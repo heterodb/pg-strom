@@ -1671,7 +1671,10 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	}
 	/* GpuPreAgg does not support ordered aggregation */
 	if (agg_final_costs.numOrderedAggs > 0)
+	{
+		elog(DEBUG2, "GpuPreAgg does not support ordered aggregation");
 		return;
+	}
 
 	if (enable_partitionwise_gpupreagg)
 		try_add_gpupreagg_append_paths(root,
@@ -1697,7 +1700,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 										  can_pullup_outerscan,
 										  try_parallel_path);
 	if (!partial_path ||
-		(try_parallel_path && !IsA(partial_path, Gather)))
+		(try_parallel_path && !IsA(partial_path, GatherPath)))
 		return;
 
 	try_add_final_aggregation_paths(root,
@@ -2480,10 +2483,20 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 */
 			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
 			if (!dtype)
+			{
+				elog(DEBUG2, "GROUP BY contains unsupported type (%s): %s",
+					 format_type_be(exprType((Node *)expr)),
+					 nodeToString((Node *)expr));
 				return false;
+			}
 			coll_oid = exprCollation((Node *)expr);
 			if (!pgstrom_devfunc_lookup_type_equal(dtype, coll_oid))
+			{
+				elog(DEBUG2, "GROUP BY contains unsupported type (%s): %s",
+					 format_type_be(exprType((Node *)expr)),
+					 nodeToString((Node *)expr));
 				return false;
+			}
 
 			/*
 			 * If expression cannot execute on device, unable to pull up
@@ -2542,7 +2555,11 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 
 			temp = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
 			if (!con.device_executable)
+			{
+				elog(DEBUG2, "alt-aggregation is not device executable: %s",
+					 nodeToString((Node *)expr));
 				return false;
+			}
 			if (orig_type != exprType((Node *)temp))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
@@ -2558,7 +2575,11 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	{
 		havingQual = replace_expression_by_altfunc(parse->havingQual, &con);
 		if (!con.device_executable)
+		{
+			elog(DEBUG2, "HAVING clause is not device executable: %s",
+				 nodeToString((Node *)parse->havingQual));
 			return false;
+		}
 	}
 	*p_havingQual = havingQual;
 
@@ -2692,8 +2713,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	 * construction of the GPU kernel code
 	 */
 	pgstrom_init_codegen_context(&context, root);
-	context.extra_flags |= (DEVKERNEL_NEEDS_DYNPARA |
-							DEVKERNEL_NEEDS_GPUPREAGG |
+	context.extra_flags |= (DEVKERNEL_NEEDS_GPUPREAGG |
 							DEVKERNEL_NEEDS_GPUSCAN);
 	kern_source = gpupreagg_codegen(&context,
 									cscan,

@@ -741,7 +741,6 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 #endif
 	gpupreaggSuspendContext *my_suspend;
 	cl_bool			rc;
-	__shared__ cl_uint	base;
 
 	assert(kds_src->format == KDS_FORMAT_COLUMN &&
 		   kds_slot->format == KDS_FORMAT_SLOT);
@@ -1051,10 +1050,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	else
 		lock_wait = false;
 	if (__syncthreads_count(lock_wait) > 0)
-	{
-		cudaDeviceSynchronize();
 		return false;
-	}
 
 	/*
 	 * Expand the final hash-slot on demand, if it may overflow.
@@ -1104,10 +1100,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 
 	/* cannot acquire the exclusive lock? */
 	if (__syncthreads_count(lock_wait) > 0)
-	{
-		cudaDeviceSynchronize();
 		goto out_unlock;
-	}
 
 	/* wait for completion of other shared-lock holder */
 	for (;;)
@@ -1118,7 +1111,6 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 			lock_wait = false;
 		if (__syncthreads_count(lock_wait) == 0)
 			break;
-		cudaDeviceSynchronize();
 	}
 	has_exclusive_lock = true;
 
