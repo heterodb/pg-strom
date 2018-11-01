@@ -1,6 +1,15 @@
 @ja:<h1>インメモリ列キャッシュ</h1>
 @en:<h1>In-memory Columnar Cache</h1>
 
+@ja:{
+!!! Warning
+    インメモリ列キャッシュはv2.2で廃止が予定されており、代わりに、現在開発中のParquet_fdwによって列指向のデータストアがインメモリ～ストレージ級のデータサイズに対して提供予定です。
+}注意
+@en:{
+!!! Warning
+    In-memory Columnar Cache shall be deprecated at v2.2, instead of the Parquet_fdw (under the development) that offers columnar data store for on-memory or on-storage class data size.
+}
+
 @ja:#概要
 @en:#Overview
 
@@ -49,41 +58,6 @@ The `pg_strom.ccache_base_dir` parameter allows to specify the path to store the
 
 Custom configuration of the parameter enables to construct columnar cache on larger and reasonably fast storage, like NVMe-SSD, as backing store. However, note that update of the cached rows invalidates whole of the chunk (128MB) which contains the updated rows. It may lead unexpected performance degradation, if workloads have frequent read / write involving I/O operations.
 }
-@ja:##列キャッシュビルダの設定
-@en:##Columnar Cache Builder Configuration
-
-@ja{
-PG-Stromは一つまたは複数のバックグラウンドワーカーを使用して、インメモリ列キャッシュを非同期かつ自動的に構築する事ができます。この処理を行うバックグラウンドワーカーを列キャッシュビルダーと呼びます。
-
-列キャッシュビルダーは、ユーザのSQLを処理するセッションの動作とは非同期に、指定されたデータベース内のテーブルのうち列キャッシュを構築すべき対象をラウンドロビンでスキャンし、これを列データへと変換した上でキャッシュします。
-
-一度列キャッシュが構築されると、他の全てのバックエンドからこれを参照する事ができます。一般的なディスクキャッシュのメカニズムとは異なり、列キャッシュが構築されていない領域へのアクセスであっても、列キャッシュをオンデマンドで作成する事はありません。この場合は、通常のPostgreSQLのストレージシステムを通して行データを参照する事となります。
-}
-@en{
-PG-Strom can build in-memory columnar cache automatically and asynchronously using one or multiple background workers. These background workers are called columnar cache builder.
-
-Columnar cache builder scans the target tables to construct columnar cache in the specified database, by round-robin, then converts to columnar format and keep it on the cache. It is an asynchronous job from the backend process which handles user's SQL.
-
-Once a columnar cache is built, any other backend process can reference them. PG-Strom never construct columnar cache on demand, unlike usual disk cache mechanism, even if it is access to the area where columnar cache is not built yet. In this case, PG-Strom loads row-data through the normal storage system of PostgreSQL.
-}
-@ja{
-列キャッシュビルダの数は起動時に決まっていますので、これを増やすには後述の`pg_strom.ccache_num_builders`パラメータを設定し、PostgreSQLの再起動が必要です。
-また、列キャッシュビルダは特定のデータベースに紐付けられますので、複数のデータベースで列キャッシュを使用する場合には、少なくともデータベース数以上の列キャッシュビルダが存在している事が必要です。
-
-列キャッシュビルダを紐づけるデータベースを指定するには、`pg_strom.ccache_databases`パラメータを指定します。
-このパラメータの指定には特権ユーザ権限が必要ですが、PostgreSQLの実行中にも変更する事が可能です。（もちろん、`postgresql.conf`に記載して起動時に設定する事も可能です。）
-
-データベース名をカンマ区切りで指定すると、列キャッシュビルダが順番に指定したデータベースに関連付けられていきます。例えば、列キャッシュビルダが5プロセス存在し、`postgres,my_test,benchmark`という3つのデータベースを`pg_strom.ccache_databases`に指定した場合、`postgres`および`my_test`データベースには2プロセスの、`benchmark`データベースには1プロセスの列キャッシュビルダが割り当てられる事になります。
-}
-@en{
-The number of columnar cache builders are fixed on the startup, so you need to setup `pg_strom.ccache_num_builders` parameters then restart PostgreSQL to increase the number of workers.
-
-The `pg_strom.ccache_databases` parameter configures the databases associated with columnar cache builders.
-It requires superuser privilege to setup, and is updatable on PostgreSQL running. (Of course, it is possible to assign by `postgresql.conf` configuration on startup.)
-
-Once a comma separated list of database names are assigned, columnar cache builders are associated to the specified databases in rotation. For example, if 5 columnar cache builders are running then 3 databases (`postgres,my_test,benchmark`) are assigned on the `pg_strom.ccache_databases`, 2 columnar cache builders are assigned on the `postgres` and `my_test` database for each, and 1 columnar cache builder is assigned on the `benchmark` database.
-}
-
 
 @ja:##対象テーブルの設定
 @en:##Source Table Configuration
@@ -117,6 +91,26 @@ postgres=# select pgstrom_ccache_enabled('t0');
 
 @ja:#運用
 @en:#Operations
+
+@ja:##列キャッシュをロードする
+@en:##Loading the columnar cache
+
+@ja{
+列キャッシュをロードするには`pgstrom_ccache_prewarm`関数を使用します。
+引数で指定されたテーブルに上記のトリガ関数が設定されていれば、テーブルの終端に達するか列キャッシュの総サイズに達するまで、テーブルの内容を列キャッシュにロードします。
+}
+@en{
+The `pgstrom_ccache_prewarm()` loads the specified table onto the columnar cache.
+If specified table has the above trigger function, it tries to load the table contents until it reached to the table end or exceeds to the configured total size of columnar cache.
+}
+
+```
+postgres=# select pgstrom_ccache_prewarm('t0');
+ pgstrom_ccache_prewarm
+------------------------
+                     35
+(1 row)
+```
 
 @ja:##列キャッシュの状態を確認する
 @en:##Check status of columnar cache
@@ -216,22 +210,3 @@ postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000
  Execution time: 1409.073 ms
 (13 rows)
 ```
-
-@ja:## `DROP DATABASE`コマンドに関する注意事項
-@en:## Attension for `DROP DATABASE` command
-
-@ja{
-列キャッシュビルダを使用して非同期に列キャッシュを構築する場合、内部的にはバックグラウンドワーカープロセスが指定されたデータベースに接続し続ける事になります。
-`DROP DATABASE`コマンドを使用してデータベースを削除する時、PostgreSQLは当該データベースに接続しているセッションが存在するかどうかをチェックします。この時、ユーザセッションが一つも存在していないにも関わらず、列キャッシュビルダがデータベースへの接続を保持し続ける事で`DROP DATABASE`コマンドが失敗してしまいます。
-}
-@en{
-When columnar cache builder constructs columnar cache asynchronously, background worker process has internally connected to the specified database.
-When `DROP DATABASE` command tries to drop a database, PostgreSQL checks whether any session connects to the database. At that time, even if no user session connects to the database, `DROP DATABASE` will fail by columnar cache builder which keeps connection to the database.
-}
-@ja{
-これを避けるには、`DROP DATABASE`コマンドの実行前に、`pg_strom.ccache_databases`パラメータから当該データベースを除外してください。列キャッシュビルダは直ちに再起動し、新しい設定に基づいてデータベースへの接続を試みます。
-}
-@en{
-Please remove the database name from the `pg_strom.ccache_databases` parameter prior to execution of `DROP DATABASE` command.
-Columnar cache builder will restart soon, then tries to connect databases according to the new configuration.
-}

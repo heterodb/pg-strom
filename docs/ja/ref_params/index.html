@@ -381,24 +381,6 @@
 <td align="left">列指向キャッシュを保持するファイルシステム上のパスを指定します。通常、<code>tmpfs</code>がマウントされている<code>/dev/shm</code>を変更する必要はありません。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.ccache_databases</code></td>
-<td align="center"><code>string</code></td>
-<td align="left"><code>''</code></td>
-<td align="left">列指向キャッシュの非同期ビルドを行う対象データベースをカンマ区切りで指定します。<code>pgstrom_ccache_prewarm()</code>によるマニュアルでのキャッシュビルドには影響しません。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.ccache_num_builders</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>2</code></td>
-<td align="left">列指向キャッシュの非同期ビルドを行うワーカープロセス数を指定します。少なくとも<code>pg_strom.ccache_databases</code>で設定するデータベースの数以上にワーカーが必要です。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.ccache_log_output</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>false</code></td>
-<td align="left">列指向キャッシュの非同期ビルダーがログメッセージを出力するかどうかを制御します。</td>
-</tr>
-<tr>
 <td align="left"><code>pg_strom.ccache_total_size</code></td>
 <td align="center"><code>int</code></td>
 <td align="left">自動</td>

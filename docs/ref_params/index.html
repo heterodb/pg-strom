@@ -381,24 +381,6 @@
 <td align="left">Specifies the directory path to store columnar cache data files. Usually, no need to change from <code>/dev/shm</code> where <code>tmpfs</code> is mounted at.</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.ccache_databases</code></td>
-<td align="center"><code>string</code></td>
-<td align="center"><code>''</code></td>
-<td align="left">Specified the target databases for asynchronous columnar cache build, in comma separated list. It does not affect to the manual cache build by <code>pgstrom_ccache_prewarm()</code>.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.ccache_num_builders</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>2</code></td>
-<td align="left">Specified the number of worker processes for asynchronous columnar cache build. It needs to be larger than or equeal to the number of databases in <code>pg_strom.ccache_databases</code>.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.ccache_log_output</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>false</code></td>
-<td align="left">Controls whether columnar cache builder prints log messages, or not</td>
-</tr>
-<tr>
 <td align="left"><code>pg_strom.ccache_total_size</code></td>
 <td align="center"><code>int</code></td>
 <td align="center">auto</td>

@@ -95,9 +95,6 @@ This session introduces PG-Strom's configuration parameters.
 |パラメータ名                  |型      |初期値    |説明       |
 |:-----------------------------|:------:|:---------|:----------|
 |`pg_strom.ccache_base_dir`    |`string`|`'/dev/shm'`|列指向キャッシュを保持するファイルシステム上のパスを指定します。通常、`tmpfs`がマウントされている`/dev/shm`を変更する必要はありません。|
-|`pg_strom.ccache_databases`   |`string`|`''`        |列指向キャッシュの非同期ビルドを行う対象データベースをカンマ区切りで指定します。`pgstrom_ccache_prewarm()`によるマニュアルでのキャッシュビルドには影響しません。|
-|`pg_strom.ccache_num_builders`|`int`   |`2`       |列指向キャッシュの非同期ビルドを行うワーカープロセス数を指定します。少なくとも`pg_strom.ccache_databases`で設定するデータベースの数以上にワーカーが必要です。|
-|`pg_strom.ccache_log_output`  |`bool`  |`false`   |列指向キャッシュの非同期ビルダーがログメッセージを出力するかどうかを制御します。|
 |`pg_strom.ccache_total_size`  |`int`   |自動      |列指向キャッシュの上限を kB 単位で指定します。区画サイズの75%またはシステムの物理メモリの66%のいずれか小さな方がデフォルト値です。|
 }
 @en{
@@ -106,9 +103,6 @@ This session introduces PG-Strom's configuration parameters.
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:----:|:----------|
 |`pg_strom.ccache_base_dir`    |`string`|`'/dev/shm'`|Specifies the directory path to store columnar cache data files. Usually, no need to change from `/dev/shm` where `tmpfs` is mounted at.|
-|`pg_strom.ccache_databases`   |`string`|`''`    |Specified the target databases for asynchronous columnar cache build, in comma separated list. It does not affect to the manual cache build by `pgstrom_ccache_prewarm()`.|
-|`pg_strom.ccache_num_builders`|`int`   |`2`     |Specified the number of worker processes for asynchronous columnar cache build. It needs to be larger than or equeal to the number of databases in `pg_strom.ccache_databases`.|
-|`pg_strom.ccache_log_output`  |`bool`  |`false` |Controls whether columnar cache builder prints log messages, or not|
 |`pg_strom.ccache_total_size`  |`int`   |auto    |Upper limit of the columnar cache in kB. Default is the smaller in 75% of volume size or 66% of system physical memory.|
 }
 

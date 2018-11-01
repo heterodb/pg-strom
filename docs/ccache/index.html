@@ -112,8 +112,6 @@
         
             <li><a class="toctree-l4" href="#location-of-the-columnar-cache">Location of the columnar cache</a></li>
         
-            <li><a class="toctree-l4" href="#columnar-cache-builder-configuration">Columnar Cache Builder Configuration</a></li>
-        
             <li><a class="toctree-l4" href="#source-table-configuration">Source Table Configuration</a></li>
         
         </ul>
@@ -123,11 +121,11 @@
     
         <ul>
         
+            <li><a class="toctree-l4" href="#loading-the-columnar-cache">Loading the columnar cache</a></li>
+        
             <li><a class="toctree-l4" href="#check-status-of-columnar-cache">Check status of columnar cache</a></li>
         
             <li><a class="toctree-l4" href="#check-usage-of-columnar-cache">Check usage of columnar cache</a></li>
-        
-            <li><a class="toctree-l4" href="#attension-for-drop-database-command">Attension for DROP DATABASE command</a></li>
         
         </ul>
     
@@ -211,6 +209,15 @@
               
                 <h1>In-memory Columnar Cache</h1>
 
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>インメモリ列キャッシュはv2.2で廃止が予定されており、代わりに、現在開発中のParquet_fdwによって列指向のデータストアがインメモリ～ストレージ級のデータサイズに対して提供予定です。</p>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>In-memory Columnar Cache shall be deprecated at v2.2, instead of the Parquet_fdw (under the development) that offers columnar data store for on-memory or on-storage class data size.</p>
+</div>
+<p>}</p>
 <h1 id="overview">Overview</h1>
 <p>PG-Strom has one another feature related to storage to supply processors data stream.</p>
 <p>In-memory columnar cache reads data blocks of the target table, convert the row-format of PostgreSQL to columnar format which is suitable for summary and analytics, and cache them on memory.</p>
@@ -223,14 +230,6 @@ PG-Strom can switch GPU kernels to be invoked for row- or columnar-format accord
 <h2 id="location-of-the-columnar-cache">Location of the columnar cache</h2>
 <p>The <code>pg_strom.ccache_base_dir</code> parameter allows to specify the path to store the columnar cache. The default is <code>/dev/shm</code> where general Linux distribution mounts <code>tmpfs</code> filesystem, so files under the directory are "volatile", with no backing store.</p>
 <p>Custom configuration of the parameter enables to construct columnar cache on larger and reasonably fast storage, like NVMe-SSD, as backing store. However, note that update of the cached rows invalidates whole of the chunk (128MB) which contains the updated rows. It may lead unexpected performance degradation, if workloads have frequent read / write involving I/O operations.</p>
-<h2 id="columnar-cache-builder-configuration">Columnar Cache Builder Configuration</h2>
-<p>PG-Strom can build in-memory columnar cache automatically and asynchronously using one or multiple background workers. These background workers are called columnar cache builder.</p>
-<p>Columnar cache builder scans the target tables to construct columnar cache in the specified database, by round-robin, then converts to columnar format and keep it on the cache. It is an asynchronous job from the backend process which handles user's SQL.</p>
-<p>Once a columnar cache is built, any other backend process can reference them. PG-Strom never construct columnar cache on demand, unlike usual disk cache mechanism, even if it is access to the area where columnar cache is not built yet. In this case, PG-Strom loads row-data through the normal storage system of PostgreSQL.</p>
-<p>The number of columnar cache builders are fixed on the startup, so you need to setup <code>pg_strom.ccache_num_builders</code> parameters then restart PostgreSQL to increase the number of workers.</p>
-<p>The <code>pg_strom.ccache_databases</code> parameter configures the databases associated with columnar cache builders.
-It requires superuser privilege to setup, and is updatable on PostgreSQL running. (Of course, it is possible to assign by <code>postgresql.conf</code> configuration on startup.)</p>
-<p>Once a comma separated list of database names are assigned, columnar cache builders are associated to the specified databases in rotation. For example, if 5 columnar cache builders are running then 3 databases (<code>postgres,my_test,benchmark</code>) are assigned on the <code>pg_strom.ccache_databases</code>, 2 columnar cache builders are assigned on the <code>postgres</code> and <code>my_test</code> database for each, and 1 columnar cache builder is assigned on the <code>benchmark</code> database.</p>
 <h2 id="source-table-configuration">Source Table Configuration</h2>
 <p>DBA needs to specify the target tables to build columnar cache.</p>
 <p>A SQL function <code>pgstrom_ccache_enabled(regclass)</code> adds the supplied table as target to build columnar cache.
@@ -245,6 +244,16 @@ It means we don't build columnar cache on the tables which have no way to invali
 </code></pre>
 
 <h1 id="operations">Operations</h1>
+<h2 id="loading-the-columnar-cache">Loading the columnar cache</h2>
+<p>The <code>pgstrom_ccache_prewarm()</code> loads the specified table onto the columnar cache.
+If specified table has the above trigger function, it tries to load the table contents until it reached to the table end or exceeds to the configured total size of columnar cache.</p>
+<pre><code>postgres=# select pgstrom_ccache_prewarm('t0');
+ pgstrom_ccache_prewarm
+------------------------
+                     35
+(1 row)
+</code></pre>
+
 <h2 id="check-status-of-columnar-cache">Check status of columnar cache</h2>
 <p><code>pgstrom.ccache_info</code> provides the status of the current columnar cache.</p>
 <p>You can check the table, block number, cache creation time and last access time per chunk.</p>
@@ -308,12 +317,6 @@ It means that columnar cache is referenced 50 times. Because the chunk size of c
  Execution time: 1409.073 ms
 (13 rows)
 </code></pre>
-
-<h2 id="attension-for-drop-database-command">Attension for <code>DROP DATABASE</code> command</h2>
-<p>When columnar cache builder constructs columnar cache asynchronously, background worker process has internally connected to the specified database.
-When <code>DROP DATABASE</code> command tries to drop a database, PostgreSQL checks whether any session connects to the database. At that time, even if no user session connects to the database, <code>DROP DATABASE</code> will fail by columnar cache builder which keeps connection to the database.</p>
-<p>Please remove the database name from the <code>pg_strom.ccache_databases</code> parameter prior to execution of <code>DROP DATABASE</code> command.
-Columnar cache builder will restart soon, then tries to connect databases according to the new configuration.</p>
               
             </div>
           </div>
