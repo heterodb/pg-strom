@@ -307,6 +307,7 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 		if (temp != NULL)
 			entry->children = lappend(entry->children, temp);
 	}
+	closedir(dir);
 
 	if (entry->gpu_attr == NULL &&
 		entry->nvme_attr == NULL &&
