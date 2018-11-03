@@ -2221,6 +2221,7 @@ gpuscan_create_task(GpuScanState *gss,
 		length = KDS_CALCULATE_HEAD_LENGTH(scan_tupdesc->natts, false) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
 			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
+		length = Max(length, pds_src->kds.length);
 
 		pds_dst = PDS_create_row(gcontext,
 								 scan_tupdesc,
