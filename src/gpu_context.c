@@ -830,29 +830,28 @@ activate_cuda_context(GpuContext *gcontext)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuDeviceGet: %s", errorText(rc));
 
-	if (gcontext->never_use_mps)
-		rc = CUDA_ERROR_OUT_OF_MEMORY;
-	else
+	if (!gcontext->never_use_mps)
+	{
 		rc = cuCtxCreate(&cuda_context,
 						 CU_CTX_SCHED_AUTO,
 						 cuda_device);
-	if (rc != CUDA_SUCCESS)
+	}
+	else
 	{
-		char   *env_saved;
+		char   *environ_saved = getenv("CUDA_MPS_PIPE_DIRECTORY");
 
-		env_saved = getenv("CUDA_MPS_PIPE_DIRECTORY");
 		if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
 			werror("failed on setenv: %m");
 		rc = cuCtxCreate(&cuda_context,
 						 CU_CTX_SCHED_AUTO,
 						 cuda_device);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuCtxCreate: %s", errorText(rc));
-		if (!env_saved)
+		if (!environ_saved)
 			unsetenv("CUDA_MPS_PIPE_DIRECTORY");
 		else
-			setenv("CUDA_MPS_PIPE_DIRECTORY", env_saved, 1);
+			setenv("CUDA_MPS_PIPE_DIRECTORY", environ_saved, 1);
 	}
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuCtxCreate: %s", errorText(rc));
 	gcontext->cuda_context = cuda_context;
 }
 

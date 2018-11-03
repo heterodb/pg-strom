@@ -195,28 +195,40 @@
 <h1 id="mps">MPSデーモンの利用</h1>
 <p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
 <p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
-<!--
+<p>PG-StromにおいてもMPSの利用を推奨していますが、下記の制限事項に対して注意が必要です。</p>
+<p>1個のMPSデーモンがサービスを提供可能なクライアントの数は最大48個（Pascal世代以前は16個）に制限されています。
+そのため、GPUを使用するPostgreSQLプロセス（CPU並列処理におけるバックグラウンドワーカを含む）の数が常に48個以下（Pascal世代以前は16個以下）である事を、運用上担保する必要があります。</p>
+<p>MPSはDynamic Parallelismを利用するGPUプログラムに対応していません。
+SQLから自動生成されたGPUプログラムが当該機能を利用する事はありませんが、PL/CUDAユーザ定義関数がCUDAデバイスランタイムをリンクし、サブカーネルを呼び出すなどDynamic Parallelismの機能を利用する場合には当該制限に抵触します。
+そのため、PL/CUDA関数の呼び出しにおいてはMPSを利用しません。</p>
+<p>MPSのドキュメントにはGPUの動作モードを<code>EXCLUSIVE_PROCESS</code>に変更する事が推奨されていますが、PG-Stromを実行する場合は<code>DEFAULT</code>動作モードで動作させてください。
+上記のPL/CUDAを含む、いくつかの処理では明示的にMPSの利用を無効化してCUDA APIを呼び出しているため、MPSデーモン以外のプロセスがGPUデバイスを利用可能である必要があります。</p>
+<p>MPSデーモンを起動するには以下の手順でコマンドを実行します。<code>&lt;UID&gt;</code>はPostgreSQLプロセスのユーザIDに置き換えてください。</p>
+<pre><code>$ nvidia-cuda-mps-control -d
+$ echo start_server -uid &lt;UID&gt; | nvidia-cuda-mps-control
+</code></pre>
 
-しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。
+<p><code>nvidia-smi</code>コマンドによって、MPSデーモンがGPUデバイスを使用している事が分かります。</p>
+<pre><code>$ nvidia-smi
+Sat Nov  3 12:22:26 2018
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 410.48                 Driver Version: 410.48                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla V100-PCIE...  Off  | 00000000:02:00.0 Off |                    0 |
+| N/A   45C    P0    38W / 250W |     40MiB / 16130MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
 
-- GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が常に16個以下である。Volta世代のGPUの場合は48個以下である。
-- gstore_fdwを使用しない事。
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|    0     11080      C   nvidia-cuda-mps-server                        29MiB |
++-----------------------------------------------------------------------------+
+</code></pre>
 
-
-
-
-これは`CUipcMemHandle`を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。
-
-この問題は既にNVIDIAへ報告し、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。
-
-
--->
-
-<p>一方、現在のMPSサービスにはいくつかの<a href="https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2">制限事項</a>があり、これとPG-Stromの利用する一部機能が被っているため、MPSサービスとPG-Stromを併用する事はできません。PG-Stromを利用する際にはMPSサービスを停止してください。</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>具体的には、GpuPreAggのGPUカーネル関数が内部のハッシュ表を動的に拡大する際に使用する<code>cudaDeviceSynchronize()</code>デバイスランタイム関数が、制限事項であるDynamic Parallelism機能を使用しているため、上記の制限に抵触します。</p>
-</div>
 <h1 id="_2">ナレッジベース</h1>
 <p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
