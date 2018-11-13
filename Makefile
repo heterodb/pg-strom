@@ -30,13 +30,13 @@ PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.0.sql
 #
 __STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
-		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o \
+		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o pl_cuda2.o \
 		aggfuncs.o matrix.o float2.o ccache.o \
 		largeobject.o gstore_fdw.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h cuda_filelist
-STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
-__STROM_SOURCES = $(__STROM_OBJS:.o=.c)
-STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
+__PLCUDA_HOST = host_plcuda.o
+STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS) $(__PLCUDA_HOST))
+PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
 
 #
 # Source file of GPU portion
@@ -160,12 +160,13 @@ OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
+       $(STROM_BUILD_ROOT)/src/plcuda_template.cu \
        $(PGSTROM_SQL) $(PGSTROM_TEST_SQL)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS) $(PGSTROM_TEST_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(STROM_UTILS) \
+EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
@@ -196,6 +197,13 @@ ifneq ($(STROM_BUILD_ROOT), .)
 pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/, pg_strom.control)
 	cp -f $< $@
 endif
+
+# PL/CUDA Host Template
+$(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)
+	@(echo "const char *pgsql_host_plcuda_code =";			\
+	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
+	      -e 's/^/  "/g'   -e 's/$$/\\n"/g' < $*.cu;		\
+	  echo ";") > $@
 
 #
 # Build documentation

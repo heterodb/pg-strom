@@ -58,7 +58,17 @@ typedef double				cl_double;
 #ifdef offsetof
 #undef offsetof
 #endif
-#define offsetof(TYPE,FIELD)	((devptr_t) &((TYPE *)0)->FIELD)
+#define offsetof(TYPE,FIELD)			((long) &((TYPE *)0UL)->FIELD)
+
+#ifdef __NVCC__
+/*
+ * At CUDA10, we found nvcc replaces the offsetof above by __builtin_offsetof
+ * regardless of our macro definitions. It is mostly equivalent, however, it
+ * does not support offset calculation which includes run-time values.
+ * E.g) offsetof(kds, colmeta[kds->ncols]) made an error.
+ */
+#define __builtin_offsetof(TYPE,FIELD)	((long) &((TYPE *)0UL)->FIELD)
+#endif
 
 #ifdef lengthof
 #undef lengthof
@@ -84,6 +94,15 @@ typedef double				cl_double;
 #else
 #error Unexpected MAXIMUM_ALIGNOF definition
 #endif	/* MAXIMUM_ALIGNOF */
+
+/*
+ * If NVCC includes this file, some inline function needs declarations of
+ * basic utility functions.
+ */
+#ifndef __CUDACC_RTC__
+#include <assert.h>
+#include <stdio.h>
+#endif
 
 #define Assert(cond)	assert(cond)
 
@@ -748,43 +767,71 @@ __kds_unpack(cl_uint offset)
 /* length estimator */
 #define KDS_LEAST_LENGTH		4096
 
-#define KDS_CALCULATE_HEAD_LENGTH(ncols,has_attnames)			\
-	(STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)])) +	\
-	 STROMALIGN((has_attnames) ? sizeof(NameData) * (ncols) : 0))
 
-#define KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems,has_attnames)	\
-	(KDS_CALCULATE_HEAD_LENGTH(ncols,has_attnames) +					\
-	 STROMALIGN(sizeof(cl_uint) * (nitems)) +	\
-	 STROMALIGN(sizeof(cl_uint) * (nslots)))
+STATIC_INLINE(size_t)
+KDS_CALCULATE_HEAD_LENGTH(cl_uint ncols, bool has_attnames)
+{
+	size_t	len = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+
+	if (has_attnames)
+		len += STROMALIGN(sizeof(NameData) * ncols);
+	return len;
+}
+
+STATIC_INLINE(size_t)
+KDS_CALCULATE_FRONTEND_LENGTH(cl_uint ncols, cl_uint nslots,cl_uint nitems,
+							  bool has_attname)
+{
+	size_t	len = KDS_CALCULATE_HEAD_LENGTH(ncols, has_attname);
+
+	return len + (STROMALIGN(sizeof(cl_uint) * (nitems)) +
+				  STROMALIGN(sizeof(cl_uint) * (nslots)));
+}
 
 /* 'nslots' estimation; 25% larger than nitems, but 128 at least */
 #define __KDS_NSLOTS(nitems)					\
 	Max(128, ((nitems) * 5) >> 2)
-#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)			\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems),false) +	\
-	 MAXALIGN(data_len))
-#define KDS_CALCULATE_HASH_LENGTH(ncols,nitems,data_len)	\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems),false) + \
-	 MAXALIGN(data_len))
-#define KDS_CALCULATE_SLOT_LENGTH(ncols,nitems)	\
-	(KDS_CALCULATE_HEAD_LENGTH(ncols,false) +	\
-	 LONGALIGN((sizeof(Datum) +					\
-				sizeof(char)) * (ncols)) * (nitems))
 
+STATIC_INLINE(size_t)
+KDS_CALCULATE_ROW_LENGTH(cl_uint ncols, cl_uint nitems, size_t data_len)
+{
+	return KDS_CALCULATE_FRONTEND_LENGTH(ncols, 0, nitems, false) +
+		MAXALIGN(data_len);
+}
+
+STATIC_INLINE(size_t)
+KDS_CALCULATE_HASH_LENGTH(cl_uint ncols, cl_uint nitems, size_t data_len)
+{
+	cl_uint		nslots = __KDS_NSLOTS(nitems);
+	return KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems,false) +
+		MAXALIGN(data_len);
+}
+
+STATIC_INLINE(size_t)
+KDS_CALCULATE_SLOT_LENGTH(cl_uint ncols, cl_uint nitems)
+{
+	size_t	len = KDS_CALCULATE_HEAD_LENGTH(ncols,false);
+
+	return len + LONGALIGN((sizeof(Datum) +
+							sizeof(char)) * ncols) * nitems;
+}
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
 	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols,(kds)->has_attnames)
-
 /* head address of data body */
 #define KERN_DATA_STORE_BODY(kds)					\
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 /* attname array, if any */
-#define KERN_DATA_STORE_ATTNAMES(kds)									\
-	((NameData *)														\
-	 ((kds)->has_attnames												\
-	  ? ((char *)(kds) + STROMALIGN(offsetof(kern_data_store,			\
-											 colmeta[(kds)->ncols])))	\
-	  : NULL))
+STATIC_INLINE(NameData *)
+KERN_DATA_STORE_ATTNAMES(kern_data_store *kds)
+{
+	size_t	sz;
+
+	if (!kds->has_attnames)
+		return NULL;
+	sz = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
+	return (NameData *)((char *)kds + sz);
+}
 
 /* access function for row- and hash-format */
 STATIC_INLINE(cl_uint *)
@@ -866,12 +913,21 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
 	KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(nitems))
 
-#define KERN_DATA_STORE_VALUES(kds,kds_index)				\
-	((Datum *)((char *)(kds) +								\
-			   KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(kds_index))))
+STATIC_INLINE(Datum *)
+KERN_DATA_STORE_VALUES(kern_data_store *kds, cl_uint kds_index)
+{
+	size_t	offset = KDS_CALCULATE_SLOT_LENGTH(kds->ncols, kds_index);
 
-#define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
-	((char *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
+	return (Datum *)((char *)kds + offset);
+}
+
+STATIC_INLINE(char *)
+KERN_DATA_STORE_ISNULL(kern_data_store *kds, cl_uint kds_index)
+{
+	Datum  *values = KERN_DATA_STORE_VALUES(kds, kds_index);
+
+	return (char *)(values + kds->ncols);
+}
 
 /* access macro for block format */
 #define KERN_DATA_STORE_PARTSZ(kds)							\
@@ -2048,11 +2104,7 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
 	cl_int		unit_sz;
 	cl_int		i, j;
 
-#if CUDA_VERSION < 9000
-	w_bitmap = __ballot(predicate);
-#else
 	w_bitmap = __ballot_sync(__activemask(), predicate);
-#endif
 	if ((get_local_id() & (warpSize-1)) == 0)
 		items[warp_id] = __popc(w_bitmap);
 	__syncthreads();

@@ -53,6 +53,12 @@
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
+#if PG_VERSION_NUM >= 100000
+#include "common/base64.h"
+#include "common/md5.h"
+#else
+#include "libpq/md5.h"	//moved at PG10
+#endif
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeIndexscan.h"
@@ -159,6 +165,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/vfs.h>
 
 #include "nvme_strom.h"
@@ -1218,6 +1225,7 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
+extern const char *pgsql_host_plcuda_code;
 extern void pgstrom_init_plcuda(void);
 
 /*
@@ -1310,6 +1318,7 @@ extern void gstore_fdw_load_function_args(GpuContext *gcontext,
 										  List **p_gstore_oid_list,
 										  List **p_gstore_devptr_list,
 										  List **p_gstore_dindex_list);
+extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

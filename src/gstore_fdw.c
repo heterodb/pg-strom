@@ -122,7 +122,6 @@ Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
-Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
 
 /*
  * gstore_fdw_chunk_visibility - equivalent to HeapTupleSatisfiesMVCC,
