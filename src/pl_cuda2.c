@@ -33,6 +33,7 @@ typedef struct
 	StringInfoData	main;
 	StringInfoData	emsg;
 	FunctionCallInfo fcinfo;
+	MemoryContext	results_memcxt;
 	int				include_count;
 	List		   *include_func_oids;
 	char			afname[200];	/* argument file name */
@@ -47,8 +48,9 @@ static void plcuda_expand_source(plcuda_code_context *con, char *source);
  */
 static void
 plcuda_init_code_context(plcuda_code_context *con,
+						 HeapTuple protup,
 						 FunctionCallInfo fcinfo,
-						 HeapTuple protup)
+						 MemoryContext results_memcxt)
 {
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 
@@ -61,6 +63,7 @@ plcuda_init_code_context(plcuda_code_context *con,
 	con->lineno			= 1;
 	con->curr			= NULL;
 	con->fcinfo			= fcinfo;	/* NULL if only validation */
+	con->results_memcxt	= results_memcxt;
 	con->include_count	= 0;
 	con->include_func_oids = NIL;
 }
@@ -409,6 +412,7 @@ plcuda_get_type_label(Oid type_oid, int16 *p_typlen, bool *p_typbyval)
 static void
 plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 {
+	const char	   *attr_unused = "__attribute__((unused))";
 	oidvector	   *proargtypes = con->proargtypes;
 	int16			typlen;
 	bool			typbyval;
@@ -465,13 +469,13 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		if (typbyval)
 			appendStringInfo(
 				source,
-				"  %s arg%d __attribute__((unused)) = PLCUDA_GET_ARGVAL(%d,%s);\n",
-				label, i+1, i, label);
+				"  %s arg%d %s = PLCUDA_GET_ARGVAL(%d,%s);\n",
+				label, i+1, attr_unused, i, label);
 		else
 			appendStringInfo(
 				source,
-				"  %s arg%d __attribute__((unused)) = p_args[%d];\n",
-				label, i+1, i);
+				"  %s arg%d %s = p_args[%d];\n",
+				label, i+1, attr_unused, i);
 	}
 	if (con->main.data)
 		appendStringInfo(source, "{\n%s}\n", con->main.data);
@@ -555,9 +559,13 @@ plcuda2_function_validator(PG_FUNCTION_ARGS)
 {
 	Oid				func_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
+	Form_pg_proc	proc;
 	Datum			value;
 	bool			isnull;
 	char			prokind;
+	int16			typlen;
+	bool			typbyval;
+	int				i;
 	plcuda_code_context con;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
@@ -598,14 +606,30 @@ plcuda2_function_validator(PG_FUNCTION_ARGS)
 							Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "PL/CUDA source is missing");
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
+
+	/* check result and arguments types */
+	get_typlenbyval(proc->prorettype, &typlen, &typbyval);
+	if (!typbyval && !(typlen > 0 || typlen==-1))
+		elog(ERROR, "type %s is not supported to use in PL/CUDA",
+			 format_type_be(proc->prorettype));
+	for (i=0; i < proc->proargtypes.dim1; i++)
+	{
+		Oid		type_oid = proc->proargtypes.values[i];
+
+		get_typlenbyval(type_oid, &typlen, &typbyval);
+		if (!typbyval && !(typlen > 0 || typlen==-1))
+			elog(ERROR, "type %s is not supported to use in PL/CUDA",
+				 format_type_be(type_oid));
+	}
 
 	/* check argument (fix-len or varlena) */
-	plcuda_init_code_context(&con, NULL, tuple);
+	plcuda_init_code_context(&con, tuple, NULL, NULL);
 	plcuda_expand_source(&con, TextDatumGetCString(value));
 	if (con.emsg.len > 0)
 		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
 	if (con.include_count > 0)
-		elog(NOTICE, "PL/CUDA does not try to build the code on function creation time, because '#plcuda_include' may change the code on run-tune.");
+		elog(NOTICE, "PL/CUDA does not try to build the code on function creation time, because '#plcuda_include' may change the code on run-time.");
 	else
 	{
 		StringInfoData	source;
@@ -984,6 +1008,8 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 			elog(ERROR, "failed on mmap: %m");
 		PG_TRY();
 		{
+			MemoryContext	oldcxt
+				= MemoryContextSwitchTo(con->results_memcxt);
 			if (typbyval)
 			{
 				Assert(typlen <= sizeof(Datum));
@@ -1006,6 +1032,7 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 			}
 			else
 				elog(ERROR, "unexpected type attribute");
+			MemoryContextSwitchTo(oldcxt);
 		}
 		PG_CATCH();
 		{
@@ -1023,10 +1050,11 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 }
 
 /*
- * plcuda_scalar_handler
+ * plcuda_scalar_function_handler
  */
 static Datum
-plcuda_scalar_function_handler(FunctionCallInfo fcinfo)
+plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
+							   MemoryContext results_memcxt)
 {
 	FmgrInfo   *flinfo = fcinfo->flinfo;
 	HeapTuple	tuple;
@@ -1048,7 +1076,7 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo)
 							Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "PL/CUDA source is missing");
-	plcuda_init_code_context(&con, fcinfo, tuple);
+	plcuda_init_code_context(&con, tuple, fcinfo, results_memcxt);
 	plcuda_expand_source(&con, TextDatumGetCString(value));
 	if (con.emsg.len > 0)
 		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
@@ -1103,27 +1131,219 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo)
 }
 
 /*
+ * plcudaSetFuncContext - for SET RETURNING FUNCTION
+ */
+typedef struct {
+	TypeFuncClass fn_class;
+	ArrayType  *results;
+	int16		elemlen;
+	bool		elembyval;
+	char		elemalign;
+	cl_int		nitems;
+	char	   *curr_pos;
+	char	   *tail_pos;
+	Datum	   *tup_values;
+	bool	   *tup_isnull;
+} plcudaSetFuncContext;
+
+/*
+ * plcuda_setfunc_firstcall
+ */
+static plcudaSetFuncContext *
+plcuda_setfunc_firstcall(FunctionCallInfo fcinfo,
+						 FuncCallContext *fn_cxt,
+						 Datum results_datum)
+{
+	MemoryContext	oldcxt;
+	ArrayType	   *results;
+	Oid				fn_rettype;
+	TupleDesc		fn_tupdesc;
+	plcudaSetFuncContext *setfcxt;
+
+	oldcxt = MemoryContextSwitchTo(fn_cxt->multi_call_memory_ctx);
+	setfcxt = palloc0(sizeof(plcudaSetFuncContext));
+	/* save properties of the array */
+	results = DatumGetArrayTypeP(results_datum);
+	get_typlenbyvalalign(ARR_ELEMTYPE(results),
+						 &setfcxt->elemlen,
+						 &setfcxt->elembyval,
+						 &setfcxt->elemalign);
+	setfcxt->results  = results;
+	setfcxt->curr_pos = ARR_DATA_PTR(results);
+	setfcxt->tail_pos = (char *)results + VARSIZE(results);
+
+	setfcxt->fn_class = get_call_result_type(fcinfo,
+											 &fn_rettype,
+											 &fn_tupdesc);
+	if (setfcxt->fn_class == TYPEFUNC_SCALAR ||
+		setfcxt->fn_class == TYPEFUNC_COMPOSITE)
+	{
+		if (ARR_ELEMTYPE(results) != fn_rettype)
+			elog(ERROR, "PL/CUDA returned wrong type: %s, not %s",
+				 format_type_be(results->elemtype),
+				 format_type_be(fn_rettype));
+		if (ARR_NDIM(results) != 1 ||
+			ARR_LBOUND(results)[0] != 0)
+			elog(ERROR, "PL/CUDA logic made wrong data array");
+		setfcxt->nitems = ARR_DIMS(results)[0];
+	}
+	else if (setfcxt->fn_class == TYPEFUNC_RECORD)
+	{
+		if (ARR_NDIM(results) == 1)
+		{
+			if (ARR_LBOUND(results)[0] != 0)
+				elog(ERROR, "PL/CUDA logic made wrong data array");
+			fn_tupdesc = CreateTemplateTupleDesc(1, false);
+			TupleDescInitEntry(fn_tupdesc, (AttrNumber) 1, "values",
+							   ARR_ELEMTYPE(results), -1, 0);
+			setfcxt->nitems = ARR_DIMS(results)[0];
+			setfcxt->tup_values = palloc(sizeof(Datum));
+			setfcxt->tup_isnull = palloc(sizeof(bool));
+		}
+		else if (ARR_NDIM(results) == 2)
+		{
+			int		i, nattrs = ARR_DIMS(results)[0];
+
+			if (ARR_LBOUND(results)[0] != 0 ||
+				ARR_LBOUND(results)[1] != 0)
+				elog(ERROR, "PL/CUDA logic made wrong data array");
+			fn_tupdesc = CreateTemplateTupleDesc(nattrs, false);
+			for (i=1; i <= nattrs; i++)
+				TupleDescInitEntry(fn_tupdesc, (AttrNumber) i,
+								   psprintf("v%d", i),
+								   ARR_ELEMTYPE(results), -1, 0);
+			setfcxt->nitems = ARR_DIMS(results)[1];
+			setfcxt->tup_values = palloc(sizeof(Datum) * nattrs);
+			setfcxt->tup_isnull = palloc(sizeof(bool) * nattrs);
+		}
+		else
+			elog(ERROR, "PL/CUDA logic made wrong data array");
+		fn_cxt->tuple_desc = BlessTupleDesc(fn_tupdesc);
+	}
+	else
+	{
+		elog(ERROR, "unexpected PL/CUDA function result class");
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	return setfcxt;
+}
+
+
+
+/*
+ * plcuda_setfunc_getnext
+ */
+static Datum
+plcuda_setfunc_getnext(FuncCallContext *fn_cxt,
+					   plcudaSetFuncContext *setfcxt,
+					   bool *p_isnull)
+{
+	ArrayType  *results = setfcxt->results;
+	bits8	   *nullmap = ARR_NULLBITMAP(results);
+	size_t		index = fn_cxt->call_cntr;
+	Datum		datum;
+
+	if (setfcxt->fn_class == TYPEFUNC_SCALAR ||
+		setfcxt->fn_class == TYPEFUNC_COMPOSITE)
+	{
+		Assert(ARR_NDIM(results) == 1);
+		if (nullmap && att_isnull(index, nullmap))
+		{
+			*p_isnull = true;
+			return 0;
+		}
+		if (setfcxt->curr_pos >= setfcxt->tail_pos)
+			elog(ERROR, "PL/CUDA: corruption of the results");
+		setfcxt->curr_pos = (char *)
+			att_align_nominal(setfcxt->curr_pos,
+							  setfcxt->elemalign);
+		datum = fetch_att(setfcxt->curr_pos,
+						  setfcxt->elembyval,
+						  setfcxt->elemlen);
+		if (setfcxt->elemlen > 0)
+			setfcxt->curr_pos += setfcxt->elemlen;
+		else if (setfcxt->elemlen == -1)
+			setfcxt->curr_pos += VARSIZE_ANY(datum);
+		else
+			elog(ERROR, "PL/CUDA: results has unknown data type");
+	}
+	else if (setfcxt->fn_class == TYPEFUNC_RECORD)
+	{
+		TupleDesc	tupdesc = fn_cxt->tuple_desc;
+		int			j, natts = tupdesc->natts;
+		size_t		index = fn_cxt->call_cntr * natts;
+		HeapTuple	tuple;
+
+		memset(setfcxt->tup_isnull, 0, sizeof(bool) * natts);
+		memset(setfcxt->tup_values, 0, sizeof(Datum) * natts);
+		for (j=0; j < natts; j++)
+		{
+			if (nullmap && att_isnull(index+j, nullmap))
+			{
+				setfcxt->tup_isnull[j] = true;
+				continue;
+			}
+			if (setfcxt->curr_pos >= setfcxt->tail_pos)
+				elog(ERROR, "PL/CUDA: result is out of range");
+			setfcxt->curr_pos = (char *)
+				att_align_nominal(setfcxt->curr_pos,
+								  setfcxt->elemalign);
+			datum = fetch_att(setfcxt->curr_pos,
+							  setfcxt->elembyval,
+							  setfcxt->elemlen);
+			setfcxt->tup_values[j] = datum;
+			if (setfcxt->elemlen > 0)
+				setfcxt->curr_pos += setfcxt->elemlen;
+			else if (setfcxt->elemlen == -1)
+				setfcxt->curr_pos += VARSIZE_ANY(datum);
+			else
+				elog(ERROR, "unexpected PL/CUDA function result type");
+		}
+		tuple = heap_form_tuple(fn_cxt->tuple_desc,
+								setfcxt->tup_values,
+								setfcxt->tup_isnull);
+		datum = HeapTupleGetDatum(tuple);
+	}
+	else
+	{
+		elog(ERROR, "unexpected PL/CUDA function result class");
+	}
+	*p_isnull = false;
+	return datum;
+}
+
+/*
  * plcuda2_function_handler
  */
 Datum
 plcuda2_function_handler(PG_FUNCTION_ARGS)
 {
-	FmgrInfo	   *flinfo = fcinfo->flinfo;
-	Datum			result;
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	FuncCallContext	*fn_cxt;
+	plcudaSetFuncContext *setfcxt;
+	bool		isnull;
+	Datum		datum;
 
+	if (!flinfo->fn_retset)
+		return plcuda_scalar_function_handler(fcinfo,
+											  CurrentMemoryContext);
 	if (SRF_IS_FIRSTCALL())
 	{
-		result = plcuda_scalar_function_handler(fcinfo);
+		fn_cxt = SRF_FIRSTCALL_INIT();
+		datum = plcuda_scalar_function_handler(fcinfo,
+											   fn_cxt->multi_call_memory_ctx);
 		if (fcinfo->isnull)
-			return (Datum) 0;
-		if (!flinfo->fn_retset)
-			return result;
-
-		/*
-		 * if not scalar, we returns each elements.
-		 */
+			SRF_RETURN_DONE(fn_cxt);
+		fn_cxt->user_fctx = plcuda_setfunc_firstcall(fcinfo, fn_cxt, datum);
 	}
-	elog(ERROR, "not implemented yet");
-	return 0;
+	fn_cxt = SRF_PERCALL_SETUP();
+	setfcxt = fn_cxt->user_fctx;
+	if (fn_cxt->call_cntr >= setfcxt->nitems)
+		SRF_RETURN_DONE(fn_cxt);
+	datum = plcuda_setfunc_getnext(fn_cxt, setfcxt, &isnull);
+	if (isnull)
+		SRF_RETURN_NEXT_NULL(fn_cxt);
+	SRF_RETURN_NEXT(fn_cxt, datum);
 }
 PG_FUNCTION_INFO_V1(plcuda2_function_handler);
