@@ -799,7 +799,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 #else
 	Datum	   *tup_values = NULL;
 	cl_bool	   *tup_isnull = NULL;
-	cl_bool	   *tup_extra_sz = NULL;
+	cl_uint	   *tup_extra_sz = NULL;
 #endif
 	cl_uint		extra_len = 0;
 	cl_int		needs_suspend = 0;
