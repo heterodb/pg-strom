@@ -160,7 +160,6 @@ OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
-       $(STROM_BUILD_ROOT)/src/plcuda_template.cu \
        $(PGSTROM_SQL) $(PGSTROM_TEST_SQL)
 
 # Support utilities
