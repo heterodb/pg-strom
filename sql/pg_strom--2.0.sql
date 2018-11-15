@@ -94,15 +94,14 @@ CREATE VIEW pgstrom.device_preserved_meminfo
 --
 -- Functions/Languages to support PL/CUDA
 --
-/*
 CREATE FUNCTION pgstrom.plcuda_function_validator(oid)
   RETURNS void
-  AS 'MODULE_PATHNAME','plcuda_function_validator'
+  AS 'MODULE_PATHNAME','plcuda2_function_validator'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.plcuda_function_handler()
   RETURNS language_handler
-  AS 'MODULE_PATHNAME','plcuda_function_handler'
+  AS 'MODULE_PATHNAME','plcuda2_function_handler'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.plcuda_function_source(regproc)
@@ -115,32 +114,6 @@ CREATE LANGUAGE plcuda
   VALIDATOR pgstrom.plcuda_function_validator;
 COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 
-CREATE FUNCTION pg_catalog.plcuda_kernel_max_blocksz()
-  RETURNS int
-  AS 'MODULE_PATHNAME','plcuda_kernel_max_blocksz'
-  LANGUAGE C VOLATILE;
-
-CREATE FUNCTION pg_catalog.plcuda_kernel_static_shmsz()
-  RETURNS int
-  AS 'MODULE_PATHNAME','plcuda_kernel_static_shmsz'
-  LANGUAGE C VOLATILE;
-
-CREATE FUNCTION pg_catalog.plcuda_kernel_dynamic_shmsz()
-  RETURNS int
-  AS 'MODULE_PATHNAME','plcuda_kernel_dynamic_shmsz'
-  LANGUAGE C VOLATILE;
-
-CREATE FUNCTION pg_catalog.plcuda_kernel_const_memsz()
-  RETURNS int
-  AS 'MODULE_PATHNAME','plcuda_kernel_const_memsz'
-  LANGUAGE C VOLATILE;
-
-CREATE FUNCTION pg_catalog.plcuda_kernel_local_memsz()
-  RETURNS int
-  AS 'MODULE_PATHNAME','plcuda_kernel_local_memsz'
-  LANGUAGE C VOLATILE;
-*/
-
 CREATE FUNCTION pg_catalog.attnums_of(regclass,text[])
   RETURNS smallint[]
   AS 'MODULE_PATHNAME','pgsql_table_attr_numbers_by_names'
@@ -149,6 +122,31 @@ CREATE FUNCTION pg_catalog.attnums_of(regclass,text[])
 CREATE FUNCTION pg_catalog.attnum_of(regclass,text)
   RETURNS smallint
   AS 'MODULE_PATHNAME','pgsql_table_attr_number_by_name'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.atttypes_of(regclass,text[])
+  RETURNS regtype[]
+  AS 'MODULE_PATHNAME','pgsql_table_attr_types_by_names'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.atttype_of(regclass,text)
+  RETURNS regtype
+  AS 'MODULE_PATHNAME','pgsql_table_attr_type_by_name'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.attrs_types_check(regclass,text[],regtype[])
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgsql_check_attrs_of_types'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.attrs_type_check(regclass,text[],regtype)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgsql_check_attrs_of_type'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.attr_type_check(regclass,text,regtype)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgsql_check_attr_of_type'
   LANGUAGE C STRICT;
 
 --

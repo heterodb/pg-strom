@@ -21,6 +21,11 @@ Datum plcuda2_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda2_function_handler(PG_FUNCTION_ARGS);
 Datum pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS);
 Datum pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_types_by_names(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_type_by_name(PG_FUNCTION_ARGS);
+Datum pgsql_check_attrs_of_types(PG_FUNCTION_ARGS);
+Datum pgsql_check_attrs_of_type(PG_FUNCTION_ARGS);
+Datum pgsql_check_attr_of_type(PG_FUNCTION_ARGS);
 
 typedef struct
 {
@@ -36,6 +41,7 @@ typedef struct
 	StringInfoData	emsg;
 	FunctionCallInfo fcinfo;
 	MemoryContext	results_memcxt;
+	Oid				fn_sanity_check;
 	int				include_count;
 	List		   *include_func_oids;
 	List		   *link_libs;
@@ -358,6 +364,15 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 				EMSG("%s is used out of code block", cmd);
 			else
 				con->curr = NULL;
+		}
+		else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
+		{
+			Oid		func_oid = plcuda_lookup_helper(con, cmd, options,
+													BOOLOID);
+			if (OidIsValid(con->fn_sanity_check))
+				EMSG("%s appeared twice", cmd);
+			else
+				con->fn_sanity_check = func_oid;
 		}
 		else if (strcmp(cmd, "#plcuda_include") == 0)
 		{
@@ -1131,6 +1146,26 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	if (con.emsg.len > 0)
 		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
 
+	/* sanity check */
+	if (OidIsValid(con.fn_sanity_check))
+	{
+		FunctionCallInfoData __fcinfo;
+		FmgrInfo	__flinfo;
+
+		fmgr_info(con.fn_sanity_check, &__flinfo);
+		InitFunctionCallInfoData(__fcinfo, &__flinfo,
+								 fcinfo->nargs,
+								 fcinfo->fncollation,
+								 NULL, NULL);
+		memcpy(__fcinfo.arg, fcinfo->arg,
+			   sizeof(Datum) * fcinfo->nargs);
+		memcpy(__fcinfo.argnull, fcinfo->argnull,
+			   sizeof(bool) * fcinfo->nargs);
+		result = FunctionCallInvoke(&__fcinfo);
+		if (__fcinfo.isnull || DatumGetBool(result))
+			elog(ERROR, "PL/CUDA sanity check failed by %s",
+				 format_procedure(con.fn_sanity_check));
+	}
 	initStringInfo(&source);
 	plcuda_make_flat_source(&source, &con);
 	if (!pg_md5_hash(source.data, source.len, hexsum))
@@ -1398,6 +1433,9 @@ plcuda2_function_handler(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(plcuda2_function_handler);
 
+#define get_table_desc(table_oid)				\
+	getObjectDescriptionOids(RelationRelationId,(table_oid))
+
 /*
  * SQL support functions
  */
@@ -1406,7 +1444,6 @@ pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
 	ArrayType  *column_names = PG_GETARG_ARRAYTYPE_P(1);
-	AttrNumber *attnums;
 	int			i = 0, nitems;
 	Datum		value;
 	bool		isnull;
@@ -1417,7 +1454,14 @@ pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
 		ARR_ELEMTYPE(column_names) != TEXTOID)
 		elog(ERROR, "column names must be a vector of text");
 	nitems = ARR_DIMS(column_names)[0];
-	attnums = palloc0(sizeof(AttrNumber) * nitems);
+	/* int2vector */
+	result = palloc0(offsetof(int2vector, values[nitems]));
+	SET_VARSIZE(result, offsetof(int2vector, values[nitems]));
+	result->ndim = 1;
+	result->dataoffset = 0;
+	result->elemtype = INT2OID;
+	result->dim1 = nitems;
+	result->lbound1 = ARR_LBOUND(column_names)[0];
 
 	iter = array_create_iterator(column_names, 0, NULL);
 	while (array_iterate(iter, &value, &isnull))
@@ -1427,19 +1471,12 @@ pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
 
 		if (anum == InvalidAttrNumber)
 			elog(ERROR, "column '%s' of %s was not found",
-				 temp,
-				 getObjectDescriptionOids(RelationRelationId, table_oid));
+				 temp, get_table_desc(table_oid));
 		Assert(i < nitems);
-		attnums[i++] = anum;
+		result->values[i++] = anum;
 	}
 	array_free_iterator(iter);
 	Assert(i == nitems);
-	/*
-	 * buildint2vector build an array with lbound1=0, however, array type
-	 * should has lbound1=1 as default. So, we adjust it manually.
-	 */
-	result = buildint2vector(attnums, nitems);
-	ARR_LBOUND(result)[0] = 1;
 
 	PG_RETURN_POINTER(result);
 }
@@ -1460,3 +1497,168 @@ pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS)
 	PG_RETURN_INT16(attnum);
 }
 PG_FUNCTION_INFO_V1(pgsql_table_attr_number_by_name);
+
+Datum
+pgsql_table_attr_types_by_names(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *column_names = PG_GETARG_ARRAYTYPE_P(1);
+	int			i = 0, nitems;
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	oidvector  *result;
+
+	if (ARR_NDIM(column_names) != 1 ||
+		ARR_ELEMTYPE(column_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	nitems = ARR_DIMS(column_names)[0];
+
+	/* oidvector */
+	result = palloc0(offsetof(oidvector, values[nitems]));
+	SET_VARSIZE(result, offsetof(oidvector, values[nitems]));
+	result->ndim = 1;
+	result->dataoffset = 0;
+	result->elemtype = OIDOID;
+	result->dim1 = nitems;
+	result->lbound1 = ARR_LBOUND(column_names)[0];
+
+	iter = array_create_iterator(column_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		HeapTuple	tup;
+
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		Assert(i < nitems);
+		result->values[i++] = ((Form_pg_attribute) GETSTRUCT(tup))->atttypid;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(iter);
+	Assert(i == nitems);
+
+	PG_RETURN_POINTER(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_types_by_names);
+
+Datum
+pgsql_table_attr_type_by_name(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	HeapTuple	tup;
+	Oid			type_oid;
+
+	tup = SearchSysCacheAttName(table_oid, column_name);
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name, get_table_desc(table_oid));
+	type_oid = ((Form_pg_attribute) GETSTRUCT(tup))->atttypid;
+	ReleaseSysCache(tup);
+
+	PG_RETURN_OID(type_oid);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_type_by_name);
+
+Datum
+pgsql_check_attrs_of_types(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *attr_names = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *type_names = PG_GETARG_ARRAYTYPE_P(2);
+	Datum		value1, value2;
+	bool		isnull1, isnull2;
+	ArrayIterator aiter;
+	ArrayIterator titer;
+	bool		result = true;
+
+	if (ARR_NDIM(attr_names) != 1 || ARR_ELEMTYPE(attr_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	if (ARR_NDIM(type_names) != 1 || ARR_ELEMTYPE(type_names) != OIDOID)
+		elog(ERROR, "types must be vector of regtype");
+	if (ARR_DIMS(attr_names)[0] != ARR_DIMS(type_names)[0])
+		elog(ERROR, "number of columns and types are mismatch");
+
+	aiter = array_create_iterator(attr_names, 0, NULL);
+	titer = array_create_iterator(type_names, 0, NULL);
+	while (array_iterate(aiter, &value1, &isnull1) &&
+		   array_iterate(titer, &value2, &isnull2))
+	{
+		char	   *temp = TextDatumGetCString(value1);
+		Oid			type_oid = DatumGetObjectId(value2);
+		HeapTuple	tup;
+
+		Assert(!isnull1 && !isnull2);
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+			result = false;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(aiter);
+	array_free_iterator(titer);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attrs_of_types);
+
+Datum
+pgsql_check_attrs_of_type(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *attr_names = PG_GETARG_ARRAYTYPE_P(1);
+	Oid			type_oid = PG_GETARG_OID(2);
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	bool		result = true;
+
+	if (ARR_NDIM(attr_names) != 1 || ARR_ELEMTYPE(attr_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+
+	iter = array_create_iterator(attr_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		HeapTuple	tup;
+
+		Assert(!isnull);
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+			result = false;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(iter);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attrs_of_type);
+
+Datum
+pgsql_check_attr_of_type(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	Oid			type_oid = PG_GETARG_OID(2);
+	HeapTuple	tup;
+	bool		result = true;
+
+	tup = SearchSysCacheAttName(table_oid, column_name);
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name, get_table_desc(table_oid));
+	if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+		result = false;
+	ReleaseSysCache(tup);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attr_of_type);
