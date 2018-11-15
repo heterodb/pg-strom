@@ -94,6 +94,7 @@ CREATE VIEW pgstrom.device_preserved_meminfo
 --
 -- Functions/Languages to support PL/CUDA
 --
+/*
 CREATE FUNCTION pgstrom.plcuda_function_validator(oid)
   RETURNS void
   AS 'MODULE_PATHNAME','plcuda_function_validator'
@@ -138,6 +139,17 @@ CREATE FUNCTION pg_catalog.plcuda_kernel_local_memsz()
   RETURNS int
   AS 'MODULE_PATHNAME','plcuda_kernel_local_memsz'
   LANGUAGE C VOLATILE;
+*/
+
+CREATE FUNCTION pg_catalog.attnums_of(regclass,text[])
+  RETURNS smallint[]
+  AS 'MODULE_PATHNAME','pgsql_table_attr_numbers_by_names'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.attnum_of(regclass,text)
+  RETURNS smallint
+  AS 'MODULE_PATHNAME','pgsql_table_attr_number_by_name'
+  LANGUAGE C STRICT;
 
 --
 -- Functions related to columnar-cache

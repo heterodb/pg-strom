@@ -19,6 +19,8 @@
 
 Datum plcuda2_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda2_function_handler(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS);
 
 typedef struct
 {
@@ -1395,3 +1397,66 @@ plcuda2_function_handler(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fn_cxt, datum);
 }
 PG_FUNCTION_INFO_V1(plcuda2_function_handler);
+
+/*
+ * SQL support functions
+ */
+Datum
+pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *column_names = PG_GETARG_ARRAYTYPE_P(1);
+	AttrNumber *attnums;
+	int			i = 0, nitems;
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	int2vector *result;
+
+	if (ARR_NDIM(column_names) != 1 ||
+		ARR_ELEMTYPE(column_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	nitems = ARR_DIMS(column_names)[0];
+	attnums = palloc0(sizeof(AttrNumber) * nitems);
+
+	iter = array_create_iterator(column_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		AttrNumber	anum = get_attnum(table_oid, temp);
+
+		if (anum == InvalidAttrNumber)
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp,
+				 getObjectDescriptionOids(RelationRelationId, table_oid));
+		Assert(i < nitems);
+		attnums[i++] = anum;
+	}
+	array_free_iterator(iter);
+	Assert(i == nitems);
+	/*
+	 * buildint2vector build an array with lbound1=0, however, array type
+	 * should has lbound1=1 as default. So, we adjust it manually.
+	 */
+	result = buildint2vector(attnums, nitems);
+	ARR_LBOUND(result)[0] = 1;
+
+	PG_RETURN_POINTER(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_numbers_by_names);
+
+Datum
+pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	AttrNumber	attnum;
+
+	attnum = get_attnum(table_oid, column_name);
+	if (attnum == InvalidAttrNumber)
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name,
+			 getObjectDescriptionOids(RelationRelationId, table_oid));
+	PG_RETURN_INT16(attnum);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_number_by_name);
