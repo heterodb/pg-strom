@@ -126,14 +126,19 @@ typedef struct
 /*
  * gstore_fdw.c related stuff
  */
-/* relation 'format' option */
-#define GSTORE_FDW_FORMAT__PGSTROM		500		/* KDS with column format */
+
+/*
+ * gstoreIpcHandlePLCUDA - a pair of IPChandle and mapped device pointer
+ */
+typedef struct
+{
+	gstoreIpcHandle		h;		/* IPChandle exported from Gstore_fdw */
+	void			   *map;	/* mapped device memory pointer */
+} gstoreIpcHandlePLCUDA;
+
 //#define GSTORE_FDW_FORMAT__PGARRAY
 //#define GSTORE_FDW_FORMAT__NUMPY
 
-/* column 'compression' option */
-#define GSTORE_COMPRESSION__NONE		0
-#define GSTORE_COMPRESSION__PGLZ		1
 
 #ifdef __CUDACC__
 typedef union {

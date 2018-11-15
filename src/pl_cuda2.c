@@ -33,6 +33,8 @@ typedef struct
 	Oid				proowner;
 	oidvector	   *proargtypes;
 	Oid				prorettype;
+	List		   *all_type_oids;
+	List		   *all_type_names;
 	const char	   *source;
 	int				lineno;
 	StringInfo		curr;
@@ -52,6 +54,36 @@ typedef struct
 
 static void plcuda_expand_source(plcuda_code_context *con, char *source);
 static bool	plcuda_enable_debug;	/* GUC */
+static const char *__attr_unused = "__attribute__((unused))";
+
+/*
+ * get_type_name
+ */
+static inline char *
+get_type_name(Oid type_oid)
+{
+	HeapTuple		tup;
+	Form_pg_type	typeForm;
+	char		   *typeName;
+	char		   *pos;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	typeForm = (Form_pg_type) GETSTRUCT(tup);
+	typeName = pstrdup(NameStr(typeForm->typname));
+	for (pos=typeName; *pos != '\0'; pos++)
+	{
+		if (!isalnum(*pos) && *pos != '_')
+		{
+			typeName = psprintf("pgtype_%u", type_oid);
+			break;
+		}
+	}
+	ReleaseSysCache(tup);
+
+	return typeName;
+}
 
 /*
  * plcuda_init_code_context
@@ -63,6 +95,10 @@ plcuda_init_code_context(plcuda_code_context *con,
 						 MemoryContext results_memcxt)
 {
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
+	List		   *all_type_oids = NIL;
+	List		   *all_type_names = NIL;
+	ListCell	   *lc1, *lc2;
+	int				i;
 
 	memset(con, 0, sizeof(plcuda_code_context));
 	con->proname		= NameStr(proc->proname);
@@ -77,6 +113,38 @@ plcuda_init_code_context(plcuda_code_context *con,
 	con->results_memcxt	= results_memcxt;
 	con->include_count	= 0;
 	con->include_func_oids = NIL;
+
+	/* makes type oid/name list */
+	all_type_oids = list_make1_oid(proc->prorettype);
+	all_type_names = list_make1(get_type_name(proc->prorettype));
+	for (i=0; i < proc->proargtypes.dim1; i++)
+	{
+		Oid		type_oid = proc->proargtypes.values[i];
+		char   *type_name = get_type_name(type_oid);
+
+		forboth (lc1, all_type_oids,
+				 lc2, all_type_names)
+		{
+			if (type_oid == lfirst_oid(lc1))
+				break;
+			if (strcmp(type_name, lfirst(lc2)) == 0)
+			{
+				appendStringInfo(
+					&con->emsg,
+					"\n%s:  Different types but have same name are used: %s",
+					con->source,
+					type_name);
+				break;
+			}
+		}
+		if (!lc1 && !lc2)
+		{
+			all_type_oids = lappend_oid(all_type_oids, type_oid);
+			all_type_names = lappend(all_type_names, type_name);
+		}
+	}
+	con->all_type_oids = all_type_oids;
+	con->all_type_names = all_type_names;
 }
 
 #define EMSG(fmt,...)									\
@@ -409,6 +477,137 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 }
 
 /*
+ * plcuda_add_extra_typeinfo - put referenced type declaration for convenient
+ */
+static void
+__add_extra_rowtype_info(StringInfo source,
+						 char *type_name, Oid type_relid)
+{
+	HeapTuple		reltup;
+	HeapTuple		atttup;
+	Form_pg_class	relForm;
+	Form_pg_attribute attForm;
+	AttrNumber		anum;
+	const char	   *suffix;
+
+	reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(type_relid));
+	if (!HeapTupleIsValid(reltup))
+		elog(ERROR, "cache lookup failed for relation %u", type_relid);
+	relForm = (Form_pg_class) GETSTRUCT(reltup);
+	if (relForm->relkind == RELKIND_FOREIGN_TABLE)
+		suffix = "gsfdwinfo";
+	else
+		suffix = "typeinfo";
+
+	appendStringInfo(
+		source,
+		"static __device__ kern_colmeta pg_%s_%s[] %s = {\n",
+		type_name, suffix, __attr_unused);
+
+	for (anum=1; anum <= relForm->relnatts; anum++)
+	{
+		atttup = SearchSysCache2(ATTNUM,
+								 ObjectIdGetDatum(type_relid),
+								 Int16GetDatum(anum));
+		if (!HeapTupleIsValid(atttup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 anum, type_relid);
+		attForm = (Form_pg_attribute) GETSTRUCT(atttup);
+		appendStringInfo(
+			source,
+			"    { %s, %d, %d, %d, %d, %u, %d, 0, 0 },\n",
+			attForm->attbyval ? "true" : "false",
+			typealign_get_width(attForm->attalign),
+			attForm->attlen,
+			attForm->attnum,
+			attForm->attcacheoff,
+			attForm->atttypid,
+			attForm->atttypmod);
+		ReleaseSysCache(atttup);
+	}
+	ReleaseSysCache(reltup);
+
+	appendStringInfo(
+		source,
+		"};\n");
+}
+
+static void
+plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
+{
+	FunctionCallInfo fcinfo = con->fcinfo;
+	ListCell   *lc1, *lc2;
+	int			i;
+	bool		meet_gstore = false;
+
+	appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
+	pgstrom_codegen_typeoid_declarations(source);
+	appendStringInfo(source, "\n/* ---- PG Type Properties ---- */\n");
+	forboth (lc1, con->all_type_oids,
+			 lc2, con->all_type_names)
+	{
+		Oid				type_oid = lfirst_oid(lc1);
+		char		   *type_name = lfirst(lc2);
+		HeapTuple		tup;
+		Form_pg_type	typeForm;
+
+		tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for type %u", type_oid);
+		typeForm = (Form_pg_type) GETSTRUCT(tup);
+		if (typeForm->typtype == TYPTYPE_COMPOSITE)
+		{
+			__add_extra_rowtype_info(source, type_name,
+									 typeForm->typrelid);
+		}
+		else
+		{
+			appendStringInfo(
+				source,
+				"static __device__ kern_colmeta pg_%s_typeinfo %s\n"
+				"    = { %s, %d, %d, 0, -1, %u, -1, 0, 0 };\n",
+				type_name, __attr_unused,
+				typeForm->typbyval ? "true" : "false",
+				typealign_get_width(typeForm->typalign),
+				typeForm->typlen,
+				type_oid);
+		}
+		ReleaseSysCache(tup);
+	}
+
+	/* Gstore_fdw */
+	for (i=0; i < con->proargtypes->dim1; i++)
+	{
+		Oid		type_oid = con->proargtypes->values[i];
+		Oid		ftable_oid;
+		char   *ftable_name;
+		char   *pos;
+
+		if (type_oid != REGGSTOREOID)
+			continue;
+		if (fcinfo->argnull[i])
+			continue;
+		if (!meet_gstore)
+			appendStringInfo(source, "\n/* ---- Gstore_Fdw schema ---- */\n");
+		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
+		ftable_name = get_rel_name(ftable_oid);
+		if (!ftable_name)
+			elog(ERROR, "cache lookup failed for relation: %u", ftable_oid);
+		for (pos = ftable_name; *pos != '\0'; pos++)
+		{
+			if (!isalnum(*pos) && *pos != '_')
+			{
+				ftable_name = psprintf("ftable_%u", ftable_oid);
+				break;
+			}
+		}
+		__add_extra_rowtype_info(source, ftable_name, ftable_oid);
+		meet_gstore = true;
+	}
+	appendStringInfoChar(source, '\n');
+}
+
+/*
  * plcuda_make_flat_source
  */
 static inline const char *
@@ -458,7 +657,6 @@ plcuda_get_type_label(Oid type_oid, int16 *p_typlen, bool *p_typbyval)
 static void
 plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 {
-	const char	   *attr_unused = "__attribute__((unused))";
 	oidvector	   *proargtypes = con->proargtypes;
 	int16			typlen;
 	bool			typbyval;
@@ -479,7 +677,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		con->proname,
 		MAXIMUM_ALIGNOF,
 		NAMEDATALEN);
-	pgstrom_codegen_typeoid_declarations(source);
+	plcuda_add_extra_typeinfo(source, con);
 	if (con->decl.data)
 		appendStringInfoString(source, con->decl.data);
 
@@ -517,12 +715,12 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 			appendStringInfo(
 				source,
 				"  %s arg%d %s = PLCUDA_GET_ARGVAL(%d,%s);\n",
-				label, i+1, attr_unused, i, label);
+				label, i+1, __attr_unused, i, label);
 		else
 			appendStringInfo(
 				source,
-				"  %s arg%d %s = p_args[%d];\n",
-				label, i+1, attr_unused, i);
+				"  %s arg%d %s = (%s)p_args[%d];\n",
+				label, i+1, __attr_unused, label, i);
 	}
 	if (con->main.data)
 		appendStringInfo(source, "{\n%s}\n", con->main.data);
@@ -684,22 +882,6 @@ plcuda2_function_validator(PG_FUNCTION_ARGS)
 	plcuda_expand_source(&con, TextDatumGetCString(value));
 	if (con.emsg.len > 0)
 		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
-	if (con.include_count > 0)
-		elog(NOTICE, "PL/CUDA does not try to build the code on function creation time, because '#plcuda_include' may change the code on run-time.");
-	else
-	{
-		StringInfoData	source;
-		File	tempFile;
-
-		initStringInfo(&source);
-		plcuda_make_flat_source(&source, &con);
-
-		tempFile = OpenTemporaryFile(false);
-		plcuda_build_program(&con, FilePathName(tempFile), &source);
-		FileClose(tempFile);
-
-		pfree(source.data);
-	}
 	ReleaseSysCache(tuple);
 
 	PG_RETURN_VOID();

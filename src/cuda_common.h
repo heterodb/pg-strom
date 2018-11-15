@@ -769,7 +769,7 @@ __kds_unpack(cl_uint offset)
 
 
 STATIC_INLINE(size_t)
-KDS_CALCULATE_HEAD_LENGTH(cl_uint ncols, bool has_attnames)
+KDS_CALCULATE_HEAD_LENGTH(cl_uint ncols, cl_char has_attnames)
 {
 	size_t	len = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 
@@ -780,7 +780,7 @@ KDS_CALCULATE_HEAD_LENGTH(cl_uint ncols, bool has_attnames)
 
 STATIC_INLINE(size_t)
 KDS_CALCULATE_FRONTEND_LENGTH(cl_uint ncols, cl_uint nslots,cl_uint nitems,
-							  bool has_attname)
+							  cl_char has_attname)
 {
 	size_t	len = KDS_CALCULATE_HEAD_LENGTH(ncols, has_attname);
 
@@ -980,6 +980,33 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 	return kparams && ((char *)ptr >= (char *)kparams &&
 					   (char *)ptr <  (char *)kparams + kparams->length);
 }
+
+/*
+ * gstoreIpcHandle
+ *
+ * Format definition when Gstore_fdw exports IPChandle of the GPU memory.
+ */
+#define GSTORE_IPC_HANDLE_MAGIC		0x474d656d		/* 'GMem' */
+
+/* Gstore_fdw's internal data format */
+#define GSTORE_FDW_FORMAT__PGSTROM		500		/* KDS with columnar */
+//#define GSTORE_FDW_FORMAT__ARROW		501		/* Apache Arrow compatible */
+
+/* column 'compression' option */
+#define GSTORE_COMPRESSION__NONE		0
+#define GSTORE_COMPRESSION__PGLZ		1
+
+typedef struct
+{
+	cl_uint		__vl_len;		/* varlena header */
+	cl_uint		magic;			/* = GSTORE_IPC_HANDLE_MAGIC */
+	cl_short	device_id;		/* GPU device where pinning on */
+	cl_char		format;			/* one of GSTORE_FDW_FORMAT__* */
+	cl_char		__padding__;	/* reserved */
+	cl_uint		nitems;			/* # of items */
+	cl_long		rawsize;		/* length in bytes */
+	char		ipc_handle[64];	/* identifier of CUDA */
+} gstoreIpcHandle;
 
 #ifdef __CUDACC__
 /* ----------------------------------------------------------------

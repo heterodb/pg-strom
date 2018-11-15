@@ -267,7 +267,8 @@ check_ndarray_column(kern_colmeta *cmeta, size_t nitems,
 static PyObject *
 pystrom_ipc_import(PyObject *self, PyObject *args)
 {
-	Py_buffer		__ipc_handle;
+	Py_buffer		ipc_token;
+	gstoreIpcHandle gs_handle;
 	cudaIpcMemHandle_t ipc_handle;
 	PyObject	   *attnameList = NULL;
 	cudaError_t		rc;
@@ -283,7 +284,7 @@ pystrom_ipc_import(PyObject *self, PyObject *args)
 	PyObject	   *ndarray = NULL;
 
 	if(!PyArg_ParseTuple(args, "y*|O!",
-						 &__ipc_handle,
+						 &ipc_token,
 						 &PyList_Type,
 						 &attnameList))
 		Py_RETURN_NONE;
@@ -291,15 +292,23 @@ pystrom_ipc_import(PyObject *self, PyObject *args)
 	/*
 	 * Import GPU device memory using IPC memory handle
 	 */
-	if (__ipc_handle.len != sizeof(cudaIpcMemHandle_t))
+	if (ipc_token.len != sizeof(gstoreIpcHandle))
 	{
 		PyErr_Format(PyExc_ValueError,
-					 "IPC handle length mismatch: %d of %d",
-					 __ipc_handle.len, sizeof(cudaIpcMemHandle_t));
+					 "IPC token length mismatch: %d of %d",
+					 ipc_token.len, sizeof(gstoreIpcHandle));
 		Py_RETURN_NONE;
 	}
-	memcpy(&ipc_handle, __ipc_handle.buf, __ipc_handle.len);
-
+	memcpy(&gs_handle, ipc_token.buf, ipc_token.len);
+	if (VARSIZE(&gs_handle) != sizeof(gs_handle) ||
+		gs_handle.magic != GSTORE_IPC_HANDLE_MAGIC)
+	{
+		PyErr_Format(PyExc_ValueError,
+					 "IPC token corruption (vl_len: %d, magic: %08x)",
+					 VARSIZE(&gs_handle), gs_handle.magic);
+		Py_RETURN_NONE;
+	}
+	memcpy(&ipc_handle, gs_handle.ipc_handle, sizeof(cudaIpcMemHandle_t));
 	rc = cudaIpcOpenMemHandle(&m_devptr, ipc_handle,
 							  cudaIpcMemLazyEnablePeerAccess);
 	if (rc != cudaSuccess)

@@ -1996,36 +1996,54 @@ reset_reggstore_type_oid(Datum arg, int cacheid, uint32 hashvalue)
 /*
  * pgstrom_gstore_export_ipchandle
  */
+gstoreIpcHandle *
+__pgstrom_gstore_export_ipchandle(Oid ftable_oid)
+{
+	cl_int			pinning;
+	GpuStoreChunk  *gs_chunk;
+	gstoreIpcHandle *result;
+
+	if (!relation_is_gstore_fdw(ftable_oid))
+		elog(ERROR, "relation %u is not gstore_fdw foreign table",
+			 ftable_oid);
+	strom_foreign_table_aclcheck(ftable_oid, GetUserId(), ACL_SELECT);
+
+	gstore_fdw_table_options(ftable_oid, &pinning, NULL);
+	if (pinning < 0)
+		elog(ERROR, "gstore_fdw: \"%s\" is not pinned on GPU devices",
+			 get_rel_name(ftable_oid));
+	if (pinning >= numDevAttrs)
+		elog(ERROR, "gstore_fdw: \"%s\" is not pinned on valid GPU device",
+			 get_rel_name(ftable_oid));
+
+	gs_chunk = gstore_fdw_lookup_chunk(ftable_oid, GetActiveSnapshot());
+	if (!gs_chunk)
+		return NULL;
+	Assert(sizeof(CUipcMemHandle) == sizeof(result->ipc_handle));
+
+	result = palloc0(sizeof(gstoreIpcHandle));
+	result->magic = GSTORE_IPC_HANDLE_MAGIC;
+	result->device_id = devAttrs[pinning].DEV_ID;
+	result->format = gs_chunk->format;
+	result->nitems = gs_chunk->nitems;
+	result->rawsize = gs_chunk->rawsize;
+	memcpy(result->ipc_handle,
+		   &gs_chunk->ipc_mhandle,
+		   sizeof(CUipcMemHandle));
+	SET_VARSIZE(result, sizeof(gstoreIpcHandle));
+
+	return result;
+}
+
 Datum
 pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 {
-	Oid				gstore_oid = PG_GETARG_OID(0);
-	cl_int			pinning;
-	GpuStoreChunk  *gs_chunk;
-	char		   *result;
+	gstoreIpcHandle *handle;
 
-	if (!relation_is_gstore_fdw(gstore_oid))
-		elog(ERROR, "relation %u is not gstore_fdw foreign table",
-			 gstore_oid);
-	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-
-	gstore_fdw_table_options(gstore_oid, &pinning, NULL);
-	if (pinning < 0)
-		elog(ERROR, "gstore_fdw: \"%s\" is not pinned on GPU devices",
-			 get_rel_name(gstore_oid));
-	if (pinning >= numDevAttrs)
-		elog(ERROR, "gstore_fdw: \"%s\" is not pinned on valid GPU device",
-			 get_rel_name(gstore_oid));
-
-	gs_chunk = gstore_fdw_lookup_chunk(gstore_oid, GetActiveSnapshot());
-	if (!gs_chunk)
+	handle = __pgstrom_gstore_export_ipchandle(PG_GETARG_OID(0));
+	if (!handle)
 		PG_RETURN_NULL();
-
-	result = palloc(VARHDRSZ + sizeof(CUipcMemHandle));
-	memcpy(result + VARHDRSZ, &gs_chunk->ipc_mhandle, sizeof(CUipcMemHandle));
-	SET_VARSIZE(result, VARHDRSZ + sizeof(CUipcMemHandle));
-
-	PG_RETURN_POINTER(result);
+	PG_RETURN_POINTER(handle);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_export_ipchandle);
 
