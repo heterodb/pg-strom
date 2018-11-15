@@ -36,6 +36,7 @@ typedef struct
 	MemoryContext	results_memcxt;
 	int				include_count;
 	List		   *include_func_oids;
+	List		   *link_libs;
 	char			afname[200];	/* argument file name */
 	char			rfname[200];	/* result file name */
 	char		   *prog_args[FUNC_MAX_ARGS];
@@ -59,8 +60,9 @@ plcuda_init_code_context(plcuda_code_context *con,
 	con->proowner		= proc->proowner;
 	con->proargtypes	= &proc->proargtypes;
 	con->prorettype		= proc->prorettype;
-	con->source			= NULL;
+	con->source			= NameStr(proc->proname);
 	con->lineno			= 1;
+	initStringInfo(&con->emsg);
 	con->curr			= NULL;
 	con->fcinfo			= fcinfo;	/* NULL if only validation */
 	con->results_memcxt	= results_memcxt;
@@ -69,10 +71,8 @@ plcuda_init_code_context(plcuda_code_context *con,
 }
 
 #define EMSG(fmt,...)									\
-	appendStringInfo(&con->emsg, "\n%s(%u) " fmt,		\
-					 con->source ? con->source : "",	\
-					 con->lineno,						\
-					 ##__VA_ARGS__)
+	appendStringInfo(&con->emsg, "\n%s:%d  " fmt,		\
+					 con->source, con->lineno, ##__VA_ARGS__)
 
 /*
  * plcuda_lookup_helper
@@ -286,11 +286,13 @@ plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include)
 static void
 plcuda_expand_source(plcuda_code_context *con, char *source)
 {
+	char   *source_pos;
 	char   *line, *pos;
+	bool	had_code_out_of_block_error = false;
 
-	for (line = strtok_r(source, "\n\r", &pos), con->lineno=1;
+	for (line = strtok_r(source, "\n\r", &source_pos), con->lineno=1;
 		 line != NULL;
-		 line = strtok_r(NULL, "\n\r", &pos), con->lineno++)
+		 line = strtok_r(NULL, "\n\r", &source_pos), con->lineno++)
 	{
 		char   *end = line + strlen(line) - 1;
 		char   *cmd;
@@ -303,13 +305,19 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 
 		if (strncmp(line, "#plcuda_", 8) != 0)
 		{
-			appendStringInfo(con->curr, "%s\n", line);
+			if (con->curr)
+				appendStringInfo(con->curr, "%s\n", line);
+			else if (!had_code_out_of_block_error)
+			{
+				EMSG("code out of valid blocks");
+				had_code_out_of_block_error = true;
+			}
 			continue;
 		}
 		/* pick up '#plcuda_' command line */
 		for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
 		cmd = pnstrdup(line, pos - line);
-		if (!plcuda_parse_cmd_options(line, &options))
+		if (!plcuda_parse_cmd_options(pos, &options))
 		{
 			EMSG("pl/cuda command parse error:\n%s", line);
 			continue;
@@ -325,6 +333,7 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 			{
 				initStringInfo(&con->decl);
 				con->curr = &con->decl;
+				had_code_out_of_block_error = false;
 			}
 		}
 		else if (strcmp(cmd, "#plcuda_begin") == 0)
@@ -337,6 +346,7 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 			{
 				initStringInfo(&con->main);
 				con->curr = &con->main;
+				had_code_out_of_block_error = false;
 			}
 		}
 		else if (strcmp(cmd, "#plcuda_end") == 0)
@@ -354,6 +364,24 @@ plcuda_expand_source(plcuda_code_context *con, char *source)
 			con->include_count++;
 			if (OidIsValid(func_oid) && con->fcinfo)
 				plcuda_code_include(con, func_oid);
+		}
+		else if (strcmp(cmd, "#plcuda_library") == 0)
+		{
+			if (list_length(options) != 1)
+				EMSG("syntax error: %s", cmd);
+			else
+			{
+				char	   *library = linitial(options);
+				ListCell   *lc;
+
+				foreach (lc, con->link_libs)
+				{
+					if (strcmp(library, lfirst(lc)) == 0)
+						break;
+				}
+				if (!lc)
+					con->link_libs = lappend(con->link_libs, library);
+			}
 		}
 		else
 		{
@@ -433,6 +461,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		con->proname,
 		MAXIMUM_ALIGNOF,
 		NAMEDATALEN);
+	pgstrom_codegen_typeoid_declarations(source);
 	if (con->decl.data)
 		appendStringInfoString(source, con->decl.data);
 
@@ -491,12 +520,14 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
  * plcuda_build_program
  */
 static void
-plcuda_build_program(const char *name, StringInfo source)
+plcuda_build_program(plcuda_code_context *con,
+					 const char *name, StringInfo source)
 {
 	File		fdesc;
 	FILE	   *filp;
 	ssize_t		nbytes;
 	int			status;
+	ListCell   *lc;
 	char		path[MAXPGPATH];
 	StringInfoData cmd;
 	StringInfoData log;
@@ -525,6 +556,10 @@ plcuda_build_program(const char *name, StringInfo source)
 		" -O2 -std=c++11 -o %s %s",
 		devComputeCapability,
 		name, path);
+	/* libraries */
+	foreach (lc, con->link_libs)
+		appendStringInfo(&cmd, " -l%s", (char *)lfirst(lc));
+
 	/* kick nvcc compiler */
 	filp = OpenPipeStream(cmd.data, PG_BINARY_R);
 	if (!filp)
@@ -639,7 +674,7 @@ plcuda2_function_validator(PG_FUNCTION_ARGS)
 		plcuda_make_flat_source(&source, &con);
 
 		tempFile = OpenTemporaryFile(false);
-		plcuda_build_program(FilePathName(tempFile), &source);
+		plcuda_build_program(&con, FilePathName(tempFile), &source);
 		FileClose(tempFile);
 
 		pfree(source.data);
@@ -981,6 +1016,19 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 		cmd_argv[j++] = con->prog_args[i];
 	cmd_argv[j++] = NULL;
 
+#if 0
+	/* debug code to check command line */
+	{
+		StringInfoData	temp;
+
+		initStringInfo(&temp);
+		appendStringInfo(&temp, "%s", command);
+		for (i=1; cmd_argv[i] != NULL; i++)
+			appendStringInfo(&temp, " %s", cmd_argv[i]);
+		elog(INFO, "PL/CUDA: %s", temp.data);
+		pfree(temp.data);
+	}
+#endif
 	/* fork child */
 	child = fork();
 	if (child == 0)
@@ -1096,7 +1144,7 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	{
 		if (errno != ENOENT)
 			elog(ERROR, "failed on stat('%s'): %m", command);
-		plcuda_build_program(command, &source);
+		plcuda_build_program(&con, command, &source);
 	}
 
 	PG_TRY();

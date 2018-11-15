@@ -141,8 +141,8 @@ int main(int argc, char * const argv[])
 		else if (strncmp(tok, "v:", 2) == 0)
 		{
 			/* immediate value */
-			argval[i] = strtol(tok+2, NULL, 16);
-			ptr = &argval[i];
+			argval[j] = strtol(tok+2, NULL, 16);
+			ptr = &argval[j];
 		}
 		else if (strncmp(tok, "r:", 2) == 0)
 		{
