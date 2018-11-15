@@ -1227,6 +1227,7 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern const char *pgsql_host_plcuda_code;
 extern void pgstrom_init_plcuda(void);
+extern void pgstrom_init_plcuda2(void);
 
 /*
  * ccache.c

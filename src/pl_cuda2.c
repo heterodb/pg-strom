@@ -51,6 +51,7 @@ typedef struct
 } plcuda_code_context;
 
 static void plcuda_expand_source(plcuda_code_context *con, char *source);
+static bool	plcuda_enable_debug;	/* GUC */
 
 /*
  * plcuda_init_code_context
@@ -570,14 +571,17 @@ plcuda_build_program(plcuda_code_context *con,
 		" --gpu-architecture=sm_%lu"
 		" --default-stream=per-thread"
 		" -I " PGSHAREDIR "/extension"
-		" -O2 -std=c++11 -o %s %s",
-		devComputeCapability,
-		name, path);
-	/* libraries */
+		" -O2 -std=c++11",
+		devComputeCapability);
+	if (plcuda_enable_debug)
+		appendStringInfo(&cmd, " -g -G");
 	foreach (lc, con->link_libs)
 		appendStringInfo(&cmd, " -l%s", (char *)lfirst(lc));
+	appendStringInfo(&cmd, " -o %s %s", name, path);
 
 	/* kick nvcc compiler */
+	if (plcuda_enable_debug)
+		elog(NOTICE, "PL/CUDA build:\n%s", cmd.data);
 	filp = OpenPipeStream(cmd.data, PG_BINARY_R);
 	if (!filp)
 		elog(ERROR, "could not kick nvcc compiler: %s", cmd.data);
@@ -1033,8 +1037,8 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 		cmd_argv[j++] = con->prog_args[i];
 	cmd_argv[j++] = NULL;
 
-#if 0
-	/* debug code to check command line */
+	/* shows command line if debug mode */
+	if (plcuda_enable_debug)
 	{
 		StringInfoData	temp;
 
@@ -1042,10 +1046,9 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 		appendStringInfo(&temp, "%s", command);
 		for (i=1; cmd_argv[i] != NULL; i++)
 			appendStringInfo(&temp, " %s", cmd_argv[i]);
-		elog(INFO, "PL/CUDA: %s", temp.data);
+		elog(NOTICE, "PL/CUDA: %s", temp.data);
 		pfree(temp.data);
 	}
-#endif
 	/* fork child */
 	child = fork();
 	if (child == 0)
@@ -1170,10 +1173,11 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	plcuda_make_flat_source(&source, &con);
 	if (!pg_md5_hash(source.data, source.len, hexsum))
 		elog(ERROR, "out of memory");
-	command = psprintf("base/%s/%s_plcuda_%u_%s_cc%ld",
+	command = psprintf("base/%s/%s_plcuda_%u%s_%s_cc%ld",
 					   PG_TEMP_FILES_DIR,
 					   PG_TEMP_FILE_PREFIX,
 					   fn_oid,
+					   (plcuda_enable_debug ? "g" : ""),
 					   hexsum,
 					   devComputeCapability);
 	/* lookup PL/CUDA binary */
@@ -1196,18 +1200,18 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	}
 	PG_CATCH();
 	{
-		if (con.afname[0] != '\0')
+		if (con.afname[0] != '\0' && !plcuda_enable_debug)
 			shm_unlink(con.afname);
-		if (con.rfname[0] != '\0')
+		if (con.rfname[0] != '\0' && !plcuda_enable_debug)
 			shm_unlink(con.rfname);
 		close(rbuf_fdesc);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	/* cleanup */
-	if (con.afname[0] != '\0')
+	if (con.afname[0] != '\0' && !plcuda_enable_debug)
 		shm_unlink(con.afname);
-	if (con.rfname[0] != '\0')
+	if (con.rfname[0] != '\0' && !plcuda_enable_debug)
 		shm_unlink(con.rfname);
 	close(rbuf_fdesc);
 	ReleaseSysCache(tuple);
@@ -1433,12 +1437,28 @@ plcuda2_function_handler(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(plcuda2_function_handler);
 
-#define get_table_desc(table_oid)				\
-	getObjectDescriptionOids(RelationRelationId,(table_oid))
+/*
+ * pgstrom_init_plcuda2
+ */
+void
+pgstrom_init_plcuda2(void)
+{
+	DefineCustomBoolVariable("pl_cuda.enable_debug",
+							 "Enables debugging stuff of PL/CUDA",
+							 NULL,
+							 &plcuda_enable_debug,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+}
 
 /*
  * SQL support functions
  */
+#define get_table_desc(table_oid)				\
+	getObjectDescriptionOids(RelationRelationId,(table_oid))
+
 Datum
 pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
 {
