@@ -488,21 +488,16 @@ __add_extra_rowtype_info(StringInfo source,
 	Form_pg_class	relForm;
 	Form_pg_attribute attForm;
 	AttrNumber		anum;
-	const char	   *suffix;
 
 	reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(type_relid));
 	if (!HeapTupleIsValid(reltup))
 		elog(ERROR, "cache lookup failed for relation %u", type_relid);
 	relForm = (Form_pg_class) GETSTRUCT(reltup);
-	if (relForm->relkind == RELKIND_FOREIGN_TABLE)
-		suffix = "gsfdwinfo";
-	else
-		suffix = "typeinfo";
 
 	appendStringInfo(
 		source,
-		"static __device__ kern_colmeta pg_%s_%s[] %s = {\n",
-		type_name, suffix, __attr_unused);
+		"static __device__ kern_colmeta pg_%s_typeinfo[] %s = {\n",
+		type_name, __attr_unused);
 
 	for (anum=1; anum <= relForm->relnatts; anum++)
 	{
@@ -535,10 +530,7 @@ __add_extra_rowtype_info(StringInfo source,
 static void
 plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 {
-	FunctionCallInfo fcinfo = con->fcinfo;
 	ListCell   *lc1, *lc2;
-	int			i;
-	bool		meet_gstore = false;
 
 	appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
 	pgstrom_codegen_typeoid_declarations(source);
@@ -573,36 +565,6 @@ plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 				type_oid);
 		}
 		ReleaseSysCache(tup);
-	}
-
-	/* Gstore_fdw */
-	for (i=0; i < con->proargtypes->dim1; i++)
-	{
-		Oid		type_oid = con->proargtypes->values[i];
-		Oid		ftable_oid;
-		char   *ftable_name;
-		char   *pos;
-
-		if (type_oid != REGGSTOREOID)
-			continue;
-		if (fcinfo->argnull[i])
-			continue;
-		if (!meet_gstore)
-			appendStringInfo(source, "\n/* ---- Gstore_Fdw schema ---- */\n");
-		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
-		ftable_name = get_rel_name(ftable_oid);
-		if (!ftable_name)
-			elog(ERROR, "cache lookup failed for relation: %u", ftable_oid);
-		for (pos = ftable_name; *pos != '\0'; pos++)
-		{
-			if (!isalnum(*pos) && *pos != '_')
-			{
-				ftable_name = psprintf("ftable_%u", ftable_oid);
-				break;
-			}
-		}
-		__add_extra_rowtype_info(source, ftable_name, ftable_oid);
-		meet_gstore = true;
 	}
 	appendStringInfoChar(source, '\n');
 }
@@ -882,6 +844,23 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	plcuda_expand_source(&con, TextDatumGetCString(value));
 	if (con.emsg.len > 0)
 		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
+	if (con.include_count > 0)
+	{
+		elog(NOTICE, "#plcuda_include changes PL/CUDA source on run-time, so validator does not try to compile on CREATE FUNCTION time");
+	}
+	else
+	{
+		StringInfoData source;
+		File		tempFile;
+
+		initStringInfo(&source);
+		plcuda_make_flat_source(&source, &con);
+		tempFile = OpenTemporaryFile(false);
+		plcuda_build_program(&con, FilePathName(tempFile), &source);
+		FileClose(tempFile);
+
+		pfree(source.data);
+	}
 	ReleaseSysCache(tuple);
 
 	PG_RETURN_VOID();

@@ -96,17 +96,12 @@ CREATE VIEW pgstrom.device_preserved_meminfo
 --
 CREATE FUNCTION pgstrom.plcuda_function_validator(oid)
   RETURNS void
-  AS 'MODULE_PATHNAME','plcuda2_function_validator'
+  AS 'MODULE_PATHNAME','plcuda_function_validator'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.plcuda_function_handler()
   RETURNS language_handler
-  AS 'MODULE_PATHNAME','plcuda2_function_handler'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom.plcuda_function_source(regproc)
-  RETURNS text
-  AS 'MODULE_PATHNAME','plcuda_function_source'
+  AS 'MODULE_PATHNAME','plcuda_function_handler'
   LANGUAGE C STRICT;
 
 CREATE LANGUAGE plcuda
