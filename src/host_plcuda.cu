@@ -12,17 +12,21 @@
 		exit(2);									\
 	} while(0)
 
-static cudaIpcMemHandle_t
-decode_ipcmhandle(const char *hex)
+static GstoreDescPLCUDA *
+decode_gstore_desc_plcuda(const char *hex)
 {
-	cudaIpcMemHandle_t handle;
+	GstoreDescPLCUDA *result;
 	const char	   *pos = hex;
-	unsigned char  *dst = (unsigned char *)&handle;
+	unsigned char  *dst;
 	int				i, c0, c1;
 
+	result = (GstoreDescPLCUDA *)malloc(sizeof(GstoreDescPLCUDA));
+	if (!result)
+		EEXIT("out of memory");
+	dst = (unsigned char *) result;
 	for (i=0; *pos != '\0'; i++)
 	{
-		if (i >= sizeof(cudaIpcMemHandle_t))
+		if (i >= sizeof(GstoreDescPLCUDA))
 			EEXIT("IPC mhandle too large");
 
 		c0 = *pos++;
@@ -34,7 +38,6 @@ decode_ipcmhandle(const char *hex)
 			c0 = c0 - 'A' + 10;
 		else
 			EEXIT("invalid HEX character: %s", hex);
-		assert((c0 & 0xfff0) == 0);
 
 		c1 = *pos++;
 		if (c1 >= '0' && c1 <= '9')
@@ -45,13 +48,12 @@ decode_ipcmhandle(const char *hex)
 			c1 = c1 - 'A' + 10;
 		else
 			EEXIT("invalid HEX character: %s", hex);
-		assert((c1 & 0xfff0) == 0);
 
 		dst[i] = (c0 << 4) | c1;
 	}
-	if (i != sizeof(cudaIpcMemHandle_t))
+	if (i != sizeof(GstoreDescPLCUDA))
 		EEXIT("IPC mhandle length mismatch");
-	return handle;
+	return result;
 }
 
 int main(int argc, char * const argv[])
@@ -164,13 +166,15 @@ int main(int argc, char * const argv[])
 			}
 			if (!ptr)
 			{
-				cudaIpcMemHandle_t ipc_mhandle = decode_ipcmhandle(tok+2);
+				GstoreDescPLCUDA *desc = decode_gstore_desc_plcuda(tok+2);
 
-				rc = cudaIpcOpenMemHandle(&ptr, ipc_mhandle,
+				rc = cudaIpcOpenMemHandle(&desc->map,
+										  desc->h.u.cuda_ipc_mhandle,
 										  cudaIpcMemLazyEnablePeerAccess);
 				if (rc != cudaSuccess)
 					EEXIT("failed on cudaIpcOpenMemHandle: %s",
 						  cudaGetErrorName(rc));
+				ptr = desc;
 			}
 		}
 		else

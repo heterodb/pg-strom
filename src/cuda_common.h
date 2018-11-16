@@ -982,7 +982,7 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 }
 
 /*
- * gstoreIpcHandle
+ * GstoreIpcHandle
  *
  * Format definition when Gstore_fdw exports IPChandle of the GPU memory.
  */
@@ -1005,8 +1005,16 @@ typedef struct
 	cl_char		__padding__;	/* reserved */
 	cl_uint		nitems;			/* # of items */
 	cl_long		rawsize;		/* length in bytes */
-	char		ipc_handle[64];	/* identifier of CUDA */
-} gstoreIpcHandle;
+	union {
+#ifdef CU_IPC_HANDLE_SIZE		/* driver API */
+		CUipcMemHandle		cu_ipc_mhandle;
+#endif
+#ifdef CUDA_IPC_HANDLE_SIZE		/* runtime API */
+		cudaIpcMemHandle_t	cuda_ipc_mhandle;
+#endif
+		char				ipc_mhandle[64];
+	} u;
+} GstoreIpcHandle;
 
 #ifdef __CUDACC__
 /* ----------------------------------------------------------------

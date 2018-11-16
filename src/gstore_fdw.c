@@ -1995,12 +1995,12 @@ reset_reggstore_type_oid(Datum arg, int cacheid, uint32 hashvalue)
 /*
  * pgstrom_gstore_export_ipchandle
  */
-gstoreIpcHandle *
+GstoreIpcHandle *
 __pgstrom_gstore_export_ipchandle(Oid ftable_oid)
 {
 	cl_int			pinning;
 	GpuStoreChunk  *gs_chunk;
-	gstoreIpcHandle *result;
+	GstoreIpcHandle *result;
 
 	if (!relation_is_gstore_fdw(ftable_oid))
 		elog(ERROR, "relation %u is not gstore_fdw foreign table",
@@ -2018,18 +2018,17 @@ __pgstrom_gstore_export_ipchandle(Oid ftable_oid)
 	gs_chunk = gstore_fdw_lookup_chunk(ftable_oid, GetActiveSnapshot());
 	if (!gs_chunk)
 		return NULL;
-	Assert(sizeof(CUipcMemHandle) == sizeof(result->ipc_handle));
 
-	result = palloc0(sizeof(gstoreIpcHandle));
+	result = palloc0(sizeof(GstoreIpcHandle));
 	result->magic = GSTORE_IPC_HANDLE_MAGIC;
 	result->device_id = devAttrs[pinning].DEV_ID;
 	result->format = gs_chunk->format;
 	result->nitems = gs_chunk->nitems;
 	result->rawsize = gs_chunk->rawsize;
-	memcpy(result->ipc_handle,
+	memcpy(&result->u.cu_ipc_mhandle,
 		   &gs_chunk->ipc_mhandle,
 		   sizeof(CUipcMemHandle));
-	SET_VARSIZE(result, sizeof(gstoreIpcHandle));
+	SET_VARSIZE(result, sizeof(GstoreIpcHandle));
 
 	return result;
 }
@@ -2037,7 +2036,7 @@ __pgstrom_gstore_export_ipchandle(Oid ftable_oid)
 Datum
 pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 {
-	gstoreIpcHandle *handle;
+	GstoreIpcHandle *handle;
 
 	handle = __pgstrom_gstore_export_ipchandle(PG_GETARG_OID(0));
 	if (!handle)
