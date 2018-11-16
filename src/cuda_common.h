@@ -2562,29 +2562,28 @@ form_kern_heaptuple(kern_tupitem	*tupitem,	/* out */
  * @buffer     ... pointer to global memory where caller wants to construct
  *                 a composite datum. It must have enough length and also
  *                 must be aligned to DWORD.
- * @comp_type  ... reference to kern_colmeta of the composite type itself
- * @sub_types  ... reference to an array of kern_colmeta of the sub-fields of
- *                 the destination composite type.
- * @nfields    ... number of sub-fields of the composite type.
- * @tup_datum  ... in: it gives length of individual sub-fields.
- *                 out: it returns pointer of the individual sub-fields.
- * @tup_isnull ... flag to indicate which fields are NULL. If @tup_isnull is
- *                 NULL, it means the composite type contains no NULL items.
+ * @typeoid    ... type OID of the composite type 
+ * @typemod    ... type modifier of the composite type
+ * @nfields    ... number of sub-fields of the composite type
+ * @colmeta    ... array of kern_colmeta for sub-field types
+ * @tup_datum  ... values of the sub-fields
+ * @tup_isnull ... true, if values are NULL
  */
 STATIC_INLINE(cl_uint)
-form_kern_composite_type(void *buffer,			/* out */
-						 kern_colmeta *typmeta, /* in: column definitions */
-						 cl_int        ncols,   /* in: # of attributes */
-						 kern_colmeta *colmeta, /* in: type attributes */
-						 Datum        *tup_values,	/* in: */
-						 cl_bool      *tup_isnull)	/* in: */
+form_kern_composite_type(void      *buffer,      /* out */
+						 cl_uint    comp_typeid, /* in: type OID */
+						 cl_int		comp_typmod, /* in: type modifier */
+						 cl_int		nfields,     /* in: # of attributes */
+						 kern_colmeta *colmeta,  /* in: sub-type attributes */
+						 Datum	   *tup_values,	 /* in: */
+						 cl_bool   *tup_isnull)	 /* in: */
 {
 	return __form_kern_heaptuple(buffer,
-								 ncols,
+								 nfields,
 								 colmeta,
 								 NULL,
-								 typmeta->atttypmod,
-								 typmeta->atttypid,
+								 comp_typmod,
+								 comp_typeid,
 								 0,	/* composite type never have OID */
 								 tup_values,
 								 tup_isnull);

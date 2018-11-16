@@ -496,7 +496,7 @@ __add_extra_rowtype_info(StringInfo source,
 
 	appendStringInfo(
 		source,
-		"static __device__ kern_colmeta pg_%s_typeinfo[] %s = {\n",
+		"static __device__ kern_colmeta pg_%s_attrinfo[] %s = {\n",
 		type_name, __attr_unused);
 
 	for (anum=1; anum <= relForm->relnatts; anum++)
@@ -531,6 +531,7 @@ static void
 plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 {
 	ListCell   *lc1, *lc2;
+	bool		meet_reggstore = false;
 
 	appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
 	pgstrom_codegen_typeoid_declarations(source);
@@ -543,30 +544,38 @@ plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 		HeapTuple		tup;
 		Form_pg_type	typeForm;
 
+		if (type_oid == REGGSTOREOID)
+			meet_reggstore = true;
+
 		tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 		if (!HeapTupleIsValid(tup))
 			elog(ERROR, "cache lookup failed for type %u", type_oid);
 		typeForm = (Form_pg_type) GETSTRUCT(tup);
+		appendStringInfo(
+			source,
+			"static __device__ kern_colmeta pg_%s_typeinfo %s\n"
+			"    = { %s, %d, %d, 0, -1, %u, -1, 0, 0 };\n",
+			type_name, __attr_unused,
+			typeForm->typbyval ? "true" : "false",
+			typealign_get_width(typeForm->typalign),
+			typeForm->typlen,
+			type_oid);
 		if (typeForm->typtype == TYPTYPE_COMPOSITE)
-		{
 			__add_extra_rowtype_info(source, type_name,
 									 typeForm->typrelid);
-		}
-		else
-		{
-			appendStringInfo(
-				source,
-				"static __device__ kern_colmeta pg_%s_typeinfo %s\n"
-				"    = { %s, %d, %d, 0, -1, %u, -1, 0, 0 };\n",
-				type_name, __attr_unused,
-				typeForm->typbyval ? "true" : "false",
-				typealign_get_width(typeForm->typalign),
-				typeForm->typlen,
-				type_oid);
-		}
 		ReleaseSysCache(tup);
 	}
 	appendStringInfoChar(source, '\n');
+
+	if (meet_reggstore)
+		appendStringInfo(
+			source,
+			"/* gstoreIpcHandlePLCUDA */\n"
+			"typedef struct\n"
+			"{\n"
+			"    gstoreIpcHandle h; /* IPChandle of Gstore_Fdw */\n"
+			"    void      *map;    /* mapped device pointer */\n"
+			"} gstoreIpcHandlePLCUDA;\n\n");
 }
 
 /*

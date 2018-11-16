@@ -481,10 +481,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpupreagg.h\"\n");
-	/* PL/CUDA functions */
-	if (extra_flags & DEVKERNEL_NEEDS_PLCUDA)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_plcuda.h\"\n");
 	/* automatically generated portion */
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
 	/* code to be included at the last */
