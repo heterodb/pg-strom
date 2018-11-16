@@ -30,7 +30,7 @@ PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.0.sql
 #
 __STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
-		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o pl_cuda2.o \
+		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o \
 		aggfuncs.o matrix.o float2.o ccache.o \
 		largeobject.o gstore_fdw.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h cuda_filelist

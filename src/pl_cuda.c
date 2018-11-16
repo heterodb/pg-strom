@@ -16,187 +16,210 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
-#include "cuda_plcuda.h"
 
-/*
- * plcudaCodeProperty
- */
-typedef struct plcudaCodeProperty
-{
-	/* kernel requirement */
-	cl_uint		extra_flags;		/* flags to standard includes */
-	/* kernel declarations */
-	char	   *kern_decl;
-	/* kernel prep function */
-	char	   *kern_prep;
-	Oid			fn_prep_kern_blocksz;
-	long		val_prep_kern_blocksz;
-	Oid			fn_prep_num_threads;
-	Size		val_prep_num_threads;
-	Oid			fn_prep_shmem_unitsz;
-	Size		val_prep_shmem_unitsz;
-	Oid			fn_prep_shmem_blocksz;
-	Size		val_prep_shmem_blocksz;
-	/* kernel function */
-	char	   *kern_main;
-	Oid			fn_main_kern_blocksz;
-	long		val_main_kern_blocksz;
-	Oid			fn_main_num_threads;
-	Size		val_main_num_threads;
-	Oid			fn_main_shmem_unitsz;
-	Size		val_main_shmem_unitsz;
-	Oid			fn_main_shmem_blocksz;
-	Size		val_main_shmem_blocksz;
-	/* kernel post function */
-	char	   *kern_post;
-	Oid			fn_post_kern_blocksz;
-	long		val_post_kern_blocksz;
-	Oid			fn_post_num_threads;
-	Size		val_post_num_threads;
-	Oid			fn_post_shmem_unitsz;
-	Size		val_post_shmem_unitsz;
-	Oid			fn_post_shmem_blocksz;
-	Size		val_post_shmem_blocksz;
-	/* device memory size for working buffer */
-	Oid			fn_working_bufsz;
-	long		val_working_bufsz;
-	/* device memory size for result buffer */
-	Oid			fn_results_bufsz;
-	long		val_results_bufsz;
-	/* comprehensive functions */
-	Oid			fn_sanity_check;
-	Oid			fn_cpu_fallback;
-	/* composite type descriptors, if any */
-	List	   *composite_types;
-} plcudaCodeProperty;
-
-/*
- * plcudaTaskState
- */
-typedef struct plcudaTaskState
-{
-	GpuTaskState	gts;		/* dummy */
-	ResourceOwner	owner;
-	dlist_node		chain;
-	kern_plcuda	   *kplcuda_head;
-	CUdeviceptr		last_results_buf;	/* results buffer last used */
-	/* property of the code block */
-	plcudaCodeProperty p;
-	/* property of the PL/CUDA kernel functions */
-	int				kprep_max_blocksz;
-	int				kprep_static_shmsz;
-	int				kprep_dynamic_shmsz;
-	int				kprep_const_memsz;
-	int				kprep_local_memsz;
-	int				kmain_max_blocksz;
-	int				kmain_static_shmsz;
-	int				kmain_dynamic_shmsz;
-	int				kmain_const_memsz;
-	int				kmain_local_memsz;
-	int				kpost_max_blocksz;
-	int				kpost_static_shmsz;
-	int				kpost_dynamic_shmsz;
-	int				kpost_const_memsz;
-	int				kpost_local_memsz;
-} plcudaTaskState;
-
-/*
- * plcudaTask
- */
-typedef struct plcudaTask
-{
-	GpuTask			task;
-	bool			exec_prep_kernel;
-	bool			exec_post_kernel;
-	bool			has_cpu_fallback;
-	CUdeviceptr		m_results_buf;	/* results buffer as unified memory */
-	List		   *gstore_oid_list;	/* OID of GpuStore foreign table */
-	List		   *gstore_devptr_list;	/* CUdeviceptr of GpuStore */
-	List		   *gstore_dindex_list;	/* Preferable dindex if any */
-	kern_plcuda		kern;
-} plcudaTask;
-
-/* static functions */
-static plcudaTaskState *plcuda_exec_begin(HeapTuple protup,
-										  FunctionCallInfo fcinfo);
-static void plcuda_exec_end(plcudaTaskState *plts);
-static int  plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
-static void plcuda_release_task(GpuTask *gtask);
-
-/* SQL functions */
 Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda_function_handler(PG_FUNCTION_ARGS);
-Datum plcuda_function_source(PG_FUNCTION_ARGS);
-Datum plcuda_kernel_max_blocksz(PG_FUNCTION_ARGS);
-Datum plcuda_kernel_static_shmsz(PG_FUNCTION_ARGS);
-Datum plcuda_kernel_dynamic_shmsz(PG_FUNCTION_ARGS);
-Datum plcuda_kernel_const_memsz(PG_FUNCTION_ARGS);
-Datum plcuda_kernel_local_memsz(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_types_by_names(PG_FUNCTION_ARGS);
+Datum pgsql_table_attr_type_by_name(PG_FUNCTION_ARGS);
+Datum pgsql_check_attrs_of_types(PG_FUNCTION_ARGS);
+Datum pgsql_check_attrs_of_type(PG_FUNCTION_ARGS);
+Datum pgsql_check_attr_of_type(PG_FUNCTION_ARGS);
 
-/* Tracker of plcudaState */
-static dlist_head	plcuda_state_list;
-
-/* PL/CUDA function property */
-static int	plcuda_kfunc_max_blocksz    = -1;
-static int	plcuda_kfunc_static_shmsz   = -1;
-static int	plcuda_kfunc_dynamic_shmsz  = -1;
-static int	plcuda_kfunc_const_memsz    = -1;
-static int	plcuda_kfunc_local_memsz    = -1;
-
-Datum
-plcuda_kernel_max_blocksz(PG_FUNCTION_ARGS)
+typedef struct
 {
-	if (plcuda_kfunc_max_blocksz < 0)
-		elog(ERROR, "%s is called out of the PL/CUDA helper context",
-			 format_procedure(fcinfo->flinfo->fn_oid));
-	PG_RETURN_INT32(plcuda_kfunc_max_blocksz);
-}
-PG_FUNCTION_INFO_V1(plcuda_kernel_max_blocksz);
+	const char	   *proname;
+	Oid				proowner;
+	oidvector	   *proargtypes;
+	Oid				prorettype;
+	List		   *all_type_oids;
+	List		   *all_type_names;
+	const char	   *source;
+	int				lineno;
+	StringInfo		curr;
+	StringInfoData	decl;
+	StringInfoData	main;
+	StringInfoData	emsg;
+	FunctionCallInfo fcinfo;
+	MemoryContext	results_memcxt;
+	Oid				fn_sanity_check;
+	int				include_count;
+	List		   *include_func_oids;
+	List		   *link_libs;
+	char			afname[200];	/* argument file name */
+	char			rfname[200];	/* result file name */
+	char		   *prog_args[FUNC_MAX_ARGS];
+} plcuda_code_context;
 
-Datum
-plcuda_kernel_static_shmsz(PG_FUNCTION_ARGS)
-{
-	if (plcuda_kfunc_static_shmsz < 0)
-		elog(ERROR, "%s is called out of the PL/CUDA helper context",
-			 format_procedure(fcinfo->flinfo->fn_oid));
-	PG_RETURN_INT32(plcuda_kfunc_static_shmsz);
-}
-PG_FUNCTION_INFO_V1(plcuda_kernel_static_shmsz);
-
-Datum
-plcuda_kernel_dynamic_shmsz(PG_FUNCTION_ARGS)
-{
-	if (plcuda_kfunc_dynamic_shmsz < 0)
-		elog(ERROR, "%s is called out of the PL/CUDA helper context",
-			 format_procedure(fcinfo->flinfo->fn_oid));
-	PG_RETURN_INT32(plcuda_kfunc_dynamic_shmsz);
-}
-PG_FUNCTION_INFO_V1(plcuda_kernel_dynamic_shmsz);
-
-Datum
-plcuda_kernel_const_memsz(PG_FUNCTION_ARGS)
-{
-	if (plcuda_kfunc_const_memsz < 0)
-		elog(ERROR, "%s is called out of the PL/CUDA helper context",
-             format_procedure(fcinfo->flinfo->fn_oid));
-	PG_RETURN_INT32(plcuda_kfunc_const_memsz);
-}
-PG_FUNCTION_INFO_V1(plcuda_kernel_const_memsz);
-
-Datum
-plcuda_kernel_local_memsz(PG_FUNCTION_ARGS)
-{
-	if (plcuda_kfunc_local_memsz < 0)
-		elog(ERROR, "%s is called out of the PL/CUDA helper context",
-			 format_procedure(fcinfo->flinfo->fn_oid));
-	PG_RETURN_INT32(plcuda_kfunc_local_memsz);
-}
-PG_FUNCTION_INFO_V1(plcuda_kernel_local_memsz);
+static void plcuda_expand_source(plcuda_code_context *con, char *source);
+static bool	plcuda_enable_debug;	/* GUC */
+static const char *__attr_unused = "__attribute__((unused))";
 
 /*
- * plcuda_parse_cmdline
- *
- * It parse the line of '#plcuda_xxx'
+ * get_type_name
+ */
+static inline char *
+get_type_name(Oid type_oid)
+{
+	HeapTuple		tup;
+	Form_pg_type	typeForm;
+	char		   *typeName;
+	char		   *pos;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	typeForm = (Form_pg_type) GETSTRUCT(tup);
+	typeName = pstrdup(NameStr(typeForm->typname));
+	for (pos=typeName; *pos != '\0'; pos++)
+	{
+		if (!isalnum(*pos) && *pos != '_')
+		{
+			typeName = psprintf("pgtype_%u", type_oid);
+			break;
+		}
+	}
+	ReleaseSysCache(tup);
+
+	return typeName;
+}
+
+/*
+ * plcuda_init_code_context
+ */
+static void
+plcuda_init_code_context(plcuda_code_context *con,
+						 HeapTuple protup,
+						 FunctionCallInfo fcinfo,
+						 MemoryContext results_memcxt)
+{
+	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
+	List		   *all_type_oids = NIL;
+	List		   *all_type_names = NIL;
+	ListCell	   *lc1, *lc2;
+	int				i;
+
+	memset(con, 0, sizeof(plcuda_code_context));
+	con->proname		= NameStr(proc->proname);
+	con->proowner		= proc->proowner;
+	con->proargtypes	= &proc->proargtypes;
+	con->prorettype		= proc->prorettype;
+	con->source			= NameStr(proc->proname);
+	con->lineno			= 1;
+	initStringInfo(&con->emsg);
+	con->curr			= NULL;
+	con->fcinfo			= fcinfo;	/* NULL if only validation */
+	con->results_memcxt	= results_memcxt;
+	con->include_count	= 0;
+	con->include_func_oids = NIL;
+
+	/* makes type oid/name list */
+	all_type_oids = list_make1_oid(proc->prorettype);
+	all_type_names = list_make1(get_type_name(proc->prorettype));
+	for (i=0; i < proc->proargtypes.dim1; i++)
+	{
+		Oid		type_oid = proc->proargtypes.values[i];
+		char   *type_name = get_type_name(type_oid);
+
+		forboth (lc1, all_type_oids,
+				 lc2, all_type_names)
+		{
+			if (type_oid == lfirst_oid(lc1))
+				break;
+			if (strcmp(type_name, lfirst(lc2)) == 0)
+			{
+				appendStringInfo(
+					&con->emsg,
+					"\n%s:  Different types but have same name are used: %s",
+					con->source,
+					type_name);
+				break;
+			}
+		}
+		if (!lc1 && !lc2)
+		{
+			all_type_oids = lappend_oid(all_type_oids, type_oid);
+			all_type_names = lappend(all_type_names, type_name);
+		}
+	}
+	con->all_type_oids = all_type_oids;
+	con->all_type_names = all_type_names;
+}
+
+#define EMSG(fmt,...)									\
+	appendStringInfo(&con->emsg, "\n%s:%d  " fmt,		\
+					 con->source, con->lineno, ##__VA_ARGS__)
+
+/*
+ * plcuda_lookup_helper
+ */
+static Oid
+plcuda_lookup_helper(plcuda_code_context *con,
+					 const char *cmd, List *options, Oid result_type)
+{
+	List	   *names = NIL;
+	ListCell   *lc;
+	Oid			func_oid = InvalidOid;
+	Oid			type_oid = InvalidOid;
+	StringInfoData temp;
+
+	if (list_length(options) == 1)
+	{
+		char   *ident = linitial(options);
+
+		names = list_make1(makeString(ident));
+	}
+	else if (list_length(options) == 3)
+	{
+		/* function in a particular schema */
+		char   *nspname = linitial(options);
+		char   *dot = lsecond(options);
+		char   *proname = lthird(options);
+
+		if (strcmp(dot, ".") == 0)
+			names = list_make2(makeString(nspname),
+							   makeString(proname));
+	}
+
+	if (names != NIL)
+	{
+		func_oid = LookupFuncName(names,
+								  con->proargtypes->dim1,
+								  con->proargtypes->values,
+								  true);
+		if (!OidIsValid(func_oid))
+		{
+			EMSG("function %s was not found", NameListToString(names));
+			return InvalidOid;
+		}
+		type_oid = get_func_rettype(func_oid);
+		if (result_type != type_oid)
+		{
+			EMSG("function %s has unexpected result typs: %s, instead of %s",
+				 NameListToString(names),
+				 format_type_be(type_oid),
+				 format_type_be(result_type));
+			return InvalidOid;
+		}
+		if (!pg_proc_ownercheck(func_oid, con->proowner))
+		{
+			EMSG("permission denied on helper function %s",
+				 NameListToString(options));
+			return InvalidOid;
+		}
+		return func_oid;
+	}
+	initStringInfo(&temp);
+	foreach (lc, options)
+		appendStringInfo(&temp, " %s", quote_identifier(lfirst(lc)));
+	EMSG("%s has invalid identifier: %s", cmd, temp.data);
+	pfree(temp.data);
+	return InvalidOid;
+}
+
+/*
+ * plcuda_parse_cmd_options - parses the '#plcuda_xxx' line
  */
 static bool
 plcuda_parse_cmd_options(const char *linebuf, List **p_options)
@@ -270,616 +293,18 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 	return true;
 }
 
-static bool
-plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
-					 Oid *p_func_oid, long *p_size_value)
-{
-	List	   *names;
-
-	if (list_length(options) == 1)
-	{
-		/* a constant value, or a function in search path */
-		char   *ident = linitial(options);
-		char   *pos = ident;
-
-		if (p_size_value)
-		{
-			for (pos = ident; isdigit(*pos); pos++);
-			if (*pos == '\0')
-			{
-				if (p_func_oid)
-					*p_func_oid = InvalidOid;	/* no function */
-				*p_size_value = atol(ident);
-                return true;
-			}
-		}
-		names = list_make1(makeString(ident));
-	}
-	else if (list_length(options) == 3)
-	{
-		/* function in a particular schema */
-		char   *nspname = linitial(options);
-		char   *dot = lsecond(options);
-		char   *proname = lthird(options);
-
-		if (strcmp(dot, ".") != 0)
-			return false;
-
-		names = list_make2(makeString(nspname),
-						   makeString(proname));
-	}
-	else
-		return false;
-
-	if (p_func_oid)
-	{
-		Oid		helper_oid = LookupFuncName(names,
-											arg_types->dim1,
-											arg_types->values,
-											true);
-		if (!OidIsValid(helper_oid))
-			return false;
-		if (result_type != get_func_rettype(helper_oid))
-			return false;
-
-		/* OK, helper function is valid */
-		*p_func_oid = helper_oid;
-		if (p_size_value)
-			*p_size_value = 0;	/* no const value */
-
-		return true;
-	}
-	return false;
-}
-
-static inline char *
-ident_to_cstring(List *ident)
-{
-	StringInfoData	buf;
-	ListCell	   *lc;
-
-	initStringInfo(&buf);
-	foreach (lc, ident)
-	{
-		if (buf.len > 0)
-			appendStringInfoChar(&buf, ' ');
-		appendStringInfo(&buf, "%s", quote_identifier(lfirst(lc)));
-	}
-	return buf.data;
-}
-
 /*
- * MEMO: structure of pl/cuda function source
- *
- * #plcuda_decl (optional)
- *      :  any declaration code
- * #plcuda_end 
- *
- * #plcuda_prep (optional)
- * #plcuda_num_threads (value|function)
- * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_blocksz
- *      :
- * #plcuda_end
- *
- * #plcuda_begin
- * #plcuda_num_threads (value|function)
- * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_blocksz
- *      :
- * #plcuda_end
- *
- * #plcuda_post (optional)
- * #plcuda_num_threads (value|function)
- * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_blocksz
- *      :
- * #plcuda_end
- *
- * (additional options)
- * #plcuda_include "cuda_xxx.h"
- * #plcuda_include <function>
- * #plcuda_results_bufsz {<value>|<function>}     (default: 0)
- * #plcuda_working_bufsz {<value>|<function>}      (default: 0)
- * #plcuda_sanity_check {<function>}             (default: no fallback)
- * #plcuda_cpu_fallback {<function>}             (default: no fallback)
+ * plcuda_code_include
  */
-typedef struct {
-	Oid					proowner;
-	oidvector		   *proargtypes;
-	Oid					prorettype;
-	StringInfo			curr;
-	StringInfoData		decl_src;
-	StringInfoData		prep_src;
-	StringInfoData		main_src;
-	StringInfoData		post_src;
-	StringInfoData		emsg;
-	FunctionCallInfo	fcinfo;
-	bool				not_exec_now;
-	bool				has_decl_block;
-	bool				has_prep_block;
-	bool				has_main_block;
-	bool				has_post_block;
-	bool				has_working_bufsz;
-	bool				has_results_bufsz;
-	bool				has_sanity_check;
-	bool				has_cpu_fallback;
-	List			   *include_func_oids;
-	plcudaCodeProperty	p;
-} plcuda_code_context;
-
 static void
-plcuda_init_code_context(plcuda_code_context *context,
-						 Form_pg_proc procForm,
-						 FunctionCallInfo fcinfo)
+plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include)
 {
-	memset(context, 0, sizeof(plcuda_code_context));
-
-	context->proowner	= procForm->proowner;
-	context->proargtypes= &procForm->proargtypes;
-	context->prorettype	= procForm->prorettype;
-	initStringInfo(&context->decl_src);
-    initStringInfo(&context->prep_src);
-    initStringInfo(&context->main_src);
-    initStringInfo(&context->post_src);
-    initStringInfo(&context->emsg);
-	context->fcinfo = fcinfo;
-	context->not_exec_now = !fcinfo;
-	/* default setting */
-	context->p.extra_flags = DEVKERNEL_NEEDS_PLCUDA;
-	context->p.val_prep_num_threads = 1;
-	context->p.val_main_num_threads = 1;
-	context->p.val_post_num_threads = 1;
-}
-
-static void __plcuda_code_include(plcuda_code_context *con,
-								  Oid fn_extra_include,
-								  const char *source_name, int lineno);
-
-static void
-__plcuda_code_validation(plcuda_code_context *con,
-						 const char *source_name,
-						 char *source)
-{
-	plcudaCodeProperty *prop = &con->p;
-	int			lineno;
-	char	   *line;
-	char	   *saveptr = NULL;
-
-#define EMSG(fmt,...)									\
-	appendStringInfo(&con->emsg, "\n%s%s%u: " fmt,		\
-					 !source_name ? "" : source_name,	\
-					 !source_name ? "" : ":",			\
-					 lineno, ##__VA_ARGS__)
-#define NOTE(fmt,...)							\
-	elog(NOTICE, "%s%s%u: " fmt,				\
-		 !source_name ? "" : source_name,		\
-		 !source_name ? "" : ":",				\
-		 lineno, ##__VA_ARGS__)
-
-#define HELPER_PRIV_CHECK(func_oid)				\
-	(!OidIsValid(func_oid) ||					\
-	 con->not_exec_now ||						\
-	 pg_proc_ownercheck((func_oid), con->proowner))
-
-	for (line = strtok_r(source, "\n", &saveptr), lineno=1;
-		 line != NULL;
-		 line = strtok_r(NULL, "\n", &saveptr), lineno++)
-	{
-		const char *cmd;
-		const char *pos;
-		char	   *end;
-		List	   *options;
-
-		/* Trimming of whitespace in the tail */
-		/* NOTE: DOS/Windows uses '\r\n' for line-feed */
-		end = line + strlen(line) - 1;
-		while (line <= end && isspace(*end))
-			*end-- = '\0';
-
-		/* put a non pl/cuda command line*/
-		if (strncmp(line, "#plcuda_", 8) != 0)
-		{
-			if (con->curr != NULL)
-				appendStringInfo(con->curr, "%s\n", line);
-			else
-			{
-				/* ignore if empty line */
-				for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
-
-				if (*pos != '\0')
-					EMSG("code is out of valid block:\n%s", line);
-			}
-		}
-		else
-		{
-			/* pick up command name */
-			for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
-			cmd = pnstrdup(line, pos - line);
-			/* parse pl/cuda command options */
-			if (!plcuda_parse_cmd_options(pos, &options))
-			{
-				EMSG("pl/cuda parse error:\n%s", line);
-				continue;
-			}
-
-			if (strcmp(cmd, "#plcuda_decl") == 0)
-			{
-				if (con->has_decl_block)
-					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) > 0)
-					EMSG("syntax error:\n  %s", line);
-				else
-				{
-					con->curr = &con->decl_src;
-					con->has_decl_block = true;
-				}
-			}
-			else if (strcmp(cmd, "#plcuda_prep") == 0)
-			{
-				if (con->has_prep_block)
-					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) > 0)
-					EMSG("syntax error:\n  %s", line);
-				else
-				{
-					con->curr = &con->prep_src;
-					con->has_prep_block = true;
-				}
-			}
-			else if (strcmp(cmd, "#plcuda_begin") == 0)
-			{
-				if (con->has_main_block)
-					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) > 0)
-					EMSG("syntax error:\n  %s", line);
-				else
-				{
-					con->curr = &con->main_src;
-					con->has_main_block = true;
-				}
-			}
-			else if (strcmp(cmd, "#plcuda_post") == 0)
-			{
-				if (con->has_post_block)
-					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) > 0)
-					EMSG("syntax error:\n  %s\n", line);
-				else
-				{
-					con->curr = &con->post_src;
-					con->has_post_block = true;
-				}
-			}
-			else if (strcmp(cmd, "#plcuda_end") == 0)
-			{
-				if (!con->curr)
-					EMSG("%s was used out of code block", cmd);
-				else
-					con->curr = NULL;
-			}
-			else if (strcmp(cmd, "#plcuda_num_threads") == 0)
-			{
-				Oid		fn_num_threads;
-				long	val_num_threads;
-
-				if (!con->curr)
-					EMSG("%s appeared outside of code block", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &fn_num_threads,
-											  &val_num_threads))
-				{
-					if (!HELPER_PRIV_CHECK(fn_num_threads))
-					{
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-					}
-					else if (con->curr == &con->prep_src)
-					{
-						prop->fn_prep_num_threads = fn_num_threads;
-						prop->val_prep_num_threads = val_num_threads;
-					}
-					else if (con->curr == &con->main_src)
-					{
-						prop->fn_main_num_threads = fn_num_threads;
-						prop->val_main_num_threads = val_num_threads;
-					}
-					else if (con->curr == &con->post_src)
-					{
-						prop->fn_post_num_threads = fn_num_threads;
-						prop->val_post_num_threads = val_num_threads;
-					}
-					else
-						EMSG("cannot use \"%s\" in this code block", cmd);
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_shmem_unitsz") == 0)
-			{
-				Oid		fn_shmem_unitsz;
-				long	val_shmem_unitsz;
-
-				if (!con->curr)
-					EMSG("%s appeared outside of code block", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &fn_shmem_unitsz,
-											  &val_shmem_unitsz))
-				{
-					if (!HELPER_PRIV_CHECK(fn_shmem_unitsz))
-					{
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-					}
-					else if (con->curr == &con->prep_src)
-					{
-						prop->fn_prep_shmem_unitsz = fn_shmem_unitsz;
-						prop->val_prep_shmem_unitsz = val_shmem_unitsz;
-					}
-					else if (con->curr == &con->main_src)
-					{
-						prop->fn_main_shmem_unitsz = fn_shmem_unitsz;
-						prop->val_main_shmem_unitsz = val_shmem_unitsz;
-					}
-					else if (con->curr == &con->post_src)
-					{
-						prop->fn_post_shmem_unitsz = fn_shmem_unitsz;
-						prop->val_post_shmem_unitsz = val_shmem_unitsz;
-					}
-					else
-						EMSG("cannot use \"%s\" in this code block", cmd);
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_shmem_blocksz") == 0)
-			{
-				Oid		fn_shmem_blocksz;
-				long	val_shmem_blocksz;
-
-				if (!con->curr)
-					EMSG("%s appeared outside of code block", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &fn_shmem_blocksz,
-											  &val_shmem_blocksz))
-				{
-					if (!HELPER_PRIV_CHECK(fn_shmem_blocksz))
-					{
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-					}
-					else if (con->curr == &con->prep_src)
-					{
-						prop->fn_prep_shmem_blocksz = fn_shmem_blocksz;
-						prop->val_prep_shmem_blocksz = val_shmem_blocksz;
-					}
-					else if (con->curr == &con->main_src)
-					{
-						prop->fn_main_shmem_blocksz = fn_shmem_blocksz;
-						prop->val_main_shmem_blocksz = val_shmem_blocksz;
-					}
-					else if (con->curr == &con->post_src)
-					{
-						prop->fn_post_shmem_blocksz = fn_shmem_blocksz;
-						prop->val_post_shmem_blocksz = val_shmem_blocksz;
-					}
-					else
-						EMSG("cannot use \"%s\" in this code block", cmd);
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_kernel_blocksz") == 0)
-			{
-				Oid		fn_kern_blocksz;
-				long	val_kern_blocksz;
-
-				if (!con->curr)
-					EMSG("%s appeared outside of code block", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &fn_kern_blocksz,
-											  &val_kern_blocksz))
-				{
-					if (!HELPER_PRIV_CHECK(fn_kern_blocksz))
-					{
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-					}
-					else if (con->curr == &con->prep_src)
-					{
-						prop->fn_prep_kern_blocksz = fn_kern_blocksz;
-						prop->val_prep_kern_blocksz = val_kern_blocksz;
-					}
-					else if (con->curr == &con->main_src)
-					{
-						prop->fn_main_kern_blocksz = fn_kern_blocksz;
-						prop->val_main_kern_blocksz = val_kern_blocksz;
-					}
-					else if (con->curr == &con->post_src)
-					{
-						prop->fn_post_kern_blocksz = fn_kern_blocksz;
-						prop->val_post_kern_blocksz = val_kern_blocksz;
-					}
-					else
-						EMSG("cannot use \"%s\" in this code block", cmd);
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_working_bufsz") == 0)
-			{
-				if (con->has_working_bufsz)
-					EMSG("%s appeared twice", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &prop->fn_working_bufsz,
-											  &prop->val_working_bufsz))
-				{
-					if (HELPER_PRIV_CHECK(prop->fn_working_bufsz))
-						con->has_working_bufsz = true;
-					else
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-                         ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_results_bufsz") == 0)
-			{
-				if (con->has_results_bufsz)
-					EMSG("%s appeared twice", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, INT8OID,
-											  &prop->fn_results_bufsz,
-											  &prop->val_results_bufsz))
-				{
-					if (HELPER_PRIV_CHECK(prop->fn_results_bufsz))
-						con->has_results_bufsz = true;
-					else
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid value or function",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_include") == 0)
-			{
-				cl_uint		extra_flags = 0;
-				Oid			fn_extra_include = InvalidOid;
-
-				/* built-in include? */
-				if (list_length(options) == 1)
-				{
-					const char *target = linitial(options);
-
-					if (strcmp(target, "cuda_dynpara.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
-					else if (strcmp(target, "cuda_matrix.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_MATRIX;
-					else if (strcmp(target, "cuda_timelib.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
-					else if (strcmp(target, "cuda_textlib.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
-					else if (strcmp(target, "cuda_numeric.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
-					else if (strcmp(target, "cuda_mathlib.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
-					else if (strcmp(target, "cuda_misc.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_MISC;
-					else if (strcmp(target, "cuda_curand.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_CURAND;
-				}
-				if (extra_flags != 0)
-					prop->extra_flags |= extra_flags;
-				else if (!con->curr)
-					EMSG("#plcuda_include must appear in code block:\n%s",
-						 line);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes,
-											  TEXTOID,
-											  &fn_extra_include,
-											  NULL))
-				{
-					if (HELPER_PRIV_CHECK(fn_extra_include))
-						__plcuda_code_include(con, fn_extra_include,
-											  source_name, lineno);
-					else
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid function name",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
-			{
-				if (con->has_sanity_check)
-					EMSG("%s appeared twice", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes, BOOLOID,
-											  &prop->fn_sanity_check,
-											  NULL))
-				{
-					if (HELPER_PRIV_CHECK(prop->fn_sanity_check))
-						con->has_sanity_check = true;
-					else
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid function name",
-						 ident_to_cstring(options));
-			}
-			else if (strcmp(cmd, "#plcuda_cpu_fallback") == 0)
-			{
-				if (con->has_cpu_fallback)
-					EMSG("%s appeared twice", cmd);
-				else if (plcuda_lookup_helper(options,
-											  con->proargtypes,
-											  con->prorettype,
-											  &prop->fn_cpu_fallback,
-											  NULL))
-				{
-					if (HELPER_PRIV_CHECK(prop->fn_cpu_fallback))
-						con->has_cpu_fallback = true;
-					else
-						EMSG("permission denied on helper function %s",
-							 NameListToString(options));
-				}
-				else if (con->not_exec_now)
-					NOTE("\"%s\" may be a function but not declared yet",
-						 ident_to_cstring(options));
-				else
-					EMSG("\"%s\" was not a valid function name",
-						 ident_to_cstring(options));
-			}
-			else
-				EMSG("unknown command: %s", line);
-		}
-	}
-}
-
-static void
-__plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include,
-					  const char *source_name, int lineno)
-{
-	ListCell   *lc;
-	Datum		src;
-	const char *func_name = get_func_name(fn_extra_include);
+	const char	   *func_name = get_func_name(fn_extra_include);
+	FmgrInfo		flinfo;
+	FunctionCallInfoData fcinfo;
+	FunctionCallInfo __fcinfo = con->fcinfo;
+	Datum			value;
+	ListCell	   *lc;
 
 	/* prevent infinite inclusion */
 	foreach (lc, con->include_func_oids)
@@ -891,805 +316,511 @@ __plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include,
 		}
 	}
 
-	if (con->fcinfo)
+	/* see OidFunctionCallXX */
+	Assert(__fcinfo != NULL);
+	fmgr_info(fn_extra_include, &flinfo);
+	InitFunctionCallInfoData(fcinfo,
+							 &flinfo,
+							 __fcinfo->nargs,
+							 __fcinfo->fncollation,
+							 NULL,
+							 NULL);
+	memcpy(&fcinfo.arg, __fcinfo->arg,
+		   __fcinfo->nargs * sizeof(Datum));
+	memcpy(&fcinfo.argnull, __fcinfo->argnull,
+		   __fcinfo->nargs * sizeof(bool));
+	value = FunctionCallInvoke(&fcinfo);
+	if (fcinfo.isnull)
 	{
-		FmgrInfo	flinfo;
-		FunctionCallInfoData fcinfo;
-		FunctionCallInfo __fcinfo = con->fcinfo;
+		EMSG("function %s returned NULL", format_procedure(fn_extra_include));
+	}
+	else
+	{
+		const char *source_saved = con->source;
+		int			lineno_saved = con->lineno;
 
 		appendStringInfo(con->curr,
 						 "/* ------ BEGIN %s ------ */\n", func_name);
 		con->include_func_oids = lappend_oid(con->include_func_oids,
 											 fn_extra_include);
-
-		/* see OidFunctionCallXX */
-		fmgr_info(fn_extra_include, &flinfo);
-		InitFunctionCallInfoData(fcinfo,
-								 &flinfo,
-								 __fcinfo->nargs,
-								 __fcinfo->fncollation,
-								 NULL,
-								 NULL);
-		memcpy(&fcinfo.arg, __fcinfo->arg,
-			   __fcinfo->nargs * sizeof(Datum));
-		memcpy(&fcinfo.argnull, __fcinfo->argnull,
-			   __fcinfo->nargs * sizeof(bool));
-		src = FunctionCallInvoke(&fcinfo);
-		if (fcinfo.isnull)
-			elog(ERROR, "function %u returned NULL", fn_extra_include);
-
-		/* recursive walks of the included source */
-		__plcuda_code_validation(con, func_name,
-								 text_to_cstring(DatumGetTextP(src)));
-
-		con->include_func_oids = list_delete_oid(con->include_func_oids,
-												 fn_extra_include);
+		con->source = func_name;
+		con->lineno = 1;
+		plcuda_expand_source(con, TextDatumGetCString(value));
+		con->lineno = lineno_saved;
+		con->source = source_saved;
+		con->include_func_oids =
+			list_truncate(con->include_func_oids,
+						  con->include_func_oids->length - 1);
 		appendStringInfo(con->curr,
-						 "/* ------ END %s ------ */\n", func_name);
+						 "/* ------ END %s ------ */\n",
+						 func_name);
 	}
-}
-#undef NMSG
-#undef EMSG
-#undef HELPER_PRIV_CHECK
-
-static void
-plcuda_code_validation(plcudaCodeProperty *prop,
-					   HeapTuple proc_tuple,
-					   FunctionCallInfo fcinfo)
-{
-	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(proc_tuple);
-	plcuda_code_context	context;
-	devtype_info   *dtype;
-	Datum			prosrc;
-	bool			isnull;
-	int				i;
-
-	plcuda_init_code_context(&context, procForm, fcinfo);
-	/* check result type */
-	dtype = pgstrom_devtype_lookup(procForm->prorettype);
-	if (dtype)
-		context.p.extra_flags |= dtype->type_flags;
-	else if (get_typlen(procForm->prorettype) == -1)
-	{
-		Assert(!get_typbyval(procForm->prorettype));
-		if (!fcinfo)
-			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
-	}
-	else
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Result type \"%s\" is not device executable",
-						format_type_be(procForm->prorettype))));
-
-	/* check argument types */
-	Assert(procForm->pronargs == procForm->proargtypes.dim1);
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid		argtype_oid = context.proargtypes->values[i];
-
-		if (argtype_oid == REGGSTOREOID)
-			continue;	/* OK, only for PL/CUDA argument */
-
-		dtype = pgstrom_devtype_lookup(argtype_oid);
-		if (dtype)
-			context.p.extra_flags |= dtype->type_flags;
-		else if (get_typlen(argtype_oid) == -1)
-		{
-			Assert(!get_typbyval(argtype_oid));
-			if (!fcinfo)
-				elog(NOTICE, "Unknown varlena argument%d - PL/CUDA must be responsible to interpretation of the supplied data format", i+1);
-		}
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("Argument type \"%s\" is not device executable",
-							format_type_be(argtype_oid))));
-	}
-	/* Fetch CUDA code block */
-	prosrc = SysCacheGetAttr(PROCOID, proc_tuple,
-							 Anum_pg_proc_prosrc,
-							 &isnull);
-	if (isnull)
-		elog(ERROR, "Bug? no program source was supplied");
-	/* walk on the pl/cuda source */
-	__plcuda_code_validation(&context, NULL,
-							 TextDatumGetCString(prosrc));
-	/* raise syntax error if any */
-	if (context.curr != NULL)
-		appendStringInfo(&context.emsg, "\n???: Code block was not closed");
-	if (!context.has_main_block)
-		appendStringInfo(&context.emsg, "\n???: No main code block");
-	if (context.emsg.len > 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("pl/cuda function syntax error\n%s",
-						context.emsg.data)));
-
-	memcpy(prop, &context.p, sizeof(plcudaCodeProperty));
-	if (context.has_decl_block)
-		prop->kern_decl = context.decl_src.data;
-
-	if (context.has_prep_block)
-		prop->kern_prep = context.prep_src.data;
-	else
-		pfree(context.prep_src.data);
-
-	prop->kern_main = context.main_src.data;
-	if (context.has_post_block)
-		prop->kern_post = context.post_src.data;
-	else
-		pfree(context.post_src.data);
-
-	pfree(context.emsg.data);
 }
 
 /*
- * plcuda_codegen
- *
- *
- *
+ * plcuda_expand_source
  */
 static void
-plcuda_codegen_part(StringInfo kern,
-					const char *suffix,
-					const char *users_code,
-					bool kernel_maxthreads,
-					Form_pg_proc procForm,
-					const char *last_suffix)
+plcuda_expand_source(plcuda_code_context *con, char *source)
 {
-	devtype_info   *dtype;
-	const char	   *retval_typname;
-	int				retval_typlen;
-	int		i;
+	char   *source_pos;
+	char   *line, *pos;
+	bool	had_code_out_of_block_error = false;
 
-	appendStringInfo(
-		kern,
-		"STATIC_INLINE(void)\n"
-		"__plcuda_%s_kernel(kern_plcuda *kplcuda,\n"
-		"                   void *workbuf,\n"
-		"                   void *results,\n"
-		"                   kern_context *kcxt)\n"
-		"{\n",
-		suffix);
+	for (line = strtok_r(source, "\n\r", &source_pos), con->lineno=1;
+		 line != NULL;
+		 line = strtok_r(NULL, "\n\r", &source_pos), con->lineno++)
+	{
+		char   *end = line + strlen(line) - 1;
+		char   *cmd;
+		List   *options;
 
-	/* declaration of 'retval' variable */
-	dtype = pgstrom_devtype_lookup(procForm->prorettype);
-	if (dtype)
-	{
-		retval_typname = dtype->type_name;
-		retval_typlen  = dtype->type_length;
-	}
-	else if (get_typlen(procForm->prorettype) == -1)
-	{
-		/* NOTE: As long as PL/CUDA function is responsible to the data
-		 * format of varlena result type, we can allow non-device executable
-		 * data type as function result.
-		 * Its primary target is composite data type, but not limited to.
-		 */
-		retval_typname = "varlena";
-		retval_typlen  = -1;
-	}
-	else
-	{
-		elog(ERROR, "cache lookup failed for type '%s'",
-			 format_type_be(procForm->prorettype));
-	}
-	appendStringInfo(
-		kern,
-		"  pg_%s_t *retval __attribute__ ((unused));\n",
-		retval_typname);
+		/* trimming the whitespace in the tail */
+		end = line + strlen(line) - 1;
+		while (line <= end && isspace(*end))
+			*end-- = '\0';
 
-	/* declaration of argument variables */
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid			type_oid = procForm->proargtypes.values[i];
-		const char *arg_typename;
-
-		/* special case if reggstore type */
-		if (type_oid == REGGSTOREOID)
+		if (strncmp(line, "#plcuda_", 8) != 0)
 		{
-			appendStringInfo(
-				kern,
-				"  kern_reggstore_t arg%u __attribute__((unused));\n",
-				i+1);
+			if (con->curr)
+				appendStringInfo(con->curr, "%s\n", line);
+			else if (!had_code_out_of_block_error)
+			{
+				EMSG("code out of valid blocks");
+				had_code_out_of_block_error = true;
+			}
+			continue;
+		}
+		/* pick up '#plcuda_' command line */
+		for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
+		cmd = pnstrdup(line, pos - line);
+		if (!plcuda_parse_cmd_options(pos, &options))
+		{
+			EMSG("pl/cuda command parse error:\n%s", line);
 			continue;
 		}
 
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (dtype)
-			arg_typename = dtype->type_name;
-		else if (get_typlen(type_oid) ==  -1)
-			arg_typename = "varlena";
-		else
-			elog(ERROR, "cache lookup failed for type '%s'",
-				 format_type_be(type_oid));
-
-		appendStringInfo(
-			kern,
-			"  pg_%s_t arg%u __attribute__((unused));\n",
-			arg_typename, i+1);
-	}
-
-	appendStringInfo(
-		kern,
-		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
-		"  retval = (pg_%s_t *)kplcuda->__retval;\n", retval_typname);
-	if (retval_typlen < 0)
-		appendStringInfoString(
-			kern,
-			"  assert(retval->isnull ||\n"
-			"         (void *)retval->value == results ||\n"
-			"         (void *)retval->value == kplcuda->__vl_buffer);\n");
-
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid			type_oid = procForm->proargtypes.values[i];
-		const char *arg_typename;
-
-		/* special case if reggstore type */
-		if (type_oid == REGGSTOREOID)
+		if (strcmp(cmd, "#plcuda_decl") == 0)
 		{
-			appendStringInfo(
-				kern,
-				"  arg%u = pg_reggstore_param(kcxt,%d);\n",
-				i+1, i);
-			continue;
+			if (con->decl.data != NULL)
+				EMSG("%s appeared twice", cmd);
+			else if (list_length(options) > 0)
+				EMSG("%s cannot takes options", cmd);
+			else
+			{
+				initStringInfo(&con->decl);
+				con->curr = &con->decl;
+				had_code_out_of_block_error = false;
+			}
 		}
+		else if (strcmp(cmd, "#plcuda_begin") == 0)
+		{
+			if (con->main.data != NULL)
+				EMSG("%s appeared twice", cmd);
+			else if (list_length(options) > 0)
+				EMSG("%s cannot takes options", cmd);
+			else
+			{
+				initStringInfo(&con->main);
+				con->curr = &con->main;
+				had_code_out_of_block_error = false;
+			}
+		}
+		else if (strcmp(cmd, "#plcuda_end") == 0)
+		{
+			if (con->curr != &con->decl &&
+				con->curr != &con->main)
+				EMSG("%s is used out of code block", cmd);
+			else
+				con->curr = NULL;
+		}
+		else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
+		{
+			Oid		func_oid = plcuda_lookup_helper(con, cmd, options,
+													BOOLOID);
+			if (OidIsValid(con->fn_sanity_check))
+				EMSG("%s appeared twice", cmd);
+			else
+				con->fn_sanity_check = func_oid;
+		}
+		else if (strcmp(cmd, "#plcuda_include") == 0)
+		{
+			Oid		func_oid = plcuda_lookup_helper(con, cmd, options,
+													TEXTOID);
+			con->include_count++;
+			if (OidIsValid(func_oid) && con->fcinfo)
+				plcuda_code_include(con, func_oid);
+		}
+		else if (strcmp(cmd, "#plcuda_library") == 0)
+		{
+			if (list_length(options) != 1)
+				EMSG("syntax error: %s", cmd);
+			else
+			{
+				char	   *library = linitial(options);
+				ListCell   *lc;
 
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (dtype)
-			arg_typename = dtype->type_name;
-		else if (get_typlen(type_oid) ==  -1)
-			arg_typename = "varlena";
+				foreach (lc, con->link_libs)
+				{
+					if (strcmp(library, lfirst(lc)) == 0)
+						break;
+				}
+				if (!lc)
+					con->link_libs = lappend(con->link_libs, library);
+			}
+		}
 		else
-			elog(ERROR, "cache lookup failed for type '%s'",
-				 format_type_be(type_oid));
-		appendStringInfo(
-			kern,
-			"  arg%u = pg_%s_param(kcxt,%d);\n",
-			i+1, arg_typename, i);
+		{
+			EMSG("unknown command: %s", cmd);
+		}
 	}
-
-	appendStringInfo(
-		kern,
-		"\n"
-		"  /* ---- code by pl/cuda function ---- */\n"
-		"%s"
-		"  /* ---- code by pl/cuda function ---- */\n"
-		"}\n\n",
-		users_code);
-
-	appendStringInfo(
-		kern,
-		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_%s_kernel_entrypoint(kern_plcuda *kplcuda,\n"
-		"            void *workbuf,\n"
-		"            void *results)\n"
-		"{\n"
-		"  kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);\n"
-		"  kern_context kcxt;\n"
-		"\n"
-		"  assert(kplcuda->nargs <= kparams->nparams);\n",
-		kernel_maxthreads ? "_MAXTHREADS" : "",
-		suffix);
-
-	if (last_suffix)
-		appendStringInfo(
-			kern,
-			"  if (kplcuda->kerror_%s.errcode != StromError_Success)\n"
-			"    kcxt.e = kplcuda->kerror_%s;\n"
-			"  else\n"
-			"  {\n"
-			"    INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,kparams);\n"
-			"    __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n"
-			"  }\n",
-			last_suffix,
-			last_suffix,
-			suffix,
-			suffix);
-	else
-		appendStringInfo(
-			kern,
-			"  INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,kparams);\n"
-			"  __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n",
-			suffix,
-			suffix);
-
-	appendStringInfo(
-		kern,
-		"  kern_writeback_error_status(&kplcuda->kerror_%s, &kcxt.e);\n"
-		"}\n\n",
-		suffix);
 }
 
+/*
+ * plcuda_add_extra_typeinfo - put referenced type declaration for convenient
+ */
 static void
-plcuda_codegen_composite_typedesc(StringInfo kern,
-								  Form_pg_proc procForm,
-								  plcudaCodeProperty *prop)
+__add_extra_rowtype_info(StringInfo source,
+						 char *type_name, Oid type_relid)
 {
-	ListCell   *lc;
-	cl_int		pindex = procForm->pronargs;
-
-	if (prop->composite_types == NIL)
-		return;
-	appendStringInfoString(
-		kern,
-		"STATIC_FUNCTION(pg_composite_typedesc *)\n"
-		"pg_lookup_composite_typedesc(kern_parambuf *kparams, cl_uint type_oid)\n"
-		"{\n"
-		"  pg_composite_typedesc *ctdesc = NULL;\n"
-		"\n"
-		"  switch (type_oid)\n"
-		"  {\n");
-	foreach (lc, prop->composite_types)
-	{
-		pg_composite_typedesc *ctdesc = lfirst(lc);
-		appendStringInfo(
-			kern,
-			"    case %d:\n"
-			"      ctdesc = (pg_composite_typedesc *)kparam_get_value(kparams, %d);\n"
-			"      break;\n",
-			ctdesc->type_oid,
-			pindex++);
-	}
-	appendStringInfoString(
-		kern,
-		"    default:\n"
-		"      /* not found */\n"
-		"      break;\n"
-		"  }\n"
-		"  return ctdesc;\n"
-		"}\n\n");
-}
-
-static char *
-plcuda_codegen(Form_pg_proc procForm, plcudaCodeProperty *prop)
-{
-	StringInfoData	kern;
-	const char	   *last_stage = NULL;
-
-	initStringInfo(&kern);
-
-	/* access function for composite types */
-	plcuda_codegen_composite_typedesc(&kern, procForm, prop);
-	/* misc declarations */
-	if (prop->kern_decl)
-		appendStringInfo(&kern, "%s\n", prop->kern_decl);
-	if (prop->kern_prep)
-	{
-		plcuda_codegen_part(&kern, "prep",
-							prop->kern_prep,
-							(OidIsValid(prop->fn_prep_kern_blocksz) ||
-							 prop->val_prep_kern_blocksz > 0),
-							procForm,
-							last_stage);
-		last_stage = "prep";
-	}
-	if (prop->kern_main)
-	{
-		plcuda_codegen_part(&kern, "main",
-							prop->kern_main,
-							(OidIsValid(prop->fn_main_kern_blocksz) ||
-							 prop->val_main_kern_blocksz > 0),
-							procForm,
-							last_stage);
-		last_stage = "main";
-	}
-	if (prop->kern_post)
-	{
-		plcuda_codegen_part(&kern, "post",
-							prop->kern_post,
-							(OidIsValid(prop->fn_post_kern_blocksz) ||
-							 prop->val_post_kern_blocksz > 0),
-							procForm,
-							last_stage);
-		last_stage = "post";
-	}
-	return kern.data;
-}
-
-static void
-plcuda_cleanup_resources(ResourceReleasePhase phase,
-						 bool isCommit,
-						 bool isTopLevel,
-						 void *private)
-{
-	dlist_mutable_iter iter;
-
-	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
-		return;
-
-	dlist_foreach_modify(iter, &plcuda_state_list)
-	{
-		plcudaTaskState *plts = (plcudaTaskState *)
-			dlist_container(plcudaTaskState, chain, iter.cur);
-		if (plts->owner == CurrentResourceOwner)
-			plcuda_exec_end(plts);
-	}
-}
-
-static void
-__setup_composite_kern_colmeta(HeapTuple typtup, plcudaCodeProperty *p)
-{
-	Form_pg_type	typeForm = (Form_pg_type) GETSTRUCT(typtup);
-	Oid				type_oid = HeapTupleGetOid(typtup);
-	Oid				type_relid = typeForm->typrelid;
-	List		   *composite_subtypes = NIL;
-	ListCell	   *lc;
-	HeapTuple		tp;
-	Form_pg_class	classForm;
+	HeapTuple		reltup;
+	HeapTuple		atttup;
+	Form_pg_class	relForm;
 	Form_pg_attribute attForm;
-	cl_int			j, nattrs;
-	size_t			vl_len;
-	pg_composite_typedesc *ctdesc;
+	AttrNumber		anum;
+	const char	   *suffix;
 
-	/* check duplication */
-	foreach (lc, p->composite_types)
-	{
-		ctdesc = lfirst(lc);
-		if (ctdesc->type_oid == type_oid)
-			return;		/* already built */
-	}
-
-	/* build a pg_composite_typedesc */
-	Assert(OidIsValid(type_relid));
-	tp = SearchSysCache1(RELOID, ObjectIdGetDatum(type_relid));
-	if (!HeapTupleIsValid(tp))
+	reltup = SearchSysCache1(RELOID, ObjectIdGetDatum(type_relid));
+	if (!HeapTupleIsValid(reltup))
 		elog(ERROR, "cache lookup failed for relation %u", type_relid);
-	classForm = (Form_pg_class) GETSTRUCT(tp);
+	relForm = (Form_pg_class) GETSTRUCT(reltup);
+	if (relForm->relkind == RELKIND_FOREIGN_TABLE)
+		suffix = "gsfdwinfo";
+	else
+		suffix = "typeinfo";
 
-	Assert(classForm->relkind == RELKIND_COMPOSITE_TYPE &&
-		   classForm->reltype == type_oid);
-	nattrs = classForm->relnatts;
-	ReleaseSysCache(tp);
+	appendStringInfo(
+		source,
+		"static __device__ kern_colmeta pg_%s_%s[] %s = {\n",
+		type_name, suffix, __attr_unused);
 
-	vl_len = offsetof(pg_composite_typedesc, colmeta[nattrs]);
-	ctdesc = palloc0(vl_len);
-	ctdesc->type_oid = type_oid;
-	ctdesc->nattrs = nattrs;
-	for (j=0; j < nattrs; j++)
+	for (anum=1; anum <= relForm->relnatts; anum++)
 	{
-		kern_colmeta   *cmeta = &ctdesc->colmeta[j];
-
-		tp = SearchSysCache2(ATTNUM,
-							 ObjectIdGetDatum(type_relid),
-							 Int16GetDatum(j+1));
-		if (!HeapTupleIsValid(tp))
+		atttup = SearchSysCache2(ATTNUM,
+								 ObjectIdGetDatum(type_relid),
+								 Int16GetDatum(anum));
+		if (!HeapTupleIsValid(atttup))
 			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-				 j, type_relid);
-		attForm = (Form_pg_attribute) GETSTRUCT(tp);
-
-		cmeta->attbyval = attForm->attbyval;
-		cmeta->attalign = typealign_get_width(attForm->attalign);
-		cmeta->attlen = attForm->attlen;
-		cmeta->attnum = attForm->attnum;
-		cmeta->attcacheoff = -1;
-		cmeta->atttypid = attForm->atttypid;
-		cmeta->atttypmod = attForm->atttypmod;
-		cmeta->va_offset = 0;
-		cmeta->va_length = 0;
-
-		if (get_typtype(attForm->atttypid) == TYPTYPE_COMPOSITE)
-			composite_subtypes = list_append_unique_oid(composite_subtypes,
-														attForm->atttypid);
-		ReleaseSysCache(tp);
+				 anum, type_relid);
+		attForm = (Form_pg_attribute) GETSTRUCT(atttup);
+		appendStringInfo(
+			source,
+			"    { %s, %d, %d, %d, %d, %u, %d, 0, 0 },\n",
+			attForm->attbyval ? "true" : "false",
+			typealign_get_width(attForm->attalign),
+			attForm->attlen,
+			attForm->attnum,
+			attForm->attcacheoff,
+			attForm->atttypid,
+			attForm->atttypmod);
+		ReleaseSysCache(atttup);
 	}
-	SET_VARSIZE(ctdesc, vl_len);
+	ReleaseSysCache(reltup);
 
-	p->composite_types = lappend(p->composite_types, ctdesc);
-
-	/* dive into sub-types if any more composite types */
-	foreach (lc, composite_subtypes)
-	{
-		Oid		subtype_oid = lfirst_oid(lc);
-
-		tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(subtype_oid));
-		if (!HeapTupleIsValid(tp))
-			elog(ERROR, "cache lookup failed for type %u", subtype_oid);
-		__setup_composite_kern_colmeta(tp, p);
-		ReleaseSysCache(tp);
-	}
-	list_free(composite_subtypes);
+	appendStringInfo(
+		source,
+		"};\n");
 }
 
-static kern_colmeta
-__setup_kern_colmeta(Oid type_oid, int attnum, plcudaCodeProperty *p)
+static void
+plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 {
-	HeapTuple		tuple;
-	Form_pg_type	typeForm;
-	kern_colmeta	result;
+	FunctionCallInfo fcinfo = con->fcinfo;
+	ListCell   *lc1, *lc2;
+	int			i;
+	bool		meet_gstore = false;
 
-	/* special case handling for reggstore if PL/CUDA used */
+	appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
+	pgstrom_codegen_typeoid_declarations(source);
+	appendStringInfo(source, "\n/* ---- PG Type Properties ---- */\n");
+	forboth (lc1, con->all_type_oids,
+			 lc2, con->all_type_names)
+	{
+		Oid				type_oid = lfirst_oid(lc1);
+		char		   *type_name = lfirst(lc2);
+		HeapTuple		tup;
+		Form_pg_type	typeForm;
+
+		tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for type %u", type_oid);
+		typeForm = (Form_pg_type) GETSTRUCT(tup);
+		if (typeForm->typtype == TYPTYPE_COMPOSITE)
+		{
+			__add_extra_rowtype_info(source, type_name,
+									 typeForm->typrelid);
+		}
+		else
+		{
+			appendStringInfo(
+				source,
+				"static __device__ kern_colmeta pg_%s_typeinfo %s\n"
+				"    = { %s, %d, %d, 0, -1, %u, -1, 0, 0 };\n",
+				type_name, __attr_unused,
+				typeForm->typbyval ? "true" : "false",
+				typealign_get_width(typeForm->typalign),
+				typeForm->typlen,
+				type_oid);
+		}
+		ReleaseSysCache(tup);
+	}
+
+	/* Gstore_fdw */
+	for (i=0; i < con->proargtypes->dim1; i++)
+	{
+		Oid		type_oid = con->proargtypes->values[i];
+		Oid		ftable_oid;
+		char   *ftable_name;
+		char   *pos;
+
+		if (type_oid != REGGSTOREOID)
+			continue;
+		if (fcinfo->argnull[i])
+			continue;
+		if (!meet_gstore)
+			appendStringInfo(source, "\n/* ---- Gstore_Fdw schema ---- */\n");
+		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
+		ftable_name = get_rel_name(ftable_oid);
+		if (!ftable_name)
+			elog(ERROR, "cache lookup failed for relation: %u", ftable_oid);
+		for (pos = ftable_name; *pos != '\0'; pos++)
+		{
+			if (!isalnum(*pos) && *pos != '_')
+			{
+				ftable_name = psprintf("ftable_%u", ftable_oid);
+				break;
+			}
+		}
+		__add_extra_rowtype_info(source, ftable_name, ftable_oid);
+		meet_gstore = true;
+	}
+	appendStringInfoChar(source, '\n');
+}
+
+/*
+ * plcuda_make_flat_source
+ */
+static inline const char *
+plcuda_get_type_label(Oid type_oid, int16 *p_typlen, bool *p_typbyval)
+{
+	const char *label = NULL;
+	int16		typlen;
+	bool		typbyval;
+
+	get_typlenbyval(type_oid, &typlen, &typbyval);
 	if (type_oid == REGGSTOREOID)
 	{
-		result.attbyval = true;
-		result.attalign = sizeof(cl_long);
-		result.attlen = sizeof(CUdeviceptr);
-		result.attnum = attnum;
-		result.attcacheoff = -1;	/* we don't use attcacheoff */
-		result.atttypid = type_oid;
-		result.atttypmod = -1;
-		result.va_offset = 0;
-		result.va_length = 0;
-
-		return result;
+		typlen	= -2;
+		typbyval = false;
+		label = "void *";			/* device pointer */
 	}
-
-	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for type '%s'",
-			 format_type_be(type_oid));
-	typeForm = (Form_pg_type) GETSTRUCT(tuple);
-
-	result.attbyval = typeForm->typbyval;
-	result.attalign = typealign_get_width(typeForm->typalign);
-	result.attlen = typeForm->typlen;
-	result.attnum = attnum;
-	result.attcacheoff = -1;	/* we don't use attcacheoff */
-	result.atttypid = type_oid;
-	result.atttypmod = typeForm->typtypmod;
-	result.va_offset = 0;
-	result.va_length = 0;
-
-	/*
-	 * composite type needs extra kern_colmeta array to form/deform
-	 * packed tuple in the GPU kernel space.
-	 */
-	if (typeForm->typtype == TYPTYPE_COMPOSITE)
-		__setup_composite_kern_colmeta(tuple, p);
-	ReleaseSysCache(tuple);
-
-	return result;
+	else if (!typbyval)
+	{
+		if (typlen == -1)
+			label = "varlena *";	/* device pointer */
+		else if (typlen > 0)
+			label = "void *";		/* device pointer */
+		else
+			elog(ERROR, "unexpected type properties");
+	}
+	else if (type_oid == FLOAT4OID)
+		label = "float";
+	else if (type_oid == FLOAT8OID)
+		label = "double";
+	else if (typlen == sizeof(cl_char))
+		label = "cl_char";
+	else if (typlen == sizeof(cl_short))
+		label = "cl_short";
+	else if (typlen == sizeof(cl_int))
+		label = "cl_int";
+	else if (typlen == sizeof(cl_long))
+		label = "cl_long";
+	else
+		elog(ERROR, "unexpected type properties");
+	if (p_typlen)
+		*p_typlen = typlen;
+	if (p_typbyval)
+		*p_typbyval = typbyval;
+	return label;
 }
 
 static void
-plcuda_assign_kernel_properties(plcudaTaskState *plts)
+plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 {
-	CUmodule	cuda_module;
-	CUfunction	cuda_function;
-	CUresult	rc;
+	oidvector	   *proargtypes = con->proargtypes;
+	int16			typlen;
+	bool			typbyval;
+	const char	   *label;
+	int				i;
 
-	cuda_module = pgstrom_load_cuda_program(plts->gts.program_id);
-	/* prep kernel */
-	rc = cuModuleGetFunction(&cuda_function, cuda_module,
-							 "plcuda_prep_kernel_entrypoint");
-	if (rc == CUDA_ERROR_NOT_FOUND)
+	appendStringInfo(
+		source,
+		"/* ----------------------------------------\n"
+		" * PL/CUDA function (%s)\n"
+		" * ----------------------------------------*/\n"
+		"#define MAXIMUM_ALIGNOF %u\n"
+		"#define NAMEDATALEN %u\n"
+		"#define KERN_CONTEXT_VARLENA_BUFSZ 0\n"
+		"#include \"cuda_common.h\"\n"
+		"#include <cuda_runtime.h>\n"
+		"\n",
+		con->proname,
+		MAXIMUM_ALIGNOF,
+		NAMEDATALEN);
+	plcuda_add_extra_typeinfo(source, con);
+	if (con->decl.data)
+		appendStringInfoString(source, con->decl.data);
+
+	if (con->prorettype == REGGSTOREOID)
 	{
-		plts->kprep_max_blocksz = -1;
-		plts->kprep_static_shmsz = -1;
-		plts->kprep_dynamic_shmsz = -1;
-		plts->kprep_const_memsz = -1;
-		plts->kprep_local_memsz = -1;
-	}
-	else if (rc == CUDA_SUCCESS)
-	{
-		rc = cuFuncGetAttribute(&plts->kprep_max_blocksz,
-								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kprep_static_shmsz,
-								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kprep_dynamic_shmsz,
-							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kprep_const_memsz,
-								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kprep_local_memsz,
-								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
-								cuda_function);
+		label = "cl_uint";
+		typlen = sizeof(cl_int);
+		typbyval = true;
 	}
 	else
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	/* main kernel */
-	rc = cuModuleGetFunction(&cuda_function, cuda_module,
-							 "plcuda_main_kernel_entrypoint");
-	if (rc == CUDA_ERROR_NOT_FOUND)
 	{
-		plts->kmain_max_blocksz = -1;
-        plts->kmain_static_shmsz = -1;
-        plts->kmain_dynamic_shmsz = -1;
-        plts->kmain_const_memsz = -1;
-        plts->kmain_local_memsz = -1;
+		label = plcuda_get_type_label(con->prorettype, &typlen, &typbyval);
 	}
-	else if (rc == CUDA_SUCCESS)
+	appendStringInfo(
+		source,
+		"typedef %s PLCUDA_RESULT_TYPE;\n"
+		"#define PLCUDA_RESULT_TYPBYVAL %d\n"
+		"#define PLCUDA_RESULT_TYPLEN   %d\n"
+		"#define PLCUDA_NUM_ARGS        %d\n"
+		"#define PLCUDA_ARG_ISNULL(x)	(p_args[(x)] == NULL)\n"
+		"#define PLCUDA_GET_ARGVAL(x,type) (PLCUDA_ARG_ISNULL(x) ? 0 : *((type *)p_args[(x)]))\n"
+		"\n"
+		"static PLCUDA_RESULT_TYPE plcuda_main(void *p_args[])\n"
+		"{\n"
+		"  %s retval = %s;\n",
+		label, typlen, typbyval, con->proargtypes->dim1, label,
+		strchr(label, '*') ? "NULL" : "0");
+
+	for (i=0; i < proargtypes->dim1; i++)
 	{
-		rc = cuFuncGetAttribute(&plts->kmain_max_blocksz,
-								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+		Oid		type_oid = proargtypes->values[i];
 
-		rc = cuFuncGetAttribute(&plts->kmain_static_shmsz,
-								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kmain_dynamic_shmsz,
-							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kmain_const_memsz,
-								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kmain_local_memsz,
-								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
-								cuda_function);
+		label = plcuda_get_type_label(type_oid, &typlen, &typbyval);
+		if (typbyval)
+			appendStringInfo(
+				source,
+				"  %s arg%d %s = PLCUDA_GET_ARGVAL(%d,%s);\n",
+				label, i+1, __attr_unused, i, label);
+		else
+			appendStringInfo(
+				source,
+				"  %s arg%d %s = (%s)p_args[%d];\n",
+				label, i+1, __attr_unused, label, i);
 	}
+	if (con->main.data)
+		appendStringInfo(source, "{\n%s}\n", con->main.data);
 	else
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		appendStringInfoString(source, "exit(1);\n");	//NULL result
+	appendStringInfo(source, "  return retval;\n}\n\n");
 
-
-	/* post kernel */
-	rc = cuModuleGetFunction(&cuda_function, cuda_module,
-							 "plcuda_post_kernel_entrypoint");
-	if (rc == CUDA_ERROR_NOT_FOUND)
-	{
-		plts->kpost_max_blocksz = -1;
-		plts->kpost_static_shmsz = -1;
-		plts->kpost_dynamic_shmsz = -1;
-		plts->kpost_const_memsz = -1;
-		plts->kpost_local_memsz = -1;
-	}
-	else if (rc == CUDA_SUCCESS)
-	{
-		rc = cuFuncGetAttribute(&plts->kpost_max_blocksz,
-								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kpost_static_shmsz,
-								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kpost_dynamic_shmsz,
-							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kpost_const_memsz,
-								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
-								cuda_function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-		rc = cuFuncGetAttribute(&plts->kpost_local_memsz,
-								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
-								cuda_function);
-	}
-	else
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleUnload(cuda_module);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleUnload: %s", errorText(rc));
+	/* merge PL/CUDA host template */
+	appendStringInfoString(source, pgsql_host_plcuda_code);
 }
 
-static plcudaTaskState *
-plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
-{
-	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
-	GpuContext	   *gcontext;
-	plcudaTaskState *plts;
-	kern_plcuda	   *kplcuda;
-	size_t			kplcuda_length;
-	char		   *kern_source;
-	StringInfoData	kern_define;
-	ProgramId		program_id;
-	int				i, cuda_dindex = -1;
-
-	/*
-	 * NOTE: In case when PL/CUDA function call contains gstore_fdw in
-	 * the argument list, some of them might be pinned to a particular
-	 * GPU device. In this case, we set up GpuContext on the preferable
-	 * location.
-	 *
-	 * FIXME: If a particular PL/CUDA function is invoked multiple times
-	 * in a single query, right now, it cannot have gstore_fdw which are
-	 * pinned to the different devices from the former invocations cases.
-	 * For more ideal performance, GPU kernel should be also built to
-	 * the dedicated device instead of the common capability.
-	 */
-	if (fcinfo)
-		cuda_dindex = gstore_fdw_preferable_device(fcinfo);
-	gcontext = AllocGpuContext(cuda_dindex, true, true, true);
-	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
-	plts = MemoryContextAllocZero(CurTransactionContext,
-								  sizeof(plcudaTaskState));
-	plts->gts.gcontext = gcontext;
-	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
-	plts->gts.kern_params = NULL;
-	plts->gts.ccache_refs = NULL;
-	plts->gts.cb_process_task = plcuda_process_task;
-	plts->gts.cb_release_task = plcuda_release_task;
-	dlist_init(&plts->gts.ready_tasks);
-
-	/* validate PL/CUDA source code */
-	procForm = (Form_pg_proc) GETSTRUCT(protup);
-	plcuda_code_validation(&plts->p, protup, fcinfo);
-
-	/* build the template of the kern_plcuda */
-	kplcuda_length = STROMALIGN(offsetof(kern_plcuda,
-										 argmeta[procForm->pronargs]));
-	kplcuda = palloc0(kplcuda_length);
-	kplcuda->length = kplcuda_length;
-	kplcuda->nargs = procForm->pronargs;
-	kplcuda->retmeta = __setup_kern_colmeta(procForm->prorettype, -1,
-											&plts->p);
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid		argtype_oid = procForm->proargtypes.values[i];
-
-		kplcuda->argmeta[i] = __setup_kern_colmeta(argtype_oid, i+1,
-												   &plts->p);
-	}
-	plts->kplcuda_head = kplcuda;
-
-	/* construct a flat kernel source to be built */
-	initStringInfo(&kern_define);
-	kern_source = plcuda_codegen(procForm, &plts->p);
-	pgstrom_build_session_info(&kern_define,
-							   &plts->gts,
-							   plts->p.extra_flags);
-	program_id = pgstrom_create_cuda_program(gcontext,
-											 plts->p.extra_flags,
-											 0,
-											 kern_source,
-											 kern_define.data,
-											 true,
-											 false);
-	plts->gts.program_id = program_id;
-	pfree(kern_define.data);
-	/* track plcudaTaskState by local tracker */
-	plts->owner = CurrentResourceOwner;
-	dlist_push_head(&plcuda_state_list, &plts->chain);
-	/* assign properties of the kernel functions */
-	plcuda_assign_kernel_properties(plts);
-
-	return plts;
-}
-
+/*
+ * plcuda_build_program
+ */
 static void
-plcuda_exec_end(plcudaTaskState *plts)
+plcuda_build_program(plcuda_code_context *con,
+					 const char *name, StringInfo source)
 {
-	dlist_delete(&plts->chain);
+	File		fdesc;
+	FILE	   *filp;
+	ssize_t		nbytes;
+	int			status;
+	ListCell   *lc;
+	char		path[MAXPGPATH];
+	StringInfoData cmd;
+	StringInfoData log;
 
-	if (plts->last_results_buf)
-		gpuMemFree(plts->gts.gcontext,
-				   plts->last_results_buf);
-	pgstromReleaseGpuTaskState(&plts->gts, NULL);
+	initStringInfo(&cmd);
+	initStringInfo(&log);
+	/* write out source file */
+	snprintf(path, sizeof(path), "%s.cu", name);
+	fdesc = PathNameOpenFile(path, O_RDWR|O_CREAT|O_EXCL|PG_BINARY, 0600);
+	nbytes = FileWrite(fdesc, source->data, source->len
+#if PG_VERSION_NUM >= 100000
+					   ,WAIT_EVENT_DATA_FILE_WRITE
+#endif
+		);
+	if (nbytes != source->len)
+		elog(ERROR, "could not write source file of PL/CUDA");
+	FileClose(fdesc);
+
+	/* make nvcc command line */
+	appendStringInfo(
+		&cmd,
+		CUDA_BINARY_PATH "/nvcc "
+		" --gpu-architecture=sm_%lu"
+		" --default-stream=per-thread"
+		" -I " PGSHAREDIR "/extension"
+		" -O2 -std=c++11",
+		devComputeCapability);
+	if (plcuda_enable_debug)
+		appendStringInfo(&cmd, " -g -G");
+	foreach (lc, con->link_libs)
+		appendStringInfo(&cmd, " -l%s", (char *)lfirst(lc));
+	appendStringInfo(&cmd, " -o %s %s", name, path);
+
+	/* kick nvcc compiler */
+	if (plcuda_enable_debug)
+		elog(NOTICE, "PL/CUDA build:\n%s", cmd.data);
+	filp = OpenPipeStream(cmd.data, PG_BINARY_R);
+	if (!filp)
+		elog(ERROR, "could not kick nvcc compiler: %s", cmd.data);
+	do {
+		enlargeStringInfo(&log, 4096);
+		nbytes = fread(log.data + log.len, 1, 4096, filp);
+		if (nbytes < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			elog(ERROR, "failed on fread: %m");
+		}
+		log.len += nbytes;
+	} while (nbytes > 0);
+	status = ClosePipeStream(filp);
+
+	if (status != 0)
+		elog(ERROR, "PL/CUDA compilation failed.\n%s", log.data);
+	else if (log.len > 0)
+		elog(NOTICE, "PL/CUDA compilation log.\n%s", log.data);
+
+	pfree(log.data);
+	pfree(cmd.data);
 }
 
+/*
+ * plcuda_function_validator
+ */
 Datum
 plcuda_function_validator(PG_FUNCTION_ARGS)
 {
 	Oid				func_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
+	Form_pg_proc	proc;
+	Datum			value;
+	bool			isnull;
 	char			prokind;
-	plcudaTaskState	*plts;
+	int16			typlen;
+	bool			typbyval;
+	int				i;
+	plcuda_code_context con;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
 		PG_RETURN_VOID();
@@ -1722,1017 +853,771 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 			break;
 	}
 
-	/*
-	 * Only validation of the CUDA code. Run synchronous code build, then
-	 * raise an error if code block has any error.
-	 */
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	if (((Form_pg_proc) GETSTRUCT(tuple))->proretset)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Righ now, PL/CUDA function does not support set returning function")));
+	value = SysCacheGetAttr(PROCOID, tuple,
+							Anum_pg_proc_prosrc, &isnull);
+	if (isnull)
+		elog(ERROR, "PL/CUDA source is missing");
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
 
-	plts = plcuda_exec_begin(tuple, NULL);
-	plcuda_exec_end(plts);
+	/* check result and arguments types */
+	get_typlenbyval(proc->prorettype, &typlen, &typbyval);
+	if (!typbyval && !(typlen > 0 || typlen==-1))
+		elog(ERROR, "type %s is not supported to use in PL/CUDA",
+			 format_type_be(proc->prorettype));
+	for (i=0; i < proc->proargtypes.dim1; i++)
+	{
+		Oid		type_oid = proc->proargtypes.values[i];
 
+		get_typlenbyval(type_oid, &typlen, &typbyval);
+		if (!typbyval && !(typlen > 0 || typlen==-1))
+			elog(ERROR, "type %s is not supported to use in PL/CUDA",
+				 format_type_be(type_oid));
+	}
+
+	/* check argument (fix-len or varlena) */
+	plcuda_init_code_context(&con, tuple, NULL, NULL);
+	plcuda_expand_source(&con, TextDatumGetCString(value));
+	if (con.emsg.len > 0)
+		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
 	ReleaseSysCache(tuple);
 
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(plcuda_function_validator);
 
-static inline Datum
-kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
-					 Oid helper_func_oid,
-					 Datum static_config,
-					 bool *p_isnull)	/* may be NULL, if don't allow NULL */
+/*
+ * plcuda_setup_arguments
+ */
+static void
+plcuda_setup_arguments(plcuda_code_context *con)
 {
-    FunctionCallInfoData fcinfo;
-	FmgrInfo	flinfo;
-	Datum		result;
+	FunctionCallInfo fcinfo = con->fcinfo;
+	oidvector  *argtypes = con->proargtypes;
+	ssize_t		required;
+	ssize_t		offset[FUNC_MAX_ARGS];
+	char		name[sizeof(con->afname)];
+	int			i, fdesc = -1;
+	char	   *buffer = NULL;
 
-	if (!OidIsValid(helper_func_oid))
-		return static_config;
-
-	strom_proc_aclcheck(helper_func_oid, GetUserId(), ACL_EXECUTE);
-
-	fmgr_info(helper_func_oid, &flinfo);
-	InitFunctionCallInfoData(fcinfo, &flinfo,
-							 __fcinfo->nargs,
-							 __fcinfo->fncollation,
-							 NULL, NULL);
-	memcpy(fcinfo.arg, __fcinfo->arg,
-		   sizeof(Datum) * fcinfo.nargs);
-	memcpy(fcinfo.argnull, __fcinfo->argnull,
-		   sizeof(bool) * fcinfo.nargs);
-
-	result = FunctionCallInvoke(&fcinfo);
-	if (fcinfo.isnull)
+	required = 0;
+	memset(offset, 0, sizeof(offset));
+	for (i=0; i < fcinfo->nargs; i++)
 	{
-		if (p_isnull)
-			*p_isnull = true;
+		Oid		type_oid = argtypes->values[i];
+		int16	typlen;
+		bool	typbyval;
+
+		offset[i] = required;
+		if (fcinfo->argnull[i])
+		{
+			con->prog_args[i] = "__null__";
+			continue;
+		}
+		if (type_oid == REGGSTOREOID)
+		{
+			Oid		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
+			Datum	handle;
+			StringInfoData buf;
+			const unsigned char *src;
+			size_t	i, len;
+
+			handle = DirectFunctionCall1(pgstrom_gstore_export_ipchandle,
+										 ObjectIdGetDatum(ftable_oid));
+			src = (unsigned char *)VARDATA_ANY(handle);
+			len = VARSIZE_ANY_EXHDR(handle);
+			initStringInfo(&buf);
+			appendStringInfo(&buf, "g:");
+			for (i=0; i < len; i++)
+			{
+				enlargeStringInfo(&buf, 2);
+				appendStringInfo(&buf, "%02x", (unsigned int)src[i]);
+			}
+			con->prog_args[i] = buf.data;
+			continue;	/* passed by IPC_mhandle */
+		}
+		get_typlenbyval(type_oid, &typlen, &typbyval);
+		if (typbyval)
+		{
+			con->prog_args[i] = psprintf("v:%lx", fcinfo->arg[i]);
+		}
+		else if (typlen > 0)
+		{
+			con->prog_args[i] = psprintf("r:%lx", required);
+			required += MAXALIGN(typlen);
+		}
+		else if (typlen == -1)
+		{
+			con->prog_args[i] = psprintf("r:%lx", required);
+			required += MAXALIGN(toast_raw_datum_size(fcinfo->arg[i]));
+		}
 		else
-			elog(ERROR, "helper function %s returned NULL",
-				 format_procedure(helper_func_oid));
+			elog(ERROR, "Data type is not suitable for PL/CUDA: %s",
+                 format_type_be(type_oid));
 	}
+	if (required == 0)
+		return;		/* no argument buffer is needed */
+
+	do {
+		snprintf(name, sizeof(name), "/.plcuda_%u_argbuf.%u.dat",
+				 fcinfo->flinfo->fn_oid, (unsigned int)random());
+		fdesc = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fdesc < 0)
+		{
+			if (errno == EEXIST)
+				continue;
+			elog(ERROR, "failed on shm_open('%s'): %m", name);
+		}
+	} while (fdesc < 0);
+
+	PG_TRY();
+	{
+		if (ftruncate(fdesc, required))
+			elog(ERROR, "failed on ftruncate: %m");
+
+		buffer = mmap(NULL, required,
+					  PROT_READ | PROT_WRITE,
+					  MAP_SHARED,
+					  fdesc, 0);
+		if (buffer == MAP_FAILED)
+			elog(ERROR, "failed on mmap('%s'): %m", name);
+
+		for (i=0; i < fcinfo->nargs; i++)
+		{
+			Oid		type_oid = argtypes->values[i];
+			int16	typlen;
+			bool	typbyval;
+
+			if (fcinfo->argnull[i])
+				continue;
+			if (type_oid == REGGSTOREOID)
+				continue;
+			get_typlenbyval(type_oid, &typlen, &typbyval);
+			if (typbyval)
+				continue;
+			if (typlen > 0)
+			{
+				memcpy(buffer + offset[i],
+					   DatumGetPointer(fcinfo->arg[i]),
+					   typlen);
+			}
+			else
+			{
+				struct varlena *datum = (struct varlena *)fcinfo->arg[i];
+
+				Assert(typlen == -1);
+				if (VARATT_IS_EXTENDED(datum))
+					datum = heap_tuple_untoast_attr(datum);
+				memcpy(buffer + offset[i], datum, VARSIZE(datum));
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		if (buffer && munmap(buffer, required) != 0)
+			elog(WARNING, "failed on munmap('%s'): %m", con->afname);
+		if (shm_unlink(name))
+			elog(WARNING, "failed on shm_unlink('%s'): %m", name);
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (munmap(buffer, required) != 0)
+		elog(WARNING, "failed on munmap('%s'): %m", name);
+	if (close(fdesc))
+		elog(WARNING, "failed on close(2): %m");
+	strcpy(con->afname, name);
+}
+
+/*
+ * plcuda_setup_result_buffer
+ */
+static int
+plcuda_setup_result_buffer(plcuda_code_context *con)
+{
+	FunctionCallInfo fcinfo = con->fcinfo;
+	int16		typlen;
+	bool		typbyval;
+	size_t		required;
+	char		name[sizeof(con->rfname)];
+	int			fdesc = -1;
+
+	get_typlenbyval(con->prorettype, &typlen, &typbyval);
+	required = Max(BLCKSZ, typlen);
+
+	/* create a new shared segment */
+	do {
+		snprintf(name, sizeof(name), "/.plcuda_%u_result.%u.dat",
+				 fcinfo->flinfo->fn_oid, (unsigned int)random());
+		fdesc = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fdesc < 0)
+		{
+			if (errno == EEXIST)
+				continue;
+			elog(ERROR, "failed on shm_open('%s'): %m", name);
+		}
+	} while (fdesc < 0);
+
+    PG_TRY();
+    {
+        if (ftruncate(fdesc, required))
+			elog(ERROR, "failed on ftruncate: %m");
+	}
+	PG_CATCH();
+	{
+		if (shm_unlink(name))
+			elog(WARNING, "failed on shm_unlink('%s'): %m", name);
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	strcpy(con->rfname, name);
+	return fdesc;
+}
+
+/*
+ * plcuda_exec_child_program
+ */
+static void
+plcuda_exec_child_program(const char *command, char *cmd_argv[])
+{
+	DIR	   *dir;
+	struct dirent *dent;
+
+	/*
+	 * For security reason, close all the file-descriptors except for stdXXX
+	 */
+	dir = opendir("/proc/self/fd");
+	if (!dir)
+	{
+		fprintf(stderr, "failed on opendir('/proc/self/fd'): %m\n");
+		_exit(2);
+	}
+	while ((dent = readdir(dir)) != NULL)
+	{
+		const char *pos = dent->d_name;
+		int			fdesc;
+
+		while (isdigit(*pos))
+			pos++;
+		if (*pos == '\0')
+		{
+			fdesc = atoi(dent->d_name);
+
+			if (fdesc > 2)
+				fcntl(fdesc, F_SETFD, O_CLOEXEC);
+		}
+	}
+	closedir(dir);
+
+	/* kick PL/CUDA program */
+	execv(command, cmd_argv);
+
+	fprintf(stderr, "failed on execv('%s', ...): %m\n", command);
+	_exit(2);
+}
+
+/*
+ * plcuda_wait_child_program
+ */
+static void
+plcuda_sigchld_handler(SIGNAL_ARGS)
+{
+	SetLatch(MyLatch);
+}
+
+static bool
+plcuda_wait_child_program(pid_t child)
+{
+	pqsigfunc	sigchld_saved = pqsignal(SIGCHLD, plcuda_sigchld_handler);
+	int			status;
+	bool		isnull;
+
+	/* wait for completion of the child process */
+	PG_TRY();
+	{
+		for (;;)
+		{
+			pid_t	rv;
+
+			CHECK_FOR_INTERRUPTS();
+			rv = waitpid(child, &status, WNOHANG);
+			if (rv > 0)
+			{
+				Assert(rv == child);
+				if (WIFEXITED(status) || WIFSIGNALED(status))
+					break;
+			}
+			else if (rv < 0)
+			{
+				if (errno == EINTR)
+					continue;
+				elog(ERROR, "failed on waitpid(2): %m");
+			}
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET |
+							 WL_TIMEOUT |
+							 WL_POSTMASTER_DEATH,
+							 5000L,
+							 PG_WAIT_EXTENSION);
+			ResetLatch(MyLatch);
+		}
+	}
+	PG_CATCH();
+	{
+		kill(child, SIGKILL);
+		pqsignal(SIGCHLD, sigchld_saved);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	pqsignal(SIGCHLD, sigchld_saved);
+
+	if (WIFSIGNALED(status))
+		elog(ERROR, "PL/CUDA script was terminated by signal: %d",
+			 WTERMSIG(status));
+	if (WEXITSTATUS(status) == 0)
+		isnull = false;
+	else if (WEXITSTATUS(status) == 1)
+		isnull = true;
+	else
+		elog(ERROR, "PL/CUDA script was terminated abnormally (code: %d)",
+			 WEXITSTATUS(status));
+	return isnull;
+}
+
+/*
+ * plcuda_exec_cuda_program
+ */
+static Datum
+plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
+						 int rbuf_fdesc, bool *p_isnull)
+{
+	oidvector  *proargtypes = con->proargtypes;
+	char	   *cmd_argv[FUNC_MAX_ARGS + 20];
+	pid_t		child;
+	int			i, j=0;
+	Datum		result = 0;
+	bool		isnull;
+
+	//XXX put env, nvprof or ..., if any
+
+	cmd_argv[j++] = command;
+	if (con->afname[0] != '\0')
+	{
+		cmd_argv[j++] = "-a";
+		cmd_argv[j++] = con->afname;
+	}
+	if (con->rfname[0] != '\0')
+	{
+		cmd_argv[j++] = "-r";
+		cmd_argv[j++] = con->rfname;
+	}
+	cmd_argv[j++] = "--";
+	for (i=0; i < proargtypes->dim1; i++)
+		cmd_argv[j++] = con->prog_args[i];
+	cmd_argv[j++] = NULL;
+
+	/* shows command line if debug mode */
+	if (plcuda_enable_debug)
+	{
+		StringInfoData	temp;
+
+		initStringInfo(&temp);
+		appendStringInfo(&temp, "%s", command);
+		for (i=1; cmd_argv[i] != NULL; i++)
+			appendStringInfo(&temp, " %s", cmd_argv[i]);
+		elog(NOTICE, "PL/CUDA: %s", temp.data);
+		pfree(temp.data);
+	}
+	/* fork child */
+	child = fork();
+	if (child == 0)
+		plcuda_exec_child_program(command, cmd_argv);
+	else if (child > 0)
+		isnull = plcuda_wait_child_program(child);
+	else
+		elog(ERROR, "failed on fork(2): %m");
+
+	/* get result */
+	if (!isnull)
+	{
+		int16		typlen;
+		bool		typbyval;
+		struct stat	stbuf;
+		void	   *buffer;
+
+		get_typlenbyval(con->prorettype, &typlen, &typbyval);
+		if (fstat(rbuf_fdesc, &stbuf) != 0)
+			elog(ERROR, "failed on stat('%s'): %m", con->rfname);
+		buffer = mmap(NULL, stbuf.st_size,
+					  PROT_READ, MAP_SHARED,
+					  rbuf_fdesc, 0);
+		if (buffer == MAP_FAILED)
+			elog(ERROR, "failed on mmap: %m");
+		PG_TRY();
+		{
+			MemoryContext	oldcxt
+				= MemoryContextSwitchTo(con->results_memcxt);
+			if (typbyval)
+			{
+				Assert(typlen <= sizeof(Datum));
+				memcpy(&result, buffer, typlen);
+			}
+			else if (typlen > 0)
+			{
+				char   *temp = palloc(typlen);
+
+				memcpy(temp, buffer, typlen);
+				result = PointerGetDatum(temp);
+			}
+			else if (typlen == -1)
+			{
+				size_t	len = VARSIZE_ANY(buffer);
+				void   *temp = palloc(len);
+
+				memcpy(temp, buffer, len);
+				result = PointerGetDatum(temp);
+			}
+			else
+				elog(ERROR, "unexpected type attribute");
+			MemoryContextSwitchTo(oldcxt);
+		}
+		PG_CATCH();
+		{
+			if (munmap(buffer, stbuf.st_size))
+				elog(WARNING, "failed on munmap: %m");
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		if (munmap(buffer, stbuf.st_size))
+			elog(WARNING, "failed on munmap: %m");
+	}
+	*p_isnull = isnull;
 	return result;
 }
 
 /*
- * create_plcuda_task
+ * plcuda_scalar_function_handler
  */
-static plcudaTask *
-create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
-				   Size working_bufsz, Size results_bufsz)
+static Datum
+plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
+							   MemoryContext results_memcxt)
 {
-	GpuContext	   *gcontext = plts->gts.gcontext;
-	plcudaTask	   *ptask;
-	kern_parambuf  *kparams;
-	kern_plcuda	   *kplcuda_head = plts->kplcuda_head;
-	kern_colmeta   *cmeta;
-	Size			total_length;
-	Size			offset;
-	List		   *gstore_oid_list;
-	List		   *gstore_devptr_list;
-	List		   *gstore_dindex_list;
-	CUdeviceptr		m_deviceptr;
-	CUresult		rc;
-	ListCell	   *lc;
-	int				i, nparams;
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	HeapTuple	tuple;
+	plcuda_code_context con;
+	Oid			fn_oid = fcinfo->flinfo->fn_oid;
+	int			rbuf_fdesc = -1;
+	char		hexsum[33];
+	char	   *command;
+	struct stat	stbuf;
+	StringInfoData source;
+	Datum		result;
+	Datum		value;
+	bool		isnull;
 
-	/* load gstore_fdw if any */
-	gstore_fdw_load_function_args(gcontext,
-								  fcinfo,
-								  &gstore_oid_list,
-								  &gstore_devptr_list,
-								  &gstore_dindex_list);
-	/* calculation of the length */
-	Assert(fcinfo->nargs == kplcuda_head->nargs);
-	Assert(kplcuda_head->length
-		   == STROMALIGN(offsetof(kern_plcuda,
-								  argmeta[kplcuda_head->nargs])));
-	total_length = STROMALIGN(offsetof(plcudaTask, kern)
-							  + kplcuda_head->length);
-	nparams = fcinfo->nargs;
-	if (plts->p.composite_types != NIL)
-		nparams += list_length(plts->p.composite_types);
-	total_length += STROMALIGN(offsetof(kern_parambuf,
-										poffset[nparams]));
-	for (i=0; i < fcinfo->nargs; i++)
-	{
-		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
-
-		if (fcinfo->argnull[i])
-			continue;
-		if (cmeta.atttypid == REGGSTOREOID)
-			total_length += MAXALIGN(sizeof(CUdeviceptr));
-		else if (cmeta.attlen > 0)
-			total_length += MAXALIGN(cmeta.attlen);
-		else
-			total_length += MAXALIGN(toast_raw_datum_size(fcinfo->arg[i]));
-	}
-	/* additional pg_composite_typedesc parameters */
-	foreach (lc, plts->p.composite_types)
-		total_length += MAXALIGN(VARSIZE(lfirst(lc)));
-
-	total_length = STROMALIGN(total_length);
-
-	/* setup plcudaTask */
-	rc = gpuMemAllocManaged(gcontext,
-							&m_deviceptr,
-							total_length,
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
-	ptask = (plcudaTask *) m_deviceptr;
-	memset(ptask, 0, offsetof(plcudaTask, kern.retmeta));
-	pgstromInitGpuTask(&plts->gts, &ptask->task);
-	if (results_bufsz > 0)
-	{
-		rc = gpuMemAllocManaged(gcontext,
-								&ptask->m_results_buf,
-								results_bufsz,
-								CU_MEM_ATTACH_GLOBAL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
-	}
-	ptask->gstore_oid_list = gstore_oid_list;
-	ptask->gstore_devptr_list = gstore_devptr_list;
-	ptask->gstore_dindex_list = gstore_dindex_list;
-
-	/* setup kern_plcuda */
-	memcpy(&ptask->kern, kplcuda_head, kplcuda_head->length);
-	ptask->kern.working_bufsz = working_bufsz;
-	ptask->kern.working_usage = 0UL;
-	ptask->kern.results_bufsz = results_bufsz;
-	ptask->kern.results_usage = 0UL;
-
-	/* setup default result value */
-	cmeta = &ptask->kern.retmeta;
-	if (cmeta->attlen > 0)
-		ptask->kern.__retval[cmeta->attlen] = true;
-	else
-	{
-		ptask->kern.__retval[sizeof(CUdeviceptr)] = true;
-		if (ptask->m_results_buf != 0UL)
-			*((CUdeviceptr *)ptask->kern.__retval) = ptask->m_results_buf;
-		else
-			*((CUdeviceptr *)ptask->kern.__retval) = (CUdeviceptr)ptask->kern.__vl_buffer;
-	}
-
-	/* copy function arguments onto DMA buffer */
-	kparams = KERN_PLCUDA_PARAMBUF(&ptask->kern);
-	kparams->hostptr = (hostptr_t) kparams;
-	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-
-	offset = STROMALIGN(offsetof(kern_parambuf,
-								 poffset[fcinfo->nargs]));
-	for (i=0; i < fcinfo->nargs; i++)
-	{
-		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
-
-		if (fcinfo->argnull[i])
-			kparams->poffset[i] = 0;	/* null */
-		else if (cmeta.atttypid == REGGSTOREOID)
-		{
-			ListCell   *lc1, *lc2;
-			Oid			gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
-			CUdeviceptr	m_deviceptr = 0L;
-
-			forboth (lc1, ptask->gstore_oid_list,
-					 lc2, ptask->gstore_devptr_list)
-			{
-				if (lfirst_oid(lc1) == gstore_oid)
-				{
-					m_deviceptr = (CUdeviceptr) lfirst(lc2);
-					break;
-				}
-			}
-			if (m_deviceptr == 0L)
-				kparams->poffset[i] = 0;	/* empty gstore deal as NULL */
-			else
-			{
-				kparams->poffset[i] = offset;
-				memcpy((char *)kparams + offset,
-					   &m_deviceptr,
-					   sizeof(CUdeviceptr));
-				offset += MAXALIGN(sizeof(CUdeviceptr));
-			}
-		}
-		else if (cmeta.attbyval)
-		{
-			kparams->poffset[i] = offset;
-			Assert(cmeta.attlen > 0);
-			memcpy((char *)kparams + offset,
-				   &fcinfo->arg[i],
-				   cmeta.attlen);
-			offset += MAXALIGN(cmeta.attlen);
-		}
-		else if (cmeta.attlen > 0)
-		{
-			kparams->poffset[i] = offset;
-			memcpy((char *)kparams + offset,
-				   DatumGetPointer(fcinfo->arg[i]),
-				   cmeta.attlen);
-			offset += MAXALIGN(cmeta.attlen);
-		}
-		else
-		{
-			char   *vl_ptr = (char *)PG_DETOAST_DATUM(fcinfo->arg[i]);
-			Size	vl_len = VARSIZE_ANY(vl_ptr);
-
-			kparams->poffset[i] = offset;
-			memcpy((char *)kparams + offset, vl_ptr, vl_len);
-			offset += MAXALIGN(vl_len);
-		}
-	}
-	Assert(i == fcinfo->nargs);
-
-	foreach (lc, plts->p.composite_types)
-	{
-		pg_composite_typedesc *ctdesc = lfirst(lc);
-		size_t		vl_len = VARSIZE(ctdesc);
-
-		kparams->poffset[i++] = offset;
-		memcpy((char *)kparams + offset, ctdesc, vl_len);
-		offset += MAXALIGN(vl_len);
-	}
-	Assert(i == nparams);
-	kparams->nparams = nparams;
-	kparams->length = STROMALIGN(offset);
-	Assert(STROMALIGN(offsetof(plcudaTask, kern) +
-					  kplcuda_head->length) +
-		   kparams->length <= total_length);
-	Assert(plts->last_results_buf == 0UL);
-	plts->last_results_buf = ptask->m_results_buf;
-
-	return ptask;
-}
-
-Datum
-plcuda_function_handler(PG_FUNCTION_ARGS)
-{
-	FmgrInfo	   *flinfo = fcinfo->flinfo;
-	plcudaTaskState *plts;
-	plcudaTask	   *ptask;
-	plcudaTask	   *precv;
-	GpuContext	   *gcontext;
-	Size			working_bufsz;
-	Size			results_bufsz;
-	kern_errorbuf	kerror;
-	Datum			retval = 0;
-	bool			isnull = false;
-	ListCell	   *lc1, *lc2, *lc3;
-
-	if (!flinfo->fn_extra)
-	{
-		MemoryContext	oldcxt;
-		HeapTuple		tuple;
-
-		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for function %u",
-				 flinfo->fn_oid);
-
-		oldcxt = MemoryContextSwitchTo(flinfo->fn_mcxt);
-		plts = plcuda_exec_begin(tuple, fcinfo);
-		MemoryContextSwitchTo(oldcxt);
-
-		ReleaseSysCache(tuple);
-		flinfo->fn_extra = plts;
-	}
-	else
-	{
-		plts = (plcudaTaskState *) flinfo->fn_extra;
-		pgstromRescanGpuTaskState(&plts->gts);
-	}
-
-	/* results buffer of last invocation will not be used no longer */
-	if (plts->last_results_buf)
-	{
-		gpuMemFree(plts->gts.gcontext,
-				   plts->last_results_buf);
-		plts->last_results_buf = 0UL;
-	}
-
-	/* sanitycheck of the supplied arguments, prior to GPU launch */
-	if (!DatumGetBool(kernel_launch_helper(fcinfo,
-										   plts->p.fn_sanity_check,
-										   BoolGetDatum(true),
-										   NULL)))
-		elog(ERROR, "function '%s' argument sanity check failed",
-			 format_procedure(plts->p.fn_sanity_check));
-
-	/* determine the kernel launch parameters */
-	working_bufsz =
-		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   plts->p.fn_working_bufsz,
-										   plts->p.val_working_bufsz,
-										   NULL));
-	results_bufsz =
-		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   plts->p.fn_results_bufsz,
-										   plts->p.val_results_bufsz,
-										   NULL));
-	elog(DEBUG2, "working_bufsz = %zu, results_bufsz = %zu",
-		 working_bufsz, results_bufsz);
-
-	/* construction of plcudaTask structure */
-	ptask = create_plcuda_task(plts, fcinfo,
-							   working_bufsz,
-							   results_bufsz);
-	if (plts->p.kern_prep)
-	{
-		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
-		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
-		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
-		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
-		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
-		int64	v;
-
-		PG_TRY();
-		{
-			plcuda_kfunc_max_blocksz   = plts->kprep_max_blocksz;
-			plcuda_kfunc_static_shmsz  = plts->kprep_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = plts->kprep_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = plts->kprep_const_memsz;
-			plcuda_kfunc_local_memsz   = plts->kprep_local_memsz;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_prep_num_threads,
-										 plts->p.val_prep_num_threads,
-										 NULL));
-			if (v <= 0)
-				elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
-			ptask->kern.prep_num_threads = (cl_ulong)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_prep_kern_blocksz,
-										 plts->p.val_prep_kern_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
-			ptask->kern.prep_kern_blocksz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_prep_shmem_unitsz,
-										 plts->p.val_prep_shmem_unitsz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_prep: invalid shared memory requirement: %ld", v);
-			ptask->kern.prep_shmem_unitsz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_prep_shmem_blocksz,
-										 plts->p.val_prep_shmem_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_prep: invalid shared memory requirement: %ld", v);
-			ptask->kern.prep_shmem_blocksz = v;
-
-			elog(DEBUG2, "kern_prep {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-				 ptask->kern.prep_kern_blocksz,
-				 ptask->kern.prep_num_threads,
-				 ptask->kern.prep_shmem_unitsz,
-				 ptask->kern.prep_shmem_blocksz);
-			ptask->exec_prep_kernel = true;
-
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-		}
-		PG_CATCH();
-		{
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-
-	if (plts->p.kern_main)
-	{
-		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
-		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
-		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
-		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
-		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
-		int64	v;
-
-		PG_TRY();
-		{
-			plcuda_kfunc_max_blocksz   = plts->kmain_max_blocksz;
-			plcuda_kfunc_static_shmsz  = plts->kmain_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = plts->kmain_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = plts->kmain_const_memsz;
-			plcuda_kfunc_local_memsz   = plts->kmain_local_memsz;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_main_num_threads,
-										 plts->p.val_main_num_threads,
-										 NULL));
-			if (v <= 0)
-				elog(ERROR, "kern_main: invalid number of threads: %ld", v);
-			ptask->kern.main_num_threads = (cl_ulong)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_main_kern_blocksz,
-										 plts->p.val_main_kern_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
-			ptask->kern.main_kern_blocksz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_main_shmem_unitsz,
-										 plts->p.val_main_shmem_unitsz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_main: invalid shared memory requirement: %ld", v);
-			ptask->kern.main_shmem_unitsz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_main_shmem_blocksz,
-										 plts->p.val_main_shmem_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_main: invalid shared memory requirement: %ld", v);
-			ptask->kern.main_shmem_blocksz = v;
-
-			elog(DEBUG2, "kern_main {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-				 ptask->kern.main_kern_blocksz,
-				 ptask->kern.main_num_threads,
-				 ptask->kern.main_shmem_unitsz,
-				 ptask->kern.main_shmem_blocksz);
-
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-		}
-		PG_CATCH();
-		{
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-
-	if (plts->p.kern_post)
-	{
-		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
-		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
-		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
-		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
-		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
-		int64	v;
-
-		PG_TRY();
-		{
-			plcuda_kfunc_max_blocksz   = plts->kpost_max_blocksz;
-			plcuda_kfunc_static_shmsz  = plts->kpost_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = plts->kpost_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = plts->kpost_const_memsz;
-			plcuda_kfunc_local_memsz   = plts->kpost_local_memsz;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_post_num_threads,
-										 plts->p.val_post_num_threads,
-										 NULL));
-			if (v <= 0)
-				elog(ERROR, "kern_post: invalid number of threads: %ld", v);
-			ptask->kern.post_num_threads = (cl_ulong)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_post_kern_blocksz,
-										 plts->p.val_post_kern_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
-			ptask->kern.post_kern_blocksz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_post_shmem_unitsz,
-										 plts->p.val_post_shmem_unitsz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_post: invalid shared memory requirement: %ld", v);
-			ptask->kern.post_shmem_unitsz = (cl_uint)v;
-
-			v = DatumGetInt64(
-					kernel_launch_helper(fcinfo,
-										 plts->p.fn_post_shmem_blocksz,
-										 plts->p.val_post_shmem_blocksz,
-										 NULL));
-			if (v < 0 || v > INT_MAX)
-				elog(ERROR,
-					 "kern_post: invalid shared memory requirement: %ld", v);
-			ptask->kern.post_shmem_blocksz = v;
-
-			elog(DEBUG2, "kern_post {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-				 ptask->kern.post_kern_blocksz,
-				 ptask->kern.post_num_threads,
-				 ptask->kern.post_shmem_unitsz,
-				 ptask->kern.post_shmem_blocksz);
-			ptask->exec_post_kernel = true;
-
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-		}
-		PG_CATCH();
-		{
-			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
-			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
-			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
-			plcuda_kfunc_const_memsz   = saved_const_memsz;
-			plcuda_kfunc_local_memsz   = saved_local_memsz;
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-
-	/* Exec PL/CUDA function by GPU */
-	gcontext = plts->gts.gcontext;
-	pthreadMutexLock(gcontext->mutex);
-	dlist_push_tail(&gcontext->pending_tasks, &ptask->task.chain);
-	plts->gts.num_running_tasks++;
-	pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-	pthreadCondSignal(gcontext->cond);
-	pthreadMutexUnlock(gcontext->mutex);
-
-	/* Wait for the completion */
-	plts->gts.scan_done = true;
-	precv = (plcudaTask *) fetch_next_gputask(&plts->gts);
-	if (!precv)
-		elog(ERROR, "PL/CUDA GPU Task has gone to somewhere...");
-	Assert(precv == ptask);
-
-	/*
-	 * Dump the debug counter if valid values are set by kernel function
-	 */
-	if (precv->kern.plcuda_debug_count0)
-		elog(NOTICE, "PL/CUDA debug count0 => %lu",
-			 precv->kern.plcuda_debug_count0);
-	if (precv->kern.plcuda_debug_count1)
-		elog(NOTICE, "PL/CUDA debug count1 => %lu",
-			 precv->kern.plcuda_debug_count1);
-	if (precv->kern.plcuda_debug_count2)
-		elog(NOTICE, "PL/CUDA debug count2 => %lu",
-			 precv->kern.plcuda_debug_count2);
-	if (precv->kern.plcuda_debug_count3)
-		elog(NOTICE, "PL/CUDA debug count3 => %lu",
-			 precv->kern.plcuda_debug_count3);
-	if (precv->kern.plcuda_debug_count4)
-		elog(NOTICE, "PL/CUDA debug count4 => %lu",
-			 precv->kern.plcuda_debug_count4);
-	if (precv->kern.plcuda_debug_count5)
-		elog(NOTICE, "PL/CUDA debug count5 => %lu",
-			 precv->kern.plcuda_debug_count5);
-	if (precv->kern.plcuda_debug_count6)
-		elog(NOTICE, "PL/CUDA debug count6 => %lu",
-			 precv->kern.plcuda_debug_count6);
-	if (precv->kern.plcuda_debug_count7)
-		elog(NOTICE, "PL/CUDA debug count7 => %lu",
-			 precv->kern.plcuda_debug_count7);
-
-	if (precv->task.kerror.errcode == StromError_Success)
-	{
-		if (precv->kern.retmeta.attlen > 0)
-		{
-			if (precv->kern.__retval[precv->kern.retmeta.attlen])
-				isnull = true;
-			else if (precv->kern.retmeta.attbyval)
-			{
-				/* inline fixed-length variable */
-				memcpy(&retval, precv->kern.__retval,
-					   precv->kern.retmeta.attlen);
-			}
-			else
-			{
-				/* indirect fixed-length variable */
-				retval = PointerGetDatum(pnstrdup(precv->kern.__retval,
-												  precv->kern.retmeta.attlen));
-			}
-		}
-		else
-		{
-			Assert(!precv->kern.retmeta.attbyval);
-			if (precv->kern.__retval[sizeof(CUdeviceptr)])
-				isnull = true;
-			else
-			{
-				CUdeviceptr	m_devptr = *((CUdeviceptr *)precv->kern.__retval);
-
-				if (m_devptr != (CUdeviceptr)precv->kern.__vl_buffer &&
-					m_devptr != precv->m_results_buf)
-					elog(ERROR, "pl/cuda: uncertain result varlena buffer");
-				retval = PointerGetDatum(m_devptr);
-			}
-		}
-	}
-	else
-	{
-		if (precv->m_results_buf)
-		{
-			gpuMemFree(plts->gts.gcontext,
-					   precv->m_results_buf);
-			precv->m_results_buf = 0UL;
-			plts->last_results_buf = 0UL;
-		}
-
-		if (kerror.errcode == StromError_CpuReCheck &&
-			OidIsValid(plts->p.fn_cpu_fallback))
-		{
-			/* CPU fallback, if any */
-			retval = kernel_launch_helper(fcinfo,
-										  plts->p.fn_cpu_fallback,
-										  (Datum)0,
-										  &isnull);
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("PL/CUDA execution error (%s)",
-							errorTextKernel(&kerror))));
-		}
-	}
-	/* close gstore_fdw if any */
-	forthree(lc1, ptask->gstore_oid_list,
-			 lc2, ptask->gstore_devptr_list,
-			 lc3, ptask->gstore_dindex_list)
-	{
-		Oid			gstore_oid __attribute__((unused)) = lfirst_oid(lc1);
-		CUdeviceptr	m_deviceptr = (CUdeviceptr) lfirst(lc2);
-		cl_int		cuda_dindex = lfirst_int(lc3);
-
-		if (cuda_dindex < 0)
-			gpuMemFree(plts->gts.gcontext, m_deviceptr);
-		else
-			gpuIpcCloseMemHandle(plts->gts.gcontext, m_deviceptr);
-	}
-	gpuMemFree(plts->gts.gcontext, (CUdeviceptr)ptask);
-
-	if (isnull)
-		PG_RETURN_NULL();
-	PG_RETURN_DATUM(retval);
-}
-PG_FUNCTION_INFO_V1(plcuda_function_handler);
-
-/*
- * plcuda_function_source
- */
-Datum
-plcuda_function_source(PG_FUNCTION_ARGS)
-{
-	Oid				func_oid = PG_GETARG_OID(0);
-	Oid				lang_oid;
-	const char	   *lang_name = "plcuda";
-	HeapTuple		tuple;
-	Form_pg_proc	procForm;
-	plcudaTaskState *plts;
-	char		   *source;
-	text		   *result;
-
-	lang_oid = GetSysCacheOid1(LANGNAME, CStringGetDatum(lang_name));
-	if (!OidIsValid(lang_oid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("language \"%s\" does not exist", lang_name)));
-
-	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
 	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	procForm = (Form_pg_proc) GETSTRUCT(tuple);
+		elog(ERROR, "cache lookup failed for function %u", flinfo->fn_oid);
+	value = SysCacheGetAttr(PROCOID, tuple,
+							Anum_pg_proc_prosrc, &isnull);
+	if (isnull)
+		elog(ERROR, "PL/CUDA source is missing");
+	plcuda_init_code_context(&con, tuple, fcinfo, results_memcxt);
+	plcuda_expand_source(&con, TextDatumGetCString(value));
+	if (con.emsg.len > 0)
+		elog(ERROR, "failed on kernel source construction:%s", con.emsg.data);
 
-	if (procForm->prolang != lang_oid)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("procedure \"%s\" is not implemented by \"%s\"",
-						format_procedure(func_oid), lang_name)));
+	/* sanity check */
+	if (OidIsValid(con.fn_sanity_check))
+	{
+		FunctionCallInfoData __fcinfo;
+		FmgrInfo	__flinfo;
 
+		fmgr_info(con.fn_sanity_check, &__flinfo);
+		InitFunctionCallInfoData(__fcinfo, &__flinfo,
+								 fcinfo->nargs,
+								 fcinfo->fncollation,
+								 NULL, NULL);
+		memcpy(__fcinfo.arg, fcinfo->arg,
+			   sizeof(Datum) * fcinfo->nargs);
+		memcpy(__fcinfo.argnull, fcinfo->argnull,
+			   sizeof(bool) * fcinfo->nargs);
+		result = FunctionCallInvoke(&__fcinfo);
+		if (__fcinfo.isnull || DatumGetBool(result))
+			elog(ERROR, "PL/CUDA sanity check failed by %s",
+				 format_procedure(con.fn_sanity_check));
+	}
+	initStringInfo(&source);
+	plcuda_make_flat_source(&source, &con);
+	if (!pg_md5_hash(source.data, source.len, hexsum))
+		elog(ERROR, "out of memory");
+	command = psprintf("base/%s/%s_plcuda_%u%s_%s_cc%ld",
+					   PG_TEMP_FILES_DIR,
+					   PG_TEMP_FILE_PREFIX,
+					   fn_oid,
+					   (plcuda_enable_debug ? "g" : ""),
+					   hexsum,
+					   devComputeCapability);
+	/* lookup PL/CUDA binary */
+	if (stat(command, &stbuf) != 0)
+	{
+		if (errno != ENOENT)
+			elog(ERROR, "failed on stat('%s'): %m", command);
+		plcuda_build_program(&con, command, &source);
+	}
 
-	plts = plcuda_exec_begin(tuple, NULL);
-	source = pgstrom_cuda_source_string(plts->gts.program_id);
 	PG_TRY();
 	{
-		result = cstring_to_text(source);
+		/* setup arguments */
+		plcuda_setup_arguments(&con);
+		/* setup result buffer */
+		rbuf_fdesc = plcuda_setup_result_buffer(&con);
+		/* kick PL/CUDA program */
+		result = plcuda_exec_cuda_program(command, &con,
+										  rbuf_fdesc, &fcinfo->isnull);
 	}
 	PG_CATCH();
 	{
-		free(source);
+		if (con.afname[0] != '\0' && !plcuda_enable_debug)
+			shm_unlink(con.afname);
+		if (con.rfname[0] != '\0' && !plcuda_enable_debug)
+			shm_unlink(con.rfname);
+		close(rbuf_fdesc);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	free(source);
-	plcuda_exec_end(plts);
-
+	/* cleanup */
+	if (con.afname[0] != '\0' && !plcuda_enable_debug)
+		shm_unlink(con.afname);
+	if (con.rfname[0] != '\0' && !plcuda_enable_debug)
+		shm_unlink(con.rfname);
+	close(rbuf_fdesc);
 	ReleaseSysCache(tuple);
 
-	PG_RETURN_TEXT_P(result);
+	return result;
 }
-PG_FUNCTION_INFO_V1(plcuda_function_source);
 
 /*
- * plcuda_process_task
+ * plcudaSetFuncContext - for SET RETURNING FUNCTION
  */
-static int
-plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
+typedef struct {
+	TypeFuncClass fn_class;
+	ArrayType  *results;
+	int16		elemlen;
+	bool		elembyval;
+	char		elemalign;
+	cl_int		nitems;
+	char	   *curr_pos;
+	char	   *tail_pos;
+	Datum	   *tup_values;
+	bool	   *tup_isnull;
+} plcudaSetFuncContext;
+
+/*
+ * plcuda_setfunc_firstcall
+ */
+static plcudaSetFuncContext *
+plcuda_setfunc_firstcall(FunctionCallInfo fcinfo,
+						 FuncCallContext *fn_cxt,
+						 Datum results_datum)
 {
-	plcudaTask	   *ptask = (plcudaTask *) gtask;
-	GpuContext	   *gcontext = GpuWorkerCurrentContext;
-	void		   *kern_args[3];
-	cl_int			warp_size;
-	cl_int			block_size;
-	cl_int			grid_size;
-	CUfunction		kern_plcuda_prep;
-	CUfunction		kern_plcuda_main;
-	CUfunction		kern_plcuda_post;
-	CUdeviceptr		m_kern_plcuda = (CUdeviceptr)&ptask->kern;
-	CUdeviceptr		m_results_buf = ptask->m_results_buf;
-	CUdeviceptr		m_working_buf = 0UL;
-	CUresult		rc;
-	int				retval = 100001;
+	MemoryContext	oldcxt;
+	ArrayType	   *results;
+	Oid				fn_rettype;
+	TupleDesc		fn_tupdesc;
+	plcudaSetFuncContext *setfcxt;
 
-	/* property of the device */
-	warp_size = devAttrs[CU_DINDEX_PER_THREAD].WARP_SIZE;
+	oldcxt = MemoryContextSwitchTo(fn_cxt->multi_call_memory_ctx);
+	setfcxt = palloc0(sizeof(plcudaSetFuncContext));
+	/* save properties of the array */
+	results = DatumGetArrayTypeP(results_datum);
+	get_typlenbyvalalign(ARR_ELEMTYPE(results),
+						 &setfcxt->elemlen,
+						 &setfcxt->elembyval,
+						 &setfcxt->elemalign);
+	setfcxt->results  = results;
+	setfcxt->curr_pos = ARR_DATA_PTR(results);
+	setfcxt->tail_pos = (char *)results + VARSIZE(results);
 
-	/* plcuda_prep_kernel_entrypoint, if any */
-	if (ptask->exec_prep_kernel)
+	setfcxt->fn_class = get_call_result_type(fcinfo,
+											 &fn_rettype,
+											 &fn_tupdesc);
+	if (setfcxt->fn_class == TYPEFUNC_SCALAR ||
+		setfcxt->fn_class == TYPEFUNC_COMPOSITE)
 	{
-		rc = cuModuleGetFunction(&kern_plcuda_prep,
-								 cuda_module,
-								 "plcuda_prep_kernel_entrypoint");
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuModuleGetFunction: %s", errorText(rc));
+		if (ARR_ELEMTYPE(results) != fn_rettype)
+			elog(ERROR, "PL/CUDA returned wrong type: %s, not %s",
+				 format_type_be(results->elemtype),
+				 format_type_be(fn_rettype));
+		if (ARR_NDIM(results) != 1 ||
+			ARR_LBOUND(results)[0] != 0)
+			elog(ERROR, "PL/CUDA logic made wrong data array");
+		setfcxt->nitems = ARR_DIMS(results)[0];
 	}
-	/* plcuda_main_kernel_entrypoint */
-	rc = cuModuleGetFunction(&kern_plcuda_main,
-							 cuda_module,
-							 "plcuda_main_kernel_entrypoint");
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuModuleGetFunction: %s", errorText(rc));
-	/* plcuda_post_kernel_entrypoint */
-	if (ptask->exec_post_kernel)
+	else if (setfcxt->fn_class == TYPEFUNC_RECORD)
 	{
-		rc = cuModuleGetFunction(&kern_plcuda_post,
-								 cuda_module,
-								 "plcuda_post_kernel_entrypoint");
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuModuleGetFunction: %s", errorText(rc));
-	}
-
-	/* working buffer if required */
-	if (ptask->kern.working_bufsz > 0)
-	{
-		rc = gpuMemAllocManaged(gcontext,
-								&m_working_buf,
-								ptask->kern.working_bufsz,
-								CU_MEM_ATTACH_GLOBAL);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAllocManaged: %s", errorText(rc));
-	}
-
-	/* move the control block + argument buffer */
-	rc = cuMemPrefetchAsync((CUdeviceptr)&ptask->kern,
-							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
-							CU_DEVICE_PER_THREAD,
-							CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-
-	/* kernel arguments (common for all thress kernels) */
-	kern_args[0] = &m_kern_plcuda;
-	kern_args[1] = &m_working_buf;
-	kern_args[2] = &m_results_buf;
-
-	/* launch plcuda_prep_kernel_entrypoint */
-	if (ptask->exec_prep_kernel)
-    {
-		if (ptask->kern.prep_kern_blocksz > 0)
+		if (ARR_NDIM(results) == 1)
 		{
-			block_size = (ptask->kern.prep_kern_blocksz +
-						  warp_size - 1) & ~(warp_size - 1);
-			grid_size = (ptask->kern.prep_num_threads +
-						 block_size - 1) / block_size;
+			if (ARR_LBOUND(results)[0] != 0)
+				elog(ERROR, "PL/CUDA logic made wrong data array");
+			fn_tupdesc = CreateTemplateTupleDesc(1, false);
+			TupleDescInitEntry(fn_tupdesc, (AttrNumber) 1, "values",
+							   ARR_ELEMTYPE(results), -1, 0);
+			setfcxt->nitems = ARR_DIMS(results)[0];
+			setfcxt->tup_values = palloc(sizeof(Datum));
+			setfcxt->tup_isnull = palloc(sizeof(bool));
+		}
+		else if (ARR_NDIM(results) == 2)
+		{
+			int		i, nattrs = ARR_DIMS(results)[0];
+
+			if (ARR_LBOUND(results)[0] != 0 ||
+				ARR_LBOUND(results)[1] != 0)
+				elog(ERROR, "PL/CUDA logic made wrong data array");
+			fn_tupdesc = CreateTemplateTupleDesc(nattrs, false);
+			for (i=1; i <= nattrs; i++)
+				TupleDescInitEntry(fn_tupdesc, (AttrNumber) i,
+								   psprintf("v%d", i),
+								   ARR_ELEMTYPE(results), -1, 0);
+			setfcxt->nitems = ARR_DIMS(results)[1];
+			setfcxt->tup_values = palloc(sizeof(Datum) * nattrs);
+			setfcxt->tup_isnull = palloc(sizeof(bool) * nattrs);
 		}
 		else
-		{
-			rc = gpuOccupancyMaxPotentialBlockSize(NULL,
-												   &block_size,
-												   kern_plcuda_prep,
-												ptask->kern.prep_shmem_blocksz,
-												ptask->kern.prep_shmem_unitsz);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
-					   errorText(rc));
-			grid_size = (ptask->kern.prep_num_threads +
-						 block_size - 1) / block_size;
-		}
-		rc = cuLaunchKernel(kern_plcuda_prep,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							ptask->kern.prep_shmem_blocksz +
-							ptask->kern.prep_shmem_unitsz * block_size,
-							NULL,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLaunchKernel: %s "
-				   "(prep-kernel: grid=%d block=%d shmem=%u)",
-				   errorText(rc),
-				   grid_size, block_size,
-				   ptask->kern.prep_shmem_blocksz +
-				   ptask->kern.prep_shmem_unitsz * block_size);
-		wdebug("PL/CUDA prep-kernel: grid=%d block=%d shmem=%u",
-			   grid_size, block_size,
-			   ptask->kern.prep_shmem_blocksz +
-			   ptask->kern.prep_shmem_unitsz * block_size);
-	}
-
-	/* launch plcuda_main_kernel_entrypoint */
-	if (ptask->kern.main_kern_blocksz > 0)
-	{
-		block_size = (ptask->kern.main_kern_blocksz +
-					  warp_size - 1) & ~(warp_size - 1);
-		grid_size = (ptask->kern.main_num_threads +
-					 block_size - 1) / block_size;
+			elog(ERROR, "PL/CUDA logic made wrong data array");
+		fn_cxt->tuple_desc = BlessTupleDesc(fn_tupdesc);
 	}
 	else
 	{
-		rc = gpuOccupancyMaxPotentialBlockSize(NULL,
-											   &block_size,
-											   kern_plcuda_main,
-											   ptask->kern.main_shmem_blocksz,
-											   ptask->kern.main_shmem_unitsz);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
-				   errorText(rc));
-		grid_size = (ptask->kern.prep_num_threads +
-					 block_size - 1) / block_size;
+		elog(ERROR, "unexpected PL/CUDA function result class");
 	}
+	MemoryContextSwitchTo(oldcxt);
 
-	rc = cuLaunchKernel(kern_plcuda_main,
-						grid_size, 1, 1,
-						block_size, 1, 1,
-						ptask->kern.main_shmem_blocksz +
-						ptask->kern.main_shmem_unitsz * block_size,
-						NULL,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuLaunchKernel: %s "
-			   "(main-kernel: grid=%d block=%d shmem=%u)",
-			   errorText(rc),
-			   (cl_uint)grid_size, (cl_uint)block_size,
-			   ptask->kern.main_shmem_blocksz +
-			   ptask->kern.main_shmem_unitsz * block_size);
-	wdebug("PL/CUDA main-kernel: grid=%d block=%d shmem=%u",
-		   grid_size, block_size,
-		   ptask->kern.main_shmem_blocksz +
-		   ptask->kern.main_shmem_unitsz * block_size);
+	return setfcxt;
+}
 
-	/* launch plcuda_post_kernel_entrypoint */
-	if (ptask->exec_post_kernel)
-    {
-		if (ptask->kern.post_kern_blocksz > 0)
+
+
+/*
+ * plcuda_setfunc_getnext
+ */
+static Datum
+plcuda_setfunc_getnext(FuncCallContext *fn_cxt,
+					   plcudaSetFuncContext *setfcxt,
+					   bool *p_isnull)
+{
+	ArrayType  *results = setfcxt->results;
+	bits8	   *nullmap = ARR_NULLBITMAP(results);
+	size_t		index = fn_cxt->call_cntr;
+	Datum		datum;
+
+	if (setfcxt->fn_class == TYPEFUNC_SCALAR ||
+		setfcxt->fn_class == TYPEFUNC_COMPOSITE)
+	{
+		Assert(ARR_NDIM(results) == 1);
+		if (nullmap && att_isnull(index, nullmap))
 		{
-			block_size = (ptask->kern.post_kern_blocksz +
-						  warp_size - 1) & ~(warp_size - 1);
-			grid_size = (ptask->kern.post_num_threads +
-						 block_size - 1) / block_size;
+			*p_isnull = true;
+			return 0;
 		}
+		if (setfcxt->curr_pos >= setfcxt->tail_pos)
+			elog(ERROR, "PL/CUDA: corruption of the results");
+		setfcxt->curr_pos = (char *)
+			att_align_nominal(setfcxt->curr_pos,
+							  setfcxt->elemalign);
+		datum = fetch_att(setfcxt->curr_pos,
+						  setfcxt->elembyval,
+						  setfcxt->elemlen);
+		if (setfcxt->elemlen > 0)
+			setfcxt->curr_pos += setfcxt->elemlen;
+		else if (setfcxt->elemlen == -1)
+			setfcxt->curr_pos += VARSIZE_ANY(datum);
 		else
+			elog(ERROR, "PL/CUDA: results has unknown data type");
+	}
+	else if (setfcxt->fn_class == TYPEFUNC_RECORD)
+	{
+		TupleDesc	tupdesc = fn_cxt->tuple_desc;
+		int			j, natts = tupdesc->natts;
+		size_t		index = fn_cxt->call_cntr * natts;
+		HeapTuple	tuple;
+
+		memset(setfcxt->tup_isnull, 0, sizeof(bool) * natts);
+		memset(setfcxt->tup_values, 0, sizeof(Datum) * natts);
+		for (j=0; j < natts; j++)
 		{
-			rc = gpuOccupancyMaxPotentialBlockSize(NULL,
-												   &block_size,
-												   kern_plcuda_post,
-												ptask->kern.post_shmem_blocksz,
-												ptask->kern.post_shmem_unitsz);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
-					   errorText(rc));
-			grid_size = (ptask->kern.post_num_threads +
-						 block_size - 1) / block_size;
+			if (nullmap && att_isnull(index+j, nullmap))
+			{
+				setfcxt->tup_isnull[j] = true;
+				continue;
+			}
+			if (setfcxt->curr_pos >= setfcxt->tail_pos)
+				elog(ERROR, "PL/CUDA: result is out of range");
+			setfcxt->curr_pos = (char *)
+				att_align_nominal(setfcxt->curr_pos,
+								  setfcxt->elemalign);
+			datum = fetch_att(setfcxt->curr_pos,
+							  setfcxt->elembyval,
+							  setfcxt->elemlen);
+			setfcxt->tup_values[j] = datum;
+			if (setfcxt->elemlen > 0)
+				setfcxt->curr_pos += setfcxt->elemlen;
+			else if (setfcxt->elemlen == -1)
+				setfcxt->curr_pos += VARSIZE_ANY(datum);
+			else
+				elog(ERROR, "unexpected PL/CUDA function result type");
 		}
-
-		rc = cuLaunchKernel(kern_plcuda_post,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							ptask->kern.post_shmem_blocksz +
-							ptask->kern.post_shmem_unitsz * block_size,
-							NULL,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLaunchKernel: %s "
-				   "(post-kernel: grid=%d block=%d shmem=%u)",
-				   errorText(rc),
-				   grid_size, block_size,
-				   ptask->kern.post_shmem_blocksz +
-				   ptask->kern.post_shmem_unitsz * block_size);
-		wdebug("PL/CUDA post-kernel: grid=%d block=%d shmem=%u",
-			   grid_size, block_size,
-			   ptask->kern.post_shmem_blocksz +
-			   ptask->kern.post_shmem_unitsz * block_size);
+		tuple = heap_form_tuple(fn_cxt->tuple_desc,
+								setfcxt->tup_values,
+								setfcxt->tup_isnull);
+		datum = HeapTupleGetDatum(tuple);
 	}
-	/* write back the control block */
-	rc = cuMemPrefetchAsync((CUdeviceptr)&ptask->kern,
-							KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern),
-							CU_DEVICE_CPU,
-							CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-
-	/* write back the result buffer, if any */
-	if (m_results_buf != 0UL)
+	else
 	{
-		rc = cuMemPrefetchAsync(ptask->m_results_buf,
-								ptask->kern.results_bufsz,
-								CU_DEVICE_CPU,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		elog(ERROR, "unexpected PL/CUDA function result class");
 	}
-
-	rc = cuEventRecord(CU_EVENT0_PER_THREAD, CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuEventRecord: %s", errorText(rc));
-
-	/* Point of synchronization */
-	rc = cuEventSynchronize(CU_EVENT0_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuEventSynchronize: %s", errorText(rc));
-
-	/* check kernel execution status */
-	memset(&ptask->task.kerror, 0, sizeof(kern_errorbuf));
-	if (ptask->exec_prep_kernel &&
-		ptask->kern.kerror_prep.errcode != StromError_Success)
-		ptask->task.kerror = ptask->kern.kerror_prep;
-	else if (ptask->kern.kerror_main.errcode != StromError_Success)
-		ptask->task.kerror = ptask->kern.kerror_main;
-	else if (ptask->exec_post_kernel &&
-			 ptask->kern.kerror_post.errcode != StromError_Success)
-		ptask->task.kerror = ptask->kern.kerror_post;
-
-	retval = 0;
-
-out_of_resource:
-	if (m_working_buf != 0UL)
-	{
-		rc = gpuMemFree(gcontext, m_working_buf);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemFree: %s", errorText(rc));
-	}
-	return retval;
+	*p_isnull = false;
+	return datum;
 }
 
 /*
- * plcuda_release_task
+ * plcuda_function_handler
  */
-static void
-plcuda_release_task(GpuTask *gtask)
+Datum
+plcuda_function_handler(PG_FUNCTION_ARGS)
 {
-	plcudaTask	   *ptask = (plcudaTask *) gtask;
-	GpuContext	   *gcontext = ptask->task.gts->gcontext;
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	FuncCallContext	*fn_cxt;
+	plcudaSetFuncContext *setfcxt;
+	bool		isnull;
+	Datum		datum;
 
-	if (ptask->m_results_buf)
-		gpuMemFree(gcontext, ptask->m_results_buf);
-	gpuMemFree(gcontext, (CUdeviceptr)ptask);
+	if (!flinfo->fn_retset)
+		return plcuda_scalar_function_handler(fcinfo,
+											  CurrentMemoryContext);
+	if (SRF_IS_FIRSTCALL())
+	{
+		fn_cxt = SRF_FIRSTCALL_INIT();
+		datum = plcuda_scalar_function_handler(fcinfo,
+											   fn_cxt->multi_call_memory_ctx);
+		if (fcinfo->isnull)
+			SRF_RETURN_DONE(fn_cxt);
+		fn_cxt->user_fctx = plcuda_setfunc_firstcall(fcinfo, fn_cxt, datum);
+	}
+	fn_cxt = SRF_PERCALL_SETUP();
+	setfcxt = fn_cxt->user_fctx;
+	if (fn_cxt->call_cntr >= setfcxt->nitems)
+		SRF_RETURN_DONE(fn_cxt);
+	datum = plcuda_setfunc_getnext(fn_cxt, setfcxt, &isnull);
+	if (isnull)
+		SRF_RETURN_NEXT_NULL(fn_cxt);
+	SRF_RETURN_NEXT(fn_cxt, datum);
 }
+PG_FUNCTION_INFO_V1(plcuda_function_handler);
 
 /*
  * pgstrom_init_plcuda
@@ -2740,6 +1625,242 @@ plcuda_release_task(GpuTask *gtask)
 void
 pgstrom_init_plcuda(void)
 {
-	dlist_init(&plcuda_state_list);
-	RegisterResourceReleaseCallback(plcuda_cleanup_resources, NULL);
+	DefineCustomBoolVariable("pl_cuda.enable_debug",
+							 "Enables debugging stuff of PL/CUDA",
+							 NULL,
+							 &plcuda_enable_debug,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }
+
+/*
+ * SQL support functions
+ */
+#define get_table_desc(table_oid)				\
+	getObjectDescriptionOids(RelationRelationId,(table_oid))
+
+Datum
+pgsql_table_attr_numbers_by_names(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *column_names = PG_GETARG_ARRAYTYPE_P(1);
+	int			i = 0, nitems;
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	int2vector *result;
+
+	if (ARR_NDIM(column_names) != 1 ||
+		ARR_ELEMTYPE(column_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	nitems = ARR_DIMS(column_names)[0];
+	/* int2vector */
+	result = palloc0(offsetof(int2vector, values[nitems]));
+	SET_VARSIZE(result, offsetof(int2vector, values[nitems]));
+	result->ndim = 1;
+	result->dataoffset = 0;
+	result->elemtype = INT2OID;
+	result->dim1 = nitems;
+	result->lbound1 = ARR_LBOUND(column_names)[0];
+
+	iter = array_create_iterator(column_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		AttrNumber	anum = get_attnum(table_oid, temp);
+
+		if (anum == InvalidAttrNumber)
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		Assert(i < nitems);
+		result->values[i++] = anum;
+	}
+	array_free_iterator(iter);
+	Assert(i == nitems);
+
+	PG_RETURN_POINTER(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_numbers_by_names);
+
+Datum
+pgsql_table_attr_number_by_name(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	AttrNumber	attnum;
+
+	attnum = get_attnum(table_oid, column_name);
+	if (attnum == InvalidAttrNumber)
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name,
+			 getObjectDescriptionOids(RelationRelationId, table_oid));
+	PG_RETURN_INT16(attnum);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_number_by_name);
+
+Datum
+pgsql_table_attr_types_by_names(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *column_names = PG_GETARG_ARRAYTYPE_P(1);
+	int			i = 0, nitems;
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	oidvector  *result;
+
+	if (ARR_NDIM(column_names) != 1 ||
+		ARR_ELEMTYPE(column_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	nitems = ARR_DIMS(column_names)[0];
+
+	/* oidvector */
+	result = palloc0(offsetof(oidvector, values[nitems]));
+	SET_VARSIZE(result, offsetof(oidvector, values[nitems]));
+	result->ndim = 1;
+	result->dataoffset = 0;
+	result->elemtype = OIDOID;
+	result->dim1 = nitems;
+	result->lbound1 = ARR_LBOUND(column_names)[0];
+
+	iter = array_create_iterator(column_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		HeapTuple	tup;
+
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		Assert(i < nitems);
+		result->values[i++] = ((Form_pg_attribute) GETSTRUCT(tup))->atttypid;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(iter);
+	Assert(i == nitems);
+
+	PG_RETURN_POINTER(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_types_by_names);
+
+Datum
+pgsql_table_attr_type_by_name(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	HeapTuple	tup;
+	Oid			type_oid;
+
+	tup = SearchSysCacheAttName(table_oid, column_name);
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name, get_table_desc(table_oid));
+	type_oid = ((Form_pg_attribute) GETSTRUCT(tup))->atttypid;
+	ReleaseSysCache(tup);
+
+	PG_RETURN_OID(type_oid);
+}
+PG_FUNCTION_INFO_V1(pgsql_table_attr_type_by_name);
+
+Datum
+pgsql_check_attrs_of_types(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *attr_names = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *type_names = PG_GETARG_ARRAYTYPE_P(2);
+	Datum		value1, value2;
+	bool		isnull1, isnull2;
+	ArrayIterator aiter;
+	ArrayIterator titer;
+	bool		result = true;
+
+	if (ARR_NDIM(attr_names) != 1 || ARR_ELEMTYPE(attr_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+	if (ARR_NDIM(type_names) != 1 || ARR_ELEMTYPE(type_names) != OIDOID)
+		elog(ERROR, "types must be vector of regtype");
+	if (ARR_DIMS(attr_names)[0] != ARR_DIMS(type_names)[0])
+		elog(ERROR, "number of columns and types are mismatch");
+
+	aiter = array_create_iterator(attr_names, 0, NULL);
+	titer = array_create_iterator(type_names, 0, NULL);
+	while (array_iterate(aiter, &value1, &isnull1) &&
+		   array_iterate(titer, &value2, &isnull2))
+	{
+		char	   *temp = TextDatumGetCString(value1);
+		Oid			type_oid = DatumGetObjectId(value2);
+		HeapTuple	tup;
+
+		Assert(!isnull1 && !isnull2);
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+			result = false;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(aiter);
+	array_free_iterator(titer);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attrs_of_types);
+
+Datum
+pgsql_check_attrs_of_type(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	ArrayType  *attr_names = PG_GETARG_ARRAYTYPE_P(1);
+	Oid			type_oid = PG_GETARG_OID(2);
+	Datum		value;
+	bool		isnull;
+	ArrayIterator iter;
+	bool		result = true;
+
+	if (ARR_NDIM(attr_names) != 1 || ARR_ELEMTYPE(attr_names) != TEXTOID)
+		elog(ERROR, "column names must be a vector of text");
+
+	iter = array_create_iterator(attr_names, 0, NULL);
+	while (array_iterate(iter, &value, &isnull))
+	{
+		char	   *temp = TextDatumGetCString(value);
+		HeapTuple	tup;
+
+		Assert(!isnull);
+		tup = SearchSysCacheAttName(table_oid, temp);
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "column '%s' of %s was not found",
+				 temp, get_table_desc(table_oid));
+		if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+			result = false;
+		ReleaseSysCache(tup);
+	}
+	array_free_iterator(iter);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attrs_of_type);
+
+Datum
+pgsql_check_attr_of_type(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	char	   *column_name = TextDatumGetCString(PG_GETARG_DATUM(1));
+	Oid			type_oid = PG_GETARG_OID(2);
+	HeapTuple	tup;
+	bool		result = true;
+
+	tup = SearchSysCacheAttName(table_oid, column_name);
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "column '%s' of %s was not found",
+			 column_name, get_table_desc(table_oid));
+	if (type_oid != ((Form_pg_attribute) GETSTRUCT(tup))->atttypid)
+		result = false;
+	ReleaseSysCache(tup);
+
+	PG_RETURN_BOOL(result);
+}
+PG_FUNCTION_INFO_V1(pgsql_check_attr_of_type);
