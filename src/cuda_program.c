@@ -97,8 +97,6 @@ static program_builder_state *pgbuilder_state = NULL;
 	static const char *pgstrom_cuda_##x##_pathname = NULL;
 #include "cuda_filelist"
 #undef PGSTROM_CUDA
-static void	   *curand_wrapper_lib = NULL;
-static size_t	curand_wrapper_libsz;
 
 static bool		cuda_program_builder_got_signal = false;
 
@@ -374,14 +372,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/*
 	 * PG-Strom CUDA device code libraries
 	 */
-	/* cuRand library */
-	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_curand.h\"\n");
-	/* cuda dynpara.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_dynpara.h\"\n");
+
 	/* cuda mathlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -489,6 +480,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	return source;
 }
 
+#ifdef NOT_USED
 /*
  * link_cuda_libraries - links CUDA libraries with the supplied PTX binary
  */
@@ -567,18 +559,6 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 					   pathname, errorText(rc));
 		}
 
-		/* curand is accessed via wrapper library */
-		if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
-		{
-			rc = cuLinkAddData(lstate, CU_JIT_INPUT_OBJECT,
-							   curand_wrapper_lib,
-							   curand_wrapper_libsz,
-							   "curand",
-							   0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddData: %s", errorText(rc));
-		}
-
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);
 		if (rc != CUDA_SUCCESS)
@@ -609,6 +589,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLinkDestroy: %s", errorText(rc));
 }
+#endif
 
 /*
  * writeout_temporary_file
@@ -799,9 +780,11 @@ build_cuda_program(program_cache_entry *src_entry)
 			options[opt_index++] = "--generate-line-info";
 		}
 		options[opt_index++] = "--use_fast_math";
+#ifdef NOT_USED
 		/* library linkage needs relocatable PTX */
 		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			options[opt_index++] = "--relocatable-device-code=true";
+#endif
 		/* enables c++11 template features */
 		options[opt_index++] = "--std=c++11";
 
@@ -1287,12 +1270,9 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	program_cache_entry *entry = NULL;
 	CUmodule	cuda_module;
 	CUresult	rc;
-	int			extra_flags;
 	char	   *ptx_image;
 	size_t		ptx_length;
 	pg_crc32	ptx_crc		__attribute__((unused));
-	void	   *bin_image;
-	size_t		bin_length;
 
 	SpinLockAcquire(&pgcache_head->lock);
 retry_checks:
@@ -1311,7 +1291,6 @@ retry_checks:
 	else if (entry->ptx_image)
 	{
 		get_cuda_program_entry_nolock(entry);
-		extra_flags = entry->extra_flags;
 		ptx_image = entry->ptx_image;
 		ptx_length = entry->ptx_length;
 		ptx_crc = entry->ptx_crc;
@@ -1357,24 +1336,7 @@ retry_checks:
 		SpinLockAcquire(&pgcache_head->lock);
 		goto retry_checks;
 	}
-
-	/*
-	 * Is linkage of run-time libraries needed?
-	 */
-	if ((extra_flags & DEVKERNEL_NEEDS_LINKAGE) == 0)
-	{
-		bin_image = ptx_image;
-		bin_length = ptx_length;
-	}
-	else
-	{
-		link_cuda_libraries(ptx_image, ptx_length,
-							extra_flags,
-							&bin_image, &bin_length);
-	}
-	rc = cuModuleLoadData(&cuda_module, bin_image);
-	if (ptx_image != bin_image)
-		free(bin_image);
+	rc = cuModuleLoadData(&cuda_module, ptx_image);
 #ifdef USE_ASSERT_CHECKING
 	{
 		pg_crc32	__ptx_crc;
@@ -1526,6 +1488,11 @@ cudaProgramBuilderWakeUp(bool error_if_no_builders)
 		elog(ERROR, "PG-Strom: no active CUDA C program builder");
 }
 
+#if 0
+/*
+ * XXXX - PL/CUDA was re-designed to use CUDA runtime,
+ * so we no longer need own wrapper library.
+ */
 static void
 build_wrapper_libraries(const char *wrapper_filename,
 						void **p_wrapper_lib,
@@ -1616,6 +1583,7 @@ build_wrapper_libraries(const char *wrapper_filename,
 	*p_wrapper_lib = wrapper_lib;
 	*p_wrapper_libsz = st_buf.st_size;
 }
+#endif
 
 static void
 pgstrom_startup_cuda_program(void)
@@ -1736,11 +1704,6 @@ pgstrom_init_cuda_program(void)
 						   ((size_t)program_cache_size_kb << 10));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
-
-	/* build wrapper library objects */
-	build_wrapper_libraries("cuda_curand.h",
-							&curand_wrapper_lib,
-							&curand_wrapper_libsz);
 
 	/* register CUDA C program builders */
 	for (i=0; i < num_program_builders; i++)

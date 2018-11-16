@@ -1456,8 +1456,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	cscan->custom_scan_tlist = tlist_dev;
 
 	gs_info->kern_source = source.data;
-	gs_info->extra_flags = context.extra_flags |
-		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->varlena_bufsz = varlena_bufsz;
 	gs_info->proj_tuple_sz = proj_tuple_sz;
 	gs_info->proj_extra_sz = proj_extra_sz;

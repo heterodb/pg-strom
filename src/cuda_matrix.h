@@ -384,6 +384,9 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 
 #ifdef __CUDACC__
 
+#if 0
+//TODO: Needs to rework based on C++Template
+
 /* ----------------------------------------------------------------
  *
  * Bitonic Sorting Support for PL/CUDA functions
@@ -1045,7 +1048,7 @@ typedef struct
 PGSTROM_MATRIX_GROUPBY_TEMPLATE(Add,FP32,cl_float,atomicAdd,0.0)
 //PGSTROM_MATRIX_GROUPBY_TEMPLATE(Max,FP32,cl_float,atomicMax,-FLT_MAX)
 //PGSTROM_MATRIX_GROUPBY_TEMPLATE(Min,FP32,cl_float,atomicMin, FLT_MAX)
-
+#endif
 
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MATRIX_H */
