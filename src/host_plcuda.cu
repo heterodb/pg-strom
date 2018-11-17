@@ -6,199 +6,172 @@
 #include <stdio.h>
 #include <unistd.h>
 
-static GstoreIpcMapping *
-decode_gstore_ipc_handle(const char *hex)
-{
-	GstoreIpcMapping *result;
-	const char	   *pos = hex;
-	unsigned char  *dst;
-	int				i, c0, c1;
-
-	result = (GstoreIpcMapping *)malloc(sizeof(GstoreIpcMapping));
-	if (!result)
-		EEXIT("out of memory");
-	dst = (unsigned char *) &result->h;
-	for (i=0; *pos != '\0'; i++)
-	{
-		if (i >= sizeof(GstoreIpcHandle))
-			EEXIT("IPC mhandle too large");
-
-		c0 = *pos++;
-		if (c0 >= '0' && c0 <= '9')
-			c0 = c0 - '0';
-		else if (c0 >= 'a' && c0 <= 'f')
-			c0 = c0 - 'a' + 10;
-		else if (c0 >= 'A' && c0 <= 'F')
-			c0 = c0 - 'A' + 10;
-		else
-			EEXIT("invalid HEX character: %s", hex);
-
-		c1 = *pos++;
-		if (c1 >= '0' && c1 <= '9')
-			c1 = c1 - '0';
-		else if (c1 >= 'a' && c1 <= 'f')
-			c1 = c1 - 'a' + 10;
-		else if (c1 >= 'A' && c1 <= 'F')
-			c1 = c1 - 'A' + 10;
-		else
-			EEXIT("invalid HEX character: %s", hex);
-
-		dst[i] = (c0 << 4) | c1;
-	}
-	if (i != sizeof(GstoreIpcHandle))
-		EEXIT("IPC mhandle length mismatch");
-	if (VARSIZE(result) != sizeof(GstoreIpcHandle))
-		EEXIT("IPC mhandle is broken varlena datum");
-	result->map = NULL;
-	return result;
-}
-
 int main(int argc, char * const argv[])
 {
-	int			fdesc;
-	struct stat	stbuf;
-	void	   *buffer;
-	ssize_t		s, nbytes;
-	int			c, i, j, k;
-	const char *arg_fname = NULL;
-	const char *res_fname = NULL;
-	void	   *arg_buffer = NULL;
-#if PLCUDA_NUM_ARGS > 0
-	cl_ulong	argval[PLCUDA_NUM_ARGS];	/* for immediate values */
-	void	   *argptr[PLCUDA_NUM_ARGS];
+	const char *arg_catalog = NULL;
+#if PLCUDA_NUM_ARGS == 0
+	void	  **arg_ptrs = NULL;
 #else
-#define argval		NULL
-#define argptr		NULL
+	void	   *arg_ptrs[PLCUDA_NUM_ARGS];
+	char		arg_kind[PLCUDA_NUM_ARGS];
+	char	   *arg_buffer = NULL;
+	long		arg_bufsz = 128 * 1024;	/* 128kB in default */
+	char	   *tail;
+	const char *pos, *cat;
 #endif
-	cudaError_t	rc;
+	ssize_t		sz, nbytes;
+	char	   *buffer;
+	int			c, i, j;
 	PLCUDA_RESULT_TYPE result;
 
 	/* command line options */
-	while ((c = getopt(argc, argv, "a:r:")) >= 0)
+	while ((c = getopt(argc, argv, "s:c:")) >= 0)
 	{
 		switch (c)
 		{
-			case 'a':
-				if (arg_fname)
-					EEXIT("argument buffer is specified twice");
-				arg_fname = strdup(optarg);
-				if (!arg_fname)
-					EEXIT("out of memory");
+			case 's':
+				arg_bufsz = atol(optarg);
+				if (arg_bufsz < 0)
+					EEXIT("invalid argument buffer size");
 				break;
-			case 'r':
-				if (res_fname)
-					EEXIT("result buffer is specified twice");
-				res_fname = strdup(optarg);
-				if (!res_fname)
-					EEXIT("out of memory");
+			case 'c':
+				if (arg_catalog)
+					EEXIT("argument catalog specified twice");
+				arg_catalog = strdup(optarg);
 				break;
 			default:
 				EEXIT("unknown option '%c'", c);
 				break;
 		}
 	}
-	if (!res_fname)
-		EEXIT("no result buffer");
-	if (arg_fname)
-	{
-		fdesc = shm_open(arg_fname, O_RDONLY, 0600);
-		if (fdesc < 0)
-			EEXIT("failed on open('%s'): %m", arg_fname);
-		if (fstat(fdesc, &stbuf) != 0)
-			EEXIT("failed on fstat('%s'): %m", arg_fname);
-		rc = cudaMallocManaged(&arg_buffer, stbuf.st_size);
-		if (rc != cudaSuccess)
-			EEXIT("failed on cudaMallocManaged: %s", cudaGetErrorName(rc));
-		nbytes = 0;
-		do {
-			s = read(fdesc, (char *)arg_buffer + nbytes,
-					 stbuf.st_size - nbytes);
-			if (s < 0)
-			{
-				if (errno == EINTR)
-					continue;
-				EEXIT("failed on read(%s): %m", arg_fname);
-			}
-			else if (s == 0)
-				EEXIT("could not read entire PL/CUDA arguments");
-			nbytes += s;
-		} while (nbytes < stbuf.st_size);
+#if PLCUDA_NUM_ARGS > 0
+	if (!arg_catalog)
+		EEXIT("no argument catalog was specified");
+	memset(arg_ptrs, 0, sizeof(arg_ptrs));
 
-		close(fdesc);
-	}
-
-	/* setup arguments */
-	for (i=optind, j=0; i < argc; i++, j++)
-	{
-		const char *tok = argv[i];
-		void	   *ptr = NULL;
-
-		if (j >= PLCUDA_NUM_ARGS)
-			EEXIT("too larget arguments for PL/CUDA function");
-		if (strcmp(tok, "__null__") == 0)
-			ptr = NULL;
-		else if (strncmp(tok, "v:", 2) == 0)
+	/* read arguments from stdin */
+	arg_buffer = (char *)malloc(arg_bufsz);
+	if (!arg_buffer)
+		EEXIT("out of host memory");
+	nbytes = arg_bufsz;
+	tail = arg_buffer;
+	do {
+		sz = read(PLCUDA_ARGMENT_FDESC, tail, nbytes);
+		if (sz < 0)
 		{
-			/* immediate value */
-			argval[j] = strtol(tok+2, NULL, 16);
-			ptr = &argval[j];
+			if (errno == EINTR)
+				continue;
+			EEXIT("failed on read(stdin): %m");
 		}
-		else if (strncmp(tok, "r:", 2) == 0)
+		else if (sz == 0)
+			break;		/* end of file */
+		assert(sz <= nbytes);
+		tail += sz;
+		nbytes -= sz;
+	} while(nbytes > 0);
+	close(PLCUDA_ARGMENT_FDESC);
+
+	pos = arg_buffer;
+	cat = arg_catalog;
+	for (i=0; i < PLCUDA_NUM_ARGS; i++)
+	{
+		assert(pos == (char *)MAXALIGN(pos));
+		arg_kind[i] = *cat++;
+		switch (arg_kind[i])
 		{
-			/* reference to argument buffer */
-			cl_ulong	offset = strtol(tok+2, NULL, 16);
-			ptr = (char *)arg_buffer + offset;
-		}
-		else if (strncmp(tok, "g:", 2) == 0)
-		{
-			/* IPC-handle of GPU memory store */
-			for (k=0; k < j; k++)
-			{
-				/* reuse if same IPC handle is already opened */
-				if (strcmp(tok, argv[optind+k]) == 0)
+			case 'N':		/* null value */
+				break;
+			case 'i':		/* immediate datum */
+				if (pos + sizeof(Datum) > tail)
+					EEXIT("argument buffer out of range pos=%p tail=%p", pos, tail);
+				arg_ptrs[i] = (void *)pos;
+				pos += sizeof(Datum);
+				break;
+			case 'r':		/* indirect fixed-length datum */
 				{
-					ptr = argptr[k];
-					break;
+					size_t	sz = 0;
+
+					while (*cat >= '0' && *cat <= '9')
+						sz = sz * 10 + (*cat++ - '0');
+					if (pos + sz > tail)
+						EEXIT("argument buffer out of range");
+					arg_ptrs[i] = (void *)pos;
+					pos += MAXALIGN(sz);
 				}
-			}
-			if (!ptr)
-			{
-				GstoreIpcMapping *temp = decode_gstore_ipc_handle(tok+2);
+				break;
+			case 'v':		/* varlena datum */
+				{
+					size_t	sz;
 
-				rc = cudaIpcOpenMemHandle(&temp->map,
-										  temp->h.ipc_mhandle.r,
-										  cudaIpcMemLazyEnablePeerAccess);
-				if (rc != cudaSuccess)
-					EEXIT("failed on cudaIpcOpenMemHandle: %s",
-						  cudaGetErrorName(rc));
-				ptr = temp;
-			}
+					if (pos + VARHDRSZ > tail)
+						EEXIT("argument buffer out of range");
+					sz = VARSIZE_ANY(pos);
+					if (pos + sz > tail)
+						EEXIT("argument buffer out of range");
+					arg_ptrs[i] = (void *)pos;
+					pos += MAXALIGN(sz);
+				}
+				break;
+			case 'g':		/* Gstore_fdw */
+				{
+					GstoreIpcMapping *temp, *prev;
+					cudaError_t	rc;
+
+					if (pos + sizeof(GstoreIpcHandle) > tail)
+						EEXIT("argument buffer out of range");
+					temp = (GstoreIpcMapping *)
+						calloc(1, sizeof(GstoreIpcMapping));
+					memcpy(&temp->h, pos, sizeof(GstoreIpcHandle));
+					pos += MAXALIGN(sizeof(GstoreIpcHandle));
+					for (j=0; j < i; j++)
+					{
+						if (arg_kind[j] != 'g')
+							continue;
+						prev = (GstoreIpcMapping *)arg_ptrs[j];
+						if (memcmp(&prev->h.ipc_mhandle.r,
+								   &temp->h.ipc_mhandle.r,
+								   sizeof(cudaIpcMemHandle_t)) == 0)
+						{
+							temp->map = prev->map;
+							break;
+						}
+					}
+					if (!temp->map)
+					{
+						rc = cudaIpcOpenMemHandle(&temp->map,
+												  temp->h.ipc_mhandle.r,
+											   cudaIpcMemLazyEnablePeerAccess);
+						if (rc != cudaSuccess)
+							CUEXIT(rc, "failed on cudaIpcOpenMemHandle");
+					}
+					arg_ptrs[i] = temp;
+				}
+				break;
+			default:
+				EEXIT("wrong argument catalog: %s", arg_catalog);
+				break;
 		}
-		else
-			EEXIT("Bug? unexpected PL/CUDA argument format: %s", tok);
-		argptr[j] = ptr;
 	}
-
-	/* open the result buffer */
-	fdesc = shm_open(res_fname, O_RDWR, 0600);
-	if (fdesc < 0)
-		EEXIT("failed on shm_open('%s'): %m", res_fname);
-	if (fstat(fdesc, &stbuf) != 0)
-		EEXIT("failed on fstat(2): %m");
-	/* kick user defined portion */
-	result = plcuda_main(argptr);
+	if (i != PLCUDA_NUM_ARGS)
+		EEXIT("invalid argument catalog: %s", arg_catalog);
+#else
+	if (arg_catalog && strlen(arg_catalog) > 0)
+		EEXIT("argument catalog is longer than expected");
+#endif
+	/* launch user defined code block */
+	result = plcuda_main(arg_ptrs);
 #if PLCUDA_RESULT_TYPLEN == -1
 	if (!result)
-		return 1;	/* returns NULL */
-	buffer = result;
+		return 1;		/* returns NULL */
+	buffer = (char *)result;
 	nbytes = VARSIZE_ANY(buffer);
 #elif PLCUDA_RESULT_TYPLEN > 0
 #if PLCUDA_RESULT_TYPBYVAL
-	buffer = &result;
+	buffer = (char *)&result;
 #else
 	if (!result)
-		return 1;	/* returns NULL */
-	buffer = result;
+		return 1;		/* return NULL */
+	buffer = (char *)result;
 #endif
 	nbytes = PLCUDA_RESULT_TYPLEN;
 #else
@@ -206,18 +179,17 @@ int main(int argc, char * const argv[])
 #endif
 	/* write back the result of PL/CUDA */
 	do {
-		s = write(fdesc, buffer, nbytes);
-		if (s < 0)
+		sz = write(PLCUDA_RESULT_FDESC, buffer, nbytes);
+		if (sz < 0)
 		{
 			if (errno == EINTR)
 				continue;
-			EEXIT("failed on write('%s'): %m", res_fname);
+			EEXIT("failed on write: %m");
 		}
-		buffer = (char *)buffer + s;
-		nbytes -= s;
+		buffer += sz;
+		nbytes -= sz;
 	} while (nbytes > 0);
-
-	close(fdesc);
+	close(PLCUDA_RESULT_FDESC);
 
 	return 0;
 }

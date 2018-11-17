@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_plcuda.h"
 
 Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda_function_handler(PG_FUNCTION_ARGS);
@@ -42,14 +43,14 @@ typedef struct
 	StringInfoData	main;
 	StringInfoData	emsg;
 	FunctionCallInfo fcinfo;
+	const char	   *arg_catalog;
+	size_t			arg_datasz;
+	Datum			arg_values[FUNC_MAX_ARGS];
 	MemoryContext	results_memcxt;
 	Oid				fn_sanity_check;
 	int				include_count;
 	List		   *include_func_oids;
 	List		   *link_libs;
-	char			afname[200];	/* argument file name */
-	char			rfname[200];	/* result file name */
-	char		   *prog_args[FUNC_MAX_ARGS];
 } plcuda_code_context;
 
 static void plcuda_expand_source(plcuda_code_context *con, char *source);
@@ -646,7 +647,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"static PLCUDA_RESULT_TYPE plcuda_main(void *p_args[])\n"
 		"{\n"
 		"  %s retval = %s;\n",
-		label, typlen, typbyval, con->proargtypes->dim1,
+		label, typbyval, typlen, con->proargtypes->dim1,
 		label, typbyval ? "0" : "NULL");
 
 	for (i=0; i < proargtypes->dim1; i++)
@@ -872,195 +873,93 @@ plcuda_setup_arguments(plcuda_code_context *con)
 {
 	FunctionCallInfo fcinfo = con->fcinfo;
 	oidvector  *argtypes = con->proargtypes;
-	ssize_t		required;
-	ssize_t		offset[FUNC_MAX_ARGS];
-	char		name[sizeof(con->afname)];
-	int			i, j, fdesc = -1;
-	char	   *buffer = NULL;
+	ssize_t		required = 0;
+	StringInfoData cat;
+	int			i;
 
-	required = 0;
-	memset(offset, 0, sizeof(offset));
+	initStringInfo(&cat);
 	for (i=0; i < fcinfo->nargs; i++)
 	{
 		Oid		type_oid = argtypes->values[i];
 		int16	typlen;
 		bool	typbyval;
 
-		offset[i] = required;
 		if (fcinfo->argnull[i])
 		{
-			con->prog_args[i] = "__null__";
+			appendStringInfoChar(&cat, 'N');
 			continue;
 		}
-
 		if (type_oid == REGGSTOREOID)
 		{
-			Oid		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
+			Oid		ftable_oid = fcinfo->arg[i];
 			GstoreIpcHandle *handle
 				= __pgstrom_gstore_export_ipchandle(ftable_oid);
 
 			if (!handle)
-				con->prog_args[i] = "__null__";
+				appendStringInfoChar(&cat, 'N');
 			else
 			{
-				StringInfoData buf;
-				const cl_uchar *src = (cl_uchar *)handle;
-
-				initStringInfo(&buf);
-				appendStringInfo(&buf, "g:");
-				for (j=0; j < sizeof(GstoreIpcHandle); j++)
-					appendStringInfo(&buf, "%02x", src[j]);
-				con->prog_args[i] = buf.data;
+				appendStringInfoChar(&cat, 'g');
+				con->arg_values[i] = PointerGetDatum(handle);
+				required += MAXALIGN(sizeof(GstoreIpcHandle));
 			}
-			continue;	/* passed by IPC_mhandle */
-		}
-		get_typlenbyval(type_oid, &typlen, &typbyval);
-		if (typbyval)
-		{
-			con->prog_args[i] = psprintf("v:%lx", fcinfo->arg[i]);
-		}
-		else if (typlen > 0)
-		{
-			con->prog_args[i] = psprintf("r:%lx", required);
-			required += MAXALIGN(typlen);
-		}
-		else if (typlen == -1)
-		{
-			con->prog_args[i] = psprintf("r:%lx", required);
-			required += MAXALIGN(toast_raw_datum_size(fcinfo->arg[i]));
 		}
 		else
-			elog(ERROR, "Data type is not suitable for PL/CUDA: %s",
-                 format_type_be(type_oid));
-	}
-	if (required == 0)
-		return;		/* no argument buffer is needed */
-
-	do {
-		snprintf(name, sizeof(name), "/.plcuda_%u_argbuf.%u.dat",
-				 fcinfo->flinfo->fn_oid, (unsigned int)random());
-		fdesc = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-		if (fdesc < 0)
 		{
-			if (errno == EEXIST)
-				continue;
-			elog(ERROR, "failed on shm_open('%s'): %m", name);
-		}
-	} while (fdesc < 0);
-
-	PG_TRY();
-	{
-		if (ftruncate(fdesc, required))
-			elog(ERROR, "failed on ftruncate: %m");
-
-		buffer = mmap(NULL, required,
-					  PROT_READ | PROT_WRITE,
-					  MAP_SHARED,
-					  fdesc, 0);
-		if (buffer == MAP_FAILED)
-			elog(ERROR, "failed on mmap('%s'): %m", name);
-
-		for (i=0; i < fcinfo->nargs; i++)
-		{
-			Oid		type_oid = argtypes->values[i];
-			int16	typlen;
-			bool	typbyval;
-
-			if (fcinfo->argnull[i])
-				continue;
-			if (type_oid == REGGSTOREOID)
-				continue;
 			get_typlenbyval(type_oid, &typlen, &typbyval);
 			if (typbyval)
-				continue;
-			if (typlen > 0)
 			{
-				memcpy(buffer + offset[i],
-					   DatumGetPointer(fcinfo->arg[i]),
-					   typlen);
+				appendStringInfoChar(&cat, 'i');
+				con->arg_values[i] = fcinfo->arg[i];
+				required += MAXALIGN(sizeof(Datum));
+			}
+			else if (typlen > 0)
+			{
+				appendStringInfo(&cat, "r%d", typlen);
+				con->arg_values[i] = fcinfo->arg[i];
+				required += MAXALIGN(typlen);
+			}
+			else if (typlen == -1)
+			{
+				Datum	datum;
+
+				appendStringInfoChar(&cat, 'v');
+				datum = PointerGetDatum(PG_DETOAST_DATUM(fcinfo->arg[i]));
+				con->arg_values[i] = datum;
+				required += MAXALIGN(VARSIZE(datum));
 			}
 			else
-			{
-				struct varlena *datum = (struct varlena *)fcinfo->arg[i];
-
-				Assert(typlen == -1);
-				if (VARATT_IS_EXTENDED(datum))
-					datum = heap_tuple_untoast_attr(datum);
-				memcpy(buffer + offset[i], datum, VARSIZE(datum));
-			}
+				elog(ERROR, "Data type is not suitable for PL/CUDA: %s",
+					 format_type_be(type_oid));
 		}
 	}
-	PG_CATCH();
-	{
-		if (buffer && munmap(buffer, required) != 0)
-			elog(WARNING, "failed on munmap('%s'): %m", con->afname);
-		if (shm_unlink(name))
-			elog(WARNING, "failed on shm_unlink('%s'): %m", name);
-		close(fdesc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	if (munmap(buffer, required) != 0)
-		elog(WARNING, "failed on munmap('%s'): %m", name);
-	if (close(fdesc))
-		elog(WARNING, "failed on close(2): %m");
-	strcpy(con->afname, name);
-}
-
-/*
- * plcuda_setup_result_buffer
- */
-static int
-plcuda_setup_result_buffer(plcuda_code_context *con)
-{
-	FunctionCallInfo fcinfo = con->fcinfo;
-	int16		typlen;
-	bool		typbyval;
-	size_t		required;
-	char		name[sizeof(con->rfname)];
-	int			fdesc = -1;
-
-	get_typlenbyval(con->prorettype, &typlen, &typbyval);
-	required = Max(BLCKSZ, typlen);
-
-	/* create a new shared segment */
-	do {
-		snprintf(name, sizeof(name), "/.plcuda_%u_result.%u.dat",
-				 fcinfo->flinfo->fn_oid, (unsigned int)random());
-		fdesc = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-		if (fdesc < 0)
-		{
-			if (errno == EEXIST)
-				continue;
-			elog(ERROR, "failed on shm_open('%s'): %m", name);
-		}
-	} while (fdesc < 0);
-
-    PG_TRY();
-    {
-        if (ftruncate(fdesc, required))
-			elog(ERROR, "failed on ftruncate: %m");
-	}
-	PG_CATCH();
-	{
-		if (shm_unlink(name))
-			elog(WARNING, "failed on shm_unlink('%s'): %m", name);
-		close(fdesc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	strcpy(con->rfname, name);
-	return fdesc;
+	con->arg_catalog = cat.data;
+	con->arg_datasz = required;
 }
 
 /*
  * plcuda_exec_child_program
  */
 static void
-plcuda_exec_child_program(const char *command, char *cmd_argv[])
+plcuda_exec_child_program(const char *command, char *cmd_argv[],
+						  int arg_fdesc, int res_fdesc)
 {
 	DIR	   *dir;
 	struct dirent *dent;
+
+	/*
+	 * replace stdin / stdout
+	 */
+	if (dup2(arg_fdesc, PLCUDA_ARGMENT_FDESC) < 0)
+	{
+		fprintf(stderr, "failed on dup2(arg_fdesc, 0): %m\n");
+		_exit(2);
+	}
+	if (dup2(res_fdesc, PLCUDA_RESULT_FDESC) < 0)
+	{
+		fprintf(stderr, "failed on dup2(res_fdesc, 1): %m\n");
+		_exit(2);
+	}
 
 	/*
 	 * For security reason, close all the file-descriptors except for stdXXX
@@ -1074,16 +973,26 @@ plcuda_exec_child_program(const char *command, char *cmd_argv[])
 	while ((dent = readdir(dir)) != NULL)
 	{
 		const char *pos = dent->d_name;
-		int			fdesc;
 
 		while (isdigit(*pos))
 			pos++;
 		if (*pos == '\0')
 		{
-			fdesc = atoi(dent->d_name);
+			int		fdesc = atoi(dent->d_name);
 
-			if (fdesc > 2)
-				fcntl(fdesc, F_SETFD, O_CLOEXEC);
+			switch (fdesc)
+			{
+				case 0:
+				case 1:
+				case 2:
+				case PLCUDA_ARGMENT_FDESC:
+				case PLCUDA_RESULT_FDESC:
+					/* retain file descriptor */
+					break;
+				default:
+					close(fdesc);
+					break;
+			}
 		}
 	}
 	closedir(dir);
@@ -1096,103 +1005,196 @@ plcuda_exec_child_program(const char *command, char *cmd_argv[])
 }
 
 /*
- * plcuda_wait_child_program
+ * plcuda_write_arguments
  */
 static void
-plcuda_sigchld_handler(SIGNAL_ARGS)
+plcuda_write_arguments(plcuda_code_context *con, FILE *afilp)
 {
-	SetLatch(MyLatch);
-}
+	FunctionCallInfo fcinfo = con->fcinfo;
+	const char *cat = con->arg_catalog;
+	char		padding[MAXIMUM_ALIGNOF];
+	int			i;
 
-static bool
-plcuda_wait_child_program(pid_t child)
-{
-	pqsigfunc	sigchld_saved = pqsignal(SIGCHLD, plcuda_sigchld_handler);
-	int			status;
-	bool		isnull;
-
-	/* wait for completion of the child process */
-	PG_TRY();
+	memset(padding, 0, sizeof(padding));
+	for (i=0; i < fcinfo->nargs; i++)
 	{
-		for (;;)
-		{
-			pid_t	rv;
+		Datum	datum = con->arg_values[i];
+		size_t	sz, len;
 
-			CHECK_FOR_INTERRUPTS();
-			rv = waitpid(child, &status, WNOHANG);
-			if (rv > 0)
-			{
-				Assert(rv == child);
-				if (WIFEXITED(status) || WIFSIGNALED(status))
-					break;
-			}
-			else if (rv < 0)
-			{
-				if (errno == EINTR)
-					continue;
-				elog(ERROR, "failed on waitpid(2): %m");
-			}
-			(void) WaitLatch(MyLatch,
-							 WL_LATCH_SET |
-							 WL_TIMEOUT |
-							 WL_POSTMASTER_DEATH,
-							 5000L,
-							 PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
+		switch (*cat++)
+		{
+			case 'N':
+				/* nothing to send */
+				break;
+			case 'i':
+				sz = fwrite(&datum, sizeof(Datum), 1, afilp);
+				if (sz != 1)
+					elog(ERROR, "broken pipe: %m");
+				break;
+			case 'g':
+				Assert(VARSIZE(datum) == sizeof(GstoreIpcHandle));
+			case 'v':
+				len = VARSIZE(datum);
+				if (fwrite(DatumGetPointer(datum), len, 1, afilp) != 1)
+					elog(ERROR, "broken pipe: %m");
+				sz = MAXALIGN(len) - len;
+				while (sz-- > 0)
+					fputc(0, afilp);
+				break;
+			case 'r':
+				len = 0;
+				while (isdigit(*cat))
+					len = 10 * len + (*cat++ - '0');
+				if (fwrite(DatumGetPointer(datum), len, 1, afilp) != 1)
+					elog(ERROR, "broken pipe: %m");
+				sz = MAXALIGN(len) - len;
+				while (sz-- > 0)
+					fputc(0, afilp);
+				break;
+			default:
+				elog(ERROR, "invalid argument catalog: %s",
+					 con->arg_catalog);
+				break;
 		}
 	}
-	PG_CATCH();
+	if (*cat != '\0')
+		elog(ERROR, "Invalid argument catalog: %s", con->arg_catalog);
+}
+
+/*
+ * plcuda_wait_child_program
+ */
+static Datum
+plcuda_wait_child_program(pid_t child, plcuda_code_context *con, int fdesc)
+{
+	StringInfoData buf;
+	ssize_t		sz, nbytes = 1024;
+	pid_t		rv;
+	int			status;
+	Datum		result = 0;
+	MemoryContext oldcxt;
+
+	/* result buffer */
+	oldcxt = MemoryContextSwitchTo(con->results_memcxt);
+	initStringInfo(&buf);
+	MemoryContextSwitchTo(oldcxt);
+
+	while (fdesc != PGINVALID_SOCKET)
 	{
-		kill(child, SIGKILL);
-		pqsignal(SIGCHLD, sigchld_saved);
-		PG_RE_THROW();
+		int		ev;
+
+		CHECK_FOR_INTERRUPTS();
+		ev = WaitLatchOrSocket(MyLatch,
+							   WL_LATCH_SET |
+							   WL_TIMEOUT |
+							   WL_SOCKET_READABLE |
+							   WL_POSTMASTER_DEATH,
+							   fdesc,
+							   5000L,
+							   PG_WAIT_EXTENSION);
+		if (ev & WL_SOCKET_READABLE)
+		{
+			for (;;)
+			{
+				enlargeStringInfo(&buf, nbytes);
+				sz = read(fdesc, buf.data + buf.len, nbytes);
+				if (sz < 0)
+				{
+					if (errno == EINTR)
+						continue;
+					else if (errno == EAGAIN || errno == EWOULDBLOCK)
+						break;
+					else
+						elog(ERROR, "failed on read(2): %m");
+				}
+				else if (sz == 0)
+				{
+					/* end of file */
+					close(fdesc);
+					fdesc = PGINVALID_SOCKET;
+					break;
+				}
+				else
+				{
+					buf.len += sz;
+					if (sz < nbytes)
+						break;
+					nbytes *= 2;
+				}
+			}
+		}
+		ResetLatch(MyLatch);
 	}
-	PG_END_TRY();
-	pqsignal(SIGCHLD, sigchld_saved);
+	/* check status of the child process */
+	do {
+		rv = waitpid(child, &status, 0);
+		if (rv < 0)
+		{
+			if (errno != EINTR)
+				elog(ERROR, "failed on waitpid(2): %m");
+			CHECK_FOR_INTERRUPTS();
+		}
+	} while (rv <= 0);
+	Assert(rv == child);
 
 	if (WIFSIGNALED(status))
 		elog(ERROR, "PL/CUDA script was terminated by signal: %d",
 			 WTERMSIG(status));
 	if (WEXITSTATUS(status) == 0)
-		isnull = false;
+	{
+		int16	typlen;
+		bool	typbyval;
+
+		get_typlenbyval(con->prorettype, &typlen, &typbyval);
+		if (typbyval)
+		{
+			if (buf.len < typlen)
+				elog(ERROR, "PL/CUDA result length mismatch (%d)", buf.len);
+			memcpy(&result, buf.data, sizeof(Datum));
+			pfree(buf.data);
+		}
+		else if (typlen > 0)
+		{
+			if (buf.len < typlen)
+				elog(ERROR, "PL/CUDA result length mismatch");
+			result = PointerGetDatum(buf.data);
+		}
+		else if (typlen == -1)
+		{
+			if (buf.len < VARHDRSZ || buf.len < VARSIZE(buf.data))
+				elog(ERROR, "PL/CUDA result length mismatch");
+			result = PointerGetDatum(buf.data);
+		}
+		else
+			elog(ERROR, "Bug? unsupported type length");
+		con->fcinfo->isnull = false;
+	}
 	else if (WEXITSTATUS(status) == 1)
-		isnull = true;
+		con->fcinfo->isnull = true;
 	else
 		elog(ERROR, "PL/CUDA script was terminated abnormally (code: %d)",
 			 WEXITSTATUS(status));
-	return isnull;
+	return result;
 }
 
 /*
  * plcuda_exec_cuda_program
  */
 static Datum
-plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
-						 int rbuf_fdesc, bool *p_isnull)
+plcuda_exec_cuda_program(char *command, plcuda_code_context *con)
 {
-	oidvector  *proargtypes = con->proargtypes;
-	char	   *cmd_argv[FUNC_MAX_ARGS + 20];
+	char	   *cmd_argv[20];
 	pid_t		child;
 	int			i, j=0;
 	Datum		result = 0;
-	bool		isnull;
+	int			pipefd[4];
 
-	//XXX put env, nvprof or ..., if any
-
+	plcuda_setup_arguments(con);
 	cmd_argv[j++] = command;
-	if (con->afname[0] != '\0')
-	{
-		cmd_argv[j++] = "-a";
-		cmd_argv[j++] = con->afname;
-	}
-	if (con->rfname[0] != '\0')
-	{
-		cmd_argv[j++] = "-r";
-		cmd_argv[j++] = con->rfname;
-	}
-	cmd_argv[j++] = "--";
-	for (i=0; i < proargtypes->dim1; i++)
-		cmd_argv[j++] = con->prog_args[i];
+	cmd_argv[j++] = "-s";
+	cmd_argv[j++] = psprintf("%zu", con->arg_datasz);
+	cmd_argv[j++] = "-c";
+	cmd_argv[j++] = pstrdup(con->arg_catalog);
 	cmd_argv[j++] = NULL;
 
 	/* shows command line if debug mode */
@@ -1207,71 +1209,64 @@ plcuda_exec_cuda_program(char *command, plcuda_code_context *con,
 		elog(NOTICE, "PL/CUDA: %s", temp.data);
 		pfree(temp.data);
 	}
-	/* fork child */
+
+	/* IPC stuff */
+	if (pipe(pipefd) != 0)		/* for arguments */
+		elog(ERROR, "failed on pipe(2): %m");
+	if (pipe(pipefd+2) != 0)	/* for result */
+	{
+		close(pipefd[0]);
+		close(pipefd[1]);
+		elog(ERROR, "failed on pipe(2): %m");
+	}
+	/* fork a child */
 	child = fork();
 	if (child == 0)
-		plcuda_exec_child_program(command, cmd_argv);
-	else if (child > 0)
-		isnull = plcuda_wait_child_program(child);
-	else
-		elog(ERROR, "failed on fork(2): %m");
-
-	/* get result */
-	if (!isnull)
 	{
-		int16		typlen;
-		bool		typbyval;
-		struct stat	stbuf;
-		void	   *buffer;
+		close(pipefd[1]);	/* W of arguments */
+		close(pipefd[2]);	/* R of result */
+		plcuda_exec_child_program(command, cmd_argv,
+								  pipefd[0], pipefd[3]);
+		/* will never return */
+		_exit(2);
+	}
+	else if (child > 0)
+	{
+		FILE	   *afilp = NULL;
 
-		get_typlenbyval(con->prorettype, &typlen, &typbyval);
-		if (fstat(rbuf_fdesc, &stbuf) != 0)
-			elog(ERROR, "failed on stat('%s'): %m", con->rfname);
-		buffer = mmap(NULL, stbuf.st_size,
-					  PROT_READ, MAP_SHARED,
-					  rbuf_fdesc, 0);
-		if (buffer == MAP_FAILED)
-			elog(ERROR, "failed on mmap: %m");
+		close(pipefd[0]);	/* R of arguments */
+		close(pipefd[3]);	/* W of result */
 		PG_TRY();
 		{
-			MemoryContext	oldcxt
-				= MemoryContextSwitchTo(con->results_memcxt);
-			if (typbyval)
-			{
-				Assert(typlen <= sizeof(Datum));
-				memcpy(&result, buffer, typlen);
-			}
-			else if (typlen > 0)
-			{
-				char   *temp = palloc(typlen);
-
-				memcpy(temp, buffer, typlen);
-				result = PointerGetDatum(temp);
-			}
-			else if (typlen == -1)
-			{
-				size_t	len = VARSIZE_ANY(buffer);
-				void   *temp = palloc(len);
-
-				memcpy(temp, buffer, len);
-				result = PointerGetDatum(temp);
-			}
-			else
-				elog(ERROR, "unexpected type attribute");
-			MemoryContextSwitchTo(oldcxt);
+			/* write arguments */
+			afilp = fdopen(pipefd[1], "wb");
+			if (!afilp)
+				elog(ERROR, "failed on fdopen(3): %m");
+			pipefd[1] = -1;
+			plcuda_write_arguments(con, afilp);
+			fclose(afilp);
+			/* wait for completion */
+			result = plcuda_wait_child_program(child, con, pipefd[2]);
+			close(pipefd[2]);
 		}
 		PG_CATCH();
 		{
-			if (munmap(buffer, stbuf.st_size))
-				elog(WARNING, "failed on munmap: %m");
+			kill(child, SIGKILL);
+			if (afilp)
+				fclose(afilp);
+			else if (pipefd[1] >= 0)
+				close(pipefd[1]);
+			close(pipefd[2]);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-
-		if (munmap(buffer, stbuf.st_size))
-			elog(WARNING, "failed on munmap: %m");
 	}
-	*p_isnull = isnull;
+	else
+	{
+		for (i=0; i < lengthof(pipefd); i++)
+			close(pipefd[i]);
+		elog(ERROR, "failed on fork(2): %m");
+	}
 	return result;
 }
 
@@ -1286,7 +1281,6 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	HeapTuple	tuple;
 	plcuda_code_context con;
 	Oid			fn_oid = fcinfo->flinfo->fn_oid;
-	int			rbuf_fdesc = -1;
 	char		hexsum[33];
 	char	   *command;
 	struct stat	stbuf;
@@ -1345,33 +1339,9 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 			elog(ERROR, "failed on stat('%s'): %m", command);
 		plcuda_build_program(&con, command, &source);
 	}
-
-	PG_TRY();
-	{
-		/* setup arguments */
-		plcuda_setup_arguments(&con);
-		/* setup result buffer */
-		rbuf_fdesc = plcuda_setup_result_buffer(&con);
-		/* kick PL/CUDA program */
-		result = plcuda_exec_cuda_program(command, &con,
-										  rbuf_fdesc, &fcinfo->isnull);
-	}
-	PG_CATCH();
-	{
-		if (con.afname[0] != '\0' && !plcuda_enable_debug)
-			shm_unlink(con.afname);
-		if (con.rfname[0] != '\0' && !plcuda_enable_debug)
-			shm_unlink(con.rfname);
-		close(rbuf_fdesc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	/* cleanup */
-	if (con.afname[0] != '\0' && !plcuda_enable_debug)
-		shm_unlink(con.afname);
-	if (con.rfname[0] != '\0' && !plcuda_enable_debug)
-		shm_unlink(con.rfname);
-	close(rbuf_fdesc);
+	/* Launch PL/CUDA binary */
+	result = plcuda_exec_cuda_program(command, &con);
+	/* Cleanup */
 	ReleaseSysCache(tuple);
 
 	return result;
