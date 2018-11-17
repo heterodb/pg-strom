@@ -986,11 +986,10 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
  *
  * Format definition when Gstore_fdw exports IPChandle of the GPU memory.
  */
-#define GSTORE_IPC_HANDLE_MAGIC		0x474d656d		/* 'GMem' */
 
 /* Gstore_fdw's internal data format */
-#define GSTORE_FDW_FORMAT__PGSTROM		500		/* KDS with columnar */
-//#define GSTORE_FDW_FORMAT__ARROW		501		/* Apache Arrow compatible */
+#define GSTORE_FDW_FORMAT__PGSTROM		50		/* KDS_FORMAT_COLUMN */
+//#define GSTORE_FDW_FORMAT__ARROW		51		/* Apache Arrow compatible */
 
 /* column 'compression' option */
 #define GSTORE_COMPRESSION__NONE		0
@@ -998,22 +997,20 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 
 typedef struct
 {
-	cl_uint		__vl_len;		/* varlena header */
-	cl_uint		magic;			/* = GSTORE_IPC_HANDLE_MAGIC */
+	cl_uint		__vl_len;		/* 4B varlena header */
 	cl_short	device_id;		/* GPU device where pinning on */
 	cl_char		format;			/* one of GSTORE_FDW_FORMAT__* */
 	cl_char		__padding__;	/* reserved */
-	cl_uint		nitems;			/* # of items */
 	cl_long		rawsize;		/* length in bytes */
 	union {
-#ifdef CU_IPC_HANDLE_SIZE		/* driver API */
-		CUipcMemHandle		cu_ipc_mhandle;
+#ifdef CU_IPC_HANDLE_SIZE
+		CUipcMemHandle		d;	/* CUDA driver API */
 #endif
-#ifdef CUDA_IPC_HANDLE_SIZE		/* runtime API */
-		cudaIpcMemHandle_t	cuda_ipc_mhandle;
+#ifdef CUDA_IPC_HANDLE_SIZE
+		cudaIpcMemHandle_t	r;	/* CUDA runtime API */
 #endif
-		char				ipc_mhandle[64];
-	} u;
+		char				data[64];
+	} ipc_mhandle;
 } GstoreIpcHandle;
 
 #ifdef __CUDACC__

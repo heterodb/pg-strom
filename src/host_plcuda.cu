@@ -6,27 +6,21 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define EEXIT(fmt, ...)								\
-	do {											\
-		fprintf(stderr, fmt "\n",##__VA_ARGS__);	\
-		exit(2);									\
-	} while(0)
-
-static GstoreDescPLCUDA *
-decode_gstore_desc_plcuda(const char *hex)
+static GstoreIpcMapping *
+decode_gstore_ipc_handle(const char *hex)
 {
-	GstoreDescPLCUDA *result;
+	GstoreIpcMapping *result;
 	const char	   *pos = hex;
 	unsigned char  *dst;
 	int				i, c0, c1;
 
-	result = (GstoreDescPLCUDA *)malloc(sizeof(GstoreDescPLCUDA));
+	result = (GstoreIpcMapping *)malloc(sizeof(GstoreIpcMapping));
 	if (!result)
 		EEXIT("out of memory");
-	dst = (unsigned char *) result;
+	dst = (unsigned char *) &result->h;
 	for (i=0; *pos != '\0'; i++)
 	{
-		if (i >= sizeof(GstoreDescPLCUDA))
+		if (i >= sizeof(GstoreIpcHandle))
 			EEXIT("IPC mhandle too large");
 
 		c0 = *pos++;
@@ -51,8 +45,11 @@ decode_gstore_desc_plcuda(const char *hex)
 
 		dst[i] = (c0 << 4) | c1;
 	}
-	if (i != sizeof(GstoreDescPLCUDA))
+	if (i != sizeof(GstoreIpcHandle))
 		EEXIT("IPC mhandle length mismatch");
+	if (VARSIZE(result) != sizeof(GstoreIpcHandle))
+		EEXIT("IPC mhandle is broken varlena datum");
+	result->map = NULL;
 	return result;
 }
 
@@ -166,15 +163,15 @@ int main(int argc, char * const argv[])
 			}
 			if (!ptr)
 			{
-				GstoreDescPLCUDA *desc = decode_gstore_desc_plcuda(tok+2);
+				GstoreIpcMapping *temp = decode_gstore_ipc_handle(tok+2);
 
-				rc = cudaIpcOpenMemHandle(&desc->map,
-										  desc->h.u.cuda_ipc_mhandle,
+				rc = cudaIpcOpenMemHandle(&temp->map,
+										  temp->h.ipc_mhandle.r,
 										  cudaIpcMemLazyEnablePeerAccess);
 				if (rc != cudaSuccess)
 					EEXIT("failed on cudaIpcOpenMemHandle: %s",
 						  cudaGetErrorName(rc));
-				ptr = desc;
+				ptr = temp;
 			}
 		}
 		else

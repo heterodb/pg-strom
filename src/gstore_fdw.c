@@ -2020,12 +2020,10 @@ __pgstrom_gstore_export_ipchandle(Oid ftable_oid)
 		return NULL;
 
 	result = palloc0(sizeof(GstoreIpcHandle));
-	result->magic = GSTORE_IPC_HANDLE_MAGIC;
 	result->device_id = devAttrs[pinning].DEV_ID;
 	result->format = gs_chunk->format;
-	result->nitems = gs_chunk->nitems;
 	result->rawsize = gs_chunk->rawsize;
-	memcpy(&result->u.cu_ipc_mhandle,
+	memcpy(&result->ipc_mhandle.d,
 		   &gs_chunk->ipc_mhandle,
 		   sizeof(CUipcMemHandle));
 	SET_VARSIZE(result, sizeof(GstoreIpcHandle));

@@ -561,16 +561,7 @@ plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 									 typeForm->typrelid);
 		ReleaseSysCache(tup);
 	}
-	appendStringInfo(
-		source,
-		"\n"
-		"/* GstoreDescPLCUDA */\n"
-		"typedef struct\n"
-		"{\n"
-		"    GstoreIpcHandle h; /* IPChandle of Gstore_Fdw */\n"
-		"    void      *map;    /* mapped device pointer */\n"
-		"} GstoreDescPLCUDA;\n"
-		"\n");
+	appendStringInfoChar(source, '\n');
 }
 
 /*
@@ -584,13 +575,7 @@ plcuda_get_type_label(Oid type_oid, int16 *p_typlen, bool *p_typbyval)
 	bool		typbyval;
 
 	get_typlenbyval(type_oid, &typlen, &typbyval);
-	if (type_oid == REGGSTOREOID)
-	{
-		typlen	= -2;
-		typbyval = false;
-		label = "GstoreDescPLCUDA *";	/* descriptor */
-	}
-	else if (!typbyval)
+	if (!typbyval)
 	{
 		if (typlen == -1)
 			label = "varlena *";	/* device pointer */
@@ -639,6 +624,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"#define KERN_CONTEXT_VARLENA_BUFSZ 0\n"
 		"#include <cuda_runtime.h>\n"
 		"#include \"cuda_common.h\"\n"
+		"#include \"cuda_plcuda.h\"\n"
 		"\n",
 		con->proname,
 		MAXIMUM_ALIGNOF,
@@ -647,16 +633,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 	if (con->decl.data)
 		appendStringInfoString(source, con->decl.data);
 
-	if (con->prorettype == REGGSTOREOID)
-	{
-		label = "cl_uint";
-		typlen = sizeof(cl_int);
-		typbyval = true;
-	}
-	else
-	{
-		label = plcuda_get_type_label(con->prorettype, &typlen, &typbyval);
-	}
+	label = plcuda_get_type_label(con->prorettype, &typlen, &typbyval);
 	appendStringInfo(
 		source,
 		"typedef %s PLCUDA_RESULT_TYPE;\n"
@@ -669,31 +646,35 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"static PLCUDA_RESULT_TYPE plcuda_main(void *p_args[])\n"
 		"{\n"
 		"  %s retval = %s;\n",
-		label, typlen, typbyval, con->proargtypes->dim1, label,
-		strchr(label, '*') ? "NULL" : "0");
+		label, typlen, typbyval, con->proargtypes->dim1,
+		label, typbyval ? "0" : "NULL");
 
 	for (i=0; i < proargtypes->dim1; i++)
 	{
 		Oid		type_oid = proargtypes->values[i];
 
-		label = plcuda_get_type_label(type_oid, &typlen, &typbyval);
 		if (type_oid == REGGSTOREOID)
 		{
+			label = "GstoreIpcMapping *";
 			appendStringInfo(
 				source,
 				"  %sarg%d %s = (%s)p_args[%d];\n",
 				label, i+1, __attr_unused, label, i);
 		}
-		else if (typbyval)
-			appendStringInfo(
-				source,
-				"  %s arg%d %s = PLCUDA_GET_ARGVAL(%d,%s);\n",
-				label, i+1, __attr_unused, i, label);
 		else
-			appendStringInfo(
-				source,
-				"  %s arg%d %s = (%s)p_args[%d];\n",
-				label, i+1, __attr_unused, label, i);
+		{
+			label = plcuda_get_type_label(type_oid, &typlen, &typbyval);
+			if (typbyval)
+				appendStringInfo(
+					source,
+					"  %s arg%d %s = PLCUDA_GET_ARGVAL(%d,%s);\n",
+					label, i+1, __attr_unused, i, label);
+			else
+				appendStringInfo(
+					source,
+					"  %s arg%d %s = (%s)p_args[%d];\n",
+					label, i+1, __attr_unused, label, i);
+		}
 	}
 	if (con->main.data)
 		appendStringInfo(source, "{\n%s}\n", con->main.data);
@@ -749,6 +730,7 @@ plcuda_build_program(plcuda_code_context *con,
 	foreach (lc, con->link_libs)
 		appendStringInfo(&cmd, " -l%s", (char *)lfirst(lc));
 	appendStringInfo(&cmd, " -o %s %s", name, path);
+	appendStringInfo(&cmd, " 2>&1");	/* stderr to stdout */
 
 	/* kick nvcc compiler */
 	if (plcuda_enable_debug)
@@ -770,10 +752,14 @@ plcuda_build_program(plcuda_code_context *con,
 	status = ClosePipeStream(filp);
 
 	if (status != 0)
-		elog(ERROR, "PL/CUDA compilation failed.\n%s", log.data);
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("PL/CUDA compilation failed."),
+				 errdetail("build log:\n%s", log.data)));
 	else if (log.len > 0)
-		elog(NOTICE, "PL/CUDA compilation log.\n%s", log.data);
-
+		ereport(NOTICE,
+				(errmsg("PL/CUDA compilation log."),
+				 errdetail("build log:\n%s", log.data)));
 	pfree(log.data);
 	pfree(cmd.data);
 }
@@ -889,7 +875,7 @@ plcuda_setup_arguments(plcuda_code_context *con)
 	ssize_t		required;
 	ssize_t		offset[FUNC_MAX_ARGS];
 	char		name[sizeof(con->afname)];
-	int			i, fdesc = -1;
+	int			i, j, fdesc = -1;
 	char	   *buffer = NULL;
 
 	required = 0;
@@ -906,6 +892,7 @@ plcuda_setup_arguments(plcuda_code_context *con)
 			con->prog_args[i] = "__null__";
 			continue;
 		}
+
 		if (type_oid == REGGSTOREOID)
 		{
 			Oid		ftable_oid = DatumGetObjectId(fcinfo->arg[i]);
@@ -921,8 +908,8 @@ plcuda_setup_arguments(plcuda_code_context *con)
 
 				initStringInfo(&buf);
 				appendStringInfo(&buf, "g:");
-				for (i=0; i < sizeof(GstoreIpcHandle); i++)
-					appendStringInfo(&buf, "%02x", src[i]);
+				for (j=0; j < sizeof(GstoreIpcHandle); j++)
+					appendStringInfo(&buf, "%02x", src[j]);
 				con->prog_args[i] = buf.data;
 			}
 			continue;	/* passed by IPC_mhandle */
