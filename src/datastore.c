@@ -419,11 +419,6 @@ init_kernel_data_store(kern_data_store *kds,
 			attcacheoff += attr->attlen;
 		if (attNames)
 			memcpy(&attNames[i], &attr->attname, sizeof(NameData));
-
-		/*
-		 * !!don't forget to update pl_cuda.c if kern_colmeta layout would
-		 * be updated !!
-		 */
 	}
 }
 

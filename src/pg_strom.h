@@ -1309,12 +1309,6 @@ extern void pgstrom_init_ccache(void);
 extern bool type_is_reggstore(Oid type_oid);
 extern Oid	get_reggstore_type_oid(void);
 #define REGGSTOREOID		get_reggstore_type_oid()
-extern int  gstore_fdw_preferable_device(FunctionCallInfo fcinfo);
-extern void gstore_fdw_load_function_args(GpuContext *gcontext,
-										  FunctionCallInfo fcinfo,
-										  List **p_gstore_oid_list,
-										  List **p_gstore_devptr_list,
-										  List **p_gstore_dindex_list);
 extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
