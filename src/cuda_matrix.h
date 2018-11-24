@@ -318,8 +318,11 @@ TYPEDEF_CUBE_TEMPLATE(Double,cl_double);
 		((VectorType *)(X))->lbound1 = 1;						\
 	} while(0)
 
+
+
+
 STATIC_INLINE(cl_bool)
-__VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype)
+__VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype, cl_bool strict)
 {
 	if (VARATT_IS_4B(X) &&
 		!ARR_HASNULL(X) &&
@@ -333,7 +336,7 @@ __VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype)
 				((VectorType *)X)->height > 0)
 				return true;
 		}
-		else if (X->ndim == 2)
+		else if (!strict && X->ndim == 2)
 		{
 			if (((MatrixType *)X)->lbound1 == 1 &&
 				((MatrixType *)X)->lbound2 == 1 &&
@@ -341,7 +344,7 @@ __VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype)
 				((MatrixType *)X)->height > 0)
 				return true;
 		}
-		else if (X->ndim == 3)
+		else if (!strict && X->ndim == 3)
 		{
 			if (((CubeType *)X)->lbound1 == 1 &&
 				((CubeType *)X)->lbound2 == 1 &&
@@ -354,8 +357,14 @@ __VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype)
 	}
 	return false;
 }
-#define VALIDATE_ARRAY_VECTOR(X)		\
-	__VALIDATE_ARRAY_VECTOR((ArrayType *)(X),0)
+#define VALIDATE_ARRAY_VECTOR(X)				\
+	__VALIDATE_ARRAY_VECTOR((ArrayType *)(X),0,false)
+#define VALIDATE_ARRAY_VECTOR_STRICT(X)			\
+	__VALIDATE_ARRAY_VECTOR((ArrayType *)(X),0,type)
+#define VALIDATE_ARRAY_VECTOR_TYPE(X,_elemtype)	\
+	__VALIDATE_ARRAY_VECTOR((ArrayType *)(X),(_elemtype),false)
+#define VALIDATE_ARRAY_VECTOR_TYPE_STRICT(X,_elemtype) \
+	__VALIDATE_ARRAY_VECTOR((ArrayType *)(X),(_elemtype),true)
 #define ARRAY_VECTOR_HEIGHT(X)										\
 	(((ArrayType *)(X))->ndim == 1 ? ((VectorType *)(X))->height :		\
 	 (((ArrayType *)(X))->ndim == 2 ? ((MatrixType *)(X))->height :		\
@@ -382,7 +391,7 @@ __VALIDATE_ARRAY_VECTOR(ArrayType *X, cl_uint elemtype)
 	} while(0)
 
 STATIC_INLINE(cl_bool)
-__VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype)
+__VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype, cl_bool strict)
 {
 	if (VARATT_IS_4B(X) &&
 		!ARR_HASNULL(X) &&
@@ -390,7 +399,7 @@ __VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype)
 		 ? IS_ARRAY_MATRIX_TYPE(ARR_ELEMTYPE(X))
 		 : ARR_ELEMTYPE(X) == elemtype))
 	{
-		if (X->ndim == 1)
+		if (!strict && X->ndim == 1)
 		{
 			if (((VectorType *)X)->lbound1 == 1 &&
 				((VectorType *)X)->height  > 0)
@@ -404,7 +413,7 @@ __VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype)
 				((MatrixType *)X)->height > 0)
 				return true;
 		}
-		else if (X->ndim == 3)
+		else if (!strict && X->ndim == 3)
 		{
 			if (((CubeType *)X)->lbound1 == 1 &&
 				((CubeType *)X)->lbound2 == 1 &&
@@ -418,7 +427,14 @@ __VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype)
 	return false;
 }
 #define VALIDATE_ARRAY_MATRIX(X)				\
-	__VALIDATE_ARRAY_MATRIX((ArrayType *)(X),0)
+	__VALIDATE_ARRAY_MATRIX((ArrayType *)(X),0,false)
+#define VALIDATE_ARRAY_MATRIX_TYPE(X,_elemtype)	\
+	__VALIDATE_ARRAY_MATRIX((ArrayType *)(X),(_elemtype),false)
+#define VALIDATE_ARRAY_MATRIX_STRICT(X)					\
+	__VALIDATE_ARRAY_MATRIX((ArrayType *)(X),0,true)
+#define VALIDATE_ARRAY_MATRIX_TYPE_STRICT(X,_elemtype)	\
+	__VALIDATE_ARRAY_MATRIX((ArrayType *)(X),(_elemtype),true)
+
 #define ARRAY_MATRIX_WIDTH(X)											\
 	(((ArrayType *)(X))->ndim == 1 ? 1 :								\
 	 (((ArrayType *)(X))->ndim == 2 ? ((MatrixType *)(X))->width :		\
@@ -452,7 +468,7 @@ __VALIDATE_ARRAY_MATRIX(ArrayType *X, cl_uint elemtype)
 	} while(0)
 
 STATIC_INLINE(cl_bool)
-__VALIDATE_ARRAY_CUBE(ArrayType *X, cl_uint elemtype)
+__VALIDATE_ARRAY_CUBE(ArrayType *X, cl_uint elemtype, cl_bool strict)
 {
 	if (VARATT_IS_4B(X) &&
 		!ARR_HASNULL(X) &&
@@ -460,13 +476,13 @@ __VALIDATE_ARRAY_CUBE(ArrayType *X, cl_uint elemtype)
 		 ? IS_ARRAY_MATRIX_TYPE(ARR_ELEMTYPE(X))
 		 : ARR_ELEMTYPE(X) == elemtype))
 	{
-		if (X->ndim == 1)
+		if (!strict && X->ndim == 1)
 		{
 			if (((VectorType *)X)->lbound1 == 1 &&
 				((VectorType *)X)->height  > 0)
 				return true;
 		}
-		else if (X->ndim == 2)
+		else if (!strict && X->ndim == 2)
 		{
 			if (((MatrixType *)X)->lbound1 == 1 &&
 				((MatrixType *)X)->lbound2 == 1 &&
@@ -487,8 +503,15 @@ __VALIDATE_ARRAY_CUBE(ArrayType *X, cl_uint elemtype)
 	}
 	return false;
 }
-#define VALIDATE_ARRAY_CUBE(X)					\
-	__VALIDATE_ARRAY_CUBE((ArrayType *)(X),0)
+#define VALIDATE_ARRAY_CUBE(X)						\
+	__VALIDATE_ARRAY_CUBE((ArrayType *)(X),0,false)
+#define VALIDATE_ARRAY_CUBE_TYPE(X,_elemtype)		\
+	__VALIDATE_ARRAY_CUBE((ArrayType *)(X),(_elemtype),false)
+#define VALIDATE_ARRAY_CUBE_STRICT(X)				\
+	__VALIDATE_ARRAY_CUBE((ArrayType *)(X),0,true)
+#define VALIDATE_ARRAY_CUBE_TYPE_STRICT(X,_elemtype)\
+	__VALIDATE_ARRAY_CUBE((ArrayType *)(X),(_elemtype),true)
+
 #define ARRAY_CUBE_DEPTH(X)												\
 	(((ArrayType *)(X))->ndim == 1 ? 1 :								\
 	 (((ArrayType *)(X))->ndim == 1 ? 1 :								\

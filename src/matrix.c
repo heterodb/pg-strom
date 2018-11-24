@@ -224,7 +224,7 @@ int4_array_to_varbit(PG_FUNCTION_ARGS)
 	cl_int		nitems;
 
 	/* sanity check - only vector like array is valid */
-	if (!__VALIDATE_ARRAY_VECTOR(X, INT4OID))
+	if (!VALIDATE_ARRAY_VECTOR_TYPE(X, INT4OID))
 		elog(ERROR, "Only vector like array is supported");
 	nitems = ARRAY_VECTOR_HEIGHT(X);
 
@@ -300,7 +300,7 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 			BASETYPE   *dst;											\
 																		\
 			/* sanity checks */											\
-			Assert(__VALIDATE_ARRAY_VECTOR(V, (amstate)->elemtype));	\
+			Assert(VALIDATE_ARRAY_VECTOR_TYPE(V, (amstate)->elemtype));	\
 			src = ((BASETYPE *)ARR_DATA_PTR(V));						\
 			dst = ((BASETYPE *)ARR_DATA_PTR(R)) + row_index;			\
 			nitems = ARRAY_VECTOR_HEIGHT(V);							\
@@ -556,8 +556,8 @@ array_martix_rbind(Oid elemtype, ArrayType *X, ArrayType *Y)
 	char	   *src, *dst;
 
 	/* sanity checks */
-	if (!__VALIDATE_ARRAY_MATRIX(X, elemtype) ||
-		!__VALIDATE_ARRAY_MATRIX(Y, elemtype))
+	if (!VALIDATE_ARRAY_MATRIX_TYPE(X, elemtype) ||
+		!VALIDATE_ARRAY_MATRIX_TYPE(Y, elemtype))
 		elog(ERROR, "not a matrix-like array");
 	typlen = get_typlen(elemtype);
 
@@ -906,8 +906,8 @@ array_martix_cbind(Oid elemtype, ArrayType *X, ArrayType *Y)
 	/* sanity checks */
 	if (VARATT_IS_EXPANDED_HEADER(X) || VARATT_IS_EXPANDED_HEADER(Y))
 		elog(ERROR, "ExpandedArrayHeader is not supported");
-	if (!__VALIDATE_ARRAY_MATRIX(X,elemtype) ||
-		!__VALIDATE_ARRAY_MATRIX(Y,elemtype))
+	if (!VALIDATE_ARRAY_MATRIX_TYPE(X,elemtype) ||
+		!VALIDATE_ARRAY_MATRIX_TYPE(Y,elemtype))
 		elog(ERROR, "Not a matrix-like array");
 	typlen = get_typlen(elemtype);
 
