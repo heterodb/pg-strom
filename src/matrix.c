@@ -20,104 +20,90 @@
 #include <math.h>
 
 /* function declarations */
-extern Datum array_matrix_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_accum_varbit(PG_FUNCTION_ARGS);
-extern Datum varbit_to_int4_array(PG_FUNCTION_ARGS);
-extern Datum int4_array_to_varbit(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_unnest(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_boolt(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_boolb(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int2t(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int2b(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int4t(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int4b(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int8t(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_int8b(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_float4t(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_float4b(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_float8t(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_scalar_float8b(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_booll(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_boolr(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int2l(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int2r(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int4l(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int4r(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int8l(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_int8r(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_float4l(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_float4r(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_float8l(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_scalar_float8r(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_bool(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_float8(PG_FUNCTION_ARGS);
-extern Datum float4_as_int4(PG_FUNCTION_ARGS);
-extern Datum int4_as_float4(PG_FUNCTION_ARGS);
-extern Datum float8_as_int8(PG_FUNCTION_ARGS);
-extern Datum int8_as_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_validation(PG_FUNCTION_ARGS);
-extern Datum array_matrix_height(PG_FUNCTION_ARGS);
-extern Datum array_matrix_width(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rawsize(PG_FUNCTION_ARGS);
+Datum array_matrix_accum(PG_FUNCTION_ARGS);
+Datum array_matrix_accum_varbit(PG_FUNCTION_ARGS);
+Datum varbit_to_int4_array(PG_FUNCTION_ARGS);
+Datum int4_array_to_varbit(PG_FUNCTION_ARGS);
+Datum array_matrix_final_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_final_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_final_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_final_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_final_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_final_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_unnest(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_boolt(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_boolb(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int2t(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int2b(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int4t(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int4b(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int8t(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_int8b(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_float4t(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_float4b(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_float8t(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_scalar_float8b(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_booll(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_boolr(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int2l(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int2r(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int4l(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int4r(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int8l(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_int8r(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_float4l(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_float4r(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_float8l(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_scalar_float8r(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_accum(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_rbind_final_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_accum(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_cbind_final_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_bool(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_int2(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_int4(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_int8(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_float4(PG_FUNCTION_ARGS);
+Datum array_matrix_transpose_float8(PG_FUNCTION_ARGS);
 
-extern Datum postgresql_type_rawsize(PG_FUNCTION_ARGS);
-extern Datum composite_type_rawsize(PG_FUNCTION_ARGS);
-
-/* fmgr macros for regular varlena matrix  objects */
-#define DatumGetMatrixTypeP(X)					\
-	((MatrixType *) PG_DETOAST_DATUM(X))
-#define DatumGetMatrixTypePCopy(X)				\
-	((MatrixType *) PG_DETOAST_DATUM_COPY(X))
-#define PG_GETARG_MATRIXTYPE_P(n)				\
-	DatumGetMatrixTypeP(PG_GETARG_DATUM(n))
-#define PG_GETARG_MATRIXTYPE_P_COPY(n)			\
-	DatumGetMatrixTypePCopy(PG_GETARG_DATUM(n))
-#define PG_RETURN_MATRIXTYPE_P(x)		PG_RETURN_POINTER(x)
+Datum float4_as_int4(PG_FUNCTION_ARGS);
+Datum int4_as_float4(PG_FUNCTION_ARGS);
+Datum float8_as_int8(PG_FUNCTION_ARGS);
+Datum int8_as_float8(PG_FUNCTION_ARGS);
+Datum array_matrix_validation(PG_FUNCTION_ARGS);
+Datum array_matrix_height(PG_FUNCTION_ARGS);
+Datum array_matrix_width(PG_FUNCTION_ARGS);
 
 /*
  * create_empty_matrix
  */
-static MatrixType *
+static ArrayType *
 create_empty_matrix(Oid type_oid, cl_uint width, cl_uint height)
 {
 	Size		type_len;
-	MatrixType *M;
+	ArrayType  *M;
 
 	Assert(width > 0);
 	switch (type_oid)
@@ -133,10 +119,7 @@ create_empty_matrix(Oid type_oid, cl_uint width, cl_uint height)
 				 format_type_be(type_oid));
 	}
 	M = palloc(ARRAY_MATRIX_RAWSIZE(type_len,height,width));
-	if (width == 1)
-		INIT_ARRAY_VECTOR(M,type_oid,type_len,height);
-	else
-		INIT_ARRAY_MATRIX(M,type_oid,type_len,height,width);
+	INIT_ARRAY_MATRIX(M,type_oid,type_len,height,width);
 	return M;
 }
 
@@ -156,8 +139,8 @@ array_matrix_accum(PG_FUNCTION_ARGS)
 	array_matrix_state *amstate;
 	MemoryContext	aggcxt;
 	MemoryContext	oldcxt;
-	ArrayType	   *array;
-	cl_uint			width;
+	VectorType	   *V;
+	cl_uint			nitems;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -166,32 +149,33 @@ array_matrix_accum(PG_FUNCTION_ARGS)
 		elog(ERROR, "null-array was supplied");
 
 	oldcxt = MemoryContextSwitchTo(aggcxt);
-	array = PG_GETARG_ARRAYTYPE_P_COPY(1);
+	V = (VectorType *)PG_GETARG_ARRAYTYPE_P_COPY(1);
 
-	/* sanity check */
-	if (ARR_NDIM(array) != 1)
-		elog(ERROR, "input array was not 1-dimension array");
-	if (ARR_ELEMTYPE(array) != BOOLOID &&
-		ARR_ELEMTYPE(array) != INT2OID &&
-		ARR_ELEMTYPE(array) != INT4OID &&
-		ARR_ELEMTYPE(array) != INT8OID &&
-		ARR_ELEMTYPE(array) != FLOAT4OID &&
-		ARR_ELEMTYPE(array) != FLOAT8OID)
+	/* validation */
+	if (ARR_ELEMTYPE(V) != BOOLOID &&
+		ARR_ELEMTYPE(V) != INT2OID &&
+		ARR_ELEMTYPE(V) != INT4OID &&
+		ARR_ELEMTYPE(V) != INT8OID &&
+		ARR_ELEMTYPE(V) != FLOAT4OID &&
+		ARR_ELEMTYPE(V) != FLOAT8OID)
 		elog(ERROR, "unsupported element type: %s",
-			 format_type_be(ARR_ELEMTYPE(array)));
-
-	width = ARR_LBOUND(array)[0] + ARR_DIMS(array)[0] - 1;
-
+			 format_type_be(ARR_ELEMTYPE(V)));
+	if (!VALIDATE_ARRAY_VECTOR(V))
+		elog(ERROR, "input was not vector-like array");
+	nitems = ARRAY_VECTOR_HEIGHT(V);
 	if (PG_ARGISNULL(0))
 	{
 		amstate = palloc0(sizeof(array_matrix_state));
-		amstate->elemtype = array->elemtype;
+		amstate->elemtype = V->elemtype;
 	}
 	else
+	{
 		amstate = (array_matrix_state *)PG_GETARG_POINTER(0);
-
-	amstate->width = Max(amstate->width, width);
-	amstate->rows = lappend(amstate->rows, array);
+		if (amstate->elemtype != ARR_ELEMTYPE(V))
+			elog(ERROR, "vector like array has wrong data type");
+	}
+	amstate->width = Max(amstate->width, nitems);
+	amstate->rows = lappend(amstate->rows, V);
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -199,31 +183,27 @@ array_matrix_accum(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(array_matrix_accum);
 
-static MatrixType *
+static VectorType *
 __varbit_to_int_vector(VarBit *varbit)
 {
-	MatrixType *matrix;
+	VectorType *V;
 	Size		nitems;
-	Size		len;
 
 	if (!varbit)
 	{
-		len = ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), 0);
-		matrix = palloc0(len);
-		INIT_ARRAY_VECTOR(matrix, INT4OID, sizeof(cl_int), 0);
+		V = palloc0(ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), 0));
+		INIT_ARRAY_VECTOR(V, INT4OID, sizeof(cl_int), 0);
 	}
 	else
 	{
 		nitems = ((varbit->bit_len + sizeof(cl_int) * BITS_PER_BYTE - 1)
 				  / (sizeof(cl_int) * BITS_PER_BYTE));
-
-		len = ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), nitems);
-		matrix = palloc0(len);
-		INIT_ARRAY_VECTOR(matrix, INT4OID, sizeof(cl_int), nitems);
-		memcpy(matrix->u.d1.values, varbit->bit_dat,
+		V = palloc(ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), 0));
+		INIT_ARRAY_VECTOR(V, INT4OID, sizeof(cl_int), nitems);
+		memcpy(V->values, varbit->bit_dat,
 			   (varbit->bit_len + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 	}
-	return matrix;
+	return V;
 }
 
 Datum
@@ -238,33 +218,22 @@ PG_FUNCTION_INFO_V1(varbit_to_int4_array);
 Datum
 int4_array_to_varbit(PG_FUNCTION_ARGS)
 {
-	AnyArrayType   *array = PG_GETARG_ANY_ARRAY_P(0);
-	VarBit		   *varbit;
-	Size			len;
-	cl_int			i, nitems;
-	Datum			datum;
-	bool			isnull;
-	array_iter		iter;
+	ArrayType  *X = PG_GETARG_ARRAYTYPE_P(0);
+	VarBit	   *varbit;
+	Size		len;
+	cl_int		nitems;
 
 	/* sanity check - only vector like array is valid */
-	if (AARR_NDIM(array) != 1)
-		elog(ERROR, "Only 1D array is supported");
-	nitems = AARR_DIMS(array)[0];
+	if (!__VALIDATE_ARRAY_VECTOR(X, INT4OID))
+		elog(ERROR, "Only vector like array is supported");
+	nitems = ARRAY_VECTOR_HEIGHT(X);
 
 	len = MAXALIGN(offsetof(VarBit, bit_dat[sizeof(cl_int) * nitems]));
 	varbit = palloc0(len);
 	SET_VARSIZE(varbit, len);
 	varbit->bit_len = sizeof(cl_int) * BITS_PER_BYTE * nitems;
+	memcpy(varbit->bit_dat, ARR_DATA_PTR(X), sizeof(cl_int) * nitems);
 
-	array_iter_setup(&iter, array);
-	for (i=0; i < nitems; i++)
-	{
-		datum = array_iter_next(&iter, &isnull, i,
-								sizeof(cl_int), true, 'i');
-		if (isnull)
-			continue;
-		((cl_int *)varbit->bit_dat)[i] =  DatumGetInt32(datum);
-	}
 	PG_RETURN_POINTER(varbit);
 }
 PG_FUNCTION_INFO_V1(int4_array_to_varbit);
@@ -276,7 +245,7 @@ array_matrix_accum_varbit(PG_FUNCTION_ARGS)
 	MemoryContext	aggcxt;
 	MemoryContext	oldcxt;
 	VarBit		   *varbit = NULL;
-	MatrixType	   *matrix;
+	VectorType	   *V;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -284,7 +253,7 @@ array_matrix_accum_varbit(PG_FUNCTION_ARGS)
 	oldcxt = MemoryContextSwitchTo(aggcxt);
 	if (!PG_ARGISNULL(1))
 		varbit = PG_GETARG_VARBIT_P(1);
-	matrix = __varbit_to_int_vector(varbit);
+	V = __varbit_to_int_vector(varbit);
 
 	if (PG_ARGISNULL(0))
 	{
@@ -294,8 +263,8 @@ array_matrix_accum_varbit(PG_FUNCTION_ARGS)
 	else
 		amstate = (array_matrix_state *)PG_GETARG_POINTER(0);
 
-	amstate->width = Max(amstate->width, ARRAY_MATRIX_HEIGHT(matrix));
-	amstate->rows = lappend(amstate->rows, matrix);
+	amstate->width = Max(amstate->width, ARRAY_VECTOR_HEIGHT(V));
+	amstate->rows = lappend(amstate->rows, V);
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -311,52 +280,32 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 		Size		row_index;											\
 		int16		typlen;												\
 		bool		typbyval;											\
-		char		typalign;											\
 		ListCell   *lc;													\
 																		\
-		get_typlenbyvalalign((amstate)->elemtype,						\
-							 &typlen, &typbyval, &typalign);			\
+		get_typlenbyval((amstate)->elemtype,							\
+						&typlen, &typbyval);							\
 		Assert(typlen == sizeof(BASETYPE));								\
 		length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);			\
 		if (!AllocSizeIsValid(length))									\
 			elog(ERROR, "supplied array-matrix is too big");			\
 		R = palloc(length);												\
-		INIT_ARRAY_MATRIX(R, (amstate)->elemtype, typlen, height, width); \
-																		\
+		INIT_ARRAY_MATRIX(R, (amstate)->elemtype,						\
+						  typlen, height, width);						\
 		row_index = 0;													\
 		foreach (lc, (amstate)->rows)									\
 		{																\
-			ArrayType  *array = lfirst(lc);								\
-			Size		offset = ARR_LBOUND(array)[0] - 1;				\
-			Size		i, nitems = ARR_DIMS(array)[0];					\
-			BASETYPE   *dest;											\
-			array_iter	iter;											\
-			Datum		datum;											\
-			Datum		mask;											\
-			bool		isnull;											\
+			ArrayType  *V = lfirst(lc);									\
+			Size		i, nitems;										\
+			BASETYPE   *src;											\
+			BASETYPE   *dst;											\
 																		\
 			/* sanity checks */											\
-			Assert(ARR_ELEMTYPE(array) == (amstate)->elemtype &&		\
-				   ARR_NDIM(array) == 1);								\
-			dest = ((BASETYPE *)ARRAY_MATRIX_DATAPTR(R)) + row_index;	\
-			mask = (sizeof(BASETYPE) < sizeof(Datum)					\
-					? ((1UL << (sizeof(BASETYPE) * 8)) - 1)				\
-					: ~0UL);											\
-			for (i=0; i < offset; i++, dest += height)					\
-				*dest = 0;												\
-			array_iter_setup(&iter, (AnyArrayType *)array);				\
-			for (i=0; i < nitems; i++, dest += height)					\
-			{															\
-				datum = array_iter_next(&iter, &isnull, i,				\
-										typlen, typbyval, typalign);	\
-				if (isnull)												\
-					datum = 0;											\
-				*dest = (BASETYPE)(datum & mask);						\
-			}															\
-																		\
-			for (i = offset + nitems; i < width; i++, dest += height)	\
-				*dest = 0;												\
-																		\
+			Assert(__VALIDATE_ARRAY_VECTOR(V, (amstate)->elemtype));	\
+			src = ((BASETYPE *)ARR_DATA_PTR(V));						\
+			dst = ((BASETYPE *)ARR_DATA_PTR(R)) + row_index;			\
+			nitems = ARRAY_VECTOR_HEIGHT(V);							\
+			for (i=0; i < nitems; i++, src++, dst += height)			\
+				*dst = *src;											\
 			row_index++;												\
 		}																\
 	} while(0)
@@ -365,7 +314,7 @@ Datum
 array_matrix_final_bool(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -380,7 +329,7 @@ Datum
 array_matrix_final_int2(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -395,7 +344,7 @@ Datum
 array_matrix_final_int4(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -410,7 +359,7 @@ Datum
 array_matrix_final_int8(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -425,7 +374,7 @@ Datum
 array_matrix_final_float4(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -440,7 +389,7 @@ Datum
 array_matrix_final_float8(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
-	MatrixType *R;
+	ArrayType *R;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -457,9 +406,9 @@ PG_FUNCTION_INFO_V1(array_matrix_final_float8);
 Datum
 array_matrix_validation(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
 
-	PG_RETURN_BOOL(VALIDATE_ARRAY_MATRIX(matrix));
+	PG_RETURN_BOOL(VALIDATE_ARRAY_MATRIX(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_validation);
 
@@ -467,41 +416,13 @@ PG_FUNCTION_INFO_V1(array_matrix_validation);
  * Size estimator
  */
 Datum
-array_matrix_rawsize(PG_FUNCTION_ARGS)
-{
-	Oid		elemtype = PG_GETARG_OID(0);
-	int32	height = (PG_NARGS() > 1 ? PG_GETARG_INT32(1) : 1);
-	int32	width = (PG_NARGS() > 2 ? PG_GETARG_INT32(2) : 1);
-	int32	depth = (PG_NARGS() > 3 ? PG_GETARG_INT32(3) : 1);
-	int16	typlen;
-
-	switch (elemtype)
-	{
-		case BOOLOID:
-		case INT2OID:
-		case INT4OID:
-		case INT8OID:
-		case FLOAT4OID:
-		case FLOAT8OID:
-			typlen = get_typlen(elemtype);
-			break;
-		default:
-			elog(ERROR, "unable to make array-matrix with '%s' type",
-				 format_type_be(elemtype));
-	}
-	PG_RETURN_INT64(ARRAY_CUBE_RAWSIZE(typlen, depth, height, width));
-}
-PG_FUNCTION_INFO_V1(array_matrix_rawsize);
-
-Datum
 array_matrix_height(PG_FUNCTION_ARGS)
 {
 	if (!PG_ARGISNULL(0))
 	{
-		MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+		ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
 
-		if (VARATT_IS_EXPANDED_HEADER(M) ||
-			!VALIDATE_ARRAY_MATRIX(M))
+		if (!VALIDATE_ARRAY_MATRIX(M))
 			elog(ERROR, "not a matrix-like array");
 		PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
 	}
@@ -514,10 +435,9 @@ array_matrix_width(PG_FUNCTION_ARGS)
 {
 	if (!PG_ARGISNULL(0))
 	{
-		MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+		ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
 
-		if (VARATT_IS_EXPANDED_HEADER(M) ||
-			!VALIDATE_ARRAY_MATRIX(M))
+		if (!VALIDATE_ARRAY_MATRIX(M))
 			elog(ERROR, "not a matrix-like array");
 		PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
 	}
@@ -529,14 +449,14 @@ Datum
 array_matrix_unnest(PG_FUNCTION_ARGS)
 {
 	struct {
-		MatrixType	   *matrix;
+		ArrayType	   *matrix;
 		TupleTableSlot *slot;
 		int16			typlen;
 		bool			typbyval;
 		char			typalign;
 	}				   *state;
 	FuncCallContext	   *fncxt;
-	MatrixType		   *matrix;
+	ArrayType		   *matrix;
 	TupleTableSlot	   *slot;
 	HeapTuple			tuple;
 	cl_int				height;
@@ -548,18 +468,13 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 	{
 		TupleDesc		tupdesc;
 		MemoryContext	oldcxt;
-		MatrixType	   *matrix;
+		ArrayType	   *matrix;
 
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 		state = palloc0(sizeof(*state));
-		matrix = PG_GETARG_MATRIXTYPE_P(0);
+		matrix = PG_GETARG_ARRAYTYPE_P(0);
 
-		/*
-		 * TODO: Allow general 1D/2D array to unnest
-		 */
-		if (VARATT_IS_EXPANDED_HEADER(matrix))
-			elog(ERROR, "ExpandedArrayHeader is not supported");
 		if (!VALIDATE_ARRAY_MATRIX(matrix))
 			elog(ERROR, "Not a matrix-like array");
 
@@ -574,7 +489,7 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 			TupleDescInitEntry(tupdesc,
 							   (AttrNumber) i+1,
 							   psprintf("c%u", i+1),
-							   ARRAY_MATRIX_ELEMTYPE(matrix), -1, 0);
+							   ARR_ELEMTYPE(matrix), -1, 0);
 		}
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -594,12 +509,16 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 	if (fncxt->call_cntr >= height)
 		SRF_RETURN_DONE(fncxt);
 	ExecClearTuple(slot);
-	source = ARRAY_MATRIX_DATAPTR(matrix) + state->typlen * fncxt->call_cntr;
+	source = ARR_DATA_PTR(matrix) + state->typlen * fncxt->call_cntr;
 	memset(slot->tts_isnull, 0, sizeof(bool) * width);
 	for (i=0; i < width; i++)
 	{
 		switch (state->typlen)
 		{
+			case sizeof(cl_uchar):
+				slot->tts_values[i] = *((cl_uchar *)source);
+				source += sizeof(cl_uchar) * height;
+				break;
 			case sizeof(cl_ushort):
 				slot->tts_values[i] = *((cl_ushort *)source);
 				source += sizeof(cl_ushort) * height;
@@ -625,10 +544,10 @@ PG_FUNCTION_INFO_V1(array_matrix_unnest);
 /*
  * rbind that takes two arrays
  */
-static MatrixType *
-array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
+static ArrayType *
+array_martix_rbind(Oid elemtype, ArrayType *X, ArrayType *Y)
 {
-	MatrixType *R;
+	ArrayType *R;
 	cl_int		r_width, x_width, y_width;
 	cl_int		r_height, x_height, y_height;
 	int			typlen;
@@ -637,13 +556,9 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	char	   *src, *dst;
 
 	/* sanity checks */
-	if (VARATT_IS_EXPANDED_HEADER(X) || VARATT_IS_EXPANDED_HEADER(Y))
-		elog(ERROR, "ExpandedArrayHeader is not supported");
-	if (!VALIDATE_ARRAY_MATRIX(X) || !VALIDATE_ARRAY_MATRIX(Y))
-		elog(ERROR, "Not a matrix-like array");
-	if (elemtype != ARRAY_MATRIX_ELEMTYPE(X) ||
-		elemtype != ARRAY_MATRIX_ELEMTYPE(Y))
-		elog(ERROR, "Bug? not expected type");
+	if (!__VALIDATE_ARRAY_MATRIX(X, elemtype) ||
+		!__VALIDATE_ARRAY_MATRIX(Y, elemtype))
+		elog(ERROR, "not a matrix-like array");
 	typlen = get_typlen(elemtype);
 
 	x_width = ARRAY_MATRIX_WIDTH(X);
@@ -659,8 +574,8 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	INIT_ARRAY_MATRIX(R, elemtype, typlen, r_height, r_width);
 
 	/* copy from the top-matrix */
-	src = ARRAY_MATRIX_DATAPTR(X);
-	dst = ARRAY_MATRIX_DATAPTR(R);
+	src = ARR_DATA_PTR(X);
+	dst = ARR_DATA_PTR(R);
 	for (i=0; i < r_width; i++)
 	{
 		if (i < x_width)
@@ -672,8 +587,8 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	}
 
 	/* copy from the bottom-matrix */
-	src = ARRAY_MATRIX_DATAPTR(Y);
-	dst = ARRAY_MATRIX_DATAPTR(R) + typlen * x_height;
+	src = ARR_DATA_PTR(Y);
+	dst = ARR_DATA_PTR(R) + typlen * x_height;
 	for (i=0; i < r_width; i++)
 	{
 		if (i < y_width)
@@ -695,9 +610,9 @@ array_matrix_rbind_bool(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(BOOLOID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_bool);
@@ -711,9 +626,9 @@ array_matrix_rbind_int2(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT2OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int2);
@@ -727,9 +642,9 @@ array_matrix_rbind_int4(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT4OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int4);
@@ -743,9 +658,9 @@ array_matrix_rbind_int8(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT8OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int8);
@@ -759,9 +674,9 @@ array_matrix_rbind_float4(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT4OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_float4);
@@ -775,9 +690,9 @@ array_matrix_rbind_float8(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT8OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_float8);
@@ -785,202 +700,202 @@ PG_FUNCTION_INFO_V1(array_matrix_rbind_float8);
 Datum
 array_matrix_rbind_scalar_boolt(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
-	bool	   *v, scalar = PG_GETARG_INT16(0);
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
+	bool	   *v, scalar = PG_GETARG_BOOL(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(BOOLOID, width, 1);
-	v = (bool *)ARRAY_MATRIX_DATAPTR(S);
+	v = (bool *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(BOOLOID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_boolt);
 
 Datum
 array_matrix_rbind_scalar_boolb(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
-	bool	   *v, scalar = PG_GETARG_BOOL(1);
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
+	bool	   *v, scalar = PG_GETARG_BOOL(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(BOOLOID, width, 1);
-	v = (bool *)ARRAY_MATRIX_DATAPTR(S);
+	v = (bool *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(BOOLOID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_boolb);
 
 Datum
 array_matrix_rbind_scalar_int2t(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int16	   *v, scalar = PG_GETARG_INT16(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT2OID, width, 1);
-	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int16 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT2OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int2t);
 
 Datum
 array_matrix_rbind_scalar_int2b(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
-	int16	   *v, scalar = PG_GETARG_INT16(1);
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
+	int16	   *v, scalar = PG_GETARG_INT16(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT2OID, width, 1);
-	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int16 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT2OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int2b);
 
 Datum
 array_matrix_rbind_scalar_int4t(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int32	   *v, scalar = PG_GETARG_INT32(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT4OID, width, 1);
-	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int32 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT4OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int4t);
 
 Datum
 array_matrix_rbind_scalar_int4b(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int32	   *v, scalar = PG_GETARG_INT32(1);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT4OID, width, 1);
-	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int32 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT4OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int4b);
 
 Datum
 array_matrix_rbind_scalar_int8t(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int64	   *v, scalar = PG_GETARG_INT64(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT8OID, width, 1);
-	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int64 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT8OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int8t);
 
 Datum
 array_matrix_rbind_scalar_int8b(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	int64	   *v, scalar = PG_GETARG_INT64(1);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(INT8OID, width, 1);
-	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int64 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(INT8OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int8b);
 
 Datum
 array_matrix_rbind_scalar_float4t(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	float4	   *v, scalar = PG_GETARG_FLOAT4(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(FLOAT4OID, width, 1);
-	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float4 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT4OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float4t);
 
 Datum
 array_matrix_rbind_scalar_float4b(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	float4	   *v, scalar = PG_GETARG_FLOAT4(1);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(FLOAT4OID, width, 1);
-	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float4 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT4OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float4b);
 
 Datum
 array_matrix_rbind_scalar_float8t(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	float8	   *v, scalar = PG_GETARG_FLOAT8(0);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(FLOAT8OID, width, 1);
-	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float8 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT8OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float8t);
 
 Datum
 array_matrix_rbind_scalar_float8b(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	float8	   *v, scalar = PG_GETARG_FLOAT8(1);
 	int			i, width = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(FLOAT8OID, width, 1);
-	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float8 *)ARR_DATA_PTR(S);
 	for (i=0; i < width; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_rbind(FLOAT8OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float8b);
 
 /*
  * cbind that takes two arrays
  */
-static MatrixType *
-array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
+static ArrayType *
+array_martix_cbind(Oid elemtype, ArrayType *X, ArrayType *Y)
 {
-	MatrixType *R;
+	ArrayType  *R;
 	cl_uint		r_height, x_height, y_height;
 	cl_uint		r_width, x_width, y_width;
 	int			typlen;
@@ -991,11 +906,9 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	/* sanity checks */
 	if (VARATT_IS_EXPANDED_HEADER(X) || VARATT_IS_EXPANDED_HEADER(Y))
 		elog(ERROR, "ExpandedArrayHeader is not supported");
-	if (!VALIDATE_ARRAY_MATRIX(X) || !VALIDATE_ARRAY_MATRIX(Y))
+	if (!__VALIDATE_ARRAY_MATRIX(X,elemtype) ||
+		!__VALIDATE_ARRAY_MATRIX(Y,elemtype))
 		elog(ERROR, "Not a matrix-like array");
-	if (elemtype != ARRAY_MATRIX_ELEMTYPE(X) ||
-		elemtype != ARRAY_MATRIX_ELEMTYPE(Y))
-		elog(ERROR, "Bug? not expected type");
 	typlen = get_typlen(elemtype);
 
 	x_width = ARRAY_MATRIX_WIDTH(X);
@@ -1008,8 +921,8 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	R = palloc(length);
 	INIT_ARRAY_MATRIX(R, elemtype, typlen, r_height, r_width);
 
-	src = ARRAY_MATRIX_DATAPTR(X);
-	dst = ARRAY_MATRIX_DATAPTR(R);
+	src = ARR_DATA_PTR(X);
+	dst = ARR_DATA_PTR(R);
 	for (i=0; i < x_width; i++)
 	{
 		memcpy(dst, src, typlen * x_height);
@@ -1019,8 +932,8 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 		dst += typlen * r_height;
 	}
 
-	src = ARRAY_MATRIX_DATAPTR(Y);
-	dst = ARRAY_MATRIX_DATAPTR(R) + typlen * x_width * r_height;
+	src = ARR_DATA_PTR(Y);
+	dst = ARR_DATA_PTR(R) + typlen * x_width * r_height;
 	for (i=0; i < y_width; i++)
 	{
 		memcpy(dst, src, typlen * y_height);
@@ -1041,9 +954,9 @@ array_matrix_cbind_bool(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(BOOLOID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_bool);
@@ -1057,9 +970,9 @@ array_matrix_cbind_int2(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT2OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int2);
@@ -1073,9 +986,9 @@ array_matrix_cbind_int4(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT4OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int4);
@@ -1089,9 +1002,9 @@ array_matrix_cbind_int8(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT8OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int8);
@@ -1105,9 +1018,9 @@ array_matrix_cbind_float4(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(FLOAT4OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_float4);
@@ -1121,9 +1034,9 @@ array_matrix_cbind_float8(PG_FUNCTION_ARGS)
 		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 	else
 	{
-		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID, X, Y));
+		ArrayType	   *X = PG_GETARG_ARRAYTYPE_P(0);
+		ArrayType	   *Y = PG_GETARG_ARRAYTYPE_P(1);
+		PG_RETURN_ARRAYTYPE_P(array_martix_cbind(FLOAT8OID, X, Y));
 	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_float8);
@@ -1131,192 +1044,192 @@ PG_FUNCTION_INFO_V1(array_matrix_cbind_float8);
 Datum
 array_matrix_cbind_scalar_booll(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	bool	   *v, scalar = PG_GETARG_BOOL(0);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(BOOLOID, 1, height);
-	v = (bool *)ARRAY_MATRIX_DATAPTR(S);
+	v = (bool *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(BOOLOID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_booll);
 
 Datum
 array_matrix_cbind_scalar_boolr(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	bool	   *v, scalar = PG_GETARG_BOOL(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(BOOLOID, 1, height);
-	v = (bool *)ARRAY_MATRIX_DATAPTR(S);
+	v = (bool *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(BOOLOID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_boolr);
 
 Datum
 array_matrix_cbind_scalar_int2l(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int16	   *v, scalar = PG_GETARG_INT16(0);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT2OID, 1, height);
-	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int16 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT2OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int2l);
 
 Datum
 array_matrix_cbind_scalar_int2r(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	int16	   *v, scalar = PG_GETARG_INT16(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT2OID, 1, height);
-	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int16 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT2OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int2r);
 
 Datum
 array_matrix_cbind_scalar_int4l(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int32	   *v, scalar = PG_GETARG_INT32(0);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT4OID, 1, height);
-	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int32 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT4OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int4l);
 
 Datum
 array_matrix_cbind_scalar_int4r(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	int32	   *v, scalar = PG_GETARG_INT32(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT4OID, 1, height);
-	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int32 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT4OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int4r);
 
 Datum
 array_matrix_cbind_scalar_int8l(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	int64	   *v, scalar = PG_GETARG_INT64(0);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT8OID, 1, height);
-	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int64 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT8OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int8l);
 
 Datum
 array_matrix_cbind_scalar_int8r(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	int64	   *v, scalar = PG_GETARG_INT64(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT8OID, 1, height);
-	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (int64 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT8OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int8r);
 
 Datum
 array_matrix_cbind_scalar_float4l(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	float4	   *v, scalar = PG_GETARG_FLOAT4(0);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(FLOAT4OID, 1, height);
-	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float4 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(FLOAT4OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float4l);
 
 Datum
 array_matrix_cbind_scalar_float4r(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	float4	   *v, scalar = PG_GETARG_FLOAT4(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(FLOAT4OID, 1, height);
-	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float4 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(FLOAT4OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float4r);
 
 Datum
 array_matrix_cbind_scalar_float8l(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *S;
 	float8	   *v, scalar = PG_GETARG_FLOAT8(0);
 	int			i, height = ARRAY_MATRIX_WIDTH(M);
 
 	S = create_empty_matrix(FLOAT8OID, 1, height);
-	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float8 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID,S,M));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(FLOAT8OID,S,M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float8l);
 
 Datum
 array_matrix_cbind_scalar_float8r(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *S;
+	ArrayType  *M = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *S;
 	float8	   *v, scalar = PG_GETARG_FLOAT8(1);
 	int			i, height = ARRAY_MATRIX_HEIGHT(M);
 
 	S = create_empty_matrix(INT8OID, 1, height);
-	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	v = (float8 *)ARR_DATA_PTR(S);
 	for (i=0; i < height; i++)
 		v[i] = scalar;
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,M,S));
+	PG_RETURN_ARRAYTYPE_P(array_martix_cbind(INT8OID,M,S));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float8r);
 
@@ -1337,7 +1250,7 @@ array_matrix_rbind_accum(PG_FUNCTION_ARGS)
 	matrix_rbind_state *mrstate;
 	MemoryContext	aggcxt;
 	MemoryContext	oldcxt;
-	MatrixType	   *X;
+	ArrayType	   *X;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -1346,21 +1259,21 @@ array_matrix_rbind_accum(PG_FUNCTION_ARGS)
 		elog(ERROR, "null-array was supplied");
 
 	oldcxt = MemoryContextSwitchTo(aggcxt);
-    X = PG_GETARG_MATRIXTYPE_P_COPY(1);
+    X = PG_GETARG_ARRAYTYPE_P_COPY(1);
 	if (!VALIDATE_ARRAY_MATRIX(X))
 		elog(ERROR, "input array is not a valid matrix-like array");
 
 	if (PG_ARGISNULL(0))
 	{
 		mrstate = palloc0(sizeof(matrix_rbind_state));
-		mrstate->elemtype = ARRAY_MATRIX_ELEMTYPE(X);
+		mrstate->elemtype = ARR_ELEMTYPE(X);
 	}
 	else
 	{
 		mrstate = (matrix_rbind_state *)PG_GETARG_POINTER(0);
-		if (mrstate->elemtype != ARRAY_MATRIX_ELEMTYPE(X))
+		if (mrstate->elemtype != ARR_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
-				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
+				 format_type_be(ARR_ELEMTYPE(X)),
 				 format_type_be(mrstate->elemtype));
 	}
 
@@ -1374,10 +1287,10 @@ array_matrix_rbind_accum(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_accum);
 
-static MatrixType *
+static ArrayType *
 array_matrix_rbind_final(matrix_rbind_state *mrstate)
 {
-	MatrixType *R;
+	ArrayType *R;
 	int			typlen;
 	Size		height = mrstate->height;
 	Size		width = mrstate->width;
@@ -1415,14 +1328,14 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 	row_index = 0;
 	foreach (lc, mrstate->matrix_list)
 	{
-		MatrixType *X = lfirst(lc);
+		ArrayType *X = lfirst(lc);
 		cl_int		x_width = ARRAY_MATRIX_WIDTH(X);
 		cl_int		x_height = ARRAY_MATRIX_HEIGHT(X);
 		cl_int		i;
 
 		Assert(VALIDATE_ARRAY_MATRIX(X));
-		src = ARRAY_MATRIX_DATAPTR(X);
-		dst = ARRAY_MATRIX_DATAPTR(R) + typlen * row_index;
+		src = ARR_DATA_PTR(X);
+		dst = ARR_DATA_PTR(R) + typlen * row_index;
 		for (i=0; i < width; i++)
 		{
 			if (i < x_width)
@@ -1532,7 +1445,7 @@ array_matrix_cbind_accum(PG_FUNCTION_ARGS)
 	matrix_cbind_state *mcstate;
 	MemoryContext	aggcxt;
 	MemoryContext	oldcxt;
-	MatrixType	   *X;
+	ArrayType	   *X;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -1541,21 +1454,21 @@ array_matrix_cbind_accum(PG_FUNCTION_ARGS)
 		elog(ERROR, "null-array was supplied");
 
 	oldcxt = MemoryContextSwitchTo(aggcxt);
-	X = PG_GETARG_MATRIXTYPE_P_COPY(1);
+	X = PG_GETARG_ARRAYTYPE_P_COPY(1);
 	if (!VALIDATE_ARRAY_MATRIX(X))
 		elog(ERROR, "input array is not a valid matrix-like array");
 
 	if (PG_ARGISNULL(0))
 	{
 		mcstate = palloc0(sizeof(matrix_cbind_state));
-		mcstate->elemtype = ARRAY_MATRIX_ELEMTYPE(X);
+		mcstate->elemtype = ARR_ELEMTYPE(X);
 	}
 	else
 	{
 		mcstate = (matrix_cbind_state *)PG_GETARG_POINTER(0);
-		if (mcstate->elemtype != ARRAY_MATRIX_ELEMTYPE(X))
+		if (mcstate->elemtype != ARR_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
-				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
+				 format_type_be(ARR_ELEMTYPE(X)),
 				 format_type_be(mcstate->elemtype));
 	}
 	mcstate->width += ARRAY_MATRIX_WIDTH(X);
@@ -1568,10 +1481,10 @@ array_matrix_cbind_accum(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_accum);
 
-static MatrixType *
+static ArrayType *
 array_matrix_cbind_final(matrix_cbind_state *mcstate)
 {
-	MatrixType *R;
+	ArrayType *R;
 	int			typlen;
 	Size		height = mcstate->height;
 	Size		width = mcstate->width;
@@ -1605,16 +1518,16 @@ array_matrix_cbind_final(matrix_cbind_state *mcstate)
 	R = palloc(length);
 	INIT_ARRAY_MATRIX(R, mcstate->elemtype, typlen, height, width);
 
-	dst = ARRAY_MATRIX_DATAPTR(R);
+	dst = ARR_DATA_PTR(R);
 	foreach (lc, mcstate->matrix_list)
 	{
-		MatrixType *X = lfirst(lc);
+		ArrayType *X = lfirst(lc);
 		cl_int		x_width = ARRAY_MATRIX_WIDTH(X);
 		cl_int		x_height = ARRAY_MATRIX_HEIGHT(X);
 		cl_uint		i;
 
 		Assert(VALIDATE_ARRAY_MATRIX(X));
-		src = ARRAY_MATRIX_DATAPTR(X);
+		src = ARR_DATA_PTR(X);
 		for (i=0; i < x_width; i++)
 		{
 			memcpy(dst, src, typlen * x_height);
@@ -1716,15 +1629,15 @@ PG_FUNCTION_INFO_V1(array_matrix_cbind_final_float8);
 		Size	i, nitems = width * height;								\
 		Size	length;													\
 		char   *T_values;												\
-		char   *M_values = ARRAY_MATRIX_DATAPTR(M);						\
+		char   *M_values = ARR_DATA_PTR(M);								\
 																		\
 		length = ARRAY_MATRIX_RAWSIZE(sizeof(BASETYPE), height, width);	\
 		if (!AllocSizeIsValid(length))									\
 			elog(ERROR, "matrix array size too large");					\
 		T = palloc(length);												\
-		INIT_ARRAY_MATRIX(T, ARRAY_MATRIX_ELEMTYPE(M),					\
+		INIT_ARRAY_MATRIX(T, ARR_ELEMTYPE(M),							\
 						  sizeof(BASETYPE), width, height);				\
-		T_values = ARRAY_MATRIX_DATAPTR(T);								\
+		T_values = ARR_DATA_PTR(T);										\
 		for (i=0; i < nitems; i++)										\
 		{																\
 			*((BASETYPE *)(T_values + sizeof(BASETYPE) *				\
@@ -1736,8 +1649,8 @@ PG_FUNCTION_INFO_V1(array_matrix_cbind_final_float8);
 Datum
 array_matrix_transpose_bool(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1751,8 +1664,8 @@ PG_FUNCTION_INFO_V1(array_matrix_transpose_bool);
 Datum
 array_matrix_transpose_int2(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1766,8 +1679,8 @@ PG_FUNCTION_INFO_V1(array_matrix_transpose_int2);
 Datum
 array_matrix_transpose_int4(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1781,8 +1694,8 @@ PG_FUNCTION_INFO_V1(array_matrix_transpose_int4);
 Datum
 array_matrix_transpose_int8(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1796,8 +1709,8 @@ PG_FUNCTION_INFO_V1(array_matrix_transpose_int8);
 Datum
 array_matrix_transpose_float4(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1811,8 +1724,8 @@ PG_FUNCTION_INFO_V1(array_matrix_transpose_float4);
 Datum
 array_matrix_transpose_float8(PG_FUNCTION_ARGS)
 {
-	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType *result;
+	ArrayType *matrix = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType *result;
 
 	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
 		!VALIDATE_ARRAY_MATRIX(matrix))
@@ -1822,82 +1735,6 @@ array_matrix_transpose_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(result);
 }
 PG_FUNCTION_INFO_V1(array_matrix_transpose_float8);
-
-/*
- * postgresql_type_rawsize on behalf of type_len(regtype)
- */
-Datum
-postgresql_type_rawsize(PG_FUNCTION_ARGS)
-{
-	Oid			type_oid = PG_GETARG_OID(0);
-	HeapTuple	tup;
-	int64		type_len;
-
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type %u", type_oid);
-	type_len = ((Form_pg_type) GETSTRUCT(tup))->typlen;
-	ReleaseSysCache(tup);
-
-	PG_RETURN_INT64(type_len);
-}
-PG_FUNCTION_INFO_V1(postgresql_type_rawsize);
-
-/*
- * composite_type_rawsize - estimator of composite data type
- *
- * note: it returns raw-size with safety margin due to lack of alignment
- * information, so actual composite record may be smaller than estimation.
- */
-Datum
-composite_type_rawsize(PG_FUNCTION_ARGS)
-{
-	ArrayType	   *a = PG_GETARG_ARRAYTYPE_P(0);
-	ArrayIterator	aiter;
-	Size			t_hoff;
-	ssize_t			attlen;
-	cl_int			attalign;
-	Datum			datum;
-	bool			isnull;
-
-	if ((ARR_ELEMTYPE(a) != INT4OID && ARR_ELEMTYPE(a) != INT8OID) ||
-		ARR_NDIM(a) != 1 ||
-		ARR_LBOUND(a)[0] != 1)
-		elog(ERROR, "array of sub-attributes size is not valid");
-
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (ARR_HASNULL(a))
-		t_hoff += BITMAPLEN(ARR_DIMS(a)[0]);
-	/* NOTE: composite type should never have OID */
-	t_hoff = MAXALIGN(t_hoff);
-
-	aiter = array_create_iterator(a, 0, NULL);
-	while (array_iterate(aiter, &datum, &isnull))
-    {
-		if (isnull)
-			continue;
-		attlen = (Size)(ARR_ELEMTYPE(a) == INT4OID
-						? DatumGetInt32(datum)
-						: DatumGetInt64(datum));
-		if (attlen < 0)
-			elog(ERROR, "negative type length is not valid - actual size should be supplied for varlena");
-		if (attlen <= sizeof(cl_char))
-			attalign = sizeof(cl_char);
-		else if (attlen <= sizeof(cl_short))
-			attalign = sizeof(cl_short);
-		else if (attlen <= sizeof(cl_int))
-			attalign = sizeof(cl_int);
-		else
-			attalign = sizeof(cl_long);
-
-		t_hoff = TYPEALIGN(attalign, t_hoff);
-		t_hoff += attlen;
-	}
-	array_free_iterator(aiter);
-
-	PG_RETURN_INT64(MAXALIGN(t_hoff));
-}
-PG_FUNCTION_INFO_V1(composite_type_rawsize);
 
 /*
  * float4_as_int4, int4_as_float4

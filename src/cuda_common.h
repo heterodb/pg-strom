@@ -270,7 +270,6 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 
 #else	/* __CUDACC__ */
 typedef uintptr_t		hostptr_t;
-#define __ldg(x)		(*(x))	/* cache access hint is just a noise on host */
 #endif	/* !__CUDACC__ */
 
 /*
@@ -284,9 +283,17 @@ typedef uintptr_t		hostptr_t;
 #define MAXTHREADS_PER_BLOCK		1024
 #ifdef __CUDACC__
 #define STATIC_INLINE(RET_TYPE)					\
-	__device__ __forceinline__ static RET_TYPE __attribute__ ((unused))
+	__host__ __device__ __forceinline__			\
+	static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)				\
-	__device__ static RET_TYPE __attribute__ ((unused))
+	__host__ __device__							\
+	static RET_TYPE __attribute__ ((unused))
+#define DEVICE_ONLY_INLINE(RET_TYPE)			\
+	__device__ __forceinline__					\
+	static RET_TYPE __attribute__ ((unused))
+#define DEVICE_ONLY_FUNCTION(RET_TYPE)			\
+	__device__									\
+	static RET_TYPE __attribute__ ((unused))
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
 #define KERNEL_FUNCTION_NUMTHREADS(RET_TYPE,NUM_THREADS) \
@@ -427,7 +434,7 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
 /*
  * kern_writeback_error_status
  */
-STATIC_INLINE(void)
+DEVICE_ONLY_INLINE(void)
 kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 {
 	/*
@@ -837,8 +844,8 @@ KERN_DATA_STORE_ATTNAMES(kern_data_store *kds)
 STATIC_INLINE(cl_uint *)
 KERN_DATA_STORE_ROWINDEX(kern_data_store *kds)
 {
-	Assert(__ldg(&kds->format) == KDS_FORMAT_ROW ||
-		   __ldg(&kds->format) == KDS_FORMAT_HASH);
+	Assert(kds->format == KDS_FORMAT_ROW ||
+		   kds->format == KDS_FORMAT_HASH);
 	return (cl_uint *)KERN_DATA_STORE_BODY(kds);
 }
 
@@ -846,7 +853,7 @@ KERN_DATA_STORE_ROWINDEX(kern_data_store *kds)
 STATIC_INLINE(cl_uint *)
 KERN_DATA_STORE_HASHSLOT(kern_data_store *kds)
 {
-	Assert(__ldg(&kds->format) == KDS_FORMAT_HASH);
+	Assert(kds->format == KDS_FORMAT_HASH);
 	return (cl_uint *)(KERN_DATA_STORE_BODY(kds) +
 					   STROMALIGN(sizeof(cl_uint) * kds->nitems));
 }
@@ -871,8 +878,8 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 {
 	kern_tupitem   *tupitem;
 
-	Assert(__ldg(&kds->format) == KDS_FORMAT_ROW ||
-		   __ldg(&kds->format) == KDS_FORMAT_HASH);
+	Assert(kds->format == KDS_FORMAT_ROW ||
+		   kds->format == KDS_FORMAT_HASH);
 	if (tup_offset == 0)
 		return NULL;
 	tupitem = (kern_tupitem *)((char *)(kds)
@@ -893,7 +900,7 @@ KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
 
 	if (offset == 0)
 		return NULL;
-	Assert(offset < __ldg(&kds->length));
+	Assert(offset < kds->length);
 	return (kern_hashitem *)((char *)kds + offset);
 }
 
@@ -930,18 +937,18 @@ KERN_DATA_STORE_ISNULL(kern_data_store *kds, cl_uint kds_index)
 }
 
 /* access macro for block format */
-#define KERN_DATA_STORE_PARTSZ(kds)							\
-	Min((__ldg(&(kds)->nrows_per_block) +					\
-		 warpSize - 1) & ~(warpSize - 1), get_local_size())
+#define KERN_DATA_STORE_PARTSZ(kds)				\
+	Min(((kds)->nrows_per_block +				\
+		 warpSize - 1) & ~(warpSize - 1),		\
+		get_local_size())
+#define KERN_DATA_STORE_BLOCK_BLCKNR(kds,kds_index)			\
+	(((BlockNumber *)KERN_DATA_STORE_BODY(kds))[kds_index])
+#define KERN_DATA_STORE_BLOCK_PGPAGE(kds,kds_index)			\
+	((struct PageHeaderData *)								\
+	 (KERN_DATA_STORE_BODY(kds) +							\
+	  STROMALIGN(sizeof(BlockNumber) * (kds)->nrooms) +		\
+	  BLCKSZ * kds_index))
 
-#define KERN_DATA_STORE_BLOCK_BLCKNR(kds, kds_index)			\
-	(((BlockNumber *)KERN_DATA_STORE_BODY(kds))[(kds_index)])
-
-#define KERN_DATA_STORE_BLOCK_PGPAGE(kds, kds_index)				\
-	(struct PageHeaderData *)(KERN_DATA_STORE_BODY(kds) +			\
-							  STROMALIGN(sizeof(BlockNumber) *		\
-										 __ldg(&(kds)->nrooms)) +	\
-							  BLCKSZ * kds_index)
 /*
  * kern_parambuf
  *
@@ -1276,7 +1283,7 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_bool_as_datum(void *addr)
 {
 	cl_bool		val = *((cl_bool *)addr);
@@ -1288,7 +1295,7 @@ pg_bool_as_datum(void *addr)
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_int2_as_datum(void *addr)
 {
 	cl_short	val = *((cl_short *)addr);
@@ -1300,7 +1307,7 @@ pg_int2_as_datum(void *addr)
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_int4_as_datum(void *addr)
 {
 	cl_int		val = *((cl_int *)addr);
@@ -1312,7 +1319,7 @@ pg_int4_as_datum(void *addr)
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_int8_as_datum(void *addr)
 {
 	cl_long		val = *((cl_long *)addr);
@@ -1324,7 +1331,7 @@ pg_int8_as_datum(void *addr)
 #ifndef PG_FLOAT2_TYPE_DEFINED
 #define PG_FLOAT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_float2_as_datum(void *addr)
 {
 	cl_half		val = *((cl_half *)addr);
@@ -1336,7 +1343,7 @@ pg_float2_as_datum(void *addr)
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_float4_as_datum(void *addr)
 {
 	cl_float	val = *((cl_float *)addr);
@@ -1348,7 +1355,7 @@ pg_float4_as_datum(void *addr)
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
-STATIC_INLINE(Datum)
+DEVICE_ONLY_INLINE(Datum)
 pg_float8_as_datum(void *addr)
 {
 	cl_double	val = *((cl_double *)addr);
@@ -1827,7 +1834,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 		else															\
 		{																\
 			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
-			__ncols = min(__ldg(&(kds)->ncols),							\
+			__ncols = min((kds)->ncols,									\
 						  __htup->t_infomask2 & HEAP_NATTS_MASK);		\
 			__cmeta = __kds_colmeta[__colidx];							\
 			__pos = (char *)(__htup) + __htup->t_hoff;					\
@@ -1989,14 +1996,14 @@ kern_get_datum_column(kern_data_store *kds,
 	/* special case handling if 'tableoid' system column */
 	if (cmeta->attnum == TableOidAttributeNumber)
 		return &kds->table_oid;
-	offset = __kds_unpack(__ldg(&cmeta->va_offset));
+	offset = __kds_unpack(cmeta->va_offset);
 	if (offset == 0)
 		return NULL;
 	values = (char *)kds + offset;
-	length = __kds_unpack(__ldg(&cmeta->va_length));
-	if (__ldg(&cmeta->attlen) < 0)
+	length = __kds_unpack(cmeta->va_length);
+	if (cmeta->attlen < 0)
 	{
-		Assert(!__ldg(&cmeta->attbyval));
+		Assert(!cmeta->attbyval);
 		offset = ((cl_uint *)values)[rowidx];
 		if (offset == 0)
 			return NULL;
@@ -2005,15 +2012,15 @@ kern_get_datum_column(kern_data_store *kds,
 	}
 	else
 	{
-		cl_int	unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
-								   __ldg(&cmeta->attlen));
-		size_t	array_sz = MAXALIGN(unitsz * __ldg(&kds->nitems));
+		cl_int	unitsz = TYPEALIGN(cmeta->attalign,
+								   cmeta->attlen);
+		size_t	array_sz = MAXALIGN(unitsz * kds->nitems);
 
 		Assert(length >= array_sz);
 		if (length > array_sz)
 		{
 			length -= array_sz;
-			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == length);
+			Assert(MAXALIGN(BITMAPLEN(kds->nitems)) == length);
 			nullmap = values + array_sz;
 			if (att_isnull(rowidx, nullmap))
 				return NULL;
@@ -2083,7 +2090,7 @@ kern_get_datum(kern_data_store *kds,
  * Also note that this function internally use barrier(), so unable to
  * use within if-blocks.
  */
-STATIC_FUNCTION(cl_uint)
+DEVICE_ONLY_FUNCTION(cl_uint)
 pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
@@ -2125,7 +2132,7 @@ pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum)
  * A special optimized version of pgstromStairlikeSum, for binary count.
  * It has smaller number of __syncthreads().
  */
-STATIC_FUNCTION(cl_uint)
+DEVICE_ONLY_FUNCTION(cl_uint)
 pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
@@ -2176,7 +2183,7 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
  *   (Unacceptable to call the function in if-block)
  */
 template <typename T>
-STATIC_FUNCTION(T)
+DEVICE_ONLY_FUNCTION(T)
 pgstromTotalSum(T *values, cl_uint nitems)
 {
 	cl_uint		nsteps = get_next_log2(nitems);

@@ -153,7 +153,7 @@ typedef struct PageHeaderData
 STATIC_INLINE(cl_uint)
 PageGetMaxOffsetNumber(PageHeaderData *page)
 {
-	cl_uint		pd_lower = __ldg(&page->pd_lower);
+	cl_uint		pd_lower = page->pd_lower;
 
 	return (pd_lower <= SizeOfPageHeaderData ? 0 :
 			(pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData));
@@ -181,13 +181,13 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	BlockNumber		block_nr;
 	PageHeaderData *pg_page;
 
-	Assert(__ldg(&kds->format) == KDS_FORMAT_BLOCK);
+	Assert(kds->format == KDS_FORMAT_BLOCK);
 	if (lp_offset == 0)
 		return NULL;
 	head_size = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-				 STROMALIGN(sizeof(BlockNumber) * __ldg(&kds->nrooms)));
+				 STROMALIGN(sizeof(BlockNumber) * kds->nrooms));
 	Assert(lp_offset >= head_size &&
-		   lp_offset <  head_size + BLCKSZ * __ldg(&kds->nitems));
+		   lp_offset <  head_size + BLCKSZ * kds->nitems);
 	block_id = (lp_offset - head_size) / BLCKSZ;
 	block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, block_id);
 	pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds, block_id);
@@ -722,8 +722,8 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
-	assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
-	assert(!kds_dst || __ldg(&kds_dst->format) == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_COLUMN);
+	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_column, kparams);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)

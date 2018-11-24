@@ -1051,36 +1051,6 @@ CREATE FUNCTION pg_catalog.array_matrix_width(anyarray)
   AS 'MODULE_PATHNAME','array_matrix_width'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pg_catalog.array_vector_rawsize(regtype,int)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','array_matrix_rawsize'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_catalog.array_matrix_rawsize(regtype,int,int)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','array_matrix_rawsize'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_catalog.array_cube_rawsize(regtype,int,int,int)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','array_matrix_rawsize'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_catalog.type_len(regtype)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','postgresql_type_rawsize'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_catalog.composite_type_rawsize(VARIADIC int[])
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','composite_type_rawsize'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_catalog.composite_type_rawsize(VARIADIC bigint[])
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','composite_type_rawsize'
-  LANGUAGE C STRICT;
-
 CREATE FUNCTION pg_catalog.matrix_unnest(anyarray)
   RETURNS SETOF record
   AS 'MODULE_PATHNAME','array_matrix_unnest'

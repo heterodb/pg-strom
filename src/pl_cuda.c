@@ -620,6 +620,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"/* ----------------------------------------\n"
 		" * PL/CUDA function (%s)\n"
 		" * ----------------------------------------*/\n"
+		"#define BLCKSZ %u\n"
 		"#define MAXIMUM_ALIGNOF %u\n"
 		"#define NAMEDATALEN %u\n"
 		"#define KERN_CONTEXT_VARLENA_BUFSZ 0\n"
@@ -628,6 +629,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"#include \"cuda_plcuda.h\"\n"
 		"\n",
 		con->proname,
+		BLCKSZ,
 		MAXIMUM_ALIGNOF,
 		NAMEDATALEN);
 	plcuda_add_extra_typeinfo(source, con);
