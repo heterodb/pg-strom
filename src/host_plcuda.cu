@@ -22,6 +22,7 @@ int main(int argc, char * const argv[])
 	ssize_t		sz, nbytes;
 	char	   *buffer;
 	int			c, i, j;
+	cudaError_t	rc;
 	PLCUDA_RESULT_TYPE result;
 
 	/* command line options */
@@ -50,9 +51,9 @@ int main(int argc, char * const argv[])
 	memset(arg_ptrs, 0, sizeof(arg_ptrs));
 
 	/* read arguments from stdin */
-	arg_buffer = (char *)malloc(arg_bufsz);
-	if (!arg_buffer)
-		EEXIT("out of host memory");
+	rc = cudaMallocManaged(&arg_buffer, arg_bufsz);
+	if (rc != cudaSuccess)
+		CUEXIT(rc, "out of managed memory");
 	nbytes = arg_bufsz;
 	tail = arg_buffer;
 	do {

@@ -35,187 +35,139 @@ Therefore, users can focus on productive tasks like implementation of statistica
 ![PL/CUDA Overview](./img/plcuda-overview.png)
 
 @ja{
-`CREATE FUNCTION`構文を用いてPL/CUDA関数を定義すると、この関数の実行時、関数の定義部をそのままGPUのカーネル関数に埋め込んだCUDAプログラムを作成します。 このカーネル関数は、ユーザ定義処理の他に、PL/CUDA関数の引数を参照するための変数の初期化や、実行時エラーをCPU側へ返却するための補助的なコードを含んでいます。また、PG-Stromの実行をサポートするための各種ランタイム関数をインクルードする事もできます。
+`CREATE FUNCTION`構文を用いてPL/CUDA関数を定義すると、この関数の定義部を含むCUDAプログラムのソースコードを作成し、これをターゲットGPU向けにビルドします。
+このCUDAプログラムは、引数の受け渡しと結果を返却するための補助的なコードを含む以外は、一般的なCUDAランタイムを用いたソフトウェアと全く同一で、CUDAの提供する各種のライブラリをインクルード／リンクする事も可能です。
 }
 @en{
-Once a PL/CUDA function is declared with CREATE FUNCTION statement, it generates a CUDA program that embeds the definition of this function on the GPU's kernel function at the execution time. This kernel function contains initialization code to reference this PL/CUDA functions and auxiliary code to return run-time error to CPU side. Also, it can include some run-time functions to support execution of PG-Strom.
+Once a PL/CUDA function is declared using `CREATE FUNCTION`, it generates a CUDA program source code that embeds the definition of this function, then build it for the target GPU device.
+This CUDA program is almost identical to usual GPU software based on CUDA runtime, except for the auxiliary code to receive arguments of SQL function and to write back its results. It also allows to include/link some libraries for CUDA device runtime.
 }
 @ja{
-PL/CUDA関数を用いて作成したネイティブのCUDAプログラムには、特別なメモリ保護などの仕組みはなく、バグのあるPL/CUDA関数の実行により、GPU実行環境や場合によってはPostgreSQL側をクラッシュさせる事も可能です。したがって、PL/CUDA関数の定義はデータベース特権ユーザに限定されています。
+PL/CUDA関数を用いて作成したネイティブのCUDAプログラムは、PostgreSQLバックエンドの子プロセスとして実行されます。
+したがって、PostgreSQLとは独立したアドレス空間と、OSやGPUのリソースを持つ事になります。
+CUDAプログラムには、ホストシステム上で実行されるホストコードと、GPU上で実行されるデバイスコードを含みます。ホストコードはC言語でプログラミング可能なあらゆるロジックを実行可能ですので、セキュリティ上の観点から、PL/CUDA関数の定義はデータベース特権ユーザに限定されています。
 }
 @en{
-Here is no special memory protection mechanism on the native CUDA program made with PL/CUDA function, thus, execution of buggy PL/CUDA function can crash GPU execution environment or PostreSQL infrastructure in some cases. Thus, only database superuser can define PL/CUDA function.
+Native CUDA programs implemented by PL/CUDA are executed as child-processes of PostgreSQL backend.
+Therefore, it has independent address space and OS/GPU resources from PostgreSQL.
+CUDA program contains host code for the host system and device code to be executed on GPU devices.
+The host code can execute any logic we can program using C-language, so we restrict only database superuser can define PL/CUDA function from the standpoint of security.
 }
 @ja{
-以下に単純なPL/CUDA関数の例を示します。 この関数は、`int`型の引数を二つ取り、その和を`int`型で返却します。
+以下に単純なPL/CUDA関数の例を示します。 この関数は、同じ長さの`read`型配列を二つ引数に取り、そのドット積を`float`型で返却します。
 }
 @en{
-Below is an example of simple PL/CUDA function. This function takes two int arguments, and then returns the sum of them with int data type.
+Below is an example of simple PL/CUDA function. This function takes two same length `real[]` array as arguments, then returns its dot product in `float` data type.
 }
 ```
-postgres=# CREATE FUNCTION gpu_add(int, int)
-RETURNS int
+CREATE OR REPLACE FUNCTION
+gpu_dot_product(real[], real[])
+RETURNS float
 AS $$
-#plcuda_include "cuda_mathlib.h"
+#plcuda_decl
+#include "cuda_matrix.h"
+
+KERNEL_FUNCTION_MAXTHREADS(void)
+gpu_dot_product(double *p_dot,
+                VectorTypeFloat *X,
+                VectorTypeFloat *Y)
+{
+    size_t      index = get_global_id();
+    size_t      nitems = X->height;
+    float       v[MAXTHREADS_PER_BLOCK];
+    float       sum;
+
+    if (index < nitems)
+        v[get_local_id()] = X->values[index] * Y->values[index];
+    else
+        v[get_local_id()] = 0.0;
+
+    sum = pgstromTotalSum(v, MAXTHREADS_PER_BLOCK);
+    if (get_local_id() == 0)
+        atomicAdd(p_dot, (double)sum);
+    __syncthreads();
+}
 #plcuda_begin
-  if (get_global_id() == 0)
-    *retval = pgfn_int4pl(kcxt, arg1, arg2);
+{
+    size_t      nitems;
+    int         blockSz;
+    int         gridSz;
+    double     *dot;
+    cudaError_t rc;
+
+    if (!VALIDATE_ARRAY_VECTOR_TYPE_STRICT(arg1, PG_FLOAT4OID) ||
+        !VALIDATE_ARRAY_VECTOR_TYPE_STRICT(arg2, PG_FLOAT4OID))
+        EEXIT("arguments are not vector like array");
+    nitems = ARRAY_VECTOR_HEIGHT(arg1);
+    if (nitems != ARRAY_VECTOR_HEIGHT(arg2))
+        EEXIT("length of arguments mismatch");
+
+    rc = cudaMallocManaged(&dot, sizeof(double));
+    if (rc != cudaSuccess)
+        CUEXIT(rc, "failed on cudaMallocManaged");
+    memset(dot, 0, sizeof(double));
+
+    blockSz = MAXTHREADS_PER_BLOCK;
+    gridSz = (nitems + MAXTHREADS_PER_BLOCK - 1) / MAXTHREADS_PER_BLOCK;
+    gpu_dot_product<<<gridSz,blockSz>>>(dot,
+                                        (VectorTypeFloat *)arg1,
+                                        (VectorTypeFloat *)arg2);
+    rc = cudaStreamSynchronize(NULL);
+    if (rc != cudaSuccess)
+        CUEXIT(rc, "failed on cudaStreamSynchronize");
+
+    return *dot;
+}
 #plcuda_end
-$$ LANGUAGE plcuda;
-CREATE FUNCTION
+$$ LANGUAGE 'plcuda';
 ```
 
 @ja{
-`#plcuda_begin`と`#plcuda_end`で囲まれた部分が、PL/CUDA関数の本体部分です。 `int`型の引数はそれぞれ、`pg_int4_t`型の変数`arg1`、`arg2`として参照する事ができ、`pg_int4_t *`型のポインタ`retval`の示す領域にセットしたデータが、PL/CUDA関数の実行結果としてCPU側に返却されます。` pgfn_int4pl()`は`cuda_mathlib.h`で定義されたPG-Stromのランタイム関数の一つで、`pg_int4_t`同士の加算を実行します。
+PL/CUDA実行系は、`#plcuda_begin`と`#plcuda_end`で囲まれた部分にSQL関数の引数の受け渡しを行う処理を付加して、CUDAプログラムのエントリポイントを作成します。
+`#plcuda_decl`と`#plcuda_begin`で囲まれた部分は、GPUデバイス関数やその他のホスト関数を宣言するためのブロックで、ソースコード上では上記のエントリポイントより前に配置されます。
 }
 @en{
-The code block enclosed by `#plcuda_begin` and `#plcuda_end` is main portion of PL/CUDA function. This kernel function can reference the `int` type argument as `arg1` and `arg2` which are `pg_int4_t` variables, and can return the result values written on the region pointed by retval variable which is a pointer of `pg_int4_t *` data type, as result of PL/CUDA function. `pgfn_int4pl()` is a runtime function of PG-Strom, declared at `cuda_mathlib.h`, which adds two `pg_int4_t` variables.
+PL/CUDA infrastructure makes entrypoint function of CUDA program by the block between `#plcuda_begin` and `#plcuda_end` with extra code to exchange arguments of SQL function.
+The portion enclosed by `#plcuda_decl` and `#plcuda_begin` is a block for declaration of GPU device functions and other host functions. It is placed prior to the entrypoint above.
 }
 @ja{
-このPL/CUDA関数を実行すると、以下のように引数である100, 200という整数値をGPU側に送出し、計算結果である300という値をGPUから書き戻しています。通常のSQL関数と同様に、PL/CUDA関数を他のSQL式の一部として使用する事もできます。
+CUDAプログラムのエントリポイントでは、`arg1`、`arg2`、... という形でSQL関数の引数を参照する事ができます。
+
+上記の例では、`real[]`配列型である`arg1`および`arg2`がエントリポイントへ渡され、`VALIDATE_ARRAY_VECTOR_TYPE_STRICT`マクロによってNULLを含まない32bit浮動小数点型の１次元配列であるかどうかを検証しています。
+
+返り値も同様に、SQLデータ型に相当するCUDA Cデータ型をエントリポイントから返します。
+エントリポイントが`return`で値を返さない場合（または明示的に`exit()`で終了コード1を返した場合）、PL/CUDA関数は`NULL`値を返却したものとして扱われます。
 }
 @en{
-Below is an example of execution of this PL/CUDA function. Its two integer arguments (100 and 200) were sent to GPU device, then it wrote back the calculated result (300) from the GPU device. As like normal SQL functions, PL/CUDA function can be used as a part of SQL expression.
+At the entrypoint of the CUDA program, you can refer the arguments of SQL function using `arg1`, `arg2, and so on.
+
+In the above example, the `arg1` and `arg2`, `real[]` array type, are passed to the entrypoint, then `VALIDATE_ARRAY_VECTOR_TYPE_STRICT` macro checks whether it is 1-dimensional array of 32bit floating-point values without NULL.
+
+Ditto with return value, the entrypoint returns a value in CUDA C representation corresponding to the SQL data type.
+If entrypoint does not return any value (or, it exits the program with status code 1 by `exit()`), it is considered PL/CUDA function returns `NULL`. 
 }
-```
-postgres=# SELECT gpu_add(100,200);
- gpu_add
----------
-     300
-(1 row)
-```
 
 @ja{
-PL/CUDA関数を定義した結果、どのようなカーネル関数が生成されるのかを確認するには`plcuda_function_source`関数を使用します。 コメント文`/* ---- code by pl/cuda function ---- */`で囲まれたブロックがPL/CUDA関数の定義部から挿入された部分です。
+上記のサンプルプログラムでは、SQL関数から受け取った`real`型配列を検証した後、`cudaMallocManaged`で結果バッファを獲得した後、GPUカーネル関数である`gpu_dot_product`を呼出してドット積を計算しています。
 }
 @en{
-The plcuda_function_source function allows showing the source of kernel function generated by the PL/CUDA function. The code block enclosed by the comment: `/* ---- code by pl/cuda function ---- */` is the portion injected from the declaration of PL/CUDA function
+The above sample program validates the array of `real` values passed from SQL function, then it allocates the result buffer by `cudaMallocManaged`, and invokes `gpu_dot_product`, a GPU kernel function, to compute dot product with two vectors.
+}
+
+@ja{
+この関数の実行結果は以下の通りです。ランダムに生成した10,000個の要素を持つベクトル同士の内積を計算しています。
+}
+@en{
+The result of this function is below. It computes the dot product of two vectors which contain 10,000 items randomly generated.
 }
 
 ```
-postgres=# SELECT pgstrom.plcuda_function_source('gpu_add'::regproc);
-                     plcuda_function_source
-----------------------------------------------------------------
- #include <cuda_device_runtime_api.h>                          +
-                                                               +
- #define HOSTPTRLEN 8                                          +
- #define DEVICEPTRLEN 8                                        +
- #define BLCKSZ 8192                                           +
- #define MAXIMUM_ALIGNOF 8                                     +
- #define MAXIMUM_ALIGNOF_SHIFT 3                               +
- #define PGSTROM_KERNEL_DEBUG 1                                +
- #include "cuda_common.h"                                      +
-                                                               +
- #define PG_BOOLOID 16                                         +
- #define PG_INT2OID 21                                         +
- #define PG_INT4OID 23                                         +
- #define PG_INT8OID 20                                         +
- #define PG_FLOAT2OID 237809                                   +
- #define PG_FLOAT4OID 700                                      +
- #define PG_FLOAT8OID 701                                      +
- #define PG_CASHOID 790                                        +
- #define PG_UUIDOID 2950                                       +
- #define PG_MACADDROID 829                                     +
- #define PG_INETOID 869                                        +
- #define PG_CIDROID 650                                        +
- #define PG_DATEOID 1082                                       +
- #define PG_TIMEOID 1083                                       +
- #define PG_TIMETZOID 1266                                     +
- #define PG_TIMESTAMPOID 1114                                  +
- #define PG_TIMESTAMPTZOID 1184                                +
- #define PG_INTERVALOID 1186                                   +
- #define PG_BPCHAROID 1042                                     +
- #define PG_VARCHAROID 1043                                    +
- #define PG_NUMERICOID 1700                                    +
- #define PG_BYTEAOID 17                                        +
- #define PG_TEXTOID 25                                         +
- #define PG_INT4RANGEOID 3904                                  +
- #define PG_INT8RANGEOID 3926                                  +
- #define PG_TSRANGEOID 3908                                    +
- #define PG_TSTZRANGEOID 3910                                  +
- #define PG_DATERANGEOID 3912                                  +
-                                                               +
- #include "cuda_mathlib.h"                                     +
- typedef union {                                               +
-     pg_varlena_t     varlena_v;                               +
-     pg_bool_t        bool_v;                                  +
-     pg_int2_t        int2_v;                                  +
-     pg_int4_t        int4_v;                                  +
-     pg_int8_t        int8_v;                                  +
-     pg_float2_t      float2_v;                                +
-     pg_float4_t      float4_v;                                +
-     pg_float8_t      float8_v;                                +
- #ifdef CUDA_NUMERIC_H                                         +
-     pg_numeric_t     numeric_v;                               +
- #endif                                                        +
- #ifdef CUDA_MISC_H                                            +
-     pg_money_t       money_v;                                 +
-     pg_uuid_t        uuid_v;                                  +
-     pg_macaddr_t     macaddr_v;                               +
-     pg_inet_t        inet_v;                                  +
-     pg_cidr_t        cidr_t;                                  +
- #endif                                                        +
- #ifdef CUDA_TIMELIB_H                                         +
-     pg_date_t        date_v;                                  +
-     pg_time_t        time_v;                                  +
-     pg_timestamp_t   timestamp_v;                             +
-     pg_timestamptz_t timestamptz_v;                           +
- #endif                                                        +
- #ifdef CUDA_TEXTLIB_H                                         +
-     pg_bpchar_t      bpchar_v;                                +
-     pg_text_t        text_v;                                  +
-     pg_varchar_t     varchar_v;                               +
- #endif                                                        +
- #ifdef CUDA_RANGETYPE_H                                       +
-     pg_int4range_t   int4range_v;                             +
-     pg_int8range_t   int8range_v;                             +
- #ifdef CUDA_TIMELIB_H                                         +
-     pg_tsrange_t     tsrange_v;                               +
-     pg_tstzrange_t   tstzrange_v;                             +
-     pg_daterange_t   daterange_v;                             +
- #endif                                                        +
- #endif                                                        +
-   } pg_anytype_t;                                             +
-                                                               +
-                                                               +
- #include "cuda_plcuda.h"                                      +
- STATIC_INLINE(void)                                           +
- __plcuda_main_kernel(kern_plcuda *kplcuda,                    +
-                    void *workbuf,                             +
-                    void *results,                             +
-                    kern_context *kcxt)                        +
- {                                                             +
-   pg_int4_t *retval __attribute__ ((unused));                 +
-   pg_int4_t arg1 __attribute__((unused));                     +
-   pg_int4_t arg2 __attribute__((unused));                     +
-   assert(sizeof(*retval) <= sizeof(kplcuda->__retval));       +
-   retval = (pg_int4_t *)kplcuda->__retval;                    +
-   arg1 = pg_int4_param(kcxt,0);                               +
-   arg2 = pg_int4_param(kcxt,1);                               +
-                                                               +
-   /* ---- code by pl/cuda function ---- */                    +
-   if (get_global_id() == 0)                                   +
-     *retval = pgfn_int4pl(kcxt, arg1, arg2);                  +
-   /* ---- code by pl/cuda function ---- */                    +
- }                                                             +
-                                                               +
- KERNEL_FUNCTION(void)                                         +
- plcuda_main_kernel_entrypoint(kern_plcuda *kplcuda,           +
-             void *workbuf,                                    +
-             void *results)                                    +
- {                                                             +
-   kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);     +
-   kern_context kcxt;                                          +
-                                                               +
-   assert(kplcuda->nargs <= kparams->nparams);                 +
-   INIT_KERNEL_CONTEXT(&kcxt,plcuda_main_kernel,kparams);      +
-   __plcuda_main_kernel(kplcuda, workbuf, results, &kcxt);     +
-   kern_writeback_error_status(&kplcuda->kerror_main, &kcxt.e);+
- }                                                             +
-                                                               +
-                                                               +
- #include "cuda_terminal.h"                                    +
-
+postgres=# SELECT gpu_dot_product(array_matrix(random()::real),
+                                  array_matrix(random()::real))
+             FROM generate_series(1,10000);
+ gpu_dot_product
+------------------
+ 3.71461999509484
 (1 row)
 ```
 
@@ -223,100 +175,128 @@ postgres=# SELECT pgstrom.plcuda_function_source('gpu_add'::regproc);
 @en:# PL/CUDA Structure
 
 @ja{
-PL/CUDAの関数定義は、`#plcuda_...`で始まるディレクティブによって分割されたいくつかのコードブロックから構成されます。 このうち、`#plcuda_begin`より始まるコードブロックのみが必須で、必要に応じてその他のコードブロックを追加する事ができます。
+PL/CUDAの関数定義は、`#plcuda_decl`、`#plcuda_begin`、および`#plcuda_end`の各ディレクティブによって分割されたコードブロックから構成されます。各コードブロックには各々の目的に応じたユーザ定義のCUDA Cコードを記述する事ができ、これらは、PL/CUDA言語ハンドラとの引数及び結果の受け渡しを行うロジックと結合し一個のソースファイルへと再構成されます。
 }
 @en{
-Function declaration with PL/CUDA is consists of several code blocks split by directives that begin from `#plcuda_...`. Only the code block start with `#plcuda_begin` is the minimum requirement, and you can add some other code block on demand.
+Function declaration of PL/CUDA is consists of two code blocks split by the directives of `#plcuda_decl`, `#plcuda_begin` and `#plcuda_end`. Users can put their custom code on the code blocks according to the purpose, then PL/CUDA language handler reconstruct them into single source file with extra logic to exchange function arguments and results.
 }
 ```
 #plcuda_decl
   [...any declarations...]
-#plcuda_prep
-  [...function body of prep kernel...]
 #plcuda_begin
-  [...function body of main kernel...]
-#plcuda_post
-  [...function body of post kernel...]
+  [...host code in the entrypoint...]
 #plcuda_end
 ```
 
 @ja{
-`#plcuda_decl`より始まる宣言ブロックは、その他のコードブロックから呼び出す事ができるstatic関数の宣言を記述する事ができます。 他のコードブロックのように、コードブロックの内容が暗黙のうちに特定のカーネル関数に組み込まれる訳ではなく、完全な形式のstatic関数を定義する必要があります。 GPU上であるカーネル関数がブロックサイズを越える数のスレッドで並列実行されている時、複数の実行ユニット間で同期を取るには、カーネル関数終了のタイミングで待ち合わせる事が唯一の方法です。 例えば、結果バッファが特定の値で初期化されている事を前提としてアルゴリズムが実装されている場合、先ず、結果バッファの初期化を行い、それが全て完了するまではアルゴリズムの中核部分を実行する事はできません。 一部のスレッドが未初期化のバッファに対して実行されるという状況は、容易に不正確な計算結果や実行環境のクラッシュを招いてしまうため、常に避ける必要があります。
+`#plcuda_decl`より始まるコードブロックは、`__host__`および`__device__`属性を持つCUDA C関数や変数を完全な形で記述する事ができます。
+このコードブロックは、最終的に構築されるソースファイル上で、`#plcuda_begin`...`#plcuda_end`ブロックを含むエントリポイントよりも前方に位置します。
+
+また、CUDA Cの`#include`構文を用いて外部ヘッダファイルをインクルードする場合には、このコードブロックに記述するようにして下さい。
 }
 @en{
-The declaration block, which begins with `#plcuda_decl`, can have declaration of static functions we can call from other code blocks. Unlike other code blocks, the contents of the code block won't be injected into a particular kernel function, and you need to declare complete static functions. When a kernel function is executed with parallel threads larger than block size on a GPU device, the only way to synchronize between multiple execution units is synchronization of kernel function exit. For example, in case when algorithm is implemented under the assumption of correct initialization of the result buffer, you have to initialize the results buffer first, then you cannot execute the core of algorithm until completion of the initialization. If a part of threads would be executed towards uninitialized buffer, it easily leads incorrect calculation results or crash of execution environment, you always need to avoid.
+The code block, begins from `#plcuda_decl`, can have declaration of `__host__` and `__device__` functions and variables for CUDA C.
+This code block locates in front of the entrypoint function which contains the code block between `#plcuda_begin` and `#plcuda_end` at the source file eventually constructed.
+
+If external header files are included using `#include` statement of CUDA C, put the statement on this code block.
 }
 
 @ja{
-`#plcuda_prep`から始まる前処理ブロック、`#plcuda_main`から始まる本体ブロック、および`#plcuda_post`から始まる後処理ブロックは、それぞれユーザ定義のコードブロックの内容が対応するカーネル関数に埋め込まれます。 前処理ブロックと後処理ブロックの定義はオプショナルですが、これらのコードブロックが定義されている時、前処理カーネル関数、本体カーネル関数、後処理カーネル関数の順で実行される事が保証されています。 これらは、本体カーネル関数の実行に先立って結果バッファや作業バッファの初期化を行う事や、本体カーネル関数の実行後に最終結果を集計するなどの用途に使用する事を意図しています。
+`#plcuda_begin`より始まるコードブロックは、ホストコードであるエントリポイント関数の一部として組み込まれます。したがって、関数名や引数の型などを記述する事はできません。
+エントリポイント関数は、当該コードブロックに制御が移る前に、パイプを介してSQL関数の引数をPostgreSQLバックエンドから受信し、`arg1`、`arg2`、…という名前で参照できるようセットアップを行います。
+
+これらの変数は、SQLデータ型に応じて以下の表に示すCUDA Cとしての表現を持ちます。
+
+|SQLデータ型            |CUDA Cデータ型|説明                  |
+|:---------------------:|:------------:|:--------------------:|
+|`reggstore`            |`void *`      |Gstore_fdw外部表のOID |
+|`real`                 |`float`       |32bit浮動小数点型     |
+|`float`                |`double`      |64bit浮動小数点型     |
+|その他のインライン型   |`Datum`       |`int`、`date`など     |
+|固定長ポインタ型       |`void *`      |`uuid`など            |
+|可変長データ型(varlena)|`varlena *`   |`text`、`real[]`など  |
 }
+
 @en{
-Every content of user defined code blocks, the preparation block begins from `#plcuda_prep`, the main block begins from `#plcuda_begin`, and the post-process block begins from `#plcuda_post`, shall be injected to the relevant kernel functions. Even though implementation of the preparation block and the post-process block are optional, we will ensure the order to launch the preparation kernel function, the main kernel function, then the post-process kernel function when these code blocks are defined. We intend to use these functions to initialize the results buffer or working buffer prior to execution of the main kernel function, or to summarize the final results next to execution of the main kernel.
+The code block between `#plcuda_begin` and `#plcuda_end` is embedded to a part of entrypoint function. Therefore, it does not describe function name, arguments definition and so on.
+Prior to execution of the code block, the entrypoint function receives arguments of the SQL function from PostgreSQL backend, and set up `arg1`, `arg2`, ... variables for further references.
+
+These variables have the following CUDA C representation according to SQL data types.
+
+|SQL data type                  |CUDA C data type|Examples              |
+|:-----------------------------:|:--------------:|:--------------------:|
+|`reggstore`                    |`void *`        |OID of Gstore_fdw foreign table|
+|`real`                         |`float`         |32bit floating point  |
+|`float`                        |`double`        |64bit floating point  |
+|Other inline data types        |`Datum`         |`int`, `date`, ...    |
+|Fixed-length value by reference|`void *`        |`uuid`, ...           |
+|Variable-length value (varlena)|`varlena *`     |`text`, `real[]`, ... |
 }
 
 @ja{
-一個のPL/CUDA関数の呼び出しは、内部的には何個かのSQL関数、GPUカーネル関数の呼び出しを含んでいます。 GPUカーネル関数の呼び出しに先立って、GPUカーネル関数を起動する際のスレッド数、作業バッファや結果バッファのサイズといったパラメータを決定する必要があります。 これらは引数により変動するため、PL/CUDA言語ハンドラは、同じ引数を取る他のSQL関数を呼びだしてこれらのパラメータを決定します。
+PL/CUDA言語ハンドラは、上記のコードブロックから一個のCUDA Cソースファイルを作成し、宣言時または実行時に１度だけ`nvcc`コンパイラでこれをビルドしCUDAプログラムを生成します。
+`#plcuda_include`ディレクティブを含む場合はCUDA Cソースファイルが実行時にしか確定しないため、実行時にのみこれをビルドします。ただし、同一内容のCUDAプログラムがビルド済みである場合にはこれを再利用します。
 }
 @en{
-An invocation of PL/CUDA function internall contains several SQL functions and launch GPU kernel functions. Prior to the GPU kernel functions, we have to determine the parameters when GPU kernel functions like number of threads, amount of results and working buffer. These parameters depend on the arguments, so PL/CUDA handler determines with other SQL functions that take identical argument signature.
+PL/CUDA language handler constructs a single CUDA C source file from the code blocks above, then builds it once by `nvcc` compiler at declaration or execution time.
+If it contains any `#plcuda_include` directive, its source code is not fixed until execution time, so built at the execution time only. In case when identical CUDA program is already pre-built, we can reuse it without rebuild.
 }
-@ja{
-GPUカーネル関数の呼び出しパラメータが確定すると、次に、PL/CUDA言語ハンドラは必要に応じて、DMAを用いてPL/CUDA関数の引数をGPU上の引数バッファに転送します。
-}
-@en{
-Once we could determine the parameters to call GPU kernel function, PL/CUDA handler loads the arguments of PL/CUDA function onto the argument buffer on GPUs, by DMA copy, on demand.
-}
-
-@ja{
-続いて、（定義されていれば）前処理カーネル関数、本体カーネル関数、（定義されていれば）後処理カーネル関数を呼びだします。ブロックサイズを越えたGPUスレッド間で同期を取る方法は、GPUカーネル関数の開始終了のタイミング以外に無い事に留意してください。つまり、作業バッファや結果バッファがある特定の状態を持っている事を期待するのであれば、前処理カーネル関数で初期化を行い、次に本体カーネル関数でこれらのデータ構造を参照する必要があります。
-}
-@en{
-Then, it launches the preparation kernel function (if any), the main kernel function, and the post-process kernel function (if any). Please note that we cannot synchronize GPU threads across the block size boundary, except for the timing of GPU kernel function begin/end. It means, if you expect a particular state exists on the working buffer or results buffer, buffer initialization by preparation kernel then reference of this data structure by the main kernel are required.
-}
-
-@ja{
-最後に、PL/CUDA言語ハンドラは結果バッファの内容を本体側へ書き戻します。 PL/CUDA関数が固定長のデータを返す場合、GPUカーネル関数がユーザ定義ブロックの開始前に設定する変数`retval`ポインタの示す領域を更新します。 PL/CUDA関数が可変長のデータを返す場合、`retval`は`pg_varlena_t`型の領域を指しており、その値が非NULLである場合には結果バッファ（`void *results`）への参照でなければいけません。結果バッファ以外の領域を指していたとしても、これは本体側へ書き戻されない事に留意してください。
-}
-@en{
-Finally, PL/CUDA handler writes back the contents of result buffer into the host side. In case when PL/CUDA function returns a fixed-length datum, the code block updates the area pointed by the `retval` variable which is initialized prior to execution of the user defined block. In case when PL/CUDA function returns a variable-length datum, `retval` points to the area of `pg_varlena_t`, and its value has to be a reference to the results buffer (`void *results`), if it is not a `NULL`. Please note that it shall not be written back if `retval` points out of the results buffer.
-}
-
-```
-typedef struct {
-    varlena    *value;      /* reference to the results buffer */
-    cl_bool     isnull;     /* true, if NULL */
-} pg_varlena_t;
-```
-
 ![PL/CUDA Callflow](./img/plcuda-callflow.png)
 
-
 @ja{
-GPUカーネル関数を実行するスレッド数を指定するには`#plcuda_num_threads`ディレクティブを使用します。このディレクティブはコードブロックの内側で使用され、定数値またはSQL関数名を指定します。SQL関数は、PL/CUDA関数と同一の引数を持ち`bigint`型を返す関数として宣言されている必要があります。
+SQLからPL/CUDA関数を呼び出すと、PL/CUDA言語ハンドラはビルド済みのCUDAプログラムを起動し、パイプを通じてSQL関数の引数をコピーします。引数はCUDAプログラム内の引数バッファに格納され、これらは`arg1`や`arg2`などの名前で参照する事が可能です。
+
+可変長データ型などCUDA Cプログラム上でポインタとして表現されるデータ型は、引数バッファへの参照として初期化されます。引数バッファは`cudaMallocManaged()`によって獲得されたmanaged memory領域であるため、当該ポインタはホスト⇔デバイス間の明示的なDMAなしに使用する事ができます。
+
+引数が`reggstore`型を持つ場合は特殊です。これは本来Gstore_Fdw外部テーブルのOID（4バイト整数）を表現するデータ型ですが、PL/CUDAの引数として与えられた場合はGstore_fdwが獲得しているGPUデバイスメモリへの参照へと置き換えられます。
+引数は`GstoreIpcMapping`オブジェクトへの参照として初期化され、`GstoreIpcMapping::map`にはGstore_Fdw外部テーブルの確保したGPUデバイスメモリをマップしたアドレスが入ります。
+当該領域を物理的に保持しているGPUデバイスIDは`GstoreIpcHandle::device_id`を、当該領域の長さは`GstoreIpcHandle::rawsize`を参照してください。
 }
 @en{
-`#plcuda_num_threads` directive allows specifying the number of threads to execute GPU kernel function. This directive can be used inside of the code block, and takes either a constant value or a SQL function. This SQL function has to be declared to take identical argument types and return bigint type.
-}
+When SQL command invokes PL/CUDA function, PL/CUDA language handler launch the pre-built CUDA program, then copies the arguments of SQL function over pipe. These are stored in the argument buffer of the CUDA program, so custom logic can refer them using `arg1` or `arg2` variables.
 
-@ja{
-同様に、`#plcuda_shmem_unitsz`ディレクティブを使用する事で、GPUカーネル関数の実行時に動的に確保する共有メモリのサイズをスレッドあたりの大きさで指定する事ができます。例えば、スレッドあたり8バイトの共有メモリを使用するGPUカーネル関数が実行ユニットあたり384スレッドで起動された場合、3KBの共有メモリを使用する事ができます。 ここで言う実行ユニットあたりスレッド数は、最適化の結果自動的に算出される値で、#plcuda_num_threadsで指定する値とは異なる事に留意してください。
-}
-@en{
-In a similar fashion, `#plcuda_shmem_unitsz` allows to specify the amount of shared memory per thread, to be acquired on GPU kernel function launch. For example, when a GPU kernel function that consumes 8bytes per thread is launched with 384 threads per streaming-multiprocessor, 3KB of shared memory shall be available. Please note that the number of threads per streaming-multiprocessor shall be automatically calculated during the code optimization, a different concept from what we specify with `#plcuda_num_threads` directive.
-}
+The data types by reference at CUDA C program, like variable-length datum, are initialized as pointers to the argument buffer. It is a managed memory region allocated by `cudaMallocManaged()`, these pointers are available without explicit DMA between host system and GPU devices.
 
-@ja{
-また、`#plcuda_kernel_maxthreads`ディレクティブを使用する事で、コードブロックから作成されるカーネル関数の最適化方針を、実行効率最大化から、実行ユニットあたりスレッド数最大化（通常、1024スレッド）へと切り替える事が可能です。実行ユニットあたりのスレッド数が増加する事で、縮約演算など、共有メモリを用いた実行ユニット間の同期処理を中核とする処理での性能向上が期待できるます。ただ一方で、スレッドあたりのレジスタ数は少なくなるため、処理の特性による使い分けが必要です。
-}
-@en{
-`#plcuda_kernel_maxthreads` directive allows switching optimization policy of the kernel function for the current code block, from maximization of execution efficiency to maximization of number of threads per streaming-multiprocessor (usually 1024). Increase of number of threads per streaming-multiprocessor will improve the performance of workloads which heavily use inter-threads synchronization using shared memory, like reduction operation. On the other hands, it reduces number of registers per thread, needs a right policy in the right place.
-}
+Here is a special case if argument has `reggstore` type. It is actually an OID (32bit integer) of Gstore_Fdw foreign table, however, it is replaced to the reference of GPU device memory acquired by the Gstore_Fdw foreign table if it is supplied as PL/CUDA argument.
 
+The argument is setup to the pointer for `GstoreIpcMapping` object. `GstoreIpcMapping::map` holds the mapped address of the GPU device memory acquired by the Gstore_Fdw foreign table.
+`GstoreIpcHandle::device_id` indicates the device-id of GPU which physically holds the region, and GstoreIpcHandle::rawsize` is raw length of the region.
+}
 ```
-#plcuda_num_threads (<value>|<function name>)
-#plcuda_shmem_unitsz  (<value>|<function name>)
-#plcuda_kernel_maxthreads
+typedef struct
+{
+    cl_uint     __vl_len;       /* 4B varlena header */
+    cl_short    device_id;      /* GPU device where pinning on */
+    cl_char     format;         /* one of GSTORE_FDW_FORMAT__* */
+    cl_char     __padding__;    /* reserved */
+    cl_long     rawsize;        /* length in bytes */
+    union {
+#ifdef CU_IPC_HANDLE_SIZE
+        CUipcMemHandle      d;  /* CUDA driver API */
+#endif
+#ifdef CUDA_IPC_HANDLE_SIZE
+        cudaIpcMemHandle_t  r;  /* CUDA runtime API */
+#endif
+        char                data[64];
+    } ipc_mhandle;
+} GstoreIpcHandle;
+
+typedef struct
+{
+    GstoreIpcHandle h; /* IPChandle of Gstore_Fdw */
+    void       *map;    /* mapped device pointer */
+} GstoreIpcMapping;
 ```
+
+@ja{
+PL/CUDA関数の処理結果を返すには、SQLデータ型に対応するCUDA Cのデータをエントリポイントから`return`で返却します。
+値を明示的に返却しない場合、CUDA Cでのデータ型がポインタ型であり`NULL`を返した場合、あるいはCUDAプログラムが`exit(1)`によりステータスコード1で終了した場合は、PL/CUDA関数はSQLに対して`null`を返したものとして扱われます。
+}
+@en{
+PL/CUDA function can return its result using `return` of a CUDA C datum relevant to the SQL data type.
+In case when no `return` clause is executed, `NULL` pointer is returned if CUDA C data type is pointer, or CUDA program is terminated with status code = 1 by `exit(1)`, PL/CUDA function returns `null` to SQL.
+}
+
 
 @ja:# PL/CUDAリファレンス
 @en:# PL/CUDA References
@@ -328,29 +308,67 @@ In a similar fashion, `#plcuda_shmem_unitsz` allows to specify the amount of sha
 This section is a reference for PL/CUDA function's directives and related SQL functions.
 }
 
+@ja:##PL/CUDAの得意不得意
+@en:##Advantage and disadvantage of PL/CUDA
+
+@ja{
+PL/CUDA関数が呼び出されると、その背後でCUDAプログラムが起動され、CUDAプログラムはGPUデバイスの初期化を行います。これらの一連の処理は決して軽いものではなく、例えば単純なスカラー値の比較を行うようなロジックをPL/CUDA関数で実装し、10億行のフルテーブルと同時に使用するという使い方は推奨されません。
+
+一方で、ひとたびGPUデバイスの初期化が完了すれば、GPUの持つ数千プロセッサコアを利用して大量データを高速に処理する事が可能です。特に、繰り返し計算により最適パラメータを計算する機械学習や統計解析のように、ワークロードに占める計算の割合が大きな問題に適すると言えるでしょう。
+}
+@en{
+On invocation of PL/CUDA function, it launches the relevant CUDA program on behalf of the invocation, then CUDA program initialize per process context of GPU device. The series of operations are never lightweight, so we don't recommend to implement a simple comparison of scalar values using PL/CUDA, and use for full table scan on billion rows.
+
+On the other hands, once GPU device is correctly initialized, it allows to process massive amount of data using several thousands of processor cores on GPU device. Especially, it is suitable for computing intensive workloads, like machine-learning or advanced analytics that approach to the optimal values by repeated calculation for example.
+}
+
+@ja{
+処理すべきデータが増加すると、CUDAプログラムとのデータの受け渡し方法にも注意が必要です。
+PostgreSQLは配列型をサポートしており、整数型や実数型のデータを高々数百万個程度受け渡すのであれば手軽な方法です。
+しかし、配列型を含むPostgreSQLの可変長データの最大長は1GBであるため、これより巨大なデータの受け渡しにはデータの分割など工夫が必要です。また、SQL関数の引数をセットアップするのはPostgreSQLバックエンドプロセスで、この処理はシングルスレッドで動作するためGB単位のメモリ操作には相応の時間を要します。
+
+データサイズが数百MBを越えてきた段階で、Gstore_Fdw外部テーブルの利用を検討してください。
+Gstore_Fdwを通して予めGPUデバイスメモリにデータをロードする事で、PL/CUDA関数の呼び出し時に長大な引数をセットアップする必要がなく、また、GPUデバイスメモリ容量が許す限り、GBを越えるサイズのデータを保持する事が可能です。
+}
+
+@en{
+According to the growth of data size, we need to pay attention how to exchange data with CUDA program.
+PostgreSQL supports array types, and it is easy and simple way to exchange several millions of integer or real values at most.
+
+However, variable-length datum of PostgreSQL, including the array-types, is restricted to 1GB at a maximum.
+We need to take a little idea to handle larger data, like separation of data-set. In addition, PostgreSQL backend process set up the argument of SQL functions in single thread, so it takes a certain amount of time to manipulate gigabytes-class memory object.
+
+Please consider usage of Gstore_Fdw foreign-table when data size grows more than several hundreds megabytes.
+Once you preload the large data-set onto GPU device memory through Gstore_Fdw, no need to set up large arguments on invocation of PL/CUDA function. It also allows to keep larger data than gigabytes, as lond as GPU device memory capacity allows.
+}
+
 @ja:##PL/CUDAディレクティブ
 @en:##PL/CUDA Directives
 
+### `#plcuda_decl`
+@ja{
+このディレクティブは`__host__`および`__device__`属性を持つCUDA C関数や変数を含むコードブロックを開始します。PL/CUDA言語ハンドラは、CUDAプログラムのソースファイル上で、このコードブロックをエントリポイントよりも前にそのままコピーします。
+
+このディレクティブの使用は任意ですが、エントリポイントから呼び出すべきGPUカーネル関数を宣言しなければPL/CUDA関数を使用する意味はありませんので、通常は一つ以上のGPUカーネル関数を含む事になります。
+}
+@en{
+This directive begins a code block which contains CUDA C functions and variables with both of `__host__` and `__device__` attributes. PL/CUDA language handler copies this code block in front of the program entrypoint as is.
+
+Use of this directive is optional, however, it makes no sense if here is no declaration of GPU kernel functions to be called from the entrypoint. So, we usually have more than one GPU kernel function.
+}
+
 ### `#plcuda_begin`
 @ja{
-本体カーネル関数のコードブロックの開始を宣言します。このディレクティブは必須です。 GPU上でのコードブロックの実行開始に先立って、PL/CUDA関数の引数は`arg1`、`arg2`、...という変数名で参照可能となるよう初期化されます。 これらの変数は、PG-StromがSQLデータ型をGPU上で表現するのと同じ表現を持っており、例えば、単精度浮動小数点である`real`型の引数は、以下のように定義された`pg_float4_t`型の変数として表現されています。
+このディレクティブは、CUDAプログラムのエントリポイントを構成するコードブロックを開始します。
+CUDAプログラムは、受け取ったPL/CUDA関数の引数を`arg1`、`arg2`、...という変数名で参照可能となるよう初期化を行った上で、コードブロックへと制御を移します。当該コードブロックはホストコードであり、CPUで動作する制御ロジックや、GPUカーネルを呼出しての計算処理を記述する事ができます。
+
+結果を返すには、CUDA Cの`return`構文でPL/CUDA関数の返り値に応じたデータを返します。
 }
 @en{
-It marks beginning of the main kernel function code block. This directive is always required. Prior to execution of the code block on GPU, the arguments of PL/CUDA function are initialized for references by variable names like `arg1`, `arg2`, ... These variables have same representation with what PG-Strom represents SQL data types on GPU, for example, an argument of the `real` data type (that is single precision floating point type) is shown as a `pg_float4_t` type variable as declared below.
-}
+This directive begins a code block which consists a part of the entrypoint of CUDA program.
+The CUDA program setup the referable `arg1`, `arg2`, ... variables according to the arguments of PL/CUDA function, then switch control to the user defined portion. This code block is a host code; we can implement own control logic working on CPU or heavy calculation by GPU kernel invocation.
 
-```
-typedef struct {
-    cl_float    value;
-    cl_bool     isnull;
-} pg_float4_t;
-```
-
-@ja{
-これらの変数は各スレッドのプライベート領域に確保されており、変数を更新したとしても次ステップのカーネル関数には反映されません。カーネル関数の終了後、次のカーネル関数に状態を引き継ぐには、`void *workbuf`ポインタが参照する作業バッファか、`void *results`ポインタの参照する結果バッファに値を格納する必要があります。
-}
-@en{
-These variables are kept in private area of each threads, thus, update of these variables are not reflected on execution of the kernel function on the next step. If you want to share the state between kernel functions, value shall be kept in either the working buffer referenced by the `void *workbuf` pointer or the results buffer referenced by the `void *results` pointer.
+Result of PL/CUDA function can be returned using `return` statement of CUDA C, according to the function definition.
 }
 
 ### `#plcuda_end`
@@ -361,194 +379,33 @@ These variables are kept in private area of each threads, thus, update of these 
 It marks end of the kernel function code block. By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the `#plcuda_end` directive.
 }
 
-### `#plcuda_decl`
+### `#plcuda_include <function name>`
 @ja{
-このディレクティブの使用は任意です。 全てのkernel関数の定義に先立って宣言しておくべきコードブロックの開始を宣言します。 他のコードブロックとは異なり、内容が自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。
+このディレクティブはCUDA Cの`#include`と似ていますが、ヘッダファイルではなく、指定されたSQL関数の実行結果をディレクティブの存在していた場所に挿入します。
+オプションで指定するSQL関数はPL/CUDA関数と同一の引数をとり`text`型を返す必要があります。
+
+これは例えば、大量データ間の類似度を計算する際に、計算のアルゴリズムはほとんど同一であるにも関わらず距離計算のロジックだけが異なるバリエーションを動的に作り出す事が可能で、PL/CUDA関数の保守を簡素化する事ができます。
 }
 @en{
-Use of this directive is optional. It marks beginning of the declaration code block that contains the raw code to be declared prior to the definition of any kernel functions. Unlike other code blocks, the contents of this code block shall not be applied as a kernel function, thus, you have to put complete definition of functions.
+This directive is similar to `#include` of CUDA C, however, it injects result of the specified SQL function onto the location where the directive was written.
+The SQL function should have identical arguments and return `text` data.
+
+For example, when we calculate similarity of massive items, we can generate multiple variant of the algorithm on the fly that is almost equivalent but only distance definitions are different. It makes maintenance of PL/CUDA function simplified.
 }
 
-### `#plcuda_prep`
+
+### `#plcuda_library <library name>`
 @ja{
-このディレクティブの使用は任意です。`#plcuda_begin`から始まる本体カーネル関数の実行に先立ってGPUで実行すべき、前処理カーネル関数の処理を記述します。 ここでは、結果バッファや作業バッファの初期化を行う事を意図しており、前処理カーネル関数の実行が完了するまでは本体カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
+CUDAプログラムをビルドする際にリンクするライブラリ名を指定します。
+`<library name>`に記述するのは、`nvcc`コマンドの`-l`オプションに相当する文字列です。
+例えば`libcublas.so`ライブラリをリンクする場合には、接頭語の`lib`と拡張子の`.so`を省略した`cublas`と指定します。
+現在のところ、CUDA Toolkitの標準ライブラリパス（`/usr/local/cuda/lib64`）にインストールされたライブラリのみを指定する事ができます。
 }
 @en{
-Use of this directive is optional. It marks beginning of the preparation code block that shall be executed on GPU prior to the main kernel function; begins from `#plcuda_begin` directive. We expect the preparation kernel initializes the results and working buffer. The main kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
-}
-
-### `#plcuda_post`
-@ja{
-このディレクティブの使用は任意です。`#plcuda_begin`から始まる本体カーネル関数の実行後にGPUで実行すべき、後処理カーネル関数の処理を記述します。 ここでは、CPU側に返却する最終結果を結果バッファにセットする事を意図しており、本体カーネル関数の実行が完了するまでは後処理カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
-}
-@en{
-You can optionally use this directive. It marks beginning of the post-process code block that shall be executed on GPU next to the main kernel function; begins from `#plcuda_begin` directive. We expect the post-process kernel set up the final results to be returned to the CPU side. The post-process kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
-}
-
-### `#plcuda_num_threads (<value>|<function>)`
-@ja{
-このディレクティブの使用は任意です。未指定の場合、デフォルト値として定数`1`が使われます。
-
-このディレクティブが#plcuda_prep、#plcuda_begin、および#plcuda_postコードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際のスレッド数を指定する事ができます。
-
-数値が指定されると、PL/CUDAランタイムは指定された数のGPUスレッドを起動してGPUカーネル関数を実行します。 関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された数のGPUスレッドを起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。
-}
-@en{
-Use of this directive is optional. If not specified, the default is a constant value `1`.
-This directive allows specifying the number of threads to execute the GPU kernel function if it is used in the code block of `#plcuda_prep`, `#plcuda_begin`, or `#plcuda_post`.
-If a constant value is specified, PL/CUDA runtime kicks the specified number of GPU threads to run the GPU kernel function. If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the number of GPU threads to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
-}
-
-### `#plcuda_shmem_unitsz (<value>|<function>)`
-@ja{
-このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数`0`です
-
-このディレクティブが`#plcuda_prep`、`#plcuda_begin`、および`#plcuda_post`コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するスレッドあたり共有メモリのサイズを指定する事ができます。
-
-数値が指定されると、PL/CUDAランタイムは指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。
-
-関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、`bigint`型を返す必要があります。
-}
-@en{
-Use of this directive is optional. If not specified, the default is a constant value `0`.
-
-This directive allows specifying amount of the shared memory per thread to be dinamically allocated on GPU kernel execution, if it is used in the code block of `#plcuda_prep`, `#plcuda_begin`, or `#plcuda_post`.
-
-If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per thread.
-
-If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per thread to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
-}
-
-@ja{
-GPUカーネル関数の実行時に実際に確保される共有メモリのサイズは、本ディレクティブによって指定したスレッドあたり共有メモリのサイズだけでなく、実行ユニットあたりのスレッド数に依存する事に留意してください。（また、実行ユニットあたりのスレッド数は#plcuda_num_threadsで指定した値とも異なる概念である事に留意してください。） 例えば、スレッドあたり共有メモリのサイズが8バイトであり、実行ユニットあたりのスレッド数が384である場合、実行ユニット毎に3KBの共有メモリが確保されます。この時、#plcuda_num_threadsで指定したスレッド数が32768であれば、このGPUカーネルは86個の実行ユニットを使用して実行されますが、実行ユニットにタスクが投入されるタイミングを決めるのはスケジューラの役割ですので、必ずしも3KB x 86個 = 258KBの共有メモリが一度に消費されるわけではありません。
-}
-@en{
-Please note that amount of the shared memory actually acquired on execution of GPU kernel function depends on the number of threads per streaming-multiprocessor, not only the amount of shared memory per thread specified by this directive. (Also note that the number of threads per streaming-multiprocessor is a different concept what we specified using #plcuda_num_threads.) For example, if amount of shared memory per thread is 8 bytes and the number of streaming-multiprocessor is 384, 3KB of shared memory shall be allocated per streaming-multiprocessor. At that time, if the number of total threads specified by #plcuda_num_threads is 32768, this GPU kernel shall be executed with 86 streaming-multiprocessor. However, it is the role of scheduler to determine the timing to put kernels into, so it does not mean that 86 x 3KB = 256KB of the shared memory is consumed at once.
-}
-
-### `#plcuda_shmem_blocksz (<value>|<function>)`
-
-@ja{
-このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
-
-このディレクティブが`#plcuda_prep`、`#plcuda_begin`、および`#plcuda_post`コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するブロックあたり共有メモリのサイズを指定する事ができます。
-
-数値が指定されると、PL/CUDAランタイムは指定された大きさのブロック毎共有メモリを確保してGPUカーネル関数を実行します。
-
-関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、`bigint`型を返す必要があります。
-}
-@en{
-Use of this directive is optional. If not specified, the default is a constant value `0`.
-
-This directive allows specifying amount of the shared memory per block to be dinamically allocated on GPU kernel execution, if it is used in the code block of `#plcuda_prep`, `#plcuda_begin`, or `#plcuda_post`.
-
-If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.
-
-If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
-}
-
-### `#plcuda_kernel_blocksz (<value>|<function>)`
-@ja{
-このディレクティブの使用は任意です。
-
-`#plcuda_prep`、`#plcuda_begin`、および`#plcuda_post`コードブロックの内側でこのディレクティブを指定すると、実行ユニットあたりのスレッド数を指定する事ができます。通常、この値はデバイスのWARP値の倍数であり1024以下です。 デフォルトでは、GPUカーネル関数のリソース消費量に基づいた最適な値が使用されます。したがって、アルゴリズムの性質上大きなブロックサイズが望ましいなどの理由がない限り、本ディレクティブを使用すべきではありません。
-
-数値が指定されると、PL/CUDAランタイムは指定された大きさのブロックを設定してGPUカーネル関数を実行します。 関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックを設定してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。
-
-ブロックあたりスレッド数が多くなると、より多くのスレッドが共有メモリを介して同期処理を行う事ができるようになる半面、スレッドが使用できるレジスタ数が減少するため、一部のローカル変数がグローバルメモリ上に確保されるなど性能面では不利になる事があります。
-}
-@en{
-Use of this directive is optional.
-
-This directive allows specifying the number of threads per streaming-multiprocessor, if it is used in the code block of `#plcuda_prep`, `#plcuda_begin`, or `#plcuda_post`. It is usually a multiple number of the warp value of the device, and equal to or less than `1024`. In the default, an optimal value is applied according to the resource consumption of the GPU kernel function, therefore, this directive shall not be used unless you have no special reason; a larger block size is preferable due to characteristics of the algorithm for example.
-
-If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.
-If a SQL function name is specified, PL/CUDA runtime calls the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns `bigint` data type.
-
-Increase the number of threads per streaming-multiprocessor allows more threads to synchronize other threads using the shared memory, on the other hands, it leads decrease of the amount of registers a thread can use, thus, it may have performance degradation by private variables allocation on the (slow) global memory for example.
-}
-
-### `#plcuda_include ("library name"|<function name>)`
-@ja{
-PG-Stromの静的GPUライブラリ、またはユーザ定義のコードブロックをインクルードし、PL/CUDA関数内で使用できるようにします。サーバシステム上の任意のヘッダファイルをインクルーとして利用するための機能ではない事に留意してください。
-
-以下の表にあるPG-Stromの静的GPUライブラリ名を指定すると、PL/CUDAランタイムは生成されるCUDA Cプログラムの先頭に指定されたライブラリをインクルードします。正直なところ、この用法は古いものであり利用シーンは限られるでしょう。
-
-関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、`#plcuda_include`ディレクティブの存在した場所に、戻り値のテキストを挿入します。このSQL関数は、PL/CUDA関数と同一の引数を取り、`text`型を返す必要があります。
-}
-
-@en{
-This directive includes the static GPU library of PG-Strom, or a user defined code block, for use in PL/CUDA functions.
-Please note that it is NOT a feature to include arbitrary header files on the server system.
-
-If any of the static library name below is specified, PL/CUDA runtime injects the library on the head of the generated CUDA C program. Honestlly, it is a legacy manner, so we expect limited use cases.
-
-If a SQL function name is specified, PL/CUDA runtime calls the specified SQL function, and then result of the function shall be injected to the CUDA C code where `#plcuda_include` directive exists. This SQL function takes identical arguments with PL/CUDA function, and returns `text` data type.
-}
-
-@ja{
-|ライブラリ名|説明|
-|:----------:|:---|
-|`"cuda_dynpara.h"`|GPU内で動的にカーネル関数を起動するDynamic Parallelism関連のGPUランタイム関数群です。 このファイルをインクルードすると、CUDAのデバイスランタイムも同時にリンクされるようになります。|
-|`"cuda_matrix.h"` |SQLの配列型をベクトル/行列と見なして処理するためのGPUランタイム関数群です。|
-|`"cuda_timelib.h"`|SQLの日付時刻型を処理するためのGPUランタイム関数群です。|
-|`"cuda_textlib.h"`|SQLのテキストデータ型、およびLIKEオペレータを処理するためのGPUランタイム関数群です。|
-|`"cuda_numeric.h"`|SQLのNumericデータ型を処理するためのGPUランタイム関数群です。|
-|`"cuda_mathlib.h"`|SQLの数学関数や四則演算オペレータを処理するためのGPUランタイム関数群です。|
-|`"cuda_money.h"`  |SQLの通貨型を処理するためのGPUランタイム関数群です。|
-|`"cuda_curand.h"` |CUDAの乱数生成ライブラリ`curand`を使用するためのGPUランタイム関数群です。|
-}
-@en{
-|Library name|Description|
-|:----------:|:---|
-|`"cuda_dynpara.h"`|A collection of GPU runtime functions related to dynamic parallelism; that launch kernel functions on GPU. Include of this file also links the device runtime library of CUDA.|
-|`"cuda_matrix.h"` |A collection of GPU runtime functions to process the array type of SQL as if vector/matrix.|
-|`"cuda_timelib.h"`|A collection of GPU runtime functions to process the date and time data type of SQL.|
-|`"cuda_textlib.h"`|A collection of GPU runtime functions to process the text data type and LIKE operator.|
-|`"cuda_numeric.h"`|A a collection of GPU runtime functions to process the `numeric` data type of SQL.|
-|`"cuda_mathlib.h"`|A collection of GPU runtime functions to process the arithmetic operators and mathematic functions of SQL.|
-|`"cuda_money.h"`  |A collection of GPU runtime functions to process the currency data type of SQL.|
-|`"cuda_curand.h"` |A collection of GPU runtime functions to use `curand` library which supports random number generation, provided by CUDA.|
-}
-
-### `#plcuda_results_bufsz (<value>|<function>)`
-@ja{
-このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
-
-PL/CUDA関数の実行時に確保する結果バッファの大きさをバイト単位で指定します。PL/CUDA関数が可変長型データを返却する際には、結果バッファの確保は必須です。
-
-数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを結果バッファとして確保してからGPUカーネル関数を起動します。 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを結果バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。
-
-GPUカーネル関数からは、結果バッファは引数`void *results`で指定された領域としてアクセス可能です。 0バイトが指定された場合、`void *results`には`NULL`がセットされます。
-}
-@en{
-Use of this directive is optional. If not specified, the default is a constant value `0`.
-
-This directive allows specifying amount of the results buffer in bytes, to be acquired on execution of PL/CUDA function. If PL/CUDA function is declared to return variable length datum, allocation of the results buffer is needed.
-
-If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the results buffer, then launch the GPU kernel functions. If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the results buffer and launch the GPU kernel functions. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
-
-GPU kernel functions can access the results buffer as the region pointed by the `void *results` argument. If `0` bytes were specified, `NULL` shall be set on the `void *results`.
-}
-
-### `#plcuda_working_bufsz (<value>|<function>)`
-@ja{
-このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
-
-PL/CUDA関数の実行時に確保する作業バッファの大きさをバイト単位で指定します。
-
-数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを作業バッファとして確保してからGPUカーネル関数を起動します。 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを作業バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、`bigint`型を返す必要があります。
-
-GPUカーネル関数からは、作業バッファは引数`void *workbuf`で指定された領域としてアクセス可能です。 0バイトが指定された場合、`void *workbuf`には`NULL`がセットされます。
-}
-@en{
-Use of this directive is optional. If not specified, the default is a constant value `0`.
-
-This directive allows specifying amount of the working buffer in bytes, to be acquired on execution of PL/CUDA function.
-
-If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the working buffer, and then launch the GPU kernel functions. If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the working buffer and launch the GPU kernel functions. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
-
-GPU kernel functions can access the working buffer as the region pointed by the void *results argument. If 0 bytes were specified, NULL shall be set on the void *results.
+It specifies the library name to be linked when CUDA program is built by `nvcc`.
+The `<library name>` portion is supplied to `nvcc` command as `-l` option.
+For example, if `libcublas.co` library is linked, you need to describe `cublas` without prefix (`lib`) and suffix (`.so`).
+Right now, we can specify the libraries only installed on the standard library path of CUDA Toolkit (`/usr/local/cuda/lib64).
 }
 
 ### `#plcuda_sanity_check <function>`
@@ -563,19 +420,6 @@ No sanity check function is configured on the default.
 Usually, launch of GPU kernel function is heavier task than call of another function on CPU, because it also involves initialization of GPU devices. If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function. The sanity check function takes identical arguments with PL/CUDA function, and returns `bool` data type.
 }
 
-### `#plcuda_cpu_fallback <function>`
-
-@ja{
-GPUカーネル関数と同等の処理を行うCPUフォールバック関数を指定します。 デフォルトではCPUフォールバック関数は設定されていません。
-
-GPUカーネル関数がStromError_CpuReCheckエラーを返却し、さらにCPUフォールバック関数が設定されていると、PL/CUDA言語ハンドラはGPUでの処理結果を破棄してCPUフォールバック関数を呼びだします。 これは、必ずしも全ての入力に対してGPUカーネル関数を実行可能でない（例えばデータサイズがGPU RAMに載りきらないなど）場合に、代替の救済策を実装するために有用です。ただし、CPUフォールバック関数はシングルスレッドで実行されるため、パフォーマンスが犠牲にならざるを得ない点には留意してください。
-}
-@en{
-It allows to specify the CPU fallback function that performs as like GPU kernel function. No CPU fallback function is configured on the default.
-
-If GPU kernel function returns StromError_CpuReCheck error and the CPU fallback function is configured, the PL/CUDA language handler discards the results of processing on GPU side, then call the CPU fallback function. It is valuable to implement an alternative remedy, in case when GPU kernel function is not always executable for all possible input; for example, data size may be too large to load onto GPU RAM. Also note that we must have a trade-off of the performance because CPU fallback function shall be executed in CPU single thread.
-}
-
 @ja:## PL/CUDA 関連関数
 @en:## PL/CUDA Related Functions
 
@@ -588,6 +432,38 @@ If GPU kernel function returns StromError_CpuReCheck error and the CPU fallback 
 |Definition|Result|Description|
 |:---------|:----:|:----------|
 |`plcuda_function_source(regproc)`|`text`|It returns source code of the GPU kernel generated from the PL/CUDA function, towards the OID input of PL/CUDA function as argument.|
+}
+
+@ja:### PL/CUDA関数呼び出し支援
+@en:### Support functions for PL/CUDA invocations
+
+@ja{
+以下の関数群は、PL/CUDA関数の呼び出しを簡便にするために提供されています。
+}
+@en{
+The functions below are provided to simplify invocation of PL/CUDA functions.
+}
+
+@ja{
+|関数定義  |結果型|説明|
+|:---------|:----:|:---|
+|`attnums_of(regclass,text[])`|`smallint[]`|第一引数で指定したテーブルの第二引数で指定した列名（複数可）の列番号を配列として返します。|
+|`attnum_of(regclass,text)`|`smallint`|第一引数で指定したテーブルの第二引数で指定した列名の列番号を返します。|
+|`atttypes_of(regclass,text[])`|`regtype[]`|第一引数で指定したテーブルの第二引数で指定した列名（複数可）のデータ型を配列として返します。|
+|`atttype_of(regclass,text)`|`regtype`|第一引数で指定したテーブルの第二引数で指定した列名のデータ型を返します。|
+|`attrs_types_check(regclass,text[],regtype[])`|`bool`|第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、第三引数で指定したデータ型とそれぞれ一致しているかどうかを調べます。|
+|`attrs_type_check(regclass,text[],regtype)`|`bool`|第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、全て第三引数で指定したデータ型と一致しているかどうかを調べます。|
+}
+
+@en{
+|Definition|Result|Description|
+|:---------|:----:|:----------|
+|`attnums_of(regclass,text[])`|`smallint[]`|It returns attribute numbers for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.|
+|`attnum_of(regclass,text)`|`smallint`|It returns attribute number for the column name of the 2nd argument on the table of the 1st argument.|
+|`atttypes_of(regclass,text[])`|`regtype[]`|It returns data types for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.|
+|`atttype_of(regclass,text)`|`regtype`|It returns data type for the column name of the 2nd argument on the table of the 1st argument.|
+|`attrs_types_check(regclass,text[],regtype[])`|`bool`|It checks whether the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data types of the 3rd argument for each.
+|`attrs_type_check(regclass,text[],regtype)`|`bool`|It checks whether all the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data type of the 3rd argument.|
 }
 
 @ja:### 配列ベースの行列型関数
@@ -631,9 +507,6 @@ If and when the array satisfies the above terms, we can determine the location o
 |`array_matrix_validation(anyarray)`|`bool`|入力された配列（`anyarray`）が、配列ベース行列として妥当かどうかを検査します。 PL/CUDA関数実行前の引数の妥当性検証や、DOMAIN型を定義する時の検査制約としての利用を想定しています。|
 |`array_matrix_height(array)`|`int`|`array`は`smallint`、`int`、`bigint`、`real`または`float`型の配列で、配列ベース行列の高さを返却します。|
 |`array_matrix_width(array)`|`int`|`array`は`smallint`、`int`、`bigint`、`real`または`float`型の配列で、配列ベース行列の幅を返却します。|
-|`array_vector_rawsize(regtype,int)`|`bigint`|第一引数で指定したデータ型、第二引数で指定した高さを持つ配列ベースベクトル（1次元配列）の作成に必要なメモリ領域の大きさを返します。`#plcuda_results_bufsz`や`#plcuda_working_bufsz`での利用を意図しています。|
-|`array_matrix_rawsize(regproc,int,int)`|`bigint`|第一引数で指定したデータ型、第二引数で指定した高さ、および第三引数で指定した幅の配列ベース行列の作成に必要なメモリ領域の大きさを返します。`#plcuda_results_bufsz`や`#plcuda_working_bufsz`での利用を意図しています。|
-|`array_cube_rawsize(regtype,int,int,int)`|`bigint`|第一引数で指定したデータ型、第二引数で指定した高さ、第三引数で指定した幅、および第４引数で指定した深さの配列ベースキューブ（3次元配列）の作成に必要なメモリ領域の大きさを返します。#plcuda_results_bufszや#plcuda_working_bufszでの利用を意図しています。|
 }
 
 @en{
@@ -649,7 +522,4 @@ If and when the array satisfies the above terms, we can determine the location o
 |`array_matrix_validation(anyarray)`|`bool`|It validates whether the supplied array (`anyarray`) is adequate for the array-based matrix. It is intended to use for sanity check prior to invocation of PL/CUDA function, or check constraint on domain type definition.|
 |`array_matrix_height(array)`|`int`|`array` is an array of either `smallint`, `int`, `bigint`, `real` or `float` data. This function returns the height of the supplied matrix.|
 |`array_matrix_width(array)`|`int`|	`array` is an array of either `smallint`, `int`, `bigint`, `real` or `float` data. This function returns the width of the supplied matrix.|
-|`array_vector_rawsize(regtype,int)`|`bigint`|It returns required bytesize to store an array-based vector (1-dimensional array) with data type specified by the 1st argument and height by the 2nd argument. It is intended to use for `#plcuda_results_bufsz` and `#plcuda_working_bufsz`.
-|`array_matrix_rawsize(regtype,int,int)`|`bigint`|It returns required bytesize to store an array-based matrix with data type specified by the 1st argument, height by the 2nd argument and width by the 3rd argument. It is intended to use for `#plcuda_results_bufsz` and `#plcuda_working_bufsz`.
-|`array_cube_rawsize(regtype,int,int,int)`|`bigint`|It returns required bytesize to store an array-based cube (3-dimensional array) with data type specified by the 1st argument, height by the 2nd argument, width by the 3rd argument, and depth by the 4th argument. It is intended to use for `#plcuda_results_bufsz` and `#plcuda_working_bufsz`.
 }

@@ -647,10 +647,8 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 		"#define PLCUDA_GET_ARGVAL(x,type) (PLCUDA_ARG_ISNULL(x) ? 0 : *((type *)p_args[(x)]))\n"
 		"\n"
 		"static PLCUDA_RESULT_TYPE plcuda_main(void *p_args[])\n"
-		"{\n"
-		"  %s retval = %s;\n",
-		label, typbyval, typlen, con->proargtypes->dim1,
-		label, typbyval ? "0" : "NULL");
+		"{\n",
+		label, typbyval, typlen, con->proargtypes->dim1);
 
 	for (i=0; i < proargtypes->dim1; i++)
 	{
@@ -681,9 +679,7 @@ plcuda_make_flat_source(StringInfo source, plcuda_code_context *con)
 	}
 	if (con->main.data)
 		appendStringInfo(source, "{\n%s}\n", con->main.data);
-	else
-		appendStringInfoString(source, "exit(1);\n");	//NULL result
-	appendStringInfo(source, "  return retval;\n}\n\n");
+	appendStringInfoString(source, "exit(1);\n}\n\n");	//NULL result
 
 	/* merge PL/CUDA host template */
 	appendStringInfoString(source, pgsql_host_plcuda_code);

@@ -121,6 +121,8 @@
     
         <ul>
         
+            <li><a class="toctree-l4" href="#advantage-and-disadvantage-of-plcuda">Advantage and disadvantage of PL/CUDA</a></li>
+        
             <li><a class="toctree-l4" href="#plcuda-directives">PL/CUDA Directives</a></li>
         
             <li><a class="toctree-l4" href="#plcuda-related-functions">PL/CUDA Related Functions</a></li>
@@ -205,296 +207,217 @@
 <p>You can also use foreign tables defined with <code>gstore_fdw</code> as arguments of PL/CUDA function. In this case, no need to load the data onto GPU for each invocation because foreign table already keeps the data, and available to use larger data than 1GB which is a restriction of variable length data in PostgreSQL.</p>
 <p>Therefore, users can focus on productive tasks like implementation of statistical analysis, code optimization and so on, without routine process like data input/output between GPU and databases.</p>
 <p><img alt="PL/CUDA Overview" src="../img/plcuda-overview.png" /></p>
-<p>Once a PL/CUDA function is declared with CREATE FUNCTION statement, it generates a CUDA program that embeds the definition of this function on the GPU's kernel function at the execution time. This kernel function contains initialization code to reference this PL/CUDA functions and auxiliary code to return run-time error to CPU side. Also, it can include some run-time functions to support execution of PG-Strom.</p>
-<p>Here is no special memory protection mechanism on the native CUDA program made with PL/CUDA function, thus, execution of buggy PL/CUDA function can crash GPU execution environment or PostreSQL infrastructure in some cases. Thus, only database superuser can define PL/CUDA function.</p>
-<p>Below is an example of simple PL/CUDA function. This function takes two int arguments, and then returns the sum of them with int data type.</p>
-<pre><code>postgres=# CREATE FUNCTION gpu_add(int, int)
-RETURNS int
+<p>Once a PL/CUDA function is declared using <code>CREATE FUNCTION</code>, it generates a CUDA program source code that embeds the definition of this function, then build it for the target GPU device.
+This CUDA program is almost identical to usual GPU software based on CUDA runtime, except for the auxiliary code to receive arguments of SQL function and to write back its results. It also allows to include/link some libraries for CUDA device runtime.</p>
+<p>Native CUDA programs implemented by PL/CUDA are executed as child-processes of PostgreSQL backend.
+Therefore, it has independent address space and OS/GPU resources from PostgreSQL.
+CUDA program contains host code for the host system and device code to be executed on GPU devices.
+The host code can execute any logic we can program using C-language, so we restrict only database superuser can define PL/CUDA function from the standpoint of security.</p>
+<p>Below is an example of simple PL/CUDA function. This function takes two same length <code>real[]</code> array as arguments, then returns its dot product in <code>float</code> data type.</p>
+<pre><code>CREATE OR REPLACE FUNCTION
+gpu_dot_product(real[], real[])
+RETURNS float
 AS $$
-#plcuda_include &quot;cuda_mathlib.h&quot;
+#plcuda_decl
+#include &quot;cuda_matrix.h&quot;
+
+KERNEL_FUNCTION_MAXTHREADS(void)
+gpu_dot_product(double *p_dot,
+                VectorTypeFloat *X,
+                VectorTypeFloat *Y)
+{
+    size_t      index = get_global_id();
+    size_t      nitems = X-&gt;height;
+    float       v[MAXTHREADS_PER_BLOCK];
+    float       sum;
+
+    if (index &lt; nitems)
+        v[get_local_id()] = X-&gt;values[index] * Y-&gt;values[index];
+    else
+        v[get_local_id()] = 0.0;
+
+    sum = pgstromTotalSum(v, MAXTHREADS_PER_BLOCK);
+    if (get_local_id() == 0)
+        atomicAdd(p_dot, (double)sum);
+    __syncthreads();
+}
 #plcuda_begin
-  if (get_global_id() == 0)
-    *retval = pgfn_int4pl(kcxt, arg1, arg2);
+{
+    size_t      nitems;
+    int         blockSz;
+    int         gridSz;
+    double     *dot;
+    cudaError_t rc;
+
+    if (!VALIDATE_ARRAY_VECTOR_TYPE_STRICT(arg1, PG_FLOAT4OID) ||
+        !VALIDATE_ARRAY_VECTOR_TYPE_STRICT(arg2, PG_FLOAT4OID))
+        EEXIT(&quot;arguments are not vector like array&quot;);
+    nitems = ARRAY_VECTOR_HEIGHT(arg1);
+    if (nitems != ARRAY_VECTOR_HEIGHT(arg2))
+        EEXIT(&quot;length of arguments mismatch&quot;);
+
+    rc = cudaMallocManaged(&amp;dot, sizeof(double));
+    if (rc != cudaSuccess)
+        CUEXIT(rc, &quot;failed on cudaMallocManaged&quot;);
+    memset(dot, 0, sizeof(double));
+
+    blockSz = MAXTHREADS_PER_BLOCK;
+    gridSz = (nitems + MAXTHREADS_PER_BLOCK - 1) / MAXTHREADS_PER_BLOCK;
+    gpu_dot_product&lt;&lt;&lt;gridSz,blockSz&gt;&gt;&gt;(dot,
+                                        (VectorTypeFloat *)arg1,
+                                        (VectorTypeFloat *)arg2);
+    rc = cudaStreamSynchronize(NULL);
+    if (rc != cudaSuccess)
+        CUEXIT(rc, &quot;failed on cudaStreamSynchronize&quot;);
+
+    return *dot;
+}
 #plcuda_end
-$$ LANGUAGE plcuda;
-CREATE FUNCTION
+$$ LANGUAGE 'plcuda';
 </code></pre>
 
-<p>The code block enclosed by <code>#plcuda_begin</code> and <code>#plcuda_end</code> is main portion of PL/CUDA function. This kernel function can reference the <code>int</code> type argument as <code>arg1</code> and <code>arg2</code> which are <code>pg_int4_t</code> variables, and can return the result values written on the region pointed by retval variable which is a pointer of <code>pg_int4_t *</code> data type, as result of PL/CUDA function. <code>pgfn_int4pl()</code> is a runtime function of PG-Strom, declared at <code>cuda_mathlib.h</code>, which adds two <code>pg_int4_t</code> variables.</p>
-<p>Below is an example of execution of this PL/CUDA function. Its two integer arguments (100 and 200) were sent to GPU device, then it wrote back the calculated result (300) from the GPU device. As like normal SQL functions, PL/CUDA function can be used as a part of SQL expression.</p>
-<pre><code>postgres=# SELECT gpu_add(100,200);
- gpu_add
----------
-     300
-(1 row)
-</code></pre>
-
-<p>The plcuda_function_source function allows showing the source of kernel function generated by the PL/CUDA function. The code block enclosed by the comment: <code>/* ---- code by pl/cuda function ---- */</code> is the portion injected from the declaration of PL/CUDA function</p>
-<pre><code>postgres=# SELECT pgstrom.plcuda_function_source('gpu_add'::regproc);
-                     plcuda_function_source
-----------------------------------------------------------------
- #include &lt;cuda_device_runtime_api.h&gt;                          +
-                                                               +
- #define HOSTPTRLEN 8                                          +
- #define DEVICEPTRLEN 8                                        +
- #define BLCKSZ 8192                                           +
- #define MAXIMUM_ALIGNOF 8                                     +
- #define MAXIMUM_ALIGNOF_SHIFT 3                               +
- #define PGSTROM_KERNEL_DEBUG 1                                +
- #include &quot;cuda_common.h&quot;                                      +
-                                                               +
- #define PG_BOOLOID 16                                         +
- #define PG_INT2OID 21                                         +
- #define PG_INT4OID 23                                         +
- #define PG_INT8OID 20                                         +
- #define PG_FLOAT2OID 237809                                   +
- #define PG_FLOAT4OID 700                                      +
- #define PG_FLOAT8OID 701                                      +
- #define PG_CASHOID 790                                        +
- #define PG_UUIDOID 2950                                       +
- #define PG_MACADDROID 829                                     +
- #define PG_INETOID 869                                        +
- #define PG_CIDROID 650                                        +
- #define PG_DATEOID 1082                                       +
- #define PG_TIMEOID 1083                                       +
- #define PG_TIMETZOID 1266                                     +
- #define PG_TIMESTAMPOID 1114                                  +
- #define PG_TIMESTAMPTZOID 1184                                +
- #define PG_INTERVALOID 1186                                   +
- #define PG_BPCHAROID 1042                                     +
- #define PG_VARCHAROID 1043                                    +
- #define PG_NUMERICOID 1700                                    +
- #define PG_BYTEAOID 17                                        +
- #define PG_TEXTOID 25                                         +
- #define PG_INT4RANGEOID 3904                                  +
- #define PG_INT8RANGEOID 3926                                  +
- #define PG_TSRANGEOID 3908                                    +
- #define PG_TSTZRANGEOID 3910                                  +
- #define PG_DATERANGEOID 3912                                  +
-                                                               +
- #include &quot;cuda_mathlib.h&quot;                                     +
- typedef union {                                               +
-     pg_varlena_t     varlena_v;                               +
-     pg_bool_t        bool_v;                                  +
-     pg_int2_t        int2_v;                                  +
-     pg_int4_t        int4_v;                                  +
-     pg_int8_t        int8_v;                                  +
-     pg_float2_t      float2_v;                                +
-     pg_float4_t      float4_v;                                +
-     pg_float8_t      float8_v;                                +
- #ifdef CUDA_NUMERIC_H                                         +
-     pg_numeric_t     numeric_v;                               +
- #endif                                                        +
- #ifdef CUDA_MISC_H                                            +
-     pg_money_t       money_v;                                 +
-     pg_uuid_t        uuid_v;                                  +
-     pg_macaddr_t     macaddr_v;                               +
-     pg_inet_t        inet_v;                                  +
-     pg_cidr_t        cidr_t;                                  +
- #endif                                                        +
- #ifdef CUDA_TIMELIB_H                                         +
-     pg_date_t        date_v;                                  +
-     pg_time_t        time_v;                                  +
-     pg_timestamp_t   timestamp_v;                             +
-     pg_timestamptz_t timestamptz_v;                           +
- #endif                                                        +
- #ifdef CUDA_TEXTLIB_H                                         +
-     pg_bpchar_t      bpchar_v;                                +
-     pg_text_t        text_v;                                  +
-     pg_varchar_t     varchar_v;                               +
- #endif                                                        +
- #ifdef CUDA_RANGETYPE_H                                       +
-     pg_int4range_t   int4range_v;                             +
-     pg_int8range_t   int8range_v;                             +
- #ifdef CUDA_TIMELIB_H                                         +
-     pg_tsrange_t     tsrange_v;                               +
-     pg_tstzrange_t   tstzrange_v;                             +
-     pg_daterange_t   daterange_v;                             +
- #endif                                                        +
- #endif                                                        +
-   } pg_anytype_t;                                             +
-                                                               +
-                                                               +
- #include &quot;cuda_plcuda.h&quot;                                      +
- STATIC_INLINE(void)                                           +
- __plcuda_main_kernel(kern_plcuda *kplcuda,                    +
-                    void *workbuf,                             +
-                    void *results,                             +
-                    kern_context *kcxt)                        +
- {                                                             +
-   pg_int4_t *retval __attribute__ ((unused));                 +
-   pg_int4_t arg1 __attribute__((unused));                     +
-   pg_int4_t arg2 __attribute__((unused));                     +
-   assert(sizeof(*retval) &lt;= sizeof(kplcuda-&gt;__retval));       +
-   retval = (pg_int4_t *)kplcuda-&gt;__retval;                    +
-   arg1 = pg_int4_param(kcxt,0);                               +
-   arg2 = pg_int4_param(kcxt,1);                               +
-                                                               +
-   /* ---- code by pl/cuda function ---- */                    +
-   if (get_global_id() == 0)                                   +
-     *retval = pgfn_int4pl(kcxt, arg1, arg2);                  +
-   /* ---- code by pl/cuda function ---- */                    +
- }                                                             +
-                                                               +
- KERNEL_FUNCTION(void)                                         +
- plcuda_main_kernel_entrypoint(kern_plcuda *kplcuda,           +
-             void *workbuf,                                    +
-             void *results)                                    +
- {                                                             +
-   kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);     +
-   kern_context kcxt;                                          +
-                                                               +
-   assert(kplcuda-&gt;nargs &lt;= kparams-&gt;nparams);                 +
-   INIT_KERNEL_CONTEXT(&amp;kcxt,plcuda_main_kernel,kparams);      +
-   __plcuda_main_kernel(kplcuda, workbuf, results, &amp;kcxt);     +
-   kern_writeback_error_status(&amp;kplcuda-&gt;kerror_main, &amp;kcxt.e);+
- }                                                             +
-                                                               +
-                                                               +
- #include &quot;cuda_terminal.h&quot;                                    +
-
+<p>PL/CUDA infrastructure makes entrypoint function of CUDA program by the block between <code>#plcuda_begin</code> and <code>#plcuda_end</code> with extra code to exchange arguments of SQL function.
+The portion enclosed by <code>#plcuda_decl</code> and <code>#plcuda_begin</code> is a block for declaration of GPU device functions and other host functions. It is placed prior to the entrypoint above.</p>
+<p>At the entrypoint of the CUDA program, you can refer the arguments of SQL function using <code>arg1</code>, `arg2, and so on.</p>
+<p>In the above example, the <code>arg1</code> and <code>arg2</code>, <code>real[]</code> array type, are passed to the entrypoint, then <code>VALIDATE_ARRAY_VECTOR_TYPE_STRICT</code> macro checks whether it is 1-dimensional array of 32bit floating-point values without NULL.</p>
+<p>Ditto with return value, the entrypoint returns a value in CUDA C representation corresponding to the SQL data type.
+If entrypoint does not return any value (or, it exits the program with status code 1 by <code>exit()</code>), it is considered PL/CUDA function returns <code>NULL</code>. </p>
+<p>The above sample program validates the array of <code>real</code> values passed from SQL function, then it allocates the result buffer by <code>cudaMallocManaged</code>, and invokes <code>gpu_dot_product</code>, a GPU kernel function, to compute dot product with two vectors.</p>
+<p>The result of this function is below. It computes the dot product of two vectors which contain 10,000 items randomly generated.</p>
+<pre><code>postgres=# SELECT gpu_dot_product(array_matrix(random()::real),
+                                  array_matrix(random()::real))
+             FROM generate_series(1,10000);
+ gpu_dot_product
+------------------
+ 3.71461999509484
 (1 row)
 </code></pre>
 
 <h1 id="plcuda-structure">PL/CUDA Structure</h1>
-<p>Function declaration with PL/CUDA is consists of several code blocks split by directives that begin from <code>#plcuda_...</code>. Only the code block start with <code>#plcuda_begin</code> is the minimum requirement, and you can add some other code block on demand.</p>
+<p>Function declaration of PL/CUDA is consists of two code blocks split by the directives of <code>#plcuda_decl</code>, <code>#plcuda_begin</code> and <code>#plcuda_end</code>. Users can put their custom code on the code blocks according to the purpose, then PL/CUDA language handler reconstruct them into single source file with extra logic to exchange function arguments and results.</p>
 <pre><code>#plcuda_decl
   [...any declarations...]
-#plcuda_prep
-  [...function body of prep kernel...]
 #plcuda_begin
-  [...function body of main kernel...]
-#plcuda_post
-  [...function body of post kernel...]
+  [...host code in the entrypoint...]
 #plcuda_end
 </code></pre>
 
-<p>The declaration block, which begins with <code>#plcuda_decl</code>, can have declaration of static functions we can call from other code blocks. Unlike other code blocks, the contents of the code block won't be injected into a particular kernel function, and you need to declare complete static functions. When a kernel function is executed with parallel threads larger than block size on a GPU device, the only way to synchronize between multiple execution units is synchronization of kernel function exit. For example, in case when algorithm is implemented under the assumption of correct initialization of the result buffer, you have to initialize the results buffer first, then you cannot execute the core of algorithm until completion of the initialization. If a part of threads would be executed towards uninitialized buffer, it easily leads incorrect calculation results or crash of execution environment, you always need to avoid.</p>
-<p>Every content of user defined code blocks, the preparation block begins from <code>#plcuda_prep</code>, the main block begins from <code>#plcuda_begin</code>, and the post-process block begins from <code>#plcuda_post</code>, shall be injected to the relevant kernel functions. Even though implementation of the preparation block and the post-process block are optional, we will ensure the order to launch the preparation kernel function, the main kernel function, then the post-process kernel function when these code blocks are defined. We intend to use these functions to initialize the results buffer or working buffer prior to execution of the main kernel function, or to summarize the final results next to execution of the main kernel.</p>
-<p>An invocation of PL/CUDA function internall contains several SQL functions and launch GPU kernel functions. Prior to the GPU kernel functions, we have to determine the parameters when GPU kernel functions like number of threads, amount of results and working buffer. These parameters depend on the arguments, so PL/CUDA handler determines with other SQL functions that take identical argument signature.</p>
-<p>Once we could determine the parameters to call GPU kernel function, PL/CUDA handler loads the arguments of PL/CUDA function onto the argument buffer on GPUs, by DMA copy, on demand.</p>
-<p>Then, it launches the preparation kernel function (if any), the main kernel function, and the post-process kernel function (if any). Please note that we cannot synchronize GPU threads across the block size boundary, except for the timing of GPU kernel function begin/end. It means, if you expect a particular state exists on the working buffer or results buffer, buffer initialization by preparation kernel then reference of this data structure by the main kernel are required.</p>
-<p>Finally, PL/CUDA handler writes back the contents of result buffer into the host side. In case when PL/CUDA function returns a fixed-length datum, the code block updates the area pointed by the <code>retval</code> variable which is initialized prior to execution of the user defined block. In case when PL/CUDA function returns a variable-length datum, <code>retval</code> points to the area of <code>pg_varlena_t</code>, and its value has to be a reference to the results buffer (<code>void *results</code>), if it is not a <code>NULL</code>. Please note that it shall not be written back if <code>retval</code> points out of the results buffer.</p>
-<pre><code>typedef struct {
-    varlena    *value;      /* reference to the results buffer */
-    cl_bool     isnull;     /* true, if NULL */
-} pg_varlena_t;
-</code></pre>
-
-<p><img alt="PL/CUDA Callflow" src="../img/plcuda-callflow.png" /></p>
-<p><code>#plcuda_num_threads</code> directive allows specifying the number of threads to execute GPU kernel function. This directive can be used inside of the code block, and takes either a constant value or a SQL function. This SQL function has to be declared to take identical argument types and return bigint type.</p>
-<p>In a similar fashion, <code>#plcuda_shmem_unitsz</code> allows to specify the amount of shared memory per thread, to be acquired on GPU kernel function launch. For example, when a GPU kernel function that consumes 8bytes per thread is launched with 384 threads per streaming-multiprocessor, 3KB of shared memory shall be available. Please note that the number of threads per streaming-multiprocessor shall be automatically calculated during the code optimization, a different concept from what we specify with <code>#plcuda_num_threads</code> directive.</p>
-<p><code>#plcuda_kernel_maxthreads</code> directive allows switching optimization policy of the kernel function for the current code block, from maximization of execution efficiency to maximization of number of threads per streaming-multiprocessor (usually 1024). Increase of number of threads per streaming-multiprocessor will improve the performance of workloads which heavily use inter-threads synchronization using shared memory, like reduction operation. On the other hands, it reduces number of registers per thread, needs a right policy in the right place.</p>
-<pre><code>#plcuda_num_threads (&lt;value&gt;|&lt;function name&gt;)
-#plcuda_shmem_unitsz  (&lt;value&gt;|&lt;function name&gt;)
-#plcuda_kernel_maxthreads
-</code></pre>
-
-<h1 id="plcuda-references">PL/CUDA References</h1>
-<p>This section is a reference for PL/CUDA function's directives and related SQL functions.</p>
-<h2 id="plcuda-directives">PL/CUDA Directives</h2>
-<h3 id="plcuda_begin"><code>#plcuda_begin</code></h3>
-<p>It marks beginning of the main kernel function code block. This directive is always required. Prior to execution of the code block on GPU, the arguments of PL/CUDA function are initialized for references by variable names like <code>arg1</code>, <code>arg2</code>, ... These variables have same representation with what PG-Strom represents SQL data types on GPU, for example, an argument of the <code>real</code> data type (that is single precision floating point type) is shown as a <code>pg_float4_t</code> type variable as declared below.</p>
-<pre><code>typedef struct {
-    cl_float    value;
-    cl_bool     isnull;
-} pg_float4_t;
-</code></pre>
-
-<p>These variables are kept in private area of each threads, thus, update of these variables are not reflected on execution of the kernel function on the next step. If you want to share the state between kernel functions, value shall be kept in either the working buffer referenced by the <code>void *workbuf</code> pointer or the results buffer referenced by the <code>void *results</code> pointer.</p>
-<h3 id="plcuda_end"><code>#plcuda_end</code></h3>
-<p>It marks end of the kernel function code block. By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the <code>#plcuda_end</code> directive.</p>
-<h3 id="plcuda_decl"><code>#plcuda_decl</code></h3>
-<p>Use of this directive is optional. It marks beginning of the declaration code block that contains the raw code to be declared prior to the definition of any kernel functions. Unlike other code blocks, the contents of this code block shall not be applied as a kernel function, thus, you have to put complete definition of functions.</p>
-<h3 id="plcuda_prep"><code>#plcuda_prep</code></h3>
-<p>Use of this directive is optional. It marks beginning of the preparation code block that shall be executed on GPU prior to the main kernel function; begins from <code>#plcuda_begin</code> directive. We expect the preparation kernel initializes the results and working buffer. The main kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.</p>
-<h3 id="plcuda_post"><code>#plcuda_post</code></h3>
-<p>You can optionally use this directive. It marks beginning of the post-process code block that shall be executed on GPU next to the main kernel function; begins from <code>#plcuda_begin</code> directive. We expect the post-process kernel set up the final results to be returned to the CPU side. The post-process kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.</p>
-<h3 id="plcuda_num_threads-valuefunction"><code>#plcuda_num_threads (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional. If not specified, the default is a constant value <code>1</code>.
-This directive allows specifying the number of threads to execute the GPU kernel function if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.
-If a constant value is specified, PL/CUDA runtime kicks the specified number of GPU threads to run the GPU kernel function. If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the number of GPU threads to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
-<h3 id="plcuda_shmem_unitsz-valuefunction"><code>#plcuda_shmem_unitsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.</p>
-<p>This directive allows specifying amount of the shared memory per thread to be dinamically allocated on GPU kernel execution, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.</p>
-<p>If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per thread.</p>
-<p>If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per thread to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
-<p>Please note that amount of the shared memory actually acquired on execution of GPU kernel function depends on the number of threads per streaming-multiprocessor, not only the amount of shared memory per thread specified by this directive. (Also note that the number of threads per streaming-multiprocessor is a different concept what we specified using #plcuda_num_threads.) For example, if amount of shared memory per thread is 8 bytes and the number of streaming-multiprocessor is 384, 3KB of shared memory shall be allocated per streaming-multiprocessor. At that time, if the number of total threads specified by #plcuda_num_threads is 32768, this GPU kernel shall be executed with 86 streaming-multiprocessor. However, it is the role of scheduler to determine the timing to put kernels into, so it does not mean that 86 x 3KB = 256KB of the shared memory is consumed at once.</p>
-<h3 id="plcuda_shmem_blocksz-valuefunction"><code>#plcuda_shmem_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.</p>
-<p>This directive allows specifying amount of the shared memory per block to be dinamically allocated on GPU kernel execution, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.</p>
-<p>If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.</p>
-<p>If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
-<h3 id="plcuda_kernel_blocksz-valuefunction"><code>#plcuda_kernel_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional.</p>
-<p>This directive allows specifying the number of threads per streaming-multiprocessor, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>. It is usually a multiple number of the warp value of the device, and equal to or less than <code>1024</code>. In the default, an optimal value is applied according to the resource consumption of the GPU kernel function, therefore, this directive shall not be used unless you have no special reason; a larger block size is preferable due to characteristics of the algorithm for example.</p>
-<p>If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.
-If a SQL function name is specified, PL/CUDA runtime calls the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.</p>
-<p>Increase the number of threads per streaming-multiprocessor allows more threads to synchronize other threads using the shared memory, on the other hands, it leads decrease of the amount of registers a thread can use, thus, it may have performance degradation by private variables allocation on the (slow) global memory for example.</p>
-<h3 id="plcuda_include-library-namefunction-name"><code>#plcuda_include ("library name"|&lt;function name&gt;)</code></h3>
-<p>This directive includes the static GPU library of PG-Strom, or a user defined code block, for use in PL/CUDA functions.
-Please note that it is NOT a feature to include arbitrary header files on the server system.</p>
-<p>If any of the static library name below is specified, PL/CUDA runtime injects the library on the head of the generated CUDA C program. Honestlly, it is a legacy manner, so we expect limited use cases.</p>
-<p>If a SQL function name is specified, PL/CUDA runtime calls the specified SQL function, and then result of the function shall be injected to the CUDA C code where <code>#plcuda_include</code> directive exists. This SQL function takes identical arguments with PL/CUDA function, and returns <code>text</code> data type.</p>
+<p>The code block, begins from <code>#plcuda_decl</code>, can have declaration of <code>__host__</code> and <code>__device__</code> functions and variables for CUDA C.
+This code block locates in front of the entrypoint function which contains the code block between <code>#plcuda_begin</code> and <code>#plcuda_end</code> at the source file eventually constructed.</p>
+<p>If external header files are included using <code>#include</code> statement of CUDA C, put the statement on this code block.</p>
+<p>The code block between <code>#plcuda_begin</code> and <code>#plcuda_end</code> is embedded to a part of entrypoint function. Therefore, it does not describe function name, arguments definition and so on.
+Prior to execution of the code block, the entrypoint function receives arguments of the SQL function from PostgreSQL backend, and set up <code>arg1</code>, <code>arg2</code>, ... variables for further references.</p>
+<p>These variables have the following CUDA C representation according to SQL data types.</p>
 <table>
 <thead>
 <tr>
-<th align="center">Library name</th>
-<th align="left">Description</th>
+<th align="center">SQL data type</th>
+<th align="center">CUDA C data type</th>
+<th align="center">Examples</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="center"><code>"cuda_dynpara.h"</code></td>
-<td align="left">A collection of GPU runtime functions related to dynamic parallelism; that launch kernel functions on GPU. Include of this file also links the device runtime library of CUDA.</td>
+<td align="center"><code>reggstore</code></td>
+<td align="center"><code>void *</code></td>
+<td align="center">OID of Gstore_fdw foreign table</td>
 </tr>
 <tr>
-<td align="center"><code>"cuda_matrix.h"</code></td>
-<td align="left">A collection of GPU runtime functions to process the array type of SQL as if vector/matrix.</td>
+<td align="center"><code>real</code></td>
+<td align="center"><code>float</code></td>
+<td align="center">32bit floating point</td>
 </tr>
 <tr>
-<td align="center"><code>"cuda_timelib.h"</code></td>
-<td align="left">A collection of GPU runtime functions to process the date and time data type of SQL.</td>
+<td align="center"><code>float</code></td>
+<td align="center"><code>double</code></td>
+<td align="center">64bit floating point</td>
 </tr>
 <tr>
-<td align="center"><code>"cuda_textlib.h"</code></td>
-<td align="left">A collection of GPU runtime functions to process the text data type and LIKE operator.</td>
+<td align="center">Other inline data types</td>
+<td align="center"><code>Datum</code></td>
+<td align="center"><code>int</code>, <code>date</code>, ...</td>
 </tr>
 <tr>
-<td align="center"><code>"cuda_numeric.h"</code></td>
-<td align="left">A a collection of GPU runtime functions to process the <code>numeric</code> data type of SQL.</td>
+<td align="center">Fixed-length value by reference</td>
+<td align="center"><code>void *</code></td>
+<td align="center"><code>uuid</code>, ...</td>
 </tr>
 <tr>
-<td align="center"><code>"cuda_mathlib.h"</code></td>
-<td align="left">A collection of GPU runtime functions to process the arithmetic operators and mathematic functions of SQL.</td>
-</tr>
-<tr>
-<td align="center"><code>"cuda_money.h"</code></td>
-<td align="left">A collection of GPU runtime functions to process the currency data type of SQL.</td>
-</tr>
-<tr>
-<td align="center"><code>"cuda_curand.h"</code></td>
-<td align="left">A collection of GPU runtime functions to use <code>curand</code> library which supports random number generation, provided by CUDA.</td>
+<td align="center">Variable-length value (varlena)</td>
+<td align="center"><code>varlena *</code></td>
+<td align="center"><code>text</code>, <code>real[]</code>, ...</td>
 </tr>
 </tbody>
 </table>
-<h3 id="plcuda_results_bufsz-valuefunction"><code>#plcuda_results_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.</p>
-<p>This directive allows specifying amount of the results buffer in bytes, to be acquired on execution of PL/CUDA function. If PL/CUDA function is declared to return variable length datum, allocation of the results buffer is needed.</p>
-<p>If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the results buffer, then launch the GPU kernel functions. If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the results buffer and launch the GPU kernel functions. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
-<p>GPU kernel functions can access the results buffer as the region pointed by the <code>void *results</code> argument. If <code>0</code> bytes were specified, <code>NULL</code> shall be set on the <code>void *results</code>.</p>
-<h3 id="plcuda_working_bufsz-valuefunction"><code>#plcuda_working_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
-<p>Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.</p>
-<p>This directive allows specifying amount of the working buffer in bytes, to be acquired on execution of PL/CUDA function.</p>
-<p>If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the working buffer, and then launch the GPU kernel functions. If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the working buffer and launch the GPU kernel functions. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
-<p>GPU kernel functions can access the working buffer as the region pointed by the void <em>results argument. If 0 bytes were specified, NULL shall be set on the void </em>results.</p>
+<p>PL/CUDA language handler constructs a single CUDA C source file from the code blocks above, then builds it once by <code>nvcc</code> compiler at declaration or execution time.
+If it contains any <code>#plcuda_include</code> directive, its source code is not fixed until execution time, so built at the execution time only. In case when identical CUDA program is already pre-built, we can reuse it without rebuild.</p>
+<p><img alt="PL/CUDA Callflow" src="../img/plcuda-callflow.png" /></p>
+<p>When SQL command invokes PL/CUDA function, PL/CUDA language handler launch the pre-built CUDA program, then copies the arguments of SQL function over pipe. These are stored in the argument buffer of the CUDA program, so custom logic can refer them using <code>arg1</code> or <code>arg2</code> variables.</p>
+<p>The data types by reference at CUDA C program, like variable-length datum, are initialized as pointers to the argument buffer. It is a managed memory region allocated by <code>cudaMallocManaged()</code>, these pointers are available without explicit DMA between host system and GPU devices.</p>
+<p>Here is a special case if argument has <code>reggstore</code> type. It is actually an OID (32bit integer) of Gstore_Fdw foreign table, however, it is replaced to the reference of GPU device memory acquired by the Gstore_Fdw foreign table if it is supplied as PL/CUDA argument.</p>
+<p>The argument is setup to the pointer for <code>GstoreIpcMapping</code> object. <code>GstoreIpcMapping::map</code> holds the mapped address of the GPU device memory acquired by the Gstore_Fdw foreign table.
+<code>GstoreIpcHandle::device_id</code> indicates the device-id of GPU which physically holds the region, and GstoreIpcHandle::rawsize` is raw length of the region.</p>
+<pre><code>typedef struct
+{
+    cl_uint     __vl_len;       /* 4B varlena header */
+    cl_short    device_id;      /* GPU device where pinning on */
+    cl_char     format;         /* one of GSTORE_FDW_FORMAT__* */
+    cl_char     __padding__;    /* reserved */
+    cl_long     rawsize;        /* length in bytes */
+    union {
+#ifdef CU_IPC_HANDLE_SIZE
+        CUipcMemHandle      d;  /* CUDA driver API */
+#endif
+#ifdef CUDA_IPC_HANDLE_SIZE
+        cudaIpcMemHandle_t  r;  /* CUDA runtime API */
+#endif
+        char                data[64];
+    } ipc_mhandle;
+} GstoreIpcHandle;
+
+typedef struct
+{
+    GstoreIpcHandle h; /* IPChandle of Gstore_Fdw */
+    void       *map;    /* mapped device pointer */
+} GstoreIpcMapping;
+</code></pre>
+
+<p>PL/CUDA function can return its result using <code>return</code> of a CUDA C datum relevant to the SQL data type.
+In case when no <code>return</code> clause is executed, <code>NULL</code> pointer is returned if CUDA C data type is pointer, or CUDA program is terminated with status code = 1 by <code>exit(1)</code>, PL/CUDA function returns <code>null</code> to SQL.</p>
+<h1 id="plcuda-references">PL/CUDA References</h1>
+<p>This section is a reference for PL/CUDA function's directives and related SQL functions.</p>
+<h2 id="advantage-and-disadvantage-of-plcuda">Advantage and disadvantage of PL/CUDA</h2>
+<p>On invocation of PL/CUDA function, it launches the relevant CUDA program on behalf of the invocation, then CUDA program initialize per process context of GPU device. The series of operations are never lightweight, so we don't recommend to implement a simple comparison of scalar values using PL/CUDA, and use for full table scan on billion rows.</p>
+<p>On the other hands, once GPU device is correctly initialized, it allows to process massive amount of data using several thousands of processor cores on GPU device. Especially, it is suitable for computing intensive workloads, like machine-learning or advanced analytics that approach to the optimal values by repeated calculation for example.</p>
+<p>According to the growth of data size, we need to pay attention how to exchange data with CUDA program.
+PostgreSQL supports array types, and it is easy and simple way to exchange several millions of integer or real values at most.</p>
+<p>However, variable-length datum of PostgreSQL, including the array-types, is restricted to 1GB at a maximum.
+We need to take a little idea to handle larger data, like separation of data-set. In addition, PostgreSQL backend process set up the argument of SQL functions in single thread, so it takes a certain amount of time to manipulate gigabytes-class memory object.</p>
+<p>Please consider usage of Gstore_Fdw foreign-table when data size grows more than several hundreds megabytes.
+Once you preload the large data-set onto GPU device memory through Gstore_Fdw, no need to set up large arguments on invocation of PL/CUDA function. It also allows to keep larger data than gigabytes, as lond as GPU device memory capacity allows.</p>
+<h2 id="plcuda-directives">PL/CUDA Directives</h2>
+<h3 id="plcuda_decl"><code>#plcuda_decl</code></h3>
+<p>This directive begins a code block which contains CUDA C functions and variables with both of <code>__host__</code> and <code>__device__</code> attributes. PL/CUDA language handler copies this code block in front of the program entrypoint as is.</p>
+<p>Use of this directive is optional, however, it makes no sense if here is no declaration of GPU kernel functions to be called from the entrypoint. So, we usually have more than one GPU kernel function.</p>
+<h3 id="plcuda_begin"><code>#plcuda_begin</code></h3>
+<p>This directive begins a code block which consists a part of the entrypoint of CUDA program.
+The CUDA program setup the referable <code>arg1</code>, <code>arg2</code>, ... variables according to the arguments of PL/CUDA function, then switch control to the user defined portion. This code block is a host code; we can implement own control logic working on CPU or heavy calculation by GPU kernel invocation.</p>
+<p>Result of PL/CUDA function can be returned using <code>return</code> statement of CUDA C, according to the function definition.</p>
+<h3 id="plcuda_end"><code>#plcuda_end</code></h3>
+<p>It marks end of the kernel function code block. By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the <code>#plcuda_end</code> directive.</p>
+<h3 id="plcuda_include-function-name"><code>#plcuda_include &lt;function name&gt;</code></h3>
+<p>This directive is similar to <code>#include</code> of CUDA C, however, it injects result of the specified SQL function onto the location where the directive was written.
+The SQL function should have identical arguments and return <code>text</code> data.</p>
+<p>For example, when we calculate similarity of massive items, we can generate multiple variant of the algorithm on the fly that is almost equivalent but only distance definitions are different. It makes maintenance of PL/CUDA function simplified.</p>
+<h3 id="plcuda_library-library-name"><code>#plcuda_library &lt;library name&gt;</code></h3>
+<p>It specifies the library name to be linked when CUDA program is built by <code>nvcc</code>.
+The <code>&lt;library name&gt;</code> portion is supplied to <code>nvcc</code> command as <code>-l</code> option.
+For example, if <code>libcublas.co</code> library is linked, you need to describe <code>cublas</code> without prefix (<code>lib</code>) and suffix (<code>.so</code>).
+Right now, we can specify the libraries only installed on the standard library path of CUDA Toolkit (`/usr/local/cuda/lib64).</p>
 <h3 id="plcuda_sanity_check-function"><code>#plcuda_sanity_check &lt;function&gt;</code></h3>
 <p>It allows to specify the sanity check function that preliminary checks adequacy of the supplied arguments, prior to GPU kernel launch.
 No sanity check function is configured on the default.
 Usually, launch of GPU kernel function is heavier task than call of another function on CPU, because it also involves initialization of GPU devices. If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function. The sanity check function takes identical arguments with PL/CUDA function, and returns <code>bool</code> data type.</p>
-<h3 id="plcuda_cpu_fallback-function"><code>#plcuda_cpu_fallback &lt;function&gt;</code></h3>
-<p>It allows to specify the CPU fallback function that performs as like GPU kernel function. No CPU fallback function is configured on the default.</p>
-<p>If GPU kernel function returns StromError_CpuReCheck error and the CPU fallback function is configured, the PL/CUDA language handler discards the results of processing on GPU side, then call the CPU fallback function. It is valuable to implement an alternative remedy, in case when GPU kernel function is not always executable for all possible input; for example, data size may be too large to load onto GPU RAM. Also note that we must have a trade-off of the performance because CPU fallback function shall be executed in CPU single thread.</p>
 <h2 id="plcuda-related-functions">PL/CUDA Related Functions</h2>
 <table>
 <thead>
@@ -509,6 +432,49 @@ Usually, launch of GPU kernel function is heavier task than call of another func
 <td align="left"><code>plcuda_function_source(regproc)</code></td>
 <td align="center"><code>text</code></td>
 <td align="left">It returns source code of the GPU kernel generated from the PL/CUDA function, towards the OID input of PL/CUDA function as argument.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="support-functions-for-plcuda-invocations">Support functions for PL/CUDA invocations</h3>
+<p>The functions below are provided to simplify invocation of PL/CUDA functions.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Definition</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>attnums_of(regclass,text[])</code></td>
+<td align="center"><code>smallint[]</code></td>
+<td align="left">It returns attribute numbers for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.</td>
+</tr>
+<tr>
+<td align="left"><code>attnum_of(regclass,text)</code></td>
+<td align="center"><code>smallint</code></td>
+<td align="left">It returns attribute number for the column name of the 2nd argument on the table of the 1st argument.</td>
+</tr>
+<tr>
+<td align="left"><code>atttypes_of(regclass,text[])</code></td>
+<td align="center"><code>regtype[]</code></td>
+<td align="left">It returns data types for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.</td>
+</tr>
+<tr>
+<td align="left"><code>atttype_of(regclass,text)</code></td>
+<td align="center"><code>regtype</code></td>
+<td align="left">It returns data type for the column name of the 2nd argument on the table of the 1st argument.</td>
+</tr>
+<tr>
+<td align="left"><code>attrs_types_check(regclass,text[],regtype[])</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">It checks whether the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data types of the 3rd argument for each.</td>
+</tr>
+<tr>
+<td align="left"><code>attrs_type_check(regclass,text[],regtype)</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">It checks whether all the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data type of the 3rd argument.</td>
 </tr>
 </tbody>
 </table>
@@ -580,21 +546,6 @@ Usually, launch of GPU kernel function is heavier task than call of another func
 <td align="left"><code>array_matrix_width(array)</code></td>
 <td align="center"><code>int</code></td>
 <td align="left"><code>array</code> is an array of either <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function returns the width of the supplied matrix.</td>
-</tr>
-<tr>
-<td align="left"><code>array_vector_rawsize(regtype,int)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">It returns required bytesize to store an array-based vector (1-dimensional array) with data type specified by the 1st argument and height by the 2nd argument. It is intended to use for <code>#plcuda_results_bufsz</code> and <code>#plcuda_working_bufsz</code>.</td>
-</tr>
-<tr>
-<td align="left"><code>array_matrix_rawsize(regtype,int,int)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">It returns required bytesize to store an array-based matrix with data type specified by the 1st argument, height by the 2nd argument and width by the 3rd argument. It is intended to use for <code>#plcuda_results_bufsz</code> and <code>#plcuda_working_bufsz</code>.</td>
-</tr>
-<tr>
-<td align="left"><code>array_cube_rawsize(regtype,int,int,int)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">It returns required bytesize to store an array-based cube (3-dimensional array) with data type specified by the 1st argument, height by the 2nd argument, width by the 3rd argument, and depth by the 4th argument. It is intended to use for <code>#plcuda_results_bufsz</code> and <code>#plcuda_working_bufsz</code>.</td>
 </tr>
 </tbody>
 </table>

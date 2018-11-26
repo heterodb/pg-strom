@@ -119,7 +119,10 @@ create_empty_matrix(Oid type_oid, cl_uint width, cl_uint height)
 				 format_type_be(type_oid));
 	}
 	M = palloc(ARRAY_MATRIX_RAWSIZE(type_len,height,width));
-	INIT_ARRAY_MATRIX(M,type_oid,type_len,height,width);
+	if (width == 1)
+		INIT_ARRAY_VECTOR(M,type_oid,type_len,height);
+	else
+		INIT_ARRAY_MATRIX(M,type_oid,type_len,height,width);
 	return M;
 }
 
@@ -289,8 +292,11 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 		if (!AllocSizeIsValid(length))									\
 			elog(ERROR, "supplied array-matrix is too big");			\
 		R = palloc(length);												\
-		INIT_ARRAY_MATRIX(R, (amstate)->elemtype,						\
-						  typlen, height, width);						\
+		if (width == 1)													\
+			INIT_ARRAY_VECTOR(R, (amstate)->elemtype, typlen, height);	\
+		else															\
+			INIT_ARRAY_MATRIX(R, (amstate)->elemtype,					\
+							  typlen, height, width);					\
 		row_index = 0;													\
 		foreach (lc, (amstate)->rows)									\
 		{																\
