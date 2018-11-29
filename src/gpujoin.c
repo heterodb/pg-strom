@@ -56,9 +56,9 @@ typedef struct
 	char	   *kern_source;
 	cl_uint		extra_flags;
 	cl_uint		varlena_bufsz;
-	List	   *ccache_refs;
 	List	   *used_params;
 	List	   *outer_quals;
+	List	   *outer_refs;
 	double		outer_ratio;
 	double		outer_nrows;		/* number of estimated outer nrows*/
 	int			outer_width;		/* copy of @plan_width in outer path */
@@ -94,9 +94,9 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, makeInteger(gj_info->varlena_bufsz));
-	privs = lappend(privs, gj_info->ccache_refs);
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
+	privs = lappend(privs, gj_info->outer_refs);
 	privs = lappend(privs, pmakeFloat(gj_info->outer_ratio));
 	privs = lappend(privs, pmakeFloat(gj_info->outer_nrows));
 	privs = lappend(privs, makeInteger(gj_info->outer_width));
@@ -138,9 +138,9 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
-	gj_info->ccache_refs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
+	gj_info->outer_refs = list_nth(privs, pindex++);
 	gj_info->outer_ratio = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_nrows = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_width = intVal(list_nth(privs, pindex++));
@@ -2259,7 +2259,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	Bitmapset	   *varattnos = NULL;
-	List		   *ccache_refs = NULL;
+	List		   *outer_refs = NULL;
 	double			outer_nrows;
 	int				i, j;
 
@@ -2400,7 +2400,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 			 i = bms_next_member(varattnos, i))
 		{
 			j = i + FirstLowInvalidHeapAttributeNumber;
-			ccache_refs = lappend_int(ccache_refs, j);
+			outer_refs = lappend_int(outer_refs, j);
 		}
 		/* BRIN-index stuff */
 		if (gjpath->index_opt)
@@ -2440,7 +2440,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUSCAN |
 						   DEVKERNEL_NEEDS_GPUJOIN |
 						   context.extra_flags);
-	gj_info.ccache_refs = ccache_refs;
+	gj_info.outer_refs = outer_refs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -2582,7 +2582,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gjs->gts,
 							gjs->gts.gcontext,
 							GpuTaskKind_GpuJoin,
-							gj_info->ccache_refs,
+							gj_info->outer_refs,
 							gj_info->used_params,
 							gj_info->optimal_gpu,
 							gj_info->outer_nrows_per_block,

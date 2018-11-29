@@ -291,8 +291,6 @@ struct GpuTaskState
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	cl_int			optimal_gpu;	/* GPU preference on plan time */
-	Relids			ccache_refs;	/* referenced attributed, if ccache */
-	long			ccache_count;	/* # of ccache hit */
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */
@@ -301,6 +299,7 @@ struct GpuTaskState
 	double			outer_plan_rows;	/* copy from the outer path node */
 	int				outer_plan_width;	/* copy from the outer path node */
 	cl_uint			outer_nrows_per_block;
+	Bitmapset	   *outer_refs;		/* referenced outer attributes */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 	/* BRIN index support on outer relation, if any */
@@ -309,12 +308,6 @@ struct GpuTaskState
 
 	IndexScanDesc	outer_brin_index;	/* brin index of outer scan, if any */
 	long			outer_brin_count;	/* # of blocks skipped by index */
-
-	/*
-	 * A pending PDS object. Load from the outer relation can be suspended
-	 * if columnar cache segment is already built and valid.
-	 */
-	struct pgstrom_data_store *outer_pds_suspend;
 
 	/*
 	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
@@ -384,7 +377,6 @@ typedef struct
 	pg_atomic_uint64	source_nitems;
 	pg_atomic_uint64	nitems_filtered;
 	pg_atomic_uint64	nvme_count;
-	pg_atomic_uint64	ccache_count;
 	pg_atomic_uint64	brin_count;
 	pg_atomic_uint64	fallback_count;
 } GpuTaskRuntimeStat;
@@ -401,7 +393,6 @@ mergeGpuTaskRuntimeStatParallelWorker(GpuTaskState *gts,
 				 &gts->outer_instrument);
 	SpinLockRelease(&gt_rtstat->lock);
 	pg_atomic_add_fetch_u64(&gt_rtstat->nvme_count, gts->nvme_count);
-	pg_atomic_add_fetch_u64(&gt_rtstat->ccache_count, gts->ccache_count);
 	pg_atomic_add_fetch_u64(&gt_rtstat->brin_count, gts->outer_brin_count);
 	pg_atomic_add_fetch_u64(&gt_rtstat->fallback_count,
 							gts->num_cpu_fallbacks);
@@ -418,7 +409,6 @@ mergeGpuTaskRuntimeStat(GpuTaskState *gts,
 	gts->outer_instrument.nfiltered1 = (double)
 		pg_atomic_read_u64(&gt_rtstat->nitems_filtered);
 	gts->nvme_count += pg_atomic_read_u64(&gt_rtstat->nvme_count);
-	gts->ccache_count += pg_atomic_read_u64(&gt_rtstat->ccache_count);
 	gts->outer_brin_count += pg_atomic_read_u64(&gt_rtstat->brin_count);
 	gts->num_cpu_fallbacks += pg_atomic_read_u64(&gt_rtstat->fallback_count);
 }
@@ -883,7 +873,7 @@ CHECK_WORKER_TERMINATION(void)
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,
-									List *ccache_refs,
+									List *outer_refs,
 									List *used_params,
 									cl_int optimal_gpu,
 									cl_uint outer_nrows_per_block,
@@ -1224,84 +1214,6 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern const char *pgsql_host_plcuda_code;
 extern void pgstrom_init_plcuda(void);
-
-/*
- * ccache.c
- */
-#define CCACHE_CHUNK_SIZE			(128L << 20)	/* 128MB */
-#define CCACHE_CHUNK_NBLOCKS		(CCACHE_CHUNK_SIZE / BLCKSZ)
-struct ccacheChunk;
-
-typedef struct
-{
-	cl_uint		offset;		/* to be used later */
-	struct varlena *vl_datum;
-} vl_dict_key;
-
-typedef struct
-{
-	int			nattrs;
-	size_t		nitems;
-	size_t		nrooms;
-	bool	   *hasnull;
-	bits8	  **nullmap;
-	void	  **values;
-	HTAB	  **vl_dict;
-	int		   *vl_compress;	/* one of GSTORE_COMPRESSION__* */
-	size_t	   *extra_sz;
-} ccacheBuffer;
-
-extern void ccache_setup_buffer(TupleDesc tupdesc,
-								ccacheBuffer *cc_buf,
-								bool with_syscols,
-								size_t nrooms,
-								MemoryContext memcxt);
-extern void ccache_expand_buffer(TupleDesc tupdesc,
-								 ccacheBuffer *cc_buf,
-								 MemoryContext memcxt);
-extern void ccache_release_buffer(ccacheBuffer *cc_buf);
-extern void ccache_buffer_append_row(TupleDesc tupdesc,
-									 ccacheBuffer *cc_buf,
-									 HeapTuple tup, /* only for syscols */
-									 bool *tup_isnull,
-									 Datum *tup_values,
-									 MemoryContext memcxt);
-extern void ccache_copy_buffer_from_kds(TupleDesc tupdesc,
-										ccacheBuffer *cc_buf,
-										kern_data_store *kds,
-										MemoryContext mcxt);
-extern void ccache_copy_buffer_to_kds(kern_data_store *kds,
-									  TupleDesc tupdesc,
-									  ccacheBuffer *cc_buf,
-									  bits8 *rowmap, size_t visible_nitems);
-extern void pgstrom_ccache_extract_row(TupleDesc tupdesc,
-									   size_t nitems,
-									   size_t nrooms,
-									   bool *tup_isnull,
-									   Datum *tup_values,
-									   bits8 **cs_nullmap,
-									   bool *cs_hasnull,
-									   void **cs_values,
-									   HTAB **cs_vl_dict,
-									   size_t *cs_extra_sz);
-extern void pgstrom_ccache_writeout_chunk(kern_data_store *kds,
-										  bits8 **cs_nullmap,
-										  bool *cs_hasnull,
-										  void **cs_values,
-										  HTAB **cs_vl_dict,
-										  size_t *cs_extra_sz);
-
-extern bool RelationCanUseColumnarCache(Relation relation);
-extern struct ccacheChunk *pgstrom_ccache_get_chunk(Relation relation,
-													BlockNumber block_nr);
-extern void pgstrom_ccache_put_chunk(struct ccacheChunk *cc_chunk);
-extern bool pgstrom_ccache_is_empty(struct ccacheChunk *cc_chunk);
-extern pgstrom_data_store *
-pgstrom_ccache_load_chunk(struct ccacheChunk *cc_chunk,
-						  GpuContext *gcontext,
-						  Relation relation,
-						  Relids ccache_refs);
-extern void pgstrom_init_ccache(void);
 
 /*
  * gstore_fdw.c

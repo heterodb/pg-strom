@@ -1012,14 +1012,12 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 static pgstrom_data_store *
 pgstromExecScanChunkParallel(GpuTaskState *gts,
 							 pgstrom_data_store *pds,
-							 Bitmapset *brin_map, cl_long brin_range_sz)
+							 Bitmapset *brin_map,
+							 cl_long brin_range_sz)
 {
 	GpuTaskSharedState *gtss = gts->gtss;
-	GpuContext *gcontext = gts->gcontext;
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	HeapScanDesc scan = gts->css.ss.ss_currentScanDesc;
-	Relids		ccache_refs = gts->ccache_refs;
-	pgstrom_data_store *pds_column = NULL;
 
 	for (;;)
 	{
@@ -1043,28 +1041,12 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 
 		if (scan->rs_numblocks == 0)
 		{
-			struct ccacheChunk *cc_chunk = NULL;
 			NVMEScanState *nvme_sstate = gts->nvme_sstate;
 			BlockNumber	sync_startpage = InvalidBlockNumber;
 			cl_long		nr_allocated;
 			cl_long		startblock;
 			cl_long		nr_blocks;
 			cl_long		page;
-			cl_long		base;
-
-			/*
-             * Suspend the heap-scan of row-based PDS, and returns columnar
-             * PDS instead. In case when bgworker tries to fetch multiple
-             * blocks which contains the head block of ccache, "gap" blocks
-             * are loaded to row-based PDS, then resumed when bgworker meets
-             * the range with no ccache.
-             */
-            if (pds_column)
-			{
-				gts->outer_pds_suspend = pds;
-				pds = pds_column;
-				break;
-			}
 
 			/*
 			 * MEMO: A key of i/o performance is consolidation of continuous
@@ -1137,56 +1119,6 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				nr_blocks = RELSEG_SIZE - (page % RELSEG_SIZE);
 			Assert(nr_blocks > 0);
 
-			/* try to lookup columnar cache */
-			base = (page + CCACHE_CHUNK_NBLOCKS-1) & ~(CCACHE_CHUNK_NBLOCKS-1);
-			if (ccache_refs &&
-				(page <= base && page + nr_blocks >= base) &&
-				(base >= startblock ||
-				 base + CCACHE_CHUNK_NBLOCKS <= startblock) &&
-				(base + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
-			{
-				cc_chunk = pgstrom_ccache_get_chunk(relation, base);
-				if (cc_chunk)
-				{
-					/*
-					 * A corner case handling: if ccache chunk is empty,
-					 * we can skip the hole zone, and can resume the table
-					 * scan from the next block of the empty ccache chunk.
-					 */
-					if (pgstrom_ccache_is_empty(cc_chunk))
-					{
-						pgstrom_ccache_put_chunk(cc_chunk);
-						cc_chunk = NULL;
-					}
-					/*
-					 * BRIN-index checks. If columnar cache chunk has no
-					 * valid tuples, we can skip this chunk.
-					 */
-					if (brin_map)
-					{
-						long	pos, end;
-
-						pos = base / brin_range_sz;
-						end = (base + CCACHE_CHUNK_NBLOCKS-1) / brin_range_sz;
-						while (pos <= end)
-						{
-							if (!bms_is_member(pos, brin_map))
-								break;
-							pos++;
-						}
-						if (pos > end)
-						{
-							pgstrom_ccache_put_chunk(cc_chunk);
-							cc_chunk = NULL;
-							gts->outer_brin_count += CCACHE_CHUNK_NBLOCKS;
-						}
-					}
-					nr_blocks = base - page;
-					nr_allocated += nr_blocks + CCACHE_CHUNK_NBLOCKS;
-					goto ccache_found;
-				}
-			}
-
 			if (brin_map)
 			{
 				long	pos = page / brin_range_sz;
@@ -1238,29 +1170,10 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				/* elsewhere, just walk on the following blocks */
 				nr_allocated += nr_blocks;
 			}
-		ccache_found:
 			/* update # of blocks already allocated to workers */
 			gtss->nr_allocated = nr_allocated;
 			SpinLockRelease(&gtss->phscan.phs_mutex);
 
-			/* construction of PDS based on the columnar cache, if any */
-			if (cc_chunk)
-			{
-				PG_TRY();
-				{
-					pds_column = pgstrom_ccache_load_chunk(cc_chunk,
-														   gcontext,
-														   relation,
-														   ccache_refs);
-				}
-				PG_CATCH();
-				{
-					pgstrom_ccache_put_chunk(cc_chunk);
-					PG_RE_THROW();
-				}
-				PG_END_TRY();
-				pgstrom_ccache_put_chunk(cc_chunk);
-			}
 			scan->rs_cblock = page;
 			scan->rs_numblocks = nr_blocks;
 			continue;
@@ -1280,15 +1193,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 		}
 		/* scan next block */
 		if (!PDS_exec_heapscan(gts, pds))
-		{
-			if (pds_column)
-			{
-				gts->outer_pds_suspend = pds;
-				pds = pds_column;
-			}
 			break;
-		}
-
 		/* move to the next block */
 		scan->rs_numblocks--;
 		scan->rs_cblock++;
@@ -1343,9 +1248,6 @@ pgstromExecScanChunk(GpuTaskState *gts)
 	brin_map = gts->outer_index_map;
 	if (brin_map)
 		brin_range_sz = gts->outer_index_state->range_sz;
-	/* resume the suspended PDS, if any */
-	pds = gts->outer_pds_suspend;
-	gts->outer_pds_suspend = NULL;
 
 	if (gts->gtss)
 	{
@@ -1372,85 +1274,6 @@ pgstromExecScanChunk(GpuTaskState *gts)
 				break;
 			}
 			page = scan->rs_cblock;
-
-			/* try to fetch columnar-cache, if any */
-			if (gts->ccache_refs &&
-				(page & (CCACHE_CHUNK_NBLOCKS - 1)) == 0 &&
-				(page >= scan->rs_startblock ||
-				 page + CCACHE_CHUNK_NBLOCKS <= scan->rs_startblock) &&
-				(page + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
-			{
-				pgstrom_data_store *pds_column = NULL;
-				struct ccacheChunk *cc_chunk;
-
-				/*
-				 * In case when BRIN-index bitmap says here is no tuples to
-				 * be fetched in the next columnar-cache range, we can skip
-				 * this range.
-				 */
-				if (brin_map)
-				{
-					long	pos, end;
-					bool	found = false;
-
-					end = (page + CCACHE_CHUNK_NBLOCKS - 1) / brin_range_sz;
-					for (pos = page / brin_range_sz; pos <= end; pos++)
-					{
-						if (!bms_is_member(pos, brin_map))
-						{
-							found = true;
-							break;
-						}
-					}
-
-					if (!found)
-					{
-						page += CCACHE_CHUNK_NBLOCKS;
-						if (page >= scan->rs_nblocks)
-							scan->rs_cblock = 0;
-						else
-							scan->rs_cblock = page;
-						if (scan->rs_syncscan)
-							ss_report_location(rel, scan->rs_cblock);
-						if (scan->rs_cblock == scan->rs_startblock)
-							scan->rs_cblock = InvalidBlockNumber;
-						gts->outer_brin_count += CCACHE_CHUNK_NBLOCKS;
-						continue;
-					}
-				}
-
-				cc_chunk = pgstrom_ccache_get_chunk(rel, page);
-				if (cc_chunk)
-				{
-					PG_TRY();
-					{
-						pds_column =
-							pgstrom_ccache_load_chunk(cc_chunk,
-													  gts->gcontext,
-													  rel,
-													  gts->ccache_refs);
-					}
-					PG_CATCH();
-					{
-						pgstrom_ccache_put_chunk(cc_chunk);
-						PG_RE_THROW();
-					}
-					PG_END_TRY();
-					pgstrom_ccache_put_chunk(cc_chunk);
-
-					scan->rs_cblock += CCACHE_CHUNK_NBLOCKS;
-					if (scan->rs_cblock >= scan->rs_nblocks)
-						scan->rs_cblock = 0;
-					if (scan->rs_syncscan)
-						ss_report_location(rel, scan->rs_cblock);
-					if (scan->rs_cblock == scan->rs_startblock)
-						scan->rs_cblock = InvalidBlockNumber;
-					/* suspend row-based PDS */
-					gts->outer_pds_suspend = pds;
-					pds = pds_column;
-					break;
-				}
-			}
 
 			/*
 			 * If any, check BRIN-index bitmap, then moves to the next range
@@ -1541,8 +1364,6 @@ pgstromExecScanChunk(GpuTaskState *gts)
 	/* update statistics */
 	if (pds)
 	{
-		if (pds->kds.format == KDS_FORMAT_COLUMN)
-			gts->ccache_count++;
 		if (pds->kds.format == KDS_FORMAT_BLOCK)
 			gts->nvme_count += pds->nblocks_uncached;
 	}

@@ -42,6 +42,7 @@ typedef struct
 	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
+	List		   *outer_refs;		/* referenced columns */
 	Oid				index_oid;		/* OID of BRIN-index, if any */
 	List		   *index_conds;	/* BRIN-index key conditions */
 	List		   *index_quals;	/* Original BRIN-index qualifiers */
@@ -52,7 +53,6 @@ typedef struct
 	char		   *kern_source;
 	cl_uint			extra_flags;
 	cl_uint			varlena_bufsz;
-	List		   *ccache_refs;	/* referenced columns */
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
 
@@ -73,6 +73,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
+	privs = lappend(privs, gpa_info->outer_refs);
 	privs = lappend(privs, makeInteger(gpa_info->index_oid));
 	privs = lappend(privs, gpa_info->index_conds);
 	exprs = lappend(exprs, gpa_info->index_quals);
@@ -81,7 +82,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, makeInteger(gpa_info->varlena_bufsz));
-	privs = lappend(privs, gpa_info->ccache_refs);
 	exprs = lappend(exprs, gpa_info->used_params);
 
 	cscan->custom_private = privs;
@@ -108,6 +108,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
+	gpa_info->outer_refs = list_nth(privs, pindex++);
 	gpa_info->index_oid = intVal(list_nth(privs, pindex++));
 	gpa_info->index_conds = list_nth(privs, pindex++);
 	gpa_info->index_quals = list_nth(exprs, eindex++);
@@ -116,7 +117,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
-	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
@@ -2611,7 +2611,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	List		   *tlist_dev = NIL;
 	Index			outer_scanrelid = 0;
 	Bitmapset	   *varattnos = NULL;
-	List		   *ccache_refs = NIL;
+	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
 	ListCell	   *lc;
@@ -2696,8 +2696,8 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		 index >= 0;
 		 index = bms_next_member(varattnos, index))
 	{
-		ccache_refs = lappend_int(ccache_refs, index +
-								  FirstLowInvalidHeapAttributeNumber);
+		outer_refs = lappend_int(outer_refs, index +
+								 FirstLowInvalidHeapAttributeNumber);
 	}
 
 	/* setup CustomScan node */
@@ -2723,7 +2723,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									pfunc_bitmap);
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags;
-	gpa_info->ccache_refs = ccache_refs;
+	gpa_info->outer_refs = outer_refs;
 	gpa_info->used_params = context.used_params;
 
 	form_gpupreagg_info(cscan, gpa_info);
@@ -4076,7 +4076,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,
 							GpuTaskKind_GpuPreAgg,
-							gpa_info->ccache_refs,
+							gpa_info->outer_refs,
 							gpa_info->used_params,
 							gpa_info->optimal_gpu,
 							gpa_info->outer_nrows_per_block,

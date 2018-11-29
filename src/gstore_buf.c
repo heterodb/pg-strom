@@ -94,6 +94,15 @@ struct GpuStoreBuffer
 	MVCCAttrs  *gs_mvcc;		/* MVCC attributes */
 };
 
+/*
+ * vl_dict_key - dictionary of varlena datum
+ */
+typedef struct
+{
+	cl_uint		offset;		/* to be used later */
+	struct varlena *vl_datum;
+} vl_dict_key;
+
 /* static variables */
 static int				gstore_max_relations;	/* GUC */
 static object_access_hook_type object_access_next;

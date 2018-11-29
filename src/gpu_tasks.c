@@ -217,7 +217,7 @@ void
 pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuContext *gcontext,
 						GpuTaskKind task_kind,
-						List *ccache_refs_list,
+						List *outer_refs_list,
 						List *used_params,
 						cl_int optimal_gpu,
 						cl_uint outer_nrows_per_block,
@@ -226,7 +226,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
-	Relids			ccache_refs = NULL;
+	Bitmapset	   *outer_refs = NULL;
 	ListCell	   *lc;
 
 	Assert(gts->gcontext == gcontext);
@@ -235,73 +235,38 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
 											   cscan->custom_scan_tlist);
-	if (relation && RelationCanUseColumnarCache(relation))
+	if (relation)
 	{
 		TupleDesc	tupdesc = RelationGetDescr(relation);
 
-		foreach (lc, ccache_refs_list)
+		foreach (lc, outer_refs_list)
 		{
-			int		i, anum = lfirst_int(lc);
+			int		j, anum = lfirst_int(lc);
 
 			if (anum == InvalidAttrNumber)
 			{
-				for (i=0; i < tupdesc->natts; i++)
+				for (j=0; j < tupdesc->natts; j++)
 				{
-					Form_pg_attribute	attr = tupleDescAttr(tupdesc, i);
+					Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
 
 					if (attr->attisdropped)
 						continue;
 					anum = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-					ccache_refs = bms_add_member(ccache_refs, anum);
+					outer_refs = bms_add_member(outer_refs, anum);
 				}
-			}
-			else if (anum < 0)
-			{
-				anum += (tupdesc->natts -
-						 (1 + FirstLowInvalidHeapAttributeNumber));
-				ccache_refs = bms_add_member(ccache_refs, anum);
 			}
 			else
 			{
-				ccache_refs = bms_add_member(ccache_refs, anum-1);
+				anum -= FirstLowInvalidHeapAttributeNumber;
+				outer_refs = bms_add_member(outer_refs, anum);
 			}
 		}
-		/*
-		 * Non-NULL ccache_refs also means the relation can have columnar-
-		 * cache, but no columns are referenced in the query like:
-		 *   SELECT count(*) FROM tbl;
-		 */
-		if (!ccache_refs)
-		{
-			ccache_refs = palloc0(offsetof(Bitmapset, words[1]));
-			ccache_refs->nwords = 1;
-		}
 	}
-#if 0
-	if (!ccache_refs)
-		elog(INFO, "ccache_refs = NULL");
-	else
-	{
-		int		i, j;
-
-		for (i = bms_first_member(ccache_refs);
-			 i >= 0;
-			 i = bms_next_member(ccache_refs, i))
-		{
-			j = i + FirstLowInvalidHeapAttributeNumber;
-			elog(INFO, "ccache_refs: [%s].[%s]",
-				 RelationGetRelationName(relation),
-				 get_attname(RelationGetRelid(relation), j));
-		}
-	}
-#endif
-	gts->ccache_refs = ccache_refs;
-	gts->ccache_count = 0;
+	gts->outer_refs = outer_refs;
 	gts->scan_done = false;
 
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
 	gts->scan_overflow = NULL;
-	gts->outer_pds_suspend = NULL;
 	gts->outer_nrows_per_block = outer_nrows_per_block;
 	gts->nvme_sstate = NULL;
 
@@ -616,24 +581,6 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 					 dattr->DEV_ID, dattr->DEV_NAME);
 		}
 		ExplainPropertyText("GPU Preference", temp, es);
-	}
-
-	/* status of columnar-cache */
-	if (!es->analyze)
-	{
-		if (gts->ccache_refs)
-			ExplainPropertyText("CCache", "enabled", es);
-		else if (es->format != EXPLAIN_FORMAT_TEXT)
-			ExplainPropertyText("CCache", "disabled", es);
-	}
-	else
-	{
-		if (gts->ccache_refs)
-			ExplainPropertyInteger("CCache Hits",
-								   NULL, gts->ccache_count, es);
-		else if (es->format != EXPLAIN_FORMAT_TEXT)
-			ExplainPropertyInteger("CCache Hits",
-								   NULL, gts->ccache_count, es);
 	}
 
 	/* NVMe-Strom support */
