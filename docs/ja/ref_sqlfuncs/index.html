@@ -96,11 +96,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">列指向キャッシュ</a>
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL</a>
                 </li>
                 <li class="">
                     
@@ -433,32 +429,6 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pgstrom_ccache_enabled(regclass)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">指定したテーブルに対するインメモリ列キャッシュを有効にします。</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom_ccache_disabled(regclass)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">指定したテーブルに対するインメモリ列キャッシュを無効にします。</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom_ccache_prewarm(regclass)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">指定したテーブルに対するインメモリ列キャッシュを同期的に構築します。キャッシュ使用量の上限に達した時は、その時点で終了します。</td>
-</tr>
-</tbody>
-</table>
-<table>
-<thead>
-<tr>
-<th align="left">関数</th>
-<th align="center">戻り値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
 <td align="left"><code>gstore_fdw_format(reggstore)</code></td>
 <td align="center"><code>text</code></td>
 <td align="left">gstore_fdw外部テーブルの内部データ形式を返します。</td>
@@ -509,36 +479,41 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 <table>
 <thead>
 <tr>
-<th align="left">関数</th>
-<th align="center">戻り値</th>
+<th align="left">関数定義</th>
+<th align="center">結果型</th>
 <th align="left">説明</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>plcuda_kernel_max_blocksz</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルの最大ブロックサイズを返す。</td>
+<td align="left"><code>attnums_of(regclass,text[])</code></td>
+<td align="center"><code>smallint[]</code></td>
+<td align="left">第一引数で指定したテーブルの第二引数で指定した列名（複数可）の列番号を配列として返します。</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_static_shmsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したブロックあたり共有メモリサイズを返す。</td>
+<td align="left"><code>attnum_of(regclass,text)</code></td>
+<td align="center"><code>smallint</code></td>
+<td align="left">第一引数で指定したテーブルの第二引数で指定した列名の列番号を返します。</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_dynamic_shmsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが動的に確保する事のできるブロックあたり共有メモリサイズを返す。</td>
+<td align="left"><code>atttypes_of(regclass,text[])</code></td>
+<td align="center"><code>regtype[]</code></td>
+<td align="left">第一引数で指定したテーブルの第二引数で指定した列名（複数可）のデータ型を配列として返します。</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_const_memsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したコンスタントメモリのサイズを返す。</td>
+<td align="left"><code>atttype_of(regclass,text)</code></td>
+<td align="center"><code>regtype</code></td>
+<td align="left">第一引数で指定したテーブルの第二引数で指定した列名のデータ型を返します。</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_local_memsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが使用するスレッドあたりローカルメモリのサイズを返す。</td>
+<td align="left"><code>attrs_types_check(regclass,text[],regtype[])</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、第三引数で指定したデータ型とそれぞれ一致しているかどうかを調べます。</td>
+</tr>
+<tr>
+<td align="left"><code>attrs_type_check(regclass,text[],regtype)</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、全て第三引数で指定したデータ型と一致しているかどうかを調べます。</td>
 </tr>
 </tbody>
 </table>
@@ -636,92 +611,6 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
 <td align="left">ctime</td>
 <td align="left"><code>timestamp with time zone</code></td>
 <td align="left">確保済みGPUデバイスメモリの作成時刻</td>
-</tr>
-</tbody>
-</table>
-<p><strong>pgstrom.ccache_info</strong></p>
-<p><code>pgstrom.ccache_info</code>システムビューは、列指向キャッシュの各チャンク（128MB単位）の情報を出力します。</p>
-<table>
-<thead>
-<tr>
-<th align="left">名前</th>
-<th align="left">データ型</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">database_id</td>
-<td align="left"><code>oid</code></td>
-<td align="left">データベースID</td>
-</tr>
-<tr>
-<td align="left">table_id</td>
-<td align="left"><code>regclass</code></td>
-<td align="left">テーブルID</td>
-</tr>
-<tr>
-<td align="left">block_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">チャンクの先頭ブロック番号</td>
-</tr>
-<tr>
-<td align="left">nitems</td>
-<td align="left"><code>bigint</code></td>
-<td align="left">チャンクに含まれる行数</td>
-</tr>
-<tr>
-<td align="left">length</td>
-<td align="left"><code>bigint</code></td>
-<td align="left">キャッシュされたチャンクのサイズ</td>
-</tr>
-<tr>
-<td align="left">ctime</td>
-<td align="left"><code>timestamp with time zone</code></td>
-<td align="left">チャンク作成時刻</td>
-</tr>
-<tr>
-<td align="left">atime</td>
-<td align="left"><code>timestamp with time zone</code></td>
-<td align="left">チャンク最終アクセス時刻</td>
-</tr>
-</tbody>
-</table>
-<p><strong>pgstrom.ccache_builder_info</strong></p>
-<p><code>pgstrom.ccache_builder_info</code>システムビューは、列指向キャッシュの非同期ビルダープロセスの情報を出力します。</p>
-<table>
-<thead>
-<tr>
-<th align="left">名前</th>
-<th align="left">データ型</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">builder_id</td>
-<td align="left"><code>int</code></td>
-<td align="left">列指向キャッシュ非同期ビルダーのID</td>
-</tr>
-<tr>
-<td align="left">state</td>
-<td align="left"><code>text</code></td>
-<td align="left">ビルダープロセスの状態。（<code>shutdown</code>: 停止中、<code>startup</code>: 起動中、<code>loading</code>: 列指向キャッシュの構築中、<code>sleep</code>: 一時停止中）</td>
-</tr>
-<tr>
-<td align="left">database_id</td>
-<td align="left"><code>oid</code></td>
-<td align="left">ビルダープロセスが割り当てられているデータベースID</td>
-</tr>
-<tr>
-<td align="left">table_id</td>
-<td align="left"><code>regclass</code></td>
-<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のテーブルID</td>
-</tr>
-<tr>
-<td align="left">block_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のブロック番号</td>
 </tr>
 </tbody>
 </table>

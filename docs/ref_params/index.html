@@ -96,11 +96,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL Exec</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">Columnar Cache</a>
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
                 </li>
                 <li class="">
                     
@@ -143,7 +139,7 @@
     <li class="toctree-l3"><a href="#executor-configuration">Executor Configuration</a></li>
     
 
-    <li class="toctree-l3"><a href="#columnar-cache-configuration">Columnar Cache Configuration</a></li>
+    <li class="toctree-l3"><a href="#ssd-to-gpu-direct-configuration">SSD-to-GPU Direct Configuration</a></li>
     
 
     <li class="toctree-l3"><a href="#gstore_fdw-configuration">gstore_fdw Configuration</a></li>
@@ -281,18 +277,6 @@
 <td align="center"><code>off</code></td>
 <td align="left">Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</td>
 </tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables the feature of SSD-to-GPU Direct SQL Execution</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">自動</td>
-<td align="left">Controls the table-size threshold to invoke the feature of SSD-to-GPU Direct SQL Execution</td>
-</tr>
 </tbody>
 </table>
 <h1 id="optimizer-configuration">Optimizer Configuration</h1>
@@ -363,7 +347,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="columnar-cache-configuration">Columnar Cache Configuration</h1>
+<h1 id="ssd-to-gpu-direct-configuration">SSD-to-GPU Direct Configuration</h1>
 <table>
 <thead>
 <tr>
@@ -375,16 +359,22 @@
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pg_strom.ccache_base_dir</code></td>
-<td align="center"><code>string</code></td>
-<td align="center"><code>'/dev/shm'</code></td>
-<td align="left">Specifies the directory path to store columnar cache data files. Usually, no need to change from <code>/dev/shm</code> where <code>tmpfs</code> is mounted at.</td>
+<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables SSD-to-GPU Direct SQL mechanism</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.ccache_total_size</code></td>
+<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
 <td align="center"><code>int</code></td>
-<td align="center">auto</td>
-<td align="left">Upper limit of the columnar cache in kB. Default is the smaller in 75% of volume size or 66% of system physical memory.</td>
+<td align="center">自動</td>
+<td align="left">Controls the table-size threshold to invoke SSD-to-GPU Direct SQL mechanism</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_distance_map</code></td>
+<td align="center"><code>string</code></td>
+<td align="center"><code>NULL</code></td>
+<td align="left">Manually configures the closest GPU for each NVME-SSD. Usually, it is configured automatically according to the PCIe bus topology information by sysfs.</td>
 </tr>
 </tbody>
 </table>

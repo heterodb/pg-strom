@@ -580,7 +580,6 @@ Investigate other parameters according to usage of the system and expected workl
     - 以下のように、ある程度の余裕を持った値を設定すべきです。
     - ```shared_buffers = 10GB```
     - 明らかにメモリサイズよりも大きなデータを処理する必要がある場合は、SSD-to-GPUダイレクトSQL実行の利用を検討してください。
-    - 特定のテーブルをインメモリでキャッシュしておきたい場合は、インメモリ列キャッシュの利用を検討してください。
 - **work_mem**
     - ワークロードによりますが、`work_mem`の初期設定は非常に小さいため、解析系クエリで最適なクエリ実行計画が選択されない可能性があります。
     - 典型的な例は、ソート処理にオンメモリのクイックソートではなく、ディスクベースのマージソートを選択するといったものです。
@@ -599,7 +598,6 @@ Investigate other parameters according to usage of the system and expected workl
     - So, we recommend to expand the variable for a certain margin.
     - ```shared_buffers = 10GB```
     - Please consider to apply **SSD-to-GPU Direct SQL Execution** to process larger than system's physical RAM size.
-    - Please consider to apply **Columnar Cache** if you want to cache particular tables.
 - **work_mem**
     - Although it depends on the workloads, the initial configuration of `work_mem` is too small to choose the optimal query execution plan on analytic queries.
     - An typical example is, disk-based merge sort may be chosen instead of the in-memory quick-sorting.
@@ -773,14 +771,14 @@ Complete!
 @ja{
 NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。
 
+- 複数個のGPUの利用
 - SSD-to-GPUダイレクトSQL実行におけるストライピング(md-raid0)対応
-- In-memory columnar cacheにおける圧縮機能
 }
 
 @en{
 License activation is needed to use all the features of NVME-Strom module, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.
-- Striping support (md-raid0) at SSD-to-GPU Direct SQL Execution
-- Compression support at in-memory columnar cache
+- Multiple GPUs support
+- Striping support (md-raid0) at SSD-to-GPU Direct SQL
 }
 
 @ja{

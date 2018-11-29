@@ -25,8 +25,6 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。|
 |`pg_strom.enable_numeric_type` |`bool`|`on` |GPUで`numeric`データ型を含む演算式を処理するかどうかを制御する。|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。|
-|`pg_strom.nvme_strom_enabled`  |`bool`|`on` |SSD-to-GPUダイレクトSQL実行機能を有効化/無効化する。|
-|`pg_strom.nvme_strom_threshold`|`int` |自動 |SSD-to-GPUダイレクトSQL実行機能を発動させるテーブルサイズの閾値を設定する。|
 }
 
 @en{
@@ -45,8 +43,6 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.|
 |`pg_strom.enable_numeric_type` |`bool`|`on` |Enables/disables support of `numeric` data type in arithmetic expression on GPU device|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"|
-|`pg_strom.nvme_strom_enabled`  |`bool`|`on` |Enables/disables the feature of SSD-to-GPU Direct SQL Execution|
-|`pg_strom.nvme_strom_threshold`|`int` |自動 |Controls the table-size threshold to invoke the feature of SSD-to-GPU Direct SQL Execution|
 }
 
 @ja{
@@ -83,27 +79,27 @@ This session introduces PG-Strom's configuration parameters.
 #Executor Configuration
 
 |Parameter                         |Type  |Default|Description|
-|:---------------------------------|:----:|:----:|:----------|
+|:---------------------------------|:----:|:-----:|:----------|
 |`pg_strom.global_max_async_tasks` |`int` |160   |Number of asynchronous taks PG-Strom can throw into GPU's execution queue in the whole system.|
 |`pg_strom.local_max_async_tasks`  |`int` |8     |Number of asynchronous taks PG-Strom can throw into GPU's execution queue per process. If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than `pg_strom.local_max_async_tasks` asynchronous tasks are executed in parallel on the entire batch job.|
 |`pg_strom.max_number_of_gpucontext`|`int`|auto  |Specifies the number of internal data structure `GpuContext` to abstract GPU device. Usually, no need to expand the initial value.|
 }
 
 @ja{
-#列指向キャッシュ関連の設定
-
-|パラメータ名                  |型      |初期値    |説明       |
-|:-----------------------------|:------:|:---------|:----------|
-|`pg_strom.ccache_base_dir`    |`string`|`'/dev/shm'`|列指向キャッシュを保持するファイルシステム上のパスを指定します。通常、`tmpfs`がマウントされている`/dev/shm`を変更する必要はありません。|
-|`pg_strom.ccache_total_size`  |`int`   |自動      |列指向キャッシュの上限を kB 単位で指定します。区画サイズの75%またはシステムの物理メモリの66%のいずれか小さな方がデフォルト値です。|
+# SSD-to-GPUダイレクト関連の設定
+|パラメータ名                   |型      |初期値|説明       |
+|:------------------------------|:------:|:-----|:----------|
+|`pg_strom.nvme_strom_enabled`  |`bool`  |`on`  |SSD-to-GPUダイレクトSQL機能を有効化/無効化する。|
+|`pg_strom.nvme_strom_threshold`|`int`   |自動  |SSD-to-GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。|
+|`pg_strom.nvme_distance_map`   |`string`|`NULL`|NVME-SSDに近いGPUを手動で設定します。通常はsysfsから取得したPCIeバストポロジ情報による自動設定で問題ありません。|
 }
 @en{
-#Columnar Cache Configuration
-
-|Parameter                      |Type  |Default|Description|
-|:------------------------------|:----:|:----:|:----------|
-|`pg_strom.ccache_base_dir`    |`string`|`'/dev/shm'`|Specifies the directory path to store columnar cache data files. Usually, no need to change from `/dev/shm` where `tmpfs` is mounted at.|
-|`pg_strom.ccache_total_size`  |`int`   |auto    |Upper limit of the columnar cache in kB. Default is the smaller in 75% of volume size or 66% of system physical memory.|
+# SSD-to-GPU Direct Configuration
+|Parameter                      |Type    |Default|Description|
+|:------------------------------|:------:|:-----:|:----------|
+|`pg_strom.nvme_strom_enabled`  |`bool`  |`on`   |Enables/disables SSD-to-GPU Direct SQL mechanism|
+|`pg_strom.nvme_strom_threshold`|`int`   |自動   |Controls the table-size threshold to invoke SSD-to-GPU Direct SQL mechanism|
+|`pg_strom.nvme_distance_map`   |`string`|`NULL` |Manually configures the closest GPU for each NVME-SSD. Usually, it is configured automatically according to the PCIe bus topology information by sysfs.|
 }
 
 @ja{

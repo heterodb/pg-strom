@@ -23,10 +23,10 @@ Its core features are GPU code generator that automatically generates GPU progra
 Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.
 }
 @ja{
-PG-Strom v2.0ではストレージ読出し能力が強化されました。SSD-to-GPUダイレクトSQL実行や、インメモリ列指向キャッシュはストレージの遅さを補い、クエリを処理するGPUへ高速にデータを供給する事を可能にします。
+PG-Strom v2.0ではストレージ読出し能力が強化されました。SSD-to-GPUダイレクトSQL機構はストレージ（NVME-SSD）からGPUへ直接データをロードし、クエリを処理するGPUへ高速にデータを供給する事を可能にします。
 }
 @en{
-PG-Strom v2.0 enhanced the capability to read from the storage. SSD-to-GPU Direct SQL Execution and in-memory columnar cache make up for the slowness of storage devices, and enable to provide massive data blocks to GPU fast which runs SQL workloads.
+PG-Strom v2.0 enhanced the capability of reading from storage. SSD-to-GPU Direct SQL mechanism allows to load from storage (NVME-SSD) to GPU directly, and supply data to GPU that runs SQL workloads.
 }
 @ja{
 一方、高度な統計解析や機械学習といった極めて計算集約度の高い問題に対しても、PL/CUDAやgstore_fdwといった機能を使用する事で、データベース管理システム上で計算処理を行い、結果だけをユーザへ返すといった使い方をする事が可能です。

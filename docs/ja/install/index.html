@@ -143,11 +143,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">列指向キャッシュ</a>
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL</a>
                 </li>
                 <li class="">
                     
@@ -536,7 +532,6 @@ Success. You can now start the database server using:
 <li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
 <li><code>shared_buffers = 10GB</code></li>
 <li>明らかにメモリサイズよりも大きなデータを処理する必要がある場合は、SSD-to-GPUダイレクトSQL実行の利用を検討してください。</li>
-<li>特定のテーブルをインメモリでキャッシュしておきたい場合は、インメモリ列キャッシュの利用を検討してください。</li>
 </ul>
 </li>
 <li><strong>work_mem</strong><ul>
@@ -654,8 +649,8 @@ Complete!
 <h2 id="_7">ライセンスの有効化</h2>
 <p>NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
 <ul>
+<li>複数個のGPUの利用</li>
 <li>SSD-to-GPUダイレクトSQL実行におけるストライピング(md-raid0)対応</li>
-<li>In-memory columnar cacheにおける圧縮機能</li>
 </ul>
 <p>ライセンスファイルは以下のような形式でHeteroDB社から入手する事ができます。</p>
 <pre><code>IAwPOAC44m8LPMoV7bMykhxM27LAVrktspcaMHki8pI1fXrxq0KzqPDK4LzAA9n26IRAr/4ymB6QJ3/JxZOfYTVsbWq66vEtTAIuZVmJ/I888zRATj1hoofh1WbIwd3/ix28Cy1v16KCgLrlqPsra6NJScMOOHnuYoWWmWe4ml+n6GVEIb7ChUJvZbEZSO/DiLXosFc0N+MD4JTEU/XsBUP9ufacpbosW/YG2nOib3mpvhkfn7RQy2T5CVQeuGjM9Taj7DN5xipqU/Q0hZaZKA8EsZwsB6b4c7usdmPILyIpuTrWnEbjJ6worOQWHA+nL87xkDL1XYGH6UVc291QPLwk=

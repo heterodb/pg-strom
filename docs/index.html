@@ -123,11 +123,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="ssd2gpu/">SSD2GPU Direct SQL Exec</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="ccache/">Columnar Cache</a>
+    <a class="" href="ssd2gpu/">SSD2GPU Direct SQL</a>
                 </li>
                 <li class="">
                     
@@ -205,7 +201,7 @@
 <p>PG-Strom is an extension module of PostgreSQL designed for version 9.6 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
 <p>Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.</p>
 <p>Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.</p>
-<p>PG-Strom v2.0 enhanced the capability to read from the storage. SSD-to-GPU Direct SQL Execution and in-memory columnar cache make up for the slowness of storage devices, and enable to provide massive data blocks to GPU fast which runs SQL workloads.</p>
+<p>PG-Strom v2.0 enhanced the capability of reading from storage. SSD-to-GPU Direct SQL mechanism allows to load from storage (NVME-SSD) to GPU directly, and supply data to GPU that runs SQL workloads.</p>
 <p>On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly computing density problems, like advanced statistical analytics or machine learning, on the database management system, and to return only results to users.</p>
 <h2 id="license-and-copyright">License and Copyright</h2>
 <p>PG-Strom is an open source software distributed under the GPL(GNU Public License) v2.
@@ -316,5 +312,5 @@ Its major version shall be incremented in the following situation.</p>
 
 <!--
 MkDocs version : 0.17.2
-Build Date UTC : 2018-11-26 15:39:36
+Build Date UTC : 2018-11-29 16:15:39
 -->

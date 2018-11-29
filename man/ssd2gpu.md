@@ -172,6 +172,78 @@ Note that tablespace of the existing tables are not changed in thie case.
 ALTER DATABASE my_database SET TABLESPACE my_nvme;
 ```
 
+@ja:##GPUとNVME-SSD間の距離
+@en:##Distance between GPU and NVME-SSD
+
+@ja{
+サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。
+
+SSD-to-GPUダイレクトSQL機能がその基盤として使用している[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/)は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。
+
+また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。
+}
+@en{
+On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.
+
+[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/), basis of the SSD-to-GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.
+
+From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.
+}
+
+@ja{
+以下の写真はHPC向けサーバのマザーボードで、8本のPCIe x16スロットがPCIeスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。
+
+例えば、SSD-2上に構築されたテーブルをSSD-to-GPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。
+}
+@en{
+The photo below is a motherboard of HPC server. It has 8 of PCIe x16 slots, and each pair is linked to the other over the PCIe switch. The slots in the left-side of the photo are connected to CPU1, and right-side are connected to CPU2.
+
+When a table on SSD-2 is scanned using SSD-to-GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.
+}
+
+![Motherboard of HPC Server](./img/pcie-hpc-server.png)
+
+@ja{
+PG-Stromは起動時にシステムのPCIeバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
+これは以下のように起動時のログに記録されており、例えば`/dev/nvme2`をスキャンする時はGPU1といった具合に、各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。
+}
+@en{
+PG-Strom calculate logical distances on any pairs of GPU and NVME-SSD using PCIe bus topology information of the system on startup time.
+It is displayed at the start up log. Each NVME-SSD determines the preferable GPU based on the distance, for example, `GPU1` shall be used on scan of the `/dev/nvme2`.
+}
+
+```
+$ pg_ctl restart
+     :
+LOG:  GPU<->SSD Distance Matrix
+LOG:             GPU0     GPU1     GPU2
+LOG:      nvme0  (   3)      7       7
+LOG:      nvme5      7       7   (   3)
+LOG:      nvme4      7       7   (   3)
+LOG:      nvme2      7   (   3)      7
+LOG:      nvme1  (   3)      7       7
+LOG:      nvme3      7   (   3)      7
+     :
+```
+
+@ja{
+通常は自動設定で問題ありません。
+ただ、NVME-over-Fabric(RDMA)を使用する場合はPCIeバス上のnvmeデバイスの位置を取得できないため、手動でNVME-SSDとGPUの位置関係を設定する必要があります。
+
+例えば`nvme1`には`gpu2`を、`nvme2`と`nvme3`には`gpu1`を割り当てる場合、以下の設定を`postgresql.conf`へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。
+}
+@en{
+Usually automatic configuration works well.
+In case when NVME-over-Fabric(RDMA) is used, unable to identify the location of nvme device on the PCIe-bus, so you need to configure the logical distance between NVME-SSD and GPU manually.
+
+The example below shows the configuration of `gpu2` for `nvme1`, and `gpu1` for `nvme2` and `nvme3`.
+It shall be added to `postgresql.conf`. Please note than manual configuration takes priority than the automatic configuration.
+}
+```
+pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
+```
+
+
 @ja:#運用
 @en:#Operations
 

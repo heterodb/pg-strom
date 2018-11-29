@@ -20,8 +20,7 @@ pages:
     - 'Partitioning' : 'partition.md'
     - 'Trouble Shooting' : 'troubles.md'
 - 'Advanced Features' :
-    - 'SSD2GPU Direct SQL Exec' : 'ssd2gpu.md'
-    - 'Columnar Cache' : 'ccache.md'
+    - 'SSD2GPU Direct SQL' : 'ssd2gpu.md'
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'References' :
@@ -41,8 +40,7 @@ pages:
     - 'パーティション' : 'partition.md'
     - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
-    - 'SSDtoGPUダイレクトSQL実行' : 'ssd2gpu.md'
-    - '列指向キャッシュ' : 'ccache.md'
+    - 'SSDtoGPUダイレクトSQL' : 'ssd2gpu.md'
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'リファレンス' :

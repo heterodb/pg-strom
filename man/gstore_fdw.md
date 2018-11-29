@@ -117,11 +117,11 @@ The options below are supported in the `OPTIONS` clause.
 }
 
 @ja{
-`format`オプションで選択可能なパラメータは、現在のところ`pgstrom`のみです。これは、PG-Stromがインメモリ列キャッシュの内部フォーマットとして使用しているものと同一です。
+`format`オプションで選択可能なパラメータは、現在のところ`pgstrom`のみです。これは、PostgreSQLのデータを列形式で保持するために設計されたPG-Stromの独自形式です。
 純粋にSQLを用いてデータの入出力を行うだけであればユーザが内部データ形式を意識する必要はありませんが、PL/CUDA関数をプログラミングしたり、IPCハンドルを用いて外部プログラムとGPUデバイスメモリを共有する場合には考慮が必要です。
 }
 @en{
-Right now, only `pgstrom` is supported for `format` option. It is identical data format with what PG-Strom uses for in-memory columnar cache.
+Right now, only `pgstrom` is supported for `format` option. It is an original data format of PG-Strom to store structured data of PostgreSQL in columnar format.
 In most cases, no need to pay attention to internal data format on writing / reading GPU data store using SQL. On the other hands, you need to consider when you program PL/CUDA function or share the GPU device memory with external applications using IPC handle.
 }
 @ja{

@@ -148,22 +148,6 @@ PG-Strom provides several SQL functions to handle array-based matrix.
 @ja{
 |関数|戻り値|説明|
 |:---|:----:|:---|
-|`pgstrom_ccache_enabled(regclass)`|`text`|指定したテーブルに対するインメモリ列キャッシュを有効にします。|
-|`pgstrom_ccache_disabled(regclass)`|`text`|指定したテーブルに対するインメモリ列キャッシュを無効にします。|
-|`pgstrom_ccache_prewarm(regclass)`|`int`|指定したテーブルに対するインメモリ列キャッシュを同期的に構築します。キャッシュ使用量の上限に達した時は、その時点で終了します。|
-}
-
-@en{
-|Function|Result|Description|
-|:-------|:----:|:----------|
-|`pgstrom_ccache_enabled(regclass)`|`text`|Enables in-memory columnar cache on the specified table.|
-|`pgstrom_ccache_disabled(regclass)`|`text`|Disables in-memory columnar cache on the specified table.|
-|`pgstrom_ccache_prewarm(regclass)`|`int`|Build in-memory columnar cache on the specified table synchronously, until cache usage is less than the threshold.|
-}
-
-@ja{
-|関数|戻り値|説明|
-|:---|:----:|:---|
 |`gstore_fdw_format(reggstore)`|`text`|gstore_fdw外部テーブルの内部データ形式を返します。|
 |`gstore_fdw_nitems(reggstore)`|`bigint`|gstore_fdw外部テーブルの行数を返します。|
 |`gstore_fdw_nattrs(reggstore)`|`bigint`|gstore_fdw外部テーブルの列数を返します。|
@@ -194,22 +178,25 @@ PG-Strom provides several SQL functions to handle array-based matrix.
 }
 
 @ja{
-|関数|戻り値|説明|
-|:---|:----:|:---|
-|`plcuda_kernel_max_blocksz`    |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルの最大ブロックサイズを返す。|
-|`plcuda_kernel_static_shmsz()` |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したブロックあたり共有メモリサイズを返す。|
-|`plcuda_kernel_dynamic_shmsz()`|`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが動的に確保する事のできるブロックあたり共有メモリサイズを返す。|
-|`plcuda_kernel_const_memsz()`  |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したコンスタントメモリのサイズを返す。|
-|`plcuda_kernel_local_memsz()`  |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが使用するスレッドあたりローカルメモリのサイズを返す。|
+|関数定義  |結果型|説明|
+|:---------|:----:|:---|
+|`attnums_of(regclass,text[])`|`smallint[]`|第一引数で指定したテーブルの第二引数で指定した列名（複数可）の列番号を配列として返します。|
+|`attnum_of(regclass,text)`|`smallint`|第一引数で指定したテーブルの第二引数で指定した列名の列番号を返します。|
+|`atttypes_of(regclass,text[])`|`regtype[]`|第一引数で指定したテーブルの第二引数で指定した列名（複数可）のデータ型を配列として返します。|
+|`atttype_of(regclass,text)`|`regtype`|第一引数で指定したテーブルの第二引数で指定した列名のデータ型を返します。|
+|`attrs_types_check(regclass,text[],regtype[])`|`bool`|第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、第三引数で指定したデータ型とそれぞれ一致しているかどうかを調べます。|
+|`attrs_type_check(regclass,text[],regtype)`|`bool`|第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、全て第三引数で指定したデータ型と一致しているかどうかを調べます。|
 }
+
 @en{
-|Function|Result|Description|
-|:-------|:----:|:----------|
-|`plcuda_kernel_max_blocksz`    |`int`|It tells maximum block size of the GPU kernel of PL/CUDA function when it is called as its helper.|
-|`plcuda_kernel_static_shmsz()` |`int`|It tells size of the statically acquired shared memory per block by the GPU kernel of PL/CUDA function when it is called as its helper.|
-|`plcuda_kernel_dynamic_shmsz()`|`int`|It tells size of the dynamic shared memory per block, which GPU kernel of the PL/CUDA function can allocate, when it is called as its helper.|
-|`plcuda_kernel_const_memsz()`  |`int`|It tells size of the constant memory acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.
-|`plcuda_kernel_local_memsz()`  |`int`|It tells size of the local memory per thread acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.
+|Definition|Result|Description|
+|:---------|:----:|:----------|
+|`attnums_of(regclass,text[])`|`smallint[]`|It returns attribute numbers for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.|
+|`attnum_of(regclass,text)`|`smallint`|It returns attribute number for the column name of the 2nd argument on the table of the 1st argument.|
+|`atttypes_of(regclass,text[])`|`regtype[]`|It returns data types for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.|
+|`atttype_of(regclass,text)`|`regtype`|It returns data type for the column name of the 2nd argument on the table of the 1st argument.|
+|`attrs_types_check(regclass,text[],regtype[])`|`bool`|It checks whether the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data types of the 3rd argument for each.
+|`attrs_type_check(regclass,text[],regtype)`|`bool`|It checks whether all the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data type of the 3rd argument.|
 }
 
 @ja{
@@ -289,57 +276,3 @@ Right now, only gstore_fdw uses this feature.
 |ctime       |`timestamp with time zone`|Timestamp when the preserved device memory is created
 
 }
-
-**pgstrom.ccache_info**
-@ja{
-`pgstrom.ccache_info`システムビューは、列指向キャッシュの各チャンク（128MB単位）の情報を出力します。
-
-|名前        |データ型  |説明|
-|:-----------|:---------|:---|
-|database_id |`oid`     |データベースID |
-|table_id    |`regclass`|テーブルID |
-|block_nr    |`int`     |チャンクの先頭ブロック番号 |
-|nitems      |`bigint`  |チャンクに含まれる行数 |
-|length      |`bigint`  |キャッシュされたチャンクのサイズ |
-|ctime       |`timestamp with time zone`|チャンク作成時刻|
-|atime       |`timestamp with time zone`|チャンク最終アクセス時刻|
-}
-@en{
-`pgstrom.ccache_info` system view exports attribute of the columnar-cache chunks (128MB unit for each).
-
-|Name        |Data Type |Description|
-|:-----------|:---------|:---|
-|database_id |`oid`     |Database Id |
-|table_id    |`regclass`|Table Id |
-|block_nr    |`int`     |Head block-number of the chunk |
-|nitems      |`bigint`  |Number of rows in the chunk |
-|length      |`bigint`  |Raw size of the cached chunk |
-|ctime       |`timestamp with time zone`|Timestamp of the chunk creation |
-|atime       |`timestamp with time zone`|Timestamp of the least access to the chunk |
-}
-
-
-**pgstrom.ccache_builder_info**
-@ja{
-`pgstrom.ccache_builder_info`システムビューは、列指向キャッシュの非同期ビルダープロセスの情報を出力します。
-
-|名前        |データ型  |説明|
-|:-----------|:---------|:---|
-|builder_id  |`int`     |列指向キャッシュ非同期ビルダーのID |
-|state       |`text`    |ビルダープロセスの状態。（`shutdown`: 停止中、`startup`: 起動中、`loading`: 列指向キャッシュの構築中、`sleep`: 一時停止中）|
-|database_id |`oid`     |ビルダープロセスが割り当てられているデータベースID |
-|table_id    |`regclass`|`state`が`loading`の場合、読出し中のテーブルID |
-|block_nr    |`int`     |`state`が`loading`の場合、読出し中のブロック番号 |
-}
-@en{
-`pgstrom.ccache_builder_info` system view exports information of asynchronous builder process of columnar cache.
-
-|Name        |Data Type  |Description|
-|:-----------|:----------|:---|
-|builder_id  |`int`      |Asynchronous builder Id of columnar cache |
-|state       |`text`     |State of the builder process (`shutdown`, `startup`, `loading` or `sleep`) |
-|database_id |`oid`      |Database Id where builder process is assigned on |
-|table_id    |`regclass` |Table Id where the builder process is scanning on, if `state` is `loading`. |
-|block_nr    |`int`      |Block number where the builder process is scanning on, if `state` is `loading`. |
-}
-

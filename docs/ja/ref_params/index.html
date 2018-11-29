@@ -96,11 +96,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">列指向キャッシュ</a>
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL</a>
                 </li>
                 <li class="">
                     
@@ -143,7 +139,7 @@
     <li class="toctree-l3"><a href="#_3">エグゼキュータに関する設定</a></li>
     
 
-    <li class="toctree-l3"><a href="#_4">列指向キャッシュ関連の設定</a></li>
+    <li class="toctree-l3"><a href="#ssd-to-gpu">SSD-to-GPUダイレクト関連の設定</a></li>
     
 
     <li class="toctree-l3"><a href="#gstore_fdw">gstore_fdw関連の設定</a></li>
@@ -281,18 +277,6 @@
 <td align="center"><code>off</code></td>
 <td align="left">GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</td>
 </tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">SSD-to-GPUダイレクトSQL実行機能を有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">自動</td>
-<td align="left">SSD-to-GPUダイレクトSQL実行機能を発動させるテーブルサイズの閾値を設定する。</td>
-</tr>
 </tbody>
 </table>
 <h1 id="_2">オプティマイザに関する設定</h1>
@@ -363,7 +347,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_4">列指向キャッシュ関連の設定</h1>
+<h1 id="ssd-to-gpu">SSD-to-GPUダイレクト関連の設定</h1>
 <table>
 <thead>
 <tr>
@@ -375,16 +359,22 @@
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pg_strom.ccache_base_dir</code></td>
-<td align="center"><code>string</code></td>
-<td align="left"><code>'/dev/shm'</code></td>
-<td align="left">列指向キャッシュを保持するファイルシステム上のパスを指定します。通常、<code>tmpfs</code>がマウントされている<code>/dev/shm</code>を変更する必要はありません。</td>
+<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>on</code></td>
+<td align="left">SSD-to-GPUダイレクトSQL機能を有効化/無効化する。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.ccache_total_size</code></td>
+<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
 <td align="center"><code>int</code></td>
 <td align="left">自動</td>
-<td align="left">列指向キャッシュの上限を kB 単位で指定します。区画サイズの75%またはシステムの物理メモリの66%のいずれか小さな方がデフォルト値です。</td>
+<td align="left">SSD-to-GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_distance_map</code></td>
+<td align="center"><code>string</code></td>
+<td align="left"><code>NULL</code></td>
+<td align="left">NVME-SSDに近いGPUを手動で設定します。通常はsysfsから取得したPCIeバストポロジ情報による自動設定で問題ありません。</td>
 </tr>
 </tbody>
 </table>

@@ -96,11 +96,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL Exec</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">Columnar Cache</a>
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
                 </li>
                 <li class=" current">
                     
@@ -267,7 +263,7 @@ SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
 </tr>
 </tbody>
 </table>
-<p>Right now, only <code>pgstrom</code> is supported for <code>format</code> option. It is identical data format with what PG-Strom uses for in-memory columnar cache.
+<p>Right now, only <code>pgstrom</code> is supported for <code>format</code> option. It is an original data format of PG-Strom to store structured data of PostgreSQL in columnar format.
 In most cases, no need to pay attention to internal data format on writing / reading GPU data store using SQL. On the other hands, you need to consider when you program PL/CUDA function or share the GPU device memory with external applications using IPC handle.</p>
 <p>Right now, only <code>pglz</code> is supported for <code>compression</code> option. This compression logic adopts an identical data format and algorithm used by PostgreSQL to compress variable length data larger than its threshold.
 It can be decompressed by GPU internal function <code>pglz_decompress()</code> from PL/CUDA function. Due to the characteristics of the compression algorithm, it is valuable to represent sparse matrix that is mostly zero.</p>
@@ -368,7 +364,7 @@ If largeobject already exists, its contents is replaced by the data read from th
         <a href="../plcuda/" class="btn btn-neutral float-right" title="PL/CUDA">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../ccache/" class="btn btn-neutral" title="Columnar Cache"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../ssd2gpu/" class="btn btn-neutral" title="SSD2GPU Direct SQL"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -394,7 +390,7 @@ If largeobject already exists, its contents is replaced by the data read from th
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../ccache/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../ssd2gpu/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
         <span style="margin-left: 15px"><a href="../plcuda/" style="color: #fcfcfc">Next &raquo;</a></span>

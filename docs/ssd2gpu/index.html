@@ -8,7 +8,7 @@
   
   <meta name="author" content="PG-Strom Development Team">
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>SSD2GPU Direct SQL Exec - PG-Strom Manual</title>
+  <title>SSD2GPU Direct SQL - PG-Strom Manual</title>
   <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
@@ -20,7 +20,7 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "SSD2GPU Direct SQL Exec";
+    var mkdocs_page_name = "SSD2GPU Direct SQL";
     var mkdocs_page_input_path = "ssd2gpu.md";
     var mkdocs_page_url = "/ssd2gpu/";
   </script>
@@ -96,7 +96,7 @@
     <ul class="subnav">
                 <li class=" current">
                     
-    <a class="current" href="./">SSD2GPU Direct SQL Exec</a>
+    <a class="current" href="./">SSD2GPU Direct SQL</a>
     <ul class="subnav">
             
     <li class="toctree-l3"><a href="#overview">Overview</a></li>
@@ -109,6 +109,8 @@
             <li><a class="toctree-l4" href="#driver-installation">Driver Installation</a></li>
         
             <li><a class="toctree-l4" href="#designing-tablespace">Designing Tablespace</a></li>
+        
+            <li><a class="toctree-l4" href="#distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</a></li>
         
         </ul>
     
@@ -125,10 +127,6 @@
     
 
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">Columnar Cache</a>
                 </li>
                 <li class="">
                     
@@ -195,7 +193,7 @@
         
       
     
-    <li>SSD2GPU Direct SQL Exec</li>
+    <li>SSD2GPU Direct SQL</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -280,6 +278,35 @@ Note that tablespace of the existing tables are not changed in thie case.</p>
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
 </code></pre>
 
+<h2 id="distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</h2>
+<p>On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.</p>
+<p><a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>, basis of the SSD-to-GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.</p>
+<p>From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.</p>
+<p>The photo below is a motherboard of HPC server. It has 8 of PCIe x16 slots, and each pair is linked to the other over the PCIe switch. The slots in the left-side of the photo are connected to CPU1, and right-side are connected to CPU2.</p>
+<p>When a table on SSD-2 is scanned using SSD-to-GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.</p>
+<p><img alt="Motherboard of HPC Server" src="../img/pcie-hpc-server.png" /></p>
+<p>PG-Strom calculate logical distances on any pairs of GPU and NVME-SSD using PCIe bus topology information of the system on startup time.
+It is displayed at the start up log. Each NVME-SSD determines the preferable GPU based on the distance, for example, <code>GPU1</code> shall be used on scan of the <code>/dev/nvme2</code>.</p>
+<pre><code>$ pg_ctl restart
+     :
+LOG:  GPU&lt;-&gt;SSD Distance Matrix
+LOG:             GPU0     GPU1     GPU2
+LOG:      nvme0  (   3)      7       7
+LOG:      nvme5      7       7   (   3)
+LOG:      nvme4      7       7   (   3)
+LOG:      nvme2      7   (   3)      7
+LOG:      nvme1  (   3)      7       7
+LOG:      nvme3      7   (   3)      7
+     :
+</code></pre>
+
+<p>Usually automatic configuration works well.
+In case when NVME-over-Fabric(RDMA) is used, unable to identify the location of nvme device on the PCIe-bus, so you need to configure the logical distance between NVME-SSD and GPU manually.</p>
+<p>The example below shows the configuration of <code>gpu2</code> for <code>nvme1</code>, and <code>gpu1</code> for <code>nvme2</code> and <code>nvme3</code>.
+It shall be added to <code>postgresql.conf</code>. Please note than manual configuration takes priority than the automatic configuration.</p>
+<pre><code>pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
+</code></pre>
+
 <h1 id="operations">Operations</h1>
 <h2 id="controls-using-guc-parameters">Controls using GUC parameters</h2>
 <p>There are two GPU parameters related to SSD-to-GPU Direct SQL Execution.</p>
@@ -354,7 +381,7 @@ and s_region = 'AMERICA'
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../ccache/" class="btn btn-neutral float-right" title="Columnar Cache">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../gstore_fdw/" class="btn btn-neutral float-right" title="Gstore_fdw">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href="../troubles/" class="btn btn-neutral" title="Trouble Shooting"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -386,7 +413,7 @@ and s_region = 'AMERICA'
         <span><a href="../troubles/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../ccache/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../gstore_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

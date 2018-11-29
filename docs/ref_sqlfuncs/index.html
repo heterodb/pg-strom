@@ -96,11 +96,7 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL Exec</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ccache/">Columnar Cache</a>
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
                 </li>
                 <li class="">
                     
@@ -433,32 +429,6 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pgstrom_ccache_enabled(regclass)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">Enables in-memory columnar cache on the specified table.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom_ccache_disabled(regclass)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">Disables in-memory columnar cache on the specified table.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom_ccache_prewarm(regclass)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">Build in-memory columnar cache on the specified table synchronously, until cache usage is less than the threshold.</td>
-</tr>
-</tbody>
-</table>
-<table>
-<thead>
-<tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
 <td align="left"><code>gstore_fdw_format(reggstore)</code></td>
 <td align="center"><code>text</code></td>
 <td align="left">It tells internal format of the specified gstore_fdw foreign table.</td>
@@ -509,36 +479,41 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 <table>
 <thead>
 <tr>
-<th align="left">Function</th>
+<th align="left">Definition</th>
 <th align="center">Result</th>
 <th align="left">Description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>plcuda_kernel_max_blocksz</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells maximum block size of the GPU kernel of PL/CUDA function when it is called as its helper.</td>
+<td align="left"><code>attnums_of(regclass,text[])</code></td>
+<td align="center"><code>smallint[]</code></td>
+<td align="left">It returns attribute numbers for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_static_shmsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells size of the statically acquired shared memory per block by the GPU kernel of PL/CUDA function when it is called as its helper.</td>
+<td align="left"><code>attnum_of(regclass,text)</code></td>
+<td align="center"><code>smallint</code></td>
+<td align="left">It returns attribute number for the column name of the 2nd argument on the table of the 1st argument.</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_dynamic_shmsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells size of the dynamic shared memory per block, which GPU kernel of the PL/CUDA function can allocate, when it is called as its helper.</td>
+<td align="left"><code>atttypes_of(regclass,text[])</code></td>
+<td align="center"><code>regtype[]</code></td>
+<td align="left">It returns data types for the column names (may be multiple) of the 2nd argument on the table of the 1st argument.</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_const_memsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells size of the constant memory acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.</td>
+<td align="left"><code>atttype_of(regclass,text)</code></td>
+<td align="center"><code>regtype</code></td>
+<td align="left">It returns data type for the column name of the 2nd argument on the table of the 1st argument.</td>
 </tr>
 <tr>
-<td align="left"><code>plcuda_kernel_local_memsz()</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells size of the local memory per thread acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.</td>
+<td align="left"><code>attrs_types_check(regclass,text[],regtype[])</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">It checks whether the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data types of the 3rd argument for each.</td>
+</tr>
+<tr>
+<td align="left"><code>attrs_type_check(regclass,text[],regtype)</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">It checks whether all the data types of the columns (may be multiple) of the 2nd argument on the table of the 1st argument match with the data type of the 3rd argument.</td>
 </tr>
 </tbody>
 </table>
@@ -636,92 +611,6 @@ Right now, only gstore_fdw uses this feature.</p>
 <td align="left">ctime</td>
 <td align="left"><code>timestamp with time zone</code></td>
 <td align="left">Timestamp when the preserved device memory is created</td>
-</tr>
-</tbody>
-</table>
-<p><strong>pgstrom.ccache_info</strong></p>
-<p><code>pgstrom.ccache_info</code> system view exports attribute of the columnar-cache chunks (128MB unit for each).</p>
-<table>
-<thead>
-<tr>
-<th align="left">Name</th>
-<th align="left">Data Type</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">database_id</td>
-<td align="left"><code>oid</code></td>
-<td align="left">Database Id</td>
-</tr>
-<tr>
-<td align="left">table_id</td>
-<td align="left"><code>regclass</code></td>
-<td align="left">Table Id</td>
-</tr>
-<tr>
-<td align="left">block_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">Head block-number of the chunk</td>
-</tr>
-<tr>
-<td align="left">nitems</td>
-<td align="left"><code>bigint</code></td>
-<td align="left">Number of rows in the chunk</td>
-</tr>
-<tr>
-<td align="left">length</td>
-<td align="left"><code>bigint</code></td>
-<td align="left">Raw size of the cached chunk</td>
-</tr>
-<tr>
-<td align="left">ctime</td>
-<td align="left"><code>timestamp with time zone</code></td>
-<td align="left">Timestamp of the chunk creation</td>
-</tr>
-<tr>
-<td align="left">atime</td>
-<td align="left"><code>timestamp with time zone</code></td>
-<td align="left">Timestamp of the least access to the chunk</td>
-</tr>
-</tbody>
-</table>
-<p><strong>pgstrom.ccache_builder_info</strong></p>
-<p><code>pgstrom.ccache_builder_info</code> system view exports information of asynchronous builder process of columnar cache.</p>
-<table>
-<thead>
-<tr>
-<th align="left">Name</th>
-<th align="left">Data Type</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">builder_id</td>
-<td align="left"><code>int</code></td>
-<td align="left">Asynchronous builder Id of columnar cache</td>
-</tr>
-<tr>
-<td align="left">state</td>
-<td align="left"><code>text</code></td>
-<td align="left">State of the builder process (<code>shutdown</code>, <code>startup</code>, <code>loading</code> or <code>sleep</code>)</td>
-</tr>
-<tr>
-<td align="left">database_id</td>
-<td align="left"><code>oid</code></td>
-<td align="left">Database Id where builder process is assigned on</td>
-</tr>
-<tr>
-<td align="left">table_id</td>
-<td align="left"><code>regclass</code></td>
-<td align="left">Table Id where the builder process is scanning on, if <code>state</code> is <code>loading</code>.</td>
-</tr>
-<tr>
-<td align="left">block_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">Block number where the builder process is scanning on, if <code>state</code> is <code>loading</code>.</td>
 </tr>
 </tbody>
 </table>
