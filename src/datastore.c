@@ -126,7 +126,7 @@ KDS_fetch_tuple_column(TupleTableSlot *slot,
 	 * system columns via this API.
 	 */
 	Assert(kds->format == KDS_FORMAT_COLUMN);
-	Assert(kds->ncols == tupdesc->natts + NumOfSystemAttrs);
+	Assert(kds->ncols == tupdesc->natts);
 	if (row_index >= kds->nitems)
 	{
 		ExecClearTuple(slot);
@@ -375,11 +375,6 @@ init_kernel_data_store(kern_data_store *kds,
 	}
 	else
 	{
-		/*
-		 * columnar format has system attribute definition next to the user
-		 * attributes. If no data array, keep va_offset/extra_sz zero.
-		 */
-		kds->ncols += NumOfSystemAttrs;
 		/* attcacheoff does not make sense for columnar format */
 		attcacheoff = -1;
 		/* it may copy attribute names */

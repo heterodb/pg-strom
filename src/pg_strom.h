@@ -1306,12 +1306,43 @@ extern void pgstrom_init_ccache(void);
 /*
  * gstore_fdw.c
  */
+extern void gstore_fdw_table_options(Oid gstore_oid,
+									 int *p_pinning, int *p_format);
+extern void gstore_fdw_column_options(Oid gstore_oid, AttrNumber attnum,
+									  int *p_compression);
+extern bool relation_is_gstore_fdw(Oid table_oid);
 extern bool type_is_reggstore(Oid type_oid);
 extern Oid	get_reggstore_type_oid(void);
 #define REGGSTOREOID		get_reggstore_type_oid()
-extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
-extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
+
+/*
+ * gstore_buf.c
+ */
+typedef struct GpuStoreBuffer	GpuStoreBuffer;
+
+extern GpuStoreBuffer *GpuStoreBufferCreate(Relation frel,
+											Snapshot snapshot);
+extern bool GpuStoreBufferGetNext(Relation frel,
+								  Snapshot snapshot,
+								  TupleTableSlot *slot,
+								  GpuStoreBuffer *gs_buffer,
+								  size_t *p_gs_index,
+								  bool needs_system_columns);
+extern void GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
+									TupleDesc tupdesc,
+									Snapshot snapshot,
+									TupleTableSlot *slot);
+extern void GpuStoreBufferRemoveRow(GpuStoreBuffer *gs_buffer,
+									TupleDesc tupdesc,
+									Snapshot snapshot,
+									size_t old_index);
+extern void GpuStoreBufferGetSize(Oid table_oid, Snapshot snapshot,
+								  Size *p_rawsize,
+								  Size *p_nitems);
+extern void pgstrom_init_gstore_buf(void);
+
+extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 
 /*
  * misc.c

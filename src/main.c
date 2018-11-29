@@ -536,6 +536,7 @@ _PG_init(void)
 	pgstrom_init_codegen();
 	pgstrom_init_plcuda();
 	pgstrom_init_ccache();
+	pgstrom_init_gstore_buf();
 	pgstrom_init_gstore_fdw();
 
 	/* check commercial license, if any */

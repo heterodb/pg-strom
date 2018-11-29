@@ -32,7 +32,7 @@ __STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
 		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o \
 		aggfuncs.o matrix.o float2.o ccache.o \
-		largeobject.o gstore_fdw.o misc.o
+		largeobject.o gstore_buf.o gstore_fdw.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h cuda_filelist
 __PLCUDA_HOST = host_plcuda.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS) $(__PLCUDA_HOST))
