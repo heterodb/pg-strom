@@ -18,7 +18,25 @@
 #include "pg_strom.h"
 
 /*
- * gstoreScanState - state object for scan/insert/update/delete
+ * GpuStorePlanInfo
+ */
+typedef struct
+{
+	List	   *host_quals;
+	List	   *dev_quals;
+	size_t		raw_nrows;		/* # of rows kept in GpuStoreFdw */
+	size_t		dma_nrows;		/* # of rows to be backed from the device */
+	Bitmapset  *outer_refs;		/* attributes to be backed to host */
+	List	   *sort_keys;		/* list of Vars */
+	List	   *sort_order;		/* BTXXXXStrategyNumber */
+	List	   *sort_null_first;/* null-first? */
+	/* table options */
+	int			pinning;		/* GPU device number */
+	int			format;			/* GSTORE_FDW_FORMAT__*  */
+} GpuStoreFdwInfo;
+
+/*
+ *  GpuStoreExecState - state object for scan/insert/update/delete
  */
 typedef struct
 {
@@ -28,7 +46,7 @@ typedef struct
 } GpuStoreExecState;
 
 /* ---- static variables ---- */
-static Oid				reggstore_type_oid = InvalidOid;
+static Oid		reggstore_type_oid = InvalidOid;
 
 Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
@@ -36,6 +54,62 @@ Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
 Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
+
+static inline void
+form_gpustore_fdw_info(GpuStoreFdwInfo *gsf_info,
+					   List **p_fdw_exprs, List **p_fdw_privs)
+{
+	List	   *exprs = NIL;
+	List	   *privs = NIL;
+	List	   *outer_refs_list = NIL;
+	int			j;
+
+	exprs = lappend(exprs, gsf_info->host_quals);
+	exprs = lappend(exprs, gsf_info->dev_quals);
+	privs = lappend(privs, makeInteger(gsf_info->raw_nrows));
+	privs = lappend(privs, makeInteger(gsf_info->dma_nrows));
+	j = -1;
+	while ((j = bms_next_member(gsf_info->outer_refs, j)) >= 0)
+		outer_refs_list = lappend_int(outer_refs_list, j);
+	privs = lappend(privs, outer_refs_list);
+	exprs = lappend(exprs, gsf_info->sort_keys);
+	privs = lappend(privs, gsf_info->sort_order);
+	privs = lappend(privs, gsf_info->sort_null_first);
+	privs = lappend(privs, makeInteger(gsf_info->pinning));
+	privs = lappend(privs, makeInteger(gsf_info->format));
+
+	*p_fdw_exprs = exprs;
+	*p_fdw_privs = privs;
+}
+
+static inline GpuStoreFdwInfo *
+deform_gpustore_fdw_info(ForeignScan *fscan)
+{
+	GpuStoreFdwInfo *gsf_info = palloc0(sizeof(GpuStoreFdwInfo));
+	List	   *exprs = fscan->fdw_exprs;
+	List	   *privs = fscan->fdw_private;
+	int			pindex = 0;
+	int			eindex = 0;
+	List	   *temp;
+	ListCell   *lc;
+	Bitmapset  *outer_refs = NULL;
+
+	gsf_info->host_quals = list_nth(exprs, eindex++);
+	gsf_info->dev_quals  = list_nth(exprs, eindex++);
+	gsf_info->raw_nrows  = intVal(list_nth(privs, pindex++));
+	gsf_info->dma_nrows  = intVal(list_nth(privs, pindex++));
+	temp = list_nth(privs, pindex++);
+	foreach (lc, temp)
+		outer_refs = bms_add_member(outer_refs, lfirst_int(lc));
+	gsf_info->outer_refs = outer_refs;
+	gsf_info->sort_keys  = list_nth(exprs, eindex++);
+	gsf_info->sort_order = list_nth(privs, pindex++);
+	gsf_info->sort_null_first = list_nth(privs, pindex++);
+	gsf_info->pinning    = intVal(list_nth(privs, pindex++));
+	gsf_info->format     = intVal(list_nth(privs, pindex++));
+
+	return gsf_info;
+}
 
 /*
  * gstoreGetForeignRelSize
@@ -45,16 +119,280 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 						RelOptInfo *baserel,
 						Oid ftable_oid)
 {
+	GpuStoreFdwInfo *gsf_info;
 	Snapshot	snapshot;
 	Size		rawsize;
 	Size		nitems;
+	double		selectivity;
+	List	   *tmp_quals;
+	List	   *dev_quals = NIL;
+	List	   *host_quals = NIL;
+	Bitmapset  *compressed = NULL;
+	ListCell   *lc;
+	int			anum;
 
+	/* setup GpuStoreFdwInfo */
+	gsf_info = palloc0(sizeof(GpuStoreFdwInfo));
+	gstore_fdw_table_options(ftable_oid,
+							 &gsf_info->pinning,
+							 &gsf_info->format);
+	for (anum=1; anum <= baserel->max_attr; anum++)
+	{
+		int		comp;
+
+		gstore_fdw_column_options(ftable_oid, anum, &comp);
+		if (comp != GSTORE_COMPRESSION__NONE)
+			compressed = bms_add_member(compressed, anum -
+										FirstLowInvalidHeapAttributeNumber);
+	}
+	/* pickup host/device quals */
+	foreach (lc, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc);
+		Bitmapset	   *varattnos = NULL;
+
+		if (pgstrom_device_expression(root, rinfo->clause))
+		{
+			/*
+			 * MEMO: Right now, we don't allow to reference compressed
+			 * varlena datum by device-side SQL code.
+			 */
+			pull_varattnos((Node *)rinfo->clause,
+						   baserel->relid,
+						   &varattnos);
+			if (!bms_overlap(varattnos, compressed))
+				dev_quals = lappend(dev_quals, rinfo);
+			else
+				host_quals = lappend(dev_quals, rinfo);
+		}
+		else
+			host_quals = lappend(dev_quals, rinfo);
+	}
+	/* estimate number of result rows */
 	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 	GpuStoreBufferGetSize(ftable_oid, snapshot, &rawsize, &nitems);
 	UnregisterSnapshot(snapshot);
 
-	baserel->rows	= nitems;
-	baserel->pages	= (rawsize + BLCKSZ - 1) / BLCKSZ;
+	tmp_quals = extract_actual_clauses(baserel->baserestrictinfo, false);
+	selectivity = clauselist_selectivity(root,
+										 tmp_quals,
+										 baserel->relid,
+										 JOIN_INNER,
+										 NULL);
+	baserel->rows  = selectivity * (double)nitems;
+	baserel->pages = (rawsize + BLCKSZ - 1) / BLCKSZ;
+
+	if (host_quals == NIL)
+		gsf_info->dma_nrows = baserel->rows;
+	else if (dev_quals != NIL)
+	{
+		tmp_quals = extract_actual_clauses(dev_quals, false);
+		selectivity = clauselist_selectivity(root,
+											 tmp_quals,
+											 baserel->relid,
+											 JOIN_INNER,
+											 NULL);
+		gsf_info->dma_nrows = selectivity * (double)nitems;
+	}
+	else
+		gsf_info->dma_nrows = (double) nitems;
+
+	gsf_info->raw_nrows  = nitems;
+	gsf_info->host_quals = extract_actual_clauses(host_quals, false);
+	gsf_info->dev_quals  = extract_actual_clauses(dev_quals, false);
+
+	/* attributes to be referenced in the host code */
+	pull_varattnos((Node *)baserel->reltarget->exprs,
+				   baserel->relid,
+				   &gsf_info->outer_refs);
+	pull_varattnos((Node *)gsf_info->host_quals,
+				   baserel->relid,
+				   &gsf_info->outer_refs);
+	baserel->fdw_private = gsf_info;
+}
+
+/*
+ * gstoreCreateForeignPath
+ */
+static void
+gstoreCreateForeignPath(PlannerInfo *root,
+						RelOptInfo *baserel,
+						Oid ftable_oid,
+						Bitmapset *outer_refs,
+						List *host_quals,
+						List *dev_quals,
+						double raw_nrows,
+						double dma_nrows,
+						List *query_pathkeys)
+{
+	ForeignPath *fpath;
+	ParamPathInfo *param_info;
+	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	Cost		startup_cost = 0.0;
+	Cost		run_cost = 0.0;
+	size_t		dma_size;
+	size_t		tup_size;
+	int			j, anum;
+	QualCost	qcost;
+	double		path_rows;
+	List	   *useful_pathkeys = NIL;
+	List	   *sort_keys = NIL;
+	List	   *sort_order = NIL;
+	List	   *sort_null_first = NIL;
+	GpuStoreFdwInfo *gsf_info;
+
+	/* Cost for GPU setup, if any */
+	if (dev_quals != NIL || query_pathkeys != NIL)
+		startup_cost += pgstrom_gpu_setup_cost;
+	/* Cost for GPU qualifiers, if any */
+	if (dev_quals)
+	{
+		cost_qual_eval_node(&qcost, (Node *)dev_quals, root);
+		startup_cost += qcost.startup;
+		run_cost += qcost.per_tuple * gpu_ratio * raw_nrows;
+	}
+	/* Cost for DMA (device-->host) */
+	tup_size = MAXALIGN(offsetof(kern_tupitem, htup) +
+						offsetof(HeapTupleHeaderData, t_bits) +
+						BITMAPLEN(baserel->max_attr));
+	j = -1;
+	while ((j = bms_next_member(outer_refs, j)) >= 0)
+	{
+		anum = j + FirstLowInvalidHeapAttributeNumber;
+
+		if (anum < InvalidAttrNumber)
+			continue;
+		if (anum == InvalidAttrNumber)
+		{
+			dma_size = baserel->pages * BLCKSZ;
+			break;
+		}
+		if (anum < baserel->min_attr || anum > baserel->max_attr)
+			elog(ERROR, "Bug? attribute number %d is out of range", anum);
+		tup_size += baserel->attr_widths[anum - baserel->min_attr];
+	}
+	dma_size = (KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr, true) +
+				MAXALIGN(tup_size) * (size_t)dma_nrows);
+	run_cost += pgstrom_gpu_dma_cost *
+		((double)dma_size / (double)pgstrom_chunk_size());
+	/* Cost for CPU qualifiers, if any */
+	if (host_quals)
+	{
+		cost_qual_eval_node(&qcost, (Node *)host_quals, root);
+		startup_cost += qcost.startup;
+		run_cost += qcost.per_tuple * dma_nrows;
+	}
+	/* Cost for baserel parameters */
+	param_info = get_baserel_parampathinfo(root, baserel, NULL);
+	if (param_info)
+	{
+		cost_qual_eval(&qcost, param_info->ppi_clauses, root);
+		startup_cost += qcost.startup;
+		run_cost += qcost.per_tuple * dma_nrows;
+
+		path_rows = param_info->ppi_rows;
+	}
+	else
+		path_rows = baserel->rows;
+
+	/* Cost for GpuSort */
+	if (query_pathkeys != NIL)
+	{
+		ListCell   *lc1, *lc2;
+		Cost		comparison_cost = 2.0 * pgstrom_gpu_operator_cost;
+
+		foreach (lc1, query_pathkeys)
+		{
+			PathKey	   *pathkey = lfirst(lc1);
+			EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
+
+			foreach (lc2, pathkey_ec->ec_members)
+			{
+				EquivalenceMember *em = lfirst(lc2);
+				Var	   *var;
+
+				/* reference to other table? */
+				if (!bms_is_subset(em->em_relids, baserel->relids))
+					continue;
+				/* sort by constant? it makes no sense for GpuSort */
+				if (bms_is_empty(em->em_relids))
+					continue;
+				/*
+				 * GpuSort can support only simple variable reference,
+				 * because sorting is earlier than projection.
+				 */
+				if (!IsA(em->em_expr, Var))
+					continue;
+				/* sanity checks */
+				var = (Var *)em->em_expr;
+				if (var->varno != baserel->relid ||
+					var->varattno <= 0 ||
+					var->varattno >  baserel->max_attr)
+					continue;
+
+				/*
+				 * Varlena data types have special optimization - offset of
+				 * values to extra buffer on KDS are preliminary sorted on
+				 * GPU-size when GpuStore is constructed.
+				 */
+				if (get_typlen(var->vartype) == -1)
+				{
+					TypeCacheEntry *tcache
+						= lookup_type_cache(var->vartype,
+											TYPECACHE_CMP_PROC);
+					if (!OidIsValid(tcache->cmp_proc))
+						continue;
+				}
+				else
+				{
+					devtype_info *dtype = pgstrom_devtype_lookup(var->vartype);
+
+					if (!dtype ||
+						!pgstrom_devfunc_lookup_type_compare(dtype,
+															 var->varcollid))
+						continue;
+				}
+				/* OK, this is suitable key for GpuSort */
+				sort_keys = lappend(sort_keys, copyObject(var));
+				sort_order = lappend_int(sort_order, pathkey->pk_strategy);
+				sort_null_first = lappend_int(sort_null_first,
+											  (int)pathkey->pk_nulls_first);
+				useful_pathkeys = lappend(useful_pathkeys, pathkey);
+				break;
+			}
+		}
+		if (useful_pathkeys == NIL)
+			return;
+		if (dma_nrows > 1.0)
+		{
+			double	log2 = log(dma_nrows) / 0.693147180559945;
+			startup_cost += comparison_cost * dma_nrows * log2;
+		}
+	}
+
+	/* setup GpuStoreFdwInfo with modification */
+	gsf_info = palloc0(sizeof(GpuStoreFdwInfo));
+	memcpy(gsf_info, baserel->fdw_private, sizeof(GpuStoreFdwInfo));
+	gsf_info->host_quals = host_quals;
+	gsf_info->dev_quals  = dev_quals;
+	gsf_info->raw_nrows  = raw_nrows;
+	gsf_info->dma_nrows  = dma_nrows;
+	gsf_info->outer_refs = outer_refs;
+	gsf_info->sort_keys  = sort_keys;
+	gsf_info->sort_order = sort_order;
+	gsf_info->sort_null_first = sort_null_first;
+
+	fpath = create_foreignscan_path(root,
+									baserel,
+									NULL,	/* default pathtarget */
+									path_rows,
+									startup_cost,
+									startup_cost + run_cost,
+									useful_pathkeys,
+									NULL,	/* no outer rel */
+									NULL,	/* no extra plan */
+									list_make1(gsf_info));
+	add_path(baserel, (Path *)fpath);
 }
 
 /*
@@ -65,33 +403,64 @@ gstoreGetForeignPaths(PlannerInfo *root,
 					  RelOptInfo *baserel,
 					  Oid foreigntableid)
 {
-	ParamPathInfo *param_info;
-	ForeignPath *fpath;
-	Cost		startup_cost = baserel->baserestrictcost.startup;
-	Cost		per_tuple = baserel->baserestrictcost.per_tuple;
-	Cost		run_cost;
-	QualCost	qcost;
+	GpuStoreFdwInfo *gsf_info = (GpuStoreFdwInfo *)baserel->fdw_private;
+	List		   *any_quals;
+	Bitmapset	   *outer_refs_nodev;
 
-	param_info = get_baserel_parampathinfo(root, baserel, NULL);
-	if (param_info)
+	/* outer_refs when dev_quals are skipped */
+	if (!gsf_info->dev_quals)
+		outer_refs_nodev = gsf_info->outer_refs;
+	else
 	{
-		cost_qual_eval(&qcost, param_info->ppi_clauses, root);
-		startup_cost += qcost.startup;
-		per_tuple += qcost.per_tuple;
+		outer_refs_nodev = bms_copy(gsf_info->outer_refs);
+		pull_varattnos((Node *)gsf_info->dev_quals,
+					   baserel->relid,
+					   &outer_refs_nodev);
 	}
-	run_cost = per_tuple * baserel->rows;
 
-	fpath = create_foreignscan_path(root,
-									baserel,
-									NULL,	/* default pathtarget */
-									baserel->rows,
-									startup_cost,
-									startup_cost + run_cost,
-									NIL,	/* no pathkeys */
-									NULL,	/* no outer rel either */
-									NULL,	/* no extra plan */
-									NIL);	/* no fdw_private */
-	add_path(baserel, (Path *) fpath);
+	/* no device qual execution, no device side sorting */
+	any_quals = extract_actual_clauses(baserel->baserestrictinfo, false);
+	gstoreCreateForeignPath(root, baserel, foreigntableid,
+							outer_refs_nodev,
+							any_quals, NIL,
+							gsf_info->raw_nrows,
+							gsf_info->raw_nrows,
+							NIL);
+
+	/* device qual execution, but no device side sorting */
+	if (gsf_info->dev_quals)
+	{
+		gstoreCreateForeignPath(root, baserel, foreigntableid,
+								gsf_info->outer_refs,
+								gsf_info->host_quals,
+								gsf_info->dev_quals,
+								gsf_info->raw_nrows,
+								gsf_info->dma_nrows,
+								NIL);
+	}
+
+	/* device side sorting */
+	if (root->query_pathkeys)
+	{
+		/* without device qual execution */
+		gstoreCreateForeignPath(root, baserel, foreigntableid,
+								outer_refs_nodev,
+								any_quals, NIL,
+								gsf_info->raw_nrows,
+								gsf_info->raw_nrows,
+								root->query_pathkeys);
+		/* with device qual execution */
+		if (gsf_info->dev_quals)
+		{
+			gstoreCreateForeignPath(root, baserel, foreigntableid,
+									gsf_info->outer_refs,
+									gsf_info->host_quals,
+									gsf_info->dev_quals,
+									gsf_info->raw_nrows,
+									gsf_info->dma_nrows,
+									root->query_pathkeys);
+		}
+	}
 }
 
 /*
@@ -106,27 +475,19 @@ gstoreGetForeignPlan(PlannerInfo *root,
 					 List *scan_clauses,
 					 Plan *outer_plan)
 {
-	List	   *scan_quals = NIL;
-	ListCell   *lc;
+	GpuStoreFdwInfo *gsf_info = linitial(best_path->fdw_private);
+	List	   *fdw_exprs;
+	List	   *fdw_privs;
 
-	foreach (lc, scan_clauses)
-	{
-		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
-
-		Assert(IsA(rinfo, RestrictInfo));
-		if (rinfo->pseudoconstant)
-			continue;
-		scan_quals = lappend(scan_quals, rinfo->clause);
-	}
-
-	return make_foreignscan(tlist,
-							scan_quals,
-							baserel->relid,
-							NIL,		/* fdw_exprs */
-							NIL,		/* fdw_private */
-							NIL,		/* fdw_scan_tlist */
-							NIL,		/* fdw_recheck_quals */
-							NULL);		/* outer_plan */
+	form_gpustore_fdw_info(gsf_info, &fdw_exprs, &fdw_privs);
+	return make_foreignscan(tlist,					/* plan.targetlist */
+							gsf_info->host_quals,	/* plan.qual */
+							baserel->relid,			/* scanrelid */
+							fdw_exprs,				/* fdw_exprs */
+							fdw_privs,				/* fdw_private */
+							NIL,					/* fdw_scan_tlist */
+							gsf_info->dev_quals,	/* fdw_recheck_quals */
+							NULL);					/* outer_plan */
 }
 
 /*
@@ -224,6 +585,80 @@ static void
 gstoreEndForeignScan(ForeignScanState *node)
 {
 	//GpuStoreExecState  *gstate = (GpuStoreExecState *) node->fdw_state;
+}
+
+/*
+ * gstoreExplainForeignScan
+ */
+static void
+gstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
+{
+	GpuStoreExecState  *gstate = (GpuStoreExecState *) node->fdw_state;
+	GpuStoreFdwInfo	   *gsf_info;
+	List			   *dcontext;
+	char			   *temp;
+
+	gsf_info = deform_gpustore_fdw_info((ForeignScan *)node->ss.ps.plan);
+
+	/* setup deparsing context */
+	dcontext = set_deparse_context_planstate(es->deparse_cxt,
+											 (Node *)&node->ss.ps,
+											 NIL); //XXX spec bug?
+	/* device quelifiers, if any */
+	if (gsf_info->dev_quals != NIL)
+	{
+		temp = deparse_expression((Node *)gsf_info->dev_quals,
+								  dcontext, es->verbose, false);
+		ExplainPropertyText("GPU Filter", temp, es);
+
+		//Rows Removed by GPU Filter
+	}
+
+	/* sorting keys, if any */
+	if (gsf_info->sort_keys != NIL)
+	{
+		StringInfoData buf;
+		ListCell   *lc1, *lc2, *lc3;
+
+		initStringInfo(&buf);
+		forthree (lc1, gsf_info->sort_keys,
+				  lc2, gsf_info->sort_order,
+				  lc3, gsf_info->sort_null_first)
+		{
+			Node   *expr = lfirst(lc1);
+			int		__order = lfirst_int(lc2);
+			int		null_first = lfirst_int(lc3);
+			const char *order;
+
+			switch (__order)
+			{
+				case BTLessStrategyNumber:
+				case BTLessEqualStrategyNumber:
+					order = "asc";
+					break;
+				case BTGreaterStrategyNumber:
+				case BTGreaterEqualStrategyNumber:
+					order = "desc";
+					break;
+				default:
+					order = "???";
+					break;
+			}
+			temp = deparse_expression(expr, dcontext, es->verbose, false);
+			if (es->verbose)
+				appendStringInfo(&buf, "%s%s %s nulls %s",
+								 buf.len > 0 ? ", " : "",
+								 temp, order,
+								 null_first ? "first" : "last");
+			else
+				appendStringInfo(&buf, "%s%s",
+								 buf.len > 0 ? ", " : "",
+								 temp);
+		}
+		ExplainPropertyText("Sort keys", buf.data, es);
+
+		pfree(buf.data);
+	}
 }
 
 /*
@@ -667,6 +1102,7 @@ pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
 	routine->IterateForeignScan	= gstoreIterateForeignScan;
 	routine->ReScanForeignScan	= gstoreReScanForeignScan;
 	routine->EndForeignScan		= gstoreEndForeignScan;
+	routine->ExplainForeignScan = gstoreExplainForeignScan;
 
 	/* functions for INSERT/UPDATE/DELETE foreign tables */
 
