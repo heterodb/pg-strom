@@ -22,7 +22,7 @@
  *
  * It construct a kernel parameter buffer to deliver Const/Param nodes.
  */
-static kern_parambuf *
+kern_parambuf *
 construct_kern_parambuf(List *used_params, ExprContext *econtext,
 						List *custom_scan_tlist)
 {

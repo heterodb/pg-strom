@@ -435,9 +435,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-
-//only PL/CUDA
-//#define DEVKERNEL_NEEDS_DYNPARA			0x00000100	/* aks, device runtime */
+#define DEVKERNEL_NEEDS_GPUSTORE		0x00000008	/* for GpuStoreFdw */
 #define DEVKERNEL_NEEDS_MATRIX			0x00000200
 #define DEVKERNEL_NEEDS_TIMELIB			0x00000400
 #define DEVKERNEL_NEEDS_TEXTLIB			0x00000800
@@ -870,6 +868,9 @@ CHECK_WORKER_TERMINATION(void)
 /*
  * gpu_tasks.c
  */
+extern kern_parambuf *construct_kern_parambuf(List *used_params,
+											  ExprContext *econtext,
+											  List *custom_scan_tlist);
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,

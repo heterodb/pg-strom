@@ -33,6 +33,12 @@ typedef struct
 	/* table options */
 	int			pinning;		/* GPU device number */
 	int			format;			/* GSTORE_FDW_FORMAT__*  */
+	/* kernel code */
+	List	   *used_params;	/* list of referenced param-id */
+	char	   *kern_source;	/* source of the CUDA kernel */
+	cl_uint		extra_flags;	/* extra libraries to be included */
+	cl_uint		varlena_bufsz;	/* nbytes of the expected result tuple size */
+	cl_uint		proj_tuple_sz;	/* expected average tuple size */
 } GpuStoreFdwInfo;
 
 /*
@@ -43,6 +49,10 @@ typedef struct
 	GpuStoreBuffer *gs_buffer;
 	cl_ulong		gs_index;
 	AttrNumber		ctid_anum;	/* only UPDATE or DELETE */
+
+	GpuContext	   *gcontext;
+	ProgramId		program_id;
+	kern_parambuf  *kern_params;
 } GpuStoreExecState;
 
 /* ---- static variables ---- */
@@ -77,6 +87,11 @@ form_gpustore_fdw_info(GpuStoreFdwInfo *gsf_info,
 	privs = lappend(privs, gsf_info->sort_null_first);
 	privs = lappend(privs, makeInteger(gsf_info->pinning));
 	privs = lappend(privs, makeInteger(gsf_info->format));
+	exprs = lappend(exprs, gsf_info->used_params);
+	privs = lappend(privs, makeString(gsf_info->kern_source));
+	privs = lappend(privs, makeInteger(gsf_info->extra_flags));
+	privs = lappend(privs, makeInteger(gsf_info->varlena_bufsz));
+	privs = lappend(privs, makeInteger(gsf_info->proj_tuple_sz));
 
 	*p_fdw_exprs = exprs;
 	*p_fdw_privs = privs;
@@ -94,19 +109,24 @@ deform_gpustore_fdw_info(ForeignScan *fscan)
 	ListCell   *lc;
 	Bitmapset  *outer_refs = NULL;
 
-	gsf_info->host_quals = list_nth(exprs, eindex++);
-	gsf_info->dev_quals  = list_nth(exprs, eindex++);
-	gsf_info->raw_nrows  = intVal(list_nth(privs, pindex++));
-	gsf_info->dma_nrows  = intVal(list_nth(privs, pindex++));
+	gsf_info->host_quals  = list_nth(exprs, eindex++);
+	gsf_info->dev_quals   = list_nth(exprs, eindex++);
+	gsf_info->raw_nrows   = intVal(list_nth(privs, pindex++));
+	gsf_info->dma_nrows   = intVal(list_nth(privs, pindex++));
 	temp = list_nth(privs, pindex++);
 	foreach (lc, temp)
 		outer_refs = bms_add_member(outer_refs, lfirst_int(lc));
-	gsf_info->outer_refs = outer_refs;
-	gsf_info->sort_keys  = list_nth(exprs, eindex++);
-	gsf_info->sort_order = list_nth(privs, pindex++);
+	gsf_info->outer_refs  = outer_refs;
+	gsf_info->sort_keys   = list_nth(exprs, eindex++);
+	gsf_info->sort_order  = list_nth(privs, pindex++);
 	gsf_info->sort_null_first = list_nth(privs, pindex++);
-	gsf_info->pinning    = intVal(list_nth(privs, pindex++));
-	gsf_info->format     = intVal(list_nth(privs, pindex++));
+	gsf_info->pinning     = intVal(list_nth(privs, pindex++));
+	gsf_info->format      = intVal(list_nth(privs, pindex++));
+	gsf_info->used_params = list_nth(exprs, eindex++);
+	gsf_info->kern_source = strVal(list_nth(privs, pindex++));
+	gsf_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gsf_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
+	gsf_info->proj_tuple_sz = intVal(list_nth(privs, pindex++));
 
 	return gsf_info;
 }
@@ -381,6 +401,7 @@ gstoreCreateForeignPath(PlannerInfo *root,
 	gsf_info->sort_keys  = sort_keys;
 	gsf_info->sort_order = sort_order;
 	gsf_info->sort_null_first = sort_null_first;
+	gsf_info->proj_tuple_sz = tup_size;
 
 	fpath = create_foreignscan_path(root,
 									baserel,
@@ -464,20 +485,349 @@ gstoreGetForeignPaths(PlannerInfo *root,
 }
 
 /*
+ * gstore_codegen_qual_eval
+ */
+static void
+gstore_codegen_qual_eval(StringInfo kern,
+						 codegen_context *context,
+						 RelOptInfo *baserel,
+						 List *dev_quals_list)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	if (dev_quals_list != NIL)
+	{
+		Node	   *dev_quals;
+		char	   *expr_code;
+		ListCell   *lc;
+
+		/* WHERE-clause */
+		dev_quals = (Node *)make_flat_ands_explicit(dev_quals_list);
+		expr_code = pgstrom_codegen_expression(dev_quals, context);
+		/* Const/Param declarations */
+		pgstrom_codegen_param_declarations(&decl, context);
+		/* Sanity check of used_vars */
+		foreach (lc, context->used_vars)
+		{
+			devtype_info *dtype;
+			Var	   *var = lfirst(lc);
+
+			Assert(var->varno == baserel->relid);
+			if (var->varattno <= 0)
+				elog(ERROR, "Bug? system column appeared in expression");
+			dtype = pgstrom_devtype_lookup_and_track(var->vartype,
+													 context);
+			appendStringInfo(
+				&decl,
+				"  pg_%s_t %s_%u;\n",
+				dtype->type_name,
+				context->var_label,
+				var->varattno);
+			appendStringInfo(
+				&body,
+				"  addr = kern_get_datum_column(kds,%u,row_index);\n"
+				"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+				var->varattno - 1,
+				context->var_label,
+				var->varattno,
+				dtype->type_name);
+		}
+		appendStringInfo(
+			&body,
+			"  return EVAL(%s);\n",
+			expr_code);
+	}
+	else
+	{
+		appendStringInfo(
+			&body,
+			"  return true;\n");
+	}
+	appendStringInfo(
+		kern,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpustore_quals_eval(kern_context *kcxt,\n"
+		"                    kern_data_store *kds_src,\n"
+		"                    cl_uint row_index)\n"
+		"{\n"
+		"  void *addr __attribute__((unused));\n"
+		"%s%s"
+		"}\n\n",
+		decl.data,
+		body.data);
+	pfree(decl.data);
+	pfree(body.data);
+}
+
+/*
+ * gstore_codegen_keycomp
+ */
+static void
+gstore_codegen_keycomp(StringInfo kern,
+					   codegen_context *context,
+					   RelOptInfo *baserel,
+					   Oid ftable_oid,
+					   GpuStoreFdwInfo *gsf_info)
+{
+	StringInfoData	body;
+	ListCell	   *lc1, *lc2, *lc3;
+
+	initStringInfo(&body);
+	forthree (lc1, gsf_info->sort_keys,
+			  lc2, gsf_info->sort_order,
+			  lc3, gsf_info->sort_null_first)
+	{
+		Var	   *var = lfirst(lc1);
+		int		order = lfirst_int(lc2);
+		bool	nulls_first = lfirst_int(lc3);
+		int16	typlen;
+		bool	typbyval;
+		devtype_info *dtype;
+		devfunc_info *dfunc;
+
+		Assert(IsA(var, Var));
+		appendStringInfo(
+			&body,
+			"  /* -- compare %s attribute -- */\n"
+			"  xaddr = kern_get_datum_column(kds_src, %u, x_index);\n"
+			"  yaddr = kern_get_datum_column(kds_src, %u, y_index);\n",
+			get_attname(ftable_oid, var->varattno),
+			var->varattno - 1,
+			var->varattno - 1);
+		if (order != BTGreaterStrategyNumber &&
+			order != BTLessStrategyNumber)
+			elog(ERROR, "nexpected sort support strategy: %d", order);
+
+		get_typlenbyval(var->vartype, &typlen, &typbyval);
+		if (typlen == -1)
+		{
+			/*
+			 * MEMO: Special optimization for variable-length types.
+			 * Because varlena-dictionary is preliminary sorted on
+			 * buffer creation time, so comparison of pointers are
+			 * sufficient to determine which is larger/smaller.
+			 */
+			appendStringInfo(
+				&body,
+				"  if (xaddr && yaddr)\n"
+				"  {\n"
+				"    if (xaddr != yaddr)\n"
+				"      return xaddr %s yaddr ? -1 : 1;\n"
+				"  }\n"
+				"  else if (!xaddr && yaddr)\n"
+				"    return %d;\n"
+				"  else if (xaddr && !yaddr)\n"
+				"    return %d;\n",
+				order == BTLessStrategyNumber ? "<" : ">",
+				nulls_first ? -1 : 1,
+				nulls_first ?  1 : -1);
+		}
+		else
+		{
+			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
+			if (!dtype)
+				elog(ERROR, "Bug? type %s is not supported on device",
+					 format_type_be(var->vartype));
+			dfunc = pgstrom_devfunc_lookup_type_compare(dtype, var->varcollid);
+			pgstrom_devfunc_track(context, dfunc);
+
+			appendStringInfo(
+				&body,
+				"  xval.%s_v = pg_%s_datum_ref(kcxt, xaddr);\n"
+				"  yval.%s_v = pg_%s_datum_ref(kcxt, yaddr);\n"
+				"  if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
+				"  {\n"
+				"    comp = pg_%s(kcxt, xval.%s_v, yval.%s_v);\n"
+				"    assert(!comp.isnull);\n"
+				"    if (comp.value != 0)\n"
+				"      return %s;\n"
+				"  }\n"
+				"  else if (xval.%s_v.isnull && !yval.%s_v.isnull)\n"
+				"    return %d;\n"
+				"  else if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
+				"    return %d;\n",
+				dtype->type_name, dtype->type_name,
+				dtype->type_name, dtype->type_name,
+				dtype->type_name, dtype->type_name,
+				dfunc->func_devname,
+				dtype->type_name, dtype->type_name,
+				order == BTLessStrategyNumber ? "comp.value" : "-comp.value",
+				dtype->type_name, dtype->type_name,
+				nulls_first ? -1 :  1,
+				dtype->type_name, dtype->type_name,
+				nulls_first ?  1 : -1);
+		}
+	}
+
+	appendStringInfo(
+		kern,
+		"#define GPUSTORE_DEVICE_PROJECTION_NFIELDS %d\n"
+		"STATIC_FUNCTION(cl_int)\n"
+		"gpustore_keycomp(kern_context *kcxt,\n"
+		"                 kern_data_store *kds_src,\n"
+		"                 cl_uint x_index,\n"
+		"                 cl_uint y_index)\n"
+		"{\n"
+		"  void *xaddr       __attribute__((unused));\n"
+		"  void *yaddr       __attribute__((unused));\n"
+		"  pg_anytype_t xval __attribute__((unused));\n"
+		"  pg_anytype_t yval __attribute__((unused));\n"
+		"  pg_int4_t comp    __attribute__((unused));\n"
+		"\n"
+		"  assert(kds_src->format == KDS_FORMAT_COLUMN);\n"
+		"  assert(x_index < kds_src->nitems &&\n"
+		"         y_index < kds_src->nitems);\n"
+		"%s"
+		"  return 0;\n"
+		"}\n\n",
+		baserel->max_attr,
+		body.data);
+	pfree(body.data);
+}
+
+/*
+ * gstore_codegen_projection
+ */
+static void
+gstore_codegen_projection(StringInfo kern,
+						  codegen_context *context,
+						  RelOptInfo *baserel,
+						  Oid ftable_oid,
+						  List *tlist,
+						  List *host_quals)
+{
+	StringInfoData	body;
+	AttrNumber		anum;
+	HeapTuple		tup;
+	Form_pg_attribute attr;
+
+	initStringInfo(&body);
+	for (anum=1; anum <= baserel->max_attr; anum++)
+	{
+		appendStringInfoChar(&body, '\n');
+		/*
+		 * unreferenced columns are always null
+		 */
+		if (anum < baserel->min_attr ||
+			!baserel->attr_needed[anum - baserel->min_attr])
+		{
+			appendStringInfo(&body,
+							 "  tup_isnull[%d] = true;\n", anum - 1);
+			continue;
+		}
+		tup = SearchSysCache2(ATTNUM,
+							  ObjectIdGetDatum(ftable_oid),
+							  Int16GetDatum(anum));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 anum, ftable_oid);
+		attr = (Form_pg_attribute) GETSTRUCT(tup);
+		if (attr->attisdropped)
+			appendStringInfo(&body,
+							 "  tup_isnull[%d] = true;\n", anum - 1);
+		else
+		{
+			appendStringInfo(
+				&body,
+				"  addr = kern_get_datum_column(kds_src, %d, row_index);\n"
+				"  if (!addr)\n"
+				"    tup_isnull[%d] = true;\n"
+				"  else\n",
+				anum - 1,
+				anum - 1);
+			if (!attr->attbyval)
+			{
+				appendStringInfo(
+					&body,
+					"    tup_values[%d] = PointerGetDatum(addr);\n",
+					anum - 1);
+			}
+			else
+			{
+				const char *macro;
+
+				switch (attr->attlen)
+				{
+					case sizeof(cl_long):
+						macro = "READ_INT64_PTR";
+						break;
+					case sizeof(cl_int):
+						macro = "READ_INT32_PTR";
+						break;
+					case sizeof(cl_short):
+						macro = "READ_INT16_PTR";
+						break;
+					case sizeof(cl_char):
+						macro = "READ_INT8_PTR";
+						break;
+					default:
+						elog(ERROR, "unexpected inline type length: %d",
+							 attr->attlen);
+				}
+				appendStringInfo(
+					&body,
+					"    tup_values[%d] = %s(addr);\n",
+					anum - 1, macro);
+			}
+		}
+		ReleaseSysCache(tup);
+	}
+
+	appendStringInfo(
+		kern,
+		"STATIC_FUNCTION(void)\n"
+		"gpustore_projection(kern_context *kcxt,\n"
+		"                    kern_data_store *kds_src,\n"
+		"                    cl_uint row_index,\n"
+		"                    Datum *tup_values,\n"
+		"                    cl_bool *tup_isnull)\n"
+		"{\n"
+		"  void *addr __attribute__((unused));\n"
+		"\n"
+		"  memset(tup_isnull, 0, sizeof(cl_bool) * %d);\n"
+		"%s"
+		"}\n\n",
+		baserel->max_attr,
+		body.data);
+	pfree(body.data);
+}
+
+/*
  * gstoreGetForeignPlan
  */
 static ForeignScan *
 gstoreGetForeignPlan(PlannerInfo *root,
 					 RelOptInfo *baserel,
-					 Oid foreigntableid,
+					 Oid ftable_oid,
 					 ForeignPath *best_path,
 					 List *tlist,
 					 List *scan_clauses,
 					 Plan *outer_plan)
 {
 	GpuStoreFdwInfo *gsf_info = linitial(best_path->fdw_private);
-	List	   *fdw_exprs;
-	List	   *fdw_privs;
+	codegen_context context;
+	StringInfoData	kern;
+	List		   *fdw_exprs;
+	List		   *fdw_privs;
+
+	/* kernel code generation */
+	initStringInfo(&kern);
+	pgstrom_init_codegen_context(&context, root);
+	gstore_codegen_qual_eval(&kern, &context, baserel,
+							 gsf_info->dev_quals);
+	gstore_codegen_keycomp(&kern, &context, baserel,
+						   ftable_oid, gsf_info);
+	gstore_codegen_projection(&kern, &context, baserel,
+							  ftable_oid, tlist, gsf_info->host_quals);
+
+	/* update GpuStoreFdwInfo */
+	gsf_info->used_params = context.used_params;
+	gsf_info->extra_flags = DEVKERNEL_NEEDS_GPUSTORE | context.extra_flags;
+	gsf_info->kern_source = kern.data;
+	gsf_info->varlena_bufsz = context.varlena_bufsz;
 
 	form_gpustore_fdw_info(gsf_info, &fdw_exprs, &fdw_privs);
 	return make_foreignscan(tlist,					/* plan.targetlist */
@@ -529,16 +879,43 @@ gstoreAddForeignUpdateTargets(Query *parsetree,
 static void
 gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 {
-	EState	   *estate = node->ss.ps.state;
+	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
+	GpuStoreFdwInfo *gsf_info = deform_gpustore_fdw_info(fscan);
 	GpuStoreExecState *gstate;
-
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
-
-	if (!IsMVCCSnapshot(estate->es_snapshot))
-		elog(ERROR, "cannot scan gstore_fdw table without MVCC snapshot");
+	GpuContext	   *gcontext = NULL;
+	ProgramId		program_id = INVALID_PROGRAM_ID;
+	kern_parambuf  *kparams = NULL;
 
 	gstate = palloc0(sizeof(GpuStoreExecState));
+	if (gsf_info->dev_quals != NIL ||
+		gsf_info->sort_keys != NIL)
+	{
+		StringInfoData kern_define;
+		bool		explain_only
+			= ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
+
+		initStringInfo(&kern_define);
+		pgstrom_build_session_info(&kern_define,
+								   NULL,
+								   gsf_info->extra_flags);
+		gcontext = AllocGpuContext(gsf_info->pinning,
+								   false, false, false);
+		program_id = pgstrom_create_cuda_program(gcontext,
+												 gsf_info->extra_flags,
+												 gsf_info->varlena_bufsz,
+												 gsf_info->kern_source,
+												 kern_define.data,
+												 false,
+												 explain_only);
+		kparams = construct_kern_parambuf(gsf_info->used_params,
+										  node->ss.ps.ps_ExprContext,
+										  NIL);
+		pfree(kern_define.data);
+	}
+	gstate->gcontext    = gcontext;
+	gstate->program_id  = program_id;
+	gstate->kern_params = kparams;
+
 	node->fdw_state = (void *) gstate;
 }
 
@@ -552,12 +929,13 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	Relation		frel = node->ss.ss_currentRelation;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	EState		   *estate = node->ss.ps.state;
+	Snapshot		snapshot = estate->es_snapshot;
 	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
 
 	if (!gstate->gs_buffer)
-		gstate->gs_buffer = GpuStoreBufferCreate(frel, estate->es_snapshot);
+		gstate->gs_buffer = GpuStoreBufferCreate(frel, snapshot);
 	if (GpuStoreBufferGetNext(frel,
-							  estate->es_snapshot,
+							  snapshot,
 							  slot,
 							  gstate->gs_buffer,
 							  &gstate->gs_index,
@@ -584,7 +962,15 @@ gstoreReScanForeignScan(ForeignScanState *node)
 static void
 gstoreEndForeignScan(ForeignScanState *node)
 {
-	//GpuStoreExecState  *gstate = (GpuStoreExecState *) node->fdw_state;
+	GpuStoreExecState  *gstate = (GpuStoreExecState *) node->fdw_state;
+
+	if (gstate->gcontext)
+	{
+		if (gstate->program_id != INVALID_PROGRAM_ID)
+			pgstrom_put_cuda_program(gstate->gcontext,
+									 gstate->program_id);
+		PutGpuContext(gstate->gcontext);
+	}
 }
 
 /*
@@ -611,7 +997,7 @@ gstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 								  dcontext, es->verbose, false);
 		ExplainPropertyText("GPU Filter", temp, es);
 
-		//Rows Removed by GPU Filter
+		//Rows Removed by GPU Filter if EXPLAIN ANALYZE
 	}
 
 	/* sorting keys, if any */
@@ -630,20 +1016,13 @@ gstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 			int		null_first = lfirst_int(lc3);
 			const char *order;
 
-			switch (__order)
-			{
-				case BTLessStrategyNumber:
-				case BTLessEqualStrategyNumber:
-					order = "asc";
-					break;
-				case BTGreaterStrategyNumber:
-				case BTGreaterEqualStrategyNumber:
-					order = "desc";
-					break;
-				default:
-					order = "???";
-					break;
-			}
+			if (__order == BTLessStrategyNumber)
+				order = "asc";
+			else if (__order == BTGreaterStrategyNumber)
+				order = "desc";
+			else
+				order = "???";
+
 			temp = deparse_expression(expr, dcontext, es->verbose, false);
 			if (es->verbose)
 				appendStringInfo(&buf, "%s%s %s nulls %s",
@@ -658,6 +1037,20 @@ gstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 		ExplainPropertyText("Sort keys", buf.data, es);
 
 		pfree(buf.data);
+	}
+
+	/* Source path of the GPU kernel */
+	if (es->verbose &&
+		gstate->program_id != INVALID_PROGRAM_ID &&
+		pgstrom_debug_kernel_source)
+	{
+		const char *cuda_source = pgstrom_cuda_source_file(gstate->program_id);
+		const char *cuda_binary = pgstrom_cuda_binary_file(gstate->program_id);
+
+		if (cuda_source)
+			ExplainPropertyText("Kernel Source", cuda_source, es);
+        if (cuda_binary)
+            ExplainPropertyText("Kernel Binary", cuda_binary, es);
 	}
 }
 

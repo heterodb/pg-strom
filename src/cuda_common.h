@@ -343,11 +343,11 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpupreagg_setup_column			0x0303
 #define StromKernel_gpupreagg_nogroup_reduction		0x0304
 #define StromKernel_gpupreagg_groupby_reduction		0x0305
-#define StromKernel_plcuda_prep_kernel				0x0501
-#define StromKernel_plcuda_main_kernel				0x0502
-#define StromKernel_plcuda_post_kernel				0x0503
-/* kernel functions by extra packages */
-#define StromKernel_kernel_gpulz_decompression		0x1001
+#define StromKernel_gpustore_exec_quals				0x0401
+#define StromKernel_gpustore_bitonic_local			0x0402
+#define StromKernel_gpustore_bitonic_step			0x0403
+#define StromKernel_gpustore_bitonic_merge			0x0404
+#define StromKernel_gpustore_projection				0x0405
 
 #define KERN_ERRORBUF_FILENAME_LEN		24
 typedef struct
