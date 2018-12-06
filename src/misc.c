@@ -341,11 +341,11 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpupreagg_setup_column);
 		KERN_ENTRY(gpupreagg_nogroup_reduction);
 		KERN_ENTRY(gpupreagg_groupby_reduction);
-		KERN_ENTRY(gpustore_exec_quals);
-		KERN_ENTRY(gpustore_bitonic_local);
-		KERN_ENTRY(gpustore_bitonic_step);
-		KERN_ENTRY(gpustore_bitonic_merge);
-		KERN_ENTRY(gpustore_projection);
+		KERN_ENTRY(gpusort_setup_index);
+		KERN_ENTRY(gpusort_bitonic_local);
+		KERN_ENTRY(gpusort_bitonic_step);
+		KERN_ENTRY(gpusort_bitonic_merge);
+		KERN_ENTRY(gpusort_projection);
 		default:
 			kernel_name = "unknown kernel";
 			break;
