@@ -17,7 +17,6 @@
  */
 #include "pg_strom.h"
 
-
 /*
  * GpuStoreChunk - shared structure
  */
@@ -649,7 +648,7 @@ GpuStoreBufferCopyFromKDS(GpuStoreBuffer *gs_buffer,
 		{
 			int		unitsz = TYPEALIGN(cmeta->attalign,
 									   cmeta->attlen);
-			size_t	extra_sz = va_length - unitsz * nitems;
+			size_t	extra_sz = va_length - MAXALIGN(unitsz * nitems);
 
 			if (extra_sz > 0)
 			{
