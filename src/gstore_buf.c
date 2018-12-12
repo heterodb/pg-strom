@@ -36,6 +36,7 @@ typedef struct
 	size_t			rawsize;	/* rawsize regardless of the internal format */
 	size_t			nitems;		/* nitems regardless of the internal format */
 	CUipcMemHandle	ipc_mhandle;
+	dsm_handle		dsm_mhandle;
 } GpuStoreChunk;
 
 /*
@@ -72,10 +73,10 @@ struct GpuStoreBuffer
 	bool		is_dirty;	/* true, if any updates happen on the read-
 							 * write buffer, thus read-only buffer is
 							 * not uptodata any more. */
-	MemoryContext memcxt_ro;/* memory context of read-only buffer */
-	MemoryContext memcxt_rw;/* memory context of read-write buffer */
+	MemoryContext memcxt;	/* memory context of read-write buffer */
 	/* read-only buffer */
 	size_t		rawsize;
+	dsm_segment	*h_seg;
 	union {
 		kern_data_store *kds;
 		void   *buffer;		/* copy of GPU device memory if any */
@@ -325,19 +326,23 @@ gstore_buf_lookup_chunk(Oid ftable_oid, Snapshot snapshot)
 }
 
 /*
- * gstore_buf_insert_chunk - host-to-device DMA
+ * gstore_buf_insert_chunk
  */
 static void
-gstore_buf_insert_chunk(GpuStoreBuffer *gs_buffer, size_t nrooms)
+gstore_buf_insert_chunk(GpuStoreBuffer *gs_buffer,
+						size_t nrooms,
+						CUipcMemHandle ipc_mhandle,
+						dsm_handle dsm_mhandle)
 {
-	CUresult		rc;
 	dlist_node	   *dnode;
 	GpuStoreChunk  *gs_chunk;
 	int				index;
 	dlist_iter		iter;
 
 	Assert(gs_buffer->pinning < numDevAttrs);
-
+	Assert(gs_buffer->read_only &&
+		   gs_buffer->h_seg != NULL &&
+		   gs_buffer->h.buffer == dsm_segment_address(gs_buffer->h_seg));
 	/* setup GpuStoreChunk */
 	SpinLockAcquire(&gstore_head->lock);
 	if (dlist_is_empty(&gstore_head->free_chunks))
@@ -360,33 +365,9 @@ gstore_buf_insert_chunk(GpuStoreBuffer *gs_buffer, size_t nrooms)
 	gs_chunk->format = gs_buffer->format;
 	gs_chunk->rawsize = gs_buffer->rawsize;
 	gs_chunk->nitems = nrooms;
-
-	/* DMA to device */
-	rc = gpuMemAllocPreserved(gs_buffer->pinning,
-							  &gs_chunk->ipc_mhandle,
-							  gs_buffer->rawsize);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-
-	PG_TRY();
-	{
-		gpuIpcMemCopyFromHost(gs_chunk->pinning,
-							  gs_chunk->ipc_mhandle,
-							  0,
-							  gs_buffer->h.buffer,
-							  gs_buffer->rawsize);
-	}
-	PG_CATCH();
-	{
-		gpuMemFreePreserved(gs_buffer->pinning,
-							gs_chunk->ipc_mhandle);
-		memset(gs_chunk, 0, sizeof(GpuStoreChunk));
-		SpinLockAcquire(&gstore_head->lock);
-		dlist_push_head(&gstore_head->free_chunks, &gs_chunk->chain);
-		SpinLockRelease(&gstore_head->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+	gs_chunk->ipc_mhandle = ipc_mhandle;
+	gs_chunk->dsm_mhandle = dsm_mhandle;
+	/* remember the revision when buffer is built */
 	gs_buffer->revision = gs_chunk->revision;
 
 	/* add GpuStoreChunk to the shared hash table */
@@ -555,7 +536,7 @@ GpuStoreBufferCopyFromKDS(GpuStoreBuffer *gs_buffer,
 	if (kds->nitems > gs_buffer->nrooms)
 		elog(ERROR, "lack of GpuStoreBuffer rooms");
 
-	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt_rw);
+	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
@@ -822,7 +803,7 @@ static void
 GpuStoreBufferMakeReadOnly(GpuStoreBuffer *gs_buffer)
 {
 	/* release read-write buffer */
-	MemoryContextReset(gs_buffer->memcxt_rw);
+	MemoryContextReset(gs_buffer->memcxt);
 	gs_buffer->nitems   = 0;
 	gs_buffer->nrooms   = 0;
 	gs_buffer->hasnull  = NULL;
@@ -836,6 +817,10 @@ GpuStoreBufferMakeReadOnly(GpuStoreBuffer *gs_buffer)
 	/* then, mark the buffer read-only with no dirty */
 	gs_buffer->read_only = true;
 	gs_buffer->is_dirty = false;
+	/* sanity checks */
+	Assert(gs_buffer->h_seg != NULL &&
+		   gs_buffer->rawsize <= dsm_segment_map_length(gs_buffer->h_seg) &&
+		   gs_buffer->h.buffer == dsm_segment_address(gs_buffer->h_seg));
 }
 
 /*
@@ -848,7 +833,7 @@ GpuStoreBufferAllocRW(GpuStoreBuffer *gs_buffer,
 	cl_int		j, nattrs = tupdesc->natts;
 	MemoryContext oldcxt;
 
-	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt_rw);
+	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
 	gs_buffer->nattrs = nattrs;
 	gs_buffer->nitems = 0;
 	gs_buffer->nrooms = nrooms;
@@ -877,7 +862,7 @@ GpuStoreBufferAllocRW(GpuStoreBuffer *gs_buffer,
 			hctl.hash = vl_dict_hash_value;
 			hctl.match = vl_dict_compare;
 			hctl.keysize = sizeof(vl_dict_key);
-			hctl.hcxt = gs_buffer->memcxt_rw;
+			hctl.hcxt = gs_buffer->memcxt;
 
 			gs_buffer->vl_dict[j] = hash_create("varlena dictionary",
 												Max(nrooms / 5, 4096),
@@ -914,8 +899,9 @@ GpuStoreBufferMakeWritable(GpuStoreBuffer *gs_buffer, TupleDesc tupdesc)
 	if (!gs_buffer->read_only)
 		return;
 	/* calculation of nrooms */
-	if (!gs_buffer->h.buffer)
+	if (!gs_buffer->h_seg)
 	{
+		Assert(!gs_buffer->h.buffer);
 		nitems = 0;
 		nrooms = 10000;
 	}
@@ -956,6 +942,16 @@ GpuStoreBufferMakeWritable(GpuStoreBuffer *gs_buffer, TupleDesc tupdesc)
 		for (i=0; i < nitems; i++)
 			gs_buffer->gs_mvcc[i] = all_visible;
 	}
+
+	if (gs_buffer->h_seg)
+	{
+		Assert(gs_buffer->rawsize > 0 && gs_buffer->h.buffer != NULL);
+		dsm_detach(gs_buffer->h_seg);
+
+		gs_buffer->rawsize = 0;
+		gs_buffer->h_seg = NULL;
+		gs_buffer->h.buffer = NULL;
+	}
 	gs_buffer->read_only = false;
 }
 
@@ -967,8 +963,7 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 {
 	GpuStoreBuffer *gs_buffer = NULL;
 	GpuStoreChunk  *gs_chunk = NULL;
-	MemoryContext	memcxt_ro = NULL;
-	MemoryContext	memcxt_rw = NULL;
+	MemoryContext	memcxt = NULL;
 	bool			found;
 
 	if (!gstore_buffer_htab)
@@ -1005,8 +1000,7 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 		 * So, GpuStoreBuffer must be reconstructed based on the latest
 		 * image.
 		 */
-		MemoryContextDelete(gs_buffer->memcxt_ro);
-		MemoryContextDelete(gs_buffer->memcxt_rw);
+		MemoryContextDelete(gs_buffer->memcxt);
 		memset(gs_buffer, 0, sizeof(GpuStoreBuffer));
 		gs_buffer->table_oid = RelationGetRelid(frel);
 	}
@@ -1020,18 +1014,14 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 	 */
 	PG_TRY();
 	{
-		cl_int		pinning;
-		cl_int		format;
-		cl_uint		revision;
-
-		memcxt_ro = AllocSetContextCreate(CacheMemoryContext,
-										  "GpuStoreBuffer [RO]",
-										  ALLOCSET_DEFAULT_SIZES);
-		memcxt_rw = AllocSetContextCreate(CacheMemoryContext,
-										  "GpuStoreBuffer [RW]",
-										  ALLOCSET_DEFAULT_SIZES);
+		memcxt = AllocSetContextCreate(CacheMemoryContext,
+									   "GpuStoreBuffer",
+									   ALLOCSET_DEFAULT_SIZES);
 		if (!gs_chunk)
 		{
+			cl_int		pinning;
+			cl_int		format;
+
 			gstore_fdw_table_options(RelationGetRelid(frel),
 									 &pinning, &format);
 			gs_buffer->pinning   = pinning;
@@ -1039,38 +1029,26 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 			gs_buffer->revision  = 0;
 			gs_buffer->read_only = true;
 			gs_buffer->is_dirty  = false;
-			gs_buffer->memcxt_ro = memcxt_ro;
-			gs_buffer->memcxt_rw = memcxt_rw;
+			gs_buffer->memcxt    = memcxt;
+			gs_buffer->rawsize   = 0;
+			gs_buffer->h_seg     = NULL;
 			gs_buffer->h.buffer  = NULL;
 			GpuStoreBufferMakeWritable(gs_buffer, RelationGetDescr(frel));
 		}
 		else
 		{
-			size_t		rawsize;
-			void	   *hbuf;
-
-			pinning  = gs_chunk->pinning;
-			format   = gs_chunk->format;
-			revision = gs_chunk->revision;
-			rawsize  = gs_chunk->rawsize;
-			hbuf = MemoryContextAllocHuge(memcxt_ro, rawsize);
-
-			gpuIpcMemCopyToHost(hbuf,
-								gs_chunk->pinning,
-								gs_chunk->ipc_mhandle,
-								0,
-								rawsize);
-
 			Assert(gs_buffer->table_oid == RelationGetRelid(frel));
-			gs_buffer->pinning   = pinning;
-			gs_buffer->format    = format;
-			gs_buffer->revision  = revision;
+			gs_buffer->pinning   = gs_chunk->pinning;
+			gs_buffer->format    = gs_chunk->format;
+			gs_buffer->revision  = gs_chunk->revision;
 			gs_buffer->read_only = true;
 			gs_buffer->is_dirty  = false;
-			gs_buffer->memcxt_ro = memcxt_ro;
-			gs_buffer->memcxt_rw = memcxt_rw;
-			gs_buffer->h.buffer  = hbuf;
-			gs_buffer->rawsize   = rawsize;
+			gs_buffer->memcxt    = memcxt;
+			gs_buffer->rawsize   = gs_chunk->rawsize;
+			gs_buffer->h_seg     = dsm_attach(gs_chunk->dsm_mhandle);
+			gs_buffer->h.buffer  = dsm_segment_address(gs_buffer->h_seg);
+			/* DSM mapping will alive more than transaction duration */
+			dsm_pin_mapping(gs_buffer->h_seg);
 		}
 	}
 	PG_CATCH();
@@ -1083,10 +1061,8 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 						&found);
 			Assert(found);
 		}
-		if (memcxt_ro)
-			MemoryContextDelete(memcxt_ro);
-		if (memcxt_rw)
-			MemoryContextDelete(memcxt_rw);
+		if (memcxt)
+			MemoryContextDelete(memcxt);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1103,7 +1079,7 @@ GpuStoreBufferExpand(GpuStoreBuffer *gs_buffer, TupleDesc tupdesc)
 	size_t		j, nrooms = 2 * gs_buffer->nrooms + 20000;
 	MemoryContext oldcxt;
 
-	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt_rw);
+	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
 	Assert(tupdesc->natts == gs_buffer->nattrs);
 	for (j=0; j < gs_buffer->nattrs; j++)
 	{
@@ -1275,7 +1251,7 @@ GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 
 	/* write out the new tuple */
 	slot_getallattrs(slot);
-	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt_rw);
+	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
@@ -1316,7 +1292,7 @@ GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 					}
 					entry->vl_datum = vl;
 					gs_buffer->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
-					Assert(gs_buffer->memcxt_rw == GetMemoryChunkContext(vl));
+					Assert(gs_buffer->memcxt == GetMemoryChunkContext(vl));
 
 					usage = (MAXALIGN(sizeof(cl_uint) * index) +
 							 gs_buffer->extra_sz[j]);
@@ -1400,51 +1376,49 @@ GpuStoreBufferRemoveRow(GpuStoreBuffer *gs_buffer,
 }
 
 /*
- * GpuStoreBufferSetupKDS
+ * GpuStoreBufferEstimateSize
+ *
+ * XXX needs rename?
  */
-static void
-GpuStoreBufferSetupKDS(Relation frel,
-					   GpuStoreBuffer *gs_buffer,
-					   bits8 *rowmap, size_t nrooms)
+static size_t
+GpuStoreBufferEstimateSize(Relation frel,
+						   GpuStoreBuffer *gs_buffer, size_t nrooms)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
-	kern_data_store *kds;
-	size_t		length;
-	int			j, ncols;
+	size_t		rawsize;
+	int			j;
 
-	Assert(tupdesc->natts == gs_buffer->nattrs);
-	/* 1. size estimation */
-	ncols = tupdesc->natts + NumOfSystemAttrs;
-	length = KDS_CALCULATE_HEAD_LENGTH(ncols, true);
-	for (j=0; j < tupdesc->natts; j++)
+	Assert(gs_buffer->table_oid == RelationGetRelid(frel) &&
+		   gs_buffer->nattrs == tupdesc->natts);
+	if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
 	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+		rawsize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, true);
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
-		if (attr->attisdropped)
-			continue;
-		if (attr->attlen < 0)
-		{
-			length += (MAXALIGN(sizeof(cl_uint) * nrooms) +
-					   MAXALIGN(gs_buffer->extra_sz[j]));
-		}
-		else
-		{
-			int		unitsz = att_align_nominal(attr->attlen,
-											   attr->attalign);
-			length += MAXALIGN(unitsz * nrooms);
-			if (gs_buffer->hasnull[j])
-				length += MAXALIGN(BITMAPLEN(nrooms));
+			if (attr->attisdropped)
+				continue;
+			if (attr->attlen < 0)
+			{
+				rawsize += (MAXALIGN(sizeof(cl_uint) * nrooms) +
+							MAXALIGN(gs_buffer->extra_sz[j]));
+			}
+			else
+			{
+				size_t		unitsz = att_align_nominal(attr->attlen,
+													   attr->attalign);
+				rawsize += MAXALIGN(unitsz * nrooms);
+				if (gs_buffer->hasnull[j])
+					rawsize += MAXALIGN(BITMAPLEN(nrooms));
+			}
 		}
 	}
-	/* 2. allocation */
-	kds = MemoryContextAllocHuge(gs_buffer->memcxt_ro, length);
-
-	/* 3. write out kern_data_store */
-	GpuStoreBufferCopyToKDS(kds, gs_buffer, tupdesc, rowmap, nrooms);
-	Assert(kds->length <= length);
-
-	gs_buffer->rawsize = kds->length;
-	gs_buffer->h.kds = kds;
+	else
+	{
+		elog(ERROR, "Gstore_Fdw: unknown format %d", gs_buffer->format);
+	}
+	return rawsize;
 }
 
 /*
@@ -1554,19 +1528,17 @@ gstoreXactCallbackOnPreCommit(void)
 	hash_seq_init(&status, gstore_buffer_htab);
 	while ((gs_buffer = hash_seq_search(&status)) != NULL)
 	{
-		Relation	frel;
-		bits8	   *rowmap;
-		size_t		nrooms = gs_buffer->nitems;
+		Relation		frel;
+		size_t			rawsize;
+		bits8		   *rowmap;
+		size_t			nrooms = gs_buffer->nitems;
+		CUresult		rc;
+		CUipcMemHandle	ipc_mhandle;
+		dsm_handle		dsm_mhandle;
 
 		/* any writes happen? */
 		if (!gs_buffer->is_dirty)
 			continue;
-		/* release read-only buffer if any */
-		if (gs_buffer->h.buffer)
-		{
-			pfree(gs_buffer->h.buffer);
-			gs_buffer->h.buffer = NULL;
-		}
 		/* check visibility for each rows (if any) */
 		rowmap = gstore_buf_visibility_bitmap(gs_buffer, &nrooms);
 
@@ -1600,8 +1572,7 @@ gstoreXactCallbackOnPreCommit(void)
 			pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
 			SpinLockRelease(&gstore_head->lock);
 			/* also remove the buffer */
-			MemoryContextDelete(gs_buffer->memcxt_ro);
-			MemoryContextDelete(gs_buffer->memcxt_rw);
+			MemoryContextDelete(gs_buffer->memcxt);
 			hash_search(gstore_buffer_htab,
 						&gstore_oid,
 						HASH_REMOVE,
@@ -1610,19 +1581,60 @@ gstoreXactCallbackOnPreCommit(void)
 			continue;
 		}
 
-		/* construction of new version of GPU device memory image */
+		/*
+		 * construction of new version of GPU device memory image
+		 */
 		frel = heap_open(gs_buffer->table_oid, NoLock);
-		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
-			GpuStoreBufferSetupKDS(frel, gs_buffer, rowmap, nrooms);
-		else
-			elog(ERROR, "gstore_fdw: unknown format %d", gs_buffer->format);
+		rawsize = GpuStoreBufferEstimateSize(frel, gs_buffer, nrooms);
+		rc = gpuMemAllocPreserved(gs_buffer->pinning,
+								  &ipc_mhandle,
+								  &dsm_mhandle,
+								  rawsize);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+		PG_TRY();
+		{
+			dsm_segment	   *h_seg = dsm_attach(dsm_mhandle);
+
+			if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
+			{
+				kern_data_store	   *kds = dsm_segment_address(h_seg);
+
+				GpuStoreBufferCopyToKDS(kds, gs_buffer,
+										RelationGetDescr(frel),
+										rowmap, nrooms);
+				Assert(kds->length == rawsize);
+			}
+			else
+				elog(ERROR, "Gstore_Fdw: unknown format %d",
+					 gs_buffer->format);
+			/* load the read-only buffer to GPU device */
+			rc = gpuMemLoadPreserved(gs_buffer->pinning, ipc_mhandle);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on gpuMemLoadPreserved: %s",
+					 errorText(rc));
+			/* register the new version of chunk */
+			gs_buffer->rawsize  = rawsize;
+			gs_buffer->h_seg    = h_seg;
+			gs_buffer->h.buffer = dsm_segment_address(h_seg);
+			/* mark the buffer read-only again */
+			GpuStoreBufferMakeReadOnly(gs_buffer);
+			/* keep DSM mapping */
+			dsm_pin_mapping(h_seg);
+			gstore_buf_insert_chunk(gs_buffer, nrooms, ipc_mhandle,
+									dsm_segment_handle(h_seg));
+		}
+		PG_CATCH();
+		{
+			gpuMemFreePreserved(gs_buffer->pinning, ipc_mhandle);
+			gs_buffer->rawsize  = 0;
+			gs_buffer->h_seg    = NULL;
+			gs_buffer->h.buffer = NULL;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
 		heap_close(frel, NoLock);
-		if (rowmap)
-			pfree(rowmap);
-		/* host-to-device DMA */
-		gstore_buf_insert_chunk(gs_buffer, nrooms);
-		/* mark the buffer read-only again */
-		GpuStoreBufferMakeReadOnly(gs_buffer);
 	}
 }
 
@@ -1640,8 +1652,9 @@ gstoreXactCallbackOnAbort(void)
 		hash_seq_init(&status, gstore_buffer_htab);
 		while ((gs_buffer = hash_seq_search(&status)) != NULL)
 		{
-			MemoryContextDelete(gs_buffer->memcxt_ro);
-			MemoryContextDelete(gs_buffer->memcxt_rw);
+			MemoryContextDelete(gs_buffer->memcxt);
+			if (gs_buffer->h_seg)
+				dsm_detach(gs_buffer->h_seg);
 		}
 		hash_destroy(gstore_buffer_htab);
 		gstore_buffer_htab = NULL;
