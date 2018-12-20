@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_gpusort.h"
 
 /*
  * GpuStorePlanInfo
@@ -49,14 +50,16 @@ typedef struct
 	GpuStoreBuffer *gs_buffer;
 	cl_ulong		gs_index;
 	AttrNumber		ctid_anum;	/* only UPDATE or DELETE */
-
 	GpuContext	   *gcontext;
 	ProgramId		program_id;
-	kern_parambuf  *kern_params;
+	kern_parambuf  *kparams;
+	kern_gpusort   *kgpusort;
+	bool			has_sortkeys;
 } GpuStoreExecState;
 
 /* ---- static variables ---- */
 static Oid		reggstore_type_oid = InvalidOid;
+static bool		enable_gpusort;			/* GUC */
 
 Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
@@ -447,9 +450,11 @@ gstoreGetForeignPaths(PlannerInfo *root,
 							gsf_info->raw_nrows,
 							gsf_info->raw_nrows,
 							NIL);
+	if (!pgstrom_enabled)
+		return;
 
 	/* device qual execution, but no device side sorting */
-	if (gsf_info->dev_quals)
+	if (enable_gpuscan && gsf_info->dev_quals)
 	{
 		gstoreCreateForeignPath(root, baserel, foreigntableid,
 								gsf_info->outer_refs,
@@ -461,7 +466,7 @@ gstoreGetForeignPaths(PlannerInfo *root,
 	}
 
 	/* device side sorting */
-	if (root->query_pathkeys)
+	if (enable_gpusort && root->query_pathkeys)
 	{
 		/* without device qual execution */
 		gstoreCreateForeignPath(root, baserel, foreigntableid,
@@ -471,7 +476,7 @@ gstoreGetForeignPaths(PlannerInfo *root,
 								gsf_info->raw_nrows,
 								root->query_pathkeys);
 		/* with device qual execution */
-		if (gsf_info->dev_quals)
+		if (enable_gpuscan && gsf_info->dev_quals)
 		{
 			gstoreCreateForeignPath(root, baserel, foreigntableid,
 									gsf_info->outer_refs,
@@ -549,9 +554,9 @@ gstore_codegen_qual_eval(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpustore_quals_eval(kern_context *kcxt,\n"
-		"                    kern_data_store *kds_src,\n"
-		"                    cl_uint row_index)\n"
+		"gpusort_quals_eval(kern_context *kcxt,\n"
+		"                   kern_data_store *kds,\n"
+		"                   cl_uint row_index)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
 		"%s%s"
@@ -600,6 +605,9 @@ gstore_codegen_keycomp(StringInfo kern,
 		if (order != BTGreaterStrategyNumber &&
 			order != BTLessStrategyNumber)
 			elog(ERROR, "nexpected sort support strategy: %d", order);
+		appendStringInfo(
+			&body,
+			"  assert(xaddr != NULL && yaddr != NULL);\n");
 
 		get_typlenbyval(var->vartype, &typlen, &typbyval);
 		if (typlen == -1)
@@ -640,7 +648,7 @@ gstore_codegen_keycomp(StringInfo kern,
 				"  yval.%s_v = pg_%s_datum_ref(kcxt, yaddr);\n"
 				"  if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
 				"  {\n"
-				"    comp = pg_%s(kcxt, xval.%s_v, yval.%s_v);\n"
+				"    comp = pgfn_%s(kcxt, xval.%s_v, yval.%s_v);\n"
 				"    assert(!comp.isnull);\n"
 				"    if (comp.value != 0)\n"
 				"      return %s;\n"
@@ -664,12 +672,11 @@ gstore_codegen_keycomp(StringInfo kern,
 
 	appendStringInfo(
 		kern,
-		"#define GPUSTORE_DEVICE_PROJECTION_NFIELDS %d\n"
 		"STATIC_FUNCTION(cl_int)\n"
-		"gpustore_keycomp(kern_context *kcxt,\n"
-		"                 kern_data_store *kds_src,\n"
-		"                 cl_uint x_index,\n"
-		"                 cl_uint y_index)\n"
+		"gpusort_keycomp(kern_context *kcxt,\n"
+		"                kern_data_store *kds_src,\n"
+		"                cl_uint x_index,\n"
+		"                cl_uint y_index)\n"
 		"{\n"
 		"  void *xaddr       __attribute__((unused));\n"
 		"  void *yaddr       __attribute__((unused));\n"
@@ -683,114 +690,6 @@ gstore_codegen_keycomp(StringInfo kern,
 		"%s"
 		"  return 0;\n"
 		"}\n\n",
-		baserel->max_attr,
-		body.data);
-	pfree(body.data);
-}
-
-/*
- * gstore_codegen_projection
- */
-static void
-gstore_codegen_projection(StringInfo kern,
-						  codegen_context *context,
-						  RelOptInfo *baserel,
-						  Oid ftable_oid,
-						  List *tlist,
-						  List *host_quals)
-{
-	StringInfoData	body;
-	AttrNumber		anum;
-	HeapTuple		tup;
-	Form_pg_attribute attr;
-
-	initStringInfo(&body);
-	for (anum=1; anum <= baserel->max_attr; anum++)
-	{
-		appendStringInfoChar(&body, '\n');
-		/*
-		 * unreferenced columns are always null
-		 */
-		if (anum < baserel->min_attr ||
-			!baserel->attr_needed[anum - baserel->min_attr])
-		{
-			appendStringInfo(&body,
-							 "  tup_isnull[%d] = true;\n", anum - 1);
-			continue;
-		}
-		tup = SearchSysCache2(ATTNUM,
-							  ObjectIdGetDatum(ftable_oid),
-							  Int16GetDatum(anum));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-				 anum, ftable_oid);
-		attr = (Form_pg_attribute) GETSTRUCT(tup);
-		if (attr->attisdropped)
-			appendStringInfo(&body,
-							 "  tup_isnull[%d] = true;\n", anum - 1);
-		else
-		{
-			appendStringInfo(
-				&body,
-				"  addr = kern_get_datum_column(kds_src, %d, row_index);\n"
-				"  if (!addr)\n"
-				"    tup_isnull[%d] = true;\n"
-				"  else\n",
-				anum - 1,
-				anum - 1);
-			if (!attr->attbyval)
-			{
-				appendStringInfo(
-					&body,
-					"    tup_values[%d] = PointerGetDatum(addr);\n",
-					anum - 1);
-			}
-			else
-			{
-				const char *macro;
-
-				switch (attr->attlen)
-				{
-					case sizeof(cl_long):
-						macro = "READ_INT64_PTR";
-						break;
-					case sizeof(cl_int):
-						macro = "READ_INT32_PTR";
-						break;
-					case sizeof(cl_short):
-						macro = "READ_INT16_PTR";
-						break;
-					case sizeof(cl_char):
-						macro = "READ_INT8_PTR";
-						break;
-					default:
-						elog(ERROR, "unexpected inline type length: %d",
-							 attr->attlen);
-				}
-				appendStringInfo(
-					&body,
-					"    tup_values[%d] = %s(addr);\n",
-					anum - 1, macro);
-			}
-		}
-		ReleaseSysCache(tup);
-	}
-
-	appendStringInfo(
-		kern,
-		"STATIC_FUNCTION(void)\n"
-		"gpustore_projection(kern_context *kcxt,\n"
-		"                    kern_data_store *kds_src,\n"
-		"                    cl_uint row_index,\n"
-		"                    Datum *tup_values,\n"
-		"                    cl_bool *tup_isnull)\n"
-		"{\n"
-		"  void *addr __attribute__((unused));\n"
-		"\n"
-		"  memset(tup_isnull, 0, sizeof(cl_bool) * %d);\n"
-		"%s"
-		"}\n\n",
-		baserel->max_attr,
 		body.data);
 	pfree(body.data);
 }
@@ -820,12 +719,10 @@ gstoreGetForeignPlan(PlannerInfo *root,
 							 gsf_info->dev_quals);
 	gstore_codegen_keycomp(&kern, &context, baserel,
 						   ftable_oid, gsf_info);
-	gstore_codegen_projection(&kern, &context, baserel,
-							  ftable_oid, tlist, gsf_info->host_quals);
 
 	/* update GpuStoreFdwInfo */
 	gsf_info->used_params = context.used_params;
-	gsf_info->extra_flags = DEVKERNEL_NEEDS_GPUSTORE | context.extra_flags;
+	gsf_info->extra_flags = DEVKERNEL_NEEDS_GPUSORT | context.extra_flags;
 	gsf_info->kern_source = kern.data;
 	gsf_info->varlena_bufsz = context.varlena_bufsz;
 
@@ -885,6 +782,7 @@ gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 	GpuContext	   *gcontext = NULL;
 	ProgramId		program_id = INVALID_PROGRAM_ID;
 	kern_parambuf  *kparams = NULL;
+	bool			has_sortkeys = false;
 
 	gstate = palloc0(sizeof(GpuStoreExecState));
 	if (gsf_info->dev_quals != NIL ||
@@ -911,19 +809,250 @@ gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 										  node->ss.ps.ps_ExprContext,
 										  NIL);
 		pfree(kern_define.data);
+
+		if (gsf_info->sort_keys != NIL)
+			has_sortkeys = true;
 	}
-	gstate->gcontext    = gcontext;
-	gstate->program_id  = program_id;
-	gstate->kern_params = kparams;
+	gstate->gcontext   = gcontext;
+	gstate->program_id = program_id;
+	gstate->kparams    = kparams;
+	gstate->has_sortkeys = has_sortkeys;
 
 	node->fdw_state = (void *) gstate;
 }
 
 /*
- * gstoreIterateForeignScan
+ * gstoreLaunchScanSortKernel
+ */
+static void
+gstoreLaunchScanSortKernel(GpuContext *gcontext,
+						   CUmodule cuda_module,
+						   CUdeviceptr m_gpusort,
+						   CUdeviceptr m_kds_src,
+						   bool run_gpusort)
+{
+	kern_gpusort   *kgpusort = (kern_gpusort *) m_gpusort;
+	CUfunction		kern_gpusort_setup;
+	CUfunction		kern_gpusort_local;
+	CUfunction		kern_gpusort_step;
+	CUfunction		kern_gpusort_merge;
+	CUresult		rc;
+	cl_uint			nitems;
+	cl_int			grid_sz;
+	cl_int			block_sz;
+	void		   *kern_args[4];
+
+	rc = cuModuleGetFunction(&kern_gpusort_setup,
+							 cuda_module,
+							 "gpusort_setup_column");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	if (run_gpusort)
+	{
+		rc = cuModuleGetFunction(&kern_gpusort_local,
+								 cuda_module,
+								 "gpusort_bitonic_local");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+		rc = cuModuleGetFunction(&kern_gpusort_step,
+								 cuda_module,
+								 "gpusort_bitonic_step");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+		rc = cuModuleGetFunction(&kern_gpusort_merge,
+								 cuda_module,
+								 "gpusort_bitonic_merge");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
+
+	/*
+	 * KERNEL_FUNCTION(void)
+	 * gpusort_setup_column(kern_gpusort *kgpusort,
+	 *                      kern_data_store *kds_src)
+	 */
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_gpusort_setup,
+							 gcontext->cuda_device,
+							 0, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuOptimalBlockSize: %s", errorText(rc));
+
+	kern_args[0] = &m_gpusort;
+	kern_args[1] = &m_kds_src;
+	rc = cuLaunchKernel(kern_gpusort_setup,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						sizeof(cl_uint) * MAXTHREADS_PER_BLOCK,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+
+	if (run_gpusort)
+	{
+		gpusortResultIndex *kresults;
+		cl_uint		nhalf;
+		cl_uint		i, j;
+
+		rc = cuStreamSynchronize(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
+		if (kgpusort->kerror.errcode != StromError_Success)
+		{
+			/* TODO: CPU fallback handling */
+			elog(ERROR, "GPU kernel error - %s",
+				 errorTextKernel(&kgpusort->kerror));
+		}
+		kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
+		nitems = kresults->nitems;
+		block_sz = MAXTHREADS_PER_BLOCK;
+		grid_sz = (nitems + BITONIC_MAX_LOCAL_SZ - 1) / BITONIC_MAX_LOCAL_SZ;
+
+		/* nhalf is the least power of two larger than the nitems */
+		nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
+
+		/*
+		 * make a sorting block up to (2 * BITONIC_MAX_LOCAL_SZ)
+		 *
+		 * KERNEL_FUNCTION_MAXTHREADS(void)
+		 * gpusort_bitonic_local(kern_gpusort *kgpusort,
+		 *                       kern_data_store *kds_src)
+		 */
+		kern_args[0] = &m_gpusort;
+		kern_args[1] = &m_kds_src;
+		rc = cuLaunchKernel(kern_gpusort_local,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							CU_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		/* inter blocks bitonic sorting */
+		for (i = BITONIC_MAX_LOCAL_SZ; i < nhalf; i *= 2)
+		{
+			for (j = 2 * i; j > BITONIC_MAX_LOCAL_SZ; j /= 2)
+			{
+				cl_uint		unitsz = 2 * j;
+				cl_bool		reversing = ((j == 2 * i) ? true : false);
+
+				/*
+				 * KERNEL_FUNCTION_MAXTHREADS(void)
+				 * gpustore_bitonic_step(kern_gpusort *kgpusort,
+				 *                       kern_data_store *kds_src,
+				 *                       cl_uint unitsz,
+				 *                       cl_bool reversing)
+				 */
+				kern_args[0] = &m_gpusort;
+				kern_args[1] = &m_kds_src;
+				kern_args[2] = &unitsz;
+				kern_args[3] = &reversing;
+				rc = cuLaunchKernel(kern_gpusort_step,
+									grid_sz, 1, 1,
+									block_sz, 1, 1,
+									0,
+									CU_STREAM_PER_THREAD,
+									kern_args,
+									NULL);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			}
+
+			/*
+			 * KERNEL_FUNCTION_MAXTHREADS(void)
+			 * gpusort_bitonic_merge(kern_gpusort *kgpusort,
+			 *                       kern_data_store *kds_src)
+			 */
+			kern_args[0] = &m_gpusort;
+			kern_args[1] = &m_kds_src;
+			rc = cuLaunchKernel(kern_gpusort_merge,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
+								0,
+								CU_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		}
+	}
+
+	rc = cuStreamSynchronize(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
+}
+
+/*
+ * gstoreProcessScanSortKernel
+ */
+static void
+gstoreProcessScanSortKernel(GpuStoreExecState *gstate)
+{
+	GpuContext	   *gcontext = gstate->gcontext;
+	GpuStoreBuffer *gs_buffer = gstate->gs_buffer;
+	kern_parambuf  *kparams = gstate->kparams;
+	size_t			length;
+	size_t			nitems;
+	CUdeviceptr		m_gpusort;
+	CUdeviceptr		m_kds_src;
+	CUmodule		cuda_module;
+	CUresult		rc;
+	
+	ActivateGpuContextNoWorkers(gcontext);
+	/*
+	 * setup kern_gpusort (including gpusortResultIndex)
+	 */
+	nitems = GpuStoreBufferGetNitems(gs_buffer);
+	length = (STROMALIGN(offsetof(kern_gpusort, kparams)) +
+			  STROMALIGN(kparams->length) +
+			  STROMALIGN(offsetof(gpusortResultIndex, results)));
+	rc = gpuMemAllocManaged(gcontext,
+							&m_gpusort,
+							STROMALIGN(length + sizeof(cl_uint) * nitems),
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	memset((void *)m_gpusort, 0, length);
+	memcpy(KERN_GPUSORT_PARAMBUF(m_gpusort),
+		   kparams,
+		   kparams->length);
+	gstate->kgpusort = (kern_gpusort *) m_gpusort;
+	gstate->kgpusort->nitems_in = nitems;
+
+	/*
+	 * map device memory
+	 */
+	m_kds_src = GpuStoreBufferOpenDevPtr(gcontext, gs_buffer);
+
+	/*
+	 * kick GPU kernel(s)
+	 */
+	cuda_module = GpuContextLookupModule(gcontext, gstate->program_id);
+	gstoreLaunchScanSortKernel(gcontext,
+							   cuda_module,
+							   m_gpusort,
+							   m_kds_src,
+							   gstate->has_sortkeys);
+	/*
+	 * unmap device memory
+	 */
+	rc = gpuIpcCloseMemHandle(gcontext, m_kds_src);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuIpcCloseMemHandle: %s", errorText(rc));
+}
+
+/*
+ * gstoreExecForeignScan
  */
 static TupleTableSlot *
-gstoreIterateForeignScan(ForeignScanState *node)
+gstoreExecForeignScan(ForeignScanState *node)
 {
 	GpuStoreExecState *gstate = (GpuStoreExecState *) node->fdw_state;
 	Relation		frel = node->ss.ss_currentRelation;
@@ -931,18 +1060,34 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	EState		   *estate = node->ss.ps.state;
 	Snapshot		snapshot = estate->es_snapshot;
 	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
+	cl_uint			row_index;
 
 	if (!gstate->gs_buffer)
 		gstate->gs_buffer = GpuStoreBufferCreate(frel, snapshot);
-	if (GpuStoreBufferGetNext(frel,
-							  snapshot,
-							  slot,
-							  gstate->gs_buffer,
-							  &gstate->gs_index,
-							  fscan->fsSystemCol))
-		return slot;
+lnext:
+	if (gstate->gcontext)
+	{
+		gpusortResultIndex *kresults;
 
-	return NULL;
+		if (!gstate->kgpusort)
+			gstoreProcessScanSortKernel(gstate);
+		kresults = KERN_GPUSORT_RESULT_INDEX(gstate->kgpusort);
+		if (gstate->gs_index >= kresults->nitems)
+			return NULL;
+		row_index = kresults->results[gstate->gs_index++];
+	}
+	else
+		row_index = gstate->gs_index++;
+
+	if (GpuStoreBufferGetTuple(frel,
+							   snapshot,
+							   slot,
+							   gstate->gs_buffer,
+							   row_index,
+							   fscan->fsSystemCol) > 0)
+		goto lnext;
+
+	return slot;
 }
 
 /*
@@ -969,6 +1114,9 @@ gstoreEndForeignScan(ForeignScanState *node)
 		if (gstate->program_id != INVALID_PROGRAM_ID)
 			pgstrom_put_cuda_program(gstate->gcontext,
 									 gstate->program_id);
+		if (gstate->kgpusort)
+			gpuMemFree(gstate->gcontext, (CUdeviceptr) gstate->kgpusort);
+
 		PutGpuContext(gstate->gcontext);
 	}
 }
@@ -1492,7 +1640,7 @@ pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
 	routine->GetForeignPlan		= gstoreGetForeignPlan;
 	routine->AddForeignUpdateTargets = gstoreAddForeignUpdateTargets;
 	routine->BeginForeignScan	= gstoreBeginForeignScan;
-	routine->IterateForeignScan	= gstoreIterateForeignScan;
+	routine->IterateForeignScan	= gstoreExecForeignScan;
 	routine->ReScanForeignScan	= gstoreReScanForeignScan;
 	routine->EndForeignScan		= gstoreEndForeignScan;
 	routine->ExplainForeignScan = gstoreExplainForeignScan;
@@ -1659,6 +1807,15 @@ type_is_reggstore(Oid type_oid)
 void
 pgstrom_init_gstore_fdw(void)
 {
+	/* pg_strom.enable_gpusort */
+	DefineCustomBoolVariable("pg_strom.enable_gpusort",
+							 "Enables use of GPU to sort rows on Gstore_Fdw",
+							 NULL,
+							 &enable_gpusort,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* invalidation of reggstore_oid variable */
 	CacheRegisterSyscacheCallback(TYPEOID, reset_reggstore_type_oid, 0);
 }

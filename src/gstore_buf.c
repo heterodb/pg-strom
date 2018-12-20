@@ -81,6 +81,7 @@ struct GpuStoreBuffer
 		kern_data_store *kds;
 		void   *buffer;		/* copy of GPU device memory if any */
 	} h;
+	CUipcMemHandle ipc_mhandle;
 	/* read-write buffer */
 	int			nattrs;
 	size_t		nitems;
@@ -951,6 +952,7 @@ GpuStoreBufferMakeWritable(GpuStoreBuffer *gs_buffer, TupleDesc tupdesc)
 		gs_buffer->rawsize = 0;
 		gs_buffer->h_seg = NULL;
 		gs_buffer->h.buffer = NULL;
+		memset(&gs_buffer->ipc_mhandle, 0, sizeof(CUipcMemHandle));
 	}
 	gs_buffer->read_only = false;
 }
@@ -1033,6 +1035,7 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 			gs_buffer->rawsize   = 0;
 			gs_buffer->h_seg     = NULL;
 			gs_buffer->h.buffer  = NULL;
+			memset(&gs_buffer->ipc_mhandle, 0, sizeof(CUipcMemHandle));
 			GpuStoreBufferMakeWritable(gs_buffer, RelationGetDescr(frel));
 		}
 		else
@@ -1047,6 +1050,7 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 			gs_buffer->rawsize   = gs_chunk->rawsize;
 			gs_buffer->h_seg     = dsm_attach(gs_chunk->dsm_mhandle);
 			gs_buffer->h.buffer  = dsm_segment_address(gs_buffer->h_seg);
+			gs_buffer->ipc_mhandle = gs_chunk->ipc_mhandle;
 			/* DSM mapping will alive more than transaction duration */
 			dsm_pin_mapping(gs_buffer->h_seg);
 		}
@@ -1068,6 +1072,30 @@ GpuStoreBufferCreate(Relation frel, Snapshot snapshot)
 	PG_END_TRY();
 
 	return gs_buffer;
+}
+
+/*
+ * GpuStoreBufferOpenDevPtr
+ */
+CUdeviceptr
+GpuStoreBufferOpenDevPtr(GpuContext *gcontext,
+						 GpuStoreBuffer *gs_buffer)
+{
+	CUdeviceptr	m_devptr;
+	CUresult	rc;
+
+	if (!gs_buffer->read_only)
+		elog(ERROR, "Gstore_Fdw has uncommitted changes");
+	Assert(gs_buffer->h_seg != NULL &&
+		   gs_buffer->h.buffer == dsm_segment_address(gs_buffer->h_seg));
+	rc = gpuIpcOpenMemHandle(gcontext,
+							 &m_devptr,
+							 gs_buffer->ipc_mhandle,
+							 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
+			 errorText(rc));
+	return m_devptr;
 }
 
 /*
@@ -1113,39 +1141,33 @@ GpuStoreBufferExpand(GpuStoreBuffer *gs_buffer, TupleDesc tupdesc)
 }
 
 /*
- * GpuStoreBufferGetNext
+ * GpuStoreBufferGetTuple
  */
-bool
-GpuStoreBufferGetNext(Relation frel,
-					  Snapshot snapshot,
-					  TupleTableSlot *slot,
-					  GpuStoreBuffer *gs_buffer,
-					  size_t *p_gs_index,
-					  bool needs_system_columns)
+int
+GpuStoreBufferGetTuple(Relation frel,
+					   Snapshot snapshot,
+					   TupleTableSlot *slot,
+					   GpuStoreBuffer *gs_buffer,
+					   size_t row_index,
+					   bool needs_system_columns)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
-	size_t		row_index;
 
 	ExecClearTuple(slot);
-lnext:
-	row_index = (*p_gs_index)++;
-
-	if (gs_buffer->h.buffer)
+	if (gs_buffer->read_only)
 	{
-		/* read from read-only buffer */
-		switch (gs_buffer->format)
+		/* read from the read-only buffer */
+		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
 		{
-			case GSTORE_FDW_FORMAT__PGSTROM:
-				if (!KDS_fetch_tuple_column(slot,
-											gs_buffer->h.kds,
-											row_index))
-					return false;
-				break;
-
-			default:
-				elog(ERROR, "gstore_fdw: unexpected format: %d",
-					 gs_buffer->format);
-				break;
+			if (!KDS_fetch_tuple_column(slot,
+										gs_buffer->h.kds,
+										row_index))
+				return -1;
+		}
+		else
+		{
+			elog(ERROR, "Gstore_Fdw: unexpected format: %d",
+				 gs_buffer->format);
 		}
 	}
 	else if (row_index < gs_buffer->nitems)
@@ -1154,7 +1176,7 @@ lnext:
 
 		if (!gstore_buf_tuple_visibility(&gs_buffer->gs_mvcc[row_index],
 										 snapshot))
-			goto lnext;
+			return 1;		/* try next */
 
 		/* OK, tuple is visible */
 		for (j=0; j < tupdesc->natts; j++)
@@ -1198,11 +1220,9 @@ lnext:
 		ExecStoreVirtualTuple(slot);
 	}
 	else
-		return false;
+		return -1;
 
-	/*
-	 * Add system column information if required
-	 */
+	/* put system column information if needed */
 	if (needs_system_columns)
 	{
 		HeapTuple   tup = ExecMaterializeSlot(slot);
@@ -1225,7 +1245,7 @@ lnext:
 			tup->t_data->t_choice.t_heap.t_field3.t_cid = mvcc->cid;
 		}
 	}
-	return true;
+	return 0;
 }
 
 /*
@@ -1514,6 +1534,35 @@ out:
 }
 
 /*
+ * GpuStoreBufferGetNitems
+ */
+size_t
+GpuStoreBufferGetNitems(GpuStoreBuffer *gs_buffer)
+{
+	size_t		nitems;
+
+	if (gs_buffer->read_only)
+	{
+		Assert(gs_buffer->h_seg &&
+			   gs_buffer->h.buffer == dsm_segment_address(gs_buffer->h_seg));
+		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
+			nitems = gs_buffer->h.kds->nitems;
+		else
+			elog(ERROR, "Gstore_Fdw has unknown format: %d",
+				 gs_buffer->format);
+	}
+	else
+	{
+		nitems = gs_buffer->nitems;
+	}
+	return nitems;
+}
+
+
+
+
+
+/*
  * gstoreXactCallbackOnPreCommit
  */
 static void
@@ -1617,6 +1666,7 @@ gstoreXactCallbackOnPreCommit(void)
 			gs_buffer->rawsize  = rawsize;
 			gs_buffer->h_seg    = h_seg;
 			gs_buffer->h.buffer = dsm_segment_address(h_seg);
+			gs_buffer->ipc_mhandle = ipc_mhandle;
 			/* mark the buffer read-only again */
 			GpuStoreBufferMakeReadOnly(gs_buffer);
 			/* keep DSM mapping */

@@ -19,88 +19,114 @@
 #define CUDA_GPUSORT_H
 
 /*
- * gpuscan_quals_eval_column - evaluation of device qualifier
+ * kern_gpusort
+ */
+typedef struct {
+	kern_errorbuf	kerror;
+	cl_uint			nitems_in;
+	cl_uint			nitems_out;
+	kern_parambuf	kparams;
+	/* <-- gpusortResultIndex --> */
+} kern_gpusort;
+
+typedef struct {
+	cl_uint			nitems;
+	cl_uint			results[FLEXIBLE_ARRAY_MEMBER];
+} gpusortResultIndex;
+
+#define KERN_GPUSORT_PARAMBUF(kgpusort)			\
+	(&((kern_gpusort *)(kgpusort))->kparams)
+#define KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)	\
+	STROMALIGN(KERN_GPUSORT_PARAMBUF(kgpusort)->length)
+#define KERN_GPUSORT_RESULT_INDEX(kgpusort)		\
+	((gpusortResultIndex *)						\
+	 ((char *)KERN_GPUSORT_PARAMBUF(kgpusort) + \
+	  KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)))
+
+#define BITONIC_MAX_LOCAL_SHIFT		12
+#define BITONIC_MAX_LOCAL_SZ		(1<<BITONIC_MAX_LOCAL_SHIFT)
+
+#ifdef __CUDACC__
+/*
+ * gpusort_quals_eval - evaluation of device qualifier
  */
 STATIC_FUNCTION(cl_bool)
-gpuscan_quals_eval_column(kern_context *kcxt,
-						  kern_data_store *kds,
-						  cl_uint src_index);
-/*
- * gpuscan_projection_column
- */
-STATIC_FUNCTION(void)
-gpuscan_projection_column(kern_context *kcxt,
-                          kern_data_store *kds_src,
-                          size_t src_index,
-                          Datum *tup_values,
-                          cl_bool *tup_isnull);
+gpusort_quals_eval(kern_context *kcxt,
+				   kern_data_store *kds,
+				   cl_uint row_index);
 /*
  * gpusort_keycomp - comparison of two keys for sorting
  */
 STATIC_FUNCTION(cl_int)
-gpustore_keycomp(kern_context *kcxt,
-				 kern_data_store *kds_column,
-				 cl_uint x_index,
-				 cl_uint y_index);
+gpusort_keycomp(kern_context *kcxt,
+				kern_data_store *kds_src,
+				cl_uint x_index,
+				cl_uint y_index);
 /*
- *
+ * gpusort_setup_column
  */
 KERNEL_FUNCTION(void)
-gpusort_setup_index(kern_gpuscan *kgpuscan,
-					kern_data_store *kds_src)
+gpusort_setup_column(kern_gpusort *kgpusort,
+					 kern_data_store *kds_src)
 {
-	gpuscanResultIndex *gs_results = KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
+	gpusortResultIndex *kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 	kern_context	kcxt;
-	cl_uint			base;
+	cl_uint			globalSz = get_global_size();
+	cl_uint			loop, nloops;
 	__shared__ cl_uint pos;
 
-	INIT_KERNEL_CONTEXT(&kcxt, gpusort_setup_index, &kgpuscan->kparams);
-	for (base = get_global_base();
-		 base < kds_src->nitems;
-		 base += get_global_size())
+	INIT_KERNEL_CONTEXT(&kcxt, gpusort_setup_column, &kgpusort->kparams);
+	assert(kds_src->format == KDS_FORMAT_COLUMN);
+	nloops = (kds_src->nitems + globalSz - 1) / globalSz;
+	for (loop=0; loop < nloops; loop++)
 	{
-		cl_uint		index = base + get_local_id();
+		cl_uint		index = loop * globalSz + get_global_id();
 		cl_uint		offset;
 		cl_uint		count;
 		cl_bool		retval;
 
-		retval = gpuscan_quals_eval_column(&kcxt, kds_src, index);
+		if (index < kds_src->nitems)
+			retval = gpusort_quals_eval(&kcxt, kds_src, index);
+		else
+			retval = false;
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 		offset = pgstromStairlikeSum(retval ? 1 : 0, &count);
 		if (get_local_id() == 0 && count > 0)
-			pos = atomicAdd(&gs_results->nitems, count);
+			pos = atomicAdd(&kresults->nitems, count);
 		__syncthreads();
 		if (retval)
-			gs_results->results[pos + offset] = index;
+			kresults->results[pos + offset] = index;
 		__syncthreads();
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &kcxt.e);
 }
 
-#define BITONIC_MAX_LOCAL_SHIFT		13
-#define BITONIC_MAX_LOCAL_SZ		(1<<13)
-
 KERNEL_FUNCTION_MAXTHREADS(void)
-gpusort_bitonic_local(kern_gpuscan *kgpuscan,
+gpusort_bitonic_local(kern_gpusort *kgpusort,
 					  kern_data_store *kds_src)
 {
-	gpuscanResultIndex *gs_results = KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
+	gpusortResultIndex *kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 	kern_context	kcxt;
 	cl_uint			localLimit;
-	cl_uint			nitems = gs_results->nitems;
-	cl_uint			partSize = 2 * BITONIC_MAX_LOCAL_SZ;
-	cl_uint			partBase = get_global_index() * partSize;
+	cl_uint			nitems = kresults->nitems;
+	cl_uint			partSize;
+	cl_uint			partBase;
 	cl_uint			blockSize;
 	cl_uint			unitSize;
 	cl_uint			i;
-	__shared__ cl_uint localIdx[BITONIC_MAX_LOCAL_SZ];		/* 32kB */
+	__shared__ cl_uint localIdx[2 * BITONIC_MAX_LOCAL_SZ];		/* 32kB */
 
 	/* quick bailout if any error happen in the prior kernel */
-	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_local, &kgpuscan->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_local, &kgpusort->kparams);
+	/* Adjust partition size if nitems is enough small */
+	partSize = 2 * BITONIC_MAX_LOCAL_SZ;
+	while (partSize / 2 > nitems)
+		partSize /= 2;
+	partBase = get_group_id() * partSize;
 
 	/* Load index to localIdx[] */
 	if (partBase + partSize <= nitems)
@@ -111,7 +137,7 @@ gpusort_bitonic_local(kern_gpuscan *kgpuscan,
 		return;		/* too much thread-blocks are launched? */
 
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		localIdx[i] = gs_results->results[partBase + i];
+		localIdx[i] = kresults->results[partBase + i];
 	__syncthreads();
 
 	for (blockSize = 2; blockSize <= partSize; blockSize *= 2)
@@ -138,8 +164,10 @@ gpusort_bitonic_local(kern_gpuscan *kgpuscan,
 				{
 					cl_uint		pos0 = localIdx[idx0];
 					cl_uint		pos1 = localIdx[idx1];
+					cl_int		comp;
 
-					if (gpustore_keycomp(&kcxt, kds_src, pos0, pos1) > 0)
+					comp = gpusort_keycomp(&kcxt, kds_src, pos0, pos1);
+					if (comp > 0)
 					{
 						/* swap */
 						localIdx[idx0] = pos1;
@@ -152,32 +180,31 @@ gpusort_bitonic_local(kern_gpuscan *kgpuscan,
 	}
 	/* Store index on localIdx[] */
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		gs_results->results[partBase + i] = localIdx[i];
+		kresults->results[partBase + i] = localIdx[i];
 	__syncthreads();
 	/* any errors on run-time? */
-	kern_writeback_error_status(&kgstore->kerror, &kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &kcxt.e);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
-gpustore_bitonic_step(kern_gpustore *kgpuscan,
-					  kern_data_store *kds_src,
-					  cl_uint unitsz,
-					  cl_bool reversing)
+gpusort_bitonic_step(kern_gpusort *kgpusort,
+					 kern_data_store *kds_src,
+					 cl_uint unitsz,
+					 cl_bool reversing)
 {
-	gpuscanResultIndex *gs_results = KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
+	gpusortResultIndex *kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 	kern_context	kcxt;
-	cl_uint			nitems = gs_results->nitems;
+	cl_uint			nitems = kresults->nitems;
 	cl_uint			halfUnitSize = unitsz >> 1;
 	cl_uint			halfUnitMask = halfUnitSize - 1;
 	cl_uint			unitMask = unitsz - 1;
 	cl_uint			idx0, idx1;
 	cl_uint			pos0, pos1;
-	cl_uint			index;
 
 	/* quick bailout if any error happen in the prior kernel */
-	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	INIT_KERNEL_CONTEXT(&kcxt, gpustore_bitonic_step, &kgstore->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_step, &kgpusort->kparams);
 
 	idx0 = (((get_global_id() & ~halfUnitMask) << 1)
 			+ (get_global_id() & halfUnitMask));
@@ -186,37 +213,37 @@ gpustore_bitonic_step(kern_gpustore *kgpuscan,
 			: (idx0 + halfUnitSize));
 	if (idx1 < nitems)
 	{
-		pos0 = gs_results->results[idx0];
-		pos1 = gs_results->results[idx1];
-        if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
+		pos0 = kresults->results[idx0];
+		pos1 = kresults->results[idx1];
+        if (gpusort_keycomp(&kcxt, kds_src, pos0, pos1) > 0)
         {
             /* swap */
-            gs_results->results[idx0] = pos1;
-			gs_results->results[idx1] = pos0;
+            kresults->results[idx0] = pos1;
+			kresults->results[idx1] = pos0;
         }
     }
-	kern_writeback_error_status(&kgstore->kerror);
+	kern_writeback_error_status(&kgpusort->kerror, &kcxt.e);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
-gpusort_bitonic_merge(kern_gpustore *kgstore,
+gpusort_bitonic_merge(kern_gpusort *kgpusort,
 					  kern_data_store *kds_src)
 {
-	gpuscanResultIndex *gs_results = KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
+	gpusortResultIndex *kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 	kern_context	kcxt;
 	cl_uint			localLimit;
-	cl_uint			nitems = gs_results->nitems;
+	cl_uint			nitems = kresults->nitems;
 	cl_uint			partSize = 2 * BITONIC_MAX_LOCAL_SZ;
-	cl_uint			partBase = get_global_index() * partSize;
+	cl_uint			partBase = get_global_id() * partSize;
 	cl_uint			blockSize = partSize;
 	cl_uint			unitSize;
 	cl_uint			i;
-	__shared__ cl_uint localIdx[BITONIC_MAX_LOCAL_SZ];		/* 32kB */
+	__shared__ cl_uint localIdx[2 * BITONIC_MAX_LOCAL_SZ];		/* 32kB */
 
 	/* quick bailout if any error happen in the prior kernel */
-	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, &kgpuscan->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, &kgpusort->kparams);
 	/* Load index to localIdx[] */
 	if (partBase + partSize <= nitems)
 		localLimit = partSize;
@@ -225,7 +252,7 @@ gpusort_bitonic_merge(kern_gpustore *kgstore,
 	else
 		return;		/* out of range */
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		localIdx[i] = gs_results->results[partBase + i];
+		localIdx[i] = kresults->results[partBase + i];
 	__syncthreads();
 
 	/* merge two sorted blocks */
@@ -259,132 +286,10 @@ gpusort_bitonic_merge(kern_gpustore *kgstore,
 	}
 	/* Store index from localIdx[] */
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		gs_results->results[partBase + i] = localIdx[i];
+		kresults->results[partBase + i] = localIdx[i];
 	__syncthreads();
 	/* any error status? */
-	kern_writeback_error_status(&kgstore->kerror);
+	kern_writeback_error_status(&kgpusort->kerror, &kcxt.e);
 }
-
-
-KERNEL_FUNCTION(void)
-gpusort_projection(kern_gpuscan *kgpuscan,
-				   kern_data_store *kds_src,
-				   kern_data_store *kds_dst)
-{
-	gpuscanResultIndex *gs_results = KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
-	gpuscanSuspendContext *my_suspend
-		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
-	kern_context	kcxt;
-	cl_uint			part_index = 0;
-	cl_uint			base;
-	cl_uint			index;
-	cl_uint			required;
-#if GPUSTORE_DEVICE_PROJECTION_NFIELDS > 0
-	Datum			tup_values[GPUSTORE_DEVICE_PROJECTION_NFIELDS];
-	cl_bool			tup_isnull[GPUSTORE_DEVICE_PROJECTION_NFIELDS];
-#else
-	Datum		   *tup_values = NULL;
-	cl_bool		   *tup_isnull = NULL;
-#endif
-	__shared__ cl_uint pos;
-
-	/* quick bailout if any error happen in the prior kernel */
-	if (__syncthreads_count(kgstore->kerror.errcode) != 0)
-		return;
-	INIT_KERNEL_CONTEXT(&kcxt, gpustore_projection, &kgstore->kparams);
-	/* resume kernel from the point where suspended, if any */
-	if (kgstore->resume_context)
-	{
-		assert(my_suspend != NULL);
-		part_index = my_suspend->part_index;
-	}
-
-	for (base = get_global_base() + part_index * get_global_size();
-		 base < gs_results->nitems;
-		 base += get_global_size(), part_index++)
-	{
-		if (base + get_local_id() < gs_results->nitems)
-		{
-			index = gs_results->results[base + get_local_id()];
-			assert(index < kds_src->nitems);
-			gpustore_projection(&kcxt,
-								kds_src,
-								index,
-								tup_values,
-								tup_isnull);
-			required = MAXALIGN(offsetof(kern_tupitem, htup) +
-								compute_heaptuple_size(&kcxt,
-													   kds_dst,
-													   tup_values,
-													   tup_isnull));
-		}
-		else
-			required = 0;
-
-		usage_offset = pgstromStairlikeSum(required, &extra_sz);
-		if (get_local_id() == 0)
-		{
-			union {
-				struct {
-					cl_uint		nitems;
-					cl_uint		usage;
-				} i;
-				cl_ulong		v64;
-			} oldval, curval, newval;
-
-			nvalids = Min(gs_results->nitems - base, get_local_size());
-
-			curval.i.nitems = kds_dst->nitems;
-            curval.i.usage  = kds_dst->usage;
-			do {
-				newval = oldval = curval;
-				newval.i.nitems += nvalids;
-				newval.i.usage  += __kds_packed(extra_sz);
-
-				if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-					STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
-					__kds_unpack(newval.i.usage) > kds_dst->length)
-				{
-					atomicAdd(&kgstore->suspend_count, 1);
-					suspend_kernel = 1;
-					break;
-				}
-			} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
-											 oldval.v64,
-											 newval.v64)) != oldval.v64);
-			nitems_base = oldval.i.nitems;
-			usage_base = __kds_unpack(oldval.i.usage);
-		}
-		if (__syncthreads_count(suspend_kernel) > 0)
-			break;
-
-		/* store the result heap-tuple on the destination buffer */
-		if (required > 0)
-		{
-			cl_uint	   *dst_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-			size_t		pos;
-
-			pos = kds_dst->length - (usage_base + usage_offset + required);
-			dst_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst->ncols,
-								kds_dst->colmeta,
-								NULL,	/* ItemPointerData */
-								NULL,	/* HeapTupleFields */
-								kds_dst->tdhasoid ? kds_dst->table_oid : 0,
-								tup_values,
-								tup_isnull);
-		}
-		/* bailout if any error */
-		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
-	}
-	/* suspend the current position (even if normal exit) */
-	if (my_suspend && get_local_id() == 0)
-	{
-		my_suspend->part_index = part_index;
-	}
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
-}
-
-#endif	/* CUDA_GSTORE_H */
+#endif	/* __CUDACC__ */
+#endif	/* CUDA_GPUSORT_H */

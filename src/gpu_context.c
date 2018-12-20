@@ -440,7 +440,7 @@ typedef struct
 	CUmodule	cuda_module;
 } GpuContextModuleEntry;
 
-static CUmodule
+CUmodule
 GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 {
 	GpuContextModuleEntry *entry;
@@ -1034,6 +1034,16 @@ ActivateGpuContext(GpuContext *gcontext)
 		activate_cuda_context(gcontext);
 	if (!gcontext->worker_is_running)
 		activate_cuda_workers(gcontext);
+}
+
+/*
+ * ActivateGpuContextNoWorkers - activate only cuda_context
+ */
+void
+ActivateGpuContextNoWorkers(GpuContext *gcontext)
+{
+	if (!gcontext->cuda_context)
+		activate_cuda_context(gcontext);
 }
 
 /*

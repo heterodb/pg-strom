@@ -23,7 +23,7 @@ static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
 static CustomExecMethods	gpuscan_exec_methods;
-static bool					enable_gpuscan;
+bool						enable_gpuscan;		/* GUC */
 static bool					enable_pullup_outer_scan;
 
 /*

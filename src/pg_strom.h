@@ -435,7 +435,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-#define DEVKERNEL_NEEDS_GPUSTORE		0x00000008	/* for GpuStoreFdw */
+#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
 #define DEVKERNEL_NEEDS_MATRIX			0x00000200
 #define DEVKERNEL_NEEDS_TIMELIB			0x00000400
 #define DEVKERNEL_NEEDS_TEXTLIB			0x00000800
@@ -738,12 +738,15 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 	}
 	CHECK_FOR_INTERRUPTS();
 }
+extern CUmodule GpuContextLookupModule(GpuContext *gcontext,
+									   ProgramId program_id);
 extern CUresult gpuInit(unsigned int flags);
 extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool never_use_mps,
 								   bool activate_context,
 								   bool activate_workers);
 extern void ActivateGpuContext(GpuContext *gcontext);
+extern void ActivateGpuContextNoWorkers(GpuContext *gcontext);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
@@ -1123,6 +1126,7 @@ extern void pgstrom_init_relscan(void);
 /*
  * gpuscan.c
  */
+extern bool enable_gpuscan;		/* GUC */
 extern Cost cost_for_dma_receive(RelOptInfo *rel, double ntuples);
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
@@ -1239,11 +1243,13 @@ typedef struct GpuStoreBuffer	GpuStoreBuffer;
 
 extern GpuStoreBuffer *GpuStoreBufferCreate(Relation frel,
 											Snapshot snapshot);
-extern bool GpuStoreBufferGetNext(Relation frel,
+extern CUdeviceptr GpuStoreBufferOpenDevPtr(GpuContext *gcontext,
+											GpuStoreBuffer *gs_buffer);
+extern int GpuStoreBufferGetTuple(Relation frel,
 								  Snapshot snapshot,
 								  TupleTableSlot *slot,
 								  GpuStoreBuffer *gs_buffer,
-								  size_t *p_gs_index,
+								  size_t row_index,
 								  bool needs_system_columns);
 extern void GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 									TupleDesc tupdesc,
@@ -1256,6 +1262,8 @@ extern void GpuStoreBufferRemoveRow(GpuStoreBuffer *gs_buffer,
 extern void GpuStoreBufferGetSize(Oid table_oid, Snapshot snapshot,
 								  Size *p_rawsize,
 								  Size *p_nitems);
+extern size_t GpuStoreBufferGetNitems(GpuStoreBuffer *gs_buffer);
+
 extern void pgstrom_init_gstore_buf(void);
 
 extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);

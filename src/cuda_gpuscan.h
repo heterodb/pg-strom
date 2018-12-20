@@ -52,9 +52,9 @@ typedef struct
 } gpuscanResultIndex;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
-	((kern_parambuf *)(&(kgpuscan)->kparams))
+	(&((kern_gpuscan *)(kgpuscan))->kparams)
 #define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
-	STROMALIGN((kgpuscan)->kparams.length)
+	STROMALIGN(KERN_GPUSCAN_PARAMBUF(kgpuscan)->length)
 #define KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, group_id) \
 	((kgpuscan)->suspend_sz == 0				\
 	 ? NULL										\
