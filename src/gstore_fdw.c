@@ -605,9 +605,6 @@ gstore_codegen_keycomp(StringInfo kern,
 		if (order != BTGreaterStrategyNumber &&
 			order != BTLessStrategyNumber)
 			elog(ERROR, "nexpected sort support strategy: %d", order);
-		appendStringInfo(
-			&body,
-			"  assert(xaddr != NULL && yaddr != NULL);\n");
 
 		get_typlenbyval(var->vartype, &typlen, &typbyval);
 		if (typlen == -1)
@@ -651,7 +648,7 @@ gstore_codegen_keycomp(StringInfo kern,
 				"    comp = pgfn_%s(kcxt, xval.%s_v, yval.%s_v);\n"
 				"    assert(!comp.isnull);\n"
 				"    if (comp.value != 0)\n"
-				"      return %s;\n"
+				"      return %scomp.value;\n"
 				"  }\n"
 				"  else if (xval.%s_v.isnull && !yval.%s_v.isnull)\n"
 				"    return %d;\n"
@@ -662,7 +659,7 @@ gstore_codegen_keycomp(StringInfo kern,
 				dtype->type_name, dtype->type_name,
 				dfunc->func_devname,
 				dtype->type_name, dtype->type_name,
-				order == BTLessStrategyNumber ? "comp.value" : "-comp.value",
+				order == BTLessStrategyNumber ? "" : "-",
 				dtype->type_name, dtype->type_name,
 				nulls_first ? -1 :  1,
 				dtype->type_name, dtype->type_name,
@@ -911,11 +908,11 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 		}
 		kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 		nitems = kresults->nitems;
-		block_sz = MAXTHREADS_PER_BLOCK;
-		grid_sz = (nitems + BITONIC_MAX_LOCAL_SZ - 1) / BITONIC_MAX_LOCAL_SZ;
-
 		/* nhalf is the least power of two larger than the nitems */
 		nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
+
+		block_sz = MAXTHREADS_PER_BLOCK;
+		grid_sz = Max(nhalf / MAXTHREADS_PER_BLOCK, 1);
 
 		/*
 		 * make a sorting block up to (2 * BITONIC_MAX_LOCAL_SZ)
@@ -1182,7 +1179,7 @@ gstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 								 buf.len > 0 ? ", " : "",
 								 temp);
 		}
-		ExplainPropertyText("Sort keys", buf.data, es);
+		ExplainPropertyText("GpuSort keys", buf.data, es);
 
 		pfree(buf.data);
 	}

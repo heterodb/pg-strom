@@ -100,8 +100,12 @@ struct GpuStoreBuffer
  */
 typedef struct
 {
-	cl_uint		offset;		/* to be used later */
 	struct varlena *vl_datum;
+	struct varlena *compressed;
+	cl_uint		offset;		/* to be used later */
+	cl_uint		usecnt;		/* usecnt; if usecnt==0 on KDS creation, we can
+							 * skip entry because it is referenced by dead
+							 * rows only */
 } vl_dict_key;
 
 /* static variables */
@@ -415,65 +419,35 @@ static uint32
 vl_dict_hash_value(const void *__key, Size keysize)
 {
 	const vl_dict_key *key = __key;
-	pg_crc32	crc;
+	Datum		hash;
 
-	if (VARATT_IS_EXTERNAL(key->vl_datum))
-		elog(ERROR, "unexpected external toast datum");
-
-	INIT_LEGACY_CRC32(crc);
-	COMP_LEGACY_CRC32(crc, key->vl_datum, VARSIZE_ANY(key->vl_datum));
-	FIN_LEGACY_CRC32(crc);
-
-	return (uint32) crc;
+	if (VARATT_IS_EXTENDED(key->vl_datum))
+		elog(ERROR, "unexpected non-flat varlena datum");
+	hash = hash_any((unsigned char *)VARDATA_ANY(key->vl_datum),
+					VARSIZE_ANY(key->vl_datum));
+	return (uint32)(hash & 0xffffffff);
 }
 
 /*
- * vl_dict_compare - comparison of varlena dictionary
+ * vl_dict_matched - equality comparison of varlena dictionary
  */
 static int
-vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
+vl_dict_matched(const void *__key1, const void *__key2, Size keysize)
 {
 	const vl_dict_key *key1 = __key1;
 	const vl_dict_key *key2 = __key2;
 
-	if (VARATT_IS_EXTERNAL(key1->vl_datum) ||
-		VARATT_IS_EXTERNAL(key2->vl_datum))
-		elog(ERROR, "unexpected external toast datum");
-
-	if (VARATT_IS_COMPRESSED(key1->vl_datum) ==
-		VARATT_IS_COMPRESSED(key2->vl_datum))
-	{
-		/*
-		 * Both of the varlena datum are compressed or uncompressed,
-		 * so binary comparison is sufficient to check full-match.
-		 */
-		if (VARSIZE_ANY_EXHDR(key1->vl_datum) ==
-			VARSIZE_ANY_EXHDR(key2->vl_datum))
-			return memcmp(VARDATA_ANY(key1->vl_datum),
-						  VARDATA_ANY(key2->vl_datum),
-						  VARSIZE_ANY_EXHDR(key1->vl_datum));
-	}
+	if (VARATT_IS_EXTENDED(key1->vl_datum) ||
+		VARATT_IS_EXTENDED(key2->vl_datum))
+		elog(ERROR, "unexpected non-flat varlena datum");
 	else
 	{
-		struct varlena *temp1 = pg_detoast_datum(key1->vl_datum);
-		struct varlena *temp2 = pg_detoast_datum(key2->vl_datum);
-		int			result;
+		const char *temp1 = VARDATA_ANY(key1->vl_datum);
+		const char *temp2 = VARDATA_ANY(key2->vl_datum);
+		size_t		sz = VARSIZE_ANY_EXHDR(key1->vl_datum);
 
-		if (VARSIZE_ANY_EXHDR(temp1) == VARSIZE_ANY_EXHDR(temp2))
-		{
-			result = memcmp(VARDATA_ANY(temp1),
-							VARDATA_ANY(temp2),
-							VARSIZE_ANY_EXHDR(temp1));
-			if (temp1 != key1->vl_datum)
-				pfree(temp1);
-			if (temp2 != key2->vl_datum)
-				pfree(temp2);
-			return result;
-		}
-		if (temp1 != key1->vl_datum)
-			pfree(temp1);
-		if (temp2 != key2->vl_datum)
-			pfree(temp2);
+		if (sz == VARSIZE_ANY_EXHDR(key2->vl_datum))
+			return memcmp(temp1, temp2, sz);
 	}
 	return 1;
 }
@@ -484,38 +458,129 @@ vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
 static struct varlena *
 vl_datum_compression(void *datum, int vl_comression)
 {
-	struct varlena *vl;
+	struct varlena *vl = NULL;
 
-	if (vl_comression == GSTORE_COMPRESSION__NONE)
+	if (vl_comression == GSTORE_COMPRESSION__PGLZ)
 	{
-		/* not compressed */
-		vl = PG_DETOAST_DATUM(datum);
+		struct varlena *temp = PG_DETOAST_DATUM(datum);
+
+		vl = (struct varlena *)toast_compress_datum(PointerGetDatum(temp));
 	}
-	else if (vl_comression == GSTORE_COMPRESSION__PGLZ)
-	{
-		/* try pglz comression */
-		if (VARATT_IS_COMPRESSED(datum))
-			vl = (struct varlena *)DatumGetPointer(datum);
-		else
-		{
-			struct varlena *temp = PG_DETOAST_DATUM(datum);
-			struct varlena *comp;
+	else if (vl_comression != GSTORE_COMPRESSION__NONE)
+		elog(ERROR, "unknown compresion logic %d", vl_comression);
 
-			comp = (struct varlena *)
-				toast_compress_datum(PointerGetDatum(temp));
-			if (!comp)
-				vl = temp;
+	return vl;
+}
+
+/*
+ * vl_datum_compare - support routine for varlena sorting
+ */
+static int
+vl_datum_compare(const void *a, const void *b, void *arg)
+{
+	const vl_dict_key  *vl_a = *((vl_dict_key **)a);
+	const vl_dict_key  *vl_b = *((vl_dict_key **)b);
+
+	return ApplySortComparator(PointerGetDatum(vl_a->vl_datum), false,
+							   PointerGetDatum(vl_b->vl_datum), false,
+							   (SortSupport) arg);
+}
+
+/*
+ * vl_datum_writeout - write out varlena datum onto extra buffer of KDS
+ */
+static size_t
+vl_datum_writeout(GpuStoreBuffer *gs_buffer, AttrNumber j,
+				  Form_pg_attribute attr, bits8 *rowmap,
+				  cl_uint *base, char *extra)
+{
+	HTAB	   *vl_dict = gs_buffer->vl_dict[j];
+	Oid			vl_ltop;
+	char	   *pos = extra;
+	HASH_SEQ_STATUS seq;
+
+	if (!vl_dict)
+		return 0;
+
+	/*
+	 * Sort by varlena values first, if operator can support.
+	 * It enables special optimization for GPU kernel.
+	 */
+	get_sort_group_operators(attr->atttypid,
+							 false, false, false,
+							 &vl_ltop, NULL, NULL, NULL);
+	if (!OidIsValid(vl_ltop))
+	{
+		vl_dict_key *entry;
+		struct varlena *vl_datum;
+		size_t		vl_len;
+
+		/* No sortable operators, so no chance to be sorted on SQL */
+		hash_seq_init(&seq, vl_dict);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+		{
+			if (rowmap && entry->usecnt == 0)
+				continue;		/* unreferenced, skip */
+			if (!entry->compressed)
+				vl_datum = entry->vl_datum;
 			else
-			{
-				vl = comp;
-				pfree(temp);
-			}
+				vl_datum = entry->compressed;
+			vl_len = VARSIZE_ANY(vl_datum);
+			memcpy(pos, vl_datum, vl_len);
+			entry->offset = __kds_packed((char *)pos - (char *)base);
+			pos += MAXALIGN(vl_len);
 		}
 	}
 	else
-		elog(ERROR, "unknown format %d", vl_comression);
+	{
+		SortSupportData ssup;
+		size_t		i, nitems;
+		vl_dict_key **vl_items;
+		vl_dict_key *entry;
+		struct varlena *vl_datum;
+		size_t		vl_len;
 
-	return vl;
+		memset(&ssup, 0, sizeof(ssup));
+		ssup.ssup_cxt = gs_buffer->memcxt;
+		ssup.ssup_collation = attr->attcollation;
+		ssup.ssup_nulls_first = false;
+		PrepareSortSupportFromOrderingOp(vl_ltop, &ssup);
+
+		/* setup sorting-array */
+		nitems = hash_get_num_entries(vl_dict);
+		vl_items = palloc(sizeof(vl_dict_key *) * nitems);
+		hash_seq_init(&seq, vl_dict);
+		i = 0;
+		while ((entry = hash_seq_search(&seq)) != NULL)
+		{
+			if (rowmap && entry->usecnt == 0)
+				continue;		/* unreferenced, skip */
+			vl_items[i++] = entry;
+			Assert(entry->vl_datum != NULL);
+			Assert(entry->compressed == NULL);
+		}
+		Assert(i <= nitems);
+		nitems = i;
+
+		/* sort by varlena datum */
+		qsort_arg((void *)vl_items, nitems, sizeof(vl_dict_key *),
+				  vl_datum_compare, &ssup);
+
+		/* write out to the extra buffer */
+		for (i=0; i < nitems; i++)
+		{
+			entry = vl_items[i];
+			if (!entry->compressed)
+				vl_datum = entry->vl_datum;
+			else
+				vl_datum = entry->compressed;
+			vl_len = VARSIZE_ANY(vl_datum);
+			memcpy(pos, vl_datum, vl_len);
+			entry->offset = __kds_packed((char *)pos - (char *)base);
+			pos += MAXALIGN(vl_len);
+		}
+	}
+	return pos - extra;		/* total extra usage */
 }
 
 /*
@@ -584,7 +649,6 @@ GpuStoreBufferCopyFromKDS(GpuStoreBuffer *gs_buffer,
 		if (cmeta->attlen < 0)
 		{
 			vl_dict_key	  **vl_array = (vl_dict_key **)gs_buffer->values[j];
-			cl_int			vl_compress	= gs_buffer->vl_compress[j];
 
 			for (i=0; i < kds->nitems; i++)
 			{
@@ -601,23 +665,21 @@ GpuStoreBufferCopyFromKDS(GpuStoreBuffer *gs_buffer,
 				}
 				datum = (char *)addr + offset;
 				key.offset = 0;
+				key.usecnt = 0;
 				key.vl_datum = (struct varlena *)datum;
+				key.compressed = NULL;
 				entry = hash_search(gs_buffer->vl_dict[j],
 									&key,
 									HASH_ENTER,
 									&found);
 				if (!found)
 				{
-					struct varlena *vl
-						= vl_datum_compression(datum, vl_compress);
-					if (vl == datum)
-					{
-						struct varlena *temp = palloc(VARSIZE_ANY(vl));
+					struct varlena *vl = PG_DETOAST_DATUM_COPY(datum);
 
-						memcpy(temp, vl, VARSIZE_ANY(vl));
-						vl = temp;
-					}
+					entry->offset = 0;
+					entry->usecnt = 0;
 					entry->vl_datum = vl;
+					entry->compressed = NULL;
 					gs_buffer->extra_sz[j] += MAXALIGN(VARSIZE(vl));
 				}
 				if (MAXALIGN(sizeof(cl_uint) * nitems) +
@@ -690,40 +752,23 @@ GpuStoreBufferCopyToKDS(kern_data_store *kds,
 		cmeta->va_offset = __kds_packed(offset);
 		if (cmeta->attlen < 0)
 		{
-			cl_uint	   *base = (cl_uint *)pos;
-			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nrooms);
-			vl_dict_key **vl_entries = (vl_dict_key **)gs_buffer->values[j];
-			vl_dict_key *entry;
+			cl_uint		   *base = (cl_uint *)pos;
+			char		   *extra = pos + MAXALIGN(sizeof(cl_uint) * nrooms);
+			vl_dict_key	  **vl_keys = (vl_dict_key **)gs_buffer->values[j];
+			vl_dict_key	   *entry;
 
-			//TODO: sort physical location of varlena entries
-			//to simplify GPU sorting
+			nbytes = vl_datum_writeout(gs_buffer, j, attr, rowmap,
+									   base, extra);
 			for (i=0, k=0; i < gs_buffer->nitems; i++)
 			{
-				/* only visible rows */
 				if (rowmap && att_isnull(i, rowmap))
-					continue;
-				entry = vl_entries[i];
-				if (!entry)
-					base[k] = 0;
-				else
-				{
-					if (entry->offset == 0)
-					{
-						offset = (size_t)(extra - (char *)base);
-						entry->offset = __kds_packed(offset);
-						nbytes = VARSIZE_ANY(entry->vl_datum);
-						Assert(nbytes > 0);
-						memcpy(extra, entry->vl_datum, nbytes);
-						extra += MAXALIGN(nbytes);
-					}
-					base[k] = entry->offset;
-				}
-				k++;
+					continue;	/* skip, if not visible rows */
+				entry = vl_keys[i];
+				base[k++] = (!entry ? 0 : entry->offset);
 			}
 			Assert(k == nrooms);
-			nbytes = ((char *)extra - (char *)base);
-			pos += nbytes;
-			cmeta->va_length = __kds_packed(nbytes);
+			pos = extra + nbytes;
+			cmeta->va_length = __kds_packed(pos - (char *)base);
 		}
 		else if (!rowmap)
 		{
@@ -861,13 +906,15 @@ GpuStoreBufferAllocRW(GpuStoreBuffer *gs_buffer,
 
 			memset(&hctl, 0, sizeof(HASHCTL));
 			hctl.hash = vl_dict_hash_value;
-			hctl.match = vl_dict_compare;
+			hctl.match = vl_dict_matched;
 			hctl.keysize = sizeof(vl_dict_key);
+			hctl.entrysize = sizeof(vl_dict_key);
 			hctl.hcxt = gs_buffer->memcxt;
 
 			gs_buffer->vl_dict[j] = hash_create("varlena dictionary",
 												Max(nrooms / 5, 4096),
 												&hctl,
+												HASH_ELEM |
 												HASH_FUNCTION |
 												HASH_COMPARE |
 												HASH_CONTEXT);
@@ -1281,49 +1328,7 @@ GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 		if (attr->attisdropped)
 			continue;
 
-		if (attr->attlen < 0)
-		{
-			vl_dict_key *entry = NULL;
-
-			if (!isnull)
-			{
-				struct varlena *vl;
-				vl_dict_key key;
-				bool		found;
-				size_t		usage;
-
-				vl = vl_datum_compression(DatumGetPointer(datum),
-										  gs_buffer->vl_compress[j]);
-				key.offset = 0;
-				key.vl_datum = vl;
-				entry = hash_search(gs_buffer->vl_dict[j],
-									&key,
-									HASH_ENTER,
-									&found);
-				if (!found)
-				{
-					entry->offset = 0;
-					if (PointerGetDatum(vl) == datum)
-					{
-						size_t		len = VARSIZE_ANY(datum);
-
-						vl = (struct varlena *) palloc(len);
-						memcpy(vl, DatumGetPointer(datum), len);
-					}
-					entry->vl_datum = vl;
-					gs_buffer->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
-					Assert(gs_buffer->memcxt == GetMemoryChunkContext(vl));
-
-					usage = (MAXALIGN(sizeof(cl_uint) * index) +
-							 gs_buffer->extra_sz[j]);
-					if (usage >= KDS_OFFSET_MAX_SIZE)
-						elog(ERROR, "attribute \"%s\" consumed too much",
-							 NameStr(attr->attname));
-				}
-			}
-			((vl_dict_key **)gs_buffer->values[j])[index] = entry;
-		}
-		else
+		if (attr->attlen > 0)
 		{
 			bits8  *nullmap = gs_buffer->nullmap[j];
 			char   *base = gs_buffer->values[j];
@@ -1348,6 +1353,49 @@ GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 				memcpy(base, &datum, attr->attlen);
 			}
 		}
+		else if (attr->attlen == -1)
+		{
+			vl_dict_key	   *entry = NULL;
+			vl_dict_key	  **vl_items =
+				(vl_dict_key **)gs_buffer->values[j];
+
+			if (!isnull)
+			{
+				struct varlena *vl = PG_DETOAST_DATUM_COPY(datum);
+				vl_dict_key key;
+				bool		found;
+				size_t		usage;
+
+				key.offset = 0;
+				key.usecnt = 0;
+				key.vl_datum = vl;
+				key.compressed = NULL;
+				entry = hash_search(gs_buffer->vl_dict[j],
+									&key,
+									HASH_ENTER,
+									&found);
+				if (!found)
+				{
+					entry->offset = 0;
+					entry->usecnt = 0;
+					entry->vl_datum = vl;
+					entry->compressed = NULL;
+					gs_buffer->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
+					Assert(gs_buffer->memcxt == GetMemoryChunkContext(vl));
+
+					usage = (MAXALIGN(sizeof(cl_uint) * index) +
+							 gs_buffer->extra_sz[j]);
+					if (usage >= KDS_OFFSET_MAX_SIZE)
+						elog(ERROR, "attribute \"%s\" consumed too much",
+							 NameStr(attr->attname));
+				}
+				Assert(entry->vl_datum != NULL &&
+					   entry->compressed == NULL);
+			}
+			vl_items[index] = entry;
+		}
+		else
+			elog(ERROR, "unexpected type length: %d", attr->attlen);
 	}
 	mvcc = &gs_buffer->gs_mvcc[index];
 	memset(mvcc, 0, sizeof(MVCCAttrs));
@@ -1401,12 +1449,12 @@ GpuStoreBufferRemoveRow(GpuStoreBuffer *gs_buffer,
  * XXX needs rename?
  */
 static size_t
-GpuStoreBufferEstimateSize(Relation frel,
-						   GpuStoreBuffer *gs_buffer, size_t nrooms)
+GpuStoreBufferEstimateSize(Relation frel, GpuStoreBuffer *gs_buffer,
+						   size_t nrooms, bits8 *rowmap)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	size_t		rawsize;
-	int			j;
+	cl_uint		i, j;
 
 	Assert(gs_buffer->table_oid == RelationGetRelid(frel) &&
 		   gs_buffer->nattrs == tupdesc->natts);
@@ -1419,19 +1467,71 @@ GpuStoreBufferEstimateSize(Relation frel,
 
 			if (attr->attisdropped)
 				continue;
-			if (attr->attlen < 0)
+
+		    if (attr->attlen > 0)
 			{
-				rawsize += (MAXALIGN(sizeof(cl_uint) * nrooms) +
-							MAXALIGN(gs_buffer->extra_sz[j]));
-			}
-			else
-			{
-				size_t		unitsz = att_align_nominal(attr->attlen,
-													   attr->attalign);
+				size_t	unitsz = att_align_nominal(attr->attlen,
+												   attr->attalign);
 				rawsize += MAXALIGN(unitsz * nrooms);
 				if (gs_buffer->hasnull[j])
 					rawsize += MAXALIGN(BITMAPLEN(nrooms));
 			}
+			else if (attr->attlen == -1)
+			{
+				HTAB		   *vl_dict = gs_buffer->vl_dict[j];
+				int				vl_compress = gs_buffer->vl_compress[j];
+				vl_dict_key	   *entry;
+				MemoryContext	oldcxt;
+				HASH_SEQ_STATUS	seq;
+				size_t			extra_sz = 0;
+
+				/* fast path, if all-visible and no compression */
+				if (!rowmap && vl_compress == GSTORE_COMPRESSION__NONE)
+				{
+					rawsize += (MAXALIGN(sizeof(cl_uint) * nrooms) +
+								MAXALIGN(gs_buffer->extra_sz[j]));
+					continue;
+				}
+
+				/* check unreferenced varlena-dictionary */
+				if (rowmap)
+				{
+					vl_dict_key	  **vl_keys
+						= (vl_dict_key **)gs_buffer->values[j];
+					for (i=0; i < gs_buffer->nitems; i++)
+					{
+						if (att_isnull(i, rowmap))
+							continue;
+						entry = vl_keys[i];
+						if (entry)
+							entry->usecnt++;
+					}
+				}
+
+				/* count up length of extra size */
+				oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
+				hash_seq_init(&seq, vl_dict);
+				while ((entry = hash_seq_search(&seq)) != NULL)
+				{
+					struct varlena *vl_datum;
+					struct varlena *compressed = NULL;
+
+					if (rowmap && entry->usecnt == 0)
+						continue;		/* unreferenced, skip */
+					vl_datum = entry->vl_datum;
+					compressed = vl_datum_compression(vl_datum, vl_compress);
+					if (!compressed)
+						extra_sz += MAXALIGN(VARSIZE_ANY(vl_datum));
+					else
+						extra_sz += MAXALIGN(VARSIZE_ANY(compressed));
+					entry->compressed = compressed;
+				}
+				MemoryContextSwitchTo(oldcxt);
+
+				rawsize += MAXALIGN(sizeof(cl_uint) * nrooms) + extra_sz;
+			}
+			else
+				elog(ERROR, "unexpected type length: %d", attr->attlen);
 		}
 	}
 	else
@@ -1634,7 +1734,7 @@ gstoreXactCallbackOnPreCommit(void)
 		 * construction of new version of GPU device memory image
 		 */
 		frel = heap_open(gs_buffer->table_oid, NoLock);
-		rawsize = GpuStoreBufferEstimateSize(frel, gs_buffer, nrooms);
+		rawsize = GpuStoreBufferEstimateSize(frel, gs_buffer, nrooms, rowmap);
 		rc = gpuMemAllocPreserved(gs_buffer->pinning,
 								  &ipc_mhandle,
 								  &dsm_mhandle,

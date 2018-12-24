@@ -234,7 +234,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	cl_uint			localLimit;
 	cl_uint			nitems = kresults->nitems;
 	cl_uint			partSize = 2 * BITONIC_MAX_LOCAL_SZ;
-	cl_uint			partBase = get_global_id() * partSize;
+	cl_uint			partBase = get_group_id() * partSize;
 	cl_uint			blockSize = partSize;
 	cl_uint			unitSize;
 	cl_uint			i;

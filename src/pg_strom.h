@@ -94,6 +94,7 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "parser/parse_func.h"
+#include "parser/parse_oper.h"
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "postmaster/bgworker.h"
