@@ -91,4 +91,22 @@
 	extract_actual_join_clauses((a),(c),(d))
 #endif
 
+/*
+ * MEMO: PG11 adds PathNameOpenFilePerm and removed creation permission
+ * flags from the PathNameOpenFile.
+ */
+#if PG_VERSION_NUM < 110000
+#define PathNameOpenFile(a,b)	PathNameOpenFile((a),(b),0600)
+#endif
+
+/*
+ * MEMO: PG11 adds 'missing_ok' flag on the get_attname(), however,
+ * it deprecates get_relid_attribute_name() that raises an ereport
+ * if attname is missing.
+ */
+#if PG_VERSION_NUM < 110000
+#define get_attname(a,b,missing_ok)				\
+	((missing_ok) ? get_attname((a),(b)) : get_relid_attribute_name((a),(b)))
+#endif
+
 #endif	/* PG_COMPAT_H */

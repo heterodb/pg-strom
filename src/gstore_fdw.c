@@ -599,7 +599,7 @@ gstore_codegen_keycomp(StringInfo kern,
 			"  /* -- compare %s attribute -- */\n"
 			"  xaddr = kern_get_datum_column(kds_src, %u, x_index);\n"
 			"  yaddr = kern_get_datum_column(kds_src, %u, y_index);\n",
-			get_attname(ftable_oid, var->varattno),
+			get_attname(ftable_oid, var->varattno, false),
 			var->varattno - 1,
 			var->varattno - 1);
 		if (order != BTGreaterStrategyNumber &&

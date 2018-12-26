@@ -705,7 +705,7 @@ plcuda_build_program(plcuda_code_context *con,
 	initStringInfo(&log);
 	/* write out source file */
 	snprintf(path, sizeof(path), "%s.cu", name);
-	fdesc = PathNameOpenFile(path, O_RDWR|O_CREAT|O_EXCL|PG_BINARY, 0600);
+	fdesc = PathNameOpenFile(path, O_RDWR|O_CREAT|O_EXCL|PG_BINARY);
 	nbytes = FileWrite(fdesc, source->data, source->len
 #if PG_VERSION_NUM >= 100000
 					   ,WAIT_EVENT_DATA_FILE_WRITE
