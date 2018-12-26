@@ -831,21 +831,24 @@ LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
 @ja{
 NVME-Stromカーネルモジュールにはパラメータがあります。
 
-|パラメータ名   |型   |初期値|説明|
-|:-------------:|:---:|:-:|:-----:|
-|`verbose`      |`int`|`0`|詳細なデバッグ出力を行います。|
-|`stat_info`    |`int`|`1`|性能情報の統計サポートを有効にします。|
-|`fast_ssd_mode`|`int`|`0`|高速なNVME-SSDに適した動作モードです。|
-
+|パラメータ名        |型   |初期値|説明|
+|:------------------:|:---:|:----:|:-----:|
+|`verbose`           |`int`|`0`   |詳細なデバッグ出力を行います。|
+|`stat_info`         |`int`|`1`   |性能情報の統計サポートを有効にします。|
+|`fast_ssd_mode`     |`int`|`0`   |高速なNVME-SSDに適した動作モードです。|
+|`p2p_dma_max_depth` |`int`|`48`  |NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。|
+|`p2p_dma_max_unitsz`|`int`|`256` |P2P DMA要求で一度に読み出すデータブロックの最大長（kB単位）です。|
 }
 @en{
 NVME-Strom Linux kernel module has some parameters.
 
-|Parameter      |Type |Default|Description|
-|:-------------:|:---:|:-:|:-----:|
-|`verbose`      |`int`|`0`|Enables detailed debug output|
-|`stat_info`    |`int`|`1`|Enables performance statistics|
-|`fast_ssd_mode`|`int`|`0`|Operating mode for fast NVME-SSD|
+|Parameter           |Type |Default|Description|
+|:------------------:|:---:|:---:|:-----:|
+|`verbose`           |`int`|`0`  |Enables detailed debug output|
+|`stat_info`         |`int`|`1`  |Enables performance statistics|
+|`fast_ssd_mode`     |`int`|`0`  |Operating mode for fast NVME-SSD|
+|`p2p_dma_max_depth` |`int`|`48` |Maximum number of asynchronous P2P DMA request can be enqueued on the I/O-queue of NVME device|
+|`p2p_dma_max_unitsz`|`int`|`256`|Maximum length of data blocks, in kB, to be read by a single P2P DMA request at once|
 }
 
 @ja{
@@ -870,3 +873,22 @@ On the other hands, SSD-to-GPU direct data transfer may be faster, if you use PC
 However, it shall never kicks SSD-to-GPU direct data transfer if page cache is dirty.
 }
 
+@ja{
+`p2p_dma_max_depth`パラメータに関する補足説明を付記します。
+
+NVME-Stromモジュールは、SSD-to-GPU間のダイレクトデータ転送のDMA要求を作成し、それをNVMEデバイスのI/Oキューに送出します。
+NVMEデバイスの能力を越えるペースで非同期DMA要求が投入されると、NVME-SSDコントローラはDMA要求を順に処理する事になるため、DMA要求のレイテンシは極めて悪化します。（一方、NVME-SSDコントローラには切れ目なくDMA要求が来るため、スループットは最大になります）
+DMA要求の発行から処理結果が返ってくるまでの時間があまりにも長いと、場合によっては、これが何らかのエラーと誤認され、I/O要求のタイムアウトとエラーを引き起こす可能性があります。そのため、NVMEデバイスが遊ばない程度にDMA要求をI/Oキューに詰めておけば、それ以上のDMA要求を一度にキューに投入するのは有害無益という事になります。
+
+`p2p_dma_max_depth`パラメータは、NVMEデバイス毎に、一度にI/Oキューに投入する事のできる非同期P2P DMA要求の数を制御します。設定値以上のDMA要求を投入しようとすると、スレッドは現在実行中のDMAが完了するまでブロックされ、それによってNVMEデバイスの高負荷を避ける事が可能となります。
+
+}
+@en{
+Here is an extra explanation for `p2p_dma_max_depth` parameter.
+
+NVME-Strom Linux kernel module makes DMA requests for SSD-to-GPU direct data transfer, then enqueues them to I/O-queue of the source NVME devices.
+When asynchronous DMA requests are enqueued more than the capacity of NVME devices, latency of individual DMA requests become terrible because NVME-SSD controler processes the DMA requests in order of arrival. (On the other hands, it maximizes the throughput because NVME-SSD controler receives DMA requests continuously.)
+If turn-around time of the DMA requests are too large, it may be wrongly considered as errors, then can lead timeout of I/O request and return an error status. Thus, it makes no sense to enqueue more DMA requests to the I/O-queue more than the reasonable amount of pending requests for full usage of NVME devices.
+
+`p2p_dma_max_depth` parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.
+}

@@ -710,6 +710,18 @@ LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
 <td align="center"><code>0</code></td>
 <td align="center">高速なNVME-SSDに適した動作モードです。</td>
 </tr>
+<tr>
+<td align="center"><code>p2p_dma_max_depth</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>48</code></td>
+<td align="center">NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。</td>
+</tr>
+<tr>
+<td align="center"><code>p2p_dma_max_unitsz</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>256</code></td>
+<td align="center">P2P DMA要求で一度に読み出すデータブロックの最大長（kB単位）です。</td>
+</tr>
 </tbody>
 </table>
 <p><code>fast_ssd_mode</code>パラメータについての補足説明を付記します。</p>
@@ -717,6 +729,11 @@ LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
 <code>fast_ssd_mode</code>が<code>0</code>の場合、データブロックが既にページキャッシュに載っていれば、その内容を呼び出し元のユーザ空間バッファに書き戻し、アプリケーションにCUDA APIを用いたHost-&gt;Device間のデータ転送を行うよう促します。これはPCIe x4接続のNVME-SSDなど比較的低速なデバイス向きの動作です。</p>
 <p>一方、PCIe x8接続の高速SSDを使用したり、複数のSSDをストライピング構成で使用する場合は、バッファ間コピーの後で改めてHost-&gt;Device間のデータ転送を行うよりも、SSD-to-GPUのダイレクトデータ転送を行った方が効率的である事もあります。<code>fast_ssd_mode</code>が<code>0</code>以外の場合、NVME-StromドライバはOSのページキャッシュの状態に関わらず、SSD-to-GPUダイレクトのデータ転送を行います。</p>
 <p>ただし、いかなる場合においてもOSのページキャッシュが dirty である場合にはSSD-to-GPUダイレクトでのデータ転送は行われません。</p>
+<p><code>p2p_dma_max_depth</code>パラメータに関する補足説明を付記します。</p>
+<p>NVME-Stromモジュールは、SSD-to-GPU間のダイレクトデータ転送のDMA要求を作成し、それをNVMEデバイスのI/Oキューに送出します。
+NVMEデバイスの能力を越えるペースで非同期DMA要求が投入されると、NVME-SSDコントローラはDMA要求を順に処理する事になるため、DMA要求のレイテンシは極めて悪化します。（一方、NVME-SSDコントローラには切れ目なくDMA要求が来るため、スループットは最大になります）
+DMA要求の発行から処理結果が返ってくるまでの時間があまりにも長いと、場合によっては、これが何らかのエラーと誤認され、I/O要求のタイムアウトとエラーを引き起こす可能性があります。そのため、NVMEデバイスが遊ばない程度にDMA要求をI/Oキューに詰めておけば、それ以上のDMA要求を一度にキューに投入するのは有害無益という事になります。</p>
+<p><code>p2p_dma_max_depth</code>パラメータは、NVMEデバイス毎に、一度にI/Oキューに投入する事のできる非同期P2P DMA要求の数を制御します。設定値以上のDMA要求を投入しようとすると、スレッドは現在実行中のDMAが完了するまでブロックされ、それによってNVMEデバイスの高負荷を避ける事が可能となります。</p>
               
             </div>
           </div>

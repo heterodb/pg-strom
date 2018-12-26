@@ -706,6 +706,18 @@ LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
 <td align="center"><code>0</code></td>
 <td align="center">Operating mode for fast NVME-SSD</td>
 </tr>
+<tr>
+<td align="center"><code>p2p_dma_max_depth</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>48</code></td>
+<td align="center">Maximum number of asynchronous P2P DMA request can be enqueued on the I/O-queue of NVME device</td>
+</tr>
+<tr>
+<td align="center"><code>p2p_dma_max_unitsz</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>256</code></td>
+<td align="center">Maximum length of data blocks, in kB, to be read by a single P2P DMA request at once</td>
+</tr>
 </tbody>
 </table>
 <p>Here is an extra explanation for <code>fast_ssd_mode</code> parameter.</p>
@@ -713,6 +725,11 @@ LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
 If <code>fast_ssd_mode</code> is <code>0</code>, NVME-Strom once writes back page caches of the required data blocks to the userspace buffer of the caller, then indicates application to invoke normal host--&gt;device data transfer by CUDA API. It is suitable for non-fast NVME-SSDs such as PCIe x4 grade.</p>
 <p>On the other hands, SSD-to-GPU direct data transfer may be faster, if you use PCIe x8 grade fast NVME-SSD or use multiple SSDs in striping mode, than normal host--&gt;device data transfer after the buffer copy. If <code>fast_ssd_mode</code> is not <code>0</code>, NVME-Strom kicks SSD-to-GPU direct data transfer regardless of the page cache state.</p>
 <p>However, it shall never kicks SSD-to-GPU direct data transfer if page cache is dirty.</p>
+<p>Here is an extra explanation for <code>p2p_dma_max_depth</code> parameter.</p>
+<p>NVME-Strom Linux kernel module makes DMA requests for SSD-to-GPU direct data transfer, then enqueues them to I/O-queue of the source NVME devices.
+When asynchronous DMA requests are enqueued more than the capacity of NVME devices, latency of individual DMA requests become terrible because NVME-SSD controler processes the DMA requests in order of arrival. (On the other hands, it maximizes the throughput because NVME-SSD controler receives DMA requests continuously.)
+If turn-around time of the DMA requests are too large, it may be wrongly considered as errors, then can lead timeout of I/O request and return an error status. Thus, it makes no sense to enqueue more DMA requests to the I/O-queue more than the reasonable amount of pending requests for full usage of NVME devices.</p>
+<p><code>p2p_dma_max_depth</code> parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.</p>
               
             </div>
           </div>
