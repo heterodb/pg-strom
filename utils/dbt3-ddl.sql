@@ -76,12 +76,12 @@ CREATE TABLE region (
     r_comment VARCHAR(152));
 
 /*
-\copy supplier FROM PROGRAM './dbt3/dbgen -X -T s -s 24' delimiter '|';
-\copy part     FROM PROGRAM './dbt3/dbgen -X -T P -s 24' delimiter '|';
-\copy partsupp FROM PROGRAM './dbt3/dbgen -X -T S -s 24' delimiter '|';
-\copy customer FROM PROGRAM './dbt3/dbgen -X -T c -s 24' delimiter '|';
-\copy orders   FROM PROGRAM './dbt3/dbgen -X -T O -s 24' delimiter '|';
-\copy lineitem FROM PROGRAM './dbt3/dbgen -X -T L -s 24' delimiter '|';
-\copy nation   FROM PROGRAM './dbt3/dbgen -X -T n -s 24' delimiter '|';
-\copy region   FROM PROGRAM './dbt3/dbgen -X -T r -s 24' delimiter '|';
+\copy supplier FROM PROGRAM './dbgen-dbt3 -X -T s -s 24' delimiter '|';
+\copy part     FROM PROGRAM './dbgen-dbt3 -X -T P -s 24' delimiter '|';
+\copy partsupp FROM PROGRAM './dbgen-dbt3 -X -T S -s 24' delimiter '|';
+\copy customer FROM PROGRAM './dbgen-dbt3 -X -T c -s 24' delimiter '|';
+\copy orders   FROM PROGRAM './dbgen-dbt3 -X -T O -s 24' delimiter '|';
+\copy lineitem FROM PROGRAM './dbgen-dbt3 -X -T L -s 24' delimiter '|';
+\copy nation   FROM PROGRAM './dbgen-dbt3 -X -T n -s 24' delimiter '|';
+\copy region   FROM PROGRAM './dbgen-dbt3 -X -T r -s 24' delimiter '|';
 */
