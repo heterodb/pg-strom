@@ -1,3 +1,11 @@
+* Thu Dec 27 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-181227
+- hotfixes for various bugs
+- Add PostgreSQL 11 support
+- columnar cache was removed
+- Gstore_Fdw can be used for source relation of SELECT, with GpuSort
+- add partitioning and multi-GPUs support
+- PL/CUDA design revised
+
 * Thu Jul 12 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180712
 - hotfixes for various bugs
 - add BRIN index support
