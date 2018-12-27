@@ -269,7 +269,7 @@ $(TESTAPP_LARGEOBJECT): $(TESTAPP_LARGEOBJECT_SOURCE)
 #
 # Tarball
 #
-$(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
+$(STROM_TGZ):
 	(cd $(STROM_BUILD_ROOT);                 \
 	 git archive	--format=tar.gz          \
 			--prefix=$(__STROM_TGZ)/ \
