@@ -190,7 +190,6 @@ REGRESS_PREP = init_regression_testdb $(TESTAPP_LARGEOBJECT)
 # Build chain of PostgreSQL
 #
 PGXS := $(shell $(PG_CONFIG) --pgxs)
-with_llvm=no
 include $(PGXS)
 
 ifneq ($(STROM_BUILD_ROOT), .)
