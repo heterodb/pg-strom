@@ -1275,7 +1275,7 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	CUmodule	cuda_module;
 	CUresult	rc;
 	char	   *ptx_image;
-	size_t		ptx_length;
+	size_t		ptx_length	__attribute__((unused));
 	pg_crc32	ptx_crc		__attribute__((unused));
 
 	SpinLockAcquire(&pgcache_head->lock);
