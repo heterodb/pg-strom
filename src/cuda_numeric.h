@@ -258,11 +258,13 @@ STATIC_INLINE(Int128_t)
 __Int128_mul(Int128_t x, cl_long a)
 {
 	Int128_t	res;
-
+#ifdef HAVE_INT128
+	res.ival = a * x.ival;
+#else
 	res.lo = x.lo * a;
 	res.hi = __umul64hi(x.lo, a);
 	res.hi += x.hi * a;
-
+#endif
 	return res;
 }
 
