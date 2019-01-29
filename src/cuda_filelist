@@ -1,6 +1,5 @@
 PGSTROM_CUDA(common)
 PGSTROM_CUDA(primitive)
-PGSTROM_CUDA(dynpara)
 PGSTROM_CUDA(matrix)
 PGSTROM_CUDA(gpuscan)
 PGSTROM_CUDA(gpujoin)
