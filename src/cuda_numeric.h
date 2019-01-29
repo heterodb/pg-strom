@@ -37,10 +37,8 @@ typedef cl_char		NumericDigit;
 typedef cl_short	NumericDigit;
 #endif
 
-#define PG_MAX_DIGITS		18	/* Max digits of 57 bit mantissa. */
-#define PG_MAX_DATA			(((PG_MAX_DIGITS + (PG_DEC_DIGITS - 1)) +	\
-							  (PG_DEC_DIGITS - 1)) /					\
-							 PG_DEC_DIGITS)
+#define PG_MAX_DIGITS		40	/* Max digits of 128bit integer */
+#define PG_MAX_DATA			(PG_MAX_DIGITS / PG_DEC_DIGITS)
 
 struct NumericShort
 {
@@ -62,12 +60,11 @@ union NumericChoice
 	struct NumericShort	n_short;			/* Short form (2-byte header) */
 };
 
-// struct NumericData
-// {
-// 	int32		vl_len_;		/* varlena header (do not touch directly!) */
-// 	union NumericChoice choice; /* choice of format */
-// };
-
+struct NumericData
+{
+ 	cl_int			vl_len_;				/* varlena header */
+	union NumericChoice choice;				/* payload */
+};
 
 #define NUMERIC_SIGN_MASK	0xC000
 #define NUMERIC_POS			0x0000
@@ -112,217 +109,352 @@ union NumericChoice
 		((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_MASK))			\
 	 : ((n)->n_long.n_weight))
 
-
-/* IEEE 754 FORMAT */
+#define FP64_FRAC_MASK		0x000fffffffffffffUL
 #define FP64_FRAC_BITS		52
-#define FP64_FRAC_MASK		((1UL << FP64_FRAC_BITS) - 1)
+#define FP64_FRAC_VALUE(x)	(((x) & FP64_FRAC_MASK) | (FP64_FRAC_MASK + 1UL))
+#define FP64_EXPO_MASK		0x7ff0000000000000UL
 #define FP64_EXPO_BITS		11
-#define FP64_EXPO_MASK		(((1UL << FP64_EXPO_BITS) - 1) << FP64_FRAC_BITS)
 #define FP64_EXPO_BIAS		1023
-#define FP64_SIGN_MASK		(1UL << 63)
+#define FP64_EXPO_VALUE(x)	\
+	((((x) & FP64_EXPO_MASK) >> FP64_FRAC_BITS) - FP64_EXPO_BIAS)
+#define FP64_SIGN_MASK		0x8000000000000000UL
+#define FP64_SIGN_VALUE(x)	(((x) & FP64_SIGN_MASK) != 0UL)
 
-#define FP32_FRAC_BITS		23
-#define FP32_FRAC_MASK		((1U << FP32_FRAC_BITS) - 1)
-#define FP32_EXPO_BITS		8
-#define FP32_EXPO_MASK		(((1U << FP32_EXPO_BITS) - 1) << FP32_FRAC_BITS)
-#define FP32_EXPO_BIAS		127
-#define FP32_SIGN_MASK		(1U << 31)
+/*
+ * operations of signed 128bit integer
+ */
+typedef struct
+{
+#ifdef HAVE_INT128
+	int128		ival;
+#else
+	cl_ulong	lo;
+	cl_long		hi;
+#endif
+} Int128_t;
 
-#define FP16_FRAC_BITS		10
-#define FP16_FRAC_MASK		((1U << FP16_FRAC_BITS) - 1)
-#define FP16_EXPO_BITS		5
-#define FP16_EXPO_MASK		(((1U << FP16_EXPO_BITS) - 1) << FP16_FRAC_BITS)
-#define FP16_EXPO_BIAS		15
-#define FP16_SIGN_MASK		(1U << 15)
+STATIC_INLINE(Int128_t)
+__Int128_lshift(Int128_t x, cl_uint shift)
+{
+	Int128_t	res;
+#ifdef HAVE_INT128
+	res.ival = (x.ival << shift);
+#else
+	if (shift >= 64)
+	{
+		if (shift >= 128)
+			res.hi = 0;
+		else
+			res.hi = (x.lo << (shift - 64));
+		res.lo = 0;
+	}
+	else
+	{
+		res.hi = (x.hi << shift) | (x.lo >> (64 - shift));
+		res.lo = (x.lo << shift);
+	}
+#endif
+	return res;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_rshift(Int128_t x, cl_uint shift)
+{
+	Int128_t	res;
+#ifdef HAVE_INT128
+	res.ival = (x.ival >> shift);
+#else
+	if (shift >= 64)
+	{
+		if (shift >= 128)
+			res.lo = 0;
+		else
+			res.lo = (x.hi >> (shift - 64));
+		res.hi = 0;
+	}
+	else
+	{
+		res.lo = (x.hi >> (64 - shift)) | (x.lo >> shift);
+		res.hi = (x.hi >> shift);
+	}
+#endif
+	return res;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_add(Int128_t x, cl_long a)
+{
+	Int128_t	res;
+#ifdef HAVE_INT128
+	res.ival = x.ival + a;
+#else
+	asm("add.cc.u64     %0, %2, %3;\n"
+		"addc.cc.u64    %1, %4, %5;\n"
+		: "=l" (res.lo), "=l" (res.hi)
+		: "l" (x.lo), "l" (a),
+		  "l" (x.hi), "l" (a < 0 ? ~0UL : 0));
+#endif
+	return res;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_sub(Int128_t x, cl_long a)
+{
+	return __Int128_add(x, -a);
+}
+
+STATIC_INLINE(cl_int)
+__Int128_sign(Int128_t x)
+{
+#ifdef HAVE_INT128
+	if (x.ival < 0)
+		return -1;
+	else if (x.ival > 0)
+		return 1;
+#else
+	if ((x.hi & (1UL<<63)) != 0)
+		return -1;	/* negative */
+	else if (x.hi != 0 || x.lo != 0)
+		return 1;
+#endif
+	return 0;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_inverse(Int128_t x)
+{
+#ifdef HAVE_INT128
+	x.ival = -x.ival;
+	return x;
+#else
+	x.hi = ~x.hi;
+	x.lo = ~x.lo;
+	return __Int128_add(x,1);
+#endif
+}
+
+STATIC_INLINE(cl_int)
+__Int128_compare(Int128_t x, Int128_t y)
+{
+#ifdef HAVE_INT128
+	if (x.ival > y.ival)
+		return 1;
+	else if (x.ival < y.ival)
+		return -1;
+#else
+	if (x.hi > y.hi)
+		return 1;
+	else if (x.hi < y.hi)
+		return -1;
+	else if (x.lo > y.lo)
+		return (x.hi < 0 ? -1 : 1);
+	else if (x.lo < y.lo)
+		return (x.hi < 0 ? 1 : -1);
+#endif
+	return 0;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_mul(Int128_t x, cl_long a)
+{
+	Int128_t	res;
+
+	res.lo = x.lo * a;
+	res.hi = __umul64hi(x.lo, a);
+	res.hi += x.hi * a;
+
+	return res;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_mad(Int128_t x, cl_long a, cl_long b)
+{
+	Int128_t	res;
+#ifdef HAVE_INT128
+	res.ival = a * x.ival + b;
+#else
+	asm volatile("mad.lo.cc.u64  %0, %2, %3, %4;\n"
+				 "madc.hi.u64    %1, %2, %3, %5;\n"
+				 : "=l" (res.lo), "=l" (res.hi)
+				 : "l" (x.lo), "l" (a),
+				 "l" (b), "l" (b < 0 ? ~0UL : 0));
+	res.hi += x.hi * a;
+#endif
+	return res;
+}
+
+STATIC_INLINE(Int128_t)
+__Int128_div(Int128_t x, cl_long a, cl_long *p_mod)
+{
+	Int128_t	res;
+#ifdef HAVE_INT128
+	res.ival = x.ival / a;
+	*p_mod = x.ival % a;
+#else
+	assert(a != 0);
+	if (a == 1)
+	{
+		res = x;
+		*p_mod = 0;
+	}
+	else if (a == -1)
+	{
+		res = __Int128_inverse(x);
+		*p_mod = 0;
+	}
+	else
+	{
+		cl_bool	is_negative = false;
+		cl_int	remain = 64;
+
+		memset(&res, 0, sizeof(res));
+		if (__Int128_sign(x) < 0)
+		{
+			x = __Int128_inverse(x);
+			is_negative = true;
+		}
+
+		for (;;)
+		{
+			cl_ulong	div = (cl_ulong)x.hi / a;
+			cl_ulong	mod = (cl_ulong)x.hi % a;
+			cl_uint		shift;
+
+			res = __Int128_add(res, div);
+			if (remain == 0)
+			{
+				*p_mod = mod;
+				break;
+			}
+			shift = __clzll(mod);
+			if (shift > remain)
+				shift = remain;
+			x.hi = (mod << shift) | (x.lo >> (64 - shift));
+			x.lo <<= shift;
+			res = __Int128_lshift(res, shift);
+			remain -= shift;
+		}
+
+		if (is_negative)
+			res = __Int128_inverse(res);
+	}
+#endif
+	return res;
+}
 
 /*
  * PG-Strom internal representation of NUMERIC data type
  *
  * Even though the nature of NUMERIC data type is variable-length and error-
- * less mathmatical operation, we assume most of numeric usage can be hosted
- * within 64bit variable. A small number anomaly can be calculated by CPU,
- * so we focus on the major portion of use-cases.
- * Internal data format of numeric is 64-bit integer that is separated to
- * (1) 6bit exponents based on 10, (2) 1bit sign bit, and (3) 57bit mantissa.
- * Function that can handle NUMERIC data type will set StromError_CpuReCheck,
+ * less mathmatical operation, we assume most of numeric usage can be stored
+ * within 128bit fixed-point number; that is compatible to Decimal type in
+ * Apache Arrow.
+ * Internal data format (pg_numeric_t) has 128bit value and precision (16bit).
+ * Function that handles NUMERIC data type may set StromError_CpuReCheck,
  * if it detects overflow during calculation.
  */
 typedef struct {
-	cl_ulong	value;
-	bool		isnull;
+	Int128_t	value;		/* 128bit value */
+	cl_short	precision;
+	cl_bool		isnull;
 } pg_numeric_t;
 
-#define PG_NUMERIC_EXPONENT_BITS	6
-#define PG_NUMERIC_EXPONENT_POS		58
-#define PG_NUMERIC_EXPONENT_MASK	\
-	(((0x1UL << (PG_NUMERIC_EXPONENT_BITS)) - 1) << (PG_NUMERIC_EXPONENT_POS))
-#define PG_NUMERIC_EXPONENT_MAX		\
-	((1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)) - 1)
-#define PG_NUMERIC_EXPONENT_MIN		\
-	(0 - (1 << ((PG_NUMERIC_EXPONENT_BITS) - 1)))
+STATIC_INLINE(pg_numeric_t)
+pg_numeric_normalize(pg_numeric_t num)
+{
+	if (!num.isnull)
+	{
+#ifdef HAVE_INT128
+		if (num.value.ival == 0)
+			num.precision = 0;
+		else
+		{
+			while (num.value.ival % 10 == 0)
+			{
+				num.value.ival /= 10;
+				num.precision--;
+			}
+		}
+#else
+		/* special case if zero */
+		if (num.value.hi == 0 &&
+			num.value.lo == 0)
+		{
+			num.precision = 0;
+		}
+		else
+		{
+			Int128_t	temp;
+			cl_long		mod;
 
-#define PG_NUMERIC_SIGN_BITS		1
-#define PG_NUMERIC_SIGN_POS			57
-#define PG_NUMERIC_SIGN_MASK		\
-	(((0x1UL << (PG_NUMERIC_SIGN_BITS)) - 1) << (PG_NUMERIC_SIGN_POS))
-
-#define PG_NUMERIC_MANTISSA_BITS	57
-#define PG_NUMERIC_MANTISSA_POS		0
-#define PG_NUMERIC_MANTISSA_MASK	\
-	(((0x1UL << (PG_NUMERIC_MANTISSA_BITS)) - 1) << (PG_NUMERIC_MANTISSA_POS))
-#define PG_NUMERIC_MANTISSA_MAX		((0x1UL << (PG_NUMERIC_MANTISSA_BITS)) - 1)
-
-#define PG_NUMERIC_EXPONENT(num)	((cl_long)(num) >> 58)
-#define PG_NUMERIC_SIGN(num)		(((num) & PG_NUMERIC_SIGN_MASK) != 0)
-#define PG_NUMERIC_MANTISSA(num)	((num) & PG_NUMERIC_MANTISSA_MASK)
-#define PG_NUMERIC_SET(expo,sign,mant)							\
-	((cl_ulong)((cl_long)(expo) << 58) |						\
-	 ((sign) != 0 ? PG_NUMERIC_SIGN_MASK : 0UL) |				\
-	 ((mant) & PG_NUMERIC_MANTISSA_MASK))
-
-#define PG_NUMERIC_ZERO				PG_NUMERIC_SET(0,0,0)
-#define PG_NUMERIC_MAX				\
-	PG_NUMERIC_SET(PG_NUMERIC_EXPONENT_MAX,0,PG_NUMERIC_MANTISSA_MAX)
-#define PG_NUMERIC_MIN				\
-	PG_NUMERIC_SET(PG_NUMERIC_EXPONENT_MAX,1,PG_NUMERIC_MANTISSA_MAX)
+			for (;;)
+			{
+				temp = __Int128_div(num.value, 10, &mod);
+				if (mod != 0)
+					break;
+				num.precision--;
+				num.value = temp;
+			}
+		}
+#endif
+	}
+	return num;
+}
 
 STATIC_FUNCTION(pg_numeric_t)
-pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
+pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 {
-	pg_numeric_t		result;
-	union NumericChoice	numData;
-	cl_char			   *pSrc;
-	cl_int				len;
+	union NumericChoice numData;
+	pg_numeric_t	result;
+	cl_uint			len;
 
-	if (vl_val == NULL)
+	memset(&result, 0, sizeof(pg_numeric_t));
+	if (vl_datum == NULL)
 	{
 		result.isnull = true;
-		result.value  = 0;
 		return result;
 	}
-
-	pSrc = VARDATA_ANY(vl_val);
-	len  = VARSIZE_ANY_EXHDR(vl_val);
-
-	if (sizeof(numData) < len) {
-		// Numeric data is too large.
-		// PG-Strom numeric type support 18 characters.
-		result.isnull = true;
-		result.value  = 0;
+	len = VARSIZE_ANY_EXHDR(vl_datum);
+	if (sizeof(numData) < len)
+	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		result.isnull = true;
 		return result;
 	}
-
-	// Once data copy to private memory for alignment.
-	memcpy(&numData, pSrc, len);
-
-	// Convert PG-Strom numeric type from PostgreSQL numeric type.
+	/* copy to private memory for alignment */
+	memcpy(&numData, VARDATA_ANY(vl_datum), len);
+	/* construct pg_numeric_t value from PostgreSQL Numeric */
 	{
-		int		     sign	 = NUMERIC_SIGN(&numData);
-		int		     expo;
-		cl_ulong     mant;
-		int 	     weight  = NUMERIC_WEIGHT(&numData);
 		NumericDigit *digits = NUMERIC_DIGITS(&numData);
-		int			 offset  = (unsigned long)digits - (unsigned long)&numData;
-		int 	     ndigits = (len - offset) / sizeof(NumericDigit);
-		int			 i, base;
-		cl_ulong	 mantLast;
+		int		weight  = NUMERIC_WEIGHT(&numData) + 1;
+        int		offset  = (const char *)digits - (const char *)&numData;
+        int		i, ndigits = (len - offset) / sizeof(NumericDigit);
 
-		// Numeric value is 0, if ndigits is 0. 
-		if (ndigits == 0) {
-			result.isnull = false;
-			result.value  = PG_NUMERIC_SET(0, 0, 0);
-			return result;
-		}
+		/* Numeric value is 0, if ndigits is 0 */
+        if (ndigits == 0)
+            return result;
+		for (i=0; i < ndigits; i++)
+		{
+			NumericDigit	dig = digits[i];
+			Int128_t		temp;
 
-		// Generate exponent.
-		expo = (weight - (ndigits-1)) * PG_DEC_DIGITS;
-
-		// Generate mantissa.
-		mant = 0;
-		for (i=0; i < ndigits-1; i++) {
-			mant = mant * PG_NBASE + digits[i];
-		}
-
-		base     = PG_NBASE;
-		mantLast = digits[i];
-		for (i=0; i < PG_DEC_DIGITS; i++) {
-			if (mantLast % 10 == 0) {
-				expo++;
-				base     /= 10;
-				mantLast /= 10;
-			} else {
-				break;
-			}
-		}
-
-		// overflow check
-		if ((mant * base) / base != mant) {
-			result.isnull = true;
-			result.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return result;
-		}
-
-		// zero check
-		mant = mant * base + mantLast;
-
-		if (mant == 0) {
-			result.isnull = false;
-			result.value  = PG_NUMERIC_SET(0, 0, 0);
-			return result;
-		}
-
-		// Normalize
-		while (mant % 10 == 0  &&  expo < PG_NUMERIC_EXPONENT_MAX) {
-			mant /= 10;
-			expo ++;
-		}
-
-		if (PG_NUMERIC_EXPONENT_MAX < expo) {
-			// Exponent is overflow.
-			int			expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
-			int			i;
-			cl_ulong	mag;
-
-			if (PG_MAX_DIGITS <= expoDiff) {
-				// magnify is overflow
-				result.isnull = true;
-				result.value  = 0;
+			temp = __Int128_mad(result.value, PG_NBASE, dig);
+			if (__Int128_sign(temp) < 0)
+			{
+				/* !overflow! */
 				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-				return result;
+                result.isnull = true;
+                return result;
 			}
-
-			for (i=0, mag=1; i < expoDiff; i++) {
-				mag *= 10;
-			}
-
-			if ((mant * mag) / mag != mant) {
-				result.isnull = true;
-				result.value  = 0;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-				return result;
-			}
-
-			expo -= expoDiff;
-			mant *= mag;
+			result.value = temp;
 		}
-
-		// Error check
-		if (expo < PG_NUMERIC_EXPONENT_MIN ||
-			PG_NUMERIC_EXPONENT_MAX < expo ||
-			(mant & ~PG_NUMERIC_MANTISSA_MASK)) {
-			result.isnull = true;
-			result.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return result;
-		}
-
-		// Set value to PG_Strom numeric type
-		result.isnull = false;
-		result.value  = PG_NUMERIC_SET(expo, sign, mant);
+		/* sign of the value */
+		if (NUMERIC_SIGN(&numData) == NUMERIC_NEG)
+			result.value = __Int128_inverse(result.value);
+		/* precision */
+		result.precision = PG_DEC_DIGITS * (ndigits - weight);
 	}
-	return result;
+	return pg_numeric_normalize(result);
 }
 
 #ifdef __CUDACC__
@@ -330,127 +462,76 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 /*
  * pg_numeric_to_varlena
  *
- * It transform the supplied pg_numeric_t value into usual varlena form.
- * Caller is responsible not to call for NULL values; thus this function
- * expects the "pg_numeric_t arg" is not NULL.
- * One other supplied argument "struct varlena *vl_val" is a pointer to
- * the global memory region that at least has XXXX bytes which is possible
- * maximum size for pg_numeric_t representation.
- * Once this function transform the supplied argument and put it on the
- * global memory with varlena format, it returns total length of the
- * written varlena datum.
- * Once an error happen, it returns 0, then set some value on errcode.
+ * It transforms a pair of supplied precision and Int128_t value into
+ * numeric of PostgreSQL representation; as a form varlena on the vl_buffer.
+ * Caller is responsible vl_buffer has enough space more than
+ * sizeof(NumericData). Once this function makes a varlena datum on the
+ * buffer, it returns total length of the written data.
  */
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
 STATIC_FUNCTION(cl_uint)
 pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
-					  Datum value, cl_bool isnull)
+					  cl_short precision, Int128_t value)
 {
-	varattrib_4b   *pHeader = (varattrib_4b *) vl_buffer;
-	cl_uint			vl_len;
+	NumericData	   *numData = (NumericData *)vl_buffer;
+	NumericLong	   *numBody = &numData->choice.n_long;
+	NumericDigit	n_data[PG_MAX_DATA];
+	int				ndigits;
+	cl_uint			len;
+	cl_short		d_scale = Max(precision, 0);
+	cl_ushort		n_header = 0;
+	cl_bool			is_negative = (__Int128_sign(value) < 0);
 
-	/* alignment error; varlena buffer must be 4byte alignment */
-	assert(((cl_ulong)vl_buffer % sizeof(cl_int)) == 0);
+	if (is_negative)
+		value = __Int128_inverse(value);
 
-	/* NULL writes nothing anyway */
-	if (isnull)
-		return 0;
-
-	/* generate numeric data */
+	switch (precision % PG_DEC_DIGITS)
 	{
-		union NumericChoice	*pNumData;
-		int			sign = PG_NUMERIC_SIGN(value);
-		int 		expo = PG_NUMERIC_EXPONENT(value);
-		cl_ulong	mant = PG_NUMERIC_MANTISSA(value);
-		NumericDigit   *pNData;
-		int			digits;
-		int			dscale;
-		int			weight;
-		int			mag;
-		int			nData;
-		int			modExpo;
-		int			tmpDigits;
-
-		{
-			cl_ulong tmp = mant;
-			for (digits=0; tmp != 0; digits++, tmp/=10)
-				;
-		}
-
-		dscale = expo < 0 ? -expo : 0;
-
-		modExpo = expo % PG_DEC_DIGITS;
-		if (modExpo < 0)
-			modExpo = PG_DEC_DIGITS + modExpo;
-
-		tmpDigits = digits + expo - 1;
-		if (tmpDigits < 0)
-			tmpDigits = tmpDigits - (PG_DEC_DIGITS-1);
-		weight = tmpDigits / PG_DEC_DIGITS;
-
-		nData  = (digits + modExpo + (PG_DEC_DIGITS - 1)) / PG_DEC_DIGITS;
-
-		{
-			int i;
-			mag = 1;
-			for(i=0; i<modExpo; i++) {
-				mag *= 10;
-			}
-		}
-
-#ifdef NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
-		/* create the data of the short format. */
-		vl_len = (VARHDRSZ +
-				  offsetof(struct NumericShort, n_data) +
-				  nData * sizeof(NumericDigit));
-		if (!pHeader)
-			return vl_len;
-
-		SET_VARSIZE(pHeader, vl_len);
-		pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
-		pNumData->n_short.n_header =
-			NUMERIC_SHORT |
-			(sign ? NUMERIC_SHORT_SIGN_MASK : 0) |
-			((dscale << NUMERIC_SHORT_DSCALE_SHIFT)
-			 & NUMERIC_SHORT_DSCALE_MASK) |
-			(weight & (NUMERIC_SHORT_WEIGHT_SIGN_MASK |
-					   NUMERIC_SHORT_WEIGHT_MASK));
-		pNData = pNumData->n_short.n_data;
-#else
-		/* create the data of the long format */
-		vl_len = (VARHDRSZ +
-				  offsetof(struct NumericLong, n_data) +
-				  nData * sizeof(NumericDigit));
-		if (!pHeader)
-			return vl_len;
-
-		SET_VARSIZE(pHeader, vl_len);
-		pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
-		pNumData->n_long.n_sign_dscale = ((sign ? NUMERIC_SIGN_MASK : 0) |
-										  (dscale & NUMERIC_SHORT_SCALE_MASK));
-		pNumData->n_long.n_weight = weight;
-		pNData = pNumData->n_long.n_data;
-#endif
-
-		if (nData > 0)
-		{
-			pNData[nData-1] = (mant % (PG_NBASE/mag)) * mag;
-			mant /= (PG_NBASE/mag);
-
-			{
-				int i;
-				for (i = nData - 2; 0 <= i; i--)
-				{
-					pNData[i] = mant % PG_NBASE;
-					mant /= PG_NBASE;
-				}
-			}
-		}
+		case 3:
+		case -1:
+			value = __Int128_mul(value, 10);
+			precision += 1;
+			break;
+		case 2:
+		case -2:
+			value = __Int128_mul(value, 100);
+			precision += 2;
+			break;
+		case 1:
+		case -3:
+			value = __Int128_mul(value, 1000);
+			precision += 3;
+			break;
+		default:
+			/* ok */
+			break;
 	}
-	return vl_len;
-}
+	assert(precision % PG_DEC_DIGITS == 0);
 
+	for (ndigits=0; __Int128_sign(value) != 0; ndigits++)
+	{
+		cl_long		mod;
+
+		assert(ndigits < PG_MAX_DATA);
+		value = __Int128_div(value, PG_NBASE, &mod);
+		n_data[PG_MAX_DATA - 1 - ndigits] = mod;
+	}
+	memcpy(numBody->n_data,
+		   n_data + PG_MAX_DATA - ndigits,
+		   sizeof(NumericDigit) * ndigits);
+	/* other metadata */
+	n_header = (d_scale & NUMERIC_DSCALE_MASK);
+	if (is_negative)
+		n_header |= NUMERIC_NEG;
+	numBody->n_sign_dscale = n_header;
+	numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
+
+	len = offsetof(NumericData, choice.n_long.n_data[ndigits]);
+	SET_VARSIZE(numData, len);
+
+	return len;
+}
 
 /*
  * pg_numeric_datum_(ref|store)
@@ -472,6 +553,7 @@ pg_numeric_datum_ref(kern_context *kcxt,
 		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	return result;
 }
+
 STATIC_INLINE(void)
 pg_datum_ref(kern_context *kcxt,
 			 pg_numeric_t &result, void *datum)
@@ -495,11 +577,13 @@ pg_numeric_datum_store(kern_context *kcxt,
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return NULL;
 	}
-	pg_numeric_to_varlena(kcxt, pos,
-						  datum.value,
-						  datum.isnull);
-	kcxt->vlpos += VARSIZE_ANY(pos);
-
+	else if (!datum.isnull)
+	{
+		pg_numeric_to_varlena(kcxt, pos,
+							  datum.precision,
+							  datum.value);
+		kcxt->vlpos += VARSIZE_ANY(pos);
+	}
 	return pos;
 }
 
@@ -540,361 +624,358 @@ pg_numeric_as_datum(void *addr)
  * Numeric format translation functions
  * ----------------------------------------------------------------
  */
-STATIC_FUNCTION(pg_int8_t)
-numeric_to_integer(kern_context *kcxt, pg_numeric_t arg, cl_int size)
+STATIC_FUNCTION(cl_long)
+numeric_to_integer(kern_context *kcxt, pg_numeric_t arg,
+				   cl_ulong max_value, cl_bool *p_isnull)
 {
-	pg_int8_t	v;
-	int		    sign, expo;
-	cl_ulong	mant;
+	Int128_t	curr = arg.value;
+	int			precision = arg.precision;
+	bool		is_negative = false;
+	cl_long		mod;
 
-
-	if (arg.isnull == true) {
-		v.isnull = true;
-		v.value  = 0;
-		return v;
-	}
-
-	expo = PG_NUMERIC_EXPONENT(arg.value);
-	sign = PG_NUMERIC_SIGN(arg.value);
-	mant = PG_NUMERIC_MANTISSA(arg.value);
-	
-	if (mant == 0) {
-		v.isnull = false;
-		v.value  = 0;
-	}
-
+	if (__Int128_sign(curr) < 0)
 	{
-		int  exp = abs(expo);
-		long mag = 1;
-
-		for(int i=0; i<exp; i++) {
-			if((mag * 10) < mag) {
-				v.isnull = true;
-				v.value  = 0;
-				return v;
-			}
-			mag *= 10;
-		}
-
-		if (expo < 0) {
-			// Round off if exponent is minus.
-			mant = (mant + mag/2) / mag;
-
-		} else {
-			// Overflow check
-			if ((mant * mag) / mag != mant) {
-				v.isnull = true;
-				v.value  = 0;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-				return v;
-			}
-
-			mant *= mag;
-		}
+		is_negative = true;
+		curr = __Int128_inverse(curr);
 	}
-
-	// Overflow check
+	while (precision > 0)
 	{
-		int      nbits       = size * BITS_PER_BYTE;
-		cl_ulong max_val     = (1UL << (nbits - 1)) - 1;
-		cl_ulong abs_min_val = (1UL << (nbits - 1));
-		if((sign == 0 && max_val < mant) ||
-		   (sign != 0 && abs_min_val < mant)) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
+		curr = __Int128_div(curr, 10, &mod);
+		precision--;
 	}
-
-	v.isnull = false;
-	v.value  = (sign == 0) ? mant : (-mant);
-
-	return v;
+	while (precision < 0)
+	{
+		curr = __Int128_mul(curr, 10);
+		precision++;
+	}
+	/* overflow? */
+	if (curr.hi != 0 || curr.lo > max_value)
+	{
+		*p_isnull = true;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+	}
+	return (!is_negative ? (cl_long)curr.lo : -((cl_long)curr.lo));
 }
 
-STATIC_FUNCTION(pg_float8_t)
+STATIC_FUNCTION(cl_double)
 numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 {
-	pg_float8_t	v;
-	int			expo, sign;
-	cl_ulong	mant;
-	double		fvalue;
+	Int128_t	curr = arg.value;
+	cl_int		precision = arg.precision;
+	bool		is_negative = (__Int128_sign(curr) < 0);
+	cl_ulong	fp64_mask = (~FP64_FRAC_MASK << 1);
+	cl_ulong	ival;
+	cl_int		expo;
 
-	if (arg.isnull == true) {
-		v.isnull = true;
-		v.value  = 0;
-		return v;
+	if (is_negative)
+		curr = __Int128_inverse(curr);
+	while (curr.hi != 0)
+	{
+		cl_long		mod;
+
+		curr = __Int128_div(curr, 10, &mod);
+		precision--;
 	}
-
-	expo = PG_NUMERIC_EXPONENT(arg.value);
-	sign = PG_NUMERIC_SIGN(arg.value);
-	mant = PG_NUMERIC_MANTISSA(arg.value);
-
-	if (mant == 0) {
-		v.isnull = false;
-		v.value  = 0.0;
-		return v;
+	ival = curr.lo;
+	expo = FP64_FRAC_BITS;
+	while (precision > 0)
+	{
+		if ((ival & fp64_mask) != 0)
+		{
+			ival /= 10;
+			precision--;
+		}
+		else
+		{
+			ival *= 2;
+			expo--;
+		}
 	}
-
-	fvalue = (double)mant * exp10((double)expo);
-
-	if (isinf(fvalue) || isnan(fvalue)) {
-		v.isnull = true;
-		v.value  = 0.0;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return v;
+	while (precision < 0)
+	{
+		if ((ival & fp64_mask) == 0)
+		{
+			ival *= 10;
+			precision++;
+		}
+		else
+		{
+			ival /= 2;
+			expo++;
+		}
 	}
+	/* special case if zero */
+	if (ival == 0)
+		return 0.0;
 
-	v.isnull = false;
-	v.value  = (sign == 0) ? fvalue : (-fvalue);
-
-	return v;
+	while ((ival & fp64_mask) != 0)
+	{
+		ival /= 2;
+		expo++;
+	}
+	while ((ival & (FP64_FRAC_MASK + 1)) == 0)
+	{
+		ival *= 2;
+		expo--;
+	}
+	expo += FP64_EXPO_BIAS;
+	if (expo < 0)			/* -infinity */
+		return __longlong_as_double(FP64_SIGN_MASK | FP64_EXPO_MASK);
+	else if (expo >= 2047)	/* +infinity */
+		return __longlong_as_double(FP64_EXPO_MASK);
+	else
+		return __longlong_as_double((is_negative ? FP64_SIGN_MASK : 0) |
+									((cl_ulong)expo << FP64_FRAC_BITS) |
+									(ival & FP64_FRAC_MASK));
 }
 
 STATIC_FUNCTION(pg_int2_t)
 pgfn_numeric_int2(kern_context *kcxt, pg_numeric_t arg)
 {
-	pg_int2_t v;
-	pg_int8_t tmp = numeric_to_integer(kcxt, arg, sizeof(v.value));
+	pg_int2_t	result;
 
-	v.isnull = tmp.isnull;
-	v.value  = tmp.value;
-
-	return v;
+	result.isnull = arg.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_short)
+			numeric_to_integer(kcxt, arg, SHRT_MAX, &result.isnull);
+	}
+	return result;
 }
 
 STATIC_FUNCTION(pg_int4_t)
 pgfn_numeric_int4(kern_context *kcxt, pg_numeric_t arg)
 {
-	pg_int4_t v;
-	pg_int8_t tmp = numeric_to_integer(kcxt, arg, sizeof(v.value));
+	pg_int4_t	result;
 
-	v.isnull = tmp.isnull;
-	v.value  = tmp.value;
-
-	return v;
+	result.isnull = arg.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_int)
+			numeric_to_integer(kcxt, arg, INT_MAX, &result.isnull);
+	}
+	return result;
 }
 
 STATIC_FUNCTION(pg_int8_t)
 pgfn_numeric_int8(kern_context *kcxt, pg_numeric_t arg)
 {
-	pg_int8_t v;
-	return numeric_to_integer(kcxt, arg, sizeof(v.value));
+	pg_int8_t	result;
+
+	result.isnull = arg.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_long)
+			numeric_to_integer(kcxt, arg, LONG_MAX, &result.isnull);
+	}
+	return result;
 }
 
 STATIC_INLINE(pg_float2_t)
 pgfn_numeric_float2(kern_context *kcxt, pg_numeric_t arg)
 {
-	pg_float8_t	tmp = numeric_to_float(kcxt, arg);
-	pg_float2_t v = { (cl_half)tmp.value, tmp.isnull };
+	pg_float2_t	result;
 
-	if (!v.isnull && isinf((cl_float)v.value))
+	result.isnull = arg.isnull;
+	if (!result.isnull)
 	{
-		v.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		result.value = numeric_to_float(kcxt, arg);
+		if (isinf((cl_float)result.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
 	}
-	return v;
+	return result;
 }
 
 STATIC_INLINE(pg_float4_t)
 pgfn_numeric_float4(kern_context *kcxt, pg_numeric_t arg)
 {
+	pg_float4_t	result;
 
-	pg_float8_t tmp = numeric_to_float(kcxt, arg);
-	pg_float4_t	v   = { (cl_float)tmp.value, tmp.isnull };
-
-	if (!v.isnull && isinf(v.value))
+	result.isnull = arg.isnull;
+	if (!result.isnull)
 	{
-		v.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		result.value = numeric_to_float(kcxt, arg);
+		if (isinf(result.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
 	}
-	return v;
+	return result;
 }
 
 STATIC_INLINE(pg_float8_t)
 pgfn_numeric_float8(kern_context *kcxt, pg_numeric_t arg)
 {
-	return numeric_to_float(kcxt, arg);
-}
+	pg_float8_t	result;
 
-STATIC_FUNCTION(pg_numeric_t)
-integer_to_numeric(kern_context *kcxt, pg_int8_t arg, cl_int size)
-{
-	pg_numeric_t	v;
-	int				sign;
-	int				expo;
-	cl_ulong		mant;
-
-
-	if (arg.isnull) {
-		v.isnull = true;
-		v.value  = 0;
-		return v;
-	}
-		
-	if (arg.value == 0) {
-		v.isnull = false;
-		v.value  = PG_NUMERIC_SET(0, 0, 0);
-		return v;
-	}
-
-	if (0 <= arg.value) {
-		sign = 0;
-		mant = arg.value;
-	} else {
-		sign = 1;
-		mant = -arg.value;
-	}
-	expo = 0;
-
-	// Normalize
-	while (mant % 10 == 0  &&  expo < PG_NUMERIC_EXPONENT_MAX) {
-		mant /= 10;
-		expo ++;
-	}
-
-	if(PG_NUMERIC_MANTISSA_BITS < size * BITS_PER_BYTE - 1) {
-		// Error check
-		if (mant & ~PG_NUMERIC_MANTISSA_MASK) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-	}
-
-	v.isnull = false;
-	v.value  = PG_NUMERIC_SET(expo, sign, mant);
-
-	return v;
-}
-
-STATIC_FUNCTION(pg_numeric_t)
-float_to_numeric(kern_context *kcxt, pg_float8_t arg)
-{
-	pg_numeric_t	v;
-	cl_ulong		fval;
-	int				sign, expo;
-	cl_ulong		frac;
-	int				base2, base10;
-	double			x;
-
-	if (arg.isnull)
+	result.isnull = arg.isnull;
+	if (!result.isnull)
 	{
-		v.isnull = true;
-		v.value  = 0;
-		return v;
-	}
-	if (isnan(arg.value) || isinf(arg.value))
-	{
-		v.isnull = true;
-		v.value  = 0;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return v;
-	}
-
-	if (arg.value == 0.0) {
-		v.isnull = false;
-		v.value  = PG_NUMERIC_SET(0, 0, 0);
-		return v;
-	}
-
-	fval = __double_as_longlong(arg.value);
-	sign = (fval >> 63);
-	expo = ((fval & FP64_EXPO_MASK) >> FP64_FRAC_BITS) - FP64_EXPO_BIAS;
-	frac = (fval & FP64_FRAC_MASK);
-	if (expo == 0)
-	{
-		/* denormalized number is obviously 0.0 in pg_numeric_t */
-		v.isnull = false;
-		v.value = PG_NUMERIC_SET(0, sign, 0);
-		return v;
-	}
-	frac |= (1UL << FP64_FRAC_BITS);
-	base2 = FP64_FRAC_BITS - expo;
-	base10 = floor(log10(pow(2.0, (double)base2)));
-	/*
-	 * value = frac / 2^base2, it is equivalent to:
-	 * value = 10^(-base10) * frac * (10^base10 / 2^base2))
-	 */
-	x = (double)frac * (pow(10.0, (double)base10) /
-						pow( 2.0, (double)base2));
-	fval = __double_as_longlong(x);
-	assert((fval >> 63) == 0);		/* should be positive */
-	expo = ((fval & FP64_EXPO_MASK) >> FP64_FRAC_BITS) - FP64_EXPO_BIAS;
-	frac = (fval & FP64_FRAC_MASK) | (1UL << FP64_FRAC_BITS);
-	if (expo < FP64_FRAC_BITS)
-		frac >>= (FP64_FRAC_BITS - expo);
-	else if (expo > FP64_FRAC_BITS)
-		frac <<= (expo - FP64_FRAC_BITS);
-
-	/* final adjustment */
-	while (base10 < 0)
-	{
-		frac *= 10;
-		base10++;
-		if ((frac & ~PG_NUMERIC_MANTISSA_MASK) != 0)
+		result.value = numeric_to_float(kcxt, arg);
+		if (isinf(result.value))
 		{
-			/* out of range */
-			v.isnull = true;
-			v.value  = 0;
+			result.isnull = true;
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
 		}
 	}
+	return result;
+}
 
-	while (base10 > PG_NUMERIC_EXPONENT_MAX ||
-		   (base10 > 0 && frac % 10 == 0))
+STATIC_FUNCTION(pg_numeric_t)
+integer_to_numeric(kern_context *kcxt, cl_long ival)
+{
+	pg_numeric_t	result;
+
+	result.isnull = false;
+	result.precision = 0;
+	result.value.lo = ival;
+	result.value.hi = (ival < 0 ? ~0UL : 0);
+
+	return pg_numeric_normalize(result);
+}
+
+STATIC_FUNCTION(pg_numeric_t)
+float_to_numeric(kern_context *kcxt, cl_double fval)
+{
+	pg_numeric_t result;
+	cl_ulong	ival = __double_as_longlong(fval);
+	cl_ulong	frac = FP64_FRAC_VALUE(ival);
+	cl_int		expo = FP64_EXPO_VALUE(ival);
+	cl_bool		sign = FP64_SIGN_VALUE(ival);
+	cl_int		prec, x, y;
+
+	/* special case if zero */
+	if ((ival & (FP64_FRAC_MASK | FP64_EXPO_MASK)) == 0)
+	{
+		memset(&result, 0, sizeof(pg_numeric_t));
+		return result;
+	}
+	frac = FP64_FRAC_VALUE(ival);
+	expo = FP64_EXPO_VALUE(ival);
+	sign = FP64_SIGN_VALUE(ival);
+
+	/*
+	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
+	 * with keeping accuracy (52bit).
+	 */
+	prec = log10(exp2((double)(FP64_FRAC_BITS - expo)));
+	x = prec;
+	y = FP64_FRAC_BITS - expo;
+	while (y > 0)
+	{
+		int		width = 64 - __clzll(frac);
+
+		if (width > FP64_FRAC_BITS)
+		{
+			frac /= 2;
+			y--;
+		}
+		else
+		{
+			frac *= 10;
+			x--;
+		}
+	}
+	while (y < 0)
+	{
+		int		width = 64 - __clzll(frac);
+
+		if (width > FP64_FRAC_BITS)
+		{
+			frac *= 2;
+			y++;
+		}
+		else
+		{
+			frac /= 10;
+			x++;
+		}
+	}
+	/*  float64 is not valid on more than 15-digits */
+	while (frac > 1000000000000000UL)
 	{
 		frac /= 10;
-		base10--;
+		x++;
 	}
-	/* now fval = (sign ? -1 : 1) * 10^(-base10) * frac */
-	v.isnull = false;
-	v.value = PG_NUMERIC_SET(-base10, sign, frac);
-
-	return v;
+	result.value.hi = 0;
+	result.value.lo = frac;
+	result.precision = prec - x;
+	if (sign)
+		result.value = __Int128_inverse(result.value);
+    return pg_numeric_normalize(result);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_int2_numeric(kern_context *kcxt, pg_int2_t arg)
 {
-	pg_int8_t tmp = { arg.value, arg.isnull };
-	return integer_to_numeric(kcxt, tmp, sizeof(arg.value));
+	pg_numeric_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = integer_to_numeric(kcxt, arg.value);
+	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_int4_numeric(kern_context *kcxt, pg_int4_t arg)
 {
-	pg_int8_t tmp = { arg.value, arg.isnull };
-	return integer_to_numeric(kcxt, tmp, sizeof(arg.value));
+	pg_numeric_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = integer_to_numeric(kcxt, arg.value);
+	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_int8_numeric(kern_context *kcxt, pg_int8_t arg)
 {
-	return integer_to_numeric(kcxt, arg, sizeof(arg.value));
+	pg_numeric_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = integer_to_numeric(kcxt, arg.value);
+	return result;
 }
 
 STATIC_INLINE(pg_numeric_t)
 pgfn_float2_numeric(kern_context *kcxt, pg_float2_t arg)
 {
-	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
-	return float_to_numeric(kcxt, tmp);
+	pg_numeric_t	result;
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = float_to_numeric(kcxt, (cl_double)arg.value);
+	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_float4_numeric(kern_context *kcxt, pg_float4_t arg)
 {
-	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
-	return float_to_numeric(kcxt, tmp);
+	pg_numeric_t	result;
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = float_to_numeric(kcxt, (cl_double)arg.value);
+	return result;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 {
-	return float_to_numeric(kcxt, arg);
+	pg_numeric_t	result;
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = float_to_numeric(kcxt, (cl_double)arg.value);
+	return result;
 }
 
 /*
@@ -904,23 +985,25 @@ pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_uplus(kern_context *kcxt, pg_numeric_t arg)
 {
-	/* return the value as-is */
 	return arg;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_uminus(kern_context *kcxt, pg_numeric_t arg)
 {
-	/* reverse the sign bit */
-	arg.value ^= PG_NUMERIC_SIGN_MASK;
+	if (!arg.isnull)
+		arg.value = __Int128_inverse(arg.value);
 	return arg;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_abs(kern_context *kcxt, pg_numeric_t arg)
 {
-	/* clear the sign bit */
-	arg.value &= ~PG_NUMERIC_SIGN_MASK;
+	if (!arg.isnull)
+	{
+		if (__Int128_sign(arg.value) < 0)
+			arg.value = __Int128_inverse(arg.value);
+	}
 	return arg;
 }
 
@@ -928,212 +1011,83 @@ STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_add(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_numeric_t	v;
-	int			expo1, expo2, sign1, sign2;
-	cl_ulong	mant1, mant2;
+	pg_numeric_t result;
 
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (result.isnull)
+		return result;
 
-	if (arg1.isnull || arg2.isnull) {
-		v.isnull = true;
-		v.value  = 0;
-		return v;
+	while (arg1.precision > arg2.precision)
+	{
+		arg2.value = __Int128_mul(arg2.value, 10);
+		arg2.precision++;
 	}
-
-	expo1 = PG_NUMERIC_EXPONENT(arg1.value);
-	sign1 = PG_NUMERIC_SIGN(arg1.value);
-	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
-
-	expo2 = PG_NUMERIC_EXPONENT(arg2.value);
-	sign2 = PG_NUMERIC_SIGN(arg2.value);
-	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
-
-	// Change the number of digits
-	if (expo1 != expo2) {
-		int			expoDiff = abs(expo1 - expo2);
-		cl_ulong	value	  = (expo1 < expo2) ? (mant2) : (mant1);
-		cl_ulong	mag;
-		int			i;
-
-		if (PG_MAX_DIGITS <= expoDiff) {
-			// magnify is overflow
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		mag = 1;
-		for (i=0; i < expoDiff; i++) {
-			mag *= 10;
-		}
-
-		// Overflow check
-		if ((value * mag) / mag != value) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		if (expo1 < expo2) {
-			mant2 = value * mag;
-			expo2 = expo1;
-		} else {
-			mant1 = value * mag;
-			expo1 = expo2;
-		}
+	while (arg1.precision < arg2.precision)
+	{
+		arg1.value = __Int128_mul(arg1.value, 10);
+		arg1.precision++;
 	}
+	asm volatile("add.cc.u64     %0, %2, %3;\n"
+				 "addc.u64       %1, %4, %5;\n"
+				 : "=l" (result.value.lo),
+				   "=l" (result.value.hi)
+				 : "l" (arg1.value.lo),
+				   "l" (arg2.value.lo),
+				   "l" (arg1.value.hi),
+				   "l" (arg2.value.hi));
+	result.precision = arg1.precision;
 
-	// Add mantissa 
-	if (sign1 != sign2) {
-		if (mant1 < mant2) {
-			sign1 = sign2;
-			mant1 = mant2 - mant1;
-		} else {
-			mant1 -= mant2;
-		}
-	} else {
-		if ((mant1 + mant2) < mant1) {
-			// Overflow
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-		mant1 += mant2;
-	}
-
-	// Set 0 if mantissa is 0
-	if(mant1 == 0UL) {
-		v.isnull = false;
-		v.value  = PG_NUMERIC_SET(0, 0, 0);
-		return v;
-	}
-
-	// Normalize
-	while(mant1 % 10 == 0  &&  expo1 < PG_NUMERIC_EXPONENT_MAX) {
-		mant1 /= 10;
-		expo1 ++;
-	}
-
-	// Error check
-	if (expo1 < PG_NUMERIC_EXPONENT_MIN || PG_NUMERIC_EXPONENT_MAX < expo1 ||
-		(mant1 & ~PG_NUMERIC_MANTISSA_MASK)) {
-		v.isnull = true;
-		v.value  = 0;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return v;
-	}
-
-	// Set
-	v.isnull = false;
-	v.value  = PG_NUMERIC_SET(expo1, sign1, mant1);
-
-	return v;
+	return pg_numeric_normalize(result);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_sub(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_numeric_t arg = pgfn_numeric_uminus(kcxt, arg2);
-	
-	return pgfn_numeric_add(kcxt, arg1, arg);
+	arg2.value = __Int128_inverse(arg2.value);
+
+	return pgfn_numeric_add(kcxt, arg1, arg2);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_numeric_mul(kern_context *kcxt,
 				 pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	pg_numeric_t	v;
-	int				expo1, expo2, sign1, sign2;
-	cl_ulong		mant1, mant2;
+	pg_numeric_t result;
+	cl_bool		is_negative_1 = false;
+	cl_bool		is_negative_2 = false;
 
-	if (arg1.isnull || arg2.isnull) {
-		v.isnull = true;
-		v.value  = 0;
-		return v;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (result.isnull)
+		return result;
+	if (__Int128_sign(arg1.value) < 0)
+	{
+		is_negative_1 = true;
+		arg1.value = __Int128_inverse(arg1.value);
+	}
+	if (__Int128_sign(arg2.value) < 0)
+	{
+		is_negative_2 = true;
+		arg2.value = __Int128_inverse(arg2.value);
 	}
 
-	expo1 = PG_NUMERIC_EXPONENT(arg1.value);
-	sign1 = PG_NUMERIC_SIGN(arg1.value);
-	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
-
-	expo2 = PG_NUMERIC_EXPONENT(arg2.value);
-	sign2 = PG_NUMERIC_SIGN(arg2.value);
-	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
-
-	// Set 0, if mantissa is 0.
-	if (mant1 == 0UL || mant2 == 0UL) {
-		v.isnull = false;
-		v.value  = PG_NUMERIC_SET(0, 0, 0);
-		return v;
-	}
-
-	// Calculate exponential
-	expo1 += expo2;
-
-	// Calculate sign
-	sign1 ^= sign2;
- 
-	// Calculate mantissa
-	if ((mant1 * mant2) / mant2 != mant1) {
-		v.isnull = true;
-		v.value  = 0;
+	if ((arg1.value.hi != 0 && arg2.value.hi != 0) ||
+		__umul64hi(arg1.value.hi, arg2.value.lo) != 0 ||
+		__umul64hi(arg1.value.lo, arg2.value.hi) != 0)
+	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return v;
+		result.isnull = true;
+		return result;
 	}
-	mant1 *= mant2;
+	result.value.lo = arg1.value.lo * arg2.value.lo;
+	result.value.hi = __umul64hi(arg1.value.lo, arg2.value.lo);
+	result.value.hi += arg1.value.hi * arg2.value.lo;
+	result.value.hi += arg1.value.lo * arg2.value.hi;
 
-	// Normalize
-	while (mant1 % 10 == 0  &&  expo1 < PG_NUMERIC_EXPONENT_MAX) {
-		mant1 /= 10;
-		expo1 ++;
-	}
-
-	if (PG_NUMERIC_EXPONENT_MAX < expo1) {
-		// Exponent is overflow.
-		int			expoDiff = expo1 - PG_NUMERIC_EXPONENT_MAX;
-		cl_ulong	mag;
-		int			i;
-
-		if (PG_MAX_DIGITS <= expoDiff) {
-			// magnify is overflow
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		for (i=0, mag=1; i < expoDiff; i++) {
-			mag *= 10;
-		}
-
-		if ((mant1 * mag) / mag != mant1) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		expo1 -= expoDiff;
-		mant1 *= mag;
-	}
-
-	// Error check
-	if (expo1 < PG_NUMERIC_EXPONENT_MIN || PG_NUMERIC_EXPONENT_MAX < expo1 ||
-		(mant1 & ~PG_NUMERIC_MANTISSA_MASK)) {
-		v.isnull = true;
-		v.value  = 0;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return v;
-	}
-
-	// set
-	v.isnull = false;
-	v.value  = PG_NUMERIC_SET(expo1, sign1, mant1);
-
-	return v;
+	if (is_negative_1 != is_negative_2)
+		result.value = __Int128_inverse(result.value);
+	result.precision = arg1.precision + arg2.precision;
+	return pg_numeric_normalize(result);
 }
 
 /*
@@ -1143,62 +1097,26 @@ pgfn_numeric_mul(kern_context *kcxt,
 STATIC_FUNCTION(int)
 numeric_cmp(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
 {
-	int			i, ret, expoDiff;
-	cl_ulong	mantL, mantR;
-	cl_ulong 	mag;
+	int		sign1 = __Int128_sign(arg1.value);
+	int		sign2 = __Int128_sign(arg2.value);
 
-	int			expo1 = PG_NUMERIC_EXPONENT(arg1.value);
-	int			sign1 = PG_NUMERIC_SIGN(arg1.value);
-	cl_ulong	mant1 = PG_NUMERIC_MANTISSA(arg1.value);
-
-	int			expo2 = PG_NUMERIC_EXPONENT(arg2.value);
-	int			sign2 = PG_NUMERIC_SIGN(arg2.value);
-	cl_ulong	mant2 = PG_NUMERIC_MANTISSA(arg2.value);
-
-
-	// Ignore exponential and sign, if both mantissa is 0.
-	if(mant1 == 0  &&  mant2 == 0) {
-		return 0;
+	/* shortcut for obvious cases */
+	if (sign1 > sign2)
+		return 1;
+	else if (sign1 < sign2)
+		return -1;
+	/* ok, both of arg1 and arg2 is not zero, and have same sign */
+	while (arg1.precision > arg2.precision)
+	{
+		arg2.value = __Int128_mul(arg2.value, 10);
+		arg2.precision++;
 	}
-
-	// Compair flag, If sign flag is different.
-	if(sign1 != sign2) {
-		return sign2 - sign1;
+	while (arg1.precision < arg2.precision)
+	{
+		arg1.value = __Int128_mul(arg1.value, 10);
+		arg1.precision++;
 	}
-
-	// Compair the exponential/matissa.
-	expoDiff = min(PG_MAX_DIGITS, (int)(abs(expo1 - expo2)));
-
-	if (expo1 < expo2) {
-		mantL = mant1;
-		mantR = mant2;	// arg2's exponential is large.
-	} else {
-		mantL = mant2;
-		mantR = mant1;	// arg1's exponential is large.
-	}
-
-	for (i=0, mag=1; i < expoDiff; i++) {
-		mag *= 10;
-	}
-
-	if ((mantR * mag) / mag != mantR  ||  mantL < mantR * mag) {
-		// mantR * mag is overflow, or larger than mantL
-		ret = 1;
-	} else if(mantL == mantR * mag) {
-		ret = 0;
-	} else {
-		ret = -1;
-	}
-
-	if(expo1 < expo2) {
-		ret *= -1;
-	}
-
-	if(sign1 != 0) {
-		ret *= -1;
-	}
-
-	return ret;
+	return __Int128_compare(arg1.value, arg2.value);
 }
 
 STATIC_FUNCTION(pg_bool_t)
@@ -1207,15 +1125,9 @@ pgfn_numeric_eq(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) == 0);
-	}
-
 	return result;
 }
 
@@ -1225,15 +1137,9 @@ pgfn_numeric_ne(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) != 0);
-	}
-
 	return result;
 }
 
@@ -1243,15 +1149,9 @@ pgfn_numeric_lt(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) < 0);
-	}
-
 	return result;
 }
 
@@ -1261,15 +1161,9 @@ pgfn_numeric_le(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) <= 0);
-	}
-
 	return result;
 }
 
@@ -1279,15 +1173,9 @@ pgfn_numeric_gt(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) > 0);
-	}
-
 	return result;
 }
 
@@ -1297,15 +1185,9 @@ pgfn_numeric_ge(kern_context *kcxt,
 {
 	pg_bool_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
 		result.value = (numeric_cmp(kcxt, arg1, arg2) >= 0);
-	}
-
 	return result;
 }
 
@@ -1316,115 +1198,9 @@ pgfn_type_compare(kern_context *kcxt,
 	pg_int4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (result.isnull)
-		result.value = 0;
-	else
+	if (!result.isnull)
 		result.value = numeric_cmp(kcxt, arg1, arg2);
-
 	return result;
-}
-
-STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_max(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
-{
-	pg_bool_t v = pgfn_numeric_ge(kcxt, arg1, arg2);
-
-	if (v.isnull)
-	{
-		pg_numeric_t	temp;
-
-		temp.isnull = true;
-		temp.value = 0;
-
-		return temp;
-	}
-	return (v.value ? arg1 : arg2);
-}
-
-STATIC_FUNCTION(pg_numeric_t)
-pgfn_numeric_min(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
-{
-	pg_bool_t v = pgfn_numeric_ge(kcxt, arg1, arg2);
-
-	if (v.isnull)
-	{
-		pg_numeric_t	temp;
-
-		temp.isnull = true;
-		temp.value = 0;
-
-		return temp;
-	}
-	return (v.value ? arg2 : arg1);
-}
-
-
-/*
- * Atomic operation support
- */
-STATIC_INLINE(cl_ulong)
-pg_atomic_min_numeric(kern_context *kcxt,
-					  cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t	x, y;
-	cl_ulong		oldval;
-	cl_ulong		curval = *ptr;
-	int				comp;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		comp = numeric_cmp(kcxt, x, y);
-		if (comp < 0)
-			break;
-	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
-
-	return oldval;
-}
-
-STATIC_INLINE(cl_ulong)
-pg_atomic_max_numeric(kern_context *kcxt,
-					  cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t	x, y;
-	cl_ulong		oldval;
-	cl_ulong		curval = *ptr;
-	int				comp;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		comp = numeric_cmp(kcxt, x, y);
-		if (comp > 0)
-			break;
-	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
-
-	return oldval;
-}
-
-STATIC_INLINE(cl_ulong)
-pg_atomic_add_numeric(kern_context *kcxt,
-					  cl_ulong *ptr, cl_ulong numeric_value)
-{
-	pg_numeric_t x, y, z;
-	cl_ulong	oldval;
-	cl_ulong	curval = *ptr;
-	cl_ulong	newval;
-
-	do {
-		x.isnull = false;
-		y.isnull = false;
-		x.value = oldval = curval;
-		y.value = numeric_value;
-		z = pgfn_numeric_add(kcxt, x, y);
-		newval = z.value;
-	} while ((curval = atomicCAS(ptr, oldval, newval)) != oldval);
-
-	return oldval;
 }
 
 #endif /* __CUDACC__ */
