@@ -1874,7 +1874,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 #endif	/* __CUDACC__ */
 
 /*
- * kern_get_datum
+ * kern_get_datum_xxx
  *
  * Reference to a particular datum on the supplied kernel data store.
  * It returns NULL, if it is a really null-value in context of SQL,
@@ -1940,29 +1940,18 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 	return NULL;
 }
 
-STATIC_FUNCTION(HeapTupleHeaderData *)
-kern_get_tuple_row(kern_data_store *kds, cl_uint rowidx)
-{
-	kern_tupitem   *tupitem;
-
-	if (rowidx >= kds->nitems)
-		return NULL;	/* likely a BUG */
-	tupitem = KERN_DATA_STORE_TUPITEM(kds, rowidx);
-	return &tupitem->htup;
-}
-
 STATIC_FUNCTION(void *)
 kern_get_datum_row(kern_data_store *kds,
 				   cl_uint colidx, cl_uint rowidx)
 {
-	HeapTupleHeaderData *htup;
+	kern_tupitem   *tupitem;
 
-	if (colidx >= kds->ncols)
+	if (colidx >= kds->ncols ||
+		rowidx >= kds->nitems)
 		return NULL;	/* likely a BUG */
-	htup = kern_get_tuple_row(kds, rowidx);
-	if (!htup)
-		return NULL;
-	return kern_get_datum_tuple(kds->colmeta, htup, colidx);
+	tupitem = KERN_DATA_STORE_TUPITEM(kds, rowidx);
+
+	return kern_get_datum_tuple(kds->colmeta, &tupitem->htup, colidx);
 }
 
 STATIC_FUNCTION(void *)
@@ -2027,24 +2016,6 @@ kern_get_datum_column(kern_data_store *kds,
 		values += unitsz * rowidx;
 	}
 	return (void *)values;
-}
-
-STATIC_INLINE(void *)
-kern_get_datum(kern_data_store *kds,
-			   cl_uint colidx, cl_uint rowidx)
-{
-	/* is it out of range? */
-	if (colidx >= kds->ncols || rowidx >= kds->nitems)
-		return NULL;
-	if (kds->format == KDS_FORMAT_ROW ||
-		kds->format == KDS_FORMAT_HASH)
-		return kern_get_datum_row(kds, colidx, rowidx);
-	if (kds->format == KDS_FORMAT_SLOT)
-		return kern_get_datum_slot(kds, colidx, rowidx);
-	if (kds->format == KDS_FORMAT_COLUMN)
-		return kern_get_datum_column(kds, colidx, rowidx);
-	/* TODO: put StromError_DataStoreCorruption error here */
-	return NULL;
 }
 
 #ifdef __CUDACC__
