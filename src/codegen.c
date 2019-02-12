@@ -280,8 +280,7 @@ build_devtype_info_entry(Oid type_oid,
 
 	if (!element)
 		entry->type_array = build_devtype_info_entry(type_form->typarray,
-													 type_flags |
-													 DEVKERNEL_NEEDS_MATRIX,
+													 type_flags,
 													 "varlena *",
 													 NULL,
 													 NULL,
@@ -2812,7 +2811,6 @@ codegen_expression_walker(codegen_context *context,
 						 opexpr->useOr ? "true" : "false",
 						 dtype->type_length,
 						 dtype->type_align);
-		context->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
 		varlena_sz = 0;
 	}
 	else

@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
-#include "cuda_matrix.h"
+#include "cuda_plcuda.h"
 #include <math.h>
 
 /* function declarations */

@@ -368,6 +368,9 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/* Per session definition if any */
 	ofs += snprintf(source + ofs, len - ofs,
 					"\n%s\n", kern_define);
+	/* variable-length datum and array */
+	ofs += snprintf(source + ofs, len - ofs,
+                    "#include \"cuda_varlena.h\"\n");
 
 	/*
 	 * PG-Strom CUDA device code libraries
@@ -393,10 +396,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_MISC) == DEVKERNEL_NEEDS_MISC)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_misc.h\"\n");
-	/* cuda matrix.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_MATRIX) == DEVKERNEL_NEEDS_MATRIX)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_matrix.h\"\n");
 	/* cuda_rangetypes.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
 		ofs += snprintf(source + ofs, len - ofs,
