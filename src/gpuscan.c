@@ -291,7 +291,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	Path	   *pathnode;
-	Path	   *subpath;
 	List	   *dev_quals = NIL;
 	List	   *host_quals = NIL;
 	IndexOptInfo *indexOpt;
@@ -380,31 +379,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									   indexQuals,
 									   indexNBlocks);
 		add_partial_path(baserel, pathnode);
-
-		/*
-		 * add Gather + GpuScan path
-		 *
-		 * MEMO: Don't reuse the pathnode above, because add_partial_path()
-		 * may release the supplied path if it is obviously lesser.
-		 * If pathnode would be already released, the gather-path shall
-		 * take a bogus sub-path which leads segmentation fault.
-		 */
-		subpath = create_gpuscan_path(root, baserel,
-									  dev_quals,
-									  host_quals,
-									  parallel_nworkers,
-									  indexOpt,
-									  indexConds,
-									  indexQuals,
-									  indexNBlocks);
-		pathnode = (Path *)
-			create_gather_path(root,
-							   baserel,
-							   subpath,
-							   baserel->reltarget,
-							   NULL,
-							   NULL);
-		add_path(baserel, pathnode);
 	}
 }
 
