@@ -208,12 +208,28 @@ typedef struct toast_compress_header
 	}															\
 																\
 	STATIC_INLINE(void *)										\
-	pg_##NAME##_datum_store(kern_context *kcxt,					\
-							pg_##NAME##_t datum)				\
+	pg_##NAME##_datum_store_OLD(kern_context *kcxt,				\
+								pg_##NAME##_t datum)			\
 	{															\
 		if (datum.isnull)										\
 			return NULL;										\
 		return datum.value;										\
+	}															\
+																\
+	STATIC_INLINE(cl_int)										\
+	pg_datum_store(kern_context *kcxt,							\
+				   pg_##NAME##_t datum,							\
+				   Datum &value,								\
+                   cl_bool &isnull)								\
+	{															\
+		isnull = datum.isnull;									\
+		if (!datum.isnull)										\
+		{														\
+			value = PointerGetDatum(datum.value);				\
+			return VARSIZE_ANY(datum.value);					\
+		}														\
+		value = 0UL;											\
+		return 0;												\
 	}															\
 																\
 	STATIC_INLINE(pg_##NAME##_t)								\
@@ -277,12 +293,7 @@ typedef struct toast_compress_header
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)						\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
-	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
-	STATIC_INLINE(Datum)										\
-	pg_##NAME##_as_datum(void *addr)							\
-	{															\
-		return PointerGetDatum(addr);							\
-	}
+	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
 
 /* generic varlena */
 #ifndef PG_VARLENA_TYPE_DEFINED

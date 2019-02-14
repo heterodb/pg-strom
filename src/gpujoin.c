@@ -4331,17 +4331,14 @@ gpujoin_codegen_projection(StringInfo source,
 			appendStringInfo(
 				&body,
 				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
+				"  pg_datum_store(kcxt, temp.%s_v,\n"
+				"                 tup_values[%d],\n"
+				"                 tup_isnull[%d]);\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
 				dtype->type_name,
 				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name);
+				tle->resno - 1);
 		}
 		else
 		{
@@ -4349,7 +4346,7 @@ gpujoin_codegen_projection(StringInfo source,
 			appendStringInfo(
 				&body,
 				"  temp.%s_v = %s;\n"
-				"  addr = pg_%s_datum_store(kcxt,temp.%s_v);\n"
+				"  addr = pg_%s_datum_store_OLD(kcxt,temp.%s_v);\n"
 				"  tup_isnull[%d] = !addr;\n"
 				"  if (addr)\n"
 				"  {\n"

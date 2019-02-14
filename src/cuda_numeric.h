@@ -563,30 +563,29 @@ pg_datum_ref(kern_context *kcxt,
 	result = pg_numeric_datum_ref(kcxt, datum);
 }
 
-STATIC_INLINE(void *)
-pg_numeric_datum_store(kern_context *kcxt,
-					   pg_numeric_t datum)
+STATIC_INLINE(cl_int)
+pg_datum_store(kern_context *kcxt,
+			   pg_numeric_t datum,
+			   Datum &value,
+			   cl_bool &isnull)
 {
-	char   *pos;
-	int		maxlen = VARHDRSZ + sizeof(union NumericChoice);
+	char   *res;
 
+	isnull = datum.isnull;
 	if (datum.isnull)
-		return NULL;
-
-	pos = (char *)MAXALIGN(kcxt->vlpos);
-	if (!PTR_ON_VLBUF(kcxt, pos, maxlen))
+		return 0;
+	res = kern_context_alloc(kcxt, sizeof(struct NumericData));
+	if (!res)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return NULL;
+		isnull = true;
+		return 0;
 	}
-	else if (!datum.isnull)
-	{
-		pg_numeric_to_varlena(kcxt, pos,
-							  datum.precision,
-							  datum.value);
-		kcxt->vlpos += VARSIZE_ANY(pos);
-	}
-	return pos;
+	pg_numeric_to_varlena(kcxt, pos,
+						  datum.precision,
+						  datum.value);
+	isnull = false;
+	value  = PointerGetDatum(res);
+	return VARSIZE_ANY(res);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
@@ -613,12 +612,6 @@ pg_numeric_param(kern_context *kcxt,
 
 /* CRC32 calculation function */
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
-
-STATIC_INLINE(Datum)
-pg_numeric_as_datum(void *addr)
-{
-	return PointerGetDatum(addr);
-}
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
 

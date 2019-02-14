@@ -128,40 +128,42 @@
 		result = pg_##NAME##_datum_ref(kcxt, datum);				\
 	}																\
 																	\
-	STATIC_FUNCTION(void *)											\
-	pg_##NAME##_datum_store(kern_context *kcxt,						\
-							pg_##NAME##_t datum)					\
+	STATIC_FUNCTION(cl_int)											\
+	pg_datum_store(kern_context *kcxt,								\
+				   pg_##NAME##_t datum,								\
+				   Datum &value,									\
+                   cl_bool &isnull)									\
 	{																\
-		char	   *res;											\
-		char	   *pos;											\
-		char		flags;											\
-		cl_uint		len;											\
+		char			flags;										\
+		struct {													\
+			cl_uint		vl_len_;									\
+			cl_uint		rangetypid;									\
+			BASE		l_val;										\
+			BASE		u_val;										\
+			cl_char		flags;										\
+		} *res;														\
 																	\
+		isnull = datum.isnull;										\
 		if (datum.isnull)											\
-			return NULL;											\
-		res = (char *)MAXALIGN(kcxt->vlpos);						\
-		len = VARHDRSZ + sizeof(cl_uint) + 2 * sizeof(BASE) + 1;	\
-		if (!PTR_ON_VLBUF(kcxt, res, len))							\
+			return 0;												\
+		res = kern_context_alloc(kcxt, sizeof(*res));				\
+		if (!res)													\
 		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
-			return NULL;											\
+			isnull = true;											\
+			return 0;												\
 		}															\
-		flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0)  |		\
+		flags = ((datum.value.l.infinite  ? RANGE_LB_INF : 0) |		\
 				 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |		\
-				 (datum.value.u.infinite ? RANGE_UB_INF : 0)  |		\
+				 (datum.value.u.infinite  ? RANGE_UB_INF : 0) |		\
 				 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |		\
-				 (datum.value.empty ? RANGE_EMPTY : 0));			\
-		pos = res + VARHDRSZ;										\
-		*((cl_uint *)pos) = PG_TYPEOID;								\
-		pos += sizeof(cl_uint);										\
-		*((BASE *)pos) = datum.value.l.val;							\
-		pos += sizeof(BASE);										\
-		*((BASE *)pos) = datum.value.u.val;							\
-		pos += sizeof(BASE);										\
-		*((char *)pos) = flags;										\
-		SET_VARSIZE(res, len);										\
-																	\
-		return res;													\
+				 (datum.value.empty       ? RANGE_EMPTY : 0));		\
+		res->rangetypid = PG_TYPEOID;								\
+		res->l_val = datum.value.l.val;								\
+		res->u_val = datum.value.u.val;								\
+		res->flags = flags;											\
+		SET_VARSIZE(res, sizeof(*res));								\
+		value  = PointerGetDatum(res);								\
+		return sizeof(*res);										\
 	}																\
 																	\
 	STATIC_FUNCTION(pg_##NAME##_t)									\
@@ -204,12 +206,6 @@
 								 sizeof(char));						\
 		}															\
 		return hash;												\
-	}																\
-																	\
-	STATIC_INLINE(Datum)											\
-	pg_##NAME##_as_datum(void *addr)								\
-	{																\
-		return PointerGetDatum(addr);								\
 	}
 
 #ifndef PG_INT4RANGE_TYPE_DEFINED

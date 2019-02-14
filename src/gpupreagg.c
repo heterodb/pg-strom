@@ -3223,17 +3223,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					/* row */
 					appendStringInfo(
 						&temp,
-						"  if (!addr)\n"
-						"    dst_isnull[%d] = true;\n"
-						"  else\n"
-						"  {\n"
-						"    dst_isnull[%d] = false;\n"
-						"    dst_values[%d] = pg_%s_as_datum(addr);\n"
-						"  }\n",
+						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"  pg_datum_store(kcxt, temp.%s_v,\n"
+						"                 dst_values[%d],\n"
+						"                 dst_isnull[%d]);\n",
+						dtype->type_name,
+						dtype->type_name,
 						tle->resno - 1,
-						tle->resno - 1,
-						tle->resno - 1,
-						dtype->type_name);
+						tle->resno - 1);
 
 					/* slot */
 					appendStringInfo(
@@ -3251,17 +3248,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 							i-1);
 					appendStringInfo(
 						&cbody,
-						"  if (!addr)\n"
-						"    dst_isnull[%d] = true;\n"
-						"  else\n"
-						"  {\n"
-						"    dst_isnull[%d] = false;\n"
-						"    dst_values[%d] = pg_%s_as_datum(addr);\n"
-						"  }\n",
+						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"  pg_datum_store(kcxt, temp.%s_v,\n"
+						"                 dst_values[%d],\n"
+						"                 dst_isnull[%d]);\n",
+						dtype->type_name,
+						dtype->type_name,
 						tle->resno - 1,
-						tle->resno - 1,
-						tle->resno - 1,
-						dtype->type_name);
+						tle->resno - 1);
 				}
 				appendStringInfoString(&tbody, temp.data);
                 resetStringInfo(&temp);
@@ -3328,18 +3322,26 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		{
 			appendStringInfo(
 				&temp,
-				"  dst_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"    dst_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
-				tle->resno-1, dtype->type_name,
+				"  pg_datum_store(kcxt, temp.%s_v,\n"
+				"                 dst_values[%d],\n"
+				"                 dst_isnull[%d]);\n",
 				dtype->type_name,
-				tle->resno-1, dtype->type_name, dtype->type_name);
+				tle->resno-1,
+				tle->resno-1);
+			if (null_const_value)
+				appendStringInfo(
+					&temp,
+					"  if (temp.%s_v.isnull)\n"
+					"    dst_values[%d] = %s;\n",
+					dtype->type_name,
+					tle->resno-1,
+					null_const_value);
 		}
 		else
 		{
 			appendStringInfo(
 				&temp,
-				"  addr = pg_%s_datum_store(kcxt,temp.%s_v);\n"
+				"  addr = pg_%s_datum_store_OLD(kcxt,temp.%s_v);\n"
 				"  dst_isnull[%d] = !addr;\n"
 				"  if (addr)\n"
 				"  {\n"
@@ -3353,15 +3355,15 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				dtype->type_length > 0
 				? psprintf("sizeof(temp.%s_v.value)", dtype->type_name)
 				: "VARSIZE_ANY(addr)");
-		}
-		if (null_const_value)
-		{
-			appendStringInfo(
-				&temp,
-				"  else\n"
-				"    dst_values[%d] = %s;\n",
-				tle->resno-1,
-				null_const_value);
+			if (null_const_value)
+			{
+				appendStringInfo(
+					&temp,
+					"  else\n"
+					"    dst_values[%d] = %s;\n",
+					tle->resno-1,
+					null_const_value);
+			}
 		}
 	}
 	appendStringInfoString(&tbody, temp.data);

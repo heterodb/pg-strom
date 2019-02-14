@@ -22,14 +22,7 @@
 /* pg_money_t */
 #ifndef PG_MONEY_TYPE_DEFINED
 #define PG_MONEY_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long)
-STATIC_INLINE(Datum)
-pg_monery_as_datum(void *addr)
-{
-	cl_long		val = *((cl_long *)addr);
-	return SET_8_BYTES(val);
-}
-STROMCL_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,cl_long)
+STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long, )
 #endif
 
 /*
@@ -651,23 +644,28 @@ pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
 	result = pg_inet_datum_ref(kcxt, datum);
 }
 
-STATIC_INLINE(void *)
-pg_inet_datum_store(kern_context *kcxt, pg_inet_t datum)
+STATIC_INLINE(cl_int)
+pg_datum_store(kern_context *kcxt,
+			   pg_inet_t datum,
+			   Datum &value,
+			   cl_bool &isnull)
 {
-	char	   *pos;
+	char	   *res;
+	int			vl_len = VARHDRSZ + sizeof(inet_struct);
 
+	isnull = datum.isnull;
 	if (datum.isnull)
-		return NULL;
-	pos = (char *)MAXALIGN(kcxt->vlpos);
-	if (!PTR_ON_VLBUF(kcxt, pos, VARHDRSZ + sizeof(inet_struct)))
+		return 0;
+	res = kern_context_alloc(kcxt, vl_len);
+	if (!res)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return NULL;
+		isnull = true;
+		return 0;
 	}
-	SET_VARSIZE(pos, VARHDRSZ + sizeof(inet_struct));
-	memcpy(pos + VARHDRSZ, &datum.value, sizeof(inet_struct));
-	kcxt->vlpos += VARHDRSZ + sizeof(inet_struct);
-	return pos;
+	value = PointerGetDatum(res);
+	memcpy(res + VARHDRSZ, &datum.value, sizeof(inet_struct));
+	SET_VARSIZE(res, vl_len);
+	return vl_len;
 }
 
 STATIC_FUNCTION(pg_inet_t)
@@ -718,7 +716,6 @@ typedef pg_inet_t					pg_cidr_t;
 #define pg_cidr_isnull(a,b)			pg_inet_isnull(a,b)
 #define pg_cidr_isnotnull(a,b)		pg_inet_isnotnull(a,b,c)
 #define pg_cidr_comp_crc32(a,b,c)	pg_inet_comp_crc32(a,b,c)
-#define pg_cidr_as_datum(a)			pg_inet_as_datum(a)
 #endif	/* PG_CIDR_TYPE_DEFINED */
 
 /* memory comparison */

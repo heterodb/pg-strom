@@ -366,7 +366,7 @@ struct kern_parambuf;
 
 #ifndef __CUDACC__
 /* just a dummy for host code */
-#define KERN_CONTEXT_VARLENA_BUFSZ			FLEXIBLE_ARRAY_MEMBER
+#define KERN_CONTEXT_VARLENA_BUFSZ			1
 #endif	/* __CUDACC__ */
 #define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	2048
 
@@ -392,6 +392,20 @@ typedef struct
 #define PTR_ON_VLBUF(kcxt,ptr,len)							\
 	((char *)(ptr) >= (kcxt)->vlbuf &&						\
 	 (char *)(ptr) + (len) <= (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ)
+
+STATIC_INLINE(void *)
+kern_context_alloc(kern_context *kcxt, size_t len)
+{
+	char   *pos = (char *)MAXALIGN(kcxt->vlpos);
+
+	if (pos >= kcxt->vlbuf &&
+		pos + len <= kcxt->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ)
+	{
+		kcxt->vlpos = pos + len;
+		return pos;
+	}
+	return NULL;
+}
 
 #ifdef __CUDACC__
 /*
@@ -1058,77 +1072,91 @@ typedef struct
  * Template of variable classes: fixed-length referenced by value
  * ---------------------------------------------------------------
  */
-#define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
-	typedef struct {										\
-		BASE		value;									\
-		cl_bool		isnull;									\
+#define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)					\
+	typedef struct {												\
+		BASE		value;											\
+		cl_bool		isnull;											\
 	} pg_##NAME##_t;
 
 #ifdef __CUDACC__
-#define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum)						\
-	{														\
-		pg_##NAME##_t	result;								\
-															\
-		if (!datum)											\
-			result.isnull = true;							\
-		else												\
-		{													\
-			result.isnull = false;							\
-			result.value = *((BASE *) datum);				\
-		}													\
-		return result;										\
-	}														\
-	STATIC_INLINE(void)										\
-	pg_datum_ref(kern_context *kcxt,						\
-				 pg_##NAME##_t &result, void *datum)		\
-	{														\
-		result = pg_##NAME##_datum_ref(kcxt, datum);		\
-	}														\
-															\
-	STATIC_INLINE(void *)									\
-	pg_##NAME##_datum_store(kern_context *kcxt,				\
-							pg_##NAME##_t datum)			\
-	{														\
-		char	  *pos;										\
-															\
-		if (datum.isnull)									\
-			return NULL;									\
-		pos = (char *)MAXALIGN(kcxt->vlpos);				\
-		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))			\
-		{													\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
-			return NULL;									\
-		}													\
-		*((BASE *)pos) = datum.value;						\
-		kcxt->vlpos += sizeof(BASE);						\
-		return pos;											\
-	}														\
-															\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
-	{														\
-		kern_parambuf *kparams = kcxt->kparams;				\
-		pg_##NAME##_t result;								\
-															\
-		if (param_id < kparams->nparams &&					\
-			kparams->poffset[param_id] > 0)					\
-		{													\
-			BASE *addr = (BASE *)							\
-				((char *)kparams +							\
-				 kparams->poffset[param_id]);				\
-			result.value = *addr;							\
-			result.isnull = false;							\
-		}													\
-		else												\
-			result.isnull = true;							\
-															\
-		return result;										\
+#define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)			\
+	STATIC_INLINE(pg_##NAME##_t)									\
+	pg_##NAME##_datum_ref(kern_context *kcxt,						\
+						  void *datum)								\
+	{																\
+		pg_##NAME##_t	result;										\
+																	\
+		if (!datum)													\
+			result.isnull = true;									\
+		else														\
+		{															\
+			result.isnull = false;									\
+			result.value = *((BASE *) datum);						\
+		}															\
+		return result;												\
+	}																\
+	STATIC_INLINE(void)												\
+	pg_datum_ref(kern_context *kcxt,								\
+				 pg_##NAME##_t &result, void *datum)				\
+	{																\
+		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+	}																\
+																	\
+	STATIC_INLINE(void *)											\
+	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
+								pg_##NAME##_t datum)				\
+	{																\
+		char	  *pos;												\
+																	\
+		if (datum.isnull)											\
+			return NULL;											\
+		pos = (char *)MAXALIGN(kcxt->vlpos);						\
+		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))					\
+		{															\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			return NULL;											\
+		}															\
+		*((BASE *)pos) = datum.value;								\
+		kcxt->vlpos += sizeof(BASE);								\
+		return pos;													\
+	}																\
+																	\
+	STATIC_INLINE(cl_int)											\
+	pg_datum_store(kern_context *kcxt,								\
+				   pg_##NAME##_t datum,								\
+				   Datum &value,									\
+				   cl_bool &isnull)									\
+	{																\
+		isnull = datum.isnull;										\
+		if (!datum.isnull)											\
+		{															\
+			value = AS_DATUM(datum.value);							\
+			return sizeof(BASE);									\
+		}															\
+		return 0;													\
+	}																\
+																	\
+	STATIC_FUNCTION(pg_##NAME##_t)									\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
+	{																\
+		kern_parambuf *kparams = kcxt->kparams;						\
+		pg_##NAME##_t result;										\
+																	\
+		if (param_id < kparams->nparams &&							\
+			kparams->poffset[param_id] > 0)							\
+		{															\
+			BASE *addr = (BASE *)((char *)kparams +					\
+								  kparams->poffset[param_id]);		\
+			result.value = *addr;									\
+			result.isnull = false;									\
+		}															\
+		else														\
+			result.isnull = true;									\
+																	\
+		return result;												\
 	}
 #else	/* __CUDACC__ */
-#define	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)
+#define	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
 #endif	/* __CUDACC__ */
 
 /*
@@ -1136,67 +1164,88 @@ typedef struct
  * ----------------------------------------------------------------
  */
 #ifdef __CUDACC__
-#define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum)						\
-	{														\
-		pg_##NAME##_t	result;								\
-															\
-		if (!datum)											\
-			result.isnull = true;							\
-		else												\
-		{													\
-			result.isnull = false;							\
-			memcpy(&result.value, (BASE *) datum,			\
-				   sizeof(BASE));							\
-		}													\
-		return result;										\
-	}														\
-	STATIC_INLINE(void)										\
-	pg_datum_ref(kern_context *kcxt,						\
-				 pg_##NAME##_t &result, void *datum)		\
-	{														\
-		result = pg_##NAME##_datum_ref(kcxt, datum);		\
-	}														\
-															\
-	STATIC_INLINE(void *)									\
-	pg_##NAME##_datum_store(kern_context *kcxt,				\
-							pg_##NAME##_t datum)			\
-	{														\
-		char	   *pos;									\
-															\
-		if (datum.isnull)									\
-			return NULL;									\
-		pos = (char *)MAXALIGN(kcxt->vlpos);				\
-		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))			\
-		{													\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
-			return NULL;									\
-		}													\
-		memcpy(pos, &datum.value, sizeof(BASE));			\
-		kcxt->vlpos += sizeof(BASE);						\
-		return pos;											\
-	}														\
-															\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
-	{														\
-		kern_parambuf *kparams = kcxt->kparams;				\
-		pg_##NAME##_t result;								\
-															\
-		if (param_id < kparams->nparams &&					\
-			kparams->poffset[param_id] > 0)					\
-		{													\
-			BASE *addr = (BASE *)((char *)kparams +			\
-								  kparams->poffset[param_id]);	\
-			memcpy(&result.value, addr, sizeof(BASE));		\
-			result.isnull = false;							\
-		}													\
-		else												\
-			result.isnull = true;							\
-															\
-		return result;										\
+#define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)					\
+	STATIC_INLINE(pg_##NAME##_t)									\
+	pg_##NAME##_datum_ref(kern_context *kcxt,						\
+						  void *datum)								\
+	{																\
+		pg_##NAME##_t	result;										\
+																	\
+		if (!datum)													\
+			result.isnull = true;									\
+		else														\
+		{															\
+			result.isnull = false;									\
+			memcpy(&result.value, (BASE *) datum, sizeof(BASE));	\
+		}															\
+		return result;												\
+	}																\
+	STATIC_INLINE(void)												\
+	pg_datum_ref(kern_context *kcxt,								\
+				 pg_##NAME##_t &result, void *datum)				\
+	{																\
+		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+	}																\
+																	\
+	STATIC_INLINE(void *)											\
+	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
+								pg_##NAME##_t datum)				\
+	{																\
+		char	   *pos;											\
+																	\
+		if (datum.isnull)											\
+			return NULL;											\
+		pos = (char *)MAXALIGN(kcxt->vlpos);						\
+		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))					\
+		{															\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			return NULL;											\
+		}															\
+		memcpy(pos, &datum.value, sizeof(BASE));					\
+		kcxt->vlpos += sizeof(BASE);								\
+		return pos;													\
+	}																\
+																	\
+	STATIC_INLINE(cl_int)											\
+	pg_datum_store(kern_context *kcxt,								\
+				   pg_##NAME##_t datum,								\
+				   Datum &value,									\
+				   cl_bool &isnull)									\
+	{																\
+		char	   *res;											\
+																	\
+		isnull = datum.isnull;										\
+		if (datum.isnull)											\
+			return 0;												\
+		res = kern_context_alloc(kcxt, sizeof(BASE));				\
+		if (!res)													\
+		{															\
+			isnull = true;											\
+			return 0;												\
+		}															\
+		memcpy(res, &datum.value, sizeof(BASE));					\
+		value = PointerGetDatum(res);								\
+		return sizeof(BASE);										\
+	}																\
+																	\
+	STATIC_FUNCTION(pg_##NAME##_t)									\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
+	{																\
+		kern_parambuf *kparams = kcxt->kparams;						\
+		pg_##NAME##_t result;										\
+																	\
+		if (param_id < kparams->nparams &&							\
+			kparams->poffset[param_id] > 0)							\
+		{															\
+			BASE *addr = (BASE *)((char *)kparams +					\
+								  kparams->poffset[param_id]);		\
+			memcpy(&result.value, addr, sizeof(BASE));				\
+			result.isnull = false;									\
+		}															\
+		else														\
+			result.isnull = true;									\
+																	\
+		return result;												\
 	}
 #else	/* __CUDACC__ */
 #define	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
@@ -1245,20 +1294,15 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #define	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
-#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
+#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)		\
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
 #define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)	\
-	STATIC_INLINE(Datum)							\
-	pg_##NAME##_as_datum(void *addr)				\
-	{												\
-		return PointerGetDatum(addr);				\
-	}
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
 /* template for binary compatible type-cast */
 #define STROMCL_SIMPLE_TYPECAST_TEMPLATE(SOURCE,TARGET)		\
@@ -1296,89 +1340,48 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
-DEVICE_ONLY_INLINE(Datum)
-pg_bool_as_datum(void *addr)
-{
-	cl_bool		val = *((cl_bool *)addr);
-	return SET_1_BYTE(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool, )
 #endif	/* PG_BOOL_TYPE_DEFINED */
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
-DEVICE_ONLY_INLINE(Datum)
-pg_int2_as_datum(void *addr)
-{
-	cl_short	val = *((cl_short *)addr);
-	return SET_2_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short, )
 #endif	/* PG_INT2_TYPE_DEFINED */
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
-DEVICE_ONLY_INLINE(Datum)
-pg_int4_as_datum(void *addr)
-{
-	cl_int		val = *((cl_int *)addr);
-	return SET_4_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int, )
 #endif	/* PG_INT4_TYPE_DEFINED */
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
-DEVICE_ONLY_INLINE(Datum)
-pg_int8_as_datum(void *addr)
-{
-	cl_long		val = *((cl_long *)addr);
-	return SET_8_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long, )
 #endif	/* PG_INT8_TYPE_DEFINED */
 
 /* pg_float2_t */
 #ifndef PG_FLOAT2_TYPE_DEFINED
 #define PG_FLOAT2_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half)
-DEVICE_ONLY_INLINE(Datum)
-pg_float2_as_datum(void *addr)
-{
-	cl_half		val = *((cl_half *)addr);
-	return SET_2_BYTES(__half_as_short(val));
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half, __half_as_short)
 #endif	/* PG_FLOAT2_TYPE_DEFINED */
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
-DEVICE_ONLY_INLINE(Datum)
-pg_float4_as_datum(void *addr)
-{
-	cl_float	val = *((cl_float *)addr);
-	return SET_4_BYTES(__float_as_int(val));
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float, __float_as_int)
 #endif	/* PG_FLOAT4_TYPE_DEFINED */
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
-DEVICE_ONLY_INLINE(Datum)
-pg_float8_as_datum(void *addr)
-{
-	cl_double	val = *((cl_double *)addr);
-	return SET_8_BYTES(__double_as_longlong(val));
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
 
 /* definitions for variable-length data types */
 #include "cuda_varlena.h"
+
 #endif	/* __CUDACC__ */
 
 #ifdef	__CUDACC__

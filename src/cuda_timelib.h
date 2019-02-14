@@ -196,25 +196,13 @@ struct pg_tm
 
 #ifndef PG_DATE_TYPE_DEFINED
 #define PG_DATE_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT)
-STATIC_INLINE(Datum)
-pg_date_as_datum(void *addr)
-{
-	DateADT		val = *((DateADT *)addr);
-	return SET_4_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
 #endif
 
 #ifndef PG_TIME_TYPE_DEFINED
 #define PG_TIME_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT)
-STATIC_INLINE(Datum)
-pg_time_as_datum(void *addr)
-{
-	TimeADT		val = *((TimeADT *)addr);
-	return SET_8_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
 #endif
 
@@ -225,25 +213,13 @@ STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
 
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
-STATIC_INLINE(Datum)
-pg_timestamp_as_datum(void *addr)
-{
-	Timestamp	val = *((Timestamp *)addr);
-	return SET_8_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,Timestamp)
 #endif
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
-STATIC_INLINE(Datum)
-pg_timestamptz_as_datum(void *addr)
-{
-	TimestampTz	val = *((TimestampTz *)addr);
-	return SET_8_BYTES(val);
-}
+STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
 #endif
 

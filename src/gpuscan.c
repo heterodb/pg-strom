@@ -963,31 +963,16 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		if (!dtype)
 			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
 
-		if (dtype->type_byval)
-		{
-			appendStringInfo(
-				&temp,
-				"  tup_isnull[%d] = expr_%u_v.isnull;\n"
-				"  if (!expr_%u_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_as_datum(&expr_%u_v.value);\n",
-				tle->resno - 1, tle->resno,
-				tle->resno,
-				tle->resno - 1, dtype->type_name, tle->resno);
-		}
-		else
-		{
-			appendStringInfo(
-				&temp,
-				"  addr = pg_%s_datum_store(kcxt,expr_%u_v);\n"
-				"  tup_isnull[%d] = !addr;\n"
-				"  if (addr)\n"
-				"    tup_values[%d] = PointerGetDatum(addr);\n",
-				dtype->type_name, tle->resno,
-				tle->resno - 1,
-				tle->resno - 1);
-			if (dtype->extra_sz > 0)
-				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-		}
+		appendStringInfo(
+			&temp,
+			"  pg_datum_store(kcxt, expr_%u_v,\n"
+			"                 tup_values[%d],\n"
+			"                 tup_isnull[%d]);\n",
+			tle->resno,
+			tle->resno - 1,
+			tle->resno - 1);
+		if (dtype->extra_sz > 0)
+			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 	}
 	appendStringInfo(&tbody, "%s}\n", temp.data);
 	appendStringInfo(&cbody, "%s}\n", temp.data);
