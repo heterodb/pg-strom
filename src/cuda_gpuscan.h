@@ -328,10 +328,10 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 									 tup_values,
 									 tup_isnull);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
-								compute_heaptuple_size(&kcxt,
-													   kds_dst,
-													   tup_values,
-													   tup_isnull));
+								compute_heaptuple_size_OLD(&kcxt,
+														   kds_dst,
+														   tup_values,
+														   tup_isnull));
 		}
 		else
 			required = 0;
@@ -389,14 +389,14 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 			}
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst->ncols,
-								kds_dst->colmeta,
-								&tupitem->t_self,
-								&tupitem->htup.t_choice.t_heap,
-								htuple_oid,
-								tup_values,
-								tup_isnull);
+			form_kern_heaptuple_OLD((kern_tupitem *)((char *)kds_dst + pos),
+									kds_dst->ncols,
+									kds_dst->colmeta,
+									&tupitem->t_self,
+									&tupitem->htup.t_choice.t_heap,
+									htuple_oid,
+									tup_values,
+									tup_isnull);
 		}
 #else
 		if (get_local_id() == 0)
@@ -570,10 +570,10 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 										 tup_values,
 										 tup_isnull);
 				required = MAXALIGN(offsetof(kern_tupitem, htup) +
-									compute_heaptuple_size(&kcxt,
-														   kds_dst,
-														   tup_values,
-														   tup_isnull));
+									compute_heaptuple_size_OLD(&kcxt,
+															   kds_dst,
+															   tup_values,
+															   tup_isnull));
 #else
 				/* no projection; just write the source tuple as is */
 				required = MAXALIGN(offsetof(kern_tupitem, htup) + t_len);
@@ -632,14 +632,15 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 					if (htuple_oid == 0)
 						htuple_oid = 0xffffffff;
 				}
-				form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-									kds_dst->ncols,
-									kds_dst->colmeta,
-									&t_self,
-									&htup->t_choice.t_heap,
-									htuple_oid,
-									tup_values,
-									tup_isnull);
+				form_kern_heaptuple_OLD((kern_tupitem *)
+										((char *)kds_dst + pos),
+										kds_dst->ncols,
+										kds_dst->colmeta,
+										&t_self,
+										&htup->t_choice.t_heap,
+										htuple_oid,
+										tup_values,
+										tup_isnull);
 #else
 				kern_tupitem *tupitem;
 
@@ -773,10 +774,10 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 									  tup_values,
 									  tup_isnull);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
-								compute_heaptuple_size(&kcxt,
-													   kds_dst,
-													   tup_values,
-													   tup_isnull));
+								compute_heaptuple_size_OLD(&kcxt,
+														   kds_dst,
+														   tup_values,
+														   tup_isnull));
 		}
 		else
 			required = 0;
@@ -824,14 +825,14 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst->ncols,
-								kds_dst->colmeta,
-								NULL,	/* ItemPointerData */
-								NULL,	/* HeapTupleFields */
-								kds_dst->tdhasoid ? 0xffffffff : 0,
-								tup_values,
-								tup_isnull);
+			form_kern_heaptuple_OLD((kern_tupitem *)((char *)kds_dst + pos),
+									kds_dst->ncols,
+									kds_dst->colmeta,
+									NULL,	/* ItemPointerData */
+									NULL,	/* HeapTupleFields */
+									kds_dst->tdhasoid ? 0xffffffff : 0,
+									tup_values,
+									tup_isnull);
 		}
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)

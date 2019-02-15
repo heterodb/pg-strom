@@ -311,6 +311,24 @@ STROMCL_VARLENA_COMP_CRC32_TEMPLATE(varlena)
 STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 #endif	/* PG_BYTEA_TYPE_DEFINED */
 
+STATIC_FUNCTION(cl_uint)
+pg_varlena_datum_length(kern_context *kcxt, Datum datum)
+{
+	pg_varlena_t   *vl = (pg_varlena_t *) datum;
+	/* right now PG format only */
+	return VARSIZE_ANY(vl->value);
+}
+
+STATIC_FUNCTION(cl_uint)
+pg_varlena_datum_write(char *dest, Datum datum)
+{
+	pg_varlena_t   *vl = (pg_varlena_t *) datum;
+	cl_int			vl_len = VARSIZE_ANY(vl->value);
+	/* right now PG format only */
+	memcpy(dest, vl->value, vl_len);
+	return vl_len;
+}
+
 #ifdef __CUDACC__
 /*
  * toast_raw_datum_size - return the raw (detoasted) size of a varlena
@@ -545,6 +563,21 @@ typedef struct
 #define PG_ARRAY_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(array)
 #endif
+
+STATIC_FUNCTION(cl_uint)
+pg_array_datum_length(kern_context *kcxt, Datum datum)
+{
+	//XXX: to be revised to support List of Apache Arrow
+	pg_array_t *array = (pg_array_t *) datum;
+
+	return VARSIZE_ANY(array->value);
+}
+
+STATIC_FUNCTION(cl_uint)
+pg_array_datum_write(char *dest, Datum datum)
+{
+	return pg_varlena_datum_write(dest, datum);
+}
 
 #ifdef __CUDACC__
 STATIC_INLINE(cl_int)
