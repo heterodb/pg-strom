@@ -320,14 +320,13 @@ typedef uintptr_t		hostptr_t;
  * Error code definition
  */
 #define StromError_Success				0		/* OK */
+#define StromError_Generic				1001	/* General error */
 #define StromError_CpuReCheck			1002	/* Re-checked by CPU */
 #define StromError_InvalidValue			1003	/* Invalid values */
 #define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
 #define StromError_WrongCodeGeneration	1005	/* Wrong GPU code generation */
 #define StromError_OutOfMemory			1006	/* Out of Memory */
 #define StromError_DataCorruption		1007	/* Data corruption */
-
-#define StromError_CudaDevRunTimeBase	1000000
 
 /*
  * Kernel functions identifier
@@ -442,10 +441,7 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
 
 #define STROM_SET_ERROR(p_kerror, errcode)		\
 	__STROM_SET_ERROR((p_kerror), (errcode), __FILE__, __LINE__)
-#define STROM_SET_RUNTIME_ERROR(p_kerror, errcode)						\
-	STROM_SET_ERROR((p_kerror), (errcode) == cudaSuccess ?				\
-					(cl_int)(errcode) :									\
-					(cl_int)(errcode) + StromError_CudaDevRunTimeBase)
+
 /*
  * kern_writeback_error_status
  */
