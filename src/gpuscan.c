@@ -898,16 +898,14 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		cbody.data);
 
 	/*
-	 * step.7 - makes kernel entrypoint
+	 * step.7 - define preprocessor variables
 	 */
 	appendStringInfo(
 		kern,
-		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(row, %u, %u)\n"
-		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(block, %u, %u)\n"
-		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(column, %u, %u)\n",
-		list_length(tlist_dev), context->varlena_bufsz,
-		list_length(tlist_dev), context->varlena_bufsz,
-		list_length(tlist_dev), context->varlena_bufsz);
+		"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS %d\n"
+		"#define GPUSCAN_VARLENA_BUFSZ %d\n",
+		list_length(tlist_dev),
+		context->varlena_bufsz);
 
 	list_free(tlist_dev);
 	pfree(temp.data);
@@ -1308,6 +1306,9 @@ PlanGpuScanPath(PlannerInfo *root,
 							   baserel->relid,
 							   relation,
 							   tlist_dev ? tlist_dev : tlist);
+	if (tlist_dev)
+		appendStringInfo(&kern,
+						 "#define GPUSCAN_HAS_DEVICE_PROJECTION 1\n");
 	heap_close(relation, NoLock);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
@@ -1534,36 +1535,6 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
 	}
 	return expression_tree_mutator(node, fixup_varnode_to_origin,
 								   (void *)custom_scan_tlist);
-}
-
-/*
- * assign_gpuscan_session_info
- *
- * Gives some definitions to the static portion of GpuScan implementation
- */
-void
-assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
-{
-	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
-
-	if (pgstrom_plan_is_gpuscan((Plan *) cscan))
-	{
-		GpuScanState   *gss = (GpuScanState *)gts;
-		TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
-		TupleDesc		tupdesc = slot->tts_tupleDescriptor;
-
-		appendStringInfo(
-			buf,
-			"#define GPUSCAN_KERNEL_REQUIRED                1\n");
-		if (gss->dev_projection)
-			appendStringInfo(
-				buf,
-				"#define GPUSCAN_HAS_DEVICE_PROJECTION          1\n");
-		appendStringInfo(
-			buf,
-			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS      %d\n",
-			tupdesc->natts);
-	}
 }
 
 /*

@@ -433,10 +433,14 @@ struct GpuTask
 /*
  * Type declarations for code generator
  */
-#define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
-#define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
-#define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+#define DEVKERNEL_NEEDS_GPUSCAN_DECL	0x00000001	/* GpuScan declaration */
+#define DEVKERNEL_NEEDS_GPUJOIN_DECL	0x00000002	/* GpuJoin declaration */
+#define DEVKERNEL_NEEDS_GPUPREAGG_DECL	0x00000004	/* GpuPreAgg declaration */
+#define DEVKERNEL_NEEDS_GPUSORT_DECL	0x00000008	/* GpuSort declaration */
+#define DEVKERNEL_NEEDS_GPUSCAN			0x00000011	/* GpuScan logic */
+#define DEVKERNEL_NEEDS_GPUJOIN			0x00000022	/* GpuJoin logic */
+#define DEVKERNEL_NEEDS_GPUPREAGG		0x00000044	/* GpuPreAgg logic */
+#define DEVKERNEL_NEEDS_GPUSORT			0x00000088	/* GpuSort logic */
 #define DEVKERNEL_NEEDS_TIMELIB			0x00000400
 #define DEVKERNEL_NEEDS_TEXTLIB			0x00000800
 #define DEVKERNEL_NEEDS_NUMERIC			0x00001000
@@ -1146,8 +1150,6 @@ extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
 extern cl_int gpuscan_get_optimal_gpu(const Path *pathnode);
-extern void assign_gpuscan_session_info(StringInfo buf,
-										GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*

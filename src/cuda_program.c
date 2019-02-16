@@ -339,7 +339,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 						   const char *kern_source)
 {
 	size_t		ofs = 0;
-	size_t		len = strlen(kern_define) + strlen(kern_source) + 20000;
+	size_t		len = strlen(kern_define) + strlen(kern_source) + 25000;
 	char	   *source;
 	const char *pg_anytype;
 
@@ -459,11 +459,23 @@ construct_flat_cuda_source(cl_uint extra_flags,
 
 	/* Main logic of each GPU tasks */
 
+	/* GpuScan (declaration part) */
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_DECL)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_gpuscan.h\"\n");
+	/* GpuJoin (declaration part) */
+	/* GpuPreAgg (declaration part) */
+	/* GpuSort (declaration part) */
+
+
+	/* Generated from SQL */
+	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
 	/* GpuScan */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		ofs += snprintf(source + ofs, len - ofs,
+						"#define  CUDA_GPUSCAN_BODY 1\n"
 						"#include \"cuda_gpuscan.h\"\n");
-	/* GpuHashJoin */
+	/* GpuJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpujoin.h\"\n");
@@ -475,8 +487,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
-	/* automatically generated portion */
-	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
 	/* code to be included at the last */
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include \"cuda_terminal.h\"\n");
@@ -1253,9 +1263,6 @@ pgstrom_build_session_info(StringInfo buf,
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
 		assign_textlib_session_info(buf);
 
-	/* enables device projection? */
-	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
-		assign_gpuscan_session_info(buf, gts);
 	/* enables device projection? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 		assign_gpujoin_session_info(buf, gts);

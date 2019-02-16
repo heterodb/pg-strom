@@ -380,6 +380,13 @@ typedef struct
 	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
 } kern_context;
 
+#define DECL_KERNEL_CONTEXT(NAME,VARLENA_BUFSZ)							\
+	union {																\
+		kern_context NAME;												\
+		char __kern_context_dummy__[offsetof(kern_context, vlbuf) +		\
+									MAXALIGN(VARLENA_BUFSZ)];			\
+	}
+
 #define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)		\
 	do {													\
 		(kcxt)->e.errcode = StromError_Success;				\

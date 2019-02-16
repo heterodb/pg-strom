@@ -17,7 +17,6 @@
  */
 #ifndef CUDA_GPUSCAN_H
 #define CUDA_GPUSCAN_H
-
 /*
  * kern_gpuscan
  */
@@ -234,38 +233,19 @@ gpuscan_projection_column(kern_context *kcxt,
 						  size_t src_index,
 						  cl_char *tup_dclass,
 						  Datum *tup_values);
+#endif	/* __CUDACC__ */
+#endif	/* CUDA_GPUSCAN_H */
 
-#define GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(SUFFIX,NATTRS,VL_BUFSZ)		\
-	KERNEL_FUNCTION(void)												\
-	kern_gpuscan_main_##SUFFIX(kern_gpuscan *kgpuscan,					\
-							   kern_data_store *kds_src,				\
-							   kern_data_store *kds_dst)				\
-	{																	\
-		kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);		\
-		cl_char			tup_dclass[NATTRS];								\
-		Datum			tup_values[NATTRS];								\
-		union {															\
-			kern_context kcxt;											\
-			char		buffer[offsetof(kern_context, vlbuf) +			\
-							   MAXALIGN(VL_BUFSZ)];						\
-		} u;															\
-		INIT_KERNEL_CONTEXT(&u.kcxt, gpuscan_main_##SUFFIX, kparams);	\
-		gpuscan_exec_##SUFFIX(&u.kcxt, kgpuscan, kds_src, kds_dst,		\
-							  tup_dclass, tup_values);					\
-	}
-
-#ifdef GPUSCAN_KERNEL_REQUIRED
+#ifdef CUDA_GPUSCAN_BODY
 /*
- * gpuscan_exec_row - GpuScan logic for KDS_FORMAT_ROW
+ * kern_gpuscan_main_row - GpuScan logic for KDS_FORMAT_ROW
  */
-STATIC_FUNCTION(void)
-gpuscan_exec_row(kern_context *kcxt,
-				 kern_gpuscan *kgpuscan,
-				 kern_data_store *kds_src,
-				 kern_data_store *kds_dst,
-				 cl_char *tup_dclass,
-				 Datum *tup_values)
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
+					  kern_data_store *kds_src,
+					  kern_data_store *kds_dst)
 {
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	gpuscanResultIndex *gs_results	__attribute__((unused))
@@ -278,11 +258,23 @@ gpuscan_exec_row(kern_context *kcxt,
 	cl_uint		total_nitems_in = 0;	/* stat */
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
+	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	cl_char	   *tup_dclass = NULL;
+	cl_char	   *tup_values = NULL;
+#endif
+	DECL_KERNEL_CONTEXT(kcxt, GPUSCAN_VARLENA_BUFSZ);
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main_row, kparams);
+	/* quick bailout if any error happen on the prior kernel */
+	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+		return;
 	/* resume kernel from the point where suspended, if any */
 	if (kgpuscan->resume_context)
 	{
@@ -301,13 +293,13 @@ gpuscan_exec_row(kern_context *kcxt,
 		cl_uint			extra_sz = 0;
 		cl_uint			suspend_kernel	__attribute__((unused)) = 0;
 
-		kcxt->vlpos = kcxt->vlbuf;	/* rewind */
+		kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
 		if (src_index < kds_src->nitems)
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
-			rc = gpuscan_quals_eval(kcxt, kds_src,
+			rc = gpuscan_quals_eval(&kcxt, kds_src,
 									&tupitem->t_self,
 									&tupitem->htup);
 		}
@@ -317,7 +309,7 @@ gpuscan_exec_row(kern_context *kcxt,
 			rc = false;
 		}
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			goto out_nostat;
 
 		/* how many rows servived WHERE-clause evaluation? */
@@ -329,15 +321,15 @@ gpuscan_exec_row(kern_context *kcxt,
 		/* extract the source tuple to the private slot, if any */
 		if (tupitem && rc)
 		{
-			kcxt->vlpos = kcxt->vlbuf;	/* rewind */
-			gpuscan_projection_tuple(kcxt,
+			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
+			gpuscan_projection_tuple(&kcxt,
 									 kds_src,
 									 &tupitem->htup,
 									 &tupitem->t_self,
 									 tup_dclass,
 									 tup_values);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
-								compute_heaptuple_size(kcxt,
+								compute_heaptuple_size(&kcxt,
 													   kds_dst,
 													   tup_dclass,
 													   tup_values));
@@ -345,7 +337,7 @@ gpuscan_exec_row(kern_context *kcxt,
 		else
 			required = 0;
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			goto out_nostat;
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
@@ -443,22 +435,18 @@ out_nostat:
 		my_suspend->part_index = part_index;
 		my_suspend->line_index = 0;
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt->e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
-#endif	/* GPUSCAN_KERNEL_REQUIRED */
 
-#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
  * gpuscan_exec_block - GpuScan logic for KDS_FORMAT_BLOCK
  */
-STATIC_FUNCTION(void)
-gpuscan_exec_block(kern_context *kcxt,
-				   kern_gpuscan *kgpuscan,
-				   kern_data_store *kds_src,
-				   kern_data_store *kds_dst,
-				   cl_char *tup_dclass,
-				   Datum *tup_values)
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
+						kern_data_store *kds_src,
+						kern_data_store *kds_dst)
 {
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	cl_uint		src_nitems = kds_src->nitems;
@@ -474,11 +462,23 @@ gpuscan_exec_block(kern_context *kcxt,
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
 	cl_bool		thread_is_valid = false;
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
+	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	cl_char	   *tup_dclass = NULL;
+	cl_char	   *tup_values = NULL;
+#endif
+	DECL_KERNEL_CONTEXT(kcxt, GPUSCAN_VARLENA_BUFSZ);
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_ROW);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main_block, kparams);
+	/* quick bailout if any error happen on the prior kernel */
+	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+		return;
 
 	part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 	n_parts = get_local_size() / part_sz;
@@ -542,13 +542,13 @@ gpuscan_exec_block(kern_context *kcxt,
 
 			/* evaluation of the qualifiers */
 			if (htup)
-				rc = gpuscan_quals_eval(kcxt, kds_src,
+				rc = gpuscan_quals_eval(&kcxt, kds_src,
 										&t_self,
 										htup);
 			else
 				rc = false;
 			/* bailout if any error */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
 				goto out_nostat;
 
 			/* how many rows servived WHERE-clause evaluations? */
@@ -560,14 +560,14 @@ gpuscan_exec_block(kern_context *kcxt,
 			if (htup && rc)
 			{
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
-				gpuscan_projection_tuple(kcxt,
+				gpuscan_projection_tuple(&kcxt,
 										 kds_src,
 										 htup,
 										 &t_self,
 										 tup_dclass,
 										 tup_values);
 				required = MAXALIGN(offsetof(kern_tupitem, htup) +
-									compute_heaptuple_size(kcxt,
+									compute_heaptuple_size(&kcxt,
 														   kds_dst,
 														   tup_dclass,
 														   tup_values));
@@ -684,22 +684,18 @@ out_nostat:
 		my_suspend->line_index = line_index;
 	}
 	/* write back error code to the host */
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt->e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
-#endif	/* GPUSCAN_KERNEL_REQUIRED */
 
-#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
- * gpuscan_exec_column - GpuScan logic for KDS_FORMAT_COLUMN
+ * kern_gpuscan_main_column - GpuScan logic for KDS_FORMAT_COLUMN
  */
 STATIC_FUNCTION(void)
-gpuscan_exec_column(kern_context *kcxt,
-					kern_gpuscan *kgpuscan,
-					kern_data_store *kds_src,
-					kern_data_store *kds_dst,
-					cl_char *tup_dclass,
-					Datum *tup_values)
+kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
+						 kern_data_store *kds_src,
+						 kern_data_store *kds_dst)
 {
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	cl_uint		part_index = 0;
@@ -710,11 +706,20 @@ gpuscan_exec_column(kern_context *kcxt,
 	cl_uint		total_nitems_in = 0;	/* stat */
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
+	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	cl_char	   *tup_dclass = NULL;
+	cl_char	   *tup_values = NULL;
+#endif
+	DECL_KERNEL_CONTEXT(kcxt, GPUSCAN_VARLENA_BUFSZ);
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_COLUMN);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main_column, kparams);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -739,11 +744,11 @@ gpuscan_exec_column(kern_context *kcxt,
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
 		if (src_index < kds_src->nitems)
-			rc = gpuscan_quals_eval_column(kcxt, kds_src, src_index);
+			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
 		else
 			rc = false;
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			goto out_nostat;
 
 		/* how many rows servived WHERE-clause evaluation? */
@@ -756,13 +761,13 @@ gpuscan_exec_column(kern_context *kcxt,
 		 */
 		if (rc)
 		{
-			gpuscan_projection_column(kcxt,
+			gpuscan_projection_column(&kcxt,
 									  kds_src,
 									  src_index,
 									  tup_dclass,
 									  tup_values);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
-								compute_heaptuple_size(kcxt,
+								compute_heaptuple_size(&kcxt,
 													   kds_dst,
 													   tup_dclass,
 													   tup_values));
@@ -823,7 +828,7 @@ gpuscan_exec_column(kern_context *kcxt,
 								tup_values);
 		}
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 	skip:
 		/* update statistics */
@@ -849,8 +854,6 @@ out_nostat:
 		my_suspend->part_index = part_index;
 		my_suspend->line_index = 0;
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt->e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
-#endif	/* GPUSCAN_KERNEL_REQUIRED */
-#endif	/* __CUDACC__ */
-#endif	/* CUDA_GPUSCAN_H */
+#endif	/* CUDA_GPUSCAN_BODY */
