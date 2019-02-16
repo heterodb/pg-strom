@@ -625,21 +625,19 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	ListCell	   *lc;
 	int				prev;
 	int				i, j, k;
-	bool			has_extract_tuple = false;
+	int				num_referenced = 0;
 	devtype_info   *dtype;
-	StringInfoData	tdecl;
-	StringInfoData	cdecl;
+	StringInfoData	decl;
 	StringInfoData	tbody;
 	StringInfoData	cbody;
 	StringInfoData	temp;
 
-	initStringInfo(&tdecl);
+	initStringInfo(&decl);
 	initStringInfo(&tbody);
-	initStringInfo(&cdecl);
 	initStringInfo(&cbody);
 	initStringInfo(&temp);
 	/*
-	 * step.0 - extract non-junk attributes
+	 * step.1 - extract non-junk attributes
 	 */
 	foreach (lc, __tlist_dev)
 	{
@@ -650,33 +648,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	}
 
 	/*
-	 * step.1 - declaration of functions and KVAR_xx for expressions
+	 * step.2 - setup of varremaps / varattnos
 	 */
-	appendStringInfoString(
-		&tdecl,
-		"STATIC_FUNCTION(void)\n"
-		"gpuscan_projection_tuple(kern_context *kcxt,\n"
-		"                         kern_data_store *kds_src,\n"
-		"                         HeapTupleHeaderData *htup,\n"
-		"                         ItemPointerData *t_self,\n"
-		"                         Datum *tup_values,\n"
-		"                         cl_bool *tup_isnull)\n"
-		"{\n"
-		"  void    *addr __attribute__((unused));\n"
-		"  cl_int   len __attribute__((unused));\n");
-
-	appendStringInfoString(
-		&cdecl,
-		"STATIC_FUNCTION(void)\n"
-		"gpuscan_projection_column(kern_context *kcxt,\n"
-		"                          kern_data_store *kds_src,\n"
-		"                          size_t src_index,\n"
-		"                          Datum *tup_values,\n"
-		"                          cl_bool *tup_isnull)\n"
-		"{\n"
-		"  void    *addr __attribute__((unused));\n"
-		"  cl_uint  len  __attribute__((unused));\n");
-
 	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_dev));
 	varattnos = NULL;
 	foreach (lc, tlist_dev)
@@ -697,8 +670,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			Var	   *var = (Var *) tle->expr;
 
 			Assert(var->varno == scanrelid);
-			Assert(var->varattno > FirstLowInvalidHeapAttributeNumber &&
-				   var->varattno != InvalidAttrNumber &&
+			Assert(var->varattno > 0 &&
 				   var->varattno <= tupdesc->natts);
 			varremaps[tle->resno - 1] = var->varattno;
 		}
@@ -708,17 +680,17 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		}
 	}
 
+	/*
+	 * step.3 - declarations of KVAR_x for source of expressions
+	 */
 	prev = -1;
 	while ((prev = bms_next_member(varattnos, prev)) >= 0)
 	{
 		Form_pg_attribute attr;
 		AttrNumber		anum = prev + FirstLowInvalidHeapAttributeNumber;
 
-		Assert(anum != InvalidAttrNumber);
-		if (anum < 0)
-			attr = SystemAttributeDefinition(anum, true);
-		else
-			attr = tupleDescAttr(tupdesc, anum-1);
+		Assert(anum > 0);
+		attr = tupleDescAttr(tupdesc, anum-1);
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		if (!dtype)
@@ -726,78 +698,12 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				 format_type_be(attr->atttypid));
 		if (anum < 0)
 			elog(ERROR, "Bug? system column appear in device expression");
-		appendStringInfo(&tdecl, "  pg_%s_t KVAR_%u;\n",
-						 dtype->type_name, anum);
-		appendStringInfo(&cdecl, "  pg_%s_t KVAR_%u;\n",
+		appendStringInfo(&decl, "  pg_%s_t KVAR_%u;\n",
 						 dtype->type_name, anum);
 	}
 
 	/*
-	 * System columns reference if any
-	 */
-	for (i=0; i < list_length(tlist_dev); i++)
-	{
-		Form_pg_attribute	attr;
-
-		if (varremaps[i] >= 0)
-			continue;
-		attr = SystemAttributeDefinition(varremaps[i], true);
-		j = attr->attnum + 1 + FirstLowInvalidHeapAttributeNumber;
-
-		if (attr->attnum == TableOidAttributeNumber)
-		{
-			resetStringInfo(&temp);
-			appendStringInfo(
-				&temp,
-				"  /* %s system column */\n"
-				"  tup_isnull[%d] = false;\n"
-				"  tup_values[%d] = kds_src->table_oid;\n",
-				NameStr(attr->attname), i, i);
-			appendStringInfoString(&tbody, temp.data);
-			appendStringInfoString(&cbody, temp.data);
-			continue;
-		}
-
-		if (attr->attnum == SelfItemPointerAttributeNumber)
-		{
-			appendStringInfo(
-				&tbody,
-				"  /* %s system column */\n"
-				"  tup_isnull[%d] = false;\n"
-				"  tup_values[%d] = PointerGetDatum(t_self);\n",
-				NameStr(attr->attname), i, i);
-		}
-		else
-		{
-			appendStringInfo(
-				&tbody,
-				"  /* %s system column */\n"
-				"  tup_isnull[%d] = false;\n"
-				"  tup_values[%d] = kern_getsysatt_%s(htup);\n",
-				NameStr(attr->attname),
-				i, i, NameStr(attr->attname));
-		}
-		appendStringInfo(
-			&cbody,
-			"  /* %s system column */\n"
-			"  addr = kern_get_datum_column(kds_src,kds_src->ncols%d,src_index);\n"
-			"  tup_isnull[%d] = !addr;\n",
-			NameStr(attr->attname),
-			attr->attnum, i);
-		if (!attr->attbyval)
-			appendStringInfo(
-				&cbody,
-				"  tup_values[%d] = PointerGetDatum(addr);\n",
-				i);
-		else
-			appendStringInfo(
-				&cbody,
-				"  tup_values[%d] = READ_INT%d_PTR(addr);\n",
-				i, 8 * attr->attlen);
-	}
-
-	/*
-	 * Extract regular tuples
+	 * step.4 - reference attributes for each
 	 */
 	resetStringInfo(&temp);
 	appendStringInfoString(
@@ -809,7 +715,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		bool		referenced = false;
 
-		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
 		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
 		/* Put values on tup_values/tup_isnull if referenced */
@@ -823,44 +729,53 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			{
 				appendStringInfo(
 					&temp,
-					"  tup_isnull[%d] = !addr;\n"
-					"  if (addr)\n"
-					"    tup_values[%d] = READ_INT%d_PTR(addr);\n",
-					j, j, 8 * attr->attlen);
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = READ_INT%d_PTR(addr);\n"
+					"  }\n",
+					j, j, j, 8 * attr->attlen);
 			}
 			else
 			{
 				appendStringInfo(
 					&temp,
-					"  tup_isnull[%d] = !addr;\n"
-					"  if (addr)\n"
-					"    tup_values[%d] = PointerGetDatum(addr);\n",
-					j, j);
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = PointerGetDatum(addr);\n"
+					"  }\n",
+					j, j, j);
 			}
 
 			/* column */
 			if (!referenced)
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,%u,src_index);\n",
+					"  addr = kern_get_datum_column(kds_src,%u,index);\n",
 					attr->attnum - 1);
-
-			if (attr->attbyval)
+			if (!dtype)
 			{
 				appendStringInfo(
 					&cbody,
-					"  tup_isnull[%d] = !addr;\n"
-					"  if (addr)\n"
-					"    tup_values[%d] = READ_INT%d_PTR(addr);\n",
-					j, j, 8 * attr->attlen);
+					"  /* shall be never referenced */\n"
+					"  assert(!addr);\n"
+					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
 			}
 			else
 			{
 				appendStringInfo(
 					&cbody,
-					"  tup_isnull[%d] = !addr;\n"
-					"  if (addr)\n"
-					"    tup_values[%d] = PointerGetDatum(addr);\n",
+					"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+					"  pg_datum_store(kcxt, temp.%s_v,\n"
+					"                 tup_dclass[%d],\n"
+					"                 tup_values[%d]);\n",
+					dtype->type_name,
+					dtype->type_name,
 					j, j);
 			}
 			referenced = true;
@@ -869,6 +784,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 		if (bms_is_member(k, varattnos))
 		{
+			Assert(dtype != NULL);
 			/* tuple */
 			appendStringInfo(
 				&temp,
@@ -880,7 +796,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			if (!referenced)
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,%u,src_index);\n",
+					"  addr = kern_get_datum_column(kds_src,%u,index);\n",
 					attr->attnum - 1);
 			appendStringInfo(
 				&cbody,
@@ -894,56 +810,20 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfoString(&tbody, temp.data);
 			resetStringInfo(&temp);
-			has_extract_tuple = true;
+			num_referenced++;
 		}
 		appendStringInfoString(
 			&temp,
 			"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 	}
-	if (has_extract_tuple)
+	if (num_referenced)
 		appendStringInfoString(
 			&tbody,
 			"  EXTRACT_HEAP_TUPLE_END();\n"
 			"\n");
 
 	/*
-	 * step.3 - execute expression node, then store the result onto KVAR_xx
-	 */
-    foreach (lc, tlist_dev)
-    {
-        TargetEntry    *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var))
-			continue;
-		/* NOTE: Const/Param are once loaded to expr_%u variable. */
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %s",
-				 format_type_be(type_oid));
-
-		resetStringInfo(&temp);
-		appendStringInfo(
-			&temp,
-			"  pg_%s_t expr_%u_v;\n",
-			dtype->type_name,
-			tle->resno);
-		appendStringInfoString(&tdecl, temp.data);
-		appendStringInfoString(&cdecl, temp.data);
-
-		resetStringInfo(&temp);
-		appendStringInfo(
-			&temp,
-			"  expr_%u_v = %s;\n",
-			tle->resno,
-			pgstrom_codegen_expression((Node *) tle->expr, context));
-		appendStringInfoString(&tbody, temp.data);
-        appendStringInfoString(&cbody, temp.data);
-	}
-
-	/*
-	 * step.5 - Store the expressions on the slot.
+	 * step.5 - execution of expression node, then store the result.
 	 */
 	resetStringInfo(&temp);
 	foreach (lc, tlist_dev)
@@ -961,38 +841,77 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+			elog(ERROR, "Bug? device supported type is missing: %s",
+				 format_type_be(type_oid));
 
 		appendStringInfo(
 			&temp,
-			"  pg_datum_store(kcxt, expr_%u_v,\n"
-			"                 tup_values[%d],\n"
-			"                 tup_isnull[%d]);\n",
-			tle->resno,
+			"  temp.%s_v = %s;\n"
+			"  pg_datum_store(kcxt, temp.%s_v,\n"
+			"                 tup_dclass[%d],\n"
+			"                 tup_values[%d]);\n",
+			dtype->type_name,
+			pgstrom_codegen_expression((Node *)tle->expr, context),
+			dtype->type_name,
 			tle->resno - 1,
 			tle->resno - 1);
 		if (dtype->extra_sz > 0)
 			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 	}
-	appendStringInfo(&tbody, "%s}\n", temp.data);
-	appendStringInfo(&cbody, "%s}\n", temp.data);
+	appendStringInfoString(&tbody, temp.data);
+	appendStringInfoString(&cbody, temp.data);
 
 	/* parameter references */
-	pgstrom_codegen_param_declarations(&tdecl, context);
-	pgstrom_codegen_param_declarations(&cdecl, context);
+	pgstrom_codegen_param_declarations(&decl, context);
 
-	/* OK, write back the kernel source */
+	/*
+	 * step.6 - put decl/body on the function body
+	 */
 	appendStringInfo(
 		kern,
-		"%s\n%s\n%s\n%s",
-		tdecl.data,
+		"STATIC_FUNCTION(void)\n"
+		"gpuscan_projection_tuple(kern_context *kcxt,\n"
+		"                         kern_data_store *kds_src,\n"
+		"                         HeapTupleHeaderData *htup,\n"
+		"                         ItemPointerData *t_self,\n"
+		"                         cl_char *tup_dclass,\n"
+		"                         Datum   *tup_values)\n"
+		"{\n"
+		"  void        *addr __attribute__((unused));\n"
+		"  pg_anytype_t temp __attribute__((unused));\n"
+		"%s\n%s"
+		"}\n\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpuscan_projection_column(kern_context *kcxt,\n"
+		"                          kern_data_store *kds_src,\n"
+		"                          size_t   index,\n"
+		"                          cl_char *tup_dclass,\n"
+		"                          Datum   *tup_values)\n"
+		"{\n"
+		"  void        *addr __attribute__((unused));\n"
+		"  pg_anytype_t temp __attribute__((unused));\n"
+		"%s\n%s"
+		"}\n\n",
+		decl.data,
 		tbody.data,
-		cdecl.data,
+		decl.data,
 		cbody.data);
+
+	/*
+	 * step.7 - makes kernel entrypoint
+	 */
+	appendStringInfo(
+		kern,
+		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(row, %u, %u)\n"
+		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(block, %u, %u)\n"
+		"GPUSCAN_KERNEL_ENTRYPOINT_TEMPLATE(column, %u, %u)\n",
+		list_length(tlist_dev), context->varlena_bufsz,
+		list_length(tlist_dev), context->varlena_bufsz,
+		list_length(tlist_dev), context->varlena_bufsz);
+
 	list_free(tlist_dev);
 	pfree(temp.data);
-	pfree(tdecl.data);
-	pfree(cdecl.data);
+	pfree(decl.data);
 	pfree(tbody.data);
 	pfree(cbody.data);
 }
@@ -1060,6 +979,12 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		/* GPU projection cannot contain whole-row var */
 		if (varnode->varattno == InvalidAttrNumber)
 			return true;
+		/* System columns are part of HeapTupleHeaderData */
+		if (varnode->varattno < 0)
+		{
+			context->compatible_tlist = false;
+			return false;
+		}
 
 		/*
 		 * check whether the original tlist matches the physical layout
@@ -1638,13 +1563,6 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 			buf,
 			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS      %d\n",
 			tupdesc->natts);
-
-		if (gss->dev_quals)
-		{
-			appendStringInfoString(
-				buf,
-				"#define GPUSCAN_HAS_WHERE_QUALS                1\n");
-		}
 	}
 }
 
@@ -2577,11 +2495,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 * Lookup GPU kernel functions
 	 */
 	if (pds_src->kds.format == KDS_FORMAT_ROW)
-		kern_fname = "gpuscan_exec_quals_row";
+		kern_fname = "kern_gpuscan_main_row";
 	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-		kern_fname = "gpuscan_exec_quals_block";
+		kern_fname = "kern_gpuscan_main_block";
 	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
-		kern_fname = "gpuscan_exec_quals_column";
+		kern_fname = "kern_gpuscan_main_column";
 	else
 		werror("GpuScan: unknown PDS format: %d", pds_src->kds.format);
 

@@ -566,24 +566,26 @@ pg_datum_ref(kern_context *kcxt,
 STATIC_INLINE(cl_int)
 pg_datum_store(kern_context *kcxt,
 			   pg_numeric_t datum,
-			   Datum &value,
-			   cl_bool &isnull)
+			   cl_char &dclass,
+			   Datum &value)
 {
 	char   *res;
 
-	isnull = datum.isnull;
 	if (datum.isnull)
+	{
+		dclass = DATUM_CLASS__NULL;
 		return 0;
+	}
 	res = kern_context_alloc(kcxt, sizeof(struct NumericData));
 	if (!res)
 	{
-		isnull = true;
+		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
-	pg_numeric_to_varlena(kcxt, pos,
+	pg_numeric_to_varlena(kcxt, res,
 						  datum.precision,
 						  datum.value);
-	isnull = false;
+	dclass = DATUM_CLASS__NORMAL;
 	value  = PointerGetDatum(res);
 	return VARSIZE_ANY(res);
 }

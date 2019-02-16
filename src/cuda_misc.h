@@ -647,24 +647,27 @@ pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
 STATIC_INLINE(cl_int)
 pg_datum_store(kern_context *kcxt,
 			   pg_inet_t datum,
-			   Datum &value,
-			   cl_bool &isnull)
+			   cl_char &dclass,
+			   Datum &value)
 {
 	char	   *res;
 	int			vl_len = VARHDRSZ + sizeof(inet_struct);
 
-	isnull = datum.isnull;
 	if (datum.isnull)
+	{
+		dclass = DATUM_CLASS__NULL;
 		return 0;
+	}
 	res = kern_context_alloc(kcxt, vl_len);
 	if (!res)
 	{
-		isnull = true;
+		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
-	value = PointerGetDatum(res);
 	memcpy(res + VARHDRSZ, &datum.value, sizeof(inet_struct));
 	SET_VARSIZE(res, vl_len);
+	value = PointerGetDatum(res);
+	dclass = DATUM_CLASS__NORMAL;
 	return vl_len;
 }
 

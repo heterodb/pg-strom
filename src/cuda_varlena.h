@@ -219,16 +219,16 @@ typedef struct toast_compress_header
 	STATIC_INLINE(cl_int)										\
 	pg_datum_store(kern_context *kcxt,							\
 				   pg_##NAME##_t datum,							\
-				   Datum &value,								\
-                   cl_bool &isnull)								\
+				   cl_char &dclass,								\
+				   Datum &value)								\
 	{															\
-		isnull = datum.isnull;									\
 		if (!datum.isnull)										\
 		{														\
+			dclass = DATUM_CLASS__NORMAL;						\
 			value = PointerGetDatum(datum.value);				\
 			return VARSIZE_ANY(datum.value);					\
 		}														\
-		value = 0UL;											\
+		dclass = DATUM_CLASS__NULL;								\
 		return 0;												\
 	}															\
 																\

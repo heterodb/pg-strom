@@ -235,9 +235,9 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(HostPGStrom);
 		KERN_ENTRY(CudaRuntime);
 		KERN_ENTRY(NVMeStrom);
-		KERN_ENTRY(gpuscan_exec_quals_block);
-		KERN_ENTRY(gpuscan_exec_quals_row);
-		KERN_ENTRY(gpuscan_exec_quals_column);
+		KERN_ENTRY(gpuscan_main_row);
+		KERN_ENTRY(gpuscan_main_block);
+		KERN_ENTRY(gpuscan_main_column);
 		KERN_ENTRY(gpujoin_main);
 		KERN_ENTRY(gpujoin_right_outer);
 		KERN_ENTRY(gpupreagg_setup_row);

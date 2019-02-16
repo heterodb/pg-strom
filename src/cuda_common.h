@@ -337,9 +337,9 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_HostPGStrom						0x0001
 #define StromKernel_CudaRuntime						0x0002
 #define StromKernel_NVMeStrom						0x0003
-#define StromKernel_gpuscan_exec_quals_row			0x0101
-#define StromKernel_gpuscan_exec_quals_block		0x0102
-#define StromKernel_gpuscan_exec_quals_column		0x0103
+#define StromKernel_gpuscan_main_row				0x0101
+#define StromKernel_gpuscan_main_block				0x0102
+#define StromKernel_gpuscan_main_column				0x0103
 #define StromKernel_gpujoin_main					0x0201
 #define StromKernel_gpujoin_right_outer				0x0202
 #define StromKernel_gpupreagg_setup_row				0x0301
@@ -1056,6 +1056,29 @@ typedef struct
  * and often transformed to internal representation.
  * Some of 'varlena' types are also inlined to pg_XXXX_t variable,
  * mostly, if this varlena type has upper limit length short enough.
+ */
+
+/* ----------------------------------------------------------------
+ *
+ * About GPU Projection Support
+ *
+ * A typical projection code path is below:
+ *
+ * 1. Extract values from heap-tuple or column-store onto tup_dclass[] and
+ *    tup_values[] array, and calculate length of the new heap-tuple.
+ * 2. Allocation of the destination buffer, per threads-group
+ * 3. Write out the heap-tuple
+ *
+ * Step-1 is usually handled by auto-generated code. In some case, it is not
+ * reasonable to extract values to in-storage format prior to allocation of
+ * the destination buffer, like a long text value that references a source
+ * buffer in Apache Arrow.
+ * Right now, we pay attention on simple varlena (Binary of Arrow that is
+ * bytes in PG, and Utf8 of Arrow that is text in PG), and array of fixed-
+ * length values (List of Arrow).
+ * If tup_values[] hold a pointer to pg_varlena_t or pg_array_t, not raw-
+ * varlena image, tup_dclass[] will have special flag to inform indirect
+ * reference to the value.
  *
  * pg_XXXX_datum_ref() routine of types are responsible to transform disk
  * format to internal representation.
@@ -1064,7 +1087,13 @@ typedef struct
  * projection stage. If and when GPU code tries to store expressions which
  * are not simple Var, Const or Param, these internal representation must
  * be written to extra-buffer first.
+ *
+ * ----------------------------------------------------------------
  */
+#define DATUM_CLASS__NORMAL		0	/* datum is normal value */
+#define DATUM_CLASS__NULL		1	/* datum is NULL */
+#define DATUM_CLASS__VARLENA	2	/* datum is pg_varlena_t reference */
+#define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
 
 /*
  * Template of variable classes: fixed-length referenced by value
@@ -1122,15 +1151,16 @@ typedef struct
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
-				   Datum &value,									\
-				   cl_bool &isnull)									\
+				   cl_char &dclass,									\
+				   Datum &value)									\
 	{																\
-		isnull = datum.isnull;										\
 		if (!datum.isnull)											\
 		{															\
+			dclass = DATUM_CLASS__NORMAL;							\
 			value = AS_DATUM(datum.value);							\
 			return sizeof(BASE);									\
 		}															\
+		dclass = DATUM_CLASS__NULL;									\
 		return 0;													\
 	}																\
 																	\
@@ -1207,21 +1237,24 @@ typedef struct
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
-				   Datum &value,									\
-				   cl_bool &isnull)									\
+				   cl_char &dclass,									\
+				   Datum &value)									\
 	{																\
 		char	   *res;											\
 																	\
-		isnull = datum.isnull;										\
 		if (datum.isnull)											\
+		{															\
+			dclass = DATUM_CLASS__NULL;								\
 			return 0;												\
+		}															\
 		res = kern_context_alloc(kcxt, sizeof(BASE));				\
 		if (!res)													\
 		{															\
-			isnull = true;											\
+			dclass = DATUM_CLASS__NULL;								\
 			return 0;												\
 		}															\
 		memcpy(res, &datum.value, sizeof(BASE));					\
+		dclass = DATUM_CLASS__NORMAL;								\
 		value = PointerGetDatum(res);								\
 		return sizeof(BASE);										\
 	}																\
@@ -1632,33 +1665,6 @@ kern_getsysatt_cmax(HeapTupleHeaderData *htup)
 	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
 }
 
-/* ----------------------------------------------------------------
- *
- * GPU Projection Support
- *
- * A typical projection code path is below:
- *
- * 1. Extract values from heap-tuple or column-store onto tup_dclass[] and
- *    tup_values[] array, and calculate length of the new heap-tuple.
- * 2. Allocation of the destination buffer, per threads-group
- * 3. Write out the heap-tuple
- *
- * Step-1 is usually handled by auto-generated code. In some case, it is not
- * reasonable to extract values to in-storage format prior to allocation of
- * the destination buffer, like a long text value that references a source
- * buffer in Apache Arrow.
- * Right now, we pay attention on simple varlena (Binary of Arrow that is
- * bytes in PG, and Utf8 of Arrow that is text in PG), and array of fixed-
- * length values (List of Arrow).
- * If tup_values[] hold a pointer to pg_varlena_t or pg_array_t, not raw-
- * varlena image, tup_dclass[] will have special flag to inform indirect
- * reference to the value.
- * ---------------------------------------------------------------- */
-#define DATUM_CLASS__NORMAL		0	/* datum is normal value */
-#define DATUM_CLASS__NULL		1	/* datum is NULL */
-#define DATUM_CLASS__VARLENA	2	/* datum is pg_varlena_t reference */
-#define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
-
 /*
  * compute_heaptuple_size (OLD)
  */
@@ -1795,7 +1801,9 @@ deform_kern_heaptuple(cl_int	nattrs,			/* in */
 	assert(((cl_ulong)htup & (MAXIMUM_ALIGNOF-1)) == 0);
 	if (!htup)
 	{
-		for (int i=0; i < nattrs; i++)
+		int		i;
+
+		for (i=0; i < nattrs; i++)
 			tup_dclass[i] = DATUM_CLASS__NULL;
 	}
 	else
