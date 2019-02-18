@@ -465,13 +465,16 @@ construct_flat_cuda_source(cl_uint extra_flags,
 						"#include \"cuda_gpuscan.h\"\n");
 	/* GpuJoin (declaration part) */
 	/* GpuPreAgg (declaration part) */
+	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_DECL)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort (declaration part) */
 
 
 	/* Generated from SQL */
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
 	/* GpuScan */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define  CUDA_GPUSCAN_BODY 1\n"
 						"#include \"cuda_gpuscan.h\"\n");
@@ -480,8 +483,9 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpujoin.h\"\n");
 	/* GpuPreAgg */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY)
 		ofs += snprintf(source + ofs, len - ofs,
+						"#define  __CUDA_GPUPREAGG_BODY__ 1\n"
 						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)

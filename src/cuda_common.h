@@ -950,12 +950,12 @@ KERN_DATA_STORE_VALUES(kern_data_store *kds, cl_uint kds_index)
 	return (Datum *)((char *)kds + offset);
 }
 
-STATIC_INLINE(char *)
-KERN_DATA_STORE_ISNULL(kern_data_store *kds, cl_uint kds_index)
+STATIC_INLINE(cl_char *)
+KERN_DATA_STORE_DCLASS(kern_data_store *kds, cl_uint kds_index)
 {
 	Datum  *values = KERN_DATA_STORE_VALUES(kds, kds_index);
 
-	return (char *)(values + kds->ncols);
+	return (cl_char *)(values + kds->ncols);
 }
 
 /* access macro for block format */
@@ -1095,6 +1095,10 @@ typedef struct
  * are not simple Var, Const or Param, these internal representation must
  * be written to extra-buffer first.
  *
+ * Also note that KDS_FORMAT_SLOT is designed to have compatible layout to
+ * pair of tup_dclass[] / tup_values[] array if all the items have NULL or
+ * NORMAL state. Other state should be normalized prior to CPU writeback.
+ *
  * ----------------------------------------------------------------
  */
 #define DATUM_CLASS__NORMAL		0	/* datum is normal value */
@@ -1115,27 +1119,38 @@ typedef struct
 #ifdef __CUDACC__
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)			\
 	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_datum_ref(kern_context *kcxt,						\
-						  void *datum)								\
+	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t	result;										\
 																	\
-		if (!datum)													\
+		if (!addr)													\
 			result.isnull = true;									\
 		else														\
 		{															\
 			result.isnull = false;									\
-			result.value = *((BASE *) datum);						\
+			result.value = *((BASE *) addr);						\
 		}															\
 		return result;												\
 	}																\
 	STATIC_INLINE(void)												\
 	pg_datum_ref(kern_context *kcxt,								\
-				 pg_##NAME##_t &result, void *datum)				\
+				 pg_##NAME##_t &result, void *addr)					\
 	{																\
-		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-																	\
+	STATIC_INLINE(void)												\
+	pg_datum_ref_slot(kern_context *kcxt,							\
+					  pg_##NAME##_t &result,						\
+					  cl_char dclass, Datum datum)					\
+	{																\
+		if (dclass == DATUM_CLASS__NULL)							\
+			result = pg_##NAME##_datum_ref(kcxt, NULL);				\
+		else														\
+		{															\
+			assert(dclass == DATUM_CLASS__NORMAL);					\
+			result = pg_##NAME##_datum_ref(kcxt, &datum);			\
+		}															\
+	}																\
 	STATIC_INLINE(void *)											\
 	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
 								pg_##NAME##_t datum)				\
@@ -1201,27 +1216,38 @@ typedef struct
 #ifdef __CUDACC__
 #define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)					\
 	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_datum_ref(kern_context *kcxt,						\
-						  void *datum)								\
+	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t	result;										\
 																	\
-		if (!datum)													\
+		if (!addr)													\
 			result.isnull = true;									\
 		else														\
 		{															\
 			result.isnull = false;									\
-			memcpy(&result.value, (BASE *) datum, sizeof(BASE));	\
+			memcpy(&result.value, (BASE *)addr, sizeof(BASE));		\
 		}															\
 		return result;												\
 	}																\
 	STATIC_INLINE(void)												\
 	pg_datum_ref(kern_context *kcxt,								\
-				 pg_##NAME##_t &result, void *datum)				\
+				 pg_##NAME##_t &result, void *addr)					\
 	{																\
-		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-																	\
+	STATIC_INLINE(void)												\
+	pg_datum_ref_slot(kern_context *kcxt,							\
+					  pg_##NAME##_t &result,						\
+					  cl_char dclass, Datum datum)					\
+	{																\
+		if (dclass == DATUM_CLASS__NULL)							\
+			result = pg_##NAME##_datum_ref(kcxt, NULL);				\
+		else														\
+		{															\
+			assert(dclass == DATUM_CLASS__NORMAL);					\
+			result = pg_##NAME##_datum_ref(kcxt, (char *)datum);	\
+		}															\
+	}																\
 	STATIC_INLINE(void *)											\
 	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
 								pg_##NAME##_t datum)				\
@@ -1327,7 +1353,23 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 										sizeof(BASE));			\
 		}														\
 		return hash;											\
+	}															\
+																\
+	STATIC_INLINE(void)											\
+	pg_comp_hash(const cl_uint *crc32_table,					\
+				 kern_context *kcxt,							\
+				 cl_uint &hash,									\
+				 pg_##NAME##_t datum)							\
+	{															\
+		if (!datum.isnull)										\
+		{														\
+			hash = pg_common_comp_crc32(crc32_table,			\
+										hash,					\
+										(char *)&datum.value,	\
+										sizeof(BASE));			\
+		}														\
 	}
+
 #else	/* __CUDACC__ */
 #define	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
@@ -1556,6 +1598,7 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 	return NULL;
 }
 
+//who use this API?
 STATIC_FUNCTION(void *)
 kern_get_datum_row(kern_data_store *kds,
 				   cl_uint colidx, cl_uint rowidx)
@@ -1570,6 +1613,8 @@ kern_get_datum_row(kern_data_store *kds,
 	return kern_get_datum_tuple(kds->colmeta, &tupitem->htup, colidx);
 }
 
+#if 0
+//not used any more. Use pg_datum_ref_slot() instead
 STATIC_FUNCTION(void *)
 kern_get_datum_slot(kern_data_store *kds,
 					cl_uint colidx, cl_uint rowidx)
@@ -1584,6 +1629,7 @@ kern_get_datum_slot(kern_data_store *kds,
 		return values + colidx;
 	return (char *)values[colidx];
 }
+#endif
 
 STATIC_FUNCTION(void *)
 kern_get_datum_column(kern_data_store *kds,

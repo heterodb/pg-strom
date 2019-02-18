@@ -55,7 +55,7 @@
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,__##NAME)					\
 																	\
 	STATIC_FUNCTION(pg_##NAME##_t)									\
-	pg_##NAME##_datum_ref(kern_context *kcxt, void *datum)			\
+	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t result;										\
 		char		vl_buf[MAXALIGN(VARHDRSZ + sizeof(cl_uint) +	\
@@ -64,38 +64,28 @@
 		char	   *pos;											\
 		cl_uint		type_oid;										\
 																	\
-		if (!datum)													\
+		if (!addr)													\
 		{															\
 			result.isnull = true;									\
 			return result;											\
 		}															\
 																	\
-		if (VARATT_IS_EXTERNAL(datum))								\
+		if (VARATT_IS_EXTERNAL(addr) ||								\
+			VARATT_IS_COMPRESSED(addr))								\
 		{															\
 			result.isnull = true;									\
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			return result;											\
 		}															\
-		else if (VARATT_IS_COMPRESSED(datum))						\
-		{															\
-			if (!toast_decompress_datum(vl_buf, sizeof(vl_buf),		\
-										(struct varlena *)datum))	\
-			{														\
-				result.isnull = true;								\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
-				return result;										\
-			}														\
-			datum = vl_buf;											\
-		}															\
-		flags = *((char *)datum + VARSIZE_ANY(datum) - 1);			\
-		memcpy(&type_oid, VARDATA_ANY(datum), sizeof(cl_uint));		\
+		flags = *((char *)addr + VARSIZE_ANY(addr) - sizeof(char));	\
+		memcpy(&type_oid, VARDATA_ANY(addr), sizeof(cl_uint));		\
 		if (type_oid != PG_TYPEOID)									\
 		{															\
 			result.isnull = true;									\
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			return result;											\
 		}															\
-		pos = VARDATA_ANY(datum) + sizeof(cl_uint);					\
+		pos = VARDATA_ANY(addr) + sizeof(cl_uint);					\
 		if (!RANGE_HAS_LBOUND(flags))								\
 			result.value.l.val = 0;									\
 		else														\
@@ -123,11 +113,23 @@
 	}																\
 	STATIC_INLINE(void)												\
 	pg_datum_ref(kern_context *kcxt,								\
-				 pg_##NAME##_t &result, void *datum)				\
+				 pg_##NAME##_t &result, void *addr)					\
 	{																\
-		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-																	\
+	STATIC_INLINE(void)												\
+	pg_datum_ref_slot(kern_context *kcxt,							\
+					  pg_##NAME##_t &result,						\
+					  cl_char dclass, Datum datum)					\
+	{																\
+		if (dclass == DATUM_CLASS__NULL)							\
+			result = pg_##NAME##_datum_ref(kcxt, NULL);				\
+		else														\
+		{															\
+			assert(dclass == DATUM_CLASS__NORMAL);					\
+			result = pg_##NAME##_datum_ref(kcxt, (void *)datum);	\
+		}															\
+	}																\
 	STATIC_FUNCTION(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\

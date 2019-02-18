@@ -187,26 +187,40 @@ typedef struct toast_compress_header
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)					\
 	STATIC_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_datum_ref(kern_context *kcxt,					\
-						  void *datum)							\
+						  void *addr)							\
 	{															\
 		pg_##NAME##_t result;									\
 																\
-		if (!datum)												\
+		if (!addr)												\
 			result.isnull = true;								\
 		else													\
 		{														\
 			result.isnull = false;								\
-			result.value = (varlena *)datum;					\
+			result.value = (varlena *)addr;						\
 		}														\
 		return result;											\
 	}															\
 	STATIC_INLINE(void)											\
 	pg_datum_ref(kern_context *kcxt,							\
-				 pg_##NAME##_t &result, void *datum)			\
+				 pg_##NAME##_t &result, void *addr)				\
 	{															\
-		result = pg_##NAME##_datum_ref(kcxt, datum);			\
+		result = pg_##NAME##_datum_ref(kcxt, addr);				\
 	}															\
-																\
+	STATIC_INLINE(void)											\
+	pg_datum_ref_slot(kern_context *kcxt,						\
+					  pg_##NAME##_t &result,					\
+					  cl_char dclass, Datum datum)				\
+	{															\
+		if (dclass == DATUM_CLASS__NULL)						\
+			result = pg_##NAME##_datum_ref(kcxt, NULL);			\
+		else if (dclass == DATUM_CLASS__VARLENA)				\
+			memcpy(&result, DatumGetPointer(datum), sizeof(result));	\
+		else													\
+		{														\
+			assert(dclass == DATUM_CLASS__NORMAL);				\
+			result = pg_##NAME##_datum_ref(kcxt, (char *)datum); \
+		}														\
+	}															\
 	STATIC_INLINE(void *)										\
 	pg_##NAME##_datum_store_OLD(kern_context *kcxt,				\
 								pg_##NAME##_t datum)			\
@@ -285,7 +299,28 @@ typedef struct toast_compress_header
 										VARSIZE_ANY_EXHDR(datum.value)); \
 		}														\
 		return hash;											\
+	}															\
+																\
+	STATIC_INLINE(void)                                         \
+	pg_comp_hash(const cl_uint *crc32_table,					\
+				 kern_context *kcxt,							\
+				 cl_uint &hash,									\
+				 pg_##NAME##_t datum)							\
+	{                                                           \
+		if (datum.isnull)										\
+			return;												\
+		if (VARATT_IS_COMPRESSED(datum.value) ||                \
+			VARATT_IS_EXTERNAL(datum.value))					\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+		else													\
+		{														\
+			hash = pg_common_comp_crc32(crc32_table,			\
+										hash,					\
+										VARDATA_ANY(datum.value), \
+										VARSIZE_ANY_EXHDR(datum.value)); \
+		}														\
 	}
+
 #else	/* __CUDACC__ */
 #define	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
 #endif	/* __CUDACC__ */

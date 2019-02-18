@@ -589,19 +589,19 @@ typedef struct
 STROMCL_SIMPLE_DATATYPE_TEMPLATE(inet,inet_struct)
 
 STATIC_INLINE(pg_inet_t)
-pg_inet_datum_ref(kern_context *kcxt, void *datum)
+pg_inet_datum_ref(kern_context *kcxt, void *addr)
 {
 	pg_inet_t	result;
 
-	result.isnull = !datum;
-	if (datum)
+	result.isnull = !addr;
+	if (addr)
 	{
-		if (VARATT_IS_COMPRESSED(datum))
+		if (VARATT_IS_COMPRESSED(addr))
 		{
 			inet	temp;
 
 			if (toast_decompress_datum((char *)&temp, sizeof(inet),
-									   (struct varlena *)datum))
+									   (struct varlena *)addr))
 			{
 				memcpy(&result.value, &temp.inet_data, sizeof(inet_struct));
 			}
@@ -611,21 +611,21 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 				result.isnull = true;
 			}
 		}
-		else if (VARATT_IS_EXTERNAL(datum) ||
-				 VARSIZE_ANY_EXHDR(datum) < offsetof(inet_struct, ipaddr))
+		else if (VARATT_IS_EXTERNAL(addr) ||
+				 VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
 		}
 		else
 		{
-			inet_struct	   *ip_data = (inet_struct *)VARDATA_ANY(datum);
+			inet_struct	   *ip_data = (inet_struct *)VARDATA_ANY(addr);
 			cl_int			ip_size = ip_addrsize(ip_data);
 
-			if (VARSIZE_ANY_EXHDR(datum) >= offsetof(inet_struct,
-													 ipaddr[ip_size]))
+			if (VARSIZE_ANY_EXHDR(addr) >= offsetof(inet_struct,
+													ipaddr[ip_size]))
 			{
-				memcpy(&result.value, VARDATA_ANY(datum),
+				memcpy(&result.value, VARDATA_ANY(addr),
 					   offsetof(inet_struct, ipaddr[ip_size]));
 				result.isnull = false;
 			}
@@ -639,9 +639,21 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 	return result;
 }
 STATIC_INLINE(void)
-pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
+pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *addr)
 {
-	result = pg_inet_datum_ref(kcxt, datum);
+	result = pg_inet_datum_ref(kcxt, addr);
+}
+STATIC_INLINE(void)
+pg_datum_ref_slot(kern_context *kcxt, pg_inet_t &result,
+				  cl_char dclass, Datum datum)
+{
+	if (dclass == DATUM_CLASS__NULL)
+		result = pg_inet_datum_ref(kcxt, NULL);
+	else
+	{
+		assert(dclass == DATUM_CLASS__NORMAL);
+		result = pg_inet_datum_ref(kcxt, (char *)datum);
+	}
 }
 
 STATIC_INLINE(cl_int)

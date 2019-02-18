@@ -3094,8 +3094,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	appendStringInfoString(
 		&decl,
 		"  void        *addr    __attribute__((unused));\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n"
-		"  cl_uint      extra_sz = 0;\n");
+		"  pg_anytype_t temp    __attribute__((unused));\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
 	if (outer_scanrelid > 0)
@@ -3175,23 +3174,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					/* row */
 					appendStringInfo(
 						&temp,
-						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-						i, dtype->type_name);
+						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
 					/* slot */
-					if (dtype->type_byval)
-						appendStringInfo(
-							&sbody,
-							"  addr = src_isnull[%d] ? NULL : &src_values[%d];\n",
-							i-1, i-1);
-					else
-						appendStringInfo(
-							&sbody,
-							"  addr = src_isnull[%d] ? NULL : DatumGetPointer(src_values[%d]);\n",
-							i-1, i-1);
 					appendStringInfo(
 						&sbody,
-						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-						i, dtype->type_name);
+						"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
+						"                    src_dclass[%d],\n"
+						"                    src_values[%d]);\n",
+						i, i-1, i-1);
 					/* column */
 					appendStringInfo(
 						&cbody,
@@ -3225,8 +3215,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						&temp,
 						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
 						"  pg_datum_store(kcxt, temp.%s_v,\n"
-						"                 dst_values[%d],\n"
-						"                 dst_isnull[%d]);\n",
+						"                 dst_dclass[%d],\n"
+						"                 dst_values[%d]);\n",
 						dtype->type_name,
 						dtype->type_name,
 						tle->resno - 1,
@@ -3235,12 +3225,13 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					/* slot */
 					appendStringInfo(
 						&sbody,
-						"  dst_isnull[%d] = src_isnull[%d];\n"
+						"  dst_dclass[%d] = src_dclass[%d];\n"
 						"  dst_values[%d] = src_values[%d];\n",
 						tle->resno-1, i-1,
 						tle->resno-1, i-1);
 
 					/* column */
+					//TO BE replaced by pg_datum_ref_arrow!!
 					if (!addr_is_valid)
 						appendStringInfo(
 							&cbody,
@@ -3250,8 +3241,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						&cbody,
 						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
 						"  pg_datum_store(kcxt, temp.%s_v,\n"
-						"                 dst_values[%d],\n"
-						"                 dst_isnull[%d]);\n",
+						"                 dst_dclass[%d],\n"
+						"                 dst_values[%d]);\n",
 						dtype->type_name,
 						dtype->type_name,
 						tle->resno - 1,
@@ -3318,53 +3309,26 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context));
 
-		if (dtype->type_byval)
-		{
+		appendStringInfo(
+			&temp,
+			"  pg_datum_store(kcxt, temp.%s_v,\n"
+			"                 dst_dclass[%d],\n"
+			"                 dst_values[%d]);\n",
+			dtype->type_name,
+			tle->resno-1,
+			tle->resno-1);
+		if (null_const_value)
 			appendStringInfo(
 				&temp,
-				"  pg_datum_store(kcxt, temp.%s_v,\n"
-				"                 dst_values[%d],\n"
-				"                 dst_isnull[%d]);\n",
+				"  if (temp.%s_v.isnull)\n"
+				"    dst_values[%d] = %s;\n",
 				dtype->type_name,
 				tle->resno-1,
-				tle->resno-1);
-			if (null_const_value)
-				appendStringInfo(
-					&temp,
-					"  if (temp.%s_v.isnull)\n"
-					"    dst_values[%d] = %s;\n",
-					dtype->type_name,
-					tle->resno-1,
-					null_const_value);
-		}
-		else
-		{
-			appendStringInfo(
-				&temp,
-				"  addr = pg_%s_datum_store_OLD(kcxt,temp.%s_v);\n"
-				"  dst_isnull[%d] = !addr;\n"
-				"  if (addr)\n"
-				"  {\n"
-				"    dst_values[%d] = PointerGetDatum(addr);\n"
-				"    if (addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
-				"      extra_sz += MAXALIGN(%s);\n"
-				"  }\n",
-				dtype->type_name, dtype->type_name,
-				tle->resno - 1,
-				tle->resno - 1,
-				dtype->type_length > 0
-				? psprintf("sizeof(temp.%s_v.value)", dtype->type_name)
-				: "VARSIZE_ANY(addr)");
-			if (null_const_value)
-			{
-				appendStringInfo(
-					&temp,
-					"  else\n"
-					"    dst_values[%d] = %s;\n",
-					tle->resno-1,
-					null_const_value);
-			}
-		}
+				null_const_value);
+		if (dtype->type_element)
+			context->varlena_bufsz += MAXALIGN(sizeof(pg_array_t));
+		else if (dtype->type_length == -1)
+			context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);
@@ -3380,37 +3344,30 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"gpupreagg_projection_row(kern_context *kcxt,\n"
 		"                         kern_data_store *kds_src,\n"
 		"                         HeapTupleHeaderData *htup,\n"
-		"                         Datum *dst_values,\n"
-		"                         cl_char *dst_isnull,\n"
-		"                         cl_uint *p_extra_sz)\n"
+		"                         cl_char *dst_dclass,\n"
+		"                         Datum   *dst_values)\n"
 		"{\n"
 		"%s\n%s"
-		"  if (p_extra_sz)\n"
-		"    *p_extra_sz = extra_sz;\n"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_projection_slot(kern_context *kcxt,\n"
+		"                          cl_char *src_dclass,\n"
 		"                          Datum   *src_values,\n"
-		"                          cl_char *src_isnull,\n"
-		"                          Datum   *dst_values,\n"
-		"                          cl_char *dst_isnull)\n"
+		"                          cl_char *dst_dclass,\n"
+		"                          Datum   *dst_values)\n"
 		"{\n"
 		"%s\n%s"
-		"  assert(extra_sz == 0);\n"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_projection_column(kern_context *kcxt,\n"
 		"                            kern_data_store *kds_src,\n"
 		"                            cl_uint src_index,\n"
-		"                            Datum *dst_values,\n"
-		"                            cl_char *dst_isnull,\n"
-		"                            cl_uint *p_extra_sz)\n"
+		"                            cl_char *dst_dclass,\n"
+		"                            Datum   *dst_values)\n"
 		"{\n"
 		"%s\n%s"
-		"  if (p_extra_sz)\n"
-		"    *p_extra_sz = extra_sz;\n"
 		"}\n\n",
 		decl.data,
 		tbody.data,
@@ -3445,24 +3402,21 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 							List *tlist_dev)
 {
 	StringInfoData	decl;
-	StringInfoData	load;
-	StringInfoData	body;
 	ListCell	   *lc;
 
 	initStringInfo(&decl);
-    initStringInfo(&load);
-    initStringInfo(&body);
 	context->param_refs = NULL;
 
-	appendStringInfo(
+	appendStringInfoString(
 		&decl,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpupreagg_hashvalue(kern_context *kcxt,\n"
 		"                    cl_uint *crc32_table,\n"
-		"                    cl_uint hash_value,\n"
-		"                    cl_bool *slot_isnull,\n"
-		"                    Datum *slot_values)\n"
-		"{\n");
+		"                    cl_uint  hash_value,\n"
+		"                    cl_char *slot_dclass,\n"
+		"                    Datum   *slot_values)\n"
+		"{\n"
+		"  pg_anytype_t temp    __attribute__((unused));\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -3478,51 +3432,33 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		if (!dtype || !OidIsValid(dtype->type_eqfunc))
 			elog(ERROR, "Bug? type (%s) is not supported",
 				 format_type_be(type_oid));
-		/* variable declarations */
+		/* load variable */
 		appendStringInfo(
 			&decl,
-			"  pg_%s_t keyval_%u;\n",
-			dtype->type_name, tle->resno);
-		/* load variables */
-		if (dtype->type_byval)
-			appendStringInfo(
-				&load,
-				"  addr = slot_isnull[%d] ? NULL : slot_values + %u;\n"
-				"  keyval_%u = pg_%s_datum_ref(kcxt, addr);\n",
-				tle->resno - 1, tle->resno - 1,
-				tle->resno, dtype->type_name);
-		else
-			appendStringInfo(
-				&load,
-				"  addr = slot_isnull[%d] ? NULL : (void *)slot_values[%u];\n"
-				"  keyval_%u = pg_%s_datum_ref(kcxt, addr);\n",
-				tle->resno - 1, tle->resno - 1,
-				tle->resno, dtype->type_name);
-		/* compute crc32 value */
+			"  pg_datum_ref_slot(kcxt,temp.%s_v,\n"
+			"                    slot_dclass[%d],\n"
+			"                    slot_values[%d]);\n",
+			dtype->type_name,
+			tle->resno - 1,
+			tle->resno - 1);
+		/* update hash value (by crc32) */
 		appendStringInfo(
-			&body,
-			"  hash_value = pg_%s_comp_crc32(crc32_table, kcxt, hash_value, keyval_%u);\n",
-			dtype->type_name, tle->resno);
+			&decl,
+			"  hash_value = pg_%s_comp_crc32(crc32_table, kcxt, hash_value, temp.%s_v);\n",
+			dtype->type_name,
+			dtype->type_name);
 	}
-	appendStringInfoString(
-		&decl,
-		"  void *addr __attribute__((unused));\n");
-
 	/* no constants should appear */
 	Assert(bms_is_empty(context->param_refs));
+	appendStringInfoString(
+		&decl,
+		"\n"
+		"  return hash_value;\n"
+		"}\n\n");
 
-	appendStringInfo(kern,
-					 "%s\n"
-					 "%s\n"
-					 "%s\n"
-					 "  return hash_value;\n"
-					 "}\n\n",
-					 decl.data,
-					 load.data,
-					 body.data);
+	appendStringInfoString(kern, decl.data);
+
 	pfree(decl.data);
-	pfree(load.data);
-	pfree(body.data);
 }
 
 /*
@@ -3554,9 +3490,12 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"                   kern_data_store *x_kds, size_t x_index,\n"
 		"                   kern_data_store *y_kds, size_t y_index)\n"
 		"{\n"
-		"  pg_anytype_t temp_x  __attribute__((unused));\n"
-		"  pg_anytype_t temp_y  __attribute__((unused));\n"
-		"  void        *datum   __attribute__((unused));\n"
+		"  pg_anytype_t x_temp  __attribute__((unused));\n"
+		"  pg_anytype_t y_temp  __attribute__((unused));\n"
+		"  cl_char     *x_dclass = KERN_DATA_STORE_DCLASS(x_kds, x_index);\n"
+		"  cl_char     *y_dclass = KERN_DATA_STORE_DCLASS(y_kds, y_index);\n"
+		"  Datum       *x_values = KERN_DATA_STORE_VALUES(x_kds, x_index);\n"
+		"  Datum       *y_values = KERN_DATA_STORE_VALUES(y_kds, y_index);\n"
 		"\n");
 
 	foreach (lc, tlist_dev)
@@ -3586,6 +3525,12 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		pgstrom_devfunc_track(context, dfunc);
 		darg1 = linitial(dfunc->func_args);
 		darg2 = lsecond(dfunc->func_args);
+		if (dtype->type_oid != darg1->type_oid ||
+			dtype->type_oid != darg2->type_oid)
+			elog(ERROR, "Bug? type (%s) didn't match to arguments (%s) (%s)",
+				 format_type_be(dtype->type_oid),
+				 format_type_be(darg1->type_oid),
+				 format_type_be(darg2->type_oid));
 
 		/*
 		 * Load the key values, then compare
@@ -3597,25 +3542,25 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		 */
 		appendStringInfo(
 			kern,
-			"  datum = kern_get_datum_slot(x_kds,%u,x_index);\n"
-			"  temp_x.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
-			"  datum = kern_get_datum_slot(y_kds,%u,y_index);\n"
-			"  temp_y.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
-			"  if (!temp_x.%s_v.isnull && !temp_y.%s_v.isnull)\n"
+			"  pg_datum_ref_slot(kcxt, x_temp.%s_v,\n"
+			"                    x_dclass[%d], y_values[%d]);\n"
+			"  pg_datum_ref_slot(kcxt, y_temp.%s_v,\n"
+			"                    y_dclass[%d], y_values[%d]);\n"
+			"  if (!x_temp.%s_v.isnull && !y_temp.%s_v.isnull)\n"
 			"  {\n"
-			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
+			"    if (!EVAL(pgfn_%s(kcxt, x_temp.%s_v, y_temp.%s_v)))\n"
 			"      return false;\n"
 			"  }\n"
-			"  else if ((temp_x.%s_v.isnull && !temp_y.%s_v.isnull) ||\n"
-			"           (!temp_x.%s_v.isnull && temp_y.%s_v.isnull))\n"
-			"      return false;\n"
+			"  else if ((x_temp.%s_v.isnull && !y_temp.%s_v.isnull) ||\n"
+			"           (!x_temp.%s_v.isnull && y_temp.%s_v.isnull))\n"
+			"    return false;\n"
 			"\n",
-			tle->resno-1,
+			dtype->type_name,
+			tle->resno-1, tle->resno-1,
+			dtype->type_name,
+            tle->resno-1, tle->resno-1,
 			dtype->type_name, dtype->type_name,
-			tle->resno-1,
-			dtype->type_name, dtype->type_name,
-			dtype->type_name, dtype->type_name,
-			dfunc->func_devname, darg1->type_name, darg2->type_name,
+			dfunc->func_devname, dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 	}
@@ -3721,9 +3666,9 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		kern,
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_local_calc(cl_int attnum,\n"
-		"                     cl_bool *p_acm_isnull,\n"
+		"                     cl_char *p_acm_dclass,\n"
 		"                     Datum   *p_acm_datum,\n"
-		"                     cl_bool  new_isnull,\n"
+		"                     cl_char  new_dclass,\n"
 		"                     Datum    new_datum)\n"
 		"{\n"
 		"  switch (attnum)\n"
@@ -3741,7 +3686,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
-			"    %s(p_acm_isnull,p_acm_datum,new_isnull,new_datum);\n"
+			"    %s(p_acm_dclass,p_acm_datum,new_dclass,new_datum);\n"
 			"    break;\n",
 			tle->resno - 1,
 			label);
@@ -3767,10 +3712,10 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_global_calc(cl_bool *dst_isnull,\n"
-		"                      Datum *dst_values,\n"
-		"                      cl_bool *src_isnull,\n"
-		"                      Datum *src_values)\n"
+		"gpupreagg_global_calc(cl_char *dst_dclass,\n"
+		"                      Datum   *dst_values,\n"
+		"                      cl_char *src_dclass,\n"
+		"                      Datum   *src_values)\n"
 		"{\n");
 	foreach (lc, tlist_dev)
 	{
@@ -3784,7 +3729,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 		label = gpupreagg_codegen_common_calc(tle, context, true);
 		appendStringInfo(
 			kern,
-			"  %s(dst_isnull+%d, dst_values+%d, src_isnull[%d], src_values[%d]);\n",
+			"  %s(dst_dclass+%d, dst_values+%d, src_dclass[%d], src_values[%d]);\n",
 			label,
 			tle->resno - 1,
 			tle->resno - 1,
@@ -3810,9 +3755,9 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
         kern,
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_nogroup_calc(cl_int attnum,\n"
-		"                       cl_bool *p_acm_isnull,\n"
+		"                       cl_char *p_acm_dclass,\n"
 		"                       Datum   *p_acm_datum,\n"
-		"                       cl_bool  new_isnull,\n"
+		"                       cl_char  new_dclass,\n"
 		"                       Datum    new_datum)\n"
 		"{\n"
 		"  switch (attnum)\n"
@@ -3829,7 +3774,7 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
-			"    %s(p_acm_isnull, p_acm_datum, new_isnull, new_datum);\n"
+			"    %s(p_acm_dclass, p_acm_datum, new_dclass, new_datum);\n"
 			"    break;\n",
 			tle->resno - 1,
 			label);

@@ -88,8 +88,12 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 	if (row_index < kds->nitems)
 	{
 		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
-		char   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
-		int		natts = slot->tts_tupleDescriptor->natts;
+		char   *tts_isnull = KERN_DATA_STORE_DCLASS(kds, row_index);
+		int		i, natts = slot->tts_tupleDescriptor->natts;
+
+		for (i=0; i < natts; i++)
+			Assert(tts_isnull[i] == DATUM_CLASS__NORMAL ||
+				   tts_isnull[i] == DATUM_CLASS__NULL);
 
 		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);

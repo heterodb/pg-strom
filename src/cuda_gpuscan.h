@@ -236,7 +236,7 @@ gpuscan_projection_column(kern_context *kcxt,
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */
 
-#ifdef CUDA_GPUSCAN_BODY
+#ifdef __CUDA_GPUSCAN_BODY__
 /*
  * kern_gpuscan_main_row - GpuScan logic for KDS_FORMAT_ROW
  */
@@ -856,4 +856,4 @@ out_nostat:
 	}
 	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
-#endif	/* CUDA_GPUSCAN_BODY */
+#endif	/* __CUDA_GPUSCAN_BODY__ */

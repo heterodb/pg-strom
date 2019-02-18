@@ -544,23 +544,36 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
  * tries to fetch fixed-length variable.
  */
 STATIC_INLINE(pg_numeric_t)
-pg_numeric_datum_ref(kern_context *kcxt,
-					 void *datum)
+pg_numeric_datum_ref(kern_context *kcxt, void *addr)
 {
 	pg_numeric_t	result;
 
-	if (!datum)
+	if (!addr)
 		result.isnull = true;
 	else
-		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
+		result = pg_numeric_from_varlena(kcxt, (varlena *) addr);
 	return result;
 }
 
 STATIC_INLINE(void)
 pg_datum_ref(kern_context *kcxt,
-			 pg_numeric_t &result, void *datum)
+			 pg_numeric_t &result, void *addr)
 {
-	result = pg_numeric_datum_ref(kcxt, datum);
+	result = pg_numeric_datum_ref(kcxt, addr);
+}
+
+STATIC_INLINE(void)
+pg_datum_ref_slot(kern_context *kcxt,
+				  pg_numeric_t &result,
+				  cl_char dclass, Datum datum)
+{
+	if (dclass == DATUM_CLASS__NULL)
+		result = pg_numeric_datum_ref(kcxt, NULL);
+	else
+	{
+		assert(dclass == DATUM_CLASS__NORMAL);
+		result = g_numeric_datum_ref(kcxt, (char *)datum);
+	}
 }
 
 STATIC_INLINE(cl_int)
