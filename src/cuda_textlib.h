@@ -78,6 +78,23 @@ pg_bpchar_comp_crc32(const cl_uint *crc32_table,
 	}
 	return hash;
 }
+
+STATIC_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
+{
+	if (datum.isnull)
+		return 0;
+	if (VARATT_IS_COMPRESSED(datum.value) ||
+		VARATT_IS_EXTERNAL(datum.value))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		return 0;
+	}
+	return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value),
+					   bpchar_truelen(datum.value));
+}
+
+
 #endif
 
 STATIC_FUNCTION(cl_int)

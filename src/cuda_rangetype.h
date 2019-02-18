@@ -208,6 +208,28 @@
 								 sizeof(char));						\
 		}															\
 		return hash;												\
+	}																\
+																	\
+	STATIC_FUNCTION(cl_uint)										\
+	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)			\
+	{																\
+		struct {													\
+			BASE		l_val;										\
+			BASE		u_val;										\
+			cl_uchar	flags;										\
+		} temp;														\
+																	\
+		if (datum.isnull)											\
+			return 0;												\
+		temp.flags = (datum.value.empty ? RANGE_EMPTY : 0)			\
+			| (datum.value.l.infinite ? RANGE_LB_INF  : 0)			\
+			| (datum.value.l.inclusive ? RANGE_LB_INC : 0)			\
+			| (datum.value.u.infinite ? RANGE_UB_INF  : 0)			\
+			| (datum.value.u.inclusive ? RANGE_UB_INC : 0);			\
+		temp.l_val = datum.value.l.val;								\
+		temp.u_val = datum.value.u.val;								\
+																	\
+		return pg_hash_any(&temp, sizeof(temp));					\
 	}
 
 #ifndef PG_INT4RANGE_TYPE_DEFINED

@@ -48,7 +48,6 @@ struct kern_gpupreagg
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
-	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
 	/* <-- gpupreaggSuspendContext[], if any --> */
 	/* <-- gpupreaggRowInvalidationMap. if any --> */
@@ -84,11 +83,6 @@ typedef union
 #define KERN_GPUPREAGG_LENGTH(kgpreagg)					\
 	(offsetof(kern_gpupreagg, kparams) +				\
 	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
-#define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
-	(offsetof(kern_gpupreagg, kparams) +				\
-	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
-#define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
-	offsetof(kern_gpupreagg, pg_crc32_table[0])
 /* suspend/resume buffer for KDS_FORMAT_BLOCK */
 #define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg,group_id)	\
 	((kgpreagg)->suspend_size > 0							\
@@ -168,8 +162,6 @@ gpupreagg_reset_kernel_task(kern_gpupreagg *kgpreagg, bool resume_context)
  */
 STATIC_FUNCTION(cl_uint)
 gpupreagg_hashvalue(kern_context *kcxt,
-					cl_uint *crc32_table,	/* __shared__ memory */
-					cl_uint  hash_value,
 					cl_char *slot_dclass,
 					Datum   *slot_values);
 
@@ -1476,7 +1468,6 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_bool			is_owner = false;
 	cl_bool			is_last_reduction = false;
 	cl_char		   *ri_map;
-	__shared__ cl_uint	crc32_table[256];
 	__shared__ cl_bool	l_dclass[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
 	__shared__ cl_int	l_kds_index[MAXTHREADS_PER_BLOCK];
@@ -1497,13 +1488,6 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
-
-	/* setup crc32 table */
-	for (index = get_local_id();
-		 index < lengthof(crc32_table);
-		 index += get_local_size())
-		crc32_table[index] = kgpreagg->pg_crc32_table[index];
-	__syncthreads();
 
 clean_restart:
 	/* setup local hashslot */
@@ -1541,13 +1525,9 @@ clean_restart:
 			{
 				slot_dclass = KERN_DATA_STORE_DCLASS(kds_slot, kds_index);
 				slot_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
-				INIT_LEGACY_CRC32(hash_value);
 				hash_value = gpupreagg_hashvalue(&kcxt,
-												 crc32_table,
-												 hash_value,
 												 slot_dclass,
 												 slot_values);
-				FIN_LEGACY_CRC32(hash_value);
 			}
 			else
 			{

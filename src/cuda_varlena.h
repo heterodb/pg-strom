@@ -301,24 +301,19 @@ typedef struct toast_compress_header
 		return hash;											\
 	}															\
 																\
-	STATIC_INLINE(void)                                         \
-	pg_comp_hash(const cl_uint *crc32_table,					\
-				 kern_context *kcxt,							\
-				 cl_uint &hash,									\
-				 pg_##NAME##_t datum)							\
+	STATIC_INLINE(cl_uint)										\
+	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
 	{                                                           \
 		if (datum.isnull)										\
-			return;												\
+			return 0;											\
 		if (VARATT_IS_COMPRESSED(datum.value) ||                \
 			VARATT_IS_EXTERNAL(datum.value))					\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
-		else													\
 		{														\
-			hash = pg_common_comp_crc32(crc32_table,			\
-										hash,					\
-										VARDATA_ANY(datum.value), \
-										VARSIZE_ANY_EXHDR(datum.value)); \
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+			return 0;											\
 		}														\
+		return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value), \
+						   VARSIZE_ANY_EXHDR(datum.value));		\
 	}
 
 #else	/* __CUDACC__ */

@@ -720,6 +720,22 @@ pg_inet_comp_crc32(const cl_uint *crc32_table,
 	}
 	return hash;
 }
+
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
+{
+	if (!datum.isnull)
+		return 0;
+	if (datum.value.family == PGSQL_AF_INET)
+		return pg_hash_any((cl_uchar *)&datum.value,
+						   offsetof(inet_struct, ipaddr[4]));
+	if (datum.value.family == PGSQL_AF_INET6)
+		return pg_hash_any((cl_uchar *)&datum.value,
+						   offsetof(inet_struct, ipaddr[16]));
+	STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
+	return 0;
+}
+
 #endif	/* PG_INET_TYPE_DEFINED */
 
 #ifndef PG_CIDR_TYPE_DEFINED

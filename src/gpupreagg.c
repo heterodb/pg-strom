@@ -3411,12 +3411,11 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		&decl,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpupreagg_hashvalue(kern_context *kcxt,\n"
-		"                    cl_uint *crc32_table,\n"
-		"                    cl_uint  hash_value,\n"
 		"                    cl_char *slot_dclass,\n"
 		"                    Datum   *slot_values)\n"
 		"{\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n");
+		"  pg_anytype_t temp    __attribute__((unused));\n"
+		"  cl_uint      hash = 0xffffffffU;\n\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -3444,8 +3443,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		/* update hash value (by crc32) */
 		appendStringInfo(
 			&decl,
-			"  hash_value = pg_%s_comp_crc32(crc32_table, kcxt, hash_value, temp.%s_v);\n",
-			dtype->type_name,
+			"  hash ^= pg_comp_hash(kcxt, temp.%s_v);\n",
 			dtype->type_name);
 	}
 	/* no constants should appear */
@@ -3453,7 +3451,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 	appendStringInfoString(
 		&decl,
 		"\n"
-		"  return hash_value;\n"
+		"  return hash;\n"
 		"}\n\n");
 
 	appendStringInfoString(kern, decl.data);
@@ -4656,9 +4654,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	gpreagg->kern.hash_size = kds_slot_nrooms; //deprecated?
 	gpreagg->kern.suspend_size = suspend_sz;
 	gpreagg->kern.row_inval_map_size = row_inval_sz;
-	memcpy(gpreagg->kern.pg_crc32_table,
-		   pg_crc32_table,
-		   sizeof(uint32) * 256);
 	/* kern_parambuf */
 	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
 		   gpas->gts.kern_params,
