@@ -476,7 +476,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/* GpuScan */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY)
 		ofs += snprintf(source + ofs, len - ofs,
-						"#define  CUDA_GPUSCAN_BODY 1\n"
+						"#define  __CUDA_GPUSCAN_BODY__ 1\n"
 						"#include \"cuda_gpuscan.h\"\n");
 	/* GpuJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)

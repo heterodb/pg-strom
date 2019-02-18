@@ -459,6 +459,7 @@ struct GpuTask
 
 struct devtype_info;
 struct devfunc_info;
+struct devcast_info;
 
 typedef pg_crc32 (*devtype_hashfunc_type)(struct devtype_info *dtype,
 										  pg_crc32 hash,
@@ -507,6 +508,12 @@ typedef struct devfunc_info {
 	int		  (*func_varlena_sz)(struct devfunc_info *dfunc,
 								 Expr **args, int *vl_width);
 } devfunc_info;
+
+typedef struct devcast_info {
+	devtype_info   *src_type;
+	devtype_info   *dst_type;
+	cl_uint			extra_flags;
+} devcast_info;
 
 /*
  * pgstrom_data_store - a data structure with various format to exchange
@@ -981,6 +988,7 @@ extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
 														 Oid type_collid);
 extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
+extern bool pgstrom_devcast_supported(Oid src_type_oid, Oid dst_type_oid);
 
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,

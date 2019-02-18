@@ -1381,17 +1381,6 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
-/* template for binary compatible type-cast */
-#define STROMCL_SIMPLE_TYPECAST_TEMPLATE(SOURCE,TARGET)		\
-	STATIC_INLINE(pg_##TARGET##_t)							\
-	to_##TARGET(pg_##SOURCE##_t arg)						\
-	{														\
-		pg_##TARGET##_t r;									\
-		r.isnull = arg.isnull;								\
-		r.value = arg.value;								\
-		return r;											\
-	}
-
 #define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
 	STATIC_INLINE(pg_bool_t)								\
 	pgfn_##FNAME##EXTRA(kern_context *kcxt,					\

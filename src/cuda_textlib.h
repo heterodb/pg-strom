@@ -595,14 +595,34 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
  */
 #ifndef PG_VARCHAR_TYPE_DEFINED
 #define PG_VARCHAR_TYPE_DEFINED
-STROMCL_VARLENA_TYPE_TEMPLATE(varchar)
+typedef pg_text_t						pg_varchar_t;
+#define pg_varchar_datum_ref(a,b)		pg_text_datum_ref(a,b)
+#define pg_varchar_param(a,b)			pg_text_param(a,b)
+#define pg_varchar_comp_crc32(a,b,c,d)	pg_text_comp_crc32(a,b,c,d)
 #endif
 
 /* binary compatible type cast */
-STROMCL_SIMPLE_TYPECAST_TEMPLATE(text,    bpchar)
-STROMCL_SIMPLE_TYPECAST_TEMPLATE(varchar, bpchar)
-STROMCL_SIMPLE_TYPECAST_TEMPLATE(text,    varchar)
-STROMCL_SIMPLE_TYPECAST_TEMPLATE(varchar, text)
+STATIC_INLINE(pg_text_t)
+to_text(pg_varchar_t arg)
+{
+	return arg;
+}
+
+STATIC_INLINE(pg_bpchar_t)
+to_bpchar(pg_text_t arg)
+{
+	pg_bpchar_t		r;
+	r.isnull = arg.isnull;
+	r.value  = arg.value;
+	return r;
+}
+/* above covers pg_varchar_t --> pg_bpchar_t */
+
+STATIC_INLINE(pg_varchar_t)
+to_varchar(pg_text_t arg)
+{
+	return arg;
+}
 
 /*
  * Support for LIKE operator

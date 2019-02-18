@@ -22,7 +22,10 @@ static MemoryContext	devinfo_memcxt;
 static bool		devtype_info_is_built;
 static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
+static List	   *devcast_info_slot[48];
 bool			pgstrom_enable_numeric_type;	/* GUC */
+
+static void		build_devcast_info(void);
 
 static pg_crc32 generic_devtype_hashfunc(devtype_info *dtype,
 										 pg_crc32 hash,
@@ -321,6 +324,8 @@ build_devtype_info(void)
 										NULL);
 	}
 	devtype_info_is_built = true;
+	/* also, device types cast */
+	build_devcast_info();
 }
 
 devtype_info *
@@ -2074,13 +2079,16 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 		 * It is legal and adequate in PostgreSQL, however, CUDA C++ code
 		 * takes strict type checks, so we have to inject type relabel
 		 * in this case.
+		 *
+		 * When we transform an expression tree, PostgreSQL injects
+		 * RelabelType node, and its buffers implicit binary-compatible
+		 * type cast, however, caller has to pay attention if it specifies
+		 * a particular function by OID.
 		 */
 		Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
 		oidvector  *proargtypes = &proc->proargtypes;
-		HeapTuple	tuple;
 		Oid			src_type;
 		Oid			dst_type;
-		char		castmethod;
 		int			j;
 
 		if (func_argtypes->dim1 != proargtypes->dim1)
@@ -2092,28 +2100,10 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 
 			if (src_type == dst_type)
 				continue;
-			tuple = SearchSysCache2(CASTSOURCETARGET,
-                                    ObjectIdGetDatum(src_type),
-									ObjectIdGetDatum(dst_type));
-			if (!HeapTupleIsValid(tuple))
+			/* have a to_DESTTYPE() device function? */
+			if (!pgstrom_devcast_supported(src_type, dst_type))
 			{
 				elog(DEBUG2, "no type cast definition (%s->%s)",
-					 format_type_be(src_type),
-					 format_type_be(dst_type));
-				return NULL;	/* no cast */
-			}
-			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
-			ReleaseSysCache(tuple);
-
-			/*
-			 * It might be possible to inject device function to cast
-			 * source type to the destination type. However, it should
-			 * be already attached by the code PostgreSQL.
-			 * Right now, we don't support it.
-			 */
-			if (castmethod != COERCION_METHOD_BINARY)
-			{
-				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
 					 format_type_be(src_type),
 					 format_type_be(dst_type));
 				return NULL;
@@ -2122,20 +2112,8 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 
 		if (func_rettype != proc->prorettype)
 		{
-			tuple = SearchSysCache2(CASTSOURCETARGET,
-									ObjectIdGetDatum(func_rettype),
-									ObjectIdGetDatum(proc->prorettype));
-			if (!HeapTupleIsValid(tuple))
-			{
-				elog(DEBUG2, "no type cast definition (%s->%s)",
-					 format_type_be(func_rettype),
-					 format_type_be(proc->prorettype));
-				return NULL;    /* no cast */
-			}
-			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
-			ReleaseSysCache(tuple);
-
-			if (castmethod != COERCION_METHOD_BINARY)
+			/* have a to_DESTTYPE() device function? */
+			if (!pgstrom_devcast_supported(func_rettype, proc->prorettype))
 			{
 				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
 					 format_type_be(func_rettype),
@@ -2143,10 +2121,7 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 				return NULL;
 			}
 		}
-
-		/*
-		 * OK, it looks type-relabel allows to call the function
-		 */
+		/* OK, type-relabel allows to call the function */
 		dfunc = __pgstrom_devfunc_lookup_or_create(protup,
 												   proc->prorettype,
 												   proargtypes,
@@ -2295,6 +2270,124 @@ skip:
 	pgstrom_devtype_track(context, dfunc->func_rettype);
 	foreach (lc, dfunc->func_args)
 		pgstrom_devtype_track(context, (devtype_info *) lfirst(lc));
+}
+
+/*
+ * Device cast support
+ *
+ * In some cases, a function can be called with different argument types or
+ * result type from its declaration, if these types are binary compatible.
+ * PostgreSQL does not have any infrastructure to check data types, it relies
+ * on the caller which shall give correct data types, and binary-compatible
+ * types will work without any problems.
+ * On the other hands, CUDA C++ has strict type checks for function invocation,
+ * so we need to inject a thin type cast device function even if they are
+ * binary compatible.
+ * The thin device function has the following naming convention:
+ *
+ *   STATIC_INLINE(DESTTYPE) to_DESTTYPE(kcxt, SOURCETYPE)
+ *
+ * We have no SQL function on host side because the above device function 
+ * reflects binary-compatible type cast. If cast is COERCION_METHOD_FUNCTION,
+ * SQL function shall be explicitly used.
+ */
+static struct {
+	Oid			src_type_oid;
+	Oid			dst_type_oid;
+	cl_uint		extra_flags;
+} devcast_catalog[] = {
+	/* text, varchar, bpchar */
+	{ TEXTOID,    BPCHAROID,  DEVKERNEL_NEEDS_TEXTLIB },
+	{ TEXTOID,    VARCHAROID, DEVKERNEL_NEEDS_TEXTLIB },
+	{ VARCHAROID, TEXTOID,    DEVKERNEL_NEEDS_TEXTLIB },
+	{ VARCHAROID, BPCHAROID,  DEVKERNEL_NEEDS_TEXTLIB },
+	/* cidr -> inet, but no reverse type cast */
+	{ CIDROID,    INETOID,    DEVKERNEL_NEEDS_MISC },
+};
+
+static void
+build_devcast_info(void)
+{
+	int			i;
+
+	Assert(devtype_info_is_built);
+	for (i=0; i < lengthof(devcast_catalog); i++)
+	{
+		Oid				src_type_oid = devcast_catalog[i].src_type_oid;
+		Oid				dst_type_oid = devcast_catalog[i].dst_type_oid;
+		cl_uint			extra_flags  = devcast_catalog[i].extra_flags;
+		cl_int			nslots = lengthof(devcast_info_slot);
+		cl_int			index;
+		devtype_info   *dtype;
+		devcast_info   *dcast;
+		HeapTuple		tup;
+		char			method;
+
+		tup = SearchSysCache2(CASTSOURCETARGET,
+							  ObjectIdGetDatum(src_type_oid),
+							  ObjectIdGetDatum(dst_type_oid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "Bug? type cast %s --> %s is not defined",
+				 format_type_be(src_type_oid),
+				 format_type_be(dst_type_oid));
+		method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
+		if (method != COERCION_METHOD_BINARY)
+			elog(ERROR, "Bug? type cast %s --> %s is not binary compatible",
+				 format_type_be(src_type_oid),
+				 format_type_be(dst_type_oid));
+		ReleaseSysCache(tup);
+
+		dcast = MemoryContextAllocZero(devinfo_memcxt,
+									   sizeof(devcast_info));
+		/* source */
+		dtype = pgstrom_devtype_lookup(src_type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? type '%s' is not supported on device",
+				 format_type_be(src_type_oid));
+		extra_flags |= dtype->type_flags;
+		dcast->src_type = dtype;
+		/* destination */
+		dtype = pgstrom_devtype_lookup(dst_type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? type '%s' is not supported on device",
+				 format_type_be(dst_type_oid));
+		extra_flags |= dtype->type_flags;
+		dcast->dst_type = dtype;
+		/* extra flags */
+		dcast->extra_flags = extra_flags;
+
+		index = (hash_uint32((uint32) src_type_oid) ^
+				 hash_uint32((uint32) dst_type_oid)) % nslots;
+		devcast_info_slot[index] = lappend_cxt(devinfo_memcxt,
+											   devcast_info_slot[index],
+											   dcast);
+	}
+}
+
+bool
+pgstrom_devcast_supported(Oid src_type_oid,
+						  Oid dst_type_oid)
+{
+	int			nslots = lengthof(devcast_info_slot);
+	int			index;
+	ListCell   *lc;
+
+	index = (hash_uint32((uint32) src_type_oid) ^
+			 hash_uint32((uint32) dst_type_oid)) % nslots;
+	foreach (lc, devcast_info_slot[index])
+	{
+		devcast_info   *dcast = lfirst(lc);
+
+		if (dcast->src_type->type_oid == src_type_oid &&
+			dcast->dst_type->type_oid == dst_type_oid)
+		{
+			//Right now, device type inclusion also contains
+			//type cast above
+			//*p_extra_flags |= dcast->extra_flags;
+			return true;
+		}
+	}
+	return false;
 }
 
 /*
@@ -2650,12 +2743,18 @@ codegen_expression_walker(codegen_context *context,
 	}
 	else if (IsA(node, RelabelType))
 	{
-		RelabelType *relabel = (RelabelType *) node;
+		RelabelType	   *relabel = (RelabelType *) node;
+		Oid				stype_oid = exprType((Node *)relabel->arg);
 
 		dtype = pgstrom_devtype_lookup_and_track(relabel->resulttype, context);
 		if (!dtype)
 			elog(ERROR, "codegen: failed to lookup device type: %s",
 				 format_type_be(relabel->resulttype));
+		if (!pgstrom_devcast_supported(stype_oid, dtype->type_oid))
+			elog(ERROR, "codegen: failed to lookup device cast: %s->%s",
+				 format_type_be(stype_oid),
+				 format_type_be(relabel->resulttype));
+
 		appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 		codegen_expression_walker(context, (Node *)relabel->arg, &varlena_sz);
 		appendStringInfo(&context->str, ")");
@@ -3215,9 +3314,14 @@ device_expression_walker(device_expression_walker_context *con,
 	{
 		RelabelType	   *relabel = (RelabelType *) expr;
 		devtype_info   *dtype = pgstrom_devtype_lookup(relabel->resulttype);
+		devtype_info   *stype =
+			pgstrom_devtype_lookup(exprType((Node *)relabel->arg));
 
 		/* array->array relabel may be possible */
-		if (!dtype)
+		if (!dtype ||
+			!stype ||
+			!pgstrom_devcast_supported(stype->type_oid,
+									   dtype->type_oid))
 			goto unable_node;
 		if (!device_expression_walker(con, relabel->arg, &varlena_sz))
 			return false;
@@ -3227,8 +3331,6 @@ device_expression_walker(device_expression_walker_context *con,
 		CaseExpr   *caseexpr = (CaseExpr *) expr;
 		ListCell   *lc;
 		int			vl_width;
-
-		elog(INFO, "CASE: %s", nodeToString(expr));
 
 		if (!pgstrom_devtype_lookup(caseexpr->casetype))
 			goto unable_node;
@@ -3398,6 +3500,7 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	MemoryContextReset(devinfo_memcxt);
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
+	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
 	devtype_info_is_built = false;
 }
 
@@ -3431,6 +3534,7 @@ pgstrom_init_codegen(void)
 										   ALLOCSET_DEFAULT_SIZES);
 	CacheRegisterSyscacheCallback(PROCOID, codegen_cache_invalidator, 0);
 	CacheRegisterSyscacheCallback(TYPEOID, codegen_cache_invalidator, 0);
+	CacheRegisterSyscacheCallback(CASTSOURCETARGET, codegen_cache_invalidator, 0);
 
 	/* pg_strom.enable_numeric_type */
     DefineCustomBoolVariable("pg_strom.enable_numeric_type",

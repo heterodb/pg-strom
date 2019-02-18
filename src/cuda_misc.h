@@ -742,12 +742,16 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 #define PG_CIDR_TYPE_DEFINED
 typedef pg_inet_t					pg_cidr_t;
 #define pg_cidr_datum_ref(a,b)		pg_inet_datum_ref(a,b)
-#define pg_cidr_datum_store(a,b,c)	pg_inet_datum_store(a,b,c)
 #define pg_cidr_param(a,b)			pg_inet_param(a,b)
-#define pg_cidr_isnull(a,b)			pg_inet_isnull(a,b)
-#define pg_cidr_isnotnull(a,b)		pg_inet_isnotnull(a,b,c)
-#define pg_cidr_comp_crc32(a,b,c)	pg_inet_comp_crc32(a,b,c)
+#define pg_cidr_comp_crc32(a,b,c,d)	pg_inet_comp_crc32(a,b,c,d)
 #endif	/* PG_CIDR_TYPE_DEFINED */
+
+/* binary compatible type cast */
+STATIC_INLINE(pg_inet_t)
+to_inet(pg_cidr_t arg)
+{
+	return arg;
+}
 
 /* memory comparison */
 STATIC_INLINE(cl_int)

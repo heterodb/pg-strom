@@ -3505,6 +3505,8 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		devfunc_info   *dfunc;
 		devtype_info   *darg1;
 		devtype_info   *darg2;
+		char		   *cast_darg1 = NULL;
+		char		   *cast_darg2 = NULL;
 
 		if (tle->resjunk || !tle->ressortgroupref)
 			continue;
@@ -3523,12 +3525,24 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		pgstrom_devfunc_track(context, dfunc);
 		darg1 = linitial(dfunc->func_args);
 		darg2 = lsecond(dfunc->func_args);
-		if (dtype->type_oid != darg1->type_oid ||
-			dtype->type_oid != darg2->type_oid)
-			elog(ERROR, "Bug? type (%s) didn't match to arguments (%s) (%s)",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(darg1->type_oid),
-				 format_type_be(darg2->type_oid));
+		if (dtype->type_oid != darg1->type_oid)
+		{
+			if (!pgstrom_devcast_supported(dtype->type_oid,
+										   darg1->type_oid))
+				elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(darg1->type_oid));
+			cast_darg1 = psprintf("to_%s", darg1->type_name);
+		}
+		if (dtype->type_oid != darg2->type_oid)
+		{
+			if (!pgstrom_devcast_supported(dtype->type_oid,
+										   darg2->type_oid))
+				elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(darg2->type_oid));
+			cast_darg2 = psprintf("to_%s", darg2->type_name);
+		}
 
 		/*
 		 * Load the key values, then compare
@@ -3546,7 +3560,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			"                    y_dclass[%d], y_values[%d]);\n"
 			"  if (!x_temp.%s_v.isnull && !y_temp.%s_v.isnull)\n"
 			"  {\n"
-			"    if (!EVAL(pgfn_%s(kcxt, x_temp.%s_v, y_temp.%s_v)))\n"
+			"    if (!EVAL(pgfn_%s(kcxt, %s(x_temp.%s_v), %s(y_temp.%s_v))))\n"
 			"      return false;\n"
 			"  }\n"
 			"  else if ((x_temp.%s_v.isnull && !y_temp.%s_v.isnull) ||\n"
@@ -3558,9 +3572,16 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			dtype->type_name,
             tle->resno-1, tle->resno-1,
 			dtype->type_name, dtype->type_name,
-			dfunc->func_devname, dtype->type_name, dtype->type_name,
+			dfunc->func_devname,
+			cast_darg1 ? cast_darg1 : "", dtype->type_name,
+			cast_darg2 ? cast_darg2 : "", dtype->type_name,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
+
+		if (cast_darg1)
+			pfree(cast_darg1);
+		if (cast_darg2)
+			pfree(cast_darg2);
 	}
 	/* no constant values should be referenced */
 	Assert(bms_is_empty(context->param_refs));

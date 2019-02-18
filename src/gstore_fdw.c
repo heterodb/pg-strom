@@ -632,12 +632,37 @@ gstore_codegen_keycomp(StringInfo kern,
 		}
 		else
 		{
+			devtype_info   *darg1;
+			devtype_info   *darg2;
+			char		   *cast_darg1 = NULL;
+			char		   *cast_darg2 = NULL;
+
 			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 			if (!dtype)
 				elog(ERROR, "Bug? type %s is not supported on device",
 					 format_type_be(var->vartype));
 			dfunc = pgstrom_devfunc_lookup_type_compare(dtype, var->varcollid);
 			pgstrom_devfunc_track(context, dfunc);
+			darg1 = linitial(dfunc->func_args);
+			darg2 = lsecond(dfunc->func_args);
+			if (dtype->type_oid != darg1->type_oid)
+			{
+				if (!pgstrom_devcast_supported(dtype->type_oid,
+											   darg1->type_oid))
+					elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
+						 format_type_be(dtype->type_oid),
+						 format_type_be(darg1->type_oid));
+				cast_darg1 = psprintf("to_%s", darg1->type_name);
+			}
+			if (dtype->type_oid != darg2->type_oid)
+			{
+				if (!pgstrom_devcast_supported(dtype->type_oid,
+											   darg2->type_oid))
+					elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
+						 format_type_be(dtype->type_oid),
+						 format_type_be(darg2->type_oid));
+				cast_darg2 = psprintf("to_%s", darg2->type_name);
+			}
 
 			appendStringInfo(
 				&body,
@@ -645,7 +670,7 @@ gstore_codegen_keycomp(StringInfo kern,
 				"  yval.%s_v = pg_%s_datum_ref(kcxt, yaddr);\n"
 				"  if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
 				"  {\n"
-				"    comp = pgfn_%s(kcxt, xval.%s_v, yval.%s_v);\n"
+				"    comp = pgfn_%s(kcxt, %s(xval.%s_v), %s(yval.%s_v));\n"
 				"    assert(!comp.isnull);\n"
 				"    if (comp.value != 0)\n"
 				"      return %scomp.value;\n"
@@ -658,12 +683,18 @@ gstore_codegen_keycomp(StringInfo kern,
 				dtype->type_name, dtype->type_name,
 				dtype->type_name, dtype->type_name,
 				dfunc->func_devname,
+				cast_darg1 ? cast_darg1 : "",
+				cast_darg2 ? cast_darg2 : "",
 				dtype->type_name, dtype->type_name,
 				order == BTLessStrategyNumber ? "" : "-",
 				dtype->type_name, dtype->type_name,
 				nulls_first ? -1 :  1,
 				dtype->type_name, dtype->type_name,
 				nulls_first ?  1 : -1);
+			if (cast_darg1)
+				pfree(cast_darg1);
+			if (cast_darg2)
+				pfree(cast_darg2);
 		}
 	}
 
