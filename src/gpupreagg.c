@@ -3186,7 +3186,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					appendStringInfo(
 						&cbody,
 						"  addr = kern_get_datum_column(kds_src,%d,src_index);\n"
-						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
+						"  pg_datum_ref(kcxt,KVAR_%u,addr); //pg_%s_t\n",
 						i-1, i, dtype->type_name);
 					addr_is_valid = true;
 				}

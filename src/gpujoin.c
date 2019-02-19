@@ -3634,14 +3634,14 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		if (depth == 0)
 			appendStringInfo(
 				source,
-				"    KVAR_%u = pg_%s_datum_ref(kcxt,NULL);\n",
+				"    pg_datum_ref(kcxt,KVAR_%u,NULL); //pg_%s_t\n",
 				keynode->varoattno,
 				dtype->type_name);
 
 		appendStringInfo(
 			&row,
 			"    datum = GPUJOIN_REF_DATUM(%s->colmeta,htup,%u);\n"
-			"    KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
+			"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
 			(depth == 0 ? "kds" : "kds_in"),
 			keynode->varattno - 1,
 			keynode->varoattno, dtype->type_name);
@@ -3651,7 +3651,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			appendStringInfo(
 				&column,
 				"    datum = (offset > 0 ? kern_get_datum_column(kds,%u,offset-1) : NULL);\n"
-				"    KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
+				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
 				keynode->varattno - 1,
 				keynode->varoattno,
 				dtype->type_name);

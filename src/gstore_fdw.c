@@ -534,7 +534,7 @@ gstore_codegen_qual_eval(StringInfo kern,
 			appendStringInfo(
 				&body,
 				"  addr = kern_get_datum_column(kds,%u,row_index);\n"
-				"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+				"  pg_datum_ref(kcxt,%s_%u,addr); //pg_%s_t\n",
 				var->varattno - 1,
 				context->var_label,
 				var->varattno,
@@ -666,8 +666,8 @@ gstore_codegen_keycomp(StringInfo kern,
 
 			appendStringInfo(
 				&body,
-				"  xval.%s_v = pg_%s_datum_ref(kcxt, xaddr);\n"
-				"  yval.%s_v = pg_%s_datum_ref(kcxt, yaddr);\n"
+				"  pg_datum_ref(kcxt, xval.%s_v, xaddr);\n"
+				"  pg_datum_ref(kcxt, yval.%s_v, yaddr);\n"
 				"  if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
 				"  {\n"
 				"    comp = pgfn_%s(kcxt, %s(xval.%s_v), %s(yval.%s_v));\n"
@@ -679,8 +679,8 @@ gstore_codegen_keycomp(StringInfo kern,
 				"    return %d;\n"
 				"  else if (!xval.%s_v.isnull && !yval.%s_v.isnull)\n"
 				"    return %d;\n",
-				dtype->type_name, dtype->type_name,
-				dtype->type_name, dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
 				dtype->type_name, dtype->type_name,
 				dfunc->func_devname,
 				cast_darg1 ? cast_darg1 : "",
