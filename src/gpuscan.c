@@ -496,26 +496,24 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				&tfunc,
 				"  pg_%s_t %s_%u;\n\n"
 				"  addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
-				"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
 				dtype->type_name,
 				context->var_label,
 				var->varattno,
 				var->varattno - 1,
 				context->var_label,
-                var->varattno,
-				dtype->type_name);
+                var->varattno);
 			appendStringInfo(
 				&cfunc,
 				"  pg_%s_t %s_%u;\n\n"
 				"  addr = kern_get_datum_column(kds,%u,row_index);\n"
-				"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
 				dtype->type_name,
 				context->var_label,
 				var->varattno,
 				var->varattno - 1,
 				context->var_label,
-				var->varattno,
-				dtype->type_name);
+                var->varattno);
 		}
 	}
 	else
@@ -557,14 +555,14 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 
 					appendStringInfo(
 						&tfunc,
-						"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
 						context->var_label,
-						var->varattno,
+                        var->varattno,
 						dtype->type_name);
 					appendStringInfo(
 						&cfunc,
 						"  addr = kern_get_datum_column(kds,%u,row_index);\n"
-						"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
+						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
 						var->varattno - 1,
 						context->var_label,
 						var->varattno,
@@ -729,27 +727,15 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			{
 				appendStringInfo(
 					&temp,
-					"  if (!addr)\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
-					"  else\n"
-					"  {\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-					"    tup_values[%d] = READ_INT%d_PTR(addr);\n"
-					"  }\n",
-					j, j, j, 8 * attr->attlen);
+					"  EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],tup_values[%d]);\n",
+					8 * attr->attlen, j, j);
 			}
 			else
 			{
 				appendStringInfo(
 					&temp,
-					"  if (!addr)\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
-					"  else\n"
-					"  {\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-					"    tup_values[%d] = PointerGetDatum(addr);\n"
-					"  }\n",
-					j, j, j);
+					"  EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],tup_values[%d]);\n",
+					j, j);
 			}
 
 			/* column */
@@ -788,9 +774,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			/* tuple */
 			appendStringInfo(
 				&temp,
-				"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-				attr->attnum,
-				dtype->type_name);
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
+				attr->attnum);
 
 			/* column */
 			if (!referenced)
@@ -800,9 +785,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 					attr->attnum - 1);
 			appendStringInfo(
 				&cbody,
-				"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-				attr->attnum,
-				dtype->type_name);
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
+				attr->attnum);
 			referenced = true;
 		}
 
