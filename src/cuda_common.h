@@ -1151,25 +1151,6 @@ typedef struct
 			result = pg_##NAME##_datum_ref(kcxt, &datum);			\
 		}															\
 	}																\
-	STATIC_INLINE(void *)											\
-	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
-								pg_##NAME##_t datum)				\
-	{																\
-		char	  *pos;												\
-																	\
-		if (datum.isnull)											\
-			return NULL;											\
-		pos = (char *)MAXALIGN(kcxt->vlpos);						\
-		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))					\
-		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
-			return NULL;											\
-		}															\
-		*((BASE *)pos) = datum.value;								\
-		kcxt->vlpos += sizeof(BASE);								\
-		return pos;													\
-	}																\
-																	\
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
@@ -1248,25 +1229,6 @@ typedef struct
 			result = pg_##NAME##_datum_ref(kcxt, (char *)datum);	\
 		}															\
 	}																\
-	STATIC_INLINE(void *)											\
-	pg_##NAME##_datum_store_OLD(kern_context *kcxt,					\
-								pg_##NAME##_t datum)				\
-	{																\
-		char	   *pos;											\
-																	\
-		if (datum.isnull)											\
-			return NULL;											\
-		pos = (char *)MAXALIGN(kcxt->vlpos);						\
-		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))					\
-		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
-			return NULL;											\
-		}															\
-		memcpy(pos, &datum.value, sizeof(BASE));					\
-		kcxt->vlpos += sizeof(BASE);								\
-		return pos;													\
-	}																\
-																	\
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
@@ -1283,6 +1245,7 @@ typedef struct
 		res = kern_context_alloc(kcxt, sizeof(BASE));				\
 		if (!res)													\
 		{															\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			dclass = DATUM_CLASS__NULL;								\
 			return 0;												\
 		}															\
@@ -1291,7 +1254,6 @@ typedef struct
 		value = PointerGetDatum(res);								\
 		return sizeof(BASE);										\
 	}																\
-																	\
 	STATIC_FUNCTION(pg_##NAME##_t)									\
 	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
 	{																\
@@ -1461,6 +1423,9 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
  *  -> addr shall point the device pointer of the second field, or NULL
  *     :
  * EXTRACT_HEAP_TUPLE_END()
+ *
+ * EXTRACT_HEAP_READ_XXXX()
+ *  -> load raw values to dclass[]/values[], and update extras[]
  */
 #define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)						\
 	do {																\
@@ -1516,6 +1481,61 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
 #define EXTRACT_HEAP_TUPLE_END()										\
 	} while(0)
 #endif	/* __CUDACC__ */
+
+#define EXTRACT_HEAP_READ_8BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
+	do {													 \
+		if (!(ADDR))										 \
+			(ATT_DCLASS) = DATUM_CLASS__NULL;				 \
+		else												 \
+		{													 \
+			(ATT_DCLASS) = DATUM_CLASS__NORMAL;				 \
+			(ATT_VALUES) = *((cl_uchar *)(ADDR));			 \
+		}												 	 \
+	} while(0)
+
+#define EXTRACT_HEAP_READ_16BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
+	do {													 \
+		if (!(ADDR))										 \
+			(ATT_DCLASS) = DATUM_CLASS__NULL;				 \
+		else												 \
+		{													 \
+			(ATT_DCLASS) = DATUM_CLASS__NORMAL;				 \
+			(ATT_VALUES) = *((cl_ushort *)(ADDR));			 \
+		}												 	 \
+	} while(0)
+
+#define EXTRACT_HEAP_READ_32BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
+	do {													 \
+		if (!(ADDR))										 \
+			(ATT_DCLASS) = DATUM_CLASS__NULL;				 \
+		else												 \
+		{													 \
+			(ATT_DCLASS) = DATUM_CLASS__NORMAL;				 \
+			(ATT_VALUES) = *((cl_uint *)(ADDR));			 \
+		}												 	 \
+	} while(0)
+
+#define EXTRACT_HEAP_READ_64BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
+	do {													 \
+		if (!(ADDR))										 \
+			(ATT_DCLASS) = DATUM_CLASS__NULL;				 \
+		else												 \
+		{													 \
+			(ATT_DCLASS) = DATUM_CLASS__NORMAL;				 \
+			(ATT_VALUES) = *((cl_ulong *)(ADDR));			 \
+		}												 	 \
+	} while(0)
+
+#define EXTRACT_HEAP_READ_POINTER(ADDR,ATT_DCLASS,ATT_VALUES)	\
+	do {											\
+		if (!(ADDR))											\
+			(ATT_DCLASS) = DATUM_CLASS__NULL;					\
+		else													\
+		{														\
+			(ATT_DCLASS) = DATUM_CLASS__NORMAL;					\
+			(ATT_VALUES) = PointerGetDatum(ADDR);				\
+		}														\
+	} while(0)
 
 /*
  * kern_get_datum_xxx
@@ -1670,48 +1690,165 @@ kern_get_datum_column(kern_data_store *kds,
  * Utility functions to reference system columns
  *   (except for ctid and table_oid)
  */
-STATIC_INLINE(Datum)
-kern_getsysatt_oid(HeapTupleHeaderData *htup)
+#ifdef __CUDACC__
+STATIC_INLINE(cl_int)
+pg_sysattr_ctid_store(kern_context *kcxt,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup,
+					  ItemPointerData *t_self,
+					  cl_char &dclass,
+					  Datum   &value)
 {
-	if ((htup->t_infomask & HEAP_HASOID) != 0)
-		return *((cl_uint *)((char *) htup
-							 + htup->t_hoff
-							 - sizeof(cl_uint)));
-	return 0;	/* InvalidOid */
+	void	   *temp;
+
+	if (!t_self)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		if (kds && ((char *)t_self >= (char *)kds &&
+					(char *)t_self <  (char *)kds + kds->length))
+		{
+			value = PointerGetDatum(t_self);
+		}
+		else
+		{
+			temp = kern_context_alloc(kcxt, sizeof(ItemPointerData));
+			if (temp)
+			{
+				memcpy(temp, t_self, sizeof(ItemPointerData));
+				value = PointerGetDatum(temp);
+				return sizeof(ItemPointerData);
+			}
+			dclass = DATUM_CLASS__NULL;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	return 0;
 }
 
-STATIC_INLINE(Datum)
-kern_getsysatt_xmin(HeapTupleHeaderData *htup)
+STATIC_INLINE(cl_int)
+pg_sysattr_oid_store(kern_context *kcxt,
+					 kern_data_store *kds,
+					 HeapTupleHeaderData *htup,
+					 ItemPointerData *t_self,
+					 cl_char &dclass,
+					 Datum   &value)
 {
-	return (Datum) htup->t_choice.t_heap.t_xmin;
+	if (!htup)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		if ((htup->t_infomask & HEAP_HASOID) == 0)
+			value = 0;
+		else
+			value = *((cl_uint *)((char *) htup
+								  + htup->t_hoff
+								  - sizeof(cl_uint)));
+	}
+	return 0;
 }
 
-STATIC_INLINE(Datum)
-kern_getsysatt_xmax(HeapTupleHeaderData *htup)
+STATIC_INLINE(cl_int)
+pg_sysattr_xmin_store(kern_context *kcxt,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup,
+					  ItemPointerData *t_self,
+					  cl_char &dclass,
+					  Datum   &value)
 {
-	return (Datum) htup->t_choice.t_heap.t_xmax;
+	if (!htup)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = htup->t_choice.t_heap.t_xmin;
+	}
+	return 0;
 }
 
-STATIC_INLINE(Datum)
-kern_getsysatt_cmin(HeapTupleHeaderData *htup)
+STATIC_INLINE(cl_int)
+pg_sysattr_cmin_store(kern_context *kcxt,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup,
+					  ItemPointerData *t_self,
+					  cl_char &dclass,
+					  Datum   &value)
 {
-	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
+	if (!htup)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = htup->t_choice.t_heap.t_field3.t_cid;
+	}
+	return 0;
 }
 
-STATIC_INLINE(Datum)
-kern_getsysatt_cmax(HeapTupleHeaderData *htup)
+STATIC_INLINE(cl_int)
+pg_sysattr_xmax_store(kern_context *kcxt,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup,
+					  ItemPointerData *t_self,
+					  cl_char &dclass,
+					  Datum   &value)
 {
-	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
+	if (!htup)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = htup->t_choice.t_heap.t_xmax;
+	}
+	return 0;
 }
+
+STATIC_INLINE(cl_int)
+pg_sysattr_cmax_store(kern_context *kcxt,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup,
+					  ItemPointerData *t_self,
+					  cl_char &dclass,
+					  Datum   &value)
+{
+	if (!htup)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = htup->t_choice.t_heap.t_field3.t_cid;
+	}
+	return 0;
+}
+
+STATIC_INLINE(cl_int)
+pg_sysattr_tableoid_store(kern_context *kcxt,
+						  kern_data_store *kds,
+						  HeapTupleHeaderData *htup,
+						  ItemPointerData *t_self,
+						  cl_char &dclass,
+						  Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = kds->table_oid;
+	}
+	return 0;
+}
+#endif	/* __CUDACC__ */
 
 /*
- * compute_heaptuple_size (OLD)
+ * compute_heaptuple_size
  */
 STATIC_FUNCTION(cl_uint)
 compute_heaptuple_size(kern_context *kcxt,
 					   kern_data_store *kds,
 					   cl_char *tup_dclass,
-					   Datum *tup_values)
+					   Datum   *tup_values)
 {
 	cl_uint		t_hoff;
 	cl_uint		datalen = 0;
@@ -1757,57 +1894,6 @@ compute_heaptuple_size(kern_context *kcxt,
 			datalen += vl_len;
 		}
 	}
-	/* compute header offset */
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (heap_hasnull)
-		t_hoff += BITMAPLEN(ncols);
-	if (kds->tdhasoid)
-		t_hoff += sizeof(cl_uint);
-	t_hoff = MAXALIGN(t_hoff);
-
-	return t_hoff + datalen;
-}
-
-/*
- * compute_heaptuple_size (OLD)
- */
-STATIC_FUNCTION(cl_uint)
-compute_heaptuple_size_OLD(kern_context *kcxt,
-						   kern_data_store *kds,
-						   Datum *tup_values,
-						   cl_bool *tup_isnull)
-{
-	cl_uint		t_hoff;
-	cl_uint		datalen = 0;
-	cl_uint		i, ncols = kds->ncols;
-	cl_bool		heap_hasnull = false;
-
-	/* compute data length */
-	for (i=0; i < ncols; i++)
-	{
-		kern_colmeta	cmeta = kds->colmeta[i];
-
-		if (tup_isnull[i])
-			heap_hasnull = true;
-		else
-		{
-			if (cmeta.attlen > 0)
-			{
-				datalen = TYPEALIGN(cmeta.attalign, datalen);
-				datalen += cmeta.attlen;
-			}
-			else
-			{
-				Datum		datum = tup_values[i];
-				cl_uint		vl_len = VARSIZE_ANY(datum);
-
-				if (!VARATT_IS_1B(datum))
-					datalen = TYPEALIGN(cmeta.attalign, datalen);
-				datalen += vl_len;
-			}
-		}
-	}
-
 	/* compute header offset */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (heap_hasnull)
@@ -1907,183 +1993,6 @@ deform_kern_heaptuple(cl_int	nattrs,			/* in */
 			tup_dclass[i++] = DATUM_CLASS__NORMAL;
 	}
 }
-
-#if 1
-/*
- * __form_kern_heaptuple
- */
-STATIC_FUNCTION(cl_uint)
-__form_kern_heaptuple_OLD(void    *buffer,		/* out */
-						  cl_int   ncols,		/* in; num of attributes */
-						  kern_colmeta *colmeta,/* in: column definition */
-						  HeapTupleFields *htup_field, /* in: only if tuple */
-						  cl_int   comp_typmod,	/* in */
-						  cl_uint  comp_typeid,	/* in */
-						  cl_uint  htuple_oid,	/* in */
-						  Datum   *tup_values,	/* in */
-						  cl_bool *tup_isnull)	/* in */
-{
-	HeapTupleHeaderData *htup = (HeapTupleHeaderData *)buffer;
-	cl_bool		tup_hasnull = false;
-	cl_ushort	t_infomask;
-	cl_uint		t_hoff;
-	cl_uint		i, curr;
-
-	/* alignment checks */
-	assert((uintptr_t)htup == MAXALIGN(htup));
-
-	/* has any NULL attribute? */
-	if (tup_isnull != NULL)
-	{
-		for (i=0; i < ncols; i++)
-		{
-			if (tup_isnull[i])
-			{
-				tup_hasnull = true;
-				break;
-			}
-		}
-	}
-	t_infomask = (tup_hasnull ? HEAP_HASNULL : 0);
-
-	/* setup HeapTupleHeaderData */
-	if (htup_field)
-		memcpy(&htup->t_choice.t_heap, htup_field, sizeof(HeapTupleFields));
-	else
-	{
-		/* datum_len_ shall be set on the tail  */
-		htup->t_choice.t_datum.datum_typmod = comp_typmod;
-		htup->t_choice.t_datum.datum_typeid = comp_typeid;
-	}
-	htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-	htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-	htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
-
-	/* computer header size */
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (tup_hasnull)
-		t_hoff += BITMAPLEN(ncols);
-	if (htuple_oid != 0)
-	{
-		t_infomask |= HEAP_HASOID;
-		t_hoff += sizeof(cl_uint);
-	}
-	t_hoff = MAXALIGN(t_hoff);
-	if (htuple_oid != 0)
-		*((cl_uint *)((char *)htup + t_hoff - sizeof(cl_uint))) = htuple_oid;
-
-	/* walk on the regular columns */
-	htup->t_hoff = t_hoff;
-	curr = t_hoff;
-
-	for (i=0; i < ncols; i++)
-	{
-		kern_colmeta   *cmeta = &colmeta[i];
-		Datum			datum = tup_values[i];
-		cl_bool			isnull = (!tup_isnull ? false : tup_isnull[i]);
-		cl_int			padding;
-
-		if (isnull)
-		{
-			assert(tup_hasnull);
-			htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
-		}
-		else
-		{
-			if (tup_hasnull)
-				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
-
-			padding = TYPEALIGN(cmeta->attalign, curr) - curr;
-			if (cmeta->attbyval)
-			{
-				while (padding-- > 0)
-					((char *)htup)[curr++] = '\0';
-				assert(cmeta->attlen <= sizeof(datum));
-				memcpy((char *)htup + curr, &datum, cmeta->attlen);
-				curr += cmeta->attlen;
-			}
-			else if (cmeta->attlen > 0)
-			{
-				while (padding-- > 0)
-					((char *)htup)[curr++] = '\0';
-				memcpy((char *)htup + curr,
-					   DatumGetPointer(datum), cmeta->attlen);
-				curr += cmeta->attlen;
-			}
-			else
-			{
-				cl_uint		vl_len = VARSIZE_ANY(datum);
-
-				if (!VARATT_IS_1B(datum))
-				{
-					while (padding-- > 0)
-						((char *)htup)[curr++] = '\0';
-				}
-				t_infomask |= HEAP_HASVARWIDTH;
-				memcpy((char *)htup + curr,
-					   DatumGetPointer(datum), vl_len);
-				curr += vl_len;
-			}
-		}
-	}
-	htup->t_infomask = t_infomask;
-	curr = MAXALIGN(curr);
-	if (!htup_field)
-		SET_VARSIZE(&htup->t_choice.t_datum, curr);
-
-	return curr;
-}
-
-/*
- * form_kern_heaptuple
- *
- * A utility routine to build a kern_tupitem on the destination buffer
- * already allocated.
- *
- * kds          ... destination data-store
- * tupitem      ... kern_tupitem allocated on the kds
- * tuple_len    ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
- * heap_hasnull ... true, if tup_values/tup_isnull contains NULL
- * tup_self     ... item pointer of the tuple, if any
- * tx_attrs     ... xmin,xmax,cmin/cmax, if any
- * tup_values   ... array of result datum
- * tup_isnull   ... array of null flags
- */
-STATIC_INLINE(cl_uint)
-form_kern_heaptuple_OLD(kern_tupitem	*tupitem,	/* out */
-						cl_int			 ncols,		/* in */
-						kern_colmeta	*colmeta,	/* in */
-						ItemPointerData *tup_self,	/* in, optional */
-						HeapTupleFields *htup_field,/* in, optional */
-						cl_uint			 htuple_oid,/* in, optional */
-						Datum           *tup_values,/* in */
-						cl_bool         *tup_isnull)/* in */
-{
-	/* check alignment */
-	assert((uintptr_t)tupitem == MAXALIGN(tupitem));
-
-	/* setup kern_tupitem */
-	if (tup_self)
-		tupitem->t_self = *tup_self;
-	else
-	{
-		tupitem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		tupitem->t_self.ip_blkid.bi_lo = 0xffff;
-		tupitem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
-	}
-	tupitem->t_len = __form_kern_heaptuple_OLD(&tupitem->htup,
-											   ncols,
-											   colmeta,
-											   htup_field,
-											   0,	/* not composite type */
-											   0,	/* not composite type */
-											   htuple_oid,
-											   tup_values,
-											   tup_isnull);
-	return tupitem->t_len;
-}
-#endif
 
 /*
  * __form_kern_heaptuple
@@ -2235,28 +2144,26 @@ __form_kern_heaptuple(void	   *buffer,			/* out */
  * A utility routine to build a kern_tupitem on the destination buffer
  * already allocated.
  *
- * kds          ... destination data-store
  * tupitem      ... kern_tupitem allocated on the kds
- * tuple_len    ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
- * heap_hasnull ... true, if tup_values/tup_isnull contains NULL
+ * kds_dst      ... destination data store
  * tup_self     ... item pointer of the tuple, if any
- * tx_attrs     ... xmin,xmax,cmin/cmax, if any
- * tup_values   ... array of result datum
- * tup_isnull   ... array of null flags
+ * htup         ... tuple-header of the original tuple, if any
+ * tup_dclass   ... any of DATUM_CLASS__*
+ * tup_values   ... array of values to be written
  */
 STATIC_INLINE(cl_uint)
-form_kern_heaptuple(kern_tupitem   *tupitem,	/* out */
-					cl_int			ncols,		/* in */
-					kern_colmeta   *colmeta,	/* in */
-					ItemPointerData *tup_self,	/* in, optional */
-					HeapTupleHeaderData *htup_orig, /* in, optional */
-					cl_uint			htuple_oid,	/* in, optional */
-					cl_char		   *tup_dclass,	/* in */
-					Datum		   *tup_values)	/* in */
+form_kern_heaptuple(kern_tupitem    *tupitem,		/* out */
+					kern_data_store	*kds_dst,		/* in */
+					ItemPointerData *tup_self,		/* in, optional */
+					HeapTupleHeaderData *htup,		/* in, optional */
+					cl_char         *tup_dclass,	/* in */
+					Datum           *tup_values)	/* in */
 {
-	/* check alignment */
-	assert((uintptr_t)tupitem == MAXALIGN(tupitem));
+	cl_uint		htuple_oid = 0;
 
+	assert((uintptr_t)tupitem == MAXALIGN(tupitem));
+	assert((char *)tupitem >= (char *)kds_dst &&
+		   (char *)tupitem <  (char *)kds_dst + kds_dst->length);
 	/* setup kern_tupitem */
 	if (tup_self)
 		tupitem->t_self = *tup_self;
@@ -2266,10 +2173,18 @@ form_kern_heaptuple(kern_tupitem   *tupitem,	/* out */
 		tupitem->t_self.ip_blkid.bi_lo = 0xffff;
 		tupitem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
 	}
+	/* OID of tuple; deprecated at PG12 */
+	if (kds_dst->tdhasoid &&
+		htup && (htup->t_infomask & HEAP_HASOID) != 0)
+	{
+		htuple_oid = *((cl_uint *)((char *)htup
+								   + htup->t_hoff
+								   - sizeof(cl_uint)));
+	}
 	tupitem->t_len = __form_kern_heaptuple(&tupitem->htup,
-										   ncols,
-										   colmeta,
-										   htup_orig,
+										   kds_dst->ncols,
+										   kds_dst->colmeta,
+										   htup,
 										   0,	/* not a composite type */
 										   0,	/* not a composite type */
 										   htuple_oid,
@@ -2291,8 +2206,8 @@ form_kern_heaptuple(kern_tupitem   *tupitem,	/* out */
  * @typemod    ... type modifier of the composite type
  * @nfields    ... number of sub-fields of the composite type
  * @colmeta    ... array of kern_colmeta for sub-field types
- * @tup_datum  ... values of the sub-fields
- * @tup_isnull ... true, if values are NULL
+ * @tup_dclass ... any of DATUM_CLASS__*
+ * @tup_values ... values of the sub-fields
  */
 STATIC_INLINE(cl_uint)
 form_kern_composite_type(void      *buffer,      /* out */
@@ -2300,18 +2215,18 @@ form_kern_composite_type(void      *buffer,      /* out */
 						 cl_int		comp_typmod, /* in: type modifier */
 						 cl_int		nfields,     /* in: # of attributes */
 						 kern_colmeta *colmeta,  /* in: sub-type attributes */
-						 Datum	   *tup_values,	 /* in: */
-						 cl_bool   *tup_isnull)	 /* in: */
+						 cl_char   *tup_dclass,  /* in: */
+						 Datum	   *tup_values)	 /* in: */
 {
-	return __form_kern_heaptuple_OLD(buffer,
-									 nfields,
-									 colmeta,
-									 NULL,
-									 comp_typmod,
-									 comp_typeid,
-									 0,	/* composite type never have OID */
-									 tup_values,
-									 tup_isnull);
+	return __form_kern_heaptuple(buffer,
+								 nfields,
+								 colmeta,
+								 NULL,
+								 comp_typmod,
+								 comp_typeid,
+								 0,	/* composite type never have OID */
+								 tup_dclass,
+								 tup_values);
 }
 
 #ifdef __CUDACC__

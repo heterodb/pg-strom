@@ -3871,18 +3871,23 @@ gpujoin_codegen_projection(StringInfo source,
 	AttrNumber	   *varattmaps;
 	Bitmapset	   *refs_by_vars = NULL;
 	Bitmapset	   *refs_by_expr = NULL;
+	devtype_info   *dtype;
+	StringInfoData	decl;
 	StringInfoData	body;
 	StringInfoData	temp;
 	StringInfoData	row;
 	StringInfoData	column;
+	StringInfoData	outer;
 	cl_int			depth;
 	cl_bool			is_first;
 
 	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
+	initStringInfo(&decl);
 	initStringInfo(&body);
 	initStringInfo(&temp);
 	initStringInfo(&row);
 	initStringInfo(&column);
+	initStringInfo(&outer);
 
 	/*
 	 * Pick up all the var-node referenced directly or indirectly by
@@ -3919,30 +3924,12 @@ gpujoin_codegen_projection(StringInfo source,
 			list_free(expr_vars);
 		}
 	}
+
 	appendStringInfoString(
-		source,
-		"STATIC_FUNCTION(void)\n"
-		"gpujoin_projection(kern_context *kcxt,\n"
-		"                   kern_data_store *kds_src,\n"
-		"                   kern_multirels *kmrels,\n"
-		"                   cl_uint *r_buffer,\n"
-		"                   kern_data_store *kds_dst,\n"
-		"                   Datum *tup_values,\n"
-		"                   cl_bool *tup_isnull,\n"
-		"                   cl_uint *tup_extra_sz)\n"
-		"{\n"
-		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
-		"  kern_data_store *kds_in      __attribute__((unused));\n"
-		"  ItemPointerData  t_self      __attribute__((unused));\n"
-		"  cl_uint          offset      __attribute__((unused));\n"
-		"  cl_uint          len         __attribute__((unused));\n"
-		"  void            *addr        __attribute__((unused));\n"
-		"  pg_anytype_t     temp        __attribute__((unused));\n"
-		"\n"
-		"  if (tup_extra_sz)\n"
-		"    memset(tup_extra_sz, 0,\n"
-		"           sizeof(cl_uint) * GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n"
-		"\n");
+		&body,
+		"  if (tup_extras)\n"
+		"    memset(tup_extras, 0,\n"
+		"           sizeof(cl_uint) * GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -3954,6 +3941,7 @@ gpujoin_codegen_projection(StringInfo source,
 
 		resetStringInfo(&row);
 		resetStringInfo(&column);
+		resetStringInfo(&outer);
 
 		/* collect information in this depth */
 		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
@@ -3991,46 +3979,10 @@ gpujoin_codegen_projection(StringInfo source,
 		if (nattrs < 1 && !sysattr_refs)
 			continue;
 
-		appendStringInfo(
-			&body,
-			"  /* ---- extract %s relation (depth=%d) */\n"
-			"  offset = r_buffer[%d];\n",
-			depth > 0 ? "inner" : "outer", depth,
-			depth);
-
 		if (depth == 0)
-		{
-			appendStringInfo(
-				&body,
-				"  if (!kds_src)\n"
-				"  {\n");
 			kds_label = "kds_src";
-		}
 		else
-		{
-			appendStringInfo(
-				&body,
-				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n",
-				depth);
 			kds_label = "kds_in";
-		}
-
-		appendStringInfo(
-			&row,
-			"    if (offset == 0)\n"
-			"      htup = NULL;\n");
-		if (depth == 0)
-			appendStringInfo(
-				&row,
-				"    else if (%s->format == KDS_FORMAT_BLOCK)\n"
-				"      htup = KDS_BLOCK_REF_HTUP(%s,offset,&t_self,NULL);\n",
-				kds_label,
-				kds_label);
-		appendStringInfo(
-			&row,
-			"    else\n"
-			"      htup = KDS_ROW_REF_HTUP(%s,offset,&t_self,NULL);\n",
-			kds_label);
 
 		/* System column reference if any */
 		foreach (lc1, tlist_dev)
@@ -4041,101 +3993,37 @@ gpujoin_codegen_projection(StringInfo source,
 			if (varattmaps[tle->resno-1] >= 0)
 				continue;
 			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
-			if (attr->attnum == TableOidAttributeNumber)
-			{
-				appendStringInfo(
-					&row,
-					"    /* %s system column */\n"
-					"    tup_isnull[%d] = !htup;\n"
-					"    tup_values[%d] = (htup ? %s->table_oid : 0);\n",
-					NameStr(attr->attname),
-					tle->resno - 1,
-					tle->resno - 1,
-					kds_label);
-				appendStringInfo(
-					&column,
-					"    /* %s system column */\n"
-					"    tup_isnull[%d] = (offset == 0);\n"
-					"    tup_values[%d] = (offset > 0 ? %s->table_oid : 0);\n",
-					NameStr(attr->attname),
-					tle->resno - 1,
-					tle->resno - 1,
-					kds_label);
-				continue;
-			}
-			if (attr->attnum == SelfItemPointerAttributeNumber)
-			{
-				appendStringInfo(
-					&row,
-					"    /* %s system column */\n"
-					"    addr = (void *)MAXALIGN(kcxt->vlpos);\n"
-					"    if (!PTR_ON_VLBUF(kcxt,addr,sizeof(t_self)))\n"
-					"    {\n"
-					"      tup_isnull[%d] = true;\n"
-					"      STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);\n"
-					"    }\n"
-					"    else\n"
-					"    {\n"
-					"      tup_isnull[%d] = false;\n"
-					"      tup_values[%d] = PointerGetDatum(addr);\n"
-					"      memcpy(addr, &t_self, sizeof(t_self));\n"
-					"      if (tup_extra_sz)\n"
-					"        tup_extra_sz[%d] = MAXALIGN(sizeof(t_self));\n"
-					"      kcxt->vlpos += MAXALIGN(sizeof(t_self));\n"
-					"    }\n",
-					NameStr(attr->attname),
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1);
-				context->varlena_bufsz += MAXALIGN(sizeof(ItemPointerData));
-			}
-			else
-			{
-				appendStringInfo(
-					&row,
-					"    /* %s system column */\n"
-					"    tup_isnull[%d] = !htup;\n"
-					"    if (htup)\n"
-					"      tup_values[%d] = kern_getsysatt_%s(htup);\n",
-					NameStr(attr->attname),
-					tle->resno-1,
-					tle->resno-1,
-					NameStr(attr->attname));
-			}
 			appendStringInfo(
-				&body,
-				"    /* %s system column */\n"
-				"    tup_isnull[%d] = true;\n"
-				"    tup_values[%d] = 0;\n",
+				&row,
+				"  sz = pg_sysattr_%s_store(kcxt,%s,htup,&t_self,\n"
+				"                           tup_dclass[%d],\n"
+				"                           tup_values[%d]);\n"
+				"  if (tup_extras)\n"
+				"    tup_extras[%d] = sz;\n",
 				NameStr(attr->attname),
+				kds_label,
+				tle->resno - 1,
 				tle->resno - 1,
 				tle->resno - 1);
 			appendStringInfo(
 				&column,
-				"    /* %s system column */\n"
-				"    addr = (offset == 0 ? NULL"
-				" : kern_get_datum_column(%s,%s->ncols%d,offset-1));\n"
-				"    tup_isnull[%d] = !addr;\n",
+				"    sz = pg_sysattr_%s_store(kcxt,(offset == 0 ? NULL : %s),\n"
+				"                             NULL, NULL,\n"
+				"                             tup_dclass[%d],\n"
+				"                             tup_values[%d]);\n"
+				"    if (tup_extras)\n"
+				"      tup_extras[%d] = sz;\n",
 				NameStr(attr->attname),
 				kds_label,
-				kds_label,
-				attr->attnum,
-				tle->resno-1);
-			if (!attr->attbyval)
-				appendStringInfo(
-					&column,
-					"    tup_values[%d] = PointerGetDatum(addr);\n",
-					tle->resno-1);
-			else
-				appendStringInfo(
-					&column,
-					"    if (addr)\n"
-					"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
-					tle->resno-1,
-					8 * attr->attlen);
+				tle->resno - 1,
+				tle->resno - 1,
+				tle->resno - 1);
+			/* NULL-initialization for LEFT OUTER JOIN */
+			appendStringInfo(
+				&outer,
+				"  tup_dclass[%d] = DATUM_CLASS__NULL;\n",
+				tle->resno - 1);
 		}
-
 		/* begin to walk on the tuple */
 		if (nattrs > 0)
 			appendStringInfo(
@@ -4146,6 +4034,7 @@ gpujoin_codegen_projection(StringInfo source,
 		for (i=1; i <= nattrs; i++)
 		{
 			TargetEntry	   *tle;
+			Oid				type_oid;
 			int16			typelen;
 			bool			typebyval;
 			cl_bool			referenced = false;
@@ -4156,60 +4045,68 @@ gpujoin_codegen_projection(StringInfo source,
 
 				if (varattmaps[tle->resno - 1] != i)
 					continue;
-				/* attribute shall be directly copied */
-				get_typlenbyval(exprType((Node *)tle->expr),
-								&typelen, &typebyval);
-				if (!referenced)
-					appendStringInfo(
-						&column,
-						"    addr = (offset == 0 ? NULL"
-						" : kern_get_datum_column(%s,%d,offset-1));\n",
-						kds_label, i-1);
+				/*
+				 * attributes can be directly copied regardless of device-
+				 * type support (if row format).
+				 */
+				type_oid = exprType((Node *)tle->expr);
+				get_typlenbyval(type_oid, &typelen, &typebyval);
+				dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
 
-				if (!typebyval)
+				/* row */
+				if (typebyval)
 				{
 					appendStringInfo(
 						&temp,
-						"    tup_isnull[%d] = !addr;\n"
-						"    tup_values[%d] = PointerGetDatum(addr);\n",
-						tle->resno - 1,
-						tle->resno - 1);
-					appendStringInfo(
-						&column,
-						"    tup_isnull[%d] = !addr;\n"
-						"    tup_values[%d] = PointerGetDatum(addr);\n",
-						tle->resno - 1,
-						tle->resno - 1);
+						"    EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],tup_values[%d]);\n",
+						8 * typelen, tle->resno - 1, tle->resno - 1);
 				}
 				else
 				{
 					appendStringInfo(
 						&temp,
-						"    tup_isnull[%d] = !addr;\n"
-						"    if (addr)\n"
-						"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
-						tle->resno - 1,
-						tle->resno - 1,
-						8 * typelen);
+						"    EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],tup_values[%d]);\n",
+						tle->resno - 1, tle->resno - 1);
+				}
+				/* column */
+				if (!referenced)
 					appendStringInfo(
 						&column,
-						"    tup_isnull[%d] = !addr;\n"
-						"    if (addr)\n"
-						"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
-						tle->resno - 1,
-						tle->resno - 1,
-						8 * typelen);
-				}
-				/* NULL-initialization for LEFT OUTER JOIN */
-				if (depth == 0)
+						"    if (offset > 0)\n"
+						"      addr = kern_get_datum_column(%s,%d,offset-1);\n",
+						kds_label, i-1);
+				if (!dtype)
 				{
 					appendStringInfo(
-						&body,
-						"    tup_isnull[%d] = true;\n"
-						"    tup_values[%d] = 0;\n",
+						&column,
+						"    /* shall be never referenced */\n"
+						"    assert(!addr);\n"
+						"    tup_dclass[%d] = DATUM_CLASS__NULL;\n",
+						tle->resno - 1);
+				}
+				else
+				{
+					appendStringInfo(
+						&column,
+						"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"    sz = pg_datum_store(kcxt, temp.%s_v,\n"
+						"                        tup_dclass[%d],\n"
+						"                        tup_values[%d]);\n"
+						"    if (tup_extras)\n"
+						"      tup_extras[%d] = sz;\n"
+						"    extra_sum += MAXALIGN(sz);\n",
+						dtype->type_name,
+						dtype->type_name,
+						tle->resno - 1,
 						tle->resno - 1,
 						tle->resno - 1);
 				}
+				/* NULL-initialization for LEFT OUTER JOIN */
+				appendStringInfo(
+					&outer,
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n",
+					tle->resno - 1);
+
 				referenced = true;
 			}
 
@@ -4232,26 +4129,22 @@ gpujoin_codegen_projection(StringInfo source,
 						 format_type_be(type_oid));
 
 				appendStringInfo(
-					source,
+					&decl,
 					"  pg_%s_t KVAR_%u;\n",
 					dtype->type_name,
 					dst_num);
 				appendStringInfo(
 					&temp,
-					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-					dst_num,
-					dtype->type_name);
+					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
 				if (!referenced)
 					appendStringInfo(
 						&column,
-						"    addr = (offset == 0 ? NULL"
-						" : kern_get_datum_column(%s,%d,offset-1));\n",
+						"    if (offset > 0)\n"
+						"      addr = kern_get_datum_column(%s,%d,offset-1);\n",
 						kds_label, i-1);
 				appendStringInfo(
 					&column,
-					"    KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
-					dst_num,
-					dtype->type_name);
+					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
 				referenced = true;
 			}
 
@@ -4274,15 +4167,31 @@ gpujoin_codegen_projection(StringInfo source,
 		{
 			appendStringInfo(
 				&body,
-				"  }\n"
-				"  else if (__ldg(&kds_src->format) != KDS_FORMAT_COLUMN)\n"
+				"  /* ------ extract outer relation ------ */\n"
+				"  if (!kds_src)\n"
 				"  {\n"
+				"%s"
+				"  }\n"
+				"  else if (kds_src->format == KDS_FORMAT_ROW ||\n"
+				"           kds_src->format == KDS_FORMAT_BLOCK)\n"
+				"  {\n"
+				"    offset = r_buffer[0];\n"
+				"    if (offset == 0)\n"
+				"      htup = NULL;\n"
+				"    else if (kds_src->format == KDS_FORMAT_ROW)\n"
+				"      htup = KDS_ROW_REF_HTUP(kds_src,offset,&t_self,NULL);\n"
+				"    else\n"
+				"      htup = KDS_BLOCK_REF_HTUP(kds_src,offset,&t_self,NULL);\n"
 				"%s"
 				"  }\n"
 				"  else\n"
 				"  {\n"
+				"    offset = r_buffer[0];\n"
+				"    if (offset == 0)\n"
+				"      addr = NULL;\n"
 				"%s"
 				"  }\n",
+				outer.data,
 				row.data,
 				column.data);
 		}
@@ -4290,9 +4199,22 @@ gpujoin_codegen_projection(StringInfo source,
 		{
 			appendStringInfo(
 				&body,
+				"  /* ---- extract inner relation (depth=%d) */\n"
+				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n"
+				"  assert(kds_in->format == KDS_FORMAT_ROW ||\n"
+				"         kds_in->format == KDS_FORMAT_HASH);\n"
+				"  offset = r_buffer[%d];\n"
+				"  if (offset == 0)\n"
 				"  {\n"
 				"%s"
+				"  }\n"
+				"  else\n"
+				"  {\n"
+				"    htup = KDS_ROW_REF_HTUP(kds_in,offset,&t_self,NULL);\n"
+				"%s"
 				"  }\n",
+				depth, depth, depth,
+				outer.data,
 				row.data);
 		}
 	}
@@ -4324,57 +4246,58 @@ gpujoin_codegen_projection(StringInfo source,
 		if (!dtype)
 			elog(ERROR, "cache lookup failed for device type: %s",
 				 format_type_be(exprType((Node *) tle->expr)));
-
-		if (dtype->type_byval)
-		{
-			/* fixed length built-in data type */
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  pg_datum_store(kcxt, temp.%s_v,\n"
-				"                 tup_values[%d],\n"
-				"                 tup_isnull[%d]);\n",
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				dtype->type_name,
-				tle->resno - 1,
-				tle->resno - 1);
-		}
-		else
-		{
-			/* fixed-length indirect data type or varlena */
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  addr = pg_%s_datum_store_OLD(kcxt,temp.%s_v);\n"
-				"  tup_isnull[%d] = !addr;\n"
-				"  if (addr)\n"
-				"  {\n"
-				"    tup_values[%d] = PointerGetDatum(addr);\n"
-				"    if (tup_extra_sz &&\n"
-				"        addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
-				"      tup_extra_sz[%d] = MAXALIGN(%s);\n"
-				"  }\n",
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				dtype->type_name, dtype->type_name,
-				tle->resno - 1,
-				tle->resno - 1,
-				tle->resno - 1,
-				dtype->type_length > 0
-				? psprintf("sizeof(temp.%s_v.value)", dtype->type_name)
-				: "VARSIZE_ANY(addr)");
-			if (dtype->extra_sz > 0)
-				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-		}
+		appendStringInfo(
+			&body,
+			"  temp.%s_v = %s;\n"
+			"  sz = pg_datum_store(kcxt, temp.%s_v,\n"
+			"                      tup_dclass[%d],\n"
+			"                      tup_values[%d]);\n"
+			"  if (tup_extras)\n"
+			"    tup_extras[%d] = sz;\n"
+			"  extra_sum += MAXALIGN(sz);\n\n",
+			dtype->type_name,
+			pgstrom_codegen_expression((Node *)tle->expr, context),
+			dtype->type_name,
+			tle->resno - 1,
+			tle->resno - 1,
+			tle->resno - 1);
+		if (dtype->extra_sz > 0)
+			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 	}
 	/* add parameter declarations */
-	pgstrom_codegen_param_declarations(source, context);
-	/* merge with declaration part */
-	appendStringInfo(source, "\n%s}\n", body.data);
+	pgstrom_codegen_param_declarations(&decl, context);
+	/* merge declarations and function body */
+	appendStringInfo(
+		source,
+		"STATIC_FUNCTION(cl_uint)\n"
+		"gpujoin_projection(kern_context *kcxt,\n"
+		"                   kern_data_store *kds_src,\n"
+		"                   kern_multirels *kmrels,\n"
+		"                   cl_uint *r_buffer,\n"
+		"                   kern_data_store *kds_dst,\n"
+		"                   cl_char *tup_dclass,\n"
+		"                   Datum   *tup_values,\n"
+		"                   cl_uint *tup_extras)\n"
+		"{\n"
+		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
+		"  kern_data_store *kds_in      __attribute__((unused));\n"
+		"  ItemPointerData  t_self      __attribute__((unused));\n"
+		"  cl_uint          offset      __attribute__((unused));\n"
+		"  cl_uint          sz          __attribute__((unused));\n"
+		"  cl_uint          extra_sum = 0;\n"
+		"  void            *addr        __attribute__((unused)) = NULL;\n"
+		"  pg_anytype_t     temp        __attribute__((unused));\n"
+		"%s\n%s"
+		"  return extra_sum;\n"
+		"}\n",
+		decl.data,
+		body.data);
 
+	pfree(decl.data);
 	pfree(body.data);
 	pfree(temp.data);
+	pfree(row.data);
+	pfree(column.data);
 }
 
 static char *

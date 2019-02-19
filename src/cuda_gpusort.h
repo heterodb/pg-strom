@@ -17,7 +17,6 @@
  */
 #ifndef CUDA_GPUSORT_H
 #define CUDA_GPUSORT_H
-
 /*
  * kern_gpusort
  */
@@ -62,6 +61,10 @@ gpusort_keycomp(kern_context *kcxt,
 				kern_data_store *kds_src,
 				cl_uint x_index,
 				cl_uint y_index);
+#endif	/* __CUDACC__ */
+#endif	/* CUDA_GPUSORT_H */
+
+#ifdef __CUDA_GPUSORT_BODY__
 /*
  * gpusort_setup_column
  */
@@ -291,5 +294,4 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	/* any error status? */
 	kern_writeback_error_status(&kgpusort->kerror, &kcxt.e);
 }
-#endif	/* __CUDACC__ */
-#endif	/* CUDA_GPUSORT_H */
+#endif	/* __CUDA_GPUSORT_BODY__ */

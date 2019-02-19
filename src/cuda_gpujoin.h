@@ -18,7 +18,6 @@
  */
 #ifndef CUDA_GPUJOIN_H
 #define CUDA_GPUJOIN_H
-
 /*
  * definition of the inner relations structure. it can load multiple
  * kern_data_store or kern_hash_table.
@@ -218,16 +217,21 @@ gpujoin_hash_value(kern_context *kcxt,
  * Implementation of device projection. Extract a pair of outer/inner tuples
  * on the tup_values/tup_isnull array.
  */
-STATIC_FUNCTION(void)
+STATIC_FUNCTION(cl_uint)
 gpujoin_projection(kern_context *kcxt,
 				   kern_data_store *kds_src,
 				   kern_multirels *kmrels,
 				   cl_uint *r_buffer,
 				   kern_data_store *kds_dst,
-				   Datum *tup_values,
-				   cl_bool *tup_isnull,
-				   cl_uint *tup_extra_sz);
+				   cl_char *tup_dclass,
+				   Datum   *tup_values,
+				   cl_uint *tup_extras);
 
+#endif	/* __CUDACC__ */
+#endif	/* CUDA_GPUJOIN_H */
+
+#ifdef __CUDA_GPUJOIN_BODY__
+#ifdef __CUDACC__
 /*
  * static shared variables
  */
@@ -646,17 +650,17 @@ gpujoin_projection_row(kern_context *kcxt,
 	cl_uint		nvalids;
 	cl_uint		required;
 #if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
+	cl_char		tup_dclass[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 	Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
-	cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #else
+	cl_char	   *tup_dclass = NULL;
 	Datum	   *tup_values = NULL;
-	cl_bool	   *tup_isnull = NULL;
 #endif
-	cl_uint		extra_len = 0;
 	cl_int		needs_suspend = 0;
 
 	/* sanity checks */
 	assert(rd_stack != NULL);
+	assert(kds_dst->ncols == GPUJOIN_DEVICE_PROJECTION_NFIELDS);
 
 	/* Any more result rows to be written? */
 	if (read_pos[nrels] >= write_pos[nrels])
@@ -678,14 +682,14 @@ gpujoin_projection_row(kern_context *kcxt,
 						   kmrels,
 						   rd_stack,
 						   kds_dst,
+						   tup_dclass,
 						   tup_values,
-						   tup_isnull,
 						   NULL);
 		required = MAXALIGN(offsetof(kern_tupitem, htup) +
-							compute_heaptuple_size_OLD(kcxt,
-													   kds_dst,
-													   tup_values,
-													   tup_isnull));
+							compute_heaptuple_size(kcxt,
+												   kds_dst,
+												   tup_dclass,
+												   tup_values));
 	}
 	else
 		required = 0;
@@ -744,14 +748,12 @@ gpujoin_projection_row(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->length - dest_offset);
 
 		row_index[dest_index] = __kds_packed(kds_dst->length - dest_offset);
-		form_kern_heaptuple_OLD(tupitem,
-								kds_dst->ncols,
-								kds_dst->colmeta,
-								NULL,		/* ItemPointerData */
-								NULL,		/* HeapTupleFields */
-								kds_dst->tdhasoid ? 0xffffffff : 0,
-								tup_values,
-								tup_isnull);
+		form_kern_heaptuple(tupitem,
+							kds_dst,
+							NULL,		/* ItemPointerData */
+							NULL,		/* HeapTupleHeaderData */
+							tup_dclass,
+							tup_values);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
@@ -793,15 +795,15 @@ gpujoin_projection_slot(kern_context *kcxt,
 	cl_uint		nvalids;
 	cl_bool		tup_is_valid = false;
 #if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
+	cl_char		tup_dclass[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 	Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
-	cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
-	cl_uint		tup_extra_sz[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_uint		tup_extras[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #else
+	cl_char	   *tup_dclass = NULL;
 	Datum	   *tup_values = NULL;
-	cl_bool	   *tup_isnull = NULL;
-	cl_uint	   *tup_extra_sz = NULL;
+	cl_int	   *tup_extras = NULL;
 #endif
-	cl_uint		extra_len = 0;
+	cl_uint		extra_sz = 0;
 	cl_int		needs_suspend = 0;
 
 	/* sanity checks */
@@ -820,27 +822,21 @@ gpujoin_projection_slot(kern_context *kcxt,
 	/* step.1 - projection by GpuJoin */
 	if (read_index < write_pos[nrels])
 	{
-		/*
-		 * NOTE: We don't need to copy varlena datum, but pointer reference
-		 * only, because pds_src / kmrels are still valid during GpuPreAgg.
-		 */
 		rd_stack += read_index * (nrels + 1);
 
-		gpujoin_projection(kcxt,
-						   kds_src,
-						   kmrels,
-						   rd_stack,
-						   kds_dst,
-						   tup_values,
-						   tup_isnull,
-						   tup_extra_sz);
-		for (int j = 0; j < GPUJOIN_DEVICE_PROJECTION_NFIELDS; j++)
-			extra_len += tup_extra_sz[j];
+		extra_sz = gpujoin_projection(kcxt,
+									  kds_src,
+									  kmrels,
+									  rd_stack,
+									  kds_dst,
+									  tup_dclass,
+									  tup_values,
+									  tup_extras);
 		tup_is_valid = true;
 	}
 
 	/* step.2 - increments nitems/usage of the kds_dst */
-	dest_offset = pgstromStairlikeSum(extra_len, &count);
+	dest_offset = pgstromStairlikeSum(extra_sz, &count);
 	if (get_local_id() == 0)
 	{
 		union {
@@ -878,46 +874,44 @@ gpujoin_projection_slot(kern_context *kcxt,
 		return -2;	/* <-- not to update statistics */
 	}
 	dest_index = dst_base_index + get_local_id();
-	dest_offset += dst_base_usage + extra_len;
+	dest_offset += dst_base_usage + extra_sz;
 
 	/* step.3 - projection by GpuPreAgg on the destination buffer */
 	if (tup_is_valid)
 	{
+		cl_char	   *dst_dclass = KERN_DATA_STORE_DCLASS(kds_dst, dest_index);
 		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, dest_index);
-		cl_bool	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dest_index);
-		cl_char    *dst_extra;
-		cl_char	   *src_extra;
 
 		/*
-		 * If varlena or indirect variables are stored in the varlena
-		 * buffer of kern_context, we have to copy the values to kds_dst,
-		 * and update the pointers.
+		 * Fixup pointers, if it points out of kds_src/kmrels because these
+		 * variables must be visible to the next GpuPreAgg kernel.
 		 */
-		if (extra_len > 0)
+		if (extra_sz > 0)
 		{
-			dst_extra = (char *)kds_dst + kds_dst->length - dest_offset;
+			char   *dpos = (char *)kds_dst + kds_dst->length - dest_offset;
+			char   *addr;
+			cl_int	extra_sum = 0;
+			cl_int	len;
+
 			for (int j=0; j < GPUJOIN_DEVICE_PROJECTION_NFIELDS; j++)
 			{
-				cl_uint		len = tup_extra_sz[j];
-
+				len = tup_extras[j];
 				if (len == 0)
 					continue;
-				src_extra = DatumGetPointer(tup_values[j]);
-				assert(src_extra >= kcxt->vlbuf && src_extra <  kcxt->vlpos);
-				memcpy(dst_extra, src_extra, len);
-				tup_values[j] = PointerGetDatum(dst_extra);
-				dst_extra += len;
+				addr = DatumGetPointer(tup_values[j]);
+				memcpy(dpos, addr, len);
+				tup_values[j] = PointerGetDatum(dpos);
+				dpos += MAXALIGN(len);
+				extra_sum += MAXALIGN(len);
 			}
+			assert(extra_sz == extra_sum);
 		}
-
-		/*
-		 * initial projection by GpuPreAgg
-		 */
+		/* initial projection by GpuPreAgg */
 		gpupreagg_projection_slot(kcxt_gpreagg,
+								  tup_dclass,
 								  tup_values,
-								  tup_isnull,
-								  dst_values,
-								  dst_isnull);
+								  dst_dclass,
+								  dst_values);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
@@ -1587,6 +1581,5 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 bailout:
 	kern_writeback_error_status(&kgjoin->kerror, &kcxt.e);
 }
-
 #endif	/* __CUDACC__ */
-#endif	/* CUDA_GPUJOIN_H */
+#endif	/* __CUDA_GPUJOIN_BODY__ */

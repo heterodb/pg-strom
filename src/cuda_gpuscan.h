@@ -379,23 +379,14 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 		if (tupitem && rc)
 		{
 			cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-			cl_uint		pos;
-			cl_uint		htuple_oid = 0;
+			size_t		pos;
 
-			if (kds_dst->tdhasoid)
-			{
-				htuple_oid = kern_getsysatt_oid(&tupitem->htup);
-				if (htuple_oid == 0)
-					htuple_oid = 0xffffffff;
-			}
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
 			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst->ncols,
-								kds_dst->colmeta,
+								kds_dst,
 								&tupitem->t_self,
 								&tupitem->htup,
-								htuple_oid,
 								tup_dclass,
 								tup_values);
 		}
@@ -618,23 +609,13 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 			if (htup && rc)
 			{
 				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				cl_ulong	pos =
-					(kds_dst->length - (usage_base + usage_offset + required));
+				size_t		pos = (kds_dst->length
+								   - (usage_base + usage_offset + required));
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
-				cl_uint		htuple_oid = 0;
-
-				if (kds_dst->tdhasoid)
-				{
-					htuple_oid = kern_getsysatt_oid(htup);
-					if (htuple_oid == 0)
-						htuple_oid = 0xffffffff;
-				}
 				form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-									kds_dst->ncols,
-									kds_dst->colmeta,
+									kds_dst,
 									&t_self,
 									htup,
-									htuple_oid,
 									tup_dclass,
 									tup_values);
 #else
@@ -819,11 +800,9 @@ kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
 			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst->ncols,
-								kds_dst->colmeta,
+								kds_dst,
 								NULL,	/* ItemPointerData */
-								NULL,	/* HeapTupleFields */
-								kds_dst->tdhasoid ? 0xffffffff : 0,
+								NULL,	/* HeapTupleHeaderData */
 								tup_dclass,
 								tup_values);
 		}

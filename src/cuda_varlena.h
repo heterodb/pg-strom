@@ -221,15 +221,6 @@ typedef struct toast_compress_header
 			result = pg_##NAME##_datum_ref(kcxt, (char *)datum); \
 		}														\
 	}															\
-	STATIC_INLINE(void *)										\
-	pg_##NAME##_datum_store_OLD(kern_context *kcxt,				\
-								pg_##NAME##_t datum)			\
-	{															\
-		if (datum.isnull)										\
-			return NULL;										\
-		return datum.value;										\
-	}															\
-																\
 	STATIC_INLINE(cl_int)										\
 	pg_datum_store(kern_context *kcxt,							\
 				   pg_##NAME##_t datum,							\
@@ -238,14 +229,17 @@ typedef struct toast_compress_header
 	{															\
 		if (!datum.isnull)										\
 		{														\
+			cl_uint		len = VARSIZE_ANY(datum.value);			\
+																\
 			dclass = DATUM_CLASS__NORMAL;						\
-			value = PointerGetDatum(datum.value);				\
-			return VARSIZE_ANY(datum.value);					\
+			value  = PointerGetDatum(datum.value);				\
+			if (PTR_ON_VLBUF(kcxt,datum.value,len))				\
+				return len;										\
+			return 0;											\
 		}														\
 		dclass = DATUM_CLASS__NULL;								\
 		return 0;												\
 	}															\
-																\
 	STATIC_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)		\
 	{															\
@@ -328,7 +322,6 @@ typedef struct toast_compress_header
 /* generic varlena */
 #ifndef PG_VARLENA_TYPE_DEFINED
 #define PG_VARLENA_TYPE_DEFINED
-//STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
 STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena)
 STROMCL_VARLENA_VARREF_TEMPLATE(varlena)
 STROMCL_VARLENA_COMP_CRC32_TEMPLATE(varlena)
