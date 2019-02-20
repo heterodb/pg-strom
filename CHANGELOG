@@ -1,3 +1,8 @@
+* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1
+- hotfixes for various bugs
+- Device Numeric is now based on 128bit
+- Various groundwork to support Apache Arrow in the next version
+
 * Thu Dec 27 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-181227
 - hotfixes for various bugs
 - Add PostgreSQL 11 support
