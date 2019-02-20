@@ -1277,71 +1277,37 @@ typedef struct
 #define	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
-/*
- * Macros to calculate CRC32 value.
- * (logic was copied from pg_crc32.c)
- */
 #ifdef __CUDACC__
+/*
+ * General purpose hash-function which is compatible to PG's hash_any()
+ * These are basis of Hash-Join and Group-By reduction.
+ */
 DEVICE_ONLY_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
 
-#define INIT_LEGACY_CRC32(crc)		((crc) = 0xFFFFFFFF)
-#define FIN_LEGACY_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
-#define EQ_LEGACY_CRC32(crc1,crc2)	((crc1) == (crc2))
-
-STATIC_FUNCTION(cl_uint)
-pg_common_comp_crc32(const cl_uint *crc32_table,
-					 cl_uint hash,
-					 const char *__data, cl_uint __len)
-{
-	cl_uint		__index;
-
-	while (__len-- > 0)
-	{
-		__index = ((int) ((hash) >> 24) ^ *__data++) & 0xff;
-		hash = crc32_table[__index] ^ ((hash) << 8);
-	}
-	return hash;
-}
-
-#define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(cl_uint)										\
-	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
-						   kern_context *kcxt,					\
-						   cl_uint hash, pg_##NAME##_t datum)	\
-	{															\
-		if (!datum.isnull)										\
-		{														\
-			hash = pg_common_comp_crc32(crc32_table,			\
-										hash,					\
-										(char *)&datum.value,	\
-										sizeof(BASE));			\
-		}														\
-		return hash;											\
-	}															\
-																\
+#define STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
 	STATIC_INLINE(cl_uint)										\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
 	{															\
-		if (!datum.isnull)										\
+		if (datum.isnull)										\
 			return 0;											\
 		return pg_hash_any((cl_uchar *)&datum.value,			\
 						   sizeof(BASE));						\
 	}
 
 #else	/* __CUDACC__ */
-#define	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+#define	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)		\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
 
 #define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
 
 #define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
 	STATIC_INLINE(pg_bool_t)								\

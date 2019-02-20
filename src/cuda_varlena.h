@@ -272,29 +272,7 @@ typedef struct toast_compress_header
 #endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
-#define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)				\
-	STATIC_INLINE(cl_uint)										\
-	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
-						   kern_context *kcxt,					\
-						   cl_uint hash, pg_##NAME##_t datum)	\
-	{															\
-		if (datum.isnull)										\
-			return hash;										\
-		if (VARATT_IS_COMPRESSED(datum.value) ||				\
-			VARATT_IS_EXTERNAL(datum.value))					\
-		{														\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
-		}														\
-		else													\
-		{														\
-			hash = pg_common_comp_crc32(crc32_table,			\
-										hash,					\
-										VARDATA_ANY(datum.value), \
-										VARSIZE_ANY_EXHDR(datum.value)); \
-		}														\
-		return hash;											\
-	}															\
-																\
+#define STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)				\
 	STATIC_INLINE(cl_uint)										\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
 	{                                                           \
@@ -311,20 +289,20 @@ typedef struct toast_compress_header
 	}
 
 #else	/* __CUDACC__ */
-#define	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
+#define	STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)
 #endif	/* __CUDACC__ */
 
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)						\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
-	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
+	STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)
 
 /* generic varlena */
 #ifndef PG_VARLENA_TYPE_DEFINED
 #define PG_VARLENA_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena)
 STROMCL_VARLENA_VARREF_TEMPLATE(varlena)
-STROMCL_VARLENA_COMP_CRC32_TEMPLATE(varlena)
+STROMCL_VARLENA_COMP_HASH_TEMPLATE(varlena)
 
 #endif	/* PG_VARLENA_TYPE_DEFINED */
 

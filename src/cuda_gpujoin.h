@@ -24,7 +24,6 @@
  */
 typedef struct
 {
-	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
 	cl_ulong		kmrels_length;	/* length of kern_multirels */
 	cl_ulong		ojmaps_length;	/* length of outer-join map, if any */
 	cl_uint			cuda_dindex;	/* device index of PG-Strom */
@@ -204,12 +203,11 @@ gpujoin_join_quals(kern_context *kcxt,
  */
 STATIC_FUNCTION(cl_uint)
 gpujoin_hash_value(kern_context *kcxt,
-				   cl_uint *pg_crc32_table,
 				   kern_data_store *kds,
 				   kern_multirels *kmrels,
 				   cl_int depth,
 				   cl_uint *x_buffer,
-				   cl_bool *p_is_null_keys);
+				   cl_bool *is_null_keys);
 
 /*
  * gpujoin_projection
@@ -245,7 +243,6 @@ static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	stat_source_nitems;
 static __shared__ cl_uint	stat_nitems[GPUJOIN_MAX_DEPTH+1];
-static __shared__ cl_uint	pg_crc32_table[256];
 
 /*
  * gpujoin_suspend_context
@@ -1137,7 +1134,6 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 			cl_bool		is_null_keys;
 
 			hash_value = gpujoin_hash_value(kcxt,
-											pg_crc32_table,
 											kds_src,
 											kmrels,
 											depth,
@@ -1281,11 +1277,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
 											(GPUJOIN_MAX_DEPTH+2)) / 2;
-	/* setup crc32 table */
-	for (index = get_local_id();
-		 index < lengthof(pg_crc32_table);
-		 index += get_local_size())
-		pg_crc32_table[index] = kmrels->pg_crc32_table[index];
 	/* init per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
@@ -1463,12 +1454,6 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
 											(GPUJOIN_MAX_DEPTH+2)) / 2;
-	/* setup crc32 table */
-	for (index = get_local_id();
-		 index < lengthof(pg_crc32_table);
-		 index += get_local_size())
-		pg_crc32_table[index] = kmrels->pg_crc32_table[index];
-
 	/* setup per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));

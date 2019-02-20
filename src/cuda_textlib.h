@@ -57,28 +57,7 @@ bpchar_truelen(struct varlena *arg)
 #define PG_BPCHAR_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
 STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
-/* pg_bpchar_comp_crc32 has to be defined with own way */
-STATIC_FUNCTION(cl_uint)
-pg_bpchar_comp_crc32(const cl_uint *crc32_table,
-					 kern_context *kcxt,
-					 cl_uint hash, pg_bpchar_t datum)
-{
-	if (datum.isnull)
-		return hash;
-	if (VARATT_IS_COMPRESSED(datum.value) ||
-		VARATT_IS_EXTERNAL(datum.value))
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-	}
-	else
-	{
-		hash = pg_common_comp_crc32(crc32_table, hash,
-									VARDATA_ANY(datum.value),
-									bpchar_truelen(datum.value));
-	}
-	return hash;
-}
-
+/* pg_comp_hash(bpchar) must be defined by itself */
 STATIC_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
 {
@@ -596,9 +575,7 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 #ifndef PG_VARCHAR_TYPE_DEFINED
 #define PG_VARCHAR_TYPE_DEFINED
 typedef pg_text_t						pg_varchar_t;
-#define pg_varchar_datum_ref(a,b)		pg_text_datum_ref(a,b)
 #define pg_varchar_param(a,b)			pg_text_param(a,b)
-#define pg_varchar_comp_crc32(a,b,c,d)	pg_text_comp_crc32(a,b,c,d)
 #endif
 
 /* binary compatible type cast */

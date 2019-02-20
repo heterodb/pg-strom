@@ -625,8 +625,15 @@ pg_numeric_param(kern_context *kcxt,
 	return result;
 }
 
-/* CRC32 calculation function */
-STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
+STATIC_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_numeric_t datum)
+{
+	if (datum.isnull)
+		return 0;
+
+
+
+}
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
 

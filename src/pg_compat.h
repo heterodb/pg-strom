@@ -29,6 +29,7 @@
  */
 #if PG_VERSION_NUM < 110000
 #define DatumGetRangeTypeP(x)		DatumGetRangeType(x)
+#define DatumGetRangeTypePCopy(x)	DatumGetRangeTypeCopy(x)
 #define PG_GETARG_RANGE_P(x)		PG_GETARG_RANGE(x)
 #define PG_RETURN_RANGE_P(x)		PG_RETURN_RANGE(x)
 

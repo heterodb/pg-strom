@@ -351,10 +351,10 @@ static GpuTask *gpujoin_next_task(GpuTaskState *gts);
 static GpuTask *gpujoin_terminator_task(GpuTaskState *gts,
 										cl_bool *task_is_ready);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
-static pg_crc32 get_tuple_hashvalue(innerState *istate,
-									bool is_inner_hashkeys,
-									TupleTableSlot *slot,
-									bool *p_is_null_keys);
+static cl_uint get_tuple_hashvalue(innerState *istate,
+								   bool is_inner_hashkeys,
+								   TupleTableSlot *slot,
+								   bool *p_is_null_keys);
 
 static char *gpujoin_codegen(PlannerInfo *root,
 							 CustomScan *cscan,
@@ -3767,10 +3767,9 @@ gpujoin_codegen_join_quals(StringInfo source,
  * codegen for:
  * STATIC_FUNCTION(cl_uint)
  * gpujoin_hash_value_depth%u(kern_context *kcxt,
- *                            cl_uint *pg_crc32_table,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
- *                            cl_int *outer_index,
+ *                            cl_int *o_buffer,
  *                            cl_bool *is_null_keys)
  */
 static void
@@ -3791,14 +3790,13 @@ gpujoin_codegen_hash_value(StringInfo source,
 		source,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
-		"                          cl_uint *pg_crc32_table,\n"
 		"                          kern_data_store *kds,\n"
 		"                          kern_multirels *kmrels,\n"
 		"                          cl_uint *o_buffer,\n"
 		"                          cl_bool *p_is_null_keys)\n"
 		"{\n"
 		"  pg_anytype_t temp    __attribute__((unused));\n"
-		"  cl_uint hash;\n"
+		"  cl_uint hash = 0xffffffffU;\n"
 		"  cl_bool is_null_keys = true;\n",
 		cur_depth);
 
@@ -3806,10 +3804,6 @@ gpujoin_codegen_hash_value(StringInfo source,
 	context->param_refs = NULL;
 
 	initStringInfo(&body);
-	appendStringInfo(
-		&body,
-		"  /* Hash-value calculation */\n"
-		"  INIT_LEGACY_CRC32(hash);\n");
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -3825,14 +3819,12 @@ gpujoin_codegen_hash_value(StringInfo source,
 			"  temp.%s_v = %s;\n"
 			"  if (!temp.%s_v.isnull)\n"
 			"    is_null_keys = false;\n"
-			"  hash = pg_%s_comp_crc32(pg_crc32_table, kcxt, hash, temp.%s_v);\n",
+			"  hash ^= pg_comp_hash(kcxt, temp.%s_v);\n",
 			dtype->type_name,
 			pgstrom_codegen_expression(key_expr, context),
 			dtype->type_name,
-			dtype->type_name,
 			dtype->type_name);
 	}
-	appendStringInfo(&body, "  FIN_LEGACY_CRC32(hash);\n");
 
 	/*
 	 * variable/params declaration & initialization
@@ -3844,6 +3836,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"%s"
 		"\n"
 		"  *p_is_null_keys = is_null_keys;\n"
+		"  hash ^= 0xffffffff;\n"
 		"  return hash;\n"
 		"}\n"
 		"\n",
@@ -4387,12 +4380,11 @@ gpujoin_codegen(PlannerInfo *root,
 		&source,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value(kern_context *kcxt,\n"
-		"                   cl_uint *pg_crc32_table,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_int depth,\n"
 		"                   cl_uint *o_buffer,\n"
-		"                   cl_bool *p_is_null_keys)\n"
+		"                   cl_bool *is_null_keys)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
@@ -4404,9 +4396,8 @@ gpujoin_codegen(PlannerInfo *root,
 			appendStringInfo(
 				&source,
 				"  case %u:\n"
-				"    return gpujoin_hash_value_depth%u(kcxt,pg_crc32_table,\n"
-				"                                      kds,kmrels,o_buffer,\n"
-				"                                      p_is_null_keys);\n",
+				"    return gpujoin_hash_value_depth%u(kcxt,kds,kmrels,\n"
+				"                                      o_buffer,is_null_keys);\n",
 				depth, depth);
 		}
 		depth++;
@@ -6269,14 +6260,14 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 /*
  * calculation of the hash-value
  */
-static pg_crc32
+static cl_uint
 get_tuple_hashvalue(innerState *istate,
 					bool is_inner_hashkeys,
 					TupleTableSlot *slot,
 					bool *p_is_null_keys)
 {
 	ExprContext	   *econtext = istate->econtext;
-	pg_crc32		hash;
+	cl_uint			hash;
 	List		   *hash_keys_list;
 	ListCell	   *lc;
 	bool			is_null_keys = true;
@@ -6293,7 +6284,7 @@ get_tuple_hashvalue(innerState *istate,
 	}
 
 	/* calculation of a hash value of this entry */
-	INIT_LEGACY_CRC32(hash);
+	hash = 0xffffffffU;
 	foreach (lc, hash_keys_list)
 	{
 		ExprState	   *clause = lfirst(lc);
@@ -6313,9 +6304,9 @@ get_tuple_hashvalue(innerState *istate,
 		dtype = pgstrom_devtype_lookup(exprType((Node *)clause->expr));
 		Assert(dtype != NULL);
 
-		hash = dtype->hash_func(dtype, hash, datum, isnull);
+		hash ^= dtype->hash_func(dtype, datum);
 	}
-	FIN_LEGACY_CRC32(hash);
+	hash ^= 0xffffffffU;
 
 	*p_is_null_keys = is_null_keys;
 
@@ -6523,9 +6514,6 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	/*
 	 * Load inner relations
 	 */
-	memcpy(h_kmrels->pg_crc32_table,
-		   pg_crc32_table,
-		   sizeof(pg_crc32_table));
 	for (i=0; i < num_rels; i++)
 	{
 		innerState	   *istate = &gjs->inners[i];

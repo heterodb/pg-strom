@@ -27,21 +27,11 @@ bool			pgstrom_enable_numeric_type;	/* GUC */
 
 static void		build_devcast_info(void);
 
-static pg_crc32 generic_devtype_hashfunc(devtype_info *dtype,
-										 pg_crc32 hash,
-										 Datum datum, bool isnull);
-static pg_crc32 pg_numeric_devtype_hashfunc(devtype_info *dtype,
-											pg_crc32 hash,
-											Datum datum, bool isnull);
-static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
-										   pg_crc32 hash,
-										   Datum datum, bool isnull);
-static pg_crc32 pg_inet_devtype_hashfunc(devtype_info *dtype,
-										 pg_crc32 hash,
-										 Datum datum, bool isnull);
-static pg_crc32 pg_range_devtype_hashfunc(devtype_info *dtype,
-										  pg_crc32 hash,
-										  Datum datum, bool isnull);
+static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_bpchar_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
 /*
  * Catalog of data types supported by device code
@@ -421,116 +411,102 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
  * Some device types have internal representation, like numeric, which shall
  * be used to GpuHashJoin for join-key hashing.
  */
-static pg_crc32
-generic_devtype_hashfunc(devtype_info *dtype,
-						 pg_crc32 hash,
-						 Datum datum, bool isnull)
+static cl_uint
+generic_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
-	if (isnull)
-		return hash;
-	else if (dtype->type_byval)
-		COMP_LEGACY_CRC32(hash, &datum, dtype->type_length);
-	else if (dtype->type_length > 0)
-		COMP_LEGACY_CRC32(hash, DatumGetPointer(datum), dtype->type_length);
-	else
-		COMP_LEGACY_CRC32(hash, VARDATA_ANY(datum), VARSIZE_ANY_EXHDR(datum));
-	return hash;
+	if (dtype->type_byval)
+		return hash_any((unsigned char *)&datum, dtype->type_length);
+	if (dtype->type_length > 0)
+		return hash_any((unsigned char *)DatumGetPointer(datum),
+						dtype->type_length);
+	Assert(dtype->type_length == -1);
+	return hash_any((cl_uchar *)VARDATA_ANY(datum),
+					VARSIZE_ANY_EXHDR(datum));
 }
 
-static pg_crc32
-pg_numeric_devtype_hashfunc(devtype_info *dtype,
-							pg_crc32 hash,
-							Datum datum, bool isnull)
+static cl_uint
+pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
-	Assert(dtype->type_oid == NUMERICOID);
-	if (!isnull)
-	{
-		kern_context	dummy;
-		pg_numeric_t	temp;
+	kern_context	dummy;
+	pg_numeric_t	temp;
 
-		memset(&dummy, 0, sizeof(dummy));
-		/*
-		 * FIXME: If NUMERIC value is out of range, we may not be able to
-		 * execute GpuJoin in the kernel space for all the outer chunks.
-		 * Is it still valuable to run on GPU kernel?
-		 */
-		temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
-									   DatumGetPointer(datum));
-		if (dummy.e.errcode != StromError_Success)
-			elog(ERROR, "failed on hash calculation of device numeric: %s",
-				 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
-		COMP_LEGACY_CRC32(hash, &temp.value, sizeof(temp.value));
-	}
-	return hash;
+	memset(&dummy, 0, sizeof(dummy));
+	/*
+	 * MEMO: If NUMERIC value is out of range, we may not be able to
+	 * execute GpuJoin in the kernel space for all the outer chunks.
+	 * Is it still valuable to run on GPU kernel?
+	 */
+	temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
+								   DatumGetPointer(datum));
+	if (dummy.e.errcode != StromError_Success)
+		elog(ERROR, "failed on hash calculation of device numeric: %s",
+			 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
+
+	return hash_any((cl_uchar *)&temp.value,
+					offsetof(pg_numeric_t, precision) + sizeof(cl_short));
 }
 
-static pg_crc32
-pg_bpchar_devtype_hashfunc(devtype_info *dtype,
-						   pg_crc32 hash,
-						   Datum datum, bool isnull)
+static cl_uint
+pg_bpchar_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
+	char   *s = VARDATA_ANY(datum);
+	int		i, len = VARSIZE_ANY_EXHDR(datum);
+
+	Assert(dtype->type_oid == BPCHAROID);
 	/*
 	 * whitespace is the tail end of CHAR(n) data shall be ignored
 	 * when we calculate hash-value, to match same text exactly.
 	 */
-	Assert(dtype->type_oid == BPCHAROID);
-	if (!isnull)
-	{
-		char   *s = VARDATA_ANY(datum);
-		int		i, len = VARSIZE_ANY_EXHDR(datum);
-
-		for (i = len - 1; i >= 0 && s[i] == ' '; i--)
-			;
-		COMP_LEGACY_CRC32(hash, VARDATA_ANY(datum), i+1);
-	}
-	return hash;
+	for (i = len - 1; i >= 0 && s[i] == ' '; i--)
+		;
+	return hash_any((unsigned char *)VARDATA_ANY(datum), i+1);
 }
 
-static pg_crc32
-pg_inet_devtype_hashfunc(devtype_info *dtype,
-						 pg_crc32 hash,
-						 Datum datum, bool isnull)
+static cl_uint
+pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
+	inet_struct *is = (inet_struct *) VARDATA_ANY(datum);
+
 	Assert(dtype->type_oid == INETOID ||
 		   dtype->type_oid == CIDROID);
-	if (!isnull)
-	{
-		inet_struct *is = (inet_struct *) VARDATA_ANY(datum);
+	if (is->family == PGSQL_AF_INET)
+		return hash_any((cl_uchar *)is, offsetof(inet_struct, ipaddr[4]));
+	else if (is->family == PGSQL_AF_INET6)
+		return hash_any((cl_uchar *)is, offsetof(inet_struct, ipaddr[16]));
 
-		if (is->family == PGSQL_AF_INET)
-			COMP_LEGACY_CRC32(hash, is, offsetof(inet_struct, ipaddr[4]));
-		else if (is->family == PGSQL_AF_INET6)
-			COMP_LEGACY_CRC32(hash, is, offsetof(inet_struct, ipaddr[16]));
-		else
-			elog(ERROR, "unexpected address family: %d", is->family);
-	}
-	return hash;
+	elog(ERROR, "unexpected address family: %d", is->family);
+	return ~0U;
 }
 
-static pg_crc32
-pg_range_devtype_hashfunc(devtype_info *dtype,
-						  pg_crc32 hash,
-						  Datum datum, bool isnull)
+static cl_uint
+pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
-	if (!isnull)
-	{
-		RangeType  *r = DatumGetRangeTypeP(datum);
-		char	   *pos = (char *)(r + 1);
-		char		flags = *((char *)r + VARSIZE(r) - 1);
+	RangeType  *r = DatumGetRangeTypeP(datum);
+	cl_uchar	flags = *((char *)r + VARSIZE(r) - 1);
+	cl_uchar   *pos = (cl_uchar *)(r + 1);
+	cl_uchar	buf[sizeof(Datum) * 2 + sizeof(char)];
+	int			len = 0;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
 
-		if (RANGE_HAS_LBOUND(flags))
-		{
-			COMP_LEGACY_CRC32(hash, pos, dtype->type_length);
-			pos += TYPEALIGN(dtype->type_align,
-							 dtype->type_length);
-		}
-		if (RANGE_HAS_UBOUND(flags))
-		{
-			COMP_LEGACY_CRC32(hash, pos, dtype->type_length);
-		}
-		COMP_LEGACY_CRC32(hash, &flags, sizeof(char));
+	get_typlenbyvalalign(r->rangetypid, &typlen, &typbyval, &typalign);
+	Assert(typlen > 0);		/* we support only fixed-length */
+	if (RANGE_HAS_LBOUND(flags))
+	{
+		memcpy(buf + len, pos, typlen);
+		len += typlen;
+		pos += typlen;
 	}
-	return hash;
+	if (RANGE_HAS_UBOUND(flags))
+	{
+		memcpy(buf + len, pos, typlen);
+		len += typlen;
+		pos += typlen;
+	}
+	buf[len++] = flags;
+
+	return hash_any(buf, len);
 }
 
 /*

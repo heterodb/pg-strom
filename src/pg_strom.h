@@ -461,9 +461,7 @@ struct devtype_info;
 struct devfunc_info;
 struct devcast_info;
 
-typedef pg_crc32 (*devtype_hashfunc_type)(struct devtype_info *dtype,
-										  pg_crc32 hash,
-										  Datum datum, bool isnull);
+typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype, Datum datum);
 
 typedef struct devtype_info {
 	Oid			type_oid;
