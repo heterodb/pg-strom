@@ -280,6 +280,7 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 			const char	   *fname = strVal(lfirst(lc));
 
 			readArrowFile(fname, &af_info);
+			elog(INFO, "%s", dumpArrowNode((ArrowNode *)&af_info.footer));
 			//dump...
 			//TODO: make cache item here
 		}

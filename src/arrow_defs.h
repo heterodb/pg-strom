@@ -1,5 +1,5 @@
 /*
- * arrow_enums.h
+ * arrow_defs.h
  *
  * definitions for apache arrow format
  */

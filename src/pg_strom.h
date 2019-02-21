@@ -1295,6 +1295,7 @@ typedef struct
 } ArrowFileInfo;
 
 extern void readArrowFile(const char *pathname, ArrowFileInfo *af_info);
+extern char *dumpArrowNode(ArrowNode *node);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*
