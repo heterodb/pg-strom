@@ -145,6 +145,26 @@ CREATE FUNCTION pg_catalog.attr_type_check(regclass,text,regtype)
   LANGUAGE C STRICT;
 
 --
+-- Handlers for arrow_fdw extension
+--
+CREATE FUNCTION pgstrom.arrow_fdw_handler()
+  RETURNS fdw_handler
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_handler'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.arrow_fdw_validator(text[],oid)
+  RETURNS void
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_validator'
+  LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER arrow_fdw
+  HANDLER   pgstrom.arrow_fdw_handler
+  VALIDATOR pgstrom.arrow_fdw_validator;
+
+CREATE SERVER arrow_fdw
+  FOREIGN DATA WRAPPER arrow_fdw;
+
+--
 -- Handlers for gstore_fdw extension
 --
 CREATE FUNCTION pgstrom.gstore_fdw_handler()

@@ -170,6 +170,7 @@
 #include <sys/vfs.h>
 
 #include "nvme_strom.h"
+#include "arrow_defs.h"
 
 /*
  * --------------------------------------------------------------------
@@ -1280,6 +1281,21 @@ extern size_t GpuStoreBufferGetNitems(GpuStoreBuffer *gs_buffer);
 extern void pgstrom_init_gstore_buf(void);
 
 extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
+
+/*
+ * arrow_(fdw|read).c
+ */
+typedef struct
+{
+	const char	   *filename;
+	struct stat		stat;
+	ArrowFooter		footer;
+	List		   *dictionaries;	/* List of ArrowDictionaryBatch */
+	List		   *recordBatches;	/* List of ArrowRecordBatch */
+} ArrowFileInfo;
+
+extern void readArrowFile(const char *pathname, ArrowFileInfo *af_info);
+extern void pgstrom_init_arrow_fdw(void);
 
 /*
  * misc.c
