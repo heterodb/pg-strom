@@ -708,6 +708,14 @@ typedef struct {
 } kern_colmeta;
 
 /*
+ * kern_tupdesc - just a pair of nattrs + colmeta[]
+ */
+typedef struct {
+	cl_uint			nattrs;
+	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
+} kern_tupdesc;
+
+/*
  * kern_tupitem - individual items for KDS_FORMAT_ROW
  */
 typedef struct

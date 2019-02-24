@@ -55,6 +55,34 @@ estimate_num_chunks(Path *pathnode)
 }
 
 /*
+ * kern_tupdesc_equal
+ */
+bool
+kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b)
+{
+	cl_int	i;
+
+	if (a->nattrs != b->nattrs)
+		return false;
+	for (i=0; i < a->nattrs; i++)
+	{
+		kern_colmeta   *cmeta_a = &a->colmeta[i];
+		kern_colmeta   *cmeta_b = &b->colmeta[i];
+
+		if ((cmeta_a->attbyval && !cmeta_b->attbyval) ||
+			(!cmeta_a->attbyval && cmeta_b->attbyval) ||
+			(cmeta_a->attalign != cmeta_b->attalign) ||
+			(cmeta_a->attlen != cmeta_b->attlen) ||
+			(cmeta_a->attnum != cmeta_b->attnum) ||
+			(cmeta_a->attcacheoff != cmeta_b->attcacheoff) ||
+			(cmeta_a->atttypid != cmeta_b->atttypid) ||
+			(cmeta_a->atttypmod != cmeta_b->atttypmod))
+			return false;
+	}
+	return true;
+}
+
+/*
  * PDS_fetch_tuple - fetch a tuple from the PDS
  */
 bool

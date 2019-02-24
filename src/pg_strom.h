@@ -1009,6 +1009,7 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern cl_uint estimate_num_chunks(Path *pathnode);
+extern bool kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b);
 extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
 								kern_data_store *kds,
 								HeapTuple tuple_buf,
