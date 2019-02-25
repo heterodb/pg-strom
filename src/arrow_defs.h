@@ -150,10 +150,16 @@ typedef enum
 /*
  * ArrowNode
  */
-typedef struct
+struct ArrowNode
 {
 	ArrowNodeTag	tag;
-} ArrowNode;
+	const char	   *tagName;
+	size_t			nodeSz;
+#ifdef PG_STROM_H
+	void		  (*dumpArrowNode)(StringInfo str, struct ArrowNode *node);
+#endif /* PG_STROM_H */
+};
+typedef struct ArrowNode		ArrowNode;
 
 /* Null */
 typedef ArrowNode	ArrowTypeNull;
@@ -161,7 +167,7 @@ typedef ArrowNode	ArrowTypeNull;
 /* Int */
 typedef struct		ArrowTypeInt
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int32			bitWidth;
 	bool			is_signed;
 } ArrowTypeInt;
@@ -169,7 +175,7 @@ typedef struct		ArrowTypeInt
 /* FloatingPoint */
 typedef struct		ArrowTypeFloatingPoint
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowPrecision	precision;
 } ArrowTypeFloatingPoint;
 
@@ -185,7 +191,7 @@ typedef ArrowNode	ArrowTypeBool;
 /* Decimal */
 typedef struct		ArrowTypeDecimal
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int32			precision;
 	int32			scale;
 } ArrowTypeDecimal;
@@ -193,14 +199,14 @@ typedef struct		ArrowTypeDecimal
 /* Date */
 typedef struct		ArrowTypeDate
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowDateUnit	unit;
 } ArrowTypeDate;
 
 /* Time */
 typedef struct		ArrowTypeTime
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowTimeUnit	unit;
 	int32			bitWidth;
 } ArrowTypeTime;
@@ -208,7 +214,7 @@ typedef struct		ArrowTypeTime
 /* Timestamp */
 typedef struct		ArrowTypeTimestamp
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowTimeUnit	unit;
 	const char	   *timezone;
 	int32			_timezone_len;
@@ -217,7 +223,7 @@ typedef struct		ArrowTypeTimestamp
 /* Interval */
 typedef struct		ArrowTypeInterval
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowIntervalUnit unit;
 } ArrowTypeInterval;
 
@@ -230,7 +236,7 @@ typedef ArrowNode	ArrowTypeStruct;
 /* Union */
 typedef struct		ArrowTypeUnion
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowUnionMode	mode;
 	int32		   *typeIds;
 	int32			_num_typeIds;
@@ -239,21 +245,21 @@ typedef struct		ArrowTypeUnion
 /* FixedSizeBinary */
 typedef struct		ArrowTypeFixedSizeBinary
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int32			byteWidth;
 } ArrowTypeFixedSizeBinary;
 
 /* FixedSizeList */
 typedef struct		ArrowTypeFixedSizeList
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int32			listSize;
 } ArrowTypeFixedSizeList;
 
 /* Map */
 typedef struct		ArrowTypeMap
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	bool			keysSorted;
 } ArrowTypeMap;
 
@@ -262,7 +268,7 @@ typedef struct		ArrowTypeMap
  */
 typedef union		ArrowType
 {
-	ArrowNodeTag			tag;
+	ArrowNode				node;
 	ArrowTypeNull			Null;
 	ArrowTypeInt			Int;
 	ArrowTypeFloatingPoint	FloatingPoint;
@@ -287,7 +293,7 @@ typedef union		ArrowType
  */
 typedef struct		ArrowBuffer
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int64			offset;
 	int64			length;
 } ArrowBuffer;
@@ -297,7 +303,7 @@ typedef struct		ArrowBuffer
  */
 typedef struct		ArrowKeyValue
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	const char	   *key;
 	const char	   *value;
 	int				_key_len;
@@ -309,7 +315,7 @@ typedef struct		ArrowKeyValue
  */
 typedef struct		ArrowDictionaryEncoding
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int64			id;
 	ArrowTypeInt	indexType;
 	bool			isOrdered;
@@ -320,7 +326,7 @@ typedef struct		ArrowDictionaryEncoding
  */
 typedef struct		ArrowField
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	const char	   *name;
 	int				_name_len;
 	bool			nullable;
@@ -339,7 +345,7 @@ typedef struct		ArrowField
  */
 typedef struct		ArrowFieldNode
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	uint64			length;
 	uint64			null_count;
 } ArrowFieldNode;
@@ -349,7 +355,7 @@ typedef struct		ArrowFieldNode
  */
 typedef struct		ArrowSchema
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowEndianness	endianness;
 	/* vector of Field */
 	ArrowField	   *fields;
@@ -364,7 +370,7 @@ typedef struct		ArrowSchema
  */
 typedef struct		ArrowRecordBatch
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int64			length;
 	/* vector of FieldNode */
 	ArrowFieldNode  *nodes;
@@ -379,7 +385,7 @@ typedef struct		ArrowRecordBatch
  */
 typedef struct		ArrowDictionaryBatch
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int64			id;
 	ArrowRecordBatch data;
 	bool			isDelta;
@@ -390,7 +396,6 @@ typedef struct		ArrowDictionaryBatch
  */
 typedef union		ArrowMessageHeader
 {
-	ArrowNodeTag	tag;
 	ArrowNode		node;
 	ArrowSchema		schema;
 	ArrowDictionaryBatch dictionaryBatch;
@@ -402,7 +407,7 @@ typedef union		ArrowMessageHeader
  */
 typedef struct		ArrowMessage
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowMetadataVersion version;
 	ArrowMessageBody body;
 	uint64			bodyLength;
@@ -413,7 +418,7 @@ typedef struct		ArrowMessage
  */
 typedef struct		ArrowBlock
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	int64			offset;
 	int32			metaDataLength;
 	int64			bodyLength;
@@ -424,7 +429,7 @@ typedef struct		ArrowBlock
  */
 typedef struct		ArrowFooter
 {
-	ArrowNodeTag	tag;
+	ArrowNode		node;
 	ArrowMetadataVersion version;
 	ArrowSchema		schema;
 	ArrowBlock	   *dictionaries;

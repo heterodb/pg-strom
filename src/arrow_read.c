@@ -9,6 +9,381 @@
 #include "pg_strom.h"
 #include "arrow_defs.h"
 
+#ifdef PG_STROM_H
+/*
+ * Dump support of ArrowNode
+ */
+static void
+__dumpArrowNode(StringInfo str, ArrowNode *node)
+{
+	node->dumpArrowNode(str, node);
+}
+
+static void
+__dumpArrowNodeSimple(StringInfo str, ArrowNode *node)
+{
+	appendStringInfo(str, "{%s}", node->tagName);
+}
+#define __dumpArrowTypeNull		__dumpArrowNodeSimple
+#define __dumpArrowTypeUtf8		__dumpArrowNodeSimple
+#define __dumpArrowTypeBinary	__dumpArrowNodeSimple
+#define __dumpArrowTypeBool		__dumpArrowNodeSimple
+#define __dumpArrowTypeList		__dumpArrowNodeSimple
+#define __dumpArrowTypeStruct	__dumpArrowNodeSimple
+
+static void
+__dumpArrowTypeInt(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeInt   *i = (ArrowTypeInt *)node;
+
+	appendStringInfo(str,"{%s%d}",
+					 i->is_signed ? "Int" : "Uint",
+					 i->bitWidth);
+}
+
+static void
+__dumpArrowTypeFloatingPoint(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeFloatingPoint *f = (ArrowTypeFloatingPoint *)node;
+
+	appendStringInfo(
+		str,"{Float%s}",
+		f->precision == ArrowPrecision__Half ? "16" :
+		f->precision == ArrowPrecision__Single ? "32" :
+		f->precision == ArrowPrecision__Double ? "64" : "??");
+}
+
+static void
+__dumpArrowTypeDecimal(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeDecimal *d = (ArrowTypeDecimal *)node;
+
+	appendStringInfo(str,"{Decimal: precision=%d, scale=%d}",
+					 d->precision,
+					 d->scale);
+}
+
+static void
+__dumpArrowTypeDate(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeDate *d = (ArrowTypeDate *)node;
+
+	appendStringInfo(
+		str,"{Date: unit=%s}",
+		d->unit == ArrowDateUnit__Day ? "day" :
+		d->unit == ArrowDateUnit__MilliSecond ? "msec" : "???");
+}
+
+static void
+__dumpArrowTypeTime(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeTime *t = (ArrowTypeTime *)node;
+
+	appendStringInfo(
+		str,"{Time: unit=%s}",
+		t->unit == ArrowTimeUnit__Second ? "sec" :
+		t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
+		t->unit == ArrowTimeUnit__MicroSecond ? "us" :
+		t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
+}
+
+static void
+__dumpArrowTypeTimestamp(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeTimestamp *t = (ArrowTypeTimestamp *)node;
+
+	appendStringInfo(
+		str,"{Timestamp: unit=%s}",
+		t->unit == ArrowTimeUnit__Second ? "sec" :
+		t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
+		t->unit == ArrowTimeUnit__MicroSecond ? "us" :
+		t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
+}
+
+static void
+__dumpArrowTypeInterval(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeInterval *t = (ArrowTypeInterval *)node;
+
+	appendStringInfo(
+		str,"{Interval: unit=%s}",
+		t->unit==ArrowIntervalUnit__Year_Month ? "Year/Month" :
+		t->unit==ArrowIntervalUnit__Day_Time ? "Day/Time" : "???");
+}
+
+static void
+__dumpArrowTypeUnion(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeUnion *u = (ArrowTypeUnion *)node;
+	int			i;
+
+	appendStringInfo(
+		str,"{Union: mode=%s, typeIds=[",
+		u->mode == ArrowUnionMode__Sparse ? "Sparse" :
+		u->mode == ArrowUnionMode__Dense ? "Dense" : "???");
+	for (i=0; i < u->_num_typeIds; i++)
+		appendStringInfo(str, "%s%d", i > 0 ? ", " : " ",
+						 u->typeIds[i]);
+	appendStringInfo(str, "]}");
+}
+
+static void
+__dumpArrowTypeFixedSizeBinary(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeFixedSizeBinary *fb = (ArrowTypeFixedSizeBinary *)node;
+
+	appendStringInfo(
+		str,"{FixedSizeBinary: byteWidth=%d}", fb->byteWidth);
+}
+
+static void
+__dumpArrowTypeFixedSizeList(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeFixedSizeList *fl = (ArrowTypeFixedSizeList *)node;
+
+	appendStringInfo(
+		str,"{FixedSizeList: listSize=%d}", fl->listSize);
+}
+
+static void
+__dumpArrowTypeMap(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeMap *m = (ArrowTypeMap *)node;
+
+	appendStringInfo(
+		str,"{Map: keysSorted=%s}", m->keysSorted ? "true" : "false");
+}
+
+static void
+__dumpArrowKeyValue(StringInfo str, ArrowNode *node)
+{
+	ArrowKeyValue *kv = (ArrowKeyValue *)node;
+
+	appendStringInfo(str,"{KeyValue: key=\"");
+	if (kv->key)
+		outToken(str, kv->key);
+	appendStringInfo(str,"\", value=\"");
+	if (kv->value)
+		outToken(str, kv->value);
+	appendStringInfo(str,"\"}");
+}
+
+static void
+__dumpArrowDictionaryEncoding(StringInfo str, ArrowNode *node)
+{
+	ArrowDictionaryEncoding *d = (ArrowDictionaryEncoding *)node;
+
+	appendStringInfo(str,"{DictionaryEncoding: id=%ld, indexType=", d->id);
+	__dumpArrowNode(str, (ArrowNode *)&d->indexType);
+	appendStringInfo(str,", isOrdered=%s}",
+					 d->isOrdered ? "true" : "false");
+}
+
+static void
+__dumpArrowField(StringInfo str, ArrowNode *node)
+{
+	ArrowField *f = (ArrowField *)node;
+	int		i;
+
+	appendStringInfo(str, "{Field: name=\"");
+	if (f->name)
+		outToken(str, f->name);
+	appendStringInfo(str, "\", nullable=%s, type=",
+					 f->nullable ? "true" : "false");
+	__dumpArrowNode(str, (ArrowNode *)&f->type);
+	if (f->dictionary.indexType.node.tag == ArrowNodeTag__Int)
+	{
+		appendStringInfo(str, ", dictionary=");
+		__dumpArrowNode(str, (ArrowNode *)&f->dictionary);
+	}
+	appendStringInfo(str, ", children=[");
+	for (i=0; i < f->_num_children; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&f->children[i]);
+	}
+	appendStringInfo(str, "], custom_metadata=[");
+	for (i=0; i < f->_num_custom_metadata; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&f->custom_metadata[i]);
+	}
+	appendStringInfo(str, "]}");
+}
+
+static void
+__dumpArrowFieldNode(StringInfo str, ArrowNode *node)
+{
+	appendStringInfo(
+		str, "{FieldNode: length=%ld, null_count=%ld}",
+		((ArrowFieldNode *)node)->length,
+		((ArrowFieldNode *)node)->null_count);
+}
+
+static void
+__dumpArrowBuffer(StringInfo str, ArrowNode *node)
+{
+	appendStringInfo(
+		str, "{Buffer: offset=%ld, length=%ld}",
+		((ArrowBuffer *)node)->offset,
+		((ArrowBuffer *)node)->length);
+}
+
+static void
+__dumpArrowSchema(StringInfo str, ArrowNode *node)
+{
+	ArrowSchema *s = (ArrowSchema *)node;
+	int		i;
+
+	appendStringInfo(
+		str, "{Schema: endianness=%s, fields=[",
+		s->endianness == ArrowEndianness__Little ? "little" :
+		s->endianness == ArrowEndianness__Big ? "big" : "???");
+	for (i=0; i < s->_num_fields; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&s->fields[i]);
+	}
+	appendStringInfo(str, "], custom_metadata=[");
+	for (i=0; i < s->_num_custom_metadata; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&s->custom_metadata[i]);
+	}
+	appendStringInfo(str, "]}");
+}
+
+static void
+__dumpArrowRecordBatch(StringInfo str, ArrowNode *node)
+{
+	ArrowRecordBatch *r = (ArrowRecordBatch *) node;
+	int		i;
+
+	appendStringInfo(str, "{RecordBatch: length=%ld, nodes=[", r->length);
+	for (i=0; i < r->_num_nodes; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&r->nodes[i]);
+	}
+	appendStringInfo(str, "], buffers=[");
+	for (i=0; i < r->_num_buffers; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&r->buffers[i]);
+	}
+	appendStringInfo(str,"]}");
+}
+
+static void
+__dumpArrowDictionaryBatch(StringInfo str, ArrowNode *node)
+{
+	ArrowDictionaryBatch *d = (ArrowDictionaryBatch *)node;
+
+	appendStringInfo(str, "{DictionaryBatch: id=%ld, data=", d->id);
+	__dumpArrowNode(str, (ArrowNode *)&d->data);
+	appendStringInfo(str, ", isDelta=%s}",
+					 d->isDelta ? "true" : "false");
+}
+
+static void
+__dumpArrowMessage(StringInfo str, ArrowNode *node)
+{
+	ArrowMessage *m = (ArrowMessage *)node;
+
+	appendStringInfo(
+		str, "{Message: version=%s, body=",
+		m->version == ArrowMetadataVersion__V1 ? "V1" :
+		m->version == ArrowMetadataVersion__V2 ? "V2" :
+		m->version == ArrowMetadataVersion__V3 ? "V3" :
+		m->version == ArrowMetadataVersion__V4 ? "V4" : "???");
+	__dumpArrowNode(str, (ArrowNode *)&m->body);
+	appendStringInfo(str, ", bodyLength=%lu}", m->bodyLength);
+}
+
+static void
+__dumpArrowBlock(StringInfo str, ArrowNode *node)
+{
+	appendStringInfo(
+		str, "{Block: offset=%ld, metaDataLength=%d bodyLength=%ld}",
+		((ArrowBlock *)node)->offset,
+		((ArrowBlock *)node)->metaDataLength,
+		((ArrowBlock *)node)->bodyLength);
+}
+
+static void
+__dumpArrowFooter(StringInfo str, ArrowNode *node)
+{
+	ArrowFooter *f = (ArrowFooter *)node;
+	int		i;
+
+	appendStringInfo(
+		str, "{Footer: version=%s, schema=",
+		f->version == ArrowMetadataVersion__V1 ? "V1" :
+		f->version == ArrowMetadataVersion__V2 ? "V2" :
+		f->version == ArrowMetadataVersion__V3 ? "V3" :
+		f->version == ArrowMetadataVersion__V4 ? "V4" : "???");
+	__dumpArrowNode(str, (ArrowNode *)&f->schema);
+	appendStringInfo(str, ", dictionaries=[");
+	for (i=0; i < f->_num_dictionaries; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&f->dictionaries[i]);
+	}
+	appendStringInfo(str, ", recordBatches=[");
+	for (i=0; i < f->_num_recordBatches; i++)
+	{
+		if (i > 0)
+			appendStringInfo(str, ", ");
+		__dumpArrowNode(str, (ArrowNode *)&f->recordBatches[i]);
+	}
+	appendStringInfo(str, "]}");
+}
+
+char *
+dumpArrowNode(ArrowNode *node)
+{
+	StringInfoData str;
+
+	initStringInfo(&str);
+	__dumpArrowNode(&str, node);
+
+	return str.data;
+}
+#endif
+
+/* ------------------------------------------------
+ *
+ * Routines to read Apache Arrow files
+ *
+ * ------------------------------------------------
+ */
+#ifdef PG_STROM_H
+#define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)					\
+	do {														\
+		((ArrowNode *)(PTR))->tag = ArrowNodeTag__##NAME;		\
+		((ArrowNode *)(PTR))->tagName = #NAME;					\
+		((ArrowNode *)(PTR))->nodeSz = sizeof(Arrow##TYPENAME);	\
+		((ArrowNode *)(PTR))->dumpArrowNode = __dumpArrow##TYPENAME; \
+	} while(0)
+#else	/* PG_STROM_H */
+#define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)					\
+	do {														\
+		((ArrowNode *)(PTR))->tag = ArrowNodeTag__##NAME;		\
+		((ArrowNode *)(PTR))->tagName = #NAME;					\
+		((ArrowNode *)(PTR))->nodeSz = sizeof(Arrow##TYPENAME);	\
+	} while(0)
+#endif	/* PG_STROM_H */
+#define INIT_ARROW_NODE(PTR,NAME)		__INIT_ARROW_NODE(PTR,NAME,NAME)
+#define INIT_ARROW_TYPE_NODE(PTR,NAME)	__INIT_ARROW_NODE(PTR,Type##NAME,NAME)
+
+
 /* table/vtable of FlatBuffer */
 typedef struct
 {
@@ -137,7 +512,7 @@ readArrowKeyValue(ArrowKeyValue *kv, const char *pos)
 	FBTable		t = fetchFBTable((int32 *)pos);
 
 	memset(kv, 0, sizeof(ArrowKeyValue));
-	kv->tag		= ArrowNodeTag__KeyValue;
+	INIT_ARROW_NODE(kv, KeyValue);
 	kv->key     = fetchString(&t, 0, &kv->_key_len);
 	kv->value   = fetchString(&t, 1, &kv->_value_len);
 }
@@ -255,75 +630,75 @@ readArrowType(ArrowType *type, int type_tag, const char *type_pos)
 	switch (type_tag)
 	{
 		case ArrowType__Null:
-			type->tag = ArrowNodeTag__Null;
+			INIT_ARROW_TYPE_NODE(type, Null);
 			break;
 		case ArrowType__Int:
-			type->tag = ArrowNodeTag__Int;
+			INIT_ARROW_TYPE_NODE(type, Int);
 			if (type_pos)
 				readArrowTypeInt(&type->Int, type_pos);
 			break;
 		case ArrowType__FloatingPoint:
-			type->tag = ArrowNodeTag__FloatingPoint;
+			INIT_ARROW_TYPE_NODE(type, FloatingPoint);
 			if (type_pos)
 				readArrowTypeFloatingPoint(&type->FloatingPoint, type_pos);
 			break;
 		case ArrowType__Binary:
-			type->tag = ArrowNodeTag__Binary;
+			INIT_ARROW_TYPE_NODE(type, Binary);
 			break;
 		case ArrowType__Utf8:
-			type->tag = ArrowNodeTag__Utf8;
+			INIT_ARROW_TYPE_NODE(type, Utf8);
 			break;
 		case ArrowType__Bool:
-			type->tag = ArrowNodeTag__Bool;
+			INIT_ARROW_TYPE_NODE(type, Bool);
 			break;
 		case ArrowType__Decimal:
-			type->tag = ArrowNodeTag__Decimal;
+			INIT_ARROW_TYPE_NODE(type, Decimal);
 			if (type_pos)
 				readArrowTypeDecimal(&type->Decimal, type_pos);
 			break;
 		case ArrowType__Date:
-			type->tag = ArrowNodeTag__Date;
+			INIT_ARROW_TYPE_NODE(type, Date);
 			if (type_pos)
 				readArrowTypeDate(&type->Date, type_pos);
 			break;
 		case ArrowType__Time:
-			type->tag = ArrowNodeTag__Time;
+			INIT_ARROW_TYPE_NODE(type, Time);
 			if (type_pos)
 				readArrowTypeTime(&type->Time, type_pos);
 			break;
 		case ArrowType__Timestamp:
-			type->tag = ArrowNodeTag__Timestamp;
+			INIT_ARROW_TYPE_NODE(type, Timestamp);
 			if (type_pos)
 				readArrowTypeTimestamp(&type->Timestamp, type_pos);
 			break;
 		case ArrowType__Interval:
-			type->tag = ArrowNodeTag__Interval;
+			INIT_ARROW_TYPE_NODE(type, Interval);
 			if (type_pos)
 				readArrowTypeInterval(&type->Interval, type_pos);
 			break;
 		case ArrowType__List:
-			type->tag = ArrowNodeTag__List;
+			INIT_ARROW_TYPE_NODE(type, List);
 			break;
 		case ArrowType__Struct:
-			type->tag = ArrowNodeTag__Struct;
+			INIT_ARROW_TYPE_NODE(type, Struct);
 			break;
 		case ArrowType__Union:
-			type->tag = ArrowNodeTag__Union;
+			INIT_ARROW_TYPE_NODE(type, Union);
 			if (type_pos)
 				readArrowTypeUnion(&type->Union, type_pos);
 			break;
 		case ArrowType__FixedSizeBinary:
-			type->tag = ArrowNodeTag__FixedSizeBinary;
+			INIT_ARROW_TYPE_NODE(type, FixedSizeBinary);
 			if (type_pos)
 				readArrowTypeFixedSizeBinary(&type->FixedSizeBinary, type_pos);
 			break;
 		case ArrowType__FixedSizeList:
-			type->tag = ArrowNodeTag__FixedSizeList;
+			INIT_ARROW_TYPE_NODE(type, FixedSizeList);
 			if (type_pos)
 				readArrowTypeFixedSizeList(&type->FixedSizeList, type_pos);
 			break;
 		case ArrowType__Map:
-			type->tag = ArrowNodeTag__Map;
+			INIT_ARROW_TYPE_NODE(type, Map);
 			if (type_pos)
 				readArrowTypeMap(&type->Map, type_pos);
 			break;
@@ -340,10 +715,10 @@ readArrowDictionaryEncoding(ArrowDictionaryEncoding *dict, const char *pos)
 	const char *type_pos;
 
 	memset(dict, 0, sizeof(ArrowDictionaryEncoding));
-	dict->tag		= ArrowNodeTag__DictionaryEncoding;
+	INIT_ARROW_NODE(dict, DictionaryEncoding);
 	dict->id		= fetchLong(&t, 0);
 	type_pos		= fetchOffset(&t, 1);
-	dict->indexType.tag = ArrowNodeTag__Int;
+	dict->indexType.node.tag = ArrowNodeTag__Int;
 	readArrowTypeInt(&dict->indexType, type_pos);
 	dict->isOrdered	= fetchBool(&t, 2);
 }
@@ -359,7 +734,7 @@ readArrowField(ArrowField *field, const char *pos)
 	int			i, nitems;
 
 	memset(field, 0, sizeof(ArrowField));
-	field->tag		= ArrowNodeTag__Field;
+	INIT_ARROW_NODE(field, Field);
 	field->name		= fetchString(&t, 0, &field->_name_len);
 	field->nullable	= fetchBool(&t, 1);
 	/* type */
@@ -415,7 +790,7 @@ readArrowSchema(ArrowSchema *schema, const char *pos)
 	int32		i, nitems;
 
 	memset(schema, 0, sizeof(ArrowSchema));
-	schema->tag			= ArrowNodeTag__Schema;
+	INIT_ARROW_NODE(schema, Schema);
 	schema->endianness	= fetchBool(&t, 0);
 	/* [ fields ]*/
 	vector = fetchVector(&t, 1, &nitems);
@@ -461,7 +836,7 @@ readArrowFieldNode(ArrowFieldNode *node, const char *pos)
 	} *fmap = (void *) pos;
 
 	memset(node, 0, sizeof(ArrowFieldNode));
-	node->tag			= ArrowNodeTag__FieldNode;
+	INIT_ARROW_NODE(node, FieldNode);
 	node->length		= fmap->length;
 	node->null_count	= fmap->null_count;
 
@@ -477,7 +852,7 @@ readArrowBuffer(ArrowBuffer *node, const char *pos)
 	} *fmap = (void *) pos;
 
 	memset(node, 0, sizeof(ArrowBuffer));
-	node->tag			= ArrowNodeTag__Buffer;
+	INIT_ARROW_NODE(node, Buffer);
 	node->offset		= fmap->offset;
 	node->length		= fmap->length;
 
@@ -494,7 +869,7 @@ readArrowRecordBatch(ArrowRecordBatch *rbatch, const char *pos)
 	int			i, nitems;
 
 	memset(rbatch, 0, sizeof(ArrowRecordBatch));
-	rbatch->tag		= ArrowNodeTag__RecordBatch;
+	INIT_ARROW_NODE(rbatch, RecordBatch);
 	rbatch->length	= fetchLong(&t, 0);
 	/* nodes: [FieldNode] */
 	next = (const char *)fetchVector(&t, 1, &nitems);
@@ -524,7 +899,7 @@ readArrowDictionaryBatch(ArrowDictionaryBatch *dbatch, const char *pos)
 	const char *next;
 
 	memset(dbatch, 0, sizeof(ArrowDictionaryBatch));
-	dbatch->tag	= ArrowNodeTag__DictionaryBatch;
+	INIT_ARROW_NODE(dbatch, DictionaryBatch);
 	dbatch->id	= fetchLong(&t, 0);
 	next		= fetchOffset(&t, 1);
 	readArrowRecordBatch(&dbatch->data, next);
@@ -539,7 +914,7 @@ readArrowMessage(ArrowMessage *message, const char *pos)
 	const char	   *next;
 
 	memset(message, 0, sizeof(ArrowMessage));
-	message->tag		= ArrowNodeTag__Message;
+	INIT_ARROW_NODE(message, Message);
 	message->version	= fetchShort(&t, 0);
 	mtype				= fetchChar(&t, 1);
 	next				= fetchOffset(&t, 2);
@@ -584,7 +959,7 @@ readArrowBlock(ArrowBlock *node, const char *pos)
 	} *fmap = (void *) pos;
 
 	memset(node, 0, sizeof(ArrowBlock));
-	node->tag            = ArrowNodeTag__Block;
+	INIT_ARROW_NODE(node, Block);
 	node->offset         = fmap->offset;
 	node->metaDataLength = fmap->metaDataLength;
 	node->bodyLength     = fmap->bodyLength;
@@ -603,7 +978,7 @@ readArrowFooter(ArrowFooter *node, const char *pos)
 	int				i, nitems;
 
 	memset(node, 0, sizeof(ArrowFooter));
-	node->tag		= ArrowNodeTag__Footer;
+	INIT_ARROW_NODE(node, Footer);
 	node->version	= fetchShort(&t, 0);
 	/* schema */
 	next = fetchOffset(&t, 1);
@@ -633,9 +1008,9 @@ readArrowFooter(ArrowFooter *node, const char *pos)
  * readArrowFile - read the supplied apache arrow file
  */
 void
-readArrowFile(const char *pathname, ArrowFileInfo *af_info)
+readArrowFileDesc(File filp, ArrowFileInfo *af_info)
 {
-	int				fdesc = -1;
+	int				fdesc = FileGetRawDesc(filp);
 	struct stat		st_buf;
 	size_t			mmap_sz = 0;
 	char		   *mmap_head = NULL;
@@ -645,23 +1020,21 @@ readArrowFile(const char *pathname, ArrowFileInfo *af_info)
 	cl_int			offset;
 	cl_int			i, nitems;
 
+	if (fstat(fdesc, &st_buf) != 0)
+		elog(ERROR, "failed on fstat: %m");
+
+	mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), st_buf.st_size);
+	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+	if (mmap_head == MAP_FAILED)
+		elog(ERROR, "failed on mmap: %m");
+	mmap_tail = mmap_head + st_buf.st_size;
+
 	PG_TRY();
 	{
-		fdesc = open(pathname, O_RDONLY);
-		if (fdesc < 0)
-			elog(ERROR, "failed on open('%s'): %m", pathname);
-		if (fstat(fdesc, &st_buf) != 0)
-			elog(ERROR, "failed on fstat('%s'): %m", pathname);
-		mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), st_buf.st_size);
-		mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
-		if (mmap_head == MAP_FAILED)
-			elog(ERROR, "failed on mmap('%s'): %m", pathname);
-		mmap_tail = mmap_head + st_buf.st_size;
-
 		/* check signature */
 		if (memcmp(mmap_head, "ARROW1\0\0", 8) != 0 ||
 			memcmp(mmap_tail - 6, "ARROW1", 6) != 0)
-			elog(ERROR, "file signature mismatch on '%s'", pathname);
+			elog(ERROR, "Signature mismatch on Apache Arrow file");
 
 		/* OK, read the Apache Arrow file */
 		memset(af_info, 0, sizeof(ArrowFileInfo));
@@ -708,368 +1081,21 @@ readArrowFile(const char *pathname, ArrowFileInfo *af_info)
 	}
 	PG_CATCH();
 	{
-		if (mmap_head != NULL && mmap_head != MAP_FAILED)
-		{
-			if (munmap(mmap_head, mmap_sz) != 0)
-				elog(LOG, "failed on munmap(2): %m");
-		}
-		if (fdesc >= 0)
-			close(fdesc);
+		if (munmap(mmap_head, mmap_sz) != 0)
+			elog(LOG, "failed on munmap(2): %m");
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	if (munmap(mmap_head, mmap_sz) != 0)
 		elog(LOG, "failed on munmap(2): %m");
-	close(fdesc);
 }
 
-/* ----------------------------------------------------------------
- *
- * Dump support for Apache Arrow nodes
- *
- * ----------------------------------------------------------------
- */
-static void __dumpArrowNode(StringInfo str, ArrowNode *node)
+void
+readArrowFile(char *pathname, ArrowFileInfo *af_info)
 {
-	int		i;
+	File		filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
 
-	if (!node)
-		return;
-	switch (node->tag)
-	{
-	    case ArrowNodeTag__Null:
-			appendStringInfo(str, "{Null}");
-			break;
+	readArrowFileDesc(filp, af_info);
 
-		case ArrowNodeTag__Int:
-			{
-				ArrowTypeInt   *t = (ArrowTypeInt *)node;
-
-				appendStringInfo(str,"{%s%d}",
-								 t->is_signed ? "Int" : "Uint",
-								 t->bitWidth);
-			}
-			break;
-
-		case ArrowNodeTag__FloatingPoint:
-			{
-				ArrowTypeFloatingPoint *f = (ArrowTypeFloatingPoint *)node;
-
-				appendStringInfo(
-					str,"{Float%s}",
-					f->precision == ArrowPrecision__Half ? "16" :
-					f->precision == ArrowPrecision__Single ? "32" :
-					f->precision == ArrowPrecision__Double ? "64" : "??");
-			}
-			break;
-
-		case ArrowNodeTag__Utf8:
-			appendStringInfo(str,"{Utf8}");
-			break;
-
-		case ArrowNodeTag__Binary:
-			appendStringInfo(str,"{Binary}");
-			break;
-
-		case ArrowNodeTag__Bool:
-			appendStringInfo(str,"{Bool}");
-			break;
-
-		case ArrowNodeTag__Decimal:
-			{
-				ArrowTypeDecimal *d = (ArrowTypeDecimal *)node;
-
-				appendStringInfo(str,"{Decimal: precision=%d, scale=%d}",
-								 d->precision,
-								 d->scale);
-			}
-			break;
-
-		case ArrowNodeTag__Date:
-			{
-				ArrowTypeDate *d = (ArrowTypeDate *)node;
-
-				appendStringInfo(
-					str,"{Date: unit=%s}",
-					d->unit == ArrowDateUnit__Day ? "day" :
-					d->unit == ArrowDateUnit__MilliSecond ? "msec" : "???");
-			}
-			break;
-
-		case ArrowNodeTag__Time:
-			{
-				ArrowTypeTime *t = (ArrowTypeTime *)node;
-
-				appendStringInfo(
-					str,"{Time: unit=%s}",
-					t->unit == ArrowTimeUnit__Second ? "sec" :
-					t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
-					t->unit == ArrowTimeUnit__MicroSecond ? "us" :
-					t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
-			}
-			break;
-
-		case ArrowNodeTag__Timestamp:
-			{
-				ArrowTypeTimestamp *t = (ArrowTypeTimestamp *)node;
-
-				appendStringInfo(
-					str,"{Timestamp: unit=%s}",
-					t->unit == ArrowTimeUnit__Second ? "sec" :
-					t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
-					t->unit == ArrowTimeUnit__MicroSecond ? "us" :
-					t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
-			}
-			break;
-
-		case ArrowNodeTag__Interval:
-			{
-				ArrowTypeInterval *t = (ArrowTypeInterval *)node;
-
-				appendStringInfo(
-					str,"{Interval: unit=%s}",
-					t->unit==ArrowIntervalUnit__Year_Month ? "Year/Month" :
-					t->unit==ArrowIntervalUnit__Day_Time ? "Day/Time" : "???");
-			}
-			break;
-
-		case ArrowNodeTag__List:
-			appendStringInfo(str,"{List}");
-			break;
-
-		case ArrowNodeTag__Struct:
-			appendStringInfo(str,"{Struct}");
-			break;
-
-		case ArrowNodeTag__Union:
-			{
-				ArrowTypeUnion *u = (ArrowTypeUnion *)node;
-
-				appendStringInfo(
-					str,"{Union: mode=%s, typeIds=[",
-					u->mode == ArrowUnionMode__Sparse ? "Sparse" :
-					u->mode == ArrowUnionMode__Dense ? "Dense" : "???");
-				for (i=0; i < u->_num_typeIds; i++)
-					appendStringInfo(str, "%s%d", i > 0 ? ", " : " ",
-									 u->typeIds[i]);
-				appendStringInfo(str, "]}");
-			}
-			break;
-
-		case ArrowNodeTag__FixedSizeBinary:
-			appendStringInfo(
-				str,"{FixedSizeBinary: byteWidth=%d}",
-				((ArrowTypeFixedSizeBinary *)node)->byteWidth);
-			break;
-
-		case ArrowNodeTag__FixedSizeList:
-			appendStringInfo(
-				str,"{FixedSizeList: listSize=%d}",
-				((ArrowTypeFixedSizeList *)node)->listSize);
-			break;
-
-		case ArrowNodeTag__Map:
-			appendStringInfo(
-				str,"{Map: keysSorted=%s}",
-				((ArrowTypeMap *)node)->keysSorted ? "true" : "false");
-			break;
-
-		case ArrowNodeTag__KeyValue:
-			{
-				ArrowKeyValue *kv = (ArrowKeyValue *)node;
-
-				appendStringInfo(str,"{KeyValue: key=\"");
-				if (kv->key)
-					outToken(str, kv->key);
-				appendStringInfo(str,"\", value=\"");
-				if (kv->value)
-					outToken(str, kv->value);
-				appendStringInfo(str,"\"}");
-			}
-			break;
-
-		case ArrowNodeTag__DictionaryEncoding:
-			{
-				ArrowDictionaryEncoding *d = (ArrowDictionaryEncoding *)node;
-
-				appendStringInfo(str,"{DictionaryEncoding: id=%ld, indexType=",
-								 d->id);
-				__dumpArrowNode(str, (ArrowNode *)&d->indexType);
-				appendStringInfo(str,", isOrdered=%s}",
-								 d->isOrdered ? "true" : "false");
-			}
-			break;
-
-		case ArrowNodeTag__Field:
-			{
-				ArrowField *f = (ArrowField *)node;
-
-				appendStringInfo(str, "{Field: name=\"");
-				if (f->name)
-					outToken(str, f->name);
-				appendStringInfo(str, "\", nullable=%s, type=",
-								 f->nullable ? "true" : "false");
-				__dumpArrowNode(str, (ArrowNode *)&f->type);
-				if (f->dictionary.indexType.tag == ArrowNodeTag__Int)
-				{
-					appendStringInfo(str, ", dictionary=");
-					__dumpArrowNode(str, (ArrowNode *)&f->dictionary);
-				}
-				appendStringInfo(str, ", children=[");
-				for (i=0; i < f->_num_children; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&f->children[i]);
-				}
-				appendStringInfo(str, "], custom_metadata=[");
-				for (i=0; i < f->_num_custom_metadata; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&f->custom_metadata[i]);
-				}
-				appendStringInfo(str, "]}");
-			}
-			break;
-
-		case ArrowNodeTag__FieldNode:
-			appendStringInfo(
-				str, "{FieldNode: length=%ld, null_count=%ld}",
-				((ArrowFieldNode *)node)->length,
-				((ArrowFieldNode *)node)->null_count);
-			break;
-
-		case ArrowNodeTag__Buffer:
-			appendStringInfo(
-				str, "{Buffer: offset=%ld, length=%ld}",
-				((ArrowBuffer *)node)->offset,
-				((ArrowBuffer *)node)->length);
-			break;
-
-		case ArrowNodeTag__Schema:
-			{
-				ArrowSchema *s = (ArrowSchema *)node;
-
-				appendStringInfo(
-					str, "{Schema: endianness=%s, fields=[",
-					s->endianness == ArrowEndianness__Little ? "little" :
-					s->endianness == ArrowEndianness__Big ? "big" : "???");
-				for (i=0; i < s->_num_fields; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&s->fields[i]);
-				}
-				appendStringInfo(str, "], custom_metadata=[");
-				for (i=0; i < s->_num_custom_metadata; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&s->custom_metadata[i]);
-				}
-				appendStringInfo(str, "]}");
-			}
-			break;
-
-		case ArrowNodeTag__RecordBatch:
-			{
-				ArrowRecordBatch *r = (ArrowRecordBatch *) node;
-
-				appendStringInfo(str, "{RecordBatch: length=%ld, nodes=[",
-								 r->length);
-				for (i=0; i < r->_num_nodes; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&r->nodes[i]);
-				}
-				appendStringInfo(str, "], buffers=[");
-				for (i=0; i < r->_num_buffers; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&r->buffers[i]);
-				}
-				appendStringInfo(str,"]}");
-			}
-			break;
-
-		case ArrowNodeTag__DictionaryBatch:
-			{
-				ArrowDictionaryBatch *d = (ArrowDictionaryBatch *)node;
-
-				appendStringInfo(str, "{DictionaryBatch: id=%ld, data=",
-								 d->id);
-				__dumpArrowNode(str, (ArrowNode *)&d->data);
-				appendStringInfo(str, ", isDelta=%s}",
-								 d->isDelta ? "true" : "false");
-			}
-			break;
-
-		case ArrowNodeTag__Message:
-			{
-				ArrowMessage *m = (ArrowMessage *)node;
-
-				appendStringInfo(
-					str, "{Message: version=%s, body=",
-					m->version == ArrowMetadataVersion__V1 ? "V1" :
-					m->version == ArrowMetadataVersion__V2 ? "V2" :
-					m->version == ArrowMetadataVersion__V3 ? "V3" :
-					m->version == ArrowMetadataVersion__V4 ? "V4" : "???");
-				__dumpArrowNode(str, (ArrowNode *)&m->body);
-				appendStringInfo(str, ", bodyLength=%lu}", m->bodyLength);
-			}
-			break;
-
-		case ArrowNodeTag__Block:
-			appendStringInfo(
-				str, "{Block: offset=%ld, metaDataLength=%d bodyLength=%ld}",
-				((ArrowBlock *)node)->offset,
-				((ArrowBlock *)node)->metaDataLength,
-				((ArrowBlock *)node)->bodyLength);
-			break;
-
-		case ArrowNodeTag__Footer:
-			{
-				ArrowFooter *f = (ArrowFooter *)node;
-
-				appendStringInfo(
-					str, "{Footer: version=%s, schema=",
-					f->version == ArrowMetadataVersion__V1 ? "V1" :
-					f->version == ArrowMetadataVersion__V2 ? "V2" :
-					f->version == ArrowMetadataVersion__V3 ? "V3" :
-					f->version == ArrowMetadataVersion__V4 ? "V4" : "???");
-				__dumpArrowNode(str, (ArrowNode *)&f->schema);
-				appendStringInfo(str, ", dictionaries=[");
-				for (i=0; i < f->_num_dictionaries; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&f->dictionaries[i]);
-				}
-				appendStringInfo(str, ", recordBatches=[");
-				for (i=0; i < f->_num_recordBatches; i++)
-				{
-					if (i > 0)
-						appendStringInfo(str, ", ");
-					__dumpArrowNode(str, (ArrowNode *)&f->recordBatches[i]);
-				}
-				appendStringInfo(str, "]}");
-			}
-			break;
-
-		default:
-			elog(ERROR, "unknown ArrowNodeTag: %d\n", (int)node->tag);
-	}
-}
-
-char *
-dumpArrowNode(ArrowNode *node)
-{
-	StringInfoData str;
-
-	initStringInfo(&str);
-	__dumpArrowNode(&str, node);
-
-	return str.data;
+	FileClose(filp);
 }

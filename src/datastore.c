@@ -55,19 +55,47 @@ estimate_num_chunks(Path *pathnode)
 }
 
 /*
+ * kern_tupdesc_create
+ */
+kern_tupdesc *
+kern_tupdesc_create(TupleDesc tupdesc)
+{
+	kern_tupdesc   *ktdesc;
+	cl_int			j, ncols = tupdesc->natts;
+
+	ktdesc = palloc0(offsetof(kern_tupdesc, colmeta[ncols]));
+	for (j=0; j < ncols; j++)
+	{
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+		kern_colmeta	   *cmeta = &ktdesc->colmeta[j];
+
+		cmeta->attbyval  = attr->attbyval;
+		cmeta->attalign  = typealign_get_width(attr->attalign);
+		cmeta->attlen    = attr->attlen;
+		cmeta->attnum    = attr->attnum;
+		cmeta->attcacheoff = attr->attcacheoff;
+		cmeta->atttypid  = attr->atttypid;
+		cmeta->atttypmod = attr->atttypmod;
+	}
+	ktdesc->ncols = ncols;
+
+	return ktdesc;
+}
+
+/*
  * kern_tupdesc_equal
  */
 bool
 kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b)
 {
-	cl_int	i;
+	cl_int	j;
 
-	if (a->nattrs != b->nattrs)
+	if (a->ncols != b->ncols)
 		return false;
-	for (i=0; i < a->nattrs; i++)
+	for (j=0; j < a->ncols; j++)
 	{
-		kern_colmeta   *cmeta_a = &a->colmeta[i];
-		kern_colmeta   *cmeta_b = &b->colmeta[i];
+		kern_colmeta   *cmeta_a = &a->colmeta[j];
+		kern_colmeta   *cmeta_b = &b->colmeta[j];
 
 		if ((cmeta_a->attbyval && !cmeta_b->attbyval) ||
 			(!cmeta_a->attbyval && cmeta_b->attbyval) ||
@@ -77,7 +105,10 @@ kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b)
 			(cmeta_a->attcacheoff != cmeta_b->attcacheoff) ||
 			(cmeta_a->atttypid != cmeta_b->atttypid) ||
 			(cmeta_a->atttypmod != cmeta_b->atttypmod))
+		{
+			Assert(false);
 			return false;
+		}
 	}
 	return true;
 }

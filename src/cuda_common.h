@@ -711,7 +711,7 @@ typedef struct {
  * kern_tupdesc - just a pair of nattrs + colmeta[]
  */
 typedef struct {
-	cl_uint			nattrs;
+	cl_uint			ncols;
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
 } kern_tupdesc;
 
