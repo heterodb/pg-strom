@@ -698,6 +698,34 @@ typedef struct {
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
 	/*
+	 * (only arrow format)
+	 * @attoptions keeps extra information of Apache Arrow type. Unlike
+	 * PostgreSQL types, it can have variation of data accuracy in time
+	 * related data types, or precision in decimal data type.
+	 */
+	union {
+		struct {
+			cl_int	precision;
+			cl_int	scale;
+		} decimal;				/* for Decimal */
+		struct {
+			cl_short	unit;	/* one of ArrowDateUnit__* */
+		} date;
+		struct {
+			cl_short	unit;	/* one of ArrowTimeUnit__* */
+		} time;
+		struct {
+			cl_short	unit;	/* one of ArrowIntervalUnit__* */
+		} interval;
+	} attopts;
+	cl_uint			nullmap_offset;
+	cl_uint			nullmap_length;
+	cl_uint			values_offset;
+	cl_uint			values_length;
+	cl_uint			extra_offset;
+	cl_uint			extra_length;
+
+	/*
 	 * (only column format)
 	 * @va_offset is offset of the values array from the kds-head.
 	 * @va_length is length of the values array and extra area which is

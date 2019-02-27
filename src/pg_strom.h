@@ -1009,8 +1009,6 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern cl_uint estimate_num_chunks(Path *pathnode);
-extern kern_tupdesc *kern_tupdesc_create(TupleDesc tupdesc);
-extern bool kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b);
 extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
 								kern_data_store *kds,
 								HeapTuple tuple_buf,
@@ -1299,6 +1297,9 @@ typedef struct
 extern void readArrowFileDesc(File filp, ArrowFileInfo *af_info);
 extern void readArrowFile(char *pathname, ArrowFileInfo *af_info);
 extern char *dumpArrowNode(ArrowNode *node);
+extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
+								  kern_data_store *kds,
+								  size_t row_index);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

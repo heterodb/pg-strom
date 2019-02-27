@@ -36,25 +36,23 @@ typedef struct
 		} date;
 		struct {
 			cl_int		unit;
-		} timestamp;
-		struct {
-			cl_int		unit;
 		} interval;
-	} xattr;
+	} attopts;
 	int64		nitems;				/* usually, same with rb_nitems */
 	int64		null_count;
-	off_t		nullmap_ofs;
-	size_t		nullmap_len;
-	off_t		values_ofs;
-	size_t		values_len;
-	off_t		extra_ofs;
-	size_t		extra_len;
+	off_t		nullmap_offset;
+	size_t		nullmap_length;
+	off_t		values_offset;
+	size_t		values_length;
+	off_t		extra_offset;
+	size_t		extra_length;
 } RecordBatchFieldState;
 
 typedef struct
 {
 	const char *fname;
 	File		fdesc;
+	kern_tupdesc *ktdesc;
 	off_t		rb_offset;	/* offset from the head */
 	size_t		rb_length;	/* length of the entire RecordBatch */
 	int64		rb_nitems;	/* number of items */
@@ -74,8 +72,8 @@ typedef struct ArrowFdwState
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index;	/* in case of single process */
 
-	pgstrom_data_store *pds_curr;	/* current focused buffer */
-	cl_ulong	curr_index;		/* current index to row on KDS */
+	pgstrom_data_store *curr_pds;	/* current focused buffer */
+	cl_ulong	curr_index;			/* current index to row on KDS */
 	/* state of RecordBatches */
 	uint32		num_rbatches;
 	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
@@ -84,8 +82,10 @@ typedef struct ArrowFdwState
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 /* ---------- static functions ---------- */
+static bool				kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b);
 static ssize_t			arrowTypeValuesLength(ArrowType *type, int64 nitems);
 static kern_tupdesc	   *arrowSchemaToKernTupdesc(ArrowSchema *schema);
+static kern_tupdesc	   *pgsqlTupdescToKernTupdesc(TupleDesc tupdesc);
 static List				*arrowFdwExtractFilesList(List *options_list);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
@@ -248,21 +248,26 @@ ArrowGetForeignPlan(PlannerInfo *root,
 					Plan *outer_plan)
 {
 	List   *referenced = NIL;
-	int		i;
+	int		i, j;
 
 	Assert(IS_SIMPLE_REL(baserel));
-	for (i=baserel->min_attr; i <= baserel->max_attr; i++)
+	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
 	{
 		if (i < 0)
 			continue;	/* system columns */
-		else if (i == 0)
+		else if (baserel->attr_needed[j])
 		{
-			/* all the columns must be fetched */
-			referenced = NIL;
-			break;
+			if (i == 0)
+			{
+				/* all the columns must be fetched */
+				referenced = NIL;
+				break;
+			}
+			else
+			{
+				referenced = lappend_int(referenced, i);
+			}
 		}
-		else if (baserel->attr_needed[i])
-			referenced = lappend_int(referenced, i);
 	}
 
 	return make_foreignscan(tlist,
@@ -318,16 +323,16 @@ makeRecordBatchState(ArrowSchema *schema,
 					elog(ERROR, "arrow_fdw: RecordBatch contains less Buffer than expected");
 				if (c->null_count > 0)
 				{
-					c->nullmap_ofs = buffer_curr->offset;
-					c->nullmap_len = buffer_curr->length;
-					if (c->nullmap_len < BITMAPLEN(c->null_count))
+					c->nullmap_offset = buffer_curr->offset;
+					c->nullmap_length = buffer_curr->length;
+					if (c->nullmap_length < BITMAPLEN(c->null_count))
 						elog(ERROR, "arrow_fdw: nullmap length is smaller than expected");
 				}
 				buffer_curr++;
-				c->values_ofs = buffer_curr->offset;
-				c->values_len = buffer_curr->length;
-				if (c->values_len < arrowTypeValuesLength(&field->type,
-														  c->nitems))
+				c->values_offset = buffer_curr->offset;
+				c->values_length = buffer_curr->length;
+				if (c->values_length < arrowTypeValuesLength(&field->type,
+															 c->nitems))
 					elog(ERROR, "arrow_fdw: values length is smaller than expected");
 				buffer_curr++;
 				break;
@@ -339,20 +344,20 @@ makeRecordBatchState(ArrowSchema *schema,
 					elog(ERROR, "arrow_fdw: RecordBatch contains less Buffer than expected");
 				if (c->null_count > 0)
 				{
-					c->nullmap_ofs = buffer_curr->offset;
-					c->nullmap_len = buffer_curr->length;
-					if (c->nullmap_len < BITMAPLEN(c->null_count))
+					c->nullmap_offset = buffer_curr->offset;
+					c->nullmap_length = buffer_curr->length;
+					if (c->nullmap_length < BITMAPLEN(c->null_count))
 						elog(ERROR, "arrow_fdw: nullmap length is smaller than expected");
 				}
 				buffer_curr++;
-				c->values_ofs = buffer_curr->offset;
-				c->values_len = buffer_curr->length;
-				if (c->values_len < arrowTypeValuesLength(&field->type,
-														  c->nitems))
+				c->values_offset = buffer_curr->offset;
+				c->values_length = buffer_curr->length;
+				if (c->values_length < arrowTypeValuesLength(&field->type,
+															 c->nitems))
 					elog(ERROR, "arrow_fdw: values length is smaller than expected");
 				buffer_curr++;
-				c->extra_ofs = buffer_curr->offset;
-				c->extra_len = buffer_curr->length;
+				c->extra_offset = buffer_curr->offset;
+				c->extra_length = buffer_curr->length;
 				buffer_curr++;
 				break;
 
@@ -366,20 +371,20 @@ makeRecordBatchState(ArrowSchema *schema,
 		switch (field->type.node.tag)
         {
             case ArrowNodeTag__Decimal:
-				c->xattr.decimal.precision = field->type.Decimal.precision;
-				c->xattr.decimal.scale     = field->type.Decimal.scale;
+				c->attopts.decimal.precision = field->type.Decimal.precision;
+				c->attopts.decimal.scale     = field->type.Decimal.scale;
 				break;
             case ArrowNodeTag__Date:
-				c->xattr.date.unit = field->type.Date.unit;
+				c->attopts.date.unit = field->type.Date.unit;
 				break;
             case ArrowNodeTag__Time:
-				c->xattr.time.unit = field->type.Time.unit;
+				c->attopts.time.unit = field->type.Time.unit;
 				break;
             case ArrowNodeTag__Timestamp:
-				c->xattr.timestamp.unit = field->type.Timestamp.unit;
+				c->attopts.time.unit = field->type.Timestamp.unit;
 				break;
             case ArrowNodeTag__Interval:
-				c->xattr.interval.unit = field->type.Interval.unit;
+				c->attopts.interval.unit = field->type.Interval.unit;
 				break;
 			default:
 				/* no extra attributes */
@@ -403,15 +408,20 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
 	Bitmapset	   *referenced = NULL;
-	kern_tupdesc   *ktdesc;
-	kern_tupdesc   *kttemp;
+	kern_tupdesc   *ktdesc_relation;
+	kern_tupdesc   *ktdesc_schema;
 	ArrowFdwState  *af_state;
 	int				i, num_rbatches;
 
 	foreach (lc, fscan->fdw_private)
-		referenced = bms_add_member(referenced, lfirst_int(lc));
+	{
+		AttrNumber	anum = lfirst_int(lc);
 
-	ktdesc = kern_tupdesc_create(RelationGetDescr(relation));
+		Assert(anum > 0 && anum <= RelationGetNumberOfAttributes(relation));
+		referenced = bms_add_member(referenced, anum);
+	}
+
+	ktdesc_relation = pgsqlTupdescToKernTupdesc(RelationGetDescr(relation));
 	foreach (lc, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc));
@@ -428,11 +438,10 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		memset(&af_info, 0, sizeof(ArrowFileInfo));
 		//XXX: check cache instead of the file read
 		readArrowFileDesc(fdesc, &af_info);
-		kttemp = arrowSchemaToKernTupdesc(&af_info.footer.schema);
-		if (!kern_tupdesc_equal(ktdesc, kttemp))
+		ktdesc_schema = arrowSchemaToKernTupdesc(&af_info.footer.schema);
+		if (!kern_tupdesc_equal(ktdesc_relation, ktdesc_schema))
 			elog(ERROR, "arrow_fdw: incompatible file '%s' on behalf of the foreign table '%s'.",
 				 fname, RelationGetRelationName(relation));
-		pfree(kttemp);
 
 		Assert(af_info.footer._num_dictionaries ==
 			   list_length(af_info.dictionaries));
@@ -450,6 +459,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 											block, rbatch);
 			rb_state->fname = fname;
 			rb_state->fdesc = fdesc;
+			rb_state->ktdesc = ktdesc_schema;
 			rb_state_list = lappend(rb_state_list, rb_state);
 			rb_count++;
 		}
@@ -468,13 +478,351 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	node->fdw_state = af_state;
 }
 
+
+typedef struct
+{
+	cl_uint			block_sz;
+	cl_uint			nchunks;
+	struct {
+		cl_ulong	m_offset;	/* copy destination (aligned to block_sz) */
+		cl_ulong	f_pos;		/* copy source (aligned to block_sz) */
+		cl_int		nblocks;	/* number of blocks to copy */
+		cl_int		status;		/* status of P2P DMA in this chunk */
+	} io[FLEXIBLE_ARRAY_MEMBER];
+} strom_io_vector;
+
+/*
+ * arrowFdwSetupIOvector
+ */
+static strom_io_vector *
+arrowFdwSetupIOvector(kern_data_store *kds,
+					  RecordBatchState *rb_state,
+					  Bitmapset *referenced)
+{
+	int			page_sz = sysconf(_SC_PAGESIZE);
+	off_t		rb_offset = rb_state->rb_offset;
+	off_t		f_offset = ~0UL;
+	cl_ulong	m_offset;
+	int			io_index = -1;
+	int			j, ncols = kds->ncols;
+	strom_io_vector *iovec;
+
+
+	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
+	iovec->block_sz = page_sz;
+
+	m_offset = TYPEALIGN(page_sz, offsetof(kern_data_store,
+										   colmeta[ncols]));
+
+	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
+	iovec->block_sz = page_sz;
+
+	m_offset = TYPEALIGN(page_sz, offsetof(kern_data_store,
+										   colmeta[ncols]));
+
+	elog(INFO, "rb_offset = %lu", rb_offset);
+
+	for (j=0; j < ncols; j++)
+	{
+		RecordBatchFieldState *fstate = &rb_state->columns[j];
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		off_t			f_base, f_pos;
+
+		if (!bms_is_member(j+1, referenced))
+			continue;
+
+		if (fstate->nullmap_length > 0)
+		{
+			Assert(fstate->null_count > 0);
+			f_pos = rb_offset + fstate->nullmap_offset;
+			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			if (f_pos == f_offset)
+			{
+				/* good, buffer is continuous */
+				cmeta->nullmap_offset = __kds_packed(m_offset);
+				cmeta->nullmap_length = __kds_packed(fstate->nullmap_length);
+
+				m_offset += fstate->nullmap_length;
+				f_offset += fstate->nullmap_length;
+			}
+			else
+			{
+				off_t	shift = f_pos - f_base;
+
+				if (io_index < 0)
+					io_index = 0;	/* here is no previous chunk */
+				else
+				{
+					size_t	len = (TYPEALIGN(page_sz, f_offset) -
+								   iovec->io[io_index].f_pos);
+					Assert((len & (page_sz-1)) == 0);
+					iovec->io[io_index++].nblocks = len / page_sz;
+
+					m_offset = TYPEALIGN(page_sz, m_offset);
+				}
+				iovec->io[io_index].m_offset = m_offset;
+				iovec->io[io_index].f_pos    = f_base;
+
+				cmeta->nullmap_offset = __kds_packed(m_offset + shift);
+				cmeta->nullmap_length = __kds_packed(fstate->nullmap_length);
+
+				m_offset += fstate->nullmap_length;
+				f_offset =  f_pos + fstate->nullmap_length;
+			}
+		}
+
+		if (fstate->values_length > 0)
+		{
+			f_pos = rb_offset + fstate->values_offset;
+			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			if (f_pos == f_offset)
+			{
+				/* good, buffer is continuous */
+				cmeta->values_offset = __kds_packed(m_offset);
+				cmeta->values_length = __kds_packed(fstate->values_length);
+
+				m_offset += fstate->values_length;
+				f_offset += fstate->values_length;
+			}
+			else
+			{
+				off_t	shift = f_pos - f_base;
+
+				if (io_index < 0)
+					io_index = 0;	/* here is no previous chunk */
+				else
+				{
+					size_t	len = (TYPEALIGN(page_sz, f_offset) -
+								   iovec->io[io_index].f_pos);
+					Assert((len & (page_sz-1)) == 0);
+					iovec->io[io_index++].nblocks = len / page_sz;
+
+					m_offset = TYPEALIGN(page_sz, m_offset);
+				}
+				iovec->io[io_index].m_offset = m_offset;
+				iovec->io[io_index].f_pos    = f_base;
+
+				cmeta->values_offset = __kds_packed(m_offset + shift);
+				cmeta->values_length = __kds_packed(fstate->values_length);
+
+				m_offset += fstate->values_length;
+				f_offset =  f_pos + fstate->values_length;
+			}
+		}
+
+		if (fstate->extra_length > 0)
+		{
+			f_pos = rb_offset + fstate->extra_offset;
+			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			if (f_pos == f_offset)
+			{
+				/* good, buffer is continuous */
+				cmeta->extra_offset = __kds_packed(m_offset);
+				cmeta->extra_length = __kds_packed(fstate->extra_length);
+
+				m_offset += fstate->extra_length;
+				f_offset += fstate->extra_length;
+			}
+			else
+			{
+				off_t	shift = f_pos - f_base;
+
+				if (io_index < 0)
+					io_index = 0;	/* here is no previous chunk */
+				else
+				{
+					off_t	len = (TYPEALIGN(page_sz, f_offset) -
+								   iovec->io[io_index].f_pos);
+					Assert((len & (page_sz-1)) == 0);
+					iovec->io[io_index++].nblocks = len / page_sz;
+
+					m_offset = TYPEALIGN(page_sz, m_offset);
+				}
+				iovec->io[io_index].m_offset = m_offset;
+				iovec->io[io_index].f_pos    = f_base;
+
+				cmeta->extra_offset = __kds_packed(m_offset + shift);
+				cmeta->extra_length = __kds_packed(fstate->values_length);
+
+				m_offset += fstate->extra_length;
+				f_offset =  f_pos + fstate->extra_length;
+			}
+		}
+	}
+
+	/* close the last i/o chunk */
+	if (io_index < 0)
+		iovec->nchunks = 0;
+	else
+	{
+		size_t	len = (TYPEALIGN(page_sz, f_offset) -
+					   iovec->io[io_index].f_pos);
+		Assert((len & (page_sz-1)) == 0);
+		iovec->io[io_index++].nblocks = len / page_sz;
+		iovec->nchunks = io_index;
+	}
+	kds->length = m_offset;
+
+	return iovec;
+}
+
+/*
+ * arrowFdwLoadRecordBatch - Loads the required RecordBatch to PDS
+ */
+static pgstrom_data_store *
+arrowFdwLoadRecordBatch(Relation relation,
+						RecordBatchState *rb_state,
+						Bitmapset *referenced)
+{
+	TupleDesc			tupdesc = RelationGetDescr(relation);
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	strom_io_vector	   *iovec;
+	kern_tupdesc	   *ktdesc = rb_state->ktdesc;
+	int					j, ncols = ktdesc->ncols;
+	int					fdesc;
+
+	kds = alloca(offsetof(kern_data_store, colmeta[ncols]));
+	memset(kds, 0, offsetof(kern_data_store, colmeta));
+	memcpy(kds->colmeta, ktdesc->colmeta, sizeof(kern_colmeta) * ncols);
+	kds->nitems = rb_state->rb_nitems;
+	kds->nrooms = rb_state->rb_nitems;
+	kds->ncols = ncols;
+	kds->format = KDS_FORMAT_ARROW;
+	kds->tdhasoid = tupdesc->tdhasoid;
+	kds->tdtypeid = tupdesc->tdtypeid;
+	kds->tdtypmod = tupdesc->tdtypmod;
+	kds->table_oid = RelationGetRelid(relation);
+	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
+#if 1
+	elog(INFO, "nchunks = %d", iovec->nchunks);
+	for (j=0; j < iovec->nchunks; j++)
+	{
+		elog(INFO, "io[%d] [ m_offset=%lu, f_pos=%lu, nblocks=%u, status=%d}",
+			 j,
+			 iovec->io[j].m_offset,
+			 iovec->io[j].f_pos,
+			 iovec->io[j].nblocks,
+			 iovec->io[j].status);
+	}
+
+	elog(INFO, "kds {length=%zu nitems=%u typeid=%u typmod=%u table_oid=%u}",
+		 kds->length, kds->nitems,
+		 kds->tdtypeid, kds->tdtypmod, kds->table_oid);
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[j];
+
+		elog(INFO, "col[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu", j,
+			 __kds_unpack(cmeta->nullmap_offset),
+			 __kds_unpack(cmeta->nullmap_length),
+			 __kds_unpack(cmeta->values_offset),
+			 __kds_unpack(cmeta->values_length),
+			 __kds_unpack(cmeta->extra_offset),
+			 __kds_unpack(cmeta->extra_length));
+
+	}
+#endif
+	/*
+	 * PDS creation and load from file
+	 */
+	pds = MemoryContextAllocHuge(CurrentMemoryContext,
+								 offsetof(pgstrom_data_store,
+										  kds) + kds->length);
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	memcpy(&pds->kds, kds, offsetof(kern_data_store, colmeta[ncols]));
+
+	fdesc = FileGetRawDesc(rb_state->fdesc);
+	for (j=0; j < iovec->nchunks; j++)
+	{
+		size_t		page_sz = iovec->block_sz;
+		char	   *dest = (char *)&pds->kds + iovec->io[j].m_offset;
+		size_t		len = page_sz * (size_t)iovec->io[j].nblocks;
+		off_t		f_pos = iovec->io[j].f_pos;
+		ssize_t		sz;
+
+		while (len > 0)
+		{
+			CHECK_FOR_INTERRUPTS();
+
+			sz = pread(fdesc, dest, len, f_pos);
+			if (sz > 0)
+			{
+				Assert(sz <= len);
+				dest += sz;
+				len -= sz;
+			}
+			else if (sz == 0)
+			{
+				elog(ERROR, "file '%s' is shorter than schema definition",
+					rb_state->fname);
+			}
+			else if (errno != EINTR)
+			{
+				elog(ERROR, "failed on pread('%s'): %m", rb_state->fname);
+			}
+		}
+	}
+	return pds;
+}
+
+/*
+ * ArrowGetNextForeignScan
+ */
+static TupleTableSlot *
+ArrowGetNextForeignScan(ForeignScanState *node)
+{
+	ArrowFdwState  *af_state = node->fdw_state;
+	Relation		relation = node->ss.ss_currentRelation;
+	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	pgstrom_data_store *pds;
+
+	while ((pds = af_state->curr_pds) == NULL ||
+		   af_state->curr_index >= pds->kds.nitems)
+	{
+		RecordBatchState *rb_state;
+		uint32		rb_index;
+
+		/* unload the previous RecordBatch, if any */
+		if (pds)
+			PDS_release(pds);
+		af_state->curr_pds = NULL;
+		af_state->curr_index = 0;
+
+		/* load the next RecordBatch */
+		rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
+		if (rb_index >= af_state->num_rbatches)
+			return NULL;	/* no more items to read */
+		rb_state = af_state->rbatches[rb_index];
+		af_state->curr_pds = arrowFdwLoadRecordBatch(relation, rb_state,
+													 af_state->referenced);
+	}
+	Assert(pds && af_state->curr_index < pds->kds.nitems);
+	if (KDS_fetch_tuple_arrow(slot, &pds->kds, af_state->curr_index++))
+		return slot;
+	return NULL;
+}
+
+/*
+ * ArrowRecheckForeignScan
+ */
+static bool
+ArrowRecheckForeignScan(ScanState *node, TupleTableSlot *slot)
+{
+	/* nothing to recheck by itself */
+	return true;
+}
+
 /*
  * ArrowIterateForeignScan
  */
 static TupleTableSlot *
 ArrowIterateForeignScan(ForeignScanState *node)
 {
-	return NULL;
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) ArrowGetNextForeignScan,
+					(ExecScanRecheckMtd) ArrowRecheckForeignScan);
 }
 
 /*
@@ -487,9 +835,9 @@ ArrowReScanForeignScan(ForeignScanState *node)
 	
 	/* rewind the current scan state */
 	pg_atomic_write_u32(af_state->rbatch_index, 0);
-	if (af_state->pds_curr)
-		PDS_release(af_state->pds_curr);
-	af_state->pds_curr = NULL;
+	if (af_state->curr_pds)
+		PDS_release(af_state->curr_pds);
+	af_state->curr_pds = NULL;
 	af_state->curr_index = 0;
 }
 
@@ -736,6 +1084,37 @@ arrowTypeValuesLength(ArrowType *type, int64 nitems)
 	return length;
 }
 
+/*
+ * kern_tupdesc_equal
+ */
+static bool
+kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b)
+{
+	cl_int	j;
+
+	if (a->ncols != b->ncols)
+		return false;
+	for (j=0; j < a->ncols; j++)
+	{
+		kern_colmeta   *cmeta_a = &a->colmeta[j];
+		kern_colmeta   *cmeta_b = &b->colmeta[j];
+
+		if ((cmeta_a->attbyval && !cmeta_b->attbyval) ||
+			(!cmeta_a->attbyval && cmeta_b->attbyval) ||
+			(cmeta_a->attalign != cmeta_b->attalign) ||
+			(cmeta_a->attlen != cmeta_b->attlen) ||
+			(cmeta_a->attnum != cmeta_b->attnum) ||
+			(cmeta_a->attcacheoff != cmeta_b->attcacheoff) ||
+			(cmeta_a->atttypid != cmeta_b->atttypid) ||
+			(cmeta_a->atttypmod != cmeta_b->atttypmod))
+		{
+			Assert(false);
+			return false;
+		}
+	}
+	return true;
+}
+
 static kern_tupdesc *
 arrowSchemaToKernTupdesc(ArrowSchema *schema)
 {
@@ -748,6 +1127,7 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 	for (i=0; i < ncols; i++)
 	{
 		ArrowField	   *field = &schema->fields[i];
+		ArrowType	   *ftype = &field->type;
 		kern_colmeta   *cmeta = &result->colmeta[i];
 		Oid				type_oid = InvalidOid;
 		int32			type_mod = -1;
@@ -756,10 +1136,10 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 		bool			typbyval;
 		char			typalign;
 
-		switch (field->type.node.tag)
+		switch (ftype->node.tag)
 		{
 			case ArrowNodeTag__Int:
-				switch (field->type.Int.bitWidth)
+				switch (ftype->Int.bitWidth)
 				{
 					case 16:
 						type_oid = INT2OID;
@@ -772,13 +1152,13 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 						break;
 					default:
 						elog(ERROR, "cannot map %s%d of Apache Arrow on PostgreSQL type",
-							 field->type.Int.is_signed ? "Int" : "Uint",
-							 field->type.Int.bitWidth);
+							 ftype->Int.is_signed ? "Int" : "Uint",
+							 ftype->Int.bitWidth);
 						break;
 				}
 				break;
 			case ArrowNodeTag__FloatingPoint:
-				switch (field->type.FloatingPoint.precision)
+				switch (ftype->FloatingPoint.precision)
 				{
 					case ArrowPrecision__Half:
 						nsp_id = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
@@ -810,20 +1190,26 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 				break;
 			case ArrowNodeTag__Decimal:
 				type_oid = NUMERICOID;
+				cmeta->attopts.decimal.precision = ftype->Decimal.precision;
+				cmeta->attopts.decimal.scale = ftype->Decimal.scale;
 				break;
 			case ArrowNodeTag__Date:
 				type_oid = DATEOID;
+				cmeta->attopts.date.unit = ftype->Date.unit;
 				break;
 			case ArrowNodeTag__Time:
 				type_oid = TIMEOID;
+				cmeta->attopts.time.unit = ftype->Time.unit;
 				break;
 			case ArrowNodeTag__Timestamp:
-				if (field->type.Timestamp.timezone)
+				if (ftype->Timestamp.timezone)
 					elog(ERROR, "Timestamp with timezone of Apache Arrow is not supported, right now");
 				type_oid = TIMESTAMPOID;
+				cmeta->attopts.time.unit = ftype->Timestamp.unit;
 				break;
 			case ArrowNodeTag__Interval:
 				type_oid = INTERVALOID;
+				cmeta->attopts.interval.unit = ftype->Interval.unit;
 				break;
 			default:
 				elog(ERROR, "Not a supported Apache Arrow type");
@@ -850,9 +1236,62 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 	return result;
 }
 
+/*
+ * pgsqlTupdescToKernTupdesc
+ */
+static kern_tupdesc *
+pgsqlTupdescToKernTupdesc(TupleDesc tupdesc)
+{
+	kern_tupdesc   *ktdesc;
+	cl_int			j, ncols = tupdesc->natts;
+
+	ktdesc = palloc0(offsetof(kern_tupdesc, colmeta[ncols]));
+	for (j=0; j < ncols; j++)
+	{
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+		kern_colmeta	   *cmeta = &ktdesc->colmeta[j];
+
+		cmeta->attbyval  = attr->attbyval;
+		cmeta->attalign  = typealign_get_width(attr->attalign);
+		cmeta->attlen    = attr->attlen;
+		cmeta->attnum    = attr->attnum;
+		cmeta->attcacheoff = attr->attcacheoff;
+		cmeta->atttypid  = attr->atttypid;
+		cmeta->atttypmod = attr->atttypmod;
+	}
+	ktdesc->ncols = ncols;
+
+	return ktdesc;
+}
+
+/*
+ * KDS_fetch_tuple_arrow
+ */
+bool
+KDS_fetch_tuple_arrow(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  size_t row_index)
+{
+	int		j;
+
+	ExecClearTuple(slot);
+	if (row_index >= kds->nitems)
+		return false;
+
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
 
 
 
+
+	}
+	return false;
+}
+
+/*
+ * arrowFdwExtractFilesList
+ */
 static List *
 arrowFdwExtractFilesList(List *options_list)
 {

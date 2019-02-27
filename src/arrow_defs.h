@@ -3,8 +3,8 @@
  *
  * definitions for apache arrow format
  */
-#ifndef _ARROW_ENUMS_H_
-#define _ARROW_ENUMS_H_
+#ifndef _ARROW_DEFS_H_
+#define _ARROW_DEFS_H_
 
 /*
  * MetadataVersion : short
@@ -110,6 +110,7 @@ typedef enum
 	ArrowUnionMode__Dense		= 1,
 } ArrowUnionMode;
 
+#ifndef __CUDACC__
 /*
  * ArrowNodeTag
  */
@@ -437,5 +438,5 @@ typedef struct		ArrowFooter
 	ArrowBlock	   *recordBatches;
 	int				_num_recordBatches;
 } ArrowFooter;
-
+#endif		/* __CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */
