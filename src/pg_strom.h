@@ -981,6 +981,9 @@ extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
+extern Oid pgstrom_get_float2_typeoid(void);
+#define FLOAT2OID	pgstrom_get_float2_typeoid()
+
 extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
 													   Oid type_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
@@ -988,7 +991,6 @@ extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
 extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
 extern bool pgstrom_devcast_supported(Oid src_type_oid, Oid dst_type_oid);
-
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);

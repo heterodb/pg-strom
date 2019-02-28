@@ -507,19 +507,11 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 	int			j, ncols = kds->ncols;
 	strom_io_vector *iovec;
 
-
 	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
 	iovec->block_sz = page_sz;
 
 	m_offset = TYPEALIGN(page_sz, offsetof(kern_data_store,
 										   colmeta[ncols]));
-
-	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
-	iovec->block_sz = page_sz;
-
-	m_offset = TYPEALIGN(page_sz, offsetof(kern_data_store,
-										   colmeta[ncols]));
-
 	elog(INFO, "rb_offset = %lu", rb_offset);
 
 	for (j=0; j < ncols; j++)
@@ -566,11 +558,12 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 				cmeta->nullmap_offset = __kds_packed(m_offset + shift);
 				cmeta->nullmap_length = __kds_packed(fstate->nullmap_length);
 
-				m_offset += fstate->nullmap_length;
+				m_offset += shift + fstate->nullmap_length;
 				f_offset =  f_pos + fstate->nullmap_length;
 			}
 		}
 
+		elog(INFO, "j=%d m_offset=%lu f_offset=%lu", j, m_offset, f_offset);
 		if (fstate->values_length > 0)
 		{
 			f_pos = rb_offset + fstate->values_offset;
@@ -605,7 +598,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 				cmeta->values_offset = __kds_packed(m_offset + shift);
 				cmeta->values_length = __kds_packed(fstate->values_length);
 
-				m_offset += fstate->values_length;
+				m_offset += shift + fstate->values_length;
 				f_offset =  f_pos + fstate->values_length;
 			}
 		}
@@ -644,7 +637,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 				cmeta->extra_offset = __kds_packed(m_offset + shift);
 				cmeta->extra_length = __kds_packed(fstate->values_length);
 
-				m_offset += fstate->extra_length;
+				m_offset += shift + fstate->extra_length;
 				f_offset =  f_pos + fstate->extra_length;
 			}
 		}
@@ -661,7 +654,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		iovec->io[io_index++].nblocks = len / page_sz;
 		iovec->nchunks = io_index;
 	}
-	kds->length = m_offset;
+	kds->length = TYPEALIGN(page_sz, m_offset);
 
 	return iovec;
 }
@@ -671,6 +664,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
  */
 static pgstrom_data_store *
 arrowFdwLoadRecordBatch(Relation relation,
+						MemoryContext memcxt,
 						RecordBatchState *rb_state,
 						Bitmapset *referenced)
 {
@@ -694,7 +688,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 	kds->tdtypmod = tupdesc->tdtypmod;
 	kds->table_oid = RelationGetRelid(relation);
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
-#if 1
+#if 0
 	elog(INFO, "nchunks = %d", iovec->nchunks);
 	for (j=0; j < iovec->nchunks; j++)
 	{
@@ -726,9 +720,8 @@ arrowFdwLoadRecordBatch(Relation relation,
 	/*
 	 * PDS creation and load from file
 	 */
-	pds = MemoryContextAllocHuge(CurrentMemoryContext,
-								 offsetof(pgstrom_data_store,
-										  kds) + kds->length);
+	pds = MemoryContextAllocHuge(memcxt, offsetof(pgstrom_data_store,
+												  kds) + kds->length);
 	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	memcpy(&pds->kds, kds, offsetof(kern_data_store, colmeta[ncols]));
@@ -742,6 +735,8 @@ arrowFdwLoadRecordBatch(Relation relation,
 		off_t		f_pos = iovec->io[j].f_pos;
 		ssize_t		sz;
 
+		elog(INFO, "pread (dest=%zu len=%zu f_pos=%lu)",
+			 iovec->io[j].m_offset, len, f_pos);
 		while (len > 0)
 		{
 			CHECK_FOR_INTERRUPTS();
@@ -768,10 +763,10 @@ arrowFdwLoadRecordBatch(Relation relation,
 }
 
 /*
- * ArrowGetNextForeignScan
+ * ArrowIterateForeignScan
  */
 static TupleTableSlot *
-ArrowGetNextForeignScan(ForeignScanState *node)
+ArrowIterateForeignScan(ForeignScanState *node)
 {
 	ArrowFdwState  *af_state = node->fdw_state;
 	Relation		relation = node->ss.ss_currentRelation;
@@ -781,6 +776,7 @@ ArrowGetNextForeignScan(ForeignScanState *node)
 	while ((pds = af_state->curr_pds) == NULL ||
 		   af_state->curr_index >= pds->kds.nitems)
 	{
+		EState	   *estate = node->ss.ps.state;
 		RecordBatchState *rb_state;
 		uint32		rb_index;
 
@@ -795,34 +791,16 @@ ArrowGetNextForeignScan(ForeignScanState *node)
 		if (rb_index >= af_state->num_rbatches)
 			return NULL;	/* no more items to read */
 		rb_state = af_state->rbatches[rb_index];
-		af_state->curr_pds = arrowFdwLoadRecordBatch(relation, rb_state,
+		af_state->curr_pds = arrowFdwLoadRecordBatch(relation,
+													 estate->es_query_cxt,
+													 rb_state,
 													 af_state->referenced);
+		elog(INFO, "curr_pds = %p", af_state->curr_pds);
 	}
 	Assert(pds && af_state->curr_index < pds->kds.nitems);
 	if (KDS_fetch_tuple_arrow(slot, &pds->kds, af_state->curr_index++))
 		return slot;
 	return NULL;
-}
-
-/*
- * ArrowRecheckForeignScan
- */
-static bool
-ArrowRecheckForeignScan(ScanState *node, TupleTableSlot *slot)
-{
-	/* nothing to recheck by itself */
-	return true;
-}
-
-/*
- * ArrowIterateForeignScan
- */
-static TupleTableSlot *
-ArrowIterateForeignScan(ForeignScanState *node)
-{
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) ArrowGetNextForeignScan,
-					(ExecScanRecheckMtd) ArrowRecheckForeignScan);
 }
 
 /*
@@ -832,7 +810,8 @@ static void
 ArrowReScanForeignScan(ForeignScanState *node)
 {
 	ArrowFdwState  *af_state = node->fdw_state;
-	
+
+	elog(INFO, "ArrowReScanForeignScan");
 	/* rewind the current scan state */
 	pg_atomic_write_u32(af_state->rbatch_index, 0);
 	if (af_state->curr_pds)
@@ -1072,7 +1051,17 @@ arrowTypeValuesLength(ArrowType *type, int64 nitems)
 			length = sizeof(cl_long) * nitems;
 			break;
 		case ArrowNodeTag__Interval:
-			length = sizeof(cl_long) * nitems;
+			switch (type->Interval.unit)
+			{
+				case ArrowIntervalUnit__Year_Month:
+					length = sizeof(cl_uint) * nitems;
+					break;
+				case ArrowIntervalUnit__Day_Time:
+					length = sizeof(cl_long) * nitems;
+					break;
+				default:
+					elog(ERROR, "Not a supported Interval unit");
+			}
 			break;
 		case ArrowNodeTag__List:	//to be supported later
 		case ArrowNodeTag__Struct:	//to be supported later
@@ -1131,7 +1120,6 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 		kern_colmeta   *cmeta = &result->colmeta[i];
 		Oid				type_oid = InvalidOid;
 		int32			type_mod = -1;
-		Oid				nsp_id;
 		int16			typlen;
 		bool			typbyval;
 		char			typalign;
@@ -1161,12 +1149,7 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 				switch (ftype->FloatingPoint.precision)
 				{
 					case ArrowPrecision__Half:
-						nsp_id = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
-						type_oid = GetSysCacheOid2(TYPENAMENSP,
-												   PointerGetDatum("float2"),
-												   ObjectIdGetDatum(nsp_id));
-						if (!OidIsValid(type_oid))
-							elog(ERROR, "float2 is not defined at PostgreSQL");
+						type_oid = FLOAT2OID;
 						break;
 					case ArrowPrecision__Single:
 						type_oid = FLOAT4OID;
@@ -1265,28 +1248,351 @@ pgsqlTupdescToKernTupdesc(TupleDesc tupdesc)
 }
 
 /*
+ * pg_XXX_arrow_ref
+ */
+static Datum
+pg_int2_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_short   *values = (cl_short *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	return values[index];
+}
+
+static Datum
+pg_int4_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_int	   *values = (cl_int *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	return values[index];
+}
+
+static Datum
+pg_int8_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_long	   *values = (cl_long *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	return values[index];
+}
+
+static Datum
+pg_float2_arrow_ref(kern_data_store *kds,
+					kern_colmeta *cmeta, size_t index)
+{
+	return pg_int2_arrow_ref(kds, cmeta, index);
+}
+
+static Datum
+pg_float4_arrow_ref(kern_data_store *kds,
+					kern_colmeta *cmeta, size_t index)
+{
+	return pg_int4_arrow_ref(kds, cmeta, index);
+}
+
+static Datum
+pg_float8_arrow_ref(kern_data_store *kds,
+					kern_colmeta *cmeta, size_t index)
+{
+	return pg_int8_arrow_ref(kds, cmeta, index);
+}
+
+static Datum
+pg_text_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_uint	   *offset = (cl_uint *)((char *)kds +
+									 __kds_unpack(cmeta->values_offset));
+	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+	cl_uint		len = offset[index+1] - offset[index];
+	text	   *res;
+
+	res = palloc(VARHDRSZ + len);
+	SET_VARSIZE(res, VARHDRSZ + len);
+	memcpy(VARDATA(res), extra + offset[index], len);
+
+	return PointerGetDatum(res);
+}
+
+static Datum
+pg_bytea_arrow_ref(kern_data_store *kds,
+				   kern_colmeta *cmeta, size_t index)
+{
+	return pg_text_arrow_ref(kds, cmeta, index);
+}
+
+static Datum
+pg_bool_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
+
+	return BoolGetDatum(att_isnull(index, bitmap));
+}
+#include "cuda_numeric.h"
+
+static Datum
+pg_numeric_arrow_ref(kern_data_store *kds,
+					 kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	int128		val = ((int128 *)base)[index];
+	uint128		uval;
+	cl_int		precision = cmeta->attopts.decimal.precision;
+	cl_ushort	n_header;
+	struct NumericData *numData;
+	struct NumericLong *numBody;
+	NumericDigit	n_data[PG_MAX_DATA];
+	cl_int		ndigits;
+	cl_uint		len;
+
+	numData = palloc0(sizeof(struct NumericData));
+	numBody = &numData->choice.n_long;
+	if (val < 0)
+	{
+		n_header = NUMERIC_NEG;
+		uval = -val;
+	}
+	else
+	{
+		n_header = NUMERIC_POS;
+		uval = val;
+	}
+
+	switch (precision % PG_DEC_DIGITS)
+	{
+		case 3:
+		case -1:
+			uval *= 10;
+			precision += 1;
+			break;
+		case 2:
+		case -2:
+			uval *= 100;
+			precision += 2;
+			break;
+		case 1:
+		case -3:
+			uval *= 1000;
+			precision += 3;
+			break;
+		default:
+			/* ok */
+			break;
+	}
+	assert(precision % PG_DEC_DIGITS == 0);
+	while ((uval % PG_NBASE) == 0)
+	{
+		precision -= PG_DEC_DIGITS;
+		uval /= PG_NBASE;
+	}
+	for (ndigits=0; uval != 0; ndigits++)
+	{
+		Assert(ndigits < PG_MAX_DATA);
+		n_data[PG_MAX_DATA - 1 - ndigits] = uval % PG_NBASE;
+		uval /= PG_NBASE;
+	}
+	memcpy(numBody->n_data,
+		   n_data + PG_MAX_DATA - ndigits,
+		   sizeof(NumericDigit) * ndigits);
+	/* other metadata */
+	n_header |= (cmeta->attopts.decimal.scale & NUMERIC_DSCALE_MASK);
+	numBody->n_sign_dscale = n_header;
+	numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
+
+	len = offsetof(struct NumericData, choice.n_long.n_data[ndigits]);
+	SET_VARSIZE(numData, len);
+
+	return PointerGetDatum(numData);
+}
+
+static Datum
+pg_date_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	DateADT		dt;
+
+	switch (cmeta->attopts.date.unit)
+	{
+		case ArrowDateUnit__Day:
+			dt = ((cl_uint *)base)[index]
+				+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			break;
+		case ArrowDateUnit__MilliSecond:
+			dt = ((cl_ulong *)base)[index] / 1000
+				+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			break;
+		default:
+			elog(ERROR, "Bug? unexpected unit of Date type");
+	}
+	return DateADTGetDatum(dt);
+}
+
+static Datum
+pg_time_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	TimeADT		tm;
+
+	switch (cmeta->attopts.time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			tm = ((cl_long)((cl_int *)base)[index]) * 1000000L;
+			break;
+		case ArrowTimeUnit__MilliSecond:
+			tm = ((cl_long)((cl_int *)base)[index]) * 1000L;
+			break;
+		case ArrowTimeUnit__MicroSecond:
+			tm = ((cl_long *)base)[index];
+			break;
+		case ArrowTimeUnit__NanoSecond:
+			tm = ((cl_ulong *)base)[index] / 1000L;
+			break;
+		default:
+			elog(ERROR, "Bug? unexpected unit of Time type");
+	}
+	return TimeADTGetDatum(tm);
+}
+
+static Datum
+pg_timestamp_arrow_ref(kern_data_store *kds,
+					   kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	Timestamp	ts;
+
+	switch (cmeta->attopts.time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			ts = ((cl_ulong *)base)[index] * 1000000UL;
+			break;
+		case ArrowTimeUnit__MilliSecond:
+			ts = ((cl_ulong *)base)[index] * 1000UL;
+			break;
+		case ArrowTimeUnit__MicroSecond:
+			ts = ((cl_ulong *)base)[index];
+			break;
+		case ArrowTimeUnit__NanoSecond:
+			ts = ((cl_ulong *)base)[index] / 1000UL;
+			break;
+		default:
+			elog(ERROR, "Bug? unexpected unit of Timestamp type");
+	}
+	return TimestampGetDatum(ts);
+}
+
+static Datum
+pg_interval_arrow_ref(kern_data_store *kds,
+					  kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	Interval   *iv = palloc0(sizeof(Interval));
+
+	switch (cmeta->attopts.interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			/* 32bit: number of months */
+			iv->month = ((cl_uint *)base)[index];
+			break;
+		case ArrowIntervalUnit__Day_Time:
+			/* 32bit+32bit: number of days and milliseconds */
+			iv->day = (int32)(((cl_uint *)base)[2 * index]);
+			iv->time = (TimeOffset)(((cl_uint *)base)[2 * index + 1]) * 1000;
+			break;
+		default:
+			elog(ERROR, "Bug? unexpected unit of Interval type");
+	}
+	return PointerGetDatum(iv);
+}
+
+/*
  * KDS_fetch_tuple_arrow
  */
 bool
 KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 					  kern_data_store *kds,
-					  size_t row_index)
+					  size_t index)
 {
+	Datum  *values = slot->tts_values;
+	bool   *isnull = slot->tts_isnull;
 	int		j;
 
-	ExecClearTuple(slot);
-	if (row_index >= kds->nitems)
+	if (index >= kds->nitems)
 		return false;
-
+	ExecStoreAllNullTuple(slot);
+//	elog(INFO, "ncols = %d slot = %p tts_nvalid = %d", kds->ncols, slot, slot->tts_nvalid);
 	for (j=0; j < kds->ncols; j++)
 	{
 		kern_colmeta   *cmeta = &kds->colmeta[j];
+		Datum			datum;
 
+		if (cmeta->values_offset == 0)
+			continue;	/* not loaded, always null */
 
+		if (cmeta->nullmap_offset != 0)
+		{
+			size_t		nullmap_offset = __kds_unpack(cmeta->nullmap_offset);
+			uint8	   *nullmap = (uint8 *)kds + nullmap_offset;
 
+			if (att_isnull(index, nullmap))
+				continue;
+		}
 
+		switch (cmeta->atttypid)
+		{
+			case INT2OID:
+				datum = pg_int2_arrow_ref(kds, cmeta, index);
+				break;
+			case INT4OID:
+				datum = pg_int4_arrow_ref(kds, cmeta, index);
+				break;
+			case INT8OID:
+				datum = pg_int8_arrow_ref(kds, cmeta, index);
+				break;
+			case FLOAT4OID:
+				datum = pg_float4_arrow_ref(kds, cmeta, index);
+				break;
+			case FLOAT8OID:
+				datum = pg_float8_arrow_ref(kds, cmeta, index);
+				break;
+			case TEXTOID:
+				datum = pg_text_arrow_ref(kds, cmeta, index);
+				break;
+			case BYTEAOID:
+				datum = pg_bytea_arrow_ref(kds, cmeta, index);
+				break;
+			case BOOLOID:
+				datum = pg_bool_arrow_ref(kds, cmeta, index);
+				break;
+			case NUMERICOID:
+				datum = pg_numeric_arrow_ref(kds, cmeta, index);
+				break;
+			case DATEOID:
+				datum = pg_date_arrow_ref(kds, cmeta, index);
+				break;
+			case TIMEOID:
+				datum = pg_time_arrow_ref(kds, cmeta, index);
+				break;
+			case TIMESTAMPOID:
+				datum = pg_timestamp_arrow_ref(kds, cmeta, index);
+				break;
+			case INTERVALOID:
+				datum = pg_interval_arrow_ref(kds, cmeta, index);
+				break;
+			default:
+				if (cmeta->atttypid == FLOAT2OID)
+					datum = pg_float2_arrow_ref(kds, cmeta, index);
+				else
+					elog(ERROR, "Bug? unexpected datum type");
+				break;
+		}
+		isnull[j] = false;
+		values[j] = datum;
 	}
-	return false;
+	return true;
 }
 
 /*

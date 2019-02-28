@@ -326,7 +326,12 @@ PDS_release(pgstrom_data_store *pds)
 	Assert(refcnt >= 0);
 	if (refcnt == 0)
 	{
-		if (pds->kds.format != KDS_FORMAT_BLOCK)
+		if (!pds->gcontext)
+		{
+			Assert(pds->kds.format == KDS_FORMAT_ARROW);
+			pfree(pds);
+		}
+		else if (pds->kds.format != KDS_FORMAT_BLOCK)
 		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
 			if (rc != CUDA_SUCCESS)

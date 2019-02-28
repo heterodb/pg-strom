@@ -24,6 +24,7 @@ static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
 static List	   *devcast_info_slot[48];
 bool			pgstrom_enable_numeric_type;	/* GUC */
+static Oid		pgstrom_float2_typeoid = InvalidOid;
 
 static void		build_devcast_info(void);
 
@@ -566,6 +567,25 @@ vlbuf_estimate_text_substr(devfunc_info *dfunc, Expr **args, int *vl_width)
 	return 0;
 }
 */
+
+/*
+ * pgstrom_get_float2_typeoid - FLOAT2OID
+ */
+Oid
+pgstrom_get_float2_typeoid(void)
+{
+	if (!OidIsValid(pgstrom_float2_typeoid))
+	{
+		Oid		nsp_oid = get_namespace_oid(PGSTROM_SCHEMA_NAME, true);
+		Oid		type_oid = GetSysCacheOid2(TYPENAMENSP,
+										   PointerGetDatum("float2"),
+										   ObjectIdGetDatum(nsp_oid));
+		if (!OidIsValid(type_oid))
+			elog(ERROR, "float2 is not defined at PostgreSQL");
+		pgstrom_float2_typeoid = type_oid;
+	}
+	return pgstrom_float2_typeoid;
+}
 
 /*
  * Catalog of functions supported by device code
@@ -3477,6 +3497,7 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
 	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
+	pgstrom_float2_typeoid = InvalidOid;
 	devtype_info_is_built = false;
 }
 
