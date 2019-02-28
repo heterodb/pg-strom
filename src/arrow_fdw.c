@@ -17,6 +17,7 @@
  */
 #include "pg_strom.h"
 #include "arrow_defs.h"
+#include "cuda_numeric.h"
 
 /*
  * RecordBatchState
@@ -320,20 +321,26 @@ makeRecordBatchState(ArrowSchema *schema,
 			case ArrowNodeTag__Interval:
 				/* fixed-length values */
 				if (buffer_curr + 1 >= buffer_tail)
-					elog(ERROR, "arrow_fdw: RecordBatch contains less Buffer than expected");
+					elog(ERROR, "RecordBatch has less buffers than expected");
 				if (c->null_count > 0)
 				{
 					c->nullmap_offset = buffer_curr->offset;
 					c->nullmap_length = buffer_curr->length;
 					if (c->nullmap_length < BITMAPLEN(c->null_count))
-						elog(ERROR, "arrow_fdw: nullmap length is smaller than expected");
+						elog(ERROR, "nullmap length is smaller than expected");
+					if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+						(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+						elog(ERROR, "nullmap is not aligned well");
 				}
 				buffer_curr++;
 				c->values_offset = buffer_curr->offset;
 				c->values_length = buffer_curr->length;
 				if (c->values_length < arrowTypeValuesLength(&field->type,
 															 c->nitems))
-					elog(ERROR, "arrow_fdw: values length is smaller than expected");
+					elog(ERROR, "values array is smaller than expected");
+				if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "values array is not aligned well");
 				buffer_curr++;
 				break;
 
@@ -341,23 +348,34 @@ makeRecordBatchState(ArrowSchema *schema,
 			case ArrowNodeTag__Binary:
 				/* variable length values */
 				if (buffer_curr + 2 >= buffer_tail)
-					elog(ERROR, "arrow_fdw: RecordBatch contains less Buffer than expected");
+					elog(ERROR, "RecordBatch has less buffers than expected");
 				if (c->null_count > 0)
 				{
 					c->nullmap_offset = buffer_curr->offset;
 					c->nullmap_length = buffer_curr->length;
 					if (c->nullmap_length < BITMAPLEN(c->null_count))
-						elog(ERROR, "arrow_fdw: nullmap length is smaller than expected");
+						elog(ERROR, "nullmap length is smaller than expected");
+					if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+						(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+						elog(ERROR, "nullmap is not aligned well");
 				}
 				buffer_curr++;
+
 				c->values_offset = buffer_curr->offset;
 				c->values_length = buffer_curr->length;
 				if (c->values_length < arrowTypeValuesLength(&field->type,
 															 c->nitems))
-					elog(ERROR, "arrow_fdw: values length is smaller than expected");
+					elog(ERROR, "offset array is smaller than expected");
+				if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "offset array is not aligned well");
 				buffer_curr++;
+
 				c->extra_offset = buffer_curr->offset;
 				c->extra_length = buffer_curr->length;
+				if ((c->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "extra buffer is not aligned well");
 				buffer_curr++;
 				break;
 
@@ -371,19 +389,61 @@ makeRecordBatchState(ArrowSchema *schema,
 		switch (field->type.node.tag)
         {
             case ArrowNodeTag__Decimal:
+				if (field->type.Decimal.precision < SHRT_MIN ||
+					field->type.Decimal.precision > SHRT_MAX)
+					elog(ERROR, "Decimal precision is out of range");
+				if (field->type.Decimal.scale < SHRT_MIN ||
+					field->type.Decimal.scale > SHRT_MAX)
+					elog(ERROR, "Decimal scale is out of range");
 				c->attopts.decimal.precision = field->type.Decimal.precision;
 				c->attopts.decimal.scale     = field->type.Decimal.scale;
 				break;
             case ArrowNodeTag__Date:
+				switch (field->type.Date.unit)
+				{
+					case ArrowDateUnit__Day:
+					case ArrowDateUnit__MilliSecond:
+						break;
+					default:
+						elog(ERROR, "unknown unit of Date");
+				}
 				c->attopts.date.unit = field->type.Date.unit;
 				break;
             case ArrowNodeTag__Time:
+				switch (field->type.Time.unit)
+				{
+					case ArrowTimeUnit__Second:
+					case ArrowTimeUnit__MilliSecond:
+					case ArrowTimeUnit__MicroSecond:
+					case ArrowTimeUnit__NanoSecond:
+						break;
+					default:
+						elog(ERROR, "unknown unit of Time");
+				}
 				c->attopts.time.unit = field->type.Time.unit;
 				break;
             case ArrowNodeTag__Timestamp:
+				switch (field->type.Timestamp.unit)
+				{
+					case ArrowTimeUnit__Second:
+					case ArrowTimeUnit__MilliSecond:
+					case ArrowTimeUnit__MicroSecond:
+					case ArrowTimeUnit__NanoSecond:
+						break;
+					default:
+						elog(ERROR, "unknown unit of Time");
+				}
 				c->attopts.time.unit = field->type.Timestamp.unit;
 				break;
             case ArrowNodeTag__Interval:
+				switch (field->type.Interval.unit)
+				{
+					case ArrowIntervalUnit__Year_Month:
+					case ArrowIntervalUnit__Day_Time:
+						break;
+					default:
+						elog(ERROR, "unknown unit of Interval");
+				}
 				c->attopts.interval.unit = field->type.Interval.unit;
 				break;
 			default:
@@ -440,7 +500,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		readArrowFileDesc(fdesc, &af_info);
 		ktdesc_schema = arrowSchemaToKernTupdesc(&af_info.footer.schema);
 		if (!kern_tupdesc_equal(ktdesc_relation, ktdesc_schema))
-			elog(ERROR, "arrow_fdw: incompatible file '%s' on behalf of the foreign table '%s'.",
+			elog(ERROR, "arrow_fdw: incompatible file '%s' on behalf of '%s'",
 				 fname, RelationGetRelationName(relation));
 
 		Assert(af_info.footer._num_dictionaries ==
@@ -509,11 +569,10 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 
 	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
 	iovec->block_sz = page_sz;
+	Assert((page_sz & (page_sz - 1)) == 0);
 
 	m_offset = TYPEALIGN(page_sz, offsetof(kern_data_store,
 										   colmeta[ncols]));
-	elog(INFO, "rb_offset = %lu", rb_offset);
-
 	for (j=0; j < ncols; j++)
 	{
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
@@ -563,7 +622,6 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 			}
 		}
 
-		elog(INFO, "j=%d m_offset=%lu f_offset=%lu", j, m_offset, f_offset);
 		if (fstate->values_length > 0)
 		{
 			f_pos = rb_offset + fstate->values_offset;
@@ -1330,81 +1388,19 @@ pg_bool_arrow_ref(kern_data_store *kds,
 
 	return BoolGetDatum(att_isnull(index, bitmap));
 }
-#include "cuda_numeric.h"
 
 static Datum
 pg_numeric_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
+	char	   *result = palloc0(sizeof(struct NumericData));
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	int128		val = ((int128 *)base)[index];
-	uint128		uval;
-	cl_int		precision = cmeta->attopts.decimal.precision;
-	cl_ushort	n_header;
-	struct NumericData *numData;
-	struct NumericLong *numBody;
-	NumericDigit	n_data[PG_MAX_DATA];
-	cl_int		ndigits;
-	cl_uint		len;
+	Int128_t	decimal;
 
-	numData = palloc0(sizeof(struct NumericData));
-	numBody = &numData->choice.n_long;
-	if (val < 0)
-	{
-		n_header = NUMERIC_NEG;
-		uval = -val;
-	}
-	else
-	{
-		n_header = NUMERIC_POS;
-		uval = val;
-	}
+	decimal.ival = ((int128 *)base)[index];
+	pg_numeric_to_varlena(result, cmeta->attopts.decimal.precision, decimal);
 
-	switch (precision % PG_DEC_DIGITS)
-	{
-		case 3:
-		case -1:
-			uval *= 10;
-			precision += 1;
-			break;
-		case 2:
-		case -2:
-			uval *= 100;
-			precision += 2;
-			break;
-		case 1:
-		case -3:
-			uval *= 1000;
-			precision += 3;
-			break;
-		default:
-			/* ok */
-			break;
-	}
-	assert(precision % PG_DEC_DIGITS == 0);
-	while ((uval % PG_NBASE) == 0)
-	{
-		precision -= PG_DEC_DIGITS;
-		uval /= PG_NBASE;
-	}
-	for (ndigits=0; uval != 0; ndigits++)
-	{
-		Assert(ndigits < PG_MAX_DATA);
-		n_data[PG_MAX_DATA - 1 - ndigits] = uval % PG_NBASE;
-		uval /= PG_NBASE;
-	}
-	memcpy(numBody->n_data,
-		   n_data + PG_MAX_DATA - ndigits,
-		   sizeof(NumericDigit) * ndigits);
-	/* other metadata */
-	n_header |= (cmeta->attopts.decimal.scale & NUMERIC_DSCALE_MASK);
-	numBody->n_sign_dscale = n_header;
-	numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
-
-	len = offsetof(struct NumericData, choice.n_long.n_data[ndigits]);
-	SET_VARSIZE(numData, len);
-
-	return PointerGetDatum(numData);
+	return PointerGetDatum(result);
 }
 
 static Datum

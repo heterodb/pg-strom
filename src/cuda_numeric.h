@@ -45,6 +45,7 @@ struct NumericShort
 	cl_ushort		n_header;				/* Sign + display scale + weight */
 	NumericDigit	n_data[PG_MAX_DATA];	/* Digits */
 };
+typedef struct NumericShort	NumericShort;
 
 struct NumericLong
 {
@@ -52,19 +53,21 @@ struct NumericLong
 	cl_short		n_weight;				/* Weight of 1st digit	*/
 	NumericDigit	n_data[PG_MAX_DATA];	/* Digits */
 };
+typedef struct NumericLong	NumericLong;
 
 union NumericChoice
 {
-	cl_ushort			n_header;			/* Header word */
-	struct NumericLong	n_long;				/* Long form (4-byte header) */
-	struct NumericShort	n_short;			/* Short form (2-byte header) */
+	cl_ushort		n_header;			/* Header word */
+	NumericLong		n_long;				/* Long form (4-byte header) */
+	NumericShort	n_short;			/* Short form (2-byte header) */
 };
 
 struct NumericData
 {
- 	cl_int			vl_len_;				/* varlena header */
-	union NumericChoice choice;				/* payload */
+ 	cl_int			vl_len_;			/* varlena header */
+	union NumericChoice choice;			/* payload */
 };
+typedef struct NumericData	NumericData;
 
 #define NUMERIC_SIGN_MASK	0xC000
 #define NUMERIC_POS			0x0000
@@ -459,8 +462,6 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 	return pg_numeric_normalize(result);
 }
 
-#ifdef __CUDACC__
-
 /*
  * pg_numeric_to_varlena
  *
@@ -470,11 +471,8 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
  * sizeof(NumericData). Once this function makes a varlena datum on the
  * buffer, it returns total length of the written data.
  */
-#define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
-
 STATIC_FUNCTION(cl_uint)
-pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
-					  cl_short precision, Int128_t value)
+pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 {
 	NumericData	   *numData = (NumericData *)vl_buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
@@ -511,13 +509,20 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
 	}
 	assert(precision % PG_DEC_DIGITS == 0);
 
-	for (ndigits=0; __Int128_sign(value) != 0; ndigits++)
+	ndigits = 0;
+	while (__Int128_sign(value) != 0)
 	{
 		cl_long		mod;
 
-		assert(ndigits < PG_MAX_DATA);
 		value = __Int128_div(value, PG_NBASE, &mod);
-		n_data[PG_MAX_DATA - 1 - ndigits] = mod;
+		if (mod == 0)
+			precision -= PG_DEC_DIGITS;
+		else
+		{
+			assert(ndigits < PG_MAX_DATA);
+			ndigits++;
+			n_data[PG_MAX_DATA - ndigits] = mod;
+		}
 	}
 	memcpy(numBody->n_data,
 		   n_data + PG_MAX_DATA - ndigits,
@@ -534,6 +539,8 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
 
 	return len;
 }
+
+#ifdef __CUDACC__
 
 /*
  * pg_numeric_datum_(ref|store)
@@ -572,7 +579,7 @@ pg_datum_ref_slot(kern_context *kcxt,
 	else
 	{
 		assert(dclass == DATUM_CLASS__NORMAL);
-		result = g_numeric_datum_ref(kcxt, (char *)datum);
+		result = pg_numeric_datum_ref(kcxt, (char *)datum);
 	}
 }
 
@@ -589,13 +596,13 @@ pg_datum_store(kern_context *kcxt,
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
-	res = kern_context_alloc(kcxt, sizeof(struct NumericData));
+	res = (char *)kern_context_alloc(kcxt, sizeof(struct NumericData));
 	if (!res)
 	{
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
-	pg_numeric_to_varlena(kcxt, res,
+	pg_numeric_to_varlena(res,
 						  datum.precision,
 						  datum.value);
 	dclass = DATUM_CLASS__NORMAL;
