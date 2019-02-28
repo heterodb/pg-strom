@@ -53,6 +53,7 @@ typedef struct
 {
 	const char *fname;
 	File		fdesc;
+	struct stat	stat_buf;
 	kern_tupdesc *ktdesc;
 	off_t		rb_offset;	/* offset from the head */
 	size_t		rb_length;	/* length of the entire RecordBatch */
@@ -145,7 +146,7 @@ cost_arrow_fdw_seqscan(Path *path,
 					   PlannerInfo *root,
 					   RelOptInfo *baserel,
 					   ParamPathInfo *param_info,
-					   int parallel_nworkers)
+					   int num_workers)
 {
 	Cost		startup_cost = 0.0;
 	Cost		disk_run_cost = 0.0;
@@ -188,13 +189,13 @@ cost_arrow_fdw_seqscan(Path *path,
 	cpu_run_cost += path->pathtarget->cost.per_tuple * path->rows;
 
 	/* adjust cost for CPU parallelism */
-	if (parallel_nworkers > 0)
+	if (num_workers > 0)
 	{
 		double		leader_contribution;
-		double		parallel_divisor = (double) parallel_nworkers;
+		double		parallel_divisor = (double) num_workers;
 
 		/* see get_parallel_divisor() */
-		leader_contribution = 1.0 - (0.3 * (double)parallel_nworkers);
+		leader_contribution = 1.0 - (0.3 * (double)num_workers);
 		parallel_divisor += Max(leader_contribution, 0.0);
 
 		/* The CPU cost is divided among all the workers. */
@@ -206,6 +207,10 @@ cost_arrow_fdw_seqscan(Path *path,
 	path->rows = nrows;
 	path->startup_cost = startup_cost;
 	path->total_cost = startup_cost + cpu_run_cost + disk_run_cost;
+	//XXXX
+	if (num_workers > 0)
+		path->total_cost = startup_cost;
+	path->parallel_workers = num_workers;
 }
 
 /*
@@ -219,6 +224,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 	ForeignPath	   *fpath;
 	ParamPathInfo  *param_info;
 	Relids			required_outer = baserel->lateral_relids;
+	int				num_workers;
+
+	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
 
 	fpath = create_foreignscan_path(root, baserel,
 									NULL,	/* default pathtarget */
@@ -229,11 +237,28 @@ ArrowGetForeignPaths(PlannerInfo *root,
 									required_outer,
 									NULL,	/* no extra plan */
 									NIL);	/* no particular private */
-	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
-	/* update nrows, startup_cost and total_cost */
 	cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info, 0);
-
 	add_path(baserel, (Path *)fpath);
+
+	num_workers = compute_parallel_worker(baserel,
+										  baserel->pages, -1.0,
+										  max_parallel_workers_per_gather);
+	if (num_workers > 0)
+	{
+		fpath = create_foreignscan_path(root,
+										baserel,
+										NULL,	/* default pathtarget */
+										-1,		/* dummy */
+										-1.0,	/* dummy */
+										-1.0,	/* dummy */
+										NIL,	/* no pathkeys */
+										required_outer,
+										NULL,	/* no extra plan */
+										NIL);	/* no particular private */
+		cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info,
+							   num_workers);
+		add_partial_path(baserel, (Path *)fpath);
+	}
 }
 
 /*
@@ -519,6 +544,8 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 											block, rbatch);
 			rb_state->fname = fname;
 			rb_state->fdesc = fdesc;
+			if (fstat(FileGetRawDesc(fdesc), &rb_state->stat_buf) != 0)
+				elog(ERROR, "failed on stat('%s'): %m", fname);
 			rb_state->ktdesc = ktdesc_schema;
 			rb_state_list = lappend(rb_state_list, rb_state);
 			rb_count++;
@@ -793,9 +820,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 		off_t		f_pos = iovec->io[j].f_pos;
 		ssize_t		sz;
 
-		elog(INFO, "pread (dest=%zu len=%zu f_pos=%lu)",
-			 iovec->io[j].m_offset, len, f_pos);
-		while (len > 0)
+		while (len > 0 && f_pos < rb_state->stat_buf.st_size)
 		{
 			CHECK_FOR_INTERRUPTS();
 
@@ -804,6 +829,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 			{
 				Assert(sz <= len);
 				dest += sz;
+				f_pos += sz;
 				len -= sz;
 			}
 			else if (sz == 0)
@@ -815,6 +841,16 @@ arrowFdwLoadRecordBatch(Relation relation,
 			{
 				elog(ERROR, "failed on pread('%s'): %m", rb_state->fname);
 			}
+		}
+		/*
+		 * NOTE: Due to the page_sz alignment, we may try to read the file
+		 * over the its tail. So, above loop may terminate with non-zero
+		 * remaining length.
+		 */
+		if (len > 0)
+		{
+			Assert(len < page_sz);
+			memset(dest, 0, len);
 		}
 	}
 	return pds;
@@ -1122,7 +1158,7 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 							   RelOptInfo *rel,
 							   RangeTblEntry *rte)
 {
-	return false;
+	return true;
 }
 
 /*
@@ -1132,7 +1168,7 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return 0;
+	return MAXALIGN(sizeof(pg_atomic_uint32));
 }
 
 /*
@@ -1142,7 +1178,13 @@ static void
 ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
-{}
+{
+	ArrowFdwState	   *af_state = node->fdw_state;
+	pg_atomic_uint32   *rbatch_index = coordinate;
+
+	pg_atomic_init_u32(rbatch_index, 0);
+	af_state->rbatch_index = rbatch_index;
+}
 
 /*
  * ArrowReInitializeDSMForeignScan
@@ -1151,7 +1193,11 @@ static void
 ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 								ParallelContext *pcxt,
 								void *coordinate)
-{}
+{
+	ArrowFdwState	   *af_state = node->fdw_state;
+
+	pg_atomic_write_u32(af_state->rbatch_index, 0);
+}
 
 /*
  * ArrowInitializeWorkerForeignScan
@@ -1160,14 +1206,20 @@ static void
 ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
-{}
+{
+	ArrowFdwState	   *af_state = node->fdw_state;
+
+	af_state->rbatch_index = (pg_atomic_uint32 *) coordinate;
+}
 
 /*
  * ArrowShutdownForeignScan
  */
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
-{}
+{
+	/* right now, nothing to do */
+}
 
 /*
  * handler of Arrow_Fdw
@@ -1310,7 +1362,6 @@ kern_tupdesc_equal(kern_tupdesc *a, kern_tupdesc *b)
 			(cmeta_a->atttypid != cmeta_b->atttypid) ||
 			(cmeta_a->atttypmod != cmeta_b->atttypmod))
 		{
-			Assert(false);
 			return false;
 		}
 	}
@@ -1322,7 +1373,6 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 {
 	kern_tupdesc   *result = NULL;
 	int				i, ncols = schema->_num_fields;
-	int				attcacheoff = 0;
 
 	result = palloc0(offsetof(kern_tupdesc, colmeta[ncols]));
 	result->ncols = ncols;
@@ -1412,22 +1462,13 @@ arrowSchemaToKernTupdesc(ArrowSchema *schema)
 				break;
 		}
 		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &typalign);
-		if (attcacheoff > 0)
-		{
-			if (typlen > 0)
-				attcacheoff = att_align_nominal(attcacheoff, typalign);
-			else
-				attcacheoff = -1;	/* no more shortcut any more */
-		}
 		cmeta->attbyval		= typbyval;
 		cmeta->attalign		= typealign_get_width(typalign);
 		cmeta->attlen		= typlen;
 		cmeta->attnum		= i+1;
-		cmeta->attcacheoff	= attcacheoff;
+		cmeta->attcacheoff	= -1;	/* no sense on columnar format */
 		cmeta->atttypid		= type_oid;
 		cmeta->atttypmod	= type_mod;
-		if (attcacheoff >= 0)
-			attcacheoff += typlen;
 	}
 	return result;
 }
@@ -1451,7 +1492,7 @@ pgsqlTupdescToKernTupdesc(TupleDesc tupdesc)
 		cmeta->attalign  = typealign_get_width(attr->attalign);
 		cmeta->attlen    = attr->attlen;
 		cmeta->attnum    = attr->attnum;
-		cmeta->attcacheoff = attr->attcacheoff;
+		cmeta->attcacheoff = -1;	/* make no sense on columnar */
 		cmeta->atttypid  = attr->atttypid;
 		cmeta->atttypmod = attr->atttypmod;
 	}
@@ -1518,8 +1559,13 @@ pg_text_arrow_ref(kern_data_store *kds,
 	cl_uint	   *offset = (cl_uint *)((char *)kds +
 									 __kds_unpack(cmeta->values_offset));
 	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+	size_t		extra_len = __kds_unpack(cmeta->extra_offset);
 	cl_uint		len = offset[index+1] - offset[index];
 	text	   *res;
+
+	if (extra_len <= offset[index] ||
+		extra_len <= offset[index + 1])
+		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
 
 	res = palloc(VARHDRSZ + len);
 	SET_VARSIZE(res, VARHDRSZ + len);

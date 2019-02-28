@@ -357,11 +357,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		int		parallel_nworkers
 			= compute_parallel_worker(baserel,
-									  baserel->pages, -1.0
-#if PG_VERSION_NUM >= 110000
-									  ,max_parallel_workers_per_gather
-#endif
-				);
+									  baserel->pages, -1.0,
+									  max_parallel_workers_per_gather);
 		/*
 		 * XXX - Do we need a something specific logic for GpuScan to adjust
 		 * parallel_workers.

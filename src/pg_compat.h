@@ -68,6 +68,15 @@
 #endif
 
 /*
+ * MEMO: PG10 add this function (also look at misc.c), then PG11 adds
+ * argument of 'max_workers' argument.
+ */
+#if PG_VERSION_NUM < 110000
+#define compute_parallel_worker(a,b,c,d)		\
+	compute_parallel_worker((a),(b),(c))
+#endif
+
+/*
  * MEMO: PG11 allows to display unit of numerical values if text-format
  * Just omit 'unit' if PG10 or older
  */
