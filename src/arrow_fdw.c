@@ -956,7 +956,162 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
-	return NIL;
+	kern_tupdesc   *ktdesc = NULL;
+	kern_tupdesc   *kttemp;
+	ArrowSchema		schema;
+	List		   *filesList;
+	ListCell	   *lc;
+	int				j;
+	StringInfoData	cmd;
+
+	/* sanity checks */
+	switch (stmt->list_type)
+	{
+		case FDW_IMPORT_SCHEMA_ALL:
+			break;
+		case FDW_IMPORT_SCHEMA_LIMIT_TO:
+			elog(ERROR, "arrow_fdw does not support LIMIT TO clause");
+		case FDW_IMPORT_SCHEMA_EXCEPT:
+			elog(ERROR, "arrow_fdw does not support EXCEPT clause");
+		default:
+			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
+	}
+	filesList = arrowFdwExtractFilesList(stmt->options);
+	if (filesList == NIL)
+		ereport(ERROR,
+				(errmsg("No valid apache arrow files are specified"),
+				 errhint("Use 'file' or 'dir' option to specify apache arrow files on behalf of the foreign table")));
+
+	/* read the schema */
+	foreach (lc, filesList)
+	{
+		char	   *fname = strVal(lfirst(lc));
+		ArrowFileInfo af_info;
+
+		readArrowFile(fname, &af_info);
+		kttemp = arrowSchemaToKernTupdesc(&af_info.footer.schema);
+		if (!ktdesc)
+		{
+			ktdesc = kttemp;
+			memcpy(&schema, &af_info.footer.schema, sizeof(ArrowSchema));
+		}
+		else if (!kern_tupdesc_equal(ktdesc, kttemp))
+			elog(ERROR, "file '%s' has incompatible schema from others",
+				 fname);
+	}
+	Assert(ktdesc != NULL);
+
+	/* makes a command to define foreign table */
+	initStringInfo(&cmd);
+	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
+					 quote_identifier(stmt->remote_schema));
+	for (j=0; j < schema._num_fields; j++)
+	{
+		ArrowField	   *field = &schema.fields[j];
+		ArrowType	   *t = &field->type;
+		const char	   *type_name;
+
+		switch (t->node.tag)
+		{
+			case ArrowNodeTag__Null:
+				elog(ERROR, "Null of ArrowType is not supported");
+			case ArrowNodeTag__Int:
+				if (!t->Int.is_signed)
+					elog(NOTICE, "Uint of ArrowType is mapped to signed-integer at PostgreSQL");
+				switch (t->Int.bitWidth)
+				{
+					case 16: type_name = "pg_catalog.int2"; break;
+					case 32: type_name = "pg_catalog.int4"; break;
+					case 64: type_name = "pg_catalog.int8"; break;
+					default:
+						elog(ERROR, "Int%d is not supported",
+							 t->Int.bitWidth);
+				}
+				break;
+			case ArrowNodeTag__FloatingPoint:
+				switch (t->FloatingPoint.precision)
+				{
+					case ArrowPrecision__Half:
+						type_name = "pg_catalog.float2";
+						break;
+					case ArrowPrecision__Single:
+						type_name = "pg_catalog.float4";
+						break;
+					case ArrowPrecision__Double:
+						type_name = "pg_catalog.float8";
+						break;
+					default:
+						elog(ERROR, "Unknown precision of floating-point");
+				}
+				break;
+			case ArrowNodeTag__Utf8:
+				type_name = "pg_catalog.text";
+				break;
+			case ArrowNodeTag__Binary:
+				type_name = "pg_catalog.bytea";
+				break;
+			case ArrowNodeTag__Bool:
+				type_name = "pg_catalog.bool";
+				break;
+			case ArrowNodeTag__Decimal:
+				type_name = "pg_catalog.numeric";
+				break;
+			case ArrowNodeTag__Date:
+				type_name = "pg_catalog.date";
+				break;
+			case ArrowNodeTag__Time:
+				type_name = "pg_catalog.time";
+				break;
+			case ArrowNodeTag__Timestamp:
+				type_name = "pg_catalog.timestamp";
+				break;
+			case ArrowNodeTag__Interval:
+				type_name = "pg_catalog.interval";
+				break;
+			case ArrowNodeTag__List:
+				elog(ERROR, "List of ArrowType is not supported, right now");
+			case ArrowNodeTag__Struct:
+				elog(ERROR, "Struct of ArrowType is not supported, right now");
+			case ArrowNodeTag__Union:
+				elog(ERROR, "Union of ArrowType is not supported");
+			case ArrowNodeTag__FixedSizeBinary:
+				elog(ERROR, "FixedSizeBinary of ArrowType is not supported");
+			case ArrowNodeTag__FixedSizeList:
+				elog(ERROR, "FixedSizeList of ArrowType is not supported");
+			case ArrowNodeTag__Map:
+				elog(ERROR, "Map of ArrowType is not supported");
+			default:
+				elog(ERROR, "Unknown ArrowType");
+		}
+		if (j > 0)
+			appendStringInfo(&cmd, ",\n");
+		if (!field->name || field->_name_len == 0)
+		{
+			elog(NOTICE, "field %d has no name, so \"__col%02d\" is used",
+				 j+1, j+1);
+			appendStringInfo(&cmd, "  __col%02d  %s", j+1, type_name);
+		}
+		else
+			appendStringInfo(&cmd, "  %s %s",
+							 quote_identifier(field->name), type_name);
+	}
+	appendStringInfo(&cmd,
+					 "\n"
+					 ") SERVER %s\n"
+					 "  OPTIONS (", stmt->server_name);
+	foreach (lc, stmt->options)
+	{
+		DefElem	   *defel = lfirst(lc);
+
+		if (lc != list_head(stmt->options))
+			appendStringInfo(&cmd, ",\n           ");
+		appendStringInfo(&cmd, "%s '%s'",
+						 defel->defname,
+						 strVal(defel->arg));
+	}
+	appendStringInfo(&cmd, ")");
+
+	return list_make1(cmd.data);
 }
 
 /*
@@ -1706,16 +1861,13 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 			char		   *fname = strVal(lfirst(lc));
 
 			readArrowFile(fname, &af_info);
-			elog(INFO, "%s", dumpArrowNode((ArrowNode *)&af_info.footer));
-			//dump...
+			elog(DEBUG2, "%s", dumpArrowNode((ArrowNode *)&af_info.footer));
 			//TODO: make cache item here
 		}
 	}
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
-
-
 
 /*
  * pgstrom_init_arrow_fdw
