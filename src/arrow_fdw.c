@@ -224,7 +224,6 @@ ArrowGetForeignPaths(PlannerInfo *root,
 	ForeignPath	   *fpath;
 	ParamPathInfo  *param_info;
 	Relids			required_outer = baserel->lateral_relids;
-	int				num_workers;
 
 	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
 
@@ -240,11 +239,15 @@ ArrowGetForeignPaths(PlannerInfo *root,
 	cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info, 0);
 	add_path(baserel, (Path *)fpath);
 
-	num_workers = compute_parallel_worker(baserel,
-										  baserel->pages, -1.0,
-										  max_parallel_workers_per_gather);
-	if (num_workers > 0)
+	if (baserel->consider_parallel)
 	{
+		int		num_workers =
+			compute_parallel_worker(baserel,
+									baserel->pages, -1.0,
+									max_parallel_workers_per_gather);
+		if (num_workers == 0)
+			return;
+
 		fpath = create_foreignscan_path(root,
 										baserel,
 										NULL,	/* default pathtarget */
@@ -255,6 +258,8 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										required_outer,
 										NULL,	/* no extra plan */
 										NIL);	/* no particular private */
+		fpath->path.parallel_aware = true;
+
 		cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info,
 							   num_workers);
 		add_partial_path(baserel, (Path *)fpath);
@@ -1158,6 +1163,7 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 							   RelOptInfo *rel,
 							   RangeTblEntry *rte)
 {
+	/* we have no special restrictions for parallel execution */
 	return true;
 }
 
@@ -1168,6 +1174,7 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
+	//elog(INFO, "pid=%u ArrowEstimateDSMForeignScan", getpid());
 	return MAXALIGN(sizeof(pg_atomic_uint32));
 }
 
@@ -1182,6 +1189,7 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 	ArrowFdwState	   *af_state = node->fdw_state;
 	pg_atomic_uint32   *rbatch_index = coordinate;
 
+	//elog(INFO, "pid=%u ArrowInitializeDSMForeignScan", getpid());
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
 }
@@ -1209,6 +1217,7 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 {
 	ArrowFdwState	   *af_state = node->fdw_state;
 
+	//elog(INFO, "pid=%u ArrowInitializeWorkerForeignScan", getpid());
 	af_state->rbatch_index = (pg_atomic_uint32 *) coordinate;
 }
 
@@ -1218,7 +1227,7 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
-	/* right now, nothing to do */
+	//elog(INFO, "pid=%u ArrowShutdownForeignScan", getpid());
 }
 
 /*
