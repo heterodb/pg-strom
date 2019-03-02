@@ -1290,7 +1290,7 @@ extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 typedef struct
 {
 	const char	   *filename;
-	struct stat		stat;
+	struct stat		stat_buf;
 	ArrowFooter		footer;
 	List		   *dictionaries;	/* List of ArrowDictionaryBatch */
 	List		   *recordBatches;	/* List of ArrowRecordBatch */

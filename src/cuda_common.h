@@ -243,6 +243,9 @@ typedef struct nameData
 #define GPUMEMALIGN(LEN)		TYPEALIGN(GPUMEMALIGN_LEN,(LEN))
 #define GPUMEMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(GPUMEMALIGN_LEN,(LEN))
 
+#define BLCKALIGN(LEN)			TYPEALIGN(BLCKSZ,(LEN))
+#define BLCKALIGN_DOWN(LEN)		TYPEALIGN_DOWN(BLCKSZ,(LEN))
+
 #ifdef __CUDACC__
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
@@ -682,6 +685,8 @@ typedef struct {
  * |      :        |     :        |     :         |     :          |
  * +---------------+--------------+---------------+----------------+
  */
+#include "arrow_defs.h"
+
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */
 	cl_char			attbyval;
@@ -703,21 +708,7 @@ typedef struct {
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
 	 */
-	union {
-		struct {
-			cl_int	precision;
-			cl_int	scale;
-		} decimal;				/* for Decimal */
-		struct {
-			cl_short	unit;	/* one of ArrowDateUnit__* */
-		} date;
-		struct {
-			cl_short	unit;	/* one of ArrowTimeUnit__* */
-		} time;
-		struct {
-			cl_short	unit;	/* one of ArrowIntervalUnit__* */
-		} interval;
-	} attopts;
+	ArrowTypeOptions attopts;
 	cl_uint			nullmap_offset;
 	cl_uint			nullmap_length;
 	cl_uint			values_offset;

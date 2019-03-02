@@ -357,7 +357,7 @@ init_kernel_data_store(kern_data_store *kds,
 	int			i, attcacheoff;
 	NameData   *attNames = NULL;
 
-	memset(kds, 0, offsetof(kern_data_store, colmeta));
+	memset(kds, 0, offsetof(kern_data_store, colmeta[tupdesc->natts]));
 	kds->length = length;
 	kds->nitems = 0;
 	kds->usage = 0;
@@ -374,7 +374,8 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->hash_max = UINT_MAX;
 	kds->nrows_per_block = 0;
 
-	if (format != KDS_FORMAT_COLUMN)
+	if (format != KDS_FORMAT_COLUMN &&
+		format != KDS_FORMAT_ARROW)
 	{
 		attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
 		if (tupdesc->tdhasoid)
@@ -392,15 +393,10 @@ init_kernel_data_store(kern_data_store *kds,
 
 	for (i=0; i < kds->ncols; i++)
 	{
-		Form_pg_attribute attr;
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		int		attalign;
 
-		if (i < tupdesc->natts)
-			attr = tupleDescAttr(tupdesc, i);
-		else
-			attr = SystemAttributeDefinition(i - (int)kds->ncols, true);
 		attalign = typealign_get_width(attr->attalign);
-
 		if (!attr->attbyval)
 			kds->has_notbyval = true;
 		if (attcacheoff > 0)

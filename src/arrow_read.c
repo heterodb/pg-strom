@@ -1011,8 +1011,8 @@ void
 readArrowFileDesc(File filp, ArrowFileInfo *af_info)
 {
 	int				fdesc = FileGetRawDesc(filp);
-	struct stat		st_buf;
-	size_t			mmap_sz = 0;
+	size_t			file_sz;
+	size_t			mmap_sz;
 	char		   *mmap_head = NULL;
 	char		   *mmap_tail = NULL;
 	const char	   *pos;
@@ -1020,14 +1020,15 @@ readArrowFileDesc(File filp, ArrowFileInfo *af_info)
 	cl_int			offset;
 	cl_int			i, nitems;
 
-	if (fstat(fdesc, &st_buf) != 0)
+	memset(af_info, 0, sizeof(ArrowFileInfo));
+	if (fstat(fdesc, &af_info->stat_buf) != 0)
 		elog(ERROR, "failed on fstat: %m");
-
-	mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), st_buf.st_size);
+	file_sz = af_info->stat_buf.st_size;
+	mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), file_sz);
 	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
 	if (mmap_head == MAP_FAILED)
 		elog(ERROR, "failed on mmap: %m");
-	mmap_tail = mmap_head + st_buf.st_size;
+	mmap_tail = mmap_head + file_sz;
 
 	PG_TRY();
 	{

@@ -290,6 +290,26 @@ typedef union		ArrowType
 } ArrowType;
 
 /*
+ * ArrowTypeOptions - our own definition
+ */
+typedef union		ArrowTypeOptions
+{
+	struct {
+		unsigned short		precision;
+		unsigned short		scale;
+	} decimal;
+	struct {
+		ArrowDateUnit		unit;
+	} date;
+	struct {
+		ArrowTimeUnit		unit;
+	} time;
+	struct {
+		ArrowIntervalUnit	unit;
+	} interval;
+} ArrowTypeOptions;
+
+/*
  * Buffer
  */
 typedef struct		ArrowBuffer
