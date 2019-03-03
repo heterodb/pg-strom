@@ -1150,7 +1150,6 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
 								  Index scanrelid,
 								  List *dev_quals_list);
-extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
 									  const Path *outer_path,
 									  Index *p_outer_relid,

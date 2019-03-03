@@ -1262,7 +1262,7 @@ typedef struct
 				   cl_char &dclass,									\
 				   Datum &value)									\
 	{																\
-		char	   *res;											\
+		void	   *res;											\
 																	\
 		if (datum.isnull)											\
 		{															\

@@ -110,6 +110,26 @@ typedef enum
 	ArrowUnionMode__Dense		= 1,
 } ArrowUnionMode;
 
+/*
+ * ArrowTypeOptions - our own definition
+ */
+typedef union		ArrowTypeOptions
+{
+	struct {
+		unsigned short		precision;
+		unsigned short		scale;
+	} decimal;
+	struct {
+		ArrowDateUnit		unit;
+	} date;
+	struct {
+		ArrowTimeUnit		unit;
+	} time;
+	struct {
+		ArrowIntervalUnit	unit;
+	} interval;
+} ArrowTypeOptions;
+
 #ifndef __CUDACC__
 /*
  * ArrowNodeTag
@@ -288,26 +308,6 @@ typedef union		ArrowType
 	ArrowTypeFixedSizeList	FixedSizeList;
 	ArrowTypeMap			Map;
 } ArrowType;
-
-/*
- * ArrowTypeOptions - our own definition
- */
-typedef union		ArrowTypeOptions
-{
-	struct {
-		unsigned short		precision;
-		unsigned short		scale;
-	} decimal;
-	struct {
-		ArrowDateUnit		unit;
-	} date;
-	struct {
-		ArrowTimeUnit		unit;
-	} time;
-	struct {
-		ArrowIntervalUnit	unit;
-	} interval;
-} ArrowTypeOptions;
 
 /*
  * Buffer

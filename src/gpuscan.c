@@ -899,25 +899,27 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
  * add_unique_expression - adds an expression node on the supplied
  * target-list, then returns true, if new target-entry was added.
  */
-bool
-add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
+static List *
+add_unique_expression(List *tlist, Expr *expr, bool resjunk)
 {
 	TargetEntry	   *tle;
 	ListCell	   *lc;
-	AttrNumber		resno;
 
-	foreach (lc, *p_targetlist)
+	foreach (lc, tlist)
 	{
 		tle = (TargetEntry *) lfirst(lc);
 		if (equal(expr, tle->expr))
-			return false;
+		{
+			if (tle->resjunk && !resjunk)
+				tle->resjunk = false;
+			return tlist;
+		}
 	}
-	/* Not found, so add this expression */
-	resno = list_length(*p_targetlist) + 1;
-	tle = makeTargetEntry(copyObject(expr), resno, NULL, resjunk);
-	*p_targetlist = lappend(*p_targetlist, tle);
-
-	return true;
+	tle = makeTargetEntry(copyObject(expr),
+						  list_length(tlist) + 1,
+						  NULL,
+						  resjunk);
+	return lappend(tlist, tle);
 }
 
 /*
@@ -931,25 +933,22 @@ typedef struct
 {
 	PlannerInfo *root;
 	Index		scanrelid;
-	TupleDesc	tupdesc;
-	int			attnum;
 	int			depth;
-	bool		compatible_tlist;
-	List	   *tlist_dev;
+	bool		resjunk;
+	List	   *tlist_temp;
 } build_gpuscan_projection_context;
 
 static bool
 build_gpuscan_projection_walker(Node *node, void *__context)
 {
 	build_gpuscan_projection_context *context = __context;
-	TupleDesc	tupdesc = context->tupdesc;
-	int			attnum = context->attnum;
 	int			depth_saved;
 	bool		retval;
 
 	if (IsA(node, Var))
 	{
 		Var	   *varnode = (Var *) node;
+		bool	resjunk;
 
 		/* if these Asserts fail, planner messed up */
 		Assert(varnode->varno == context->scanrelid);
@@ -958,96 +957,118 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		/* GPU projection cannot contain whole-row var */
 		if (varnode->varattno == InvalidAttrNumber)
 			return true;
-		/* System columns are part of HeapTupleHeaderData */
-		if (varnode->varattno < 0)
-		{
-			context->compatible_tlist = false;
-			return false;
-		}
 
-		/*
-		 * check whether the original tlist matches the physical layout
-		 * of the base relation. GPU can reorder the var reference
-		 * regardless of the data-type support.
-		 */
-		if (varnode->varattno != context->attnum || attnum > tupdesc->natts)
-			context->compatible_tlist = false;
-		else
-		{
-			Form_pg_attribute	attr = tupleDescAttr(tupdesc, attnum-1);
-
-			/* should not be a reference to dropped columns */
-			Assert(!attr->attisdropped);
-			/* See the logic in tlist_matches_tupdesc */
-			if (varnode->vartype != attr->atttypid ||
-				(varnode->vartypmod != attr->atttypmod &&
-				 varnode->vartypmod != -1))
-				context->compatible_tlist = false;
-		}
-		/* add a primitive var-node on the tlist_dev */
-		if (!add_unique_expression((Expr *) varnode,
-								   &context->tlist_dev, false))
-			context->compatible_tlist = false;
+		resjunk = (varnode->varattno < 0 || context->resjunk);
+		context->tlist_temp =
+			add_unique_expression(context->tlist_temp,
+								  (Expr *)varnode, resjunk);
 		return false;
 	}
-	else if (context->depth == 0 && (IsA(node, Const) || IsA(node, Param)))
+	else if (context->depth == 0 &&
+			 (IsA(node, Const) || IsA(node, Param)))
 	{
 		/* no need to have top-level constant values on the device side */
-		context->compatible_tlist = false;
 		return false;
 	}
 	else if (pgstrom_device_expression(context->root, (Expr *) node))
 	{
-		/* add device executable expression onto the tlist_dev */
-		add_unique_expression((Expr *) node, &context->tlist_dev, false);
-		/* of course, it is not a physically compatible tlist */
-		context->compatible_tlist = false;
+		context->tlist_temp =
+			add_unique_expression(context->tlist_temp,
+								  (Expr *) node,
+								  context->resjunk);
 		return false;
 	}
-	/*
-	 * walks down if expression is host-only.
-	 */
+	/* walks down if expression is host-only */
 	depth_saved = context->depth++;
 	retval = expression_tree_walker(node, build_gpuscan_projection_walker,
 									context);
 	context->depth = depth_saved;
-	context->compatible_tlist = false;
 	return retval;
 }
 
 static List *
 build_gpuscan_projection(PlannerInfo *root,
-						 Index scanrelid,
+						 RelOptInfo *baserel,
 						 Relation relation,
 						 List *tlist,
 						 List *host_quals,
 						 List *dev_quals)
 {
 	build_gpuscan_projection_context context;
+	Index		scanrelid = baserel->relid;
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	bool		compatible = true;
+	List	   *tlist_dev = NIL;
 	ListCell   *lc;
 
 	memset(&context, 0, sizeof(context));
 	context.root = root;
 	context.scanrelid = scanrelid;
-	context.tupdesc = RelationGetDescr(relation);
-	context.attnum = 0;
 	context.depth = 0;
-	context.tlist_dev = NIL;
-	context.compatible_tlist = true;
+	context.resjunk = false;
+	context.tlist_temp = NIL;
 
 	foreach (lc, tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		context.attnum++;
 		if (build_gpuscan_projection_walker((Node *)tle->expr, &context))
 			return NIL;
 		Assert(context.depth == 0);
 	}
 
-	/* Is the tlist shorter than relation's definition? */
-	if (RelationGetNumberOfAttributes(relation) != context.attnum)
-		context.compatible_tlist = false;
+	/*
+	 * If GpuScan is not a top-level query execution plan, PostgreSQL gives
+	 * NULL for tlist. In this case, GpuScan is required to return Var-list
+	 * according to the RelOptInfo->attr_needed[].
+	 */
+	if (tlist == NIL)
+	{
+		Form_pg_attribute attr;
+		Var	   *var;
+		int		i, j;
+
+		Assert(context.tlist_temp == NIL);
+		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
+		{
+			elog(INFO, "attr_needed[%d] = %p", i, baserel->attr_needed[j]);
+			if (!baserel->attr_needed[j])
+				continue;
+
+			if (i < 0)
+				attr = SystemAttributeDefinition(i, true);
+			else if (i > 0)
+				attr = tupleDescAttr(tupdesc, i-1);
+			else
+			{
+				/* special case handling for whole row reference */
+				for (j=0; j < tupdesc->natts; j++)
+				{
+					attr = tupleDescAttr(tupdesc, j);
+
+					if (attr->attisdropped)
+						continue;
+					var = makeVar(scanrelid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation,
+								  0);
+					if (build_gpuscan_projection_walker((Node *)var, &context))
+						return NIL;
+				}
+				break;
+			}
+			var = makeVar(scanrelid,
+						  i,
+						  attr->atttypid,
+						  attr->atttypmod,
+						  attr->attcollation,
+						  0);
+			if (build_gpuscan_projection_walker((Node *)var, &context))
+				return NIL;
+		}
+	}
 
 	/*
 	 * Host quals needs 
@@ -1061,7 +1082,10 @@ build_gpuscan_projection(PlannerInfo *root,
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				return NIL;		/* no whole-row support */
-			add_unique_expression((Expr *)var, &context.tlist_dev, false);
+			context.tlist_temp
+				= add_unique_expression(context.tlist_temp,
+										(Expr *) var,
+										var->varattno < 0);
 		}
 		list_free(vars_list);
 	}
@@ -1078,20 +1102,71 @@ build_gpuscan_projection(PlannerInfo *root,
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				return NIL;		/* no whole-row support */
-			add_unique_expression((Expr *)var, &context.tlist_dev, true);
+			context.tlist_temp
+				= add_unique_expression(context.tlist_temp,
+										(Expr *) var, true);
 		}
 		list_free(vars_list);
 	}
 
+	/*
+	 * Reorder of target-entry; non-junk first, then junk attributes
+	 */
+	foreach (lc, context.tlist_temp)
+	{
+		TargetEntry	   *tle = (TargetEntry *) lfirst(lc);
+		AttrNumber		resno;
+
+		if (tle->resjunk)
+			continue;
+		resno = list_length(tlist_dev) + 1;
+		if (!IsA(tle->expr, Var))
+			compatible = false;
+		else if (resno >= tupdesc->natts)
+			compatible = false;
+		else
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, resno - 1);
+			Var	   *var = (Var *)tle->expr;
+
+			if (var->varno == scanrelid &&
+				var->varattno == attr->attnum)
+			{
+				Assert(var->vartype == attr->atttypid &&
+					   var->vartypmod == attr->atttypmod &&
+					   var->varcollid == attr->attcollation &&
+					   var->varlevelsup == 0);
+			}
+			else
+				compatible = false;
+		}
+		tle->resno = resno;
+		tlist_dev = lappend(tlist_dev, tle);
+	}
+
+	foreach (lc, context.tlist_temp)
+	{
+		TargetEntry	   *tle = (TargetEntry *) lfirst(lc);
+
+		if (!tle->resjunk)
+			continue;
+		tle->resno = list_length(tlist_dev) + 1;
+		tlist_dev = lappend(tlist_dev, tle);
+		/* junk attribute involves projection */
+		compatible = false;
+	}
+	/* check number of attributes */
+	if (list_length(tlist_dev) != tupdesc->natts)
+		compatible = false;
 	/*
 	 * At this point, device projection is "executable".
 	 * However, if compatible_tlist == true, it implies the upper node
 	 * expects physically compatible tuple, thus, it is uncertain whether
 	 * we should run GpuProjection for this GpuScan.
 	 */
-	if (context.compatible_tlist)
+	if (compatible)
 		return NIL;
-	return context.tlist_dev;
+	return tlist_dev;
 }
 
 /*
@@ -1273,11 +1348,12 @@ PlanGpuScanPath(PlannerInfo *root,
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
 	varlena_bufsz = context.varlena_bufsz;
 	tlist_dev = build_gpuscan_projection(root,
-										 baserel->relid,
+										 baserel,
 										 relation,
 										 tlist,
 										 host_quals,
 										 dev_quals);
+	elog(INFO, "GpuScan: tlist_dev(%d) = %s", __LINE__, nodeToString(tlist_dev));
 	bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
 									  &proj_tuple_sz,
 									  &proj_extra_sz);
@@ -1296,9 +1372,13 @@ PlanGpuScanPath(PlannerInfo *root,
 	varlena_bufsz = Max(varlena_bufsz, context.varlena_bufsz);
 
 	/* pickup referenced attributes */
+	for (i=baserel->min_attr, j=0; i < baserel->max_attr; i++, j++)
+	{
+		varattnos = bms_add_member(varattnos,
+								   i - FirstLowInvalidHeapAttributeNumber);
+	}
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
 	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);
-	pull_varattnos((Node *)tlist, baserel->relid, &varattnos);
 	for (i = bms_first_member(varattnos);
 		 i >= 0;
 		 i = bms_next_member(varattnos, i))
