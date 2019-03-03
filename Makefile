@@ -44,7 +44,7 @@ PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
 #
 __CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
                  $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
-                 $(STROM_BUILD_ROOT)/src/arrow_defs.h
+                 arrow_defs.h
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
 #
@@ -160,7 +160,7 @@ SHLIB_LINK := -L $(LPATH) -lcuda
 MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA = $(__CUDA_SOURCES) $(PGSTROM_SQL) $(PGSTROM_TEST_SQL)
+DATA = $(CUDA_SOURCES) $(PGSTROM_SQL) $(PGSTROM_TEST_SQL)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS) $(PGSTROM_TEST_UTILS)
