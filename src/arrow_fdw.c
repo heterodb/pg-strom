@@ -525,7 +525,8 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		AttrNumber	anum = lfirst_int(lc);
 
 		Assert(anum > 0 && anum <= RelationGetNumberOfAttributes(relation));
-		referenced = bms_add_member(referenced, anum);
+		referenced = bms_add_member(referenced, anum -
+									FirstLowInvalidHeapAttributeNumber);
 	}
 
 	foreach (lc, filesList)
@@ -635,8 +636,9 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
 		kern_colmeta   *cmeta = &kds->colmeta[j];
 		off_t			f_base, f_pos;
+		int				attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
-		if (referenced && !bms_is_member(j+1, referenced))
+		if (referenced && !bms_is_member(attidx, referenced))
 			continue;
 
 		if (fstate->nullmap_length > 0)
