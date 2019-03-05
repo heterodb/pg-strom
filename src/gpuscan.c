@@ -1001,6 +1001,14 @@ build_gpuscan_projection(PlannerInfo *root,
 	List	   *tlist_dev = NIL;
 	ListCell   *lc;
 
+	/*
+	 * FIXME: In case when PG11 or later injects a ProjectionPath on top of
+	 * the CustomPath, it always calls PlanCustomPath method with tlist==NIL,
+	 * then attach result of build_path_tlist().
+	 */
+	if (tlist == NIL)
+		return NIL;
+
 	memset(&context, 0, sizeof(context));
 	context.root = root;
 	context.scanrelid = scanrelid;
@@ -1015,59 +1023,6 @@ build_gpuscan_projection(PlannerInfo *root,
 		if (build_gpuscan_projection_walker((Node *)tle->expr, &context))
 			return NIL;
 		Assert(context.depth == 0);
-	}
-
-	/*
-	 * If GpuScan is not a top-level query execution plan, PostgreSQL gives
-	 * NULL for tlist. In this case, GpuScan is required to return Var-list
-	 * according to the RelOptInfo->attr_needed[].
-	 */
-	if (tlist == NIL)
-	{
-		Form_pg_attribute attr;
-		Var	   *var;
-		int		i, j;
-
-		Assert(context.tlist_temp == NIL);
-		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
-		{
-			elog(INFO, "attr_needed[%d] = %p", i, baserel->attr_needed[j]);
-			if (!baserel->attr_needed[j])
-				continue;
-
-			if (i < 0)
-				attr = SystemAttributeDefinition(i, true);
-			else if (i > 0)
-				attr = tupleDescAttr(tupdesc, i-1);
-			else
-			{
-				/* special case handling for whole row reference */
-				for (j=0; j < tupdesc->natts; j++)
-				{
-					attr = tupleDescAttr(tupdesc, j);
-
-					if (attr->attisdropped)
-						continue;
-					var = makeVar(scanrelid,
-								  attr->attnum,
-								  attr->atttypid,
-								  attr->atttypmod,
-								  attr->attcollation,
-								  0);
-					if (build_gpuscan_projection_walker((Node *)var, &context))
-						return NIL;
-				}
-				break;
-			}
-			var = makeVar(scanrelid,
-						  i,
-						  attr->atttypid,
-						  attr->atttypmod,
-						  attr->attcollation,
-						  0);
-			if (build_gpuscan_projection_walker((Node *)var, &context))
-				return NIL;
-		}
 	}
 
 	/*
@@ -1093,6 +1048,7 @@ build_gpuscan_projection(PlannerInfo *root,
 	/*
 	 * Device quals need junk var-nodes
 	 */
+	context.resjunk = true;
 	if (dev_quals)
 	{
 		List	   *vars_list = pull_vars_of_level((Node *)dev_quals, 0);
@@ -1353,7 +1309,6 @@ PlanGpuScanPath(PlannerInfo *root,
 										 tlist,
 										 host_quals,
 										 dev_quals);
-	elog(INFO, "GpuScan: tlist_dev(%d) = %s", __LINE__, nodeToString(tlist_dev));
 	bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
 									  &proj_tuple_sz,
 									  &proj_extra_sz);

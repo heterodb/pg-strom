@@ -692,7 +692,7 @@ kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
 	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 #else
 	cl_char	   *tup_dclass = NULL;
-	cl_char	   *tup_values = NULL;
+	Datum	   *tup_values = NULL;
 #endif
 	DECL_KERNEL_CONTEXT(kcxt, GPUSCAN_VARLENA_BUFSZ);
 	__shared__ cl_uint	nitems_base;

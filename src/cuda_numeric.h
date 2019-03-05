@@ -638,8 +638,8 @@ pg_comp_hash(kern_context *kcxt, pg_numeric_t datum)
 	if (datum.isnull)
 		return 0;
 
-
-
+	return pg_hash_any((cl_uchar *)&datum.value,
+					   offsetof(pg_numeric_t, precision) + sizeof(cl_short));
 }
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
