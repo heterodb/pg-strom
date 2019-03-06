@@ -3438,9 +3438,10 @@ unable_node:
  * It shows a quick decision whether the provided expression tree is
  * available to run on CUDA device, or not.
  */
-int
-__pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
-								 const char *filename, int lineno)
+bool
+__pgstrom_device_expression(PlannerInfo *root, Expr *expr,
+							int *p_devcost, int *p_extra_sz,
+							const char *filename, int lineno)
 {
 	device_expression_walker_context con;
 	ListCell   *lc;
@@ -3453,7 +3454,7 @@ __pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
 	con.vl_usage = 0;
 
 	if (!expr)
-		return -1;
+		return false;
 	if (IsA(expr, List))
 	{
 		List   *exprList = (List *) expr;
@@ -3461,32 +3462,25 @@ __pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
 		foreach (lc, exprList)
 		{
 			if (!device_expression_walker(&con, (Expr *)lfirst(lc) , NULL))
-				return -1;
+				return false;
 		}
 	}
 	else
 	{
 		if (!device_expression_walker(&con, expr, NULL))
-			return -1;
+			return false;
 	}
 	if (con.vl_usage > KERN_CONTEXT_VARLENA_BUFSZ_LIMIT)
 	{
 		elog(DEBUG2, "Expression consumes too much varlena buffer (%zu): %s",
 			 con.vl_usage, nodeToString(expr));
-		return -1;
+		return false;
 	}
 	Assert(con.devcost >= 0);
-	return con.devcost;
-}
-
-bool
-__pgstrom_device_expression(PlannerInfo *root, Expr *expr,
-							const char *filename, int lineno)
-{
-	if (__pgstrom_device_expression_cost(root, expr,
-										 filename, lineno) < 0)
-		return false;
-
+	if (p_devcost)
+		*p_devcost = con.devcost;
+	if (p_extra_sz)
+		*p_extra_sz = con.vl_usage;
 	return true;
 }
 

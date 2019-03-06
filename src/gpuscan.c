@@ -609,10 +609,14 @@ output:
  * Code generator for GpuScan's projection
  */
 static void
-codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
-						   Index scanrelid, Relation relation,
-						   List *__tlist_dev)
+codegen_gpuscan_projection(StringInfo kern,
+						   codegen_context *context,
+						   RelOptInfo *baserel,
+						   Relation relation,
+						   List *__tlist_dev,
+						   Bitmapset *outer_refs)
 {
+	Index			scanrelid = baserel->relid;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	List		   *tlist_dev = NIL;
 	AttrNumber	   *varremaps;
@@ -631,6 +635,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	initStringInfo(&tbody);
 	initStringInfo(&cbody);
 	initStringInfo(&temp);
+
 	/*
 	 * step.1 - extract non-junk attributes
 	 */
@@ -640,6 +645,70 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 		if (!tle->resjunk)
 			tlist_dev = lappend(tlist_dev, tle);
+	}
+
+	/*
+	 * step.2 - define preprocessor variables
+	 */
+	appendStringInfo(
+		kern,
+		"#define GPUSCAN_VARLENA_BUFSZ %d\n"
+		"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS %d\n",
+		context->varlena_bufsz,
+		tlist_dev ? list_length(tlist_dev) : RelationGetNumberOfAttributes(relation));
+
+	/*
+	 * step.3 - make an "as-is" projection for columnar case
+	 */
+	if (!tlist_dev)
+	{
+		appendStringInfoString(
+			kern,
+			"STATIC_FUNCTION(void)\n"
+			"gpuscan_projection_column(kern_context *kcxt,\n"
+			"                          kern_data_store *kds_src,\n"
+			"                          size_t   index,\n"
+			"                          cl_char *tup_dclass,\n"
+			"                          Datum   *tup_values)\n"
+			"{\n"
+			"  void        *addr __attribute__((unused));\n"
+			"  pg_anytype_t temp __attribute__((unused));\n");
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+			dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
+			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+			if (!bms_is_member(k, outer_refs) || !dtype)
+				appendStringInfo(
+					kern,
+					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
+			else
+			{
+				appendStringInfo(
+					kern,
+					"  addr = kern_get_datum_column(kds_src,%d,index);\n"
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    pg_datum_ref(kcxt,temp.%s_v,addr);\n"
+					"    pg_datum_store(kcxt,temp.%s_v,\n"
+					"                   tup_dclass[%d],\n"
+					"                   tup_values[%d]);\n"
+					"  }\n",
+					j,
+					j,
+					dtype->type_name,
+					dtype->type_name,
+					j,
+					j);
+			}
+		}
+		appendStringInfoString(
+			kern,
+			"}\n");
+		return;
 	}
 
 	/*
@@ -850,6 +919,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	 */
 	appendStringInfo(
 		kern,
+		"#define GPUSCAN_HAS_DEVICE_PROJECTION 1\n"
 		"STATIC_FUNCTION(void)\n"
 		"gpuscan_projection_tuple(kern_context *kcxt,\n"
 		"                         kern_data_store *kds_src,\n"
@@ -878,16 +948,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		decl.data,
 		cbody.data);
 
-	/*
-	 * step.7 - define preprocessor variables
-	 */
-	appendStringInfo(
-		kern,
-		"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS %d\n"
-		"#define GPUSCAN_VARLENA_BUFSZ %d\n",
-		list_length(tlist_dev),
-		context->varlena_bufsz);
-
 	list_free(tlist_dev);
 	pfree(temp.data);
 	pfree(decl.data);
@@ -900,7 +960,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
  * target-list, then returns true, if new target-entry was added.
  */
 static List *
-add_unique_expression(List *tlist, Expr *expr, bool resjunk)
+add_unique_expression(List *tlist, Node *node, bool resjunk)
 {
 	TargetEntry	   *tle;
 	ListCell	   *lc;
@@ -908,14 +968,14 @@ add_unique_expression(List *tlist, Expr *expr, bool resjunk)
 	foreach (lc, tlist)
 	{
 		tle = (TargetEntry *) lfirst(lc);
-		if (equal(expr, tle->expr))
+		if (equal(node, tle->expr))
 		{
 			if (tle->resjunk && !resjunk)
 				tle->resjunk = false;
 			return tlist;
 		}
 	}
-	tle = makeTargetEntry(copyObject(expr),
+	tle = makeTargetEntry((Expr *)copyObject(node),
 						  list_length(tlist) + 1,
 						  NULL,
 						  resjunk);
@@ -932,9 +992,10 @@ add_unique_expression(List *tlist, Expr *expr, bool resjunk)
 typedef struct
 {
 	PlannerInfo *root;
-	Index		scanrelid;
-	int			depth;
+	Relids		relids;
 	bool		resjunk;
+	bool		has_expressions;
+	size_t		extra_sz;
 	List	   *tlist_temp;
 } build_gpuscan_projection_context;
 
@@ -942,48 +1003,49 @@ static bool
 build_gpuscan_projection_walker(Node *node, void *__context)
 {
 	build_gpuscan_projection_context *context = __context;
-	int			depth_saved;
-	bool		retval;
+	int			extra_sz;
 
 	if (IsA(node, Var))
 	{
 		Var	   *varnode = (Var *) node;
 		bool	resjunk;
 
-		/* if these Asserts fail, planner messed up */
-		Assert(varnode->varno == context->scanrelid);
+		/*
+		 * Is it a reference to other relation to be replaced by
+		 * replace_nestloop_params(). So, it shall be executed on
+		 * the CPU side.
+		 */
+		if (!bms_is_member(varnode->varno, context->relids))
+			return false;
 		Assert(varnode->varlevelsup == 0);
 
 		/* GPU projection cannot contain whole-row var */
 		if (varnode->varattno == InvalidAttrNumber)
 			return true;
-
 		resjunk = (varnode->varattno < 0 || context->resjunk);
-		context->tlist_temp =
-			add_unique_expression(context->tlist_temp,
-								  (Expr *)varnode, resjunk);
+		context->tlist_temp = add_unique_expression(context->tlist_temp,
+													node, resjunk);
 		return false;
 	}
-	else if (context->depth == 0 &&
-			 (IsA(node, Const) || IsA(node, Param)))
+	else if (IsA(node, Const) || IsA(node, Param))
 	{
-		/* no need to have top-level constant values on the device side */
+		/* no need to carry constant values from GPU kernel */
 		return false;
 	}
-	else if (pgstrom_device_expression(context->root, (Expr *) node))
+	else if (pgstrom_device_expression_extrasz(context->root, (Expr *) node,
+											   &extra_sz))
 	{
-		context->tlist_temp =
-			add_unique_expression(context->tlist_temp,
-								  (Expr *) node,
-								  context->resjunk);
+		//TODO: Var must be on scanrel
+		context->tlist_temp = add_unique_expression(context->tlist_temp,
+													node,
+													context->resjunk);
+		context->has_expressions = true;
+		context->extra_sz += MAXALIGN(extra_sz);
 		return false;
 	}
 	/* walks down if expression is host-only */
-	depth_saved = context->depth++;
-	retval = expression_tree_walker(node, build_gpuscan_projection_walker,
-									context);
-	context->depth = depth_saved;
-	return retval;
+	return expression_tree_walker(node, build_gpuscan_projection_walker,
+								  context);
 }
 
 static List *
@@ -992,7 +1054,9 @@ build_gpuscan_projection(PlannerInfo *root,
 						 Relation relation,
 						 List *tlist,
 						 List *host_quals,
-						 List *dev_quals)
+						 List *dev_quals,
+						 cl_int *p_tuple_sz,
+						 cl_int *p_extra_sz)
 {
 	build_gpuscan_projection_context context;
 	Index		scanrelid = baserel->relid;
@@ -1000,33 +1064,48 @@ build_gpuscan_projection(PlannerInfo *root,
 	bool		compatible = true;
 	List	   *tlist_dev = NIL;
 	ListCell   *lc;
-
-	/*
-	 * FIXME: In case when PG11 or later injects a ProjectionPath on top of
-	 * the CustomPath, it always calls PlanCustomPath method with tlist==NIL,
-	 * then attach result of build_path_tlist().
-	 */
-	if (tlist == NIL)
-		return NIL;
+	cl_int		tuple_sz = 0;
+	cl_int		data_len = 0;
+	int			j;
 
 	memset(&context, 0, sizeof(context));
 	context.root = root;
-	context.scanrelid = scanrelid;
-	context.depth = 0;
-	context.resjunk = false;
-	context.tlist_temp = NIL;
+	context.relids = baserel->relids;
 
-	foreach (lc, tlist)
+	if (tlist != NIL)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		foreach (lc, tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
 
-		if (build_gpuscan_projection_walker((Node *)tle->expr, &context))
-			return NIL;
-		Assert(context.depth == 0);
+			if (build_gpuscan_projection_walker((Node *)tle->expr,
+												&context))
+				goto no_gpu_projection;
+		}
 	}
+	else
+	{
+		/*
+		 * When ProjectionPath is on CustomPath(GpuScan), it always assigns
+		 * the result of build_path_tlist() and calls PlanCustomPath method
+		 * with tlist == NIL.
+		 * So, if GPU projection wants to make something valuable, we need
+		 * to check path-target.
+		 * Also don't forget all the Var-nodes to be added must exist at
+		 * the custrom_scan_tlist because setrefs.c references this list.
+		 */
+		foreach (lc, baserel->reltarget->exprs)
+		{
+			if (build_gpuscan_projection_walker((Node *)lfirst(lc),
+												&context))
+				goto no_gpu_projection;
+		}
+	}
+	if (!context.has_expressions)
+		goto no_gpu_projection;
 
 	/*
-	 * Host quals needs 
+	 * Host quals need
 	 */
 	if (host_quals)
 	{
@@ -1036,17 +1115,16 @@ build_gpuscan_projection(PlannerInfo *root,
 		{
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
-				return NIL;		/* no whole-row support */
+				goto no_gpu_projection;
 			context.tlist_temp
 				= add_unique_expression(context.tlist_temp,
-										(Expr *) var,
-										var->varattno < 0);
+										(Node *) var, var->varattno < 0);
 		}
 		list_free(vars_list);
 	}
 
 	/*
-	 * Device quals need junk var-nodes
+	 * Device quals need as junk attribute
 	 */
 	context.resjunk = true;
 	if (dev_quals)
@@ -1057,10 +1135,10 @@ build_gpuscan_projection(PlannerInfo *root,
 		{
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
-				return NIL;		/* no whole-row support */
+				goto no_gpu_projection;
 			context.tlist_temp
 				= add_unique_expression(context.tlist_temp,
-										(Expr *) var, true);
+										(Node *) var, true);
 		}
 		list_free(vars_list);
 	}
@@ -1068,37 +1146,62 @@ build_gpuscan_projection(PlannerInfo *root,
 	/*
 	 * Reorder of target-entry; non-junk first, then junk attributes
 	 */
+	tuple_sz = offsetof(kern_tupitem,
+						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
+	if (tupdesc->tdhasoid)
+		tuple_sz += sizeof(Oid);
+	tuple_sz = MAXALIGN(tuple_sz);
+
 	foreach (lc, context.tlist_temp)
 	{
-		TargetEntry	   *tle = (TargetEntry *) lfirst(lc);
-		AttrNumber		resno;
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		Oid			type_id = exprType((Node *)tle->expr);
+		int			type_mod = exprTypmod((Node *)tle->expr);
+		AttrNumber	resno = list_length(tlist_dev) + 1;
+		int16		typlen;
+		bool		typbyval;
+		char		typalign;
 
 		if (tle->resjunk)
 			continue;
-		resno = list_length(tlist_dev) + 1;
+		get_typlenbyvalalign(type_id, &typlen, &typbyval, &typalign);
+		data_len = att_align_nominal(data_len, typalign);
+
 		if (!IsA(tle->expr, Var))
+		{
 			compatible = false;
-		else if (resno >= tupdesc->natts)
-			compatible = false;
+			data_len += get_typavgwidth(type_id, type_mod);
+		}
 		else
 		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, resno - 1);
-			Var	   *var = (Var *)tle->expr;
+			Var		   *varnode = (Var *)tle->expr;
 
-			if (var->varno == scanrelid &&
-				var->varattno == attr->attnum)
-			{
-				Assert(var->vartype == attr->atttypid &&
-					   var->vartypmod == attr->atttypmod &&
-					   var->varcollid == attr->attcollation &&
-					   var->varlevelsup == 0);
-			}
-			else
+			if (resno >= tupdesc->natts)
 				compatible = false;
+			else
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc, resno - 1);
+	
+				if (varnode->varno == scanrelid &&
+					varnode->varattno == attr->attnum)
+				{
+					Assert(varnode->vartype == attr->atttypid &&
+						   varnode->vartypmod == attr->atttypmod &&
+						   varnode->varcollid == attr->attcollation &&
+						   varnode->varlevelsup == 0);
+				}
+				else
+					compatible = false;
+			}
+			data_len += baserel->attr_widths[varnode->varattno - 1];
 		}
 		tle->resno = resno;
 		tlist_dev = lappend(tlist_dev, tle);
 	}
+	/* check number of valid attributes */
+	if (compatible &&
+		list_length(tlist_dev) != tupdesc->natts)
+		goto no_gpu_projection;
 
 	foreach (lc, context.tlist_temp)
 	{
@@ -1108,23 +1211,30 @@ build_gpuscan_projection(PlannerInfo *root,
 			continue;
 		tle->resno = list_length(tlist_dev) + 1;
 		tlist_dev = lappend(tlist_dev, tle);
-		/* junk attribute involves projection */
-		compatible = false;
 	}
-	/* check number of attributes */
-	if (list_length(tlist_dev) != tupdesc->natts)
-		compatible = false;
-	/*
-	 * At this point, device projection is "executable".
-	 * However, if compatible_tlist == true, it implies the upper node
-	 * expects physically compatible tuple, thus, it is uncertain whether
-	 * we should run GpuProjection for this GpuScan.
-	 */
-	if (compatible)
-		return NIL;
+	*p_tuple_sz = MAXALIGN(tuple_sz);
+	*p_extra_sz = context.extra_sz;
 	return tlist_dev;
+
+no_gpu_projection:
+	tuple_sz = offsetof(kern_tupitem,
+						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
+	if (tupdesc->tdhasoid)
+		tuple_sz += sizeof(Oid);
+	tuple_sz = MAXALIGN(tuple_sz);
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+		tuple_sz = att_align_nominal(tuple_sz, attr->attalign);
+		tuple_sz += baserel->attr_widths[j + 1 - baserel->min_attr];
+	}
+	*p_tuple_sz = MAXALIGN(tuple_sz);
+	*p_extra_sz = 0;
+	return NIL;
 }
 
+#if 0
 /*
  * bufsz_estimate_gpuscan_projection - GPU Projection may need larger
  * destination buffer than the source buffer. 
@@ -1226,6 +1336,7 @@ out:
 	*p_proj_tuple_sz = proj_tuple_sz;
 	*p_proj_extra_sz = proj_extra_sz;
 }
+#endif
 
 /*
  * PlanGpuScanPath - construction of a new GpuScan plan node
@@ -1250,9 +1361,9 @@ PlanGpuScanPath(PlannerInfo *root,
 	List		   *outer_refs = NIL;
 	ListCell	   *cell;
 	Bitmapset	   *varattnos = NULL;
-	size_t			varlena_bufsz;
 	cl_int			proj_tuple_sz = 0;
 	cl_int			proj_extra_sz = 0;
+	cl_int			qual_extra_sz = 0;
 	cl_int			i, j;
 	StringInfoData	kern;
 	StringInfoData	source;
@@ -1277,8 +1388,7 @@ PlanGpuScanPath(PlannerInfo *root,
 
 		if (exprType((Node *)rinfo->clause) != BOOLOID)
 			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
-		devcost = pgstrom_device_expression_cost(root, rinfo->clause);
-		if (devcost < 0)
+		if (!pgstrom_device_expression_devcost(root, rinfo->clause, &devcost))
 			host_quals = lappend(host_quals, rinfo);
 		else
 		{
@@ -1302,38 +1412,36 @@ PlanGpuScanPath(PlannerInfo *root,
 	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context, root);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
-	varlena_bufsz = context.varlena_bufsz;
+	qual_extra_sz = context.varlena_bufsz;
 	tlist_dev = build_gpuscan_projection(root,
 										 baserel,
 										 relation,
 										 tlist,
 										 host_quals,
-										 dev_quals);
-	bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
-									  &proj_tuple_sz,
-									  &proj_extra_sz);
-	context.param_refs = NULL;
-	context.varlena_bufsz = proj_extra_sz;
-	codegen_gpuscan_projection(&kern, &context,
-							   baserel->relid,
-							   relation,
-							   tlist_dev ? tlist_dev : tlist);
+										 dev_quals,
+										 &proj_tuple_sz,
+										 &proj_extra_sz);
 	if (tlist_dev)
-		appendStringInfo(&kern,
-						 "#define GPUSCAN_HAS_DEVICE_PROJECTION 1\n");
+		pull_varattnos((Node *)tlist_dev, baserel->relid, &varattnos);
+	else
+		pull_varattnos((Node *)baserel->reltarget->exprs,
+					   baserel->relid, &varattnos);
+	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);
+
+	context.param_refs = NULL;
+	context.varlena_bufsz = Max(qual_extra_sz, proj_extra_sz);
+	codegen_gpuscan_projection(&kern,
+							   &context,
+							   baserel,
+							   relation,
+							   tlist_dev,
+							   varattnos);
 	heap_close(relation, NoLock);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
-	varlena_bufsz = Max(varlena_bufsz, context.varlena_bufsz);
 
-	/* pickup referenced attributes */
-	for (i=baserel->min_attr, j=0; i < baserel->max_attr; i++, j++)
-	{
-		varattnos = bms_add_member(varattnos,
-								   i - FirstLowInvalidHeapAttributeNumber);
-	}
+	/* save the outer_refs for columnar optimization */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
-	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);
 	for (i = bms_first_member(varattnos);
 		 i >= 0;
 		 i = bms_next_member(varattnos, i))
@@ -1358,7 +1466,7 @@ PlanGpuScanPath(PlannerInfo *root,
 
 	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
-	gs_info->varlena_bufsz = varlena_bufsz;
+	gs_info->varlena_bufsz = context.varlena_bufsz;
 	gs_info->proj_tuple_sz = proj_tuple_sz;
 	gs_info->proj_extra_sz = proj_extra_sz;
 	gs_info->outer_refs = outer_refs;
@@ -1423,8 +1531,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
-		devcost = pgstrom_device_expression_cost(root, rinfo->clause);
-		if (devcost < 0)
+		if (!pgstrom_device_expression_devcost(root, rinfo->clause, &devcost))
 			return false;
 		outer_quals = lappend(outer_quals, rinfo);
 		outer_costs = lappend_int(outer_costs, devcost);
@@ -1592,8 +1699,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(scan_rel != NULL);
-	Assert(outerPlan(node) == NULL);
-	Assert(innerPlan(node) == NULL);
+	Assert(outerPlanState(node) == NULL);
+	Assert(innerPlanState(node) == NULL);
 
 	/* setup GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(gs_info->optimal_gpu,

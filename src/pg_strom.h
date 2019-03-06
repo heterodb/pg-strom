@@ -995,14 +995,15 @@ extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern bool __pgstrom_device_expression(PlannerInfo *root, Expr *expr,
+										int *p_devcost, int *p_extra_sz,
 										const char *filename, int lineno);
-
-extern int	__pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
-											 const char *filename, int lineno);
 #define pgstrom_device_expression(a,b)					\
-	__pgstrom_device_expression((a),(b),__FILE__,__LINE__)
-#define pgstrom_device_expression_cost(a,b)				\
-	__pgstrom_device_expression_cost((a),(b),__FILE__,__LINE__)
+	__pgstrom_device_expression((a),(b),NULL,NULL,__FILE__,__LINE__)
+#define pgstrom_device_expression_devcost(a,b,c)		\
+	__pgstrom_device_expression((a),(b),(c),NULL,__FILE__,__LINE__)
+#define pgstrom_device_expression_extrasz(a,b,c)		\
+	__pgstrom_device_expression((a),(b),NULL,(c),__FILE__,__LINE__)
+
 extern void pgstrom_init_codegen_context(codegen_context *context,
 										 PlannerInfo *root);
 extern void pgstrom_init_codegen(void);
