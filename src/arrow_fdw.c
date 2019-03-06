@@ -1042,6 +1042,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				 errhint("Use 'file' or 'dir' option to specify apache arrow files on behalf of the foreign table")));
 
 	/* read the schema */
+	memset(&schema, 0, sizeof(ArrowSchema));
 	foreach (lc, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc));
