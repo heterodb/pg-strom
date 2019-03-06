@@ -327,7 +327,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (pgstrom_device_expression(root, rinfo->clause))
+		if (pgstrom_device_expression(rinfo->clause,
+									  baserel->relids))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -1032,7 +1033,8 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		/* no need to carry constant values from GPU kernel */
 		return false;
 	}
-	else if (pgstrom_device_expression_extrasz(context->root, (Expr *) node,
+	else if (pgstrom_device_expression_extrasz((Expr *) node,
+											   context->relids,
 											   &extra_sz))
 	{
 		//TODO: Var must be on scanrel
@@ -1388,7 +1390,9 @@ PlanGpuScanPath(PlannerInfo *root,
 
 		if (exprType((Node *)rinfo->clause) != BOOLOID)
 			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
-		if (!pgstrom_device_expression_devcost(root, rinfo->clause, &devcost))
+		if (!pgstrom_device_expression_devcost(rinfo->clause,
+											   baserel->relids,
+											   &devcost))
 			host_quals = lappend(host_quals, rinfo);
 		else
 		{
@@ -1531,7 +1535,9 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
-		if (!pgstrom_device_expression_devcost(root, rinfo->clause, &devcost))
+		if (!pgstrom_device_expression_devcost(rinfo->clause,
+											   baserel->relids,
+											   &devcost))
 			return false;
 		outer_quals = lappend(outer_quals, rinfo);
 		outer_costs = lappend_int(outer_costs, devcost);
@@ -1548,11 +1554,14 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		{
 			Var	   *var = (Var *) expr;
 
+			/* must be a field on the table */
+			if (!bms_is_member(var->varno, baserel->relids))
+				return false;
 			/* we don't support whole-row reference */
 			if (var->varattno == InvalidAttrNumber)
 				return false;
 		}
-		else if (!pgstrom_device_expression(root, expr))
+		else if (!pgstrom_device_expression(expr, baserel->relids))
 			return false;
 	}
 	/* Optimal GPU selection */

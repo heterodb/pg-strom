@@ -174,7 +174,8 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 		RestrictInfo   *rinfo = lfirst(lc);
 		Bitmapset	   *varattnos = NULL;
 
-		if (pgstrom_device_expression(root, rinfo->clause))
+		if (pgstrom_device_expression(rinfo->clause,
+									  baserel->relids))
 		{
 			/*
 			 * MEMO: Right now, we don't allow to reference compressed

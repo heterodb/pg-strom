@@ -3063,7 +3063,7 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 typedef struct {
 	const char *filename;
 	int			lineno;
-	PlannerInfo *root;
+	Relids		varnos;
 	int			devcost;
 	ssize_t		vl_usage;
 } device_expression_walker_context;
@@ -3108,6 +3108,15 @@ device_expression_walker(device_expression_walker_context *con,
 		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 
 		/*
+		 * NOTE: When we check parameterized paths, its target-entry may
+		 * contain references to other tables, which shall be replaced by
+		 * replace_nestloop_params(). So, Var-node out of con->varnos
+		 * shall not be visible for device code.
+		 */
+		if (!bms_is_member(var->varno, con->varnos))
+			goto unable_node;
+
+		/*
 		 * supported and scalar types only
 		 *
 		 * NOTE: We don't support array data type stored in relations,
@@ -3120,31 +3129,8 @@ device_expression_walker(device_expression_walker_context *con,
 		if (!dtype || dtype->type_element)
 			goto unable_node;
 		if (dtype->type_length < 0)
-		{
-			PlannerInfo	   *root = con->root;
-			RelOptInfo	   *rel;
-
-			varlena_sz = -1;	/* unknown, if no table statistics */
-			if (var->varno == INDEX_VAR)
-			{
-				if (var->varnoold < root->simple_rel_array_size)
-				{
-					rel = root->simple_rel_array[var->varnoold];
-					if (var->varoattno >= rel->min_attr &&
-						var->varoattno <= rel->max_attr)
-						varlena_sz = rel->attr_widths[var->varoattno -
-													  rel->min_attr];
-				}
-			}
-			else if (var->varno < root->simple_rel_array_size)
-			{
-				rel = root->simple_rel_array[var->varno];
-				if (var->varattno >= rel->min_attr &&
-					var->varattno <= rel->max_attr)
-					varlena_sz = rel->attr_widths[var->varattno -
-												  rel->min_attr];
-			}
-		}
+			varlena_sz = type_maximum_size(var->vartype,
+										   var->vartypmod);
 		else
 			varlena_sz = 0;
 	}
@@ -3439,7 +3425,7 @@ unable_node:
  * available to run on CUDA device, or not.
  */
 bool
-__pgstrom_device_expression(PlannerInfo *root, Expr *expr,
+__pgstrom_device_expression(Expr *expr, Relids varnos,
 							int *p_devcost, int *p_extra_sz,
 							const char *filename, int lineno)
 {
@@ -3447,9 +3433,9 @@ __pgstrom_device_expression(PlannerInfo *root, Expr *expr,
 	ListCell   *lc;
 
 	memset(&con, 0, sizeof(device_expression_walker_context));
-	con.root     = root;
 	con.filename = filename;
 	con.lineno   = lineno;
+	con.varnos   = varnos;
 	con.devcost  = 0.0;
 	con.vl_usage = 0;
 

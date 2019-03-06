@@ -994,7 +994,7 @@ extern bool pgstrom_devcast_supported(Oid src_type_oid, Oid dst_type_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
-extern bool __pgstrom_device_expression(PlannerInfo *root, Expr *expr,
+extern bool __pgstrom_device_expression(Expr *expr, Relids varnos,
 										int *p_devcost, int *p_extra_sz,
 										const char *filename, int lineno);
 #define pgstrom_device_expression(a,b)					\

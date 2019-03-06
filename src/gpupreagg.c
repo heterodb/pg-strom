@@ -213,7 +213,7 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_final,
 											PathTarget *target_partial,
 											PathTarget *target_device,
-											PathTarget *target_input,
+											Path       *input_path,
 											Bitmapset **p_pfunc_bitmap,
 											Node **p_havingQual,
 											bool *p_can_pullup_outerscan);
@@ -957,6 +957,7 @@ cost_gpupreagg(PlannerInfo *root,
 	/* Cost come from the underlying path */
 	if (gpa_info->outer_scanrelid == 0)
 	{
+		RelOptInfo *outer_rel = input_path->parent;
 		Cost	outer_startup = input_path->startup_cost;
 		Cost	outer_total   = input_path->total_cost;
 		List   *outer_tlist   = input_path->pathtarget->exprs;
@@ -967,7 +968,8 @@ cost_gpupreagg(PlannerInfo *root,
 		 */
 		if (enable_pullup_outer_join &&
 			pgstrom_path_is_gpujoin(input_path) &&
-			pgstrom_device_expression(root, (Expr *)outer_tlist))
+			pgstrom_device_expression((Expr *)outer_tlist,
+									  outer_rel->relids))
 		{
 			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
 			outer_total -= cpu_tuple_cost * input_path->rows;
@@ -1235,11 +1237,13 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	if (IsA(input_path, ProjectionPath))
 	{
 		ProjectionPath *pjpath = (ProjectionPath *)input_path;
+		RelOptInfo	   *pjrel = pjpath->path.parent;
 		PathTarget	   *pathtarget = pjpath->path.pathtarget;
 
 		if (pjpath->dummypp &&
 			pgstrom_path_is_gpujoin(pjpath->subpath) &&
-			pgstrom_device_expression(root, (Expr *)pathtarget->exprs))
+			pgstrom_device_expression((Expr *)pathtarget->exprs,
+									  pjrel->relids))
 		{
 			input_path = pgstrom_copy_gpujoin_path(pjpath->subpath);
 			input_path->pathtarget = pathtarget;
@@ -1654,7 +1658,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									 target_final,
 									 target_partial,
 									 target_device,
-									 input_path->pathtarget,
+									 input_path,
 									 &pfunc_bitmap,
 									 &havingQual,
 									 &can_pullup_outerscan))
@@ -2158,6 +2162,7 @@ make_alternative_aggref(PlannerInfo *root,
 						PathTarget *target_partial,
 						PathTarget *target_device,
 						PathTarget *target_input,
+						RelOptInfo *input_rel,
 						Bitmapset **p_pfunc_bitmap)
 {
 	const aggfunc_catalog_t *aggfn_cat;
@@ -2251,7 +2256,8 @@ make_alternative_aggref(PlannerInfo *root,
 		{
 			Node   *temp = replace_expression_by_outerref((Node *)pfunc->args,
 														  target_input);
-			if (!pgstrom_device_expression(root, (Expr *) temp))
+			if (!pgstrom_device_expression((Expr *)temp,
+										   input_rel->relids))
 			{
 				elog(DEBUG2, "argument of %s is not device executable: %s",
 					 format_procedure(aggref->aggfnoid),
@@ -2379,6 +2385,7 @@ typedef struct
 	PathTarget *target_partial;
 	PathTarget *target_device;
 	PathTarget *target_input;
+	RelOptInfo *input_rel;
 	Bitmapset  *pfunc_bitmap;
 } gpupreagg_build_path_target_context;
 
@@ -2398,6 +2405,7 @@ replace_expression_by_altfunc(Node *node,
 												con->target_partial,
 												con->target_device,
 												con->target_input,
+												con->input_rel,
 												&con->pfunc_bitmap);
 		if (!aggfn)
 			con->device_executable = false;
@@ -2435,13 +2443,15 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_final,	/* out */
 							PathTarget *target_partial,	/* out */
 							PathTarget *target_device,	/* out */
-							PathTarget *target_input,	/* in */
+							Path       *input_path,     /* in */
 							Bitmapset **p_pfunc_bitmap,	/* out */
 							Node **p_havingQual,		/* out */
 							bool *p_can_pullup_outerscan) /* out */
 {
 	gpupreagg_build_path_target_context con;
 	Query	   *parse = root->parse;
+	PathTarget *target_input = input_path->pathtarget;
+	RelOptInfo *input_rel = input_path->parent;
 	Node	   *havingQual = NULL;
 	ListCell   *lc;
 	cl_int		i, j, n;
@@ -2453,6 +2463,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	con.target_partial	= target_partial;
 	con.target_device	= target_device;
 	con.target_input	= target_input;
+	con.input_rel       = input_rel;
 	con.pfunc_bitmap    = NULL;
 
 	/*
@@ -2503,7 +2514,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 * outer scan node. This expression must be calculated on the
 			 * host-side.
 			 */
-			if (!pgstrom_device_expression(root, expr))
+			if (!pgstrom_device_expression(expr, input_rel->relids))
 				*p_can_pullup_outerscan = false;
 
 			/* grouping-key should be on the any of input items */

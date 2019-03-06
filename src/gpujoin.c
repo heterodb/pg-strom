@@ -1696,7 +1696,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (!pgstrom_device_expression(root, rinfo->clause))
+		if (!pgstrom_device_expression(rinfo->clause, joinrel->relids))
 			return;
 	}
 
@@ -1778,7 +1778,8 @@ try_add_gpujoin_paths(PlannerInfo *root,
 							join_path->innerjoinpath->parent->relids))
 				return;
 
-			if (!pgstrom_device_expression(root, (Expr *)join_quals))
+			if (!pgstrom_device_expression((Expr *)join_quals,
+										   joinrel->relids))
 				return;
 
 			ip_item = palloc0(sizeof(inner_path_item));
@@ -1907,6 +1908,7 @@ static void
 build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 {
 	GpuJoinPath	   *gpath = context->gpath;
+	RelOptInfo	   *gjrel = gpath->cpath.path.parent;
 	RelOptInfo	   *rel;
 	ListCell	   *cell;
 	int				i;
@@ -2074,7 +2076,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			 nodeToString(phvnode));
 	}
 	else if (!context->resjunk &&
-			 pgstrom_device_expression(context->root, (Expr *)node))
+			 pgstrom_device_expression((Expr *)node, gjrel->relids))
 	{
 		TargetEntry	   *ps_tle;
 
