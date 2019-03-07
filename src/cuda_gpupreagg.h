@@ -389,70 +389,77 @@ gpupreagg_setup_common(kern_context    *kcxt,
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_uint	extra_base;
 
-	/* calculation of required extra buffer */
-#if GPUPREAGG_DEVICE_PROJECTION_NFIELDS > 0
-	memset(tup_extra, 0, sizeof(tup_extra));
-#endif
-	for (int j=0; j < kds_slot->ncols; j++)
+	/*
+	 * calculation of the required extra buffer
+	 */
+	if (slot_index != UINT_MAX)
 	{
-		kern_colmeta   *cmeta = &kds_slot->colmeta[j];
-		cl_char			dclass = tup_dclass[j];
-		cl_char		   *addr;
+#if GPUPREAGG_DEVICE_PROJECTION_NFIELDS > 0
+		memset(tup_extra, 0, sizeof(tup_extra));
+#endif
+		for (int j=0; j < kds_slot->ncols; j++)
+		{
+			kern_colmeta   *cmeta = &kds_slot->colmeta[j];
+			cl_char			dclass = tup_dclass[j];
+			cl_char		   *addr;
 
-		if (dclass == DATUM_CLASS__NULL)
-			continue;
-		if (cmeta->attbyval)
-		{
-			assert(dclass == DATUM_CLASS__NORMAL);
-			continue;
-		}
-		if (cmeta->attlen > 0)
-		{
-			assert(dclass == DATUM_CLASS__NORMAL);
-			addr = DatumGetPointer(tup_values[j]);
-			if (addr <  (char *)kds_src ||
-				addr >= (char *)kds_src + kds_src->length)
+			if (dclass == DATUM_CLASS__NULL)
+				continue;
+			if (cmeta->attbyval)
 			{
-				tup_extra[j] = cmeta->attlen;
-				extra_sz += MAXALIGN(cmeta->attlen);
+				assert(dclass == DATUM_CLASS__NORMAL);
+				continue;
 			}
-		}
-		else
-		{
-			/*
-			 * NOTE: DATUM_CLASS__* that is not NORMAL only happen when
-			 * Var-node references the kds_src buffer which is not
-			 * a normal heap-tuple (Apache Arrow). So, it is sufficient
-			 * to copy only pg_varlena_t or pg_array_t according to the
-			 * datum class. Unlike gpupreagg_final_data_move(), kds_src
-			 * buffer shall be valid until reduction steps.
-			 */
-			assert(cmeta->attlen == -1);
-			switch (dclass)
+			if (cmeta->attlen > 0)
 			{
-				case DATUM_CLASS__VARLENA:
-					tup_extra[j] = sizeof(pg_varlena_t);
-					extra_sz += MAXALIGN(sizeof(pg_varlena_t));
-					break;
-				case DATUM_CLASS__ARRAY:
-					tup_extra[j] = sizeof(pg_array_t);
-					extra_sz += MAXALIGN(sizeof(pg_array_t));
-					break;
-				default:
-					assert(dclass == DATUM_CLASS__NORMAL);
-					addr = DatumGetPointer(tup_values[j]);
-					if (addr <  (char *)kds_src ||
-						addr >= (char *)kds_src + kds_src->length)
-					{
-						tup_extra[j] = VARSIZE_ANY(addr);
-						extra_sz += MAXALIGN(VARSIZE_ANY(addr));
-					}
-					break;
+				assert(dclass == DATUM_CLASS__NORMAL);
+				addr = DatumGetPointer(tup_values[j]);
+				if (addr <  (char *)kds_src ||
+					addr >= (char *)kds_src + kds_src->length)
+				{
+					tup_extra[j] = cmeta->attlen;
+					extra_sz += MAXALIGN(cmeta->attlen);
+				}
 			}
-		}		
+			else
+			{
+				/*
+				 * NOTE: DATUM_CLASS__* that is not NORMAL only happen when
+				 * Var-node references the kds_src buffer which is not
+				 * a normal heap-tuple (Apache Arrow). So, it is sufficient
+				 * to copy only pg_varlena_t or pg_array_t according to the
+				 * datum class. Unlike gpupreagg_final_data_move(), kds_src
+				 * buffer shall be valid until reduction steps.
+				 */
+				assert(cmeta->attlen == -1);
+				switch (dclass)
+				{
+					case DATUM_CLASS__VARLENA:
+						tup_extra[j] = sizeof(pg_varlena_t);
+						extra_sz += MAXALIGN(sizeof(pg_varlena_t));
+						break;
+					case DATUM_CLASS__ARRAY:
+						tup_extra[j] = sizeof(pg_array_t);
+						extra_sz += MAXALIGN(sizeof(pg_array_t));
+						break;
+					default:
+						assert(dclass == DATUM_CLASS__NORMAL);
+						addr = DatumGetPointer(tup_values[j]);
+						if (addr <  (char *)kds_src ||
+							addr >= (char *)kds_src + kds_src->length)
+						{
+							tup_extra[j] = VARSIZE_ANY(addr);
+							extra_sz += MAXALIGN(VARSIZE_ANY(addr));
+						}
+						break;
+				}
+			}		
+		}
 	}
 
-	/* allocation of extra buffer for indirect/varlena values */
+	/*
+	 * allocation of extra buffer for indirect/varlena values
+	 */
 	offset = pgstromStairlikeSum(extra_sz, &required);
 	if (get_local_id() == 0)
 	{
