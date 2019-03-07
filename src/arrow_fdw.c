@@ -25,7 +25,6 @@
 typedef struct
 {
 	ArrowField	arrow_field;
-//	ArrowType	arrow_type;
 	ArrowTypeOptions attopts;
 	int64		nitems;				/* usually, same with rb_nitems */
 	int64		null_count;
@@ -356,9 +355,7 @@ makeRecordBatchState(ArrowSchema *schema,
 		ArrowFieldNode *fnode = &rbatch->nodes[j];
 		RecordBatchFieldState *c = &result->columns[j];
 
-//		c->arrow_type = field->type;
-//XXX fixme
-		memcpy(&c->arrow_field, field, sizeof(ArrowField));
+		copyArrowNode(&c->arrow_field.node, &field->node);
 		c->nitems     = fnode->length;
 		c->null_count = fnode->null_count;
 
@@ -1631,7 +1628,9 @@ arrowTypeValuesLength(ArrowType *type, int64 nitems)
 			}
 			break;
 		case ArrowNodeTag__List:	//to be supported later
+			//XXXX
 		case ArrowNodeTag__Struct:	//to be supported later
+			//XXXX
 		default:
 			elog(ERROR, "Arrow Type '%s' is not supported now",
 				 type->node.tagName);

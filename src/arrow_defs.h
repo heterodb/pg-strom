@@ -178,6 +178,8 @@ struct ArrowNode
 	size_t			nodeSz;
 #ifdef PG_STROM_H
 	void		  (*dumpArrowNode)(StringInfo str, struct ArrowNode *node);
+	void		  (*copyArrowNode)(struct ArrowNode *dest,
+								   const struct ArrowNode *source);
 #endif /* PG_STROM_H */
 };
 typedef struct ArrowNode		ArrowNode;

@@ -358,6 +358,263 @@ dumpArrowNode(ArrowNode *node)
 }
 #endif
 
+#ifdef PG_STROM_H
+/*
+ * Copy support of ArrowNode
+ */
+#define COPY_SCALAR(FIELD)								\
+	(dest)->FIELD = (src)->FIELD
+#define COPY_CSTRING(FIELD)								\
+	do {												\
+		(dest)->FIELD = pstrdup((src)->FIELD);			\
+		(dest)->_##FIELD##_len = strlen((dest)->FIELD);	\
+	} while(0)
+#define COPY_VECTOR(FIELD, NODETYPE)								\
+	do {															\
+		int		j;													\
+																	\
+		(dest)->FIELD = palloc(sizeof(NODETYPE) * (src)->_num_##FIELD);	\
+		for (j=0; j < (src)->_num_##FIELD; j++)						\
+			__copy##NODETYPE(&(dest)->FIELD[j], &(src)->FIELD[j]);	\
+		(dest)->_num_##FIELD = (src)->_num_##FIELD;					\
+	} while(0)
+
+static void
+__copyArrowNode(ArrowNode *dest, const ArrowNode *src)
+{
+	COPY_SCALAR(tag);
+	COPY_SCALAR(tagName);
+	COPY_SCALAR(nodeSz);
+	COPY_SCALAR(dumpArrowNode);
+	COPY_SCALAR(copyArrowNode);
+}
+#define __copyArrowTypeNull		__copyArrowNode
+#define __copyArrowTypeUtf8		__copyArrowNode
+#define __copyArrowTypeBinary	__copyArrowNode
+#define __copyArrowTypeBool		__copyArrowNode
+#define __copyArrowTypeList		__copyArrowNode
+#define __copyArrowTypeStruct	__copyArrowNode
+
+typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
+
+static void
+__copyArrowTypeInt(ArrowTypeInt *dest, const ArrowTypeInt *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(bitWidth);
+	COPY_SCALAR(is_signed);
+}
+
+static void
+__copyArrowTypeFloatingPoint(ArrowTypeFloatingPoint *dest,
+							 const ArrowTypeFloatingPoint *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(precision);
+}
+
+static void
+__copyArrowTypeDecimal(ArrowTypeDecimal *dest, const ArrowTypeDecimal *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(precision);
+	COPY_SCALAR(scale);
+}
+
+static void
+__copyArrowTypeDate(ArrowTypeDate *dest, const ArrowTypeDate *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(unit);
+}
+
+static void
+__copyArrowTypeTime(ArrowTypeTime *dest, const ArrowTypeTime *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+    COPY_SCALAR(unit);
+	COPY_SCALAR(bitWidth);
+}
+
+static void
+__copyArrowTypeTimestamp(ArrowTypeTimestamp *dest,
+						 const ArrowTypeTimestamp *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(unit);
+	COPY_CSTRING(timezone);
+}
+
+static void
+__copyArrowTypeInterval(ArrowTypeInterval *dest,
+						const ArrowTypeInterval *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(unit);
+}
+
+static void
+__copyArrowTypeUnion(ArrowTypeUnion *dest, const ArrowTypeUnion *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(mode);
+	dest->typeIds = palloc(sizeof(int32) * src->_num_typeIds);
+	memcpy(dest->typeIds, src->typeIds, sizeof(int32) * src->_num_typeIds);
+	dest->_num_typeIds = src->_num_typeIds;
+}
+
+static void
+__copyArrowTypeFixedSizeBinary(ArrowTypeFixedSizeBinary *dest,
+							   const ArrowTypeFixedSizeBinary *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(byteWidth);
+}
+
+static void
+__copyArrowTypeFixedSizeList(ArrowTypeFixedSizeList *dest,
+							 const ArrowTypeFixedSizeList *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(listSize);
+}
+
+static void
+__copyArrowTypeMap(ArrowTypeMap *dest, const ArrowTypeMap *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(keysSorted);
+}
+
+static void
+__copyArrowType(ArrowType *dest, const ArrowType *src)
+{
+	src->node.copyArrowNode(&dest->node, &src->node);
+}
+
+static void
+__copyArrowBuffer(ArrowBuffer *dest, const ArrowBuffer *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(offset);
+	COPY_SCALAR(length);
+}
+
+static void
+__copyArrowKeyValue(ArrowKeyValue *dest, const ArrowKeyValue *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_CSTRING(key);
+	COPY_CSTRING(value);
+}
+
+static void
+__copyArrowDictionaryEncoding(ArrowDictionaryEncoding *dest,
+							  const ArrowDictionaryEncoding *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(id);
+	COPY_SCALAR(indexType);
+	COPY_SCALAR(isOrdered);
+}
+
+static void
+__copyArrowField(ArrowField *dest, const ArrowField *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_CSTRING(name);
+	COPY_SCALAR(nullable);
+	__copyArrowType(&dest->type, &src->type);
+	__copyArrowDictionaryEncoding(&dest->dictionary, &src->dictionary);
+	COPY_VECTOR(children, ArrowField);
+	COPY_VECTOR(custom_metadata, ArrowKeyValue);
+}
+
+static void
+__copyArrowFieldNode(ArrowFieldNode *dest, const ArrowFieldNode *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(length);
+	COPY_SCALAR(null_count);
+}
+
+static void
+__copyArrowSchema(ArrowSchema *dest, const ArrowSchema *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(endianness);
+	COPY_VECTOR(fields, ArrowField);
+	COPY_VECTOR(custom_metadata, ArrowKeyValue);
+}
+
+static void
+__copyArrowRecordBatch(ArrowRecordBatch *dest, const ArrowRecordBatch *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(length);
+	COPY_VECTOR(nodes, ArrowFieldNode);
+	COPY_VECTOR(buffers, ArrowBuffer);
+}
+
+static void
+__copyArrowDictionaryBatch(ArrowDictionaryBatch *dest,
+						   const ArrowDictionaryBatch *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(id);
+	__copyArrowRecordBatch(&dest->data, &src->data);
+	COPY_SCALAR(isDelta);
+}
+
+static void
+__copyArrowMessage(ArrowMessage *dest, const ArrowMessage *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(version);
+	switch (src->body.node.tag)
+	{
+		case ArrowNodeTag__Schema:
+			__copyArrowSchema(&dest->body.schema, &src->body.schema);
+			break;
+		case ArrowNodeTag__RecordBatch:
+			__copyArrowDictionaryBatch(&dest->body.dictionaryBatch,
+									   &src->body.dictionaryBatch);
+			break;
+		case ArrowNodeTag__DictionaryBatch:
+			__copyArrowRecordBatch(&dest->body.recordBatch,
+								   &src->body.recordBatch);
+			break;
+		default:
+			elog(ERROR, "Bug? unknown ArrowMessageBody");
+	}
+	COPY_SCALAR(bodyLength);
+}
+
+static void
+__copyArrowBlock(ArrowBlock *dest, const ArrowBlock *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(offset);
+	COPY_SCALAR(metaDataLength);
+	COPY_SCALAR(bodyLength);
+}
+
+static void
+__copyArrowFooter(ArrowFooter *dest, const ArrowFooter *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(version);
+	__copyArrowSchema(&dest->schema, &src->schema);
+	COPY_VECTOR(dictionaries, ArrowBlock);
+	COPY_VECTOR(recordBatches, ArrowBlock);
+}
+
+void
+copyArrowNode(ArrowNode *dest, const ArrowNode *src)
+{
+	src->copyArrowNode(dest, src);
+}
+#endif
 /* ------------------------------------------------
  *
  * Routines to read Apache Arrow files
@@ -371,6 +628,8 @@ dumpArrowNode(ArrowNode *node)
 		((ArrowNode *)(PTR))->tagName = #NAME;					\
 		((ArrowNode *)(PTR))->nodeSz = sizeof(Arrow##TYPENAME);	\
 		((ArrowNode *)(PTR))->dumpArrowNode = __dumpArrow##TYPENAME; \
+		((ArrowNode *)(PTR))->copyArrowNode						\
+			= (copyArrowNode_f)__copyArrow##TYPENAME;			\
 	} while(0)
 #else	/* PG_STROM_H */
 #define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)					\

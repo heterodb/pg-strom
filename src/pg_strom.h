@@ -1299,6 +1299,7 @@ typedef struct
 extern void readArrowFileDesc(File filp, ArrowFileInfo *af_info);
 extern void readArrowFile(char *pathname, ArrowFileInfo *af_info);
 extern char *dumpArrowNode(ArrowNode *node);
+extern void copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
