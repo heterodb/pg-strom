@@ -24,7 +24,8 @@
  */
 typedef struct
 {
-	ArrowType	arrow_type;
+	ArrowField	arrow_field;
+//	ArrowType	arrow_type;
 	ArrowTypeOptions attopts;
 	int64		nitems;				/* usually, same with rb_nitems */
 	int64		null_count;
@@ -108,7 +109,9 @@ static int				arrow_metadata_entry_size;		/* GUC */
 	MAXALIGN(offsetof(arrowMetadataCache,					\
 					  fstate[arrow_metadata_entry_size]))
 /* ---------- static functions ---------- */
-static Oid		arrowTypeToPgSQLTypeOid(ArrowType *ftype);
+static bool		__arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
+#define arrowTypeIsEqual(a,b)		__arrowTypeIsEqual((a),(b),0)
+static bool		arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b);
 static ssize_t	arrowTypeValuesLength(ArrowType *type, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 											  RecordBatchState *rb_state);
@@ -353,7 +356,9 @@ makeRecordBatchState(ArrowSchema *schema,
 		ArrowFieldNode *fnode = &rbatch->nodes[j];
 		RecordBatchFieldState *c = &result->columns[j];
 
-		c->arrow_type = field->type;
+//		c->arrow_type = field->type;
+//XXX fixme
+		memcpy(&c->arrow_field, field, sizeof(ArrowField));
 		c->nitems     = fnode->length;
 		c->null_count = fnode->null_count;
 
@@ -1049,7 +1054,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		ArrowFileInfo af_info;
 
 		readArrowFile(fname, &af_info);
-		if (lc == linitial(filesList))
+		if (lc == list_head(filesList))
 		{
 			memcpy(&schema, &af_info.footer.schema, sizeof(ArrowSchema));
 		}
@@ -1064,11 +1069,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 					 fname);
 			for (j=0; j < schema._num_fields; j++)
 			{
-				ArrowField *field = &schema.fields[j];
-				ArrowField *ftemp = &stemp->fields[j];
-
-				if (arrowTypeToPgSQLTypeOid(&field->type) !=
-					arrowTypeToPgSQLTypeOid(&ftemp->type))
+				if (arrowTypeIsEqual(&schema.fields[j],
+									 &stemp->fields[j]))
 					elog(ERROR, "file '%s' has incompatible schema definition",
 						 fname);
 			}
@@ -1269,82 +1271,266 @@ pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
 
 /*
- * arrowTypeToPgSQLTypeOid
+ * arrowTypeIsEqual
  */
-static Oid
-arrowTypeToPgSQLTypeOid(ArrowType *ftype)
+static bool
+__arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 {
-	Oid		type_oid = InvalidOid;
+	int		j;
 
-	switch (ftype->node.tag)
+	if (a->type.node.tag != b->type.node.tag)
+		return false;
+	switch (a->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
-			switch (ftype->Int.bitWidth)
+			if (a->type.Int.bitWidth != b->type.Int.bitWidth)
+				return false;
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			{
+				ArrowPrecision	p1 = a->type.FloatingPoint.precision;
+				ArrowPrecision	p2 = b->type.FloatingPoint.precision;
+
+				if (p1 != p2)
+					return false;
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__Bool:
+			break;
+
+		case ArrowNodeTag__Decimal:
+			if (a->type.Decimal.precision != b->type.Decimal.precision ||
+				a->type.Decimal.scale != b->type.Decimal.scale)
+				return false;
+			break;
+
+		case ArrowNodeTag__Date:
+			if (a->type.Date.unit != b->type.Date.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Time:
+			if (a->type.Time.unit != b->type.Time.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			if (a->type.Timestamp.unit != b->type.Timestamp.unit ||
+				a->type.Timestamp.timezone != NULL ||
+				b->type.Timestamp.timezone != NULL)
+				return false;
+			break;
+
+		case ArrowNodeTag__Interval:
+			if (a->type.Interval.unit != b->type.Interval.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Struct:
+			if (depth > 0)
+				elog(ERROR, "arrow: nested composite types are not supported");
+			if (a->_num_children != b->_num_children)
+				return false;
+			for (j=0; j < a->_num_children; j++)
+			{
+				if (!__arrowTypeIsEqual(&a->children[j],
+										&b->children[j],
+										depth + 1))
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__List:
+			if (depth > 0)
+				elog(ERROR, "arrow_fdw: nested array types are not supported");
+			if (a->_num_children != 1 || b->_num_children != 1)
+				elog(ERROR, "Bug? List of arrow type is corrupted.");
+			if (!__arrowTypeIsEqual(&a->children[0],
+									&b->children[0],
+									depth + 1))
+				return false;
+			break;
+
+		default:
+			elog(ERROR, "'%s' of arrow type is not supported",
+				 a->type.node.tagName);
+	}
+	return true;
+}
+
+static bool
+arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b)
+{
+	switch (b->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (b->type.Int.bitWidth)
 			{
 				case 16:
-					type_oid = INT2OID;
+					if (a->atttypid != INT2OID)
+						return false;
 					break;
 				case 32:
-					type_oid = INT4OID;
+					if (a->atttypid != INT4OID)
+						return false;
 					break;
 				case 64:
-					type_oid = INT8OID;
+					if (a->atttypid != INT8OID)
+						return false;
 					break;
 				default:
 					elog(ERROR, "%s%d of Arrow is not supported",
-						 ftype->Int.is_signed ? "Int" : "Uint",
-						 ftype->Int.bitWidth);
+                         b->type.Int.is_signed ? "Int" : "Uint",
+                         b->type.Int.bitWidth);
 					break;
 			}
 			break;
 		case ArrowNodeTag__FloatingPoint:
-			switch (ftype->FloatingPoint.precision)
+			switch (b->type.FloatingPoint.precision)
 			{
 				case ArrowPrecision__Half:
-					type_oid = FLOAT2OID;
+					if (a->atttypid != FLOAT2OID)
+						return false;
 					break;
 				case ArrowPrecision__Single:
-					type_oid = FLOAT4OID;
+					if (a->atttypid != FLOAT4OID)
+						return false;
 					break;
 				case ArrowPrecision__Double:
-					type_oid = FLOAT8OID;
+					if (a->atttypid != FLOAT8OID)
+						return false;
 					break;
 				default:
-					elog(ERROR, "unknown floating-point precision");
-					break;
+					elog(ERROR, "FloatingPoint of Arrow is corrupted");
 			}
 			break;
 		case ArrowNodeTag__Utf8:
-			type_oid = TEXTOID;
+			if (a->atttypid != TEXTOID)
+				return false;
 			break;
 		case ArrowNodeTag__Binary:
-			type_oid = BYTEAOID;
+			if (a->atttypid != BYTEAOID)
+				return false;
 			break;
 		case ArrowNodeTag__Bool:
-			type_oid = BOOLOID;
+			if (a->atttypid != BOOLOID)
+				return false;
 			break;
 		case ArrowNodeTag__Decimal:
-			type_oid = NUMERICOID;
+			if (a->atttypid != NUMERICOID)
+				return false;
 			break;
 		case ArrowNodeTag__Date:
-			type_oid = DATEOID;
+			if (a->atttypid != DATEOID)
+				return false;
 			break;
 		case ArrowNodeTag__Time:
-			type_oid = TIMEOID;
+			if (a->atttypid != TIMEOID)
+				return false;
 			break;
 		case ArrowNodeTag__Timestamp:
-			if (ftype->Timestamp.timezone)
-				elog(ERROR, "Timestamp with timezone of Arrow is not supported, right now");
-			type_oid = TIMESTAMPOID;
+			if (a->atttypid != TIMESTAMPOID)
+				return false;
 			break;
 		case ArrowNodeTag__Interval:
-			type_oid = INTERVALOID;
+			if (a->atttypid != INTERVALOID)
+				return false;
+			break;
+		case ArrowNodeTag__List:
+			if (b->_num_children != 1)
+				elog(ERROR, "Bug? List of arrow type is corrupted");
+			else
+			{
+				ArrowField *child = &b->children[0];
+				Oid			elem_oid = get_element_type(a->atttypid);
+				FormData_pg_attribute dummy;
+
+				if (a->attlen != -1 || !OidIsValid(elem_oid))
+					return false;
+
+				switch (child->type.node.tag)
+				{
+					case ArrowNodeTag__Int:
+					case ArrowNodeTag__FloatingPoint:
+					case ArrowNodeTag__Bool:
+					case ArrowNodeTag__Decimal:
+					case ArrowNodeTag__Date:
+					case ArrowNodeTag__Time:
+					case ArrowNodeTag__Timestamp:
+					case ArrowNodeTag__Interval:
+						memset(&dummy, 0, sizeof(dummy));
+						dummy.atttypid = elem_oid;
+						if (!arrowTypeIsEqualPG(&dummy, child))
+							return false;
+						break;
+					default:
+						/* only fixed length array is supported */
+						return false;
+				}
+			}
+			break;
+		case ArrowNodeTag__Struct:
+			if (get_typtype(a->atttypid) != TYPTYPE_COMPOSITE)
+				return false;
+			else
+			{
+				Oid			composite_id = get_typ_typrelid(a->atttypid);
+				HeapTuple	tup;
+				int			j, nfields;
+
+				tup = SearchSysCache1(RELOID, ObjectIdGetDatum(composite_id));
+				if (!HeapTupleIsValid(tup))
+					return false;
+				nfields = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
+				ReleaseSysCache(tup);
+
+				if (nfields != b->_num_children)
+					return false;
+
+				for (j=0; j < nfields; j++)
+				{
+					Form_pg_attribute attr;
+					ArrowField	   *child = &b->children[j];
+					bool			equal = false;
+
+					tup = SearchSysCache2(ATTNUM,
+										  ObjectIdGetDatum(composite_id),
+										  Int16GetDatum(j+1));
+					if (!HeapTupleIsValid(tup))
+						break;
+					attr = (Form_pg_attribute) GETSTRUCT(tup);
+
+					switch (child->type.node.tag)
+					{
+						case ArrowNodeTag__Int:
+						case ArrowNodeTag__FloatingPoint:
+						case ArrowNodeTag__Utf8:
+						case ArrowNodeTag__Binary:
+						case ArrowNodeTag__Bool:
+						case ArrowNodeTag__Decimal:
+						case ArrowNodeTag__Date:
+						case ArrowNodeTag__Time:
+						case ArrowNodeTag__Timestamp:
+						case ArrowNodeTag__Interval:
+							equal = arrowTypeIsEqualPG(attr, child);
+							break;
+						default:
+							elog(ERROR, "nested Struct/List of arrow is not supported");
+					}
+					ReleaseSysCache(tup);
+
+					if (!equal)
+						return false;
+				}
+			}
 			break;
 		default:
-			elog(ERROR, "Not a supported Apache Arrow type");
-			break;
+			elog(ERROR, "'%s' of arrow type is not supported",
+				 b->type.node.tagName);
 	}
-	return type_oid;
+	return true;
 }
 
 /*
@@ -1467,9 +1653,9 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		RecordBatchFieldState *field = &rb_state->columns[j];
+		RecordBatchFieldState *fstate = &rb_state->columns[j];
 
-		if (attr->atttypid != arrowTypeToPgSQLTypeOid(&field->arrow_type))
+		if (!arrowTypeIsEqualPG(attr, &fstate->arrow_field))
 			return false;
 	}
 	return true;
