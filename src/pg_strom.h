@@ -1322,6 +1322,7 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_WINDOW		'w'
 #define PROKIND_PROCEDURE	'p'
 #endif
+extern int	get_relnatts(Oid relid);
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 

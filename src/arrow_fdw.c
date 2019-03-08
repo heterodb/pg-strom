@@ -22,7 +22,7 @@
 /*
  * RecordBatchState
  */
-typedef struct
+typedef struct RecordBatchFieldState
 {
 	ArrowField	arrow_field;
 	ArrowTypeOptions attopts;
@@ -34,9 +34,11 @@ typedef struct
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	int			num_children;
+	struct RecordBatchFieldState *children;
 } RecordBatchFieldState;
 
-typedef struct
+typedef struct RecordBatchState
 {
 	const char *fname;
 	File		fdesc;
@@ -108,10 +110,10 @@ static int				arrow_metadata_entry_size;		/* GUC */
 	MAXALIGN(offsetof(arrowMetadataCache,					\
 					  fstate[arrow_metadata_entry_size]))
 /* ---------- static functions ---------- */
-static bool		__arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
-#define arrowTypeIsEqual(a,b)		__arrowTypeIsEqual((a),(b),0)
-static bool		arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b);
-static ssize_t	arrowTypeValuesLength(ArrowType *type, int64 nitems);
+static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
+static bool		arrowTypeIsEqualPGType(ArrowField *a, Oid type_oid);
+static const char *arrowTypeToPGTypeName(ArrowField *field);
+static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 											  RecordBatchState *rb_state);
 static List			   *arrowFdwExtractFilesList(List *options_list);
@@ -226,9 +228,6 @@ cost_arrow_fdw_seqscan(Path *path,
 	path->rows = nrows;
 	path->startup_cost = startup_cost;
 	path->total_cost = startup_cost + cpu_run_cost + disk_run_cost;
-	//XXXX
-	if (num_workers > 0)
-		path->total_cost = startup_cost;
 	path->parallel_workers = num_workers;
 }
 
@@ -330,6 +329,218 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
+static int
+setupRecordBatchField(RecordBatchFieldState *c,
+					  ArrowField  *field,
+					  ArrowBuffer *buffer_curr,
+					  ArrowBuffer *buffer_tail,
+					  int depth)
+{
+	ArrowBuffer	   *buffer_head = buffer_curr;
+
+	copyArrowNode(&c->arrow_field.node, &field->node);
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+		case ArrowNodeTag__FloatingPoint:
+		case ArrowNodeTag__Bool:
+		case ArrowNodeTag__Decimal:
+		case ArrowNodeTag__Date:
+		case ArrowNodeTag__Time:
+		case ArrowNodeTag__Timestamp:
+		case ArrowNodeTag__Interval:
+			/* fixed length values */
+			if (buffer_curr + 2 > buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			if (c->null_count > 0)
+			{
+				c->nullmap_offset = buffer_curr->offset;
+				c->nullmap_length = buffer_curr->length;
+				if (c->nullmap_length < BITMAPLEN(c->null_count))
+					elog(ERROR, "nullmap length is smaller than expected");
+				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "nullmap is not aligned well");
+			}
+			buffer_curr++;
+			c->values_offset = buffer_curr->offset;
+			c->values_length = buffer_curr->length;
+			if (c->values_length < arrowFieldLength(field, c->nitems))
+				elog(ERROR, "values array is smaller than expected");
+			if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				elog(ERROR, "values array is not aligned well");
+			buffer_curr++;
+			break;
+
+		case ArrowNodeTag__List:
+			if (field->_num_children != 1)
+				elog(ERROR, "Bug? List of arrow type is corrupted");
+			else
+			{
+				ArrowField *child = &field->children[0];
+
+				switch (child->type.node.tag)
+				{
+					case ArrowNodeTag__Int:
+					case ArrowNodeTag__FloatingPoint:
+					case ArrowNodeTag__Bool:
+					case ArrowNodeTag__Decimal:
+					case ArrowNodeTag__Date:
+					case ArrowNodeTag__Time:
+					case ArrowNodeTag__Timestamp:
+					case ArrowNodeTag__Interval:
+						/* OK, supported */
+						break;
+					default:
+						elog(ERROR, "arrow_fdw: List of %s is not supported",
+							 child->type.node.tagName);
+				}
+			}
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__Binary:
+			if (depth > 0)
+				elog(ERROR, "nested %s type is not supported",
+					 field->type.node.tagName);
+			/* variable length values */
+			if (buffer_curr + 3 > buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			if (c->null_count > 0)
+			{
+				c->nullmap_offset = buffer_curr->offset;
+				c->nullmap_length = buffer_curr->length;
+				if (c->nullmap_length < BITMAPLEN(c->null_count))
+					elog(ERROR, "nullmap length is smaller than expected");
+				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "nullmap is not aligned well");
+			}
+			buffer_curr++;
+
+			c->values_offset = buffer_curr->offset;
+			c->values_length = buffer_curr->length;
+			if (c->values_length < arrowFieldLength(field, c->nitems))
+				elog(ERROR, "offset array is smaller than expected");
+			if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				elog(ERROR, "offset array is not aligned well");
+			buffer_curr++;
+
+			c->extra_offset = buffer_curr->offset;
+			c->extra_length = buffer_curr->length;
+			if ((c->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(c->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				elog(ERROR, "extra buffer is not aligned well");
+			buffer_curr++;
+			break;
+
+		case ArrowNodeTag__Struct:
+			if (depth > 0)
+				elog(ERROR, "nested composite type is not supported");
+			/* only nullmap */
+			if (buffer_curr + 1 > buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			if (c->null_count > 0)
+			{
+				c->nullmap_offset = buffer_curr->offset;
+				c->nullmap_length = buffer_curr->length;
+				if (c->nullmap_length < BITMAPLEN(c->null_count))
+					elog(ERROR, "nullmap length is smaller than expected");
+				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "nullmap is not aligned well");
+			}
+			buffer_curr++;
+
+			if (field->_num_children > 0)
+			{
+				int		i;
+
+				c->children = palloc0(sizeof(RecordBatchFieldState) *
+									  field->_num_children);
+				for (i=0; i < field->_num_children; i++)
+				{
+					buffer_curr += setupRecordBatchField(&c->children[i],
+														 &field->children[i],
+														 buffer_curr,
+														 buffer_tail,
+														 depth+1);
+				}
+			}
+			c->num_children = field->_num_children;
+			break;
+		default:
+			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
+	}
+
+	/* Extra attributes (precision, unitsz, ...) */
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Decimal:
+			if (field->type.Decimal.precision < SHRT_MIN ||
+				field->type.Decimal.precision > SHRT_MAX)
+				elog(ERROR, "Decimal precision is out of range");
+			if (field->type.Decimal.scale < SHRT_MIN ||
+				field->type.Decimal.scale > SHRT_MAX)
+				elog(ERROR, "Decimal scale is out of range");
+			c->attopts.decimal.precision = field->type.Decimal.precision;
+			c->attopts.decimal.scale     = field->type.Decimal.scale;
+			break;
+		case ArrowNodeTag__Date:
+			switch (field->type.Date.unit)
+			{
+				case ArrowDateUnit__Day:
+				case ArrowDateUnit__MilliSecond:
+					break;
+				default:
+					elog(ERROR, "unknown unit of Date");
+			}
+			c->attopts.date.unit = field->type.Date.unit;
+			break;
+		case ArrowNodeTag__Time:
+			switch (field->type.Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					break;
+				default:
+					elog(ERROR, "unknown unit of Time");
+			}
+			c->attopts.time.unit = field->type.Time.unit;
+			break;
+		case ArrowNodeTag__Timestamp:
+			switch (field->type.Timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					break;
+				default:
+					elog(ERROR, "unknown unit of Time");
+			}
+			c->attopts.time.unit = field->type.Timestamp.unit;
+			break;
+		case ArrowNodeTag__Interval:
+			switch (field->type.Interval.unit)
+			{
+				case ArrowIntervalUnit__Year_Month:
+				case ArrowIntervalUnit__Day_Time:
+					break;
+				default:
+					elog(ERROR, "unknown unit of Interval");
+			}
+			c->attopts.interval.unit = field->type.Interval.unit;
+			break;
+		default:
+			/* no extra attributes */
+			break;
+	}
+	return buffer_curr - buffer_head;
+}
+
 static RecordBatchState *
 makeRecordBatchState(ArrowSchema *schema,
 					 ArrowBlock *block,
@@ -351,155 +562,15 @@ makeRecordBatchState(ArrowSchema *schema,
 
 	for (j=0; j < ncols; j++)
 	{
+		RecordBatchFieldState *c = &result->columns[j];
 		ArrowField	   *field = &schema->fields[j];
 		ArrowFieldNode *fnode = &rbatch->nodes[j];
-		RecordBatchFieldState *c = &result->columns[j];
 
-		copyArrowNode(&c->arrow_field.node, &field->node);
 		c->nitems     = fnode->length;
 		c->null_count = fnode->null_count;
-
-		switch (field->type.node.tag)
-		{
-			case ArrowNodeTag__Int:
-			case ArrowNodeTag__FloatingPoint:
-			case ArrowNodeTag__Bool:
-			case ArrowNodeTag__Decimal:
-			case ArrowNodeTag__Date:
-			case ArrowNodeTag__Time:
-			case ArrowNodeTag__Timestamp:
-			case ArrowNodeTag__Interval:
-				/* fixed-length values */
-				if (buffer_curr + 1 >= buffer_tail)
-					elog(ERROR, "RecordBatch has less buffers than expected");
-				if (c->null_count > 0)
-				{
-					c->nullmap_offset = buffer_curr->offset;
-					c->nullmap_length = buffer_curr->length;
-					if (c->nullmap_length < BITMAPLEN(c->null_count))
-						elog(ERROR, "nullmap length is smaller than expected");
-					if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-						(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-						elog(ERROR, "nullmap is not aligned well");
-				}
-				buffer_curr++;
-				c->values_offset = buffer_curr->offset;
-				c->values_length = buffer_curr->length;
-				if (c->values_length < arrowTypeValuesLength(&field->type,
-															 c->nitems))
-					elog(ERROR, "values array is smaller than expected");
-				if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-					elog(ERROR, "values array is not aligned well");
-				buffer_curr++;
-				break;
-
-			case ArrowNodeTag__Utf8:
-			case ArrowNodeTag__Binary:
-				/* variable length values */
-				if (buffer_curr + 2 >= buffer_tail)
-					elog(ERROR, "RecordBatch has less buffers than expected");
-				if (c->null_count > 0)
-				{
-					c->nullmap_offset = buffer_curr->offset;
-					c->nullmap_length = buffer_curr->length;
-					if (c->nullmap_length < BITMAPLEN(c->null_count))
-						elog(ERROR, "nullmap length is smaller than expected");
-					if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-						(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-						elog(ERROR, "nullmap is not aligned well");
-				}
-				buffer_curr++;
-
-				c->values_offset = buffer_curr->offset;
-				c->values_length = buffer_curr->length;
-				if (c->values_length < arrowTypeValuesLength(&field->type,
-															 c->nitems))
-					elog(ERROR, "offset array is smaller than expected");
-				if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-					elog(ERROR, "offset array is not aligned well");
-				buffer_curr++;
-
-				c->extra_offset = buffer_curr->offset;
-				c->extra_length = buffer_curr->length;
-				if ((c->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-					elog(ERROR, "extra buffer is not aligned well");
-				buffer_curr++;
-				break;
-
-			case ArrowNodeTag__List:
-				//TODO: Add support of fixed-length array.
-			default:
-				elog(ERROR, "Bug? ArrowSchema contains unsupported types");
-		}
-
-		/* Extra attributes (precision, unitsz, ...) */
-		switch (field->type.node.tag)
-        {
-            case ArrowNodeTag__Decimal:
-				if (field->type.Decimal.precision < SHRT_MIN ||
-					field->type.Decimal.precision > SHRT_MAX)
-					elog(ERROR, "Decimal precision is out of range");
-				if (field->type.Decimal.scale < SHRT_MIN ||
-					field->type.Decimal.scale > SHRT_MAX)
-					elog(ERROR, "Decimal scale is out of range");
-				c->attopts.decimal.precision = field->type.Decimal.precision;
-				c->attopts.decimal.scale     = field->type.Decimal.scale;
-				break;
-            case ArrowNodeTag__Date:
-				switch (field->type.Date.unit)
-				{
-					case ArrowDateUnit__Day:
-					case ArrowDateUnit__MilliSecond:
-						break;
-					default:
-						elog(ERROR, "unknown unit of Date");
-				}
-				c->attopts.date.unit = field->type.Date.unit;
-				break;
-            case ArrowNodeTag__Time:
-				switch (field->type.Time.unit)
-				{
-					case ArrowTimeUnit__Second:
-					case ArrowTimeUnit__MilliSecond:
-					case ArrowTimeUnit__MicroSecond:
-					case ArrowTimeUnit__NanoSecond:
-						break;
-					default:
-						elog(ERROR, "unknown unit of Time");
-				}
-				c->attopts.time.unit = field->type.Time.unit;
-				break;
-            case ArrowNodeTag__Timestamp:
-				switch (field->type.Timestamp.unit)
-				{
-					case ArrowTimeUnit__Second:
-					case ArrowTimeUnit__MilliSecond:
-					case ArrowTimeUnit__MicroSecond:
-					case ArrowTimeUnit__NanoSecond:
-						break;
-					default:
-						elog(ERROR, "unknown unit of Time");
-				}
-				c->attopts.time.unit = field->type.Timestamp.unit;
-				break;
-            case ArrowNodeTag__Interval:
-				switch (field->type.Interval.unit)
-				{
-					case ArrowIntervalUnit__Year_Month:
-					case ArrowIntervalUnit__Day_Time:
-						break;
-					default:
-						elog(ERROR, "unknown unit of Interval");
-				}
-				c->attopts.interval.unit = field->type.Interval.unit;
-				break;
-			default:
-				/* no extra attributes */
-				break;
-		}
+		buffer_curr += setupRecordBatchField(c, field,
+											 buffer_curr,
+											 buffer_tail, 0);
 	}
 	return result;
 }
@@ -794,6 +865,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 	int					j, ncols = rb_state->ncols;
 	int					fdesc;
 
+	//XXX: how many total ncol needed?
 	kds = alloca(offsetof(kern_data_store, colmeta[ncols]));
 	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0, false);
 	kds->nitems = rb_state->rb_nitems;
@@ -1019,10 +1091,10 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
-	ArrowSchema		schema;
-	List		   *filesList;
-	ListCell	   *lc;
-	int				j;
+	ArrowSchema	schema;
+	List	   *filesList;
+	ListCell   *lc;
+	int			j;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -1053,7 +1125,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		readArrowFile(fname, &af_info);
 		if (lc == list_head(filesList))
 		{
-			memcpy(&schema, &af_info.footer.schema, sizeof(ArrowSchema));
+			copyArrowNode(&schema.node, &af_info.footer.schema.node);
 		}
 		else
 		{
@@ -1067,7 +1139,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			for (j=0; j < schema._num_fields; j++)
 			{
 				if (arrowTypeIsEqual(&schema.fields[j],
-									 &stemp->fields[j]))
+									 &stemp->fields[j], 0))
 					elog(ERROR, "file '%s' has incompatible schema definition",
 						 fname);
 			}
@@ -1080,77 +1152,9 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 					 quote_identifier(stmt->remote_schema));
 	for (j=0; j < schema._num_fields; j++)
 	{
-		ArrowField	   *field = &schema.fields[j];
-		ArrowType	   *t = &field->type;
-		const char	   *type_name;
+		ArrowField *field = &schema.fields[j];
+		const char *type_name = arrowTypeToPGTypeName(field);
 
-		switch (t->node.tag)
-		{
-			case ArrowNodeTag__Int:
-				if (!t->Int.is_signed)
-					elog(NOTICE, "Uint of ArrowType is mapped to signed-integer at PostgreSQL");
-				switch (t->Int.bitWidth)
-				{
-					case 16: type_name = "pg_catalog.int2"; break;
-					case 32: type_name = "pg_catalog.int4"; break;
-					case 64: type_name = "pg_catalog.int8"; break;
-					default:
-						elog(ERROR, "Int%d is not supported",
-							 t->Int.bitWidth);
-				}
-				break;
-			case ArrowNodeTag__FloatingPoint:
-				switch (t->FloatingPoint.precision)
-				{
-					case ArrowPrecision__Half:
-						type_name = "pg_catalog.float2";
-						break;
-					case ArrowPrecision__Single:
-						type_name = "pg_catalog.float4";
-						break;
-					case ArrowPrecision__Double:
-						type_name = "pg_catalog.float8";
-						break;
-					default:
-						elog(ERROR, "Unknown precision of floating-point");
-				}
-				break;
-			case ArrowNodeTag__Utf8:
-				type_name = "pg_catalog.text";
-				break;
-			case ArrowNodeTag__Binary:
-				type_name = "pg_catalog.bytea";
-				break;
-			case ArrowNodeTag__Bool:
-				type_name = "pg_catalog.bool";
-				break;
-			case ArrowNodeTag__Decimal:
-				type_name = "pg_catalog.numeric";
-				break;
-			case ArrowNodeTag__Date:
-				type_name = "pg_catalog.date";
-				break;
-			case ArrowNodeTag__Time:
-				type_name = "pg_catalog.time";
-				break;
-			case ArrowNodeTag__Timestamp:
-				type_name = "pg_catalog.timestamp";
-				break;
-			case ArrowNodeTag__Interval:
-				type_name = "pg_catalog.interval";
-				break;
-			case ArrowNodeTag__Null:
-			case ArrowNodeTag__List:
-			case ArrowNodeTag__Struct:
-			case ArrowNodeTag__Union:
-			case ArrowNodeTag__FixedSizeBinary:
-			case ArrowNodeTag__FixedSizeList:
-			case ArrowNodeTag__Map:
-				elog(ERROR, "ArrowType '%s' is not supported, right now",
-					 t->node.tagName);
-			default:
-				elog(ERROR, "Unknown ArrowType: %s", t->node.tagName);
-		}
 		if (j > 0)
 			appendStringInfo(&cmd, ",\n");
 		if (!field->name || field->_name_len == 0)
@@ -1271,7 +1275,7 @@ PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
  * arrowTypeIsEqual
  */
 static bool
-__arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
+arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 {
 	int		j;
 
@@ -1332,9 +1336,9 @@ __arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 				return false;
 			for (j=0; j < a->_num_children; j++)
 			{
-				if (!__arrowTypeIsEqual(&a->children[j],
-										&b->children[j],
-										depth + 1))
+				if (!arrowTypeIsEqual(&a->children[j],
+									  &b->children[j],
+									  depth + 1))
 					return false;
 			}
 			break;
@@ -1344,9 +1348,9 @@ __arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 				elog(ERROR, "arrow_fdw: nested array types are not supported");
 			if (a->_num_children != 1 || b->_num_children != 1)
 				elog(ERROR, "Bug? List of arrow type is corrupted.");
-			if (!__arrowTypeIsEqual(&a->children[0],
-									&b->children[0],
-									depth + 1))
+			if (!arrowTypeIsEqual(&a->children[0],
+								  &b->children[0],
+								  depth + 1))
 				return false;
 			break;
 
@@ -1358,122 +1362,117 @@ __arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 }
 
 static bool
-arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b)
+arrowTypeIsEqualPGType(ArrowField *a, Oid type_oid)
 {
-	switch (b->type.node.tag)
+	switch (a->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
-			switch (b->type.Int.bitWidth)
+			switch (a->type.Int.bitWidth)
 			{
 				case 16:
-					if (a->atttypid != INT2OID)
-						return false;
+					if (type_oid == INT2OID)
+						return true;
 					break;
 				case 32:
-					if (a->atttypid != INT4OID)
-						return false;
+					if (type_oid ==INT4OID)
+						return true;
 					break;
 				case 64:
-					if (a->atttypid != INT8OID)
-						return false;
+					if (type_oid == INT8OID)
+						return true;
 					break;
 				default:
 					elog(ERROR, "%s%d of Arrow is not supported",
-                         b->type.Int.is_signed ? "Int" : "Uint",
-                         b->type.Int.bitWidth);
+						 a->type.Int.is_signed ? "Int" : "Uint",
+						 a->type.Int.bitWidth);
 					break;
 			}
 			break;
 		case ArrowNodeTag__FloatingPoint:
-			switch (b->type.FloatingPoint.precision)
+			switch (a->type.FloatingPoint.precision)
 			{
 				case ArrowPrecision__Half:
-					if (a->atttypid != FLOAT2OID)
-						return false;
+					if (type_oid == FLOAT2OID)
+						return true;
 					break;
 				case ArrowPrecision__Single:
-					if (a->atttypid != FLOAT4OID)
-						return false;
+					if (type_oid == FLOAT4OID)
+						return true;
 					break;
 				case ArrowPrecision__Double:
-					if (a->atttypid != FLOAT8OID)
-						return false;
+					if (type_oid == FLOAT8OID)
+						return true;
 					break;
 				default:
-					elog(ERROR, "FloatingPoint of Arrow is corrupted");
+					elog(ERROR, "FloatingPoint with unknown precision");
 			}
 			break;
 		case ArrowNodeTag__Utf8:
-			if (a->atttypid != TEXTOID)
-				return false;
+			if (type_oid == TEXTOID)
+				return true;
 			break;
 		case ArrowNodeTag__Binary:
-			if (a->atttypid != BYTEAOID)
-				return false;
+			if (type_oid == BYTEAOID)
+				return true;
 			break;
 		case ArrowNodeTag__Bool:
-			if (a->atttypid != BOOLOID)
-				return false;
+			if (type_oid == BOOLOID)
+				return true;
 			break;
 		case ArrowNodeTag__Decimal:
-			if (a->atttypid != NUMERICOID)
-				return false;
+			if (type_oid == NUMERICOID)
+				return true;
 			break;
 		case ArrowNodeTag__Date:
-			if (a->atttypid != DATEOID)
-				return false;
+			if (type_oid == DATEOID)
+				return true;
 			break;
 		case ArrowNodeTag__Time:
-			if (a->atttypid != TIMEOID)
-				return false;
+			if (type_oid == TIMEOID)
+				return true;
 			break;
 		case ArrowNodeTag__Timestamp:
-			if (a->atttypid != TIMESTAMPOID)
-				return false;
+			if (type_oid == TIMESTAMPOID)
+				return true;
 			break;
 		case ArrowNodeTag__Interval:
-			if (a->atttypid != INTERVALOID)
-				return false;
+			if (type_oid == INTERVALOID)
+				return true;
 			break;
 		case ArrowNodeTag__List:
-			if (b->_num_children != 1)
-				elog(ERROR, "Bug? List of arrow type is corrupted");
-			else
+			if (a->_num_children == 1)
 			{
-				ArrowField *child = &b->children[0];
-				Oid			elem_oid = get_element_type(a->atttypid);
-				FormData_pg_attribute dummy;
+				ArrowField *child = &a->children[0];
+				int16		type_len = get_typlen(type_oid);
+				Oid			elem_oid = get_element_type(type_oid);
 
-				if (a->attlen != -1 || !OidIsValid(elem_oid))
-					return false;
-
-				switch (child->type.node.tag)
+				if (type_len == -1 && OidIsValid(elem_oid))
 				{
-					case ArrowNodeTag__Int:
-					case ArrowNodeTag__FloatingPoint:
-					case ArrowNodeTag__Bool:
-					case ArrowNodeTag__Decimal:
-					case ArrowNodeTag__Date:
-					case ArrowNodeTag__Time:
-					case ArrowNodeTag__Timestamp:
-					case ArrowNodeTag__Interval:
-						memset(&dummy, 0, sizeof(dummy));
-						dummy.atttypid = elem_oid;
-						if (!arrowTypeIsEqualPG(&dummy, child))
-							return false;
-						break;
-					default:
-						/* only fixed length array is supported */
-						return false;
+					switch (child->type.node.tag)
+					{
+						case ArrowNodeTag__Int:
+						case ArrowNodeTag__FloatingPoint:
+						case ArrowNodeTag__Bool:
+						case ArrowNodeTag__Decimal:
+						case ArrowNodeTag__Date:
+						case ArrowNodeTag__Time:
+						case ArrowNodeTag__Timestamp:
+						case ArrowNodeTag__Interval:
+							if (arrowTypeIsEqualPGType(child, elem_oid))
+								return true;
+						default:
+							/* only fixed length array is supported */
+							break;
+					}
 				}
 			}
+			else
+				elog(ERROR, "Bug? List of arrow type is corrupted");
 			break;
 		case ArrowNodeTag__Struct:
-			if (get_typtype(a->atttypid) != TYPTYPE_COMPOSITE)
-				return false;
-			else
+			if (get_typtype(type_oid) == TYPTYPE_COMPOSITE)
 			{
-				Oid			composite_id = get_typ_typrelid(a->atttypid);
+				Oid			composite_id = get_typ_typrelid(type_oid);
 				HeapTuple	tup;
 				int			j, nfields;
 
@@ -1483,22 +1482,17 @@ arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b)
 				nfields = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
 				ReleaseSysCache(tup);
 
-				if (nfields != b->_num_children)
+				if (nfields != a->_num_children)
 					return false;
 
 				for (j=0; j < nfields; j++)
 				{
-					Form_pg_attribute attr;
-					ArrowField	   *child = &b->children[j];
-					bool			equal = false;
+					ArrowField	   *child = &a->children[j];
+					Oid				child_type;
 
-					tup = SearchSysCache2(ATTNUM,
-										  ObjectIdGetDatum(composite_id),
-										  Int16GetDatum(j+1));
-					if (!HeapTupleIsValid(tup))
-						break;
-					attr = (Form_pg_attribute) GETSTRUCT(tup);
-
+					child_type = get_atttype(composite_id, j+1);
+					if (!OidIsValid(child_type))
+						return false;
 					switch (child->type.node.tag)
 					{
 						case ArrowNodeTag__Int:
@@ -1511,32 +1505,267 @@ arrowTypeIsEqualPG(Form_pg_attribute a, ArrowField *b)
 						case ArrowNodeTag__Time:
 						case ArrowNodeTag__Timestamp:
 						case ArrowNodeTag__Interval:
-							equal = arrowTypeIsEqualPG(attr, child);
+							if (!arrowTypeIsEqualPGType(child, child_type))
+								return false;
 							break;
 						default:
-							elog(ERROR, "nested Struct/List of arrow is not supported");
+							elog(ERROR, "nested Struct is not supported");
+							break;
 					}
-					ReleaseSysCache(tup);
-
-					if (!equal)
-						return false;
 				}
+				return true;
 			}
 			break;
 		default:
 			elog(ERROR, "'%s' of arrow type is not supported",
-				 b->type.node.tagName);
+				 a->type.node.tagName);
 	}
-	return true;
+	return false;
+}
+
+static const char *
+__arrowStructTypeToPGTypeName(ArrowField *field)
+{
+	Relation	rel;
+	ScanKeyData	skey[2];
+	SysScanDesc	sscan;
+	HeapTuple	tup;
+	const char *type_name = NULL;
+
+	rel = heap_open(RelationRelationId, AccessShareLock);
+	ScanKeyInit(&skey[0],
+				Anum_pg_class_relkind,
+				BTEqualStrategyNumber, F_CHAREQ,
+				CharGetDatum(RELKIND_COMPOSITE_TYPE));
+	ScanKeyInit(&skey[1],
+				Anum_pg_class_relnatts,
+				BTEqualStrategyNumber, F_INT2EQ,
+				Int16GetDatum(field->_num_children));
+	sscan = systable_beginscan(rel, InvalidOid, false,
+							   NULL, 2, skey);
+	while (HeapTupleIsValid(tup = systable_getnext(sscan)))
+	{
+		Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tup);
+		Oid			reloid = HeapTupleGetOid(tup);
+		int			j;
+		bool		compatible = true;
+
+		if (pg_namespace_aclcheck(relForm->relnamespace,
+								  GetUserId(),
+								  ACL_USAGE) != ACLCHECK_OK)
+			continue;
+
+		if (pg_type_aclcheck(relForm->reltype,
+							 GetUserId(),
+							 ACL_USAGE) != ACLCHECK_OK)
+			continue;
+
+		Assert(relForm->relnatts == field->_num_children);
+		for (j=0; compatible && j < relForm->relnatts; j++)
+		{
+			ArrowField *child = &field->children[j];
+			Form_pg_attribute attr;
+			HeapTuple	tp;
+
+			tp = SearchSysCache2(ATTNUM,
+								 ObjectIdGetDatum(reloid),
+								 Int16GetDatum(j+1));
+			if (!HeapTupleIsValid(tp))
+				elog(ERROR, "cache lookup failed for attribute %d of composite type %s",
+					 j+1, NameStr(relForm->relname));
+			attr = (Form_pg_attribute) GETSTRUCT(tp);
+			switch (child->type.node.tag)
+			{
+				case ArrowNodeTag__Int:
+					switch (child->type.Int.bitWidth)
+					{
+						case 16:
+							compatible = (attr->atttypid == INT2OID);
+							break;
+						case 32:
+							compatible = (attr->atttypid == INT4OID);
+							break;
+						case 64:
+							compatible = (attr->atttypid == INT8OID);
+							break;
+						default:
+							elog(ERROR, "not a supported Int bitWidth: %d",
+								 child->type.Int.bitWidth);
+							break;
+					}
+					break;
+				case ArrowNodeTag__FloatingPoint:
+					switch (child->type.FloatingPoint.precision)
+					{
+						case ArrowPrecision__Half:
+							compatible = (attr->atttypid == FLOAT2OID);
+							break;
+						case ArrowPrecision__Single:
+							compatible = (attr->atttypid == FLOAT4OID);
+							break;
+						case ArrowPrecision__Double:
+							compatible = (attr->atttypid == FLOAT8OID);
+							break;
+						default:
+							elog(ERROR, "unknown precision of FloatingPoint");
+							break;
+					}
+					break;
+				case ArrowNodeTag__Utf8:
+					compatible = (attr->atttypid == TEXTOID);
+					break;
+				case ArrowNodeTag__Binary:
+					compatible = (attr->atttypid == BYTEAOID);
+					break;
+				case ArrowNodeTag__Bool:
+					compatible = (attr->atttypid == BOOLOID);
+					break;
+				case ArrowNodeTag__Decimal:
+					compatible = (attr->atttypid == NUMERICOID);
+					break;
+				case ArrowNodeTag__Date:
+					compatible = (attr->atttypid == DATEOID);
+					break;
+				case ArrowNodeTag__Time:
+					compatible = (attr->atttypid == TIMEOID);
+					break;
+				case ArrowNodeTag__Timestamp:
+					if (child->type.Timestamp.timezone)
+					   elog(ERROR, "Timestamp with timezone is not supported");
+					compatible = (attr->atttypid == TIMESTAMPOID);
+					break;
+				case ArrowNodeTag__Interval:
+					compatible = (attr->atttypid == INTERVALOID);
+					break;
+				default:
+					elog(ERROR, "'%s' type is not supported for child field of Struct type",
+						 child->type.node.tagName);
+					break;
+			}
+			ReleaseSysCache(tp);
+		}
+
+		if (compatible)
+		{
+			Form_pg_type	typeForm;
+			HeapTuple		tup;
+
+			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(relForm->reltype));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for type: %u",
+					 relForm->reltype);
+			typeForm = (Form_pg_type) GETSTRUCT(tup);
+
+			type_name = psprintf("%s.%s",
+								 get_namespace_name(typeForm->typnamespace),
+								 NameStr(typeForm->typname));
+			ReleaseSysCache(tup);
+			break;
+		}
+	}
+	systable_endscan(sscan);
+	heap_close(rel, AccessShareLock);
+
+	return type_name;
+}
+
+static const char *
+arrowTypeToPGTypeName(ArrowField *field)
+{
+	ArrowType  *t = &field->type;
+
+	switch (t->node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (t->Int.bitWidth)
+			{
+				case 16:
+					return "pg_catalog.int2";
+				case 32:
+					return "pg_catalog.int4";
+				case 64:
+					return "pg_catalog.int8";
+				default:
+					elog(ERROR, "%s%d of Arrow is not supported",
+						 t->Int.is_signed ? "Int" : "Uint",
+						 t->Int.bitWidth);
+					break;
+			}
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			switch (t->FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					return "pg_catalog.float2";
+				case ArrowPrecision__Single:
+					return "pg_catalog.float4";
+				case ArrowPrecision__Double:
+					return "pg_catalog.float8";
+				default:
+					elog(ERROR, "FloatingPoint with unknown precision");
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+			return "pg_catalog.text";
+		case ArrowNodeTag__Binary:
+			return "pg_catalog.bytea";
+		case ArrowNodeTag__Bool:
+			return "pg_catalog.bool";
+		case ArrowNodeTag__Decimal:
+			return "pg_catalog.numeric";
+		case ArrowNodeTag__Date:
+			return "pg_catalog.date";
+		case ArrowNodeTag__Time:
+			return "pg_catalog.time";
+		case ArrowNodeTag__Timestamp:
+			if (t->Timestamp.timezone)
+				elog(ERROR, "Timestamp with timezone is not supported");
+			return "pg_catalog.timezone";
+		case ArrowNodeTag__Interval:
+			return "pg_catalog.interval";
+		case ArrowNodeTag__List:
+			if (field->_num_children != 1)
+				elog(ERROR, "arrow_fdw: corrupted List type definition");
+			else
+			{
+				ArrowField *child = &field->children[0];
+
+				switch (child->type.node.tag)
+				{
+					case ArrowNodeTag__Int:
+					case ArrowNodeTag__FloatingPoint:
+					case ArrowNodeTag__Bool:
+					case ArrowNodeTag__Decimal:
+					case ArrowNodeTag__Date:
+					case ArrowNodeTag__Time:
+					case ArrowNodeTag__Timestamp:
+					case ArrowNodeTag__Interval:
+						break;
+					default:
+						elog(ERROR, "List of '%s' is not supported",
+							 child->type.node.tagName);
+				}
+				return psprintf("%s[]", arrowTypeToPGTypeName(child));
+			}
+			break;
+
+		case ArrowNodeTag__Struct:
+			return __arrowStructTypeToPGTypeName(field);
+		default:
+			elog(ERROR, "arrow_fdw: type '%s' is not supported",
+				 field->type.node.tagName);
+	}
+	return NULL;
 }
 
 /*
- * arrowTypeValuesLength - calculates minimum required length of the values
+ * arrowFieldLength
  */
-static ssize_t
-arrowTypeValuesLength(ArrowType *type, int64 nitems)
+static size_t
+arrowFieldLength(ArrowField *field, int64 nitems)
 {
-	ssize_t	length = -1;
+	ArrowType  *type = &field->type;
+	size_t		length = 0;
 
 	switch (type->node.tag)
 	{
@@ -1575,6 +1804,7 @@ arrowTypeValuesLength(ArrowType *type, int64 nitems)
 			break;
 		case ArrowNodeTag__Utf8:
 		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__List:
 			length = sizeof(cl_uint) * (nitems + 1);
 			break;
 		case ArrowNodeTag__Bool:
@@ -1627,10 +1857,9 @@ arrowTypeValuesLength(ArrowType *type, int64 nitems)
 					elog(ERROR, "Not a supported Interval unit");
 			}
 			break;
-		case ArrowNodeTag__List:	//to be supported later
-			//XXXX
 		case ArrowNodeTag__Struct:	//to be supported later
-			//XXXX
+			length = 0;		/* only nullmap */
+			break;
 		default:
 			elog(ERROR, "Arrow Type '%s' is not supported now",
 				 type->node.tagName);
@@ -1654,7 +1883,7 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
 
-		if (!arrowTypeIsEqualPG(attr, &fstate->arrow_field))
+		if (!arrowTypeIsEqualPGType(&fstate->arrow_field, attr->atttypid))
 			return false;
 	}
 	return true;

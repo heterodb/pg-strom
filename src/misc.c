@@ -127,6 +127,9 @@ compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages)
 }
 #endif		/* < PG10 */
 
+/*
+ * Usefulll wrapper routines like lsyscache.c
+ */
 #if PG_VERSION_NUM < 110000
 char
 get_func_prokind(Oid funcid)
@@ -158,6 +161,23 @@ get_func_prokind(Oid funcid)
 	return prokind;
 }
 #endif		/* <PG11 */
+
+int
+get_relnatts(Oid relid)
+{
+	HeapTuple	tup;
+	int			relnatts = -1;
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (HeapTupleIsValid(tup))
+	{
+        Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tup);
+
+        relnatts = reltup->relnatts;
+        ReleaseSysCache(tup);
+	}
+	return relnatts;
+}
 
 /*
  * errorText - string form of the error code
