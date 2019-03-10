@@ -706,7 +706,6 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 					  RecordBatchState *rb_state,
 					  Bitmapset *referenced)
 {
-	int			page_sz = sysconf(_SC_PAGESIZE);
 	off_t		rb_offset = rb_state->rb_offset;
 	off_t		f_offset = ~0UL;
 	cl_ulong	m_offset;
@@ -715,10 +714,9 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 	strom_io_vector *iovec;
 
 	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
-	iovec->block_sz = page_sz;
-	Assert((page_sz & (page_sz - 1)) == 0);
+	iovec->block_sz = PAGE_SIZE;
 
-	m_offset = TYPEALIGN(page_sz, KERN_DATA_STORE_HEAD_LENGTH(kds));
+	m_offset = TYPEALIGN(PAGE_SIZE, KERN_DATA_STORE_HEAD_LENGTH(kds));
 	for (j=0; j < ncols; j++)
 	{
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
@@ -733,7 +731,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		{
 			Assert(fstate->null_count > 0);
 			f_pos = rb_offset + fstate->nullmap_offset;
-			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
 			if (f_pos == f_offset)
 			{
 				/* good, buffer is continuous */
@@ -751,12 +749,12 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 					io_index = 0;	/* here is no previous chunk */
 				else
 				{
-					size_t	len = (TYPEALIGN(page_sz, f_offset) -
+					size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
 								   iovec->io[io_index].f_pos);
-					Assert((len & (page_sz-1)) == 0);
-					iovec->io[io_index++].nblocks = len / page_sz;
+					Assert((len & PAGE_MASK) == 0);
+					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
 
-					m_offset = TYPEALIGN(page_sz, m_offset);
+					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
 				}
 				iovec->io[io_index].m_offset = m_offset;
 				iovec->io[io_index].f_pos    = f_base;
@@ -772,7 +770,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		if (fstate->values_length > 0)
 		{
 			f_pos = rb_offset + fstate->values_offset;
-			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
 			if (f_pos == f_offset)
 			{
 				/* good, buffer is continuous */
@@ -790,12 +788,12 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 					io_index = 0;	/* here is no previous chunk */
 				else
 				{
-					size_t	len = (TYPEALIGN(page_sz, f_offset) -
+					size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
 								   iovec->io[io_index].f_pos);
-					Assert((len & (page_sz-1)) == 0);
-					iovec->io[io_index++].nblocks = len / page_sz;
+					Assert((len & PAGE_MASK) == 0);
+					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
 
-					m_offset = TYPEALIGN(page_sz, m_offset);
+					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
 				}
 				iovec->io[io_index].m_offset = m_offset;
 				iovec->io[io_index].f_pos    = f_base;
@@ -811,7 +809,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		if (fstate->extra_length > 0)
 		{
 			f_pos = rb_offset + fstate->extra_offset;
-			f_base = TYPEALIGN_DOWN(page_sz, f_pos);
+			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
 			if (f_pos == f_offset)
 			{
 				/* good, buffer is continuous */
@@ -829,12 +827,12 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 					io_index = 0;	/* here is no previous chunk */
 				else
 				{
-					off_t	len = (TYPEALIGN(page_sz, f_offset) -
+					off_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
 								   iovec->io[io_index].f_pos);
-					Assert((len & (page_sz-1)) == 0);
-					iovec->io[io_index++].nblocks = len / page_sz;
+					Assert((len & PAGE_MASK) == 0);
+					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
 
-					m_offset = TYPEALIGN(page_sz, m_offset);
+					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
 				}
 				iovec->io[io_index].m_offset = m_offset;
 				iovec->io[io_index].f_pos    = f_base;
@@ -853,13 +851,13 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		iovec->nchunks = 0;
 	else
 	{
-		size_t	len = (TYPEALIGN(page_sz, f_offset) -
+		size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
 					   iovec->io[io_index].f_pos);
-		Assert((len & (page_sz-1)) == 0);
-		iovec->io[io_index++].nblocks = len / page_sz;
+		Assert((len & PAGE_MASK) == 0);
+		iovec->io[io_index++].nblocks = len / PAGE_SIZE;
 		iovec->nchunks = io_index;
 	}
-	kds->length = TYPEALIGN(page_sz, m_offset);
+	kds->length = TYPEALIGN(PAGE_SIZE, m_offset);
 
 	return iovec;
 }

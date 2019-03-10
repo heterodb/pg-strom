@@ -36,6 +36,12 @@ double		pgstrom_gpu_operator_cost;
 static planner_hook_type	planner_hook_next;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
+
+/* misc variables */
+long		PAGE_SIZE;
+long		PAGE_MASK;
+int			PAGE_SHIFT;
+
 /* SQL function declarations */
 Datum pgstrom_license_query(PG_FUNCTION_ARGS);
 
@@ -516,6 +522,11 @@ _PG_init(void)
 #else
 	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
 #endif
+	/* init misc variables */
+	PAGE_SIZE = sysconf(_SC_PAGESIZE);
+	PAGE_MASK = PAGE_SIZE - 1;
+	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
+	elog(LOG, "PAGE_SIZE = %ld PAGE_MASK = %ld PAGE_SHIFT = %d", PAGE_SIZE, PAGE_MASK, PAGE_SHIFT);
 
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_misc_guc();
