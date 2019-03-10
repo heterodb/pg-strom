@@ -501,9 +501,9 @@ estimate_inner_buffersize(PlannerInfo *root,
 		Path	   *inner_path = gpath->inners[i].scan_path;
 		RelOptInfo *inner_rel = inner_path->parent;
 		PathTarget *inner_reltarget = inner_rel->reltarget;
-		Size		inner_ntuples = (Size)inner_path->rows;
+		Size		inner_nrows = (Size)inner_path->rows;
 		Size		chunk_size;
-		Size		entry_size;
+		Size		htup_size;
 
 		/*
 		 * NOTE: PathTarget->width is not reliable for base relations 
@@ -513,36 +513,27 @@ estimate_inner_buffersize(PlannerInfo *root,
 		 */
 		ncols = list_length(inner_reltarget->exprs);
 
-		if (gpath->inners[i].hash_quals != NIL)
-			entry_size = offsetof(kern_hashitem, t.htup);
-		else
-			entry_size = offsetof(kern_tupitem, htup);
-
-		entry_size += MAXALIGN(offsetof(HeapTupleHeaderData,
-										t_bits[BITMAPLEN(ncols)]));
+		htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+									  t_bits[BITMAPLEN(ncols)]));
 		if (inner_rel->reloptkind != RELOPT_BASEREL)
-			entry_size += MAXALIGN(inner_reltarget->width);
+			htup_size += MAXALIGN(inner_reltarget->width);
 		else
 		{
-			entry_size += MAXALIGN(((double)(BLCKSZ -
-											 SizeOfPageHeaderData)
-									* inner_rel->pages
-									/ Max(inner_rel->tuples, 1.0))
-								   - sizeof(ItemIdData)
-								   - SizeofHeapTupleHeader);
+			htup_size += MAXALIGN(((double)(BLCKSZ -
+											SizeOfPageHeaderData)
+								   * inner_rel->pages
+								   / Max(inner_rel->tuples, 1.0))
+								  - sizeof(ItemIdData)
+								  - SizeofHeapTupleHeader);
 		}
 
 		/*
 		 * estimation of the inner chunk in this depth
 		 */
 		if (gpath->inners[i].hash_quals != NIL)
-			chunk_size = KDS_CALCULATE_HASH_LENGTH(ncols,
-												   inner_ntuples,
-												   inner_ntuples * entry_size);
+			chunk_size = KDS_ESTIMATE_HASH_LENGTH(ncols,inner_nrows,htup_size);
 		else
-			chunk_size = KDS_CALCULATE_ROW_LENGTH(ncols,
-												  inner_ntuples,
-												  inner_ntuples * entry_size);
+			chunk_size = KDS_ESTIMATE_ROW_LENGTH(ncols,inner_nrows,htup_size);
 		gpath->inners[i].ichunk_size = chunk_size;
 		inner_total_sz += chunk_size;
 	}
@@ -6366,29 +6357,28 @@ static void
 gpujoin_compaction_inner_kds(kern_data_store *kds_in)
 {
 	size_t		curr_usage = __kds_unpack(kds_in->usage);
-	size_t		head_sz;
+	size_t		front_sz;
 	size_t		shift;
 	cl_uint	   *row_index;
 	cl_uint		i;
 
 	Assert(kds_in->format == KDS_FORMAT_HASH ||
 		   kds_in->nslots == 0);
-	head_sz = KDS_CALCULATE_FRONTEND_LENGTH(kds_in->ncols,
-											kds_in->nslots,
-											kds_in->nitems,
-											false);
-	Assert(head_sz == MAXALIGN(head_sz));
-	Assert(head_sz + curr_usage <= kds_in->length);
-	shift = kds_in->length - (head_sz + curr_usage);
+	front_sz = KERN_DATA_STORE_HEAD_LENGTH(kds_in) +
+		STROMALIGN(sizeof(cl_uint) * kds_in->nitems) +
+		STROMALIGN(sizeof(cl_uint) * kds_in->nslots);
+	Assert(front_sz == MAXALIGN(front_sz));
+	Assert(front_sz + curr_usage <= kds_in->length);
+	shift = kds_in->length - (front_sz + curr_usage);
 	if (shift > 32 * 1024)	/* close the hole larger than 32KB */
 	{
-		memmove((char *)kds_in + head_sz,
+		memmove((char *)kds_in + front_sz,
 				(char *)kds_in + kds_in->length - curr_usage,
 				curr_usage);
 		row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
 		for (i=0; i < kds_in->nitems; i++)
 			row_index[i] -= __kds_packed(shift);
-		kds_in->length = head_sz + curr_usage;
+		kds_in->length = front_sz + curr_usage;
 	}
 }
 
@@ -6529,7 +6519,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 
 		/* expand DSM on demand */
 		dsm_length = dsm_segment_map_length(seg);
-		kds_head_sz = KDS_CALCULATE_HEAD_LENGTH(ps_desc->natts, false);
+		kds_head_sz = KDS_calculateHeadSize(ps_desc, false);
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
 			h_kmrels = dsm_resize(seg, TYPEALIGN(BLCKSZ, (3*dsm_length)/2));

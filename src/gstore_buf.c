@@ -1460,7 +1460,7 @@ GpuStoreBufferEstimateSize(Relation frel, GpuStoreBuffer *gs_buffer,
 		   gs_buffer->nattrs == tupdesc->natts);
 	if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
 	{
-		rawsize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, true);
+		rawsize = KDS_calculateHeadSize(tupdesc, true);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);

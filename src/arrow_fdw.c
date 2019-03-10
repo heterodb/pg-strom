@@ -329,16 +329,30 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
-static int
-setupRecordBatchField(RecordBatchFieldState *c,
+typedef struct
+{
+	ArrowBuffer    *buffer_curr;
+	ArrowBuffer    *buffer_tail;
+	ArrowFieldNode *fnode_curr;
+	ArrowFieldNode *fnode_tail;
+} setupRecordBatchContext;
+
+static void
+setupRecordBatchField(setupRecordBatchContext *con,
+					  RecordBatchFieldState *fstate,
 					  ArrowField  *field,
-					  ArrowBuffer *buffer_curr,
-					  ArrowBuffer *buffer_tail,
 					  int depth)
 {
-	ArrowBuffer	   *buffer_head = buffer_curr;
+	ArrowBuffer	   *buffer_curr;
+	ArrowFieldNode *fnode;
 
-	copyArrowNode(&c->arrow_field.node, &field->node);
+	if (con->fnode_curr >= con->fnode_tail)
+		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
+	fnode = con->fnode_curr++;
+	fstate->nitems     = fnode->length;
+	fstate->null_count = fnode->null_count;
+
+	copyArrowNode(&fstate->arrow_field.node, &field->node);
 	switch (field->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -350,27 +364,27 @@ setupRecordBatchField(RecordBatchFieldState *c,
 		case ArrowNodeTag__Timestamp:
 		case ArrowNodeTag__Interval:
 			/* fixed length values */
-			if (buffer_curr + 2 > buffer_tail)
+			if (con->buffer_curr + 2 > con->buffer_tail)
 				elog(ERROR, "RecordBatch has less buffers than expected");
-			if (c->null_count > 0)
+			buffer_curr = con->buffer_curr++;
+			if (fstate->null_count > 0)
 			{
-				c->nullmap_offset = buffer_curr->offset;
-				c->nullmap_length = buffer_curr->length;
-				if (c->nullmap_length < BITMAPLEN(c->null_count))
+				fstate->nullmap_offset = buffer_curr->offset;
+				fstate->nullmap_length = buffer_curr->length;
+				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
-			buffer_curr++;
-			c->values_offset = buffer_curr->offset;
-			c->values_length = buffer_curr->length;
-			if (c->values_length < arrowFieldLength(field, c->nitems))
+			buffer_curr = con->buffer_curr++;
+			fstate->values_offset = buffer_curr->offset;
+			fstate->values_length = buffer_curr->length;
+			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
 				elog(ERROR, "values array is smaller than expected");
-			if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "values array is not aligned well");
-			buffer_curr++;
 			break;
 
 		case ArrowNodeTag__List:
@@ -396,78 +410,79 @@ setupRecordBatchField(RecordBatchFieldState *c,
 						elog(ERROR, "arrow_fdw: List of %s is not supported",
 							 child->type.node.tagName);
 				}
+				/*
+				 * Layout of fixed-length values array is identical with
+				 * variable-length values below (Utf8/Binary), so just goes
+				 * through the next block.
+				 */
 			}
 		case ArrowNodeTag__Utf8:
 		case ArrowNodeTag__Binary:
-			if (depth > 0)
-				elog(ERROR, "nested %s type is not supported",
-					 field->type.node.tagName);
 			/* variable length values */
-			if (buffer_curr + 3 > buffer_tail)
+			if (con->buffer_curr + 3 > con->buffer_tail)
 				elog(ERROR, "RecordBatch has less buffers than expected");
-			if (c->null_count > 0)
+			buffer_curr = con->buffer_curr++;
+			if (fstate->null_count > 0)
 			{
-				c->nullmap_offset = buffer_curr->offset;
-				c->nullmap_length = buffer_curr->length;
-				if (c->nullmap_length < BITMAPLEN(c->null_count))
+				fstate->nullmap_offset = buffer_curr->offset;
+				fstate->nullmap_length = buffer_curr->length;
+				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
-			buffer_curr++;
 
-			c->values_offset = buffer_curr->offset;
-			c->values_length = buffer_curr->length;
-			if (c->values_length < arrowFieldLength(field, c->nitems))
+			buffer_curr = con->buffer_curr++;
+			fstate->values_offset = buffer_curr->offset;
+			fstate->values_length = buffer_curr->length;
+			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
 				elog(ERROR, "offset array is smaller than expected");
-			if ((c->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(c->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "offset array is not aligned well");
-			buffer_curr++;
 
-			c->extra_offset = buffer_curr->offset;
-			c->extra_length = buffer_curr->length;
-			if ((c->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(c->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			buffer_curr = con->buffer_curr++;
+			fstate->extra_offset = buffer_curr->offset;
+			fstate->extra_length = buffer_curr->length;
+			if ((fstate->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(fstate->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "extra buffer is not aligned well");
-			buffer_curr++;
 			break;
 
 		case ArrowNodeTag__Struct:
 			if (depth > 0)
 				elog(ERROR, "nested composite type is not supported");
 			/* only nullmap */
-			if (buffer_curr + 1 > buffer_tail)
+			if (con->buffer_curr + 1 > con->buffer_tail)
 				elog(ERROR, "RecordBatch has less buffers than expected");
-			if (c->null_count > 0)
+			buffer_curr = con->buffer_curr++;
+			if (fstate->null_count > 0)
 			{
-				c->nullmap_offset = buffer_curr->offset;
-				c->nullmap_length = buffer_curr->length;
-				if (c->nullmap_length < BITMAPLEN(c->null_count))
+				fstate->nullmap_offset = buffer_curr->offset;
+				fstate->nullmap_length = buffer_curr->length;
+				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((c->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(c->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
-			buffer_curr++;
 
 			if (field->_num_children > 0)
 			{
 				int		i;
 
-				c->children = palloc0(sizeof(RecordBatchFieldState) *
+				fstate->children = palloc0(sizeof(RecordBatchFieldState) *
 									  field->_num_children);
 				for (i=0; i < field->_num_children; i++)
 				{
-					buffer_curr += setupRecordBatchField(&c->children[i],
-														 &field->children[i],
-														 buffer_curr,
-														 buffer_tail,
-														 depth+1);
+					setupRecordBatchField(con,
+										  &fstate->children[i],
+										  &field->children[i],
+										  depth+1);
 				}
 			}
-			c->num_children = field->_num_children;
+			fstate->num_children = field->_num_children;
 			break;
 		default:
 			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
@@ -483,8 +498,8 @@ setupRecordBatchField(RecordBatchFieldState *c,
 			if (field->type.Decimal.scale < SHRT_MIN ||
 				field->type.Decimal.scale > SHRT_MAX)
 				elog(ERROR, "Decimal scale is out of range");
-			c->attopts.decimal.precision = field->type.Decimal.precision;
-			c->attopts.decimal.scale     = field->type.Decimal.scale;
+			fstate->attopts.decimal.precision = field->type.Decimal.precision;
+			fstate->attopts.decimal.scale     = field->type.Decimal.scale;
 			break;
 		case ArrowNodeTag__Date:
 			switch (field->type.Date.unit)
@@ -495,7 +510,7 @@ setupRecordBatchField(RecordBatchFieldState *c,
 				default:
 					elog(ERROR, "unknown unit of Date");
 			}
-			c->attopts.date.unit = field->type.Date.unit;
+			fstate->attopts.date.unit = field->type.Date.unit;
 			break;
 		case ArrowNodeTag__Time:
 			switch (field->type.Time.unit)
@@ -508,7 +523,7 @@ setupRecordBatchField(RecordBatchFieldState *c,
 				default:
 					elog(ERROR, "unknown unit of Time");
 			}
-			c->attopts.time.unit = field->type.Time.unit;
+			fstate->attopts.time.unit = field->type.Time.unit;
 			break;
 		case ArrowNodeTag__Timestamp:
 			switch (field->type.Timestamp.unit)
@@ -521,7 +536,7 @@ setupRecordBatchField(RecordBatchFieldState *c,
 				default:
 					elog(ERROR, "unknown unit of Time");
 			}
-			c->attopts.time.unit = field->type.Timestamp.unit;
+			fstate->attopts.time.unit = field->type.Timestamp.unit;
 			break;
 		case ArrowNodeTag__Interval:
 			switch (field->type.Interval.unit)
@@ -532,13 +547,12 @@ setupRecordBatchField(RecordBatchFieldState *c,
 				default:
 					elog(ERROR, "unknown unit of Interval");
 			}
-			c->attopts.interval.unit = field->type.Interval.unit;
+			fstate->attopts.interval.unit = field->type.Interval.unit;
 			break;
 		default:
 			/* no extra attributes */
 			break;
 	}
-	return buffer_curr - buffer_head;
 }
 
 static RecordBatchState *
@@ -546,13 +560,9 @@ makeRecordBatchState(ArrowSchema *schema,
 					 ArrowBlock *block,
 					 ArrowRecordBatch *rbatch)
 {
+	setupRecordBatchContext con;
 	RecordBatchState *result;
-	ArrowBuffer	   *buffer_curr = rbatch->buffers;
-	ArrowBuffer	   *buffer_tail = rbatch->buffers + rbatch->_num_buffers;
-	int				j, ncols = schema->_num_fields;
-
-	if (rbatch->_num_nodes != ncols)
-		elog(ERROR, "arrow_fdw: RecordBatch may have corruption.");
+	int			j, ncols = schema->_num_fields;
 
 	result = palloc0(offsetof(RecordBatchState, columns[ncols]));
 	result->ncols = ncols;
@@ -560,18 +570,23 @@ makeRecordBatchState(ArrowSchema *schema,
 	result->rb_length = block->bodyLength;
 	result->rb_nitems = rbatch->length;
 
+	memset(&con, 0, sizeof(setupRecordBatchContext));
+	con.buffer_curr = rbatch->buffers;
+	con.buffer_tail = rbatch->buffers + rbatch->_num_buffers;
+	con.fnode_curr  = rbatch->nodes;
+	con.fnode_tail  = rbatch->nodes + rbatch->_num_nodes;
+
 	for (j=0; j < ncols; j++)
 	{
-		RecordBatchFieldState *c = &result->columns[j];
+		RecordBatchFieldState *fstate = &result->columns[j];
 		ArrowField	   *field = &schema->fields[j];
-		ArrowFieldNode *fnode = &rbatch->nodes[j];
 
-		c->nitems     = fnode->length;
-		c->null_count = fnode->null_count;
-		buffer_curr += setupRecordBatchField(c, field,
-											 buffer_curr,
-											 buffer_tail, 0);
+		setupRecordBatchField(&con, fstate, field, 0);
 	}
+	if (con.buffer_curr != con.buffer_tail ||
+		con.fnode_curr  != con.fnode_tail)
+		elog(ERROR, "arrow_fdw: RecordBatch may have corruption.");
+
 	return result;
 }
 
@@ -864,9 +879,10 @@ arrowFdwLoadRecordBatch(Relation relation,
 	strom_io_vector	   *iovec;
 	int					j, ncols = rb_state->ncols;
 	int					fdesc;
+	size_t head_sz;
 
-	//XXX: how many total ncol needed?
-	kds = alloca(offsetof(kern_data_store, colmeta[ncols]));
+	head_sz = KDS_calculateHeadSize(tupdesc, false);
+	kds = alloca(head_sz);
 	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0, false);
 	kds->nitems = rb_state->rb_nitems;
 	kds->nrooms = rb_state->rb_nitems;
@@ -874,7 +890,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 	for (j=0; j < ncols; j++)
 		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
-#if 0
+#if 1
 	elog(INFO, "nchunks = %d", iovec->nchunks);
 	for (j=0; j < iovec->nchunks; j++)
 	{

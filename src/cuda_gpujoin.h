@@ -1139,13 +1139,9 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 											depth,
 											rd_stack,
 											&is_null_keys);
-			if (hash_value >= kds_hash->hash_min &&
-				hash_value <= kds_hash->hash_max)
-			{
-				/* MEMO: NULL-keys will never match to inner-join */
-				if (!is_null_keys)
-					khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
-			}
+			/* MEMO: NULL-keys will never match to inner-join */
+			if (!is_null_keys)
+				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 			/* rewind the varlena buffer */
 			kcxt->vlpos = kcxt->vlbuf;
 		}

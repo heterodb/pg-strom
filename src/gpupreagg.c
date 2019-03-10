@@ -4126,7 +4126,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   &gpas->gts.css.ss.ps,
 											   outer_tupdesc);
 	/* Template of kds_slot */
-	length = KDS_CALCULATE_HEAD_LENGTH(gpreagg_tupdesc->natts, false);
+	length = KDS_calculateHeadSize(gpreagg_tupdesc, false);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,
 												 length);
 	init_kernel_data_store(gpas->kds_slot_head,
@@ -4576,11 +4576,13 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 					  int outer_depth)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
+	//TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
+	//TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 	GpuPreAggTask  *gpreagg;
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
+	kern_data_store *kds_slot = gpas->kds_slot_head;
+	size_t			unitsz;
 	size_t			kds_slot_nrooms = 0;
 	size_t			kds_slot_length;
 	CUdeviceptr		m_deviceptr;
@@ -4627,19 +4629,17 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
 								GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
 
-		kds_slot_length = KDS_CALCULATE_SLOT_LENGTH(gpa_tupdesc->natts,
-													kds_slot_nrooms);
+		unitsz = MAXALIGN((sizeof(Datum) + sizeof(char)) * kds_slot->ncols);
+		kds_slot_length = (KERN_DATA_STORE_HEAD_LENGTH(kds_slot) +
+						   unitsz * kds_slot_nrooms);
 	}
 	else
 	{
 		/* combined RIGHT OUTER JOIN or terminator task */
-		kern_data_store *kds_slot = gpas->kds_slot_head;
-
+		unitsz = MAXALIGN((sizeof(Datum) + sizeof(char)) * kds_slot->ncols);
 		kds_slot_length = pgstrom_chunk_size();
 		kds_slot_nrooms = (kds_slot_length -
-						   KERN_DATA_STORE_HEAD_LENGTH(kds_slot))
-			/ (MAXALIGN(sizeof(Datum) * kds_slot->ncols) +
-			   MAXALIGN(sizeof(bool) * kds_slot->ncols));
+						   KERN_DATA_STORE_HEAD_LENGTH(kds_slot)) / unitsz;
 	}
 	/* buffer of row-invalidation-map */
 	row_inval_sz = STROMALIGN(sizeof(cl_char) * kds_slot_nrooms);

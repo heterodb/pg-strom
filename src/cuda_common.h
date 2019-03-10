@@ -648,10 +648,15 @@ typedef struct {
  * | Attributes of columns                                         |
  * |                                                               |
  * | kern_colmeta colmeta[0]                                       |
- * | kern_colmeta colmeta[1]                                       |
+ * | kern_colmeta colmeta[1]       <--+                            |
+ * |        :                         :   column definition of     |
+ * | kern_colmeta colmeta[ncols-1] <--+-- regular tables           |
  * |        :                                                      |
- * | kern_colmeta colmeta[M-1]                                     |
- * +----------------------------------------------+----------------+
+ * | kern_colmeta colmeta[idx_subattrs]     <--+                   |
+ * |        :                                  : field definition  |
+ * | kern_colmeta colmeta[idx_subattrs +       : of composite type |
+ * |                      num_subattrs - 1] <--+                   |
+ * +---------------------------------------------------------------+
  * | <slot format> | <row format> / <hash format> | <block format> |
  * +---------------+------------------------------+----------------+
  * | values/isnull | Offset to the first hash-    | BlockNumber of |
@@ -703,6 +708,21 @@ typedef struct {
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
 	/*
+	 * (for array and composite types)
+	 * Some of types contain sub-fields like array or composite type.
+	 * We carry type definition information (kern_colmeta) using the
+	 * kds->colmeta[] array next to the top-level fields.
+	 * An array type has relevant element type. So, its @num_subattrs
+	 * is always 1, and kds->colmeta[@idx_subattrs] informs properties
+	 * of the element type.
+	 * A composite type has several fields.
+	 * kds->colmeta[@idx_subattrs ... @idx_subattrs + @num_subattrs -1]
+	 * carries its sub-fields properties.
+	 */
+	cl_ushort		idx_subattrs;
+	cl_ushort		num_subattrs;
+
+	/*
 	 * (only arrow format)
 	 * @attoptions keeps extra information of Apache Arrow type. Unlike
 	 * PostgreSQL types, it can have variation of data accuracy in time
@@ -725,14 +745,6 @@ typedef struct {
 	cl_uint			va_offset;
 	cl_uint			va_length;
 } kern_colmeta;
-
-/*
- * kern_tupdesc - just a pair of nattrs + colmeta[]
- */
-typedef struct {
-	cl_uint			ncols;
-	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
-} kern_tupdesc;
 
 /*
  * kern_tupitem - individual items for KDS_FORMAT_ROW
@@ -782,10 +794,10 @@ typedef struct {
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	cl_uint			table_oid;	/* OID of the table (only if GpuScan) */
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
-	cl_uint			hash_min;	/* minimum hash-value (only HASH format) */
-	cl_uint			hash_max;	/* maximum hash-value (only HASH format) */
 	cl_uint			nrows_per_block; /* average number of rows per
 									  * PostgreSQL block (only BLOCK format) */
+	cl_uint			nr_colmeta;	/* number of colmeta[] array elements;
+								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -820,73 +832,58 @@ __kds_unpack(cl_uint offset)
 }
 #define KDS_OFFSET_MAX_SIZE		((size_t)UINT_MAX << MAXIMUM_ALIGNOF_SHIFT)
 
-/* length estimator */
-#define KDS_LEAST_LENGTH		4096
-
-
-STATIC_INLINE(size_t)
-KDS_CALCULATE_HEAD_LENGTH(cl_uint ncols, cl_char has_attnames)
-{
-	size_t	len = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-
-	if (has_attnames)
-		len += STROMALIGN(sizeof(NameData) * ncols);
-	return len;
-}
-
-STATIC_INLINE(size_t)
-KDS_CALCULATE_FRONTEND_LENGTH(cl_uint ncols, cl_uint nslots,cl_uint nitems,
-							  cl_char has_attname)
-{
-	size_t	len = KDS_CALCULATE_HEAD_LENGTH(ncols, has_attname);
-
-	return len + (STROMALIGN(sizeof(cl_uint) * (nitems)) +
-				  STROMALIGN(sizeof(cl_uint) * (nslots)));
-}
-
 /* 'nslots' estimation; 25% larger than nitems, but 128 at least */
 #define __KDS_NSLOTS(nitems)					\
 	Max(128, ((nitems) * 5) >> 2)
+/*
+ * NOTE: For strict correctness, header portion of kern_data_store may
+ * have larger number of colmeta[] items than 'ncols', if array or composite
+ * types are in the field definition.
+ * However, it is relatively rare, and 'ncols' == 'nr_colmeta' in most cases.
+ * The macros below are used for just cost estimation; no need to be strict
+ * connect for size estimatino.
+ */
+#define KDS_ESTIMATE_HEAD_LENGTH(ncols)					\
+	STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)]))
+#define KDS_ESTIMATE_ROW_LENGTH(ncols,nitems,htup_sz)					\
+	(KDS_ESTIMATE_HEAD_LENGTH(ncols) +									\
+	 STROMALIGN(sizeof(cl_uint) * (nitems)) +							\
+	 STROMALIGN(MAXALIGN(offsetof(kern_tupitem,							\
+								  htup) + htup_sz) * (nitems)))
+#define KDS_ESTIMATE_HASH_LENGTH(ncols,nitems,htup_sz)					\
+	(KDS_ESTIMATE_HEAD_LENGTH(ncols) +									\
+	 STROMALIGN(sizeof(cl_uint) * (nitems)) +							\
+	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nitems)) +				\
+	 STROMALIGN(MAXALIGN(offsetof(kern_hashitem,						\
+								  t.htup) + htup_sz) * (nitems)))
 
+/* Length of the header postion of kern_data_store */
 STATIC_INLINE(size_t)
-KDS_CALCULATE_ROW_LENGTH(cl_uint ncols, cl_uint nitems, size_t data_len)
+KERN_DATA_STORE_HEAD_LENGTH(kern_data_store *kds)
 {
-	return KDS_CALCULATE_FRONTEND_LENGTH(ncols, 0, nitems, false) +
-		MAXALIGN(data_len);
+	size_t	headsz = STROMALIGN(offsetof(kern_data_store,
+										 colmeta[kds->nr_colmeta]));
+	if (kds->has_attnames)
+		headsz += STROMALIGN(sizeof(NameData) * kds->nr_colmeta);
+	return headsz;
 }
-
-STATIC_INLINE(size_t)
-KDS_CALCULATE_HASH_LENGTH(cl_uint ncols, cl_uint nitems, size_t data_len)
-{
-	cl_uint		nslots = __KDS_NSLOTS(nitems);
-	return KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems,false) +
-		MAXALIGN(data_len);
-}
-
-STATIC_INLINE(size_t)
-KDS_CALCULATE_SLOT_LENGTH(cl_uint ncols, cl_uint nitems)
-{
-	size_t	len = KDS_CALCULATE_HEAD_LENGTH(ncols,false);
-
-	return len + LONGALIGN((sizeof(Datum) +
-							sizeof(char)) * ncols) * nitems;
-}
-/* length of the header portion of kern_data_store */
-#define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
-	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols,(kds)->has_attnames)
-/* head address of data body */
-#define KERN_DATA_STORE_BODY(kds)					\
-	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 /* attname array, if any */
 STATIC_INLINE(NameData *)
 KERN_DATA_STORE_ATTNAMES(kern_data_store *kds)
 {
-	size_t	sz;
+	size_t	offset;
 
 	if (!kds->has_attnames)
 		return NULL;
-	sz = STROMALIGN(offsetof(kern_data_store, colmeta[kds->ncols]));
-	return (NameData *)((char *)kds + sz);
+	offset = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[kds->nr_colmeta]));
+	return (NameData *)((char *)kds + offset);
+}
+/* Base address of the data body */
+STATIC_INLINE(char *)
+KERN_DATA_STORE_BODY(kern_data_store *kds)
+{
+	return (char *)kds + KERN_DATA_STORE_HEAD_LENGTH(kds);
 }
 
 /* access function for row- and hash-format */
@@ -966,21 +963,27 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 }
 
 /* access macro for tuple-slot format */
-#define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
-	KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(nitems))
+STATIC_INLINE(size_t)
+KERN_DATA_STORE_SLOT_LENGTH(kern_data_store *kds, cl_uint nitems)
+{
+	size_t	headsz = KERN_DATA_STORE_HEAD_LENGTH(kds);
+	size_t	unitsz = LONGALIGN((sizeof(Datum) + sizeof(char)) * kds->ncols);
+
+	return headsz + unitsz * nitems;
+}
 
 STATIC_INLINE(Datum *)
-KERN_DATA_STORE_VALUES(kern_data_store *kds, cl_uint kds_index)
+KERN_DATA_STORE_VALUES(kern_data_store *kds, cl_uint row_index)
 {
-	size_t	offset = KDS_CALCULATE_SLOT_LENGTH(kds->ncols, kds_index);
+	size_t	offset = KERN_DATA_STORE_SLOT_LENGTH(kds, row_index);
 
 	return (Datum *)((char *)kds + offset);
 }
 
 STATIC_INLINE(cl_char *)
-KERN_DATA_STORE_DCLASS(kern_data_store *kds, cl_uint kds_index)
+KERN_DATA_STORE_DCLASS(kern_data_store *kds, cl_uint row_index)
 {
-	Datum  *values = KERN_DATA_STORE_VALUES(kds, kds_index);
+	Datum  *values = KERN_DATA_STORE_VALUES(kds, row_index);
 
 	return (cl_char *)(values + kds->ncols);
 }

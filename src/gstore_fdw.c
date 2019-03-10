@@ -255,7 +255,7 @@ gstoreCreateForeignPath(PlannerInfo *root,
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
 	size_t		dma_size;
-	size_t		tup_size;
+	size_t		htup_size;
 	int			j, anum;
 	QualCost	qcost;
 	double		path_rows;
@@ -276,9 +276,8 @@ gstoreCreateForeignPath(PlannerInfo *root,
 		run_cost += qcost.per_tuple * gpu_ratio * raw_nrows;
 	}
 	/* Cost for DMA (device-->host) */
-	tup_size = MAXALIGN(offsetof(kern_tupitem, htup) +
-						offsetof(HeapTupleHeaderData, t_bits) +
-						BITMAPLEN(baserel->max_attr));
+	htup_size = MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+						 BITMAPLEN(baserel->max_attr));
 	j = -1;
 	while ((j = bms_next_member(outer_refs, j)) >= 0)
 	{
@@ -293,10 +292,10 @@ gstoreCreateForeignPath(PlannerInfo *root,
 		}
 		if (anum < baserel->min_attr || anum > baserel->max_attr)
 			elog(ERROR, "Bug? attribute number %d is out of range", anum);
-		tup_size += baserel->attr_widths[anum - baserel->min_attr];
+		htup_size += baserel->attr_widths[anum - baserel->min_attr];
 	}
-	dma_size = (KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr, true) +
-				MAXALIGN(tup_size) * (size_t)dma_nrows);
+	dma_size = KDS_ESTIMATE_ROW_LENGTH(baserel->max_attr,
+									   dma_nrows, htup_size);
 	run_cost += pgstrom_gpu_dma_cost *
 		((double)dma_size / (double)pgstrom_chunk_size());
 	/* Cost for CPU qualifiers, if any */
@@ -405,7 +404,7 @@ gstoreCreateForeignPath(PlannerInfo *root,
 	gsf_info->sort_keys  = sort_keys;
 	gsf_info->sort_order = sort_order;
 	gsf_info->sort_null_first = sort_null_first;
-	gsf_info->proj_tuple_sz = tup_size;
+	gsf_info->proj_tuple_sz = htup_size;
 
 	fpath = create_foreignscan_path(root,
 									baserel,
