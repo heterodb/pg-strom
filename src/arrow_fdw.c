@@ -928,7 +928,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 												  kds) + kds->length);
 	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pg_atomic_init_u32(&pds->refcnt, 1);
-	memcpy(&pds->kds, kds, offsetof(kern_data_store, colmeta[ncols]));
+	memcpy(&pds->kds, kds, head_sz);
 
 	fdesc = FileGetRawDesc(rb_state->fdesc);
 	for (j=0; j < iovec->nr_chunks; j++)
@@ -1680,6 +1680,40 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
  * pg_XXX_arrow_ref
  */
 static Datum
+pg_varlena_arrow_ref(kern_data_store *kds,
+					 kern_colmeta *cmeta, size_t index)
+{
+	cl_uint	   *offset = (cl_uint *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+	size_t		extra_len = __kds_unpack(cmeta->extra_offset);
+	cl_uint		len = offset[index+1] - offset[index];
+	struct varlena *res;
+
+	if (extra_len == 0)
+		elog(ERROR, "arrow_fdw: file corruption? varlena has no extra buffer");
+	if (extra_len <= offset[index] ||
+		extra_len <= offset[index + 1] ||
+		offset[index] >= offset[index+1])
+		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
+
+	res = palloc(VARHDRSZ + len);
+	SET_VARSIZE(res, VARHDRSZ + len);
+	memcpy(VARDATA(res), extra + offset[index], len);
+
+	return PointerGetDatum(res);
+}
+
+static Datum
+pg_bool_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
+
+	return BoolGetDatum(att_isnull(index, bitmap));
+}
+
+static Datum
 pg_int2_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
@@ -1704,66 +1738,6 @@ pg_int8_arrow_ref(kern_data_store *kds,
 	cl_long	   *values = (cl_long *)
 		((char *)kds + __kds_unpack(cmeta->values_offset));
 	return values[index];
-}
-
-static Datum
-pg_float2_arrow_ref(kern_data_store *kds,
-					kern_colmeta *cmeta, size_t index)
-{
-	return pg_int2_arrow_ref(kds, cmeta, index);
-}
-
-static Datum
-pg_float4_arrow_ref(kern_data_store *kds,
-					kern_colmeta *cmeta, size_t index)
-{
-	return pg_int4_arrow_ref(kds, cmeta, index);
-}
-
-static Datum
-pg_float8_arrow_ref(kern_data_store *kds,
-					kern_colmeta *cmeta, size_t index)
-{
-	return pg_int8_arrow_ref(kds, cmeta, index);
-}
-
-static Datum
-pg_text_arrow_ref(kern_data_store *kds,
-				  kern_colmeta *cmeta, size_t index)
-{
-	cl_uint	   *offset = (cl_uint *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
-	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
-	size_t		extra_len = __kds_unpack(cmeta->extra_offset);
-	cl_uint		len = offset[index+1] - offset[index];
-	text	   *res;
-
-	if (extra_len <= offset[index] ||
-		extra_len <= offset[index + 1] ||
-		offset[index] >= offset[index+1])
-		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
-
-	res = palloc(VARHDRSZ + len);
-	SET_VARSIZE(res, VARHDRSZ + len);
-	memcpy(VARDATA(res), extra + offset[index], len);
-
-	return PointerGetDatum(res);
-}
-
-static Datum
-pg_bytea_arrow_ref(kern_data_store *kds,
-				   kern_colmeta *cmeta, size_t index)
-{
-	return pg_text_arrow_ref(kds, cmeta, index);
-}
-
-static Datum
-pg_bool_arrow_ref(kern_data_store *kds,
-				  kern_colmeta *cmeta, size_t index)
-{
-	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
-
-	return BoolGetDatum(att_isnull(index, bitmap));
 }
 
 static Datum
@@ -1882,59 +1856,134 @@ pg_interval_arrow_ref(kern_data_store *kds,
 }
 
 /*
- * KDS_fetch_tuple_arrow
+ * pg_datum_arrow_ref
  */
-bool
-KDS_fetch_tuple_arrow(TupleTableSlot *slot,
-					  kern_data_store *kds,
-					  size_t index)
+static void
+pg_datum_arrow_ref(kern_data_store *kds,
+				   kern_colmeta *cmeta,
+				   size_t index,
+				   Datum *p_datum,
+				   bool *p_isnull)
 {
-	Datum  *values = slot->tts_values;
-	bool   *isnull = slot->tts_isnull;
-	int		j;
+	Datum		datum = 0;
+	bool		isnull = true;
 
-	if (index >= kds->nitems)
-		return false;
-	ExecStoreAllNullTuple(slot);
-	for (j=0; j < kds->ncols; j++)
+	if (cmeta->nullmap_offset != 0)
 	{
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-		Datum			datum;
+		size_t	nullmap_offset = __kds_unpack(cmeta->nullmap_offset);
+		uint8  *nullmap = (uint8 *)kds + nullmap_offset;
 
-		if (cmeta->values_offset == 0)
-			continue;	/* not loaded, always null */
+		if (att_isnull(index, nullmap))
+			goto out;
+	}
 
-		if (cmeta->nullmap_offset != 0)
+	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+	{
+		kern_colmeta   *smeta;
+		cl_uint		   *offset;
+		char		   *extra;
+		size_t			extra_len;
+		cl_uint			nitems;
+		cl_uint			nbytes;
+		ArrayType	   *result;
+
+		if (cmeta->num_subattrs != 1 ||
+			cmeta->idx_subattrs < kds->ncols ||
+			cmeta->idx_subattrs >= kds->nr_colmeta)
+			elog(ERROR, "Bug? strange kernel column metadata");
+		smeta = &kds->colmeta[cmeta->idx_subattrs];
+		if (smeta->attlen < 1)
+			elog(ERROR, "List of variable-length type is not supported");
+		if (cmeta->values_offset == 0 ||
+			cmeta->extra_offset == 0)
+			goto out;	/* not loaded? always NULL */
+
+		//XXX Do we have values_offset of the smeta side?
+		//    It is straightforward layout towards Apache Arrow.
+		//FIXME: Likely, smeta is correct, because we have no space for
+		//       NULL bitmap
+		offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+		extra  = (char *)kds + __kds_unpack(cmeta->extra_offset);
+		extra_len = __kds_unpack(cmeta->extra_length);
+		if (offset[index] * smeta->attlen >= extra_len ||
+			offset[index+1] * smeta->attlen >= extra_len)
+			elog(ERROR, "List offset is out of range");
+		if (offset[index] >= offset[index + 1])
+			elog(ERROR, "List offset is corrupted");
+		nitems = offset[index + 1] - offset[index];
+
+		nbytes = ARR_OVERHEAD_NONULLS(1) + smeta->attlen * nitems;
+		result = palloc(nbytes);
+		SET_VARSIZE(result, nbytes);
+		result->ndim = 1;
+		result->dataoffset = 0;
+		result->elemtype = smeta->atttypid;
+		ARR_DIMS(result)[0] = nitems;
+		ARR_LBOUND(result)[0] = 1;
+		memcpy(ARR_DATA_PTR(result),
+			   extra + offset[index],
+			   smeta->attlen * nitems);
+
+		datum = PointerGetDatum(result);
+		isnull = false;
+	}
+	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(cmeta->atttypid, -1);
+		Datum	   *sub_values = alloca(sizeof(Datum) * tupdesc->natts);
+		bool	   *sub_isnull = alloca(sizeof(bool)  * tupdesc->natts);
+		HeapTuple	htup;
+		int			j;
+
+		if (tupdesc->natts != cmeta->num_subattrs)
+			elog(ERROR, "Struct definition is conrrupted?");
+		if (cmeta->idx_subattrs < kds->ncols ||
+			cmeta->idx_subattrs + cmeta->num_subattrs > kds->nr_colmeta)
+			elog(ERROR, "Bug? strange kernel column metadata");
+
+		for (j=0; j < tupdesc->natts; j++)
 		{
-			size_t		nullmap_offset = __kds_unpack(cmeta->nullmap_offset);
-			uint8	   *nullmap = (uint8 *)kds + nullmap_offset;
+			kern_colmeta *sub_meta = &kds->colmeta[cmeta->idx_subattrs + j];
 
-			if (att_isnull(index, nullmap))
-				continue;
+			pg_datum_arrow_ref(kds, sub_meta, index,
+							   sub_values + j,
+							   sub_isnull + j);
 		}
+		htup = heap_form_tuple(tupdesc, sub_values, sub_isnull);
 
+		ReleaseTupleDesc(tupdesc);
+
+		datum = PointerGetDatum(htup->t_data);
+		isnull = false;
+	}
+	else if (cmeta->values_offset == 0)
+	{
+		/* not loaded, always null */
+		goto out;
+	}
+	else
+	{
+		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
+			default:
+				if (cmeta->atttypid != FLOAT2OID)
+					elog(ERROR, "Bug? unexpected datum type: %u",
+						 cmeta->atttypid);
 			case INT2OID:
 				datum = pg_int2_arrow_ref(kds, cmeta, index);
 				break;
 			case INT4OID:
+			case FLOAT4OID:
 				datum = pg_int4_arrow_ref(kds, cmeta, index);
 				break;
 			case INT8OID:
+			case FLOAT8OID:
 				datum = pg_int8_arrow_ref(kds, cmeta, index);
 				break;
-			case FLOAT4OID:
-				datum = pg_float4_arrow_ref(kds, cmeta, index);
-				break;
-			case FLOAT8OID:
-				datum = pg_float8_arrow_ref(kds, cmeta, index);
-				break;
 			case TEXTOID:
-				datum = pg_text_arrow_ref(kds, cmeta, index);
-				break;
 			case BYTEAOID:
-				datum = pg_bytea_arrow_ref(kds, cmeta, index);
+				datum = pg_varlena_arrow_ref(kds, cmeta, index);
 				break;
 			case BOOLOID:
 				datum = pg_bool_arrow_ref(kds, cmeta, index);
@@ -1954,15 +2003,37 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 			case INTERVALOID:
 				datum = pg_interval_arrow_ref(kds, cmeta, index);
 				break;
-			default:
-				if (cmeta->atttypid == FLOAT2OID)
-					datum = pg_float2_arrow_ref(kds, cmeta, index);
-				else
-					elog(ERROR, "Bug? unexpected datum type");
-				break;
 		}
-		isnull[j] = false;
-		values[j] = datum;
+		isnull = false;
+	}
+out:
+	*p_datum  = datum;
+	*p_isnull = isnull;
+}
+
+/*
+ * KDS_fetch_tuple_arrow
+ */
+bool
+KDS_fetch_tuple_arrow(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  size_t index)
+{
+	Datum  *values = slot->tts_values;
+	bool   *isnull = slot->tts_isnull;
+	int		j;
+
+	if (index >= kds->nitems)
+		return false;
+	ExecStoreAllNullTuple(slot);
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+
+		pg_datum_arrow_ref(kds, cmeta,
+						   index,
+						   values + j,
+						   isnull + j);
 	}
 	return true;
 }
