@@ -24,7 +24,7 @@
  */
 typedef struct RecordBatchFieldState
 {
-	ArrowField	arrow_field;
+	Oid			atttypid;
 	ArrowTypeOptions attopts;
 	int64		nitems;				/* usually, same with rb_nitems */
 	int64		null_count;
@@ -87,6 +87,7 @@ typedef struct
     size_t		rb_length;	/* length of the entire RecordBatch */
     int64		rb_nitems;	/* number of items */
 	int			ncols;
+	int			nfields;	/* length of fstate[] array */
 	RecordBatchFieldState fstate[FLEXIBLE_ARRAY_MEMBER];
 } arrowMetadataCache;
 
@@ -111,7 +112,7 @@ static int				arrow_metadata_entry_size;		/* GUC */
 					  fstate[arrow_metadata_entry_size]))
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
-static bool		arrowTypeIsEqualPGType(ArrowField *a, Oid type_oid);
+static Oid		arrowTypeToPGTypeOid(ArrowField *field);
 static const char *arrowTypeToPGTypeName(ArrowField *field);
 static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
@@ -349,10 +350,10 @@ setupRecordBatchField(setupRecordBatchContext *con,
 	if (con->fnode_curr >= con->fnode_tail)
 		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
 	fnode = con->fnode_curr++;
+	fstate->atttypid   = arrowTypeToPGTypeOid(field);
 	fstate->nitems     = fnode->length;
 	fstate->null_count = fnode->null_count;
 
-	copyArrowNode(&fstate->arrow_field.node, &field->node);
 	switch (field->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -688,15 +689,130 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 
 typedef struct
 {
-	cl_uint			block_sz;
-	cl_uint			nchunks;
-	struct {
-		cl_ulong	m_offset;	/* copy destination (aligned to block_sz) */
-		cl_ulong	f_pos;		/* copy source (aligned to block_sz) */
-		cl_int		nblocks;	/* number of blocks to copy */
-		cl_int		status;		/* status of P2P DMA in this chunk */
-	} io[FLEXIBLE_ARRAY_MEMBER];
+	unsigned int	nr_chunks;
+	strom_io_chunk	ioc[FLEXIBLE_ARRAY_MEMBER];
 } strom_io_vector;
+
+typedef struct
+{
+	off_t		rb_offset;
+	off_t		f_offset;
+	off_t		m_offset;
+	cl_int		io_index;
+	cl_int      depth;
+	strom_io_chunk ioc[FLEXIBLE_ARRAY_MEMBER];
+} arrowFdwSetupIOContext;
+
+/*
+ * arrowFdwSetupIOvectorField
+ */
+static inline void
+__setupIOvectorField(arrowFdwSetupIOContext *con,
+					 off_t chunk_offset,
+					 size_t chunk_length,
+					 cl_uint *p_cmeta_offset,
+					 cl_uint *p_cmeta_length)
+{
+	off_t		f_pos = con->rb_offset + chunk_offset;
+
+	if (f_pos == con->f_offset &&
+		con->m_offset == MAXALIGN(con->m_offset))
+	{
+		/* good, buffer is continuous */
+		*p_cmeta_offset = __kds_packed(con->m_offset);
+		*p_cmeta_length = __kds_packed(chunk_length);
+
+		con->m_offset += chunk_length;
+		con->f_offset += chunk_length;
+	}
+	else
+	{
+		off_t		f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
+		off_t		f_tail;
+		off_t		shift = f_pos - f_base;
+		strom_io_chunk *ioc;
+
+		if (con->io_index < 0)
+			con->io_index = 0;	/* no previous i/o chunks */
+		else
+		{
+			ioc = &con->ioc[con->io_index++];
+
+			f_tail = TYPEALIGN(PAGE_SIZE, con->f_offset);
+			ioc->nr_pages = f_tail / PAGE_SIZE - ioc->fchunk_id;
+			con->m_offset += (f_tail - con->f_offset); //safety margin;
+		}
+		ioc = &con->ioc[con->io_index];
+		/* adjust position if con->m_offset is not aligned well */
+		if (con->m_offset + shift != MAXALIGN(con->m_offset + shift))
+			con->m_offset = MAXALIGN(con->m_offset + shift) - shift;
+		ioc->m_offset   = con->m_offset;
+		ioc->fchunk_id  = f_base / PAGE_SIZE;
+
+		*p_cmeta_offset = __kds_packed(con->m_offset + shift);
+		*p_cmeta_length = __kds_packed(chunk_length);
+
+		con->m_offset  += shift + chunk_length;
+		con->f_offset   = f_pos + chunk_length;
+	}
+}
+
+static void
+arrowFdwSetupIOvectorField(arrowFdwSetupIOContext *con,
+						   RecordBatchFieldState *fstate,
+						   kern_data_store *kds,
+						   kern_colmeta *cmeta)
+{
+	//int		index = cmeta - kds->colmeta;
+
+	if (fstate->nullmap_length > 0)
+	{
+		Assert(fstate->null_count > 0);
+		__setupIOvectorField(con,
+							 fstate->nullmap_offset,
+							 fstate->nullmap_length,
+							 &cmeta->nullmap_offset,
+							 &cmeta->nullmap_length);
+		//elog(INFO, "D%d att[%d] nullmap=%lu,%lu m_offset=%lu f_offset=%lu", con->depth, index, fstate->nullmap_offset, fstate->nullmap_length, con->m_offset, con->f_offset);
+	}
+	if (fstate->values_length > 0)
+	{
+		__setupIOvectorField(con,
+							 fstate->values_offset,
+							 fstate->values_length,
+							 &cmeta->values_offset,
+							 &cmeta->values_length);
+		//elog(INFO, "D%d att[%d] values=%lu,%lu m_offset=%lu f_offset=%lu", con->depth, index, fstate->values_offset, fstate->values_length, con->m_offset, con->f_offset);
+	}
+	if (fstate->extra_length > 0)
+	{
+		__setupIOvectorField(con,
+							 fstate->extra_offset,
+							 fstate->extra_length,
+							 &cmeta->extra_offset,
+							 &cmeta->extra_length);
+		//elog(INFO, "D%d att[%d] extra=%lu,%lu m_offset=%lu f_offset=%lu", con->depth, index, fstate->extra_offset, fstate->extra_length, con->m_offset, con->f_offset);
+	}
+
+	/* nested sub-fields if composite types */
+	if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
+	{
+		kern_colmeta *subattr;
+		int		j;
+
+		Assert(fstate->num_children == cmeta->num_subattrs);
+		con->depth++;
+		for (j=0, subattr = &kds->colmeta[cmeta->idx_subattrs];
+			 j < cmeta->num_subattrs;
+			 j++, subattr++)
+		{
+			RecordBatchFieldState *child = &fstate->children[j];
+
+			arrowFdwSetupIOvectorField(con, child, kds, subattr);
+		}
+		con->depth--;
+	}
+}
 
 /*
  * arrowFdwSetupIOvector
@@ -706,159 +822,43 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 					  RecordBatchState *rb_state,
 					  Bitmapset *referenced)
 {
-	off_t		rb_offset = rb_state->rb_offset;
-	off_t		f_offset = ~0UL;
-	cl_ulong	m_offset;
-	int			io_index = -1;
-	int			j, ncols = kds->ncols;
-	strom_io_vector *iovec;
+	arrowFdwSetupIOContext *con;
+	strom_io_vector *iovec = NULL;
+	int			j, nr_chunks = 0;
 
-	iovec = palloc0(offsetof(strom_io_vector, io[3 * ncols]));
-	iovec->block_sz = PAGE_SIZE;
-
-	m_offset = TYPEALIGN(PAGE_SIZE, KERN_DATA_STORE_HEAD_LENGTH(kds));
-	for (j=0; j < ncols; j++)
+	Assert(kds->nr_colmeta >= kds->ncols);
+	con = alloca(offsetof(arrowFdwSetupIOContext,
+						  ioc[3 * kds->nr_colmeta]));
+	con->rb_offset = rb_state->rb_offset;
+	con->f_offset  = ~0UL;	/* invalid offset */
+	con->m_offset  = TYPEALIGN(PAGE_SIZE, KERN_DATA_STORE_HEAD_LENGTH(kds));
+	con->io_index  = -1;
+	for (j=0; j < kds->ncols; j++)
 	{
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-		off_t			f_base, f_pos;
-		int				attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
+		kern_colmeta *cmeta = &kds->colmeta[j];
+		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
 		if (referenced && !bms_is_member(attidx, referenced))
 			continue;
-
-		if (fstate->nullmap_length > 0)
-		{
-			Assert(fstate->null_count > 0);
-			f_pos = rb_offset + fstate->nullmap_offset;
-			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
-			if (f_pos == f_offset)
-			{
-				/* good, buffer is continuous */
-				cmeta->nullmap_offset = __kds_packed(m_offset);
-				cmeta->nullmap_length = __kds_packed(fstate->nullmap_length);
-
-				m_offset += fstate->nullmap_length;
-				f_offset += fstate->nullmap_length;
-			}
-			else
-			{
-				off_t	shift = f_pos - f_base;
-
-				if (io_index < 0)
-					io_index = 0;	/* here is no previous chunk */
-				else
-				{
-					size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
-								   iovec->io[io_index].f_pos);
-					Assert((len & PAGE_MASK) == 0);
-					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
-
-					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
-				}
-				iovec->io[io_index].m_offset = m_offset;
-				iovec->io[io_index].f_pos    = f_base;
-
-				cmeta->nullmap_offset = __kds_packed(m_offset + shift);
-				cmeta->nullmap_length = __kds_packed(fstate->nullmap_length);
-
-				m_offset += shift + fstate->nullmap_length;
-				f_offset =  f_pos + fstate->nullmap_length;
-			}
-		}
-
-		if (fstate->values_length > 0)
-		{
-			f_pos = rb_offset + fstate->values_offset;
-			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
-			if (f_pos == f_offset)
-			{
-				/* good, buffer is continuous */
-				cmeta->values_offset = __kds_packed(m_offset);
-				cmeta->values_length = __kds_packed(fstate->values_length);
-
-				m_offset += fstate->values_length;
-				f_offset += fstate->values_length;
-			}
-			else
-			{
-				off_t	shift = f_pos - f_base;
-
-				if (io_index < 0)
-					io_index = 0;	/* here is no previous chunk */
-				else
-				{
-					size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
-								   iovec->io[io_index].f_pos);
-					Assert((len & PAGE_MASK) == 0);
-					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
-
-					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
-				}
-				iovec->io[io_index].m_offset = m_offset;
-				iovec->io[io_index].f_pos    = f_base;
-
-				cmeta->values_offset = __kds_packed(m_offset + shift);
-				cmeta->values_length = __kds_packed(fstate->values_length);
-
-				m_offset += shift + fstate->values_length;
-				f_offset =  f_pos + fstate->values_length;
-			}
-		}
-
-		if (fstate->extra_length > 0)
-		{
-			f_pos = rb_offset + fstate->extra_offset;
-			f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
-			if (f_pos == f_offset)
-			{
-				/* good, buffer is continuous */
-				cmeta->extra_offset = __kds_packed(m_offset);
-				cmeta->extra_length = __kds_packed(fstate->extra_length);
-
-				m_offset += fstate->extra_length;
-				f_offset += fstate->extra_length;
-			}
-			else
-			{
-				off_t	shift = f_pos - f_base;
-
-				if (io_index < 0)
-					io_index = 0;	/* here is no previous chunk */
-				else
-				{
-					off_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
-								   iovec->io[io_index].f_pos);
-					Assert((len & PAGE_MASK) == 0);
-					iovec->io[io_index++].nblocks = len / PAGE_SIZE;
-
-					m_offset = TYPEALIGN(PAGE_SIZE, m_offset);
-				}
-				iovec->io[io_index].m_offset = m_offset;
-				iovec->io[io_index].f_pos    = f_base;
-
-				cmeta->extra_offset = __kds_packed(m_offset + shift);
-				cmeta->extra_length = __kds_packed(fstate->values_length);
-
-				m_offset += shift + fstate->extra_length;
-				f_offset =  f_pos + fstate->extra_length;
-			}
-		}
+		arrowFdwSetupIOvectorField(con, fstate, kds, cmeta);
 	}
-
-	/* close the last i/o chunk */
-	if (io_index < 0)
-		iovec->nchunks = 0;
-	else
+	if (con->io_index >= 0)
 	{
-		size_t	len = (TYPEALIGN(PAGE_SIZE, f_offset) -
-					   iovec->io[io_index].f_pos);
-		Assert((len & PAGE_MASK) == 0);
-		iovec->io[io_index++].nblocks = len / PAGE_SIZE;
-		iovec->nchunks = io_index;
-	}
-	kds->length = TYPEALIGN(PAGE_SIZE, m_offset);
+		/* close the last I/O chunks */
+		strom_io_chunk *ioc = &con->ioc[con->io_index];
 
+		ioc->nr_pages = (TYPEALIGN(PAGE_SIZE, con->f_offset) / PAGE_SIZE -
+						 ioc->fchunk_id);
+		con->m_offset = ioc->m_offset + PAGE_SIZE * ioc->nr_pages;
+		nr_chunks = con->io_index + 1;
+	}
+	kds->length = con->m_offset;
+
+	iovec = palloc0(offsetof(strom_io_vector, ioc[nr_chunks]));
+	iovec->nr_chunks = nr_chunks;
+	if (nr_chunks > 0)
+		memcpy(iovec->ioc, con->ioc, sizeof(strom_io_chunk) * nr_chunks);
 	return iovec;
 }
 
@@ -875,9 +875,9 @@ arrowFdwLoadRecordBatch(Relation relation,
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
 	strom_io_vector	   *iovec;
+	size_t				head_sz;
 	int					j, ncols = rb_state->ncols;
 	int					fdesc;
-	size_t head_sz;
 
 	head_sz = KDS_calculateHeadSize(tupdesc, false);
 	kds = alloca(head_sz);
@@ -888,26 +888,30 @@ arrowFdwLoadRecordBatch(Relation relation,
 	for (j=0; j < ncols; j++)
 		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
-#if 1
-	elog(INFO, "nchunks = %d", iovec->nchunks);
-	for (j=0; j < iovec->nchunks; j++)
+
+#if 0
+	elog(INFO, "nchunks = %d", iovec->nr_chunks);
+	for (j=0; j < iovec->nr_chunks; j++)
 	{
-		elog(INFO, "io[%d] [ m_offset=%lu, f_pos=%lu, nblocks=%u, status=%d}",
+		strom_io_chunk *ioc = &iovec->ioc[j];
+
+		elog(INFO, "io[%d] [ m_offset=%lu, f_read=%lu...%lu, nr_pages=%u}",
 			 j,
-			 iovec->io[j].m_offset,
-			 iovec->io[j].f_pos,
-			 iovec->io[j].nblocks,
-			 iovec->io[j].status);
+			 ioc->m_offset,
+			 ioc->fchunk_id * PAGE_SIZE,
+			 (ioc->fchunk_id + ioc->nr_pages) * PAGE_SIZE,
+			 ioc->nr_pages);
 	}
 
 	elog(INFO, "kds {length=%zu nitems=%u typeid=%u typmod=%u table_oid=%u}",
 		 kds->length, kds->nitems,
 		 kds->tdtypeid, kds->tdtypmod, kds->table_oid);
-	for (j=0; j < kds->ncols; j++)
+	for (j=0; j < kds->nr_colmeta; j++)
 	{
 		kern_colmeta *cmeta = &kds->colmeta[j];
 
-		elog(INFO, "col[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu", j,
+		elog(INFO, "%ccol[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu",
+			 j < kds->ncols ? ' ' : '*', j,
 			 __kds_unpack(cmeta->nullmap_offset),
 			 __kds_unpack(cmeta->nullmap_length),
 			 __kds_unpack(cmeta->values_offset),
@@ -927,13 +931,13 @@ arrowFdwLoadRecordBatch(Relation relation,
 	memcpy(&pds->kds, kds, offsetof(kern_data_store, colmeta[ncols]));
 
 	fdesc = FileGetRawDesc(rb_state->fdesc);
-	for (j=0; j < iovec->nchunks; j++)
+	for (j=0; j < iovec->nr_chunks; j++)
 	{
-		size_t		page_sz = iovec->block_sz;
-		char	   *dest = (char *)&pds->kds + iovec->io[j].m_offset;
-		size_t		len = page_sz * (size_t)iovec->io[j].nblocks;
-		off_t		f_pos = iovec->io[j].f_pos;
-		ssize_t		sz;
+		strom_io_chunk *ioc = &iovec->ioc[j];
+		char   *dest = (char *)&pds->kds + ioc->m_offset;
+		off_t	f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
+		size_t	len = (size_t)ioc->nr_pages * PAGE_SIZE;
+		ssize_t	sz;
 
 		while (len > 0 && f_pos < rb_state->stat_buf.st_size)
 		{
@@ -964,7 +968,7 @@ arrowFdwLoadRecordBatch(Relation relation,
 		 */
 		if (len > 0)
 		{
-			Assert(len < page_sz);
+			Assert(len < PAGE_SIZE);
 			memset(dest, 0, len);
 		}
 	}
@@ -1375,316 +1379,8 @@ arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 	return true;
 }
 
-static bool
-arrowTypeIsEqualPGType(ArrowField *a, Oid type_oid)
-{
-	switch (a->type.node.tag)
-	{
-		case ArrowNodeTag__Int:
-			switch (a->type.Int.bitWidth)
-			{
-				case 16:
-					if (type_oid == INT2OID)
-						return true;
-					break;
-				case 32:
-					if (type_oid ==INT4OID)
-						return true;
-					break;
-				case 64:
-					if (type_oid == INT8OID)
-						return true;
-					break;
-				default:
-					elog(ERROR, "%s%d of Arrow is not supported",
-						 a->type.Int.is_signed ? "Int" : "Uint",
-						 a->type.Int.bitWidth);
-					break;
-			}
-			break;
-		case ArrowNodeTag__FloatingPoint:
-			switch (a->type.FloatingPoint.precision)
-			{
-				case ArrowPrecision__Half:
-					if (type_oid == FLOAT2OID)
-						return true;
-					break;
-				case ArrowPrecision__Single:
-					if (type_oid == FLOAT4OID)
-						return true;
-					break;
-				case ArrowPrecision__Double:
-					if (type_oid == FLOAT8OID)
-						return true;
-					break;
-				default:
-					elog(ERROR, "FloatingPoint with unknown precision");
-			}
-			break;
-		case ArrowNodeTag__Utf8:
-			if (type_oid == TEXTOID)
-				return true;
-			break;
-		case ArrowNodeTag__Binary:
-			if (type_oid == BYTEAOID)
-				return true;
-			break;
-		case ArrowNodeTag__Bool:
-			if (type_oid == BOOLOID)
-				return true;
-			break;
-		case ArrowNodeTag__Decimal:
-			if (type_oid == NUMERICOID)
-				return true;
-			break;
-		case ArrowNodeTag__Date:
-			if (type_oid == DATEOID)
-				return true;
-			break;
-		case ArrowNodeTag__Time:
-			if (type_oid == TIMEOID)
-				return true;
-			break;
-		case ArrowNodeTag__Timestamp:
-			if (type_oid == TIMESTAMPOID)
-				return true;
-			break;
-		case ArrowNodeTag__Interval:
-			if (type_oid == INTERVALOID)
-				return true;
-			break;
-		case ArrowNodeTag__List:
-			if (a->_num_children == 1)
-			{
-				ArrowField *child = &a->children[0];
-				int16		type_len = get_typlen(type_oid);
-				Oid			elem_oid = get_element_type(type_oid);
-
-				if (type_len == -1 && OidIsValid(elem_oid))
-				{
-					switch (child->type.node.tag)
-					{
-						case ArrowNodeTag__Int:
-						case ArrowNodeTag__FloatingPoint:
-						case ArrowNodeTag__Bool:
-						case ArrowNodeTag__Decimal:
-						case ArrowNodeTag__Date:
-						case ArrowNodeTag__Time:
-						case ArrowNodeTag__Timestamp:
-						case ArrowNodeTag__Interval:
-							if (arrowTypeIsEqualPGType(child, elem_oid))
-								return true;
-						default:
-							/* only fixed length array is supported */
-							break;
-					}
-				}
-			}
-			else
-				elog(ERROR, "Bug? List of arrow type is corrupted");
-			break;
-		case ArrowNodeTag__Struct:
-			if (get_typtype(type_oid) == TYPTYPE_COMPOSITE)
-			{
-				Oid			composite_id = get_typ_typrelid(type_oid);
-				HeapTuple	tup;
-				int			j, nfields;
-
-				tup = SearchSysCache1(RELOID, ObjectIdGetDatum(composite_id));
-				if (!HeapTupleIsValid(tup))
-					return false;
-				nfields = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
-				ReleaseSysCache(tup);
-
-				if (nfields != a->_num_children)
-					return false;
-
-				for (j=0; j < nfields; j++)
-				{
-					ArrowField	   *child = &a->children[j];
-					Oid				child_type;
-
-					child_type = get_atttype(composite_id, j+1);
-					if (!OidIsValid(child_type))
-						return false;
-					switch (child->type.node.tag)
-					{
-						case ArrowNodeTag__Int:
-						case ArrowNodeTag__FloatingPoint:
-						case ArrowNodeTag__Utf8:
-						case ArrowNodeTag__Binary:
-						case ArrowNodeTag__Bool:
-						case ArrowNodeTag__Decimal:
-						case ArrowNodeTag__Date:
-						case ArrowNodeTag__Time:
-						case ArrowNodeTag__Timestamp:
-						case ArrowNodeTag__Interval:
-							if (!arrowTypeIsEqualPGType(child, child_type))
-								return false;
-							break;
-						default:
-							elog(ERROR, "nested Struct is not supported");
-							break;
-					}
-				}
-				return true;
-			}
-			break;
-		default:
-			elog(ERROR, "'%s' of arrow type is not supported",
-				 a->type.node.tagName);
-	}
-	return false;
-}
-
-static const char *
-__arrowStructTypeToPGTypeName(ArrowField *field)
-{
-	Relation	rel;
-	ScanKeyData	skey[2];
-	SysScanDesc	sscan;
-	HeapTuple	tup;
-	const char *type_name = NULL;
-
-	rel = heap_open(RelationRelationId, AccessShareLock);
-	ScanKeyInit(&skey[0],
-				Anum_pg_class_relkind,
-				BTEqualStrategyNumber, F_CHAREQ,
-				CharGetDatum(RELKIND_COMPOSITE_TYPE));
-	ScanKeyInit(&skey[1],
-				Anum_pg_class_relnatts,
-				BTEqualStrategyNumber, F_INT2EQ,
-				Int16GetDatum(field->_num_children));
-	sscan = systable_beginscan(rel, InvalidOid, false,
-							   NULL, 2, skey);
-	while (HeapTupleIsValid(tup = systable_getnext(sscan)))
-	{
-		Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tup);
-		Oid			reloid = HeapTupleGetOid(tup);
-		int			j;
-		bool		compatible = true;
-
-		if (pg_namespace_aclcheck(relForm->relnamespace,
-								  GetUserId(),
-								  ACL_USAGE) != ACLCHECK_OK)
-			continue;
-
-		if (pg_type_aclcheck(relForm->reltype,
-							 GetUserId(),
-							 ACL_USAGE) != ACLCHECK_OK)
-			continue;
-
-		Assert(relForm->relnatts == field->_num_children);
-		for (j=0; compatible && j < relForm->relnatts; j++)
-		{
-			ArrowField *child = &field->children[j];
-			Form_pg_attribute attr;
-			HeapTuple	tp;
-
-			tp = SearchSysCache2(ATTNUM,
-								 ObjectIdGetDatum(reloid),
-								 Int16GetDatum(j+1));
-			if (!HeapTupleIsValid(tp))
-				elog(ERROR, "cache lookup failed for attribute %d of composite type %s",
-					 j+1, NameStr(relForm->relname));
-			attr = (Form_pg_attribute) GETSTRUCT(tp);
-			switch (child->type.node.tag)
-			{
-				case ArrowNodeTag__Int:
-					switch (child->type.Int.bitWidth)
-					{
-						case 16:
-							compatible = (attr->atttypid == INT2OID);
-							break;
-						case 32:
-							compatible = (attr->atttypid == INT4OID);
-							break;
-						case 64:
-							compatible = (attr->atttypid == INT8OID);
-							break;
-						default:
-							elog(ERROR, "not a supported Int bitWidth: %d",
-								 child->type.Int.bitWidth);
-							break;
-					}
-					break;
-				case ArrowNodeTag__FloatingPoint:
-					switch (child->type.FloatingPoint.precision)
-					{
-						case ArrowPrecision__Half:
-							compatible = (attr->atttypid == FLOAT2OID);
-							break;
-						case ArrowPrecision__Single:
-							compatible = (attr->atttypid == FLOAT4OID);
-							break;
-						case ArrowPrecision__Double:
-							compatible = (attr->atttypid == FLOAT8OID);
-							break;
-						default:
-							elog(ERROR, "unknown precision of FloatingPoint");
-							break;
-					}
-					break;
-				case ArrowNodeTag__Utf8:
-					compatible = (attr->atttypid == TEXTOID);
-					break;
-				case ArrowNodeTag__Binary:
-					compatible = (attr->atttypid == BYTEAOID);
-					break;
-				case ArrowNodeTag__Bool:
-					compatible = (attr->atttypid == BOOLOID);
-					break;
-				case ArrowNodeTag__Decimal:
-					compatible = (attr->atttypid == NUMERICOID);
-					break;
-				case ArrowNodeTag__Date:
-					compatible = (attr->atttypid == DATEOID);
-					break;
-				case ArrowNodeTag__Time:
-					compatible = (attr->atttypid == TIMEOID);
-					break;
-				case ArrowNodeTag__Timestamp:
-					if (child->type.Timestamp.timezone)
-					   elog(ERROR, "Timestamp with timezone is not supported");
-					compatible = (attr->atttypid == TIMESTAMPOID);
-					break;
-				case ArrowNodeTag__Interval:
-					compatible = (attr->atttypid == INTERVALOID);
-					break;
-				default:
-					elog(ERROR, "'%s' type is not supported for child field of Struct type",
-						 child->type.node.tagName);
-					break;
-			}
-			ReleaseSysCache(tp);
-		}
-
-		if (compatible)
-		{
-			Form_pg_type	typeForm;
-			HeapTuple		tup;
-
-			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(relForm->reltype));
-			if (!HeapTupleIsValid(tup))
-				elog(ERROR, "cache lookup failed for type: %u",
-					 relForm->reltype);
-			typeForm = (Form_pg_type) GETSTRUCT(tup);
-
-			type_name = psprintf("%s.%s",
-								 get_namespace_name(typeForm->typnamespace),
-								 NameStr(typeForm->typname));
-			ReleaseSysCache(tup);
-			break;
-		}
-	}
-	systable_endscan(sscan);
-	heap_close(rel, AccessShareLock);
-
-	return type_name;
-}
-
-static const char *
-arrowTypeToPGTypeName(ArrowField *field)
+static Oid
+arrowTypeToPGTypeOid(ArrowField *field)
 {
 	ArrowType  *t = &field->type;
 
@@ -1694,11 +1390,11 @@ arrowTypeToPGTypeName(ArrowField *field)
 			switch (t->Int.bitWidth)
 			{
 				case 16:
-					return "pg_catalog.int2";
+					return INT2OID;
 				case 32:
-					return "pg_catalog.int4";
+					return INT4OID;
 				case 64:
-					return "pg_catalog.int8";
+					return INT8OID;
 				default:
 					elog(ERROR, "%s%d of Arrow is not supported",
 						 t->Int.is_signed ? "Int" : "Uint",
@@ -1710,66 +1406,143 @@ arrowTypeToPGTypeName(ArrowField *field)
 			switch (t->FloatingPoint.precision)
 			{
 				case ArrowPrecision__Half:
-					return "pg_catalog.float2";
+					return FLOAT2OID;
 				case ArrowPrecision__Single:
-					return "pg_catalog.float4";
+					return FLOAT4OID;
 				case ArrowPrecision__Double:
-					return "pg_catalog.float8";
+					return FLOAT8OID;
 				default:
 					elog(ERROR, "FloatingPoint with unknown precision");
 			}
 			break;
 		case ArrowNodeTag__Utf8:
-			return "pg_catalog.text";
+			return TEXTOID;
 		case ArrowNodeTag__Binary:
-			return "pg_catalog.bytea";
+			return BYTEAOID;
 		case ArrowNodeTag__Bool:
-			return "pg_catalog.bool";
+			return BOOLOID;
 		case ArrowNodeTag__Decimal:
-			return "pg_catalog.numeric";
+			return NUMERICOID;
 		case ArrowNodeTag__Date:
-			return "pg_catalog.date";
+			return DATEOID;
 		case ArrowNodeTag__Time:
-			return "pg_catalog.time";
+			return TIMEOID;
 		case ArrowNodeTag__Timestamp:
 			if (t->Timestamp.timezone)
 				elog(ERROR, "Timestamp with timezone is not supported");
-			return "pg_catalog.timezone";
+			return TIMESTAMPOID;
 		case ArrowNodeTag__Interval:
-			return "pg_catalog.interval";
+			return INTERVALOID;
 		case ArrowNodeTag__List:
 			if (field->_num_children != 1)
 				elog(ERROR, "arrow_fdw: corrupted List type definition");
 			else
 			{
 				ArrowField *child = &field->children[0];
+				Oid		elem_oid = arrowTypeToPGTypeOid(child);
+				Oid		type_oid = get_array_type(elem_oid);
 
-				switch (child->type.node.tag)
-				{
-					case ArrowNodeTag__Int:
-					case ArrowNodeTag__FloatingPoint:
-					case ArrowNodeTag__Bool:
-					case ArrowNodeTag__Decimal:
-					case ArrowNodeTag__Date:
-					case ArrowNodeTag__Time:
-					case ArrowNodeTag__Timestamp:
-					case ArrowNodeTag__Interval:
-						break;
-					default:
-						elog(ERROR, "List of '%s' is not supported",
-							 child->type.node.tagName);
-				}
-				return psprintf("%s[]", arrowTypeToPGTypeName(child));
+				if (!OidIsValid(type_oid))
+					elog(ERROR, "arrow_fdw: no correspondin List element");
+				if (get_typlen(type_oid) <= 0)
+					elog(ERROR, "arrow_fdw: List of %s is not supported",
+						 child->type.node.tagName);
+				return type_oid;
 			}
 			break;
 
 		case ArrowNodeTag__Struct:
-			return __arrowStructTypeToPGTypeName(field);
+			{
+				Relation	rel;
+				ScanKeyData	skey[2];
+				SysScanDesc	sscan;
+				HeapTuple	tup;
+				Oid			type_oid = InvalidOid;
+
+				/*
+				 * lookup composite type definition from pg_class
+				 * At least, nattrs == _num_children
+				 */
+				rel = heap_open(RelationRelationId, AccessShareLock);
+				ScanKeyInit(&skey[0],
+							Anum_pg_class_relkind,
+							BTEqualStrategyNumber, F_CHAREQ,
+							CharGetDatum(RELKIND_COMPOSITE_TYPE));
+				ScanKeyInit(&skey[1],
+							Anum_pg_class_relnatts,
+							BTEqualStrategyNumber, F_INT2EQ,
+							Int16GetDatum(field->_num_children));
+
+				sscan = systable_beginscan(rel, InvalidOid, false,
+										   NULL, 2, skey);
+				while (!OidIsValid(type_oid) &&
+					   HeapTupleIsValid(tup = systable_getnext(sscan)))
+				{
+					Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tup);
+					TupleDesc	tupdesc;
+					int			j;
+					bool		compatible = true;
+
+					if (pg_namespace_aclcheck(relForm->relnamespace,
+											  GetUserId(),
+											  ACL_USAGE) != ACLCHECK_OK)
+						continue;
+
+					if (pg_type_aclcheck(relForm->reltype,
+										 GetUserId(),
+										 ACL_USAGE) != ACLCHECK_OK)
+						continue;
+
+					tupdesc = lookup_rowtype_tupdesc(relForm->reltype, -1);
+					Assert(tupdesc->natts == field->_num_children);
+					for (j=0; compatible && j < tupdesc->natts; j++)
+					{
+						Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+						ArrowField		   *child = &field->children[j];
+
+						if (arrowTypeToPGTypeOid(child) != attr->atttypid)
+							compatible = false;
+					}
+					ReleaseTupleDesc(tupdesc);
+
+					if (compatible)
+						type_oid = relForm->reltype;
+				}
+				systable_endscan(sscan);
+				heap_close(rel, AccessShareLock);
+
+				return type_oid;
+			}
+			break;
 		default:
 			elog(ERROR, "arrow_fdw: type '%s' is not supported",
 				 field->type.node.tagName);
 	}
-	return NULL;
+	return InvalidOid;
+}
+
+static const char *
+arrowTypeToPGTypeName(ArrowField *field)
+{
+	Oid			type_oid = arrowTypeToPGTypeOid(field);
+	HeapTuple	tup;
+	Form_pg_type type;
+	char	   *schema;
+	char	   *result;
+
+	if (!OidIsValid(type_oid))
+		return NULL;
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	type = (Form_pg_type) GETSTRUCT(tup);
+	schema = get_namespace_name(type->typnamespace);
+	result = psprintf("%s.%s",
+					  quote_identifier(schema),
+					  quote_identifier(NameStr(type->typname)));
+	ReleaseSysCache(tup);
+
+	return result;
 }
 
 /*
@@ -1897,7 +1670,7 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		RecordBatchFieldState *fstate = &rb_state->columns[j];
 
-		if (!arrowTypeIsEqualPGType(&fstate->arrow_field, attr->atttypid))
+		if (attr->atttypid != fstate->atttypid)
 			return false;
 	}
 	return true;
@@ -1958,15 +1731,16 @@ static Datum
 pg_text_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	cl_uint	   *offset = (cl_uint *)((char *)kds +
-									 __kds_unpack(cmeta->values_offset));
+	cl_uint	   *offset = (cl_uint *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
 	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
 	size_t		extra_len = __kds_unpack(cmeta->extra_offset);
 	cl_uint		len = offset[index+1] - offset[index];
 	text	   *res;
 
 	if (extra_len <= offset[index] ||
-		extra_len <= offset[index + 1])
+		extra_len <= offset[index + 1] ||
+		offset[index] >= offset[index+1])
 		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
 
 	res = palloc(VARHDRSZ + len);
@@ -2372,6 +2146,42 @@ arrowInvalidateMetadataCache(struct stat *stat_buf)
 }
 
 /*
+ * copyMetadataFieldCache - copy for nested structure
+ */
+static int
+copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
+					   RecordBatchFieldState *dest_tail,
+					   int nattrs,
+					   RecordBatchFieldState *columns)
+{
+	RecordBatchFieldState *dest_next = dest_curr + nattrs;
+	int		j, k, nslots = nattrs;
+
+	if (dest_next > dest_tail)
+		return -1;
+
+	for (j=0; j < nattrs; j++)
+	{
+		dest_curr[j] = columns[j];
+		if (dest_curr[j].num_children == 0)
+			Assert(dest_curr[j].children == NULL);
+		else
+		{
+			dest_curr[j].children = dest_next;
+			k = copyMetadataFieldCache(dest_next,
+									   dest_tail,
+									   columns[j].num_children,
+									   columns[j].children);
+			if (k < 0)
+				return -1;
+			dest_next += k;
+			nslots += k;
+		}
+	}
+	return nslots;
+}
+
+/*
  * arrowLookupMetadataCache
  */
 static List *
@@ -2404,7 +2214,6 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
 		{
 			RecordBatchState *rbstate;
-			int		j, ncols = mcache->ncols;
 
 			if (mcache->stat_buf.st_mtime < stat_buf.st_mtime ||
 				mcache->stat_buf.st_ctime < stat_buf.st_ctime)
@@ -2421,8 +2230,8 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 				goto out;
 			}
 			/* setup RecordBatchState from arrowMetadataCache */
-			rbstate = palloc0(offsetof(RecordBatchState, columns[ncols]));
-
+			rbstate = palloc0(offsetof(RecordBatchState,
+									   columns[mcache->nfields]));
 			rbstate->fname = fname;
 			rbstate->fdesc = fdesc;
 			memcpy(&rbstate->stat_buf, &mcache->stat_buf, sizeof(struct stat));
@@ -2431,9 +2240,10 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 			rbstate->rb_length = mcache->rb_length;
 			rbstate->rb_nitems = mcache->rb_nitems;
 			rbstate->ncols = mcache->ncols;
-			rbstate->ncols = mcache->ncols;
-			for (j=0; j < mcache->ncols; j++)
-				rbstate->columns[j] = mcache->fstate[j];
+			copyMetadataFieldCache(rbstate->columns,
+								   rbstate->columns + mcache->nfields,
+								   mcache->ncols,
+								   mcache->fstate);
 			result = lappend(result, rbstate);
 
 			dlist_move_head(slot, &mcache->lru_chain);
@@ -2459,7 +2269,7 @@ arrowUpdateMetadataCache(List *rbstateList)
 	ListCell	   *lc;
 	const char	   *fname;
 	uint32			hash, index;
-	int				j, nitems;
+	int				nitems;
 	char			buf1[50], buf2[50];
 	RecordBatchState *rbstate;
 
@@ -2568,9 +2378,11 @@ arrowUpdateMetadataCache(List *rbstateList)
 		mtemp->rb_length = rbstate->rb_length;
 		mtemp->rb_nitems = rbstate->rb_nitems;
 		mtemp->ncols     = rbstate->ncols;
-		for (j=0; j < rbstate->ncols; j++)
-			mtemp->fstate[j] = rbstate->columns[j];
-
+		mtemp->nfields   =
+			copyMetadataFieldCache(mtemp->fstate,
+								   mtemp->fstate + arrow_metadata_entry_size,
+								   rbstate->ncols,
+								   rbstate->columns);
 		if (!mcache)
 			mcache = mtemp;
 		else

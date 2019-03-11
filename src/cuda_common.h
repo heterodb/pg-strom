@@ -692,6 +692,14 @@ typedef struct {
  */
 #include "arrow_defs.h"
 
+#define TYPE_KIND__BASE			'b'
+#define TYPE_KIND__ARRAY		'a'
+#define TYPE_KIND__COMPOSITE	'c'
+#define TYPE_KIND__DOMAIN		'd'
+#define TYPE_KIND__ENUM			'e'
+#define TYPE_KIND__PSEUDO		'p'
+#define TYPE_KIND__RANGE		'r'
+
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */
 	cl_char			attbyval;
@@ -707,6 +715,8 @@ typedef struct {
 	cl_uint			atttypid;
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
+	/* one of TYPE_KIND__* */
+	cl_char			atttypkind;
 	/*
 	 * (for array and composite types)
 	 * Some of types contain sub-fields like array or composite type.

@@ -374,10 +374,37 @@ count_num_of_subfields(Form_pg_attribute attr)
 
 			result += count_num_of_subfields(attr);
 		}
-		DecrTupleDescRefCount(tupdesc);
+		ReleaseTupleDesc(tupdesc);
 	}
 	ReleaseSysCache(tup);
 	return result;
+}
+
+static char
+pg_type_to_typeKind(Form_pg_type type)
+{
+	switch (type->typtype)
+	{
+		case TYPTYPE_BASE:
+			if (type->typlen == -1 && OidIsValid(type->typelem))
+				return TYPE_KIND__ARRAY;
+			return TYPE_KIND__BASE;
+		case TYPTYPE_COMPOSITE:
+			if (OidIsValid(type->typrelid))
+				return TYPE_KIND__COMPOSITE;
+			elog(ERROR, "composite type without relevant relation OID");
+		case TYPTYPE_DOMAIN:
+			return TYPE_KIND__DOMAIN;
+		case TYPTYPE_ENUM:
+			return TYPE_KIND__ENUM;
+		case TYPTYPE_PSEUDO:
+			return TYPE_KIND__PSEUDO;
+		case TYPTYPE_RANGE:
+			return TYPE_KIND__RANGE;
+		default:
+			break;
+	}
+	elog(ERROR, "unknown pg_type.typtype definition: '%c'", type->typtype);
 }
 
 static int
@@ -408,6 +435,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 		Form_pg_type	type;
 		HeapTuple		tup;
 		int				attalign;
+		cl_char			atttypkind;
 		cl_ushort		idx_subattrs = 0;
 		cl_ushort		num_subattrs = 0;
 
@@ -415,7 +443,8 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 		if (!HeapTupleIsValid(tup))
 			elog(ERROR, "cache lookup failed for type %u", attr->atttypid);
 		type = (Form_pg_type) GETSTRUCT(tup);
-		if (type->typlen == -1 && OidIsValid(type->typelem))
+		atttypkind = pg_type_to_typeKind(type);
+		if (atttypkind == TYPE_KIND__ARRAY)
 		{
 			HeapTuple		tp;
 			Form_pg_type	elem;
@@ -433,6 +462,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 			ctemp->attcacheoff = -1;
 			ctemp->atttypid = type->typelem;
 			ctemp->atttypmod = -1;
+			ctemp->atttypkind = pg_type_to_typeKind(elem);
 			ctemp->idx_subattrs = 0;
 			ctemp->num_subattrs = 0;
 			if (attNames)
@@ -442,8 +472,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 			idx_subattrs = cusage++;
 			num_subattrs = 1;
 		}
-		else if (type->typtype == TYPTYPE_COMPOSITE &&
-				 OidIsValid(type->typrelid))
+		else if (atttypkind == TYPE_KIND__COMPOSITE)
 		{
 			NameData   *__attNames = (attNames ? attNames + cusage : NULL);
 			TupleDesc	rowdesc = lookup_rowtype_tupdesc(attr->atttypid,
@@ -453,6 +482,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 			num_subattrs = init_kernel_tupdesc(cmeta + cusage,
 											   __attNames,
 											   rowdesc, format, NULL);
+			ReleaseTupleDesc(rowdesc);
 			cusage += num_subattrs;
 		}
 		/* setup colmeta */
@@ -473,6 +503,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 		cmeta[j].attcacheoff = attcacheoff;
 		cmeta[j].atttypid = (cl_uint)attr->atttypid;
 		cmeta[j].atttypmod = (cl_int)attr->atttypmod;
+		cmeta[j].atttypkind = atttypkind;
 		cmeta[j].idx_subattrs = idx_subattrs;
 		cmeta[j].num_subattrs = num_subattrs;
 		if (attcacheoff >= 0)
@@ -543,7 +574,6 @@ KDS_calculateHeadSize(TupleDesc tupdesc, bool has_attnames)
 
 		nr_colmeta += count_num_of_subfields(attr);
 	}
-	elog(INFO, "ncol=%d nr_colmeta=%d", tupdesc->natts, nr_colmeta);
 	head_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 	if (has_attnames)
 		head_sz += sizeof(NameData) * nr_colmeta;

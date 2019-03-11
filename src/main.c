@@ -526,7 +526,6 @@ _PG_init(void)
 	PAGE_SIZE = sysconf(_SC_PAGESIZE);
 	PAGE_MASK = PAGE_SIZE - 1;
 	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
-	elog(LOG, "PAGE_SIZE = %ld PAGE_MASK = %ld PAGE_SHIFT = %d", PAGE_SIZE, PAGE_MASK, PAGE_SHIFT);
 
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_misc_guc();

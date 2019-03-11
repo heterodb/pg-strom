@@ -21,16 +21,14 @@ enum {
 	STROM_IOCTL__UNMAP_GPU_MEMORY	= _IO('S',0x82),
 	STROM_IOCTL__LIST_GPU_MEMORY	= _IO('S',0x83),
 	STROM_IOCTL__INFO_GPU_MEMORY	= _IO('S',0x84),
-	STROM_IOCTL__ALLOC_DMA_BUFFER	= _IO('S',0x85),
 	STROM_IOCTL__MEMCPY_SSD2GPU		= _IO('S',0x90),
-	STROM_IOCTL__MEMCPY_SSD2RAM		= _IO('S',0x91),
+	STROM_IOCTL__MEMCPY_SSD2GPU_RAW	= _IO('S',0x91),
 	STROM_IOCTL__MEMCPY_WAIT		= _IO('S',0x92),
 	STROM_IOCTL__STAT_INFO			= _IO('S',0x99),
 };
 
 /* path of ioctl(2) entrypoint */
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
-
 /* default license location */
 #define HETERODB_LICENSE_PATHNAME		"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */
@@ -57,8 +55,11 @@ typedef struct StromCmd__LicenseInfo
 } StromCmd__LicenseInfo;
 
 /* STROM_IOCTL__CHECK_FILE */
-#define NVME_STROM_VOLKIND__RAW_NVME		1
-#define NVME_STROM_VOLKIND__MD_RAID0		2
+#define NVME_VOLUME_KIND__RAW_NVME		'R'
+#define NVME_VOLUME_KIND__MD_RAID0		'M'
+
+#define NVME_DEVICE_KIND__PCIE			'p'
+#define NVME_DEVICE_KIND__RDMA			'r'
 
 typedef struct StromCmd__CheckFile
 {
@@ -66,8 +67,10 @@ typedef struct StromCmd__CheckFile
 	int				fdesc;
 	/* in: length of the disks[] array */
 	int				nrooms;
-	/* out: type of the volume; one of the NVME_STROM_VOLKIND_* */
-	int				volkind;
+	/* out: type of the volume; one of the NVME_VOLUME_KIND__* */
+	char			volume_kind;
+	/* out: type of NVME device; one of the NVME_DEVICE_KIND__* */
+	char			nvme_kind;
 	/* out: number of the underlying raw-disks */
 	int				ndisks;
 	/*
@@ -140,41 +143,37 @@ typedef struct StromCmd__MemCopySsdToGpu
 								 * chunk_sz * nr_chunks bytes. */
 } StromCmd__MemCopySsdToGpu;
 
+/* STROM_IOCTL__MEMCPY_SSD2GPU_RAW */
+typedef struct
+{
+	unsigned long	m_offset;	/* destination offset from the base address
+								 * base = mgmem + offset */
+	unsigned int	fchunk_id;	/* source page index of the file. */
+	unsigned int	nr_pages;	/* number of pages to be loaded */
+} strom_io_chunk;
+
+typedef struct StromCmd__MemCopySsdToGpuRaw
+{
+	unsigned long	dma_task_id;/* out: ID of the DMA task */
+	unsigned int	nr_ram2gpu; /* out: # of RAM2GPU chunks */
+	unsigned int	nr_ssd2gpu; /* out: # of SSD2GPU chunks */
+	unsigned int	nr_dma_submit;	/* out: # of SSD2GPU DMA submit */
+	unsigned int	nr_dma_blocks;	/* out: # of SSD2GPU DMA blocks */
+	unsigned long	handle;		/* in: handle of the mapped GPU memory */
+	size_t			offset;		/* in: offset from the head of GPU memory */
+	int				file_desc;	/* in: file descriptor of the source file */
+	unsigned int	nr_chunks;	/* in: number of chunks */
+	unsigned int	page_sz;	/* in: page-size application assumes */
+	strom_io_chunk __user *io_chunks; /* in: copy source, destination and
+									   *     length per I/O chunk. */
+} StromCmd__MemCopySsdToGpuRaw;
+
 /* STROM_IOCTL__MEMCPY_WAIT */
 typedef struct StromCmd__MemCopyWait
 {
 	unsigned long	dma_task_id;/* in: ID of the DMA task to wait */
 	long			status;		/* out: status of the DMA task */
 } StromCmd__MemCopyWait;
-
-/* STROM_IOCTL__MEMCPY_SSD2RAM */
-typedef struct StromCmd__MemCopySsdToRam
-{
-	unsigned long	dma_task_id;/* out: ID of the DMA task */
-	unsigned int	nr_ram2ram; /* out: # of RAM2RAM chunks */
-	unsigned int	nr_ssd2ram; /* out: # of SSD2RAM chunks */
-	unsigned int	nr_dma_submit;	/* out: # of SSD2GPU DMA submit */
-	unsigned int	nr_dma_blocks;	/* out: # of SSD2RAM DMA blocks */
-
-	void __user	   *dest_uaddr;	/* in: virtual address of the destination
-								 *     buffer; which must be mapped using
-								 *     mmap(2) on /proc/nvme-strom */
-	int				file_desc;	/* in: file descriptor of the source file */
-	unsigned int	nr_chunks;	/* in: number of chunks */
-	unsigned int    chunk_sz;	/* in: chunk-size (BLCKSZ in PostgreSQL) */
-	unsigned int	relseg_sz;	/* in: # of chunks per file. (RELSEG_SIZE
-								 *     in PostgreSQL). 0 means no boundary. */
-	uint32_t __user *chunk_ids;	/* in: # of chunks per file (RELSEG_SIZE in
-								 *     PostgreSQL). 0 means no boundary. */
-} StromCmd__MemCopySsdToRam;
-
-/* STROM_IOCTL__ALLOC_DMA_BUFFER */
-typedef struct StromCmd__AllocDMABuffer
-{
-	size_t			length;		/* in: required length of DMA buffer */
-	int				node_id;	/* in: numa-id to be located */
-	int				dmabuf_fdesc; /* out: FD of anon file descriptor */
-} StromCmd__AllocDMABuffer;
 
 /* STROM_IOCTL__STAT_INFO */
 #define NVME_STROM_STATFLAGS__DEBUG		0x0001
@@ -193,6 +192,8 @@ typedef struct StromCmd__StatInfo
 	uint64_t		clk_setup_prps;
 	uint64_t		nr_submit_dma;
 	uint64_t		clk_submit_dma;
+	uint64_t		nr_submit_wait;
+	uint64_t		clk_submit_wait;
 	uint64_t		nr_wait_dtask;
 	uint64_t		clk_wait_dtask;
 	uint64_t		nr_wrong_wakeup;
