@@ -574,7 +574,7 @@ KDS_calculateHeadSize(TupleDesc tupdesc, bool has_attnames)
 
 		nr_colmeta += count_num_of_subfields(attr);
 	}
-	head_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
+	head_sz = STROMALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 	if (has_attnames)
 		head_sz += sizeof(NameData) * nr_colmeta;
 	return head_sz;
