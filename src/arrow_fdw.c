@@ -372,7 +372,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			{
 				fstate->nullmap_offset = buffer_curr->offset;
 				fstate->nullmap_length = buffer_curr->length;
-				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
+				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
 				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
 					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
@@ -427,7 +427,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			{
 				fstate->nullmap_offset = buffer_curr->offset;
 				fstate->nullmap_length = buffer_curr->length;
-				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
+				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
 				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
 					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
@@ -462,7 +462,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			{
 				fstate->nullmap_offset = buffer_curr->offset;
 				fstate->nullmap_length = buffer_curr->length;
-				if (fstate->nullmap_length < BITMAPLEN(fstate->null_count))
+				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
 				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
 					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
