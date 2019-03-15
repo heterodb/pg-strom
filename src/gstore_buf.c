@@ -1305,13 +1305,14 @@ GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
 						TupleTableSlot *slot)
 {
 	MemoryContext	oldcxt;
-	size_t			index = gs_buffer->nitems++;
+	size_t			index;
 	cl_uint			j;
 	MVCCAttrs	   *mvcc;
 
 	/* ensure the buffer is read-writable */
 	if (gs_buffer->read_only)
 		GpuStoreBufferMakeWritable(gs_buffer, tupdesc);
+	index = gs_buffer->nitems++;
 	/* expand the buffer on demand */
 	while (index >= gs_buffer->nrooms)
 		GpuStoreBufferExpand(gs_buffer, tupdesc);
