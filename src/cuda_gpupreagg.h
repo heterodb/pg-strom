@@ -477,7 +477,7 @@ gpupreagg_setup_common(kern_context    *kcxt,
 			newval = oldval = curval;
 			newval.i.nitems += nvalids;
 			newval.i.usage  += __kds_packed(required);
-			if (KDS_CALCULATE_SLOT_LENGTH(kds_slot->ncols, newval.i.nitems) +
+			if (KERN_DATA_STORE_SLOT_LENGTH(kds_slot, newval.i.nitems) +
 				__kds_unpack(newval.i.usage) > kds_slot->length)
 			{
 				suspend_kernel = true;
