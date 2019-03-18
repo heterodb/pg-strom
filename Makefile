@@ -160,10 +160,10 @@ SHLIB_LINK := -L $(LPATH) -lcuda
 MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA = $(CUDA_SOURCES) $(PGSTROM_SQL) $(PGSTROM_TEST_SQL)
+DATA = $(CUDA_SOURCES) $(PGSTROM_SQL)
 
 # Support utilities
-SCRIPTS_built = $(STROM_UTILS) $(PGSTROM_TEST_UTILS)
+SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \

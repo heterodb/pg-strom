@@ -1759,10 +1759,10 @@ void
 gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
-	StromCmd__MemCopySsdToGpu cmd;
+	StromCmd__MemCopySsdToGpuBlocks cmd;
 	GpuMemSegment  *gm_seg;
 	BlockNumber	   *block_nums;
-	void		   *block_data;
+//	void		   *block_data;
 	size_t			offset;
 	size_t			length;
 	cl_uint			nr_loaded;
@@ -1796,13 +1796,12 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded) -
 			  (char *)(&pds->kds));
 	offset += length;
-
 	/* userspace pointers */
+	//block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
-	block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 
 	/* setup ioctl(2) command */
-	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpu));
+	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuBlocks));
 	cmd.handle		= gm_seg->iomap_handle;
 	cmd.offset		= offset;
 	cmd.file_desc	= pds->filedesc;
@@ -1810,11 +1809,11 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	cmd.chunk_sz	= BLCKSZ;
 	cmd.relseg_sz	= RELSEG_SIZE;
 	cmd.chunk_ids	= block_nums;
-	cmd.wb_buffer	= block_data;
+	//cmd.wb_buffer	= block_data;
 
 	/* (1) kick SSD2GPU P2P DMA */
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, &cmd) != 0)
-		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS, &cmd) != 0)
+		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS: %m");
 
 	/* (2) kick RAM2GPU DMA (earlier half) */
 	rc = cuMemcpyHtoDAsync(m_kds,
@@ -1826,7 +1825,7 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
-
+#if 0
 	/* (3) kick RAM2GPU DMA (later half; if any) */
 	if (cmd.nr_ram2gpu > 0)
 	{
@@ -1844,6 +1843,7 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 	}
+#endif
 	/* (4) wait for completion of SSD2GPU P2P DMA */
 	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 }

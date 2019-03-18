@@ -22,7 +22,8 @@ enum {
 	STROM_IOCTL__LIST_GPU_MEMORY	= _IO('S',0x83),
 	STROM_IOCTL__INFO_GPU_MEMORY	= _IO('S',0x84),
 	STROM_IOCTL__MEMCPY_SSD2GPU		= _IO('S',0x90),
-	STROM_IOCTL__MEMCPY_SSD2GPU_RAW	= _IO('S',0x91),
+	STROM_IOCTL__MEMCPY_SSD2GPU_RAW	= _IO('S',0x93),
+	STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS = _IO('S',0x94),
 	STROM_IOCTL__MEMCPY_WAIT		= _IO('S',0x92),
 	STROM_IOCTL__STAT_INFO			= _IO('S',0x99),
 };
@@ -167,6 +168,24 @@ typedef struct StromCmd__MemCopySsdToGpuRaw
 	strom_io_chunk __user *io_chunks; /* in: copy source, destination and
 									   *     length per I/O chunk. */
 } StromCmd__MemCopySsdToGpuRaw;
+
+/* STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS */
+typedef struct StromCmd__MemCopySsdToGpuBlocks
+{
+	unsigned long	dma_task_id;/* out: ID of the DMA task */
+	unsigned int	nr_ram2gpu;	/* out: # of RAM2GPU chunks */
+	unsigned int	nr_ssd2gpu;	/* out: # of SSD2GPU chunks */
+	unsigned int	nr_dma_submit; /* out: # of SSD2GPU DMA submit */
+	unsigned int	nr_dma_blocks; /* out: # of SSD2GPU DMA blocks */
+	unsigned long	handle;		/* in: handle of the mapped GPU memory */
+	size_t			offset;		/* in: offset from the head of GPU memory */
+	int				file_desc;	/* in: file descriptor of the source file */
+	unsigned int	nr_chunks;	/* in: number of chunks */
+	unsigned int	chunk_sz;	/* in: chunk-size (BLCKSZ in PostgreSQL) */
+	unsigned int	relseg_sz;	/* in: # of chunks per file. (RELSEG_SIZE
+								 *     in PostgreSQL). 0 means no boundary. */
+	uint32_t __user *chunk_ids;	/* in: array of BlockNumber in PostgreSQL */
+} StromCmd__MemCopySsdToGpuBlocks;
 
 /* STROM_IOCTL__MEMCPY_WAIT */
 typedef struct StromCmd__MemCopyWait
