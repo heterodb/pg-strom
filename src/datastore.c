@@ -412,7 +412,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 					NameData *attNames,
 					TupleDesc tupdesc,
 					int format,
-					bool *p_has_notbyval)
+					cl_char *p_has_notbyval)
 {
 	bool		has_notbyval = false;
 	int			attcacheoff = -1;
