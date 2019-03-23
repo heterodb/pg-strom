@@ -49,33 +49,33 @@ static int	print_license = 0;
 static int	detailed_output = 0;
 
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
-	
 
-static void
-__error_exit(const char *file_name, int lineno,
-			 CUresult errcode, const char *message)
-{
-	const char *err_name;
-	const char *err_string;
+#define cuda_elog(errcode,fmt,...)					\
+	do {											\
+		const char *__err_name;						\
+													\
+		cuGetErrorName(errcode, &__err_name);		\
+		fprintf(stderr, "%s:%d  " fmt "\n",			\
+				__FILE__, __LINE__, ##__VA_ARGS__);	\
+		exit(1);									\
+	} while(0)
 
-	cuGetErrorName(errcode, &err_name);
-	cuGetErrorString(errcode, &err_string);
-
-	fprintf(stderr, "%s:%d %s (%s:%s)\n",
-			file_name, lineno, message, err_name, err_string);
-	exit(1);
-}
-
-#define error_exit(errcode, message)			\
-	__error_exit(__FILE__,__LINE__,(errcode),(message))
+#define sys_elog(fmt,...)							\
+	do {											\
+		fprintf(stderr, "%s:%d  " fmt "\n",			\
+				__FILE__, __LINE__, ##__VA_ARGS__);	\
+		exit(1);									\
+	} while(0)
 
 /*
  * commercial license validation if any
  */
-static int
-commercial_license_validation(int *nr_gpus)
+static StromCmd__LicenseInfo *
+commercial_license_validation(const char *license_filename)
 {
-	StromCmd__LicenseInfo cmd;
+	StromCmd__LicenseInfo *cmd;
+	size_t		buffer_sz = 10000;
+	int			nbytes;
 	int			fdesc;
 	int			retry_done = 0;
 	int			i_year, i_mon, i_day;
@@ -85,12 +85,20 @@ commercial_license_validation(int *nr_gpus)
 		 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 	/* Read the license file */
-	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
-	if (read_heterodb_license_file(&cmd, stderr))
-		return 1;
-	cmd.validation = 1;
+	cmd = calloc(1, sizeof(StromCmd__LicenseInfo) + buffer_sz);
+	if (!cmd)
+		sys_elog("out of memory");
+	cmd->buffer_sz = buffer_sz;
 
-	/* License validation */
+	nbytes = read_heterodb_license_file(license_filename,
+										cmd->u.buffer, buffer_sz,
+										stderr);
+	if (nbytes < 0)
+		exit(1);
+	if (nbytes == 0)
+		return NULL;
+
+	/* Load the license */
 retry_open:
 	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 	if (fdesc < 0)
@@ -104,75 +112,69 @@ retry_open:
 			retry_done = 1;
 			goto retry_open;
 		}
-		fprintf(stderr, "failed on open('%s'): %s\n",
-				NVME_STROM_IOCTL_PATHNAME, strerror(errcode));
-		return 1;
+		sys_elog("failed on open('%s'): %m\n", NVME_STROM_IOCTL_PATHNAME);
 	}
 
-	if (ioctl(fdesc, STROM_IOCTL__LICENSE_ADMIN, &cmd) != 0)
+	if (ioctl(fdesc, STROM_IOCTL__LICENSE_LOAD, cmd) != 0)
 	{
-		fprintf(stderr, "failed on ioctl(STROM_IOCTL__LICENSE_ADMIN): %m\n");
+		fprintf(stderr, "failed on ioctl(STROM_IOCTL__LICENSE_LOAD): %m\n");
 		close(fdesc);
-		return 1;
+		return NULL;
 	}
 	close(fdesc);
 
 	/* Print License Info */
-	i_year = (cmd.issued_at / 10000);
-	i_mon  = (cmd.issued_at / 100) % 100;
-	i_day  = (cmd.issued_at % 100);
-	e_year = (cmd.expired_at / 10000);
-	e_mon  = (cmd.expired_at / 100) % 100;
-	e_day  = (cmd.expired_at % 100);
+	i_year = (cmd->issued_at / 10000);
+	i_mon  = (cmd->issued_at / 100) % 100;
+	i_day  = (cmd->issued_at % 100);
+	e_year = (cmd->expired_at / 10000);
+	e_mon  = (cmd->expired_at / 100) % 100;
+	e_day  = (cmd->expired_at % 100);
 
 	if (print_license)
 	{
+		int		i;
+
 		if (machine_format)
 		{
-			printf("LICENSE_VERSION: %u\n"
-				   "LICENSE_SERIAL_NR: %s\n"
-				   "LICENSE_ISSUED_AT: %d-%s-%d\n"
-				   "LICENSE_EXPIRED_AT: %d-%s-%d\n"
-				   "LICENSE_NR_GPUS: %d\n"
-				   "LICENSEE_ORG: %s\n"
-				   "LICENSEE_NAME: %s\n"
-				   "LICENSEE_MAIL: %s\n"
-				   "LICENSE_DESC: %s\n",
-				   cmd.version,
-				   cmd.serial_nr,
+			printf("LICENSE_VERSION: %u\n", cmd->version);
+			if (cmd->serial_nr)
+				printf("LICENSE_SERIAL_NR: %s\n", cmd->serial_nr);
+			printf("LICENSE_ISSUED_AT: %d-%s-%d\n"
+				   "LICENSE_EXPIRED_AT: %d-%s-%d\n",
 				   i_day, months[i_mon-1], i_year,
-				   e_day, months[e_mon-1], e_year,
-				   cmd.nr_gpus,
-				   cmd.licensee_org,
-				   cmd.licensee_name,
-				   cmd.licensee_mail,
-				   cmd.license_desc ? cmd.license_desc : "");
+                   e_day, months[e_mon-1], e_year);
+			if (cmd->licensee_org)
+				printf("LICENSEE_ORG: %s\n", cmd->licensee_org);
+			if (cmd->licensee_name)
+				printf("LICENSEE_NAME: %s\n", cmd->licensee_name);
+			if (cmd->licensee_mail)
+				printf("LICENSEE_MAIL: %s\n", cmd->licensee_mail);
+			if (cmd->description)
+				printf("LICENSE_DESC: %s\n", cmd->description);
+			printf("LICENSE_NR_GPUS: %d\n", cmd->nr_gpus);
 		}
 		else
 		{
-			printf("License Version: %u\n"
-				   "License Serial Number: %s\n"
-				   "License Issued at: %d-%s-%d\n"
-				   "License Expired at: %d-%s-%d\n"
-				   "License Num of GPUs: %d\n"
-				   "Licensee Organization: %s\n"
-				   "Licensee Name: %s\n"
-				   "Licensee Mail: %s\n",
-				   cmd.version,
-				   cmd.serial_nr,
+			printf("License Version: %u\n", cmd->version);
+			if (cmd->serial_nr)
+				printf("License Serial Number: %s\n", cmd->serial_nr);
+			printf("License Issued at: %d-%s-%d\n"
+				   "License Expired at: %d-%s-%d\n",
 				   i_day, months[i_mon-1], i_year,
-				   e_day, months[e_mon-1], e_year,
-				   cmd.nr_gpus,
-				   cmd.licensee_org,
-				   cmd.licensee_name,
-				   cmd.licensee_mail);
-			if (cmd.license_desc)
-				printf("License Description: %s\n", cmd.license_desc);
+				   e_day, months[e_mon-1], e_year);
+			if (cmd->licensee_org)
+				printf("Licensee Organization: %s\n", cmd->licensee_org);
+			if (cmd->licensee_name)
+				printf("Licensee Name: %s\n", cmd->licensee_name);
+			if (cmd->licensee_mail)
+				printf("Licensee Mail: %s\n", cmd->licensee_mail);
+			if (cmd->description)
+				printf("License Description: %s\n", cmd->description);
+			printf("License Num of GPUs: %d\n", cmd->nr_gpus);
 		}
 	}
-	*nr_gpus = cmd.nr_gpus;
-
-	return 0;
+	return cmd;
 }
 
 /*
@@ -202,6 +204,50 @@ static struct
 };
 #undef DEV_ATTR
 
+static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
+{
+	CUresult	rc;
+	int			domain;
+	int			bus_id;
+	int			dev_id;
+	int			func_id;
+	int			i;
+
+	rc = cuDeviceGetAttribute(&domain,
+							  CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuDeviceGetAttribute");
+
+	rc = cuDeviceGetAttribute(&bus_id,
+							  CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuDeviceGetAttribute");
+
+	rc = cuDeviceGetAttribute(&dev_id,
+							  CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuDeviceGetAttribute");
+
+	rc = cuDeviceGetAttribute(&func_id,
+							  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD_GROUP_ID,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuDeviceGetAttribute");
+
+	for (i=0; i < li->nr_gpus; i++)
+	{
+		if (li->u.gpus[i].domain == domain &&
+			li->u.gpus[i].bus_id == bus_id &&
+			li->u.gpus[i].dev_id == dev_id &&
+			li->u.gpus[i].func_id == func_id)
+			return 1;
+	}
+	return 0;
+}
+
 static void output_device(CUdevice device, int dev_id)
 {
 	char		dev_name[1024];
@@ -219,7 +265,7 @@ static void output_device(CUdevice device, int dev_id)
 	/* device name */
 	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
 	if (rc != CUDA_SUCCESS)
-		error_exit(rc, "failed on cuDeviceGetName");
+		cuda_elog(rc, "failed on cuDeviceGetName");
 	if (!machine_format)
 		printf("Device Name: %s\n", dev_name);
 	else
@@ -228,7 +274,7 @@ static void output_device(CUdevice device, int dev_id)
 	/* device RAM size */
 	rc = cuDeviceTotalMem(&dev_memsz, device);
 	if (rc != CUDA_SUCCESS)
-		error_exit(rc, "failed on cuDeviceTotalMem");
+		cuda_elog(rc, "failed on cuDeviceTotalMem");
 	if (!machine_format)
 		printf("Global memory size: %zuMB\n", dev_memsz >> 20);
 	else
@@ -248,7 +294,7 @@ static void output_device(CUdevice device, int dev_id)
 
 		rc = cuDeviceGetAttribute(&dev_prop, attcode, device);
 		if (rc != CUDA_SUCCESS)
-			error_exit(rc, "failed on cuDeviceGetAttribute");
+			cuda_elog(rc, "failed on cuDeviceGetAttribute");
 
 		if (machine_format)
 			printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
@@ -333,6 +379,7 @@ static void output_device(CUdevice device, int dev_id)
 
 int main(int argc, char *argv[])
 {
+	StromCmd__LicenseInfo *li;
 	CUdevice	device;
 	CUresult	rc;
 	int			version;
@@ -369,19 +416,17 @@ int main(int argc, char *argv[])
 				return 1;
 		}
 	}
-	/* Commercial License Validation (if any) */
-	commercial_license_validation(&nr_gpus);
-
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		error_exit(rc, "failed on cuInit");
 
 	/*
 	 * CUDA Runtime version
 	 */
+	rc = cuInit(0);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuInit");
+
 	rc = cuDriverGetVersion(&version);
 	if (rc != CUDA_SUCCESS)
-		error_exit(rc, "failed on cuDriverGetVersion");
+		cuda_elog(rc, "failed on cuDriverGetVersion");
 	if (!machine_format)
 		printf("CUDA Runtime version: %d.%d.%d\n",
 			   (version / 1000),
@@ -392,6 +437,7 @@ int main(int argc, char *argv[])
 			   (version / 1000),
                (version % 1000) / 10,
                (version % 10));
+
 	/*
 	 * NVIDIA driver version
 	 */
@@ -413,24 +459,46 @@ int main(int argc, char *argv[])
 	}
 
 	/*
+	 * Commercial License Validation (if any)
+	 *
+	 * Memo: it must be called after cuInit(0), because the first call of
+	 * CUDA driver setups UUID of GPU devices.
+	 */
+	li = commercial_license_validation(HETERODB_LICENSE_PATHNAME);
+
+	/*
 	 * Number of devices available
 	 */
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
-		error_exit(rc, "failed on cuDeviceGetCount");
-	if (nr_gpus > count)
-		nr_gpus = count;
+		cuda_elog(rc, "failed on cuDeviceGetCount");
+	if (!li)
+		nr_gpus = 1;
+	else
+	{
+		for (i=0, nr_gpus=0; i < count; i++)
+		{
+			rc = cuDeviceGet(&device, i);
+			if (rc != CUDA_SUCCESS)
+				cuda_elog(rc, "failed on cuDeviceGet");
+			if (check_device(device, li))
+				nr_gpus++;
+		}
+	}
 	if (!machine_format)
 		printf("Number of devices: %d\n", nr_gpus);
 	else
 		printf("PLATFORM:NUMBER_OF_DEVICES=%d\n", nr_gpus);
 
-	for (i=0; i < nr_gpus; i++)
+	for (i=0; i < count; i++)
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
-			error_exit(rc, "failed on cuDeviceGet");
-		output_device(device, i);
+			cuda_elog(rc, "failed on cuDeviceGet");
+		if (!li || check_device(device, li))
+			output_device(device, i);
+		if (!li)
+			break;
 	}
 	return 0;
 }

@@ -15,7 +15,8 @@
 #include <asm/ioctl.h>
 
 enum {
-	STROM_IOCTL__LICENSE_ADMIN		= _IO('S',0x60),
+	STROM_IOCTL__LICENSE_QUERY		= _IO('S',0x60),
+	STROM_IOCTL__LICENSE_LOAD		= _IO('S',0x61),
 	STROM_IOCTL__CHECK_FILE			= _IO('S',0x80),
 	STROM_IOCTL__MAP_GPU_MEMORY		= _IO('S',0x81),
 	STROM_IOCTL__UNMAP_GPU_MEMORY	= _IO('S',0x82),
@@ -34,25 +35,34 @@ enum {
 #define HETERODB_LICENSE_PATHNAME		"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */
 #define HETERODB_LICENSE_KEYLEN			256
+#define HETERODB_LICENSE_KEYBITS		(8 * HETERODB_LICENSE_KEYLEN)
 
-/* STROM_IOCTL__LICENSE_ADMIN */
+/* STROM_IOCTL__LICENSE_(QUERY|LOAD) */
 typedef struct StromCmd__LicenseInfo
 {
 	uint32_t	version;		/* out: VERSION field */
 	const char *serial_nr;		/* out: SERIAL_NR field */
 	uint32_t	issued_at;		/* out: ISSUED_AT field; YYYYMMDD */
 	uint32_t	expired_at;		/* out: EXPIRED_AT field; YYYYMMDD */
-	uint32_t	nr_gpus;		/* out: NR_GPUS field */
-	const char *licensee_org;	/* out: LICENSEE_ORG field */
-	const char *licensee_name;	/* out: LICENSEE_NAME field */
-	const char *licensee_mail;	/* out: LICENSEE_MAIL field */
-	const char *license_desc;	/* out: LICENSE_DESC field, if any */
-	uint32_t	validation;		/* in: If 0, just query current licence info.
-								 *     Elsewhere, validate a new license */
-	unsigned char buffer[HETERODB_LICENSE_KEYLEN+2];
-								/* in: binary license image, if @validation
-								 *     is not zero.
-								 * out: buffer of the variable length data. */
+
+	const char *licensee_org;	/* out: LICENSEE_ORG field (optional) */
+	const char *licensee_name;	/* out: LICENSEE_NAME field (optional) */
+	const char *licensee_mail;	/* out: LICENSEE_MAIL field (optional) */
+	const char *description;	/* out: DESCRIPTION field (optional) */
+	uint32_t	nr_gpus;		/* out: number of GPUs specified by UUID */
+	size_t		buffer_sz;		/* in: bytes length of the following fields */
+	union {
+		char	buffer[1];		/* in: binary license image, if LICENSE_LOAD */
+		struct {
+			const char *uuid;	/* out: UUID of GPU */
+			uint32_t	domain;	/* out: PCIe domain id */
+			uint16_t	bus_id;	/* out: PCIe bus id */
+			uint16_t	dev_id;	/* out: PCIe device id */
+			uint16_t	func_id;/* out: PCIe function id */
+			uint64_t	bar1_start;	/* out: BAR1 physical start address */
+			uint64_t	bar1_end;	/* out: BAR1 physical end address */
+		} gpus[1];				/* out: GPU's information */
+	} u;
 } StromCmd__LicenseInfo;
 
 /* STROM_IOCTL__CHECK_FILE */
@@ -235,7 +245,9 @@ typedef struct StromCmd__StatInfo
 
 /* support routine to parse heterodb license file */
 static inline int
-read_heterodb_license_file(StromCmd__LicenseInfo *cmd, FILE *outerr)
+read_heterodb_license_file(const char *license_filename,
+						   char *buffer, size_t buffer_sz,
+						   FILE *outerr)
 {
 	FILE	   *filp = NULL;
 	ssize_t		i;
@@ -243,14 +255,13 @@ read_heterodb_license_file(StromCmd__LicenseInfo *cmd, FILE *outerr)
 	long		val = 0;
 	int			bits = 0;
 
-	filp = fopen(HETERODB_LICENSE_PATHNAME, "rb");
+	filp = fopen(license_filename, "rb");
 	if (!filp)
 	{
 		if (errno == ENOENT)
-			return 1;
+			return 0;
 		else if (outerr)
-			fprintf(outerr, "failed to open '%s': %m\n",
-					HETERODB_LICENSE_PATHNAME);
+			fprintf(outerr, "failed to open '%s': %m\n", license_filename);
 		return -1;
 	}
 	/* Extract base64 */
@@ -279,41 +290,35 @@ read_heterodb_license_file(StromCmd__LicenseInfo *cmd, FILE *outerr)
 		bits += 6;
 		while (bits >= 8)
 		{
-			if (i >= sizeof(cmd->buffer))
+			if (i >= buffer_sz)
 			{
 				if (outerr)
 					fprintf(outerr, "license file too large\n");
 				goto out;
 			}
-			cmd->buffer[i++] = (val & 0xff);
+			buffer[i++] = (val & 0xff);
 			val >>= 8;
 			bits -= 8;
 		}
 	}
 	if (bits > 0)
 	{
-		if (i >= sizeof(cmd->buffer))
+		if (i >= buffer_sz)
 		{
 			if (outerr)
 				fprintf(outerr, "license file too large\n");
 			goto out;
 		}
-		cmd->buffer[i++] = (val & 0xff);
+		buffer[i++] = (val & 0xff);
 	}
-	if (i != sizeof(cmd->buffer))
-	{
-		if (outerr)
-			fprintf(outerr, "license file length mismatch\n");
-		goto out;
-	}
-	if (8 * HETERODB_LICENSE_KEYLEN != (((int)cmd->buffer[0] << 8) |
-										((int)cmd->buffer[1])))
+	if (HETERODB_LICENSE_KEYBITS != (((int)buffer[0] << 8) |
+									 ((int)buffer[1])))
 	{
 		if (outerr)
 			fprintf(outerr, "license file corruption?\n");
 		goto out;
 	}
-	retval = 0;
+	retval = i;		/* binary length */
 out:
 	fclose(filp);
 	return retval;

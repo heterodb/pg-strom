@@ -372,14 +372,19 @@ commercial_license_expired_at(void)
 static bool
 commercial_license_query(StringInfo buf)
 {
-	StromCmd__LicenseInfo cmd;
+	StromCmd__LicenseInfo *cmd;
+	size_t		buffer_sz = 10000;
 	int			fdesc;
 	int			i_year, i_mon, i_day;
 	int			e_year, e_mon, e_day;
+	int			i;
 	struct tm	tm;
 	TimestampTz	tv;
 
-	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
+	cmd = alloca(sizeof(StromCmd__LicenseInfo) + buffer_sz);
+	memset(cmd, 0, sizeof(StromCmd__LicenseInfo));
+	cmd->buffer_sz = buffer_sz;
+
 	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 	if (fdesc < 0)
 	{
@@ -389,36 +394,36 @@ commercial_license_query(StringInfo buf)
 			elog(LOG, "failed to open \"%s\": %m", NVME_STROM_IOCTL_PATHNAME);
 		return false;
 	}
-	if (ioctl(fdesc, STROM_IOCTL__LICENSE_ADMIN, &cmd) != 0)
+	if (ioctl(fdesc, STROM_IOCTL__LICENSE_QUERY, cmd) != 0)
 	{
 		if (errno == EINVAL)
 			elog(LOG, "PG-Strom: no valid commercial license is installed");
 		else if (errno == EKEYEXPIRED)
 			elog(LOG, "PG-Strom: commercial license is expired");
 		else
-			elog(LOG, "PG-Strom: failed on STROM_IOCTL__LICENSE_ADMIN: %m");
+			elog(LOG, "PG-Strom: failed on STROM_IOCTL__LICENSE_QUERY: %m");
 		close(fdesc);
 		return false;
 	}
 	/* convert to text */
-	i_year = (cmd.issued_at / 10000);
-	i_mon  = (cmd.issued_at / 100) % 100;
-	i_day  = (cmd.issued_at % 100);
-	e_year = (cmd.expired_at / 10000);
-	e_mon  = (cmd.expired_at / 100) % 100;
-	e_day  = (cmd.expired_at % 100);
+	i_year = (cmd->issued_at / 10000);
+	i_mon  = (cmd->issued_at / 100) % 100;
+	i_day  = (cmd->issued_at % 100);
+	e_year = (cmd->expired_at / 10000);
+	e_mon  = (cmd->expired_at / 100) % 100;
+	e_day  = (cmd->expired_at % 100);
 
 	if (i_year < 2000 || i_year > 9999 || i_mon < 1 || i_mon > 12)
 	{
 		elog(LOG, "Strange date in the ISSUED_AT field: %08d",
-			 cmd.issued_at);
+			 cmd->issued_at);
 		close(fdesc);
 		return false;
 	}
 	if (e_year < 2000 || e_year > 9999 || e_mon < 1 || e_mon > 12)
 	{
 		elog(LOG, "Strange date in the EXPIRED_AT_AT field: %08d",
-			 cmd.expired_at);
+			 cmd->expired_at);
 		close(fdesc);
 		return false;
 	}
@@ -436,29 +441,51 @@ commercial_license_query(StringInfo buf)
 		commercial_license_expired_timestamp = tv;
 
 	/* make a JSON string  */
-	appendStringInfo(
-		buf,
-		"{ \"version\" : %u"
-		", \"serial_nr\" : %s"
-		", \"issued_at\" : \"%d-%s-%d\""
-		", \"expired_at\" : \"%d-%s-%d\""
-		", \"nr_gpus\" : %d"
-		", \"licensee_org\" : %s"
-		", \"licensee_name\" : %s"
-		", \"licensee_mail\" : %s",
-		cmd.version,
-		quote_identifier(cmd.serial_nr),
-		i_day, months[i_mon-1], i_year,
-		e_day, months[e_mon-1], e_year,
-		cmd.nr_gpus,
-		quote_identifier(cmd.licensee_org),
-		quote_identifier(cmd.licensee_name),
-		quote_identifier(cmd.licensee_mail));
-	if (cmd.license_desc)
-		appendStringInfo(
-			buf,
-			", \"license_desc\" : %s",
-			quote_identifier(cmd.license_desc));
+	appendStringInfo(buf,
+					 "{ \"version\" : %u",
+					 cmd->version);
+	if (cmd->serial_nr)
+		appendStringInfo(buf,
+						 ", \"serial_nr\" : %s",
+						 quote_identifier(cmd->serial_nr));
+	appendStringInfo(buf,
+					 ", \"issued_at\" : \"%d-%s-%d\""
+					 ", \"expired_at\" : \"%d-%s-%d\"",
+					 i_day, months[i_mon-1], i_year,
+					 e_day, months[e_mon-1], e_year);
+	if (cmd->licensee_org)
+		appendStringInfo(buf,
+						 ", \"licensee_org\" : %s",
+						 quote_identifier(cmd->licensee_org));
+	if (cmd->licensee_name)
+		appendStringInfo(buf,
+						 ", \"licensee_name\" : %s",
+						 quote_identifier(cmd->licensee_name));
+	if (cmd->licensee_mail)
+		appendStringInfo(buf,
+						 ", \"licensee_mail\" : %s",
+						 quote_identifier(cmd->licensee_mail));
+	if (cmd->description)
+		appendStringInfo(buf,
+						 ", \"description\" : %s",
+						 quote_identifier(cmd->description));
+	if (cmd->nr_gpus > 0)
+	{
+		appendStringInfo(buf, ", \"gpus\" : [");
+		for (i=0; i < cmd->nr_gpus; i++)
+		{
+			appendStringInfo(
+				buf,
+				"%s{ \"uuid\" : \"%s\", \"pci_id\" : \"%04x:%02x:%02x.%d\" }",
+				(i == 0 ? " " : " , "),
+				cmd->u.gpus[i].uuid,
+				cmd->u.gpus[i].domain,
+				cmd->u.gpus[i].bus_id,
+				cmd->u.gpus[i].dev_id,
+				cmd->u.gpus[i].func_id);
+		}
+		appendStringInfo(buf, " ]");
+	}
 	appendStringInfo(buf, " }");
 
 	return true;
