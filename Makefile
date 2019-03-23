@@ -14,11 +14,10 @@ endif
 -include $(STROM_BUILD_ROOT)/Makefile.custom
 
 #
-# PostgreSQL versioning
+# PG-Strom version
 #
-PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
-	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
-	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
+PGSTROM_VERSION := 2.1
+PGSTROM_RELEASE := $(shell env LANG=C date +%y%m%d)
 
 #
 # Installation related
@@ -112,7 +111,11 @@ __DOC_FILES = index.md install.md partition.md \
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
 	          src sql utils test man
 ifdef PGSTROM_VERSION
-__STROM_TGZ = pg_strom-$(shell echo $(PGSTROM_VERSION))
+ifeq ($(PGSTROM_RELEASE),1)
+__STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
+else
+__STROM_TGZ = pg_strom-$(PGSTROM_VERSION)-$(PGSTROM_RELEASE)
+endif
 else
 __STROM_TGZ = pg_strom-master
 endif
@@ -122,6 +125,8 @@ __STROM_TGZ_GITHASH = $(PGSTROM_GITHASH)
 else
 __STROM_TGZ_GITHASH = HEAD
 endif
+
+__SPECFILE = pg_strom-PG$(MAJORVERSION)
 
 #
 # Header and Libraries of CUDA
@@ -277,6 +282,21 @@ $(STROM_TGZ):
 			$(__STROM_TGZ_GITHASH) $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
+
+#
+# RPM Package
+#
+rpm: tarball
+	cp -f $(STROM_TGZ) `rpmbuild -E %{_sourcedir}` || exit 1
+	cp -f $(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf \
+	      `rpmbuild -E %{_sourcedir}` || exit 1
+	(cat $(STROM_BUILD_ROOT)/files/pg_strom.spec.in |  \
+	 sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g" \
+	     -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g" \
+	     -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
+	     -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g")   \
+	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
+	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
 
 #
 # init regression test database
