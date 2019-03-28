@@ -123,6 +123,8 @@ static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowRecordBatch *rbatch);
 static List	   *arrowLookupMetadataCache(const char *fname, File fdesc);
 static void		arrowUpdateMetadataCache(List *rbstateList);
+static List	   *arrowLookupOrBuildMetadataCache(const char *fname, File fdesc);
+
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
@@ -130,6 +132,24 @@ Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
 /*
  * ArrowGetForeignRelSize
  */
+static size_t
+RecordBatchFieldLength(RecordBatchFieldState *fstate)
+{
+	size_t	len = 0;
+	int		j;
+
+	if (fstate->nullmap_offset > 0)
+		len += fstate->nullmap_length;
+	if (fstate->values_offset > 0)
+		len += fstate->values_length;
+	if (fstate->extra_offset > 0)
+		len += fstate->extra_length;
+	len = BLCKALIGN(len);
+	for (j=0; j < fstate->num_children; j++)
+		len += RecordBatchFieldLength(&fstate->children[j]);
+	return len;
+}
+
 static void
 ArrowGetForeignRelSize(PlannerInfo *root,
 					   RelOptInfo *baserel,
@@ -137,21 +157,63 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 {
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	Bitmapset	   *referenced = NULL;
 	BlockNumber		npages = 0;
 	double			ntuples = 0.0;
 	ListCell	   *lc;
+	int				i, j, k;
+
+	/* columns to be fetched */
+	foreach (lc, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc);
+
+		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
+	}
+	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
+	{
+		if (baserel->attr_needed[j] == NULL)
+			continue;
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		referenced = bms_add_member(referenced, k);
+	}
 
 	foreach (lc, filesList)
 	{
 		const char *fname = strVal(lfirst(lc));
-		struct stat	stat_buf;
+		File		fdesc;
+		List	   *rb_cached;
+		ListCell   *cell;
+		size_t		len = 0;
 
-		if (stat(fname, &stat_buf) != 0)
-			elog(ERROR,
-				 "failed on stat('%s') on behalf of foreign table %s: %m",
+		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
+		if (fdesc < 0)
+		{
+			elog(NOTICE, "failed to open file '%s' on behalf of '%s', skipped",
 				 fname, get_rel_name(foreigntableid));
-		npages += BLCKALIGN(stat_buf.st_size);
+			continue;
+		}
+		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		foreach (cell, rb_cached)
+		{
+			RecordBatchState   *rb_state = lfirst(cell);
+
+			i = -1;
+			while ((i = bms_next_member(referenced, i)) >= 0)
+			{
+				k = i + FirstLowInvalidHeapAttributeNumber;
+
+				if (k < 0 || k >= rb_state->ncols)
+					continue;
+				len += RecordBatchFieldLength(&rb_state->columns[k]);
+			}
+			ntuples += rb_state->rb_nitems;
+		}
+		npages = len / BLCKSZ;
+		FileClose(fdesc);
 	}
+	bms_free(referenced);
+
 	baserel->fdw_private = NULL;
 	baserel->pages = npages;
 	baserel->tuples = ntuples;
@@ -630,7 +692,8 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 			elog(ERROR, "failed to open '%s'", fname);
 		fdescList = lappend_int(fdescList, fdesc);
 
-		rb_cached = arrowLookupMetadataCache(fname, fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+#if 0
 		if (rb_cached == NIL)
 		{
 			ArrowFileInfo af_info;
@@ -661,6 +724,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 				elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
 			arrowUpdateMetadataCache(rb_cached);
 		}
+#endif
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -2471,6 +2535,49 @@ arrowUpdateMetadataCache(List *rbstateList)
 		 ctime_r(&mcache->stat_buf.st_ctime, buf2));
 out:
 	LWLockRelease(&arrow_metadata_state->lock);
+}
+
+/*
+ * arrowLookupOrBuildMetadataCache
+ */
+List *
+arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
+{
+	List   *rb_cached;
+
+	rb_cached = arrowLookupMetadataCache(fname, fdesc);
+	if (rb_cached == NIL)
+	{
+		ArrowFileInfo af_info;
+		ListCell   *lc;
+		int			index = 0;
+
+		readArrowFileDesc(fdesc, &af_info);
+		if (af_info.dictionaries != NIL)
+			elog(ERROR, "DictionaryBatch is not supported");
+		Assert(af_info.footer._num_dictionaries == 0);
+
+		foreach (lc, af_info.recordBatches)
+		{
+			ArrowBlock       *block = &af_info.footer.recordBatches[index];
+			ArrowRecordBatch *rbatch = lfirst(lc);
+			RecordBatchState *rb_state;
+
+			rb_state = makeRecordBatchState(&af_info.footer.schema,
+											block, rbatch);
+			rb_state->fname = fname;
+			rb_state->fdesc = fdesc;
+			if (fstat(FileGetRawDesc(fdesc), &rb_state->stat_buf) != 0)
+				elog(ERROR, "failed on stat('%s'): %m", fname);
+			rb_state->rb_index = index;
+			rb_cached = lappend(rb_cached, rb_state);
+			index++;
+		}
+		if (rb_cached == NIL)
+			elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
+		arrowUpdateMetadataCache(rb_cached);
+	}
+	return rb_cached;
 }
 
 /*
