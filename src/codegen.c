@@ -3112,9 +3112,20 @@ device_expression_walker(device_expression_walker_context *con,
 		 * contain references to other tables, which shall be replaced by
 		 * replace_nestloop_params(). So, Var-node out of con->varnos
 		 * shall not be visible for device code.
+		 *
+		 * If var->varno == INDEX_VAR, it is obvious that the caller is
+		 * responsible to supply custom_scan_tlist with adequate source.
 		 */
-		if (!bms_is_member(var->varno, con->varnos))
-			goto unable_node;
+		if (var->varno != INDEX_VAR &&
+			!bms_is_member(var->varno, con->varnos))
+		{
+			char   *varnos = bms_to_cstring(con->varnos);
+			elog(DEBUG2, "(%s:%d): unsupported expression: %s (varnos=%s)",
+				 basename(con->filename), con->lineno,
+				 nodeToString(expr), varnos);
+			pfree(varnos);
+			return false;
+		}
 
 		/*
 		 * supported and scalar types only
@@ -3413,7 +3424,7 @@ device_expression_walker(device_expression_walker_context *con,
 	return true;
 
 unable_node:
-	elog(DEBUG2, "Unable to run on device(%s:%d): %s",
+	elog(DEBUG2, "(%s:%d): unsupported expression: %s",
 		 basename(con->filename), con->lineno, nodeToString(expr));
 	return false;
 }

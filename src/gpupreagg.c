@@ -1187,7 +1187,7 @@ make_gpupreagg_path(PlannerInfo *root,
 
 	/* Setup CustomPath */
 	cpath->path.pathtype = T_CustomScan;
-	cpath->path.parent = group_rel;
+	cpath->path.parent = input_path->parent;
 	cpath->path.pathtarget = target_partial;
 	cpath->path.param_info = NULL;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
@@ -2256,14 +2256,14 @@ make_alternative_aggref(PlannerInfo *root,
 		{
 			Node   *temp = replace_expression_by_outerref((Node *)pfunc->args,
 														  target_input);
-			if (!pgstrom_device_expression((Expr *)temp,
-										   input_rel->relids))
-			{
-				elog(DEBUG2, "argument of %s is not device executable: %s",
-					 format_procedure(aggref->aggfnoid),
-					 nodeToString(aggref));
+			/*
+			 * MEMO: Expressions are replaced to Var-node that references
+			 * one of target_input, and these Var-nodes have INDEX_VAR.
+			 * So, it is obvious Var-nodes references adeauate input relation,
+			 * thus no need to provide relids to pgstrom_device_expression().
+			 */
+			if (!pgstrom_device_expression((Expr *)temp, NULL))
 				return NULL;
-			}
 		}
 		/*
 		 * Add partial-aggregate function expression

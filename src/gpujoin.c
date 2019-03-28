@@ -1266,24 +1266,35 @@ setup_append_child_path(PlannerInfo *root,
 	{
 		newpath = pgstrom_copy_gpujoin_path(subpath);
 	}
-	else if (IsA(subpath, HashPath))
+	else if (pgstrom_path_is_gpuscan(subpath))
 	{
-		newpath = palloc(sizeof(HashPath));
-		memcpy(newpath, subpath, sizeof(HashPath));
-	}
-	else if (IsA(subpath, MergePath))
-	{
-		newpath = palloc(sizeof(MergePath));
-		memcpy(newpath, subpath, sizeof(MergePath));
-	}
-	else if (IsA(subpath, NestPath))
-	{
-		newpath = palloc(sizeof(NestPath));
-		memcpy(newpath, subpath, sizeof(NestPath));
+		newpath = pgstrom_copy_gpuscan_path(subpath);
 	}
 	else
-		return NULL;		/* not supported */
+	{
+		size_t	sz;
 
+		switch (nodeTag(subpath))
+		{
+			case T_Path:			sz = sizeof(Path); break;
+			case T_IndexPath:		sz = sizeof(IndexPath);	break;
+			case T_BitmapHeapPath:	sz = sizeof(BitmapHeapPath); break;
+			case T_BitmapAndPath:	sz = sizeof(BitmapAndPath); break;
+			case T_BitmapOrPath:	sz = sizeof(BitmapOrPath); break;
+			case T_TidPath:			sz = sizeof(TidPath); break;
+			case T_SubqueryScanPath:sz = sizeof(SubqueryScanPath); break;
+			case T_ForeignPath:		sz = sizeof(ForeignPath); break;
+			case T_CustomPath:		sz = sizeof(CustomPath); break;
+			case T_NestPath:		sz = sizeof(NestPath); break;
+			case T_MergePath:		sz = sizeof(MergePath); break;
+			case T_HashPath:		sz = sizeof(HashPath); break;
+			case T_ProjectionPath:	sz = sizeof(ProjectionPath); break;
+			default:
+				return NULL;	/* not expected */
+		}
+		newpath = palloc(sz);
+		memcpy(newpath, subpath, sz);
+	}
 	new_target = copy_pathtarget(old_target);
 	new_target->exprs =
 		fixup_appendrel_child_varnode((List *)old_target->exprs,

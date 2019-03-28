@@ -1172,6 +1172,7 @@ extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
+extern Path *pgstrom_copy_gpuscan_path(const Path *pathnode);
 extern cl_int gpuscan_get_optimal_gpu(const Path *pathnode);
 extern void pgstrom_init_gpuscan(void);
 
@@ -1332,6 +1333,7 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_PROCEDURE	'p'
 #endif
 extern int	get_relnatts(Oid relid);
+extern char *bms_to_cstring(Bitmapset *x);
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 

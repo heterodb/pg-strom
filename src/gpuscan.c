@@ -1626,6 +1626,25 @@ pgstrom_planstate_is_gpuscan(const PlanState *ps)
 }
 
 /*
+ * pgstrom_copy_gpuscan_path
+ */
+Path *
+pgstrom_copy_gpuscan_path(const Path *pathnode)
+{
+	const CustomPath   *oldpath = (const CustomPath *) pathnode;
+	CustomPath		   *newpath;
+
+	if (!pgstrom_path_is_gpuscan(pathnode))
+		elog(ERROR, "Bug? tried to copy non-GpuScanPath node");
+	newpath = palloc0(sizeof(CustomPath));
+	memcpy(newpath, oldpath, sizeof(CustomPath));
+	Assert(newpath->custom_paths == NIL);
+	newpath->custom_private = copyObject(oldpath->custom_private);
+
+	return &newpath->path;
+}
+
+/*
  * gpuscan_get_optimal_gpu
  */
 cl_int

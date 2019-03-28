@@ -180,6 +180,24 @@ get_relnatts(Oid relid)
 }
 
 /*
+ * bms_to_cstring - human readable Bitmapset
+ */
+char *
+bms_to_cstring(Bitmapset *x)
+{
+	StringInfoData buf;
+	int			i;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "{");
+	for (i=0; i < x->nwords; i++)
+		appendStringInfo(&buf, "%s %08x", i==0 ? "" : ",", x->words[i]);
+	appendStringInfo(&buf, " }");
+
+	return buf.data;
+}
+
+/*
  * errorText - string form of the error code
  */
 const char *
