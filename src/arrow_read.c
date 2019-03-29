@@ -615,6 +615,152 @@ copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 	src->copyArrowNode(dest, src);
 }
 #endif
+
+#ifdef PG_STROM_H
+/*
+ * CString representation of arrow type name
+ */
+static size_t
+__arrowTypeName(char *buf, size_t len, ArrowField *field)
+{
+	ArrowType  *t = &field->type;
+	size_t		sz = 0;
+	int			j;
+
+	switch (t->node.tag)
+	{
+		case ArrowNodeTag__Null:
+			sz = snprintf(buf, len, "Null");
+			break;
+		case ArrowNodeTag__Int:
+			sz = snprintf(buf, len, "%s%d",
+						  t->Int.is_signed ? "Int" : "Uint",
+						  t->Int.bitWidth);
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			{
+				ArrowTypeFloatingPoint *f = &t->FloatingPoint;
+
+				sz = snprintf(
+					buf, len, "Float%s",
+					f->precision == ArrowPrecision__Half ? "16" :
+					f->precision == ArrowPrecision__Single ? "32" :
+					f->precision == ArrowPrecision__Double ? "64" : "??");
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+			sz = snprintf(buf, len, "Utf8");
+			break;
+		case ArrowNodeTag__Binary:
+			sz = snprintf(buf, len, "Binary");
+			break;
+		case ArrowNodeTag__Bool:
+			sz = snprintf(buf, len, "Bool");
+			break;
+		case ArrowNodeTag__Decimal:
+			if (t->Decimal.scale == 0)
+				sz = snprintf(buf, len, "Decimal(%d)",
+							  t->Decimal.precision);
+			else
+				sz = snprintf(buf, len, "Decimal(%d,%d)",
+							  t->Decimal.precision,
+							  t->Decimal.scale);
+			break;
+		case ArrowNodeTag__Date:
+			{
+				ArrowDateUnit	unit = t->Date.unit;
+
+				sz = snprintf(
+					buf, len, "Date[%s]",
+					unit == ArrowDateUnit__Day ? "day" :
+					unit == ArrowDateUnit__MilliSecond ? "msec" : "??");
+			}
+			break;
+		case ArrowNodeTag__Time:
+			{
+				ArrowTimeUnit	unit = t->Time.unit;
+
+				sz = snprintf(buf, len, "Time[%s]",
+							  unit == ArrowTimeUnit__Second ? "sec" :
+							  unit == ArrowTimeUnit__MilliSecond ? "ms" :
+							  unit == ArrowTimeUnit__MicroSecond ? "us" :
+							  unit == ArrowTimeUnit__NanoSecond ? "ns" : "??");
+			}
+			break;
+		case ArrowNodeTag__Timestamp:
+			{
+				ArrowTimeUnit	unit = t->Timestamp.unit;
+
+				sz = snprintf(buf, len, "Timestamp[%s]",
+							  unit == ArrowTimeUnit__Second ? "sec" :
+							  unit == ArrowTimeUnit__MilliSecond ? "ms" :
+							  unit == ArrowTimeUnit__MicroSecond ? "us" :
+							  unit == ArrowTimeUnit__NanoSecond ? "ns" : "??");
+			}
+			break;
+		case ArrowNodeTag__Interval:
+			switch (t->Interval.unit)
+			{
+				case ArrowIntervalUnit__Year_Month:
+					sz = snprintf(buf, len, "Interval[Year/Month]");
+					break;
+				case ArrowIntervalUnit__Day_Time:
+					sz = snprintf(buf, len, "Interval[Day/Time]");
+					break;
+				default:
+					sz = snprintf(buf, len, "Interval[???]");
+					break;
+			}
+			break;
+		case ArrowNodeTag__List:
+			if (field->_num_children != 1)
+				elog(ERROR, "corrupted List data type");
+			sz = __arrowTypeName(buf, len, &field->children[0]);
+			sz += snprintf(buf+sz, len-sz, "[]");
+			break;
+
+		case ArrowNodeTag__Struct:
+			sz += snprintf(buf+sz, len-sz, "Struct(");
+			for (j=0; j < field->_num_children; j++)
+			{
+				if (j > 0)
+					sz += snprintf(buf+sz, len-sz, ", ");
+				sz += __arrowTypeName(buf+sz, len-sz, &field->children[j]);
+			}
+			sz += snprintf(buf+sz, len-sz, ")");
+			break;
+
+		case ArrowNodeTag__Union:
+			sz = snprintf(buf, len, "Union");
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			sz = snprintf(buf, len, "FixedSizeBinary(%d)",
+						  t->FixedSizeBinary.byteWidth);
+			break;
+		case ArrowNodeTag__FixedSizeList:
+			sz = snprintf(buf, len, "FixedSizeList[%d]",
+						  t->FixedSizeList.listSize);
+			break;
+		case ArrowNodeTag__Map:
+			sz = snprintf(buf, len, "Map");
+			break;
+		default:
+			elog(ERROR, "unknown Arrow type");
+	}
+	return sz;
+}
+
+char *
+arrowTypeName(ArrowField *field)
+{
+	char	buf[1024];
+
+	__arrowTypeName(buf, sizeof(buf), field);
+
+	return pstrdup(buf);
+}
+#endif
+
 /* ------------------------------------------------
  *
  * Routines to read Apache Arrow files

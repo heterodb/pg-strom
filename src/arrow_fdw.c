@@ -1460,9 +1460,8 @@ arrowTypeToPGTypeOid(ArrowField *field)
 				case 64:
 					return INT8OID;
 				default:
-					elog(ERROR, "%s%d of Arrow is not supported",
-						 t->Int.is_signed ? "Int" : "Uint",
-						 t->Int.bitWidth);
+					elog(ERROR, "Arrow.%s is not supported",
+						 arrowTypeName(field));
 					break;
 			}
 			break;
@@ -1476,7 +1475,8 @@ arrowTypeToPGTypeOid(ArrowField *field)
 				case ArrowPrecision__Double:
 					return FLOAT8OID;
 				default:
-					elog(ERROR, "FloatingPoint with unknown precision");
+					elog(ERROR, "Arrow.%s is not supported",
+						 arrowTypeName(field));
 			}
 			break;
 		case ArrowNodeTag__Utf8:
@@ -1507,7 +1507,8 @@ arrowTypeToPGTypeOid(ArrowField *field)
 				Oid		type_oid = get_array_type(elem_oid);
 
 				if (!OidIsValid(type_oid))
-					elog(ERROR, "arrow_fdw: no correspondin List element");
+					elog(ERROR, "arrow.%s is not supported",
+						 arrowTypeName(field));
 				if (get_typlen(type_oid) <= 0)
 					elog(ERROR, "arrow_fdw: List of %s is not supported",
 						 child->type.node.tagName);
@@ -1575,6 +1576,9 @@ arrowTypeToPGTypeOid(ArrowField *field)
 				systable_endscan(sscan);
 				heap_close(rel, AccessShareLock);
 
+				if (!OidIsValid(type_oid))
+					elog(ERROR, "arrow.%s is not supported",
+						 arrowTypeName(field));
 				return type_oid;
 			}
 			break;
