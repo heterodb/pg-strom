@@ -1322,9 +1322,9 @@ extern void pgstrom_init_arrow_fdw(void);
  */
 extern Expr *make_flat_ands_explicit(List *andclauses);
 #if PG_VERSION_NUM < 100000
-extern int compute_parallel_worker(RelOptInfo *rel,
-								   double heap_pages,
-								   double index_pages);
+extern int __compute_parallel_worker(RelOptInfo *rel,
+									 double heap_pages,
+									 double index_pages);
 #endif
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */

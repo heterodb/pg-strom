@@ -71,7 +71,10 @@
  * MEMO: PG10 add this function (also look at misc.c), then PG11 adds
  * argument of 'max_workers' argument.
  */
-#if PG_VERSION_NUM < 110000
+#if PG_VERSION_NUM < 100000
+#define compute_parallel_worker(a,b,c,d)		\
+	__compute_parallel_worker((a),(b),(c))
+#elif PG_VERSION_NUM < 110000
 #define compute_parallel_worker(a,b,c,d)		\
 	compute_parallel_worker((a),(b),(c))
 #endif

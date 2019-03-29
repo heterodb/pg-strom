@@ -180,7 +180,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	foreach (lc, filesList)
 	{
-		const char *fname = strVal(lfirst(lc));
+		char	   *fname = strVal(lfirst(lc));
 		File		fdesc;
 		List	   *rb_cached;
 		ListCell   *cell;
@@ -1276,8 +1276,16 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 							   RelOptInfo *rel,
 							   RangeTblEntry *rte)
 {
-	/* we have no special restrictions for parallel execution */
+	/*
+	 * PG9.6 does not support ReInitializeDSMForeignScan and
+	 * ShutdownForeignScan. It makes DSM setup/cleanup complicated,
+	 * so we simply prohibit parallel scan on PG9.6.
+	 */
+#if PG_VERSION_NUM < 100000
+	return false;
+#else
 	return true;
+#endif
 }
 
 /*
@@ -1310,6 +1318,7 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 /*
  * ArrowReInitializeDSMForeignScan
  */
+#if PG_VERSION_NUM >= 100000
 static void
 ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 								ParallelContext *pcxt,
@@ -1319,6 +1328,7 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 
 	pg_atomic_write_u32(af_state->rbatch_index, 0);
 }
+#endif
 
 /*
  * ArrowInitializeWorkerForeignScan
@@ -1334,6 +1344,7 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 	af_state->rbatch_index = (pg_atomic_uint32 *) coordinate;
 }
 
+#if PG_VERSION_NUM >= 100000
 /*
  * ArrowShutdownForeignScan
  */
@@ -1342,6 +1353,7 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 {
 	//elog(INFO, "pid=%u ArrowShutdownForeignScan", getpid());
 }
+#endif
 
 /*
  * handler of Arrow_Fdw
@@ -2660,9 +2672,13 @@ pgstrom_init_arrow_fdw(void)
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
 	r->InitializeDSMForeignScan		= ArrowInitializeDSMForeignScan;
+#if PG_VERSION_NUM >= 100000
 	r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
+#endif
 	r->InitializeWorkerForeignScan	= ArrowInitializeWorkerForeignScan;
+#if PG_VERSION_NUM >= 100000
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
+#endif
 
 	/*
 	 * Configurations for arrow_fdw metadata cache

@@ -65,7 +65,9 @@ make_flat_ands_explicit(List *andclauses)
  *  or -1 if we don't expect to scan any.
  */
 int
-compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages)
+__compute_parallel_worker(RelOptInfo *rel,
+						  double heap_pages,
+						  double index_pages)
 {
 	int			parallel_workers = 0;
 
