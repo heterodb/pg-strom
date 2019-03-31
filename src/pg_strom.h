@@ -533,9 +533,17 @@ typedef struct pgstrom_data_store
 	 * by NVMe-Strom. If @nblocks_uncached > 0, the tail of PDS shall be
 	 * filled up by an array of strom_dma_chunk.
 	 * @filedesc is file-descriptor of the underlying blocks.
+	 *
+	 * NOTE: Extra information for KDS_FORMAT_ARROW
+	 * @iovec introduces pairs of destination offset, file offset and
+	 * chunk length to be read (usually by SSD-to-GPU Direct SQL).
+	 * If NULL, KDS is preliminary loaded by CPU and filesystem, and
+	 * PDS is also allocated on managed memory area. So, worker don't
+	 * need to kick DMA operations explicitly.
 	 */
-	cl_uint				nblocks_uncached;
+	cl_uint				nblocks_uncached;	/* for KDS_FORMAT_BLOCK */
 	cl_int				filedesc;
+	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
@@ -924,6 +932,7 @@ extern void pgstrom_init_gputasks(void);
  * nvme_strom.c
  */
 extern int	nvme_strom_ioctl(int cmd, void *arg);
+extern int	GetOptimalGpuForFile(const char *fname, int fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
 									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
@@ -1174,7 +1183,6 @@ extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
 extern Path *pgstrom_copy_gpuscan_path(const Path *pathnode);
-extern cl_int gpuscan_get_optimal_gpu(const Path *pathnode);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -1296,7 +1304,7 @@ extern void pgstrom_init_gstore_buf(void);
 extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 
 /*
- * arrow_(fdw|read).c
+ * arrow_fdw.c and arrow_read.c
  */
 typedef struct
 {
@@ -1307,6 +1315,10 @@ typedef struct
 	List		   *recordBatches;	/* List of ArrowRecordBatch */
 } ArrowFileInfo;
 
+extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
+extern cl_int GetOptimalGpuForArrowFdw(PlannerInfo *root,
+									   RelOptInfo *baserel);
+
 extern void readArrowFileDesc(File filp, ArrowFileInfo *af_info);
 extern void readArrowFile(char *pathname, ArrowFileInfo *af_info);
 extern char *dumpArrowNode(ArrowNode *node);
@@ -1315,6 +1327,15 @@ extern char *arrowTypeName(ArrowField *field);
 extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
+
+typedef struct ArrowFdwState	ArrowFdwState;
+
+extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
+									   Bitmapset *referenced);
+extern pgstrom_data_store *ExecScanChunkArrowFdw(ArrowFdwState *af_state,
+												 GpuTaskState *gts);
+extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
+extern void ExecEndArrowFdw(ArrowFdwState *af_state);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

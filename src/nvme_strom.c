@@ -713,44 +713,61 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 /*
- * GetOptimalGpuForVolume
+ * GetOptimalGpuForFile
  */
-static int
-GetOptimalGpuForVolume(int major, int minor)
+int
+GetOptimalGpuForFile(const char *fname, int fdesc)
 {
-	NvmeAttributes	key;
-	NvmeAttributes *nvme;
-	char		path[MAXPGPATH];
-	const char *temp;
+	StromCmd__CheckFile *uarg
+		= alloca(offsetof(StromCmd__CheckFile, rawdisks[100]));
+	int		nrooms = 100;
+	int		optimal_gpu = -1;
+	int		i, curr_gpu;
 
-	if (!nvmeHash)
-		return -1;		/* no nvme device is detected */
-
-	snprintf(path, sizeof(path),
-			 "/sys/dev/block/%d:%d/device/dev", major, minor);
-	temp = sysfs_read_line(path, false);
-	if (!temp)
+retry:
+	uarg->fdesc = fdesc;
+	uarg->nrooms = nrooms;
+	if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, uarg) != 0)
 	{
-		elog(WARNING, "failed to read '%s': %m", path);
+		ereport(DEBUG1,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("nvme_strom does not support file '%s'", fname)));
 		return -1;
 	}
-	if (sscanf(temp, "%d:%d",
-			   &key.nvme_major,
-			   &key.nvme_minor) != 2)
+	else if (uarg->ndisks > nrooms)
 	{
-		elog(WARNING, "unexpected attribute in '%s': %s", path, temp);
-		return -1;
+		nrooms = uarg->ndisks;
+		uarg = alloca(offsetof(StromCmd__CheckFile, rawdisks[nrooms]));
+		goto retry;
 	}
+	Assert(uarg->ndisks > 0);
 
-	nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
-	if (!nvme)
+	/*
+	 * If file is built on md-raid0 volume, all the underlying
+	 * NVME devices must have same optimal GPU.
+	 */
+	for (i=0; i < uarg->ndisks; i++)
 	{
-		elog(WARNING, "nvme device (%d,%d) is not detected on startup",
-			 key.nvme_major,
-			 key.nvme_minor);
-		return -1;
+		NvmeAttributes	key;
+		NvmeAttributes *nvme;
+
+		if (!nvmeHash)
+			return -1;
+		key.nvme_major = uarg->rawdisks[i].major;
+		key.nvme_minor = uarg->rawdisks[i].minor;
+		nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
+		if (!nvme)
+			return -1;
+
+		curr_gpu = nvme->nvme_optimal_gpu;
+		if (curr_gpu < 0)
+			return -1;
+		if (optimal_gpu < 0)
+			optimal_gpu = curr_gpu;
+		else if (optimal_gpu != curr_gpu)
+			return -1;
 	}
-	return nvme->nvme_optimal_gpu;
+	return optimal_gpu;
 }
 
 static cl_int
@@ -801,47 +818,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 
 	PG_TRY();
 	{
-		StromCmd__CheckFile *uarg;
-		int		nrooms = 256;
-		int		optimal_gpu = -1;
-		int		i, curr_gpu;
-
-	retry:
-		uarg = palloc0(offsetof(StromCmd__CheckFile,
-								rawdisks[nrooms]));
-		uarg->fdesc = fdesc;
-		uarg->nrooms = nrooms;
-		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, uarg) != 0)
-		{
-			ereport(DEBUG1,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("nvme_strom does not support tablespace '%s'",
-							get_tablespace_name(tablespace_oid))));
-		}
-		else if (uarg->ndisks > nrooms)
-		{
-			nrooms = uarg->ndisks;
-			pfree(uarg);
-			goto retry;
-		}
-
-		/*
-		 * NOTE: If tablespace is built on md-raid0 volume, all the underlying
-		 * NVME devices must have same optimal GPU.
-		 */
-		for (i=0; i < uarg->ndisks; i++)
-		{
-			curr_gpu = GetOptimalGpuForVolume(uarg->rawdisks[i].major,
-											  uarg->rawdisks[i].minor);
-			if (curr_gpu < 0)
-				break;
-			if (optimal_gpu < 0)
-				optimal_gpu = curr_gpu;
-			else if (optimal_gpu != curr_gpu)
-				break;
-		}
-		if (i == uarg->ndisks)
-			entry->nvme_optimal_gpu = optimal_gpu;
+		entry->nvme_optimal_gpu = GetOptimalGpuForFile(pathname, fdesc);
 	}
 	PG_CATCH();
 	{
@@ -861,6 +838,9 @@ GetOptimalGpuForRelation(PlannerInfo *root, RelOptInfo *rel)
 	HeapTuple	tup;
 	char		relpersistence;
 	cl_int		cuda_dindex;
+
+	if (baseRelIsArrowFdw(rel))
+		return GetOptimalGpuForArrowFdw(root, rel);
 
 	cuda_dindex = GetOptimalGpuForTablespace(rel->reltablespace);
 	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)

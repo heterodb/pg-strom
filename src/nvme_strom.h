@@ -163,6 +163,12 @@ typedef struct
 	unsigned int	nr_pages;	/* number of pages to be loaded */
 } strom_io_chunk;
 
+typedef struct
+{
+	unsigned int	nr_chunks;
+	strom_io_chunk	ioc[1];
+} strom_io_vector;
+
 typedef struct StromCmd__MemCopySsdToGpuRaw
 {
 	unsigned long	dma_task_id;/* out: ID of the DMA task */

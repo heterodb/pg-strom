@@ -109,6 +109,7 @@ typedef struct {
 	GpuTaskState	gts;
 	GpuScanSharedState *gs_sstate;
 	GpuScanRuntimeStat *gs_rtstat;
+	ArrowFdwState  *af_state;		/* only if arrow_fdw scan */
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 #if PG_VERSION_NUM < 100000
 	List		   *dev_quals;		/* quals to be run on the device */
@@ -314,12 +315,17 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/* It is the role of built-in Append node */
 	if (rte->inh)
 		return;
-
-	/* only base relation we can handle */
-	if (rte->rtekind != RTE_RELATION)
-		return;
-	if (rte->relkind != RELKIND_RELATION &&
-		rte->relkind != RELKIND_MATVIEW)
+	/*
+	 * GpuScan can run on only base relations or foreign table managed
+	 * by arrow_fdw.
+	 */
+	if (rte->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		if (!baseRelIsArrowFdw(baserel))
+			return;
+	}
+	else if (rte->relkind != RELKIND_RELATION &&
+			 rte->relkind != RELKIND_MATVIEW)
 		return;
 
 	/* Check whether the qualifier can run on GPU device */
@@ -1236,110 +1242,6 @@ no_gpu_projection:
 	return NIL;
 }
 
-#if 0
-/*
- * bufsz_estimate_gpuscan_projection - GPU Projection may need larger
- * destination buffer than the source buffer. 
- */
-static void
-bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
-								  Relation relation,
-								  List *tlist_proj,
-								  cl_int *p_proj_tuple_sz,
-								  cl_int *p_proj_extra_sz)
-{
-	TupleDesc	tupdesc = RelationGetDescr(relation);
-	cl_int		proj_tuple_sz = 0;
-	cl_int		proj_extra_sz = 0;
-	int			j, nattrs;
-	ListCell   *lc;
-
-	if (!tlist_proj)
-	{
-		proj_tuple_sz = offsetof(kern_tupitem,
-								 htup.t_bits[BITMAPLEN(tupdesc->natts)]);
-		if (tupdesc->tdhasoid)
-			proj_tuple_sz += sizeof(Oid);
-		proj_tuple_sz = MAXALIGN(proj_tuple_sz);
-
-		for (j=0; j < tupdesc->natts; j++)
-		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-			proj_tuple_sz = att_align_nominal(proj_tuple_sz, attr->attalign);
-			proj_tuple_sz += baserel->attr_widths[j + 1 - baserel->min_attr];
-		}
-		proj_tuple_sz = MAXALIGN(proj_tuple_sz);
-		goto out;
-	}
-
-	nattrs = list_length(tlist_proj);
-	proj_tuple_sz = offsetof(kern_tupitem,
-							 htup.t_bits[BITMAPLEN(nattrs)]);
-	proj_tuple_sz = MAXALIGN(proj_tuple_sz);
-	foreach (lc, tlist_proj)
-	{
-		TargetEntry *tle = lfirst(lc);
-		Oid		type_oid = exprType((Node *)tle->expr);
-		int32	type_mod = exprTypmod((Node *)tle->expr);
-		int16	typlen;
-		bool	typbyval;
-		char	typalign;
-
-		/* alignment */
-		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &typalign);
-		proj_tuple_sz = att_align_nominal(proj_tuple_sz, typalign);
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-
-			Assert(var->vartype == type_oid &&
-				   var->vartypmod == type_mod);
-			Assert(var->varno == baserel->relid &&
-				   var->varattno >= baserel->min_attr &&
-				   var->varattno <= baserel->max_attr);
-			proj_tuple_sz += baserel->attr_widths[var->varattno -
-												  baserel->min_attr];
-		}
-		else if (IsA(tle->expr, Const))
-		{
-			Const  *con = (Const *) tle->expr;
-
-			/* raw-data is the most reliable information source :) */
-			if (!con->constisnull)
-				proj_tuple_sz += (con->constlen > 0
-								  ? con->constlen
-								  : VARSIZE_ANY(con->constvalue));
-		}
-		else
-		{
-			devtype_info   *dtype;
-
-			dtype = pgstrom_devtype_lookup(type_oid);
-			if (!dtype)
-				elog(ERROR, "device type %u lookup failed", type_oid);
-			proj_tuple_sz += (dtype->type_length > 0
-							  ? dtype->type_length
-							  : get_typavgwidth(type_oid, type_mod));
-			/*
-			 * Indirect fixed-length type or varlena type with special
-			 * internal format (like numeric) needs extra varlena buffer.
-			 * Expression with normal varlena type (like text) should
-			 * already allocate buffer on the device function which returns
-			 * varlena value, and codegen.c tells expected consumption of
-			 * the buffer.
-			 */
-			if (!dtype->type_byval)
-				proj_extra_sz += MAXALIGN(dtype->extra_sz);
-		}
-	}
-	proj_tuple_sz = MAXALIGN(proj_tuple_sz);
-out:
-	*p_proj_tuple_sz = proj_tuple_sz;
-	*p_proj_extra_sz = proj_extra_sz;
-}
-#endif
-
 /*
  * PlanGpuScanPath - construction of a new GpuScan plan node
  */
@@ -1513,6 +1415,8 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 
 	for (;;)
 	{
+		//TODO: pullup outer arrow_fdw relation
+
 		if (outer_path->pathtype == T_SeqScan)
 			break;	/* OK */
 		if (pgstrom_path_is_gpuscan(outer_path))
@@ -1645,22 +1549,6 @@ pgstrom_copy_gpuscan_path(const Path *pathnode)
 }
 
 /*
- * gpuscan_get_optimal_gpu
- */
-cl_int
-gpuscan_get_optimal_gpu(const Path *pathnode)
-{
-	if (pgstrom_path_is_gpuscan(pathnode))
-	{
-		CustomPath	   *cpath = (CustomPath *) pathnode;
-		GpuScanInfo	   *gs_info = linitial(cpath->custom_private);
-
-		return gs_info->optimal_gpu;
-	}
-	return -1;
-}
-
-/*
  * fixup_varnode_to_origin
  */
 static Node *
@@ -1765,6 +1653,10 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_switch_task = gpuscan_switch_task;
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
+
+	/* setup ArrowFdwState, if foreign-table */
+	if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
+		gss->af_state = ExecInitArrowFdw(scan_rel, gss->gts.outer_refs);
 
 	/*
 	 * initialize device qualifiers/projection stuff, for CPU fallback
@@ -1926,6 +1818,8 @@ ExecEndGpuScan(CustomScanState *node)
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
+	if (gss->af_state)
+		ExecEndArrowFdw(gss->af_state);
 }
 
 /*
@@ -1942,6 +1836,9 @@ ExecReScanGpuScan(CustomScanState *node)
 	resetGpuScanSharedState(gss);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gss->gts);
+	/* arrow_fdw rescan handling, if any */
+	if (gss->af_state)
+		ExecReScanArrowFdw(gss->af_state);
 }
 
 /*
@@ -2276,7 +2173,10 @@ gpuscan_next_task(GpuTaskState *gts)
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
 
-	pds = pgstromExecScanChunk(gts);
+	if (gss->af_state)
+		pds = ExecScanChunkArrowFdw(gss->af_state, gts);
+	else
+		pds = pgstromExecScanChunk(gts);
 	if (!pds)
 		return NULL;
 	gscan = gpuscan_create_task(gss, pds);

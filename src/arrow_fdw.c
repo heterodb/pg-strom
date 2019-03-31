@@ -55,7 +55,7 @@ typedef struct RecordBatchState
 /*
  * ArrowFdwState
  */
-typedef struct ArrowFdwState
+struct ArrowFdwState
 {
 	List	   *filesList;
 	List	   *fdescList;
@@ -68,7 +68,7 @@ typedef struct ArrowFdwState
 	/* state of RecordBatches */
 	uint32		num_rbatches;
 	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
-} ArrowFdwState;
+};
 
 /*
  * metadata cache (on shared memory)
@@ -130,6 +130,25 @@ Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
 
 /*
+ * baseRelIsArrowFdw
+ */
+bool
+baseRelIsArrowFdw(RelOptInfo *baserel)
+{
+	if ((baserel->reloptkind == RELOPT_BASEREL ||
+		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL) &&
+		baserel->rtekind == RTE_RELATION &&
+		OidIsValid(baserel->serverid) &&
+		baserel->fdwroutine &&
+		memcmp(baserel->fdwroutine,
+			   &pgstrom_arrow_fdw_routine,
+			   sizeof(FdwRoutine)) == 0)
+		return true;
+
+	return false;
+}
+
+/*
  * ArrowGetForeignRelSize
  */
 static size_t
@@ -161,6 +180,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	BlockNumber		npages = 0;
 	double			ntuples = 0.0;
 	ListCell	   *lc;
+	int				optimal_gpu = INT_MAX;
 	int				i, j, k;
 
 	/* columns to be fetched */
@@ -193,11 +213,18 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 				 fname, get_rel_name(foreigntableid));
 			continue;
 		}
+		k = GetOptimalGpuForFile(fname, fdesc);
+		if (optimal_gpu == INT_MAX)
+			optimal_gpu = k;
+		else if (optimal_gpu != k)
+			optimal_gpu = -1;
+
 		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
 
+			/* walk on the referenced columns */
 			i = -1;
 			while ((i = bms_next_member(referenced, i)) >= 0)
 			{
@@ -214,7 +241,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	}
 	bms_free(referenced);
 
-	baserel->fdw_private = NULL;
+	if (optimal_gpu < 0 || optimal_gpu >= numDevAttrs)
+		optimal_gpu = -1;
+	baserel->fdw_private = makeInteger(optimal_gpu);
 	baserel->pages = npages;
 	baserel->tuples = ntuples;
 	baserel->rows = ntuples *
@@ -223,6 +252,17 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 							   0,
 							   JOIN_INNER,
 							   NULL);
+}
+
+/*
+ * GetOptimalGpuForArrowFdw
+ *
+ * optimal GPU index is saved at baserel->fdw_private
+ */
+cl_int
+GetOptimalGpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
+{
+	return intVal(baserel->fdw_private);
 }
 
 static void
@@ -654,31 +694,24 @@ makeRecordBatchState(ArrowSchema *schema,
 }
 
 /*
- * ArrowBeginForeignScan
+ * ExecInitArrowFdw
  */
-static void
-ArrowBeginForeignScan(ForeignScanState *node, int eflags)
+ArrowFdwState *
+ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
 {
-	Relation		relation = node->ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
-	ForeignScan	   *fscan = (ForeignScan *) node->ss.ps.plan;
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	List		   *fdescList = NIL;
+	ArrowFdwState  *af_state;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
-	Bitmapset	   *referenced = NULL;
-	ArrowFdwState  *af_state;
 	int				i, num_rbatches;
 
-	foreach (lc, fscan->fdw_private)
-	{
-		AttrNumber	anum = lfirst_int(lc);
-
-		Assert(anum > 0 && anum <= RelationGetNumberOfAttributes(relation));
-		referenced = bms_add_member(referenced, anum -
-									FirstLowInvalidHeapAttributeNumber);
-	}
+	Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE &&
+		   memcmp(relation->rd_fdwroutine,
+				  &pgstrom_arrow_fdw_routine,
+				  sizeof(FdwRoutine)) == 0);
 
 	foreach (lc, filesList)
 	{
@@ -693,38 +726,6 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		fdescList = lappend_int(fdescList, fdesc);
 
 		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
-#if 0
-		if (rb_cached == NIL)
-		{
-			ArrowFileInfo af_info;
-			int			index = 0;
-
-			readArrowFileDesc(fdesc, &af_info);
-			if (af_info.dictionaries != NIL)
-				elog(ERROR, "DictionaryBatch is not supported");
-			Assert(af_info.footer._num_dictionaries == 0);
-
-			foreach (cell, af_info.recordBatches)
-			{
-				ArrowBlock		 *block = &af_info.footer.recordBatches[index];
-				ArrowRecordBatch *rbatch = lfirst(cell);
-				RecordBatchState *rb_state;
-
-				rb_state = makeRecordBatchState(&af_info.footer.schema,
-												block, rbatch);
-				rb_state->fname = fname;
-				rb_state->fdesc = fdesc;
-				if (fstat(FileGetRawDesc(fdesc), &rb_state->stat_buf) != 0)
-					elog(ERROR, "failed on stat('%s'): %m", fname);
-				rb_state->rb_index = index;
-				rb_cached = lappend(rb_cached, rb_state);
-				index++;
-			}
-			if (rb_cached == NIL)
-				elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
-			arrowUpdateMetadataCache(rb_cached);
-		}
-#endif
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -747,15 +748,30 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
 	af_state->num_rbatches = num_rbatches;
 
-	node->fdw_state = af_state;
+	return af_state;
 }
 
-
-typedef struct
+/*
+ * ArrowBeginForeignScan
+ */
+static void
+ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 {
-	unsigned int	nr_chunks;
-	strom_io_chunk	ioc[FLEXIBLE_ARRAY_MEMBER];
-} strom_io_vector;
+	Relation		relation = node->ss.ss_currentRelation;
+	ForeignScan	   *fscan = (ForeignScan *) node->ss.ps.plan;
+	ListCell	   *lc;
+	Bitmapset	   *referenced = NULL;
+
+	foreach (lc, fscan->fdw_private)
+	{
+		AttrNumber	anum = lfirst_int(lc);
+
+		Assert(anum > 0 && anum <= RelationGetNumberOfAttributes(relation));
+		referenced = bms_add_member(referenced, anum -
+									FirstLowInvalidHeapAttributeNumber);
+	}
+	node->fdw_state = ExecInitArrowFdw(relation, referenced);
+}
 
 typedef struct
 {
@@ -927,33 +943,14 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 }
 
 /*
- * arrowFdwLoadRecordBatch - Loads the required RecordBatch to PDS
+ * __dump_kds_and_iovec - just for debug
  */
-static pgstrom_data_store *
-arrowFdwLoadRecordBatch(Relation relation,
-						MemoryContext memcxt,
-						RecordBatchState *rb_state,
-						Bitmapset *referenced)
+static inline void
+__dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
 {
-	TupleDesc			tupdesc = RelationGetDescr(relation);
-	pgstrom_data_store *pds;
-	kern_data_store	   *kds;
-	strom_io_vector	   *iovec;
-	size_t				head_sz;
-	int					j, ncols = rb_state->ncols;
-	int					fdesc;
+#if 1
+	int		j;
 
-	head_sz = KDS_calculateHeadSize(tupdesc, false);
-	kds = alloca(head_sz);
-	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0, false);
-	kds->nitems = rb_state->rb_nitems;
-	kds->nrooms = rb_state->rb_nitems;
-	kds->table_oid = RelationGetRelid(relation);
-	for (j=0; j < ncols; j++)
-		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
-	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
-
-#if 0
 	elog(INFO, "nchunks = %d", iovec->nr_chunks);
 	for (j=0; j < iovec->nr_chunks; j++)
 	{
@@ -985,16 +982,104 @@ arrowFdwLoadRecordBatch(Relation relation,
 
 	}
 #endif
-	/*
-	 * PDS creation and load from file
-	 */
-	pds = MemoryContextAllocHuge(memcxt, offsetof(pgstrom_data_store,
-												  kds) + kds->length);
-	memset(pds, 0, offsetof(pgstrom_data_store, kds));
-	pg_atomic_init_u32(&pds->refcnt, 1);
-	memcpy(&pds->kds, kds, head_sz);
+}
+
+/*
+ * arrowFdwLoadRecordBatch
+ */
+static pgstrom_data_store *
+arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
+						Relation relation,
+						EState *estate,
+						GpuContext *gcontext,
+						int optimal_gpu)
+{
+	TupleDesc			tupdesc = RelationGetDescr(relation);
+	Bitmapset		   *referenced = af_state->referenced;
+	RecordBatchState   *rb_state;
+	pgstrom_data_store *pds;
+	kern_data_store	   *kds;
+	strom_io_vector	   *iovec;
+	size_t				head_sz;
+	uint32				rb_index;
+	int					j, fdesc;
+	CUresult			rc;
+
+	/* fetch next RecordBatch */
+	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
+	if (rb_index >= af_state->num_rbatches)
+		return NULL;	/* no more RecordBatch to read */
+	rb_state = af_state->rbatches[rb_index];
+
+	/* setup KDS and I/O-vector */
+	head_sz = KDS_calculateHeadSize(tupdesc, false);
+	kds = alloca(head_sz);
+	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0, false);
+	kds->nitems = rb_state->rb_nitems;
+	kds->nrooms = rb_state->rb_nitems;
+	kds->table_oid = RelationGetRelid(relation);
+	Assert(head_sz == KERN_DATA_STORE_HEAD_LENGTH(kds));
+	for (j=0; j < rb_state->ncols; j++)
+		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
+	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
+	__dump_kds_and_iovec(kds, iovec);
 
 	fdesc = FileGetRawDesc(rb_state->fdesc);
+	/*
+	 * If SSD-to-GPU Direct SQL is available on the arrow file, setup a small
+	 * PDS on host-pinned memory, with strom_io_vector.
+	 */
+	if (gcontext &&
+		gcontext->cuda_dindex == optimal_gpu &&
+		iovec->nr_chunks > 0)
+	{
+		size_t	iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+
+		rc = gpuMemAllocHost(gcontext, (void **)&pds,
+							 offsetof(pgstrom_data_store, kds) +
+							 head_sz + iovec_sz);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocHost: %s", errorText(rc));
+
+		pds->gcontext = gcontext;
+		pg_atomic_init_u32(&pds->refcnt, 1);
+		pds->nblocks_uncached = 0;
+		pds->filedesc = fdesc;
+		pds->iovec = (strom_io_vector *)((char *)&pds->kds + head_sz);
+		memcpy(&pds->kds, kds, head_sz);
+		memcpy(pds->iovec, iovec, iovec_sz);
+
+		pfree(iovec);
+		return pds;
+	}
+
+	/*
+	 * Elsewhere, load RecordBatch using filesystem i/o
+	 */
+	if (gcontext)
+	{
+		rc = gpuMemAllocManaged(gcontext,
+								(CUdeviceptr *)&pds,
+								offsetof(pgstrom_data_store,
+										 kds) + kds->length,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	}
+	else
+	{
+		pds = MemoryContextAllocHuge(estate->es_query_cxt,
+									 offsetof(pgstrom_data_store,
+											  kds) + kds->length);
+	}
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
+	pds->gcontext = gcontext;
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
+	pds->iovec = NULL;
+	memcpy(&pds->kds, kds, head_sz);
+
 	for (j=0; j < iovec->nr_chunks; j++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[j];
@@ -1036,7 +1121,21 @@ arrowFdwLoadRecordBatch(Relation relation,
 			memset(dest, 0, len);
 		}
 	}
+	pfree(iovec);
 	return pds;
+}
+
+/*
+ * ExecScanChunkArrowFdw
+ */
+pgstrom_data_store *
+ExecScanChunkArrowFdw(ArrowFdwState *af_state, GpuTaskState *gts)
+{
+	return arrowFdwLoadRecordBatch(af_state,
+								   gts->css.ss.ss_currentRelation,
+								   gts->css.ss.ps.state,
+								   gts->gcontext,
+								   gts->optimal_gpu);
 }
 
 /*
@@ -1054,24 +1153,17 @@ ArrowIterateForeignScan(ForeignScanState *node)
 		   af_state->curr_index >= pds->kds.nitems)
 	{
 		EState	   *estate = node->ss.ps.state;
-		RecordBatchState *rb_state;
-		uint32		rb_index;
 
 		/* unload the previous RecordBatch, if any */
 		if (pds)
 			PDS_release(pds);
-		af_state->curr_pds = NULL;
 		af_state->curr_index = 0;
-
-		/* load the next RecordBatch */
-		rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
-		if (rb_index >= af_state->num_rbatches)
-			return NULL;	/* no more items to read */
-		rb_state = af_state->rbatches[rb_index];
-		af_state->curr_pds = arrowFdwLoadRecordBatch(relation,
-													 estate->es_query_cxt,
-													 rb_state,
-													 af_state->referenced);
+		af_state->curr_pds = arrowFdwLoadRecordBatch(af_state,
+													 relation,
+													 estate,
+													 NULL, -1);
+		if (!af_state->curr_pds)
+			return NULL;
 	}
 	Assert(pds && af_state->curr_index < pds->kds.nitems);
 	if (KDS_fetch_tuple_arrow(slot, &pds->kds, af_state->curr_index++))
@@ -1082,11 +1174,9 @@ ArrowIterateForeignScan(ForeignScanState *node)
 /*
  * ArrowReScanForeignScan
  */
-static void
-ArrowReScanForeignScan(ForeignScanState *node)
+void
+ExecReScanArrowFdw(ArrowFdwState *af_state)
 {
-	ArrowFdwState  *af_state = node->fdw_state;
-
 	/* rewind the current scan state */
 	pg_atomic_write_u32(af_state->rbatch_index, 0);
 	if (af_state->curr_pds)
@@ -1095,17 +1185,28 @@ ArrowReScanForeignScan(ForeignScanState *node)
 	af_state->curr_index = 0;
 }
 
+static void
+ArrowReScanForeignScan(ForeignScanState *node)
+{
+	ExecReScanArrowFdw((ArrowFdwState *)node->fdw_state);
+}
+
 /*
  * ArrowEndForeignScan
  */
-static void
-ArrowEndForeignScan(ForeignScanState *node)
+void
+ExecEndArrowFdw(ArrowFdwState *af_state)
 {
-	ArrowFdwState  *af_state = node->fdw_state;
-	ListCell	   *lc;
+	ListCell   *lc;
 
 	foreach (lc, af_state->fdescList)
 		FileClose((File)lfirst_int(lc));
+}
+
+static void
+ArrowEndForeignScan(ForeignScanState *node)
+{
+	ExecEndArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 
 /*
