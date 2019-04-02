@@ -211,6 +211,7 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 	int			bus_id;
 	int			dev_id;
 	int			func_id;
+	int			is_multi;
 	int			i;
 
 	rc = cuDeviceGetAttribute(&domain,
@@ -231,11 +232,22 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 	if (rc != CUDA_SUCCESS)
 		cuda_elog(rc, "failed on cuDeviceGetAttribute");
 
-	rc = cuDeviceGetAttribute(&func_id,
-							  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD_GROUP_ID,
+	rc = cuDeviceGetAttribute(&is_multi,
+							  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD,
 							  device);
 	if (rc != CUDA_SUCCESS)
 		cuda_elog(rc, "failed on cuDeviceGetAttribute");
+
+	if (!is_multi)
+		func_id = 0;
+	else
+	{
+		rc = cuDeviceGetAttribute(&func_id,
+								  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD_GROUP_ID,
+								  device);
+		if (rc != CUDA_SUCCESS)
+			cuda_elog(rc, "failed on cuDeviceGetAttribute");
+	}
 
 	for (i=0; i < li->nr_gpus; i++)
 	{
