@@ -510,14 +510,11 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&cfunc,
 				"  pg_%s_t %s_%u;\n\n"
-				"  addr = kern_get_datum_column(kds,%u,row_index);\n"
-				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
+				"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
 				dtype->type_name,
-				context->var_label,
-				var->varattno,
-				var->varattno - 1,
-				context->var_label,
-                var->varattno);
+				context->var_label, var->varattno,
+				context->var_label, var->varattno,
+				var->varattno - 1);
 		}
 	}
 	else
@@ -565,12 +562,10 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 						dtype->type_name);
 					appendStringInfo(
 						&cfunc,
-						"  addr = kern_get_datum_column(kds,%u,row_index);\n"
-						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
-						var->varattno - 1,
+						"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
 						context->var_label,
 						var->varattno,
-						dtype->type_name);
+						var->varattno - 1);
 					break;	/* no need to read same value twice */
 				}
 			}
@@ -598,9 +593,9 @@ output:
 		"  return %s;\n"
 		"}\n\n"
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpuscan_quals_eval_column(kern_context *kcxt,\n"
-		"                          kern_data_store *kds,\n"
-		"                          cl_uint row_index)\n"
+		"gpuscan_quals_eval_arrow(kern_context *kcxt,\n"
+		"                         kern_data_store *kds,\n"
+		"                         cl_uint row_index)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
 		"%s\n"
@@ -672,11 +667,11 @@ codegen_gpuscan_projection(StringInfo kern,
 		appendStringInfoString(
 			kern,
 			"STATIC_FUNCTION(void)\n"
-			"gpuscan_projection_column(kern_context *kcxt,\n"
-			"                          kern_data_store *kds_src,\n"
-			"                          size_t   index,\n"
-			"                          cl_char *tup_dclass,\n"
-			"                          Datum   *tup_values)\n"
+			"gpuscan_projection_arrow(kern_context *kcxt,\n"
+			"                         kern_data_store *kds_src,\n"
+			"                         size_t   index,\n"
+			"                         cl_char *tup_dclass,\n"
+			"                         Datum   *tup_values)\n"
 			"{\n"
 			"  void        *addr __attribute__((unused));\n"
 			"  pg_anytype_t temp __attribute__((unused));\n");
@@ -694,22 +689,18 @@ codegen_gpuscan_projection(StringInfo kern,
 			{
 				appendStringInfo(
 					kern,
-					"  addr = kern_get_datum_column(kds_src,%d,index);\n"
-					"  if (!addr)\n"
+					"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n"
+					"  if (temp.%s_v.isnull)\n"
 					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
 					"  else\n"
 					"  {\n"
-					"    pg_datum_ref(kcxt,temp.%s_v,addr);\n"
 					"    pg_datum_store(kcxt,temp.%s_v,\n"
 					"                   tup_dclass[%d],\n"
 					"                   tup_values[%d]);\n"
 					"  }\n",
-					j,
-					j,
-					dtype->type_name,
-					dtype->type_name,
-					j,
-					j);
+					dtype->type_name, j,
+					dtype->type_name, j,
+					dtype->type_name, j, j);
 			}
 		}
 		appendStringInfoString(
@@ -812,30 +803,25 @@ codegen_gpuscan_projection(StringInfo kern,
 			}
 
 			/* column */
-			if (!referenced)
-				appendStringInfo(
-					&cbody,
-					"  addr = kern_get_datum_column(kds_src,%u,index);\n",
-					attr->attnum - 1);
 			if (!dtype)
 			{
 				appendStringInfo(
 					&cbody,
-					"  /* shall be never referenced */\n"
-					"  assert(!addr);\n"
 					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
 			}
 			else
 			{
+				if (!referenced)
+					appendStringInfo(
+						&cbody,
+						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n",
+						dtype->type_name, attr->attnum-1);
 				appendStringInfo(
 					&cbody,
-					"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
 					"  pg_datum_store(kcxt, temp.%s_v,\n"
 					"                 tup_dclass[%d],\n"
 					"                 tup_values[%d]);\n",
-					dtype->type_name,
-					dtype->type_name,
-					j, j);
+					dtype->type_name, j, j);
 			}
 			referenced = true;
 		}
@@ -852,14 +838,19 @@ codegen_gpuscan_projection(StringInfo kern,
 
 			/* column */
 			if (!referenced)
+			{
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,%u,index);\n",
-					attr->attnum - 1);
-			appendStringInfo(
-				&cbody,
-				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
-				attr->attnum);
+					"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%u,index);\n",
+					attr->attnum, attr->attnum - 1);
+			}
+			else
+			{
+				appendStringInfo(
+					&cbody,
+					"  KVAR_%u = temp.%s_v;\n",
+					attr->attnum, dtype->type_name);
+			}
 			referenced = true;
 		}
 
@@ -940,11 +931,11 @@ codegen_gpuscan_projection(StringInfo kern,
 		"%s\n%s"
 		"}\n\n"
 		"STATIC_FUNCTION(void)\n"
-		"gpuscan_projection_column(kern_context *kcxt,\n"
-		"                          kern_data_store *kds_src,\n"
-		"                          size_t   index,\n"
-		"                          cl_char *tup_dclass,\n"
-		"                          Datum   *tup_values)\n"
+		"gpuscan_projection_arrow(kern_context *kcxt,\n"
+		"                         kern_data_store *kds_src,\n"
+		"                         size_t   index,\n"
+		"                         cl_char *tup_dclass,\n"
+		"                         Datum   *tup_values)\n"
 		"{\n"
 		"  void        *addr __attribute__((unused));\n"
 		"  pg_anytype_t temp __attribute__((unused));\n"
@@ -2520,8 +2511,8 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		kern_fname = "kern_gpuscan_main_row";
 	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		kern_fname = "kern_gpuscan_main_block";
-	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
-		kern_fname = "kern_gpuscan_main_column";
+	else if (pds_src->kds.format == KDS_FORMAT_ARROW)
+		kern_fname = "kern_gpuscan_main_arrow";
 	else
 		werror("GpuScan: unknown PDS format: %d", pds_src->kds.format);
 

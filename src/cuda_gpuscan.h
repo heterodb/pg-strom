@@ -215,9 +215,9 @@ gpuscan_quals_eval(kern_context *kcxt,
 				   HeapTupleHeaderData *htup);
 
 STATIC_FUNCTION(cl_bool)
-gpuscan_quals_eval_column(kern_context *kcxt,
-						  kern_data_store *kds,
-						  cl_uint src_index);
+gpuscan_quals_eval_arrow(kern_context *kcxt,
+						 kern_data_store *kds,
+						 cl_uint src_index);
 
 STATIC_FUNCTION(void)
 gpuscan_projection_tuple(kern_context *kcxt,
@@ -228,11 +228,11 @@ gpuscan_projection_tuple(kern_context *kcxt,
 						 Datum *tup_values);
 
 STATIC_FUNCTION(void)
-gpuscan_projection_column(kern_context *kcxt,
-						  kern_data_store *kds_src,
-						  size_t src_index,
-						  cl_char *tup_dclass,
-						  Datum *tup_values);
+gpuscan_projection_arrow(kern_context *kcxt,
+						 kern_data_store *kds_src,
+						 size_t src_index,
+						 cl_char *tup_dclass,
+						 Datum *tup_values);
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */
 
@@ -669,12 +669,12 @@ out_nostat:
 }
 
 /*
- * kern_gpuscan_main_column - GpuScan logic for KDS_FORMAT_COLUMN
+ * kern_gpuscan_main_arrow - GpuScan logic for KDS_FORMAT_ARROW
  */
-STATIC_FUNCTION(void)
-kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
-						 kern_data_store *kds_src,
-						 kern_data_store *kds_dst)
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
+						kern_data_store *kds_src,
+						kern_data_store *kds_dst)
 {
 	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	gpuscanSuspendContext *my_suspend
@@ -698,9 +698,9 @@ kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
-	assert(kds_src->format == KDS_FORMAT_COLUMN);
+	assert(kds_src->format == KDS_FORMAT_ARROW);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main_column, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main_arrow, kparams);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -725,7 +725,7 @@ kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
 		if (src_index < kds_src->nitems)
-			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
+			rc = gpuscan_quals_eval_arrow(&kcxt, kds_src, src_index);
 		else
 			rc = false;
 		/* bailout if any error */
@@ -742,11 +742,11 @@ kern_gpuscan_main_column(kern_gpuscan *kgpuscan,
 		 */
 		if (rc)
 		{
-			gpuscan_projection_column(&kcxt,
-									  kds_src,
-									  src_index,
-									  tup_dclass,
-									  tup_values);
+			gpuscan_projection_arrow(&kcxt,
+									 kds_src,
+									 src_index,
+									 tup_dclass,
+									 tup_values);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,

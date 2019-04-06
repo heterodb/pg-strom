@@ -23,6 +23,7 @@
 #ifndef PG_MONEY_TYPE_DEFINED
 #define PG_MONEY_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long, )
+STROMCL_SIMPLE_ARROW_TEMPLATE(money, cl_long)
 #endif
 
 /*

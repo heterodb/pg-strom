@@ -583,6 +583,28 @@ pg_datum_ref_slot(kern_context *kcxt,
 	}
 }
 
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_numeric_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	void		   *addr;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+									   sizeof(Int128_t));
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		memcpy(&result.value, addr, sizeof(Int128_t));
+		result.precision = cmeta->attopts.decimal.precision;
+		result.isnull = false;
+	}
+}
+
 STATIC_INLINE(cl_int)
 pg_datum_store(kern_context *kcxt,
 			   pg_numeric_t datum,

@@ -847,7 +847,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 		if (src_index < src_nitems)
 		{
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
-			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
+			rc = gpuscan_quals_eval_arrow(&kcxt, kds_src, src_index);
 			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 #else
 			rc = true;

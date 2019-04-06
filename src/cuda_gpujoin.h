@@ -469,9 +469,9 @@ gpujoin_load_source(kern_context *kcxt,
 		if (row_index < __ldg(&kds_src->nitems))
 		{
 			t_offset = row_index + 1;
-			visible = gpuscan_quals_eval_column(kcxt,
-												kds_src,
-												row_index);
+			visible = gpuscan_quals_eval_arrow(kcxt,
+											   kds_src,
+											   row_index);
 		}
 		assert(wip_count[0] == 0);
 	}

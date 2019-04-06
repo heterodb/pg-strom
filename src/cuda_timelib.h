@@ -198,35 +198,201 @@ struct pg_tm
 #define PG_DATE_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
-#endif
+#ifdef __CUDACC__
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_date_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta *cmeta = &kds->colmeta[colidx];
+	void	   *addr;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	switch (cmeta->attopts.date.unit)
+	{
+		case ArrowDateUnit__Day:
+			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+											   sizeof(cl_uint));
+			if (!addr)
+				result.isnull = true;
+			else
+			{
+				result.isnull = false;
+				result.value = *((cl_uint *)addr)
+					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+		case ArrowDateUnit__MilliSecond:
+			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+											   sizeof(cl_ulong));
+			if (!addr)
+				result.isnull = true;
+			else
+			{
+				result.isnull = false;
+				result.value = *((cl_ulong *)addr) / 1000
+					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+		default:
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			return;
+	}
+}
+#endif	/* __CUDACC__ */
+#endif	/* PG_DATE_TYPE_DEFINED */
 
 #ifndef PG_TIME_TYPE_DEFINED
 #define PG_TIME_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
-#endif
+#ifdef __CUDACC__
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_time_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta *cmeta = &kds->colmeta[colidx];
+	cl_long	   *aval;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
+	aval = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+									   sizeof(cl_ulong));
+	if (!aval)
+		result.isnull = true;
+	else
+	{
+		switch (cmeta->attopts.time.unit)
+		{
+			case ArrowTimeUnit__Second:
+				result.value = *aval * 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				result.value = *aval * 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				result.value = *aval;
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				result.value = *aval / 1000L;
+				break;
+			default:
+				result.isnull = true;
+				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				return;
+		}
+		result.isnull = false;
+	}
+}
+#endif	/* __CUDACC__ */
+#endif	/* PG_TIME_TYPE_DEFINED */
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
 #define PG_TIMETZ_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
-#endif
+STROMCL_NOSUPPORT_ARROW_TEMPLATE(timetz)
+#endif	/* PG_TIMETZ_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,Timestamp)
-#endif
+#ifdef __CUDACC__
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_timestamp_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta *cmeta = &kds->colmeta[colidx];
+	cl_long	   *aval;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
+	aval = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+									   sizeof(cl_ulong));
+	if (!aval)
+		result.isnull = true;
+	else
+	{
+		switch (cmeta->attopts.time.unit)
+		{
+			case ArrowTimeUnit__Second:
+				result.value = *aval * 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				result.value = *aval * 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				result.value = *aval;
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				result.value = *aval / 1000L;
+				break;
+			default:
+				result.isnull = true;
+				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				return;
+		}
+		result.isnull = false;
+	}
+}
+#endif	/* __CUDACC__ */
+#endif	/* PG_TIMESTAMP_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
+STROMCL_NOSUPPORT_ARROW_TEMPLATE(timestamptz)
 #endif
 
 #ifndef PG_INTERVAL_TYPE_DEFINED
 #define PG_INTERVAL_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
-#endif
+#ifdef __CUDACC__
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_interval_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	cl_uint		   *ival;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
+	switch (cmeta->attopts.interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+											   sizeof(cl_uint));
+			result.month = *ival;
+			result.day = 0;
+			result.month = 0;
+			break;
+
+		case ArrowIntervalUnit__Day_Time:
+			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+											   sizeof(cl_ulong));
+			result.month = 0;
+			result.value.day  = ival[0];
+			result.value.time = ival[1];
+			break;
+
+		default:
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			break;
+	}
+	result.isnull = false;
+}
+#endif	/* __CUDACC__ */
+#endif	/* PG_INTERVAL_TYPE_DEFINED */
 
 /*
  * Support routines

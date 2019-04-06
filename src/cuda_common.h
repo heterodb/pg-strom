@@ -342,7 +342,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_NVMeStrom						0x0003
 #define StromKernel_gpuscan_main_row				0x0101
 #define StromKernel_gpuscan_main_block				0x0102
-#define StromKernel_gpuscan_main_column				0x0103
+#define StromKernel_gpuscan_main_arrow				0x0103
 #define StromKernel_gpujoin_main					0x0201
 #define StromKernel_gpujoin_right_outer				0x0202
 #define StromKernel_gpupreagg_setup_row				0x0301
@@ -1011,6 +1011,58 @@ KERN_DATA_STORE_DCLASS(kern_data_store *kds, cl_uint row_index)
 	  STROMALIGN(sizeof(BlockNumber) * (kds)->nrooms) +		\
 	  BLCKSZ * kds_index))
 
+/* access functions for apache arrow format */
+STATIC_FUNCTION(void *)
+kern_get_simple_datum_arrow(kern_data_store *kds,
+							kern_colmeta *cmeta,
+							cl_uint index,
+							cl_uint unitsz)
+{
+	cl_char	   *nullmap = NULL;
+	cl_char	   *values;
+
+	Assert(index < kds->nitems);
+	if (cmeta->nullmap_offset)
+	{
+		nullmap = (char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		if (att_isnull(index, nullmap))
+			return NULL;
+	}
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	values = (char *)kds + __kds_unpack(cmeta->values_offset);
+	return values + unitsz * index;
+}
+
+STATIC_FUNCTION(void *)
+kern_get_varlena_datum_arrow(kern_data_store *kds,
+							 kern_colmeta *cmeta,
+							 cl_uint index,
+							 cl_uint *p_length)
+{
+	cl_char	   *nullmap;
+	cl_uint	   *offset;
+	cl_char	   *extra;
+
+	Assert(index < kds->nitems);
+	if (cmeta->nullmap_offset)
+	{
+		nullmap = (char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		if (att_isnull(index, nullmap))
+			return NULL;
+	}
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset > 0);
+	offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+
+	Assert(offset[index] <= offset[index+1] &&
+		   offset[index+1] <= __kds_unpack(cmeta->extra_length));
+	*p_length = offset[index+1] - offset[index];
+	return (extra + offset[index]);
+}
+
 /*
  * kern_parambuf
  *
@@ -1178,6 +1230,10 @@ typedef struct
 	{																\
 		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
+	STATIC_INLINE(pg_##NAME##_t)									\
+	pg_##NAME##_arrow_ref(kern_context *kcxt,						\
+						  kern_data_store *kds,						\
+						  kern_colmeta *cmeta, cl_int index);		\
 	STATIC_INLINE(void)												\
 	pg_datum_ref_slot(kern_context *kcxt,							\
 					  pg_##NAME##_t &result,						\
@@ -1205,26 +1261,6 @@ typedef struct
 		}															\
 		dclass = DATUM_CLASS__NULL;									\
 		return 0;													\
-	}																\
-																	\
-	STATIC_FUNCTION(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
-	{																\
-		kern_parambuf *kparams = kcxt->kparams;						\
-		pg_##NAME##_t result;										\
-																	\
-		if (param_id < kparams->nparams &&							\
-			kparams->poffset[param_id] > 0)							\
-		{															\
-			BASE *addr = (BASE *)((char *)kparams +					\
-								  kparams->poffset[param_id]);		\
-			result.value = *addr;									\
-			result.isnull = false;									\
-		}															\
-		else														\
-			result.isnull = true;									\
-																	\
-		return result;												\
 	}
 #else	/* __CUDACC__ */
 #define	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
@@ -1293,35 +1329,16 @@ typedef struct
 		dclass = DATUM_CLASS__NORMAL;								\
 		value = PointerGetDatum(res);								\
 		return sizeof(BASE);										\
-	}																\
-	STATIC_FUNCTION(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
-	{																\
-		kern_parambuf *kparams = kcxt->kparams;						\
-		pg_##NAME##_t result;										\
-																	\
-		if (param_id < kparams->nparams &&							\
-			kparams->poffset[param_id] > 0)							\
-		{															\
-			BASE *addr = (BASE *)((char *)kparams +					\
-								  kparams->poffset[param_id]);		\
-			memcpy(&result.value, addr, sizeof(BASE));				\
-			result.isnull = false;									\
-		}															\
-		else														\
-			result.isnull = true;									\
-																	\
-		return result;												\
 	}
 #else	/* __CUDACC__ */
 #define	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
-#ifdef __CUDACC__
 /*
  * General purpose hash-function which is compatible to PG's hash_any()
  * These are basis of Hash-Join and Group-By reduction.
  */
+#ifdef __CUDACC__
 DEVICE_ONLY_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
 
@@ -1334,20 +1351,91 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 		return pg_hash_any((cl_uchar *)&datum.value,			\
 						   sizeof(BASE));						\
 	}
-
 #else	/* __CUDACC__ */
 #define	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
+/*
+ * References to Const/Param values
+ */
+#ifdef __CUDACC__
+#define STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)					\
+	STATIC_INLINE(pg_##NAME##_t)							\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
+	{														\
+		kern_parambuf *kparams = kcxt->kparams;				\
+		pg_##NAME##_t result;								\
+															\
+		if (param_id < kparams->nparams &&					\
+			kparams->poffset[param_id] > 0)					\
+		{													\
+			void   *addr = ((char *)kparams +				\
+							kparams->poffset[param_id]);	\
+			result = pg_##NAME##_datum_ref(kcxt, addr);		\
+		}													\
+		else												\
+			result.isnull = true;							\
+		return result;										\
+	}
+#else
+#define STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
+#endif
+
+/*
+ * Reference to Arrow values without any transformation
+ */
+#ifdef __CUDACC__
+#define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)			\
+	STATIC_INLINE(void)										\
+	pg_datum_ref_arrow(kern_context *kcxt,					\
+					   pg_##NAME##_t &result,				\
+					   kern_data_store *kds,				\
+					   cl_uint colidx, cl_uint rowidx)		\
+	{														\
+		kern_colmeta   *cmeta = &kds->colmeta[colidx];		\
+		void		   *addr;								\
+															\
+		assert(kds->format == KDS_FORMAT_ARROW);			\
+		assert(colidx < kds->nr_colmeta &&					\
+			   rowidx < kds->nitems);						\
+		addr = kern_get_simple_datum_arrow(kds,cmeta,		\
+										   rowidx,			\
+										   sizeof(BASE));	\
+		if (!addr)											\
+			result.isnull = true;							\
+		else												\
+		{													\
+			result.isnull = false;							\
+			result.value  = *((BASE *)addr);				\
+		}													\
+	}
+#define STROMCL_NOSUPPORT_ARROW_TEMPLATE(NAME)				\
+	STATIC_INLINE(void)                                     \
+    pg_datum_ref_arrow(kern_context *kcxt,                  \
+					   pg_##NAME##_t &result,               \
+					   kern_data_store *kds,                \
+					   cl_uint colidx, cl_uint rowidx)      \
+	{														\
+		result.isnull = true;								\
+		STROM_SET_ERROR(&kcxt->e,StromError_WrongCodeGeneration);	\
+	}
+
+#else
+#define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)
+#define STROMCL_NOSUPPORT_ARROW_TEMPLATE(NAME,BASE)
+#endif
+
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)		\
-	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
 
 #define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)	\
+	STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
 
 #define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
 	STATIC_INLINE(pg_bool_t)								\
@@ -1375,42 +1463,73 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool, )
+#ifdef __CUDACC__
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_bool_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	cl_uchar	   *bitmap;
+	cl_uchar		mask = (1 << (rowidx & 7));
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
+	bitmap = (cl_uchar *)
+		kern_get_simple_datum_arrow(kds,cmeta,rowidx>>3,
+									sizeof(cl_uchar));
+	if (!bitmap)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = ((*bitmap & mask) ? true : false);
+	}
+}
+#endif	/* __CUDACC__ */
 #endif	/* PG_BOOL_TYPE_DEFINED */
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short, )
+STROMCL_SIMPLE_ARROW_TEMPLATE(int2, cl_short)
 #endif	/* PG_INT2_TYPE_DEFINED */
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int, )
+STROMCL_SIMPLE_ARROW_TEMPLATE(int4, cl_int)
 #endif	/* PG_INT4_TYPE_DEFINED */
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long, )
+STROMCL_SIMPLE_ARROW_TEMPLATE(int8, cl_long)
 #endif	/* PG_INT8_TYPE_DEFINED */
 
 /* pg_float2_t */
 #ifndef PG_FLOAT2_TYPE_DEFINED
 #define PG_FLOAT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half, __half_as_short)
+STROMCL_SIMPLE_ARROW_TEMPLATE(float2, cl_half)
 #endif	/* PG_FLOAT2_TYPE_DEFINED */
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float, __float_as_int)
+STROMCL_SIMPLE_ARROW_TEMPLATE(float4, cl_float)
 #endif	/* PG_FLOAT4_TYPE_DEFINED */
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
+STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
 
 /* definitions for variable-length data types */
