@@ -948,7 +948,7 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 static inline void
 __dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
 {
-#if 1
+#if 0
 	int		j;
 
 	elog(INFO, "nchunks = %d", iovec->nr_chunks);
@@ -2434,6 +2434,33 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 }
 
 /*
+ * makeRecordBatchStateFromCache
+ *   - setup RecordBatchState from arrowMetadataCache
+ */
+static RecordBatchState *
+makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
+							  const char *fname, File fdesc)
+{
+	RecordBatchState   *rbstate;
+
+	rbstate = palloc0(offsetof(RecordBatchState,
+							   columns[mcache->nfields]));
+	rbstate->fname = fname;
+	rbstate->fdesc = fdesc;
+	memcpy(&rbstate->stat_buf, &mcache->stat_buf, sizeof(struct stat));
+	rbstate->rb_index  = mcache->rb_index;
+	rbstate->rb_offset = mcache->rb_offset;
+	rbstate->rb_length = mcache->rb_length;
+	rbstate->rb_nitems = mcache->rb_nitems;
+	rbstate->ncols = mcache->ncols;
+	copyMetadataFieldCache(rbstate->columns,
+						   rbstate->columns + mcache->nfields,
+						   mcache->ncols,
+						   mcache->fstate);
+	return rbstate;
+}
+
+/*
  * arrowLookupMetadataCache
  */
 static List *
@@ -2441,8 +2468,8 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 {
 	MetadataCacheKey key;
 	uint32			hash, index;
-	dlist_iter		iter;
 	dlist_head	   *slot;
+	dlist_iter		iter, __iter;
 	struct stat		stat_buf;
 	List		   *result = NIL;
 
@@ -2456,7 +2483,7 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 	index = hash % arrow_metadata_state->nslots;
 	slot = &arrow_metadata_state->hash_slots[index];
 	LWLockAcquire(&arrow_metadata_state->lock, LW_EXCLUSIVE);
-	dlist_foreach (iter, slot)
+	dlist_foreach(iter, slot)
 	{
 		arrowMetadataCache *mcache
 			= dlist_container(arrowMetadataCache, chain, iter.cur);
@@ -2479,25 +2506,20 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 					 ctime_r(&mcache->stat_buf.st_ctime, buf2),
 					 ctime_r(&stat_buf.st_mtime, buf3),
 					 ctime_r(&stat_buf.st_ctime, buf4));
+				result = NIL;
 				goto out;
 			}
-			/* setup RecordBatchState from arrowMetadataCache */
-			rbstate = palloc0(offsetof(RecordBatchState,
-									   columns[mcache->nfields]));
-			rbstate->fname = fname;
-			rbstate->fdesc = fdesc;
-			memcpy(&rbstate->stat_buf, &mcache->stat_buf, sizeof(struct stat));
-			rbstate->rb_index = mcache->rb_index;
-			rbstate->rb_offset = mcache->rb_offset;
-			rbstate->rb_length = mcache->rb_length;
-			rbstate->rb_nitems = mcache->rb_nitems;
-			rbstate->ncols = mcache->ncols;
-			copyMetadataFieldCache(rbstate->columns,
-								   rbstate->columns + mcache->nfields,
-								   mcache->ncols,
-								   mcache->fstate);
-			result = lappend(result, rbstate);
-
+			rbstate = makeRecordBatchStateFromCache(mcache,
+													fname, fdesc);
+			result = list_make1(rbstate);
+			dlist_foreach (__iter, &mcache->siblings)
+			{
+				arrowMetadataCache *__mcache
+					= dlist_container(arrowMetadataCache, chain, __iter.cur);
+				rbstate = makeRecordBatchStateFromCache(__mcache,
+														fname, fdesc);
+				result = lappend(result, rbstate);
+			}
 			dlist_move_head(slot, &mcache->lru_chain);
 			break;
 		}

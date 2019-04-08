@@ -179,8 +179,9 @@ typedef struct toast_compress_header
  */
 #define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)					\
 	typedef struct {											\
-		varlena	   *value;										\
+		char	   *value;										\
 		cl_bool		isnull;										\
+		cl_int		length;		/* -1, if PG varlena */			\
 	} pg_##NAME##_t;
 
 #ifdef __CUDACC__
@@ -196,7 +197,8 @@ typedef struct toast_compress_header
 		else													\
 		{														\
 			result.isnull = false;								\
-			result.value = (varlena *)addr;						\
+			result.length = -1;									\
+			result.value = (char *)addr;						\
 		}														\
 		return result;											\
 	}															\
@@ -227,17 +229,33 @@ typedef struct toast_compress_header
 				   cl_char &dclass,								\
 				   Datum &value)								\
 	{															\
-		if (!datum.isnull)										\
+		if (datum.isnull)										\
+			dclass = DATUM_CLASS__NULL;							\
+		else if (datum.length < 0)								\
 		{														\
 			cl_uint		len = VARSIZE_ANY(datum.value);			\
 																\
 			dclass = DATUM_CLASS__NORMAL;						\
 			value  = PointerGetDatum(datum.value);				\
-			if (PTR_ON_VLBUF(kcxt,datum.value,len))				\
+			if (PTR_ON_VLBUF(kcxt, datum.value, len))			\
 				return len;										\
-			return 0;											\
 		}														\
-		dclass = DATUM_CLASS__NULL;								\
+		else													\
+		{														\
+			pg_##NAME##_t  *vl_buf;								\
+																\
+			vl_buf = (pg_##NAME##_t *)							\
+				kern_context_alloc(kcxt, sizeof(pg_##NAME##_t));\
+			if (vl_buf)											\
+			{													\
+				memcpy(vl_buf, &datum, sizeof(pg_##NAME##_t));	\
+				dclass = DATUM_CLASS__VARLENA;					\
+				value  = PointerGetDatum(vl_buf);				\
+				return sizeof(pg_##NAME##_t);					\
+			}													\
+			STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);	\
+			dclass = DATUM_CLASS__NULL;							\
+		}														\
 		return 0;												\
 	}															\
 	STATIC_INLINE(pg_##NAME##_t)								\
@@ -249,11 +267,12 @@ typedef struct toast_compress_header
 		if (param_id < kparams->nparams &&						\
 			kparams->poffset[param_id] > 0)						\
 		{														\
-			struct varlena *vl_val = (struct varlena *)			\
-				((char *)kparams + kparams->poffset[param_id]);	\
+			char	   *vl_val = ((char *)kparams +				\
+								  kparams->poffset[param_id]);	\
 			if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))	\
 			{													\
 				result.value = vl_val;							\
+				result.length = -1;								\
 				result.isnull = false;							\
 			}													\
 			else												\
@@ -278,6 +297,9 @@ typedef struct toast_compress_header
 	{                                                           \
 		if (datum.isnull)										\
 			return 0;											\
+		if (datum.length >= 0)									\
+			return pg_hash_any((cl_uchar *)datum.value,			\
+							   datum.length);					\
 		if (VARATT_IS_COMPRESSED(datum.value) ||                \
 			VARATT_IS_EXTERNAL(datum.value))					\
 		{														\
@@ -292,9 +314,40 @@ typedef struct toast_compress_header
 #define	STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)
 #endif	/* __CUDACC__ */
 
-#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)						\
-	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
-	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
+#ifdef __CUDACC__
+#define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)				\
+	STATIC_INLINE(void)										\
+	pg_datum_ref_arrow(kern_context *kcxt,                  \
+					   pg_##NAME##_t &result,               \
+					   kern_data_store *kds,                \
+					   cl_uint colidx, cl_uint rowidx)      \
+	{                                                       \
+		kern_colmeta   *cmeta = &kds->colmeta[colidx];      \
+		void           *addr;                               \
+		cl_uint			length;								\
+                                                            \
+		assert(kds->format == KDS_FORMAT_ARROW);            \
+		assert(colidx < kds->nr_colmeta &&                  \
+			   rowidx < kds->nitems);                       \
+		addr = kern_get_varlena_datum_arrow(kds,cmeta,		\
+											rowidx,			\
+											&length);		\
+		if (!addr)											\
+		{													\
+			result.isnull = true;							\
+			return;											\
+		}													\
+		result.isnull = false;								\
+		result.value  = (char *)addr;						\
+		result.length = length;								\
+	}
+#else
+#define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)
+#endif
+
+#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)					\
+	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)					\
+	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)					\
 	STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)
 
 /* generic varlena */
@@ -303,32 +356,73 @@ typedef struct toast_compress_header
 STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena)
 STROMCL_VARLENA_VARREF_TEMPLATE(varlena)
 STROMCL_VARLENA_COMP_HASH_TEMPLATE(varlena)
-
+//STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
 #endif	/* PG_VARLENA_TYPE_DEFINED */
 
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
 #define PG_BYTEA_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
+STROMCL_VARLENA_ARROW_TEMPLATE(bytea)
 #endif	/* PG_BYTEA_TYPE_DEFINED */
 
 STATIC_FUNCTION(cl_uint)
 pg_varlena_datum_length(kern_context *kcxt, Datum datum)
 {
 	pg_varlena_t   *vl = (pg_varlena_t *) datum;
-	/* right now PG format only */
-	return VARSIZE_ANY(vl->value);
+
+	if (vl->length < 0)
+		return VARSIZE_ANY(vl->value);
+	return VARHDRSZ + vl->length;
 }
 
 STATIC_FUNCTION(cl_uint)
 pg_varlena_datum_write(char *dest, Datum datum)
 {
 	pg_varlena_t   *vl = (pg_varlena_t *) datum;
-	cl_int			vl_len = VARSIZE_ANY(vl->value);
-	/* right now PG format only */
-	memcpy(dest, vl->value, vl_len);
+	cl_uint			vl_len;
+
+	if (vl->length < 0)
+	{
+		vl_len = VARSIZE_ANY(vl->value);
+		memcpy(dest, vl->value, vl_len);
+	}
+	else
+	{
+		vl_len = VARHDRSZ + vl->length;
+		memcpy(dest + VARHDRSZ, vl->value, vl->length);
+		SET_VARSIZE(dest, vl_len);
+	}
 	return vl_len;
 }
+
+#ifdef __CUDACC__
+template <typename T>
+DEVICE_ONLY_INLINE(cl_bool)
+pg_varlena_datum_extract(kern_context *kcxt, T &arg,
+						 char **s, cl_int *len)
+{
+	if (arg.isnull)
+		return false;
+	if (arg.length < 0)
+	{
+		if (VARATT_IS_COMPRESSED(arg.value) ||
+			VARATT_IS_EXTERNAL(arg.value))
+        {
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return false;
+        }
+		*s = VARDATA_ANY(arg.value);
+		*len = VARSIZE_ANY_EXHDR(arg.value);
+	}
+	else
+	{
+		*s = arg.value;
+		*len = arg.length;
+	}
+	return true;
+}
+#endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
 /*
@@ -481,7 +575,7 @@ pglz_decompress(const char *source, cl_int slen,
 
 STATIC_INLINE(cl_bool)
 toast_decompress_datum(char *buffer, cl_uint buflen,
-					   const struct varlena *datum)
+					   const varlena *datum)
 {
 	cl_int		rawsize;
 

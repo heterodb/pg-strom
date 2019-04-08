@@ -39,12 +39,10 @@
  * ----------------------------------------------------------------
  */
 STATIC_INLINE(cl_int)
-bpchar_truelen(struct varlena *arg)
+bpchar_truelen(const char *s, cl_int len)
 {
-	cl_char	   *s = VARDATA_ANY(arg);
-	cl_int		i, len;
+	cl_int		i;
 
-	len = VARSIZE_ANY_EXHDR(arg);
 	for (i = len - 1; i >= 0; i--)
 	{
 		if (s[i] != ' ')
@@ -61,30 +59,83 @@ STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
 STATIC_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
 {
+	cl_int		len;
+
 	if (datum.isnull)
 		return 0;
+	if (datum.length >= 0)
+		return pg_hash_any((cl_uchar *)datum.value, datum.length);
 	if (VARATT_IS_COMPRESSED(datum.value) ||
 		VARATT_IS_EXTERNAL(datum.value))
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return 0;
 	}
-	return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value),
-					   bpchar_truelen(datum.value));
+	len = bpchar_truelen(VARDATA_ANY(datum.value),
+						 VARSIZE_ANY_EXHDR(datum.value));
+	return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value), len);
 }
 
+STATIC_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   pg_bpchar_t &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	void		   *addr;
+	cl_uint			length;
 
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta &&
+		   rowidx < kds->nitems);
+	addr = kern_get_varlena_datum_arrow(kds,cmeta,
+										rowidx,
+										&length);
+	if (!addr)
+	{
+		result.isnull = true;
+		return;
+	}
+	result.isnull = false;
+	result.value  = (char *)addr;
+	result.length = bpchar_truelen((const char *)addr, length);
+}
 #endif
 
 STATIC_FUNCTION(cl_int)
-bpchar_compare(kern_context *kcxt, varlena *arg1, varlena *arg2)
+bpchar_compare(kern_context *kcxt,
+			   const char *s1, cl_int len1,
+			   const char *s2, cl_int len2,
+			   cl_bool *p_isnull)
 {
-	cl_char	   *s1 = VARDATA_ANY(arg1);
-	cl_char	   *s2 = VARDATA_ANY(arg2);
-	cl_int		len1 = bpchar_truelen(arg1);
-	cl_int		len2 = bpchar_truelen(arg2);
-	cl_int		len = min(len1, len2);
+	cl_int		len;
 
+	if (len1 < 0)
+	{
+		if (VARATT_IS_COMPRESSED(s1) || VARATT_IS_EXTERNAL(s1))
+		{
+			*p_isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+		len1 = bpchar_truelen(VARDATA_ANY(s1),
+							  VARSIZE_ANY_EXHDR(s1));
+		s1 = VARDATA_ANY(s1);
+	}
+	if (len2 < 0)
+	{
+		if (VARATT_IS_COMPRESSED(s2) || VARATT_IS_EXTERNAL(s2))
+		{
+			*p_isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+		len2 = bpchar_truelen(VARDATA_ANY(s2),
+							  VARSIZE_ANY_EXHDR(s2));
+		s2 = VARDATA_ANY(s2);
+	}
+	len = min(len1, len2);
 	while (len > 0)
 	{
 		if (*s1 < *s2)
@@ -108,20 +159,10 @@ pgfn_bpchareq(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) == 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) == 0);
 	}
 	return result;
 }
@@ -134,20 +175,10 @@ pgfn_bpcharne(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) != 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) != 0);
 	}
 	return result;
 }
@@ -160,20 +191,10 @@ pgfn_bpcharlt(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) < 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) < 0);
 	}
 	return result;
 }
@@ -186,20 +207,10 @@ pgfn_bpcharle(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) <= 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) <= 0);
 	}
 	return result;
 }
@@ -212,20 +223,10 @@ pgfn_bpchargt(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) > 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) > 0);
 	}
 	return result;
 }
@@ -238,20 +239,10 @@ pgfn_bpcharge(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(bpchar_compare(kcxt,
-													arg1.value,
-													arg2.value) >= 0);
-		}
+		result.value = (cl_bool)(bpchar_compare(kcxt,
+												arg1.value, arg1.length,
+												arg2.value, arg2.length,
+												&result.isnull) >= 0);
 	}
 	return result;
 }
@@ -264,18 +255,10 @@ pgfn_type_compare(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = bpchar_compare(kcxt, arg1.value, arg2.value);
-		}
+		result.value = bpchar_compare(kcxt,
+									  arg1.value, arg1.length,
+									  arg2.value, arg2.length,
+									  &result.isnull);
 	}
 	return result;
 }
@@ -290,7 +273,13 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
-		result.value = bpchar_truelen(arg1.value);
+	{
+		if (arg1.length >= 0)
+			result.value = arg1.length;
+		else
+			result.value = bpchar_truelen(VARDATA_ANY(arg1.value),
+										  VARSIZE_ANY_EXHDR(arg1.value));
+	}
 	return result;
 }
 
@@ -303,24 +292,33 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 #ifndef PG_TEXT_TYPE_DEFINED
 #define PG_TEXT_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(text)
+STROMCL_VARLENA_ARROW_TEMPLATE(text)
 #endif
 
 STATIC_FUNCTION(cl_int)
-text_compare(kern_context *kcxt, varlena *arg1, varlena *arg2)
+text_compare(kern_context *kcxt,
+			 pg_text_t arg1,
+			 pg_text_t arg2,
+			 cl_bool *p_isnull)
 {
-	cl_char	   *s1 = VARDATA_ANY(arg1);
-	cl_char	   *s2 = VARDATA_ANY(arg2);
-	cl_int		len1 = VARSIZE_ANY_EXHDR(arg1);
-	cl_int		len2 = VARSIZE_ANY_EXHDR(arg2);
-	cl_int		len = min(len1, len2);
+	char	   *s1, *s2;
+	cl_int		len1;
+	cl_int		len2;
+	cl_int		len;
 
+	if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1) ||
+		!pg_varlena_datum_extract(kcxt, arg2, &s2, &len2))
+	{
+		*p_isnull = true;
+		return 0;
+	}
+	len = min(len1, len2);
 	while (len > 0)
 	{
 		if (*s1 < *s2)
 			return -1;
 		if (*s1 > *s2)
 			return 1;
-
 		s1++;
 		s2++;
 		len--;
@@ -338,20 +336,8 @@ pgfn_texteq(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) == 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) == 0);
 	}
 	return result;
 }
@@ -364,20 +350,8 @@ pgfn_textne(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) != 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) != 0);
 	}
 	return result;
 }
@@ -390,20 +364,8 @@ pgfn_text_lt(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) < 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) < 0);
 	}
 	return result;
 }
@@ -416,20 +378,8 @@ pgfn_text_le(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) <= 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) <= 0);
 	}
 	return result;
 }
@@ -442,20 +392,8 @@ pgfn_text_gt(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) > 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) > 0);
 	}
 	return result;
 }
@@ -468,20 +406,8 @@ pgfn_text_ge(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = (cl_bool)(text_compare(kcxt,
-												  arg1.value,
-												  arg2.value) >= 0);
-		}
+		result.value = (cl_bool)(text_compare(kcxt, arg1, arg2,
+											  &result.isnull) >= 0);
 	}
 	return result;
 }
@@ -494,18 +420,8 @@ pgfn_type_compare(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = (arg1.isnull | arg2.isnull);
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-		else
-		{
-			result.value = text_compare(kcxt, arg1.value, arg2.value);
-		}
+		result.value = text_compare(kcxt, arg1, arg2,
+									&result.isnull);
 	}
 	return result;
 }
@@ -520,51 +436,48 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
-		result.value = toast_raw_datum_size(kcxt, arg1.value) - VARHDRSZ;
+	{
+		if (arg1.length >= 0)
+			result.value = arg1.length;
+		else
+			result.value = toast_raw_datum_size(kcxt, (varlena *)arg1.value) - VARHDRSZ;
+	}
 	return result;
 }
 
 STATIC_FUNCTION(pg_text_t)
 pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 {
+	char	   *s1, *s2;
 	cl_int		len1, len2;
-	cl_char	   *pos;
 	pg_text_t	result;
+	char	   *pos;
 
 	if (arg1.isnull)
 		return arg2;
 	if (arg2.isnull)
 		return arg1;
-	if (VARATT_IS_COMPRESSED(arg1.value) ||
-		VARATT_IS_COMPRESSED(arg2.value) ||
-		VARATT_IS_EXTERNAL(arg1.value) ||
-		VARATT_IS_EXTERNAL(arg2.value))
+	if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1) ||
+		!pg_varlena_datum_extract(kcxt, arg2, &s2, &len2))
 	{
-		printf("gid=%u %d %d %d %d\n", get_global_id(), (int)VARATT_IS_COMPRESSED(arg1.value), (int)VARATT_IS_COMPRESSED(arg2.value), (int)VARATT_IS_EXTERNAL(arg1.value), (int)VARATT_IS_EXTERNAL(arg2.value));
-
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return result;
 	}
-	len1 = VARSIZE_ANY_EXHDR(arg1.value);
-	len2 = VARSIZE_ANY_EXHDR(arg2.value);
-	pos = (char *)INTALIGN(kcxt->vlpos);
-	if (!PTR_ON_VLBUF(kcxt,pos,VARHDRSZ + len1 + len2))
+	pos = (char *)kern_context_alloc(kcxt, VARHDRSZ + len1 + len2);
+	if (!pos)
 	{
-		printf("gid=%u len1=%d len2=%d\n", get_global_id(), len1, len2);
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
 		return result;
 	}
 	result.isnull = false;
-	result.value = (struct varlena *) pos;
+	result.value = pos;
 	SET_VARSIZE(pos, VARHDRSZ + len1 + len2);
 	pos += VARHDRSZ;
-	memcpy(pos, VARDATA_ANY(arg1.value), len1);
+	memcpy(pos, s1, len1);
 	pos += len1;
-	memcpy(pos, VARDATA_ANY(arg2.value), len2);
+	memcpy(pos, s2, len2);
 	pos += len2;
-	kcxt->vlpos = pos;
 
 	return result;
 }
@@ -849,25 +762,19 @@ pgfn_textlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return result;
 		}
-		else
-		{
-			char	   *s = VARDATA_ANY(arg1.value);
-			char	   *p = VARDATA_ANY(arg2.value);
-			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
-
-			result.value = (GenericMatchText(kcxt,
-											 s, slen,
-											 p, plen, 0) == LIKE_TRUE);
-		}
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) == LIKE_TRUE);
 	}
 	return result;
 }
@@ -880,25 +787,19 @@ pgfn_textnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return result;
 		}
-		else
-		{
-			char	   *s = VARDATA_ANY(arg1.value);
-			char	   *p = VARDATA_ANY(arg2.value);
-			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
-
-			result.value = (GenericMatchText(kcxt,
-											 s, slen,
-											 p, plen, 0) != LIKE_TRUE);
-		}
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) != LIKE_TRUE);
 	}
 	return result;
 }
@@ -911,25 +812,19 @@ pgfn_texticlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return result;
 		}
-		else
-		{
-			char	   *s = VARDATA_ANY(arg1.value);
-			char	   *p = VARDATA_ANY(arg2.value);
-			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
-
-			result.value = (GenericCaseMatchText(kcxt,
-												 s, slen,
-												 p, plen, 0) == LIKE_TRUE);
-		}
+		result.value = (GenericCaseMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) == LIKE_TRUE);
 	}
 	return result;
 }
@@ -942,25 +837,19 @@ pgfn_texticnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		if (VARATT_IS_COMPRESSED(arg1.value) ||
-			VARATT_IS_COMPRESSED(arg2.value) ||
-			VARATT_IS_EXTERNAL(arg1.value)   ||
-			VARATT_IS_EXTERNAL(arg1.value))
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return result;
 		}
-		else
-		{
-			char	   *s = VARDATA_ANY(arg1.value);
-			char	   *p = VARDATA_ANY(arg2.value);
-			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
-
-			result.value = (GenericCaseMatchText(kcxt,
-												 s, slen,
-												 p, plen, 0) != LIKE_TRUE);
-		}
+		result.value = (GenericCaseMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) != LIKE_TRUE);
 	}
 	return result;
 }

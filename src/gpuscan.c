@@ -701,6 +701,8 @@ codegen_gpuscan_projection(StringInfo kern,
 					dtype->type_name, j,
 					dtype->type_name, j,
 					dtype->type_name, j, j);
+				if (dtype->type_length < 0)
+					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 			}
 		}
 		appendStringInfoString(
@@ -822,6 +824,8 @@ codegen_gpuscan_projection(StringInfo kern,
 					"                 tup_dclass[%d],\n"
 					"                 tup_values[%d]);\n",
 					dtype->type_name, j, j);
+				if (dtype->type_length < 0)
+					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 			}
 			referenced = true;
 		}

@@ -255,13 +255,13 @@ pg_datum_ref_arrow(kern_context *kcxt,
 				   kern_data_store *kds,
 				   cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta *cmeta = &kds->colmeta[colidx];
-	cl_long	   *aval;
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	cl_ulong	   *aval;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
 	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
-	aval = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-									   sizeof(cl_ulong));
+	aval = (cl_ulong *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+												   sizeof(cl_ulong));
 	if (!aval)
 		result.isnull = true;
 	else
@@ -308,13 +308,13 @@ pg_datum_ref_arrow(kern_context *kcxt,
 				   kern_data_store *kds,
 				   cl_uint colidx, cl_uint rowidx)
 {
-	kern_colmeta *cmeta = &kds->colmeta[colidx];
-	cl_long	   *aval;
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	cl_ulong	   *aval;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
 	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
-	aval = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-									   sizeof(cl_ulong));
+	aval = (cl_ulong *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+												   sizeof(cl_ulong));
 	if (!aval)
 		result.isnull = true;
 	else
@@ -369,19 +369,21 @@ pg_datum_ref_arrow(kern_context *kcxt,
 	switch (cmeta->attopts.interval.unit)
 	{
 		case ArrowIntervalUnit__Year_Month:
-			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-											   sizeof(cl_uint));
-			result.month = *ival;
-			result.day = 0;
-			result.month = 0;
+			ival = (cl_uint *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+														  sizeof(cl_uint));
+			result.value.month = *ival;
+			result.value.day = 0;
+			result.value.month = 0;
+			result.isnull = false;
 			break;
 
 		case ArrowIntervalUnit__Day_Time:
-			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-											   sizeof(cl_ulong));
-			result.month = 0;
+			ival = (cl_uint *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
+														  2 * sizeof(cl_uint));
+			result.value.month = 0;
 			result.value.day  = ival[0];
 			result.value.time = ival[1];
+			result.isnull = false;
 			break;
 
 		default:
@@ -389,7 +391,6 @@ pg_datum_ref_arrow(kern_context *kcxt,
 			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
 			break;
 	}
-	result.isnull = false;
 }
 #endif	/* __CUDACC__ */
 #endif	/* PG_INTERVAL_TYPE_DEFINED */
