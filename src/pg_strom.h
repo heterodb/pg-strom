@@ -277,6 +277,7 @@ typedef enum {
 typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
 typedef struct GpuTaskSharedState	GpuTaskSharedState;
+typedef struct ArrowFdwState		ArrowFdwState;
 
 /*
  * GpuTaskState
@@ -311,6 +312,8 @@ struct GpuTaskState
 
 	IndexScanDesc	outer_brin_index;	/* brin index of outer scan, if any */
 	long			outer_brin_count;	/* # of blocks skipped by index */
+
+	ArrowFdwState  *af_state;			/* for GpuTask on Arrow_Fdw */
 
 	/*
 	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
@@ -362,6 +365,10 @@ struct GpuTaskState
  */
 struct GpuTaskSharedState
 {
+	/* for arrow_fdw file scan  */
+	pg_atomic_uint32 af_rbatch_index;
+
+	/* for regular table scan */
 	uint64		nr_allocated;	/* number of blocks already allocated to
 								 * workers; almost equivalent to the
 								 * @phs_nallocated in PG11 or later.
@@ -1328,14 +1335,19 @@ extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
 
-typedef struct ArrowFdwState	ArrowFdwState;
-
 extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
 									   Bitmapset *referenced);
 extern pgstrom_data_store *ExecScanChunkArrowFdw(ArrowFdwState *af_state,
 												 GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
 extern void ExecEndArrowFdw(ArrowFdwState *af_state);
+extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
+								pg_atomic_uint32 *rbatch_index);
+extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
+extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
+								   pg_atomic_uint32 *rbatch_index);
+extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
+
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

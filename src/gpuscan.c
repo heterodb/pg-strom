@@ -109,7 +109,6 @@ typedef struct {
 	GpuTaskState	gts;
 	GpuScanSharedState *gs_sstate;
 	GpuScanRuntimeStat *gs_rtstat;
-	ArrowFdwState  *af_state;		/* only if arrow_fdw scan */
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 #if PG_VERSION_NUM < 100000
 	List		   *dev_quals;		/* quals to be run on the device */
@@ -1651,7 +1650,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 
 	/* setup ArrowFdwState, if foreign-table */
 	if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
-		gss->af_state = ExecInitArrowFdw(scan_rel, gss->gts.outer_refs);
+		gss->gts.af_state = ExecInitArrowFdw(scan_rel, gss->gts.outer_refs);
 
 	/*
 	 * initialize device qualifiers/projection stuff, for CPU fallback
@@ -1813,8 +1812,8 @@ ExecEndGpuScan(CustomScanState *node)
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
-	if (gss->af_state)
-		ExecEndArrowFdw(gss->af_state);
+	if (gss->gts.af_state)
+		ExecEndArrowFdw(gss->gts.af_state);
 }
 
 /*
@@ -1832,8 +1831,8 @@ ExecReScanGpuScan(CustomScanState *node)
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gss->gts);
 	/* arrow_fdw rescan handling, if any */
-	if (gss->af_state)
-		ExecReScanArrowFdw(gss->af_state);
+	if (gss->gts.af_state)
+		ExecReScanArrowFdw(gss->gts.af_state);
 }
 
 /*
@@ -2168,8 +2167,8 @@ gpuscan_next_task(GpuTaskState *gts)
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
 
-	if (gss->af_state)
-		pds = ExecScanChunkArrowFdw(gss->af_state, gts);
+	if (gss->gts.af_state)
+		pds = ExecScanChunkArrowFdw(gss->gts.af_state, gts);
 	else
 		pds = pgstromExecScanChunk(gts);
 	if (!pds)

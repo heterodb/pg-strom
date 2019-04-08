@@ -708,9 +708,8 @@ ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
 	int				i, num_rbatches;
 
 	Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE &&
-		   memcmp(relation->rd_fdwroutine,
-				  &pgstrom_arrow_fdw_routine,
-				  sizeof(FdwRoutine)) == 0);
+		   memcmp(GetFdwRoutineForRelation(relation, false),
+				  &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0);
 
 	foreach (lc, filesList)
 	{
@@ -1402,56 +1401,75 @@ ArrowEstimateDSMForeignScan(ForeignScanState *node,
 /*
  * ArrowInitializeDSMForeignScan
  */
+void
+ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
+{
+	pg_atomic_init_u32(rbatch_index, 0);
+	af_state->rbatch_index = rbatch_index;
+}
+
 static void
 ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
 {
-	ArrowFdwState	   *af_state = node->fdw_state;
-	pg_atomic_uint32   *rbatch_index = coordinate;
-
-	//elog(INFO, "pid=%u ArrowInitializeDSMForeignScan", getpid());
-	pg_atomic_init_u32(rbatch_index, 0);
-	af_state->rbatch_index = rbatch_index;
+	ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
+						(pg_atomic_uint32 *) coordinate);
 }
 
 /*
  * ArrowReInitializeDSMForeignScan
  */
 #if PG_VERSION_NUM >= 100000
+void
+ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
+{
+	pg_atomic_write_u32(af_state->rbatch_index, 0);
+}
+
+
 static void
 ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 								ParallelContext *pcxt,
 								void *coordinate)
 {
-	ArrowFdwState	   *af_state = node->fdw_state;
-
-	pg_atomic_write_u32(af_state->rbatch_index, 0);
+	ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 #endif
 
 /*
  * ArrowInitializeWorkerForeignScan
  */
+void
+ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
+					   pg_atomic_uint32 *rbatch_index)
+{
+	af_state->rbatch_index = rbatch_index;
+}
+
 static void
 ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
-	ArrowFdwState	   *af_state = node->fdw_state;
-
-	//elog(INFO, "pid=%u ArrowInitializeWorkerForeignScan", getpid());
-	Assert(af_state->rbatch_index == coordinate);
+	ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
+						   (pg_atomic_uint32 *) coordinate);
 }
 
 #if PG_VERSION_NUM >= 100000
 /*
  * ArrowShutdownForeignScan
  */
+void
+ExecShutdownArrowFdw(ArrowFdwState *af_state)
+{
+	/* nothing to do */
+}
+
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
-	//elog(INFO, "pid=%u ArrowShutdownForeignScan", getpid());
+	ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 #endif
 

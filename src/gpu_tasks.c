@@ -660,7 +660,12 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	Snapshot	snapshot = estate->es_snapshot;
 	GpuTaskSharedState *gtss = coordinate;
 
-	if (relation)
+	if (gts->af_state != NULL)
+	{
+		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
+		ExecInitDSMArrowFdw(gts->af_state, &gtss->af_rbatch_index);
+	}
+	else if (relation)
 	{
 		gtss->nr_allocated = 0;
 		heap_parallelscan_initialize(&gtss->phscan, relation, snapshot);
@@ -680,7 +685,12 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	GpuTaskSharedState *gtss = coordinate;
 
-	if (relation)
+	if (gts->af_state != NULL)
+	{
+		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
+		ExecInitWorkerArrowFdw(gts->af_state, &gtss->af_rbatch_index);
+	}
+	else if (relation)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
@@ -699,6 +709,8 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 {
 	GpuTaskSharedState *gtss = gts->gtss;
 
+	if (gts->af_state)
+		ExecReInitDSMArrowFdw(gts->af_state);
 	if (gtss)
 	{
 		/* see heap_parallelscan_reinitialize */
