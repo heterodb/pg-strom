@@ -61,8 +61,7 @@ struct ArrowFdwState
 	List	   *fdescList;
 	Bitmapset  *referenced;
 	pg_atomic_uint32   *rbatch_index;
-	pg_atomic_uint32	__rbatch_index;	/* in case of single process */
-
+	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
 	cl_ulong	curr_index;			/* current index to row on KDS */
 	/* state of RecordBatches */
@@ -742,7 +741,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
 	af_state->filesList = filesList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
-	af_state->rbatch_index = &af_state->__rbatch_index;
+	af_state->rbatch_index = &af_state->__rbatch_index_local;
 	i = 0;
 	foreach (lc, rb_state_list)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
@@ -1442,7 +1441,7 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 	ArrowFdwState	   *af_state = node->fdw_state;
 
 	//elog(INFO, "pid=%u ArrowInitializeWorkerForeignScan", getpid());
-	af_state->rbatch_index = (pg_atomic_uint32 *) coordinate;
+	Assert(af_state->rbatch_index == coordinate);
 }
 
 #if PG_VERSION_NUM >= 100000
@@ -1867,15 +1866,11 @@ pg_varlena_arrow_ref(kern_data_store *kds,
 	cl_uint	   *offset = (cl_uint *)
 		((char *)kds + __kds_unpack(cmeta->values_offset));
 	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
-	size_t		extra_len = __kds_unpack(cmeta->extra_offset);
+	size_t		extra_len = __kds_unpack(cmeta->extra_length);
 	cl_uint		len = offset[index+1] - offset[index];
 	struct varlena *res;
 
-	if (extra_len == 0)
-		elog(ERROR, "arrow_fdw: file corruption? varlena has no extra buffer");
-	if (extra_len <= offset[index] ||
-		extra_len <= offset[index + 1] ||
-		offset[index] >= offset[index+1])
+	if (offset[index] > offset[index + 1] || offset[index+1] > extra_len)
 		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
 
 	res = palloc(VARHDRSZ + len);

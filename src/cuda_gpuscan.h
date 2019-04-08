@@ -293,7 +293,8 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 		cl_uint			extra_sz = 0;
 		cl_uint			suspend_kernel	__attribute__((unused)) = 0;
 
-		kcxt.vlpos = kcxt.vlbuf;	/* rewind */
+		/* rewind the varlena buffer */
+		kcxt.vlpos = kcxt.vlbuf;
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
 		if (src_index < kds_src->nitems)
@@ -512,6 +513,9 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 			cl_uint		suspend_kernel = 0;
 			cl_bool		rc;
 
+			/* rewind the varlena buffer */
+			kcxt.vlpos = kcxt.vlbuf;
+
 			/* identify the block */
 			if (thread_is_valid && part_id < src_nitems)
 			{
@@ -721,6 +725,9 @@ kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
 		cl_uint			required	__attribute__((unused));
 		cl_uint			extra_sz = 0;
 		cl_uint			suspend_kernel = 0;
+
+		/* rewind the varlena buffer */
+		kcxt.vlpos = kcxt.vlbuf;
 
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
