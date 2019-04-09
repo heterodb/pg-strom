@@ -1736,7 +1736,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 			add_path(joinrel, (Path *)gjpath);
 
 		/*
-		 * pull up outer and 
+		 * pull up outer GpuJoin, and merge if possible
 		 */
 		if (pgstrom_path_is_gpujoin(outer_path))
 		{
@@ -2650,10 +2650,16 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		nattrs = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation)->natts;
-		pgstromExecInitBrinIndexMap(&gjs->gts,
-									gj_info->index_oid,
-									gj_info->index_conds);
+		Relation	rel = gjs->gts.css.ss.ss_currentRelation;
+
+		/* setup ArrowFdwState, if foreign-table */
+		if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
+			gjs->gts.af_state = ExecInitArrowFdw(rel, gjs->gts.outer_refs);
+		else
+			pgstromExecInitBrinIndexMap(&gjs->gts,
+										gj_info->index_oid,
+										gj_info->index_conds);
+		nattrs = RelationGetNumberOfAttributes(rel);
 	}
 	else
 	{
@@ -2962,6 +2968,9 @@ ExecEndGpuJoin(CustomScanState *node)
 		ExecEndNode(gjs->inners[i].state);
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts, false);
+	/* shutdown Arrow_Fdw, if any */
+	if (gjs->gts.af_state)
+        ExecEndArrowFdw(gjs->gts.af_state);
 	pgstromReleaseGpuTaskState(&gjs->gts, gt_rtstat);
 }
 
@@ -2996,6 +3005,9 @@ ExecReScanGpuJoin(CustomScanState *node)
 		/* rewind the inner hash/heap buffer */
 		GpuJoinInnerUnload(&gjs->gts, true);
 	}
+	/* arrow_fdw rescan handling, if any */
+	if (gjs->gts.af_state)
+		ExecReScanArrowFdw(gjs->gts.af_state);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gjs->gts);
 }
@@ -3577,7 +3589,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				appendStringInfoString(
 					&row,
 					"  }\n"
-					"  else if (__ldg(&kds->format) != KDS_FORMAT_COLUMN)\n"
+					"  else if (__ldg(&kds->format) != KDS_FORMAT_ARROW)\n"
 					"  {\n"
 					"    if (offset == 0)\n"
 					"      htup = NULL;\n"
@@ -3654,11 +3666,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		if (depth == 0)
 			appendStringInfo(
 				&column,
-				"    datum = (offset > 0 ? kern_get_datum_column(kds,%u,offset-1) : NULL);\n"
-				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
-				keynode->varattno - 1,
-				keynode->varoattno,
-				dtype->type_name);
+				"    if (offset > 0)\n"
+				"      pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,offset-1);\n"
+				"    else\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n",
+				keynode->varoattno, keynode->varattno - 1,
+				keynode->varoattno);
 	}
 
 	/* close the previous block */
@@ -4066,18 +4079,10 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1, tle->resno - 1);
 				}
 				/* column */
-				if (!referenced)
-					appendStringInfo(
-						&column,
-						"    if (offset > 0)\n"
-						"      addr = kern_get_datum_column(%s,%d,offset-1);\n",
-						kds_label, i-1);
 				if (!dtype)
 				{
 					appendStringInfo(
 						&column,
-						"    /* shall be never referenced */\n"
-						"    assert(!addr);\n"
 						"    tup_dclass[%d] = DATUM_CLASS__NULL;\n",
 						tle->resno - 1);
 				}
@@ -4085,13 +4090,17 @@ gpujoin_codegen_projection(StringInfo source,
 				{
 					appendStringInfo(
 						&column,
-						"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"    if (offset > 0)\n"
+						"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,offset-1);\n"
+						"    else\n"
+						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n"
 						"    sz = pg_datum_store(kcxt, temp.%s_v,\n"
 						"                        tup_dclass[%d],\n"
 						"                        tup_values[%d]);\n"
 						"    if (tup_extras)\n"
 						"      tup_extras[%d] = sz;\n"
 						"    extra_sum += MAXALIGN(sz);\n",
+						dtype->type_name, kds_label, i-1,
 						dtype->type_name,
 						dtype->type_name,
 						tle->resno - 1,
@@ -4134,14 +4143,23 @@ gpujoin_codegen_projection(StringInfo source,
 					&temp,
 					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
 				if (!referenced)
+				{
 					appendStringInfo(
 						&column,
 						"    if (offset > 0)\n"
-						"      addr = kern_get_datum_column(%s,%d,offset-1);\n",
-						kds_label, i-1);
-				appendStringInfo(
-					&column,
-					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
+						"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,offset-1);\n"
+						"    else\n"
+						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n",
+						dtype->type_name, kds_label, i-1,
+						dtype->type_name);
+				}
+				else
+				{
+					appendStringInfo(
+						&column,
+						"    KVAR_%u = temp.%s_v;\n",
+						dst_num, dtype->type_name);
+				}
 				referenced = true;
 			}
 
@@ -4184,8 +4202,6 @@ gpujoin_codegen_projection(StringInfo source,
 				"  else\n"
 				"  {\n"
 				"    offset = r_buffer[0];\n"
-				"    if (offset == 0)\n"
-				"      addr = NULL;\n"
 				"%s"
 				"  }\n",
 				outer.data,
@@ -4600,7 +4616,10 @@ gpujoin_next_task(GpuTaskState *gts)
 	GpuTask		   *gtask = NULL;
 	pgstrom_data_store *pds;
 
-	pds = GpuJoinExecOuterScanChunk(gts);
+	if (gjs->gts.af_state)
+		pds = ExecScanChunkArrowFdw(gjs->gts.af_state, gts);
+	else
+		pds = GpuJoinExecOuterScanChunk(gts);
 	if (pds)
 		gtask = gpujoin_create_task(gjs, pds, -1);
 	return gtask;
@@ -5943,7 +5962,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	/* sanity checks */
 	Assert(!pds_src || (pds_src->kds.format == KDS_FORMAT_ROW ||
 						pds_src->kds.format == KDS_FORMAT_BLOCK ||
-						pds_src->kds.format == KDS_FORMAT_COLUMN));
+						pds_src->kds.format == KDS_FORMAT_ARROW));
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW);
 
 	/* Lookup GPU kernel function */

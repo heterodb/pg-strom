@@ -456,7 +456,7 @@ gpujoin_load_source(kern_context *kcxt,
 	}
 	else
 	{
-		assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
+		assert(__ldg(&kds_src->format) == KDS_FORMAT_ARROW);
 		cl_uint			row_index;
 
 		/* fetch next window */
@@ -1258,7 +1258,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_ROW ||
 		   __ldg(&kds_src->format) == KDS_FORMAT_BLOCK ||
-		   __ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
+		   __ldg(&kds_src->format) == KDS_FORMAT_ARROW);
 #ifndef GPUPREAGG_COMBINED_JOIN
 	assert(__ldg(&kds_dst->format) == KDS_FORMAT_ROW);
 	assert(kparams_gpreagg == NULL);
@@ -1301,7 +1301,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		kcxt.vlpos = kcxt.vlbuf;
 		if (depth == 0)
 		{
-			/* LOAD FROM KDS_SRC (ROW/BLOCK/COLUMN) */
+			/* LOAD FROM KDS_SRC (ROW/BLOCK/ARROW) */
 			depth = gpujoin_load_source(&kcxt,
 										kgjoin,
 										kds_src,

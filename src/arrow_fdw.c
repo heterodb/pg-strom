@@ -223,15 +223,22 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
 
-			/* walk on the referenced columns */
-			i = -1;
-			while ((i = bms_next_member(referenced, i)) >= 0)
+			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
 			{
-				k = i + FirstLowInvalidHeapAttributeNumber;
-
-				if (k < 0 || k >= rb_state->ncols)
-					continue;
-				len += RecordBatchFieldLength(&rb_state->columns[k]);
+				for (j=0; j < rb_state->ncols; j++)
+					len += RecordBatchFieldLength(&rb_state->columns[j]);
+			}
+			else
+			{
+				for (k = bms_next_member(referenced, -1);
+					 k >= 0;
+					 k = bms_next_member(referenced, k))
+				{
+					j = k + FirstLowInvalidHeapAttributeNumber;
+					if (j < 0 || j >= rb_state->ncols)
+						continue;
+					len += RecordBatchFieldLength(&rb_state->columns[j]);
+				}
 			}
 			ntuples += rb_state->rb_nitems;
 		}
@@ -398,34 +405,41 @@ ArrowGetForeignPlan(PlannerInfo *root,
 					List *scan_clauses,
 					Plan *outer_plan)
 {
-	List   *referenced = NIL;
-	int		i, j;
+	Bitmapset  *referenced = NULL;
+	List	   *ref_list = NIL;
+	ListCell   *lc;
+	int			i, j, k;
 
 	Assert(IS_SIMPLE_REL(baserel));
+	/* pick up referenced attributes */
+	foreach (lc, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc);
+
+		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
+	}
 	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
 	{
-		if (i < 0)
-			continue;	/* system columns */
-		else if (baserel->attr_needed[j])
+		if (baserel->attr_needed[j] != NULL)
 		{
-			if (i == 0)
-			{
-				/* all the columns must be fetched */
-				referenced = NIL;
-				break;
-			}
-			else
-			{
-				referenced = lappend_int(referenced, i);
-			}
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
 		}
 	}
+	for (k = bms_next_member(referenced, -1);
+		 k >= 0;
+		 k = bms_next_member(referenced, k))
+	{
+		j = k + FirstLowInvalidHeapAttributeNumber;
+		ref_list = lappend_int(ref_list, j);
+	}
+	bms_free(referenced);
 
 	return make_foreignscan(tlist,
 							extract_actual_clauses(scan_clauses, false),
 							baserel->relid,
 							NIL,	/* no expressions to evaluate */
-							referenced, /* list of referenced attnum */
+							ref_list, /* list of referenced attnums */
 							NIL,	/* no custom tlist */
 							NIL,	/* no remote quals */
 							outer_plan);
@@ -756,17 +770,28 @@ static void
 ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	Relation		relation = node->ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignScan	   *fscan = (ForeignScan *) node->ss.ps.plan;
 	ListCell	   *lc;
 	Bitmapset	   *referenced = NULL;
 
 	foreach (lc, fscan->fdw_private)
 	{
-		AttrNumber	anum = lfirst_int(lc);
+		int		j = lfirst_int(lc);
+		int		k = j - FirstLowInvalidHeapAttributeNumber;
 
-		Assert(anum > 0 && anum <= RelationGetNumberOfAttributes(relation));
-		referenced = bms_add_member(referenced, anum -
-									FirstLowInvalidHeapAttributeNumber);
+		if (j > 0 && j <= RelationGetNumberOfAttributes(relation))
+			referenced = bms_add_member(referenced, k);
+		else if (j == 0)
+		{
+			for (j=0; j < tupdesc->natts; j++)
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+				if (!attr->attisdropped)
+					referenced = bms_add_member(referenced, k);
+			}
+		}
 	}
 	node->fdw_state = ExecInitArrowFdw(relation, referenced);
 }

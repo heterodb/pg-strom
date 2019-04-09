@@ -1409,12 +1409,13 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 
 	for (;;)
 	{
-		//TODO: pullup outer arrow_fdw relation
-
 		if (outer_path->pathtype == T_SeqScan)
 			break;	/* OK */
 		if (pgstrom_path_is_gpuscan(outer_path))
 			break;	/* OK, only if GpuScan */
+		if (outer_path->pathtype == T_ForeignScan &&
+			baseRelIsArrowFdw(outer_path->parent))
+			break;	/* OK, only if ArrowFdw */
 		if (IsA(outer_path, ProjectionPath))
 		{
 			ProjectionPath *ppath = (ProjectionPath *) outer_path;
@@ -1811,9 +1812,9 @@ ExecEndGpuScan(CustomScanState *node)
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
-	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
 	if (gss->gts.af_state)
 		ExecEndArrowFdw(gss->gts.af_state);
+	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
 }
 
 /*
@@ -1828,11 +1829,11 @@ ExecReScanGpuScan(CustomScanState *node)
 	SynchronizeGpuContext(gss->gts.gcontext);
 	/* reset shared state */
 	resetGpuScanSharedState(gss);
-	/* common rescan handling */
-	pgstromRescanGpuTaskState(&gss->gts);
 	/* arrow_fdw rescan handling, if any */
 	if (gss->gts.af_state)
 		ExecReScanArrowFdw(gss->gts.af_state);
+	/* common rescan handling */
+	pgstromRescanGpuTaskState(&gss->gts);
 }
 
 /*
