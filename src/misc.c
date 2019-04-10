@@ -282,7 +282,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpujoin_right_outer);
 		KERN_ENTRY(gpupreagg_setup_row);
 		KERN_ENTRY(gpupreagg_setup_block);
-		KERN_ENTRY(gpupreagg_setup_column);
+		KERN_ENTRY(gpupreagg_setup_arrow);
 		KERN_ENTRY(gpupreagg_nogroup_reduction);
 		KERN_ENTRY(gpupreagg_groupby_reduction);
 		KERN_ENTRY(gpusort_setup_column);

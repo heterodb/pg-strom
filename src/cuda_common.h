@@ -347,7 +347,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpujoin_right_outer				0x0202
 #define StromKernel_gpupreagg_setup_row				0x0301
 #define StromKernel_gpupreagg_setup_block			0x0302
-#define StromKernel_gpupreagg_setup_column			0x0303
+#define StromKernel_gpupreagg_setup_arrow			0x0303
 #define StromKernel_gpupreagg_nogroup_reduction		0x0304
 #define StromKernel_gpupreagg_groupby_reduction		0x0305
 #define StromKernel_gpusort_setup_column			0x0401

@@ -2929,11 +2929,11 @@ make_tlist_device_projection(List *tlist_dev,
  *                           cl_bool *dst_values);
  * and
  * STATIC_FUNCTION(void)
- * gpupreagg_projection_column(kern_context *kcxt,
- *                             kern_data_store *kds_src,
- *                             cl_uint src_index,
- *                             Datum *dst_values,
- *                             cl_char *dst_isnull);
+ * gpupreagg_projection_arrow(kern_context *kcxt,
+ *                            kern_data_store *kds_src,
+ *                            cl_uint src_index,
+ *                            Datum *dst_values,
+ *                            cl_char *dst_isnull);
  */
 static Expr *
 codegen_projection_partial_funcion(FuncExpr *f,
@@ -3142,7 +3142,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
 		for (i=1; i <= nattrs; i++)
 		{
-			bool	addr_is_valid = false;
+			bool	referenced = false;
 
 			k = i - FirstLowInvalidHeapAttributeNumber;
 			if (bms_is_member(k, outer_refs_any))
@@ -3170,36 +3170,6 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					if (!dtype)
 						elog(ERROR, "device type lookup failed: %s",
 							 format_type_be(type_oid));
-				}
-
-				/*
-				 * KVAR_x must be set up if variables are referenced by
-				 * expressions.
-				 */
-				if (bms_is_member(k, outer_refs_expr))
-				{
-					appendStringInfo(
-						&decl,
-						"  pg_%s_t KVAR_%u;\n",
-						dtype->type_name, i);
-					/* row */
-					appendStringInfo(
-						&temp,
-						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
-					/* slot */
-					appendStringInfo(
-						&sbody,
-						"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
-						"                    src_dclass[%d],\n"
-						"                    src_values[%d]);\n",
-						i, i-1, i-1);
-					/* column */
-					appendStringInfo(
-						&cbody,
-						"  addr = kern_get_datum_column(kds_src,%d,src_index);\n"
-						"  pg_datum_ref(kcxt,KVAR_%u,addr); //pg_%s_t\n",
-						i-1, i, dtype->type_name);
-					addr_is_valid = true;
 				}
 
 				foreach (lc, tlist_alt)
@@ -3241,24 +3211,59 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						tle->resno-1, i-1,
 						tle->resno-1, i-1);
 
-					/* column */
-					//TO BE replaced by pg_datum_ref_arrow!!
-					if (!addr_is_valid)
-						appendStringInfo(
-							&cbody,
-							"  addr = kern_get_datum_column(kds_src,%d,src_index);\n",
-							i-1);
+					/* arrow */
 					appendStringInfo(
 						&cbody,
-						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
 						"  pg_datum_store(kcxt, temp.%s_v,\n"
 						"                 dst_dclass[%d],\n"
 						"                 dst_values[%d]);\n",
+						dtype->type_name, i-1,
 						dtype->type_name,
-						dtype->type_name,
-						tle->resno - 1,
-						tle->resno - 1);
+						tle->resno-1,
+						tle->resno-1);
+					referenced = true;
 				}
+
+				/*
+				 * KVAR_x must be set up if variables are referenced by
+				 * expressions.
+				 */
+				if (bms_is_member(k, outer_refs_expr))
+				{
+					appendStringInfo(
+						&decl,
+						"  pg_%s_t KVAR_%u;\n",
+						dtype->type_name, i);
+					/* row */
+					appendStringInfo(
+						&temp,
+						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+					/* slot */
+					appendStringInfo(
+						&sbody,
+						"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
+						"                    src_dclass[%d],\n"
+						"                    src_values[%d]);\n",
+						i, i-1, i-1);
+					/* arrow */
+					if (referenced)
+					{
+						appendStringInfo(
+							&cbody,
+							"  KVAR_%u = temp.%s_v;\n",
+							i, dtype->type_name);
+					}
+					else
+					{
+						appendStringInfo(
+							&cbody,
+							"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
+							i, i-1);
+					}
+				}
+				if (dtype->type_length < 0)
+					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 				appendStringInfoString(&tbody, temp.data);
                 resetStringInfo(&temp);
 			}
@@ -3372,11 +3377,11 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection_column(kern_context *kcxt,\n"
-		"                            kern_data_store *kds_src,\n"
-		"                            cl_uint src_index,\n"
-		"                            cl_char *dst_dclass,\n"
-		"                            Datum   *dst_values)\n"
+		"gpupreagg_projection_arrow(kern_context *kcxt,\n"
+		"                           kern_data_store *kds_src,\n"
+		"                           cl_uint src_index,\n"
+		"                           cl_char *dst_dclass,\n"
+		"                           Datum   *dst_values)\n"
 		"{\n"
 		"%s\n%s"
 		"}\n\n",
@@ -4096,6 +4101,10 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 										 &gpas->gts.css.ss.ps);
 #endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
+		/* setup ArrowFdwState, if foreign-table */
+		if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
+			gpas->gts.af_state = ExecInitArrowFdw(scan_rel,
+												  gpas->gts.outer_refs);
 		pgstromExecInitBrinIndexMap(&gpas->gts,
 									gpa_info->index_oid,
 									gpa_info->index_conds);
@@ -4241,7 +4250,8 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(gpas->gpreagg_slot);
 	if (gpas->outer_slot)
 		ExecDropSingleTupleTableSlot(gpas->outer_slot);
-
+	if (gpas->gts.af_state)
+		ExecEndArrowFdw(gpas->gts.af_state);
 	releaseGpuPreAggSharedState(gpas);
 	pgstromReleaseGpuTaskState(&gpas->gts, gt_rtstat);
 }
@@ -4261,6 +4271,9 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 		ExecEndNode(outerPlanState(node));
 	/* reset shared state */
 	resetGpuPreAggSharedState(gpas);
+	/* arrow_fdw rescan handling, if any */
+	if (gpas->gts.af_state)
+		ExecReScanArrowFdw(gpas->gts.af_state);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gpas->gts);
 	/* reset other stuff */
@@ -4719,7 +4732,10 @@ gpupreagg_next_task(GpuTaskState *gts)
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(&gpas->gts);
+		if (gpas->gts.af_state)
+			pds = ExecScanChunkArrowFdw(gpas->gts.af_state, gts);
+		else
+			pds = pgstromExecScanChunk(&gpas->gts);
 	}
 	else
 	{
@@ -5130,8 +5146,8 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		case KDS_FORMAT_BLOCK:
 			kfunc_setup = "gpupreagg_setup_block";
 			break;
-		case KDS_FORMAT_COLUMN:
-			kfunc_setup = "gpupreagg_setup_column";
+		case KDS_FORMAT_ARROW:
+			kfunc_setup = "gpupreagg_setup_arrow";
 			break;
 		default:
 			werror("GpuPreAgg: unknown PDS format: %d", pds_src->kds.format);

@@ -72,7 +72,7 @@ typedef union
 	} b;	/* block-format */
 	struct {
 		size_t		src_base;
-	} c;	/* column-format */
+	} c;	/* arrow-format */
 } gpupreaggSuspendContext;
 
 /* macro definitions to reference packed values */
@@ -220,11 +220,11 @@ gpupreagg_projection_row(kern_context *kcxt,
 						 Datum   *dst_values);		/* out */
 
 STATIC_FUNCTION(void)
-gpupreagg_projection_column(kern_context *kcxt,
-							kern_data_store *kds_src,	/* in */
-							cl_uint src_index,			/* out */
-							cl_char *dst_dclass,		/* out */
-							Datum   *dst_values);		/* out */
+gpupreagg_projection_arrow(kern_context *kcxt,
+						   kern_data_store *kds_src,	/* in */
+						   cl_uint src_index,			/* out */
+						   cl_char *dst_dclass,		/* out */
+						   Datum   *dst_values);		/* out */
 
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUPREAGG_H */
@@ -802,12 +802,12 @@ out:
 #endif	/* GPUPREAGG_PULLUP_OUTER_SCAN */
 
 /*
- * gpupreagg_setup_column
+ * gpupreagg_setup_arrow
  */
 KERNEL_FUNCTION(void)
-gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
-					   kern_data_store *kds_src,	/* in: KDS_FORMAT_COLUMN */
-					   kern_data_store *kds_slot)	/* out: KDS_FORMAT_SLOT */
+gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
+					  kern_data_store *kds_src,	/* in: KDS_FORMAT_ARROW */
+					  kern_data_store *kds_slot)/* out: KDS_FORMAT_SLOT */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
@@ -827,10 +827,10 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 	gpupreaggSuspendContext *my_suspend;
 	cl_bool			rc;
 
-	assert(kds_src->format == KDS_FORMAT_COLUMN &&
+	assert(kds_src->format == KDS_FORMAT_ARROW &&
 		   kds_slot->format == KDS_FORMAT_SLOT &&
 		   kds_slot->ncols == GPUPREAGG_DEVICE_PROJECTION_NFIELDS);
-	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_arrow, kparams);
 
 	/* resume kernel from the point where suspended, if any */
 	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
@@ -868,11 +868,11 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 		{
 			if (rc)
 			{
-				gpupreagg_projection_column(&kcxt,
-                                            kds_src,
-                                            src_index,
-											tup_dclass,
-                                            tup_values);
+				gpupreagg_projection_arrow(&kcxt,
+										   kds_src,
+										   src_index,
+										   tup_dclass,
+										   tup_values);
 			}
 			/* Bailout if any error */
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
