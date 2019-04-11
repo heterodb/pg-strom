@@ -85,9 +85,9 @@ typedef struct StromCmd__CheckFile
 	/* out: number of the underlying raw-disks */
 	int				ndisks;
 	/*
-	 * out: major/minor code of the raw-disk device where the file is
-	 * located on. It is exactly device number of the disk, not partition,
-	 * even if filesystem is constructed on a disk-partition.
+	 * out: major/minor code of the NVME-controller devices (not namespace
+	 * of NVME disks) where the file is located on. Application can use
+	 * the major/minor code to identify the closest GPU from the file.
 	 */
 	struct {
 		int			major;

@@ -1054,7 +1054,8 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 	 */
 	if (gcontext &&
 		gcontext->cuda_dindex == optimal_gpu &&
-		iovec->nr_chunks > 0)
+		iovec->nr_chunks > 0 &&
+		kds->length <= gpuMemAllocIOMapMaxLength())
 	{
 		size_t	iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
 
@@ -1071,78 +1072,27 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 		pds->iovec = (strom_io_vector *)((char *)&pds->kds + head_sz);
 		memcpy(&pds->kds, kds, head_sz);
 		memcpy(pds->iovec, iovec, iovec_sz);
-
-		pfree(iovec);
-		return pds;
-	}
-
-	/*
-	 * Elsewhere, load RecordBatch using filesystem i/o
-	 */
-	if (gcontext)
-	{
-		rc = gpuMemAllocManaged(gcontext,
-								(CUdeviceptr *)&pds,
-								offsetof(pgstrom_data_store,
-										 kds) + kds->length,
-								CU_MEM_ATTACH_GLOBAL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
 	else
 	{
-		pds = MemoryContextAllocHuge(estate->es_query_cxt,
-									 offsetof(pgstrom_data_store,
-											  kds) + kds->length);
-	}
-	memset(pds, 0, offsetof(pgstrom_data_store, kds));
-	pds->gcontext = gcontext;
-	pg_atomic_init_u32(&pds->refcnt, 1);
-	pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
-	pds->iovec = NULL;
-	memcpy(&pds->kds, kds, head_sz);
-
-	for (j=0; j < iovec->nr_chunks; j++)
-	{
-		strom_io_chunk *ioc = &iovec->ioc[j];
-		char   *dest = (char *)&pds->kds + ioc->m_offset;
-		off_t	f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
-		size_t	len = (size_t)ioc->nr_pages * PAGE_SIZE;
-		ssize_t	sz;
-
-		while (len > 0 && f_pos < rb_state->stat_buf.st_size)
+		/* Elsewhere, load RecordBatch by filesystem */
+		if (gcontext)
 		{
-			CHECK_FOR_INTERRUPTS();
-
-			sz = pread(fdesc, dest, len, f_pos);
-			if (sz > 0)
-			{
-				Assert(sz <= len);
-				dest += sz;
-				f_pos += sz;
-				len -= sz;
-			}
-			else if (sz == 0)
-			{
-				elog(ERROR, "file '%s' is shorter than schema definition",
-					rb_state->fname);
-			}
-			else if (errno != EINTR)
-			{
-				elog(ERROR, "failed on pread('%s'): %m", rb_state->fname);
-			}
+			rc = gpuMemAllocManaged(gcontext,
+									(CUdeviceptr *)&pds,
+									offsetof(pgstrom_data_store,
+											 kds) + kds->length,
+									CU_MEM_ATTACH_GLOBAL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 		}
-		/*
-		 * NOTE: Due to the page_sz alignment, we may try to read the file
-		 * over the its tail. So, above loop may terminate with non-zero
-		 * remaining length.
-		 */
-		if (len > 0)
+		else
 		{
-			Assert(len < PAGE_SIZE);
-			memset(dest, 0, len);
+			pds = MemoryContextAllocHuge(estate->es_query_cxt,
+										 offsetof(pgstrom_data_store,
+												  kds) + kds->length);
 		}
+		__PDS_fillup_arrow(pds, gcontext, kds, fdesc, iovec);
 	}
 	pfree(iovec);
 	return pds;
@@ -1152,9 +1102,9 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
  * ExecScanChunkArrowFdw
  */
 pgstrom_data_store *
-ExecScanChunkArrowFdw(ArrowFdwState *af_state, GpuTaskState *gts)
+ExecScanChunkArrowFdw(GpuTaskState *gts)
 {
-	return arrowFdwLoadRecordBatch(af_state,
+	return arrowFdwLoadRecordBatch(gts->af_state,
 								   gts->css.ss.ss_currentRelation,
 								   gts->css.ss.ps.state,
 								   gts->gcontext,
@@ -1235,10 +1185,9 @@ ArrowEndForeignScan(ForeignScanState *node)
 /*
  * ArrowExplainForeignScan 
  */
-static void
-ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
+void
+ExplainArrowFdw(ArrowFdwState *af_state, ExplainState *es)
 {
-	ArrowFdwState  *af_state = node->fdw_state;
 	ListCell	   *lc1, *lc2;
 	int				fcount = 0;
 	int				rbcount = 0;
@@ -1289,6 +1238,12 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 			rbcount++;
 		}
 	}
+}
+
+static void
+ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
+{
+	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, es);
 }
 
 /*

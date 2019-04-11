@@ -502,6 +502,7 @@ retry:
 	dlist_foreach(iter, gm_segment_list)
 	{
 		gm_seg = dlist_container(GpuMemSegment, chain, iter.cur);
+		Assert(gm_seg->gm_kind == gm_kind);
 		SpinLockAcquire(&gm_seg->lock);
 		/* try to split larger chunks if any */
 		if (dlist_is_empty(&gm_seg->free_chunks[mclass]))
@@ -695,7 +696,7 @@ __gpuMemAllocIOMap(GpuContext *gcontext,
 				   size_t bytesize,
 				   const char *filename, int lineno)
 {
-	if (bytesize <= gm_segment_sz)
+	if (bytesize <= gm_segment_sz / 2)
 	{
 		cl_int	mclass = Max(get_next_log2(bytesize),
 							 GPUMEM_CHUNKSZ_MIN_BIT);
@@ -709,6 +710,12 @@ __gpuMemAllocIOMap(GpuContext *gcontext,
 	 * GpuMemSegment, so we don't provide _Raw interface here.
 	 */
 	return CUDA_ERROR_INVALID_VALUE;
+}
+
+size_t
+gpuMemAllocIOMapMaxLength(void)
+{
+	return gm_segment_sz / 2;
 }
 
 /*
@@ -901,35 +908,31 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 	dlist_head	   *dhead_i = &gcontext->gm_iomap_list;
 	dlist_head	   *dhead_m = &gcontext->gm_managed_list;
 	dlist_head	   *dhead_h = &gcontext->gm_hostmem_list;
-	dlist_node	   *dnode_n;
-	dlist_node	   *dnode_i;
-	dlist_node	   *dnode_m;
-	dlist_node	   *dnode_h;
+	dlist_node	   *dnode_n = NULL;
+	dlist_node	   *dnode_i = NULL;
+	dlist_node	   *dnode_m = NULL;
+	dlist_node	   *dnode_h = NULL;
 	GpuMemSegment  *gm_seg;
 	CUresult		rc;
 
 	pthreadRWLockWriteLock(&gcontext->gm_rwlock);
-	for (dnode_n = (!dlist_is_empty(dhead_n)
-					? dlist_tail_node(dhead_n) : NULL),
-		 dnode_i = (!dlist_is_empty(dhead_i)
-					? dlist_tail_node(dhead_i) : NULL),
-		 dnode_m = (!dlist_is_empty(dhead_m)
-					? dlist_tail_node(dhead_m) : NULL),
-		 dnode_h = (!dlist_is_empty(dhead_h)
-					? dlist_tail_node(dhead_h) : NULL);
-		 dnode_n != NULL || dnode_i != NULL;
-		 dnode_n = (dnode_n && dlist_has_prev(dhead_n, dnode_n)
-					? dlist_prev_node(dhead_n, dnode_n) : NULL),
-		 dnode_i = (dnode_i && dlist_has_prev(dhead_i, dnode_i)
-					? dlist_prev_node(dhead_i, dnode_i) : NULL),
-		 dnode_m = (dnode_m && dlist_has_prev(dhead_m, dnode_m)
-					? dlist_prev_node(dhead_m, dnode_m) : NULL),
-		 dnode_h = (dnode_h && dlist_has_prev(dhead_h, dnode_h)
-					? dlist_prev_node(dhead_h, dnode_h) : NULL))
+	if (!dlist_is_empty(dhead_n))
+		dnode_n = dlist_tail_node(dhead_n);
+	if (!dlist_is_empty(dhead_i))
+		dnode_i = dlist_tail_node(dhead_i);
+	if (!dlist_is_empty(dhead_m))
+		dnode_m = dlist_tail_node(dhead_m);
+	if (!dlist_is_empty(dhead_h))
+		dnode_h = dlist_tail_node(dhead_h);
+	while (dnode_n || dnode_i)
 	{
 		if (dnode_n)
 		{
 			gm_seg = dlist_container(GpuMemSegment, chain, dnode_n);
+			if (dlist_has_prev(dhead_n, dnode_n))
+				dnode_n = dlist_prev_node(dhead_n, dnode_n);
+			else
+				dnode_n = NULL;
 			Assert(gm_seg->gm_kind == GpuMemKind__NormalMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
 			{
@@ -943,11 +946,15 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 				free(gm_seg);
 				break;
 			}
-		}
+					}
 
 		if (dnode_i)
 		{
 			gm_seg = dlist_container(GpuMemSegment, chain, dnode_i);
+			if (dlist_has_prev(dhead_i, dnode_i))
+				dnode_i = dlist_prev_node(dhead_i, dnode_i);
+			else
+				dnode_i = NULL;
 			Assert(gm_seg->gm_kind == GpuMemKind__IOMapMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
             {
@@ -966,6 +973,10 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 		if (dnode_m)
 		{
 			gm_seg = dlist_container(GpuMemSegment, chain, dnode_m);
+			if (dlist_has_prev(dhead_m, dnode_m))
+				dnode_m = dlist_prev_node(dhead_m, dnode_m);
+			else
+				dnode_m = NULL;
 			Assert(gm_seg->gm_kind == GpuMemKind__ManagedMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
 			{
@@ -979,10 +990,13 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 				free(gm_seg);
 			}
 		}
-
 		if (dnode_h)
 		{
 			gm_seg = dlist_container(GpuMemSegment, chain, dnode_h);
+			if (dlist_has_prev(dhead_h, dnode_h))
+				dnode_h = dlist_prev_node(dhead_h, dnode_h);
+			else
+				dnode_h = NULL;
 			Assert(gm_seg->gm_kind == GpuMemKind__HostMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
 			{
@@ -1740,33 +1754,22 @@ retry:
 }
 
 /*
- * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA, then wait for completion
+ * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
  */
-void
-gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
+static unsigned long
+__gpuMemCopyFromSSD_Block(GpuContext *gcontext,
+						  GpuMemSegment *gm_seg,
+						  CUdeviceptr m_kds,
+						  pgstrom_data_store *pds)
 {
-	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	StromCmd__MemCopySsdToGpuBlocks cmd;
-	GpuMemSegment  *gm_seg;
-	BlockNumber	   *block_nums;
-//	void		   *block_data;
-	size_t			offset;
+	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
+	BlockNumber	   *block_nums;
 	CUresult		rc;
 
-	/* ensure the @m_kds is exactly i/o mapped buffer */
-	Assert(gcontext != NULL);
-	gm_seg = lookupGpuMem(gcontext, m_kds);
-	if (!gm_seg ||
-		gm_seg->gm_kind != GpuMemKind__IOMapMemory ||
-		gm_seg->iomap_handle == 0UL)
-		werror("nvme-strom: invalid device pointer");
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
-	Assert(m_kds >= gm_seg->m_segment &&
-		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);
-	offset = m_kds - gm_seg->m_segment;
-
 	/* nothing special if all the blocks are already loaded */
 	if (pds->nblocks_uncached == 0)
 	{
@@ -1776,7 +1779,7 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		return;
+		return 0UL;
 	}
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
 	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
@@ -1784,7 +1787,6 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 			  (char *)(&pds->kds));
 	offset += length;
 	/* userspace pointers */
-	//block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 
 	/* setup ioctl(2) command */
@@ -1796,7 +1798,6 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	cmd.chunk_sz	= BLCKSZ;
 	cmd.relseg_sz	= RELSEG_SIZE;
 	cmd.chunk_ids	= block_nums;
-	//cmd.wb_buffer	= block_data;
 
 	/* (1) kick SSD2GPU P2P DMA */
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS, &cmd) != 0)
@@ -1812,25 +1813,88 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
-#if 0
-	/* (3) kick RAM2GPU DMA (later half; if any) */
-	if (cmd.nr_ram2gpu > 0)
+	return cmd.dma_task_id;
+}
+
+/*
+ * __gpuMemCopyFromSSD_Arrow - for KDS_FORMAT_ARROW
+ */
+static unsigned long
+__gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
+						  GpuMemSegment *gm_seg,
+						  CUdeviceptr m_kds,
+						  pgstrom_data_store *pds)
+{
+	size_t		head_sz;
+	CUresult	rc;
+
+	Assert(pds->kds.format == KDS_FORMAT_ARROW);
+
+	/* (1) RAM2GPU DMA (header portion) */
+	head_sz = KERN_DATA_STORE_HEAD_LENGTH(&pds->kds);
+	rc = cuMemcpyHtoDAsync(m_kds,
+						   &pds->kds,
+						   head_sz,
+						   CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	
+	/* (2) SSD2GPU P2P DMA */
+	if (pds->iovec)
 	{
-		length = BLCKSZ * cmd.nr_ram2gpu;
-		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-													   pds->kds.nitems) -
-				  (char *)&pds->kds) - length;
-		rc = cuMemcpyHtoDAsync(m_kds + offset,
-							   (char *)&pds->kds + offset,
-							   length,
-							   CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-		{
-			gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
-			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		}
+		StromCmd__MemCopySsdToGpuRaw cmd;
+		strom_io_vector	   *iovec = pds->iovec;
+
+		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
+		cmd.handle    = gm_seg->iomap_handle;
+		cmd.offset    = m_kds - gm_seg->m_segment;
+		cmd.file_desc = pds->filedesc;
+		cmd.nr_chunks = iovec->nr_chunks;
+		cmd.page_sz   = PAGE_SIZE;
+		cmd.io_chunks = iovec->ioc;
+
+		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
+			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW: %m");
+		return cmd.dma_task_id;
 	}
-#endif
-	/* (4) wait for completion of SSD2GPU P2P DMA */
-	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
+	return 0UL;
+}
+
+/*
+ * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA, then wait for completion
+ */
+void
+gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
+{
+	GpuContext	   *gcontext = GpuWorkerCurrentContext;
+	GpuMemSegment  *gm_seg;
+	unsigned long	dma_task_id;
+
+	/* ensure the @m_kds is exactly i/o mapped buffer */
+	Assert(gcontext != NULL);
+	gm_seg = lookupGpuMem(gcontext, m_kds);
+	if (!gm_seg ||
+		gm_seg->gm_kind != GpuMemKind__IOMapMemory ||
+		gm_seg->iomap_handle == 0UL)
+		werror("nvme-strom: invalid device pointer");
+	Assert(m_kds >= gm_seg->m_segment &&
+		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);
+	switch (pds->kds.format)
+	{
+		case KDS_FORMAT_BLOCK:
+			dma_task_id = __gpuMemCopyFromSSD_Block(gcontext,
+													gm_seg, m_kds, pds);
+			break;
+		case KDS_FORMAT_ARROW:
+			dma_task_id = __gpuMemCopyFromSSD_Arrow(gcontext,
+													gm_seg, m_kds, pds);
+			break;
+		default:
+			werror("nvme-strom: unsupported KDS format: %d",
+				   pds->kds.format);
+			break;
+	}
+	/* Wait for completion of SSD2GPU P2P DMA */
+	if (dma_task_id)
+		gpuMemCopyFromSSDWaitRaw(gcontext, dma_task_id);
 }

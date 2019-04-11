@@ -261,6 +261,9 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 				outer_refs = bms_add_member(outer_refs, anum);
 			}
 		}
+		/* setup ArrowFdwState, if foreign-table */
+		if (RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE)
+			gts->af_state = ExecInitArrowFdw(relation, outer_refs);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;
@@ -279,7 +282,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	/* callbacks shall be set by the caller */
 	dlist_init(&gts->ready_tasks);
 	gts->num_ready_tasks = 0;
-
 	/* co-operation with CPU parallel (setup by DSM init handler) */
 	gts->pcxt = NULL;
 }
@@ -528,6 +530,9 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 #endif
 		ExecScanReScan(&gts->css.ss);
 	}
+	/* Also rewind the scan state of Arrow_Fdw */
+	if (gts->af_state)
+		ExecReScanArrowFdw(gts->af_state);
 }
 
 /*
@@ -553,6 +558,9 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);
+	/* shutdown Arrow_Fdw state */
+	if (gts->af_state)
+		ExecEndArrowFdw(gts->af_state);
 	/* unreference CUDA program */
 	if (gts->program_id != INVALID_PROGRAM_ID)
 		pgstrom_put_cuda_program(gts->gcontext, gts->program_id);
@@ -615,7 +623,9 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	if (es->analyze && gts->num_cpu_fallbacks > 0)
 		ExplainPropertyInteger("CPU fallbacks",
 							   NULL, gts->num_cpu_fallbacks, es);
-
+	/* Properties of Arrow_Fdw if any */
+	if (gts->af_state)
+		ExplainArrowFdw(gts->af_state, es);
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
@@ -660,7 +670,7 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	Snapshot	snapshot = estate->es_snapshot;
 	GpuTaskSharedState *gtss = coordinate;
 
-	if (gts->af_state != NULL)
+	if (gts->af_state)
 	{
 		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
 		ExecInitDSMArrowFdw(gts->af_state, &gtss->af_rbatch_index);
@@ -685,7 +695,7 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	GpuTaskSharedState *gtss = coordinate;
 
-	if (gts->af_state != NULL)
+	if (gts->af_state)
 	{
 		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
 		ExecInitWorkerArrowFdw(gts->af_state, &gtss->af_rbatch_index);

@@ -2650,16 +2650,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		Relation	rel = gjs->gts.css.ss.ss_currentRelation;
+		Relation	scan_rel = gjs->gts.css.ss.ss_currentRelation;
 
-		/* setup ArrowFdwState, if foreign-table */
-		if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
-			gjs->gts.af_state = ExecInitArrowFdw(rel, gjs->gts.outer_refs);
-		else
-			pgstromExecInitBrinIndexMap(&gjs->gts,
-										gj_info->index_oid,
-										gj_info->index_conds);
-		nattrs = RelationGetNumberOfAttributes(rel);
+		pgstromExecInitBrinIndexMap(&gjs->gts,
+									gj_info->index_oid,
+									gj_info->index_conds);
+		nattrs = RelationGetNumberOfAttributes(scan_rel);
 	}
 	else
 	{
@@ -2968,9 +2964,7 @@ ExecEndGpuJoin(CustomScanState *node)
 		ExecEndNode(gjs->inners[i].state);
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts, false);
-	/* shutdown Arrow_Fdw, if any */
-	if (gjs->gts.af_state)
-        ExecEndArrowFdw(gjs->gts.af_state);
+	/* shutdown the common portion */
 	pgstromReleaseGpuTaskState(&gjs->gts, gt_rtstat);
 }
 
@@ -3005,9 +2999,6 @@ ExecReScanGpuJoin(CustomScanState *node)
 		/* rewind the inner hash/heap buffer */
 		GpuJoinInnerUnload(&gjs->gts, true);
 	}
-	/* arrow_fdw rescan handling, if any */
-	if (gjs->gts.af_state)
-		ExecReScanArrowFdw(gjs->gts.af_state);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gjs->gts);
 }
@@ -4617,7 +4608,7 @@ gpujoin_next_task(GpuTaskState *gts)
 	pgstrom_data_store *pds;
 
 	if (gjs->gts.af_state)
-		pds = ExecScanChunkArrowFdw(gjs->gts.af_state, gts);
+		pds = ExecScanChunkArrowFdw(gts);
 	else
 		pds = GpuJoinExecOuterScanChunk(gts);
 	if (pds)

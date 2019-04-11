@@ -330,17 +330,18 @@ PDS_release(pgstrom_data_store *pds)
 			Assert(pds->kds.format == KDS_FORMAT_ARROW);
 			pfree(pds);
 		}
-		else if (pds->kds.format != KDS_FORMAT_BLOCK)
-		{
-			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemFree: %s", errorText(rc));
-		}
-		else
+		else if ((pds->kds.format == KDS_FORMAT_BLOCK) ||
+				 (pds->kds.format == KDS_FORMAT_ARROW && pds->iovec))
 		{
 			rc = gpuMemFreeHost(gcontext, pds);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuMemFreeHost: %s", errorText(rc));
+		}
+		else
+		{
+			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemFree: %s", errorText(rc));
 		}
 	}
 }
@@ -1446,4 +1447,100 @@ PDS_fillup_blocks(pgstrom_data_store *pds)
 	Assert(dest_addr == (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 															 pds->kds.nitems));
 	pds->nblocks_uncached = 0;
+}
+
+/*
+ * PDS_fillup_arrow
+ */
+void
+__PDS_fillup_arrow(pgstrom_data_store *pds_dst,
+				   GpuContext *gcontext,
+				   kern_data_store *kds_head,
+				   int fdesc, strom_io_vector *iovec)
+{
+	size_t	head_sz = KERN_DATA_STORE_HEAD_LENGTH(kds_head);
+	int		j;
+
+	Assert(kds_head->format == KDS_FORMAT_ARROW);
+	memset(pds_dst, 0, offsetof(pgstrom_data_store, kds));
+	pds_dst->gcontext = gcontext;
+	pg_atomic_init_u32(&pds_dst->refcnt, 1);
+	pds_dst->nblocks_uncached = 0;
+	pds_dst->filedesc = -1;
+	pds_dst->iovec = NULL;
+	memcpy(&pds_dst->kds, kds_head, head_sz);
+
+	for (j=0; j < iovec->nr_chunks; j++)
+	{
+		strom_io_chunk *ioc = &iovec->ioc[j];
+		char   *dest = (char *)&pds_dst->kds + ioc->m_offset;
+		off_t	f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
+		size_t	len = (size_t)ioc->nr_pages * PAGE_SIZE;
+		ssize_t	sz;
+
+		while (len > 0)
+		{
+			if (!GpuWorkerCurrentContext)
+				CHECK_FOR_INTERRUPTS();
+			else
+				CHECK_WORKER_TERMINATION();
+
+			sz = pread(fdesc, dest, len, f_pos);
+			if (sz > 0)
+			{
+				Assert(sz <= len);
+				dest += sz;
+				f_pos += sz;
+				len -= sz;
+			}
+			else if (sz == 0)
+			{
+				/*
+				 * Due to the page_sz alignment, we may try to read the file
+				 * over its tail. So, pread(2) may tell us unable to read
+				 * any more. The expected scenario happend only when remained
+				 * length is less than PAGE_SIZE.
+				 */
+				if (len >= PAGE_SIZE)
+					werror("unable to read arrow file any more");
+				memset(dest, 0, len);
+				break;
+			}
+			else if (errno != EINTR)
+			{
+				werror("failed on pread(2) of arrow file: %m");
+			}
+		}
+		/*
+		 * NOTE: Due to the page_sz alignment, we may try to read the file
+		 * over the its tail. So, above loop may terminate with non-zero
+		 * remaining length.
+		 */
+		if (len > 0)
+		{
+			Assert(len < PAGE_SIZE);
+			memset(dest, 0, len);
+		}
+	}
+}
+
+pgstrom_data_store *
+PDS_fillup_arrow(pgstrom_data_store *pds_src)
+{
+	pgstrom_data_store *pds_dst;
+	CUresult	rc;
+
+	rc = gpuMemAllocManaged(pds_src->gcontext,
+							(CUdeviceptr *)&pds_dst,
+							offsetof(pgstrom_data_store,
+									 kds) + pds_src->kds.length,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
+	__PDS_fillup_arrow(pds_dst,
+					   pds_dst->gcontext,
+					   &pds_src->kds,
+					   pds_src->filedesc,
+					   pds_src->iovec);
+	return pds_dst;
 }

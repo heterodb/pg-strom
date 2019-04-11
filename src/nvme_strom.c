@@ -716,7 +716,7 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
  * GetOptimalGpuForFile
  */
 int
-GetOptimalGpuForFile(const char *fname, int fdesc)
+GetOptimalGpuForFile(const char *fname, File fdesc)
 {
 	StromCmd__CheckFile *uarg
 		= alloca(offsetof(StromCmd__CheckFile, rawdisks[100]));
@@ -725,7 +725,8 @@ GetOptimalGpuForFile(const char *fname, int fdesc)
 	int		i, curr_gpu;
 
 retry:
-	uarg->fdesc = fdesc;
+	memset(uarg, 0, offsetof(StromCmd__CheckFile, rawdisks[nrooms]));
+	uarg->fdesc = FileGetRawDesc(fdesc);
 	uarg->nrooms = nrooms;
 	if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, uarg) != 0)
 	{
@@ -775,7 +776,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
 	vfs_nvme_status *entry;
 	const char *pathname;
-	int			fdesc;
+	File		fdesc;
 	bool		found;
 
 	if (!nvme_strom_enabled)
@@ -800,34 +801,26 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 											&tablespace_oid,
 											HASH_ENTER,
 											&found);
-	if (found)
-		goto out;
-
-	/* check whether the tablespace is supported */
-	entry->tablespace_oid = tablespace_oid;
-	entry->nvme_optimal_gpu = -1;
-
-	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-	fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
-	if (fdesc < 0)
+	if (!found)
 	{
-		elog(WARNING, "failed on open('%s') of tablespace %u: %m",
-			 pathname, tablespace_oid);
-		return false;
-	}
+		/* check whether the tablespace is supported */
+		entry->tablespace_oid = tablespace_oid;
+		entry->nvme_optimal_gpu = -1;
 
-	PG_TRY();
-	{
-		entry->nvme_optimal_gpu = GetOptimalGpuForFile(pathname, fdesc);
+		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+		fdesc = PathNameOpenFile(pathname, O_RDONLY | O_DIRECTORY);
+		if (fdesc < 0)
+		{
+			elog(WARNING, "failed on open('%s') of tablespace %u: %m",
+				 pathname, tablespace_oid);
+			entry->nvme_optimal_gpu = -1;
+		}
+		else
+		{
+			entry->nvme_optimal_gpu = GetOptimalGpuForFile(pathname, fdesc);
+			FileClose(fdesc);
+		}
 	}
-	PG_CATCH();
-	{
-		close(fdesc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	close(fdesc);
-out:
 	return entry->nvme_optimal_gpu;
 }
 

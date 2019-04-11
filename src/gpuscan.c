@@ -1649,10 +1649,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
 
-	/* setup ArrowFdwState, if foreign-table */
-	if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
-		gss->gts.af_state = ExecInitArrowFdw(scan_rel, gss->gts.outer_refs);
-
 	/*
 	 * initialize device qualifiers/projection stuff, for CPU fallback
 	 *
@@ -1812,8 +1808,6 @@ ExecEndGpuScan(CustomScanState *node)
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
-	if (gss->gts.af_state)
-		ExecEndArrowFdw(gss->gts.af_state);
 	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
 }
 
@@ -1829,9 +1823,6 @@ ExecReScanGpuScan(CustomScanState *node)
 	SynchronizeGpuContext(gss->gts.gcontext);
 	/* reset shared state */
 	resetGpuScanSharedState(gss);
-	/* arrow_fdw rescan handling, if any */
-	if (gss->gts.af_state)
-		ExecReScanArrowFdw(gss->gts.af_state);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gss->gts);
 }
@@ -2137,8 +2128,11 @@ gpuscan_create_task(GpuScanState *gss,
 	gscan = (GpuScanTask *) m_deviceptr;
 	memset(gscan, 0, length);
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
-	gscan->with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
-							  pds_src->nblocks_uncached > 0);
+	if ((pds_src->kds.format == KDS_FORMAT_BLOCK &&
+		 pds_src->nblocks_uncached > 0) ||
+		(pds_src->kds.format == KDS_FORMAT_ARROW &&
+		 pds_src->iovec != NULL))
+		gscan->with_nvme_strom = true;
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
 	gscan->kern.suspend_sz = suspend_sz;
@@ -2169,7 +2163,7 @@ gpuscan_next_task(GpuTaskState *gts)
 	pgstrom_data_store *pds;
 
 	if (gss->gts.af_state)
-		pds = ExecScanChunkArrowFdw(gss->gts.af_state, gts);
+		pds = ExecScanChunkArrowFdw(gts);
 	else
 		pds = pgstromExecScanChunk(gts);
 	if (!pds)
@@ -2535,33 +2529,42 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 * So, if we cannot allocate i/o mapped device memory, we try to read
 	 * the blocks synchronously then kicks usual RAM->GPU DMA.
 	 */
-	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
-		m_kds_src = (CUdeviceptr)&pds_src->kds;
-	else
+	if (gscan->with_nvme_strom)
 	{
-		if (gscan->with_nvme_strom)
+		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK ||
+			   pds_src->kds.format == KDS_FORMAT_ARROW);
+		rc = gpuMemAllocIOMap(gcontext,
+							  &m_kds_src,
+							  pds_src->kds.length);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			rc = gpuMemAllocIOMap(gcontext,
-								  &m_kds_src,
-								  pds_src->kds.length);
-			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			gscan->with_nvme_strom = false;
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 			{
 				PDS_fillup_blocks(pds_src);
-				gscan->with_nvme_strom = false;
+
+				rc = gpuMemAlloc(gcontext,
+								 &m_kds_src,
+								 pds_src->kds.length);
+				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+					goto out_of_resource;
+				else if (rc != CUDA_SUCCESS)
+					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
-			else if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+			else
+			{
+				pds_src = PDS_fillup_arrow(gscan->pds_src);
+				PDS_release(gscan->pds_src);
+				gscan->pds_src = pds_src;
+				Assert(!pds_src->iovec);
+			}
 		}
-		if (m_kds_src == 0UL)
-		{
-			rc = gpuMemAlloc(gcontext,
-							 &m_kds_src,
-							 pds_src->kds.length);
-			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-				goto out_of_resource;
-			else if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemAlloc: %s", errorText(rc));
-		}
+		else if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+	}
+	else
+	{
+		m_kds_src = (CUdeviceptr)&pds_src->kds;
 	}
 
 	/*
@@ -2576,16 +2579,12 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kern_data_store *kds_src */
-	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+	wnotice("with_nvme_strom=%d format=%d", gscan->with_nvme_strom, pds_src->kds.format);
+	if (gscan->with_nvme_strom)
 	{
-		rc = cuMemPrefetchAsync(m_kds_src,
-								pds_src->kds.length,
-								CU_DEVICE_PER_THREAD,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
-	else if (!gscan->with_nvme_strom)
+	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 	{
 		rc = cuMemcpyHtoDAsync(m_kds_src,
 							   &pds_src->kds,
@@ -2596,8 +2595,12 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 	else
 	{
-		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-		gpuMemCopyFromSSD(m_kds_src, pds_src);
+		rc = cuMemPrefetchAsync(m_kds_src,
+								pds_src->kds.length,
+								CU_DEVICE_PER_THREAD,
+								CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 	}
 
 	/* head of the kds_dst, if any */
@@ -2769,7 +2772,8 @@ resume_kernel:
 out_of_resource:
 	if (retval > 0)
 		wnotice("GpuScan: out of resource");
-	if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+	if ((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
+		(pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec))
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }

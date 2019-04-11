@@ -653,6 +653,7 @@ extern CUresult __gpuMemAllocIOMap(GpuContext *gcontext,
 								   CUdeviceptr *p_devptr,
 								   size_t bytesize,
 								   const char *filename, int lineno);
+extern size_t	gpuMemAllocIOMapMaxLength(void);
 extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  void **p_hostptr,
 								  size_t bytesize,
@@ -884,7 +885,7 @@ extern void pgstrom_init_gpu_context(void);
 static inline void
 CHECK_WORKER_TERMINATION(void)
 {
-	if (pg_atomic_read_u32(&GpuWorkerCurrentContext->terminate_workers) != 0)
+	if (pg_atomic_read_u32(&GpuWorkerCurrentContext->terminate_workers))
 		werror("GpuContext worker termination");
 }
 
@@ -939,7 +940,7 @@ extern void pgstrom_init_gputasks(void);
  * nvme_strom.c
  */
 extern int	nvme_strom_ioctl(int cmd, void *arg);
-extern int	GetOptimalGpuForFile(const char *fname, int fdesc);
+extern int	GetOptimalGpuForFile(const char *fname, File fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
 									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
@@ -1107,6 +1108,11 @@ extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
 													 (pds)->kds.nrooms) - \
 				(sizeof(loff_t) * (pds)->nblocks_uncached)))
 extern void PDS_fillup_blocks(pgstrom_data_store *pds);
+extern void __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
+							   GpuContext *gcontext,
+							   kern_data_store *kds_head,
+							   int fdesc, strom_io_vector *iovec);
+extern pgstrom_data_store *PDS_fillup_arrow(pgstrom_data_store *pds_src);
 
 extern bool KDS_insert_tuple(kern_data_store *kds,
 							 TupleTableSlot *slot);
@@ -1337,8 +1343,7 @@ extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 
 extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
 									   Bitmapset *referenced);
-extern pgstrom_data_store *ExecScanChunkArrowFdw(ArrowFdwState *af_state,
-												 GpuTaskState *gts);
+extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
 extern void ExecEndArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
@@ -1347,6 +1352,7 @@ extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 								   pg_atomic_uint32 *rbatch_index);
 extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
+extern void ExplainArrowFdw(ArrowFdwState *af_state, ExplainState *es);
 
 extern void pgstrom_init_arrow_fdw(void);
 

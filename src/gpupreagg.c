@@ -4101,10 +4101,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 										 &gpas->gts.css.ss.ps);
 #endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
-		/* setup ArrowFdwState, if foreign-table */
-		if (RelationGetForm(scan_rel)->relkind == RELKIND_FOREIGN_TABLE)
-			gpas->gts.af_state = ExecInitArrowFdw(scan_rel,
-												  gpas->gts.outer_refs);
 		pgstromExecInitBrinIndexMap(&gpas->gts,
 									gpa_info->index_oid,
 									gpa_info->index_conds);
@@ -4250,8 +4246,6 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(gpas->gpreagg_slot);
 	if (gpas->outer_slot)
 		ExecDropSingleTupleTableSlot(gpas->outer_slot);
-	if (gpas->gts.af_state)
-		ExecEndArrowFdw(gpas->gts.af_state);
 	releaseGpuPreAggSharedState(gpas);
 	pgstromReleaseGpuTaskState(&gpas->gts, gt_rtstat);
 }
@@ -4271,9 +4265,6 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 		ExecEndNode(outerPlanState(node));
 	/* reset shared state */
 	resetGpuPreAggSharedState(gpas);
-	/* arrow_fdw rescan handling, if any */
-	if (gpas->gts.af_state)
-		ExecReScanArrowFdw(gpas->gts.af_state);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gpas->gts);
 	/* reset other stuff */
@@ -4733,7 +4724,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		if (gpas->gts.af_state)
-			pds = ExecScanChunkArrowFdw(gpas->gts.af_state, gts);
+			pds = ExecScanChunkArrowFdw(&gpas->gts);
 		else
 			pds = pgstromExecScanChunk(&gpas->gts);
 	}
