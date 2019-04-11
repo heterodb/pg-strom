@@ -4521,10 +4521,12 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->outer_depth = outer_depth;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
-	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
+	if (pds_src && ((pds_src->kds.format == KDS_FORMAT_BLOCK &&
+					 pds_src->nblocks_uncached > 0) ||
+					(pds_src->kds.format == KDS_FORMAT_ARROW &&
+					 pds_src->iovec != NULL)))
 	{
-		Assert(gjs->gts.nvme_sstate != NULL);
-		pgjoin->with_nvme_strom = (pds_src->nblocks_uncached > 0);
+		pgjoin->with_nvme_strom = true;
 	}
 	GpuJoinSetupTask(&pgjoin->kern, &gjs->gts, pds_src);
 
@@ -5966,50 +5968,54 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	/*
 	 * Device memory allocation
 	 */
-	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
-		m_kds_src = (CUdeviceptr)&pds_src->kds;
-	else
+	if (pgjoin->with_nvme_strom)
 	{
 		Size	required = GPUMEMALIGN(pds_src->kds.length);
 
-		if (pgjoin->with_nvme_strom)
+		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK ||
+			   pds_src->kds.format == KDS_FORMAT_ARROW);
+		rc = gpuMemAllocIOMap(gcontext,
+							  &m_kds_src,
+							  required);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			rc = gpuMemAllocIOMap(gcontext,
-								  &m_kds_src,
-								  required);
-			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			pgjoin->with_nvme_strom = false;
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 			{
 				PDS_fillup_blocks(pds_src);
-				pgjoin->with_nvme_strom = false;
+
+				rc = gpuMemAlloc(gcontext,
+								 &m_kds_src,
+                                 required);
+				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+					goto out_of_resource;
+				else if (rc != CUDA_SUCCESS)
+					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
-			else if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+			else
+			{
+				pds_src = PDS_fillup_arrow(pgjoin->pds_src);
+				PDS_release(pgjoin->pds_src);
+				pgjoin->pds_src = pds_src;
+				Assert(!pds_src->iovec);
+			}
 		}
-		if (m_kds_src == 0UL)
-		{
-			rc = gpuMemAlloc(gcontext,
-							 &m_kds_src,
-							 required);
-			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-				goto out_of_resource;
-			else if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemAlloc: %s", errorText(rc));
-		}
+		else if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+	}
+	else
+	{
+		m_kds_src = (CUdeviceptr)&pds_src->kds;
 	}
 
 	/*
 	 * OK, kick a series of GpuJoin invocations
 	 */
-	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+	if (pgjoin->with_nvme_strom)
 	{
-		rc = cuMemPrefetchAsync(m_kds_src,
-								pds_src->kds.length,
-								CU_DEVICE_PER_THREAD,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
-	else if (!pgjoin->with_nvme_strom)
+	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 	{
 		rc = cuMemcpyHtoDAsync(m_kds_src,
 							   &pds_src->kds,
@@ -6017,11 +6023,16 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+
 	}
 	else
 	{
-		gpuMemCopyFromSSD(m_kds_src,
-						  pds_src);
+		rc = cuMemPrefetchAsync(m_kds_src,
+								pds_src->kds.length,
+								CU_DEVICE_PER_THREAD,
+								CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 	}
 
 	/* Launch:
@@ -6109,6 +6120,11 @@ resume_kernel:
 				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 			pds_src->nblocks_uncached = 0;
 		}
+		else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+				 pds_src->iovec != NULL)
+		{
+			//to be implemented
+		}
 		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;
 		pgjoin->kern.resume_context = (last_suspend != NULL);
@@ -6126,7 +6142,9 @@ resume_kernel:
 		retval = 0;
 	}
 out_of_resource:
-	if (pds_src->kds.format == KDS_FORMAT_BLOCK && m_kds_src != 0UL)
+	if (m_kds_src &&
+		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
+		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }

@@ -2579,7 +2579,6 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kern_data_store *kds_src */
-	wnotice("with_nvme_strom=%d format=%d", gscan->with_nvme_strom, pds_src->kds.format);
 	if (gscan->with_nvme_strom)
 	{
 		gpuMemCopyFromSSD(m_kds_src, pds_src);
@@ -2757,6 +2756,11 @@ resume_kernel:
 					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 				pds_src->nblocks_uncached = 0;
 			}
+			else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+					 pds_src->iovec != NULL)
+			{
+				//to be implemented
+			}
 			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
 			gscan->task.cpu_fallback = true;
 			/* restore suspend context, if any */
@@ -2770,10 +2774,9 @@ resume_kernel:
 		}
 	}
 out_of_resource:
-	if (retval > 0)
-		wnotice("GpuScan: out of resource");
-	if ((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
-		(pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec))
+	if (m_kds_src != 0UL &&
+		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
+		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }
