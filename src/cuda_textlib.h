@@ -83,25 +83,57 @@ pg_datum_ref_arrow(kern_context *kcxt,
 				   cl_uint colidx, cl_uint rowidx)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[colidx];
-	void		   *addr;
-	cl_uint			length;
+	cl_int			unitsz = cmeta->atttypmod - VARHDRSZ;
+	char		   *addr, *pos;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
 	assert(colidx < kds->nr_colmeta &&
 		   rowidx < kds->nitems);
-	addr = kern_get_varlena_datum_arrow(kds,cmeta,
-										rowidx,
-										&length);
+	if (unitsz <= 0)
+		addr = NULL;
+	else
+		addr = (char *)kern_get_simple_datum_arrow(kds,cmeta,
+												   rowidx,
+												   unitsz);
 	if (!addr)
-	{
 		result.isnull = true;
-		return;
+	else
+	{
+		pos = addr + unitsz;
+		while (pos > addr && pos[-1] == ' ')
+			pos--;
+		result.isnull = false;
+		result.value  = addr;
+		result.length = pos - addr;
 	}
-	result.isnull = false;
-	result.value  = (char *)addr;
-	result.length = bpchar_truelen((const char *)addr, length);
 }
 #endif
+
+STATIC_INLINE(cl_bool)
+pg_bpchar_datum_extract(kern_context *kcxt, pg_bpchar_t arg,
+						char **s, cl_int *len)
+{
+	if (arg.isnull)
+		return false;
+	if (arg.length < 0)
+	{
+		if (VARATT_IS_COMPRESSED(arg.value) ||
+			VARATT_IS_EXTERNAL(arg.value))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return false;
+		}
+		*s = VARDATA_ANY(arg.value);
+		*len = bpchar_truelen(VARDATA_ANY(arg.value),
+							  VARSIZE_ANY_EXHDR(arg.value));
+	}
+	else
+	{
+		*s = arg.value;
+		*len = arg.length;
+	}
+	return true;
+}
 
 STATIC_FUNCTION(cl_int)
 bpchar_compare(kern_context *kcxt,
@@ -805,6 +837,56 @@ pgfn_textnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 }
 
 STATIC_FUNCTION(pg_bool_t)
+pgfn_bpcharlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_bpchar_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
+		{
+			result.isnull = true;
+			return result;
+		}
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) == LIKE_TRUE);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_bpcharnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_bpchar_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
+		{
+			result.isnull = true;
+			return result;
+		}
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) != LIKE_TRUE);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
 pgfn_texticlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_bool_t	result;
@@ -842,6 +924,56 @@ pgfn_texticnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 		cl_int		plen;
 
 		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
+		{
+			result.isnull = true;
+			return result;
+		}
+		result.value = (GenericCaseMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) != LIKE_TRUE);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_bpchariclike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_bpchar_datum_extract(kcxt, arg1, &s, &slen) ||
+			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
+		{
+			result.isnull = true;
+			return result;
+		}
+		result.value = (GenericCaseMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) == LIKE_TRUE);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s, *p;
+		cl_int		slen;
+		cl_int		plen;
+
+		if (!pg_bpchar_datum_extract(kcxt, arg1, &s, &slen) ||
 			!pg_varlena_datum_extract(kcxt, arg2, &p, &plen))
 		{
 			result.isnull = true;

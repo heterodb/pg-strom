@@ -576,10 +576,10 @@ pgstrom_get_float2_typeoid(void)
 {
 	if (!OidIsValid(pgstrom_float2_typeoid))
 	{
-		Oid		nsp_oid = get_namespace_oid(PGSTROM_SCHEMA_NAME, true);
-		Oid		type_oid = GetSysCacheOid2(TYPENAMENSP,
-										   PointerGetDatum("float2"),
-										   ObjectIdGetDatum(nsp_oid));
+		Oid		type_oid =
+			GetSysCacheOid2(TYPENAMENSP,
+							PointerGetDatum("float2"),
+							ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
 		if (!OidIsValid(type_oid))
 			elog(ERROR, "float2 is not defined at PostgreSQL");
 		pgstrom_float2_typeoid = type_oid;
@@ -1319,15 +1319,15 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* LIKE operators */
 	{ "like",        2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textlike" },
 	{ "textlike",    2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textlike" },
-	{ "bpcharlike",  2, {BPCHAROID, TEXTOID}, 9999, NULL, "s/f:textlike" },
+	{ "bpcharlike",  2, {BPCHAROID, TEXTOID}, 9999, NULL, "s/f:bpcharlike" },
 	{ "notlike",     2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textnlike" },
 	{ "textnlike",   2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textnlike" },
-	{ "bpcharnlike", 2, {BPCHAROID, TEXTOID}, 9999, NULL, "s/f:textnlike" },
+	{ "bpcharnlike", 2, {BPCHAROID, TEXTOID}, 9999, NULL, "s/f:bpcharnlike" },
 	/* ILIKE operators */
 	{ "texticlike",    2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticlike" },
-	{ "bpchariclike",  2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticlike" },
+	{ "bpchariclike",  2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:bpchariclike" },
 	{ "texticnlike",   2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticnlike" },
-	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID},9999,NULL, "sc/f:texticnlike" },
+	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID},9999,NULL, "sc/f:bpcharicnlike" },
 	/* string operations */
 	{ "length",		1, {TEXTOID},            2, NULL, "sc/f:textlen" },
 	{ "textcat",	2, {TEXTOID,TEXTOID},

@@ -259,8 +259,10 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
 #if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
-	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS]
+					__attribute__((unused));
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS]
+					__attribute__((unused));
 #else
 	cl_char	   *tup_dclass = NULL;
 	cl_char	   *tup_values = NULL;
@@ -455,8 +457,10 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 	cl_uint		total_extra_size = 0;	/* stat */
 	cl_bool		thread_is_valid = false;
 #if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
-	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	cl_char		tup_dclass[GPUSCAN_DEVICE_PROJECTION_NFIELDS]
+					__attribute__((unused));
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS]
+					__attribute__((unused));
 #else
 	cl_char	   *tup_dclass = NULL;
 	cl_char	   *tup_values = NULL;

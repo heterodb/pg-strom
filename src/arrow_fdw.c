@@ -25,6 +25,7 @@
 typedef struct RecordBatchFieldState
 {
 	Oid			atttypid;
+	int			atttypmod;
 	ArrowTypeOptions attopts;
 	int64		nitems;				/* usually, same with rb_nitems */
 	int64		null_count;
@@ -111,7 +112,7 @@ static int				arrow_metadata_entry_size;		/* GUC */
 					  fstate[arrow_metadata_entry_size]))
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
-static Oid		arrowTypeToPGTypeOid(ArrowField *field);
+static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
 static const char *arrowTypeToPGTypeName(ArrowField *field);
 static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
@@ -465,7 +466,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 	if (con->fnode_curr >= con->fnode_tail)
 		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
 	fnode = con->fnode_curr++;
-	fstate->atttypid   = arrowTypeToPGTypeOid(field);
+	fstate->atttypid   = arrowTypeToPGTypeOid(field, &fstate->atttypmod);
 	fstate->nitems     = fnode->length;
 	fstate->null_count = fnode->null_count;
 
@@ -479,6 +480,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 		case ArrowNodeTag__Time:
 		case ArrowNodeTag__Timestamp:
 		case ArrowNodeTag__Interval:
+		case ArrowNodeTag__FixedSizeBinary:
 			/* fixed length values */
 			if (con->buffer_curr + 2 > con->buffer_tail)
 				elog(ERROR, "RecordBatch has less buffers than expected");
@@ -1554,10 +1556,11 @@ arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 }
 
 static Oid
-arrowTypeToPGTypeOid(ArrowField *field)
+arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 {
 	ArrowType  *t = &field->type;
 
+	*typmod = -1;
 	switch (t->node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -1613,9 +1616,12 @@ arrowTypeToPGTypeOid(ArrowField *field)
 			else
 			{
 				ArrowField *child = &field->children[0];
-				Oid		elem_oid = arrowTypeToPGTypeOid(child);
-				Oid		type_oid = get_array_type(elem_oid);
+				Oid		type_oid;
+				Oid		elem_oid;
+				int		elem_mod;
 
+				elem_oid = arrowTypeToPGTypeOid(child, &elem_mod);
+				type_oid = get_array_type(elem_oid);
 				if (!OidIsValid(type_oid))
 					elog(ERROR, "arrow.%s is not supported",
 						 arrowTypeName(field));
@@ -1672,10 +1678,14 @@ arrowTypeToPGTypeOid(ArrowField *field)
 					Assert(tupdesc->natts == field->_num_children);
 					for (j=0; compatible && j < tupdesc->natts; j++)
 					{
-						Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
-						ArrowField		   *child = &field->children[j];
+						Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+						ArrowField  *child = &field->children[j];
+						Oid			typoid;
+						int			typmod;
 
-						if (arrowTypeToPGTypeOid(child) != attr->atttypid)
+						typoid = arrowTypeToPGTypeOid(child, &typmod);
+						if (typoid != attr->atttypid ||
+							typoid != attr->atttypmod)
 							compatible = false;
 					}
 					ReleaseTupleDesc(tupdesc);
@@ -1692,6 +1702,14 @@ arrowTypeToPGTypeOid(ArrowField *field)
 				return type_oid;
 			}
 			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			if (t->FixedSizeBinary.byteWidth < 1 ||
+				t->FixedSizeBinary.byteWidth > BLCKSZ)
+				elog(ERROR, "arrow_fdw: %s with byteWidth=%d is not supported",
+					 t->node.tagName,
+					 t->FixedSizeBinary.byteWidth);
+			*typmod = t->FixedSizeBinary.byteWidth;
+			return BPCHAROID;
 		default:
 			elog(ERROR, "arrow_fdw: type '%s' is not supported",
 				 field->type.node.tagName);
@@ -1702,22 +1720,30 @@ arrowTypeToPGTypeOid(ArrowField *field)
 static const char *
 arrowTypeToPGTypeName(ArrowField *field)
 {
-	Oid			type_oid = arrowTypeToPGTypeOid(field);
+	Oid			typoid;
+	int			typmod;
 	HeapTuple	tup;
 	Form_pg_type type;
 	char	   *schema;
 	char	   *result;
 
-	if (!OidIsValid(type_oid))
+	typoid = arrowTypeToPGTypeOid(field, &typmod);
+	if (!OidIsValid(typoid))
 		return NULL;
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid));
 	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type %u", type_oid);
+		elog(ERROR, "cache lookup failed for type %u", typoid);
 	type = (Form_pg_type) GETSTRUCT(tup);
 	schema = get_namespace_name(type->typnamespace);
-	result = psprintf("%s.%s",
-					  quote_identifier(schema),
-					  quote_identifier(NameStr(type->typname)));
+	if (typmod < 0)
+		result = psprintf("%s.%s",
+						  quote_identifier(schema),
+						  quote_identifier(NameStr(type->typname)));
+	else
+		result = psprintf("%s.%s(%d)",
+						  quote_identifier(schema),
+						  quote_identifier(NameStr(type->typname)),
+						  typmod);
 	ReleaseSysCache(tup);
 
 	return result;
@@ -1825,6 +1851,9 @@ arrowFieldLength(ArrowField *field, int64 nitems)
 		case ArrowNodeTag__Struct:	//to be supported later
 			length = 0;		/* only nullmap */
 			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			length = (size_t)type->FixedSizeBinary.byteWidth * nitems;
+			break;
 		default:
 			elog(ERROR, "Arrow Type '%s' is not supported now",
 				 type->node.tagName);
@@ -1879,6 +1908,23 @@ pg_varlena_arrow_ref(kern_data_store *kds,
 }
 
 static Datum
+pg_bpchar_arrow_ref(kern_data_store *kds,
+					kern_colmeta *cmeta, size_t index)
+{
+	cl_char	   *values = ((char *)kds + __kds_unpack(cmeta->values_offset));
+	cl_int		unitsz = cmeta->atttypmod - VARHDRSZ;
+	struct varlena *res;
+
+	if (unitsz <= 0)
+		elog(ERROR, "CHAR(%d) is not expected", unitsz);
+	res = palloc(VARHDRSZ + unitsz);
+	memcpy((char *)res + VARHDRSZ, values + unitsz * index, unitsz);
+	SET_VARSIZE(res, VARHDRSZ + unitsz);
+
+	return PointerGetDatum(res);
+}
+
+static Datum
 pg_bool_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
@@ -1920,10 +1966,16 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 {
 	char	   *result = palloc0(sizeof(struct NumericData));
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	int			precision = cmeta->attopts.decimal.precision;
 	Int128_t	decimal;
 
 	decimal.ival = ((int128 *)base)[index];
-	pg_numeric_to_varlena(result, cmeta->attopts.decimal.precision, decimal);
+	while (precision > 0 && decimal.ival % 10 == 0)
+	{
+		decimal.ival /= 10;
+		precision--;
+	}
+	pg_numeric_to_varlena(result, precision, decimal);
 
 	return PointerGetDatum(result);
 }
@@ -2140,10 +2192,6 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
-			default:
-				if (cmeta->atttypid != FLOAT2OID)
-					elog(ERROR, "Bug? unexpected datum type: %u",
-						 cmeta->atttypid);
 			case INT2OID:
 				datum = pg_int2_arrow_ref(kds, cmeta, index);
 				break;
@@ -2158,6 +2206,9 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			case TEXTOID:
 			case BYTEAOID:
 				datum = pg_varlena_arrow_ref(kds, cmeta, index);
+				break;
+			case BPCHAROID:
+				datum = pg_bpchar_arrow_ref(kds, cmeta, index);
 				break;
 			case BOOLOID:
 				datum = pg_bool_arrow_ref(kds, cmeta, index);
@@ -2176,6 +2227,12 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				break;
 			case INTERVALOID:
 				datum = pg_interval_arrow_ref(kds, cmeta, index);
+				break;
+			default:
+				if (cmeta->atttypid != FLOAT2OID)
+					elog(ERROR, "Bug? unexpected datum type: %u",
+						 cmeta->atttypid);
+				datum = pg_int2_arrow_ref(kds, cmeta, index);
 				break;
 		}
 		isnull = false;

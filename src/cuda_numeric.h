@@ -479,7 +479,6 @@ pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 	NumericDigit	n_data[PG_MAX_DATA];
 	int				ndigits;
 	cl_uint			len;
-	cl_short		d_scale = Max(precision, 0);
 	cl_ushort		n_header = 0;
 	cl_bool			is_negative = (__Int128_sign(value) < 0);
 
@@ -528,7 +527,7 @@ pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 		   n_data + PG_MAX_DATA - ndigits,
 		   sizeof(NumericDigit) * ndigits);
 	/* other metadata */
-	n_header = (d_scale & NUMERIC_DSCALE_MASK);
+	n_header = (Max(precision, 0) & NUMERIC_DSCALE_MASK);
 	if (is_negative)
 		n_header |= NUMERIC_NEG;
 	numBody->n_sign_dscale = n_header;
