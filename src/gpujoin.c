@@ -4097,6 +4097,10 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						tle->resno - 1,
 						tle->resno - 1);
+					if (dtype->extra_sz > 0)
+						context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+					if (dtype->type_length < 0)
+						context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 				}
 				/* NULL-initialization for LEFT OUTER JOIN */
 				appendStringInfo(

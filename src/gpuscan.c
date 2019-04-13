@@ -700,6 +700,8 @@ codegen_gpuscan_projection(StringInfo kern,
 					dtype->type_name, j,
 					dtype->type_name, j,
 					dtype->type_name, j, j);
+				if (dtype->extra_sz > 0)
+					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				if (dtype->type_length < 0)
 					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 			}

@@ -753,6 +753,7 @@ kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
 		 */
 		if (rc)
 		{
+			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 			gpuscan_projection_arrow(&kcxt,
 									 kds_src,
 									 src_index,
