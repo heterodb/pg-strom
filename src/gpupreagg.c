@@ -2713,7 +2713,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 			k = i - FirstLowInvalidHeapAttributeNumber;
 			referenced = bms_add_member(referenced, k);
 		}
-		for (k = bms_first_member(referenced);
+		for (k = bms_next_member(referenced, -1);
 			 k >= 0;
 			 k = bms_next_member(referenced, k))
 		{

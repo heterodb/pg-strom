@@ -727,6 +727,22 @@ ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
 		   memcmp(GetFdwRoutineForRelation(relation, false),
 				  &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0);
 
+	/* expand 'referenced' if it has whole-row reference */
+	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
+	{
+		referenced = bms_del_member(bms_copy(referenced),
+									-FirstLowInvalidHeapAttributeNumber);
+		for (i=0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+			referenced = bms_add_member(referenced, attr->attnum -
+										FirstLowInvalidHeapAttributeNumber);
+		}
+	}
+
 	foreach (lc, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc));
@@ -1190,15 +1206,15 @@ ArrowEndForeignScan(ForeignScanState *node)
 void
 ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 {
-	TupleDesc		tupdesc = RelationGetDescr(frel);
-	ListCell	   *lc1, *lc2;
-	int				fcount = 0;
-	int				rbcount = 0;
-	char			label[64];
-	char			temp[1024];
+	TupleDesc	tupdesc = RelationGetDescr(frel);
+	ListCell   *lc1, *lc2;
+	int			fcount = 0;
+	char		label[80];
+	size_t	   *chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
+	int			i, j, k;
 	StringInfoData	buf;
-	int				j, k;
 
+	/* shows referenced columns */
 	initStringInfo(&buf);
 	for (k = bms_next_member(af_state->referenced, -1);
 		 k >= 0;
@@ -1216,11 +1232,13 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 	}
 	ExplainPropertyText("referenced", buf.data, es);
 
+	/* shows files on behalf of the foreign table */
 	forboth (lc1, af_state->filesList,
 			 lc2, af_state->fdescList)
 	{
 		const char *fname = strVal(lfirst(lc1));
 		File		fdesc = (File)lfirst_int(lc2);
+		int			rbcount = 0;
 
 		snprintf(label, sizeof(label), "files%d", fcount++);
 		ExplainPropertyText(label, fname, es);
@@ -1228,36 +1246,43 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 			continue;
 
 		/* below only verbose mode */
-		while (rbcount < af_state->num_rbatches)
+		memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
+		for (i=0; i < af_state->num_rbatches; i++)
 		{
-			RecordBatchState *rb_state = af_state->rbatches[rbcount];
+			RecordBatchState *rb_state = af_state->rbatches[i];
 
 			if (rb_state->fdesc != fdesc)
-				break;
-			if (es->format == EXPLAIN_FORMAT_TEXT)
+				continue;
+
+			for (k = bms_next_member(af_state->referenced, -1);
+				 k >= 0;
+				 k = bms_next_member(af_state->referenced, k))
 			{
-				snprintf(label, sizeof(label),
-						 "  record-batch%d", rbcount);
-				snprintf(temp, sizeof(temp),
-						 "offset=%lu, length=%zu, nitems=%ld",
-						 rb_state->rb_offset,
-						 rb_state->rb_length,
-						 rb_state->rb_nitems);
-				ExplainPropertyText(label, temp, es);
-			}
-			else
-			{
-				snprintf(label, sizeof(label),
-						 "file%d-ecord-batch%d-offset", fcount, rbcount);
-				ExplainPropertyInteger(label, NULL, rb_state->rb_offset, es);
-				snprintf(label, sizeof(label),
-						 "file%d-ecord-batch%d-length", fcount, rbcount);
-				ExplainPropertyInteger(label, NULL, rb_state->rb_length, es);
-				snprintf(label, sizeof(label),
-						 "file%d-ecord-batch%d-nitems", fcount, rbcount);
-				ExplainPropertyInteger(label, NULL, rb_state->rb_nitems, es);
+				j = k + FirstLowInvalidHeapAttributeNumber;
+				if (j < 0 || j >= tupdesc->natts)
+					continue;
+				chunk_sz[j] += RecordBatchFieldLength(&rb_state->columns[j]);
 			}
 			rbcount++;
+		}
+		elog(INFO, "rbcount = %d", rbcount);
+		if (rbcount >= 0)
+		{
+			for (k = bms_next_member(af_state->referenced, -1);
+                 k >= 0;
+                 k = bms_next_member(af_state->referenced, k))
+            {
+				Form_pg_attribute attr;
+
+				j = k + FirstLowInvalidHeapAttributeNumber;
+				elog(INFO, "j=%d", j);
+				if (j < 0 || j >= tupdesc->natts)
+					continue;
+				attr = tupleDescAttr(tupdesc, j);
+				snprintf(label, sizeof(label),
+						 "  %s", NameStr(attr->attname));
+				ExplainPropertyText(label, format_bytesz(chunk_sz[j]), es);
+			}
 		}
 	}
 }

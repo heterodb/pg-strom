@@ -1344,7 +1344,7 @@ PlanGpuScanPath(PlannerInfo *root,
 
 	/* save the outer_refs for columnar optimization */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
-	for (i = bms_first_member(varattnos);
+	for (i = bms_next_member(varattnos, -1);
 		 i >= 0;
 		 i = bms_next_member(varattnos, i))
 	{
