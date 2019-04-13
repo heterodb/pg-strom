@@ -425,7 +425,9 @@ gpujoin_get_optimal_gpu(const Path *pathnode)
 }
 
 /*
- * returns copy of GpuJoinPath node, but not recursive.
+ * pgstrom_copy_gpujoin_path
+ *
+ * Note that this function shall never copies individual fields recursively.
  */
 Path *
 pgstrom_copy_gpujoin_path(const Path *pathnode)
@@ -434,9 +436,7 @@ pgstrom_copy_gpujoin_path(const Path *pathnode)
 	GpuJoinPath	   *gjpath_new;
 	Size			length;
 
-	if (!pgstrom_path_is_gpujoin(pathnode))
-		elog(ERROR, "Bug? tried to copy non-GpuJoinPath node");
-
+	Assert(pgstrom_path_is_gpujoin(pathnode));
 	length = offsetof(GpuJoinPath, inners[gjpath_old->num_rels]);
 	gjpath_new = palloc0(length);
 	memcpy(gjpath_new, gjpath_old, length);
@@ -1246,6 +1246,8 @@ fixup_appendrel_child_varnode(List *exprs_list,
 {
 	fixup_appendrel_child_varnode_context con;
 
+	if (exprs_list == NIL)
+		return NIL;
 	Assert(IsA(exprs_list, List));
 	con.root = root;
 	con.partitioned_rels = partitioned_rels;
