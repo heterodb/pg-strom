@@ -589,6 +589,7 @@ pg_datum_ref_arrow(kern_context *kcxt,
 				   cl_uint colidx, cl_uint rowidx)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	pg_numeric_t	temp;
 	void		   *addr;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
@@ -598,9 +599,11 @@ pg_datum_ref_arrow(kern_context *kcxt,
 		result.isnull = true;
 	else
 	{
-		memcpy(&result.value, addr, sizeof(Int128_t));
-		result.precision = cmeta->attopts.decimal.precision;
-		result.isnull = false;
+		memcpy(&temp.value, addr, sizeof(Int128_t));
+		temp.precision = cmeta->attopts.decimal.precision;
+		temp.isnull = false;
+
+		result = pg_numeric_normalize(temp);
 	}
 }
 
