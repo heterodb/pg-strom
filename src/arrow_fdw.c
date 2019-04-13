@@ -1188,13 +1188,33 @@ ArrowEndForeignScan(ForeignScanState *node)
  * ArrowExplainForeignScan 
  */
 void
-ExplainArrowFdw(ArrowFdwState *af_state, ExplainState *es)
+ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 {
+	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ListCell	   *lc1, *lc2;
 	int				fcount = 0;
 	int				rbcount = 0;
 	char			label[64];
 	char			temp[1024];
+	StringInfoData	buf;
+	int				j, k;
+
+	initStringInfo(&buf);
+	for (k = bms_next_member(af_state->referenced, -1);
+		 k >= 0;
+		 k = bms_next_member(af_state->referenced, k))
+	{
+		j = k + FirstLowInvalidHeapAttributeNumber;
+
+		if (j > 0)
+		{
+			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j-1);
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, NameStr(attr->attname));
+		}
+	}
+	ExplainPropertyText("referenced", buf.data, es);
 
 	forboth (lc1, af_state->filesList,
 			 lc2, af_state->fdescList)
@@ -1245,7 +1265,9 @@ ExplainArrowFdw(ArrowFdwState *af_state, ExplainState *es)
 static void
 ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
-	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, es);
+	Relation	frel = node->ss.ss_currentRelation;
+
+	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es);
 }
 
 /*

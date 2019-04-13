@@ -1352,8 +1352,8 @@ extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 								   pg_atomic_uint32 *rbatch_index);
 extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
-extern void ExplainArrowFdw(ArrowFdwState *af_state, ExplainState *es);
-
+extern void ExplainArrowFdw(ArrowFdwState *af_state,
+							Relation frel, ExplainState *es);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

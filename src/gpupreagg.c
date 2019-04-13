@@ -2621,7 +2621,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	Bitmapset	   *pfunc_bitmap;
 	List		   *tlist_dev = NIL;
 	Index			outer_scanrelid = 0;
-	Bitmapset	   *varattnos = NULL;
+	Bitmapset	   *referenced = NULL;
 	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
@@ -2653,9 +2653,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		TargetEntry *tle;
 		Node	   *node = lfirst(lc);
 
-		if (outer_scanrelid)
-			pull_varattnos(node, outer_scanrelid, &varattnos);
-
 		Assert(!best_path->path.param_info);
 		tle = makeTargetEntry((Expr *)node,
 							  index + 1,
@@ -2681,7 +2678,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 
 		if (outer_scanrelid)
 			pull_varattnos((Node *)gpa_info->outer_quals,
-						   outer_scanrelid, &varattnos);
+						   outer_scanrelid, &referenced);
 
 		outer_vars = pull_var_clause((Node *)gpa_info->outer_quals,
 									 PVC_RECURSE_AGGREGATES |
@@ -2703,12 +2700,26 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		}
 	}
 
-	for (index = bms_first_member(varattnos);
-		 index >= 0;
-		 index = bms_next_member(varattnos, index))
+	/* pick up referenced columns */
+	if (outer_scanrelid)
 	{
-		outer_refs = lappend_int(outer_refs, index +
-								 FirstLowInvalidHeapAttributeNumber);
+		RelOptInfo *baserel = root->simple_rel_array[outer_scanrelid];
+		int			i, j, k;
+
+		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
+		{
+			if (i < 0 || baserel->attr_needed[j] == NULL)
+				continue;
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
+		}
+		for (k = bms_first_member(referenced);
+			 k >= 0;
+			 k = bms_next_member(referenced, k))
+		{
+			i = k + FirstLowInvalidHeapAttributeNumber;
+			outer_refs = lappend_int(outer_refs, i);
+		}
 	}
 
 	/* setup CustomScan node */

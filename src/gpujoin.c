@@ -2264,10 +2264,10 @@ PlanGpuJoinPath(PlannerInfo *root,
 	codegen_context	context;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
-	Bitmapset	   *varattnos = NULL;
+	List		   *outer_quals = gjpath->outer_quals;
 	List		   *outer_refs = NULL;
 	double			outer_nrows;
-	int				i, j;
+	int				i, j, k;
 
 	Assert(gjpath->num_rels + 1 == list_length(custom_plans));
 	outer_plan = linitial(custom_plans);
@@ -2275,6 +2275,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = NIL;
+	cscan->scan.scanrelid = outer_relid;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpujoin_plan_methods;
 	cscan->custom_plans = list_copy_tail(custom_plans, 1);
@@ -2307,9 +2308,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 		}
 		gj_info.sibling_param_id = param_id;
 	}
-
-	if (outer_relid)
-		pull_varattnos((Node *)tlist, outer_relid, &varattnos);
 
 	outer_nrows = outer_plan->plan_rows;
 	for (i=0; i < gjpath->num_rels; i++)
@@ -2381,13 +2379,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
 		outer_nrows = gjpath->inners[i].join_nrows;
-
-		if (outer_relid)
-		{
-			pull_varattnos((Node *)hash_outer_keys, outer_relid, &varattnos);
-			pull_varattnos((Node *)join_quals, outer_relid, &varattnos);
-			pull_varattnos((Node *)other_quals, outer_relid, &varattnos);
-		}
 	}
 
 	/*
@@ -2397,17 +2388,27 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 */
 	if (outer_relid)
 	{
-		cscan->scan.scanrelid = outer_relid;
-		gj_info.outer_quals = gjpath->outer_quals;
-		pull_varattnos((Node *)gjpath->outer_quals, outer_relid, &varattnos);
+		RelOptInfo *baserel = root->simple_rel_array[outer_relid];
+		Bitmapset  *referenced = NULL;
 
-		for (i = bms_first_member(varattnos);
-			 i >= 0;
-			 i = bms_next_member(varattnos, i))
+		/* pick up outer referenced columns */
+		pull_varattnos((Node *)outer_quals, outer_relid, &referenced);
+		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
 		{
-			j = i + FirstLowInvalidHeapAttributeNumber;
-			outer_refs = lappend_int(outer_refs, j);
+			if (i < 0 || baserel->attr_needed[j] == NULL)
+				continue;
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
 		}
+		for (k = bms_first_member(referenced);
+			 k >= 0;
+			 k = bms_next_member(referenced, k))
+		{
+			i = k + FirstLowInvalidHeapAttributeNumber;
+			if (i >= 0)
+				outer_refs = lappend_int(outer_refs, i);
+		}
+
 		/* BRIN-index stuff */
 		if (gjpath->index_opt)
 		{
@@ -2420,6 +2421,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	else
 	{
 		outerPlan(cscan) = outer_plan;
+		Assert(outer_quals == NIL);
 		Assert(gjpath->index_opt == NULL);
 	}
 	gj_info.outer_nrows_per_block = gjpath->outer_nrows_per_block;
@@ -2446,6 +2448,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUJOIN |
 						   DEVKERNEL_NEEDS_GPUSCAN_DECL |
 						   context.extra_flags);
+	gj_info.outer_quals = outer_quals;
 	gj_info.outer_refs = outer_refs;
 	gj_info.used_params = context.used_params;
 

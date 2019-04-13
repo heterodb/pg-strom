@@ -574,7 +574,8 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
-	char	temp[320];
+	Relation	rel = gts->css.ss.ss_currentRelation;
+	char		temp[320];
 
 	/* GPU preference, if any */
 	if (es->verbose || gts->optimal_gpu >= 0)
@@ -592,10 +593,9 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	}
 
 	/* NVMe-Strom support */
-	if (gts->css.ss.ss_currentRelation &&
-		(!es->analyze
-		 ? gts->outer_nrows_per_block > 0
-		 : gts->nvme_sstate != NULL))
+	if (rel && (!es->analyze
+				? gts->outer_nrows_per_block > 0
+				: gts->nvme_sstate != NULL))
 	{
 		if (!gts->nvme_sstate)
 			ExplainPropertyText("NVMe-Strom", "enabled", es);
@@ -625,7 +625,7 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 							   NULL, gts->num_cpu_fallbacks, es);
 	/* Properties of Arrow_Fdw if any */
 	if (gts->af_state)
-		ExplainArrowFdw(gts->af_state, es);
+		ExplainArrowFdw(gts->af_state, rel, es);
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
