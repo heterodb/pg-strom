@@ -1253,13 +1253,13 @@ typedef struct
 				   cl_char &dclass,									\
 				   Datum &value)									\
 	{																\
-		if (!datum.isnull)											\
+		if (datum.isnull)											\
+			dclass = DATUM_CLASS__NULL;								\
+		else														\
 		{															\
 			dclass = DATUM_CLASS__NORMAL;							\
 			value = AS_DATUM(datum.value);							\
-			return sizeof(BASE);									\
 		}															\
-		dclass = DATUM_CLASS__NULL;									\
 		return 0;													\
 	}
 #else	/* __CUDACC__ */

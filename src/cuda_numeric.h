@@ -620,6 +620,7 @@ pg_datum_store(kern_context *kcxt,
 	res = (char *)kern_context_alloc(kcxt, sizeof(struct NumericData));
 	if (!res)
 	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}

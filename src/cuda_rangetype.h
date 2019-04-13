@@ -151,6 +151,7 @@
 		res = kern_context_alloc(kcxt, sizeof(*res));				\
 		if (!res)													\
 		{															\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			isnull = true;											\
 			return 0;												\
 		}															\

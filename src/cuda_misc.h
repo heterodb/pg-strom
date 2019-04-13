@@ -674,6 +674,7 @@ pg_datum_store(kern_context *kcxt,
 	res = kern_context_alloc(kcxt, vl_len);
 	if (!res)
 	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}

@@ -4544,7 +4544,10 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(gts);
+		if (gjs->gts.af_state)
+			pds = ExecScanChunkArrowFdw(gts);
+		else
+			pds = pgstromExecScanChunk(gts);
 	}
 	else
 	{

@@ -5505,36 +5505,44 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	/* allocation of kds_src */
 	if (!pds_src)
 		m_kds_src = 0UL;
-	else
+	else if (gpreagg->with_nvme_strom)
 	{
-		if (pds_src->kds.format != KDS_FORMAT_BLOCK)
-			m_kds_src = (CUdeviceptr)&pds_src->kds;
-		else
+		size_t	required = GPUMEMALIGN(pds_src->kds.length);
+
+		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK ||
+			   pds_src->kds.format == KDS_FORMAT_ARROW);
+		rc = gpuMemAllocIOMap(gcontext,
+							  &m_kds_src,
+							  required);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			if (gpreagg->with_nvme_strom)
+			gpreagg->with_nvme_strom = false;
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 			{
-				rc = gpuMemAllocIOMap(gcontext,
-									  &m_kds_src,
-									  GPUMEMALIGN(pds_src->kds.length));
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-				{
-					PDS_fillup_blocks(pds_src);
-					gpreagg->with_nvme_strom = false;
-				}
-				else if (rc != CUDA_SUCCESS)
-					werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
-			}
-			if (m_kds_src == 0UL)
-			{
+				PDS_fillup_blocks(pds_src);
+
 				rc = gpuMemAlloc(gcontext,
 								 &m_kds_src,
-								 GPUMEMALIGN(pds_src->kds.length));
+								 required);
 				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 					goto out_of_resource;
 				else if (rc != CUDA_SUCCESS)
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
+			else
+			{
+				pds_src = PDS_fillup_arrow(gpreagg->pds_src);
+				PDS_release(gpreagg->pds_src);
+				gpreagg->pds_src = pds_src;
+				Assert(!pds_src->iovec);
+			}
 		}
+		else if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+	}
+	else
+	{
+		m_kds_src = (CUdeviceptr)&pds_src->kds;
 	}
 
 	/*
@@ -5559,16 +5567,11 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	 */
 	if (pds_src)
 	{
-		if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+		if (gpreagg->with_nvme_strom)
 		{
-			rc = cuMemPrefetchAsync(m_kds_src,
-									pds_src->kds.length,
-									CU_DEVICE_PER_THREAD,
-									CU_STREAM_PER_THREAD);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+			gpuMemCopyFromSSD(m_kds_src, pds_src);
 		}
-		else if (!gpreagg->with_nvme_strom)
+		else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		{
 			rc = cuMemcpyHtoDAsync(m_kds_src,
 								   &pds_src->kds,
@@ -5579,7 +5582,12 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		}
 		else
 		{
-			gpuMemCopyFromSSD(m_kds_src, pds_src);
+			rc = cuMemPrefetchAsync(m_kds_src,
+									pds_src->kds.length,
+									CU_DEVICE_PER_THREAD,
+									CU_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 		}
 	}
 	else
@@ -5795,8 +5803,9 @@ resume_kernel:
 		retval = -1;
 	}
 out_of_resource:
-	if (pds_src &&
-		pds_src->kds.format == KDS_FORMAT_BLOCK && m_kds_src != 0UL)
+	if (m_kds_src != 0UL &&
+		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
+		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
 		gpuMemFree(gcontext, m_kds_src);
 	if (m_kds_slot)
 		gpuMemFree(gcontext, m_kds_slot);
