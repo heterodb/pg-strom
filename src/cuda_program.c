@@ -901,6 +901,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		bin_entry->kern_source		= bin_entry->data + offset;
 		strcpy(bin_entry->kern_source, src_entry->kern_source);
 		offset += MAXALIGN(bin_entry->kern_srclen + 1);
+		bin_entry->varlena_bufsz	= src_entry->varlena_bufsz;
 
 		if (!ptx_image)
 			bin_entry->ptx_image	= CUDA_PROGRAM_BUILD_FAILURE;
