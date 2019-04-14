@@ -2264,8 +2264,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 	codegen_context	context;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
-	List		   *outer_quals = gjpath->outer_quals;
-	List		   *outer_refs = NULL;
 	double			outer_nrows;
 	int				i, j, k;
 
@@ -2390,6 +2388,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 	{
 		RelOptInfo *baserel = root->simple_rel_array[outer_relid];
 		Bitmapset  *referenced = NULL;
+		List	   *outer_quals = gjpath->outer_quals;
+		List	   *outer_refs = NULL;
 
 		/* pick up outer referenced columns */
 		pull_varattnos((Node *)outer_quals, outer_relid, &referenced);
@@ -2417,6 +2417,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 			gj_info.index_quals
 				= extract_actual_clauses(gjpath->index_quals, false);
 		}
+		gj_info.outer_quals = outer_quals;
+		gj_info.outer_refs = outer_refs;
 	}
 	else
 	{
@@ -2448,8 +2450,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUJOIN |
 						   DEVKERNEL_NEEDS_GPUSCAN_DECL |
 						   context.extra_flags);
-	gj_info.outer_quals = outer_quals;
-	gj_info.outer_refs = outer_refs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
