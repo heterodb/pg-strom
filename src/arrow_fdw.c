@@ -712,12 +712,14 @@ makeRecordBatchState(ArrowSchema *schema,
  * ExecInitArrowFdw
  */
 ArrowFdwState *
-ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
+ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	List		   *fdescList = NIL;
+	Bitmapset	   *referenced = NULL;
+	bool			whole_row_ref = false;
 	ArrowFdwState  *af_state;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
@@ -728,19 +730,17 @@ ExecInitArrowFdw(Relation relation, Bitmapset *referenced)
 				  &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0);
 
 	/* expand 'referenced' if it has whole-row reference */
-	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
+	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, outer_refs))
+		whole_row_ref = true;
+	for (i=0; i < tupdesc->natts; i++)
 	{
-		referenced = bms_del_member(bms_copy(referenced),
-									-FirstLowInvalidHeapAttributeNumber);
-		for (i=0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
+		int		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
-			if (attr->attisdropped)
-				continue;
-			referenced = bms_add_member(referenced, attr->attnum -
-										FirstLowInvalidHeapAttributeNumber);
-		}
+		if (attr->attisdropped)
+			continue;
+		if (whole_row_ref || bms_is_member(k, outer_refs))
+			referenced = bms_add_member(referenced, k);
 	}
 
 	foreach (lc, filesList)
@@ -796,20 +796,10 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	foreach (lc, fscan->fdw_private)
 	{
 		int		j = lfirst_int(lc);
-		int		k = j - FirstLowInvalidHeapAttributeNumber;
 
-		if (j > 0 && j <= RelationGetNumberOfAttributes(relation))
-			referenced = bms_add_member(referenced, k);
-		else if (j == 0)
-		{
-			for (j=0; j < tupdesc->natts; j++)
-			{
-				Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-				if (!attr->attisdropped)
-					referenced = bms_add_member(referenced, k);
-			}
-		}
+		if (j >= 0 && j <= tupdesc->natts)
+			referenced = bms_add_member(referenced, j -
+										FirstLowInvalidHeapAttributeNumber);
 	}
 	node->fdw_state = ExecInitArrowFdw(relation, referenced);
 }
@@ -960,9 +950,8 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		kern_colmeta *cmeta = &kds->colmeta[j];
 		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
-		if (referenced && !bms_is_member(attidx, referenced))
-			continue;
-		arrowFdwSetupIOvectorField(con, fstate, kds, cmeta);
+		if (referenced && bms_is_member(attidx, referenced))
+			arrowFdwSetupIOvectorField(con, fstate, kds, cmeta);
 	}
 	if (con->io_index >= 0)
 	{
