@@ -775,9 +775,9 @@ static cl_int
 GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
 	vfs_nvme_status *entry;
-	const char *pathname;
-	File		fdesc;
-	bool		found;
+	char   *pathname;
+	File	fdesc;
+	bool	found;
 
 	if (!nvme_strom_enabled)
 		return false;	/* nvme_strom is not configured or disabled */

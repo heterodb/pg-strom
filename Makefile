@@ -16,8 +16,8 @@ endif
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 2.1
-PGSTROM_RELEASE := $(shell env LANG=C date +%y%m%d)
+PGSTROM_VERSION := 2.2
+PGSTROM_RELEASE := devel
 
 #
 # Installation related

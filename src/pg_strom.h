@@ -1217,10 +1217,11 @@ extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											Path *inner_path,
 											bool try_parallel_path,
 											int *p_parallel_nworkers,
+											Index *p_partition_relid,
 											List **p_partitioned_rels);
 extern List *fixup_appendrel_child_varnode(List *exprs_list,
 										   PlannerInfo *root,
-										   List *partitioned_rels,
+										   Index partition_relid,
 										   RelOptInfo *subrel);
 #endif
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);

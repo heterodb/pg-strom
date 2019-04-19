@@ -1506,6 +1506,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
+	Index		partition_relid;
 	int			parallel_nworkers;
 	AppendPath *append_path;
 	Path	   *partial_path;
@@ -1517,6 +1518,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 													NULL,
 													try_parallel_path,
 													&parallel_nworkers,
+													&partition_relid,
 													&partitioned_rels);
 	if (sub_paths_list == NIL)
 		return;
@@ -1531,12 +1533,12 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		curr_partial->exprs =
 			fixup_appendrel_child_varnode(curr_partial->exprs,
 										  root,
-										  partitioned_rels,
+										  partition_relid,
 										  sub_path->parent);
 		curr_device->exprs =
 			fixup_appendrel_child_varnode(curr_device->exprs,
 										  root,
-										  partitioned_rels,
+										  partition_relid,
 										  sub_path->parent);
 
 		partial_path = prepend_gpupreagg_path(root,
