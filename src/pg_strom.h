@@ -421,6 +421,11 @@ mergeGpuTaskRuntimeStat(GpuTaskState *gts,
 	gts->nvme_count += pg_atomic_read_u64(&gt_rtstat->nvme_count);
 	gts->outer_brin_count += pg_atomic_read_u64(&gt_rtstat->brin_count);
 	gts->num_cpu_fallbacks += pg_atomic_read_u64(&gt_rtstat->fallback_count);
+
+	if (gts->css.ss.ps.instrument)
+		memcpy(&gts->css.ss.ps.instrument->bufusage,
+			   &gts->outer_instrument.bufusage,
+			   sizeof(BufferUsage));
 }
 
 /*

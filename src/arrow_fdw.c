@@ -1111,11 +1111,17 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 pgstrom_data_store *
 ExecScanChunkArrowFdw(GpuTaskState *gts)
 {
-	return arrowFdwLoadRecordBatch(gts->af_state,
-								   gts->css.ss.ss_currentRelation,
-								   gts->css.ss.ps.state,
-								   gts->gcontext,
-								   gts->optimal_gpu);
+	pgstrom_data_store *pds;
+
+	InstrStartNode(&gts->outer_instrument);
+	pds = arrowFdwLoadRecordBatch(gts->af_state,
+								  gts->css.ss.ss_currentRelation,
+								  gts->css.ss.ps.state,
+								  gts->gcontext,
+								  gts->optimal_gpu);
+	InstrStopNode(&gts->outer_instrument,
+				  !pds ? 0.0 : (double)pds->kds.nitems);
+	return pds;
 }
 
 /*

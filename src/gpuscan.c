@@ -1961,10 +1961,6 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	InstrEndLoop(&gss->gts.outer_instrument);
 	if (gs_rtstat)
 		mergeGpuTaskRuntimeStat(&gss->gts, &gs_rtstat->c);
-	if (gss->gts.css.ss.ps.instrument)
-		memcpy(&gss->gts.css.ss.ps.instrument->bufusage,
-			   &gss->gts.outer_instrument.bufusage,
-			   sizeof(BufferUsage));
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,

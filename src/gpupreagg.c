@@ -161,9 +161,6 @@ typedef struct
 struct GpuPreAggRuntimeStat
 {
 	GpuTaskRuntimeStat	c;		/* common statistics */
-	pg_atomic_uint64	source_nitems;
-	pg_atomic_uint64	nitems_filtered;
-	pg_atomic_uint64	num_fallback_rows;
 };
 typedef struct GpuPreAggRuntimeStat	GpuPreAggRuntimeStat;
 
@@ -4419,10 +4416,6 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	if (gpa_rtstat)
 		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
-	if (gpas->gts.css.ss.ps.instrument)
-		memcpy(&gpas->gts.css.ss.ps.instrument->bufusage,
-			   &gpas->gts.outer_instrument.bufusage,
-			   sizeof(BufferUsage));
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
@@ -4440,7 +4433,8 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("GPU Projection", exprstr, es);
 		}
 	}
-	pgstromExplainOuterScan(&gpas->gts, dcontext, ancestors, es,
+	pgstromExplainOuterScan(&gpas->gts,
+							dcontext, ancestors, es,
 							gpa_info->outer_quals,
 							gpa_info->outer_startup_cost,
 							gpa_info->outer_total_cost,
@@ -4456,12 +4450,12 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* other run-time statistics, if any */
 	if (gpa_rtstat)
 	{
-		uint64		num_fallback_rows
-			= pg_atomic_read_u64(&gpa_rtstat->num_fallback_rows);
+		uint64		fallback_count
+			= pg_atomic_read_u64(&gpa_rtstat->c.fallback_count);
 
-		if (num_fallback_rows > 0)
+		if (fallback_count > 0)
 			ExplainPropertyInteger("Num of CPU fallback rows",
-								   NULL, num_fallback_rows, es);
+								   NULL, fallback_count, es);
 	}
 }
 
@@ -4904,7 +4898,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 
 			econtext->ecxt_scantuple = gpas->outer_slot;
 		}
-		pg_atomic_add_fetch_u64(&gpa_rtstat->source_nitems, 1L);
+		pg_atomic_add_fetch_u64(&gpa_rtstat->c.source_nitems, 1L);
 
 		/* filter out the tuple, if any outer quals */
 #if PG_VERSION_NUM < 100000
@@ -4914,7 +4908,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 #endif
 		if (!retval)
 		{
-			pg_atomic_add_fetch_u64(&gpa_rtstat->nitems_filtered, 1L);
+			pg_atomic_add_fetch_u64(&gpa_rtstat->c.nitems_filtered, 1L);
 			continue;
 		}
 		/* makes a projection from the outer-scan to the pseudo-tlist */
@@ -4927,7 +4921,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 		break;
 #endif
 	}
-	pg_atomic_add_fetch_u64(&gpa_rtstat->num_fallback_rows, 1);
+	pg_atomic_add_fetch_u64(&gpa_rtstat->c.fallback_count, 1);
 	return slot;
 }
 
@@ -5044,9 +5038,9 @@ gpupreaggUpdateRunTimeStat(GpuTaskState *gts, kern_gpupreagg *kgpreagg)
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
 	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
 
-	pg_atomic_add_fetch_u64(&gpa_rtstat->source_nitems,
+	pg_atomic_add_fetch_u64(&gpa_rtstat->c.source_nitems,
 							(int64)kgpreagg->nitems_real);
-	pg_atomic_add_fetch_u64(&gpa_rtstat->nitems_filtered,
+	pg_atomic_add_fetch_u64(&gpa_rtstat->c.nitems_filtered,
 							(int64)kgpreagg->nitems_filtered);
 	//TODO: other statistics
 }
