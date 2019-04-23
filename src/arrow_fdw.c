@@ -1220,9 +1220,10 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		if (j > 0)
 		{
 			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j-1);
+			const char		   *attName = NameStr(attr->attname);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
-			appendStringInfoString(&buf, NameStr(attr->attname));
+			appendStringInfoString(&buf, quote_identifier(attName));
 		}
 	}
 	ExplainPropertyText("referenced", buf.data, es);
@@ -1234,9 +1235,32 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		const char *fname = strVal(lfirst(lc1));
 		File		fdesc = (File)lfirst_int(lc2);
 		int			rbcount = 0;
+		char	   *pos = label;
+		struct stat	st_buf;
 
-		snprintf(label, sizeof(label), "files%d", fcount++);
-		ExplainPropertyText(label, fname, es);
+		pos += snprintf(label, sizeof(label), "files%d", fcount++);
+		if (fstat(FileGetRawDesc(fdesc), &st_buf) != 0)
+			memset(&st_buf, 0, sizeof(struct stat));
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			resetStringInfo(&buf);
+			if (st_buf.st_size == 0)
+				appendStringInfoString(&buf, fname);
+			else
+				appendStringInfo(&buf, "%s (size: %s)", fname,
+								 format_bytesz(st_buf.st_size));
+			ExplainPropertyText(label, buf.data, es);
+		}
+		else
+		{
+			ExplainPropertyText(label, fname, es);
+
+			if (st_buf.st_size > 0)
+			{
+				sprintf(pos, "-size");
+				ExplainPropertyText(label, format_bytesz(st_buf.st_size), es);
+			}
+		}
 		if (!es->verbose)
 			continue;
 
@@ -1260,7 +1284,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 			}
 			rbcount++;
 		}
-		elog(INFO, "rbcount = %d", rbcount);
+
 		if (rbcount >= 0)
 		{
 			for (k = bms_next_member(af_state->referenced, -1);
@@ -1270,7 +1294,6 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 				Form_pg_attribute attr;
 
 				j = k + FirstLowInvalidHeapAttributeNumber;
-				elog(INFO, "j=%d", j);
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
 				attr = tupleDescAttr(tupdesc, j);
