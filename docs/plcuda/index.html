@@ -13,7 +13,7 @@
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
   <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="../css/highlight.css">
+  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
   <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
   <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
   <link href="../custom.css" rel="stylesheet">
@@ -22,12 +22,13 @@
     // Current page data
     var mkdocs_page_name = "PL/CUDA";
     var mkdocs_page_input_path = "plcuda.md";
-    var mkdocs_page_url = "/plcuda/";
+    var mkdocs_page_url = null;
   </script>
   
-  <script src="../js/jquery-2.1.1.min.js"></script>
-  <script src="../js/modernizr-2.8.3.min.js"></script>
-  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
 
@@ -97,6 +98,10 @@
                 <li class="">
                     
     <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../arrow_fdw/">Arrow_fdw</a>
                 </li>
                 <li class="">
                     
@@ -401,16 +406,16 @@ The CUDA program setup the referable <code>arg1</code>, <code>arg2</code>, ... v
 <p>Result of PL/CUDA function can be returned using <code>return</code> statement of CUDA C, according to the function definition.</p>
 <h3 id="plcuda_end"><code>#plcuda_end</code></h3>
 <p>It marks end of the kernel function code block. By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the <code>#plcuda_end</code> directive.</p>
-<h3 id="plcuda_include-function-name"><code>#plcuda_include &lt;function name&gt;</code></h3>
+<h3 id="plcuda_include-ltfunction-namegt"><code>#plcuda_include &lt;function name&gt;</code></h3>
 <p>This directive is similar to <code>#include</code> of CUDA C, however, it injects result of the specified SQL function onto the location where the directive was written.
 The SQL function should have identical arguments and return <code>text</code> data.</p>
 <p>For example, when we calculate similarity of massive items, we can generate multiple variant of the algorithm on the fly that is almost equivalent but only distance definitions are different. It makes maintenance of PL/CUDA function simplified.</p>
-<h3 id="plcuda_library-library-name"><code>#plcuda_library &lt;library name&gt;</code></h3>
+<h3 id="plcuda_library-ltlibrary-namegt"><code>#plcuda_library &lt;library name&gt;</code></h3>
 <p>It specifies the library name to be linked when CUDA program is built by <code>nvcc</code>.
 The <code>&lt;library name&gt;</code> portion is supplied to <code>nvcc</code> command as <code>-l</code> option.
 For example, if <code>libcublas.co</code> library is linked, you need to describe <code>cublas</code> without prefix (<code>lib</code>) and suffix (<code>.so</code>).
 Right now, we can specify the libraries only installed on the standard library path of CUDA Toolkit (`/usr/local/cuda/lib64).</p>
-<h3 id="plcuda_sanity_check-function"><code>#plcuda_sanity_check &lt;function&gt;</code></h3>
+<h3 id="plcuda_sanity_check-ltfunctiongt"><code>#plcuda_sanity_check &lt;function&gt;</code></h3>
 <p>It allows to specify the sanity check function that preliminary checks adequacy of the supplied arguments, prior to GPU kernel launch.
 No sanity check function is configured on the default.
 Usually, launch of GPU kernel function is heavier task than call of another function on CPU, because it also involves initialization of GPU devices. If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function. The sanity check function takes identical arguments with PL/CUDA function, and returns <code>bool</code> data type.</p>
@@ -589,9 +594,8 @@ Usually, launch of GPU kernel function is heavier task than call of another func
     </span>
 </div>
     <script>var base_url = '..';</script>
-    <script src="../js/theme.js"></script>
-      <script src="../search/require.js"></script>
-      <script src="../search/search.js"></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
 
 </body>
 </html>

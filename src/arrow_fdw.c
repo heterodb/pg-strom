@@ -269,6 +269,12 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 cl_int
 GetOptimalGpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
+	if (!baserel->fdw_private)
+	{
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+
+		ArrowGetForeignRelSize(root, baserel, rte->relid);
+	}
 	return intVal(baserel->fdw_private);
 }
 

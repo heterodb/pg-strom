@@ -21,6 +21,7 @@ pages:
     - 'Trouble Shooting' : 'troubles.md'
 - 'Advanced Features' :
     - 'SSD2GPU Direct SQL' : 'ssd2gpu.md'
+    - 'Arrow_fdw' : 'arrow_fdw.md'
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'References' :
@@ -41,6 +42,7 @@ pages:
     - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
     - 'SSDtoGPUダイレクトSQL' : 'ssd2gpu.md'
+    - 'Arrow_fdw' : 'arrow_fdw.md'
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'リファレンス' :

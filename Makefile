@@ -101,7 +101,7 @@ STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 #
 __DOC_FILES = index.md install.md partition.md \
               operations.md sys_admin.md brin.md partition.md troubles.md \
-	      ssd2gpu.md ccache.md gstore_fdw.md plcuda.md \
+	      ssd2gpu.md arrow_fdw.md gstore_fdw.md plcuda.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
 	      release_note.md
 
@@ -226,7 +226,8 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 	    -f $(STROM_BUILD_ROOT)/man/mkdocs.yml	\
 	    -o $(STROM_BUILD_ROOT)/man/mkdocs.en.yml
 	pushd $(STROM_BUILD_ROOT)/man;			\
-	$(MKDOCS) build -c -f mkdocs.en.yml -d ../docs;	\
+	env LANG=en_US.utf8				\
+		$(MKDOCS) build -c -f mkdocs.en.yml -d ../docs;	\
 	popd
 	for x in $(__DOC_FILES);			\
 	do						\
@@ -238,7 +239,8 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 	    -f $(STROM_BUILD_ROOT)/man/mkdocs.yml	\
 	    -o $(STROM_BUILD_ROOT)/man/mkdocs.ja.yml
 	pushd $(STROM_BUILD_ROOT)/man;			\
-	$(MKDOCS) build -c -f mkdocs.ja.yml -d ../docs/ja; \
+	env LANG=ja_JP.utf8			 	\
+		$(MKDOCS) build -c -f mkdocs.ja.yml -d ../docs/ja; \
 	popd
 
 #

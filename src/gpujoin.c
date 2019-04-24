@@ -1574,7 +1574,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 						Path   *ipath = gpath->inners[j].scan_path;
 
 						inner_relids[j] = ipath->parent->relids;
-						elog(INFO, "inner[%d] = %s", j, bmsToString(inner_relids[j]));
 					}
 				}
 				else
@@ -1583,7 +1582,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 					{
 						Path   *ipath = gpath->inners[j].scan_path;
 
-						elog(INFO, "INNER[%d] = %s", j, bmsToString(ipath->parent->relids));
 						if (!bms_equal(inner_relids[j],
 									   ipath->parent->relids))
 							goto gpujoin_not_compatible;

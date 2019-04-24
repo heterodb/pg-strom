@@ -1,112 +1,83 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-
-    
     <url>
-     <loc>/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-    
-
-    
     <url>
-     <loc>/install/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-    
-
-    
-        
     <url>
-     <loc>/operations/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/sys_admin/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/brin/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/partition/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/troubles/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
-    
-
-    
-        
     <url>
-     <loc>/ssd2gpu/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/gstore_fdw/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/plcuda/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
-    
-
-    
-        
     <url>
-     <loc>/ref_types/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/ref_devfuncs/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/ref_sqlfuncs/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
     <url>
-     <loc>/ref_params/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-        
-    
-
-    
     <url>
-     <loc>/release_note/</loc>
-     <lastmod>2018-12-27</lastmod>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
      <changefreq>daily</changefreq>
     </url>
-    
-
+    <url>
+     <loc>None</loc>
+     <lastmod>2019-04-24</lastmod>
+     <changefreq>daily</changefreq>
+    </url>
 </urlset>
