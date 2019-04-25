@@ -9,7 +9,7 @@ theme:
 @ja{
     custom_dir: docs/custom_ja
 }
-pages:
+nav:
 @en{
 - 'Home' : 'index.md'
 - 'Install' : 'install.md'
