@@ -1,10 +1,83 @@
-@ja:# PG-Strom v2.0リリース
-@en:# PG-Strom v2.0 Release
+<!--
+@ja:#PG-Strom v2.2リリース
+@en:#PG-Strom v2.2 Release
+
+<div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
+
+@ja:##概要
+@en:##Overview
+
+@ja{
+PG-Strom v2.2における主要な機能強化は以下の通りです。
+
+- PostgreSQL v11への対応
+- テーブルパーティションへの対応
+- Arrow_Fdwによる列指向ストアのサポート
+- Jsonbデータ型の対応
+- 可変長データ型を返すGPU関数の対応
+- GPUメモリストア（Gstore_Fdw）のソート対応
+- NVMEoFへの対応（NVMe-Stromドライバ）
+- キャッシュページの高速転送（NVMe-Stromドライバ）
+}
+
+
+
+
+@ja:##動作環境
+@en:##Prerequisites
+
+@ja{
+- PostgreSQL v9.6, v10, v11
+- CUDA Toolkit 9.1
+- CUDA ToolkitのサポートするLinuxディストリビューション
+- Intel x86 64bit アーキテクチャ(x86_64)
+- NVIDIA GPU CC 6.0 以降 (Pascal以降)
+}
+@en{
+- PostgreSQL v9.6, v10, v11
+- CUDA Toolkit 9.1
+- Linux distributions supported by CUDA Toolkit
+- Intel x86 64bit architecture (x86_64)
+- NVIDIA GPU CC 6.0 or later (Pascal or Volta)
+}
+
+@ja:##新機能
+@en:##New Features
+
+@ja{
+- PostgreSQL v11への対応
+- テーブルパーティションへの対応
+- Arrow_Fdwによる列指向ストアのサポート
+- Jsonbデータ型の対応
+- 可変長データ型を返すGPU関数の対応
+- GPUメモリストア（Gstore_Fdw）のソート対応
+- NVMEoFへの対応（NVMe-Stromドライバ）
+- キャッシュページの高速転送（NVMe-Stromドライバ）
+}
+
+
+
+
+
+
+@ja:##廃止された機能
+@en:##Dropped Features
+
+@ja{
+- インメモリ列キャッシュ
+    - ユースケースを分析した結果、多くのケースではArrow_Fdwで十分に代替可能なワークロードである事が分かりました。重複機能であるため、本機能は削除されました。
+}
+
+
+-->
+
+@ja:#PG-Strom v2.0リリース
+@en:#PG-Strom v2.0 Release
 
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-@ja:## 概要
-@en:## Overview
+@ja:##概要
+@en:##Overview
 
 @ja{
 PG-Strom v2.0における主要な機能強化は以下の通りです。
@@ -34,8 +107,8 @@ Major enhancement in PG-Strom v2.0 includes:
 You can download the summary of new features from: [PG-Strom v2.0 Technical Brief](./blob/20180417_PGStrom_v2.0_TechBrief.pdf).
 }
 
-@ja:## 動作環境
-@en:## Prerequisites
+@ja:##動作環境
+@en:##Prerequisites
 
 @ja{
 - PostgreSQL v9.6, v10
@@ -52,8 +125,8 @@ You can download the summary of new features from: [PG-Strom v2.0 Technical Brie
 - NVIDIA GPU CC 6.0 or later (Pascal or Volta)
 }
 
-@ja:## 新機能
-@en:## New Features
+@ja:##新機能
+@en:##New Features
 
 @ja{
 - GPUを管理する内部インフラストラクチャの全体的な再設計と安定化
@@ -198,8 +271,8 @@ You can download the summary of new features from: [PG-Strom v2.0 Technical Brie
     - Regression test for PG-Strom was built on top of the regression test framework of PostgreSQL.
 }
 
-@ja:## 廃止された機能
-@en:## Dropped features
+@ja:##廃止された機能
+@en:##Dropped features
 
 @ja{
 - PostgreSQL v9.5サポート
