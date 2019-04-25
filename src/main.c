@@ -41,6 +41,7 @@ static CustomScanMethods	pgstrom_dummy_plan_methods;
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
+long		PHYS_PAGES;
 
 /* SQL function declarations */
 Datum pgstrom_license_query(PG_FUNCTION_ARGS);
@@ -553,6 +554,7 @@ _PG_init(void)
 	PAGE_SIZE = sysconf(_SC_PAGESIZE);
 	PAGE_MASK = PAGE_SIZE - 1;
 	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
+	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
 
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_misc_guc();

@@ -944,6 +944,7 @@ extern void pgstrom_init_gputasks(void);
 /*
  * nvme_strom.c
  */
+extern Size	nvme_strom_threshold(void);
 extern int	nvme_strom_ioctl(int cmd, void *arg);
 extern int	GetOptimalGpuForFile(const char *fname, File fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
@@ -1407,6 +1408,7 @@ extern Size		pgstrom_chunk_size(void);
 extern long		PAGE_SIZE;
 extern long		PAGE_MASK;
 extern int		PAGE_SHIFT;
+extern long		PHYS_PAGES;
 extern TimestampTz commercial_license_expired_at(void);
 
 extern Path *pgstrom_create_dummy_path(PlannerInfo *root,

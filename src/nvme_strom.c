@@ -61,6 +61,15 @@ static char		   *nvme_manual_distance_map;	/* GUC */
 static void			apply_nvme_manual_distance_map(void);
 
 /*
+ * nvme_strom_threshold
+ */
+Size
+nvme_strom_threshold(void)
+{
+	return (Size)nvme_strom_threshold_kb << 10;
+}
+
+/*
  * nvme_strom_ioctl
  */
 int
@@ -929,7 +938,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 		elog(ERROR, "Bug? unexpected reloptkind of base relation: %d",
 			 (int)baserel->reloptkind);
 
-	if (num_scan_pages < ((size_t)nvme_strom_threshold_kb << 10) / BLCKSZ)
+	if (num_scan_pages < nvme_strom_threshold() / BLCKSZ)
 		return false;
 	/* ok, this table scan can use nvme-strom */
 	return true;
@@ -941,8 +950,6 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 void
 pgstrom_init_nvme_strom(void)
 {
-	long		sysconf_pagesize;		/* _SC_PAGESIZE */
-	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 	long		default_threshold;
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	bool		has_tesla_gpu = false;
@@ -972,28 +979,21 @@ pgstrom_init_nvme_strom(void)
 	/*
 	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
 	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
+	 *    (shared_buffer size)) * 0.5 + (shared_buffer size)
 	 *
 	 * If table size is enough large to issue real i/o, NVMe-Strom will
 	 * make advantage by higher i/o performance.
 	 */
-	sysconf_pagesize = sysconf(_SC_PAGESIZE);
-	if (sysconf_pagesize < 0)
-		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
-	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
-	if (sysconf_phys_pages < 0)
-		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
-	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
+	if (PAGE_SIZE * PHYS_PAGES < shared_buffer_size)
 		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
-	default_threshold = ((sysconf_pagesize * sysconf_phys_pages -
-						  shared_buffer_size) * 2 / 3 +
-						 shared_buffer_size) / 1024;
+	default_threshold = ((PAGE_SIZE * PHYS_PAGES - shared_buffer_size) / 2
+						 + shared_buffer_size);
 	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
 							"Tablesize threshold to use SSD-to-GPU P2P DMA",
 							NULL,
 							&nvme_strom_threshold_kb,
-							default_threshold,
-							RELSEG_SIZE,
+							default_threshold >> 10,
+							262144,	/* 256MB */
 							INT_MAX,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
@@ -1017,4 +1017,3 @@ pgstrom_init_nvme_strom(void)
 							   NULL, NULL, NULL);
 	setup_nvme_distance_map();
 }
-

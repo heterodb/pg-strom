@@ -176,6 +176,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 {
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	Size			filesSizeTotal = 0;
 	Bitmapset	   *referenced = NULL;
 	BlockNumber		npages = 0;
 	double			ntuples = 0.0;
@@ -224,6 +225,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
 
+			if (cell == list_head(rb_cached))
+				filesSizeTotal += BLCKALIGN(rb_state->stat_buf.st_size);
+
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
 			{
 				for (j=0; j < rb_state->ncols; j++)
@@ -250,6 +254,9 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	if (optimal_gpu < 0 || optimal_gpu >= numDevAttrs)
 		optimal_gpu = -1;
+	else if (filesSizeTotal < nvme_strom_threshold())
+		optimal_gpu = -1;
+
 	baserel->fdw_private = makeInteger(optimal_gpu);
 	baserel->pages = npages;
 	baserel->tuples = ntuples;

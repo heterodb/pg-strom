@@ -586,16 +586,10 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		{
 			DevAttributes  *dattr = &devAttrs[gts->optimal_gpu];
 
-			snprintf(temp, sizeof(temp), "GPU%d (%s)",
-					 dattr->DEV_ID, dattr->DEV_NAME);
-		}
-		ExplainPropertyText("GPU Preference", temp, es);
-		if (gts->af_state)
-		{
-			if (gts->optimal_gpu < 0)
-				ExplainPropertyText("NVMe-Strom", "disabled", es);
-			else
-				ExplainPropertyText("NVMe-Strom", "enabled",  es);
+			snprintf(temp, sizeof(temp), "GPU%d (%s)%s",
+					 dattr->DEV_ID, dattr->DEV_NAME,
+					 gts->af_state ? " with NVMe-Strom" : "");
+			ExplainPropertyText("GPU Preference", temp, es);
 		}
 	}
 
