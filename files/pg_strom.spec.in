@@ -71,6 +71,7 @@ ldconfig
 %doc LICENSE README.md
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/gpuinfo
+%{__pkgbindir}/pg2arrow
 %{__pkgsharedir}/extension/*
 %config %{__systemd_conf}
 %if "%{PGSQL_PKGVER}" != "96" && "%{PGSQL_PKGVER}" != "10"
