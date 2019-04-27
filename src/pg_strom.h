@@ -1326,21 +1326,11 @@ extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 /*
  * arrow_fdw.c and arrow_read.c
  */
-typedef struct
-{
-	const char	   *filename;
-	struct stat		stat_buf;
-	ArrowFooter		footer;
-	List		   *dictionaries;	/* List of ArrowDictionaryBatch */
-	List		   *recordBatches;	/* List of ArrowRecordBatch */
-} ArrowFileInfo;
-
 extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
 extern cl_int GetOptimalGpuForArrowFdw(PlannerInfo *root,
 									   RelOptInfo *baserel);
 
-extern void readArrowFileDesc(File filp, ArrowFileInfo *af_info);
-extern void readArrowFile(char *pathname, ArrowFileInfo *af_info);
+extern void readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern char *dumpArrowNode(ArrowNode *node);
 extern void copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern char *arrowTypeName(ArrowField *field);

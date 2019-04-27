@@ -6,10 +6,11 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License. See the LICENSE file.
  */
+#ifndef __PG2ARROW__
 #include "pg_strom.h"
-#include "arrow_defs.h"
+#define Elog(fmt, ...)		elog(ERROR,(fmt),##__VA_ARGS__)
+#endif
 
-#ifdef PG_STROM_H
 /*
  * Dump support of ArrowNode
  */
@@ -159,13 +160,9 @@ __dumpArrowKeyValue(StringInfo str, ArrowNode *node)
 {
 	ArrowKeyValue *kv = (ArrowKeyValue *)node;
 
-	appendStringInfo(str,"{KeyValue: key=\"");
-	if (kv->key)
-		outToken(str, kv->key);
-	appendStringInfo(str,"\", value=\"");
-	if (kv->value)
-		outToken(str, kv->value);
-	appendStringInfo(str,"\"}");
+	appendStringInfo(str,"{KeyValue: key=\"%s\" value=\"%s\"}",
+					 kv->key ? kv->key : "",
+					 kv->value ? kv->value : "");
 }
 
 static void
@@ -185,10 +182,8 @@ __dumpArrowField(StringInfo str, ArrowNode *node)
 	ArrowField *f = (ArrowField *)node;
 	int		i;
 
-	appendStringInfo(str, "{Field: name=\"");
-	if (f->name)
-		outToken(str, f->name);
-	appendStringInfo(str, "\", nullable=%s, type=",
+	appendStringInfo(str, "{Field: name=\"%s\", nullable=%s, type=",
+					 f->name ? f->name : "",
 					 f->nullable ? "true" : "false");
 	__dumpArrowNode(str, (ArrowNode *)&f->type);
 	if (f->dictionary.indexType.node.tag == ArrowNodeTag__Int)
@@ -356,9 +351,7 @@ dumpArrowNode(ArrowNode *node)
 
 	return str.data;
 }
-#endif
 
-#ifdef PG_STROM_H
 /*
  * Copy support of ArrowNode
  */
@@ -384,7 +377,6 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 {
 	COPY_SCALAR(tag);
 	COPY_SCALAR(tagName);
-	COPY_SCALAR(nodeSz);
 	COPY_SCALAR(dumpArrowNode);
 	COPY_SCALAR(copyArrowNode);
 }
@@ -394,8 +386,6 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 #define __copyArrowTypeBool		__copyArrowNode
 #define __copyArrowTypeList		__copyArrowNode
 #define __copyArrowTypeStruct	__copyArrowNode
-
-typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
 
 static void
 __copyArrowTypeInt(ArrowTypeInt *dest, const ArrowTypeInt *src)
@@ -585,7 +575,7 @@ __copyArrowMessage(ArrowMessage *dest, const ArrowMessage *src)
 								   &src->body.recordBatch);
 			break;
 		default:
-			elog(ERROR, "Bug? unknown ArrowMessageBody");
+			Elog("Bug? unknown ArrowMessageBody");
 	}
 	COPY_SCALAR(bodyLength);
 }
@@ -614,9 +604,7 @@ copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 {
 	src->copyArrowNode(dest, src);
 }
-#endif
 
-#ifdef PG_STROM_H
 /*
  * CString representation of arrow type name
  */
@@ -714,7 +702,7 @@ __arrowTypeName(char *buf, size_t len, ArrowField *field)
 			break;
 		case ArrowNodeTag__List:
 			if (field->_num_children != 1)
-				elog(ERROR, "corrupted List data type");
+				Elog("corrupted List data type");
 			sz = __arrowTypeName(buf, len, &field->children[0]);
 			sz += snprintf(buf+sz, len-sz, "[]");
 			break;
@@ -745,7 +733,7 @@ __arrowTypeName(char *buf, size_t len, ArrowField *field)
 			sz = snprintf(buf, len, "Map");
 			break;
 		default:
-			elog(ERROR, "unknown Arrow type");
+			Elog("unknown Arrow type");
 	}
 	return sz;
 }
@@ -759,7 +747,6 @@ arrowTypeName(ArrowField *field)
 
 	return pstrdup(buf);
 }
-#endif
 
 /* ------------------------------------------------
  *
@@ -767,24 +754,18 @@ arrowTypeName(ArrowField *field)
  *
  * ------------------------------------------------
  */
-#ifdef PG_STROM_H
-#define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)					\
-	do {														\
-		((ArrowNode *)(PTR))->tag = ArrowNodeTag__##NAME;		\
-		((ArrowNode *)(PTR))->tagName = #NAME;					\
-		((ArrowNode *)(PTR))->nodeSz = sizeof(Arrow##TYPENAME);	\
-		((ArrowNode *)(PTR))->dumpArrowNode = __dumpArrow##TYPENAME; \
-		((ArrowNode *)(PTR))->copyArrowNode						\
-			= (copyArrowNode_f)__copyArrow##TYPENAME;			\
+typedef void (*dumpArrowNode_f)(StringInfo str, ArrowNode *node);
+typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
+
+#define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)				\
+	do {													\
+		((ArrowNode *)(PTR))->tag = ArrowNodeTag__##NAME;	\
+		((ArrowNode *)(PTR))->tagName = #NAME;				\
+		((ArrowNode *)(PTR))->dumpArrowNode					\
+			= (dumpArrowNode_f)__dumpArrow##TYPENAME;		\
+		((ArrowNode *)(PTR))->copyArrowNode					\
+			= (copyArrowNode_f)__copyArrow##TYPENAME;		\
 	} while(0)
-#else	/* PG_STROM_H */
-#define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)					\
-	do {														\
-		((ArrowNode *)(PTR))->tag = ArrowNodeTag__##NAME;		\
-		((ArrowNode *)(PTR))->tagName = #NAME;					\
-		((ArrowNode *)(PTR))->nodeSz = sizeof(Arrow##TYPENAME);	\
-	} while(0)
-#endif	/* PG_STROM_H */
 #define INIT_ARROW_NODE(PTR,NAME)		__INIT_ARROW_NODE(PTR,NAME,NAME)
 #define INIT_ARROW_TYPE_NODE(PTR,NAME)	__INIT_ARROW_NODE(PTR,Type##NAME,NAME)
 
@@ -893,7 +874,9 @@ fetchString(FBTable *t, int index, int *p_strlen)
 	else
 	{
 		len = *ptr++;
-		temp = pnstrdup((char *)ptr, len);
+		temp = palloc(len + 1);
+		memcpy(temp, (char *)ptr, len);
+		temp[len] = '\0';
 	}
 	*p_strlen = len;
 	return temp;
@@ -1162,7 +1145,7 @@ readArrowField(ArrowField *field, const char *pos)
 			int		offset = vector[i];
 
 			if (offset == 0)
-				elog(ERROR, "ArrowField has NULL-element in children[]");
+				Elog("ArrowField has NULL-element in children[]");
 			readArrowField(&field->children[i],
 						   (const char *)&vector[i] + offset);
 		}
@@ -1179,7 +1162,7 @@ readArrowField(ArrowField *field, const char *pos)
 			int		offset = vector[i];
 
 			if (offset == 0)
-				elog(ERROR, "ArrowField has NULL-element in custom_metadata[]");
+				Elog("ArrowField has NULL-element in custom_metadata[]");
 			readArrowKeyValue(&field->custom_metadata[i],
 							  (const char *)&vector[i] + offset);
 		}
@@ -1207,7 +1190,7 @@ readArrowSchema(ArrowSchema *schema, const char *pos)
 			int		offset = vector[i];
 
 			if (offset == 0)
-				elog(ERROR, "ArrowSchema has NULL-element in fields[]");
+				Elog("ArrowSchema has NULL-element in fields[]");
 			readArrowField(&schema->fields[i],
 						   (const char *)&vector[i] + offset);
 		}
@@ -1224,7 +1207,7 @@ readArrowSchema(ArrowSchema *schema, const char *pos)
 			int		offset = vector[i];
 
 			if (offset == 0)
-				elog(ERROR, "ArrowSchema has NULL-element in custom_metadata[]");
+				Elog("ArrowSchema has NULL-item in custom_metadata[]");
 			readArrowKeyValue(&schema->custom_metadata[i],
 							  (const char *)&vector[i] + offset);
 		}
@@ -1326,7 +1309,7 @@ readArrowMessage(ArrowMessage *message, const char *pos)
 	message->bodyLength	= fetchLong(&t, 3);
 
 	if (message->version != ArrowMetadataVersion__V4)
-		elog(ERROR, "metadata version %d is not supported", message->version);
+		Elog("metadata version %d is not supported", message->version);
 
 	switch (mtype)
 	{
@@ -1340,13 +1323,13 @@ readArrowMessage(ArrowMessage *message, const char *pos)
 			readArrowRecordBatch(&message->body.recordBatch, next);
 			break;
 		case ArrowMessageHeader__Tensor:
-			elog(ERROR, "message type: Tensor is not implemented");
+			Elog("message type: Tensor is not implemented");
 			break;
 		case ArrowMessageHeader__SparseTensor:
-			elog(ERROR, "message type: SparseTensor is not implemented");
+			Elog("message type: SparseTensor is not implemented");
 			break;
 		default:
-			elog(ERROR, "unknown message header type: %d", mtype);
+			Elog("unknown message header type: %d", mtype);
 			break;
 	}
 }
@@ -1413,95 +1396,82 @@ readArrowFooter(ArrowFooter *node, const char *pos)
  * readArrowFile - read the supplied apache arrow file
  */
 void
-readArrowFileDesc(File filp, ArrowFileInfo *af_info)
+readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 {
-	int				fdesc = FileGetRawDesc(filp);
 	size_t			file_sz;
 	size_t			mmap_sz;
 	char		   *mmap_head = NULL;
 	char		   *mmap_tail = NULL;
 	const char	   *pos;
 	FBMetaData	   *meta;
-	cl_int			offset;
-	cl_int			i, nitems;
+	int32			offset;
+	int32			i, nitems;
 
 	memset(af_info, 0, sizeof(ArrowFileInfo));
 	if (fstat(fdesc, &af_info->stat_buf) != 0)
-		elog(ERROR, "failed on fstat: %m");
+		Elog("failed on fstat: %m");
 	file_sz = af_info->stat_buf.st_size;
 	mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), file_sz);
 	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
 	if (mmap_head == MAP_FAILED)
-		elog(ERROR, "failed on mmap: %m");
+		Elog("failed on mmap: %m");
 	mmap_tail = mmap_head + file_sz;
 
-	PG_TRY();
+	/* check signature */
+	if (memcmp(mmap_head, "ARROW1\0\0", 8) != 0 ||
+		memcmp(mmap_tail - 6, "ARROW1", 6) != 0)
 	{
-		/* check signature */
-		if (memcmp(mmap_head, "ARROW1\0\0", 8) != 0 ||
-			memcmp(mmap_tail - 6, "ARROW1", 6) != 0)
-			elog(ERROR, "Signature mismatch on Apache Arrow file");
+		munmap(mmap_head, mmap_sz);
+		Elog("Signature mismatch on Apache Arrow file");
+	}
 
-		/* OK, read the Apache Arrow file */
-		memset(af_info, 0, sizeof(ArrowFileInfo));
-		/* Read Footer chunk */
-		pos = mmap_tail - 6 - sizeof(int32);
-		offset = *((int32 *)pos);
-		pos -= offset;
-		offset = *((int32 *)pos);
-		readArrowFooter(&af_info->footer, pos + offset);
+	/* Read Footer chunk */
+	pos = mmap_tail - 6 - sizeof(int32);
+	offset = *((int32 *)pos);
+	pos -= offset;
+	offset = *((int32 *)pos);
+	readArrowFooter(&af_info->footer, pos + offset);
 
-		/* Read DictionaryBatch chunks */
-		nitems = af_info->footer._num_dictionaries;
+	/* Read DictionaryBatch chunks */
+	nitems = af_info->footer._num_dictionaries;
+	if (nitems > 0)
+	{
+		af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
 		for (i=0; i < nitems; i++)
 		{
 			ArrowBlock	   *b = &af_info->footer.dictionaries[i];
-			ArrowMessage   *m = palloc0(sizeof(ArrowMessage));
+			ArrowMessage   *m = &af_info->dictionaries[i];
 
 			meta = (FBMetaData *)(mmap_head + b->offset);
 			if (b->metaDataLength != meta->metaLength + sizeof(int32))
-				elog(ERROR, "metadata length mismatch");
+			{
+				munmap(mmap_head, mmap_sz);
+				Elog("metadata length mismatch");
+			}
 			pos = (const char *)&meta->headOffset + meta->headOffset;
 			readArrowMessage(m, pos);
-
-			af_info->dictionaries = lappend(af_info->dictionaries,
-											&m->body.dictionaryBatch);
 		}
+	}
 
-		/* Read RecordBatch chunks */
-		nitems = af_info->footer._num_recordBatches;
+	/* Read RecordBatch chunks */
+	nitems = af_info->footer._num_recordBatches;
+	if (nitems > 0)
+	{
+		af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
 		for (i=0; i < nitems; i++)
 		{
 			ArrowBlock	   *b = &af_info->footer.recordBatches[i];
-			ArrowMessage   *m = palloc0(sizeof(ArrowMessage));
+			ArrowMessage   *m = &af_info->recordBatches[i];
 
 			meta = (FBMetaData *)(mmap_head + b->offset);
 			if (b->metaDataLength != meta->metaLength + sizeof(int32))
-				elog(ERROR, "metadata length mismatch");
+			{
+				munmap(mmap_head, mmap_sz);
+				Elog("metadata length mismatch");
+			}
 			pos = (const char *)&meta->headOffset + meta->headOffset;
 			readArrowMessage(m, pos);
-
-			af_info->recordBatches = lappend(af_info->recordBatches,
-											 &m->body.recordBatch);
 		}
 	}
-	PG_CATCH();
-	{
-		if (munmap(mmap_head, mmap_sz) != 0)
-			elog(LOG, "failed on munmap(2): %m");
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	if (munmap(mmap_head, mmap_sz) != 0)
-		elog(LOG, "failed on munmap(2): %m");
-}
-
-void
-readArrowFile(char *pathname, ArrowFileInfo *af_info)
-{
-	File		filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
-
-	readArrowFileDesc(filp, af_info);
-
-	FileClose(filp);
+	munmap(mmap_head, mmap_sz);
 }

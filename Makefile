@@ -33,7 +33,8 @@ __STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		pl_cuda.o gstore_buf.o gstore_fdw.o \
 		arrow_fdw.o arrow_read.o \
 		matrix.o float2.o largeobject.o misc.o
-__STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h cuda_filelist
+__STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
+		device_attrs.h cuda_filelist
 __PLCUDA_HOST = host_plcuda.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS) $(__PLCUDA_HOST))
 PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
@@ -49,12 +50,26 @@ CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo dbgen-ssbm dbgen-dbt3
+__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm dbgen-dbt3
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO = $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE = $(STROM_BUILD_ROOT)/utils/gpuinfo.c
 GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH)
+
+PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
+__PG2ARROW_SOURCE = pg2arrow.c arrow_write.c
+PG2ARROW_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__PG2ARROW_SOURCE))
+PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
+	$(addprefix $(STROM_BUILD_ROOT)/src/, arrow_read.c) \
+	$(addprefix $(STROM_BUILD_ROOT)/src/, arrow_defs.h) \
+	$(addprefix $(STROM_BUILD_ROOT)/utils/, arrow_types.c)
+PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -g -O0 \
+			-I $(STROM_BUILD_ROOT)/src \
+			-I $(STROM_BUILD_ROOT)/utils \
+			-I $(shell $(PG_CONFIG) --includedir) \
+			-I $(shell $(PG_CONFIG) --includedir-server) \
+			-L $(shell $(PG_CONFIG) --libdir)
 
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
@@ -248,6 +263,9 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 #
 $(GPUINFO): $(GPUINFO_SOURCE) $(STROM_HEADERS)
 	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
+
+$(PG2ARROW): $(PG2ARROW_DEPEND)
+	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm

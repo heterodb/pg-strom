@@ -175,12 +175,10 @@ struct ArrowNode
 {
 	ArrowNodeTag	tag;
 	const char	   *tagName;
-	size_t			nodeSz;
-#ifdef PG_STROM_H
+//	size_t			nodeSz;
 	void		  (*dumpArrowNode)(StringInfo str, struct ArrowNode *node);
 	void		  (*copyArrowNode)(struct ArrowNode *dest,
 								   const struct ArrowNode *source);
-#endif /* PG_STROM_H */
 };
 typedef struct ArrowNode		ArrowNode;
 
@@ -460,5 +458,18 @@ typedef struct		ArrowFooter
 	ArrowBlock	   *recordBatches;
 	int				_num_recordBatches;
 } ArrowFooter;
+
+/*
+ * ArrowFileInfo - state information of readArrowFileDesc()
+ */
+typedef struct
+{
+	const char	   *filename;
+	struct stat		stat_buf;
+	ArrowFooter		footer;
+	ArrowMessage   *dictionaries;	/* array of ArrowDictionaryBatch */
+	ArrowMessage   *recordBatches;	/* array of ArrowRecordBatch */
+} ArrowFileInfo;
+
 #endif		/* __CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

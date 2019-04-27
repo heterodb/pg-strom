@@ -1327,6 +1327,19 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 }
 
 /*
+ * readArrowFile
+ */
+static void
+readArrowFile(char *pathname, ArrowFileInfo *af_info)
+{
+    File        filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
+
+    readArrowFileDesc(FileGetRawDesc(filp), af_info);
+
+    FileClose(filp);
+}
+
+/*
  * ArrowImportForeignSchema
  */
 static List *
@@ -2816,19 +2829,23 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 	if (rb_cached == NIL)
 	{
 		ArrowFileInfo af_info;
-		ListCell   *lc;
-		int			index = 0;
+		int			index;
 
-		readArrowFileDesc(fdesc, &af_info);
-		if (af_info.dictionaries != NIL)
+		readArrowFileDesc(FileGetRawDesc(fdesc), &af_info);
+		if (af_info.dictionaries != NULL)
 			elog(ERROR, "DictionaryBatch is not supported");
 		Assert(af_info.footer._num_dictionaries == 0);
 
-		foreach (lc, af_info.recordBatches)
+		if (af_info.recordBatches == NULL)
+			elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
+		Assert(af_info.footer._num_recordBatches > 0);
+		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
-			ArrowBlock       *block = &af_info.footer.recordBatches[index];
-			ArrowRecordBatch *rbatch = lfirst(lc);
 			RecordBatchState *rb_state;
+			ArrowBlock       *block
+				= &af_info.footer.recordBatches[index];
+			ArrowRecordBatch *rbatch
+				= &af_info.recordBatches[index].body.recordBatch;
 
 			rb_state = makeRecordBatchState(&af_info.footer.schema,
 											block, rbatch);
@@ -2838,10 +2855,7 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 				elog(ERROR, "failed on stat('%s'): %m", fname);
 			rb_state->rb_index = index;
 			rb_cached = lappend(rb_cached, rb_state);
-			index++;
 		}
-		if (rb_cached == NIL)
-			elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
 		arrowUpdateMetadataCache(rb_cached);
 	}
 	return rb_cached;
