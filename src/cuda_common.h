@@ -63,7 +63,7 @@ typedef cl_ulong			uintptr_t;
 #ifndef PG_STROM_H
 #ifdef offsetof
 #undef offsetof
-#endif
+#endif /* offsetof */
 #define offsetof(TYPE,FIELD)			((long) &((TYPE *)0UL)->FIELD)
 
 #ifdef __NVCC__
@@ -74,7 +74,7 @@ typedef cl_ulong			uintptr_t;
  * E.g) offsetof(kds, colmeta[kds->ncols]) made an error.
  */
 #define __builtin_offsetof(TYPE,FIELD)	((long) &((TYPE *)0UL)->FIELD)
-#endif
+#endif /* __NVCC__ */
 
 #ifdef lengthof
 #undef lengthof
@@ -232,9 +232,8 @@ typedef struct nameData
 #define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
 #define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
 #endif		/* PG_STROM_H */
-/*
- * wider alignments
- */
+
+/* wider alignment */
 #define STROMALIGN_LEN			16
 #define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,(LEN))
 #define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,(LEN))
@@ -373,13 +372,14 @@ struct kern_parambuf;
 /* just a dummy for host code */
 #define KERN_CONTEXT_VARLENA_BUFSZ			1
 #endif	/* __CUDACC__ */
-#define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	2048
+#define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	8192
 
 typedef struct
 {
 	kern_errorbuf	e;
 	struct kern_parambuf *kparams;
 	cl_char		   *vlpos;
+	cl_char		   *vlend;
 	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
 } kern_context;
 
@@ -390,28 +390,28 @@ typedef struct
 									MAXALIGN(VARLENA_BUFSZ)];			\
 	}
 
-#define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)		\
-	do {													\
-		(kcxt)->e.errcode = StromError_Success;				\
-		(kcxt)->e.kernel = StromKernel_##kfunction;			\
-		(kcxt)->e.lineno = 0;								\
-		(kcxt)->e.filename[0] = '\0';						\
-		(kcxt)->kparams = (__kparams);						\
-		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams)); \
-		(kcxt)->vlpos = (kcxt)->vlbuf;						\
+#define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)				\
+	do {															\
+		(kcxt)->e.errcode = StromError_Success;						\
+		(kcxt)->e.kernel = StromKernel_##kfunction;					\
+		(kcxt)->e.lineno = 0;										\
+		(kcxt)->e.filename[0] = '\0';								\
+		(kcxt)->kparams = (__kparams);								\
+		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
+		(kcxt)->vlpos = (kcxt)->vlbuf;								\
+		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ;	\
 	} while(0)
 
 #define PTR_ON_VLBUF(kcxt,ptr,len)							\
 	((char *)(ptr) >= (kcxt)->vlbuf &&						\
-	 (char *)(ptr) + (len) <= (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ)
+	 (char *)(ptr) + (len) <= (kcxt)->vlend)
 
 STATIC_INLINE(void *)
 kern_context_alloc(kern_context *kcxt, size_t len)
 {
 	char   *pos = (char *)MAXALIGN(kcxt->vlpos);
 
-	if (pos >= kcxt->vlbuf &&
-		pos + len <= kcxt->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ)
+	if (pos >= kcxt->vlbuf && pos + len <= kcxt->vlend)
 	{
 		kcxt->vlpos = pos + len;
 		return pos;
@@ -491,6 +491,21 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 
 #ifdef __CUDACC__
 /*
+ * __Fetch - unaligned memory access for variable types
+ */
+template <typename T>
+DEVICE_ONLY_INLINE(T)
+__Fetch(const T *ptr)
+{
+	T	temp;
+
+	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
+		return *ptr;
+	memcpy(&temp, ptr, sizeof(T));
+	return temp;
+}
+
+/*
  * NumSmx - reference to the %nsmid register
  */
 STATIC_INLINE(cl_uint) NumSmx(void)
@@ -552,7 +567,26 @@ STATIC_INLINE(cl_ulong) GlobalTimer(void)
 	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
 	return ret;
 }
-#endif		/* __CUDACC__ */
+
+/* memory comparison */
+STATIC_INLINE(cl_int)
+__memcmp(const void *s1, const void *s2, size_t n)
+{
+	const cl_uchar *p1 = (const cl_uchar *)s1;
+	const cl_uchar *p2 = (const cl_uchar *)s2;
+
+	while (n--)
+	{
+		if (*p1 != *p2)
+			return ((int)*p1) - ((int)*p2);
+		p1++;
+		p2++;
+	}
+	return 0;
+}
+#else	/* __CUDACC__ */
+#define __Fetch(PTR)			(*(PTR))
+#endif	/* __CUDACC__ */
 
 #ifndef PG_STROM_H
 /* definitions at storage/block.h */

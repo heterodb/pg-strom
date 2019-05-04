@@ -32,6 +32,7 @@ static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_bpchar_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
 /*
@@ -170,6 +171,10 @@ static struct {
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 generic_devtype_hashfunc),
+	DEVTYPE_DECL("jsonb",   "JSONBOID",   "varlena *",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_JSONLIB, 0,
+				 pg_jsonb_devtype_hashfunc),
 	/*
 	 * range types
 	 */
@@ -480,6 +485,87 @@ pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum)
 }
 
 static cl_uint
+__jsonb_devtype_hashfunc(devtype_info *dtype, JsonbContainer *jc)
+{
+	cl_uint		hash = 0;
+	cl_uint		j, nitems = JsonContainerSize(jc);
+	char	   *base = NULL;
+	char	   *data;
+	cl_uint		datalen;
+
+	if (!JsonContainerIsScalar(jc))
+	{
+		if (JsonContainerIsObject(jc))
+		{
+			base = (char *)(jc->children + 2 * nitems);
+			hash ^= JB_FOBJECT;
+		}
+		else
+		{
+			base = (char *)(jc->children + nitems);
+			hash ^= JB_FARRAY;
+		}
+	}
+
+	for (j=0; j < nitems; j++)
+	{
+		cl_uint		index = j;
+		cl_uint		temp;
+		JEntry		entry;
+
+		/* hash value for key */
+		if (JsonContainerIsObject(jc))
+		{
+			entry = jc->children[index];
+			if (!JBE_ISSTRING(entry))
+				elog(ERROR, "jsonb key value is not STRING");
+			data = base + getJsonbOffset(jc, index);
+			datalen = getJsonbLength(jc, index);
+			temp = hash_any((cl_uchar *)data, datalen);
+			hash = ((hash << 1) | (hash >> 31)) ^ temp;
+
+			index += nitems;
+		}
+		/* hash value for element */
+		entry = jc->children[index];
+		if (JBE_ISNULL(entry))
+			temp = 0x01;
+		else if (JBE_ISSTRING(entry))
+		{
+			data = base + getJsonbOffset(jc, index);
+			datalen = getJsonbLength(jc, index);
+			temp = hash_any((cl_uchar *)data, datalen);
+		}
+		else if (JBE_ISNUMERIC(entry))
+		{
+			data = base + INTALIGN(getJsonbOffset(jc, index));
+			temp = pg_numeric_devtype_hashfunc(NULL, PointerGetDatum(data));
+		}
+		else if (JBE_ISBOOL_TRUE(entry))
+			temp = 0x02;
+		else if (JBE_ISBOOL_FALSE(entry))
+			temp = 0x04;
+		else if (JBE_ISCONTAINER(entry))
+		{
+			data = base + INTALIGN(getJsonbOffset(jc, index));
+			temp = __jsonb_devtype_hashfunc(dtype, (JsonbContainer *)data);
+		}
+        else
+			elog(ERROR, "Unexpected jsonb entry (%08x)", entry);
+		hash = ((hash << 1) | (hash >> 31)) ^ temp;
+	}
+	return hash;
+}
+
+static cl_uint
+pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	JsonbContainer *jc = (JsonbContainer *) VARDATA_ANY(datum);
+
+	return __jsonb_devtype_hashfunc(dtype, jc);
+}
+
+static cl_uint
 pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
 	RangeType  *r = DatumGetRangeTypeP(datum);
@@ -560,6 +646,13 @@ vlbuf_estimate_textcat(devfunc_info *dfunc, Expr **args, int *vl_width)
 	return maxlen;
 }
 
+static int
+vlbuf_estimate_jsonb(devfunc_info *dfunc, Expr **args, int *vl_width)
+{
+	return 2000;
+}
+
+
 /*
 static int
 vlbuf_estimate_text_substr(devfunc_info *dfunc, Expr **args, int *vl_width)
@@ -616,6 +709,7 @@ pgstrom_get_float2_typeoid(void)
  * 'n' : this function needs cuda_numeric.h
  * 's' : this function needs cuda_textlib.h
  * 't' : this function needs cuda_timelib.h
+ * 'j' : this function needs cuda_jsonlib.h
  * 'y' : this function needs cuda_misc.h
  * 'r' : this function needs cuda_rangetype.h
  * 'E' : this function needs cuda_time_extract.h
@@ -944,20 +1038,20 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "macaddr_ge",     2, {MACADDROID,MACADDROID},
 	  5, NULL, "y/f:macaddr_ge" },
 	/* inet comparison */
-	{ "network_cmp",    2, {INETOID,INETOID},	8, NULL, "y/f:type_compare" },
-	{ "network_eq",     2, {INETOID,INETOID},	8, NULL, "y/f:network_eq" },
-	{ "network_ne",     2, {INETOID,INETOID},	8, NULL, "y/f:network_ne" },
-	{ "network_lt",     2, {INETOID,INETOID},	8, NULL, "y/f:network_lt" },
-	{ "network_le",     2, {INETOID,INETOID},	8, NULL, "y/f:network_le" },
-	{ "network_gt",     2, {INETOID,INETOID},	8, NULL, "y/f:network_gt" },
-	{ "network_ge",     2, {INETOID,INETOID},	8, NULL, "y/f:network_ge" },
-	{ "network_larger", 2, {INETOID,INETOID},	8, NULL, "y/f:network_larger" },
-	{ "network_smaller", 2, {INETOID,INETOID},	8, NULL, "y/f:network_smaller" },
-	{ "network_sub",    2, {INETOID,INETOID},	8, NULL, "y/f:network_sub" },
-	{ "network_subeq",  2, {INETOID,INETOID},	8, NULL, "y/f:network_subeq" },
-	{ "network_sup",    2, {INETOID,INETOID},	8, NULL, "y/f:network_sup" },
-	{ "network_supeq",  2, {INETOID,INETOID},	8, NULL, "y/f:network_supeq" },
-	{ "network_overlap",2, {INETOID,INETOID},	8, NULL, "y/f:network_overlap" },
+	{ "network_cmp",    2, {INETOID,INETOID}, 8, NULL, "y/f:type_compare" },
+	{ "network_eq",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_eq" },
+	{ "network_ne",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_ne" },
+	{ "network_lt",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_lt" },
+	{ "network_le",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_le" },
+	{ "network_gt",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_gt" },
+	{ "network_ge",     2, {INETOID,INETOID}, 8, NULL, "y/f:network_ge" },
+	{ "network_larger", 2, {INETOID,INETOID}, 8, NULL, "y/f:network_larger" },
+	{ "network_smaller", 2, {INETOID,INETOID},8, NULL, "y/f:network_smaller" },
+	{ "network_sub",    2, {INETOID,INETOID}, 8, NULL, "y/f:network_sub" },
+	{ "network_subeq",  2, {INETOID,INETOID}, 8, NULL, "y/f:network_subeq" },
+	{ "network_sup",    2, {INETOID,INETOID}, 8, NULL, "y/f:network_sup" },
+	{ "network_supeq",  2, {INETOID,INETOID}, 8, NULL, "y/f:network_supeq" },
+	{ "network_overlap",2, {INETOID,INETOID}, 8, NULL, "y/f:network_overlap" },
 
 	/*
      * Mathmatical functions
@@ -1036,7 +1130,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  8, NULL, "n/f:numeric_le" },
 	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  8, NULL, "n/f:numeric_gt" },
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  8, NULL, "n/f:numeric_ge" },
-	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, 8, NULL, "n/f:type_compare" },
+	{ "numeric_cmp", 2,{NUMERICOID, NUMERICOID}, 8, NULL, "n/f:type_compare" },
 
 	/*
 	 * Date and time functions
@@ -1334,6 +1428,19 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  999, vlbuf_estimate_textcat, "s/f:textcat" },
 //	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},
 //	  999, vlbuf_estimate_text_substr, "sc/f:text_substr" },
+
+	/* jsonb operators */
+	//todo: how much varlena sz is required?
+	{ "jsonb_object_field",       2, {JSONBOID,TEXTOID}, 1000,
+	  vlbuf_estimate_jsonb, "j/f:jsonb_object_field" },
+	{ "jsonb_object_field_text",  2, {JSONBOID,TEXTOID}, 1000,
+	  vlbuf_estimate_jsonb, "j/f:jsonb_object_field_text" },
+	{ "jsonb_array_element",      2, {JSONBOID,INT4OID}, 1000,
+	  vlbuf_estimate_jsonb, "j/f:jsonb_array_element" },
+	{ "jsonb_array_element_text", 2, {JSONBOID,INT4OID}, 1000,
+	  vlbuf_estimate_jsonb, "j/f:jsonb_array_element_text" },
+	{ "jsonb_exists",             1, {JSONBOID,TEXTOID},  100,
+	  NULL, "j/f:jsonb_exists" },
 };
 
 /*
@@ -1807,6 +1914,9 @@ __construct_devfunc_info(devfunc_info *entry,
 					break;
 				case 't':
 					flags |= DEVKERNEL_NEEDS_TIMELIB;
+					break;
+				case 'j':
+					flags |= DEVKERNEL_NEEDS_JSONLIB;
 					break;
 				case 'y':
 					flags |= DEVKERNEL_NEEDS_MISC;

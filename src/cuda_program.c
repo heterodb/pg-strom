@@ -392,6 +392,10 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_numeric.h\"\n");
+	/* cuda_jsonlib.h */
+	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) == DEVKERNEL_NEEDS_JSONLIB)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_jsonlib.h\"\n");
 	/* cuda money.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_MISC) == DEVKERNEL_NEEDS_MISC)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -440,6 +444,9 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		"    pg_bpchar_t      bpchar_v;\n"
 		"    pg_text_t        text_v;\n"
 		"    pg_varchar_t     varchar_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_JSONLIB_H\n"
+		"    pg_jsonb_t       jsonb_v;\n"
 		"#endif\n"
 		"#ifdef CUDA_RANGETYPE_H\n"
 		"    pg_int4range_t   int4range_v;\n"

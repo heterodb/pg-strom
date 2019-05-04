@@ -55,17 +55,17 @@ struct NumericLong
 };
 typedef struct NumericLong	NumericLong;
 
-union NumericChoice
+typedef union
 {
 	cl_ushort		n_header;			/* Header word */
 	NumericLong		n_long;				/* Long form (4-byte header) */
 	NumericShort	n_short;			/* Short form (2-byte header) */
-};
+} NumericChoice;
 
 struct NumericData
 {
- 	cl_int			vl_len_;			/* varlena header */
-	union NumericChoice choice;			/* payload */
+ 	cl_int			vl_len_;		/* varlena header */
+	NumericChoice	choice;			/* payload */
 };
 typedef struct NumericData	NumericData;
 
@@ -75,9 +75,9 @@ typedef struct NumericData	NumericData;
 #define NUMERIC_SHORT		0x8000
 #define NUMERIC_NAN			0xC000
 
-#define NUMERIC_FLAGBITS(n)		((n)->n_header & NUMERIC_SIGN_MASK)
-#define NUMERIC_IS_NAN(n)		(NUMERIC_FLAGBITS(n) == NUMERIC_NAN)
-#define NUMERIC_IS_SHORT(n)		(NUMERIC_FLAGBITS(n) == NUMERIC_SHORT)
+#define NUMERIC_FLAGBITS(n_head)	((n_head) & NUMERIC_SIGN_MASK)
+#define NUMERIC_IS_NAN(n_head)		(NUMERIC_FLAGBITS(n_head) == NUMERIC_NAN)
+#define NUMERIC_IS_SHORT(n_head)	(NUMERIC_FLAGBITS(n_head) == NUMERIC_SHORT)
 
 #define NUMERIC_SHORT_SIGN_MASK			0x2000
 #define NUMERIC_SHORT_DSCALE_MASK		0x1F80
@@ -91,26 +91,77 @@ typedef struct NumericData	NumericData;
 
 #define NUMERIC_DSCALE_MASK			0x3FFF
 
-#define NUMERIC_DIGITS(n)												\
-	(NUMERIC_IS_SHORT(n) ? (n)->n_short.n_data : (n)->n_long.n_data)
-#define NUMERIC_SIGN(n)									  \
-	(NUMERIC_IS_SHORT(n)								  \
-	 ? (((n)->n_short.n_header & NUMERIC_SHORT_SIGN_MASK) \
-		? NUMERIC_NEG									  \
-		: NUMERIC_POS)									  \
-	 : NUMERIC_FLAGBITS(n))
-#define NUMERIC_DSCALE(n)												\
-	(NUMERIC_IS_SHORT(n) ?												\
-	 (((n)->n_short.n_header & NUMERIC_SHORT_DSCALE_MASK) >>			\
-	  NUMERIC_SHORT_DSCALE_SHIFT)										\
-	 : ((n)->n_long.n_sign_dscale & NUMERIC_DSCALE_MASK))
-#define NUMERIC_WEIGHT(n)												\
-	(NUMERIC_IS_SHORT(n)												\
-	 ? (((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_SIGN_MASK			\
-		 ? ~NUMERIC_SHORT_WEIGHT_MASK									\
-		 : 0) |															\
-		((n)->n_short.n_header & NUMERIC_SHORT_WEIGHT_MASK))			\
-	 : ((n)->n_long.n_weight))
+STATIC_INLINE(cl_uint)
+NUMERIC_NDIGITS(varlena *numeric)
+{
+	NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	cl_int			nc_len = VARSIZE_ANY_EXHDR(numeric);
+	cl_ushort		n_head = __Fetch(&nc->n_header);
+
+	return (NUMERIC_IS_SHORT(n_head)
+			? (nc_len - offsetof(NumericChoice, n_short.n_data))
+			: (nc_len - offsetof(NumericChoice, n_long.n_data)))
+		/ sizeof(NumericDigit);
+}
+
+STATIC_INLINE(NumericDigit *)
+NUMERIC_DIGITS(varlena *numeric)		/* may not be aligned */
+{
+	NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	cl_ushort		n_head = __Fetch(&nc->n_header);
+
+	return NUMERIC_IS_SHORT(n_head) ? nc->n_short.n_data : nc->n_long.n_data;
+}
+
+STATIC_INLINE(cl_int)
+NUMERIC_SIGN(varlena *numeric)
+{
+	NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	cl_ushort		n_head = __Fetch(&nc->n_header);
+
+	if (NUMERIC_IS_SHORT(n_head))
+		return (n_head & NUMERIC_SHORT_SIGN_MASK) ? NUMERIC_NEG : NUMERIC_POS;
+	return NUMERIC_FLAGBITS(n_head);
+}
+
+STATIC_INLINE(cl_uint)
+NUMERIC_DSCALE(varlena *numeric)
+{
+	NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	cl_ushort		n_head = __Fetch(&nc->n_header);
+	cl_uint			dscale;
+
+	if (NUMERIC_IS_SHORT(n_head))
+	{
+		dscale = (n_head & NUMERIC_SHORT_DSCALE_MASK)
+			>> NUMERIC_SHORT_DSCALE_SHIFT;
+	}
+	else
+	{
+		dscale = __Fetch(&nc->n_long.n_sign_dscale) & NUMERIC_DSCALE_MASK;
+	}
+	return dscale;
+}
+
+STATIC_INLINE(cl_int)
+NUMERIC_WEIGHT(varlena *numeric)
+{
+	NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	cl_ushort		n_head = __Fetch(&nc->n_header);
+	cl_int			weight;
+
+	if (NUMERIC_IS_SHORT(n_head))
+	{
+		weight = (n_head) & NUMERIC_SHORT_WEIGHT_MASK;
+		if (n_head & NUMERIC_SHORT_WEIGHT_SIGN_MASK)
+			weight |= ~NUMERIC_SHORT_WEIGHT_MASK;
+	}
+	else
+	{
+		weight = __Fetch(&nc->n_long.n_weight);
+	}
+	return weight;
+}
 
 #define FP64_FRAC_MASK		0x000fffffffffffffUL
 #define FP64_FRAC_BITS		52
@@ -250,9 +301,9 @@ __Int128_compare(Int128_t x, Int128_t y)
 	else if (x.hi < y.hi)
 		return -1;
 	else if (x.lo > y.lo)
-		return (x.hi < 0 ? -1 : 1);
+		return 1;
 	else if (x.lo < y.lo)
-		return (x.hi < 0 ? 1 : -1);
+		return -1;
 #endif
 	return 0;
 }
@@ -409,7 +460,6 @@ pg_numeric_normalize(pg_numeric_t num)
 STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 {
-	union NumericChoice numData;
 	pg_numeric_t	result;
 	cl_uint			len;
 
@@ -420,27 +470,24 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 		return result;
 	}
 	len = VARSIZE_ANY_EXHDR(vl_datum);
-	if (sizeof(numData) < len)
+	if (sizeof(NumericChoice) < len)
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
 		return result;
 	}
-	/* copy to private memory for alignment */
-	memcpy(&numData, VARDATA_ANY(vl_datum), len);
 	/* construct pg_numeric_t value from PostgreSQL Numeric */
 	{
-		NumericDigit *digits = NUMERIC_DIGITS(&numData);
-		int		weight  = NUMERIC_WEIGHT(&numData) + 1;
-        int		offset  = (const char *)digits - (const char *)&numData;
-        int		i, ndigits = (len - offset) / sizeof(NumericDigit);
+		NumericDigit *digits = NUMERIC_DIGITS(vl_datum); //may be unaligned
+		int		weight  = NUMERIC_WEIGHT(vl_datum);
+		int		i, ndigits = NUMERIC_NDIGITS(vl_datum);
 
 		/* Numeric value is 0, if ndigits is 0 */
         if (ndigits == 0)
             return result;
 		for (i=0; i < ndigits; i++)
 		{
-			NumericDigit	dig = digits[i];
+			NumericDigit	dig = __Fetch(digits + i);
 			Int128_t		temp;
 
 			temp = __Int128_mad(result.value, PG_NBASE, dig);
@@ -454,7 +501,7 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 			result.value = temp;
 		}
 		/* sign of the value */
-		if (NUMERIC_SIGN(&numData) == NUMERIC_NEG)
+		if (NUMERIC_SIGN(vl_datum) == NUMERIC_NEG)
 			result.value = __Int128_inverse(result.value);
 		/* precision */
 		result.precision = PG_DEC_DIGITS * (ndigits - weight);
@@ -1025,6 +1072,136 @@ pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 	else
 		result = float_to_numeric(kcxt, (cl_double)arg.value);
 	return result;
+}
+
+/*
+ * pg_numeric_to_cstring
+ */
+STATIC_FUNCTION(cl_int)
+pg_numeric_to_cstring(kern_context *kcxt, varlena *numeric,
+					  char *buf, char *endp)
+{
+	int			ndigits = NUMERIC_NDIGITS(numeric);
+	int			weight  = NUMERIC_WEIGHT(numeric);
+	int			sign    = NUMERIC_SIGN(numeric);
+	int			dscale  = NUMERIC_DSCALE(numeric);
+	int			d;
+	char	   *cp = buf;
+	NumericDigit *n_data = NUMERIC_DIGITS(numeric);
+	NumericDigit  dig, d1 __attribute__ ((unused));
+
+	if (sign == NUMERIC_NEG)
+	{
+		if (cp >= endp)
+			return -1;
+		*cp++ = '-';
+	}
+	/* Output all digits before the decimal point */
+	if (weight < 0)
+	{
+		d = weight + 1;
+		if (cp >= endp)
+			return -1;
+		*cp++ = '0';
+	}
+	else
+	{
+		for (d = 0; d <= weight; d++)
+		{
+			bool		putit __attribute__ ((unused)) = (d > 0);
+
+			if (d < ndigits)
+				dig = __Fetch(n_data + d);
+			else
+				dig = 0;
+#if PG_DEC_DIGITS == 4
+			d1 = dig / 1000;
+			dig -= d1 * 1000;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			d1 = dig / 100;
+			dig -= d1 * 100;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 2
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			if (d1 > 0 || d > 0)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 1
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#else
+#error unsupported NBASE
+#endif
+		}
+	}
+
+	if (dscale > 0)
+	{
+		if (cp >= endp)
+			return -1;
+		*cp++ = '.';
+		for (int i = 0; i < dscale; d++, i += PG_DEC_DIGITS)
+		{
+#if PG_DEC_DIGITS == 4
+			if (cp + 4 > endp)
+				return -1;
+			d1 = dig / 1000;
+			dig -= d1 * 1000;
+			*cp++ = d1 + '0';
+			d1 = dig / 100;
+			dig -= d1 * 100;
+			*cp++ = d1 + '0';
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			*cp++ = d1 + '0';
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 2
+			if (cp + 2 > endp)
+				return -1;
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			*cp++ = d1 + '0';
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 1
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#else
+#error unsupported NBASE
+#endif
+		}
+	}
+	return (cl_int)(cp - buf);
 }
 
 /*

@@ -146,14 +146,14 @@ typedef struct toast_compress_header
 #define VARATT_NOT_PAD_BYTE(PTR) 		(*((cl_uchar *) (PTR)) != 0)
 
 #define VARSIZE_4B(PTR)						\
-	((((varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
+	((__Fetch(&((varattrib_4b *)(PTR))->va_4byte.va_header)>>2) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	((((varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
 #define VARTAG_1B_E(PTR) \
 	(((varattrib_1b_e *) (PTR))->va_tag)
 
 #define VARRAWSIZE_4B_C(PTR)	\
-	(((varattrib_4b *) (PTR))->va_compressed.va_rawsize)
+	__Fetch(&((varattrib_4b *) (PTR))->va_compressed.va_rawsize)
 
 #define VARSIZE_ANY_EXHDR(PTR) \
 	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \

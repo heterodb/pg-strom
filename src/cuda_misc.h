@@ -755,23 +755,6 @@ to_inet(pg_cidr_t arg)
 	return arg;
 }
 
-/* memory comparison */
-STATIC_INLINE(cl_int)
-__memcmp(const void *s1, const void *s2, size_t n)
-{
-	const cl_uchar *p1 = (const cl_uchar *)s1;
-	const cl_uchar *p2 = (const cl_uchar *)s2;
-
-	while (n--)
-	{
-		if (*p1 != *p2)
-			return ((int)*p1) - ((int)*p2);
-		p1++;
-		p2++;
-	}
-	return 0;
-}
-
 /*
  * int
  * bitncmp(l, r, n)
