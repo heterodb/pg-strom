@@ -3103,16 +3103,24 @@ codegen_function_expression(codegen_context *context,
 	{
 		devtype_info *dtype = lfirst(lc1);
 		Node   *expr = lfirst(lc2);
+		Oid		expr_type_oid = exprType(expr);
 
 		appendStringInfo(&context->str, ", ");
-		if (dtype->type_oid == exprType(expr))
+		if (dtype->type_oid == expr_type_oid)
 			codegen_expression_walker(context, expr, &vl_width[index]);
-		else
+		else if (pgstrom_devcast_supported(expr_type_oid,
+										   dtype->type_oid))
 		{
 			appendStringInfo(&context->str,
 							 "to_%s(", dtype->type_name);
 			codegen_expression_walker(context, expr, &vl_width[index]);
 			appendStringInfo(&context->str, ")");
+		}
+		else
+		{
+			elog(ERROR, "Bug? unsupported implicit type cast (%s)->(%s)",
+				 format_type_be(expr_type_oid),
+				 format_type_be(dtype->type_oid));
 		}
 		fn_args[index++] = (Expr *)expr;
 	}
