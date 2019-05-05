@@ -65,6 +65,43 @@ typedef struct JsonbContainer
 #define JsonContainerIsObject(jch)	(((jch) & JB_FOBJECT) != 0)
 #define JsonContainerIsArray(jch)	(((jch) & JB_FARRAY) != 0)
 
+STATIC_INLINE(cl_uint)
+getJsonbOffset(const JsonbContainer *jc,		/* may not be aligned */
+			   int index)
+{
+	cl_uint		offset = 0;
+	JEntry		entry;
+	int			j;
+
+	for (j=index-1; j >= 0; j--)
+	{
+		memcpy(&entry, &jc->children[j], sizeof(JEntry));
+		offset += JBE_OFFLENFLD(entry);
+		if (JBE_HAS_OFF(entry))
+			break;
+	}
+	return offset;
+}
+
+STATIC_INLINE(cl_uint)
+getJsonbLength(const JsonbContainer *jc,		/* may not be aligned */
+			   int index)
+{
+	cl_uint		off;
+	cl_uint		len;
+	JEntry		entry;
+
+	memcpy(&entry, &jc->children[index], sizeof(JEntry));
+	if (JBE_HAS_OFF(entry))
+	{
+		off = getJsonbOffset(jc, index);
+		len = JBE_OFFLENFLD(entry) - off;
+	}
+	else
+		len = JBE_OFFLENFLD(entry);
+	return len;
+}
+
 #ifndef PG_JSONB_TYPE_DEFINED
 #define PG_JSONB_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(jsonb)
@@ -158,13 +195,10 @@ pg_comp_hash(kern_context *kcxt, pg_jsonb_t datum)
 {
 	char	   *jdata;
 	cl_int		jlen;
-	cl_uint		hash = 0;
 
-	if (pg_varlena_datum_extract(kcxt, datum, &jdata, &jlen))
-	{
-		hash = __pg_jsonb_comp_hash(kcxt, hash, (JsonbContainer *)jdata);
-	}
-	return hash;
+	if (!pg_varlena_datum_extract(kcxt, datum, &jdata, &jlen))
+		return 0;
+	return __pg_jsonb_comp_hash(kcxt, (JsonbContainer *)jdata);
 }
 
 STATIC_INLINE(void)
@@ -178,43 +212,6 @@ pg_datum_ref_arrow(kern_context *kcxt,
 	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
 }
 #endif  /* PG_JSONB_TYPE_DEFINED */
-
-STATIC_INLINE(cl_uint)
-getJsonbOffset(const JsonbContainer *jc,		/* may not be aligned */
-			   int index)
-{
-	cl_uint		offset = 0;
-	JEntry		entry;
-	int			j;
-
-	for (j=index-1; j >= 0; j--)
-	{
-		memcpy(&entry, &jc->children[j], sizeof(JEntry));
-		offset += JBE_OFFLENFLD(entry);
-		if (JBE_HAS_OFF(entry))
-			break;
-	}
-	return offset;
-}
-
-STATIC_INLINE(cl_uint)
-getJsonbLength(const JsonbContainer *jc,		/* may not be aligned */
-			   int index)
-{
-	cl_uint		off;
-	cl_uint		len;
-	JEntry		entry;
-
-	memcpy(&entry, &jc->children[index], sizeof(JEntry));
-	if (JBE_HAS_OFF(entry))
-	{
-		off = getJsonbOffset(jc, index);
-		len = JBE_OFFLENFLD(entry) - off;
-	}
-	else
-		len = JBE_OFFLENFLD(entry);
-	return len;
-}
 
 STATIC_INLINE(cl_int)
 compareJsonbStringValue(const char *s1, cl_int len1,
