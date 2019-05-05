@@ -477,7 +477,8 @@ struct devtype_info;
 struct devfunc_info;
 struct devcast_info;
 
-typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype, Datum datum);
+typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype,
+										 Datum datum);
 
 typedef struct devtype_info {
 	Oid			type_oid;
@@ -503,6 +504,10 @@ typedef struct devtype_info {
 	struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;
 
+/* callback for expected consumption of run-time varlena buffer */
+typedef int (*devfunc_varlena_sz_f)(struct devfunc_info *dfunc,
+									Expr **args, int *args_width);
+
 typedef struct devfunc_info {
 	Oid			func_oid;		/* OID of the SQL function */
 	Oid			func_collid;	/* OID of collation, if collation aware */
@@ -515,12 +520,7 @@ typedef struct devfunc_info {
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
 	Cost		func_devcost;	/* relative cost to run function on GPU */
-	/*
-	 * callback to inform expected consumption of the run-time varlena
-	 * buffer, if device function returns varlena datum
-	 */
-	int		  (*func_varlena_sz)(struct devfunc_info *dfunc,
-								 Expr **args, int *vl_width);
+	devfunc_varlena_sz_f dfunc_varlena_sz;
 } devfunc_info;
 
 typedef struct devcast_info {

@@ -17,6 +17,8 @@
  */
 #ifndef CUDA_TIME_EXTRACT_H
 #define CUDA_TIME_EXTRACT_H
+#include "cuda_textlib.h"
+#include "cuda_timelib.h"
 #ifdef __CUDACC__
 
 /*
