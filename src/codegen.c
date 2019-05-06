@@ -3285,7 +3285,8 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 typedef struct {
 	const char *filename;
 	int			lineno;
-	Relids		varnos;
+	PlannerInfo *root;
+	RelOptInfo *baserel;
 	int			devcost;
 	ssize_t		vl_usage;
 } device_expression_walker_context;
@@ -3332,21 +3333,30 @@ device_expression_walker(device_expression_walker_context *con,
 		/*
 		 * NOTE: When we check parameterized paths, its target-entry may
 		 * contain references to other tables, which shall be replaced by
-		 * replace_nestloop_params(). So, Var-node out of con->varnos
+		 * replace_nestloop_params(). So, Var-node out of baserel->relids
 		 * shall not be visible for device code.
 		 *
 		 * If var->varno == INDEX_VAR, it is obvious that the caller is
 		 * responsible to supply custom_scan_tlist with adequate source.
 		 */
-		if (var->varno != INDEX_VAR &&
-			!bms_is_member(var->varno, con->varnos))
+		if (con->baserel)
 		{
-			char   *varnos = bms_to_cstring(con->varnos);
-			elog(DEBUG2, "(%s:%d): unsupported expression: %s (varnos=%s)",
-				 basename(con->filename), con->lineno,
-				 nodeToString(expr), varnos);
-			pfree(varnos);
-			return false;
+			RelOptInfo *baserel = con->baserel;
+
+			Assert(var->varno != INDEX_VAR);
+			if (!bms_is_member(var->varno, baserel->relids))
+			{
+				char   *varnos = bms_to_cstring(baserel->relids);
+				elog(DEBUG2, "(%s:%d): unsupported expression: %s (varnos=%s)",
+					 basename(con->filename), con->lineno,
+					 nodeToString(expr), varnos);
+				pfree(varnos);
+				return false;
+			}
+		}
+		else
+		{
+			Assert(var->varno == INDEX_VAR);
 		}
 
 		/*
@@ -3673,7 +3683,9 @@ unable_node:
  * available to run on CUDA device, or not.
  */
 bool
-__pgstrom_device_expression(Expr *expr, Relids varnos,
+__pgstrom_device_expression(PlannerInfo *root,
+							RelOptInfo *baserel,
+							Expr *expr,
 							int *p_devcost, int *p_extra_sz,
 							const char *filename, int lineno)
 {
@@ -3683,7 +3695,8 @@ __pgstrom_device_expression(Expr *expr, Relids varnos,
 	memset(&con, 0, sizeof(device_expression_walker_context));
 	con.filename = filename;
 	con.lineno   = lineno;
-	con.varnos   = varnos;
+	con.root     = root;
+	con.baserel  = baserel;
 	con.devcost  = 0.0;
 	con.vl_usage = 0;
 

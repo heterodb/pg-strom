@@ -1757,7 +1757,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (!pgstrom_device_expression(rinfo->clause, joinrel->relids))
+		if (!pgstrom_device_expression(root, joinrel, rinfo->clause))
 			return;
 	}
 
@@ -1839,8 +1839,8 @@ try_add_gpujoin_paths(PlannerInfo *root,
 							join_path->innerjoinpath->parent->relids))
 				return;
 
-			if (!pgstrom_device_expression((Expr *)join_quals,
-										   joinrel->relids))
+			if (!pgstrom_device_expression(root, joinrel,
+										   (Expr *)join_quals))
 				return;
 
 			ip_item = palloc0(sizeof(inner_path_item));
@@ -2137,7 +2137,8 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			 nodeToString(phvnode));
 	}
 	else if (!context->resjunk &&
-			 pgstrom_device_expression((Expr *)node, gjrel->relids))
+			 pgstrom_device_expression(context->root, gjrel,
+									   (Expr *)node))
 	{
 		TargetEntry	   *ps_tle;
 

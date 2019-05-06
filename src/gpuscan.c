@@ -332,8 +332,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (pgstrom_device_expression(rinfo->clause,
-									  baserel->relids))
+		if (pgstrom_device_expression(root, baserel, rinfo->clause))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -995,7 +994,7 @@ add_unique_expression(List *tlist, Node *node, bool resjunk)
 typedef struct
 {
 	PlannerInfo *root;
-	Relids		relids;
+	RelOptInfo	*baserel;
 	bool		resjunk;
 	bool		has_expressions;
 	size_t		extra_sz;
@@ -1010,15 +1009,16 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 
 	if (IsA(node, Var))
 	{
-		Var	   *varnode = (Var *) node;
-		bool	resjunk;
+		RelOptInfo *baserel = context->baserel;
+		Var		   *varnode = (Var *) node;
+		bool		resjunk;
 
 		/*
 		 * Is it a reference to other relation to be replaced by
 		 * replace_nestloop_params(). So, it shall be executed on
 		 * the CPU side.
 		 */
-		if (!bms_is_member(varnode->varno, context->relids))
+		if (!bms_is_member(varnode->varno, baserel->relids))
 			return false;
 		Assert(varnode->varlevelsup == 0);
 
@@ -1035,8 +1035,9 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		/* no need to carry constant values from GPU kernel */
 		return false;
 	}
-	else if (pgstrom_device_expression_extrasz((Expr *) node,
-											   context->relids,
+	else if (pgstrom_device_expression_extrasz(context->root,
+											   context->baserel,
+											   (Expr *) node,
 											   &extra_sz))
 	{
 		//TODO: Var must be on scanrel
@@ -1074,7 +1075,7 @@ build_gpuscan_projection(PlannerInfo *root,
 
 	memset(&context, 0, sizeof(context));
 	context.root = root;
-	context.relids = baserel->relids;
+	context.baserel = baserel;
 
 	if (tlist != NIL)
 	{
@@ -1288,8 +1289,9 @@ PlanGpuScanPath(PlannerInfo *root,
 
 		if (exprType((Node *)rinfo->clause) != BOOLOID)
 			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
-		if (!pgstrom_device_expression_devcost(rinfo->clause,
-											   baserel->relids,
+		if (!pgstrom_device_expression_devcost(root,
+											   baserel,
+											   rinfo->clause,
 											   &devcost))
 			host_quals = lappend(host_quals, rinfo);
 		else
@@ -1436,8 +1438,9 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
-		if (!pgstrom_device_expression_devcost(rinfo->clause,
-											   baserel->relids,
+		if (!pgstrom_device_expression_devcost(root,
+											   baserel,
+											   rinfo->clause,
 											   &devcost))
 			return false;
 		outer_quals = lappend(outer_quals, rinfo);
@@ -1462,7 +1465,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 			if (var->varattno == InvalidAttrNumber)
 				return false;
 		}
-		else if (!pgstrom_device_expression(expr, baserel->relids))
+		else if (!pgstrom_device_expression(root, baserel, expr))
 			return false;
 	}
 	/* Optimal GPU selection */

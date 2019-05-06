@@ -965,8 +965,7 @@ cost_gpupreagg(PlannerInfo *root,
 		 */
 		if (enable_pullup_outer_join &&
 			pgstrom_path_is_gpujoin(input_path) &&
-			pgstrom_device_expression((Expr *)outer_tlist,
-									  outer_rel->relids))
+			pgstrom_device_expression(root, outer_rel, (Expr *)outer_tlist))
 		{
 			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
 			outer_total -= cpu_tuple_cost * input_path->rows;
@@ -1239,8 +1238,7 @@ prepend_gpupreagg_path(PlannerInfo *root,
 
 		if (pjpath->dummypp &&
 			pgstrom_path_is_gpujoin(pjpath->subpath) &&
-			pgstrom_device_expression((Expr *)pathtarget->exprs,
-									  pjrel->relids))
+			pgstrom_device_expression(root, pjrel, (Expr *)pathtarget->exprs))
 		{
 			input_path = pgstrom_copy_gpujoin_path(pjpath->subpath);
 			input_path->pathtarget = pathtarget;
@@ -2261,7 +2259,7 @@ make_alternative_aggref(PlannerInfo *root,
 			 * So, it is obvious Var-nodes references adeauate input relation,
 			 * thus no need to provide relids to pgstrom_device_expression().
 			 */
-			if (!pgstrom_device_expression((Expr *)temp, NULL))
+			if (!pgstrom_device_expression(root, NULL, (Expr *)temp))
 				return NULL;
 		}
 		/*
@@ -2513,7 +2511,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 * outer scan node. This expression must be calculated on the
 			 * host-side.
 			 */
-			if (!pgstrom_device_expression(expr, input_rel->relids))
+			if (!pgstrom_device_expression(root, input_rel, expr))
 				*p_can_pullup_outerscan = false;
 
 			/* grouping-key should be on the any of input items */

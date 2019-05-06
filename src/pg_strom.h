@@ -1000,6 +1000,7 @@ extern void pgstrom_init_cuda_program(void);
 struct codegen_context {
 	StringInfoData	str;
 	PlannerInfo *root;
+	RelOptInfo	*baserel;	/* scope of Var-node, if any */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
 	Bitmapset  *param_refs;	/* referenced parameters */
@@ -1033,15 +1034,21 @@ extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
-extern bool __pgstrom_device_expression(Expr *expr, Relids varnos,
-										int *p_devcost, int *p_extra_sz,
+extern bool __pgstrom_device_expression(PlannerInfo *root,
+										RelOptInfo *baserel,
+										Expr *expr,
+										int *p_devcost,
+										int *p_extra_sz,
 										const char *filename, int lineno);
-#define pgstrom_device_expression(a,b)					\
-	__pgstrom_device_expression((a),(b),NULL,NULL,__FILE__,__LINE__)
-#define pgstrom_device_expression_devcost(a,b,c)		\
-	__pgstrom_device_expression((a),(b),(c),NULL,__FILE__,__LINE__)
-#define pgstrom_device_expression_extrasz(a,b,c)		\
-	__pgstrom_device_expression((a),(b),NULL,(c),__FILE__,__LINE__)
+#define pgstrom_device_expression(a,b,c)				\
+	__pgstrom_device_expression((a),(b),(c),NULL,NULL,	\
+								__FILE__,__LINE__)
+#define pgstrom_device_expression_devcost(a,b,c,d)		\
+	__pgstrom_device_expression((a),(b),(c),(d),NULL,	\
+								__FILE__,__LINE__)
+#define pgstrom_device_expression_extrasz(a,b,c,d)		\
+	__pgstrom_device_expression((a),(b),(c),NULL,(d),	\
+								__FILE__,__LINE__)
 
 extern void pgstrom_init_codegen_context(codegen_context *context,
 										 PlannerInfo *root);
