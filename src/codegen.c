@@ -359,31 +359,13 @@ pgstrom_devtype_lookup(Oid type_oid)
 	return NULL;
 }
 
-static void
-pgstrom_devtype_track(codegen_context *context, devtype_info *dtype)
-{
-	ListCell   *lc;
-
-	context->extra_flags |= dtype->type_flags;
-	foreach (lc, context->type_defs)
-	{
-		Oid		type_oid = intVal(lfirst(lc));
-
-		if (type_oid == dtype->type_oid)
-			return;
-	}
-	context->type_defs = lappend(context->type_defs,
-								 makeInteger(dtype->type_oid));
-}
-
 devtype_info *
 pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 {
 	devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 
-	if (!dtype)
-		return NULL;
-	pgstrom_devtype_track(context, dtype);
+	if (dtype)
+		context->extra_flags |= dtype->type_flags;
 
 	return dtype;
 }
@@ -2440,23 +2422,16 @@ pgstrom_devfunc_lookup_type_compare(devtype_info *dtype, Oid type_collid)
 void
 pgstrom_devfunc_track(codegen_context *context, devfunc_info *dfunc)
 {
+	devtype_info   *dtype = dfunc->func_rettype;
 	ListCell	   *lc;
 
 	/* track device function */
-	context->extra_flags |= dfunc->func_flags;
-	foreach (lc, context->func_defs)
-	{
-		devfunc_info   *dtemp = lfirst(lc);
-
-		if (dfunc == dtemp)
-			goto skip;
-	}
-	context->func_defs = lappend(context->func_defs, dfunc);
-skip:
-	/* track function arguments and result types also */
-	pgstrom_devtype_track(context, dfunc->func_rettype);
+	context->extra_flags |= (dfunc->func_flags | dtype->type_flags);
 	foreach (lc, dfunc->func_args)
-		pgstrom_devtype_track(context, (devtype_info *) lfirst(lc));
+	{
+		dtype = (devtype_info *) lfirst(lc);
+		context->extra_flags |= dtype->type_flags;
+	}
 }
 
 /*
@@ -2780,7 +2755,6 @@ codegen_expression_walker(codegen_context *context,
 		if (!dfunc)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(func->funcid));
-		dtype = dfunc->func_rettype;
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, func->args);
 	}
@@ -2796,7 +2770,6 @@ codegen_expression_walker(codegen_context *context,
 		if (!dfunc)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(dfunc->func_oid));
-		dtype = dfunc->func_rettype;
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, op->args);
 	}
@@ -3205,9 +3178,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	initStringInfo(&walker_context.str);
 	walker_context.root = context->root;
-	walker_context.type_defs = list_copy(context->type_defs);
-	walker_context.func_defs = list_copy(context->func_defs);
-	walker_context.expr_defs = list_copy(context->expr_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.param_refs = bms_copy(context->param_refs);
@@ -3237,9 +3207,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	}
 	PG_END_TRY();
 
-	context->type_defs = walker_context.type_defs;
-	context->func_defs = walker_context.func_defs;
-	context->expr_defs = walker_context.expr_defs;
 	context->used_params = walker_context.used_params;
 	context->used_vars = walker_context.used_vars;
 	context->param_refs = walker_context.param_refs;

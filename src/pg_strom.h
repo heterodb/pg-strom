@@ -1000,9 +1000,6 @@ extern void pgstrom_init_cuda_program(void);
 struct codegen_context {
 	StringInfoData	str;
 	PlannerInfo *root;
-	List	   *type_defs;	/* list of devtype_info in use */
-	List	   *func_defs;	/* list of devfunc_info in use */
-	List	   *expr_defs;	/* list of devexpr_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
 	Bitmapset  *param_refs;	/* referenced parameters */
