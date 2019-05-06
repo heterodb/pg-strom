@@ -647,8 +647,8 @@ gstore_codegen_keycomp(StringInfo kern,
 			darg2 = lsecond(dfunc->func_args);
 			if (dtype->type_oid != darg1->type_oid)
 			{
-				if (!pgstrom_devcast_supported(dtype->type_oid,
-											   darg1->type_oid))
+				if (!pgstrom_devtype_can_relabel(dtype->type_oid,
+												 darg1->type_oid))
 					elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
 						 format_type_be(dtype->type_oid),
 						 format_type_be(darg1->type_oid));
@@ -656,8 +656,8 @@ gstore_codegen_keycomp(StringInfo kern,
 			}
 			if (dtype->type_oid != darg2->type_oid)
 			{
-				if (!pgstrom_devcast_supported(dtype->type_oid,
-											   darg2->type_oid))
+				if (!pgstrom_devtype_can_relabel(dtype->type_oid,
+												 darg2->type_oid))
 					elog(ERROR, "Bug? no binary compatible cast for %s -> %s",
 						 format_type_be(dtype->type_oid),
 						 format_type_be(darg2->type_oid));

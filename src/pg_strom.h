@@ -476,6 +476,7 @@ struct GpuTask
 struct devtype_info;
 struct devfunc_info;
 struct devcast_info;
+struct codegen_context;
 
 typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype,
 										 Datum datum);
@@ -523,10 +524,20 @@ typedef struct devfunc_info {
 	devfunc_varlena_sz_f dfunc_varlena_sz;
 } devfunc_info;
 
+/*
+ * Callback on CoerceViaIO (type cast using in/out handler).
+ * In some special cases, device code can handle this class of type cast.
+ */
+typedef bool (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
+											   struct devcast_info *dcast,
+											   CoerceViaIO *node,
+											   cl_int *p_varlena_sz);
+
 typedef struct devcast_info {
 	devtype_info   *src_type;
 	devtype_info   *dst_type;
-	cl_uint			extra_flags;
+	char			castmethod;	/* one of COERCION_METHOD_* */
+	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
 } devcast_info;
 
 /*
@@ -986,7 +997,7 @@ extern void pgstrom_init_cuda_program(void);
 /*
  * codegen.c
  */
-typedef struct {
+struct codegen_context {
 	StringInfoData	str;
 	PlannerInfo *root;
 	List	   *type_defs;	/* list of devtype_info in use */
@@ -1001,7 +1012,8 @@ typedef struct {
 	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
 	int			extra_flags;	/* external libraries to be included */
 	int			varlena_bufsz;	/* required size of temporary varlena buffer */
-} codegen_context;
+};
+typedef struct codegen_context	codegen_context;
 
 extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
@@ -1016,7 +1028,11 @@ extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
 														 Oid type_collid);
 extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
-extern bool pgstrom_devcast_supported(Oid src_type_oid, Oid dst_type_oid);
+extern devcast_info *pgstrom_devcast_lookup(Oid src_type_oid,
+											Oid dst_type_oid,
+											char castmethod);
+extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
+										Oid dst_type_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);

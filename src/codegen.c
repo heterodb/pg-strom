@@ -35,6 +35,12 @@ static cl_uint pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
+/* callback to handle special cases of device cast */
+static bool  devcast_text2numeric_callback(codegen_context *context,
+										   devcast_info *dcast,
+										   CoerceViaIO *node,
+										   cl_int *p_varlena_sz);
+
 /*
  * Catalog of data types supported by device code
  *
@@ -2282,7 +2288,7 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 			if (src_type == dst_type)
 				continue;
 			/* have a to_DESTTYPE() device function? */
-			if (!pgstrom_devcast_supported(src_type, dst_type))
+			if (!pgstrom_devtype_can_relabel(src_type, dst_type))
 			{
 				elog(DEBUG2, "no type cast definition (%s->%s)",
 					 format_type_be(src_type),
@@ -2294,7 +2300,7 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 		if (func_rettype != proc->prorettype)
 		{
 			/* have a to_DESTTYPE() device function? */
-			if (!pgstrom_devcast_supported(func_rettype, proc->prorettype))
+			if (!pgstrom_devtype_can_relabel(func_rettype, proc->prorettype))
 			{
 				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
 					 format_type_be(func_rettype),
@@ -2471,19 +2477,33 @@ skip:
  * We have no SQL function on host side because the above device function 
  * reflects binary-compatible type cast. If cast is COERCION_METHOD_FUNCTION,
  * SQL function shall be explicitly used.
+ *
+ * In case of COERCION_METHOD_INOUT, expression tree have CoerceViaIO; that
+ * involves a pair of heavy operation (cstring-out/in). Usually, it is not
+ * supported on the device code except for small number of exceptions.
+ * dcast_coerceviaio_callback allows to inject special case handling to run
+ * the job of CoerceViaIO.
  */
 static struct {
 	Oid			src_type_oid;
 	Oid			dst_type_oid;
-	cl_uint		extra_flags;
+	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
 } devcast_catalog[] = {
 	/* text, varchar, bpchar */
-	{ TEXTOID,    BPCHAROID,  DEVKERNEL_NEEDS_TEXTLIB },
-	{ TEXTOID,    VARCHAROID, DEVKERNEL_NEEDS_TEXTLIB },
-	{ VARCHAROID, TEXTOID,    DEVKERNEL_NEEDS_TEXTLIB },
-	{ VARCHAROID, BPCHAROID,  DEVKERNEL_NEEDS_TEXTLIB },
+	{ TEXTOID,    BPCHAROID,  NULL },
+	{ TEXTOID,    VARCHAROID, NULL },
+	{ VARCHAROID, TEXTOID,    NULL },
+	{ VARCHAROID, BPCHAROID,  NULL },
 	/* cidr -> inet, but no reverse type cast */
-	{ CIDROID,    INETOID,    DEVKERNEL_NEEDS_MISC },
+	{ CIDROID,    INETOID,    NULL },
+	/* text -> (intX/floatX/numeric), including (jsonb->>'key') reference */
+	{ TEXTOID,    BOOLOID,    devcast_text2numeric_callback },
+	{ TEXTOID,    INT2OID,    devcast_text2numeric_callback },
+	{ TEXTOID,    INT4OID,    devcast_text2numeric_callback },
+	{ TEXTOID,    INT8OID,    devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT4OID,  devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT8OID,  devcast_text2numeric_callback },
+	{ TEXTOID,    NUMERICOID, devcast_text2numeric_callback },
 };
 
 static void
@@ -2496,7 +2516,8 @@ build_devcast_info(void)
 	{
 		Oid				src_type_oid = devcast_catalog[i].src_type_oid;
 		Oid				dst_type_oid = devcast_catalog[i].dst_type_oid;
-		cl_uint			extra_flags  = devcast_catalog[i].extra_flags;
+		devcast_coerceviaio_callback_f dcast_callback
+			= devcast_catalog[i].dcast_coerceviaio_callback;
 		cl_int			nslots = lengthof(devcast_info_slot);
 		cl_int			index;
 		devtype_info   *dtype;
@@ -2508,16 +2529,27 @@ build_devcast_info(void)
 							  ObjectIdGetDatum(src_type_oid),
 							  ObjectIdGetDatum(dst_type_oid));
 		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "Bug? type cast %s --> %s is not defined",
-				 format_type_be(src_type_oid),
-				 format_type_be(dst_type_oid));
-		method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
-		if (method != COERCION_METHOD_BINARY)
-			elog(ERROR, "Bug? type cast %s --> %s is not binary compatible",
-				 format_type_be(src_type_oid),
-				 format_type_be(dst_type_oid));
-		ReleaseSysCache(tup);
-
+		{
+			if (!dcast_callback)
+				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
+					 format_type_be(src_type_oid),
+					 format_type_be(dst_type_oid));
+			/*
+			 * No pg_cast entry, so we assume this conversion is processed by
+			 * the cstring in/out function.
+			 */
+			method = COERCION_METHOD_INOUT;
+		}
+		else
+		{
+			method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
+			if (!((method == COERCION_METHOD_BINARY && !dcast_callback) ||
+				  (method == COERCION_METHOD_INOUT && dcast_callback)))
+				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
+					 format_type_be(src_type_oid),
+					 format_type_be(dst_type_oid));
+			ReleaseSysCache(tup);
+		}
 		dcast = MemoryContextAllocZero(devinfo_memcxt,
 									   sizeof(devcast_info));
 		/* source */
@@ -2525,17 +2557,16 @@ build_devcast_info(void)
 		if (!dtype)
 			elog(ERROR, "Bug? type '%s' is not supported on device",
 				 format_type_be(src_type_oid));
-		extra_flags |= dtype->type_flags;
 		dcast->src_type = dtype;
 		/* destination */
 		dtype = pgstrom_devtype_lookup(dst_type_oid);
 		if (!dtype)
 			elog(ERROR, "Bug? type '%s' is not supported on device",
 				 format_type_be(dst_type_oid));
-		extra_flags |= dtype->type_flags;
 		dcast->dst_type = dtype;
-		/* extra flags */
-		dcast->extra_flags = extra_flags;
+		/* method && callback */
+		dcast->castmethod = method;
+		dcast->dcast_coerceviaio_callback = dcast_callback;
 
 		index = (hash_uint32((uint32) src_type_oid) ^
 				 hash_uint32((uint32) dst_type_oid)) % nslots;
@@ -2545,9 +2576,10 @@ build_devcast_info(void)
 	}
 }
 
-bool
-pgstrom_devcast_supported(Oid src_type_oid,
-						  Oid dst_type_oid)
+devcast_info *
+pgstrom_devcast_lookup(Oid src_type_oid,
+					   Oid dst_type_oid,
+					   char castmethod)
 {
 	int			nslots = lengthof(devcast_info_slot);
 	int			index;
@@ -2560,13 +2592,26 @@ pgstrom_devcast_supported(Oid src_type_oid,
 		devcast_info   *dcast = lfirst(lc);
 
 		if (dcast->src_type->type_oid == src_type_oid &&
-			dcast->dst_type->type_oid == dst_type_oid)
-		{
-			//Right now, device type inclusion also contains
-			//type cast above
-			//*p_extra_flags |= dcast->extra_flags;
-			return true;
+			dcast->dst_type->type_oid == dst_type_oid &&
+			dcast->castmethod == castmethod)
+        {
+			return dcast;
 		}
+	}
+	return NULL;
+}
+
+bool
+pgstrom_devtype_can_relabel(Oid src_type_oid,
+							Oid dst_type_oid)
+{
+	devcast_info *dcast = pgstrom_devcast_lookup(src_type_oid,
+												 dst_type_oid,
+												 COERCION_METHOD_BINARY);
+	if (dcast)
+	{
+		Assert(!dcast->dcast_coerceviaio_callback);
+		return true;
 	}
 	return false;
 }
@@ -2931,7 +2976,7 @@ codegen_expression_walker(codegen_context *context,
 		if (!dtype)
 			elog(ERROR, "codegen: failed to lookup device type: %s",
 				 format_type_be(relabel->resulttype));
-		if (!pgstrom_devcast_supported(stype_oid, dtype->type_oid))
+		if (!pgstrom_devtype_can_relabel(stype_oid, dtype->type_oid))
 			elog(ERROR, "codegen: failed to lookup device cast: %s->%s",
 				 format_type_be(stype_oid),
 				 format_type_be(relabel->resulttype));
@@ -2939,6 +2984,23 @@ codegen_expression_walker(codegen_context *context,
 		appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 		codegen_expression_walker(context, (Node *)relabel->arg, &varlena_sz);
 		appendStringInfo(&context->str, ")");
+	}
+	else if (IsA(node, CoerceViaIO))
+	{
+		CoerceViaIO	   *coerce = (CoerceViaIO *)node;
+		devcast_info   *dcast;
+
+		dcast = pgstrom_devcast_lookup(exprType((Node *)coerce->arg),
+									   coerce->resulttype,
+									   COERCION_METHOD_INOUT);
+		if (!dcast)
+			elog(ERROR, "failed on lookup of device cast");
+		if (!dcast->dcast_coerceviaio_callback ||
+			!dcast->dcast_coerceviaio_callback(context, dcast, coerce,
+											   &varlena_sz))
+			elog(ERROR, "no device cast support on %s -> %s",
+				 format_type_be(dcast->src_type->type_oid),
+				 format_type_be(dcast->dst_type->type_oid));
 	}
 	else if (IsA(node, CaseExpr))
 	{
@@ -3108,8 +3170,8 @@ codegen_function_expression(codegen_context *context,
 		appendStringInfo(&context->str, ", ");
 		if (dtype->type_oid == expr_type_oid)
 			codegen_expression_walker(context, expr, &vl_width[index]);
-		else if (pgstrom_devcast_supported(expr_type_oid,
-										   dtype->type_oid))
+		else if (pgstrom_devtype_can_relabel(expr_type_oid,
+											 dtype->type_oid))
 		{
 			appendStringInfo(&context->str,
 							 "to_%s(", dtype->type_name);
@@ -3506,11 +3568,26 @@ device_expression_walker(device_expression_walker_context *con,
 		/* array->array relabel may be possible */
 		if (!dtype ||
 			!stype ||
-			!pgstrom_devcast_supported(stype->type_oid,
-									   dtype->type_oid))
+			!pgstrom_devtype_can_relabel(stype->type_oid,
+										 dtype->type_oid))
 			goto unable_node;
 		if (!device_expression_walker(con, relabel->arg, &varlena_sz))
 			return false;
+	}
+	else if (IsA(expr, CoerceViaIO))
+	{
+		CoerceViaIO	   *coerce = (CoerceViaIO *)expr;
+		devcast_info   *dcast;
+
+		dcast = pgstrom_devcast_lookup(exprType((Node *)coerce->arg),
+									   coerce->resulttype,
+									   COERCION_METHOD_INOUT);
+		if (!dcast ||
+			!dcast->dcast_coerceviaio_callback ||
+			!dcast->dcast_coerceviaio_callback(NULL, dcast, coerce,
+											   &varlena_sz))
+			goto unable_node;
+		con->devcost += 8;		/* XXX - just a rough estimation */
 	}
 	else if (IsA(expr, CaseExpr))
 	{
@@ -3672,6 +3749,66 @@ __pgstrom_device_expression(Expr *expr, Relids varnos,
 	if (p_extra_sz)
 		*p_extra_sz = con.vl_usage;
 	return true;
+}
+
+/*
+ * devcast_text2numeric_callback
+ * ------
+ * Special case handling of text->numeric values, including the case of
+ * jsonb key references.
+ */
+static bool
+devcast_text2numeric_callback(codegen_context *context,
+							  devcast_info *dcast,
+							  CoerceViaIO *node,
+							  cl_int *p_varlena_sz)
+{
+	devtype_info   *stype = dcast->src_type;
+	devtype_info   *dtype = dcast->dst_type;
+	Node		   *arg = (Node *)node->arg;
+	Oid				func_oid = InvalidOid;
+	List		   *func_args = NIL;
+
+	Assert(stype->type_oid == exprType(arg) &&
+		   dtype->type_oid == node->resulttype);
+	/* check special case if jsonb key reference */
+	if (IsA(arg, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *)arg;
+
+		if (func->funcid == F_JSONB_OBJECT_FIELD_TEXT ||
+			func->funcid == F_JSONB_ARRAY_ELEMENT_TEXT)
+		{
+			func_oid = func->funcid;
+			func_args = func->args;
+		}
+	}
+	else if (IsA(arg, OpExpr) || IsA(arg, DistinctExpr))
+	{
+		OpExpr	   *op = (OpExpr *)arg;
+		Oid			opfuncid = get_opcode(op->opno);
+
+		if (opfuncid == F_JSONB_OBJECT_FIELD_TEXT ||
+			opfuncid == F_JSONB_ARRAY_ELEMENT_TEXT)
+		{
+			func_oid = opfuncid;
+			func_args = op->args;
+		}
+	}
+
+	if (OidIsValid(func_oid))
+	{
+		// OK, put special device code here.
+
+		elog(INFO, "dcast = %s", nodeToString(node));
+
+
+
+	}
+	/* elsewhere, walks on the arguments. */
+	/* if OK, put a text to numeric convert function */
+
+	return false;
 }
 
 static void
