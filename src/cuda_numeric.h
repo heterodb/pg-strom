@@ -479,7 +479,7 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 	/* construct pg_numeric_t value from PostgreSQL Numeric */
 	{
 		NumericDigit *digits = NUMERIC_DIGITS(vl_datum); //may be unaligned
-		int		weight  = NUMERIC_WEIGHT(vl_datum);
+		int		weight  = NUMERIC_WEIGHT(vl_datum) + 1;
 		int		i, ndigits = NUMERIC_NDIGITS(vl_datum);
 
 		/* Numeric value is 0, if ndigits is 0 */
