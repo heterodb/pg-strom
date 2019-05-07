@@ -515,6 +515,99 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 }
 
 /*
+ * substring
+ */
+STATIC_FUNCTION(pg_text_t)
+text_substring(kern_context *kcxt,
+			   char *str, cl_int strlen, cl_int start, cl_int length)
+{
+	pg_text_t	result;
+	char	   *pos;
+	char	   *end = str + strlen;
+	char	   *mark __attribute__((unused));
+
+#if PG_DATABASE_ENCODING_MAX_LENGTH == 1
+	start = Max(start, 1) - 1;
+	if (start >= strlen)
+		goto empty;
+	pos = str + start;
+
+	if (length < 0 || start + length >= strlen)
+		length = strlen - start;
+	/* substring */
+	result.isnull = false;
+	result.value  = pos;
+	result.length = length;
+#else
+	start = Max(start, 1);
+	pos = str;
+	while (start-- > 0 && pos < end)
+		pos += pg_wchar_mblen(pos);
+	if (pos >= end)
+		goto empty;
+	mark = pos;
+	if (length < 0)
+		length = INT_MAX;
+	while (length-- > 0 && pos < end)
+		pos += pg_wchar_mblen(pos);
+	if (pos >= end)
+		pos = end;
+	result.isnull = false;
+	result.value  = mark;
+	result.length = (pos - mark);
+#endif	/* PG_DATABASE_ENCODING_MAX_LENGTH */
+	return result;
+
+empty:
+	result.isnull = false;
+	result.value  = end;
+	result.length = 0;
+	return result;
+}
+
+STATIC_INLINE(pg_text_t)
+pgfn_text_substring(kern_context *kcxt,
+					pg_text_t arg1, pg_int4_t arg2, pg_int4_t arg3)
+{
+	pg_text_t	result;
+	char	   *s1;
+	cl_int		len1;
+
+	if (arg1.isnull || arg2.isnull || arg3.isnull)
+		result.isnull = true;
+	else if (arg3.value < 0)
+	{
+		/* negative substring length not allowed */
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		result.isnull = true;
+	}
+	else if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1))
+		result.isnull = true;
+	else
+		result = text_substring(kcxt, s1, len1, arg2.value, arg3.value);
+
+	return result;
+}
+
+STATIC_INLINE(pg_text_t)
+pgfn_text_substring_nolen(kern_context *kcxt,
+						  pg_text_t arg1, pg_int4_t arg2)
+{
+	pg_text_t	result;
+	char	   *s1;
+	cl_int		len1;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1))
+		result.isnull = true;
+	else
+		result = text_substring(kcxt, s1, len1, arg2.value, -1);
+
+	return result;
+}
+
+/*
  * varchar(*) type definition
  */
 #ifndef PG_VARCHAR_TYPE_DEFINED
@@ -998,6 +1091,14 @@ pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
 STATIC_INLINE(void)
 assign_textlib_session_info(StringInfo buf)
 {
+	/*
+	 * pg_database_encoding_max_length()
+	 */
+	appendStringInfo(
+		buf,
+		"#define PG_DATABASE_ENCODING_MAX_LENGTH %d\n\n",
+		pg_database_encoding_max_length());
+
 	/*
 	 * Put encoding aware character length function
 	 */

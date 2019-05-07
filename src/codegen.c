@@ -1478,8 +1478,10 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  999, "sC/f:textcat",
 	  vlbuf_estimate_textcat
 	},
-//	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},
-//	  999, vlbuf_estimate_text_substr, "sc/f:text_substr" },
+	{ "substr",		3, {TEXTOID,INT4OID,INT4OID},10, "s/f:text_substring" },
+	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},10, "s/f:text_substring" },
+	{ "substr",		2, {TEXTOID,INT4OID},10, "s/f:text_substring_nolen" },
+	{ "substring",	2, {TEXTOID,INT4OID},10, "s/f:text_substring_nolen" },
 
 	/* jsonb operators */
 	{ "jsonb_object_field",       2, {JSONBOID,TEXTOID},
