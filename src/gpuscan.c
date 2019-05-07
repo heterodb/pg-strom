@@ -1314,7 +1314,7 @@ PlanGpuScanPath(PlannerInfo *root,
 
 	initStringInfo(&kern);
 	initStringInfo(&source);
-	pgstrom_init_codegen_context(&context, root);
+	pgstrom_init_codegen_context(&context, root, baserel);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
 	qual_extra_sz = context.varlena_bufsz;
 	tlist_dev = build_gpuscan_projection(root,

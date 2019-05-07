@@ -1006,10 +1006,10 @@ struct codegen_context {
 	Bitmapset  *param_refs;	/* referenced parameters */
 	const char *var_label;	/* prefix of var reference, if exist */
 	const char *kds_label;	/* label to reference kds, if exist */
-	const char *kds_index_label;/* label to reference kds_index, if exist */
 	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
 	int			extra_flags;	/* external libraries to be included */
 	int			varlena_bufsz;	/* required size of temporary varlena buffer */
+	int			devcost;	/* relative device cost */
 };
 typedef struct codegen_context	codegen_context;
 
@@ -1051,7 +1051,8 @@ extern bool __pgstrom_device_expression(PlannerInfo *root,
 								__FILE__,__LINE__)
 
 extern void pgstrom_init_codegen_context(codegen_context *context,
-										 PlannerInfo *root);
+										 PlannerInfo *root,
+										 RelOptInfo *baserel);
 extern void pgstrom_init_codegen(void);
 
 /*

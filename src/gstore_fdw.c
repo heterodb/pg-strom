@@ -741,7 +741,7 @@ gstoreGetForeignPlan(PlannerInfo *root,
 
 	/* kernel code generation */
 	initStringInfo(&kern);
-	pgstrom_init_codegen_context(&context, root);
+	pgstrom_init_codegen_context(&context, root, baserel);
 	gstore_codegen_qual_eval(&kern, &context, baserel,
 							 gsf_info->dev_quals);
 	gstore_codegen_keycomp(&kern, &context, baserel,

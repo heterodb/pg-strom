@@ -2316,6 +2316,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 				List *custom_plans)
 {
 	GpuJoinPath	   *gjpath = (GpuJoinPath *) best_path;
+	RelOptInfo	   *joinrel = gjpath->cpath.path.parent;
 	Index			outer_relid = gjpath->outer_relid;
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
@@ -2498,7 +2499,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	/*
 	 * construct kernel code
 	 */
-	pgstrom_init_codegen_context(&context, root);
+	pgstrom_init_codegen_context(&context, root, joinrel);
 	gj_info.optimal_gpu = gjpath->optimal_gpu;
 	gj_info.kern_source = gpujoin_codegen(root,
 										  cscan,

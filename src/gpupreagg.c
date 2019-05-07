@@ -2731,7 +2731,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	/*
 	 * construction of the GPU kernel code
 	 */
-	pgstrom_init_codegen_context(&context, root);
+	pgstrom_init_codegen_context(&context, root, best_path->path.parent);
 	context.extra_flags |= (DEVKERNEL_NEEDS_GPUPREAGG |
 							DEVKERNEL_NEEDS_GPUSCAN_DECL);
 	kern_source = gpupreagg_codegen(&context,
