@@ -2780,17 +2780,15 @@ static int
 codegen_function_expression(codegen_context *context,
 							devfunc_info *dfunc, List *args)
 {
-	bool		do_codegen = (context->str.data != NULL);
 	ListCell   *lc1, *lc2;
 	Expr	   *fn_args[DEVFUNC_MAX_NARGS];
 	int			vl_width[DEVFUNC_MAX_NARGS];
 	int			index = 0;
 	int			varlena_sz;
 
-	if (do_codegen)
-		appendStringInfo(&context->str,
-						 "pgfn_%s(kcxt",
-						 dfunc->func_devname);
+	__appendStringInfo(&context->str,
+					   "pgfn_%s(kcxt",
+					   dfunc->func_devname);
 	forboth (lc1, dfunc->func_args,
 			 lc2, args)
 	{
@@ -2798,19 +2796,16 @@ codegen_function_expression(codegen_context *context,
 		Node   *expr = lfirst(lc2);
 		Oid		expr_type_oid = exprType(expr);
 
-		if (do_codegen)
-			appendStringInfo(&context->str, ", ");
+		__appendStringInfo(&context->str, ", ");
 
 		if (dtype->type_oid == expr_type_oid)
 			codegen_expression_walker(context, expr, &vl_width[index]);
 		else if (pgstrom_devtype_can_relabel(expr_type_oid,
 											 dtype->type_oid))
 		{
-			if (do_codegen)
-				appendStringInfo(&context->str, "to_%s(", dtype->type_name);
+			__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 			codegen_expression_walker(context, expr, &vl_width[index]);
-			if (do_codegen)
-				appendStringInfo(&context->str, ")");
+			__appendStringInfoChar(&context->str, ')');
 		}
 		else
 		{
@@ -2820,15 +2815,11 @@ codegen_function_expression(codegen_context *context,
 		}
 		fn_args[index++] = (Expr *)expr;
 	}
-	if (do_codegen)
-		appendStringInfoChar(&context->str, ')');
+	__appendStringInfoChar(&context->str, ')');
 
 	varlena_sz = dfunc->dfunc_varlena_sz(dfunc, fn_args, vl_width);
 	if (varlena_sz > 0)
 		context->varlena_bufsz += MAXALIGN(VARHDRSZ + varlena_sz);
-	else if (varlena_sz < 0)
-		elog(ERROR, "cannot run %s on device due to varlena buffer usage",
-			 format_procedure(dfunc->func_oid));
 	return varlena_sz;
 }
 
@@ -3396,9 +3387,6 @@ codegen_expression_walker(codegen_context *context,
 	__codegen_current_node = __codegen_saved_node;
 }
 
-#undef __appendStringInfo
-#undef __appendStringInfoChar
-
 char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
@@ -3602,51 +3590,69 @@ devcast_text2numeric_callback(codegen_context *context,
 {
 	devtype_info   *stype = dcast->src_type;
 	devtype_info   *dtype = dcast->dst_type;
-	Node		   *arg = (Node *)node->arg;
+	Expr		   *arg = node->arg;
 	Oid				func_oid = InvalidOid;
 	List		   *func_args = NIL;
+	List		   *dfunc_args;
+	char			dfunc_name[100];
+	ListCell	   *lc;
 
-	Assert(stype->type_oid == exprType(arg) &&
+	Assert(stype->type_oid == exprType((Node *)arg) &&
 		   dtype->type_oid == node->resulttype);
 	/* check special case if jsonb key reference */
 	if (IsA(arg, FuncExpr))
 	{
 		FuncExpr   *func = (FuncExpr *)arg;
 
-		if (func->funcid == F_JSONB_OBJECT_FIELD_TEXT ||
-			func->funcid == F_JSONB_ARRAY_ELEMENT_TEXT)
-		{
-			func_oid = func->funcid;
-			func_args = func->args;
-		}
+		func_oid  = func->funcid;
+		func_args = func->args;
 	}
 	else if (IsA(arg, OpExpr) || IsA(arg, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *)arg;
-		Oid			opfuncid = get_opcode(op->opno);
 
-		if (opfuncid == F_JSONB_OBJECT_FIELD_TEXT ||
-			opfuncid == F_JSONB_ARRAY_ELEMENT_TEXT)
-		{
-			func_oid = opfuncid;
-			func_args = op->args;
-		}
+		func_oid  = get_opcode(op->opno);
+		func_args = op->args;
 	}
 
-	if (OidIsValid(func_oid))
+	switch (func_oid)
 	{
-		// OK, put special device code here.
-
-		elog(INFO, "dcast = %s", nodeToString(node));
-
-
-
+		case F_JSONB_OBJECT_FIELD_TEXT:
+			snprintf(dfunc_name, sizeof(dfunc_name),
+					 "jsonb_object_field_as_%s", dtype->type_name);
+			dfunc_args = func_args;
+			break;
+		case F_JSONB_ARRAY_ELEMENT_TEXT:
+			snprintf(dfunc_name, sizeof(dfunc_name),
+					 "jsonb_array_element_as_%s", dtype->type_name);
+			dfunc_args = func_args;
+			break;
+		default:
+			snprintf(dfunc_name, sizeof(dfunc_name),
+					 "text_to_%s", dtype->type_name);
+			dfunc_args = list_make1(arg);
+			break;
 	}
-	/* elsewhere, walks on the arguments. */
-	/* if OK, put a text to numeric convert function */
 
-	return false;
+	__appendStringInfo(&context->str,
+					   "pgfn_%s(kcxt",
+					   dfunc_name);
+	foreach (lc, dfunc_args)
+	{
+		Node   *expr = lfirst(lc);
+		int		dummy;
+
+		__appendStringInfo(&context->str, ", ");
+		codegen_expression_walker(context, expr, &dummy);
+	}
+	__appendStringInfoChar(&context->str, ')');
+	if (p_varlena_sz)
+		*p_varlena_sz = 0;
+	return true;
 }
+
+#undef __appendStringInfo
+#undef __appendStringInfoChar
 
 static void
 codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)

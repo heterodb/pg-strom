@@ -779,9 +779,33 @@ pgfn_jsonb_array_element_text(kern_context *kcxt,
 							  pg_jsonb_t arg1, pg_int4_t arg2)
 {
 	pg_text_t	result;
+	char	   *jdata;
+	cl_int		jlen;
 
-	result.isnull = true;
+	if (!pg_varlena_datum_extract(kcxt, arg1, &jdata, &jlen) || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		JsonbContainer *jc = (JsonbContainer *)jdata;
+		cl_uint		jheader;
 
+		memcpy(&jheader, &jc->header, sizeof(cl_uint));
+		if (!JsonContainerIsArray(jheader))
+			result.isnull = true;
+		else
+		{
+			cl_uint		count = JsonContainerSize(jheader);
+            char	   *base = (char *)(jc->children + count);	/* values */
+			cl_int		index = arg2.value;
+
+			if (index < 0)
+				index += count;		/* index from the tail, if negative */
+			if (index < 0 || index >= count)
+				result.isnull = true;
+			else
+                result = extractTextItemFromContainer(kcxt, jc, index, base);
+		}
+	}
 	return result;
 }
 
@@ -810,5 +834,217 @@ pgfn_jsonb_exists(kern_context *kcxt,
 	return result;
 }
 
+/*
+ * Special shortcut for CoerceViaIO; fetch jsonb element as numeric values
+ */
+STATIC_FUNCTION(pg_numeric_t)
+pgfn_jsonb_object_field_as_numeric(kern_context *kcxt,
+								   pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t result;
+	char	   *jdata;		/* jsonb */
+	char	   *kdata;		/* key text */
+	cl_int		jlen, klen;
+
+	if (!pg_varlena_datum_extract(kcxt, arg1, &jdata, &jlen) ||
+		!pg_varlena_datum_extract(kcxt, arg2, &kdata, &klen))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+	}
+	else
+	{
+		JsonbContainer *jc = (JsonbContainer *)jdata;
+		cl_uint		jheader = __Fetch(&jc->header);
+
+		if (JsonContainerIsObject(jheader))
+		{
+			cl_uint		count = JsonContainerSize(jheader);
+			char	   *base = (char *)(jc->children + 2 * count);
+			cl_int		index;
+
+			index = findJsonbIndexFromObject(jc, kdata, klen);
+			if (index >= 0 && index < count)
+			{
+				JEntry		entry;
+				char	   *data;
+				cl_int		datalen;
+
+				index += count;		/* index now points values, not keys */
+				entry = __Fetch(&jc->children[index]);
+				if (JBE_ISNUMERIC(entry))
+				{
+					data = base + INTALIGN(getJsonbOffset(jc, index));
+					datalen = getJsonbLength(jc, index);
+
+					assert(VARSIZE_ANY(data) <= datalen);
+					return pg_numeric_from_varlena(kcxt, (varlena *)data);
+				}
+				else if (!JBE_ISNULL(entry))
+				{
+					/*
+					 * Elsewhere, if item is neither numeric nor null,
+					 * query eventually raises an error, because of value
+					 * conversion problems.
+					 */
+					STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				}
+			}
+		}
+	}
+	result.isnull = true;
+	return result;
+}
+
+STATIC_INLINE(pg_int2_t)
+pgfn_jsonb_object_field_as_int2(kern_context *kcxt,
+								pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = pgfn_jsonb_object_field_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int2(kcxt, num);
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_jsonb_object_field_as_int4(kern_context *kcxt,
+								pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = pgfn_jsonb_object_field_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int4(kcxt, num);
+}
+
+STATIC_INLINE(pg_int8_t)
+pgfn_jsonb_object_field_as_int8(kern_context *kcxt,
+								pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = pgfn_jsonb_object_field_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int8(kcxt, num);
+}
+
+STATIC_INLINE(pg_float4_t)
+pgfn_jsonb_object_field_as_float4(kern_context *kcxt,
+								  pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = pgfn_jsonb_object_field_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_float4(kcxt, num);
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_jsonb_object_field_as_float8(kern_context *kcxt,
+								  pg_jsonb_t arg1, pg_text_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = pgfn_jsonb_object_field_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_float8(kcxt, num);
+}
+
+STATIC_FUNCTION(pg_numeric_t)
+jsonb_array_element_as_numeric(kern_context *kcxt,
+							   pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t result;
+	char	   *jdata;
+	cl_int		jlen;
+
+	if (pg_varlena_datum_extract(kcxt, arg1, &jdata, &jlen) && !arg2.isnull)
+	{
+		JsonbContainer *jc = (JsonbContainer *)jdata;
+		cl_uint		jheader = __Fetch(&jc->header);
+
+		if (JsonContainerIsArray(jheader))
+		{
+			cl_uint		count = JsonContainerSize(jheader);
+			char	   *base = (char *)(jc->children + count);	/* values */
+			cl_int		index = arg2.value;
+
+			if (index < 0)
+				index += count;		/* index from the tail, if negative */
+			if (index >= 0 && index < count)
+			{
+				JEntry		entry;
+				char	   *data;
+				cl_int		datalen;
+
+				entry = __Fetch(&jc->children[index]);
+				if (JBE_ISNUMERIC(entry))
+				{
+					data = base + INTALIGN(getJsonbOffset(jc, index));
+					datalen = getJsonbLength(jc, index);
+
+					assert(VARSIZE_ANY(data) <= datalen);
+					return pg_numeric_from_varlena(kcxt, (varlena *)data);
+				}
+				else if (!JBE_ISNULL(entry))
+				{
+					/*
+					 * Elsewhere, if item is neither numeric nor null,
+					 * query eventually raises an error, because of value
+					 * conversion problems.
+					 */
+					STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				}
+			}
+		}
+	}
+	result.isnull = true;
+	return result;
+}
+
+STATIC_INLINE(pg_int2_t)
+jsonb_array_element_as_int2(kern_context *kcxt,
+							pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = jsonb_array_element_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int2(kcxt, num);
+}
+
+STATIC_INLINE(pg_int4_t)
+jsonb_array_element_as_int4(kern_context *kcxt,
+							pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = jsonb_array_element_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int4(kcxt, num);
+}
+
+STATIC_INLINE(pg_int8_t)
+jsonb_array_element_as_int8(kern_context *kcxt,
+							pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = jsonb_array_element_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_int8(kcxt, num);
+}
+
+STATIC_INLINE(pg_float4_t)
+jsonb_array_element_as_float4(kern_context *kcxt,
+							  pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = jsonb_array_element_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_float4(kcxt, num);
+}
+
+STATIC_INLINE(pg_float8_t)
+jsonb_array_element_as_float8(kern_context *kcxt,
+							  pg_jsonb_t arg1, pg_int4_t arg2)
+{
+	pg_numeric_t	num;
+
+	num = jsonb_array_element_as_numeric(kcxt, arg1, arg2);
+	return pgfn_numeric_float8(kcxt, num);
+}
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_JSONLIB_H */
