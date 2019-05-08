@@ -154,6 +154,9 @@
     <li class="toctree-l3"><a href="#uuid-operators">UUID operators</a></li>
     
 
+    <li class="toctree-l3"><a href="#jsonb-operators">JSONB operators</a></li>
+    
+
     <li class="toctree-l3"><a href="#range-type-functionsoperators">Range type functions/operators</a></li>
     
 
@@ -670,6 +673,14 @@
 <td align="left"><code>COMP</code> is either of <code>&lt;,&lt;=,&gt;=,&gt;</code><br>Only available on no-locale or UTF-8</td>
 </tr>
 <tr>
+<td align="left"><code>varchar || varchar</code></td>
+<td align="left">Both side must be <code>varchar(n)</code> with maximum length.</td>
+</tr>
+<tr>
+<td align="left"><code>substring</code>, <code>substr</code></td>
+<td align="left"></td>
+</tr>
+<tr>
 <td align="left"><code>length(TYPE)</code></td>
 <td align="left">length of the string<br><code>TYPE</code> is either of <code>text,bpchar</code></td>
 </tr>
@@ -840,6 +851,50 @@
 </tr>
 </tbody>
 </table>
+<h1 id="jsonb-operators">JSONB operators</h1>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>jsonb -&gt; KEY</code></td>
+<td align="left">Get a JSON object field specified by the <code>KEY</code></td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt; NUM</code></td>
+<td align="left">Get a JSON array element indexed by <code>NUM</code></td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt;&gt; KEY</code></td>
+<td align="left">Get a JSON object field specified by the <code>KEY</code>, as text</td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt;&gt; NUM</code></td>
+<td align="left">Get a JSON array element indexed by <code>NUM</code></td>
+</tr>
+<tr>
+<td align="left"><code>(jsonb -&gt;&gt; KEY)::TYPE</code></td>
+<td align="left">TYPE is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON object field specified by <code>KEY</code>, as numeric data type. See the note below.</td>
+</tr>
+<tr>
+<td align="left"><code>(jsonb -&gt;&gt; NUM)::TYPE</code></td>
+<td align="left">TYPE is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON array element indexed by <code>NUM</code>, as numeric data type. See the note below.</td>
+</tr>
+<tr>
+<td align="left"><code>jsonb ? KEY</code></td>
+<td align="left">Check whether jsonb object contains the <code>KEY</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>When we convert a jsonb element fetched by <code>jsonb -&gt;&gt; KEY</code> operator into numerical data types like <code>float</code> or <code>numeric</code>, PostgreSQL takes 2 steps operations; an internal numerical form is printed as text first, then it is converted into numerical data type.
+PG-Strom optimizes the GPU code using a special device function to fetch a numerical datum from jsonb object/array, if <code>jsonb -&gt;&gt; KEY</code> operator and text-to-numeric case are continuously used.</p>
+</div>
 <h1 id="range-type-functionsoperators">Range type functions/operators</h1>
 <table>
 <thead>

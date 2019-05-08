@@ -136,6 +136,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |:------------------|:----------|
 |`{text,bpchar} COMP {text,bpchar}`|`COMP` is either of `=,<>`|
 |`{text,bpchar} COMP {text,bpchar}`|`COMP` is either of `<,<=,>=,>`<br>Only available on no-locale or UTF-8|
+|`varchar || varchar`|Both side must be `varchar(n)` with maximum length.|
+|`substring`, `substr`||
 |`length(TYPE)`|length of the string<br>`TYPE` is either of `text,bpchar`|
 |`TYPE LIKE text`|`TYPE` is either of `text,bpchar`|
 |`TYPE NOT LIKE text`|`TYPE` is either of `text,bpchar`|
@@ -190,6 +192,30 @@ This chapter introduces the functions and operators executable on GPU devices.
 |functions/operators|description|
 |:------------------|:----------|
 |`uuid COMP uuid`   |`COMP` is any of `=,<>,<,<=,>=,>`|
+
+@ja:#JSONB型演算子
+@en:#JSONB operators
+
+|functions/operators    |description|
+|:----------------------|:----------|
+|`jsonb -> KEY`         |Get a JSON object field specified by the `KEY`|
+|`jsonb -> NUM`         |Get a JSON array element indexed by `NUM`|
+|`jsonb ->> KEY`        |Get a JSON object field specified by the `KEY`, as text|
+|`jsonb ->> NUM`        |Get a JSON array element indexed by `NUM`|
+|`(jsonb ->> KEY)::TYPE`|TYPE is any of `int2,int4,int8,float4,float8,numeric`<br>Get a JSON object field specified by `KEY`, as numeric data type. See the note below.|
+|`(jsonb ->> NUM)::TYPE`|TYPE is any of `int2,int4,int8,float4,float8,numeric`<br>Get a JSON array element indexed by `NUM`, as numeric data type. See the note below.|
+|`jsonb ? KEY`          |Check whether jsonb object contains the `KEY`|
+
+@ja{
+!!! Note
+    `jsonb ->> KEY`演算子によって取り出した数値データを`float`や`numeric`など数値型に変換する時、通常、PostgreSQLはjsonb内部表現をテキストとして出力し、それを数値表現に変換するという2ステップの処理を行います。
+    PG-Stromは`jsonb ->> KEY`演算子による参照とテキスト⇒数値表現へのキャストが連続している時、jsonbオブジェクトから数値表現を取り出すための特別なデバイス関数を使用する事で最適化を行います。
+}
+@en{
+!!! Note
+    When we convert a jsonb element fetched by `jsonb ->> KEY` operator into numerical data types like `float` or `numeric`, PostgreSQL takes 2 steps operations; an internal numerical form is printed as text first, then it is converted into numerical data type.
+    PG-Strom optimizes the GPU code using a special device function to fetch a numerical datum from jsonb object/array, if `jsonb ->> KEY` operator and text-to-numeric case are continuously used.
+}
 
 @ja:#範囲型演算子
 @en:#Range type functions/operators

@@ -788,16 +788,13 @@ License activation is needed to use all the features of NVME-Strom module, provi
 You can obtain a license file, like as a plain text below, from HeteroDB,Inc.
 }
 ```
-IAwPOAC44m8LPMoV7bMykhxM27LAVrktspcaMHki8pI1fXrxq0KzqPDK4LzAA9n26IRAr/4ymB6QJ3/JxZOfYTVsbWq66vEtTAIuZVmJ/I888zRATj1hoofh1WbIwd3/ix28Cy1v16KCgLrlqPsra6NJScMOOHnuYoWWmWe4ml+n6GVEIb7ChUJvZbEZSO/DiLXosFc0N+MD4JTEU/XsBUP9ufacpbosW/YG2nOib3mpvhkfn7RQy2T5CVQeuGjM9Taj7DN5xipqU/Q0hZaZKA8EsZwsB6b4c7usdmPILyIpuTrWnEbjJ6worOQWHA+nL87xkDL1XYGH6UVc291QPLwk=
+IAgIVdKxhe+BSer3Y67jQW0+uTzYh00K6WOSH7xQ26Qcw8aeUNYqJB9YcKJTJb+QQhjmUeQpUnboNxVwLCd3HFuLXeBWMKp11/BgG0FSrkUWu/ZCtDtw0F1hEIUY7m767zAGV8y+i7BuNXGJFvRlAkxdVO3/K47ocIgoVkuzBfLvN/h9LffOydUnHPzrFHfLc0r3nNNgtyTrfvoZiXegkGM9GBTAKyq8uWu/OGonh9ybzVKOgofhDLk0rVbLohOXDhMlwDl2oMGIr83tIpCWG+BGE+TDwsJ4n71Sv6n4bi/ZBXBS498qShNHDGrbz6cNcDVBa+EuZc6HzZoF6UrljEcl=
 ----
-VERSION:1
+VERSION:2
 SERIAL_NR:HDB-TRIAL
-ISSUED_AT:2018-08-16
-EXPIRED_AT:2018-09-15
-NR_GPUS:1
-LICENSEE_ORG:Capybara Kingdom
-LICENSEE_NAME:Herr.Wassershweine
-LICENSEE_MAIL:capybara@example.com
+ISSUED_AT:2019-05-09
+EXPIRED_AT:2019-06-08
+GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
 ```
 
 @ja{
@@ -814,15 +811,13 @@ The startup log messages of PostgreSQL dumps the license information, and it tel
 ```
 $ pg_ctl restart
    :
-LOG:  PG-Strom built for PostgreSQL 11
-LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+LOG:  PG-Strom version 2.2 built for PostgreSQL 11
+LOG:  PG-Strom: GPU0 Tesla P40 (3840 CUDA cores; 1531MHz, L2 3072kB), RAM 22.38GB (384bits, 3.45GHz), CC 6.1
    :
-   :
-LOG:  HeteroDB License: { "version" : 1, "serial_nr" : "HDB-TRIAL", "issued_at" : "16-Aug-2018", "expired_at" : "15-Sep-2018", "nr_gpus" : 1, "licensee_org" : "Capybara Kingdom", "licensee_name" : "Herr.Wassershweine", "licensee_mail" : "capybara@example.com" }
+LOG:  HeteroDB License: { "version" : 2, "serial_nr" : "HDB-TRIAL", "issued_at" : "9-May-2019", "expired_at" : "8-Jun-2019", "gpus" : [ { "uuid" : "GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f", "pci_id" : "0000:02:00.0" } ] }
 LOG:  listening on IPv6 address "::1", port 5432
 LOG:  listening on IPv4 address "127.0.0.1", port 5432
-LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
-   :
+    :
 ```
 
 @ja:## カーネルモジュールパラメータ

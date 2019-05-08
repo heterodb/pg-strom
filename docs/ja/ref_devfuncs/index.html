@@ -154,6 +154,9 @@
     <li class="toctree-l3"><a href="#uuid">uuid型演算子</a></li>
     
 
+    <li class="toctree-l3"><a href="#jsonb">JSONB型演算子</a></li>
+    
+
     <li class="toctree-l3"><a href="#_9">範囲型演算子</a></li>
     
 
@@ -670,6 +673,14 @@
 <td align="left"><code>COMP</code> is either of <code>&lt;,&lt;=,&gt;=,&gt;</code><br>Only available on no-locale or UTF-8</td>
 </tr>
 <tr>
+<td align="left"><code>varchar || varchar</code></td>
+<td align="left">Both side must be <code>varchar(n)</code> with maximum length.</td>
+</tr>
+<tr>
+<td align="left"><code>substring</code>, <code>substr</code></td>
+<td align="left"></td>
+</tr>
+<tr>
 <td align="left"><code>length(TYPE)</code></td>
 <td align="left">length of the string<br><code>TYPE</code> is either of <code>text,bpchar</code></td>
 </tr>
@@ -840,6 +851,50 @@
 </tr>
 </tbody>
 </table>
+<h1 id="jsonb">JSONB型演算子</h1>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>jsonb -&gt; KEY</code></td>
+<td align="left">Get a JSON object field specified by the <code>KEY</code></td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt; NUM</code></td>
+<td align="left">Get a JSON array element indexed by <code>NUM</code></td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt;&gt; KEY</code></td>
+<td align="left">Get a JSON object field specified by the <code>KEY</code>, as text</td>
+</tr>
+<tr>
+<td align="left"><code>jsonb -&gt;&gt; NUM</code></td>
+<td align="left">Get a JSON array element indexed by <code>NUM</code></td>
+</tr>
+<tr>
+<td align="left"><code>(jsonb -&gt;&gt; KEY)::TYPE</code></td>
+<td align="left">TYPE is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON object field specified by <code>KEY</code>, as numeric data type. See the note below.</td>
+</tr>
+<tr>
+<td align="left"><code>(jsonb -&gt;&gt; NUM)::TYPE</code></td>
+<td align="left">TYPE is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON array element indexed by <code>NUM</code>, as numeric data type. See the note below.</td>
+</tr>
+<tr>
+<td align="left"><code>jsonb ? KEY</code></td>
+<td align="left">Check whether jsonb object contains the <code>KEY</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>jsonb -&gt;&gt; KEY</code>演算子によって取り出した数値データを<code>float</code>や<code>numeric</code>など数値型に変換する時、通常、PostgreSQLはjsonb内部表現をテキストとして出力し、それを数値表現に変換するという2ステップの処理を行います。
+PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキスト⇒数値表現へのキャストが連続している時、jsonbオブジェクトから数値表現を取り出すための特別なデバイス関数を使用する事で最適化を行います。</p>
+</div>
 <h1 id="_9">範囲型演算子</h1>
 <table>
 <thead>
