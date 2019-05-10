@@ -612,6 +612,7 @@ cost_gpujoin(PlannerInfo *root,
 		List	   *join_quals = gpath->inners[i].join_quals;
 		double		join_nrows = gpath->inners[i].join_nrows;
 		Size		ichunk_size = gpath->inners[i].ichunk_size;
+		Cost		inner_run_cost;
 		QualCost	join_quals_cost;
 
 		/*
@@ -639,8 +640,23 @@ cost_gpujoin(PlannerInfo *root,
 			return false;
 		}
 
-		/* cost to load all the tuples from inner-path */
-		startup_cost += scan_path->total_cost;
+		/*
+		 * cost to load all the tuples from inner-path
+		 *
+		 * FIXME: This is an ad-hoc workaround not to breal multi-level
+		 * GpuJoin chain. PostgreSQL v11 begins to support parallel build
+		 * of inner hash-table, and its cost tends to be discounted by
+		 * num of parallel workers. It is exactly a rapid option to process
+		 * inner side, however, cannot use combined GpuJoin+GpuPreAgg here.
+		 * So, we tentatively discount the inner cost by parallel_nworkers,
+		 * as if it is processed in parallel.
+		 * It shall be supported on the later PG-Strom version.
+		 */
+		inner_run_cost = (scan_path->total_cost -
+						  scan_path->startup_cost);
+		if (parallel_nworkers > 0)
+			inner_run_cost /= (double)parallel_nworkers;
+		startup_cost += scan_path->startup_cost + inner_run_cost;
 
 		/* cost for join_qual startup */
 		cost_qual_eval(&join_quals_cost, join_quals, root);
