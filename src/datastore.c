@@ -458,7 +458,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 
 			ctemp = cmeta + cusage;
 			ctemp->attbyval = elem->typbyval;
-			ctemp->attalign = elem->typalign;
+			ctemp->attalign = typealign_get_width(elem->typalign);
 			ctemp->attlen   = elem->typlen;
 			ctemp->attcacheoff = -1;
 			ctemp->atttypid = type->typelem;

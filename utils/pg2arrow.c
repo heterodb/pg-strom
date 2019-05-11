@@ -398,19 +398,6 @@ pgsql_end_query(PGconn *conn)
 	PQfinish(conn);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 #define atooid(x)		((Oid) strtoul((x), NULL, 10))
 #define InvalidOid		((Oid) 0)
 

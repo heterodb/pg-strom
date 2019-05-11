@@ -521,32 +521,40 @@ setupRecordBatchField(setupRecordBatchContext *con,
 		case ArrowNodeTag__List:
 			if (field->_num_children != 1)
 				elog(ERROR, "Bug? List of arrow type is corrupted");
-			else
+			if (depth > 0)
+				elog(ERROR, "nested array type is not supported");
+			/* nullmap */
+			if (con->buffer_curr + 1 > con->buffer_tail)
+				elog(ERROR, "RecordBatch has less buffers than expected");
+			buffer_curr = con->buffer_curr++;
+			if (fstate->null_count > 0)
 			{
-				ArrowField *child = &field->children[0];
-
-				switch (child->type.node.tag)
-				{
-					case ArrowNodeTag__Int:
-					case ArrowNodeTag__FloatingPoint:
-					case ArrowNodeTag__Bool:
-					case ArrowNodeTag__Decimal:
-					case ArrowNodeTag__Date:
-					case ArrowNodeTag__Time:
-					case ArrowNodeTag__Timestamp:
-					case ArrowNodeTag__Interval:
-						/* OK, supported */
-						break;
-					default:
-						elog(ERROR, "arrow_fdw: List of %s is not supported",
-							 child->type.node.tagName);
-				}
-				/*
-				 * Layout of fixed-length values array is identical with
-				 * variable-length values below (Utf8/Binary), so just goes
-				 * through the next block.
-				 */
+				fstate->nullmap_offset = buffer_curr->offset;
+				fstate->nullmap_length = buffer_curr->length;
+				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
+					elog(ERROR, "nullmap length is smaller than expected");
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+					elog(ERROR, "nullmap is not aligned well");
 			}
+			/* offset values */
+			buffer_curr = con->buffer_curr++;
+			fstate->values_offset = buffer_curr->offset;
+			fstate->values_length = buffer_curr->length;
+			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
+				elog(ERROR, "offset array is smaller than expected");
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
+				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				elog(ERROR, "offset array is not aligned well");
+			/* setup array element */
+			fstate->children = palloc0(sizeof(RecordBatchFieldState));
+			setupRecordBatchField(con,
+								  &fstate->children[0],
+								  &field->children[0],
+								  depth+1);
+			fstate->num_children = 1;
+			break;
+
 		case ArrowNodeTag__Utf8:
 		case ArrowNodeTag__Binary:
 			/* variable length values */
@@ -919,7 +927,8 @@ arrowFdwSetupIOvectorField(arrowFdwSetupIOContext *con,
 	}
 
 	/* nested sub-fields if composite types */
-	if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
+	if (cmeta->atttypkind == TYPE_KIND__ARRAY ||
+		cmeta->atttypkind == TYPE_KIND__COMPOSITE)
 	{
 		kern_colmeta *subattr;
 		int		j;
@@ -1714,11 +1723,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				elem_oid = arrowTypeToPGTypeOid(child, &elem_mod);
 				type_oid = get_array_type(elem_oid);
 				if (!OidIsValid(type_oid))
-					elog(ERROR, "arrow.%s is not supported",
+					elog(ERROR, "array of arrow::%s type is not defined",
 						 arrowTypeName(field));
-				if (get_typlen(type_oid) <= 0)
-					elog(ERROR, "arrow_fdw: List of %s is not supported",
-						 child->type.node.tagName);
 				return type_oid;
 			}
 			break;
@@ -1977,6 +1983,12 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 /*
  * pg_XXX_arrow_ref
  */
+static void pg_datum_arrow_ref(kern_data_store *kds,
+							   kern_colmeta *cmeta,
+							   size_t index,
+							   Datum *p_datum,
+							   bool *p_isnull);
+
 static Datum
 pg_varlena_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
@@ -2172,6 +2184,94 @@ pg_interval_arrow_ref(kern_data_store *kds,
 	return PointerGetDatum(iv);
 }
 
+static Datum
+pg_array_arrow_ref(kern_data_store *kds,
+				   kern_colmeta *smeta,
+				   cl_uint start, cl_uint end)
+{
+	ArrayType  *res;
+	size_t		sz;
+	cl_uint		i, nitems = end - start;
+	cl_uint	   *offset;
+	bits8	   *nullmap = NULL;
+	char	   *base;
+	size_t		usage;
+
+	/* allocation of the result buffer */
+	if (smeta->nullmap_offset != 0)
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+	else
+		sz = ARR_OVERHEAD_NONULLS(1);
+
+	if (smeta->attlen > 0)
+	{
+		sz += TYPEALIGN(smeta->attalign,
+						smeta->attlen) * nitems;
+	}
+	else if (smeta->attlen == -1)
+	{
+		if (smeta->values_offset == 0)
+			elog(ERROR, "Bug? corrupted kernel column metadata");
+		offset = (cl_uint *)((char *)kds + __kds_unpack(smeta->values_offset));
+		sz += (MAXALIGN(VARHDRSZ * nitems) +		/* space for varlena */
+			   MAXALIGN(sizeof(cl_uint) * nitems) +	/* space for alignment */
+			   offset[end] - offset[start]);
+	}
+	else
+		elog(ERROR, "Bug? corrupted kernel column metadata");
+
+	res = palloc0(sz);
+	res->ndim = 1;
+	if (smeta->nullmap_offset != 0)
+	{
+		res->dataoffset = ARR_OVERHEAD_WITHNULLS(1, nitems);
+		nullmap = ARR_NULLBITMAP(res);
+	}
+	res->elemtype = smeta->atttypid;
+	ARR_DIMS(res)[0] = nitems;
+	ARR_LBOUND(res)[0] = 1;
+
+	base = ARR_DATA_PTR(res);
+	usage = 0;
+	for (i=0; i < nitems; i++)
+	{
+		Datum	datum;
+		bool	isnull;
+
+		pg_datum_arrow_ref(kds, smeta, start+i, &datum, &isnull);
+		if (isnull)
+		{
+			if (!nullmap)
+				elog(ERROR, "Bug? element item should not be NULL");
+		}
+		else if (smeta->attlen > 0)
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+			usage = TYPEALIGN(smeta->attalign, usage);
+			memcpy(base + usage, &datum, smeta->attlen);
+			usage += smeta->attlen;
+		}
+		else if (smeta->attlen == -1)
+		{
+			cl_int		vl_len = VARSIZE(datum);
+
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+			usage = TYPEALIGN(smeta->attalign, usage);
+			memcpy(base + usage, DatumGetPointer(datum), vl_len);
+			usage += vl_len;
+
+			pfree(DatumGetPointer(datum));
+		}
+		else
+			elog(ERROR, "Bug? corrupted kernel column metadata");
+	}
+	SET_VARSIZE(res, (base + usage) - (char *)res);
+
+	return PointerGetDatum(res);
+}
+
 /*
  * pg_datum_arrow_ref
  */
@@ -2198,50 +2298,18 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	{
 		kern_colmeta   *smeta;
 		cl_uint		   *offset;
-		char		   *extra;
-		size_t			extra_len;
-		cl_uint			nitems;
-		cl_uint			nbytes;
-		ArrayType	   *result;
 
 		if (cmeta->num_subattrs != 1 ||
 			cmeta->idx_subattrs < kds->ncols ||
 			cmeta->idx_subattrs >= kds->nr_colmeta)
-			elog(ERROR, "Bug? strange kernel column metadata");
+			elog(ERROR, "Bug? corrupted kernel column metadata");
 		smeta = &kds->colmeta[cmeta->idx_subattrs];
-		if (smeta->attlen < 1)
-			elog(ERROR, "List of variable-length type is not supported");
-		if (cmeta->values_offset == 0 ||
-			cmeta->extra_offset == 0)
-			goto out;	/* not loaded? always NULL */
-
-		//XXX Do we have values_offset of the smeta side?
-		//    It is straightforward layout towards Apache Arrow.
-		//FIXME: Likely, smeta is correct, because we have no space for
-		//       NULL bitmap
+		if (cmeta->values_offset == 0)
+			goto out;		/* not loaded? always NULL */
 		offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
-		extra  = (char *)kds + __kds_unpack(cmeta->extra_offset);
-		extra_len = __kds_unpack(cmeta->extra_length);
-		if (offset[index] * smeta->attlen >= extra_len ||
-			offset[index+1] * smeta->attlen >= extra_len)
-			elog(ERROR, "List offset is out of range");
-		if (offset[index] >= offset[index + 1])
-			elog(ERROR, "List offset is corrupted");
-		nitems = offset[index + 1] - offset[index];
-
-		nbytes = ARR_OVERHEAD_NONULLS(1) + smeta->attlen * nitems;
-		result = palloc(nbytes);
-		SET_VARSIZE(result, nbytes);
-		result->ndim = 1;
-		result->dataoffset = 0;
-		result->elemtype = smeta->atttypid;
-		ARR_DIMS(result)[0] = nitems;
-		ARR_LBOUND(result)[0] = 1;
-		memcpy(ARR_DATA_PTR(result),
-			   extra + offset[index],
-			   smeta->attlen * nitems);
-
-		datum = PointerGetDatum(result);
+		datum = pg_array_arrow_ref(kds, smeta,
+								   offset[index],
+								   offset[index+1]);
 		isnull = false;
 	}
 	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
