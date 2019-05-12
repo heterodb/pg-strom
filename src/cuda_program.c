@@ -505,9 +505,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define  __CUDA_GPUSORT_BODY__ 1\n"
 						"#include \"cuda_gpusort.h\"\n");
-	/* code to be included at the last */
-	ofs += snprintf(source + ofs, len - ofs,
-					"#include \"cuda_terminal.h\"\n");
 	return source;
 }
 

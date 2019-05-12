@@ -14,4 +14,4 @@ PGSTROM_CUDA(misc)
 PGSTROM_CUDA(rangetype)
 PGSTROM_CUDA(time_extract)
 PGSTROM_CUDA(plcuda)
-PGSTROM_CUDA(terminal)
+
