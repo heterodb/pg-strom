@@ -317,21 +317,18 @@ typedef struct toast_compress_header
 #ifdef __CUDACC__
 #define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)				\
 	STATIC_INLINE(void)										\
-	pg_datum_ref_arrow(kern_context *kcxt,                  \
-					   pg_##NAME##_t &result,               \
-					   kern_data_store *kds,                \
-					   cl_uint colidx, cl_uint rowidx)      \
-	{                                                       \
-		kern_colmeta   *cmeta = &kds->colmeta[colidx];      \
+	pg_datum_fetch_arrow(kern_context *kcxt,				\
+						 pg_##NAME##_t &result,             \
+						 kern_colmeta *cmeta,				\
+						 char *base, cl_uint rowidx)		\
+	{														\
 		void           *addr;                               \
 		cl_uint			length;								\
                                                             \
-		assert(kds->format == KDS_FORMAT_ARROW);            \
-		assert(colidx < kds->nr_colmeta &&                  \
-			   rowidx < kds->nitems);                       \
-		addr = kern_get_varlena_datum_arrow(kds,cmeta,		\
-											rowidx,			\
-											&length);		\
+		addr = kern_fetch_varlena_datum_arrow(cmeta,		\
+											  base,			\
+											  rowidx,		\
+											  &length);		\
 		if (!addr)											\
 		{													\
 			result.isnull = true;							\

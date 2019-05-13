@@ -77,24 +77,21 @@ pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
 }
 
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_bpchar_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_bpchar_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
 	cl_int			unitsz = cmeta->atttypmod - VARHDRSZ;
 	char		   *addr, *pos;
 
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta &&
-		   rowidx < kds->nitems);
 	if (unitsz <= 0)
 		addr = NULL;
 	else
-		addr = (char *)kern_get_simple_datum_arrow(kds,cmeta,
-												   rowidx,
-												   unitsz);
+		addr = (char *)kern_fetch_simple_datum_arrow(cmeta,
+													 base,
+													 rowidx,
+													 unitsz);
 	if (!addr)
 		result.isnull = true;
 	else

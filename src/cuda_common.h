@@ -1047,49 +1047,49 @@ KERN_DATA_STORE_DCLASS(kern_data_store *kds, cl_uint row_index)
 
 /* access functions for apache arrow format */
 STATIC_FUNCTION(void *)
-kern_get_simple_datum_arrow(kern_data_store *kds,
-							kern_colmeta *cmeta,
-							cl_uint index,
-							cl_uint unitsz)
+kern_fetch_simple_datum_arrow(kern_colmeta *cmeta,
+							  char *base,
+							  cl_uint index,
+							  cl_uint unitsz)
 {
 	cl_char	   *nullmap = NULL;
 	cl_char	   *values;
 
-	Assert(index < kds->nitems);
 	if (cmeta->nullmap_offset)
 	{
-		nullmap = (char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		nullmap = base + __kds_unpack(cmeta->nullmap_offset);
 		if (att_isnull(index, nullmap))
 			return NULL;
 	}
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset == 0 &&
-		   cmeta->extra_length == 0);
-	values = (char *)kds + __kds_unpack(cmeta->values_offset);
+		   cmeta->extra_length == 0 &&
+		   unitsz * (index+1) <= __kds_unpack(cmeta->values_length));
+	values = base + __kds_unpack(cmeta->values_offset);
 	return values + unitsz * index;
 }
 
 STATIC_FUNCTION(void *)
-kern_get_varlena_datum_arrow(kern_data_store *kds,
-							 kern_colmeta *cmeta,
-							 cl_uint index,
-							 cl_uint *p_length)
+kern_fetch_varlena_datum_arrow(kern_colmeta *cmeta,
+							   char *base,
+							   cl_uint index,
+							   cl_uint *p_length)
 {
 	cl_char	   *nullmap;
 	cl_uint	   *offset;
 	cl_char	   *extra;
 
-	Assert(index < kds->nitems);
 	if (cmeta->nullmap_offset)
 	{
-		nullmap = (char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		nullmap = base + __kds_unpack(cmeta->nullmap_offset);
 		if (att_isnull(index, nullmap))
 			return NULL;
 	}
 	Assert(cmeta->values_offset > 0 &&
-		   cmeta->extra_offset > 0);
-	offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
-	extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+		   cmeta->extra_offset > 0 &&
+		   sizeof(cl_uint) * (index+1) <= __kds_unpack(cmeta->values_length));
+	offset = (cl_uint *)(base + __kds_unpack(cmeta->values_offset));
+	extra = base + __kds_unpack(cmeta->extra_offset);
 
 	Assert(offset[index] <= offset[index+1] &&
 		   offset[index+1] <= __kds_unpack(cmeta->extra_length));
@@ -1421,20 +1421,17 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #ifdef __CUDACC__
 #define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)			\
 	STATIC_INLINE(void)										\
-	pg_datum_ref_arrow(kern_context *kcxt,					\
-					   pg_##NAME##_t &result,				\
-					   kern_data_store *kds,				\
-					   cl_uint colidx, cl_uint rowidx)		\
+	pg_datum_fetch_arrow(kern_context *kcxt,				\
+						 pg_##NAME##_t &result,				\
+						 kern_colmeta *cmeta,				\
+						 char *base, cl_uint rowidx)		\
 	{														\
-		kern_colmeta   *cmeta = &kds->colmeta[colidx];		\
 		void		   *addr;								\
 															\
-		assert(kds->format == KDS_FORMAT_ARROW);			\
-		assert(colidx < kds->nr_colmeta &&					\
-			   rowidx < kds->nitems);						\
-		addr = kern_get_simple_datum_arrow(kds,cmeta,		\
-										   rowidx,			\
-										   sizeof(BASE));	\
+		addr = kern_fetch_simple_datum_arrow(cmeta,			\
+											 base,			\
+											 rowidx,		\
+											 sizeof(BASE));	\
 		if (!addr)											\
 			result.isnull = true;							\
 		else												\
@@ -1443,20 +1440,28 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 			result.value  = *((BASE *)addr);				\
 		}													\
 	}
-#define STROMCL_NOSUPPORT_ARROW_TEMPLATE(NAME)				\
-	STATIC_INLINE(void)                                     \
-    pg_datum_ref_arrow(kern_context *kcxt,                  \
-					   pg_##NAME##_t &result,               \
-					   kern_data_store *kds,                \
-					   cl_uint colidx, cl_uint rowidx)      \
-	{														\
-		result.isnull = true;								\
-		STROM_SET_ERROR(&kcxt->e,StromError_WrongCodeGeneration);	\
-	}
+
+/*
+ * A common interface to reference scalar value on KDS_FORMAT_ARROW
+ */
+template <typename T>
+DEVICE_ONLY_INLINE(void)
+pg_datum_ref_arrow(kern_context *kcxt,
+				   T &result,
+				   kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(colidx < kds->nr_colmeta &&
+		   rowidx < kds->nitems);
+	pg_datum_fetch_arrow(kcxt, result, cmeta,
+						 (char *)kds, rowidx);
+}
 
 #else
 #define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)
-#define STROMCL_NOSUPPORT_ARROW_TEMPLATE(NAME,BASE)
 #endif
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
@@ -1498,21 +1503,21 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool, )
 #ifdef __CUDACC__
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_bool_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_bool_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
 	cl_uchar	   *bitmap;
 	cl_uchar		mask = (1 << (rowidx & 7));
 
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
 	bitmap = (cl_uchar *)
-		kern_get_simple_datum_arrow(kds,cmeta,rowidx>>3,
-									sizeof(cl_uchar));
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx>>3,
+									  sizeof(cl_uchar));
 	if (!bitmap)
 		result.isnull = true;
 	else

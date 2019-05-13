@@ -199,21 +199,22 @@ struct pg_tm
 STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
 #ifdef __CUDACC__
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_date_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_date_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta *cmeta = &kds->colmeta[colidx];
 	void	   *addr;
 
-	assert(kds->format == KDS_FORMAT_ARROW);
 	switch (cmeta->attopts.date.unit)
 	{
 		case ArrowDateUnit__Day:
-			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-											   sizeof(cl_uint));
+			addr = kern_fetch_simple_datum_arrow(cmeta,
+												 base,
+												 rowidx,
+												 sizeof(cl_uint));
 			if (!addr)
 				result.isnull = true;
 			else
@@ -224,8 +225,10 @@ pg_datum_ref_arrow(kern_context *kcxt,
 			}
 			break;
 		case ArrowDateUnit__MilliSecond:
-			addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-											   sizeof(cl_ulong));
+			addr = kern_fetch_simple_datum_arrow(cmeta,
+												 base,
+												 rowidx,
+												 sizeof(cl_ulong));
 			if (!addr)
 				result.isnull = true;
 			else
@@ -249,19 +252,18 @@ pg_datum_ref_arrow(kern_context *kcxt,
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
 #ifdef __CUDACC__
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_time_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_time_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
-	cl_ulong	   *aval;
-
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
-	aval = (cl_ulong *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-												   sizeof(cl_ulong));
+	cl_ulong	   *aval = (cl_ulong *)
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx,
+									  sizeof(cl_ulong));
 	if (!aval)
 		result.isnull = true;
 	else
@@ -294,7 +296,6 @@ pg_datum_ref_arrow(kern_context *kcxt,
 #ifndef PG_TIMETZ_TYPE_DEFINED
 #define PG_TIMETZ_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
-STROMCL_NOSUPPORT_ARROW_TEMPLATE(timetz)
 #endif	/* PG_TIMETZ_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
@@ -302,19 +303,18 @@ STROMCL_NOSUPPORT_ARROW_TEMPLATE(timetz)
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,Timestamp)
 #ifdef __CUDACC__
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_timestamp_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_timestamp_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
-	cl_ulong	   *aval;
-
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
-	aval = (cl_ulong *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-												   sizeof(cl_ulong));
+	cl_ulong	   *aval = (cl_ulong *)
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx,
+									  sizeof(cl_ulong));
 	if (!aval)
 		result.isnull = true;
 	else
@@ -348,29 +348,29 @@ pg_datum_ref_arrow(kern_context *kcxt,
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz,)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
-STROMCL_NOSUPPORT_ARROW_TEMPLATE(timestamptz)
 #endif
 
 #ifndef PG_INTERVAL_TYPE_DEFINED
 #define PG_INTERVAL_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
 #ifdef __CUDACC__
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_interval_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_interval_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
 	cl_uint		   *ival;
 
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta && rowidx < kds->nitems);
 	switch (cmeta->attopts.interval.unit)
 	{
 		case ArrowIntervalUnit__Year_Month:
-			ival = (cl_uint *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-														  sizeof(cl_uint));
+			ival = (cl_uint *)
+				kern_fetch_simple_datum_arrow(cmeta,
+											  base,
+											  rowidx,
+											  sizeof(cl_uint));
 			result.value.month = *ival;
 			result.value.day = 0;
 			result.value.month = 0;
@@ -378,8 +378,11 @@ pg_datum_ref_arrow(kern_context *kcxt,
 			break;
 
 		case ArrowIntervalUnit__Day_Time:
-			ival = (cl_uint *)kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-														  2 * sizeof(cl_uint));
+			ival = (cl_uint *)
+				kern_fetch_simple_datum_arrow(cmeta,
+											  base,
+											  rowidx,
+											  2 * sizeof(cl_uint));
 			result.value.month = 0;
 			result.value.day  = ival[0];
 			result.value.time = ival[1];

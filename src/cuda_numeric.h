@@ -629,19 +629,20 @@ pg_datum_ref_slot(kern_context *kcxt,
 	}
 }
 
+/* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   pg_numeric_t &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_numeric_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
 	pg_numeric_t	temp;
 	void		   *addr;
 
-	assert(kds->format == KDS_FORMAT_ARROW);
-	addr = kern_get_simple_datum_arrow(kds, cmeta, rowidx,
-									   sizeof(Int128_t));
+	addr = kern_fetch_simple_datum_arrow(cmeta,
+										 base,
+										 rowidx,
+										 sizeof(Int128_t));
 	if (!addr)
 		result.isnull = true;
 	else
