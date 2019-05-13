@@ -105,11 +105,12 @@ typedef struct
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
+static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
-static int				arrow_metadata_entry_size;		/* GUC */
+static int				arrow_metadata_cache_width;		/* GUC */
 #define arrowMetadataCacheSize								\
 	MAXALIGN(offsetof(arrowMetadataCache,					\
-					  fstate[arrow_metadata_entry_size]))
+					  fstate[arrow_metadata_cache_width]))
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
 static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
@@ -303,6 +304,10 @@ cost_arrow_fdw_seqscan(Path *path,
 		nrows = param_info->ppi_rows;
 	else
 		nrows = baserel->rows;
+
+	/* arrow_fdw.enabled */
+	if (!arrow_fdw_enabled)
+		startup_cost += disable_cost;
 
 	/*
 	 * Storage costs
@@ -2799,10 +2804,10 @@ arrowUpdateMetadataCache(List *rbstateList)
 		goto out;	/* it will consume too large entries */
 	}
 	/* # of columns too large, so unable to cache metadata */
-    if (rbstate->ncols > arrow_metadata_entry_size)
+    if (rbstate->ncols > arrow_metadata_cache_width)
 	{
 		elog(DEBUG2, "arrow_fdw: file '%s' contains too much columns larger than unit size of metadata cache entry size (%d)",
-			 fname, arrow_metadata_entry_size);
+			 fname, arrow_metadata_cache_width);
 		goto out;
 	}
 
@@ -2863,7 +2868,7 @@ arrowUpdateMetadataCache(List *rbstateList)
 		mtemp->ncols     = rbstate->ncols;
 		mtemp->nfields   =
 			copyMetadataFieldCache(mtemp->fstate,
-								   mtemp->fstate + arrow_metadata_entry_size,
+								   mtemp->fstate + arrow_metadata_cache_width,
 								   rbstate->ncols,
 								   rbstate->columns);
 		if (!mcache)
@@ -3012,11 +3017,22 @@ pgstrom_init_arrow_fdw(void)
 #if PG_VERSION_NUM >= 100000
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
 #endif
+	/*
+	 * Turn on/off arrow_fdw
+	 */
+	DefineCustomBoolVariable("arrow_fdw.enabled",
+							 "Enables the planner's use of Arrow_Fdw",
+							 NULL,
+							 &arrow_fdw_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	/*
 	 * Configurations for arrow_fdw metadata cache
 	 */
-	DefineCustomIntVariable("pg_strom.arrow_metadata_cache_size",
+	DefineCustomIntVariable("arrow_fdw.metadata_cache_size",
 							"size of shared metadata cache for arrow files",
 							NULL,
 							&arrow_metadata_cache_size_kb,
@@ -3027,10 +3043,10 @@ pgstrom_init_arrow_fdw(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
-	DefineCustomIntVariable("pg_strom.arrow_metadata_cache_num_columns",
-							"size of metadata cache entry for arrow files",
+	DefineCustomIntVariable("arrow_fdw.metadata_cache_width",
+							"max number of columns on metadata cache entry for arrow files",
 							NULL,
-							&arrow_metadata_entry_size,
+							&arrow_metadata_cache_width,
 							80,		/* up to 80 columns */
 							10,
 							SHRT_MAX,

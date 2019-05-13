@@ -98,9 +98,28 @@ This session introduces PG-Strom's configuration parameters.
 |Parameter                      |Type    |Default|Description|
 |:------------------------------|:------:|:-----:|:----------|
 |`pg_strom.nvme_strom_enabled`  |`bool`  |`on`   |Enables/disables SSD-to-GPU Direct SQL mechanism|
-|`pg_strom.nvme_strom_threshold`|`int`   |自動   |Controls the table-size threshold to invoke SSD-to-GPU Direct SQL mechanism|
+|`pg_strom.nvme_strom_threshold`|`int`   |auto   |Controls the table-size threshold to invoke SSD-to-GPU Direct SQL mechanism|
 |`pg_strom.nvme_distance_map`   |`string`|`NULL` |Manually configures the closest GPU for each NVME-SSD. Usually, it is configured automatically according to the PCIe bus topology information by sysfs.|
 }
+
+@ja{
+#Arrow_Fdw関連の設定
+|パラメータ名                    |型      |初期値    |説明       |
+|:-------------------------------|:------:|:---------|:----------|
+|`arrow_fdw.enabled`             |`bool`  |`on`      |推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。|
+|`arrow_fdw.metadata_cache_size` |`int`   |32MB      |Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。|
+|`arrow_fdw.metadata_cache_width`|`int`   |80        |メタ情報キャッシュ１個に格納できるカラムの上限を指定します。この値より多くの列を持つArrowファイルの場合は、メタ情報がキャッシュされないため、参照のたびにファイルからメタデータをロードします。<br>パラメータの更新には再起動が必要です。|
+}
+@en{
+#Arrow_Fdw Configuration
+|Parameter                       |Type  |Default|Description|
+|:-------------------------------|:----:|:----:|:----------|
+|`arrow_fdw.enabled`             |`bool`|`on`  |By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.|
+|`arrow_fdw.metadata_cache_size` |`int` |32MB  |Size of shared memory to cache metadata of Arrow files.<br>It needs to restart to update the parameter.|
+|`arrow_fdw.metadata_cache_width`|`int` |80    |Max number of columns for each metadata entry. Arrow_Fdw does not cache metadata if Arrow file has more columns than this configuration, so it loads metadata from the files on behalf of the foreign table for each references.<br>It needs to restart to update the parameter.|
+}
+
+
 
 @ja{
 #gstore_fdw関連の設定

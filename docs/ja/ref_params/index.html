@@ -147,6 +147,9 @@
     <li class="toctree-l3"><a href="#ssd-to-gpu">SSD-to-GPUダイレクト関連の設定</a></li>
     
 
+    <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連の設定</a></li>
+    
+
     <li class="toctree-l3"><a href="#gstore_fdw">gstore_fdw関連の設定</a></li>
     
 
@@ -380,6 +383,37 @@
 <td align="center"><code>string</code></td>
 <td align="left"><code>NULL</code></td>
 <td align="left">NVME-SSDに近いGPUを手動で設定します。通常はsysfsから取得したPCIeバストポロジ情報による自動設定で問題ありません。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="arrow_fdw">Arrow_Fdw関連の設定</h1>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>arrow_fdw.enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>on</code></td>
+<td align="left">推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。</td>
+</tr>
+<tr>
+<td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">32MB</td>
+<td align="left">Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。</td>
+</tr>
+<tr>
+<td align="left"><code>arrow_fdw.metadata_cache_width</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">80</td>
+<td align="left">メタ情報キャッシュ１個に格納できるカラムの上限を指定します。この値より多くの列を持つArrowファイルの場合は、メタ情報がキャッシュされないため、参照のたびにファイルからメタデータをロードします。<br>パラメータの更新には再起動が必要です。</td>
 </tr>
 </tbody>
 </table>

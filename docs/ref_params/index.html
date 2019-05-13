@@ -147,6 +147,9 @@
     <li class="toctree-l3"><a href="#ssd-to-gpu-direct-configuration">SSD-to-GPU Direct Configuration</a></li>
     
 
+    <li class="toctree-l3"><a href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a></li>
+    
+
     <li class="toctree-l3"><a href="#gstore_fdw-configuration">gstore_fdw Configuration</a></li>
     
 
@@ -372,7 +375,7 @@
 <tr>
 <td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
 <td align="center"><code>int</code></td>
-<td align="center">自動</td>
+<td align="center">auto</td>
 <td align="left">Controls the table-size threshold to invoke SSD-to-GPU Direct SQL mechanism</td>
 </tr>
 <tr>
@@ -380,6 +383,37 @@
 <td align="center"><code>string</code></td>
 <td align="center"><code>NULL</code></td>
 <td align="left">Manually configures the closest GPU for each NVME-SSD. Usually, it is configured automatically according to the PCIe bus topology information by sysfs.</td>
+</tr>
+</tbody>
+</table>
+<h1 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>arrow_fdw.enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.</td>
+</tr>
+<tr>
+<td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">32MB</td>
+<td align="left">Size of shared memory to cache metadata of Arrow files.<br>It needs to restart to update the parameter.</td>
+</tr>
+<tr>
+<td align="left"><code>arrow_fdw.metadata_cache_width</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">80</td>
+<td align="left">Max number of columns for each metadata entry. Arrow_Fdw does not cache metadata if Arrow file has more columns than this configuration, so it loads metadata from the files on behalf of the foreign table for each references.<br>It needs to restart to update the parameter.</td>
 </tr>
 </tbody>
 </table>
