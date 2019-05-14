@@ -341,7 +341,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	size_t		ofs = 0;
 	size_t		len = strlen(kern_define) + strlen(kern_source) + 25000;
 	char	   *source;
-	const char *pg_anytype;
 
 	source = malloc(len);
 	if (!source)
@@ -412,57 +411,9 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_time_extract.h\"\n");
 
-	/* pg_anytype_t declaration */
-	pg_anytype =
-		"typedef union {\n"
-		"    pg_varlena_t     varlena_v;\n"
-		"    pg_bool_t        bool_v;\n"
-		"    pg_int2_t        int2_v;\n"
-		"    pg_int4_t        int4_v;\n"
-		"    pg_int8_t        int8_v;\n"
-		"    pg_float2_t      float2_v;\n"
-		"    pg_float4_t      float4_v;\n"
-		"    pg_float8_t      float8_v;\n"
-		"#ifdef CUDA_NUMERIC_H\n"
-		"    pg_numeric_t     numeric_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_MISC_H\n"
-		"    pg_money_t       money_v;\n"
-		"    pg_uuid_t        uuid_v;\n"
-		"    pg_macaddr_t     macaddr_v;\n"
-		"    pg_inet_t        inet_v;\n"
-		"    pg_cidr_t        cidr_t;\n"
-		"#endif\n"
-		"#ifdef CUDA_TIMELIB_H\n"
-		"    pg_date_t        date_v;\n"
-		"    pg_time_t        time_v;\n"
-		"    pg_timestamp_t   timestamp_v;\n"
-		"    pg_timestamptz_t timestamptz_v;\n"
-		"    pg_interval_t    interval_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_TEXTLIB_H\n"
-		"    pg_bpchar_t      bpchar_v;\n"
-		"    pg_text_t        text_v;\n"
-		"    pg_varchar_t     varchar_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_JSONLIB_H\n"
-		"    pg_jsonb_t       jsonb_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_RANGETYPE_H\n"
-		"    pg_int4range_t   int4range_v;\n"
-		"    pg_int8range_t   int8range_v;\n"
-		"#ifdef CUDA_TIMELIB_H\n"
-		"    pg_tsrange_t     tsrange_v;\n"
-		"    pg_tstzrange_t   tstzrange_v;\n"
-		"    pg_daterange_t   daterange_v;\n"
-		"#endif\n"	/* CUDA_TIMELIB_H */
-		"#endif\n"	/* CUDA_RANGETYPE_H */
-		"#ifdef CUDA_MATRIX_H\n"
-		"    pg_array_t       array_v;\n"
-		"    pg_matrix_t      matrix_v;\n"
-		"#endif\n"
-		"  } pg_anytype_t;\n\n";
-	ofs += snprintf(source + ofs, len - ofs, "%s\n", pg_anytype);
+	/* pg_array_t type and pg_anytype_t declaration */
+	ofs += snprintf(source + ofs, len - ofs,
+					"#include \"cuda_anytype.h\"\n");
 
 	/* Main logic of each GPU tasks */
 

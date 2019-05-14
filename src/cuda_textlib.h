@@ -104,6 +104,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		result.length = pos - addr;
 	}
 }
+STROMCL_VARLENA_PGARRAY_TEMPLATE(bpchar)
 #endif
 
 STATIC_INLINE(cl_bool)
@@ -322,6 +323,7 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 #define PG_TEXT_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(text)
 STROMCL_VARLENA_ARROW_TEMPLATE(text)
+STROMCL_VARLENA_PGARRAY_TEMPLATE(text)
 #endif
 
 STATIC_FUNCTION(cl_int)
@@ -611,6 +613,8 @@ pgfn_text_substring_nolen(kern_context *kcxt,
 #define PG_VARCHAR_TYPE_DEFINED
 typedef pg_text_t						pg_varchar_t;
 #define pg_varchar_param(a,b)			pg_text_param(a,b)
+#define pg_varchar_array_from_arrow(a,b,c,d,e,f) \
+		pg_text_array_from_arrow(a,b,c,d,e,f)
 #endif
 
 /* binary compatible type cast */

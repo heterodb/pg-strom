@@ -745,7 +745,8 @@ gpujoin_projection_row(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->length - dest_offset);
 
 		row_index[dest_index] = __kds_packed(kds_dst->length - dest_offset);
-		form_kern_heaptuple(tupitem,
+		form_kern_heaptuple(kcxt,
+							tupitem,
 							kds_dst,
 							NULL,		/* ItemPointerData */
 							NULL,		/* HeapTupleHeaderData */

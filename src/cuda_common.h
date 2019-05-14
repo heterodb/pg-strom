@@ -1061,10 +1061,10 @@ kern_fetch_simple_datum_arrow(kern_colmeta *cmeta,
 		if (att_isnull(index, nullmap))
 			return NULL;
 	}
-	Assert(cmeta->values_offset > 0 &&
-		   cmeta->extra_offset == 0 &&
-		   cmeta->extra_length == 0 &&
-		   unitsz * (index+1) <= __kds_unpack(cmeta->values_length));
+	Assert(cmeta->values_offset > 0);
+	Assert(cmeta->extra_offset == 0);
+	Assert(cmeta->extra_length == 0);
+	Assert(unitsz * (index+1) <= __kds_unpack(cmeta->values_length));
 	values = base + __kds_unpack(cmeta->values_offset);
 	return values + unitsz * index;
 }
@@ -1415,6 +1415,9 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #define STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
 #endif
 
+/* also, variable-length values */
+#include "cuda_varlena.h"
+
 /*
  * Reference to Arrow values without any transformation
  */
@@ -1440,6 +1443,18 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 			result.value  = *((BASE *)addr);				\
 		}													\
 	}
+#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_simple_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
 
 /*
  * A common interface to reference scalar value on KDS_FORMAT_ARROW
@@ -1460,8 +1475,64 @@ pg_datum_ref_arrow(kern_context *kcxt,
 						 (char *)kds, rowidx);
 }
 
+template <typename T>
+DEVICE_ONLY_INLINE(cl_uint)
+pg_simple_array_from_arrow(kern_context *kcxt,
+						   char *dest,
+						   kern_colmeta *cmeta,
+						   char *base,
+						   cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+		Assert(dest + sz == ARR_DATA_PTR(res));
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (dest)
+				memcpy(dest+sz, &temp.value, sizeof(temp.value));
+			sz += sizeof(temp.value);
+		}
+	}
+	return sz;
+}
 #else
 #define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)
+#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)
 #endif
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
@@ -1527,6 +1598,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 #endif	/* __CUDACC__ */
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(bool);
 #endif	/* PG_BOOL_TYPE_DEFINED */
 
 /* pg_int2_t */
@@ -1534,6 +1606,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short, )
 STROMCL_SIMPLE_ARROW_TEMPLATE(int2, cl_short)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
 #endif	/* PG_INT2_TYPE_DEFINED */
 
 /* pg_int4_t */
@@ -1541,6 +1614,7 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(int2, cl_short)
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int, )
 STROMCL_SIMPLE_ARROW_TEMPLATE(int4, cl_int)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
 #endif	/* PG_INT4_TYPE_DEFINED */
 
 /* pg_int8_t */
@@ -1548,6 +1622,7 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(int4, cl_int)
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long, )
 STROMCL_SIMPLE_ARROW_TEMPLATE(int8, cl_long)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
 #endif	/* PG_INT8_TYPE_DEFINED */
 
 /* pg_float2_t */
@@ -1555,6 +1630,7 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(int8, cl_long)
 #define PG_FLOAT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half, __half_as_short)
 STROMCL_SIMPLE_ARROW_TEMPLATE(float2, cl_half)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
 #endif	/* PG_FLOAT2_TYPE_DEFINED */
 
 /* pg_float4_t */
@@ -1562,6 +1638,7 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(float2, cl_half)
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float, __float_as_int)
 STROMCL_SIMPLE_ARROW_TEMPLATE(float4, cl_float)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
 #endif	/* PG_FLOAT4_TYPE_DEFINED */
 
 /* pg_float8_t */
@@ -1569,10 +1646,8 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(float4, cl_float)
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
 STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
-
-/* definitions for variable-length data types */
-#include "cuda_varlena.h"
 
 #ifdef	__CUDACC__
 /*
@@ -2005,6 +2080,7 @@ pg_sysattr_tableoid_store(kern_context *kcxt,
 }
 #endif	/* __CUDACC__ */
 
+#ifdef __CUDACC__
 /*
  * compute_heaptuple_size
  */
@@ -2162,7 +2238,8 @@ deform_kern_heaptuple(cl_int	nattrs,			/* in */
  * __form_kern_heaptuple
  */
 STATIC_FUNCTION(cl_uint)
-__form_kern_heaptuple(void	   *buffer,			/* out */
+__form_kern_heaptuple(kern_context *kcxt,
+					  void	   *buffer,			/* out */
 					  cl_int	ncols,			/* in */
 					  kern_colmeta *colmeta,	/* in */
 					  HeapTupleHeaderData *htup_orig, /* in: if heap-tuple */
@@ -2273,12 +2350,16 @@ __form_kern_heaptuple(void	   *buffer,			/* out */
 				case DATUM_CLASS__VARLENA:
 					while (padding-- > 0)
 						((char *)htup)[curr++] = '\0';
-					vl_len = pg_varlena_datum_write((char *)htup+curr, datum);
+					vl_len = pg_varlena_datum_write(kcxt,
+													(char *)htup+curr,
+													datum);
 					break;
 				case DATUM_CLASS__ARRAY:
 					while (padding-- > 0)
 						((char *)htup)[curr++] = '\0';
-					vl_len = pg_array_datum_write((char *)htup+curr, datum);
+					vl_len = pg_array_datum_write(kcxt,
+												  (char *)htup+curr,
+												  datum);
 					break;
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
@@ -2316,7 +2397,8 @@ __form_kern_heaptuple(void	   *buffer,			/* out */
  * tup_values   ... array of values to be written
  */
 STATIC_INLINE(cl_uint)
-form_kern_heaptuple(kern_tupitem    *tupitem,		/* out */
+form_kern_heaptuple(kern_context    *kcxt,
+					kern_tupitem    *tupitem,		/* out */
 					kern_data_store	*kds_dst,		/* in */
 					ItemPointerData *tup_self,		/* in, optional */
 					HeapTupleHeaderData *htup,		/* in, optional */
@@ -2345,7 +2427,8 @@ form_kern_heaptuple(kern_tupitem    *tupitem,		/* out */
 								   + htup->t_hoff
 								   - sizeof(cl_uint)));
 	}
-	tupitem->t_len = __form_kern_heaptuple(&tupitem->htup,
+	tupitem->t_len = __form_kern_heaptuple(kcxt,
+										   &tupitem->htup,
 										   kds_dst->ncols,
 										   kds_dst->colmeta,
 										   htup,
@@ -2374,7 +2457,8 @@ form_kern_heaptuple(kern_tupitem    *tupitem,		/* out */
  * @tup_values ... values of the sub-fields
  */
 STATIC_INLINE(cl_uint)
-form_kern_composite_type(void      *buffer,      /* out */
+form_kern_composite_type(kern_context *kcxt,
+						 void      *buffer,      /* out */
 						 cl_uint    comp_typeid, /* in: type OID */
 						 cl_int		comp_typmod, /* in: type modifier */
 						 cl_int		nfields,     /* in: # of attributes */
@@ -2382,7 +2466,8 @@ form_kern_composite_type(void      *buffer,      /* out */
 						 cl_char   *tup_dclass,  /* in: */
 						 Datum	   *tup_values)	 /* in: */
 {
-	return __form_kern_heaptuple(buffer,
+	return __form_kern_heaptuple(kcxt,
+								 buffer,
 								 nfields,
 								 colmeta,
 								 NULL,
@@ -2392,6 +2477,7 @@ form_kern_composite_type(void      *buffer,      /* out */
 								 tup_dclass,
 								 tup_values);
 }
+#endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
 /* ------------------------------------------------------------------

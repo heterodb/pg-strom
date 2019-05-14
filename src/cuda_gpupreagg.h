@@ -346,10 +346,10 @@ gpupreagg_final_data_move(kern_context *kcxt,
 			switch (dclass)
 			{
 				case DATUM_CLASS__VARLENA:
-					len = pg_varlena_datum_write(curr, datum);
+					len = pg_varlena_datum_write(kcxt, curr, datum);
                     break;
                 case DATUM_CLASS__ARRAY:
-					len = pg_array_datum_write(curr, datum);
+					len = pg_array_datum_write(kcxt, curr, datum);
 					break;
 				default:
 					len = VARSIZE_ANY(datum);

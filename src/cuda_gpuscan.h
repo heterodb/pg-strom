@@ -386,7 +386,8 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+			form_kern_heaptuple(&kcxt,
+								(kern_tupitem *)((char *)kds_dst + pos),
 								kds_dst,
 								&tupitem->t_self,
 								&tupitem->htup,
@@ -620,7 +621,8 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 				size_t		pos = (kds_dst->length
 								   - (usage_base + usage_offset + required));
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
-				form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+				form_kern_heaptuple(&kcxt,
+									(kern_tupitem *)((char *)kds_dst + pos),
 									kds_dst,
 									&t_self,
 									htup,
@@ -811,7 +813,8 @@ kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
 
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+			form_kern_heaptuple(&kcxt,
+								(kern_tupitem *)((char *)kds_dst + pos),
 								kds_dst,
 								NULL,	/* ItemPointerData */
 								NULL,	/* HeapTupleHeaderData */

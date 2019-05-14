@@ -32,7 +32,7 @@
  * length of these values, unlike contents.
  */
 typedef struct varlena		varlena;
-#ifndef PG_STROM_H
+#ifndef POSTGRES_H
 struct varlena {
 	cl_char		vl_len_[4];	/* Do not touch this field directly! */
 	cl_char		vl_dat[1];
@@ -172,7 +172,68 @@ typedef struct toast_compress_header
 
 #define SET_VARSIZE(PTR, len)						\
 	(((varattrib_4b *)(PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
-#endif	/* PG_STROM_H */
+#endif	/* POSTGRES_H */
+
+/* ------------------------------------------------------------------
+ *
+ * Definitions for PostgreSQL's array structure
+ *
+ *    Definitions in this block are valid only if utils/array.h is not
+ *    included yet.
+ *
+ * ------------------------------------------------------------------ */
+#ifndef ARRAY_H
+typedef struct
+{
+	/*
+	 * NOTE: We assume 4bytes varlena header for array type. It allows
+	 * aligned references to the array elements. Unlike CPU side, we
+	 * cannot have extra malloc to ensure 4bytes varlena header. It is
+	 * the reason why our ScalarArrayOp implementation does not support
+	 * array data type referenced by Var node; which is potentially has
+	 * short format.
+	 */
+	cl_uint		vl_len_;		/* don't touch this field */
+	cl_int		ndim;			/* # of dimensions */
+	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
+	cl_uint		elemtype;		/* element type OID */
+} ArrayType;
+
+#define MAXDIM			6
+
+#define ARR_SIZE(a)		VARSIZE_ANY(a)
+#define ARR_NDIM(a)		(((ArrayType *)(a))->ndim)
+#define ARR_HASNULL(a)	(((ArrayType *)(a))->dataoffset != 0)
+#define ARR_ELEMTYPE(a)	(((ArrayType *)(a))->elemtype)
+#define ARR_DIMS(a)									\
+	((int *) (((char *) (a)) + sizeof(ArrayType)))
+#define ARR_LBOUND(a)								\
+	((int *) (((char *) (a)) + sizeof(ArrayType) +	\
+			  sizeof(int) * ARR_NDIM(a)))
+#define ARR_NULLBITMAP(a)							\
+	(ARR_HASNULL(a)									\
+	 ? (((char *) (a)) + sizeof(ArrayType) +		\
+		2 * sizeof(int) * ARR_NDIM(a))				\
+	 : (char *) NULL)
+/*
+ * The total array header size (in bytes) for an array with the specified
+ * number of dimensions and total number of items.
+ */
+#define ARR_OVERHEAD_NONULLS(ndims)					\
+	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims))
+#define ARR_OVERHEAD_WITHNULLS(ndims, nitems)		\
+	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims) +	\
+			 ((nitems) + 7) / 8)
+/*
+ * Returns a pointer to the actual array data.
+ */
+#define ARR_DATA_OFFSET(a)					\
+	(ARR_HASNULL(a)							\
+	 ? ((ArrayType *)(a))->dataoffset		\
+	 : ARR_OVERHEAD_NONULLS(ARR_NDIM(a)))
+
+#define ARR_DATA_PTR(a)		(((char *) (a)) + ARR_DATA_OFFSET(a))
+#endif	/* ARRAY_H */
 
 /*
  * Template of variable length data type on device
@@ -338,8 +399,97 @@ typedef struct toast_compress_header
 		result.value  = (char *)addr;						\
 		result.length = length;								\
 	}
+
+#define STROMCL_VARLENA_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_varlena_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
+
+/*
+ * Generic interface of pg_XXXX_array_from_arrow
+ */
+template <typename T>
+DEVICE_ONLY_INLINE(cl_uint)
+pg_varlena_array_from_arrow(kern_context *kcxt,
+							char *dest,
+							kern_colmeta *cmeta,
+							char *base,
+							cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+		Assert(dest + sz == ARR_DATA_PTR(res));
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (temp.length < 0)
+			{
+				cl_uint		vl_len = VARSIZE_ANY(temp.value);
+
+				if (dest)
+					memcpy(dest + sz, DatumGetPointer(temp.value), vl_len);
+				sz += vl_len;
+			}
+			else
+			{
+				if (dest)
+				{
+					memcpy(dest + sz + VARHDRSZ, temp.value, temp.length);
+					SET_VARSIZE(dest + sz, VARHDRSZ + temp.length);
+				}
+				sz += VARHDRSZ + temp.length;
+			}
+		}
+	}
+	return sz;
+}
+
 #else
 #define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)
+#define STROMCL_VARLENA_PGARRAY_TEMPLATE(NAME)
 #endif
 
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)					\
@@ -350,10 +500,7 @@ typedef struct toast_compress_header
 /* generic varlena */
 #ifndef PG_VARLENA_TYPE_DEFINED
 #define PG_VARLENA_TYPE_DEFINED
-STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena)
-STROMCL_VARLENA_VARREF_TEMPLATE(varlena)
-STROMCL_VARLENA_COMP_HASH_TEMPLATE(varlena)
-//STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
+STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
 #endif	/* PG_VARLENA_TYPE_DEFINED */
 
 /* pg_bytea_t */
@@ -361,8 +508,13 @@ STROMCL_VARLENA_COMP_HASH_TEMPLATE(varlena)
 #define PG_BYTEA_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
 STROMCL_VARLENA_ARROW_TEMPLATE(bytea)
+STROMCL_VARLENA_PGARRAY_TEMPLATE(bytea)
 #endif	/* PG_BYTEA_TYPE_DEFINED */
 
+#ifdef __CUDACC__
+/*
+ * for DATUM_CLASS__VARLENA handler
+ */
 STATIC_FUNCTION(cl_uint)
 pg_varlena_datum_length(kern_context *kcxt, Datum datum)
 {
@@ -374,7 +526,7 @@ pg_varlena_datum_length(kern_context *kcxt, Datum datum)
 }
 
 STATIC_FUNCTION(cl_uint)
-pg_varlena_datum_write(char *dest, Datum datum)
+pg_varlena_datum_write(kern_context *kcxt, char *dest, Datum datum)
 {
 	pg_varlena_t   *vl = (pg_varlena_t *) datum;
 	cl_uint			vl_len;
@@ -392,6 +544,27 @@ pg_varlena_datum_write(char *dest, Datum datum)
 	}
 	return vl_len;
 }
+#endif	/* __CUDACC__ */
+
+#ifdef __CUDACC__
+/*
+ * for DATUM_CLASS__ARRAY handler
+ */
+STATIC_FUNCTION(cl_uint)
+__pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum);
+
+STATIC_INLINE(cl_uint)
+pg_array_datum_length(kern_context *kcxt, Datum datum)
+{
+	return __pg_array_from_arrow(kcxt, NULL, datum);
+}
+
+STATIC_FUNCTION(cl_uint)
+pg_array_datum_write(kern_context *kcxt, char *dest, Datum datum)
+{
+	return __pg_array_from_arrow(kcxt, dest, datum);
+}
+#endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
 template <typename T>
@@ -593,63 +766,19 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 }
 #endif	/* __CUDACC__ */
 
-/* ------------------------------------------------------------------
- *
- * Definitions for PostgreSQL's array structure
- *
- * ------------------------------------------------------------------ */
-#ifndef PG_STROM_H
-typedef struct
-{
-	/*
-	 * NOTE: We assume 4bytes varlena header for array type. It allows
-	 * aligned references to the array elements. Unlike CPU side, we
-	 * cannot have extra malloc to ensure 4bytes varlena header. It is
-	 * the reason why our ScalarArrayOp implementation does not support
-	 * array data type referenced by Var node; which is potentially has
-	 * short format.
-	 */
-	cl_uint		vl_len_;		/* don't touch this field */
-	cl_int		ndim;			/* # of dimensions */
-	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
-	cl_uint		elemtype;		/* element type OID */
-} ArrayType;
 
-#define MAXDIM			6
 
-#define ARR_SIZE(a)		VARSIZE_ANY(a)
-#define ARR_NDIM(a)		(((ArrayType *)(a))->ndim)
-#define ARR_HASNULL(a)	(((ArrayType *)(a))->dataoffset != 0)
-#define ARR_ELEMTYPE(a)	(((ArrayType *)(a))->elemtype)
-#define ARR_DIMS(a)									\
-	((int *) (((char *) (a)) + sizeof(ArrayType)))
-#define ARR_LBOUND(a)								\
-	((int *) (((char *) (a)) + sizeof(ArrayType) +	\
-			  sizeof(int) * ARR_NDIM(a)))
-#define ARR_NULLBITMAP(a)							\
-	(ARR_HASNULL(a)									\
-	 ? (((char *) (a)) + sizeof(ArrayType) +		\
-		2 * sizeof(int) * ARR_NDIM(a))				\
-	 : (char *) NULL)
-/*
- * The total array header size (in bytes) for an array with the specified
- * number of dimensions and total number of items.
- */
-#define ARR_OVERHEAD_NONULLS(ndims)					\
-	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims))
-#define ARR_OVERHEAD_WITHNULLS(ndims, nitems)		\
-	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims) +	\
-			 ((nitems) + 7) / 8)
-/*
- * Returns a pointer to the actual array data.
- */
-#define ARR_DATA_OFFSET(a)					\
-	(ARR_HASNULL(a)							\
-	 ? ((ArrayType *)(a))->dataoffset		\
-	 : ARR_OVERHEAD_NONULLS(ARR_NDIM(a)))
 
-#define ARR_DATA_PTR(a)		(((char *) (a)) + ARR_DATA_OFFSET(a))
-#endif	/* PG_STROM_H */
+
+
+
+
+
+
+
+
+
+#if 0
 
 #ifndef PG_ARRAY_TYPE_DEFINED
 #define PG_ARRAY_TYPE_DEFINED
@@ -704,6 +833,7 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 
 	return ret;
 }
+#endif
 
 /*
  * Support routine for ScalarArrayOpExpr

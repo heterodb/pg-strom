@@ -245,6 +245,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 #endif	/* __CUDACC__ */
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(date)
 #endif	/* PG_DATE_TYPE_DEFINED */
 
 #ifndef PG_TIME_TYPE_DEFINED
@@ -291,6 +292,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 #endif	/* __CUDACC__ */
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(time)
 #endif	/* PG_TIME_TYPE_DEFINED */
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
@@ -342,6 +344,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 #endif	/* __CUDACC__ */
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(timestamp)
 #endif	/* PG_TIMESTAMP_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
@@ -396,6 +399,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 #endif	/* __CUDACC__ */
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(interval)
 #endif	/* PG_INTERVAL_TYPE_DEFINED */
 
 /*

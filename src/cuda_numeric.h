@@ -570,19 +570,22 @@ pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 			n_data[PG_MAX_DATA - ndigits] = mod;
 		}
 	}
-	memcpy(numBody->n_data,
-		   n_data + PG_MAX_DATA - ndigits,
-		   sizeof(NumericDigit) * ndigits);
-	/* other metadata */
-	n_header = (Max(precision, 0) & NUMERIC_DSCALE_MASK);
-	if (is_negative)
-		n_header |= NUMERIC_NEG;
-	numBody->n_sign_dscale = n_header;
-	numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
-
 	len = offsetof(NumericData, choice.n_long.n_data[ndigits]);
-	SET_VARSIZE(numData, len);
 
+	if (vl_buffer)
+	{
+		memcpy(numBody->n_data,
+			   n_data + PG_MAX_DATA - ndigits,
+			   sizeof(NumericDigit) * ndigits);
+		/* other metadata */
+		n_header = (Max(precision, 0) & NUMERIC_DSCALE_MASK);
+		if (is_negative)
+			n_header |= NUMERIC_NEG;
+		numBody->n_sign_dscale = n_header;
+		numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
+
+		SET_VARSIZE(numData, len);
+	}
 	return len;
 }
 
@@ -653,6 +656,66 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 
 		result = pg_numeric_normalize(temp);
 	}
+}
+
+STATIC_INLINE(cl_uint)
+pg_numeric_array_from_arrow(kern_context *kcxt,
+							char *dest,
+							kern_colmeta *cmeta,
+							char *base, cl_uint start, cl_uint end)
+{
+	ArrayType	   *res = (ArrayType *)dest;
+	cl_uint			nitems = end - start;
+	cl_uint			i, sz;
+	char		   *nullmap = NULL;
+	pg_numeric_t	temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+		Assert(dest + sz == ARR_DATA_PTR(res));
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (dest)
+				sz += pg_numeric_to_varlena(dest + sz,
+											temp.precision,
+											temp.value);
+			else
+				sz += pg_numeric_to_varlena(NULL,
+											temp.precision,
+											temp.value);
+		}
+	}
+	return sz;
 }
 
 STATIC_INLINE(cl_int)

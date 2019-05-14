@@ -13,5 +13,5 @@ PGSTROM_CUDA(jsonlib)
 PGSTROM_CUDA(misc)
 PGSTROM_CUDA(rangetype)
 PGSTROM_CUDA(time_extract)
+PGSTROM_CUDA(anytype)
 PGSTROM_CUDA(plcuda)
-

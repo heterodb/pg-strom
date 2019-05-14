@@ -236,12 +236,11 @@ build_devtype_info_entry(Oid type_oid,
 
 	/* Don't register if array type is not true array type */
 	if (element && (type_form->typelem != element->type_oid ||
-					type_form->typlen >= 0))
+					type_form->typlen  != -1))
 	{
 		ReleaseSysCache(tuple);
 		return NULL;
 	}
-
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);

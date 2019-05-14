@@ -19,6 +19,7 @@
 #include "cuda_gpuscan.h"
 #include "cuda_gpujoin.h"
 #include "cuda_gpupreagg.h"
+#include "cuda_anytype.h"
 
 static create_upper_paths_hook_type create_upper_paths_next;
 static CustomPathMethods	gpupreagg_path_methods;
