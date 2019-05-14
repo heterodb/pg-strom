@@ -2683,10 +2683,6 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 	if (!dtype)
 		elog(ERROR, "type %s is not device supported",
 			 format_type_be(var->vartype));
-	if (dtype->type_element)
-		elog(ERROR, "Array type (%s) references by Var-node",
-			 format_type_be(var->vartype));
-
 	/*
 	 * NOTE: Expression tree at the path-construction time can contain
 	 * references to other tables; which can be eventually replaced by 
@@ -3227,35 +3223,67 @@ codegen_scalar_array_op_expression(codegen_context *context,
 								   ScalarArrayOpExpr *opexpr)
 {
 	devfunc_info *dfunc;
-	devtype_info *dtype;
-	Oid		func_oid = get_opcode(opexpr->opno);
-	Node   *expr;
+	devtype_info *dtype_s;
+	devtype_info *dtype_a;
+	devtype_info *dtype_e;
+	Node	   *node_s;
+	Node	   *node_a;
+	HeapTuple	fn_tup;
+	oidvector  *fn_argtypes = alloca(offsetof(oidvector, values[2]));
 
-	dfunc = pgstrom_devfunc_lookup(func_oid,
-								   get_func_rettype(func_oid),
-								   opexpr->args,
-								   opexpr->inputcollid);
+	Assert(list_length(opexpr->args) == 2);
+	node_s = linitial(opexpr->args);
+	node_a = lsecond(opexpr->args);
+	dtype_s = pgstrom_devtype_lookup_and_track(exprType(node_s), context);
+	if (!dtype_s)
+		elog(ERROR, "type %s is not device supported",
+			 format_type_be(exprType(node_s)));
+	dtype_a = pgstrom_devtype_lookup_and_track(exprType(node_a), context);
+	if (!dtype_a)
+		elog(ERROR, "type %s is not device supported",
+			 format_type_be(exprType(node_a)));
+	dtype_e = dtype_a->type_element;
+	if (!dtype_e)
+		elog(ERROR, "type %s is not an array data type",
+			 format_type_be(exprType(node_a)));
+
+	/* lookup operator function */
+	fn_tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(opexpr->opfuncid));
+	if (!HeapTupleIsValid(fn_tup))
+		elog(ERROR, "cache lookup failed for function %u", opexpr->opfuncid);
+
+	memset(fn_argtypes, 0, offsetof(oidvector, values[2]));
+	fn_argtypes->ndim = 1;
+	fn_argtypes->dataoffset = 0;
+	fn_argtypes->elemtype = OIDOID;
+	fn_argtypes->dim1 = 2;
+	fn_argtypes->lbound1 = 0;
+	fn_argtypes->values[0] = dtype_s->type_oid;
+	fn_argtypes->values[1] = dtype_e->type_oid;
+	SET_VARSIZE(fn_argtypes, offsetof(oidvector, values[2]));
+
+	dfunc = __pgstrom_devfunc_lookup(fn_tup,
+									 BOOLOID,
+									 fn_argtypes,
+									 opexpr->inputcollid);
 	if (!dfunc)
 		elog(ERROR, "function %s is not device supported",
-			 format_procedure(get_opcode(opexpr->opno)));
+			 format_procedure(opexpr->opfuncid));
 	pgstrom_devfunc_track(context, dfunc);
-	Assert(dfunc->func_rettype->type_oid == BOOLOID &&
-		   list_length(dfunc->func_args) == 2);
+
+	ReleaseSysCache(fn_tup);
 
 	__appendStringInfo(&context->str,
-					   "PG_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
+					   "PG_%s_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
+					   dtype_e->type_length < 0
+					   ? "VARLENA"
+					   : "SIMPLE",
 					   dfunc->func_devname);
-	expr = linitial(opexpr->args);
-	codegen_expression_walker(context, expr, NULL);
+	codegen_expression_walker(context, node_s, NULL);
 	__appendStringInfo(&context->str, ", ");
-	expr = lsecond(opexpr->args);
-	codegen_expression_walker(context, expr, NULL);
-	/* type of array element */
-	dtype = lsecond(dfunc->func_args);
-	__appendStringInfo(&context->str, ", %s, %d, %d)",
-					   opexpr->useOr ? "true" : "false",
-					   dtype->type_length,
-					   dtype->type_align);
+	codegen_expression_walker(context, node_a, NULL);
+	__appendStringInfo(&context->str, ", %s)",
+					   opexpr->useOr ? "true" : "false");
 	/*
 	 * Cost for PG_SCALAR_ARRAY_OP - It repeats on number of invocation
 	 * of the operator function for each array elements. Tentatively,

@@ -289,6 +289,217 @@ __pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum)
 }
 #endif	/* __CUDACC__ */
 
+#ifdef __CUDACC__
+STATIC_INLINE(cl_int)
+ArrayGetNItems(kern_context *kcxt, char *array)
+{
+	cl_int		ndim = ARR_NDIM(array);
+	cl_int	   *dims = ARR_DIMS(array);
+	cl_int      i, ret;
+    cl_long     prod;
+
+	if (ndim <= 0)
+		return 0;
+
+	ret = 1;
+	for (i=0; i < ndim; i++)
+	{
+		if (dims[i] < 0)
+		{
+			/* negative dimension implies an error... */
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+		prod = (cl_long) ret * (cl_long) dims[i];
+		ret = (cl_int) prod;
+		if ((cl_long) ret != prod)
+		{
+			/* array size exceeds the maximum allowed... */
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+	}
+	assert(ret >= 0);
+
+	return ret;
+}
+
+/*
+ * Support routine for ScalarArrayOpExpr on fixed-length data type
+ *
+ * S = scalar type, E = element of array type
+ */
+template <typename S, typename E>
+STATIC_FUNCTION(pg_bool_t)
+PG_SIMPLE_SCALAR_ARRAY_OP(kern_context *kcxt,
+						  pg_bool_t (*equal_fn)(kern_context *, S, E),
+						  S scalar,
+						  pg_array_t array,
+						  cl_bool useOr)
+{
+	pg_bool_t	result;
+	pg_bool_t	rv;
+	cl_uint		i, nitems;
+	char	   *pos = NULL;
+	char	   *nullmap = NULL;
+
+	/* NULL result for NULL array */
+	if (array.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+
+	/* num of items in the array */
+	result.isnull = false;
+	result.value = (useOr ? false : true);
+	if (array.length >= 0)
+		nitems  = array.length;
+	else
+	{
+		nitems  = ArrayGetNItems(kcxt, array.value);
+		pos     = ARR_DATA_PTR(array.value);
+		nullmap = ARR_NULLBITMAP(array.value);
+	}
+	if (nitems == 0)
+		return result;
+
+	for (i=0; i < nitems; i++)
+	{
+		E		element;
+
+		if (array.length >= 0)
+		{
+			pg_datum_fetch_arrow(kcxt, element,
+								 array.smeta,
+								 array.value, array.start + i);
+		}
+		else if (nullmap && att_isnull(i, nullmap))
+			pg_datum_ref(kcxt, element, NULL);
+		else
+		{
+			pg_datum_ref(kcxt, element, pos);
+			pos += sizeof(element.value);
+		}
+		/* call of the comparison function */
+		rv = equal_fn(kcxt, scalar, element);
+		if (rv.isnull)
+			result.isnull = true;
+		else if (useOr)
+		{
+			if (rv.value)
+			{
+				result.isnull = false;
+				result.value  = true;
+				break;
+			}
+		}
+		else
+		{
+			if (!rv.value)
+			{
+				result.isnull = false;
+				result.value  = false;
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+/*
+ * Support routine for ScalarArrayOpExpr on variable-length data type
+ *
+ * S = scalar type, E = element of array type
+ */
+template <typename S, typename E>
+STATIC_FUNCTION(pg_bool_t)
+PG_VARLENA_SCALAR_ARRAY_OP(kern_context *kcxt,
+						   pg_bool_t (*equal_fn)(kern_context *, S, E),
+						   S scalar,
+						   pg_array_t array,
+						   cl_bool useOr)
+{
+	pg_bool_t	result;
+	pg_bool_t	rv;
+	cl_uint		i, nitems;
+	char	   *pos = NULL;
+	char	   *nullmap = NULL;
+
+	/* NULL result for NULL array */
+	if (array.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+
+	/* num of items in the array */
+	result.isnull = false;
+	result.value = (useOr ? false : true);
+	if (array.length >= 0)
+		nitems  = array.length;
+	else
+	{
+		nitems  = ArrayGetNItems(kcxt, array.value);
+		pos     = ARR_DATA_PTR(array.value);
+		nullmap = ARR_NULLBITMAP(array.value);
+	}
+	if (nitems == 0)
+		return result;
+
+	for (i=0; i < nitems; i++)
+	{
+		E		element;
+
+		/* bailout if any error */
+		if (kcxt->e.errcode != StromError_Success)
+		{
+			result.isnull = true;
+			return result;
+		}
+
+		if (array.length >= 0)
+		{
+			pg_datum_fetch_arrow(kcxt, element,
+								 array.smeta,
+								 array.value, array.start + i);
+		}
+		else if (nullmap && att_isnull(i, nullmap))
+			pg_datum_ref(kcxt, element, NULL);
+		else
+		{
+			pos = (char *)INTALIGN(pos);
+			pg_datum_ref(kcxt, element, pos);
+			if (!element.isnull)
+				pos += VARSIZE_ANY(element.value);
+		}
+		/* call of the comparison function */
+		rv = equal_fn(kcxt, scalar, element);
+		if (rv.isnull)
+			result.isnull = true;
+		else if (useOr)
+		{
+			if (rv.value)
+			{
+				result.isnull = false;
+				result.value  = true;
+				break;
+			}
+		}
+		else
+		{
+			if (!rv.value)
+			{
+				result.isnull = false;
+				result.value  = false;
+				break;
+			}
+		}
+	}
+	return result;
+}
+#endif	/* __CUDACC__ */
+
 /*
  * declaration of pg_anytype_t
  */
