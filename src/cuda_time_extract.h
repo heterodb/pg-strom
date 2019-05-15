@@ -312,10 +312,9 @@ datebsearch(const char *key, const datetkn *datetkntbl, int nitems)
 }
 
 STATIC_FUNCTION(cl_bool)
-extract_decode_unit(struct varlena *units, cl_int *p_type, cl_int *p_value)
+extract_decode_unit(const char *s, cl_int slen,
+					cl_int *p_type, cl_int *p_value)
 {
-	const char *s = VARDATA_ANY(units);
-	cl_int		slen = VARSIZE_ANY_EXHDR(units);
 	char		key[20];
 	const datetkn *dtoken;
 	int			i;
@@ -414,12 +413,15 @@ pgfn_extract_timestamp(kern_context *kcxt,
 					   pg_text_t arg1, pg_timestamp_t arg2)
 {
 	pg_float8_t	result;
+	char	   *s;
+	cl_int		slen;
 	cl_int		type, val;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-	if (extract_decode_unit(arg1.value, &type, &val))
+	if (pg_varlena_datum_extract(kcxt, arg1, &s, &slen) &&
+		extract_decode_unit(s, slen, &type, &val))
 	{
 		if (TIMESTAMP_NOT_FINITE(arg2.value))
 			return NonFiniteTimestampTzPart(kcxt, type, val,
@@ -568,12 +570,15 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 						 pg_text_t arg1, pg_timestamptz_t arg2)
 {
 	pg_float8_t	result;
+	char	   *s;
+	cl_int		slen;
 	cl_int		type, val;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-	if (extract_decode_unit(arg1.value, &type, &val))
+	if (pg_varlena_datum_extract(kcxt, arg1, &s, &slen) &&
+		extract_decode_unit(s, slen, &type, &val))
 	{
 		if (TIMESTAMP_NOT_FINITE(arg2.value))
 			return NonFiniteTimestampTzPart(kcxt, type, val,
@@ -736,12 +741,15 @@ STATIC_FUNCTION(pg_float8_t)
 pgfn_extract_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
 {
 	pg_float8_t	result;
-	int			type, val;
+	char	   *s;
+	cl_int		slen;
+	cl_int		type, val;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-	if (extract_decode_unit(arg1.value, &type, &val))
+	if (pg_varlena_datum_extract(kcxt, arg1, &s, &slen) &&
+		extract_decode_unit(s, slen, &type, &val))
 	{
 		if (type == UNITS)
 		{
@@ -819,12 +827,15 @@ STATIC_FUNCTION(pg_float8_t)
 pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
 {
 	pg_float8_t	result;
-	int			type, val;
+	char	   *s;
+	cl_int		slen;
+	cl_int		type, val;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-	if (extract_decode_unit(arg1.value, &type, &val))
+	if (pg_varlena_datum_extract(kcxt, arg1, &s, &slen) &&
+		extract_decode_unit(s, slen, &type, &val))
 	{
 		if (type == UNITS)
 		{
@@ -888,13 +899,15 @@ STATIC_FUNCTION(pg_float8_t)
 pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 {
 	pg_float8_t	result;
-	int			type, val;
+	char	   *s;
+	cl_int		slen;
+	cl_int		type, val;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-
-	if (extract_decode_unit(arg1.value, &type, &val))
+	if (pg_varlena_datum_extract(kcxt, arg1, &s, &slen) &&
+		extract_decode_unit(s, slen, &type, &val))
 	{
 		if (type == UNITS)
 		{
