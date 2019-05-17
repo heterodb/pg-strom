@@ -55,6 +55,7 @@ bpchar_truelen(const char *s, cl_int len)
 #define PG_BPCHAR_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
 STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
+#ifdef __CUDACC__
 /* pg_comp_hash(bpchar) must be defined by itself */
 STATIC_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
@@ -104,8 +105,9 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		result.length = pos - addr;
 	}
 }
+#endif	/* __CUDACC__ */
 STROMCL_VARLENA_PGARRAY_TEMPLATE(bpchar)
-#endif
+#endif	/* PG_BPCHAR_TYPE_DEFINED */
 
 STATIC_INLINE(cl_bool)
 pg_bpchar_datum_extract(kern_context *kcxt, pg_bpchar_t arg,
@@ -324,7 +326,7 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 STROMCL_VARLENA_TYPE_TEMPLATE(text)
 STROMCL_VARLENA_ARROW_TEMPLATE(text)
 STROMCL_VARLENA_PGARRAY_TEMPLATE(text)
-#endif
+#endif	/* PG_TEXT_TYPE_DEFINED */
 
 STATIC_FUNCTION(cl_int)
 text_compare(kern_context *kcxt,

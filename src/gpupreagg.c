@@ -2491,7 +2491,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 * Type of the grouping-key must have device equality-function
 			 */
 			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
-			if (!dtype)
+			if (!dtype || !dtype->hash_func)
 			{
 				elog(DEBUG2, "GROUP BY contains unsupported type (%s): %s",
 					 format_type_be(exprType((Node *)expr)),

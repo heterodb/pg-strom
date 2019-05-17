@@ -200,9 +200,9 @@ typedef struct
 	 */
 	List			   *hash_outer_keys;
 	List			   *hash_inner_keys;
-	List			   *hash_keylen;
-	List			   *hash_keybyval;
-	List			   *hash_keytype;
+//	List			   *hash_keylen;
+//	List			   *hash_keybyval;
+//	List			   *hash_keytype;
 
 	/* CPU Fallback related */
 	AttrNumber		   *inner_dst_resno;
@@ -971,6 +971,7 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
 		/* Is it hash-joinable clause? */
 		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
 			continue;
+		Assert(is_opclause(rinfo->clause));
 
 		/*
 		 * Check if clause has the form "outer op inner" or
@@ -982,6 +983,19 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
 			(bms_is_subset(rinfo->left_relids,  inner_rel->relids) &&
 			 bms_is_subset(rinfo->right_relids, outer_rel->relids)))
 		{
+			OpExpr	   *op = (OpExpr *)rinfo->clause;
+			Node	   *arg1 = linitial(op->args);
+			Node	   *arg2 = lsecond(op->args);
+			devtype_info *dtype;
+
+			/* hash-join key must support device hash function */
+			dtype = pgstrom_devtype_lookup(exprType(arg1));
+			if (!dtype || !dtype->hash_func)
+				continue;
+			dtype = pgstrom_devtype_lookup(exprType(arg2));
+			if (!dtype || !dtype->hash_func)
+				continue;
+
 			/* OK, it is hash-joinable qualifier */
 			hash_quals = lappend(hash_quals, rinfo);
 		}
@@ -2244,6 +2258,7 @@ build_device_targetlist(PlannerInfo *root,
 	cscan->custom_scan_tlist = context.ps_tlist;
 }
 
+#ifdef NOT_USED
 /*
  * extract_hashvalue_bothside
  */
@@ -2317,6 +2332,7 @@ extract_hashvalue_bothside(OpExpr *op_clause, Node **p_arg1, Node **p_arg2)
 	*p_arg1 = arg1;
 	*p_arg2 = arg2;
 }
+#endif
 
 /*
  * PlanGpuJoinPath
@@ -2396,15 +2412,18 @@ PlanGpuJoinPath(PlannerInfo *root,
 			RelOptInfo	   *scan_rel = scan_path->parent;
 			RestrictInfo   *rinfo = lfirst(lc);
 			OpExpr		   *op_clause = (OpExpr *) rinfo->clause;
-			Relids			relids1;
-			Relids			relids2;
-			Node		   *arg1;
-			Node		   *arg2;
+			Node		   *arg1 = (Node *)linitial(op_clause->args);
+			Node		   *arg2 = (Node *)lsecond(op_clause->args);
+			Relids			relids1 = pull_varnos(arg1);
+			Relids			relids2 = pull_varnos(arg2);
 
-			Assert(is_opclause(op_clause));
-			extract_hashvalue_bothside(op_clause, &arg1, &arg2);
-			relids1 = pull_varnos(arg1);
-			relids2 = pull_varnos(arg2);
+			/*
+			 * NOTE: Both sides of hash-join operator may have different
+			 * types if cross-type operators, like int48eq(x,y), are used.
+			 * Hash functions are designed to generate same hash-value
+			 * regardless of the data types, so we can run hash-join
+			 * without implicit type casts.
+			 */
 			if (bms_is_subset(relids1, scan_rel->relids) &&
 				!bms_is_subset(relids2, scan_rel->relids))
 			{
@@ -2920,23 +2939,11 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				Expr	   *o_expr = lfirst(lc2);
 				ExprState  *i_expr_state = ExecInitExpr(i_expr, &ss->ps);
 				ExprState  *o_expr_state = ExecInitExpr(o_expr, &ss->ps);
-				Oid			type_oid = exprType((Node *)i_expr);
-				int16		typlen;
-				bool		typbyval;
 
 				istate->hash_inner_keys =
 					lappend(istate->hash_inner_keys, i_expr_state);
 				istate->hash_outer_keys =
 					lappend(istate->hash_outer_keys, o_expr_state);
-
-				Assert(type_oid == exprType((Node *)o_expr));
-				get_typlenbyval(type_oid, &typlen, &typbyval);
-                istate->hash_keytype =
-                    lappend_oid(istate->hash_keytype, type_oid);
-                istate->hash_keylen =
-                    lappend_int(istate->hash_keylen, typlen);
-                istate->hash_keybyval =
-                    lappend_int(istate->hash_keybyval, typbyval);
 			}
 		}
 

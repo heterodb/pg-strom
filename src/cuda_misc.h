@@ -23,6 +23,7 @@
 #ifndef PG_MONEY_TYPE_DEFINED
 #define PG_MONEY_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long, )
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(money, cl_long)
 STROMCL_SIMPLE_ARROW_TEMPLATE(money, cl_long)
 #endif
 
@@ -254,6 +255,7 @@ typedef struct
 #ifndef PG_UUID_TYPE_DEFINED
 #define PG_UUID_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(uuid, pgsql_uuid_t)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(uuid, pgsql_uuid_t)
 #endif	/* PG_UUID_TYPE_DEFINED */
 
 STATIC_INLINE(int)
@@ -397,6 +399,7 @@ typedef struct macaddr
 #ifndef PG_MACADDR_TYPE_DEFINED
 #define PG_MACADDR_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(macaddr,macaddr)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(macaddr,macaddr)
 #endif	/* PG_MACADDR_TYPE_DEFINED */
 
 STATIC_FUNCTION(pg_macaddr_t)
@@ -701,29 +704,6 @@ pg_inet_param(kern_context *kcxt, cl_uint param_id)
 }
 
 STATIC_INLINE(cl_uint)
-pg_inet_comp_crc32(const cl_uint *crc32_table,
-				   kern_context *kcxt,
-				   cl_uint hash, pg_inet_t datum)
-{
-	if (!datum.isnull)
-	{
-		int		len = (datum.value.family == PGSQL_AF_INET  ? 4 :
-					   datum.value.family == PGSQL_AF_INET6 ? 16 : 0);
-		if (len > 0)
-		{
-			hash = pg_common_comp_crc32(crc32_table, hash,
-										(char *)&datum.value,
-										offsetof(inet_struct, ipaddr[len]));
-		}
-		else
-		{
-			STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
-		}
-	}
-	return hash;
-}
-
-STATIC_INLINE(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 {
 	if (!datum.isnull)
@@ -737,7 +717,6 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 	STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
 	return 0;
 }
-
 #endif	/* PG_INET_TYPE_DEFINED */
 
 #ifndef PG_CIDR_TYPE_DEFINED
@@ -745,7 +724,6 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 typedef pg_inet_t					pg_cidr_t;
 #define pg_cidr_datum_ref(a,b)		pg_inet_datum_ref(a,b)
 #define pg_cidr_param(a,b)			pg_inet_param(a,b)
-#define pg_cidr_comp_crc32(a,b,c,d)	pg_inet_comp_crc32(a,b,c,d)
 #endif	/* PG_CIDR_TYPE_DEFINED */
 
 /* binary compatible type cast */

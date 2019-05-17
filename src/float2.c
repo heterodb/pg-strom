@@ -361,7 +361,7 @@ fp64_to_fp16(double value)
 	return result;
 }
 
-static float
+static double
 fp16_to_fp64(half_t fp16val)
 {
 	cl_ulong	sign = ((cl_ulong)(fp16val & 0x8000) << 48);

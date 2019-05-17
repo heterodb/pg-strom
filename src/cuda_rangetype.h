@@ -36,7 +36,7 @@
 											  RANGE_UB_NULL |	\
 											  RANGE_UB_INF)))
 
-#define PG_RANGETYPE_TEMPLATE(NAME,BASE,PG_TYPEOID)					\
+#define PG_RANGETYPE_TEMPLATE(NAME,BASE,PG_TYPEOID,AS_DATUM64)		\
 	typedef struct													\
 	{																\
 		BASE	val;												\
@@ -185,39 +185,12 @@
 	}																\
 																	\
 	STATIC_FUNCTION(cl_uint)										\
-	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
-						   kern_context *kcxt,						\
-						   cl_uint hash, pg_##NAME##_t datum)		\
-	{																\
-		char		flags;											\
-		if (!datum.isnull)											\
-		{															\
-			flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0) |	\
-					 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |	\
-					 (datum.value.u.infinite ? RANGE_UB_INF : 0) |	\
-					 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |	\
-					 (datum.value.empty ? RANGE_EMPTY : 0));		\
-																	\
-			pg_common_comp_crc32(crc32_table, hash,					\
-								 (char *)&datum.value.l.val,		\
-								 sizeof(BASE));						\
-			pg_common_comp_crc32(crc32_table, hash,					\
-								 (char *)&datum.value.u.val,		\
-								 sizeof(BASE));						\
-			pg_common_comp_crc32(crc32_table, hash,					\
-								 (char *)&flags,					\
-								 sizeof(char));						\
-		}															\
-		return hash;												\
-	}																\
-																	\
-	STATIC_FUNCTION(cl_uint)										\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)			\
 	{																\
 		cl_char		flags;											\
 		struct {													\
-			BASE	l_val;											\
-			BASE	u_val;											\
+			Datum	l_val;											\
+			Datum	u_val;											\
 			char	flags;											\
 		} temp														\
 																	\
@@ -229,40 +202,41 @@
 			| (datum.value.u.infinite ? RANGE_UB_INF  : 0)			\
 			| (datum.value.u.inclusive ? RANGE_UB_INC : 0);			\
 		if (RANGE_HAS_LBOUND(flags))								\
-			temp.l_val = datum.value.l.val;							\
+			temp.l_val = AS_DATUM64(datum.value.l.val);				\
 		else														\
 			temp.l_val = 0;											\
 		if (RANGE_HAS_UBOUND(flags))								\
-			temp.u_val = datum.value.u.val;							\
+			temp.u_val = AS_DATUM64(datum.value.u.val);				\
 		else														\
 			temp.u_val = 0;											\
-		return pg_hash_any((unsigned char *)&temp, sizeof(temp));	\
+		return pg_hash_any((unsigned char *)&temp,					\
+						   2*sizeof(Datum)+sizeof(char));			\
 	}
 
 #ifndef PG_INT4RANGE_TYPE_DEFINED
 #define PG_INT4RANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(int4range,cl_int,PG_INT4RANGEOID)
+PG_RANGETYPE_TEMPLATE(int4range,cl_int,PG_INT4RANGEOID,(cl_long))
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifndef PG_INT8RANGE_TYPE_DEFINED
 #define PG_INT8RANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(int8range,cl_long,PG_INT8RANGEOID)
+PG_RANGETYPE_TEMPLATE(int8range,cl_long,PG_INT8RANGEOID,)
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifdef CUDA_TIMELIB_H
 #ifndef PG_TSRANGE_TYPE_DEFINED
 #define PG_TSRANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(tsrange,Timestamp,PG_TSRANGEOID)
+PG_RANGETYPE_TEMPLATE(tsrange,Timestamp,PG_TSRANGEOID,)
 #endif	/* PG_TSRANGE_TYPE_DEFINED */
 
 #ifndef PG_TSTZRANGE_TYPE_DEFINED
 #define PG_TSTZRANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(tstzrange,TimestampTz,PG_TSTZRANGEOID)
+PG_RANGETYPE_TEMPLATE(tstzrange,TimestampTz,PG_TSTZRANGEOID,)
 #endif	/* PG_TSTZRANGE_TYPE_DEFINED */
 
 #ifndef PG_DATERANGE_TYPE_DEFINED
 #define PG_DATERANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID)
+	PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 #endif	/* PG_DATERANGE_TYPE_DEFINED */
 #endif	/* CUDA_TIMELIB_H */
 

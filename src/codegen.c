@@ -29,7 +29,14 @@ static Oid		pgstrom_float2_typeoid = InvalidOid;
 static void		build_devcast_info(void);
 
 static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_int2_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_int4_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_int8_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_float2_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_float4_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_float8_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_interval_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_bpchar_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum);
@@ -80,29 +87,29 @@ static struct {
 				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("int2",   "INT2OID",   "cl_short",
 				 "SHRT_MAX", "SHRT_MIN", "0",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_int2_devtype_hashfunc),
 	DEVTYPE_DECL("int4",   "INT4OID",   "cl_int",
 				 "INT_MAX", "INT_MIN", "0",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_int4_devtype_hashfunc),
 	DEVTYPE_DECL("int8",   "INT8OID",   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_int8_devtype_hashfunc),
 	/* XXX - float2 is not a built-in data type */
 	DEVTYPE_DECL("float2", "FLOAT2OID", "cl_half",
 				 "__half_as_short(HALF_MAX)",
 				 "__half_as_short(-HALF_MAX)",
 				 "__half_as_short(0.0)",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_float2_devtype_hashfunc),
 	DEVTYPE_DECL("float4", "FLOAT4OID", "cl_float",
 				 "__float_as_int(FLT_MAX)",
 				 "__float_as_int(-FLT_MAX)",
 				 "__float_as_int(0.0)",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_float4_devtype_hashfunc),
 	DEVTYPE_DECL("float8", "FLOAT8OID", "cl_double",
 				 "__double_as_longlong(DBL_MAX)",
 				 "__double_as_longlong(-DBL_MAX)",
 				 "__double_as_longlong(0.0)",
-				 0, 0, generic_devtype_hashfunc),
+				 0, 0, pg_float8_devtype_hashfunc),
 	/*
 	 * Misc data types
 	 */
@@ -152,7 +159,7 @@ static struct {
 	DEVTYPE_DECL("interval", "INTERVALOID", "Interval",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
-				 generic_devtype_hashfunc),
+				 pg_interval_devtype_hashfunc),
 	/*
 	 * variable length datatypes
 	 */
@@ -418,6 +425,66 @@ generic_devtype_hashfunc(devtype_info *dtype, Datum datum)
 }
 
 static cl_uint
+pg_int2_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_int		ival = DatumGetInt16(datum);
+
+	return hash_any((cl_uchar *)&ival, sizeof(cl_int));
+}
+
+static cl_uint
+pg_int4_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_int		ival = DatumGetInt32(datum);
+
+	return hash_any((cl_uchar *)&ival, sizeof(cl_int));
+}
+
+static cl_uint
+pg_int8_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_long		ival = DatumGetInt64(datum);
+	cl_uint		lo = (ival & 0xffffffffL);
+	cl_uint		hi = (ival >> 32);
+
+	lo ^= (ival >= 0 ? hi : ~hi);
+
+	return hash_any((cl_uchar *)&lo, sizeof(cl_int));
+}
+
+extern Datum	pgstrom_float2_to_float8(PG_FUNCTION_ARGS);
+static cl_uint
+pg_float2_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	Datum		v = DirectFunctionCall1(pgstrom_float2_to_float8, datum);
+	cl_double	fval = DatumGetFloat8(v);
+
+	if (fval == 0.0)
+		return 0;
+	return hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+
+static cl_uint
+pg_float4_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_double	fval = DatumGetFloat4(datum);
+
+	if (fval == 0.0)
+		return 0;
+	return hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+
+static cl_uint
+pg_float8_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_double	fval = DatumGetFloat8(datum);
+
+	if (fval == 0.0)
+		return 0;
+	return hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+
+static cl_uint
 pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
 	kern_context	dummy;
@@ -437,6 +504,22 @@ pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum)
 
 	return hash_any((cl_uchar *)&temp.value,
 					offsetof(pg_numeric_t, precision) + sizeof(cl_short));
+}
+
+static cl_uint
+pg_interval_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	Interval   *interval = DatumGetIntervalP(datum);
+	cl_long		frac;
+	cl_long		days;
+
+	frac = interval->time % USECS_PER_DAY;
+	days = (interval->time / USECS_PER_DAY +
+			interval->month * 30L +
+			interval->day);
+	days ^= frac;
+
+	return hash_any((cl_uchar *)&days, sizeof(cl_long));
 }
 
 static cl_uint
@@ -555,32 +638,62 @@ pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum)
 static cl_uint
 pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
-	RangeType  *r = DatumGetRangeTypeP(datum);
-	cl_uchar	flags = *((char *)r + VARSIZE(r) - 1);
-	cl_uchar   *pos = (cl_uchar *)(r + 1);
-	cl_uchar	buf[sizeof(Datum) * 2 + sizeof(char)];
-	int			len = 0;
-	int16		typlen;
-	bool		typbyval;
-	char		typalign;
+	RangeType	   *r = DatumGetRangeTypeP(datum);
+	cl_uchar		flags = *((char *)r + VARSIZE_ANY(r) - 1);
+	cl_uchar	   *pos = (cl_uchar *)(r + 1);
+	struct {
+		Datum		l_val;
+		Datum		u_val;
+		cl_uchar	flags;
+	} temp;
+	int32			ival32;
 
-	get_typlenbyvalalign(r->rangetypid, &typlen, &typbyval, &typalign);
-	Assert(typlen > 0);		/* we support only fixed-length */
 	if (RANGE_HAS_LBOUND(flags))
 	{
-		memcpy(buf + len, pos, typlen);
-		len += typlen;
-		pos += typlen;
+		switch (RangeTypeGetOid(r))
+		{
+			case INT4RANGEOID:
+			case DATERANGEOID:
+				memcpy(&ival32, pos, sizeof(cl_int));
+				temp.l_val = (cl_long)ival32;
+				pos += sizeof(cl_int);
+				break;
+			case INT8RANGEOID:
+			case TSRANGEOID:
+			case TSTZRANGEOID:
+				memcpy(&temp.l_val, pos, sizeof(cl_long));
+				pos += sizeof(cl_long);
+				break;
+			default:
+				elog(ERROR, "unexpected range type: %s",
+					 format_type_be(RangeTypeGetOid(r)));
+		}
 	}
 	if (RANGE_HAS_UBOUND(flags))
 	{
-		memcpy(buf + len, pos, typlen);
-		len += typlen;
-		pos += typlen;
+		switch (RangeTypeGetOid(r))
+		{
+			case INT4RANGEOID:
+			case DATERANGEOID:
+				memcpy(&ival32, pos, sizeof(cl_int));
+				temp.l_val = (cl_long)ival32;
+				pos += sizeof(cl_int);
+				break;
+			case INT8RANGEOID:
+			case TSRANGEOID:
+			case TSTZRANGEOID:
+				memcpy(&temp.l_val, pos, sizeof(cl_long));
+				pos += sizeof(cl_long);
+				break;
+			default:
+				elog(ERROR, "unexpected range type: %s",
+					 format_type_be(RangeTypeGetOid(r)));
+		}
 	}
-	buf[len++] = flags;
+	temp.flags = flags;
 
-	return hash_any(buf, len);
+	return hash_any((unsigned char *)&temp,
+					2*sizeof(Datum)+sizeof(cl_uchar));
 }
 
 /*

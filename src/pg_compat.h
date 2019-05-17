@@ -14,6 +14,19 @@
 #define PG_COMPAT_H
 
 /*
+ * MEMO: PostgreSQL v11 declares all the type OIDs, but some of types
+ * has no label definition in the older version.
+ */
+#if PG_VERSION_NUM < 110000
+//#define INT4RANGEOID	3904
+#define INT8RANGEOID	3926
+#define NUMRANGEOID		3906
+#define TSRANGEOID		3908
+#define TSTZRANGEOID	3910
+#define DATERANGEOID	3912
+#endif
+
+/*
  * MEMO: tupleDesc was re-defined at PG11. Newer version has flexible-
  * length of FormData_pg_attribute on the tail
  */

@@ -194,10 +194,19 @@ struct pg_tm
 	// const char *tm_zone;	not supported yet
 };
 
+STATIC_INLINE(void)
+interval_cmp_value(const Interval interval, cl_long *days, cl_long *fraction)
+{
+	*fraction = interval.time % USECS_PER_DAY;
+	*days = (interval.time / USECS_PER_DAY +
+			 interval.month * 30L +
+			 interval.day);
+}
+
 #ifndef PG_DATE_TYPE_DEFINED
 #define PG_DATE_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT,)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(date,DateADT)
 #ifdef __CUDACC__
 /* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
@@ -246,12 +255,13 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 }
 #endif	/* __CUDACC__ */
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(date)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
 #endif	/* PG_DATE_TYPE_DEFINED */
 
 #ifndef PG_TIME_TYPE_DEFINED
 #define PG_TIME_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT,)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(time,TimeADT)
 #ifdef __CUDACC__
 /* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
@@ -293,17 +303,19 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 }
 #endif	/* __CUDACC__ */
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(time)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
 #endif	/* PG_TIME_TYPE_DEFINED */
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
 #define PG_TIMETZ_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timetz,TimeTzADT)
 #endif	/* PG_TIMETZ_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp,)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,Timestamp)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timestamp,Timestamp)
 #ifdef __CUDACC__
 /* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
@@ -345,18 +357,37 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 }
 #endif	/* __CUDACC__ */
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(timestamp)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamp_,
+								timestamp,
+								timestamp,
+								Timestamp)
 #endif	/* PG_TIMESTAMP_TYPE_DEFINED */
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz,)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
+STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timestamptz,TimestampTz)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,
+								timestamptz,
+								timestamptz,
+								TimestampTz)
 #endif
 
 #ifndef PG_INTERVAL_TYPE_DEFINED
 #define PG_INTERVAL_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
 #ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_interval_t datum)
+{
+	cl_long		days, frac;
+
+	if (datum.isnull)
+		return 0;
+	interval_cmp_value(datum.value, &days, &frac);
+	days ^= frac;
+	return pg_hash_any((cl_uchar *)&days, sizeof(cl_long));
+}
 /* usually, called via pg_datum_ref_arrow() */
 STATIC_INLINE(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
@@ -3236,25 +3267,24 @@ pgfn_timestamptz_ne_timestamp(kern_context *kcxt,
 /*
  * Comparison between pg_interval_t
  */
-STATIC_INLINE(TimeOffset)
-interval_cmp_value(const Interval interval)
-{
-	TimeOffset	span;
-
-	span = interval.time;
-	span += interval.month * INT64CONST(30) * USECS_PER_DAY;
-	span += interval.day * INT64CONST(24) * USECS_PER_HOUR;
-
-	return span;
-}
-
 STATIC_INLINE(cl_int)
 interval_cmp_internal(Interval arg1, Interval arg2)
 {
-	TimeOffset	span1 = interval_cmp_value(arg1);
-	TimeOffset	span2 = interval_cmp_value(arg2);
+	cl_long		days1, days2;
+	cl_long		frac1, frac2;
 
-	return ((span1 < span2) ? -1 : (span1 > span2) ? 1 : 0);
+	interval_cmp_value(arg1, &days1, &frac1);
+	interval_cmp_value(arg2, &days2, &frac2);
+
+	if (days1 < days2)
+		return -1;
+	else if (days1 > days2)
+		return  1;
+	else if (frac1 < frac2)
+		return -1;
+	else if (frac1 > frac2)
+		return  1;
+	return 0;
 }
 
 STATIC_FUNCTION(pg_bool_t)

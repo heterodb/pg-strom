@@ -185,12 +185,9 @@ pg_array_param(kern_context *kcxt, cl_uint param_id)
 STATIC_INLINE(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_array_t datum)
 {
-	if (datum.isnull)
-		return 0;
-	if (datum.length < 0)
-		return 0;
-	else
-		return 0;
+	/* we don't support to use pg_array_t for JOIN/GROUP BY key */
+	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	return 0;
 }
 #endif	/* __CUDACC__ */
 #endif	/* PG_ARRAY_TYPE_DEFINED */

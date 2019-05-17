@@ -1281,6 +1281,23 @@ typedef struct
 			result = pg_##NAME##_datum_ref(kcxt, &datum);			\
 		}															\
 	}																\
+	STATIC_INLINE(pg_##NAME##_t)									\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
+	{																\
+		kern_parambuf *kparams = kcxt->kparams;						\
+		pg_##NAME##_t result;										\
+																	\
+		if (param_id < kparams->nparams &&							\
+			kparams->poffset[param_id] > 0)							\
+		{															\
+			void   *addr = ((char *)kparams +						\
+							kparams->poffset[param_id]);			\
+			result = pg_##NAME##_datum_ref(kcxt, addr);				\
+		}															\
+		else														\
+			result.isnull = true;									\
+		return result;												\
+	}																\
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
@@ -1339,6 +1356,23 @@ typedef struct
 			result = pg_##NAME##_datum_ref(kcxt, (char *)datum);	\
 		}															\
 	}																\
+	STATIC_INLINE(pg_##NAME##_t)									\
+	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
+	{																\
+		kern_parambuf *kparams = kcxt->kparams;						\
+		pg_##NAME##_t result;										\
+																	\
+		if (param_id < kparams->nparams &&							\
+			kparams->poffset[param_id] > 0)							\
+		{															\
+			void   *addr = ((char *)kparams +						\
+							kparams->poffset[param_id]);			\
+			result = pg_##NAME##_datum_ref(kcxt, addr);				\
+		}															\
+		else														\
+			result.isnull = true;									\
+		return result;												\
+	}																\
 	STATIC_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
@@ -1375,7 +1409,6 @@ typedef struct
 #ifdef __CUDACC__
 DEVICE_ONLY_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
-
 #define STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
 	STATIC_INLINE(cl_uint)										\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
@@ -1389,31 +1422,13 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #define	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
 #endif	/* __CUDACC__ */
 
-/*
- * References to Const/Param values
- */
-#ifdef __CUDACC__
-#define STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)					\
-	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
-	{														\
-		kern_parambuf *kparams = kcxt->kparams;				\
-		pg_##NAME##_t result;								\
-															\
-		if (param_id < kparams->nparams &&					\
-			kparams->poffset[param_id] > 0)					\
-		{													\
-			void   *addr = ((char *)kparams +				\
-							kparams->poffset[param_id]);	\
-			result = pg_##NAME##_datum_ref(kcxt, addr);		\
-		}													\
-		else												\
-			result.isnull = true;							\
-		return result;										\
-	}
-#else
-#define STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
-#endif
+#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
+
+#define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
+	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
 
 /* also, variable-length values */
 #include "cuda_varlena.h"
@@ -1535,18 +1550,6 @@ pg_simple_array_from_arrow(kern_context *kcxt,
 #define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)
 #endif
 
-#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)		\
-	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
-
-#define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)	\
-	STROMCL_SIMPLE_PARAM_TEMPLATE(NAME)
-
 #define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
 	STATIC_INLINE(pg_bool_t)								\
 	pgfn_##FNAME##EXTRA(kern_context *kcxt,					\
@@ -1605,6 +1608,18 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(bool);
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short, )
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int2_t datum)
+{
+	cl_int		ival;
+
+	if (datum.isnull)
+		return 0;
+	ival = (cl_int)datum.value;
+	return pg_hash_any((cl_uchar *)&ival, sizeof(cl_int));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(int2, cl_short)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
 #endif	/* PG_INT2_TYPE_DEFINED */
@@ -1613,6 +1628,15 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int, )
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int4_t datum)
+{
+	if (datum.isnull)
+		return 0;
+	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_int));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(int4, cl_int)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
 #endif	/* PG_INT4_TYPE_DEFINED */
@@ -1621,6 +1645,21 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long, )
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int8_t datum)
+{
+	cl_uint		hi, lo;
+
+	if (datum.isnull)
+		return 0;
+	/* see hashint8, for cross-type hash joins */
+	lo = (cl_uint)(datum.value & 0xffffffffL);
+	hi = (cl_uint)(datum.value >> 32);
+	lo ^= (datum.value >= 0 ? hi : ~hi);
+	return pg_hash_any((cl_uchar *)&lo, sizeof(cl_int));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(int8, cl_long)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
 #endif	/* PG_INT8_TYPE_DEFINED */
@@ -1629,6 +1668,21 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
 #ifndef PG_FLOAT2_TYPE_DEFINED
 #define PG_FLOAT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half, __half_as_short)
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float2_t datum)
+{
+	cl_double	fval;
+
+	/* see comments at hashfloat4() */
+	if (datum.isnull)
+		return 0;
+	fval = datum.value;
+	if (fval == 0.0)
+		return 0;
+	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(float2, cl_half)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
 #endif	/* PG_FLOAT2_TYPE_DEFINED */
@@ -1637,6 +1691,19 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float, __float_as_int)
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float4_t datum)
+{
+	cl_double	fval;
+
+	/* see comments at hashfloat4() */
+	if (datum.isnull || datum.value == 0.0)
+		return 0;
+	fval = datum.value;
+	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(float4, cl_float)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
 #endif	/* PG_FLOAT4_TYPE_DEFINED */
@@ -1645,6 +1712,16 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
+#ifdef __CUDACC__
+STATIC_INLINE(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float8_t datum)
+{
+	/* see comments at hashfloat8() */
+	if (datum.isnull || datum.value == 0.0)
+		return 0;
+	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_double));
+}
+#endif	/* __CUDACC__ */
 STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
