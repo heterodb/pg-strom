@@ -1786,8 +1786,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 						int			typmod;
 
 						typoid = arrowTypeToPGTypeOid(child, &typmod);
-						if (typoid != attr->atttypid ||
-							typoid != attr->atttypmod)
+						if (typoid != attr->atttypid)
 							compatible = false;
 					}
 					ReleaseTupleDesc(tupdesc);
@@ -1799,7 +1798,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				heap_close(rel, AccessShareLock);
 
 				if (!OidIsValid(type_oid))
-					elog(ERROR, "arrow.%s is not supported",
+					elog(ERROR, "arrow::%s is not supported",
 						 arrowTypeName(field));
 				return type_oid;
 			}

@@ -359,8 +359,16 @@ dumpArrowNode(ArrowNode *node)
 	(dest)->FIELD = (src)->FIELD
 #define COPY_CSTRING(FIELD)								\
 	do {												\
-		(dest)->FIELD = pstrdup((src)->FIELD);			\
-		(dest)->_##FIELD##_len = strlen((dest)->FIELD);	\
+		if ((src)->FIELD)								\
+		{												\
+			(dest)->FIELD = pstrdup((src)->FIELD);		\
+			(dest)->_##FIELD##_len = strlen((dest)->FIELD);	\
+		}												\
+		else											\
+		{												\
+			(dest)->FIELD = NULL;						\
+			(dest)->_##FIELD##_len = 0;					\
+		}												\
 	} while(0)
 #define COPY_VECTOR(FIELD, NODETYPE)								\
 	do {															\
