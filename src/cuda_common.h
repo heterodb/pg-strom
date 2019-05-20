@@ -1231,6 +1231,7 @@ typedef struct
 #define DATUM_CLASS__NULL		1	/* datum is NULL */
 #define DATUM_CLASS__VARLENA	2	/* datum is pg_varlena_t reference */
 #define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
+#define DATUM_CLASS__COMPOSITE	4	/* datum is pg_composite_t reference */
 
 /*
  * Template of variable classes: fixed-length referenced by value
@@ -1264,10 +1265,6 @@ typedef struct
 	{																\
 		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_arrow_ref(kern_context *kcxt,						\
-						  kern_data_store *kds,						\
-						  kern_colmeta *cmeta, cl_int index);		\
 	STATIC_INLINE(void)												\
 	pg_datum_ref_slot(kern_context *kcxt,							\
 					  pg_##NAME##_t &result,						\
@@ -2162,21 +2159,23 @@ pg_sysattr_tableoid_store(kern_context *kcxt,
  * compute_heaptuple_size
  */
 STATIC_FUNCTION(cl_uint)
-compute_heaptuple_size(kern_context *kcxt,
-					   kern_data_store *kds,
-					   cl_char *tup_dclass,
-					   Datum   *tup_values)
+__compute_heaptuple_size(kern_context *kcxt,
+						 kern_colmeta *__cmeta,
+						 cl_bool heap_hasoid,
+						 cl_uint ncols,
+						 cl_char *tup_dclass,
+						 Datum   *tup_values)
 {
 	cl_uint		t_hoff;
 	cl_uint		datalen = 0;
-	cl_uint		i, ncols = kds->ncols;
+	cl_uint		j;
 	cl_bool		heap_hasnull = false;
 
 	/* compute data length */
-	for (i=0; i < ncols; i++)
+	for (j=0; j < ncols; j++)
 	{
-		kern_colmeta   *cmeta = &kds->colmeta[i];
-		cl_char			dclass = tup_dclass[i];
+		kern_colmeta   *cmeta = &__cmeta[j];
+		cl_char			dclass = tup_dclass[j];
 
 		if (dclass == DATUM_CLASS__NULL)
 			heap_hasnull = true;
@@ -2188,7 +2187,7 @@ compute_heaptuple_size(kern_context *kcxt,
 		}
 		else
 		{
-			Datum		datum = tup_values[i];
+			Datum		datum = tup_values[j];
 			cl_uint		vl_len;
 
 			switch (dclass)
@@ -2197,10 +2196,18 @@ compute_heaptuple_size(kern_context *kcxt,
 					vl_len = pg_varlena_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 				case DATUM_CLASS__ARRAY:
 					vl_len = pg_array_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
+#endif
+#ifdef PGSTROM_KERNEL_HAS_PGCOMPOSITE
+				case DATUM_CLASS__COMPOSITE:
+					vl_len = pg_composite_datum_length(kcxt,datum);
+					datalen = TYPEALIGN(cmeta->attalign, datalen);
+					break;
+#endif
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					vl_len = VARSIZE_ANY(datum);
@@ -2215,11 +2222,25 @@ compute_heaptuple_size(kern_context *kcxt,
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (heap_hasnull)
 		t_hoff += BITMAPLEN(ncols);
-	if (kds->tdhasoid)
+	if (heap_hasoid)
 		t_hoff += sizeof(cl_uint);
 	t_hoff = MAXALIGN(t_hoff);
 
 	return t_hoff + datalen;
+}
+
+STATIC_INLINE(cl_uint)
+compute_heaptuple_size(kern_context *kcxt,
+					   kern_data_store *kds,
+					   cl_char *tup_dclass,
+					   Datum   *tup_values)
+{
+	return __compute_heaptuple_size(kcxt,
+									kds->colmeta,
+									kds->tdhasoid,
+									kds->ncols,
+									tup_dclass,
+									tup_values);
 }
 
 /*
@@ -2431,6 +2452,7 @@ __form_kern_heaptuple(kern_context *kcxt,
 													(char *)htup+curr,
 													datum);
 					break;
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 				case DATUM_CLASS__ARRAY:
 					while (padding-- > 0)
 						((char *)htup)[curr++] = '\0';
@@ -2438,6 +2460,16 @@ __form_kern_heaptuple(kern_context *kcxt,
 												  (char *)htup+curr,
 												  datum);
 					break;
+#endif
+#ifdef  PGSTROM_KERNEL_HAS_PGCOMPOSITE
+				case DATUM_CLASS__COMPOSITE:
+					while (padding-- > 0)
+						((char *)htup)[curr++] = '\0';
+					vl_len = pg_composite_datum_write(kcxt,
+													  (char *)htup+curr,
+													  datum);
+					break;
+#endif
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					vl_len = VARSIZE_ANY(datum);

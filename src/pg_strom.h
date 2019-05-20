@@ -461,6 +461,8 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000044	/* GpuPreAgg all */
 #define DEVKERNEL_NEEDS_GPUSORT			0x00000088	/* GpuSort all */
 
+#define DEVKERNEL_NEEDS_PGARRAY			0x00000100	/* pg_array_t */
+#define DEVKERNEL_NEEDS_PGCOMPOSITE		0x00000200	/* pg_composite_t */
 #define DEVKERNEL_NEEDS_TIMELIB			0x00000400
 #define DEVKERNEL_NEEDS_TEXTLIB			0x00000800
 #define DEVKERNEL_NEEDS_NUMERIC			0x00001000
@@ -503,6 +505,8 @@ typedef struct devtype_info {
 	devtype_hashfunc_type hash_func;  /* type specific hash function */
 	struct devtype_info *type_array;  /* array type of itself, if any */
 	struct devtype_info *type_element;/* element type of array, if any */
+	int			comp_nfields;	/* # of sub-fields if composite types */
+	struct devtype_info *comp_subtypes[FLEXIBLE_ARRAY_MEMBER];
 } devtype_info;
 
 /* callback for expected consumption of run-time varlena buffer */

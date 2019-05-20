@@ -3271,8 +3271,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 							i, i-1);
 					}
 				}
-				if (dtype->type_length < 0)
-					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+				context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
 				appendStringInfoString(&tbody, temp.data);
                 resetStringInfo(&temp);
 			}
@@ -3350,10 +3349,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				dtype->type_name,
 				tle->resno-1,
 				null_const_value);
-		if (dtype->type_element)
-			context->varlena_bufsz += MAXALIGN(sizeof(pg_array_t));
-		else if (dtype->type_length == -1)
-			context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+		context->varlena_bufsz += MAXALIGN(sizeof(pg_array_t));
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);

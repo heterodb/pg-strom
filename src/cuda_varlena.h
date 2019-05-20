@@ -548,22 +548,20 @@ pg_varlena_datum_write(kern_context *kcxt, char *dest, Datum datum)
 
 #ifdef __CUDACC__
 /*
- * for DATUM_CLASS__ARRAY handler
+ * for DATUM_CLASS__(ARRAY|COMPOSITE) handler (cuda_anytype.h)
  */
-STATIC_FUNCTION(cl_uint)
-__pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum);
-
-STATIC_INLINE(cl_uint)
-pg_array_datum_length(kern_context *kcxt, Datum datum)
-{
-	return __pg_array_from_arrow(kcxt, NULL, datum);
-}
-
-STATIC_FUNCTION(cl_uint)
-pg_array_datum_write(kern_context *kcxt, char *dest, Datum datum)
-{
-	return __pg_array_from_arrow(kcxt, dest, datum);
-}
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
+STATIC_INLINE(cl_uint) pg_array_datum_length(kern_context *kcxt,
+											 Datum datum);
+STATIC_INLINE(cl_uint) pg_array_datum_write(kern_context *kcxt,
+											char *dest, Datum datum);
+#endif	/* PGSTROM_KERNEL_HAS_PGARRAY */
+#ifdef PGSTROM_KERNEL_HAS_PGCOMPOSITE
+STATIC_INLINE(cl_uint) pg_composite_datum_length(kern_context *kcxt,
+												 Datum datum);
+STATIC_INLINE(cl_uint) pg_composite_datum_write(kern_context *kcxt,
+												char *dest, Datum datum);
+#endif	/* PGSTROM_KERNEL_HAS_PGCOMPOSITE */
 #endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__

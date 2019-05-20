@@ -285,6 +285,9 @@ gpupreagg_final_data_move(kern_context *kcxt,
 				case DATUM_CLASS__ARRAY:
 					len = pg_array_datum_length(kcxt, src_values[i]);
 					break;
+				case DATUM_CLASS__COMPOSITE:
+					len = pg_composite_datum_length(kcxt, src_values[i]);
+					break;
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					len = VARSIZE_ANY(DatumGetPointer(src_values[i]));
@@ -350,6 +353,9 @@ gpupreagg_final_data_move(kern_context *kcxt,
                     break;
                 case DATUM_CLASS__ARRAY:
 					len = pg_array_datum_write(kcxt, curr, datum);
+					break;
+				case DATUM_CLASS__COMPOSITE:
+					len = pg_composite_datum_write(kcxt, curr, datum);
 					break;
 				default:
 					len = VARSIZE_ANY(datum);
@@ -441,6 +447,10 @@ gpupreagg_setup_common(kern_context    *kcxt,
 					case DATUM_CLASS__ARRAY:
 						tup_extra[j] = sizeof(pg_array_t);
 						extra_sz += MAXALIGN(sizeof(pg_array_t));
+						break;
+					case DATUM_CLASS__COMPOSITE:
+						tup_extra[j] = sizeof(pg_composite_t);
+						extra_sz += MAXALIGN(sizeof(pg_composite_t));
 						break;
 					default:
 						assert(dclass == DATUM_CLASS__NORMAL);

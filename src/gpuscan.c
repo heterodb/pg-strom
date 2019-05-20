@@ -677,7 +677,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		{
 			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
-			dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
+			dtype = pgstrom_devtype_lookup(attr->atttypid);
 			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 			if (!bms_is_member(k, outer_refs) || !dtype)
 				appendStringInfo(
@@ -699,10 +699,8 @@ codegen_gpuscan_projection(StringInfo kern,
 					dtype->type_name, j,
 					dtype->type_name, j,
 					dtype->type_name, j, j);
-				if (dtype->extra_sz > 0)
-					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-				if (dtype->type_length < 0)
-					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+				context->extra_flags |= dtype->type_flags;
+				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 			}
 		}
 		appendStringInfoString(
@@ -756,7 +754,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		Assert(anum > 0);
 		attr = tupleDescAttr(tupdesc, anum-1);
 
-		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
 		if (!dtype)
 			elog(ERROR, "Bug? failed to lookup device supported type: %s",
 				 format_type_be(attr->atttypid));
@@ -773,13 +771,12 @@ codegen_gpuscan_projection(StringInfo kern,
 	appendStringInfoString(
 		&temp,
 		"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
-
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		bool		referenced = false;
 
-		dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
+		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 
 		/* Put values on tup_values/tup_isnull if referenced */
@@ -813,6 +810,7 @@ codegen_gpuscan_projection(StringInfo kern,
 			}
 			else
 			{
+				context->extra_flags |= dtype->type_flags;
 				if (!referenced)
 					appendStringInfo(
 						&cbody,
@@ -824,8 +822,7 @@ codegen_gpuscan_projection(StringInfo kern,
 					"                 tup_dclass[%d],\n"
 					"                 tup_values[%d]);\n",
 					dtype->type_name, j, j);
-				if (dtype->type_length < 0)
-					context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 			}
 			referenced = true;
 		}
@@ -873,7 +870,6 @@ codegen_gpuscan_projection(StringInfo kern,
 			&tbody,
 			"  EXTRACT_HEAP_TUPLE_END();\n"
 			"\n");
-
 	/*
 	 * step.5 - execution of expression node, then store the result.
 	 */
@@ -907,8 +903,8 @@ codegen_gpuscan_projection(StringInfo kern,
 			dtype->type_name,
 			tle->resno - 1,
 			tle->resno - 1);
-		if (dtype->extra_sz > 0)
-			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		context->extra_flags |= dtype->type_flags;
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&cbody, temp.data);

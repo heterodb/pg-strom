@@ -361,6 +361,19 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define PGSTROM_KERNEL_DEBUG 1\n");
+	/*
+	 * XXX - enables support of pg_array_t / pg_composite_t
+	 *
+	 * It increases code compilation time. So, it is preferable to turn off
+	 * unless it is not required.
+	 */
+	if ((extra_flags & DEVKERNEL_NEEDS_PGARRAY) != 0)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#define PGSTROM_KERNEL_HAS_PGARRAY 1\n");
+	if ((extra_flags & DEVKERNEL_NEEDS_PGCOMPOSITE) != 0)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#define PGSTROM_KERNEL_HAS_PGCOMPOSITE 1\n");
+
 	/* Common PG-Strom device routine */
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include \"cuda_common.h\"\n");
@@ -511,6 +524,11 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 		jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 		jit_option_values[jit_index] = (void *)1UL;
 		jit_index++;
+#if 0
+		jit_options[jit_index] = CU_JIT_OPTIMIZATION_LEVEL;
+		jit_option_values[jit_index] = (void *)0;
+		jit_index++;
+#endif
 	}
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);

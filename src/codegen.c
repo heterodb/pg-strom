@@ -146,7 +146,8 @@ static struct {
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("timetz", "TIMETZOID", "TimeTzADT",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TIMELIB, sizeof(TimeTzADT),
+				 DEVKERNEL_NEEDS_TIMELIB,
+				 sizeof(TimeTzADT),
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("timestamp", "TIMESTAMPOID","Timestamp",
 				 "LONG_MAX", "LONG_MIN", "0",
@@ -158,7 +159,8 @@ static struct {
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("interval", "INTERVALOID", "Interval",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
+				 DEVKERNEL_NEEDS_TIMELIB,
+				 sizeof(Interval),
 				 pg_interval_devtype_hashfunc),
 	/*
 	 * variable length datatypes
@@ -178,15 +180,18 @@ static struct {
 				 pg_numeric_devtype_hashfunc),
 	DEVTYPE_DECL("bytea",   "BYTEAOID",   "varlena *",
 				 NULL, NULL, NULL,
-				 0, 0,
+				 0,
+				 sizeof(pg_varlena_t),
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("text",    "TEXTOID",    "varlena *",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TEXTLIB, 0,
+				 DEVKERNEL_NEEDS_TEXTLIB,
+				 sizeof(pg_varlena_t),
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("jsonb",   "JSONBOID",   "varlena *",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_JSONLIB, 0,
+				 DEVKERNEL_NEEDS_JSONLIB,
+				 sizeof(pg_varlena_t),
 				 pg_jsonb_devtype_hashfunc),
 	/*
 	 * range types
@@ -252,7 +257,7 @@ build_devtype_info_entry(Oid type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	entry = palloc0(sizeof(devtype_info));
+	entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
 	entry->type_oid = type_oid;
 	entry->type_flags = type_flags;
 	entry->type_length = type_form->typlen;
@@ -261,7 +266,10 @@ build_devtype_info_entry(Oid type_oid,
 	if (!element)
 		entry->type_name = pstrdup(NameStr(type_form->typname));
 	else
+	{
 		entry->type_name = pstrdup("array");
+		entry->type_flags |= DEVKERNEL_NEEDS_PGARRAY;
+	}
 	entry->type_base = pstrdup(type_basename);
 	entry->max_const = max_const;	/* may be NULL */
 	entry->min_const = min_const;	/* may be NULL */
@@ -336,11 +344,67 @@ build_devtype_info(void)
 	build_devcast_info();
 }
 
+static devtype_info *
+build_composite_devtype_info(Oid type_oid, Form_pg_type type_form)
+{
+	Oid				type_relid = type_form->typrelid;
+	int				j, nfields = get_relnatts(type_relid);
+	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * nfields);
+	devtype_info   *entry;
+	cl_uint			extra_flags = DEVKERNEL_NEEDS_PGCOMPOSITE;
+	size_t			extra_sz;
+
+	extra_sz = (MAXALIGN(sizeof(Datum) * nfields) +
+				MAXALIGN(sizeof(bool) * nfields));
+	for (j=0; j < nfields; j++)
+	{
+		HeapTuple		tup;
+		Oid				atttypid;
+		devtype_info   *dtype;
+
+		tup = SearchSysCache2(ATTNUM,
+							  ObjectIdGetDatum(type_relid),
+							  Int16GetDatum(j+1));
+		if (!HeapTupleIsValid(tup))
+			return NULL;
+		atttypid = ((Form_pg_attribute) GETSTRUCT(tup))->atttypid;
+		ReleaseSysCache(tup);
+
+		dtype = pgstrom_devtype_lookup(atttypid);
+		if (!dtype)
+			return NULL;
+		subtypes[j] = dtype;
+
+		extra_flags |= dtype->type_flags;
+		extra_sz    += MAXALIGN(dtype->extra_sz);
+	}
+	entry = MemoryContextAllocZero(devinfo_memcxt,
+								   offsetof(devtype_info,
+											comp_subtypes[nfields]));
+	entry->type_oid = type_oid;
+	entry->type_flags = extra_flags;
+	entry->type_length = type_form->typlen;
+	entry->type_align = typealign_get_width(type_form->typalign);
+	entry->type_byval = type_form->typbyval;
+	entry->type_is_negative = false;
+	entry->type_name = "composite";
+	entry->type_base = "varlena *";
+	entry->extra_sz = extra_sz;
+
+	entry->comp_nfields = nfields;
+	memcpy(entry->comp_subtypes, subtypes,
+		   sizeof(devtype_info *) * nfields);
+	return entry;
+}
+
 devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
 {
+	devtype_info   *dtype;
 	ListCell	   *cell;
 	int				hindex;
+	HeapTuple		tup;
+	Form_pg_type	typeForm;
 
 	if (!devtype_info_is_built)
 		build_devtype_info();
@@ -354,15 +418,37 @@ pgstrom_devtype_lookup(Oid type_oid)
 		return NULL;
 
 	hindex = hash_uint32((uint32) type_oid) % lengthof(devtype_info_slot);
-
 	foreach (cell, devtype_info_slot[hindex])
 	{
-		devtype_info   *entry = lfirst(cell);
-
-		if (entry->type_oid == type_oid)
-			return entry;
+		dtype = lfirst(cell);
+		if (dtype->type_oid == type_oid)
+			return dtype;
 	}
-	return NULL;
+
+	/*
+	 * Try to build devtype_info for composite type which contains
+	 * all device supported types.
+	 */
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		return NULL;
+	typeForm = (Form_pg_type) GETSTRUCT(tup);
+	if (typeForm->typtype == TYPTYPE_COMPOSITE &&
+		OidIsValid(typeForm->typrelid))
+	{
+		dtype = build_composite_devtype_info(type_oid, typeForm);
+		if (dtype)
+			devtype_info_slot[hindex] = lappend_cxt(devinfo_memcxt,
+													devtype_info_slot[hindex],
+													dtype);
+	}
+	else
+	{
+		dtype = NULL;
+	}
+	ReleaseSysCache(tup);
+
+	return dtype;
 }
 
 devtype_info *

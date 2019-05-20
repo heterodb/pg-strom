@@ -4184,10 +4184,7 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						tle->resno - 1,
 						tle->resno - 1);
-					if (dtype->extra_sz > 0)
-						context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-					if (dtype->type_length < 0)
-						context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				}
 				/* NULL-initialization for LEFT OUTER JOIN */
 				appendStringInfo(
@@ -4234,6 +4231,7 @@ gpujoin_codegen_projection(StringInfo source,
 						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n",
 						dtype->type_name, kds_label, i-1,
 						dtype->type_name);
+					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				}
 				else
 				{
@@ -4356,8 +4354,7 @@ gpujoin_codegen_projection(StringInfo source,
 			tle->resno - 1,
 			tle->resno - 1,
 			tle->resno - 1);
-		if (dtype->extra_sz > 0)
-			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 	}
 	/* add parameter declarations */
 	pgstrom_codegen_param_declarations(&decl, context);
