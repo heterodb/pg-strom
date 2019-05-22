@@ -282,12 +282,16 @@ gpupreagg_final_data_move(kern_context *kcxt,
 				case DATUM_CLASS__VARLENA:
 					len = pg_varlena_datum_length(kcxt, src_values[i]);
 					break;
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 				case DATUM_CLASS__ARRAY:
 					len = pg_array_datum_length(kcxt, src_values[i]);
 					break;
+#endif
+#ifdef PGSTROM_KERNEL_HAS_PGCOMPOSITE
 				case DATUM_CLASS__COMPOSITE:
 					len = pg_composite_datum_length(kcxt, src_values[i]);
 					break;
+#endif
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					len = VARSIZE_ANY(DatumGetPointer(src_values[i]));
@@ -351,12 +355,16 @@ gpupreagg_final_data_move(kern_context *kcxt,
 				case DATUM_CLASS__VARLENA:
 					len = pg_varlena_datum_write(kcxt, curr, datum);
                     break;
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
                 case DATUM_CLASS__ARRAY:
 					len = pg_array_datum_write(kcxt, curr, datum);
 					break;
+#endif
+#ifdef PGSTROM_KERNEL_HAS_PGCOMPOSITE
 				case DATUM_CLASS__COMPOSITE:
 					len = pg_composite_datum_write(kcxt, curr, datum);
 					break;
+#endif
 				default:
 					len = VARSIZE_ANY(datum);
 					memcpy(curr, DatumGetPointer(datum), len);

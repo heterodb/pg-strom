@@ -1265,6 +1265,7 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	program_cache_entry *entry = NULL;
 	CUmodule	cuda_module;
 	CUresult	rc;
+	size_t		stack_sz, lvalue;
 	char	   *ptx_image;
 	size_t		ptx_length	__attribute__((unused));
 	pg_crc32	ptx_crc		__attribute__((unused));
@@ -1289,6 +1290,15 @@ retry_checks:
 		ptx_image = entry->ptx_image;
 		ptx_length = entry->ptx_length;
 		ptx_crc = entry->ptx_crc;
+		/*
+		 * NOTE: Stack size of GPU thread is configured to 1024 in default,
+		 * however, not a small varlena buffer needs more stack configuration.
+		 * In addition, build with debug option also requires more stack than
+		 * optimized kernel.
+		 */
+		stack_sz = 1024 + MAXALIGN(entry->varlena_bufsz);
+		if ((entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
+			stack_sz += 4096;
 		SpinLockRelease(&pgcache_head->lock);
 	}
 	else if (entry->build_chain.prev || entry->build_chain.next)
@@ -1345,6 +1355,16 @@ retry_checks:
 	put_cuda_program_entry(entry);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleLoadData: %s", errorText(rc));
+
+	rc = cuCtxGetLimit(&lvalue, CU_LIMIT_STACK_SIZE);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuCtxGetLimit: %s", errorText(rc));
+	if (stack_sz > lvalue)
+	{
+		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuCtxSetLimit: %s", errorText(rc));
+	}
 	return cuda_module;
 }
 
