@@ -3130,7 +3130,7 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 						__appendStringInfo(&context->str, " || ");
 				}
 				__appendStringInfo(&context->str, "EVAL(");
-				codegen_expression_walker(context, lfirst(lc), NULL);
+				codegen_expression_walker(context, node, NULL);
 				__appendStringInfoChar(&context->str, ')');
 			}
 			__appendStringInfoChar(&context->str, ')');
@@ -3816,7 +3816,6 @@ devcast_text2numeric_callback(codegen_context *context,
 							  CoerceViaIO *node,
 							  cl_int *p_varlena_sz)
 {
-	devtype_info   *stype = dcast->src_type;
 	devtype_info   *dtype = dcast->dst_type;
 	Expr		   *arg = node->arg;
 	Oid				func_oid = InvalidOid;
@@ -3825,8 +3824,6 @@ devcast_text2numeric_callback(codegen_context *context,
 	char			dfunc_name[100];
 	ListCell	   *lc;
 
-	Assert(stype->type_oid == exprType((Node *)arg) &&
-		   dtype->type_oid == node->resulttype);
 	/* check special case if jsonb key reference */
 	if (IsA(arg, FuncExpr))
 	{
