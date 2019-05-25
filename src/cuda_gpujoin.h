@@ -1101,7 +1101,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	assert(kds_hash->format == KDS_FORMAT_HASH);
 	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
 
-	if (__syncthreads_or(l_state[depth] != UINT_MAX) == 0)
+	if (__syncthreads_count(l_state[depth] != UINT_MAX) == 0)
 	{
 		/*
 		 * OK, all the threads reached to the end of hash-slot chain
@@ -1234,8 +1234,22 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	count = __syncthreads_count(khitem != NULL);
 	if (get_local_id() == 0)
 		wip_count[depth] = count;
-	/* enough room exists on this depth? */
-	if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+	/*
+	 * (2019/05/25) We saw a strange behavior on Tesla T4 (CUDA 10.1 with
+	 * driver 418.67), but never seen at Pascal/Volta devices.
+	 * Even though "write_pos[depth]" is updated by the leader thread above,
+	 * then __syncthreads_count() shall synchronize all the local threads,
+	 * a part of threads read different value from this variable.
+	 * I doubt compiler may have some optimization problem here, therefore,
+	 * the code below avoid to reference "write_pos[depth]" directly.
+	 * It loads this value to local variable once, then injects a barrier
+	 * synchronization explicitly.
+	 *
+	 * We should check whether the future version of CUDA can fix the problem.
+	 */
+	wr_index = write_pos[depth];
+	__syncthreads();
+	if (wr_index + get_local_size() <= kgjoin->pstack_nrooms)
 		return depth;
 	return depth+1;
 }
