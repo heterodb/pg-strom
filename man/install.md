@@ -22,8 +22,8 @@ This chapter introduces the steps to install PG-Strom.
 - **PostgreSQL**
     - PG-Stromの実行にはPostgreSQLバージョン9.6以降が必要です。これは、Custom ScanインターフェースがCPU並列実行やGROUP BYに対応するため刷新され、拡張モジュールが提供するカスタム実行計画を自然な形で統合できるようになったためです。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン9.1以降が必要です。
-    - PG-Stromが提供する半精度浮動小数点（`float2`）型は、内部的にCUDA Cのhalf_t型を使用しており、古いCUDA Toolkitではこれをビルドできないためです。
+    - PG-Stromの実行にはCUDA Toolkit バージョン9.2以降が必要です。
+    - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 }
 @en{
 - **Server Hardware**
@@ -38,8 +38,8 @@ This chapter introduces the steps to install PG-Strom.
 - **PostgreSQL**
     - PG-Strom requires PostgreSQL version 9.6 or later. PostgreSQL v9.6 renew the custom-scan interface for CPU-parallel execution or `GROUP BY` planning, thus, it allows cooperation of custom-plans provides by extension modules.
 - **CUDA Toolkit**
-    - PG-Strom requires CUDA Toolkit version 9.1 or later.
-    - PG-Strom provides half-precision floating point type (`float2`), and it internally use `half_t` type of CUDA C, so we cannot build it with older CUDA Toolkit.
+    - PG-Strom requires CUDA Toolkit version 9.2 or later.
+    - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
 
 @ja:# OSのインストール

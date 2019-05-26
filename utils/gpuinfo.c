@@ -204,57 +204,41 @@ static struct
 };
 #undef DEV_ATTR
 
+static inline int HEX2DIG(char c)
+{
+	if (isdigit(c))
+		return c - '0';
+	else if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	else if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
 static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 {
 	CUresult	rc;
-	int			domain;
-	int			bus_id;
-	int			dev_id;
-	int			func_id;
-	int			is_multi;
-	int			i;
+	CUuuid		dev_uuid;
+	int			i, j=0;
 
-	rc = cuDeviceGetAttribute(&domain,
-							  CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
-							  device);
+	rc = cuDeviceGetUuid(&dev_uuid, device);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetAttribute");
-
-	rc = cuDeviceGetAttribute(&bus_id,
-							  CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetAttribute");
-
-	rc = cuDeviceGetAttribute(&dev_id,
-							  CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetAttribute");
-
-	rc = cuDeviceGetAttribute(&is_multi,
-							  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetAttribute");
-
-	if (!is_multi)
-		func_id = 0;
-	else
-	{
-		rc = cuDeviceGetAttribute(&func_id,
-								  CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD_GROUP_ID,
-								  device);
-		if (rc != CUDA_SUCCESS)
-			cuda_elog(rc, "failed on cuDeviceGetAttribute");
-	}
+		cuda_elog(rc, "failed on cuDeviceGetUuid");
 
 	for (i=0; i < li->nr_gpus; i++)
 	{
-		if (li->u.gpus[i].domain == domain &&
-			li->u.gpus[i].bus_id == bus_id &&
-			li->u.gpus[i].dev_id == dev_id &&
-			li->u.gpus[i].func_id == func_id)
+		const char *c;
+		char		uuid[16];
+
+		for (c = li->u.gpus[i].uuid, j=0; *c != '\0' && j < 16; c++)
+		{
+			if (isxdigit(c[0]) && isxdigit(c[1]))
+			{
+				uuid[j++] = (HEX2DIG(c[0]) << 4) | (HEX2DIG(c[1]));
+				c++;
+			}
+		}
+		if (j == 16 && memcmp(dev_uuid.bytes, uuid, 16) == 0)
 			return 1;
 	}
 	return 0;
@@ -263,8 +247,10 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 static void output_device(CUdevice device, int dev_id)
 {
 	char		dev_name[1024];
+	CUuuid		dev_uuid;
 	size_t		dev_memsz;
 	int			dev_prop;
+	char		uuid[80];
 	int			i;
 	CUresult	rc;
 
@@ -282,6 +268,33 @@ static void output_device(CUdevice device, int dev_id)
 		printf("Device Name: %s\n", dev_name);
 	else
 		printf("DEVICE%d:DEVICE_NAME=%s\n", dev_id, dev_name);
+
+	/* device uuid */
+	rc = cuDeviceGetUuid(&dev_uuid, device);
+	if (rc != CUDA_SUCCESS)
+		cuda_elog(rc, "failed on cuDeviceGetUuid");
+	snprintf(uuid, sizeof(uuid),
+			 "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			 (unsigned char)dev_uuid.bytes[0],
+			 (unsigned char)dev_uuid.bytes[1],
+			 (unsigned char)dev_uuid.bytes[2],
+			 (unsigned char)dev_uuid.bytes[3],
+			 (unsigned char)dev_uuid.bytes[4],
+			 (unsigned char)dev_uuid.bytes[5],
+			 (unsigned char)dev_uuid.bytes[6],
+			 (unsigned char)dev_uuid.bytes[7],
+			 (unsigned char)dev_uuid.bytes[8],
+			 (unsigned char)dev_uuid.bytes[9],
+			 (unsigned char)dev_uuid.bytes[10],
+			 (unsigned char)dev_uuid.bytes[11],
+			 (unsigned char)dev_uuid.bytes[12],
+			 (unsigned char)dev_uuid.bytes[13],
+			 (unsigned char)dev_uuid.bytes[14],
+			 (unsigned char)dev_uuid.bytes[15]);
+	if (!machine_format)
+		printf("Device UUID: %s\n", uuid);
+	else
+		printf("DEVICE%d:DEVICE_UUID=%s\n", dev_id, uuid);
 
 	/* device RAM size */
 	rc = cuDeviceTotalMem(&dev_memsz, device);

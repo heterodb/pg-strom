@@ -607,6 +607,7 @@ typedef struct DevAttributes
 	cl_int		NUMA_NODE_ID;
 	cl_int		DEV_ID;
 	char		DEV_NAME[256];
+	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
 	cl_int		CORES_PER_MPU;
 #define DEV_ATTR(LABEL,a,b,c)		\

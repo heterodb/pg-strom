@@ -155,6 +155,11 @@ pgstrom_collect_gpu_device(void)
 				strncpy(devAttrs[dindex].DEV_NAME, tok_val,
 						sizeof(devAttrs[dindex].DEV_NAME));
 			}
+			else if (strcmp(tok_attr, "DEVICE_UUID") == 0)
+			{
+				strncpy(devAttrs[dindex].DEV_UUID, tok_val,
+						sizeof(devAttrs[dindex].DEV_UUID));
+			}
 			else if (strcmp(tok_attr, "GLOBAL_MEMORY_SIZE") == 0)
 				devAttrs[dindex].DEV_TOTAL_MEMSZ = atol(tok_val);
 #include "device_attrs.h"
@@ -560,8 +565,8 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	fncxt = SRF_PERCALL_SETUP();
 
-	dindex = fncxt->call_cntr / (lengthof(DevAttrCatalog) + 2);
-	aindex = fncxt->call_cntr % (lengthof(DevAttrCatalog) + 2);
+	dindex = fncxt->call_cntr / (lengthof(DevAttrCatalog) + 3);
+	aindex = fncxt->call_cntr % (lengthof(DevAttrCatalog) + 3);
 
 	if (dindex >= numDevAttrs)
 		SRF_RETURN_DONE(fncxt);
@@ -574,12 +579,17 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	else if (aindex == 1)
 	{
+		att_name = "GPU Device UUID";
+		att_value = dattrs->DEV_UUID;
+	}
+	else if (aindex == 2)
+	{
 		att_name = "GPU Total RAM Size";
 		att_value = format_bytesz(dattrs->DEV_TOTAL_MEMSZ);
 	}
 	else
 	{
-		int		i = aindex - 2;
+		int		i = aindex - 3;
 		int		value = *((int *)((char *)dattrs +
 								  DevAttrCatalog[i].attr_offset));
 

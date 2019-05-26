@@ -21,8 +21,8 @@
 /* ---- Check minimum required CUDA version ---- */
 #ifdef __CUDACC_RTC__
 #if __CUDACC_VER_MAJOR__ < 9 || \
-   (__CUDACC_VER_MAJOR__ == 9 && __CUDACC_VER_MINOR__ < 1)
-#error PG-Strom requires CUDA 9.1 or later. Use newer version.
+   (__CUDACC_VER_MAJOR__ == 9 && __CUDACC_VER_MINOR__ < 2)
+#error PG-Strom requires CUDA 9.2 or later. Use newer version.
 #endif
 #endif /* __CUDACC_RTC__ */
 
