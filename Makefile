@@ -47,6 +47,12 @@ __CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
                  arrow_defs.h
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
+__GPU_HEADERS = cuda_common.h arrow_defs.h
+GPU_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
+__GPU_LIBS = libgpucore.a
+GPU_LIBS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_LIBS))
+GPU_DEBUG_LIBS = $(GPU_LIBS:.a=.ag)
+
 #
 # Source file of utilities
 #
@@ -167,12 +173,21 @@ ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 endif
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
+PGSTROM_FLAGS += -DPGSERV_INCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lcuda
+
+# also, flags to build GPU libraries
+NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
+NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
+              --fatbin --relocatable-device-code=true \
+              --gpu-architecture=compute_60 \
+              --gpu-code=sm_60,sm_61,sm_70,sm_72
+NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 
 #
 # Definition of PG-Strom Extension
@@ -181,6 +196,7 @@ MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(CUDA_SOURCES) $(PGSTROM_SQL)
+DATA_built = $(GPU_LIBS) $(GPU_DEBUG_LIBS)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -216,6 +232,16 @@ ifneq ($(STROM_BUILD_ROOT), .)
 pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/, pg_strom.control)
 	cp -f $< $@
 endif
+
+#
+# GPU Libraries
+#
+%.a: %.cu $(GPU_HEADERS)
+	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+%.ag: %.cu $(GPU_HEADERS)
+	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
+
 
 # PL/CUDA Host Template
 $(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)

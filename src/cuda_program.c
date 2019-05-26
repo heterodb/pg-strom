@@ -348,14 +348,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include <cuda_device_runtime_api.h>\n"
-					"\n"
-					"#define BLCKSZ %u\n"
-					"#define MAXIMUM_ALIGNOF %u\n"
-					"#define NAMEDATALEN %u\n"
 					"#define KERN_CONTEXT_VARLENA_BUFSZ %u\n",
-					BLCKSZ,
-					MAXIMUM_ALIGNOF,
-					NAMEDATALEN,
 					Max(varlena_bufsz, 1));
 	/* Enables Debug build? */
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
@@ -472,14 +465,13 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	return source;
 }
 
-#ifdef NOT_USED
 /*
  * link_cuda_libraries - links CUDA libraries with the supplied PTX binary
  */
-static void
-link_cuda_libraries(char *ptx_image, size_t ptx_length,
-					cl_uint extra_flags,
-					void **p_bin_image, size_t *p_bin_length)
+static char *
+link_cuda_libraries(char *ptx_image,
+					size_t ptx_length,
+					cl_uint extra_flags)
 {
 	CUlinkState		lstate;
 	CUresult		rc;
@@ -489,10 +481,8 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	void		   *temp;
 	void		   *bin_image;
 	size_t			bin_length;
+	const char	   *lib_suffix = "a";
 	char			pathname[MAXPGPATH];
-
-	/* at least one library has to be specified */
-	Assert((extra_flags & DEVKERNEL_NEEDS_LINKAGE) != 0);
 
 	/*
 	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
@@ -529,6 +519,8 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 		jit_option_values[jit_index] = (void *)0;
 		jit_index++;
 #endif
+		/* link libraries with debug options */
+		lib_suffix = "ag";
 	}
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
@@ -544,17 +536,15 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLinkAddData: %s", errorText(rc));
 
-		/* libcudart.a, if any */
-		if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
-		{
-			snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
-					 CUDA_LIBRARY_PATH);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
-							   0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
+
+		snprintf(pathname, sizeof(pathname),
+				 PGSHAREDIR "/extension/libgpucore.%s", lib_suffix);
+		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+						   pathname, 0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuLinkAddFile(\"%s\"): %s",
+				   pathname, errorText(rc));
+		//XXX - add other libraries here
 
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);
@@ -569,9 +559,6 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 		if (!bin_image)
 			werror("out of memory");
 		memcpy(bin_image, temp, bin_length);
-
-		*p_bin_image = bin_image;
-		*p_bin_length = bin_length;
 	}
 	STROM_CATCH();
 	{
@@ -585,8 +572,10 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	rc = cuLinkDestroy(lstate);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLinkDestroy: %s", errorText(rc));
+
+	return bin_image;
 }
-#endif
+
 
 /*
  * writeout_temporary_file
@@ -768,6 +757,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		 */
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/extension";
+		options[opt_index++] = "-I " PGSERV_INCLUDEDIR;
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
 				 "--gpu-architecture=compute_%u", src_entry->target_cc);
 		options[opt_index++] = gpu_arch_option;
@@ -777,11 +767,8 @@ build_cuda_program(program_cache_entry *src_entry)
 			options[opt_index++] = "--generate-line-info";
 		}
 		options[opt_index++] = "--use_fast_math";
-#ifdef NOT_USED
 		/* library linkage needs relocatable PTX */
-		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
-			options[opt_index++] = "--relocatable-device-code=true";
-#endif
+		options[opt_index++] = "--device-c";
 		/* enables c++11 template features */
 		options[opt_index++] = "--std=c++11";
 
@@ -1266,9 +1253,7 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	CUmodule	cuda_module;
 	CUresult	rc;
 	size_t		stack_sz, lvalue;
-	char	   *ptx_image;
-	size_t		ptx_length	__attribute__((unused));
-	pg_crc32	ptx_crc		__attribute__((unused));
+	char	   *bin_image;
 
 	SpinLockAcquire(&pgcache_head->lock);
 retry_checks:
@@ -1287,9 +1272,8 @@ retry_checks:
 	else if (entry->ptx_image)
 	{
 		get_cuda_program_entry_nolock(entry);
-		ptx_image = entry->ptx_image;
-		ptx_length = entry->ptx_length;
-		ptx_crc = entry->ptx_crc;
+		SpinLockRelease(&pgcache_head->lock);
+
 		/*
 		 * NOTE: Stack size of GPU thread is configured to 1024 in default,
 		 * however, not a small varlena buffer needs more stack configuration.
@@ -1299,7 +1283,31 @@ retry_checks:
 		stack_sz = 1024 + MAXALIGN(entry->varlena_bufsz);
 		if ((entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 			stack_sz += 4096;
-		SpinLockRelease(&pgcache_head->lock);
+#ifdef USE_ASSERT_CHECKING
+		{
+			pg_crc32	__ptx_crc;
+
+			INIT_LEGACY_CRC32(__ptx_crc);
+			COMP_LEGACY_CRC32(__ptx_crc,
+							  entry->ptx_image,
+							  entry->ptx_length);
+			FIN_LEGACY_CRC32(__ptx_crc);
+			Assert(__ptx_crc == entry->ptx_crc);
+		}
+#endif /* USE_ASSERT_CHECKING */
+		STROM_TRY();
+		{
+			bin_image = link_cuda_libraries(entry->ptx_image,
+											entry->ptx_length,
+											entry->extra_flags);
+		}
+		STROM_CATCH();
+		{
+			put_cuda_program_entry(entry);
+			STROM_RE_THROW();
+		}
+		STROM_END_TRY();
+		put_cuda_program_entry(entry);
 	}
 	else if (entry->build_chain.prev || entry->build_chain.next)
 	{
@@ -1341,18 +1349,7 @@ retry_checks:
 		SpinLockAcquire(&pgcache_head->lock);
 		goto retry_checks;
 	}
-	rc = cuModuleLoadData(&cuda_module, ptx_image);
-#ifdef USE_ASSERT_CHECKING
-	{
-		pg_crc32	__ptx_crc;
-
-		INIT_LEGACY_CRC32(__ptx_crc);
-		COMP_LEGACY_CRC32(__ptx_crc, ptx_image, ptx_length);
-		FIN_LEGACY_CRC32(__ptx_crc);
-		Assert(__ptx_crc == ptx_crc);
-	}
-#endif /* USE_ASSERT_CHECKING */
-	put_cuda_program_entry(entry);
+	rc = cuModuleLoadData(&cuda_module, bin_image);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleLoadData: %s", errorText(rc));
 
