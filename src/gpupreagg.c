@@ -19,7 +19,6 @@
 #include "cuda_gpuscan.h"
 #include "cuda_gpujoin.h"
 #include "cuda_gpupreagg.h"
-#include "cuda_anytype.h"
 
 static create_upper_paths_hook_type create_upper_paths_next;
 static CustomPathMethods	gpupreagg_path_methods;
@@ -3101,6 +3100,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
 	TupleDesc		outer_desc = NULL;
+	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
 	int				i, k, nattrs;
 
@@ -3113,8 +3113,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 
 	appendStringInfoString(
 		&decl,
-		"  void        *addr    __attribute__((unused));\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n");
+		"  void        *addr    __attribute__((unused));\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
 	if (outer_scanrelid > 0)
@@ -3146,7 +3145,6 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 
 		appendStringInfoString(
 			&tbody,
-			"\n"
 			"  /* extract the given htup and load variables */\n"
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
 		for (i=1; i <= nattrs; i++)
@@ -3271,7 +3269,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 							i, i-1);
 					}
 				}
-				context->varlena_bufsz += MAXALIGN(sizeof(pg_varlena_t));
+				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+				type_oid_list = list_append_unique_oid(type_oid_list,
+													   dtype->type_oid);
 				appendStringInfoString(&tbody, temp.data);
                 resetStringInfo(&temp);
 			}
@@ -3349,14 +3349,17 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				dtype->type_name,
 				tle->resno-1,
 				null_const_value);
-		context->varlena_bufsz += MAXALIGN(sizeof(pg_array_t));
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
 
-	/* const/params */
+	/* const/params and temporary variable */
 	pgstrom_codegen_param_declarations(&decl, context);
+	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 
 	/* writeout kernel functions */
 	appendStringInfo(
@@ -3423,20 +3426,17 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 							List *tlist_dev)
 {
 	StringInfoData	decl;
+	StringInfoData	body;
+	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
 
 	initStringInfo(&decl);
+	initStringInfo(&body);
 	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
-		"STATIC_FUNCTION(cl_uint)\n"
-		"gpupreagg_hashvalue(kern_context *kcxt,\n"
-		"                    cl_char *slot_dclass,\n"
-		"                    Datum   *slot_values)\n"
-		"{\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n"
-		"  cl_uint      hash = 0xffffffffU;\n\n");
+		"  cl_uint      hash = 0xffffffffU;\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -3454,7 +3454,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 				 format_type_be(type_oid));
 		/* load variable */
 		appendStringInfo(
-			&decl,
+			&body,
 			"  pg_datum_ref_slot(kcxt,temp.%s_v,\n"
 			"                    slot_dclass[%d],\n"
 			"                    slot_values[%d]);\n",
@@ -3463,21 +3463,29 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 			tle->resno - 1);
 		/* update hash value (by crc32) */
 		appendStringInfo(
-			&decl,
+			&body,
 			"  hash ^= pg_comp_hash(kcxt, temp.%s_v);\n",
 			dtype->type_name);
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 	}
+	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
+
 	/* no constants should appear */
 	Assert(bms_is_empty(context->param_refs));
-	appendStringInfoString(
-		&decl,
-		"\n"
+	appendStringInfo(
+		kern,
+		"STATIC_FUNCTION(cl_uint)\n"
+		"gpupreagg_hashvalue(kern_context *kcxt,\n"
+		"                    cl_char *slot_dclass,\n"
+		"                    Datum   *slot_values)\n"
+		"{\n"
+		"%s\n%s"
 		"  return hash;\n"
-		"}\n\n");
-
-	appendStringInfoString(kern, decl.data);
+		"}\n\n", decl.data, body.data);
 
 	pfree(decl.data);
+	pfree(body.data);
 }
 
 /*
@@ -3496,6 +3504,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 {
 	StringInfoData	decl;
 	StringInfoData	body;
+	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
 
 	initStringInfo(&decl);
@@ -3503,19 +3512,11 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 	context->param_refs = NULL;
 
 	appendStringInfoString(
-		kern,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpupreagg_keymatch(kern_context *kcxt,\n"
-		"                   kern_data_store *x_kds, size_t x_index,\n"
-		"                   kern_data_store *y_kds, size_t y_index)\n"
-		"{\n"
-		"  pg_anytype_t x_temp  __attribute__((unused));\n"
-		"  pg_anytype_t y_temp  __attribute__((unused));\n"
+		&decl,
 		"  cl_char     *x_dclass = KERN_DATA_STORE_DCLASS(x_kds, x_index);\n"
 		"  cl_char     *y_dclass = KERN_DATA_STORE_DCLASS(y_kds, y_index);\n"
 		"  Datum       *x_values = KERN_DATA_STORE_VALUES(x_kds, x_index);\n"
-		"  Datum       *y_values = KERN_DATA_STORE_VALUES(y_kds, y_index);\n"
-		"\n");
+		"  Datum       *y_values = KERN_DATA_STORE_VALUES(y_kds, y_index);\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -3574,7 +3575,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		 * compatible types, so we don't inject PG_RELABEL operator here.
 		 */
 		appendStringInfo(
-			kern,
+			&body,
 			"  pg_datum_ref_slot(kcxt, x_temp.%s_v,\n"
 			"                    x_dclass[%d], y_values[%d]);\n"
 			"  pg_datum_ref_slot(kcxt, y_temp.%s_v,\n"
@@ -3599,18 +3600,31 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 		if (cast_darg1)
 			pfree(cast_darg1);
 		if (cast_darg2)
 			pfree(cast_darg2);
 	}
+	/* declaration of temporary variable */
+	pgstrom_union_type_declarations(&decl, "x_temp", type_oid_list);
+	pgstrom_union_type_declarations(&decl, "y_temp", type_oid_list);
 	/* no constant values should be referenced */
 	Assert(bms_is_empty(context->param_refs));
 
-	appendStringInfoString(
+	appendStringInfo(
 		kern,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpupreagg_keymatch(kern_context *kcxt,\n"
+		"                   kern_data_store *x_kds, size_t x_index,\n"
+		"                   kern_data_store *y_kds, size_t y_index)\n"
+		"{\n"
+		"%s\n%s"
 		"  return true;\n"
-		"}\n\n");
+		"}\n\n", decl.data, body.data);
+	pfree(decl.data);
+	pfree(body.data);
 }
 
 /*
