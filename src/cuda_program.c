@@ -443,10 +443,10 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/* Generated from SQL */
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
 	/* GpuScan */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#define  __CUDA_GPUSCAN_BODY__ 1\n"
-						"#include \"cuda_gpuscan.h\"\n");
+//	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY)
+//		ofs += snprintf(source + ofs, len - ofs,
+//						"#define  __CUDA_GPUSCAN_BODY__ 1\n"
+//						"#include \"cuda_gpuscan.h\"\n");
 	/* GpuJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -545,6 +545,17 @@ link_cuda_libraries(char *ptx_image,
 			werror("failed on cuLinkAddFile(\"%s\"): %s",
 				   pathname, errorText(rc));
 		//XXX - add other libraries here
+
+		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY) != 0)
+		{
+			snprintf(pathname, sizeof(pathname),
+					 PGSHAREDIR "/extension/libgpuscan.%s", lib_suffix);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+							   pathname, 0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
 
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);

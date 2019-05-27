@@ -302,6 +302,8 @@ typedef uintptr_t		hostptr_t;
 #define STATIC_FUNCTION(RET_TYPE)				\
 	__host__ __device__							\
 	static RET_TYPE __attribute__ ((unused))
+#define DEVICE_FUNCTION(RET_TYPE)				\
+	__device__ RET_TYPE
 #define DEVICE_ONLY_INLINE(RET_TYPE)			\
 	__device__ __forceinline__					\
 	static RET_TYPE __attribute__ ((unused))
@@ -390,14 +392,26 @@ typedef struct
 	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
 } kern_context;
 
-#define DECL_KERNEL_CONTEXT(NAME,VARLENA_BUFSZ)							\
-	union {																\
-		kern_context NAME;												\
-		char __kern_context_dummy__[offsetof(kern_context, vlbuf) +		\
-									MAXALIGN(VARLENA_BUFSZ)];			\
-	}
+#define DECL_KERNEL_CONTEXT(NAME)								\
+	union {														\
+		kern_context kcxt;										\
+		char __dummy__[offsetof(kern_context, vlbuf) +			\
+					   MAXALIGN(KERN_CONTEXT_VARLENA_BUFSZ)];	\
+	} NAME
 
-#define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)				\
+#define INIT_KERNEL_CONTEXT(kcxt,__kparams)							\
+	do {															\
+		(kcxt)->e.errcode = StromError_Success;						\
+		(kcxt)->e.kernel = -1; /* deprecated */						\
+		(kcxt)->e.lineno = 0;										\
+		(kcxt)->e.filename[0] = '\0';								\
+		(kcxt)->kparams = (__kparams);								\
+		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
+		(kcxt)->vlpos = (kcxt)->vlbuf;								\
+		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ; \
+	} while(0)
+
+#define __INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)				\
 	do {															\
 		(kcxt)->e.errcode = StromError_Success;						\
 		(kcxt)->e.kernel = StromKernel_##kfunction;					\
