@@ -577,7 +577,8 @@ gstore_codegen_keycomp(StringInfo kern,
 					   GpuStoreFdwInfo *gsf_info)
 {
 	StringInfoData	body;
-	ListCell	   *lc1, *lc2, *lc3;
+	List	   *type_oid_list = NIL;
+	ListCell   *lc1, *lc2, *lc3;
 
 	initStringInfo(&body);
 	forthree (lc1, gsf_info->sort_keys,
@@ -662,7 +663,8 @@ gstore_codegen_keycomp(StringInfo kern,
 						 format_type_be(darg2->type_oid));
 				cast_darg2 = psprintf("to_%s", darg2->type_name);
 			}
-
+			type_oid_list = list_append_unique_oid(type_oid_list,
+												   dtype->type_oid);
 			appendStringInfo(
 				&body,
 				"  pg_datum_ref(kcxt, xval.%s_v, xaddr);\n"
@@ -682,9 +684,8 @@ gstore_codegen_keycomp(StringInfo kern,
 				dtype->type_name,
 				dtype->type_name, dtype->type_name,
 				dfunc->func_devname,
-				cast_darg1 ? cast_darg1 : "",
-				cast_darg2 ? cast_darg2 : "",
-				dtype->type_name, dtype->type_name,
+				cast_darg1 ? cast_darg1 : "", dtype->type_name,
+				cast_darg2 ? cast_darg2 : "", dtype->type_name,
 				order == BTLessStrategyNumber ? "" : "-",
 				dtype->type_name, dtype->type_name,
 				nulls_first ? -1 :  1,
@@ -697,7 +698,7 @@ gstore_codegen_keycomp(StringInfo kern,
 		}
 	}
 
-	appendStringInfo(
+	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(cl_int)\n"
 		"gpusort_keycomp(kern_context *kcxt,\n"
@@ -707,9 +708,11 @@ gstore_codegen_keycomp(StringInfo kern,
 		"{\n"
 		"  void *xaddr       __attribute__((unused));\n"
 		"  void *yaddr       __attribute__((unused));\n"
-		"  pg_anytype_t xval __attribute__((unused));\n"
-		"  pg_anytype_t yval __attribute__((unused));\n"
-		"  pg_int4_t comp    __attribute__((unused));\n"
+		"  pg_int4_t comp    __attribute__((unused));\n");
+	pgstrom_union_type_declarations(kern, "xval", type_oid_list);
+	pgstrom_union_type_declarations(kern, "yval", type_oid_list);
+	appendStringInfo(
+		kern,
 		"\n"
 		"  assert(kds_src->format == KDS_FORMAT_COLUMN);\n"
 		"  assert(x_index < kds_src->nitems &&\n"
