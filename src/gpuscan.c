@@ -619,6 +619,7 @@ codegen_gpuscan_projection(StringInfo kern,
 	Index			scanrelid = baserel->relid;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	List		   *tlist_dev = NIL;
+	List		   *type_oid_list = NIL;
 	AttrNumber	   *varremaps;
 	Bitmapset	   *varattnos;
 	ListCell	   *lc;
@@ -673,18 +674,6 @@ codegen_gpuscan_projection(StringInfo kern,
 	 */
 	if (!tlist_dev)
 	{
-		appendStringInfoString(
-			kern,
-			"#define GPUSCAN_HAS_DEVICE_PROJECTION  false\n"
-			"STATIC_FUNCTION(void)\n"
-			"gpuscan_projection_arrow(kern_context *kcxt,\n"
-			"                         kern_data_store *kds_src,\n"
-			"                         size_t   index,\n"
-			"                         cl_char *tup_dclass,\n"
-			"                         Datum   *tup_values)\n"
-			"{\n"
-			"  void        *addr __attribute__((unused));\n"
-			"  pg_anytype_t temp __attribute__((unused));\n");
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
@@ -693,12 +682,14 @@ codegen_gpuscan_projection(StringInfo kern,
 			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 			if (!bms_is_member(k, outer_refs) || !dtype)
 				appendStringInfo(
-					kern,
+					&cbody,
 					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
 			else
 			{
+				type_oid_list = list_append_unique_oid(type_oid_list,
+													   dtype->type_oid);
 				appendStringInfo(
-					kern,
+					&cbody,
 					"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n"
 					"  if (temp.%s_v.isnull)\n"
 					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
@@ -715,9 +706,32 @@ codegen_gpuscan_projection(StringInfo kern,
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 			}
 		}
+
 		appendStringInfoString(
 			kern,
-			"}\n");
+			"#define GPUSCAN_HAS_DEVICE_PROJECTION  false\n"
+			"DEVICE_FUNCTION(void)\n"
+			"gpuscan_projection_tuple(kern_context *kcxt,\n"
+			"                         kern_data_store *kds_src,\n"
+			"                         HeapTupleHeaderData *htup,\n"
+			"                         ItemPointerData *t_self,\n"
+			"                         cl_char *tup_dclass,\n"
+			"                         Datum *tup_values)\n"
+			"{\n"
+			"  STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
+			"}\n"
+			"\n"
+			"DEVICE_FUNCTION(void)\n"
+			"gpuscan_projection_arrow(kern_context *kcxt,\n"
+			"                         kern_data_store *kds_src,\n"
+			"                         size_t   index,\n"
+			"                         cl_char *tup_dclass,\n"
+			"                         Datum   *tup_values)\n"
+			"{\n"
+			"  void        *addr __attribute__((unused));\n");
+		pgstrom_union_type_declarations(kern, "temp", type_oid_list); 
+		appendStringInfoString(kern, cbody.data);
+		appendStringInfoString(kern, "}\n");
 		return;
 	}
 
@@ -822,7 +836,6 @@ codegen_gpuscan_projection(StringInfo kern,
 			}
 			else
 			{
-				context->extra_flags |= dtype->type_flags;
 				if (!referenced)
 					appendStringInfo(
 						&cbody,
@@ -834,7 +847,10 @@ codegen_gpuscan_projection(StringInfo kern,
 					"                 tup_dclass[%d],\n"
 					"                 tup_values[%d]);\n",
 					dtype->type_name, j, j);
+				context->extra_flags |= dtype->type_flags;
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+				type_oid_list = list_append_unique_oid(type_oid_list,
+													   dtype->type_oid);
 			}
 			referenced = true;
 		}
@@ -864,6 +880,8 @@ codegen_gpuscan_projection(StringInfo kern,
 					"  KVAR_%u = temp.%s_v;\n",
 					attr->attnum, dtype->type_name);
 			}
+			type_oid_list = list_append_unique_oid(type_oid_list,
+												   dtype->type_oid);
 			referenced = true;
 		}
 
@@ -917,6 +935,8 @@ codegen_gpuscan_projection(StringInfo kern,
 			tle->resno - 1);
 		context->extra_flags |= dtype->type_flags;
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
@@ -939,9 +959,11 @@ codegen_gpuscan_projection(StringInfo kern,
 		"                         Datum   *tup_values)\n"
 		"{\n"
 		"  void        *addr __attribute__((unused));\n"
-		"  pg_anytype_t temp __attribute__((unused));\n"
-		"%s\n%s"
-		"}\n\n"
+		"%s", decl.data);
+	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
+	appendStringInfo(kern, "\n%s}\n\n", tbody.data);
+	appendStringInfo(
+		kern,
 		"DEVICE_FUNCTION(void)\n"
 		"gpuscan_projection_arrow(kern_context *kcxt,\n"
 		"                         kern_data_store *kds_src,\n"
@@ -950,15 +972,12 @@ codegen_gpuscan_projection(StringInfo kern,
 		"                         Datum   *tup_values)\n"
 		"{\n"
 		"  void        *addr __attribute__((unused));\n"
-		"  pg_anytype_t temp __attribute__((unused));\n"
-		"%s\n%s"
-		"}\n\n",
-		decl.data,
-		tbody.data,
-		decl.data,
-		cbody.data);
+		"%s", decl.data);
+	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
+	appendStringInfo(kern, "\n%s}\n\n", cbody.data);
 
 	list_free(tlist_dev);
+	list_free(type_oid_list);
 	pfree(temp.data);
 	pfree(decl.data);
 	pfree(tbody.data);
@@ -2137,7 +2156,7 @@ gpuscan_create_task(GpuScanState *gss,
 		length = KDS_calculateHeadSize(scan_tupdesc, false) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
 			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
-		length = Max(length, pds_src->kds.length);
+		length = Max3(length, pds_src->kds.length, 8<<20);
 
 		pds_dst = PDS_create_row(gcontext,
 								 scan_tupdesc,

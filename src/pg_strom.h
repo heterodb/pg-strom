@@ -1039,6 +1039,9 @@ extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
+extern void pgstrom_union_type_declarations(StringInfo buf,
+											const char *name,
+											List *type_oid_list);
 extern bool __pgstrom_device_expression(PlannerInfo *root,
 										RelOptInfo *baserel,
 										Expr *expr,

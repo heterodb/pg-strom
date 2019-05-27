@@ -3725,6 +3725,44 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 }
 
 /*
+ * pgstrom_union_type_declarations
+ *
+ * put declaration of a union type which contains all the types in type_oid_list,
+ * as follows. OID of device types should be unique, must not duplicated.
+ *
+ *   union {
+ *     pg_bool_t   bool_v;
+ *     pg_text_t   text_v;
+ *        :
+ *   } NAME;
+ */
+void
+pgstrom_union_type_declarations(StringInfo buf,
+								const char *name,
+								List *type_oid_list)
+{
+	ListCell	   *lc;
+	devtype_info   *dtype;
+
+	if (type_oid_list == NIL)
+		return;
+	appendStringInfo(buf, "  union {\n");
+	foreach (lc, type_oid_list)
+	{
+		Oid		type_oid = lfirst_oid(lc);
+
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "failed to lookup device type: %u", type_oid);
+		appendStringInfo(buf,
+						 "    pg_%s_t %s_v;\n",
+						 dtype->type_name,
+						 dtype->type_name);
+	}
+	appendStringInfo(buf, "  } %s;\n", name);
+}
+
+/*
  * __pgstrom_device_expression
  *
  * It shows a quick decision whether the provided expression tree is
