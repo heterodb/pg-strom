@@ -3873,32 +3873,26 @@ gpujoin_codegen_hash_value(StringInfo source,
 						   int cur_depth,
 						   codegen_context *context)
 {
+	StringInfoData	decl;
 	StringInfoData	body;
 	List		   *hash_outer_keys;
+	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	hash_outer_keys = list_nth(gj_info->hash_outer_keys, cur_depth - 1);
 	Assert(hash_outer_keys != NIL);
 
+	initStringInfo(&decl);
+	initStringInfo(&body);
+
 	appendStringInfo(
-		source,
-		"STATIC_FUNCTION(cl_uint)\n"
-		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
-		"                          kern_data_store *kds,\n"
-		"                          kern_multirels *kmrels,\n"
-		"                          cl_uint *o_buffer,\n"
-		"                          cl_bool *p_is_null_keys)\n"
-		"{\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n"
+		&decl,
 		"  cl_uint hash = 0xffffffffU;\n"
-		"  cl_bool is_null_keys = true;\n",
-		cur_depth);
+		"  cl_bool is_null_keys = true;\n");
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-
-	initStringInfo(&body);
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -3919,23 +3913,35 @@ gpujoin_codegen_hash_value(StringInfo source,
 			pgstrom_codegen_expression(key_expr, context),
 			dtype->type_name,
 			dtype->type_name);
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 	}
 
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info,
+	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
+	gpujoin_codegen_var_param_decl(&decl, gj_info,
 								   cur_depth, context);
 	appendStringInfo(
 		source,
-		"%s"
-		"\n"
+		"STATIC_FUNCTION(cl_uint)\n"
+		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
+		"                          kern_data_store *kds,\n"
+		"                          kern_multirels *kmrels,\n"
+		"                          cl_uint *o_buffer,\n"
+		"                          cl_bool *p_is_null_keys)\n"
+		"{\n"
+		"%s%s"
 		"  *p_is_null_keys = is_null_keys;\n"
 		"  hash ^= 0xffffffff;\n"
 		"  return hash;\n"
 		"}\n"
 		"\n",
+		cur_depth,
+		decl.data,
 		body.data);
+	pfree(decl.data);
 	pfree(body.data);
 }
 
@@ -3959,6 +3965,7 @@ gpujoin_codegen_projection(StringInfo source,
 	AttrNumber	   *varattmaps;
 	Bitmapset	   *refs_by_vars = NULL;
 	Bitmapset	   *refs_by_expr = NULL;
+	List		   *type_oid_list = NIL;
 	devtype_info   *dtype;
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -4185,6 +4192,8 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						tle->resno - 1);
 					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+					type_oid_list = list_append_unique_oid(type_oid_list,
+														   dtype->type_oid);
 				}
 				/* NULL-initialization for LEFT OUTER JOIN */
 				appendStringInfo(
@@ -4232,6 +4241,8 @@ gpujoin_codegen_projection(StringInfo source,
 						dtype->type_name, kds_label, i-1,
 						dtype->type_name);
 					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+					type_oid_list = list_append_unique_oid(type_oid_list,
+														   dtype->type_oid);
 				}
 				else
 				{
@@ -4355,9 +4366,12 @@ gpujoin_codegen_projection(StringInfo source,
 			tle->resno - 1,
 			tle->resno - 1);
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		type_oid_list = list_append_unique_oid(type_oid_list,
+											   dtype->type_oid);
 	}
-	/* add parameter declarations */
+	/* add const/param and temporary declarations */
 	pgstrom_codegen_param_declarations(&decl, context);
+	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 	/* merge declarations and function body */
 	appendStringInfo(
 		source,
@@ -4378,7 +4392,6 @@ gpujoin_codegen_projection(StringInfo source,
 		"  cl_uint          sz          __attribute__((unused));\n"
 		"  cl_uint          extra_sum = 0;\n"
 		"  void            *addr        __attribute__((unused)) = NULL;\n"
-		"  pg_anytype_t     temp        __attribute__((unused));\n"
 		"%s\n%s"
 		"  return extra_sum;\n"
 		"}\n",
