@@ -185,9 +185,17 @@ SHLIB_LINK := -L $(LPATH) -lcuda
 NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
 NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
               --fatbin --relocatable-device-code=true \
+              --maxrregcount=32 \
               --gpu-architecture=compute_60 \
-              --gpu-code=sm_60,sm_61,sm_70,sm_72
+              --gpu-code=sm_60,sm_61,sm_70,sm_72,sm_75
 NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
+
+# MEMO: Some of kernel functions shall be built to launch 1024 threads
+# per block, by KERNEL_FUNCTION_MAXTHREADS(). It saves usage of registers
+# per thread. Right now, NVCC/NVRTC configures 32x1024 = 32k registers per SM.
+# Our logic can be improved in the furture version regardless of the block-
+# size, however, we use 32 registers per thread is a safety configuration for
+# all the run-time build.
 
 #
 # Definition of PG-Strom Extension

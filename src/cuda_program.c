@@ -475,14 +475,15 @@ link_cuda_libraries(char *ptx_image,
 {
 	CUlinkState		lstate;
 	CUresult		rc;
-	CUjit_option	jit_options[10];
-	void		   *jit_option_values[10];
+	CUjit_option	jit_options[16];
+	void		   *jit_option_values[16];
 	int				jit_index = 0;
 	void		   *temp;
 	void		   *bin_image;
 	size_t			bin_length;
 	const char	   *lib_suffix = "a";
 	char			pathname[MAXPGPATH];
+	char			log_buffer[16384];
 
 	/*
 	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
@@ -522,6 +523,15 @@ link_cuda_libraries(char *ptx_image,
 		/* link libraries with debug options */
 		lib_suffix = "ag";
 	}
+	/* Link log buffer */
+	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER;
+	jit_option_values[jit_index] = (void *)log_buffer;
+	jit_index++;
+
+	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
+	jit_option_values[jit_index] = (void *)sizeof(log_buffer);
+	jit_index++;
+
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
 	if (rc != CUDA_SUCCESS)
@@ -560,7 +570,8 @@ link_cuda_libraries(char *ptx_image,
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLinkComplete: %s", errorText(rc));
+			werror("failed on cuLinkComplete: %s\nLog: %s",
+				   errorText(rc), log_buffer);
 
 		/*
 		 * copy onto the result buffer; because bin_image is owned by
