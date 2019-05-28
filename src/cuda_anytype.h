@@ -21,6 +21,7 @@
 
 #ifndef PG_ARRAY_TYPE_DEFINED
 #define PG_ARRAY_TYPE_DEFINED
+
 /*
  * NOTE: pg_array_t is designed to store both of PostgreSQL / Arrow array
  * values. If @length < 0, it means @value points a varlena based PostgreSQL

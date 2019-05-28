@@ -20,6 +20,92 @@
 
 #ifdef __CUDACC__
 /*
+ * routines to reference registers or memory
+ */
+
+/*
+ * NumSmx - reference to the %nsmid register
+ */
+STATIC_INLINE(cl_uint) NumSmx(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %nsmid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * SmxId - reference to the %smid register
+ */
+STATIC_INLINE(cl_uint) SmxId(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %smid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * LaneId() - reference to the %laneid register
+ */
+STATIC_INLINE(cl_uint) LaneId(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %laneid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * TotalShmemSize() - reference to the %total_smem_size
+ */
+STATIC_INLINE(cl_uint) TotalShmemSize(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * DynamicShmemSize() - reference to the %dynamic_smem_size
+ */
+STATIC_INLINE(cl_uint) DynamicShmemSize(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * GlobalTimer - A pre-defined, 64bit global nanosecond timer.
+ *
+ * NOTE: clock64() is not consistent across different SMX, thus, should not
+ *       use this API in case when device time-run may reschedule the kernel.
+ */
+STATIC_INLINE(cl_ulong) GlobalTimer(void)
+{
+	cl_ulong	ret;
+	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
+	return ret;
+}
+
+/* memory comparison */
+STATIC_INLINE(cl_int)
+__memcmp(const void *s1, const void *s2, size_t n)
+{
+	const cl_uchar *p1 = (const cl_uchar *)s1;
+	const cl_uchar *p2 = (const cl_uchar *)s2;
+
+	while (n--)
+	{
+		if (*p1 != *p2)
+			return ((int)*p1) - ((int)*p2);
+		p1++;
+		p2++;
+	}
+	return 0;
+}
+#endif	/* __CUDACC__ */
+
+#ifdef __CUDACC__
+/*
  * pgstromTotalSum
  *
  * A utility routine to calculate total sum of the supplied array which are
@@ -572,6 +658,133 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 	result.isnull = false;
 	return result;
 }
+
+#ifdef PGSTROM_KERNEL_HAS_PGARRAY
+/*
+ * Support routine of ScalarArrayOpExpr
+ */
+STATIC_INLINE(cl_int)
+ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
+{
+	cl_int		i, ret;
+	cl_long		prod;
+
+	if (ndim <= 0)
+		return 0;
+
+	ret = 1;
+	for (i=0; i < ndim; i++)
+	{
+
+		if (dims[i] < 0)
+		{
+			/* negative dimension implies an error... */
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+		prod = (cl_long) ret * (cl_long) dims[i];
+		ret = (cl_int) prod;
+		if ((cl_long) ret != prod)
+		{
+			/* array size exceeds the maximum allowed... */
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return 0;
+		}
+	}
+	assert(ret >= 0);
+
+	return ret;
+}
+
+template <typename ScalarType, typename ElementType>
+STATIC_INLINE(pg_bool_t)
+PG_SCALAR_ARRAY_OP(kern_context *kcxt,
+				   pg_bool_t (*compare_fn)(kern_context *kcxt,
+										   ScalarType scalar,
+										   ElementType element),
+				   ScalarType scalar,
+				   pg_array_t array,
+				   cl_bool useOr,	/* true = ANY, false = ALL */
+				   cl_int typelen,
+				   cl_int typealign)
+{
+	ElementType	element;
+	pg_bool_t	result;
+	pg_bool_t	rv;
+	char	   *base;
+	cl_uint		offset;
+	char	   *bitmap;
+	int			bitmask;
+	cl_uint		i, nitems;
+
+	/* NULL results towards NULL array */
+	if (array.isnull)
+	{
+		result.isnull = true;
+		result.value = false;
+		return result;
+	}
+	result.isnull = false;
+	result.value = (useOr ? false : true);
+
+	/* how many items in the array? */
+	nitems = ArrayGetNItems(kcxt,
+							ARR_NDIM(array.value),
+							ARR_DIMS(array.value));
+	if (nitems == 0)
+		return result;
+
+	/* loop on the array elements */
+	base = ARR_DATA_PTR(array.value);
+	offset = 0;
+	bitmap = ARR_NULLBITMAP(array.value);
+	bitmask = 1;
+
+	for (i=0; i < nitems; i++)
+	{
+		if (bitmap && (*bitmap & bitmask) == 0)
+			pg_datum_ref(kcxt, element, NULL);
+		else
+		{
+			pg_datum_ref(kcxt, element, base + offset);
+			offset = TYPEALIGN(typealign, (offset + typelen));
+		}
+		/* call for the comparison function */
+		rv = compare_fn(kcxt, scalar, element);
+		if (rv.isnull)
+			result.isnull = true;
+		else if (useOr)
+		{
+			if (rv.value)
+			{
+				result.isnull = false;
+				result.value = true;
+				break;
+			}
+		}
+		else
+		{
+			if (!rv.value)
+			{
+				result.isnull = false;
+				result.value = false;
+				break;
+			}
+		}
+		/* advance the bitmap pointer if any */
+		if (bitmap)
+		{
+			bitmask <<= 1;
+			if (bitmask == 0x0100)
+			{
+				bitmap++;
+				bitmask = 1;
+			}
+		}
+	}
+	return result;
+}
+#endif /* PGSTROM_KERNEL_HAS_PGARRAY */
 #endif /* __CUDACC__ */
 
 #endif  /* CUDA_UTILS_H */

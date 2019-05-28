@@ -574,7 +574,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kds_slot->format == KDS_FORMAT_SLOT &&
 		   kds_slot->ncols == GPUPREAGG_DEVICE_PROJECTION_NFIELDS);
-	__INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_row, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 
 	/* resume kernel from the point where suspended, if any */
 	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
@@ -681,7 +681,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kds_slot->format == KDS_FORMAT_SLOT &&
 		   kds_slot->ncols == GPUPREAGG_DEVICE_PROJECTION_NFIELDS);
-	__INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 
 	part_sz = Min((kds_src->nrows_per_block +
 				   warpSize-1) & ~(warpSize-1), get_local_size());
@@ -848,7 +848,7 @@ gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
 		   kds_slot->format == KDS_FORMAT_SLOT &&
 		   kds_slot->ncols == GPUPREAGG_DEVICE_PROJECTION_NFIELDS);
-	__INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_arrow, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 
 	/* resume kernel from the point where suspended, if any */
 	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
@@ -959,7 +959,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
 	assert(kds_slot->ncols == kds_final->ncols);
-	__INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
 	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
@@ -1509,7 +1509,7 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	assert(kgpreagg->num_group_keys > 0);
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
-	__INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_groupby_reduction, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;

@@ -340,33 +340,11 @@ typedef uintptr_t		hostptr_t;
 #define StromError_OutOfMemory			1006	/* Out of Memory */
 #define StromError_DataCorruption		1007	/* Data corruption */
 
-/*
- * Kernel functions identifier
- */
-#define StromKernel_HostPGStrom						0x0001
-#define StromKernel_CudaRuntime						0x0002
-#define StromKernel_NVMeStrom						0x0003
-#define StromKernel_gpuscan_main_row				0x0101
-#define StromKernel_gpuscan_main_block				0x0102
-#define StromKernel_gpuscan_main_arrow				0x0103
-#define StromKernel_gpujoin_main					0x0201
-#define StromKernel_gpujoin_right_outer				0x0202
-#define StromKernel_gpupreagg_setup_row				0x0301
-#define StromKernel_gpupreagg_setup_block			0x0302
-#define StromKernel_gpupreagg_setup_arrow			0x0303
-#define StromKernel_gpupreagg_nogroup_reduction		0x0304
-#define StromKernel_gpupreagg_groupby_reduction		0x0305
-#define StromKernel_gpusort_setup_column			0x0401
-#define StromKernel_gpusort_bitonic_local			0x0412
-#define StromKernel_gpusort_bitonic_step			0x0413
-#define StromKernel_gpusort_bitonic_merge			0x0414
-
 #define KERN_ERRORBUF_FILENAME_LEN		24
 typedef struct
 {
 	cl_int		errcode;	/* one of the StromError_* */
-	cl_short	kernel;		/* one of the StromKernel_* */
-	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
+	cl_int		lineno;		/* line number STROM_SET_ERROR is called */
 	char		filename[KERN_ERRORBUF_FILENAME_LEN];
 } kern_errorbuf;
 
@@ -400,25 +378,12 @@ typedef struct
 #define INIT_KERNEL_CONTEXT(kcxt,__kparams)							\
 	do {															\
 		(kcxt)->e.errcode = StromError_Success;						\
-		(kcxt)->e.kernel = -1; /* deprecated */						\
 		(kcxt)->e.lineno = 0;										\
 		(kcxt)->e.filename[0] = '\0';								\
 		(kcxt)->kparams = (__kparams);								\
 		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
 		(kcxt)->vlpos = (kcxt)->vlbuf;								\
 		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ; \
-	} while(0)
-
-#define __INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)				\
-	do {															\
-		(kcxt)->e.errcode = StromError_Success;						\
-		(kcxt)->e.kernel = StromKernel_##kfunction;					\
-		(kcxt)->e.lineno = 0;										\
-		(kcxt)->e.filename[0] = '\0';								\
-		(kcxt)->kparams = (__kparams);								\
-		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
-		(kcxt)->vlpos = (kcxt)->vlbuf;								\
-		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ;	\
 	} while(0)
 
 #define PTR_ON_VLBUF(kcxt,ptr,len)							\
@@ -492,7 +457,6 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 				  my_error->errcode) == StromError_Success)
 	{
 		/* only primary error workgroup can come into */
-		result->kernel = my_error->kernel;
 		result->lineno = my_error->lineno;
 		memcpy(result->filename,
 			   my_error->filename,
@@ -508,6 +472,7 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
 #endif	/* !__CUDACC__ */
 
+//TO BE MOVED LATER
 #ifdef __CUDACC__
 /*
  * __Fetch - unaligned memory access for variable types
@@ -523,89 +488,11 @@ __Fetch(const T *ptr)
 	memcpy(&temp, ptr, sizeof(T));
 	return temp;
 }
-
-/*
- * NumSmx - reference to the %nsmid register
- */
-STATIC_INLINE(cl_uint) NumSmx(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %nsmid;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * SmxId - reference to the %smid register
- */
-STATIC_INLINE(cl_uint) SmxId(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %smid;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * LaneId() - reference to the %laneid register
- */
-STATIC_INLINE(cl_uint) LaneId(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %laneid;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * TotalShmemSize() - reference to the %total_smem_size
- */
-STATIC_INLINE(cl_uint) TotalShmemSize(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * DynamicShmemSize() - reference to the %dynamic_smem_size
- */
-STATIC_INLINE(cl_uint) DynamicShmemSize(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * GlobalTimer - A pre-defined, 64bit global nanosecond timer.
- *
- * NOTE: clock64() is not consistent across different SMX, thus, should not
- *       use this API in case when device time-run may reschedule the kernel.
- */
-STATIC_INLINE(cl_ulong) GlobalTimer(void)
-{
-	cl_ulong	ret;
-	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
-	return ret;
-}
-
-/* memory comparison */
-STATIC_INLINE(cl_int)
-__memcmp(const void *s1, const void *s2, size_t n)
-{
-	const cl_uchar *p1 = (const cl_uchar *)s1;
-	const cl_uchar *p2 = (const cl_uchar *)s2;
-
-	while (n--)
-	{
-		if (*p1 != *p2)
-			return ((int)*p1) - ((int)*p2);
-		p1++;
-		p2++;
-	}
-	return 0;
-}
 #else	/* __CUDACC__ */
 #define __Fetch(PTR)			(*(PTR))
 #endif	/* __CUDACC__ */
+
+
 
 #ifndef PG_STROM_H
 /* definitions at storage/block.h */

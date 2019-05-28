@@ -1278,7 +1278,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
-	__INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_ROW ||
 		   __ldg(&kds_src->format) == KDS_FORMAT_BLOCK ||
 		   __ldg(&kds_src->format) == KDS_FORMAT_ARROW);
@@ -1455,7 +1455,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
-	__INIT_KERNEL_CONTEXT(&kcxt, gpujoin_right_outer, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, kparams);
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
 #ifndef GPUPREAGG_COMBINED_JOIN
 	assert(kds_dst->format == KDS_FORMAT_ROW);

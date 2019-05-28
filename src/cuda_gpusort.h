@@ -78,7 +78,7 @@ gpusort_setup_column(kern_gpusort *kgpusort,
 	cl_uint			loop, nloops;
 	__shared__ cl_uint pos;
 
-	__INIT_KERNEL_CONTEXT(&kcxt, gpusort_setup_column, &kgpusort->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, &kgpusort->kparams);
 	assert(kds_src->format == KDS_FORMAT_COLUMN);
 	nloops = (kds_src->nitems + globalSz - 1) / globalSz;
 	for (loop=0; loop < nloops; loop++)
@@ -124,7 +124,7 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 	/* quick bailout if any error happen in the prior kernel */
 	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	__INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_local, &kgpusort->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, &kgpusort->kparams);
 	/* Adjust partition size if nitems is enough small */
 	partSize = 2 * BITONIC_MAX_LOCAL_SZ;
 	while (partSize / 2 > nitems)
@@ -207,7 +207,7 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 	/* quick bailout if any error happen in the prior kernel */
 	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	__INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_step, &kgpusort->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, &kgpusort->kparams);
 
 	idx0 = (((get_global_id() & ~halfUnitMask) << 1)
 			+ (get_global_id() & halfUnitMask));
@@ -246,7 +246,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	/* quick bailout if any error happen in the prior kernel */
 	if (__syncthreads_count(kgpusort->kerror.errcode) != 0)
 		return;
-	__INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, &kgpusort->kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, &kgpusort->kparams);
 	/* Load index to localIdx[] */
 	if (partBase + partSize <= nitems)
 		localLimit = partSize;

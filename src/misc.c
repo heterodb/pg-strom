@@ -265,38 +265,10 @@ const char *
 errorTextKernel(kern_errorbuf *kerror)
 {
 	static __thread char buffer[1024];
-	const char *kernel_name;
 
-#define KERN_ENTRY(KERNEL)						\
-	case StromKernel_##KERNEL: kernel_name = #KERNEL; break
-
-	switch (kerror->kernel)
-	{
-		KERN_ENTRY(HostPGStrom);
-		KERN_ENTRY(CudaRuntime);
-		KERN_ENTRY(NVMeStrom);
-		KERN_ENTRY(gpuscan_main_row);
-		KERN_ENTRY(gpuscan_main_block);
-		KERN_ENTRY(gpuscan_main_arrow);
-		KERN_ENTRY(gpujoin_main);
-		KERN_ENTRY(gpujoin_right_outer);
-		KERN_ENTRY(gpupreagg_setup_row);
-		KERN_ENTRY(gpupreagg_setup_block);
-		KERN_ENTRY(gpupreagg_setup_arrow);
-		KERN_ENTRY(gpupreagg_nogroup_reduction);
-		KERN_ENTRY(gpupreagg_groupby_reduction);
-		KERN_ENTRY(gpusort_setup_column);
-		KERN_ENTRY(gpusort_bitonic_local);
-		KERN_ENTRY(gpusort_bitonic_step);
-		KERN_ENTRY(gpusort_bitonic_merge);
-		default:
-			kernel_name = "unknown kernel";
-			break;
-	}
-#undef KERN_ENTRY
-	snprintf(buffer, sizeof(buffer), "%s at %s:%d by %s",
+	snprintf(buffer, sizeof(buffer), "%s at %s:%d",
 			 errorText(kerror->errcode),
-			 kerror->filename, kerror->lineno, kernel_name);
+			 kerror->filename, kerror->lineno);
 	return buffer;
 }
 
