@@ -1246,7 +1246,7 @@ pgstrom_build_session_info(StringInfo buf,
 						   cl_uint extra_flags)
 {
 	/* OID declaration of types */
-	pgstrom_codegen_typeoid_declarations(buf);
+	//pgstrom_codegen_typeoid_declarations(buf);
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(buf);

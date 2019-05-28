@@ -1351,7 +1351,13 @@ CREATE FUNCTION pg_catalog.transpose(float8[])
 -- float2 - half-precision floating point data support
 --
 -- ==================================================================
-CREATE TYPE pg_catalog.float2;
+CREATE FUNCTION pgstrom.define_shell_type(name,oid,regnamespace='public')
+  RETURNS oid
+  AS 'MODULE_PATHNAME','pgstrom_define_shell_type'
+  LANGUAGE C STRICT VOLATILE;
+SELECT pgstrom.define_shell_type('float2',421,'pg_catalog');
+--CREATE TYPE pg_catalog.float2;
+
 CREATE FUNCTION pgstrom.float2_in(cstring)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_float2_in'

@@ -41,6 +41,9 @@ typedef unsigned short	half_t;
 #define FP64_EXPO_MAX		(1023)
 #define FP64_EXPO_BIAS		(1023)
 
+/* special backdoor to define a shell type with a fixed OID */
+Datum pgstrom_define_shell_type(PG_FUNCTION_ARGS);
+
 /* type input/output */
 Datum pgstrom_float2_in(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_out(PG_FUNCTION_ARGS);
@@ -1514,3 +1517,85 @@ pgstrom_float2_sum(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(newval);
 }
 PG_FUNCTION_INFO_V1(pgstrom_float2_sum);
+
+Datum
+pgstrom_define_shell_type(PG_FUNCTION_ARGS)
+{
+	Name		type_name = PG_GETARG_NAME(0);
+	Oid			type_oid = PG_GETARG_OID(1);
+	Oid			type_namespace = PG_GETARG_OID(2);
+	Oid			new_oid;
+	Relation	type_rel;
+	TupleDesc	tupdesc;
+	HeapTuple	tup;
+	Datum		values[Natts_pg_type];
+	bool		isnull[Natts_pg_type];
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to create a shell type")));
+	/* see TypeShellMake */
+	type_rel = heap_open(TypeRelationId, RowExclusiveLock);
+	tupdesc = RelationGetDescr(type_rel);
+
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
+	values[Anum_pg_type_typname-1] = NameGetDatum(type_name);
+    values[Anum_pg_type_typnamespace-1] = ObjectIdGetDatum(type_namespace);
+    values[Anum_pg_type_typowner-1] = ObjectIdGetDatum(GetUserId());
+    values[Anum_pg_type_typlen-1] = Int16GetDatum(sizeof(int32));
+    values[Anum_pg_type_typbyval-1] = BoolGetDatum(true);
+    values[Anum_pg_type_typtype-1] = CharGetDatum(TYPTYPE_PSEUDO);
+	values[Anum_pg_type_typcategory-1] =CharGetDatum(TYPCATEGORY_PSEUDOTYPE);
+	values[Anum_pg_type_typispreferred-1] = BoolGetDatum(false);
+	values[Anum_pg_type_typisdefined-1] = BoolGetDatum(false);
+	values[Anum_pg_type_typdelim-1] = CharGetDatum(DEFAULT_TYPDELIM);
+	values[Anum_pg_type_typrelid-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typelem-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typarray-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typinput-1] = ObjectIdGetDatum(F_SHELL_IN);
+	values[Anum_pg_type_typoutput-1] = ObjectIdGetDatum(F_SHELL_OUT);
+	values[Anum_pg_type_typreceive-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typsend-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typmodin-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typmodout-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typanalyze-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typalign-1] = CharGetDatum('i');
+	values[Anum_pg_type_typstorage-1] = CharGetDatum('p');
+	values[Anum_pg_type_typnotnull-1] = BoolGetDatum(false);
+	values[Anum_pg_type_typbasetype-1] = ObjectIdGetDatum(InvalidOid);
+	values[Anum_pg_type_typtypmod-1] = Int32GetDatum(-1);
+	values[Anum_pg_type_typndims-1] = Int32GetDatum(0);
+	values[Anum_pg_type_typcollation-1] = ObjectIdGetDatum(InvalidOid);
+	isnull[Anum_pg_type_typdefaultbin-1] = true;
+	isnull[Anum_pg_type_typdefault-1] = true;
+	isnull[Anum_pg_type_typacl-1] = true;
+
+	/* create a new type tuple */
+	tup = heap_form_tuple(tupdesc, values, isnull);
+	HeapTupleSetOid(tup, type_oid);
+
+	/* insert the tuple in the relation with specified OID */
+	new_oid = CatalogTupleInsert(type_rel, tup);
+	if (new_oid != type_oid)
+		elog(ERROR, "unable to create a shell type with OID (%u)", type_oid);
+
+	/* create dependencies */
+	GenerateTypeDependencies(type_oid,
+							 (Form_pg_type) GETSTRUCT(tup),
+							 NULL,
+							 NULL,
+							 0,
+							 false,
+							 false,
+							 false);
+	/* Post creation hook for new shell type */
+	InvokeObjectPostCreateHook(TypeRelationId, type_oid, 0);
+
+	heap_freetuple(tup);
+    heap_close(type_rel, RowExclusiveLock);
+
+	PG_RETURN_OID(type_oid);
+}
+PG_FUNCTION_INFO_V1(pgstrom_define_shell_type);

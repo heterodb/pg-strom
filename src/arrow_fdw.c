@@ -2356,6 +2356,7 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		switch (cmeta->atttypid)
 		{
 			case INT2OID:
+			case FLOAT2OID:
 				datum = pg_int2_arrow_ref(kds, cmeta, index);
 				break;
 			case INT4OID:
@@ -2392,10 +2393,8 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				datum = pg_interval_arrow_ref(kds, cmeta, index);
 				break;
 			default:
-				if (cmeta->atttypid != FLOAT2OID)
-					elog(ERROR, "Bug? unexpected datum type: %u",
-						 cmeta->atttypid);
-				datum = pg_int2_arrow_ref(kds, cmeta, index);
+				elog(ERROR, "Bug? unexpected datum type: %u",
+					 cmeta->atttypid);
 				break;
 		}
 		isnull = false;

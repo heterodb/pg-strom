@@ -533,8 +533,8 @@ plcuda_add_extra_typeinfo(StringInfo source, plcuda_code_context *con)
 {
 	ListCell   *lc1, *lc2;
 
-	appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
-	pgstrom_codegen_typeoid_declarations(source);
+	//appendStringInfo(source, "/* ---- PG Type OIDs ---- */\n");
+	//pgstrom_codegen_typeoid_declarations(source);
 	appendStringInfo(source, "\n/* ---- PG Type Properties ---- */\n");
 	forboth (lc1, con->all_type_oids,
 			 lc2, con->all_type_names)

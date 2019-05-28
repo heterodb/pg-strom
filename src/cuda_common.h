@@ -1083,29 +1083,6 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #endif
 
 /* ----------------------------------------------------------------
- * PostgreSQL Data Type support in CUDA kernel
- *
- * Device code will have the following representation for data types of
- * PostgreSQL, once it gets loaded from any type of data store above.
- *
- * typedef struct
- * {
- *     bool    isnull;
- *     BASE    value;
- * } pg_XXXX_t
- *
- * PostgreSQL has four different classes:
- *  - fixed-length referenced by value (simple)
- *  - fixed-length referenced by pointer (indirect)
- *  - variable-length (varlena)
- *
- * The 'simple' and 'indirect' types are always inlined to pg_XXX_t,
- * and often transformed to internal representation.
- * Some of 'varlena' types are also inlined to pg_XXXX_t variable,
- * mostly, if this varlena type has upper limit length short enough.
- */
-
-/* ----------------------------------------------------------------
  *
  * About GPU Projection Support
  *
@@ -1146,6 +1123,49 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #define DATUM_CLASS__VARLENA	2	/* datum is pg_varlena_t reference */
 #define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
 #define DATUM_CLASS__COMPOSITE	4	/* datum is pg_composite_t reference */
+
+/* ----------------------------------------------------------------
+ * PostgreSQL Data Type support in CUDA kernel
+ *
+ * Device code will have the following representation for data types of
+ * PostgreSQL, once it gets loaded from any type of data store above.
+ *
+ * typedef struct
+ * {
+ *     bool    isnull;
+ *     BASE    value;
+ * } pg_XXXX_t
+ *
+ * PostgreSQL has four different classes:
+ *  - fixed-length referenced by value (simple)
+ *  - fixed-length referenced by pointer (indirect)
+ *  - variable-length (varlena)
+ *
+ * The 'simple' and 'indirect' types are always inlined to pg_XXX_t,
+ * and often transformed to internal representation.
+ * Some of 'varlena' types are also inlined to pg_XXXX_t variable,
+ * mostly, if this varlena type has upper limit length short enough.
+ */
+
+/* Type OID of PostgreSQL for base types */
+#define PG_BOOLOID			16
+#define PG_INT2OID			21
+#define PG_INT4OID			23
+#define PG_INT8OID			20
+#define PG_FLOAT2OID		421
+#define PG_FLOAT4OID		700
+#define PG_FLOAT8OID		701
+#define PG_NUMERICOID		1700
+#define PG_DATEOID			1082
+#define PG_TIMEOID			1083
+#define PG_TIMESTAMPOID		1114
+#define PG_TIMESTAMPTZOID	1184
+#define PG_INTERVALOID		1186
+#define PG_BPCHAROID		1042
+#define PG_TEXTOID			25
+#define PG_VARCHAROID		1043
+#define PG_BYTEAOID			17
+#define PG_JSONBOID			3802
 
 /*
  * Template of variable classes: fixed-length referenced by value

@@ -53,6 +53,7 @@
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
+#include "commands/typecmds.h"
 #if PG_VERSION_NUM >= 100000
 #include "common/base64.h"
 #include "common/md5.h"
@@ -1022,9 +1023,6 @@ extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
-extern Oid pgstrom_get_float2_typeoid(void);
-#define FLOAT2OID	pgstrom_get_float2_typeoid()
-
 extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
 													   Oid type_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
@@ -1410,6 +1408,11 @@ extern const char *errorTextKernel(kern_errorbuf *kerror);
  * nvrtc.c
  */
 extern void		pgstrom_init_nvrtc(void);
+
+/*
+ * float2.c
+ */
+#define		FLOAT2OID		421
 
 /*
  * main.c

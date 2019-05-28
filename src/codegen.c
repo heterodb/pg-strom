@@ -838,34 +838,6 @@ vlbuf_estimate_jsonb(devfunc_info *dfunc, Expr **args, int *vl_width)
 	return 2000;
 }
 
-
-/*
-static int
-vlbuf_estimate_text_substr(devfunc_info *dfunc, Expr **args, int *vl_width)
-{
-	return 0;
-}
-*/
-
-/*
- * pgstrom_get_float2_typeoid - FLOAT2OID
- */
-Oid
-pgstrom_get_float2_typeoid(void)
-{
-	if (!OidIsValid(pgstrom_float2_typeoid))
-	{
-		Oid		type_oid =
-			GetSysCacheOid2(TYPENAMENSP,
-							PointerGetDatum("float2"),
-							ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-		if (!OidIsValid(type_oid))
-			elog(ERROR, "float2 is not defined at PostgreSQL");
-		pgstrom_float2_typeoid = type_oid;
-	}
-	return pgstrom_float2_typeoid;
-}
-
 /*
  * Catalog of functions supported by device code
  *
