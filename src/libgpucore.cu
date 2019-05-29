@@ -18,7 +18,6 @@
 #define KERN_CONTEXT_VARLENA_BUFSZ 10 //tentative
 #include "cuda_common.h"
 
-
 /*
  * __compute_heaptuple_size
  */
@@ -779,3 +778,1150 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 	}
 	return true;
 }
+
+
+
+
+
+//
+// Tentative Data Types Routines
+//
+
+/* usually, called via pg_datum_ref_arrow() */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_bool_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	cl_uchar	   *bitmap;
+	cl_uchar		mask = (1 << (rowidx & 7));
+
+	bitmap = (cl_uchar *)
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx>>3,
+									  sizeof(cl_uchar));
+	if (!bitmap)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value  = ((*bitmap & mask) ? true : false);
+	}
+}
+
+
+/* usually, called via pg_datum_ref_arrow() */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_date_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	void	   *addr;
+
+	switch (cmeta->attopts.date.unit)
+	{
+		case ArrowDateUnit__Day:
+			addr = kern_fetch_simple_datum_arrow(cmeta,
+												 base,
+												 rowidx,
+												 sizeof(cl_uint));
+			if (!addr)
+				result.isnull = true;
+			else
+			{
+				result.isnull = false;
+				result.value = *((cl_uint *)addr)
+					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+		case ArrowDateUnit__MilliSecond:
+			addr = kern_fetch_simple_datum_arrow(cmeta,
+												 base,
+												 rowidx,
+												 sizeof(cl_ulong));
+			if (!addr)
+				result.isnull = true;
+			else
+			{
+				result.isnull = false;
+				result.value = *((cl_ulong *)addr) / 1000
+					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+		default:
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			return;
+	}
+}
+
+/* usually, called via pg_datum_ref_arrow() */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_time_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	cl_ulong	   *aval = (cl_ulong *)
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx,
+									  sizeof(cl_ulong));
+	if (!aval)
+		result.isnull = true;
+	else
+	{
+		switch (cmeta->attopts.time.unit)
+		{
+			case ArrowTimeUnit__Second:
+				result.value = *aval * 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				result.value = *aval * 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				result.value = *aval;
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				result.value = *aval / 1000L;
+				break;
+			default:
+				result.isnull = true;
+				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				return;
+		}
+		result.isnull = false;
+	}
+}
+
+/* usually, called via pg_datum_ref_arrow() */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_timestamp_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	cl_ulong	   *aval = (cl_ulong *)
+		kern_fetch_simple_datum_arrow(cmeta,
+									  base,
+									  rowidx,
+									  sizeof(cl_ulong));
+	if (!aval)
+		result.isnull = true;
+	else
+	{
+		switch (cmeta->attopts.time.unit)
+		{
+			case ArrowTimeUnit__Second:
+				result.value = *aval * 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				result.value = *aval * 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				result.value = *aval;
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				result.value = *aval / 1000L;
+				break;
+			default:
+				result.isnull = true;
+				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				return;
+		}
+		result.isnull = false;
+	}
+}
+
+/* usually, called via pg_datum_ref_arrow() */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_interval_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	cl_uint		   *ival;
+
+	switch (cmeta->attopts.interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			ival = (cl_uint *)
+				kern_fetch_simple_datum_arrow(cmeta,
+											  base,
+											  rowidx,
+											  sizeof(cl_uint));
+			result.value.month = *ival;
+			result.value.day = 0;
+			result.value.month = 0;
+			result.isnull = false;
+			break;
+
+		case ArrowIntervalUnit__Day_Time:
+			ival = (cl_uint *)
+				kern_fetch_simple_datum_arrow(cmeta,
+											  base,
+											  rowidx,
+											  2 * sizeof(cl_uint));
+			result.value.month = 0;
+			result.value.day  = ival[0];
+			result.value.time = ival[1];
+			result.isnull = false;
+			break;
+
+		default:
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			break;
+	}
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_bpchar_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	cl_int			unitsz = cmeta->atttypmod - VARHDRSZ;
+	char		   *addr, *pos;
+
+	if (unitsz <= 0)
+		addr = NULL;
+	else
+		addr = (char *)kern_fetch_simple_datum_arrow(cmeta,
+													 base,
+													 rowidx,
+													 unitsz);
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		pos = addr + unitsz;
+		while (pos > addr && pos[-1] == ' ')
+			pos--;
+		result.isnull = false;
+		result.value  = addr;
+		result.length = pos - addr;
+	}
+}
+
+
+
+
+
+
+//
+// tentative base type hash-values
+//
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int2_t datum)
+{
+	cl_int		ival;
+
+	if (datum.isnull)
+		return 0;
+	ival = (cl_int)datum.value;
+	return pg_hash_any((cl_uchar *)&ival, sizeof(cl_int));
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int4_t datum)
+{
+	if (datum.isnull)
+		return 0;
+	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_int));
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_int8_t datum)
+{
+	cl_uint		hi, lo;
+
+	if (datum.isnull)
+		return 0;
+	/* see hashint8, for cross-type hash joins */
+	lo = (cl_uint)(datum.value & 0xffffffffL);
+	hi = (cl_uint)(datum.value >> 32);
+	lo ^= (datum.value >= 0 ? hi : ~hi);
+	return pg_hash_any((cl_uchar *)&lo, sizeof(cl_int));
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float2_t datum)
+{
+	cl_double	fval;
+
+	/* see comments at hashfloat4() */
+	if (datum.isnull)
+		return 0;
+	fval = datum.value;
+	if (fval == 0.0)
+		return 0;
+	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float4_t datum)
+{
+	cl_double	fval;
+
+	/* see comments at hashfloat4() */
+	if (datum.isnull || datum.value == 0.0)
+		return 0;
+	fval = datum.value;
+	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_float8_t datum)
+{
+	/* see comments at hashfloat8() */
+	if (datum.isnull || datum.value == 0.0)
+		return 0;
+	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_double));
+}
+
+
+
+
+
+
+
+
+/* pg_comp_hash(bpchar) must be defined by itself */
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
+{
+	cl_int		len;
+
+	if (datum.isnull)
+		return 0;
+	if (datum.length >= 0)
+		return pg_hash_any((cl_uchar *)datum.value, datum.length);
+	if (VARATT_IS_COMPRESSED(datum.value) ||
+		VARATT_IS_EXTERNAL(datum.value))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		return 0;
+	}
+	len = bpchar_truelen(VARDATA_ANY(datum.value),
+						 VARSIZE_ANY_EXHDR(datum.value));
+	return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value), len);
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_interval_t datum)
+{
+	cl_long		days, frac;
+
+	if (datum.isnull)
+		return 0;
+	interval_cmp_value(datum.value, &days, &frac);
+	days ^= frac;
+	return pg_hash_any((cl_uchar *)&days, sizeof(cl_long));
+}
+
+
+/*
+ * for DATUM_CLASS__VARLENA handler
+ *
+ * If dclass == DATUM_CLASS__VARLENA, value is a pointer to pg_varlena_t; that
+ * is binary compatible to other base variable-length types (pg_text_t,
+ * pg_bytea_t, pg_bpchar_t). Unlike varlena of PostgreSQL
+ */
+DEVICE_FUNCTION(cl_uint)
+pg_varlena_datum_length(kern_context *kcxt, Datum datum)
+{
+	pg_varlena_t   *vl = (pg_varlena_t *) datum;
+
+	if (vl->length < 0)
+		return VARSIZE_ANY(vl->value);
+	return VARHDRSZ + vl->length;
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_varlena_datum_write(kern_context *kcxt, char *dest, Datum datum)
+{
+	pg_varlena_t   *vl = (pg_varlena_t *) datum;
+	cl_uint			vl_len;
+
+	if (vl->length < 0)
+	{
+		vl_len = VARSIZE_ANY(vl->value);
+		memcpy(dest, vl->value, vl_len);
+	}
+	else
+	{
+		vl_len = VARHDRSZ + vl->length;
+		memcpy(dest + VARHDRSZ, vl->value, vl->length);
+		SET_VARSIZE(dest, vl_len);
+	}
+	return vl_len;
+}
+
+/*
+ * DATUM_CLASS_ARRAY handler
+ *
+ * If dclass == DATUM_CLASS_ARRAY, value is a pointer to pg_array_t that
+ * is likely a reference to Arrow::List values, assumed to 1-dimensional
+ * array in PostgreSQL.
+ * It internally uses 
+ * 
+ *
+ *
+ *
+ *
+ *
+ */
+typedef struct
+{
+	/*
+	 * NOTE: We assume 4bytes varlena header for array type. It allows
+	 * aligned references to the array elements. Unlike CPU side, we
+	 * cannot have extra malloc to ensure 4bytes varlena header. It is
+	 * the reason why our ScalarArrayOp implementation does not support
+	 * array data type referenced by Var node; which is potentially has
+	 * short format.
+	 */
+	cl_uint		vl_len_;		/* don't touch this field */
+	cl_int		ndim;			/* # of dimensions */
+	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
+	cl_uint		elemtype;		/* element type OID */
+} ArrayType;
+
+#define MAXDIM			6
+
+#define ARR_SIZE(a)		VARSIZE_ANY(a)
+#define ARR_NDIM(a)		(((ArrayType *)(a))->ndim)
+#define ARR_HASNULL(a)	(((ArrayType *)(a))->dataoffset != 0)
+#define ARR_ELEMTYPE(a)	(((ArrayType *)(a))->elemtype)
+#define ARR_DIMS(a)									\
+	((int *) (((char *) (a)) + sizeof(ArrayType)))
+#define ARR_LBOUND(a)								\
+	((int *) (((char *) (a)) + sizeof(ArrayType) +	\
+			  sizeof(int) * ARR_NDIM(a)))
+#define ARR_NULLBITMAP(a)							\
+	(ARR_HASNULL(a)									\
+	 ? (((char *) (a)) + sizeof(ArrayType) +		\
+		2 * sizeof(int) * ARR_NDIM(a))				\
+	 : (char *) NULL)
+/*
+ * The total array header size (in bytes) for an array with the specified
+ * number of dimensions and total number of items.
+ */
+#define ARR_OVERHEAD_NONULLS(ndims)					\
+	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims))
+#define ARR_OVERHEAD_WITHNULLS(ndims, nitems)		\
+	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims) +	\
+			 ((nitems) + 7) / 8)
+/*
+ * Returns a pointer to the actual array data.
+ */
+#define ARR_DATA_OFFSET(a)					\
+	(ARR_HASNULL(a)							\
+	 ? ((ArrayType *)(a))->dataoffset		\
+	 : ARR_OVERHEAD_NONULLS(ARR_NDIM(a)))
+
+#define ARR_DATA_PTR(a)		(((char *) (a)) + ARR_DATA_OFFSET(a))
+
+/*
+ * pg_array_t handlers (not suitable for template)
+ */
+DEVICE_FUNCTION(pg_array_t)
+pg_array_datum_ref(kern_context *kcxt, void *addr)
+{
+	pg_array_t	result;
+
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		result.value  = (char *)addr;
+		result.isnull = false;
+		result.length = -1;
+		result.start  = -1;
+		result.smeta  = NULL;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_ref(kern_context *kcxt,
+			 pg_array_t &result, void *addr)
+{
+	result = pg_array_datum_ref(kcxt, addr);
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_ref_slot(kern_context *kcxt,
+				  pg_array_t &result,
+				  cl_char dclass, Datum datum)
+{
+	if (dclass == DATUM_CLASS__NULL)
+		result = pg_array_datum_ref(kcxt, NULL);
+	else if (dclass == DATUM_CLASS__ARRAY)
+		memcpy(&result, DatumGetPointer(datum), sizeof(pg_array_t));
+	else
+	{
+		assert(dclass == DATUM_CLASS__NORMAL);
+		result = pg_array_datum_ref(kcxt, (char *)datum);
+	}
+}
+
+DEVICE_FUNCTION(cl_int)
+pg_datum_store(kern_context *kcxt,
+			   pg_array_t datum,
+			   cl_char &dclass,
+			   Datum &value)
+{
+	if (datum.isnull)
+		dclass = DATUM_CLASS__NULL;
+	else if (datum.length < 0)
+	{
+		cl_uint		len = VARSIZE_ANY(datum.value);
+
+		dclass = DATUM_CLASS__NORMAL;
+		value  = PointerGetDatum(datum.value);
+		if (PTR_ON_VLBUF(kcxt, datum.value, len))
+			return len;
+	}
+	else
+	{
+		pg_array_t *temp;
+
+		temp = (pg_array_t *)
+			kern_context_alloc(kcxt, sizeof(pg_array_t));
+		if (temp)
+		{
+			memcpy(temp, &datum, sizeof(pg_array_t));
+			dclass = DATUM_CLASS__ARRAY;
+			value  = PointerGetDatum(temp);
+			return sizeof(pg_array_t);
+		}
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		dclass = DATUM_CLASS__NULL;
+	}
+	return 0;
+}
+
+DEVICE_FUNCTION(pg_array_t)
+pg_array_param(kern_context *kcxt, cl_uint param_id)
+{
+	kern_parambuf  *kparams = kcxt->kparams;
+	pg_array_t		result;
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
+	{
+		char   *addr = (char *)kparams + kparams->poffset[param_id];
+
+		if (VARATT_IS_4B_U(addr) || VARATT_IS_1B(addr))
+			result = pg_array_datum_ref(kcxt, addr);
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	else
+	{
+		result.isnull = true;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_array_t datum)
+{
+	/* we don't support to use pg_array_t for JOIN/GROUP BY key */
+	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	return 0;
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_array_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	kern_data_store *kds = (kern_data_store *)base;
+	kern_colmeta   *smeta;
+	cl_uint		   *offset;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(cmeta->num_subattrs == 1 &&
+		   cmeta->idx_subattrs < kds->nr_colmeta);
+	assert(rowidx < kds->nitems);
+	if (cmeta->nullmap_offset != 0)
+	{
+		cl_char	   *nullmap =
+			(char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		if (att_isnull(rowidx, nullmap))
+		{
+			result.isnull = true;
+			return;
+		}
+	}
+	smeta = &kds->colmeta[cmeta->idx_subattrs];
+	offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	assert(offset[rowidx] <= offset[rowidx+1]);
+
+	result.value  = base;
+	result.isnull = false;
+	result.length = (offset[rowidx+1] - offset[rowidx]);
+	result.start  = offset[rowidx];
+	result.smeta  = smeta;
+}
+
+/*
+ * Template to generate pg_array_t from Apache Arrow store
+ */
+#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_simple_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
+
+#define STROMCL_VARLENA_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_varlena_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
+
+template <typename T>
+STATIC_FUNCTION(cl_uint)
+pg_simple_array_from_arrow(kern_context *kcxt,
+						   char *dest,
+						   kern_colmeta *cmeta,
+						   char *base,
+						   cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+		Assert(dest + sz == ARR_DATA_PTR(res));
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (dest)
+				memcpy(dest+sz, &temp.value, sizeof(temp.value));
+			sz += sizeof(temp.value);
+		}
+	}
+	return sz;
+}
+
+template <typename T>
+STATIC_INLINE(cl_uint)
+pg_varlena_array_from_arrow(kern_context *kcxt,
+							char *dest,
+							kern_colmeta *cmeta,
+							char *base,
+							cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+		Assert(dest + sz == ARR_DATA_PTR(res));
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (temp.length < 0)
+			{
+				cl_uint		vl_len = VARSIZE_ANY(temp.value);
+
+				if (dest)
+					memcpy(dest + sz, DatumGetPointer(temp.value), vl_len);
+				sz += vl_len;
+			}
+			else
+			{
+				if (dest)
+				{
+					memcpy(dest + sz + VARHDRSZ, temp.value, temp.length);
+					SET_VARSIZE(dest + sz, VARHDRSZ + temp.length);
+				}
+				sz += VARHDRSZ + temp.length;
+			}
+		}
+	}
+	return sz;
+}
+
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(bool)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(date)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(time)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(timestamp)
+STROMCL_SIMPLE_PGARRAY_TEMPLATE(interval)
+STROMCL_VARLENA_PGARRAY_TEMPLATE(bytea)
+STROMCL_VARLENA_PGARRAY_TEMPLATE(text)
+STROMCL_VARLENA_PGARRAY_TEMPLATE(bpchar)
+
+/*
+ * functions to write out Arrow::List<T> as an array of PostgreSQL
+ *
+ * only called if dclass == DATUM_CLASS__ARRAY
+ */
+STATIC_FUNCTION(cl_uint)
+__pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum)
+{
+	pg_array_t	   *array = (pg_array_t *)DatumGetPointer(datum);
+	kern_colmeta   *smeta = array->smeta;
+	char		   *base  = array->value;
+	cl_uint			start = array->start;
+	cl_uint			end   = array->start + array->length;
+	cl_uint			sz;
+
+	assert(!array->isnull && array->length >= 0);
+	assert(start <= end);
+	switch (smeta->atttypid)
+	{
+		case PG_BOOLOID:
+			sz = pg_bool_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_INT2OID:
+			sz = pg_int2_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_INT4OID:
+			sz = pg_int4_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_INT8OID:
+			sz = pg_int8_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_FLOAT2OID:
+			sz = pg_float2_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_FLOAT4OID:
+			sz = pg_float4_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_FLOAT8OID:
+			sz = pg_float8_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+#if 0
+		case PG_NUMERICOID:
+			sz = pg_numeric_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+#endif
+		case PG_DATEOID:
+			sz = pg_date_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_TIMEOID:
+			sz = pg_time_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_TIMESTAMPOID:
+			sz = pg_timestamp_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_INTERVALOID:
+			sz = pg_interval_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_BPCHAROID:
+			sz = pg_bpchar_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_TEXTOID:
+		case PG_VARCHAROID:
+			sz = pg_text_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		case PG_BYTEAOID:
+			sz = pg_bytea_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			break;
+		default:
+			STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+			return 0;
+	}
+	return sz;
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_array_datum_length(kern_context *kcxt, Datum datum)
+{
+    return __pg_array_from_arrow(kcxt, NULL, datum);
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_array_datum_write(kern_context *kcxt, char *dest, Datum datum)
+{
+    return __pg_array_from_arrow(kcxt, dest, datum);
+}
+
+/*
+ * pg_composite_t handlers (not suitable for template)
+ */
+DEVICE_FUNCTION(pg_composite_t)
+pg_composite_datum_ref(kern_context *kcxt, void *addr)
+{
+	pg_composite_t	result;
+
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		HeapTupleHeaderData *htup = (HeapTupleHeaderData *)addr;
+		result.value  = (char *)htup;
+		result.isnull = false;
+		result.length = -1;
+		result.rowidx = -1;
+		result.comp_typid = __Fetch(&htup->t_choice.t_datum.datum_typeid);
+		result.comp_typmod = __Fetch(&htup->t_choice.t_datum.datum_typmod);
+		result.smeta  = NULL;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_ref(kern_context *kcxt,
+			 pg_composite_t &result, void *addr)
+{
+	result = pg_composite_datum_ref(kcxt, addr);
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_ref_slot(kern_context *kcxt,
+				  pg_composite_t &result,
+				  cl_char dclass, Datum datum)
+{
+	if (dclass == DATUM_CLASS__NULL)
+		result = pg_composite_datum_ref(kcxt, NULL);
+	else if (dclass == DATUM_CLASS__COMPOSITE)
+		memcpy(&result, DatumGetPointer(datum), sizeof(pg_composite_t));
+	else
+	{
+		assert(dclass == DATUM_CLASS__NORMAL);
+		result = pg_composite_datum_ref(kcxt, DatumGetPointer(datum));
+	}
+}
+
+DEVICE_FUNCTION(cl_int)
+pg_datum_store(kern_context *kcxt,
+               pg_composite_t datum,
+               cl_char &dclass,
+               Datum &value)
+{
+	if (datum.isnull)
+		dclass = DATUM_CLASS__NULL;
+	else if (datum.length < 0)
+	{
+		cl_uint		len = VARSIZE_ANY(datum.value);
+
+		dclass = DATUM_CLASS__NORMAL;
+		value  = PointerGetDatum(datum.value);
+		if (PTR_ON_VLBUF(kcxt, datum.value, len))
+			return len;
+	}
+	else
+	{
+		pg_composite_t *temp;
+
+		temp = (pg_composite_t *)
+			kern_context_alloc(kcxt, sizeof(pg_composite_t));
+		if (temp)
+		{
+			memcpy(temp, &datum, sizeof(pg_composite_t));
+			dclass = DATUM_CLASS__COMPOSITE;
+			value  = PointerGetDatum(temp);
+			return sizeof(pg_composite_t);
+		}
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		dclass = DATUM_CLASS__NULL;
+	}
+	return 0;
+}
+
+DEVICE_FUNCTION(pg_composite_t)
+pg_composite_param(kern_context *kcxt, cl_uint param_id)
+{
+	kern_parambuf  *kparams = kcxt->kparams;
+	pg_composite_t	result;
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
+	{
+		char   *addr = (char *)kparams + kparams->poffset[param_id];
+
+		if (VARATT_IS_4B_U(addr) || VARATT_IS_1B(addr))
+			result = pg_composite_datum_ref(kcxt, addr);
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	else
+	{
+		result.isnull = true;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_comp_hash(kern_context *kcxt, pg_composite_t datum)
+{
+	/* we don't support to use pg_composite_t for JOIN/GROUP BY key */
+	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	return 0;
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_composite_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	kern_data_store *kds = (kern_data_store *)base;
+
+	assert(kds->format == KDS_FORMAT_ARROW);
+	assert(rowidx < kds->nitems);
+	assert(cmeta->idx_subattrs + cmeta->num_subattrs <= kds->nr_colmeta);
+	if (cmeta->nullmap_offset != 0)
+	{
+		cl_char	   *nullmap =
+			(char *)kds + __kds_unpack(cmeta->nullmap_offset);
+		if (att_isnull(rowidx, nullmap))
+		{
+			result.isnull = true;
+			return;
+		}
+	}
+	result.value  = base;
+	result.isnull = false;
+	result.length = cmeta->num_subattrs;
+	result.rowidx = rowidx;
+	result.comp_typid = cmeta->atttypid;
+	result.comp_typmod = cmeta->atttypmod;
+	result.smeta  = &kds->colmeta[cmeta->idx_subattrs];
+}
+
+/*
+ * for DATUM_CLASS_COMPOSITE handler
+ *
+ * A functions to write out Arrow::Struct as a composite datum of PostgreSQL
+ * only called if dclass == DATUM_CLASS__COMPOSITE
+ */
+STATIC_FUNCTION(void)
+__pg_composite_from_arrow(kern_context *kcxt,
+						  pg_composite_t *comp,
+						  cl_char *tup_dclass,
+						  Datum *tup_values)
+{
+	char	   *base = comp->value;
+	cl_uint		j, nfields = comp->length;
+	cl_uint		rowidx = comp->rowidx;
+
+	for (j=0; j < nfields; j++)
+	{
+		kern_colmeta   *smeta = comp->smeta + j;
+
+		if (smeta->atttypkind == TYPE_KIND__COMPOSITE)
+		{
+			pg_composite_t	temp;
+
+			pg_datum_fetch_arrow(kcxt, temp,
+								 smeta, base, rowidx);
+			pg_datum_store(kcxt, temp,
+						   tup_dclass[j],
+						   tup_values[j]);
+		}
+		else if (smeta->atttypkind == TYPE_KIND__ARRAY)
+		{
+			pg_array_t		temp;
+
+			pg_datum_fetch_arrow(kcxt, temp,
+								 smeta, base, rowidx);
+			pg_datum_store(kcxt, temp,
+						   tup_dclass[j],
+						   tup_values[j]);
+		}
+		else if (smeta->atttypkind == TYPE_KIND__BASE)
+		{
+#define ELEMENT_ENTRY(NAME,PG_TYPEOID)							\
+			case PG_TYPEOID:									\
+			{													\
+				pg_##NAME##_t	temp;							\
+					pg_datum_fetch_arrow(kcxt, temp,			\
+										 smeta, base, rowidx);	\
+					pg_datum_store(kcxt, temp,					\
+								   tup_dclass[j],				\
+								   tup_values[j]);				\
+			}													\
+			break
+
+			switch (smeta->atttypid)
+			{
+				ELEMENT_ENTRY(bool,PG_BOOLOID);
+				ELEMENT_ENTRY(int2,PG_INT2OID);
+				ELEMENT_ENTRY(int4,PG_INT4OID);
+				ELEMENT_ENTRY(int8,PG_INT8OID);
+				ELEMENT_ENTRY(float2,PG_FLOAT2OID);
+				ELEMENT_ENTRY(float4,PG_FLOAT4OID);
+				ELEMENT_ENTRY(float8,PG_FLOAT8OID);
+//				ELEMENT_ENTRY(numeric,PG_NUMERICOID);
+				ELEMENT_ENTRY(date, PG_DATEOID);
+				ELEMENT_ENTRY(time, PG_TIMEOID);
+				ELEMENT_ENTRY(timestamp, PG_TIMESTAMPOID);
+				ELEMENT_ENTRY(interval, PG_INTERVALOID);
+				ELEMENT_ENTRY(bpchar, PG_BPCHAROID);
+				ELEMENT_ENTRY(text, PG_TEXTOID);
+				ELEMENT_ENTRY(varchar, PG_VARCHAROID);
+				ELEMENT_ENTRY(bytea, PG_BYTEAOID);
+				default:
+					STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+					tup_dclass[j] = DATUM_CLASS__NULL;
+			}
+		}
+	}
+}
+#undef ELEMENT_ENTRY
+
+DEVICE_FUNCTION(cl_uint)
+pg_composite_datum_length(kern_context *kcxt, Datum datum)
+{
+	pg_composite_t *comp = (pg_composite_t *)DatumGetPointer(datum);
+	cl_uint		nfields = comp->length;
+	cl_char	   *tup_dclass;
+	Datum	   *tup_values;
+	cl_char	   *vlpos_saved = kcxt->vlpos;
+	cl_uint		sz;
+
+	tup_dclass = (cl_char *)
+		kern_context_alloc(kcxt, sizeof(cl_char) * nfields);
+	tup_values = (Datum *)
+		kern_context_alloc(kcxt, sizeof(Datum) * nfields);
+	if (!tup_dclass || !tup_values)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		kcxt->vlpos = vlpos_saved;
+		return 0;
+	}
+	__pg_composite_from_arrow(kcxt, comp, tup_dclass, tup_values);
+	sz = __compute_heaptuple_size(kcxt,
+								  comp->smeta,
+								  false,
+								  comp->length,
+								  tup_dclass,
+								  tup_values);
+	kcxt->vlpos = vlpos_saved;
+	return sz;
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_composite_datum_write(kern_context *kcxt, char *dest, Datum datum)
+{
+	pg_composite_t *comp = (pg_composite_t *)DatumGetPointer(datum);
+	cl_uint		nfields = comp->length;
+	cl_char	   *tup_dclass;
+	Datum	   *tup_values;
+	cl_uint		sz;
+	cl_char	   *vlpos_saved = kcxt->vlpos;
+
+	tup_dclass = (cl_char *)
+		kern_context_alloc(kcxt, sizeof(cl_char) * nfields);
+	tup_values = (Datum *)
+		kern_context_alloc(kcxt, sizeof(Datum) * nfields);
+	if (!tup_dclass || !tup_values)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		kcxt->vlpos = vlpos_saved;
+		return 0;
+	}
+	__pg_composite_from_arrow(kcxt, comp, tup_dclass, tup_values);
+	sz = form_kern_composite_type(kcxt,
+								  dest,
+								  comp->comp_typid,
+								  comp->comp_typmod,
+								  comp->length,
+								  comp->smeta,
+								  tup_dclass,
+								  tup_values);
+	kcxt->vlpos = vlpos_saved;
+	return sz;
+}
+

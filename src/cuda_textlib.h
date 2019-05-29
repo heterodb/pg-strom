@@ -38,73 +38,11 @@
  * 
  * ----------------------------------------------------------------
  */
-STATIC_INLINE(cl_int)
-bpchar_truelen(const char *s, cl_int len)
-{
-	cl_int		i;
-
-	for (i = len - 1; i >= 0; i--)
-	{
-		if (s[i] != ' ')
-			break;
-	}
-	return i + 1;
-}
-
 #ifndef PG_BPCHAR_TYPE_DEFINED
 #define PG_BPCHAR_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
 STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
 #ifdef __CUDACC__
-/* pg_comp_hash(bpchar) must be defined by itself */
-STATIC_FUNCTION(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
-{
-	cl_int		len;
-
-	if (datum.isnull)
-		return 0;
-	if (datum.length >= 0)
-		return pg_hash_any((cl_uchar *)datum.value, datum.length);
-	if (VARATT_IS_COMPRESSED(datum.value) ||
-		VARATT_IS_EXTERNAL(datum.value))
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		return 0;
-	}
-	len = bpchar_truelen(VARDATA_ANY(datum.value),
-						 VARSIZE_ANY_EXHDR(datum.value));
-	return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value), len);
-}
-
-STATIC_INLINE(void)
-pg_datum_fetch_arrow(kern_context *kcxt,
-					 pg_bpchar_t &result,
-					 kern_colmeta *cmeta,
-					 char *base, cl_uint rowidx)
-{
-	cl_int			unitsz = cmeta->atttypmod - VARHDRSZ;
-	char		   *addr, *pos;
-
-	if (unitsz <= 0)
-		addr = NULL;
-	else
-		addr = (char *)kern_fetch_simple_datum_arrow(cmeta,
-													 base,
-													 rowidx,
-													 unitsz);
-	if (!addr)
-		result.isnull = true;
-	else
-	{
-		pos = addr + unitsz;
-		while (pos > addr && pos[-1] == ' ')
-			pos--;
-		result.isnull = false;
-		result.value  = addr;
-		result.length = pos - addr;
-	}
-}
 #endif	/* __CUDACC__ */
 STROMCL_VARLENA_PGARRAY_TEMPLATE(bpchar)
 #endif	/* PG_BPCHAR_TYPE_DEFINED */

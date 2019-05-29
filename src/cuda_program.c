@@ -373,9 +373,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/* Per session definition if any */
 	ofs += snprintf(source + ofs, len - ofs,
 					"\n%s\n", kern_define);
-	/* variable-length datum and array */
-	ofs += snprintf(source + ofs, len - ofs,
-                    "#include \"cuda_varlena.h\"\n");
 
 	/*
 	 * PG-Strom CUDA device code libraries
@@ -416,10 +413,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_TIME_EXTRACT) == DEVKERNEL_NEEDS_TIME_EXTRACT)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_time_extract.h\"\n");
-
-	/* pg_array_t type and pg_anytype_t declaration */
-	ofs += snprintf(source + ofs, len - ofs,
-					"#include \"cuda_anytype.h\"\n");
 
 	/* Main logic of each GPU tasks */
 

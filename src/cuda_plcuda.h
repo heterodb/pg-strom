@@ -17,7 +17,6 @@
  */
 #ifndef CUDA_PLCUDA_H
 #define CUDA_PLCUDA_H
-#include "cuda_varlena.h"
 /*
  * GstoreIpcMapping
  */

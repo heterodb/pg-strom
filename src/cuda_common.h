@@ -104,7 +104,7 @@ typedef cl_ulong			uintptr_t;
 #ifdef __CUDACC__
 #undef FLEXIBLE_ARRAY_MEMBER
 #define FLEXIBLE_ARRAY_MEMBER	1
-#endif
+#endif	/* __CUDACC__ */
 
 /*
  * If NVCC includes this file, some inline function needs declarations of
@@ -113,7 +113,7 @@ typedef cl_ulong			uintptr_t;
 #ifndef __CUDACC_RTC__
 #include <assert.h>
 #include <stdio.h>
-#endif
+#endif	/* __CUDACC_RTC__ */
 
 #define Assert(cond)	assert(cond)
 
@@ -249,6 +249,25 @@ typedef struct nameData
 
 #define BLCKALIGN(LEN)			TYPEALIGN(BLCKSZ,(LEN))
 #define BLCKALIGN_DOWN(LEN)		TYPEALIGN_DOWN(BLCKSZ,(LEN))
+
+#ifdef __CUDACC__
+/*
+ * __Fetch - access macro regardless of memory alignment
+ */
+template <typename T>
+__device__ __forceinline__
+static T __Fetch(const T *ptr)
+{
+	T	temp;
+
+	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
+		return *ptr;
+	memcpy(&temp, ptr, sizeof(T));
+	return temp;
+}
+#else	/* __CUDACC__ */
+#define __Fetch(PTR)			(*(PTR))
+#endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
 /*
@@ -471,28 +490,6 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 #define STROM_SET_ERROR(p_kerror, errcode)							\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
 #endif	/* !__CUDACC__ */
-
-//TO BE MOVED LATER
-#ifdef __CUDACC__
-/*
- * __Fetch - unaligned memory access for variable types
- */
-template <typename T>
-DEVICE_ONLY_INLINE(T)
-__Fetch(const T *ptr)
-{
-	T	temp;
-
-	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
-		return *ptr;
-	memcpy(&temp, ptr, sizeof(T));
-	return temp;
-}
-#else	/* __CUDACC__ */
-#define __Fetch(PTR)			(*(PTR))
-#endif	/* __CUDACC__ */
-
-
 
 #ifndef PG_STROM_H
 /* definitions at storage/block.h */
@@ -1075,12 +1072,162 @@ typedef struct
 } GstoreIpcHandle;
 
 /*
- * device functions in libgpucore.a
+ * PostgreSQL varlena related definitions
+ *
+ * Unlike host code, device code cannot touch external and/or compressed
+ * toast datum. All the format device code can understand is usual
+ * in-memory form; 4-bytes length is put on the head and contents follows.
+ * So, it is a responsibility of host code to decompress the toast values
+ * if device code may access compressed varlena.
+ * In case when device code touches unsupported format, calculation result
+ * shall be postponed to calculate on the host side.
+ *
+ * Note that it is harmless to have external and/or compressed toast datam
+ * unless it is NOT referenced in the device code. It can understand the
+ * length of these values, unlike contents.
  */
-#ifdef __CUDACC__
-__device__ cl_uint
-pg_hash_any(const cl_uchar *k, cl_int keylen);
-#endif
+typedef struct varlena		varlena;
+#ifndef POSTGRES_H
+struct varlena {
+	cl_char		vl_len_[4];	/* Do not touch this field directly! */
+	cl_char		vl_dat[1];
+};
+
+#define VARHDRSZ			((int) sizeof(cl_int))
+#define VARDATA(PTR)		VARDATA_4B(PTR)
+#define VARSIZE(PTR)		VARSIZE_4B(PTR)
+#define VARSIZE_EXHDR(PTR)	(VARSIZE(PTR) - VARHDRSZ)
+
+#define VARSIZE_SHORT(PTR)	VARSIZE_1B(PTR)
+#define VARDATA_SHORT(PTR)	VARDATA_1B(PTR)
+
+typedef union
+{
+	struct						/* Normal varlena (4-byte length) */
+	{
+		cl_uint		va_header;
+		cl_char		va_data[1];
+    }		va_4byte;
+	struct						/* Compressed-in-line format */
+	{
+		cl_uint		va_header;
+		cl_uint		va_rawsize;	/* Original data size (excludes header) */
+		cl_char		va_data[1];	/* Compressed data */
+	}		va_compressed;
+} varattrib_4b;
+
+typedef struct
+{
+	cl_uchar	va_header;
+	cl_char		va_data[1];		/* Data begins here */
+} varattrib_1b;
+
+/* inline portion of a short varlena pointing to an external resource */
+typedef struct
+{
+	cl_uchar    va_header;		/* Always 0x80 or 0x01 */
+	cl_uchar	va_tag;			/* Type of datum */
+	cl_char		va_data[1];		/* Data (of the type indicated by va_tag) */
+} varattrib_1b_e;
+
+typedef enum vartag_external
+{
+	VARTAG_INDIRECT = 1,
+	VARTAG_ONDISK = 18
+} vartag_external;
+
+#define VARHDRSZ_SHORT			offsetof(varattrib_1b, va_data)
+#define VARATT_SHORT_MAX		0x7F
+
+typedef struct varatt_external
+{
+	cl_int		va_rawsize;		/* Original data size (includes header) */
+	cl_int		va_extsize;		/* External saved size (doesn't) */
+	cl_int		va_valueid;		/* Unique ID of value within TOAST table */
+	cl_int		va_toastrelid;	/* RelID of TOAST table containing it */
+} varatt_external;
+
+typedef struct varatt_indirect
+{
+	hostptr_t	pointer;	/* Host pointer to in-memory varlena */
+} varatt_indirect;
+
+#define VARTAG_SIZE(tag) \
+	((tag) == VARTAG_INDIRECT ? sizeof(varatt_indirect) :	\
+	 (tag) == VARTAG_ONDISK ? sizeof(varatt_external) :		\
+	 0 /* should not happen */)
+
+#define VARHDRSZ_EXTERNAL		offsetof(varattrib_1b_e, va_data)
+#define VARTAG_EXTERNAL(PTR)	VARTAG_1B_E(PTR)
+#define VARSIZE_EXTERNAL(PTR)	\
+	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
+
+/*
+ * compressed varlena format
+ */
+typedef struct toast_compress_header
+{
+	cl_int		vl_len_;	/* varlena header (do not touch directly!) */
+	cl_int		rawsize;
+} toast_compress_header;
+
+#define TOAST_COMPRESS_HDRSZ		((cl_int)sizeof(toast_compress_header))
+#define TOAST_COMPRESS_RAWSIZE(ptr)				\
+	(((toast_compress_header *) (ptr))->rawsize)
+#define TOAST_COMPRESS_RAWDATA(ptr)				\
+	(((char *) (ptr)) + TOAST_COMPRESS_HDRSZ)
+#define TOAST_COMPRESS_SET_RAWSIZE(ptr, len)	\
+	(((toast_compress_header *) (ptr))->rawsize = (len))
+
+/* basic varlena macros */
+#define VARATT_IS_4B(PTR) \
+	((((varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
+#define VARATT_IS_4B_U(PTR) \
+	((((varattrib_1b *) (PTR))->va_header & 0x03) == 0x00)
+#define VARATT_IS_4B_C(PTR) \
+	((((varattrib_1b *) (PTR))->va_header & 0x03) == 0x02)
+#define VARATT_IS_1B(PTR) \
+	((((varattrib_1b *) (PTR))->va_header & 0x01) == 0x01)
+#define VARATT_IS_1B_E(PTR) \
+	((((varattrib_1b *) (PTR))->va_header) == 0x01)
+#define VARATT_IS_COMPRESSED(PTR)		VARATT_IS_4B_C(PTR)
+#define VARATT_IS_EXTERNAL(PTR)			VARATT_IS_1B_E(PTR)
+#define VARATT_IS_EXTERNAL_ONDISK(PTR)		\
+	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_ONDISK)
+#define VARATT_IS_EXTERNAL_INDIRECT(PTR)	\
+	(VARATT_IS_EXTERNAL(PTR) && VARTAG_EXTERNAL(PTR) == VARTAG_INDIRECT)
+#define VARATT_IS_SHORT(PTR)			VARATT_IS_1B(PTR)
+#define VARATT_IS_EXTENDED(PTR)			(!VARATT_IS_4B_U(PTR))
+#define VARATT_NOT_PAD_BYTE(PTR) 		(*((cl_uchar *) (PTR)) != 0)
+
+#define VARSIZE_4B(PTR)						\
+	((__Fetch(&((varattrib_4b *)(PTR))->va_4byte.va_header)>>2) & 0x3FFFFFFF)
+#define VARSIZE_1B(PTR) \
+	((((varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
+#define VARTAG_1B_E(PTR) \
+	(((varattrib_1b_e *) (PTR))->va_tag)
+
+#define VARRAWSIZE_4B_C(PTR)	\
+	__Fetch(&((varattrib_4b *) (PTR))->va_compressed.va_rawsize)
+
+#define VARSIZE_ANY_EXHDR(PTR) \
+	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR)-VARHDRSZ_EXTERNAL : \
+	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR)-VARHDRSZ_SHORT :			 \
+	  VARSIZE_4B(PTR)-VARHDRSZ))
+
+#define VARSIZE_ANY(PTR)							\
+	(VARATT_IS_1B_E(PTR) ? VARSIZE_EXTERNAL(PTR) :	\
+	 (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
+	  VARSIZE_4B(PTR)))
+
+#define VARDATA_4B(PTR)	(((varattrib_4b *) (PTR))->va_4byte.va_data)
+#define VARDATA_1B(PTR)	(((varattrib_1b *) (PTR))->va_data)
+#define VARDATA_ANY(PTR) \
+	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
+
+#define SET_VARSIZE(PTR, len)						\
+	(((varattrib_4b *)(PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+#endif	/* POSTGRES_H */
 
 /* ----------------------------------------------------------------
  *
@@ -1124,536 +1271,15 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 #define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
 #define DATUM_CLASS__COMPOSITE	4	/* datum is pg_composite_t reference */
 
-/* ----------------------------------------------------------------
- * PostgreSQL Data Type support in CUDA kernel
- *
- * Device code will have the following representation for data types of
- * PostgreSQL, once it gets loaded from any type of data store above.
- *
- * typedef struct
- * {
- *     bool    isnull;
- *     BASE    value;
- * } pg_XXXX_t
- *
- * PostgreSQL has four different classes:
- *  - fixed-length referenced by value (simple)
- *  - fixed-length referenced by pointer (indirect)
- *  - variable-length (varlena)
- *
- * The 'simple' and 'indirect' types are always inlined to pg_XXX_t,
- * and often transformed to internal representation.
- * Some of 'varlena' types are also inlined to pg_XXXX_t variable,
- * mostly, if this varlena type has upper limit length short enough.
- */
-
-/* Type OID of PostgreSQL for base types */
-#define PG_BOOLOID			16
-#define PG_INT2OID			21
-#define PG_INT4OID			23
-#define PG_INT8OID			20
-#define PG_FLOAT2OID		421
-#define PG_FLOAT4OID		700
-#define PG_FLOAT8OID		701
-#define PG_NUMERICOID		1700
-#define PG_DATEOID			1082
-#define PG_TIMEOID			1083
-#define PG_TIMESTAMPOID		1114
-#define PG_TIMESTAMPTZOID	1184
-#define PG_INTERVALOID		1186
-#define PG_BPCHAROID		1042
-#define PG_TEXTOID			25
-#define PG_VARCHAROID		1043
-#define PG_BYTEAOID			17
-#define PG_JSONBOID			3802
-
 /*
- * Template of variable classes: fixed-length referenced by value
- * ---------------------------------------------------------------
- */
-#define STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)					\
-	typedef struct {												\
-		BASE		value;											\
-		cl_bool		isnull;											\
-	} pg_##NAME##_t;
-
-#ifdef __CUDACC__
-#define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)			\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
-	{																\
-		pg_##NAME##_t	result;										\
-																	\
-		if (!addr)													\
-			result.isnull = true;									\
-		else														\
-		{															\
-			result.isnull = false;									\
-			result.value = *((BASE *) addr);						\
-		}															\
-		return result;												\
-	}																\
-	STATIC_INLINE(void)												\
-	pg_datum_ref(kern_context *kcxt,								\
-				 pg_##NAME##_t &result, void *addr)					\
-	{																\
-		result = pg_##NAME##_datum_ref(kcxt, addr);					\
-	}																\
-	STATIC_INLINE(void)												\
-	pg_datum_ref_slot(kern_context *kcxt,							\
-					  pg_##NAME##_t &result,						\
-					  cl_char dclass, Datum datum)					\
-	{																\
-		if (dclass == DATUM_CLASS__NULL)							\
-			result = pg_##NAME##_datum_ref(kcxt, NULL);				\
-		else														\
-		{															\
-			assert(dclass == DATUM_CLASS__NORMAL);					\
-			result = pg_##NAME##_datum_ref(kcxt, &datum);			\
-		}															\
-	}																\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
-	{																\
-		kern_parambuf *kparams = kcxt->kparams;						\
-		pg_##NAME##_t result;										\
-																	\
-		if (param_id < kparams->nparams &&							\
-			kparams->poffset[param_id] > 0)							\
-		{															\
-			void   *addr = ((char *)kparams +						\
-							kparams->poffset[param_id]);			\
-			result = pg_##NAME##_datum_ref(kcxt, addr);				\
-		}															\
-		else														\
-			result.isnull = true;									\
-		return result;												\
-	}																\
-	STATIC_INLINE(cl_int)											\
-	pg_datum_store(kern_context *kcxt,								\
-				   pg_##NAME##_t datum,								\
-				   cl_char &dclass,									\
-				   Datum &value)									\
-	{																\
-		if (datum.isnull)											\
-			dclass = DATUM_CLASS__NULL;								\
-		else														\
-		{															\
-			dclass = DATUM_CLASS__NORMAL;							\
-			value = AS_DATUM(datum.value);							\
-		}															\
-		return 0;													\
-	}
-#else	/* __CUDACC__ */
-#define	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
-#endif	/* __CUDACC__ */
-
-/*
- * Template of variable classes: fixed-length referenced by pointer
- * ----------------------------------------------------------------
+ * device functions in libgpucore.a
  */
 #ifdef __CUDACC__
-#define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)					\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
-	{																\
-		pg_##NAME##_t	result;										\
-																	\
-		if (!addr)													\
-			result.isnull = true;									\
-		else														\
-		{															\
-			result.isnull = false;									\
-			memcpy(&result.value, (BASE *)addr, sizeof(BASE));		\
-		}															\
-		return result;												\
-	}																\
-	STATIC_INLINE(void)												\
-	pg_datum_ref(kern_context *kcxt,								\
-				 pg_##NAME##_t &result, void *addr)					\
-	{																\
-		result = pg_##NAME##_datum_ref(kcxt, addr);					\
-	}																\
-	STATIC_INLINE(void)												\
-	pg_datum_ref_slot(kern_context *kcxt,							\
-					  pg_##NAME##_t &result,						\
-					  cl_char dclass, Datum datum)					\
-	{																\
-		if (dclass == DATUM_CLASS__NULL)							\
-			result = pg_##NAME##_datum_ref(kcxt, NULL);				\
-		else														\
-		{															\
-			assert(dclass == DATUM_CLASS__NORMAL);					\
-			result = pg_##NAME##_datum_ref(kcxt, (char *)datum);	\
-		}															\
-	}																\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
-	{																\
-		kern_parambuf *kparams = kcxt->kparams;						\
-		pg_##NAME##_t result;										\
-																	\
-		if (param_id < kparams->nparams &&							\
-			kparams->poffset[param_id] > 0)							\
-		{															\
-			void   *addr = ((char *)kparams +						\
-							kparams->poffset[param_id]);			\
-			result = pg_##NAME##_datum_ref(kcxt, addr);				\
-		}															\
-		else														\
-			result.isnull = true;									\
-		return result;												\
-	}																\
-	STATIC_INLINE(cl_int)											\
-	pg_datum_store(kern_context *kcxt,								\
-				   pg_##NAME##_t datum,								\
-				   cl_char &dclass,									\
-				   Datum &value)									\
-	{																\
-		void	   *res;											\
-																	\
-		if (datum.isnull)											\
-		{															\
-			dclass = DATUM_CLASS__NULL;								\
-			return 0;												\
-		}															\
-		res = kern_context_alloc(kcxt, sizeof(BASE));				\
-		if (!res)													\
-		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
-			dclass = DATUM_CLASS__NULL;								\
-			return 0;												\
-		}															\
-		memcpy(res, &datum.value, sizeof(BASE));					\
-		dclass = DATUM_CLASS__NORMAL;								\
-		value = PointerGetDatum(res);								\
-		return sizeof(BASE);										\
-	}
-#else	/* __CUDACC__ */
-#define	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
-#endif	/* __CUDACC__ */
-
-/*
- * General purpose hash-function which is compatible to PG's hash_any()
- * These are basis of Hash-Join and Group-By reduction.
- */
-#ifdef __CUDACC__
-#define STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(cl_uint)										\
-	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
-	{															\
-		if (datum.isnull)										\
-			return 0;											\
-		return pg_hash_any((cl_uchar *)&datum.value,			\
-						   sizeof(BASE));						\
-	}
-#else	/* __CUDACC__ */
-#define	STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
-#endif	/* __CUDACC__ */
-
-#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM)	\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
-
-#define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)				\
-	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
-
-/* also, variable-length values */
-#include "cuda_varlena.h"
-
-/*
- * Reference to Arrow values without any transformation
- */
-#ifdef __CUDACC__
-#define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(void)										\
-	pg_datum_fetch_arrow(kern_context *kcxt,				\
-						 pg_##NAME##_t &result,				\
-						 kern_colmeta *cmeta,				\
-						 char *base, cl_uint rowidx)		\
-	{														\
-		void		   *addr;								\
-															\
-		addr = kern_fetch_simple_datum_arrow(cmeta,			\
-											 base,			\
-											 rowidx,		\
-											 sizeof(BASE));	\
-		if (!addr)											\
-			result.isnull = true;							\
-		else												\
-		{													\
-			result.isnull = false;							\
-			result.value  = *((BASE *)addr);				\
-		}													\
-	}
-#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)				\
-	STATIC_INLINE(cl_uint)									\
-	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
-								 char *dest,				\
-								 kern_colmeta *cmeta,		\
-								 char *base,				\
-								 cl_uint start,				\
-								 cl_uint end)				\
-	{														\
-		return pg_simple_array_from_arrow<pg_##NAME##_t>	\
-					(kcxt, dest, cmeta, base, start, end);	\
-	}
-
-/*
- * A common interface to reference scalar value on KDS_FORMAT_ARROW
- */
-template <typename T>
-DEVICE_ONLY_INLINE(void)
-pg_datum_ref_arrow(kern_context *kcxt,
-				   T &result,
-				   kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
-{
-	kern_colmeta   *cmeta = &kds->colmeta[colidx];
-
-	assert(kds->format == KDS_FORMAT_ARROW);
-	assert(colidx < kds->nr_colmeta &&
-		   rowidx < kds->nitems);
-	pg_datum_fetch_arrow(kcxt, result, cmeta,
-						 (char *)kds, rowidx);
-}
-
-template <typename T>
-DEVICE_ONLY_INLINE(cl_uint)
-pg_simple_array_from_arrow(kern_context *kcxt,
-						   char *dest,
-						   kern_colmeta *cmeta,
-						   char *base,
-						   cl_uint start, cl_uint end)
-{
-	ArrayType  *res = (ArrayType *)dest;
-	cl_uint		nitems = end - start;
-	cl_uint		i, sz;
-	char	   *nullmap = NULL;
-	T			temp;
-
-	Assert((cl_ulong)res == MAXALIGN(res));
-	Assert(start <= end);
-	if (cmeta->nullmap_offset == 0)
-		sz = ARR_OVERHEAD_NONULLS(1);
-	else
-		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
-
-	if (res)
-	{
-		res->ndim = 1;
-		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
-		res->elemtype = cmeta->atttypid;
-		ARR_DIMS(res)[0] = nitems;
-		ARR_LBOUND(res)[0] = 1;
-
-		nullmap = ARR_NULLBITMAP(res);
-		Assert(dest + sz == ARR_DATA_PTR(res));
-	}
-
-	for (i=0; i < nitems; i++)
-	{
-		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
-		if (temp.isnull)
-		{
-			if (nullmap)
-				nullmap[i>>3] &= ~(1<<(i&7));
-			else
-				Assert(!dest);
-		}
-		else
-		{
-			if (nullmap)
-				nullmap[i>>3] |= (1<<(i&7));
-			sz = TYPEALIGN(cmeta->attalign, sz);
-			if (dest)
-				memcpy(dest+sz, &temp.value, sizeof(temp.value));
-			sz += sizeof(temp.value);
-		}
-	}
-	return sz;
-}
-#else
-#define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)
-#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)
+DEVICE_FUNCTION(cl_uint)
+pg_hash_any(const cl_uchar *k, cl_int keylen);
 #endif
 
-#define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
-	STATIC_INLINE(pg_bool_t)								\
-	pgfn_##FNAME##EXTRA(kern_context *kcxt,					\
-						pg_##LNAME##_t arg1,				\
-						pg_##RNAME##_t arg2)				\
-	{														\
-		pg_bool_t result;									\
-															\
-		result.isnull = arg1.isnull | arg2.isnull;			\
-		if (!result.isnull)									\
-			result.value = ((CAST)arg1.value OPER			\
-							(CAST)arg2.value);				\
-		return result;										\
-	}
-#define STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)		\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,==,eq)	\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,!=,ne)	\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<, lt)	\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<=,le)	\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>, gt)	\
-	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>=,ge)
-
-/* pg_bool_t */
-#ifndef PG_BOOL_TYPE_DEFINED
-#define PG_BOOL_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool, )
-#ifdef __CUDACC__
-/* usually, called via pg_datum_ref_arrow() */
-STATIC_INLINE(void)
-pg_datum_fetch_arrow(kern_context *kcxt,
-					 pg_bool_t &result,
-					 kern_colmeta *cmeta,
-					 char *base, cl_uint rowidx)
-{
-	cl_uchar	   *bitmap;
-	cl_uchar		mask = (1 << (rowidx & 7));
-
-	bitmap = (cl_uchar *)
-		kern_fetch_simple_datum_arrow(cmeta,
-									  base,
-									  rowidx>>3,
-									  sizeof(cl_uchar));
-	if (!bitmap)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value  = ((*bitmap & mask) ? true : false);
-	}
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(bool);
-#endif	/* PG_BOOL_TYPE_DEFINED */
-
-/* pg_int2_t */
-#ifndef PG_INT2_TYPE_DEFINED
-#define PG_INT2_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short, )
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_int2_t datum)
-{
-	cl_int		ival;
-
-	if (datum.isnull)
-		return 0;
-	ival = (cl_int)datum.value;
-	return pg_hash_any((cl_uchar *)&ival, sizeof(cl_int));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(int2, cl_short)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
-#endif	/* PG_INT2_TYPE_DEFINED */
-
-/* pg_int4_t */
-#ifndef PG_INT4_TYPE_DEFINED
-#define PG_INT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int, )
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_int4_t datum)
-{
-	if (datum.isnull)
-		return 0;
-	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_int));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(int4, cl_int)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
-#endif	/* PG_INT4_TYPE_DEFINED */
-
-/* pg_int8_t */
-#ifndef PG_INT8_TYPE_DEFINED
-#define PG_INT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long, )
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_int8_t datum)
-{
-	cl_uint		hi, lo;
-
-	if (datum.isnull)
-		return 0;
-	/* see hashint8, for cross-type hash joins */
-	lo = (cl_uint)(datum.value & 0xffffffffL);
-	hi = (cl_uint)(datum.value >> 32);
-	lo ^= (datum.value >= 0 ? hi : ~hi);
-	return pg_hash_any((cl_uchar *)&lo, sizeof(cl_int));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(int8, cl_long)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
-#endif	/* PG_INT8_TYPE_DEFINED */
-
-/* pg_float2_t */
-#ifndef PG_FLOAT2_TYPE_DEFINED
-#define PG_FLOAT2_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half, __half_as_short)
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_float2_t datum)
-{
-	cl_double	fval;
-
-	/* see comments at hashfloat4() */
-	if (datum.isnull)
-		return 0;
-	fval = datum.value;
-	if (fval == 0.0)
-		return 0;
-	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(float2, cl_half)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
-#endif	/* PG_FLOAT2_TYPE_DEFINED */
-
-/* pg_float4_t */
-#ifndef PG_FLOAT4_TYPE_DEFINED
-#define PG_FLOAT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float, __float_as_int)
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_float4_t datum)
-{
-	cl_double	fval;
-
-	/* see comments at hashfloat4() */
-	if (datum.isnull || datum.value == 0.0)
-		return 0;
-	fval = datum.value;
-	return pg_hash_any((cl_uchar *)&fval, sizeof(cl_double));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(float4, cl_float)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
-#endif	/* PG_FLOAT4_TYPE_DEFINED */
-
-/* pg_float8_t */
-#ifndef PG_FLOAT8_TYPE_DEFINED
-#define PG_FLOAT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double, __double_as_longlong)
-#ifdef __CUDACC__
-STATIC_INLINE(cl_uint)
-pg_comp_hash(kern_context *kcxt, pg_float8_t datum)
-{
-	/* see comments at hashfloat8() */
-	if (datum.isnull || datum.value == 0.0)
-		return 0;
-	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_double));
-}
-#endif	/* __CUDACC__ */
-STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
-STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
-#endif	/* PG_FLOAT8_TYPE_DEFINED */
+#include "cuda_basetype.h"
 
 #ifdef	__CUDACC__
 /*
@@ -1781,6 +1407,20 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
 			(ATT_VALUES) = PointerGetDatum(ADDR);				\
 		}														\
 	} while(0)
+
+#ifdef __CUDACC__
+/*
+ * device function to decompress toast datum
+ */
+DEVICE_FUNCTION(size_t)
+toast_raw_datum_size(kern_context *kcxt, varlena *attr);
+DEVICE_FUNCTION(cl_int)
+pglz_decompress(const char *source, cl_int slen,
+				char *dest, cl_int rawsize);
+DEVICE_FUNCTION(cl_bool)
+toast_decompress_datum(char *buffer, cl_uint buflen,
+					   const varlena *datum);
+#endif	/* __CUDACC__ */
 
 /*
  * kern_get_datum_xxx
@@ -1973,5 +1613,63 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 
 /* static inline and c++ template functions */
 #include "cuda_utils.h"
+
+/*
+ * function declarations in libgpucore.a
+ */
+
+
+
+//primitive
+
+/*
+ * function declarations in libgputext.a
+ */
+STATIC_INLINE(cl_int)
+bpchar_truelen(const char *s, cl_int len)
+{
+	cl_int		i;
+
+	for (i = len - 1; i >= 0; i--)
+	{
+		if (s[i] != ' ')
+			break;
+	}
+	return i + 1;
+}
+
+/*
+ * function declarations in libgputime.a
+ */
+
+/* Julian-date equivalents of Day 0 in Unix and Postgres reckoning */
+#define UNIX_EPOCH_JDATE		2440588	/* == date2j(1970, 1, 1) */
+#define POSTGRES_EPOCH_JDATE	2451545	/* == date2j(2000, 1, 1) */
+
+#define USECS_PER_DAY		INT64CONST(86400000000)
+#define USECS_PER_HOUR		INT64CONST(3600000000)
+#define USECS_PER_MINUTE	INT64CONST(60000000)
+#define USECS_PER_SEC		INT64CONST(1000000)
+
+STATIC_INLINE(void)
+interval_cmp_value(const Interval interval, cl_long *days, cl_long *fraction)
+{
+	*fraction = interval.time % USECS_PER_DAY;
+	*days = (interval.time / USECS_PER_DAY +
+			 interval.month * 30L +
+			 interval.day);
+}
+
+/*
+ * function declarations in libgpumisc
+ */
+
+
+
+
+
+
+
+
 
 #endif	/* CUDA_COMMON_H */
