@@ -16,9 +16,9 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "mb/pg_wchar.h"
 #include "cuda_misc.h"
 #include "cuda_timelib.h"
-#include "cuda_textlib.h"
 
 typedef struct
 {
@@ -547,6 +547,17 @@ link_cuda_libraries(char *ptx_image,
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLinkAddFile(\"%s\"): %s",
 				   pathname, errorText(rc));
+		if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
+		{
+			snprintf(pathname, sizeof(pathname),
+					 PGSHAREDIR "/extension/libgputext.%s", lib_suffix);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+							   pathname, 0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+
 		//XXX - add other libraries here
 
 		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY) != 0)
@@ -1226,6 +1237,137 @@ pgstrom_put_cuda_program(GpuContext *gcontext, ProgramId program_id)
    	SpinLockRelease(&pgcache_head->lock);
 }
 
+
+
+
+/*
+ * session info for libgputext
+ */
+static void
+assign_textlib_session_info(StringInfo buf)
+{
+	/*
+	 * Makes encoding aware character length function
+	 */
+	appendStringInfoString(
+		buf,
+		"DEVICE_FUNCTION(cl_int)\n"
+		"pg_wchar_mblen(const char *str)\n"
+		"{\n");
+
+	switch (GetDatabaseEncoding())
+	{
+		case PG_EUC_JP:		/* logic in pg_euc_mblen() */
+		case PG_EUC_KR:
+		case PG_EUC_TW:		/* logic in pg_euctw_mblen(), but identical */
+		case PG_EUC_JIS_2004:
+		case PG_JOHAB:		/* logic in pg_johab_mblen(), but identical */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c == 0x8e)\n"
+				"    return 2;\n"
+				"  else if (c == 0x8f)\n"
+				"    return 3;\n"
+				"  else if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_EUC_CN:		/* logic in pg_euccn_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_UTF8:		/* logic in pg_utf_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if ((c & 0x80) == 0)\n"
+				"    return 1;\n"
+				"  else if ((c & 0xe0) == 0xc0)\n"
+				"    return 2;\n"
+				"  else if ((c & 0xf0) == 0xe0)\n"
+				"    return 3;\n"
+				"  else if ((c & 0xf8) == 0xf0)\n"
+				"    return 4;\n"
+				"#ifdef NOT_USED\n"
+				"  else if ((c & 0xfc) == 0xf8)\n"
+				"    return 5;\n"
+				"  else if ((c & 0xfe) == 0xfc)\n"
+				"    return 6;\n"
+				"#endif\n"
+				"  return 1;\n");
+			break;
+
+		case PG_MULE_INTERNAL:	/* logic in pg_mule_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c >= 0x81 && c <= 0x8d)\n"
+				"    return 2;\n"
+				"  else if (c == 0x9a || c == 0x9b)\n"
+				"    return 3;\n"
+				"  else if (c >= 0x90 && c <= 0x99)\n"
+				"    return 2;\n"
+				"  else if (c == 0x9c || c == 0x9d)\n"
+				"    return 4;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_SJIS:	/* logic in pg_sjis_mblen */
+		case PG_SHIFT_JIS_2004:
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c >= 0xa1 && c <= 0xdf)\n"
+				"    return 1;	/* 1byte kana? */\n"
+				"  else if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_BIG5:	/* logic in pg_big5_mblen */
+		case PG_GBK:	/* logic in pg_gbk_mblen, but identical */
+		case PG_UHC:	/* logic in pg_uhc_mblen, but identical */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_GB18030:/* logic in pg_gb18030_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c1 = *((const cl_uchar *)str);\n"
+				"  cl_uchar c2;\n"
+				"  if ((c & 0x80) == 0)\n"
+				"    return 1; /* ASCII */\n"
+				"  c2 = *((const cl_uchar *)(str + 1));\n"
+				"  if (c2 >= 0x30 && c2 <= 0x39)\n"
+				"    return 4;\n"
+				"  return 2;\n");
+			break;
+
+		default:	/* encoding with maxlen==1 */
+			if (pg_database_encoding_max_length() != 1)
+				elog(ERROR, "Bug? unsupported database encoding: %s",
+					 GetDatabaseEncodingName());
+			appendStringInfoString(
+				buf,
+				"  return 1;\n");
+			break;
+	}
+	appendStringInfoString(
+		buf,
+		"}\n\n");
+}
 
 /*
  * pgstrom_build_session_info

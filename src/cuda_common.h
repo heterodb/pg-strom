@@ -1625,18 +1625,8 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 /*
  * function declarations in libgputext.a
  */
-STATIC_INLINE(cl_int)
-bpchar_truelen(const char *s, cl_int len)
-{
-	cl_int		i;
+#include "cuda_textlib.h"
 
-	for (i = len - 1; i >= 0; i--)
-	{
-		if (s[i] != ' ')
-			break;
-	}
-	return i + 1;
-}
 
 /*
  * function declarations in libgputime.a
