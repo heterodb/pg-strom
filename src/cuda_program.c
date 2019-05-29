@@ -17,8 +17,9 @@
  */
 #include "pg_strom.h"
 #include "mb/pg_wchar.h"
+#include "access/xact.h"
+#include "pgtime.h"
 #include "cuda_misc.h"
-#include "cuda_timelib.h"
 
 typedef struct
 {
@@ -382,6 +383,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_mathlib.h\"\n");
+#if 0
 	/* cuda textlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) == DEVKERNEL_NEEDS_TEXTLIB)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -390,6 +392,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_timelib.h\"\n");
+#endif
 	/* cuda numeric.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -410,9 +413,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
 		ofs += snprintf(source + ofs, len - ofs,
                         "#include \"cuda_primitive.h\"\n");
-	if ((extra_flags & DEVKERNEL_NEEDS_TIME_EXTRACT) == DEVKERNEL_NEEDS_TIME_EXTRACT)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_time_extract.h\"\n");
 
 	/* Main logic of each GPU tasks */
 
@@ -551,6 +551,16 @@ link_cuda_libraries(char *ptx_image,
 		{
 			snprintf(pathname, sizeof(pathname),
 					 PGSHAREDIR "/extension/libgputext.%s", lib_suffix);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+							   pathname, 0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+		if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
+		{
+			snprintf(pathname, sizeof(pathname),
+					 PGSHAREDIR "/extension/libgputime.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -1246,6 +1256,12 @@ pgstrom_put_cuda_program(GpuContext *gcontext, ProgramId program_id)
 static void
 assign_textlib_session_info(StringInfo buf)
 {
+	appendStringInfo(
+		buf,
+		"/* ================================================\n"
+		" * session information for device text library\n"
+		" * ================================================ */\n");
+
 	/*
 	 * Makes encoding aware character length function
 	 */
@@ -1370,6 +1386,188 @@ assign_textlib_session_info(StringInfo buf)
 }
 
 /*
+ * session info for libgputime.a
+ */
+/*
+ * assign_timelib_session_info
+ *
+ * It constructs per-session information around cuda_timelib.h.
+ * At this moment, items below has to be informed.
+ * - session_timezone information
+ */
+
+/* copied from src/timezone/tzfile.h */
+#define TZ_MAX_TIMES	1200
+#define TZ_MAX_TYPES	256		/* Limited by what (uchar)'s can hold */
+#define TZ_MAX_CHARS	50		/* Maximum number of abbreviation characters */
+#define TZ_MAX_LEAPS	50		/* Maximum number of leap second corrections */
+
+/* copied from src/timezone/pgtz.h */
+#define BIGGEST(a, b)	(((a) > (b)) ? (a) : (b))
+
+struct ttinfo
+{								/* time type information */
+	cl_long		tt_gmtoff;		/* UTC offset in seconds */
+	cl_int		tt_isdst;		/* used to set tm_isdst */
+	cl_int		tt_abbrind;		/* abbreviation list index */
+	cl_int		tt_ttisstd;		/* TRUE if transition is std time */
+	cl_int		tt_ttisgmt;		/* TRUE if transition is UTC */
+};
+
+struct lsinfo
+{                               /* leap second information */
+    pg_time_t   ls_trans;       /* transition time */
+    long        ls_corr;        /* correction to apply */
+};
+
+struct state
+{
+	cl_int		leapcnt;
+	cl_int		timecnt;
+	cl_int		typecnt;
+	cl_int		charcnt;
+	cl_int		goback;
+	cl_int		goahead;
+	/* NOTE: pg_time_t has different meaning in GPU kernel */
+    cl_long		ats[TZ_MAX_TIMES];
+	cl_uchar	types[TZ_MAX_TIMES];
+	struct ttinfo ttis[TZ_MAX_TYPES];
+	cl_char		chars[BIGGEST(BIGGEST(TZ_MAX_CHARS + 1, 3 /* sizeof gmt */ ),
+							  (2 * (TZ_STRLEN_MAX + 1)))];
+	struct lsinfo lsis[TZ_MAX_LEAPS];
+};
+
+struct pg_tz
+{
+	/* TZname contains the canonically-cased name of the timezone */
+	char			TZname[TZ_STRLEN_MAX + 1];
+	struct state	state;
+};
+
+STATIC_INLINE(void)
+assign_timelib_session_info(StringInfo buf)
+{
+	const struct state *sp;
+	int			i;
+
+	appendStringInfo(
+		buf,
+		"/* ================================================\n"
+		" * session information for device time library\n"
+		" * ================================================ */\n");
+
+	/* put session timezone info */
+	sp = &session_timezone->state;
+
+	/* ats[] */
+	appendStringInfo(
+		buf,
+		"static __device__ cl_long __session_timezone_state_ats[] =\n");
+	appendStringInfo(buf, "  {\n");
+	if (sp->timecnt == 0)
+		appendStringInfo(buf, " 0");
+	else
+	{
+		for (i=0; i < sp->timecnt; i++)
+		{
+			appendStringInfo(buf, "    % 10ld,\n", sp->ats[i]);
+		}
+	}
+	appendStringInfo(buf, " };\n");
+
+	/* types[] */
+	appendStringInfo(
+		buf,
+		"static __device__ cl_uchar __session_timezone_state_types[] =\n"
+		"  {");
+	if (sp->timecnt == 0)
+		appendStringInfo(buf, " 0");
+	else
+	{
+		for (i=0; i < sp->timecnt; i++)
+		{
+			appendStringInfo(buf, " %d,", sp->types[i]);
+		}
+	}
+	appendStringInfo(buf, "  };\n");
+
+	/* ttis[] */
+	appendStringInfo(
+		buf,
+		"static __device__ tz_ttinfo __session_timezone_state_ttis[] = {\n");
+	if (sp->typecnt == 0)
+		appendStringInfo(buf, "  { 0, 0, 0, 0, 0 },\n");
+	else
+	{
+		for (i=0; i < sp->typecnt; i++)
+		{
+			appendStringInfo(
+				buf,
+				"  { %ld, %d, %d, %d, %d },\n",
+				sp->ttis[i].tt_gmtoff,
+				sp->ttis[i].tt_isdst,
+				sp->ttis[i].tt_abbrind,
+				sp->ttis[i].tt_ttisstd,
+				sp->ttis[i].tt_ttisgmt);
+		}
+	}
+	appendStringInfo(buf, "};\n");
+
+	/* lsis[] */
+	appendStringInfo(
+		buf,
+		"static __device__ tz_lsinfo __session_timezone_state_lsis[] = {\n");
+	if (sp->leapcnt == 0)
+		appendStringInfo(buf, "  { 0, 0 },\n");
+	else
+	{
+		for (i=0; i < sp->leapcnt; i++)
+		{
+			appendStringInfo(
+				buf,
+				"  { %ld, %ld },\n",
+				sp->lsis[i].ls_trans,
+				sp->lsis[i].ls_corr);
+		}
+	}
+	appendStringInfo(buf, "};\n");
+	/* session_timezone_state */
+	appendStringInfo(
+        buf,
+		"__device__ const tz_state session_timezone_state =\n"
+		"{\n"
+		"    %d,    /* leapcnt */\n"
+		"    %d,    /* timecnt */\n"
+		"    %d,    /* typecnt */\n"
+		"    %d,    /* charcnt */\n"
+		"    %d,    /* goback */\n"
+		"    %d,    /* goahead */\n"
+		"    __session_timezone_state_ats,   /* ats[] */\n"
+		"    __session_timezone_state_types, /* types[] */\n"
+		"    __session_timezone_state_ttis,  /* ttis[] */\n"
+		"    __session_timezone_state_lsis,  /* lsis[] */\n"
+		"};\n",
+		sp->leapcnt,
+		sp->timecnt,
+		sp->typecnt,
+		sp->charcnt,
+		sp->goback,
+		sp->goahead);
+
+	/* SetEpochTimestamp() */
+	appendStringInfo(
+		buf,
+		"DEVICE_FUNCTION(Timestamp)\n"
+		"SetEpochTimestamp(void)\n"
+		"{\n"
+		"  return %ldLL;\n"
+		"}\n",
+		SetEpochTimestamp());
+
+	appendStringInfoChar(buf, '\n');
+}
+
+/*
  * pgstrom_build_session_info
  *
  * it build a session specific code. if extra_flags contains a particular
@@ -1380,8 +1578,6 @@ pgstrom_build_session_info(StringInfo buf,
 						   GpuTaskState *gts,
 						   cl_uint extra_flags)
 {
-	/* OID declaration of types */
-	//pgstrom_codegen_typeoid_declarations(buf);
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(buf);

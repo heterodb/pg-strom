@@ -1279,8 +1279,6 @@ DEVICE_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
 #endif
 
-#include "cuda_basetype.h"
-
 #ifdef	__CUDACC__
 /*
  * Macro to extract a heap-tuple
@@ -1611,12 +1609,14 @@ DEVICE_FUNCTION(cl_uint)
 pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 #endif	/* __CUDACC__ */
 
+/* base type definitions and templates */
+#include "cuda_basetype.h"
+/* text functions support */
+#include "cuda_textlib.h"
+/* time functions support */
+#include "cuda_timelib.h"
 /* static inline and c++ template functions */
 #include "cuda_utils.h"
-
-/*
- * function declarations in libgpucore.a
- */
 
 
 
@@ -1625,30 +1625,13 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 /*
  * function declarations in libgputext.a
  */
-#include "cuda_textlib.h"
 
 
 /*
  * function declarations in libgputime.a
  */
 
-/* Julian-date equivalents of Day 0 in Unix and Postgres reckoning */
-#define UNIX_EPOCH_JDATE		2440588	/* == date2j(1970, 1, 1) */
-#define POSTGRES_EPOCH_JDATE	2451545	/* == date2j(2000, 1, 1) */
 
-#define USECS_PER_DAY		INT64CONST(86400000000)
-#define USECS_PER_HOUR		INT64CONST(3600000000)
-#define USECS_PER_MINUTE	INT64CONST(60000000)
-#define USECS_PER_SEC		INT64CONST(1000000)
-
-STATIC_INLINE(void)
-interval_cmp_value(const Interval interval, cl_long *days, cl_long *fraction)
-{
-	*fraction = interval.time % USECS_PER_DAY;
-	*days = (interval.time / USECS_PER_DAY +
-			 interval.month * 30L +
-			 interval.day);
-}
 
 /*
  * function declarations in libgpumisc

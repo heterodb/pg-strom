@@ -564,63 +564,6 @@ STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(float8)
 STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
 
-#ifndef PG_DATE_TYPE_DEFINED
-#define PG_DATE_TYPE_DEFINED
-typedef cl_int			DateADT;
-STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT,)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(date,DateADT)
-STROMCL_EXTERNAL_ARROW_TEMPLATE(date)
-#endif	/* PG_DATE_TYPE_DEFINED */
-
-#ifndef PG_TIME_TYPE_DEFINED
-#define PG_TIME_TYPE_DEFINED
-typedef cl_long			TimeADT;
-STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT,)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(time,TimeADT)
-STROMCL_EXTERNAL_ARROW_TEMPLATE(time)
-#endif	/* PG_TIME_TYPE_DEFINED */
-
-#ifndef PG_TIMETZ_TYPE_DEFINED
-#define PG_TIMETZ_TYPE_DEFINED
-typedef struct
-{
-	TimeADT		time;	/* all time units other than months and years */
-	cl_int		zone;	/* numeric time zone, in seconds */
-} TimeTzADT;
-STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timetz,TimeTzADT)
-#endif	/* PG_TIMETZ_TYPE_DEFINED */
-
-#ifndef PG_TIMESTAMP_TYPE_DEFINED
-#define PG_TIMESTAMP_TYPE_DEFINED
-typedef cl_long			Timestamp;
-STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp,)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timestamp,Timestamp)
-STROMCL_EXTERNAL_ARROW_TEMPLATE(timestamp)
-#endif	/* PG_TIMESTAMP_TYPE_DEFINED */
-
-#ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
-#define PG_TIMESTAMPTZ_TYPE_DEFINED
-typedef cl_long			TimestampTz;
-STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz,)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(timestamptz,TimestampTz)
-//STROMCL_EXTERNAL_ARROW_TEMPLATE(timestamptz)
-#endif
-
-#ifndef PG_INTERVAL_TYPE_DEFINED
-#define PG_INTERVAL_TYPE_DEFINED
-typedef cl_long			TimeOffset;
-typedef struct
-{
-	TimeOffset	time;	/* all time units other than days, months and years */
-	cl_int		day;	/* days, after time for alignment */
-	cl_int		month;	/* months and years, after time for alignment */
-} Interval;
-STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
-STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(interval)
-STROMCL_EXTERNAL_ARROW_TEMPLATE(interval)
-#endif	/* PG_INTERVAL_TYPE_DEFINED */
-
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
 #define PG_BYTEA_TYPE_DEFINED

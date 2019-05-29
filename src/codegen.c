@@ -859,7 +859,6 @@ vlbuf_estimate_jsonb(devfunc_info *dfunc, Expr **args, int *vl_width)
  * 'j' : this function needs cuda_jsonlib.h
  * 'y' : this function needs cuda_misc.h
  * 'r' : this function needs cuda_rangetype.h
- * 'E' : this function needs cuda_time_extract.h
  *
  * class character:
  * 'r' : right operator that takes an argument (deprecated)
@@ -1578,11 +1577,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  20, "t/f:overlaps_timestamptz"
 	},
 	/* extract() */
-	{ "date_part", 2, {TEXTOID,TIMESTAMPOID},  100, "e/f:extract_timestamp"},
-	{ "date_part", 2, {TEXTOID,TIMESTAMPTZOID},100, "e/f:extract_timestamptz"},
-	{ "date_part", 2, {TEXTOID,INTERVALOID},   100, "e/f:extract_interval"},
-	{ "date_part", 2, {TEXTOID,TIMETZOID},     100, "e/f:extract_timetz"},
-	{ "date_part", 2, {TEXTOID,TIMEOID},       100, "e/f:extract_time"},
+	{ "date_part", 2, {TEXTOID,TIMESTAMPOID},  100, "t/f:extract_timestamp"},
+	{ "date_part", 2, {TEXTOID,TIMESTAMPTZOID},100, "t/f:extract_timestamptz"},
+	{ "date_part", 2, {TEXTOID,INTERVALOID},   100, "t/f:extract_interval"},
+	{ "date_part", 2, {TEXTOID,TIMETZOID},     100, "t/f:extract_timetz"},
+	{ "date_part", 2, {TEXTOID,TIMEOID},       100, "t/f:extract_time"},
 
 	/* other time and data functions */
 	{ "now", 0, {}, 1, "t/f:now" },
@@ -2165,9 +2164,6 @@ __construct_devfunc_info(devfunc_info *entry, const char *template,
 					break;
 				case 'r':
 					flags |= DEVKERNEL_NEEDS_RANGETYPE;
-					break;
-				case 'e':
-					flags |= DEVKERNEL_NEEDS_TIME_EXTRACT;
 					break;
 				default:
 					elog(NOTICE,
