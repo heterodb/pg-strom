@@ -47,12 +47,13 @@ __CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
                  arrow_defs.h
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
-__GPU_HEADERS = cuda_common.h arrow_defs.h
-GPU_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
-__GPU_LIBS = libgpucore.a libgputext.a libgputime.a libgpumisc.a \
-             libgpuscan.a
-GPU_LIBS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_LIBS))
-GPU_DEBUG_LIBS = $(GPU_LIBS:.a=.ag)
+__GPU_HEADERS := cuda_common.h arrow_defs.h
+GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
+__GPU_FATBIN := cuda_common.fatbin cuda_numeric.fatbin \
+                cuda_timelib.fatbin cuda_textlib.fatbin cuda_misclib.fatbin \
+                cuda_gpuscan.fatbin
+GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_FATBIN))
+GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
 
 #
 # Source file of utilities
@@ -205,7 +206,7 @@ MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(CUDA_SOURCES) $(PGSTROM_SQL)
-DATA_built = $(GPU_LIBS) $(GPU_DEBUG_LIBS)
+DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -245,12 +246,11 @@ endif
 #
 # GPU Libraries
 #
-%.a: %.cu $(GPU_HEADERS)
+%.fatbin:  %.cu
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 
-%.ag: %.cu $(GPU_HEADERS)
+%.gfatbin: %.cu
 	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
-
 
 # PL/CUDA Host Template
 $(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)

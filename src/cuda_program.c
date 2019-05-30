@@ -447,7 +447,7 @@ link_cuda_libraries(char *ptx_image,
 	void		   *temp;
 	void		   *bin_image;
 	size_t			bin_length;
-	const char	   *lib_suffix = "a";
+	const char	   *lib_suffix = "fatbin";
 	char			pathname[MAXPGPATH];
 	char			log_buffer[16384];
 
@@ -487,7 +487,7 @@ link_cuda_libraries(char *ptx_image,
 		jit_index++;
 #endif
 		/* link libraries with debug options */
-		lib_suffix = "ag";
+		lib_suffix = "gfatbin";
 	}
 	/* Link log buffer */
 	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER;
@@ -514,16 +514,26 @@ link_cuda_libraries(char *ptx_image,
 
 
 		snprintf(pathname, sizeof(pathname),
-				 PGSHAREDIR "/extension/libgpucore.%s", lib_suffix);
+				 PGSHAREDIR "/extension/cuda_common.%s", lib_suffix);
 		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 						   pathname, 0, NULL, NULL);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLinkAddFile(\"%s\"): %s",
 				   pathname, errorText(rc));
+
+		/* numeric must be always loaded */
+		snprintf(pathname, sizeof(pathname),
+				 PGSHAREDIR "/extension/cuda_numeric.%s", lib_suffix);
+		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+						   pathname, 0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuLinkAddFile(\"%s\"): %s",
+				   pathname, errorText(rc));
+
 		if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
 		{
 			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/libgputext.%s", lib_suffix);
+					 PGSHAREDIR "/extension/cuda_textlib.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -533,7 +543,7 @@ link_cuda_libraries(char *ptx_image,
 		if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		{
 			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/libgputime.%s", lib_suffix);
+					 PGSHAREDIR "/extension/cuda_timelib.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -543,7 +553,7 @@ link_cuda_libraries(char *ptx_image,
 		if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
 		{
 			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/libgpumisc.%s", lib_suffix);
+					 PGSHAREDIR "/extension/cuda_misclib.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -556,7 +566,7 @@ link_cuda_libraries(char *ptx_image,
 		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY) != 0)
 		{
 			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/libgpuscan.%s", lib_suffix);
+					 PGSHAREDIR "/extension/cuda_gpuscan.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)

@@ -17,7 +17,7 @@
  */
 #include "pg_strom.h"
 #include "arrow_defs.h"
-#include "gpu_numeric.cu"
+#include "cuda_numeric.cu"
 
 /*
  * RecordBatchState

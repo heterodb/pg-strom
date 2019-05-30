@@ -1160,56 +1160,6 @@ pg_varlena_datum_write(kern_context *kcxt, char *dest, Datum datum)
  * is likely a reference to Arrow::List values, assumed to 1-dimensional
  * array in PostgreSQL.
  */
-typedef struct
-{
-	/*
-	 * NOTE: We assume 4bytes varlena header for array type. It allows
-	 * aligned references to the array elements. Unlike CPU side, we
-	 * cannot have extra malloc to ensure 4bytes varlena header. It is
-	 * the reason why our ScalarArrayOp implementation does not support
-	 * array data type referenced by Var node; which is potentially has
-	 * short format.
-	 */
-	cl_uint		vl_len_;		/* don't touch this field */
-	cl_int		ndim;			/* # of dimensions */
-	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
-	cl_uint		elemtype;		/* element type OID */
-} ArrayType;
-
-#define MAXDIM			6
-
-#define ARR_SIZE(a)		VARSIZE_ANY(a)
-#define ARR_NDIM(a)		(((ArrayType *)(a))->ndim)
-#define ARR_HASNULL(a)	(((ArrayType *)(a))->dataoffset != 0)
-#define ARR_ELEMTYPE(a)	(((ArrayType *)(a))->elemtype)
-#define ARR_DIMS(a)									\
-	((int *) (((char *) (a)) + sizeof(ArrayType)))
-#define ARR_LBOUND(a)								\
-	((int *) (((char *) (a)) + sizeof(ArrayType) +	\
-			  sizeof(int) * ARR_NDIM(a)))
-#define ARR_NULLBITMAP(a)							\
-	(ARR_HASNULL(a)									\
-	 ? (((char *) (a)) + sizeof(ArrayType) +		\
-		2 * sizeof(int) * ARR_NDIM(a))				\
-	 : (char *) NULL)
-/*
- * The total array header size (in bytes) for an array with the specified
- * number of dimensions and total number of items.
- */
-#define ARR_OVERHEAD_NONULLS(ndims)					\
-	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims))
-#define ARR_OVERHEAD_WITHNULLS(ndims, nitems)		\
-	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims) +	\
-			 ((nitems) + 7) / 8)
-/*
- * Returns a pointer to the actual array data.
- */
-#define ARR_DATA_OFFSET(a)					\
-	(ARR_HASNULL(a)							\
-	 ? ((ArrayType *)(a))->dataoffset		\
-	 : ARR_OVERHEAD_NONULLS(ARR_NDIM(a)))
-
-#define ARR_DATA_PTR(a)		(((char *) (a)) + ARR_DATA_OFFSET(a))
 
 /*
  * pg_array_t handlers (not suitable for template)
@@ -1359,11 +1309,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	result.start  = offset[rowidx];
 	result.smeta  = smeta;
 }
-
-/*
- * routine for pg_numeric_t support
- */
-#include "gpu_numeric.cu"
 
 /*
  * Template to generate pg_array_t from Apache Arrow store
