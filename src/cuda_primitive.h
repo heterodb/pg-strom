@@ -19,67 +19,6 @@
 #define CUDA_PRIMITIVE_H
 
 /*
- * type cast functions
- */
-STATIC_INLINE(pg_bool_t)
-pgfn_to_bool(kern_context *kcxt, pg_int4_t arg)
-{
-	pg_bool_t	result;
-
-	result.isnull = arg.isnull;
-	if (!result.isnull)
-		result.value = (arg.value == 0 ? false : true);
-	return result;
-}
-
-#define PG_SIMPLE_TYPECAST_TEMPLATE(TARGET,SOURCE,CAST)	\
-	STATIC_INLINE(pg_##TARGET##_t)						\
-	pgfn_to_##TARGET(kern_context *kcxt,				\
-					 pg_##SOURCE##_t arg)				\
-	{													\
-		pg_##TARGET##_t result;							\
-														\
-		result.isnull = arg.isnull;						\
-		if (!result.isnull)								\
-			result.value = (CAST)arg.value;				\
-		return result;									\
-	}
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,int4,cl_short)
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,int8,cl_short)
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,float4,cl_short)
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,float8,cl_short)
-
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,int2,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,int8,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,float4,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,float8,cl_int)
-
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,int2,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,int4,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,float4,cl_int)
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,float8,cl_int)
-
-PG_SIMPLE_TYPECAST_TEMPLATE(float2,int2,cl_half)
-PG_SIMPLE_TYPECAST_TEMPLATE(float2,int4,cl_half)
-PG_SIMPLE_TYPECAST_TEMPLATE(float2,int8,cl_half)
-PG_SIMPLE_TYPECAST_TEMPLATE(float2,float4,cl_half)
-PG_SIMPLE_TYPECAST_TEMPLATE(float2,float8,cl_half)
-
-PG_SIMPLE_TYPECAST_TEMPLATE(float4,int2,cl_float)
-PG_SIMPLE_TYPECAST_TEMPLATE(float4,int4,cl_float)
-PG_SIMPLE_TYPECAST_TEMPLATE(float4,int8,cl_float)
-PG_SIMPLE_TYPECAST_TEMPLATE(float4,float2,cl_float)
-PG_SIMPLE_TYPECAST_TEMPLATE(float4,float8,cl_float)
-
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,int2,cl_double)
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,int4,cl_double)
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,int8,cl_double)
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,cl_double)
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,cl_double)
-
-#undef PG_SIMPLE_TYPECAST_TEMPLATE
-
-/*
  * unary operators
  */
 #define PG_UNARY_PLUS_TEMPLATE(NAME)			\
@@ -142,29 +81,6 @@ PG_UNARY_ABS_TEMPLATE(int8, cl_long)
 PG_UNARY_ABS_TEMPLATE(float2, cl_float)
 PG_UNARY_ABS_TEMPLATE(float4, cl_float)
 PG_UNARY_ABS_TEMPLATE(float8, cl_double)
-
-/*
- * Simple comparison operators across data types
- */
-__STROMCL_SIMPLE_COMPARE_TEMPLATE(bool,  bool,   bool,   cl_char, ==, eq)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int2,    int2,   int2,   cl_short)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int24,   int2,   int4,   cl_int)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int28,   int2,   int8,   cl_long)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int42,   int4,   int2,   cl_int)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int4,    int4,   int4,   cl_int)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int48,   int4,   int8,   cl_long)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int82,   int8,   int2,   cl_long)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int84,   int8,   int4,   cl_long)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(int8,    int8,   int8,   cl_long)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float2,  float2, float2, cl_float)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float24, float2, float4, cl_float)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float28, float2, float8, cl_double)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float42, float4, float2, cl_float)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, cl_float)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, cl_double)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, cl_double)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, cl_double)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, cl_double)
 
 /*
  * scalar comparison functions
@@ -352,5 +268,177 @@ PG_TYPE_REINTERPRETE_TEMPLATE(float8,int8,__longlong_as_double)
 PG_TYPE_REINTERPRETE_TEMPLATE(float4,int4,__int_as_float)
 PG_TYPE_REINTERPRETE_TEMPLATE(float2,int2,__short_as_half)
 #undef PG_TYPE_REINTERPRETE_TEMPLATE
+
+/*
+ * Pre-built functions ('+' operators)
+ */
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int2pl(kern_context *kcxt,  pg_int2_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int24pl(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int28pl(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int42pl(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int4pl(kern_context *kcxt,  pg_int4_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int48pl(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int82pl(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int84pl(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int8pl(kern_context *kcxt,  pg_int8_t arg1, pg_int8_t arg2);
+
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float2pl(kern_context *kcxt,  pg_float2_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float24pl(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float28pl(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float42pl(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float4pl(kern_context *kcxt,  pg_float4_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float48pl(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float82pl(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float84pl(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float8pl(kern_context *kcxt,  pg_float8_t arg1, pg_float8_t arg2);
+
+/*
+ * Pre-built functions ('-' operators)
+ */
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int2mi(kern_context *kcxt,  pg_int2_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int24mi(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int28mi(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int42mi(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int4mi(kern_context *kcxt,  pg_int4_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int48mi(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int82mi(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int84mi(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int8mi(kern_context *kcxt,  pg_int8_t arg1, pg_int8_t arg2);
+
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float2mi(kern_context *kcxt,  pg_float2_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float24mi(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float28mi(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float42mi(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float4mi(kern_context *kcxt,  pg_float4_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float48mi(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float82mi(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float84mi(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float8mi(kern_context *kcxt,  pg_float8_t arg1, pg_float8_t arg2);
+
+/*
+ * Pre-built functions ('*' operators)
+ */
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int2mul(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int24mul(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int28mul(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int42mul(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int4mul(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int48mul(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int82mul(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int84mul(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int8mul(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float2mul(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float24mul(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float28mul(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float42mul(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float4mul(kern_context *kcxt, pg_float4_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float48mul(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float82mul(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float84mul(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float8mul(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
+
+/*
+ * Pre-built functions ('/' operators)
+ */
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int24div(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int28div(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int4div(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int48div(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int84div(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float2div(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float42div(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float4_t)
+pgfn_float4div(kern_context *kcxt, pg_float4_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float48div(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float82div(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float84div(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_float8div(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
+
+/*
+ * Pre-built functions ('%' operators)
+ */
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int2mod(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int4mod(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int8mod(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2);
 
 #endif	/* CUDA_PRIMITIVE_H */

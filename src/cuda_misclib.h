@@ -272,5 +272,57 @@ DEVICE_FUNCTION(pg_int8_t)
 pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_inet_same_family(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2);
+
+/*
+ * Misc mathematic functions
+ */
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_cbrt(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_ceil(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_exp(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_floor(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_ln(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_log10(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_dpi(kern_context *kcxt);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_round(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_sign(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_dsqrt(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_dpow(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_trunc(kern_context *kcxt, pg_float8_t arg1);
+/*
+ * Trigonometric function
+ */
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_degrees(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_radians(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_acos(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_asin(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_atan(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_cos(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_cot(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_sin(kern_context *kcxt, pg_float8_t arg1);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_tan(kern_context *kcxt, pg_float8_t arg1);
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MISCLIB_H */
