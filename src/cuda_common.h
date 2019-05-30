@@ -314,19 +314,13 @@ typedef uintptr_t		hostptr_t;
 #define MAXTHREADS_PER_BLOCK		1024
 #ifdef __CUDACC__
 #define STATIC_INLINE(RET_TYPE)					\
-	__host__ __device__ __forceinline__			\
+	__device__ __forceinline__					\
 	static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)				\
-	__host__ __device__							\
+	__device__									\
 	static RET_TYPE __attribute__ ((unused))
 #define DEVICE_FUNCTION(RET_TYPE)				\
 	__device__ RET_TYPE
-#define DEVICE_ONLY_INLINE(RET_TYPE)			\
-	__device__ __forceinline__					\
-	static RET_TYPE __attribute__ ((unused))
-#define DEVICE_ONLY_FUNCTION(RET_TYPE)			\
-	__device__									\
-	static RET_TYPE __attribute__ ((unused))
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
 #define KERNEL_FUNCTION_NUMTHREADS(RET_TYPE,NUM_THREADS) \
@@ -336,6 +330,7 @@ typedef uintptr_t		hostptr_t;
 #else	/* __CUDACC__ */
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
+#define DEVICE_FUNCTION(RET_TYPE)	RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	KERNEL_FUNCTION(RET_TYPE)
 #endif	/* !__CUDACC__ */
@@ -461,7 +456,7 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
 /*
  * kern_writeback_error_status
  */
-DEVICE_ONLY_INLINE(void)
+STATIC_INLINE(void)
 kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 {
 	/*
@@ -1611,6 +1606,8 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 
 /* base type definitions and templates */
 #include "cuda_basetype.h"
+/* numeric functions support (binary is in libgpucore.a) */
+#include "cuda_numeric.h"
 /* text functions support */
 #include "cuda_textlib.h"
 /* time functions support */

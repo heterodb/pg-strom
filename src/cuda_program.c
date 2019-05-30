@@ -392,11 +392,11 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_timelib.h\"\n");
-#endif
 	/* cuda numeric.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_numeric.h\"\n");
+#endif
 	/* cuda_jsonlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) == DEVKERNEL_NEEDS_JSONLIB)
 		ofs += snprintf(source + ofs, len - ofs,

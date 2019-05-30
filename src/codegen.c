@@ -175,8 +175,7 @@ static struct {
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("numeric", "NUMERICOID", "cl_ulong",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_NUMERIC,
-				 sizeof(struct NumericData),
+				 0, sizeof(struct NumericData),
 				 pg_numeric_devtype_hashfunc),
 	DEVTYPE_DECL("bytea",   "BYTEAOID",   "varlena *",
 				 NULL, NULL, NULL,
@@ -849,11 +848,10 @@ vlbuf_estimate_jsonb(devfunc_info *dfunc, Expr **args, int *vl_width)
  * [<attributes>/](c|r|l|b|f|F):<extra>
  *
  * attributes:
- * 'c' : this function is locale aware, thus, available only if simple
+ * 'L' : this function is locale aware, thus, available only if simple
  *       collation configuration (none, and C-locale).
  * 'p' : this function needs cuda_primitive.h
  * 'm' : this function needs cuda_mathlib.h
- * 'n' : this function needs cuda_numeric.h
  * 's' : this function needs cuda_textlib.h
  * 't' : this function needs cuda_timelib.h
  * 'j' : this function needs cuda_jsonlib.h
@@ -1240,32 +1238,32 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	 * Numeric functions
 	 * ------------------------- */
 	/* Numeric type cast functions */
-	{ "int2",    1, {NUMERICOID}, 8, "n/f:numeric_int2" },
-	{ "int4",    1, {NUMERICOID}, 8, "n/f:numeric_int4" },
-	{ "int8",    1, {NUMERICOID}, 8, "n/f:numeric_int8" },
-	{ "float4",  1, {NUMERICOID}, 8, "n/f:numeric_float4" },
-	{ "float8",  1, {NUMERICOID}, 8, "n/f:numeric_float8" },
-	{ "numeric", 1, {INT2OID},    5, "n/f:int2_numeric" },
-	{ "numeric", 1, {INT4OID},    5, "n/f:int4_numeric" },
-	{ "numeric", 1, {INT8OID},    5, "n/f:int8_numeric" },
-	{ "numeric", 1, {FLOAT4OID},  5, "n/f:float4_numeric" },
-	{ "numeric", 1, {FLOAT8OID},  5, "n/f:float8_numeric" },
+	{ "int2",    1, {NUMERICOID}, 8, "f:numeric_int2" },
+	{ "int4",    1, {NUMERICOID}, 8, "f:numeric_int4" },
+	{ "int8",    1, {NUMERICOID}, 8, "f:numeric_int8" },
+	{ "float4",  1, {NUMERICOID}, 8, "f:numeric_float4" },
+	{ "float8",  1, {NUMERICOID}, 8, "f:numeric_float8" },
+	{ "numeric", 1, {INT2OID},    5, "f:int2_numeric" },
+	{ "numeric", 1, {INT4OID},    5, "f:int4_numeric" },
+	{ "numeric", 1, {INT8OID},    5, "f:int8_numeric" },
+	{ "numeric", 1, {FLOAT4OID},  5, "f:float4_numeric" },
+	{ "numeric", 1, {FLOAT8OID},  5, "f:float8_numeric" },
 	/* Numeric operators */
-	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, 10, "n/f:numeric_add" },
-	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, 10, "n/f:numeric_sub" },
-	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, 10, "n/f:numeric_mul" },
-	{ "numeric_uplus",  1, {NUMERICOID}, 10, "n/f:numeric_uplus" },
-	{ "numeric_uminus", 1, {NUMERICOID}, 10, "n/f:numeric_uminus" },
-	{ "numeric_abs",    1, {NUMERICOID}, 10, "n/f:numeric_abs" },
-	{ "abs",            1, {NUMERICOID}, 10, "n/f:numeric_abs" },
+	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, 10, "f:numeric_add" },
+	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, 10, "f:numeric_sub" },
+	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, 10, "f:numeric_mul" },
+	{ "numeric_uplus",  1, {NUMERICOID}, 10, "f:numeric_uplus" },
+	{ "numeric_uminus", 1, {NUMERICOID}, 10, "f:numeric_uminus" },
+	{ "numeric_abs",    1, {NUMERICOID}, 10, "f:numeric_abs" },
+	{ "abs",            1, {NUMERICOID}, 10, "f:numeric_abs" },
 	/* Numeric comparison */
-	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_eq" },
-	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_ne" },
-	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_lt" },
-	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_le" },
-	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_gt" },
-	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  8, "n/f:numeric_ge" },
-	{ "numeric_cmp", 2,{NUMERICOID, NUMERICOID}, 8, "n/f:type_compare" },
+	{ "numeric_eq", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_eq" },
+	{ "numeric_ne", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_ne" },
+	{ "numeric_lt", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_lt" },
+	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_le" },
+	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_gt" },
+	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  8, "f:numeric_ge" },
+	{ "numeric_cmp", 2,{NUMERICOID, NUMERICOID},  8, "f:type_compare" },
 
 	/*
 	 * Date and time functions
@@ -1701,13 +1699,13 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	{ INT2,    "pgstrom.int2("FLOAT2")",    2, "p/f:to_int2" },
 	{ INT4,    "pgstrom.int4("FLOAT2")",    2, "p/f:to_int4" },
 	{ INT8,    "pgstrom.int8("FLOAT2")",    2, "p/f:to_int8" },
-	{ NUMERIC, "pgstrom.numeric("FLOAT2")", 2, "n/f:float2_numeric" },
+	{ NUMERIC, "pgstrom.numeric("FLOAT2")", 2, "f:float2_numeric" },
 	{ FLOAT2,  "pgstrom.float2("FLOAT4")",  2, "p/f:to_float2" },
 	{ FLOAT2,  "pgstrom.float2("FLOAT8")",  2, "p/f:to_float2" },
 	{ FLOAT2,  "pgstrom.float2("INT2")",    2, "p/f:to_float2" },
 	{ FLOAT2,  "pgstrom.float2("INT4")",    2, "p/f:to_float2" },
 	{ FLOAT2,  "pgstrom.float2("INT8")",    2, "p/f:to_float2" },
-	{ FLOAT2,  "pgstrom.float2("NUMERIC")", 2, "n/f:numeric_float2" },
+	{ FLOAT2,  "pgstrom.float2("NUMERIC")", 2, "f:numeric_float2" },
 	/* float2 - type comparison functions */
 	{ BOOL,    "pgstrom.float2_eq("FLOAT2","FLOAT2")",
 	  2, "p/f:float2eq" },
@@ -2143,9 +2141,6 @@ __construct_devfunc_info(devfunc_info *entry, const char *template,
 					break;
 				case 'p':
 					flags |= DEVKERNEL_NEEDS_PRIMITIVE;
-					break;
-				case 'n':
-					flags |= DEVKERNEL_NEEDS_NUMERIC;
 					break;
 				case 'm':
 					flags |= DEVKERNEL_NEEDS_MATHLIB;

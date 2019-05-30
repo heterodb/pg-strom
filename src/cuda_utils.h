@@ -120,7 +120,7 @@ __memcmp(const void *s1, const void *s2, size_t n)
  *   (Unacceptable to call the function in if-block)
  */
 template <typename T>
-DEVICE_ONLY_FUNCTION(T)
+STATIC_FUNCTION(T)
 pgstromTotalSum(T *values, cl_uint nitems)
 {
 	cl_uint		nsteps = get_next_log2(nitems);

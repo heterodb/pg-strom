@@ -320,7 +320,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
  * enables to extract pointer and length regardless of the physical layout.
  */
 template <typename T>
-DEVICE_ONLY_INLINE(cl_bool)
+STATIC_INLINE(cl_bool)
 pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 						 char **s, cl_int *len)
 {
@@ -471,7 +471,7 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
  * A common interface to reference scalar value on KDS_FORMAT_ARROW
  */
 template <typename T>
-DEVICE_ONLY_INLINE(void)
+STATIC_INLINE(void)
 pg_datum_ref_arrow(kern_context *kcxt,
 				   T &result,
 				   kern_data_store *kds,
@@ -594,9 +594,6 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
 STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(bpchar)
 STROMCL_EXTERNAL_ARROW_TEMPLATE(bpchar)
 #endif	/* PG_BPCHAR_TYPE_DEFINED */
-
-
-//numeric
 
 /* pg_array_t */
 #ifndef PG_ARRAY_TYPE_DEFINED

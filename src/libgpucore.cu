@@ -1084,14 +1084,6 @@ pg_comp_hash(kern_context *kcxt, pg_float8_t datum)
 	return pg_hash_any((cl_uchar *)&datum.value, sizeof(cl_double));
 }
 
-
-
-
-
-
-
-
-/* pg_comp_hash(bpchar) must be defined by itself */
 DEVICE_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
 {
@@ -1123,7 +1115,6 @@ pg_comp_hash(kern_context *kcxt, pg_interval_t datum)
 	days ^= frac;
 	return pg_hash_any((cl_uchar *)&days, sizeof(cl_long));
 }
-
 
 /*
  * for DATUM_CLASS__VARLENA handler
@@ -1168,13 +1159,6 @@ pg_varlena_datum_write(kern_context *kcxt, char *dest, Datum datum)
  * If dclass == DATUM_CLASS_ARRAY, value is a pointer to pg_array_t that
  * is likely a reference to Arrow::List values, assumed to 1-dimensional
  * array in PostgreSQL.
- * It internally uses 
- * 
- *
- *
- *
- *
- *
  */
 typedef struct
 {
@@ -1375,6 +1359,11 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	result.start  = offset[rowidx];
 	result.smeta  = smeta;
 }
+
+/*
+ * routine for pg_numeric_t support
+ */
+#include "gpu_numeric.cu"
 
 /*
  * Template to generate pg_array_t from Apache Arrow store
