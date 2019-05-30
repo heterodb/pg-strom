@@ -115,23 +115,23 @@ static struct {
 	 */
 	DEVTYPE_DECL("money",  "CASHOID",   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_MISC, 0,
+				 DEVKERNEL_NEEDS_MISCLIB, 0,
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("uuid",   "UUIDOID",   "pg_uuid_t",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_MISC, UUID_LEN,
+				 DEVKERNEL_NEEDS_MISCLIB, UUID_LEN,
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("macaddr", "MACADDROID", "macaddr",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_MISC, sizeof(macaddr),
+				 DEVKERNEL_NEEDS_MISCLIB, sizeof(macaddr),
 				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("inet",   "INETOID",   "inet_struct",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
+				 DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 				 pg_inet_devtype_hashfunc),
 	DEVTYPE_DECL("cidr",   "CIDROID",   "inet_struct",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
+				 DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 				 pg_inet_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
@@ -265,10 +265,7 @@ build_devtype_info_entry(Oid type_oid,
 	if (!element)
 		entry->type_name = pstrdup(NameStr(type_form->typname));
 	else
-	{
 		entry->type_name = pstrdup("array");
-		entry->type_flags |= DEVKERNEL_NEEDS_PGARRAY;
-	}
 	entry->type_base = pstrdup(type_basename);
 	entry->max_const = max_const;	/* may be NULL */
 	entry->min_const = min_const;	/* may be NULL */
@@ -350,7 +347,7 @@ build_composite_devtype_info(Oid type_oid, Form_pg_type type_form)
 	int				j, nfields = get_relnatts(type_relid);
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * nfields);
 	devtype_info   *entry;
-	cl_uint			extra_flags = DEVKERNEL_NEEDS_PGCOMPOSITE;
+	cl_uint			extra_flags = 0;
 	size_t			extra_sz;
 
 	extra_sz = (MAXALIGN(sizeof(Datum) * nfields) +
@@ -2155,7 +2152,7 @@ __construct_devfunc_info(devfunc_info *entry, const char *template,
 					flags |= DEVKERNEL_NEEDS_JSONLIB;
 					break;
 				case 'y':
-					flags |= DEVKERNEL_NEEDS_MISC;
+					flags |= DEVKERNEL_NEEDS_MISCLIB;
 					break;
 				case 'r':
 					flags |= DEVKERNEL_NEEDS_RANGETYPE;

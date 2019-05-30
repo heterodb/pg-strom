@@ -49,7 +49,7 @@ CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
 __GPU_HEADERS = cuda_common.h arrow_defs.h
 GPU_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
-__GPU_LIBS = libgpucore.a libgputext.a libgputime.a \
+__GPU_LIBS = libgpucore.a libgputext.a libgputime.a libgpumisc.a \
              libgpuscan.a
 GPU_LIBS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_LIBS))
 GPU_DEBUG_LIBS = $(GPU_LIBS:.a=.ag)

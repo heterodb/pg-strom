@@ -1606,40 +1606,13 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 
 /* base type definitions and templates */
 #include "cuda_basetype.h"
-/* numeric functions support (binary is in libgpucore.a) */
+/* numeric functions support (must be here) */
 #include "cuda_numeric.h"
-/* text functions support */
+/* text functions support (must be here) */
 #include "cuda_textlib.h"
-/* time functions support */
+/* time functions support (must be here) */
 #include "cuda_timelib.h"
 /* static inline and c++ template functions */
 #include "cuda_utils.h"
-
-
-
-//primitive
-
-/*
- * function declarations in libgputext.a
- */
-
-
-/*
- * function declarations in libgputime.a
- */
-
-
-
-/*
- * function declarations in libgpumisc
- */
-
-
-
-
-
-
-
-
 
 #endif	/* CUDA_COMMON_H */

@@ -1,5 +1,5 @@
 /*
- * cuda_misc.h
+ * libgpumisc.cu
  *
  * Collection of various data type support on CUDA devices
  * --
@@ -15,26 +15,23 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_MISC_H
-#define CUDA_MISC_H
-#ifdef __CUDACC__
+#define KERN_CONTEXT_VARLENA_BUFSZ 10 //tentative
+#include "cuda_common.h"
+#include "cuda_misclib.h"
+#include <sys/socket.h>
 
-/* pg_money_t */
-#ifndef PG_MONEY_TYPE_DEFINED
-#define PG_MONEY_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long, )
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(money, cl_long)
-STROMCL_SIMPLE_ARROW_TEMPLATE(money, cl_long)
-#endif
+/*
+ * Session information
+ */
+DEVICE_FUNCTION(cl_long)	PGLC_CURRENCY_SCALE(void);
 
 /*
  * Cast function to currency data type
  */
-#ifdef PG_NUMERIC_TYPE_DEFINED
-STATIC_FUNCTION(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_numeric_cash(kern_context *kcxt, pg_numeric_t arg1)
 {
-	pg_int8			temp = { PGLC_CURRENCY_SCALE, false };
+	pg_int8_t			temp = { PGLC_CURRENCY_SCALE(), false };
 	pg_numeric_t	div;
 	pg_money_t		result;
 
@@ -45,9 +42,8 @@ pgfn_numeric_cash(kern_context *kcxt, pg_numeric_t arg1)
 
 	return result;
 }
-#endif
 
-STATIC_FUNCTION(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_int4_cash(kern_context *kcxt, pg_int4_t arg1)
 {
 	pg_money_t	result;
@@ -57,12 +53,12 @@ pgfn_int4_cash(kern_context *kcxt, pg_int4_t arg1)
 	else
 	{
 		result.isnull = false;
-		result.value = (cl_long) arg1.value / (cl_long)PGLC_CURRENCY_SCALE;
+		result.value = (cl_long) arg1.value / PGLC_CURRENCY_SCALE();
 	}
 	return result;
 }
 
-STATIC_FUNCTION(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_int8_cash(kern_context *kcxt, pg_int8_t arg1)
 {
 	pg_money_t	result;
@@ -72,7 +68,7 @@ pgfn_int8_cash(kern_context *kcxt, pg_int8_t arg1)
 	else
 	{
 		result.isnull = false;
-		result.value = (cl_long) arg1.value / (cl_long)PGLC_CURRENCY_SCALE;
+		result.value = (cl_long) arg1.value / PGLC_CURRENCY_SCALE();
 	}
 	return result;
 }
@@ -80,7 +76,7 @@ pgfn_int8_cash(kern_context *kcxt, pg_int8_t arg1)
 /*
  * Currency operator functions
  */
-STATIC_FUNCTION(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_pl(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_money_t	result;
@@ -95,7 +91,7 @@ pgfn_cash_pl(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_mi(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_money_t	result;
@@ -110,7 +106,7 @@ pgfn_cash_mi(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_float8_t)
+DEVICE_FUNCTION(pg_float8_t)
 pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_float8_t	result;
@@ -134,7 +130,7 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 }
 
 #define PGFN_MONEY_MULFUNC_TEMPLATE(name,d_type,d_cast)				\
-	STATIC_FUNCTION(pg_money_t)										\
+	DEVICE_FUNCTION(pg_money_t)										\
 	pgfn_cash_mul_##name(kern_context *kcxt,						\
 						 pg_money_t arg1, pg_##d_type##_t arg2)		\
 	{																\
@@ -159,7 +155,7 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8, cl_double)
 #undef PGFN_MONEY_MULFUNC_TEMPLATE
 
 #define PGFN_MONEY_DIVFUNC_TEMPLATE(name,d_type,zero)				\
-	STATIC_FUNCTION(pg_money_t)										\
+	DEVICE_FUNCTION(pg_money_t)										\
 	pgfn_cash_div_##name(kern_context *kcxt,						\
 						 pg_money_t arg1, pg_##d_type##_t arg2)		\
 	{																\
@@ -225,7 +221,7 @@ pgfn_flt8_mul_cash(kern_context *kcxt, pg_float8_t arg1, pg_money_t arg2)
 /*
  * Currency comparison functions
  */
-STATIC_FUNCTION(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_int4_t	result;
@@ -246,18 +242,6 @@ pgfn_type_compare(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 }
 
 /* pg_uuid_t */
-#define UUID_LEN 16
-typedef struct
-{
-	cl_uchar data[UUID_LEN];
-} pgsql_uuid_t;
-
-#ifndef PG_UUID_TYPE_DEFINED
-#define PG_UUID_TYPE_DEFINED
-STROMCL_INDIRECT_TYPE_TEMPLATE(uuid, pgsql_uuid_t)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(uuid, pgsql_uuid_t)
-#endif	/* PG_UUID_TYPE_DEFINED */
-
 STATIC_INLINE(int)
 uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
 {
@@ -270,7 +254,7 @@ uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
 	return cmp;
 }
 
-STATIC_INLINE(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_int4_t	result;
@@ -285,7 +269,7 @@ pgfn_type_compare(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -300,7 +284,7 @@ pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -315,7 +299,7 @@ pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -330,7 +314,7 @@ pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -345,7 +329,7 @@ pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -360,7 +344,7 @@ pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -380,29 +364,7 @@ pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
  * ---------------------------------------------------------------- */
 
 /* pg_macaddr_t */
-typedef struct macaddr
-{
-	cl_uchar	a;
-	cl_uchar	b;
-	cl_uchar	c;
-	cl_uchar	d;
-	cl_uchar	e;
-	cl_uchar	f;
-} macaddr;
-
-#define hibits(addr) \
-	((unsigned long)(((addr)->a<<16)|((addr)->b<<8)|((addr)->c)))
-
-#define lobits(addr) \
-	((unsigned long)(((addr)->d<<16)|((addr)->e<<8)|((addr)->f)))
-
-#ifndef PG_MACADDR_TYPE_DEFINED
-#define PG_MACADDR_TYPE_DEFINED
-STROMCL_INDIRECT_TYPE_TEMPLATE(macaddr,macaddr)
-STROMCL_SIMPLE_COMP_HASH_TEMPLATE(macaddr,macaddr)
-#endif	/* PG_MACADDR_TYPE_DEFINED */
-
-STATIC_FUNCTION(pg_macaddr_t)
+DEVICE_FUNCTION(pg_macaddr_t)
 pgfn_macaddr_trunc(kern_context *kcxt, pg_macaddr_t arg1)
 {
 	arg1.value.d = 0;
@@ -427,7 +389,7 @@ macaddr_cmp_internal(macaddr *a1, macaddr *a2)
 		return 0;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_eq(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -438,7 +400,7 @@ pgfn_macaddr_eq(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_lt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -449,7 +411,7 @@ pgfn_macaddr_lt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_le(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -460,7 +422,7 @@ pgfn_macaddr_le(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_gt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -471,7 +433,7 @@ pgfn_macaddr_gt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_ge(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -482,7 +444,7 @@ pgfn_macaddr_ge(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_macaddr_ne(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_bool_t	result;
@@ -493,7 +455,7 @@ pgfn_macaddr_ne(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_int4_t	result;
@@ -504,7 +466,7 @@ pgfn_type_compare(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_macaddr_t)
+DEVICE_FUNCTION(pg_macaddr_t)
 pgfn_macaddr_not(kern_context *kcxt, pg_macaddr_t arg1)
 {
 	pg_macaddr_t	result;
@@ -522,7 +484,7 @@ pgfn_macaddr_not(kern_context *kcxt, pg_macaddr_t arg1)
 	return result;
 }
 
-STATIC_FUNCTION(pg_macaddr_t)
+DEVICE_FUNCTION(pg_macaddr_t)
 pgfn_macaddr_and(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_macaddr_t	result;
@@ -540,7 +502,7 @@ pgfn_macaddr_and(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_macaddr_t)
+DEVICE_FUNCTION(pg_macaddr_t)
 pgfn_macaddr_or(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_macaddr_t	result;
@@ -559,40 +521,7 @@ pgfn_macaddr_or(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 }
 
 /* pg_inet_t */
-
-/*
- *  This is the internal storage format for IP addresses
- *  (both INET and CIDR datatypes):
- */
-typedef struct
-{
-	cl_uchar	family;		/* PGSQL_AF_INET or PGSQL_AF_INET6 */
-	cl_uchar	bits;		/* number of bits in netmask */
-	cl_uchar	ipaddr[16];	/* up to 128 bits of address */
-} inet_struct;
-
-#define PGSQL_AF_INET		(AF_INET + 0)
-#define PGSQL_AF_INET6		(AF_INET + 1)
-
-typedef struct
-{
-	char		vl_len_[4];	/* Do not touch this field directly! */
-	inet_struct	inet_data;
-} inet;
-
-#define ip_family(inetptr)		(inetptr)->family
-#define ip_bits(inetptr)		(inetptr)->bits
-#define ip_addr(inetptr)		(inetptr)->ipaddr
-#define ip_addrsize(inetptr)	\
-	((inetptr)->family == PGSQL_AF_INET ? 4 : 16)
-#define ip_maxbits(inetptr)		\
-	((inetptr)->family == PGSQL_AF_INET ? 32 : 128)
-
-#ifndef PG_INET_TYPE_DEFINED
-#define PG_INET_TYPE_DEFINED
-STROMCL_SIMPLE_DATATYPE_TEMPLATE(inet,inet_struct)
-
-STATIC_INLINE(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pg_inet_datum_ref(kern_context *kcxt, void *addr)
 {
 	pg_inet_t	result;
@@ -642,12 +571,12 @@ pg_inet_datum_ref(kern_context *kcxt, void *addr)
 	}
 	return result;
 }
-STATIC_INLINE(void)
+DEVICE_FUNCTION(void)
 pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *addr)
 {
 	result = pg_inet_datum_ref(kcxt, addr);
 }
-STATIC_INLINE(void)
+DEVICE_FUNCTION(void)
 pg_datum_ref_slot(kern_context *kcxt, pg_inet_t &result,
 				  cl_char dclass, Datum datum)
 {
@@ -660,7 +589,7 @@ pg_datum_ref_slot(kern_context *kcxt, pg_inet_t &result,
 	}
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_FUNCTION(cl_int)
 pg_datum_store(kern_context *kcxt,
 			   pg_inet_t datum,
 			   cl_char &dclass,
@@ -674,7 +603,7 @@ pg_datum_store(kern_context *kcxt,
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
-	res = kern_context_alloc(kcxt, vl_len);
+	res = (char *)kern_context_alloc(kcxt, vl_len);
 	if (!res)
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -688,7 +617,7 @@ pg_datum_store(kern_context *kcxt,
 	return vl_len;
 }
 
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pg_inet_param(kern_context *kcxt, cl_uint param_id)
 {
 	kern_parambuf  *kparams = kcxt->kparams;
@@ -703,7 +632,7 @@ pg_inet_param(kern_context *kcxt, cl_uint param_id)
 	return pg_inet_datum_ref(kcxt,paddr);
 }
 
-STATIC_INLINE(cl_uint)
+DEVICE_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 {
 	if (!datum.isnull)
@@ -716,21 +645,6 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 						   offsetof(inet_struct, ipaddr[16]));
 	STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
 	return 0;
-}
-#endif	/* PG_INET_TYPE_DEFINED */
-
-#ifndef PG_CIDR_TYPE_DEFINED
-#define PG_CIDR_TYPE_DEFINED
-typedef pg_inet_t					pg_cidr_t;
-#define pg_cidr_datum_ref(a,b)		pg_inet_datum_ref(a,b)
-#define pg_cidr_param(a,b)			pg_inet_param(a,b)
-#endif	/* PG_CIDR_TYPE_DEFINED */
-
-/* binary compatible type cast */
-STATIC_INLINE(pg_inet_t)
-to_inet(pg_cidr_t arg)
-{
-	return arg;
 }
 
 /*
@@ -796,7 +710,7 @@ network_cmp_internal(inet_struct *a1, inet_struct *a2)
 /*
  * network_lt
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_lt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -810,7 +724,7 @@ pgfn_network_lt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_le
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_le(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -824,7 +738,7 @@ pgfn_network_le(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_eq
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_eq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -838,7 +752,7 @@ pgfn_network_eq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_ge
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_ge(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -852,7 +766,7 @@ pgfn_network_ge(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_gt
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_gt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -866,7 +780,7 @@ pgfn_network_gt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_ne
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_ne(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -880,7 +794,7 @@ pgfn_network_ne(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_cmp
  */
-STATIC_FUNCTION(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_int4_t	result;
@@ -894,7 +808,7 @@ pgfn_type_compare(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_larger
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_network_larger(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	if (arg1.isnull || arg2.isnull)
@@ -913,7 +827,7 @@ pgfn_network_larger(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_smaller
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_network_smaller(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	if (arg1.isnull || arg2.isnull)
@@ -932,7 +846,7 @@ pgfn_network_smaller(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_sub
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_sub(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -954,7 +868,7 @@ pgfn_network_sub(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_subeq
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_subeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -976,7 +890,7 @@ pgfn_network_subeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_sup
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_sup(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -999,7 +913,7 @@ pgfn_network_sup(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_supeq(inet)
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_supeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -1021,7 +935,7 @@ pgfn_network_supeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * network_overlap(inet)
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_network_overlap(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -1043,7 +957,7 @@ pgfn_network_overlap(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * set_masklen(inet,int)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_set_masklen(kern_context *kcxt, pg_inet_t arg1, pg_int4_t arg2)
 {
 	pg_inet_t	result;
@@ -1072,7 +986,7 @@ pgfn_inet_set_masklen(kern_context *kcxt, pg_inet_t arg1, pg_int4_t arg2)
 /*
  * set_masklen(cidr,int)
  */
-STATIC_FUNCTION(pg_cidr_t)
+DEVICE_FUNCTION(pg_cidr_t)
 pgfn_cidr_set_masklen(kern_context *kcxt, pg_cidr_t arg1, pg_int4_t arg2)
 {
 	pg_cidr_t	result;
@@ -1122,7 +1036,7 @@ pgfn_cidr_set_masklen(kern_context *kcxt, pg_cidr_t arg1, pg_int4_t arg2)
 /*
  * family(inet)
  */
-STATIC_FUNCTION(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_inet_family(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_int4_t	result;
@@ -1149,7 +1063,7 @@ pgfn_inet_family(kern_context *kcxt, pg_inet_t arg1)
 /*
  * network(inet)
  */
-STATIC_FUNCTION(pg_cidr_t)
+DEVICE_FUNCTION(pg_cidr_t)
 pgfn_network_network(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_cidr_t	result;
@@ -1192,7 +1106,7 @@ pgfn_network_network(kern_context *kcxt, pg_inet_t arg1)
 /*
  * netmask(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_netmask(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_inet_t	result;
@@ -1234,7 +1148,7 @@ pgfn_inet_netmask(kern_context *kcxt, pg_inet_t arg1)
 /*
  * masklen(inet)
  */
-STATIC_FUNCTION(pg_int4_t)
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_inet_masklen(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_int4_t	result;
@@ -1248,7 +1162,7 @@ pgfn_inet_masklen(kern_context *kcxt, pg_inet_t arg1)
 /*
  * broadcast(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_broadcast(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_inet_t	result;
@@ -1298,7 +1212,7 @@ pgfn_inet_broadcast(kern_context *kcxt, pg_inet_t arg1)
 /*
  * host(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_hostmask(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_inet_t	result;
@@ -1349,7 +1263,7 @@ pgfn_inet_hostmask(kern_context *kcxt, pg_inet_t arg1)
 /*
  * cidr(inet)
  */
-STATIC_FUNCTION(pg_cidr_t)
+DEVICE_FUNCTION(pg_cidr_t)
 pgfn_inet_to_cidr(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_cidr_t	result;
@@ -1398,7 +1312,7 @@ pgfn_inet_to_cidr(kern_context *kcxt, pg_inet_t arg1)
 /*
  * inetnot(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_not(kern_context *kcxt, pg_inet_t arg1)
 {
 	pg_inet_t	result;
@@ -1424,7 +1338,7 @@ pgfn_inet_not(kern_context *kcxt, pg_inet_t arg1)
 /*
  * inetand(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_and(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_inet_t	result;
@@ -1459,7 +1373,7 @@ pgfn_inet_and(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * inetor(inet)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inet_or(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_inet_t	result;
@@ -1541,7 +1455,7 @@ internal_inetpl(kern_context *kcxt, inet_struct *ip, cl_long addend)
 /*
  * inetpl(inet,bigint)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inetpl_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
 {
 	if (arg1.isnull | arg2.isnull)
@@ -1557,7 +1471,7 @@ pgfn_inetpl_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
 /*
  * inetmi(inet,bigint)
  */
-STATIC_FUNCTION(pg_inet_t)
+DEVICE_FUNCTION(pg_inet_t)
 pgfn_inetmi_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
 {
 	if (arg1.isnull | arg2.isnull)
@@ -1573,7 +1487,7 @@ pgfn_inetmi_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
 /*
  * inetmi(inet,inet)
  */
-STATIC_FUNCTION(pg_int8_t)
+DEVICE_FUNCTION(pg_int8_t)
 pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_int8_t	result;
@@ -1643,7 +1557,7 @@ pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 /*
  * inet_same_family(inet,inet)
  */
-STATIC_FUNCTION(pg_bool_t)
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_inet_same_family(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_bool_t	result;
@@ -1653,43 +1567,3 @@ pgfn_inet_same_family(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 		result.value = (ip_family(&arg1.value) == ip_family(&arg2.value));
 	return result;
 }
-
-#else	/* __CUDACC__ */
-#include "utils/pg_locale.h"
-
-STATIC_INLINE(void)
-assign_misclib_session_info(StringInfo buf)
-{
-	struct lconv *lconvert = PGLC_localeconv();
-	cl_int		fpoint;
-	cl_long		scale;
-	cl_int		i;
-
-	/* see comments about frac_digits in cash_in() */
-	fpoint = lconvert->frac_digits;
-	if (fpoint < 0 || fpoint > 10)
-		fpoint = 2;
-
-	/* compute required scale factor */
-	scale = 1;
-	for (i=0; i < fpoint; i++)
-		scale *= 10;
-
-	appendStringInfo(
-		buf,
-		"#ifdef __CUDACC__\n"
-		"/* ================================================\n"
-		" * session information for cuda_misc.h\n"
-		" * ================================================ */\n"
-		"\n"
-		"#define PGLC_CURRENCY_SCALE_LOG10  %d\n"
-		"#define PGLC_CURRENCY_SCALE        %ld\n"
-		"#define AF_INET                    %d\n"
-		"\n"
-		"#endif /* __CUDACC__ */\n",
-		fpoint,
-		scale,
-		AF_INET);
-}
-#endif	/* __CUDACC__ */
-#endif	/* CUDA_MISC_H */

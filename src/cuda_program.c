@@ -19,7 +19,7 @@
 #include "mb/pg_wchar.h"
 #include "access/xact.h"
 #include "pgtime.h"
-#include "cuda_misc.h"
+#include "utils/pg_locale.h"
 
 typedef struct
 {
@@ -355,19 +355,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define PGSTROM_KERNEL_DEBUG 1\n");
-	/*
-	 * XXX - enables support of pg_array_t / pg_composite_t
-	 *
-	 * It increases code compilation time. So, it is preferable to turn off
-	 * unless it is not required.
-	 */
-	if ((extra_flags & DEVKERNEL_NEEDS_PGARRAY) != 0)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#define PGSTROM_KERNEL_HAS_PGARRAY 1\n");
-	if ((extra_flags & DEVKERNEL_NEEDS_PGCOMPOSITE) != 0)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#define PGSTROM_KERNEL_HAS_PGCOMPOSITE 1\n");
-
 	/* Common PG-Strom device routine */
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include \"cuda_common.h\"\n");
@@ -383,28 +370,14 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_mathlib.h\"\n");
-#if 0
-	/* cuda textlib.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) == DEVKERNEL_NEEDS_TEXTLIB)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_textlib.h\"\n");
-	/* cuda timelib.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_timelib.h\"\n");
-	/* cuda numeric.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_numeric.h\"\n");
-#endif
 	/* cuda_jsonlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) == DEVKERNEL_NEEDS_JSONLIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_jsonlib.h\"\n");
-	/* cuda money.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_MISC) == DEVKERNEL_NEEDS_MISC)
+	/* cuda_misclib.h */
+	if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_misc.h\"\n");
+						"#include \"cuda_misclib.h\"\n");
 	/* cuda_rangetypes.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -561,6 +534,16 @@ link_cuda_libraries(char *ptx_image,
 		{
 			snprintf(pathname, sizeof(pathname),
 					 PGSHAREDIR "/extension/libgputime.%s", lib_suffix);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+							   pathname, 0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+		if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
+		{
+			snprintf(pathname, sizeof(pathname),
+					 PGSHAREDIR "/extension/libgpumisc.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -1567,6 +1550,38 @@ assign_timelib_session_info(StringInfo buf)
 	appendStringInfoChar(buf, '\n');
 }
 
+static void
+assign_misclib_session_info(StringInfo buf)
+{
+	struct lconv *lconvert = PGLC_localeconv();
+	cl_int		fpoint;
+	cl_long		scale;
+	cl_int		i;
+
+	/* see comments about frac_digits in cash_in() */
+	fpoint = lconvert->frac_digits;
+	if (fpoint < 0 || fpoint > 10)
+		fpoint = 2;
+
+	/* compute required scale factor */
+	scale = 1;
+	for (i=0; i < fpoint; i++)
+		scale *= 10;
+
+	appendStringInfo(
+		buf,
+		"/* ================================================\n"
+		" * session information for cuda_misc.h\n"
+		" * ================================================ */\n"
+		"\n"
+		"DEVICE_FUNCTION(cl_long)\n"
+		"PGLC_CURRENCY_SCALE(void)\n"
+		"{\n"
+		"  return %ld;\n"
+		"}\n",
+		scale);
+}
+
 /*
  * pgstrom_build_session_info
  *
@@ -1581,12 +1596,12 @@ pgstrom_build_session_info(StringInfo buf,
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(buf);
-	/* put currency info */
-	if ((extra_flags & DEVKERNEL_NEEDS_MISC) != 0)
-		assign_misclib_session_info(buf);
 	/* put text/string info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
 		assign_textlib_session_info(buf);
+	/* put currency info */
+	if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
+		assign_misclib_session_info(buf);
 
 	/* enables device projection? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)

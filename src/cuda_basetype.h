@@ -466,6 +466,16 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 						 pg_##NAME##_t &result,				\
 						 kern_colmeta *cmeta,				\
 						 char *base, cl_uint rowidx);
+#define STROMCL_UNSUPPORTED_ARROW_TEMPLATE(NAME)					\
+	STATIC_INLINE(void)												\
+	pg_datum_fetch_arrow(kern_context *kcxt,						\
+						 pg_##NAME##_t &result,						\
+						 kern_colmeta *cmeta,						\
+						 char *base, cl_uint rowidx)				\
+	{																\
+		result.isnull = true;										\
+		STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);	\
+	}
 
 /*
  * A common interface to reference scalar value on KDS_FORMAT_ARROW

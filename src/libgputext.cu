@@ -17,6 +17,7 @@
  */
 #define KERN_CONTEXT_VARLENA_BUFSZ 10 //tentative
 #include "cuda_common.h"
+#include "cuda_textlib.h"
 
 #define CHECK_VARLENA_ARGS(kcxt,result,arg1,arg2)				\
 	do {														\
