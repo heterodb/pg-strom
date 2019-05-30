@@ -439,6 +439,7 @@ reorder_devqual_clauses(PlannerInfo *root, List *dev_quals, List *dev_costs)
  */
 void
 codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
+					  const char *component,
 					  Index scanrelid, List *dev_quals_list)
 {
 	devtype_info   *dtype;
@@ -454,7 +455,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	initStringInfo(&cfunc);
 	initStringInfo(&temp);
 
-	if (dev_quals_list == NIL)
+	if (scanrelid == 0 || dev_quals_list == NIL)
 		goto output;
 	/* Let's walk on the device expression tree */
 	dev_quals = (Node *)make_flat_ands_explicit(dev_quals_list);
@@ -581,7 +582,7 @@ output:
 	appendStringInfo(
 		kern,
 		"DEVICE_FUNCTION(cl_bool)\n"
-		"gpuscan_quals_eval(kern_context *kcxt,\n"
+		"%s_quals_eval(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
 		"                   ItemPointerData *t_self,\n"
 		"                   HeapTupleHeaderData *htup)\n"
@@ -591,7 +592,7 @@ output:
 		"  return %s;\n"
 		"}\n\n"
 		"DEVICE_FUNCTION(cl_bool)\n"
-		"gpuscan_quals_eval_arrow(kern_context *kcxt,\n"
+		"%s_quals_eval_arrow(kern_context *kcxt,\n"
 		"                         kern_data_store *kds,\n"
 		"                         cl_uint row_index)\n"
 		"{\n"
@@ -599,8 +600,10 @@ output:
 		"%s\n"
 		"  return %s;\n"
 		"}\n\n",
+		component,
 		tfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
+		component,
 		cfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code));
 }
@@ -1370,7 +1373,8 @@ PlanGpuScanPath(PlannerInfo *root,
 
 	initStringInfo(&kern);
 	pgstrom_init_codegen_context(&context, root, baserel);
-	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
+	codegen_gpuscan_quals(&kern, &context, "gpuscan",
+						  baserel->relid, dev_quals);
 	qual_extra_sz = context.varlena_bufsz;
 	tlist_dev = build_gpuscan_projection(root,
 										 baserel,

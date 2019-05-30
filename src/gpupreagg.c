@@ -2933,7 +2933,7 @@ make_tlist_device_projection(List *tlist_dev,
 /*
  * gpupreagg_codegen_projection_XXXX - code generator for
  *
- * STATIC_FUNCTION(void)
+ * DEVICE_FUNCTION(void)
  * gpupreagg_projection_row(kern_context *kcxt,
  *                          kern_data_store *kds_src,
  *                          HeapTupleHeaderData *htup,
@@ -2941,14 +2941,14 @@ make_tlist_device_projection(List *tlist_dev,
  *                          cl_char *dst_isnull);
  * and
  *
- * STATIC_FUNCTION(void)
+ * DEVICE_FUNCTION(void)
  * gpupreagg_projection_slot(kern_context *kcxt,
  *                           Datum *src_values,
  *                           cl_bool *src_isnull,
  *                           Datum *dst_values,
  *                           cl_bool *dst_values);
  * and
- * STATIC_FUNCTION(void)
+ * DEVICE_FUNCTION(void)
  * gpupreagg_projection_arrow(kern_context *kcxt,
  *                            kern_data_store *kds_src,
  *                            cl_uint src_index,
@@ -3376,7 +3376,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	/* writeout kernel functions */
 	appendStringInfo(
 		kern,
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_projection_row(kern_context *kcxt,\n"
 		"                         kern_data_store *kds_src,\n"
 		"                         HeapTupleHeaderData *htup,\n"
@@ -3386,7 +3386,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"%s\n%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_projection_slot(kern_context *kcxt,\n"
 		"                          cl_char *src_dclass,\n"
 		"                          Datum   *src_values,\n"
@@ -3396,7 +3396,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"%s\n%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_projection_arrow(kern_context *kcxt,\n"
 		"                           kern_data_store *kds_src,\n"
 		"                           cl_uint src_index,\n"
@@ -3425,7 +3425,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 /*
  * gpupreagg_codegen_hashvalue - code generator for
  *
- * STATIC_FUNCTION(cl_uint)
+ * DEVICE_FUNCTION(cl_uint)
  * gpupreagg_hashvalue(kern_context *kcxt,
  *                     cl_uint *crc32_table,
  *                     cl_uint hash_value,
@@ -3487,7 +3487,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 	Assert(bms_is_empty(context->param_refs));
 	appendStringInfo(
 		kern,
-		"STATIC_FUNCTION(cl_uint)\n"
+		"DEVICE_FUNCTION(cl_uint)\n"
 		"gpupreagg_hashvalue(kern_context *kcxt,\n"
 		"                    cl_char *slot_dclass,\n"
 		"                    Datum   *slot_values)\n"
@@ -3504,7 +3504,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
  * gpupreagg_codegen_keymatch - code generator for
  *
  *
- * STATIC_FUNCTION(cl_bool)
+ * DEVICE_FUNCTION(cl_bool)
  * gpupreagg_keymatch(kern_context *kcxt,
  *                    kern_data_store *x_kds, size_t x_index,
  *                    kern_data_store *y_kds, size_t y_index);
@@ -3627,7 +3627,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 
 	appendStringInfo(
 		kern,
-		"STATIC_FUNCTION(cl_bool)\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpupreagg_keymatch(kern_context *kcxt,\n"
 		"                   kern_data_store *x_kds, size_t x_index,\n"
 		"                   kern_data_store *y_kds, size_t y_index)\n"
@@ -3730,7 +3730,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 
 	appendStringInfoString(
 		kern,
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_local_calc(cl_int attnum,\n"
 		"                     cl_char *p_acm_dclass,\n"
 		"                     Datum   *p_acm_datum,\n"
@@ -3777,7 +3777,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 
 	appendStringInfoString(
 		kern,
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_global_calc(cl_char *dst_dclass,\n"
 		"                      Datum   *dst_values,\n"
 		"                      cl_char *src_dclass,\n"
@@ -3819,7 +3819,7 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 
 	appendStringInfoString(
         kern,
-		"STATIC_FUNCTION(void)\n"
+		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_nogroup_calc(cl_int attnum,\n"
 		"                       cl_char *p_acm_dclass,\n"
 		"                       Datum   *p_acm_datum,\n"
@@ -3874,6 +3874,8 @@ gpupreagg_codegen(codegen_context *context,
 	ListCell	   *lc;
 	Bitmapset	   *outer_refs_any = NULL;
 	Bitmapset	   *outer_refs_expr = NULL;
+	size_t			varlena_bufsz = 0;
+	int				nfields = list_length(tlist_dev);
 	int				i = 0;
 
 	initStringInfo(&kern);
@@ -3883,7 +3885,7 @@ gpupreagg_codegen(codegen_context *context,
 	 * KPARAM_0 is an array of cl_char to inform which field is grouping
 	 * keys, or target of (partial) aggregate function.
 	 */
-	length = sizeof(cl_char) * list_length(tlist_dev);
+	length = sizeof(cl_char) * nfields;
 	kparam_0 = palloc0(length + VARHDRSZ);
 	SET_VARSIZE(kparam_0, length + VARHDRSZ);
 	attr_is_preagg = (cl_char *)VARDATA(kparam_0);
@@ -3901,13 +3903,10 @@ gpupreagg_codegen(codegen_context *context,
 												false));
 	pgstrom_devtype_lookup_and_track(BYTEAOID, context);
 
-	/* gpuscan_quals_eval (optional) */
-	if (cscan->scan.scanrelid > 0)
-	{
-		codegen_gpuscan_quals(&body, context,
-							  cscan->scan.scanrelid,
-							  gpa_info->outer_quals);
-	}
+	/* gpuscan_quals_eval */
+	codegen_gpuscan_quals(&body, context, "gpupreagg",
+						  cscan->scan.scanrelid,
+						  gpa_info->outer_quals);
 
 	/*
 	 * gpupreagg_projection_(row|slot)
@@ -3921,7 +3920,7 @@ gpupreagg_codegen(codegen_context *context,
 											 outer_tlist,
 											 &outer_refs_any,
 											 &outer_refs_expr);
-	Assert(list_length(tlist_alt) == list_length(tlist_dev));
+	Assert(list_length(tlist_alt) == nfields);
 	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
 	gpupreagg_codegen_projection_row(&body,
@@ -3931,7 +3930,10 @@ gpupreagg_codegen(codegen_context *context,
 									 outer_refs_expr,
 									 cscan->scan.scanrelid,
 									 outer_tlist);
-	gpa_info->varlena_bufsz = context->varlena_bufsz;
+	varlena_bufsz = (context->varlena_bufsz +
+					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
+					 MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
+					 MAXALIGN(sizeof(cl_int)  * nfields));	/* tup_extra */
 
 	/* remove junk entries for tlist_fallback */
 	foreach (lc, tlist_alt)
@@ -3943,9 +3945,15 @@ gpupreagg_codegen(codegen_context *context,
 	}
 	gpa_info->tlist_fallback = tlist_fallback;
 	/* gpupreagg_hashvalue */
+	context->varlena_bufsz = 0;
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
+	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+
 	/* gpupreagg_keymatch */
+	context->varlena_bufsz = 0;
 	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
+	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+
 	/* gpupreagg_local_calc */
 	gpupreagg_codegen_local_calc(&body, context, tlist_dev);
 	/* gpupreagg_global_calc */
@@ -3955,6 +3963,8 @@ gpupreagg_codegen(codegen_context *context,
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
+
+	gpa_info->varlena_bufsz = varlena_bufsz;
 
 	return kern.data;
 }
@@ -5165,13 +5175,13 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	switch (pds_src->kds.format)
 	{
 		case KDS_FORMAT_ROW:
-			kfunc_setup = "gpupreagg_setup_row";
+			kfunc_setup = "kern_gpupreagg_setup_row";
 			break;
 		case KDS_FORMAT_BLOCK:
-			kfunc_setup = "gpupreagg_setup_block";
+			kfunc_setup = "kern_gpupreagg_setup_block";
 			break;
 		case KDS_FORMAT_ARROW:
-			kfunc_setup = "gpupreagg_setup_arrow";
+			kfunc_setup = "kern_gpupreagg_setup_arrow";
 			break;
 		default:
 			werror("GpuPreAgg: unknown PDS format: %d", pds_src->kds.format);
@@ -5185,8 +5195,8 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	rc = cuModuleGetFunction(&kern_reduction,
 							 cuda_module,
 							 gpreagg->kern.num_group_keys == 0
-							 ? "gpupreagg_nogroup_reduction"
-							 : "gpupreagg_groupby_reduction");
+							 ? "kern_gpupreagg_nogroup_reduction"
+							 : "kern_gpupreagg_groupby_reduction");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -5525,8 +5535,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	rc = cuModuleGetFunction(&kern_gpupreagg_reduction,
 							 cuda_module,
 							 gpreagg->kern.num_group_keys == 0
-							 ? "gpupreagg_nogroup_reduction"
-							 : "gpupreagg_groupby_reduction");
+							 ? "kern_gpupreagg_nogroup_reduction"
+							 : "kern_gpupreagg_groupby_reduction");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 

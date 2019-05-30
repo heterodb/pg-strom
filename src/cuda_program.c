@@ -418,11 +418,11 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define  __CUDA_GPUJOIN_BODY__ 1\n"
 						"#include \"cuda_gpujoin.h\"\n");
-	/* GpuPreAgg */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#define  __CUDA_GPUPREAGG_BODY__ 1\n"
-						"#include \"cuda_gpupreagg.h\"\n");
+//	/* GpuPreAgg */
+//	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY)
+//		ofs += snprintf(source + ofs, len - ofs,
+//						"#define  __CUDA_GPUPREAGG_BODY__ 1\n"
+//						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -460,6 +460,10 @@ link_cuda_libraries(char *ptx_image,
 	/*
 	 * JIT Options
 	 */
+	/* Limit max number of registers per threads for ABI compatibility */
+	jit_options[jit_index] = CU_JIT_MAX_REGISTERS;
+	jit_option_values[jit_index] = (void *)CUDA_MAXREGCOUNT;
+	jit_index++;
 
 	/* Get optimal binary to the current context */
 	jit_options[jit_index] = CU_JIT_TARGET_FROM_CUCONTEXT;
@@ -567,6 +571,16 @@ link_cuda_libraries(char *ptx_image,
 		{
 			snprintf(pathname, sizeof(pathname),
 					 PGSHAREDIR "/extension/cuda_gpuscan.%s", lib_suffix);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+							   pathname, 0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+		if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY) != 0)
+		{
+			snprintf(pathname, sizeof(pathname),
+					 PGSHAREDIR "/extension/cuda_gpupreagg.%s", lib_suffix);
 			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 							   pathname, 0, NULL, NULL);
 			if (rc != CUDA_SUCCESS)
@@ -743,7 +757,7 @@ build_cuda_program(program_cache_entry *src_entry)
 	nvrtcResult		rc;
 	char		   *source = NULL;
 	char			tempfile[MAXPGPATH];
-	const char	   *options[10];
+	const char	   *options[16];
 	int				opt_index = 0;
 	char		   *ptx_image = NULL;
 	size_t			ptx_length = 0;
@@ -779,10 +793,6 @@ build_cuda_program(program_cache_entry *src_entry)
 				   nvrtcGetErrorString(rc));
 		/*
 		 * Put command line options
-		 *
-		 * MEMO: (23-Oct-2017) It looks to me "--device-debug" leads
-		 * CUDA_ERROR_ILLEGAL_INSTRUCTION error on execution.
-		 * So, as a workaround, we removed this option here.
 		 */
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/extension";

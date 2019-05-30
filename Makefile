@@ -49,12 +49,21 @@ CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
 __GPU_HEADERS := cuda_common.h arrow_defs.h
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
-__GPU_FATBIN := cuda_common.fatbin cuda_numeric.fatbin \
-                cuda_primitive.fatbin cuda_timelib.fatbin cuda_textlib.fatbin \
-                cuda_misclib.fatbin \
-                cuda_gpuscan.fatbin
+__GPU_FATBIN := cuda_common.fatbin cuda_numeric.fatbin    \
+                cuda_primitive.fatbin cuda_timelib.fatbin \
+                cuda_textlib.fatbin cuda_misclib.fatbin   \
+                cuda_gpuscan.fatbin cuda_gpupreagg.fatbin
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_FATBIN))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
+
+MAXREGCOUNT := 32
+# MEMO: Some of kernel functions shall be built to launch 1024 threads
+# per block, by KERNEL_FUNCTION_MAXTHREADS(). It saves usage of registers
+# per thread. Right now, NVCC/NVRTC configures 32x1024 = 32k registers per SM.
+# Our logic can be improved in the furture version regardless of the block-
+# size, however, we use 32 registers per thread is a safety configuration for
+# all the run-time build.
+
 
 #
 # Source file of utilities
@@ -180,6 +189,7 @@ PGSTROM_FLAGS += -DPGSERV_INCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
+PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lcuda
@@ -188,17 +198,10 @@ SHLIB_LINK := -L $(LPATH) -lcuda
 NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
 NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
               --fatbin --relocatable-device-code=true \
-              --maxrregcount=32 \
+              --maxrregcount=$(MAXREGCOUNT) \
               --gpu-architecture=compute_60 \
               --gpu-code=sm_60,sm_61,sm_70,sm_72,sm_75
 NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
-
-# MEMO: Some of kernel functions shall be built to launch 1024 threads
-# per block, by KERNEL_FUNCTION_MAXTHREADS(). It saves usage of registers
-# per thread. Right now, NVCC/NVRTC configures 32x1024 = 32k registers per SM.
-# Our logic can be improved in the furture version regardless of the block-
-# size, however, we use 32 registers per thread is a safety configuration for
-# all the run-time build.
 
 #
 # Definition of PG-Strom Extension

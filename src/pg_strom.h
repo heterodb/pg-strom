@@ -1213,6 +1213,7 @@ extern bool enable_gpuscan;		/* GUC */
 extern Cost cost_for_dma_receive(RelOptInfo *rel, double ntuples);
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
+								  const char *component,
 								  Index scanrelid,
 								  List *dev_quals_list);
 extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,

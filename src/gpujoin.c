@@ -4424,6 +4424,7 @@ gpujoin_codegen(PlannerInfo *root,
 	 */
 	codegen_gpuscan_quals(&source,
 						  context,
+						  "gpujoin",
 						  cscan->scan.scanrelid,
 						  gj_info->outer_quals);
 	varlena_bufsz = context->varlena_bufsz;

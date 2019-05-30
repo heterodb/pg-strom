@@ -177,6 +177,19 @@ typedef struct gpujoinSuspendContext	gpujoinSuspendContext;
 	(!(htup) ? NULL : kern_get_datum_tuple((colmeta),(htup),(colidx)))
 
 /*
+ * gpujoin_quals_eval(_arrow)
+ */
+DEVICE_FUNCTION(cl_bool)
+gpujoin_quals_eval(kern_context *kcxt,
+				   kern_data_store *kds,
+				   ItemPointerData *t_self,
+				   HeapTupleHeaderData *htup);
+DEVICE_FUNCTION(cl_bool)
+gpujoin_quals_eval_arrow(kern_context *kcxt,
+						 kern_data_store *kds,
+						 cl_uint row_index);
+
+/*
  * gpujoin_join_quals
  *
  * Evaluation of join qualifier in the given depth. It shall return true
@@ -399,7 +412,7 @@ gpujoin_load_source(kern_context *kcxt,
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, row_index);
 			t_offset = __kds_packed((char *)&tupitem->htup -
 									(char *)kds_src);
-			visible = gpuscan_quals_eval(kcxt,
+			visible = gpujoin_quals_eval(kcxt,
 										 kds_src,
 										 &tupitem->t_self,
 										 &tupitem->htup);
@@ -446,7 +459,7 @@ gpujoin_load_source(kern_context *kcxt,
 
 					htup = PageGetItem(pg_page, lpp);
 
-					visible = gpuscan_quals_eval(kcxt,
+					visible = gpujoin_quals_eval(kcxt,
 												 kds_src,
 												 &t_self,
 												 htup);
@@ -469,7 +482,7 @@ gpujoin_load_source(kern_context *kcxt,
 		if (row_index < __ldg(&kds_src->nitems))
 		{
 			t_offset = row_index + 1;
-			visible = gpuscan_quals_eval_arrow(kcxt,
+			visible = gpujoin_quals_eval_arrow(kcxt,
 											   kds_src,
 											   row_index);
 		}
