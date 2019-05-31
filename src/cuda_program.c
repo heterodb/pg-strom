@@ -381,22 +381,19 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
 		ofs += snprintf(source + ofs, len - ofs,
                         "#include \"cuda_primitive.h\"\n");
-
-	/* Main logic of each GPU tasks */
-
-	/* GpuScan (declaration part) */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_DECL)
+	/* GpuScan */
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpuscan.h\"\n");
-	/* GpuJoin (declaration part) */
+	/* GpuJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN_DECL)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpujoin.h\"\n");
-	/* GpuPreAgg (declaration part) */
+	/* GpuPreAgg */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpupreagg.h\"\n");
-	/* GpuSort (declaration part) */
+	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
@@ -1565,20 +1562,17 @@ pgstrom_build_session_info(StringInfo buf,
 						   GpuTaskState *gts,
 						   cl_uint extra_flags)
 {
-	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(buf);
-	/* put text/string info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
 		assign_textlib_session_info(buf);
-	/* put currency info */
 	if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
 		assign_misclib_session_info(buf);
 
-	/* enables device projection? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
+		assign_gpuscan_session_info(buf, gts);
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 		assign_gpujoin_session_info(buf, gts);
-	/* enables outer-quals evaluation? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
 		assign_gpupreagg_session_info(buf, gts);
 }

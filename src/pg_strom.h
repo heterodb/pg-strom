@@ -1228,6 +1228,7 @@ extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
 extern Path *pgstrom_copy_gpuscan_path(const Path *pathnode);
+extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*

@@ -653,18 +653,8 @@ codegen_gpuscan_projection(StringInfo kern,
 	}
 
 	/*
-	 * step.2 - define preprocessor variables
+	 * step.2 - extend varlena-buffer for dclass/values array
 	 */
-
-	//XXX
-	appendStringInfo(
-		kern,
-		"#define GPUSCAN_VARLENA_BUFSZ %d\n"
-		"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS %d\n",
-		context->varlena_bufsz,
-		tlist_dev ? list_length(tlist_dev) : RelationGetNumberOfAttributes(relation));
-	//HOGE
-	//extend varlena-buffer for dclass/values array
 	if (tlist_dev)
 		nfields = list_length(tlist_dev);
 	else
@@ -712,7 +702,6 @@ codegen_gpuscan_projection(StringInfo kern,
 
 		appendStringInfoString(
 			kern,
-			"#define GPUSCAN_HAS_DEVICE_PROJECTION  false\n"
 			"DEVICE_FUNCTION(void)\n"
 			"gpuscan_projection_tuple(kern_context *kcxt,\n"
 			"                         kern_data_store *kds_src,\n"
@@ -952,7 +941,6 @@ codegen_gpuscan_projection(StringInfo kern,
 	 */
 	appendStringInfo(
 		kern,
-		"#define GPUSCAN_HAS_DEVICE_PROJECTION  true\n"
 		"DEVICE_FUNCTION(void)\n"
 		"gpuscan_projection_tuple(kern_context *kcxt,\n"
 		"                         kern_data_store *kds_src,\n"
@@ -986,36 +974,6 @@ codegen_gpuscan_projection(StringInfo kern,
 	pfree(tbody.data);
 	pfree(cbody.data);
 }
-
-static void
-codegen_gpuscan_entrypoint(StringInfo kern, codegen_context *context)
-{
-	const char *labels[] = {"row", "block", "arrow", NULL};
-	int			i;
-
-	for (i=0; labels[i] != NULL; i++)
-	{
-		appendStringInfo(
-			kern,
-			"\n"
-			"KERNEL_FUNCTION(void)\n"
-			"kern_gpuscan_entry_%s(kern_gpuscan *kgpuscan,\n"
-			"                      kern_data_store *kds_src,\n"
-			"                      kern_data_store *kds_dst)\n"
-			"{\n"
-			"  kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);\n"
-			"  DECL_KERNEL_CONTEXT(u);\n"
-			"\n"
-			"  INIT_KERNEL_CONTEXT(&u.kcxt, kparams);\n"
-			"  kern_gpuscan_main_%s(&u.kcxt, kgpuscan, kds_src, kds_dst,\n"
-			"                       GPUSCAN_HAS_DEVICE_PROJECTION);\n"
-			"  kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);\n"
-			"}\n",
-			labels[i],
-			labels[i]);
-	}
-}
-
 
 /*
  * add_unique_expression - adds an expression node on the supplied
@@ -1157,7 +1115,7 @@ build_gpuscan_projection(PlannerInfo *root,
 		 * So, if GPU projection wants to make something valuable, we need
 		 * to check path-target.
 		 * Also don't forget all the Var-nodes to be added must exist at
-		 * the custrom_scan_tlist because setrefs.c references this list.
+		 * the custom_scan_tlist because setrefs.c references this list.
 		 */
 		foreach (lc, baserel->reltarget->exprs)
 		{
@@ -1399,7 +1357,6 @@ PlanGpuScanPath(PlannerInfo *root,
 							   relation,
 							   tlist_dev,
 							   varattnos);
-	codegen_gpuscan_entrypoint(&kern, &context);
 	heap_close(relation, NoLock);
 
 	/* save the outer_refs for columnar optimization */
@@ -1631,6 +1588,21 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
 	}
 	return expression_tree_mutator(node, fixup_varnode_to_origin,
 								   (void *)custom_scan_tlist);
+}
+
+/*
+ * assign_gpuscan_session_info
+ */
+void
+assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
+{
+	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
+
+	appendStringInfo(
+		buf,
+		"/* GpuScan session info */\n"
+		"#define GPUSCAN_HAS_DEVICE_PROJECTION %d\n\n",
+		cscan->custom_scan_tlist != NIL ? 1 : 0);
 }
 
 /*
@@ -2564,11 +2536,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 * Lookup GPU kernel functions
 	 */
 	if (pds_src->kds.format == KDS_FORMAT_ROW)
-		kern_fname = "kern_gpuscan_entry_row";
+		kern_fname = "kern_gpuscan_main_row";
 	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-		kern_fname = "kern_gpuscan_entry_block";
+		kern_fname = "kern_gpuscan_main_block";
 	else if (pds_src->kds.format == KDS_FORMAT_ARROW)
-		kern_fname = "kern_gpuscan_entry_arrow";
+		kern_fname = "kern_gpuscan_main_arrow";
 	else
 		werror("GpuScan: unknown PDS format: %d", pds_src->kds.format);
 

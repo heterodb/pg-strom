@@ -20,14 +20,14 @@
 #include "cuda_gpuscan.h"
 
 /*
- * kern_gpuscan_main_row - GpuScan logic for KDS_FORMAT_ROW
+ * gpuscan_main_row - GpuScan logic for KDS_FORMAT_ROW
  */
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_row(kern_context *kcxt,
-					  kern_gpuscan *kgpuscan,
-					  kern_data_store *kds_src,
-					  kern_data_store *kds_dst,
-					  bool has_device_projection)
+gpuscan_main_row(kern_context *kcxt,
+				 kern_gpuscan *kgpuscan,
+				 kern_data_store *kds_src,
+				 kern_data_store *kds_dst,
+				 bool has_device_projection)
 {
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
@@ -225,14 +225,14 @@ out_nostat:
 }
 
 /*
- * gpuscan_exec_block - GpuScan logic for KDS_FORMAT_BLOCK
+ * gpuscan_main_block - GpuScan logic for KDS_FORMAT_BLOCK
  */
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_block(kern_context *kcxt,
-						kern_gpuscan *kgpuscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst,
-						bool has_device_projection)
+gpuscan_main_block(kern_context *kcxt,
+				   kern_gpuscan *kgpuscan,
+				   kern_data_store *kds_src,
+				   kern_data_store *kds_dst,
+				   bool has_device_projection)
 {
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
@@ -483,14 +483,14 @@ out_nostat:
 }
 
 /*
- * kern_gpuscan_main_arrow - GpuScan logic for KDS_FORMAT_ARROW
+ * gpuscan_main_arrow - GpuScan logic for KDS_FORMAT_ARROW
  */
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_arrow(kern_context *kcxt,
-						kern_gpuscan *kgpuscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst,
-						bool has_device_projection)
+gpuscan_main_arrow(kern_context *kcxt,
+				   kern_gpuscan *kgpuscan,
+				   kern_data_store *kds_src,
+				   kern_data_store *kds_dst,
+				   bool has_device_projection)
 {
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());

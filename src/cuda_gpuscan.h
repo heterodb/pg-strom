@@ -96,25 +96,75 @@ gpuscan_projection_arrow(kern_context *kcxt,
 						 size_t src_index,
 						 cl_char *tup_dclass,
 						 Datum *tup_values);
-
-/* libgpuscan.a */
+/*
+ * GpuScan main logic
+ */
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_row(kern_context *kcxt,
-					  kern_gpuscan *kgpuscan,
-					  kern_data_store *kds_src,
-					  kern_data_store *kds_dst,
-					  bool has_device_projection);
+gpuscan_main_row(kern_context *kcxt,
+				 kern_gpuscan *kgpuscan,
+				 kern_data_store *kds_src,
+				 kern_data_store *kds_dst,
+				 bool has_device_projection);
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_block(kern_context *kcxt,
-						kern_gpuscan *kgpuscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst,
-						bool has_device_projection);
+gpuscan_main_block(kern_context *kcxt,
+				   kern_gpuscan *kgpuscan,
+				   kern_data_store *kds_src,
+				   kern_data_store *kds_dst,
+				   bool has_device_projection);
 DEVICE_FUNCTION(void)
-kern_gpuscan_main_arrow(kern_context *kcxt,
-						kern_gpuscan *kgpuscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst,
-						bool has_device_projection);
+gpuscan_main_arrow(kern_context *kcxt,
+				   kern_gpuscan *kgpuscan,
+				   kern_data_store *kds_src,
+				   kern_data_store *kds_dst,
+				   bool has_device_projection);
 #endif	/* __CUDACC__ */
+#ifdef __CUDACC_RTC__
+/*
+ * GPU kernel entrypoint - valid only NVRTC
+ */
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
+                      kern_data_store *kds_src,
+                      kern_data_store *kds_dst,
+                      bool has_device_projection)
+{
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	DECL_KERNEL_CONTEXT(u);
+
+	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
+	gpuscan_main_row(&u.kcxt, kgpuscan, kds_src, kds_dst,
+					 GPUSCAN_HAS_DEVICE_PROJECTION);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+}
+
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
+                        kern_data_store *kds_src,
+                        kern_data_store *kds_dst,
+                        bool has_device_projection)
+{
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	DECL_KERNEL_CONTEXT(u);
+
+	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
+	gpuscan_main_block(&u.kcxt, kgpuscan, kds_src, kds_dst,
+					   GPUSCAN_HAS_DEVICE_PROJECTION);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+}
+
+KERNEL_FUNCTION(void)
+kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
+                        kern_data_store *kds_src,
+                        kern_data_store *kds_dst,
+                        bool has_device_projection)
+{
+	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	DECL_KERNEL_CONTEXT(u);
+
+	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
+	gpuscan_main_arrow(&u.kcxt, kgpuscan, kds_src, kds_dst,
+					   GPUSCAN_HAS_DEVICE_PROJECTION);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+}
+#endif	/* __CUDACC_RTC__ */
 #endif	/* CUDA_GPUSCAN_H */
