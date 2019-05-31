@@ -2541,9 +2541,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 										  &gj_info,
 										  tlist,
 										  &context);
-	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUJOIN |
-						   DEVKERNEL_NEEDS_GPUSCAN_DECL |
-						   context.extra_flags);
+	gj_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUJOIN;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);

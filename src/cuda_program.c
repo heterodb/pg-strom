@@ -365,11 +365,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	/*
 	 * PG-Strom CUDA device code libraries
 	 */
-
-	/* cuda mathlib.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_mathlib.h\"\n");
 	/* cuda_jsonlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) == DEVKERNEL_NEEDS_JSONLIB)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -382,7 +377,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_rangetype.h\"\n");
-	/* cuda_primitive.h (must be last) */
+	/* cuda_primitive.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
 		ofs += snprintf(source + ofs, len - ofs,
                         "#include \"cuda_primitive.h\"\n");
@@ -398,31 +393,21 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpujoin.h\"\n");
 	/* GpuPreAgg (declaration part) */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_DECL)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort (declaration part) */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT_DECL)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
-
 	/* Generated from SQL */
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
-	/* GpuScan */
-//	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY)
-//		ofs += snprintf(source + ofs, len - ofs,
-//						"#define  __CUDA_GPUSCAN_BODY__ 1\n"
-//						"#include \"cuda_gpuscan.h\"\n");
+
 	/* GpuJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define  __CUDA_GPUJOIN_BODY__ 1\n"
 						"#include \"cuda_gpujoin.h\"\n");
-//	/* GpuPreAgg */
-//	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY)
-//		ofs += snprintf(source + ofs, len - ofs,
-//						"#define  __CUDA_GPUPREAGG_BODY__ 1\n"
-//						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -509,6 +494,24 @@ link_cuda_libraries(char *ptx_image,
 
 	STROM_TRY();
 	{
+		static struct {
+			const char *libname;
+			cl_int		libflags;
+		} catalog[] = {
+			{ "cuda_common", 0 },
+			{ "cuda_numeric", 0 },
+			{ "cuda_primitive", DEVKERNEL_NEEDS_PRIMITIVE },
+			{ "cuda_textlib",   DEVKERNEL_NEEDS_TEXTLIB },
+			{ "cuda_timelib",   DEVKERNEL_NEEDS_TIMELIB },
+			{ "cuda_misclib",   DEVKERNEL_NEEDS_MISCLIB },
+			{ "cuda_gpuscan",   DEVKERNEL_NEEDS_GPUSCAN },
+			//{ "cuda_gpujoin", DEVKERNEL_NEEDS_GPUJOIN },
+			{ "cuda_gpupreagg", DEVKERNEL_NEEDS_GPUPREAGG },
+			//{ "cuda_gpusort", DEVKERNEL_NEEDS_GPUSORT },
+			{ NULL, 0 },
+		};
+		cl_int		i;
+
 		/* add the base PTX image */
 		rc = cuLinkAddData(lstate, CU_JIT_INPUT_PTX,
 						   ptx_image, ptx_length,
@@ -516,76 +519,20 @@ link_cuda_libraries(char *ptx_image,
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLinkAddData: %s", errorText(rc));
 
-
-		snprintf(pathname, sizeof(pathname),
-				 PGSHAREDIR "/extension/cuda_common.%s", lib_suffix);
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-						   pathname, 0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLinkAddFile(\"%s\"): %s",
-				   pathname, errorText(rc));
-
-		/* numeric must be always loaded */
-		snprintf(pathname, sizeof(pathname),
-				 PGSHAREDIR "/extension/cuda_numeric.%s", lib_suffix);
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-						   pathname, 0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLinkAddFile(\"%s\"): %s",
-				   pathname, errorText(rc));
-
-		if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
+		/* other libraries */
+		for (i=0; catalog[i].libname != NULL; i++)
 		{
-			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/cuda_textlib.%s", lib_suffix);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-							   pathname, 0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
-		if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
-		{
-			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/cuda_timelib.%s", lib_suffix);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-							   pathname, 0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
-		if ((extra_flags & DEVKERNEL_NEEDS_MISCLIB) != 0)
-		{
-			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/cuda_misclib.%s", lib_suffix);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-							   pathname, 0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
-
-		//XXX - add other libraries here
-
-		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN_BODY) != 0)
-		{
-			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/cuda_gpuscan.%s", lib_suffix);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-							   pathname, 0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
-		if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG_BODY) != 0)
-		{
-			snprintf(pathname, sizeof(pathname),
-					 PGSHAREDIR "/extension/cuda_gpupreagg.%s", lib_suffix);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-							   pathname, 0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
+			if ((extra_flags & catalog[i].libflags) == catalog[i].libflags)
+			{
+				snprintf(pathname, sizeof(pathname),
+						 PGSHAREDIR "/extension/%s.%s",
+						 catalog[i].libname, lib_suffix);
+				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+								   pathname, 0, NULL, NULL);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuLinkAddFile(\"%s\"): %s",
+						   pathname, errorText(rc));
+			}
 		}
 
 		/* do the linkage */
@@ -1259,11 +1206,21 @@ pgstrom_put_cuda_program(GpuContext *gcontext, ProgramId program_id)
 static void
 assign_textlib_session_info(StringInfo buf)
 {
-	appendStringInfo(
+	appendStringInfoString(
 		buf,
 		"/* ================================================\n"
 		" * session information for device text library\n"
 		" * ================================================ */\n");
+	/*
+	 * Max character bytes in this encoding
+	 */
+	appendStringInfo(
+		buf,
+		"DEVICE_FUNCTION(cl_int)\n"
+		"pg_database_encoding_max_length(void)\n"
+		"{\n"
+		"  return %d;\n"
+		"}\n\n", pg_database_encoding_max_length());
 
 	/*
 	 * Makes encoding aware character length function

@@ -18,7 +18,6 @@
  */
 #define KERN_CONTEXT_VARLENA_BUFSZ 10
 #include "cuda_common.h"
-#include "cuda_gpuscan.h"
 #include "cuda_gpupreagg.h"
 /*
  * gpupreagg_final_data_move

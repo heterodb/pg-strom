@@ -388,18 +388,32 @@ DEVICE_FUNCTION(pg_int4_t)
 pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 {
 	pg_int4_t	result;
+	char	   *s, *end;
+	cl_int		j, len;
 
-	/* NOTE: At this moment, we don't support any special encodings,
-	 * so no multibytes character is assumed.
-	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
 	{
-		if (arg1.length >= 0)
-			result.value = arg1.length;
+		if (pg_database_encoding_max_length() == 1)
+		{
+			if (arg1.length >= 0)
+				result.value = arg1.length;
+			else
+				result.value = toast_raw_datum_size(kcxt, (varlena *)
+													arg1.value) - VARHDRSZ;
+		}
+		else if (pg_varlena_datum_extract(kcxt, arg1, &s, &len))
+		{
+			end = s + len;
+			for (j=0; s < end; j++)
+				s += pg_wchar_mblen(s);
+			result.value = j;
+		}
 		else
-			result.value = toast_raw_datum_size(kcxt, (varlena *)
-												arg1.value) - VARHDRSZ;
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
 	}
 	return result;
 }

@@ -111,5 +111,9 @@ DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpchariclike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
+
+/* made by session_info */
+DEVICE_FUNCTION(cl_int) pg_database_encoding_max_length(void);
+DEVICE_FUNCTION(cl_int) pg_wchar_mblen(const char *str);
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TEXTLIB_H */
