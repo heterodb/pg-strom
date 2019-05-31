@@ -552,7 +552,7 @@ gstore_codegen_qual_eval(StringInfo kern,
 	}
 	appendStringInfo(
 		kern,
-		"STATIC_FUNCTION(cl_bool)\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpusort_quals_eval(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
 		"                   cl_uint row_index)\n"
@@ -700,7 +700,7 @@ gstore_codegen_keycomp(StringInfo kern,
 
 	appendStringInfoString(
 		kern,
-		"STATIC_FUNCTION(cl_int)\n"
+		"DEVICE_FUNCTION(cl_int)\n"
 		"gpusort_keycomp(kern_context *kcxt,\n"
 		"                kern_data_store *kds_src,\n"
 		"                cl_uint x_index,\n"
@@ -874,7 +874,7 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 
 	rc = cuModuleGetFunction(&kern_gpusort_setup,
 							 cuda_module,
-							 "gpusort_setup_column");
+							 "kern_gpusort_setup_column");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -882,26 +882,26 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 	{
 		rc = cuModuleGetFunction(&kern_gpusort_local,
 								 cuda_module,
-								 "gpusort_bitonic_local");
+								 "kern_gpusort_bitonic_local");
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
 		rc = cuModuleGetFunction(&kern_gpusort_step,
 								 cuda_module,
-								 "gpusort_bitonic_step");
+								 "kern_gpusort_bitonic_step");
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
 		rc = cuModuleGetFunction(&kern_gpusort_merge,
 								 cuda_module,
-								 "gpusort_bitonic_merge");
+								 "kern_gpusort_bitonic_merge");
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 	}
 
 	/*
 	 * KERNEL_FUNCTION(void)
-	 * gpusort_setup_column(kern_gpusort *kgpusort,
+	 * kern_gpusort_setup_column(kern_gpusort *kgpusort,
 	 *                      kern_data_store *kds_src)
 	 */
 	rc = gpuOptimalBlockSize(&grid_sz,
@@ -951,8 +951,8 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 		 * make a sorting block up to (2 * BITONIC_MAX_LOCAL_SZ)
 		 *
 		 * KERNEL_FUNCTION_MAXTHREADS(void)
-		 * gpusort_bitonic_local(kern_gpusort *kgpusort,
-		 *                       kern_data_store *kds_src)
+		 * kern_gpusort_bitonic_local(kern_gpusort *kgpusort,
+		 *                            kern_data_store *kds_src)
 		 */
 		kern_args[0] = &m_gpusort;
 		kern_args[1] = &m_kds_src;
@@ -975,10 +975,10 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 
 				/*
 				 * KERNEL_FUNCTION_MAXTHREADS(void)
-				 * gpustore_bitonic_step(kern_gpusort *kgpusort,
-				 *                       kern_data_store *kds_src,
-				 *                       cl_uint unitsz,
-				 *                       cl_bool reversing)
+				 * kern_gpustore_bitonic_step(kern_gpusort *kgpusort,
+				 *                            kern_data_store *kds_src,
+				 *                            cl_uint unitsz,
+				 *                            cl_bool reversing)
 				 */
 				kern_args[0] = &m_gpusort;
 				kern_args[1] = &m_kds_src;
@@ -997,8 +997,8 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 
 			/*
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
-			 * gpusort_bitonic_merge(kern_gpusort *kgpusort,
-			 *                       kern_data_store *kds_src)
+			 * kern_gpusort_bitonic_merge(kern_gpusort *kgpusort,
+			 *                            kern_data_store *kds_src)
 			 */
 			kern_args[0] = &m_gpusort;
 			kern_args[1] = &m_kds_src;

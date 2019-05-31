@@ -397,7 +397,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort (declaration part) */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT_DECL)
+	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
 	/* Generated from SQL */
@@ -408,11 +408,6 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#define  __CUDA_GPUJOIN_BODY__ 1\n"
 						"#include \"cuda_gpujoin.h\"\n");
-	/* GpuSort */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#define  __CUDA_GPUSORT_BODY__ 1\n"
-						"#include \"cuda_gpusort.h\"\n");
 	return source;
 }
 
@@ -507,7 +502,7 @@ link_cuda_libraries(char *ptx_image,
 			{ "cuda_gpuscan",   DEVKERNEL_NEEDS_GPUSCAN },
 			//{ "cuda_gpujoin", DEVKERNEL_NEEDS_GPUJOIN },
 			{ "cuda_gpupreagg", DEVKERNEL_NEEDS_GPUPREAGG },
-			//{ "cuda_gpusort", DEVKERNEL_NEEDS_GPUSORT },
+			{ "cuda_gpusort",   DEVKERNEL_NEEDS_GPUSORT },
 			{ NULL, 0 },
 		};
 		cl_int		i;
