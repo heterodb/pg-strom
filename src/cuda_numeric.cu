@@ -945,38 +945,64 @@ pg_numeric_to_cstring(kern_context *kcxt, varlena *numeric,
 
 	if (dscale > 0)
 	{
+		char   *lastp = cp;
+
 		if (cp >= endp)
 			return -1;
 		*cp++ = '.';
 		for (int i = 0; i < dscale; d++, i += PG_DEC_DIGITS)
 		{
+			if (d >= 0 && d < ndigits)
+				dig = __Fetch(n_data + d);
+			else
+				dig = 0;
 #if PG_DEC_DIGITS == 4
 			if (cp + 4 > endp)
 				return -1;
 			d1 = dig / 1000;
 			dig -= d1 * 1000;
 			*cp++ = d1 + '0';
+			if (d1 != 0)
+				lastp = cp;
+
 			d1 = dig / 100;
 			dig -= d1 * 100;
 			*cp++ = d1 + '0';
+			if (d1 != 0)
+				lastp = cp;
+
 			d1 = dig / 10;
+			if (d1 != 0)
+				lastp = cp;
 			dig -= d1 * 10;
 			*cp++ = d1 + '0';
+			if (d1 != 0)
+				lastp = cp;
+
 			*cp++ = dig + '0';
+			if (dig != 0)
+				lastp = cp;
 #elif PG_DEC_DIGITS == 2
 			if (cp + 2 > endp)
 				return -1;
 			d1 = dig / 10;
 			dig -= d1 * 10;
 			*cp++ = d1 + '0';
+			if (d1 != 0)
+				lastp = cp;
 			*cp++ = dig + '0';
+			if (dig != 0)
+				lastp = cp;
 #elif PG_DEC_DIGITS == 1
 			if (cp >= endp)
 				return -1;
 			*cp++ = dig + '0';
+			if (dig != 0)
+				lastp = cp;
 #else
 #error unsupported NBASE
 #endif
+			cp = lastp;
 		}
 	}
 	return (cl_int)(cp - buf);

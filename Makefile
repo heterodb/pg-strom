@@ -50,7 +50,7 @@ CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 __GPU_HEADERS := cuda_common.h arrow_defs.h
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
 __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
-                cuda_timelib cuda_textlib cuda_misclib \
+                cuda_timelib cuda_textlib cuda_misclib cuda_jsonlib \
                 cuda_gpuscan cuda_gpupreagg cuda_gpusort
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))

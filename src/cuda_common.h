@@ -260,8 +260,8 @@ static T __Fetch(const T *ptr)
 {
 	T	temp;
 
-	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
-		return *ptr;
+//	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
+//		return *ptr;
 	memcpy(&temp, ptr, sizeof(T));
 	return temp;
 }
