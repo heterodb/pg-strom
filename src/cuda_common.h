@@ -259,10 +259,16 @@ __device__ __forceinline__
 static T __Fetch(const T *ptr)
 {
 	T	temp;
-
-//	if ((((cl_ulong)ptr) & (sizeof(T) - 1)) == 0)
-//		return *ptr;
+	/*
+	 * (2019/06/01) Originally, this function used direct pointer access
+	 * using *ptr, if pointer is aligned. However, it looks NVCC/NVRTC
+	 * optimization generates binary code that accesses unaligned pointer.
+	 * '--device-debug' eliminates the strange behavior, and 'volatile'
+	 * qualification also stop the behavior.
+	 * Maybe, future version of CUDA and NVCC/NVRTC will fix the problem.
+	 */
 	memcpy(&temp, ptr, sizeof(T));
+
 	return temp;
 }
 #else	/* __CUDACC__ */

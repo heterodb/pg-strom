@@ -42,12 +42,9 @@ PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
 #
 # Source file of GPU portion
 #
-__CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
+__GPU_HEADERS := $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
                  $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
                  arrow_defs.h
-CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
-
-__GPU_HEADERS := cuda_common.h arrow_defs.h
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
 __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib cuda_jsonlib \
@@ -209,7 +206,7 @@ NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA = $(CUDA_SOURCES) $(PGSTROM_SQL)
+DATA = $(GPU_HEADERS) $(PGSTROM_SQL)
 DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN)
 
 # Support utilities
@@ -250,10 +247,10 @@ endif
 #
 # GPU Libraries
 #
-%.fatbin:  %.cu
+%.fatbin:  %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 
-%.gfatbin: %.cu
+%.gfatbin: %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
 
 # PL/CUDA Host Template

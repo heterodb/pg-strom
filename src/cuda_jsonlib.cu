@@ -73,7 +73,7 @@ getJsonbOffset(const JsonbContainer *jc,		/* may not be aligned */
 
 	for (j=index-1; j >= 0; j--)
 	{
-		memcpy(&entry, &jc->children[j], sizeof(JEntry));
+		entry = __Fetch(&jc->children[j]);
 		offset += JBE_OFFLENFLD(entry);
 		if (JBE_HAS_OFF(entry))
 			break;
@@ -85,11 +85,10 @@ STATIC_INLINE(cl_uint)
 getJsonbLength(const JsonbContainer *jc,		/* may not be aligned */
 			   int index)
 {
+	JEntry		entry = __Fetch(&jc->children[index]);
 	cl_uint		off;
 	cl_uint		len;
-	JEntry		entry;
 
-	memcpy(&entry, &jc->children[index], sizeof(JEntry));
 	if (JBE_HAS_OFF(entry))
 	{
 		off = getJsonbOffset(jc, index);
@@ -212,9 +211,8 @@ STATIC_FUNCTION(cl_int)
 findJsonbIndexFromObject(JsonbContainer *jc,	/* may not be aligned */
 						 char *key, cl_int keylen)
 {
-	cl_uint		jheader;
+	cl_uint		jheader = __Fetch(&jc->header);
 
-	memcpy(&jheader, &jc->header, sizeof(cl_uint));
 	if (JsonContainerIsObject(jheader))
 	{
 		cl_uint		count = JsonContainerSize(jheader);
@@ -249,15 +247,14 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 							  JsonbContainer *jc,	/* may not be aligned */
 							  cl_int index, char *base)
 {
-	pg_jsonb_t	res;
-	cl_uint		jheader;
+	cl_uint		jheader = __Fetch(&jc->header);
 	JEntry		entry;
+	pg_jsonb_t	res;
 
-	memcpy(&jheader, &jc->header, sizeof(cl_uint));
 	assert(JsonContainerIsObject(jheader) ||
 		   JsonContainerIsArray(jheader));
 	/* extract jsonb object value */
-	memcpy(&entry, &jc->children[index], sizeof(JEntry));
+	entry = __Fetch(&jc->children[index]);
 	if (JBE_ISNULL(entry) ||
 		JBE_ISSTRING(entry) ||
 		JBE_ISNUMERIC(entry) ||
@@ -460,7 +457,7 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 		/* key name */
 		if (JsonContainerIsObject(jheader))
 		{
-			memcpy(&entry, &jc->children[index], sizeof(JEntry));
+			entry = __Fetch(&jc->children[index]);
 			if (!JBE_ISSTRING(entry))
 			{
 				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
@@ -480,7 +477,7 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 			index += count;
 		}
 		/* element value */
-		memcpy(&entry, &jc->children[index], sizeof(JEntry));
+		entry = __Fetch(&jc->children[index]);
 		if (JBE_ISSTRING(entry))
 		{
 			data = base + getJsonbOffset(jc, index);
@@ -551,15 +548,14 @@ extractTextItemFromContainer(kern_context *kcxt,
 							 JsonbContainer *jc,	/* may not be aligned */
 							 cl_int index, char *base)
 {
-	pg_text_t	res;
-	cl_uint		jheader;
+	cl_uint		jheader = __Fetch(&jc->header);
 	JEntry		entry;
+	pg_text_t	res;
 
-	memcpy(&jheader, &jc->header, sizeof(cl_uint));
 	assert(JsonContainerIsObject(jheader) ||
 		   JsonContainerIsArray(jheader));
 	/* extract jsonb object value */
-	memcpy(&entry, &jc->children[index], sizeof(JEntry));
+	entry = __Fetch(&jc->children[index]);
 	if (JBE_ISNULL(entry))
 		res.isnull = true;
 	else if (JBE_ISSTRING(entry))
@@ -658,9 +654,8 @@ pgfn_jsonb_object_field(kern_context *kcxt,
 	else
 	{
 		JsonbContainer *jc = (JsonbContainer *)jdata;
-		cl_uint		jheader;
+		cl_uint		jheader = __Fetch(&jc->header);
 
-		memcpy(&jheader, &jc->header, sizeof(cl_uint));
 		if (!JsonContainerIsObject(jheader))
 			result.isnull = true;
 		else
@@ -695,9 +690,8 @@ pgfn_jsonb_array_element(kern_context *kcxt,
 	else
 	{
 		JsonbContainer *jc = (JsonbContainer *)jdata;
-		cl_uint		jheader;
+		cl_uint		jheader = __Fetch(&jc->header);
 
-		memcpy(&jheader, &jc->header, sizeof(cl_uint));
 		if (!JsonContainerIsArray(jheader))
 			result.isnull = true;
 		else
@@ -734,9 +728,8 @@ pgfn_jsonb_object_field_text(kern_context *kcxt,
 	else
 	{
 		JsonbContainer *jc = (JsonbContainer *)jdata;
-		cl_uint		jheader;
+		cl_uint		jheader = __Fetch(&jc->header);
 
-		memcpy(&jheader, &jc->header, sizeof(cl_uint));
 		if (!JsonContainerIsObject(jheader))
 			result.isnull = true;
 		else
@@ -771,9 +764,8 @@ pgfn_jsonb_array_element_text(kern_context *kcxt,
 	else
 	{
 		JsonbContainer *jc = (JsonbContainer *)jdata;
-		cl_uint		jheader;
+		cl_uint		jheader = __Fetch(&jc->header);
 
-		memcpy(&jheader, &jc->header, sizeof(cl_uint));
 		if (!JsonContainerIsArray(jheader))
 			result.isnull = true;
 		else
