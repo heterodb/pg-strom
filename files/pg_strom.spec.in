@@ -83,6 +83,14 @@ ldconfig
 %{__pkgbindir}/dbgen-ssbm
 
 %changelog
+#* Sun Jun  2 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
+#- hotfixes of various bugs
+#- support of Apache Arrow columnar store (arrow_fdw)
+#- pg2arrow utility is included
+#- support of JSONB data type
+#- pre-built GPU binary for quick code compilation/optimization
+#- support of nvme_strom v2; enables to handle cached disk pages
+
 * Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1
 - hotfixes for various bugs
 - Device Numeric is now based on 128bit

@@ -135,4 +135,34 @@
 	((missing_ok) ? get_attname((a),(b)) : get_relid_attribute_name((a),(b)))
 #endif
 
+/*
+ * MEMO: PG11.2, 10.7, and 9.6.12 changed ABI of GenerateTypeDependencies()
+ *
+ * PG11: 1b55acb2cf48341822261bf9c36785be5ee275db
+ * PG10: 2d83863ea2739dc559ed490c284f5c1817db4752
+ * PG96: d431dff1af8c220490b84dd978aa3a508f71d415
+ */
+#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 13) || \
+	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 7)  ||	\
+	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 3))
+#define GenerateTypeDependencies(a,b,c,d,e,f,g,h)						\
+	GenerateTypeDependencies((b)->typnamespace,	/* typeNamespace */		\
+							 (a),				/* typeObjectId */		\
+							 (b)->typrelid,		/* relationOid */		\
+							 (e),				/* relationKind */		\
+							 (b)->typowner,		/* owner */				\
+							 (b)->typinput,		/* inputProcedure  */	\
+							 (b)->typoutput,	/* outputProcedure */	\
+							 (b)->typreceive,	/* receiveProcedure */	\
+							 (b)->typsend,		/* sendProcedure */		\
+							 (b)->typmodin,		/* typmodinProcedure */	\
+							 (b)->typmodout,	/* typmodoutProcedure */ \
+							 (b)->typanalyze,	/* analyzeProcedure */	\
+							 (b)->typelem,		/* elementType */		\
+							 (f),				/* isImplicitArray */	\
+							 (b)->typbasetype,	/* baseType */			\
+							 (b)->typcollation,	/* typeCollation */		\
+							 (c),				/* defaultExpr */		\
+							 (h))				/* rebuild */
+#endif
 #endif	/* PG_COMPAT_H */

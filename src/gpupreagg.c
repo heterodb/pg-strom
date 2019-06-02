@@ -4025,24 +4025,14 @@ void
 assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
+	CustomScan	   *cscan __attribute__((unused))
+		= (CustomScan *) gpas->gts.css.ss.ps.plan;
 
 	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
-#if 0
-	/*
-	 * Put GPUPREAGG_PULLUP_OUTER_SCAN if GpuPreAgg pulled up outer scan
-	 * node regardless of the outer-quals (because KDS may be BLOCK format,
-	 * and only gpuscan_exec_quals_block() can extract it).
-	 */
-	if (cscan->scan.scanrelid > 0)
-		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
-	if (gpas->outer_quals)
-		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
-#endif
 	/*
 	 * definition of GPUPREAGG_COMBINED_JOIN disables a dummy definition
-	 * of 
-	 *
+	 * of gpupreagg_projection_slot() in cuda_gpujoin.h, and switch to
+	 * use the auto-generated one for initial projection of GpuPreAgg.
 	 */
 	if (gpas->combined_gpujoin)
 		appendStringInfo(buf, "#define GPUPREAGG_COMBINED_JOIN 1\n");

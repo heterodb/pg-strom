@@ -366,7 +366,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	 * PG-Strom CUDA device code libraries
 	 */
 	/* cuda_jsonlib.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) == DEVKERNEL_NEEDS_JSONLIB)
+	if ((extra_flags & DEVKERNEL_NEEDS_JSONLIB) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_jsonlib.h\"\n");
 	/* cuda_misclib.h */
@@ -374,27 +374,27 @@ construct_flat_cuda_source(cl_uint extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_misclib.h\"\n");
 	/* cuda_rangetypes.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
+	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_rangetype.h\"\n");
 	/* cuda_primitive.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
+	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
                         "#include \"cuda_primitive.h\"\n");
 	/* GpuScan */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpuscan.h\"\n");
 	/* GpuJoin */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpujoin.h\"\n");
 	/* GpuPreAgg */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpupreagg.h\"\n");
 	/* GpuSort */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
 	/* Generated from SQL */
@@ -513,7 +513,7 @@ link_cuda_libraries(char *ptx_image,
 			if ((extra_flags & catalog[i].libflags) == catalog[i].libflags)
 			{
 				snprintf(pathname, sizeof(pathname),
-						 PGSHAREDIR "/extension/%s.%s",
+						 PGSHAREDIR "/pg_strom/%s.%s",
 						 catalog[i].libname, lib_suffix);
 				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 								   pathname, 0, NULL, NULL);
@@ -730,7 +730,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		 * Put command line options
 		 */
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
-		options[opt_index++] = "-I " PGSHAREDIR "/extension";
+		options[opt_index++] = "-I " PGSHAREDIR "/pg_strom";
 		options[opt_index++] = "-I " PGSERV_INCLUDEDIR;
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
 				 "--gpu-architecture=compute_%u", src_entry->target_cc);

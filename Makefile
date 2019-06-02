@@ -22,7 +22,7 @@ PGSTROM_RELEASE := devel
 #
 # Installation related
 #
-PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.0.sql
+PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--$(PGSTROM_VERSION).sql
 
 #
 # Source file of CPU portion
@@ -204,6 +204,7 @@ NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
+MODULEDIR = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL)
