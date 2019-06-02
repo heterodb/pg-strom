@@ -729,6 +729,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		/*
 		 * Put command line options
 		 */
+		options[opt_index++] = "-D__" CPU_ARCH "__=1";
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/pg_strom";
 		options[opt_index++] = "-I " PGSERV_INCLUDEDIR;
