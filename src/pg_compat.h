@@ -144,7 +144,7 @@
  */
 #if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 13) || \
 	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 7)  ||	\
-	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 3))
+	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 2))
 #define GenerateTypeDependencies(a,b,c,d,e,f,g,h)						\
 	GenerateTypeDependencies((b)->typnamespace,	/* typeNamespace */		\
 							 (a),				/* typeObjectId */		\
