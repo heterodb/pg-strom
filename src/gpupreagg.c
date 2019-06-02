@@ -4028,6 +4028,7 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
 	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
+#if 0
 	/*
 	 * Put GPUPREAGG_PULLUP_OUTER_SCAN if GpuPreAgg pulled up outer scan
 	 * node regardless of the outer-quals (because KDS may be BLOCK format,
@@ -4037,11 +4038,14 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
 	if (gpas->outer_quals)
 		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
+#endif
+	/*
+	 * definition of GPUPREAGG_COMBINED_JOIN disables a dummy definition
+	 * of 
+	 *
+	 */
 	if (gpas->combined_gpujoin)
 		appendStringInfo(buf, "#define GPUPREAGG_COMBINED_JOIN 1\n");
-
-	appendStringInfo(buf, "#define GPUPREAGG_DEVICE_PROJECTION_NFIELDS %d\n",
-					 gpas->kds_slot_head->ncols);
 }
 
 /*
@@ -5525,8 +5529,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
 							 cuda_module,
 							 pds_src != NULL
-							 ? "gpujoin_main"
-							 : "gpujoin_right_outer");
+							 ? "kern_gpujoin_main"
+							 : "kern_gpujoin_right_outer");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 

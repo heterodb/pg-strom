@@ -2611,16 +2611,12 @@ void
 assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
-	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 
 	Assert(gts->css.methods == &gpujoin_exec_methods);
 	appendStringInfo(
 		buf,
-		"#define GPUJOIN_MAX_DEPTH %u\n"
-		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n",
-		gjs->num_rels,
-		tupdesc->natts);
+		"#define GPUJOIN_MAX_DEPTH %u\n",
+		gjs->num_rels);
 }
 
 static Node *
@@ -3806,7 +3802,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	 */
 	appendStringInfo(
 		source,
-		"STATIC_FUNCTION(cl_bool)\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpujoin_join_quals_depth%d(kern_context *kcxt,\n"
 		"                          kern_data_store *kds,\n"
         "                          kern_multirels *kmrels,\n"
@@ -3971,6 +3967,7 @@ gpujoin_codegen_projection(StringInfo source,
 	StringInfoData	row;
 	StringInfoData	column;
 	StringInfoData	outer;
+	cl_int			nfields = list_length(tlist_dev);
 	cl_int			depth;
 	cl_bool			is_first;
 
@@ -3981,6 +3978,11 @@ gpujoin_codegen_projection(StringInfo source,
 	initStringInfo(&row);
 	initStringInfo(&column);
 	initStringInfo(&outer);
+
+	/* expand varlena_bufsz for tup_dclass/values/extra array */
+	context->varlena_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
+							   MAXALIGN(sizeof(Datum)   * nfields) +
+							   MAXALIGN(sizeof(cl_uint) * nfields));
 
 	/*
 	 * Pick up all the var-node referenced directly or indirectly by
@@ -4021,8 +4023,7 @@ gpujoin_codegen_projection(StringInfo source,
 	appendStringInfoString(
 		&body,
 		"  if (tup_extras)\n"
-		"    memset(tup_extras, 0,\n"
-		"           sizeof(cl_uint) * GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n");
+		"    memset(tup_extras, 0, sizeof(cl_uint) * kds_dst->ncols);\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -4373,7 +4374,7 @@ gpujoin_codegen_projection(StringInfo source,
 	/* merge declarations and function body */
 	appendStringInfo(
 		source,
-		"STATIC_FUNCTION(cl_uint)\n"
+		"DEVICE_FUNCTION(cl_uint)\n"
 		"gpujoin_projection(kern_context *kcxt,\n"
 		"                   kern_data_store *kds_src,\n"
 		"                   kern_multirels *kmrels,\n"
@@ -4440,7 +4441,7 @@ gpujoin_codegen(PlannerInfo *root,
 
 	appendStringInfo(
 		&source,
-		"STATIC_FUNCTION(cl_bool)\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpujoin_join_quals(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
@@ -4489,7 +4490,7 @@ gpujoin_codegen(PlannerInfo *root,
 	 */
 	appendStringInfo(
 		&source,
-		"STATIC_FUNCTION(cl_uint)\n"
+		"DEVICE_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
@@ -6064,7 +6065,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	/* Lookup GPU kernel function */
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
 							 cuda_module,
-							 "gpujoin_main");
+							 "kern_gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -6280,7 +6281,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	/* Lookup GPU kernel function */
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
 							 cuda_module,
-							 "gpujoin_right_outer");
+							 "kern_gpujoin_right_outer");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
