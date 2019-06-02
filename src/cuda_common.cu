@@ -15,7 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#define KERN_CONTEXT_VARLENA_BUFSZ 10 //tentative
 #include "cuda_common.h"
 
 /*
@@ -59,18 +58,14 @@ __compute_heaptuple_size(kern_context *kcxt,
 					vl_len = pg_varlena_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
-#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 				case DATUM_CLASS__ARRAY:
 					vl_len = pg_array_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
-#endif
-#ifdef PGSTROM_KERNEL_HAS_PGCOMPOSITE
 				case DATUM_CLASS__COMPOSITE:
 					vl_len = pg_composite_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
-#endif
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					vl_len = VARSIZE_ANY(datum);
@@ -301,7 +296,6 @@ __form_kern_heaptuple(kern_context *kcxt,
 													(char *)htup+curr,
 													datum);
 					break;
-#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 				case DATUM_CLASS__ARRAY:
 					while (padding-- > 0)
 						((char *)htup)[curr++] = '\0';
@@ -309,8 +303,6 @@ __form_kern_heaptuple(kern_context *kcxt,
 												  (char *)htup+curr,
 												  datum);
 					break;
-#endif
-#ifdef  PGSTROM_KERNEL_HAS_PGCOMPOSITE
 				case DATUM_CLASS__COMPOSITE:
 					while (padding-- > 0)
 						((char *)htup)[curr++] = '\0';
@@ -318,7 +310,6 @@ __form_kern_heaptuple(kern_context *kcxt,
 													  (char *)htup+curr,
 													  datum);
 					break;
-#endif
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
 					vl_len = VARSIZE_ANY(datum);
@@ -1777,7 +1768,7 @@ __pg_composite_from_arrow(kern_context *kcxt,
 				ELEMENT_ENTRY(float2,PG_FLOAT2OID);
 				ELEMENT_ENTRY(float4,PG_FLOAT4OID);
 				ELEMENT_ENTRY(float8,PG_FLOAT8OID);
-//				ELEMENT_ENTRY(numeric,PG_NUMERICOID);
+				ELEMENT_ENTRY(numeric,PG_NUMERICOID);
 				ELEMENT_ENTRY(date, PG_DATEOID);
 				ELEMENT_ENTRY(time, PG_TIMEOID);
 				ELEMENT_ENTRY(timestamp, PG_TIMESTAMPOID);
@@ -1787,6 +1778,7 @@ __pg_composite_from_arrow(kern_context *kcxt,
 				ELEMENT_ENTRY(varchar, PG_VARCHAROID);
 				ELEMENT_ENTRY(bytea, PG_BYTEAOID);
 				default:
+					printf("typeid = %u\n", smeta->atttypid);
 					STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
 					tup_dclass[j] = DATUM_CLASS__NULL;
 			}

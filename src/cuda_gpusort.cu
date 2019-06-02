@@ -15,7 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#define  KERN_CONTEXT_VARLENA_BUFSZ 10
 #include "cuda_common.h"
 #include "cuda_gpusort.h"
 /*

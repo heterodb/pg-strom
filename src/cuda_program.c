@@ -1611,7 +1611,7 @@ retry_checks:
 		 * In addition, build with debug option also requires more stack than
 		 * optimized kernel.
 		 */
-		stack_sz = 1024 + MAXALIGN(entry->varlena_bufsz);
+		stack_sz = 1800 + MAXALIGN(entry->varlena_bufsz);
 		if ((entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 			stack_sz += 4096;
 #ifdef USE_ASSERT_CHECKING

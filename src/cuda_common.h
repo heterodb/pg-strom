@@ -373,27 +373,30 @@ typedef struct
  */
 struct kern_parambuf;
 
-#ifndef __CUDACC__
-/* just a dummy for host code */
-#define KERN_CONTEXT_VARLENA_BUFSZ			1
-#endif	/* __CUDACC__ */
-#define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	8192
-
 typedef struct
 {
 	kern_errorbuf	e;
 	struct kern_parambuf *kparams;
 	cl_char		   *vlpos;
 	cl_char		   *vlend;
-	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
+	cl_char			vlbuf[1];
 } kern_context;
 
+/*
+ * Usually, kern_context is declared at the auto-generated portion,
+ * then its pointer shall be passed to the pre-built GPU binary part.
+ * Its vlbuf length shall be determined on run-time compilation using
+ * the macro below.
+ */
+#define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	8192
+#ifdef __CUDACC_RTC__
 #define DECL_KERNEL_CONTEXT(NAME)								\
 	union {														\
 		kern_context kcxt;										\
 		char __dummy__[offsetof(kern_context, vlbuf) +			\
 					   MAXALIGN(KERN_CONTEXT_VARLENA_BUFSZ)];	\
 	} NAME
+#endif /* __CUDACC_RTC__ */
 
 #define INIT_KERNEL_CONTEXT(kcxt,__kparams)							\
 	do {															\
