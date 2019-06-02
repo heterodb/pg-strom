@@ -72,7 +72,8 @@ ldconfig
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/gpuinfo
 %{__pkgbindir}/pg2arrow
-%{__pkgsharedir}/extension/*
+%{__pkgsharedir}/extension/pg_strom.control
+%{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
 %if "%{PGSQL_PKGVER}" != "96" && "%{PGSQL_PKGVER}" != "10"
 %{__pkglibdir}/bitcode/pg_strom*
