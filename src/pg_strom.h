@@ -47,7 +47,9 @@
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
+#if PG_VERSION_NUM < 110000
 #include "catalog/pg_type_fn.h"
+#endif
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
