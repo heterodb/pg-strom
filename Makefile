@@ -22,7 +22,7 @@ PGSTROM_RELEASE := devel
 #
 # Installation related
 #
-PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--$(PGSTROM_VERSION).sql
+PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.2.sql
 
 #
 # Source file of CPU portion
