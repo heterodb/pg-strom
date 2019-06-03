@@ -142,7 +142,7 @@
  * PG10: 2d83863ea2739dc559ed490c284f5c1817db4752
  * PG96: d431dff1af8c220490b84dd978aa3a508f71d415
  */
-#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 13) || \
+#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 12) || \
 	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 7)  ||	\
 	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 2))
 #define GenerateTypeDependencies(a,b,c,d,e,f,g,h)						\
@@ -165,4 +165,36 @@
 							 (c),				/* defaultExpr */		\
 							 (h))				/* rebuild */
 #endif
+
+/*
+ * MEMO: PG9.6 does not define macros below
+ */
+#if PG_MAJOR_VERSION < 1000
+/* convenience macros for accessing a JsonbContainer struct */
+#define JsonContainerSize(jc)       ((jc)->header & JB_CMASK)
+#define JsonContainerIsScalar(jc)   (((jc)->header & JB_FSCALAR) != 0)
+#define JsonContainerIsObject(jc)   (((jc)->header & JB_FOBJECT) != 0)
+#define JsonContainerIsArray(jc)    (((jc)->header & JB_FARRAY) != 0)
+
+#define IS_SIMPLE_REL(rel)							\
+	((rel)->reloptkind == RELOPT_BASEREL ||			\
+	 (rel)->reloptkind == RELOPT_OTHER_MEMBER_REL)
+
+static inline Oid
+CatalogTupleInsert(Relation heapRel, HeapTuple tup)
+{
+	CatalogIndexState indstate;
+	Oid         oid;
+
+	indstate = CatalogOpenIndexes(heapRel);
+
+	oid = simple_heap_insert(heapRel, tup);
+
+	CatalogIndexInsert(indstate, tup);
+	CatalogCloseIndexes(indstate);
+
+	return oid;
+}
+#endif
+
 #endif	/* PG_COMPAT_H */

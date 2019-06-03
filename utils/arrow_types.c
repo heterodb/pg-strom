@@ -615,6 +615,33 @@ STAT_UPDATE_INLINE_TEMPLATE(int64,  Int64GetDatum)
 STAT_UPDATE_INLINE_TEMPLATE(float4, Float4GetDatum)
 STAT_UPDATE_INLINE_TEMPLATE(float8, Float8GetDatum)
 
+/*
+ * missing function in PG9.6
+ */
+#if PG_MAJOR_VERSION < 1000
+Datum Float4GetDatum(float4 X)
+{
+	union
+	{
+		float4		value;
+		int32		retval;
+	}	myunion;
+	myunion.value = X;
+	return Int32GetDatum(myunion.retval);
+}
+
+Datum Float8GetDatum(float8 X)
+{
+	union
+	{
+		float8		value;
+		int64		retval;
+	}	myunion;
+	myunion.value = X;
+	return Int64GetDatum(myunion.retval);
+}
+#endif
+
 /* ----------------------------------------------------------------
  *
  * setup_buffer handler for each data types
