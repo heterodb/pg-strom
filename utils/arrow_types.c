@@ -618,7 +618,7 @@ STAT_UPDATE_INLINE_TEMPLATE(float8, Float8GetDatum)
 /*
  * missing function in PG9.6
  */
-#if PG_MAJOR_VERSION < 1000
+#if PG_VERSION_NUM < 100000
 Datum Float4GetDatum(float4 X)
 {
 	union
