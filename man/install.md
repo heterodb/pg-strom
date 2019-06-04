@@ -225,7 +225,9 @@ So, you needs to installa the related RPM packages over network after the resist
 ```
 $ sudo rpm -i cuda-repo-<distribution>-<version>.x86_64.rpm
 $ sudo yum clean all
-$ sudo yum install cuda
+$ sudo yum install cuda --enablerepo=rhel-7-server-e4s-optional-rpms
+ or
+$ sudo yum install cuda 
 ```
 
 @ja{
@@ -234,6 +236,15 @@ $ sudo yum install cuda
 
 @en{
 Once installation completed successfully, CUDA Toolkit is deployed at `/usr/local/cuda`.
+}
+
+@ja{
+!!! Tip
+    RHEL7の場合、CUDA Toolkitのインストールに必要な`vulkan-filesystem`パッケージを配布する`rhel-7-server-e4s-optional-rpms`リポジトリは、デフォルトで有効化されていません。CUDA Toolkitをインストールする際には、`/etc/yum.repos.d/redhat.repo`を編集して当該リポジトリを有効化するか、yumコマンドの`--enablerepo`オプションを用いて当該リポジトリを一時的に有効化してください。
+}
+@en{
+!!! Tip
+    RHEL7 does not enable `rhel-7-server-e4s-optional-rpms` repository in the default. It distributes `vulkan-filesystem` packaged required by CUDA Toolkit installation. When you kick installation of CUDA Toolkit, edit `/etc/yum.repos.d/redhat.repo` to enable the repository, or use `--enablerepo` option of yum command to resolve dependency.
 }
 
 ```
@@ -275,13 +286,29 @@ Wed Feb 14 09:43:48 2018
 @ja{
 !!! Tip
     nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
-    この場合は、システムを一度再起動してnvidia-smiコマンドを実行できるかどうか確認してください。CUDAのインストーラはnouveauドライバの無効化設定を行うため、次回起動時にはnouveauドライバがロードされることはありません。
+    この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
+    runfileによるインストールの場合、CUDA Toolkitのインストーラがnouveauドライバの無効化設定も行います。RPMによるインストールの場合は、以下の設定を行ってください。
 }
 @en{
 !!! Tip
     If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
-    In this case, reboot the operating system once, then confirm whether you can run nvidia-smi command successfully, or not. CUDA installer also disables nouveau driver, nouveau driver will not be loaded on the next boot.
+    In this case, reboot the operating system after a configuration to disable the nouveau driver.
+    If CUDA Toolkit is installed by the runfile installer, it also disables the nouveau driver. Elsewhere, in case of RPM installation, do the following configuration.
 }
+
+@ja{
+nouveauドライバを無効化するには、以下の設定を`/etc/modprobe.d/disable-nouveau.conf`という名前で保存し、`dracut`コマンドを実行してLinux kernelのブートイメージに反映します。
+}
+@en{
+To disable the nouveau driver, put the following configuration onto `/etc/modprobe.d/disable-nouveau.conf`, then run `dracut` command to apply them on the boot image of Linux kernel.
+}
+```
+# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+```
 
 @ja:# PostgreSQLのインストール
 @en:# PostgreSQL Installation
@@ -819,6 +846,7 @@ LOG:  listening on IPv6 address "::1", port 5432
 LOG:  listening on IPv4 address "127.0.0.1", port 5432
     :
 ```
+
 
 @ja:## カーネルモジュールパラメータ
 @en:## Kernel module parameters

@@ -329,10 +329,16 @@ We recommend RPM installation because it allows simple software updates.</p>
 So, you needs to installa the related RPM packages over network after the resistoration of CUDA repository. Run the following command.</p>
 <pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
 $ sudo yum clean all
-$ sudo yum install cuda
+$ sudo yum install cuda --enablerepo=rhel-7-server-e4s-optional-rpms
+ or
+$ sudo yum install cuda 
 </code></pre>
 
 <p>Once installation completed successfully, CUDA Toolkit is deployed at <code>/usr/local/cuda</code>.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>RHEL7 does not enable <code>rhel-7-server-e4s-optional-rpms</code> repository in the default. It distributes <code>vulkan-filesystem</code> packaged required by CUDA Toolkit installation. When you kick installation of CUDA Toolkit, edit <code>/etc/yum.repos.d/redhat.repo</code> to enable the repository, or use <code>--enablerepo</code> option of yum command to resolve dependency.</p>
+</div>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
@@ -364,8 +370,17 @@ Wed Feb 14 09:43:48 2018
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
-In this case, reboot the operating system once, then confirm whether you can run nvidia-smi command successfully, or not. CUDA installer also disables nouveau driver, nouveau driver will not be loaded on the next boot.</p>
+In this case, reboot the operating system after a configuration to disable the nouveau driver.
+If CUDA Toolkit is installed by the runfile installer, it also disables the nouveau driver. Elsewhere, in case of RPM installation, do the following configuration.</p>
 </div>
+<p>To disable the nouveau driver, put the following configuration onto <code>/etc/modprobe.d/disable-nouveau.conf</code>, then run <code>dracut</code> command to apply them on the boot image of Linux kernel.</p>
+<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+</code></pre>
+
 <h1 id="postgresql-installation">PostgreSQL Installation</h1>
 <p>This section introduces PostgreSQL installation with RPM.
 We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>

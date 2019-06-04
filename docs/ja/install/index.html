@@ -330,10 +330,16 @@ Complete!
 <p>『rpm(network)』パッケージにはCUDA Toolkitを配布するyumリポジトリの定義情報が含まれているだけです。これは OSのインストール においてシステムにEPELリポジトリの定義を追加したのと同様の方法です。 したがって、cudaリポジトリを登録した後、関連したRPMパッケージをネットワークインストールする必要があります。 下記のコマンドを実行してください。</p>
 <pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
 $ sudo yum clean all
-$ sudo yum install cuda
+$ sudo yum install cuda --enablerepo=rhel-7-server-e4s-optional-rpms
+ or
+$ sudo yum install cuda 
 </code></pre>
 
 <p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>RHEL7の場合、CUDA Toolkitのインストールに必要な<code>vulkan-filesystem</code>パッケージを配布する<code>rhel-7-server-e4s-optional-rpms</code>リポジトリは、デフォルトで有効化されていません。CUDA Toolkitをインストールする際には、<code>/etc/yum.repos.d/redhat.repo</code>を編集して当該リポジトリを有効化するか、yumコマンドの<code>--enablerepo</code>オプションを用いて当該リポジトリを一時的に有効化してください。</p>
+</div>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
@@ -364,8 +370,17 @@ Wed Feb 14 09:43:48 2018
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
-この場合は、システムを一度再起動してnvidia-smiコマンドを実行できるかどうか確認してください。CUDAのインストーラはnouveauドライバの無効化設定を行うため、次回起動時にはnouveauドライバがロードされることはありません。</p>
+この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
+runfileによるインストールの場合、CUDA Toolkitのインストーラがnouveauドライバの無効化設定も行います。RPMによるインストールの場合は、以下の設定を行ってください。</p>
 </div>
+<p>nouveauドライバを無効化するには、以下の設定を<code>/etc/modprobe.d/disable-nouveau.conf</code>という名前で保存し、<code>dracut</code>コマンドを実行してLinux kernelのブートイメージに反映します。</p>
+<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+</code></pre>
+
 <h1 id="postgresql">PostgreSQLのインストール</h1>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
