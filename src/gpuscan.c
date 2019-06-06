@@ -2216,7 +2216,6 @@ gpuscan_next_tuple_suspended_row(GpuScanState *gss, GpuScanTask *gscan)
 	cl_uint		local_id;
 	cl_uint		part_index;
 	size_t		base_index;
-	bool		status;
 
 	while (gss->fallback_group_id < gscan->kern.grid_sz)
 	{
@@ -2349,6 +2348,7 @@ gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
+	bool				status;
 
 retry_next:
 	ExecClearTuple(gss->base_slot);

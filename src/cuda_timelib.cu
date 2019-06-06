@@ -50,6 +50,37 @@ struct pg_tm
 };
 
 /*
+ * definition by session information
+ */
+DEVICE_FUNCTION(Timestamp) SetEpochTimestamp(void);
+typedef struct {
+	cl_long		ls_trans; /* pg_time_t in original */
+	cl_long		ls_corr;
+} tz_lsinfo;
+typedef struct {
+	cl_long		tt_gmtoff;
+	cl_int		tt_isdst;
+	cl_int		tt_abbrind;
+	cl_int		tt_ttisstd;
+	cl_int		tt_ttisgmt;
+} tz_ttinfo;
+typedef struct {
+	cl_int		leapcnt;
+	cl_int		timecnt;
+	cl_int		typecnt;
+	cl_int		charcnt;
+	cl_int		goback;
+	cl_int		goahead;
+	cl_long	   *ats;
+	cl_uchar   *types;
+	tz_ttinfo  *ttis;
+	/* GPU kernel does not use chars[] */
+	tz_lsinfo  *lsis;
+} tz_state;
+
+extern const __device__ tz_state session_timezone_state;
+
+/*
  * Support routines
  */
 STATIC_FUNCTION(cl_int)

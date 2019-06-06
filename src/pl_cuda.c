@@ -721,7 +721,8 @@ plcuda_build_program(plcuda_code_context *con,
 		CUDA_BINARY_PATH "/nvcc "
 		" --gpu-architecture=sm_%lu"
 		" --default-stream=per-thread"
-		" -I " PGSHAREDIR "/extension"
+		" -I " PGSHAREDIR "/pg_strom"
+		" -I " PGSERV_INCLUDEDIR
 		" -O2 -std=c++11",
 		devComputeCapability);
 	if (plcuda_enable_debug)

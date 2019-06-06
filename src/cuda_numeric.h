@@ -71,7 +71,17 @@ typedef struct NumericData	NumericData;
 
 /*
  * operations of signed 128bit integer
+ *
+ * host code can use int128 operators supported by compiler (gcc/nvcc),
+ * however, device code needs to implement own int128 operations by itself.
  */
+#ifndef HAVE_INT128
+#ifndef __CUDA_ARCH__
+#define HAVE_INT128		1
+typedef __int128		int128;
+#endif  /* __CUDA_ARCH__ */
+#endif  /* HAVE_INT128 */
+
 typedef struct
 {
 #ifdef HAVE_INT128
@@ -311,17 +321,15 @@ typedef struct {
 	cl_short	precision;
 	cl_bool		isnull;
 } pg_numeric_t;
-#ifdef __CUDACC__
 STROMCL_EXTERNAL_VARREF_TEMPLATE(numeric)
 STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(numeric)
 STROMCL_EXTERNAL_ARROW_TEMPLATE(numeric)
-#endif /* __CUDACC__ */
 #endif /* PG_NUMERIC_TYPE_DEFINED */
 
 /* convert pg_numeric_t <-> convert */
-DEVICE_FUNCTION(cl_uint)
+PUBLIC_FUNCTION(cl_uint)
 pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value);
-DEVICE_FUNCTION(pg_numeric_t)
+PUBLIC_FUNCTION(pg_numeric_t)
 pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum);
 
 #ifdef __CUDACC__

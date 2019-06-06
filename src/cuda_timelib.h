@@ -160,35 +160,6 @@ typedef struct
 		if ((q) != 0) (t) -= ((q) * (u));		\
 	} while(0)
 
-/* definition for session information */
-DEVICE_FUNCTION(Timestamp) SetEpochTimestamp(void);
-typedef struct {
-	cl_long		ls_trans; /* pg_time_t in original */
-	cl_long		ls_corr;
-} tz_lsinfo;
-typedef struct {
-	cl_long		tt_gmtoff;
-	cl_int		tt_isdst;
-	cl_int		tt_abbrind;
-	cl_int		tt_ttisstd;
-	cl_int		tt_ttisgmt;
-} tz_ttinfo;
-typedef struct {
-	cl_int		leapcnt;
-	cl_int		timecnt;
-	cl_int		typecnt;
-	cl_int		charcnt;
-	cl_int		goback;
-	cl_int		goahead;
-	cl_long	   *ats;
-	cl_uchar   *types;
-	tz_ttinfo  *ttis;
-	/* GPU kernel does not use chars[] */
-	tz_lsinfo  *lsis;
-} tz_state;
-
-extern __device__ const tz_state session_timezone_state;
-
 STATIC_INLINE(void)
 interval_cmp_value(const Interval interval, cl_long *days, cl_long *fraction)
 {
@@ -238,7 +209,7 @@ STROMCL_SIMPLE_COMPARE_TEMPLATE(timestamptz_,
 								timestamptz,
 								timestamptz,
 								TimestampTz)
-#endif
+#endif /* PG_TIMESTAMPTZ_TYPE_DEFINED */
 #ifndef PG_INTERVAL_TYPE_DEFINED
 #define PG_INTERVAL_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)

@@ -207,7 +207,7 @@ typedef pg_inet_t					pg_cidr_t;
 
 #ifdef __CUDACC__
 /* binary compatible type cast */
-STATIC_INLINE(pg_inet_t)
+DEVICE_INLINE(pg_inet_t)
 to_inet(pg_cidr_t arg)
 {
 	return arg;

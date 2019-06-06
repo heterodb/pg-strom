@@ -31,16 +31,18 @@
 		}														\
 	} while(0)
 
-/* to be defined as session info */
+/*
+ * definitions to be made by session info
+ */
+DEVICE_FUNCTION(cl_int) pg_database_encoding_max_length(void);
 DEVICE_FUNCTION(cl_int) pg_wchar_mblen(const char *str);
-
 /* ----------------------------------------------------------------
  *
  * Bpchar Text comparison functions
  * 
  * ----------------------------------------------------------------
  */
-STATIC_INLINE(cl_bool)
+DEVICE_INLINE(cl_bool)
 pg_bpchar_datum_extract(kern_context *kcxt, pg_bpchar_t arg,
 						char **s, cl_int *len)
 {
@@ -66,7 +68,7 @@ pg_bpchar_datum_extract(kern_context *kcxt, pg_bpchar_t arg,
 	return true;
 }
 
-STATIC_FUNCTION(cl_int)
+DEVICE_FUNCTION(cl_int)
 bpchar_compare(kern_context *kcxt,
 			   const char *s1, cl_int len1,
 			   const char *s2, cl_int len2,

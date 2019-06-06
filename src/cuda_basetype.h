@@ -60,7 +60,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 
 #ifdef __CUDACC__
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)			\
-	STATIC_INLINE(pg_##NAME##_t)									\
+	DEVICE_INLINE(pg_##NAME##_t)									\
 	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t	result;										\
@@ -74,13 +74,13 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		}															\
 		return result;												\
 	}																\
-	STATIC_INLINE(void)												\
+	DEVICE_INLINE(void)												\
 	pg_datum_ref(kern_context *kcxt,								\
 				 pg_##NAME##_t &result, void *addr)					\
 	{																\
 		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-	STATIC_INLINE(void)												\
+	DEVICE_INLINE(void)												\
 	pg_datum_ref_slot(kern_context *kcxt,							\
 					  pg_##NAME##_t &result,						\
 					  cl_char dclass, Datum datum)					\
@@ -93,7 +93,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			result = pg_##NAME##_datum_ref(kcxt, &datum);			\
 		}															\
 	}																\
-	STATIC_INLINE(pg_##NAME##_t)									\
+	DEVICE_INLINE(pg_##NAME##_t)									\
 	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
 	{																\
 		kern_parambuf *kparams = kcxt->kparams;						\
@@ -110,7 +110,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			result.isnull = true;									\
 		return result;												\
 	}																\
-	STATIC_INLINE(cl_int)											\
+	DEVICE_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
 				   cl_char &dclass,									\
@@ -131,7 +131,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
  * ----------------------------------------------------------------
  */
 #define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)					\
-	STATIC_INLINE(pg_##NAME##_t)									\
+	DEVICE_INLINE(pg_##NAME##_t)									\
 	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t	result;										\
@@ -145,13 +145,13 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		}															\
 		return result;												\
 	}																\
-	STATIC_INLINE(void)												\
+	DEVICE_INLINE(void)												\
 	pg_datum_ref(kern_context *kcxt,								\
 				 pg_##NAME##_t &result, void *addr)					\
 	{																\
 		result = pg_##NAME##_datum_ref(kcxt, addr);					\
 	}																\
-	STATIC_INLINE(void)												\
+	DEVICE_INLINE(void)												\
 	pg_datum_ref_slot(kern_context *kcxt,							\
 					  pg_##NAME##_t &result,						\
 					  cl_char dclass, Datum datum)					\
@@ -164,7 +164,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			result = pg_##NAME##_datum_ref(kcxt, (char *)datum);	\
 		}															\
 	}																\
-	STATIC_INLINE(pg_##NAME##_t)									\
+	DEVICE_INLINE(pg_##NAME##_t)									\
 	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)			\
 	{																\
 		kern_parambuf *kparams = kcxt->kparams;						\
@@ -181,7 +181,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			result.isnull = true;									\
 		return result;												\
 	}																\
-	STATIC_INLINE(cl_int)											\
+	DEVICE_INLINE(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
 				   cl_char &dclass,									\
@@ -212,7 +212,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
  * ----------------------------------------------------------------
  */
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)					\
-	STATIC_INLINE(pg_##NAME##_t)								\
+	DEVICE_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_datum_ref(kern_context *kcxt,					\
 						  void *addr)							\
 	{															\
@@ -228,13 +228,13 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		}														\
 		return result;											\
 	}															\
-	STATIC_INLINE(void)											\
+	DEVICE_INLINE(void)											\
 	pg_datum_ref(kern_context *kcxt,							\
 				 pg_##NAME##_t &result, void *addr)				\
 	{															\
 		result = pg_##NAME##_datum_ref(kcxt, addr);				\
 	}															\
-	STATIC_INLINE(void)											\
+	DEVICE_INLINE(void)											\
 	pg_datum_ref_slot(kern_context *kcxt,						\
 					  pg_##NAME##_t &result,					\
 					  cl_char dclass, Datum datum)				\
@@ -249,7 +249,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			result = pg_##NAME##_datum_ref(kcxt, (char *)datum); \
 		}														\
 	}															\
-	STATIC_INLINE(cl_int)										\
+	DEVICE_INLINE(cl_int)										\
 	pg_datum_store(kern_context *kcxt,							\
 				   pg_##NAME##_t datum,							\
 				   cl_char &dclass,								\
@@ -284,7 +284,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		}														\
 		return 0;												\
 	}															\
-	STATIC_INLINE(pg_##NAME##_t)								\
+	DEVICE_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)		\
 	{															\
 		kern_parambuf  *kparams = kcxt->kparams;				\
@@ -320,7 +320,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
  * enables to extract pointer and length regardless of the physical layout.
  */
 template <typename T>
-STATIC_INLINE(cl_bool)
+DEVICE_INLINE(cl_bool)
 pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 						 char **s, cl_int *len)
 {
@@ -372,7 +372,7 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
  * These are basis of Hash-Join and Group-By reduction.
  */
 #define STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(cl_uint)										\
+	DEVICE_INLINE(cl_uint)										\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
 	{															\
 		if (datum.isnull)										\
@@ -380,7 +380,7 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 		return pg_hash_any((cl_uchar *)&datum.value, sizeof(BASE));	\
 	}
 #define STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)				\
-	STATIC_INLINE(cl_uint)										\
+	DEVICE_INLINE(cl_uint)											\
 	pg_comp_hash(kern_context *kcxt, pg_##NAME##_t datum)		\
 	{                                                           \
 		if (datum.isnull)										\
@@ -417,7 +417,7 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
  * Template of Reference to Arrow values without any transformation
  */
 #define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)			\
-	STATIC_INLINE(void)										\
+	DEVICE_INLINE(void)										\
 	pg_datum_fetch_arrow(kern_context *kcxt,				\
 						 pg_##NAME##_t &result,				\
 						 kern_colmeta *cmeta,				\
@@ -438,7 +438,7 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 		}													\
 	}
 #define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)				\
-	STATIC_INLINE(void)										\
+	DEVICE_INLINE(void)										\
 	pg_datum_fetch_arrow(kern_context *kcxt,				\
 						 pg_##NAME##_t &result,             \
 						 kern_colmeta *cmeta,				\
@@ -466,22 +466,22 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 						 pg_##NAME##_t &result,				\
 						 kern_colmeta *cmeta,				\
 						 char *base, cl_uint rowidx);
-#define STROMCL_UNSUPPORTED_ARROW_TEMPLATE(NAME)					\
-	STATIC_INLINE(void)												\
-	pg_datum_fetch_arrow(kern_context *kcxt,						\
-						 pg_##NAME##_t &result,						\
-						 kern_colmeta *cmeta,						\
-						 char *base, cl_uint rowidx)				\
-	{																\
-		result.isnull = true;										\
-		STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);	\
+#define STROMCL_UNSUPPORTED_ARROW_TEMPLATE(NAME)			\
+	DEVICE_INLINE(void)										\
+	pg_datum_fetch_arrow(kern_context *kcxt,				\
+						 pg_##NAME##_t &result,				\
+						 kern_colmeta *cmeta,				\
+						 char *base, cl_uint rowidx)		\
+	{														\
+		result.isnull = true;								\
+		STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration); \
 	}
 
 /*
  * A common interface to reference scalar value on KDS_FORMAT_ARROW
  */
 template <typename T>
-STATIC_INLINE(void)
+DEVICE_INLINE(void)
 pg_datum_ref_arrow(kern_context *kcxt,
 				   T &result,
 				   kern_data_store *kds,
@@ -495,9 +495,32 @@ pg_datum_ref_arrow(kern_context *kcxt,
 	pg_datum_fetch_arrow(kcxt, result, cmeta,
 						 (char *)kds, rowidx);
 }
+#else  /* __CUDACC__ */
+#define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
+#define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)
+#define STROMCL_EXTERNAL_VARREF_TEMPLATE(NAME)
 
+#define STROMCL_SIMPLE_COMP_HASH_TEMPLATE(NAME,BASE)
+#define STROMCL_VARLENA_COMP_HASH_TEMPLATE(NAME)
+#define STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(NAME)
+
+#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE,AS_DATUM) \
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)
+#define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE) \
+	STROMCL_INDIRECT_DATATYPE_TEMPLATE(NAME,BASE)
+#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME) \
+	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)
+
+#define STROMCL_SIMPLE_ARROW_TEMPLATE(NAME,BASE)
+#define STROMCL_VARLENA_ARROW_TEMPLATE(NAME)
+#define STROMCL_EXTERNAL_ARROW_TEMPLATE(NAME)
+#define STROMCL_UNSUPPORTED_ARROW_TEMPLATE(NAME)
+#endif /* !__CUDACC__ */
+
+#ifdef __CUDACC__
 #define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
-	STATIC_INLINE(pg_bool_t)								\
+	DEVICE_INLINE(pg_bool_t)								\
 	pgfn_##FNAME##EXTRA(kern_context *kcxt,					\
 						pg_##LNAME##_t arg1,				\
 						pg_##RNAME##_t arg2)				\
@@ -517,6 +540,10 @@ pg_datum_ref_arrow(kern_context *kcxt,
 	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<=,le)	\
 	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>, gt)	\
 	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>=,ge)
+#else  /* __CUDACC__ */
+#define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA)
+#define STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)
+#endif /* !__CUDACC__ */
 
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
@@ -574,8 +601,9 @@ STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(float8)
 STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
 #endif	/* PG_FLOAT8_TYPE_DEFINED */
 
+#ifdef __CUDACC__
 #define PG_SIMPLE_TYPECAST_TEMPLATE(TARGET,SOURCE,CAST)	\
-	STATIC_INLINE(pg_##TARGET##_t)						\
+	DEVICE_INLINE(pg_##TARGET##_t)						\
 	pgfn_to_##TARGET(kern_context *kcxt,				\
 					 pg_##SOURCE##_t arg)				\
 	{													\
@@ -587,7 +615,7 @@ STROMCL_SIMPLE_ARROW_TEMPLATE(float8, cl_double)
 		return result;									\
 	}
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_to_bool(kern_context *kcxt, pg_int4_t arg)
 {
 	pg_bool_t	result;
@@ -632,8 +660,9 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,int4,cl_double)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,int8,cl_double)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,cl_double)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,cl_double)
-
 #undef PG_SIMPLE_TYPECAST_TEMPLATE
+#endif /* __CUDACC__ */
+
 /*
  * Simple comparison operators between intX/floatX
  */
@@ -730,6 +759,7 @@ STROMCL_EXTERNAL_ARROW_TEMPLATE(composite)
 /*
  * handler functions for DATUM_CLASS__(VARLENA|ARRAY|COMPOSITE)
  */
+#ifdef __CUDACC__
 DEVICE_FUNCTION(cl_uint)
 pg_varlena_datum_length(kern_context *kcxt, Datum datum);
 DEVICE_FUNCTION(cl_uint)

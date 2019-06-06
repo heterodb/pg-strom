@@ -17,16 +17,11 @@
  */
 #ifndef CUDA_UTILS_H
 #define CUDA_UTILS_H
-
 #ifdef __CUDACC__
-/*
- * routines to reference registers or memory
- */
-
 /*
  * NumSmx - reference to the %nsmid register
  */
-STATIC_INLINE(cl_uint) NumSmx(void)
+DEVICE_INLINE(cl_uint) NumSmx(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %nsmid;" : "=r"(ret) );
@@ -36,7 +31,7 @@ STATIC_INLINE(cl_uint) NumSmx(void)
 /*
  * SmxId - reference to the %smid register
  */
-STATIC_INLINE(cl_uint) SmxId(void)
+DEVICE_INLINE(cl_uint) SmxId(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %smid;" : "=r"(ret) );
@@ -46,7 +41,7 @@ STATIC_INLINE(cl_uint) SmxId(void)
 /*
  * LaneId() - reference to the %laneid register
  */
-STATIC_INLINE(cl_uint) LaneId(void)
+DEVICE_INLINE(cl_uint) LaneId(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %laneid;" : "=r"(ret) );
@@ -56,7 +51,7 @@ STATIC_INLINE(cl_uint) LaneId(void)
 /*
  * TotalShmemSize() - reference to the %total_smem_size
  */
-STATIC_INLINE(cl_uint) TotalShmemSize(void)
+DEVICE_INLINE(cl_uint) TotalShmemSize(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(ret) );
@@ -66,7 +61,7 @@ STATIC_INLINE(cl_uint) TotalShmemSize(void)
 /*
  * DynamicShmemSize() - reference to the %dynamic_smem_size
  */
-STATIC_INLINE(cl_uint) DynamicShmemSize(void)
+DEVICE_INLINE(cl_uint) DynamicShmemSize(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(ret) );
@@ -79,7 +74,7 @@ STATIC_INLINE(cl_uint) DynamicShmemSize(void)
  * NOTE: clock64() is not consistent across different SMX, thus, should not
  *       use this API in case when device time-run may reschedule the kernel.
  */
-STATIC_INLINE(cl_ulong) GlobalTimer(void)
+DEVICE_INLINE(cl_ulong) GlobalTimer(void)
 {
 	cl_ulong	ret;
 	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
@@ -87,7 +82,7 @@ STATIC_INLINE(cl_ulong) GlobalTimer(void)
 }
 
 /* memory comparison */
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 __memcmp(const void *s1, const void *s2, size_t n)
 {
 	const cl_uchar *p1 = (const cl_uchar *)s1;
@@ -102,9 +97,7 @@ __memcmp(const void *s1, const void *s2, size_t n)
 	}
 	return 0;
 }
-#endif	/* __CUDACC__ */
 
-#ifdef __CUDACC__
 /*
  * pgstromTotalSum
  *
@@ -120,7 +113,7 @@ __memcmp(const void *s1, const void *s2, size_t n)
  *   (Unacceptable to call the function in if-block)
  */
 template <typename T>
-STATIC_FUNCTION(T)
+DEVICE_INLINE(T)
 pgstromTotalSum(T *values, cl_uint nitems)
 {
 	cl_uint		nsteps = get_next_log2(nitems);
@@ -151,14 +144,12 @@ pgstromTotalSum(T *values, cl_uint nitems)
 
 	return retval;
 }
-#endif /* __CUDACC__ */
 
-#ifdef __CUDACC__
 /*
  * Utility functions to reference system columns
  *   (except for ctid and table_oid)
  */
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_ctid_store(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup,
@@ -194,7 +185,7 @@ pg_sysattr_ctid_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_oid_store(kern_context *kcxt,
 					 kern_data_store *kds,
 					 HeapTupleHeaderData *htup,
@@ -217,7 +208,7 @@ pg_sysattr_oid_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_xmin_store(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup,
@@ -235,7 +226,7 @@ pg_sysattr_xmin_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_cmin_store(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup,
@@ -253,7 +244,7 @@ pg_sysattr_cmin_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_xmax_store(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup,
@@ -271,7 +262,7 @@ pg_sysattr_xmax_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_cmax_store(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup,
@@ -289,7 +280,7 @@ pg_sysattr_cmax_store(kern_context *kcxt,
 	return 0;
 }
 
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 pg_sysattr_tableoid_store(kern_context *kcxt,
 						  kern_data_store *kds,
 						  HeapTupleHeaderData *htup,
@@ -306,13 +297,11 @@ pg_sysattr_tableoid_store(kern_context *kcxt,
 	}
 	return 0;
 }
-#endif	/* __CUDACC__ */
 
-#ifdef __CUDACC__
 /*
  * inline functions to form/deform HeapTuple
  */
-STATIC_INLINE(cl_uint)
+DEVICE_INLINE(cl_uint)
 compute_heaptuple_size(kern_context *kcxt,
 					   kern_data_store *kds,
 					   cl_char *tup_dclass,
@@ -339,7 +328,7 @@ compute_heaptuple_size(kern_context *kcxt,
  * tup_dclass   ... any of DATUM_CLASS__*
  * tup_values   ... array of values to be written
  */
-STATIC_INLINE(cl_uint)
+DEVICE_INLINE(cl_uint)
 form_kern_heaptuple(kern_context    *kcxt,
 					kern_tupitem    *tupitem,		/* out */
 					kern_data_store	*kds_dst,		/* in */
@@ -399,7 +388,7 @@ form_kern_heaptuple(kern_context    *kcxt,
  * @tup_dclass ... any of DATUM_CLASS__*
  * @tup_values ... values of the sub-fields
  */
-STATIC_INLINE(cl_uint)
+DEVICE_INLINE(cl_uint)
 form_kern_composite_type(kern_context *kcxt,
 						 void      *buffer,      /* out */
 						 cl_uint    comp_typeid, /* in: type OID */
@@ -420,14 +409,12 @@ form_kern_composite_type(kern_context *kcxt,
 								 tup_dclass,
 								 tup_values);
 }
-#endif /* __CUDACC__ */
 
-#ifdef __CUDACC__
 /*
  * A utility function to evaluate pg_bool_t value as if built-in
  * bool variable.
  */
-STATIC_INLINE(cl_bool)
+DEVICE_INLINE(cl_bool)
 EVAL(pg_bool_t arg)
 {
 	if (!arg.isnull && arg.value != 0)
@@ -435,14 +422,14 @@ EVAL(pg_bool_t arg)
 	return false;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 NOT(pg_bool_t arg)
 {
 	arg.value = !arg.value;
 	return arg;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 to_bool(cl_bool value)
 {
 	pg_bool_t	result;
@@ -457,7 +444,7 @@ to_bool(cl_bool value)
  * Support routine for CASE x WHEN y then ... else ... end
  */
 template <typename E, typename T>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_CASEWHEN_ELSE(kern_context *kcxt,
 				 const E& case_val,
 				 const T& else_val)
@@ -466,7 +453,7 @@ PG_CASEWHEN_ELSE(kern_context *kcxt,
 }
 
 template <typename E, typename T, typename ...R>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_CASEWHEN_ELSE(kern_context *kcxt,
 				 const E& case_val,
 				 const T& else_val,
@@ -486,7 +473,7 @@ PG_CASEWHEN_ELSE(kern_context *kcxt,
 }
 
 template <typename E, typename T, typename ...R>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_CASEWHEN_EXPR(kern_context *kcxt,
 				 const E& case_val,
 				 const E& test_val,
@@ -510,14 +497,14 @@ PG_CASEWHEN_EXPR(kern_context *kcxt,
  * Support routine for COALESCE / GREATEST / LEAST
  */
 template <typename T>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_COALESCE(kern_context *kcxt, const T& arg)
 {
 	return arg;
 }
 
 template <typename T, typename ...R>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_COALESCE(kern_context *kcxt, const T& arg1, const R&... args_rest)
 {
 	if (!arg1.isnull)
@@ -526,14 +513,14 @@ PG_COALESCE(kern_context *kcxt, const T& arg1, const R&... args_rest)
 }
 
 template <typename T>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_GREATEST(kern_context *kcxt, const T& arg)
 {
 	return arg;
 }
 
 template <typename T, typename ...R>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_GREATEST(kern_context *kcxt, const T& arg1, const R&... args_rest)
 {
 	if (arg1.isnull)
@@ -554,14 +541,14 @@ PG_GREATEST(kern_context *kcxt, const T& arg1, const R&... args_rest)
 }
 
 template <typename T>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_LEAST(kern_context *kcxt, const T& arg)
 {
 	return arg;
 }
 
 template <typename T, typename... R>
-STATIC_INLINE(T)
+DEVICE_INLINE(T)
 PG_LEAST(kern_context *kcxt, const T& arg1, const R&... args_rest)
 {
 	if (arg1.isnull)
@@ -585,7 +572,7 @@ PG_LEAST(kern_context *kcxt, const T& arg1, const R&... args_rest)
  * Support routine for NullTest
  */
 template <typename T>
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 PG_ISNULL(kern_context *kcxt, T arg)
 {
 	pg_bool_t	result;
@@ -597,7 +584,7 @@ PG_ISNULL(kern_context *kcxt, T arg)
 }
 
 template <typename T>
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 PG_ISNOTNULL(kern_context *kcxt, T arg)
 {
 	pg_bool_t	result;
@@ -611,7 +598,7 @@ PG_ISNOTNULL(kern_context *kcxt, T arg)
 /*
  * Functions for BooleanTest
  */
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && result.value);
@@ -619,7 +606,7 @@ pgfn_bool_is_true(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_not_true(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || !result.value);
@@ -627,7 +614,7 @@ pgfn_bool_is_not_true(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (!result.isnull && !result.value);
@@ -635,7 +622,7 @@ pgfn_bool_is_false(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_not_false(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = (result.isnull || result.value);
@@ -643,7 +630,7 @@ pgfn_bool_is_not_false(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = result.isnull;
@@ -651,7 +638,7 @@ pgfn_bool_is_unknown(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.isnull;
@@ -659,11 +646,10 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 	return result;
 }
 
-#ifdef PGSTROM_KERNEL_HAS_PGARRAY
 /*
  * Support routine of ScalarArrayOpExpr
  */
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 {
 	cl_int		i, ret;
@@ -697,7 +683,7 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 }
 
 template <typename ScalarType, typename ElementType>
-STATIC_INLINE(pg_bool_t)
+DEVICE_INLINE(pg_bool_t)
 PG_SCALAR_ARRAY_OP(kern_context *kcxt,
 				   pg_bool_t (*compare_fn)(kern_context *kcxt,
 										   ScalarType scalar,
@@ -784,7 +770,5 @@ PG_SCALAR_ARRAY_OP(kern_context *kcxt,
 	}
 	return result;
 }
-#endif /* PGSTROM_KERNEL_HAS_PGARRAY */
-#endif /* __CUDACC__ */
-
+#endif  /* __CUDACC__ */
 #endif  /* CUDA_UTILS_H */

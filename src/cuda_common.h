@@ -68,13 +68,13 @@ typedef cl_ulong			uintptr_t;
 #endif /* offsetof */
 #define offsetof(TYPE,FIELD)			((long) &((TYPE *)0UL)->FIELD)
 
-#ifdef __NVCC__
 /*
  * At CUDA10, we found nvcc replaces the offsetof above by __builtin_offsetof
  * regardless of our macro definitions. It is mostly equivalent, however, it
  * does not support offset calculation which includes run-time values.
  * E.g) offsetof(kds, colmeta[kds->ncols]) made an error.
  */
+#ifdef __NVCC__
 #define __builtin_offsetof(TYPE,FIELD)	((long) &((TYPE *)0UL)->FIELD)
 #endif /* __NVCC__ */
 
@@ -252,31 +252,6 @@ typedef struct nameData
 
 #ifdef __CUDACC__
 /*
- * __Fetch - access macro regardless of memory alignment
- */
-template <typename T>
-__device__ __forceinline__
-static T __Fetch(const T *ptr)
-{
-	T	temp;
-	/*
-	 * (2019/06/01) Originally, this function used direct pointer access
-	 * using *ptr, if pointer is aligned. However, it looks NVCC/NVRTC
-	 * optimization generates binary code that accesses unaligned pointer.
-	 * '--device-debug' eliminates the strange behavior, and 'volatile'
-	 * qualification also stop the behavior.
-	 * Maybe, future version of CUDA and NVCC/NVRTC will fix the problem.
-	 */
-	memcpy(&temp, ptr, sizeof(T));
-
-	return temp;
-}
-#else	/* __CUDACC__ */
-#define __Fetch(PTR)			(*(PTR))
-#endif	/* __CUDACC__ */
-
-#ifdef __CUDACC__
-/*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
  * alignment problem. The nvidia's driver adjust alignment of local memory
  * according to the data type; 1byte for cl_char, 4bytes for cl_uint and
@@ -306,7 +281,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_base()		(blockIdx.x * blockDim.x)
 
 #else	/* __CUDACC__ */
-typedef uintptr_t		hostptr_t;
+typedef cl_ulong		hostptr_t;
 #endif	/* !__CUDACC__ */
 
 /*
@@ -320,26 +295,52 @@ typedef uintptr_t		hostptr_t;
 #define MAXTHREADS_PER_BLOCK		1024
 #ifdef __CUDACC__
 #define STATIC_INLINE(RET_TYPE)					\
-	__device__ __forceinline__					\
+	__device__ __host__ __forceinline__			\
 	static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)				\
-	__device__									\
+	__device__ __host__							\
+	static RET_TYPE
+#define DEVICE_INLINE(RET_TYPE)					\
+	__device__ __forceinline__					\
 	static RET_TYPE __attribute__ ((unused))
 #define DEVICE_FUNCTION(RET_TYPE)				\
-	__device__ RET_TYPE
+	__device__ RET_TYPE __attribute__ ((unused))
+#define PUBLIC_FUNCTION(RET_TYPE)				\
+	__device__ __host__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
-#define KERNEL_FUNCTION_NUMTHREADS(RET_TYPE,NUM_THREADS) \
-	extern "C" __global__ RET_TYPE __launch_bounds__(NUM_THREADS)
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
 	extern "C" __global__ RET_TYPE __launch_bounds__(MAXTHREADS_PER_BLOCK)
 #else	/* __CUDACC__ */
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
-#define DEVICE_FUNCTION(RET_TYPE)	RET_TYPE
-#define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
-#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	KERNEL_FUNCTION(RET_TYPE)
+#define PUBLIC_FUNCTION(RET_TYPE)	RET_TYPE
 #endif	/* !__CUDACC__ */
+
+/*
+ * __Fetch - access macro regardless of memory alignment
+ */
+#ifdef __CUDA_ARCH__
+template <typename T>
+DEVICE_INLINE(T)
+__Fetch(const T *ptr)
+{
+	T	temp;
+	/*
+	 * (2019/06/01) Originally, this function used direct pointer access
+	 * using *ptr, if pointer is aligned. However, it looks NVCC/NVRTC
+	 * optimization generates binary code that accesses unaligned pointer.
+	 * '--device-debug' eliminates the strange behavior, and 'volatile'
+	 * qualification also stop the behavior.
+	 * Maybe, future version of CUDA and NVCC/NVRTC will fix the problem.
+	 */
+	memcpy(&temp, ptr, sizeof(T));
+
+	return temp;
+}
+#else	/* __CUDA_ARCH__ */
+#define __Fetch(PTR)			(*(PTR))
+#endif	/* !__CUDA_ARCH__ */
 
 /*
  * Error code definition
@@ -426,7 +427,7 @@ kern_context_alloc(kern_context *kcxt, size_t len)
 	return NULL;
 }
 
-#ifdef __CUDACC__
+#ifdef __CUDA_ARCH__
 /*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
@@ -486,14 +487,17 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 			   KERN_ERRORBUF_FILENAME_LEN);
 	}
 }
-#else	/* __CUDACC__ */
-/*
- * If case when STROM_SET_ERROR is called in the host code,
- * it raises an error using ereport()
- */
+#elif defined(__CUDACC__)
+#define STROM_SET_ERROR(p_kerror, errcode)			\
+	do {											\
+		fprintf(stderr, "%s:%d error code=%d\n",	\
+				__FUNCTION__, __LINE__, errcode);	\
+		exit(1);									\
+	} while(0)
+#else /* !__CUDA_ARCH__ && !__CUDACC__ == gcc by pg_config */
 #define STROM_SET_ERROR(p_kerror, errcode)							\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
-#endif	/* !__CUDACC__ */
+#endif	/* !__CUDA_ARCH__ && !__CUDACC__ */
 
 #ifndef PG_STROM_H
 /* definitions at storage/block.h */
@@ -1465,14 +1469,13 @@ typedef struct
 #define DATUM_CLASS__COMPOSITE	4	/* datum is pg_composite_t reference */
 
 /*
- * device functions in libgpucore.a
+ * device functions in cuda_common.fatbin
  */
 #ifdef __CUDACC__
 DEVICE_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
-#endif
+#endif /* __CUDACC__ */
 
-#ifdef	__CUDACC__
 /*
  * Macro to extract a heap-tuple
  *
@@ -1542,7 +1545,6 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 
 #define EXTRACT_HEAP_TUPLE_END()										\
 	} while(0)
-#endif	/* __CUDACC__ */
 
 #define EXTRACT_HEAP_READ_8BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
 	do {													 \
@@ -1601,7 +1603,7 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 
 #ifdef __CUDACC__
 /*
- * device function to decompress toast datum
+ * device functions to decompress a toast datum
  */
 DEVICE_FUNCTION(size_t)
 toast_raw_datum_size(kern_context *kcxt, varlena *attr);
@@ -1611,109 +1613,66 @@ pglz_decompress(const char *source, cl_int slen,
 DEVICE_FUNCTION(cl_bool)
 toast_decompress_datum(char *buffer, cl_uint buflen,
 					   const varlena *datum);
+/*
+ * device functions to reference a particular datum in a tuple
+ */
+DEVICE_FUNCTION(void *)
+kern_get_datum_tuple(kern_colmeta *colmeta,
+					 HeapTupleHeaderData *htup,
+					 cl_uint colidx);
+DEVICE_FUNCTION(void *)
+kern_get_datum_row(kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx);
+DEVICE_FUNCTION(void *)
+kern_get_datum_slot(kern_data_store *kds,
+					cl_uint colidx, cl_uint rowidx);
+//see below
+//DEVICE_FUNCTION(void *)
+//kern_get_datum_column(kern_data_store *kds,
+//					  cl_uint colidx, cl_uint rowidx);
+
+/*
+ * device functions to form/deform HeapTuple
+ */
+DEVICE_FUNCTION(cl_uint)
+__compute_heaptuple_size(kern_context *kcxt,
+						 kern_colmeta *__cmeta,
+						 cl_bool heap_hasoid,
+						 cl_uint ncols,
+						 cl_char *tup_dclass,
+						 Datum   *tup_values);
+DEVICE_FUNCTION(void)
+deform_kern_heaptuple(cl_int	nattrs,
+					  kern_colmeta *tup_attrs,
+					  HeapTupleHeaderData *htup,
+					  cl_char  *tup_dclass,
+					  Datum	   *tup_values);
+DEVICE_FUNCTION(cl_uint)
+__form_kern_heaptuple(kern_context *kcxt,
+					  void	   *buffer,			/* out */
+					  cl_int	ncols,			/* in */
+					  kern_colmeta *colmeta,	/* in */
+					  HeapTupleHeaderData *htup_orig, /* in: if heap-tuple */
+					  cl_int	comp_typmod,	/* in: if composite type */
+					  cl_uint	comp_typeid,	/* in: if composite type */
+					  cl_uint	htuple_oid,		/* in */
+					  cl_char  *tup_dclass,		/* in */
+					  Datum	   *tup_values);	/* in */
+/*
+ * Reduction Operations
+ */
+DEVICE_FUNCTION(cl_uint)
+pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum);
+DEVICE_FUNCTION(cl_uint)
+pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 #endif	/* __CUDACC__ */
 
 /*
- * kern_get_datum_xxx
- *
- * Reference to a particular datum on the supplied kernel data store.
- * It returns NULL, if it is a really null-value in context of SQL,
- * or in case when out of range with error code
- *
- * NOTE: We are paranoia for validation of the data being fetched from
- * the kern_data_store in row-format because we may see a phantom page
- * if the source transaction that required this kernel execution was
- * aborted during execution.
- * Once a transaction gets aborted, shared buffers being pinned are
- * released, even if DMA send request on the buffers are already
- * enqueued. In this case, the calculation result shall be discarded,
- * so no need to worry about correctness of the calculation, however,
- * needs to be care about address of the variables being referenced.
+ * Some host code uses kern_get_datum_column() to implement fallback code
+ * on KDS_FORMAT_COLUMN, however, this data-store format shall be deprecated
+ * in the near future. So, we keep this inline function for a while.
  */
-STATIC_FUNCTION(void *)
-kern_get_datum_tuple(kern_colmeta *colmeta,
-					 HeapTupleHeaderData *htup,
-					 cl_uint colidx)
-{
-	cl_bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-	cl_uint		offset = htup->t_hoff;
-	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
-
-	/* shortcut if colidx is obviously out of range */
-	if (colidx >= ncols)
-		return NULL;
-	/* shortcut if tuple contains no NULL values */
-	if (!heap_hasnull)
-	{
-		kern_colmeta	cmeta = colmeta[colidx];
-
-		if (cmeta.attcacheoff >= 0)
-			return (char *)htup + cmeta.attcacheoff;
-	}
-	/* regular path that walks on heap-tuple from the head */
-	for (i=0; i < ncols; i++)
-	{
-		if (heap_hasnull && att_isnull(i, htup->t_bits))
-		{
-			if (i == colidx)
-				return NULL;
-		}
-		else
-		{
-			kern_colmeta	cmeta = colmeta[i];
-			char		   *addr;
-
-			if (cmeta.attlen > 0)
-				offset = TYPEALIGN(cmeta.attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-				offset = TYPEALIGN(cmeta.attalign, offset);
-			/* TODO: overrun checks here */
-			addr = ((char *) htup + offset);
-			if (i == colidx)
-				return addr;
-			if (cmeta.attlen > 0)
-				offset += cmeta.attlen;
-			else
-				offset += VARSIZE_ANY(addr);
-		}
-	}
-	return NULL;
-}
-
-//who use this API?
-STATIC_FUNCTION(void *)
-kern_get_datum_row(kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
-{
-	kern_tupitem   *tupitem;
-
-	if (colidx >= kds->ncols ||
-		rowidx >= kds->nitems)
-		return NULL;	/* likely a BUG */
-	tupitem = KERN_DATA_STORE_TUPITEM(kds, rowidx);
-
-	return kern_get_datum_tuple(kds->colmeta, &tupitem->htup, colidx);
-}
-
-#if 0
-//not used any more. Use pg_datum_ref_slot() instead
-STATIC_FUNCTION(void *)
-kern_get_datum_slot(kern_data_store *kds,
-					cl_uint colidx, cl_uint rowidx)
-{
-	Datum	   *values = KERN_DATA_STORE_VALUES(kds,rowidx);
-	cl_bool	   *isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
-	kern_colmeta		cmeta = kds->colmeta[colidx];
-
-	if (isnull[colidx])
-		return NULL;
-	if (cmeta.attbyval)
-		return values + colidx;
-	return (char *)values[colidx];
-}
-#endif
-
-STATIC_FUNCTION(void *)
+STATIC_INLINE(void *)
 kern_get_datum_column(kern_data_store *kds,
 					  cl_uint colidx, cl_uint rowidx)
 {
@@ -1761,46 +1720,6 @@ kern_get_datum_column(kern_data_store *kds,
 	}
 	return (void *)values;
 }
-
-#ifdef __CUDACC__
-/*
- * functions to form/deform HeapTuple
- */
-DEVICE_FUNCTION(cl_uint)
-__compute_heaptuple_size(kern_context *kcxt,
-						 kern_colmeta *__cmeta,
-						 cl_bool heap_hasoid,
-						 cl_uint ncols,
-						 cl_char *tup_dclass,
-						 Datum   *tup_values);
-DEVICE_FUNCTION(void)
-deform_kern_heaptuple(cl_int	nattrs,
-					  kern_colmeta *tup_attrs,
-					  HeapTupleHeaderData *htup,
-					  cl_char  *tup_dclass,
-					  Datum	   *tup_values);
-DEVICE_FUNCTION(cl_uint)
-__form_kern_heaptuple(kern_context *kcxt,
-					  void	   *buffer,			/* out */
-					  cl_int	ncols,			/* in */
-					  kern_colmeta *colmeta,	/* in */
-					  HeapTupleHeaderData *htup_orig, /* in: if heap-tuple */
-					  cl_int	comp_typmod,	/* in: if composite type */
-					  cl_uint	comp_typeid,	/* in: if composite type */
-					  cl_uint	htuple_oid,		/* in */
-					  cl_char  *tup_dclass,		/* in */
-					  Datum	   *tup_values);	/* in */
-#endif	/* __CUDACC__ */
-
-#ifdef __CUDACC__
-/*
- * Reduction Operations
- */
-DEVICE_FUNCTION(cl_uint)
-pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum);
-DEVICE_FUNCTION(cl_uint)
-pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
-#endif	/* __CUDACC__ */
 
 /* base type definitions and templates */
 #include "cuda_basetype.h"

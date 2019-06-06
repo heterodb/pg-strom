@@ -470,7 +470,7 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
 		c ^= b; c -= rot(b,24);					\
 	}
 
-__device__ cl_uint
+DEVICE_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen)
 {
 	cl_uint		a, b, c;
@@ -770,15 +770,109 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 	return true;
 }
 
+/*
+ * kern_get_datum_xxx
+ *
+ * Reference to a particular datum on the supplied kernel data store.
+ * It returns NULL, if it is a really null-value in context of SQL,
+ * or in case when out of range with error code
+ *
+ * NOTE: We are paranoia for validation of the data being fetched from
+ * the kern_data_store in row-format because we may see a phantom page
+ * if the source transaction that required this kernel execution was
+ * aborted during execution.
+ * Once a transaction gets aborted, shared buffers being pinned are
+ * released, even if DMA send request on the buffers are already
+ * enqueued. In this case, the calculation result shall be discarded,
+ * so no need to worry about correctness of the calculation, however,
+ * needs to be care about address of the variables being referenced.
+ */
+DEVICE_FUNCTION(void *)
+kern_get_datum_tuple(kern_colmeta *colmeta,
+					 HeapTupleHeaderData *htup,
+					 cl_uint colidx)
+{
+	cl_bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	cl_uint		offset = htup->t_hoff;
+	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 
+	/* shortcut if colidx is obviously out of range */
+	if (colidx >= ncols)
+		return NULL;
+	/* shortcut if tuple contains no NULL values */
+	if (!heap_hasnull)
+	{
+		kern_colmeta	cmeta = colmeta[colidx];
 
+		if (cmeta.attcacheoff >= 0)
+			return (char *)htup + cmeta.attcacheoff;
+	}
+	/* regular path that walks on heap-tuple from the head */
+	for (i=0; i < ncols; i++)
+	{
+		if (heap_hasnull && att_isnull(i, htup->t_bits))
+		{
+			if (i == colidx)
+				return NULL;
+		}
+		else
+		{
+			kern_colmeta	cmeta = colmeta[i];
+			char		   *addr;
 
+			if (cmeta.attlen > 0)
+				offset = TYPEALIGN(cmeta.attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta.attalign, offset);
+			/* TODO: overrun checks here */
+			addr = ((char *) htup + offset);
+			if (i == colidx)
+				return addr;
+			if (cmeta.attlen > 0)
+				offset += cmeta.attlen;
+			else
+				offset += VARSIZE_ANY(addr);
+		}
+	}
+	return NULL;
+}
 
-//
-// Tentative Data Types Routines
-//
+#if 0
+/* nobody uses these routines now? */
+DEVICE_FUNCTION(void *)
+kern_get_datum_row(kern_data_store *kds,
+				   cl_uint colidx, cl_uint rowidx)
+{
+	kern_tupitem   *tupitem;
 
-/* usually, called via pg_datum_ref_arrow() */
+	if (colidx >= kds->ncols ||
+		rowidx >= kds->nitems)
+		return NULL;	/* likely a BUG */
+	tupitem = KERN_DATA_STORE_TUPITEM(kds, rowidx);
+
+	return kern_get_datum_tuple(kds->colmeta, &tupitem->htup, colidx);
+}
+
+DEVICE_FUNCTION(void *)
+kern_get_datum_slot(kern_data_store *kds,
+					cl_uint colidx, cl_uint rowidx)
+{
+	Datum	   *values = KERN_DATA_STORE_VALUES(kds,rowidx);
+	cl_bool	   *isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
+	kern_colmeta		cmeta = kds->colmeta[colidx];
+
+	if (isnull[colidx])
+		return NULL;
+	if (cmeta.attbyval)
+		return values + colidx;
+	return (char *)values[colidx];
+}
+#endif
+
+/*
+ * Routines to reference values on KDS_FORMAT_ARROW for base types.
+ * Usually, these routines are referenced via pg_datum_ref_arrow().
+ */
 DEVICE_FUNCTION(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
 					 pg_bool_t &result,
@@ -802,8 +896,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 
-
-/* usually, called via pg_datum_ref_arrow() */
 DEVICE_FUNCTION(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
 					 pg_date_t &result,
@@ -849,7 +941,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 
-/* usually, called via pg_datum_ref_arrow() */
 DEVICE_FUNCTION(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
 					 pg_time_t &result,
@@ -888,7 +979,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 
-/* usually, called via pg_datum_ref_arrow() */
 DEVICE_FUNCTION(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
 					 pg_timestamp_t &result,
@@ -927,7 +1017,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 
-/* usually, called via pg_datum_ref_arrow() */
 DEVICE_FUNCTION(void)
 pg_datum_fetch_arrow(kern_context *kcxt,
 					 pg_interval_t &result,
@@ -998,15 +1087,9 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	}
 }
 
-
-
-
-
-
-//
-// tentative base type hash-values
-//
-
+/*
+ * Hash-functions for base types
+ */
 DEVICE_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_int2_t datum)
 {
@@ -1330,6 +1413,15 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 					(kcxt, dest, cmeta, base, start, end);	\
 	}
 
+#define STROMCL_EXTERNAL_PGARRAY_TEMPLATE(NAME)				\
+	DEVICE_FUNCTION(cl_uint)								\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+                                 cl_uint end);
+
 template <typename T>
 STATIC_FUNCTION(cl_uint)
 pg_simple_array_from_arrow(kern_context *kcxt,
@@ -1464,6 +1556,7 @@ STROMCL_SIMPLE_PGARRAY_TEMPLATE(int8)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float2)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float4)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(float8)
+STROMCL_EXTERNAL_PGARRAY_TEMPLATE(numeric)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(date)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(time)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(timestamp)
@@ -1512,11 +1605,9 @@ __pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum)
 		case PG_FLOAT8OID:
 			sz = pg_float8_array_from_arrow(kcxt,dest,smeta,base,start,end);
 			break;
-#if 0
 		case PG_NUMERICOID:
 			sz = pg_numeric_array_from_arrow(kcxt,dest,smeta,base,start,end);
 			break;
-#endif
 		case PG_DATEOID:
 			sz = pg_date_array_from_arrow(kcxt,dest,smeta,base,start,end);
 			break;
@@ -1850,4 +1941,3 @@ pg_composite_datum_write(kern_context *kcxt, char *dest, Datum datum)
 	kcxt->vlpos = vlpos_saved;
 	return sz;
 }
-

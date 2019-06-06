@@ -160,7 +160,7 @@ pg_numeric_normalize(pg_numeric_t num)
 	return num;
 }
 
-DEVICE_FUNCTION(pg_numeric_t)
+PUBLIC_FUNCTION(pg_numeric_t)
 pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 {
 	pg_numeric_t	result;
@@ -221,7 +221,7 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
  * sizeof(NumericData). Once this function makes a varlena datum on the
  * buffer, it returns total length of the written data.
  */
-DEVICE_FUNCTION(cl_uint)
+PUBLIC_FUNCTION(cl_uint)
 pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 {
 	NumericData	   *numData = (NumericData *)vl_buffer;
@@ -696,7 +696,7 @@ pgfn_numeric_float8(kern_context *kcxt, pg_numeric_t arg)
 	return result;
 }
 
-STATIC_FUNCTION(pg_numeric_t)
+DEVICE_FUNCTION(pg_numeric_t)
 integer_to_numeric(kern_context *kcxt, cl_long ival)
 {
 	pg_numeric_t	result;
@@ -709,7 +709,7 @@ integer_to_numeric(kern_context *kcxt, cl_long ival)
 	return pg_numeric_normalize(result);
 }
 
-STATIC_FUNCTION(pg_numeric_t)
+DEVICE_FUNCTION(pg_numeric_t)
 float_to_numeric(kern_context *kcxt, cl_double fval)
 {
 	pg_numeric_t result;

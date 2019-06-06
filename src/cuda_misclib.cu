@@ -187,31 +187,31 @@ PGFN_MONEY_DIVFUNC_TEMPLATE(flt4, float4, 0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt8, float8, 0.0)
 #undef PGFN_MONEY_DIVFUNC_TEMPLATE
 
-STATIC_INLINE(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_int2_mul_cash(kern_context *kcxt, pg_int2_t arg1, pg_money_t arg2)
 {
 	return pgfn_cash_mul_int2(kcxt, arg2, arg1);
 }
 
-STATIC_INLINE(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_int4_mul_cash(kern_context *kcxt, pg_int4_t arg1, pg_money_t arg2)
 {
 	return pgfn_cash_mul_int4(kcxt, arg2, arg1);
 }
 
-STATIC_INLINE(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_flt2_mul_cash(kern_context *kcxt, pg_float2_t arg1, pg_money_t arg2)
 {
 	return pgfn_cash_mul_flt2(kcxt, arg2, arg1);
 }
 
-STATIC_INLINE(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_flt4_mul_cash(kern_context *kcxt, pg_float4_t arg1, pg_money_t arg2)
 {
 	return pgfn_cash_mul_flt4(kcxt, arg2, arg1);
 }
 
-STATIC_INLINE(pg_money_t)
+DEVICE_FUNCTION(pg_money_t)
 pgfn_flt8_mul_cash(kern_context *kcxt, pg_float8_t arg1, pg_money_t arg2)
 {
 	return pgfn_cash_mul_flt8(kcxt, arg2, arg1);

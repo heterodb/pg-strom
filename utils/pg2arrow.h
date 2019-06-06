@@ -35,8 +35,8 @@ typedef struct SQLtable			SQLtable;
 typedef struct SQLattribute		SQLattribute;
 typedef struct SQLdictionary	SQLdictionary;
 /* fake StringInfo definition */
-typedef SQLbuffer				StringInfoData;
-typedef SQLbuffer			   *StringInfo;
+typedef struct SQLbuffer		StringInfoData;
+typedef struct SQLbuffer	   *StringInfo;
 #include "arrow_defs.h"
 
 struct SQLbuffer

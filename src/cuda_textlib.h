@@ -18,7 +18,7 @@
 #ifndef CUDA_TEXTLIB_H
 #define CUDA_TEXTLIB_H
 #ifdef __CUDACC__
-STATIC_INLINE(cl_int)
+DEVICE_INLINE(cl_int)
 bpchar_truelen(const char *s, cl_int len)
 {
 	cl_int		i;
@@ -75,13 +75,13 @@ DEVICE_FUNCTION(pg_text_t)
 pgfn_text_substring_nolen(kern_context *kcxt,
 						  pg_text_t arg1, pg_int4_t arg2);
 /* binary compatible type cast */
-STATIC_INLINE(pg_text_t)
+DEVICE_INLINE(pg_text_t)
 to_text(pg_varchar_t arg)
 {
 	return arg;
 }
 
-STATIC_INLINE(pg_bpchar_t)
+DEVICE_INLINE(pg_bpchar_t)
 to_bpchar(pg_text_t arg)
 {
 	pg_bpchar_t		r;
@@ -89,7 +89,7 @@ to_bpchar(pg_text_t arg)
 	r.value  = arg.value;
 	return r;
 }
-STATIC_INLINE(pg_varchar_t)
+DEVICE_INLINE(pg_varchar_t)
 to_varchar(pg_text_t arg)
 {
 	return arg;
@@ -111,9 +111,5 @@ DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpchariclike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
-
-/* made by session_info */
-DEVICE_FUNCTION(cl_int) pg_database_encoding_max_length(void);
-DEVICE_FUNCTION(cl_int) pg_wchar_mblen(const char *str);
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TEXTLIB_H */
