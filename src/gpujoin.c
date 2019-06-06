@@ -5039,90 +5039,6 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 }
 
 /*
- * gpujoin_fallback_column_extract
- */
-static void
-gpujoin_fallback_column_extract(TupleTableSlot *slot_fallback,
-								kern_data_store *kds_src,
-								cl_uint row_index,
-								AttrNumber *tuple_dst_resno,
-								AttrNumber src_anum_min,
-								AttrNumber src_anum_max)
-{
-	TupleDesc tts_tupdesc = slot_fallback->tts_tupleDescriptor;
-	Datum  *tts_values = slot_fallback->tts_values;
-	bool   *tts_isnull = slot_fallback->tts_isnull;
-	int		i, j;
-
-	for (i=src_anum_min; i < src_anum_max; i++)
-	{
-		void	   *addr = NULL;
-		AttrNumber	anum;
-		kern_colmeta *cmeta;
-
-		anum = tuple_dst_resno[i-FirstLowInvalidHeapAttributeNumber-1];
-		if (anum)
-		{
-			if (anum < 1 || anum > tts_tupdesc->natts)
-				elog(ERROR, "Bug? tuple extraction out of range (%d) at %s",
-					 anum, __FUNCTION__);
-
-			/* special case for tableoid */
-			if (i == TableOidAttributeNumber)
-			{
-				tts_isnull[anum-1] = false;
-				tts_values[anum-1] = DatumGetObjectId(kds_src->table_oid);
-				continue;
-			}
-
-			if (i < 0)
-				j = kds_src->ncols + i;		/* system column */
-			else
-				j = i - 1;					/* user column */
-
-			cmeta = &kds_src->colmeta[j];
-			addr = kern_get_datum_column(kds_src, j, row_index);
-			if (!addr)
-			{
-				tts_isnull[anum-1] = true;
-				tts_values[anum-1] = 0UL;
-			}
-			else if (!cmeta->attbyval)
-			{
-				tts_isnull[anum-1] = false;
-				tts_values[anum-1] = PointerGetDatum(addr);
-			}
-			else
-			{
-				Datum	datum = 0;
-
-				tts_isnull[anum-1] = false;
-				switch (cmeta->attlen)
-				{
-					case sizeof(cl_char):
-						datum = CharGetDatum(*((cl_char *) addr));
-						break;
-					case sizeof(cl_short):
-						datum = Int16GetDatum(*((cl_short *) addr));
-						break;
-					case sizeof(cl_int):
-						datum = Int32GetDatum(*((cl_int *) addr));
-						break;
-					case sizeof(cl_long):
-						datum = Int64GetDatum(*((cl_long *) addr));
-						break;
-					default:
-						Assert(cmeta->attlen <= sizeof(Datum));
-						memcpy(&datum, addr, cmeta->attlen);
-						break;
-				}
-				tts_values[anum-1] = datum;
-			}
-		}
-	}
-}
-
-/*
  * Hash-Join for CPU fallback
  */
 static int
@@ -5399,19 +5315,6 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 										   gjs->outer_src_anum_min,
 										   gjs->outer_src_anum_max);
 		}
-		else if (kds_src->format == KDS_FORMAT_COLUMN)
-		{
-			cl_uint		row_index = gjs->fallback_outer_index++;
-
-			if (row_index >= kds_src->nitems)
-				return -1;
-			gpujoin_fallback_column_extract(gjs->slot_fallback,
-											kds_src,
-											row_index,
-											gjs->outer_dst_resno,
-											gjs->outer_src_anum_min,
-											gjs->outer_src_anum_max);
-		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
 #if PG_VERSION_NUM < 100000
@@ -5548,15 +5451,6 @@ lnext:
 											   gjs->outer_dst_resno,
 											   gjs->outer_src_anum_min,
 											   gjs->outer_src_anum_max);
-			}
-			else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
-			{
-				gpujoin_fallback_column_extract(gjs->slot_fallback,
-												&pds_src->kds,
-												pstack[0],
-												gjs->outer_dst_resno,
-												gjs->outer_src_anum_min,
-												gjs->outer_src_anum_max);
 			}
 			else
 			{

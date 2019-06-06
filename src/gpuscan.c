@@ -2204,10 +2204,10 @@ gpuscan_next_task(GpuTaskState *gts)
 }
 
 /*
- * gpuscan_next_tuple_suspended
+ * gpuscan_next_tuple_suspended_row
  */
 static bool
-gpuscan_next_tuple_suspended(GpuScanState *gss, GpuScanTask *gscan)
+gpuscan_next_tuple_suspended_row(GpuScanState *gss, GpuScanTask *gscan)
 {
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	gpuscanSuspendContext *con;
@@ -2241,16 +2241,10 @@ gpuscan_next_tuple_suspended(GpuScanState *gss, GpuScanTask *gscan)
 			con->part_index++;
 			gss->fallback_local_id = 0;
 		}
-		if (pds_src->kds.format == KDS_FORMAT_ROW)
-			status = KDS_fetch_tuple_row(gss->base_slot,
-										 &pds_src->kds,
-										 &gss->gts.curr_tuple,
-										 base_index + local_id);
-		else
-			status = KDS_fetch_tuple_column(gss->base_slot,
-											&pds_src->kds,
-											base_index + local_id);
-		if (status)
+		if (KDS_fetch_tuple_row(gss->base_slot,
+								&pds_src->kds,
+								&gss->gts.curr_tuple,
+								base_index + local_id))
 			return true;
 	}
 	return false;
@@ -2355,15 +2349,13 @@ gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
-	bool				status;
 
 retry_next:
 	ExecClearTuple(gss->base_slot);
 	if (!gscan->kern.resume_context)
 		status = PDS_fetch_tuple(gss->base_slot, pds_src, &gss->gts);
-	else if (pds_src->kds.format == KDS_FORMAT_ROW ||
-			 pds_src->kds.format == KDS_FORMAT_COLUMN)
-		status = gpuscan_next_tuple_suspended(gss, gscan);
+	else if (pds_src->kds.format == KDS_FORMAT_ROW)
+		status = gpuscan_next_tuple_suspended_row(gss, gscan);
 	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		status = gpuscan_next_tuple_suspended_block(gss, gscan);
 	else
