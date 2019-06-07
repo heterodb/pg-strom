@@ -94,11 +94,6 @@ static bool		pgstrom_debug_jit_compile_options;
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
 static program_builder_state *pgbuilder_state = NULL;
-#define PGSTROM_CUDA(x)	\
-	static const char *pgstrom_cuda_##x##_pathname = NULL;
-#include "cuda_filelist"
-#undef PGSTROM_CUDA
-
 static bool		cuda_program_builder_got_signal = false;
 
 /* ---- forward declarations ---- */
@@ -2035,12 +2030,6 @@ pgstrom_init_cuda_program(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							 NULL, NULL, NULL);
-
-	/* setup cuda_xxxx.h file pathname */
-#define PGSTROM_CUDA(x) \
-	pgstrom_cuda_##x##_pathname = PGSHAREDIR "/extension/cuda_" #x ".h";
-#include "cuda_filelist"
-#undef PGSTROM_CUDA
 
 	/* allocation of static shared memory */
 	RequestAddinShmemSpace(offsetof(program_cache_head, base) +

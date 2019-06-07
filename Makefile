@@ -42,13 +42,13 @@ PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
 #
 # Source file of GPU portion
 #
-__GPU_HEADERS := $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
-                 $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
-                 arrow_defs.h
-GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPU_HEADERS))
 __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib cuda_jsonlib \
                 cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort
+__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype \
+                 cuda_rangetype cuda_plcuda arrow_defs
+GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
+               $(addsuffix .h, $(__GPU_HEADERS)))
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
@@ -65,20 +65,22 @@ MAXREGCOUNT := 32
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm dbgen-dbt3
+__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
-GPUINFO = $(STROM_BUILD_ROOT)/utils/gpuinfo
-GPUINFO_SOURCE = $(STROM_BUILD_ROOT)/utils/gpuinfo.c
+GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
+GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
+GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
+                  $(STROM_BUILD_ROOT)/src/nvme_strom.h
 GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
-__PG2ARROW_SOURCE = pg2arrow.c arrow_write.c
-PG2ARROW_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__PG2ARROW_SOURCE))
+PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/pg2arrow.c \
+                  $(STROM_BUILD_ROOT)/utils/arrow_write.c
 PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
-	$(addprefix $(STROM_BUILD_ROOT)/src/, arrow_read.c) \
-	$(addprefix $(STROM_BUILD_ROOT)/src/, arrow_defs.h) \
-	$(addprefix $(STROM_BUILD_ROOT)/utils/, arrow_types.c)
+                  $(Addprefix $(STROM_BUILD_ROOT)/Src/, arrow_read.c) \
+                  $(Addprefix $(STROM_BUILD_ROOT)/src/, arrow_defs.h) \
+                  $(addprefix $(STROM_BUILD_ROOT)/utils/, arrow_types.c)
 PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -g -O0 \
 			-I $(STROM_BUILD_ROOT)/src \
 			-I $(STROM_BUILD_ROOT)/utils \
@@ -100,31 +102,8 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
                    ssbm-41.sql ssbm-42.sql ssbm-43.sql
 
-DBT3_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-dbt3
-__DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
-                   bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
-DBT3_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/utils/dbt3/, \
-                                $(__DBT3_DBGEN_SOURCE))
-DBT3_DBGEN_DISTS_DSS = $(STROM_BUILD_ROOT)/utils/dbt3/dists.dss.h
-DBT3_DBGEN_CFLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
-                    -Wno-parentheses -Wno-unused-result -Wall \
-                    -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/dbt3 \
-                    -DLINUX=1 -DTPCH=1 -DEOL_HANDLING=1 -DSTATIC_DISTS=1
-__DBT3_SQL_FILES = dbt3-01.sql dbt3-02.sql dbt3-03.sql dbt3-04.sql \
-                   dbt3-05.sql dbt3-06.sql dbt3-07.sql dbt3-08.sql \
-                   dbt3-09.sql dbt3-10.sql dbt3-11.sql dbt3-12.sql \
-                   dbt3-13.sql dbt3-14.sql dbt3-15.sql dbt3-16.sql \
-                   dbt3-17.sql dbt3-18.sql dbt3-19.sql dbt3-20.sql \
-                   dbt3-21.sql dbt3-22.sql
-
 TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/test/testapp_largeobject
 TESTAPP_LARGEOBJECT_SOURCE = $(TESTAPP_LARGEOBJECT).cu
-
-#
-# Header files
-#
-__STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h
-STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 
 #
 # Markdown (document) files
@@ -168,6 +147,7 @@ IPATH := $(CUDA_PATH)/include
 BPATH := $(CUDA_PATH)/bin
 LPATH := $(CUDA_PATH)/lib64
 NVCC  := $(CUDA_PATH)/bin/nvcc
+CUDA_VERSION := $(shell grep -E '^\#define[ ]+CUDA_VERSION[ ]+[0-9]+$$' $(IPATH)/cuda.h | awk '{print $$3}')
 
 #
 # Flags to build
@@ -197,8 +177,15 @@ NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
 NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
               --fatbin --relocatable-device-code=true \
               --maxrregcount=$(MAXREGCOUNT) \
-              --gpu-architecture=compute_60 \
-              --gpu-code=sm_60,sm_61,sm_70,sm_72,sm_75
+              --gpu-architecture=compute_60
+# supported device depends on CUDA version
+ifeq ($(shell test $(CUDA_VERSION) -ge 10000; echo $$?), 0)
+  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75
+else ifeq ($(shell test $(CUDA_VERSION) -ge 9000; echo $$?), 0)
+  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
+else
+  NVCC_FLAGS += --gpu-code=sm_60,sm_61
+endif
 NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 
 #
@@ -220,7 +207,6 @@ EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
 	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
 	$(SSBM_DBGEN_DISTS_DSS) \
-	$(DBT3_DBGEN_DISTS_DSS) \
 	$(TESTAPP_LARGEOBJECT)
 
 #
@@ -299,7 +285,7 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 #
 # Build utilities
 #
-$(GPUINFO): $(GPUINFO_SOURCE) $(STROM_HEADERS)
+$(GPUINFO): $(GPUINFO_DEPEND)
 	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
@@ -309,15 +295,6 @@ $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm
 
 $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
-	@(echo "const char *static_dists_dss ="; \
-	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
-	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
-	  echo ";") > $@
-
-$(DBT3_DBGEN): $(DBT3_DBGEN_SOURCE) $(DBT3_DBGEN_DISTS_DSS)
-	$(CC) $(DBT3_DBGEN_CFLAGS) $(DBT3_DBGEN_SOURCE) -o $@
-
-$(DBT3_DBGEN_DISTS_DSS): $(basename $(DBT3_DBGEN_DISTS_DSS))
 	@(echo "const char *static_dists_dss ="; \
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
@@ -355,17 +332,5 @@ rpm: tarball
 	     -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g")   \
 	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
 	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
-
-#
-# init regression test database
-#
-init_regression_testdb: $(DBT3_DBGEN)
-	cd $(STROM_BUILD_ROOT)/test;
-	REV=`$(PSQL) $(REGRESS_DBNAME) -At -c $(REGRESS_REVISION_QUERY)`; \
-	if [ "$$REV" != "$(REGRESS_REVISION)" ]; then \
-	  $(CREATEDB) -l C $(REGRESS_DBNAME); \
-	  cd $(STROM_BUILD_ROOT)/test && \
-	  $(PSQL) $(REGRESS_DBNAME) -f testdb_init.sql; \
-	fi
 
 .PHONY: docs

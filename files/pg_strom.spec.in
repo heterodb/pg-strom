@@ -11,9 +11,9 @@ Source0: @@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
 BuildRequires: postgresql%{PGSQL_PKGVER}
 BuildRequires: postgresql%{PGSQL_PKGVER}-devel
-BuildRequires: cuda >= 9.1
+BuildRequires: cuda >= 9.2
 Requires: nvidia-kmod
-Requires: cuda >= 9.1
+Requires: cuda >= 9.2
 %if "%{PGSQL_PKGVER}" == "96"
 Requires: postgresql%{PGSQL_PKGVER}-server >= 9.6.9
 %else
@@ -80,7 +80,6 @@ ldconfig
 %endif
 
 %files test
-%{__pkgbindir}/dbgen-dbt3
 %{__pkgbindir}/dbgen-ssbm
 
 %changelog
