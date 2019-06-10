@@ -1743,8 +1743,10 @@ pgfn_dpow(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
 
-	if ((arg1.value == 0.0 && arg2.value < 0.0) ||
-		(arg1.value < 0.0 && floor(arg2.value) != arg2.value))
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else if ((arg1.value == 0.0 && arg2.value < 0.0) ||
+			 (arg1.value < 0.0 && floor(arg2.value) != arg2.value))
 	{
 		result.isnull = true;
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -1883,8 +1885,6 @@ DEVICE_FUNCTION(pg_float8_t)
 pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
-	cl_double	atan1_0;
-	cl_double	atan2_arg1_arg2;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
@@ -1893,10 +1893,7 @@ pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 			result.value = DBL_NAN;
 		else
 		{
-			atan2_arg1_arg2 = atan2(arg1.value, arg2.value);
-			atan1_0 = atan(1.0);
-			result.value = (atan2_arg1_arg2 / atan1_0) * 45.0;
-
+			result.value = atan2(arg1.value, arg2.value);
 			CHECKFLOATVAL(&kcxt->e, result, false, true);
 		}
 	}

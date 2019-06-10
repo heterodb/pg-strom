@@ -16,13 +16,12 @@ test: pgstrom_guc
 test: dtype_int dtype_float
 
 # ----------
-# Test for complicated expressions
+# Test for various functions / expressions
 # ----------
-#test: case_when float_math
-test: float_math
+test: dfunc_math
 
 # ----------
 # Test for largeobject
 # ----------
-#test: largeobject
+test: largeobject
 

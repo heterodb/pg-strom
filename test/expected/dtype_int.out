@@ -617,6 +617,86 @@ SELECT id, a<=b v1, a<=d v2, a<=f v3,
 ----+----+----+----+----+----+----+----+----+----
 (0 rows)
 
+-- bitwise operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+                                                                                                                                      QUERY PLAN                                                                                                                                      
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a & b)), ((c & d)), ((e & f)), ((a | b)), ((c | d)), ((e | f)), ((a # b)), ((c # d)), ((e # f)), ((~ a)), ((~ c)), ((~ e))
+   GPU Projection: rt_int.id, (rt_int.a & rt_int.b), (rt_int.c & rt_int.d), (rt_int.e & rt_int.f), (rt_int.a | rt_int.b), (rt_int.c | rt_int.d), (rt_int.e | rt_int.f), (rt_int.a # rt_int.b), (rt_int.c # rt_int.d), (rt_int.e # rt_int.f), (~ rt_int.a), (~ rt_int.c), (~ rt_int.e)
+   GPU Filter: ((rt_int.z >= '-20000'::double precision) AND (rt_int.z <= '20000'::double precision))
+(4 rows)
+
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+SET pg_strom.enabled = off;
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30p
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+(SELECT * FROM test30g EXCEPT ALL SELECT * FROM test30p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test30p EXCEPT ALL SELECT * FROM test30g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+-- bit shift
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+                                                                                                        QUERY PLAN                                                                                                        
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a >> (id % 10))), ((c >> (id % 12))), ((e >> (id % 12))), ((b << (id % 5))), ((d << (id % 7))), ((f << (id % 8)))
+   GPU Projection: rt_int.id, (rt_int.a >> (rt_int.id % 10)), (rt_int.c >> (rt_int.id % 12)), (rt_int.e >> (rt_int.id % 12)), (rt_int.b << (rt_int.id % 5)), (rt_int.d << (rt_int.id % 7)), (rt_int.f << (rt_int.id % 8))
+   GPU Filter: (rt_int.z > '-10000'::double precision)
+(4 rows)
+
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+SET pg_strom.enabled = off;
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31p
+  FROM rt_int
+ WHERE z > -10000.0;
+(SELECT * FROM test31g EXCEPT ALL SELECT * FROM test31p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 
+----+----+----+----+----+----+----
+(0 rows)
+
+(SELECT * FROM test31p EXCEPT ALL SELECT * FROM test31g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 
+----+----+----+----+----+----+----
+(0 rows)
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA regtest_dtype_int_temp CASCADE;

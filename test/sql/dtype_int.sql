@@ -390,6 +390,56 @@ SELECT id, a<=b v1, a<=d v2, a<=f v3,
 (SELECT * FROM test25g EXCEPT ALL SELECT * FROM test25p);
 (SELECT * FROM test25p EXCEPT ALL SELECT * FROM test25g);
 
+-- bitwise operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+SET pg_strom.enabled = off;
+SELECT id, a&b v1, c&d v2, e&f v3,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12	-- bitwise NOT
+  INTO test30p
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+(SELECT * FROM test30g EXCEPT ALL SELECT * FROM test30p);
+(SELECT * FROM test30p EXCEPT ALL SELECT * FROM test30g);
+
+-- bit shift
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+SET pg_strom.enabled = off;
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6
+  INTO test31p
+  FROM rt_int
+ WHERE z > -10000.0;
+(SELECT * FROM test31g EXCEPT ALL SELECT * FROM test31p);
+(SELECT * FROM test31p EXCEPT ALL SELECT * FROM test31g);
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA regtest_dtype_int_temp CASCADE;
