@@ -212,14 +212,17 @@ EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
 #
 # Regression Test
 #
-USE_MODULE_DB = 1
-REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_DBNAME = contrib_regression_$(MODULE_big)
-REGRESS_REVISION = 20180124
-REGRESS_REVISION_QUERY = 'SELECT public.pgstrom_regression_test_revision()'
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
+USE_MODULE_DB := 1
+REGRESS := --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
+REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/pgstrom_init_regress.sql
+REGRESS_DBNAME := contrib_regression_$(MODULE_big)
+REGRESS_REVISION := 20190608
+REGRESS_REVISION_QUERY := 'SELECT public.pgstrom_regression_test_revision() = $(REGRESS_REVISION)'
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
+               --outputdir=$(STROM_BUILD_ROOT)/test \
+               --use-existing \
                --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
-REGRESS_PREP = init_regression_testdb $(TESTAPP_LARGEOBJECT)
+REGRESS_PREP = init_pgstrom_regtest $(TESTAPP_LARGEOBJECT)
 
 #
 # Build chain of PostgreSQL
@@ -247,6 +250,18 @@ $(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
 	      -e 's/^/  "/g'   -e 's/$$/\\n"/g' < $*.cu;		\
 	  echo ";") > $@
+
+#
+# initial setup of regression test
+#
+init_pgstrom_regtest: $(SSBM_DBGEN)
+	@if [ "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" != "t" ]; \
+	then \
+        SSBM_DBGEN_FULLPATH="`pwd`/$(SSBM_DBGEN)"; \
+		$(PSQL) -f $(REGRESS_INIT_SQL) $(REGRESS_DBNAME) \
+                -v SSBM_DBGEN="$${SSBM_DBGEN_FULLPATH}" || exit 1   \
+		echo "regression test database '$(REGRESS_DBNAME)' initialized"; \
+	fi
 
 #
 # Build documentation

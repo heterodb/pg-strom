@@ -215,57 +215,58 @@ print_fp64(const char *prefix, cl_ulong value)
 static half_t
 fp32_to_fp16(float value)
 {
-	cl_uint		fp32val = float_as_int(value);
-	cl_uint		sign = ((fp32val & 0x80000000U) >> 16);
-	cl_int		expo = ((fp32val & 0x7f800000U) >> 23);
-	cl_int		frac = ((fp32val & 0x007fffffU));
-	half_t		result;
+	cl_uint		x = float_as_int(value);
+	cl_uint		u = (x & 0x7fffffffU);
+	cl_uint		sign = ((x >> 16U) & 0x8000U);
+	cl_uint		remainder;
+	cl_uint		result = 0;
 
-	print_fp32("->", fp32val);
-
-	/* special cases */
-	if (expo == 0xff)
+	if (u >= 0x7f800000U)
 	{
-		if (frac == 0)
-			result = sign | 0x7c00;		/* -/+Infinity */
-		else
-			result = 0xffff;			/* NaN */
-	}
-	else if (expo == 0)
-		result = sign;					/* -/+0.0 */
-	else
+		/* NaN/+Inf/-Inf */
+		remainder = 0U;
+		result = ((u == 0x7f800000U) ? (sign | 0x7c00U) : 0x7fffU);
+    }
+	else if (u > 0x477fefffU)
 	{
-		expo -= FP32_EXPO_BIAS;
+		/* Overflows */
+		remainder = 0x80000000U;
+		result = (sign | 0x7bffU);
+    }
+	else if (u >= 0x38800000U)
+	{
+		/* Normal numbers */
+		remainder = u << 19U;
+		u -= 0x38000000U;
+		result = (sign | (u >> 13U));
+    }
+	else if (u < 0x33000001U)
+	{
+		/* +0/-0 */
+		remainder = u;
+		result = sign;
+    }
+	else {
+		/* Denormal numbers */
+        const cl_uint	exponent = u >> 23U;
+        const cl_uint	shift = 0x7eU - exponent;
+        cl_uint			mantissa = (u & 0x7fffffU) | 0x800000U;
 
-		frac = ((frac >> 13) | 0x400) + ((frac >> 12) & 1);
-		while ((frac & 0xfc00) != 0x400)
-		{
-			frac >>= 1;
-			expo++;
-		}
-
-		if (expo < FP16_EXPO_MIN)
-		{
-			/* try non-uniformed fraction for small numbers */
-			if (FP16_EXPO_MIN - expo <= FP16_FRAC_BITS)
-				frac >>= (FP16_EXPO_MIN - expo);
-			else
-				frac = 0;
-			expo = 0;
-		}
-		else if (expo > FP16_EXPO_MAX)
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("\"%f\" is out of range for type float2", value)));
-		else
-		{
-			frac &= 0x3ff;
-			expo += FP16_EXPO_BIAS;
-		}
-		result = sign | (expo << FP16_FRAC_BITS) | frac;
+		remainder = mantissa << (32U - shift);
+		result = (sign | (mantissa >> shift));
 	}
-	print_fp16("<-", result);
+
+	if ((remainder > 0x80000000U) ||
+		((remainder == 0x80000000U) && ((result & 0x1U) != 0U)))
+		result++;
+
 	return result;
+}
+
+static inline half_t
+fp64_to_fp16(double fval)
+{
+	return fp32_to_fp16((float)fval);
 }
 
 static float
@@ -303,65 +304,11 @@ fp16_to_fp32(half_t fp16val)
 			expo -= FP16_EXPO_BIAS;
 
 		expo += FP32_EXPO_BIAS;
+
 		result = (sign | (expo << FP32_FRAC_BITS) | (frac << 13));
 	}
 	print_fp32("<-", result);
 	return int_as_float(result);
-}
-
-static half_t
-fp64_to_fp16(double value)
-{
-	cl_ulong	fp64val = double_as_long(value);
-	cl_uint		sign = ((fp64val >> 48) & 0x8000);
-	cl_long		expo = ((fp64val >> 52) & 0x07ff);
-	cl_long		frac = ((fp64val & 0x000fffffffffffffUL));
-	half_t		result;
-
-	print_fp64("->", fp64val);
-
-	if (expo == 0x7ff)
-	{
-		if (frac == 0)
-			result = sign | 0x7c00;		/* -/+Infinity */
-		else
-			result = 0xffff;			/* NaN */
-	}
-	else if (expo == 0)
-		result = sign;					/* -/+0.0 */
-	else
-	{
-		expo -= FP64_EXPO_BIAS;
-
-		frac = ((frac >> 42) | 0x400) + ((frac >> 41) & 1);
-		while ((frac & 0xfc00) != 0x400)
-		{
-			frac >>= 1;
-			expo++;
-		}
-
-		if (expo < FP16_EXPO_MIN)
-		{
-			/* try non-uniformed fraction for small numbers */
-			if (FP16_EXPO_MIN - expo <= FP16_FRAC_BITS)
-				frac >>= (FP16_EXPO_MIN - expo);
-			else
-				frac = 0;
-			expo = 0;
-		}
-		else if (expo > FP16_EXPO_MAX)
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("\"%f\" is out of range for type float2", value)));
-		else
-		{
-			frac &= 0x3ff;
-			expo += FP16_EXPO_BIAS;
-		}
-		result = sign | (expo << FP16_FRAC_BITS) | frac;
-	}
-	print_fp16("<-", result);
-	return result;
 }
 
 static double
@@ -485,7 +432,7 @@ pgstrom_float2_to_int2(PG_FUNCTION_ARGS)
 {
 	float	fval = fp16_to_fp32(PG_GETARG_FLOAT2(0));
 
-	return DirectFunctionCall1(ftoi2, Float2GetDatum(fval));
+	return DirectFunctionCall1(ftoi2, Float4GetDatum(fval));
 }
 PG_FUNCTION_INFO_V1(pgstrom_float2_to_int2);
 
@@ -497,7 +444,7 @@ pgstrom_float2_to_int4(PG_FUNCTION_ARGS)
 {
 	float	fval = fp16_to_fp32(PG_GETARG_FLOAT2(0));
 
-	return DirectFunctionCall1(ftoi4, Float2GetDatum(fval));
+	return DirectFunctionCall1(ftoi4, Float4GetDatum(fval));
 }
 PG_FUNCTION_INFO_V1(pgstrom_float2_to_int4);
 
@@ -509,7 +456,7 @@ pgstrom_float2_to_int8(PG_FUNCTION_ARGS)
 {
 	double	fval = fp16_to_fp64(PG_GETARG_FLOAT2(0));
 
-	return DirectFunctionCall1(dtoi8, Float2GetDatum(fval));
+	return DirectFunctionCall1(dtoi8, Float8GetDatum(fval));
 }
 PG_FUNCTION_INFO_V1(pgstrom_float2_to_int8);
 
@@ -567,9 +514,9 @@ PG_FUNCTION_INFO_V1(pgstrom_int2_to_float2);
 Datum
 pgstrom_int4_to_float2(PG_FUNCTION_ARGS)
 {
-	float	fval = (float) PG_GETARG_INT32(0);
+	double	fval = (double) PG_GETARG_INT32(0);
 
-	PG_RETURN_FLOAT2(fp32_to_fp16(fval));
+	PG_RETURN_FLOAT2(fp64_to_fp16(fval));
 }
 PG_FUNCTION_INFO_V1(pgstrom_int4_to_float2);
 
