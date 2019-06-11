@@ -24,7 +24,6 @@ static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
 static List	   *devcast_info_slot[48];
 bool			pgstrom_enable_numeric_type;	/* GUC */
-static Oid		pgstrom_float2_typeoid = InvalidOid;
 
 static void		build_devcast_info(void);
 
@@ -2303,8 +2302,8 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	}
 	entry->func_args = func_args;
 	entry->func_rettype = dtype;
-	entry->func_sqlname = pstrdup(NameStr(proc->proname));
-
+	entry->func_sqlname = MemoryContextStrdup(devinfo_memcxt,
+											  NameStr(proc->proname));
 	if (proc->pronamespace == PG_CATALOG_NAMESPACE
 		/* for system default functions (pg_catalog) */
 		? pgstrom_devfunc_construct_common(entry)
@@ -3825,7 +3824,6 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
 	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
-	pgstrom_float2_typeoid = InvalidOid;
 	devtype_info_is_built = false;
 }
 

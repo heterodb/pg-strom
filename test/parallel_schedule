@@ -13,7 +13,7 @@ test: pgstrom_guc
 # ----------
 # Test for each data types
 # ----------
-test: dtype_int dtype_float
+test: dtype_int dtype_float dtype_numeric
 
 # ----------
 # Test for various functions / expressions
@@ -24,4 +24,3 @@ test: dfunc_math
 # Test for largeobject
 # ----------
 test: largeobject
-

@@ -264,14 +264,9 @@ pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 		cl_long		mod;
 
 		value = __Int128_div(value, PG_NBASE, &mod);
-		if (mod == 0)
-			precision -= PG_DEC_DIGITS;
-		else
-		{
-			assert(ndigits < PG_MAX_DATA);
-			ndigits++;
-			n_data[PG_MAX_DATA - ndigits] = mod;
-		}
+		assert(ndigits < PG_MAX_DATA);
+		ndigits++;
+		n_data[PG_MAX_DATA - ndigits] = mod;
 	}
 	len = offsetof(NumericData, choice.n_long.n_data[ndigits]);
 
@@ -500,6 +495,8 @@ numeric_to_integer(kern_context *kcxt, pg_numeric_t arg,
 	}
 	while (precision > 0)
 	{
+		if (precision == 1)
+			curr = __Int128_add(curr, 5);	/* round of 0.x digit */
 		curr = __Int128_div(curr, 10, &mod);
 		precision--;
 	}
@@ -710,14 +707,14 @@ integer_to_numeric(kern_context *kcxt, cl_long ival)
 }
 
 DEVICE_FUNCTION(pg_numeric_t)
-float_to_numeric(kern_context *kcxt, cl_double fval)
+float_to_numeric(kern_context *kcxt, cl_double fval, cl_long max_fraction)
 {
 	pg_numeric_t result;
 	cl_ulong	ival = __double_as_longlong(fval);
 	cl_ulong	frac = FP64_FRAC_VALUE(ival);
 	cl_int		expo = FP64_EXPO_VALUE(ival);
 	cl_bool		sign = FP64_SIGN_VALUE(ival);
-	cl_int		prec, x, y;
+	cl_int		x, y;
 
 	/* special case if zero */
 	if ((ival & (FP64_FRAC_MASK | FP64_EXPO_MASK)) == 0)
@@ -733,14 +730,11 @@ float_to_numeric(kern_context *kcxt, cl_double fval)
 	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
 	 * with keeping accuracy (52bit).
 	 */
-	prec = log10(exp2((double)(FP64_FRAC_BITS - expo)));
-	x = prec;
+	x = 0;
 	y = FP64_FRAC_BITS - expo;
 	while (y > 0)
 	{
-		int		width = 64 - __clzll(frac);
-
-		if (width > FP64_FRAC_BITS)
+		if (frac >= 0x1800000000000000UL)
 		{
 			frac /= 2;
 			y--;
@@ -748,36 +742,33 @@ float_to_numeric(kern_context *kcxt, cl_double fval)
 		else
 		{
 			frac *= 10;
-			x--;
+			x++;
 		}
 	}
 	while (y < 0)
 	{
-		int		width = 64 - __clzll(frac);
-
-		if (width > FP64_FRAC_BITS)
+		if (frac >= 0x1800000000000000UL)
+		{
+			frac /= 10;
+			x--;
+		}
+		else
 		{
 			frac *= 2;
 			y++;
 		}
-		else
-		{
-			frac /= 10;
-			x++;
-		}
 	}
-	/*  float64 is not valid on more than 15-digits */
-	while (frac > 1000000000000000UL)
+	while (frac >= max_fraction)
 	{
-		frac /= 10;
-		x++;
+		frac = frac / 10;
+		x--;
 	}
 	result.value.hi = 0;
 	result.value.lo = frac;
-	result.precision = prec - x;
+	result.precision = x;
 	if (sign)
 		result.value = __Int128_inverse(result.value);
-    return pg_numeric_normalize(result);
+	return pg_numeric_normalize(result);
 }
 
 DEVICE_FUNCTION(pg_numeric_t)
@@ -823,7 +814,8 @@ pgfn_float2_numeric(kern_context *kcxt, pg_float2_t arg)
 	if (arg.isnull)
 		result.isnull = true;
 	else
-		result = float_to_numeric(kcxt, (cl_double)arg.value);
+		result = float_to_numeric(kcxt, (cl_double)arg.value,
+								  10000UL);			/* max 4digits */
 	return result;
 }
 
@@ -834,7 +826,8 @@ pgfn_float4_numeric(kern_context *kcxt, pg_float4_t arg)
 	if (arg.isnull)
 		result.isnull = true;
 	else
-		result = float_to_numeric(kcxt, (cl_double)arg.value);
+		result = float_to_numeric(kcxt, (cl_double)arg.value,
+								  1000000UL);		/* max 6digits */
 	return result;
 }
 
@@ -845,7 +838,8 @@ pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 	if (arg.isnull)
 		result.isnull = true;
 	else
-		result = float_to_numeric(kcxt, (cl_double)arg.value);
+		result = float_to_numeric(kcxt, (cl_double)arg.value,
+								  1000000000000000UL);	/* max 15digits */
 	return result;
 }
 
@@ -1042,7 +1036,6 @@ pgfn_numeric_add(kern_context *kcxt,
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-
 	while (arg1.precision > arg2.precision)
 	{
 		arg2.value = __Int128_mul(arg2.value, 10);
