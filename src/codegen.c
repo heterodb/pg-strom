@@ -49,10 +49,10 @@ static bool  devcast_text2numeric_callback(codegen_context *context,
  * naming convension of types:
  *   pg_<type_name>_t
  */
-#define DEVTYPE_DECL(type_name,type_oid_label,type_base,		\
+#define DEVTYPE_DECL(type_name,type_oid_label,					\
 					 min_const,max_const,zero_const,			\
 					 type_flags,extra_sz,hash_func)				\
-	{ "pg_catalog", type_name, type_oid_label, type_base,		\
+	{ "pg_catalog", type_name, type_oid_label,					\
 	  min_const, max_const, zero_const, type_flags, extra_sz, hash_func }
 
 /* XXX - These types have no constant definition at catalog/pg_type.h */
@@ -66,7 +66,6 @@ static struct {
 	const char	   *type_schema;
 	const char	   *type_name;
 	const char	   *type_oid_label;
-	const char	   *type_base;
 	const char	   *max_const;
 	const char	   *min_const;
 	const char	   *zero_const;
@@ -77,30 +76,30 @@ static struct {
 	/*
 	 * Primitive datatypes
 	 */
-	DEVTYPE_DECL("bool",   "BOOLOID",   "cl_bool",
+	DEVTYPE_DECL("bool",   "BOOLOID",
 				 NULL, NULL, "false",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("int2",   "INT2OID",   "cl_short",
+	DEVTYPE_DECL("int2",   "INT2OID",
 				 "SHRT_MAX", "SHRT_MIN", "0",
 				 0, 0, pg_int2_devtype_hashfunc),
-	DEVTYPE_DECL("int4",   "INT4OID",   "cl_int",
+	DEVTYPE_DECL("int4",   "INT4OID",
 				 "INT_MAX", "INT_MIN", "0",
 				 0, 0, pg_int4_devtype_hashfunc),
-	DEVTYPE_DECL("int8",   "INT8OID",   "cl_long",
+	DEVTYPE_DECL("int8",   "INT8OID",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 0, 0, pg_int8_devtype_hashfunc),
 	/* XXX - float2 is not a built-in data type */
-	DEVTYPE_DECL("float2", "FLOAT2OID", "cl_half",
+	DEVTYPE_DECL("float2", "FLOAT2OID",
 				 "__half_as_short(HALF_MAX)",
 				 "__half_as_short(-HALF_MAX)",
 				 "__half_as_short(0.0)",
 				 0, 0, pg_float2_devtype_hashfunc),
-	DEVTYPE_DECL("float4", "FLOAT4OID", "cl_float",
+	DEVTYPE_DECL("float4", "FLOAT4OID",
 				 "__float_as_int(FLT_MAX)",
 				 "__float_as_int(-FLT_MAX)",
 				 "__float_as_int(0.0)",
 				 0, 0, pg_float4_devtype_hashfunc),
-	DEVTYPE_DECL("float8", "FLOAT8OID", "cl_double",
+	DEVTYPE_DECL("float8", "FLOAT8OID",
 				 "__double_as_longlong(DBL_MAX)",
 				 "__double_as_longlong(-DBL_MAX)",
 				 "__double_as_longlong(0.0)",
@@ -108,51 +107,51 @@ static struct {
 	/*
 	 * Misc data types
 	 */
-	DEVTYPE_DECL("money",  "CASHOID",   "cl_long",
+	DEVTYPE_DECL("money",  "CASHOID",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_MISCLIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("uuid",   "UUIDOID",   "pg_uuid_t",
+	DEVTYPE_DECL("uuid",   "UUIDOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISCLIB, UUID_LEN,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("macaddr", "MACADDROID", "macaddr",
+	DEVTYPE_DECL("macaddr", "MACADDROID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISCLIB, sizeof(macaddr),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("inet",   "INETOID",   "inet_struct",
+	DEVTYPE_DECL("inet",   "INETOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 				 pg_inet_devtype_hashfunc),
-	DEVTYPE_DECL("cidr",   "CIDROID",   "inet_struct",
+	DEVTYPE_DECL("cidr",   "CIDROID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 				 pg_inet_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
 	 */
-	DEVTYPE_DECL("date", "DATEOID", "DateADT",
+	DEVTYPE_DECL("date", "DATEOID",
 				 "INT_MAX", "INT_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("time", "TIMEOID", "TimeADT",
+	DEVTYPE_DECL("time", "TIMEOID",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timetz", "TIMETZOID", "TimeTzADT",
+	DEVTYPE_DECL("timetz", "TIMETZOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB,
 				 sizeof(TimeTzADT),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timestamp", "TIMESTAMPOID","Timestamp",
+	DEVTYPE_DECL("timestamp", "TIMESTAMPOID",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timestamptz", "TIMESTAMPTZOID", "TimestampTz",
+	DEVTYPE_DECL("timestamptz", "TIMESTAMPTZOID",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("interval", "INTERVALOID", "Interval",
+	DEVTYPE_DECL("interval", "INTERVALOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB,
 				 sizeof(Interval),
@@ -160,29 +159,29 @@ static struct {
 	/*
 	 * variable length datatypes
 	 */
-	DEVTYPE_DECL("bpchar",  "BPCHAROID",  "varlena *",
+	DEVTYPE_DECL("bpchar",  "BPCHAROID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 pg_bpchar_devtype_hashfunc),
-	DEVTYPE_DECL("varchar", "VARCHAROID", "varlena *",
+	DEVTYPE_DECL("varchar", "VARCHAROID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("numeric", "NUMERICOID", "cl_ulong",
+	DEVTYPE_DECL("numeric", "NUMERICOID",
 				 NULL, NULL, NULL,
 				 0, sizeof(struct NumericData),
 				 pg_numeric_devtype_hashfunc),
-	DEVTYPE_DECL("bytea",   "BYTEAOID",   "varlena *",
+	DEVTYPE_DECL("bytea",   "BYTEAOID",
 				 NULL, NULL, NULL,
 				 0,
 				 sizeof(pg_varlena_t),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("text",    "TEXTOID",    "varlena *",
+	DEVTYPE_DECL("text",    "TEXTOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB,
 				 sizeof(pg_varlena_t),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("jsonb",   "JSONBOID",   "varlena *",
+	DEVTYPE_DECL("jsonb",   "JSONBOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_JSONLIB,
 				 sizeof(pg_varlena_t),
@@ -190,27 +189,27 @@ static struct {
 	/*
 	 * range types
 	 */
-	DEVTYPE_DECL("int4range",  "INT4RANGEOID",  "__int4range",
+	DEVTYPE_DECL("int4range",  "INT4RANGEOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_RANGETYPE,
 				 sizeof(RangeType) + 2 * sizeof(cl_int) + 1,
 				 pg_range_devtype_hashfunc),
-	DEVTYPE_DECL("int8range",  "INT8RANGEOID",  "__int8range",
+	DEVTYPE_DECL("int8range",  "INT8RANGEOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_RANGETYPE,
 				 sizeof(RangeType) + 2 * sizeof(cl_long) + 1,
 				 pg_range_devtype_hashfunc),
-	DEVTYPE_DECL("tsrange",    "TSRANGEOID",    "__tsrange",
+	DEVTYPE_DECL("tsrange",    "TSRANGEOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 				 sizeof(RangeType) + 2 * sizeof(Timestamp) + 1,
 				 pg_range_devtype_hashfunc),
-	DEVTYPE_DECL("tstzrange",  "TSTZRANGEOID",  "__tstzrange",
+	DEVTYPE_DECL("tstzrange",  "TSTZRANGEOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 				 sizeof(RangeType) + 2 * sizeof(TimestampTz) + 1,
 				 pg_range_devtype_hashfunc),
-	DEVTYPE_DECL("daterange",  "DATERANGEOID",  "__daterange",
+	DEVTYPE_DECL("daterange",  "DATERANGEOID",
 				 NULL, NULL, NULL,
                  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 				 sizeof(RangeType) + 2 * sizeof(DateADT) + 1,
@@ -248,7 +247,6 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			entry->type_align = typealign_get_width(tcache->typalign);
 			entry->type_byval = tcache->typbyval;
 			entry->type_name = devtype_catalog[i].type_name; /* const */
-			entry->type_base = devtype_catalog[i].type_base; /* const */
 			entry->max_const = devtype_catalog[i].max_const;
 			entry->min_const = devtype_catalog[i].min_const;
 			entry->zero_const = devtype_catalog[i].zero_const;
@@ -285,7 +283,6 @@ build_array_devtype_info(TypeCacheEntry *tcache)
 	entry->type_align = typealign_get_width(tcache->typalign);
 	entry->type_byval = tcache->typbyval;
 	entry->type_name = "array";
-	entry->type_base = "varlena *";
 	entry->max_const = NULL;
 	entry->min_const = NULL;
 	entry->zero_const = NULL;
@@ -341,7 +338,6 @@ build_composite_devtype_info(TypeCacheEntry *tcache)
 	entry->type_align = typealign_get_width(tcache->typalign);
 	entry->type_byval = tcache->typbyval;
 	entry->type_name = "composite";
-	entry->type_base = "varlena *";
 	entry->extra_sz = extra_sz;
 
 	entry->comp_nfields = nfields;

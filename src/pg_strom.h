@@ -485,20 +485,26 @@ typedef struct devtype_info {
 	bool		type_byval;
 	bool		type_is_negative;
 	const char *type_name;	/* name of device type; same of SQL's type */
-	const char *type_base;	/* base name of this type (like varlena) */
+//	const char *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
-	const char *max_const;		/* static initializer, if any */
-	const char *min_const;		/* static initializer, if any */
-	const char *zero_const;		/* static initializer, if any */
-	int			extra_sz;		/* required size for extra buffer, if device
-								 * type has internal representation. 0 means
-								 * this device type never has inline format,
-								 * or simple data type. */
-	devtype_hashfunc_type hash_func;  /* type specific hash function */
-	struct devtype_info *type_element;/* element type of array, if any */
-	int			comp_nfields;	/* # of sub-fields if composite types */
+	/* constant initializer cstring, if any */
+	const char *max_const;
+	const char *min_const;
+	const char *zero_const;
+	/*
+	 * required size for extra buffer, if device type has special
+	 * internal representation, or device type needs working buffer
+	 * on device-side projection.
+	 */
+	int			extra_sz;
+	/* type specific hash-function; to be compatible to device code */
+	devtype_hashfunc_type hash_func;
+	/* element type of array, if type is array */
+	struct devtype_info *type_element;
+	/* properties of sub-fields, if type is composite */
+	int			comp_nfields;
 	struct devtype_info *comp_subtypes[FLEXIBLE_ARRAY_MEMBER];
 } devtype_info;
 
@@ -1019,8 +1025,6 @@ extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
-extern void pgstrom_devtype_put(devtype_info *dtype);
-
 extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
 													   Oid type_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
