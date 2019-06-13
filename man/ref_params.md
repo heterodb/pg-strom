@@ -23,7 +23,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.enable_partitionwise_gpupreagg`|`bool`|`on`|GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。|
 |`pg_strom.pullup_outer_scan`   |`bool`|`on` |GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。|
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。|
-|`pg_strom.enable_numeric_type` |`bool`|`on` |GPUで`numeric`データ型を含む演算式を処理するかどうかを制御する。|
+|`pg_strom.enable_numeric_aggfuncs` |`bool`|`on` |`numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。|
 }
 
@@ -41,7 +41,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.enable_partitionwise_gpupreagg`|`bool`|`on`|Enables/disables whether GpuPreAgg is pushed down to the partition children. Available only PostgreSQL v10 or later.|
 |`pg_strom.pullup_outer_scan`   |`bool`|`on` |Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.|
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.|
-|`pg_strom.enable_numeric_type` |`bool`|`on` |Enables/disables support of `numeric` data type in arithmetic expression on GPU device|
+|`pg_strom.enable_numeric_aggfuncs` |`bool`|`on` |Enables/disables support of aggregate function that takes `numeric` data type.|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"|
 }
 

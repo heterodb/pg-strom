@@ -274,10 +274,10 @@
 <td align="left">Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.enable_numeric_type</code></td>
+<td align="left"><code>pg_strom.enable_numeric_aggfuncs</code></td>
 <td align="center"><code>bool</code></td>
 <td align="center"><code>on</code></td>
-<td align="left">Enables/disables support of <code>numeric</code> data type in arithmetic expression on GPU device</td>
+<td align="left">Enables/disables support of aggregate function that takes <code>numeric</code> data type.</td>
 </tr>
 <tr>
 <td align="left"><code>pg_strom.cpu_fallback</code></td>

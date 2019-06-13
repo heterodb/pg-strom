@@ -476,14 +476,16 @@ typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype,
 										 Datum datum);
 
 typedef struct devtype_info {
+	dlist_node	chain;
+	cl_uint		hashvalue;
 	Oid			type_oid;
 	uint32		type_flags;
 	int16		type_length;
 	int16		type_align;
 	bool		type_byval;
 	bool		type_is_negative;
-	char	   *type_name;	/* name of device type; same of SQL's type */
-	char	   *type_base;	/* base name of this type (like varlena) */
+	const char *type_name;	/* name of device type; same of SQL's type */
+	const char *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
@@ -495,7 +497,6 @@ typedef struct devtype_info {
 								 * this device type never has inline format,
 								 * or simple data type. */
 	devtype_hashfunc_type hash_func;  /* type specific hash function */
-	struct devtype_info *type_array;  /* array type of itself, if any */
 	struct devtype_info *type_element;/* element type of array, if any */
 	int			comp_nfields;	/* # of sub-fields if composite types */
 	struct devtype_info *comp_subtypes[FLEXIBLE_ARRAY_MEMBER];
@@ -506,6 +507,8 @@ typedef int (*devfunc_varlena_sz_f)(struct devfunc_info *dfunc,
 									Expr **args, int *args_width);
 
 typedef struct devfunc_info {
+	dlist_node	chain;
+	cl_uint		hashvalue;
 	Oid			func_oid;		/* OID of the SQL function */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
@@ -530,6 +533,8 @@ typedef bool (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
 											   cl_int *p_varlena_sz);
 
 typedef struct devcast_info {
+	dlist_node		chain;
+	cl_uint			hashvalue;
 	devtype_info   *src_type;
 	devtype_info   *dst_type;
 	char			castmethod;	/* one of COERCION_METHOD_* */
@@ -1014,6 +1019,8 @@ extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
+extern void pgstrom_devtype_put(devtype_info *dtype);
+
 extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
 													   Oid type_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
@@ -1285,7 +1292,6 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 /*
  * gpupreagg.c
  */
-extern bool pgstrom_enable_numeric_type;
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);

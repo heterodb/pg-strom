@@ -27,6 +27,7 @@ static CustomExecMethods	gpupreagg_exec_methods;
 static bool					enable_gpupreagg;				/* GUC */
 static bool					enable_pullup_outer_join;		/* GUC */
 static bool					enable_partitionwise_gpupreagg;	/* GUC */
+static bool					enable_numeric_aggfuncs; 		/* GUC */
 static double				gpupreagg_reduction_threshold;	/* GUC */
 
 typedef struct
@@ -287,7 +288,7 @@ typedef struct {
 	Oid			partfn_argtypes[8];
 	int			partfn_argexprs[8];
 	int			extra_flags;
-	bool		numeric_aware;	/* ignored, if !pgstrom_enable_numeric_type */
+	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 } aggfunc_catalog_t;
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
@@ -923,7 +924,7 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
 		{
 			/* check status of device NUMERIC type support */
-			if (!pgstrom_enable_numeric_type && catalog->numeric_aware)
+			if (!enable_numeric_aggfuncs && catalog->numeric_aware)
 				catalog = NULL;
 
 			ReleaseSysCache(htup);
@@ -5912,6 +5913,15 @@ pgstrom_init_gpupreagg(void)
 #else
 	enable_partitionwise_gpupreagg = false;
 #endif
+	/* pg_strom.enable_numeric_aggfuncs */
+	DefineCustomBoolVariable("pg_strom.enable_numeric_aggfuncs",
+							 "Enables aggregate functions on numeric type",
+							 NULL,
+							 &enable_numeric_aggfuncs,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
 							 "Minimus reduction ratio to use GpuPreAgg",

@@ -274,10 +274,10 @@
 <td align="left">GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.enable_numeric_type</code></td>
+<td align="left"><code>pg_strom.enable_numeric_aggfuncs</code></td>
 <td align="center"><code>bool</code></td>
 <td align="center"><code>on</code></td>
-<td align="left">GPUで<code>numeric</code>データ型を含む演算式を処理するかどうかを制御する。</td>
+<td align="left"><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</td>
 </tr>
 <tr>
 <td align="left"><code>pg_strom.cpu_fallback</code></td>

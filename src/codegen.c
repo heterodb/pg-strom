@@ -19,13 +19,9 @@
 #include "cuda_numeric.h"
 
 static MemoryContext	devinfo_memcxt;
-static bool		devtype_info_is_built;
-static List	   *devtype_info_slot[128];
-static List	   *devfunc_info_slot[1024];
-static List	   *devcast_info_slot[48];
-bool			pgstrom_enable_numeric_type;	/* GUC */
-
-static void		build_devcast_info(void);
+static dlist_head	devtype_info_slot[128];
+static dlist_head	devfunc_info_slot[1024];
+static dlist_head	devcast_info_slot[48];
 
 static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_int2_devtype_hashfunc(devtype_info *dtype, Datum datum);
@@ -222,90 +218,9 @@ static struct {
 };
 
 static devtype_info *
-build_devtype_info_entry(Oid type_oid,
-						 int32 type_flags,
-						 const char *type_basename,
-						 const char *max_const,
-						 const char *min_const,
-						 const char *zero_const,
-						 cl_uint extra_sz,
-						 devtype_hashfunc_type hash_func,
-						 devtype_info *element)
-{
-	HeapTuple		tuple;
-	Form_pg_type	type_form;
-	TypeCacheEntry *tcache;
-	devtype_info   *entry;
-	cl_int			hindex;
-	MemoryContext	oldcxt;
-
-	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
-	if (!HeapTupleIsValid(tuple))
-		return NULL;
-	type_form = (Form_pg_type) GETSTRUCT(tuple);
-
-	/* Don't register if array type is not true array type */
-	if (element && (type_form->typelem != element->type_oid ||
-					type_form->typlen  != -1))
-	{
-		ReleaseSysCache(tuple);
-		return NULL;
-	}
-	tcache = lookup_type_cache(type_oid,
-							   TYPECACHE_EQ_OPR |
-							   TYPECACHE_CMP_PROC);
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
-	entry->type_oid = type_oid;
-	entry->type_flags = type_flags;
-	entry->type_length = type_form->typlen;
-	entry->type_align = typealign_get_width(type_form->typalign);
-	entry->type_byval = type_form->typbyval;
-	if (!element)
-		entry->type_name = pstrdup(NameStr(type_form->typname));
-	else
-		entry->type_name = pstrdup("array");
-	entry->type_base = pstrdup(type_basename);
-	entry->max_const = max_const;	/* may be NULL */
-	entry->min_const = min_const;	/* may be NULL */
-	entry->zero_const = zero_const;	/* may be NULL */
-	entry->extra_sz = extra_sz;
-	entry->hash_func = hash_func;
-	/* type equality function */
-	entry->type_eqfunc = get_opcode(tcache->eq_opr);
-	entry->type_cmpfunc = tcache->cmp_proc;
-	MemoryContextSwitchTo(oldcxt);
-
-	if (!element)
-		entry->type_array = build_devtype_info_entry(type_form->typarray,
-													 type_flags,
-													 "varlena *",
-													 NULL,
-													 NULL,
-													 NULL,
-													 0,
-													 generic_devtype_hashfunc,
-													 entry);
-	else
-		entry->type_element = element;
-
-	ReleaseSysCache(tuple);
-
-	/* add to the hash slot */
-	hindex = (hash_uint32((uint32) entry->type_oid)
-			  % lengthof(devtype_info_slot));
-	devtype_info_slot[hindex] = lappend_cxt(devinfo_memcxt,
-											devtype_info_slot[hindex],
-											entry);
-	return entry;
-}
-
-static void
-build_devtype_info(void)
+build_basic_devtype_info(TypeCacheEntry *tcache)
 {
 	int		i;
-
-	Assert(!devtype_info_is_built);
 
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
@@ -317,32 +232,74 @@ build_devtype_info(void)
 		nsp_oid = GetSysCacheOid1(NAMESPACENAME, CStringGetDatum(nsp_name));
 		if (!OidIsValid(nsp_oid))
 			continue;
-
 		typ_oid = GetSysCacheOid2(TYPENAMENSP,
 								  CStringGetDatum(typ_name),
 								  ObjectIdGetDatum(nsp_oid));
-		if (!OidIsValid(typ_oid))
-			continue;
+		if (typ_oid == tcache->type_id)
+		{
+			devtype_info   *entry
+				= MemoryContextAllocZero(devinfo_memcxt,
+										 offsetof(devtype_info,
+												  comp_subtypes[0]));
+			entry->hashvalue = GetSysCacheHashValue(TYPEOID, typ_oid, 0, 0, 0);
+			entry->type_oid = typ_oid;
+			entry->type_flags = devtype_catalog[i].type_flags;
+			entry->type_length = tcache->typlen;
+			entry->type_align = typealign_get_width(tcache->typalign);
+			entry->type_byval = tcache->typbyval;
+			entry->type_name = devtype_catalog[i].type_name; /* const */
+			entry->type_base = devtype_catalog[i].type_base; /* const */
+			entry->max_const = devtype_catalog[i].max_const;
+			entry->min_const = devtype_catalog[i].min_const;
+			entry->zero_const = devtype_catalog[i].zero_const;
+			entry->extra_sz = devtype_catalog[i].extra_sz;
+			entry->hash_func = devtype_catalog[i].hash_func;
+			/* type equality functions */
+			entry->type_eqfunc = get_opcode(tcache->eq_opr);
+			entry->type_cmpfunc = tcache->cmp_proc;
 
-		(void) build_devtype_info_entry(typ_oid,
-										devtype_catalog[i].type_flags,
-										devtype_catalog[i].type_base,
-										devtype_catalog[i].max_const,
-										devtype_catalog[i].min_const,
-										devtype_catalog[i].zero_const,
-										devtype_catalog[i].extra_sz,
-										devtype_catalog[i].hash_func,
-										NULL);
+			return entry;
+		}
 	}
-	devtype_info_is_built = true;
-	/* also, device types cast */
-	build_devcast_info();
+	return NULL;
 }
 
 static devtype_info *
-build_composite_devtype_info(Oid type_oid, Form_pg_type type_form)
+build_array_devtype_info(TypeCacheEntry *tcache)
 {
-	Oid				type_relid = type_form->typrelid;
+	devtype_info *element;
+	devtype_info *entry;
+
+	Assert(OidIsValid(tcache->typelem) && tcache->typlen == -1);
+	element = pgstrom_devtype_lookup(tcache->typelem);
+	if (!element)
+		return NULL;
+	entry = MemoryContextAllocZero(devinfo_memcxt,
+								   offsetof(devtype_info,
+											comp_subtypes[0]));
+	entry->hashvalue = GetSysCacheHashValue(TYPEOID,
+											tcache->type_id, 0, 0, 0);
+	entry->type_oid = tcache->type_id;
+	entry->type_flags = element->type_flags;
+	entry->type_length = tcache->typlen;
+	entry->type_align = typealign_get_width(tcache->typalign);
+	entry->type_byval = tcache->typbyval;
+	entry->type_name = "array";
+	entry->type_base = "varlena *";
+	entry->max_const = NULL;
+	entry->min_const = NULL;
+	entry->zero_const = NULL;
+	entry->extra_sz = sizeof(pg_array_t);
+	entry->hash_func = generic_devtype_hashfunc;
+	entry->type_element = element;
+
+	return entry;
+}
+
+static devtype_info *
+build_composite_devtype_info(TypeCacheEntry *tcache)
+{
+	Oid				type_relid = tcache->typrelid;
 	int				j, nfields = get_relnatts(type_relid);
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * nfields);
 	devtype_info   *entry;
@@ -376,12 +333,13 @@ build_composite_devtype_info(Oid type_oid, Form_pg_type type_form)
 	entry = MemoryContextAllocZero(devinfo_memcxt,
 								   offsetof(devtype_info,
 											comp_subtypes[nfields]));
-	entry->type_oid = type_oid;
+	entry->hashvalue = GetSysCacheHashValue(TYPEOID,
+											tcache->type_id, 0, 0, 0);
+	entry->type_oid = tcache->type_id;
 	entry->type_flags = extra_flags;
-	entry->type_length = type_form->typlen;
-	entry->type_align = typealign_get_width(type_form->typalign);
-	entry->type_byval = type_form->typbyval;
-	entry->type_is_negative = false;
+	entry->type_length = tcache->typlen;
+	entry->type_align = typealign_get_width(tcache->typalign);
+	entry->type_byval = tcache->typbyval;
 	entry->type_name = "composite";
 	entry->type_base = "varlena *";
 	entry->extra_sz = extra_sz;
@@ -395,53 +353,44 @@ build_composite_devtype_info(Oid type_oid, Form_pg_type type_form)
 devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
 {
+	TypeCacheEntry *tcache;
 	devtype_info   *dtype;
-	ListCell	   *cell;
 	int				hindex;
-	HeapTuple		tup;
-	Form_pg_type	typeForm;
+	dlist_iter		iter;
 
-	if (!devtype_info_is_built)
-		build_devtype_info();
-
-	/*
-	 * Numeric data type with large digits tend to cause CPU fallback.
-	 * It may cause performance slowdown or random fault. So, we give
-	 * an option to disable only numeric values.
-	 */
-	if (type_oid == NUMERICOID && !pgstrom_enable_numeric_type)
-		return NULL;
-
-	hindex = hash_uint32((uint32) type_oid) % lengthof(devtype_info_slot);
-	foreach (cell, devtype_info_slot[hindex])
+	/* lookup dtype that is already built */
+	hindex = hash_uint32(type_oid) % lengthof(devtype_info_slot);
+	dlist_foreach(iter, &devtype_info_slot[hindex])
 	{
-		dtype = lfirst(cell);
+		dtype = dlist_container(devtype_info, chain, iter.cur);
+
 		if (dtype->type_oid == type_oid)
+		{
+			if (dtype->type_is_negative)
+				return NULL;
 			return dtype;
+		}
 	}
-
-	/*
-	 * Try to build devtype_info for composite type which contains
-	 * all device supported types.
-	 */
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
-	if (!HeapTupleIsValid(tup))
-		return NULL;
-	typeForm = (Form_pg_type) GETSTRUCT(tup);
-	if (typeForm->typtype == TYPTYPE_COMPOSITE &&
-		OidIsValid(typeForm->typrelid))
-	{
-		dtype = build_composite_devtype_info(type_oid, typeForm);
-		if (dtype)
-			devtype_info_slot[hindex] = lappend_cxt(devinfo_memcxt,
-													devtype_info_slot[hindex],
-													dtype);
-	}
+	/* try to build devtype_info entry */
+	tcache = lookup_type_cache(type_oid,
+							   TYPECACHE_EQ_OPR |
+							   TYPECACHE_CMP_PROC);
+	if (OidIsValid(tcache->typrelid))
+		dtype = build_composite_devtype_info(tcache);
+	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+		dtype = build_array_devtype_info(tcache);
 	else
+		dtype = build_basic_devtype_info(tcache);
+	/* makes a negative entry, if not in the catalog */
+	if (!dtype)
 	{
-		dtype = NULL;
+		dtype = MemoryContextAllocZero(devinfo_memcxt,
+									   offsetof(devtype_info,
+												comp_subtypes[0]));
+		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
+		dtype->type_is_negative = true;
 	}
-	ReleaseSysCache(tup);
+	dlist_push_head(&devtype_info_slot[hindex], &dtype->chain);
 
 	return dtype;
 }
@@ -2238,36 +2187,38 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 {
 	Oid				func_oid = HeapTupleGetOid(protup);
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
-	devfunc_info   *entry;
+	devfunc_info   *dfunc;
 	devtype_info   *dtype;
 	List		   *func_args = NIL;
 	ListCell	   *lc;
-	ListCell	   *cell;
-	int				i, j;
+	cl_uint			hashvalue;
+	int				j, hindex;
+	dlist_iter		iter;
 
-	i = func_oid % lengthof(devfunc_info_slot);
-	foreach (lc, devfunc_info_slot[i])
+	hashvalue = GetSysCacheHashValue(PROCOID, func_oid, 0, 0, 0);
+	hindex = hashvalue % lengthof(devfunc_info_slot);
+	dlist_foreach (iter, &devfunc_info_slot[hindex])
 	{
-		entry = lfirst(lc);
+		dfunc = dlist_container(devfunc_info, chain, iter.cur);
 
-		if (entry->func_oid == func_oid &&
-			list_length(entry->func_args) == func_argtypes->dim1 &&
-			(!OidIsValid(entry->func_collid) ||
-			 entry->func_collid == func_collid))
+		if (dfunc->func_oid == func_oid &&
+			list_length(dfunc->func_args) == func_argtypes->dim1 &&
+			(!OidIsValid(dfunc->func_collid) ||
+			 dfunc->func_collid == func_collid))
 		{
 			j = 0;
-			foreach (cell, entry->func_args)
+			foreach (lc, dfunc->func_args)
 			{
-				dtype = lfirst(cell);
+				dtype = lfirst(lc);
 				if (dtype->type_oid != func_argtypes->values[j])
 					break;
 				j++;
 			}
-			if (!cell)
+			if (!lc)
 			{
-				if (entry->func_is_negative)
+				if (dfunc->func_is_negative)
 					return NULL;
-				return entry;
+				return dfunc;
 			}
 		}
 	}
@@ -2275,11 +2226,12 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	/*
 	 * Not found, construct a new entry of the device function
 	 */
-	entry = MemoryContextAllocZero(devinfo_memcxt,
+	dfunc = MemoryContextAllocZero(devinfo_memcxt,
 								   sizeof(devfunc_info));
-	entry->func_oid = func_oid;
-	entry->func_collid = func_collid;	/* may be cleared later */
-	entry->func_is_strict = proc->proisstrict;
+	dfunc->hashvalue = hashvalue;
+	dfunc->func_oid = func_oid;
+	dfunc->func_collid = func_collid;	/* may be cleared later */
+	dfunc->func_is_strict = proc->proisstrict;
 	Assert(proc->pronargs == func_argtypes->dim1);
 	for (j=0; j < proc->pronargs; j++)
 	{
@@ -2287,7 +2239,7 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 		if (!dtype)
 		{
 			list_free(func_args);
-			entry->func_is_negative = true;
+			dfunc->func_is_negative = true;
 			goto skip;
 		}
 		func_args = lappend_cxt(devinfo_memcxt, func_args, dtype);
@@ -2297,33 +2249,31 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	if (!dtype)
 	{
 		list_free(func_args);
-		entry->func_is_negative = true;
+		dfunc->func_is_negative = true;
 		goto skip;
 	}
-	entry->func_args = func_args;
-	entry->func_rettype = dtype;
-	entry->func_sqlname = MemoryContextStrdup(devinfo_memcxt,
+	dfunc->func_args = func_args;
+	dfunc->func_rettype = dtype;
+	dfunc->func_sqlname = MemoryContextStrdup(devinfo_memcxt,
 											  NameStr(proc->proname));
 	if (proc->pronamespace == PG_CATALOG_NAMESPACE
 		/* for system default functions (pg_catalog) */
-		? pgstrom_devfunc_construct_common(entry)
+		? pgstrom_devfunc_construct_common(dfunc)
 		/* other extra or polymorphic functions */
-		: pgstrom_devfunc_construct_extra(entry, protup))
+		: pgstrom_devfunc_construct_extra(dfunc, protup))
 	{
-		entry->func_is_negative = false;
+		dfunc->func_is_negative = false;
 	}
 	else
 	{
 		/* oops, function has no entry */
-		entry->func_is_negative = true;
+		dfunc->func_is_negative = true;
 	}
 skip:
-	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
-									   devfunc_info_slot[i],
-									   entry);
-	if (entry->func_is_negative)
+	dlist_push_head(&devfunc_info_slot[hindex], &dfunc->chain);
+	if (dfunc->func_is_negative)
 		return NULL;
-	return entry;
+	return dfunc;
 }
 
 static devfunc_info *
@@ -2581,24 +2531,23 @@ static struct {
 	{ TEXTOID,    NUMERICOID, devcast_text2numeric_callback },
 };
 
-static void
-build_devcast_info(void)
+static devcast_info *
+build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 {
 	int			i;
 
-	Assert(devtype_info_is_built);
 	for (i=0; i < lengthof(devcast_catalog); i++)
 	{
-		Oid				src_type_oid = devcast_catalog[i].src_type_oid;
-		Oid				dst_type_oid = devcast_catalog[i].dst_type_oid;
-		devcast_coerceviaio_callback_f dcast_callback
-			= devcast_catalog[i].dcast_coerceviaio_callback;
-		cl_int			nslots = lengthof(devcast_info_slot);
-		cl_int			index;
+		devcast_coerceviaio_callback_f dcast_callback;
 		devtype_info   *dtype;
 		devcast_info   *dcast;
 		HeapTuple		tup;
 		char			method;
+
+		if (src_type_oid != devcast_catalog[i].src_type_oid ||
+			dst_type_oid != devcast_catalog[i].dst_type_oid)
+			continue;
+		dcast_callback = devcast_catalog[i].dcast_coerceviaio_callback;
 
 		tup = SearchSysCache2(CASTSOURCETARGET,
 							  ObjectIdGetDatum(src_type_oid),
@@ -2627,6 +2576,9 @@ build_devcast_info(void)
 		}
 		dcast = MemoryContextAllocZero(devinfo_memcxt,
 									   sizeof(devcast_info));
+		dcast->hashvalue = GetSysCacheHashValue(CASTSOURCETARGET,
+												src_type_oid,
+												dst_type_oid, 0, 0);
 		/* source */
 		dtype = pgstrom_devtype_lookup(src_type_oid);
 		if (!dtype)
@@ -2643,12 +2595,9 @@ build_devcast_info(void)
 		dcast->castmethod = method;
 		dcast->dcast_coerceviaio_callback = dcast_callback;
 
-		index = (hash_uint32((uint32) src_type_oid) ^
-				 hash_uint32((uint32) dst_type_oid)) % nslots;
-		devcast_info_slot[index] = lappend_cxt(devinfo_memcxt,
-											   devcast_info_slot[index],
-											   dcast);
+		return dcast;
 	}
+	return NULL;
 }
 
 devcast_info *
@@ -2656,22 +2605,35 @@ pgstrom_devcast_lookup(Oid src_type_oid,
 					   Oid dst_type_oid,
 					   char castmethod)
 {
-	int			nslots = lengthof(devcast_info_slot);
-	int			index;
-	ListCell   *lc;
 
-	index = (hash_uint32((uint32) src_type_oid) ^
-			 hash_uint32((uint32) dst_type_oid)) % nslots;
-	foreach (lc, devcast_info_slot[index])
+	int			hindex;
+	devcast_info *dcast;
+	dlist_iter	iter;
+
+	hindex = GetSysCacheHashValue(CASTSOURCETARGET,
+								  src_type_oid,
+								  dst_type_oid,
+								  0, 0) % lengthof(devcast_info_slot);
+	dlist_foreach (iter, &devcast_info_slot[hindex])
 	{
-		devcast_info   *dcast = lfirst(lc);
-
+		dcast = dlist_container(devcast_info, chain, iter.cur);
 		if (dcast->src_type->type_oid == src_type_oid &&
-			dcast->dst_type->type_oid == dst_type_oid &&
-			dcast->castmethod == castmethod)
-        {
-			return dcast;
+            dcast->dst_type->type_oid == dst_type_oid)
+		{
+			if (dcast->castmethod == castmethod)
+				return dcast;
+			return NULL;
 		}
+	}
+
+	dcast = build_devcast_info(src_type_oid, dst_type_oid);
+	if (dcast)
+	{
+		hindex = dcast->hashvalue % lengthof(devcast_info_slot);
+		dlist_push_head(&devcast_info_slot[hindex], &dcast->chain);
+
+		if (dcast->castmethod == castmethod)
+			return dcast;
 	}
 	return NULL;
 }
@@ -3818,19 +3780,84 @@ devcast_text2numeric_callback(codegen_context *context,
 #undef __appendStringInfoChar
 
 static void
-codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
+devtype_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
-	MemoryContextReset(devinfo_memcxt);
-	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
-	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
-	memset(devcast_info_slot, 0, sizeof(devcast_info_slot));
-	devtype_info_is_built = false;
+	dlist_mutable_iter iter;
+	int		hindex;
+
+	Assert(cacheid == TYPEOID);
+	if (hashvalue == 0)
+	{
+		for (hindex=0; hindex < lengthof(devtype_info_slot); hindex++)
+			dlist_init(&devtype_info_slot[hindex]);
+		return;
+	}
+
+	hindex = hashvalue % lengthof(devtype_info_slot);
+	dlist_foreach_modify (iter, &devtype_info_slot[hindex])
+	{
+		devtype_info *dtype = dlist_container(devtype_info,
+											  chain, iter.cur);
+		if (dtype->hashvalue == hashvalue)
+		{
+			dlist_delete(&dtype->chain);
+			memset(&dtype->chain, 0, sizeof(dlist_node));
+		}
+	}
 }
 
 static void
-guc_assign_cache_invalidator(bool newval, void *extra)
+devfunc_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
-	codegen_cache_invalidator(0, 0, 0);
+	dlist_mutable_iter iter;
+	int		hindex;
+
+	Assert(cacheid == PROCOID);
+	if (hashvalue == 0)
+	{
+		for (hindex=0; hindex < lengthof(devfunc_info_slot); hindex++)
+			dlist_init(&devfunc_info_slot[hindex]);
+		return;
+	}
+
+	hindex = hashvalue % lengthof(devfunc_info_slot);
+	dlist_foreach_modify (iter, &devfunc_info_slot[hindex])
+	{
+		devfunc_info *dfunc = dlist_container(devfunc_info,
+											  chain, iter.cur);
+		if (dfunc->hashvalue == hashvalue)
+		{
+			dlist_delete(&dfunc->chain);
+			memset(&dfunc->chain, 0, sizeof(dlist_node));
+		}
+	}
+}
+
+static void
+devcast_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
+{
+	dlist_mutable_iter iter;
+	int		hindex;
+
+	Assert(cacheid == CASTSOURCETARGET);
+	if (hashvalue == 0)
+	{
+		for (hindex=0; hindex < lengthof(devcast_info_slot); hindex++)
+			dlist_init(&devcast_info_slot[hindex]);
+		return;
+	}
+
+	hindex = hashvalue % lengthof(devcast_info_slot);
+	dlist_foreach_modify (iter, &devcast_info_slot[hindex])
+	{
+		devcast_info *dcast = dlist_container(devcast_info,
+											  chain, iter.cur);
+		if (dcast->hashvalue == hashvalue)
+		{
+			dlist_delete(&dcast->chain);
+			memset(&dcast->chain, 0, sizeof(dlist_node));
+		}
+	}
 }
 
 void
@@ -3848,27 +3875,20 @@ pgstrom_init_codegen_context(codegen_context *context,
 void
 pgstrom_init_codegen(void)
 {
-	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
-	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
-	devtype_info_is_built = false;
+	int		i;
 
-	/* create a memory context */
+	for (i=0; i < lengthof(devtype_info_slot); i++)
+		dlist_init(&devtype_info_slot[i]);
+	for (i=0; i < lengthof(devfunc_info_slot); i++)
+		dlist_init(&devfunc_info_slot[i]);
+	for (i=0; i < lengthof(devcast_info_slot); i++)
+		dlist_init(&devcast_info_slot[i]);
+
 	devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,
 										   "device type/func info cache",
 										   ALLOCSET_DEFAULT_SIZES);
-	CacheRegisterSyscacheCallback(PROCOID, codegen_cache_invalidator, 0);
-	CacheRegisterSyscacheCallback(TYPEOID, codegen_cache_invalidator, 0);
-	CacheRegisterSyscacheCallback(CASTSOURCETARGET, codegen_cache_invalidator, 0);
-
-	/* pg_strom.enable_numeric_type */
-    DefineCustomBoolVariable("pg_strom.enable_numeric_type",
-							 "Turn on/off device numeric type support",
-							 NULL,
-							 &pgstrom_enable_numeric_type,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL,
-							 guc_assign_cache_invalidator,
-							 NULL);
+	CacheRegisterSyscacheCallback(PROCOID, devfunc_cache_invalidator, 0);
+	CacheRegisterSyscacheCallback(TYPEOID, devtype_cache_invalidator, 0);
+	CacheRegisterSyscacheCallback(CASTSOURCETARGET,
+								  devcast_cache_invalidator, 0);
 }
