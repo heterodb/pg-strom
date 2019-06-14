@@ -1332,6 +1332,7 @@ assign_textlib_session_info(StringInfo buf)
 /*
  * session info for libgputime.a
  */
+
 /*
  * assign_timelib_session_info
  *
@@ -1341,7 +1342,7 @@ assign_textlib_session_info(StringInfo buf)
  */
 
 /* copied from src/timezone/tzfile.h */
-#define TZ_MAX_TIMES	1200
+#define TZ_MAX_TIMES	2000
 #define TZ_MAX_TYPES	256		/* Limited by what (uchar)'s can hold */
 #define TZ_MAX_CHARS	50		/* Maximum number of abbreviation characters */
 #define TZ_MAX_LEAPS	50		/* Maximum number of leap second corrections */
@@ -1351,11 +1352,11 @@ assign_textlib_session_info(StringInfo buf)
 
 struct ttinfo
 {								/* time type information */
-	cl_long		tt_gmtoff;		/* UTC offset in seconds */
-	cl_int		tt_isdst;		/* used to set tm_isdst */
-	cl_int		tt_abbrind;		/* abbreviation list index */
-	cl_int		tt_ttisstd;		/* TRUE if transition is std time */
-	cl_int		tt_ttisgmt;		/* TRUE if transition is UTC */
+	int32		tt_gmtoff;		/* UTC offset in seconds */
+	bool		tt_isdst;		/* used to set tm_isdst */
+	int			tt_abbrind;		/* abbreviation list index */
+	bool		tt_ttisstd;		/* TRUE if transition is std time */
+	bool		tt_ttisgmt;		/* TRUE if transition is UTC */
 };
 
 struct lsinfo
@@ -1370,15 +1371,21 @@ struct state
 	cl_int		timecnt;
 	cl_int		typecnt;
 	cl_int		charcnt;
-	cl_int		goback;
-	cl_int		goahead;
+	bool		goback;
+	bool		goahead;
 	/* NOTE: pg_time_t has different meaning in GPU kernel */
-    cl_long		ats[TZ_MAX_TIMES];
-	cl_uchar	types[TZ_MAX_TIMES];
+    pg_time_t	ats[TZ_MAX_TIMES];
+	unsigned char types[TZ_MAX_TIMES];
 	struct ttinfo ttis[TZ_MAX_TYPES];
 	cl_char		chars[BIGGEST(BIGGEST(TZ_MAX_CHARS + 1, 3 /* sizeof gmt */ ),
 							  (2 * (TZ_STRLEN_MAX + 1)))];
 	struct lsinfo lsis[TZ_MAX_LEAPS];
+	/*
+	 * The time type to use for early times or if no transitions. It is always
+	 * zero for recent tzdb releases. It might be nonzero for data from tzdb
+	 * 2018e or earlier.
+	 */
+	int			defaulttype;
 };
 
 struct pg_tz
@@ -1447,12 +1454,12 @@ assign_timelib_session_info(StringInfo buf)
 		{
 			appendStringInfo(
 				buf,
-				"  { %ld, %d, %d, %d, %d },\n",
+				"  { %d, %s, %d, %s, %s },\n",
 				sp->ttis[i].tt_gmtoff,
-				sp->ttis[i].tt_isdst,
+				sp->ttis[i].tt_isdst   ? "true" : "false",
 				sp->ttis[i].tt_abbrind,
-				sp->ttis[i].tt_ttisstd,
-				sp->ttis[i].tt_ttisgmt);
+				sp->ttis[i].tt_ttisstd ? "true" : "false",
+				sp->ttis[i].tt_ttisgmt ? "true" : "false");
 		}
 	}
 	appendStringInfo(buf, "};\n");
@@ -1484,19 +1491,21 @@ assign_timelib_session_info(StringInfo buf)
 		"    %d,    /* timecnt */\n"
 		"    %d,    /* typecnt */\n"
 		"    %d,    /* charcnt */\n"
-		"    %d,    /* goback */\n"
-		"    %d,    /* goahead */\n"
+		"    %s,    /* goback */\n"
+		"    %s,    /* goahead */\n"
 		"    __session_timezone_state_ats,   /* ats[] */\n"
 		"    __session_timezone_state_types, /* types[] */\n"
 		"    __session_timezone_state_ttis,  /* ttis[] */\n"
 		"    __session_timezone_state_lsis,  /* lsis[] */\n"
+		"    %d,    /* defaulttype */\n"
 		"};\n",
 		sp->leapcnt,
 		sp->timecnt,
 		sp->typecnt,
 		sp->charcnt,
-		sp->goback,
-		sp->goahead);
+		sp->goback  ? "true" : "false",
+		sp->goahead ? "true" : "false",
+		sp->defaulttype);
 
 	/* SetEpochTimestamp() */
 	appendStringInfo(

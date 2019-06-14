@@ -111,6 +111,7 @@ typedef struct
 /* import from timezone/private.h */
 #define YEARSPERREPEAT	400		/* years before a Gregorian repeat */
 #define AVGSECSPERYEAR	31556952L
+#define SECSPERREPEAT	((cl_long)YEARSPERREPEAT * (cl_long)AVGSECSPERYEAR)
 
 /* import from include/datatype/timestamp.h */
 #define JULIAN_MINYEAR (-4713)
@@ -168,6 +169,38 @@ interval_cmp_value(const Interval interval, cl_long *days, cl_long *fraction)
 			 interval.month * 30L +
 			 interval.day);
 }
+
+/*
+ * to be defined by session information
+ */
+DEVICE_FUNCTION(Timestamp) SetEpochTimestamp(void);
+typedef struct {
+	cl_long		ls_trans; /* pg_time_t in original */
+	cl_long		ls_corr;
+} tz_lsinfo;
+typedef struct {
+	cl_int		tt_gmtoff;
+	cl_bool		tt_isdst;
+	cl_int		tt_abbrind;
+	cl_bool		tt_ttisstd;
+	cl_bool		tt_ttisgmt;
+} tz_ttinfo;
+typedef struct {
+	cl_int		leapcnt;
+	cl_int		timecnt;
+	cl_int		typecnt;
+	cl_int		charcnt;
+	cl_bool		goback;
+	cl_bool		goahead;
+	cl_long	   *ats;
+	cl_uchar   *types;
+	tz_ttinfo  *ttis;
+	/* GPU kernel does not use chars[] */
+	tz_lsinfo  *lsis;
+	cl_int		defaulttype;
+} tz_state;
+
+extern const __device__ tz_state session_timezone_state;
 
 #ifndef PG_DATE_TYPE_DEFINED
 #define PG_DATE_TYPE_DEFINED

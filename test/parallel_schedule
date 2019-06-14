@@ -13,7 +13,7 @@ test: pgstrom_guc
 # ----------
 # Test for each data types
 # ----------
-test: dtype_int dtype_float dtype_numeric
+test: dtype_int dtype_float dtype_numeric dtype_time
 
 # ----------
 # Test for various functions / expressions

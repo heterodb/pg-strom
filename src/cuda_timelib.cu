@@ -50,37 +50,6 @@ struct pg_tm
 };
 
 /*
- * definition by session information
- */
-DEVICE_FUNCTION(Timestamp) SetEpochTimestamp(void);
-typedef struct {
-	cl_long		ls_trans; /* pg_time_t in original */
-	cl_long		ls_corr;
-} tz_lsinfo;
-typedef struct {
-	cl_long		tt_gmtoff;
-	cl_int		tt_isdst;
-	cl_int		tt_abbrind;
-	cl_int		tt_ttisstd;
-	cl_int		tt_ttisgmt;
-} tz_ttinfo;
-typedef struct {
-	cl_int		leapcnt;
-	cl_int		timecnt;
-	cl_int		typecnt;
-	cl_int		charcnt;
-	cl_int		goback;
-	cl_int		goahead;
-	cl_long	   *ats;
-	cl_uchar   *types;
-	tz_ttinfo  *ttis;
-	/* GPU kernel does not use chars[] */
-	tz_lsinfo  *lsis;
-} tz_state;
-
-extern const __device__ tz_state session_timezone_state;
-
-/*
  * Support routines
  */
 STATIC_FUNCTION(cl_int)
@@ -480,106 +449,9 @@ timesub(const cl_long *timep,	/* pg_time_t in original */
 }
 
 STATIC_FUNCTION(struct pg_tm *)
-localsub_no_recursive(const cl_long *timep,	/* pg_time_t in original */
-					  long offset,
-					  struct pg_tm * tmp,
-					  const tz_state *sp)	/* const pg_tz *tz in original */
-{
-	const tz_ttinfo *ttisp;
-	int			i;
-	struct pg_tm *result;
-	const cl_long t = *timep;	/* pg_time_t in original */
-
-#if 0
-	if ((sp->goback && t < sp->ats[0]) ||
-		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
-	{
-		cl_long	newt = t;	/* pg_time_t in original */
-		cl_long	seconds;	/* pg_time_t in original */
-		cl_long	tcycles;	/* pg_time_t in original */
-		cl_long	icycles;	/* pg_time_t in original */
-
-		if (t < sp->ats[0])
-			seconds = sp->ats[0] - t;
-		else
-			seconds = t - sp->ats[sp->timecnt - 1];
-		--seconds;
-		tcycles = seconds / YEARSPERREPEAT / AVGSECSPERYEAR;
-		++tcycles;
-		icycles = tcycles;
-		if (tcycles - icycles >= 1 || icycles - tcycles >= 1)
-			return NULL;
-		seconds = icycles;
-		seconds *= YEARSPERREPEAT;
-		seconds *= AVGSECSPERYEAR;
-		if (t < sp->ats[0])
-			newt += seconds;
-		else
-			newt -= seconds;
-		if (newt < sp->ats[0] ||
-			newt > sp->ats[sp->timecnt - 1])
-			return NULL;		/* "cannot happen" */
-		result = localsub(&newt, offset, tmp, tz);
-		if (result == tmp)
-		{
-			cl_long newy;		/* pg_time_t in original */
-
-			newy = tmp->tm_year;
-			if (t < sp->ats[0])
-				newy -= icycles * YEARSPERREPEAT;
-			else
-				newy += icycles * YEARSPERREPEAT;
-			tmp->tm_year = newy;
-			if (tmp->tm_year != newy)
-				return NULL;
-		}
-		return result;
-	}
-#else
-	/* Don't recursive call in this function. */
-	assert(!((sp->goback && t < sp->ats[0]) ||
-			 (sp->goahead && t > sp->ats[sp->timecnt - 1])));
-#endif
-
-	if (sp->timecnt == 0 || t < sp->ats[0])
-	{
-		i = 0;
-		while (sp->ttis[i].tt_isdst)
-			if (++i >= sp->typecnt)
-			{
-				i = 0;
-				break;
-			}
-	}
-	else
-	{
-		int			lo = 1;
-		int			hi = sp->timecnt;
-
-		while (lo < hi)
-		{
-			int			mid = (lo + hi) >> 1;
-
-			if (t < sp->ats[mid])
-				hi = mid;
-			else
-				lo = mid + 1;
-		}
-		i = (int) sp->types[lo - 1];
-	}
-	ttisp = &sp->ttis[i];
-
-	result = timesub(&t, ttisp->tt_gmtoff, sp, tmp);
-	tmp->tm_isdst = ttisp->tt_isdst;
-
-	return result;
-}
-
-STATIC_FUNCTION(struct pg_tm *)
-localsub(const cl_long *timep, 	/* pg_time_t in original */
-		 long offset,
-		 struct pg_tm * tmp,
-		 const tz_state *sp	    /* const pg_tz *tz in original*/ )
+localsub(const tz_state *sp,
+		 const cl_long *timep, 	/* pg_time_t in original */
+		 struct pg_tm *tmp)
 {
 	const tz_ttinfo *ttisp;
 	int			i;
@@ -591,22 +463,15 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 	{
 		cl_long	newt = t;		/* pg_time_t in original */
 		cl_long	seconds;		/* pg_time_t in original */
-		cl_long	tcycles;		/* pg_time_t in original */
-		cl_long	icycles;
+		cl_long	years;			/* pg_time_t in original */
 
 		if (t < sp->ats[0])
 			seconds = sp->ats[0] - t;
 		else
 			seconds = t - sp->ats[sp->timecnt - 1];
 		--seconds;
-		tcycles = seconds / YEARSPERREPEAT / AVGSECSPERYEAR;
-		++tcycles;
-		icycles = tcycles;
-		if (tcycles - icycles >= 1 || icycles - tcycles >= 1)
-			return NULL;
-		seconds = icycles;
-		seconds *= YEARSPERREPEAT;
-		seconds *= AVGSECSPERYEAR;
+		years = (seconds / SECSPERREPEAT + 1) * YEARSPERREPEAT;
+		seconds = years * AVGSECSPERYEAR;
 		if (t < sp->ats[0])
 			newt += seconds;
 		else
@@ -614,40 +479,34 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 		if (newt < sp->ats[0] ||
 			newt > sp->ats[sp->timecnt - 1])
 			return NULL;		/* "cannot happen" */
-		result = localsub_no_recursive(&newt, offset, tmp, sp);
-		if (result == tmp)
+		result = localsub(sp, &newt, tmp);
+		if (result)
 		{
-			cl_long	newy;		/* pg_time_t in original */
+			cl_long		newy;
 
-			newy = tmp->tm_year;
+			newy = result->tm_year;
 			if (t < sp->ats[0])
-				newy -= icycles * YEARSPERREPEAT;
+				newy -= years;
 			else
-				newy += icycles * YEARSPERREPEAT;
-			tmp->tm_year = newy;
-			if (tmp->tm_year != newy)
+				newy += years;
+			if (!(INT_MIN <= newy && newy <= INT_MAX))
 				return NULL;
+			result->tm_year = newy;
 		}
 		return result;
 	}
 	if (sp->timecnt == 0 || t < sp->ats[0])
 	{
-		i = 0;
-		while (sp->ttis[i].tt_isdst)
-			if (++i >= sp->typecnt)
-			{
-				i = 0;
-				break;
-			}
+		i = sp->defaulttype;
 	}
 	else
 	{
-		int			lo = 1;
-		int			hi = sp->timecnt;
+		int		lo = 1;
+		int		hi = sp->timecnt;
 
 		while (lo < hi)
 		{
-			int			mid = (lo + hi) >> 1;
+			int		mid = (lo + hi) >> 1;
 
 			if (t < sp->ats[mid])
 				hi = mid;
@@ -658,9 +517,17 @@ localsub(const cl_long *timep, 	/* pg_time_t in original */
 	}
 	ttisp = &sp->ttis[i];
 
+	/*
+	 * To get (wrong) behavior that's compatible with System V Release 2.0
+	 * you'd replace the statement below with t += ttisp->tt_gmtoff;
+	 * timesub(&t, 0L, sp, tmp);
+	 */
 	result = timesub(&t, ttisp->tt_gmtoff, sp, tmp);
-	tmp->tm_isdst = ttisp->tt_isdst;
-
+	if (result)
+	{
+		result->tm_isdst = ttisp->tt_isdst;
+//		result->tm_zone = (char *) &sp->chars[ttisp->tt_abbrind];
+	}
 	return result;
 }
 
@@ -672,145 +539,7 @@ pg_localtime(const cl_long *timep,	/* pg_time_t in original */
 	/*
 	 * pg_localtime() returns tm if success. NULL, elsewhere.
 	 */
-	return localsub(timep, 0L, tm, sp);
-}
-
-STATIC_FUNCTION(int)
-pg_next_dst_boundary_no_recursive(
-	const cl_long *timep,		/* pg_time_t in original */
-	long int *before_gmtoff,
-	int *before_isdst,
-	cl_long *boundary,			/* pg_time_t in original */
-	long int *after_gmtoff,
-	int *after_isdst,
-	const tz_state *sp)			/* const pg_tz *tz in original */
-{
-	const tz_ttinfo *ttisp;
-	int			i;
-	int			j;
-	const cl_long t = *timep;	/* pg_time_t in original */
-
-	if (sp->timecnt == 0)
-	{
-		/* non-DST zone, use lowest-numbered standard type */
-		i = 0;
-		while (sp->ttis[i].tt_isdst)
-			if (++i >= sp->typecnt)
-			{
-				i = 0;
-				break;
-			}
-		ttisp = &sp->ttis[i];
-		*before_gmtoff = ttisp->tt_gmtoff;
-		*before_isdst = ttisp->tt_isdst;
-		return 0;
-	}
-#if 0
-	if ((sp->goback && t < sp->ats[0]) ||
-		(sp->goahead && t > sp->ats[sp->timecnt - 1]))
-	{
-		/* For values outside the transition table, extrapolate */
-		cl_long	newt = t;	/* pg_time_t in original */
-		cl_long	seconds;	/* pg_time_t in original */
-		cl_long	tcycles;	/* pg_time_t in original */
-		cl_long	icycles;
-		int		result;
-
-		if (t < sp->ats[0])
-			seconds = sp->ats[0] - t;
-		else
-			seconds = t - sp->ats[sp->timecnt - 1];
-		--seconds;
-		tcycles = seconds / YEARSPERREPEAT / AVGSECSPERYEAR;
-		++tcycles;
-		icycles = tcycles;
-		if (tcycles - icycles >= 1 || icycles - tcycles >= 1)
-			return -1;
-		seconds = icycles;
-		seconds *= YEARSPERREPEAT;
-		seconds *= AVGSECSPERYEAR;
-		if (t < sp->ats[0])
-			newt += seconds;
-		else
-			newt -= seconds;
-		if (newt < sp->ats[0] ||
-			newt > sp->ats[sp->timecnt - 1])
-			return -1;			/* "cannot happen" */
-
-		result = pg_next_dst_boundary(&newt, before_gmtoff,
-									  before_isdst,
-									  boundary,
-									  after_gmtoff,
-									  after_isdst,
-									  tz);
-		if (t < sp->ats[0])
-			*boundary -= seconds;
-		else
-			*boundary += seconds;
-		return result;
-	}
-#else
-	/* Don't recursive call in this function. */
-	assert(!((sp->goback && t < sp->ats[0]) ||
-			 (sp->goahead && t > sp->ats[sp->timecnt - 1])));
-#endif
-
-	if (t >= sp->ats[sp->timecnt - 1])
-	{
-		/* No known transition > t, so use last known segment's type */
-		i = sp->types[sp->timecnt - 1];
-		ttisp = &sp->ttis[i];
-		*before_gmtoff = ttisp->tt_gmtoff;
-		*before_isdst = ttisp->tt_isdst;
-		return 0;
-	}
-	if (t < sp->ats[0])
-	{
-		/* For "before", use lowest-numbered standard type */
-		i = 0;
-		while (sp->ttis[i].tt_isdst)
-			if (++i >= sp->typecnt)
-			{
-				i = 0;
-				break;
-			}
-		ttisp = &sp->ttis[i];
-		*before_gmtoff = ttisp->tt_gmtoff;
-		*before_isdst = ttisp->tt_isdst;
-		*boundary = sp->ats[0];
-		/* And for "after", use the first segment's type */
-		i = sp->types[0];
-		ttisp = &sp->ttis[i];
-		*after_gmtoff = ttisp->tt_gmtoff;
-		*after_isdst = ttisp->tt_isdst;
-		return 1;
-	}
-	/* Else search to find the boundary following t */
-	{
-		int			lo = 1;
-		int			hi = sp->timecnt - 1;
-
-		while (lo < hi)
-		{
-			int			mid = (lo + hi) >> 1;
-
-			if (t < sp->ats[mid])
-				hi = mid;
-			else
-				lo = mid + 1;
-		}
-		i = lo;
-	}
-	j = sp->types[i - 1];
-	ttisp = &sp->ttis[j];
-	*before_gmtoff = ttisp->tt_gmtoff;
-	*before_isdst = ttisp->tt_isdst;
-	*boundary = sp->ats[i];
-	j = sp->types[i];
-	ttisp = &sp->ttis[j];
-	*after_gmtoff = ttisp->tt_gmtoff;
-	*after_isdst = ttisp->tt_isdst;
-	return 1;
+	return localsub(sp, timep, tm);
 }
 
 STATIC_FUNCTION(int)
@@ -873,12 +602,13 @@ pg_next_dst_boundary(const cl_long *timep,	/* pg_time_t in original */
 			newt > sp->ats[sp->timecnt - 1])
 			return -1;			/* "cannot happen" */
 
-		result = pg_next_dst_boundary_no_recursive(&newt, before_gmtoff,
-												   before_isdst,
-												   boundary,
-												   after_gmtoff,
-												   after_isdst,
-												   sp);
+		result = pg_next_dst_boundary(&newt,
+									  before_gmtoff,
+									  before_isdst,
+									  boundary,
+									  after_gmtoff,
+									  after_isdst,
+									  sp);
 		if (t < sp->ats[0])
 			*boundary -= seconds;
 		else
@@ -1156,8 +886,7 @@ tm2timestamp(struct pg_tm * tm, fsec_t fsec, int *tzp, Timestamp *result)
     /* Julian day routines are not correct for negative Julian days */
     if (!IS_VALID_JULIAN(tm->tm_year, tm->tm_mon, tm->tm_mday))
     {
-        *result = 0;
-		/* keep compiler quiet */
+        *result = 0;		/* keep compiler quiet */
         return false;
     }
 
@@ -1176,8 +905,7 @@ tm2timestamp(struct pg_tm * tm, fsec_t fsec, int *tzp, Timestamp *result)
     if ((*result < 0 && date > 0) ||
         (*result > 0 && date < -1))
     {
-        *result = 0;
-		/* keep compiler quiet */
+        *result = 0;		/* keep compiler quiet */
         return false;
     }
 	
@@ -1562,7 +1290,7 @@ pgfn_timestamptz_timetz(kern_context *kcxt, pg_timestamptz_t arg1)
 		result.isnull = true;
 	else if (TIMESTAMP_NOT_FINITE(arg1.value))
 		result.isnull = true;
-	else if (timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL) != 0)
+	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL) != 0)
 	{
 		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -1962,9 +1690,10 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 		if (arg2.value.month != 0)
 		{
 			struct pg_tm tm;
-			fsec_t fsec;
+			fsec_t	fsec;
+			int		tz;
 
-			if (timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL) != 0)
+			if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 			{
 				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
 				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -1988,7 +1717,8 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
 				tm.tm_mday = (day_tab[isleap(tm.tm_year)][tm.tm_mon - 1]);
 
-			if (tm2timestamp(&tm, fsec, NULL, &arg1.value) != 0)
+			tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
+			if (tm2timestamp(&tm, fsec, &tz, &arg1.value) != 0)
 			{
 				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
 				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -2000,10 +1730,11 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 		if (arg2.value.day != 0)
 		{
 			struct pg_tm tm;
-			fsec_t fsec;
-			int julian;
+			fsec_t	fsec;
+			int		julian;
+			int		tz;
 
-			if (timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL) != 0)
+			if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 			{
 				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
 				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -2012,10 +1743,12 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 			}
 
 			/* Add days by converting to and from julian */
-			julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + arg2.value.day;
+			julian = (date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) +
+					  arg2.value.day);
 			j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
 
-			if (tm2timestamp(&tm, fsec, NULL, &arg1.value) != 0)
+			tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
+			if (!tm2timestamp(&tm, fsec, &tz, &arg1.value))
 			{
 				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE;
 				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -3324,10 +3057,10 @@ pgfn_overlaps_timestamptz(kern_context *kcxt,
 typedef struct
 {
 	const char *token;		/* always NUL-terminated */
-//	cl_char		token[11];	/* always NUL-terminated */
 	cl_char		type;		/* see field type codes above */
 	cl_int		value;		/* meaning depends on type */
 } datetkn;
+#define TOKMAXLEN		10
 
 static __device__ const datetkn deltatktbl[] = {
 	/* token, type, value */
@@ -3482,25 +3215,6 @@ static __device__ const datetkn datetktbl[] = {
 	{"yesterday",	RESERV, DTK_YESTERDAY}  /* yesterday midnight */
 };
 
-/* string comparison */
-STATIC_INLINE(cl_int)
-__strcmp(const char *__s1, const char *__s2)
-{
-	const cl_uchar *s1 = (const cl_uchar *) __s1;
-	const cl_uchar *s2 = (const cl_uchar *) __s2;
-	cl_int		c1, c2;
-
-	do {
-		c1 = (cl_uchar) *s1++;
-		c2 = (cl_uchar) *s2++;
-
-		if (c1 == '\0')
-			return c1 - c2;
-	} while (c1 == c2);
-
-	return c1 - c2;
-}
-
 /*
  *
  */
@@ -3518,7 +3232,7 @@ datebsearch(const char *key, const datetkn *datetkntbl, int nitems)
 		comp = (int) key[0] - (int) position->token[0];
 		if (comp == 0)
 		{
-			comp = __strcmp(key, position->token);
+			comp = __strncmp(key, position->token, TOKMAXLEN);
 			if (comp == 0)
 				return position;
 		}
@@ -3648,10 +3362,9 @@ pgfn_extract_timestamp(kern_context *kcxt,
 		if (type == UNITS)
 		{
 			fsec_t		fsec;
-			int			tz;
 			struct pg_tm  tm;
 
-			if (timestamp2tm(arg2.value, &tz, &tm, &fsec, NULL))
+			if (timestamp2tm(arg2.value, NULL, &tm, &fsec, NULL))
 			{
 				switch (val)
 				{
@@ -3823,7 +3536,7 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 						return result;
 
 					case DTK_TZ_HOUR:
-						result.value = -tz;
+						dummy = -tz;
 						FMODULO(dummy, result.value, (double) SECS_PER_HOUR);
 						return result;
 

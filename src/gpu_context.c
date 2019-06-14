@@ -584,8 +584,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			free(entry);
 		}
 	}
-	if (gcontext->error_message)
-		free(gcontext->error_message);
 	free(gcontext);
 }
 
@@ -605,16 +603,15 @@ GpuContextWorkerReportError(int elevel,
 	GpuContext *gcontext = GpuWorkerCurrentContext;
 	uint32		expected = 0;
 	va_list		va_args;
-	ssize_t		length = 0;
 
 	Assert(gcontext != NULL);
 	Assert(elevel != 0);
-
 	if (elevel >= Min(ERROR, log_min_messages))
 	{
 		va_start(va_args, fmt);
-		length = vfprintf(stderr, fmt, va_args);
+		vfprintf(stderr, fmt, va_args);
 		va_end(va_args);
+		fputc('\n', stderr);
 	}
 	if (elevel < ERROR)
 		return;
@@ -625,13 +622,11 @@ GpuContextWorkerReportError(int elevel,
 		gcontext->error_filename	= filename;
 		gcontext->error_lineno		= lineno;
 		gcontext->error_funcname	= funcname;
-		gcontext->error_message		= malloc(length + 1);
-		if (gcontext->error_message)
-		{
-			va_start(va_args, fmt);
-			vsnprintf(gcontext->error_message, length, fmt, va_args);
-			va_end(va_args);
-		}
+		va_start(va_args, fmt);
+		vsnprintf(gcontext->error_message,
+				  sizeof(gcontext->error_message),
+				  fmt, va_args);
+		va_end(va_args);
 		/* unlock error information */
 		pg_atomic_fetch_and_u32(&gcontext->error_level, 0xfffffffeU);
 	}
@@ -739,8 +734,13 @@ GpuContextWorkerMain(void *arg)
 				else if (gtask->kerror.errcode != StromError_Success)
 				{
 					/* GPU kernel completed with error status */
-					werror("GPU kernel error - %s",
-						   errorTextKernel(&gtask->kerror));
+					GpuContextWorkerReportError(
+						ERROR,
+						gtask->kerror.filename,
+						gtask->kerror.lineno,
+						"kernel function", //gtask->kerror.funcname
+						"GPU kernel error - %s",
+						errorTextKernel(&gtask->kerror));
 				}
 				else if (retval == 0)
 				{
@@ -993,7 +993,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	pg_atomic_init_u32(&gcontext->error_level, 0);
 	gcontext->error_filename = NULL;
 	gcontext->error_lineno	= 0;
-	gcontext->error_message	= NULL;
+	memset(gcontext->error_message, 0, sizeof(gcontext->error_message));
 	/* management of work-queue */
 	gcontext->worker_is_running = false;
 	gcontext->global_num_running_tasks

@@ -98,6 +98,44 @@ __memcmp(const void *s1, const void *s2, size_t n)
 	return 0;
 }
 
+/* cstring comparison */
+STATIC_INLINE(cl_int)
+__strcmp(const char *__s1, const char *__s2)
+{
+	const cl_uchar *s1 = (const cl_uchar *) __s1;
+	const cl_uchar *s2 = (const cl_uchar *) __s2;
+	cl_int		c1, c2;
+
+	do {
+		c1 = (cl_uchar) *s1++;
+		c2 = (cl_uchar) *s2++;
+
+		if (c1 == '\0')
+			return c1 - c2;
+	} while (c1 == c2);
+
+	return c1 - c2;
+}
+
+STATIC_INLINE(cl_int)
+__strncmp(const char *__s1, const char *__s2, cl_uint n)
+{
+	const cl_uchar *s1 = (const cl_uchar *) __s1;
+	const cl_uchar *s2 = (const cl_uchar *) __s2;
+	cl_int		c1 = '\0';
+	cl_int		c2 = '\0';
+
+	while (n > 0)
+	{
+		c1 = (cl_uchar) *s1++;
+		c2 = (cl_uchar) *s2++;
+		if (c1 == '\0' || c1 != c2)
+			return c1 - c2;
+		n--;
+	}
+	return c1 - c2;
+}
+
 /*
  * pgstromTotalSum
  *

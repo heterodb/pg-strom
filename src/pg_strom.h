@@ -250,7 +250,7 @@ typedef struct GpuContext
 	const char	   *error_filename;
 	int				error_lineno;
 	const char	   *error_funcname;
-	char		   *error_message;
+	char			error_message[200];
 	/* management of the work-queue */
 	bool			worker_is_running;
 	pg_atomic_uint32 *global_num_running_tasks;
@@ -485,7 +485,6 @@ typedef struct devtype_info {
 	bool		type_byval;
 	bool		type_is_negative;
 	const char *type_name;	/* name of device type; same of SQL's type */
-//	const char *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
@@ -772,8 +771,6 @@ static inline void
 CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 {
 	uint32		error_level = pg_atomic_read_u32(&gcontext->error_level);
-	const char *error_message;
-
 	/*
 	 * NOTE: The least bit of the error_level is a flag to indicate
 	 * whether the error information is ready or not.
@@ -785,14 +782,10 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 			pg_usleep(1000L);
 			error_level = pg_atomic_read_u32(&gcontext->error_level);
 		}
-
-		error_message = strchr(gcontext->error_message, '(');
-		if (!error_message)
-			error_message = gcontext->error_message;
 		elog_start(gcontext->error_filename,
 				   gcontext->error_lineno,
 				   gcontext->error_funcname);
-		elog_finish(error_level / 2, "%s", error_message);
+		elog_finish(error_level / 2, "%s", gcontext->error_message);
 	}
 	CHECK_FOR_INTERRUPTS();
 }
