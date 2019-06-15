@@ -25,8 +25,9 @@
 			VARATT_IS_EXTERNAL(arg1) ||							\
 			VARATT_IS_EXTERNAL(arg2))							\
 		{														\
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,	\
+							   "varlena datum is compressed or external"); \
 			(result).isnull = true;								\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
 			return (result);									\
 		}														\
 	} while(0)
@@ -53,7 +54,8 @@ pg_bpchar_datum_extract(kern_context *kcxt, pg_bpchar_t arg,
 		if (VARATT_IS_COMPRESSED(arg.value) ||
 			VARATT_IS_EXTERNAL(arg.value))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "varlena datum is compressed or external");
 			return false;
 		}
 		*s = VARDATA_ANY(arg.value);
@@ -81,7 +83,8 @@ bpchar_compare(kern_context *kcxt,
 		if (VARATT_IS_COMPRESSED(s1) || VARATT_IS_EXTERNAL(s1))
 		{
 			*p_isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "varlena datum is compressed or external");
 			return 0;
 		}
 		len1 = bpchar_truelen(VARDATA_ANY(s1),
@@ -93,7 +96,8 @@ bpchar_compare(kern_context *kcxt,
 		if (VARATT_IS_COMPRESSED(s2) || VARATT_IS_EXTERNAL(s2))
 		{
 			*p_isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "varlena datum is compressed or external");
 			return 0;
 		}
 		len2 = bpchar_truelen(VARDATA_ANY(s2),
@@ -412,7 +416,6 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 		}
 		else
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
 		}
 	}
@@ -440,7 +443,8 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	pos = (char *)kern_context_alloc(kcxt, VARHDRSZ + len1 + len2);
 	if (!pos)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
 		result.isnull = true;
 		return result;
 	}
@@ -519,9 +523,9 @@ pgfn_text_substring(kern_context *kcxt,
 		result.isnull = true;
 	else if (arg3.value < 0)
 	{
-		/* negative substring length not allowed */
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_SUBSTRING_ERROR,
+					  "negative substring length not allowed");
 	}
 	else if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1))
 		result.isnull = true;
@@ -617,7 +621,8 @@ GetCharLowerCase(cl_char c)
 				/* ... and there had better be one, per SQL standard */	\
 				if (plen <= 0)											\
 				{														\
-					STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+					STROM_EREPORT(kcxt, ERRCODE_INVALID_ESCAPE_SEQUENCE,\
+								  "invalid escape in LIKE pattern");	\
 					return LIKE_ABORT;									\
 				}														\
 				if (GETCHAR(*p) != GETCHAR(*t))							\
@@ -682,10 +687,11 @@ GetCharLowerCase(cl_char c)
 				 */														\
 				if (*p == '\\')											\
 				{														\
-					if (plen < 0)										\
+					if (plen < 2)										\
 					{													\
-						STROM_SET_ERROR(&kcxt->e,						\
-										StromError_CpuReCheck);			\
+						STROM_EREPORT(kcxt,								\
+							ERRCODE_INVALID_ESCAPE_SEQUENCE,			\
+							"invalid escape in LIKE pattern");			\
 						return LIKE_ABORT;								\
 					}													\
 					firstpat = GETCHAR(p[1]);							\
@@ -699,8 +705,9 @@ GetCharLowerCase(cl_char c)
 					{													\
 						if (depth >= VIRTUAL_STACK_MAX_DEPTH)			\
 						{												\
-							STROM_SET_ERROR(&kcxt->e,					\
-											StromError_CpuReCheck);		\
+							STROM_CPU_FALLBACK(kcxt,					\
+								ERRCODE_STROM_RECURSION_TOO_DEEP,		\
+								"too deep recursive function call");	\
 							return LIKE_ABORT;							\
 						}												\
 						/* push values */								\

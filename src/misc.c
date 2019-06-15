@@ -205,70 +205,20 @@ bms_to_cstring(Bitmapset *x)
 const char *
 errorText(int errcode)
 {
-	static __thread char buffer[800];
-	const char	   *label;
+	static __thread char buffer[160];
+	const char *error_name;
+	const char *error_desc;
 
-	switch (errcode)
+	if (cuGetErrorName(errcode, &error_name) == CUDA_SUCCESS &&
+		cuGetErrorString(errcode, &error_desc) == CUDA_SUCCESS)
 	{
-		case StromError_Success:
-			label = "Suceess";
-			break;
-		case StromError_CpuReCheck:
-			label = "CPU ReCheck";
-			break;
-		case StromError_InvalidValue:
-			label = "Invalid Value";
-			break;
-		case StromError_DataStoreNoSpace:
-			label = "Data store no space";
-			break;
-		case StromError_WrongCodeGeneration:
-			label = "Wrong code generation";
-			break;
-		case StromError_OutOfMemory:
-			label = "Out of Memory";
-			break;
-		case StromError_DataCorruption:
-			label = "Data corruption";
-			break;
-		default:
-			if (errcode <= CUDA_ERROR_UNKNOWN)
-			{
-				const char *error_val;
-				const char *error_str;
-
-				/* Likely CUDA driver error */
-				if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
-					cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
-					snprintf(buffer, sizeof(buffer), "%s - %s",
-							 error_val, error_str);
-				else
-					snprintf(buffer, sizeof(buffer), "%d - unknown",
-							 errcode);
-			}
-			else
-			{
-				/* ??? Unknown PG-Strom error??? */
-				snprintf(buffer, sizeof(buffer),
-						 "Unexpected Error: %d",
-						 errcode);
-			}
-			return buffer;
+		snprintf(buffer, sizeof(buffer), "%s - %s",
+				 error_name, error_desc);
 	}
-	return label;
-}
-
-/*
- * errorTextKernel - string form of the kern_errorbuf
- */
-const char *
-errorTextKernel(kern_errorbuf *kerror)
-{
-	static __thread char buffer[1024];
-
-	snprintf(buffer, sizeof(buffer), "%s at %s:%d",
-			 errorText(kerror->errcode),
-			 kerror->filename, kerror->lineno);
+	else
+	{
+		snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+	}
 	return buffer;
 }
 

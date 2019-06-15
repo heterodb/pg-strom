@@ -117,7 +117,8 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -167,7 +168,8 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8, cl_double)
 			if (arg2.value == (zero))								\
 			{														\
 				result.isnull = true;								\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+				STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,		\
+							  "division by zero");					\
 			}														\
 			else													\
 			{														\
@@ -539,14 +541,21 @@ pg_inet_datum_ref(kern_context *kcxt, void *addr)
 			}
 			else
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+								   "compressed varlena datum on device");
 				result.isnull = true;
 			}
 		}
-		else if (VARATT_IS_EXTERNAL(addr) ||
-				 VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
+		else if (VARATT_IS_EXTERNAL(addr))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "external varlena datum on device");
+			result.isnull = true;
+		}
+		else if (VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
+		{
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "corrupted inet datum");
 			result.isnull = true;
 		}
 		else
@@ -563,7 +572,8 @@ pg_inet_datum_ref(kern_context *kcxt, void *addr)
 			}
 			else
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "corrupted inet datum");
 				result.isnull = true;
 			}
 		}
@@ -605,7 +615,8 @@ pg_datum_store(kern_context *kcxt,
 	res = (char *)kern_context_alloc(kcxt, vl_len);
 	if (!res)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
 		dclass = DATUM_CLASS__NULL;
 		return 0;
 	}
@@ -642,7 +653,8 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 	if (datum.value.family == PGSQL_AF_INET6)
 		return pg_hash_any((cl_uchar *)&datum.value,
 						   offsetof(inet_struct, ipaddr[16]));
-	STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
+	STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+				  "unknown inet family");
 	return 0;
 }
 
@@ -970,7 +982,8 @@ pgfn_inet_set_masklen(kern_context *kcxt, pg_inet_t arg1, pg_int4_t arg2)
 			bits = ip_maxbits(&arg1.value);
 		if (bits < 0 || bits > ip_maxbits(&arg1.value))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "inet datum corrupted");
 			result.isnull = true;
 		}
 		else
@@ -1002,7 +1015,8 @@ pgfn_cidr_set_masklen(kern_context *kcxt, pg_cidr_t arg1, pg_int4_t arg2)
 			bits = ip_maxbits(&arg1.value);
 		if (bits < 0 || bits > ip_maxbits(&arg1.value))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "inet datum corrupted");
 			result.isnull = true;
 		}
 		else
@@ -1278,7 +1292,8 @@ pgfn_inet_to_cidr(kern_context *kcxt, pg_inet_t arg1)
 		/* sanity check */
 		if (bits < 0 || bits > ip_maxbits(&arg1.value))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "inet datum corrupted");
 			result.isnull = true;
 		}
 		else
@@ -1349,7 +1364,8 @@ pgfn_inet_and(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 		if (ip_family(&arg1.value) != ip_family(&arg2.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+						  "cannot AND inet values of different sizes");
 		}
 		else
 		{
@@ -1384,7 +1400,8 @@ pgfn_inet_or(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 		if (ip_family(&arg1.value) != ip_family(&arg2.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+						  "cannot AND inet values of different sizes");
 		}
 		else
 		{
@@ -1441,7 +1458,8 @@ internal_inetpl(kern_context *kcxt, inet_struct *ip, cl_long addend)
 	if (!((addend == 0 && carry == 0) || (addend == -1 && carry == 1)))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "result is out of range");
 	}
 	else
 	{
@@ -1496,8 +1514,9 @@ pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 	{
 		if (ip_family(&arg1.value) != ip_family(&arg2.value))
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+						  "cannot subtract inet values of different sizes");
 		}
 		else
 		{
@@ -1533,7 +1552,8 @@ pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 					 */
 					if ((res < 0) ? (lobyte != 0xFF) : (lobyte != 0))
 					{
-						STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+						STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+									  "result is out of range");
 						result.isnull = true;
 						return result;
 					}
@@ -1572,11 +1592,17 @@ pgfn_inet_same_family(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
  */
 #define CHECKFLOATVAL(kerror, result, inf_is_valid, zero_is_valid)	\
 	do {															\
-		if ((isinf((result).value) && !(inf_is_valid)) ||			\
-			((result).value == 0.0 && !(zero_is_valid)))			\
+		if (isinf((result).value) && !(inf_is_valid))				\
 		{															\
 			(result).isnull = true;									\
-			STROM_SET_ERROR((kerror), StromError_CpuReCheck);		\
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,	\
+						  "value out of range: overflow");			\
+		}															\
+		if ((result).value == 0.0 && !(zero_is_valid))				\
+		{															\
+			(result).isnull = true;									\
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,	\
+						  "value out of range: underflow");			\
 		}															\
 	} while(0)
 
@@ -1637,7 +1663,8 @@ pgfn_ln(kern_context *kcxt, pg_float8_t arg1)
 		if (arg1.value <= 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_ARGUMENT_FOR_LOG,
+						  "cannot take logarithm of zero or negative number");
 		}
 		else
 		{
@@ -1661,7 +1688,8 @@ pgfn_log10(kern_context *kcxt, pg_float8_t arg1)
 		if (arg1.value <= 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_ARGUMENT_FOR_LOG,
+						  "cannot take logarithm of zero or negative number");
 		}
 		else
 		{
@@ -1726,7 +1754,8 @@ pgfn_dsqrt(kern_context *kcxt, pg_float8_t arg1)
 		if (arg1.value < 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+						  "cannot take square root of a negative number");
 		}
 		else
 		{
@@ -1745,11 +1774,17 @@ pgfn_dpow(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 
 	if (arg1.isnull || arg2.isnull)
 		result.isnull = true;
-	else if ((arg1.value == 0.0 && arg2.value < 0.0) ||
-			 (arg1.value < 0.0 && floor(arg2.value) != arg2.value))
+	else if (arg1.value == 0.0 && arg2.value < 0.0)
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+					  "zero raised to a negative power is undefined");
+	}
+	else if (arg1.value < 0.0 && floor(arg2.value) != arg2.value)
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION,
+					  "a negative number raised to a non-integer power yields a complex result");
 	}
 	else
 	{
@@ -1826,8 +1861,9 @@ pgfn_acos(kern_context *kcxt, pg_float8_t arg1)
 			result.value = DBL_NAN;
 		else if (arg1.value < -1.0 || arg1.value > 1.0)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "input is out of range");
 		}
 		else
 		{
@@ -1850,8 +1886,9 @@ pgfn_asin(kern_context *kcxt, pg_float8_t arg1)
 			result.value = DBL_NAN;
 		else if (arg1.value < -1.0 || arg1.value > 1.0)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "input is out of range");
 		}
 		else
 		{

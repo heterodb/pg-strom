@@ -95,7 +95,8 @@ gpupreagg_final_data_move(kern_context *kcxt,
 											__kds_packed(alloc_size)));
 		if (usage_slot + usage_prev + alloc_size >= kds_dst->length)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+			STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+						  "kds_final has no more space");
 			/*
 			 * NOTE: Uninitialized dst_values[] for NULL values will lead
 			 * a problem around atomic operation, because we designed 
@@ -361,9 +362,9 @@ gpupreagg_setup_row(kern_context *kcxt,
 	tup_extra  = (cl_int *)
 		kern_context_alloc(kcxt, sizeof(cl_int) * kds_slot->ncols);
 	if (!tup_dclass || !tup_values || !tup_extra)
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 	/* bailout if any errors */
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		goto skip;
 	vlbuf_base = kcxt->vlpos;
 
@@ -385,7 +386,7 @@ gpupreagg_setup_row(kern_context *kcxt,
 			rc = false;
 		}
 		/* bailout if any errors on gpupreagg_quals_eval */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			break;
 		/* allocation of kds_slot buffer, if any */
 		slot_index = pgstromStairlikeBinaryCount(rc, &nvalids);
@@ -401,7 +402,7 @@ gpupreagg_setup_row(kern_context *kcxt,
 										 tup_values);
 			}
 			/* bailout if any errors */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				break;
 
 			if (!gpupreagg_setup_common(kcxt,
@@ -477,9 +478,9 @@ gpupreagg_setup_block(kern_context *kcxt,
 	tup_extra  = (cl_int *)
 		kern_context_alloc(kcxt, sizeof(cl_int) * kds_slot->ncols);
 	if (!tup_dclass || !tup_values || !tup_extra)
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 	/* bailout if any errors */
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		goto out;
 	vlbuf_base = kcxt->vlpos;
 
@@ -536,7 +537,7 @@ gpupreagg_setup_block(kern_context *kcxt,
 				kcxt->vlpos = vlbuf_base;		/* rewind */
 			}
 			/* bailout if any errors on gpupreagg_quals_eval */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				goto out;
 			/* allocation of the kds_slot buffer */
 			slot_index = pgstromStairlikeBinaryCount(rc, &nvalids);
@@ -551,7 +552,7 @@ gpupreagg_setup_block(kern_context *kcxt,
 											 tup_values);
 				}
 				/* bailout if any errors */
-				if (__syncthreads_count(kcxt->e.errcode) > 0)
+				if (__syncthreads_count(kcxt->errcode) > 0)
 					goto out;
 
 				if (!gpupreagg_setup_common(kcxt,
@@ -635,9 +636,9 @@ gpupreagg_setup_arrow(kern_context *kcxt,
 	tup_extra  = (cl_int *)
 		kern_context_alloc(kcxt, sizeof(cl_int) * kds_slot->ncols);
 	if (!tup_dclass || !tup_values || !tup_extra)
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 	/* bailout if any errors */
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		goto skip;
 	vlbuf_base = kcxt->vlpos;
 
@@ -655,7 +656,7 @@ gpupreagg_setup_arrow(kern_context *kcxt,
 			rc = false;
 		}
 		/* Bailout if any error on gpupreagg_quals_eval_arrow */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			break;
 		/* allocation of kds_slot buffer, if any */
 		slot_index = pgstromStairlikeBinaryCount(rc ? 1 : 0, &nvalids);
@@ -670,7 +671,7 @@ gpupreagg_setup_arrow(kern_context *kcxt,
 										   tup_values);
 			}
 			/* Bailout if any error */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				break;
 			/* common portion */
 			if (!gpupreagg_setup_common(kcxt,
@@ -943,7 +944,8 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	if (curr_size > f_hash->hash_limit)
 	{
 		/* no more space to expand */
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+					  "f_hash has no more space");
 		goto out_unlock;
 	}
 
@@ -1000,7 +1002,8 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 		/* no more space to expand */
 		if (get_local_id() == 0)
 			f_hash->hash_size = UINT_MAX;
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+					  "f_hash has no more space");
 		goto out_unlock;
 	}
 	else if (curr_size >= f_hash->hash_limit / 2)
@@ -1109,7 +1112,8 @@ retry_fnext:
 	if (f_hashsize > f_hash->hash_limit)
 	{
 		/* no more space to expand */
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+					  "f_hash has no more space");
 		return false;
 	}
 	else if (f_hash->hash_usage > GLOBAL_HASHSLOT_THRESHOLD(f_hashsize))
@@ -1148,7 +1152,8 @@ retry_fnext:
 		else
 		{
 			new_slot.s.index = (cl_uint)(0xffffffffU);
-			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+			STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+						  "kds_final has no more space");
 		}
 		__threadfence();
 		/* UNLOCK */
@@ -1336,7 +1341,7 @@ clean_restart:
 		else
 			assert(l_kds_index[get_local_id()] == kds_index);
 		/* error checks */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
 
 		/* Local hash-table lookup to get owner index */
@@ -1376,7 +1381,7 @@ clean_restart:
 				else
 				{
 					index = (index + 1) % GPUPREAGG_LOCAL_HASHSIZE;
-					if (kcxt->e.errcode == StromError_Success)
+					if (kcxt->errcode == ERRCODE_STROM_SUCCESS)
 						goto lhash_next;
 				}
 			}
@@ -1384,7 +1389,7 @@ clean_restart:
 		else
 			owner_index = INT_MAX;
 		/* error checks */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
 
 		/* Local reduction for each column */
@@ -1475,7 +1480,7 @@ clean_restart:
 						atomicSub(&f_hash->lock, 2);
 				}
 				/* quick bailout on error */
-				if (__syncthreads_count(kcxt->e.errcode) > 0)
+				if (__syncthreads_count(kcxt->errcode) > 0)
 					return;
 				count = __syncthreads_count(is_owner);
 			} while (__syncthreads_count(lock_wait) > 0);

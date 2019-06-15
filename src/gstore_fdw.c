@@ -933,11 +933,20 @@ gstoreLaunchScanSortKernel(GpuContext *gcontext,
 		rc = cuStreamSynchronize(NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
-		if (kgpusort->kerror.errcode != StromError_Success)
+		if (kgpusort->kerror.errcode != ERRCODE_STROM_SUCCESS)
 		{
 			/* TODO: CPU fallback handling */
-			elog(ERROR, "GPU kernel error - %s",
-				 errorTextKernel(&kgpusort->kerror));
+			errcode(kgpusort->kerror.errcode & ~ERRCODE_FLAGS_CPU_FALLBACK);
+			elog_start(kgpusort->kerror.filename,
+					   kgpusort->kerror.lineno,
+					   kgpusort->kerror.funcname);
+			elog_finish(ERROR, "%s - %c%c%c%c%c",
+						kgpusort->kerror.message,
+						PGUNSIXBIT(kgpusort->kerror.errcode),
+						PGUNSIXBIT(kgpusort->kerror.errcode >> 6),
+						PGUNSIXBIT(kgpusort->kerror.errcode >> 12),
+						PGUNSIXBIT(kgpusort->kerror.errcode >> 18),
+						PGUNSIXBIT(kgpusort->kerror.errcode >> 24));
 		}
 		kresults = KERN_GPUSORT_RESULT_INDEX(kgpusort);
 		nitems = kresults->nitems;

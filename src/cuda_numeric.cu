@@ -175,8 +175,9 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 	len = VARSIZE_ANY_EXHDR(vl_datum);
 	if (sizeof(NumericChoice) < len)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "corrupted numeric header");
 		return result;
 	}
 	/* construct pg_numeric_t value from PostgreSQL Numeric */
@@ -197,8 +198,9 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 			if (__Int128_sign(temp) < 0)
 			{
 				/* !overflow! */
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
                 result.isnull = true;
+				STROM_CPU_FALLBACK(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+								   "too much digits for device numeric");
                 return result;
 			}
 			result.value = temp;
@@ -431,8 +433,8 @@ pg_datum_store(kern_context *kcxt,
 	res = (char *)kern_context_alloc(kcxt, sizeof(struct NumericData));
 	if (!res)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		dclass = DATUM_CLASS__NULL;
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 		return 0;
 	}
 	pg_numeric_to_varlena(res,
@@ -458,8 +460,8 @@ pg_numeric_param(kern_context *kcxt,
 		/* only uncompressed & inline datum */
 		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
 			return pg_numeric_from_varlena(kcxt, vl_val);
-
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+					  "numeric datum is compressed or external");
 	}
 	result.isnull = true;
 	return result;
@@ -509,7 +511,8 @@ numeric_to_integer(kern_context *kcxt, pg_numeric_t arg,
 	if (curr.hi != 0 || curr.lo > max_value)
 	{
 		*p_isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
 	}
 	return (!is_negative ? (cl_long)curr.lo : -((cl_long)curr.lo));
 }
@@ -651,7 +654,8 @@ pgfn_numeric_float2(kern_context *kcxt, pg_numeric_t arg)
 		if (isinf((cl_float)result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "numeric value overflow");
 		}
 	}
 	return result;
@@ -669,7 +673,8 @@ pgfn_numeric_float4(kern_context *kcxt, pg_numeric_t arg)
 		if (isinf(result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+                          "numeric value overflow");
 		}
 	}
 	return result;
@@ -687,7 +692,8 @@ pgfn_numeric_float8(kern_context *kcxt, pg_numeric_t arg)
 		if (isinf(result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "numeric value overflow");
 		}
 	}
 	return result;
@@ -1094,8 +1100,9 @@ pgfn_numeric_mul(kern_context *kcxt,
 		__umul64hi(arg1.value.hi, arg2.value.lo) != 0 ||
 		__umul64hi(arg1.value.lo, arg2.value.hi) != 0)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						   "numeric value overflow");
 		return result;
 	}
 	result.value.lo = arg1.value.lo * arg2.value.lo;

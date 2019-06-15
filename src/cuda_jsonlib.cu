@@ -137,7 +137,8 @@ __pg_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 			entry = __Fetch(&jc->children[index]);
 			if (!JBE_ISSTRING(entry))
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "corrupted jsonb entry");
 				return 0;
 			}
 			data = base + getJsonbOffset(jc, index);
@@ -176,7 +177,8 @@ __pg_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 		}
 		else
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "corrupted jsonb entry");
 			return 0;
 		}
 		hash = ((hash << 1) | (hash >> 31)) ^ temp;
@@ -281,7 +283,8 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 		vl = (varlena *)kern_context_alloc(kcxt, sz);
 		if (!vl)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+							   "out of memory");
 			res.isnull = true;
 		}
 		else
@@ -318,7 +321,8 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 	}
 	else
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "corrupted jsonb entry");
 		res.isnull = true;
 	}
 	return res;
@@ -425,7 +429,8 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 
 	if (depth > 8)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_RECURSION_TOO_DEEP,
+						   "too deep recursive function call");
 		return -1;
 	}
 
@@ -459,7 +464,8 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 			entry = __Fetch(&jc->children[index]);
 			if (!JBE_ISSTRING(entry))
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "corrupter jsonb entry");
 				return -1;
 			}
 			data = base + getJsonbOffset(jc, index);
@@ -528,7 +534,8 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 		}
 		else
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "corrupted jsonb entry");
 			return -1;
 		}
 	}
@@ -577,8 +584,8 @@ extractTextItemFromContainer(kern_context *kcxt,
 								   vl->vl_dat, kcxt->vlend);
 		if (sz < 0)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
             res.isnull = true;
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 		}
 		else
 		{
@@ -614,8 +621,8 @@ extractTextItemFromContainer(kern_context *kcxt,
 								 vl->vl_dat, kcxt->vlend, 0);
 		if (sz < 0)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			res.isnull = true;
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 		}
 		else
 		{
@@ -630,8 +637,9 @@ extractTextItemFromContainer(kern_context *kcxt,
 	}
 	else
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
 		res.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "corrupted jsonb entry");
 	}
 	return res;
 }
@@ -824,7 +832,7 @@ pgfn_jsonb_object_field_as_numeric(kern_context *kcxt,
 	if (!pg_varlena_datum_extract(kcxt, arg1, &jdata, &jlen) ||
 		!pg_varlena_datum_extract(kcxt, arg2, &kdata, &klen))
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 	}
 	else
 	{
@@ -861,7 +869,8 @@ pgfn_jsonb_object_field_as_numeric(kern_context *kcxt,
 					 * query eventually raises an error, because of value
 					 * conversion problems.
 					 */
-					STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+					STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+								  "corrupted jsonb entry");
 				}
 			}
 		}
@@ -963,7 +972,8 @@ pgfn_jsonb_array_element_as_numeric(kern_context *kcxt,
 					 * query eventually raises an error, because of value
 					 * conversion problems.
 					 */
-					STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+					STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+								  "corrupted jsonb entry");
 				}
 			}
 		}

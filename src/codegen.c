@@ -524,7 +524,7 @@ pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum)
 	 */
 	temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
 								   DatumGetPointer(datum));
-	if (dummy.e.errcode != StromError_Success)
+	if (dummy.errcode != ERRCODE_STROM_SUCCESS)
 		elog(ERROR, "failed on hash calculation of device numeric: %s",
 			 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
 

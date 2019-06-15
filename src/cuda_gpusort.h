@@ -93,7 +93,7 @@ kern_gpusort_setup_column(kern_gpusort *kgpusort,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, &kgpusort->kparams);
 	gpusort_setup_column(&u.kcxt, kgpusort, kds_src);
-	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -104,7 +104,7 @@ kern_gpusort_bitonic_local(kern_gpusort *kgpusort,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, &kgpusort->kparams);
 	gpusort_bitonic_local(&u.kcxt, kgpusort, kds_src);
-	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -117,7 +117,7 @@ kern_gpusort_bitonic_step(kern_gpusort *kgpusort,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, &kgpusort->kparams);
 	gpusort_bitonic_step(&u.kcxt, kgpusort, kds_src, unitsz, reversing);
-	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -128,7 +128,7 @@ kern_gpusort_bitonic_merge(kern_gpusort *kgpusort,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, &kgpusort->kparams);
 	gpusort_bitonic_merge(&u.kcxt, kgpusort, kds_src);
-	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpusort->kerror, &u.kcxt);
 }
 #endif	/* __CUDACC_RTC__ */
 #endif	/* CUDA_GPUSORT_H */

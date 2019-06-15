@@ -126,6 +126,17 @@ typedef struct
 		   || ((m) == JULIAN_MINMONTH && (d) >= JULIAN_MINDAY)))) \
 	 && (y) < JULIAN_MAXYEAR)
 
+/* date/timestamp limits and range-checks */
+#define DATETIME_MIN_JULIAN (0)
+#define DATE_END_JULIAN (2147483494)	/* == date2j(JULIAN_MAXYEAR, 1, 1) */
+#define TIMESTAMP_END_JULIAN (109203528) /* == date2j(294277, 1, 1) */
+#define MIN_TIMESTAMP   INT64CONST(-211813488000000000)
+#define END_TIMESTAMP   INT64CONST(9223371331200000000)
+/* Range-check a data / timestamp */
+#define IS_VALID_DATE(d) \
+	((DATETIME_MIN_JULIAN - POSTGRES_EPOCH_JDATE) <= (d) && \
+	 (d) < (DATE_END_JULIAN - POSTGRES_EPOCH_JDATE))
+#define IS_VALID_TIMESTAMP(t)  (MIN_TIMESTAMP <= (t) && (t) < END_TIMESTAMP)
 
 #define TIMESTAMP_NOBEGIN(j) \
 	do {(j) = DT_NOBEGIN;} while (0)

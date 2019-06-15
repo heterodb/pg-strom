@@ -197,8 +197,9 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		res = kern_context_alloc(kcxt, sizeof(BASE));				\
 		if (!res)													\
 		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			dclass = DATUM_CLASS__NULL;								\
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,			\
+							   "out of memory");					\
 			return 0;												\
 		}															\
 		memcpy(res, &datum.value, sizeof(BASE));					\
@@ -279,8 +280,9 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 				value  = PointerGetDatum(vl_buf);				\
 				return sizeof(pg_##NAME##_t);					\
 			}													\
-			STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);	\
 			dclass = DATUM_CLASS__NULL;							\
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,		\
+							   "out of memory");				\
 		}														\
 		return 0;												\
 	}															\
@@ -304,7 +306,8 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 			else												\
 			{													\
 				result.isnull = true;							\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
+				STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,	\
+							"varlena datum is compressed or external"); \
 			}													\
 		}														\
 		else													\
@@ -331,7 +334,8 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 		if (VARATT_IS_COMPRESSED(arg.value) ||
 			VARATT_IS_EXTERNAL(arg.value))
         {
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "compressed or external varlena on device");
 			return false;
         }
 		*s = VARDATA_ANY(arg.value);
@@ -391,7 +395,8 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 		if (VARATT_IS_COMPRESSED(datum.value) ||                \
 			VARATT_IS_EXTERNAL(datum.value))					\
 		{														\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,	\
+							   "compressed or external varlena on device");	\
 			return 0;											\
 		}														\
 		return pg_hash_any((cl_uchar *)VARDATA_ANY(datum.value), \
@@ -474,7 +479,8 @@ pg_varlena_datum_extract(kern_context *kcxt, T &arg,
 						 char *base, cl_uint rowidx)		\
 	{														\
 		result.isnull = true;								\
-		STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration); \
+		STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\
+					  "wrong code generation");				\
 	}
 
 /*

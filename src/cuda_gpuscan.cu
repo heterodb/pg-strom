@@ -86,7 +86,7 @@ gpuscan_main_row(kern_context *kcxt,
 			rc = false;
 		}
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			goto out_nostat;
 
 		/* how many rows servived WHERE-clause evaluation? */
@@ -105,7 +105,13 @@ gpuscan_main_row(kern_context *kcxt,
 				tup_values = (Datum *)
 					kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
 
-				if (tup_dclass && tup_values)
+				if (!tup_dclass || !tup_values)
+				{
+					required = 0;
+					STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+									   "out of memory");
+				}
+				else
 				{
 					gpuscan_projection_tuple(kcxt,
 											 kds_src,
@@ -119,16 +125,11 @@ gpuscan_main_row(kern_context *kcxt,
 															   tup_dclass,
 															   tup_values));
 				}
-				else
-				{
-					STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-					required = 0;
-				}
 			}
 			else
 				required = 0;
 			/* bailout if any error */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				goto out_nostat;
 
 			usage_offset = pgstromStairlikeSum(required, &extra_sz);
@@ -220,7 +221,6 @@ out_nostat:
 		my_suspend->part_index = part_index;
 		my_suspend->line_index = 0;
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, &kcxt->e);
 }
 
 /*
@@ -331,7 +331,7 @@ gpuscan_main_block(kern_context *kcxt,
 			else
 				rc = false;
 			/* bailout if any error */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				goto out_nostat;
 
 			/* how many rows servived WHERE-clause evaluations? */
@@ -349,7 +349,13 @@ gpuscan_main_block(kern_context *kcxt,
 					tup_values = (Datum *)
 						kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
 
-					if (tup_dclass && tup_values)
+					if (!tup_dclass || !tup_values)
+					{
+						required = 0;
+						STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+									  "out of memory");
+					}
+					else
 					{
 						gpuscan_projection_tuple(kcxt,
 												 kds_src,
@@ -363,11 +369,6 @@ gpuscan_main_block(kern_context *kcxt,
 																   tup_dclass,
 																   tup_values));
 					}
-					else
-					{
-						STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-						required = 0;
-					}
 				}
 				else
 				{
@@ -378,7 +379,7 @@ gpuscan_main_block(kern_context *kcxt,
 			else
 				required = 0;
 			/* bailout if any error */
-			if (__syncthreads_count(kcxt->e.errcode) > 0)
+			if (__syncthreads_count(kcxt->errcode) > 0)
 				goto out;
 
 			usage_offset = pgstromStairlikeSum(required, &extra_sz);
@@ -540,7 +541,7 @@ gpuscan_main_arrow(kern_context *kcxt,
 		else
 			rc = false;
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			goto out_nostat;
 
 		/* how many rows servived WHERE-clause evaluation? */
@@ -559,7 +560,13 @@ gpuscan_main_arrow(kern_context *kcxt,
 			tup_values = (Datum *)
 				kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
 
-			if (tup_dclass && tup_values)
+			if (!tup_dclass || !tup_values)
+			{
+				required = 0;
+				STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+							  "out of memory");
+			}
+			else
 			{
 				gpuscan_projection_arrow(kcxt,
 										 kds_src,
@@ -571,11 +578,6 @@ gpuscan_main_arrow(kern_context *kcxt,
 														   kds_dst,
 														   tup_dclass,
 														   tup_values));
-			}
-			else
-			{
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-				required = 0;
 			}
 		}
 		else
@@ -633,7 +635,7 @@ gpuscan_main_arrow(kern_context *kcxt,
 								tup_values);
 		}
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			break;
 	skip:
 		/* update statistics */

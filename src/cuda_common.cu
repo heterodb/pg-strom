@@ -622,7 +622,8 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		else
 		{
 			/* should not appear in the kernel space */
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "unsupported varlena datum on device");
 			result = 0;
 		}
 	}
@@ -936,7 +937,8 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 			break;
 		default:
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "corrupted unit-size of Arrow::Date");
 			return;
 	}
 }
@@ -959,23 +961,27 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		switch (cmeta->attopts.time.unit)
 		{
 			case ArrowTimeUnit__Second:
+				result.isnull = false;
 				result.value = *aval * 1000000L;
 				break;
 			case ArrowTimeUnit__MilliSecond:
+				result.isnull = false;
 				result.value = *aval * 1000L;
 				break;
 			case ArrowTimeUnit__MicroSecond:
+				result.isnull = false;
 				result.value = *aval;
 				break;
 			case ArrowTimeUnit__NanoSecond:
+				result.isnull = false;
 				result.value = *aval / 1000L;
 				break;
 			default:
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "corrupted unit-size of Arrow::Time");
 				return;
 		}
-		result.isnull = false;
 	}
 }
 
@@ -997,23 +1003,27 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		switch (cmeta->attopts.time.unit)
 		{
 			case ArrowTimeUnit__Second:
+				result.isnull = false;
 				result.value = *aval * 1000000L;
 				break;
 			case ArrowTimeUnit__MilliSecond:
+				result.isnull = false;
 				result.value = *aval * 1000L;
 				break;
 			case ArrowTimeUnit__MicroSecond:
+				result.isnull = false;
 				result.value = *aval;
 				break;
 			case ArrowTimeUnit__NanoSecond:
+				result.isnull = false;
 				result.value = *aval / 1000L;
 				break;
 			default:
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "corrupted unit-size of Arrow::Timestamp");
 				return;
 		}
-		result.isnull = false;
 	}
 }
 
@@ -1053,7 +1063,8 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 
 		default:
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_DataCorruption);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+						  "corrupted unit-size of Arrow::Interval");
 			break;
 	}
 }
@@ -1170,7 +1181,8 @@ pg_comp_hash(kern_context *kcxt, pg_bpchar_t datum)
 	if (VARATT_IS_COMPRESSED(datum.value) ||
 		VARATT_IS_EXTERNAL(datum.value))
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+						   "varlena datum is compressed or external");
 		return 0;
 	}
 	len = bpchar_truelen(VARDATA_ANY(datum.value),
@@ -1309,7 +1321,8 @@ pg_datum_store(kern_context *kcxt,
 			value  = PointerGetDatum(temp);
 			return sizeof(pg_array_t);
 		}
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+					  "out of memory");
 		dclass = DATUM_CLASS__NULL;
 	}
 	return 0;
@@ -1331,7 +1344,8 @@ pg_array_param(kern_context *kcxt, cl_uint param_id)
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "varlena datum is compressed or external");
 		}
 	}
 	else
@@ -1345,7 +1359,8 @@ DEVICE_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_array_t datum)
 {
 	/* we don't support to use pg_array_t for JOIN/GROUP BY key */
-	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,
+				  "wrong code generation");
 	return 0;
 }
 
@@ -1631,7 +1646,8 @@ __pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum)
 			sz = pg_bytea_array_from_arrow(kcxt,dest,smeta,base,start,end);
 			break;
 		default:
-			STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+			STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,
+						  "wrong code generation");
 			return 0;
 	}
 	return sz;
@@ -1726,8 +1742,9 @@ pg_datum_store(kern_context *kcxt,
 			value  = PointerGetDatum(temp);
 			return sizeof(pg_composite_t);
 		}
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
 		dclass = DATUM_CLASS__NULL;
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
 	}
 	return 0;
 }
@@ -1748,7 +1765,8 @@ pg_composite_param(kern_context *kcxt, cl_uint param_id)
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "varlena datum is compressed or external");
 		}
 	}
 	else
@@ -1762,7 +1780,8 @@ DEVICE_FUNCTION(cl_uint)
 pg_comp_hash(kern_context *kcxt, pg_composite_t datum)
 {
 	/* we don't support to use pg_composite_t for JOIN/GROUP BY key */
-	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,
+				  "wrong code generation");
 	return 0;
 }
 
@@ -1869,8 +1888,8 @@ __pg_composite_from_arrow(kern_context *kcxt,
 				ELEMENT_ENTRY(varchar, PG_VARCHAROID);
 				ELEMENT_ENTRY(bytea, PG_BYTEAOID);
 				default:
-					printf("typeid = %u\n", smeta->atttypid);
-					STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+					STROM_EREPORT(kcxt, ERRCODE_INVALID_COLUMN_DEFINITION,
+								  "unsupported type of sub-field");
 					tup_dclass[j] = DATUM_CLASS__NULL;
 			}
 		}
@@ -1894,7 +1913,8 @@ pg_composite_datum_length(kern_context *kcxt, Datum datum)
 		kern_context_alloc(kcxt, sizeof(Datum) * nfields);
 	if (!tup_dclass || !tup_values)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
 		kcxt->vlpos = vlpos_saved;
 		return 0;
 	}
@@ -1925,7 +1945,8 @@ pg_composite_datum_write(kern_context *kcxt, char *dest, Datum datum)
 		kern_context_alloc(kcxt, sizeof(Datum) * nfields);
 	if (!tup_dclass || !tup_values)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
 		kcxt->vlpos = vlpos_saved;
 		return 0;
 	}

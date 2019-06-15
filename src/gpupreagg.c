@@ -5370,8 +5370,9 @@ resume_kernel:
      * Clear the error code if CPU fallback case.
      * Elsewhere, update run-time statistics.
      */
-	gpreagg->task.kerror = gpreagg->kern.kerror;
-	if (gpreagg->task.kerror.errcode == StromError_Success)
+	memcpy(&gpreagg->task.kerror,
+		   &gpreagg->kern.kerror, sizeof(kern_errorbuf));
+	if (gpreagg->task.kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
 		if (gpreagg->kern.suspend_count > 0)
 		{
@@ -5389,7 +5390,7 @@ resume_kernel:
 		retval = -1;
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
-			 gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 	{
 		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 		gpreagg->task.cpu_fallback = true;
@@ -5463,6 +5464,7 @@ resume_kernel:
 	else
 	{
 		/* raise an error */
+		gpreagg->task.kerror.errcode &= ~ERRCODE_FLAGS_CPU_FALLBACK;
 		retval = 0;
 	}
 out_of_resource:
@@ -5719,10 +5721,10 @@ resume_kernel:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	if (kgjoin->kerror.errcode != StromError_Success)
+	if (kgjoin->kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
 		if (pgstrom_cpu_fallback_enabled &&
-			kgjoin->kerror.errcode == StromError_CpuReCheck)
+			(kgjoin->kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 		{
 			/*
 			 * CPU fallback without partial results - If GpuJoin reported
@@ -5753,13 +5755,14 @@ resume_kernel:
 					   kgjoin->suspend_size);
 			}
 		}
-		gpreagg->task.kerror = kgjoin->kerror;
+		memcpy(&gpreagg->task.kerror,
+			   &kgjoin->kerror, sizeof(kern_errorbuf));
 		retval = 0;
 	}
-	else if (gpreagg->kern.kerror.errcode != StromError_Success)
+	else if (gpreagg->kern.kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
 		if (pgstrom_cpu_fallback_enabled &&
-			gpreagg->kern.kerror.errcode == StromError_CpuReCheck)
+			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 		{
 			/*
 			 * CPU fallback with partial results
@@ -5806,7 +5809,8 @@ resume_kernel:
 				retval = 0;
 			}
 		}
-		gpreagg->task.kerror = gpreagg->kern.kerror;
+		memcpy(&gpreagg->task.kerror,
+			   &gpreagg->kern.kerror, sizeof(kern_errorbuf));
 	}
 	else
 	{

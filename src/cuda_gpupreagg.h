@@ -672,7 +672,7 @@ kern_gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpupreagg_setup_row(&u.kcxt, kgpreagg, kds_src, kds_slot);
-	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION(void)
@@ -685,7 +685,7 @@ kern_gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpupreagg_setup_block(&u.kcxt, kgpreagg, kds_src, kds_slot);
-	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION(void)
@@ -698,7 +698,7 @@ kern_gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpupreagg_setup_arrow(&u.kcxt, kgpreagg, kds_src, kds_slot);
-	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -718,7 +718,7 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 								kds_slot,
 								kds_final,
 								f_hash);
-	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -738,7 +738,7 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 								kds_slot,
 								kds_final,
 								f_hash);
-	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 #endif /* __CUDACC_RTC__ */
 #endif /* CUDA_GPUPREAGG_H */

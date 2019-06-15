@@ -217,7 +217,7 @@ pg_sysattr_ctid_store(kern_context *kcxt,
 				return sizeof(ItemPointerData);
 			}
 			dclass = DATUM_CLASS__NULL;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 		}
 	}
 	return 0;
@@ -703,7 +703,8 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 		if (dims[i] < 0)
 		{
 			/* negative dimension implies an error... */
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+						  "array size exceeds the limit");
 			return 0;
 		}
 		prod = (cl_long) ret * (cl_long) dims[i];
@@ -711,7 +712,8 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 		if ((cl_long) ret != prod)
 		{
 			/* array size exceeds the maximum allowed... */
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+						  "array size exceeds the limit");
 			return 0;
 		}
 	}

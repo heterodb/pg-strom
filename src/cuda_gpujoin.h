@@ -291,7 +291,7 @@ kern_gpujoin_main(kern_gpujoin *kgjoin,
 				 kparams_gpreagg,
 				 l_state,
 				 matched);
-	kern_writeback_error_status(&kgjoin->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgjoin->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION(void)
@@ -315,7 +315,7 @@ kern_gpujoin_right_outer(kern_gpujoin *kgjoin,
 						kparams_gpreagg,
 						l_state,
 						matched);
-	kern_writeback_error_status(&kgjoin->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgjoin->kerror, &u.kcxt);
 }
 
 #ifndef GPUPREAGG_COMBINED_JOIN

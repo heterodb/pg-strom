@@ -345,28 +345,35 @@ __Fetch(const T *ptr)
 /*
  * Error code definition
  *
- *           0 : Success in all error code scheme
- *    1 -  999 : Error code in CUDA driver API
- * 1000 - 9999 : Error code of PG-Strom
- *     > 10000 : Error code in CUDA device runtime
- *
- * Error code definition
+ * MEMO: SQL ERRCODE_* uses 0-29bits. We also use 30bit for a flag of
+ * CPU fallback. Host code tries CPU fallback if this flag is set and
+ * pg_strom.cpu_fallback_enabled is set.
  */
-#define StromError_Success				0		/* OK */
-#define StromError_Generic				1001	/* General error */
-#define StromError_CpuReCheck			1002	/* Re-checked by CPU */
-#define StromError_InvalidValue			1003	/* Invalid values */
-#define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
-#define StromError_WrongCodeGeneration	1005	/* Wrong GPU code generation */
-#define StromError_OutOfMemory			1006	/* Out of Memory */
-#define StromError_DataCorruption		1007	/* Data corruption */
+#ifndef MAKE_SQLSTATE
+#define PGSIXBIT(ch)		(((ch) - '0') & 0x3F)
+#define MAKE_SQLSTATE(ch1,ch2,ch3,ch4,ch5)  \
+	(PGSIXBIT(ch1) + (PGSIXBIT(ch2) << 6) + (PGSIXBIT(ch3) << 12) + \
+	 (PGSIXBIT(ch4) << 18) + (PGSIXBIT(ch5) << 24))
+#endif  /* MAKE_SQLSTATE */
+#include "utils/errcodes.h"
+#define ERRCODE_FLAGS_CPU_FALLBACK			(1U<<30)
+#define ERRCODE_STROM_SUCCESS				0
+#define ERRCODE_STROM_DATASTORE_NOSPACE		MAKE_SQLSTATE('H','D','B','0','4')
+#define ERRCODE_STROM_WRONG_CODE_GENERATION	MAKE_SQLSTATE('H','D','B','0','5')
+#define ERRCODE_STROM_DATA_CORRUPTION		MAKE_SQLSTATE('H','D','B','0','7')
+#define ERRCODE_STROM_VARLENA_UNSUPPORTED	MAKE_SQLSTATE('H','D','B','0','8')
+#define ERRCODE_STROM_RECURSION_TOO_DEEP	MAKE_SQLSTATE('H','D','B','0','9')
 
 #define KERN_ERRORBUF_FILENAME_LEN		24
+#define KERN_ERRORBUF_FUNCNAME_LEN		64
+#define KERN_ERRORBUF_MESSAGE_LEN		200
 typedef struct
 {
-	cl_int		errcode;	/* one of the StromError_* */
-	cl_int		lineno;		/* line number STROM_SET_ERROR is called */
+	cl_int		errcode;	/* one of the ERRCODE_* */
+	cl_int		lineno;
 	char		filename[KERN_ERRORBUF_FILENAME_LEN];
+	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN];
+	char		message[KERN_ERRORBUF_MESSAGE_LEN];
 } kern_errorbuf;
 
 /*
@@ -376,7 +383,11 @@ struct kern_parambuf;
 
 typedef struct
 {
-	kern_errorbuf	e;
+	cl_int			errcode;
+	const char	   *error_filename;
+	cl_int			error_lineno;
+	const char	   *error_funcname;
+	const char	   *error_message;	/* !!only const static cstring!! */
 	struct kern_parambuf *kparams;
 	cl_char		   *vlpos;
 	cl_char		   *vlend;
@@ -401,9 +412,7 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(kcxt,__kparams)							\
 	do {															\
-		(kcxt)->e.errcode = StromError_Success;						\
-		(kcxt)->e.lineno = 0;										\
-		(kcxt)->e.filename[0] = '\0';								\
+		memset(kcxt, 0, offsetof(kern_context, vlbuf));				\
 		(kcxt)->kparams = (__kparams);								\
 		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
 		(kcxt)->vlpos = (kcxt)->vlbuf;								\
@@ -435,39 +444,55 @@ kern_context_alloc(kern_context *kcxt, size_t len)
  * (Usually, due to compressed or external varlena datum)
  */
 STATIC_INLINE(void)
-__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
-				  const char *filename, cl_int lineno)
+__STROM_EREPORT(kern_context *kcxt, cl_int errcode,
+				const char *filename, cl_int lineno,
+				const char *funcname, const char *message)
 {
-	cl_int		oldcode = p_kerror->errcode;
+	cl_int		oldcode = kcxt->errcode;
 
-	if (oldcode == StromError_Success &&
-		errcode != StromError_Success)
+	if (oldcode == ERRCODE_STROM_SUCCESS &&
+		errcode != ERRCODE_STROM_SUCCESS)
 	{
 		const char *pos;
-		cl_int		fn_len;
 
 		for (pos=filename; *pos != '\0'; pos++)
 		{
 			if (pos[0] == '/' && pos[1] != '\0')
 				filename = pos + 1;
 		}
-		p_kerror->errcode = errcode;
-		p_kerror->lineno = lineno;
-
-		fn_len = Min(pos - filename, KERN_ERRORBUF_FILENAME_LEN - 1);
-		memcpy(p_kerror->filename, filename, fn_len);
-		p_kerror->filename[fn_len] = '\0';
+		if (!message)
+			message = "GPU kernel internal error";
+		kcxt->errcode  = errcode;
+		kcxt->error_filename = filename;
+		kcxt->error_lineno   = lineno;
+		kcxt->error_funcname = funcname;
+		kcxt->error_message  = message;
 	}
 }
 
-#define STROM_SET_ERROR(p_kerror, errcode)		\
-	__STROM_SET_ERROR((p_kerror), (errcode), __FILE__, __LINE__)
+#define STROM_EREPORT(kcxt, errcode, message)							\
+	__STROM_EREPORT((kcxt),(errcode),									\
+					__FILE__,__LINE__,__FUNCTION__,(message))
+#define STROM_CPU_FALLBACK(kcxt, errcode, message)						\
+	__STROM_EREPORT((kcxt),(errcode) | ERRCODE_FLAGS_CPU_FALLBACK,		\
+					__FILE__,__LINE__,__FUNCTION__,(message))
+
+STATIC_INLINE(void)
+__strncpy(char *d, const char *s, cl_uint n)
+{
+	cl_uint		i, m = n-1;
+
+	for (i=0; i < m && s[i] != '\0'; i++)
+		d[i] = s[i];
+	while (i < n)
+		d[i++] = '\0';
+}
 
 /*
  * kern_writeback_error_status
  */
 STATIC_INLINE(void)
-kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
+kern_writeback_error_status(kern_errorbuf *result, kern_context *kcxt)
 {
 	/*
 	 * It writes back a thread local error status only when the global
@@ -475,28 +500,39 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 	 * error status. Elsewhere, we don't involves any atomic operation
 	 * in the most of code path.
 	 */
-	if (my_error->errcode != StromError_Success &&
+	if (kcxt->errcode != ERRCODE_STROM_SUCCESS &&
 		atomicCAS(&result->errcode,
-				  StromError_Success,
-				  my_error->errcode) == StromError_Success)
+				  ERRCODE_STROM_SUCCESS,
+				  kcxt->errcode) == ERRCODE_STROM_SUCCESS)
 	{
-		/* only primary error workgroup can come into */
-		result->lineno = my_error->lineno;
-		memcpy(result->filename,
-			   my_error->filename,
-			   KERN_ERRORBUF_FILENAME_LEN);
+		result->errcode = kcxt->errcode;
+		result->lineno  = kcxt->error_lineno;
+		__strncpy(result->filename,
+				  kcxt->error_filename,
+				  KERN_ERRORBUF_FILENAME_LEN);
+		__strncpy(result->funcname,
+				  kcxt->error_funcname,
+				  KERN_ERRORBUF_FUNCNAME_LEN);
+		__strncpy(result->message,
+				  kcxt->error_message,
+				  KERN_ERRORBUF_MESSAGE_LEN);
 	}
 }
 #elif defined(__CUDACC__)
-#define STROM_SET_ERROR(p_kerror, errcode)			\
+#define STROM_EREPORT(kcxt, errcode, message)		\
 	do {											\
-		fprintf(stderr, "%s:%d error code=%d\n",	\
-				__FUNCTION__, __LINE__, errcode);	\
+		fprintf(stderr, "%s:%d %s (code=%d)\n",		\
+				__FUNCTION__, __LINE__,				\
+				message, errcode);					\
 		exit(1);									\
 	} while(0)
+#define STROM_CPU_FALLBACK(a,b,c)	STROM_EREPORT((a),(b),(c))
 #else /* !__CUDA_ARCH__ && !__CUDACC__ == gcc by pg_config */
-#define STROM_SET_ERROR(p_kerror, errcode)							\
-	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
+#define STROM_EREPORT(kcxt, errcode, message)		\
+	elog(ERROR, "%s:%d %s (code=%d)",				\
+		 __FUNCTION__, __LINE__,					\
+		 message, errcode)
+#define STROM_CPU_FALLBACK(a,b,c)	STROM_EREPORT((a),(b),(c))
 #endif	/* !__CUDA_ARCH__ && !__CUDACC__ */
 
 #ifndef PG_STROM_H

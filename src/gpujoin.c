@@ -4466,7 +4466,8 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
+		"    STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+		"                  \"GpuJoin: wrong code generation\");\n"
 		"    break;\n"
 		"  }\n"
 		"  return false;\n"
@@ -4517,7 +4518,8 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
+		"    STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+		"                  \"GpuJoin: wrong code generation\");\n"
 		"    break;\n"
 		"  }\n"
 		"  return (cl_uint)(-1);\n"
@@ -6078,8 +6080,9 @@ resume_kernel:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgjoin->task.kerror.errcode == StromError_Success)
+	memcpy(&pgjoin->task.kerror,
+		   &pgjoin->kern.kerror, sizeof(kern_errorbuf));
+	if (pgjoin->task.kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
 		if (pgjoin->kern.suspend_count > 0)
 		{
@@ -6102,7 +6105,7 @@ resume_kernel:
 		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
-			 pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
+			 (pgjoin->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 	{
 		/*
 		 * In case of KDS_FORMAT_BLOCK, we have to write back the kernel
@@ -6221,8 +6224,9 @@ resume_kernel:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgjoin->task.kerror.errcode == StromError_Success)
+	memcpy(&pgjoin->task.kerror,
+		   &pgjoin->kern.kerror, sizeof(kern_errorbuf));
+	if (pgjoin->task.kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
 		if (pgjoin->kern.suspend_count > 0)
 		{
@@ -6245,7 +6249,7 @@ resume_kernel:
 		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
-			 pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+			 (pgjoin->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 	{
 		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;

@@ -134,7 +134,7 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpuscan_main_row(&u.kcxt, kgpuscan, kds_src, kds_dst,
 					 GPUSCAN_HAS_DEVICE_PROJECTION);
-	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION(void)
@@ -149,7 +149,7 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpuscan_main_block(&u.kcxt, kgpuscan, kds_src, kds_dst,
 					   GPUSCAN_HAS_DEVICE_PROJECTION);
-	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt);
 }
 
 KERNEL_FUNCTION(void)
@@ -164,7 +164,7 @@ kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpuscan_main_arrow(&u.kcxt, kgpuscan, kds_src, kds_dst,
 					   GPUSCAN_HAS_DEVICE_PROJECTION);
-	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &u.kcxt);
 }
 #endif	/* __CUDACC_RTC__ */
 #endif	/* CUDA_GPUSCAN_H */

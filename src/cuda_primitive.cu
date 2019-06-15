@@ -23,11 +23,17 @@
  */
 #define CHECKFLOATVAL(kerror, result, inf_is_valid, zero_is_valid)	\
 	do {															\
-		if ((isinf((result).value) && !(inf_is_valid)) ||			\
-			((result).value == 0.0 && !(zero_is_valid)))			\
+		if (isinf((result).value) && !(inf_is_valid))				\
 		{															\
 			(result).isnull = true;									\
-			STROM_SET_ERROR((kerror), StromError_CpuReCheck);		\
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,	\
+						  "value out of range: overflow");			\
+		}															\
+		if ((result).value == 0.0 && !(zero_is_valid))				\
+		{															\
+			(result).isnull = true;									\
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,	\
+						  "value out of range: underflow");			\
 		}															\
 	} while(0)
 
@@ -53,7 +59,8 @@
 				!SAMESIGN(result.value, arg1.value))				\
 			{														\
 				result.isnull = true;								\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,\
+							  "integer out of range");				\
 			}														\
 		}															\
 		return result;												\
@@ -121,7 +128,8 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8, cl_double)
 				!SAMESIGN(result.value, arg1.value))				\
 			{														\
 				result.isnull = true;								\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,	\
+							  "integer out of range");				\
 			}														\
 		}															\
 		return result;												\
@@ -187,7 +195,8 @@ pgfn_int2mul(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 		if (temp < SHRT_MIN || temp > SHRT_MAX)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "smallint out of range");
 		}
 		else
 			result.value = (cl_short) temp;
@@ -210,7 +219,8 @@ pgfn_int24mul(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2)
 			result.value / arg2.value != arg1.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "integer out of range");
 		}
 	}
 	return result;
@@ -230,7 +240,8 @@ pgfn_int28mul(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2)
 			result.value / arg2.value != arg1.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "bigint out of range");
 		}
 	}
 	return result;
@@ -251,7 +262,8 @@ pgfn_int42mul(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 			result.value / arg1.value != arg2.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "integer out of range");
 		}
 	}
 	return result;
@@ -276,7 +288,8 @@ pgfn_int4mul(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2)
 			 result.value / arg2.value != arg1.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "integer out of range");
 		}
 	}
 	return result;
@@ -296,7 +309,8 @@ pgfn_int48mul(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2)
 			result.value / arg2.value != arg1.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "bigint out of range");
 		}
 	}
 	return result;
@@ -316,7 +330,8 @@ pgfn_int82mul(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 			result.value / arg1.value != arg2.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "bigint out of range");
 		}
 	}
 	return result;
@@ -336,7 +351,8 @@ pgfn_int84mul(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2)
 			result.value / arg1.value != arg2.value)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "bigint out of range");
 		}
 	}
 	return result;
@@ -359,7 +375,8 @@ pgfn_int8mul(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 			  result.value / arg2.value != arg1.value)))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+						  "bigint out of range");
 		}
 	}
 	return result;
@@ -532,7 +549,8 @@ pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -540,7 +558,8 @@ pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "smallint out of range");
 			}
 		}
 		else
@@ -560,7 +579,8 @@ pgfn_int24div(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-            STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 			result.value = (cl_int) arg1.value / arg2.value;
@@ -579,7 +599,8 @@ pgfn_int28div(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-            STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+                          "division by zero");
 		}
 		else
 			result.value = (cl_long) arg1.value / arg2.value;
@@ -598,7 +619,8 @@ pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -606,7 +628,8 @@ pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "integer out of range");
 			}
 		}
 		else
@@ -626,7 +649,8 @@ pgfn_int4div(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -634,7 +658,8 @@ pgfn_int4div(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "integer out of range");
 			}
 		}
 		else
@@ -654,7 +679,8 @@ pgfn_int48div(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+                          "division by zero");
 		}
 		else
 			result.value = (cl_long) arg1.value / arg2.value;
@@ -673,7 +699,8 @@ pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -681,7 +708,8 @@ pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "bigint out of range");
 			}
 		}
 		else
@@ -701,7 +729,8 @@ pgfn_int84div(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -709,7 +738,8 @@ pgfn_int84div(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "bigint out of range");
 			}
 		}
 		else
@@ -729,7 +759,8 @@ pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 		if (arg2.value == 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else if (arg2.value == -1)
 		{
@@ -737,7 +768,8 @@ pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
 			{
 				result.isnull = true;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "bigint out of range");
 			}
 		}
 		else
@@ -759,7 +791,8 @@ pgfn_float2div(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
 		if (value2 == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -785,7 +818,8 @@ pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -810,7 +844,8 @@ pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -835,7 +870,8 @@ pgfn_float42div(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
 		if (value2 == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -859,7 +895,8 @@ pgfn_float4div(kern_context *kcxt, pg_float4_t arg1, pg_float4_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -883,7 +920,8 @@ pgfn_float48div(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -908,7 +946,8 @@ pgfn_float82div(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2)
 		if (value2 == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -932,7 +971,8 @@ pgfn_float84div(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -956,7 +996,8 @@ pgfn_float8div(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 		if (arg2.value == 0.0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
 		}
 		else
 		{
@@ -985,7 +1026,8 @@ pgfn_float8div(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 			if (arg2.value == 0)									\
 			{														\
 				result.isnull = true;								\
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+				STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,		\
+							  "division by zero");					\
 			}														\
 			else if (arg2.value == -1)								\
 				result.value = 0;									\

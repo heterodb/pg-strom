@@ -942,6 +942,12 @@ date2timestamptz(kern_context *kcxt, pg_date_t arg)
 		result.isnull = false;
 		TIMESTAMP_NOEND(result.value);
 	}
+	else if (arg.value >= (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+	{
+		result.isnull = false;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "date out of range for timestamp");
+	}
 	else
 	{
         j2date(arg.value + POSTGRES_EPOCH_JDATE,
@@ -953,11 +959,12 @@ date2timestamptz(kern_context *kcxt, pg_date_t arg)
 
 		result.isnull = false;
 		result.value = arg.value * USECS_PER_DAY + tz * USECS_PER_SEC;
-        /* Date's range is wider than timestamp's, so check for overflow */
-        if ((result.value - tz * USECS_PER_SEC) / USECS_PER_DAY != arg.value)
+
+		if (!IS_VALID_TIMESTAMP(result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+						  "date out of range for timestamp");
 		}
 	}
 	return result;
@@ -989,7 +996,8 @@ timestamp2timestamptz(kern_context *kcxt, pg_timestamp_t arg)
 	else if (!timestamp2tm(arg.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp out of range");
 	}
 	else
 	{
@@ -997,7 +1005,8 @@ timestamp2timestamptz(kern_context *kcxt, pg_timestamp_t arg)
 		if (!tm2timestamp(&tm, fsec, &tz, &result.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+						  "timestamp out of range");
 		}
 		else
 		{
@@ -1132,7 +1141,8 @@ pgfn_timestamp_date(kern_context *kcxt, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp out of range");
 	}
 	else
 	{
@@ -1169,7 +1179,8 @@ pgfn_timestamptz_date(kern_context *kcxt, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp with timezone out of range");
 	}
 	else
 	{
@@ -1209,7 +1220,8 @@ pgfn_timestamp_time(kern_context *kcxt, pg_timestamp_t arg1)
 	else if (!timestamp2tm(arg1.value, NULL, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp out of range");
 	}
 	else
 	{
@@ -1238,7 +1250,8 @@ pgfn_timestamptz_time(kern_context *kcxt, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp with timezone out of range");
 	}
 	else
 	{
@@ -1292,9 +1305,9 @@ pgfn_timestamptz_timetz(kern_context *kcxt, pg_timestamptz_t arg1)
 		result.isnull = true;
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL) != 0)
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp with timezone out of range");
 	}
 	else
 	{
@@ -1345,17 +1358,17 @@ pgfn_date_timestamp(kern_context *kcxt, pg_date_t arg1)
 		result.isnull = false;
 		TIMESTAMP_NOEND(result.value);
 	}
+	else if (arg1.value >= (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "date out of range for timestamp");
+	}
 	else
 	{
 		/* date is days since 2000, timestamp is microseconds since same... */
 		result.isnull = false;
 		result.value = arg1.value * USECS_PER_DAY;
-		/* Date's range is wider than timestamp's, so check for overflow */
-		if (result.value / USECS_PER_DAY != arg1.value)
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
 	}
 	return result;
 }
@@ -1380,12 +1393,14 @@ pgfn_timestamptz_timestamp(kern_context *kcxt, pg_timestamptz_t arg1)
 	else if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp out of range");
 	}
 	else if (!tm2timestamp(&tm, fsec, NULL, &result.value))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "timestamp out of range");
 	}
 	else
 	{
@@ -1533,7 +1548,8 @@ pgfn_date_mi(kern_context *kcxt, pg_date_t arg1, pg_date_t arg2)
 	else if (DATE_NOT_FINITE(arg1.value) || DATE_NOT_FINITE(arg2.value))
 	{
 		result.isnull = true;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "cannot subtract infinite dates");
 	}
 	else
 	{
@@ -1599,8 +1615,9 @@ pgfn_timestamp_mi(kern_context *kcxt, pg_timestamp_t arg1, pg_timestamp_t arg2)
 	else if (TIMESTAMP_NOT_FINITE(arg1.value) || 
 			 TIMESTAMP_NOT_FINITE(arg2.value))
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "cannot subtract infinite timestamps");
 	}
 	else 
 	{
@@ -1695,9 +1712,9 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 
 			if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 			{
-				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp with timezone out of range");
 				return result;
 			}
 
@@ -1720,9 +1737,9 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 			tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
 			if (tm2timestamp(&tm, fsec, &tz, &arg1.value) != 0)
 			{
-				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp with timezone out of range");
 				return result;
 			}
 		}
@@ -1736,9 +1753,9 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 
 			if (!timestamp2tm(arg1.value, &tz, &tm, &fsec, NULL))
 			{
-				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp with timezone out of range");
 				return result;
 			}
 
@@ -1750,9 +1767,9 @@ pgfn_timestamptz_pl_interval(kern_context *kcxt,
 			tz = DetermineTimeZoneOffset(&tm, &session_timezone_state);
 			if (!tm2timestamp(&tm, fsec, &tz, &arg1.value))
 			{
-				// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE;
-				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp with timezone out of range");
 				return result;
 			}
 		}
@@ -1791,26 +1808,26 @@ pgfn_interval_um(kern_context *kcxt, pg_interval_t arg1)
 	/* overflow check copied from int4um */
 	if (arg1.value.time != 0 && SAMESIGN(result.value.time, arg1.value.time))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.value.day = - arg1.value.day;
 	if (arg1.value.day != 0 && SAMESIGN(result.value.day, arg1.value.day))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.value.month = - arg1.value.month;
 	if (arg1.value.month != 0 &&
 		SAMESIGN(result.value.month, arg1.value.month))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.isnull = false;
@@ -1834,27 +1851,27 @@ pgfn_interval_pl(kern_context *kcxt, pg_interval_t arg1, pg_interval_t arg2)
 	if (SAMESIGN(arg1.value.month, arg2.value.month) &&
 		!SAMESIGN(result.value.month, arg1.value.month))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.value.day = arg1.value.day + arg2.value.day;
 	if (SAMESIGN(arg1.value.day, arg2.value.day) &&
 		!SAMESIGN(result.value.day, arg1.value.day))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.value.time = arg1.value.time + arg2.value.time;
 	if (SAMESIGN(arg1.value.time, arg2.value.time) &&
 		!SAMESIGN(result.value.time, arg1.value.time))
 	{
-		// ERRCODE_DATETIME_VALUE_OUT_OF_RANGE
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+					  "interval out of range");
 		return result;
 	}
 	result.isnull = false;
@@ -3292,8 +3309,9 @@ NonFiniteTimestampTzPart(kern_context *kcxt,
 
 	if (type != UNITS && type != RESERV)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+					  "not recognized timestamp units");
 		return result;
 	}
 
@@ -3332,7 +3350,8 @@ NonFiniteTimestampTzPart(kern_context *kcxt,
 
 		default:
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+						  "unsupported timestamp unit");
 			break;
 	}
 	return result;
@@ -3364,7 +3383,13 @@ pgfn_extract_timestamp(kern_context *kcxt,
 			fsec_t		fsec;
 			struct pg_tm  tm;
 
-			if (timestamp2tm(arg2.value, NULL, &tm, &fsec, NULL))
+			if (!timestamp2tm(arg2.value, NULL, &tm, &fsec, NULL))
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp out of range");
+			}
+			else
 			{
 				switch (val)
 				{
@@ -3471,9 +3496,13 @@ pgfn_extract_timestamp(kern_context *kcxt,
 					case DTK_TZ_MINUTE:
 					case DTK_TZ_HOUR:
 					default:
+						result.isnull = true;
+						STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									  "unsupported unit of timestamp");
 						break;
 				}
 			}
+			return result;
 		}
 		else if (type == RESERV)
 		{
@@ -3485,12 +3514,19 @@ pgfn_extract_timestamp(kern_context *kcxt,
 					result.value = (arg2.value - epoch) / 1000000.0;
 				else
 					result.value = ((double)arg2.value - epoch) / 1000000.0;
-				return result;
 			}
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+							  "unsupported unit of timestamp");
+			}
+			return result;
 		}
 	}
-	STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	result.isnull = true;
+	STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+				  "not recognized unit of timestamp");
 	return result;
 }
 
@@ -3522,7 +3558,13 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 			struct pg_tm  tm;
 			double		dummy;
 
-			if (timestamp2tm(arg2.value, &tz, &tm, &fsec, NULL))
+			if (!timestamp2tm(arg2.value, &tz, &tm, &fsec, NULL))
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+							  "timestamp with timezone out of range");
+			}
+			else
 			{
 				switch (val)
 				{
@@ -3643,9 +3685,13 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 						return result;
 
 					default:
+						result.isnull = true;
+						STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									  "unsupported unit of timestamp with timezone");
 						break;
 				}
 			}
+			return result;
 		}
 		else if (type == RESERV)
 		{
@@ -3657,12 +3703,19 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 					result.value = (arg2.value - epoch) / 1000000.0;
 				else
 					result.value = ((double)arg2.value - epoch) / 1000000.0;
-				return result;
 			}
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+							  "unsupported unit of timestamp with timezone");
+			}
+			return result;
 		}
 	}
-	STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	result.isnull = true;
+	STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+				  "not recognized unit of timestamp");
 	return result;
 }
 
@@ -3732,8 +3785,17 @@ pgfn_extract_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
 						result.value = tm.tm_year / 1000;
 						return result;
 					default:
+						result.isnull = true;
+						STROM_EREPORT(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									  "unsupported unit of interval");
 						break;
 				}
+			}
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_INTERNAL_ERROR,
+							  "could not convert interval to tm");
 			}
 		}
 		else if (type == RESERV && val == DTK_EPOCH)
@@ -3747,8 +3809,9 @@ pgfn_extract_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
 			return result;
 		}
 	}
-	STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	result.isnull = true;
+	STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+				  "unrecognized parameter of interval");
 	return result;
 }
 
@@ -3809,6 +3872,9 @@ pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
 				case DTK_MILLENNIUM:
 				case DTK_ISOYEAR:
 				default:
+					result.isnull = true;
+					STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+								  "unsupported unit of time");
 					break;
 			}
 		}
@@ -3818,9 +3884,9 @@ pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
 			return result;
 		}
 	}
-	/* elsewhere, it is an error */
-	STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	result.isnull = true;
+	STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+				  "not a recognized unit of time");
 	return result;
 }
 
@@ -3881,6 +3947,9 @@ pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 				case DTK_MILLENNIUM:
 				case DTK_ISOYEAR:
 				default:
+					result.isnull = true;
+					STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+								  "unsupported unit of time");
 					break;
 			}
 		}
@@ -3890,7 +3959,8 @@ pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 			return result;
 		}
 	}
-	STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	result.isnull = true;
+    STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+                  "not a recognized unit of time");
 	return result;
 }

@@ -596,6 +596,7 @@ __thread cl_int			GpuWorkerIndex = -1;
 
 void
 GpuContextWorkerReportError(int elevel,
+							int errcode,
 							const char *filename, int lineno,
 							const char *funcname,
 							const char *fmt, ...)
@@ -605,32 +606,27 @@ GpuContextWorkerReportError(int elevel,
 	va_list		va_args;
 
 	Assert(gcontext != NULL);
-	Assert(elevel != 0);
-	if (elevel >= Min(ERROR, log_min_messages))
-	{
-		va_start(va_args, fmt);
-		vfprintf(stderr, fmt, va_args);
-		va_end(va_args);
-		fputc('\n', stderr);
-	}
-	if (elevel < ERROR)
-		return;
-
+	Assert(elevel >= ERROR);
 	if (pg_atomic_compare_exchange_u32(&gcontext->error_level,
 									   &expected, (uint32)(2 * elevel + 1)))
 	{
+		const char *slash;
+
+		slash = strrchr(filename,'/');
+		if (slash)
+			filename = slash + 1;
+
+		gcontext->error_code		= errcode;
 		gcontext->error_filename	= filename;
 		gcontext->error_lineno		= lineno;
 		gcontext->error_funcname	= funcname;
 		va_start(va_args, fmt);
 		vsnprintf(gcontext->error_message,
-				  sizeof(gcontext->error_message),
-				  fmt, va_args);
+				  sizeof(gcontext->error_message), fmt, va_args);
 		va_end(va_args);
 		/* unlock error information */
 		pg_atomic_fetch_and_u32(&gcontext->error_level, 0xfffffffeU);
 	}
-
 	if (GpuWorkerExceptionStack)
 		siglongjmp(*GpuWorkerExceptionStack, 1);
 }
@@ -731,16 +727,17 @@ GpuContextWorkerMain(void *arg)
 						pthreadMutexUnlock(gcontext->mutex);
 					}
 				}
-				else if (gtask->kerror.errcode != StromError_Success)
+				else if (gtask->kerror.errcode != ERRCODE_STROM_SUCCESS)
 				{
 					/* GPU kernel completed with error status */
 					GpuContextWorkerReportError(
 						ERROR,
+						gtask->kerror.errcode & ~ERRCODE_FLAGS_CPU_FALLBACK,
 						gtask->kerror.filename,
 						gtask->kerror.lineno,
-						"kernel function", //gtask->kerror.funcname
-						"GPU kernel error - %s",
-						errorTextKernel(&gtask->kerror));
+						gtask->kerror.funcname,
+						"GPU kernel: %s",
+						gtask->kerror.message);
 				}
 				else if (retval == 0)
 				{

@@ -44,7 +44,7 @@ gpusort_setup_column(kern_context *kcxt,
 		else
 			retval = false;
 		/* bailout if any error */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			break;
 		offset = pgstromStairlikeSum(retval ? 1 : 0, &count);
 		if (get_local_id() == 0 && count > 0)

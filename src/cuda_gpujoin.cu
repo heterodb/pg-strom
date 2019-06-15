@@ -268,7 +268,7 @@ gpujoin_load_source(kern_context *kcxt,
 		assert(wip_count[0] == 0);
 	}
 	/* error checks */
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;
 	/* statistics */
 	count = __syncthreads_count(t_offset != UINT_MAX);
@@ -455,8 +455,8 @@ gpujoin_projection_row(kern_context *kcxt,
 	tup_values = (Datum *)
 		kern_context_alloc(kcxt, sizeof(Datum) * kds_dst->ncols);
 	if (!tup_dclass || !tup_values)
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;		/* bailout GpuJoin */
 
 	/* pick up combinations from the pseudo-stack */
@@ -487,7 +487,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	else
 		required = 0;
 
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;		/* bailout */
 
 	/* step.2 - increments nitems/usage of the kds_dst */
@@ -549,7 +549,7 @@ gpujoin_projection_row(kern_context *kcxt,
 							tup_dclass,
 							tup_values);
 	}
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;	/* bailout */
 
 	/* step.4 - make advance the read position */
@@ -609,8 +609,8 @@ gpujoin_projection_slot(kern_context *kcxt,
 	tup_extras = (cl_uint *)
 		kern_context_alloc(kcxt, sizeof(cl_uint) * kds_dst->ncols);
 	if (!tup_dclass || !tup_values || !tup_extras)
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfMemory);
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;		/* bailout GpuJoin */
 
 	/* pick up combinations from the pseudo-stack */
@@ -721,7 +721,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 								  dst_values);
 		kcxt->kparams = kparams_saved;
 	}
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;	/* bailout */
 
 	/* step.4 - make advance the read position */
@@ -1182,7 +1182,7 @@ gpujoin_main(kern_context *kcxt,
 		}
 		if (get_local_id() == 0)
 			depth_thread0 = depth;
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
 		assert(depth_thread0 == depth);
 	}
@@ -1352,7 +1352,7 @@ gpujoin_right_outer(kern_context *kcxt,
 		}
 		if (get_local_id() == 0)
 			depth_thread0 = depth;
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
+		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
 		assert(depth == depth_thread0);
 	}

@@ -311,7 +311,7 @@ __Int128_div(Int128_t x, cl_long a, cl_long *p_mod)
  * within 128bit fixed-point number; that is compatible to Decimal type in
  * Apache Arrow.
  * Internal data format (pg_numeric_t) has 128bit value and precision (16bit).
- * Function that handles NUMERIC data type may set StromError_CpuReCheck,
+ * Function that handles NUMERIC data type can aise CPU-FALLBACKed error,
  * if it detects overflow during calculation.
  */
 #ifndef PG_NUMERIC_TYPE_DEFINED

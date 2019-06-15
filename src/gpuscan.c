@@ -710,7 +710,8 @@ codegen_gpuscan_projection(StringInfo kern,
 			"                         cl_char *tup_dclass,\n"
 			"                         Datum *tup_values)\n"
 			"{\n"
-			"  STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
+			"  STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+			"                \"GpuScan: wrong code generation\");\n"
 			"}\n"
 			"\n"
 			"DEVICE_FUNCTION(void)\n"
@@ -2687,8 +2688,9 @@ resume_kernel:
 	nitems_out = gscan->kern.nitems_out;
 	extra_size = gscan->kern.extra_size;
 
-	gscan->task.kerror = ((kern_gpuscan *)m_gpuscan)->kerror;
-	if (gscan->task.kerror.errcode == StromError_Success)
+	memcpy(&gscan->task.kerror,
+		   &((kern_gpuscan *)m_gpuscan)->kerror, sizeof(kern_errorbuf));
+	if (gscan->task.kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
 		GpuScanState	   *gss = (GpuScanState *)gscan->task.gts;
 		GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
@@ -2762,7 +2764,7 @@ resume_kernel:
 	else
 	{
 		if (pgstrom_cpu_fallback_enabled &&
-			gscan->task.kerror.errcode == StromError_CpuReCheck)
+			(gscan->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 		{
 			/*
 			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer

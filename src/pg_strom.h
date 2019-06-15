@@ -247,6 +247,7 @@ typedef struct GpuContext
 	dlist_head		gm_hostmem_list;	/* list of Host memory segments */
 	/* error information buffer */
 	pg_atomic_uint32 error_level;
+	int				error_code;
 	const char	   *error_filename;
 	int				error_lineno;
 	const char	   *error_funcname;
@@ -762,10 +763,11 @@ extern __thread int				GpuWorkerIndex;
 	(GpuWorkerCurrentContext->cuda_events1[GpuWorkerIndex])
 
 extern void GpuContextWorkerReportError(int elevel,
-										const char *filename, int lineno,
+										int errcode,
+										const char *__filename, int lineno,
 										const char *funcname,
 										const char *fmt, ...)
-	pg_attribute_printf(5,6);
+	pg_attribute_printf(6,7);
 
 static inline void
 CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
@@ -782,10 +784,15 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 			pg_usleep(1000L);
 			error_level = pg_atomic_read_u32(&gcontext->error_level);
 		}
-		elog_start(gcontext->error_filename,
-				   gcontext->error_lineno,
-				   gcontext->error_funcname);
-		elog_finish(error_level / 2, "%s", gcontext->error_message);
+		if (errstart(error_level / 2,
+					 gcontext->error_filename,
+					 gcontext->error_lineno,
+					 gcontext->error_funcname, NULL))
+		{
+			errcode(gcontext->error_code);
+			errmsg("%s", gcontext->error_message);
+			errfinish(0);
+		}
 	}
 	CHECK_FOR_INTERRUPTS();
 }
@@ -873,23 +880,24 @@ extern void pgstrom_init_gpu_context(void);
 	do {																\
 		if (!GpuWorkerCurrentContext)									\
 			elog((elevel), fmt, ##__VA_ARGS__);							\
+		else if ((elevel) < ERROR)										\
+		{																\
+			if ((elevel) >= log_min_messages)							\
+				fprintf(stderr, "%s: " fmt " (%s:%d)\n",				\
+						(elabel), ##__VA_ARGS__,						\
+						__FILE__, __LINE__);							\
+		}																\
 		else															\
 		{																\
-			const char *__fname = strrchr(__FILE__,'/');				\
-			__fname = (__fname ? __fname + 1 : __FILE__);				\
 			GpuContextWorkerReportError((elevel),						\
-										__fname, __LINE__,				\
+										ERRCODE_INTERNAL_ERROR,			\
+										__FILE__, __LINE__,				\
 										PG_FUNCNAME_MACRO,				\
-										"%s: (%s:%d) " fmt "\n",		\
-										(elabel), __fname, __LINE__,	\
-										##__VA_ARGS__);					\
-			if ((elevel) >= ERROR)										\
-				pg_unreachable();										\
+										fmt, ##__VA_ARGS__);			\
+			pg_unreachable();											\
 		}																\
 	} while(0)
 
-#define wdebug(fmt,...)							\
-	STROM_REPORT_ERROR(DEBUG2,"Debug",fmt,##__VA_ARGS__)
 #define wlog(fmt,...)							\
 	STROM_REPORT_ERROR(LOG,"Log",fmt,##__VA_ARGS__)
 #define wnotice(fmt,...)						\
@@ -1398,7 +1406,6 @@ extern char get_func_prokind(Oid funcid);
 extern int	get_relnatts(Oid relid);
 extern char *bms_to_cstring(Bitmapset *x);
 extern const char *errorText(int errcode);
-extern const char *errorTextKernel(kern_errorbuf *kerror);
 
 /*
  * nvrtc.c

@@ -74,7 +74,8 @@
 			VARATT_IS_COMPRESSED(addr))								\
 		{															\
 			result.isnull = true;									\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			STROM_CPU_FALLBACK(kcxt,ERRCODE_STROM_VARLENA_UNSUPPORTED,\
+							   "compressed or external varlena");	\
 			return result;											\
 		}															\
 		flags = *((char *)addr + VARSIZE_ANY(addr) - sizeof(char));	\
@@ -82,7 +83,8 @@
 		if (type_oid != PG_TYPEOID)									\
 		{															\
 			result.isnull = true;									\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,				\
+						  "corrupted range type");					\
 			return result;											\
 		}															\
 		pos = VARDATA_ANY(addr) + sizeof(cl_uint);					\
@@ -151,8 +153,9 @@
 		res = kern_context_alloc(kcxt, sizeof(*res));				\
 		if (!res)													\
 		{															\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
 			isnull = true;											\
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,			\
+							   "out of memory");					\
 			return 0;												\
 		}															\
 		flags = ((datum.value.l.infinite  ? RANGE_LB_INF : 0) |		\
@@ -953,7 +956,8 @@ pgfn_generic_range_union(kern_context *kcxt,
 			!__range_adjacent_internal(&arg1.value, &arg2.value))
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_EXCEPTION,
+						  "result of range union would not be contiguous");
 		}
 		else
 		{
@@ -1056,7 +1060,8 @@ pgfn_generic_range_minus(kern_context *kcxt,
 		if (cmp_l1l2 < 0 && cmp_u1u2 > 0)
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_DATA_EXCEPTION,
+						"result of range difference would not be contiguous");
 		}
 		else if (cmp_l1u2 > 0 || cmp_u1l2 < 0)
 		{
@@ -1084,10 +1089,10 @@ pgfn_generic_range_minus(kern_context *kcxt,
 		else
 		{
 			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			STROM_EREPORT(kcxt, ERRCODE_INTERNAL_ERROR,
+						  "unexpected case in range_minus");
 		}
 	}
 	return result;
 }
-
 #endif	/* CUDA_RANGETYPES_H */
