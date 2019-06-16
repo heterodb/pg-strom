@@ -2,11 +2,11 @@
 --- Micro test cases for date & time operators / functions
 ---
 SET client_min_messages = error;
-DROP SCHEMA IF EXISTS regtest_dtype_datetime_temp CASCADE;
-CREATE SCHEMA regtest_dtype_datetime_temp;
+DROP SCHEMA IF EXISTS regtest_dtype_time_temp CASCADE;
+CREATE SCHEMA regtest_dtype_time_temp;
 RESET client_min_messages;
 
-SET search_path = regtest_dtype_datetime_temp,public;
+SET search_path = regtest_dtype_time_temp,public;
 CREATE TABLE rt_datetime (
   id      int,
   d1      date,
@@ -857,4 +857,4 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
 
 -- cleanup temporary resource
 SET client_min_messages = error;
-DROP SCHEMA regtest_dtype_datetime_temp CASCADE;
+DROP SCHEMA regtest_dtype_time_temp CASCADE;
