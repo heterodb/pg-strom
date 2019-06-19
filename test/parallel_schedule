@@ -6,6 +6,13 @@
 # ----------
 
 # ----------
+# Setup test database
+#
+# note: It will fail if database is not initialized yet. Please ignore.
+# ----------
+test: init_regress
+
+# ----------
 # Check default parameter setting
 # ----------
 test: pgstrom_guc
@@ -13,7 +20,7 @@ test: pgstrom_guc
 # ----------
 # Test for each data types
 # ----------
-test: dtype_int dtype_float dtype_numeric dtype_time
+test: dtype_int dtype_float dtype_numeric dtype_time dtype_text
 
 # ----------
 # Test for various functions / expressions

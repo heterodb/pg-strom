@@ -214,15 +214,17 @@ EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
 #
 USE_MODULE_DB := 1
 REGRESS := --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/pgstrom_init_regress.sql
+REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/sql/init_regress.sql
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
 REGRESS_REVISION := 20190608
-REGRESS_REVISION_QUERY := 'SELECT public.pgstrom_regression_test_revision() = $(REGRESS_REVISION)'
+REGRESS_REVISION_QUERY := 'SELECT pgstrom.regression_testdb_revision() = $(REGRESS_REVISION)'
 REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --outputdir=$(STROM_BUILD_ROOT)/test \
-               --use-existing \
-               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
-REGRESS_PREP = init_pgstrom_regtest $(TESTAPP_LARGEOBJECT)
+               --encoding=UTF-8 \
+               --load-extension=pg_strom \
+               --launcher="env PGDATABASE=$(REGRESS_DBNAME)" \
+               $(shell test "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" = "t" && echo "--use-existing")
+REGRESS_PREP = $(SSBM_DBGEN) $(TESTAPP_LARGEOBJECT) $(REGRESS_INIT_SQL)
 
 #
 # Build chain of PostgreSQL
@@ -254,14 +256,9 @@ $(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)
 #
 # initial setup of regression test
 #
-init_pgstrom_regtest: $(SSBM_DBGEN)
-	@if [ "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" != "t" ]; \
-	then \
-        SSBM_DBGEN_FULLPATH="`pwd`/$(SSBM_DBGEN)"; \
-		$(PSQL) -f $(REGRESS_INIT_SQL) $(REGRESS_DBNAME) \
-                -v SSBM_DBGEN="$${SSBM_DBGEN_FULLPATH}" || exit 1   \
-		echo "regression test database '$(REGRESS_DBNAME)' initialized"; \
-	fi
+$(REGRESS_INIT_SQL): $(REGRESS_INIT_SQL:.sql=.in)
+	sed -e 's|@@PGSTROM_REGRESS_REVISION@@|$(REGRESS_REVISION)|g' \
+        -e 's|@@PGSTROM_SSBM_DBGEN@@|$(SSBM_DBGEN)|g' < $< > $@
 
 #
 # Build documentation

@@ -38,10 +38,9 @@ static cl_uint pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
 /* callback to handle special cases of device cast */
-static bool  devcast_text2numeric_callback(codegen_context *context,
-										   devcast_info *dcast,
-										   CoerceViaIO *node,
-										   cl_int *p_varlena_sz);
+static int	devcast_text2numeric_callback(codegen_context *context,
+										  devcast_info *dcast,
+										  CoerceViaIO *node);
 
 /*
  * Catalog of data types supported by device code
@@ -726,56 +725,54 @@ pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum)
  * varlena buffer estimation handler
  */
 static int
-vlbuf_estimate_textcat(devfunc_info *dfunc, Expr **args, int *vl_width)
+vlbuf_estimate_textcat(codegen_context *context,
+					   devfunc_info *dfunc,
+					   Expr **args, int *vl_width)
 {
 	int		i, maxlen = 0;
 
 	for (i=0; i < 2; i++)
 	{
-		Expr   *str = args[i];
-	retry:
-		if (IsA(str, Const))
-		{
-			Const  *con = (Const *) str;
-
-			if (!con->constisnull)
-				maxlen += VARSIZE_ANY_EXHDR(con);
-		}
-		else
-		{
-			int		typmod = exprTypmod((Node *) str);
-
-			if (typmod >= VARHDRSZ)
-				maxlen += (typmod - VARHDRSZ);
-			else if (IsA(str, FuncExpr) ||
-					 IsA(str, OpExpr) ||
-					 IsA(str, DistinctExpr))
-				maxlen += vl_width[i];
-			else if (IsA(str, RelabelType))
-			{
-				str = ((RelabelType *) str)->arg;
-				goto retry;
-			}
-			else
-			{
-				/*
-				 * Even though table statistics tell us 'average length' of
-				 * the values, we have no information about 'maximum length'
-				 * or 'standard diviation'. So, it may cause CPU recheck and
-				 * performance slowdown, if we try textcat on the device.
-				 * To avoid the risk, simply, we prohibit the operation.
-				 */
-				return -1;
-			}
-		}
+		if (vl_width[i] < 0)
+			elog(ERROR, "unable to combine two strings uncertain length");
+		maxlen += vl_width[i];
 	}
+	/* it consumes varlena buffer on run-time */
+	context->varlena_bufsz += MAXALIGN(maxlen + VARHDRSZ);
+
 	return maxlen;
 }
 
 static int
-vlbuf_estimate_jsonb(devfunc_info *dfunc, Expr **args, int *vl_width)
+vlbuf_estimate_substring(codegen_context *context,
+						 devfunc_info *dfunc,
+						 Expr **args, int *vl_width)
 {
-	return 2000;
+	if (list_length(dfunc->func_args) > 2 &&
+		IsA(args[2], Const))
+	{
+		Const  *con = (Const *)args[2];
+
+		Assert(con->consttype == INT4OID);
+		if (con->constisnull)
+			return 0;
+		return Max(DatumGetInt32(con->constvalue), 0);
+	}
+	return vl_width[0];
+}
+
+static int
+vlbuf_estimate_jsonb(codegen_context *context,
+					 devfunc_info *dfunc,
+					 Expr **args, int *vl_width)
+{
+	/*
+	 * We usually have no information about jsonb object length preliminary,
+	 * however, plain varlena must be less than the threshold of toasting.
+	 * If user altered storage option of jsonb column to 'main', it may be
+	 * increased to BLCKSZ, but unusual.
+	 */
+	return TOAST_TUPLE_THRESHOLD;
 }
 
 /*
@@ -813,7 +810,7 @@ typedef struct devfunc_catalog_t {
 	Oid			func_argtypes[DEVFUNC_MAX_NARGS];
 	int			func_devcost;	/* relative cost to run on device */
 	const char *func_template;	/* a template string if simple function */
-	devfunc_varlena_sz_f dfunc_varlena_sz;
+	devfunc_result_sz_type devfunc_result_sz;
 } devfunc_catalog_t;
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
@@ -1582,14 +1579,21 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* string operations */
 	{ "length",		1, {TEXTOID},                 2, "s/f:textlen" },
 	{ "textcat",	2, {TEXTOID,TEXTOID},
-	  999, "s/f:textcat",
+	  999, "Cs/f:textcat",
 	  vlbuf_estimate_textcat
 	},
-	{ "substr",		3, {TEXTOID,INT4OID,INT4OID},10, "s/f:text_substring" },
-	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},10, "s/f:text_substring" },
-	{ "substr",		2, {TEXTOID,INT4OID},10, "s/f:text_substring_nolen" },
-	{ "substring",	2, {TEXTOID,INT4OID},10, "s/f:text_substring_nolen" },
-
+	{ "substr",		3, {TEXTOID,INT4OID,INT4OID},
+	  10, "Cs/f:text_substring",
+	  vlbuf_estimate_substring },
+	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},
+	  10, "Cs/f:text_substring",
+	  vlbuf_estimate_substring },
+	{ "substr",		2, {TEXTOID,INT4OID},
+	  10, "Cs/f:text_substring_nolen",
+	  vlbuf_estimate_substring },
+	{ "substring",	2, {TEXTOID,INT4OID},
+	  10, "Cs/f:text_substring_nolen",
+	  vlbuf_estimate_substring },
 	/* jsonb operators */
 	{ "jsonb_object_field",       2, {JSONBOID,TEXTOID},
 	  1000, "jC/f:jsonb_object_field",
@@ -1620,7 +1624,7 @@ typedef struct devfunc_extra_catalog_t {
 	const char *func_signature;
 	int			func_devcost;
 	const char *func_template;
-	devfunc_varlena_sz_f dfunc_varlena_sz;
+	devfunc_result_sz_type devfunc_result_sz;
 } devfunc_extra_catalog_t;
 
 #define BOOL    "boolean"
@@ -1995,14 +1999,22 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 
 /* default of dfunc->dfunc_varlena_sz if not specified */
 static int
-devfunc_varlena_size_zero(devfunc_info *dfunc, Expr **args, int *vl_width)
+devfunc_generic_result_sz(codegen_context *context,
+						  devfunc_info *dfunc,
+						  Expr **args, int *vl_width)
 {
-	return 0;
+	devtype_info   *rtype = dfunc->func_rettype;
+
+	if (rtype->type_length > 0)
+		return rtype->type_length;
+	else if (rtype->type_length == -1)
+		return type_maximum_size(rtype->type_oid, -1);
+	elog(ERROR, "unexpected type length: %d", rtype->type_length);
 }
 
 static bool
 __construct_devfunc_info(devfunc_info *entry, const char *template,
-						 devfunc_varlena_sz_f dfunc_varlena_sz)
+						 devfunc_result_sz_type devfunc_result_sz)
 {
 	const char *pos;
 	const char *end;
@@ -2064,9 +2076,9 @@ __construct_devfunc_info(devfunc_info *entry, const char *template,
 		return false;		/* unable to run on device */
 
 	if (has_callbacks)
-		entry->dfunc_varlena_sz = dfunc_varlena_sz;
+		entry->devfunc_result_sz = devfunc_result_sz;
 	else
-		entry->dfunc_varlena_sz = devfunc_varlena_size_zero;
+		entry->devfunc_result_sz = devfunc_generic_result_sz;
 
 	if (strncmp(template, "f:", 2) == 0)
 		entry->func_devname = template + 2;
@@ -2105,7 +2117,7 @@ pgstrom_devfunc_construct_common(devfunc_info *entry)
 			{
 				entry->func_devcost = procat->func_devcost;
 				return __construct_devfunc_info(entry, procat->func_template,
-												procat->dfunc_varlena_sz);
+												procat->devfunc_result_sz);
 			}
 		}
 	}
@@ -2163,7 +2175,7 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 		{
 			entry->func_devcost = procat->func_devcost;
 			result = __construct_devfunc_info(entry, procat->func_template,
-											  procat->dfunc_varlena_sz);
+											  procat->devfunc_result_sz);
 			goto found;
 		}
 	}
@@ -2672,7 +2684,8 @@ static int
 codegen_const_expression(codegen_context *context,
 						 Const *con)
 {
-	cl_int	index;
+	cl_int		index;
+	cl_int		width;
 
 	if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
 		elog(ERROR, "type %s is not device supported",
@@ -2684,10 +2697,15 @@ codegen_const_expression(codegen_context *context,
 	__appendStringInfo(&context->str,
 					   "KPARAM_%u", index);
 	context->param_refs = bms_add_member(context->param_refs, index);
-	if (con->constlen < 0 && !con->constisnull)
-		return VARSIZE_ANY_EXHDR(con->constvalue);
-
-	return 0;
+	if (con->constisnull)
+		width = 0;
+	else if (con->constlen > 0)
+		width = con->constlen;
+	else if (con->constlen == -1)
+		width = VARSIZE_ANY_EXHDR(con->constvalue);
+	else
+		elog(ERROR, "unexpected type length: %d", con->constlen);
+	return width;
 }
 
 static int
@@ -2697,6 +2715,7 @@ codegen_param_expression(codegen_context *context,
 	devtype_info   *dtype;
 	ListCell	   *lc;
 	int				index = 0;
+	int				width;
 
 	if (param->paramkind != PARAM_EXTERN)
 		elog(ERROR, "ParamKind is not PARAM_EXTERN: %d",
@@ -2725,7 +2744,15 @@ codegen_param_expression(codegen_context *context,
 					   "KPARAM_%u", index);
 	context->param_refs = bms_add_member(context->param_refs, index);
 out:
-	return (dtype->type_length < 0 ? -1 : 0);	/* unknown, if varlena */
+	if (dtype->type_length > 0)
+		width = dtype->type_length;
+	else if (dtype->type_length == -1)
+		width = type_maximum_size(param->paramtype,
+								  param->paramtypmod) - VARHDRSZ;
+	else
+		elog(ERROR, "unexpected type length: %d", dtype->type_length);
+
+	return width;
 }
 
 static int
@@ -2734,7 +2761,7 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 	AttrNumber		varattno = var->varattno;
 	devtype_info   *dtype;
 	ListCell	   *lc;
-	int				varlena_sz;
+	int				width;
 
 	dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 	if (!dtype)
@@ -2800,34 +2827,11 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(var));
 	if (dtype->type_length >= 0)
-		varlena_sz = 0;
+		width = dtype->type_length;
 	else
-	{
-		PlannerInfo	   *root = context->root;
-		RelOptInfo	   *rel;
-
-		varlena_sz = -1;	/* unknown, unless no hint information */
-		if (var->varno == INDEX_VAR)
-		{
-			if (var->varnoold < root->simple_rel_array_size)
-			{
-				rel = root->simple_rel_array[var->varnoold];
-				if (var->varoattno >= rel->min_attr &&
-					var->varoattno <= rel->max_attr)
-					varlena_sz = rel->attr_widths[var->varoattno -
-												  rel->min_attr];
-			}
-		}
-		else if (var->varno < root->simple_rel_array_size)
-		{
-			rel = root->simple_rel_array[var->varno];
-			if (var->varattno >= rel->min_attr &&
-				var->varattno <= rel->max_attr)
-				varlena_sz = rel->attr_widths[var->varattno -
-											  rel->min_attr];
-		}
-	}
-	return varlena_sz;
+		width = type_maximum_size(var->vartype,
+								  var->vartypmod) - VARHDRSZ;
+	return width;
 }
 
 static int
@@ -2838,7 +2842,6 @@ codegen_function_expression(codegen_context *context,
 	Expr	   *fn_args[DEVFUNC_MAX_NARGS];
 	int			vl_width[DEVFUNC_MAX_NARGS];
 	int			index = 0;
-	int			varlena_sz;
 
 	__appendStringInfo(&context->str,
 					   "pgfn_%s(kcxt",
@@ -2870,11 +2873,8 @@ codegen_function_expression(codegen_context *context,
 		fn_args[index++] = (Expr *)expr;
 	}
 	__appendStringInfoChar(&context->str, ')');
-
-	varlena_sz = dfunc->dfunc_varlena_sz(dfunc, fn_args, vl_width);
-	if (varlena_sz > 0)
-		context->varlena_bufsz += MAXALIGN(VARHDRSZ + varlena_sz);
-	return varlena_sz;
+	/* estimation of function result width */
+	return dfunc->devfunc_result_sz(context, dfunc, fn_args, vl_width);
 }
 
 static int
@@ -2908,7 +2908,7 @@ codegen_nulltest_expression(codegen_context *context,
 	__appendStringInfoChar(&context->str, ')');
 	context->devcost += 1;
 
-	return 0;
+	return sizeof(cl_bool);
 }
 
 static int
@@ -2951,7 +2951,7 @@ codegen_booleantest_expression(codegen_context *context,
 	__appendStringInfoChar(&context->str, ')');
 	context->devcost += 1;
 
-	return 0;
+	return sizeof(cl_bool);
 }
 
 static int
@@ -2998,7 +2998,7 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 			break;
 	}
 	context->devcost += list_length(b->args);
-	return 0;
+	return sizeof(cl_bool);
 }
 
 static int
@@ -3007,7 +3007,7 @@ codegen_coalesce_expression(codegen_context *context,
 {
 	devtype_info   *dtype;
 	ListCell	   *lc;
-	int				varlena_sz = 0;
+	int				maxlen = 0;
 
 	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 	if (!dtype)
@@ -3028,14 +3028,14 @@ codegen_coalesce_expression(codegen_context *context,
 		__appendStringInfo(&context->str, ", ");
 		codegen_expression_walker(context, expr, &width);
 		if (width < 0)
-			varlena_sz = -1;
-		else if (varlena_sz >= 0)
-			varlena_sz = Max(varlena_sz, width);
+			maxlen = -1;
+		else if (maxlen >= 0)
+			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 	}
 	__appendStringInfoChar(&context->str, ')');
 
-	return varlena_sz;
+	return maxlen;
 }
 
 static int
@@ -3045,7 +3045,7 @@ codegen_minmax_expression(codegen_context *context,
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	ListCell	   *lc;
-	int				varlena_sz = 0;
+	int				maxlen = 0;
 
 	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 	if (!dtype)
@@ -3082,14 +3082,14 @@ codegen_minmax_expression(codegen_context *context,
 		__appendStringInfo(&context->str, ", ");
 		codegen_expression_walker(context, expr, &width);
 		if (width < 0)
-			varlena_sz = -1;
-		else if (varlena_sz >= 0)
-			varlena_sz = Max(varlena_sz, width);
+			maxlen = -1;
+		else if (maxlen >= 0)
+			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 	}
 	__appendStringInfoChar(&context->str, ')');
 
-	return varlena_sz;
+	return maxlen;
 }
 
 static int
@@ -3098,7 +3098,7 @@ codegen_relabel_expression(codegen_context *context,
 {
 	devtype_info *dtype;
 	Oid		stype_oid = exprType((Node *)relabel->arg);
-	int		varlena_sz;
+	int		width;
 
 	dtype = pgstrom_devtype_lookup_and_track(stype_oid, context);
 	if (!dtype)
@@ -3115,10 +3115,10 @@ codegen_relabel_expression(codegen_context *context,
 			 format_type_be(relabel->resulttype));
 
 	__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
-	codegen_expression_walker(context, (Node *)relabel->arg, &varlena_sz);
+	codegen_expression_walker(context, (Node *)relabel->arg, &width);
 	__appendStringInfoChar(&context->str, ')');
 
-	return varlena_sz;
+	return width;
 }
 
 static int
@@ -3128,7 +3128,6 @@ codegen_coerceviaio_expression(codegen_context *context,
 	devcast_info   *dcast;
 	Oid		stype_oid = exprType((Node *)coerce->arg);
 	Oid		dtype_oid = coerce->resulttype;
-	int		varlena_sz;
 
 	dcast = pgstrom_devcast_lookup(stype_oid,
 								   dtype_oid,
@@ -3138,16 +3137,13 @@ codegen_coerceviaio_expression(codegen_context *context,
 			 format_type_be(stype_oid),
 			 format_type_be(dtype_oid));
 
-	if (!dcast->dcast_coerceviaio_callback ||
-		!dcast->dcast_coerceviaio_callback(context, dcast, coerce,
-										   &varlena_sz))
+	if (!dcast->dcast_coerceviaio_callback)
 		elog(ERROR, "no device cast support on %s -> %s",
 			 format_type_be(dcast->src_type->type_oid),
 			 format_type_be(dcast->dst_type->type_oid));
-
 	context->devcost += 8;		/* just a rough estimation */
 
-	return varlena_sz;
+	return dcast->dcast_coerceviaio_callback(context, dcast, coerce);
 }
 
 static int
@@ -3159,8 +3155,7 @@ codegen_casewhen_expression(codegen_context *context,
 	devfunc_info   *dfunc;
 	ListCell	   *cell;
 	Oid				type_oid;
-	int				width;
-	int				varlena_sz = 0;
+	int				width, maxlen = 0;
 
 	/* check result type */
 	rtype = pgstrom_devtype_lookup(caseexpr->casetype);
@@ -3198,9 +3193,9 @@ codegen_casewhen_expression(codegen_context *context,
 									  (Node *)caseexpr->defresult,
 									  &width);
 			if (width < 0)
-				varlena_sz = -1;
-			else if (varlena_sz >= 0)
-				varlena_sz = Max(varlena_sz, width);
+				maxlen = -1;
+			else if (maxlen >= 0)
+				maxlen = Max(maxlen, width);
 			context->devcost += 1;
 		}
 
@@ -3233,9 +3228,9 @@ codegen_casewhen_expression(codegen_context *context,
 									  (Node *)casewhen->result,
 									  &width);
 			if (width < 0)
-				varlena_sz = -1;
-			else if (varlena_sz >= 0)
-				varlena_sz = Max(varlena_sz, width);
+				maxlen = -1;
+			else if (maxlen >= 0)
+				maxlen = Max(maxlen, width);
 			context->devcost += 1;
 		}
 		__appendStringInfoChar(&context->str, ')');
@@ -3255,24 +3250,24 @@ codegen_casewhen_expression(codegen_context *context,
 			codegen_expression_walker(context, (Node *)casewhen->result,
 									  &width);
 			if (width < 0)
-				varlena_sz = -1;
-			else if (varlena_sz >= 0)
-				varlena_sz = Max(varlena_sz, width);
+				maxlen = -1;
+			else if (maxlen >= 0)
+				maxlen = Max(maxlen, width);
 			__appendStringInfo(&context->str, ") : (");
 		}
 		codegen_expression_walker(context,
 								  (Node *)caseexpr->defresult,
 								  &width);
 		if (width < 0)
-			varlena_sz = -1;
-		else if (varlena_sz >= 0)
-			varlena_sz = Max(varlena_sz, width);
+			maxlen = -1;
+		else if (width >= 0)
+			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 
 		foreach (cell, caseexpr->args)
 			__appendStringInfoChar(&context->str, ')');
 	}
-	return varlena_sz;
+	return maxlen;
 }
 
 static int
@@ -3348,15 +3343,15 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	 */
 	context->devcost += 32 * dfunc->func_devcost;
 
-	return 0;
+	return sizeof(cl_bool);
 }
 
 static void
 codegen_expression_walker(codegen_context *context,
-						  Node *node, int *p_varlena_sz)
+						  Node *node, int *p_width)
 {
 	devfunc_info   *dfunc;
-	int				varlena_sz = 0;
+	int				width = 0;
 	Node		   *__codegen_saved_node;
 
 	if (node == NULL)
@@ -3368,15 +3363,15 @@ codegen_expression_walker(codegen_context *context,
 	switch (nodeTag(node))
 	{
 		case T_Const:
-			varlena_sz = codegen_const_expression(context, (Const *) node);
+			width = codegen_const_expression(context, (Const *) node);
 			break;
 
 		case T_Param:
-			varlena_sz = codegen_param_expression(context, (Param *) node);
+			width = codegen_param_expression(context, (Param *) node);
 			break;
 
 		case T_Var:
-			varlena_sz = codegen_varnode_expression(context, (Var *) node);
+			width = codegen_varnode_expression(context, (Var *) node);
 			break;
 
 		case T_FuncExpr:
@@ -3391,9 +3386,9 @@ codegen_expression_walker(codegen_context *context,
 					elog(ERROR, "function %s is not device supported",
 						 format_procedure(func->funcid));
 				pgstrom_devfunc_track(context, dfunc);
-				varlena_sz = codegen_function_expression(context,
-														 dfunc,
-														 func->args);
+				width = codegen_function_expression(context,
+													dfunc,
+													func->args);
 				context->devcost += dfunc->func_devcost;
 			}
 			break;
@@ -3412,63 +3407,63 @@ codegen_expression_walker(codegen_context *context,
 					elog(ERROR, "function %s is not device supported",
 						 format_procedure(func_oid));
 				pgstrom_devfunc_track(context, dfunc);
-				varlena_sz = codegen_function_expression(context,
-														 dfunc,
-														 op->args);
+				width = codegen_function_expression(context,
+													dfunc,
+													op->args);
 				context->devcost += dfunc->func_devcost;
 			}
 			break;
 
 		case T_NullTest:
-			varlena_sz = codegen_nulltest_expression(context,
-													 (NullTest *) node);
+			width = codegen_nulltest_expression(context,
+												(NullTest *) node);
 			break;
 
 		case T_BooleanTest:
-			varlena_sz = codegen_booleantest_expression(context,
-														(BooleanTest *) node);
+			width = codegen_booleantest_expression(context,
+												   (BooleanTest *) node);
 			break;
 
 		case T_BoolExpr:
-			varlena_sz = codegen_bool_expression(context,
-												 (BoolExpr *) node);
+			width = codegen_bool_expression(context,
+											(BoolExpr *) node);
 			break;
 
 		case T_CoalesceExpr:
-			varlena_sz = codegen_coalesce_expression(context,
-													 (CoalesceExpr *) node);
+			width = codegen_coalesce_expression(context,
+												(CoalesceExpr *) node);
 			break;
 
 		case T_MinMaxExpr:
-			varlena_sz = codegen_minmax_expression(context,
-												   (MinMaxExpr *) node);
+			width = codegen_minmax_expression(context,
+											  (MinMaxExpr *) node);
 			break;
 
 		case T_RelabelType:
-			varlena_sz = codegen_relabel_expression(context,
-													(RelabelType *) node);
+			width = codegen_relabel_expression(context,
+											   (RelabelType *) node);
 			break;
 
 		case T_CoerceViaIO:
-			varlena_sz = codegen_coerceviaio_expression(context,
-														(CoerceViaIO *) node);
+			width = codegen_coerceviaio_expression(context,
+												   (CoerceViaIO *) node);
 			break;
 
 		case T_CaseExpr:
-			varlena_sz = codegen_casewhen_expression(context,
-													 (CaseExpr *) node);
+			width = codegen_casewhen_expression(context,
+												(CaseExpr *) node);
 			break;
 
 		case T_ScalarArrayOpExpr:
-			varlena_sz = codegen_scalar_array_op_expression(context,
+			width = codegen_scalar_array_op_expression(context,
 												(ScalarArrayOpExpr *) node);
 			break;
 		default:
 			elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
 			break;
 	}
-	if (p_varlena_sz)
-		*p_varlena_sz = varlena_sz;
+	if (p_width)
+		*p_width = width;
 	/* restore */
 	__codegen_current_node = __codegen_saved_node;
 }
@@ -3477,7 +3472,7 @@ char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
 	codegen_context	walker_context;
-	int			width;
+	devtype_info   *dtype;
 
 	initStringInfo(&walker_context.str);
 	walker_context.root = context->root;
@@ -3501,7 +3496,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	PG_TRY();
 	{
-		codegen_expression_walker(&walker_context, expr, &width);
+		codegen_expression_walker(&walker_context, expr, NULL);
 	}
 	PG_CATCH();
 	{
@@ -3516,19 +3511,17 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	/* no need to write back xxx_label fields because read-only */
 	context->extra_flags = walker_context.extra_flags;
 	context->varlena_bufsz = walker_context.varlena_bufsz;
+
 	/*
 	 * Even if expression itself needs no varlena extra buffer, projection
 	 * code may require the buffer to construct a temporary datum.
 	 * E.g) Numeric datum is encoded to 128bit at the GPU kernel, however,
 	 * projection needs to decode to varlena again.
 	 */
-	if (width == 0)
-	{
-		Oid				type_oid = exprType((Node *) expr);
-		devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
-
+	dtype = pgstrom_devtype_lookup(exprType((Node *) expr));
+	if (dtype)
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-	}
+
 	return walker_context.str.data;
 }
 
@@ -3706,18 +3699,17 @@ __pgstrom_device_expression(PlannerInfo *root,
  * Special case handling of text->numeric values, including the case of
  * jsonb key references.
  */
-static bool
+static int
 devcast_text2numeric_callback(codegen_context *context,
 							  devcast_info *dcast,
-							  CoerceViaIO *node,
-							  cl_int *p_varlena_sz)
+							  CoerceViaIO *node)
 {
 	devtype_info   *dtype = dcast->dst_type;
 	Expr		   *arg = node->arg;
 	Oid				func_oid = InvalidOid;
 	List		   *func_args = NIL;
-	List		   *dfunc_args;
 	char			dfunc_name[100];
+	int				width;
 	ListCell	   *lc;
 
 	/* check special case if jsonb key reference */
@@ -3735,30 +3727,27 @@ devcast_text2numeric_callback(codegen_context *context,
 		func_oid  = get_opcode(op->opno);
 		func_args = op->args;
 	}
+	else
+		elog(ERROR, "Not supported CoerceViaIO with jsonb key reference");
 
 	switch (func_oid)
 	{
 		case F_JSONB_OBJECT_FIELD_TEXT:
 			snprintf(dfunc_name, sizeof(dfunc_name),
 					 "jsonb_object_field_as_%s", dtype->type_name);
-			dfunc_args = func_args;
 			break;
 		case F_JSONB_ARRAY_ELEMENT_TEXT:
 			snprintf(dfunc_name, sizeof(dfunc_name),
 					 "jsonb_array_element_as_%s", dtype->type_name);
-			dfunc_args = func_args;
 			break;
 		default:
-			snprintf(dfunc_name, sizeof(dfunc_name),
-					 "text_to_%s", dtype->type_name);
-			dfunc_args = list_make1(arg);
-			break;
+			elog(ERROR, "Not supported CoerceViaIO with jsonb key reference");
 	}
-
+	context->extra_flags |= DEVKERNEL_NEEDS_JSONLIB;
 	__appendStringInfo(&context->str,
 					   "pgfn_%s(kcxt",
 					   dfunc_name);
-	foreach (lc, dfunc_args)
+	foreach (lc, func_args)
 	{
 		Node   *expr = lfirst(lc);
 		int		dummy;
@@ -3767,9 +3756,14 @@ devcast_text2numeric_callback(codegen_context *context,
 		codegen_expression_walker(context, expr, &dummy);
 	}
 	__appendStringInfoChar(&context->str, ')');
-	if (p_varlena_sz)
-		*p_varlena_sz = 0;
-	return true;
+	if (dtype->type_length > 0)
+		width = dtype->type_length;
+	else if (dtype->type_length == -1)
+		width = -1;		/* we don't know max length of a jsonb field */
+	else
+		elog(ERROR, "unexpected type length: %d", dtype->type_length);
+
+	return width;
 }
 
 #undef __appendStringInfo

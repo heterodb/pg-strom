@@ -508,10 +508,15 @@ typedef struct devtype_info {
 	struct devtype_info *comp_subtypes[FLEXIBLE_ARRAY_MEMBER];
 } devtype_info;
 
-/* callback for expected consumption of run-time varlena buffer */
-typedef int (*devfunc_varlena_sz_f)(struct devfunc_info *dfunc,
-									Expr **args, int *args_width);
-
+/*
+ * Per-function callback to estimate maximum expected length of
+ * the function result. -1, if cannot estimate it.
+ * If device function may consume per-thread varlena buffer, it
+ * should expand context->varlena_bufsz.
+ */
+typedef int (*devfunc_result_sz_type)(struct codegen_context *context,
+									  struct devfunc_info *dfunc,
+									  Expr **args, int *args_width);
 typedef struct devfunc_info {
 	dlist_node	chain;
 	cl_uint		hashvalue;
@@ -526,17 +531,16 @@ typedef struct devfunc_info {
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
 	Cost		func_devcost;	/* relative cost to run function on GPU */
-	devfunc_varlena_sz_f dfunc_varlena_sz;
+	devfunc_result_sz_type devfunc_result_sz; /* result width estimator */
 } devfunc_info;
 
 /*
  * Callback on CoerceViaIO (type cast using in/out handler).
  * In some special cases, device code can handle this class of type cast.
  */
-typedef bool (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
-											   struct devcast_info *dcast,
-											   CoerceViaIO *node,
-											   cl_int *p_varlena_sz);
+typedef int (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
+											  struct devcast_info *dcast,
+											  CoerceViaIO *node);
 
 typedef struct devcast_info {
 	dlist_node		chain;

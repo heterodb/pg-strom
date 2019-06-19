@@ -430,10 +430,11 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	pg_text_t	result;
 	char	   *pos;
 
-	if (arg1.isnull)
-		return arg2;
-	if (arg2.isnull)
-		return arg1;
+	if (arg1.isnull || arg2.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
 	if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1) ||
 		!pg_varlena_datum_extract(kcxt, arg2, &s2, &len2))
 	{
@@ -450,6 +451,7 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	}
 	result.isnull = false;
 	result.value = pos;
+	result.length = -1;
 	SET_VARSIZE(pos, VARHDRSZ + len1 + len2);
 	pos += VARHDRSZ;
 	memcpy(pos, s1, len1);
@@ -485,7 +487,7 @@ text_substring(kern_context *kcxt,
 	result.value  = pos;
 	result.length = length;
 #else
-	start = Max(start, 1);
+	start = Max(start, 1) - 1;
 	pos = str;
 	while (start-- > 0 && pos < end)
 		pos += pg_wchar_mblen(pos);

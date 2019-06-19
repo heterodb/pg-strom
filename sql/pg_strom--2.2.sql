@@ -2400,3 +2400,10 @@ CREATE FUNCTION pgstrom.random_daterange(float=0.0,
   RETURNS daterange
   AS 'MODULE_PATHNAME','pgstrom_random_daterange'
   LANGUAGE C CALLED ON NULL INPUT;
+
+-- dummy regression test revision (very old)
+CREATE OR REPLACE FUNCTION
+pgstrom.regression_testdb_revision()
+RETURNS int
+AS 'SELECT 0'
+LANGUAGE 'sql';

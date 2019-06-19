@@ -246,6 +246,7 @@ Datum pgstrom_random_int8range(PG_FUNCTION_ARGS);
 Datum pgstrom_random_tsrange(PG_FUNCTION_ARGS);
 Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
 Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
+Datum pgstrom_abort_if(PG_FUNCTION_ARGS);
 
 static inline bool
 generate_null(double ratio)
@@ -563,7 +564,10 @@ PG_FUNCTION_INFO_V1(pgstrom_random_text);
 Datum
 pgstrom_random_text_length(PG_FUNCTION_ARGS)
 {
-	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+	static const char *base64 =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz"
+		"0123456789+/";
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	cl_int		maxlen;
 	text	   *temp;
@@ -583,14 +587,14 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	pos = VARDATA(temp);
 	for (i=0, j=0; i < n; i++, pos++)
 	{
-		if (j < 5)
+		if (j < 6)
 		{
 			v |= (cl_ulong)random() << j;
 			j += 31;
 		}
-		*pos = base32[v & 0x1f];
-		v >>= 5;
-		j -= 5;
+		*pos = base64[v & 0x3f];
+		v >>= 6;
+		j -= 6;
 	}
 	PG_RETURN_TEXT_P(temp);
 }
@@ -809,3 +813,15 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 							 DateADTGetDatum(y));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
+
+Datum
+pgstrom_abort_if(PG_FUNCTION_ARGS)
+{
+	bool		cond = PG_GETARG_BOOL(0);
+
+	if (cond)
+		elog(ERROR, "abort transaction");
+
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_abort_if);

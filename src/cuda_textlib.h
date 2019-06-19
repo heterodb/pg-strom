@@ -87,6 +87,7 @@ to_bpchar(pg_text_t arg)
 	pg_bpchar_t		r;
 	r.isnull = arg.isnull;
 	r.value  = arg.value;
+	r.length = arg.length;
 	return r;
 }
 DEVICE_INLINE(pg_varchar_t)
