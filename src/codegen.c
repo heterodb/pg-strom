@@ -41,6 +41,11 @@ static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static int	devcast_text2numeric_callback(codegen_context *context,
 										  devcast_info *dcast,
 										  CoerceViaIO *node);
+/* error report */
+#define __ELog(fmt, ...)								\
+	ereport(ERROR,										\
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),	\
+			 errmsg((fmt), ##__VA_ARGS__)))
 
 /*
  * Catalog of data types supported by device code
@@ -387,6 +392,8 @@ pgstrom_devtype_lookup(Oid type_oid)
 	}
 	dlist_push_head(&devtype_info_slot[hindex], &dtype->chain);
 
+	if (dtype->type_is_negative)
+		return NULL;
 	return dtype;
 }
 
@@ -734,7 +741,7 @@ vlbuf_estimate_textcat(codegen_context *context,
 	for (i=0; i < 2; i++)
 	{
 		if (vl_width[i] < 0)
-			elog(ERROR, "unable to combine two strings uncertain length");
+			__ELog("unable to estimate result size of textcat");
 		maxlen += vl_width[i];
 	}
 	/* it consumes varlena buffer on run-time */
@@ -2372,32 +2379,41 @@ pgstrom_devfunc_lookup(Oid func_oid,
 	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	proc = (Form_pg_proc) GETSTRUCT(tup);
-	Assert(proc->pronargs == list_length(func_args));
-	if (proc->pronargs <= DEVFUNC_MAX_NARGS)
+	PG_TRY();
 	{
-		size_t		len = offsetof(oidvector, values[proc->pronargs]);
-		cl_uint		i = 0;
-		ListCell   *lc;
-
-		func_argtypes->ndim = 1;
-		func_argtypes->dataoffset = 0;
-		func_argtypes->elemtype = OIDOID;
-		func_argtypes->dim1 = list_length(func_args);
-		func_argtypes->lbound1 = 0;
-		foreach (lc, func_args)
+		proc = (Form_pg_proc) GETSTRUCT(tup);
+		Assert(proc->pronargs == list_length(func_args));
+		if (proc->pronargs <= DEVFUNC_MAX_NARGS)
 		{
-			Oid		type_oid = exprType((Node *)lfirst(lc));
+			size_t		len = offsetof(oidvector, values[proc->pronargs]);
+			cl_uint		i = 0;
+			ListCell   *lc;
 
-			func_argtypes->values[i++] = type_oid;
+			func_argtypes->ndim = 1;
+			func_argtypes->dataoffset = 0;
+			func_argtypes->elemtype = OIDOID;
+			func_argtypes->dim1 = list_length(func_args);
+			func_argtypes->lbound1 = 0;
+			foreach (lc, func_args)
+			{
+				Oid		type_oid = exprType((Node *)lfirst(lc));
+
+				func_argtypes->values[i++] = type_oid;
+			}
+			SET_VARSIZE(func_argtypes, len);
+
+			result = __pgstrom_devfunc_lookup(tup,
+											  func_rettype,
+											  func_argtypes,
+											  func_collid);
 		}
-		SET_VARSIZE(func_argtypes, len);
-
-		result = __pgstrom_devfunc_lookup(tup,
-										  func_rettype,
-										  func_argtypes,
-										  func_collid);
 	}
+	PG_CATCH();
+	{
+		ReleaseSysCache(tup);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	ReleaseSysCache(tup);
 
 	return result;
@@ -2416,25 +2432,35 @@ pgstrom_devfunc_lookup_type_equal(devtype_info *dtype, Oid type_collid)
 		return NULL;
 	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(dtype->type_eqfunc));
 	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for function %u", dtype->type_eqfunc);
-	proc = (Form_pg_proc) GETSTRUCT(tup);
-	Assert(proc->pronargs == 2);
-	Assert(proc->prorettype == BOOLOID);
+		elog(ERROR, "cache lookup failed for function %u",
+			 dtype->type_eqfunc);
+	PG_TRY();
+	{
+		proc = (Form_pg_proc) GETSTRUCT(tup);
+		Assert(proc->pronargs == 2);
+		Assert(proc->prorettype == BOOLOID);
 
-	memset(func_argtypes, 0, offsetof(oidvector, values[2]));
-	func_argtypes->ndim = 1;
-	func_argtypes->dataoffset = 0;
-	func_argtypes->elemtype = OIDOID;
-	func_argtypes->dim1 = 2;
-	func_argtypes->lbound1 = 0;
-	func_argtypes->values[0] = dtype->type_oid;
-	func_argtypes->values[1] = dtype->type_oid;
-	SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
+		memset(func_argtypes, 0, offsetof(oidvector, values[2]));
+		func_argtypes->ndim = 1;
+		func_argtypes->dataoffset = 0;
+		func_argtypes->elemtype = OIDOID;
+		func_argtypes->dim1 = 2;
+		func_argtypes->lbound1 = 0;
+		func_argtypes->values[0] = dtype->type_oid;
+		func_argtypes->values[1] = dtype->type_oid;
+		SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
 
-	result = __pgstrom_devfunc_lookup(tup,
-									  BOOLOID,
-									  func_argtypes,
-									  type_collid);
+		result = __pgstrom_devfunc_lookup(tup,
+										  BOOLOID,
+										  func_argtypes,
+										  type_collid);
+	}
+	PG_CATCH();
+	{
+		ReleaseSysCache(tup);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	ReleaseSysCache(tup);
 
 	return result;
@@ -2453,25 +2479,35 @@ pgstrom_devfunc_lookup_type_compare(devtype_info *dtype, Oid type_collid)
 		return NULL;
 	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(dtype->type_cmpfunc));
 	if (!HeapTupleIsValid(tup))
-        elog(ERROR, "cache lookup failed for function %u", dtype->type_cmpfunc);
-	proc = (Form_pg_proc) GETSTRUCT(tup);
-	Assert(proc->pronargs == 2);
-	Assert(proc->prorettype == INT4OID);
+        elog(ERROR, "cache lookup failed for function %u",
+			 dtype->type_cmpfunc);
+	PG_TRY();
+	{
+		proc = (Form_pg_proc) GETSTRUCT(tup);
+		Assert(proc->pronargs == 2);
+		Assert(proc->prorettype == INT4OID);
 
-	memset(func_argtypes, 0, offsetof(oidvector, values[2]));
-	func_argtypes->ndim = 1;
-	func_argtypes->dataoffset = 0;
-	func_argtypes->elemtype = OIDOID;
-	func_argtypes->dim1 = 2;
-	func_argtypes->lbound1 = 0;
-	func_argtypes->values[0] = dtype->type_oid;
-	func_argtypes->values[1] = dtype->type_oid;
-	SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
+		memset(func_argtypes, 0, offsetof(oidvector, values[2]));
+		func_argtypes->ndim = 1;
+		func_argtypes->dataoffset = 0;
+		func_argtypes->elemtype = OIDOID;
+		func_argtypes->dim1 = 2;
+		func_argtypes->lbound1 = 0;
+		func_argtypes->values[0] = dtype->type_oid;
+		func_argtypes->values[1] = dtype->type_oid;
+		SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
 
-	result = __pgstrom_devfunc_lookup(tup,
-									  INT4OID,
-									  func_argtypes,
-									  type_collid);
+		result = __pgstrom_devfunc_lookup(tup,
+										  INT4OID,
+										  func_argtypes,
+										  type_collid);
+	}
+	PG_CATCH();
+	{
+		ReleaseSysCache(tup);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	ReleaseSysCache(tup);
 
 	return result;
@@ -2575,12 +2611,13 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 		else
 		{
 			method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
+			ReleaseSysCache(tup);
+
 			if (!((method == COERCION_METHOD_BINARY && !dcast_callback) ||
 				  (method == COERCION_METHOD_INOUT && dcast_callback)))
 				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
 					 format_type_be(src_type_oid),
 					 format_type_be(dst_type_oid));
-			ReleaseSysCache(tup);
 		}
 		dcast = MemoryContextAllocZero(devinfo_memcxt,
 									   sizeof(devcast_info));
@@ -2590,14 +2627,14 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 		/* source */
 		dtype = pgstrom_devtype_lookup(src_type_oid);
 		if (!dtype)
-			elog(ERROR, "Bug? type '%s' is not supported on device",
-				 format_type_be(src_type_oid));
+			__ELog("Bug? type '%s' is not supported on device",
+				   format_type_be(src_type_oid));
 		dcast->src_type = dtype;
 		/* destination */
 		dtype = pgstrom_devtype_lookup(dst_type_oid);
 		if (!dtype)
-			elog(ERROR, "Bug? type '%s' is not supported on device",
-				 format_type_be(dst_type_oid));
+			__ELog("Bug? type '%s' is not supported on device",
+				   format_type_be(dst_type_oid));
 		dcast->dst_type = dtype;
 		/* method && callback */
 		dcast->castmethod = method;
@@ -2688,8 +2725,8 @@ codegen_const_expression(codegen_context *context,
 	cl_int		width;
 
 	if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(con->consttype));
+		__ELog("type %s is not device supported",
+			   format_type_be(con->consttype));
 
 	context->used_params = lappend(context->used_params,
 								   copyObject(con));
@@ -2718,13 +2755,13 @@ codegen_param_expression(codegen_context *context,
 	int				width;
 
 	if (param->paramkind != PARAM_EXTERN)
-		elog(ERROR, "ParamKind is not PARAM_EXTERN: %d",
-			 (int)param->paramkind);
+		__ELog("ParamKind is not PARAM_EXTERN: %d",
+			   (int)param->paramkind);
 
 	dtype = pgstrom_devtype_lookup_and_track(param->paramtype, context);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(param->paramtype));
+		__ELog("type %s is not device supported",
+			   format_type_be(param->paramtype));
 
 	foreach (lc, context->used_params)
 	{
@@ -2765,8 +2802,8 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 
 	dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(var->vartype));
+		__ELog("type %s is not device supported",
+			   format_type_be(var->vartype));
 	/*
 	 * NOTE: Expression tree at the path-construction time can contain
 	 * references to other tables; which can be eventually replaced by 
@@ -2866,9 +2903,9 @@ codegen_function_expression(codegen_context *context,
 		}
 		else
 		{
-			elog(ERROR, "Bug? unsupported implicit type cast (%s)->(%s)",
-				 format_type_be(expr_type_oid),
-				 format_type_be(dtype->type_oid));
+			__ELog("Bug? unsupported implicit type cast (%s)->(%s)",
+				   format_type_be(expr_type_oid),
+				   format_type_be(dtype->type_oid));
 		}
 		fn_args[index++] = (Expr *)expr;
 	}
@@ -2885,12 +2922,12 @@ codegen_nulltest_expression(codegen_context *context,
 	Oid		typeoid = exprType((Node *)nulltest->arg);
 
 	if (nulltest->argisrow)
-		elog(ERROR, "NullTest towards RECORD data");
+		__ELog("NullTest towards RECORD data");
 
 	dtype = pgstrom_devtype_lookup_and_track(typeoid, context);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(typeoid));
+		__ELog("type %s is not device supported",
+			   format_type_be(typeoid));
 	switch (nulltest->nulltesttype)
 	{
 		case IS_NULL:
@@ -3011,8 +3048,8 @@ codegen_coalesce_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(coalesce->coalescetype));
+		__ELog("type %s is not device supported",
+			   format_type_be(coalesce->coalescetype));
 
 	__appendStringInfo(&context->str, "PG_COALESCE(kcxt");
 	foreach (lc, coalesce->args)
@@ -3022,9 +3059,9 @@ codegen_coalesce_expression(codegen_context *context,
 		int		width;
 
 		if (dtype->type_oid != type_oid)
-			elog(ERROR, "device type mismatch in COALESCE: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(type_oid));
+			__ELog("device type mismatch in COALESCE: %s / %s",
+				   format_type_be(dtype->type_oid),
+				   format_type_be(type_oid));
 		__appendStringInfo(&context->str, ", ");
 		codegen_expression_walker(context, expr, &width);
 		if (width < 0)
@@ -3049,13 +3086,13 @@ codegen_minmax_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(minmax->minmaxtype));
+		__ELog("type %s is not device supported",
+			   format_type_be(minmax->minmaxtype));
 
 	dfunc = pgstrom_devfunc_lookup_type_compare(dtype, minmax->inputcollid);
 	if (!dfunc)
-		elog(ERROR, "device type %s has no comparison operator",
-			 format_type_be(minmax->minmaxtype));
+		__ELog("device type %s has no comparison operator",
+			   format_type_be(minmax->minmaxtype));
 	switch (minmax->op)
 	{
 		case IS_GREATEST:
@@ -3076,9 +3113,9 @@ codegen_minmax_expression(codegen_context *context,
 		int		width;
 
 		if (dtype->type_oid != type_oid)
-			elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(exprType(expr)));
+			__ELog("device type mismatch in LEAST/GREATEST: %s / %s",
+				   format_type_be(dtype->type_oid),
+				   format_type_be(exprType(expr)));
 		__appendStringInfo(&context->str, ", ");
 		codegen_expression_walker(context, expr, &width);
 		if (width < 0)
@@ -3102,17 +3139,17 @@ codegen_relabel_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup_and_track(stype_oid, context);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(stype_oid));
+		__ELog("type %s is not device supported",
+			   format_type_be(stype_oid));
 
 	dtype = pgstrom_devtype_lookup_and_track(relabel->resulttype, context);
 	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(relabel->resulttype));
+		__ELog("type %s is not device supported",
+			   format_type_be(relabel->resulttype));
 	if (!pgstrom_devtype_can_relabel(stype_oid, dtype->type_oid))
-		elog(ERROR, "type %s->%s cannot be relabeled on device",
-			 format_type_be(stype_oid),
-			 format_type_be(relabel->resulttype));
+		__ELog("type %s->%s cannot be relabeled on device",
+			   format_type_be(stype_oid),
+			   format_type_be(relabel->resulttype));
 
 	__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 	codegen_expression_walker(context, (Node *)relabel->arg, &width);
@@ -3133,14 +3170,14 @@ codegen_coerceviaio_expression(codegen_context *context,
 								   dtype_oid,
 								   COERCION_METHOD_INOUT);
 	if (!dcast)
-		elog(ERROR, "type cast (%s -> %s) is not device supported",
-			 format_type_be(stype_oid),
-			 format_type_be(dtype_oid));
+		__ELog("type cast (%s -> %s) is not device supported",
+			   format_type_be(stype_oid),
+			   format_type_be(dtype_oid));
 
 	if (!dcast->dcast_coerceviaio_callback)
-		elog(ERROR, "no device cast support on %s -> %s",
-			 format_type_be(dcast->src_type->type_oid),
-			 format_type_be(dcast->dst_type->type_oid));
+		__ELog("no device cast support on %s -> %s",
+			   format_type_be(dcast->src_type->type_oid),
+			   format_type_be(dcast->dst_type->type_oid));
 	context->devcost += 8;		/* just a rough estimation */
 
 	return dcast->dcast_coerceviaio_callback(context, dcast, coerce);
@@ -3160,8 +3197,8 @@ codegen_casewhen_expression(codegen_context *context,
 	/* check result type */
 	rtype = pgstrom_devtype_lookup(caseexpr->casetype);
 	if (!rtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(caseexpr->casetype));
+		__ELog("type %s is not device supported",
+			   format_type_be(caseexpr->casetype));
 
 	if (caseexpr->arg)
 	{
@@ -3174,12 +3211,12 @@ codegen_casewhen_expression(codegen_context *context,
 		type_oid = exprType((Node *) caseexpr->arg);
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
-			elog(ERROR, "type %s is not device supported",
-				 format_type_be(type_oid));
+			__ELog("type %s is not device supported",
+				   format_type_be(type_oid));
 		dfunc = pgstrom_devfunc_lookup_type_compare(dtype, InvalidOid);
 		if (!dfunc)
-			elog(ERROR, "type %s has no device executable compare-operator",
-				 format_type_be(type_oid));
+			__ELog("type %s has no device executable compare-operator",
+				   format_type_be(type_oid));
 		pgstrom_devfunc_track(context, dfunc);
 
 		/* walk on the expression */
@@ -3288,41 +3325,48 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	node_a = lsecond(opexpr->args);
 	dtype_s = pgstrom_devtype_lookup_and_track(exprType(node_s), context);
 	if (!dtype_s)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(exprType(node_s)));
+		__ELog("type %s is not device supported",
+			   format_type_be(exprType(node_s)));
 	dtype_a = pgstrom_devtype_lookup_and_track(exprType(node_a), context);
 	if (!dtype_a)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(exprType(node_a)));
+		__ELog("type %s is not device supported",
+			   format_type_be(exprType(node_a)));
 	dtype_e = dtype_a->type_element;
 	if (!dtype_e)
-		elog(ERROR, "type %s is not an array data type",
-			 format_type_be(exprType(node_a)));
+		__ELog("type %s is not an array data type",
+			   format_type_be(exprType(node_a)));
 
 	/* lookup operator function */
 	fn_tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(opexpr->opfuncid));
 	if (!HeapTupleIsValid(fn_tup))
 		elog(ERROR, "cache lookup failed for function %u", opexpr->opfuncid);
+	PG_TRY();
+	{
+		memset(fn_argtypes, 0, offsetof(oidvector, values[2]));
+		fn_argtypes->ndim = 1;
+		fn_argtypes->dataoffset = 0;
+		fn_argtypes->elemtype = OIDOID;
+		fn_argtypes->dim1 = 2;
+		fn_argtypes->lbound1 = 0;
+		fn_argtypes->values[0] = dtype_s->type_oid;
+		fn_argtypes->values[1] = dtype_e->type_oid;
+		SET_VARSIZE(fn_argtypes, offsetof(oidvector, values[2]));
 
-	memset(fn_argtypes, 0, offsetof(oidvector, values[2]));
-	fn_argtypes->ndim = 1;
-	fn_argtypes->dataoffset = 0;
-	fn_argtypes->elemtype = OIDOID;
-	fn_argtypes->dim1 = 2;
-	fn_argtypes->lbound1 = 0;
-	fn_argtypes->values[0] = dtype_s->type_oid;
-	fn_argtypes->values[1] = dtype_e->type_oid;
-	SET_VARSIZE(fn_argtypes, offsetof(oidvector, values[2]));
-
-	dfunc = __pgstrom_devfunc_lookup(fn_tup,
-									 BOOLOID,
-									 fn_argtypes,
-									 opexpr->inputcollid);
-	if (!dfunc)
-		elog(ERROR, "function %s is not device supported",
-			 format_procedure(opexpr->opfuncid));
-	pgstrom_devfunc_track(context, dfunc);
-
+		dfunc = __pgstrom_devfunc_lookup(fn_tup,
+										 BOOLOID,
+										 fn_argtypes,
+										 opexpr->inputcollid);
+		if (!dfunc)
+			__ELog("function %s is not device supported",
+				   format_procedure(opexpr->opfuncid));
+		pgstrom_devfunc_track(context, dfunc);
+	}
+	PG_CATCH();
+	{
+		ReleaseSysCache(fn_tup);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	ReleaseSysCache(fn_tup);
 
 	__appendStringInfo(&context->str,
@@ -3383,8 +3427,8 @@ codegen_expression_walker(codegen_context *context,
 											   func->args,
 											   func->inputcollid);
 				if (!dfunc)
-					elog(ERROR, "function %s is not device supported",
-						 format_procedure(func->funcid));
+					__ELog("function %s is not device supported",
+						   format_procedure(func->funcid));
 				pgstrom_devfunc_track(context, dfunc);
 				width = codegen_function_expression(context,
 													dfunc,
@@ -3404,8 +3448,8 @@ codegen_expression_walker(codegen_context *context,
 											   op->args,
 											   op->inputcollid);
 				if (!dfunc)
-					elog(ERROR, "function %s is not device supported",
-						 format_procedure(func_oid));
+					__ELog("function %s is not device supported",
+						   format_procedure(func_oid));
 				pgstrom_devfunc_track(context, dfunc);
 				width = codegen_function_expression(context,
 													dfunc,
@@ -3459,7 +3503,7 @@ codegen_expression_walker(codegen_context *context,
 												(ScalarArrayOpExpr *) node);
 			break;
 		default:
-			elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
+			__ELog("Bug? unsupported expression: %s", nodeToString(node));
 			break;
 	}
 	if (p_width)
@@ -3537,31 +3581,33 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 
 	foreach (cell, context->used_params)
 	{
+		Node	   *node = lfirst(cell);
+
 		if (!bms_is_member(index, context->param_refs))
 			goto lnext;
 
-		if (IsA(lfirst(cell), Const))
+		if (IsA(node, Const))
 		{
-			Const  *con = lfirst(cell);
+			Const  *con = (Const *)node;
 
 			dtype = pgstrom_devtype_lookup(con->consttype);
 			if (!dtype)
-				elog(ERROR, "failed to lookup device type: %u",
-					 con->consttype);
+				__ELog("failed to lookup device type: %u",
+					   con->consttype);
 
 			appendStringInfo(
 				buf,
 				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
 				dtype->type_name, index, dtype->type_name, index);
 		}
-		else if (IsA(lfirst(cell), Param))
+		else if (IsA(node, Param))
 		{
-			Param  *param = lfirst(cell);
+			Param  *param = (Param *)node;
 
 			dtype = pgstrom_devtype_lookup(param->paramtype);
 			if (!dtype)
-				elog(ERROR, "failed to lookup device type: %u",
-					 param->paramtype);
+				__ELog("failed to lookup device type: %u",
+					   param->paramtype);
 
 			appendStringInfo(
 				buf,
@@ -3569,7 +3615,7 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 				dtype->type_name, index, dtype->type_name, index);
 		}
 		else
-			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
+			elog(ERROR, "Bug? unexpected node: %s", nodeToString(node));
 	lnext:
 		index++;
 	}
@@ -3604,7 +3650,7 @@ pgstrom_union_type_declarations(StringInfo buf,
 
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
-			elog(ERROR, "failed to lookup device type: %u", type_oid);
+			__ELog("failed to lookup device type: %u", type_oid);
 		appendStringInfo(buf,
 						 "    pg_%s_t %s_v;\n",
 						 dtype->type_name,
@@ -3660,6 +3706,9 @@ __pgstrom_device_expression(PlannerInfo *root,
 
 		MemoryContextSwitchTo(memcxt);
 		edata = CopyErrorData();
+		if (edata->sqlerrcode != ERRCODE_FEATURE_NOT_SUPPORTED)
+			PG_RE_THROW();
+
 		FlushErrorState();
 
 		ereport(DEBUG2,
@@ -3728,7 +3777,7 @@ devcast_text2numeric_callback(codegen_context *context,
 		func_args = op->args;
 	}
 	else
-		elog(ERROR, "Not supported CoerceViaIO with jsonb key reference");
+		__ELog("Not supported CoerceViaIO with jsonb key reference");
 
 	switch (func_oid)
 	{
@@ -3741,7 +3790,7 @@ devcast_text2numeric_callback(codegen_context *context,
 					 "jsonb_array_element_as_%s", dtype->type_name);
 			break;
 		default:
-			elog(ERROR, "Not supported CoerceViaIO with jsonb key reference");
+			__ELog("Not supported CoerceViaIO with jsonb key reference");
 	}
 	context->extra_flags |= DEVKERNEL_NEEDS_JSONLIB;
 	__appendStringInfo(&context->str,
