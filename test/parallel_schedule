@@ -25,7 +25,7 @@ test: dtype_int dtype_float dtype_numeric dtype_time dtype_text
 # ----------
 # Test for various functions / expressions
 # ----------
-test: dfunc_math
+test: dfunc_math dfunc_mbtext
 
 # ----------
 # Test for largeobject
