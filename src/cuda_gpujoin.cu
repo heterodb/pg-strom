@@ -33,8 +33,6 @@ extern __shared__ cl_uint	write_pos[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 static __shared__ cl_uint	stat_source_nitems;
 extern __shared__ cl_uint	stat_nitems[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 
-#define GPUJOIN_MAX_DEPTH	(__ldg(&kgjoin->num_rels))
-
 /*
  * gpujoin_suspend_context
  */
@@ -43,7 +41,7 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 						cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
 	gpujoinSuspendContext *sb;
-	cl_int		i;
+	cl_int		i, max_depth = kgjoin->num_rels;
 
 	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 	if (get_local_id() == 0)
@@ -54,7 +52,7 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		sb->stat_source_nitems = stat_source_nitems;
 	}
 
-	for (i=get_local_id(); i <= GPUJOIN_MAX_DEPTH; i+=get_local_size())
+	for (i=get_local_id(); i <= max_depth; i+=get_local_size())
 	{
 		sb->pd[i].wip_count = wip_count[i];
 		sb->pd[i].read_pos = read_pos[i];
@@ -62,7 +60,7 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		sb->pd[i].stat_nitems = stat_nitems[i];
 	}
 
-	for (i=0; i <= GPUJOIN_MAX_DEPTH; i++)
+	for (i=0; i <= max_depth; i++)
 	{
 		sb->pd[i].l_state[get_local_id()] = l_state[i];
 		sb->pd[i].matched[get_local_id()] = matched[i];
@@ -81,7 +79,7 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 					   cl_uint *l_state, cl_bool *matched)
 {
 	gpujoinSuspendContext *sb;
-	cl_int		i;
+	cl_int		i, max_depth = kgjoin->num_rels;
 
 	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 	if (get_local_id() == 0)
@@ -91,7 +89,7 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 		stat_source_nitems = sb->stat_source_nitems;
 	}
 
-	for (i=get_local_id(); i <= GPUJOIN_MAX_DEPTH; i+=get_local_size())
+	for (i=get_local_id(); i <= max_depth; i+=get_local_size())
 	{
 		wip_count[i] = sb->pd[i].wip_count;
 		read_pos[i] = sb->pd[i].read_pos;
@@ -99,7 +97,7 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 		stat_nitems[i] = sb->pd[i].stat_nitems;
 	}
 
-	for (i=0; i <= GPUJOIN_MAX_DEPTH; i++)
+	for (i=0; i <= max_depth; i++)
 	{
 		l_state[i] = sb->pd[i].l_state[get_local_id()];
 		matched[i] = sb->pd[i].matched[get_local_id()];
@@ -114,9 +112,10 @@ STATIC_INLINE(cl_int)
 gpujoin_rewind_stack(kern_gpujoin *kgjoin, cl_int depth,
 					 cl_uint *l_state, cl_bool *matched)
 {
+	cl_int		max_depth = kgjoin->num_rels;
 	static __shared__ cl_int	__depth;
 
-	assert(depth >= base_depth && depth <= GPUJOIN_MAX_DEPTH);
+	assert(depth >= base_depth && depth <= max_depth);
 	__syncthreads();
 	if (get_local_id() == 0)
 	{
@@ -146,12 +145,12 @@ gpujoin_rewind_stack(kern_gpujoin *kgjoin, cl_int depth,
 	}
 	__syncthreads();
 	depth = __depth;
-	if (depth < GPUJOIN_MAX_DEPTH)
+	if (depth < max_depth)
 	{
 		memset(l_state + depth + 1, 0,
-			   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH - depth));
+			   sizeof(cl_uint) * (max_depth - depth));
 		memset(matched + depth + 1, 0,
-			   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH - depth));
+			   sizeof(cl_bool) * (max_depth - depth));
 	}
 	if (scan_done && depth == base_depth)
 		return -1;
@@ -325,7 +324,9 @@ gpujoin_load_source(kern_context *kcxt,
 		 */
 		if (write_pos[0] == 0)
 		{
-			for (cl_int depth=1; depth <= GPUJOIN_MAX_DEPTH; depth++)
+			cl_int		max_depth = kgjoin->num_rels;
+
+			for (cl_int depth=1; depth <= max_depth; depth++)
 			{
 				if (read_pos[depth] < write_pos[depth])
 					return depth+1;
@@ -406,10 +407,12 @@ gpujoin_load_outer(kern_context *kcxt,
 		 */
 		if (write_pos[outer_depth] == 0)
 		{
-			for (cl_int dep=outer_depth + 1; dep <= GPUJOIN_MAX_DEPTH; dep++)
+			cl_int		max_depth = kgjoin->num_rels;
+
+			for (cl_int depth=outer_depth + 1; depth <= max_depth; depth++)
 			{
-				if (read_pos[dep] < write_pos[dep])
-					return dep+1;
+				if (read_pos[depth] < write_pos[depth])
+					return depth+1;
 			}
 			return -1;
 		}
@@ -747,6 +750,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	kern_tupitem   *tupitem = NULL;
+	cl_int			max_depth = kgjoin->num_rels;
 	cl_uint			x_unitsz;
 	cl_uint			y_unitsz;
 	cl_uint			x_index;	/* outer index */
@@ -757,7 +761,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 	__shared__ cl_bool matched_sync[MAXTHREADS_PER_BLOCK];
 
 	assert(kds_in->format == KDS_FORMAT_ROW);
-	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
+	assert(depth >= 1 && depth <= max_depth);
 	if (read_pos[depth-1] >= write_pos[depth-1])
 	{
 		/*
@@ -891,6 +895,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	cl_bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	kern_hashitem	   *khitem = NULL;
+	cl_int				max_depth = kgjoin->num_rels;
 	cl_uint				t_offset = UINT_MAX;
 	cl_uint				hash_value;
 	cl_uint				rd_index;
@@ -899,7 +904,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	cl_bool				result;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
-	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
+	assert(depth >= 1 && depth <= max_depth);
 
 	if (__syncthreads_count(l_state[depth] != UINT_MAX) == 0)
 	{
@@ -1071,12 +1076,11 @@ gpujoin_main(kern_context *kcxt,
 			 cl_uint *l_state,
 			 cl_bool *matched)
 {
+	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
 	cl_int			index;
 	cl_uint			pstack_nrooms;
 	cl_uint		   *pstack_base;
-//	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
-//	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_ROW ||
@@ -1088,8 +1092,8 @@ gpujoin_main(kern_context *kcxt,
 	/* setup private variables */
 	pstack_nrooms = kgjoin->pstack_nrooms;
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
-											(GPUJOIN_MAX_DEPTH+2)) / 2;
+		+ get_group_id() * pstack_nrooms * ((max_depth+1) *
+											(max_depth+2)) / 2;
 	/* init per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
@@ -1097,10 +1101,10 @@ gpujoin_main(kern_context *kcxt,
 	{
 		src_read_pos = UINT_MAX;
 		stat_source_nitems = 0;
-		memset(stat_nitems, 0, sizeof(stat_nitems));
-		memset(wip_count, 0, sizeof(wip_count));
-		memset(read_pos, 0, sizeof(read_pos));
-		memset(write_pos, 0, sizeof(write_pos));
+		memset(stat_nitems, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(wip_count, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		scan_done = false;
 		base_depth = 0;
 	}
@@ -1125,7 +1129,7 @@ gpujoin_main(kern_context *kcxt,
 										PSTACK_DEPTH(depth),
 										l_state);
 		}
-		else if (depth > GPUJOIN_MAX_DEPTH)
+		else if (depth > max_depth)
 		{
 			assert(depth == kmrels->nrels + 1);
 			if (kds_dst->format == KDS_FORMAT_ROW)
@@ -1196,7 +1200,7 @@ gpujoin_main(kern_context *kcxt,
 
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
 		atomicAdd(&kgjoin->outer_nitems, stat_nitems[0]);
-		for (index=0; index <= GPUJOIN_MAX_DEPTH; index++)
+		for (index=0; index <= max_depth; index++)
 			atomicAdd(&kgjoin->stat_nitems[index],
 					  stat_nitems[index+1]);
 	}
@@ -1244,12 +1248,11 @@ gpujoin_right_outer(kern_context *kcxt,
 					cl_uint *l_state,
 					cl_bool *matched)
 {
+	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
 	cl_int			index;
 	cl_uint			pstack_nrooms;
 	cl_uint		   *pstack_base;
-//	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
-//	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
@@ -1258,8 +1261,8 @@ gpujoin_right_outer(kern_context *kcxt,
 	/* setup private variables */
 	pstack_nrooms = kgjoin->pstack_nrooms;
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
-											(GPUJOIN_MAX_DEPTH+2)) / 2;
+		+ get_group_id() * pstack_nrooms * ((max_depth+1) *
+											(max_depth+2)) / 2;
 	/* setup per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
@@ -1267,9 +1270,10 @@ gpujoin_right_outer(kern_context *kcxt,
 	{
 		src_read_pos = UINT_MAX;
 		stat_source_nitems = 0;
-		memset(stat_nitems, 0, sizeof(stat_nitems));
-		memset(read_pos, 0, sizeof(read_pos));
-		memset(write_pos, 0, sizeof(write_pos));
+		memset(stat_nitems, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(wip_count, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		scan_done = false;
 		base_depth = outer_depth;
 	}
@@ -1295,7 +1299,7 @@ gpujoin_right_outer(kern_context *kcxt,
 									   PSTACK_DEPTH(outer_depth),
 									   l_state);
 		}
-		else if (depth > GPUJOIN_MAX_DEPTH)
+		else if (depth > max_depth)
 		{
 			assert(depth == kmrels->nrels + 1);
 			if (kds_dst->format == KDS_FORMAT_ROW)
@@ -1365,7 +1369,7 @@ gpujoin_right_outer(kern_context *kcxt,
 
 		assert(stat_source_nitems == 0);
 		assert(stat_nitems[0] == 0);
-		for (index = outer_depth; index <= GPUJOIN_MAX_DEPTH; index++)
+		for (index = outer_depth; index <= max_depth; index++)
 		{
 			atomicAdd(&kgjoin->stat_nitems[index-1],
 					  stat_nitems[index]);
