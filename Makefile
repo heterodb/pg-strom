@@ -65,7 +65,7 @@ MAXREGCOUNT := 32
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
+__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm testapp_largeobject
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
@@ -101,8 +101,7 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-21.sql ssbm-22.sql ssbm-23.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
                    ssbm-41.sql ssbm-42.sql ssbm-43.sql
-
-TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/test/testapp_largeobject
+TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/utils/testapp_largeobject
 TESTAPP_LARGEOBJECT_SOURCE = $(TESTAPP_LARGEOBJECT).cu
 
 #

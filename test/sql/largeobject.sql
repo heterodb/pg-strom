@@ -3,6 +3,6 @@
 --
 CREATE TABLE pg_temp.command_log (test text, status text);
 
-\copy pg_temp.command_log FROM PROGRAM '@abs_srcdir@/testapp_largeobject'
+\copy pg_temp.command_log FROM PROGRAM 'testapp_largeobject'
 
 SELECT * FROM pg_temp.command_log;
