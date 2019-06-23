@@ -3,11 +3,14 @@
 --
 SET search_path = pgstrom_regress,public;
 
-SELECT pgstrom.regression_testdb_revision() != @@PGSTROM_REGRESS_REVISION@@ as revision_check
+SHOW application_name
+\gset
+SELECT pgstrom.regression_testdb_revision() != :application_name rev_check
 \gset
 
-\if :revision_check
+\if :rev_check
 -- cleanup resources
+SET client_min_messages = error;
 DROP SCHEMA IF EXISTS pgstrom_regress CASCADE;
 DROP FUNCTION IF EXISTS pgstrom.regression_test_revision();
 RESET client_min_messages;
@@ -88,11 +91,11 @@ CREATE TABLE supplier (
     s_phone character(15)
 );
 
-\copy customer  FROM PROGRAM '@@PGSTROM_SSBM_DBGEN@@ -s2 -X -Tc' DELIMITER '|';
-\copy date1     FROM PROGRAM '@@PGSTROM_SSBM_DBGEN@@ -s2 -X -Td' DELIMITER '|';
-\copy lineorder FROM PROGRAM '@@PGSTROM_SSBM_DBGEN@@ -s2 -X -Tl' DELIMITER '|';
-\copy part      FROM PROGRAM '@@PGSTROM_SSBM_DBGEN@@ -s2 -X -Tp' DELIMITER '|';
-\copy supplier  FROM PROGRAM '@@PGSTROM_SSBM_DBGEN@@ -s2 -X -Ts' DELIMITER '|';
+\copy customer  FROM PROGRAM 'dbgen-ssbm -q -s2 -X -Tc' DELIMITER '|';
+\copy date1     FROM PROGRAM 'dbgen-ssbm -q -s2 -X -Td' DELIMITER '|';
+\copy lineorder FROM PROGRAM 'dbgen-ssbm -q -s2 -X -Tl' DELIMITER '|';
+\copy part      FROM PROGRAM 'dbgen-ssbm -q -s2 -X -Tp' DELIMITER '|';
+\copy supplier  FROM PROGRAM 'dbgen-ssbm -q -s2 -X -Ts' DELIMITER '|';
 
 --
 -- Simple large tables (for CPU fallback & suspend/resume case)
@@ -166,10 +169,11 @@ INSERT INTO t0 (SELECT 2000001, '__cpu_fallback__',
                   FROM generate_series(1,256) x);
 
 -- mark regression test database (large ones) is built
+\set sql_func_body 'SELECT ':application_name
 CREATE OR REPLACE FUNCTION
 pgstrom.regression_testdb_revision()
 RETURNS int
-AS 'SELECT @@PGSTROM_REGRESS_REVISION@@'
+AS :'sql_func_body'
 LANGUAGE 'sql';
 
 COMMIT;

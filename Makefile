@@ -222,7 +222,7 @@ REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --outputdir=$(STROM_BUILD_ROOT)/test \
                --encoding=UTF-8 \
                --load-extension=pg_strom \
-               --launcher="env PGDATABASE=$(REGRESS_DBNAME)" \
+               --launcher="env PGDATABASE=$(REGRESS_DBNAME) PATH=$(shell dirname $(SSBM_DBGEN)):$$PATH PGAPPNAME=$(REGRESS_REVISION)" \
                $(shell test "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" = "t" && echo "--use-existing")
 REGRESS_PREP = $(SSBM_DBGEN) $(TESTAPP_LARGEOBJECT) $(REGRESS_INIT_SQL)
 
@@ -252,13 +252,6 @@ $(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
 	      -e 's/^/  "/g'   -e 's/$$/\\n"/g' < $*.cu;		\
 	  echo ";") > $@
-
-#
-# initial setup of regression test
-#
-$(REGRESS_INIT_SQL): $(REGRESS_INIT_SQL:.sql=.in)
-	sed -e 's|@@PGSTROM_REGRESS_REVISION@@|$(REGRESS_REVISION)|g' \
-        -e 's|@@PGSTROM_SSBM_DBGEN@@|$(SSBM_DBGEN)|g' < $< > $@
 
 #
 # Build documentation
