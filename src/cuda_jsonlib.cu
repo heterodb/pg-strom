@@ -43,6 +43,12 @@ typedef cl_uint		JEntry;
 #define JBE_ISBOOL_FALSE(je) (((je) & JENTRY_TYPEMASK) == JENTRY_ISBOOL_FALSE)
 #define JBE_ISBOOL(je)		(JBE_ISBOOL_TRUE(je_) || JBE_ISBOOL_FALSE(je_))
 
+/*
+ * We store an offset every JB_OFFSET_STRIDE children, regardless of the
+ * sub-field type.
+ */
+#define JB_OFFSET_STRIDE		32
+
 /* Jsonb array or object node */
 typedef struct JsonbContainer
 {
@@ -256,6 +262,7 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 		   JsonContainerIsArray(jheader));
 	/* extract jsonb object value */
 	entry = __Fetch(&jc->children[index]);
+
 	if (JBE_ISNULL(entry) ||
 		JBE_ISSTRING(entry) ||
 		JBE_ISNUMERIC(entry) ||
@@ -272,13 +279,13 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 		{
 			data = base + getJsonbOffset(jc, index);
 			datalen = getJsonbLength(jc, index);
-			sz += INTALIGN(datalen);
+			sz += datalen;
 		}
 		else if (JBE_ISNUMERIC(entry))
 		{
 			data = base + INTALIGN(getJsonbOffset(jc, index));
 			datalen = VARSIZE_ANY(data);
-			sz += INTALIGN(datalen);
+			sz += datalen;
 		}
 		vl = (varlena *)kern_context_alloc(kcxt, sz);
 		if (!vl)
@@ -294,15 +301,14 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 			r->header = JB_FARRAY | JB_FSCALAR | 1;
 			if (!data)
 			{
-				assert(!JBE_HAS_OFF(entry));
-				r->children[0] = entry;
+				entry = (entry & JENTRY_TYPEMASK);
 			}
 			else
 			{
 				memcpy((char *)r + off, data, datalen);
-				r->children[0] = (entry & JENTRY_TYPEMASK)
-					| JENTRY_HAS_OFF | off;
+				entry = (entry & JENTRY_TYPEMASK) | datalen;
 			}
+			r->children[0] = entry;
 			SET_VARSIZE(vl, sz);
 
 			res.isnull = false;
@@ -602,13 +608,13 @@ extractTextItemFromContainer(kern_context *kcxt,
 	{
 		res.isnull = false;
 		res.length = -1;
-		res.value  = (char *)"\x09" "true";
+		res.value  = (char *)"\x0b" "true";
 	}
 	else if (JBE_ISBOOL_FALSE(entry))
 	{
-		res.isnull = true;
+		res.isnull = false;
 		res.length = -1;
-		res.value  = (char *)"\x0b" "false";
+		res.value  = (char *)"\x0d" "false";
 	}
 	else if (JBE_ISCONTAINER(entry))
 	{
@@ -832,7 +838,7 @@ pgfn_jsonb_object_field_as_numeric(kern_context *kcxt,
 	if (!pg_varlena_datum_extract(kcxt, arg1, &jdata, &jlen) ||
 		!pg_varlena_datum_extract(kcxt, arg2, &kdata, &klen))
 	{
-		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+		result.isnull = true;
 	}
 	else
 	{

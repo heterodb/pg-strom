@@ -188,7 +188,8 @@ static struct {
 	DEVTYPE_DECL("jsonb",   "JSONBOID",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_JSONLIB,
-				 sizeof(pg_varlena_t),
+				 /* see comment at vlbuf_estimate_jsonb() */
+				 TOAST_TUPLE_THRESHOLD,
 				 pg_jsonb_devtype_hashfunc),
 	/*
 	 * range types

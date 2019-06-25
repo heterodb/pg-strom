@@ -947,6 +947,7 @@ pg_numeric_to_cstring(kern_context *kcxt, varlena *numeric,
 		if (cp >= endp)
 			return -1;
 		*cp++ = '.';
+		lastp = cp + dscale;
 		for (int i = 0; i < dscale; d++, i += PG_DEC_DIGITS)
 		{
 			if (d >= 0 && d < ndigits)
@@ -959,23 +960,12 @@ pg_numeric_to_cstring(kern_context *kcxt, varlena *numeric,
 			d1 = dig / 1000;
 			dig -= d1 * 1000;
 			*cp++ = d1 + '0';
-			if (d1 != 0)
-				lastp = cp;
-
 			d1 = dig / 100;
 			dig -= d1 * 100;
 			*cp++ = d1 + '0';
-			if (d1 != 0)
-				lastp = cp;
-
 			d1 = dig / 10;
-			if (d1 != 0)
-				lastp = cp;
 			dig -= d1 * 10;
 			*cp++ = d1 + '0';
-			if (d1 != 0)
-				lastp = cp;
-
 			*cp++ = dig + '0';
 			if (dig != 0)
 				lastp = cp;
@@ -985,17 +975,11 @@ pg_numeric_to_cstring(kern_context *kcxt, varlena *numeric,
 			d1 = dig / 10;
 			dig -= d1 * 10;
 			*cp++ = d1 + '0';
-			if (d1 != 0)
-				lastp = cp;
 			*cp++ = dig + '0';
-			if (dig != 0)
-				lastp = cp;
 #elif PG_DEC_DIGITS == 1
 			if (cp >= endp)
 				return -1;
 			*cp++ = dig + '0';
-			if (dig != 0)
-				lastp = cp;
 #else
 #error unsupported NBASE
 #endif
