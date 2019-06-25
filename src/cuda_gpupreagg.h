@@ -701,7 +701,7 @@ kern_gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
 	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
-KERNEL_FUNCTION_MAXTHREADS(void)
+KERNEL_FUNCTION(void)
 kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 								 kern_errorbuf *kgjoin_errorbuf,
 								 kern_data_store *kds_slot,

@@ -417,7 +417,6 @@ gpupreagg_setup_row(kern_context *kcxt,
 				break;
 		}
 		/* update statistics */
-		//pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
 		count = __syncthreads_count(tupitem != NULL);
 		if (get_local_id() == 0)
 		{
@@ -567,8 +566,6 @@ gpupreagg_setup_block(kern_context *kcxt,
 					goto out;
 			}
 			/* update statistics */
-			//to be syncthreads_count?
-			//pgstromStairlikeBinaryCount(htup != NULL ? 1 : 0, &count);
 			count = __syncthreads_count(htup != NULL);
 			if (get_local_id() == 0)
 			{
@@ -686,7 +683,6 @@ gpupreagg_setup_arrow(kern_context *kcxt,
 				break;
 		}
 		/* update statistics */
-		//pgstromStairlikeBinaryCount(rc, &count);
 		count = __syncthreads_count(rc);
 		if (get_local_id() == 0)
 		{
@@ -716,12 +712,16 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
 	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
 	cl_uint			nvalids;
-	cl_uint			slot_index;
-	cl_int			index;
+	cl_int			i, j;
 	cl_bool			is_last_reduction = false;
 	cl_char		   *slot_dclass;
 	Datum		   *slot_values;
 	cl_char		   *ri_map;
+	/*
+	 * NoGroup reduction fetches 4096 rows at once. It consumes 36KB of
+	 * shared memory per streaming multiprocessor.
+	 */
+#define NOGROUP_BLOCK_SZ		4096
 	__shared__ cl_bool	l_dclass[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
 	__shared__ cl_uint	base;
@@ -744,55 +744,54 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	do {
 		/* fetch next items from the kds_slot */
 		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
+			base = atomicAdd(&kgpreagg->read_slot_pos, MAXTHREADS_PER_BLOCK);
 		__syncthreads();
 
-		if (base + get_local_size() >= kds_slot->nitems)
+		if (base + MAXTHREADS_PER_BLOCK >= kds_slot->nitems)
 			is_last_reduction = true;
 		if (base >= kds_slot->nitems)
 			break;
-		nvalids = Min(kds_slot->nitems - base, get_local_size());
-		slot_index = base + get_local_id();
-		assert(slot_index < kds_slot->nitems || get_local_id() >= nvalids);
-
+		nvalids = Min(kds_slot->nitems - base, MAXTHREADS_PER_BLOCK);
 		/* reductions for each columns */
-		slot_dclass = KERN_DATA_STORE_DCLASS(kds_slot, slot_index);
-		slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
-		for (index=0; index < kds_slot->ncols; index++)
+		for (j=0; j < kds_slot->ncols; j++)
 		{
 			int		dist, buddy;
 
 			/* do nothing, if attribute is not preagg-function */
-			if (!attr_is_preagg[index])
+			if (!attr_is_preagg[j])
 				continue;
 			/* load the value from kds_slot to local */
-			if (get_local_id() < nvalids)
+			for (i = get_local_id(); i < nvalids; i += get_local_size())
 			{
-				l_dclass[get_local_id()] = slot_dclass[index];
-                l_values[get_local_id()] = slot_values[index];
+				assert(base + i < kds_slot->nitems);
+				l_dclass[i] = KERN_DATA_STORE_DCLASS(kds_slot, base + i)[j];
+				l_values[i] = KERN_DATA_STORE_VALUES(kds_slot, base + i)[j];
 			}
 			__syncthreads();
 
 			/* do reduction */
 			for (dist=2, buddy=1; dist < 2 * nvalids; buddy=dist, dist *= 2)
 			{
-				if ((get_local_id() & (dist-1)) == 0 &&
-					(get_local_id() + (buddy)) < nvalids)
+				for (i = get_local_id(); i < nvalids; i += get_local_size())
 				{
-					gpupreagg_nogroup_calc(index,
-										   &l_dclass[get_local_id()],
-										   &l_values[get_local_id()],
-										   l_dclass[get_local_id() + buddy],
-										   l_values[get_local_id() + buddy]);
+					if ((i & (dist - 1)) == 0 &&
+						(i + (buddy)) < nvalids)
+					{
+						gpupreagg_nogroup_calc(j,
+											   &l_dclass[i],
+											   &l_values[i],
+											   l_dclass[i + buddy],
+											   l_values[i + buddy]);
+					}
+					__syncthreads();
 				}
-				__syncthreads();
 			}
 
 			/* store this value to kds_slot from isnull/values */
 			if (get_local_id() == 0)
 			{
-				slot_dclass[index] = l_dclass[get_local_id()];
-				slot_values[index] = l_values[get_local_id()];
+				KERN_DATA_STORE_DCLASS(kds_slot, base)[j] = l_dclass[0];
+				KERN_DATA_STORE_VALUES(kds_slot, base)[j] = l_values[0];
 			}
 			__syncthreads();
 		}
@@ -811,10 +810,10 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 			{
 				/* just copy */
 				memcpy(KERN_DATA_STORE_DCLASS(kds_final, 0),
-					   KERN_DATA_STORE_DCLASS(kds_slot, slot_index),
+					   KERN_DATA_STORE_DCLASS(kds_slot, base),
 					   sizeof(cl_char) * kds_slot->ncols);
 				memcpy(KERN_DATA_STORE_VALUES(kds_final, 0),
-					   KERN_DATA_STORE_VALUES(kds_slot, slot_index),
+					   KERN_DATA_STORE_VALUES(kds_slot, base),
 					   sizeof(Datum) * kds_slot->ncols);
 				atomicAdd(&kgpreagg->num_groups, 1);
 				atomicExch(&kds_final->nitems, 1);	/* UNLOCKED */
@@ -830,8 +829,8 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 				gpupreagg_global_calc(
 					KERN_DATA_STORE_DCLASS(kds_final, 0),
 					KERN_DATA_STORE_VALUES(kds_final, 0),
-					KERN_DATA_STORE_DCLASS(kds_slot, slot_index),
-					KERN_DATA_STORE_VALUES(kds_slot, slot_index));
+					KERN_DATA_STORE_DCLASS(kds_slot, base),
+					KERN_DATA_STORE_VALUES(kds_slot, base));
 			}
 			else
 			{
@@ -845,8 +844,8 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		 * reported CpuReCheck error, CPU fallback routine shall ignore
 		 * the rows to avoid duplication in count.
 		 */
-		if (slot_index < kds_slot->nitems)
-			ri_map[slot_index] = true;
+		for (i = get_local_id(); i < nvalids; i += get_local_size())
+			ri_map[base + i] = true;
 		__syncthreads();
 	} while (!is_last_reduction);
 }
