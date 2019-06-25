@@ -717,13 +717,9 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	cl_char		   *slot_dclass;
 	Datum		   *slot_values;
 	cl_char		   *ri_map;
-	/*
-	 * NoGroup reduction fetches 4096 rows at once. It consumes 36KB of
-	 * shared memory per streaming multiprocessor.
-	 */
-#define NOGROUP_BLOCK_SZ		4096
-	__shared__ cl_bool	l_dclass[MAXTHREADS_PER_BLOCK];
-	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
+#define NOGROUP_BLOCK_SZ		4096	/* 36kB of shared memory consumption */
+	__shared__ cl_bool	l_dclass[NOGROUP_BLOCK_SZ];
+	__shared__ Datum	l_values[NOGROUP_BLOCK_SZ];
 	__shared__ cl_uint	base;
 
 	/* skip if previous stage reported an error */
@@ -744,14 +740,14 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	do {
 		/* fetch next items from the kds_slot */
 		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_slot_pos, MAXTHREADS_PER_BLOCK);
+			base = atomicAdd(&kgpreagg->read_slot_pos, NOGROUP_BLOCK_SZ);
 		__syncthreads();
 
-		if (base + MAXTHREADS_PER_BLOCK >= kds_slot->nitems)
+		if (base + NOGROUP_BLOCK_SZ >= kds_slot->nitems)
 			is_last_reduction = true;
 		if (base >= kds_slot->nitems)
 			break;
-		nvalids = Min(kds_slot->nitems - base, MAXTHREADS_PER_BLOCK);
+		nvalids = Min(kds_slot->nitems - base, NOGROUP_BLOCK_SZ);
 		/* reductions for each columns */
 		for (j=0; j < kds_slot->ncols; j++)
 		{
@@ -783,8 +779,8 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 											   l_dclass[i + buddy],
 											   l_values[i + buddy]);
 					}
-					__syncthreads();
 				}
+				__syncthreads();
 			}
 
 			/* store this value to kds_slot from isnull/values */
