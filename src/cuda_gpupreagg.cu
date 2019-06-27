@@ -716,7 +716,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	cl_bool			is_last_reduction = false;
 	cl_char		   *slot_dclass;
 	Datum		   *slot_values;
-	cl_char		   *ri_map;
+	cl_char		   *row_inval_map;
 #define NOGROUP_BLOCK_SZ		4096	/* 36kB of shared memory consumption */
 	__shared__ cl_bool	l_dclass[NOGROUP_BLOCK_SZ];
 	__shared__ Datum	l_values[NOGROUP_BLOCK_SZ];
@@ -735,7 +735,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	assert(kds_slot->ncols == kds_final->ncols);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
-	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	row_inval_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 
 	do {
 		/* fetch next items from the kds_slot */
@@ -841,7 +841,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		 * the rows to avoid duplication in count.
 		 */
 		for (i = get_local_id(); i < nvalids; i += get_local_size())
-			ri_map[base + i] = true;
+			row_inval_map[base + i] = true;
 		__syncthreads();
 	} while (!is_last_reduction);
 }
@@ -1239,10 +1239,6 @@ retry_fnext:
 /*
  * gpupreagg_group_reduction
  */
-
-/* keep shared memory consumption less than 32KB */
-#define GPUPREAGG_LOCAL_HASHSIZE	1720
-
 DEVICE_FUNCTION(void)
 gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_gpupreagg *kgpreagg,		/* in/out */
@@ -1253,23 +1249,23 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 {
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
 	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	pagg_hashslot	old_slot;
-	pagg_hashslot	new_slot;
-	pagg_hashslot	cur_slot;
-	cl_bool		   *slot_dclass;
-	Datum		   *slot_values;
-	cl_uint			index;
-	cl_uint			count;
+	cl_uint			i, j;
 	cl_uint			kds_index;
+	cl_uint			buf_index;
+	cl_uint			hash_index;
 	cl_uint			hash_value;
-	cl_uint			owner_index;
-	cl_bool			is_owner = false;
+	cl_bool			is_leader;
 	cl_bool			is_last_reduction = false;
-	cl_char		   *ri_map;
-	__shared__ cl_bool	l_dclass[MAXTHREADS_PER_BLOCK];
-	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
-	__shared__ cl_int	l_kds_index[MAXTHREADS_PER_BLOCK];
-	__shared__ pagg_hashslot l_hashslot[GPUPREAGG_LOCAL_HASHSIZE];
+	cl_bool			l_hashslot_cleanup = true;
+	cl_char		   *row_inval_map;
+#define GROUPBY_LOCAL_HASHSIZE	2400
+#define GROUPBY_LOCAL_BUFSIZE	1800
+	__shared__ cl_bool	l_dclass[GROUPBY_LOCAL_BUFSIZE];
+	__shared__ Datum	l_values[GROUPBY_LOCAL_BUFSIZE];
+	__shared__ cl_short l_b2h_index[GROUPBY_LOCAL_BUFSIZE];	/* B->H index */
+	__shared__ pagg_hashslot l_hashslot[GROUPBY_LOCAL_HASHSIZE];
+	__shared__ cl_short	l_h2b_index[GROUPBY_LOCAL_HASHSIZE];/* H->B index */
+	__shared__ cl_uint	l_nitems;
 	__shared__ cl_uint	base;
 
 	/* skip if previous stage reported an error */
@@ -1282,142 +1278,171 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	assert(kgpreagg->num_group_keys > 0);
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
-	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	row_inval_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
 
-clean_restart:
-	/* setup local hashslot */
-	for (index = get_local_id();
-		 index < GPUPREAGG_LOCAL_HASHSIZE;
-		 index += get_local_size())
-	{
-		l_hashslot[index].s.hash = 0;
-		l_hashslot[index].s.index = (cl_uint)(0xffffffff);
-	}
-	__syncthreads();
-
-	kds_index = INT_MAX;
-	hash_value = ~0;
-	is_owner = false;
-	owner_index = INT_MAX;
-	slot_dclass = NULL;
-	slot_values = NULL;
 	do {
+		cl_bool	   *slot_dclass = NULL;
+		Datum	   *slot_values = NULL;
+		cl_bool	   *dest_dclass = NULL;
+		Datum	   *dest_values = NULL;
+
+		/* cleanup hash-slot */
+		if (l_hashslot_cleanup)
+		{
+			l_hashslot_cleanup = false;
+			for (i = get_local_id();
+				 i < GROUPBY_LOCAL_HASHSIZE;
+				 i += get_local_size())
+			{
+				l_hashslot[i].s.hash = 0;
+				l_hashslot[i].s.index = (cl_uint)(0xffffffff);
+			}
+			if (get_local_id() == 0)
+				l_nitems = 0;
+			__syncthreads();
+		}
 		/* fetch next items from the kds_slot */
-		index = pgstromStairlikeBinaryCount(!is_owner, &count);
-		assert(count > 0);
 		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_slot_pos, count);
+			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
 		__syncthreads();
-		if (base + count >= kds_slot->nitems)
+		if (base + get_local_size() >= kds_slot->nitems)
 			is_last_reduction = true;
 		if (base >= kds_slot->nitems)
 			goto skip_local_reduction;
-		/* Assign a kds_index if thread is not owner */
-		if (!is_owner)
+		/*
+		 * Lookup local hash-slot, or create a new one if not exists
+		 */
+		kds_index = base + get_local_id();
+		if (kds_index < kds_slot->nitems)
 		{
-			kds_index = base + index;
-			if (kds_index < kds_slot->nitems)
-			{
-				slot_dclass = KERN_DATA_STORE_DCLASS(kds_slot, kds_index);
-				slot_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
-				hash_value = gpupreagg_hashvalue(kcxt,
-												 slot_dclass,
-												 slot_values);
-			}
-			else
-			{
-				slot_dclass = NULL;
-				slot_values = NULL;
-			}
-			l_kds_index[get_local_id()] = kds_index;
+			slot_dclass = KERN_DATA_STORE_DCLASS(kds_slot, kds_index);
+			slot_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
+			hash_value = gpupreagg_hashvalue(kcxt,
+											 slot_dclass,
+											 slot_values);
 		}
-		else
-			assert(l_kds_index[get_local_id()] == kds_index);
 		/* error checks */
 		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
 
-		/* Local hash-table lookup to get owner index */
-		if (is_owner)
-			assert(get_local_id() == owner_index);
-		else if (kds_index < kds_slot->nitems)
+		if (kds_index < kds_slot->nitems)
 		{
-			new_slot.s.hash		= hash_value;
-			new_slot.s.index	= get_local_id();
-			old_slot.s.hash		= 0;
-			old_slot.s.index	= (cl_uint)(0xffffffff);
-			index = hash_value % GPUPREAGG_LOCAL_HASHSIZE;
+			pagg_hashslot	old_slot;
+			pagg_hashslot	new_slot;
+			pagg_hashslot	cur_slot;
 
-		lhash_next:
-			cur_slot.value = atomicCAS(&l_hashslot[index].value,
-									   old_slot.value,
-									   new_slot.value);
-			if (cur_slot.value == old_slot.value)
-			{
-				/* hashslot was empty, so thread should own this slot */
-				owner_index = new_slot.s.index;
-				is_owner = true;
-			}
-			else
-			{
-				cl_uint		buddy_index = l_kds_index[cur_slot.s.index];
-
-				assert(cur_slot.s.index < get_local_size());
-				assert(buddy_index < kds_slot->nitems);
+			new_slot.s.hash     = hash_value;
+			new_slot.s.index    = kds_index;
+			old_slot.s.hash     = 0;
+			old_slot.s.index    = (cl_uint)(0xffffffff);
+			hash_index = hash_value % GROUPBY_LOCAL_HASHSIZE;
+			do {
+				cur_slot.value = atomicCAS(&l_hashslot[hash_index].value,
+										   old_slot.value,
+										   new_slot.value);
+				if (cur_slot.value == old_slot.value)
+				{
+					/* hash-slot was empty, so inject a new one */
+					buf_index = atomicAdd(&l_nitems, 1);
+					l_h2b_index[hash_index] = buf_index;
+					l_b2h_index[buf_index] = hash_index;
+					dest_dclass = slot_dclass;
+					dest_values = slot_values;
+					break;
+				}
+				assert(cur_slot.s.index < kds_slot->nitems);
 				if (cur_slot.s.hash == hash_value &&
 					gpupreagg_keymatch(kcxt,
 									   kds_slot, kds_index,
-									   kds_slot, buddy_index))
+									   kds_slot, cur_slot.s.index))
 				{
-					owner_index = cur_slot.s.index;
+					/* grouping-keys are already on hash-slot */
+					i = cur_slot.s.index;
+					dest_dclass = KERN_DATA_STORE_DCLASS(kds_slot, i);
+					dest_values = KERN_DATA_STORE_VALUES(kds_slot, i);
+					break;
 				}
-				else
-				{
-					index = (index + 1) % GPUPREAGG_LOCAL_HASHSIZE;
-					if (kcxt->errcode == ERRCODE_STROM_SUCCESS)
-						goto lhash_next;
-				}
-			}
+				hash_index = (hash_index + 1) % GROUPBY_LOCAL_HASHSIZE;
+			} while (kcxt->errcode == ERRCODE_STROM_SUCCESS);
 		}
 		else
-			owner_index = INT_MAX;
+		{
+			hash_index = UINT_MAX;	/* shall never fit */
+		}
 		/* error checks */
 		if (__syncthreads_count(kcxt->errcode) > 0)
 			return;
-
-		/* Local reduction for each column */
-		for (index=0; index < kds_slot->ncols; index++)
+		/*
+		 * Note that l_h2b_index / l_b2h_index are not updated atomically,
+		 * so we have to fetch values from these array after synchronization
+		 * point.
+		 */
+		if (hash_index < GROUPBY_LOCAL_HASHSIZE)
 		{
-			if (!attr_is_preagg[index])
+			buf_index = l_h2b_index[hash_index];
+			assert(buf_index < l_nitems);
+			assert(l_b2h_index[buf_index] == hash_index);
+		}
+		else
+			buf_index = UINT_MAX;	/* shall never fit */
+
+		/*
+		 * Determines the thread that performs as "owner" of the entry.
+		 * Owner loads initial value of reduction to l_dclass[]/l_values[]
+		 * buffer, then stores the reduction results to the same slot on
+		 * the kds_slot. These are NOT atomic operation.
+		 */
+		for (i = get_local_id();
+			 i < GROUPBY_LOCAL_BUFSIZE;
+			 i += get_local_size())
+			l_values[i] = 0;
+		__syncthreads();
+		if (buf_index < GROUPBY_LOCAL_BUFSIZE &&
+			atomicMax(&l_values[buf_index], 1) == 0)
+		{
+			is_leader = true;
+		}
+		else
+		{
+			is_leader = false;
+		}
+		__syncthreads();
+
+		/*
+		 * Local reduction for each column
+		 */
+		for (j=0; j < kds_slot->ncols; j++)
+		{
+			if (!attr_is_preagg[j])
 				continue;
 			/* load the value to local storage */
-			if (kds_index < kds_slot->nitems)
+			if (is_leader)
 			{
-				l_dclass[get_local_id()] = slot_dclass[index];
-				l_values[get_local_id()] = slot_values[index];
+				assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
+				l_dclass[buf_index] = dest_dclass[j];
+				l_values[buf_index] = dest_values[j];
 			}
 			__syncthreads();
 
 			/* reduction by atomic operation */
-			if (!is_owner && kds_index < kds_slot->nitems)
+			if (kds_index < kds_slot->nitems && slot_values != dest_values)
 			{
-				assert(owner_index < get_local_size());
-				gpupreagg_local_calc(index,
-									 &l_dclass[owner_index],
-									 &l_values[owner_index],
-									 l_dclass[get_local_id()],
-									 l_values[get_local_id()]);
+				assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
+				gpupreagg_local_calc(j,
+									 &l_dclass[buf_index],
+									 &l_values[buf_index],
+									 slot_dclass[j],
+									 slot_values[j]);
 			}
 			__syncthreads();
 
-			/* move the aggregation value */
-			if (is_owner)
+			/* store the value from local storage */
+			if (is_leader)
 			{
-				assert(get_local_id() == owner_index);
-				slot_dclass[index] = l_dclass[owner_index];
-				slot_values[index] = l_values[owner_index];
+				dest_dclass[j] = l_dclass[buf_index];
+				dest_values[j] = l_values[buf_index];
 			}
 			__syncthreads();
 		}
@@ -1428,31 +1453,48 @@ clean_restart:
 		 * process this row again. (owner's row already contains its own
 		 * values and accumulated ones from non-owner's row)
 		 */
-		if (!is_owner && kds_index < kds_slot->nitems)
-			ri_map[kds_index] = true;
+		if (!is_leader && kds_index < kds_slot->nitems)
+			row_inval_map[kds_index] = true;
 
 	skip_local_reduction:
 		/*
 		 * final reduction steps if needed
 		 */
-		count = __syncthreads_count(is_owner);
-		if (is_last_reduction || count > get_local_size() / 8)
+		if (is_last_reduction ||
+			l_nitems + get_local_size() > GROUPBY_LOCAL_BUFSIZE)
 		{
-			cl_bool		lock_wait;
+			cl_uint		nloops;
+			cl_uint		loop;
+			cl_uint		nvalids;
 
-			do {
-				/*
-				 * Get shared-lock of the final hash-slot
-				 * If it may have overflow, expand length of the hash-slot
-				 * on demand, under its exclusive lock.
-				 */
-				if (!gpupreagg_expand_final_hash(kcxt, f_hash, count))
-					lock_wait = true;
-				else
-				{
-					lock_wait = false;
-					if (is_owner)
+			nloops = (l_nitems + get_local_size() - 1) / get_local_size();
+			for (loop=0; loop < nloops; loop++)
+			{
+				cl_bool		reduction_done = false;
+				cl_bool		lock_wait;
+
+				nvalids = Min(l_nitems - loop * get_local_size(),
+							  get_local_size());
+				do {
+					/*
+					 * Get shared-lock of the final hash-slot
+					 * If it may have overflow, expand length of the final
+					 * hash-slot on demand, under its exclusive lock.
+					 */
+					if (!gpupreagg_expand_final_hash(kcxt, f_hash, nvalids))
+						lock_wait = true;
+					else if (get_local_id() >= nvalids || reduction_done)
+						lock_wait = false;
+					else
 					{
+						buf_index  = get_local_size() * loop + get_local_id();
+						assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
+						hash_index = l_b2h_index[buf_index];
+						assert(hash_index < GROUPBY_LOCAL_HASHSIZE);
+						kds_index  = l_hashslot[hash_index].s.index;
+						hash_value = l_hashslot[hash_index].s.hash;
+						assert(kds_index < kds_slot->nitems);
+
 						if (gpupreagg_final_reduction(kcxt,
 													  kgpreagg,
 													  kds_slot,
@@ -1461,8 +1503,8 @@ clean_restart:
 													  kds_final,
 													  f_hash))
 						{
-							is_owner = false;
-							ri_map[kds_index] = true;
+							reduction_done = true;
+							lock_wait = false;
 						}
 						else
 						{
@@ -1473,15 +1515,17 @@ clean_restart:
 					/* release shared lock of the final hash-slot */
 					if (get_local_id() == 0)
 						atomicSub(&f_hash->lock, 2);
-				}
-				/* quick bailout on error */
-				if (__syncthreads_count(kcxt->errcode) > 0)
-					return;
-				count = __syncthreads_count(is_owner);
-			} while (__syncthreads_count(lock_wait) > 0);
-			/* OK, pending items are successfully moved */
-			if (!is_last_reduction)
-				goto clean_restart;
+					/* quick bailout on error */
+					if (__syncthreads_count(kcxt->errcode) > 0)
+						return;
+				} while (__syncthreads_count(lock_wait) > 0);
+			}
+			/*
+			 * OK, pending items were successfully moved to the final buffer.
+			 * Local hash-slots shall be reset, and restart.
+			 */
+			l_hashslot_cleanup = true;
 		}
+		__syncthreads();
 	} while(!is_last_reduction);
 }

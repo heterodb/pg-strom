@@ -5316,20 +5316,20 @@ resume_kernel:
 
 	/*
 	 * Launch:
-	 * KERNEL_FUNCTION_MAXTHREADS(void)
+	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
 	 *                          kern_errorbuf *kgjoin_errorbuf,
 	 *                          kern_data_store *kds_slot,
 	 *                          kern_data_store *kds_final,
 	 *                          kern_global_hashslot *f_hash)
 	 */
-	rc = gpuLargestBlockSize(&grid_sz,
+	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_reduction,
 							 CU_DEVICE_PER_THREAD,
-							 sizeof(cl_int) * 1024, 0);
+							 0, sizeof(int));
 	if (rc != CUDA_SUCCESS)
-		werror("failed on gpuLargestBlockSize: %s", errorText(rc));
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_nullptr;
 	kern_args[2] = &m_kds_slot;
@@ -5682,7 +5682,7 @@ resume_kernel:
 
 	/*
 	 * Launch:
-	 * KERNEL_FUNCTION_MAXTHREADS(void)
+	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
 	 *                          kern_errorbuf *kgjoin_errorbuf,
 	 *                          kern_data_store *kds_slot,
