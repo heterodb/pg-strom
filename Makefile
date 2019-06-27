@@ -53,7 +53,9 @@ GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
 
-MAXREGCOUNT := 32
+# 32k / 128 = 256 threads per SM
+MAXREGCOUNT := 128
+
 # MEMO: Some of kernel functions shall be built to launch 1024 threads
 # per block, by KERNEL_FUNCTION_MAXTHREADS(). It saves usage of registers
 # per thread. Right now, NVCC/NVRTC configures 32x1024 = 32k registers per SM.
