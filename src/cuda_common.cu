@@ -1467,7 +1467,6 @@ pg_simple_array_from_arrow(kern_context *kcxt,
 		ARR_LBOUND(res)[0] = 1;
 
 		nullmap = ARR_NULLBITMAP(res);
-		Assert(dest + sz == ARR_DATA_PTR(res));
 	}
 
 	for (i=0; i < nitems; i++)
@@ -1523,7 +1522,6 @@ pg_varlena_array_from_arrow(kern_context *kcxt,
 		ARR_LBOUND(res)[0] = 1;
 
 		nullmap = ARR_NULLBITMAP(res);
-		Assert(dest + sz == ARR_DATA_PTR(res));
 	}
 
 	for (i=0; i < nitems; i++)

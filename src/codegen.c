@@ -3371,16 +3371,15 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	ReleaseSysCache(fn_tup);
 
 	__appendStringInfo(&context->str,
-					   "PG_%s_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
-					   dtype_e->type_length < 0
-					   ? "VARLENA"
-					   : "SIMPLE",
+					   "PG_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
 					   dfunc->func_devname);
 	codegen_expression_walker(context, node_s, NULL);
 	__appendStringInfo(&context->str, ", ");
 	codegen_expression_walker(context, node_a, NULL);
-	__appendStringInfo(&context->str, ", %s)",
-					   opexpr->useOr ? "true" : "false");
+	__appendStringInfo(&context->str, ", %s, %d, %d)",
+					   opexpr->useOr ? "true" : "false",
+					   dtype_e->type_length,
+					   dtype_e->type_align);
 	/*
 	 * Cost for PG_SCALAR_ARRAY_OP - It repeats on number of invocation
 	 * of the operator function for each array elements. Tentatively,

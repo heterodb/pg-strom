@@ -70,7 +70,7 @@ STROMCL_VARLENA_DATATYPE_TEMPLATE(varlena);
 		else														\
 		{															\
 			result.isnull = false;									\
-			result.value = *((BASE *) addr);						\
+			memcpy(&result.value, (BASE *)addr, sizeof(BASE));		\
 		}															\
 		return result;												\
 	}																\

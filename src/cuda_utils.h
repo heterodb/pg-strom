@@ -699,15 +699,16 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 	ret = 1;
 	for (i=0; i < ndim; i++)
 	{
+		cl_int		d = __Fetch(dims + i);
 
-		if (dims[i] < 0)
+		if (d < 0)
 		{
 			/* negative dimension implies an error... */
 			STROM_EREPORT(kcxt, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 						  "array size exceeds the limit");
 			return 0;
 		}
-		prod = (cl_long) ret * (cl_long) dims[i];
+		prod = (cl_long) ret * (cl_long) d;
 		ret = (cl_int) prod;
 		if ((cl_long) ret != prod)
 		{
@@ -734,46 +735,74 @@ PG_SCALAR_ARRAY_OP(kern_context *kcxt,
 				   cl_int typelen,
 				   cl_int typealign)
 {
+	kern_colmeta *smeta = array.smeta;
 	ElementType	element;
 	pg_bool_t	result;
 	pg_bool_t	rv;
 	char	   *base;
-	cl_uint		offset;
-	char	   *bitmap;
-	int			bitmask;
+	cl_uint		offset = 0;
+	char	   *nullmap = NULL;
+	int			nullmask = 1;
 	cl_uint		i, nitems;
 
-	/* NULL results towards NULL array */
-	if (array.isnull)
+	/*
+	 * MEMO: In case when we support a device type with non-strict comparison
+	 * function, we need to extract the array loop towards NULL-input.
+	 */
+	if (array.isnull || scalar.isnull)
 	{
 		result.isnull = true;
 		result.value = false;
 		return result;
 	}
 	result.isnull = false;
-	result.value = (useOr ? false : true);
+    result.value = (useOr ? false : true);
 
-	/* how many items in the array? */
-	nitems = ArrayGetNItems(kcxt,
-							ARR_NDIM(array.value),
-							ARR_DIMS(array.value));
+	if (array.length < 0)
+	{
+		nitems = ArrayGetNItems(kcxt,
+								ARR_NDIM(array.value),
+								ARR_DIMS(array.value));
+		base = ARR_DATA_PTR(array.value);
+		nullmap = ARR_NULLBITMAP(array.value);
+	}
+	else
+	{
+		nitems = array.length;
+		base = (char *)array.value;
+		if (smeta->nullmap_offset != 0)
+			nullmap = base + __kds_unpack(smeta->nullmap_offset);
+	}
 	if (nitems == 0)
 		return result;
 
-	/* loop on the array elements */
-	base = ARR_DATA_PTR(array.value);
-	offset = 0;
-	bitmap = ARR_NULLBITMAP(array.value);
-	bitmask = 1;
-
 	for (i=0; i < nitems; i++)
 	{
-		if (bitmap && (*bitmap & bitmask) == 0)
+		if (nullmap && (*nullmap & nullmask) == 0)
 			pg_datum_ref(kcxt, element, NULL);
+		else if (array.length < 0)
+		{
+			/* PG Array */
+			char   *pos = base + offset;
+
+			pg_datum_ref(kcxt, element, pos);
+			if (typelen > 0)
+				offset = TYPEALIGN(typealign, offset + typelen);
+			else if (typelen == -1)
+				offset = TYPEALIGN(typealign, offset + VARSIZE_ANY(pos));
+			else
+			{
+				STROM_EREPORT(kcxt, ERRCODE_WRONG_OBJECT_TYPE,
+							  "unexpected type length");
+				result.isnull = true;
+				return result;
+			}
+		}
 		else
 		{
-			pg_datum_ref(kcxt, element, base + offset);
-			offset = TYPEALIGN(typealign, (offset + typelen));
+			/* Arrow::List */
+			assert(i < array.length);
+			pg_datum_fetch_arrow(kcxt, element, smeta, base, i);
 		}
 		/* call for the comparison function */
 		rv = compare_fn(kcxt, scalar, element);
@@ -797,14 +826,14 @@ PG_SCALAR_ARRAY_OP(kern_context *kcxt,
 				break;
 			}
 		}
-		/* advance the bitmap pointer if any */
-		if (bitmap)
+		/* advance nullmap pointer if any */
+		if (nullmap)
 		{
-			bitmask <<= 1;
-			if (bitmask == 0x0100)
+			nullmask <<= 1;
+			if (nullmask == 0x0100)
 			{
-				bitmap++;
-				bitmask = 1;
+				nullmap++;
+				nullmask = 1;
 			}
 		}
 	}

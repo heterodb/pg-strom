@@ -1426,40 +1426,40 @@ typedef struct
 	cl_uint		elemtype;		/* element type OID */
 } ArrayType;
 
-#define MAXDIM			6
+typedef struct
+{
+	cl_int		ndim;			/* # of dimensions */
+	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
+	cl_uint		elemtype;		/* element type OID */
+} ArrayTypeData;
 
-#define ARR_SIZE(a)		VARSIZE_ANY(a)
-#define ARR_NDIM(a)		(((ArrayType *)(a))->ndim)
-#define ARR_HASNULL(a)	(((ArrayType *)(a))->dataoffset != 0)
-#define ARR_ELEMTYPE(a)	(((ArrayType *)(a))->elemtype)
-#define ARR_DIMS(a)									\
-	((int *) (((char *) (a)) + sizeof(ArrayType)))
-#define ARR_LBOUND(a)								\
-	((int *) (((char *) (a)) + sizeof(ArrayType) +	\
-			  sizeof(int) * ARR_NDIM(a)))
-#define ARR_NULLBITMAP(a)							\
-	(ARR_HASNULL(a)									\
-	 ? (((char *) (a)) + sizeof(ArrayType) +		\
-		2 * sizeof(int) * ARR_NDIM(a))				\
-	 : (char *) NULL)
+#define ARR_SIZE(a)			VARSIZE_ANY(a)
+#define ARR_BODY(a)			((ArrayTypeData *)VARDATA_ANY(a))
+#define ARR_NDIM(a)			__Fetch(&ARR_BODY(a)->ndim)
+#define ARR_DATAOFFSET(a)	__Fetch(&ARR_BODY(a)->dataoffset)
+#define ARR_HASNULL(a)		(ARR_DATAOFFSET(a) != 0)
+#define ARR_ELEMTYPE(a)		__Fetch(&ARR_BODY(a)->elemtype)
+#define ARR_DIMS(a)												\
+	((int *)((char *)VARDATA_ANY(a) + sizeof(ArrayTypeData)))
+#define ARR_LBOUND(a)	(ARR_DIMS(a) + ARR_NDIM(a))
+#define ARR_NULLBITMAP(a)										\
+	(ARR_HASNULL(a) ? (char *)(ARR_DIMS(a) + 2 * ARR_NDIM(a)) : (char *)NULL)
+#define ARR_DATA_PTR(a)											\
+	((char *)VARDATA_ANY(a) +									\
+	 (ARR_HASNULL(a) ? (ARR_DATAOFFSET(a) - VARHDRSZ)			\
+	  : (sizeof(ArrayTypeData) + 2 * sizeof(int) * ARR_NDIM(a))))
+
 /*
  * The total array header size (in bytes) for an array with the specified
  * number of dimensions and total number of items.
+ * NOTE: This macro assume 4-bytes varlena header
  */
 #define ARR_OVERHEAD_NONULLS(ndims)					\
 	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims))
 #define ARR_OVERHEAD_WITHNULLS(ndims, nitems)		\
 	MAXALIGN(sizeof(ArrayType) + 2 * sizeof(int) * (ndims) +	\
 			 ((nitems) + 7) / 8)
-/*
- * Returns a pointer to the actual array data.
- */
-#define ARR_DATA_OFFSET(a)					\
-	(ARR_HASNULL(a)							\
-	 ? ((ArrayType *)(a))->dataoffset		\
-	 : ARR_OVERHEAD_NONULLS(ARR_NDIM(a)))
 
-#define ARR_DATA_PTR(a)		(((char *) (a)) + ARR_DATA_OFFSET(a))
 #endif /* ARRAY_H */
 
 /* ----------------------------------------------------------------
