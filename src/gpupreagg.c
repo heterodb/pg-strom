@@ -3382,7 +3382,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                         cl_char *dst_dclass,\n"
 		"                         Datum   *dst_values)\n"
 		"{\n"
-		"%s\n%s"
+		"%s%s\n%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3392,7 +3392,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                          cl_char *dst_dclass,\n"
 		"                          Datum   *dst_values)\n"
 		"{\n"
-		"%s\n%s"
+		"%s%s\n%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3402,13 +3402,13 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                           cl_char *dst_dclass,\n"
 		"                           Datum   *dst_values)\n"
 		"{\n"
-		"%s\n%s"
+		"%s%s\n%s"
 		"}\n\n",
-		decl.data,
+		decl.data, context->decl_temp.data,
 		tbody.data,
-		decl.data,
+		decl.data, context->decl_temp.data,
 		sbody.data,
-		decl.data,
+		decl.data, context->decl_temp.data,
 		cbody.data);
 
 	if (outer_rel)

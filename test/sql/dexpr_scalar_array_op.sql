@@ -89,3 +89,7 @@ SELECT id,z INTO test03p FROM regtest_data
 -- should be empty result
 SET pg_strom.enabled = off;
 SELECT * FROM regtest_data WHERE null = ANY (x);
+
+-- cleanup
+SET client_min_messages = error;
+DROP SCHEMA regtest_dexpr_scalar_array_op_temp CASCADE;

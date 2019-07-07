@@ -468,67 +468,33 @@ NOT(pg_bool_t arg)
 }
 
 DEVICE_INLINE(pg_bool_t)
-to_bool(cl_bool value)
+PG_BOOL(cl_bool isnull, cl_bool value)
 {
-	pg_bool_t	result;
-
-	result.isnull = false;
-	result.value  = value;
-
-	return result;
+	pg_bool_t	res;
+	res.isnull = isnull;
+	res.value  = value;
+	return res;
 }
+
+#define AND(temp,anynull,x,y)						\
+	((temp) = (x), (anynull) |= (temp).isnull,		\
+	 ((!(temp).isnull && !(temp).value) ? (temp) : (y)))
+#define OR(temp,anynull,x,y)						\
+	((temp) = (x), (anynull) |= (temp).isnull,		\
+	 ((!(temp).isnull &&  (temp).value) ? (temp) : (y)))
 
 /*
- * Support routine for CASE x WHEN y then ... else ... end
+ * A simple wrapper for pgfn_type_compare
  */
-template <typename E, typename T>
-DEVICE_INLINE(T)
-PG_CASEWHEN_ELSE(kern_context *kcxt,
-				 const E& case_val,
-				 const T& else_val)
+template <typename T>
+DEVICE_INLINE(cl_bool)
+pgfn_type_equal(kern_context *kcxt, T arg1, T arg2)
 {
-	return else_val;
-}
+	pg_int4_t	cmp = pgfn_type_compare(kcxt, arg1, arg2);
 
-template <typename E, typename T, typename ...R>
-DEVICE_INLINE(T)
-PG_CASEWHEN_ELSE(kern_context *kcxt,
-				 const E& case_val,
-				 const T& else_val,
-				 const E& test_val,
-				 const T& then_val,
-				 const R&... args_rest)
-{
-	pg_int4_t	cmp;
-
-	if (!case_val.isnull && !test_val.isnull)
-	{
-		cmp = pgfn_type_compare(kcxt, case_val, test_val);
-		if (!cmp.isnull && cmp.value == 0)
-			return then_val;
-	}
-	return PG_CASEWHEN_ELSE(kcxt, case_val, else_val, args_rest...);
-}
-
-template <typename E, typename T, typename ...R>
-DEVICE_INLINE(T)
-PG_CASEWHEN_EXPR(kern_context *kcxt,
-				 const E& case_val,
-				 const E& test_val,
-				 const T& then_val,
-				 const R&... args_rest)
-{
-	pg_int4_t	cmp;
-	E			else_val;
-
-	if (!case_val.isnull && !test_val.isnull)
-	{
-		cmp = pgfn_type_compare(kcxt, case_val, test_val);
-		if (!cmp.isnull && cmp.value == 0)
-			return then_val;
-	}
-	else_val.isnull = true;
-	return PG_CASEWHEN_ELSE(kcxt, case_val, else_val, args_rest...);
+	if (!cmp.isnull && cmp.value == 0)
+		return true;
+	return false;
 }
 
 /*

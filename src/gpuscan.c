@@ -588,7 +588,7 @@ output:
 		"                   HeapTupleHeaderData *htup)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
-		"%s\n"
+		"%s%s\n"
 		"  return %s;\n"
 		"}\n\n"
 		"DEVICE_FUNCTION(cl_bool)\n"
@@ -597,13 +597,15 @@ output:
 		"                         cl_uint row_index)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
-		"%s\n"
+		"%s%s\n"
 		"  return %s;\n"
 		"}\n\n",
 		component,
+		context->decl_temp.data,
 		tfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
 		component,
+		context->decl_temp.data,
 		cfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code));
 }
@@ -700,7 +702,7 @@ codegen_gpuscan_projection(StringInfo kern,
 			}
 		}
 
-		appendStringInfoString(
+		appendStringInfo(
 			kern,
 			"DEVICE_FUNCTION(void)\n"
 			"gpuscan_projection_tuple(kern_context *kcxt,\n"
@@ -897,6 +899,7 @@ codegen_gpuscan_projection(StringInfo kern,
 	 * step.5 - execution of expression node, then store the result.
 	 */
 	resetStringInfo(&temp);
+	resetStringInfo(&context->decl_temp);
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -951,7 +954,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		"                         Datum   *tup_values)\n"
 		"{\n"
 		"  void        *addr __attribute__((unused));\n"
-		"%s", decl.data);
+		"%s%s", decl.data, context->decl_temp.data);
 	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
 	appendStringInfo(kern, "\n%s}\n\n", tbody.data);
 	appendStringInfo(
@@ -964,7 +967,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		"                         Datum   *tup_values)\n"
 		"{\n"
 		"  void        *addr __attribute__((unused));\n"
-		"%s", decl.data);
+		"%s%s", decl.data, context->decl_temp.data);
 	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
 	appendStringInfo(kern, "\n%s}\n\n", cbody.data);
 
@@ -1025,6 +1028,9 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 {
 	build_gpuscan_projection_context *context = __context;
 	int			extra_sz;
+
+	if (!node)
+		return false;
 
 	if (IsA(node, Var))
 	{

@@ -3791,6 +3791,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	 */
 	context->used_vars = NIL;
 	context->param_refs = NULL;
+	resetStringInfo(&context->decl_temp);
 	if (join_quals != NIL)
 		join_quals_code = pgstrom_codegen_expression((Node *)join_quals,
 													 context);
@@ -3809,8 +3810,8 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"                          cl_uint *o_buffer,\n"
 		"                          HeapTupleHeaderData *i_htup,\n"
 		"                          cl_bool *joinquals_matched)\n"
-		"{\n",
-		cur_depth);
+		"{\n%s",
+		cur_depth, context->decl_temp.data);
 
 	/*
 	 * variable/params declaration & initialization
@@ -3887,6 +3888,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
+	resetStringInfo(&context->decl_temp);
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -3926,7 +3928,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                          cl_uint *o_buffer,\n"
 		"                          cl_bool *p_is_null_keys)\n"
 		"{\n"
-		"%s%s"
+		"%s%s%s"
 		"  *p_is_null_keys = is_null_keys;\n"
 		"  hash ^= 0xffffffff;\n"
 		"  return hash;\n"
@@ -3934,6 +3936,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"\n",
 		cur_depth,
 		decl.data,
+		context->decl_temp.data,
 		body.data);
 	pfree(decl.data);
 	pfree(body.data);
@@ -3978,6 +3981,10 @@ gpujoin_codegen_projection(StringInfo source,
 	initStringInfo(&row);
 	initStringInfo(&column);
 	initStringInfo(&outer);
+
+	context->used_vars = NIL;
+	context->param_refs = NULL;
+	resetStringInfo(&context->decl_temp);
 
 	/* expand varlena_bufsz for tup_dclass/values/extra array */
 	context->varlena_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
@@ -4391,10 +4398,10 @@ gpujoin_codegen_projection(StringInfo source,
 		"  cl_uint          sz          __attribute__((unused));\n"
 		"  cl_uint          extra_sum = 0;\n"
 		"  void            *addr        __attribute__((unused)) = NULL;\n"
-		"%s\n%s"
+		"%s%s\n%s"
 		"  return extra_sum;\n"
 		"}\n",
-		decl.data,
+		decl.data, context->decl_temp.data,
 		body.data);
 
 	pfree(decl.data);

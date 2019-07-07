@@ -136,3 +136,6 @@ SELECT * FROM regtest_data WHERE null = ANY (x);
 ----+---+---+---
 (0 rows)
 
+-- cleanup
+SET client_min_messages = error;
+DROP SCHEMA regtest_dexpr_scalar_array_op_temp CASCADE;

@@ -1006,7 +1006,9 @@ extern void pgstrom_init_cuda_program(void);
  */
 struct codegen_context {
 	StringInfoData	str;
-	PlannerInfo *root;
+	StringInfoData	decl_temp;	/* declarations of temporary variables */
+	int				decl_count;	/* # of temporary variabes in decl */
+	PlannerInfo *root;		//not necessary?
 	RelOptInfo	*baserel;	/* scope of Var-node, if any */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
