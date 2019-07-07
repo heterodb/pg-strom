@@ -63,30 +63,49 @@ SELECT id, COALESCE(a, b, c, d) v1,
 (SELECT * FROM test01g EXCEPT SELECT * FROM test01p) ORDER BY id;
 (SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
 
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT id, COALESCE(a::float, b::float, -1.0, d::float / 0.0) v1
+  INTO test02g
+  FROM regtest_data
+ WHERE id > 0;
+SELECT id, COALESCE(a::float, b::float, -1.0, d::float / 0.0) v1
+  INTO test02g
+  FROM regtest_data
+ WHERE id > 0;
+SET pg_strom.enabled = off;
+SELECT id, COALESCE(a::float, b::float, -1.0, d::float / 0.0) v1
+  INTO test02p
+  FROM regtest_data
+ WHERE id > 0;
+SELECT p.id, p.v1, g.v1
+  FROM test02g g, test02p p
+ WHERE p.id = g.id AND abs(p.v1 - g.v1) > 0.001;
+
 -- test for BoolExpr
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
 SELECT id, not a > b v1,
            (a + b > c + d or a - b < c - d) and memo like '%abc%' v2,
            (a + d > b + c and b < d) or memo like '%xyz%' v3
-  INTO test02g
+  INTO test10g
   FROM regtest_data
  WHERE id > 0;
 SELECT id, not a > b v1,
            (a + b > c + d or a - b < c - d) and memo like '%abc%' v2,
            (a + d > b + c and b < d) or memo like '%xyz%' v3
-  INTO test02g
+  INTO test10g
   FROM regtest_data
  WHERE id > 0;
 SET pg_strom.enabled = off;
 SELECT id, not a > b v1,
            (a + b > c + d or a - b < c - d) and memo like '%abc%' v2,
            (a + d > b + c and b < d) or memo like '%xyz%' v3
-  INTO test02p
+  INTO test10p
   FROM regtest_data
  WHERE id > 0;
-(SELECT * FROM test02g EXCEPT SELECT * FROM test02p) ORDER BY id;
-(SELECT * FROM test02p EXCEPT SELECT * FROM test02g) ORDER BY id;
+(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
+(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
 
 -- test for BooleanTest / NullTest
 SET pg_strom.enabled = on;
@@ -99,7 +118,7 @@ SELECT id, a > b IS TRUE v1,
            b > c IS UNKNOWN v6,
            b IS NULL v7,
            c IS NOT NULL v8
-  INTO test03g
+  INTO test20g
   FROM regtest_data
  WHERE id > 0;
 SELECT id, a > b IS TRUE v1,
@@ -110,7 +129,7 @@ SELECT id, a > b IS TRUE v1,
            b > c IS UNKNOWN v6,
            b IS NULL v7,
            c IS NOT NULL v8
-  INTO test03g
+  INTO test20g
   FROM regtest_data
  WHERE id > 0;
 SET pg_strom.enabled = off;
@@ -122,11 +141,11 @@ SELECT id, a > b IS TRUE v1,
            b > c IS UNKNOWN v6,
            b IS NULL v7,
            c IS NOT NULL v8
-  INTO test03p
+  INTO test20p
   FROM regtest_data
  WHERE id > 0;
-(SELECT * FROM test03g EXCEPT SELECT * FROM test03p) ORDER BY id;
-(SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
+(SELECT * FROM test20g EXCEPT SELECT * FROM test20p) ORDER BY id;
+(SELECT * FROM test20p EXCEPT SELECT * FROM test20g) ORDER BY id;
 
 -- test for CASE ... WHEN
 SET pg_strom.enabled = on;
@@ -142,7 +161,7 @@ SELECT id, CASE id % 4
            WHEN 4 THEN substring(memo, (id % 32) / 4, 6)
            ELSE        'piyo'
            END v2
-  INTO test10g
+  INTO test30g
   FROM regtest_data
  WHERE id > 0;
 SELECT id, CASE id % 4
@@ -156,7 +175,7 @@ SELECT id, CASE id % 4
            WHEN 4 THEN substring(memo, (id % 32) / 4, 6)
            ELSE        'piyo'
            END v2
-  INTO test10g
+  INTO test30g
   FROM regtest_data
  WHERE id > 0;
 SET pg_strom.enabled = off;
@@ -171,11 +190,11 @@ SELECT id, CASE id % 4
            WHEN 4 THEN substring(memo,(id % 32) / 4, 6)
            ELSE        'piyo'
            END v2
-  INTO test10p
+  INTO test30p
   FROM regtest_data
  WHERE id > 0;
-(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
-(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
+(SELECT * FROM test30g EXCEPT SELECT * FROM test30p) ORDER BY id;
+(SELECT * FROM test30p EXCEPT SELECT * FROM test30g) ORDER BY id;
 
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
@@ -193,7 +212,7 @@ SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
            WHEN 0 THEN -1.0
            ELSE b::real / (id % 71)::real
             END v3
-  INTO test11g
+  INTO test31g
   FROM regtest_data
  WHERE id > 0;
 SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
@@ -210,7 +229,7 @@ SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
            WHEN 0 THEN -1.0
            ELSE b::real / (id % 71)::real
             END v3
-  INTO test11g
+  INTO test31g
   FROM regtest_data
  WHERE id > 0;
 SET pg_strom.enabled = off;
@@ -228,11 +247,11 @@ SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
            WHEN 0 THEN -1.0
            ELSE b::real / (id % 71)::real
             END v3
-  INTO test11p
+  INTO test31p
   FROM regtest_data
  WHERE id > 0;
-(SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
-(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+(SELECT * FROM test31g EXCEPT SELECT * FROM test31p) ORDER BY id;
+(SELECT * FROM test31p EXCEPT SELECT * FROM test31g) ORDER BY id;
 
 -- cleanup
 SET client_min_messages = error;

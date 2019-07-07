@@ -3052,14 +3052,19 @@ codegen_coalesce_expression(codegen_context *context,
 {
 	devtype_info   *dtype;
 	ListCell	   *lc;
+	int				temp_nr;
 	int				maxlen = 0;
 
 	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 	if (!dtype)
 		__ELog("type %s is not device supported",
 			   format_type_be(coalesce->coalescetype));
+	temp_nr = ++context->decl_count;
+	__appendStringInfo(
+		&context->decl_temp,
+		"  pg_%s_t __temp%d __attribute__((unused));\n",
+		dtype->type_name, temp_nr);
 
-	__appendStringInfo(&context->str, "PG_COALESCE(kcxt");
 	foreach (lc, coalesce->args)
 	{
 		Node   *expr = (Node *)lfirst(lc);
@@ -3070,15 +3075,27 @@ codegen_coalesce_expression(codegen_context *context,
 			__ELog("device type mismatch in COALESCE: %s / %s",
 				   format_type_be(dtype->type_oid),
 				   format_type_be(type_oid));
-		__appendStringInfo(&context->str, ", ");
-		codegen_expression_walker(context, expr, &width);
+		if (lc->next != NULL)
+		{
+			__appendStringInfo(&context->str, "((__temp%d = ", temp_nr);
+			codegen_expression_walker(context, expr, &width);
+			__appendStringInfo(&context->str,
+							   ").isnull == false ? __temp%d : ", temp_nr);
+		}
+		else
+		{
+			/* last item */
+			__appendStringInfo(&context->str, "(__temp%d = ", temp_nr);
+			codegen_expression_walker(context, expr, &width);
+		}
 		if (width < 0)
 			maxlen = -1;
 		else if (maxlen >= 0)
 			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 	}
-	__appendStringInfoChar(&context->str, ')');
+	foreach (lc, coalesce->args)
+		__appendStringInfo(&context->str, ")");
 
 	return maxlen;
 }
