@@ -81,6 +81,7 @@ ldconfig
 
 %files test
 %{__pkgbindir}/dbgen-ssbm
+%{__pkgbindir}/testapp_largeobject
 
 %changelog
 #* Sun Jun  2 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
