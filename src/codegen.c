@@ -272,9 +272,10 @@ build_array_devtype_info(TypeCacheEntry *tcache)
 {
 	devtype_info *element;
 	devtype_info *entry;
+	Oid			typelem = get_element_type(tcache->type_id);
 
-	Assert(OidIsValid(tcache->typelem) && tcache->typlen == -1);
-	element = pgstrom_devtype_lookup(tcache->typelem);
+	Assert(OidIsValid(typelem) && tcache->typlen == -1);
+	element = pgstrom_devtype_lookup(typelem);
 	if (!element)
 		return NULL;
 	entry = MemoryContextAllocZero(devinfo_memcxt,
@@ -378,10 +379,15 @@ pgstrom_devtype_lookup(Oid type_oid)
 							   TYPECACHE_CMP_PROC);
 	if (OidIsValid(tcache->typrelid))
 		dtype = build_composite_devtype_info(tcache);
-	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
-		dtype = build_array_devtype_info(tcache);
 	else
-		dtype = build_basic_devtype_info(tcache);
+	{
+		Oid		typelem = get_element_type(tcache->type_id);
+
+		if (OidIsValid(typelem) && tcache->typlen == -1)
+			dtype = build_array_devtype_info(tcache);
+		else
+			dtype = build_basic_devtype_info(tcache);
+	}
 	/* makes a negative entry, if not in the catalog */
 	if (!dtype)
 	{
