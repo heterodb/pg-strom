@@ -471,44 +471,57 @@ text_substring(kern_context *kcxt,
 {
 	pg_text_t	result;
 	char	   *pos;
-	char	   *end = str + strlen;
-	char	   *mark __attribute__((unused));
 
-#if PG_DATABASE_ENCODING_MAX_LENGTH == 1
-	start = Max(start, 1) - 1;
-	if (start >= strlen)
-		goto empty;
-	pos = str + start;
+	if (pg_database_encoding_max_length() == 1)
+	{
+		cl_int	tail = start + length - 1;
 
-	if (length < 0 || start + length >= strlen)
-		length = strlen - start;
-	/* substring */
-	result.isnull = false;
-	result.value  = pos;
-	result.length = length;
-#else
-	start = Max(start, 1) - 1;
-	pos = str;
-	while (start-- > 0 && pos < end)
-		pos += pg_wchar_mblen(pos);
-	if (pos >= end)
-		goto empty;
-	mark = pos;
-	if (length < 0)
-		length = INT_MAX;
-	while (length-- > 0 && pos < end)
-		pos += pg_wchar_mblen(pos);
-	if (pos >= end)
-		pos = end;
-	result.isnull = false;
-	result.value  = mark;
-	result.length = (pos - mark);
-#endif	/* PG_DATABASE_ENCODING_MAX_LENGTH */
+		start = Max(start, 1) - 1;	/* 0-origin */
+		if (start >= strlen)
+			goto empty;
+		pos = str + start;
+
+		if (length < 0 || tail >= strlen)
+			length = strlen - start;
+		else
+			length = tail - start;
+		/* substring */
+		result.isnull = false;
+		result.value  = pos;
+		result.length = length;
+	}
+	else
+	{
+		cl_int	tail = start + length - 1;
+		char   *end = str + strlen;
+		char   *mark;
+
+		start = Max(start, 1) - 1;
+		if (length < 0)
+			length = INT_MAX;
+		else
+			length = tail - start;
+		pos = str;
+		while (start-- > 0 && pos < end)
+			pos += pg_wchar_mblen(pos);
+		if (pos >= end)
+			goto empty;
+		mark = pos;
+		if (length < 0)
+			length = INT_MAX;
+		while (length-- > 0 && pos < end)
+			pos += pg_wchar_mblen(pos);
+		if (pos >= end)
+			pos = end;
+		result.isnull = false;
+		result.value  = mark;
+		result.length = (pos - mark);
+	}
 	return result;
 
 empty:
 	result.isnull = false;
-	result.value  = end;
+	result.value  = str + strlen;
 	result.length = 0;
 	return result;
 }
