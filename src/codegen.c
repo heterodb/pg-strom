@@ -3569,8 +3569,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 		initStringInfo(&context->str);
 	else
 		resetStringInfo(&context->str);
-	if (!context->decl_temp.data)
-		initStringInfo(&context->decl_temp);
 
 	if (IsA(expr, List))
 	{
@@ -3940,6 +3938,7 @@ pgstrom_init_codegen_context(codegen_context *context,
 							 RelOptInfo *baserel)
 {
 	memset(context, 0, sizeof(codegen_context));
+	initStringInfo(&context->decl_temp);
 	context->root = root;
 	context->baserel = baserel;
 	context->var_label = "KVAR";
