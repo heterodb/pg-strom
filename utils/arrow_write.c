@@ -279,7 +279,7 @@ createArrowTypeFloatingPoint(ArrowTypeFloatingPoint *node)
 	FBTableBuf *buf = allocFBTableBuf(1);
 
 	assert(ArrowNodeIs(node, FloatingPoint));
-	addBufferInt(buf, 0, node->precision);
+	addBufferShort(buf, 0, node->precision);
 
 	return makeBufferFlatten(buf);
 }

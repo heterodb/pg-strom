@@ -58,6 +58,23 @@ __write_buffer_common(int fdesc, const void *buffer, size_t length)
  *
  * ----------------------------------------------------------------
  */
+static inline uint64
+ntohll(uint64 __val)
+{
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+	uint32		h, l;
+
+	l = ntohl(__val & 0xffffffffU);
+	h = ntohl((__val >> 32) & 0xffffffffU);
+
+	return ((uint64)l << 32) | ((uint64)h);
+#else
+	return __val;
+#endif
+}
+
+
+
 static void
 put_inline_bool_value(SQLattribute *attr,
 					  const char *addr, int sz)
@@ -298,6 +315,45 @@ put_timestamp_value(SQLattribute *attr,
 		value += (POSTGRES_EPOCH_JDATE -
 				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 		sql_buffer_append(&attr->values, &value, sizeof(Timestamp));
+	}
+}
+
+#define DAYS_PER_MONTH	30		/* assumes exactly 30 days per month */
+#define HOURS_PER_DAY	24		/* assume no daylight savings time changes */
+
+static void
+put_interval_value(SQLattribute *attr,
+				   const char *addr, int sz)
+{
+	size_t		row_index = attr->nitems++;
+
+	if (!addr)
+	{
+		attr->nullcount++;
+		sql_buffer_clrbit(&attr->nullmap, row_index);
+		sql_buffer_append_zero(&attr->values, 2 * sizeof(uint32));
+	}
+	else
+	{
+		uint64	t;
+		uint32	d, m;
+		uint32	value;
+
+		t = ntohll(*((const uint64 *)addr));
+		addr += sizeof(uint64);
+		d = ntohl(*((const uint32 *)addr));
+		addr += sizeof(uint32);
+		m = ntohl(*((const uint32 *)addr));
+		addr += sizeof(uint32);
+
+		/*
+		 * Unit size of PG Interval::time is micro-second.
+		 * Arrow Interval::time is a pair of elapsed days and milli-seconds.
+		 */
+		value = m + DAYS_PER_MONTH * d;
+		sql_buffer_append(&attr->values, &value, sizeof(uint32));
+		value = t / 1000;
+		sql_buffer_append(&attr->values, &value, sizeof(uint32));
 	}
 }
 
@@ -863,7 +919,7 @@ assignArrowTypeInt(SQLattribute *attr, int *p_numBuffers, bool is_signed)
 	attr->setup_buffer = setup_buffer_inline_type;
 	attr->write_buffer = write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	*p_numBuffers += 2;		/* null map + values */
 }
 
 static void
@@ -1037,14 +1093,19 @@ assignArrowTypeTimestamp(SQLattribute *attr, int *p_numBuffers)
 	*p_numBuffers += 2;		/* nullmap + values */
 }
 
-#if 0
 static void
 assignArrowTypeInterval(SQLattribute *attr, int *p_numBuffers)
 {
-	usec + day + mon;
-	Elog("Interval is not supported yet");
+	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Interval);
+	attr->arrow_type.Interval.unit = ArrowIntervalUnit__Day_Time;
+	attr->arrow_typename	= "Interval";
+	attr->put_value         = put_interval_value;
+	attr->buffer_usage		= buffer_usage_inline_type;
+	attr->setup_buffer		= setup_buffer_inline_type;
+	attr->write_buffer		= write_buffer_inline_type;
+
+	*p_numBuffers += 2;		/* nullmap + values */
 }
-#endif
 
 static void
 assignArrowTypeList(SQLattribute *attr, int *p_numBuffers)
@@ -1149,6 +1210,11 @@ assignArrowType(SQLattribute *attr, int *p_numBuffers)
 				 strcmp(attr->typname, "timestamptz") == 0)
 		{
 			assignArrowTypeTimestamp(attr, p_numBuffers);
+			return;
+		}
+		else if (strcmp(attr->typname, "interval") == 0)
+		{
+			assignArrowTypeInterval(attr, p_numBuffers);
 			return;
 		}
 		else if (strcmp(attr->typname, "text") == 0 ||

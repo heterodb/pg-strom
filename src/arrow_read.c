@@ -331,7 +331,7 @@ __dumpArrowFooter(StringInfo str, ArrowNode *node)
 			appendStringInfo(str, ", ");
 		__dumpArrowNode(str, (ArrowNode *)&f->dictionaries[i]);
 	}
-	appendStringInfo(str, ", recordBatches=[");
+	appendStringInfo(str, "], recordBatches=[");
 	for (i=0; i < f->_num_recordBatches; i++)
 	{
 		if (i > 0)
