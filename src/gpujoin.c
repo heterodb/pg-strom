@@ -6111,8 +6111,7 @@ resume_kernel:
 		/* return task if any result rows */
 		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
 	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 (pgjoin->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+	else if (pgstrom_check_cpu_fallback(&pgjoin->kern.kerror, last_suspend))
 	{
 		/*
 		 * In case of KDS_FORMAT_BLOCK, we have to write back the kernel
@@ -6255,8 +6254,7 @@ resume_kernel:
 		/* return task if any result rows */
 		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
 	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 (pgjoin->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+	else if (pgstrom_check_cpu_fallback(&pgjoin->task.kerror, last_suspend))
 	{
 		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;

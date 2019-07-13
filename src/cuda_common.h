@@ -356,7 +356,7 @@ __Fetch(const T *ptr)
 	 (PGSIXBIT(ch4) << 18) + (PGSIXBIT(ch5) << 24))
 #endif  /* MAKE_SQLSTATE */
 #include "utils/errcodes.h"
-#define ERRCODE_FLAGS_CPU_FALLBACK			(1U<<30)
+#define ERRCODE_FLAGS_CPU_FALLBACK			0x40000000U
 #define ERRCODE_STROM_SUCCESS				0
 #define ERRCODE_STROM_DATASTORE_NOSPACE		MAKE_SQLSTATE('H','D','B','0','4')
 #define ERRCODE_STROM_WRONG_CODE_GENERATION	MAKE_SQLSTATE('H','D','B','0','5')

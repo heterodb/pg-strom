@@ -5389,8 +5389,7 @@ resume_kernel:
 		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
 		retval = -1;
 	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+	else if (pgstrom_check_cpu_fallback(&gpreagg->task.kerror, last_suspend))
 	{
 		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 		gpreagg->task.cpu_fallback = true;
@@ -5723,8 +5722,7 @@ resume_kernel:
 
 	if (kgjoin->kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
-		if (pgstrom_cpu_fallback_enabled &&
-			(kgjoin->kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+		if (pgstrom_check_cpu_fallback(&kgjoin->kerror, last_suspend))
 		{
 			/*
 			 * CPU fallback without partial results - If GpuJoin reported
@@ -5761,8 +5759,7 @@ resume_kernel:
 	}
 	else if (gpreagg->kern.kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
-		if (pgstrom_cpu_fallback_enabled &&
-			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+		if (pgstrom_check_cpu_fallback(&gpreagg->kern.kerror, last_suspend))
 		{
 			/*
 			 * CPU fallback with partial results
