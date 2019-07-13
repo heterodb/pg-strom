@@ -5,6 +5,7 @@ SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_cpu_temp CASCADE;
 CREATE SCHEMA regtest_arrow_cpu_temp;
 RESET client_min_messages;
+
 SET search_path = regtest_arrow_cpu_temp,public;
 CREATE TYPE regtest_comp AS (
   a   int,
@@ -13,6 +14,7 @@ CREATE TYPE regtest_comp AS (
   d   numeric(9,3),
   e   timestamp
 );
+
 CREATE TABLE regtest_data (
   id     int,
   i2     int2,
@@ -31,11 +33,6 @@ CREATE TABLE regtest_data (
   ts     timestamp
 );
 SELECT setseed(0.20190711);
- setseed 
----------
- 
-(1 row)
-
 INSERT INTO regtest_data (
   SELECT x, pgstrom.random_int(2, -32000, 32000),
             pgstrom.random_int(2, -16777216, 16777216),
@@ -58,31 +55,13 @@ UPDATE regtest_data
        comp.c = pgstrom.random_text_len(2, 64),
        comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
        comp.e = pgstrom.random_timestamp(2);
+
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
-OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data');
+OPTIONS (file '@abs_srcdir@/input/arrow_1.data');
+
 \d regtest_arrow
-                Foreign table "regtest_arrow_cpu_temp.regtest_arrow"
- Column |            Type             | Collation | Nullable | Default | FDW options 
---------+-----------------------------+-----------+----------+---------+-------------
- id     | integer                     |           |          |         | 
- i2     | smallint                    |           |          |         | 
- i4     | integer                     |           |          |         | 
- i8     | bigint                      |           |          |         | 
- f2     | float2                      |           |          |         | 
- f4     | real                        |           |          |         | 
- f8     | double precision            |           |          |         | 
- n1     | numeric                     |           |          |         | 
- n2     | numeric                     |           |          |         | 
- comp   | regtest_comp                |           |          |         | 
- t1     | text                        |           |          |         | 
- t2     | text                        |           |          |         | 
- dt     | date                        |           |          |         | 
- tm     | time without time zone      |           |          |         | 
- ts     | timestamp without time zone |           |          |         | 
-Server: arrow_fdw
-FDW options: (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data')
 
 SET pg_strom.enabled = off;
 -- should be empty results
@@ -91,40 +70,24 @@ SELECT d.id, d.i2, d.i4, d.i8, a.i2, a.i4, a.i8
  WHERE (d.i2 IS NOT NULL) != (a.i2 IS NOT NULL) OR (d.i2 != a.i2)
     OR (d.i4 IS NOT NULL) != (a.i4 IS NOT NULL) OR (d.i4 != a.i4)
     OR (d.i8 IS NOT NULL) != (a.i8 IS NOT NULL) OR (d.i8 != a.i8);
- id | i2 | i4 | i8 | i2 | i4 | i8 
-----+----+----+----+----+----+----
-(0 rows)
 
 SELECT d.id, d.f2, d.f4, d.f8, a.f2, a.f4, a.f8
   FROM regtest_data d JOIN regtest_arrow a ON d.id = a.id
  WHERE (d.f2 IS NOT NULL) != (a.f2 IS NOT NULL) OR (d.f2 != a.f2)
     OR (d.f4 IS NOT NULL) != (a.f4 IS NOT NULL) OR (d.f4 != a.f4)
     OR (d.f8 IS NOT NULL) != (a.f8 IS NOT NULL) OR (d.f8 != a.f8);
- id | f2 | f4 | f8 | f2 | f4 | f8 
-----+----+----+----+----+----+----
-(0 rows)
 
 SELECT d.id, d.n1, d.n2, a.n1, a.n2
   FROM regtest_data d JOIN regtest_arrow a ON d.id = a.id
  WHERE (d.n1 IS NOT NULL) != (d.n1 IS NOT NULL) OR (d.n1 != d.n1)
     OR (d.n2 IS NOT NULL) != (d.n2 IS NOT NULL) OR (d.n2 != d.n2);
- id | n1 | n2 | n1 | n2 
-----+----+----+----+----
-(0 rows)
 
 SELECT d.id, d.comp, a.comp
   FROM regtest_data d JOIN regtest_arrow a ON d.id = a.id
  WHERE (d.comp IS NOT NULL) != (a.comp IS NOT NULL) OR d.comp != a.comp;
- id | comp | comp 
-----+------+------
-(0 rows)
 
 SELECT d.id, d.dt, d.tm, d.ts, a.dt, a.tm, a.ts
   FROM regtest_data d JOIN regtest_arrow a ON d.id = a.id
  WHERE (d.dt IS NOT NULL) != (a.dt IS NOT NULL) OR d.dt != a.dt
     OR (d.tm IS NOT NULL) != (a.tm IS NOT NULL) OR d.tm != a.tm
     OR (d.ts IS NOT NULL) != (a.ts IS NOT NULL) OR d.ts != a.ts;
- id | dt | tm | ts | dt | tm | ts 
-----+----+----+----+----+----+----
-(0 rows)
-

@@ -61,7 +61,7 @@ UPDATE regtest_data
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
-OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data');
+OPTIONS (file '@abs_srcdir@/input/arrow_1.data');
 \d regtest_arrow
                 Foreign table "regtest_arrow_cpu_temp.regtest_arrow"
  Column |            Type             | Collation | Nullable | Default | FDW options 

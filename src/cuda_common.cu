@@ -1004,19 +1004,23 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		{
 			case ArrowTimeUnit__Second:
 				result.isnull = false;
-				result.value = *aval * 1000000L;
+				result.value = *aval * 1000000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				break;
 			case ArrowTimeUnit__MilliSecond:
 				result.isnull = false;
-				result.value = *aval * 1000L;
+				result.value = *aval * 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				break;
 			case ArrowTimeUnit__MicroSecond:
 				result.isnull = false;
-				result.value = *aval;
+				result.value = *aval -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				break;
 			case ArrowTimeUnit__NanoSecond:
 				result.isnull = false;
-				result.value = *aval / 1000L;
+				result.value = *aval / 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				break;
 			default:
 				result.isnull = true;
