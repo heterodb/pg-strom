@@ -898,8 +898,8 @@ codegen_gpuscan_projection(StringInfo kern,
 	/*
 	 * step.5 - execution of expression node, then store the result.
 	 */
-	resetStringInfo(&temp);
 	resetStringInfo(&context->decl_temp);
+	resetStringInfo(&temp);
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -2211,10 +2211,10 @@ gpuscan_next_task(GpuTaskState *gts)
 }
 
 /*
- * gpuscan_next_tuple_suspended_row
+ * gpuscan_next_tuple_suspended_tuple
  */
 static bool
-gpuscan_next_tuple_suspended_row(GpuScanState *gss, GpuScanTask *gscan)
+gpuscan_next_tuple_suspended_tuple(GpuScanState *gss, GpuScanTask *gscan)
 {
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	gpuscanSuspendContext *con;
@@ -2361,8 +2361,9 @@ retry_next:
 	ExecClearTuple(gss->base_slot);
 	if (!gscan->kern.resume_context)
 		status = PDS_fetch_tuple(gss->base_slot, pds_src, &gss->gts);
-	else if (pds_src->kds.format == KDS_FORMAT_ROW)
-		status = gpuscan_next_tuple_suspended_row(gss, gscan);
+	else if (pds_src->kds.format == KDS_FORMAT_ROW ||
+			 pds_src->kds.format == KDS_FORMAT_ARROW)
+		status = gpuscan_next_tuple_suspended_tuple(gss, gscan);
 	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		status = gpuscan_next_tuple_suspended_block(gss, gscan);
 	else
@@ -2518,6 +2519,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUdeviceptr		m_gpuscan = (CUdeviceptr)&gscan->kern;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_dst = (pds_dst ? (CUdeviceptr)&pds_dst->kds : 0UL);
+	bool			m_kds_src_release = false;
 	const char	   *kern_fname;
 	void		   *kern_args[5];
 	void		   *last_suspend = NULL;
@@ -2565,7 +2567,9 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		rc = gpuMemAllocIOMap(gcontext,
 							  &m_kds_src,
 							  pds_src->kds.length);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (rc == CUDA_SUCCESS)
+			m_kds_src_release = true;
+		else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			gscan->with_nvme_strom = false;
 			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -2575,9 +2579,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 				rc = gpuMemAlloc(gcontext,
 								 &m_kds_src,
 								 pds_src->kds.length);
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				if (rc == CUDA_SUCCESS)
+					m_kds_src_release = true;
+				else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 					goto out_of_resource;
-				else if (rc != CUDA_SUCCESS)
+				else
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
 			else
@@ -2588,7 +2594,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 				Assert(!pds_src->iovec);
 			}
 		}
-		else if (rc != CUDA_SUCCESS)
+		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 	else
@@ -2776,6 +2782,8 @@ resume_kernel:
 			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
 			 * to host-side, because its ItemIdData might be updated, and
 			 * blocks might not be loaded yet if NVMe-Strom mode.
+			 * Due to the same reason, KDS_FORMAT_ARROW with NVMe-Strom mode
+			 * needs to write back the device buffer to host-side.
 			 */
 			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 			{
@@ -2789,7 +2797,7 @@ resume_kernel:
 			else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
 					 pds_src->iovec != NULL)
 			{
-				//to be implemented
+				gscan->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
 			}
 			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
 			gscan->task.cpu_fallback = true;
@@ -2804,9 +2812,7 @@ resume_kernel:
 		}
 	}
 out_of_resource:
-	if (m_kds_src != 0UL &&
-		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
-		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
+	if (m_kds_src_release)
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }
