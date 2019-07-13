@@ -1151,7 +1151,8 @@ extern void __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
 							   kern_data_store *kds_head,
 							   int fdesc, strom_io_vector *iovec);
 extern pgstrom_data_store *PDS_fillup_arrow(pgstrom_data_store *pds_src);
-
+extern pgstrom_data_store *PDS_writeback_arrow(pgstrom_data_store *pds_src,
+											   CUdeviceptr m_kds_src);
 extern bool KDS_insert_tuple(kern_data_store *kds,
 							 TupleTableSlot *slot);
 #define PDS_insert_tuple(pds,slot)	KDS_insert_tuple(&(pds)->kds,slot)

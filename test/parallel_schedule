@@ -28,6 +28,11 @@ test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb
 test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
 
 # ----------
+# Test for arrow_fdw
+# ----------
+test: arrow_cpu
+
+# ----------
 # Test for largeobject
 # ----------
 test: largeobject

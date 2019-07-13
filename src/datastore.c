@@ -227,6 +227,9 @@ PDS_fetch_tuple(TupleTableSlot *slot,
 		case KDS_FORMAT_COLUMN:
 			return KDS_fetch_tuple_column(slot, &pds->kds,
 										  gts->curr_index++);
+		case KDS_FORMAT_ARROW:
+			return KDS_fetch_tuple_arrow(slot, &pds->kds,
+										 gts->curr_index++);
 		default:
 			elog(ERROR, "Bug? unsupported data store format: %d",
 				pds->kds.format);
@@ -330,6 +333,7 @@ PDS_release(pgstrom_data_store *pds)
 			Assert(pds->kds.format == KDS_FORMAT_ARROW);
 			pfree(pds);
 		}
+#if 0
 		else if ((pds->kds.format == KDS_FORMAT_BLOCK) ||
 				 (pds->kds.format == KDS_FORMAT_ARROW && pds->iovec))
 		{
@@ -337,6 +341,7 @@ PDS_release(pgstrom_data_store *pds)
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuMemFreeHost: %s", errorText(rc));
 		}
+#endif
 		else
 		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
@@ -1524,6 +1529,9 @@ __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
 	}
 }
 
+/*
+ * PDS_fillup_arrow - fills up PDS buffer using filesystem i/o
+ */
 pgstrom_data_store *
 PDS_fillup_arrow(pgstrom_data_store *pds_src)
 {
@@ -1542,5 +1550,40 @@ PDS_fillup_arrow(pgstrom_data_store *pds_src)
 					   &pds_src->kds,
 					   pds_src->filedesc,
 					   pds_src->iovec);
+	return pds_dst;
+}
+
+/*
+ * PDS_writeback_arrow - write back PDS buffer on device memory to host
+ *                       if buffer content is not kept in host-side.
+ */
+pgstrom_data_store *
+PDS_writeback_arrow(pgstrom_data_store *pds_src,
+					CUdeviceptr m_kds_src)
+{
+	pgstrom_data_store *pds_dst;
+	CUresult		rc;
+
+	Assert(pds_src->kds.format == KDS_FORMAT_ARROW &&
+		   pds_src->iovec != NULL);
+	rc = gpuMemAllocHostRaw(pds_src->gcontext,
+							(void **)&pds_dst,
+							offsetof(pgstrom_data_store,
+									 kds) + pds_src->kds.length);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuMemAllocHostRaw: %s", errorText(rc));
+
+	memset(pds_dst, 0, offsetof(pgstrom_data_store, kds));
+	pds_dst->gcontext = pds_src->gcontext;
+	pg_atomic_init_u32(&pds_dst->refcnt, 1);
+	pds_dst->filedesc = -1;
+	rc = cuMemcpyDtoH(&pds_dst->kds,
+					  m_kds_src,
+					  pds_src->kds.length);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+	/* detach old buffer */
+	PDS_release(pds_src);
+
 	return pds_dst;
 }

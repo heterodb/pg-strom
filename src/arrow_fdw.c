@@ -122,8 +122,6 @@ static List			   *arrowFdwExtractFilesList(List *options_list);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
 											  ArrowRecordBatch *rbatch);
-static List	   *arrowLookupMetadataCache(const char *fname, File fdesc);
-static void		arrowUpdateMetadataCache(List *rbstateList);
 static List	   *arrowLookupOrBuildMetadataCache(const char *fname, File fdesc);
 
 
@@ -1076,7 +1074,7 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 	kds->nrooms = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
 	Assert(head_sz == KERN_DATA_STORE_HEAD_LENGTH(kds));
-	for (j=0; j < rb_state->ncols; j++)
+	for (j=0; j < kds->nr_colmeta; j++)
 		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
 	__dump_kds_and_iovec(kds, iovec);
@@ -1967,21 +1965,90 @@ arrowFieldLength(ArrowField *field, int64 nitems)
  * arrowSchemaCompatibilityCheck
  */
 static bool
-arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
+__arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
+								RecordBatchFieldState *rb_fstate)
 {
 	int		j;
 
-	if (tupdesc->natts != rb_state->ncols)
-		return false;
 	for (j=0; j < tupdesc->natts; j++)
 	{
+		RecordBatchFieldState *fstate = &rb_fstate[j];
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		RecordBatchFieldState *fstate = &rb_state->columns[j];
 
-		if (attr->atttypid != fstate->atttypid)
-			return false;
+		if (!fstate->children)
+		{
+			/* shortcur, it should be a scalar built-in type */
+			Assert(fstate->num_children == 0);
+			if (attr->atttypid != fstate->atttypid)
+				return false;
+		}
+		else
+		{
+			Form_pg_type	typ;
+			HeapTuple		tup;
+			bool			type_is_ok = true;
+
+			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(attr->atttypid));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for type %u", attr->atttypid);
+			typ = (Form_pg_type) GETSTRUCT(tup);
+			if (typ->typlen == -1 && OidIsValid(typ->typelem) &&
+				fstate->num_children == 1)
+			{
+				/* Arrow::List */
+				RecordBatchFieldState *cstate = &fstate->children[0];
+
+				if (attr->atttypid != cstate->atttypid)
+					type_is_ok = false;
+				else
+				{
+					/*
+					 * overwrite typoid / typmod because a same arrow file
+					 * can be reused, and it may be on behalf of different
+					 * user defined data type.
+					 */
+					fstate->atttypid = attr->atttypid;
+					fstate->atttypmod = attr->atttypmod;
+				}
+			}
+			else if (typ->typlen == -1 && OidIsValid(typ->typrelid))
+			{
+				/* Arrow::Struct */
+				TupleDesc	sdesc = lookup_rowtype_tupdesc(attr->atttypid,
+														   attr->atttypmod);
+				if (sdesc->natts == fstate->num_children &&
+					__arrowSchemaCompatibilityCheck(sdesc, fstate->children))
+				{
+					/* see comment above */
+					fstate->atttypid = attr->atttypid;
+					fstate->atttypmod = attr->atttypmod;
+				}
+				else
+				{
+					type_is_ok = false;
+				}
+				DecrTupleDescRefCount(sdesc);
+
+			}
+			else
+			{
+				/* unknown */
+				type_is_ok = false;
+			}
+			ReleaseSysCache(tup);
+			if (!type_is_ok)
+				return false;
+		}
 	}
 	return true;
+}
+
+static bool
+arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
+{
+	if (tupdesc->natts != rb_state->ncols)
+		return false;
+	return __arrowSchemaCompatibilityCheck(tupdesc, rb_state->columns);
 }
 
 /*
@@ -2097,16 +2164,16 @@ pg_date_arrow_ref(kern_data_store *kds,
 	switch (cmeta->attopts.date.unit)
 	{
 		case ArrowDateUnit__Day:
-			dt = ((cl_uint *)base)[index]
-				+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			dt = ((cl_uint *)base)[index];
 			break;
 		case ArrowDateUnit__MilliSecond:
-			dt = ((cl_ulong *)base)[index] / 1000
-				+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			dt = ((cl_ulong *)base)[index] / 1000;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Date type");
 	}
+	/* convert UNIX epoch to PostgreSQL epoch */
+	dt -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 	return DateADTGetDatum(dt);
 }
 
@@ -2161,6 +2228,9 @@ pg_timestamp_arrow_ref(kern_data_store *kds,
 		default:
 			elog(ERROR, "Bug? unexpected unit of Timestamp type");
 	}
+	/* convert UNIX epoch to PostgreSQL epoch */
+	ts -= (POSTGRES_EPOCH_JDATE -
+		   UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 	return TimestampGetDatum(ts);
 }
 
@@ -2324,6 +2394,9 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		HeapTuple	htup;
 		int			j;
 
+		struct pg_tm tt;
+		fsec_t fsec;
+
 		if (tupdesc->natts != cmeta->num_subattrs)
 			elog(ERROR, "Struct definition is conrrupted?");
 		if (cmeta->idx_subattrs < kds->ncols ||
@@ -2338,6 +2411,8 @@ pg_datum_arrow_ref(kern_data_store *kds,
 							   sub_values + j,
 							   sub_isnull + j);
 		}
+		Assert(sub_isnull[4] || timestamp2tm((Timestamp)sub_values[4], NULL, &tt, &fsec, NULL, NULL) == 0);
+
 		htup = heap_form_tuple(tupdesc, sub_values, sub_isnull);
 
 		ReleaseTupleDesc(tupdesc);
@@ -2869,6 +2944,26 @@ arrowUpdateMetadataCache(List *rbstateList)
 								   mtemp->fstate + arrow_metadata_cache_width,
 								   rbstate->ncols,
 								   rbstate->columns);
+		if (mtemp->nfields < 0)
+		{
+			/*
+			 * Unable to copy the private RecordBatchState on the shared cache
+			 * if number of attributes (including sub-fields) is larger then
+			 * the arrow_metadata_cache_width configuration.
+			 */
+			dlist_push_tail(&arrow_metadata_state->free_list,
+							&mtemp->chain);
+			while (!dlist_is_empty(&free_list))
+			{
+				dnode = dlist_pop_head_node(&free_list);
+				dlist_push_tail(&arrow_metadata_state->free_list, dnode);
+			}
+			Assert(!mcache);
+			elog(DEBUG2, "arrow_fdw: '%s' cannot have metadata cache because of number of attributes; we recommend to increase 'arrow_metadata_cache_width'",
+				 fname);
+			goto out;
+		}
+
 		if (!mcache)
 			mcache = mtemp;
 		else
