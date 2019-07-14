@@ -125,8 +125,7 @@ gpuscan_main_arrow(kern_context *kcxt,
 KERNEL_FUNCTION(void)
 kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
                       kern_data_store *kds_src,
-                      kern_data_store *kds_dst,
-                      bool has_device_projection)
+                      kern_data_store *kds_dst)
 {
 	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	DECL_KERNEL_CONTEXT(u);
@@ -140,8 +139,7 @@ kern_gpuscan_main_row(kern_gpuscan *kgpuscan,
 KERNEL_FUNCTION(void)
 kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
                         kern_data_store *kds_src,
-                        kern_data_store *kds_dst,
-                        bool has_device_projection)
+                        kern_data_store *kds_dst)
 {
 	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	DECL_KERNEL_CONTEXT(u);
@@ -155,8 +153,7 @@ kern_gpuscan_main_block(kern_gpuscan *kgpuscan,
 KERNEL_FUNCTION(void)
 kern_gpuscan_main_arrow(kern_gpuscan *kgpuscan,
                         kern_data_store *kds_src,
-                        kern_data_store *kds_dst,
-                        bool has_device_projection)
+                        kern_data_store *kds_dst)
 {
 	kern_parambuf *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	DECL_KERNEL_CONTEXT(u);
