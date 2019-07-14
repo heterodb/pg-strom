@@ -64,12 +64,33 @@ UPDATE regtest_data
  WHERE id = 400001;
 VACUUM ANALYZE regtest_data;
 
+CREATE TABLE regtest_small (
+  aid   int,
+  z     float,
+  md5   varchar(32)
+);
+INSERT INTO regtest_small (
+  SELECT x, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,4000) x);
+VACUUM ANALYZE regtest_small;
+
+CREATE TABLE regtest_enlarge (
+  aid   int,
+  z     float,
+  md5   char(200)
+);
+INSERT INTO regtest_enlarge (
+  SELECT x / 5, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,20000) x);
+
 -- disables SeqScan and kernel source
 SET enable_seqscan = off;
 SET max_parallel_workers_per_gather = 0;
 SET pg_strom.debug_kernel_source = off;
 
--- GPU scan with CPU fallback
+-- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y v1, substring(memo, 1, 20) v2
@@ -123,7 +144,7 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM regtest_data
- WHERE memo LIKE '%abc%' OR id > 0;		-- error
+ WHERE memo LIKE '%abc%' OR id > 0;		-- Error
 SET pg_strom.cpu_fallback = on;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
@@ -136,4 +157,66 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
  WHERE memo LIKE '%abc%' OR id > 0;
 (SELECT * FROM test03g EXCEPT SELECT * FROM test03p) ORDER BY id;
 (SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
+RESET pg_strom.cpu_fallback;
+
+-- GpuJoin with CPU fallback
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';		-- Error
+SET pg_strom.cpu_fallback = on;
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+SET pg_strom.enabled = off;
+SELECT id, x+y+z v, memo
+  INTO test10p
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
+(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
+RESET pg_strom.cpu_fallback;
+
+-- GpuJoin with GPU kernel suspend / resume
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT * INTO pg_temp.test11g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+SELECT * INTO pg_temp.test11g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+SET pg_strom.enabled = off;
+SELECT * INTO pg_temp.test11p
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+(SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
+(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+
+-- GpuJoin with GPU kernel suspend / resume, and CPU fallback
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT *
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+SELECT *
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';	-- Error
+SET pg_strom.cpu_fallback = on;
+SELECT * INTO pg_temp.test12g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+SET pg_strom.enabled = off;
+SELECT * INTO pg_temp.test12p
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id;
+(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id;
 RESET pg_strom.cpu_fallback;

@@ -67,11 +67,30 @@ UPDATE regtest_data
    SET memo = memo || '-' || memo || '-' || memo || '-' || memo
  WHERE id = 400001;
 VACUUM ANALYZE regtest_data;
+CREATE TABLE regtest_small (
+  aid   int,
+  z     float,
+  md5   varchar(32)
+);
+INSERT INTO regtest_small (
+  SELECT x, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,4000) x);
+VACUUM ANALYZE regtest_small;
+CREATE TABLE regtest_enlarge (
+  aid   int,
+  z     float,
+  md5   char(200)
+);
+INSERT INTO regtest_enlarge (
+  SELECT x / 5, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,20000) x);
 -- disables SeqScan and kernel source
 SET enable_seqscan = off;
 SET max_parallel_workers_per_gather = 0;
 SET pg_strom.debug_kernel_source = off;
--- GPU scan with CPU fallback
+-- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y v1, substring(memo, 1, 20) v2
@@ -164,7 +183,7 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM regtest_data
- WHERE memo LIKE '%abc%' OR id > 0;		-- error
+ WHERE memo LIKE '%abc%' OR id > 0;		-- Error
 ERROR:  GPU kernel: compressed or external varlena on device
 SET pg_strom.cpu_fallback = on;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
@@ -184,6 +203,137 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
 (SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
  id | a | b | c | d | e | f | g | h | memo 
 ----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
+-- GpuJoin with CPU fallback
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_fallback_pgsql_temp.regtest_small s
+   Output: d.id, ((d.x + d.y) + s.z), d.memo
+   GPU Projection: d.id::integer, d.x::double precision, d.y::double precision, d.memo::text, s.z::double precision
+   Outer Scan: regtest_fallback_pgsql_temp.regtest_small s
+   Depth 1: GpuHashJoin  (nrows 4000...39)
+            HashKeys: s.aid
+            JoinQuals: (d.aid = s.aid)
+            KDS-Hash (size: 8.31KB)
+   ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_data d
+         Output: d.id, d.x, d.y, d.memo, d.aid
+         GPU Filter: (d.memo ~~ '%abc%'::text)
+(11 rows)
+
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';		-- Error
+ERROR:  GPU kernel: compressed or external varlena on device
+SET pg_strom.cpu_fallback = on;
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+SET pg_strom.enabled = off;
+SELECT id, x+y+z v, memo
+  INTO test10p
+  FROM regtest_data d NATURAL JOIN regtest_small s
+ WHERE memo LIKE '%abc%';
+(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
+ id | v | memo 
+----+---+------
+(0 rows)
+
+(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
+ id | v | memo 
+----+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
+-- GpuJoin with GPU kernel suspend / resume
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT * INTO pg_temp.test11g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_fallback_pgsql_temp.regtest_data d
+   Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Projection: d.aid::integer, d.id::integer, d.cat::text, d.x::double precision, d.y::double precision, d.memo::text, l.z::double precision, l.md5::character(200)
+   Outer Scan: regtest_fallback_pgsql_temp.regtest_data d
+   Depth 1: GpuHashJoin  (nrows 400001...186416)
+            HashKeys: d.aid
+            JoinQuals: (d.aid = l.aid)
+            KDS-Hash (size: 1715.94KB)
+   ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_enlarge l
+         Output: l.z, l.md5, l.aid
+         GPU Filter: (l.aid < 1500)
+(11 rows)
+
+SELECT * INTO pg_temp.test11g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+SET pg_strom.enabled = off;
+SELECT * INTO pg_temp.test11p
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 1500;
+(SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+-- GpuJoin with GPU kernel suspend / resume, and CPU fallback
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT *
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_fallback_pgsql_temp.regtest_data d
+   Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Projection: d.aid::integer, d.id::integer, d.cat::text, d.x::double precision, d.y::double precision, d.memo::text, l.z::double precision, l.md5::character(200)
+   Outer Scan: regtest_fallback_pgsql_temp.regtest_data d
+   Outer Scan Filter: (d.memo ~~ '%ab%'::text)
+   Depth 1: GpuHashJoin  (nrows 39...18)
+            HashKeys: d.aid
+            JoinQuals: (d.aid = l.aid)
+            KDS-Hash (size: 1715.94KB)
+   ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_enlarge l
+         Output: l.z, l.md5, l.aid
+         GPU Filter: (l.aid < 2500)
+(12 rows)
+
+SELECT *
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';	-- Error
+ERROR:  GPU kernel: compressed or external varlena on device
+SET pg_strom.cpu_fallback = on;
+SELECT * INTO pg_temp.test12g
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+SET pg_strom.enabled = off;
+SELECT * INTO pg_temp.test12p
+  FROM regtest_data d NATURAL JOIN regtest_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
 (0 rows)
 
 RESET pg_strom.cpu_fallback;
