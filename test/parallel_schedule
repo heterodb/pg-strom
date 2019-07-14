@@ -33,6 +33,11 @@ test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
 test: arrow_cpu
 
 # ----------
+# Test for CPU fallback and GPU kernel suspend / resume
+# ----------
+test: fallback_pgsql
+
+# ----------
 # Test for largeobject
 # ----------
 test: largeobject
