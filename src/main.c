@@ -24,7 +24,7 @@ PG_MODULE_MAGIC;
  */
 bool		pgstrom_enabled;
 bool		pgstrom_debug_kernel_source;
-static int	pgstrom_cpu_fallback_mode;
+bool		pgstrom_cpu_fallback_enabled;
 static int	pgstrom_chunk_size_kb;
 
 /* cost factors */
@@ -53,52 +53,6 @@ pgstrom_chunk_size(void)
 	return ((Size)pgstrom_chunk_size_kb) << 10;
 }
 
-/* pg_strom.cpu_fallback */
-#define CPU_FALLBACK__DISABLED			0
-#define CPU_FALLBACK__ENABLED			1
-#define CPU_FALLBACK__DEBUG_ALWAYS		2
-#define CPU_FALLBACK__DEBUG_IF_RESUMED	3
-static const struct config_enum_entry cpu_fallback_options[] = {
-	{ "on",               CPU_FALLBACK__ENABLED,  false },
-	{ "off",              CPU_FALLBACK__DISABLED, false },
-	{ "true",             CPU_FALLBACK__ENABLED,  true },
-	{ "false",            CPU_FALLBACK__DISABLED, true },
-	{ "yes",              CPU_FALLBACK__ENABLED,  true },
-	{ "no",               CPU_FALLBACK__DISABLED, true },
-	{ "1",                CPU_FALLBACK__ENABLED,  true },
-	{ "0",                CPU_FALLBACK__DISABLED, true },
-	{ "debug_always",     CPU_FALLBACK__DEBUG_ALWAYS, true },
-	{ "debug_if_resumed", CPU_FALLBACK__DEBUG_IF_RESUMED, true },
-	{ NULL, 0, false },
-};
-
-bool
-pgstrom_check_cpu_fallback(kern_errorbuf *e, void *last_suspend)
-{
-	switch (pgstrom_cpu_fallback_mode)
-	{
-		case CPU_FALLBACK__DISABLED:
-			break;
-		case CPU_FALLBACK__ENABLED:
-			if ((e->errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
-				return true;
-			break;
-		case CPU_FALLBACK__DEBUG_ALWAYS:
-			if ((e->errcode & ~ERRCODE_FLAGS_CPU_FALLBACK) == 0)
-				return true;
-			break;
-		case CPU_FALLBACK__DEBUG_IF_RESUMED:
-			if ((e->errcode & ~ERRCODE_FLAGS_CPU_FALLBACK) == 0 &&
-				last_suspend != NULL)
-				return true;
-			break;
-		default:
-			werror("unknown pg_strom.cpu_fallback state");
-			break;
-	}
-	return false;
-}
-
 static void
 pgstrom_init_misc_guc(void)
 {
@@ -112,12 +66,11 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off CPU fallback if GPU could not execute the query */
-	DefineCustomEnumVariable("pg_strom.cpu_fallback",
+	DefineCustomBoolVariable("pg_strom.cpu_fallback",
 							 "Enables CPU fallback if GPU required re-run",
 							 NULL,
-							 &pgstrom_cpu_fallback_mode,
-							 CPU_FALLBACK__DISABLED,
-							 cpu_fallback_options,
+							 &pgstrom_cpu_fallback_enabled,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

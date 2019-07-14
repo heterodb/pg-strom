@@ -61,10 +61,7 @@ IMPORT FOREIGN SCHEMA regtest_arrow
   INTO regtest_arrow_cpu_temp
 OPTIONS (file '@abs_srcdir@/input/arrow_1.data');
 
-SELECT attnum, attname, atttypid::regtype
-  FROM pg_attribute
- WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0
- ORDER BY attnum;
+\d regtest_arrow
 
 SET pg_strom.enabled = off;
 -- should be empty results

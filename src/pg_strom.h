@@ -1424,7 +1424,7 @@ extern void		pgstrom_init_nvrtc(void);
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_debug_kernel_source;
 extern bool		pgstrom_bulkexec_enabled;
-extern bool		pgstrom_check_cpu_fallback(kern_errorbuf *e, void *suspend);
+extern bool		pgstrom_cpu_fallback_enabled;
 extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;

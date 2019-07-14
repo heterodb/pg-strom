@@ -2773,38 +2773,42 @@ resume_kernel:
 			goto resume_kernel;
 		}
 	}
-	else if (pgstrom_check_cpu_fallback(&gscan->task.kerror, last_suspend))
+	else
 	{
-		/*
-		 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
-		 * to host-side, because its ItemIdData might be updated, and
-		 * blocks might not be loaded yet if NVMe-Strom mode.
-		 * Due to the same reason, KDS_FORMAT_ARROW with NVMe-Strom mode
-		 * needs to write back the device buffer to host-side.
-		 */
-		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		if (pgstrom_cpu_fallback_enabled &&
+			(gscan->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
 		{
-			rc = cuMemcpyDtoH(&pds_src->kds,
-							  m_kds_src,
-							  pds_src->kds.length);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-			pds_src->nblocks_uncached = 0;
-		}
-		else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
-				 pds_src->iovec != NULL)
-		{
-			gscan->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
-		}
-		memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
-		gscan->task.cpu_fallback = true;
-		/* restore suspend context, if any */
-		gscan->kern.resume_context = (last_suspend != NULL);
-		if (last_suspend)
-		{
-			void   *temp = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
+			/*
+			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
+			 * to host-side, because its ItemIdData might be updated, and
+			 * blocks might not be loaded yet if NVMe-Strom mode.
+			 * Due to the same reason, KDS_FORMAT_ARROW with NVMe-Strom mode
+			 * needs to write back the device buffer to host-side.
+			 */
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			{
+				rc = cuMemcpyDtoH(&pds_src->kds,
+								  m_kds_src,
+								  pds_src->kds.length);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+				pds_src->nblocks_uncached = 0;
+			}
+			else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+					 pds_src->iovec != NULL)
+			{
+				gscan->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
+			}
+			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
+			gscan->task.cpu_fallback = true;
+			/* restore suspend context, if any */
+			gscan->kern.resume_context = (last_suspend != NULL);
+			if (last_suspend)
+			{
+				void   *temp = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
 
-			memcpy(temp, last_suspend, gscan->kern.suspend_sz);
+				memcpy(temp, last_suspend, gscan->kern.suspend_sz);
+			}
 		}
 	}
 out_of_resource:

@@ -62,28 +62,27 @@ IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
 OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data');
-SELECT attnum, attname, atttypid::regtype
-  FROM pg_attribute
- WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0
- ORDER BY attnum;
- attnum | attname |          atttypid           
---------+---------+-----------------------------
-      1 | id      | integer
-      2 | i2      | smallint
-      3 | i4      | integer
-      4 | i8      | bigint
-      5 | f2      | float2
-      6 | f4      | real
-      7 | f8      | double precision
-      8 | n1      | numeric
-      9 | n2      | numeric
-     10 | comp    | regtest_comp
-     11 | t1      | text
-     12 | t2      | text
-     13 | dt      | date
-     14 | tm      | time without time zone
-     15 | ts      | timestamp without time zone
-(15 rows)
+\d regtest_arrow
+                Foreign table "regtest_arrow_cpu_temp.regtest_arrow"
+ Column |            Type             | Collation | Nullable | Default | FDW options 
+--------+-----------------------------+-----------+----------+---------+-------------
+ id     | integer                     |           |          |         | 
+ i2     | smallint                    |           |          |         | 
+ i4     | integer                     |           |          |         | 
+ i8     | bigint                      |           |          |         | 
+ f2     | float2                      |           |          |         | 
+ f4     | real                        |           |          |         | 
+ f8     | double precision            |           |          |         | 
+ n1     | numeric                     |           |          |         | 
+ n2     | numeric                     |           |          |         | 
+ comp   | regtest_comp                |           |          |         | 
+ t1     | text                        |           |          |         | 
+ t2     | text                        |           |          |         | 
+ dt     | date                        |           |          |         | 
+ tm     | time without time zone      |           |          |         | 
+ ts     | timestamp without time zone |           |          |         | 
+Server: arrow_fdw
+FDW options: (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data')
 
 SET pg_strom.enabled = off;
 -- should be empty results
