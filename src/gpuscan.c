@@ -2058,7 +2058,6 @@ createGpuScanSharedState(GpuScanState *gss,
 	GpuScanRuntimeStat *gs_rtstat;
 	size_t		ss_length = MAXALIGN(sizeof(GpuScanSharedState));
 
-	Assert(!IsParallelWorker());
 	if (dsm_addr)
 		gs_sstate = dsm_addr;
 	else
