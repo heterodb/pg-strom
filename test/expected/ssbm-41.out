@@ -34,14 +34,12 @@ from date1, customer, supplier, part, lineorder
                            GPU Projection: date1.d_year::integer, customer.c_nation::character(15), lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric
                            Outer Scan: pgstrom_regress.part
                            Outer Scan Filter: ((part.p_mfgr = 'MFGR#1'::bpchar) OR (part.p_mfgr = 'MFGR#2'::bpchar))
-                           Depth 1: GpuHashJoin  (nrows 59831...174707)
+                           Depth 1: GpuHashJoin
                                     HashKeys: part.p_partkey
                                     JoinQuals: (lineorder.lo_partkey = part.p_partkey)
-                                    KDS-Hash (size: 45.02MB)
-                           Depth 2: GpuHashJoin  (nrows 174707...174707)
+                           Depth 2: GpuHashJoin
                                     HashKeys: lineorder.lo_orderdate
                                     JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                                    KDS-Hash (size: 461.95KB)
                            ->  Hash Join
                                  Output: customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_partkey, lineorder.lo_orderdate
                                  Inner Unique: true
@@ -50,10 +48,9 @@ from date1, customer, supplier, part, lineorder
                                        Output: customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_suppkey, lineorder.lo_partkey, lineorder.lo_orderdate
                                        GPU Projection: customer.c_nation::character(15), lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric, lineorder.lo_suppkey::numeric, lineorder.lo_partkey::integer, lineorder.lo_orderdate::integer
                                        Outer Scan: pgstrom_regress.lineorder
-                                       Depth 1: GpuHashJoin  (nrows 11998030...2374010)
+                                       Depth 1: GpuHashJoin
                                                 HashKeys: lineorder.lo_custkey
                                                 JoinQuals: (customer.c_custkey = lineorder.lo_custkey)
-                                                KDS-Hash (size: 2052.27KB)
                                        ->  Seq Scan on pgstrom_regress.customer
                                              Output: customer.c_nation, customer.c_custkey
                                              Filter: (customer.c_region = 'AMERICA'::bpchar)
@@ -64,7 +61,7 @@ from date1, customer, supplier, part, lineorder
                                              Filter: (supplier.s_region = 'AMERICA'::bpchar)
                            ->  Seq Scan on pgstrom_regress.date1
                                  Output: date1.d_year, date1.d_datekey
-(49 rows)
+(46 rows)
 
 select d_year, c_nation,  sum(lo_revenue - lo_supplycost) as profit
 from date1, customer, supplier, part, lineorder

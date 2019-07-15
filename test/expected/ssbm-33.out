@@ -36,25 +36,23 @@ where lo_custkey = c_custkey
                                        Output: customer.c_city, lineorder.lo_revenue, lineorder.lo_orderdate, supplier.s_city
                                        GPU Projection: customer.c_city::character(10), lineorder.lo_revenue::numeric, lineorder.lo_orderdate::integer, supplier.s_city::character(10)
                                        Outer Scan: pgstrom_regress.lineorder
-                                       Depth 1: GpuHashJoin  (nrows 4999179...94584)
-                                                HashKeys: lineorder.lo_custkey
-                                                JoinQuals: (customer.c_custkey = lineorder.lo_custkey)
-                                                KDS-Hash (size: 81.95KB)
-                                       Depth 2: GpuHashJoin  (nrows 94584...747)
+                                       Depth 1: GpuHashJoin
                                                 HashKeys: lineorder.lo_suppkey
                                                 JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                                KDS-Hash (size: 26.27KB)
-                                       ->  Seq Scan on pgstrom_regress.customer
-                                             Output: customer.c_city, customer.c_custkey
-                                             Filter: ((customer.c_city = 'UNITED KI1'::bpchar) OR (customer.c_city = 'UNITED KI5'::bpchar))
+                                       Depth 2: GpuHashJoin
+                                                HashKeys: lineorder.lo_custkey
+                                                JoinQuals: (lineorder.lo_custkey = customer.c_custkey)
                                        ->  Seq Scan on pgstrom_regress.supplier
                                              Output: supplier.s_city, supplier.s_suppkey
                                              Filter: ((supplier.s_city = 'UNITED KI1'::bpchar) OR (supplier.s_city = 'UNITED KI5'::bpchar))
+                                       ->  Seq Scan on pgstrom_regress.customer
+                                             Output: customer.c_city, customer.c_custkey
+                                             Filter: ((customer.c_city = 'UNITED KI1'::bpchar) OR (customer.c_city = 'UNITED KI5'::bpchar))
                                  ->  Index Scan using date1_pkey on pgstrom_regress.date1
                                        Output: date1.d_datekey, date1.d_date, date1.d_dayofweek, date1.d_month, date1.d_year, date1.d_yearmonthnum, date1.d_yearmonth, date1.d_daynuminweek, date1.d_daynuminmonth, date1.d_daynuminyear, date1.d_monthnuminyear, date1.d_weeknuminyear, date1.d_sellingseason, date1.d_lastdayinweekfl, date1.d_lastdayinmonthfl, date1.d_holidayfl, date1.d_weekdayfl
                                        Index Cond: (date1.d_datekey = lineorder.lo_orderdate)
                                        Filter: ((date1.d_year >= 1992) AND (date1.d_year <= 1997))
-(40 rows)
+(38 rows)
 
 select c_city,s_city,d_year,sum(lo_revenue) as revenue
 from customer,lineorder,supplier,date1

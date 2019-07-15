@@ -3211,52 +3211,86 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
-			if (!gj_rtstat)
-				appendStringInfo(&str, "  (nrows %.0f...%.0f)",
-								 plan_nrows_in,
-								 plan_nrows_out);
-			else if (exec_nrows_out2 > 0.0)
-				appendStringInfo(&str, "  (plan nrows: %.0f...%.0f,"
-								 " actual nrows: %.0f...%.0f+%.0f)",
-								 plan_nrows_in,
-								 plan_nrows_out,
-								 exec_nrows_in,
-								 exec_nrows_out1,
-								 exec_nrows_out2);
-			else
-				appendStringInfo(&str, "  (plan nrows: %.0f...%.0f,"
-								 " actual nrows: %.0f...%.0f)",
-								 plan_nrows_in,
-								 plan_nrows_out,
-								 exec_nrows_in,
-								 exec_nrows_out1);
+			if (es->costs)
+			{
+				if (!es->analyze)
+				{
+					appendStringInfo(es->str, "  (%s-size: %s",
+									 hash_outer_key ? "hash" : "heap",
+									 format_bytesz(istate->ichunk_size));
+				}
+				else
+				{
+					Size	exec_sz = (kds_in ? kds_in->length : 0);
+
+					appendStringInfo(es->str, "  (%s-size: %s actual-size: %s",
+									 hash_outer_key ? "hash" : "heap",
+									 format_bytesz(istate->ichunk_size),
+									 format_bytesz(exec_sz));
+				}
+
+				if (!gj_rtstat)
+					appendStringInfo(&str, ", nrows %.0f...%.0f)",
+									 plan_nrows_in,
+									 plan_nrows_out);
+				else if (exec_nrows_out2 > 0.0)
+					appendStringInfo(&str, ", plan nrows: %.0f...%.0f,"
+									 " actual nrows: %.0f...%.0f+%.0f)",
+									 plan_nrows_in,
+									 plan_nrows_out,
+									 exec_nrows_in,
+									 exec_nrows_out1,
+									 exec_nrows_out2);
+				else
+					appendStringInfo(&str, ", plan nrows: %.0f...%.0f,"
+									 " actual nrows: %.0f...%.0f)",
+									 plan_nrows_in,
+									 plan_nrows_out,
+									 exec_nrows_in,
+									 exec_nrows_out1);
+			}
 			ExplainPropertyText(qlabel, str.data, es);
 		}
 		else
 		{
 			ExplainPropertyText(qlabel, str.data, es);
 
-			snprintf(qlabel, sizeof(qlabel),
-					 "Depth% 2d Plan Rows-in", depth);
-			ExplainPropertyFloat(qlabel, NULL, plan_nrows_in, 0, es);
-
-			snprintf(qlabel, sizeof(qlabel),
-					 "Depth% 2d Plan Rows-out", depth);
-			ExplainPropertyFloat(qlabel, NULL, plan_nrows_out, 0, es);
-
-			if (gj_rtstat)
+			if (es->costs)
 			{
 				snprintf(qlabel, sizeof(qlabel),
-						 "Depth% 2d Actual Rows-in", depth);
-				ExplainPropertyFloat(qlabel, NULL, exec_nrows_in, 0, es);
+						 "Depth % 2d KDS Plan Size", depth);
+				ExplainPropertyInteger(qlabel, NULL, istate->ichunk_size, es);
+				if (es->analyze)
+				{
+					Size	len = (kds_in ? kds_in->length : 0);
+
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth % 2d KDS Exec Size", depth);
+					ExplainPropertyInteger(qlabel, NULL, len, es);
+				}
 
 				snprintf(qlabel, sizeof(qlabel),
-                         "Depth% 2d Actual Rows-out by inner join", depth);
-				ExplainPropertyFloat(qlabel, NULL, exec_nrows_out1, 0, es);
+						 "Depth% 2d Plan Rows-in", depth);
+				ExplainPropertyFloat(qlabel, NULL, plan_nrows_in, 0, es);
 
 				snprintf(qlabel, sizeof(qlabel),
-						 "Depth% 2d Actual Rows-out by outer join", depth);
-				ExplainPropertyFloat(qlabel, NULL, exec_nrows_out2, 0, es);
+						 "Depth% 2d Plan Rows-out", depth);
+				ExplainPropertyFloat(qlabel, NULL, plan_nrows_out, 0, es);
+
+				if (gj_rtstat)
+				{
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth% 2d Actual Rows-in", depth);
+					ExplainPropertyFloat(qlabel, NULL, exec_nrows_in, 0, es);
+
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth% 2d Actual Rows-out by inner join", depth);
+					ExplainPropertyFloat(qlabel, NULL, exec_nrows_out1, 0, es);
+
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth% 2d Actual Rows-out by outer join", depth);
+					ExplainPropertyFloat(qlabel, NULL, exec_nrows_out2, 0, es);
+				}
 			}
 		}
 
@@ -3316,47 +3350,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			{
 				snprintf(qlabel, sizeof(qlabel), "Depth %02d-Filter", depth);
 				ExplainPropertyText(qlabel, str.data, es);
-			}
-		}
-
-		/*
-		 * Inner KDS statistics
-		 */
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			appendStringInfoSpaces(es->str, indent_width);
-			if (!es->analyze)
-			{
-				appendStringInfo(es->str, "KDS-%s (size: %s)",
-								 hash_outer_key ? "Hash" : "Heap",
-								 format_bytesz(istate->ichunk_size));
-			}
-			else
-			{
-				appendStringInfo(es->str, "KDS-%s (size plan: %s, exec: %s)",
-								 hash_outer_key ? "Hash" : "Heap",
-								 format_bytesz(istate->ichunk_size),
-								 format_bytesz(kds_in ? kds_in->length : 0));
-			}
-			appendStringInfoChar(es->str, '\n');
-		}
-		else
-		{
-			Size		len;
-
-			snprintf(qlabel, sizeof(qlabel), "Depth %02d KDS Type", depth);
-			ExplainPropertyText(qlabel, hash_outer_key ? "Hash" : "Heap", es);
-
-			snprintf(qlabel, sizeof(qlabel),
-					 "Depth % 2d KDS Plan Size", depth);
-			len = istate->ichunk_size;
-			ExplainPropertyText(qlabel, format_bytesz(len), es);
-			if (es->analyze)
-			{
-				len = (kds_in ? kds_in->length : 0);
-				snprintf(qlabel, sizeof(qlabel),
-						 "Depth % 2d KDS Exec Size", depth);
-				ExplainPropertyText(qlabel, format_bytesz(len), es);
 			}
 		}
 		depth++;

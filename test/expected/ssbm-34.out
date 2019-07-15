@@ -33,14 +33,12 @@ from customer, lineorder, supplier, date1
                                  Output: lineorder.lo_revenue, lineorder.lo_custkey, supplier.s_city, date1.d_year
                                  GPU Projection: lineorder.lo_revenue::numeric, lineorder.lo_custkey::numeric, supplier.s_city::character(10), date1.d_year::integer
                                  Outer Scan: pgstrom_regress.lineorder
-                                 Depth 1: GpuHashJoin  (nrows 4999179...94737)
+                                 Depth 1: GpuHashJoin
                                           HashKeys: lineorder.lo_suppkey
                                           JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                          KDS-Hash (size: 26.27KB)
-                                 Depth 2: GpuHashJoin  (nrows 94737...1149)
+                                 Depth 2: GpuHashJoin
                                           HashKeys: lineorder.lo_orderdate
                                           JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                                          KDS-Hash (size: 6272B)
                                  ->  Seq Scan on pgstrom_regress.supplier
                                        Output: supplier.s_city, supplier.s_suppkey
                                        Filter: ((supplier.s_city = 'UNITED KI1'::bpchar) OR (supplier.s_city = 'UNITED KI5'::bpchar))
@@ -51,7 +49,7 @@ from customer, lineorder, supplier, date1
                                  Output: customer.c_custkey, customer.c_name, customer.c_address, customer.c_city, customer.c_nation, customer.c_region, customer.c_phone, customer.c_mktsegment
                                  Index Cond: (customer.c_custkey = lineorder.lo_custkey)
                                  Filter: ((customer.c_city = 'UNITED KI1'::bpchar) OR (customer.c_city = 'UNITED KI5'::bpchar))
-(37 rows)
+(35 rows)
 
 select c_city, s_city, d_year, sum(lo_revenue) as revenue
 from customer, lineorder, supplier, date1

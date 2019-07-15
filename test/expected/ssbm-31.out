@@ -34,18 +34,15 @@ and d_year >= 1992 and d_year <= 1997
                                  Output: customer.c_nation, supplier.s_nation, date1.d_year, lineorder.lo_revenue
                                  GPU Projection: customer.c_nation::character(15), supplier.s_nation::character(15), date1.d_year::integer, lineorder.lo_revenue::numeric
                                  Outer Scan: pgstrom_regress.lineorder
-                                 Depth 1: GpuHashJoin  (nrows 4999179...2399006)
+                                 Depth 1: GpuHashJoin
                                           HashKeys: lineorder.lo_suppkey
                                           JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                          KDS-Hash (size: 660.52KB)
-                                 Depth 2: GpuHashJoin  (nrows 2399006...487158)
+                                 Depth 2: GpuHashJoin
                                           HashKeys: lineorder.lo_custkey
                                           JoinQuals: (lineorder.lo_custkey = customer.c_custkey)
-                                          KDS-Hash (size: 2106.20KB)
-                                 Depth 3: GpuHashJoin  (nrows 487158...417782)
+                                 Depth 3: GpuHashJoin
                                           HashKeys: lineorder.lo_orderdate
                                           JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                                          KDS-Hash (size: 396.19KB)
                                  ->  Seq Scan on pgstrom_regress.supplier
                                        Output: supplier.s_nation, supplier.s_suppkey
                                        Filter: (supplier.s_region = 'ASIA'::bpchar)
@@ -55,7 +52,7 @@ and d_year >= 1992 and d_year <= 1997
                                  ->  Seq Scan on pgstrom_regress.date1
                                        Output: date1.d_year, date1.d_datekey
                                        Filter: ((date1.d_year >= 1992) AND (date1.d_year <= 1997))
-(42 rows)
+(39 rows)
 
 select c_nation, s_nation, d_year, sum(lo_revenue)
 as revenue from customer, lineorder, supplier, date1
@@ -68,131 +65,123 @@ and d_year >= 1992 and d_year <= 1997
   order by d_year asc, revenue desc;
     c_nation     |    s_nation     | d_year |   revenue   
 -----------------+-----------------+--------+-------------
- JAPAN           | JAPAN           |   1992 | 36503848913
- VIETNAM         | VIETNAM         |   1992 | 16697021050
- CHINA           | INDONESIA       |   1992 | 14449484868
- INDONESIA       | VIETNAM         |   1992 | 14279687350
- INDONESIA       | INDIA           |   1992 | 14202636138
- INDIA           | JAPAN           |   1992 | 14180063582
- CHINA           | INDIA           |   1992 | 14029078166
- INDONESIA       | JAPAN           |   1992 | 13974541214
- JAPAN           | VIETNAM         |   1992 | 13857527150
- VIETNAM         | CHINA           |   1992 | 13711604425
- VIETNAM         | INDIA           |   1992 | 13546392815
- CHINA           | JAPAN           |   1992 | 13541699311
- JAPAN           | CHINA           |   1992 |  7534332947
- INDIA           | CHINA           |   1992 |  7442577414
- JAPAN           | INDIA           |   1992 |  7319051613
- CHINA           | VIETNAM         |   1992 |  7288632195
- INDIA           | INDONESIA       |   1992 |  7265176410
- JAPAN           | INDONESIA       |   1992 |  7119195144
- INDONESIA       | CHINA           |   1992 |  7102646980
- INDIA           | VIETNAM         |   1992 |  6992621132
- VIETNAM         | INDONESIA       |   1992 |  6951798614
- VIETNAM         | JAPAN           |   1992 |  6312295467
- VIETNAM         | VIETNAM         |   1993 | 35425809970
- INDIA           | INDONESIA       |   1993 | 22035181616
- VIETNAM         | INDONESIA       |   1993 | 21187717321
- VIETNAM         | INDIA           |   1993 | 21047441584
- VIETNAM         | CHINA           |   1993 | 21033847735
- VIETNAM         | JAPAN           |   1993 | 20269705306
- INDONESIA       | INDONESIA       |   1993 | 17571433237
- JAPAN           | INDONESIA       |   1993 | 14984068366
- INDONESIA       | CHINA           |   1993 | 14596607369
- CHINA           | JAPAN           |   1993 | 14331576779
- JAPAN           | INDIA           |   1993 | 13979646977
- CHINA           | INDIA           |   1993 | 13880376319
- INDONESIA       | JAPAN           |   1993 |  7465883404
- CHINA           | INDONESIA       |   1993 |  7400613752
- JAPAN           | CHINA           |   1993 |  7127237824
- INDIA           | CHINA           |   1993 |  7066860873
- INDIA           | JAPAN           |   1993 |  6968462747
- CHINA           | INDONESIA       |   1994 | 22091964416
+ VIETNAM         | VIETNAM         |   1992 | 33573660759
+ INDONESIA       | VIETNAM         |   1992 | 21231485964
+ CHINA           | VIETNAM         |   1992 | 21000236620
+ CHINA           | CHINA           |   1992 | 19627209204
+ CHINA           | INDIA           |   1992 | 15068912776
+ INDIA           | INDONESIA       |   1992 | 14484860871
+ JAPAN           | INDONESIA       |   1992 | 14239197074
+ CHINA           | JAPAN           |   1992 | 14203350787
+ JAPAN           | INDIA           |   1992 | 13766110705
+ INDONESIA       | CHINA           |   1992 | 13700489631
+ INDIA           | VIETNAM         |   1992 | 12882361859
+ JAPAN           | VIETNAM         |   1992 | 12643685946
+ CHINA           | INDONESIA       |   1992 |  7851642217
+ INDIA           | JAPAN           |   1992 |  7733004490
+ VIETNAM         | INDIA           |   1992 |  7656652088
+ VIETNAM         | JAPAN           |   1992 |  7526136671
+ INDONESIA       | INDIA           |   1992 |  6982951677
+ JAPAN           | CHINA           |   1992 |  6872681471
+ INDONESIA       | JAPAN           |   1992 |  6854539284
+ INDIA           | CHINA           |   1992 |  6402742804
+ INDONESIA       | INDONESIA       |   1993 | 36538856359
+ CHINA           | INDONESIA       |   1993 | 21997221121
+ CHINA           | JAPAN           |   1993 | 21458814603
+ JAPAN           | VIETNAM         |   1993 | 20269705306
+ VIETNAM         | VIETNAM         |   1993 | 16458386848
+ JAPAN           | INDONESIA       |   1993 | 15539510152
+ JAPAN           | INDIA           |   1993 | 14704452377
+ INDONESIA       | VIETNAM         |   1993 | 14639691440
+ VIETNAM         | CHINA           |   1993 | 14495716052
+ INDIA           | INDONESIA       |   1993 | 13948607782
+ INDIA           | VIETNAM         |   1993 | 13363650800
+ INDIA           | CHINA           |   1993 | 13328913166
+ INDONESIA       | INDIA           |   1993 |  8086573834
+ VIETNAM         | INDIA           |   1993 |  7683790784
+ CHINA           | INDIA           |   1993 |  7618324026
+ INDONESIA       | JAPAN           |   1993 |  6910441618
+ VIETNAM         | INDONESIA       |   1993 |  6548025881
+ CHINA           | VIETNAM         |   1993 |  6538131683
+ INDIA           | JAPAN           |   1993 |  6243657347
+ INDONESIA       | INDONESIA       |   1994 | 36133944592
+ JAPAN           | INDONESIA       |   1994 | 21866384696
  INDONESIA       | VIETNAM         |   1994 | 21308088912
- INDONESIA       | INDONESIA       |   1994 | 18265555356
- VIETNAM         | VIETNAM         |   1994 | 18134010577
- JAPAN           | JAPAN           |   1994 | 17268795984
- INDONESIA       | INDIA           |   1994 | 14673546163
- INDONESIA       | JAPAN           |   1994 | 14426504269
- INDIA           | JAPAN           |   1994 | 14408949076
- INDIA           | CHINA           |   1994 | 14392259265
- VIETNAM         | JAPAN           |   1994 | 14141717772
- JAPAN           | CHINA           |   1994 | 13803126737
- VIETNAM         | CHINA           |   1994 | 13784371491
- INDIA           | VIETNAM         |   1994 | 13394513649
- JAPAN           | INDONESIA       |   1994 |  7439880427
- INDIA           | INDONESIA       |   1994 |  7423174399
- CHINA           | VIETNAM         |   1994 |  7288657825
- CHINA           | INDIA           |   1994 |  7241674076
- JAPAN           | INDIA           |   1994 |  7204529579
- CHINA           | JAPAN           |   1994 |  7008310585
- VIETNAM         | INDIA           |   1994 |  6998388727
- JAPAN           | VIETNAM         |   1994 |  6531855012
- CHINA           | CHINA           |   1995 | 36005051255
- INDONESIA       | INDONESIA       |   1995 | 17129547976
- INDIA           | INDONESIA       |   1995 | 15271674614
- JAPAN           | INDONESIA       |   1995 | 14583975043
- INDIA           | CHINA           |   1995 | 14534207170
- INDONESIA       | CHINA           |   1995 | 14368284255
- JAPAN           | INDIA           |   1995 | 14335337124
- VIETNAM         | INDONESIA       |   1995 | 14161067881
- VIETNAM         | INDIA           |   1995 | 14025751618
- CHINA           | JAPAN           |   1995 | 13913540534
- VIETNAM         | JAPAN           |   1995 | 13910509640
- VIETNAM         | CHINA           |   1995 | 13493782681
- JAPAN           | CHINA           |   1995 |  7871437462
- CHINA           | INDONESIA       |   1995 |  7558129738
- INDONESIA       | VIETNAM         |   1995 |  7351714368
- CHINA           | VIETNAM         |   1995 |  7211187422
- CHINA           | INDIA           |   1995 |  7201038035
- JAPAN           | VIETNAM         |   1995 |  7155049983
- INDONESIA       | INDIA           |   1995 |  7103465450
- INDIA           | VIETNAM         |   1995 |  7067164204
- INDONESIA       | JAPAN           |   1995 |  6833375859
- INDIA           | JAPAN           |   1995 |  6784252457
- INDIA           | JAPAN           |   1996 | 20574791825
- JAPAN           | JAPAN           |   1996 | 17713522281
- VIETNAM         | VIETNAM         |   1996 | 17659859709
- CHINA           | CHINA           |   1996 | 17374366689
- CHINA           | INDONESIA       |   1996 | 14952197894
- INDIA           | INDONESIA       |   1996 | 14784752070
- CHINA           | INDIA           |   1996 | 14646907482
- INDONESIA       | JAPAN           |   1996 | 14548466858
- INDIA           | VIETNAM         |   1996 | 14538931185
- JAPAN           | CHINA           |   1996 | 14144128184
- VIETNAM         | INDONESIA       |   1996 | 14142622065
- JAPAN           | VIETNAM         |   1996 | 14083275262
- CHINA           | VIETNAM         |   1996 | 13875026629
- JAPAN           | INDONESIA       |   1996 |  7755440852
- INDONESIA       | CHINA           |   1996 |  7599007475
- CHINA           | JAPAN           |   1996 |  7251096657
- VIETNAM         | CHINA           |   1996 |  7165348737
- INDONESIA       | VIETNAM         |   1996 |  7028499014
- INDONESIA       | INDIA           |   1996 |  6980260004
- VIETNAM         | JAPAN           |   1996 |  6879285304
- INDIA           | CHINA           |   1996 |  6811070255
- VIETNAM         | INDIA           |   1996 |  6659253490
- INDIA           | CHINA           |   1997 | 21415364599
- CHINA           | CHINA           |   1997 | 18377931861
- JAPAN           | JAPAN           |   1997 | 17428519326
- INDONESIA       | INDONESIA       |   1997 | 16820956229
- INDONESIA       | JAPAN           |   1997 | 15089962952
- INDIA           | INDONESIA       |   1997 | 14944223922
- INDONESIA       | CHINA           |   1997 | 14629585085
- VIETNAM         | INDONESIA       |   1997 | 14627556070
- JAPAN           | INDIA           |   1997 | 14293656026
- CHINA           | JAPAN           |   1997 | 14194800237
- INDIA           | VIETNAM         |   1997 | 13639682802
- CHINA           | VIETNAM         |   1997 | 13509505774
- JAPAN           | VIETNAM         |   1997 | 13479525749
- CHINA           | INDONESIA       |   1997 |  7501495484
- INDONESIA       | INDIA           |   1997 |  7375882578
- VIETNAM         | CHINA           |   1997 |  7257785491
- JAPAN           | INDONESIA       |   1997 |  7089794485
- INDONESIA       | VIETNAM         |   1997 |  7018899229
- JAPAN           | CHINA           |   1997 |  6978695778
- VIETNAM         | JAPAN           |   1997 |  6954252238
- INDIA           | JAPAN           |   1997 |  6897289854
- VIETNAM         | INDIA           |   1997 |  6882816857
-(126 rows)
+ CHINA           | JAPAN           |   1994 | 20811437322
+ INDIA           | VIETNAM         |   1994 | 20392902376
+ JAPAN           | JAPAN           |   1994 | 17534417325
+ CHINA           | INDONESIA       |   1994 | 15337218804
+ INDONESIA       | INDIA           |   1994 | 15075547426
+ VIETNAM         | CHINA           |   1994 | 14805000243
+ VIETNAM         | JAPAN           |   1994 | 14013469477
+ INDIA           | JAPAN           |   1994 | 13652501920
+ INDIA           | CHINA           |   1994 | 13335166948
+ CHINA           | INDIA           |   1994 |  8298766393
+ JAPAN           | INDIA           |   1994 |  7960976735
+ INDIA           | INDONESIA       |   1994 |  7021173136
+ INDONESIA       | CHINA           |   1994 |  6754745612
+ JAPAN           | VIETNAM         |   1994 |  6660103307
+ CHINA           | VIETNAM         |   1994 |  6268029073
+ CHINA           | INDONESIA       |   1995 | 21926413993
+ INDIA           | JAPAN           |   1995 | 21119589581
+ INDONESIA       | INDONESIA       |   1995 | 19743444843
+ VIETNAM         | VIETNAM         |   1995 | 16731181096
+ JAPAN           | JAPAN           |   1995 | 16659973292
+ INDONESIA       | INDIA           |   1995 | 15524532894
+ INDONESIA       | VIETNAM         |   1995 | 14882009437
+ CHINA           | INDIA           |   1995 | 14705564863
+ INDIA           | VIETNAM         |   1995 | 14680139059
+ JAPAN           | INDONESIA       |   1995 | 14428333690
+ VIETNAM         | JAPAN           |   1995 | 14321765363
+ CHINA           | VIETNAM         |   1995 | 14267801226
+ JAPAN           | CHINA           |   1995 | 13617443878
+ CHINA           | JAPAN           |   1995 |  8167534118
+ INDIA           | CHINA           |   1995 |  7029680342
+ INDONESIA       | JAPAN           |   1995 |  6989017212
+ INDIA           | INDONESIA       |   1995 |  6850607170
+ JAPAN           | VIETNAM         |   1995 |  6743794260
+ VIETNAM         | INDONESIA       |   1995 |  6630772812
+ VIETNAM         | CHINA           |   1995 |  6437168877
+ VIETNAM         | INDIA           |   1995 |  6412776763
+ CHINA           | CHINA           |   1996 | 36028870070
+ INDONESIA       | JAPAN           |   1996 | 22303907710
+ INDONESIA       | INDIA           |   1996 | 21765012074
+ CHINA           | INDIA           |   1996 | 21457977737
+ VIETNAM         | INDONESIA       |   1996 | 21171121079
+ INDIA           | INDIA           |   1996 | 16718878609
+ CHINA           | INDONESIA       |   1996 | 15520038788
+ VIETNAM         | INDIA           |   1996 | 14498967309
+ CHINA           | JAPAN           |   1996 | 14321395987
+ JAPAN           | INDIA           |   1996 | 13816469844
+ CHINA           | VIETNAM         |   1996 | 13566285089
+ JAPAN           | VIETNAM         |   1996 | 13524703833
+ VIETNAM         | CHINA           |   1996 |  7474090277
+ VIETNAM         | JAPAN           |   1996 |  7437856733
+ JAPAN           | CHINA           |   1996 |  7073828854
+ INDONESIA       | CHINA           |   1996 |  7031166581
+ INDIA           | JAPAN           |   1996 |  6758321981
+ INDIA           | VIETNAM         |   1996 |  6699217366
+ JAPAN           | INDONESIA       |   1997 | 22179757437
+ JAPAN           | JAPAN           |   1997 | 19567616936
+ INDIA           | INDIA           |   1997 | 17099398028
+ VIETNAM         | VIETNAM         |   1997 | 15960392452
+ INDIA           | INDONESIA       |   1997 | 15736605969
+ VIETNAM         | INDONESIA       |   1997 | 14916910836
+ INDIA           | JAPAN           |   1997 | 14698772855
+ CHINA           | JAPAN           |   1997 | 14531036128
+ JAPAN           | VIETNAM         |   1997 | 14286616412
+ VIETNAM         | CHINA           |   1997 | 14238161962
+ INDONESIA       | CHINA           |   1997 | 14215376015
+ CHINA           | INDIA           |   1997 | 13601276570
+ INDIA           | VIETNAM         |   1997 | 13129416291
+ CHINA           | INDONESIA       |   1997 |  7915704554
+ INDIA           | CHINA           |   1997 |  7814088029
+ VIETNAM         | INDIA           |   1997 |  7393083368
+ INDONESIA       | VIETNAM         |   1997 |  6729544463
+ JAPAN           | CHINA           |   1997 |  6642459887
+ INDONESIA       | INDIA           |   1997 |  6583500531
+ CHINA           | VIETNAM         |   1997 |  6529129303
+ JAPAN           | INDIA           |   1997 |  6492173025
+ VIETNAM         | JAPAN           |   1997 |  6147161575
+(118 rows)
 

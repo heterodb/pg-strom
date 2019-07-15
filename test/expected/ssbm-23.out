@@ -34,18 +34,16 @@ select sum(lo_revenue), d_year, p_brand1
                                  GPU Projection: lineorder.lo_revenue::numeric, lineorder.lo_orderdate::integer, part.p_brand1::character(9)
                                  Outer Scan: pgstrom_regress.part
                                  Outer Scan Filter: (part.p_brand1 = 'MFGR#2221'::bpchar)
-                                 Depth 1: GpuHashJoin  (nrows 165...2364)
+                                 Depth 1: GpuHashJoin
                                           HashKeys: part.p_partkey
                                           JoinQuals: (lineorder.lo_partkey = part.p_partkey)
-                                          KDS-Hash (size: 165.80MB)
                                  ->  Custom Scan (GpuJoin) on pgstrom_regress.lineorder
                                        Output: lineorder.lo_revenue, lineorder.lo_orderdate, lineorder.lo_partkey
                                        GPU Projection: lineorder.lo_revenue::numeric, lineorder.lo_orderdate::integer, lineorder.lo_partkey::integer
                                        Outer Scan: pgstrom_regress.lineorder
-                                       Depth 1: GpuHashJoin  (nrows 11998030...2381618)
+                                       Depth 1: GpuHashJoin
                                                 HashKeys: lineorder.lo_suppkey
                                                 JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                                KDS-Hash (size: 655.66KB)
                                        ->  Seq Scan on pgstrom_regress.supplier
                                              Output: supplier.s_suppkey
                                              Filter: (supplier.s_region = 'EUROPE'::bpchar)
@@ -53,7 +51,7 @@ select sum(lo_revenue), d_year, p_brand1
                                  Output: date1.d_year, date1.d_datekey
                                  ->  Seq Scan on pgstrom_regress.date1
                                        Output: date1.d_year, date1.d_datekey
-(40 rows)
+(38 rows)
 
 select sum(lo_revenue), d_year, p_brand1
   from lineorder, date1, part, supplier

@@ -23,14 +23,13 @@ where lo_orderdate = d_datekey
                      GPU Projection: lineorder.lo_extendedprice::numeric, lineorder.lo_discount::numeric
                      Outer Scan: pgstrom_regress.lineorder
                      Outer Scan Filter: ((lineorder.lo_discount >= '5'::numeric) AND (lineorder.lo_discount <= '7'::numeric) AND (lineorder.lo_quantity >= '26'::numeric) AND (lineorder.lo_quantity <= '35'::numeric))
-                     Depth 1: GpuHashJoin  (nrows 263662...1733)
+                     Depth 1: GpuHashJoin
                               HashKeys: lineorder.lo_orderdate
                               JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                              KDS-Hash (size: 1888B)
                      ->  Seq Scan on pgstrom_regress.date1
                            Output: date1.d_datekey
                            Filter: ((date1.d_weeknuminyear = '6'::numeric) AND (date1.d_year = 1994))
-(19 rows)
+(18 rows)
 
 select sum(lo_extendedprice*lo_discount) as revenue
 from lineorder, date1

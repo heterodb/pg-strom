@@ -219,14 +219,13 @@ SELECT id, x+y+z v, memo
    Output: d.id, ((d.x + d.y) + s.z), d.memo
    GPU Projection: d.id::integer, d.x::double precision, d.y::double precision, d.memo::text, s.z::double precision
    Outer Scan: regtest_fallback_pgsql_temp.regtest_small s
-   Depth 1: GpuHashJoin  (nrows 4000...39)
+   Depth 1: GpuHashJoin
             HashKeys: s.aid
             JoinQuals: (d.aid = s.aid)
-            KDS-Hash (size: 8.31KB)
    ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_data d
          Output: d.id, d.x, d.y, d.memo, d.aid
          GPU Filter: (d.memo ~~ '%abc%'::text)
-(11 rows)
+(10 rows)
 
 SELECT id, x+y+z v, memo
   INTO test10g
@@ -266,14 +265,13 @@ SELECT * INTO pg_temp.test11g
    Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
    GPU Projection: d.aid::integer, d.id::integer, d.cat::text, d.x::double precision, d.y::double precision, d.memo::text, l.z::double precision, l.md5::character(200)
    Outer Scan: regtest_fallback_pgsql_temp.regtest_data d
-   Depth 1: GpuHashJoin  (nrows 400001...186416)
+   Depth 1: GpuHashJoin
             HashKeys: d.aid
             JoinQuals: (d.aid = l.aid)
-            KDS-Hash (size: 1715.94KB)
    ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_enlarge l
          Output: l.z, l.md5, l.aid
          GPU Filter: (l.aid < 1500)
-(11 rows)
+(10 rows)
 
 SELECT * INTO pg_temp.test11g
   FROM regtest_data d NATURAL JOIN regtest_enlarge l
@@ -305,14 +303,13 @@ SELECT *
    GPU Projection: d.aid::integer, d.id::integer, d.cat::text, d.x::double precision, d.y::double precision, d.memo::text, l.z::double precision, l.md5::character(200)
    Outer Scan: regtest_fallback_pgsql_temp.regtest_data d
    Outer Scan Filter: (d.memo ~~ '%ab%'::text)
-   Depth 1: GpuHashJoin  (nrows 39...18)
+   Depth 1: GpuHashJoin
             HashKeys: d.aid
             JoinQuals: (d.aid = l.aid)
-            KDS-Hash (size: 1715.94KB)
    ->  Custom Scan (GpuScan) on regtest_fallback_pgsql_temp.regtest_enlarge l
          Output: l.z, l.md5, l.aid
          GPU Filter: (l.aid < 2500)
-(12 rows)
+(11 rows)
 
 SELECT *
   FROM regtest_data d NATURAL JOIN regtest_enlarge l

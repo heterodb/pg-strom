@@ -16,59 +16,54 @@ from date1, customer, supplier, part, lineorder
    or p_mfgr = 'MFGR#2')
 group by d_year, s_nation, p_category
 order by d_year, s_nation, p_category;
-                                                                                                         QUERY PLAN                                                                                                         
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                       QUERY PLAN                                                                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Finalize GroupAggregate
    Output: date1.d_year, supplier.s_nation, part.p_category, sum((lineorder.lo_revenue - lineorder.lo_supplycost))
    Group Key: date1.d_year, supplier.s_nation, part.p_category
    ->  Gather Merge
          Output: date1.d_year, supplier.s_nation, part.p_category, (PARTIAL sum((lineorder.lo_revenue - lineorder.lo_supplycost)))
          Workers Planned: 2
-         ->  Partial GroupAggregate
-               Output: date1.d_year, supplier.s_nation, part.p_category, PARTIAL sum((lineorder.lo_revenue - lineorder.lo_supplycost))
-               Group Key: date1.d_year, supplier.s_nation, part.p_category
-               ->  Sort
-                     Output: date1.d_year, supplier.s_nation, part.p_category, lineorder.lo_revenue, lineorder.lo_supplycost
-                     Sort Key: date1.d_year, supplier.s_nation, part.p_category
+         ->  Sort
+               Output: date1.d_year, supplier.s_nation, part.p_category, (PARTIAL sum((lineorder.lo_revenue - lineorder.lo_supplycost)))
+               Sort Key: date1.d_year, supplier.s_nation, part.p_category
+               ->  Partial HashAggregate
+                     Output: date1.d_year, supplier.s_nation, part.p_category, PARTIAL sum((lineorder.lo_revenue - lineorder.lo_supplycost))
+                     Group Key: date1.d_year, supplier.s_nation, part.p_category
                      ->  Parallel Custom Scan (GpuJoin) on pgstrom_regress.part
                            Output: date1.d_year, supplier.s_nation, part.p_category, lineorder.lo_revenue, lineorder.lo_supplycost
                            GPU Projection: date1.d_year::integer, lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric, supplier.s_nation::character(15), part.p_category::character(7)
                            Outer Scan: pgstrom_regress.part
                            Outer Scan Filter: ((part.p_mfgr = 'MFGR#1'::bpchar) OR (part.p_mfgr = 'MFGR#2'::bpchar))
-                           Depth 1: GpuHashJoin  (nrows 59831...46274)
+                           Depth 1: GpuHashJoin
                                     HashKeys: part.p_partkey
                                     JoinQuals: (lineorder.lo_partkey = part.p_partkey)
-                                    KDS-Hash (size: 11.92MB)
+                           Depth 2: GpuHashJoin
+                                    HashKeys: lineorder.lo_custkey
+                                    JoinQuals: (lineorder.lo_custkey = customer.c_custkey)
                            ->  Hash Join
-                                 Output: date1.d_year, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_partkey, supplier.s_nation
+                                 Output: date1.d_year, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_custkey, lineorder.lo_partkey, supplier.s_nation
                                  Inner Unique: true
-                                 Hash Cond: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                 ->  Hash Join
-                                       Output: date1.d_year, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_suppkey, lineorder.lo_partkey
-                                       Inner Unique: true
-                                       Hash Cond: (lineorder.lo_orderdate = date1.d_datekey)
-                                       ->  Custom Scan (GpuJoin) on pgstrom_regress.lineorder
-                                             Output: lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_suppkey, lineorder.lo_partkey, lineorder.lo_orderdate
-                                             GPU Projection: lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric, lineorder.lo_suppkey::numeric, lineorder.lo_partkey::integer, lineorder.lo_orderdate::integer
-                                             Outer Scan: pgstrom_regress.lineorder
-                                             Depth 1: GpuHashJoin  (nrows 11998030...2374010)
-                                                      HashKeys: lineorder.lo_custkey
-                                                      JoinQuals: (customer.c_custkey = lineorder.lo_custkey)
-                                                      KDS-Hash (size: 2052.20KB)
-                                             ->  Seq Scan on pgstrom_regress.customer
-                                                   Output: customer.c_custkey
-                                                   Filter: (customer.c_region = 'AMERICA'::bpchar)
-                                       ->  Hash
-                                             Output: date1.d_year, date1.d_datekey
-                                             ->  Seq Scan on pgstrom_regress.date1
-                                                   Output: date1.d_year, date1.d_datekey
-                                                   Filter: ((date1.d_year = 1997) OR (date1.d_year = 1998))
-                                 ->  Hash
-                                       Output: supplier.s_nation, supplier.s_suppkey
+                                 Hash Cond: (lineorder.lo_orderdate = date1.d_datekey)
+                                 ->  Custom Scan (GpuJoin) on pgstrom_regress.lineorder
+                                       Output: supplier.s_nation, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_custkey, lineorder.lo_partkey, lineorder.lo_orderdate
+                                       GPU Projection: supplier.s_nation::character(15), lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric, lineorder.lo_custkey::numeric, lineorder.lo_partkey::integer, lineorder.lo_orderdate::integer
+                                       Outer Scan: pgstrom_regress.lineorder
+                                       Depth 1: GpuHashJoin
+                                                HashKeys: lineorder.lo_suppkey
+                                                JoinQuals: (supplier.s_suppkey = lineorder.lo_suppkey)
                                        ->  Seq Scan on pgstrom_regress.supplier
                                              Output: supplier.s_nation, supplier.s_suppkey
                                              Filter: (supplier.s_region = 'AMERICA'::bpchar)
-(50 rows)
+                                 ->  Hash
+                                       Output: date1.d_year, date1.d_datekey
+                                       ->  Seq Scan on pgstrom_regress.date1
+                                             Output: date1.d_year, date1.d_datekey
+                                             Filter: ((date1.d_year = 1997) OR (date1.d_year = 1998))
+                           ->  Seq Scan on pgstrom_regress.customer
+                                 Output: customer.c_custkey
+                                 Filter: (customer.c_region = 'AMERICA'::bpchar)
+(45 rows)
 
 select d_year, s_nation, p_category,
 sum(lo_revenue - lo_supplycost) as profit
