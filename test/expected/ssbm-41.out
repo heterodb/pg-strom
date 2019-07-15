@@ -1,0 +1,118 @@
+SET search_path = pgstrom_regress,public;
+SET pg_strom.debug_kernel_source = off;
+--Q4_1
+EXPLAIN(costs off, verbose)
+select d_year, c_nation,  sum(lo_revenue - lo_supplycost) as profit
+from date1, customer, supplier, part, lineorder
+    where lo_custkey = c_custkey
+       and lo_suppkey = s_suppkey
+       and lo_partkey = p_partkey
+       and lo_orderdate = d_datekey
+       and c_region = 'AMERICA'
+       and s_region = 'AMERICA'
+       and (p_mfgr = 'MFGR#1' or p_mfgr = 'MFGR#2')
+    group by d_year, c_nation
+    order by d_year, c_nation;
+                                                                                                                       QUERY PLAN                                                                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate
+   Output: date1.d_year, customer.c_nation, pgstrom.fsum_numeric((pgstrom.psum(((lineorder.lo_revenue - lineorder.lo_supplycost))::double precision)))
+   Group Key: date1.d_year, customer.c_nation
+   ->  Sort
+         Output: date1.d_year, customer.c_nation, (pgstrom.psum(((lineorder.lo_revenue - lineorder.lo_supplycost))::double precision))
+         Sort Key: date1.d_year, customer.c_nation
+         ->  Gather
+               Output: date1.d_year, customer.c_nation, (pgstrom.psum(((lineorder.lo_revenue - lineorder.lo_supplycost))::double precision))
+               Workers Planned: 2
+               ->  Parallel Custom Scan (GpuPreAgg)
+                     Output: date1.d_year, customer.c_nation, (pgstrom.psum(((lineorder.lo_revenue - lineorder.lo_supplycost))::double precision))
+                     Reduction: Local
+                     GPU Projection: date1.d_year, customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost, pgstrom.psum(((lineorder.lo_revenue - lineorder.lo_supplycost))::double precision)
+                     Combined GpuJoin: enabled
+                     ->  Parallel Custom Scan (GpuJoin) on pgstrom_regress.part
+                           Output: date1.d_year, customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost
+                           GPU Projection: date1.d_year::integer, customer.c_nation::character(15), lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric
+                           Outer Scan: pgstrom_regress.part
+                           Outer Scan Filter: ((part.p_mfgr = 'MFGR#1'::bpchar) OR (part.p_mfgr = 'MFGR#2'::bpchar))
+                           Depth 1: GpuHashJoin  (nrows 59831...174707)
+                                    HashKeys: part.p_partkey
+                                    JoinQuals: (lineorder.lo_partkey = part.p_partkey)
+                                    KDS-Hash (size: 45.02MB)
+                           Depth 2: GpuHashJoin  (nrows 174707...174707)
+                                    HashKeys: lineorder.lo_orderdate
+                                    JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
+                                    KDS-Hash (size: 461.95KB)
+                           ->  Hash Join
+                                 Output: customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_partkey, lineorder.lo_orderdate
+                                 Inner Unique: true
+                                 Hash Cond: (lineorder.lo_suppkey = supplier.s_suppkey)
+                                 ->  Custom Scan (GpuJoin) on pgstrom_regress.lineorder
+                                       Output: customer.c_nation, lineorder.lo_revenue, lineorder.lo_supplycost, lineorder.lo_suppkey, lineorder.lo_partkey, lineorder.lo_orderdate
+                                       GPU Projection: customer.c_nation::character(15), lineorder.lo_revenue::numeric, lineorder.lo_supplycost::numeric, lineorder.lo_suppkey::numeric, lineorder.lo_partkey::integer, lineorder.lo_orderdate::integer
+                                       Outer Scan: pgstrom_regress.lineorder
+                                       Depth 1: GpuHashJoin  (nrows 11998030...2374010)
+                                                HashKeys: lineorder.lo_custkey
+                                                JoinQuals: (customer.c_custkey = lineorder.lo_custkey)
+                                                KDS-Hash (size: 2052.27KB)
+                                       ->  Seq Scan on pgstrom_regress.customer
+                                             Output: customer.c_nation, customer.c_custkey
+                                             Filter: (customer.c_region = 'AMERICA'::bpchar)
+                                 ->  Hash
+                                       Output: supplier.s_suppkey
+                                       ->  Seq Scan on pgstrom_regress.supplier
+                                             Output: supplier.s_suppkey
+                                             Filter: (supplier.s_region = 'AMERICA'::bpchar)
+                           ->  Seq Scan on pgstrom_regress.date1
+                                 Output: date1.d_year, date1.d_datekey
+(49 rows)
+
+select d_year, c_nation,  sum(lo_revenue - lo_supplycost) as profit
+from date1, customer, supplier, part, lineorder
+    where lo_custkey = c_custkey
+       and lo_suppkey = s_suppkey
+       and lo_partkey = p_partkey
+       and lo_orderdate = d_datekey
+       and c_region = 'AMERICA'
+       and s_region = 'AMERICA'
+       and (p_mfgr = 'MFGR#1' or p_mfgr = 'MFGR#2')
+    group by d_year, c_nation
+    order by d_year, c_nation;
+ d_year |    c_nation     |   profit    
+--------+-----------------+-------------
+   1992 | ARGENTINA       | 21049817821
+   1992 | BRAZIL          | 20793623985
+   1992 | CANADA          | 21768888522
+   1992 | PERU            | 21107265997
+   1992 | UNITED STATES   | 22087350809
+   1993 | ARGENTINA       | 21224064185
+   1993 | BRAZIL          | 20214018274
+   1993 | CANADA          | 21487793123
+   1993 | PERU            | 20451314966
+   1993 | UNITED STATES   | 21537297778
+   1994 | ARGENTINA       | 21492078723
+   1994 | BRAZIL          | 20119322546
+   1994 | CANADA          | 21245670138
+   1994 | PERU            | 20925002153
+   1994 | UNITED STATES   | 21768994510
+   1995 | ARGENTINA       | 21744240441
+   1995 | BRAZIL          | 20626871263
+   1995 | CANADA          | 21970480412
+   1995 | PERU            | 21358554139
+   1995 | UNITED STATES   | 21533231465
+   1996 | ARGENTINA       | 21906426061
+   1996 | BRAZIL          | 21091679462
+   1996 | CANADA          | 21089650746
+   1996 | PERU            | 20849385079
+   1996 | UNITED STATES   | 21245236259
+   1997 | ARGENTINA       | 21906122939
+   1997 | BRAZIL          | 20930283186
+   1997 | CANADA          | 21478124066
+   1997 | PERU            | 21254050870
+   1997 | UNITED STATES   | 21818581630
+   1998 | ARGENTINA       | 12360150387
+   1998 | BRAZIL          | 11535854687
+   1998 | CANADA          | 12711817151
+   1998 | PERU            | 12175877989
+   1998 | UNITED STATES   | 12731502856
+(35 rows)
+

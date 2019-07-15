@@ -61,7 +61,7 @@ UPDATE regtest_data
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
-OPTIONS (file '/home/kaigai/repo/pg-strom/src/../test/input/arrow_1.data');
+OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/input/arrow_1.data');
 SELECT attnum, attname, atttypid::regtype
   FROM pg_attribute
  WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0

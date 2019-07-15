@@ -41,3 +41,11 @@ test: fallback_pgsql
 # Test for largeobject
 # ----------
 test: largeobject
+
+# ----------
+# General Test by SSBM
+# ----------
+test: ssbm-11 ssbm-12 ssbm-13
+test: ssbm-21 ssbm-22 ssbm-23
+test: ssbm-31 ssbm-32 ssbm-33 ssbm-34
+test: ssbm-41 ssbm-42 ssbm-43

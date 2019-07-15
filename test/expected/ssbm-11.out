@@ -1,0 +1,47 @@
+SET search_path = pgstrom_regress,public;
+SET pg_strom.debug_kernel_source = off;
+-- Q1_1
+EXPLAIN(costs off, verbose)
+select sum(lo_extendedprice*lo_discount) as revenue
+from lineorder,date1
+where lo_orderdate = d_datekey
+and d_year = 1993
+and lo_discount between 1 and 3
+and lo_quantity < 25;
+                                                                                QUERY PLAN                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.fsum_numeric((pgstrom.psum(((lineorder.lo_extendedprice * lineorder.lo_discount))::double precision)))
+   ->  Gather
+         Output: (pgstrom.psum(((lineorder.lo_extendedprice * lineorder.lo_discount))::double precision))
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg)
+               Output: (pgstrom.psum(((lineorder.lo_extendedprice * lineorder.lo_discount))::double precision))
+               Reduction: NoGroup
+               GPU Projection: lineorder.lo_extendedprice, lineorder.lo_discount, pgstrom.psum(((lineorder.lo_extendedprice * lineorder.lo_discount))::double precision)
+               Combined GpuJoin: enabled
+               ->  Parallel Custom Scan (GpuJoin) on pgstrom_regress.lineorder
+                     Output: lineorder.lo_extendedprice, lineorder.lo_discount
+                     GPU Projection: lineorder.lo_extendedprice::numeric, lineorder.lo_discount::numeric
+                     Outer Scan: pgstrom_regress.lineorder
+                     Outer Scan Filter: ((lineorder.lo_discount >= '1'::numeric) AND (lineorder.lo_discount <= '3'::numeric) AND (lineorder.lo_quantity < '25'::numeric))
+                     Depth 1: GpuHashJoin  (nrows 658036...225524)
+                              HashKeys: lineorder.lo_orderdate
+                              JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
+                              KDS-Hash (size: 66.06KB)
+                     ->  Seq Scan on pgstrom_regress.date1
+                           Output: date1.d_datekey
+                           Filter: (date1.d_year = 1993)
+(22 rows)
+
+select sum(lo_extendedprice*lo_discount) as revenue
+from lineorder,date1
+where lo_orderdate = d_datekey
+and d_year = 1993
+and lo_discount between 1 and 3
+and lo_quantity < 25;
+   revenue    
+--------------
+ 894280292647
+(1 row)
+

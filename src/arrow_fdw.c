@@ -2394,9 +2394,6 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		HeapTuple	htup;
 		int			j;
 
-		struct pg_tm tt;
-		fsec_t fsec;
-
 		if (tupdesc->natts != cmeta->num_subattrs)
 			elog(ERROR, "Struct definition is conrrupted?");
 		if (cmeta->idx_subattrs < kds->ncols ||
@@ -2411,8 +2408,6 @@ pg_datum_arrow_ref(kern_data_store *kds,
 							   sub_values + j,
 							   sub_isnull + j);
 		}
-		Assert(sub_isnull[4] || timestamp2tm((Timestamp)sub_values[4], NULL, &tt, &fsec, NULL, NULL) == 0);
-
 		htup = heap_form_tuple(tupdesc, sub_values, sub_isnull);
 
 		ReleaseTupleDesc(tupdesc);

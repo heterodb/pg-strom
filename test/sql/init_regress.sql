@@ -1,8 +1,6 @@
 --
 -- initialization of regression test database
 --
-SET search_path = pgstrom_regress,public;
-
 SHOW application_name
 \gset
 SELECT pgstrom.regression_testdb_revision() != :application_name rev_check
@@ -17,6 +15,7 @@ RESET client_min_messages;
 
 BEGIN;
 CREATE SCHEMA pgstrom_regress;
+SET search_path = pgstrom_regress,public;
 
 CREATE TABLE customer (
     c_custkey numeric PRIMARY KEY,
