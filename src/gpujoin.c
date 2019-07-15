@@ -3215,7 +3215,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			{
 				if (!es->analyze)
 				{
-					appendStringInfo(es->str, "  (%s-size: %s",
+					appendStringInfo(&str, "  (%s-size: %s",
 									 hash_outer_key ? "hash" : "heap",
 									 format_bytesz(istate->ichunk_size));
 				}
@@ -3223,7 +3223,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				{
 					Size	exec_sz = (kds_in ? kds_in->length : 0);
 
-					appendStringInfo(es->str, "  (%s-size: %s actual-size: %s",
+					appendStringInfo(&str, "  (%s-size: %s actual-size: %s",
 									 hash_outer_key ? "hash" : "heap",
 									 format_bytesz(istate->ichunk_size),
 									 format_bytesz(exec_sz));
