@@ -329,13 +329,12 @@ tarball: $(STROM_TGZ)
 #
 rpm: tarball
 	cp -f $(STROM_TGZ) `rpmbuild -E %{_sourcedir}` || exit 1
-	cp -f $(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf \
-	      `rpmbuild -E %{_sourcedir}` || exit 1
-	(cat $(STROM_BUILD_ROOT)/files/pg_strom.spec.in |  \
-	 sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g" \
-	     -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g" \
-	     -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
-	     -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g")   \
+	git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf > `rpmbuild -E %{_sourcedir}`/systemd-pg_strom.conf || exit 1
+	git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/pg_strom.spec.in | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g" \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g" \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
+	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"    \
 	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
 	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
 
