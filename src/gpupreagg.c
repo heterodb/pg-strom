@@ -5166,6 +5166,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
+	bool			m_kds_src_release = false;
 	cl_int			grid_sz;
 	cl_int			block_sz;
 	void		   *last_suspend = NULL;
@@ -5224,7 +5225,9 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		rc = gpuMemAllocIOMap(gcontext,
 							  &m_kds_src,
 							  required);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (rc == CUDA_SUCCESS)
+			m_kds_src_release = true;
+		else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			gpreagg->with_nvme_strom = false;
 			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -5234,9 +5237,11 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 				rc = gpuMemAlloc(gcontext,
 								 &m_kds_src,
 								 required);
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				if (rc == CUDA_SUCCESS)
+					m_kds_src_release = true;
+				else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 					goto out_of_resource;
-				else if (rc != CUDA_SUCCESS)
+				else
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
 			else
@@ -5247,7 +5252,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 				Assert(!pds_src->iovec);
 			}
 		}
-		else if (rc != CUDA_SUCCESS)
+		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 	else
@@ -5429,6 +5434,11 @@ resume_kernel:
 					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 				pds_src->nblocks_uncached = 0;
 			}
+			else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+					 pds_src->iovec != NULL)
+			{
+				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
+			}
 			/* restore the point where suspended most recently */
 			gpreagg->kern.resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -5485,9 +5495,7 @@ resume_kernel:
 		retval = 0;
 	}
 out_of_resource:
-	if (m_kds_src != 0UL &&
-		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
-		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
+	if (m_kds_src_release)
 		gpuMemFree(gcontext, m_kds_src);
 	if (m_kds_slot != 0UL)
 		gpuMemFree(gcontext, m_kds_slot);
@@ -5519,6 +5527,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUdeviceptr		m_kparams = ((CUdeviceptr)&gpreagg->kern +
 								 offsetof(kern_gpupreagg, kparams));
 	CUresult		rc;
+	bool			m_kds_src_release = false;
 	cl_int			grid_sz;
 	cl_int			block_sz;
 	void		   *kern_args[10];
@@ -5564,7 +5573,9 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		rc = gpuMemAllocIOMap(gcontext,
 							  &m_kds_src,
 							  required);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (rc == CUDA_SUCCESS)
+			m_kds_src_release = true;
+		else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			gpreagg->with_nvme_strom = false;
 			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -5574,9 +5585,11 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 				rc = gpuMemAlloc(gcontext,
 								 &m_kds_src,
 								 required);
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				if (rc == CUDA_SUCCESS)
+					m_kds_src_release = true;
+				else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 					goto out_of_resource;
-				else if (rc != CUDA_SUCCESS)
+				else
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
 			else
@@ -5587,7 +5600,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 				Assert(!pds_src->iovec);
 			}
 		}
-		else if (rc != CUDA_SUCCESS)
+		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 	else
@@ -5763,6 +5776,13 @@ resume_kernel:
 					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 				pds_src->nblocks_uncached = 0;
 			}
+			else if (pds_src &&
+					 pds_src->kds.format == KDS_FORMAT_ARROW &&
+					 pds_src->iovec != NULL)
+			{
+				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
+			}
+
 			/* restore the suspend context if any */
 			kgjoin->resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -5855,9 +5875,7 @@ resume_kernel:
 		retval = -1;
 	}
 out_of_resource:
-	if (m_kds_src != 0UL &&
-		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
-		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
+	if (m_kds_src_release)
 		gpuMemFree(gcontext, m_kds_src);
 	if (m_kds_slot)
 		gpuMemFree(gcontext, m_kds_slot);

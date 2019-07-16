@@ -5946,6 +5946,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	CUdeviceptr			m_kds_dst;
 	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
+	bool				m_kds_src_release = false;
 	cl_int				grid_sz;
 	cl_int				block_sz;
 	cl_int				retval = 10001;
@@ -5977,7 +5978,9 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		rc = gpuMemAllocIOMap(gcontext,
 							  &m_kds_src,
 							  required);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (rc == CUDA_SUCCESS)
+			m_kds_src_release = true;
+		else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			pgjoin->with_nvme_strom = false;
 			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -5987,9 +5990,11 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 				rc = gpuMemAlloc(gcontext,
 								 &m_kds_src,
                                  required);
-				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				if (rc == CUDA_SUCCESS)
+					m_kds_src_release = true;
+				else if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 					goto out_of_resource;
-				else if (rc != CUDA_SUCCESS)
+				else
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
 			}
 			else
@@ -6000,7 +6005,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 				Assert(!pds_src->iovec);
 			}
 		}
-		else if (rc != CUDA_SUCCESS)
+		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 	else
@@ -6096,6 +6101,7 @@ resume_kernel:
 			memcpy(last_suspend,
 				   KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
 				   pgjoin->kern.suspend_size);
+			fprintf(stderr, "suspend / resume\n");
 			/* renew buffer and restart */
 			pds_dst = pgjoin->pds_dst;
 			goto resume_kernel;
@@ -6124,7 +6130,7 @@ resume_kernel:
 		else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
 				 pds_src->iovec != NULL)
 		{
-			//to be implemented
+			pgjoin->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
 		}
 		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;
@@ -6143,9 +6149,7 @@ resume_kernel:
 		retval = 0;
 	}
 out_of_resource:
-	if (m_kds_src &&
-		((pds_src->kds.format == KDS_FORMAT_BLOCK) ||
-		 (pds_src->kds.format == KDS_FORMAT_ARROW && pds_src->iovec)))
+	if (m_kds_src_release)
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }

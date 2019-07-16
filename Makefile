@@ -217,7 +217,7 @@ USE_MODULE_DB := 1
 REGRESS := --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
 REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/sql/init_regress.sql
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
-REGRESS_REVISION := 20190608
+REGRESS_REVISION := 20190716
 REGRESS_REVISION_QUERY := 'SELECT pgstrom.regression_testdb_revision() = $(REGRESS_REVISION)'
 REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --outputdir=$(STROM_BUILD_ROOT)/test \

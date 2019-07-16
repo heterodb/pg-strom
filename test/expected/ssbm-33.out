@@ -37,17 +37,17 @@ where lo_custkey = c_custkey
                                        GPU Projection: customer.c_city::character(10), lineorder.lo_revenue::numeric, lineorder.lo_orderdate::integer, supplier.s_city::character(10)
                                        Outer Scan: pgstrom_regress.lineorder
                                        Depth 1: GpuHashJoin
+                                                HashKeys: lineorder.lo_custkey
+                                                JoinQuals: (customer.c_custkey = lineorder.lo_custkey)
+                                       Depth 2: GpuHashJoin
                                                 HashKeys: lineorder.lo_suppkey
                                                 JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                                       Depth 2: GpuHashJoin
-                                                HashKeys: lineorder.lo_custkey
-                                                JoinQuals: (lineorder.lo_custkey = customer.c_custkey)
-                                       ->  Seq Scan on pgstrom_regress.supplier
-                                             Output: supplier.s_city, supplier.s_suppkey
-                                             Filter: ((supplier.s_city = 'UNITED KI1'::bpchar) OR (supplier.s_city = 'UNITED KI5'::bpchar))
                                        ->  Seq Scan on pgstrom_regress.customer
                                              Output: customer.c_city, customer.c_custkey
                                              Filter: ((customer.c_city = 'UNITED KI1'::bpchar) OR (customer.c_city = 'UNITED KI5'::bpchar))
+                                       ->  Seq Scan on pgstrom_regress.supplier
+                                             Output: supplier.s_city, supplier.s_suppkey
+                                             Filter: ((supplier.s_city = 'UNITED KI1'::bpchar) OR (supplier.s_city = 'UNITED KI5'::bpchar))
                                  ->  Index Scan using date1_pkey on pgstrom_regress.date1
                                        Output: date1.d_datekey, date1.d_date, date1.d_dayofweek, date1.d_month, date1.d_year, date1.d_yearmonthnum, date1.d_yearmonth, date1.d_daynuminweek, date1.d_daynuminmonth, date1.d_daynuminyear, date1.d_monthnuminyear, date1.d_weeknuminyear, date1.d_sellingseason, date1.d_lastdayinweekfl, date1.d_lastdayinmonthfl, date1.d_holidayfl, date1.d_weekdayfl
                                        Index Cond: (date1.d_datekey = lineorder.lo_orderdate)
