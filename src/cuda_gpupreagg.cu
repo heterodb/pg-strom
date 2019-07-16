@@ -1352,7 +1352,8 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 					dest_values = slot_values;
 					break;
 				}
-				assert(cur_slot.s.index < kds_slot->nitems);
+				assert(cur_slot.s.index < kds_slot->nitems &&
+					   cur_slot.s.index != kds_index);
 				if (cur_slot.s.hash == hash_value &&
 					gpupreagg_keymatch(kcxt,
 									   kds_slot, kds_index,

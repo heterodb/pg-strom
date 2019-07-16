@@ -3440,6 +3440,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 	StringInfoData	body;
 	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
+	bool			is_first_key = true;
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
@@ -3472,13 +3473,29 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 			dtype->type_name,
 			tle->resno - 1,
 			tle->resno - 1);
-		/* update hash value (by crc32) */
+		/*
+		 * update hash value
+		 *
+		 * NOTE: In case when GROUP BY has multiple keys and identical values
+		 * may appear on some of them, we should not merge hash values without
+		 * randomization, because (X xor Y) xor Y == X.
+		 * We put a simple randomization using magic number (0x9e370001) here,
+		 * so it enables to generate different hash value, even if key1 and
+		 * key2 has same value.
+		 */
+		if (!is_first_key)
+		{
+			appendStringInfo(
+				&body,
+				"  hash = ((cl_ulong)hash * 0x9e370001UL) >> 32;\n");
+		}
 		appendStringInfo(
 			&body,
 			"  hash ^= pg_comp_hash(kcxt, temp.%s_v);\n",
 			dtype->type_name);
 		type_oid_list = list_append_unique_oid(type_oid_list,
 											   dtype->type_oid);
+		is_first_key = false;
 	}
 	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 
@@ -3588,7 +3605,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		appendStringInfo(
 			&body,
 			"  pg_datum_ref_slot(kcxt, x_temp.%s_v,\n"
-			"                    x_dclass[%d], y_values[%d]);\n"
+			"                    x_dclass[%d], x_values[%d]);\n"
 			"  pg_datum_ref_slot(kcxt, y_temp.%s_v,\n"
 			"                    y_dclass[%d], y_values[%d]);\n"
 			"  if (!x_temp.%s_v.isnull && !y_temp.%s_v.isnull)\n"
