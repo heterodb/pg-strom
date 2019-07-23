@@ -653,7 +653,7 @@ typedef struct pgstromIndexState
 {
 	Oid			index_oid;
 	Relation	index_rel;
-	Node	   *index_conds;	/* for EXPLAIN */
+	Node	   *index_quals;	/* for EXPLAIN */
 	BlockNumber	nblocks;
 	BlockNumber	range_sz;
 	BrinRevmap *brin_revmap;
@@ -672,7 +672,8 @@ typedef struct pgstromIndexState
 void
 pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 							Oid index_oid,
-							List *index_conds)
+							List *index_conds,
+							List *index_quals)
 {
 	pgstromIndexState *pi_state = NULL;
 	Relation	relation = gts->css.ss.ss_currentRelation;
@@ -694,7 +695,7 @@ pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 	pi_state = palloc0(sizeof(pgstromIndexState));
 	pi_state->index_oid = index_oid;
 	pi_state->index_rel = index_open(index_oid, lockmode);
-	pi_state->index_conds = (Node *)make_ands_explicit(index_conds);
+	pi_state->index_quals = (Node *)make_ands_explicit(index_quals);
 	ExecIndexBuildScanKeys(&gts->css.ss.ps,
 						   pi_state->index_rel,
 						   index_conds,
@@ -983,7 +984,7 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 	if (!pi_state)
 		return;
 
-	conds_str = deparse_expression(pi_state->index_conds,
+	conds_str = deparse_expression(pi_state->index_quals,
 								   dcontext, es->verbose, false);
 	ExplainPropertyText("BRIN cond", conds_str, es);
 	if (es->analyze)

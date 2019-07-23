@@ -2747,7 +2747,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 		pgstromExecInitBrinIndexMap(&gjs->gts,
 									gj_info->index_oid,
-									gj_info->index_conds);
+									gj_info->index_conds,
+									gj_info->index_quals);
 		nattrs = RelationGetNumberOfAttributes(scan_rel);
 	}
 	else

@@ -1189,7 +1189,8 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
-										List *index_conds);
+										List *index_conds,
+										List *index_quals);
 extern Size pgstromSizeOfBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);

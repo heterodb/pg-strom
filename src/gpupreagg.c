@@ -4154,7 +4154,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		outer_tupdesc = RelationGetDescr(scan_rel);
 		pgstromExecInitBrinIndexMap(&gpas->gts,
 									gpa_info->index_oid,
-									gpa_info->index_conds);
+									gpa_info->index_conds,
+									gpa_info->index_quals);
 	}
 
 	/*

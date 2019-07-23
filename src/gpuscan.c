@@ -1748,7 +1748,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* init BRIN-index support, if any */
 	pgstromExecInitBrinIndexMap(&gss->gts,
 								gs_info->index_oid,
-								gs_info->index_conds);
+								gs_info->index_conds,
+								gs_info->index_quals);
 
 	/* Get CUDA program and async build if any */
 	initStringInfo(&kern_define);
