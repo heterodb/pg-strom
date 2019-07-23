@@ -278,7 +278,7 @@ gpuscan_main_block(kern_context *kcxt,
 	{
 		cl_uint		part_id;
 		cl_uint		line_no;
-		cl_uint		n_lines;
+		cl_uint		n_lines = 0;
 		cl_uint		nvalids;
 		cl_uint		nitems_real;
 
