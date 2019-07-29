@@ -573,25 +573,24 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 		 * cost by parallel_divisor.
 		 */
 		startup_cost += pgstrom_gpu_setup_cost / parallel_divisor;
-
-		/*
-		 * Cost discount for more efficient I/O with multiplexing.
-		 * PG background workers can issue read request to filesystem
-		 * concurrently. It enables to work I/O subsystem during blocking-
-		 * time for other workers, then, it pulls up usage ratio of the
-		 * storage system.
-		 */
-		disk_scan_cost /= Min(2.0, sqrt(parallel_divisor));
-
-		/* more disk i/o discount if NVMe-Strom is available */
-		if ((scan_mode & PGSTROM_RELSCAN_SSD2GPU) != 0)
-			disk_scan_cost /= 1.5;
 	}
 	else
 	{
 		parallel_divisor = 1.0;
 		startup_cost += pgstrom_gpu_setup_cost;
 	}
+	/*
+	 * Cost discount for more efficient I/O with multiplexing.
+	 * PG background workers can issue read request to filesystem
+	 * concurrently. It enables to work I/O subsystem during blocking-
+	 * time for other workers, then, it pulls up usage ratio of the
+	 * storage system.
+	 */
+	disk_scan_cost /= Min(2.0, sqrt(parallel_divisor));
+
+	/* more disk i/o discount if NVMe-Strom is available */
+	if ((scan_mode & PGSTROM_RELSCAN_SSD2GPU) != 0)
+		disk_scan_cost /= 1.5;
 	run_cost += disk_scan_cost;
 
 	/*

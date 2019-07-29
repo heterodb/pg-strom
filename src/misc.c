@@ -130,6 +130,26 @@ __compute_parallel_worker(RelOptInfo *rel,
 #endif		/* < PG10 */
 
 /*
+ * get_parallel_divisor - Estimate the fraction of the work that each worker
+ * will do given the number of workers budgeted for the path.
+ */
+double
+get_parallel_divisor(Path *path)
+{
+	double		parallel_divisor = path->parallel_workers;
+
+	if (parallel_leader_participation)
+	{
+		double	leader_contribution;
+
+		leader_contribution = 1.0 - (0.3 * path->parallel_workers);
+		if (leader_contribution > 0)
+			parallel_divisor += leader_contribution;
+	}
+	return parallel_divisor;
+}
+
+/*
  * Usefulll wrapper routines like lsyscache.c
  */
 #if PG_VERSION_NUM < 110000
@@ -197,6 +217,172 @@ bms_to_cstring(Bitmapset *x)
 	appendStringInfo(&buf, " }");
 
 	return buf.data;
+}
+
+/*
+ * pathnode_tree_walker
+ */
+static bool
+pathnode_tree_walker(Path *node,
+					 bool (*walker)(),
+					 void *context)
+{
+	ListCell   *lc;
+
+	if (!node)
+		return false;
+
+	check_stack_depth();
+	switch (nodeTag(node))
+	{
+		case T_Path:
+		case T_IndexPath:
+		case T_BitmapHeapPath:
+		case T_BitmapAndPath:
+		case T_BitmapOrPath:
+		case T_TidPath:
+		case T_ResultPath:
+		case T_MinMaxAggPath:
+			/* primitive path nodes */
+			break;
+		case T_SubqueryScanPath:
+			if (walker(((SubqueryScanPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_ForeignPath:
+			if (walker(((ForeignPath *)node)->fdw_outerpath, context))
+				return true;
+			break;
+		case T_CustomPath:
+			foreach (lc, ((CustomPath *)node)->custom_paths)
+			{
+				if (walker((Path *)lfirst(lc), context))
+					return true;
+			}
+			break;
+		case T_NestPath:
+		case T_MergePath:
+		case T_HashPath:
+			if (walker(((JoinPath *)node)->outerjoinpath, context))
+				return true;
+			if (walker(((JoinPath *)node)->innerjoinpath, context))
+				return true;
+			break;
+		case T_AppendPath:
+			foreach (lc, ((AppendPath *)node)->subpaths)
+			{
+				if (walker((Path *)lfirst(lc), context))
+					return true;
+			}
+			break;
+		case T_MergeAppendPath:
+			foreach (lc, ((MergeAppendPath *)node)->subpaths)
+			{
+				if (walker((Path *)lfirst(lc), context))
+					return true;
+			}
+			break;
+		case T_MaterialPath:
+			if (walker(((MaterialPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_UniquePath:
+			if (walker(((UniquePath *)node)->subpath, context))
+				return true;
+			break;
+		case T_GatherPath:
+			if (walker(((GatherPath *)node)->subpath, context))
+				return true;
+			break;
+#if PG_VERSION_NUM >= 100000
+		case T_GatherMergePath:
+			if (walker(((GatherMergePath *)node)->subpath, context))
+				return true;
+			break;
+#endif		/* >= PG10 */
+		case T_ProjectionPath:
+			if (walker(((ProjectionPath *)node)->subpath, context))
+				return true;
+			break;
+#if PG_VERSION_NUM >= 100000
+		case T_ProjectSetPath:
+			if (walker(((ProjectSetPath *)node)->subpath, context))
+				return true;
+			break;
+#endif		/* >= PG10 */
+		case T_SortPath:
+			if (walker(((SortPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_GroupPath:
+			if (walker(((GroupPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_UpperUniquePath:
+			if (walker(((UpperUniquePath *)node)->subpath, context))
+				return true;
+			break;
+		case T_AggPath:
+			if (walker(((AggPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_GroupingSetsPath:
+			if (walker(((GroupingSetsPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_WindowAggPath:
+			if (walker(((WindowAggPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_SetOpPath:
+			if (walker(((SetOpPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_RecursiveUnionPath:
+			if (walker(((RecursiveUnionPath *)node)->leftpath, context))
+				return true;
+			if (walker(((RecursiveUnionPath *)node)->rightpath, context))
+				return true;
+			break;
+		case T_LockRowsPath:
+			if (walker(((LockRowsPath *)node)->subpath, context))
+				return true;
+			break;
+		case T_ModifyTablePath:
+			foreach (lc, ((ModifyTablePath *)node)->subpaths)
+			{
+				if (walker((Path *)lfirst(lc), context))
+					return true;
+			}
+			break;
+		case T_LimitPath:
+			if (walker(((LimitPath *)node)->subpath, context))
+				return true;
+			break;
+		default:
+			elog(ERROR, "unrecognized path-node type: %d",
+				 (int) nodeTag(node));
+			break;
+	}
+	return false;
+}
+
+static bool
+__pathtree_has_gpupath(Path *node, void *context)
+{
+	if (!node)
+		return false;
+	if (pgstrom_path_is_gpuscan(node) ||
+		pgstrom_path_is_gpujoin(node) ||
+		pgstrom_path_is_gpupreagg(node))
+		return true;
+	return pathnode_tree_walker(node, __pathtree_has_gpupath, context);
+}
+
+bool
+pathtree_has_gpupath(Path *node)
+{
+	return __pathtree_has_gpupath(node, NULL);
 }
 
 /*

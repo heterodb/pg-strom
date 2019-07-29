@@ -983,6 +983,8 @@ cost_gpupreagg(PlannerInfo *root,
 			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
 			outer_total -= cpu_tuple_cost * input_path->rows;
 		}
+		else if (pathtree_has_gpupath(input_path))
+			outer_total += pgstrom_gpu_setup_cost / 2;
 		else
 			outer_total += pgstrom_gpu_setup_cost;
 
@@ -1514,9 +1516,9 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
-	Index		partition_relid;
 	int			parallel_nworkers;
 	AppendPath *append_path;
+	Cost		discount_cost;
 	Path	   *partial_path;
 	ListCell   *lc;
 
@@ -1526,8 +1528,8 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 													NULL,
 													try_parallel_path,
 													&parallel_nworkers,
-													&partition_relid,
-													&partitioned_rels);
+													&append_path,
+													&discount_cost);
 	if (sub_paths_list == NIL)
 		return;
 	foreach (lc, sub_paths_list)
@@ -1541,12 +1543,12 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		curr_partial->exprs =
 			fixup_appendrel_child_varnode(curr_partial->exprs,
 										  root,
-										  partition_relid,
+										  append_path->path.parent,
 										  sub_path->parent);
 		curr_device->exprs =
 			fixup_appendrel_child_varnode(curr_device->exprs,
 										  root,
-										  partition_relid,
+										  append_path->path.parent,
 										  sub_path->parent);
 
 		partial_path = prepend_gpupreagg_path(root,
@@ -1563,6 +1565,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		append_paths_list = lappend(append_paths_list, partial_path);
 	}
 	/* also see create_append_path(), some fields must be fixed up */
+	partitioned_rels = copyObject(append_path->partitioned_rels);
 #if PG_VERSION_NUM < 110000
 	append_path = create_append_path(input_path->parent,
 									 append_paths_list,
@@ -1584,6 +1587,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 										 partitioned_rels, -1.0);
 #endif
 	append_path->path.pathtarget = target_partial;
+	append_path->path.total_cost -= discount_cost;
 
 	/* prepend Gather on demand */
 	if (try_parallel_path &&

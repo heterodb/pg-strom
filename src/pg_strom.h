@@ -1259,12 +1259,12 @@ extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											Path *inner_path,
 											bool try_parallel_path,
 											int *p_parallel_nworkers,
-											Index *p_partition_relid,
-											List **p_partitioned_rels);
+											AppendPath **p_append_path,
+											Cost *p_discount_cost);
 extern List *fixup_appendrel_child_varnode(List *exprs_list,
 										   PlannerInfo *root,
-										   Index partition_relid,
-										   RelOptInfo *subrel);
+										   RelOptInfo *append_rel,
+										   RelOptInfo *leaf_rel);
 #endif
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
@@ -1397,6 +1397,7 @@ extern int __compute_parallel_worker(RelOptInfo *rel,
 									 double heap_pages,
 									 double index_pages);
 #endif
+extern double get_parallel_divisor(Path *path);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */
 extern char get_func_prokind(Oid funcid);
@@ -1407,6 +1408,7 @@ extern char get_func_prokind(Oid funcid);
 #endif
 extern int	get_relnatts(Oid relid);
 extern char *bms_to_cstring(Bitmapset *x);
+extern bool pathtree_has_gpupath(Path *node);
 extern const char *errorText(int errcode);
 
 /*
