@@ -1524,7 +1524,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 
 	sub_paths_list = extract_partitionwise_pathlist(root,
 													input_path->pathtarget,
-													input_path,
+													input_path->parent,
 													NULL,
 													try_parallel_path,
 													&parallel_nworkers,
