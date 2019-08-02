@@ -485,7 +485,7 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 	Cost		index_scan_cost = 0.0;
 	Cost		disk_scan_cost;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	double		parallel_divisor = (double) parallel_workers;
+	double		parallel_divisor;
 	double		ntuples = scan_rel->tuples;
 	double		nblocks = scan_rel->pages;
 	double		nchunks;
@@ -556,13 +556,15 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 	 */
 	if (parallel_workers > 0)
 	{
-		double		leader_contribution;
+		parallel_divisor = (double) parallel_workers;
+		if (parallel_leader_participation)
+		{
+			double		leader_contribution;
 
-		/* How much leader process can contribute query execution? */
-		leader_contribution = 1.0 - (0.3 * (double)parallel_workers);
-		if (leader_contribution > 0)
-			parallel_divisor += leader_contribution;
-
+			leader_contribution = 1.0 - (0.3 * (double) parallel_workers);
+			if (leader_contribution > 0)
+				parallel_divisor += leader_contribution;
+		}
 		/* number of tuples to be actually processed */
 		ntuples  = clamp_row_est(ntuples / parallel_divisor);
 
@@ -572,7 +574,8 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 		 * be shared with all the worker process, so we can discount the
 		 * cost by parallel_divisor.
 		 */
-		startup_cost += pgstrom_gpu_setup_cost / parallel_divisor;
+		startup_cost += pgstrom_gpu_setup_cost / 2
+			+ (pgstrom_gpu_setup_cost / (2 * parallel_divisor));
 	}
 	else
 	{
