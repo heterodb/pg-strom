@@ -1145,60 +1145,54 @@ found:
 }
 
 /*
- * make_pseudo_sjinfo_list
+ * make_pseudo_special_join_info
  */
-static List *
-make_pseudo_sjinfo_list(PlannerInfo *root,
-						List *part_tree_list,
-						List *join_info_list)
+static SpecialJoinInfo *
+make_pseudo_special_join_info(PlannerInfo *root,
+							  List *part_tree_list,
+							  SpecialJoinInfo *__sj)
 {
-	List	   *result = NIL;
-	ListCell   *lc1, *lc2;
+	SpecialJoinInfo *sj = copyObject(__sj);
+	ListCell   *lc;
 	Bitmapset  *temp;
 
-	foreach (lc1, join_info_list)
+	foreach (lc, part_tree_list)
 	{
-		SpecialJoinInfo *sj = copyObject(lfirst(lc1));
+		List   *part_tree = lfirst(lc);
+		Index	part, leaf;
 
-		foreach (lc2, part_tree_list)
+		part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
+		leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
+
+		if (bms_is_member(part, sj->min_lefthand))
 		{
-			List   *part_tree = lfirst(lc1);
-			Index	part, leaf;
-
-			part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
-			leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
-
-			if (bms_is_member(part, sj->min_lefthand))
-			{
-				Assert(!bms_is_member(leaf, sj->min_lefthand));
-				temp = bms_del_member(sj->min_lefthand, part);
-				sj->min_lefthand = bms_add_member(temp, leaf);
-			}
-
-			if (bms_is_member(part, sj->min_righthand))
-			{
-				Assert(!bms_is_member(leaf, sj->min_righthand));
-				temp = bms_del_member(sj->min_righthand, part);
-				sj->min_righthand = bms_add_member(temp, leaf);
-			}
-
-			if (bms_is_member(part, sj->syn_lefthand))
-			{
-				Assert(!bms_is_member(leaf, sj->syn_lefthand));
-				temp = bms_del_member(sj->syn_lefthand, part);
-				sj->syn_lefthand = bms_add_member(temp, leaf);
-			}
-
-			if (bms_is_member(part, sj->syn_righthand))
-			{
-				Assert(!bms_is_member(leaf, sj->syn_righthand));
-				temp = bms_del_member(sj->syn_righthand, part);
-				sj->syn_righthand = bms_add_member(temp, leaf);
-			}
+			Assert(!bms_is_member(leaf, sj->min_lefthand));
+			temp = bms_del_member(sj->min_lefthand, part);
+			sj->min_lefthand = bms_add_member(temp, leaf);
 		}
-		result = lappend(result, sj);
+
+		if (bms_is_member(part, sj->min_righthand))
+		{
+			Assert(!bms_is_member(leaf, sj->min_righthand));
+			temp = bms_del_member(sj->min_righthand, part);
+			sj->min_righthand = bms_add_member(temp, leaf);
+		}
+
+		if (bms_is_member(part, sj->syn_lefthand))
+		{
+			Assert(!bms_is_member(leaf, sj->syn_lefthand));
+			temp = bms_del_member(sj->syn_lefthand, part);
+			sj->syn_lefthand = bms_add_member(temp, leaf);
+		}
+
+		if (bms_is_member(part, sj->syn_righthand))
+		{
+			Assert(!bms_is_member(leaf, sj->syn_righthand));
+			temp = bms_del_member(sj->syn_righthand, part);
+			sj->syn_righthand = bms_add_member(temp, leaf);
+		}
 	}
-	return result;
+	return sj;
 }
 
 /*
@@ -1259,11 +1253,50 @@ pickup_partition_tree(PlannerInfo *root,
 }
 
 /*
- * adjust_appendrel_child_reltarget
+ * fixup_appendrel_child_relids
+ */
+static Relids
+__fixup_appendrel_child_relids(Relids relids_orig,
+							   RelOptInfo *append_rel,
+							   List *part_tree_list)
+{
+	Relids		result = NULL;
+	int			index = -1;
+	ListCell   *lc;
+
+	while ((index = bms_next_member(relids_orig, index)) >= 0)
+	{
+		if (bms_is_member(index, append_rel->relids))
+		{
+			foreach (lc, part_tree_list)
+			{
+				List   *part_tree = lfirst(lc);
+				Index	part, leaf;
+
+				part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
+				leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
+
+				if (index == part)
+				{
+					result = bms_add_member(result, leaf);
+					goto found;
+				}
+			}
+		}
+		result = bms_add_member(result, index);
+	found:
+		;
+	}
+	return result;
+}
+
+/*
+ * fixup_appendrel_child_varnode
  */
 typedef struct
 {
 	PlannerInfo *root;
+	RelOptInfo	*append_rel;
 	List		*part_tree_list;
 } fixup_appendrel_child_varnode_context;
 
@@ -1313,6 +1346,9 @@ __fixup_appendrel_child_varnode(Node *node, void *__context)
 	return expression_tree_mutator(node, __fixup_appendrel_child_varnode, con);
 }
 
+/*
+ * fixup_appendrel_child_varnode
+ */
 List *
 fixup_appendrel_child_varnode(List *exprs_list,
 							  PlannerInfo *root,
@@ -1331,19 +1367,23 @@ fixup_appendrel_child_varnode(List *exprs_list,
 		elog(ERROR, "Bug? could not pick up partition tree");
 
 	con.root = root;
+	con.append_rel = append_rel;
 	con.part_tree_list = part_tree_list;
 	return (List *)__fixup_appendrel_child_varnode((Node *)exprs_list, &con);
 }
 
 static Path *
 setup_append_child_path(PlannerInfo *root,
-						List *part_tree_list,
-						PathTarget *old_target,
 						RelOptInfo *append_rel,
 						Path *subpath)
 {
 	Path	   *newpath;
 	PathTarget *new_target;
+	List	   *part_tree_list;
+
+	part_tree_list = pickup_partition_tree(root, append_rel, subpath->parent);
+	if (part_tree_list == NIL)
+		return NULL;
 
 	if (pgstrom_path_is_gpujoin(subpath))
 	{
@@ -1378,7 +1418,7 @@ setup_append_child_path(PlannerInfo *root,
 		newpath = palloc(sz);
 		memcpy(newpath, subpath, sz);
 	}
-	new_target = copy_pathtarget(old_target);
+	new_target = copy_pathtarget(subpath->pathtarget);
 	if (new_target->exprs != NIL)
 	{
 		fixup_appendrel_child_varnode_context con;
@@ -1394,18 +1434,86 @@ setup_append_child_path(PlannerInfo *root,
 }
 
 /*
- * extract_partitionwise_pathlist
+ * build_partitionwise_gpujoin_final
+ */
+static bool
+build_partitionwise_gpujoin_final(PlannerInfo *root,
+								  RelOptInfo *join_rel,
+								  RelOptInfo *outer_rel,
+								  RelOptInfo *inner_rel,
+								  JoinType join_type,
+								  JoinPathExtraData *extra,
+								  RelOptInfo *append_rel,
+								  List *part_tree_list)
+{
+	SpecialJoinInfo *sjinfo;
+	List	   *restrictlist = NIL;
+	ListCell   *lc;
+
+	sjinfo = make_pseudo_special_join_info(root, part_tree_list,
+										   extra->sjinfo);
+	foreach (lc, extra->restrictlist)
+	{
+		RestrictInfo *rinfo = copyObject(lfirst(lc));
+		fixup_appendrel_child_varnode_context con;
+
+		con.root = root;
+		con.append_rel = append_rel;
+		con.part_tree_list = part_tree_list;
+		rinfo->clause = (Expr *)
+			__fixup_appendrel_child_varnode((Node *)rinfo->clause, &con);
+
+		rinfo->clause_relids =
+			__fixup_appendrel_child_relids(rinfo->clause_relids,
+										   append_rel,
+										   part_tree_list);
+		rinfo->required_relids =
+			__fixup_appendrel_child_relids(rinfo->required_relids,
+										   append_rel,
+										   part_tree_list);
+		rinfo->outer_relids =
+			__fixup_appendrel_child_relids(rinfo->outer_relids,
+										   append_rel,
+										   part_tree_list);
+		rinfo->nullable_relids =
+			__fixup_appendrel_child_relids(rinfo->nullable_relids,
+										   append_rel,
+										   part_tree_list);
+		rinfo->left_relids =
+			__fixup_appendrel_child_relids(rinfo->left_relids,
+										   append_rel,
+										   part_tree_list);
+		rinfo->right_relids =
+			__fixup_appendrel_child_relids(rinfo->right_relids,
+										   append_rel,
+										   part_tree_list);
+
+		restrictlist = lappend(restrictlist, rinfo);
+	}
+	add_paths_to_joinrel(root,
+						 join_rel,
+						 outer_rel,
+						 inner_rel,
+						 join_type,
+						 sjinfo,
+						 restrictlist);
+	return true;
+}
+
+/*
+ * build_partitionwise_gpujoin_leafs
  */
 static List *
-__extract_partitionwise_pathlist(PlannerInfo *root,
-								 PathTarget *path_target,
-								 AppendPath *append_path,
-								 List *inner_rels_list,
-								 bool try_parallel_path,
-								 List *join_info_list,
-								 int *p_parallel_nworkers,
-								 AppendPath **p_append_path,
-								 Cost *p_discount_cost)
+build_partitionwise_gpujoin_leafs(PlannerInfo *root,
+								  AppendPath *append_path,
+								  List *inner_rels_list,
+								  JoinType join_type,		/* only GpuJoin */
+								  JoinPathExtraData *extra,	/* only GpuJoin */
+								  bool try_parallel_path,
+								  List *join_info_list_saved,
+								  int *p_parallel_nworkers,
+								  AppendPath **p_append_path,
+								  Cost *p_discount_cost)
 {
 	RelOptInfo *append_rel = append_path->path.parent;
 	Cost		discount_cost = 0.0;
@@ -1442,13 +1550,13 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 		 * SpecialJoinInfo, so we have to fixup relid of the parent
 		 * relation as if child relation is referenced.
 		 */
-		if (join_info_list == NIL)
-			root->join_info_list = NIL;
-		else
+		root->join_info_list = NIL;
+		foreach (lc2, join_info_list_saved)
 		{
-			root->join_info_list = make_pseudo_sjinfo_list(root,
-														   part_tree_list,
-														   join_info_list);
+			SpecialJoinInfo *sj = lfirst(lc2);
+
+			sj = make_pseudo_special_join_info(root, part_tree_list, sj);
+			root->join_info_list = lappend(root->join_info_list, sj);
 		}
 
 		foreach (lc2, inner_rels_list)
@@ -1480,18 +1588,20 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 				if (!join_rel)
 					return NIL;
 			}
-			else
+			/* add various JOIN path; including GpuJoin */
+			if (extra && lc2 == list_tail(inner_rels_list))
 			{
-				/*
-				 * NOTE: join_rel may not contain best path based on the
-				 * current inner/outer relations, because it can be already
-				 * built based on another (lesser) combination of relations.
-				 * So, we should revise GpuJoin path here, even though PG
-				 * core shall support non-partition vs partition JOIN.
-				 */
+				if (!build_partitionwise_gpujoin_final(root,
+													   join_rel,
+													   curr_rel,
+													   inner_rel,
+													   join_type,
+													   extra,
+													   append_rel,
+													   part_tree_list))
+					return NIL;
 			}
 			set_cheapest(join_rel);
-
 			curr_rel = join_rel;
 		}
 
@@ -1504,6 +1614,7 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 			Path   *temppath = lfirst(cell);
 			Relids	paramrels = PATH_REQ_OUTER(temppath);
 
+			/* XXX - Is this restriction reasonable? */
 			if (!bms_is_empty(paramrels))
 				continue;
 			if (child_path == NULL ||
@@ -1515,13 +1626,6 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 
 		parallel_nworkers = Max(parallel_nworkers,
 								child_path->parallel_workers);
-		child_path = setup_append_child_path(root,
-											 part_tree_list,
-											 path_target,
-											 append_rel,
-											 child_path);
-		if (!child_path)
-			return NIL;
 		if (!pgstrom_path_is_gpujoin(child_path))
 			all_gpujoin = false;
 		new_append_subpaths = lappend(new_append_subpaths, child_path);
@@ -1654,145 +1758,203 @@ gpujoin_not_compatible:
 	return new_append_subpaths;
 }
 
-List *
-extract_partitionwise_pathlist(PlannerInfo *root,
-							   PathTarget *path_target,
-							   RelOptInfo *outer_rel,
-							   RelOptInfo *inner_rel,
-							   bool try_parallel_path,
-							   int *p_parallel_nworkers,
-							   AppendPath **p_append_path,
-							   Cost *p_discount_cost)
+/*
+ * extract_partitionwise_pathlist
+ */
+static List *
+__extract_partitionwise_pathlist(PlannerInfo *root,
+								 Path *outer_path,
+								 List *inner_rels_list,		/* only GpuJoin */
+								 JoinType join_type,		/* only GpuJoin */
+								 JoinPathExtraData *extra,	/* only GpuJoin */
+								 bool try_parallel_path,
+								 AppendPath **p_append_path,
+								 int *p_parallel_nworkers,
+								 Cost *p_discount_cost)
 {
-	AppendPath *append_path = NULL;
-	List	   *inner_rels_list;
-	List	   *outer_pathlist;
-	ListCell   *lc;
-	bool		enable_gpunestloop_saved;
-	bool		enable_gpuhashjoin_saved;
-	List	   *join_info_list_saved;
-	List	  **join_rel_level_saved;
 	List	   *result = NIL;
+	List	   *subpaths_list;
+	ListCell   *lc;
 
-	/* walk down the outer path (normal or partial) */
-	if (!try_parallel_path)
-		outer_pathlist = outer_rel->pathlist;
-	else
-		outer_pathlist = outer_rel->partial_pathlist;
-	foreach (lc, outer_pathlist)
+	if (IsA(outer_path, AppendPath))
 	{
-		Path   *outer_path = lfirst(lc);
+		AppendPath *append_path = (AppendPath *) outer_path;
+		bool		enable_gpunestloop_saved;
+		bool		enable_gpuhashjoin_saved;
+		List	   *join_info_list_saved;
+		List	  **join_rel_level_saved;
 
-		inner_rels_list = NIL;
-		if (inner_rel)
-			inner_rels_list = list_make1(inner_rel);
+		if (append_path->partitioned_rels == NIL)
+			return NIL;		/* not a partition */
 
-		for (;;)
+		join_rel_level_saved = root->join_rel_level;
+		join_info_list_saved = root->join_info_list;
+		enable_gpunestloop_saved = enable_gpunestloop;
+		enable_gpuhashjoin_saved = enable_gpuhashjoin;
+		if (!enable_partitionwise_gpujoin)
 		{
-			if (IsA(outer_path, AppendPath))
-			{
-				append_path = (AppendPath *) outer_path;
-
-				if (append_path->partitioned_rels != NIL)
-					goto found;
-				break;	/* not a partition */
-			}
-			else if (IsA(outer_path, NestPath) ||
-					 IsA(outer_path, MergePath) ||
-					 IsA(outer_path, HashPath))
-			{
-				JoinPath   *jpath = (JoinPath *) outer_path;
-				Path	   *ipath = jpath->innerjoinpath;
-
-				if (jpath->jointype != JOIN_INNER &&
-					jpath->jointype != JOIN_LEFT)
-					break;		/* not a supported join type */
-				inner_rels_list = lcons(ipath->parent, inner_rels_list);
-				outer_path = jpath->outerjoinpath;
-			}
-			else if (pgstrom_path_is_gpujoin(outer_path))
-			{
-				GpuJoinPath	   *gjpath = (GpuJoinPath *) outer_path;
-				bool			dive_deeper = true;
-				int				i;
-
-				for (i=gjpath->num_rels-1; i >= 0; i--)
-				{
-					Path	   *ipath = gjpath->inners[i].scan_path;
-
-					if (gjpath->inners[i].join_type != JOIN_INNER &&
-						gjpath->inners[i].join_type != JOIN_LEFT)
-					{
-						dive_deeper = false;	/* not a supported join type */
-						break;
-					}
-					inner_rels_list = lcons(ipath->parent, inner_rels_list);
-				}
-				if (!dive_deeper)
-					break;
-				outer_path = linitial(gjpath->cpath.custom_paths);
-			}
-			else if (IsA(outer_path, ProjectionPath))
-			{
-				outer_path = ((ProjectionPath *) outer_path)->subpath;
-			}
-			else if (try_parallel_path && IsA(outer_path, GatherPath))
-			{
-				outer_path = ((GatherPath *) outer_path)->subpath;
-			}
-			else
-			{
-				break;	/* try next */
-			}
+			enable_gpunestloop = false;
+			enable_gpuhashjoin = false;
 		}
-	}
-	return NIL;
-
-found:
-	Assert(append_path != NULL && append_path->partitioned_rels != NIL);
-
-	join_rel_level_saved = root->join_rel_level;
-	join_info_list_saved = root->join_info_list;
-	enable_gpunestloop_saved = enable_gpunestloop;
-	enable_gpuhashjoin_saved = enable_gpuhashjoin;
-	if (!enable_partitionwise_gpujoin)
-	{
-		enable_gpunestloop = false;
-		enable_gpuhashjoin = false;
-	}
-	PG_TRY();
-	{
-		/* temporary disables "dynamic programming" algorithm */
-		root->join_rel_level = NULL;
-
-		result = __extract_partitionwise_pathlist(root,
-												  path_target,
+		PG_TRY();
+		{
+			/* temporary disables "dynamic programming" algorithm */
+			root->join_rel_level = NULL;
+			subpaths_list =
+				build_partitionwise_gpujoin_leafs(root,
 												  append_path,
 												  inner_rels_list,
+												  join_type,
+												  extra,
 												  try_parallel_path,
 												  join_info_list_saved,
 												  p_parallel_nworkers,
 												  p_append_path,
 												  p_discount_cost);
-	}
-	PG_CATCH();
-	{
+		}
+		PG_CATCH();
+		{
+			/* restore */
+			root->join_rel_level = join_rel_level_saved;
+			root->join_info_list = join_info_list_saved;
+			enable_gpunestloop = enable_gpunestloop_saved;
+			enable_gpuhashjoin = enable_gpuhashjoin_saved;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		/* restore */
 		root->join_rel_level = join_rel_level_saved;
 		root->join_info_list = join_info_list_saved;
 		enable_gpunestloop = enable_gpunestloop_saved;
 		enable_gpuhashjoin = enable_gpuhashjoin_saved;
-		PG_RE_THROW();
 	}
-	PG_END_TRY();
-	/* restore */
-	root->join_rel_level = join_rel_level_saved;
-	root->join_info_list = join_info_list_saved;
-	enable_gpunestloop = enable_gpunestloop_saved;
-	enable_gpuhashjoin = enable_gpuhashjoin_saved;
+	else if (IsA(outer_path, NestPath) ||
+			 IsA(outer_path, MergePath) ||
+			 IsA(outer_path, HashPath))
+	{
+		JoinPath   *jpath = (JoinPath *) outer_path;
+		Path	   *ipath = jpath->innerjoinpath;
 
+		if (jpath->jointype != JOIN_INNER &&
+			jpath->jointype != JOIN_LEFT)
+			return NIL;		/* not a supported join type */
+		inner_rels_list = lcons(ipath->parent, inner_rels_list);
+		subpaths_list =
+			__extract_partitionwise_pathlist(root,
+											 jpath->outerjoinpath,
+											 inner_rels_list,
+											 join_type,
+											 extra,
+											 try_parallel_path,
+											 p_append_path,
+											 p_parallel_nworkers,
+											 p_discount_cost);
+	}
+	else if (pgstrom_path_is_gpujoin(outer_path))
+	{
+		GpuJoinPath *gjpath = (GpuJoinPath *) outer_path;
+		Path   *gjouter_path = linitial(gjpath->cpath.custom_paths);
+		int		i;
+
+		for (i=gjpath->num_rels-1; i >= 0; i--)
+		{
+			Path   *ipath = gjpath->inners[i].scan_path;
+
+			if (gjpath->inners[i].join_type != JOIN_INNER &&
+				gjpath->inners[i].join_type != JOIN_LEFT)
+				return NIL;	/* not a supported join type */
+			inner_rels_list = lcons(ipath->parent, inner_rels_list);
+		}
+		subpaths_list =
+			__extract_partitionwise_pathlist(root,
+											 gjouter_path,
+											 inner_rels_list,
+											 join_type,
+											 extra,
+											 try_parallel_path,
+											 p_append_path,
+											 p_parallel_nworkers,
+											 p_discount_cost);
+	}
+	else if (IsA(outer_path, ProjectionPath))
+	{
+		ProjectionPath *projection_path = (ProjectionPath *)outer_path;
+		List	   *temp;
+		ListCell   *lc;
+
+		temp = __extract_partitionwise_pathlist(root,
+												projection_path->subpath,
+												inner_rels_list,
+												join_type,
+												extra,
+												try_parallel_path,
+												p_append_path,
+												p_parallel_nworkers,
+												p_discount_cost);
+		foreach (lc, temp)
+		{
+			Path	   *subpath = lfirst(lc);
+			ProjectionPath *newpath;
+		
+			newpath = create_projection_path(root,
+                                             subpath->parent,
+                                             subpath,
+											 projection_path->path.pathtarget);
+			subpaths_list = lappend(subpaths_list, newpath);
+		}
+	}
+	else if (IsA(outer_path, GatherPath))
+	{
+		Path   *subpath = ((GatherPath *) outer_path)->subpath;
+
+		subpaths_list = __extract_partitionwise_pathlist(root,
+														 subpath,
+														 inner_rels_list,
+														 join_type,
+														 extra,
+														 try_parallel_path,
+														 p_append_path,
+														 p_parallel_nworkers,
+														 p_discount_cost);
+	}
+	else
+	{
+		return NIL;
+	}
+
+	foreach (lc, subpaths_list)
+	{
+		RelOptInfo *append_rel = (*p_append_path)->path.parent;
+		Path	   *oldpath = lfirst(lc);
+		Path	   *newpath;
+
+		newpath = setup_append_child_path(root, append_rel, oldpath);
+		if (!newpath)
+			return NIL;
+		result = lappend(result, newpath);
+	}
 	return result;
 }
+
+List *
+extract_partitionwise_pathlist(PlannerInfo *root,
+							   Path *outer_path,
+							   bool try_parallel_path,
+							   AppendPath **p_append_path,
+							   int *p_parallel_nworkers,
+							   Cost *p_discount_cost)
+{
+	return __extract_partitionwise_pathlist(root,
+											outer_path,
+											NIL,		/* only GpuJoin */
+											JOIN_INNER,	/* only GpuJoin */
+											NULL,		/* only GpuJoin */
+											try_parallel_path,
+											p_append_path,
+											p_parallel_nworkers,
+											p_discount_cost);
+}
+
 #endif		/* >=PG10; partition support */
 
 /*
@@ -1801,79 +1963,86 @@ found:
 static void
 try_add_gpujoin_append_paths(PlannerInfo *root,
 							 RelOptInfo *joinrel,
-							 RelOptInfo *outer_rel,
-							 RelOptInfo *inner_rel,
+							 Path *outer_path,
+							 Path *inner_path,
 							 JoinType join_type,
-							 JoinPathExtraData *extra)
+							 JoinPathExtraData *extra,
+							 Relids required_outer,
+							 bool try_parallel_path)
 {
 #if PG_VERSION_NUM >= 100000
-	Relids		required_outer = NULL;
-	List	   *subpaths_list;
+	List	   *inner_rels_list = list_make1(inner_path->parent);
+	List	   *subpaths_list = NIL;
 	List	   *partitioned_rels;
-	int			parallel_nworkers;
 	AppendPath *append_path;
+
+	int			parallel_nworkers;
+
 	Cost		discount_cost;
-	bool		try_parallel_path = false;
+
+	bool		all_gpujoin = true;
 
 	if (join_type != JOIN_INNER &&
 		join_type != JOIN_LEFT)
 		return;
 
-try_parallel:
-	subpaths_list = extract_partitionwise_pathlist(root,
-												   joinrel->reltarget,
-												   outer_rel,
-												   inner_rel,
-												   try_parallel_path,
-												   &parallel_nworkers,
-												   &append_path,
-												   &discount_cost);
-	if (subpaths_list != NIL)
-	{
-		/* make a new AppendPath */
-		partitioned_rels = copyObject(append_path->partitioned_rels);
 #if PG_VERSION_NUM < 110000
-		/* PG10 has no support of Parallel Append */
-		append_path = create_append_path(joinrel,
-										 subpaths_list,
-										 required_outer,
-										 parallel_nworkers,
-										 partitioned_rels);
-		/* discount inner heap/hash cost if shared by siblings */
+	if (try_parallel_path)
+		return;		/* no parallel append support at PG10 */
+#endif
+	Assert(extra != NULL);
+	subpaths_list = __extract_partitionwise_pathlist(root,
+													 outer_path,
+													 inner_rels_list,
+													 join_type,
+													 extra,
+													 try_parallel_path,
+													 &append_path,
+													 &parallel_nworkers,
+													 &discount_cost);
+	if (subpaths_list == NIL)
+		return;
+	/*
+	 * Now inner_path X outer_path is distributed to all the leaf-pathnodes.
+	 * Then, create a new AppendPath.
+	 */
+	partitioned_rels = copyObject(append_path->partitioned_rels);
+#if PG_VERSION_NUM < 110000
+	/* PG10 has no support of Parallel Append */
+	append_path = create_append_path(joinrel,
+									 subpaths_list,
+									 required_outer,
+									 parallel_nworkers,
+									 partitioned_rels);
+	/* discount inner heap/hash cost if shared by siblings */
+	if (all_gpujoin)
 		append_path->path.total_cost -= discount_cost;
-		add_path(joinrel, (Path *) append_path);
+	add_path(joinrel, (Path *) append_path);
 #else
-		if (try_parallel_path)
-		{
-			append_path = create_append_path(root, joinrel,
-											 NIL, subpaths_list,
-											 required_outer,
-											 parallel_nworkers, true,
-											 partitioned_rels, -1.0);
-			append_path->path.total_cost -= discount_cost;
-			add_partial_path(joinrel, (Path *) append_path);
-		}
-		else
-		{
-			append_path = create_append_path(root, joinrel,
-											 subpaths_list, NIL,
-											 required_outer,
-											 0, false,
-											 partitioned_rels, -1.0);
-			append_path->path.total_cost -= discount_cost;
-			add_path(joinrel, (Path *) append_path);
-		}
-#endif
-	}
-#if PG_VERSION_NUM >= 110000
-	if (!try_parallel_path)
+	if (try_parallel_path)
 	{
-		try_parallel_path = true;
-		goto try_parallel;
+		append_path = create_append_path(root, joinrel,
+										 NIL, subpaths_list,
+										 required_outer,
+										 parallel_nworkers, true,
+										 partitioned_rels, -1.0);
+		if (all_gpujoin)
+			append_path->path.total_cost -= discount_cost;
+		add_partial_path(joinrel, (Path *) append_path);
+	}
+	else
+	{
+		append_path = create_append_path(root, joinrel,
+										 subpaths_list, NIL,
+										 required_outer,
+										 0, false,
+										 partitioned_rels, -1.0);
+		if (all_gpujoin)
+			append_path->path.total_cost -= discount_cost;
+		add_path(joinrel, (Path *) append_path);
 	}
 #endif
 #endif
-	return;
 }
 
 /*
@@ -2062,6 +2231,17 @@ try_add_gpujoin_paths(PlannerInfo *root,
 			break;
 		}
 	}
+
+	/* Add partition-wise GpuJoin path */
+	if (enable_partitionwise_gpujoin)
+		try_add_gpujoin_append_paths(root,
+									 joinrel,
+									 outer_path,
+									 inner_path,
+									 join_type,
+									 extra,
+									 required_outer,
+									 try_parallel_path);
 }
 
 /*
@@ -2097,51 +2277,52 @@ gpujoin_add_join_path(PlannerInfo *root,
 	/*
 	 * make a traditional sequential path
 	 */
-	inner_path = gpujoin_find_cheapest_path(root, joinrel, innerrel, false);
-	outer_path = gpujoin_find_cheapest_path(root, joinrel, outerrel, false);
-	if (inner_path && outer_path)
-		try_add_gpujoin_paths(root, joinrel,
-							  outer_path, inner_path,
-							  jointype, extra, false);
+	outer_path = gpujoin_find_cheapest_path(root,
+											joinrel,
+											outerrel,
+											false);
+	if (outer_path)
+	{
+		inner_path = gpujoin_find_cheapest_path(root,
+												joinrel,
+												innerrel,
+												false);
+		if (inner_path)
+			try_add_gpujoin_paths(root,
+								  joinrel,
+								  outer_path,
+								  inner_path,
+								  jointype, extra, false);
+	}
 
 	/*
 	 * consider partial paths if any partial outers
 	 */
-	if (joinrel->consider_parallel)
+	if (!joinrel->consider_parallel)
+		return;
+
+	foreach (lc1, outerrel->partial_pathlist)
 	{
-		foreach (lc1, innerrel->pathlist)
+		outer_path = lfirst(lc1);
+
+		if (!outer_path->parallel_safe ||
+			outer_path->parallel_workers == 0 ||
+			bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
+			continue;
+
+		foreach (lc2, innerrel->pathlist)
 		{
-			inner_path = lfirst(lc1);
+			inner_path = lfirst(lc2);
 
 			if (!inner_path->parallel_safe ||
 				bms_overlap(PATH_REQ_OUTER(inner_path), outerrel->relids))
 				continue;
 
-			foreach (lc2, outerrel->partial_pathlist)
-			{
-				outer_path = lfirst(lc2);
-
-				if (!outer_path->parallel_safe ||
-					outer_path->parallel_workers == 0 ||
-					bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
-					continue;
-				try_add_gpujoin_paths(root, joinrel,
-									  outer_path, inner_path,
-									  jointype, extra, true);
-			}
+			try_add_gpujoin_paths(root, joinrel,
+								  outer_path, inner_path,
+								  jointype, extra, true);
 		}
 	}
-
-	/*
-	 * Try to push down GpuJoin across Append node, if any chance
-	 */
-	if (enable_partitionwise_gpujoin)
-		try_add_gpujoin_append_paths(root,
-									 joinrel,
-									 outerrel,
-									 innerrel,
-									 jointype,
-									 extra);
 }
 
 /*

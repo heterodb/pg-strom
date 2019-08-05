@@ -1254,12 +1254,10 @@ extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
 
 #if PG_VERSION_NUM >= 100000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
-											PathTarget *path_target,
-											RelOptInfo *outer_rel,
-											RelOptInfo *inner_rel,
+											Path *outer_path,
 											bool try_parallel_path,
-											int *p_parallel_nworkers,
 											AppendPath **p_append_path,
+											int *p_parallel_nworkers,
 											Cost *p_discount_cost);
 extern List *fixup_appendrel_child_varnode(List *exprs_list,
 										   PlannerInfo *root,

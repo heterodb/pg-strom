@@ -1523,15 +1523,18 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	ListCell   *lc;
 
 	sub_paths_list = extract_partitionwise_pathlist(root,
-													input_path->pathtarget,
-													input_path->parent,
-													NULL,
+													input_path,
 													try_parallel_path,
-													&parallel_nworkers,
 													&append_path,
+													&parallel_nworkers,
 													&discount_cost);
 	if (sub_paths_list == NIL)
 		return;
+	if (list_length(sub_paths_list) > 1)
+		discount_cost /= (Cost)(list_length(sub_paths_list) - 1);
+	else
+		discount_cost = 0.0;
+
 	foreach (lc, sub_paths_list)
 	{
 		PathTarget *curr_partial = copy_pathtarget(target_partial);
@@ -1562,6 +1565,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 											  false);
 		if (!partial_path)
 			return;
+		partial_path->total_cost -= discount_cost;
 		append_paths_list = lappend(append_paths_list, partial_path);
 	}
 	/* also see create_append_path(), some fields must be fixed up */
