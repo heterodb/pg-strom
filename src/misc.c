@@ -48,6 +48,32 @@ make_flat_ands_explicit(List *andclauses)
 	return make_andclause(args);
 }
 
+/*
+ * __find_appinfos_by_relids - almost equivalent to find_appinfos_by_relids
+ * that is added at PG11, but ignores relations that are not partition leafs.
+ */
+AppendRelInfo **
+__find_appinfos_by_relids(PlannerInfo *root, Relids relids, int *nappinfos)
+{
+	AppendRelInfo **appinfos;
+	ListCell   *lc;
+	int			nrooms = bms_num_members(relids);
+	int			nitems = 0;
+
+	appinfos = palloc0(sizeof(AppendRelInfo *) * nrooms);
+	foreach (lc, root->append_rel_list)
+	{
+		AppendRelInfo *apinfo = lfirst(lc);
+
+		if (bms_is_member(apinfo->child_relid, relids))
+			appinfos[nitems++] = apinfo;
+	}
+	Assert(nitems <= nrooms);
+	*nappinfos = nitems;
+
+	return appinfos;
+}
+
 #if PG_VERSION_NUM < 100000
 /*
  * compute_parallel_worker at optimizer/path/allpaths.c
@@ -138,7 +164,9 @@ get_parallel_divisor(Path *path)
 {
 	double		parallel_divisor = path->parallel_workers;
 
+#if PG_VERSION_NUM >= 110000
 	if (parallel_leader_participation)
+#endif
 	{
 		double	leader_contribution;
 

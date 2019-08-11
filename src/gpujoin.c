@@ -1019,7 +1019,7 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
 	return hash_quals;
 }
 
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 /*
  * Partition support for GPU-aware custom-plans (GpuJoin, GpuPreAgg)
  *
@@ -1062,442 +1062,645 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
  */
 
 /*
- * adjust_appendrel_attr_needed
- *
- * 'attr_needed' of child relations of partition/inheritance are not
- * initialized (probably, because no code path references the attribute
- * on the PG side), then it leads wrong construction of joinrel with
- * missing target-vars.
- * So, we fix up 'attr_needed' of the base relation here.
- *
- * See adjust_appendrel_attrs() also.
+ * join_is_legal, copy from optimizer/path/joinrels.c
  */
 static bool
-adjust_appendrel_attr_needed(PlannerInfo *root,
-							 List *part_tree_list,
-							 RelOptInfo *parent,
-							 RelOptInfo *subrel)
+join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
+			  Relids joinrelids,
+			  SpecialJoinInfo **sjinfo_p, bool *reversed_p)
 {
-	List	   *part_tree;
-	ListCell   *lc;
-	int			i, j, k;
+	SpecialJoinInfo *match_sjinfo;
+	bool		reversed;
+	bool		unique_ified;
+	bool		must_be_leftjoin;
+	ListCell   *l;
 
-	foreach (lc, part_tree_list)
+	/*
+	 * Ensure output params are set on failure return.  This is just to
+	 * suppress uninitialized-variable warnings from overly anal compilers.
+	 */
+	*sjinfo_p = NULL;
+	*reversed_p = false;
+
+	/*
+	 * If we have any special joins, the proposed join might be illegal; and
+	 * in any case we have to determine its join type.  Scan the join info
+	 * list for matches and conflicts.
+	 */
+	match_sjinfo = NULL;
+	reversed = false;
+	unique_ified = false;
+	must_be_leftjoin = false;
+
+	foreach(l, root->join_info_list)
 	{
-		List		   *temp = lfirst(lc);
-		AppendRelInfo  *head = (AppendRelInfo *)linitial(temp);
-		AppendRelInfo  *tail = (AppendRelInfo *)llast(temp);
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
 
-		if (bms_is_member(head->parent_relid, parent->relids) &&
-			bms_is_member(tail->child_relid, subrel->relids))
+		/*
+		 * This special join is not relevant unless its RHS overlaps the
+		 * proposed join.  (Check this first as a fast path for dismissing
+		 * most irrelevant SJs quickly.)
+		 */
+		if (!bms_overlap(sjinfo->min_righthand, joinrelids))
+			continue;
+
+		/*
+		 * Also, not relevant if proposed join is fully contained within RHS
+		 * (ie, we're still building up the RHS).
+		 */
+		if (bms_is_subset(joinrelids, sjinfo->min_righthand))
+			continue;
+
+		/*
+		 * Also, not relevant if SJ is already done within either input.
+		 */
+		if (bms_is_subset(sjinfo->min_lefthand, rel1->relids) &&
+			bms_is_subset(sjinfo->min_righthand, rel1->relids))
+			continue;
+		if (bms_is_subset(sjinfo->min_lefthand, rel2->relids) &&
+			bms_is_subset(sjinfo->min_righthand, rel2->relids))
+			continue;
+
+		/*
+		 * If it's a semijoin and we already joined the RHS to any other rels
+		 * within either input, then we must have unique-ified the RHS at that
+		 * point (see below).  Therefore the semijoin is no longer relevant in
+		 * this join path.
+		 */
+		if (sjinfo->jointype == JOIN_SEMI)
 		{
-			part_tree = temp;
-			goto found;
+			if (bms_is_subset(sjinfo->syn_righthand, rel1->relids) &&
+				!bms_equal(sjinfo->syn_righthand, rel1->relids))
+				continue;
+			if (bms_is_subset(sjinfo->syn_righthand, rel2->relids) &&
+				!bms_equal(sjinfo->syn_righthand, rel2->relids))
+				continue;
+		}
+
+		/*
+		 * If one input contains min_lefthand and the other contains
+		 * min_righthand, then we can perform the SJ at this join.
+		 *
+		 * Reject if we get matches to more than one SJ; that implies we're
+		 * considering something that's not really valid.
+		 */
+		if (bms_is_subset(sjinfo->min_lefthand, rel1->relids) &&
+			bms_is_subset(sjinfo->min_righthand, rel2->relids))
+		{
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = false;
+		}
+		else if (bms_is_subset(sjinfo->min_lefthand, rel2->relids) &&
+				 bms_is_subset(sjinfo->min_righthand, rel1->relids))
+		{
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = true;
+		}
+		else if (sjinfo->jointype == JOIN_SEMI &&
+				 bms_equal(sjinfo->syn_righthand, rel2->relids) &&
+				 create_unique_path(root, rel2, rel2->cheapest_total_path,
+									sjinfo) != NULL)
+		{
+			/*----------
+			 * For a semijoin, we can join the RHS to anything else by
+			 * unique-ifying the RHS (if the RHS can be unique-ified).
+			 * We will only get here if we have the full RHS but less
+			 * than min_lefthand on the LHS.
+			 *
+			 * The reason to consider such a join path is exemplified by
+			 *	SELECT ... FROM a,b WHERE (a.x,b.y) IN (SELECT c1,c2 FROM c)
+			 * If we insist on doing this as a semijoin we will first have
+			 * to form the cartesian product of A*B.  But if we unique-ify
+			 * C then the semijoin becomes a plain innerjoin and we can join
+			 * in any order, eg C to A and then to B.  When C is much smaller
+			 * than A and B this can be a huge win.  So we allow C to be
+			 * joined to just A or just B here, and then make_join_rel has
+			 * to handle the case properly.
+			 *
+			 * Note that actually we'll allow unique-ified C to be joined to
+			 * some other relation D here, too.  That is legal, if usually not
+			 * very sane, and this routine is only concerned with legality not
+			 * with whether the join is good strategy.
+			 *----------
+			 */
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = false;
+			unique_ified = true;
+		}
+		else if (sjinfo->jointype == JOIN_SEMI &&
+				 bms_equal(sjinfo->syn_righthand, rel1->relids) &&
+				 create_unique_path(root, rel1, rel1->cheapest_total_path,
+									sjinfo) != NULL)
+		{
+			/* Reversed semijoin case */
+			if (match_sjinfo)
+				return false;	/* invalid join path */
+			match_sjinfo = sjinfo;
+			reversed = true;
+			unique_ified = true;
+		}
+		else
+		{
+			/*
+			 * Otherwise, the proposed join overlaps the RHS but isn't a valid
+			 * implementation of this SJ.  But don't panic quite yet: the RHS
+			 * violation might have occurred previously, in one or both input
+			 * relations, in which case we must have previously decided that
+			 * it was OK to commute some other SJ with this one.  If we need
+			 * to perform this join to finish building up the RHS, rejecting
+			 * it could lead to not finding any plan at all.  (This can occur
+			 * because of the heuristics elsewhere in this file that postpone
+			 * clauseless joins: we might not consider doing a clauseless join
+			 * within the RHS until after we've performed other, validly
+			 * commutable SJs with one or both sides of the clauseless join.)
+			 * This consideration boils down to the rule that if both inputs
+			 * overlap the RHS, we can allow the join --- they are either
+			 * fully within the RHS, or represent previously-allowed joins to
+			 * rels outside it.
+			 */
+			if (bms_overlap(rel1->relids, sjinfo->min_righthand) &&
+				bms_overlap(rel2->relids, sjinfo->min_righthand))
+				continue;		/* assume valid previous violation of RHS */
+
+			/*
+			 * The proposed join could still be legal, but only if we're
+			 * allowed to associate it into the RHS of this SJ.  That means
+			 * this SJ must be a LEFT join (not SEMI or ANTI, and certainly
+			 * not FULL) and the proposed join must not overlap the LHS.
+			 */
+			if (sjinfo->jointype != JOIN_LEFT ||
+				bms_overlap(joinrelids, sjinfo->min_lefthand))
+				return false;	/* invalid join path */
+
+			/*
+			 * To be valid, the proposed join must be a LEFT join; otherwise
+			 * it can't associate into this SJ's RHS.  But we may not yet have
+			 * found the SpecialJoinInfo matching the proposed join, so we
+			 * can't test that yet.  Remember the requirement for later.
+			 */
+			must_be_leftjoin = true;
+		}
+	}
+
+	/*
+	 * Fail if violated any SJ's RHS and didn't match to a LEFT SJ: the
+	 * proposed join can't associate into an SJ's RHS.
+	 *
+	 * Also, fail if the proposed join's predicate isn't strict; we're
+	 * essentially checking to see if we can apply outer-join identity 3, and
+	 * that's a requirement.  (This check may be redundant with checks in
+	 * make_outerjoininfo, but I'm not quite sure, and it's cheap to test.)
+	 */
+	if (must_be_leftjoin &&
+		(match_sjinfo == NULL ||
+		 match_sjinfo->jointype != JOIN_LEFT ||
+		 !match_sjinfo->lhs_strict))
+		return false;			/* invalid join path */
+
+	/*
+	 * We also have to check for constraints imposed by LATERAL references.
+	 */
+	if (root->hasLateralRTEs)
+	{
+		bool		lateral_fwd;
+		bool		lateral_rev;
+		Relids		join_lateral_rels;
+
+		/*
+		 * The proposed rels could each contain lateral references to the
+		 * other, in which case the join is impossible.  If there are lateral
+		 * references in just one direction, then the join has to be done with
+		 * a nestloop with the lateral referencer on the inside.  If the join
+		 * matches an SJ that cannot be implemented by such a nestloop, the
+		 * join is impossible.
+		 *
+		 * Also, if the lateral reference is only indirect, we should reject
+		 * the join; whatever rel(s) the reference chain goes through must be
+		 * joined to first.
+		 *
+		 * Another case that might keep us from building a valid plan is the
+		 * implementation restriction described by have_dangerous_phv().
+		 */
+		lateral_fwd = bms_overlap(rel1->relids, rel2->lateral_relids);
+		lateral_rev = bms_overlap(rel2->relids, rel1->lateral_relids);
+		if (lateral_fwd && lateral_rev)
+			return false;		/* have lateral refs in both directions */
+		if (lateral_fwd)
+		{
+			/* has to be implemented as nestloop with rel1 on left */
+			if (match_sjinfo &&
+				(reversed ||
+				 unique_ified ||
+				 match_sjinfo->jointype == JOIN_FULL))
+				return false;	/* not implementable as nestloop */
+			/* check there is a direct reference from rel2 to rel1 */
+			if (!bms_overlap(rel1->relids, rel2->direct_lateral_relids))
+				return false;	/* only indirect refs, so reject */
+			/* check we won't have a dangerous PHV */
+			if (have_dangerous_phv(root, rel1->relids, rel2->lateral_relids))
+				return false;	/* might be unable to handle required PHV */
+		}
+		else if (lateral_rev)
+		{
+			/* has to be implemented as nestloop with rel2 on left */
+			if (match_sjinfo &&
+				(!reversed ||
+				 unique_ified ||
+				 match_sjinfo->jointype == JOIN_FULL))
+				return false;	/* not implementable as nestloop */
+			/* check there is a direct reference from rel1 to rel2 */
+			if (!bms_overlap(rel2->relids, rel1->direct_lateral_relids))
+				return false;	/* only indirect refs, so reject */
+			/* check we won't have a dangerous PHV */
+			if (have_dangerous_phv(root, rel2->relids, rel1->lateral_relids))
+				return false;	/* might be unable to handle required PHV */
+		}
+
+		/*
+		 * LATERAL references could also cause problems later on if we accept
+		 * this join: if the join's minimum parameterization includes any rels
+		 * that would have to be on the inside of an outer join with this join
+		 * rel, then it's never going to be possible to build the complete
+		 * query using this join.  We should reject this join not only because
+		 * it'll save work, but because if we don't, the clauseless-join
+		 * heuristics might think that legality of this join means that some
+		 * other join rel need not be formed, and that could lead to failure
+		 * to find any plan at all.  We have to consider not only rels that
+		 * are directly on the inner side of an OJ with the joinrel, but also
+		 * ones that are indirectly so, so search to find all such rels.
+		 */
+		join_lateral_rels = min_join_parameterization(root, joinrelids,
+													  rel1, rel2);
+		if (join_lateral_rels)
+		{
+			Relids		join_plus_rhs = bms_copy(joinrelids);
+			bool		more;
+
+			do
+			{
+				more = false;
+				foreach(l, root->join_info_list)
+				{
+					SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+					/* ignore full joins --- their ordering is predetermined */
+					if (sjinfo->jointype == JOIN_FULL)
+						continue;
+
+					if (bms_overlap(sjinfo->min_lefthand, join_plus_rhs) &&
+						!bms_is_subset(sjinfo->min_righthand, join_plus_rhs))
+					{
+						join_plus_rhs = bms_add_members(join_plus_rhs,
+														sjinfo->min_righthand);
+						more = true;
+					}
+				}
+			} while (more);
+			if (bms_overlap(join_plus_rhs, join_lateral_rels))
+				return false;	/* will not be able to join to some RHS rel */
+		}
+	}
+
+	/* Otherwise, it's a valid join */
+	*sjinfo_p = match_sjinfo;
+	*reversed_p = reversed;
+	return true;
+}
+
+/*
+ * build_joinrel_restrictlist
+ *  - equivalent to the same function at optimizer/util/relnode.c
+ */
+static List *
+build_joinrel_restrictlist(PlannerInfo *root,
+                           RelOptInfo *joinrel,
+                           RelOptInfo *outer_rel,
+                           RelOptInfo *inner_rel)
+{
+	List	   *result = NIL;
+	List	   *temp;
+	ListCell   *lc;
+
+	foreach (lc, outer_rel->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		if (bms_is_subset(rinfo->required_relids, joinrel->relids))
+			result = list_append_unique_ptr(result, rinfo);
+	}
+	foreach (lc, inner_rel->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		if (bms_is_subset(rinfo->required_relids, joinrel->relids))
+			result = list_append_unique_ptr(result, rinfo);
+	}
+	temp = generate_join_implied_equalities(root,
+											joinrel->relids,
+											outer_rel->relids,
+											inner_rel);
+	return list_concat(result, temp);
+}
+
+/*
+ * restriction_is_constant_false, copied from optimizer/path/joinrels.c
+ */
+static bool
+restriction_is_constant_false(List *restrictlist,
+							  RelOptInfo *joinrel,
+							  bool only_pushed_down)
+{
+	ListCell   *lc;
+
+	/*
+	 * Despite the above comment, the restriction list we see here might
+	 * possibly have other members besides the FALSE constant, since other
+	 * quals could get "pushed down" to the outer join level.  So we check
+	 * each member of the list.
+	 */
+	foreach(lc, restrictlist)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		if (only_pushed_down && !RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
+			continue;
+
+		if (rinfo->clause && IsA(rinfo->clause, Const))
+		{
+			Const  *con = (Const *) rinfo->clause;
+
+			/* constant NULL is as good as constant FALSE for our purposes */
+			if (con->constisnull)
+				return true;
+			if (!DatumGetBool(con->constvalue))
+				return true;
 		}
 	}
 	return false;
-found:
-
-	for (i=parent->min_attr, j=0; i <= parent->max_attr; i++, j++)
-	{
-		Relids		needed = parent->attr_needed[j];
-
-		if (!needed)
-			continue;
-		if (i <= 0)
-			k = i;
-		else
-		{
-			Var			__var;
-			Var		   *var = &__var;
-			ListCell   *lc;
-
-			memset(var, 0, sizeof(Var));
-			var->varattno = i;
-			foreach (lc, part_tree)
-			{
-				AppendRelInfo *apinfo = lfirst(lc);
-
-				var = list_nth(apinfo->translated_vars, var->varattno - 1);
-				if (!var)
-					break;
-			}
-			if (!var)
-				continue;		/* dropped column */
-			if (!IsA(var, Var))
-				return false;	/* UNION ALL? */
-			if (var->varno != subrel->relid)
-				return false;
-			k = var->varattno;
-		}
-
-		if (k >= subrel->min_attr && k <= subrel->max_attr)
-		{
-			k -= subrel->min_attr;
-
-			if (!subrel->attr_needed[k])
-				subrel->attr_needed[k] = bms_copy(needed);
-			else
-				Assert(bms_equal(subrel->attr_needed[k], needed));
-		}
-	}
-	return true;
 }
 
 /*
- * make_pseudo_special_join_info
+ * make_pseudo_append_rel_info
  */
-static SpecialJoinInfo *
-make_pseudo_special_join_info(PlannerInfo *root,
-							  List *part_tree_list,
-							  SpecialJoinInfo *__sj)
+static AppendRelInfo *
+make_pseudo_append_rel_info(PlannerInfo *root, Index relid)
 {
-	SpecialJoinInfo *sj = copyObject(__sj);
-	ListCell   *lc;
-	Bitmapset  *temp;
+	RelOptInfo	   *rel = root->simple_rel_array[relid];
+	RangeTblEntry  *rte = root->simple_rte_array[relid];
+	AppendRelInfo  *apinfo;
+	AttrNumber		anum;
+	List		   *vars = NIL;
 
-	foreach (lc, part_tree_list)
+	Assert(rel->reloptkind == RELOPT_BASEREL);
+	apinfo = makeNode(AppendRelInfo);
+	apinfo->parent_relid = relid;
+	apinfo->child_relid = relid;
+	for (anum=1; anum <= rel->max_attr; anum++)
 	{
-		List   *part_tree = lfirst(lc);
-		Index	part, leaf;
+		HeapTuple	tup;
+		Form_pg_attribute attr;
 
-		part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
-		leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
-
-		if (bms_is_member(part, sj->min_lefthand))
-		{
-			Assert(!bms_is_member(leaf, sj->min_lefthand));
-			temp = bms_del_member(sj->min_lefthand, part);
-			sj->min_lefthand = bms_add_member(temp, leaf);
-		}
-
-		if (bms_is_member(part, sj->min_righthand))
-		{
-			Assert(!bms_is_member(leaf, sj->min_righthand));
-			temp = bms_del_member(sj->min_righthand, part);
-			sj->min_righthand = bms_add_member(temp, leaf);
-		}
-
-		if (bms_is_member(part, sj->syn_lefthand))
-		{
-			Assert(!bms_is_member(leaf, sj->syn_lefthand));
-			temp = bms_del_member(sj->syn_lefthand, part);
-			sj->syn_lefthand = bms_add_member(temp, leaf);
-		}
-
-		if (bms_is_member(part, sj->syn_righthand))
-		{
-			Assert(!bms_is_member(leaf, sj->syn_righthand));
-			temp = bms_del_member(sj->syn_righthand, part);
-			sj->syn_righthand = bms_add_member(temp, leaf);
-		}
+		tup = SearchSysCache2(ATTNUM,
+							  ObjectIdGetDatum(rte->relid),
+							  Int16GetDatum(anum));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 anum, rte->relid);
+		attr = (Form_pg_attribute) GETSTRUCT(tup);
+		vars = lappend(vars, makeVar(relid,
+									 anum,
+									 attr->atttypid,
+									 attr->atttypmod,
+									 attr->attcollation,
+									 0));
+		ReleaseSysCache(tup);
 	}
-	return sj;
+	apinfo->translated_vars = vars;
+
+	return apinfo;
 }
 
 /*
- * pickup_partition_tree - makes List of AppendRelInfo
+ * try_partitionwise_gpujoin
  */
-static List *
-__pickup_partition_tree_walker(PlannerInfo *root,
-							   RelOptInfo *part_rel,
-							   Index leaf_relid)
+static RelOptInfo *
+__try_partitionwise_gpujoin(PlannerInfo *root,
+							RelOptInfo *parent_join_rel,
+							RelOptInfo *parent_outer_rel,
+							RelOptInfo *outer_rel,
+							RelOptInfo *inner_rel)
 {
-	List	   *temp;
-	ListCell   *lc;
+	AppendRelInfo **appinfos;
+	int				nappinfos;
+	SpecialJoinInfo *sjinfo, *child_sjinfo;
+	SpecialJoinInfo __sjinfo_data;
+	bool			reverse;
+	List		   *restrictlist, *child_restrictlist;
+	RelOptInfo	   *child_join_rel;
 
-	foreach (lc, root->append_rel_list)
+	if (!join_is_legal(root,
+					   parent_outer_rel,
+					   inner_rel,
+					   parent_join_rel->relids,
+					   &sjinfo, &reverse))
+		elog(ERROR, "Bug? unexpected illigal join (%s) x (%s)",
+			 bmsToString(inner_rel->relids),
+			 bmsToString(parent_outer_rel->relids));
+
+	if (!sjinfo)
 	{
-		AppendRelInfo *apinfo = lfirst(lc);
-
-		if (apinfo->child_relid == leaf_relid)
-		{
-			if (bms_is_member(apinfo->parent_relid, part_rel->relids))
-				return list_make1(apinfo);
-			temp = __pickup_partition_tree_walker(root, part_rel,
-												  apinfo->parent_relid);
-			if (temp != NIL)
-				return lappend(temp, apinfo);
-		}
+		memset(&__sjinfo_data, 0, sizeof(SpecialJoinInfo));
+		sjinfo = &__sjinfo_data;
+		sjinfo->min_lefthand = parent_outer_rel->relids;
+        sjinfo->min_righthand = inner_rel->relids;
+        sjinfo->syn_lefthand = parent_outer_rel->relids;
+        sjinfo->syn_righthand = inner_rel->relids;
+        sjinfo->jointype = JOIN_INNER;
 	}
-	return NIL;
-}
+	child_sjinfo = build_child_join_sjinfo(root, sjinfo,
+										   outer_rel->relids,
+										   inner_rel->relids);
+	/*
+	 * Inner relation is distributed to multiple outer partition-leafs.
+	 * It is harmless on INNER-JOIN, and LEFT-JOIN if partition-leafs are
+	 * at the left side. Elsewhere, it generates wrong results.
+	 */
+	if (sjinfo->jointype != JOIN_INNER &&
+		(sjinfo->jointype != JOIN_LEFT || reverse))
+		return NULL;	/* not a supported join type */
 
-static List *
-pickup_partition_tree(PlannerInfo *root,
-					  RelOptInfo *part_rel,
-					  RelOptInfo *leaf_rel)
-{
-	List	   *results = NIL;
-	List	   *temp;
-	ListCell   *lc;
+	/*
+	 * Construction of restrict-info list.
+	 */
+	restrictlist = build_joinrel_restrictlist(root,
+											  parent_join_rel,
+											  parent_outer_rel,
+											  inner_rel);
+	appinfos = find_appinfos_by_relids(root, outer_rel->relids,
+									   &nappinfos);
+	child_restrictlist = (List *)
+		adjust_appendrel_attrs(root, (Node *)restrictlist,
+							   nappinfos, appinfos);
 
-	foreach (lc, root->append_rel_list)
+	child_join_rel = find_join_rel(root, bms_union(outer_rel->relids,
+												   inner_rel->relids));
+	if (!child_join_rel)
 	{
-		AppendRelInfo *apinfo = lfirst(lc);
+		child_join_rel = build_child_join_rel(root,
+											  !reverse ? outer_rel : inner_rel,
+											  !reverse ? inner_rel : outer_rel,
+											  parent_join_rel,
+											  child_restrictlist,
+											  child_sjinfo,
+											  child_sjinfo->jointype);
 
-		if (bms_is_member(apinfo->child_relid, leaf_rel->relids))
-		{
-			if (bms_is_member(apinfo->parent_relid, part_rel->relids))
-				results = lappend(results, list_make1(apinfo));
-			else
-			{
-				temp = __pickup_partition_tree_walker(root, part_rel,
-													  apinfo->parent_relid);
-				if (temp != NIL)
-					results = lappend(results, lappend(temp, apinfo));
-			}
-		}
 	}
-	return results;
-}
-
-/*
- * fixup_appendrel_child_relids
- */
-static Relids
-__fixup_appendrel_child_relids(Relids relids_orig,
-							   RelOptInfo *append_rel,
-							   List *part_tree_list)
-{
-	Relids		result = NULL;
-	int			index = -1;
-	ListCell   *lc;
-
-	while ((index = bms_next_member(relids_orig, index)) >= 0)
-	{
-		if (bms_is_member(index, append_rel->relids))
-		{
-			foreach (lc, part_tree_list)
-			{
-				List   *part_tree = lfirst(lc);
-				Index	part, leaf;
-
-				part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
-				leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
-
-				if (index == part)
-				{
-					result = bms_add_member(result, leaf);
-					goto found;
-				}
-			}
-		}
-		result = bms_add_member(result, index);
-	found:
-		;
-	}
-	return result;
-}
-
-/*
- * fixup_appendrel_child_varnode
- */
-typedef struct
-{
-	PlannerInfo *root;
-	RelOptInfo	*append_rel;
-	List		*part_tree_list;
-} fixup_appendrel_child_varnode_context;
-
-static Node *
-__fixup_appendrel_child_varnode(Node *node, void *__context)
-{
-	fixup_appendrel_child_varnode_context *con = __context;
-
-	if (!node)
+	if (!child_join_rel)
 		return NULL;
-	if (IsA(node, Var))
+	/*
+	 * Add paths to child_join_rel.
+	 * Logic comes from populate_joinrel_with_paths
+	 */
+	switch (child_sjinfo->jointype)
 	{
-		Var			   *var = (Var *) node;
-		ListCell	   *lc1, *lc2;
-		AppendRelInfo  *apinfo;
-
-		foreach (lc1, con->part_tree_list)
-		{
-			List	   *part_tree = lfirst(lc1);
-			int			part, leaf;
-
-			part = ((AppendRelInfo *)linitial(part_tree))->parent_relid;
-			leaf = ((AppendRelInfo *)llast(part_tree))->child_relid;
-			if (var->varno != part)
-				continue;
-			/* system column? */
-			if (var->varattno <= 0)
-				return (Node *)makeVar(leaf,
-									   var->varattno,
-									   var->vartype,
-									   var->vartypmod,
-									   var->varcollid, 0);
-			/* elsewhere, walk down the translated_vars */
-			foreach (lc2, part_tree)
+		case JOIN_INNER:
+			if (is_dummy_rel(outer_rel) || is_dummy_rel(inner_rel) ||
+				restriction_is_constant_false(child_restrictlist,
+											  child_join_rel, false))
 			{
-				apinfo = (AppendRelInfo *)lfirst(lc2);
-
-				var = list_nth(apinfo->translated_vars,
-							   var->varattno - 1);
+				mark_dummy_rel(child_join_rel);
+				break;
 			}
-			Assert(var->varno == leaf);
-			return copyObject((Node *)var);
-		}
-		/* likely, reference to inner (non-partitioned) columns */
-		return copyObject((Node *)var);
+			add_paths_to_joinrel(root, child_join_rel,
+								 !reverse ? outer_rel : inner_rel,
+								 !reverse ? inner_rel : outer_rel,
+								 JOIN_INNER,
+								 child_sjinfo,
+								 child_restrictlist);
+			break;
+		case JOIN_LEFT:
+			Assert(!reverse);
+			if (is_dummy_rel(outer_rel) ||
+				restriction_is_constant_false(child_restrictlist,
+											  child_join_rel, true))
+			{
+				mark_dummy_rel(child_join_rel);
+				break;
+			}
+			if (restriction_is_constant_false(child_restrictlist,
+											  child_join_rel, false) &&
+				bms_is_subset(inner_rel->relids,
+							  child_sjinfo->syn_righthand))
+				mark_dummy_rel(inner_rel);
+			add_paths_to_joinrel(root, child_join_rel,
+								 outer_rel,
+								 inner_rel,
+								 JOIN_LEFT,
+								 child_sjinfo,
+								 child_restrictlist);
+			break;
+		default:
+			return NULL;		/* should not happen */
 	}
-	return expression_tree_mutator(node, __fixup_appendrel_child_varnode, con);
+	return child_join_rel;
 }
 
-/*
- * fixup_appendrel_child_varnode
- */
-List *
-fixup_appendrel_child_varnode(List *exprs_list,
-							  PlannerInfo *root,
-							  RelOptInfo *append_rel,
-							  RelOptInfo *leaf_rel)
+static RelOptInfo *
+try_partitionwise_gpujoin(PlannerInfo *root,
+						  RelOptInfo *parent_join_rel,
+						  RelOptInfo *parent_outer_rel,
+						  RelOptInfo *outer_rel,
+						  RelOptInfo *inner_rel)
 {
-	fixup_appendrel_child_varnode_context con;
-	List   *part_tree_list;
+	RelOptInfo	   *join_rel;
+	RelOptKind		reloptkind_saved = inner_rel->reloptkind;
+	Relids			top_parent_relids_saved = inner_rel->top_parent_relids;
+	List		   *append_rel_list_saved = root->append_rel_list;
+	List		   *append_rel_list_alter;
+	AppendRelInfo **append_rel_array_saved = root->append_rel_array;
+	AppendRelInfo **append_rel_array_alter;
+	bool			consider_partitionwise_join_saved
+		= parent_join_rel->consider_partitionwise_join;
+	Relids			join_relids;
+	int				relid = -1;
 
-	if (exprs_list == NIL)
-		return NIL;
-	Assert(IsA(exprs_list, List));
-
-	part_tree_list = pickup_partition_tree(root, append_rel, leaf_rel);
-	if (part_tree_list == NIL)
-		elog(ERROR, "Bug? could not pick up partition tree");
-
-	con.root = root;
-	con.append_rel = append_rel;
-	con.part_tree_list = part_tree_list;
-	return (List *)__fixup_appendrel_child_varnode((Node *)exprs_list, &con);
-}
-
-static Path *
-setup_append_child_path(PlannerInfo *root,
-						RelOptInfo *append_rel,
-						Path *subpath)
-{
-	Path	   *newpath;
-	PathTarget *new_target;
-	List	   *part_tree_list;
-
-	part_tree_list = pickup_partition_tree(root, append_rel, subpath->parent);
-	if (part_tree_list == NIL)
-		return NULL;
-
-	if (pgstrom_path_is_gpujoin(subpath))
+	/*
+	 * NOTE: build_child_join_rel() in PG11/12 expects both side of
+	 * relations are partition-leafs. So, we switch a few attributes
+	 * of inner relation and put pseudo items on root->append_rel_*.
+	 */
+	Assert(IS_OTHER_REL(outer_rel) && !IS_OTHER_REL(inner_rel));
+	append_rel_list_alter = list_copy(root->append_rel_list);
+	append_rel_array_alter = alloca(sizeof(AppendRelInfo *) *
+									root->simple_rel_array_size);
+	memcpy(append_rel_array_alter, root->append_rel_array,
+		   sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	join_relids = bms_union(outer_rel->relids,
+							inner_rel->relids);
+	while ((relid = bms_next_member(join_relids, relid)) >= 0)
 	{
-		newpath = pgstrom_copy_gpujoin_path(subpath);
+		AppendRelInfo *apinfo;
+
+		if (append_rel_array_alter[relid] != NULL)
+			continue;	/* it is a "true" partition members */
+		apinfo = make_pseudo_append_rel_info(root, relid);
+		append_rel_list_alter = lappend(append_rel_list_alter, apinfo);
+		append_rel_array_alter[relid] = apinfo;
 	}
-	else if (pgstrom_path_is_gpuscan(subpath))
+
+	/* set pseudo attributes */
+	switch (inner_rel->reloptkind)
 	{
-		newpath = pgstrom_copy_gpuscan_path(subpath);
+		case RELOPT_BASEREL:
+			inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
+			break;
+		case RELOPT_JOINREL:
+			inner_rel->reloptkind = RELOPT_OTHER_JOINREL;
+			break;
+		case RELOPT_UPPER_REL:
+			inner_rel->reloptkind = RELOPT_OTHER_UPPER_REL;
+			break;
+		default:
+			return NULL;
 	}
-	else
+	inner_rel->top_parent_relids = inner_rel->relids;
+	root->append_rel_list = append_rel_list_alter;
+	root->append_rel_array = append_rel_array_alter;
+	parent_join_rel->consider_partitionwise_join = true;
+
+	PG_TRY();
 	{
-		size_t	sz;
-
-		switch (nodeTag(subpath))
-		{
-			case T_Path:			sz = sizeof(Path); break;
-			case T_IndexPath:		sz = sizeof(IndexPath);	break;
-			case T_BitmapHeapPath:	sz = sizeof(BitmapHeapPath); break;
-			case T_BitmapAndPath:	sz = sizeof(BitmapAndPath); break;
-			case T_BitmapOrPath:	sz = sizeof(BitmapOrPath); break;
-			case T_TidPath:			sz = sizeof(TidPath); break;
-			case T_SubqueryScanPath:sz = sizeof(SubqueryScanPath); break;
-			case T_ForeignPath:		sz = sizeof(ForeignPath); break;
-			case T_CustomPath:		sz = sizeof(CustomPath); break;
-			case T_NestPath:		sz = sizeof(NestPath); break;
-			case T_MergePath:		sz = sizeof(MergePath); break;
-			case T_HashPath:		sz = sizeof(HashPath); break;
-			case T_ProjectionPath:	sz = sizeof(ProjectionPath); break;
-			default:
-				return NULL;	/* not expected */
-		}
-		newpath = palloc(sz);
-		memcpy(newpath, subpath, sz);
+		join_rel = __try_partitionwise_gpujoin(root,
+											   parent_join_rel,
+											   parent_outer_rel,
+											   outer_rel,
+											   inner_rel);
 	}
-	new_target = copy_pathtarget(subpath->pathtarget);
-	if (new_target->exprs != NIL)
+	PG_CATCH();
 	{
-		fixup_appendrel_child_varnode_context con;
-
-		con.root      = root;
-		con.part_tree_list = part_tree_list;
-		new_target->exprs = (List *)
-			__fixup_appendrel_child_varnode((Node *)new_target->exprs, &con);
+		inner_rel->reloptkind = reloptkind_saved;
+		inner_rel->top_parent_relids = top_parent_relids_saved;
+		root->append_rel_list = append_rel_list_saved;
+		root->append_rel_array = append_rel_array_saved;
+		parent_join_rel->consider_partitionwise_join
+			= consider_partitionwise_join_saved;
+		PG_RE_THROW();
 	}
-	newpath->pathtarget = new_target;
+	PG_END_TRY();
+	inner_rel->reloptkind = reloptkind_saved;
+	inner_rel->top_parent_relids = top_parent_relids_saved;
+	root->append_rel_list = append_rel_list_saved;
+	root->append_rel_array = append_rel_array_saved;
+	parent_join_rel->consider_partitionwise_join
+		= consider_partitionwise_join_saved;
 
-	return newpath;
-}
-
-/*
- * build_partitionwise_gpujoin_final
- */
-static bool
-build_partitionwise_gpujoin_final(PlannerInfo *root,
-								  RelOptInfo *join_rel,
-								  RelOptInfo *outer_rel,
-								  RelOptInfo *inner_rel,
-								  JoinType join_type,
-								  JoinPathExtraData *extra,
-								  RelOptInfo *append_rel,
-								  List *part_tree_list)
-{
-	SpecialJoinInfo *sjinfo;
-	List	   *restrictlist = NIL;
-	ListCell   *lc;
-
-	sjinfo = make_pseudo_special_join_info(root, part_tree_list,
-										   extra->sjinfo);
-	foreach (lc, extra->restrictlist)
-	{
-		RestrictInfo *rinfo = copyObject(lfirst(lc));
-		fixup_appendrel_child_varnode_context con;
-
-		con.root = root;
-		con.append_rel = append_rel;
-		con.part_tree_list = part_tree_list;
-		rinfo->clause = (Expr *)
-			__fixup_appendrel_child_varnode((Node *)rinfo->clause, &con);
-
-		rinfo->clause_relids =
-			__fixup_appendrel_child_relids(rinfo->clause_relids,
-										   append_rel,
-										   part_tree_list);
-		rinfo->required_relids =
-			__fixup_appendrel_child_relids(rinfo->required_relids,
-										   append_rel,
-										   part_tree_list);
-		rinfo->outer_relids =
-			__fixup_appendrel_child_relids(rinfo->outer_relids,
-										   append_rel,
-										   part_tree_list);
-		rinfo->nullable_relids =
-			__fixup_appendrel_child_relids(rinfo->nullable_relids,
-										   append_rel,
-										   part_tree_list);
-		rinfo->left_relids =
-			__fixup_appendrel_child_relids(rinfo->left_relids,
-										   append_rel,
-										   part_tree_list);
-		rinfo->right_relids =
-			__fixup_appendrel_child_relids(rinfo->right_relids,
-										   append_rel,
-										   part_tree_list);
-
-		restrictlist = lappend(restrictlist, rinfo);
-	}
-	add_paths_to_joinrel(root,
-						 join_rel,
-						 outer_rel,
-						 inner_rel,
-						 join_type,
-						 sjinfo,
-						 restrictlist);
-	return true;
+	return join_rel;
 }
 
 /*
@@ -1525,83 +1728,33 @@ build_partitionwise_gpujoin_leafs(PlannerInfo *root,
 
 	foreach (lc1, append_path->subpaths)
 	{
+		RelOptInfo *parent_outer_rel = append_path->path.parent;
 		Path	   *curr_path = lfirst(lc1);
 		RelOptInfo *curr_rel = curr_path->parent;
-		RelOptInfo *leaf_rel = curr_path->parent;
 		Path	   *child_path = NULL;
 		List	   *child_path_list = NIL;
-		List	   *part_tree_list;
-
-		part_tree_list = pickup_partition_tree(root, append_rel, leaf_rel);
-		if (!part_tree_list)
-			return NIL;
-
-		if (leaf_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
-		{
-			if (!adjust_appendrel_attr_needed(root,
-											  part_tree_list,
-											  append_rel,
-											  leaf_rel))
-				return NIL;
-		}
-
-		/*
-		 * MEMO: make_join_rel() makes OUTER JOIN decision based on
-		 * SpecialJoinInfo, so we have to fixup relid of the parent
-		 * relation as if child relation is referenced.
-		 */
-		root->join_info_list = NIL;
-		foreach (lc2, join_info_list_saved)
-		{
-			SpecialJoinInfo *sj = lfirst(lc2);
-
-			sj = make_pseudo_special_join_info(root, part_tree_list, sj);
-			root->join_info_list = lappend(root->join_info_list, sj);
-		}
 
 		foreach (lc2, inner_rels_list)
 		{
 			RelOptInfo *inner_rel = lfirst(lc2);
 			RelOptInfo *join_rel;
+			RelOptInfo *parent_join_rel;
+			Relids		temp;
 
-			join_rel = find_join_rel(root, bms_union(curr_rel->relids,
-													 inner_rel->relids));
+			temp = bms_union(parent_outer_rel->relids, inner_rel->relids);
+			parent_join_rel = find_join_rel(root, temp);
+			if (!parent_join_rel)
+				return NIL;		/* should not happen */
+
+			join_rel = try_partitionwise_gpujoin(root,
+												 parent_join_rel,
+												 parent_outer_rel,
+												 curr_rel,
+												 inner_rel);
 			if (!join_rel)
-			{
-				RelOptKind	reloptkind_saved = leaf_rel->reloptkind;
-
-				leaf_rel->reloptkind = RELOPT_BASEREL;
-				PG_TRY();
-				{
-					join_rel = make_join_rel(root,
-											 curr_rel,
-											 inner_rel);
-				}
-				PG_CATCH();
-				{
-					leaf_rel->reloptkind = reloptkind_saved;
-					PG_RE_THROW();
-				}
-				PG_END_TRY();
-				leaf_rel->reloptkind = reloptkind_saved;
-
-				if (!join_rel)
-					return NIL;
-			}
-			/* add various JOIN path; including GpuJoin */
-			if (extra && lc2 == list_tail(inner_rels_list))
-			{
-				if (!build_partitionwise_gpujoin_final(root,
-													   join_rel,
-													   curr_rel,
-													   inner_rel,
-													   join_type,
-													   extra,
-													   append_rel,
-													   part_tree_list))
-					return NIL;
-			}
+				return NIL;
 			set_cheapest(join_rel);
+			parent_outer_rel = parent_join_rel;
 			curr_rel = join_rel;
 		}
 
@@ -1773,8 +1926,6 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 								 Cost *p_discount_cost)
 {
 	List	   *result = NIL;
-	List	   *subpaths_list;
-	ListCell   *lc;
 
 	if (IsA(outer_path, AppendPath))
 	{
@@ -1800,17 +1951,16 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 		{
 			/* temporary disables "dynamic programming" algorithm */
 			root->join_rel_level = NULL;
-			subpaths_list =
-				build_partitionwise_gpujoin_leafs(root,
-												  append_path,
-												  inner_rels_list,
-												  join_type,
-												  extra,
-												  try_parallel_path,
-												  join_info_list_saved,
-												  p_parallel_nworkers,
-												  p_append_path,
-												  p_discount_cost);
+			result = build_partitionwise_gpujoin_leafs(root,
+													   append_path,
+													   inner_rels_list,
+													   join_type,
+													   extra,
+													   try_parallel_path,
+													   join_info_list_saved,
+													   p_parallel_nworkers,
+													   p_append_path,
+													   p_discount_cost);
 		}
 		PG_CATCH();
 		{
@@ -1839,16 +1989,15 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 			jpath->jointype != JOIN_LEFT)
 			return NIL;		/* not a supported join type */
 		inner_rels_list = lcons(ipath->parent, inner_rels_list);
-		subpaths_list =
-			__extract_partitionwise_pathlist(root,
-											 jpath->outerjoinpath,
-											 inner_rels_list,
-											 join_type,
-											 extra,
-											 try_parallel_path,
-											 p_append_path,
-											 p_parallel_nworkers,
-											 p_discount_cost);
+		result = __extract_partitionwise_pathlist(root,
+												  jpath->outerjoinpath,
+												  inner_rels_list,
+												  join_type,
+												  extra,
+												  try_parallel_path,
+												  p_append_path,
+												  p_parallel_nworkers,
+												  p_discount_cost);
 	}
 	else if (pgstrom_path_is_gpujoin(outer_path))
 	{
@@ -1865,16 +2014,15 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 				return NIL;	/* not a supported join type */
 			inner_rels_list = lcons(ipath->parent, inner_rels_list);
 		}
-		subpaths_list =
-			__extract_partitionwise_pathlist(root,
-											 gjouter_path,
-											 inner_rels_list,
-											 join_type,
-											 extra,
-											 try_parallel_path,
-											 p_append_path,
-											 p_parallel_nworkers,
-											 p_discount_cost);
+		result = __extract_partitionwise_pathlist(root,
+												  gjouter_path,
+												  inner_rels_list,
+												  join_type,
+												  extra,
+												  try_parallel_path,
+												  p_append_path,
+												  p_parallel_nworkers,
+												  p_discount_cost);
 	}
 	else if (IsA(outer_path, ProjectionPath))
 	{
@@ -1893,45 +2041,41 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 												p_discount_cost);
 		foreach (lc, temp)
 		{
-			Path	   *subpath = lfirst(lc);
+			Path		   *subpath = lfirst(lc);
+			RelOptInfo	   *subrel = subpath->parent;
+			PathTarget	   *newtarget;
 			ProjectionPath *newpath;
-		
+			AppendRelInfo **appinfos;
+			int				nappinfos;
+
+			appinfos = __find_appinfos_by_relids(root, subrel->relids,
+												 &nappinfos);
+			newtarget = copy_pathtarget(projection_path->path.pathtarget);
+			newtarget->exprs = (List *)
+				adjust_appendrel_attrs(root, (Node *)newtarget->exprs,
+									   nappinfos, appinfos);
 			newpath = create_projection_path(root,
-                                             subpath->parent,
-                                             subpath,
-											 projection_path->path.pathtarget);
-			subpaths_list = lappend(subpaths_list, newpath);
+											 subpath->parent,
+											 subpath,
+											 newtarget);
+			result = lappend(result, newpath);
+
+			pfree(appinfos);
 		}
 	}
 	else if (IsA(outer_path, GatherPath))
 	{
 		Path   *subpath = ((GatherPath *) outer_path)->subpath;
 
-		subpaths_list = __extract_partitionwise_pathlist(root,
-														 subpath,
-														 inner_rels_list,
-														 join_type,
-														 extra,
-														 try_parallel_path,
-														 p_append_path,
-														 p_parallel_nworkers,
-														 p_discount_cost);
-	}
-	else
-	{
-		return NIL;
-	}
-
-	foreach (lc, subpaths_list)
-	{
-		RelOptInfo *append_rel = (*p_append_path)->path.parent;
-		Path	   *oldpath = lfirst(lc);
-		Path	   *newpath;
-
-		newpath = setup_append_child_path(root, append_rel, oldpath);
-		if (!newpath)
-			return NIL;
-		result = lappend(result, newpath);
+		result = __extract_partitionwise_pathlist(root,
+												  subpath,
+												  inner_rels_list,
+												  join_type,
+												  extra,
+												  try_parallel_path,
+												  p_append_path,
+												  p_parallel_nworkers,
+												  p_discount_cost);
 	}
 	return result;
 }
@@ -1954,8 +2098,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 											p_parallel_nworkers,
 											p_discount_cost);
 }
-
-#endif		/* >=PG10; partition support */
+#endif		/* >=PG11; partition-wise join support */
 
 /*
  * try_add_gpujoin_append_paths
@@ -1970,26 +2113,17 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 							 Relids required_outer,
 							 bool try_parallel_path)
 {
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 	List	   *inner_rels_list = list_make1(inner_path->parent);
 	List	   *subpaths_list = NIL;
 	List	   *partitioned_rels;
 	AppendPath *append_path;
-
 	int			parallel_nworkers;
-
 	Cost		discount_cost;
-
-	bool		all_gpujoin = true;
 
 	if (join_type != JOIN_INNER &&
 		join_type != JOIN_LEFT)
 		return;
-
-#if PG_VERSION_NUM < 110000
-	if (try_parallel_path)
-		return;		/* no parallel append support at PG10 */
-#endif
 	Assert(extra != NULL);
 	subpaths_list = __extract_partitionwise_pathlist(root,
 													 outer_path,
@@ -2007,18 +2141,6 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	 * Then, create a new AppendPath.
 	 */
 	partitioned_rels = copyObject(append_path->partitioned_rels);
-#if PG_VERSION_NUM < 110000
-	/* PG10 has no support of Parallel Append */
-	append_path = create_append_path(joinrel,
-									 subpaths_list,
-									 required_outer,
-									 parallel_nworkers,
-									 partitioned_rels);
-	/* discount inner heap/hash cost if shared by siblings */
-	if (all_gpujoin)
-		append_path->path.total_cost -= discount_cost;
-	add_path(joinrel, (Path *) append_path);
-#else
 	if (try_parallel_path)
 	{
 		append_path = create_append_path(root, joinrel,
@@ -2026,8 +2148,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 required_outer,
 										 parallel_nworkers, true,
 										 partitioned_rels, -1.0);
-		if (all_gpujoin)
-			append_path->path.total_cost -= discount_cost;
+		append_path->path.total_cost -= discount_cost;
 		add_partial_path(joinrel, (Path *) append_path);
 	}
 	else
@@ -2037,11 +2158,9 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 required_outer,
 										 0, false,
 										 partitioned_rels, -1.0);
-		if (all_gpujoin)
-			append_path->path.total_cost -= discount_cost;
+		append_path->path.total_cost -= discount_cost;
 		add_path(joinrel, (Path *) append_path);
 	}
-#endif
 #endif
 }
 
@@ -7356,7 +7475,7 @@ pgstrom_init_gpujoin(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 	/* turn on/off partition wise gpujoin */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpujoin",
 							 "(EXPERIMENTAL) Enables partition wise GpuJoin",

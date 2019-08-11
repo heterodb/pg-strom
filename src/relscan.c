@@ -557,7 +557,9 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 	if (parallel_workers > 0)
 	{
 		parallel_divisor = (double) parallel_workers;
+#if PG_VERSION_NUM >= 110000
 		if (parallel_leader_participation)
+#endif
 		{
 			double		leader_contribution;
 

@@ -1,14 +1,14 @@
 @ja{
 <h1>パーティショニング</h1>
 本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。
-なお、本章の内容は PostgreSQL v10 以降でPG-Stromを使用する場合にのみ有効です。
+なお、本章の内容は**PostgreSQL v11以降**でPG-Stromを使用する場合にのみ有効です。
 
 PostgreSQLのパーティション機能について、詳しくは[PostgreSQL文書：テーブルのパーティショニング](https://www.postgresql.jp/document/current/html/ddl-partitioning.html)を参照してください。
 }
 @en{
 <h1>Partitioning</h1>
 This chapter introduces the way to use PG-Strom and the partitioning feature of PostgreSQL.
-Note that this chapter is only valid when PG-Strom works on PostgreSQL v10 or later.
+Note that this chapter is only valid when PG-Strom works on **PostgreSQL v11 or later**.
 
 Also see [PostgreSQL Document: Table Partitioning](https://www.postgresql.org/docs/current/static/ddl-partitioning.html) for more details of the partitioning feature of PostgreSQL.
 }
@@ -20,13 +20,13 @@ Also see [PostgreSQL Document: Table Partitioning](https://www.postgresql.org/do
 PostgreSQL v10においてパーティショニング機能がサポートされました。
 これは、論理的には一個の大きなテーブルであるものを物理的により小さなテーブルに分割して格納する仕組みで、検索条件より明らかにスキャンの必要がないパーティション子テーブルをスキップしたり、ストレージを物理的に分散させる事でより広いI/O帯域を確保するなどの利点があります。
 
-PostgreSQL v10では範囲パーティショニング、リストパーティショニングの2種類がサポートされ、さらにPostgreSQL v11ではハッシュパーティショニングがサポートされています。
+PostgreSQL v10では範囲パーティショニング、リストパーティショニングの2種類がサポートされ、さらにPostgreSQL v11ではハッシュパーティショニングに加え、パーティション同士のJOINがサポートされています。
 }
 @en{
 PostgreSQL v10 newly support table partitioning.
 This mechanism splits one logically large table into physically small pieces. It is valuable because it can skip partitioned child tables which is obviously unnecessary to scan from the search qualification, and it can offer broader I/O bandwidth by physically distributed storage and so on.
 
-PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning.
+PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning and partition-wise JOINs.
 }
 
 @ja{

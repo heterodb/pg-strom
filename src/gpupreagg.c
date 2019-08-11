@@ -1512,7 +1512,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   bool can_pullup_outerscan,
 							   bool try_parallel_path)
 {
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
@@ -1537,22 +1537,23 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 
 	foreach (lc, sub_paths_list)
 	{
+		Path	   *sub_path = (Path *) lfirst(lc);
+		RelOptInfo *sub_rel = sub_path->parent;
 		PathTarget *curr_partial = copy_pathtarget(target_partial);
 		PathTarget *curr_device = copy_pathtarget(target_device);
-		Path	   *sub_path = (Path *) lfirst(lc);
 		Path	   *partial_path;
+		AppendRelInfo **appinfos;
+		int				nappinfos;
 
+		appinfos = __find_appinfos_by_relids(root, sub_rel->relids,
+											 &nappinfos);
 		/* fixup varno */
-		curr_partial->exprs =
-			fixup_appendrel_child_varnode(curr_partial->exprs,
-										  root,
-										  append_path->path.parent,
-										  sub_path->parent);
-		curr_device->exprs =
-			fixup_appendrel_child_varnode(curr_device->exprs,
-										  root,
-										  append_path->path.parent,
-										  sub_path->parent);
+		curr_partial->exprs = (List *)
+			adjust_appendrel_attrs(root, (Node *)curr_partial->exprs,
+								   nappinfos, appinfos);
+		curr_device->exprs = (List *)
+			adjust_appendrel_attrs(root, (Node *)curr_device->exprs,
+								   nappinfos, appinfos);
 
 		partial_path = prepend_gpupreagg_path(root,
 											  group_rel,
@@ -1570,13 +1571,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	}
 	/* also see create_append_path(), some fields must be fixed up */
 	partitioned_rels = copyObject(append_path->partitioned_rels);
-#if PG_VERSION_NUM < 110000
-	append_path = create_append_path(input_path->parent,
-									 append_paths_list,
-									 NULL,
-									 parallel_nworkers,
-									 partitioned_rels);
-#else
 	if (try_parallel_path)
 		append_path = create_append_path(root, input_path->parent,
 										 NIL, append_paths_list,
@@ -1589,7 +1583,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 										 NULL,
 										 parallel_nworkers, false,
 										 partitioned_rels, -1.0);
-#endif
 	append_path->path.pathtarget = target_partial;
 	append_path->path.total_cost -= discount_cost;
 
@@ -5948,7 +5941,7 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 	/* pg_strom.enable_partitionwise_gpupreagg */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
 							 "(EXPERIMENTAL) Enables partition wise GpuPreAgg",

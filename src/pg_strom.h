@@ -93,6 +93,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
+#include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
@@ -1252,17 +1253,13 @@ extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
 extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
 
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 110000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											Path *outer_path,
 											bool try_parallel_path,
 											AppendPath **p_append_path,
 											int *p_parallel_nworkers,
 											Cost *p_discount_cost);
-extern List *fixup_appendrel_child_varnode(List *exprs_list,
-										   PlannerInfo *root,
-										   RelOptInfo *append_rel,
-										   RelOptInfo *leaf_rel);
 #endif
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
@@ -1390,6 +1387,9 @@ extern void pgstrom_init_arrow_fdw(void);
  * misc.c
  */
 extern Expr *make_flat_ands_explicit(List *andclauses);
+extern AppendRelInfo **__find_appinfos_by_relids(PlannerInfo *root,
+												 Relids relids,
+												 int *nappinfos);
 #if PG_VERSION_NUM < 100000
 extern int __compute_parallel_worker(RelOptInfo *rel,
 									 double heap_pages,

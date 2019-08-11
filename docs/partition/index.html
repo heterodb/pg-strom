@@ -199,12 +199,12 @@
                 <h1>Partitioning</h1>
 
 <p>This chapter introduces the way to use PG-Strom and the partitioning feature of PostgreSQL.
-Note that this chapter is only valid when PG-Strom works on PostgreSQL v10 or later.</p>
+Note that this chapter is only valid when PG-Strom works on <strong>PostgreSQL v11 or later</strong>.</p>
 <p>Also see <a href="https://www.postgresql.org/docs/current/static/ddl-partitioning.html">PostgreSQL Document: Table Partitioning</a> for more details of the partitioning feature of PostgreSQL.</p>
 <h1 id="brief-overview">Brief overview</h1>
 <p>PostgreSQL v10 newly support table partitioning.
 This mechanism splits one logically large table into physically small pieces. It is valuable because it can skip partitioned child tables which is obviously unnecessary to scan from the search qualification, and it can offer broader I/O bandwidth by physically distributed storage and so on.</p>
-<p>PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning.</p>
+<p>PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning and partition-wise JOINs.</p>
 <p>The diagram below shows a range-partitioning configuration with <code>date</code>-type key values.
 A record which has <code>2018-05-30</code> as key is distributed to the partition child table <code>tbl_2018</code>, in the same way, a record which has <code>2014-03-21</code> is distributed to the partition child table <code>tbl_2014</code>, and so on.</p>
 <p>In case when scan qualifier <code>WHERE ymd &gt; '2016-07-01'::date</code> is added on scan of the partitioned table for example, it is obvious that <code>tbl_2014</code> and <code>tbl_2015</code> contains no records to match, therefore, PostgreSQL' optimizer constructs query execution plan which runs on only <code>tbl_2016</code>, <code>tbl_2017</code> and <code>tbl_2018</code> then merges their results by <strong>Append</strong> node. It shall perform as if records are read from one logical table.</p>
