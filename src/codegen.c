@@ -395,6 +395,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 									   offsetof(devtype_info,
 												comp_subtypes[0]));
 		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
+		dtype->type_oid = type_oid;
 		dtype->type_is_negative = true;
 	}
 	dlist_push_head(&devtype_info_slot[hindex], &dtype->chain);
