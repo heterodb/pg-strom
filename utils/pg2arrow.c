@@ -886,17 +886,21 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 static void
 pgsql_dump_attribute(SQLattribute *attr, const char *label, int indent)
 {
-	char   *dump;
 	int		j;
 
 	for (j=0; j < indent; j++)
 		putchar(' ');
-	dump = dumpArrowNode((ArrowNode *)&attr->arrow_type);
 	printf("%s {attname='%s', atttypid=%u, atttypmod=%d, attlen=%d,"
 		   " attbyval=%s, attalign=%d, typtype=%c, arrow_type=%s}\n",
 		   label,
-		   attr->attname, attr->atttypid, attr->atttypmod, attr->attlen,
-		   attr->attbyval ? "true" : "false", attr->attalign, attr->typtype);
+		   attr->attname,
+		   attr->atttypid,
+		   attr->atttypmod,
+		   attr->attlen,
+		   attr->attbyval ? "true" : "false",
+		   attr->attalign,
+		   attr->typtype,
+		   attr->arrow_typename);
 
 	if (attr->typtype == 'b')
 	{

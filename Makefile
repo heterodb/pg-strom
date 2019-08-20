@@ -83,7 +83,7 @@ PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
                   $(Addprefix $(STROM_BUILD_ROOT)/Src/, arrow_read.c) \
                   $(Addprefix $(STROM_BUILD_ROOT)/src/, arrow_defs.h) \
                   $(addprefix $(STROM_BUILD_ROOT)/utils/, arrow_types.c)
-PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -g -O0 \
+PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -g -Wall \
 			-I $(STROM_BUILD_ROOT)/src \
 			-I $(STROM_BUILD_ROOT)/utils \
 			-I $(shell $(PG_CONFIG) --includedir) \
