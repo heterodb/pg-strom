@@ -789,7 +789,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	bool	found;
 
 	if (!nvme_strom_enabled)
-		return false;	/* nvme_strom is not configured or disabled */
+		return -1;		/* nvme_strom is not configured or disabled */
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
