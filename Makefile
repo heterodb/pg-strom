@@ -16,8 +16,8 @@ endif
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 2.2
-PGSTROM_RELEASE := 1
+PGSTROM_VERSION := 2.3
+PGSTROM_RELEASE := devel
 
 #
 # Installation related

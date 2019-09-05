@@ -191,8 +191,8 @@
  *
  * --------------------------------------------------------------------
  */
-#if PG_VERSION_NUM < 90600
-#error Base PostgreSQL version is too OLD for this PG-Strom code
+#if PG_VERSION_NUM < 100000
+#error Base PostgreSQL version must be v10 or later
 #endif
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
