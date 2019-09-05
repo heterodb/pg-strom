@@ -197,4 +197,16 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 }
 #endif
 
+/*
+ * MEMO: PG11.3 and PG10.8 added is_dummy_rel() instead of old IS_DUMMY_REL().
+ *
+ * PG11: 925f46ffb82f0b25c94e7997caff732eaf14367d
+ * PG10: 19ff710aaa5f131a15da97484da5a669a3448864
+ */
+#if ((PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 3) || \
+	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 8) || \
+	 (PG_MAJOR_VERSION <  1000))
+#define is_dummy_rel(r)			IS_DUMMY_REL(r)
+#endif
+
 #endif	/* PG_COMPAT_H */

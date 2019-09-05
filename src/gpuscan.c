@@ -308,7 +308,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		return;
 
 	/* We already proved the relation empty, so nothing more to do */
-	if (IS_DUMMY_REL(baserel))
+	if (is_dummy_rel(baserel))
 		return;
 
 	/* It is the role of built-in Append node */
