@@ -1570,7 +1570,7 @@ __try_partitionwise_gpujoin(PlannerInfo *root,
 	switch (child_sjinfo->jointype)
 	{
 		case JOIN_INNER:
-			if (is_dummy_rel(outer_rel) || is_dummy_rel(inner_rel) ||
+			if (IS_DUMMY_REL(outer_rel) || IS_DUMMY_REL(inner_rel) ||
 				restriction_is_constant_false(child_restrictlist,
 											  child_join_rel, false))
 			{
@@ -1586,7 +1586,7 @@ __try_partitionwise_gpujoin(PlannerInfo *root,
 			break;
 		case JOIN_LEFT:
 			Assert(!reverse);
-			if (is_dummy_rel(outer_rel) ||
+			if (IS_DUMMY_REL(outer_rel) ||
 				restriction_is_constant_false(child_restrictlist,
 											  child_join_rel, true))
 			{
