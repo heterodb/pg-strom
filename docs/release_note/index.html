@@ -44,9 +44,7 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-
-  [<a href="../ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
-
+  [<a href="../ja/release_note/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
 </div>
       </div>
 
@@ -142,7 +140,7 @@
     <a class="current" href="./">Release Note</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#pg-strom-v20-release">PG-Strom v2.0 Release</a></li>
+    <li class="toctree-l2"><a href="#pg-strom-v22-release">PG-Strom v2.2 Release</a></li>
     
         <ul>
         
@@ -152,7 +150,24 @@
         
             <li><a class="toctree-l3" href="#new-features">New Features</a></li>
         
-            <li><a class="toctree-l3" href="#dropped-features">Dropped features</a></li>
+            <li><a class="toctree-l3" href="#features-to-be-deprecated">Features to be deprecated</a></li>
+        
+            <li><a class="toctree-l3" href="#dropped-features">Dropped Features</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom-v20-release">PG-Strom v2.0 Release</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#overview_1">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#prerequisites_1">Prerequisites</a></li>
+        
+            <li><a class="toctree-l3" href="#new-features_1">New Features</a></li>
+        
+            <li><a class="toctree-l3" href="#dropped-features_1">Dropped features</a></li>
         
         </ul>
     
@@ -192,49 +207,95 @@
           <div role="main">
             <div class="section">
               
-                <!--
-#PG-Strom v2.2 Release
-
+                <h1 id="pg-strom-v22-release">PG-Strom v2.2 Release</h1>
 <div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
 
-##Overview
-
-
-
-
-
-
-##Prerequisites
-
-
-
-- PostgreSQL v9.6, v10, v11
-- CUDA Toolkit 9.1
-- Linux distributions supported by CUDA Toolkit
-- Intel x86 64bit architecture (x86_64)
-- NVIDIA GPU CC 6.0 or later (Pascal or Volta)
-
-
-##New Features
-
-
-
-
-
-
-
-
-##Dropped Features
-
-
-
-
--->
-
+<h2 id="overview">Overview</h2>
+<p>Major enhancement in PG-Strom v2.2 includes:</p>
+<ul>
+<li>Table partitioning support</li>
+<li>Columnar store support with Arrow_Fdw</li>
+<li>Pre-built GPU binary support</li>
+<li>Enables to implement GPU functions that returns variable length data</li>
+<li>GpuSort support on GPU memory store (Gstore_Fdw)</li>
+<li>NVME-oF support (Experimental)</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v9.6, v10, v11</li>
+<li>CUDA Toolkit 10.1</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+</ul>
+<h2 id="new-features">New Features</h2>
+<ul>
+<li>Table partitioning support<ul>
+<li>If multi-GPUs configuration, an optimal GPU shall be chosen according to the physical distance between GPU and child tables that construct a partition. If PG-Strom cannot identify the distance from PCIe-bus topology, like NVME-oF configuration, DBA can configure the relation of GPU and NVME-SSD using <code>pg_strom.nvme_distance_map</code>.</li>
+<li>When we join a partitioned table with non-partition tables, this version can produce a query execution plan that preliminary joins the non-partitioned table with partition child tables for each, and gather the results from child tables. This feature is proposed to PostgreSQL v13 core, as Asymmetric Partition-wise JOIN.</li>
+</ul>
+</li>
+<li>Columnar store support with Arrow_Fdw<ul>
+<li>It supports to read external Apache Arrow files using foreign table.</li>
+<li>It also supports SSD-to-GPU Direct SQL on Apache Arrow files.</li>
+</ul>
+</li>
+<li>Pre-built GPU binary support<ul>
+<li>When GPU binary code is generated from SQL, the older version wrote out eitire CUDA C source code, including static portions like libraries, then NVRTC(NVIDIA Run-Time Compiker) built them on the fly. However, a part of complicated function consumed much longer compilation time.</li>
+<li>v2.2 preliminary builds static functions preliminary, and only dynamic portion from SQL are built dynamically. It reduces the time for GPU binary generation.</li>
+</ul>
+</li>
+<li>JSONB data type support<ul>
+<li>This version allows to reference elements of JSONB object, and to utilize them as <code>numeric</code> or <code>test</code>.</li>
+</ul>
+</li>
+<li>Enables to implement GPU functions that returns variable length data<ul>
+<li>This version allows to implement SQL functions that returns variable-length data, like <code>textcat</code>, on GPU devices.</li>
+</ul>
+</li>
+<li>GpuSort support on GPU memory store (Gstore_Fdw)<ul>
+<li>This version allows to read data from GPU memory store for SQL workloads execution, not only PL/CUDA.</li>
+</ul>
+</li>
+<li>Addition of regression test<ul>
+<li>Several simple regression tests are added.</li>
+</ul>
+</li>
+<li>NVME-oF support (Experimental)<ul>
+<li>It supports SSD-to-GPU Direct SQL from remote SSD disks which are mounted using NVME-over-Fabric. Please note that it is an experimental feature, and it needs to replace the <code>nvme_rdma</code> kernel module on Red Hat Enterprise Linux 7.x / CentOS 7.x.</li>
+</ul>
+</li>
+</ul>
+<h2 id="features-to-be-deprecated">Features to be deprecated</h2>
+<ul>
+<li>
+<p>PostgreSQL v9.6 support</p>
+<ul>
+<li>CustomScan API in PostgreSQL v9.6 lacks a few APIs to handle dynamic shared memory (DSM), so it is unable to collect run-time statistics.</li>
+<li>It also changes the way to keep expression objects internally, therefore, we had to put <code>#if ... #endif</code> blocks at no little points. It has damaged to code maintainability.</li>
+<li>Due to the problems, this is the last version to support PostgreSQL v9.6. If you applied PG-Strom on PostgreSQL v9.6, let us recommend to move PostgreSQL v11 as soon as possible.</li>
+</ul>
+</li>
+<li>
+<p>The <code>pgstrom</code> format of Gstore_Fdw foreign table</p>
+<ul>
+<li>The internal data format on GPU memory store (Gstore_Fdw) is originally designed for data source of PL/CUDA procedures. It is our own format, and used PostgreSQL's data representations as is, like variable-length data, numeric, and so on.</li>
+<li>After that, NVIDIA released RAPIDS(cuDF), based on Apache Arrow, for data exchange on GPU, then its adoption becomes wider on machine-learning application and Python software stack.</li>
+<li>PG-Strom will switch its internal data format of Gstore_Fdw, to improve interoperability with these machine-learning software, then existing data format shall be deprecated.</li>
+</ul>
+</li>
+</ul>
+<h2 id="dropped-features">Dropped Features</h2>
+<ul>
+<li>In-memory columnar cache<ul>
+<li>As results of use-case analysis, we concluded Arrow_Fdw can replace this feature in most cases. Due to feature duplication, we dropped the in-memory columnar cache.</li>
+</ul>
+</li>
+</ul>
 <h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-<h2 id="overview">Overview</h2>
+<h2 id="overview_1">Overview</h2>
 <p>Major enhancement in PG-Strom v2.0 includes:</p>
 <ul>
 <li>Overall redesign of the internal infrastructure to manage GPU and stabilization</li>
@@ -246,7 +307,7 @@
 <li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
 </ul>
 <p>You can download the summary of new features from: <a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
-<h2 id="prerequisites">Prerequisites</h2>
+<h2 id="prerequisites_1">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
 <li>CUDA Toolkit 9.1</li>
@@ -254,7 +315,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features">New Features</h2>
+<h2 id="new-features_1">New Features</h2>
 <ul>
 <li>
 <p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
@@ -342,7 +403,7 @@
 </ul>
 </li>
 </ul>
-<h2 id="dropped-features">Dropped features</h2>
+<h2 id="dropped-features_1">Dropped features</h2>
 <ul>
 <li>
 <p>PostgreSQL v9.5 Support</p>

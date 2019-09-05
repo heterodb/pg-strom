@@ -2,9 +2,5 @@
   <form id ="rtd-search-form" class="wy-form" action="{{ base_url }}/search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-{% if page.is_homepage %}
-  [<a href="./ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
-{% else %}
-  [<a href="../ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
-{% endif %}
+  [<a href="{{ nav.homepage.url|url }}/ja/{{ page.url }}" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
 </div>

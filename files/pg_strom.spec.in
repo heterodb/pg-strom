@@ -84,13 +84,14 @@ ldconfig
 %{__pkgbindir}/testapp_largeobject
 
 %changelog
-#* Sun Jun  2 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
-#- hotfixes of various bugs
-#- support of Apache Arrow columnar store (arrow_fdw)
-#- pg2arrow utility is included
-#- support of JSONB data type
-#- pre-built GPU binary for quick code compilation/optimization
-#- support of nvme_strom v2; enables to handle cached disk pages
+* Wed Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
+- fixes of various bugs
+- support of Apache Arrow columnar store (Arrow_Fdw)
+- pg2arrow utility command is added
+- support of JSONB data type
+- pre-built GPU binary for quick code compilation/optimization
+- support of nvme_strom v2; enables to handle cached disk pages
+- asymmetric partition-wise JOIN support
 
 * Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1
 - hotfixes for various bugs

@@ -44,9 +44,7 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-
-  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
-
+  [<strong>Japanese</strong> | <a href="../../release_note/"    style="color: #cccccc">English</a>]
 </div>
       </div>
 
@@ -142,7 +140,7 @@
     <a class="current" href="./">リリースノート</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#pg-strom-v20">PG-Strom v2.0リリース</a></li>
+    <li class="toctree-l2"><a href="#pg-strom-v22">PG-Strom v2.2リリース</a></li>
     
         <ul>
         
@@ -152,7 +150,24 @@
         
             <li><a class="toctree-l3" href="#_3">新機能</a></li>
         
-            <li><a class="toctree-l3" href="#_4">廃止された機能</a></li>
+            <li><a class="toctree-l3" href="#_4">将来廃止予定の機能</a></li>
+        
+            <li><a class="toctree-l3" href="#_5">廃止された機能</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom-v20">PG-Strom v2.0リリース</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#_6">概要</a></li>
+        
+            <li><a class="toctree-l3" href="#_7">動作環境</a></li>
+        
+            <li><a class="toctree-l3" href="#_8">新機能</a></li>
+        
+            <li><a class="toctree-l3" href="#_9">廃止された機能</a></li>
         
         </ul>
     
@@ -192,72 +207,97 @@
           <div role="main">
             <div class="section">
               
-                <!--
-#PG-Strom v2.2リリース
-
+                <h1 id="pg-strom-v22">PG-Strom v2.2リリース</h1>
 <div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
 
-##概要
-
-
-PG-Strom v2.2における主要な機能強化は以下の通りです。
-
-- PostgreSQL v11への対応
-- テーブルパーティションへの対応
-- Arrow_Fdwによる列指向ストアのサポート
-- Jsonbデータ型の対応
-- 可変長データ型を返すGPU関数の対応
-- GPUメモリストア（Gstore_Fdw）のソート対応
-- NVMEoFへの対応（NVMe-Stromドライバ）
-- キャッシュページの高速転送（NVMe-Stromドライバ）
-
-
-
-
-
-##動作環境
-
-
-- PostgreSQL v9.6, v10, v11
-- CUDA Toolkit 9.1
-- CUDA ToolkitのサポートするLinuxディストリビューション
-- Intel x86 64bit アーキテクチャ(x86_64)
-- NVIDIA GPU CC 6.0 以降 (Pascal以降)
-
-
-
-##新機能
-
-
-- PostgreSQL v11への対応
-- テーブルパーティションへの対応
-- Arrow_Fdwによる列指向ストアのサポート
-- Jsonbデータ型の対応
-- 可変長データ型を返すGPU関数の対応
-- GPUメモリストア（Gstore_Fdw）のソート対応
-- NVMEoFへの対応（NVMe-Stromドライバ）
-- キャッシュページの高速転送（NVMe-Stromドライバ）
-
-
-
-
-
-
-
-##廃止された機能
-
-
-- インメモリ列キャッシュ
-    - ユースケースを分析した結果、多くのケースではArrow_Fdwで十分に代替可能なワークロードである事が分かりました。重複機能であるため、本機能は削除されました。
-
-
-
--->
-
+<h2 id="_1">概要</h2>
+<p>PG-Strom v2.2における主要な機能強化は以下の通りです。</p>
+<ul>
+<li>テーブルパーティションへの対応</li>
+<li>Arrow_Fdwによる列指向ストアのサポート</li>
+<li>ビルド済みGPUバイナリへの対応</li>
+<li>Jsonbデータ型の対応</li>
+<li>可変長データ型を返すGPU関数の対応</li>
+<li>GPUメモリストア（Gstore_Fdw）のソート対応</li>
+<li>NVMEoFへの対応（実験的機能）</li>
+</ul>
+<h2 id="_2">動作環境</h2>
+<ul>
+<li>PostgreSQL v9.6, v10, v11</li>
+<li>CUDA Toolkit 10.1</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
+</ul>
+<h2 id="_3">新機能</h2>
+<ul>
+<li>テーブルパーティションへの対応<ul>
+<li>マルチGPU構成の場合、パーティションを構成する子テーブルの物理的なGPUとの距離に応じて最適なGPUを選択するようになりました。NVME-oF環境などPCIeバスの構成だけでは最適距離を判断できない場合は、DB管理者は<code>pg_strom.nvme_distance_map</code>パラメータを用いて対応関係を設定する事ができます。</li>
+<li>非パーティションテーブルとのJOIN時、パーティション子テーブルと非パーティションテーブルとのJOINを行った後、各子テーブルの処理結果を結合するような実行計画を生成できるようになりました。本機能は Asymmetric Partition-wise JOIN という名称でPostgreSQL v13の本体機能へと提案されています。</li>
+</ul>
+</li>
+<li>Arrow_Fdwによる列指向ストアのサポート<ul>
+<li>外部テーブル経由でApache Arrow形式ファイルの読み出しに対応するようになりました。</li>
+<li>SSD-to-GPU Direct SQLを用いたApache Arrowの読み出しとSQL実行にも対応しています。</li>
+</ul>
+</li>
+<li>ビルド済みGPUバイナリへの対応<ul>
+<li>SQLからGPUバイナリコードを生成する際、従来は動的に変更する要素のない関数群（ライブラリ関数に酷似）も含めてCUDA Cのソースコードを生成し、それをNVRTC(NVIDIA Run-Time Compiler)を用いてビルドしていました。しかし、一部の複雑な関数の影響でビルド時間が極端に長くなるという問題がありました。</li>
+<li>v2.2において、静的な関数群は事前にビルドされ、SQLから動的に生成する部分のみを実行時にコンパイルするように変更されました。これにより、GPUバイナリの生成時間が大幅に減少する事となりました。</li>
+</ul>
+</li>
+<li>JSONBデータ型の対応<ul>
+<li>GPU側でJSONBオブジェクトの子要素を参照し、<code>numeric</code>や<code>text</code>値として条件句などで利用できるようになった。</li>
+</ul>
+</li>
+<li>可変長データ型を返すGPU関数の対応<ul>
+<li><code>textcat</code>など可変長データ型を返すSQL関数をGPU側で実装する事ができるようになった。</li>
+</ul>
+</li>
+<li>GPUメモリストア（Gstore_Fdw）のソート対応<ul>
+<li>PL/CUDAのデータソースとして利用する以外に、GPUメモリストアからデータを読み出して実行するSQLをGPUで実行する事ができるようになりました。</li>
+<li>対応しているワークロードはGpuScanおよびGpuSortの２種類で、JOINおよびGROUP BYにはまだ対応していません。</li>
+</ul>
+</li>
+<li>リグレッションテストの追加<ul>
+<li>簡易なテストのため、リグレッションテストを追加しました。</li>
+</ul>
+</li>
+<li>NVME-oFへの対応（実験的機能）<ul>
+<li>NVME-over-Fabricを用いてマウントされたリモートのNVMEディスクからのSSD-to-GPU Direct SQLに対応しました。ただし、Red Hat Enterprise Linux 7.x / CentOS 7.xでは<code>nvme_rdma</code>ドライバの入れ替えが必要となり、現在のところ実験的機能という形になっています。</li>
+</ul>
+</li>
+</ul>
+<h2 id="_4">将来廃止予定の機能</h2>
+<ul>
+<li>
+<p>PostgreSQL v9.6サポート</p>
+<ul>
+<li>PostgreSQL v9.6のCustomScan APIには、動的共有メモリ(DSM)の正しいハンドリングに必要な幾つかのAPIが欠けており、実行時統計情報の採取などが不可能でした。</li>
+<li>また、内部的に式表現(Expression)を保持するための方法にも変更が加えられている事から、少なくない箇所で <code>#if ... #endif</code> ブロックが必要となり、コードの保守性を損なっていました。</li>
+<li>これらの問題により、PostgreSQL v9.6サポートは本バージョンが最後となります。PG-StromをPostgreSQL v9.6でお使いの場合は、早期にPostgreSQL v11へと移行される事をお勧めします。</li>
+</ul>
+</li>
+<li>
+<p>Gstore_Fdw外部テーブルのpgstromフォーマット</p>
+<ul>
+<li>GPUメモリストア上のデータ形式は、元々PL/CUDAのデータソースとして利用するために設計された独自の列形式で、可変長データやnumericデータ型の表現はPostgreSQLのものをそのまま利用していました。</li>
+<li>その後、GPU上でのデータ交換用共通形式として、Apache Arrow形式を元にしたNVIDIA RAPIDS(cuDF)が公開され、多くの機械学習ソフトウェアやPythonでのソフトウェアスタックなど対応が強化されつつあります。</li>
+<li>今後、PG-StromはGstore_Fdwの内部データ形式をcuDFと共通のフォーマットに変更し、これら機械学習ソフトウェアとの相互運用性を改善します。コードの保守性を高くするため、従来の独自データ形式は廃止となります。</li>
+</ul>
+</li>
+</ul>
+<h2 id="_5">廃止された機能</h2>
+<ul>
+<li>インメモリ列キャッシュ<ul>
+<li>ユースケースを分析した結果、多くのケースではArrow_Fdwで十分に代替可能なワークロードである事が分かりました。重複機能であるため、インメモリ列キャッシュは削除されました。</li>
+</ul>
+</li>
+</ul>
 <h1 id="pg-strom-v20">PG-Strom v2.0リリース</h1>
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-<h2 id="_1">概要</h2>
+<h2 id="_6">概要</h2>
 <p>PG-Strom v2.0における主要な機能強化は以下の通りです。</p>
 <ul>
 <li>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</li>
@@ -269,7 +309,7 @@ PG-Strom v2.2における主要な機能強化は以下の通りです。
 <li>GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル</li>
 </ul>
 <p>新機能のサマリはこちらからダウンロードできます：<a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
-<h2 id="_2">動作環境</h2>
+<h2 id="_7">動作環境</h2>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
 <li>CUDA Toolkit 9.1</li>
@@ -277,7 +317,7 @@ PG-Strom v2.2における主要な機能強化は以下の通りです。
 <li>Intel x86 64bit アーキテクチャ(x86_64)</li>
 <li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
 </ul>
-<h2 id="_3">新機能</h2>
+<h2 id="_8">新機能</h2>
 <ul>
 <li>
 <p>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</p>
@@ -395,7 +435,7 @@ PG-Strom v2.2における主要な機能強化は以下の通りです。
 </ul>
 </li>
 </ul>
-<h2 id="_4">廃止された機能</h2>
+<h2 id="_9">廃止された機能</h2>
 <ul>
 <li>
 <p>PostgreSQL v9.5サポート</p>
