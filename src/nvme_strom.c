@@ -184,7 +184,7 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 			pos++;
 		else
 			pos = linebuf;
-		if (sscanf(pos, "%04x:%02x:%02x.%d",
+		if (sscanf(pos, "%x:%02x:%02x.%d",
 				   &nvmeAttr->nvme_pcie_domain,
 				   &nvmeAttr->nvme_pcie_bus_id,
 				   &nvmeAttr->nvme_pcie_dev_id,
