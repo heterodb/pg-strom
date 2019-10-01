@@ -224,11 +224,8 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 	entry->parent = parent;
 	if (!parent)
 	{
-		if (my_name[0] != 'p' ||
-			my_name[1] != 'c' ||
-			my_name[2] != 'i')
-			elog(ERROR, "unexpected sysfs entry: %s/%s", dirname, my_name);
-		if (sscanf(my_name+3, "%04x:%02x",
+		Assert(strncmp("pci", my_name, 3) == 0);
+		if (sscanf(my_name+3, "%x:%02x",
 				   &entry->domain,
 				   &entry->bus_id) != 2)
 			elog(ERROR, "unexpected sysfs entry: %s/%s", dirname, my_name);
@@ -238,7 +235,7 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 	}
 	else
 	{
-		if (sscanf(my_name, "%04x:%02x:%02x.%d",
+		if (sscanf(my_name, "%x:%02x:%02x.%d",
 				   &entry->domain,
 				   &entry->bus_id,
 				   &entry->dev_id,
@@ -290,31 +287,23 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 	while ((dent = readdir(dir)) != NULL)
 	{
 		PCIDevEntry *temp;
+		const char *delim = "::.";
+		char	   *pos;
 
 		/* my_name should be xxxx:xx:xx.x */
-		if (!isxdigit(dent->d_name[0]) ||
-			!isxdigit(dent->d_name[1]) ||
-			!isxdigit(dent->d_name[2]) ||
-			!isxdigit(dent->d_name[3]) ||
-			dent->d_name[4] != ':' ||
-			!isxdigit(dent->d_name[5]) ||
-            !isxdigit(dent->d_name[6]) ||
-			dent->d_name[7] != ':' ||
-			!isxdigit(dent->d_name[8]) ||
-            !isxdigit(dent->d_name[9]) ||
-			dent->d_name[10] != '.')
-			continue;
-		for (index=11; dent->d_name[index] != '\0'; index++)
+		for (pos = dent->d_name; *pos != '\0'; pos++)
 		{
-			if (!isxdigit(dent->d_name[index]))
+			if (*pos == *delim)
+				delim++;
+			else if (*delim != '\0' ? !isxdigit(*pos) : !isdigit(*pos))
 				break;
 		}
-		if (dent->d_name[index] != '\0')
-			continue;
-
-		temp = sysfs_read_pcie_attrs(path, dent->d_name, entry, depth+1);
-		if (temp != NULL)
-			entry->children = lappend(entry->children, temp);
+		if (*pos == '\0' && *delim == '\0')
+		{
+			temp = sysfs_read_pcie_attrs(path, dent->d_name, entry, depth+1);
+			if (temp != NULL)
+				entry->children = lappend(entry->children, temp);
+		}
 	}
 	closedir(dir);
 
