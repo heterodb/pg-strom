@@ -59,7 +59,9 @@ static bool			nvme_strom_enabled;			/* GUC */
 static int			nvme_strom_threshold_kb;	/* GUC */
 static char		   *nvme_manual_distance_map;	/* GUC */
 static void			apply_nvme_manual_distance_map(void);
-
+static bool			sysfs_read_pcie_root_complex(const char *dirname,
+												 const char *my_name,
+												 List **p_pcie_root);
 /*
  * nvme_strom_threshold
  */
@@ -212,7 +214,8 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
  */
 static PCIDevEntry *
 sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
-					  PCIDevEntry *parent, int depth)
+					  PCIDevEntry *parent, int depth,
+					  List **p_pcie_root)
 {
 	PCIDevEntry *entry;
 	DIR		   *dir;
@@ -290,7 +293,12 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 		const char *delim = "::.";
 		char	   *pos;
 
-		/* my_name should be xxxx:xx:xx.x */
+		/* pcixxxx:xx sub-root? */
+		if (sysfs_read_pcie_root_complex(path, dent->d_name,
+										 p_pcie_root))
+			continue;
+
+		/* elsewhere, xxxx:xx:xx.x? */
 		for (pos = dent->d_name; *pos != '\0'; pos++)
 		{
 			if (*pos == *delim)
@@ -300,7 +308,8 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 		}
 		if (*pos == '\0' && *delim == '\0')
 		{
-			temp = sysfs_read_pcie_attrs(path, dent->d_name, entry, depth+1);
+			temp = sysfs_read_pcie_attrs(path, dent->d_name, entry, depth+1,
+										 p_pcie_root);
 			if (temp != NULL)
 				entry->children = lappend(entry->children, temp);
 		}
@@ -315,6 +324,39 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 		return NULL;
 	}
 	return entry;
+}
+
+/*
+ * sysfs_read_pcie_root_complex
+ */
+static bool
+sysfs_read_pcie_root_complex(const char *dirname,
+							 const char *my_name,
+							 List **p_pcie_root)
+{
+	const char	   *delim = ":";
+	const char	   *pos = my_name;
+	PCIDevEntry	   *entry;
+
+	if (strncmp("pci", my_name, 3) == 0)
+	{
+		for (pos = my_name+3; *pos != '\0'; pos++)
+		{
+			if (*pos == *delim)
+				delim++;
+			else if (!isxdigit(*pos))
+				break;
+		}
+		if (*pos == '\0' && *delim == '\0')
+		{
+			entry = sysfs_read_pcie_attrs(dirname, my_name, NULL, 0,
+										  p_pcie_root);
+			if (entry)
+				*p_pcie_root = lappend(*p_pcie_root, entry);
+			return true;
+		}
+	}
+	return false;
 }
 
 /*
@@ -513,13 +555,7 @@ setup_nvme_distance_map(void)
 		elog(ERROR, "failed on opendir('%s'): %m", dirname);
 	while ((dent = readdir(dir)) != NULL)
 	{
-		PCIDevEntry *pcie_item;
-
-		if (strncmp("pci", dent->d_name, 3) != 0)
-			continue;
-		pcie_item = sysfs_read_pcie_attrs(dirname, dent->d_name, NULL, 0);
-		if (pcie_item)
-			pcie_root = lappend(pcie_root, pcie_item);
+		sysfs_read_pcie_root_complex(dirname, dent->d_name, &pcie_root);
 	}
 
 	/*
