@@ -1297,6 +1297,7 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
+extern Path *pgstrom_copy_gpupreagg_path(const Path *pathnode);
 extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState *gts);
@@ -1407,6 +1408,7 @@ extern char get_func_prokind(Oid funcid);
 extern int	get_relnatts(Oid relid);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
+extern Path *pgstrom_copy_pathnode(const Path *pathnode);
 extern const char *errorText(int errcode);
 
 /*
@@ -1753,9 +1755,18 @@ __basename(const char *filename)
 }
 
 /*
- * XXX - why PG does not have palloc_huge()?
+ * Some usuful memory allocation wrapper
  */
 #define palloc_huge(sz)		MemoryContextAllocHuge(CurrentMemoryContext,(sz))
+static inline void *
+pmemdup(const void *src, Size sz)
+{
+	void   *dst = palloc(sz);
+
+	memcpy(dst, src, sz);
+
+	return dst;
+}
 
 /*
  * simple wrapper for pthread_mutex_lock

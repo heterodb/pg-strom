@@ -1559,14 +1559,8 @@ pgstrom_planstate_is_gpuscan(const PlanState *ps)
 Path *
 pgstrom_copy_gpuscan_path(const Path *pathnode)
 {
-	const CustomPath   *oldpath = (const CustomPath *) pathnode;
-	CustomPath		   *newpath;
-
 	Assert(pgstrom_path_is_gpuscan(pathnode));
-	newpath = palloc0(sizeof(CustomPath));
-	memcpy(newpath, oldpath, sizeof(CustomPath));
-
-	return &newpath->path;
+	return (Path *)pmemdup(pathnode, sizeof(CustomPath));
 }
 
 /*

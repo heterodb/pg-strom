@@ -1776,6 +1776,13 @@ build_partitionwise_gpujoin_leafs(PlannerInfo *root,
 		}
 		if (!child_path)
 			return NIL;
+		/*
+		 * 'child_path' is the best path at this moment, however, it can be
+		 * dominated by other paths on the later planning steps.
+		 * Once child_path gets dominated, it is probably released by add_path,
+		 * thus we have to keep an equivalent copy.
+		 */
+		child_path = pgstrom_copy_pathnode(child_path);
 
 		parallel_nworkers = Max(parallel_nworkers,
 								child_path->parallel_workers);

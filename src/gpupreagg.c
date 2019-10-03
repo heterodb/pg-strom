@@ -2800,6 +2800,16 @@ pgstrom_planstate_is_gpupreagg(const PlanState *ps)
 }
 
 /*
+ * pgstrom_copy_gpupreagg_path
+ */
+Path *
+pgstrom_copy_gpupreagg_path(const Path *pathnode)
+{
+	Assert(pgstrom_path_is_gpupreagg(pathnode));
+	return pmemdup(pathnode, sizeof(CustomPath));
+}
+
+/*
  * make_tlist_device_projection
  *
  * It pulls a set of referenced resource numbers according to the supplied

@@ -414,6 +414,255 @@ pathtree_has_gpupath(Path *node)
 }
 
 /*
+ * pgstrom_copy_pathnode
+ *
+ * add_path() / add_partial_path() may reject path-nodes that are already
+ * registered and referenced by upper path nodes, like GpuJoin.
+ * To avoid the problem, we use copy of path-nodes that are (potentially)
+ * released by another ones. However, it is not a full-copy. add_path() will
+ * never release fields of individual path-nodes, so this function tries
+ * to make a copy of path-node itself and child path-nodes only.
+ */
+Path *
+pgstrom_copy_pathnode(const Path *pathnode)
+{
+	switch (nodeTag(pathnode))
+	{
+		case T_Path:
+			return pmemdup(pathnode, sizeof(Path));
+		case T_IndexPath:
+			return pmemdup(pathnode, sizeof(IndexPath));
+		case T_BitmapHeapPath:
+			return pmemdup(pathnode, sizeof(BitmapHeapPath));
+		case T_BitmapAndPath:
+			return pmemdup(pathnode, sizeof(BitmapAndPath));
+		case T_BitmapOrPath:
+			return pmemdup(pathnode, sizeof(BitmapOrPath));
+		case T_TidPath:
+			return pmemdup(pathnode, sizeof(TidPath));
+		case T_SubqueryScanPath:
+			{
+				SubqueryScanPath *a = (SubqueryScanPath *)pathnode;
+				SubqueryScanPath *b = pmemdup(a, sizeof(SubqueryScanPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_ForeignPath:
+			{
+				ForeignPath	   *a = (ForeignPath *)pathnode;
+				ForeignPath	   *b = pmemdup(a, sizeof(ForeignPath));
+				b->fdw_outerpath = pgstrom_copy_pathnode(a->fdw_outerpath);
+				return &b->path;
+			}
+		case T_CustomPath:
+			if (pgstrom_path_is_gpuscan(pathnode))
+				return pgstrom_copy_gpuscan_path(pathnode);
+			else if (pgstrom_path_is_gpujoin(pathnode))
+				return pgstrom_copy_gpujoin_path(pathnode);
+			else if (pgstrom_path_is_gpupreagg(pathnode))
+				return pgstrom_copy_gpupreagg_path(pathnode);
+			else
+			{
+				CustomPath	   *a = (CustomPath *)pathnode;
+				CustomPath	   *b = pmemdup(a, sizeof(CustomPath));
+				List		   *subpaths = NIL;
+				ListCell	   *lc;
+				foreach (lc, a->custom_paths)
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
+				b->custom_paths = subpaths;
+				return &b->path;
+			}
+		case T_NestPath:
+			{
+				NestPath   *a = (NestPath *)pathnode;
+				NestPath   *b = pmemdup(a, sizeof(NestPath));
+				b->outerjoinpath = pgstrom_copy_pathnode(a->outerjoinpath);
+				b->innerjoinpath = pgstrom_copy_pathnode(a->innerjoinpath);
+				return &b->path;
+			}
+		case T_MergePath:
+			{
+				MergePath  *a = (MergePath *)pathnode;
+				MergePath  *b = pmemdup(a, sizeof(MergePath));
+				b->jpath.outerjoinpath =
+					pgstrom_copy_pathnode(a->jpath.outerjoinpath);
+				b->jpath.innerjoinpath =
+					pgstrom_copy_pathnode(a->jpath.innerjoinpath);
+				return &b->jpath.path;
+			}
+		case T_HashPath:
+			{
+				HashPath   *a = (HashPath *)pathnode;
+				HashPath   *b = pmemdup(a, sizeof(HashPath));
+				b->jpath.outerjoinpath =
+					pgstrom_copy_pathnode(a->jpath.outerjoinpath);
+				b->jpath.innerjoinpath =
+					pgstrom_copy_pathnode(a->jpath.innerjoinpath);
+				return &b->jpath.path;
+			}
+		case T_AppendPath:
+			{
+				AppendPath *a = (AppendPath *)pathnode;
+				AppendPath *b = pmemdup(a, sizeof(AppendPath));
+				List	   *subpaths = NIL;
+				ListCell   *lc;
+
+				foreach (lc, a->subpaths)
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
+				b->subpaths = subpaths;
+				return &b->path;
+			}
+		case T_MergeAppendPath:
+			{
+				MergeAppendPath *a = (MergeAppendPath *)pathnode;
+				MergeAppendPath *b = pmemdup(a, sizeof(MergeAppendPath));
+				List	   *subpaths = NIL;
+				ListCell   *lc;
+
+				foreach (lc, a->subpaths)
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
+				b->subpaths = subpaths;
+				return &b->path;
+			}
+		case T_ResultPath:
+			return pmemdup(pathnode, sizeof(ResultPath));
+		case T_MaterialPath:
+			{
+				MaterialPath   *a = (MaterialPath *)pathnode;
+				MaterialPath   *b = pmemdup(a, sizeof(MaterialPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_UniquePath:
+			{
+				UniquePath	   *a = (UniquePath *)pathnode;
+				UniquePath	   *b = pmemdup(a, sizeof(UniquePath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_GatherPath:
+			{
+				GatherPath	   *a = (GatherPath *)pathnode;
+				GatherPath	   *b = pmemdup(a, sizeof(GatherPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_GatherMergePath:
+			{
+				GatherMergePath *a = (GatherMergePath *)pathnode;
+				GatherMergePath *b = pmemdup(a, sizeof(GatherMergePath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_ProjectionPath:
+			{
+				ProjectionPath *a = (ProjectionPath *)pathnode;
+				ProjectionPath *b = pmemdup(a, sizeof(ProjectionPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_ProjectSetPath:
+			{
+				ProjectSetPath *a = (ProjectSetPath *)pathnode;
+				ProjectSetPath *b = pmemdup(a, sizeof(ProjectSetPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_SortPath:
+			{
+				SortPath	   *a = (SortPath *)pathnode;
+				SortPath	   *b = pmemdup(a, sizeof(SortPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_GroupPath:
+			{
+				GroupPath	   *a = (GroupPath *)pathnode;
+				GroupPath	   *b = pmemdup(a, sizeof(GroupPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_UpperUniquePath:
+			{
+				UpperUniquePath *a = (UpperUniquePath *)pathnode;
+				UpperUniquePath *b = pmemdup(a, sizeof(UpperUniquePath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_AggPath:
+			{
+				AggPath		   *a = (AggPath *)pathnode;
+				AggPath		   *b = pmemdup(a, sizeof(AggPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_GroupingSetsPath:
+			{
+				GroupingSetsPath *a = (GroupingSetsPath *)pathnode;
+				GroupingSetsPath *b = pmemdup(a, sizeof(GroupingSetsPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+                return &b->path;
+			}
+		case T_MinMaxAggPath:
+			return pmemdup(pathnode, sizeof(MinMaxAggPath));
+		case T_WindowAggPath:
+			{
+				WindowAggPath  *a = (WindowAggPath *)pathnode;
+				WindowAggPath  *b = pmemdup(a, sizeof(WindowAggPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_SetOpPath:
+			{
+				SetOpPath	   *a = (SetOpPath *)pathnode;
+				SetOpPath	   *b = pmemdup(a, sizeof(SetOpPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_RecursiveUnionPath:
+			{
+				RecursiveUnionPath *a = (RecursiveUnionPath *)pathnode;
+				RecursiveUnionPath *b = pmemdup(a, sizeof(RecursiveUnionPath));
+				b->leftpath = pgstrom_copy_pathnode(a->leftpath);
+				b->rightpath = pgstrom_copy_pathnode(a->rightpath);
+				return &b->path;
+			}
+		case T_LockRowsPath:
+			{
+				LockRowsPath   *a = (LockRowsPath *)pathnode;
+				LockRowsPath   *b = pmemdup(a, sizeof(LockRowsPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		case T_ModifyTablePath:
+			{
+				ModifyTablePath *a = (ModifyTablePath *)pathnode;
+				ModifyTablePath *b = pmemdup(a, sizeof(ModifyTablePath));
+				List	   *subpaths = NIL;
+				ListCell   *lc;
+				foreach (lc, a->subpaths)
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
+				b->subpaths = subpaths;
+				return &b->path;
+			}
+		case T_LimitPath:
+			{
+				LimitPath  *a = (LimitPath *)pathnode;
+				LimitPath  *b = pmemdup(a, sizeof(LimitPath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
+		default:
+			elog(ERROR, "Bug? unknown path-node: %s", nodeToString(pathnode));
+	}
+	return NULL;
+}
+
+/*
  * errorText - string form of the error code
  */
 const char *
