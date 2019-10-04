@@ -426,6 +426,9 @@ pathtree_has_gpupath(Path *node)
 Path *
 pgstrom_copy_pathnode(const Path *pathnode)
 {
+	if (!pathnode)
+		return NULL;
+
 	switch (nodeTag(pathnode))
 	{
 		case T_Path:
