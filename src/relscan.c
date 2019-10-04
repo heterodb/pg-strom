@@ -651,6 +651,73 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 }
 
 /*
+ * pgstrom_pullup_outer_refs
+ *
+ * setup outer_refs bitmap according to the attr_needed of RelOptInfo.
+ * If base_rel is a partition leaf, we have to look at parent relation
+ * instead.
+ */
+Bitmapset *
+pgstrom_pullup_outer_refs(PlannerInfo *root,
+						  RelOptInfo *base_rel,
+						  Bitmapset *referenced)
+{
+	ListCell   *lc;
+	int			i, j, k;
+
+	if (base_rel->reloptkind == RELOPT_BASEREL)
+	{
+		for (i=base_rel->min_attr, j=0; i <= base_rel->max_attr; i++, j++)
+		{
+			if (i < 0 || base_rel->attr_needed[j] == NULL)
+				continue;
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
+		}
+	}
+	else if (base_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+	{
+		foreach (lc, root->append_rel_list)
+		{
+			AppendRelInfo  *apinfo = lfirst(lc);
+			RelOptInfo	   *parent_rel;
+			Bitmapset	   *parent_refs;
+			Var			   *var;
+
+			if (apinfo->child_relid != base_rel->relid)
+				continue;
+			Assert(apinfo->parent_relid < root->simple_rel_array_size);
+			parent_rel = root->simple_rel_array[apinfo->parent_relid];
+			parent_refs = pgstrom_pullup_outer_refs(root, parent_rel, NULL);
+
+			for (k = bms_next_member(parent_refs, -1);
+				 k >= 0;
+				 k = bms_next_member(parent_refs, k))
+			{
+				i = k + FirstLowInvalidHeapAttributeNumber;
+				if (i <= 0)
+					bms_add_member(referenced, k);
+				if (i > list_length(apinfo->translated_vars))
+					elog(ERROR, "Bug? column reference out of range");
+				var = list_nth(apinfo->translated_vars, i-1);
+				Assert(IsA(var, Var));
+				j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+				referenced = bms_add_member(referenced, j);
+			}
+			break;
+		}
+		if (lc == NULL)
+			elog(ERROR, "Bug? AppendRelInfo not found (relid=%u)",
+				 base_rel->relid);
+	}
+	else
+	{
+		elog(ERROR, "Bug? outer is not a simple relation");
+	}
+	return referenced;
+}
+
+/*
  * pgstromIndexState - runtime status of BRIN-index for relation scan
  */
 typedef struct pgstromIndexState

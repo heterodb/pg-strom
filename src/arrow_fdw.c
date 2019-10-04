@@ -181,7 +181,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	double			ntuples = 0.0;
 	ListCell	   *lc;
 	int				optimal_gpu = INT_MAX;
-	int				i, j, k;
+	int				j, k;
 
 	/* columns to be fetched */
 	foreach (lc, baserel->baserestrictinfo)
@@ -190,13 +190,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
 	}
-	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
-	{
-		if (baserel->attr_needed[j] == NULL)
-			continue;
-		k = i - FirstLowInvalidHeapAttributeNumber;
-		referenced = bms_add_member(referenced, k);
-	}
+	referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
 
 	foreach (lc, filesList)
 	{

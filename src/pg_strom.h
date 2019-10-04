@@ -1187,7 +1187,9 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   cl_uint *p_nrows_per_block,
 									   Cost *p_startup_cost,
 									   Cost *p_run_cost);
-
+extern Bitmapset *pgstrom_pullup_outer_refs(PlannerInfo *root,
+											RelOptInfo *base_rel,
+											Bitmapset *referenced);
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
 										List *index_conds,

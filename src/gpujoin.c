@@ -2766,7 +2766,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	double			outer_nrows;
-	int				i, j, k;
+	int				i, k;
 
 	Assert(gjpath->num_rels + 1 == list_length(custom_plans));
 	outer_plan = linitial(custom_plans);
@@ -2897,13 +2897,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 
 		/* pick up outer referenced columns */
 		pull_varattnos((Node *)outer_quals, outer_relid, &referenced);
-		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
-		{
-			if (i < 0 || baserel->attr_needed[j] == NULL)
-				continue;
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			referenced = bms_add_member(referenced, k);
-		}
+		referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
 		for (k = bms_next_member(referenced, -1);
 			 k >= 0;
 			 k = bms_next_member(referenced, k))
