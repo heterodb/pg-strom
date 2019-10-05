@@ -1655,6 +1655,21 @@ get_next_log2(Size size)
 }
 
 /*
+ * __trim - remove whitespace at the head/tail of cstring
+ */
+static inline char *
+__trim(char *token)
+{
+	char   *tail = token + strlen(token) - 1;
+
+	while (*token == ' ' || *token == '\t')
+		token++;
+	while (tail >= token && (*tail == ' ' || *tail == '\t'))
+		*tail-- = '\0';
+	return token;
+}
+
+/*
  * It translate an alignment character into width
  */
 static inline int

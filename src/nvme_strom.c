@@ -654,17 +654,6 @@ setup_nvme_distance_map(void)
 /*
  * apply_nvme_manual_distance_map
  */
-static inline char *__trim(char *token)
-{
-	char   *tail = token + strlen(token) - 1;
-
-	while (*token == ' ' || *token == '\t')
-		token++;
-	while (tail >= token && (*tail == ' ' || *tail == '\t'))
-		*tail-- = '\0';
-	return token;
-}
-
 static void
 apply_nvme_manual_distance_map(void)
 {
