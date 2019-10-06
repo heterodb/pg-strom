@@ -134,6 +134,7 @@ Arrow_Fdwは以下のオプションに対応しています。現状、全て�
 |外部テーブル|`files`|外部テーブルにマップするArrowファイルをカンマ(,）区切りで複数指定します。|
 |外部テーブル|`dir`|指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。|
 |外部テーブル|`suffix`|`dir`オプションの指定時、例えば`.arrow`など、特定の接尾句を持つファイルだけをマップします。|
+|外部テーブル|`parallel_workers`|この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける`parallel_workers`ストレージパラメータと同等の意味を持ちます。|
 }
 @en{
 Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.
@@ -144,6 +145,7 @@ Arrow_Fdw supports the options below. Right now, all the options are for foreign
 |foreign table|`files`|It maps multiple Arrow files specified by comma (,) separated files list on the foreign table.
 |foreign table|`dir`|It maps all the Arrow files in the directory specified on the foreign table.
 |foreign table|`suffix`|When `dir` option is given, it maps only files with the specified suffix, like `.arrow` for example.
+|foreign table|`parallel_workers`|It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to `parallel_workers` storage parameter at normal tables.|
 }
 
 @ja:##データ型の対応
