@@ -124,7 +124,11 @@ static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
 											  ArrowRecordBatch *rbatch);
 static List	   *arrowLookupOrBuildMetadataCache(const char *fname, File fdesc);
-
+static void		pg_datum_arrow_ref(kern_data_store *kds,
+								   kern_colmeta *cmeta,
+								   size_t index,
+								   Datum *p_datum,
+								   bool *p_isnull);
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
@@ -1099,28 +1103,20 @@ __dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
  * arrowFdwLoadRecordBatch
  */
 static pgstrom_data_store *
-arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
-						Relation relation,
-						EState *estate,
-						GpuContext *gcontext,
-						int optimal_gpu)
+__arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
+						  Relation relation,
+						  Bitmapset *referenced,
+						  GpuContext *gcontext,
+						  MemoryContext mcontext,
+						  int optimal_gpu)
 {
 	TupleDesc			tupdesc = RelationGetDescr(relation);
-	Bitmapset		   *referenced = af_state->referenced;
-	RecordBatchState   *rb_state;
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
 	strom_io_vector	   *iovec;
 	size_t				head_sz;
-	uint32				rb_index;
 	int					j, fdesc;
 	CUresult			rc;
-
-	/* fetch next RecordBatch */
-	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
-	if (rb_index >= af_state->num_rbatches)
-		return NULL;	/* no more RecordBatch to read */
-	rb_state = af_state->rbatches[rb_index];
 
 	/* setup KDS and I/O-vector */
 	head_sz = KDS_calculateHeadSize(tupdesc, false);
@@ -1176,7 +1172,7 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 		}
 		else
 		{
-			pds = MemoryContextAllocHuge(estate->es_query_cxt,
+			pds = MemoryContextAllocHuge(mcontext,
 										 offsetof(pgstrom_data_store,
 												  kds) + kds->length);
 		}
@@ -1184,6 +1180,28 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 	}
 	pfree(iovec);
 	return pds;
+}
+
+static pgstrom_data_store *
+arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
+						Relation relation,
+						EState *estate,
+						GpuContext *gcontext,
+						int optimal_gpu)
+{
+	uint32		rb_index;
+
+	/* fetch next RecordBatch */
+	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
+	if (rb_index >= af_state->num_rbatches)
+		return NULL;	/* no more RecordBatch to read */
+
+	return __arrowFdwLoadRecordBatch(af_state->rbatches[rb_index],
+									 relation,
+									 af_state->referenced,
+									 gcontext,
+									 estate->es_query_cxt,
+									 optimal_gpu);
 }
 
 /*
@@ -1405,6 +1423,181 @@ readArrowFile(char *pathname, ArrowFileInfo *af_info)
     readArrowFileDesc(FileGetRawDesc(filp), af_info);
 
     FileClose(filp);
+}
+
+/*
+ * RecordBatchAcquireSampleRows - random sampling
+ */
+static int
+RecordBatchAcquireSampleRows(Relation relation,
+							 RecordBatchState *rb_state,
+							 HeapTuple *rows,
+							 int nsamples)
+{
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	pgstrom_data_store *pds;
+	Bitmapset	   *referenced = NULL;
+	Datum		   *values;
+	bool		   *isnull;
+	int				count;
+	int				i, j, nwords;
+
+	/* ANALYZE needs to fetch all the attributes */
+	nwords = (tupdesc->natts - FirstLowInvalidHeapAttributeNumber +
+			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
+	referenced = alloca(offsetof(Bitmapset, words[nwords]));
+	referenced->nwords = nwords;
+	memset(referenced->words, -1, sizeof(bitmapword) * nwords);
+	
+	pds = __arrowFdwLoadRecordBatch(rb_state,
+									relation,
+									referenced,
+									NULL,
+									CurrentMemoryContext,
+									-1);
+	values = alloca(sizeof(Datum) * tupdesc->natts);
+	isnull = alloca(sizeof(bool)  * tupdesc->natts);
+	for (count = 0; count < nsamples; count++)
+	{
+		/* fetch a row randomly */
+		i = (double)pds->kds.nitems * (((double) random()) /
+									   ((double)MAX_RANDOM_VALUE + 1));
+		Assert(i < pds->kds.nitems);
+
+		for (j=0; j < pds->kds.ncols; j++)
+		{
+			kern_colmeta   *cmeta = &pds->kds.colmeta[j];
+			
+			pg_datum_arrow_ref(&pds->kds,
+							   cmeta,
+							   i,
+							   values + j,
+							   isnull + j);
+		}
+		rows[count] = heap_form_tuple(tupdesc, values, isnull);
+	}
+	PDS_release(pds);
+
+	return count;
+}
+
+/*
+ * ArrowAcquireSampleRows
+ */
+static int
+ArrowAcquireSampleRows(Relation relation,
+					   int elevel,
+					   HeapTuple *rows,
+					   int nrooms,
+					   double *p_totalrows,
+					   double *p_totaldeadrows)
+{
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *rb_state_list = NIL;
+	ListCell	   *lc;
+	File		   *fdesc_array;
+	int64			total_nrows = 0;
+	int64			count_nrows = 0;
+	int				nsamples_min = nrooms / 100;
+	int				nitems = 0;
+	int				fcount = 0;
+
+	fdesc_array = alloca(sizeof(File) * list_length(filesList));
+	foreach (lc, filesList)
+	{
+		const char *fname = strVal(lfirst(lc));
+		File		fdesc;
+		List	   *rb_cached;
+		ListCell   *cell;
+
+		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
+        if (fdesc < 0)
+		{
+			elog(NOTICE, "failed to open file '%s' on behalf of '%s', skipped",
+				 fname, RelationGetRelationName(relation));
+			continue;
+		}
+		fdesc_array[fcount++] = fdesc;
+		
+		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		foreach (cell, rb_cached)
+		{
+			RecordBatchState *rb_state = lfirst(cell);
+
+			if (!arrowSchemaCompatibilityCheck(tupdesc, rb_state))
+				elog(ERROR, "arrow file '%s' on behalf of foreign table '%s' has incompatible schema definition",
+					 fname, RelationGetRelationName(relation));
+			if (rb_state->rb_nitems == 0)
+				continue;	/* not reasonable to sample, skipped */
+			total_nrows += rb_state->rb_nitems;
+
+			rb_state_list = lappend(rb_state_list, rb_state);
+		}
+	}
+	nrooms = Min(nrooms, total_nrows);
+
+	/* fetch samples for each record-batch */
+	foreach (lc, rb_state_list)
+	{
+		RecordBatchState *rb_state = lfirst(lc);
+		int			nsamples;
+
+		count_nrows += rb_state->rb_nitems;
+		nsamples = (double)nrooms * ((double)count_nrows /
+									 (double)total_nrows) - nitems;
+		if (nitems + nsamples > nrooms)
+			nsamples = nrooms - nitems;
+		if (nsamples > nsamples_min)
+			nitems += RecordBatchAcquireSampleRows(relation,
+												   rb_state,
+												   rows + nitems,
+												   nsamples);
+	}
+	while (fcount > 0)
+		FileClose(fdesc_array[--fcount]);
+
+	*p_totalrows = total_nrows;
+	*p_totaldeadrows = 0.0;
+
+	return nitems;
+}
+
+/*
+ * ArrowAnalyzeForeignTable
+ */
+static bool
+ArrowAnalyzeForeignTable(Relation frel,
+						 AcquireSampleRowsFunc *p_sample_rows_func,
+						 BlockNumber *p_totalpages)
+{
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	ListCell	   *lc;
+	Size			totalpages = 0;
+
+	foreach (lc, filesList)
+	{
+		const char *fname = strVal(lfirst(lc));
+		struct stat	statbuf;
+
+		if (stat(fname, &statbuf) != 0)
+		{
+			elog(NOTICE, "failed on stat('%s') on behalf of '%s', skipped",
+				 fname, get_rel_name(ft->relid));
+			continue;
+		}
+		totalpages += (statbuf.st_size + BLCKSZ - 1) / BLCKSZ;
+	}
+
+	if (totalpages > MaxBlockNumber)
+		totalpages = MaxBlockNumber;
+
+	*p_sample_rows_func = ArrowAcquireSampleRows;
+	*p_totalpages = totalpages;
+
+	return true;
 }
 
 /*
@@ -2110,12 +2303,6 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 /*
  * pg_XXX_arrow_ref
  */
-static void pg_datum_arrow_ref(kern_data_store *kds,
-							   kern_colmeta *cmeta,
-							   size_t index,
-							   Datum *p_datum,
-							   bool *p_isnull);
-
 static Datum
 pg_varlena_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
@@ -3148,6 +3335,8 @@ pgstrom_init_arrow_fdw(void)
 	r->EndForeignScan				= ArrowEndForeignScan;
 	/* EXPLAIN support */
 	r->ExplainForeignScan			= ArrowExplainForeignScan;
+	/* ANALYZE support */
+	r->AnalyzeForeignTable			= ArrowAnalyzeForeignTable;
 	/* IMPORT FOREIGN SCHEMA support */
 	r->ImportForeignSchema			= ArrowImportForeignSchema;
 	/* CPU Parallel support (not yet) */
