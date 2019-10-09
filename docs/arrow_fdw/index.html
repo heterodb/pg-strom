@@ -297,6 +297,11 @@ OPTIONS (file '/path/to/logdata.arrow');
 <td align="left"><code>suffix</code></td>
 <td align="left">When <code>dir</code> option is given, it maps only files with the specified suffix, like <code>.arrow</code> for example.</td>
 </tr>
+<tr>
+<td align="left">foreign table</td>
+<td align="left"><code>parallel_workers</code></td>
+<td align="left">It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to <code>parallel_workers</code> storage parameter at normal tables.</td>
+</tr>
 </tbody>
 </table>
 <h2 id="data-type-mapping">Data type mapping</h2>

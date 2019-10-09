@@ -632,6 +632,40 @@ Investigate other parameters according to usage of the system and expected workl
     - ```work_mem = 1GB```
 }
 
+@ja:### OSのリソース制限の拡張
+@en:### Expand OS resource limits
+
+@ja{
+SSD-to-GPUダイレクトSQLを使用する場合は特に、同時に大量のファイルをオープンする事があるため、プロセスあたりファイルディスクリプタ数の上限を拡大しておく必要があります。
+
+また、PostgreSQLのクラッシュ時に確実にコアダンプを生成できるよう、コアファイルのサイズ上限を制限しないことを推奨します。
+}
+@en{
+SSD-to-GPU Direct SQL especially tries to open many files simultaneously, so resource limit for number of file descriptors per process should be expanded.
+
+Also, we recommend not to limit core file size to generate core dump of PostgreSQL certainly on system crash.
+}
+@ja{
+PostgreSQLをsystemd経由で起動する場合、リソース制限に関する設定は`/etc/systemd/system/postgresql-XX.service.d/pg_strom.conf`に記述します。
+
+RPMによるインストールの場合、デフォルトで以下の内容が設定されます。
+
+環境変数 `CUDA_ENABLE_COREDUMP_ON_EXCEPTION` に関する設定がコメントアウトされています。これは開発者向けのオプションで、これを有効にして起動すると、GPU側でエラーが発生した場合にGPUのコアダンプを生成させる事ができます。詳しくは[CUDA-GDB:GPU core dump support](https://docs.nvidia.com/cuda/cuda-gdb/index.html#gpu-coredump)をご覧ください。
+}
+@en{
+If PostgreSQL service is launched by systemd, you can put the configurations of resource limit at `/etc/systemd/system/postgresql-XX.service.d/pg_strom.conf`.
+
+RPM installation setups the configuration below by the default.
+
+It comments out configuration to the environment variable `CUDA_ENABLE_COREDUMP_ON_EXCEPTION`. This is a developer option that enables to generate GPU's core dump on any CUDA/GPU level errors, if enabled. See [CUDA-GDB:GPU core dump support](https://docs.nvidia.com/cuda/cuda-gdb/index.html#gpu-coredump) for more details.
+}
+```
+[Service]
+LimitNOFILE=65536
+LimitCORE=infinity
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+```
+
 @ja:### PostgreSQLの起動
 @en:### Start PostgreSQL
 
@@ -857,21 +891,19 @@ NVME-Stromカーネルモジュールにはパラメータがあります。
 |パラメータ名        |型   |初期値|説明|
 |:------------------:|:---:|:----:|:-----:|
 |`verbose`           |`int`|`0`   |詳細なデバッグ出力を行います。|
-|`stat_info`         |`int`|`1`   |性能情報の統計サポートを有効にします。|
 |`fast_ssd_mode`     |`int`|`0`   |高速なNVME-SSDに適した動作モードです。|
-|`p2p_dma_max_depth` |`int`|`48`  |NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。|
+|`p2p_dma_max_depth` |`int`|`1024`|NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。|
 |`p2p_dma_max_unitsz`|`int`|`256` |P2P DMA要求で一度に読み出すデータブロックの最大長（kB単位）です。|
 }
 @en{
 NVME-Strom Linux kernel module has some parameters.
 
 |Parameter           |Type |Default|Description|
-|:------------------:|:---:|:---:|:-----:|
-|`verbose`           |`int`|`0`  |Enables detailed debug output|
-|`stat_info`         |`int`|`1`  |Enables performance statistics|
-|`fast_ssd_mode`     |`int`|`0`  |Operating mode for fast NVME-SSD|
-|`p2p_dma_max_depth` |`int`|`48` |Maximum number of asynchronous P2P DMA request can be enqueued on the I/O-queue of NVME device|
-|`p2p_dma_max_unitsz`|`int`|`256`|Maximum length of data blocks, in kB, to be read by a single P2P DMA request at once|
+|:------------------:|:---:|:----:|:-----:|
+|`verbose`           |`int`|`0`   |Enables detailed debug output|
+|`fast_ssd_mode`     |`int`|`0`   |Operating mode for fast NVME-SSD|
+|`p2p_dma_max_depth` |`int`|`1024`|Maximum number of asynchronous P2P DMA request can be enqueued on the I/O-queue of NVME device|
+|`p2p_dma_max_unitsz`|`int`|`256` |Maximum length of data blocks, in kB, to be read by a single P2P DMA request at once|
 }
 
 @ja{

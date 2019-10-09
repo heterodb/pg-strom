@@ -297,6 +297,11 @@ OPTIONS (file '/path/to/logdata.arrow');
 <td align="left"><code>suffix</code></td>
 <td align="left"><code>dir</code>オプションの指定時、例えば<code>.arrow</code>など、特定の接尾句を持つファイルだけをマップします。</td>
 </tr>
+<tr>
+<td align="left">外部テーブル</td>
+<td align="left"><code>parallel_workers</code></td>
+<td align="left">この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける<code>parallel_workers</code>ストレージパラメータと同等の意味を持ちます。</td>
+</tr>
 </tbody>
 </table>
 <h2 id="_5">データ型の対応</h2>
