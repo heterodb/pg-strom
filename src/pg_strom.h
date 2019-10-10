@@ -1944,6 +1944,38 @@ pthreadCondSignal(pthread_cond_t *cond)
 }
 
 /*
+ * functions for execution time measurement
+ */
+typedef struct timeval		timeval_t;
+
+static inline timeval_t
+stat_time_begin(void)
+{
+	timeval_t	tv_start;
+
+	gettimeofday(&tv_start, NULL);
+
+	return tv_start;
+}
+
+static inline void
+stat_time_end(timeval_t tv_start, const char *label)
+{
+	timeval_t	tv_end;
+	cl_long		delta;		/* us */
+
+	gettimeofday(&tv_end, NULL);
+	delta = ((tv_end.tv_sec - tv_start.tv_sec) * 1000000 +
+			 (tv_end.tv_usec - tv_start.tv_usec));
+	if (delta > 4000000)
+		elog(INFO, "%s: %.2fs", label, (double)delta / 1000000.0);
+	else if (delta > 4000)
+		elog(INFO, "%s: %.2fms", label, (double)delta / 1000.0);
+	else
+		elog(INFO, "%s: %luus", label, delta);
+}
+
+/*
  * simple wrapper for permission checks
  */
 static inline void
