@@ -106,12 +106,16 @@ retry_open:
 	{
 		int		errcode = errno;
 
-		if (errno == ENOENT &&
-			retry_done == 0 &&
-			system("/usr/bin/nvme_strom-modprobe") == 0)
+		if (errno == ENOENT)
 		{
-			retry_done = 1;
-			goto retry_open;
+			if (retry_done == 0 &&
+				system("/usr/bin/nvme_strom-modprobe") == 0)
+			{
+				retry_done = 1;
+				goto retry_open;
+			}
+			fprintf(stderr, "nvme_strom kernel module is not installed.\n");
+			return NULL;
 		}
 		sys_elog("failed on open('%s'): %m\n", NVME_STROM_IOCTL_PATHNAME);
 	}
