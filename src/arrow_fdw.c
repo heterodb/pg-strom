@@ -119,7 +119,8 @@ static const char *arrowTypeToPGTypeName(ArrowField *field);
 static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 											  RecordBatchState *rb_state);
-static List			   *arrowFdwExtractFilesList(List *options_list);
+static List	   *arrowFdwExtractFilesList(List *options_list,
+										 int *p_parallel_workers);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
 											  ArrowRecordBatch *rbatch);
@@ -238,12 +239,13 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 					   Oid foreigntableid)
 {
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *filesList;
 	Size			filesSizeTotal = 0;
 	Bitmapset	   *referenced = NULL;
 	BlockNumber		npages = 0;
 	double			ntuples = 0.0;
 	ListCell	   *lc;
+	int				parallel_nworkers;
 	int				optimal_gpu = INT_MAX;
 	int				j, k;
 
@@ -256,6 +258,8 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	}
 	referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
 
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &parallel_nworkers);
 	foreach (lc, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc));
@@ -314,6 +318,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	else if (filesSizeTotal < nvme_strom_threshold())
 		optimal_gpu = -1;
 
+	baserel->rel_parallel_workers = parallel_nworkers;
 	baserel->fdw_private = makeInteger(optimal_gpu);
 	baserel->pages = npages;
 	baserel->tuples = ntuples;
@@ -800,7 +805,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
 	List		   *fdescList = NIL;
 	Bitmapset	   *referenced = NULL;
 	bool			whole_row_ref = false;
@@ -1494,7 +1499,7 @@ ArrowAcquireSampleRows(Relation relation,
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
 	File		   *fdesc_array;
@@ -1573,7 +1578,7 @@ ArrowAnalyzeForeignTable(Relation frel,
 						 BlockNumber *p_totalpages)
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
 	ListCell	   *lc;
 	Size			totalpages = 0;
 
@@ -1624,7 +1629,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		default:
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
 	}
-	filesList = arrowFdwExtractFilesList(stmt->options);
+	filesList = arrowFdwExtractFilesList(stmt->options, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -2748,12 +2753,13 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
  * arrowFdwExtractFilesList
  */
 static List *
-arrowFdwExtractFilesList(List *options_list)
+arrowFdwExtractFilesList(List *options_list, int *p_parallel_nworkers)
 {
 	ListCell   *lc;
 	List	   *filesList = NIL;
 	char	   *dir_path = NULL;
 	char	   *dir_suffix = NULL;
+	int			parallel_nworkers = -1;
 
 	foreach (lc, options_list)
 	{
@@ -2792,6 +2798,14 @@ arrowFdwExtractFilesList(List *options_list)
 		{
 			dir_suffix = strVal(defel->arg);
 		}
+		else if (strcmp(defel->defname, "parallel_workers") == 0)
+		{
+			if (parallel_nworkers >= 0)
+				elog(ERROR, "'parallel_workers' appeared twice");
+			parallel_nworkers = pg_atoi(strVal(defel->arg), sizeof(int), '\0');
+		}
+		else
+			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
 	}
 	if (dir_suffix && !dir_path)
 		elog(ERROR, "arrow: cannot use 'suffix' option without 'dir'");
@@ -2836,6 +2850,11 @@ arrowFdwExtractFilesList(List *options_list)
 		if (access(strVal(val), F_OK | R_OK) != 0)
 			elog(ERROR, "arrow: permission error at '%s': %m", strVal(val));
 	}
+
+	/* other properties */
+	if (p_parallel_nworkers)
+		*p_parallel_nworkers = parallel_nworkers;
+
 	return filesList;
 }
 
@@ -2850,9 +2869,10 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 
 	if (catalog == ForeignTableRelationId)
 	{
-		List	   *filesList = arrowFdwExtractFilesList(options_list);
+		List	   *filesList;
 		ListCell   *lc;
 
+		filesList = arrowFdwExtractFilesList(options_list, NULL);
 		foreach (lc, filesList)
 		{
 			ArrowFileInfo	af_info;

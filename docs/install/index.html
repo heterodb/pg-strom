@@ -558,6 +558,18 @@ Investigate other parameters according to usage of the system and expected workl
 </ul>
 </li>
 </ul>
+<h3 id="expand-os-resource-limits">Expand OS resource limits</h3>
+<p>SSD-to-GPU Direct SQL especially tries to open many files simultaneously, so resource limit for number of file descriptors per process should be expanded.</p>
+<p>Also, we recommend not to limit core file size to generate core dump of PostgreSQL certainly on system crash.</p>
+<p>If PostgreSQL service is launched by systemd, you can put the configurations of resource limit at <code>/etc/systemd/system/postgresql-XX.service.d/pg_strom.conf</code>.</p>
+<p>RPM installation setups the configuration below by the default.</p>
+<p>It comments out configuration to the environment variable <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>. This is a developer option that enables to generate GPU's core dump on any CUDA/GPU level errors, if enabled. See <a href="https://docs.nvidia.com/cuda/cuda-gdb/index.html#gpu-coredump">CUDA-GDB:GPU core dump support</a> for more details.</p>
+<pre><code>[Service]
+LimitNOFILE=65536
+LimitCORE=infinity
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+</code></pre>
+
 <h3 id="start-postgresql">Start PostgreSQL</h3>
 <p>Start PostgreSQL service.</p>
 <p>If PG-Strom is set up appropriately, it writes out log message which shows PG-Strom recognized GPU devices.
@@ -708,12 +720,6 @@ LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
 <td align="center">Enables detailed debug output</td>
 </tr>
 <tr>
-<td align="center"><code>stat_info</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>1</code></td>
-<td align="center">Enables performance statistics</td>
-</tr>
-<tr>
 <td align="center"><code>fast_ssd_mode</code></td>
 <td align="center"><code>int</code></td>
 <td align="center"><code>0</code></td>
@@ -722,7 +728,7 @@ LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
 <tr>
 <td align="center"><code>p2p_dma_max_depth</code></td>
 <td align="center"><code>int</code></td>
-<td align="center"><code>48</code></td>
+<td align="center"><code>1024</code></td>
 <td align="center">Maximum number of asynchronous P2P DMA request can be enqueued on the I/O-queue of NVME device</td>
 </tr>
 <tr>

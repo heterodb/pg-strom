@@ -560,6 +560,18 @@ Success. You can now start the database server using:
 </ul>
 </li>
 </ul>
+<h3 id="os_2">OSのリソース制限の拡張</h3>
+<p>SSD-to-GPUダイレクトSQLを使用する場合は特に、同時に大量のファイルをオープンする事があるため、プロセスあたりファイルディスクリプタ数の上限を拡大しておく必要があります。</p>
+<p>また、PostgreSQLのクラッシュ時に確実にコアダンプを生成できるよう、コアファイルのサイズ上限を制限しないことを推奨します。</p>
+<p>PostgreSQLをsystemd経由で起動する場合、リソース制限に関する設定は<code>/etc/systemd/system/postgresql-XX.service.d/pg_strom.conf</code>に記述します。</p>
+<p>RPMによるインストールの場合、デフォルトで以下の内容が設定されます。</p>
+<p>環境変数 <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> に関する設定がコメントアウトされています。これは開発者向けのオプションで、これを有効にして起動すると、GPU側でエラーが発生した場合にGPUのコアダンプを生成させる事ができます。詳しくは<a href="https://docs.nvidia.com/cuda/cuda-gdb/index.html#gpu-coredump">CUDA-GDB:GPU core dump support</a>をご覧ください。</p>
+<pre><code>[Service]
+LimitNOFILE=65536
+LimitCORE=infinity
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+</code></pre>
+
 <h3 id="postgresql_1">PostgreSQLの起動</h3>
 <p>PostgreSQLを起動します。</p>
 <p>正常にセットアップが完了していれば、ログにPG-StromがGPUを認識した事を示すメッセージが記録されているはずです。
@@ -712,12 +724,6 @@ LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
 <td align="center">詳細なデバッグ出力を行います。</td>
 </tr>
 <tr>
-<td align="center"><code>stat_info</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>1</code></td>
-<td align="center">性能情報の統計サポートを有効にします。</td>
-</tr>
-<tr>
 <td align="center"><code>fast_ssd_mode</code></td>
 <td align="center"><code>int</code></td>
 <td align="center"><code>0</code></td>
@@ -726,7 +732,7 @@ LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
 <tr>
 <td align="center"><code>p2p_dma_max_depth</code></td>
 <td align="center"><code>int</code></td>
-<td align="center"><code>48</code></td>
+<td align="center"><code>1024</code></td>
 <td align="center">NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。</td>
 </tr>
 <tr>
