@@ -3674,6 +3674,7 @@ pgstrom_union_type_declarations(StringInfo buf,
 {
 	ListCell	   *lc;
 	devtype_info   *dtype;
+	bool			meet_array_v = false;
 
 	if (type_oid_list == NIL)
 		return;
@@ -3685,6 +3686,17 @@ pgstrom_union_type_declarations(StringInfo buf,
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
 			__ELog("failed to lookup device type: %u", type_oid);
+		/*
+		 * All the array types have same device type name (pg_array_t)
+		 * regardless of the element type. So, we have to avoid duplication
+		 * of the field name in union, by special handling.
+		 */
+		if (dtype->type_element)
+		{
+			if (meet_array_v)
+				continue;
+			meet_array_v = true;
+		}
 		appendStringInfo(buf,
 						 "    pg_%s_t %s_v;\n",
 						 dtype->type_name,
