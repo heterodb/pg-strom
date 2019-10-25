@@ -1319,11 +1319,11 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		 k >= 0;
 		 k = bms_next_member(af_state->referenced, k))
 	{
-		j = k + FirstLowInvalidHeapAttributeNumber;
+		j = k + FirstLowInvalidHeapAttributeNumber - 1;
 
-		if (j > 0)
+		if (j >= 0)
 		{
-			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j-1);
+			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
 			const char		   *attName = NameStr(attr->attname);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
@@ -1381,7 +1381,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 				 k >= 0;
 				 k = bms_next_member(af_state->referenced, k))
 			{
-				j = k + FirstLowInvalidHeapAttributeNumber;
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
 				chunk_sz[j] += RecordBatchFieldLength(&rb_state->columns[j]);
@@ -1397,7 +1397,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
             {
 				Form_pg_attribute attr;
 
-				j = k + FirstLowInvalidHeapAttributeNumber;
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
 				attr = tupleDescAttr(tupdesc, j);
