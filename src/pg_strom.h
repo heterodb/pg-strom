@@ -1395,11 +1395,6 @@ extern Expr *make_flat_ands_explicit(List *andclauses);
 extern AppendRelInfo **__find_appinfos_by_relids(PlannerInfo *root,
 												 Relids relids,
 												 int *nappinfos);
-#if PG_VERSION_NUM < 100000
-extern int __compute_parallel_worker(RelOptInfo *rel,
-									 double heap_pages,
-									 double index_pages);
-#endif
 extern double get_parallel_divisor(Path *path);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */
