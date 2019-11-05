@@ -1483,7 +1483,7 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser to create a shell type")));
 	/* see TypeShellMake */
-	type_rel = heap_open(TypeRelationId, RowExclusiveLock);
+	type_rel = table_open(TypeRelationId, RowExclusiveLock);
 	tupdesc = RelationGetDescr(type_rel);
 
 	memset(values, 0, sizeof(values));
@@ -1541,7 +1541,7 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 	InvokeObjectPostCreateHook(TypeRelationId, type_oid, 0);
 
 	heap_freetuple(tup);
-    heap_close(type_rel, RowExclusiveLock);
+	table_close(type_rel, RowExclusiveLock);
 
 	PG_RETURN_OID(type_oid);
 }

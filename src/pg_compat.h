@@ -209,4 +209,32 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 #define is_dummy_rel(r)			IS_DUMMY_REL(r)
 #endif
 
+/*
+ * MEMO: PG12 adopted storage access method (a.k.a pluggable storage layer).
+ */
+#if PG_VERSION_NUM < 120000
+typedef ParallelHeapScanDesc			ParallelTableScanDesc;
+typedef ParallelHeapScanDescData		ParallelTableScanDescData;
+
+#define table_open(a,b)					heap_open(a,b)
+#define table_close(a,b)				heap_close(a,b)
+#define table_beginscan(a,b,c,d)		heap_beginscan(a,b,c,d)
+#define table_beginscan_parallel(a,b)	heap_beginscan_parallel(a,b)
+
+#define table_endscan(a)				heap_endscan(a)
+#define table_rescan(a,b)				heap_rescan(a,b)
+
+#define table_parallelscan_estimate(a,b)		\
+	heap_parallelscan_estimate(b)
+#define table_parallelscan_initialize(a,b,c)	\
+	heap_parallelscan_initialize(b,a,c)
+#define table_parallelscan_reinitialize(a,b)	\
+	heap_parallelscan_reinitialize(b)
+
+#endif	/* < PG12 */
+
+
+
+
+
 #endif	/* PG_COMPAT_H */

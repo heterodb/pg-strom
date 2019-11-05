@@ -3145,7 +3145,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		Assert(outer_scanrelid > 0 &&
 			   outer_scanrelid < root->simple_rel_array_size);
 		rte = root->simple_rte_array[outer_scanrelid];
-		outer_rel = heap_open(rte->relid, NoLock);
+		outer_rel = table_open(rte->relid, NoLock);
 		outer_desc = RelationGetDescr(outer_rel);
 		nattrs = outer_desc->natts;
 	}
@@ -3423,7 +3423,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		cbody.data);
 
 	if (outer_rel)
-		heap_close(outer_rel, NoLock);
+		table_close(outer_rel, NoLock);
 
 	pfree(decl.data);
 	pfree(tbody.data);

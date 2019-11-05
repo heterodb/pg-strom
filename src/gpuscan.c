@@ -1334,7 +1334,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	 * Code construction for the CUDA kernel code
 	 */
 	rte = planner_rt_fetch(baserel->relid, root);
-	relation = heap_open(rte->relid, NoLock);
+	relation = table_open(rte->relid, NoLock);
 
 	initStringInfo(&kern);
 	pgstrom_init_codegen_context(&context, root, baserel);
@@ -1364,7 +1364,7 @@ PlanGpuScanPath(PlannerInfo *root,
 							   relation,
 							   tlist_dev,
 							   varattnos);
-	heap_close(relation, NoLock);
+	table_close(relation, NoLock);
 
 	/* save the outer_refs for columnar optimization */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);

@@ -1171,7 +1171,6 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 	/* Load the target buffer */
 	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
 								RBM_NORMAL, strategy);
-
 #if 1
 	/* Just like heapgetpage(), however, jobs we focus on is OLAP
 	 * workload, so it's uncertain whether we should vacuum the page
@@ -1179,7 +1178,6 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 	 */
 	heap_page_prune_opt(relation, buffer);
 #endif
-
 	/* we will check tuple's visibility under the shared lock */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = (Page) BufferGetPage(buffer);
@@ -1265,7 +1263,7 @@ bool
 PDS_exec_heapscan(GpuTaskState *gts, pgstrom_data_store *pds)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
-	HeapScanDesc	hscan = gts->css.ss.ss_currentScanDesc;
+	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
 	bool			retval;
 
 	CHECK_FOR_INTERRUPTS();

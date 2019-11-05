@@ -16,6 +16,7 @@
 #include "access/brin.h"
 #include "access/brin_revmap.h"
 #include "access/hash.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
@@ -57,12 +58,8 @@
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
-#if PG_VERSION_NUM >= 100000
 #include "common/base64.h"
 #include "common/md5.h"
-#else
-#include "libpq/md5.h"	//moved at PG10
-#endif
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeIndexscan.h"
@@ -85,9 +82,14 @@
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/readfuncs.h"
+#if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
+#endif
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#if PG_VERSION_NUM >= 120000
+#include "optimizer/optimizer.h"
+#endif
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
@@ -96,7 +98,9 @@
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#if PG_VERSION_NUM < 120000
 #include "optimizer/var.h"
+#endif
 #include "parser/parsetree.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -149,7 +153,9 @@
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
+#if PG_VERSION_NUM < 120000
 #include "utils/tqual.h"
+#endif
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 #include "utils/varbit.h"
@@ -215,6 +221,7 @@
 #error PG-Strom expects timestamp has 64bit integer format
 #endif
 #include "cuda_common.h"
+#include "pg_compat.h"
 
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
@@ -374,14 +381,9 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-
 	/* for regular table scan */
-	uint64		nr_allocated;	/* number of blocks already allocated to
-								 * workers; almost equivalent to the
-								 * @phs_nallocated in PG11 or later.
-								 */
-	ParallelHeapScanDescData	phscan;
-	/* variable length */
+	ParallelTableScanDescData phscan;
+	/* <-- variable length field --> */
 };
 
 /*
@@ -1461,13 +1463,6 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-
-/* ----------------------------------------------------------------
- *
- * Thin abstruction layer across multiple PostgreSQL versions
- *
- * ---------------------------------------------------------------- */
-#include "pg_compat.h"
 
 /* ----------------------------------------------------------------
  *

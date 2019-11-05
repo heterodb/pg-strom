@@ -1081,17 +1081,17 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 }
 
 /*
- * pgstromExecScanChunkParallel - read the relation with parallel scan
+ * pgstromExecHeapScanChunkParallel - read the heap relation by parallel scan
  */
 static pgstrom_data_store *
-pgstromExecScanChunkParallel(GpuTaskState *gts,
-							 pgstrom_data_store *pds,
-							 Bitmapset *brin_map,
-							 cl_long brin_range_sz)
+pgstromExecHeapScanChunkParallel(GpuTaskState *gts,
+								 Bitmapset *brin_map,
+								 cl_long brin_range_sz)
 {
 	GpuTaskSharedState *gtss = gts->gtss;
-	Relation	relation = gts->css.ss.ss_currentRelation;
-	HeapScanDesc scan = gts->css.ss.ss_currentScanDesc;
+	Relation			relation = gts->css.ss.ss_currentRelation;
+	HeapScanDesc		scan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
+	pgstrom_data_store *pds = NULL;
 
 	for (;;)
 	{
@@ -1173,7 +1173,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				}
 			}
 			scan->rs_startblock = startblock = gtss->phscan.phs_startblock;
-			nr_allocated = gtss->nr_allocated;
+			nr_allocated = pg_atomic_read_u64(&gtss->phscan.phs_nallocated);
 
 			if (nr_allocated >= (cl_long)scan->rs_nblocks)
 			{
@@ -1245,7 +1245,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				nr_allocated += nr_blocks;
 			}
 			/* update # of blocks already allocated to workers */
-			gtss->nr_allocated = nr_allocated;
+			pg_atomic_write_u64(&gtss->phscan.phs_nallocated, nr_allocated);
 			SpinLockRelease(&gtss->phscan.phs_mutex);
 
 			scan->rs_cblock = page;
@@ -1283,6 +1283,93 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 }
 
 /*
+ * pgstromExecHeapScanChunk
+ */
+static pgstrom_data_store *
+pgstromExecHeapScanChunk(GpuTaskState *gts,
+						 Bitmapset *brin_map, cl_long brin_range_sz)
+{
+	Relation		rel = gts->css.ss.ss_currentRelation;
+	HeapScanDesc	scan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
+	pgstrom_data_store *pds = NULL;
+
+	for (;;)
+	{
+		cl_long		page;
+
+		if (!scan->rs_inited)
+		{
+			/* no blocks to read? */
+			if (scan->rs_nblocks == 0)
+				break;
+			scan->rs_cblock = scan->rs_startblock;
+			Assert(scan->rs_numblocks == InvalidBlockNumber);
+			scan->rs_inited = true;
+		}
+		else if (scan->rs_cblock == InvalidBlockNumber)
+		{
+			/* no more blocks to read */
+			break;
+		}
+		page = scan->rs_cblock;
+
+		/*
+		 * If any, check BRIN-index bitmap, then moves to the next range
+		 * boundary if no tuple can match in this range.
+		 */
+		if (brin_map)
+		{
+			long	pos = page / brin_range_sz;
+
+			if (bms_is_member(pos, brin_map))
+			{
+				long	prev = page;
+
+				page = (pos + 1) * brin_range_sz;
+				if (page <= (cl_long)MaxBlockNumber)
+					scan->rs_cblock = (BlockNumber)page;
+				else
+					scan->rs_cblock = 0;
+				gts->outer_brin_count += (page - prev);
+				goto skip;
+			}
+		}
+
+		/* allocation of row-based PDS on demand */
+		if (!pds)
+		{
+			if (gts->nvme_sstate)
+				pds =  PDS_create_block(gts->gcontext,
+										RelationGetDescr(rel),
+										gts->nvme_sstate);
+			else
+				pds = PDS_create_row(gts->gcontext,
+									 RelationGetDescr(rel),
+									 pgstrom_chunk_size());
+			pds->kds.table_oid = RelationGetRelid(rel);
+		}
+		/* scan the next block */
+		if (!PDS_exec_heapscan(gts, pds))
+			break;		/* no more tuples we can store now! */
+		/* move to the next block */
+		scan->rs_cblock++;
+	skip:
+		if (scan->rs_cblock >= scan->rs_nblocks)
+			scan->rs_cblock = 0;
+		Assert(scan->rs_numblocks == InvalidBlockNumber);
+		if (scan->rs_syncscan)
+			ss_report_location(scan->rs_rd, scan->rs_cblock);
+		/* end of the scan? */
+		if (scan->rs_cblock == scan->rs_startblock)
+			scan->rs_cblock = InvalidBlockNumber;
+	}
+	/* PDS is valid, or end of the relation */
+	Assert(pds || !BlockNumberIsValid(scan->rs_cblock));
+
+	return pds;
+}
+
+/*
  * pgstromExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
@@ -1303,9 +1390,9 @@ pgstromExecScanChunk(GpuTaskState *gts)
 		EState	   *estate = gts->css.ss.ps.state;
 
 		if (!gts->gtss)
-			scan = heap_beginscan(rel, estate->es_snapshot, 0, NULL);
+			scan = table_beginscan(rel, estate->es_snapshot, 0, NULL);
 		else
-			scan = heap_beginscan_parallel(rel, &gts->gtss->phscan);
+			scan = table_beginscan_parallel(rel, &gts->gtss->phscan);
 
 		gts->css.ss.ss_currentScanDesc = scan;
 		/*
@@ -1324,125 +1411,53 @@ pgstromExecScanChunk(GpuTaskState *gts)
 		brin_range_sz = gts->outer_index_state->range_sz;
 
 	if (gts->gtss)
-	{
-		pds = pgstromExecScanChunkParallel(gts, pds, brin_map, brin_range_sz);
-	}
+		pds = pgstromExecHeapScanChunkParallel(gts, brin_map, brin_range_sz);
 	else
+		pds = pgstromExecHeapScanChunk(gts, brin_map, brin_range_sz);
+
+	if (pds)
 	{
-		for (;;)
+		if (pds->kds.nitems == 0)
 		{
-			cl_long		page;
-
-			if (!scan->rs_inited)
-			{
-				/* no blocks to read? */
-				if (scan->rs_nblocks == 0)
-					break;
-				scan->rs_cblock = scan->rs_startblock;
-				Assert(scan->rs_numblocks == InvalidBlockNumber);
-				scan->rs_inited = true;
-			}
-			else if (scan->rs_cblock == InvalidBlockNumber)
-			{
-				/* no more blocks to read */
-				break;
-			}
-			page = scan->rs_cblock;
-
-			/*
-			 * If any, check BRIN-index bitmap, then moves to the next range
-			 * boundary if no tuple can match in this range.
-			 */
-			if (brin_map)
-			{
-				long	pos = page / brin_range_sz;
-
-				if (bms_is_member(pos, brin_map))
-				{
-					long	prev = page;
-
-					page = (pos + 1) * brin_range_sz;
-					if (page <= (cl_long)MaxBlockNumber)
-						scan->rs_cblock = (BlockNumber)page;
-					else
-						scan->rs_cblock = 0;
-					gts->outer_brin_count += (page - prev);
-					goto skip;
-				}
-			}
-
-			/* allocation of row-based PDS on demand */
-			if (!pds)
-			{
-				if (gts->nvme_sstate)
-					pds =  PDS_create_block(gts->gcontext,
-											RelationGetDescr(rel),
-											gts->nvme_sstate);
-				else
-					pds = PDS_create_row(gts->gcontext,
-										 RelationGetDescr(rel),
-										 pgstrom_chunk_size());
-				pds->kds.table_oid = RelationGetRelid(rel);
-			}
-			/* scan the next block */
-			if (!PDS_exec_heapscan(gts, pds))
-				break;		/* no more tuples we can store now! */
-			/* move to the next block */
-			scan->rs_cblock++;
-		skip:
-			if (scan->rs_cblock >= scan->rs_nblocks)
-				scan->rs_cblock = 0;
-			Assert(scan->rs_numblocks == InvalidBlockNumber);
-			if (scan->rs_syncscan)
-				ss_report_location(scan->rs_rd, scan->rs_cblock);
-			/* end of the scan? */
-			if (scan->rs_cblock == scan->rs_startblock)
-				scan->rs_cblock = InvalidBlockNumber;
+			/* empty result */
+			Assert(!BlockNumberIsValid(scan->rs_cblock));
+			PDS_release(pds);
+			pds = NULL;
 		}
-	}
+		else if (pds->kds.format == KDS_FORMAT_BLOCK &&
+				 pds->kds.nitems < pds->kds.nrooms &&
+				 pds->nblocks_uncached > 0)
+		{
+			/*
+			 * MEMO: Special case handling if KDS_FORMAT_BLOCK was not filled
+			 * up entirely. KDS_FORMAT_BLOCK has an array of block-number to
+			 * support "ctid" system column, located on next to the KDS-head.
+			 * Block-numbers of pre-loaded blocks (hit on shared buffer) are
+			 * used from the head, and others (to be read from the file) are
+			 * used from the tail. If nitems < nrooms, this array has a hole
+			 * on the middle of array.
+			 * So, we have to move later half of the array to close the hole
+			 * and make a flat array.
+			 */
+			BlockNumber	   *block_nums
+				= (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
 
-	if (!pds)
-	{
-		/* end of the scan */
-		Assert(!BlockNumberIsValid(scan->rs_cblock));
-	}
-	else if (pds->kds.nitems == 0)
-	{
-		/* empty result */
-		Assert(!BlockNumberIsValid(scan->rs_cblock));
-		PDS_release(pds);
-		pds = NULL;
-	}
-	else if (pds->kds.format == KDS_FORMAT_BLOCK &&
-			 pds->kds.nitems < pds->kds.nrooms &&
-			 pds->nblocks_uncached > 0)
-	{
-		/*
-		 * MEMO: Special case handling if KDS_FORMAT_BLOCK was not filled
-		 * up entirely. KDS_FORMAT_BLOCK has an array of block-number to
-		 * support "ctid" system column, located on next to the KDS-head.
-		 * Block-numbers of pre-loaded blocks (hit on shared buffer) are
-		 * used from the head, and others (to be read from the file) are
-		 * used from the tail. If nitems < nrooms, this array has a hole
-		 * on the middle of array.
-		 * So, we have to move later half of the array to close the hole
-		 * and make a flat array.
-		 */
-		BlockNumber	   *block_nums
-			= (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
-
-		memmove(block_nums + (pds->kds.nitems - pds->nblocks_uncached),
-				block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
-				sizeof(BlockNumber) * pds->nblocks_uncached);
+			memmove(block_nums + (pds->kds.nitems - pds->nblocks_uncached),
+					block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
+					sizeof(BlockNumber) * pds->nblocks_uncached);
+		}
 	}
 	/* update statistics */
 	if (pds)
 	{
 		if (pds->kds.format == KDS_FORMAT_BLOCK)
 			gts->nvme_count += pds->nblocks_uncached;
+		InstrStopNode(&gts->outer_instrument, (double)pds->kds.nitems);
 	}
-	InstrStopNode(&gts->outer_instrument,
-				  !pds ? 0.0 : (double)pds->kds.nitems);
+	else
+	{
+		InstrStopNode(&gts->outer_instrument, 0.0);
+	}
 	return pds;
 }
 
@@ -1456,21 +1471,6 @@ pgstromRewindScanChunk(GpuTaskState *gts)
 
 	InstrEndLoop(&gts->outer_instrument);
 	heap_rescan(scan, NULL);
-#if PG_VERSION_NUM < 100000
-	/*
-	 * In PG9.6, re-initialization of DSM segment is a role of ReScan method,
-	 * then it was moved to ReInitializeDSM method on the later version.
-	 * phs_cblock must be reset to zero to rewind the scan.
-	 */
-	if (scan->rs_parallel != NULL)
-	{
-		ParallelHeapScanDesc parallel_scan = scan->rs_parallel;
-
-		SpinLockAcquire(&parallel_scan->phs_mutex);
-		parallel_scan->phs_cblock = parallel_scan->phs_startblock;
-		SpinLockRelease(&parallel_scan->phs_mutex);
-	}
-#endif
 	ExecScanReScan(&gts->css.ss);
 }
 

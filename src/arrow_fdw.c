@@ -1512,7 +1512,7 @@ ArrowAcquireSampleRows(Relation relation,
 	fdesc_array = alloca(sizeof(File) * list_length(filesList));
 	foreach (lc, filesList)
 	{
-		const char *fname = strVal(lfirst(lc));
+		char	   *fname = strVal(lfirst(lc));
 		File		fdesc;
 		List	   *rb_cached;
 		ListCell   *cell;
@@ -1998,7 +1998,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				 * lookup composite type definition from pg_class
 				 * At least, nattrs == _num_children
 				 */
-				rel = heap_open(RelationRelationId, AccessShareLock);
+				rel = table_open(RelationRelationId, AccessShareLock);
 				ScanKeyInit(&skey[0],
 							Anum_pg_class_relkind,
 							BTEqualStrategyNumber, F_CHAREQ,
@@ -2047,7 +2047,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 						type_oid = relForm->reltype;
 				}
 				systable_endscan(sscan);
-				heap_close(rel, AccessShareLock);
+				table_close(rel, AccessShareLock);
 
 				if (!OidIsValid(type_oid))
 					elog(ERROR, "arrow::%s is not supported",

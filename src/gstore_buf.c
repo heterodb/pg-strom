@@ -1734,7 +1734,7 @@ gstoreXactCallbackOnPreCommit(void)
 		/*
 		 * construction of new version of GPU device memory image
 		 */
-		frel = heap_open(gs_buffer->table_oid, NoLock);
+		frel = table_open(gs_buffer->table_oid, NoLock);
 		rawsize = GpuStoreBufferEstimateSize(frel, gs_buffer, nrooms, rowmap);
 		rc = gpuMemAllocPreserved(gs_buffer->pinning,
 								  &ipc_mhandle,
@@ -1785,7 +1785,7 @@ gstoreXactCallbackOnPreCommit(void)
 		}
 		PG_END_TRY();
 
-		heap_close(frel, NoLock);
+		table_close(frel, NoLock);
 	}
 }
 
@@ -2199,9 +2199,9 @@ pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
-	frel = heap_open(gstore_oid, AccessShareLock);
+	frel = table_open(gstore_oid, AccessShareLock);
 	retval = RelationGetNumberOfAttributes(frel);
-	heap_close(frel, NoLock);
+	table_close(frel, NoLock);
 
 	PG_RETURN_INT64(retval);
 }
