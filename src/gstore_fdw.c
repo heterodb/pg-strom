@@ -1777,9 +1777,7 @@ get_reggstore_type_oid(void)
 	{
 		Oid		temp_oid;
 
-		temp_oid = GetSysCacheOid2(TYPENAMENSP,
-								   CStringGetDatum("reggstore"),
-								   ObjectIdGetDatum(PG_PUBLIC_NAMESPACE));
+		temp_oid = get_type_oid("reggstore", PG_PUBLIC_NAMESPACE, true);
 		if (!OidIsValid(temp_oid) ||
 			!type_is_reggstore(temp_oid))
 			elog(ERROR, "type \"reggstore\" is not defined");

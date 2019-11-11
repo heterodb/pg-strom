@@ -37,6 +37,25 @@
 #endif
 
 /*
+ * MEMO: PG12 re-defines 'oid' as a regular column, not a system column.
+ * Thus, we don't need to have special treatment for OID, on the other
+ * hand, widespread APIs were affected by this change.
+ */
+#if PG_VERSION_NUM < 120000
+#define tupleDescHasOid(tdesc)		((tdesc)->tdhasoid)
+#define PgProcTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define PgTypeTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define CreateTemplateTupleDesc(a)	CreateTemplateTupleDesc((a), false)
+#define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
+#define SystemAttributeDefinition(a)			\
+	SystemAttributeDefinition((a),true)
+#else
+#define tupleDescHasOid(tdesc)		(false)
+#define PgProcTupleGetOid(tuple)	(((Form_pg_proc)GETSTRUCT(tuple))->oid)
+#define PgTypeTupleGetOid(tuple)	(((Form_pg_type)GETSTRUCT(tuple))->oid)
+#endif
+
+/*
  * MEMO: Naming convension of data access macro on some data types
  * were confused before PG11
  */
@@ -57,19 +76,6 @@
 #if PG_VERSION_NUM < 100000
 #define WaitLatch(a,b,c,d)				WaitLatch((a),(b),(c))
 #define WaitLatchOrSocket(a,b,c,d,e)	WaitLatchOrSocket((a),(b),(c),(d))
-#endif
-
-/*
- * MEMO: PG11 prohibits to replace only tupdesc of TupleTableSlot (it hits
- * Assert condition), so we have to use ExecInitScanTupleSlot() instead of
- * ExecAssignScanType().
- */
-#if PG_VERSION_NUM < 110000
-#define ExecInitScanTupleSlot(es, ss, tupdesc)							\
-	do {																\
-		(ss)->ss_ScanTupleSlot = ExecAllocTableSlot(&(es)->es_tupleTable); \
-		ExecAssignScanType((ss),(tupdesc));								\
-	} while(0)
 #endif
 
 /*
@@ -208,8 +214,11 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 
 /*
  * MEMO: PG12 adopted storage access method (a.k.a pluggable storage layer).
+ * It affects widespread APIs we had used in PG11 or older.
  */
 #if PG_VERSION_NUM < 120000
+typedef HeapScanDesc					TableScanDesc;
+typedef HeapScanDescData				TableScanDescData;
 typedef ParallelHeapScanDesc			ParallelTableScanDesc;
 typedef ParallelHeapScanDescData		ParallelTableScanDescData;
 
@@ -228,10 +237,57 @@ typedef ParallelHeapScanDescData		ParallelTableScanDescData;
 #define table_parallelscan_reinitialize(a,b)	\
 	heap_parallelscan_reinitialize(b)
 
+/*
+ * PG12 and newer required TupleTableSlot to have TupleTableSlotOps,
+ * for better support of pluggable storage engines. It affects to
+ * the widespread relevant APIs.
+ *
+ * PG10 or older didn't assign TupleDesc at ExecInitScanTupleSlot(),
+ * so we had to call ExecAssignScanType() additionally.
+ */
+#if PG_VERSION_NUM < 110000
+#define ExecInitScanTupleSlot(estate,ss,tdesc,tts_ops)	\
+	do {												\
+		ExecInitScanTupleSlot((estate),(ss));			\
+		ExecAssignScanType((ss),(tdesc));				\
+	} while(0)
+#else
+#define ExecInitScanTupleSlot(estate,ss,tdesc,tts_ops)	\
+	ExecInitScanTupleSlot((estate),(ss),(tdesc))
+#endif
+
+#define MakeSingleTupleTableSlot(tdesc,tts_ops)			\
+	MakeSingleTupleTableSlot((tdesc))
+#define ExecStoreHeapTuple(tup,slot,shouldFree)			\
+	ExecStoreTuple((tup),(slot),InvalidBuffer,(shouldFree))
+static inline HeapTuple
+ExecFetchSlotHeapTuple(TupleTableSlot *slot,
+					   bool materialize, bool *shouldFree)
+{
+	Assert(!materialize && !shouldFree);
+	return ExecFetchSlotTuple(slot);
+}
 #endif	/* < PG12 */
 
+/*
+ * PG12 added 'pathkey' argument of create_append_path().
+ * It shall be ignored on the older versions.
+ */
+#if PG_VERSION_NUM < 120000
+#define create_append_path(a,b,c,d,e,f,g,h,i,j)	\
+	create_append_path((a),(b),(c),(d),(f),(g),(h),(i),(j))
+#endif
 
-
-
+/*
+ * PG12 removed dsm_resize(). Even though we put a tentative alternative here,
+ * it should be replaced by the own implementation...
+ */
+#if PG_VERSION_NUM >= 120000
+static inline void *
+dsm_resize(dsm_segment *seg, Size size)
+{
+	elog(ERROR, "dsm_resize() is not implemented");
+}
+#endif
 
 #endif	/* PG_COMPAT_H */

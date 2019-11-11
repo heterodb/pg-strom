@@ -1109,12 +1109,12 @@ cost_gpupreagg(PlannerInfo *root,
 	return true;
 }
 
+#if PG_VERSION_NUM < 120000
 /*
- * estimate_hashagg_tablesize
- *
- * See optimizer/plan/planner.c
+ * estimate_hashagg_tablesize - had been declared as a static function
+ * until PG12 at the optimizer/plan/planner.c.
  */
-static Size
+static double
 estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
                            double dNumGroups)
 {
@@ -1131,6 +1131,7 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
 
 	return hashentrysize * dNumGroups;
 }
+#endif
 
 /*
  * make_gpupreagg_path
@@ -1470,7 +1471,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 		/* make a final grouping path (hash) */
 		if (can_hash)
 		{
-			Size	hashaggtablesize
+			double	hashaggtablesize
 				= estimate_hashagg_tablesize(partial_path,
 											 agg_final_costs,
 											 num_groups);
@@ -1574,13 +1575,13 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	if (try_parallel_path)
 		append_path = create_append_path(root, input_path->parent,
 										 NIL, append_paths_list,
-										 NULL,
+										 NIL, NULL,
 										 parallel_nworkers, true,
 										 partitioned_rels, -1.0);
 	else
 		append_path = create_append_path(root, input_path->parent,
 										 append_paths_list, NIL,
-										 NULL,
+										 NIL, NULL,
 										 parallel_nworkers, false,
 										 partitioned_rels, -1.0);
 	append_path->path.pathtarget = target_partial;
@@ -2019,7 +2020,7 @@ make_altfunc_simple_expr(const char *func_name, Expr *func_arg)
 			 : funcname_signature_string(func_name, 0, NIL, NULL));
 
 	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-	func_expr = makeFuncExpr(HeapTupleGetOid(tuple),
+	func_expr = makeFuncExpr(PgProcTupleGetOid(tuple),
 							 proc_form->prorettype,
 							 func_arg ? list_make1(func_arg) : NIL,
 							 InvalidOid,
@@ -2137,14 +2138,9 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
 	func_argtypes_oid[1] = FLOAT8OID;
 	func_argtypes_oid[2] = FLOAT8OID;
 	func_argtypes = buildoidvector(func_argtypes_oid, 3);
-	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-							   PointerGetDatum(func_name),
-							   PointerGetDatum(func_argtypes),
-							   ObjectIdGetDatum(namespace_oid));
-	if (!OidIsValid(func_oid))
-		elog(ERROR, "alternative function not found: %s",
-			 funcname_signature_string(func_name, 2, NIL, func_argtypes_oid));
-
+	func_oid = get_function_oid(func_name,
+								func_argtypes,
+								namespace_oid, false);
 	/* filter if any */
 	if (aggref->aggfilter)
 		filter_expr = aggref->aggfilter;
@@ -2324,7 +2320,7 @@ make_alternative_aggref(PlannerInfo *root,
 										   NIL,
 										   aggfn_cat->partfn_argtypes));
 		proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-		expr_host = (Expr *)makeFuncExpr(HeapTupleGetOid(tuple),
+		expr_host = (Expr *)makeFuncExpr(PgProcTupleGetOid(tuple),
 										 proc_form->prorettype,
 										 altfunc_args,
 										 InvalidOid,
@@ -2345,15 +2341,10 @@ make_alternative_aggref(PlannerInfo *root,
 
 	func_name = aggfn_cat->finalfn_name + 2;
 	func_argtypes = buildoidvector(&aggfn_cat->finalfn_argtype, 1);
-	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-							   PointerGetDatum(func_name),
-							   PointerGetDatum(func_argtypes),
-							   ObjectIdGetDatum(namespace_oid));
-	if (!OidIsValid(func_oid))
-		elog(ERROR, "cache lookup failed for function %s",
-			 funcname_signature_string(func_name, 1, NIL,
-									   &aggfn_cat->finalfn_argtype));
-	/* sanity checks */
+	func_oid = get_function_oid(func_name,
+								func_argtypes,
+								namespace_oid, false);
+	/* sanity check */
 	Assert(aggref->aggtype == get_func_rettype(func_oid));
 
 	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
@@ -4102,7 +4093,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	List		   *tlist_dev = cscan->custom_scan_tlist;
-	List		   *tlist_fallback = NIL;
 	ListCell	   *lc	__attribute__((unused));
 	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
@@ -4110,7 +4100,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	ProgramId		program_id;
 	size_t			length;
 	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
-	bool			has_oid;
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
@@ -4175,20 +4164,14 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	 * Projection from the outer-relation to the custom_scan_tlist is a job
 	 * of CPU fallback. It is equivalent to the initial device projection.
 	 */
-#if PG_VERSION_NUM < 100000
-	tlist_fallback = (List *)ExecInitExpr((Expr *)gpa_info->tlist_fallback,
-										  &gpas->gts.css.ss.ps);
-#else
-	tlist_fallback = gpa_info->tlist_fallback;
-#endif
-	if (!ExecContextForcesOids(&gpas->gts.css.ss.ps, &has_oid))
-		has_oid = false;
-	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev, has_oid);
-	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc);
+	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev);
+	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc,
+												  &TTSOpsVirtual);
 	//XXX - tlist_dev and tlist_fallback are compatible; needs Assert()?
 
-	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc);
-	gpas->outer_proj = ExecBuildProjectionInfo(tlist_fallback,
+	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc,
+												&TTSOpsHeapTuple);
+	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_fallback,
 											   econtext,
 											   gpas->gpreagg_slot,
 											   &gpas->gts.css.ss.ps,

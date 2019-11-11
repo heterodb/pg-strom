@@ -72,7 +72,7 @@ KDS_fetch_tuple_row(TupleTableSlot *slot,
 		tuple_buf->t_tableOid = kds->table_oid;
 		tuple_buf->t_data = &tup_item->htup;
 
-		ExecStoreTuple(tuple_buf, slot, InvalidBuffer, false);
+		ExecStoreHeapTuple(tuple_buf, slot, false);
 
 		return true;
 	}
@@ -197,7 +197,7 @@ KDS_fetch_tuple_block(TupleTableSlot *slot,
 			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
 			tuple->t_data = (HeapTupleHeader)((char *)hpage +
 											  ItemIdGetOffset(lpp));
-			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+			ExecStoreHeapTuple(tuple, slot, false);
 			return true;
 		}
 		/* move to the next block */
@@ -430,7 +430,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 		format == KDS_FORMAT_BLOCK)
 	{
 		attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
-        if (tupdesc->tdhasoid)
+        if (tupleDescHasOid(tupdesc))
             attcacheoff += sizeof(Oid);
         attcacheoff = MAXALIGN(attcacheoff);
 	}
@@ -550,7 +550,7 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->ncols = tupdesc->natts;
 	kds->format = format;
 	kds->has_attnames = has_attnames;
-	kds->tdhasoid = tupdesc->tdhasoid;
+	kds->tdhasoid = tupleDescHasOid(tupdesc);
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
 	kds->table_oid = InvalidOid;	/* caller shall set */
@@ -1014,7 +1014,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 {
 	BlockNumber		blknum = hscan->rs_cblock;
 	BlockNumber	   *block_nums;
-	Snapshot		snapshot = hscan->rs_snapshot;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
 	BufferAccessStrategy strategy = hscan->rs_strategy;
 	SMgrRelation	smgr = relation->rd_smgr;
 	Buffer			buffer;
@@ -1154,7 +1154,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 					  HeapScanDesc hscan)
 {
 	BlockNumber		blknum = hscan->rs_cblock;
-	Snapshot		snapshot = hscan->rs_snapshot;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
 	BufferAccessStrategy strategy = hscan->rs_strategy;
 	kern_data_store	*kds = &pds->kds;
 	Buffer			buffer;
@@ -1308,7 +1308,7 @@ KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	tup_index = KERN_DATA_STORE_ROWINDEX(kds);
 
 	/* reference a HeapTuple in TupleTableSlot */
-	tuple = ExecFetchSlotTuple(slot);
+	tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
 
 	/* check whether we have room for this tuple */
 	curr_usage = (__kds_unpack(kds->usage) +
@@ -1355,7 +1355,7 @@ KDS_insert_hashitem(kern_data_store *kds,
 		elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 
 	/* compute required length */
-	tuple = ExecFetchSlotTuple(slot);
+	tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
 	curr_usage = (__kds_unpack(kds->usage) +
 				  MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len));
 

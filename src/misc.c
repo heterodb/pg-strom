@@ -149,18 +149,71 @@ get_relnatts(Oid relid)
 }
 
 /*
+ * get_function_oid
+ */
+Oid
+get_function_oid(const char *func_name,
+				 oidvector *func_args,
+				 Oid namespace_oid,
+				 bool missing_ok)
+{
+	Oid		func_oid;
+
+	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_proc_oid,
+#endif
+							   CStringGetDatum(func_name),
+							   PointerGetDatum(func_args),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(func_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("function %s is not defined",
+						funcname_signature_string(func_name,
+												  func_args->dim1,
+												  NIL,
+												  func_args->values))));
+	return func_oid;
+}
+
+/*
+ * get_type_oid
+ */
+Oid
+get_type_oid(const char *type_name,
+			 Oid namespace_oid,
+			 bool missing_ok)
+{
+	Oid		type_oid;
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_type_oid,
+#endif
+							   CStringGetDatum(type_name),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(type_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("type %s is not defined", type_name)));
+
+	return type_oid;
+}
+
+/*
  * bms_to_cstring - human readable Bitmapset
  */
 char *
-bms_to_cstring(Bitmapset *x)
+bms_to_cstring(Bitmapset *bms)
 {
 	StringInfoData buf;
-	int			i;
+	int			bit = -1;
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "{");
-	for (i=0; i < x->nwords; i++)
-		appendStringInfo(&buf, "%s %08x", i==0 ? "" : ",", x->words[i]);
+	while ((bit = bms_next_member(bms, bit)) >= 0)
+		appendStringInfo(&buf, " %d", bit);
 	appendStringInfo(&buf, " }");
 
 	return buf.data;
@@ -188,7 +241,11 @@ pathnode_tree_walker(Path *node,
 		case T_BitmapAndPath:
 		case T_BitmapOrPath:
 		case T_TidPath:
+#if PG_VERSION_NUM < 120000
 		case T_ResultPath:
+#else
+		case T_GroupResultPath:
+#endif
 		case T_MinMaxAggPath:
 			/* primitive path nodes */
 			break;
@@ -449,8 +506,13 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpaths = subpaths;
 				return &b->path;
 			}
+#if PG_VERSION_NUM < 120000
 		case T_ResultPath:
 			return pmemdup(pathnode, sizeof(ResultPath));
+#else
+		case T_GroupResultPath:
+			return pmemdup(pathnode, sizeof(GroupResultPath));
+#endif
 		case T_MaterialPath:
 			{
 				MaterialPath   *a = (MaterialPath *)pathnode;
@@ -1026,9 +1088,7 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("int4range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("int4range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + random() % (upper - lower);
 	y = lower + random() % (upper - lower);
@@ -1050,9 +1110,7 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("int8range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("int8range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = ((int64)random() << 31) | (int64)random();
 	x = lower + v % (upper - lower);
@@ -1100,9 +1158,7 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("tsrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("tsrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = ((cl_ulong)random() << 31) | random();
 	x = lower + v % (upper - lower);
@@ -1150,9 +1206,7 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("tstzrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("tstzrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = ((cl_ulong)random() << 31) | random();
 	x = lower + v % (upper - lower);
@@ -1187,9 +1241,7 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("daterange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("daterange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + random() % (upper - lower);
 	y = lower + random() % (upper - lower);

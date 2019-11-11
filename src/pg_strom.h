@@ -85,6 +85,9 @@
 #if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
 #endif
+#if PG_VERSION_NUM >= 120000
+#include "optimizer/appendinfo.h"
+#endif
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #if PG_VERSION_NUM >= 120000
@@ -130,6 +133,9 @@
 #include "utils/bytea.h"
 #include "utils/cash.h"
 #include "utils/date.h"
+#if PG_VERSION_NUM >= 120000
+#include "utils/float.h"
+#endif
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/json.h"
@@ -381,9 +387,15 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	/* for regular table scan */
+
+	/* for block-based regular table scan */
+	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
+	slock_t			pbs_mutex;		/* lock of the fields below */
+	BlockNumber		pbs_startblock;	/* starting block number */
+	BlockNumber		pbs_nallocated;	/* # of blocks allocated to workers */
+
+	/* common parallel table scan descriptor */
 	ParallelTableScanDescData phscan;
-	/* <-- variable length field --> */
 };
 
 /*
@@ -1405,6 +1417,13 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_PROCEDURE	'p'
 #endif
 extern int	get_relnatts(Oid relid);
+extern Oid	get_function_oid(const char *func_name,
+							 oidvector *func_args,
+							 Oid namespace_oid,
+							 bool missing_ok);
+extern Oid	get_type_oid(const char *type_name,
+						 Oid namespace_oid,
+						 bool missing_ok);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);

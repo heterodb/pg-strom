@@ -233,12 +233,10 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 		Oid			nsp_oid;
 		Oid			typ_oid;
 
-		nsp_oid = GetSysCacheOid1(NAMESPACENAME, CStringGetDatum(nsp_name));
+		nsp_oid = get_namespace_oid(nsp_name, true);
 		if (!OidIsValid(nsp_oid))
 			continue;
-		typ_oid = GetSysCacheOid2(TYPENAMENSP,
-								  CStringGetDatum(typ_name),
-								  ObjectIdGetDatum(nsp_oid));
+		typ_oid = get_type_oid(typ_name, nsp_oid, true);
 		if (typ_oid == tcache->type_id)
 		{
 			devtype_info   *entry
@@ -430,14 +428,11 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
 		Oid			nsp_oid;
 		Oid			typ_oid;
 
-		nsp_oid = GetSysCacheOid1(NAMESPACENAME,
-								  CStringGetDatum(nsp_name));
+		nsp_oid = get_namespace_oid(nsp_name, true);
 		if (!OidIsValid(nsp_oid))
 			continue;
 
-		typ_oid = GetSysCacheOid2(TYPENAMENSP,
-								  CStringGetDatum(typ_name),
-								  ObjectIdGetDatum(nsp_oid));
+		typ_oid = get_type_oid(typ_name, nsp_oid, true);
 		if (!OidIsValid(typ_oid))
 			continue;
 
@@ -2208,7 +2203,7 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 								   oidvector *func_argtypes,
 								   Oid func_collid)
 {
-	Oid				func_oid = HeapTupleGetOid(protup);
+	Oid				func_oid = PgProcTupleGetOid(protup);
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	devfunc_info   *dfunc;
 	devtype_info   *dtype;

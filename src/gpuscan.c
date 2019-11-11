@@ -1178,7 +1178,7 @@ build_gpuscan_projection(PlannerInfo *root,
 	 */
 	tuple_sz = offsetof(kern_tupitem,
 						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
-	if (tupdesc->tdhasoid)
+	if (tupleDescHasOid(tupdesc))
 		tuple_sz += sizeof(Oid);
 	tuple_sz = MAXALIGN(tuple_sz);
 
@@ -1249,7 +1249,7 @@ build_gpuscan_projection(PlannerInfo *root,
 no_gpu_projection:
 	tuple_sz = offsetof(kern_tupitem,
 						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
-	if (tupdesc->tdhasoid)
+	if (tupleDescHasOid(tupdesc))
 		tuple_sz += sizeof(Oid);
 	tuple_sz = MAXALIGN(tuple_sz);
 	for (j=0; j < tupdesc->natts; j++)
@@ -1663,12 +1663,23 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	if (cscan->custom_scan_tlist != NIL)
 	{
 		TupleDesc		scan_tupdesc
-			= ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc);
+			= ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
+							  &TTSOpsHeapTuple);
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 		/* valid @custom_scan_tlist means device projection is required */
 		gss->dev_projection = true;
 	}
+	else
+	{
+		TupleDesc		scan_tupdesc = RelationGetDescr(scan_rel);
+
+		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
+							  &TTSOpsHeapTuple);
+		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss,
+											  cscan->scan.scanrelid);
+	}
+
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
@@ -1725,7 +1736,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* initialize resource for CPU fallback */
-	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel));
+	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel),
+											  &TTSOpsHeapTuple);
 	if (gss->dev_projection)
 	{
 		ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
@@ -1768,11 +1780,11 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
  * on ExecScan(), all we have to do here is recheck of device qualifier.
  */
 static bool
-ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
+ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *epq_slot)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
-	HeapTuple		tuple = slot->tts_tuple;
+	HeapTuple		tuple = ExecFetchSlotHeapTuple(epq_slot, false, NULL);
 	TupleTableSlot *scan_slot	__attribute__((unused));
 	ExprDoneCond	is_done		__attribute__((unused));
 	bool			retval;
@@ -1783,15 +1795,11 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
 	 * because it may not be compatible with relations's definition
 	 * if device projection is valid.
 	 */
-	ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
+	ExecStoreHeapTuple(tuple, gss->base_slot, false);
 	econtext->ecxt_scantuple = gss->base_slot;
 	ResetExprContext(econtext);
 
-#if PG_VERSION_NUM < 100000
-	retval = ExecQual(gss->dev_quals, econtext, false);
-#else
 	retval = ExecQual(gss->dev_quals, econtext);
-#endif
 	if (retval && gss->base_proj)
 	{
 		/*
@@ -1800,14 +1808,9 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
 		 * into ss_ScanTupleSlot, to fit tuple descriptor of the supplied
 		 * 'slot'.
 		 */
-		Assert(!slot->tts_shouldFree);
-		ExecClearTuple(slot);
-#if PG_VERSION_NUM < 100000
-		scan_slot = ExecProject(gss->base_proj, &is_done);
-#else
+		ExecClearTuple(epq_slot);
 		scan_slot = ExecProject(gss->base_proj);
-#endif
-		Assert(scan_slot == slot);
+		Assert(scan_slot == epq_slot);
 	}
 	return retval;
 }
@@ -2314,7 +2317,7 @@ gpuscan_next_tuple_suspended_block(GpuScanState *gss, GpuScanTask *gscan)
 				tuple->t_tableOid = pds_src->kds.table_oid;
 				tuple->t_data = (HeapTupleHeader)((char *)hpage +
 												  ItemIdGetOffset(lpp));
-				ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
+				ExecStoreHeapTuple(tuple, gss->base_slot, false);
 
 				return true;
 			}
@@ -2447,7 +2450,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 											 &tuple->t_self,
 											 &tuple->t_len);
 			slot = gss->gts.css.ss.ss_ScanTupleSlot;
-			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+			ExecStoreHeapTuple(tuple, slot, false);
 		}
 	}
 	return slot;

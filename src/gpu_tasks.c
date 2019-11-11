@@ -491,8 +491,6 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 void
 pgstromRescanGpuTaskState(GpuTaskState *gts)
 {
-	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
-
 	/*
 	 * release all the unprocessed tasks
 	 */
@@ -505,15 +503,9 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		gts->cb_release_task(gtask);
 	}
 
-	/*
-	 * rewind the scan position if GTS scans a table
-	 */
-	if (scan)
-	{
-		InstrEndLoop(&gts->outer_instrument);
-		heap_rescan(scan, NULL);
-		ExecScanReScan(&gts->css.ss);
-	}
+	/* rewind the scan position if GTS scans a table */
+	pgstromRewindScanChunk(gts);
+
 	/* Also rewind the scan state of Arrow_Fdw */
 	if (gts->af_state)
 		ExecReScanArrowFdw(gts->af_state);
@@ -665,6 +657,12 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	}
 	else if (relation)
 	{
+		/* init state of block based table scan */
+		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
+		SpinLockInit(&gtss->pbs_mutex);
+		gtss->pbs_startblock = InvalidBlockNumber;
+		gtss->pbs_nallocated = 0;
+		/* import snapshot by the core logic */
 		table_parallelscan_initialize(relation, &gtss->phscan, snapshot);
 		/* per workers initialization inclusing the coordinator */
 		pgstromInitWorkerGpuTaskState(gts, coordinate);
@@ -707,9 +705,15 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	GpuTaskSharedState *gtss = gts->gtss;
 
+	/* re-init block based scan */
+	SpinLockAcquire(&gtss->pbs_mutex);
+	gtss->pbs_startblock = InvalidBlockNumber;
+	gtss->pbs_nallocated = 0;
+	SpinLockRelease(&gtss->pbs_mutex);
+
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	if (relation)
+	else if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 

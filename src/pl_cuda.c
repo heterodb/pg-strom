@@ -295,6 +295,39 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 }
 
 /*
+ * CloneFunctionCallInfoData
+ */
+static FunctionCallInfo
+CloneFunctionCallInfoData(FmgrInfo *flinfo, FunctionCallInfo __fcinfo)
+{
+	FunctionCallInfo fcinfo;
+
+#if PG_VERSION_NUM < 120000
+	fcinfo = palloc(sizeof(FunctionCallInfoData));
+#else
+	fcinfo = palloc(offsetof(FunctionCallInfoBaseData, args) +
+					sizeof(NullableDatum) * __fcinfo->nargs);
+#endif
+	InitFunctionCallInfoData(*fcinfo,
+							 flinfo,
+							 __fcinfo->nargs,
+							 __fcinfo->fncollation,
+							 NULL,
+							 NULL);
+#if PG_VERSION_NUM < 120000
+	memcpy(fcinfo->arg, __fcinfo->arg,
+		   __fcinfo->nargs * sizeof(Datum));
+    memcpy(fcinfo->argnull, __fcinfo->argnull,
+           __fcinfo->nargs * sizeof(bool));
+#else
+	memcpy(fcinfo->args, __fcinfo->args,
+		   __fcinfo->nargs * sizeof(NullableDatum));
+#endif
+
+	return fcinfo;
+}
+
+/*
  * plcuda_code_include
  */
 static void
@@ -302,8 +335,7 @@ plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include)
 {
 	const char	   *func_name = get_func_name(fn_extra_include);
 	FmgrInfo		flinfo;
-	FunctionCallInfoData fcinfo;
-	FunctionCallInfo __fcinfo = con->fcinfo;
+	FunctionCallInfo fcinfo;
 	Datum			value;
 	ListCell	   *lc;
 
@@ -317,21 +349,10 @@ plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include)
 		}
 	}
 
-	/* see OidFunctionCallXX */
-	Assert(__fcinfo != NULL);
 	fmgr_info(fn_extra_include, &flinfo);
-	InitFunctionCallInfoData(fcinfo,
-							 &flinfo,
-							 __fcinfo->nargs,
-							 __fcinfo->fncollation,
-							 NULL,
-							 NULL);
-	memcpy(&fcinfo.arg, __fcinfo->arg,
-		   __fcinfo->nargs * sizeof(Datum));
-	memcpy(&fcinfo.argnull, __fcinfo->argnull,
-		   __fcinfo->nargs * sizeof(bool));
-	value = FunctionCallInvoke(&fcinfo);
-	if (fcinfo.isnull)
+	fcinfo = CloneFunctionCallInfoData(&flinfo, con->fcinfo);
+	value = FunctionCallInvoke(fcinfo);
+	if (fcinfo->isnull)
 	{
 		EMSG("function %s returned NULL", format_procedure(fn_extra_include));
 	}
@@ -706,11 +727,11 @@ plcuda_build_program(plcuda_code_context *con,
 	/* write out source file */
 	snprintf(path, sizeof(path), "%s.cu", name);
 	fdesc = PathNameOpenFile(path, O_RDWR|O_CREAT|O_EXCL|PG_BINARY);
-	nbytes = FileWrite(fdesc, source->data, source->len
-#if PG_VERSION_NUM >= 100000
-					   ,WAIT_EVENT_DATA_FILE_WRITE
+	nbytes = FileWrite(fdesc, source->data, source->len,
+#if PG_VERSION_NUM >= 120000
+					   0,	/* offset */
 #endif
-		);
+					   WAIT_EVENT_DATA_FILE_WRITE);
 	if (nbytes != source->len)
 		elog(ERROR, "could not write source file of PL/CUDA");
 	FileClose(fdesc);
@@ -883,14 +904,14 @@ plcuda_setup_arguments(plcuda_code_context *con)
 		int16	typlen;
 		bool	typbyval;
 
-		if (fcinfo->argnull[i])
+		if (PG_ARGISNULL(i))
 		{
 			appendStringInfoChar(&cat, 'N');
 			continue;
 		}
 		if (type_oid == REGGSTOREOID)
 		{
-			Oid		ftable_oid = fcinfo->arg[i];
+			Oid		ftable_oid = PG_GETARG_OID(i);
 			GstoreIpcHandle *handle
 				= __pgstrom_gstore_export_ipchandle(ftable_oid);
 
@@ -909,13 +930,13 @@ plcuda_setup_arguments(plcuda_code_context *con)
 			if (typbyval)
 			{
 				appendStringInfoChar(&cat, 'i');
-				con->arg_values[i] = fcinfo->arg[i];
+				con->arg_values[i] = PG_GETARG_DATUM(i);
 				required += MAXALIGN(sizeof(Datum));
 			}
 			else if (typlen > 0)
 			{
 				appendStringInfo(&cat, "r%d", typlen);
-				con->arg_values[i] = fcinfo->arg[i];
+				con->arg_values[i] = PG_GETARG_DATUM(i);
 				required += MAXALIGN(typlen);
 			}
 			else if (typlen == -1)
@@ -923,7 +944,7 @@ plcuda_setup_arguments(plcuda_code_context *con)
 				Datum	datum;
 
 				appendStringInfoChar(&cat, 'v');
-				datum = PointerGetDatum(PG_DETOAST_DATUM(fcinfo->arg[i]));
+				datum = PointerGetDatum(PG_GETARG_VARLENA_P(i));
 				con->arg_values[i] = datum;
 				required += MAXALIGN(VARSIZE(datum));
 			}
@@ -1091,6 +1112,8 @@ plcuda_wait_child_program(pid_t child, plcuda_code_context *con, int fdesc)
 							   fdesc,
 							   5000L,
 							   PG_WAIT_EXTENSION);
+		if (ev & WL_POSTMASTER_DEATH)
+			elog(FATAL, "unexpected postmaster dead");
 		if (ev & WL_SOCKET_READABLE)
 		{
 			for (;;)
@@ -1303,20 +1326,13 @@ plcuda_scalar_function_handler(FunctionCallInfo fcinfo,
 	/* sanity check */
 	if (OidIsValid(con.fn_sanity_check))
 	{
-		FunctionCallInfoData __fcinfo;
+		FunctionCallInfo __fcinfo;
 		FmgrInfo	__flinfo;
 
 		fmgr_info(con.fn_sanity_check, &__flinfo);
-		InitFunctionCallInfoData(__fcinfo, &__flinfo,
-								 fcinfo->nargs,
-								 fcinfo->fncollation,
-								 NULL, NULL);
-		memcpy(__fcinfo.arg, fcinfo->arg,
-			   sizeof(Datum) * fcinfo->nargs);
-		memcpy(__fcinfo.argnull, fcinfo->argnull,
-			   sizeof(bool) * fcinfo->nargs);
-		result = FunctionCallInvoke(&__fcinfo);
-		if (__fcinfo.isnull || DatumGetBool(result))
+		__fcinfo = CloneFunctionCallInfoData(&__flinfo, fcinfo);
+		result = FunctionCallInvoke(__fcinfo);
+		if (__fcinfo->isnull || DatumGetBool(result))
 			elog(ERROR, "PL/CUDA sanity check failed by %s",
 				 format_procedure(con.fn_sanity_check));
 	}
@@ -1409,7 +1425,7 @@ plcuda_setfunc_firstcall(FunctionCallInfo fcinfo,
 		{
 			if (ARR_LBOUND(results)[0] != 0)
 				elog(ERROR, "PL/CUDA logic made wrong data array");
-			fn_tupdesc = CreateTemplateTupleDesc(1, false);
+			fn_tupdesc = CreateTemplateTupleDesc(1);
 			TupleDescInitEntry(fn_tupdesc, (AttrNumber) 1, "values",
 							   ARR_ELEMTYPE(results), -1, 0);
 			setfcxt->nitems = ARR_DIMS(results)[0];
@@ -1423,7 +1439,7 @@ plcuda_setfunc_firstcall(FunctionCallInfo fcinfo,
 			if (ARR_LBOUND(results)[0] != 0 ||
 				ARR_LBOUND(results)[1] != 0)
 				elog(ERROR, "PL/CUDA logic made wrong data array");
-			fn_tupdesc = CreateTemplateTupleDesc(nattrs, false);
+			fn_tupdesc = CreateTemplateTupleDesc(nattrs);
 			for (i=1; i <= nattrs; i++)
 				TupleDescInitEntry(fn_tupdesc, (AttrNumber) i,
 								   psprintf("v%d", i),

@@ -1486,6 +1486,49 @@ make_pseudo_append_rel_info(PlannerInfo *root, Index relid)
 	return apinfo;
 }
 
+#if PG_VERSION_NUM >= 120000
+/*
+ * build_child_join_sjinfo - PG12 moved this function to joinrels.c, and
+ * re-declared as static function....
+ */
+static SpecialJoinInfo *
+build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
+                        Relids left_relids, Relids right_relids)
+{
+	SpecialJoinInfo *sjinfo = makeNode(SpecialJoinInfo);
+	AppendRelInfo **left_appinfos;
+	int			left_nappinfos;
+	AppendRelInfo **right_appinfos;
+	int			right_nappinfos;
+
+	memcpy(sjinfo, parent_sjinfo, sizeof(SpecialJoinInfo));
+	left_appinfos = find_appinfos_by_relids(root, left_relids,
+											&left_nappinfos);
+	right_appinfos = find_appinfos_by_relids(root, right_relids,
+											 &right_nappinfos);
+
+	sjinfo->min_lefthand = adjust_child_relids(sjinfo->min_lefthand,
+											   left_nappinfos, left_appinfos);
+	sjinfo->min_righthand = adjust_child_relids(sjinfo->min_righthand,
+												right_nappinfos,
+												right_appinfos);
+	sjinfo->syn_lefthand = adjust_child_relids(sjinfo->syn_lefthand,
+											   left_nappinfos, left_appinfos);
+	sjinfo->syn_righthand = adjust_child_relids(sjinfo->syn_righthand,
+												right_nappinfos,
+												right_appinfos);
+	sjinfo->semi_rhs_exprs = (List *)
+		adjust_appendrel_attrs(root,
+							   (Node *) sjinfo->semi_rhs_exprs,
+							   right_nappinfos,
+							   right_appinfos);
+	pfree(left_appinfos);
+	pfree(right_appinfos);
+
+	return sjinfo;
+}
+#endif
+
 /*
  * try_partitionwise_gpujoin
  */
@@ -2152,7 +2195,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	{
 		append_path = create_append_path(root, joinrel,
 										 NIL, subpaths_list,
-										 required_outer,
+										 NIL, required_outer,
 										 parallel_nworkers, true,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
@@ -2162,7 +2205,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	{
 		append_path = create_append_path(root, joinrel,
 										 subpaths_list, NIL,
-										 required_outer,
+										 NIL, required_outer,
 										 0, false,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
@@ -3075,8 +3118,9 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 * descriptor to initialize the related stuff.
 	 */
 	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc);
+	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc,
+						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
@@ -3224,7 +3268,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 	if (fallback_needs_projection)
 	{
-		gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc);
+		gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc,
+													  &TTSOpsHeapTuple);
 		gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
 													 ss->ps.ps_ExprContext,
 													 ss->ss_ScanTupleSlot,
@@ -3397,7 +3442,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->result_width =
 		MAXALIGN(offsetof(HeapTupleHeaderData,
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
-				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
+				 (tupleDescHasOid(result_tupdesc) ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 }
 
@@ -4487,11 +4532,11 @@ gpujoin_codegen_projection(StringInfo source,
 		foreach (lc1, tlist_dev)
 		{
 			TargetEntry		   *tle = lfirst(lc1);
-			Form_pg_attribute	attr;
+			const FormData_pg_attribute *attr;
 
 			if (varattmaps[tle->resno-1] >= 0)
 				continue;
-			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
+			attr = SystemAttributeDefinition(varattmaps[tle->resno-1]);
 			appendStringInfo(
 				&row,
 				"  sz = pg_sysattr_%s_store(kcxt,%s,htup,&t_self,\n"
@@ -5181,7 +5226,7 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 						   1000L,
 						   PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "Unexpected Postmaster Dead");
+				elog(FATAL, "unexpected postmaster dead");
 			ResetLatch(MyLatch);
 		}
 		/* OK, no PG workers run GpuJoin at this point */
@@ -5351,9 +5396,11 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			case MinTransactionIdAttributeNumber:
 				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
 				break;
+#if PG_VERSION_NUM < 120000
 			case ObjectIdAttributeNumber:
 				datum = ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
 				break;
+#endif
 			case TableOidAttributeNumber:
 				datum = ObjectIdGetDatum(kds->table_oid);
 				break;
@@ -6856,7 +6903,7 @@ gpujoin_inner_hash_preload(innerState *istate,
 		if (TupIsNull(scan_slot))
 			break;
 
-		(void)ExecFetchSlotTuple(scan_slot);
+		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
 		hash = get_tuple_hashvalue(istate, true, scan_slot,
 								   &is_null_keys);
 		/*
@@ -6911,7 +6958,7 @@ gpujoin_inner_heap_preload(innerState *istate,
 		scan_slot = ExecProcNode(scan_ps);
 		if (TupIsNull(scan_slot))
 			break;
-		(void)ExecFetchSlotTuple(scan_slot);
+		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
 		while (!KDS_insert_tuple(kds_heap, scan_slot))
 			kds_heap = gpujoin_expand_inner_kds(seg, kds_offset);
 	}
@@ -7207,13 +7254,18 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		}
 		else
 		{
+			int		ev;
+
 			/* wait for the completion of inner preload by the master */
 			CHECK_FOR_INTERRUPTS();
 
-			WaitLatch(&MyProc->procLatch,
-					  WL_LATCH_SET,
-					  -1,
-					  PG_WAIT_EXTENSION);
+			ev = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET |
+						   WL_POSTMASTER_DEATH,
+						   -1,
+						   PG_WAIT_EXTENSION);
+			if (ev & WL_POSTMASTER_DEATH)
+				elog(FATAL, "unexpected postmaster dead");
 			ResetLatch(&MyProc->procLatch);
 		}
 	}

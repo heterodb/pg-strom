@@ -1272,7 +1272,7 @@ GpuStoreBufferGetTuple(Relation frel,
 	/* put system column information if needed */
 	if (needs_system_columns)
 	{
-		HeapTuple   tup = ExecMaterializeSlot(slot);
+		HeapTuple   tup = ExecFetchSlotHeapTuple(slot, false, NULL);
 
 		tup->t_self.ip_blkid.bi_hi = (row_index >> 32) & 0x0000ffff;
 		tup->t_self.ip_blkid.bi_lo = (row_index >> 16) & 0x0000ffff;
@@ -2251,7 +2251,7 @@ pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(9, false);
+		tupdesc = CreateTemplateTupleDesc(9);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database_oid",
 						   OIDOID, -1, 0);
         TupleDescInitEntry(tupdesc, (AttrNumber) 2, "table_oid",
