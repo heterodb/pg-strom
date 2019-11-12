@@ -15,7 +15,7 @@ CREATE TABLE regtest_data (
   d     numeric,
   memo  text
 );
-SELECT setseed(0.20190701);
+SELECT pgstrom.random_setseed(20190701);
 INSERT INTO regtest_data (
   SELECT x, pgstrom.random_float(20,-100.0,100.0)::numeric(9,3),
             pgstrom.random_float(20,-100.0,100.0)::numeric(9,3),

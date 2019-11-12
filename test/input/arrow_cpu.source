@@ -32,7 +32,7 @@ CREATE TABLE regtest_data (
   tm     time,
   ts     timestamp
 );
-SELECT setseed(0.20190711);
+SELECT pgstrom.random_setseed(20190711);
 INSERT INTO regtest_data (
   SELECT x, pgstrom.random_int(2, -32000, 32000),
             pgstrom.random_int(2, -16777216, 16777216),

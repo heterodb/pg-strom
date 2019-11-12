@@ -30,9 +30,9 @@ CREATE TABLE rt_datetime (
   iv2     interval,
   ival    int
 );
-SELECT setseed(0.20190613);
- setseed 
----------
+SELECT pgstrom.random_setseed(20190613);
+ random_setseed 
+----------------
  
 (1 row)
 

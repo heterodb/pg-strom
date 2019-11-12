@@ -31,7 +31,7 @@ CREATE TABLE rt_datetime (
   iv2     interval,
   ival    int
 );
-SELECT setseed(0.20190613);
+SELECT pgstrom.random_setseed(20190613);
 INSERT INTO rt_datetime (
   SELECT x, pgstrom.random_date(1.0),
             pgstrom.random_date(1.0),

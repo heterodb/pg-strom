@@ -676,6 +676,7 @@ errorText(int errcode)
  *
  * ----------------------------------------------------------------
  */
+Datum pgstrom_random_setseed(PG_FUNCTION_ARGS);
 Datum pgstrom_random_int(PG_FUNCTION_ARGS);
 Datum pgstrom_random_float(PG_FUNCTION_ARGS);
 Datum pgstrom_random_date(PG_FUNCTION_ARGS);
@@ -695,12 +696,44 @@ Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
 Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
 Datum pgstrom_abort_if(PG_FUNCTION_ARGS);
 
+static unsigned int		pgstrom_random_seed = 0;
+static bool				pgstrom_random_seed_set = false;
+
+Datum
+pgstrom_random_setseed(PG_FUNCTION_ARGS)
+{
+	unsigned int	seed = PG_GETARG_UINT32(0);
+
+	pgstrom_random_seed = seed ^ 0xdeadbeafU;
+	pgstrom_random_seed_set = true;
+
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
+
+static cl_long
+__random(void)
+{
+	if (!pgstrom_random_seed_set)
+	{
+		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeaf;
+		pgstrom_random_seed_set = true;
+	}
+	return (cl_ulong)rand_r(&pgstrom_random_seed);
+}
+
+static inline double
+__drand48(void)
+{
+	return (double)__random() / (double)RAND_MAX;
+}
+
 static inline bool
 generate_null(double ratio)
 {
 	if (ratio <= 0.0)
 		return false;
-	if (100.0 * drand48() < ratio)
+	if (100.0 * __drand48() < ratio)
 		return true;
 	return false;
 }
@@ -719,7 +752,7 @@ pgstrom_random_int(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_INT64(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_INT64(lower + v % (upper - lower));
 }
@@ -739,7 +772,7 @@ pgstrom_random_float(PG_FUNCTION_ARGS)
 	if (upper == lower)
 		PG_RETURN_FLOAT8(lower);
 
-	PG_RETURN_FLOAT8((upper - lower) * drand48() + lower);
+	PG_RETURN_FLOAT8((upper - lower) * __drand48() + lower);
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_float);
 
@@ -766,7 +799,7 @@ pgstrom_random_date(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_DATEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_DATEADT(lower + v % (upper - lower));
 }
@@ -790,7 +823,7 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_TIMEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
@@ -814,12 +847,12 @@ pgstrom_random_timetz(PG_FUNCTION_ARGS)
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
 	temp = palloc(sizeof(TimeTzADT));
-	temp->zone = (random() % 23 - 11) * USECS_PER_HOUR;
+	temp->zone = (__random() % 23 - 11) * USECS_PER_HOUR;
 	if (upper == lower)
 		temp->time = lower;
 	else
 	{
-		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		v = (__random() << 31) | __random();
 		temp->time = lower + v % (upper - lower);
 	}
 	PG_RETURN_TIMETZADT_P(temp);
@@ -860,7 +893,7 @@ pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_TIMEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_TIMESTAMP(lower + v % (upper - lower));
 }
@@ -903,7 +936,7 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 		x = lower;
 	else
 	{
-		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		v = (__random() << 31) | __random();
 		x = lower + v % (upper - lower);
 	}
 	temp = palloc(sizeof(macaddr));
@@ -949,7 +982,7 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 	{
 		if (j < 8)
 		{
-			v |= (cl_ulong)random() << j;
+			v |= __random() << j;
 			j += 31;	/* note: only 31b of random() are valid */
 		}
 		if (bits >= 8)
@@ -996,7 +1029,7 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 		{
 			if (j < 5)
 			{
-				v |= (cl_ulong)random() << j;
+				v |= __random() << j;
 				j += 31;
 			}
 			*pos = base32[v & 0x1f];
@@ -1027,7 +1060,7 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	maxlen = (PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1));
 	if (maxlen < 1 || maxlen > BLCKSZ)
 		elog(ERROR, "%s: max length too much", __FUNCTION__);
-	n = 1 + random() % maxlen;
+	n = 1 + __random() % maxlen;
 
 	temp = palloc(VARHDRSZ + n);
 	SET_VARSIZE(temp, VARHDRSZ + n);
@@ -1036,7 +1069,7 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	{
 		if (j < 6)
 		{
-			v |= (cl_ulong)random() << j;
+			v |= __random() << j;
 			j += 31;
 		}
 		*pos = base64[v & 0x3f];
@@ -1090,8 +1123,8 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	type_oid = get_type_oid("int4range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	x = lower + random() % (upper - lower);
-	y = lower + random() % (upper - lower);
+	x = lower + __random() % (upper - lower);
+	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
 							 Int32GetDatum(x),
 							 Int32GetDatum(y));
@@ -1112,9 +1145,9 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	type_oid = get_type_oid("int8range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((int64)random() << 31) | (int64)random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((int64)random() << 31) | (int64)random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 Int64GetDatum(x),
@@ -1160,9 +1193,9 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 
 	type_oid = get_type_oid("tsrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 TimestampGetDatum(x),
@@ -1208,9 +1241,9 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 
 	type_oid = get_type_oid("tstzrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 TimestampTzGetDatum(x),
@@ -1243,8 +1276,8 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 
 	type_oid = get_type_oid("daterange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	x = lower + random() % (upper - lower);
-	y = lower + random() % (upper - lower);
+	x = lower + __random() % (upper - lower);
+	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
 							 DateADTGetDatum(x),
 							 DateADTGetDatum(y));

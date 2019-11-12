@@ -24,7 +24,7 @@ CREATE TABLE rt_text (
   tj1   text        COLLATE "ja_JP",
   tj2   text        COLLATE "ja_JP"
 );
-SELECT setseed(0.20190616);
+SELECT pgstrom.random_setseed(20190616);
 INSERT INTO rt_text (
   SELECT x, pgstrom.random_text_len(1,  80),
             pgstrom.random_text_len(1,  80),

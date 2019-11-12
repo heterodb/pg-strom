@@ -18,9 +18,9 @@ CREATE TABLE rt_jsonb_c (
   id  int,
   v   jsonb
 );
-SELECT setseed(0.20190623);
- setseed 
----------
+SELECT pgstrom.random_setseed(20190623);
+ random_setseed 
+----------------
  
 (1 row)
 

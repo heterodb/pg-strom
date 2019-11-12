@@ -3656,7 +3656,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
 		}
-		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
+		snprintf(qlabel, sizeof(qlabel), "Depth%2d", depth);
 		indent_width = es->indent * 2 + strlen(qlabel) + 2;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)

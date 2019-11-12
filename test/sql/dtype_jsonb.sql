@@ -19,7 +19,7 @@ CREATE TABLE rt_jsonb_c (
   id  int,
   v   jsonb
 );
-SELECT setseed(0.20190623);
+SELECT pgstrom.random_setseed(20190623);
 
 INSERT INTO rt_jsonb_a (
   SELECT x, ('[ ' || case when i is null then 'null' else i::text end
