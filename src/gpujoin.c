@@ -188,22 +188,14 @@ typedef struct
 	JoinType			join_type;
 	double				nrows_ratio;
 	cl_uint				ichunk_size;
-#if PG_VERSION_NUM < 100000	
-	List			   *join_quals;		/* single element list of ExprState */
-	List			   *other_quals;	/* single element list of ExprState */
-#else
 	ExprState		   *join_quals;
 	ExprState		   *other_quals;
-#endif
 
 	/*
 	 * Join properties; only hash-join
 	 */
 	List			   *hash_outer_keys;
 	List			   *hash_inner_keys;
-//	List			   *hash_keylen;
-//	List			   *hash_keybyval;
-//	List			   *hash_keytype;
 
 	/* CPU Fallback related */
 	AttrNumber		   *inner_dst_resno;
@@ -232,11 +224,7 @@ typedef struct
 	 * Expressions to be used in the CPU fallback path
 	 */
 	List		   *join_types;
-#if PG_VERSION_NUM < 100000
-	List		   *outer_quals;	/* list of ExprState */
-#else
 	ExprState	   *outer_quals;
-#endif
 	double			outer_ratio;
 	double			outer_nrows;
 	List		   *hash_outer_keys;
@@ -3174,14 +3162,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
 	if (gj_info->outer_quals)
-	{
-#if PG_VERSION_NUM < 100000
-		gjs->outer_quals = (List *)
-			ExecInitExpr((Expr *)gj_info->outer_quals, &ss->ps);
-#else
 		gjs->outer_quals = ExecInitQual(gj_info->outer_quals, &ss->ps);
-#endif
-	}
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
 	Assert(!cscan->scan.plan.qual);
@@ -3257,12 +3238,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				/* also, non-simple Var node needs projection */
 				fallback_needs_projection = true;
 			}
-#if PG_VERSION_NUM < 100000
-			tlist_fallback = lappend(tlist_fallback,
-									 ExecInitExpr((Expr *)tle, &ss->ps));
-#else
 			tlist_fallback = lappend(tlist_fallback, tle);
-#endif
 		}
 	}
 
@@ -3348,24 +3324,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		if (join_quals)
 		{
 			Assert(IsA(join_quals, List));
-#if PG_VERSION_NUM < 100000
-			istate->join_quals = (List *)
-				ExecInitExpr((Expr *)join_quals, &ss->ps);
-#else
 			istate->join_quals = ExecInitQual(join_quals, &ss->ps);
-#endif
 		}
 
 		other_quals = list_nth(gj_info->other_quals, i);
 		if (other_quals)
-		{
-#if PG_VERSION_NUM < 100000
-			istate->other_quals = (List *)
-				ExecInitExpr((Expr *)other_quals, &ss->ps);
-#else
 			istate->other_quals = ExecInitQual(other_quals, &ss->ps);
-#endif
-		}
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
@@ -3900,7 +3864,6 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	OverWriteSharedStateIfPartitionLeaf(gjs);
 }
 
-#if PG_VERSION_NUM >= 100000
 /*
  * ExecGpuJoinReInitializeDSM
  */
@@ -3946,7 +3909,6 @@ ExecShutdownGpuJoin(CustomScanState *node)
 		gjs->gj_rtstat = gj_rtstat_new;
 	}
 }
-#endif
 
 /*
  * gpujoin_codegen_var_decl
@@ -5547,11 +5509,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(istate->other_quals, econtext, false);
-#else
 		retval = ExecQual(istate->other_quals, econtext);
-#endif
 	} while (!retval);
 
 	/* update outer join map */
@@ -5618,11 +5576,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(istate->join_quals, econtext, false);
-#else
 		retval = ExecQual(istate->join_quals, econtext);
-#endif
 		if (retval)
 		{
 			istate->fallback_inner_index = index + 1;
@@ -5771,11 +5725,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(gjs->outer_quals, econtext, false);
-#else
 		retval = ExecQual(gjs->outer_quals, econtext);
-#endif
 	} while (!retval);
 
 	/* rewind the next depth */
@@ -6083,15 +6033,7 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 
 			/* projection? */
 			if (gjs->proj_fallback)
-			{
-#if PG_VERSION_NUM < 100000
-				ExprDoneCond	is_done;
-
-				slot = ExecProject(gjs->proj_fallback, &is_done);
-#else
 				slot = ExecProject(gjs->proj_fallback);
-#endif
-			}
 			Assert(slot == gjs->gts.css.ss.ss_ScanTupleSlot);
 			return slot;
 		}
@@ -6782,11 +6724,7 @@ get_tuple_hashvalue(innerState *istate,
 		Datum			datum;
 		bool			isnull;
 
-#if PG_VERSION_NUM < 100000
-		datum = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
-#else
 	    datum = ExecEvalExpr(clause, istate->econtext, &isnull);
-#endif
 		if (isnull)
 			continue;
 		is_null_keys = false;	/* key contains at least a valid value */
@@ -7478,14 +7416,7 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 
 	gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
 	SpinLockInit(&gj_rtstat->c.lock);
-#if PG_VERSION_NUM < 100000
-	/* Because of restrictions at PG9.6, see createGpuScanSharedState */
-	if (dsm_addr)
-	{
-		gj_rtstat = MemoryContextAllocZero(estate->es_query_cxt, rtstat_len);
-		SpinLockInit(&gj_rtstat->c.lock);
-	}
-#endif
+
 	gjs->gj_sstate = gj_sstate;
 	gjs->gj_rtstat = gj_rtstat;
 }
@@ -7561,10 +7492,8 @@ pgstrom_init_gpujoin(void)
 	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
 	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
 	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
-#if PG_VERSION_NUM >= 100000
 	gpujoin_exec_methods.ReInitializeDSMCustomScan = ExecGpuJoinReInitializeDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= ExecShutdownGpuJoin;
-#endif
 	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
 
 	/* hook registration */

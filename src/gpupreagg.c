@@ -137,11 +137,7 @@ typedef struct
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
-#if PG_VERSION_NUM < 100000
-	List		   *outer_quals;	/* List of ExprState */
-#else
 	ExprState	   *outer_quals;
-#endif
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
 
@@ -1361,13 +1357,8 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 								 -1.0);
 			if (parse->groupingSets)
 			{
-#if PG_VERSION_NUM < 100000
-				List	   *rollup_lists = NIL;
-				List	   *rollup_groupclauses = NIL;
-#else
 				AggStrategy	rollup_strategy = AGG_PLAIN;
 				List	   *rollup_data_list = NIL;
-#endif
 				ListCell   *lc;
 				/*
 				 * TODO: In this version, we expect group_rel->pathlist have
@@ -1383,13 +1374,8 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 
 					if (IsA(pathnode, GroupingSetsPath))
 					{
-#if PG_VERSION_NUM < 100000
-						rollup_groupclauses = pathnode->rollup_groupclauses;
-						rollup_lists = pathnode->rollup_lists;
-#else
 						rollup_strategy = pathnode->aggstrategy;
 						rollup_data_list = pathnode->rollups;
-#endif
 						break;
 					}
 				}
@@ -1403,13 +1389,8 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 											 target_final,
 #endif
 											 (List *) parse->havingQual,
-#if PG_VERSION_NUM < 100000
-											 rollup_lists,
-											 rollup_groupclauses,
-#else
 											 rollup_strategy,
 											 rollup_data_list,
-#endif
 											 agg_final_costs,
 											 num_groups);
 #if PG_VERSION_NUM >= 110000
@@ -1612,7 +1593,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 									(List *) havingQual,
 									num_groups,
 									agg_final_costs);
-#endif	/* PG_VERSION_NUM >= 100000 */
+#endif	/* PG_VERSION_NUM >= 110000 */
 }
 
 /*
@@ -4144,13 +4125,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	else
 	{
 		Assert(scan_rel != NULL);
-#if PG_VERSION_NUM < 100000
-		gpas->outer_quals = (List *)
-			ExecInitExpr((Expr *)gpa_info->outer_quals, &gpas->gts.css.ss.ps);
-#else
 		gpas->outer_quals = ExecInitQual(gpa_info->outer_quals,
 										 &gpas->gts.css.ss.ps);
-#endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
 		pgstromExecInitBrinIndexMap(&gpas->gts,
 									gpa_info->index_oid,
@@ -4382,7 +4358,6 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	pgstromInitWorkerGpuTaskState(&gpas->gts, coordinate);
 }
 
-#if PG_VERSION_NUM >= 100000
 /*
  * ExecGpuPreAggReInitializeDSM
  */
@@ -4425,7 +4400,6 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 		gpas->gpa_rtstat = gpa_rtstat_new;
 	}
 }
-#endif
 
 /*
  * ExplainGpuPreAgg
@@ -4519,15 +4493,7 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 
 	gpa_rtstat = &gpa_sstate->gpa_rtstat;
 	SpinLockInit(&gpa_rtstat->c.lock);
-#if PG_VERSION_NUM < 100000
-	/* Because of restrictions at PG9.6, see createScanSharedState */
-	if (dsm_addr)
-	{
-		gpa_rtstat = MemoryContextAllocZero(estate->es_query_cxt,
-											sizeof(GpuPreAggRuntimeStat));
-		SpinLockInit(&gpa_rtstat->c.lock);
-	}
-#endif
+
 	gpas->gpa_sstate = gpa_sstate;
 	gpas->gpa_rtstat = gpa_rtstat;
 }
@@ -4910,14 +4876,8 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 			/* Run CPU Projection of GpuJoin, instead */
 			if (outer_gts->css.ss.ps.ps_ProjInfo)
 			{
-				ExprContext *__econtext = outer_gts->css.ss.ps.ps_ExprContext;
-
-				__econtext->ecxt_scantuple = slot;
-#if PG_VERSION_NUM < 100000
-				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo, &is_done);
-#else
+				outer_gts->css.ss.ps.ps_ExprContext->ecxt_scantuple = slot;
 				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo);
-#endif
 			}
 			econtext->ecxt_scantuple = slot;
 		}
@@ -4937,25 +4897,15 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 		pg_atomic_add_fetch_u64(&gpa_rtstat->c.source_nitems, 1L);
 
 		/* filter out the tuple, if any outer quals */
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(gpas->outer_quals, econtext, false);
-#else
 		retval = ExecQual(gpas->outer_quals, econtext);
-#endif
 		if (!retval)
 		{
 			pg_atomic_add_fetch_u64(&gpa_rtstat->c.nitems_filtered, 1L);
 			continue;
 		}
 		/* makes a projection from the outer-scan to the pseudo-tlist */
-#if PG_VERSION_NUM < 100000
-		slot = ExecProject(gpas->outer_proj, &is_done);
-		if (is_done != ExprEndResult)
-			break;		/* XXX is this logic really right? */
-#else
 		slot = ExecProject(gpas->outer_proj);
 		break;
-#endif
 	}
 	pg_atomic_add_fetch_u64(&gpa_rtstat->c.fallback_count, 1);
 	return slot;
@@ -5989,10 +5939,8 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_exec_methods.EstimateDSMCustomScan = ExecGpuPreAggEstimateDSM;
     gpupreagg_exec_methods.InitializeDSMCustomScan = ExecGpuPreAggInitDSM;
     gpupreagg_exec_methods.InitializeWorkerCustomScan = ExecGpuPreAggInitWorker;
-#if PG_VERSION_NUM >= 100000
 	gpupreagg_exec_methods.ReInitializeDSMCustomScan = ExecGpuPreAggReInitializeDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = ExecShutdownGpuPreAgg;
-#endif
 	gpupreagg_exec_methods.ExplainCustomScan   = ExplainGpuPreAgg;
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;

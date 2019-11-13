@@ -69,26 +69,7 @@
 #endif
 
 /*
- * MEMO: PG10 adds the 4th argument for WaitLatch(), to inform the event
- * type which blocks PostgreSQL backend context. In our case, it is always
- * PG_WAIT_EXTENSION.
- */
-#if PG_VERSION_NUM < 100000
-#define WaitLatch(a,b,c,d)				WaitLatch((a),(b),(c))
-#define WaitLatchOrSocket(a,b,c,d,e)	WaitLatchOrSocket((a),(b),(c),(d))
-#endif
-
-/*
- * MEMO: PG10 adds PlanState argument to ExecBuildProjectionInfo
- */
-#if PG_VERSION_NUM < 100000
-#define ExecBuildProjectionInfo(a,b,c,d,e)\
-	ExecBuildProjectionInfo(a,b,c,e)
-#endif
-
-/*
- * MEMO: PG10 add this function (also look at misc.c), then PG11 adds
- * argument of 'max_workers' argument.
+ * MEMO: PG11 adds 'max_workers' argument to the compute_parallel_worker().
  */
 #if PG_VERSION_NUM < 110000
 #define compute_parallel_worker(a,b,c,d)		\

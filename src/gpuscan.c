@@ -110,11 +110,7 @@ typedef struct {
 	GpuScanSharedState *gs_sstate;
 	GpuScanRuntimeStat *gs_rtstat;
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
-#if PG_VERSION_NUM < 100000
-	List		   *dev_quals;		/* quals to be run on the device */
-#else
 	ExprState	   *dev_quals;		/* quals to be run on the device */
-#endif
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_tuple_sz;
 	cl_uint			proj_extra_sz;
@@ -1704,12 +1700,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	dev_quals_raw = (List *)
 		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
 								cscan->custom_scan_tlist);
-#if PG_VERSION_NUM < 100000
-	gss->dev_quals = (List *)ExecInitExpr((Expr *)dev_quals_raw,
-										  &gss->gts.css.ss.ps);
-#else
 	gss->dev_quals = ExecInitQual(dev_quals_raw, &gss->gts.css.ss.ps);
-#endif
 
 	foreach (lc, cscan->custom_scan_tlist)
 	{
@@ -1717,17 +1708,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 
 		if (tle->resjunk)
 			break;
-#if PG_VERSION_NUM < 100000
-		/*
-		 * Caution: before PG v10, the targetList was a list of ExprStates;
-		 * now it should be the planner-created targetlist.
-		 * See, ExecBuildProjectionInfo
-		 */
-		dev_tlist = lappend(dev_tlist, ExecInitExpr((Expr *) tle,
-													&gss->gts.css.ss.ps));
-#else
 		dev_tlist = lappend(dev_tlist, tle);
-#endif
 	}
 
 	/* device projection related resource consumption */
@@ -1932,7 +1913,6 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	pgstromInitWorkerGpuTaskState(&gss->gts, coordinate);
 }
 
-#if PG_VERSION_NUM >= 100000
 static void
 ExecGpuScanReInitializeDSM(CustomScanState *node,
 						   ParallelContext *pcxt, void *coordinate)
@@ -1974,7 +1954,6 @@ ExecShutdownGpuScan(CustomScanState *node)
 		gss->gs_rtstat = gs_rtstat_new;
 	}
 }
-#endif
 
 /*
  * ExplainGpuScan - EXPLAIN callback
@@ -1983,11 +1962,7 @@ static void
 ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-#if PG_VERSION_NUM < 100000
-	GpuScanRuntimeStat *gs_rtstat = NULL;
-#else
 	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
-#endif
 	CustomScan		   *cscan = (CustomScan *) gss->gts.css.ss.ps.plan;
 	GpuScanInfo		   *gs_info = deform_gpuscan_info(cscan);
 	List			   *dcontext;
@@ -2066,20 +2041,7 @@ createGpuScanSharedState(GpuScanState *gss,
 
 	gs_rtstat = &gs_sstate->gs_rtstat;
 	SpinLockInit(&gs_rtstat->c.lock);
-#if PG_VERSION_NUM < 100000
-	/*
-	 * MEMO: PG9.6 does not support ShutdownCustomScan() callback, so we have
-	 * no way to reference own custom run-time statistics on EXPLAIN.
-	 * It is a restriction of the older version, and is a specification;
-	 * when parallel query in PG9.6, EXPLAIN ANALYZE shows incorrect values.
-	 */
-	if (dsm_addr)
-	{
-		gs_rtstat = MemoryContextAllocZero(estate->es_query_cxt,
-										   sizeof(GpuScanRuntimeStat));
-		SpinLockInit(&gs_rtstat->c.lock);
-	}
-#endif
+
 	gss->gs_sstate = gs_sstate;
 	gss->gs_rtstat = gs_rtstat;
 }
@@ -2377,11 +2339,8 @@ retry_next:
 	if (gss->dev_quals)
 	{
 		bool		retval;
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(gss->dev_quals, econtext, false);
-#else
+
 		retval = ExecQual(gss->dev_quals, econtext);
-#endif
 		if (!retval)
 		{
 			pg_atomic_add_fetch_u64(&gs_rtstat->c.nitems_filtered, 1);
@@ -2395,19 +2354,8 @@ retry_next:
 	if (!gss->base_proj)
 		slot = gss->base_slot;
 	else
-	{
-#if PG_VERSION_NUM < 100000
-		ExprDoneCond		is_done;
-
-		slot = ExecProject(gss->base_proj, &is_done);
-		if (is_done == ExprMultipleResult)
-			gss->gts.css.ss.ps.ps_TupFromTlist = true;
-		else if (is_done != ExprEndResult)
-			gss->gts.css.ss.ps.ps_TupFromTlist = false;
-#else
 		slot = ExecProject(gss->base_proj);
-#endif
-	}
+
 	return slot;
 }
 
@@ -2876,10 +2824,8 @@ pgstrom_init_gpuscan(void)
 	gpuscan_exec_methods.EstimateDSMCustomScan = ExecGpuScanEstimateDSM;
 	gpuscan_exec_methods.InitializeDSMCustomScan = ExecGpuScanInitDSM;
 	gpuscan_exec_methods.InitializeWorkerCustomScan = ExecGpuScanInitWorker;
-#if PG_VERSION_NUM >= 100000
 	gpuscan_exec_methods.ReInitializeDSMCustomScan = ExecGpuScanReInitializeDSM;
 	gpuscan_exec_methods.ShutdownCustomScan	= ExecShutdownGpuScan;
-#endif
 	gpuscan_exec_methods.ExplainCustomScan  = ExplainGpuScan;
 
 	/* hook registration */

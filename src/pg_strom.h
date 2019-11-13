@@ -12,7 +12,14 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+
 #include "postgres.h"
+#if PG_VERSION_NUM < 100000
+#error Base PostgreSQL version must be v10 or later
+#endif
+#define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
+#define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
+
 #include "access/brin.h"
 #include "access/brin_revmap.h"
 #include "access/hash.h"
@@ -149,9 +156,7 @@
 #include "utils/pg_crc.h"
 #include "utils/pg_locale.h"
 #include "utils/rangetypes.h"
-#if PG_VERSION_NUM >= 100000
 #include "utils/regproc.h"
-#endif
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/ruleutils.h"
@@ -165,9 +170,7 @@
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 #include "utils/varbit.h"
-#if PG_VERSION_NUM >= 100000
 #include "utils/varlena.h"
-#endif
 
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
@@ -203,12 +206,6 @@
  *
  * --------------------------------------------------------------------
  */
-#if PG_VERSION_NUM < 100000
-#error Base PostgreSQL version must be v10 or later
-#endif
-#define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
-#define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
-
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif

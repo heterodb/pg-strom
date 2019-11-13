@@ -1714,16 +1714,7 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 							   RelOptInfo *rel,
 							   RangeTblEntry *rte)
 {
-	/*
-	 * PG9.6 does not support ReInitializeDSMForeignScan and
-	 * ShutdownForeignScan. It makes DSM setup/cleanup complicated,
-	 * so we simply prohibit parallel scan on PG9.6.
-	 */
-#if PG_VERSION_NUM < 100000
-	return false;
-#else
 	return true;
-#endif
 }
 
 /*
@@ -1759,7 +1750,6 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 /*
  * ArrowReInitializeDSMForeignScan
  */
-#if PG_VERSION_NUM >= 100000
 void
 ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
 {
@@ -1774,7 +1764,6 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 {
 	ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
 }
-#endif
 
 /*
  * ArrowInitializeWorkerForeignScan
@@ -1795,7 +1784,6 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 						   (pg_atomic_uint32 *) coordinate);
 }
 
-#if PG_VERSION_NUM >= 100000
 /*
  * ArrowShutdownForeignScan
  */
@@ -1810,7 +1798,6 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 {
 	ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
 }
-#endif
 
 /*
  * handler of Arrow_Fdw
@@ -3363,13 +3350,10 @@ pgstrom_init_arrow_fdw(void)
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
 	r->InitializeDSMForeignScan		= ArrowInitializeDSMForeignScan;
-#if PG_VERSION_NUM >= 100000
 	r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
-#endif
 	r->InitializeWorkerForeignScan	= ArrowInitializeWorkerForeignScan;
-#if PG_VERSION_NUM >= 100000
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
-#endif
+
 	/*
 	 * Turn on/off arrow_fdw
 	 */

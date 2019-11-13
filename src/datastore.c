@@ -777,9 +777,6 @@ typedef struct _MdfdVec
 {
 	File			mdfd_vfd;		/* fd number in fd.c's pool */
 	BlockNumber		mdfd_segno;		/* segment number, from 0 */
-#if PG_VERSION_NUM < 100000
-	struct _MdfdVec *mdfd_chain;	/* next segment, or NULL */
-#endif
 } MdfdVec;
 
 static int
@@ -817,52 +814,6 @@ nvme_sstate_open_files(GpuContext *gcontext,
 	int			i, nr_segs;
 	int			fdesc;
 
-#if PG_VERSION_NUM < 100000
-	/* PG9.6 */
-	nr_segs = nvme_sstate->nr_segs;
-	memset(nvme_sstate->fdesc, -1, sizeof(int) * nr_segs);
-	for (vec = rd_smgr->md_fd[MAIN_FORKNUM];
-		 vec != NULL;
-		 vec = vec->mdfd_chain)
-	{
-		if (vec->mdfd_vfd < 0)
-			elog(ERROR, "Bug? seg=%u of relation %s is not opened",
-				 vec->mdfd_segno, RelationGetRelationName(relation));
-		if (vec->mdfd_segno >= nr_segs)
-			continue;	/* skip, out of the range */
-
-		fdesc = FileGetRawDesc(vec->mdfd_vfd);
-		if (fdesc < 0)
-			fdesc = nvme_sstate_open_segment(rd_smgr, vec->mdfd_segno);
-		else
-		{
-			fdesc = dup(fdesc);
-			if (fdesc < 0)
-				elog(ERROR, "failed on dup(2): %m");
-		}
-
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
-		{
-			close(fdesc);
-			elog(ERROR, "out of memory");
-		}
-		nvme_sstate->fdesc[vec->mdfd_segno] = fdesc;
-	}
-
-	for (i=0; i < nr_segs; i++)
-	{
-		if (nvme_sstate->fdesc[i] >= 0)
-			continue;
-		fdesc = nvme_sstate_open_segment(rd_smgr, i);
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
-		{
-			close(fdesc);
-			elog(ERROR, "out of memory");
-		}
-		nvme_sstate->fdesc[i] = fdesc;
-	}
-#else
-	/* PG10 or later */
 	nr_segs = Min(rd_smgr->md_num_open_segs[MAIN_FORKNUM],
 				  nvme_sstate->nr_segs);
 	for (i=0; i < nr_segs; i++)
@@ -901,7 +852,6 @@ nvme_sstate_open_files(GpuContext *gcontext,
 		}
 		nvme_sstate->fdesc[i] = fdesc;
 	}
-#endif
 }
 
 /*
