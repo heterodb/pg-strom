@@ -259,16 +259,4 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 	create_append_path((a),(b),(c),(d),(f),(g),(h),(i),(j))
 #endif
 
-/*
- * PG12 removed dsm_resize(). Even though we put a tentative alternative here,
- * it should be replaced by the own implementation...
- */
-#if PG_VERSION_NUM >= 120000
-static inline void *
-dsm_resize(dsm_segment *seg, Size size)
-{
-	elog(ERROR, "dsm_resize() is not implemented");
-}
-#endif
-
 #endif	/* PG_COMPAT_H */

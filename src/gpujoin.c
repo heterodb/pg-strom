@@ -217,7 +217,7 @@ typedef struct
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr	   *m_kmrels_array;		/* only master process */
 	GpuContext	  **m_kmrels_gcontext;	/* only master process */
-	dsm_segment	   *seg_kmrels;
+	shared_mmap_segment *seg_kmrels;
 	cl_int			curr_outer_depth;
 
 	/*
@@ -284,7 +284,7 @@ struct GpuJoinSiblingState
 {
 	cl_int			n_actives;	/* number of active siblings */
 	GpuJoinSharedState *gj_sstate;
-	dsm_segment	   *seg_kmrels;
+	shared_mmap_segment *seg_kmrels;
 	struct {
 		CUdeviceptr	m_kmrels;	/* device memory of inner buffer */
 		GpuContext *gcontext;	/* GpuContext which allocates/opens m_kmrels */
@@ -3587,7 +3587,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		if (gjs->seg_kmrels)
 		{
-			kern_multirels *kmrels = dsm_segment_address(gjs->seg_kmrels);
+			kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
 			kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 		}
 
@@ -5143,7 +5143,7 @@ int
 gpujoinNextRightOuterJoin(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	int				outer_depth = -1;
 
 	for (outer_depth = Max(gjs->curr_outer_depth + 1, 1);
@@ -5199,7 +5199,7 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 		 * In case of PG workers, the last process per GPU needs to write back
 		 * OUTER JOIN map to the DSM area. (only happen on multi-GPU mode)
 		 */
-		kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+		kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 		cl_int			dindex = gcontext->cuda_dindex;
 		uint32			pg_nworkers_pergpu =
 			pg_atomic_sub_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
@@ -5462,7 +5462,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	kern_hashitem  *khitem;
@@ -5557,7 +5557,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5624,7 +5624,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 static int
 gpujoinFallbackLoadOuter(int depth, GpuJoinState *gjs)
 {
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5742,7 +5742,7 @@ gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
 							   pgstrom_data_store *pds_src,
 							   int outer_depth)
 {
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_int		num_rels = gjs->num_rels;
 	cl_uint		block_sz = kgjoin->block_sz;
 	cl_uint		grid_sz = kgjoin->grid_sz;
@@ -6219,7 +6219,7 @@ static void
 gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
 {
 	GpuContext	   *gcontext = gjs->gts.gcontext;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_bool		   *h_ojmaps;
 	CUdeviceptr		m_ojmaps;
 	CUresult		rc;
@@ -6261,7 +6261,7 @@ gpujoinColocateOuterJoinMaps(GpuTaskState *gts, CUmodule cuda_module)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_bool		   *h_ojmaps;
 	CUdeviceptr		m_ojmaps;
 	CUfunction		kern_colocate;
@@ -6745,7 +6745,7 @@ get_tuple_hashvalue(innerState *istate,
  * gpujoin_expand_inner_kds
  */
 static kern_data_store *
-gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
+gpujoin_expand_inner_kds(shared_mmap_segment *seg, size_t kds_offset)
 {
 	kern_data_store *kds;
 	size_t		new_dsmlen;
@@ -6757,12 +6757,12 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 
 	/* check current size */
 	kds = (kern_data_store *)
-		((char *)dsm_segment_address(seg) + kds_offset);
+		((char *)shared_mmap_address(seg) + kds_offset);
 	if (kds->length >= 0x100000000)
 		elog(ERROR, "GpuJoin: inner hash table larger than 4GB is not supported right now (nitems=%u, usage=%u)", kds->nitems, kds->usage);
 
-	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * dsm_segment_map_length(seg)) / 2);
-	new_kmrels = dsm_resize(seg, new_dsmlen);
+	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * shared_mmap_length(seg)) / 2);
+	new_kmrels = shared_mmap_expand(seg, new_dsmlen);
 	kds = (kern_data_store *)(new_kmrels + kds_offset);
 	row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	kds_length = Min(new_dsmlen - kds_offset, 0x400000000);	/* up to 16GB */
@@ -6824,7 +6824,7 @@ gpujoin_compaction_inner_kds(kern_data_store *kds_in)
  */
 static void
 gpujoin_inner_hash_preload(innerState *istate,
-						   dsm_segment *seg,
+						   shared_mmap_segment *seg,
 						   kern_data_store *kds_hash,
 						   size_t kds_offset)
 {
@@ -6884,7 +6884,7 @@ gpujoin_inner_hash_preload(innerState *istate,
  */
 static void
 gpujoin_inner_heap_preload(innerState *istate,
-						   dsm_segment *seg,
+						   shared_mmap_segment *seg,
 						   kern_data_store *kds_heap,
 						   size_t kds_offset)
 {
@@ -6918,7 +6918,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
 	kern_multirels *h_kmrels;
 	kern_data_store *kds;
-	dsm_segment	   *seg;
+	shared_mmap_segment *seg;
 	int				i, num_rels = gjs->num_rels;
 	int				dindex_min;
 	int				dindex_max;
@@ -6932,8 +6932,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 										numDevAttrs * sizeof(CUdeviceptr));
 	gjs->m_kmrels_gcontext = MemoryContextAllocZero(CurTransactionContext,
 										numDevAttrs * sizeof(GpuContext *));
-	seg = dsm_create(pgstrom_chunk_size(), 0);
-	h_kmrels = dsm_segment_address(seg);
+	seg = shared_mmap_create(pgstrom_chunk_size());
+	h_kmrels = shared_mmap_address(seg);
 	kmrels_usage = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
 	memset(h_kmrels, 0, kmrels_usage);
 
@@ -6952,12 +6952,14 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		size_t			kds_head_sz;
 
 		/* expand DSM on demand */
-		dsm_length = dsm_segment_map_length(seg);
+		dsm_length = shared_mmap_length(seg);
 		kds_head_sz = KDS_calculateHeadSize(ps_desc, false);
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
-			h_kmrels = dsm_resize(seg, TYPEALIGN(BLCKSZ, (3*dsm_length)/2));
-			dsm_length = dsm_segment_map_length(seg);
+			size_t	new_length = TYPEALIGN(BLCKSZ, (3 * dsm_length) / 2);
+
+			h_kmrels = shared_mmap_expand(seg, new_length);
+			dsm_length = shared_mmap_length(seg);
 		}
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
 		kds_length = Min(dsm_length - kmrels_usage, 0x100000000L);
@@ -6976,7 +6978,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 			gpujoin_inner_heap_preload(istate, seg, kds, kmrels_usage);
 
 		/* NOTE: gpujoin_inner_xxxx_preload may expand and remap segment */
-		h_kmrels = dsm_segment_address(seg);
+		h_kmrels = shared_mmap_address(seg);
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
 
 		if (!istate->hash_outer_keys)
@@ -6995,7 +6997,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		}
 		kmrels_usage += STROMALIGN(kds->length);
 	}
-	Assert(kmrels_usage <= dsm_segment_map_length(seg));
+	Assert(kmrels_usage <= shared_mmap_length(seg));
 	h_kmrels->kmrels_length = kmrels_usage;
 	h_kmrels->ojmaps_length = ojmaps_usage;
 	h_kmrels->cuda_dindex = numDevAttrs;	/* host side */
@@ -7022,8 +7024,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	required = h_kmrels->kmrels_length + ojmaps_usage * (numDevAttrs + 1);
 
 	/* expand DSM if outer-join map requires more */
-	if (required > dsm_segment_map_length(seg))
-		h_kmrels = dsm_resize(seg, required);
+	if (required > shared_mmap_length(seg))
+		h_kmrels = shared_mmap_expand(seg, required);
 	memset((char *)h_kmrels + h_kmrels->kmrels_length,
 		   0,
 		   ojmaps_usage * (numDevAttrs + 1));
@@ -7067,7 +7069,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		GPUCONTEXT_POP(__gcontext);
 	}
 skip_device_malloc:
-	gj_sstate->kmrels_handle = dsm_segment_handle(seg);
+	gj_sstate->kmrels_handle = shared_mmap_handle(seg);
 	gjs->seg_kmrels = seg;
 
 	return result;
@@ -7104,7 +7106,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	{
 		if (p_m_kmrels)
 			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != (CUdeviceptr) 0UL);
+		return (gjs->seg_kmrels != NULL);
 	}
 	pg_atomic_add_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
 	pg_atomic_add_fetch_u32(&gj_sstate->pg_nworkers, 1);
@@ -7134,7 +7136,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		sibling->n_actives++;
 		if (p_m_kmrels)
 			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != (CUdeviceptr) 0UL);
+		return (gjs->seg_kmrels != NULL);
 	}
 
 	/*
@@ -7223,9 +7225,8 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 			gjs->seg_kmrels = sibling->seg_kmrels;
 		else
 		{
-			gjs->seg_kmrels = dsm_attach(gj_sstate->kmrels_handle);
-			if (!gjs->seg_kmrels)
-				elog(ERROR, "could not map dynamic shared memory segment");
+			gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
+
 			sibling->seg_kmrels = gjs->seg_kmrels;
 		}
 		sibling->n_actives++;
@@ -7251,9 +7252,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	}
 	else
 	{
-		gjs->seg_kmrels = dsm_attach(gj_sstate->kmrels_handle);
-		if (!gjs->seg_kmrels)
-			elog(ERROR, "could not map dynamic shared memory segment");
+		gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
 
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &m_deviceptr,
@@ -7293,7 +7292,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
 					 errorText(rc));
-			dsm_detach(gjs->seg_kmrels);
+			shared_mmap_detach(gjs->seg_kmrels);
 		}
 		else if (--sibling->n_actives == 0)
 		{
@@ -7314,7 +7313,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 				sibling->pergpu[i].m_kmrels = (CUdeviceptr) 0UL;
 			}
 			Assert(gjs->seg_kmrels == sibling->seg_kmrels);
-			dsm_detach(sibling->seg_kmrels);
+			shared_mmap_detach(sibling->seg_kmrels);
 			gjs->seg_kmrels = NULL;
 			sibling->seg_kmrels = 0;
 		}
@@ -7360,7 +7359,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 			gjs->m_kmrels_gcontext = NULL;
 		}
 		/* Also release DSM */
-		dsm_detach(gjs->seg_kmrels);
+		shared_mmap_detach(gjs->seg_kmrels);
 		/* Clear sibling, if any */
 		if (sibling)
 		{
@@ -7428,7 +7427,7 @@ bool
 gpujoinHasRightOuterJoin(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
 
 	return (kmrels->ojmaps_length > 0);
 }

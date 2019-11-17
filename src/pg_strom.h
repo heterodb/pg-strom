@@ -1305,6 +1305,22 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 
 /*
+ * inners.c
+ */
+typedef struct shared_mmap_segment		shared_mmap_segment;
+
+extern shared_mmap_segment *shared_mmap_create(size_t size);
+extern shared_mmap_segment *shared_mmap_attach(uint32 handle);
+extern void shared_mmap_detach(shared_mmap_segment *shm_seg);
+extern void *shared_mmap_expand(shared_mmap_segment *shm_seg, size_t new_size);
+
+extern void *shared_mmap_address(shared_mmap_segment *shm_seg);
+extern size_t shared_mmap_length(shared_mmap_segment *shm_seg);
+extern uint64 shared_mmap_handle(shared_mmap_segment *shm_seg);
+
+extern void	pgstrom_init_inners(void);
+
+/*
  * gpupreagg.c
  */
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
