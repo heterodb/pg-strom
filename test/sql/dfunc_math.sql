@@ -40,6 +40,10 @@ SET enable_seqscan = off;
 -- not to print kernel source code
 SET pg_strom.debug_kernel_source = off;
 
+-- PG12 changed default of extra_float_digits, so it affects to number of
+-- digits of float values.
+SET extra_float_digits = 1;
+
 -- absolute values
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
