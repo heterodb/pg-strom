@@ -804,6 +804,14 @@ pgsql_writeout_buffer(SQLtable *table)
 	currPos = lseek(table->fdesc, 0, SEEK_CUR);
 	if (currPos < 0)
 		Elog("unable to get current position of the file");
+	if (currPos != LONGALIGN(currPos))
+	{
+		uint64	zero = 0;
+		size_t	gap = LONGALIGN(currPos) - currPos;
+
+		if (write(table->fdesc, &zero, gap) != gap)
+			Elog("unable to fill up alignment gap: %m");
+	}
 	writeArrowRecordBatch(table, &metaSize, &bodySize);
 
 	index = table->numRecordBatches++;

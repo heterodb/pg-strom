@@ -760,6 +760,7 @@ createArrowFooter(ArrowFooter *node)
  */
 typedef struct
 {
+	int32		continuation;
 	int32		metaLength;
 	int32		rootOffset;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
@@ -776,10 +777,11 @@ writeFlatBufferMessage(int fdesc, ArrowMessage *message)
 
 	assert(payload->length > 0);
 	offset = INTALIGN(payload->vtable.vlen) - payload->vtable.vlen;
-    nbytes = INTALIGN(offset + payload->length);
-	length = offsetof(FBMessageFileImage, data[nbytes]);
+	nbytes = INTALIGN(offset + payload->length);
+	length = LONGALIGN(offsetof(FBMessageFileImage, data[nbytes]));
 	image = alloca(length);
-	image->metaLength = sizeof(int32) + nbytes;
+	image->continuation = 0xffffffff;
+	image->metaLength = length - offsetof(FBMessageFileImage, rootOffset);
 	image->rootOffset = sizeof(int32) + INTALIGN(payload->vtable.vlen);
 	if (offset > 0)
 		memset(image->data, 0, offset);
@@ -816,6 +818,12 @@ writeFlatBufferFooter(int fdesc, ArrowFooter *footer)
 	ssize_t		nbytes;
 	ssize_t		offset;
 	ssize_t		length;
+	uint64		eos = 0xffffffffUL;
+
+	/* put EOS and ensure 64bit alignment */
+	nbytes = write(fdesc, &eos, sizeof(uint64));
+	if (nbytes != sizeof(uint64))
+		Elog("failed on write: %m");
 
 	assert(payload->length > 0);
     offset = INTALIGN(payload->vtable.vlen) - payload->vtable.vlen;

@@ -99,6 +99,7 @@ __dumpArrowTypeTimestamp(StringInfo str, ArrowNode *node)
 		t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
 		t->unit == ArrowTimeUnit__MicroSecond ? "us" :
 		t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
+	printf("Timestamp unit=%d\n", t->unit);
 }
 
 static void
@@ -794,6 +795,7 @@ typedef struct
 
 typedef struct
 {
+	int32		continuation;	/* = 0xffffffff, if a valid block */
 	int32		metaLength;
 	int32		headOffset;
 } FBMetaData;
@@ -964,7 +966,7 @@ readArrowTypeTimestamp(ArrowTypeTimestamp *node, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32 *) pos);
 
-	node->unit = fetchInt(&t, 0);
+	node->unit = fetchShort(&t, 0);
 	node->timezone = fetchString(&t, 1, &node->_timezone_len);
 }
 
@@ -1403,6 +1405,11 @@ readArrowFooter(ArrowFooter *node, const char *pos)
 /*
  * readArrowFile - read the supplied apache arrow file
  */
+#define ARROW_FILE_HEAD_SIGNATURE		"ARROW1\0\0"
+#define ARROW_FILE_HEAD_SIGNATURE_SZ	(sizeof(ARROW_FILE_HEAD_SIGNATURE) - 1)
+#define ARROW_FILE_TAIL_SIGNATURE		"ARROW1"
+#define ARROW_FILE_TAIL_SIGNATURE_SZ	(sizeof(ARROW_FILE_TAIL_SIGNATURE) - 1)
+
 void
 readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 {
@@ -1423,18 +1430,22 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
 	if (mmap_head == MAP_FAILED)
 		Elog("failed on mmap: %m");
-	mmap_tail = mmap_head + file_sz;
+	mmap_tail = mmap_head + file_sz - ARROW_FILE_TAIL_SIGNATURE_SZ;
 
 	/* check signature */
-	if (memcmp(mmap_head, "ARROW1\0\0", 8) != 0 ||
-		memcmp(mmap_tail - 6, "ARROW1", 6) != 0)
+	if (memcmp(mmap_head,
+			   ARROW_FILE_HEAD_SIGNATURE,
+			   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
+		memcmp(mmap_tail,
+			   ARROW_FILE_TAIL_SIGNATURE,
+			   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
 	{
 		munmap(mmap_head, mmap_sz);
 		Elog("Signature mismatch on Apache Arrow file");
 	}
 
 	/* Read Footer chunk */
-	pos = mmap_tail - 6 - sizeof(int32);
+	pos = mmap_tail - sizeof(int32);
 	offset = *((int32 *)pos);
 	pos -= offset;
 	offset = *((int32 *)pos);
@@ -1451,11 +1462,8 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 			ArrowMessage   *m = &af_info->dictionaries[i];
 
 			meta = (FBMetaData *)(mmap_head + b->offset);
-			if (b->metaDataLength != meta->metaLength + sizeof(int32))
-			{
-				munmap(mmap_head, mmap_sz);
-				Elog("metadata length mismatch");
-			}
+			if (meta->continuation != 0xffffffff)
+				Elog("DictionaryBatch[%d] is not a valid block", i);
 			pos = (const char *)&meta->headOffset + meta->headOffset;
 			readArrowMessage(m, pos);
 		}
@@ -1472,11 +1480,8 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 			ArrowMessage   *m = &af_info->recordBatches[i];
 
 			meta = (FBMetaData *)(mmap_head + b->offset);
-			if (b->metaDataLength != meta->metaLength + sizeof(int32))
-			{
-				munmap(mmap_head, mmap_sz);
-				Elog("metadata length mismatch");
-			}
+			if (meta->continuation != 0xffffffff)
+				Elog("RecordBatch[%d] is not a valid block", i);
 			pos = (const char *)&meta->headOffset + meta->headOffset;
 			readArrowMessage(m, pos);
 		}
