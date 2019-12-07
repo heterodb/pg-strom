@@ -146,9 +146,7 @@ pgstrom_collect_gpu_device(void)
 
 			if (strcmp(tok_attr, "DEVICE_ID") == 0)
 			{
-				if (dindex != atoi(tok_val))
-					elog(ERROR, "incorrect gpuinfo -md format");
-				devAttrs[dindex].DEV_ID = dindex;
+				devAttrs[dindex].DEV_ID = atoi(tok_val);
 			}
 			else if (strcmp(tok_attr, "DEVICE_NAME") == 0)
 			{
