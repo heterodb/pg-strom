@@ -793,13 +793,6 @@ typedef struct
 	FBVtable   *vtable;
 } FBTable;
 
-typedef struct
-{
-	int32		continuation;	/* = 0xffffffff, if a valid block */
-	int32		metaLength;
-	int32		headOffset;
-} FBMetaData;
-
 static inline FBTable
 fetchFBTable(void *p_table)
 {
@@ -818,14 +811,11 @@ __fetchPointer(FBTable *t, int index)
 
 	if (offsetof(FBVtable, offset[index]) < vtable->vlen)
 	{
-		int		offset = vtable->offset[index];
-		if (offset)
-		{
-			void   *addr = (char *)t->table + offset;
+		uint16		offset = vtable->offset[index];
 
-			assert((char *)addr < (char *)t->table + vtable->tlen);
-			return addr;
-		}
+		assert(offset < vtable->tlen);
+		if (offset)
+			return (char *)t->table + offset;
 	}
 	return NULL;
 }
@@ -1418,7 +1408,6 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 	char		   *mmap_head = NULL;
 	char		   *mmap_tail = NULL;
 	const char	   *pos;
-	FBMetaData	   *meta;
 	int32			offset;
 	int32			i, nitems;
 
@@ -1460,11 +1449,22 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 		{
 			ArrowBlock	   *b = &af_info->footer.dictionaries[i];
 			ArrowMessage   *m = &af_info->dictionaries[i];
+			int32		   *ival = (int32 *)(mmap_head + b->offset);
+			int32			metaLength	__attribute__((unused));
+			int32		   *headOffset;
 
-			meta = (FBMetaData *)(mmap_head + b->offset);
-			if (meta->continuation != 0xffffffff)
-				Elog("DictionaryBatch[%d] is not a valid block", i);
-			pos = (const char *)&meta->headOffset + meta->headOffset;
+			if (*ival == 0xffffffff)
+			{
+				metaLength = ival[1];
+				headOffset = ival + 2;
+			}
+			else
+			{
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
+			}
+			pos = (const char *)headOffset + *headOffset;
 			readArrowMessage(m, pos);
 		}
 	}
@@ -1478,11 +1478,22 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 		{
 			ArrowBlock	   *b = &af_info->footer.recordBatches[i];
 			ArrowMessage   *m = &af_info->recordBatches[i];
+			int32		   *ival = (int32 *)(mmap_head + b->offset);
+			int32			metaLength	__attribute__((unused));
+			int32		   *headOffset;
 
-			meta = (FBMetaData *)(mmap_head + b->offset);
-			if (meta->continuation != 0xffffffff)
-				Elog("RecordBatch[%d] is not a valid block", i);
-			pos = (const char *)&meta->headOffset + meta->headOffset;
+			if (*ival == 0xffffffff)
+			{
+				metaLength = ival[1];
+				headOffset = ival + 2;
+			}
+			else
+			{
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
+			}
+			pos = (const char *)headOffset + *headOffset;
 			readArrowMessage(m, pos);
 		}
 	}

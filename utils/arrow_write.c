@@ -18,8 +18,10 @@ typedef struct
 typedef struct
 {
 	void	  **extra_buf;		/* external buffer */
-	int32	   *extra_sz;
-	int32		nattrs;			/* number of variables */
+	int32	   *extra_sz;		/* size of extra data */
+	uint16	   *extra_align;	/* alignment of extra data */
+	uint16		nattrs;			/* number of variables */
+	uint16		maxalign;		/* expected alignment of vtable base */
 	int32		length;			/* length of the flat image.
 								 * If -1, buffer is not flatten yet. */
 	FBVtable	vtable;
@@ -35,10 +37,12 @@ __allocFBTableBuf(int nattrs, const char *func_name)
 									 sizeof(Datum) * nattrs));
 	buf = palloc0(required);
 	buf->extra_buf		= palloc0(sizeof(void *) * nattrs);
-	buf->extra_sz		= palloc0(sizeof(int) * nattrs);
+	buf->extra_sz		= palloc0(sizeof(int32) * nattrs);
+	buf->extra_align	= palloc0(sizeof(uint16) * nattrs);
 	buf->nattrs			= nattrs;
+	buf->maxalign		= ALIGNOF_INT;
 	buf->length			= -1;	/* not flatten yet */
-	buf->vtable.vlen	= sizeof(int32);
+	buf->vtable.vlen	= offsetof(FBVtable, offset[0]);
 	buf->vtable.tlen	= sizeof(int32);
 
 	return buf;
@@ -61,31 +65,52 @@ __addBufferScalar(FBTableBuf *buf, int index, void *ptr, int sz, int align)
 		int		offset;
 
 		assert(buf->vtable.tlen >= sizeof(int32));
-		table = (char *)&buf->vtable +
-			INTALIGN(offsetof(FBVtable, offset[buf->nattrs]));
+		table = (char *)&buf->vtable + offsetof(FBVtable, offset[buf->nattrs]);
 		offset = TYPEALIGN(align, vtable->tlen);
 		memcpy(table + offset, ptr, sz);
 		vtable->offset[index] = offset;
 		vtable->tlen = offset + sz;
 		vtable->vlen = Max(vtable->vlen,
 						   offsetof(FBVtable, offset[index+1]));
+		buf->maxalign = Max(buf->maxalign, align);
 	}
 }
 
 static void
-__addBufferBinary(FBTableBuf *buf, int index, void *ptr, int sz, int32 shift)
+__addBufferBinary(FBTableBuf *buf, int index, void *ptr, int sz, int align)
 {
 	assert(index >= 0 && index < buf->nattrs);
 	if (!ptr || sz == 0)
 		buf->vtable.offset[index] = 0;
 	else
 	{
+		int32	zero = 0;
+
 		buf->extra_buf[index]	= ptr;
 		buf->extra_sz[index]	= sz;
-		__addBufferScalar(buf, index, &shift, sizeof(shift), ALIGNOF_INT);
+		buf->extra_align[index] = align;
+		__addBufferScalar(buf, index, &zero, sizeof(int32), ALIGNOF_INT);
 	}
 }
 
+static inline void
+addBufferOffset(FBTableBuf *buf, int index, FBTableBuf *sub)
+{
+	assert(index >= 0 && index < buf->nattrs);
+	if (!sub)
+		buf->vtable.offset[index] = 0;
+	else
+	{
+		int32	shift = sub->vtable.vlen;
+
+		if (sub->length < 0)
+			Elog("Bug? FBTableBuf is not flatten");
+		buf->extra_buf[index]	= &sub->vtable;
+		buf->extra_sz[index]	= sub->length;
+		buf->extra_align[index]	= sub->maxalign;
+		__addBufferScalar(buf, index, &shift, sizeof(int32), ALIGNOF_INT);
+	}
+}
 
 static inline void
 __addBufferBool(FBTableBuf *buf, int index, bool value, bool __default)
@@ -139,30 +164,17 @@ addBufferString(FBTableBuf *buf, int index, const char *cstring)
 		temp = palloc0(blen);
 		*((int32 *)temp) = slen;
 		strcpy(temp + sizeof(int32), cstring);
-		__addBufferBinary(buf, index, temp, blen, 0);
-	}
-}
-
-static inline void
-addBufferOffset(FBTableBuf *buf, int index, FBTableBuf *sub)
-{
-	if (sub)
-	{
-		if (sub->length < 0)
-			Elog("Bug? FBTableBuf is not flatten");
-		__addBufferBinary(buf, index,
-						  &sub->vtable,
-						  sub->length,
-						  sub->vtable.vlen);
+		__addBufferBinary(buf, index, temp, blen, ALIGNOF_INT);
 	}
 }
 
 static void
 addBufferVector(FBTableBuf *buf, int index, int nitems, FBTableBuf **elements)
 {
-	size_t	len = sizeof(int32) + sizeof(int32) * nitems;
+	size_t	len = MAXALIGN(sizeof(int32) + sizeof(int32) * nitems);
 	int32	i, *vector;
 	char   *pos;
+	int		maxalign = ALIGNOF_INT;
 
 	/* calculation of flat buffer length */
 	for (i=0; i < nitems; i++)
@@ -171,8 +183,7 @@ addBufferVector(FBTableBuf *buf, int index, int nitems, FBTableBuf **elements)
 
 		if (e->length < 0)
 			Elog("Bug? FBTableBuf is not flatten");
-
-		len += MAXALIGN(e->length) + MAXIMUM_ALIGNOF; /* with margin */
+		len += MAXALIGN(e->length);
 	}
 	vector = palloc0(len);
 	vector[0] = nitems;
@@ -180,8 +191,9 @@ addBufferVector(FBTableBuf *buf, int index, int nitems, FBTableBuf **elements)
 	for (i=0; i < nitems; i++)
 	{
 		FBTableBuf *e = elements[i];
-		int			gap = (INTALIGN(pos + e->vtable.vlen) -
-						   (uintptr_t)(pos + e->vtable.vlen));
+		int			gap = TYPEALIGN(e->maxalign,
+									e->vtable.vlen) - e->vtable.vlen;
+
 		if (gap > 0)
 		{
 			memset(pos, 0, gap);
@@ -190,76 +202,90 @@ addBufferVector(FBTableBuf *buf, int index, int nitems, FBTableBuf **elements)
 		memcpy(pos, &e->vtable, e->length);
 		vector[i+1] = (pos + e->vtable.vlen) - (char *)&vector[i+1];
 		pos += e->length;
+
+		maxalign = Max(maxalign, e->maxalign);
 	}
-	__addBufferBinary(buf, index, vector, pos - (char *)vector, 0);
+	__addBufferBinary(buf, index, vector, pos - (char *)vector, maxalign);
 }
 
 static FBTableBuf *
 __makeBufferFlatten(FBTableBuf *buf, const char *func_name)
 {
-	size_t		base_sz = buf->vtable.vlen + buf->vtable.tlen;
+	FBVtable   *vtable = &buf->vtable;
 	size_t		extra_sz = 0;
-	char	   *table;
-	char	   *table_old;
-	char	   *pos;
-	int			i, diff;
+	int			i;
 
-	assert(buf->vtable.vlen == SHORTALIGN(buf->vtable.vlen));
-	assert(buf->vtable.tlen >= sizeof(int32));
+	assert(vtable->vlen == SHORTALIGN(vtable->vlen) &&
+		   vtable->vlen <= offsetof(FBVtable, offset[buf->nattrs]));
+	assert(vtable->tlen >= sizeof(int32));
+
 	/* close up the hole between vtable tail and table head if any */
-	table = ((char *)&buf->vtable + buf->vtable.vlen);
-	table_old = ((char *)&buf->vtable +
-				 INTALIGN(offsetof(FBVtable, offset[buf->nattrs])));
-	if (table != table_old)
+	if (buf->vtable.vlen != offsetof(FBVtable, offset[buf->nattrs]))
 	{
-		assert(table < table_old);
-		memmove(table, table_old, buf->vtable.tlen);
+		memmove((char *)vtable + vtable->vlen,
+				(char *)vtable + offsetof(FBVtable, offset[buf->nattrs]),
+				vtable->tlen);
 	}
-	*((int32 *)table) = buf->vtable.vlen;
-	diff = INTALIGN(buf->vtable.tlen) - buf->vtable.tlen;
-	if (diff > 0)
-		memset(table + buf->vtable.tlen, 0, diff);
+	*((int32 *)((char *)vtable + vtable->vlen)) = vtable->vlen;
 
 	/* check extra buffer usage */
 	for (i=0; i < buf->nattrs; i++)
 	{
-		if (buf->extra_buf[i] != NULL)
+		if (buf->extra_buf[i])
 			extra_sz += MAXALIGN(buf->extra_sz[i]);
 	}
 
 	if (extra_sz == 0)
-		buf->length = base_sz;
+		buf->length = vtable->vlen + vtable->tlen;
 	else
 	{
-		buf = repalloc(buf, offsetof(FBTableBuf,
-									 vtable) + MAXALIGN(base_sz) + extra_sz);
-		table = (char *)&buf->vtable + buf->vtable.vlen;
-		/*
-		 * memo: we shall copy the flat image to the location where 'table'
-		 * is aligned to INT. So, extra buffer should begin from INT aligned
-		 * offset to the table.
-		 */
-		pos = table + INTALIGN(buf->vtable.tlen);
+		char	   *base;
+		int32	   *offset;
+		size_t		usage, gap;
+
+		buf = repalloc(buf, (offsetof(FBTableBuf, vtable) +
+							 MAXALIGN(buf->vtable.vlen) +
+							 MAXALIGN(buf->vtable.tlen) + extra_sz));
+		vtable = &buf->vtable;
+		base   = (char *)vtable + vtable->vlen;
+		usage  = vtable->tlen;
 		for (i=0; i < buf->nattrs; i++)
 		{
-			int32  *offset;
-
 			if (!buf->extra_buf[i])
 				continue;
-			assert(buf->vtable.offset[i] != 0);
-			offset = (int32 *)(table + buf->vtable.offset[i]);
-			assert(*offset >= 0 && *offset < buf->extra_sz[i]);
-			*offset = (pos - (char *)offset) + *offset;
-
-			memcpy(pos, buf->extra_buf[i], buf->extra_sz[i]);
-			pos += INTALIGN(buf->extra_sz[i]);
+			assert(buf->extra_sz[i] > 0);
+			assert(buf->extra_align[i] > 0);
+			assert(vtable->offset[i] != 0);
+			offset = (int32 *)(base + vtable->offset[i]);
+			gap = TYPEALIGN(buf->extra_align[i],
+							usage + *offset) - (usage + *offset);
+			if (gap > 0)
+			{
+				memset(base + usage, 0, gap);
+				usage += gap;
+			}
+			memcpy(base + usage, buf->extra_buf[i], buf->extra_sz[i]);
+			*offset = (base + usage + *offset) - (char *)offset;
+			usage += buf->extra_sz[i];
 		}
-		buf->length = pos - (char *)&buf->vtable;
+		buf->length = buf->vtable.vlen + usage;
 	}
 	return buf;
 }
 
 #define makeBufferFlatten(a)	__makeBufferFlatten((a),__FUNCTION__)
+
+/*
+ * Arrow v0.15 didn't allow Filed->type is null object, even if type has
+ * no parameters. So, we inject an empty flat-buffer entry.
+ */
+static FBTableBuf *
+createArrowTypeSimple(void)
+{
+	FBTableBuf *buf = allocFBTableBuf(0);
+
+	return makeBufferFlatten(buf);
+}
 
 static FBTableBuf *
 createArrowTypeInt(ArrowTypeInt *node)
@@ -351,14 +377,14 @@ createArrowTypeUnion(ArrowTypeUnion *node)
 	addBufferShort(buf, 0, node->mode);
 	if (node->_num_typeIds > 0)
 	{
-		size_t		vector_len = sizeof(int32) * (node->_num_typeIds + 1);
-		int32	   *vector = alloca(vector_len);
-		int			i;
+		size_t	sz = sizeof(int32) * (node->_num_typeIds + 1);
+		int32  *vector = alloca(sz);
+		int		i;
 
 		vector[0] = node->_num_typeIds;
 		for (i=0; i < node->_num_typeIds; i++)
 			vector[i+1] = node->typeIds[i];
-		__addBufferBinary(buf, 1, vector, vector_len, 0);
+		__addBufferBinary(buf, 1, vector, sz, ALIGNOF_INT);
 	}
 	return makeBufferFlatten(buf);
 }
@@ -406,6 +432,7 @@ createArrowType(ArrowType *node, ArrowTypeTag *p_type_tag)
 	{
 		case ArrowNodeTag__Null:
 			tag = ArrowType__Null;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Int:
 			tag = ArrowType__Int;
@@ -417,12 +444,15 @@ createArrowType(ArrowType *node, ArrowTypeTag *p_type_tag)
 			break;
 		case ArrowNodeTag__Utf8:
 			tag = ArrowType__Utf8;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Binary:
 			tag = ArrowType__Binary;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Bool:
 			tag = ArrowType__Bool;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Decimal:
 			tag = ArrowType__Decimal;
@@ -446,9 +476,11 @@ createArrowType(ArrowType *node, ArrowTypeTag *p_type_tag)
 			break;
 		case ArrowNodeTag__List:
 			tag = ArrowType__List;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Struct:
 			tag = ArrowType__Struct;
+			buf = createArrowTypeSimple();
 			break;
 		case ArrowNodeTag__Union:
 			tag = ArrowType__Union;
@@ -489,10 +521,10 @@ addBufferArrowBufferVector(FBTableBuf *buf, int index,
 						   int nitems, ArrowBuffer *arrow_buffers)
 {
 	ArrowBufferVector *vector;
-	size_t		length = offsetof(ArrowBufferVector, buffers[nitems]);
-	int			i;
+	size_t	sz = offsetof(ArrowBufferVector, buffers[nitems]);
+	int		i;
 
-	vector = palloc0(length);
+	vector = palloc0(sz);
 	vector->nitems = nitems;
 	for (i=0; i < nitems; i++)
 	{
@@ -502,7 +534,7 @@ addBufferArrowBufferVector(FBTableBuf *buf, int index,
 		vector->buffers[i].offset = b->offset;
 		vector->buffers[i].length = b->length;
 	}
-	__addBufferBinary(buf, index, vector, length, 0);
+	__addBufferBinary(buf, index, vector, sz, ALIGNOF_LONG);
 }
 
 struct ArrowFieldNodeVector
@@ -520,10 +552,10 @@ addBufferArrowFieldNodeVector(FBTableBuf *buf, int index,
 							  int nitems, ArrowFieldNode *elements)
 {
 	ArrowFieldNodeVector *vector;
-	size_t		length = offsetof(ArrowFieldNodeVector, nodes[nitems]);
-	int			i;
+	size_t	sz = offsetof(ArrowFieldNodeVector, nodes[nitems]);
+	int		i;
 
-	vector = palloc0(length);
+	vector = palloc0(sz);
 	vector->nitems = nitems;
 	for (i=0; i < nitems; i++)
 	{
@@ -533,7 +565,7 @@ addBufferArrowFieldNodeVector(FBTableBuf *buf, int index,
 		vector->nodes[i].length		= f->length;
 		vector->nodes[i].null_count	= f->null_count;
 	}
-	__addBufferBinary(buf, index, vector, length, 0);
+	__addBufferBinary(buf, index, vector, sz, ALIGNOF_LONG);
 }
 
 static FBTableBuf *
@@ -715,10 +747,10 @@ addBufferArrowBlockVector(FBTableBuf *buf, int index,
 						  int nitems, ArrowBlock *arrow_blocks)
 {
 	ArrowBlockVector *vector;
-	size_t		length = offsetof(ArrowBlockVector, blocks[nitems]);
-	int			i;
+	size_t	sz = offsetof(ArrowBlockVector, blocks[nitems]);
+	int		i;
 
-	vector = palloc0(length);
+	vector = palloc0(sz);
     vector->nitems = nitems;
     for (i=0; i < nitems; i++)
 	{
@@ -729,7 +761,7 @@ addBufferArrowBlockVector(FBTableBuf *buf, int index,
 		vector->blocks[i].metaDataLength = b->metaDataLength;
 		vector->blocks[i].bodyLength = b->bodyLength;
 	}
-	__addBufferBinary(buf, index, vector, length, 0);
+	__addBufferBinary(buf, index, vector, sz, ALIGNOF_LONG);
 }
 
 static FBTableBuf *
@@ -771,24 +803,22 @@ writeFlatBufferMessage(int fdesc, ArrowMessage *message)
 {
 	FBTableBuf *payload = createArrowMessage(message);
 	FBMessageFileImage *image;
-	ssize_t		nbytes;
 	ssize_t		offset;
+	ssize_t		gap;
 	ssize_t		length;
 
 	assert(payload->length > 0);
-	offset = INTALIGN(payload->vtable.vlen) - payload->vtable.vlen;
-	nbytes = INTALIGN(offset + payload->length);
-	length = LONGALIGN(offsetof(FBMessageFileImage, data[nbytes]));
+	offset = TYPEALIGN(payload->maxalign, payload->vtable.vlen);
+	gap = offset - payload->vtable.vlen;
+	length = LONGALIGN(offsetof(FBMessageFileImage,
+								data[gap + payload->length]));
 	image = alloca(length);
+	memset(image, 0, length);
 	image->continuation = 0xffffffff;
 	image->metaLength = length - offsetof(FBMessageFileImage, rootOffset);
-	image->rootOffset = sizeof(int32) + INTALIGN(payload->vtable.vlen);
-	if (offset > 0)
-		memset(image->data, 0, offset);
-	memcpy(image->data + offset, &payload->vtable, payload->length);
-	offset += payload->length;
-	if (offset < nbytes)
-		memset(image->data + offset, 0, nbytes - offset);
+	image->rootOffset = sizeof(int32) + offset;
+	memcpy(image->data + gap, &payload->vtable, payload->length);
+
 	if (write(fdesc, image, length) != length)
 		Elog("failed on write: %m");
 	return length;
