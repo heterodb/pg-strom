@@ -491,8 +491,6 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 void
 pgstromRescanGpuTaskState(GpuTaskState *gts)
 {
-	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
-
 	/*
 	 * release all the unprocessed tasks
 	 */
@@ -505,31 +503,9 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		gts->cb_release_task(gtask);
 	}
 
-	/*
-	 * rewind the scan position if GTS scans a table
-	 */
-	if (scan)
-	{
-		InstrEndLoop(&gts->outer_instrument);
-		heap_rescan(scan, NULL);
-#if PG_VERSION_NUM < 100000
-		/*
-		 * In PG9.6, re-initialization of DSM segment is a role of ReScan
-		 * method, but it was moved to ReInitializeDSM on PG10.
-		 * 
-		 */
-		if (gts->gtss)
-		{
-			GpuTaskSharedState *gtss = gts->gtss;
+	/* rewind the scan position if GTS scans a table */
+	pgstromRewindScanChunk(gts);
 
-			Assert(&gtss->phscan == scan->rs_parallel);
-			SpinLockAcquire(&gtss->phscan.phs_mutex);
-			
-			SpinLockRelease(&gtss->phscan.phs_mutex);
-		}
-#endif
-		ExecScanReScan(&gts->css.ss);
-	}
 	/* Also rewind the scan state of Arrow_Fdw */
 	if (gts->af_state)
 		ExecReScanArrowFdw(gts->af_state);
@@ -648,12 +624,15 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 Size
 pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 {
-	if (gts->css.ss.ss_currentRelation)
+	Relation	relation = gts->css.ss.ss_currentRelation;
+
+	if (relation)
 	{
 		EState	   *estate = gts->css.ss.ps.state;
+		Snapshot	snapshot = estate->es_snapshot;
 
 		return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
-						heap_parallelscan_estimate(estate->es_snapshot));
+						table_parallelscan_estimate(relation, snapshot));
 	}
 	return 0;
 }
@@ -678,8 +657,13 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	}
 	else if (relation)
 	{
-		gtss->nr_allocated = 0;
-		heap_parallelscan_initialize(&gtss->phscan, relation, snapshot);
+		/* init state of block based table scan */
+		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
+		SpinLockInit(&gtss->pbs_mutex);
+		gtss->pbs_startblock = InvalidBlockNumber;
+		gtss->pbs_nallocated = 0;
+		/* import snapshot by the core logic */
+		table_parallelscan_initialize(relation, &gtss->phscan, snapshot);
 		/* per workers initialization inclusing the coordinator */
 		pgstromInitWorkerGpuTaskState(gts, coordinate);
 	}
@@ -705,7 +689,7 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
-			heap_beginscan_parallel(relation, &gtss->phscan);
+			table_beginscan_parallel(relation, &gtss->phscan);
 		/* try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(gts);
 	}
@@ -718,17 +702,19 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 void
 pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 {
+	Relation	relation = gts->css.ss.ss_currentRelation;
 	GpuTaskSharedState *gtss = gts->gtss;
+
+	/* re-init block based scan */
+	SpinLockAcquire(&gtss->pbs_mutex);
+	gtss->pbs_startblock = InvalidBlockNumber;
+	gtss->pbs_nallocated = 0;
+	SpinLockRelease(&gtss->pbs_mutex);
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	if (gtss)
-	{
-		/* see heap_parallelscan_reinitialize */
-		SpinLockAcquire(&gtss->phscan.phs_mutex);
-		gtss->nr_allocated = 0;
-		SpinLockRelease(&gtss->phscan.phs_mutex);
-	}
+	else if (relation)
+		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 
 /*

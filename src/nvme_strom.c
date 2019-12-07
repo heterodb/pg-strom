@@ -632,9 +632,9 @@ setup_nvme_distance_map(void)
 				int		dist = nvme->nvme_distances[i];
 
 				if (nvme->nvme_optimal_gpu == i)
-					appendStringInfo(&str, "  (% 4d)", dist);
+					appendStringInfo(&str, "  (%4d)", dist);
 				else
-					appendStringInfo(&str, "   % 4d ", dist);
+					appendStringInfo(&str, "   %4d ", dist);
 			}
 			elog(LOG, "%s", str.data);
 		}

@@ -1,7 +1,7 @@
 SET search_path = pgstrom_regress,public;
 SET pg_strom.debug_kernel_source = off;
 --Q4_3
-EXPLAIN(costs off, verbose)
+SET pg_strom.enabled = on;
 select d_year, s_city, p_brand1,
 sum(lo_revenue - lo_supplycost) as profit_Q4_3
 from date1, customer, supplier, part, lineorder
@@ -16,6 +16,7 @@ from date1, customer, supplier, part, lineorder
 group by d_year, s_city, p_brand1
 order by d_year, s_city, p_brand1;
 
+SET pg_strom.enabled = off;
 select d_year, s_city, p_brand1,
 sum(lo_revenue - lo_supplycost) as profit_Q4_3
 from date1, customer, supplier, part, lineorder

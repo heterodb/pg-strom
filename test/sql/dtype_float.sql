@@ -19,7 +19,7 @@ CREATE TABLE rt_float (
   y    int4,
   z    int8
 );
-SELECT setseed(0.20190609);
+SELECT pgstrom.random_setseed(20190609);
 INSERT INTO rt_float (
   SELECT x, pgstrom.random_float(1,     -3200.0,     3200.0),
             pgstrom.random_float(1,     -3200.0,     3200.0),

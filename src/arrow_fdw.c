@@ -1319,11 +1319,11 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		 k >= 0;
 		 k = bms_next_member(af_state->referenced, k))
 	{
-		j = k + FirstLowInvalidHeapAttributeNumber;
+		j = k + FirstLowInvalidHeapAttributeNumber - 1;
 
-		if (j > 0)
+		if (j >= 0)
 		{
-			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j-1);
+			Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
 			const char		   *attName = NameStr(attr->attname);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
@@ -1381,7 +1381,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 				 k >= 0;
 				 k = bms_next_member(af_state->referenced, k))
 			{
-				j = k + FirstLowInvalidHeapAttributeNumber;
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
 				chunk_sz[j] += RecordBatchFieldLength(&rb_state->columns[j]);
@@ -1397,7 +1397,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
             {
 				Form_pg_attribute attr;
 
-				j = k + FirstLowInvalidHeapAttributeNumber;
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
 				attr = tupleDescAttr(tupdesc, j);
@@ -1512,7 +1512,7 @@ ArrowAcquireSampleRows(Relation relation,
 	fdesc_array = alloca(sizeof(File) * list_length(filesList));
 	foreach (lc, filesList)
 	{
-		const char *fname = strVal(lfirst(lc));
+		char	   *fname = strVal(lfirst(lc));
 		File		fdesc;
 		List	   *rb_cached;
 		ListCell   *cell;
@@ -1714,16 +1714,7 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 							   RelOptInfo *rel,
 							   RangeTblEntry *rte)
 {
-	/*
-	 * PG9.6 does not support ReInitializeDSMForeignScan and
-	 * ShutdownForeignScan. It makes DSM setup/cleanup complicated,
-	 * so we simply prohibit parallel scan on PG9.6.
-	 */
-#if PG_VERSION_NUM < 100000
-	return false;
-#else
 	return true;
-#endif
 }
 
 /*
@@ -1759,7 +1750,6 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 /*
  * ArrowReInitializeDSMForeignScan
  */
-#if PG_VERSION_NUM >= 100000
 void
 ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
 {
@@ -1774,7 +1764,6 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 {
 	ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
 }
-#endif
 
 /*
  * ArrowInitializeWorkerForeignScan
@@ -1795,7 +1784,6 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 						   (pg_atomic_uint32 *) coordinate);
 }
 
-#if PG_VERSION_NUM >= 100000
 /*
  * ArrowShutdownForeignScan
  */
@@ -1810,7 +1798,6 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 {
 	ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
 }
-#endif
 
 /*
  * handler of Arrow_Fdw
@@ -1998,7 +1985,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				 * lookup composite type definition from pg_class
 				 * At least, nattrs == _num_children
 				 */
-				rel = heap_open(RelationRelationId, AccessShareLock);
+				rel = table_open(RelationRelationId, AccessShareLock);
 				ScanKeyInit(&skey[0],
 							Anum_pg_class_relkind,
 							BTEqualStrategyNumber, F_CHAREQ,
@@ -2047,7 +2034,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 						type_oid = relForm->reltype;
 				}
 				systable_endscan(sscan);
-				heap_close(rel, AccessShareLock);
+				table_close(rel, AccessShareLock);
 
 				if (!OidIsValid(type_oid))
 					elog(ERROR, "arrow::%s is not supported",
@@ -3363,13 +3350,10 @@ pgstrom_init_arrow_fdw(void)
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
 	r->InitializeDSMForeignScan		= ArrowInitializeDSMForeignScan;
-#if PG_VERSION_NUM >= 100000
 	r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
-#endif
 	r->InitializeWorkerForeignScan	= ArrowInitializeWorkerForeignScan;
-#if PG_VERSION_NUM >= 100000
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
-#endif
+
 	/*
 	 * Turn on/off arrow_fdw
 	 */

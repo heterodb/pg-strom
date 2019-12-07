@@ -22,15 +22,16 @@ PGSTROM_RELEASE := devel
 #
 # Installation related
 #
-PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.2.sql
+__PGSTROM_SQL = pg_strom--2.2.sql pg_strom--2.2--2.3.sql
+PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 
 #
 # Source file of CPU portion
 #
 __STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
-		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o aggfuncs.o \
-		pl_cuda.o gstore_buf.o gstore_fdw.o \
+		gpu_tasks.o gpuscan.o gpujoin.o inners.o gpupreagg.o \
+		aggfuncs.o pl_cuda.o gstore_buf.o gstore_fdw.o \
 		arrow_fdw.o arrow_read.o \
 		matrix.o float2.o largeobject.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
@@ -217,7 +218,7 @@ USE_MODULE_DB := 1
 REGRESS := --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
 REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/sql/init_regress.sql
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
-REGRESS_REVISION := 20190716
+REGRESS_REVISION := 20191112
 REGRESS_REVISION_QUERY := 'SELECT pgstrom.regression_testdb_revision() = $(REGRESS_REVISION)'
 REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --outputdir=$(STROM_BUILD_ROOT)/test \
@@ -295,7 +296,7 @@ $(GPUINFO): $(GPUINFO_DEPEND)
 	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
-	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon
+	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm

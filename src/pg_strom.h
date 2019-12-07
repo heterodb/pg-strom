@@ -12,10 +12,18 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+
 #include "postgres.h"
+#if PG_VERSION_NUM < 100000
+#error Base PostgreSQL version must be v10 or later
+#endif
+#define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
+#define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
+
 #include "access/brin.h"
 #include "access/brin_revmap.h"
 #include "access/hash.h"
+#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
@@ -57,12 +65,8 @@
 #include "commands/tablespace.h"
 #include "commands/trigger.h"
 #include "commands/typecmds.h"
-#if PG_VERSION_NUM >= 100000
 #include "common/base64.h"
 #include "common/md5.h"
-#else
-#include "libpq/md5.h"	//moved at PG10
-#endif
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeIndexscan.h"
@@ -85,9 +89,17 @@
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/readfuncs.h"
+#if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
+#endif
+#if PG_VERSION_NUM >= 120000
+#include "optimizer/appendinfo.h"
+#endif
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#if PG_VERSION_NUM >= 120000
+#include "optimizer/optimizer.h"
+#endif
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
@@ -96,7 +108,9 @@
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#if PG_VERSION_NUM < 120000
 #include "optimizer/var.h"
+#endif
 #include "parser/parsetree.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -126,6 +140,9 @@
 #include "utils/bytea.h"
 #include "utils/cash.h"
 #include "utils/date.h"
+#if PG_VERSION_NUM >= 120000
+#include "utils/float.h"
+#endif
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/json.h"
@@ -139,9 +156,7 @@
 #include "utils/pg_crc.h"
 #include "utils/pg_locale.h"
 #include "utils/rangetypes.h"
-#if PG_VERSION_NUM >= 100000
 #include "utils/regproc.h"
-#endif
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/ruleutils.h"
@@ -149,13 +164,13 @@
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
+#if PG_VERSION_NUM < 120000
 #include "utils/tqual.h"
+#endif
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 #include "utils/varbit.h"
-#if PG_VERSION_NUM >= 100000
 #include "utils/varlena.h"
-#endif
 
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
@@ -191,12 +206,6 @@
  *
  * --------------------------------------------------------------------
  */
-#if PG_VERSION_NUM < 100000
-#error Base PostgreSQL version must be v10 or later
-#endif
-#define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
-#define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
-
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif
@@ -215,6 +224,7 @@
 #error PG-Strom expects timestamp has 64bit integer format
 #endif
 #include "cuda_common.h"
+#include "pg_compat.h"
 
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
@@ -375,13 +385,14 @@ struct GpuTaskSharedState
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
 
-	/* for regular table scan */
-	uint64		nr_allocated;	/* number of blocks already allocated to
-								 * workers; almost equivalent to the
-								 * @phs_nallocated in PG11 or later.
-								 */
-	ParallelHeapScanDescData	phscan;
-	/* variable length */
+	/* for block-based regular table scan */
+	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
+	slock_t			pbs_mutex;		/* lock of the fields below */
+	BlockNumber		pbs_startblock;	/* starting block number */
+	BlockNumber		pbs_nallocated;	/* # of blocks allocated to workers */
+
+	/* common parallel table scan descriptor */
+	ParallelTableScanDescData phscan;
 };
 
 /*
@@ -1294,6 +1305,22 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 
 /*
+ * inners.c
+ */
+typedef struct shared_mmap_segment		shared_mmap_segment;
+
+extern shared_mmap_segment *shared_mmap_create(size_t size);
+extern shared_mmap_segment *shared_mmap_attach(uint32 handle);
+extern void shared_mmap_detach(shared_mmap_segment *shm_seg);
+extern void *shared_mmap_expand(shared_mmap_segment *shm_seg, size_t new_size);
+
+extern void *shared_mmap_address(shared_mmap_segment *shm_seg);
+extern size_t shared_mmap_length(shared_mmap_segment *shm_seg);
+extern uint64 shared_mmap_handle(shared_mmap_segment *shm_seg);
+
+extern void	pgstrom_init_inners(void);
+
+/*
  * gpupreagg.c
  */
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
@@ -1393,11 +1420,6 @@ extern Expr *make_flat_ands_explicit(List *andclauses);
 extern AppendRelInfo **__find_appinfos_by_relids(PlannerInfo *root,
 												 Relids relids,
 												 int *nappinfos);
-#if PG_VERSION_NUM < 100000
-extern int __compute_parallel_worker(RelOptInfo *rel,
-									 double heap_pages,
-									 double index_pages);
-#endif
 extern double get_parallel_divisor(Path *path);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */
@@ -1408,6 +1430,13 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_PROCEDURE	'p'
 #endif
 extern int	get_relnatts(Oid relid);
+extern Oid	get_function_oid(const char *func_name,
+							 oidvector *func_args,
+							 Oid namespace_oid,
+							 bool missing_ok);
+extern Oid	get_type_oid(const char *type_name,
+						 Oid namespace_oid,
+						 bool missing_ok);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);
@@ -1461,13 +1490,6 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-
-/* ----------------------------------------------------------------
- *
- * Thin abstruction layer across multiple PostgreSQL versions
- *
- * ---------------------------------------------------------------- */
-#include "pg_compat.h"
 
 /* ----------------------------------------------------------------
  *

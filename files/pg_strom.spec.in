@@ -84,7 +84,7 @@ ldconfig
 %{__pkgbindir}/testapp_largeobject
 
 %changelog
-* Wed Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
+* Thu Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
 - fixes of various bugs
 - support of Apache Arrow columnar store (Arrow_Fdw)
 - pg2arrow utility command is added

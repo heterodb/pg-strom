@@ -81,7 +81,7 @@ typedef struct
 {
 	pg_atomic_uint32	num_active_builders;
 	struct {
-		volatile Latch *latch;
+		Latch *latch;
 	} builders[FLEXIBLE_ARRAY_MEMBER];
 } program_builder_state;
 
@@ -1421,7 +1421,7 @@ assign_timelib_session_info(StringInfo buf)
 	{
 		for (i=0; i < sp->timecnt; i++)
 		{
-			appendStringInfo(buf, "    % 10ld,\n", sp->ats[i]);
+			appendStringInfo(buf, "    %10ld,\n", sp->ats[i]);
 		}
 	}
 	appendStringInfo(buf, " };\n");
@@ -1822,7 +1822,7 @@ cudaProgramBuilderWakeUp(bool error_if_no_builders)
 
 	for (i=0; i < num_program_builders; i++)
 	{
-		volatile Latch *latch = pgbuilder_state->builders[i].latch;
+		Latch *latch = pgbuilder_state->builders[i].latch;
 
 		if (latch)
 		{

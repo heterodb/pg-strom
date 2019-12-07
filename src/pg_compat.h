@@ -37,6 +37,25 @@
 #endif
 
 /*
+ * MEMO: PG12 re-defines 'oid' as a regular column, not a system column.
+ * Thus, we don't need to have special treatment for OID, on the other
+ * hand, widespread APIs were affected by this change.
+ */
+#if PG_VERSION_NUM < 120000
+#define tupleDescHasOid(tdesc)		((tdesc)->tdhasoid)
+#define PgProcTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define PgTypeTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define CreateTemplateTupleDesc(a)	CreateTemplateTupleDesc((a), false)
+#define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
+#define SystemAttributeDefinition(a)			\
+	SystemAttributeDefinition((a),true)
+#else
+#define tupleDescHasOid(tdesc)		(false)
+#define PgProcTupleGetOid(tuple)	(((Form_pg_proc)GETSTRUCT(tuple))->oid)
+#define PgTypeTupleGetOid(tuple)	(((Form_pg_type)GETSTRUCT(tuple))->oid)
+#endif
+
+/*
  * MEMO: Naming convension of data access macro on some data types
  * were confused before PG11
  */
@@ -50,44 +69,9 @@
 #endif
 
 /*
- * MEMO: PG10 adds the 4th argument for WaitLatch(), to inform the event
- * type which blocks PostgreSQL backend context. In our case, it is always
- * PG_WAIT_EXTENSION.
- */
-#if PG_VERSION_NUM < 100000
-#define WaitLatch(a,b,c,d)				WaitLatch((a),(b),(c))
-#define WaitLatchOrSocket(a,b,c,d,e)	WaitLatchOrSocket((a),(b),(c),(d))
-#endif
-
-/*
- * MEMO: PG11 prohibits to replace only tupdesc of TupleTableSlot (it hits
- * Assert condition), so we have to use ExecInitScanTupleSlot() instead of
- * ExecAssignScanType().
+ * MEMO: PG11 adds 'max_workers' argument to the compute_parallel_worker().
  */
 #if PG_VERSION_NUM < 110000
-#define ExecInitScanTupleSlot(es, ss, tupdesc)							\
-	do {																\
-		(ss)->ss_ScanTupleSlot = ExecAllocTableSlot(&(es)->es_tupleTable); \
-		ExecAssignScanType((ss),(tupdesc));								\
-	} while(0)
-#endif
-
-/*
- * MEMO: PG10 adds PlanState argument to ExecBuildProjectionInfo
- */
-#if PG_VERSION_NUM < 100000
-#define ExecBuildProjectionInfo(a,b,c,d,e)\
-	ExecBuildProjectionInfo(a,b,c,e)
-#endif
-
-/*
- * MEMO: PG10 add this function (also look at misc.c), then PG11 adds
- * argument of 'max_workers' argument.
- */
-#if PG_VERSION_NUM < 100000
-#define compute_parallel_worker(a,b,c,d)		\
-	__compute_parallel_worker((a),(b),(c))
-#elif PG_VERSION_NUM < 110000
 #define compute_parallel_worker(a,b,c,d)		\
 	compute_parallel_worker((a),(b),(c))
 #endif
@@ -207,6 +191,72 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 8) || \
 	 (PG_MAJOR_VERSION <  1000))
 #define is_dummy_rel(r)			IS_DUMMY_REL(r)
+#endif
+
+/*
+ * MEMO: PG12 adopted storage access method (a.k.a pluggable storage layer).
+ * It affects widespread APIs we had used in PG11 or older.
+ */
+#if PG_VERSION_NUM < 120000
+typedef HeapScanDesc					TableScanDesc;
+typedef HeapScanDescData				TableScanDescData;
+typedef ParallelHeapScanDesc			ParallelTableScanDesc;
+typedef ParallelHeapScanDescData		ParallelTableScanDescData;
+
+#define table_open(a,b)					heap_open(a,b)
+#define table_close(a,b)				heap_close(a,b)
+#define table_beginscan(a,b,c,d)		heap_beginscan(a,b,c,d)
+#define table_beginscan_parallel(a,b)	heap_beginscan_parallel(a,b)
+
+#define table_endscan(a)				heap_endscan(a)
+#define table_rescan(a,b)				heap_rescan(a,b)
+
+#define table_parallelscan_estimate(a,b)		\
+	heap_parallelscan_estimate(b)
+#define table_parallelscan_initialize(a,b,c)	\
+	heap_parallelscan_initialize(b,a,c)
+#define table_parallelscan_reinitialize(a,b)	\
+	heap_parallelscan_reinitialize(b)
+
+/*
+ * PG12 and newer required TupleTableSlot to have TupleTableSlotOps,
+ * for better support of pluggable storage engines. It affects to
+ * the widespread relevant APIs.
+ *
+ * PG10 or older didn't assign TupleDesc at ExecInitScanTupleSlot(),
+ * so we had to call ExecAssignScanType() additionally.
+ */
+#if PG_VERSION_NUM < 110000
+#define ExecInitScanTupleSlot(estate,ss,tdesc,tts_ops)	\
+	do {												\
+		ExecInitScanTupleSlot((estate),(ss));			\
+		ExecAssignScanType((ss),(tdesc));				\
+	} while(0)
+#else
+#define ExecInitScanTupleSlot(estate,ss,tdesc,tts_ops)	\
+	ExecInitScanTupleSlot((estate),(ss),(tdesc))
+#endif
+
+#define MakeSingleTupleTableSlot(tdesc,tts_ops)			\
+	MakeSingleTupleTableSlot((tdesc))
+#define ExecStoreHeapTuple(tup,slot,shouldFree)			\
+	ExecStoreTuple((tup),(slot),InvalidBuffer,(shouldFree))
+static inline HeapTuple
+ExecFetchSlotHeapTuple(TupleTableSlot *slot,
+					   bool materialize, bool *shouldFree)
+{
+	Assert(!materialize && !shouldFree);
+	return ExecFetchSlotTuple(slot);
+}
+#endif	/* < PG12 */
+
+/*
+ * PG12 added 'pathkey' argument of create_append_path().
+ * It shall be ignored on the older versions.
+ */
+#if PG_VERSION_NUM < 120000
+#define create_append_path(a,b,c,d,e,f,g,h,i,j)	\
+	create_append_path((a),(b),(c),(d),(f),(g),(h),(i),(j))
 #endif
 
 #endif	/* PG_COMPAT_H */

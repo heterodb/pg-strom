@@ -30,9 +30,9 @@ CREATE TABLE regtest_data (
   tm     time,
   ts     timestamp
 );
-SELECT setseed(0.20190711);
- setseed 
----------
+SELECT pgstrom.random_setseed(20190711);
+ random_setseed 
+----------------
  
 (1 row)
 

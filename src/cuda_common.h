@@ -881,6 +881,7 @@ typedef struct {
 } kern_data_store;
 
 /* attribute number of system columns */
+#ifndef SYSATTR_H
 #define SelfItemPointerAttributeNumber			(-1)
 #define ObjectIdAttributeNumber					(-2)
 #define MinTransactionIdAttributeNumber			(-3)
@@ -889,6 +890,7 @@ typedef struct {
 #define MaxCommandIdAttributeNumber				(-6)
 #define TableOidAttributeNumber					(-7)
 #define FirstLowInvalidHeapAttributeNumber		(-8)
+#endif	/* !SYSATTR_H */
 
 /*
  * MEMO: Support of 32GB KDS - KDS with row-, hash- and column-format

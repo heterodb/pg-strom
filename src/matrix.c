@@ -456,14 +456,14 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 {
 	struct {
 		ArrayType	   *matrix;
-		TupleTableSlot *slot;
+		Datum		   *values;
+		bool		   *isnull;
 		int16			typlen;
 		bool			typbyval;
 		char			typalign;
 	}				   *state;
 	FuncCallContext	   *fncxt;
 	ArrayType		   *matrix;
-	TupleTableSlot	   *slot;
 	HeapTuple			tuple;
 	cl_int				height;
 	cl_int				width;
@@ -489,7 +489,7 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 							 &state->typbyval,
 							 &state->typalign);
 		width = ARRAY_MATRIX_WIDTH(matrix);
-		tupdesc = CreateTemplateTupleDesc(width, false);
+		tupdesc = CreateTemplateTupleDesc(width);
 		for (i=0; i < width; i++)
 		{
 			TupleDescInitEntry(tupdesc,
@@ -500,7 +500,8 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
 		state->matrix = matrix;
-		state->slot = MakeSingleTupleTableSlot(fncxt->tuple_desc);
+		state->values = palloc(sizeof(Datum) * width);
+		state->isnull = palloc(sizeof(bool) * width);
 		fncxt->user_fctx = state;
 
 		MemoryContextSwitchTo(oldcxt);
@@ -510,39 +511,38 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 	matrix = state->matrix;
 	width = ARRAY_MATRIX_WIDTH(matrix);
 	height = ARRAY_MATRIX_HEIGHT(matrix);
-	slot = state->slot;
 
 	if (fncxt->call_cntr >= height)
 		SRF_RETURN_DONE(fncxt);
-	ExecClearTuple(slot);
 	source = ARR_DATA_PTR(matrix) + state->typlen * fncxt->call_cntr;
-	memset(slot->tts_isnull, 0, sizeof(bool) * width);
+	memset(state->isnull, 0, sizeof(bool) * width);
 	for (i=0; i < width; i++)
 	{
 		switch (state->typlen)
 		{
 			case sizeof(cl_uchar):
-				slot->tts_values[i] = *((cl_uchar *)source);
+				state->values[i] = *((cl_uchar *)source);
 				source += sizeof(cl_uchar) * height;
 				break;
 			case sizeof(cl_ushort):
-				slot->tts_values[i] = *((cl_ushort *)source);
+				state->values[i] = *((cl_ushort *)source);
 				source += sizeof(cl_ushort) * height;
 				break;
 			case sizeof(cl_uint):
-				slot->tts_values[i] = *((cl_uint *)source);
+				state->values[i] = *((cl_uint *)source);
 				source += sizeof(cl_uint) * height;
 				break;
 			case sizeof(cl_ulong):
-				slot->tts_values[i] = *((cl_ulong *)source);
+				state->values[i] = *((cl_ulong *)source);
 				source += sizeof(cl_ulong) * height;
 				break;
 			default:
 				elog(ERROR, "unexpecter type length: %d", state->typlen);
 		}
 	}
-	ExecStoreVirtualTuple(slot);
-	tuple = ExecMaterializeSlot(slot);
+	tuple = heap_form_tuple(fncxt->tuple_desc,
+							state->values,
+							state->isnull);
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(array_matrix_unnest);

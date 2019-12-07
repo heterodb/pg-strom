@@ -20,7 +20,7 @@ CREATE TABLE rt_data (
   y    int4,
   z    int8
 );
-SELECT setseed(0.20190610);
+SELECT pgstrom.random_setseed(20190610);
 INSERT INTO rt_data (
   SELECT x, pgstrom.random_float(1, -1.0, 1.0),
             pgstrom.random_float(1, -10.0, 10.0),
@@ -39,6 +39,10 @@ VACUUM ANALYZE;
 SET enable_seqscan = off;
 -- not to print kernel source code
 SET pg_strom.debug_kernel_source = off;
+
+-- PG12 changed default of extra_float_digits, so it affects to number of
+-- digits of float values.
+SET extra_float_digits = 1;
 
 -- absolute values
 SET pg_strom.enabled = on;

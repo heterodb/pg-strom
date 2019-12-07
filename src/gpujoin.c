@@ -188,22 +188,14 @@ typedef struct
 	JoinType			join_type;
 	double				nrows_ratio;
 	cl_uint				ichunk_size;
-#if PG_VERSION_NUM < 100000	
-	List			   *join_quals;		/* single element list of ExprState */
-	List			   *other_quals;	/* single element list of ExprState */
-#else
 	ExprState		   *join_quals;
 	ExprState		   *other_quals;
-#endif
 
 	/*
 	 * Join properties; only hash-join
 	 */
 	List			   *hash_outer_keys;
 	List			   *hash_inner_keys;
-//	List			   *hash_keylen;
-//	List			   *hash_keybyval;
-//	List			   *hash_keytype;
 
 	/* CPU Fallback related */
 	AttrNumber		   *inner_dst_resno;
@@ -225,18 +217,14 @@ typedef struct
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr	   *m_kmrels_array;		/* only master process */
 	GpuContext	  **m_kmrels_gcontext;	/* only master process */
-	dsm_segment	   *seg_kmrels;
+	shared_mmap_segment *seg_kmrels;
 	cl_int			curr_outer_depth;
 
 	/*
 	 * Expressions to be used in the CPU fallback path
 	 */
 	List		   *join_types;
-#if PG_VERSION_NUM < 100000
-	List		   *outer_quals;	/* list of ExprState */
-#else
 	ExprState	   *outer_quals;
-#endif
 	double			outer_ratio;
 	double			outer_nrows;
 	List		   *hash_outer_keys;
@@ -296,7 +284,7 @@ struct GpuJoinSiblingState
 {
 	cl_int			n_actives;	/* number of active siblings */
 	GpuJoinSharedState *gj_sstate;
-	dsm_segment	   *seg_kmrels;
+	shared_mmap_segment *seg_kmrels;
 	struct {
 		CUdeviceptr	m_kmrels;	/* device memory of inner buffer */
 		GpuContext *gcontext;	/* GpuContext which allocates/opens m_kmrels */
@@ -1486,6 +1474,49 @@ make_pseudo_append_rel_info(PlannerInfo *root, Index relid)
 	return apinfo;
 }
 
+#if PG_VERSION_NUM >= 120000
+/*
+ * build_child_join_sjinfo - PG12 moved this function to joinrels.c, and
+ * re-declared as static function....
+ */
+static SpecialJoinInfo *
+build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
+                        Relids left_relids, Relids right_relids)
+{
+	SpecialJoinInfo *sjinfo = makeNode(SpecialJoinInfo);
+	AppendRelInfo **left_appinfos;
+	int			left_nappinfos;
+	AppendRelInfo **right_appinfos;
+	int			right_nappinfos;
+
+	memcpy(sjinfo, parent_sjinfo, sizeof(SpecialJoinInfo));
+	left_appinfos = find_appinfos_by_relids(root, left_relids,
+											&left_nappinfos);
+	right_appinfos = find_appinfos_by_relids(root, right_relids,
+											 &right_nappinfos);
+
+	sjinfo->min_lefthand = adjust_child_relids(sjinfo->min_lefthand,
+											   left_nappinfos, left_appinfos);
+	sjinfo->min_righthand = adjust_child_relids(sjinfo->min_righthand,
+												right_nappinfos,
+												right_appinfos);
+	sjinfo->syn_lefthand = adjust_child_relids(sjinfo->syn_lefthand,
+											   left_nappinfos, left_appinfos);
+	sjinfo->syn_righthand = adjust_child_relids(sjinfo->syn_righthand,
+												right_nappinfos,
+												right_appinfos);
+	sjinfo->semi_rhs_exprs = (List *)
+		adjust_appendrel_attrs(root,
+							   (Node *) sjinfo->semi_rhs_exprs,
+							   right_nappinfos,
+							   right_appinfos);
+	pfree(left_appinfos);
+	pfree(right_appinfos);
+
+	return sjinfo;
+}
+#endif
+
 /*
  * try_partitionwise_gpujoin
  */
@@ -2152,7 +2183,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	{
 		append_path = create_append_path(root, joinrel,
 										 NIL, subpaths_list,
-										 required_outer,
+										 NIL, required_outer,
 										 parallel_nworkers, true,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
@@ -2162,7 +2193,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	{
 		append_path = create_append_path(root, joinrel,
 										 subpaths_list, NIL,
-										 required_outer,
+										 NIL, required_outer,
 										 0, false,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
@@ -3075,8 +3106,9 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 * descriptor to initialize the related stuff.
 	 */
 	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc);
+	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc,
+						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
@@ -3130,14 +3162,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
 	if (gj_info->outer_quals)
-	{
-#if PG_VERSION_NUM < 100000
-		gjs->outer_quals = (List *)
-			ExecInitExpr((Expr *)gj_info->outer_quals, &ss->ps);
-#else
 		gjs->outer_quals = ExecInitQual(gj_info->outer_quals, &ss->ps);
-#endif
-	}
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
 	Assert(!cscan->scan.plan.qual);
@@ -3213,18 +3238,14 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				/* also, non-simple Var node needs projection */
 				fallback_needs_projection = true;
 			}
-#if PG_VERSION_NUM < 100000
-			tlist_fallback = lappend(tlist_fallback,
-									 ExecInitExpr((Expr *)tle, &ss->ps));
-#else
 			tlist_fallback = lappend(tlist_fallback, tle);
-#endif
 		}
 	}
 
 	if (fallback_needs_projection)
 	{
-		gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc);
+		gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc,
+													  &TTSOpsHeapTuple);
 		gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
 													 ss->ps.ps_ExprContext,
 													 ss->ss_ScanTupleSlot,
@@ -3303,24 +3324,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		if (join_quals)
 		{
 			Assert(IsA(join_quals, List));
-#if PG_VERSION_NUM < 100000
-			istate->join_quals = (List *)
-				ExecInitExpr((Expr *)join_quals, &ss->ps);
-#else
 			istate->join_quals = ExecInitQual(join_quals, &ss->ps);
-#endif
 		}
 
 		other_quals = list_nth(gj_info->other_quals, i);
 		if (other_quals)
-		{
-#if PG_VERSION_NUM < 100000
-			istate->other_quals = (List *)
-				ExecInitExpr((Expr *)other_quals, &ss->ps);
-#else
 			istate->other_quals = ExecInitQual(other_quals, &ss->ps);
-#endif
-		}
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
@@ -3397,7 +3406,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->result_width =
 		MAXALIGN(offsetof(HeapTupleHeaderData,
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
-				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
+				 (tupleDescHasOid(result_tupdesc) ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 }
 
@@ -3578,7 +3587,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		if (gjs->seg_kmrels)
 		{
-			kern_multirels *kmrels = dsm_segment_address(gjs->seg_kmrels);
+			kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
 			kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 		}
 
@@ -3611,7 +3620,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
 		}
-		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
+		snprintf(qlabel, sizeof(qlabel), "Depth%2d", depth);
 		indent_width = es->indent * 2 + strlen(qlabel) + 2;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
@@ -3855,7 +3864,6 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	OverWriteSharedStateIfPartitionLeaf(gjs);
 }
 
-#if PG_VERSION_NUM >= 100000
 /*
  * ExecGpuJoinReInitializeDSM
  */
@@ -3901,7 +3909,6 @@ ExecShutdownGpuJoin(CustomScanState *node)
 		gjs->gj_rtstat = gj_rtstat_new;
 	}
 }
-#endif
 
 /*
  * gpujoin_codegen_var_decl
@@ -4487,11 +4494,11 @@ gpujoin_codegen_projection(StringInfo source,
 		foreach (lc1, tlist_dev)
 		{
 			TargetEntry		   *tle = lfirst(lc1);
-			Form_pg_attribute	attr;
+			const FormData_pg_attribute *attr;
 
 			if (varattmaps[tle->resno-1] >= 0)
 				continue;
-			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
+			attr = SystemAttributeDefinition(varattmaps[tle->resno-1]);
 			appendStringInfo(
 				&row,
 				"  sz = pg_sysattr_%s_store(kcxt,%s,htup,&t_self,\n"
@@ -5136,7 +5143,7 @@ int
 gpujoinNextRightOuterJoin(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	int				outer_depth = -1;
 
 	for (outer_depth = Max(gjs->curr_outer_depth + 1, 1);
@@ -5181,7 +5188,7 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 						   1000L,
 						   PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "Unexpected Postmaster Dead");
+				elog(FATAL, "unexpected postmaster dead");
 			ResetLatch(MyLatch);
 		}
 		/* OK, no PG workers run GpuJoin at this point */
@@ -5192,7 +5199,7 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 		 * In case of PG workers, the last process per GPU needs to write back
 		 * OUTER JOIN map to the DSM area. (only happen on multi-GPU mode)
 		 */
-		kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+		kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 		cl_int			dindex = gcontext->cuda_dindex;
 		uint32			pg_nworkers_pergpu =
 			pg_atomic_sub_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
@@ -5351,9 +5358,11 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			case MinTransactionIdAttributeNumber:
 				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
 				break;
+#if PG_VERSION_NUM < 120000
 			case ObjectIdAttributeNumber:
 				datum = ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
 				break;
+#endif
 			case TableOidAttributeNumber:
 				datum = ObjectIdGetDatum(kds->table_oid);
 				break;
@@ -5453,7 +5462,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	kern_hashitem  *khitem;
@@ -5500,11 +5509,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(istate->other_quals, econtext, false);
-#else
 		retval = ExecQual(istate->other_quals, econtext);
-#endif
 	} while (!retval);
 
 	/* update outer join map */
@@ -5552,7 +5557,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5571,11 +5576,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(istate->join_quals, econtext, false);
-#else
 		retval = ExecQual(istate->join_quals, econtext);
-#endif
 		if (retval)
 		{
 			istate->fallback_inner_index = index + 1;
@@ -5623,7 +5624,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 static int
 gpujoinFallbackLoadOuter(int depth, GpuJoinState *gjs)
 {
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5724,11 +5725,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
-#if PG_VERSION_NUM < 100000
-		retval = ExecQual(gjs->outer_quals, econtext, false);
-#else
 		retval = ExecQual(gjs->outer_quals, econtext);
-#endif
 	} while (!retval);
 
 	/* rewind the next depth */
@@ -5745,7 +5742,7 @@ gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
 							   pgstrom_data_store *pds_src,
 							   int outer_depth)
 {
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_int		num_rels = gjs->num_rels;
 	cl_uint		block_sz = kgjoin->block_sz;
 	cl_uint		grid_sz = kgjoin->grid_sz;
@@ -6036,15 +6033,7 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 
 			/* projection? */
 			if (gjs->proj_fallback)
-			{
-#if PG_VERSION_NUM < 100000
-				ExprDoneCond	is_done;
-
-				slot = ExecProject(gjs->proj_fallback, &is_done);
-#else
 				slot = ExecProject(gjs->proj_fallback);
-#endif
-			}
 			Assert(slot == gjs->gts.css.ss.ss_ScanTupleSlot);
 			return slot;
 		}
@@ -6230,7 +6219,7 @@ static void
 gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
 {
 	GpuContext	   *gcontext = gjs->gts.gcontext;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_bool		   *h_ojmaps;
 	CUdeviceptr		m_ojmaps;
 	CUresult		rc;
@@ -6272,7 +6261,7 @@ gpujoinColocateOuterJoinMaps(GpuTaskState *gts, CUmodule cuda_module)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
 	cl_bool		   *h_ojmaps;
 	CUdeviceptr		m_ojmaps;
 	CUfunction		kern_colocate;
@@ -6735,11 +6724,7 @@ get_tuple_hashvalue(innerState *istate,
 		Datum			datum;
 		bool			isnull;
 
-#if PG_VERSION_NUM < 100000
-		datum = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
-#else
 	    datum = ExecEvalExpr(clause, istate->econtext, &isnull);
-#endif
 		if (isnull)
 			continue;
 		is_null_keys = false;	/* key contains at least a valid value */
@@ -6760,7 +6745,7 @@ get_tuple_hashvalue(innerState *istate,
  * gpujoin_expand_inner_kds
  */
 static kern_data_store *
-gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
+gpujoin_expand_inner_kds(shared_mmap_segment *seg, size_t kds_offset)
 {
 	kern_data_store *kds;
 	size_t		new_dsmlen;
@@ -6772,12 +6757,12 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 
 	/* check current size */
 	kds = (kern_data_store *)
-		((char *)dsm_segment_address(seg) + kds_offset);
+		((char *)shared_mmap_address(seg) + kds_offset);
 	if (kds->length >= 0x100000000)
 		elog(ERROR, "GpuJoin: inner hash table larger than 4GB is not supported right now (nitems=%u, usage=%u)", kds->nitems, kds->usage);
 
-	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * dsm_segment_map_length(seg)) / 2);
-	new_kmrels = dsm_resize(seg, new_dsmlen);
+	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * shared_mmap_length(seg)) / 2);
+	new_kmrels = shared_mmap_expand(seg, new_dsmlen);
 	kds = (kern_data_store *)(new_kmrels + kds_offset);
 	row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	kds_length = Min(new_dsmlen - kds_offset, 0x400000000);	/* up to 16GB */
@@ -6839,7 +6824,7 @@ gpujoin_compaction_inner_kds(kern_data_store *kds_in)
  */
 static void
 gpujoin_inner_hash_preload(innerState *istate,
-						   dsm_segment *seg,
+						   shared_mmap_segment *seg,
 						   kern_data_store *kds_hash,
 						   size_t kds_offset)
 {
@@ -6856,7 +6841,7 @@ gpujoin_inner_hash_preload(innerState *istate,
 		if (TupIsNull(scan_slot))
 			break;
 
-		(void)ExecFetchSlotTuple(scan_slot);
+		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
 		hash = get_tuple_hashvalue(istate, true, scan_slot,
 								   &is_null_keys);
 		/*
@@ -6899,7 +6884,7 @@ gpujoin_inner_hash_preload(innerState *istate,
  */
 static void
 gpujoin_inner_heap_preload(innerState *istate,
-						   dsm_segment *seg,
+						   shared_mmap_segment *seg,
 						   kern_data_store *kds_heap,
 						   size_t kds_offset)
 {
@@ -6911,7 +6896,7 @@ gpujoin_inner_heap_preload(innerState *istate,
 		scan_slot = ExecProcNode(scan_ps);
 		if (TupIsNull(scan_slot))
 			break;
-		(void)ExecFetchSlotTuple(scan_slot);
+		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
 		while (!KDS_insert_tuple(kds_heap, scan_slot))
 			kds_heap = gpujoin_expand_inner_kds(seg, kds_offset);
 	}
@@ -6933,7 +6918,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
 	kern_multirels *h_kmrels;
 	kern_data_store *kds;
-	dsm_segment	   *seg;
+	shared_mmap_segment *seg;
 	int				i, num_rels = gjs->num_rels;
 	int				dindex_min;
 	int				dindex_max;
@@ -6947,8 +6932,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 										numDevAttrs * sizeof(CUdeviceptr));
 	gjs->m_kmrels_gcontext = MemoryContextAllocZero(CurTransactionContext,
 										numDevAttrs * sizeof(GpuContext *));
-	seg = dsm_create(pgstrom_chunk_size(), 0);
-	h_kmrels = dsm_segment_address(seg);
+	seg = shared_mmap_create(pgstrom_chunk_size());
+	h_kmrels = shared_mmap_address(seg);
 	kmrels_usage = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
 	memset(h_kmrels, 0, kmrels_usage);
 
@@ -6967,12 +6952,14 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		size_t			kds_head_sz;
 
 		/* expand DSM on demand */
-		dsm_length = dsm_segment_map_length(seg);
+		dsm_length = shared_mmap_length(seg);
 		kds_head_sz = KDS_calculateHeadSize(ps_desc, false);
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
-			h_kmrels = dsm_resize(seg, TYPEALIGN(BLCKSZ, (3*dsm_length)/2));
-			dsm_length = dsm_segment_map_length(seg);
+			size_t	new_length = TYPEALIGN(BLCKSZ, (3 * dsm_length) / 2);
+
+			h_kmrels = shared_mmap_expand(seg, new_length);
+			dsm_length = shared_mmap_length(seg);
 		}
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
 		kds_length = Min(dsm_length - kmrels_usage, 0x100000000L);
@@ -6991,7 +6978,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 			gpujoin_inner_heap_preload(istate, seg, kds, kmrels_usage);
 
 		/* NOTE: gpujoin_inner_xxxx_preload may expand and remap segment */
-		h_kmrels = dsm_segment_address(seg);
+		h_kmrels = shared_mmap_address(seg);
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
 
 		if (!istate->hash_outer_keys)
@@ -7010,7 +6997,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		}
 		kmrels_usage += STROMALIGN(kds->length);
 	}
-	Assert(kmrels_usage <= dsm_segment_map_length(seg));
+	Assert(kmrels_usage <= shared_mmap_length(seg));
 	h_kmrels->kmrels_length = kmrels_usage;
 	h_kmrels->ojmaps_length = ojmaps_usage;
 	h_kmrels->cuda_dindex = numDevAttrs;	/* host side */
@@ -7037,8 +7024,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	required = h_kmrels->kmrels_length + ojmaps_usage * (numDevAttrs + 1);
 
 	/* expand DSM if outer-join map requires more */
-	if (required > dsm_segment_map_length(seg))
-		h_kmrels = dsm_resize(seg, required);
+	if (required > shared_mmap_length(seg))
+		h_kmrels = shared_mmap_expand(seg, required);
 	memset((char *)h_kmrels + h_kmrels->kmrels_length,
 		   0,
 		   ojmaps_usage * (numDevAttrs + 1));
@@ -7082,7 +7069,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 		GPUCONTEXT_POP(__gcontext);
 	}
 skip_device_malloc:
-	gj_sstate->kmrels_handle = dsm_segment_handle(seg);
+	gj_sstate->kmrels_handle = shared_mmap_handle(seg);
 	gjs->seg_kmrels = seg;
 
 	return result;
@@ -7119,7 +7106,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	{
 		if (p_m_kmrels)
 			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != (CUdeviceptr) 0UL);
+		return (gjs->seg_kmrels != NULL);
 	}
 	pg_atomic_add_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
 	pg_atomic_add_fetch_u32(&gj_sstate->pg_nworkers, 1);
@@ -7149,7 +7136,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		sibling->n_actives++;
 		if (p_m_kmrels)
 			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != (CUdeviceptr) 0UL);
+		return (gjs->seg_kmrels != NULL);
 	}
 
 	/*
@@ -7207,13 +7194,18 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		}
 		else
 		{
+			int		ev;
+
 			/* wait for the completion of inner preload by the master */
 			CHECK_FOR_INTERRUPTS();
 
-			WaitLatch(&MyProc->procLatch,
-					  WL_LATCH_SET,
-					  -1,
-					  PG_WAIT_EXTENSION);
+			ev = WaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET |
+						   WL_POSTMASTER_DEATH,
+						   -1,
+						   PG_WAIT_EXTENSION);
+			if (ev & WL_POSTMASTER_DEATH)
+				elog(FATAL, "unexpected postmaster dead");
 			ResetLatch(&MyProc->procLatch);
 		}
 	}
@@ -7233,9 +7225,8 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 			gjs->seg_kmrels = sibling->seg_kmrels;
 		else
 		{
-			gjs->seg_kmrels = dsm_attach(gj_sstate->kmrels_handle);
-			if (!gjs->seg_kmrels)
-				elog(ERROR, "could not map dynamic shared memory segment");
+			gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
+
 			sibling->seg_kmrels = gjs->seg_kmrels;
 		}
 		sibling->n_actives++;
@@ -7261,9 +7252,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	}
 	else
 	{
-		gjs->seg_kmrels = dsm_attach(gj_sstate->kmrels_handle);
-		if (!gjs->seg_kmrels)
-			elog(ERROR, "could not map dynamic shared memory segment");
+		gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
 
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &m_deviceptr,
@@ -7303,7 +7292,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
 					 errorText(rc));
-			dsm_detach(gjs->seg_kmrels);
+			shared_mmap_detach(gjs->seg_kmrels);
 		}
 		else if (--sibling->n_actives == 0)
 		{
@@ -7324,7 +7313,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 				sibling->pergpu[i].m_kmrels = (CUdeviceptr) 0UL;
 			}
 			Assert(gjs->seg_kmrels == sibling->seg_kmrels);
-			dsm_detach(sibling->seg_kmrels);
+			shared_mmap_detach(sibling->seg_kmrels);
 			gjs->seg_kmrels = NULL;
 			sibling->seg_kmrels = 0;
 		}
@@ -7370,7 +7359,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 			gjs->m_kmrels_gcontext = NULL;
 		}
 		/* Also release DSM */
-		dsm_detach(gjs->seg_kmrels);
+		shared_mmap_detach(gjs->seg_kmrels);
 		/* Clear sibling, if any */
 		if (sibling)
 		{
@@ -7426,14 +7415,7 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 
 	gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
 	SpinLockInit(&gj_rtstat->c.lock);
-#if PG_VERSION_NUM < 100000
-	/* Because of restrictions at PG9.6, see createGpuScanSharedState */
-	if (dsm_addr)
-	{
-		gj_rtstat = MemoryContextAllocZero(estate->es_query_cxt, rtstat_len);
-		SpinLockInit(&gj_rtstat->c.lock);
-	}
-#endif
+
 	gjs->gj_sstate = gj_sstate;
 	gjs->gj_rtstat = gj_rtstat;
 }
@@ -7445,7 +7427,7 @@ bool
 gpujoinHasRightOuterJoin(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *kmrels = dsm_segment_address(gjs->seg_kmrels);
+	kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
 
 	return (kmrels->ojmaps_length > 0);
 }
@@ -7509,10 +7491,8 @@ pgstrom_init_gpujoin(void)
 	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
 	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
 	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
-#if PG_VERSION_NUM >= 100000
 	gpujoin_exec_methods.ReInitializeDSMCustomScan = ExecGpuJoinReInitializeDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= ExecShutdownGpuJoin;
-#endif
 	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
 
 	/* hook registration */

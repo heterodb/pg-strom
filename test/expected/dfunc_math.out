@@ -19,9 +19,9 @@ CREATE TABLE rt_data (
   y    int4,
   z    int8
 );
-SELECT setseed(0.20190610);
- setseed 
----------
+SELECT pgstrom.random_setseed(20190610);
+ random_setseed 
+----------------
  
 (1 row)
 
@@ -42,6 +42,9 @@ VACUUM ANALYZE;
 SET enable_seqscan = off;
 -- not to print kernel source code
 SET pg_strom.debug_kernel_source = off;
+-- PG12 changed default of extra_float_digits, so it affects to number of
+-- digits of float values.
+SET extra_float_digits = 1;
 -- absolute values
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -201,7 +204,7 @@ SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
                                                               QUERY PLAN                                                              
 --------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
-   Output: id, '3.14159265358979'::double precision, (degrees(r)), (radians(d)), (cos(r)), (cot(r)), (sin(r)), (tan(r))
+   Output: id, '3.141592653589793'::double precision, (degrees(r)), (radians(d)), (cos(r)), (cot(r)), (sin(r)), (tan(r))
    GPU Projection: rt_data.id, degrees(rt_data.r), radians(rt_data.d), cos(rt_data.r), cot(rt_data.r), sin(rt_data.r), tan(rt_data.r)
    GPU Filter: ((rt_data.r > '-360'::double precision) AND (rt_data.r < '360'::double precision))
 (4 rows)

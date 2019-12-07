@@ -1272,7 +1272,7 @@ GpuStoreBufferGetTuple(Relation frel,
 	/* put system column information if needed */
 	if (needs_system_columns)
 	{
-		HeapTuple   tup = ExecMaterializeSlot(slot);
+		HeapTuple   tup = ExecFetchSlotHeapTuple(slot, false, NULL);
 
 		tup->t_self.ip_blkid.bi_hi = (row_index >> 32) & 0x0000ffff;
 		tup->t_self.ip_blkid.bi_lo = (row_index >> 16) & 0x0000ffff;
@@ -1734,7 +1734,7 @@ gstoreXactCallbackOnPreCommit(void)
 		/*
 		 * construction of new version of GPU device memory image
 		 */
-		frel = heap_open(gs_buffer->table_oid, NoLock);
+		frel = table_open(gs_buffer->table_oid, NoLock);
 		rawsize = GpuStoreBufferEstimateSize(frel, gs_buffer, nrooms, rowmap);
 		rc = gpuMemAllocPreserved(gs_buffer->pinning,
 								  &ipc_mhandle,
@@ -1785,7 +1785,7 @@ gstoreXactCallbackOnPreCommit(void)
 		}
 		PG_END_TRY();
 
-		heap_close(frel, NoLock);
+		table_close(frel, NoLock);
 	}
 }
 
@@ -2199,9 +2199,9 @@ pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
-	frel = heap_open(gstore_oid, AccessShareLock);
+	frel = table_open(gstore_oid, AccessShareLock);
 	retval = RelationGetNumberOfAttributes(frel);
-	heap_close(frel, NoLock);
+	table_close(frel, NoLock);
 
 	PG_RETURN_INT64(retval);
 }
@@ -2251,7 +2251,7 @@ pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(9, false);
+		tupdesc = CreateTemplateTupleDesc(9);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database_oid",
 						   OIDOID, -1, 0);
         TupleDescInitEntry(tupdesc, (AttrNumber) 2, "table_oid",

@@ -1471,7 +1471,6 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 	Name		type_name = PG_GETARG_NAME(0);
 	Oid			type_oid = PG_GETARG_OID(1);
 	Oid			type_namespace = PG_GETARG_OID(2);
-	Oid			new_oid;
 	Relation	type_rel;
 	TupleDesc	tupdesc;
 	HeapTuple	tup;
@@ -1483,11 +1482,14 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser to create a shell type")));
 	/* see TypeShellMake */
-	type_rel = heap_open(TypeRelationId, RowExclusiveLock);
+	type_rel = table_open(TypeRelationId, RowExclusiveLock);
 	tupdesc = RelationGetDescr(type_rel);
 
 	memset(values, 0, sizeof(values));
 	memset(isnull, 0, sizeof(isnull));
+#if PG_VERSION_NUM >= 120000
+	values[Anum_pg_type_oid-1] = type_oid;
+#endif
 	values[Anum_pg_type_typname-1] = NameGetDatum(type_name);
     values[Anum_pg_type_typnamespace-1] = ObjectIdGetDatum(type_namespace);
     values[Anum_pg_type_typowner-1] = ObjectIdGetDatum(GetUserId());
@@ -1519,14 +1521,12 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 	isnull[Anum_pg_type_typdefault-1] = true;
 	isnull[Anum_pg_type_typacl-1] = true;
 
-	/* create a new type tuple */
+	/* create a new type tuple, and insert */
 	tup = heap_form_tuple(tupdesc, values, isnull);
+#if PG_VERSION_NUM < 120000
 	HeapTupleSetOid(tup, type_oid);
-
-	/* insert the tuple in the relation with specified OID */
-	new_oid = CatalogTupleInsert(type_rel, tup);
-	if (new_oid != type_oid)
-		elog(ERROR, "unable to create a shell type with OID (%u)", type_oid);
+#endif
+	CatalogTupleInsert(type_rel, tup);
 
 	/* create dependencies */
 	GenerateTypeDependencies(type_oid,
@@ -1541,7 +1541,7 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 	InvokeObjectPostCreateHook(TypeRelationId, type_oid, 0);
 
 	heap_freetuple(tup);
-    heap_close(type_rel, RowExclusiveLock);
+	table_close(type_rel, RowExclusiveLock);
 
 	PG_RETURN_OID(type_oid);
 }

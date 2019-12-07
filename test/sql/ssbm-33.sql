@@ -1,7 +1,7 @@
 SET search_path = pgstrom_regress,public;
 SET pg_strom.debug_kernel_source = off;
 --Q3_3
-EXPLAIN(costs off, verbose)
+SET pg_strom.enabled = on;
 select c_city,s_city,d_year,sum(lo_revenue) as revenue
 from customer,lineorder,supplier,date1
 where lo_custkey = c_custkey
@@ -13,6 +13,7 @@ where lo_custkey = c_custkey
   group by c_city, s_city, d_year
   order by d_year asc,revenue desc;
 
+SET pg_strom.enabled = off;
 select c_city,s_city,d_year,sum(lo_revenue) as revenue
 from customer,lineorder,supplier,date1
 where lo_custkey = c_custkey

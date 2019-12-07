@@ -18,9 +18,9 @@ CREATE TABLE rt_numeric (
   y     numeric(12,3),
   z     numeric(12,3)
 );
-SELECT setseed(0.20190611);
- setseed 
----------
+SELECT pgstrom.random_setseed(20190611);
+ random_setseed 
+----------------
  
 (1 row)
 

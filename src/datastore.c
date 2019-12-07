@@ -72,7 +72,7 @@ KDS_fetch_tuple_row(TupleTableSlot *slot,
 		tuple_buf->t_tableOid = kds->table_oid;
 		tuple_buf->t_data = &tup_item->htup;
 
-		ExecStoreTuple(tuple_buf, slot, InvalidBuffer, false);
+		ExecStoreHeapTuple(tuple_buf, slot, false);
 
 		return true;
 	}
@@ -197,7 +197,7 @@ KDS_fetch_tuple_block(TupleTableSlot *slot,
 			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
 			tuple->t_data = (HeapTupleHeader)((char *)hpage +
 											  ItemIdGetOffset(lpp));
-			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+			ExecStoreHeapTuple(tuple, slot, false);
 			return true;
 		}
 		/* move to the next block */
@@ -430,7 +430,7 @@ init_kernel_tupdesc(kern_colmeta *cmeta,
 		format == KDS_FORMAT_BLOCK)
 	{
 		attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
-        if (tupdesc->tdhasoid)
+        if (tupleDescHasOid(tupdesc))
             attcacheoff += sizeof(Oid);
         attcacheoff = MAXALIGN(attcacheoff);
 	}
@@ -550,7 +550,7 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->ncols = tupdesc->natts;
 	kds->format = format;
 	kds->has_attnames = has_attnames;
-	kds->tdhasoid = tupdesc->tdhasoid;
+	kds->tdhasoid = tupleDescHasOid(tupdesc);
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
 	kds->table_oid = InvalidOid;	/* caller shall set */
@@ -777,9 +777,6 @@ typedef struct _MdfdVec
 {
 	File			mdfd_vfd;		/* fd number in fd.c's pool */
 	BlockNumber		mdfd_segno;		/* segment number, from 0 */
-#if PG_VERSION_NUM < 100000
-	struct _MdfdVec *mdfd_chain;	/* next segment, or NULL */
-#endif
 } MdfdVec;
 
 static int
@@ -817,52 +814,6 @@ nvme_sstate_open_files(GpuContext *gcontext,
 	int			i, nr_segs;
 	int			fdesc;
 
-#if PG_VERSION_NUM < 100000
-	/* PG9.6 */
-	nr_segs = nvme_sstate->nr_segs;
-	memset(nvme_sstate->fdesc, -1, sizeof(int) * nr_segs);
-	for (vec = rd_smgr->md_fd[MAIN_FORKNUM];
-		 vec != NULL;
-		 vec = vec->mdfd_chain)
-	{
-		if (vec->mdfd_vfd < 0)
-			elog(ERROR, "Bug? seg=%u of relation %s is not opened",
-				 vec->mdfd_segno, RelationGetRelationName(relation));
-		if (vec->mdfd_segno >= nr_segs)
-			continue;	/* skip, out of the range */
-
-		fdesc = FileGetRawDesc(vec->mdfd_vfd);
-		if (fdesc < 0)
-			fdesc = nvme_sstate_open_segment(rd_smgr, vec->mdfd_segno);
-		else
-		{
-			fdesc = dup(fdesc);
-			if (fdesc < 0)
-				elog(ERROR, "failed on dup(2): %m");
-		}
-
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
-		{
-			close(fdesc);
-			elog(ERROR, "out of memory");
-		}
-		nvme_sstate->fdesc[vec->mdfd_segno] = fdesc;
-	}
-
-	for (i=0; i < nr_segs; i++)
-	{
-		if (nvme_sstate->fdesc[i] >= 0)
-			continue;
-		fdesc = nvme_sstate_open_segment(rd_smgr, i);
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
-		{
-			close(fdesc);
-			elog(ERROR, "out of memory");
-		}
-		nvme_sstate->fdesc[i] = fdesc;
-	}
-#else
-	/* PG10 or later */
 	nr_segs = Min(rd_smgr->md_num_open_segs[MAIN_FORKNUM],
 				  nvme_sstate->nr_segs);
 	for (i=0; i < nr_segs; i++)
@@ -901,7 +852,6 @@ nvme_sstate_open_files(GpuContext *gcontext,
 		}
 		nvme_sstate->fdesc[i] = fdesc;
 	}
-#endif
 }
 
 /*
@@ -1014,7 +964,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 {
 	BlockNumber		blknum = hscan->rs_cblock;
 	BlockNumber	   *block_nums;
-	Snapshot		snapshot = hscan->rs_snapshot;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
 	BufferAccessStrategy strategy = hscan->rs_strategy;
 	SMgrRelation	smgr = relation->rd_smgr;
 	Buffer			buffer;
@@ -1154,7 +1104,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 					  HeapScanDesc hscan)
 {
 	BlockNumber		blknum = hscan->rs_cblock;
-	Snapshot		snapshot = hscan->rs_snapshot;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
 	BufferAccessStrategy strategy = hscan->rs_strategy;
 	kern_data_store	*kds = &pds->kds;
 	Buffer			buffer;
@@ -1171,7 +1121,6 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 	/* Load the target buffer */
 	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
 								RBM_NORMAL, strategy);
-
 #if 1
 	/* Just like heapgetpage(), however, jobs we focus on is OLAP
 	 * workload, so it's uncertain whether we should vacuum the page
@@ -1179,7 +1128,6 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 	 */
 	heap_page_prune_opt(relation, buffer);
 #endif
-
 	/* we will check tuple's visibility under the shared lock */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = (Page) BufferGetPage(buffer);
@@ -1265,7 +1213,7 @@ bool
 PDS_exec_heapscan(GpuTaskState *gts, pgstrom_data_store *pds)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
-	HeapScanDesc	hscan = gts->css.ss.ss_currentScanDesc;
+	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
 	bool			retval;
 
 	CHECK_FOR_INTERRUPTS();
@@ -1310,7 +1258,7 @@ KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	tup_index = KERN_DATA_STORE_ROWINDEX(kds);
 
 	/* reference a HeapTuple in TupleTableSlot */
-	tuple = ExecFetchSlotTuple(slot);
+	tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
 
 	/* check whether we have room for this tuple */
 	curr_usage = (__kds_unpack(kds->usage) +
@@ -1357,7 +1305,7 @@ KDS_insert_hashitem(kern_data_store *kds,
 		elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 
 	/* compute required length */
-	tuple = ExecFetchSlotTuple(slot);
+	tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
 	curr_usage = (__kds_unpack(kds->usage) +
 				  MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len));
 

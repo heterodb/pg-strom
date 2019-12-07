@@ -74,87 +74,6 @@ __find_appinfos_by_relids(PlannerInfo *root, Relids relids, int *nappinfos)
 	return appinfos;
 }
 
-#if PG_VERSION_NUM < 100000
-/*
- * compute_parallel_worker at optimizer/path/allpaths.c
- * was newly added at PG10.x
- *
- * Compute the number of parallel workers that should be used to scan a
- * relation.  We compute the parallel workers based on the size of the heap to
- * be scanned and the size of the index to be scanned, then choose a minimum
- * of those.
- *
- * "heap_pages" is the number of pages from the table that we expect to scan,
- *  or -1 if we don't expect to scan any.
- *
- * "index_pages" is the number of pages from the index that we expect to scan,
- *  or -1 if we don't expect to scan any.
- */
-int
-__compute_parallel_worker(RelOptInfo *rel,
-						  double heap_pages,
-						  double index_pages)
-{
-	int			parallel_workers = 0;
-
-	/*
-	 * If the user has set the parallel_workers reloption, use that; otherwise
-	 * select a default number of workers.
-	 */
-	if (rel->rel_parallel_workers != -1)
-		parallel_workers = rel->rel_parallel_workers;
-	else
-	{
-		/*
-		 * If the number of pages being scanned is insufficient to justify a
-		 * parallel scan, just return zero ... unless it's an inheritance
-		 * child. In that case, we want to generate a parallel path here
-		 * anyway.  It might not be worthwhile just for this relation, but
-		 * when combined with all of its inheritance siblings it may well pay
-		 * off.
-		 */
-		if (rel->reloptkind == RELOPT_BASEREL &&
-			(heap_pages >= 0 && heap_pages < min_parallel_relation_size))
-			return 0;
-
-		if (heap_pages >= 0)
-		{
-			int			heap_parallel_threshold;
-			int			heap_parallel_workers = 1;
-
-			/*
-			 * Select the number of workers based on the log of the size of
-			 * the relation.  This probably needs to be a good deal more
-			 * sophisticated, but we need something here for now.  Note that
-			 * the upper limit of the min_parallel_relation_size GUC is
-			 * chosen to prevent overflow here.
-			 */
-			heap_parallel_threshold = Max(min_parallel_relation_size, 1);
-			while (heap_pages >= (BlockNumber) (heap_parallel_threshold * 3))
-			{
-				heap_parallel_workers++;
-				heap_parallel_threshold *= 3;
-				if (heap_parallel_threshold > INT_MAX / 3)
-					break;		/* avoid overflow */
-			}
-
-			parallel_workers = heap_parallel_workers;
-		}
-		/*
-		 * NOTE: PG9.6 does not pay attention for # of index pages
-		 * for decision of parallel execution.
-		 */
-	}
-
-	/*
-	 * In no case use more than max_parallel_workers_per_gather workers.
-	 */
-	parallel_workers = Min(parallel_workers, max_parallel_workers_per_gather);
-
-	return parallel_workers;
-}
-#endif		/* < PG10 */
-
 /*
  * get_parallel_divisor - Estimate the fraction of the work that each worker
  * will do given the number of workers budgeted for the path.
@@ -230,18 +149,71 @@ get_relnatts(Oid relid)
 }
 
 /*
+ * get_function_oid
+ */
+Oid
+get_function_oid(const char *func_name,
+				 oidvector *func_args,
+				 Oid namespace_oid,
+				 bool missing_ok)
+{
+	Oid		func_oid;
+
+	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_proc_oid,
+#endif
+							   CStringGetDatum(func_name),
+							   PointerGetDatum(func_args),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(func_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("function %s is not defined",
+						funcname_signature_string(func_name,
+												  func_args->dim1,
+												  NIL,
+												  func_args->values))));
+	return func_oid;
+}
+
+/*
+ * get_type_oid
+ */
+Oid
+get_type_oid(const char *type_name,
+			 Oid namespace_oid,
+			 bool missing_ok)
+{
+	Oid		type_oid;
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_type_oid,
+#endif
+							   CStringGetDatum(type_name),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(type_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("type %s is not defined", type_name)));
+
+	return type_oid;
+}
+
+/*
  * bms_to_cstring - human readable Bitmapset
  */
 char *
-bms_to_cstring(Bitmapset *x)
+bms_to_cstring(Bitmapset *bms)
 {
 	StringInfoData buf;
-	int			i;
+	int			bit = -1;
 
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "{");
-	for (i=0; i < x->nwords; i++)
-		appendStringInfo(&buf, "%s %08x", i==0 ? "" : ",", x->words[i]);
+	while ((bit = bms_next_member(bms, bit)) >= 0)
+		appendStringInfo(&buf, " %d", bit);
 	appendStringInfo(&buf, " }");
 
 	return buf.data;
@@ -269,7 +241,11 @@ pathnode_tree_walker(Path *node,
 		case T_BitmapAndPath:
 		case T_BitmapOrPath:
 		case T_TidPath:
+#if PG_VERSION_NUM < 120000
 		case T_ResultPath:
+#else
+		case T_GroupResultPath:
+#endif
 		case T_MinMaxAggPath:
 			/* primitive path nodes */
 			break;
@@ -530,8 +506,13 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpaths = subpaths;
 				return &b->path;
 			}
+#if PG_VERSION_NUM < 120000
 		case T_ResultPath:
 			return pmemdup(pathnode, sizeof(ResultPath));
+#else
+		case T_GroupResultPath:
+			return pmemdup(pathnode, sizeof(GroupResultPath));
+#endif
 		case T_MaterialPath:
 			{
 				MaterialPath   *a = (MaterialPath *)pathnode;
@@ -695,6 +676,7 @@ errorText(int errcode)
  *
  * ----------------------------------------------------------------
  */
+Datum pgstrom_random_setseed(PG_FUNCTION_ARGS);
 Datum pgstrom_random_int(PG_FUNCTION_ARGS);
 Datum pgstrom_random_float(PG_FUNCTION_ARGS);
 Datum pgstrom_random_date(PG_FUNCTION_ARGS);
@@ -714,12 +696,44 @@ Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
 Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
 Datum pgstrom_abort_if(PG_FUNCTION_ARGS);
 
+static unsigned int		pgstrom_random_seed = 0;
+static bool				pgstrom_random_seed_set = false;
+
+Datum
+pgstrom_random_setseed(PG_FUNCTION_ARGS)
+{
+	unsigned int	seed = PG_GETARG_UINT32(0);
+
+	pgstrom_random_seed = seed ^ 0xdeadbeafU;
+	pgstrom_random_seed_set = true;
+
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
+
+static cl_long
+__random(void)
+{
+	if (!pgstrom_random_seed_set)
+	{
+		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeaf;
+		pgstrom_random_seed_set = true;
+	}
+	return (cl_ulong)rand_r(&pgstrom_random_seed);
+}
+
+static inline double
+__drand48(void)
+{
+	return (double)__random() / (double)RAND_MAX;
+}
+
 static inline bool
 generate_null(double ratio)
 {
 	if (ratio <= 0.0)
 		return false;
-	if (100.0 * drand48() < ratio)
+	if (100.0 * __drand48() < ratio)
 		return true;
 	return false;
 }
@@ -738,7 +752,7 @@ pgstrom_random_int(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_INT64(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_INT64(lower + v % (upper - lower));
 }
@@ -758,7 +772,7 @@ pgstrom_random_float(PG_FUNCTION_ARGS)
 	if (upper == lower)
 		PG_RETURN_FLOAT8(lower);
 
-	PG_RETURN_FLOAT8((upper - lower) * drand48() + lower);
+	PG_RETURN_FLOAT8((upper - lower) * __drand48() + lower);
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_float);
 
@@ -785,7 +799,7 @@ pgstrom_random_date(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_DATEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_DATEADT(lower + v % (upper - lower));
 }
@@ -809,7 +823,7 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_TIMEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
@@ -833,12 +847,12 @@ pgstrom_random_timetz(PG_FUNCTION_ARGS)
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
 	temp = palloc(sizeof(TimeTzADT));
-	temp->zone = (random() % 23 - 11) * USECS_PER_HOUR;
+	temp->zone = (__random() % 23 - 11) * USECS_PER_HOUR;
 	if (upper == lower)
 		temp->time = lower;
 	else
 	{
-		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		v = (__random() << 31) | __random();
 		temp->time = lower + v % (upper - lower);
 	}
 	PG_RETURN_TIMETZADT_P(temp);
@@ -879,7 +893,7 @@ pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	if (upper == lower)
 		PG_RETURN_TIMEADT(lower);
-	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+	v = (__random() << 31) | __random();
 
 	PG_RETURN_TIMESTAMP(lower + v % (upper - lower));
 }
@@ -922,7 +936,7 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 		x = lower;
 	else
 	{
-		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		v = (__random() << 31) | __random();
 		x = lower + v % (upper - lower);
 	}
 	temp = palloc(sizeof(macaddr));
@@ -968,7 +982,7 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 	{
 		if (j < 8)
 		{
-			v |= (cl_ulong)random() << j;
+			v |= __random() << j;
 			j += 31;	/* note: only 31b of random() are valid */
 		}
 		if (bits >= 8)
@@ -1015,7 +1029,7 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 		{
 			if (j < 5)
 			{
-				v |= (cl_ulong)random() << j;
+				v |= __random() << j;
 				j += 31;
 			}
 			*pos = base32[v & 0x1f];
@@ -1046,7 +1060,7 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	maxlen = (PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1));
 	if (maxlen < 1 || maxlen > BLCKSZ)
 		elog(ERROR, "%s: max length too much", __FUNCTION__);
-	n = 1 + random() % maxlen;
+	n = 1 + __random() % maxlen;
 
 	temp = palloc(VARHDRSZ + n);
 	SET_VARSIZE(temp, VARHDRSZ + n);
@@ -1055,7 +1069,7 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	{
 		if (j < 6)
 		{
-			v |= (cl_ulong)random() << j;
+			v |= __random() << j;
 			j += 31;
 		}
 		*pos = base64[v & 0x3f];
@@ -1107,12 +1121,10 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("int4range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("int4range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	x = lower + random() % (upper - lower);
-	y = lower + random() % (upper - lower);
+	x = lower + __random() % (upper - lower);
+	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
 							 Int32GetDatum(x),
 							 Int32GetDatum(y));
@@ -1131,13 +1143,11 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("int8range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("int8range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((int64)random() << 31) | (int64)random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((int64)random() << 31) | (int64)random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 Int64GetDatum(x),
@@ -1181,13 +1191,11 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("tsrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("tsrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 TimestampGetDatum(x),
@@ -1231,13 +1239,11 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("tstzrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("tstzrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
-	v = ((cl_ulong)random() << 31) | random();
+	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
 							 TimestampTzGetDatum(x),
@@ -1268,12 +1274,10 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   CStringGetDatum("daterange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	type_oid = get_type_oid("daterange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
-	x = lower + random() % (upper - lower);
-	y = lower + random() % (upper - lower);
+	x = lower + __random() % (upper - lower);
+	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
 							 DateADTGetDatum(x),
 							 DateADTGetDatum(y));
