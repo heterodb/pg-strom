@@ -25,12 +25,77 @@ __dumpArrowNodeSimple(StringInfo str, ArrowNode *node)
 {
 	appendStringInfo(str, "{%s}", node->tagName);
 }
-#define __dumpArrowTypeNull		__dumpArrowNodeSimple
-#define __dumpArrowTypeUtf8		__dumpArrowNodeSimple
-#define __dumpArrowTypeBinary	__dumpArrowNodeSimple
-#define __dumpArrowTypeBool		__dumpArrowNodeSimple
-#define __dumpArrowTypeList		__dumpArrowNodeSimple
-#define __dumpArrowTypeStruct	__dumpArrowNodeSimple
+#define __dumpArrowTypeNull			__dumpArrowNodeSimple
+#define __dumpArrowTypeUtf8			__dumpArrowNodeSimple
+#define __dumpArrowTypeBinary		__dumpArrowNodeSimple
+#define __dumpArrowTypeBool			__dumpArrowNodeSimple
+#define __dumpArrowTypeList			__dumpArrowNodeSimple
+#define __dumpArrowTypeStruct		__dumpArrowNodeSimple
+#define __dumpArrowTypeLargeBinary	__dumpArrowNodeSimple
+#define __dumpArrowTypeLargeUtf8	__dumpArrowNodeSimple
+#define __dumpArrowTypeLargeList	__dumpArrowNodeSimple
+
+static inline const char *
+ArrowPrecisionAsCstring(ArrowPrecision prec)
+{
+	switch (prec)
+	{
+		case ArrowPrecision__Half:
+			return "16";
+		case ArrowPrecision__Single:
+			return "32";
+		case ArrowPrecision__Double:
+			return "64";
+		default:
+			return "??";
+	}
+}
+
+static inline const char *
+ArrowDateUnitAsCstring(ArrowDateUnit unit)
+{
+	switch (unit)
+	{
+		case ArrowDateUnit__Day:
+			return "day";
+		case ArrowDateUnit__MilliSecond:
+			return "msec";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowTimeUnitAsCstring(ArrowTimeUnit unit)
+{
+	switch (unit)
+	{
+		case  ArrowTimeUnit__Second:
+			return "sec";
+		case ArrowTimeUnit__MilliSecond:
+			return "ms";
+		case ArrowTimeUnit__MicroSecond:
+			return "us";
+		case ArrowTimeUnit__NanoSecond:
+			return "ns";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowIntervalUnitAsCstring(ArrowIntervalUnit unit)
+{
+	switch (unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			return "Year/Month";
+		case ArrowIntervalUnit__Day_Time:
+			return "Day/Time";
+		default:
+			return "???";
+	}
+}
 
 static void
 __dumpArrowTypeInt(StringInfo str, ArrowNode *node)
@@ -49,9 +114,7 @@ __dumpArrowTypeFloatingPoint(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Float%s}",
-		f->precision == ArrowPrecision__Half ? "16" :
-		f->precision == ArrowPrecision__Single ? "32" :
-		f->precision == ArrowPrecision__Double ? "64" : "??");
+		ArrowPrecisionAsCstring(f->precision));
 }
 
 static void
@@ -71,8 +134,7 @@ __dumpArrowTypeDate(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Date: unit=%s}",
-		d->unit == ArrowDateUnit__Day ? "day" :
-		d->unit == ArrowDateUnit__MilliSecond ? "msec" : "???");
+		ArrowDateUnitAsCstring(d->unit));
 }
 
 static void
@@ -82,10 +144,7 @@ __dumpArrowTypeTime(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Time: unit=%s}",
-		t->unit == ArrowTimeUnit__Second ? "sec" :
-		t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
-		t->unit == ArrowTimeUnit__MicroSecond ? "us" :
-		t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
+		ArrowTimeUnitAsCstring(t->unit));
 }
 
 static void
@@ -95,11 +154,7 @@ __dumpArrowTypeTimestamp(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Timestamp: unit=%s}",
-		t->unit == ArrowTimeUnit__Second ? "sec" :
-		t->unit == ArrowTimeUnit__MilliSecond ? "ms" :
-		t->unit == ArrowTimeUnit__MicroSecond ? "us" :
-		t->unit == ArrowTimeUnit__NanoSecond ? "ns" : "???");
-	printf("Timestamp unit=%d\n", t->unit);
+		ArrowTimeUnitAsCstring(t->unit));
 }
 
 static void
@@ -109,8 +164,7 @@ __dumpArrowTypeInterval(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Interval: unit=%s}",
-		t->unit==ArrowIntervalUnit__Year_Month ? "Year/Month" :
-		t->unit==ArrowIntervalUnit__Day_Time ? "Day/Time" : "???");
+		ArrowIntervalUnitAsCstring(t->unit));
 }
 
 static void
@@ -154,6 +208,16 @@ __dumpArrowTypeMap(StringInfo str, ArrowNode *node)
 
 	appendStringInfo(
 		str,"{Map: keysSorted=%s}", m->keysSorted ? "true" : "false");
+}
+
+static void
+__dumpArrowTypeDuration(StringInfo str, ArrowNode *node)
+{
+	ArrowTypeDuration *d = (ArrowTypeDuration *)node;
+
+	appendStringInfo(
+		str,"{Duration: unit=%s}",
+		ArrowTimeUnitAsCstring(d->unit));
 }
 
 static void
@@ -389,12 +453,15 @@ __copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 	COPY_SCALAR(dumpArrowNode);
 	COPY_SCALAR(copyArrowNode);
 }
-#define __copyArrowTypeNull		__copyArrowNode
-#define __copyArrowTypeUtf8		__copyArrowNode
-#define __copyArrowTypeBinary	__copyArrowNode
-#define __copyArrowTypeBool		__copyArrowNode
-#define __copyArrowTypeList		__copyArrowNode
-#define __copyArrowTypeStruct	__copyArrowNode
+#define __copyArrowTypeNull			__copyArrowNode
+#define __copyArrowTypeUtf8			__copyArrowNode
+#define __copyArrowTypeBinary		__copyArrowNode
+#define __copyArrowTypeBool			__copyArrowNode
+#define __copyArrowTypeList			__copyArrowNode
+#define __copyArrowTypeStruct		__copyArrowNode
+#define __copyArrowTypeLargeBinary	__copyArrowNode
+#define __copyArrowTypeLargeUtf8	__copyArrowNode
+#define __copyArrowTypeLargeList	__copyArrowNode
 
 static void
 __copyArrowTypeInt(ArrowTypeInt *dest, const ArrowTypeInt *src)
@@ -460,6 +527,13 @@ __copyArrowTypeUnion(ArrowTypeUnion *dest, const ArrowTypeUnion *src)
 	dest->typeIds = palloc(sizeof(int32) * src->_num_typeIds);
 	memcpy(dest->typeIds, src->typeIds, sizeof(int32) * src->_num_typeIds);
 	dest->_num_typeIds = src->_num_typeIds;
+}
+
+static void
+__copyArrowTypeDuration(ArrowTypeDuration *dest, const ArrowTypeDuration *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(unit);
 }
 
 static void
@@ -635,15 +709,9 @@ __arrowTypeName(char *buf, size_t len, ArrowField *field)
 						  t->Int.bitWidth);
 			break;
 		case ArrowNodeTag__FloatingPoint:
-			{
-				ArrowTypeFloatingPoint *f = &t->FloatingPoint;
-
-				sz = snprintf(
-					buf, len, "Float%s",
-					f->precision == ArrowPrecision__Half ? "16" :
-					f->precision == ArrowPrecision__Single ? "32" :
-					f->precision == ArrowPrecision__Double ? "64" : "??");
-			}
+			sz = snprintf(
+				buf, len, "Float%s",
+				ArrowPrecisionAsCstring(t->FloatingPoint.precision));
 			break;
 		case ArrowNodeTag__Utf8:
 			sz = snprintf(buf, len, "Utf8");
@@ -664,50 +732,21 @@ __arrowTypeName(char *buf, size_t len, ArrowField *field)
 							  t->Decimal.scale);
 			break;
 		case ArrowNodeTag__Date:
-			{
-				ArrowDateUnit	unit = t->Date.unit;
-
-				sz = snprintf(
-					buf, len, "Date[%s]",
-					unit == ArrowDateUnit__Day ? "day" :
-					unit == ArrowDateUnit__MilliSecond ? "msec" : "??");
-			}
+			sz = snprintf(
+				buf, len, "Date[%s]",
+				ArrowDateUnitAsCstring(t->Date.unit));
 			break;
 		case ArrowNodeTag__Time:
-			{
-				ArrowTimeUnit	unit = t->Time.unit;
-
-				sz = snprintf(buf, len, "Time[%s]",
-							  unit == ArrowTimeUnit__Second ? "sec" :
-							  unit == ArrowTimeUnit__MilliSecond ? "ms" :
-							  unit == ArrowTimeUnit__MicroSecond ? "us" :
-							  unit == ArrowTimeUnit__NanoSecond ? "ns" : "??");
-			}
+			sz = snprintf(buf, len, "Time[%s]",
+						  ArrowTimeUnitAsCstring(t->Time.unit));
 			break;
 		case ArrowNodeTag__Timestamp:
-			{
-				ArrowTimeUnit	unit = t->Timestamp.unit;
-
-				sz = snprintf(buf, len, "Timestamp[%s]",
-							  unit == ArrowTimeUnit__Second ? "sec" :
-							  unit == ArrowTimeUnit__MilliSecond ? "ms" :
-							  unit == ArrowTimeUnit__MicroSecond ? "us" :
-							  unit == ArrowTimeUnit__NanoSecond ? "ns" : "??");
-			}
+			sz = snprintf(buf, len, "Timestamp[%s]",
+						  ArrowTimeUnitAsCstring(t->Timestamp.unit));
 			break;
 		case ArrowNodeTag__Interval:
-			switch (t->Interval.unit)
-			{
-				case ArrowIntervalUnit__Year_Month:
-					sz = snprintf(buf, len, "Interval[Year/Month]");
-					break;
-				case ArrowIntervalUnit__Day_Time:
-					sz = snprintf(buf, len, "Interval[Day/Time]");
-					break;
-				default:
-					sz = snprintf(buf, len, "Interval[???]");
-					break;
-			}
+			sz = snprintf(buf, len, "Interval[%s]",
+						  ArrowIntervalUnitAsCstring(t->Interval.unit));
 			break;
 		case ArrowNodeTag__List:
 			if (field->_num_children != 1)
@@ -740,6 +779,19 @@ __arrowTypeName(char *buf, size_t len, ArrowField *field)
 			break;
 		case ArrowNodeTag__Map:
 			sz = snprintf(buf, len, "Map");
+			break;
+		case ArrowNodeTag__Duration:
+			sz = snprintf(buf, len, "Duration[%s]",
+						  ArrowTimeUnitAsCstring(t->Duration.unit));
+			break;
+		case ArrowNodeTag__LargeBinary:
+			sz = snprintf(buf, len, "LargeBinary");
+			break;
+		case ArrowNodeTag__LargeUtf8:
+			sz = snprintf(buf, len, "LargeUtf8");
+			break;
+		case ArrowNodeTag__LargeList:
+			sz = snprintf(buf, len, "LargeList");
 			break;
 		default:
 			Elog("unknown Arrow type");
@@ -1012,6 +1064,14 @@ readArrowTypeMap(ArrowTypeMap *node, const char *pos)
 }
 
 static void
+readArrowTypeDuration(ArrowTypeDuration *node, const char *pos)
+{
+	FBTable		t = fetchFBTable((int32 *) pos);
+
+	node->unit = fetchShort(&t, 0);
+}
+
+static void
 readArrowType(ArrowType *type, int type_tag, const char *type_pos)
 {
 	memset(type, 0, sizeof(ArrowType));
@@ -1089,6 +1149,20 @@ readArrowType(ArrowType *type, int type_tag, const char *type_pos)
 			INIT_ARROW_TYPE_NODE(type, Map);
 			if (type_pos)
 				readArrowTypeMap(&type->Map, type_pos);
+			break;
+		case ArrowType__Duration:
+			INIT_ARROW_TYPE_NODE(type, Duration);
+			if (type_pos)
+				readArrowTypeDuration(&type->Duration, type_pos);
+			break;
+		case ArrowType__LargeBinary:
+			INIT_ARROW_TYPE_NODE(type, LargeBinary);
+			break;
+		case ArrowType__LargeUtf8:
+			INIT_ARROW_TYPE_NODE(type, LargeUtf8);
+			break;
+		case ArrowType__LargeList:
+			INIT_ARROW_TYPE_NODE(type, LargeList);
 			break;
 		default:
 			printf("no suitable ArrowType__* tag for the code = %d", type_tag);

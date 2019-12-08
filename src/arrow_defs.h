@@ -60,6 +60,10 @@ typedef enum
 	ArrowType__FixedSizeBinary	= 15,
 	ArrowType__FixedSizeList	= 16,
 	ArrowType__Map				= 17,
+	ArrowType__Duration			= 18,
+	ArrowType__LargeBinary		= 19,
+	ArrowType__LargeUtf8		= 20,
+	ArrowType__LargeList		= 21,
 } ArrowTypeTag;
 
 /*
@@ -158,6 +162,10 @@ typedef enum
 	ArrowNodeTag__FixedSizeBinary,
 	ArrowNodeTag__FixedSizeList,
 	ArrowNodeTag__Map,
+	ArrowNodeTag__Duration,
+	ArrowNodeTag__LargeBinary,
+	ArrowNodeTag__LargeUtf8,
+	ArrowNodeTag__LargeList,
 	/* others */
 	ArrowNodeTag__KeyValue,
 	ArrowNodeTag__DictionaryEncoding,
@@ -287,6 +295,22 @@ typedef struct		ArrowTypeMap
 	bool			keysSorted;
 } ArrowTypeMap;
 
+/* Duration */
+typedef struct		ArrowTypeDuration
+{
+	ArrowNode		node;
+	ArrowTimeUnit	unit;
+} ArrowTypeDuration;
+
+/* LargeBinary */
+typedef ArrowNode	ArrowTypeLargeBinary;
+
+/* LargeUtf8 */
+typedef ArrowNode	ArrowTypeLargeUtf8;
+
+/* LargeList */
+typedef ArrowNode	ArrowTypeLargeList;
+
 /*
  * ArrowType
  */
@@ -310,6 +334,10 @@ typedef union		ArrowType
 	ArrowTypeFixedSizeBinary FixedSizeBinary;
 	ArrowTypeFixedSizeList	FixedSizeList;
 	ArrowTypeMap			Map;
+	ArrowTypeDuration		Duration;
+	ArrowTypeLargeBinary	LargeBinary;
+	ArrowTypeLargeUtf8		LargeUtf8;
+	ArrowTypeLargeList		LargeList;
 } ArrowType;
 
 /*
