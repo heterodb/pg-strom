@@ -108,6 +108,12 @@ DEV_ATTR(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, INT, 0, "Maximum optin shared memory
 DEV_ATTR(HOST_REGISTER_SUPPORTED, BOOL, 0, "Device supports host memory registration")
 DEV_ATTR(PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES, BOOL, 0, "Device accesses pageable memory via the host's page tables")
 DEV_ATTR(DIRECT_MANAGED_MEM_ACCESS_FROM_HOST, BOOL, 0, "The host can directly access managed memory on the device without migration")
+#if CUDA_VERSION >= 10020
+DEV_ATTR(VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED, BOOL, 0, "Device supports virtual address management APIs")
+DEV_ATTR(HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED, BOOL, 0, "Device supports exporting memory to a posix file descriptor")
+DEV_ATTR(HANDLE_TYPE_WIN32_HANDLE_SUPPORTED, BOOL, 0, "Device supports exporting memory to a Win32 NT handle")
+DEV_ATTR(HANDLE_TYPE_WIN32_KMT_HANDLE_SUPPORTED, BOOL, 0, "Device supports exporting memory to a Win32 KMT handle")
+#endif	/* CUDA 10.2 */
 #endif	/* CUDA 9.2 */
 #endif	/* CUDA 9.0 */
 #endif	/* CUDA 8.0 */

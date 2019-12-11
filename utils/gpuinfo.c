@@ -52,21 +52,29 @@ static int	detailed_output = 0;
 
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
 
-#define cuda_elog(errcode,fmt,...)					\
-	do {											\
-		const char *__err_name;						\
-													\
-		cuGetErrorName(errcode, &__err_name);		\
-		fprintf(stderr, "%s:%d  " fmt "\n",			\
-				__FILE__, __LINE__, ##__VA_ARGS__);	\
-		exit(1);									\
+#define cuda_elog(errcode,fmt,...)							\
+	do {													\
+		const char *__cmd_name = strrchr(__FILE__, '/');	\
+		const char *__err_name;								\
+															\
+		if (!__cmd_name)									\
+			__cmd_name = __FILE__;							\
+		cuGetErrorName(errcode, &__err_name);				\
+		fprintf(stderr, "%s:%d [%s]  " fmt "\n",			\
+				__cmd_name, __LINE__, __err_name,			\
+				##__VA_ARGS__);								\
+		exit(1);											\
 	} while(0)
 
-#define sys_elog(fmt,...)							\
-	do {											\
-		fprintf(stderr, "%s:%d  " fmt "\n",			\
-				__FILE__, __LINE__, ##__VA_ARGS__);	\
-		exit(1);									\
+#define sys_elog(fmt,...)									\
+	do {													\
+		const char *__cmd_name = strrchr(__FILE__, '/');	\
+															\
+		if (!__cmd_name)									\
+			__cmd_name = __FILE__;							\
+		fprintf(stderr, "%s:%d  " fmt "\n",					\
+				__cmd_name, __LINE__, ##__VA_ARGS__);			\
+		exit(1);											\
 	} while(0)
 
 /*
@@ -325,7 +333,11 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 
 		rc = cuDeviceGetAttribute(&dev_prop, attcode, device);
 		if (rc != CUDA_SUCCESS)
+		{
+			if (rc == CUDA_ERROR_INVALID_VALUE)
+				continue;	/* likely, not supported at this runtime */
 			cuda_elog(rc, "failed on cuDeviceGetAttribute");
+		}
 
 		if (machine_format)
 			printf("DEVICE%d:%s=%d\n", dindex, attname_m, dev_prop);
