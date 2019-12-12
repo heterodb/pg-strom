@@ -104,6 +104,8 @@ typedef cl_ulong			uintptr_t;
 #ifdef __CUDACC__
 #undef FLEXIBLE_ARRAY_MEMBER
 #define FLEXIBLE_ARRAY_MEMBER	1
+#elif !defined(FLEXIBLE_ARRAY_MEMBER)
+#define FLEXIBLE_ARRAY_MEMBER	1
 #endif	/* __CUDACC__ */
 
 /*
