@@ -739,9 +739,10 @@ vlbuf_estimate_textcat(codegen_context *context,
 					   devfunc_info *dfunc,
 					   Expr **args, int *vl_width)
 {
-	int		i, maxlen = 0;
+	int		i, nargs = list_length(dfunc->func_args);
+	int		maxlen = 0;
 
-	for (i=0; i < 2; i++)
+	for (i=0; i < nargs; i++)
 	{
 		if (vl_width[i] < 0)
 			__ELog("unable to estimate result size of textcat");
@@ -793,11 +794,13 @@ vlbuf_estimate_jsonb(codegen_context *context,
  *
  * func_template is a set of characters based on the rules below:
  *
- * [<attributes>/](c|r|l|b|f|F):<extra>
+ * [<attributes>/]f:<extra>
  *
  * attributes:
  * 'L' : this function is locale aware, thus, available only if simple
  *       collation configuration (none, and C-locale).
+ * 'C' : this function uses its special callback to estimate the result
+ *       width of varlena-buffer.
  * 'p' : this function needs cuda_primitive.h
  * 's' : this function needs cuda_textlib.h
  * 't' : this function needs cuda_timelib.h
@@ -1592,6 +1595,18 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  999, "Cs/f:textcat",
 	  vlbuf_estimate_textcat
 	},
+	{ "concat",     2, {TEXTOID,TEXTOID},
+	  999, "Cs/f:text_concat2",
+	  vlbuf_estimate_textcat
+	},
+	{ "concat",     3, {TEXTOID,TEXTOID,TEXTOID},
+	  999, "Cs/f:text_concat3",
+	  vlbuf_estimate_textcat
+	},
+	{ "concat",     4, {TEXTOID,TEXTOID,TEXTOID,TEXTOID},
+	  999, "Cs/f:text_concat4",
+	  vlbuf_estimate_textcat
+	},
 	{ "substr",		3, {TEXTOID,INT4OID,INT4OID},
 	  10, "Cs/f:text_substring",
 	  vlbuf_estimate_substring },
@@ -2022,21 +2037,31 @@ devfunc_generic_result_sz(codegen_context *context,
 	elog(ERROR, "unexpected type length: %d", rtype->type_length);
 }
 
-static bool
-__construct_devfunc_info(devfunc_info *entry, const char *template,
+static devfunc_info *
+__construct_devfunc_info(HeapTuple protup,
+						 Oid func_collid,
+						 int func_nargs, Oid *func_argtypes,
+						 int func_devcost,
+						 const char *func_template,
 						 devfunc_result_sz_type devfunc_result_sz)
 {
-	const char *pos;
-	const char *end;
-	int32		flags = 0;
-	bool		has_collation = false;
-	bool		has_callbacks = false;
+	Form_pg_proc    proc = (Form_pg_proc) GETSTRUCT(protup);
+	MemoryContext	oldcxt;
+	devfunc_info   *dfunc = NULL;
+	devtype_info   *dtype;
+	List		   *dfunc_args = NIL;
+	const char	   *pos;
+	const char	   *end;
+	int32			flags = 0;
+	int				j;
+	bool			has_collation = false;
+	bool			has_callbacks = false;
 
 	/* fetch attribute */
-	end = strchr(template, '/');
+	end = strchr(func_template, '/');
 	if (end)
 	{
-		for (pos = template; pos < end; pos++)
+		for (pos = func_template; pos < end; pos++)
 		{
 			switch (*pos)
 			{
@@ -2071,79 +2096,110 @@ __construct_devfunc_info(devfunc_info *entry, const char *template,
 					break;
 			}
 		}
-		template = end + 1;
+		func_template = end + 1;
 	}
-	entry->func_flags = flags;
-
-	/*
-	 * If function is collation aware but not supported to run on GPU device,
-	 * we have to give up to generate device code.
-	 */
-	if (!has_collation)
-		entry->func_collid = InvalidOid;	/* clear default if any */
-	else if (OidIsValid(entry->func_collid) &&
-			 !lc_collate_is_c(entry->func_collid))
-		return false;		/* unable to run on device */
-
-	if (has_callbacks)
-		entry->devfunc_result_sz = devfunc_result_sz;
-	else
-		entry->devfunc_result_sz = devfunc_generic_result_sz;
-
-	if (strncmp(template, "f:", 2) == 0)
-		entry->func_devname = template + 2;
-	else
+	if (strncmp(func_template, "f:", 2) != 0)
 	{
 		elog(NOTICE, "Bug? unknown device function template: '%s'",
-			 template);
-		return false;
+			 func_template);
+		return NULL;
 	}
-	return true;
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	for (j=0; j < func_nargs; j++)
+	{
+		dtype = pgstrom_devtype_lookup(func_argtypes[j]);
+		if (!dtype)
+			goto negative;
+		dfunc_args = lappend(dfunc_args, dtype);
+	}
+	dtype = pgstrom_devtype_lookup(proc->prorettype);
+	if (!dtype)
+		goto negative;
+
+	dfunc = palloc0(sizeof(devfunc_info));
+	dfunc->func_oid = PgProcTupleGetOid(protup);
+	if (has_collation)
+	{
+		if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
+			dfunc->func_is_negative = true;
+		dfunc->func_collid = func_collid;
+	}
+	dfunc->func_is_strict = proc->proisstrict;
+	dfunc->func_flags = flags;
+	dfunc->func_args = dfunc_args;
+	dfunc->func_rettype = dtype;
+	dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
+	dfunc->func_devname = func_template + 2;	/* const cstring */
+	dfunc->func_devcost = func_devcost;
+	dfunc->devfunc_result_sz = (has_callbacks
+								? devfunc_result_sz
+								: devfunc_generic_result_sz);
+	/* other fields shall be assigned on the caller side */
+negative:
+	MemoryContextSwitchTo(oldcxt);
+
+	return dfunc;
 }
 
-static bool
-pgstrom_devfunc_construct_common(devfunc_info *entry)
+static devfunc_info *
+pgstrom_devfunc_construct_core(HeapTuple protup,
+							   oidvector *func_argtypes,
+							   Oid func_collid,
+							   bool consider_relabel)
 {
-	int		i, j;
+	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
+	int				i, j;
 
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
 
-		if (strcmp(procat->func_name, entry->func_sqlname) == 0 &&
-			procat->func_nargs == list_length(entry->func_args))
+		if (strcmp(procat->func_name, NameStr(proc->proname)) != 0 ||
+			procat->func_nargs != func_argtypes->dim1)
+			continue;
+
+		for (j=0; j < procat->func_nargs; j++)
 		{
-			ListCell   *lc;
-
-			j = 0;
-			foreach (lc, entry->func_args)
+			if (procat->func_argtypes[j] != func_argtypes->values[j])
 			{
-				devtype_info   *dtype = lfirst(lc);
-
-				if (dtype->type_oid != procat->func_argtypes[j++])
+				if (!consider_relabel ||
+					!pgstrom_devtype_can_relabel(func_argtypes->values[j],
+												 procat->func_argtypes[j]))
 					break;
 			}
-			if (lc == NULL)
-			{
-				entry->func_devcost = procat->func_devcost;
-				return __construct_devfunc_info(entry, procat->func_template,
-												procat->devfunc_result_sz);
-			}
 		}
+		if (j == procat->func_nargs)
+			return __construct_devfunc_info(protup,
+											func_collid,
+											procat->func_nargs,
+											procat->func_argtypes,
+											procat->func_devcost,
+											procat->func_template,
+											procat->devfunc_result_sz);
 	}
-	return false;
+	return NULL;	/* not found, to be negative entry */
 }
 
-static bool
-pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
+/*
+ * pgstrom_devfunc_construct_extra
+ *
+ * FIXME: Right now, we have no way to describe device function catalog
+ * that accepts binary compatible arguments; like varchar(N) values on
+ * text argument. Thus, FuncExpr must have exactly identical argument
+ * list towards the device function definition.
+ * So, this function has no 'consider_relabel' argument
+ */
+static devfunc_info *
+pgstrom_devfunc_construct_extra(HeapTuple protup,
+								oidvector *func_argtypes,
+								Oid func_collid)
 {
-	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
-	StringInfoData sig;
-	ListCell   *lc;
-	int			i;
-	bool		result = false;
-	char	   *func_rettype;
-	char	   *temp;
+	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
+	StringInfoData	sig;
+	devfunc_info   *result = NULL;
+	char		   *rettype;
+	char		   *temp;
+	int				i;
 
 	/* make a signature string */
 	initStringInfo(&sig);
@@ -2155,13 +2211,13 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 	}
 
 	appendStringInfo(&sig, "%s(", quote_identifier(NameStr(proc->proname)));
-	foreach (lc, entry->func_args)
+	for (i=0; i < func_argtypes->dim1; i++)
 	{
-		devtype_info   *dtype = lfirst(lc);
+		Oid		argtype = func_argtypes->values[i];
 
-		if (lc != list_head(entry->func_args))
+		if (i > 0)
 			appendStringInfoChar(&sig, ',');
-		temp = format_type_be_qualified(dtype->type_oid);
+		temp = format_type_be_qualified(argtype);
 		if (strncmp(temp, "pg_catalog.", 11) == 0)
 			appendStringInfo(&sig, "%s", temp + 11);
 		else
@@ -2170,27 +2226,31 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 	}
 	appendStringInfoChar(&sig, ')');
 
-	temp = format_type_be_qualified(entry->func_rettype->type_oid);
+	temp = format_type_be_qualified(proc->prorettype);
 	if (strncmp(temp, "pg_catalog.", 11) == 0)
-		func_rettype = temp + 11;
+		rettype = temp + 11;
 	else
-		func_rettype = temp;
+		rettype = temp;
 
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
 	{
 		devfunc_extra_catalog_t  *procat = devfunc_extra_catalog + i;
 
 		if (strcmp(procat->func_signature, sig.data) == 0 &&
-			strcmp(procat->func_rettype, func_rettype) == 0)
+			strcmp(procat->func_rettype, rettype) == 0)
 		{
-			entry->func_devcost = procat->func_devcost;
-			result = __construct_devfunc_info(entry, procat->func_template,
+			result = __construct_devfunc_info(protup,
+											  func_collid,
+											  func_argtypes->dim1,
+											  func_argtypes->values,
+											  procat->func_devcost,
+											  procat->func_template,
 											  procat->devfunc_result_sz);
 			goto found;
 		}
 	}
 	elog(DEBUG2, "no extra function found for sig=[%s] rettype=[%s]",
-		 sig.data, func_rettype);
+		 sig.data, rettype);
 found:
 	pfree(sig.data);
 	pfree(temp);
@@ -2201,13 +2261,13 @@ static devfunc_info *
 __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 								   Oid func_rettype,
 								   oidvector *func_argtypes,
-								   Oid func_collid)
+								   Oid func_collid,
+								   bool consider_relabel)
 {
 	Oid				func_oid = PgProcTupleGetOid(protup);
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	devfunc_info   *dfunc;
 	devtype_info   *dtype;
-	List		   *func_args = NIL;
 	ListCell	   *lc;
 	cl_uint			hashvalue;
 	int				j, hindex;
@@ -2227,67 +2287,82 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 			j = 0;
 			foreach (lc, dfunc->func_args)
 			{
+				Oid		arg_type_oid = func_argtypes->values[j++];
+
 				dtype = lfirst(lc);
-				if (dtype->type_oid != func_argtypes->values[j])
-					break;
-				j++;
+				if (dtype->type_oid != arg_type_oid)
+				{
+					if (!consider_relabel ||
+						!pgstrom_devtype_can_relabel(arg_type_oid,
+													 dtype->type_oid))
+						break;		/* not match */
+				}
 			}
+
 			if (!lc)
 			{
 				if (dfunc->func_is_negative)
 					return NULL;
-				return dfunc;
+				dtype = dfunc->func_rettype;
+				if (dtype->type_oid != func_rettype &&
+					!pgstrom_devtype_can_relabel(dtype->type_oid,
+												 func_rettype))
+					return NULL;
+
+				return dfunc;	/* Ok, found */
 			}
 		}
 	}
 
 	/*
-	 * Not found, construct a new entry of the device function
+	 * Not cached, construct a new entry of the device function
 	 */
-	dfunc = MemoryContextAllocZero(devinfo_memcxt,
-								   sizeof(devfunc_info));
-	dfunc->hashvalue = hashvalue;
-	dfunc->func_oid = func_oid;
-	dfunc->func_collid = func_collid;	/* may be cleared later */
-	dfunc->func_is_strict = proc->proisstrict;
-	Assert(proc->pronargs == func_argtypes->dim1);
-	for (j=0; j < proc->pronargs; j++)
+	if (proc->prorettype != func_rettype &&
+		!pgstrom_devtype_can_relabel(proc->prorettype, func_rettype))
 	{
-		dtype = pgstrom_devtype_lookup(func_argtypes->values[j]);
-		if (!dtype)
-		{
-			list_free(func_args);
-			dfunc->func_is_negative = true;
-			goto skip;
-		}
-		func_args = lappend_cxt(devinfo_memcxt, func_args, dtype);
+		elog(NOTICE, "Bug? function result type is not compatible");
+		dfunc = NULL;
 	}
-
-	dtype = pgstrom_devtype_lookup(func_rettype);
-	if (!dtype)
+	else if (proc->pronamespace == PG_CATALOG_NAMESPACE)
 	{
-		list_free(func_args);
-		dfunc->func_is_negative = true;
-		goto skip;
-	}
-	dfunc->func_args = func_args;
-	dfunc->func_rettype = dtype;
-	dfunc->func_sqlname = MemoryContextStrdup(devinfo_memcxt,
-											  NameStr(proc->proname));
-	if (proc->pronamespace == PG_CATALOG_NAMESPACE
-		/* for system default functions (pg_catalog) */
-		? pgstrom_devfunc_construct_common(dfunc)
-		/* other extra or polymorphic functions */
-		: pgstrom_devfunc_construct_extra(dfunc, protup))
-	{
-		dfunc->func_is_negative = false;
+		dfunc = pgstrom_devfunc_construct_core(protup,
+											   func_argtypes,
+											   func_collid,
+											   consider_relabel);
 	}
 	else
 	{
-		/* oops, function has no entry */
-		dfunc->func_is_negative = true;
+		dfunc = pgstrom_devfunc_construct_extra(protup,
+												func_argtypes,
+												func_collid);
 	}
-skip:
+
+	/*
+	 * Not found, so this function should be a nagative entry
+	 */
+	if (!dfunc)
+	{
+		MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+
+		/* dummy devtype_info just for oid checks */
+		dfunc = palloc0(sizeof(devfunc_info));
+		dfunc->func_oid = func_oid;
+		dfunc->func_is_negative = true;
+		for (j=0; j < func_argtypes->dim1; j++)
+		{
+			dtype = palloc0(sizeof(devtype_info));
+			dtype->type_oid = func_argtypes->values[j];
+			dfunc->func_args = lappend(dfunc->func_args, dtype);
+		}
+		dtype = palloc0(sizeof(devtype_info));
+		dtype->type_oid = func_rettype;
+		dfunc->func_rettype = dtype;
+
+		dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	dfunc->hashvalue = hashvalue;
 	dlist_push_head(&devfunc_info_slot[hindex], &dfunc->chain);
 	if (dfunc->func_is_negative)
 		return NULL;
@@ -2305,65 +2380,14 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 	dfunc = __pgstrom_devfunc_lookup_or_create(protup,
 											   func_rettype,
 											   func_argtypes,
-											   func_collid);
+											   func_collid,
+											   false);
 	if (!dfunc)
-	{
-		/*
-		 * NOTE: In some cases, function might be called with different
-		 * argument types or result type from its definition, if both of
-		 * the types are binary compatible.
-		 * For example, type equality function of varchar(N) is texteq.
-		 * It is legal and adequate in PostgreSQL, however, CUDA C++ code
-		 * takes strict type checks, so we have to inject type relabel
-		 * in this case.
-		 *
-		 * When we transform an expression tree, PostgreSQL injects
-		 * RelabelType node, and its buffers implicit binary-compatible
-		 * type cast, however, caller has to pay attention if it specifies
-		 * a particular function by OID.
-		 */
-		Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
-		oidvector  *proargtypes = &proc->proargtypes;
-		Oid			src_type;
-		Oid			dst_type;
-		int			j;
-
-		if (func_argtypes->dim1 != proargtypes->dim1)
-			return NULL;
-		for (j = 0; j < proargtypes->dim1; j++)
-		{
-			src_type = func_argtypes->values[j];
-			dst_type = proargtypes->values[j];
-
-			if (src_type == dst_type)
-				continue;
-			/* have a to_DESTTYPE() device function? */
-			if (!pgstrom_devtype_can_relabel(src_type, dst_type))
-			{
-				elog(DEBUG2, "no type cast definition (%s->%s)",
-					 format_type_be(src_type),
-					 format_type_be(dst_type));
-				return NULL;
-			}
-		}
-
-		if (func_rettype != proc->prorettype)
-		{
-			/* have a to_DESTTYPE() device function? */
-			if (!pgstrom_devtype_can_relabel(func_rettype, proc->prorettype))
-			{
-				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
-					 format_type_be(func_rettype),
-					 format_type_be(proc->prorettype));
-				return NULL;
-			}
-		}
-		/* OK, type-relabel allows to call the function */
 		dfunc = __pgstrom_devfunc_lookup_or_create(protup,
-												   proc->prorettype,
-												   proargtypes,
-												   func_collid);
-	}
+												   func_rettype,
+												   func_argtypes,
+												   func_collid,
+												   true);
 	return dfunc;
 }
 
@@ -2373,43 +2397,37 @@ pgstrom_devfunc_lookup(Oid func_oid,
 					   List *func_args,	/* list of expressions */
 					   Oid func_collid)
 {
-	devfunc_info *result = NULL;
-	char		buffer[offsetof(oidvector, values[DEVFUNC_MAX_NARGS])];
-	oidvector  *func_argtypes = (oidvector *)buffer;
-	HeapTuple	tup;
-	Form_pg_proc proc;
+	devfunc_info   *result = NULL;
+	HeapTuple		tup;
 
 	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
 	PG_TRY();
 	{
-		proc = (Form_pg_proc) GETSTRUCT(tup);
-		Assert(proc->pronargs == list_length(func_args));
-		if (proc->pronargs <= DEVFUNC_MAX_NARGS)
+		int			func_nargs = list_length(func_args);
+		oidvector  *func_argtypes;
+		int			i = 0;
+		ListCell   *lc;
+
+		func_argtypes = alloca(offsetof(oidvector, values[func_nargs]));
+		func_argtypes->ndim = 1;
+		func_argtypes->dataoffset = 0;
+		func_argtypes->elemtype = OIDOID;
+		func_argtypes->dim1 = func_nargs;
+		func_argtypes->lbound1 = 0;
+		foreach (lc, func_args)
 		{
-			size_t		len = offsetof(oidvector, values[proc->pronargs]);
-			cl_uint		i = 0;
-			ListCell   *lc;
+			Oid		type_oid = exprType((Node *)lfirst(lc));
 
-			func_argtypes->ndim = 1;
-			func_argtypes->dataoffset = 0;
-			func_argtypes->elemtype = OIDOID;
-			func_argtypes->dim1 = list_length(func_args);
-			func_argtypes->lbound1 = 0;
-			foreach (lc, func_args)
-			{
-				Oid		type_oid = exprType((Node *)lfirst(lc));
-
-				func_argtypes->values[i++] = type_oid;
-			}
-			SET_VARSIZE(func_argtypes, len);
-
-			result = __pgstrom_devfunc_lookup(tup,
-											  func_rettype,
-											  func_argtypes,
-											  func_collid);
+			func_argtypes->values[i++] = type_oid;
 		}
+		SET_VARSIZE(func_argtypes, offsetof(oidvector, values[func_nargs]));
+
+		result = __pgstrom_devfunc_lookup(tup,
+										  func_rettype,
+										  func_argtypes,
+										  func_collid);
 	}
 	PG_CATCH();
 	{
@@ -2900,6 +2918,16 @@ codegen_function_expression(codegen_context *context,
 		else if (pgstrom_devtype_can_relabel(expr_type_oid,
 											 dtype->type_oid))
 		{
+			/*
+			 * NOTE: PostgreSQL may pass binary compatible arguments
+			 * without explicit RelabelType, like varchar(N) values
+			 * onto text arguments.
+			 * It is quite right implementation from the PostgreSQL
+			 * function invocation API, however, unable to describe
+			 * the relevant device code, because CUDA C++ has strict
+			 * type checks. So, we have to inject an explicit type
+			 * relabel in this case.
+			 */
 			__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 			codegen_expression_walker(context, expr, &vl_width[index]);
 			__appendStringInfoChar(&context->str, ')');

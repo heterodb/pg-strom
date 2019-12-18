@@ -425,6 +425,12 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 DEVICE_FUNCTION(pg_text_t)
 pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 {
+	return pgfn_text_concat2(kcxt, arg1, arg2);
+}
+
+DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat2(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
+{
 	char	   *s1, *s2;
 	cl_int		len1, len2;
 	pg_text_t	result;
@@ -458,6 +464,102 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	pos += len1;
 	memcpy(pos, s2, len2);
 	pos += len2;
+
+	return result;
+}
+
+DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat3(kern_context *kcxt,
+				  pg_text_t arg1, pg_text_t arg2, pg_text_t arg3)
+{
+	char	   *s1, *s2, *s3;
+	cl_int		len1, len2, len3;
+	cl_int		sz;
+	pg_text_t	result;
+	char	   *pos;
+
+	if (arg1.isnull || arg2.isnull || arg3.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+	if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1) ||
+		!pg_varlena_datum_extract(kcxt, arg2, &s2, &len2) ||
+		!pg_varlena_datum_extract(kcxt, arg3, &s3, &len3))
+	{
+		result.isnull = true;
+		return result;
+	}
+	sz = VARHDRSZ + len1 + len2 + len3;
+	pos = (char *)kern_context_alloc(kcxt, sz);
+	if (!pos)
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
+		result.isnull = true;
+		return result;
+	}
+	result.isnull = false;
+	result.value = pos;
+	result.length = -1;
+	SET_VARSIZE(pos, sz);
+	pos += VARHDRSZ;
+	memcpy(pos, s1, len1);
+	pos += len1;
+	memcpy(pos, s2, len2);
+	pos += len2;
+	memcpy(pos, s3, len3);
+	pos += len3;
+
+	return result;
+}
+
+DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat4(kern_context *kcxt,
+				  pg_text_t arg1, pg_text_t arg2,
+				  pg_text_t arg3, pg_text_t arg4)
+{
+	char	   *s1, *s2, *s3, *s4;
+	cl_int		len1, len2, len3, len4;
+	cl_int		sz;
+	pg_text_t	result;
+	char	   *pos;
+
+	if (arg1.isnull || arg2.isnull || arg3.isnull || arg4.isnull)
+	{
+		result.isnull = true;
+		return result;
+	}
+	if (!pg_varlena_datum_extract(kcxt, arg1, &s1, &len1) ||
+		!pg_varlena_datum_extract(kcxt, arg2, &s2, &len2) ||
+		!pg_varlena_datum_extract(kcxt, arg3, &s3, &len3) ||
+		!pg_varlena_datum_extract(kcxt, arg4, &s4, &len4))
+	{
+		result.isnull = true;
+		return result;
+	}
+	sz = VARHDRSZ + len1 + len2 + len3 + len4;
+	pos = (char *)kern_context_alloc(kcxt, sz);
+	if (!pos)
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
+		result.isnull = true;
+		return result;
+	}
+	result.isnull = false;
+	result.value = pos;
+	result.length = -1;
+	SET_VARSIZE(pos, sz);
+	pos += VARHDRSZ;
+	memcpy(pos, s1, len1);
+	pos += len1;
+	memcpy(pos, s2, len2);
+	pos += len2;
+	memcpy(pos, s3, len3);
+	pos += len3;
+	memcpy(pos, s4, len4);
+	pos += len4;
 
 	return result;
 }

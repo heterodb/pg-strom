@@ -274,6 +274,37 @@ SELECT id, length(tc2) v1, length(tj2) v2,
 (SELECT * FROM test31g EXCEPT SELECT * FROM test31p) ORDER BY id;
 (SELECT * FROM test31p EXCEPT SELECT * FROM test31g) ORDER BY id;
 
+-- variadic concat() also works on fixed max-length text
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, length(tc1) v1,
+       concat(tc1, '_foo') v2,
+	   concat(substring(tc1, 1, 10), '_bar') v3,
+	   concat(substring(tc1, 1, 8), '--hoge--', substring(tc1, 8, 16)) v4,
+	   concat(substring(tc1, 1, 8), substring(tc2, 1, 8), vc1, vc2) v5
+  INTO test32g
+  FROM rt_text
+ WHERE id > 0;
+SELECT id, length(tc1) v1,
+       concat(tc1, '_foo') v2,
+	   concat(substring(tc1, 1, 10), '_bar') v3,
+	   concat(substring(tc1, 1, 8), '--hoge--', substring(tc1, 8, 16)) v4,
+	   concat(substring(tc1, 1, 8), substring(tc2, 1, 8), vc1, vc2) v5
+  INTO test32g
+  FROM rt_text
+ WHERE id > 0;
+SET pg_strom.enabled = off;
+SELECT id, length(tc1) v1,
+       concat(tc1, '_foo') v2,
+	   concat(substring(tc1, 1, 10), '_bar') v3,
+	   concat(substring(tc1, 1, 8), '--hoge--', substring(tc1, 8, 16)) v4,
+	   concat(substring(tc1, 1, 8), substring(tc2, 1, 8), vc1, vc2) v5
+  INTO test32p
+  FROM rt_text
+ WHERE id > 0;
+(SELECT * FROM test32g EXCEPT SELECT * FROM test32p) ORDER BY id;
+(SELECT * FROM test32p EXCEPT SELECT * FROM test32g) ORDER BY id;
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA regtest_dtype_text_temp CASCADE;

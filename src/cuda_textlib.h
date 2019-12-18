@@ -69,6 +69,15 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1);
 DEVICE_FUNCTION(pg_text_t)
 pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2);
 DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat2(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2);
+DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat3(kern_context *kcxt,
+				  pg_text_t arg1, pg_text_t arg2, pg_text_t arg3);
+DEVICE_FUNCTION(pg_text_t)
+pgfn_text_concat4(kern_context *kcxt,
+				  pg_text_t arg1, pg_text_t arg2,
+				  pg_text_t arg3, pg_text_t arg4);
+DEVICE_FUNCTION(pg_text_t)
 pgfn_text_substring(kern_context *kcxt,
 					pg_text_t arg1, pg_int4_t arg2, pg_int4_t arg3);
 DEVICE_FUNCTION(pg_text_t)
