@@ -200,26 +200,35 @@ void
 pgstrom_init_nvrtc(void)
 {
 	CUresult	rc;
-	int			version;
+	nvrtcResult	rv;
+	int			cuda_version;
+	int			nvrtc_version;
+	int			major, minor;
 	char		namebuf[MAXPGPATH];
 	void	   *handle;
 
-	rc = cuDriverGetVersion(&version);
+	rc = cuDriverGetVersion(&cuda_version);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDriverGetVersion: %s", errorText(rc));
 
 	snprintf(namebuf, sizeof(namebuf),
-			 "libnvrtc.so.%d.%d", version / 1000, (version % 1000) / 10);
+			 "libnvrtc.so.%d.%d",
+			 (cuda_version / 1000),
+			 (cuda_version % 1000) / 10);
 	handle = dlopen(namebuf, RTLD_NOW | RTLD_LOCAL);
 	if (!handle)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("failed on open '%s' library (CUDA %d.%d): %m",
-						namebuf, version / 10, version % 10),
-				 errhint("check /etc/ld.so.conf or LD_LIBRARY_PATH config")));
+	{
+		handle = dlopen("libnvrtc.so", RTLD_NOW | RTLD_LOCAL);
+		if (!handle)
+			elog(ERROR, "failed on open '%s' and 'libnvrtc.so': %m", namebuf);
+	}
+	LOOKUP_NVRTC_FUNCTION(nvrtcVersion);
+	rv = nvrtcVersion(&major, &minor);
+	if (rv != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcVersion: %d", (int)rv);
+	nvrtc_version = major * 1000 + minor * 10;
 
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetErrorString);
-	LOOKUP_NVRTC_FUNCTION(nvrtcVersion);
 	LOOKUP_NVRTC_FUNCTION(nvrtcCreateProgram);
 	LOOKUP_NVRTC_FUNCTION(nvrtcDestroyProgram);
 	LOOKUP_NVRTC_FUNCTION(nvrtcCompileProgram);
@@ -227,9 +236,17 @@ pgstrom_init_nvrtc(void)
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetPTX);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLogSize);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLog);
-	if (version >= 100)		/* CUDA10.0 */
+	if (major >= 10)		/* CUDA10.0 */
 	{
 		LOOKUP_NVRTC_FUNCTION(nvrtcAddNameExpression);
 		LOOKUP_NVRTC_FUNCTION(nvrtcGetLoweredName);
 	}
+
+	if (cuda_version == nvrtc_version)
+		elog(LOG, "NVRTC %d.%d is successfully loaded.", major, minor);
+	else
+		elog(LOG, "NVRTC %d.%d is successfully loaded, but CUDA driver expects %d.%d. Check /etc/ld.so.conf or LD_LIBRARY_PATH configuration.",
+			 major, minor,
+			 (cuda_version / 1000),
+			 (cuda_version % 1000) / 10);
 }
