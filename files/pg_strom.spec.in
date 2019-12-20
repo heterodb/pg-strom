@@ -23,6 +23,8 @@ Requires: postgresql%{PGSQL_PKGVER}-server >= 10.4
 Requires: postgresql%{PGSQL_PKGVER}-server
 %endif
 %endif
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
 Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
@@ -62,9 +64,23 @@ rm -rf %{buildroot}
 
 %post
 ldconfig
+%{_sbindir}/update-alternatives --install %{_bindir}/gpuinfo  pgsql-gpuinfo  %{__pkgbindir}/gpuinfo  %{PGSQL_PKGVER}0
+%{_sbindir}/update-alternatives --install %{_bindir}/pg2arrow pgsql-pg2arrow %{__pkgbindir}/pg2arrow %{PGSQL_PKGVER}0
 
 %postun
 ldconfig
+if [ "$1" -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove pgsql-gpuinfo  %{__pkgbindir}/gpuinfo
+    %{_sbindir}/update-alternatives --remove pgsql-pg2arrow %{__pkgbindir}/pg2arrow
+fi
+
+%post test
+%{_sbindir}/update-alternatives --install %{_bindir}/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm %{PGSQL_PKGVER}0
+
+%postun test
+if [ "$1" -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm
+fi
 
 %files
 %defattr(-,root,root,-)
@@ -84,7 +100,13 @@ ldconfig
 %{__pkgbindir}/testapp_largeobject
 
 %changelog
-* Thu Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2
+* Wed Dec 25 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-2
+- support of RHEL8/CentOS8
+- pg2arrow supports the latest Arrow 0.15 format; upcoming 1.0
+- add support of ANALYZE on arrow_fdw
+- PostgreSQL v9.6 is dropped from the supported list.
+
+* Thu Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-1
 - fixes of various bugs
 - support of Apache Arrow columnar store (Arrow_Fdw)
 - pg2arrow utility command is added
@@ -93,7 +115,7 @@ ldconfig
 - support of nvme_strom v2; enables to handle cached disk pages
 - asymmetric partition-wise JOIN support
 
-* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1
+* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1-1
 - hotfixes for various bugs
 - Device Numeric is now based on 128bit
 - Various groundwork to support Apache Arrow in the next version
