@@ -65,8 +65,6 @@ struct SQLattribute
 	/* data buffer and handler */
 	void   (*put_value)(SQLattribute *attr,
 						const char *addr, int sz);
-	void   (*stat_update)(SQLattribute *attr,
-						  const char *addr, int sz);
 	size_t (*buffer_usage)(SQLattribute *attr);
 	int	   (*setup_buffer)(SQLattribute *attr,
 						   ArrowBuffer *node,
@@ -78,11 +76,6 @@ struct SQLattribute
 	SQLbuffer	nullmap;		/* null bitmap */
 	SQLbuffer	values;			/* main storage of values */
 	SQLbuffer	extra;			/* extra buffer for varlena */
-	/* statistics */
-	bool		min_isnull;
-	bool		max_isnull;
-	Datum		min_value;
-	Datum		max_value;
 };
 
 struct SQLtable

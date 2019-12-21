@@ -632,45 +632,6 @@ buffer_usage_composite_type(SQLattribute *attr)
 	return usage;
 }
 
-/* ----------------------------------------------------------------
- *
- * stat_update handler for each data types (optional)
- *
- * ---------------------------------------------------------------- */
-#define STAT_UPDATE_INLINE_TEMPLATE(TYPENAME,TO_DATUM)			\
-	static void													\
-	stat_update_##TYPENAME##_value(SQLattribute *attr,			\
-								   const char *addr, int sz)	\
-	{															\
-		TYPENAME		value;									\
-																\
-		if (!addr)												\
-			return;												\
-		value = *((const TYPENAME *)addr);						\
-		if (attr->min_isnull)									\
-		{														\
-			attr->min_isnull = false;							\
-			attr->min_value  = TO_DATUM(value);					\
-		}														\
-		else if (value < attr->min_value)						\
-			attr->min_value = value;							\
-																\
-		if (attr->max_isnull)									\
-		{														\
-			attr->max_isnull = false;							\
-			attr->max_value  = TO_DATUM(value);					\
-		}														\
-		else if (value > attr->max_value)						\
-			attr->max_value = value;							\
-	}
-
-STAT_UPDATE_INLINE_TEMPLATE(int8,   Int8GetDatum)
-STAT_UPDATE_INLINE_TEMPLATE(int16,  Int16GetDatum)
-STAT_UPDATE_INLINE_TEMPLATE(int32,  Int32GetDatum)
-STAT_UPDATE_INLINE_TEMPLATE(int64,  Int64GetDatum)
-STAT_UPDATE_INLINE_TEMPLATE(float4, Float4GetDatum)
-STAT_UPDATE_INLINE_TEMPLATE(float8, Float8GetDatum)
-
 /*
  * missing function in PG9.6
  */
@@ -891,25 +852,21 @@ assignArrowTypeInt(SQLattribute *attr, int *p_numBuffers, bool is_signed)
 			attr->arrow_type.Int.bitWidth = 8;
 			attr->arrow_typename = (is_signed ? "Int8" : "Uint8");
 			attr->put_value = put_inline_8b_value;
-			attr->stat_update = stat_update_int8_value;
 			break;
 		case sizeof(short):
 			attr->arrow_type.Int.bitWidth = 16;
 			attr->arrow_typename = (is_signed ? "Int16" : "Uint16");
 			attr->put_value = put_inline_16b_value;
-			attr->stat_update = stat_update_int16_value;
 			break;
 		case sizeof(int):
 			attr->arrow_type.Int.bitWidth = 32;
 			attr->arrow_typename = (is_signed ? "Int32" : "Uint32");
 			attr->put_value = put_inline_32b_value;
-			attr->stat_update = stat_update_int32_value;
 			break;
 		case sizeof(long):
 			attr->arrow_type.Int.bitWidth = 64;
 			attr->arrow_typename = (is_signed ? "Int64" : "Uint64");
 			attr->put_value = put_inline_64b_value;
-			attr->stat_update = stat_update_int64_value;
 			break;
 		default:
 			Elog("unsupported Int width: %d", attr->attlen);
@@ -937,13 +894,11 @@ assignArrowTypeFloatingPoint(SQLattribute *attr, int *p_numBuffers)
 			attr->arrow_type.FloatingPoint.precision = ArrowPrecision__Single;
 			attr->arrow_typename = "Float32";
 			attr->put_value = put_inline_32b_value;
-			attr->stat_update = stat_update_float4_value;
 			break;
 		case sizeof(double):
 			attr->arrow_type.FloatingPoint.precision = ArrowPrecision__Double;
 			attr->arrow_typename = "Float64";
 			attr->put_value = put_inline_64b_value;
-			attr->stat_update = stat_update_float8_value;
 			break;
 		default:
 			Elog("unsupported floating point width: %d", attr->attlen);
@@ -1005,7 +960,6 @@ assignArrowTypeBool(SQLattribute *attr, int *p_numBuffers)
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Bool);
 	attr->arrow_typename	= "Bool";
 	attr->put_value			= put_inline_bool_value;
-	attr->stat_update		= stat_update_int8_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
@@ -1054,7 +1008,6 @@ assignArrowTypeDate(SQLattribute *attr, int *p_numBuffers)
 	attr->arrow_type.Date.unit = ArrowDateUnit__Day;
 	attr->arrow_typename	= "Date";
 	attr->put_value			= put_date_value;
-	attr->stat_update		= stat_update_int32_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
@@ -1070,7 +1023,6 @@ assignArrowTypeTime(SQLattribute *attr, int *p_numBuffers)
 	attr->arrow_type.Time.bitWidth = 64;
 	attr->arrow_typename	= "Time";
 	attr->put_value			= put_inline_64b_value;
-	attr->stat_update		= stat_update_int64_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
@@ -1085,7 +1037,6 @@ assignArrowTypeTimestamp(SQLattribute *attr, int *p_numBuffers)
 	attr->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
 	attr->arrow_typename	= "Timestamp";
 	attr->put_value			= put_timestamp_value;
-	attr->stat_update		= stat_update_int64_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;

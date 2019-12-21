@@ -557,11 +557,6 @@ pgsql_setup_attribute(PGconn *conn,
 	else
 		Elog("unknown state pf typtype: %c", typtype);
 
-	/* init statistics */
-	attr->min_isnull = true;
-	attr->max_isnull = true;
-	attr->min_value  = 0UL;
-	attr->max_value  = 0UL;
 	/* assign properties of Apache Arrow Type */
 	assignArrowType(attr, p_numBuffers);
 	*p_numFieldNodes += 1;
@@ -781,11 +776,6 @@ pgsql_clear_attribute(SQLattribute *attr)
 	}
 	if (attr->element)
 		pgsql_clear_attribute(attr->element);
-	/* clear statistics */
-	attr->min_isnull = true;
-	attr->max_isnull = true;
-	attr->min_value  = 0UL;
-	attr->max_value  = 0UL;
 }
 
 /*
@@ -873,8 +863,6 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 			}
 			assert(attr->nitems == table->nitems);
 			attr->put_value(attr, addr, sz);
-			if (attr->stat_update)
-				attr->stat_update(attr, addr, sz);
 			usage += attr->buffer_usage(attr);
 		}
 		table->nitems++;
