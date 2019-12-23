@@ -897,7 +897,7 @@ __arrow_type_is_compatible(SQLtable *root,
 
 		assert(sql_type->node.tag == ArrowNodeTag__Utf8);
 		if (field->dictionary.indexType.bitWidth != 32 ||
-			field->dictionary.indexType.is_signed)
+			!field->dictionary.indexType.is_signed)
 			Elog("Index of DictionaryBatch must be unsigned 32bit");
 		if (field->dictionary.isOrdered)
 			Elog("Ordered DictionaryBatch is not supported right now");
@@ -1253,8 +1253,9 @@ setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 
 		dict->id = attr->enumdict->dict_id;
 		INIT_ARROW_TYPE_NODE(indexType, Int);
-		indexType->bitWidth  = 32;		/* OID in PostgreSQL */
-		indexType->is_signed = false;
+		/* dictionary index must be Int32 */
+		indexType->bitWidth  = 32;
+		indexType->is_signed = true;
 		dict->isOrdered = false;
 	}
 }
