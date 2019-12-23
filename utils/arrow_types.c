@@ -73,13 +73,11 @@ ntohll(uint64 __val)
 #endif
 }
 
-
-
 static void
-put_inline_bool_value(SQLattribute *attr,
-					  const char *addr, int sz)
+put_bool_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
+	int8		value;
 
 	if (!addr)
 	{
@@ -89,45 +87,119 @@ put_inline_bool_value(SQLattribute *attr,
 	}
 	else
 	{
+		value = *((const int8 *)addr);
 		sql_buffer_setbit(&attr->nullmap, row_index);
-		sql_buffer_setbit(&attr->values,  row_index);
+		if (value)
+			sql_buffer_setbit(&attr->values,  row_index);
+		else
+			sql_buffer_clrbit(&attr->values,  row_index);
 	}
 }
 
+static inline void
+put_inline_null_value(SQLattribute *attr, size_t row_index, int sz)
+{
+	attr->nullcount++;
+	sql_buffer_clrbit(&attr->nullmap, row_index);
+	sql_buffer_append_zero(&attr->values, sz);
+}
+
 static void
-put_inline_8b_value(SQLattribute *attr,
-					const char *addr, int sz)
+put_int8_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
+	uint8		value;
 
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, sizeof(char));
-	}
+		put_inline_null_value(attr, row_index, sizeof(uint8));
 	else
 	{
+		assert(sz == sizeof(uint8));
+		value = *((const uint8 *)addr);
+
+		if (!attr->arrow_type.Int.is_signed && value > INT8_MAX)
+			Elog("Uint8 cannot store negative values");
+
 		sql_buffer_setbit(&attr->nullmap, row_index);
-		sql_buffer_append(&attr->values, addr, sz);
+		sql_buffer_append(&attr->values, &value, sizeof(uint8));
 	}
 }
 
 static void
-put_inline_16b_value(SQLattribute *attr,
-					 const char *addr, int sz)
+put_int16_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint16		value;
 
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, sizeof(uint16));
-	}
+		put_inline_null_value(attr, row_index, sizeof(uint16));
 	else
 	{
+		assert(sz == sizeof(uint16));
+		value = ntohs(*((const uint16 *)addr));
+
+		if (!attr->arrow_type.Int.is_signed && value > INT16_MAX)
+			Elog("Uint16 cannot store negative values");
+
+		sql_buffer_setbit(&attr->nullmap, row_index);
+		sql_buffer_append(&attr->values, &value, sz);
+	}
+}
+
+static void
+put_int32_value(SQLattribute *attr, const char *addr, int sz)
+{
+	size_t		row_index = attr->nitems++;
+	uint32		value;
+
+	if (!addr)
+		put_inline_null_value(attr, row_index, sizeof(uint32));
+	else
+	{
+		assert(sz == sizeof(uint32));
+		value = ntohl(*((const uint32 *)addr));
+
+		if (!attr->arrow_type.Int.is_signed && value > INT32_MAX)
+			Elog("Uint32 cannot store negative values");
+
+		sql_buffer_setbit(&attr->nullmap, row_index);
+		sql_buffer_append(&attr->values, &value, sz);
+	}
+}
+
+static void
+put_int64_value(SQLattribute *attr, const char *addr, int sz)
+{
+	size_t		row_index = attr->nitems++;
+	uint64		value;
+	uint32		h, l;
+
+	if (!addr)
+		put_inline_null_value(attr, row_index, sizeof(uint64));
+	else
+	{
+		h = ntohl(*((const uint32 *)(addr)));
+		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
+		value = (uint64)h << 32 | (uint64)l;
+
+		if (!attr->arrow_type.Int.is_signed && value > INT64_MAX)
+			Elog("Uint64 cannot store negative values");
+		sql_buffer_setbit(&attr->nullmap, row_index);
+		sql_buffer_append(&attr->values, &value, sz);
+	}
+}
+
+static void
+put_float16_value(SQLattribute *attr, const char *addr, int sz)
+{
+	size_t		row_index = attr->nitems++;
+	uint16		value;
+
+	if (!addr)
+		put_inline_null_value(attr, row_index, sizeof(uint16));
+	else
+	{
+		assert(sz == sizeof(uint16));
 		value = ntohs(*((const uint16 *)addr));
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
@@ -135,19 +207,13 @@ put_inline_16b_value(SQLattribute *attr,
 }
 
 static void
-put_inline_32b_value(SQLattribute *attr,
-					 const char *addr, int sz)
+put_float32_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint32		value;
 
-	assert(attr->attlen == sizeof(uint32));
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, sizeof(uint32));
-	}
+		put_inline_null_value(attr, row_index, sizeof(uint32));
 	else
 	{
 		assert(sz == sizeof(uint32));
@@ -158,21 +224,17 @@ put_inline_32b_value(SQLattribute *attr,
 }
 
 static void
-put_inline_64b_value(SQLattribute *attr,
-					 const char *addr, int sz)
+put_float64_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint64		value;
 	uint32		h, l;
 
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, sizeof(uint64));
-	}
+		put_inline_null_value(attr, row_index, sizeof(uint64));
 	else
 	{
+		assert(sz == sizeof(uint64));
 		h = ntohl(*((const uint32 *)(addr)));
 		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
 		value = (uint64)h << 32 | (uint64)l;
@@ -202,11 +264,7 @@ put_decimal_value(SQLattribute *attr,
 	size_t		row_index = attr->nitems++;
 
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-        sql_buffer_append_zero(&attr->values, sizeof(int128));
-	}
+		put_inline_null_value(attr, row_index, sizeof(int128));
 	else
 	{
 		struct {
@@ -265,96 +323,305 @@ put_decimal_value(SQLattribute *attr,
 }
 #endif
 
-static void
-put_date_value(SQLattribute *attr,
-			   const char *addr, int sz)
+static inline void
+__put_date_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
+						 int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
+	uint64		value;
 
 	if (!addr)
+		put_inline_null_value(attr, row_index, arrow_sz);
+	else
 	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, attr->attlen);
-	}
-    else
-    {
-		DateADT	value;
-
-		assert(sz == sizeof(DateADT));
+		assert(pgsql_sz == sizeof(DateADT));
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		value = ntohl(*((const DateADT *)addr));
 		value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-		sql_buffer_append(&attr->values, &value, sz);
+		/*
+		 * PostgreSQL native is ArrowDateUnit__Day.
+		 * Compiler optimization will remove the if-block below by constant
+		 * 'adjustment' argument.
+		 */
+		if (adjustment > 0)
+			value *= adjustment;
+		else if (adjustment < 0)
+			value /= adjustment;
+		sql_buffer_append(&attr->values, &value, arrow_sz);
 	}
 }
 
 static void
-put_timestamp_value(SQLattribute *attr,
-					const char *addr, int sz)
+__put_date_day_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_date_value_generic(attr, addr, sz, 0, sizeof(int32));
+}
+
+static void
+__put_date_ms_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_date_value_generic(attr, addr, sz, 86400000L, sizeof(int64));
+}
+
+static void
+put_date_value(SQLattribute *attr, const char *addr, int sz)
+{
+	/* validation checks only first call */
+	switch (attr->arrow_type.Date.unit)
+	{
+		case ArrowDateUnit__Day:
+			attr->put_value = __put_date_day_value;
+			break;
+		case ArrowDateUnit__MilliSecond:
+			attr->put_value = __put_date_ms_value;
+			break;
+		default:
+			Elog("ArrowTypeDate has unknown unit (%d)",
+				 attr->arrow_type.Date.unit);
+			break;
+	}
+	attr->put_value(attr, addr, sz);
+}
+
+static inline void
+__put_time_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
+						 int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
+	uint64		value;
+	uint32		h, l;
 
 	if (!addr)
-	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, attr->attlen);
-	}
+		put_inline_null_value(attr, row_index, arrow_sz);
 	else
 	{
-		Timestamp	value;
-		uint32		h, l;
-
-		assert(sz == sizeof(Timestamp));
+		assert(pgsql_sz == sizeof(TimeADT));
+		h = ntohl(*((const uint32 *)(addr)));
+		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
+		value = (uint64)h << 32 | (uint64)l;
+		/*
+		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
+		 * Compiler optimization will remove the if-block below by constant
+		 * 'adjustment' argument.
+		 */
+		if (adjustment > 0)
+			value *= adjustment;
+		else if (adjustment < 0)
+			value /= -adjustment;
 		sql_buffer_setbit(&attr->nullmap, row_index);
+		sql_buffer_append(&attr->values, &value, arrow_sz);
+	}
+}
+
+static void
+__put_time_sec_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_time_value_generic(attr, addr, sz, -1000000L, sizeof(int32));
+}
+
+static void
+__put_time_ms_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_time_value_generic(attr, addr, sz, -1000L, sizeof(int32));
+}
+
+static void
+__put_time_us_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_time_value_generic(attr, addr, sz, 0L, sizeof(int64));
+}
+
+static void
+__put_time_ns_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_time_value_generic(attr, addr, sz, 1000L, sizeof(int64));
+}
+
+static void
+put_time_value(SQLattribute *attr, const char *addr, int sz)
+{
+	switch (attr->arrow_type.Time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			if (attr->arrow_type.Time.bitWidth != 32)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [sec]",
+					 attr->arrow_type.Time.bitWidth);
+			attr->put_value = __put_time_sec_value;
+			break;
+		case ArrowTimeUnit__MilliSecond:
+			if (attr->arrow_type.Time.bitWidth != 32)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ms]",
+					 attr->arrow_type.Time.bitWidth);
+			attr->put_value = __put_time_ms_value;
+			break;
+		case ArrowTimeUnit__MicroSecond:
+			if (attr->arrow_type.Time.bitWidth != 64)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [us]",
+					 attr->arrow_type.Time.bitWidth);
+			attr->put_value = __put_time_us_value;
+			break;
+		case ArrowTimeUnit__NanoSecond:
+			if (attr->arrow_type.Time.bitWidth != 64)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ns]",
+					 attr->arrow_type.Time.bitWidth);
+			attr->put_value = __put_time_ns_value;
+		default:
+			Elog("ArrowTypeTime has unknown unit (%d)",
+				 attr->arrow_type.Time.unit);
+			break;
+	}
+	attr->put_value(attr, addr, sz);
+}
+
+static inline void
+__put_timestamp_value_generic(SQLattribute *attr,
+							  const char *addr, int pgsql_sz,
+							  int64 adjustment, int arrow_sz)
+{
+	size_t		row_index = attr->nitems++;
+	uint64		value;
+	uint32		h, l;
+
+	if (!addr)
+		put_inline_null_value(attr, row_index, arrow_sz);
+	else
+	{
+		assert(pgsql_sz == sizeof(Timestamp));
 		h = ((const uint32 *)addr)[0];
 		l = ((const uint32 *)addr)[1];
 		value = (Timestamp)ntohl(h) << 32 | (Timestamp)ntohl(l);
 		/* convert PostgreSQL epoch to UNIX epoch */
 		value += (POSTGRES_EPOCH_JDATE -
 				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-		sql_buffer_append(&attr->values, &value, sizeof(Timestamp));
+		/*
+		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
+		 * Compiler optimization will remove the if-block below by constant
+		 * 'adjustment' argument.
+		 */
+		if (adjustment > 0)
+			value *= adjustment;
+		else if (adjustment < 0)
+			value /= adjustment;
+		sql_buffer_setbit(&attr->nullmap, row_index);
+		sql_buffer_append(&attr->values, &value, arrow_sz);
 	}
 }
+
+static void
+__put_timestamp_sec_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_timestamp_value_generic(attr, addr, sz, -1000000L, sizeof(int64));
+}
+
+static void
+__put_timestamp_ms_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_timestamp_value_generic(attr, addr, sz, -1000L, sizeof(int64));
+}
+
+static void
+__put_timestamp_us_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_timestamp_value_generic(attr, addr, sz, 0L, sizeof(int64));
+}
+
+static void
+__put_timestamp_ns_value(SQLattribute *attr, const char *addr, int sz)
+{
+	__put_timestamp_value_generic(attr, addr, sz, -1000L, sizeof(int64));
+}
+
+static void
+put_timestamp_value(SQLattribute *attr, const char *addr, int sz)
+{
+	switch (attr->arrow_type.Timestamp.unit)
+	{
+		case ArrowTimeUnit__Second:
+			attr->put_value = __put_timestamp_sec_value;
+			break;
+		case ArrowTimeUnit__MilliSecond:
+			attr->put_value = __put_timestamp_ms_value;
+			break;
+		case ArrowTimeUnit__MicroSecond:
+			attr->put_value = __put_timestamp_us_value;
+			break;
+		case ArrowTimeUnit__NanoSecond:
+			attr->put_value = __put_timestamp_ns_value;
+			break;
+		default:
+			Elog("ArrowTypeTimestamp has unknown unit (%d)",
+				attr->arrow_type.Timestamp.unit);
+			break;
+	}
+	attr->put_value(attr, addr, sz);
+}
+
 
 #define DAYS_PER_MONTH	30		/* assumes exactly 30 days per month */
 #define HOURS_PER_DAY	24		/* assume no daylight savings time changes */
 
 static void
-put_interval_value(SQLattribute *attr,
-				   const char *addr, int sz)
+__put_interval_year_month_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 
 	if (!addr)
+		put_inline_null_value(attr, row_index, sizeof(uint32));
+	else
 	{
-		attr->nullcount++;
-		sql_buffer_clrbit(&attr->nullmap, row_index);
-		sql_buffer_append_zero(&attr->values, 2 * sizeof(uint32));
+		uint32	m;
+
+		m = ntohl(*((const uint32 *)(addr + offsetof(Interval, month))));
+		sql_buffer_append(&attr->values, &m, sizeof(uint32));
 	}
+}
+
+static void
+__put_interval_day_time_value(SQLattribute *attr, const char *addr, int sz)
+{
+		size_t		row_index = attr->nitems++;
+
+	if (!addr)
+		put_inline_null_value(attr, row_index, 2 * sizeof(uint32));
 	else
 	{
 		uint64	t;
 		uint32	d, m;
 		uint32	value;
 
-		t = ntohll(*((const uint64 *)addr));
-		addr += sizeof(uint64);
-		d = ntohl(*((const uint32 *)addr));
-		addr += sizeof(uint32);
-		m = ntohl(*((const uint32 *)addr));
-		addr += sizeof(uint32);
+		t = ntohll(*((const uint64 *)(addr + offsetof(Interval, time))));
+		d = ntohl(*((const uint32 *)(addr + offsetof(Interval, day))));
+		m = ntohl(*((const uint32 *)(addr + offsetof(Interval, month))));
 
 		/*
-		 * Unit size of PG Interval::time is micro-second.
-		 * Arrow Interval::time is a pair of elapsed days and milli-seconds.
+		 * Unit of PostgreSQL Interval is micro-seconds. Arrow Interval::time
+		 * is represented as a pair of elapsed days and milli-seconds; needs
+		 * to be adjusted.
 		 */
 		value = m + DAYS_PER_MONTH * d;
 		sql_buffer_append(&attr->values, &value, sizeof(uint32));
 		value = t / 1000;
 		sql_buffer_append(&attr->values, &value, sizeof(uint32));
 	}
+}
+
+static void
+put_interval_value(SQLattribute *attr, const char *addr, int sz)
+{
+	switch (attr->arrow_type.Interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			attr->put_value = __put_interval_year_month_value;
+			break;
+		case ArrowIntervalUnit__Day_Time:
+			attr->put_value = __put_interval_day_time_value;
+			break;
+		default:
+			Elog("attribute \"%s\" has unknown Arrow::Interval.unit(%d)",
+				 attr->attname, attr->arrow_type.Interval.unit);
+			break;
+	}
+	attr->put_value(attr, addr, sz);
 }
 
 static void
@@ -851,22 +1118,22 @@ assignArrowTypeInt(SQLattribute *attr, int *p_numBuffers, bool is_signed)
 		case sizeof(char):
 			attr->arrow_type.Int.bitWidth = 8;
 			attr->arrow_typename = (is_signed ? "Int8" : "Uint8");
-			attr->put_value = put_inline_8b_value;
+			attr->put_value = put_int8_value;
 			break;
 		case sizeof(short):
 			attr->arrow_type.Int.bitWidth = 16;
 			attr->arrow_typename = (is_signed ? "Int16" : "Uint16");
-			attr->put_value = put_inline_16b_value;
+			attr->put_value = put_int16_value;
 			break;
 		case sizeof(int):
 			attr->arrow_type.Int.bitWidth = 32;
 			attr->arrow_typename = (is_signed ? "Int32" : "Uint32");
-			attr->put_value = put_inline_32b_value;
+			attr->put_value = put_int32_value;
 			break;
 		case sizeof(long):
 			attr->arrow_type.Int.bitWidth = 64;
 			attr->arrow_typename = (is_signed ? "Int64" : "Uint64");
-			attr->put_value = put_inline_64b_value;
+			attr->put_value = put_int64_value;
 			break;
 		default:
 			Elog("unsupported Int width: %d", attr->attlen);
@@ -888,17 +1155,17 @@ assignArrowTypeFloatingPoint(SQLattribute *attr, int *p_numBuffers)
 		case sizeof(short):		/* half */
 			attr->arrow_type.FloatingPoint.precision = ArrowPrecision__Half;
 			attr->arrow_typename = "Float16";
-			attr->put_value = put_inline_16b_value;
+			attr->put_value = put_float16_value;
 			break;
 		case sizeof(float):
 			attr->arrow_type.FloatingPoint.precision = ArrowPrecision__Single;
 			attr->arrow_typename = "Float32";
-			attr->put_value = put_inline_32b_value;
+			attr->put_value = put_float32_value;
 			break;
 		case sizeof(double):
 			attr->arrow_type.FloatingPoint.precision = ArrowPrecision__Double;
 			attr->arrow_typename = "Float64";
-			attr->put_value = put_inline_64b_value;
+			attr->put_value = put_float64_value;
 			break;
 		default:
 			Elog("unsupported floating point width: %d", attr->attlen);
@@ -959,7 +1226,7 @@ assignArrowTypeBool(SQLattribute *attr, int *p_numBuffers)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Bool);
 	attr->arrow_typename	= "Bool";
-	attr->put_value			= put_inline_bool_value;
+	attr->put_value			= put_bool_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
@@ -1022,7 +1289,7 @@ assignArrowTypeTime(SQLattribute *attr, int *p_numBuffers)
 	attr->arrow_type.Time.unit = ArrowTimeUnit__MicroSecond;
 	attr->arrow_type.Time.bitWidth = 64;
 	attr->arrow_typename	= "Time";
-	attr->put_value			= put_inline_64b_value;
+	attr->put_value			= put_time_value;
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;

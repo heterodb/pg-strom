@@ -964,6 +964,9 @@ readArrowTypeInt(ArrowTypeInt *node, const char *pos)
 
 	node->bitWidth  = fetchInt(&t, 0);
 	node->is_signed = fetchBool(&t, 1);
+	if (node->bitWidth != 8  && node->bitWidth != 16 &&
+		node->bitWidth != 32 && node->bitWidth != 64)
+		Elog("ArrowTypeInt has unknown bitWidth (%d)", node->bitWidth);
 }
 
 static void
@@ -972,6 +975,11 @@ readArrowTypeFloatingPoint(ArrowTypeFloatingPoint *node, const char *pos)
 	FBTable		t = fetchFBTable((int32 *) pos);
 
 	node->precision = fetchShort(&t, 0);
+	if (node->precision != ArrowPrecision__Half &&
+		node->precision != ArrowPrecision__Single &&
+		node->precision != ArrowPrecision__Double)
+		Elog("ArrowTypeFloatingPoint has unknown precision (%d)",
+			 node->precision);
 }
 
 static void
@@ -992,6 +1000,9 @@ readArrowTypeDate(ArrowTypeDate *node, const char *pos)
 	/* Date->unit has non-zero default value */
 	ptr = __fetchPointer(&t, 0);
 	node->unit = (ptr != NULL ? *ptr : ArrowDateUnit__MilliSecond);
+	if (node->unit != ArrowDateUnit__Day &&
+		node->unit != ArrowDateUnit__MilliSecond)
+		Elog("ArrowTypeDate has unknown unit (%d)", node->unit);
 }
 
 static void
@@ -1001,6 +1012,23 @@ readArrowTypeTime(ArrowTypeTime *node, const char *pos)
 
 	node->unit = fetchShort(&t, 0);
 	node->bitWidth = fetchInt(&t, 1);
+	switch (node->unit)
+	{
+		case ArrowTimeUnit__Second:
+		case ArrowTimeUnit__MilliSecond:
+			if (node->bitWidth != 32)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for unit=%d",
+					 node->bitWidth, node->unit);
+			break;
+		case ArrowTimeUnit__MicroSecond:
+		case ArrowTimeUnit__NanoSecond:
+			if (node->bitWidth != 64)
+				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for unit=%d",
+					 node->bitWidth, node->unit);
+			break;
+		default:
+			Elog("ArrowTypeTime has unknown unit (%d)", node->unit);
+	}
 }
 
 static void
@@ -1010,6 +1038,11 @@ readArrowTypeTimestamp(ArrowTypeTimestamp *node, const char *pos)
 
 	node->unit = fetchShort(&t, 0);
 	node->timezone = fetchString(&t, 1, &node->_timezone_len);
+	if (node->unit != ArrowTimeUnit__Second &&
+		node->unit != ArrowTimeUnit__MilliSecond &&
+		node->unit != ArrowTimeUnit__MicroSecond &&
+		node->unit != ArrowTimeUnit__NanoSecond)
+		Elog("ArrowTypeTimestamp has unknown unit (%d)", node->unit);
 }
 
 static void
@@ -1018,6 +1051,9 @@ readArrowTypeInterval(ArrowTypeInterval *node, const char *pos)
 	FBTable		t = fetchFBTable((int32 *) pos);
 
 	node->unit = fetchShort(&t, 0);
+	if (node->unit != ArrowIntervalUnit__Year_Month &&
+		node->unit != ArrowIntervalUnit__Day_Time)
+		Elog("ArrowTypeInterval has unknown unit (%d)", node->unit);
 }
 
 static void
@@ -1069,6 +1105,11 @@ readArrowTypeDuration(ArrowTypeDuration *node, const char *pos)
 	FBTable		t = fetchFBTable((int32 *) pos);
 
 	node->unit = fetchShort(&t, 0);
+	if (node->unit != ArrowTimeUnit__Second &&
+		node->unit != ArrowTimeUnit__MilliSecond &&
+		node->unit != ArrowTimeUnit__MicroSecond &&
+		node->unit != ArrowTimeUnit__NanoSecond)
+		Elog("ArrowTypeDuration has unknown unit (%d)", node->unit);
 }
 
 static void
@@ -1180,7 +1221,7 @@ readArrowDictionaryEncoding(ArrowDictionaryEncoding *dict, const char *pos)
 	INIT_ARROW_NODE(dict, DictionaryEncoding);
 	dict->id		= fetchLong(&t, 0);
 	type_pos		= fetchOffset(&t, 1);
-	dict->indexType.node.tag = ArrowNodeTag__Int;
+	INIT_ARROW_TYPE_NODE(&dict->indexType, Int);
 	readArrowTypeInt(&dict->indexType, type_pos);
 	dict->isOrdered	= fetchBool(&t, 2);
 }

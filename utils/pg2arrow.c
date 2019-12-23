@@ -24,6 +24,7 @@ static SQLattribute *pgsql_create_array_element(PGconn *conn,
 /* command options */
 static char	   *sql_command = NULL;
 static char	   *output_filename = NULL;
+static char	   *append_filename = NULL;
 static size_t	batch_segment_sz = 0;
 static char	   *pgsql_hostname = NULL;
 static char	   *pgsql_portno = NULL;
@@ -34,7 +35,6 @@ static char	   *dump_arrow_filename = NULL;
 int				shows_progress = 0;
 /* dictionary batches */
 SQLdictionary  *pgsql_dictionary_list = NULL;
-static int		pgsql_dictionary_count = 0;
 
 static void
 usage(void)
@@ -48,7 +48,10 @@ usage(void)
 		  "  -f, --file=FILENAME     SQL command from file\n"
 		  "      (-c and -f are exclusive, either of them must be specified)\n"
 		  "  -o, --output=FILENAME   result file in Apache Arrow format\n"
-		  "      (default creates a temporary file)\n"
+		  "      --append=FILENAME   result file to be appended\n"
+		  "\n"
+		  "      --output and --append are exclusive to use at the same time.\n"
+		  "      If neither of them are specified, it creates a temporary file.)\n"
 		  "\n"
 		  "Arrow format options:\n"
 		  "  -s, --segment-size=SIZE size of record batch for each\n"
@@ -79,9 +82,9 @@ dumpArrowFile(const char *filename)
 	StringInfoData	buf2;
 
 	memset(&af_info, 0, sizeof(ArrowFileInfo));
-	fdesc = open(dump_arrow_filename, O_RDONLY);
+	fdesc = open(filename, O_RDONLY);
 	if (fdesc < 0)
-		Elog("unable to open '%s': %m", dump_arrow_filename);
+		Elog("unable to open '%s': %m", filename);
 	readArrowFileDesc(fdesc, &af_info);
 
 	initStringInfo(&buf1);
@@ -124,6 +127,7 @@ parse_options(int argc, char * const argv[])
 		{"password",     no_argument,        NULL,  'W' },
 		{"dump",         required_argument,  NULL, 1000 },
 		{"progress",     no_argument,        NULL, 1001 },
+		{"append",       required_argument,  NULL, 1002 },
 		{"help",         no_argument,        NULL, 9999 },
 		{NULL, 0, NULL, 0},
 	};
@@ -158,6 +162,8 @@ parse_options(int argc, char * const argv[])
 			case 'o':
 				if (output_filename)
 					Elog("-o option specified twice");
+				if (append_filename)
+					Elog("-o and --append are exclusive");
 				output_filename = optarg;
 				break;
 			case 's':
@@ -211,7 +217,16 @@ parse_options(int argc, char * const argv[])
 				dump_arrow_filename = optarg;
 				break;
 			case 1001:		/* --progress */
+				if (shows_progress)
+					Elog("--progress option specified twice");
 				shows_progress = 1;
+				break;
+			case 1002:
+				if (append_filename)
+					Elog("--append option specified twice");
+				if (output_filename)
+					Elog("-o and --append are exclusive");
+				append_filename = optarg;
 				break;
 			case 9999:		/* --help */
 			default:
@@ -236,11 +251,15 @@ parse_options(int argc, char * const argv[])
 	}
 	else if (optind != argc)
 		Elog("Too much command line arguments");
-	/*
-	 * special code path if '--dump' option is specified.
-	 */
+
+	/* '--dump' option is exclusive other options */
 	if (dump_arrow_filename)
-		exit(dumpArrowFile(dump_arrow_filename));
+	{
+		if (sql_command || sql_file || output_filename)
+			Elog("--dump FILENAME is exclusive with -c, -f, or -o");
+		return;
+	}
+
 	if (batch_segment_sz == 0)
 		batch_segment_sz = (1UL << 28);		/* 256MB in default */
 	if (sql_file)
@@ -433,11 +452,13 @@ pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
 	char		query[4096];
 	int			i, j, nitems;
 	int			nslots;
+	int			num_dicts = 0;
 
 	for (dict = pgsql_dictionary_list; dict != NULL; dict = dict->next)
 	{
 		if (dict->enum_typeid == enum_typeid)
 			return dict;
+		num_dicts++;
 	}
 
 	snprintf(query, sizeof(query),
@@ -453,7 +474,7 @@ pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
 	nslots = Min(Max(nitems, 1<<10), 1<<18);
 	dict = palloc0(offsetof(SQLdictionary, hslots[nslots]));
 	dict->enum_typeid = enum_typeid;
-	dict->dict_id = pgsql_dictionary_count++;
+	dict->dict_id = num_dicts;
 	sql_buffer_init(&dict->values);
 	sql_buffer_init(&dict->extra);
 	dict->nitems = nitems;
@@ -487,6 +508,43 @@ pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
 	dict->next = pgsql_dictionary_list;
 	pgsql_dictionary_list = dict;
 	PQclear(res);
+
+	return dict;
+}
+
+static SQLdictionary *
+pgsql_duplicate_dictionary(SQLdictionary *orig, int dict_id)
+{
+	SQLdictionary  *dict;
+	int		i;
+
+	dict = palloc0(offsetof(SQLdictionary, hslots[orig->nslots]));
+	dict->enum_typeid = orig->enum_typeid;
+	dict->dict_id = dict_id;
+	dict->is_delta = true;
+	sql_buffer_copy(&dict->values, &orig->values);
+	sql_buffer_copy(&dict->extra,  &orig->extra);
+	dict->nitems = orig->nitems;
+	dict->nslots = orig->nslots;
+	for (i=0; i < orig->nslots; i++)
+	{
+		hashItem   *hitem;
+		hashItem   *hcopy;
+		
+		for (hitem = orig->hslots[i]; hitem != NULL; hitem = hitem->next)
+		{
+			hcopy = palloc0(offsetof(hashItem, label[hitem->label_len+1]));
+			hcopy->hash = hitem->hash;
+			hcopy->index = hitem->index;
+			hcopy->label_len = hitem->label_len;
+			strcpy(hcopy->label, hitem->label);
+
+			hcopy->next = dict->hslots[i];
+			dict->hslots[i] = hcopy;
+		}
+	}
+	dict->next = pgsql_dictionary_list;
+	pgsql_dictionary_list = dict;
 
 	return dict;
 }
@@ -752,6 +810,171 @@ pgsql_create_buffer(PGconn *conn, PGresult *res, size_t segment_sz)
 		PQclear(__res);
 	}
 	return table;
+}
+
+static int
+__arrow_type_is_compatible(SQLtable *root,
+						   SQLattribute *attr,
+						   ArrowField *field)
+{
+	ArrowType  *sql_type = &attr->arrow_type;
+	int			j;
+
+	if (sql_type->node.tag != field->type.node.tag)
+		return 0;
+
+	switch (sql_type->node.tag)
+	{
+		case ArrowNodeTag__Int:
+			if (sql_type->Int.bitWidth != field->type.Int.bitWidth)
+				return 0;	/* not compatible */
+			sql_type->Int.is_signed = field->type.Int.is_signed;
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			if (sql_type->FloatingPoint.precision
+				!= field->type.FloatingPoint.precision)
+				return 0;
+			break;
+		case ArrowNodeTag__Decimal:
+			/* adjust precision and scale to the previous one */
+			sql_type->Decimal.precision = field->type.Decimal.precision;
+			sql_type->Decimal.scale = field->type.Decimal.scale;
+			break;
+		case ArrowNodeTag__Date:
+			/* adjust unit */
+			sql_type->Date.unit = field->type.Date.unit;
+			break;
+		case ArrowNodeTag__Time:
+			/* adjust unit */
+			sql_type->Time.unit = field->type.Time.unit;
+			sql_type->Time.bitWidth = field->type.Time.bitWidth;
+			break;
+		case ArrowNodeTag__Timestamp:
+			/* adjust unit */
+			sql_type->Timestamp.unit = field->type.Timestamp.unit;
+			break;
+		case ArrowNodeTag__Interval:
+			/* adjust unit */
+			sql_type->Interval.unit = field->type.Interval.unit;
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			if (sql_type->FixedSizeBinary.byteWidth
+				!= field->type.FixedSizeBinary.byteWidth)
+				return 0;
+			break;
+		default:
+			break;
+	}
+
+	if (attr->element)
+	{
+		/* array type */
+		assert(sql_type->node.tag == ArrowNodeTag__List);
+		if (field->_num_children != 1 ||
+			!__arrow_type_is_compatible(root, attr->element, field->children))
+			return 0;
+	}
+	else if (attr->subtypes)
+	{
+		/* composite type */
+		SQLtable   *subtypes = attr->subtypes;
+
+		assert(sql_type->node.tag == ArrowNodeTag__Struct);
+		if (subtypes->nfields != field->_num_children)
+			return 0;
+		for (j=0; j < subtypes->nfields; j++)
+		{
+			if (!__arrow_type_is_compatible(root,
+											subtypes->attrs + j,
+											field->children + j))
+				return 0;
+		}
+	}
+	else if (attr->enumdict)
+	{
+		/* enum type; encoded UTF-8 values */
+		SQLdictionary  *enumdict = attr->enumdict;
+
+		assert(sql_type->node.tag == ArrowNodeTag__Utf8);
+		if (field->dictionary.indexType.bitWidth != 32 ||
+			field->dictionary.indexType.is_signed)
+			Elog("Index of DictionaryBatch must be unsigned 32bit");
+		if (field->dictionary.isOrdered)
+			Elog("Ordered DictionaryBatch is not supported right now");
+		if (enumdict->is_delta)
+		{
+			if (enumdict->dict_id == field->dictionary.id)
+				return 1;		/* nothing to do */
+			enumdict = pgsql_duplicate_dictionary(enumdict,
+												  field->dictionary.id);
+		}
+		else
+		{
+			enumdict->is_delta = true;
+			enumdict->dict_id  = field->dictionary.id;
+		}
+		/*
+		 * Right now, we don't implement "true" delta DictionaryBatch.
+		 * The appended RecordBatch will reference the new DictionaryBatch
+		 * that replaced entire dictionary we previously written on.
+		 */
+	}
+	return 1;
+}
+
+static void
+initial_setup_append_file(SQLtable *table)
+{
+	ArrowFileInfo	af_info;
+	ArrowSchema	   *af_schema;
+	int				i, nitems;
+	size_t			nbytes;
+	off_t			offset;
+	char			buffer[100];
+
+	/*
+	 * check schema compatibility
+	 */
+	readArrowFileDesc(table->fdesc, &af_info);
+	af_schema = &af_info.footer.schema;
+	if (af_schema->_num_fields != table->nfields)
+		Elog("--append is given, but number of columns are different.");
+	for (i=0; i < table->nfields; i++)
+	{
+		if (!__arrow_type_is_compatible(table,
+										table->attrs + i,
+										af_schema->fields + i))
+			Elog("--append is given, but attribute %d is not compatible", i+1);
+	}
+
+	/* restore DictionaryBatches already in the file */
+	nitems = af_info.footer._num_dictionaries;
+	table->numDictionaries = nitems;
+	table->dictionaries = palloc0(sizeof(ArrowBlock) * nitems);
+	memcpy(table->dictionaries,
+		   af_info.footer.dictionaries,
+		   sizeof(ArrowBlock) * nitems);
+
+	/* restore RecordBatches already in the file */
+	nitems = af_info.footer._num_recordBatches;
+	table->numRecordBatches = nitems;
+	table->recordBatches = palloc0(sizeof(ArrowBlock) * nitems);
+	memcpy(table->recordBatches,
+		   af_info.footer.recordBatches,
+		   sizeof(ArrowBlock) * nitems);
+
+	/* move the file offset in front of the Footer portion */
+	nbytes = sizeof(int32) + 6;	/* strlen("ARROW1") */
+	offset = lseek(table->fdesc, -nbytes, SEEK_END);
+	if (offset < 0)
+		Elog("failed on lseek(%d, %zu, SEEK_END): %m",
+			 table->fdesc, sizeof(int32) + 6);
+	if (read(table->fdesc, buffer, nbytes) != nbytes)
+		Elog("failed on read(2): %m");
+	offset -= *((int32 *)buffer);
+	if (lseek(table->fdesc, offset, SEEK_SET) < 0)
+		Elog("failed on lseek(%d, %zu, SEEK_SET): %m",
+			 table->fdesc, offset);
 }
 
 /*
@@ -1031,7 +1254,7 @@ setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 		dict->id = attr->enumdict->dict_id;
 		INIT_ARROW_TYPE_NODE(indexType, Int);
 		indexType->bitWidth  = 32;		/* OID in PostgreSQL */
-		indexType->is_signed = true;
+		indexType->is_signed = false;
 		dict->isOrdered = false;
 	}
 }
@@ -1225,6 +1448,10 @@ int main(int argc, char * const argv[])
 	ssize_t		nbytes;
 
 	parse_options(argc, argv);
+	/* special case if '--dump <filename>' is given */
+	if (dump_arrow_filename)
+		return dumpArrowFile(dump_arrow_filename);
+
 	/* open PostgreSQL connection */
 	conn = pgsql_server_connect();
 	/* run SQL command */
@@ -1232,36 +1459,47 @@ int main(int argc, char * const argv[])
 	if (!res)
 		Elog("SQL command returned an empty result");
 	table = pgsql_create_buffer(conn, res, batch_segment_sz);
-	/* open the output file */
-	if (output_filename)
+	if (append_filename)
 	{
-		table->fdesc = open(output_filename,
-							O_RDWR | O_CREAT | O_TRUNC, 0644);
+		table->fdesc = open(append_filename, O_RDWR, 0644);
 		if (table->fdesc < 0)
-			Elog("failed to open '%s'", output_filename);
-		table->filename = output_filename;
+			Elog("failed to open '%s'", append_filename);
+		table->filename = append_filename;
+
+		initial_setup_append_file(table);
 	}
 	else
 	{
-		char	temp_filename[128];
+		if (output_filename)
+		{
+			table->fdesc = open(output_filename,
+								O_RDWR | O_CREAT | O_TRUNC, 0644);
+			if (table->fdesc < 0)
+				Elog("failed to open '%s'", output_filename);
+			table->filename = output_filename;
+		}
+		else
+		{
+			char	temp_fname[128];
 
-		strcpy(temp_filename, "/tmp/XXXXXX.arrow");
-		table->fdesc = mkostemps(temp_filename, 6,
-								 O_RDWR | O_CREAT | O_TRUNC);
-		if (table->fdesc < 0)
-			Elog("failed to open '%s' : %m", temp_filename);
-		table->filename = pstrdup(temp_filename);
-		fprintf(stderr,
-				"notice: -o, --output=FILENAME options was not specified,\n"
-				"        so, a temporary file '%s' was built instead.\n",
-				temp_filename);
+			strcpy(temp_fname, "/tmp/XXXXXX.arrow");
+			table->fdesc = mkostemps(temp_fname, 6,
+									 O_RDWR | O_CREAT | O_TRUNC);
+			if (table->fdesc < 0)
+				Elog("failed to open '%s' : %m", temp_fname);
+			table->filename = pstrdup(temp_fname);
+			fprintf(stderr,
+					"NOTICE: -o, --output=FILENAME option was not given,\n"
+					"        so a temporary file '%s' was built instead.\n",
+					temp_fname);
+		}
+		/* write out header stuff from the file head */
+		nbytes = write(table->fdesc, "ARROW1\0\0", 8);
+		if (nbytes != 8)
+			Elog("failed on write(2): %m");
+		nbytes = writeArrowSchema(table);
 	}
 	//pgsql_dump_buffer(table);
-	/* write header portion */
-	nbytes = write(table->fdesc, "ARROW1\0\0", 8);
-	if (nbytes != 8)
-		Elog("failed on write(2): %m");
-	nbytes = writeArrowSchema(table);
 	writeArrowDictionaryBatches(table);
 	do {
 		pgsql_append_results(table, res);

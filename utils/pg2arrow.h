@@ -109,6 +109,7 @@ struct SQLdictionary
 	struct SQLdictionary *next;
 	Oid			enum_typeid;
 	int			dict_id;
+	char		is_delta;
 	SQLbuffer	values;
 	SQLbuffer	extra;
 	int			nitems;
@@ -244,6 +245,19 @@ static inline void
 sql_buffer_clear(SQLbuffer *buf)
 {
 	buf->usage = 0;
+}
+
+static inline void
+sql_buffer_copy(SQLbuffer *dest, const SQLbuffer *orig)
+{
+	sql_buffer_init(dest);
+	if (orig->data)
+	{
+		assert(orig->usage <= orig->length);
+		sql_buffer_expand(dest, orig->length);
+		memcpy(dest->data, orig->data, orig->usage);
+		dest->usage = orig->usage;
+	}
 }
 
 /*
