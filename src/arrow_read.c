@@ -587,7 +587,7 @@ __copyArrowDictionaryEncoding(ArrowDictionaryEncoding *dest,
 {
 	__copyArrowNode(&dest->node, &src->node);
 	COPY_SCALAR(id);
-	COPY_SCALAR(indexType);
+	__copyArrowTypeInt(&dest->indexType, &src->indexType);
 	COPY_SCALAR(isOrdered);
 }
 
