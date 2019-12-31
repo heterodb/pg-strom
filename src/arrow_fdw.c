@@ -133,6 +133,7 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS);
 
 /*
  * baseRelIsArrowFdw
@@ -2090,6 +2091,69 @@ arrowTypeToPGTypeName(ArrowField *field)
 }
 
 /*
+ * arrowTypeIsConvertible
+ */
+static bool
+arrowTypeIsConvertible(Oid type_oid, int typemod)
+{
+	HeapTuple		tup;
+	Form_pg_type	typeForm;
+	bool			retval = false;
+
+	switch (type_oid)
+	{
+		case INT2OID:		/* Int16 */
+		case INT4OID:		/* Int32 */
+		case INT8OID:		/* Int64 */
+		case FLOAT2OID:		/* FP16 */
+		case FLOAT4OID:		/* FP32 */
+		case FLOAT8OID:		/* FP64 */
+		case TEXTOID:		/* Utf8 */
+		case BYTEAOID:		/* Binary */
+		case BOOLOID:		/* Bool */
+		case NUMERICOID:	/* Decimal */
+		case DATEOID:		/* Date */
+		case TIMEOID:		/* Time */
+		case TIMESTAMPOID:	/* Timestamp */
+		case INTERVALOID:	/* Interval */
+		case BPCHAROID:		/* FixedSizeBinary */
+			return true;
+		default:
+			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for type %u", type_oid);
+			typeForm = (Form_pg_type) GETSTRUCT(tup);
+
+			if (typeForm->typlen == -1 && OidIsValid(typeForm->typelem))
+			{
+				retval = arrowTypeIsConvertible(typeForm->typelem, typemod);
+			}
+			else if (typeForm->typtype == TYPTYPE_COMPOSITE)
+			{
+				Relation	rel;
+				TupleDesc	tupdesc;
+				int			j;
+
+				rel = relation_open(typeForm->typrelid, AccessShareLock);
+				tupdesc = RelationGetDescr(rel);
+				for (j=0; j < tupdesc->natts; j++)
+				{
+					Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+
+					if (!arrowTypeIsConvertible(attr->atttypid,
+												attr->atttypmod))
+						break;
+				}
+				if (j >= tupdesc->natts)
+					retval = true;
+				relation_close(rel, AccessShareLock);
+			}
+			ReleaseSysCache(tup);
+	}
+	return retval;
+}
+
+/*
  * arrowFieldLength
  */
 static size_t
@@ -2867,12 +2931,154 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 
 			readArrowFile(fname, &af_info);
 			elog(DEBUG2, "%s", dumpArrowNode((ArrowNode *)&af_info.footer));
-			//TODO: make cache item here
 		}
+	}
+	else if (options_list != NIL)
+	{
+		const char	   *label;
+		char			temp[80];
+
+		switch (catalog)
+		{
+			case ForeignDataWrapperRelationId:
+				label = "FOREIGN DATA WRAPPER";
+				break;
+			case ForeignServerRelationId:
+				label = "SERVER";
+				break;
+			case UserMappingRelationId:
+				label = "USER MAPPING";
+				break;
+			case AttributeRelationId:
+				label = "attribute of FOREIGN TABLE";
+				break;
+			default:
+				snprintf(temp, sizeof(temp),
+						 "[unexpected object catalog=%u]", catalog);
+				label = temp;
+				break;
+		}
+		elog(ERROR, "Arrow_Fdw does not support any options for %s", label);
 	}
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
+
+/*
+ * pgstrom_arrow_fdw_precheck_schema
+ */
+static void
+arrow_fdw_precheck_schema(Relation rel)
+{
+	TupleDesc		tupdesc = RelationGetDescr(rel);
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(rel));
+	List		   *filesList;
+	ListCell	   *lc;
+	int				j;
+
+	/* check schema definition is supported by Apache Arrow */
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+
+		if (!arrowTypeIsConvertible(attr->atttypid,
+									attr->atttypmod))
+			elog(ERROR, "column %s of foreign table %s has %s type that is not convertible any supported Apache Arrow types",
+				 NameStr(attr->attname),
+				 RelationGetRelationName(rel),
+				 format_type_be(attr->atttypid));
+	}
+
+	filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	foreach (lc, filesList)
+	{
+		const char *fname = strVal(lfirst(lc));
+		File		fdesc;
+		List	   *rb_cached = NIL;
+		ListCell   *cell;
+
+		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
+		if (fdesc < 0)
+			elog(ERROR, "failed to open '%s'", fname);
+		/* check schema compatibility */
+		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		foreach (cell, rb_cached)
+		{
+			RecordBatchState *rb_state = lfirst(cell);
+
+			if (!arrowSchemaCompatibilityCheck(tupdesc, rb_state))
+				elog(ERROR, "arrow file '%s' on behalf of the foreign table '%s' has incompatible schema definition",
+					 fname, RelationGetRelationName(rel));
+		}
+		list_free(rb_cached);
+	}
+}
+
+Datum
+pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
+{
+	EventTriggerData   *trigdata;
+	
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "%s: must be called as EventTrigger",
+			 __FUNCTION__);
+	trigdata = (EventTriggerData *) fcinfo->context;
+	if (strcmp(trigdata->event, "ddl_command_end") != 0)
+		elog(ERROR, "%s: must be called on ddl_command_end event",
+			 __FUNCTION__);
+	if (strcmp(trigdata->tag, "CREATE FOREIGN TABLE") == 0)
+	{
+		CreateStmt	   *stmt = (CreateStmt *)trigdata->parsetree;
+		Relation		rel;
+
+		rel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
+		if (!rel)
+			PG_RETURN_NULL();
+		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
+			GetFdwRoutineForRelation(rel, false) == &pgstrom_arrow_fdw_routine)
+		{
+			arrow_fdw_precheck_schema(rel);
+		}
+		relation_close(rel, AccessShareLock);
+	}
+	else if (strcmp(trigdata->tag, "ALTER FOREIGN TABLE") == 0)
+	{
+		AlterTableStmt *stmt = (AlterTableStmt *)trigdata->parsetree;
+		Relation		rel;
+		ListCell	   *lc;
+		bool			has_schema_change = false;
+
+		rel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
+		if (!rel)
+			PG_RETURN_NULL();
+		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
+			GetFdwRoutineForRelation(rel, false) == &pgstrom_arrow_fdw_routine)
+		{
+			foreach (lc, stmt->cmds)
+			{
+				AlterTableCmd  *cmd = lfirst(lc);
+
+				if (cmd->subtype == AT_AddColumn ||
+					cmd->subtype == AT_DropColumn ||
+					cmd->subtype == AT_AlterColumnType)
+				{
+					has_schema_change = true;
+					break;
+				}
+			}
+			if (has_schema_change)
+				arrow_fdw_precheck_schema(rel);
+		}
+		relation_close(rel, AccessShareLock);
+	}
+	else
+	{
+		elog(NOTICE, "%s was called on %s, ignored",
+			 __FUNCTION__, trigdata->tag);
+	}
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
 
 /*
  * Routines for Arrow metadata cache
@@ -3403,6 +3609,7 @@ pgstrom_init_arrow_fdw(void)
 							   GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							   NULL, NULL, NULL);
 
+	/* shared memory size */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)) +
 						   ((size_t)arrow_metadata_cache_size_kb << 10));
 	shmem_startup_next = shmem_startup_hook;

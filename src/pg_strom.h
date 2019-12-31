@@ -58,8 +58,10 @@
 #if PG_VERSION_NUM < 110000
 #include "catalog/pg_type_fn.h"
 #endif
+#include "catalog/pg_user_mapping.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/event_trigger.h"
 #include "commands/explain.h"
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
