@@ -119,8 +119,11 @@ static const char *arrowTypeToPGTypeName(ArrowField *field);
 static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
 static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 											  RecordBatchState *rb_state);
-static List	   *arrowFdwExtractFilesList(List *options_list,
-										 int *p_parallel_workers);
+static List	   *__arrowFdwExtractFilesList(List *options_list,
+										   int *p_parallel_nworkers,
+										   bool *p_writable,
+										   int *p_pinning);
+static List	   *arrowFdwExtractFilesList(List *options_list);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
 											  ArrowRecordBatch *rbatch);
@@ -259,8 +262,10 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	}
 	referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
 
-	filesList = arrowFdwExtractFilesList(ft->options,
-										 &parallel_nworkers);
+	filesList = __arrowFdwExtractFilesList(ft->options,
+										   &parallel_nworkers,
+										   NULL,
+										   NULL);
 	foreach (lc, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc));
@@ -806,7 +811,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	List		   *fdescList = NIL;
 	Bitmapset	   *referenced = NULL;
 	bool			whole_row_ref = false;
@@ -1500,7 +1505,7 @@ ArrowAcquireSampleRows(Relation relation,
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
 	File		   *fdesc_array;
@@ -1579,7 +1584,7 @@ ArrowAnalyzeForeignTable(Relation frel,
 						 BlockNumber *p_totalpages)
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	ListCell	   *lc;
 	Size			totalpages = 0;
 
@@ -1630,7 +1635,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		default:
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
 	}
-	filesList = arrowFdwExtractFilesList(stmt->options, NULL);
+	filesList = arrowFdwExtractFilesList(stmt->options);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -1798,6 +1803,76 @@ static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
 	ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
+}
+
+/*
+ * ArrowPlanForeignModify
+ */
+static List *
+ArrowPlanForeignModify(PlannerInfo *root,
+					   ModifyTable *plan,
+					   Index resultRelation,
+					   int subplan_index)
+{
+	Assert(plan->operation == CMD_INSERT);
+
+
+	return NIL;
+}
+
+/*
+ * ArrowBeginForeignModify
+ */
+static void
+ArrowBeginForeignModify(ModifyTableState *mtstate,
+						ResultRelInfo *rinfo,
+						List *fdw_private,
+						int subplan_index,
+						int eflags)
+{
+	//1. Lookup or build local arrow buffer
+	//2. Attach mtstate
+
+}
+
+/*
+ * ArrowExecForeignInsert
+ */
+static TupleTableSlot *
+ArrowExecForeignInsert(EState *estate,
+					   ResultRelInfo *rinfo,
+					   TupleTableSlot *slot,
+					   TupleTableSlot *planSlot)
+{
+	//1. append local arrow buffer
+
+
+	return slot;
+}
+
+/*
+ * ArrowEndForeignModify
+ */
+static void
+ArrowEndForeignModify(EState *estate,
+					  ResultRelInfo *rinfo)
+{
+	//1. if nitems==0, release buffer
+	//   elsewhere, mark
+
+}
+
+/*
+ * ArrowExplainForeignModify
+ */
+static void
+ArrowExplainForeignModify(ModifyTableState *mtstate,
+						  ResultRelInfo *rinfo,
+						  List *fdw_private,
+						  int subplan_index,
+						  struct ExplainState *es)
+{
+	/* print something */
 }
 
 /*
@@ -2804,13 +2879,18 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
  * arrowFdwExtractFilesList
  */
 static List *
-arrowFdwExtractFilesList(List *options_list, int *p_parallel_nworkers)
+__arrowFdwExtractFilesList(List *options_list,
+						   int *p_parallel_nworkers,
+						   bool *p_writable,
+						   int *p_pinning)
 {
 	ListCell   *lc;
 	List	   *filesList = NIL;
 	char	   *dir_path = NULL;
 	char	   *dir_suffix = NULL;
 	int			parallel_nworkers = -1;
+	bool		writable = false;	/* default: read-only */
+	int			pinning = -1;		/* default: not pinning */
 
 	foreach (lc, options_list)
 	{
@@ -2855,11 +2935,43 @@ arrowFdwExtractFilesList(List *options_list, int *p_parallel_nworkers)
 				elog(ERROR, "'parallel_workers' appeared twice");
 			parallel_nworkers = pg_atoi(strVal(defel->arg), sizeof(int), '\0');
 		}
+		else if (strcmp(defel->defname, "writable") == 0)
+		{
+			writable = defGetBoolean(defel);
+		}
+		else if (strcmp(defel->defname, "pinning") == 0)
+		{
+			int		dindex = -1;
+
+			pinning = pg_atoi(strVal(defel->arg), sizeof(int), '\0');
+			if (pinning < 0)
+				elog(ERROR, "arrow: pinning=%d is out of range", pinning);
+			for (dindex = -1; dindex < numDevAttrs; dindex++)
+			{
+				if (devAttrs[dindex].DEV_ID == pinning)
+					break;
+			}
+			if (dindex >= numDevAttrs)
+			{
+				elog(NOTICE, "arrow: pinning=%d is not a valid GPU device id. Ignored", pinning);
+				pinning = -1;
+			}
+		}
 		else
 			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
 	}
 	if (dir_suffix && !dir_path)
 		elog(ERROR, "arrow: cannot use 'suffix' option without 'dir'");
+
+	if (writable)
+	{
+		if (dir_path)
+			elog(ERROR, "arrow: 'dir_path' and 'writable' options are exclusive");
+		if (list_length(filesList) == 0)
+			elog(ERROR, "arrow: 'writable' needs a backend file specified by 'file' option");
+		if (list_length(filesList) > 1)
+			elog(ERROR, "arrow: 'writable' cannot use multiple backend files");
+	}
 
 	if (dir_path)
 	{
@@ -2905,9 +3017,20 @@ arrowFdwExtractFilesList(List *options_list, int *p_parallel_nworkers)
 	/* other properties */
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
+	if (p_writable)
+		*p_writable = writable;
+	if (p_pinning)
+		*p_pinning = pinning;
 
 	return filesList;
 }
+
+static List *
+arrowFdwExtractFilesList(List *options_list)
+{
+	return __arrowFdwExtractFilesList(options_list, NULL, NULL, NULL);
+}
+
 
 /*
  * validator of Arrow_Fdw
@@ -2923,7 +3046,7 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 		List	   *filesList;
 		ListCell   *lc;
 
-		filesList = arrowFdwExtractFilesList(options_list, NULL);
+		filesList = arrowFdwExtractFilesList(options_list);
 		foreach (lc, filesList)
 		{
 			ArrowFileInfo	af_info;
@@ -2989,7 +3112,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 format_type_be(attr->atttypid));
 	}
 
-	filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	filesList = arrowFdwExtractFilesList(ft->options);
 	foreach (lc, filesList)
 	{
 		const char *fname = strVal(lfirst(lc));
@@ -3552,13 +3675,19 @@ pgstrom_init_arrow_fdw(void)
 	r->AnalyzeForeignTable			= ArrowAnalyzeForeignTable;
 	/* IMPORT FOREIGN SCHEMA support */
 	r->ImportForeignSchema			= ArrowImportForeignSchema;
-	/* CPU Parallel support (not yet) */
+	/* CPU Parallel support */
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
 	r->InitializeDSMForeignScan		= ArrowInitializeDSMForeignScan;
 	r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
 	r->InitializeWorkerForeignScan	= ArrowInitializeWorkerForeignScan;
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
+	/* INSERT/DELETE support */
+	r->PlanForeignModify			= ArrowPlanForeignModify;
+	r->BeginForeignModify			= ArrowBeginForeignModify;
+	r->ExecForeignInsert			= ArrowExecForeignInsert;
+	r->EndForeignModify				= ArrowEndForeignModify;
+	r->ExplainForeignModify			= ArrowExplainForeignModify;
 
 	/*
 	 * Turn on/off arrow_fdw
