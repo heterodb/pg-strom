@@ -1,7 +1,7 @@
 /*
  * pg2arrow.c - main logic of the command
  *
- * Copyright 2018-2019 (C) KaiGai Kohei <kaigai@heterodb.com>
+ * Copyright 2018-2020 (C) KaiGai Kohei <kaigai@heterodb.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License. See the LICENSE file.
