@@ -187,11 +187,15 @@ struct ArrowNode
 {
 	ArrowNodeTag	tag;
 	const char	   *tagName;
-	void		  (*dumpArrowNode)(StringInfo str, struct ArrowNode *node);
+	void		  (*dumpArrowNode)(StringInfo str,
+								   struct ArrowNode *node);
 	void		  (*copyArrowNode)(struct ArrowNode *dest,
 								   const struct ArrowNode *source);
 };
 typedef struct ArrowNode		ArrowNode;
+
+#define ArrowNodeTag(PTR)		(((ArrowNode *)(PTR))->tag)
+#define ArrowNodeIs(PTR,NAME)	(ArrowNodeTag(PTR) == ArrowNodeTag__##NAME)
 
 /* Null */
 typedef ArrowNode	ArrowTypeNull;
@@ -502,5 +506,5 @@ typedef struct
 	ArrowMessage   *recordBatches;	/* array of ArrowRecordBatch */
 } ArrowFileInfo;
 
-#endif		/* __CUDACC__ */
+#endif		/* !__CUDACC__ */
 #endif		/* _ARROW_DEFS_H_ */

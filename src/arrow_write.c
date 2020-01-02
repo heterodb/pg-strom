@@ -6,7 +6,13 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License. See the LICENSE file.
  */
-#include "pg2arrow.h"
+#include "postgres.h"
+#include <assert.h>
+
+typedef struct SQLbuffer		StringInfoData;
+typedef struct SQLbuffer	   *StringInfo;
+
+#include "arrow_ipc.h"
 
 typedef struct
 {
