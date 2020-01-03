@@ -2675,46 +2675,6 @@ setup_buffer_composite_type(SQLattribute *attr,
  *
  * ----------------------------------------------------------------
  */
-#if 0
-static void
-__write_buffer_common(int fdesc, const void *buffer, size_t length)
-{
-	ssize_t		nbytes;
-	ssize_t		offset = 0;
-
-	while (offset < length)
-	{
-		nbytes = write(fdesc, (const char *)buffer + offset, length - offset);
-		if (nbytes < 0)
-		{
-			if (errno == EINTR)
-				continue;
-			Elog("failed on write(2): %m");
-		}
-		offset += nbytes;
-	}
-
-	if (length != ARROWALIGN(length))
-	{
-		ssize_t	gap = ARROWALIGN(length) - length;
-		char	zero[64];
-
-		offset = 0;
-		memset(zero, 0, sizeof(zero));
-		while (offset < gap)
-		{
-			nbytes = write(fdesc, (const char *)&zero + offset, gap - offset);
-			if (nbytes < 0)
-			{
-				if (errno == EINTR)
-					continue;
-				Elog("failed on write(2): %m");
-			}
-			offset += nbytes;
-		}
-	}
-}
-#endif
 static void
 write_buffer_inline_type(SQLattribute *attr, int fdesc)
 {
