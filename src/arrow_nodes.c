@@ -826,7 +826,7 @@ arrowTypeName(ArrowField *field)
 
 /* ------------------------------------------------
  *
- * Routines to read Apache Arrow files
+ * Routines to initialize Apache Arrow nodes
  *
  * ------------------------------------------------
  */
@@ -845,6 +845,68 @@ typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
 #define INIT_ARROW_NODE(PTR,NAME)		__INIT_ARROW_NODE(PTR,NAME,NAME)
 #define INIT_ARROW_TYPE_NODE(PTR,NAME)	__INIT_ARROW_NODE(PTR,Type##NAME,NAME)
 
+void
+__initArrowNode(ArrowNode *node, ArrowNodeTag tag)
+{
+#define CASE_ARROW_NODE(NAME)						\
+	case ArrowNodeTag__##NAME:						\
+		memset(node, 0, sizeof(Arrow##NAME));		\
+		INIT_ARROW_NODE(node,NAME);					\
+		break
+#define CASE_ARROW_TYPE_NODE(NAME)					\
+	case ArrowNodeTag__##NAME:						\
+		memset(node, 0, sizeof(ArrowType##NAME));	\
+		INIT_ARROW_TYPE_NODE(node,NAME);			\
+		break
+
+	switch (tag)
+	{
+		CASE_ARROW_TYPE_NODE(Null);
+		CASE_ARROW_TYPE_NODE(Int);
+		CASE_ARROW_TYPE_NODE(FloatingPoint);
+		CASE_ARROW_TYPE_NODE(Utf8);
+		CASE_ARROW_TYPE_NODE(Binary);
+		CASE_ARROW_TYPE_NODE(Bool);
+		CASE_ARROW_TYPE_NODE(Decimal);
+		CASE_ARROW_TYPE_NODE(Date);
+		CASE_ARROW_TYPE_NODE(Time);
+		CASE_ARROW_TYPE_NODE(Timestamp);
+		CASE_ARROW_TYPE_NODE(Interval);
+		CASE_ARROW_TYPE_NODE(List);
+		CASE_ARROW_TYPE_NODE(Struct);
+		CASE_ARROW_TYPE_NODE(Union);
+		CASE_ARROW_TYPE_NODE(FixedSizeBinary);
+		CASE_ARROW_TYPE_NODE(FixedSizeList);
+		CASE_ARROW_TYPE_NODE(Map);
+		CASE_ARROW_TYPE_NODE(Duration);
+		CASE_ARROW_TYPE_NODE(LargeBinary);
+		CASE_ARROW_TYPE_NODE(LargeUtf8);
+		CASE_ARROW_TYPE_NODE(LargeList);
+
+		CASE_ARROW_NODE(KeyValue);
+		CASE_ARROW_NODE(DictionaryEncoding);
+		CASE_ARROW_NODE(Field);
+		CASE_ARROW_NODE(FieldNode);
+		CASE_ARROW_NODE(Buffer);
+		CASE_ARROW_NODE(Schema);
+		CASE_ARROW_NODE(RecordBatch);
+		CASE_ARROW_NODE(DictionaryBatch);
+		CASE_ARROW_NODE(Message);
+		CASE_ARROW_NODE(Block);
+		CASE_ARROW_NODE(Footer);
+		default:
+			Elog("unknown ArrowNodeTag: %d", tag);
+	}
+#undef CASE_ARROW_NODE
+#undef CASE_ARROW_TYPE_NODE
+}
+
+/* ------------------------------------------------
+ *
+ * Routines to read Apache Arrow files
+ *
+ * ------------------------------------------------
+ */
 
 /* table/vtable of FlatBuffer */
 typedef struct
@@ -2613,6 +2675,7 @@ setup_buffer_composite_type(SQLattribute *attr,
  *
  * ----------------------------------------------------------------
  */
+#if 0
 static void
 __write_buffer_common(int fdesc, const void *buffer, size_t length)
 {
@@ -2651,19 +2714,15 @@ __write_buffer_common(int fdesc, const void *buffer, size_t length)
 		}
 	}
 }
-
+#endif
 static void
 write_buffer_inline_type(SQLattribute *attr, int fdesc)
 {
 	/* nullmap */
 	if (attr->nullcount > 0)
-		__write_buffer_common(fdesc,
-							  attr->nullmap.data,
-							  attr->nullmap.usage);
+		sql_buffer_write(fdesc, &attr->nullmap);
 	/* fixed length values */
-	__write_buffer_common(fdesc,
-						  attr->values.data,
-						  attr->values.usage);
+	sql_buffer_write(fdesc, &attr->values);
 }
 
 static void
@@ -2671,17 +2730,11 @@ write_buffer_varlena_type(SQLattribute *attr, int fdesc)
 {
 	/* nullmap */
 	if (attr->nullcount > 0)
-		__write_buffer_common(fdesc,
-							  attr->nullmap.data,
-							  attr->nullmap.usage);
+		sql_buffer_write(fdesc, &attr->nullmap);
 	/* index values */
-	__write_buffer_common(fdesc,
-						  attr->values.data,
-						  attr->values.usage);
+	sql_buffer_write(fdesc, &attr->values);
 	/* extra buffer */
-	__write_buffer_common(fdesc,
-						  attr->extra.data,
-						  attr->extra.usage);
+	sql_buffer_write(fdesc, &attr->extra);
 }
 
 static void
@@ -2691,13 +2744,9 @@ write_buffer_array_type(SQLattribute *attr, int fdesc)
 
 	/* nullmap */
 	if (attr->nullcount > 0)
-		__write_buffer_common(fdesc,
-							  attr->nullmap.data,
-							  attr->nullmap.usage);
+		sql_buffer_write(fdesc, &attr->nullmap);
 	/* offset values */
-	__write_buffer_common(fdesc,
-						  attr->values.data,
-						  attr->values.usage);
+	sql_buffer_write(fdesc, &attr->values);
 	/* element values */
 	element->write_buffer(element, fdesc);
 }
@@ -2710,9 +2759,7 @@ write_buffer_composite_type(SQLattribute *attr, int fdesc)
 
 	/* nullmap */
 	if (attr->nullcount > 0)
-		__write_buffer_common(fdesc,
-							  attr->nullmap.data,
-							  attr->nullmap.usage);
+		sql_buffer_write(fdesc, &attr->nullmap);
 	/* sub-types */
 	for (i=0; i < subtypes->nfields; i++)
 	{

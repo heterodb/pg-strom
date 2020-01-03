@@ -16,9 +16,7 @@ typedef struct SQLbuffer		StringInfoData;
 typedef struct SQLbuffer	   *StringInfo;
 
 #include "arrow_ipc.h"
-#include "arrow_nodes.c"
-
-
+//#include "arrow_nodes.c"
 
 /* static functions */
 #define CURSOR_NAME		"curr_pg2arrow"
@@ -26,8 +24,10 @@ static PGresult *pgsql_begin_query(PGconn *conn, const char *query);
 static PGresult *pgsql_next_result(PGconn *conn);
 static void      pgsql_end_query(PGconn *conn);
 static SQLtable *pgsql_create_composite_type(PGconn *conn,
+											 SQLtable *root,
 											 Oid comptype_relid);
 static SQLattribute *pgsql_create_array_element(PGconn *conn,
+												SQLtable *root,
 												Oid array_elemid,
 												int *p_numFieldNode,
 												int *p_numBuffers);
@@ -88,8 +88,8 @@ dumpArrowFile(const char *filename)
 {
 	ArrowFileInfo	af_info;
 	int				i, fdesc;
-	StringInfoData	buf1;
-	StringInfoData	buf2;
+	char		   *temp1;
+	char		   *temp2;
 
 	memset(&af_info, 0, sizeof(ArrowFileInfo));
 	fdesc = open(filename, O_RDONLY);
@@ -97,26 +97,26 @@ dumpArrowFile(const char *filename)
 		Elog("unable to open '%s': %m", filename);
 	readArrowFileDesc(fdesc, &af_info);
 
-	initStringInfo(&buf1);
-	initStringInfo(&buf2);
-	__dumpArrowNode(&buf1, &af_info.footer.node);
-	printf("[Footer]\n%s\n", buf1.data);
+	temp1 = dumpArrowNode((ArrowNode *)&af_info.footer);
+	printf("[Footer]\n%s\n", temp1);
+	pfree(temp1);
 
 	for (i=0; i < af_info.footer._num_dictionaries; i++)
 	{
-		resetStringInfo(&buf1);
-		resetStringInfo(&buf2);
-		__dumpArrowNode(&buf1, &af_info.footer.dictionaries[i].node);
-		__dumpArrowNode(&buf2, &af_info.dictionaries[i].node);
-		printf("[Dictionary Batch %d]\n%s\n%s\n", i, buf1.data, buf2.data);
+		temp1 = dumpArrowNode((ArrowNode *)&af_info.footer.dictionaries[i]);
+		temp2 = dumpArrowNode((ArrowNode *)&af_info.dictionaries[i]);
+		printf("[Dictionary Batch %d]\n%s\n%s\n", i, temp1, temp2);
+		pfree(temp1);
+		pfree(temp2);
 	}
+
 	for (i=0; i < af_info.footer._num_recordBatches; i++)
 	{
-		resetStringInfo(&buf1);
-		resetStringInfo(&buf2);
-		__dumpArrowNode(&buf1, &af_info.footer.recordBatches[i].node);
-		__dumpArrowNode(&buf2, &af_info.recordBatches[i].node);
-		printf("[Record Batch %d]\n%s\n%s\n", i, buf1.data, buf2.data);
+		temp1 = dumpArrowNode((ArrowNode *)&af_info.footer.recordBatches[i]);
+		temp2 = dumpArrowNode((ArrowNode *)&af_info.recordBatches[i]);
+		printf("[Record Batch %d]\n%s\n%s\n", i, temp1, temp2);
+		pfree(temp1);
+		pfree(temp2);
 	}
 	return 0;
 }
@@ -455,7 +455,7 @@ pg_strtochar(const char *v)
 }
 
 static SQLdictionary *
-pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
+pgsql_create_dictionary(PGconn *conn, SQLtable *root, Oid enum_typeid)
 {
 	SQLdictionary *dict;
 	PGresult   *res;
@@ -464,7 +464,7 @@ pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
 	int			nslots;
 	int			num_dicts = 0;
 
-	for (dict = pgsql_dictionary_list; dict != NULL; dict = dict->next)
+	for (dict = root->sql_dict_list; dict != NULL; dict = dict->next)
 	{
 		if (dict->enum_typeid == enum_typeid)
 			return dict;
@@ -515,15 +515,16 @@ pgsql_create_dictionary(PGconn *conn, Oid enum_typeid)
 		sql_buffer_append(&dict->values, &dict->extra.usage, sizeof(int32));
 	}
 	dict->nitems = nitems;
-	dict->next = pgsql_dictionary_list;
-	pgsql_dictionary_list = dict;
+	dict->next = root->sql_dict_list;
+	root->sql_dict_list = dict;
 	PQclear(res);
 
 	return dict;
 }
 
 static SQLdictionary *
-pgsql_duplicate_dictionary(SQLdictionary *orig, int dict_id)
+pgsql_duplicate_dictionary(SQLtable *root,
+						   SQLdictionary *orig, int dict_id)
 {
 	SQLdictionary  *dict;
 	int		i;
@@ -553,8 +554,8 @@ pgsql_duplicate_dictionary(SQLdictionary *orig, int dict_id)
 			dict->hslots[i] = hcopy;
 		}
 	}
-	dict->next = pgsql_dictionary_list;
-	pgsql_dictionary_list = dict;
+	dict->next = root->sql_dict_list;
+	root->sql_dict_list = dict;
 
 	return dict;
 }
@@ -564,6 +565,7 @@ pgsql_duplicate_dictionary(SQLdictionary *orig, int dict_id)
  */
 static void
 pgsql_setup_attribute(PGconn *conn,
+					  SQLtable *root,
 					  SQLattribute *attr,
 					  const char *attname,
 					  Oid atttypid,
@@ -602,7 +604,8 @@ pgsql_setup_attribute(PGconn *conn,
 	if (typtype == 'b')
 	{
 		if (array_elemid != InvalidOid)
-			attr->element = pgsql_create_array_element(conn, array_elemid,
+			attr->element = pgsql_create_array_element(conn, root,
+													   array_elemid,
 													   p_numFieldNodes,
 													   p_numBuffers);
 	}
@@ -612,7 +615,7 @@ pgsql_setup_attribute(PGconn *conn,
 		SQLtable   *subtypes;
 
 		assert(comp_typrelid != 0);
-		subtypes = pgsql_create_composite_type(conn, comp_typrelid);
+		subtypes = pgsql_create_composite_type(conn, root, comp_typrelid);
 		*p_numFieldNodes += subtypes->numFieldNodes;
 		*p_numBuffers += subtypes->numBuffers;
 
@@ -620,7 +623,7 @@ pgsql_setup_attribute(PGconn *conn,
 	}
 	else if (typtype == 'e')
 	{
-		attr->enumdict = pgsql_create_dictionary(conn, atttypid);
+		attr->enumdict = pgsql_create_dictionary(conn, root, atttypid);
 	}
 	else
 		Elog("unknown state pf typtype: %c", typtype);
@@ -634,7 +637,8 @@ pgsql_setup_attribute(PGconn *conn,
  * pgsql_create_composite_type
  */
 static SQLtable *
-pgsql_create_composite_type(PGconn *conn, Oid comptype_relid)
+pgsql_create_composite_type(PGconn *conn, SQLtable *root,
+							Oid comptype_relid)
 {
 	PGresult   *res;
 	SQLtable   *table;
@@ -678,6 +682,7 @@ pgsql_create_composite_type(PGconn *conn, Oid comptype_relid)
 		if (index < 1 || index > nfields)
 			Elog("attribute number is out of range");
 		pgsql_setup_attribute(conn,
+							  root,
 							  &table->attrs[index-1],
 							  attname,
 							  atooid(atttypid),
@@ -696,7 +701,8 @@ pgsql_create_composite_type(PGconn *conn, Oid comptype_relid)
 }
 
 static SQLattribute *
-pgsql_create_array_element(PGconn *conn, Oid array_elemid,
+pgsql_create_array_element(PGconn *conn, SQLtable *root,
+						   Oid array_elemid,
 						   int *p_numFieldNode,
 						   int *p_numBuffers)
 {
@@ -736,6 +742,7 @@ pgsql_create_array_element(PGconn *conn, Oid array_elemid,
 	typelem  = PQgetvalue(res, 0, 7);
 
 	pgsql_setup_attribute(conn,
+						  root,
 						  attr,
 						  typname,
 						  array_elemid,
@@ -804,6 +811,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res, size_t segment_sz)
 		nspname  = PQgetvalue(__res, 0, 6);
 		typname  = PQgetvalue(__res, 0, 7);
 		pgsql_setup_attribute(conn,
+							  table,
 							  &table->attrs[j],
                               attname,
 							  atttypid,
@@ -915,7 +923,8 @@ __arrow_type_is_compatible(SQLtable *root,
 		{
 			if (enumdict->dict_id == field->dictionary.id)
 				return 1;		/* nothing to do */
-			enumdict = pgsql_duplicate_dictionary(enumdict,
+			enumdict = pgsql_duplicate_dictionary(root,
+												  enumdict,
 												  field->dictionary.id);
 		}
 		else
@@ -988,78 +997,33 @@ initial_setup_append_file(SQLtable *table)
 }
 
 /*
- * pgsql_clear_attribute
- */
-static void
-pgsql_clear_attribute(SQLattribute *attr)
-{
-	attr->nitems = 0;
-	attr->nullcount = 0;
-	sql_buffer_clear(&attr->nullmap);
-	sql_buffer_clear(&attr->values);
-	sql_buffer_clear(&attr->extra);
-
-	if (attr->subtypes)
-	{
-		SQLtable   *subtypes = attr->subtypes;
-		int			j;
-
-		for (j=0; j < subtypes->nfields; j++)
-			pgsql_clear_attribute(&subtypes->attrs[j]);
-	}
-	if (attr->element)
-		pgsql_clear_attribute(attr->element);
-}
-
-/*
  * pgsql_writeout_buffer
  */
-void
+static void
 pgsql_writeout_buffer(SQLtable *table)
 {
-	off_t		currPos;
-	size_t		metaSize;
-	size_t		bodySize;
-	int			j, index;
-	ArrowBlock *b;
+	size_t		nitems = table->nitems;
 
-	/* write a new record batch */
-	currPos = lseek(table->fdesc, 0, SEEK_CUR);
-	if (currPos < 0)
-		Elog("unable to get current position of the file");
-	if (currPos != LONGALIGN(currPos))
-	{
-		uint64	zero = 0;
-		size_t	gap = LONGALIGN(currPos) - currPos;
+	if (nitems == 0)
+		return;
 
-		if (write(table->fdesc, &zero, gap) != gap)
-			Elog("unable to fill up alignment gap: %m");
-	}
-	writeArrowRecordBatch(table, &metaSize, &bodySize);
-
-	index = table->numRecordBatches++;
-	if (index == 0)
-		table->recordBatches = palloc(sizeof(ArrowBlock));
-	else
-		table->recordBatches = repalloc(table->recordBatches,
-										sizeof(ArrowBlock) * (index+1));
-	b = &table->recordBatches[index];
-	INIT_ARROW_NODE(b, Block);
-	b->offset = currPos;
-	b->metaDataLength = metaSize;
-	b->bodyLength = bodySize;
-
-	/* shows progress (optional) */
+	writeArrowRecordBatch(table);
 	if (shows_progress)
 	{
-		printf("RecordBatch %d: offset=%lu length=%lu (meta=%zu, body=%zu)\n",
-			   index, currPos, metaSize + bodySize, metaSize, bodySize);
-	}
+		ArrowBlock *block;
+		int		index = table->numRecordBatches - 1;
 
-	/* makes table/attributes empty again */
-	table->nitems = 0;
-	for (j=0; j < table->nfields; j++)
-		pgsql_clear_attribute(&table->attrs[j]);
+		assert(index >= 0);
+		block = &table->recordBatches[index];
+		printf("RecordBatch[%d]: "
+			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+			   index,
+			   block->offset,
+			   block->metaDataLength + block->bodyLength,
+			   block->metaDataLength,
+			   block->bodyLength,
+			   nitems);
+	}
 }
 
 /*
@@ -1171,284 +1135,6 @@ pgsql_dump_buffer(SQLtable *table)
 }
 
 /*
- * setupArrowFieldNode
- */
-static int
-setupArrowFieldNode(ArrowFieldNode *node, SQLattribute *attr)
-{
-	SQLtable   *subtypes = attr->subtypes;
-	SQLattribute *element = attr->element;
-	int			i, count = 1;
-
-	memset(node, 0, sizeof(ArrowFieldNode));
-	INIT_ARROW_NODE(node, FieldNode);
-	node->length = attr->nitems;
-	node->null_count = attr->nullcount;
-	/* array types */
-	if (element)
-		count += setupArrowFieldNode(node + count, element);
-	/* composite types */
-	if (subtypes)
-	{
-		for (i=0; i < subtypes->nfields; i++)
-			count += setupArrowFieldNode(node + count, &subtypes->attrs[i]);
-	}
-	return count;
-}
-
-void
-writeArrowRecordBatch(SQLtable *table,
-					  size_t *p_metaLength,
-					  size_t *p_bodyLength)
-{
-	ArrowMessage	message;
-	ArrowRecordBatch *rbatch;
-	ArrowFieldNode *nodes;
-	ArrowBuffer	   *buffers;
-	int32			i, j;
-	size_t			metaLength;
-	size_t			bodyLength = 0;
-
-	/* fill up [nodes] vector */
-	nodes = alloca(sizeof(ArrowFieldNode) * table->numFieldNodes);
-	for (i=0, j=0; i < table->nfields; i++)
-	{
-		SQLattribute   *attr = &table->attrs[i];
-		assert(table->nitems == attr->nitems);
-		j += setupArrowFieldNode(nodes + j, attr);
-	}
-	assert(j == table->numFieldNodes);
-
-	/* fill up [buffers] vector */
-	buffers = alloca(sizeof(ArrowBuffer) * table->numBuffers);
-	for (i=0, j=0; i < table->nfields; i++)
-	{
-		SQLattribute   *attr = &table->attrs[i];
-		j += attr->setup_buffer(attr, buffers+j, &bodyLength);
-	}
-	assert(j == table->numBuffers);
-
-	/* setup Message of Schema */
-	memset(&message, 0, sizeof(ArrowMessage));
-	INIT_ARROW_NODE(&message, Message);
-	message.version = ArrowMetadataVersion__V4;
-	message.bodyLength = bodyLength;
-
-	rbatch = &message.body.recordBatch;
-	INIT_ARROW_NODE(rbatch, RecordBatch);
-	rbatch->length = table->nitems;
-	rbatch->nodes = nodes;
-	rbatch->_num_nodes = table->numFieldNodes;
-	rbatch->buffers = buffers;
-	rbatch->_num_buffers = table->numBuffers;
-	/* serialization */
-	metaLength = writeFlatBufferMessage(table->fdesc, &message);
-	for (i=0; i < table->nfields; i++)
-	{
-		SQLattribute   *attr = &table->attrs[i];
-		attr->write_buffer(attr, table->fdesc);
-	}
-	*p_metaLength = metaLength;
-	*p_bodyLength = bodyLength;
-}
-
-static void
-setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
-							 SQLattribute *attr)
-{
-	INIT_ARROW_NODE(dict, DictionaryEncoding);
-	if (attr->enumdict)
-	{
-		ArrowTypeInt   *indexType = &dict->indexType;
-
-		dict->id = attr->enumdict->dict_id;
-		INIT_ARROW_TYPE_NODE(indexType, Int);
-		/* dictionary index must be Int32 */
-		indexType->bitWidth  = 32;
-		indexType->is_signed = true;
-		dict->isOrdered = false;
-	}
-}
-
-static void
-setupArrowField(ArrowField *field, SQLattribute *attr)
-{
-	memset(field, 0, sizeof(ArrowField));
-	INIT_ARROW_NODE(field, Field);
-	field->name = attr->attname;
-	field->_name_len = strlen(attr->attname);
-	field->nullable = true;
-	field->type = attr->arrow_type;
-	setupArrowDictionaryEncoding(&field->dictionary, attr);
-	/* array type */
-	if (attr->element)
-	{
-		field->children = palloc0(sizeof(ArrowField));
-		field->_num_children = 1;
-		setupArrowField(field->children, attr->element);
-	}
-	/* composite type */
-	if (attr->subtypes)
-	{
-		SQLtable   *sub = attr->subtypes;
-		int			i;
-
-		field->children = palloc0(sizeof(ArrowField) * sub->nfields);
-		field->_num_children = sub->nfields;
-		for (i=0; i < sub->nfields; i++)
-			setupArrowField(&field->children[i], &sub->attrs[i]);
-	}
-}
-
-static ssize_t
-writeArrowSchema(SQLtable *table)
-{
-	ArrowMessage	message;
-	ArrowSchema	   *schema;
-	int32			i;
-
-	/* setup Message of Schema */
-	memset(&message, 0, sizeof(ArrowMessage));
-	INIT_ARROW_NODE(&message, Message);
-	message.version = ArrowMetadataVersion__V4;
-	schema = &message.body.schema;
-	INIT_ARROW_NODE(schema, Schema);
-	schema->endianness = ArrowEndianness__Little;
-	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
-	schema->_num_fields = table->nfields;
-	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->attrs[i]);
-	/* serialization */
-	return writeFlatBufferMessage(table->fdesc, &message);
-}
-
-static void
-__writeArrowDictionaryBatch(int fdesc, ArrowBlock *block, SQLdictionary *dict)
-{
-	ArrowMessage	message;
-	ArrowDictionaryBatch *dbatch;
-	ArrowRecordBatch *rbatch;
-	ArrowFieldNode	nodes[1];
-	ArrowBuffer		buffers[3];
-	loff_t			currPos;
-	size_t			metaLength = 0;
-	size_t			bodyLength = 0;
-
-	memset(&message, 0, sizeof(ArrowMessage));
-
-	/* DictionaryBatch portion */
-	dbatch = &message.body.dictionaryBatch;
-	INIT_ARROW_NODE(dbatch, DictionaryBatch);
-	dbatch->id = dict->dict_id;
-	dbatch->isDelta = false;
-
-	/* ArrowFieldNode of RecordBatch */
-	INIT_ARROW_NODE(&nodes[0], FieldNode);
-	nodes[0].length = dict->nitems;
-	nodes[0].null_count = 0;
-
-	/* ArrowBuffer[0] of RecordBatch -- nullmap */
-	INIT_ARROW_NODE(&buffers[0], Buffer);
-	buffers[0].offset = bodyLength;
-	buffers[0].length = 0;
-
-	/* ArrowBuffer[1] of RecordBatch -- offset to extra buffer */
-	INIT_ARROW_NODE(&buffers[1], Buffer);
-	buffers[1].offset = bodyLength;
-	buffers[1].length = ARROWALIGN(dict->values.usage);
-	bodyLength += buffers[1].length;
-
-	/* ArrowBuffer[2] of RecordBatch -- extra buffer */
-	INIT_ARROW_NODE(&buffers[2], Buffer);
-	buffers[2].offset = bodyLength;
-	buffers[2].length = ARROWALIGN(dict->extra.usage);
-	bodyLength += buffers[2].length;
-
-	/* RecordBatch portion */
-	rbatch = &dbatch->data;
-	INIT_ARROW_NODE(rbatch, RecordBatch);
-	rbatch->length = dict->nitems;
-	rbatch->_num_nodes = 1;
-    rbatch->nodes = nodes;
-	rbatch->_num_buffers = 3;	/* empty nullmap + offset + extra buffer */
-	rbatch->buffers = buffers;
-
-	/* final wrap-up message */
-	INIT_ARROW_NODE(&message, Message);
-    message.version = ArrowMetadataVersion__V4;
-	message.bodyLength = bodyLength;
-
-	currPos = lseek(fdesc, 0, SEEK_CUR);
-	if (currPos < 0)
-		Elog("unable to get current position of the file");
-	metaLength = writeFlatBufferMessage(fdesc, &message);
-	__write_buffer_common(fdesc, dict->values.data, dict->values.usage);
-	__write_buffer_common(fdesc, dict->extra.data,  dict->extra.usage);
-
-	/* setup Block of Footer */
-	INIT_ARROW_NODE(block, Block);
-	block->offset = currPos;
-	block->metaDataLength = metaLength;
-	block->bodyLength = bodyLength;
-}
-
-static void
-writeArrowDictionaryBatches(SQLtable *table)
-{
-	SQLdictionary  *dict;
-	int				index, count;
-
-	if (!pgsql_dictionary_list)
-		return;
-
-	for (dict = pgsql_dictionary_list, count=0;
-		 dict != NULL;
-		 dict = dict->next, count++);
-	table->numDictionaries = count;
-	table->dictionaries = palloc0(sizeof(ArrowBlock) * count);
-
-	for (dict = pgsql_dictionary_list, index=0;
-		 dict != NULL;
-		 dict = dict->next, index++)
-	{
-		__writeArrowDictionaryBatch(table->fdesc,
-									table->dictionaries + index,
-									dict);
-	}
-}
-
-static ssize_t
-writeArrowFooter(SQLtable *table)
-{
-	ArrowFooter		footer;
-	ArrowSchema	   *schema;
-	int				i;
-
-	/* setup Footer */
-	memset(&footer, 0, sizeof(ArrowFooter));
-	INIT_ARROW_NODE(&footer, Footer);
-	footer.version = ArrowMetadataVersion__V4;
-	/* setup Schema of Footer */
-	schema = &footer.schema;
-	INIT_ARROW_NODE(schema, Schema);
-	schema->endianness = ArrowEndianness__Little;
-	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
-	schema->_num_fields = table->nfields;
-	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->attrs[i]);
-	/* [dictionaries] */
-	footer.dictionaries = table->dictionaries;
-	footer._num_dictionaries = table->numDictionaries;
-
-	/* [recordBatches] */
-	footer.recordBatches = table->recordBatches;
-	footer._num_recordBatches = table->numRecordBatches;
-
-	/* serialization */
-	return writeFlatBufferFooter(table->fdesc, &footer);
-}
-
-/*
  * Entrypoint of pg2arrow
  */
 int main(int argc, char * const argv[])
@@ -1518,8 +1204,7 @@ int main(int argc, char * const argv[])
 		res = pgsql_next_result(conn);
 	} while (res != NULL);
 	pgsql_end_query(conn);
-	if (table->nitems > 0)
-		pgsql_writeout_buffer(table);
+	pgsql_writeout_buffer(table);
 	nbytes = writeArrowFooter(table);
 
 	return 0;

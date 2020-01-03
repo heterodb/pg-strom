@@ -804,7 +804,7 @@ typedef struct
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } FBMessageFileImage;
 
-ssize_t
+static ssize_t
 writeFlatBufferMessage(int fdesc, ArrowMessage *message)
 {
 	FBTableBuf *payload = createArrowMessage(message);
@@ -812,6 +812,7 @@ writeFlatBufferMessage(int fdesc, ArrowMessage *message)
 	ssize_t		offset;
 	ssize_t		gap;
 	ssize_t		length;
+	ssize_t		nbytes;
 
 	assert(payload->length > 0);
 	offset = TYPEALIGN(payload->maxalign, payload->vtable.vlen);
@@ -825,8 +826,18 @@ writeFlatBufferMessage(int fdesc, ArrowMessage *message)
 	image->rootOffset = sizeof(int32) + offset;
 	memcpy(image->data + gap, &payload->vtable, payload->length);
 
-	if (write(fdesc, image, length) != length)
-		Elog("failed on write: %m");
+	offset = 0;
+	while (offset < length)
+	{
+		nbytes = write(fdesc, (char *)image + offset, length - offset);
+		if (nbytes < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			Elog("failed on write: %m");
+		}
+		offset += nbytes;
+	}
 	return length;
 }
 
@@ -845,7 +856,7 @@ typedef struct
 	char		signature[6];
 } FBFooterTailImage;
 
-ssize_t
+static ssize_t
 writeFlatBufferFooter(int fdesc, ArrowFooter *footer)
 {
 	FBTableBuf *payload = createArrowFooter(footer);
@@ -880,4 +891,340 @@ writeFlatBufferFooter(int fdesc, ArrowFooter *footer)
 	if (write(fdesc, image, length) != length)
 		Elog("failed on write: %m");
 	return length;
+}
+
+/*
+ * writeArrowSchema
+ */
+static void
+setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
+							 SQLattribute *attr)
+{
+	initArrowNode(dict, DictionaryEncoding);
+	if (attr->enumdict)
+	{
+		ArrowTypeInt   *indexType = &dict->indexType;
+
+		dict->id = attr->enumdict->dict_id;
+		/* dictionary index must be Int32 */
+		initArrowNode(indexType, Int);
+		indexType->bitWidth  = 32;
+		indexType->is_signed = true;
+		dict->isOrdered = false;
+	}
+}
+
+static void
+setupArrowField(ArrowField *field, SQLattribute *attr)
+{
+	initArrowNode(field, Field);
+	field->name = attr->attname;
+	field->_name_len = strlen(attr->attname);
+	field->nullable = true;
+	field->type = attr->arrow_type;
+	setupArrowDictionaryEncoding(&field->dictionary, attr);
+	/* array type */
+	if (attr->element)
+	{
+		field->children = palloc0(sizeof(ArrowField));
+		field->_num_children = 1;
+		setupArrowField(field->children, attr->element);
+	}
+	/* composite type */
+	if (attr->subtypes)
+	{
+		SQLtable   *sub = attr->subtypes;
+		int			i;
+
+		field->children = palloc0(sizeof(ArrowField) * sub->nfields);
+		field->_num_children = sub->nfields;
+		for (i=0; i < sub->nfields; i++)
+			setupArrowField(&field->children[i], &sub->attrs[i]);
+	}
+}
+
+ssize_t
+writeArrowSchema(SQLtable *table)
+{
+	ArrowMessage	message;
+	ArrowSchema	   *schema;
+	int32			i;
+
+	/* setup Message of Schema */
+	initArrowNode(&message, Message);
+	message.version = ArrowMetadataVersion__V4;
+	schema = &message.body.schema;
+	initArrowNode(schema, Schema);
+	schema->endianness = ArrowEndianness__Little;
+	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
+	schema->_num_fields = table->nfields;
+	for (i=0; i < table->nfields; i++)
+		setupArrowField(&schema->fields[i], &table->attrs[i]);
+	/* serialization */
+	return writeFlatBufferMessage(table->fdesc, &message);
+}
+
+
+/*
+ * writeArrowDictionaryBatches
+ */
+static ArrowBlock
+__writeArrowDictionaryBatch(int fdesc, SQLdictionary *dict)
+{
+	ArrowMessage	message;
+	ArrowDictionaryBatch *dbatch;
+	ArrowRecordBatch *rbatch;
+	ArrowFieldNode	fnodes[1];
+	ArrowBuffer		buffers[3];
+	ArrowBlock		block;
+	loff_t			currPos;
+	size_t			metaLength = 0;
+	size_t			bodyLength = 0;
+
+	initArrowNode(&message, Message);
+
+	/* DictionaryBatch portion */
+	dbatch = &message.body.dictionaryBatch;
+	initArrowNode(dbatch, DictionaryBatch);
+	dbatch->id = dict->dict_id;
+	dbatch->isDelta = false;
+
+	/* ArrowFieldNode of RecordBatch */
+	initArrowNode(&fnodes[0], FieldNode);
+	fnodes[0].length = dict->nitems;
+	fnodes[0].null_count = 0;
+
+	/* ArrowBuffer[0] of RecordBatch -- nullmap */
+	initArrowNode(&buffers[0], Buffer);
+	buffers[0].offset = bodyLength;
+	buffers[0].length = 0;
+
+	/* ArrowBuffer[1] of RecordBatch -- offset to extra buffer */
+	initArrowNode(&buffers[1], Buffer);
+	buffers[1].offset = bodyLength;
+	buffers[1].length = ARROWALIGN(dict->values.usage);
+	bodyLength += buffers[1].length;
+
+	/* ArrowBuffer[2] of RecordBatch -- extra buffer */
+	initArrowNode(&buffers[2], Buffer);
+	buffers[2].offset = bodyLength;
+	buffers[2].length = ARROWALIGN(dict->extra.usage);
+	bodyLength += buffers[2].length;
+
+	/* RecordBatch portion */
+	rbatch = &dbatch->data;
+	initArrowNode(rbatch, RecordBatch);
+	rbatch->length = dict->nitems;
+	rbatch->_num_nodes = 1;
+    rbatch->nodes = fnodes;
+	rbatch->_num_buffers = 3;	/* empty nullmap + offset + extra buffer */
+	rbatch->buffers = buffers;
+
+	/* final wrap-up message */
+    message.version = ArrowMetadataVersion__V4;
+	message.bodyLength = bodyLength;
+
+	currPos = lseek(fdesc, 0, SEEK_CUR);
+	if (currPos < 0)
+		Elog("unable to get current position of the file");
+	metaLength = writeFlatBufferMessage(fdesc, &message);
+	sql_buffer_write(fdesc, &dict->values);
+	sql_buffer_write(fdesc, &dict->extra);
+
+	/* setup Block of Footer */
+	initArrowNode(&block, Block);
+	block.offset = currPos;
+	block.metaDataLength = metaLength;
+	block.bodyLength = bodyLength;
+
+	return block;
+}
+
+void
+writeArrowDictionaryBatches(SQLtable *table)
+{
+	SQLdictionary  *dict;
+	int				index = 0;
+
+	for (dict = table->sql_dict_list, index=0;
+		 dict != NULL;
+		 dict = dict->next, index++)
+	{
+		if (!table->dictionaries)
+			table->dictionaries = palloc0(sizeof(ArrowBlock) * 32);
+		else
+			table->dictionaries = repalloc(table->dictionaries,
+										   sizeof(ArrowBlock) * index);
+		table->dictionaries[index]
+			= __writeArrowDictionaryBatch(table->fdesc, dict);
+	}
+	table->numDictionaries = index;
+}
+
+/*
+ * reset_sql_attribute
+ */
+static void
+reset_sql_attribute(SQLattribute *attr)
+{
+	attr->nitems = 0;
+	attr->nullcount = 0;
+	sql_buffer_clear(&attr->nullmap);
+	sql_buffer_clear(&attr->values);
+	sql_buffer_clear(&attr->extra);
+
+	if (attr->subtypes)
+	{
+		SQLtable   *subtypes = attr->subtypes;
+		int			j;
+
+		for (j=0; j < subtypes->nfields; j++)
+			reset_sql_attribute(&subtypes->attrs[j]);
+	}
+	if (attr->element)
+		reset_sql_attribute(attr->element);
+}
+
+/*
+ * setupArrowFieldNode
+ */
+static int
+setupArrowFieldNode(ArrowFieldNode *fnode, SQLattribute *attr)
+{
+	SQLtable   *subtypes = attr->subtypes;
+	SQLattribute *element = attr->element;
+	int			i, count = 1;
+
+	initArrowNode(fnode, FieldNode);
+	fnode->length = attr->nitems;
+	fnode->null_count = attr->nullcount;
+	/* array types */
+	if (element)
+		count += setupArrowFieldNode(fnode + count, element);
+	/* composite types */
+	if (subtypes)
+	{
+		for (i=0; i < subtypes->nfields; i++)
+			count += setupArrowFieldNode(fnode + count, &subtypes->attrs[i]);
+	}
+	return count;
+}
+
+void
+writeArrowRecordBatch(SQLtable *table)
+{
+	ArrowMessage	message;
+	ArrowRecordBatch *rbatch;
+	ArrowFieldNode *nodes;
+	ArrowBuffer	   *buffers;
+	ArrowBlock	   *block;
+	int32			i, j;
+	int				index;
+	off_t			currPos;
+	size_t			metaLength;
+	size_t			bodyLength = 0;
+
+	/* adjust current file position */
+	currPos = lseek(table->fdesc, 0, SEEK_CUR);
+	if (currPos < 0)
+		Elog("unable to get current position of the file");
+	if (currPos != LONGALIGN(currPos))
+	{
+		uint64  zero = 0;
+		size_t  gap = LONGALIGN(currPos) - currPos;
+
+		if (write(table->fdesc, &zero, gap) != gap)
+			Elog("unable to fill up alignment gap: %m");
+	}
+
+	/* fill up [nodes] vector */
+	nodes = alloca(sizeof(ArrowFieldNode) * table->numFieldNodes);
+	for (i=0, j=0; i < table->nfields; i++)
+	{
+		SQLattribute   *attr = &table->attrs[i];
+		assert(table->nitems == attr->nitems);
+		j += setupArrowFieldNode(nodes + j, attr);
+	}
+	assert(j == table->numFieldNodes);
+
+	/* fill up [buffers] vector */
+	buffers = alloca(sizeof(ArrowBuffer) * table->numBuffers);
+	for (i=0, j=0; i < table->nfields; i++)
+	{
+		SQLattribute   *attr = &table->attrs[i];
+		j += attr->setup_buffer(attr, buffers+j, &bodyLength);
+	}
+	assert(j == table->numBuffers);
+
+	/* setup Message of Schema */
+	initArrowNode(&message, Message);
+	message.version = ArrowMetadataVersion__V4;
+	message.bodyLength = bodyLength;
+
+	rbatch = &message.body.recordBatch;
+	initArrowNode(rbatch, RecordBatch);
+	rbatch->length = table->nitems;
+	rbatch->nodes = nodes;
+	rbatch->_num_nodes = table->numFieldNodes;
+	rbatch->buffers = buffers;
+	rbatch->_num_buffers = table->numBuffers;
+	/* serialization */
+	metaLength = writeFlatBufferMessage(table->fdesc, &message);
+	for (i=0; i < table->nfields; i++)
+	{
+		SQLattribute   *attr = &table->attrs[i];
+		attr->write_buffer(attr, table->fdesc);
+	}
+
+	/* save the offset/length at ArrowBlock */
+	index = table->numRecordBatches++;
+	if (index == 0)
+		table->recordBatches = palloc(sizeof(ArrowBlock) * 32);
+	else
+		table->recordBatches = repalloc(table->recordBatches,
+										sizeof(ArrowBlock) * (index+1));
+	block = &table->recordBatches[index];
+	initArrowNode(block, Block);
+	block->offset = currPos;
+	block->metaDataLength = metaLength;
+	block->bodyLength = bodyLength;
+
+	/* makes table/attributes empty again */
+	table->nitems = 0;
+	for (j=0; j < table->nfields; j++)
+		reset_sql_attribute(&table->attrs[j]);
+}
+
+/*
+ * writeArrowFooter
+ */
+ssize_t
+writeArrowFooter(SQLtable *table)
+{
+	ArrowFooter		footer;
+	ArrowSchema	   *schema;
+	int				i;
+
+	/* setup Footer */
+	initArrowNode(&footer, Footer);
+	footer.version = ArrowMetadataVersion__V4;
+
+	/* setup Schema of Footer */
+	schema = &footer.schema;
+	initArrowNode(schema, Schema);
+	schema->endianness = ArrowEndianness__Little;
+	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
+	schema->_num_fields = table->nfields;
+	for (i=0; i < table->nfields; i++)
+		setupArrowField(&schema->fields[i], &table->attrs[i]);
+	/* [dictionaries] */
+	footer.dictionaries = table->dictionaries;
+	footer._num_dictionaries = table->numDictionaries;
+
+	/* [recordBatches] */
+	footer.recordBatches = table->recordBatches;
+	footer._num_recordBatches = table->numRecordBatches;
+
+	/* serialization */
+	return writeFlatBufferFooter(table->fdesc, &footer);
 }

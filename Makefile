@@ -79,9 +79,9 @@ GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
 PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/pg2arrow.c \
+                  $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
                   $(STROM_BUILD_ROOT)/src/arrow_write.c
 PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
-                  $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
                   $(STROM_BUILD_ROOT)/src/arrow_defs.h \
                   $(STROM_BUILD_ROOT)/src/arrow_ipc.h
 PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
