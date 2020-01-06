@@ -931,15 +931,14 @@ setupArrowField(ArrowField *field, SQLattribute *attr)
 		setupArrowField(field->children, attr->element);
 	}
 	/* composite type */
-	if (attr->subtypes)
+	if (attr->subfields)
 	{
-		SQLtable   *sub = attr->subtypes;
-		int			i;
+		int		j;
 
-		field->children = palloc0(sizeof(ArrowField) * sub->nfields);
-		field->_num_children = sub->nfields;
-		for (i=0; i < sub->nfields; i++)
-			setupArrowField(&field->children[i], &sub->attrs[i]);
+		field->children = palloc0(sizeof(ArrowField) * attr->nfields);
+		field->_num_children = attr->nfields;
+		for (j=0; j < attr->nfields; j++)
+			setupArrowField(&field->children[j], &attr->subfields[j]);
 	}
 }
 
@@ -1073,13 +1072,12 @@ reset_sql_attribute(SQLattribute *attr)
 	sql_buffer_clear(&attr->values);
 	sql_buffer_clear(&attr->extra);
 
-	if (attr->subtypes)
+	if (attr->subfields)
 	{
-		SQLtable   *subtypes = attr->subtypes;
-		int			j;
+		int		j;
 
-		for (j=0; j < subtypes->nfields; j++)
-			reset_sql_attribute(&subtypes->attrs[j]);
+		for (j=0; j < attr->nfields; j++)
+			reset_sql_attribute(&attr->subfields[j]);
 	}
 	if (attr->element)
 		reset_sql_attribute(attr->element);
@@ -1091,9 +1089,8 @@ reset_sql_attribute(SQLattribute *attr)
 static int
 setupArrowFieldNode(ArrowFieldNode *fnode, SQLattribute *attr)
 {
-	SQLtable   *subtypes = attr->subtypes;
 	SQLattribute *element = attr->element;
-	int			i, count = 1;
+	int			j, count = 1;
 
 	initArrowNode(fnode, FieldNode);
 	fnode->length = attr->nitems;
@@ -1102,10 +1099,10 @@ setupArrowFieldNode(ArrowFieldNode *fnode, SQLattribute *attr)
 	if (element)
 		count += setupArrowFieldNode(fnode + count, element);
 	/* composite types */
-	if (subtypes)
+	if (attr->subfields)
 	{
-		for (i=0; i < subtypes->nfields; i++)
-			count += setupArrowFieldNode(fnode + count, &subtypes->attrs[i]);
+		for (j=0; j < attr->nfields; j++)
+			count += setupArrowFieldNode(fnode + count, &attr->subfields[j]);
 	}
 	return count;
 }

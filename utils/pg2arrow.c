@@ -23,14 +23,18 @@ typedef struct SQLbuffer	   *StringInfo;
 static PGresult *pgsql_begin_query(PGconn *conn, const char *query);
 static PGresult *pgsql_next_result(PGconn *conn);
 static void      pgsql_end_query(PGconn *conn);
-static SQLtable *pgsql_create_composite_type(PGconn *conn,
-											 SQLtable *root,
-											 Oid comptype_relid);
-static SQLattribute *pgsql_create_array_element(PGconn *conn,
-												SQLtable *root,
-												Oid array_elemid,
-												int *p_numFieldNode,
-												int *p_numBuffers);
+static void      pgsql_setup_composite_type(PGconn *conn,
+											SQLtable *root,
+											SQLattribute *attr,
+											Oid comptype_relid,
+											int *p_numFieldNodes,
+											int *p_numBuffers);
+static void      pgsql_setup_array_element(PGconn *conn,
+										   SQLtable *root,
+										   SQLattribute *attr,
+										   Oid array_elemid,
+										   int *p_numFieldNode,
+										   int *p_numBuffers);
 /* command options */
 static char	   *sql_command = NULL;
 static char	   *output_filename = NULL;
@@ -604,13 +608,18 @@ pgsql_setup_attribute(PGconn *conn,
 	if (typtype == 'b')
 	{
 		if (array_elemid != InvalidOid)
-			attr->element = pgsql_create_array_element(conn, root,
-													   array_elemid,
-													   p_numFieldNodes,
-													   p_numBuffers);
+			pgsql_setup_array_element(conn, root, attr,
+									  array_elemid,
+									  p_numFieldNodes,
+									  p_numBuffers);
 	}
 	else if (typtype == 'c')
 	{
+		pgsql_setup_composite_type(conn, root, attr,
+								   comp_typrelid,
+								   p_numFieldNodes,
+								   p_numBuffers);
+#if 0
 		/* composite data type */
 		SQLtable   *subtypes;
 
@@ -620,6 +629,7 @@ pgsql_setup_attribute(PGconn *conn,
 		*p_numBuffers += subtypes->numBuffers;
 
 		attr->subtypes = subtypes;
+#endif
 	}
 	else if (typtype == 'e')
 	{
@@ -634,14 +644,18 @@ pgsql_setup_attribute(PGconn *conn,
 }
 
 /*
- * pgsql_create_composite_type
+ * pgsql_setup_composite_type
  */
-static SQLtable *
-pgsql_create_composite_type(PGconn *conn, SQLtable *root,
-							Oid comptype_relid)
+static void
+pgsql_setup_composite_type(PGconn *conn,
+						   SQLtable *root,
+						   SQLattribute *attr,
+						   Oid comptype_relid,
+						   int *p_numFieldNodes,
+						   int *p_numBuffers)						   
 {
 	PGresult   *res;
-	SQLtable   *table;
+	SQLattribute *subfields;
 	char		query[4096];
 	int			j, nfields;
 
@@ -661,8 +675,7 @@ pgsql_create_composite_type(PGconn *conn, SQLtable *root,
 			 PQresultErrorMessage(res));
 
 	nfields = PQntuples(res);
-	table = palloc0(offsetof(SQLtable, attrs[nfields]));
-	table->nfields = nfields;
+	subfields = palloc0(sizeof(SQLattribute) * nfields);
 	for (j=0; j < nfields; j++)
 	{
 		const char *attname   = PQgetvalue(res, j, 0);
@@ -683,7 +696,7 @@ pgsql_create_composite_type(PGconn *conn, SQLtable *root,
 			Elog("attribute number is out of range");
 		pgsql_setup_attribute(conn,
 							  root,
-							  &table->attrs[index-1],
+							  &subfields[index-1],
 							  attname,
 							  atooid(atttypid),
 							  atoi(atttypmod),
@@ -694,19 +707,22 @@ pgsql_create_composite_type(PGconn *conn, SQLtable *root,
 							  atooid(typrelid),
 							  atooid(typelem),
 							  nspname, typname,
-							  &table->numFieldNodes,
-							  &table->numBuffers);
+							  p_numFieldNodes,
+							  p_numBuffers);
 	}
-	return table;
+	attr->nfields = nfields;
+	attr->subfields = subfields;
 }
 
-static SQLattribute *
-pgsql_create_array_element(PGconn *conn, SQLtable *root,
-						   Oid array_elemid,
-						   int *p_numFieldNode,
-						   int *p_numBuffers)
+static void
+pgsql_setup_array_element(PGconn *conn,
+						  SQLtable *root,
+						  SQLattribute *attr,
+						  Oid array_elemid,
+						  int *p_numFieldNode,
+						  int *p_numBuffers)
 {
-	SQLattribute   *attr = palloc0(sizeof(SQLattribute));
+	SQLattribute   *element = palloc0(sizeof(SQLattribute));
 	PGresult	   *res;
 	char			query[4096];
 	const char     *nspname;
@@ -743,7 +759,7 @@ pgsql_create_array_element(PGconn *conn, SQLtable *root,
 
 	pgsql_setup_attribute(conn,
 						  root,
-						  attr,
+						  element,
 						  typname,
 						  array_elemid,
 						  -1,
@@ -757,7 +773,7 @@ pgsql_create_array_element(PGconn *conn, SQLtable *root,
 						  typname,
 						  p_numFieldNode,
 						  p_numBuffers);
-	return attr;
+	attr->element = element;
 }
 
 /*
@@ -892,19 +908,17 @@ __arrow_type_is_compatible(SQLtable *root,
 			!__arrow_type_is_compatible(root, attr->element, field->children))
 			return 0;
 	}
-	else if (attr->subtypes)
+	else if (attr->subfields)
 	{
 		/* composite type */
-		SQLtable   *subtypes = attr->subtypes;
-
 		assert(sql_type->node.tag == ArrowNodeTag__Struct);
-		if (subtypes->nfields != field->_num_children)
+		if (attr->nfields != field->_num_children)
 			return 0;
-		for (j=0; j < subtypes->nfields; j++)
+		for (j=0; j < attr->nfields; j++)
 		{
 			if (!__arrow_type_is_compatible(root,
-											subtypes->attrs + j,
-											field->children + j))
+											&attr->subfields[j],
+											&field->children[j]))
 				return 0;
 		}
 	}
@@ -1102,13 +1116,12 @@ pgsql_dump_attribute(SQLattribute *attr, const char *label, int indent)
 	}
 	else if (attr->typtype == 'c')
 	{
-		SQLtable   *subtypes = attr->subtypes;
 		char		label[64];
 
-		for (j=0; j < subtypes->nfields; j++)
+		for (j=0; j < attr->nfields; j++)
 		{
-			snprintf(label, sizeof(label), "subtype[%d]", j);
-			pgsql_dump_attribute(&subtypes->attrs[j], label, indent+2);
+			snprintf(label, sizeof(label), "subfields[%d]", j);
+			pgsql_dump_attribute(&attr->subfields[j], label, indent+2);
 		}
 	}
 }

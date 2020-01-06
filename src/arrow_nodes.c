@@ -2502,12 +2502,6 @@ put_array_value(SQLattribute *attr,
 /*
  * Arrow::Struct
  */
-static inline void
-__put_composite_value_libpq_binary(SQLattribute *attr,
-								   const char *addr, int sz)
-{
-}
-
 #if 0
 static inline void
 __put_composite_value_native(SQLattribute *attr,
@@ -2559,12 +2553,13 @@ __put_composite_value_native(SQLattribute *attr,
 }
 #endif
 
+/*
+ * Arrow::Struct - also see record_send()
+ */
 static void
 put_composite_value(SQLattribute *attr,
 					const char *addr, int sz)
 {
-	/* see record_send() */
-	SQLtable   *subtypes = attr->subtypes;
 	size_t		row_index = attr->nitems++;
 	int			j;
 
@@ -2573,9 +2568,9 @@ put_composite_value(SQLattribute *attr,
 		attr->nullcount++;
 		sql_buffer_clrbit(&attr->nullmap, row_index);
 		/* NULL for all the subtypes */
-		for (j=0; j < subtypes->nfields; j++)
+		for (j=0; j < attr->nfields; j++)
 		{
-			SQLattribute *subattr = &subtypes->attrs[j];
+			SQLattribute *subattr = &attr->subfields[j];
 			subattr->put_value(subattr, NULL, 0);
 		}
 	}
@@ -2589,9 +2584,9 @@ put_composite_value(SQLattribute *attr,
 			Elog("binary composite record corruption");
 		nvalids = __ntoh32(*((const int *)pos));
 		pos += sizeof(int);
-		for (j=0; j < subtypes->nfields; j++)
+		for (j=0; j < attr->nfields; j++)
 		{
-			SQLattribute *subattr = &subtypes->attrs[j];
+			SQLattribute *subattr = &attr->subfields[j];
 			Oid		atttypid;
 			int		attlen;
 
@@ -2709,15 +2704,14 @@ buffer_usage_array_type(SQLattribute *attr)
 static size_t
 buffer_usage_composite_type(SQLattribute *attr)
 {
-	SQLtable   *subtypes = attr->subtypes;
 	size_t		usage = 0;
 	int			j;
 
 	if (attr->nullcount > 0)
 		usage += ARROWALIGN(attr->nullmap.usage);
-	for (j=0; j < subtypes->nfields; j++)
+	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute *subattr = &subtypes->attrs[j];
+		SQLattribute *subattr = &attr->subfields[j];
 		usage += subattr->buffer_usage(subattr);
 	}
 	return usage;
@@ -2831,8 +2825,7 @@ static int
 setup_buffer_composite_type(SQLattribute *attr,
 							ArrowBuffer *node, size_t *p_offset)
 {
-	SQLtable   *subtypes = attr->subtypes;
-	int			i, count = 1;
+	int			j, count = 1;
 
 	/* nullmap */
 	if (attr->nullcount == 0)
@@ -2841,9 +2834,9 @@ setup_buffer_composite_type(SQLattribute *attr,
 		*p_offset += setup_arrow_buffer(node, *p_offset,
 										attr->nullmap.usage);
 	/* walk down the sub-types */
-	for (i=0; i < subtypes->nfields; i++)
+	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute   *subattr = &subtypes->attrs[i];
+		SQLattribute   *subattr = &attr->subfields[j];
 
 		count += subattr->setup_buffer(subattr, node+count, p_offset);
 	}
@@ -2895,16 +2888,15 @@ write_buffer_array_type(SQLattribute *attr, int fdesc)
 static void
 write_buffer_composite_type(SQLattribute *attr, int fdesc)
 {
-	SQLtable   *subtypes = attr->subtypes;
-	int			i;
+	int			j;
 
 	/* nullmap */
 	if (attr->nullcount > 0)
 		sql_buffer_write(fdesc, &attr->nullmap);
 	/* sub-types */
-	for (i=0; i < subtypes->nfields; i++)
+	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute   *subattr = &subtypes->attrs[i];
+		SQLattribute   *subattr = &attr->subfields[j];
 
 		subattr->write_buffer(subattr, fdesc);
 	}
@@ -3151,7 +3143,7 @@ assignArrowTypeList(SQLattribute *attr, int *p_numBuffers)
 static void
 assignArrowTypeStruct(SQLattribute *attr, int *p_numBuffers)
 {
-	assert(attr->subtypes != NULL);
+	assert(attr->subfields != NULL);
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Struct);
 	attr->arrow_typename	= "Struct";
 	attr->put_value			= put_composite_value;
@@ -3182,7 +3174,7 @@ void
 assignArrowType(SQLattribute *attr, int *p_numBuffers)
 {
 	memset(&attr->arrow_type, 0, sizeof(ArrowType));
-	if (attr->subtypes)
+	if (attr->subfields)
 	{
 		/* composite type */
 		assignArrowTypeStruct(attr, p_numBuffers);

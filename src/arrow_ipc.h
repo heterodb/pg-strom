@@ -49,8 +49,9 @@ struct SQLattribute
 	short		attlen;
 	bool		attbyval;
 	uint8		attalign;		/* 1, 2, 4 or 8 */
-	SQLtable   *subtypes;		/* valid, if composite type */
 	SQLattribute *element;		/* valid, if array type */
+	int			nfields;		/* # of sub-fields of composite type */
+	SQLattribute *subfields;	/* valid, if composite type */
 	SQLdictionary *enumdict;	/* valid, if enum type */
 	const char *typnamespace;	/* name of pg_type.typnamespace */
 	const char *typname;		/* pg_type.typname */
