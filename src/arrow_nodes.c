@@ -18,11 +18,20 @@
  */
 #ifndef __PG2ARROW__
 #include "pg_strom.h"
+#define __ntoh16(x)			(x)
+#define __ntoh32(x)			(x)
+#define __ntoh64(x)			(x)
 #else
 #include "postgres.h"
+#include "port/pg_bswap.h"
 #include "utils/date.h"
+#include "access/htup_details.h"
+#include "utils/array.h"
 typedef struct SQLbuffer	StringInfoData;
 typedef struct SQLbuffer   *StringInfo;
+#define __ntoh16(x)			pg_ntoh16(x)
+#define __ntoh32(x)			pg_ntoh32(x)
+#define __ntoh64(x)			pg_ntoh64(x)
 #endif
 #include "arrow_ipc.h"
 
@@ -1692,30 +1701,12 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 	munmap(mmap_head, mmap_sz);
 }
 
-
-
-
 /* ----------------------------------------------------------------
  *
  * put_value handler for each data types (optional)
  *
  * ----------------------------------------------------------------
  */
-static inline uint64
-ntohll(uint64 __val)
-{
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-	uint32		h, l;
-
-	l = ntohl(__val & 0xffffffffU);
-	h = ntohl((__val >> 32) & 0xffffffffU);
-
-	return ((uint64)l << 32) | ((uint64)h);
-#else
-	return __val;
-#endif
-}
-
 static void
 put_bool_value(SQLattribute *attr, const char *addr, int sz)
 {
@@ -1747,6 +1738,9 @@ put_inline_null_value(SQLattribute *attr, size_t row_index, int sz)
 	sql_buffer_append_zero(&attr->values, sz);
 }
 
+/*
+ * IntXX/UintXX
+ */
 static void
 put_int8_value(SQLattribute *attr, const char *addr, int sz)
 {
@@ -1779,11 +1773,9 @@ put_int16_value(SQLattribute *attr, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint16));
-		value = ntohs(*((const uint16 *)addr));
-
+		value = __ntoh16(*((const uint16 *)addr));
 		if (!attr->arrow_type.Int.is_signed && value > INT16_MAX)
 			Elog("Uint16 cannot store negative values");
-
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
 	}
@@ -1800,11 +1792,9 @@ put_int32_value(SQLattribute *attr, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint32));
-		value = ntohl(*((const uint32 *)addr));
-
+		value = __ntoh32(*((const uint32 *)addr));
 		if (!attr->arrow_type.Int.is_signed && value > INT32_MAX)
 			Elog("Uint32 cannot store negative values");
-
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
 	}
@@ -1815,16 +1805,13 @@ put_int64_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint64		value;
-	uint32		h, l;
 
 	if (!addr)
 		put_inline_null_value(attr, row_index, sizeof(uint64));
 	else
 	{
-		h = ntohl(*((const uint32 *)(addr)));
-		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
-		value = (uint64)h << 32 | (uint64)l;
-
+		assert(sz == sizeof(uint64));
+		value = __ntoh64(*((const uint64 *)addr));
 		if (!attr->arrow_type.Int.is_signed && value > INT64_MAX)
 			Elog("Uint64 cannot store negative values");
 		sql_buffer_setbit(&attr->nullmap, row_index);
@@ -1832,6 +1819,9 @@ put_int64_value(SQLattribute *attr, const char *addr, int sz)
 	}
 }
 
+/*
+ * FloatingPointXX
+ */
 static void
 put_float16_value(SQLattribute *attr, const char *addr, int sz)
 {
@@ -1843,7 +1833,7 @@ put_float16_value(SQLattribute *attr, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint16));
-		value = ntohs(*((const uint16 *)addr));
+		value = __ntoh16(*((const uint16 *)addr));
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
 	}
@@ -1860,7 +1850,7 @@ put_float32_value(SQLattribute *attr, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint32));
-		value = ntohl(*((const uint32 *)addr));
+		value = __ntoh32(*((const uint32 *)addr));
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
 	}
@@ -1871,23 +1861,24 @@ put_float64_value(SQLattribute *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint64		value;
-	uint32		h, l;
 
 	if (!addr)
 		put_inline_null_value(attr, row_index, sizeof(uint64));
 	else
 	{
 		assert(sz == sizeof(uint64));
-		h = ntohl(*((const uint32 *)(addr)));
-		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
-		value = (uint64)h << 32 | (uint64)l;
+		value = __ntoh64(*((const uint64 *)addr));
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sz);
 	}
 }
 
+/*
+ * Decimal
+ */
 #ifdef PG_INT128_TYPE
 /* parameters of Numeric type */
+#define NUMERIC_DSCALE_MASK	0x3FFF
 #define NUMERIC_SIGN_MASK	0xC000
 #define NUMERIC_POS         0x0000
 #define NUMERIC_NEG         0x4000
@@ -1899,10 +1890,70 @@ put_float64_value(SQLattribute *attr, const char *addr, int sz)
 #define MUL_GUARD_DIGITS    2	/* these are measured in NBASE digits */
 #define DIV_GUARD_DIGITS	4
 typedef int16				NumericDigit;
+typedef struct NumericVar
+{
+	int			ndigits;	/* # of digits in digits[] - can be 0! */
+	int			weight;		/* weight of first digit */
+	int			sign;		/* NUMERIC_POS, NUMERIC_NEG, or NUMERIC_NAN */
+	int			dscale;		/* display scale */
+	NumericDigit *digits;	/* base-NBASE digits */
+} NumericVar;
+
+#ifndef __PG2ARROW__
+#define NUMERIC_SHORT_SIGN_MASK			0x2000
+#define NUMERIC_SHORT_DSCALE_MASK		0x1F80
+#define NUMERIC_SHORT_DSCALE_SHIFT		7
+#define NUMERIC_SHORT_WEIGHT_SIGN_MASK	0x0040
+#define NUMERIC_SHORT_WEIGHT_MASK		0x003F
+
+static void
+init_var_from_num(NumericVar *nv, const char *addr, int sz)
+{
+	uint16		n_header = *((uint16 *)addr);
+
+	/* NUMERIC_HEADER_IS_SHORT */
+	if ((n_header & 0x8000) != 0)
+	{
+		/* short format */
+		const struct {
+			uint16	n_header;
+			NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];
+		}  *n_short = (const void *)addr;
+		size_t		hoff = ((uintptr_t)n_short->n_data - (uintptr_t)n_short);
+
+		nv->ndigits = (sz - hoff) / sizeof(NumericDigit);
+		nv->weight = (n_short->n_header & NUMERIC_SHORT_WEIGHT_MASK);
+		if ((n_short->n_header & NUMERIC_SHORT_WEIGHT_SIGN_MASK) != 0)
+			nv->weight |= NUMERIC_SHORT_WEIGHT_MASK;	/* negative value */
+		nv->sign = ((n_short->n_header & NUMERIC_SHORT_SIGN_MASK) != 0
+					? NUMERIC_NEG
+					: NUMERIC_POS);
+		nv->dscale = (n_short->n_header & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT;
+		nv->digits = (NumericDigit *)n_short->n_data;
+	}
+	else
+	{
+		/* long format */
+		const struct {
+			uint16      n_sign_dscale;  /* Sign + display scale */
+			int16       n_weight;       /* Weight of 1st digit  */
+			NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
+		}  *n_long = (const void *)addr;
+		size_t		hoff = ((uintptr_t)n_long->n_data - (uintptr_t)n_long);
+
+		assert(sz >= hoff);
+		nv->ndigits = (sz - hoff) / sizeof(NumericDigit);
+		nv->weight = n_long->n_weight;
+		nv->sign   = (n_long->n_sign_dscale & NUMERIC_SIGN_MASK);
+		nv->dscale = (n_long->n_sign_dscale & NUMERIC_DSCALE_MASK);
+		nv->digits = (NumericDigit *)n_long->n_data;
+	}
+}
+#endif	/* !__PG2ARROW__ */
 
 static void
 put_decimal_value(SQLattribute *attr,
-				  const char *addr, int sz)
+			const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 
@@ -1910,62 +1961,70 @@ put_decimal_value(SQLattribute *attr,
 		put_inline_null_value(attr, row_index, sizeof(int128));
 	else
 	{
+		NumericVar		nv;
+		int				scale = attr->arrow_type.Decimal.scale;
+		int128			value = 0;
+		int				d, dig;
+#ifdef __PG2ARROW__
 		struct {
-			int16		ndigits;
-			int16		weight;		/* weight of first digit */
-			int16		sign;		/* NUMERIC_(POS|NEG|NAN) */
-			int16		dscale;		/* display scale */
+			uint16		ndigits;	/* number of digits */
+			uint16		weight;		/* weight of first digit */
+			uint16		sign;		/* NUMERIC_(POS|NEG|NAN) */
+			uint16		dscale;		/* display scale */
 			NumericDigit digits[FLEXIBLE_ARRAY_MEMBER];
-		}	   *rawdata = (void *)addr;
-		int		ndigits	= ntohs(rawdata->ndigits);
-		int		weight	= ntohs(rawdata->weight);
-		int		sign	= ntohs(rawdata->sign);
-		int		precision = attr->arrow_type.Decimal.precision;
-		int128	value = 0;
-		int		d, dig;
-
-		if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
+		}  *rawdata = (void *)addr;
+		nv.ndigits	= (int16)__ntoh16(rawdata->ndigits);
+		nv.weight	= (int16)__ntoh16(rawdata->weight);
+		nv.sign		= (int16)__ntoh16(rawdata->sign);
+		nv.dscale	= (int16)__ntoh16(rawdata->dscale);
+		nv.digits	= rawdata->digits;
+#else	/* __PG2ARROW__ */
+		init_var_from_num(&nv, addr, sz);
+#endif	/* __PG2ARROW__ */
+		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
 			Elog("Decimal128 cannot map NaN in PostgreSQL Numeric");
 
 		/* makes integer portion first */
-		for (d=0; d <= weight; d++)
+		for (d=0; d <= nv.weight; d++)
 		{
-			dig = (d < ndigits) ? ntohs(rawdata->digits[d]) : 0;
+			dig = (d < nv.ndigits) ? __ntoh16(nv.digits[d]) : 0;
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is out of range: %d", (int)dig);
 			value = NBASE * value + (int128)dig;
 		}
-
 		/* makes floating point portion if any */
-		while (precision > 0)
+		while (scale > 0)
 		{
-			dig = (d >= 0 && d < ndigits) ? ntohs(rawdata->digits[d]) : 0;
+			dig = (d >= 0 && d < nv.ndigits) ? __ntoh16(nv.digits[d]) : 0;
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is out of range: %d", (int)dig);
 
-			if (precision >= DEC_DIGITS)
+			if (scale >= DEC_DIGITS)
 				value = NBASE * value + dig;
-			else if (precision == 3)
+			else if (scale == 3)
 				value = 1000L * value + dig / 10L;
-			else if (precision == 2)
+			else if (scale == 2)
 				value =  100L * value + dig / 100L;
-			else if (precision == 1)
+			else if (scale == 1)
 				value =   10L * value + dig / 1000L;
 			else
 				Elog("internal bug");
-			precision -= DEC_DIGITS;
+			scale -= DEC_DIGITS;
 			d++;
 		}
 		/* is it a negative value? */
-		if ((sign & NUMERIC_NEG) != 0)
+		if ((nv.sign & NUMERIC_NEG) != 0)
 			value = -value;
 
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &value, sizeof(value));
 	}
 }
-#endif
+#endif	/* PG_INT128_TYPE */
 
+/*
+ * Date
+ */
 static inline void
 __put_date_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
 						 int64 adjustment, int arrow_sz)
@@ -1979,7 +2038,7 @@ __put_date_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
 	{
 		assert(pgsql_sz == sizeof(DateADT));
 		sql_buffer_setbit(&attr->nullmap, row_index);
-		value = ntohl(*((const DateADT *)addr));
+		value = __ntoh32(*((const DateADT *)addr));
 		value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 		/*
 		 * PostgreSQL native is ArrowDateUnit__Day.
@@ -2026,22 +2085,22 @@ put_date_value(SQLattribute *attr, const char *addr, int sz)
 	attr->put_value(attr, addr, sz);
 }
 
+/*
+ * Time
+ */
 static inline void
 __put_time_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
 						 int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
-	uint64		value;
-	uint32		h, l;
+	TimeADT		value;
 
 	if (!addr)
 		put_inline_null_value(attr, row_index, arrow_sz);
 	else
 	{
 		assert(pgsql_sz == sizeof(TimeADT));
-		h = ntohl(*((const uint32 *)(addr)));
-		l = ntohl(*((const uint32 *)(addr + sizeof(uint32))));
-		value = (uint64)h << 32 | (uint64)l;
+		value = __ntoh64(*((const TimeADT *)addr));
 		/*
 		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
 		 * Compiler optimization will remove the if-block below by constant
@@ -2116,23 +2175,23 @@ put_time_value(SQLattribute *attr, const char *addr, int sz)
 	attr->put_value(attr, addr, sz);
 }
 
+/*
+ * Timestamp
+ */
 static inline void
 __put_timestamp_value_generic(SQLattribute *attr,
 							  const char *addr, int pgsql_sz,
 							  int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
-	uint64		value;
-	uint32		h, l;
+	Timestamp	value;
 
 	if (!addr)
 		put_inline_null_value(attr, row_index, arrow_sz);
 	else
 	{
 		assert(pgsql_sz == sizeof(Timestamp));
-		h = ((const uint32 *)addr)[0];
-		l = ((const uint32 *)addr)[1];
-		value = (Timestamp)ntohl(h) << 32 | (Timestamp)ntohl(l);
+		value = __ntoh64(*((const Timestamp *)addr));
 		/* convert PostgreSQL epoch to UNIX epoch */
 		value += (POSTGRES_EPOCH_JDATE -
 				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
@@ -2199,7 +2258,9 @@ put_timestamp_value(SQLattribute *attr, const char *addr, int sz)
 	attr->put_value(attr, addr, sz);
 }
 
-
+/*
+ * Interval
+ */
 #define DAYS_PER_MONTH	30		/* assumes exactly 30 days per month */
 #define HOURS_PER_DAY	24		/* assume no daylight savings time changes */
 
@@ -2214,7 +2275,8 @@ __put_interval_year_month_value(SQLattribute *attr, const char *addr, int sz)
 	{
 		uint32	m;
 
-		m = ntohl(*((const uint32 *)(addr + offsetof(Interval, month))));
+		assert(sz == sizeof(Interval));
+		m = __ntoh32(((const Interval *)addr)->month);
 		sql_buffer_append(&attr->values, &m, sizeof(uint32));
 	}
 }
@@ -2222,28 +2284,28 @@ __put_interval_year_month_value(SQLattribute *attr, const char *addr, int sz)
 static void
 __put_interval_day_time_value(SQLattribute *attr, const char *addr, int sz)
 {
-		size_t		row_index = attr->nitems++;
+	size_t		row_index = attr->nitems++;
 
 	if (!addr)
 		put_inline_null_value(attr, row_index, 2 * sizeof(uint32));
 	else
 	{
-		uint64	t;
-		uint32	d, m;
-		uint32	value;
+		Interval	iv;
+		uint32		value;
 
-		t = ntohll(*((const uint64 *)(addr + offsetof(Interval, time))));
-		d = ntohl(*((const uint32 *)(addr + offsetof(Interval, day))));
-		m = ntohl(*((const uint32 *)(addr + offsetof(Interval, month))));
+		assert(sz == sizeof(Interval));
+		iv.time  = __ntoh64(((const Interval *)addr)->time);
+		iv.day   = __ntoh32(((const Interval *)addr)->day);
+		iv.month = __ntoh32(((const Interval *)addr)->month);
 
 		/*
 		 * Unit of PostgreSQL Interval is micro-seconds. Arrow Interval::time
 		 * is represented as a pair of elapsed days and milli-seconds; needs
 		 * to be adjusted.
 		 */
-		value = m + DAYS_PER_MONTH * d;
+		value = iv.month + DAYS_PER_MONTH * iv.day;
 		sql_buffer_append(&attr->values, &value, sizeof(uint32));
-		value = t / 1000;
+		value = iv.time / 1000;
 		sql_buffer_append(&attr->values, &value, sizeof(uint32));
 	}
 }
@@ -2267,6 +2329,9 @@ put_interval_value(SQLattribute *attr, const char *addr, int sz)
 	attr->put_value(attr, addr, sz);
 }
 
+/*
+ * Utf8, Binary
+ */
 static void
 put_variable_value(SQLattribute *attr,
 				   const char *addr, int sz)
@@ -2289,6 +2354,9 @@ put_variable_value(SQLattribute *attr,
 	}
 }
 
+/*
+ * FixedSizeBinary
+ */
 static void
 put_bpchar_value(SQLattribute *attr,
 				 const char *addr, int sz)
@@ -2313,6 +2381,60 @@ put_bpchar_value(SQLattribute *attr,
 	}
 }
 
+/*
+ * List::<element> type
+ */
+#if 0
+static inline void
+__put_array_value_native(SQLattribute *element,
+						 const char *addr, int sz)
+{
+	/*
+	 * NOTE: varlena of ArrayType may have short-header (1byte, not 4bytes).
+	 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
+	 * benefit by elimination of redundant copy just for header.
+	 * Instead of the optimization, we should never use VARSIZE() or related.
+	 */
+	ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
+	size_t		i, nitems = 1;
+	bits8	   *nullmap;
+	char	   *base;
+	size_t		off = 0;
+
+	for (i=0; i < ARR_NDIM(array); i++)
+		nitems *= ARR_DIMS(array)[i];
+	nullmap = ARR_NULLBITMAP(array);
+	base = ARR_DATA_PTR(array);
+	for (i=0; i < nitems; i++)
+	{
+		if (nullmap && att_isnull(i, nullmap))
+		{
+			element->put_value(element, NULL, 0);
+		}
+		else if (element->attbyval)
+		{
+			assert(element->attlen > 0);
+			element->put_value(element, base + off, element->attlen);
+			off = TYPEALIGN(element->attalign,
+							off + element->attlen);
+		}
+		else if (element->attlen == -1)
+		{
+			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+			char   *vl_data = VARDATA_ANY(base + off);
+
+			element->put_value(element, vl_data, vl_len);
+			off = TYPEALIGN(element->attalign,
+							off + VARSIZE_ANY(base + off));
+		}
+		else
+		{
+			Elog("Bug? PostgreSQL Array has unsupported element type");
+		}
+	}
+}
+#endif
+
 static void
 put_array_value(SQLattribute *attr,
 				const char *addr, int sz)
@@ -2330,7 +2452,7 @@ put_array_value(SQLattribute *attr,
 	}
 	else
 	{
-		static bool		notification_has_printed = false;
+#ifdef __PG2ARROW__
 		struct {
 			int32		ndim;
 			int32		hasnull;
@@ -2340,9 +2462,9 @@ put_array_value(SQLattribute *attr,
 				int32	lb;
 			} dim[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *) addr;
-		int32		ndim = ntohl(rawdata->ndim);
-		//int32		hasnull = ntohl(rawdata->hasnull);
-		Oid			element_type = ntohl(rawdata->element_type);
+		int32		ndim = __ntoh32(rawdata->ndim);
+		//int32		hasnull = __ntoh32(rawdata->hasnull);
+		Oid			element_type = __ntoh32(rawdata->element_type);
 		size_t		i, nitems = 1;
 		int			item_sz;
 		char	   *pos;
@@ -2351,20 +2473,15 @@ put_array_value(SQLattribute *attr,
 			Elog("PostgreSQL array type mismatch");
 		if (ndim < 1)
 			Elog("Invalid dimension size of PostgreSQL Array (ndim=%d)", ndim);
-		if (ndim > 1 && !notification_has_printed)
-		{
-			fprintf(stderr, "Notice: multi-dimensional PostgreSQL Array is extracted to List<%s> type in Apache Arrow, due to data type restrictions", attr->arrow_typename);
-			notification_has_printed = true;
-		}
 		for (i=0; i < ndim; i++)
-			nitems *= ntohl(rawdata->dim[i].sz);
+			nitems *= __ntoh32(rawdata->dim[i].sz);
 
 		pos = (char *)&rawdata->dim[ndim];
 		for (i=0; i < nitems; i++)
 		{
 			if (pos + sizeof(int32) > addr + sz)
 				Elog("out of range - binary array has corruption");
-			item_sz = ntohl(*((int32 *)pos));
+			item_sz = __ntoh32(*((int32 *)pos));
 			pos += sizeof(int32);
 			if (item_sz < 0)
 				element->put_value(element, NULL, 0);
@@ -2374,10 +2491,73 @@ put_array_value(SQLattribute *attr,
 				pos += item_sz;
 			}
 		}
+#else	/* __PG2ARROW__ */
+		Elog("Bug? server code must override put_array_value");
+#endif	/* !__PG2ARROW__ */
 		sql_buffer_setbit(&attr->nullmap, row_index);
 		sql_buffer_append(&attr->values, &element->nitems, sizeof(int32));
 	}
 }
+
+/*
+ * Arrow::Struct
+ */
+static inline void
+__put_composite_value_libpq_binary(SQLattribute *attr,
+								   const char *addr, int sz)
+{
+}
+
+#if 0
+static inline void
+__put_composite_value_native(SQLattribute *attr,
+							 const char *addr, int sz)
+{
+	SQLtable   *subtypes = attr->subtypes;
+	HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
+	bits8	   *nullmap = NULL;
+	int			j, nvalids;
+	char	   *base = (char *)htup + htup->t_hoff;
+	size_t		off = 0;
+
+	if ((htup->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = htup->t_bits;
+	nvalids = HeapTupleHeaderGetNatts(htup);
+
+	for (j=0; j < subtypes->nfields; j++)
+	{
+		SQLattribute *subattr = &subtypes->attrs[j];
+
+		if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
+		{
+			subattr->put_value(subattr, NULL, 0);
+		}
+		else if (subattr->attbyval)
+		{
+			assert(subattr->attlen > 0);
+			subattr->put_value(subattr, base + off, subattr->attlen);
+			off = TYPEALIGN(subattr->attalign,
+							off + subattr->attlen);
+		}
+		else if (subattr->attlen == -1)
+		{
+			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+			char   *vl_dat = VARDATA_ANY(base + off);
+
+			subattr->put_value(subattr, vl_dat, vl_len);
+			off = TYPEALIGN(subattr->attalign,
+							off + VARSIZE_ANY(base + off));
+		}
+		else
+		{
+			Elog("Bug? sub-field '%s' of attribute '%s' has unsupported type",
+				 subattr->attname,
+				 attr->attname);
+		}
+		assert(attr->nitems == subattr->nitems);
+	}
+}
+#endif
 
 static void
 put_composite_value(SQLattribute *attr,
@@ -2386,14 +2566,12 @@ put_composite_value(SQLattribute *attr,
 	/* see record_send() */
 	SQLtable   *subtypes = attr->subtypes;
 	size_t		row_index = attr->nitems++;
-	size_t		usage = 0;
-	int			j, nvalids;
+	int			j;
 
 	if (!addr)
 	{
 		attr->nullcount++;
 		sql_buffer_clrbit(&attr->nullmap, row_index);
-		usage += ARROWALIGN(attr->nullmap.usage);
 		/* NULL for all the subtypes */
 		for (j=0; j < subtypes->nfields; j++)
 		{
@@ -2403,14 +2581,13 @@ put_composite_value(SQLattribute *attr,
 	}
 	else
 	{
+#ifdef __PG2ARROW__
 		const char *pos = addr;
+		int			j, nvalids;
 
-		sql_buffer_setbit(&attr->nullmap, row_index);
 		if (sz < sizeof(uint32))
 			Elog("binary composite record corruption");
-		if (attr->nullcount > 0)
-			usage += ARROWALIGN(attr->nullmap.usage);
-		nvalids = ntohl(*((const int *)pos));
+		nvalids = __ntoh32(*((const int *)pos));
 		pos += sizeof(int);
 		for (j=0; j < subtypes->nfields; j++)
 		{
@@ -2418,7 +2595,6 @@ put_composite_value(SQLattribute *attr,
 			Oid		atttypid;
 			int		attlen;
 
-			assert(subattr->nitems == row_index);
 			if (j >= nvalids)
 			{
 				subattr->put_value(subattr, NULL, 0);
@@ -2426,11 +2602,11 @@ put_composite_value(SQLattribute *attr,
 			}
 			if ((pos - addr) + sizeof(Oid) + sizeof(int) > sz)
 				Elog("binary composite record corruption");
-			atttypid = ntohl(*((Oid *)pos));
+			atttypid = __ntoh32(*((Oid *)pos));
 			pos += sizeof(Oid);
 			if (subattr->atttypid != atttypid)
 				Elog("composite subtype mismatch");
-			attlen = ntohl(*((int *)pos));
+			attlen = __ntoh32(*((int *)pos));
 			pos += sizeof(int);
 			if (attlen == -1)
 			{
@@ -2443,7 +2619,12 @@ put_composite_value(SQLattribute *attr,
 				subattr->put_value(subattr, pos, attlen);
 				pos += attlen;
 			}
+			assert(attr->nitems == subattr->nitems);
 		}
+#else	/* __PG2ARROW__ */
+		Elog("Bug? server code must override put_composite_value");
+#endif	/* !__PG2ARROW__ */
+		sql_buffer_setbit(&attr->nullmap, row_index);
 	}
 }
 
@@ -2866,8 +3047,8 @@ assignArrowTypeDecimal(SQLattribute *attr, int *p_numBuffers)
 {
 #ifdef PG_INT128_TYPE
 	int		typmod			= attr->atttypmod;
-	int		precision		= 11;	/* default, if typmod == -1 */
-	int		scale			= 30;	/* default, if typmod == -1 */
+	int		precision		= 30;	/* default, if typmod == -1 */
+	int		scale			=  8;	/* default, if typmod == -1 */
 
 	if (typmod >= VARHDRSZ)
 	{

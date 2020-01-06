@@ -57,7 +57,7 @@ struct SQLattribute
 	char		typtype;		/* pg_type.typtype */
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
-	/* data buffer and handler */
+	/* data buffer and handlers */
 	void   (*put_value)(SQLattribute *attr,
 						const char *addr, int sz);
 	size_t (*buffer_usage)(SQLattribute *attr);
