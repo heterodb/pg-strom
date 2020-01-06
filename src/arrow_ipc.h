@@ -72,6 +72,9 @@ struct SQLattribute
 	SQLbuffer	nullmap;		/* null bitmap */
 	SQLbuffer	values;			/* main storage of values */
 	SQLbuffer	extra;			/* extra buffer for varlena */
+	/* custom metadata(optional) */
+	ArrowKeyValue *customMetadata;
+	int			numCustomMetadata;
 };
 
 struct SQLtable
@@ -84,6 +87,8 @@ struct SQLtable
 	int			numDictionaries;
 	int			numFieldNodes;	/* # of FieldNode vector elements */
 	int			numBuffers;		/* # of Buffer vector elements */
+	ArrowKeyValue *customMetadata; /* custom metadata, if any */
+	int			numCustomMetadata;
 	SQLdictionary *sql_dict_list; /* list of SQLdictionary */
 	size_t		segment_sz;		/* threshold of the memory usage */
 	size_t		nitems;			/* current number of rows */

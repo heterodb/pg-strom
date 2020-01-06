@@ -92,8 +92,6 @@ dumpArrowFile(const char *filename)
 {
 	ArrowFileInfo	af_info;
 	int				i, fdesc;
-	char		   *temp1;
-	char		   *temp2;
 
 	memset(&af_info, 0, sizeof(ArrowFileInfo));
 	fdesc = open(filename, O_RDONLY);
@@ -101,26 +99,21 @@ dumpArrowFile(const char *filename)
 		Elog("unable to open '%s': %m", filename);
 	readArrowFileDesc(fdesc, &af_info);
 
-	temp1 = dumpArrowNode((ArrowNode *)&af_info.footer);
-	printf("[Footer]\n%s\n", temp1);
-	pfree(temp1);
+	printf("[Footer]\n%s\n",
+		   dumpArrowNode((ArrowNode *)&af_info.footer));
 
 	for (i=0; i < af_info.footer._num_dictionaries; i++)
 	{
-		temp1 = dumpArrowNode((ArrowNode *)&af_info.footer.dictionaries[i]);
-		temp2 = dumpArrowNode((ArrowNode *)&af_info.dictionaries[i]);
-		printf("[Dictionary Batch %d]\n%s\n%s\n", i, temp1, temp2);
-		pfree(temp1);
-		pfree(temp2);
+		printf("[Dictionary Batch %d]\n%s\n%s\n", i,
+			   dumpArrowNode((ArrowNode *)&af_info.footer.dictionaries[i]),
+			   dumpArrowNode((ArrowNode *)&af_info.dictionaries[i]));
 	}
 
 	for (i=0; i < af_info.footer._num_recordBatches; i++)
 	{
-		temp1 = dumpArrowNode((ArrowNode *)&af_info.footer.recordBatches[i]);
-		temp2 = dumpArrowNode((ArrowNode *)&af_info.recordBatches[i]);
-		printf("[Record Batch %d]\n%s\n%s\n", i, temp1, temp2);
-		pfree(temp1);
-		pfree(temp2);
+		printf("[Record Batch %d]\n%s\n%s\n", i,
+			   dumpArrowNode((ArrowNode *)&af_info.footer.recordBatches[i]),
+			   dumpArrowNode((ArrowNode *)&af_info.recordBatches[i]));
 	}
 	return 0;
 }
@@ -769,10 +762,13 @@ pgsql_setup_array_element(PGconn *conn,
  * pgsql_create_buffer
  */
 SQLtable *
-pgsql_create_buffer(PGconn *conn, PGresult *res, size_t segment_sz)
+pgsql_create_buffer(PGconn *conn, PGresult *res,
+					size_t segment_sz,
+					const char *sql_command)
 {
 	int			j, nfields = PQnfields(res);
 	SQLtable   *table;
+	ArrowKeyValue *kv;
 
 	table = palloc0(offsetof(SQLtable, attrs[nfields]));
 	table->segment_sz = segment_sz;
@@ -832,6 +828,18 @@ pgsql_create_buffer(PGconn *conn, PGresult *res, size_t segment_sz)
 							  &table->numBuffers);
 		PQclear(__res);
 	}
+
+	/* save the SQL command as custom metadata */
+	kv = palloc0(sizeof(ArrowKeyValue));
+	initArrowNode(kv, KeyValue);
+	kv->key = "sql_command";
+	kv->_key_len = 11;
+	kv->value = sql_command;
+	kv->_value_len = strlen(sql_command);
+
+	table->customMetadata = kv;
+	table->numCustomMetadata = 1;
+
 	return table;
 }
 
@@ -1157,7 +1165,7 @@ int main(int argc, char * const argv[])
 	res = pgsql_begin_query(conn, sql_command);
 	if (!res)
 		Elog("SQL command returned an empty result");
-	table = pgsql_create_buffer(conn, res, batch_segment_sz);
+	table = pgsql_create_buffer(conn, res, batch_segment_sz, sql_command);
 	if (append_filename)
 	{
 		table->fdesc = open(append_filename, O_RDWR, 0644);

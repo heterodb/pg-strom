@@ -893,9 +893,6 @@ writeFlatBufferFooter(int fdesc, ArrowFooter *footer)
 	return length;
 }
 
-/*
- * writeArrowSchema
- */
 static void
 setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 							 SQLattribute *attr)
@@ -940,6 +937,9 @@ setupArrowField(ArrowField *field, SQLattribute *attr)
 		for (j=0; j < attr->nfields; j++)
 			setupArrowField(&field->children[j], &attr->subfields[j]);
 	}
+	/* custom metadata, if any */
+	field->_num_custom_metadata = attr->numCustomMetadata;
+	field->custom_metadata = attr->customMetadata;
 }
 
 ssize_t
@@ -959,6 +959,8 @@ writeArrowSchema(SQLtable *table)
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
 		setupArrowField(&schema->fields[i], &table->attrs[i]);
+	schema->custom_metadata = table->customMetadata;
+	schema->_num_custom_metadata = table->numCustomMetadata;
 	/* serialization */
 	return writeFlatBufferMessage(table->fdesc, &message);
 }
@@ -1214,6 +1216,9 @@ writeArrowFooter(SQLtable *table)
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
 		setupArrowField(&schema->fields[i], &table->attrs[i]);
+	schema->custom_metadata = table->customMetadata;
+	schema->_num_custom_metadata = table->numCustomMetadata;
+
 	/* [dictionaries] */
 	footer.dictionaries = table->dictionaries;
 	footer._num_dictionaries = table->numDictionaries;
