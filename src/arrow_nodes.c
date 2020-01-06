@@ -2908,8 +2908,8 @@ write_buffer_composite_type(SQLattribute *attr, int fdesc)
  *
  * ----------------------------------------------------------------
  */
-static void
-assignArrowTypeInt(SQLattribute *attr, int *p_numBuffers, bool is_signed)
+static int
+assignArrowTypeInt(SQLattribute *attr, bool is_signed)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Int);
 	attr->arrow_type.Int.is_signed = is_signed;
@@ -2943,11 +2943,11 @@ assignArrowTypeInt(SQLattribute *attr, int *p_numBuffers, bool is_signed)
 	attr->setup_buffer = setup_buffer_inline_type;
 	attr->write_buffer = write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* null map + values */
+	return 2;		/* null map + values */
 }
 
-static void
-assignArrowTypeFloatingPoint(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeFloatingPoint(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, FloatingPoint);
 	switch (attr->attlen)
@@ -2975,11 +2975,11 @@ assignArrowTypeFloatingPoint(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer = setup_buffer_inline_type;
 	attr->write_buffer = write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeBinary(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeBinary(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Binary);
 	attr->arrow_typename	= "Binary";
@@ -2988,11 +2988,11 @@ assignArrowTypeBinary(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_varlena_type;
 	attr->write_buffer		= write_buffer_varlena_type;
 
-	*p_numBuffers += 3;		/* nullmap + index + extra */
+	return 3;		/* nullmap + index + extra */
 }
 
-static void
-assignArrowTypeUtf8(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeUtf8(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Utf8);
 	attr->arrow_typename	= "Utf8";
@@ -3001,11 +3001,11 @@ assignArrowTypeUtf8(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_varlena_type;
 	attr->write_buffer		= write_buffer_varlena_type;
 
-	*p_numBuffers += 3;		/* nullmap + index + extra */
+	return 3;		/* nullmap + index + extra */
 }
 
-static void
-assignArrowTypeBpchar(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeBpchar(SQLattribute *attr)
 {
 	if (attr->atttypmod <= VARHDRSZ)
 		Elog("unexpected Bpchar definition (typmod=%d)", attr->atttypmod);
@@ -3018,11 +3018,11 @@ assignArrowTypeBpchar(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeBool(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeBool(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Bool);
 	attr->arrow_typename	= "Bool";
@@ -3031,11 +3031,11 @@ assignArrowTypeBool(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeDecimal(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeDecimal(SQLattribute *attr)
 {
 #ifdef PG_INT128_TYPE
 	int		typmod			= attr->atttypmod;
@@ -3057,8 +3057,6 @@ assignArrowTypeDecimal(SQLattribute *attr, int *p_numBuffers)
 	attr->buffer_usage		= buffer_usage_inline_type;
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
-
-	*p_numBuffers += 2;		/* nullmap + values */
 #else
 	/*
 	 * MEMO: Numeric of PostgreSQL is mapped to Decimal128 in Apache Arrow.
@@ -3066,10 +3064,11 @@ assignArrowTypeDecimal(SQLattribute *attr, int *p_numBuffers)
 	 */
 	Elog("Numeric type of PostgreSQL is not supported in this build");
 #endif
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeDate(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeDate(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Date);
 	attr->arrow_type.Date.unit = ArrowDateUnit__Day;
@@ -3079,11 +3078,11 @@ assignArrowTypeDate(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeTime(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeTime(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Time);
 	attr->arrow_type.Time.unit = ArrowTimeUnit__MicroSecond;
@@ -3094,11 +3093,11 @@ assignArrowTypeTime(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeTimestamp(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeTimestamp(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Timestamp);
 	attr->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
@@ -3108,11 +3107,11 @@ assignArrowTypeTimestamp(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeInterval(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeInterval(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Interval);
 	attr->arrow_type.Interval.unit = ArrowIntervalUnit__Day_Time;
@@ -3122,11 +3121,11 @@ assignArrowTypeInterval(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;		/* nullmap + values */
 }
 
-static void
-assignArrowTypeList(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeList(SQLattribute *attr)
 {
 	SQLattribute *element = attr->element;
 
@@ -3137,11 +3136,11 @@ assignArrowTypeList(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_array_type;
 	attr->write_buffer		= write_buffer_array_type;
 
-	*p_numBuffers += 2;		/* nullmap + offset vector */
+	return 2;		/* nullmap + offset vector */
 }
 
-static void
-assignArrowTypeStruct(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeStruct(SQLattribute *attr)
 {
 	assert(attr->subfields != NULL);
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Struct);
@@ -3151,11 +3150,11 @@ assignArrowTypeStruct(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_composite_type;
 	attr->write_buffer		= write_buffer_composite_type;
 
-	*p_numBuffers += 1;		/* only nullmap */
+	return 1;	/* only nullmap */
 }
 
-static void
-assignArrowTypeDictionary(SQLattribute *attr, int *p_numBuffers)
+static int
+assignArrowTypeDictionary(SQLattribute *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Utf8);
 	attr->arrow_typename	= psprintf("Enum; dictionary=%u", attr->atttypid);
@@ -3164,92 +3163,79 @@ assignArrowTypeDictionary(SQLattribute *attr, int *p_numBuffers)
 	attr->setup_buffer		= setup_buffer_inline_type;
 	attr->write_buffer		= write_buffer_inline_type;
 
-	*p_numBuffers += 2;		/* nullmap + values */
+	return 2;	/* nullmap + values */
 }
 
 /*
  * assignArrowType
  */
-void
-assignArrowType(SQLattribute *attr, int *p_numBuffers)
+int
+assignArrowType(SQLattribute *attr)
 {
 	memset(&attr->arrow_type, 0, sizeof(ArrowType));
 	if (attr->subfields)
 	{
 		/* composite type */
-		assignArrowTypeStruct(attr, p_numBuffers);
-		return;
+		return assignArrowTypeStruct(attr);
 	}
 	else if (attr->element)
 	{
 		/* array type */
-		assignArrowTypeList(attr, p_numBuffers);
-		return;
+		return assignArrowTypeList(attr);
 	}
 	else if (attr->typtype == 'e')
 	{
 		/* enum type */
-		assignArrowTypeDictionary(attr, p_numBuffers);
-		return;
+		return assignArrowTypeDictionary(attr);
 	}
 	else if (strcmp(attr->typnamespace, "pg_catalog") == 0)
 	{
 		/* well known built-in data types? */
 		if (strcmp(attr->typname, "bool") == 0)
 		{
-			assignArrowTypeBool(attr, p_numBuffers);
-			return;
+			return assignArrowTypeBool(attr);
 		}
 		else if (strcmp(attr->typname, "int2") == 0 ||
 				 strcmp(attr->typname, "int4") == 0 ||
 				 strcmp(attr->typname, "int8") == 0)
 		{
-			assignArrowTypeInt(attr, p_numBuffers, true);
-			return;
+			return assignArrowTypeInt(attr, true);
 		}
 		else if (strcmp(attr->typname, "float2") == 0 ||	/* by PG-Strom */
 				 strcmp(attr->typname, "float4") == 0 ||
 				 strcmp(attr->typname, "float8") == 0)
 		{
-			assignArrowTypeFloatingPoint(attr, p_numBuffers);
-			return;
+			return assignArrowTypeFloatingPoint(attr);
 		}
 		else if (strcmp(attr->typname, "date") == 0)
 		{
-			assignArrowTypeDate(attr, p_numBuffers);
-			return;
+			return assignArrowTypeDate(attr);
 		}
 		else if (strcmp(attr->typname, "time") == 0)
 		{
-			assignArrowTypeTime(attr, p_numBuffers);
-			return;
+			return assignArrowTypeTime(attr);
 		}
 		else if (strcmp(attr->typname, "timestamp") == 0 ||
 				 strcmp(attr->typname, "timestamptz") == 0)
 		{
-			assignArrowTypeTimestamp(attr, p_numBuffers);
-			return;
+			return assignArrowTypeTimestamp(attr);
 		}
 		else if (strcmp(attr->typname, "interval") == 0)
 		{
-			assignArrowTypeInterval(attr, p_numBuffers);
-			return;
+			return assignArrowTypeInterval(attr);
 		}
 		else if (strcmp(attr->typname, "text") == 0 ||
 				 strcmp(attr->typname, "varchar") == 0)
 		{
-			assignArrowTypeUtf8(attr, p_numBuffers);
-			return;
+			return assignArrowTypeUtf8(attr);
 		}
 		else if (strcmp(attr->typname, "bpchar") == 0)
 		{
-			assignArrowTypeBpchar(attr, p_numBuffers);
-			return;
+			return assignArrowTypeBpchar(attr);
 		}
 		else if (strcmp(attr->typname, "numeric") == 0)
 		{
-			assignArrowTypeDecimal(attr, p_numBuffers);
-			return;
+			return assignArrowTypeDecimal(attr);
 		}
 	}
 	/* elsewhere, we save the column just a bunch of binary data */
@@ -3260,8 +3246,7 @@ assignArrowType(SQLattribute *attr, int *p_numBuffers)
 			attr->attlen == sizeof(int) ||
 			attr->attlen == sizeof(long))
 		{
-			assignArrowTypeInt(attr, p_numBuffers, false);
-			return;
+			return assignArrowTypeInt(attr, false);
 		}
 		/*
 		 * MEMO: Unfortunately, we have no portable way to pack user defined
@@ -3274,8 +3259,7 @@ assignArrowType(SQLattribute *attr, int *p_numBuffers)
 	}
 	else if (attr->attlen == -1)
 	{
-		assignArrowTypeBinary(attr, p_numBuffers);
-		return;
+		return assignArrowTypeBinary(attr);
 	}
 	Elog("PostgreSQL type: '%s.%s' is not supported",
 		 attr->typnamespace,

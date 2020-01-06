@@ -619,17 +619,6 @@ pgsql_setup_attribute(PGconn *conn,
 								   comp_typrelid,
 								   p_numFieldNodes,
 								   p_numBuffers);
-#if 0
-		/* composite data type */
-		SQLtable   *subtypes;
-
-		assert(comp_typrelid != 0);
-		subtypes = pgsql_create_composite_type(conn, root, comp_typrelid);
-		*p_numFieldNodes += subtypes->numFieldNodes;
-		*p_numBuffers += subtypes->numBuffers;
-
-		attr->subtypes = subtypes;
-#endif
 	}
 	else if (typtype == 'e')
 	{
@@ -639,7 +628,7 @@ pgsql_setup_attribute(PGconn *conn,
 		Elog("unknown state pf typtype: %c", typtype);
 
 	/* assign properties of Apache Arrow Type */
-	assignArrowType(attr, p_numBuffers);
+	*p_numBuffers += assignArrowType(attr);
 	*p_numFieldNodes += 1;
 }
 

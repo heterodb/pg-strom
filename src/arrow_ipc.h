@@ -122,7 +122,7 @@ extern ssize_t	writeArrowFooter(SQLtable *table);
 
 
 /* arrow_nodes.c */
-extern void		assignArrowType(SQLattribute *attr, int *p_numBuffers);
+extern int		assignArrowType(SQLattribute *attr);
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
