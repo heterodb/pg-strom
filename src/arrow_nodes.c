@@ -16,23 +16,34 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef __PG2ARROW__
-#include "pg_strom.h"
+#ifdef __PG2ARROW__
+#include "postgres.h"
+#include "port/pg_bswap.h"
+#include "utils/date.h"
+#include "utils/timestamp.h"
+typedef struct SQLbuffer	StringInfoData;
+typedef struct SQLbuffer   *StringInfo;
+#if PG_VERSION_NUM < 110000
+#ifdef WORDS_BIGENDIAN
 #define __ntoh16(x)			(x)
 #define __ntoh32(x)			(x)
 #define __ntoh64(x)			(x)
 #else
-#include "postgres.h"
-#include "port/pg_bswap.h"
-#include "utils/date.h"
-#include "access/htup_details.h"
-#include "utils/array.h"
-typedef struct SQLbuffer	StringInfoData;
-typedef struct SQLbuffer   *StringInfo;
+#define __ntoh16(x)			ntohs(x)
+#define __ntoh32(x)			BSWAP32(x)
+#define __ntoh64(x)			BSWAP64(x)
+#endif
+#else	/* >=PG11 */
 #define __ntoh16(x)			pg_ntoh16(x)
 #define __ntoh32(x)			pg_ntoh32(x)
 #define __ntoh64(x)			pg_ntoh64(x)
-#endif
+#endif	/* >=PG11 */
+#else	/* __PG2ARROW__ */
+#include "pg_strom.h"
+#define __ntoh16(x)			(x)
+#define __ntoh32(x)			(x)
+#define __ntoh64(x)			(x)
+#endif	/* !__PG2ARROW__ */
 #include "arrow_ipc.h"
 
 /*
