@@ -17,6 +17,7 @@
  */
 #include "pg_strom.h"
 #include "arrow_defs.h"
+#include "arrow_ipc.h"
 #include "cuda_numeric.cu"
 
 /*
@@ -101,6 +102,29 @@ typedef struct
 	dlist_head	hash_slots[FLEXIBLE_ARRAY_MEMBER];
 } arrowMetadataState;
 
+/*
+ * Local Arrow Buffer - chunks pending to write
+ */
+typedef struct
+{
+	dlist_node		chain;
+	SubTransactionId sub_xid;
+	int				index;
+	size_t			nitems;
+} arrowLocalBufferXactTracker;
+
+typedef struct
+{
+	Oid				frel_oid;
+	MemoryContext	memcxt;
+	TransactionId	curr_xid;
+	SubTransactionId curr_sub_xid;
+	SQLtable	   *curr_table;
+	SQLtable	  **any_tables;
+	int				num_tables;
+	dlist_head		xact_list;
+} arrowLocalBuffer;
+
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -112,6 +136,8 @@ static int				arrow_metadata_cache_width;		/* GUC */
 	MAXALIGN(offsetof(arrowMetadataCache,					\
 					  fstate[arrow_metadata_cache_width]))
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
+static int				arrow_record_batch_size;		/* GUC */
+static HTAB			   *arrow_local_buffer_hash = NULL;
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
 static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
@@ -3601,6 +3627,208 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 	return rb_cached;
 }
 
+
+
+
+/*
+ * setupArrowLocalBufferAttribute
+ */
+static void
+setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
+							   const char *attname,
+							   Oid atttypid, int atttypmod)
+{
+	HeapTuple		tup;
+	Form_pg_type	formType;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type: %u", atttypid);
+	formType = (Form_pg_type) GETSTRUCT(tup);
+
+	sql_attr->attname	= pstrdup(attname);
+	sql_attr->atttypid	= atttypid,
+	sql_attr->atttypmod	= atttypmod;
+	sql_attr->attlen	= formType->typlen;
+	sql_attr->attbyval	= formType->typbyval;
+	if (formType->typalign == 'c')
+		sql_attr->attalign	= sizeof(char);
+	else if (formType->typalign == 's')
+		sql_attr->attalign	= sizeof(short);
+	else if (formType->typalign == 'i')
+		sql_attr->attalign	= sizeof(int);
+	else if (formType->typalign == 'd')
+		sql_attr->attalign	= sizeof(double);
+	else
+		elog(ERROR, "attribute '%s' has unknown alignment: %c",
+			 attname, formType->typalign);
+
+	sql_attr->typnamespace = get_namespace_name(formType->typnamespace);
+	sql_attr->typname = pstrdup(NameStr(formType->typname));
+	sql_attr->typtype = formType->typtype;
+
+	assignArrowType(sql_attr);
+
+	if (OidIsValid(formType->typelem) && formType->typlen == -1)
+	{
+		/* array type */
+		sql_attr->element = palloc0(sizeof(SQLattribute));
+		setupArrowLocalBufferAttribute(sql_attr->element,
+									   psprintf("%s[]", attname),
+									   formType->typelem, -1);
+	}
+	else if (OidIsValid(formType->typrelid))
+	{
+		/* composite type */
+		Relation	comp;
+		TupleDesc	tupdesc;
+		int			j;
+
+		comp = relation_open(formType->typrelid, AccessShareLock);
+		if (comp->rd_rel->relkind != RELKIND_COMPOSITE_TYPE)
+			elog(ERROR, "Bug? relation '%s' is not a composite type",
+				 RelationGetRelationName(comp));
+		tupdesc = RelationGetDescr(comp);
+
+		sql_attr->nfields = tupdesc->natts;
+		sql_attr->subfields = palloc0(sizeof(SQLattribute) * tupdesc->natts);
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
+
+			setupArrowLocalBufferAttribute(&sql_attr->subfields[j],
+										   NameStr(subattr->attname),
+										   subattr->atttypid,
+										   subattr->atttypmod);
+		}
+		relation_close(comp, AccessShareLock);
+	}
+	else if (formType->typtype == 'e')
+	{
+		/* enum type */
+		elog(ERROR, "Enum type is not supported right now");
+	}
+	ReleaseSysCache(tup);
+}
+
+/*
+ * setupArrowLocalBuffer
+ */
+static void
+setupArrowLocalBuffer(arrowLocalBuffer *lbuf, Relation frel)
+{
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	MemoryContext	memcxt;
+	MemoryContext	oldcxt;
+	SQLtable	   *table;
+	int				j;
+
+	memcxt = AllocSetContextCreate(TopMemoryContext,
+								   "arrowLocalBuffer",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(memcxt);
+
+	table = palloc0(offsetof(SQLtable, attrs[tupdesc->natts]));
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+		
+		setupArrowLocalBufferAttribute(&table->attrs[j],
+									   NameStr(attr->attname),
+									   attr->atttypid,
+									   attr->atttypmod);
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * lookupArrowLocalBuffer
+ */
+static arrowLocalBuffer *
+lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
+{
+	arrowLocalBuffer *lbuf;
+	Oid			frel_oid = RelationGetRelid(frel);
+	bool		found;
+
+	if (!arrow_local_buffer_hash)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(arrowLocalBuffer);
+		arrow_local_buffer_hash = hash_create("Arrow_Fdw Local Buffer",
+											  256,
+											  &hctl,
+											  HASH_ELEM | HASH_BLOBS);
+	}
+	lbuf = hash_search(arrow_local_buffer_hash, &frel_oid,
+					   create_on_demand ? HASH_ENTER : HASH_FIND,
+					   &found);
+	if (!lbuf)
+		Assert(!create_on_demand);
+	else if (!found)
+	{
+		PG_TRY();
+		{
+			MemoryContext	memcxt;
+			MemoryContext	oldcxt;
+
+			memcxt = AllocSetContextCreate(TopMemoryContext,
+										   "arrowLocalBuffer",
+										   ALLOCSET_DEFAULT_SIZES);
+			oldcxt = MemoryContextSwitchTo(memcxt);
+
+			setupArrowLocalBuffer(lbuf, frel);
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+		PG_CATCH();
+		{
+			hash_search(arrow_local_buffer_hash,
+						&frel_oid, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	return lbuf;
+}
+
+/*
+ * arrowFdwXactCallback
+ */
+static void
+arrowFdwXactCallback(XactEvent event, void *arg)
+{
+	switch (event)
+	{
+		case XACT_EVENT_PRE_COMMIT:
+			/* preparation of write */
+
+			/* makes record batch images */
+			/* expand file size */
+			
+			break;
+		case XACT_EVENT_COMMIT:
+			break;
+
+		case XACT_EVENT_ABORT:
+			/* clean up buffers */
+			
+			break;
+		default:
+			/* do nothing */
+			return;
+	}
+
+
+
+
+	
+
+}
+
 /*
  * pgstrom_startup_arrow_fdw
  */
@@ -3738,9 +3966,26 @@ pgstrom_init_arrow_fdw(void)
 							   GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							   NULL, NULL, NULL);
 
+	/*
+	 * Limit of RecordBatch size for writing
+	 */
+	DefineCustomIntVariable("arrow_fdw.record_batch_size",
+							"maximum size of record batch on writing",
+							NULL,
+							&arrow_record_batch_size,
+							256 * 1024,		/* default: 256MB */
+							4 * 1024,		/* min: 4MB */
+							2048 * 1024,	/* max: 2GB */
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+
 	/* shared memory size */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)) +
 						   ((size_t)arrow_metadata_cache_size_kb << 10));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
+
+	/* transaction callback  */
+	RegisterXactCallback(arrowFdwXactCallback, NULL);
 }
