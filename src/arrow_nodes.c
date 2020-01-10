@@ -2395,57 +2395,6 @@ put_bpchar_value(SQLattribute *attr,
 /*
  * List::<element> type
  */
-#if 0
-static inline void
-__put_array_value_native(SQLattribute *element,
-						 const char *addr, int sz)
-{
-	/*
-	 * NOTE: varlena of ArrayType may have short-header (1byte, not 4bytes).
-	 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
-	 * benefit by elimination of redundant copy just for header.
-	 * Instead of the optimization, we should never use VARSIZE() or related.
-	 */
-	ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
-	size_t		i, nitems = 1;
-	bits8	   *nullmap;
-	char	   *base;
-	size_t		off = 0;
-
-	for (i=0; i < ARR_NDIM(array); i++)
-		nitems *= ARR_DIMS(array)[i];
-	nullmap = ARR_NULLBITMAP(array);
-	base = ARR_DATA_PTR(array);
-	for (i=0; i < nitems; i++)
-	{
-		if (nullmap && att_isnull(i, nullmap))
-		{
-			element->put_value(element, NULL, 0);
-		}
-		else if (element->attbyval)
-		{
-			assert(element->attlen > 0);
-			element->put_value(element, base + off, element->attlen);
-			off = TYPEALIGN(element->attalign,
-							off + element->attlen);
-		}
-		else if (element->attlen == -1)
-		{
-			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-			char   *vl_data = VARDATA_ANY(base + off);
-
-			element->put_value(element, vl_data, vl_len);
-			off = TYPEALIGN(element->attalign,
-							off + VARSIZE_ANY(base + off));
-		}
-		else
-		{
-			Elog("Bug? PostgreSQL Array has unsupported element type");
-		}
-	}
-}
-#endif
-
 static void
 put_array_value(SQLattribute *attr,
 				const char *addr, int sz)
@@ -2512,60 +2461,6 @@ put_array_value(SQLattribute *attr,
 
 /*
  * Arrow::Struct
- */
-#if 0
-static inline void
-__put_composite_value_native(SQLattribute *attr,
-							 const char *addr, int sz)
-{
-	SQLtable   *subtypes = attr->subtypes;
-	HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
-	bits8	   *nullmap = NULL;
-	int			j, nvalids;
-	char	   *base = (char *)htup + htup->t_hoff;
-	size_t		off = 0;
-
-	if ((htup->t_infomask & HEAP_HASNULL) != 0)
-		nullmap = htup->t_bits;
-	nvalids = HeapTupleHeaderGetNatts(htup);
-
-	for (j=0; j < subtypes->nfields; j++)
-	{
-		SQLattribute *subattr = &subtypes->attrs[j];
-
-		if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
-		{
-			subattr->put_value(subattr, NULL, 0);
-		}
-		else if (subattr->attbyval)
-		{
-			assert(subattr->attlen > 0);
-			subattr->put_value(subattr, base + off, subattr->attlen);
-			off = TYPEALIGN(subattr->attalign,
-							off + subattr->attlen);
-		}
-		else if (subattr->attlen == -1)
-		{
-			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-			char   *vl_dat = VARDATA_ANY(base + off);
-
-			subattr->put_value(subattr, vl_dat, vl_len);
-			off = TYPEALIGN(subattr->attalign,
-							off + VARSIZE_ANY(base + off));
-		}
-		else
-		{
-			Elog("Bug? sub-field '%s' of attribute '%s' has unsupported type",
-				 subattr->attname,
-				 attr->attname);
-		}
-		assert(attr->nitems == subattr->nitems);
-	}
-}
-#endif
-
-/*
- * Arrow::Struct - also see record_send()
  */
 static void
 put_composite_value(SQLattribute *attr,

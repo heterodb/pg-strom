@@ -105,24 +105,24 @@ typedef struct
 /*
  * Local Arrow Buffer - chunks pending to write
  */
-typedef struct
+typedef struct arrowLocalBufferXactTracker
 {
-	dlist_node		chain;
+	struct arrowLocalBufferXactTracker *prev;
 	SubTransactionId sub_xid;
-	int				index;
+	int				num_tables;
 	size_t			nitems;
 } arrowLocalBufferXactTracker;
 
 typedef struct
 {
+	dlist_node		chain;
 	Oid				frel_oid;
 	MemoryContext	memcxt;
-	TransactionId	curr_xid;
 	SubTransactionId curr_sub_xid;
 	SQLtable	   *curr_table;
 	SQLtable	  **any_tables;
 	int				num_tables;
-	dlist_head		xact_list;
+	arrowLocalBufferXactTracker *savepoint_list;
 } arrowLocalBuffer;
 
 /* ---------- static variables ---------- */
@@ -137,7 +137,10 @@ static int				arrow_metadata_cache_width;		/* GUC */
 					  fstate[arrow_metadata_cache_width]))
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size;		/* GUC */
-static HTAB			   *arrow_local_buffer_hash = NULL;
+
+#define ARROW_LOCAL_BUFFER_HASHSIZE		256
+static long				arrow_local_buffer_count = 0;
+static dlist_head		arrow_local_buffer_hash[ARROW_LOCAL_BUFFER_HASHSIZE];
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
 static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
@@ -159,6 +162,9 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   size_t index,
 								   Datum *p_datum,
 								   bool *p_isnull);
+/* INSERT support */
+static arrowLocalBuffer *lookupArrowLocalBuffer(Relation frel,
+												bool create_on_demand);
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
@@ -1851,14 +1857,34 @@ ArrowPlanForeignModify(PlannerInfo *root,
  */
 static void
 ArrowBeginForeignModify(ModifyTableState *mtstate,
-						ResultRelInfo *rinfo,
+						ResultRelInfo *rrinfo,
 						List *fdw_private,
 						int subplan_index,
 						int eflags)
 {
-	//1. Lookup or build local arrow buffer
-	//2. Attach mtstate
+	Relation		frel = rrinfo->ri_RelationDesc;
+	arrowLocalBuffer *lbuf;
 
+	lbuf = lookupArrowLocalBuffer(frel, true);
+	Assert(lbuf->num_tables > 0 &&
+		   lbuf->curr_table == lbuf->any_tables[lbuf->num_tables - 1]);
+	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
+	{
+		arrowLocalBufferXactTracker *xtrack
+			= MemoryContextAllocZero(lbuf->memcxt,
+									 sizeof(arrowLocalBufferXactTracker));
+		xtrack->sub_xid    = GetCurrentSubTransactionId();
+		xtrack->num_tables = lbuf->num_tables;
+		xtrack->nitems     = lbuf->curr_table->nitems;
+		xtrack->prev       = lbuf->savepoint_list;
+
+		elog(INFO, "xtrack subid=%u table/nitems=%d/%zu",
+			 xtrack->sub_xid, xtrack->num_tables, xtrack->nitems);
+		
+		lbuf->savepoint_list = xtrack;
+		lbuf->curr_sub_xid = xtrack->sub_xid;
+	}
+	rrinfo->ri_FdwState = lbuf;
 }
 
 /*
@@ -1866,12 +1892,62 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
  */
 static TupleTableSlot *
 ArrowExecForeignInsert(EState *estate,
-					   ResultRelInfo *rinfo,
+					   ResultRelInfo *rrinfo,
 					   TupleTableSlot *slot,
 					   TupleTableSlot *planSlot)
 {
-	//1. append local arrow buffer
+	Relation		frel = rrinfo->ri_RelationDesc;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	arrowLocalBuffer *lbuf = rrinfo->ri_FdwState;
+	SQLtable	   *table = lbuf->curr_table;
+	MemoryContext	oldcxt;
+	size_t			usage = 0;
+	int				j;
 
+	slot_getallattrs(slot);
+	oldcxt = MemoryContextSwitchTo(lbuf->memcxt);
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		SQLattribute *attr = &table->attrs[j];
+		Datum		datum = slot->tts_values[j];
+		bool		isnull = slot->tts_isnull[j];
+
+		if (isnull)
+		{
+			attr->put_value(attr, NULL, 0);
+		}
+		else if (attr->attbyval)
+		{
+			attr->put_value(attr, (char *)&datum, attr->attlen);
+		}
+		else if (attr->attlen == -1)
+		{
+			int		vl_len = VARSIZE_ANY_EXHDR(datum);
+			char   *vl_ptr = VARDATA_ANY(datum);
+			
+			attr->put_value(attr, vl_ptr, vl_len);
+		}
+		else
+		{
+			elog(ERROR, "Bug? unsupported type format");
+		}
+		usage += attr->buffer_usage(attr);
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	/* if usage exceeds the record-batch size, switch to new SQLtable */
+	if (usage > arrow_record_batch_size && table->nitems > 0)
+	{
+		SQLtable   *new_table;
+		
+
+
+
+
+
+		
+	}
+	table->nitems++;
 
 	return slot;
 }
@@ -3630,6 +3706,111 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 
 
 
+
+/*
+ * __put_array_value_native
+ */
+static void
+__put_array_value_native(SQLattribute *attr,
+						 const char *addr, int sz)
+{
+	/*
+	 * NOTE: varlena of ArrayType may have short-header (1byte, not 4bytes).
+	 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
+	 * benefit by elimination of redundant copy just for header.
+	 * Instead of the optimization, we should never use VARSIZE() or related.
+	 */
+	SQLattribute *element = attr->element;
+	ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
+	size_t		i, nitems = 1;
+	bits8	   *nullmap;
+	char	   *base;
+	size_t		off = 0;
+
+	for (i=0; i < ARR_NDIM(array); i++)
+		nitems *= ARR_DIMS(array)[i];
+	nullmap = ARR_NULLBITMAP(array);
+	base = ARR_DATA_PTR(array);
+	for (i=0; i < nitems; i++)
+	{
+		if (nullmap && att_isnull(i, nullmap))
+		{
+			element->put_value(element, NULL, 0);
+		}
+		else if (element->attbyval)
+		{
+			assert(element->attlen > 0);
+			element->put_value(element, base + off, element->attlen);
+			off = TYPEALIGN(element->attalign,
+							off + element->attlen);
+		}
+		else if (element->attlen == -1)
+		{
+			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+			char   *vl_data = VARDATA_ANY(base + off);
+
+			element->put_value(element, vl_data, vl_len);
+			off = TYPEALIGN(element->attalign,
+							off + VARSIZE_ANY(base + off));
+		}
+		else
+		{
+			Elog("Bug? PostgreSQL Array has unsupported element type");
+		}
+	}
+}
+
+/*
+ * __put_composite_value_native
+ */
+static void
+__put_composite_value_native(SQLattribute *attr,
+							 const char *addr, int sz)
+{
+	HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
+	bits8	   *nullmap = NULL;
+	int			j, nvalids;
+	char	   *base = (char *)htup + htup->t_hoff;
+	size_t		off = 0;
+
+	if ((htup->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = htup->t_bits;
+	nvalids = HeapTupleHeaderGetNatts(htup);
+
+	for (j=0; j < attr->nfields; j++)
+	{
+		SQLattribute *subattr = &attr->subfields[j];
+
+		if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
+		{
+			subattr->put_value(subattr, NULL, 0);
+		}
+		else if (subattr->attbyval)
+		{
+			assert(subattr->attlen > 0);
+			subattr->put_value(subattr, base + off, subattr->attlen);
+			off = TYPEALIGN(subattr->attalign,
+							off + subattr->attlen);
+		}
+		else if (subattr->attlen == -1)
+		{
+			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+			char   *vl_dat = VARDATA_ANY(base + off);
+
+			subattr->put_value(subattr, vl_dat, vl_len);
+			off = TYPEALIGN(subattr->attalign,
+							off + VARSIZE_ANY(base + off));
+		}
+		else
+		{
+			Elog("Bug? sub-field '%s' of attribute '%s' has unsupported type",
+				 subattr->attname,
+				 attr->attname);
+		}
+		assert(attr->nitems == subattr->nitems);
+	}
+}
+
 /*
  * setupArrowLocalBufferAttribute
  */
@@ -3676,6 +3857,8 @@ setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
 		setupArrowLocalBufferAttribute(sql_attr->element,
 									   psprintf("%s[]", attname),
 									   formType->typelem, -1);
+		/* ArrayType layout is much different from libpq binary form */
+		sql_attr->put_value = __put_array_value_native;
 	}
 	else if (OidIsValid(formType->typrelid))
 	{
@@ -3702,6 +3885,8 @@ setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
 										   subattr->atttypmod);
 		}
 		relation_close(comp, AccessShareLock);
+		/* Composite type has much different layout from libpq binary form */
+		sql_attr->put_value = __put_composite_value_native;
 	}
 	else if (formType->typtype == 'e')
 	{
@@ -3712,14 +3897,15 @@ setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
 }
 
 /*
- * setupArrowLocalBuffer
+ * createArrowLocalBuffer
  */
-static void
-setupArrowLocalBuffer(arrowLocalBuffer *lbuf, Relation frel)
+static arrowLocalBuffer *
+createArrowLocalBuffer(Relation frel)
 {
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	MemoryContext	memcxt;
 	MemoryContext	oldcxt;
+	arrowLocalBuffer *lbuf;
 	SQLtable	   *table;
 	int				j;
 
@@ -3738,7 +3924,18 @@ setupArrowLocalBuffer(arrowLocalBuffer *lbuf, Relation frel)
 									   attr->atttypid,
 									   attr->atttypmod);
 	}
+	lbuf = palloc0(sizeof(arrowLocalBuffer));
+	lbuf->frel_oid = RelationGetRelid(frel);
+	lbuf->memcxt = memcxt;
+	lbuf->curr_sub_xid = InvalidSubTransactionId;
+	lbuf->any_tables = palloc0(sizeof(SQLtable *) * 64);
+	lbuf->num_tables = 1;
+	lbuf->any_tables[0] = lbuf->curr_table = table;
+	lbuf->savepoint_list = NULL;
+
 	MemoryContextSwitchTo(oldcxt);
+
+	return lbuf;
 }
 
 /*
@@ -3747,52 +3944,30 @@ setupArrowLocalBuffer(arrowLocalBuffer *lbuf, Relation frel)
 static arrowLocalBuffer *
 lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 {
-	arrowLocalBuffer *lbuf;
-	Oid			frel_oid = RelationGetRelid(frel);
-	bool		found;
+	arrowLocalBuffer *lbuf = NULL;
+	Oid				frel_oid = RelationGetRelid(frel);
+	uint32			hash = hash_uint32(frel_oid);
+	dlist_head	   *hslot;
+	dlist_iter		iter;
 
-	if (!arrow_local_buffer_hash)
+	hslot = &arrow_local_buffer_hash[hash % ARROW_LOCAL_BUFFER_HASHSIZE];
+	dlist_foreach(iter, hslot)
 	{
-		HASHCTL		hctl;
-
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = sizeof(arrowLocalBuffer);
-		arrow_local_buffer_hash = hash_create("Arrow_Fdw Local Buffer",
-											  256,
-											  &hctl,
-											  HASH_ELEM | HASH_BLOBS);
+		lbuf = dlist_container(arrowLocalBuffer, chain, iter.cur);
+		if (lbuf->frel_oid == frel_oid)
+			return lbuf;
 	}
-	lbuf = hash_search(arrow_local_buffer_hash, &frel_oid,
-					   create_on_demand ? HASH_ENTER : HASH_FIND,
-					   &found);
-	if (!lbuf)
-		Assert(!create_on_demand);
-	else if (!found)
+	/* not found */
+	if (create_on_demand)
 	{
-		PG_TRY();
-		{
-			MemoryContext	memcxt;
-			MemoryContext	oldcxt;
+		lbuf = createArrowLocalBuffer(frel);
 
-			memcxt = AllocSetContextCreate(TopMemoryContext,
-										   "arrowLocalBuffer",
-										   ALLOCSET_DEFAULT_SIZES);
-			oldcxt = MemoryContextSwitchTo(memcxt);
+		dlist_push_tail(hslot, &lbuf->chain);
+		arrow_local_buffer_count++;
 
-			setupArrowLocalBuffer(lbuf, frel);
-
-			MemoryContextSwitchTo(oldcxt);
-		}
-		PG_CATCH();
-		{
-			hash_search(arrow_local_buffer_hash,
-						&frel_oid, HASH_REMOVE, NULL);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		return lbuf;
 	}
-	return lbuf;
+	return NULL;
 }
 
 /*
@@ -3801,32 +3976,108 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 static void
 arrowFdwXactCallback(XactEvent event, void *arg)
 {
-	switch (event)
+	if (!arrow_local_buffer_count)
+		return;
+	if (event == XACT_EVENT_PRE_COMMIT ||
+		event == XACT_EVENT_COMMIT ||
+		event == XACT_EVENT_ABORT)
 	{
-		case XACT_EVENT_PRE_COMMIT:
-			/* preparation of write */
+		int		index;
 
-			/* makes record batch images */
-			/* expand file size */
-			
-			break;
-		case XACT_EVENT_COMMIT:
-			break;
+		for (index=0; index < ARROW_LOCAL_BUFFER_HASHSIZE; index++)
+		{
+			dlist_head	   *hslot = &arrow_local_buffer_hash[index];
+			dlist_mutable_iter iter;
 
-		case XACT_EVENT_ABORT:
-			/* clean up buffers */
-			
-			break;
-		default:
-			/* do nothing */
-			return;
+			dlist_foreach_modify(iter, hslot)
+			{
+				arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
+														   chain, iter.cur);
+				switch (event)
+				{
+					case XACT_EVENT_PRE_COMMIT:
+						/* preparation of write */
+						/* footer backup */
+						elog(INFO, "PRE_COMMIT lbuf (oid=%u)", lbuf->frel_oid);
+						break;
+					case XACT_EVENT_COMMIT:
+						elog(INFO, "COMMIT lbuf (oid=%u)", lbuf->frel_oid);
+					default:
+						elog(INFO, "release lbuf (oid=%u)", lbuf->frel_oid);
+						dlist_delete(&lbuf->chain);
+						MemoryContextDelete(lbuf->memcxt);
+						break;
+				}
+			}
+		}
 	}
+}
 
+/*
+ * rewindArrowLocalBuffer
+ */
+static void
+rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
+{
+	arrowLocalBufferXactTracker *xtrack;
 
+	for (xtrack = lbuf->savepoint_list; xtrack != NULL; xtrack = xtrack->prev)
+	{
+		SQLtable   *curr_table;
+		int			j;
+		
+		if (xtrack->sub_xid != sub_xid)
+			continue;
+		Assert(lbuf->num_tables > xtrack->num_tables ||
+			   (lbuf->num_tables == xtrack->num_tables &&
+				lbuf->curr_table->nitems >= xtrack->nitems));
+		for (j=lbuf->num_tables; j > xtrack->num_tables; j--)
+		{
+			//release SQLtable
+			lbuf->any_tables[j-1] = NULL;
+		}
+		curr_table = lbuf->any_tables[xtrack->num_tables - 1];
+		for (j=0; j < curr_table->nfields; j++)
+		{
+			//SQLattribute   *attr = &curr_table->attrs[j];
+			//attr->rewind_buffer(attr, xtrack->nitems);
+		}
+		curr_table->nitems = xtrack->nitems;
+		lbuf->num_tables = xtrack->num_tables;
+		lbuf->curr_sub_xid = InvalidSubTransactionId;
+		lbuf->savepoint_list = xtrack->prev;
 
+		elog(INFO, "rewind sub_xid=%u", sub_xid);
 
-	
+		return;
+	}
+}
 
+/*
+ * arrowFdwSubXactCallback
+ */
+static void
+arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+						SubTransactionId parentSubid, void *arg)
+{
+	int			index;
+
+	if (event != SUBXACT_EVENT_ABORT_SUB)
+		return;
+	if (arrow_local_buffer_count == 0)
+		return;
+	for (index=0; index < ARROW_LOCAL_BUFFER_HASHSIZE; index++)
+	{
+		dlist_head *hslot = &arrow_local_buffer_hash[index];
+		dlist_iter	iter;
+
+		dlist_foreach (iter, hslot)
+		{
+			arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
+													   chain, iter.cur);
+			rewindArrowLocalBuffer(lbuf, mySubid);
+		}
+	}
 }
 
 /*
@@ -3886,6 +4137,7 @@ void
 pgstrom_init_arrow_fdw(void)
 {
 	FdwRoutine *r = &pgstrom_arrow_fdw_routine;
+	int			i;
 
 	memset(r, 0, sizeof(FdwRoutine));
 	NodeSetTag(r, T_FdwRoutine);
@@ -3986,6 +4238,9 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 
-	/* transaction callback  */
+	/* arrow local buffer and transaction callback */
+	for (i=0; i < ARROW_LOCAL_BUFFER_HASHSIZE; i++)
+		dlist_init(&arrow_local_buffer_hash[i]);
 	RegisterXactCallback(arrowFdwXactCallback, NULL);
+	RegisterSubXactCallback(arrowFdwSubXactCallback, NULL);
 }
