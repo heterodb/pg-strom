@@ -2565,6 +2565,170 @@ put_dictionary_value(SQLattribute *attr,
 	}
 }
 
+/*
+ * Rewind the Arrow Type Buffer
+ */
+void
+rewindArrowTypeBuffer(SQLattribute *attr, size_t nitems)
+{
+	if (nitems > attr->nitems)
+		Elog("Bug? tried to rewind the buffer beyond the tail");
+	else if (nitems == attr->nitems)
+	{
+		/* special case, nothing to do */
+		return;
+	}
+	else if (nitems == 0)
+	{
+		/* special case optimization */
+		sql_buffer_clear(&attr->nullmap);
+		sql_buffer_clear(&attr->values);
+		sql_buffer_clear(&attr->extra);
+		attr->nitems = 0;
+		attr->nullcount = 0;
+		return;
+	}
+	else if (attr->nullcount > 0)
+	{
+		long		nullcount = 0;
+		uint32	   *nullmap = (uint32 *)attr->nullmap.data;
+		uint32		i, n = nitems / 32;
+		uint32		mask = (1UL << (nitems % 32)) - 1;
+
+		for (i=0; i < n; i++)
+			nullcount += __builtin_popcount(~nullmap[i]);
+		if (mask != 0)
+			nullcount += __builtin_popcount(~nullmap[n] & mask);
+		attr->nullcount = nullcount;
+	}
+	attr->nitems = nitems;
+	attr->nullmap.usage = (nitems + 7) >> 3;
+
+	switch (attr->arrow_type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (attr->arrow_type.Int.bitWidth)
+			{
+				case 8:
+					attr->values.usage = sizeof(int8) * nitems;
+					break;
+				case 16:
+					attr->values.usage = sizeof(int16) * nitems;
+					break;
+				case 32:
+					attr->values.usage = sizeof(int32) * nitems;
+					break;
+				case 64:
+					attr->values.usage = sizeof(int64) * nitems;
+					break;
+				default:
+					Elog("unknown width of Arrow::Int type: %d",
+						 attr->arrow_type.Int.bitWidth);
+					break;
+			}
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			switch (attr->arrow_type.FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					attr->values.usage = sizeof(int16) * nitems;
+					break;
+				case ArrowPrecision__Single:
+					attr->values.usage = sizeof(int32) * nitems;
+					break;
+				case ArrowPrecision__Double:
+					attr->values.usage = sizeof(int64) * nitems;
+					break;
+				default:
+					Elog("unknown precision of Arrow::FloatingPoint type: %d",
+						 attr->arrow_type.FloatingPoint.precision);
+					break;
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__Binary:
+			attr->values.usage = sizeof(int32) * (nitems + 1);
+			attr->extra.usage = ((uint32 *)attr->values.data)[nitems];
+			break;
+		case ArrowNodeTag__Bool:
+			attr->values.usage = (nitems + 7) >> 3;
+			break;
+		case ArrowNodeTag__Decimal:
+			attr->values.usage = sizeof(int128) * nitems;
+			break;
+		case ArrowNodeTag__Date:
+			switch (attr->arrow_type.Date.unit)
+			{
+				case ArrowDateUnit__Day:
+					attr->values.usage = sizeof(int32) * nitems;
+					break;
+				case ArrowDateUnit__MilliSecond:
+					attr->values.usage = sizeof(int64) * nitems;
+					break;
+				default:
+					Elog("unknown unit of Arrow::Date type; %u",
+						 attr->arrow_type.Date.unit);
+					break;
+			}
+			break;
+		case ArrowNodeTag__Time:
+			switch (attr->arrow_type.Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+					attr->values.usage = sizeof(int32) * nitems;
+					break;
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					attr->values.usage = sizeof(int64) * nitems;
+					break;
+				default:
+					Elog("unknown unit of Arrow::Time type; %u",
+						 attr->arrow_type.Time.unit);
+			}
+			break;
+		case ArrowNodeTag__Timestamp:
+			attr->values.usage = sizeof(int64) * nitems;
+			break;
+		case ArrowNodeTag__Interval:
+			switch (attr->arrow_type.Interval.unit)
+			{
+				case ArrowIntervalUnit__Year_Month:
+					attr->values.usage = sizeof(int32) * nitems;
+					break;
+				case ArrowIntervalUnit__Day_Time:
+					attr->values.usage = sizeof(int64) * nitems;
+					break;
+				default:
+					Elog("unknown unit of Arrow::Interval type; %u",
+						 attr->arrow_type.Interval.unit);
+			}
+			break;
+		case ArrowNodeTag__List:
+			attr->values.usage = sizeof(int32) * (nitems + 1);
+			rewindArrowTypeBuffer(attr->element, nitems);
+			break;
+		case ArrowNodeTag__Struct:
+			{
+				for (int j=0; j < attr->nfields; j++)
+					rewindArrowTypeBuffer(&attr->subfields[j], nitems);
+
+			}
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			{
+				int32	unitsz = attr->arrow_type.FixedSizeBinary.byteWidth;
+
+				attr->values.usage = unitsz * nitems;
+			}
+			break;
+		default:
+			Elog("unexpected ArrowType node tag: %s (%u)",
+				 attr->arrow_type.node.tagName,
+				 attr->arrow_type.node.tag);
+	}
+}
+
 /* ----------------------------------------------------------------
  *
  * buffer_usage handler for each data types

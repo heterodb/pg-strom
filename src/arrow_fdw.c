@@ -4039,8 +4039,8 @@ rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
 		curr_table = lbuf->any_tables[xtrack->num_tables - 1];
 		for (j=0; j < curr_table->nfields; j++)
 		{
-			//SQLattribute   *attr = &curr_table->attrs[j];
-			//attr->rewind_buffer(attr, xtrack->nitems);
+			rewindArrowTypeBuffer(&curr_table->attrs[j],
+								  xtrack->nitems);
 		}
 		curr_table->nitems = xtrack->nitems;
 		lbuf->num_tables = xtrack->num_tables;

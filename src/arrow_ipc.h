@@ -131,6 +131,7 @@ extern int		assignArrowType(SQLattribute *attr);
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
+extern void		rewindArrowTypeBuffer(SQLattribute *attr, size_t nitems);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern char	   *dumpArrowNode(ArrowNode *node);
 
