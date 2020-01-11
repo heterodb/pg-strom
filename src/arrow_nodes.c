@@ -1719,7 +1719,7 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
  * ----------------------------------------------------------------
  */
 static void
-put_bool_value(SQLattribute *attr, const char *addr, int sz)
+put_bool_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	int8		value;
@@ -1742,7 +1742,7 @@ put_bool_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static inline void
-put_inline_null_value(SQLattribute *attr, size_t row_index, int sz)
+put_inline_null_value(SQLfield *attr, size_t row_index, int sz)
 {
 	attr->nullcount++;
 	sql_buffer_clrbit(&attr->nullmap, row_index);
@@ -1753,7 +1753,7 @@ put_inline_null_value(SQLattribute *attr, size_t row_index, int sz)
  * IntXX/UintXX
  */
 static void
-put_int8_value(SQLattribute *attr, const char *addr, int sz)
+put_int8_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint8		value;
@@ -1774,7 +1774,7 @@ put_int8_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_int16_value(SQLattribute *attr, const char *addr, int sz)
+put_int16_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint16		value;
@@ -1793,7 +1793,7 @@ put_int16_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_int32_value(SQLattribute *attr, const char *addr, int sz)
+put_int32_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint32		value;
@@ -1812,7 +1812,7 @@ put_int32_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_int64_value(SQLattribute *attr, const char *addr, int sz)
+put_int64_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint64		value;
@@ -1834,7 +1834,7 @@ put_int64_value(SQLattribute *attr, const char *addr, int sz)
  * FloatingPointXX
  */
 static void
-put_float16_value(SQLattribute *attr, const char *addr, int sz)
+put_float16_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint16		value;
@@ -1851,7 +1851,7 @@ put_float16_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_float32_value(SQLattribute *attr, const char *addr, int sz)
+put_float32_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint32		value;
@@ -1868,7 +1868,7 @@ put_float32_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_float64_value(SQLattribute *attr, const char *addr, int sz)
+put_float64_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 	uint64		value;
@@ -1963,7 +1963,7 @@ init_var_from_num(NumericVar *nv, const char *addr, int sz)
 #endif	/* !__PG2ARROW__ */
 
 static void
-put_decimal_value(SQLattribute *attr,
+put_decimal_value(SQLfield *attr,
 			const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2037,7 +2037,7 @@ put_decimal_value(SQLattribute *attr,
  * Date
  */
 static inline void
-__put_date_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
+__put_date_value_generic(SQLfield *attr, const char *addr, int pgsql_sz,
 						 int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2065,19 +2065,19 @@ __put_date_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
 }
 
 static void
-__put_date_day_value(SQLattribute *attr, const char *addr, int sz)
+__put_date_day_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_date_value_generic(attr, addr, sz, 0, sizeof(int32));
 }
 
 static void
-__put_date_ms_value(SQLattribute *attr, const char *addr, int sz)
+__put_date_ms_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_date_value_generic(attr, addr, sz, 86400000L, sizeof(int64));
 }
 
 static void
-put_date_value(SQLattribute *attr, const char *addr, int sz)
+put_date_value(SQLfield *attr, const char *addr, int sz)
 {
 	/* validation checks only first call */
 	switch (attr->arrow_type.Date.unit)
@@ -2100,7 +2100,7 @@ put_date_value(SQLattribute *attr, const char *addr, int sz)
  * Time
  */
 static inline void
-__put_time_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
+__put_time_value_generic(SQLfield *attr, const char *addr, int pgsql_sz,
 						 int64 adjustment, int arrow_sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2127,31 +2127,31 @@ __put_time_value_generic(SQLattribute *attr, const char *addr, int pgsql_sz,
 }
 
 static void
-__put_time_sec_value(SQLattribute *attr, const char *addr, int sz)
+__put_time_sec_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_time_value_generic(attr, addr, sz, -1000000L, sizeof(int32));
 }
 
 static void
-__put_time_ms_value(SQLattribute *attr, const char *addr, int sz)
+__put_time_ms_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_time_value_generic(attr, addr, sz, -1000L, sizeof(int32));
 }
 
 static void
-__put_time_us_value(SQLattribute *attr, const char *addr, int sz)
+__put_time_us_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_time_value_generic(attr, addr, sz, 0L, sizeof(int64));
 }
 
 static void
-__put_time_ns_value(SQLattribute *attr, const char *addr, int sz)
+__put_time_ns_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_time_value_generic(attr, addr, sz, 1000L, sizeof(int64));
 }
 
 static void
-put_time_value(SQLattribute *attr, const char *addr, int sz)
+put_time_value(SQLfield *attr, const char *addr, int sz)
 {
 	switch (attr->arrow_type.Time.unit)
 	{
@@ -2190,7 +2190,7 @@ put_time_value(SQLattribute *attr, const char *addr, int sz)
  * Timestamp
  */
 static inline void
-__put_timestamp_value_generic(SQLattribute *attr,
+__put_timestamp_value_generic(SQLfield *attr,
 							  const char *addr, int pgsql_sz,
 							  int64 adjustment, int arrow_sz)
 {
@@ -2221,31 +2221,31 @@ __put_timestamp_value_generic(SQLattribute *attr,
 }
 
 static void
-__put_timestamp_sec_value(SQLattribute *attr, const char *addr, int sz)
+__put_timestamp_sec_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_timestamp_value_generic(attr, addr, sz, -1000000L, sizeof(int64));
 }
 
 static void
-__put_timestamp_ms_value(SQLattribute *attr, const char *addr, int sz)
+__put_timestamp_ms_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_timestamp_value_generic(attr, addr, sz, -1000L, sizeof(int64));
 }
 
 static void
-__put_timestamp_us_value(SQLattribute *attr, const char *addr, int sz)
+__put_timestamp_us_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_timestamp_value_generic(attr, addr, sz, 0L, sizeof(int64));
 }
 
 static void
-__put_timestamp_ns_value(SQLattribute *attr, const char *addr, int sz)
+__put_timestamp_ns_value(SQLfield *attr, const char *addr, int sz)
 {
 	__put_timestamp_value_generic(attr, addr, sz, -1000L, sizeof(int64));
 }
 
 static void
-put_timestamp_value(SQLattribute *attr, const char *addr, int sz)
+put_timestamp_value(SQLfield *attr, const char *addr, int sz)
 {
 	switch (attr->arrow_type.Timestamp.unit)
 	{
@@ -2276,7 +2276,7 @@ put_timestamp_value(SQLattribute *attr, const char *addr, int sz)
 #define HOURS_PER_DAY	24		/* assume no daylight savings time changes */
 
 static void
-__put_interval_year_month_value(SQLattribute *attr, const char *addr, int sz)
+__put_interval_year_month_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 
@@ -2293,7 +2293,7 @@ __put_interval_year_month_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-__put_interval_day_time_value(SQLattribute *attr, const char *addr, int sz)
+__put_interval_day_time_value(SQLfield *attr, const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
 
@@ -2322,7 +2322,7 @@ __put_interval_day_time_value(SQLattribute *attr, const char *addr, int sz)
 }
 
 static void
-put_interval_value(SQLattribute *attr, const char *addr, int sz)
+put_interval_value(SQLfield *attr, const char *addr, int sz)
 {
 	switch (attr->arrow_type.Interval.unit)
 	{
@@ -2344,7 +2344,7 @@ put_interval_value(SQLattribute *attr, const char *addr, int sz)
  * Utf8, Binary
  */
 static void
-put_variable_value(SQLattribute *attr,
+put_variable_value(SQLfield *attr,
 				   const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2369,7 +2369,7 @@ put_variable_value(SQLattribute *attr,
  * FixedSizeBinary
  */
 static void
-put_bpchar_value(SQLattribute *attr,
+put_bpchar_value(SQLfield *attr,
 				 const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2396,10 +2396,10 @@ put_bpchar_value(SQLattribute *attr,
  * List::<element> type
  */
 static void
-put_array_value(SQLattribute *attr,
+put_array_value(SQLfield *attr,
 				const char *addr, int sz)
 {
-	SQLattribute *element = attr->element;
+	SQLfield *element = attr->element;
 	size_t		row_index = attr->nitems++;
 
 	if (row_index == 0)
@@ -2463,7 +2463,7 @@ put_array_value(SQLattribute *attr,
  * Arrow::Struct
  */
 static void
-put_composite_value(SQLattribute *attr,
+put_composite_value(SQLfield *attr,
 					const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2476,7 +2476,7 @@ put_composite_value(SQLattribute *attr,
 		/* NULL for all the subtypes */
 		for (j=0; j < attr->nfields; j++)
 		{
-			SQLattribute *subattr = &attr->subfields[j];
+			SQLfield *subattr = &attr->subfields[j];
 			subattr->put_value(subattr, NULL, 0);
 		}
 	}
@@ -2492,7 +2492,7 @@ put_composite_value(SQLattribute *attr,
 		pos += sizeof(int);
 		for (j=0; j < attr->nfields; j++)
 		{
-			SQLattribute *subattr = &attr->subfields[j];
+			SQLfield *subattr = &attr->subfields[j];
 			Oid		atttypid;
 			int		attlen;
 
@@ -2530,7 +2530,7 @@ put_composite_value(SQLattribute *attr,
 }
 
 static void
-put_dictionary_value(SQLattribute *attr,
+put_dictionary_value(SQLfield *attr,
 					 const char *addr, int sz)
 {
 	size_t		row_index = attr->nitems++;
@@ -2569,7 +2569,7 @@ put_dictionary_value(SQLattribute *attr,
  * Rewind the Arrow Type Buffer
  */
 void
-rewindArrowTypeBuffer(SQLattribute *attr, size_t nitems)
+rewindArrowTypeBuffer(SQLfield *attr, size_t nitems)
 {
 	if (nitems > attr->nitems)
 		Elog("Bug? tried to rewind the buffer beyond the tail");
@@ -2735,7 +2735,7 @@ rewindArrowTypeBuffer(SQLattribute *attr, size_t nitems)
  *
  * ---------------------------------------------------------------- */
 static size_t
-buffer_usage_inline_type(SQLattribute *attr)
+buffer_usage_inline_type(SQLfield *attr)
 {
 	size_t		usage;
 
@@ -2746,7 +2746,7 @@ buffer_usage_inline_type(SQLattribute *attr)
 }
 
 static size_t
-buffer_usage_varlena_type(SQLattribute *attr)
+buffer_usage_varlena_type(SQLfield *attr)
 {
 	size_t		usage;
 
@@ -2758,9 +2758,9 @@ buffer_usage_varlena_type(SQLattribute *attr)
 }
 
 static size_t
-buffer_usage_array_type(SQLattribute *attr)
+buffer_usage_array_type(SQLfield *attr)
 {
-	SQLattribute   *element = attr->element;
+	SQLfield   *element = attr->element;
 	size_t			usage;
 
 	usage = ARROWALIGN(attr->values.usage);
@@ -2772,7 +2772,7 @@ buffer_usage_array_type(SQLattribute *attr)
 }
 
 static size_t
-buffer_usage_composite_type(SQLattribute *attr)
+buffer_usage_composite_type(SQLfield *attr)
 {
 	size_t		usage = 0;
 	int			j;
@@ -2781,7 +2781,7 @@ buffer_usage_composite_type(SQLattribute *attr)
 		usage += ARROWALIGN(attr->nullmap.usage);
 	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute *subattr = &attr->subfields[j];
+		SQLfield *subattr = &attr->subfields[j];
 		usage += subattr->buffer_usage(subattr);
 	}
 	return usage;
@@ -2832,7 +2832,7 @@ setup_arrow_buffer(ArrowBuffer *node, size_t offset, size_t length)
 }
 
 static int
-setup_buffer_inline_type(SQLattribute *attr,
+setup_buffer_inline_type(SQLfield *attr,
 						 ArrowBuffer *node, size_t *p_offset)
 {
 	size_t		offset = *p_offset;
@@ -2850,7 +2850,7 @@ setup_buffer_inline_type(SQLattribute *attr,
 }
 
 static int
-setup_buffer_varlena_type(SQLattribute *attr,
+setup_buffer_varlena_type(SQLfield *attr,
 						  ArrowBuffer *node, size_t *p_offset)
 {
 	size_t		offset = *p_offset;
@@ -2870,10 +2870,10 @@ setup_buffer_varlena_type(SQLattribute *attr,
 }
 
 static int
-setup_buffer_array_type(SQLattribute *attr,
+setup_buffer_array_type(SQLfield *attr,
 						ArrowBuffer *node, size_t *p_offset)
 {
-	SQLattribute *element = attr->element;
+	SQLfield *element = attr->element;
 	int			count = 2;
 
 	/* nullmap */
@@ -2892,7 +2892,7 @@ setup_buffer_array_type(SQLattribute *attr,
 }
 
 static int
-setup_buffer_composite_type(SQLattribute *attr,
+setup_buffer_composite_type(SQLfield *attr,
 							ArrowBuffer *node, size_t *p_offset)
 {
 	int			j, count = 1;
@@ -2906,7 +2906,7 @@ setup_buffer_composite_type(SQLattribute *attr,
 	/* walk down the sub-types */
 	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute   *subattr = &attr->subfields[j];
+		SQLfield   *subattr = &attr->subfields[j];
 
 		count += subattr->setup_buffer(subattr, node+count, p_offset);
 	}
@@ -2920,7 +2920,7 @@ setup_buffer_composite_type(SQLattribute *attr,
  * ----------------------------------------------------------------
  */
 static void
-write_buffer_inline_type(SQLattribute *attr, int fdesc)
+write_buffer_inline_type(SQLfield *attr, int fdesc)
 {
 	/* nullmap */
 	if (attr->nullcount > 0)
@@ -2930,7 +2930,7 @@ write_buffer_inline_type(SQLattribute *attr, int fdesc)
 }
 
 static void
-write_buffer_varlena_type(SQLattribute *attr, int fdesc)
+write_buffer_varlena_type(SQLfield *attr, int fdesc)
 {
 	/* nullmap */
 	if (attr->nullcount > 0)
@@ -2942,9 +2942,9 @@ write_buffer_varlena_type(SQLattribute *attr, int fdesc)
 }
 
 static void
-write_buffer_array_type(SQLattribute *attr, int fdesc)
+write_buffer_array_type(SQLfield *attr, int fdesc)
 {
-	SQLattribute *element = attr->element;
+	SQLfield *element = attr->element;
 
 	/* nullmap */
 	if (attr->nullcount > 0)
@@ -2956,7 +2956,7 @@ write_buffer_array_type(SQLattribute *attr, int fdesc)
 }
 
 static void
-write_buffer_composite_type(SQLattribute *attr, int fdesc)
+write_buffer_composite_type(SQLfield *attr, int fdesc)
 {
 	int			j;
 
@@ -2966,7 +2966,7 @@ write_buffer_composite_type(SQLattribute *attr, int fdesc)
 	/* sub-types */
 	for (j=0; j < attr->nfields; j++)
 	{
-		SQLattribute   *subattr = &attr->subfields[j];
+		SQLfield   *subattr = &attr->subfields[j];
 
 		subattr->write_buffer(subattr, fdesc);
 	}
@@ -2979,7 +2979,7 @@ write_buffer_composite_type(SQLattribute *attr, int fdesc)
  * ----------------------------------------------------------------
  */
 static int
-assignArrowTypeInt(SQLattribute *attr, bool is_signed)
+assignArrowTypeInt(SQLfield *attr, bool is_signed)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Int);
 	attr->arrow_type.Int.is_signed = is_signed;
@@ -3017,7 +3017,7 @@ assignArrowTypeInt(SQLattribute *attr, bool is_signed)
 }
 
 static int
-assignArrowTypeFloatingPoint(SQLattribute *attr)
+assignArrowTypeFloatingPoint(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, FloatingPoint);
 	switch (attr->attlen)
@@ -3049,7 +3049,7 @@ assignArrowTypeFloatingPoint(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeBinary(SQLattribute *attr)
+assignArrowTypeBinary(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Binary);
 	attr->arrow_typename	= "Binary";
@@ -3062,7 +3062,7 @@ assignArrowTypeBinary(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeUtf8(SQLattribute *attr)
+assignArrowTypeUtf8(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Utf8);
 	attr->arrow_typename	= "Utf8";
@@ -3075,7 +3075,7 @@ assignArrowTypeUtf8(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeBpchar(SQLattribute *attr)
+assignArrowTypeBpchar(SQLfield *attr)
 {
 	if (attr->atttypmod <= VARHDRSZ)
 		Elog("unexpected Bpchar definition (typmod=%d)", attr->atttypmod);
@@ -3092,7 +3092,7 @@ assignArrowTypeBpchar(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeBool(SQLattribute *attr)
+assignArrowTypeBool(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Bool);
 	attr->arrow_typename	= "Bool";
@@ -3105,7 +3105,7 @@ assignArrowTypeBool(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeDecimal(SQLattribute *attr)
+assignArrowTypeDecimal(SQLfield *attr)
 {
 #ifdef PG_INT128_TYPE
 	int		typmod			= attr->atttypmod;
@@ -3138,7 +3138,7 @@ assignArrowTypeDecimal(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeDate(SQLattribute *attr)
+assignArrowTypeDate(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Date);
 	attr->arrow_type.Date.unit = ArrowDateUnit__Day;
@@ -3152,7 +3152,7 @@ assignArrowTypeDate(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeTime(SQLattribute *attr)
+assignArrowTypeTime(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Time);
 	attr->arrow_type.Time.unit = ArrowTimeUnit__MicroSecond;
@@ -3167,7 +3167,7 @@ assignArrowTypeTime(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeTimestamp(SQLattribute *attr)
+assignArrowTypeTimestamp(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Timestamp);
 	attr->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
@@ -3181,7 +3181,7 @@ assignArrowTypeTimestamp(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeInterval(SQLattribute *attr)
+assignArrowTypeInterval(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Interval);
 	attr->arrow_type.Interval.unit = ArrowIntervalUnit__Day_Time;
@@ -3195,9 +3195,9 @@ assignArrowTypeInterval(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeList(SQLattribute *attr)
+assignArrowTypeList(SQLfield *attr)
 {
-	SQLattribute *element = attr->element;
+	SQLfield *element = attr->element;
 
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, List);
 	attr->put_value			= put_array_value;
@@ -3210,7 +3210,7 @@ assignArrowTypeList(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeStruct(SQLattribute *attr)
+assignArrowTypeStruct(SQLfield *attr)
 {
 	assert(attr->subfields != NULL);
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Struct);
@@ -3224,7 +3224,7 @@ assignArrowTypeStruct(SQLattribute *attr)
 }
 
 static int
-assignArrowTypeDictionary(SQLattribute *attr)
+assignArrowTypeDictionary(SQLfield *attr)
 {
 	INIT_ARROW_TYPE_NODE(&attr->arrow_type, Utf8);
 	attr->arrow_typename	= psprintf("Enum; dictionary=%u", attr->atttypid);
@@ -3240,7 +3240,7 @@ assignArrowTypeDictionary(SQLattribute *attr)
  * assignArrowType
  */
 int
-assignArrowType(SQLattribute *attr)
+assignArrowType(SQLfield *attr)
 {
 	memset(&attr->arrow_type, 0, sizeof(ArrowType));
 	if (attr->subfields)

@@ -895,14 +895,15 @@ writeFlatBufferFooter(int fdesc, ArrowFooter *footer)
 
 static void
 setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
-							 SQLattribute *attr)
+							 SQLfield *column)
 {
 	initArrowNode(dict, DictionaryEncoding);
-	if (attr->enumdict)
+	if (column->enumdict)
 	{
+		SQLdictionary  *enumdict = column->enumdict;
 		ArrowTypeInt   *indexType = &dict->indexType;
 
-		dict->id = attr->enumdict->dict_id;
+		dict->id = enumdict->dict_id;
 		/* dictionary index must be Int32 */
 		initArrowNode(indexType, Int);
 		indexType->bitWidth  = 32;
@@ -912,34 +913,34 @@ setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 }
 
 static void
-setupArrowField(ArrowField *field, SQLattribute *attr)
+setupArrowField(ArrowField *field, SQLfield *column)
 {
 	initArrowNode(field, Field);
-	field->name = attr->attname;
-	field->_name_len = strlen(attr->attname);
+	field->name = column->attname;
+	field->_name_len = strlen(column->attname);
 	field->nullable = true;
-	field->type = attr->arrow_type;
-	setupArrowDictionaryEncoding(&field->dictionary, attr);
+	field->type = column->arrow_type;
+	setupArrowDictionaryEncoding(&field->dictionary, column);
 	/* array type */
-	if (attr->element)
+	if (column->element)
 	{
 		field->children = palloc0(sizeof(ArrowField));
 		field->_num_children = 1;
-		setupArrowField(field->children, attr->element);
+		setupArrowField(field->children, column->element);
 	}
 	/* composite type */
-	if (attr->subfields)
+	if (column->subfields)
 	{
 		int		j;
 
-		field->children = palloc0(sizeof(ArrowField) * attr->nfields);
-		field->_num_children = attr->nfields;
-		for (j=0; j < attr->nfields; j++)
-			setupArrowField(&field->children[j], &attr->subfields[j]);
+		field->children = palloc0(sizeof(ArrowField) * column->nfields);
+		field->_num_children = column->nfields;
+		for (j=0; j < column->nfields; j++)
+			setupArrowField(&field->children[j], &column->subfields[j]);
 	}
 	/* custom metadata, if any */
-	field->_num_custom_metadata = attr->numCustomMetadata;
-	field->custom_metadata = attr->customMetadata;
+	field->_num_custom_metadata = column->numCustomMetadata;
+	field->custom_metadata = column->customMetadata;
 }
 
 ssize_t
@@ -958,7 +959,7 @@ writeArrowSchema(SQLtable *table)
 	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->attrs[i]);
+		setupArrowField(&schema->fields[i], &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
 	/* serialization */
@@ -1066,28 +1067,28 @@ writeArrowDictionaryBatches(SQLtable *table)
  * setupArrowFieldNode
  */
 static int
-setupArrowFieldNode(ArrowFieldNode *fnode, SQLattribute *attr)
+setupArrowFieldNode(ArrowFieldNode *fnode, SQLfield *column)
 {
-	SQLattribute *element = attr->element;
+	SQLfield   *element = column->element;
 	int			j, count = 1;
 
 	initArrowNode(fnode, FieldNode);
-	fnode->length = attr->nitems;
-	fnode->null_count = attr->nullcount;
+	fnode->length = column->nitems;
+	fnode->null_count = column->nullcount;
 	/* array types */
 	if (element)
 		count += setupArrowFieldNode(fnode + count, element);
 	/* composite types */
-	if (attr->subfields)
+	if (column->subfields)
 	{
-		for (j=0; j < attr->nfields; j++)
-			count += setupArrowFieldNode(fnode + count, &attr->subfields[j]);
+		for (j=0; j < column->nfields; j++)
+			count += setupArrowFieldNode(fnode + count, &column->subfields[j]);
 	}
 	return count;
 }
 
 void
-writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
+writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 {
 	ArrowMessage	message;
 	ArrowRecordBatch *rbatch;
@@ -1099,7 +1100,7 @@ writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 	off_t			currPos;
 	size_t			metaLength;
 	size_t			bodyLength = 0;
-	size_t			nitems = attrs[0].nitems;
+	size_t			nitems = columns[0].nitems;
 
 	/* adjust current file position */
 	currPos = lseek(table->fdesc, 0, SEEK_CUR);
@@ -1118,8 +1119,8 @@ writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 	nodes = alloca(sizeof(ArrowFieldNode) * table->numFieldNodes);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		assert(attrs[i].nitems == nitems);
-		j += setupArrowFieldNode(&nodes[j], &attrs[i]);
+		assert(columns[i].nitems == nitems);
+		j += setupArrowFieldNode(&nodes[j], &columns[i]);
 	}
 	assert(j == table->numFieldNodes);
 
@@ -1127,9 +1128,9 @@ writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 	buffers = alloca(sizeof(ArrowBuffer) * table->numBuffers);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		SQLattribute   *attr = &attrs[i];
+		SQLfield   *col = &columns[i];
 
-		j += attr->setup_buffer(attr, &buffers[j], &bodyLength);
+		j += col->setup_buffer(col, &buffers[j], &bodyLength);
 	}
 	assert(j == table->numBuffers);
 
@@ -1149,9 +1150,9 @@ writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 	metaLength = writeFlatBufferMessage(table->fdesc, &message);
 	for (i=0; i < table->nfields; i++)
 	{
-		SQLattribute   *attr = &attrs[i];
+		SQLfield   *col = &columns[i];
 
-		attr->write_buffer(attr, table->fdesc);
+		col->write_buffer(col, table->fdesc);
 	}
 
 	/* save the offset/length at ArrowBlock */
@@ -1169,7 +1170,7 @@ writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 
 	/* makes table/attributes empty again */
 	for (j=0; j < table->nfields; j++)
-		rewindArrowTypeBuffer(&attrs[j], 0);
+		rewindArrowTypeBuffer(&columns[j], 0);
 }
 
 /*
@@ -1193,7 +1194,7 @@ writeArrowFooter(SQLtable *table)
 	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->attrs[i]);
+		setupArrowField(&schema->fields[i], &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
 

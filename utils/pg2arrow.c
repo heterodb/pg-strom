@@ -25,13 +25,13 @@ static PGresult *pgsql_next_result(PGconn *conn);
 static void      pgsql_end_query(PGconn *conn);
 static void      pgsql_setup_composite_type(PGconn *conn,
 											SQLtable *root,
-											SQLattribute *attr,
+											SQLfield *attr,
 											Oid comptype_relid,
 											int *p_numFieldNodes,
 											int *p_numBuffers);
 static void      pgsql_setup_array_element(PGconn *conn,
 										   SQLtable *root,
-										   SQLattribute *attr,
+										   SQLfield *attr,
 										   Oid array_elemid,
 										   int *p_numFieldNode,
 										   int *p_numBuffers);
@@ -563,7 +563,7 @@ pgsql_duplicate_dictionary(SQLtable *root,
 static void
 pgsql_setup_attribute(PGconn *conn,
 					  SQLtable *root,
-					  SQLattribute *attr,
+					  SQLfield *attr,
 					  const char *attname,
 					  Oid atttypid,
 					  int atttypmod,
@@ -631,13 +631,13 @@ pgsql_setup_attribute(PGconn *conn,
 static void
 pgsql_setup_composite_type(PGconn *conn,
 						   SQLtable *root,
-						   SQLattribute *attr,
+						   SQLfield *attr,
 						   Oid comptype_relid,
 						   int *p_numFieldNodes,
 						   int *p_numBuffers)						   
 {
 	PGresult   *res;
-	SQLattribute *subfields;
+	SQLfield *subfields;
 	char		query[4096];
 	int			j, nfields;
 
@@ -657,7 +657,7 @@ pgsql_setup_composite_type(PGconn *conn,
 			 PQresultErrorMessage(res));
 
 	nfields = PQntuples(res);
-	subfields = palloc0(sizeof(SQLattribute) * nfields);
+	subfields = palloc0(sizeof(SQLfield) * nfields);
 	for (j=0; j < nfields; j++)
 	{
 		const char *attname   = PQgetvalue(res, j, 0);
@@ -699,12 +699,12 @@ pgsql_setup_composite_type(PGconn *conn,
 static void
 pgsql_setup_array_element(PGconn *conn,
 						  SQLtable *root,
-						  SQLattribute *attr,
+						  SQLfield *attr,
 						  Oid array_elemid,
 						  int *p_numFieldNode,
 						  int *p_numBuffers)
 {
-	SQLattribute   *element = palloc0(sizeof(SQLattribute));
+	SQLfield   *element = palloc0(sizeof(SQLfield));
 	PGresult	   *res;
 	char			query[4096];
 	const char     *nspname;
@@ -770,7 +770,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 	SQLtable   *table;
 	ArrowKeyValue *kv;
 
-	table = palloc0(offsetof(SQLtable, attrs[nfields]));
+	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->segment_sz = segment_sz;
 	table->nbatches = 1;
 	table->nfields = nfields;
@@ -813,7 +813,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 		typname  = PQgetvalue(__res, 0, 7);
 		pgsql_setup_attribute(conn,
 							  table,
-							  &table->attrs[j],
+							  &table->columns[j],
                               attname,
 							  atttypid,
 							  atttypmod,
@@ -845,7 +845,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 
 static int
 __arrow_type_is_compatible(SQLtable *root,
-						   SQLattribute *attr,
+						   SQLfield *attr,
 						   ArrowField *field)
 {
 	ArrowType  *sql_type = &attr->arrow_type;
@@ -972,7 +972,7 @@ initial_setup_append_file(SQLtable *table)
 	for (i=0; i < table->nfields; i++)
 	{
 		if (!__arrow_type_is_compatible(table,
-										table->attrs + i,
+										&table->columns[i],
 										af_schema->fields + i))
 			Elog("--append is given, but attribute %d is not compatible", i+1);
 	}
@@ -1013,30 +1013,29 @@ initial_setup_append_file(SQLtable *table)
 static void
 pgsql_writeout_buffer(SQLtable *table)
 {
-	int		i;
+	SQLfield   *columns = SQLtableLatestColumns(table);
+	size_t			nitems = columns[0].nitems;
 
-	for (i=0; i < table->nbatches; i++)
+	assert(table->nbatches == 1);
+	if (nitems == 0)
+		return;
+
+	writeArrowRecordBatch(table, columns);
+	if (shows_progress)
 	{
-		SQLattribute   *attrs = table->attrs + i * table->nfields;
-		size_t			nitems = attrs[0].nitems;
+		ArrowBlock *block;
+		int		index = table->numRecordBatches - 1;
 
-		writeArrowRecordBatch(table, attrs);
-		if (shows_progress)
-		{
-			ArrowBlock *block;
-			int		index = table->numRecordBatches - 1;
-
-			assert(index >= 0);
-			block = &table->recordBatches[index];
-			printf("RecordBatch[%d]: "
-				   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
-				   index,
-				   block->offset,
-				   block->metaDataLength + block->bodyLength,
-				   block->metaDataLength,
-				   block->bodyLength,
-				   nitems);
-		}
+		assert(index >= 0);
+		block = &table->recordBatches[index];
+		printf("RecordBatch[%d]: "
+			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+			   index,
+			   block->offset,
+			   block->metaDataLength + block->bodyLength,
+			   block->metaDataLength,
+			   block->bodyLength,
+			   nitems);
 	}
 }
 
@@ -1046,6 +1045,7 @@ pgsql_writeout_buffer(SQLtable *table)
 void
 pgsql_append_results(SQLtable *table, PGresult *res)
 {
+	SQLfield *columns = table->columns;
 	int		i, ntuples = PQntuples(res);
 	int		j, nfields = PQnfields(res);
 
@@ -1054,11 +1054,11 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 	for (i=0; i < ntuples; i++)
 	{
 		size_t	usage = 0;
-		size_t	nitems = table->attrs[0].nitems;
+		size_t	nitems = columns[0].nitems;
 
 		for (j=0; j < nfields; j++)
 		{
-			SQLattribute   *attr = &table->attrs[j];
+			SQLfield   *column = &columns[j];
 			const char	   *addr;
 			size_t			sz;
 			/* data must be binary format */
@@ -1073,9 +1073,9 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 				addr = PQgetvalue(res, i, j);
 				sz = PQgetlength(res, i, j);
 			}
-			assert(attr->nitems == nitems);
-			attr->put_value(attr, addr, sz);
-			usage += attr->buffer_usage(attr);
+			assert(column->nitems == nitems);
+			column->put_value(column, addr, sz);
+			usage += column->buffer_usage(column);
 		}
 		/* exceeds the threshold to write? */
 		if (usage > table->segment_sz)
@@ -1091,7 +1091,7 @@ pgsql_append_results(SQLtable *table, PGresult *res)
  * pgsql_dump_attribute
  */
 static void
-pgsql_dump_attribute(SQLattribute *attr, const char *label, int indent)
+pgsql_dump_attribute(SQLfield *attr, const char *label, int indent)
 {
 	int		j;
 
@@ -1132,23 +1132,21 @@ pgsql_dump_attribute(SQLattribute *attr, const char *label, int indent)
 void
 pgsql_dump_buffer(SQLtable *table)
 {
-	int		i, j;
-	char	label[64];
+	SQLfield *columns = SQLtableLatestColumns(table);
+	int		j;
 
+	assert(table->nbatches == 1);
 	printf("Dump of SQL buffer:\n"
-		   "nfields: %d\n",
-		   table->nfields);
-	for (i=0; i < table->nbatches; i++)
+		   "nfields: %d\n"
+		   "nitems: %zu\n",
+		   table->nfields,
+		   columns[0].nitems);
+	for (j=0; j < table->nfields; j++)
 	{
-		SQLattribute   *attrs = SQLtableGetAttrs(table, i);
-		size_t			nitems = attrs[0].nitems;
+		char	label[64];
 
-		printf("batches[%d]: nitems=%zu\n", i, nitems);
-		for (j=0; j < table->nfields; j++)
-		{
-			snprintf(label, sizeof(label), "attr[%d]", j);
-			pgsql_dump_attribute(&attrs[j], label, 0);
-		}
+		snprintf(label, sizeof(label), "attr[%d]", j);
+		pgsql_dump_attribute(&columns[j], label, 0);
 	}
 }
 

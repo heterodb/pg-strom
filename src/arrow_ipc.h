@@ -31,8 +31,11 @@
 
 typedef struct SQLbuffer		SQLbuffer;
 typedef struct SQLtable			SQLtable;
-typedef struct SQLattribute		SQLattribute;
+typedef struct SQLfield			SQLfield;
 typedef struct SQLdictionary	SQLdictionary;
+typedef union  SQLtype			SQLtype;
+typedef struct SQLtype__pgsql	SQLtype__pgsql;
+typedef struct SQLtype__mysql	SQLtype__mysql;
 
 struct SQLbuffer
 {
@@ -41,7 +44,30 @@ struct SQLbuffer
 	uint32		length;
 };
 
-struct SQLattribute
+struct SQLtype__pgsql
+{
+	Oid			typeid;
+	int			typmod;
+	const char *typname;
+	const char *typnamespace;
+	short		typlen;
+	bool		typbyval;
+	char		typtype;
+	uint8		typalign;
+};
+
+struct SQLtype__mysql
+{
+	const char *typname;
+};
+
+union SQLtype
+{
+	SQLtype__pgsql	pgsql;
+	SQLtype__mysql	mysql;
+};
+
+struct SQLfield
 {
 	char	   *attname;
 	Oid			atttypid;
@@ -49,9 +75,9 @@ struct SQLattribute
 	short		attlen;
 	bool		attbyval;
 	uint8		attalign;		/* 1, 2, 4 or 8 */
-	SQLattribute *element;		/* valid, if array type */
+	SQLfield   *element;		/* valid, if array type */
 	int			nfields;		/* # of sub-fields of composite type */
-	SQLattribute *subfields;	/* valid, if composite type */
+	SQLfield   *subfields;	/* valid, if composite type */
 	SQLdictionary *enumdict;	/* valid, if enum type */
 	const char *typnamespace;	/* name of pg_type.typnamespace */
 	const char *typname;		/* pg_type.typname */
@@ -59,13 +85,13 @@ struct SQLattribute
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
 	/* data buffer and handlers */
-	void   (*put_value)(SQLattribute *attr,
+	void   (*put_value)(SQLfield *attr,
 						const char *addr, int sz);
-	size_t (*buffer_usage)(SQLattribute *attr);
-	int	   (*setup_buffer)(SQLattribute *attr,
+	size_t (*buffer_usage)(SQLfield *attr);
+	int	   (*setup_buffer)(SQLfield *attr,
 						   ArrowBuffer *node,
 						   size_t *p_offset);
-	void   (*write_buffer)(SQLattribute *attr, int fdesc);
+	void   (*write_buffer)(SQLfield *attr, int fdesc);
 
 	long		nitems;			/* number of rows */
 	long		nullcount;		/* number of null values */
@@ -93,12 +119,12 @@ struct SQLtable
 	size_t		segment_sz;		/* threshold of the memory usage */
 	int			nbatches;		/* number of buffered record-batches */
 	int			nfields;		/* number of attributes */
-	SQLattribute attrs[FLEXIBLE_ARRAY_MEMBER];
+	SQLfield columns[FLEXIBLE_ARRAY_MEMBER];
 };
-#define SQLtableGetAttrs(table,index)								\
-	((table)->attrs + (table)->nfields * (index))
-#define SQLtableLatestAttrs(table)									\
-	SQLtableGetAttrs((table),(table)->nbatches - 1)
+#define SQLtableGetColumns(table,index)								\
+	((table)->columns + (table)->nfields * (index))
+#define SQLtableLatestColumns(table)									\
+	SQLtableGetColumns((table),(table)->nbatches - 1)
 
 typedef struct hashItem		hashItem;
 struct hashItem
@@ -127,16 +153,16 @@ struct SQLdictionary
 extern ssize_t	writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
 extern void		writeArrowRecordBatch(SQLtable *table,
-									  SQLattribute *attrs);
+									  SQLfield *attrs);
 extern ssize_t	writeArrowFooter(SQLtable *table);
 
 
 /* arrow_nodes.c */
-extern int		assignArrowType(SQLattribute *attr);
+extern int		assignArrowType(SQLfield *attr);
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
-extern void		rewindArrowTypeBuffer(SQLattribute *attr, size_t nitems);
+extern void		rewindArrowTypeBuffer(SQLfield *attr, size_t nitems);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern char	   *dumpArrowNode(ArrowNode *node);
 

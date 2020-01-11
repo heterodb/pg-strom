@@ -1868,13 +1868,13 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 	{
 		arrowLocalBufferXactTracker *xtrack;
 		SQLtable	   *table = &lbuf->sql_table;
-		SQLattribute   *attrs = SQLtableLatestAttrs(table);
+		SQLfield	   *columns = SQLtableLatestColumns(table);
 
 		xtrack = MemoryContextAllocZero(lbuf->memcxt,
 										sizeof(arrowLocalBufferXactTracker));
 		xtrack->sub_xid    = GetCurrentSubTransactionId();
 		xtrack->nbatches   = table->nbatches;
-		xtrack->nitems     = attrs[0].nitems;
+		xtrack->nitems     = columns[0].nitems;
 		xtrack->prev       = lbuf->savepoint_list;
 		lbuf->savepoint_list = xtrack;
         lbuf->curr_sub_xid   = xtrack->sub_xid;
@@ -1898,7 +1898,7 @@ ArrowExecForeignInsert(EState *estate,
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	arrowLocalBuffer *lbuf = rrinfo->ri_FdwState;
 	SQLtable	   *table = &lbuf->sql_table;
-	SQLattribute   *attrs = SQLtableLatestAttrs(table);
+	SQLfield	   *columns = SQLtableLatestColumns(table);
 	MemoryContext	oldcxt;
 	size_t			usage = 0;
 	int				j;
@@ -1907,30 +1907,30 @@ ArrowExecForeignInsert(EState *estate,
 	oldcxt = MemoryContextSwitchTo(lbuf->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		SQLattribute *attr = &attrs[j];
+		SQLfield   *column = &columns[j];
 		Datum		datum = slot->tts_values[j];
 		bool		isnull = slot->tts_isnull[j];
 
 		if (isnull)
 		{
-			attr->put_value(attr, NULL, 0);
+			column->put_value(column, NULL, 0);
 		}
-		else if (attr->attbyval)
+		else if (column->attbyval)
 		{
-			attr->put_value(attr, (char *)&datum, attr->attlen);
+			column->put_value(column, (char *)&datum, column->attlen);
 		}
-		else if (attr->attlen == -1)
+		else if (column->attlen == -1)
 		{
 			int		vl_len = VARSIZE_ANY_EXHDR(datum);
 			char   *vl_ptr = VARDATA_ANY(datum);
-			
-			attr->put_value(attr, vl_ptr, vl_len);
+
+			column->put_value(column, vl_ptr, vl_len);
 		}
 		else
 		{
 			elog(ERROR, "Bug? unsupported type format");
 		}
-		usage += attr->buffer_usage(attr);
+		usage += column->buffer_usage(column);
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -3699,60 +3699,72 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 	return rb_cached;
 }
 
-
-
-
-
 /*
  * __put_array_value_native
  */
 static void
-__put_array_value_native(SQLattribute *attr,
+__put_array_value_native(SQLfield *column,
 						 const char *addr, int sz)
 {
-	/*
-	 * NOTE: varlena of ArrayType may have short-header (1byte, not 4bytes).
-	 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
-	 * benefit by elimination of redundant copy just for header.
-	 * Instead of the optimization, we should never use VARSIZE() or related.
-	 */
-	SQLattribute *element = attr->element;
-	ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
-	size_t		i, nitems = 1;
-	bits8	   *nullmap;
-	char	   *base;
-	size_t		off = 0;
+	SQLfield   *element = column->element;
+	size_t		row_index = column->nitems++;
 
-	for (i=0; i < ARR_NDIM(array); i++)
-		nitems *= ARR_DIMS(array)[i];
-	nullmap = ARR_NULLBITMAP(array);
-	base = ARR_DATA_PTR(array);
-	for (i=0; i < nitems; i++)
+	if (row_index == 0)
+		sql_buffer_append_zero(&column->values, sizeof(uint32));
+	if (!addr)
 	{
-		if (nullmap && att_isnull(i, nullmap))
-		{
-			element->put_value(element, NULL, 0);
-		}
-		else if (element->attbyval)
-		{
-			assert(element->attlen > 0);
-			element->put_value(element, base + off, element->attlen);
-			off = TYPEALIGN(element->attalign,
-							off + element->attlen);
-		}
-		else if (element->attlen == -1)
-		{
-			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-			char   *vl_data = VARDATA_ANY(base + off);
+		column->nullcount++;
+		sql_buffer_clrbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
+	}
+	else
+	{
+		/*
+		 * NOTE: varlena of ArrayType may have short-header (1b, not 4b).
+		 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
+		 * benefit by elimination of redundant copy just for header.
+		 * Due to the reason, we should never rely on varlena header, thus,
+		 * unable to use VARSIZE() or related ones.
+		 */
+		ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
+		size_t		i, nitems = 1;
+		bits8	   *nullmap;
+		char	   *base;
+		size_t		off = 0;
 
-			element->put_value(element, vl_data, vl_len);
-			off = TYPEALIGN(element->attalign,
-							off + VARSIZE_ANY(base + off));
-		}
-		else
+		for (i=0; i < ARR_NDIM(array); i++)
+			nitems *= ARR_DIMS(array)[i];
+		nullmap = ARR_NULLBITMAP(array);
+		base = ARR_DATA_PTR(array);
+		for (i=0; i < nitems; i++)
 		{
-			Elog("Bug? PostgreSQL Array has unsupported element type");
+			if (nullmap && att_isnull(i, nullmap))
+			{
+				element->put_value(element, NULL, 0);
+			}
+			else if (element->attbyval)
+			{
+				assert(element->attlen > 0);
+				element->put_value(element, base + off, element->attlen);
+				off = TYPEALIGN(element->attalign,
+								off + element->attlen);
+			}
+			else if (element->attlen == -1)
+			{
+				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+				char   *vl_data = VARDATA_ANY(base + off);
+
+				element->put_value(element, vl_data, vl_len);
+				off = TYPEALIGN(element->attalign,
+								off + VARSIZE_ANY(base + off));
+			}
+			else
+			{
+				Elog("Bug? PostgreSQL Array has unsupported element type");
+			}
 		}
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
 	}
 }
 
@@ -3760,50 +3772,68 @@ __put_array_value_native(SQLattribute *attr,
  * __put_composite_value_native
  */
 static void
-__put_composite_value_native(SQLattribute *attr,
+__put_composite_value_native(SQLfield *column,
 							 const char *addr, int sz)
 {
-	HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
-	bits8	   *nullmap = NULL;
-	int			j, nvalids;
-	char	   *base = (char *)htup + htup->t_hoff;
-	size_t		off = 0;
+	size_t		row_index = column->nitems++;
+	int			j;
 
-	if ((htup->t_infomask & HEAP_HASNULL) != 0)
-		nullmap = htup->t_bits;
-	nvalids = HeapTupleHeaderGetNatts(htup);
-
-	for (j=0; j < attr->nfields; j++)
+	if (!addr)
 	{
-		SQLattribute *subattr = &attr->subfields[j];
-
-		if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
+		column->nullcount++;
+		sql_buffer_clrbit(&column->nullmap, row_index);
+		/* NULL for all the subfields */
+		for (j=0; j < column->nfields; j++)
 		{
+			SQLfield   *subattr = &column->subfields[j];
 			subattr->put_value(subattr, NULL, 0);
 		}
-		else if (subattr->attbyval)
-		{
-			assert(subattr->attlen > 0);
-			subattr->put_value(subattr, base + off, subattr->attlen);
-			off = TYPEALIGN(subattr->attalign,
-							off + subattr->attlen);
-		}
-		else if (subattr->attlen == -1)
-		{
-			int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-			char   *vl_dat = VARDATA_ANY(base + off);
+	}
+	else
+	{
+		HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
+		bits8	   *nullmap = NULL;
+		int			j, nvalids;
+		char	   *base = (char *)htup + htup->t_hoff;
+		size_t		off = 0;
 
-			subattr->put_value(subattr, vl_dat, vl_len);
-			off = TYPEALIGN(subattr->attalign,
-							off + VARSIZE_ANY(base + off));
-		}
-		else
+		if ((htup->t_infomask & HEAP_HASNULL) != 0)
+			nullmap = htup->t_bits;
+		nvalids = HeapTupleHeaderGetNatts(htup);
+
+		for (j=0; j < column->nfields; j++)
 		{
-			Elog("Bug? sub-field '%s' of attribute '%s' has unsupported type",
-				 subattr->attname,
-				 attr->attname);
+			SQLfield   *subattr = &column->subfields[j];
+
+			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
+			{
+				subattr->put_value(subattr, NULL, 0);
+			}
+			else if (subattr->attbyval)
+			{
+				assert(subattr->attlen > 0);
+				subattr->put_value(subattr, base + off, subattr->attlen);
+				off = TYPEALIGN(subattr->attalign,
+								off + subattr->attlen);
+			}
+			else if (subattr->attlen == -1)
+			{
+				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
+				char   *vl_dat = VARDATA_ANY(base + off);
+
+				subattr->put_value(subattr, vl_dat, vl_len);
+				off = TYPEALIGN(subattr->attalign,
+								off + VARSIZE_ANY(base + off));
+			}
+			else
+			{
+				Elog("Bug? sub-field '%s' of column '%s' has unsupported type",
+					 subattr->attname,
+					 column->attname);
+			}
+			assert(column->nitems == subattr->nitems);
 		}
-		assert(attr->nitems == subattr->nitems);
+		sql_buffer_setbit(&column->nullmap, row_index);
 	}
 }
 
@@ -3811,7 +3841,7 @@ __put_composite_value_native(SQLattribute *attr,
  * setupArrowLocalBufferAttribute
  */
 static void
-setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
+setupArrowLocalBufferAttribute(SQLfield *sql_attr,
 							   const char *attname,
 							   Oid atttypid, int atttypmod)
 {
@@ -3849,7 +3879,7 @@ setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
 	if (OidIsValid(formType->typelem) && formType->typlen == -1)
 	{
 		/* array type */
-		sql_attr->element = palloc0(sizeof(SQLattribute));
+		sql_attr->element = palloc0(sizeof(SQLfield));
 		setupArrowLocalBufferAttribute(sql_attr->element,
 									   psprintf("%s[]", attname),
 									   formType->typelem, -1);
@@ -3870,7 +3900,7 @@ setupArrowLocalBufferAttribute(SQLattribute *sql_attr,
 		tupdesc = RelationGetDescr(comp);
 
 		sql_attr->nfields = tupdesc->natts;
-		sql_attr->subfields = palloc0(sizeof(SQLattribute) * tupdesc->natts);
+		sql_attr->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
@@ -3909,19 +3939,8 @@ createArrowLocalBuffer(Relation frel)
 								   "arrowLocalBuffer",
 								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(memcxt);
-
-	table = palloc0(offsetof(SQLtable, attrs[tupdesc->natts]));
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
-		
-		setupArrowLocalBufferAttribute(&table->attrs[j],
-									   NameStr(attr->attname),
-									   attr->atttypid,
-									   attr->atttypmod);
-	}
 	lbuf = palloc0(offsetof(arrowLocalBuffer,
-							sql_table.attrs[tupdesc->natts]));
+							sql_table.columns[tupdesc->natts]));
 	lbuf->frel_oid = RelationGetRelid(frel);
 	lbuf->memcxt = memcxt;
 	lbuf->curr_sub_xid = InvalidSubTransactionId;
@@ -3930,7 +3949,7 @@ createArrowLocalBuffer(Relation frel)
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		setupArrowLocalBufferAttribute(&table->attrs[j],
+		setupArrowLocalBufferAttribute(&table->columns[j],
 									   NameStr(attr->attname),
 									   attr->atttypid,
 									   attr->atttypmod);
@@ -4030,25 +4049,26 @@ rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
 	for (xtrack = lbuf->savepoint_list; xtrack != NULL; xtrack = xtrack->prev)
 	{
 		SQLtable   *table = &lbuf->sql_table;
-		SQLattribute *attrs = SQLtableLatestAttrs(table);
+		SQLfield *columns = SQLtableLatestColumns(table);
 		int			i, j;
 
 		if (xtrack->sub_xid != sub_xid)
 			continue;
 		if (table->nbatches > xtrack->nbatches ||
 			(table->nbatches == xtrack->nbatches &&
-			 attrs[0].nitems > xtrack->nitems))
+			 columns[0].nitems > xtrack->nitems))
 		{
 			/* rewind the rows to be rollbacked */
 			for (i=table->nbatches; i >= xtrack->nbatches; i--)
 			{
-				size_t	nitems = (i == xtrack->nbatches ? xtrack->nitems : 0);
-
-				attrs = SQLtableGetAttrs(table, i-1);
-				if (i > xtrack->nbatches)
-					rewindArrowTypeBuffer(&attrs[j], 0);
-				else
-					rewindArrowTypeBuffer(&attrs[j], xtrack->nitems);
+				columns = SQLtableGetColumns(table, i-1);
+				for (j=0; j < table->nfields; j++)
+				{
+					if (i > xtrack->nbatches)
+						rewindArrowTypeBuffer(&columns[j], 0);
+					else
+						rewindArrowTypeBuffer(&columns[j], xtrack->nitems);
+				}
 			}
 			table->nbatches = xtrack->nbatches;
 		}
