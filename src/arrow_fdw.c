@@ -109,7 +109,7 @@ typedef struct arrowLocalBufferXactTracker
 {
 	struct arrowLocalBufferXactTracker *prev;
 	SubTransactionId sub_xid;
-	int				num_tables;
+	int				nbatches;
 	size_t			nitems;
 } arrowLocalBufferXactTracker;
 
@@ -119,10 +119,8 @@ typedef struct
 	Oid				frel_oid;
 	MemoryContext	memcxt;
 	SubTransactionId curr_sub_xid;
-	SQLtable	   *curr_table;
-	SQLtable	  **any_tables;
-	int				num_tables;
 	arrowLocalBufferXactTracker *savepoint_list;
+	SQLtable		sql_table;		/* must be tail */
 } arrowLocalBuffer;
 
 /* ---------- static variables ---------- */
@@ -136,7 +134,7 @@ static int				arrow_metadata_cache_width;		/* GUC */
 	MAXALIGN(offsetof(arrowMetadataCache,					\
 					  fstate[arrow_metadata_cache_width]))
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
-static int				arrow_record_batch_size;		/* GUC */
+static int				arrow_record_batch_size_kb;		/* GUC */
 
 #define ARROW_LOCAL_BUFFER_HASHSIZE		256
 static long				arrow_local_buffer_count = 0;
@@ -1866,23 +1864,23 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 	arrowLocalBuffer *lbuf;
 
 	lbuf = lookupArrowLocalBuffer(frel, true);
-	Assert(lbuf->num_tables > 0 &&
-		   lbuf->curr_table == lbuf->any_tables[lbuf->num_tables - 1]);
 	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
 	{
-		arrowLocalBufferXactTracker *xtrack
-			= MemoryContextAllocZero(lbuf->memcxt,
-									 sizeof(arrowLocalBufferXactTracker));
-		xtrack->sub_xid    = GetCurrentSubTransactionId();
-		xtrack->num_tables = lbuf->num_tables;
-		xtrack->nitems     = lbuf->curr_table->nitems;
-		xtrack->prev       = lbuf->savepoint_list;
+		arrowLocalBufferXactTracker *xtrack;
+		SQLtable	   *table = &lbuf->sql_table;
+		SQLattribute   *attrs = SQLtableLatestAttrs(table);
 
-		elog(INFO, "xtrack subid=%u table/nitems=%d/%zu",
-			 xtrack->sub_xid, xtrack->num_tables, xtrack->nitems);
-		
+		xtrack = MemoryContextAllocZero(lbuf->memcxt,
+										sizeof(arrowLocalBufferXactTracker));
+		xtrack->sub_xid    = GetCurrentSubTransactionId();
+		xtrack->nbatches   = table->nbatches;
+		xtrack->nitems     = attrs[0].nitems;
+		xtrack->prev       = lbuf->savepoint_list;
 		lbuf->savepoint_list = xtrack;
-		lbuf->curr_sub_xid = xtrack->sub_xid;
+        lbuf->curr_sub_xid   = xtrack->sub_xid;
+
+		elog(INFO, "xtrack subid=%u nbatches/nitems=%d/%zu",
+			 xtrack->sub_xid, xtrack->nbatches, xtrack->nitems);
 	}
 	rrinfo->ri_FdwState = lbuf;
 }
@@ -1899,7 +1897,8 @@ ArrowExecForeignInsert(EState *estate,
 	Relation		frel = rrinfo->ri_RelationDesc;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	arrowLocalBuffer *lbuf = rrinfo->ri_FdwState;
-	SQLtable	   *table = lbuf->curr_table;
+	SQLtable	   *table = &lbuf->sql_table;
+	SQLattribute   *attrs = SQLtableLatestAttrs(table);
 	MemoryContext	oldcxt;
 	size_t			usage = 0;
 	int				j;
@@ -1908,7 +1907,7 @@ ArrowExecForeignInsert(EState *estate,
 	oldcxt = MemoryContextSwitchTo(lbuf->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		SQLattribute *attr = &table->attrs[j];
+		SQLattribute *attr = &attrs[j];
 		Datum		datum = slot->tts_values[j];
 		bool		isnull = slot->tts_isnull[j];
 
@@ -1936,9 +1935,8 @@ ArrowExecForeignInsert(EState *estate,
 	MemoryContextSwitchTo(oldcxt);
 
 	/* if usage exceeds the record-batch size, switch to new SQLtable */
-	if (usage > arrow_record_batch_size && table->nitems > 0)
+	if (usage > table->segment_sz)
 	{
-		SQLtable   *new_table;
 		
 
 
@@ -1947,8 +1945,6 @@ ArrowExecForeignInsert(EState *estate,
 
 		
 	}
-	table->nitems++;
-
 	return slot;
 }
 
@@ -3924,14 +3920,24 @@ createArrowLocalBuffer(Relation frel)
 									   attr->atttypid,
 									   attr->atttypmod);
 	}
-	lbuf = palloc0(sizeof(arrowLocalBuffer));
+	lbuf = palloc0(offsetof(arrowLocalBuffer,
+							sql_table.attrs[tupdesc->natts]));
 	lbuf->frel_oid = RelationGetRelid(frel);
 	lbuf->memcxt = memcxt;
 	lbuf->curr_sub_xid = InvalidSubTransactionId;
-	lbuf->any_tables = palloc0(sizeof(SQLtable *) * 64);
-	lbuf->num_tables = 1;
-	lbuf->any_tables[0] = lbuf->curr_table = table;
 	lbuf->savepoint_list = NULL;
+	table = &lbuf->sql_table;
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+		setupArrowLocalBufferAttribute(&table->attrs[j],
+									   NameStr(attr->attname),
+									   attr->atttypid,
+									   attr->atttypmod);
+	}
+	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
+	table->nbatches = 1;
+	table->nfields = tupdesc->natts;
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -4023,32 +4029,33 @@ rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
 
 	for (xtrack = lbuf->savepoint_list; xtrack != NULL; xtrack = xtrack->prev)
 	{
-		SQLtable   *curr_table;
-		int			j;
-		
+		SQLtable   *table = &lbuf->sql_table;
+		SQLattribute *attrs = SQLtableLatestAttrs(table);
+		int			i, j;
+
 		if (xtrack->sub_xid != sub_xid)
 			continue;
-		Assert(lbuf->num_tables > xtrack->num_tables ||
-			   (lbuf->num_tables == xtrack->num_tables &&
-				lbuf->curr_table->nitems >= xtrack->nitems));
-		for (j=lbuf->num_tables; j > xtrack->num_tables; j--)
+		if (table->nbatches > xtrack->nbatches ||
+			(table->nbatches == xtrack->nbatches &&
+			 attrs[0].nitems > xtrack->nitems))
 		{
-			//release SQLtable
-			lbuf->any_tables[j-1] = NULL;
+			/* rewind the rows to be rollbacked */
+			for (i=table->nbatches; i >= xtrack->nbatches; i--)
+			{
+				size_t	nitems = (i == xtrack->nbatches ? xtrack->nitems : 0);
+
+				attrs = SQLtableGetAttrs(table, i-1);
+				if (i > xtrack->nbatches)
+					rewindArrowTypeBuffer(&attrs[j], 0);
+				else
+					rewindArrowTypeBuffer(&attrs[j], xtrack->nitems);
+			}
+			table->nbatches = xtrack->nbatches;
 		}
-		curr_table = lbuf->any_tables[xtrack->num_tables - 1];
-		for (j=0; j < curr_table->nfields; j++)
-		{
-			rewindArrowTypeBuffer(&curr_table->attrs[j],
-								  xtrack->nitems);
-		}
-		curr_table->nitems = xtrack->nitems;
-		lbuf->num_tables = xtrack->num_tables;
 		lbuf->curr_sub_xid = InvalidSubTransactionId;
 		lbuf->savepoint_list = xtrack->prev;
 
 		elog(INFO, "rewind sub_xid=%u", sub_xid);
-
 		return;
 	}
 }
@@ -4224,7 +4231,7 @@ pgstrom_init_arrow_fdw(void)
 	DefineCustomIntVariable("arrow_fdw.record_batch_size",
 							"maximum size of record batch on writing",
 							NULL,
-							&arrow_record_batch_size,
+							&arrow_record_batch_size_kb,
 							256 * 1024,		/* default: 256MB */
 							4 * 1024,		/* min: 4MB */
 							2048 * 1024,	/* max: 2GB */

@@ -772,7 +772,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 
 	table = palloc0(offsetof(SQLtable, attrs[nfields]));
 	table->segment_sz = segment_sz;
-	table->nitems = 0;
+	table->nbatches = 1;
 	table->nfields = nfields;
 	for (j=0; j < nfields; j++)
 	{
@@ -1013,27 +1013,30 @@ initial_setup_append_file(SQLtable *table)
 static void
 pgsql_writeout_buffer(SQLtable *table)
 {
-	size_t		nitems = table->nitems;
+	int		i;
 
-	if (nitems == 0)
-		return;
-
-	writeArrowRecordBatch(table);
-	if (shows_progress)
+	for (i=0; i < table->nbatches; i++)
 	{
-		ArrowBlock *block;
-		int		index = table->numRecordBatches - 1;
+		SQLattribute   *attrs = table->attrs + i * table->nfields;
+		size_t			nitems = attrs[0].nitems;
 
-		assert(index >= 0);
-		block = &table->recordBatches[index];
-		printf("RecordBatch[%d]: "
-			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
-			   index,
-			   block->offset,
-			   block->metaDataLength + block->bodyLength,
-			   block->metaDataLength,
-			   block->bodyLength,
-			   nitems);
+		writeArrowRecordBatch(table, attrs);
+		if (shows_progress)
+		{
+			ArrowBlock *block;
+			int		index = table->numRecordBatches - 1;
+
+			assert(index >= 0);
+			block = &table->recordBatches[index];
+			printf("RecordBatch[%d]: "
+				   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+				   index,
+				   block->offset,
+				   block->metaDataLength + block->bodyLength,
+				   block->metaDataLength,
+				   block->bodyLength,
+				   nitems);
+		}
 	}
 }
 
@@ -1045,12 +1048,13 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 {
 	int		i, ntuples = PQntuples(res);
 	int		j, nfields = PQnfields(res);
-	size_t	usage;
 
-	assert(nfields == table->nfields);
+	assert(table->nfields == nfields &&
+		   table->nbatches == 1);
 	for (i=0; i < ntuples; i++)
 	{
-		usage = 0;
+		size_t	usage = 0;
+		size_t	nitems = table->attrs[0].nitems;
 
 		for (j=0; j < nfields; j++)
 		{
@@ -1069,15 +1073,14 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 				addr = PQgetvalue(res, i, j);
 				sz = PQgetlength(res, i, j);
 			}
-			assert(attr->nitems == table->nitems);
+			assert(attr->nitems == nitems);
 			attr->put_value(attr, addr, sz);
 			usage += attr->buffer_usage(attr);
 		}
-		table->nitems++;
 		/* exceeds the threshold to write? */
 		if (usage > table->segment_sz)
 		{
-			if (table->nitems == 0)
+			if (nitems == 0)
 				Elog("A result row is larger than size of record batch!!");
 			pgsql_writeout_buffer(table);
 		}
@@ -1129,18 +1132,23 @@ pgsql_dump_attribute(SQLattribute *attr, const char *label, int indent)
 void
 pgsql_dump_buffer(SQLtable *table)
 {
-	int		j;
+	int		i, j;
 	char	label[64];
 
 	printf("Dump of SQL buffer:\n"
-		   "nfields: %d\n"
-		   "nitems: %zu\n",
-		   table->nfields,
-		   table->nitems);
-	for (j=0; j < table->nfields; j++)
+		   "nfields: %d\n",
+		   table->nfields);
+	for (i=0; i < table->nbatches; i++)
 	{
-		snprintf(label, sizeof(label), "attr[%d]", j);
-		pgsql_dump_attribute(&table->attrs[j], label, 0);
+		SQLattribute   *attrs = SQLtableGetAttrs(table, i);
+		size_t			nitems = attrs[0].nitems;
+
+		printf("batches[%d]: nitems=%zu\n", i, nitems);
+		for (j=0; j < table->nfields; j++)
+		{
+			snprintf(label, sizeof(label), "attr[%d]", j);
+			pgsql_dump_attribute(&attrs[j], label, 0);
+		}
 	}
 }
 
@@ -1206,7 +1214,6 @@ int main(int argc, char * const argv[])
 			Elog("failed on write(2): %m");
 		nbytes = writeArrowSchema(table);
 	}
-	//pgsql_dump_buffer(table);
 	writeArrowDictionaryBatches(table);
 	do {
 		pgsql_append_results(table, res);

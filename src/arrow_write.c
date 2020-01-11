@@ -1063,29 +1063,6 @@ writeArrowDictionaryBatches(SQLtable *table)
 }
 
 /*
- * reset_sql_attribute
- */
-static void
-reset_sql_attribute(SQLattribute *attr)
-{
-	attr->nitems = 0;
-	attr->nullcount = 0;
-	sql_buffer_clear(&attr->nullmap);
-	sql_buffer_clear(&attr->values);
-	sql_buffer_clear(&attr->extra);
-
-	if (attr->subfields)
-	{
-		int		j;
-
-		for (j=0; j < attr->nfields; j++)
-			reset_sql_attribute(&attr->subfields[j]);
-	}
-	if (attr->element)
-		reset_sql_attribute(attr->element);
-}
-
-/*
  * setupArrowFieldNode
  */
 static int
@@ -1110,7 +1087,7 @@ setupArrowFieldNode(ArrowFieldNode *fnode, SQLattribute *attr)
 }
 
 void
-writeArrowRecordBatch(SQLtable *table)
+writeArrowRecordBatch(SQLtable *table, SQLattribute *attrs)
 {
 	ArrowMessage	message;
 	ArrowRecordBatch *rbatch;
@@ -1122,6 +1099,7 @@ writeArrowRecordBatch(SQLtable *table)
 	off_t			currPos;
 	size_t			metaLength;
 	size_t			bodyLength = 0;
+	size_t			nitems = attrs[0].nitems;
 
 	/* adjust current file position */
 	currPos = lseek(table->fdesc, 0, SEEK_CUR);
@@ -1140,9 +1118,8 @@ writeArrowRecordBatch(SQLtable *table)
 	nodes = alloca(sizeof(ArrowFieldNode) * table->numFieldNodes);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		SQLattribute   *attr = &table->attrs[i];
-		assert(table->nitems == attr->nitems);
-		j += setupArrowFieldNode(nodes + j, attr);
+		assert(attrs[i].nitems == nitems);
+		j += setupArrowFieldNode(&nodes[j], &attrs[i]);
 	}
 	assert(j == table->numFieldNodes);
 
@@ -1150,8 +1127,9 @@ writeArrowRecordBatch(SQLtable *table)
 	buffers = alloca(sizeof(ArrowBuffer) * table->numBuffers);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		SQLattribute   *attr = &table->attrs[i];
-		j += attr->setup_buffer(attr, buffers+j, &bodyLength);
+		SQLattribute   *attr = &attrs[i];
+
+		j += attr->setup_buffer(attr, &buffers[j], &bodyLength);
 	}
 	assert(j == table->numBuffers);
 
@@ -1162,7 +1140,7 @@ writeArrowRecordBatch(SQLtable *table)
 
 	rbatch = &message.body.recordBatch;
 	initArrowNode(rbatch, RecordBatch);
-	rbatch->length = table->nitems;
+	rbatch->length = nitems;
 	rbatch->nodes = nodes;
 	rbatch->_num_nodes = table->numFieldNodes;
 	rbatch->buffers = buffers;
@@ -1171,7 +1149,8 @@ writeArrowRecordBatch(SQLtable *table)
 	metaLength = writeFlatBufferMessage(table->fdesc, &message);
 	for (i=0; i < table->nfields; i++)
 	{
-		SQLattribute   *attr = &table->attrs[i];
+		SQLattribute   *attr = &attrs[i];
+
 		attr->write_buffer(attr, table->fdesc);
 	}
 
@@ -1189,9 +1168,8 @@ writeArrowRecordBatch(SQLtable *table)
 	block->bodyLength = bodyLength;
 
 	/* makes table/attributes empty again */
-	table->nitems = 0;
 	for (j=0; j < table->nfields; j++)
-		reset_sql_attribute(&table->attrs[j]);
+		rewindArrowTypeBuffer(&attrs[j], 0);
 }
 
 /*

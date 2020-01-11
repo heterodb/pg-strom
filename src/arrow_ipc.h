@@ -91,10 +91,14 @@ struct SQLtable
 	int			numCustomMetadata;
 	SQLdictionary *sql_dict_list; /* list of SQLdictionary */
 	size_t		segment_sz;		/* threshold of the memory usage */
-	size_t		nitems;			/* current number of rows */
+	int			nbatches;		/* number of buffered record-batches */
 	int			nfields;		/* number of attributes */
 	SQLattribute attrs[FLEXIBLE_ARRAY_MEMBER];
 };
+#define SQLtableGetAttrs(table,index)								\
+	((table)->attrs + (table)->nfields * (index))
+#define SQLtableLatestAttrs(table)									\
+	SQLtableGetAttrs((table),(table)->nbatches - 1)
 
 typedef struct hashItem		hashItem;
 struct hashItem
@@ -122,7 +126,8 @@ struct SQLdictionary
 /* arrow_write.c */
 extern ssize_t	writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
-extern void		writeArrowRecordBatch(SQLtable *table);
+extern void		writeArrowRecordBatch(SQLtable *table,
+									  SQLattribute *attrs);
 extern ssize_t	writeArrowFooter(SQLtable *table);
 
 
@@ -169,26 +174,25 @@ sql_buffer_expand(SQLbuffer *buf, size_t required)
 
 		if (buf->data == NULL)
 		{
-			length = (1UL << 21);	/* start from 2MB */
+			length = (1UL << 20);	/* start from 1MB */
 			while (length < required)
 				length *= 2;
-			data = mmap(NULL, length, PROT_READ | PROT_WRITE,
-						MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-			if (data == MAP_FAILED)
-				Elog("failed on mmap(len=%zu): %m", length);
+			data = palloc(length);
+			if (!data)
+				Elog("palloc: out of memory (sz=%zu)", length);
 			buf->data   = data;
 			buf->usage  = 0;
 			buf->length = length;
 		}
 		else
 		{
-			length = 2 * buf->length;
+			length = buf->length;
 			while (length < required)
 				length *= 2;
-			data = mremap(buf->data, buf->length, length, MREMAP_MAYMOVE);
-			if (data == MAP_FAILED)
-				Elog("failed on mremap(len=%zu): %m", length);
-			buf->data   = data;
+			data = repalloc(buf->data, length);
+			if (!data)
+				Elog("repalloc: out of memory (sz=%zu)", length);
+			buf->data = data;
 			buf->length = length;
 		}
 	}
