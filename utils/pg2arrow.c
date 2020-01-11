@@ -563,8 +563,8 @@ pgsql_duplicate_dictionary(SQLtable *root,
 static void
 pgsql_setup_attribute(PGconn *conn,
 					  SQLtable *root,
-					  SQLfield *attr,
-					  const char *attname,
+					  SQLfield *column,
+					  const char *field_name,
 					  Oid atttypid,
 					  int atttypmod,
 					  int attlen,
@@ -578,50 +578,50 @@ pgsql_setup_attribute(PGconn *conn,
 					  int *p_numFieldNodes,
 					  int *p_numBuffers)
 {
-	attr->attname   = pstrdup(attname);
-	attr->atttypid  = atttypid;
-	attr->atttypmod = atttypmod;
-	attr->attlen    = attlen;
-	attr->attbyval  = attbyval;
+	column->field_name = pstrdup(field_name);
+	column->sql_type.pgsql.typeid	= atttypid;
+	column->sql_type.pgsql.typmod	= atttypmod;
+	column->sql_type.pgsql.typlen	= attlen;
+	column->sql_type.pgsql.typbyval	= attbyval;
 
 	if (attalign == 'c')
-		attr->attalign = sizeof(char);
+		column->sql_type.pgsql.typalign = sizeof(char);
 	else if (attalign == 's')
-		attr->attalign = sizeof(short);
+		column->sql_type.pgsql.typalign = sizeof(short);
 	else if (attalign == 'i')
-		attr->attalign = sizeof(int);
+		column->sql_type.pgsql.typalign = sizeof(int);
 	else if (attalign == 'd')
-		attr->attalign = sizeof(double);
+		column->sql_type.pgsql.typalign = sizeof(double);
 	else
 		Elog("unknown state of attalign: %c", attalign);
 
-	attr->typnamespace = pstrdup(nspname);
-	attr->typname = pstrdup(typname);
-	attr->typtype = typtype;
+	column->sql_type.pgsql.typnamespace = pstrdup(nspname);
+	column->sql_type.pgsql.typname = pstrdup(typname);
+	column->sql_type.pgsql.typtype = typtype;
 	if (typtype == 'b')
 	{
 		if (array_elemid != InvalidOid)
-			pgsql_setup_array_element(conn, root, attr,
+			pgsql_setup_array_element(conn, root, column,
 									  array_elemid,
 									  p_numFieldNodes,
 									  p_numBuffers);
 	}
 	else if (typtype == 'c')
 	{
-		pgsql_setup_composite_type(conn, root, attr,
+		pgsql_setup_composite_type(conn, root, column,
 								   comp_typrelid,
 								   p_numFieldNodes,
 								   p_numBuffers);
 	}
 	else if (typtype == 'e')
 	{
-		attr->enumdict = pgsql_create_dictionary(conn, root, atttypid);
+		column->enumdict = pgsql_create_dictionary(conn, root, atttypid);
 	}
 	else
 		Elog("unknown state pf typtype: %c", typtype);
 
 	/* assign properties of Apache Arrow Type */
-	*p_numBuffers += assignArrowType(attr);
+	*p_numBuffers += assignArrowType(column);
 	*p_numFieldNodes += 1;
 }
 
@@ -1091,7 +1091,7 @@ pgsql_append_results(SQLtable *table, PGresult *res)
  * pgsql_dump_attribute
  */
 static void
-pgsql_dump_attribute(SQLfield *attr, const char *label, int indent)
+pgsql_dump_attribute(SQLfield *column, const char *label, int indent)
 {
 	int		j;
 
@@ -1100,28 +1100,28 @@ pgsql_dump_attribute(SQLfield *attr, const char *label, int indent)
 	printf("%s {attname='%s', atttypid=%u, atttypmod=%d, attlen=%d,"
 		   " attbyval=%s, attalign=%d, typtype=%c, arrow_type=%s}\n",
 		   label,
-		   attr->attname,
-		   attr->atttypid,
-		   attr->atttypmod,
-		   attr->attlen,
-		   attr->attbyval ? "true" : "false",
-		   attr->attalign,
-		   attr->typtype,
-		   attr->arrow_typename);
+		   column->field_name,
+		   column->sql_type.pgsql.typeid,
+		   column->sql_type.pgsql.typmod,
+		   column->sql_type.pgsql.typlen,
+		   column->sql_type.pgsql.typbyval ? "true" : "false",
+		   column->sql_type.pgsql.typalign,
+		   column->sql_type.pgsql.typtype,
+		   column->arrow_typename);
 
-	if (attr->typtype == 'b')
+	if (column->sql_type.pgsql.typtype == 'b')
 	{
-		if (attr->element)
-			pgsql_dump_attribute(attr->element, "element", indent+2);
+		if (column->element)
+			pgsql_dump_attribute(column->element, "element", indent+2);
 	}
-	else if (attr->typtype == 'c')
+	else if (column->sql_type.pgsql.typtype == 'c')
 	{
 		char		label[64];
 
-		for (j=0; j < attr->nfields; j++)
+		for (j=0; j < column->nfields; j++)
 		{
 			snprintf(label, sizeof(label), "subfields[%d]", j);
-			pgsql_dump_attribute(&attr->subfields[j], label, indent+2);
+			pgsql_dump_attribute(&column->subfields[j], label, indent+2);
 		}
 	}
 }

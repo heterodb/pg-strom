@@ -69,19 +69,13 @@ union SQLtype
 
 struct SQLfield
 {
-	char	   *attname;
-	Oid			atttypid;
-	int			atttypmod;
-	short		attlen;
-	bool		attbyval;
-	uint8		attalign;		/* 1, 2, 4 or 8 */
+	char	   *field_name;		/* name of the column, element or sub-field */
+	SQLtype		sql_type;		/* attributes of SQL type */
 	SQLfield   *element;		/* valid, if array type */
 	int			nfields;		/* # of sub-fields of composite type */
 	SQLfield   *subfields;	/* valid, if composite type */
 	SQLdictionary *enumdict;	/* valid, if enum type */
-	const char *typnamespace;	/* name of pg_type.typnamespace */
-	const char *typname;		/* pg_type.typname */
-	char		typtype;		/* pg_type.typtype */
+
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
 	/* data buffer and handlers */

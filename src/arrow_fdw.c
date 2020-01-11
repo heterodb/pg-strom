@@ -1907,6 +1907,7 @@ ArrowExecForeignInsert(EState *estate,
 	oldcxt = MemoryContextSwitchTo(lbuf->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		SQLfield   *column = &columns[j];
 		Datum		datum = slot->tts_values[j];
 		bool		isnull = slot->tts_isnull[j];
@@ -1915,15 +1916,17 @@ ArrowExecForeignInsert(EState *estate,
 		{
 			column->put_value(column, NULL, 0);
 		}
-		else if (column->attbyval)
+		else if (attr->attbyval)
 		{
-			column->put_value(column, (char *)&datum, column->attlen);
+			Assert(column->sql_type.pgsql.typbyval);
+			column->put_value(column, (char *)&datum, attr->attlen);
 		}
-		else if (column->attlen == -1)
+		else if (attr->attlen == -1)
 		{
 			int		vl_len = VARSIZE_ANY_EXHDR(datum);
 			char   *vl_ptr = VARDATA_ANY(datum);
 
+			Assert(column->sql_type.pgsql.typlen == -1);
 			column->put_value(column, vl_ptr, vl_len);
 		}
 		else
@@ -3742,20 +3745,22 @@ __put_array_value_native(SQLfield *column,
 			{
 				element->put_value(element, NULL, 0);
 			}
-			else if (element->attbyval)
+			else if (element->sql_type.pgsql.typbyval)
 			{
-				assert(element->attlen > 0);
-				element->put_value(element, base + off, element->attlen);
-				off = TYPEALIGN(element->attalign,
-								off + element->attlen);
+				Assert(element->sql_type.pgsql.typlen > 0 &&
+					   element->sql_type.pgsql.typlen <= sizeof(Datum));
+				element->put_value(element, base + off,
+								   element->sql_type.pgsql.typlen);
+				off = TYPEALIGN(element->sql_type.pgsql.typalign,
+								off + element->sql_type.pgsql.typlen);
 			}
-			else if (element->attlen == -1)
+			else if (element->sql_type.pgsql.typlen == -1)
 			{
 				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
 				char   *vl_data = VARDATA_ANY(base + off);
 
 				element->put_value(element, vl_data, vl_len);
-				off = TYPEALIGN(element->attalign,
+				off = TYPEALIGN(element->sql_type.pgsql.typalign,
 								off + VARSIZE_ANY(base + off));
 			}
 			else
@@ -3803,35 +3808,37 @@ __put_composite_value_native(SQLfield *column,
 
 		for (j=0; j < column->nfields; j++)
 		{
-			SQLfield   *subattr = &column->subfields[j];
+			SQLfield   *sub_field = &column->subfields[j];
 
 			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
 			{
-				subattr->put_value(subattr, NULL, 0);
+				sub_field->put_value(sub_field, NULL, 0);
 			}
-			else if (subattr->attbyval)
+			else if (sub_field->sql_type.pgsql.typbyval)
 			{
-				assert(subattr->attlen > 0);
-				subattr->put_value(subattr, base + off, subattr->attlen);
-				off = TYPEALIGN(subattr->attalign,
-								off + subattr->attlen);
+				Assert(sub_field->sql_type.pgsql.typlen > 0 &&
+					   sub_field->sql_type.pgsql.typlen <= sizeof(Datum));
+				sub_field->put_value(sub_field, base + off,
+									 sub_field->sql_type.pgsql.typlen);
+				off = TYPEALIGN(sub_field->sql_type.pgsql.typalign,
+								off + sub_field->sql_type.pgsql.typlen);
 			}
-			else if (subattr->attlen == -1)
+			else if (sub_field->sql_type.pgsql.typlen == -1)
 			{
 				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
 				char   *vl_dat = VARDATA_ANY(base + off);
 
-				subattr->put_value(subattr, vl_dat, vl_len);
-				off = TYPEALIGN(subattr->attalign,
+				sub_field->put_value(sub_field, vl_dat, vl_len);
+				off = TYPEALIGN(sub_field->sql_type.pgsql.typalign,
 								off + VARSIZE_ANY(base + off));
 			}
 			else
 			{
 				Elog("Bug? sub-field '%s' of column '%s' has unsupported type",
-					 subattr->attname,
-					 column->attname);
+					 sub_field->field_name,
+					 column->field_name);
 			}
-			assert(column->nitems == subattr->nitems);
+			assert(column->nitems == sub_field->nitems);
 		}
 		sql_buffer_setbit(&column->nullmap, row_index);
 	}
@@ -3841,50 +3848,51 @@ __put_composite_value_native(SQLfield *column,
  * setupArrowLocalBufferAttribute
  */
 static void
-setupArrowLocalBufferAttribute(SQLfield *sql_attr,
-							   const char *attname,
+setupArrowLocalBufferAttribute(SQLfield *sql_field,
+							   const char *field_name,
 							   Oid atttypid, int atttypmod)
 {
 	HeapTuple		tup;
 	Form_pg_type	formType;
+	SQLtype__pgsql *pgtype;
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type: %u", atttypid);
 	formType = (Form_pg_type) GETSTRUCT(tup);
 
-	sql_attr->attname	= pstrdup(attname);
-	sql_attr->atttypid	= atttypid,
-	sql_attr->atttypmod	= atttypmod;
-	sql_attr->attlen	= formType->typlen;
-	sql_attr->attbyval	= formType->typbyval;
+	sql_field->field_name	= pstrdup(field_name);
+	pgtype = &sql_field->sql_type.pgsql;
+	pgtype->typeid		= atttypid;
+	pgtype->typmod		= atttypmod;
+	pgtype->typname		= pstrdup(NameStr(formType->typname));
+	pgtype->typnamespace= get_namespace_name(formType->typnamespace);
+	pgtype->typlen		= formType->typlen;
+	pgtype->typbyval	= formType->typbyval;
+	pgtype->typtype		= formType->typtype;
 	if (formType->typalign == 'c')
-		sql_attr->attalign	= sizeof(char);
+		pgtype->typalign = sizeof(char);
 	else if (formType->typalign == 's')
-		sql_attr->attalign	= sizeof(short);
+		pgtype->typalign = sizeof(short);
 	else if (formType->typalign == 'i')
-		sql_attr->attalign	= sizeof(int);
+		pgtype->typalign = sizeof(int);
 	else if (formType->typalign == 'd')
-		sql_attr->attalign	= sizeof(double);
+		pgtype->typalign = sizeof(double);
 	else
 		elog(ERROR, "attribute '%s' has unknown alignment: %c",
-			 attname, formType->typalign);
+			 field_name, formType->typalign);
 
-	sql_attr->typnamespace = get_namespace_name(formType->typnamespace);
-	sql_attr->typname = pstrdup(NameStr(formType->typname));
-	sql_attr->typtype = formType->typtype;
-
-	assignArrowType(sql_attr);
+	assignArrowType(sql_field);
 
 	if (OidIsValid(formType->typelem) && formType->typlen == -1)
 	{
 		/* array type */
-		sql_attr->element = palloc0(sizeof(SQLfield));
-		setupArrowLocalBufferAttribute(sql_attr->element,
-									   psprintf("%s[]", attname),
+		sql_field->element = palloc0(sizeof(SQLfield));
+		setupArrowLocalBufferAttribute(sql_field->element,
+									   psprintf("%s[]", field_name),
 									   formType->typelem, -1);
 		/* ArrayType layout is much different from libpq binary form */
-		sql_attr->put_value = __put_array_value_native;
+		sql_field->put_value = __put_array_value_native;
 	}
 	else if (OidIsValid(formType->typrelid))
 	{
@@ -3899,20 +3907,20 @@ setupArrowLocalBufferAttribute(SQLfield *sql_attr,
 				 RelationGetRelationName(comp));
 		tupdesc = RelationGetDescr(comp);
 
-		sql_attr->nfields = tupdesc->natts;
-		sql_attr->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
+		sql_field->nfields = tupdesc->natts;
+		sql_field->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
 
-			setupArrowLocalBufferAttribute(&sql_attr->subfields[j],
+			setupArrowLocalBufferAttribute(&sql_field->subfields[j],
 										   NameStr(subattr->attname),
 										   subattr->atttypid,
 										   subattr->atttypmod);
 		}
 		relation_close(comp, AccessShareLock);
 		/* Composite type has much different layout from libpq binary form */
-		sql_attr->put_value = __put_composite_value_native;
+		sql_field->put_value = __put_composite_value_native;
 	}
 	else if (formType->typtype == 'e')
 	{

@@ -916,8 +916,8 @@ static void
 setupArrowField(ArrowField *field, SQLfield *column)
 {
 	initArrowNode(field, Field);
-	field->name = column->attname;
-	field->_name_len = strlen(column->attname);
+	field->name = column->field_name;
+	field->_name_len = strlen(column->field_name);
 	field->nullable = true;
 	field->type = column->arrow_type;
 	setupArrowDictionaryEncoding(&field->dictionary, column);
