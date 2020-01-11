@@ -1914,12 +1914,12 @@ ArrowExecForeignInsert(EState *estate,
 
 		if (isnull)
 		{
-			column->put_value(column, NULL, 0);
+			usage += arrowFieldPutValue(column, NULL, 0);
 		}
 		else if (attr->attbyval)
 		{
 			Assert(column->sql_type.pgsql.typbyval);
-			column->put_value(column, (char *)&datum, attr->attlen);
+			usage += arrowFieldPutValue(column, (char *)&datum, attr->attlen);
 		}
 		else if (attr->attlen == -1)
 		{
@@ -1927,13 +1927,12 @@ ArrowExecForeignInsert(EState *estate,
 			char   *vl_ptr = VARDATA_ANY(datum);
 
 			Assert(column->sql_type.pgsql.typlen == -1);
-			column->put_value(column, vl_ptr, vl_len);
+			usage += arrowFieldPutValue(column, vl_ptr, vl_len);
 		}
 		else
 		{
 			elog(ERROR, "Bug? unsupported type format");
 		}
-		usage += column->buffer_usage(column);
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -3711,6 +3710,7 @@ __put_array_value_native(SQLfield *column,
 {
 	SQLfield   *element = column->element;
 	size_t		row_index = column->nitems++;
+	size_t		usage;
 
 	if (row_index == 0)
 		sql_buffer_append_zero(&column->values, sizeof(uint32));
@@ -3771,16 +3771,21 @@ __put_array_value_native(SQLfield *column,
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
 	}
+	usage = ARROWALIGN(column->values.usage);
+	if (column->nullcount > 0)
+		usage += ARROWALIGN(column->nullmap.usage);
+	return usage + element->__curr_usage__;
 }
 
 /*
  * __put_composite_value_native
  */
-static void
+static size_t
 __put_composite_value_native(SQLfield *column,
 							 const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
+	size_t		usage = 0;
 	int			j;
 
 	if (!addr)
@@ -3790,8 +3795,7 @@ __put_composite_value_native(SQLfield *column,
 		/* NULL for all the subfields */
 		for (j=0; j < column->nfields; j++)
 		{
-			SQLfield   *subattr = &column->subfields[j];
-			subattr->put_value(subattr, NULL, 0);
+			usage += arrowFieldPutValue(&column->subfields[j], NULL, 0);
 		}
 	}
 	else
@@ -3808,40 +3812,43 @@ __put_composite_value_native(SQLfield *column,
 
 		for (j=0; j < column->nfields; j++)
 		{
-			SQLfield   *sub_field = &column->subfields[j];
+			SQLfield   *field = &column->subfields[j];
 
 			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
 			{
-				sub_field->put_value(sub_field, NULL, 0);
+				usage += arrowFieldPutValue(field, NULL, 0);
 			}
-			else if (sub_field->sql_type.pgsql.typbyval)
+			else if (field->sql_type.pgsql.typbyval)
 			{
-				Assert(sub_field->sql_type.pgsql.typlen > 0 &&
-					   sub_field->sql_type.pgsql.typlen <= sizeof(Datum));
-				sub_field->put_value(sub_field, base + off,
-									 sub_field->sql_type.pgsql.typlen);
-				off = TYPEALIGN(sub_field->sql_type.pgsql.typalign,
-								off + sub_field->sql_type.pgsql.typlen);
+				Assert(field->sql_type.pgsql.typlen > 0 &&
+					   field->sql_type.pgsql.typlen <= sizeof(Datum));
+				usage += arrowFieldPutValue(field, base + off,
+											field->sql_type.pgsql.typlen);
+				off = TYPEALIGN(field->sql_type.pgsql.typalign,
+								off + field->sql_type.pgsql.typlen);
 			}
-			else if (sub_field->sql_type.pgsql.typlen == -1)
+			else if (field->sql_type.pgsql.typlen == -1)
 			{
 				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
 				char   *vl_dat = VARDATA_ANY(base + off);
 
-				sub_field->put_value(sub_field, vl_dat, vl_len);
-				off = TYPEALIGN(sub_field->sql_type.pgsql.typalign,
+				usage += arrowFieldPutValue(field, vl_dat, vl_len);
+				off = TYPEALIGN(field->sql_type.pgsql.typalign,
 								off + VARSIZE_ANY(base + off));
 			}
 			else
 			{
 				Elog("Bug? sub-field '%s' of column '%s' has unsupported type",
-					 sub_field->field_name,
+					 field->field_name,
 					 column->field_name);
 			}
-			assert(column->nitems == sub_field->nitems);
+			assert(column->nitems == field->nitems);
 		}
 		sql_buffer_setbit(&column->nullmap, row_index);
 	}
+	if (column->nullcount > 0)
+		usage += ARROWALIGN(column->nullmap.usage);
+	return usage;
 }
 
 /*

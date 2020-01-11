@@ -78,20 +78,16 @@ struct SQLfield
 
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
-	/* data buffer and handlers */
-	void   (*put_value)(SQLfield *attr,
-						const char *addr, int sz);
-	size_t (*buffer_usage)(SQLfield *attr);
-	int	   (*setup_buffer)(SQLfield *attr,
-						   ArrowBuffer *node,
-						   size_t *p_offset);
-	void   (*write_buffer)(SQLfield *attr, int fdesc);
-
+	/* data save as Apache Arrow datum */
+	size_t      (*put_value)(SQLfield *attr, const char *addr, int sz);
+	const char *(*get_value)(SQLfield *column, size_t index, int *p_sz);
+	/* data buffers of the field */
 	long		nitems;			/* number of rows */
 	long		nullcount;		/* number of null values */
 	SQLbuffer	nullmap;		/* null bitmap */
 	SQLbuffer	values;			/* main storage of values */
 	SQLbuffer	extra;			/* extra buffer for varlena */
+	size_t		__curr_usage__;	/* current buffer usage */
 	/* custom metadata(optional) */
 	ArrowKeyValue *customMetadata;
 	int			numCustomMetadata;
@@ -158,6 +154,10 @@ extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
 extern void		rewindArrowTypeBuffer(SQLfield *attr, size_t nitems);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
+extern size_t	arrowFieldPutValue(SQLfield *column,
+								   const char *addr, int sz);
+extern Datum	arrowFieldGetValue(SQLfield *column,
+								   size_t index, bool *isnull);
 extern char	   *dumpArrowNode(ArrowNode *node);
 
 /*
