@@ -79,8 +79,8 @@ struct SQLfield
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
 	/* data save as Apache Arrow datum */
-	size_t      (*put_value)(SQLfield *attr, const char *addr, int sz);
-	const char *(*get_value)(SQLfield *column, size_t index, int *p_sz);
+	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
+	Datum	(*get_value)(SQLfield *column, size_t index, bool *isnull);
 	/* data buffers of the field */
 	long		nitems;			/* number of rows */
 	long		nullcount;		/* number of null values */
@@ -139,27 +139,6 @@ struct SQLdictionary
 	hashItem   *hslots[FLEXIBLE_ARRAY_MEMBER];
 };
 
-/* arrow_write.c */
-extern ssize_t	writeArrowSchema(SQLtable *table);
-extern void		writeArrowDictionaryBatches(SQLtable *table);
-extern void		writeArrowRecordBatch(SQLtable *table,
-									  SQLfield *attrs);
-extern ssize_t	writeArrowFooter(SQLtable *table);
-
-
-/* arrow_nodes.c */
-extern int		assignArrowType(SQLfield *attr);
-extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
-#define initArrowNode(PTR,NAME)					\
-	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
-extern void		rewindArrowTypeBuffer(SQLfield *attr, size_t nitems);
-extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
-extern size_t	arrowFieldPutValue(SQLfield *column,
-								   const char *addr, int sz);
-extern Datum	arrowFieldGetValue(SQLfield *column,
-								   size_t index, bool *isnull);
-extern char	   *dumpArrowNode(ArrowNode *node);
-
 /*
  * Error message and exit
  */
@@ -173,6 +152,50 @@ extern char	   *dumpArrowNode(ArrowNode *node);
 		exit(1);									\
 	} while(0)
 #endif
+
+/* arrow_write.c */
+extern ssize_t	writeArrowSchema(SQLtable *table);
+extern void		writeArrowDictionaryBatches(SQLtable *table);
+extern void		writeArrowRecordBatch(SQLtable *table,
+									  SQLfield *attrs);
+extern ssize_t	writeArrowFooter(SQLtable *table);
+
+/* arrow_nodes.c */
+extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
+#define initArrowNode(PTR,NAME)					\
+	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
+extern void		rewindArrowTypeBuffer(SQLfield *attr, size_t nitems);
+extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
+extern char	   *dumpArrowNode(ArrowNode *node);
+
+/* arrow_pgsql.c */
+extern int		assignArrowTypePgSQL(SQLfield *column,
+									 const char *field_name,
+									 Oid typeid,
+									 int typmod,
+									 const char *typname,
+									 const char *typnamespace,
+									 short typlen,
+									 bool typbyval,
+									 char typtype,
+									 char typalign,
+									 Oid typelem,
+									 Oid typrelid);
+static inline size_t
+arrowFieldPutValue(SQLfield *column, const char *addr, int sz)
+{
+	return (column->__curr_usage__ = column->put_value(column, addr, sz));
+}
+
+static inline Datum
+arrowFieldGetValue(SQLfield *column, size_t row_index, bool *isnull)
+{
+	if (!column->get_value)
+		Elog("%s does not implement get_value() handler",
+			 column->arrow_typename);
+	return column->get_value(column, row_index, isnull);
+}
+
 /*
  * SQLbuffer related routines
  */

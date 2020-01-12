@@ -564,65 +564,52 @@ static void
 pgsql_setup_attribute(PGconn *conn,
 					  SQLtable *root,
 					  SQLfield *column,
-					  const char *field_name,
+					  const char *attname,
 					  Oid atttypid,
 					  int atttypmod,
 					  int attlen,
 					  char attbyval,
 					  char attalign,
 					  char typtype,
-					  Oid comp_typrelid,
-					  Oid array_elemid,
+					  Oid typrelid,		/* valid, if composite type */
+					  Oid typelemid,	/* valid, if array type */
 					  const char *nspname,
 					  const char *typname,
 					  int *p_numFieldNodes,
 					  int *p_numBuffers)
 {
-	column->field_name = pstrdup(field_name);
-	column->sql_type.pgsql.typeid	= atttypid;
-	column->sql_type.pgsql.typmod	= atttypmod;
-	column->sql_type.pgsql.typlen	= attlen;
-	column->sql_type.pgsql.typbyval	= attbyval;
-
-	if (attalign == 'c')
-		column->sql_type.pgsql.typalign = sizeof(char);
-	else if (attalign == 's')
-		column->sql_type.pgsql.typalign = sizeof(short);
-	else if (attalign == 'i')
-		column->sql_type.pgsql.typalign = sizeof(int);
-	else if (attalign == 'd')
-		column->sql_type.pgsql.typalign = sizeof(double);
-	else
-		Elog("unknown state of attalign: %c", attalign);
-
-	column->sql_type.pgsql.typnamespace = pstrdup(nspname);
-	column->sql_type.pgsql.typname = pstrdup(typname);
-	column->sql_type.pgsql.typtype = typtype;
-	if (typtype == 'b')
+	*p_numFieldNodes += 1;
+	*p_numBuffers += assignArrowTypePgSQL(column,
+										  attname,
+										  atttypid,
+										  atttypmod,
+										  typname,
+										  nspname,
+										  attlen,
+										  attbyval,
+										  typtype,
+										  attalign,
+										  typrelid,
+										  typelemid);
+	if (typrelid != InvalidOid)
 	{
-		if (array_elemid != InvalidOid)
-			pgsql_setup_array_element(conn, root, column,
-									  array_elemid,
-									  p_numFieldNodes,
-									  p_numBuffers);
-	}
-	else if (typtype == 'c')
-	{
+		assert(typtype == 'c');
 		pgsql_setup_composite_type(conn, root, column,
-								   comp_typrelid,
+								   typrelid,
 								   p_numFieldNodes,
 								   p_numBuffers);
+	}
+	else if (typelemid != InvalidOid)
+	{
+		pgsql_setup_array_element(conn, root, column,
+								  typelemid,
+								  p_numFieldNodes,
+								  p_numBuffers);
 	}
 	else if (typtype == 'e')
 	{
 		column->enumdict = pgsql_create_dictionary(conn, root, atttypid);
 	}
-	else
-		Elog("unknown state pf typtype: %c", typtype);
-
-	/* assign properties of Apache Arrow Type */
-	*p_numBuffers += assignArrowType(column);
-	*p_numFieldNodes += 1;
 }
 
 /*
@@ -688,7 +675,8 @@ pgsql_setup_composite_type(PGconn *conn,
 							  pg_strtochar(typtype),
 							  atooid(typrelid),
 							  atooid(typelem),
-							  nspname, typname,
+							  nspname,
+							  typname,
 							  p_numFieldNodes,
 							  p_numBuffers);
 	}
@@ -700,11 +688,11 @@ static void
 pgsql_setup_array_element(PGconn *conn,
 						  SQLtable *root,
 						  SQLfield *attr,
-						  Oid array_elemid,
+						  Oid typelemid,
 						  int *p_numFieldNode,
 						  int *p_numBuffers)
 {
-	SQLfield   *element = palloc0(sizeof(SQLfield));
+	SQLfield	   *element = palloc0(sizeof(SQLfield));
 	PGresult	   *res;
 	char			query[4096];
 	const char     *nspname;
@@ -723,7 +711,7 @@ pgsql_setup_array_element(PGconn *conn,
 			 "  FROM pg_catalog.pg_type t,"
 			 "       pg_catalog.pg_namespace n"
 			 " WHERE t.typnamespace = n.oid"
-			 "   AND t.oid = %u", array_elemid);
+			 "   AND t.oid = %u", typelemid);
 	res = PQexec(conn, query);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		Elog("failed on pg_type system catalog query: %s",
@@ -743,7 +731,7 @@ pgsql_setup_array_element(PGconn *conn,
 						  root,
 						  element,
 						  typname,
-						  array_elemid,
+						  typelemid,
 						  -1,
 						  atoi(typlen),
 						  pg_strtobool(typbyval),
@@ -823,7 +811,8 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 							  *typtype,
 							  atoi(typrelid),
 							  atoi(typelem),
-							  nspname, typname,
+							  nspname,
+							  typname,
 							  &table->numFieldNodes,
 							  &table->numBuffers);
 		PQclear(__res);

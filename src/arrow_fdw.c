@@ -3702,204 +3702,41 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 }
 
 /*
- * __put_array_value_native
- */
-static void
-__put_array_value_native(SQLfield *column,
-						 const char *addr, int sz)
-{
-	SQLfield   *element = column->element;
-	size_t		row_index = column->nitems++;
-	size_t		usage;
-
-	if (row_index == 0)
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
-	if (!addr)
-	{
-		column->nullcount++;
-		sql_buffer_clrbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
-	}
-	else
-	{
-		/*
-		 * NOTE: varlena of ArrayType may have short-header (1b, not 4b).
-		 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
-		 * benefit by elimination of redundant copy just for header.
-		 * Due to the reason, we should never rely on varlena header, thus,
-		 * unable to use VARSIZE() or related ones.
-		 */
-		ArrayType  *array = (ArrayType *)(addr - VARHDRSZ);
-		size_t		i, nitems = 1;
-		bits8	   *nullmap;
-		char	   *base;
-		size_t		off = 0;
-
-		for (i=0; i < ARR_NDIM(array); i++)
-			nitems *= ARR_DIMS(array)[i];
-		nullmap = ARR_NULLBITMAP(array);
-		base = ARR_DATA_PTR(array);
-		for (i=0; i < nitems; i++)
-		{
-			if (nullmap && att_isnull(i, nullmap))
-			{
-				element->put_value(element, NULL, 0);
-			}
-			else if (element->sql_type.pgsql.typbyval)
-			{
-				Assert(element->sql_type.pgsql.typlen > 0 &&
-					   element->sql_type.pgsql.typlen <= sizeof(Datum));
-				element->put_value(element, base + off,
-								   element->sql_type.pgsql.typlen);
-				off = TYPEALIGN(element->sql_type.pgsql.typalign,
-								off + element->sql_type.pgsql.typlen);
-			}
-			else if (element->sql_type.pgsql.typlen == -1)
-			{
-				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-				char   *vl_data = VARDATA_ANY(base + off);
-
-				element->put_value(element, vl_data, vl_len);
-				off = TYPEALIGN(element->sql_type.pgsql.typalign,
-								off + VARSIZE_ANY(base + off));
-			}
-			else
-			{
-				Elog("Bug? PostgreSQL Array has unsupported element type");
-			}
-		}
-		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
-	}
-	usage = ARROWALIGN(column->values.usage);
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage + element->__curr_usage__;
-}
-
-/*
- * __put_composite_value_native
- */
-static size_t
-__put_composite_value_native(SQLfield *column,
-							 const char *addr, int sz)
-{
-	size_t		row_index = column->nitems++;
-	size_t		usage = 0;
-	int			j;
-
-	if (!addr)
-	{
-		column->nullcount++;
-		sql_buffer_clrbit(&column->nullmap, row_index);
-		/* NULL for all the subfields */
-		for (j=0; j < column->nfields; j++)
-		{
-			usage += arrowFieldPutValue(&column->subfields[j], NULL, 0);
-		}
-	}
-	else
-	{
-		HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
-		bits8	   *nullmap = NULL;
-		int			j, nvalids;
-		char	   *base = (char *)htup + htup->t_hoff;
-		size_t		off = 0;
-
-		if ((htup->t_infomask & HEAP_HASNULL) != 0)
-			nullmap = htup->t_bits;
-		nvalids = HeapTupleHeaderGetNatts(htup);
-
-		for (j=0; j < column->nfields; j++)
-		{
-			SQLfield   *field = &column->subfields[j];
-
-			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
-			{
-				usage += arrowFieldPutValue(field, NULL, 0);
-			}
-			else if (field->sql_type.pgsql.typbyval)
-			{
-				Assert(field->sql_type.pgsql.typlen > 0 &&
-					   field->sql_type.pgsql.typlen <= sizeof(Datum));
-				usage += arrowFieldPutValue(field, base + off,
-											field->sql_type.pgsql.typlen);
-				off = TYPEALIGN(field->sql_type.pgsql.typalign,
-								off + field->sql_type.pgsql.typlen);
-			}
-			else if (field->sql_type.pgsql.typlen == -1)
-			{
-				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-				char   *vl_dat = VARDATA_ANY(base + off);
-
-				usage += arrowFieldPutValue(field, vl_dat, vl_len);
-				off = TYPEALIGN(field->sql_type.pgsql.typalign,
-								off + VARSIZE_ANY(base + off));
-			}
-			else
-			{
-				Elog("Bug? sub-field '%s' of column '%s' has unsupported type",
-					 field->field_name,
-					 column->field_name);
-			}
-			assert(column->nitems == field->nitems);
-		}
-		sql_buffer_setbit(&column->nullmap, row_index);
-	}
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
-/*
  * setupArrowLocalBufferAttribute
  */
 static void
-setupArrowLocalBufferAttribute(SQLfield *sql_field,
-							   const char *field_name,
-							   Oid atttypid, int atttypmod)
+setupArrowLocalBufferAttribute(SQLfield *column,
+							   const char *attname,
+							   Oid atttypid,
+							   int atttypmod)
 {
 	HeapTuple		tup;
 	Form_pg_type	formType;
-	SQLtype__pgsql *pgtype;
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type: %u", atttypid);
 	formType = (Form_pg_type) GETSTRUCT(tup);
 
-	sql_field->field_name	= pstrdup(field_name);
-	pgtype = &sql_field->sql_type.pgsql;
-	pgtype->typeid		= atttypid;
-	pgtype->typmod		= atttypmod;
-	pgtype->typname		= pstrdup(NameStr(formType->typname));
-	pgtype->typnamespace= get_namespace_name(formType->typnamespace);
-	pgtype->typlen		= formType->typlen;
-	pgtype->typbyval	= formType->typbyval;
-	pgtype->typtype		= formType->typtype;
-	if (formType->typalign == 'c')
-		pgtype->typalign = sizeof(char);
-	else if (formType->typalign == 's')
-		pgtype->typalign = sizeof(short);
-	else if (formType->typalign == 'i')
-		pgtype->typalign = sizeof(int);
-	else if (formType->typalign == 'd')
-		pgtype->typalign = sizeof(double);
-	else
-		elog(ERROR, "attribute '%s' has unknown alignment: %c",
-			 field_name, formType->typalign);
-
-	assignArrowType(sql_field);
-
-	if (OidIsValid(formType->typelem) && formType->typlen == -1)
+	assignArrowTypePgSQL(column,
+						 attname,
+						 atttypid,
+						 atttypmod,
+						 NameStr(formType->typname),
+						 get_namespace_name(formType->typnamespace),
+						 formType->typlen,
+						 formType->typbyval,
+						 formType->typtype,
+						 formType->typalign,
+						 formType->typelem,
+						 formType->typrelid);
+	if (OidIsValid(formType->typelem))
 	{
 		/* array type */
-		sql_field->element = palloc0(sizeof(SQLfield));
-		setupArrowLocalBufferAttribute(sql_field->element,
-									   psprintf("%s[]", field_name),
+		column->element = palloc0(sizeof(SQLfield));
+		setupArrowLocalBufferAttribute(column->element,
+									   psprintf("%s[]", attname),
 									   formType->typelem, -1);
-		/* ArrayType layout is much different from libpq binary form */
-		sql_field->put_value = __put_array_value_native;
 	}
 	else if (OidIsValid(formType->typrelid))
 	{
@@ -3914,20 +3751,18 @@ setupArrowLocalBufferAttribute(SQLfield *sql_field,
 				 RelationGetRelationName(comp));
 		tupdesc = RelationGetDescr(comp);
 
-		sql_field->nfields = tupdesc->natts;
-		sql_field->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
+		column->nfields = tupdesc->natts;
+		column->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
 
-			setupArrowLocalBufferAttribute(&sql_field->subfields[j],
+			setupArrowLocalBufferAttribute(&column->subfields[j],
 										   NameStr(subattr->attname),
 										   subattr->atttypid,
 										   subattr->atttypmod);
 		}
 		relation_close(comp, AccessShareLock);
-		/* Composite type has much different layout from libpq binary form */
-		sql_field->put_value = __put_composite_value_native;
 	}
 	else if (formType->typtype == 'e')
 	{
