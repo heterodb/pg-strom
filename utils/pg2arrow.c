@@ -1003,7 +1003,7 @@ static void
 pgsql_writeout_buffer(SQLtable *table)
 {
 	SQLfield   *columns = SQLtableLatestColumns(table);
-	size_t			nitems = columns[0].nitems;
+	size_t		nitems = columns[0].nitems;
 
 	assert(table->nbatches == 1);
 	if (nitems == 0)

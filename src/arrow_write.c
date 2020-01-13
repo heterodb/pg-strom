@@ -1281,16 +1281,6 @@ writeArrowBuffer(SQLfield *column, int fdesc)
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
 void
 writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 {

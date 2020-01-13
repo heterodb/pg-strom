@@ -120,6 +120,10 @@ typedef struct
 	MemoryContext	memcxt;
 	SubTransactionId curr_sub_xid;
 	arrowLocalBufferXactTracker *savepoint_list;
+	File			fdesc;
+	void		   *footer_backup;
+	off_t			footer_offset;
+	size_t			footer_length;
 	SQLtable		sql_table;		/* must be tail */
 } arrowLocalBuffer;
 
@@ -3702,41 +3706,46 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 }
 
 /*
- * setupArrowLocalBufferAttribute
+ * setupArrowLocalBufferField
  */
 static void
-setupArrowLocalBufferAttribute(SQLfield *column,
-							   const char *attname,
-							   Oid atttypid,
-							   int atttypmod)
+setupArrowLocalBufferField(SQLtable *table,
+						   SQLfield *column,
+						   const char *attname,
+						   Oid atttypid,
+						   int atttypmod)
 {
 	HeapTuple		tup;
 	Form_pg_type	formType;
+	const char	   *typnamespace;
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type: %u", atttypid);
 	formType = (Form_pg_type) GETSTRUCT(tup);
-
-	assignArrowTypePgSQL(column,
-						 attname,
-						 atttypid,
-						 atttypmod,
-						 NameStr(formType->typname),
-						 get_namespace_name(formType->typnamespace),
-						 formType->typlen,
-						 formType->typbyval,
-						 formType->typtype,
-						 formType->typalign,
-						 formType->typelem,
-						 formType->typrelid);
+	typnamespace = get_namespace_name(formType->typnamespace);
+	
+	table->numFieldNodes++;
+	table->numBuffers += assignArrowTypePgSQL(column,
+											  attname,
+											  atttypid,
+											  atttypmod,
+											  NameStr(formType->typname),
+											  typnamespace,
+											  formType->typlen,
+											  formType->typbyval,
+											  formType->typtype,
+											  formType->typalign,
+											  formType->typelem,
+											  formType->typrelid);
 	if (OidIsValid(formType->typelem))
 	{
 		/* array type */
 		column->element = palloc0(sizeof(SQLfield));
-		setupArrowLocalBufferAttribute(column->element,
-									   psprintf("%s[]", attname),
-									   formType->typelem, -1);
+		setupArrowLocalBufferField(table,
+								   column->element,
+								   psprintf("%s[]", attname),
+								   formType->typelem, -1);
 	}
 	else if (OidIsValid(formType->typrelid))
 	{
@@ -3757,10 +3766,11 @@ setupArrowLocalBufferAttribute(SQLfield *column,
 		{
 			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
 
-			setupArrowLocalBufferAttribute(&column->subfields[j],
-										   NameStr(subattr->attname),
-										   subattr->atttypid,
-										   subattr->atttypmod);
+			setupArrowLocalBufferField(table,
+									   &column->subfields[j],
+									   NameStr(subattr->attname),
+									   subattr->atttypid,
+									   subattr->atttypmod);
 		}
 		relation_close(comp, AccessShareLock);
 	}
@@ -3795,14 +3805,16 @@ createArrowLocalBuffer(Relation frel)
 	lbuf->memcxt = memcxt;
 	lbuf->curr_sub_xid = InvalidSubTransactionId;
 	lbuf->savepoint_list = NULL;
+	lbuf->fdesc = -1;
 	table = &lbuf->sql_table;
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		setupArrowLocalBufferAttribute(&table->columns[j],
-									   NameStr(attr->attname),
-									   attr->atttypid,
-									   attr->atttypmod);
+		setupArrowLocalBufferField(table,
+								   &table->columns[j],
+								   NameStr(attr->attname),
+								   attr->atttypid,
+								   attr->atttypmod);
 	}
 	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
 	table->nbatches = 1;
@@ -3846,6 +3858,187 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 }
 
 /*
+ * __arrowFdwXactFileCreation
+ *
+ * If apache arrow file on behalf of the foreign table is empty, we try
+ * to construct the file from scratch; including Schema header.
+ */
+static off_t
+__arrowFdwXactPrepCreation(arrowLocalBuffer *lbuf)
+{
+	SQLtable   *table = &lbuf->sql_table;
+	ssize_t		nbytes;
+	off_t		offset;
+
+	/* mark as an empty file */
+	lbuf->footer_backup = ((void *)(~0UL));
+
+	nbytes = write(table->fdesc, "ARROW1\0\0", 8);
+	if (nbytes != 8)
+		elog(ERROR, "failed on write(2): %m");
+	writeArrowSchema(table);
+	writeArrowDictionaryBatches(table);
+
+	offset = lseek(table->fdesc, 0, SEEK_CUR);
+	if (offset < 0)
+		elog(ERROR, "failed on lseek(2): %m");
+	return offset;
+}
+
+/*
+ * __arrowFdwXactFileAppend
+ */
+static off_t
+__arrowFdwXactPrepAppend(arrowLocalBuffer *lbuf, struct stat *st_buf)
+{
+	SQLtable	   *table = &lbuf->sql_table;
+	ArrowFileInfo	af_info;
+	ArrowSchema	   *schema;
+	int				j, nitems;
+	ssize_t			nbytes;
+	off_t			offset;
+	void		   *backup;
+	char			temp[100];
+
+	readArrowFileDesc(table->fdesc, &af_info);
+	schema = &af_info.footer.schema;
+	if (schema->_num_fields != table->nfields)
+		elog(ERROR, "number of fields of Arrow file ('%s') mismatch",
+			 table->filename);
+	for (j=0; j < table->nfields; j++)
+	{
+		// compatibility checks
+
+	}
+	/* restore DictionaryBatches already in the file */
+	nitems = af_info.footer._num_dictionaries;
+	table->numDictionaries = nitems;
+	table->dictionaries = palloc0(sizeof(ArrowBlock) * nitems);
+	memcpy(table->dictionaries,
+		   af_info.footer.dictionaries,
+		   sizeof(ArrowBlock) * nitems);
+
+	/* restore RecordBatches already in the file */
+	nitems = af_info.footer._num_recordBatches;
+	table->numRecordBatches = nitems;
+	table->recordBatches = palloc0(sizeof(ArrowBlock) * nitems);
+	memcpy(table->recordBatches,
+		   af_info.footer.recordBatches,
+		   sizeof(ArrowBlock) * nitems);
+
+	/* make backup image of the Footer section */
+	nbytes = sizeof(int32) + 6;	/* strlen("ARROW1") */
+	offset = lseek(table->fdesc, -nbytes, SEEK_END);
+	if (offset < 0)
+		elog(ERROR, "failed on lseek(2): %m");
+	if (__read(table->fdesc, temp, nbytes) != nbytes)
+		elog(ERROR, "failed on read(2): %m");
+	offset -= *((int32 *)temp);
+
+	nbytes = st_buf->st_size - offset;
+	backup = palloc(nbytes);
+	if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
+		elog(ERROR, "failed on lseek(2): %m");
+	if (__read(table->fdesc, backup, nbytes) != nbytes)
+		elog(ERROR, "failed on read(2): %m");
+	lbuf->footer_backup = backup;
+	lbuf->footer_offset = offset;
+	lbuf->footer_length = nbytes;
+
+	return offset;
+}
+
+/*
+ * arrowFdwXactPreCommit
+ */
+static void
+arrowFdwXactPreCommit(arrowLocalBuffer *lbuf)
+{
+	SQLtable	   *table = &lbuf->sql_table;
+	ForeignTable   *ft = GetForeignTable(lbuf->frel_oid);
+	List		   *filesList;
+	const char	   *fname;
+	File			fdesc;
+	struct stat		st_buf;
+	off_t			f_pos;
+	int				i;
+
+	filesList = arrowFdwExtractFilesList(ft->options);
+	if (list_length(filesList) != 1)
+		elog(ERROR, "cannot expand arrow_fdw table with multiple files");
+	fname = strVal(linitial(filesList));
+	fdesc = PathNameOpenFile(fname, O_RDWR | PG_BINARY);
+	if (fdesc < 0)
+		elog(ERROR, "failed on open('%s'): %m", fname);
+	lbuf->fdesc = fdesc;
+
+	table->filename = pstrdup(fname);
+	table->fdesc = FileGetRawDesc(fdesc);
+	if (fstat(table->fdesc, &st_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", fname);
+	if (st_buf.st_size == 0)
+		f_pos = __arrowFdwXactPrepCreation(lbuf);
+	else
+		f_pos = __arrowFdwXactPrepAppend(lbuf, &st_buf);
+	Assert(lbuf->footer_backup != NULL);
+	if (lseek(table->fdesc, f_pos, SEEK_SET) < 0)
+		elog(ERROR, "failed on lseek: %m");
+	for (i=0; i < table->nbatches; i++)
+	{
+		SQLfield   *columns = &table->columns[i * table->nfields];
+		writeArrowRecordBatch(table, columns);
+	}
+	writeArrowFooter(table);
+	elog(INFO, "PRE_COMMIT lbuf (oid=%u) ", lbuf->frel_oid);
+}
+
+static void
+arrowFdwXactCommit(arrowLocalBuffer *lbuf)
+{
+	if (lbuf->fdesc >= 0)
+		FileClose(lbuf->fdesc);
+	lbuf->fdesc = -1;
+}
+
+/*
+ * arrowFdwXactAbort
+ */
+static void
+arrowFdwXactAbort(arrowLocalBuffer *lbuf)
+{
+	if (lbuf->fdesc >= 0)
+	{
+		/*
+		 * A non-NULL lbuf->footer_backup means arrowFdwXactPreCommit might
+		 * be already opened the arrow file on behalf of the foreign table.
+		 * In this case, we have to revert the file using backup image (or
+		 * make the file empty again).
+		 */
+		if (lbuf->footer_backup == ((void *)(~0UL)))
+		{
+			if (FileTruncate(lbuf->fdesc, 0,
+							 WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
+				elog(WARNING, "arrow_fdw: failed on FileTruncate: %m");
+		}
+		else if (lbuf->footer_backup != NULL)
+		{
+			void   *backup = lbuf->footer_backup;
+			off_t	offset = lbuf->footer_offset;
+			size_t	length = lbuf->footer_length;
+			int		fdesc = FileGetRawDesc(lbuf->fdesc);
+
+			if (lseek(fdesc, offset, SEEK_SET) < 0)
+				elog(WARNING, "arrow_fdw: failed on lseek: %m");
+			else if (__write(fdesc, backup, length) != length)
+				elog(WARNING, "arrow_fdw: failed on __write: %m");
+			else if (ftruncate(fdesc, offset + length) < 0)
+				elog(WARNING, "arrow_fdw: failed on ftruncate: %m");
+		}
+		FileClose(lbuf->fdesc);
+	}
+}
+
+/*
  * arrowFdwXactCallback
  */
 static void
@@ -3868,23 +4061,24 @@ arrowFdwXactCallback(XactEvent event, void *arg)
 			{
 				arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
 														   chain, iter.cur);
-				switch (event)
+				if (event == XACT_EVENT_PRE_COMMIT)
+					arrowFdwXactPreCommit(lbuf);
+				else
 				{
-					case XACT_EVENT_PRE_COMMIT:
-						/* preparation of write */
-						/* footer backup */
-						elog(INFO, "PRE_COMMIT lbuf (oid=%u)", lbuf->frel_oid);
-						break;
-					case XACT_EVENT_COMMIT:
-						elog(INFO, "COMMIT lbuf (oid=%u)", lbuf->frel_oid);
-					default:
-						elog(INFO, "release lbuf (oid=%u)", lbuf->frel_oid);
-						dlist_delete(&lbuf->chain);
-						MemoryContextDelete(lbuf->memcxt);
-						break;
+					if (event == XACT_EVENT_COMMIT)
+						arrowFdwXactCommit(lbuf);
+					else
+						arrowFdwXactAbort(lbuf);
+
+					elog(INFO, "release lbuf (oid=%u)", lbuf->frel_oid);
+					dlist_delete(&lbuf->chain);
+					MemoryContextDelete(lbuf->memcxt);
 				}
 			}
 		}
+		if (event == XACT_EVENT_COMMIT ||
+			event == XACT_EVENT_ABORT)
+			arrow_local_buffer_count = 0;
 	}
 }
 

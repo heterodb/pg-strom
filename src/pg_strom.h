@@ -1809,6 +1809,55 @@ pmemdup(const void *src, Size sz)
 	return dst;
 }
 
+
+/*
+ * Simple wrapper for read(2) and write(2) to ensure full-buffer read and
+ * write, regardless of i/o-size and signal interrupts.
+ */
+static inline ssize_t
+__read(int fdesc, void *buffer, size_t nbytes)
+{
+	ssize_t		rv, count = 0;
+	do {
+		rv = read(fdesc, (char *)buffer + count, nbytes - count);
+		if (rv <= 0)
+		{
+			if (errno == EINTR)
+			{
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			return -1;
+		}
+		else if (rv == 0)
+			break;
+		count += rv;
+	} while (count < nbytes);
+	return count;
+}
+
+static inline ssize_t
+__write(int fdesc, const void *buffer, size_t nbytes)
+{
+	ssize_t		rv, count = 0;
+	do {
+		rv = write(fdesc, (const char *)buffer + count, nbytes - count);
+		if (rv <= 0)
+		{
+			if (errno == EINTR)
+			{
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			return -1;
+		}
+		else if (rv == 0)
+			break;
+		count += rv;
+	} while (count < nbytes);
+	return count;
+}
+
 /*
  * simple wrapper for pthread_mutex_lock
  */
