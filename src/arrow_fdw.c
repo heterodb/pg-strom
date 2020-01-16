@@ -104,14 +104,14 @@ typedef struct
 	MemoryContext	memcxt;
 	SubTransactionId curr_sub_xid;
 	arrowLocalBufferXactTracker *savepoint_list;
+	/* local buffer */
+	SQLtable	   *sql_table;
 	kern_data_store *kds_head;
 	/* state for transaction commit */
 	File			fdesc;
 	void		   *footer_backup;
 	off_t			footer_offset;
 	size_t			footer_length;
-	/* local buffer; must be tail */
-	SQLtable		sql_table;
 } arrowLocalBuffer;
 
 /*
@@ -916,10 +916,11 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 	lbuf = lookupArrowLocalBuffer(relation, false);
 	if (lbuf)
 	{
-		SQLfield   *columns = SQLtableLatestColumns(&lbuf->sql_table);
+		SQLtable   *table = lbuf->sql_table;
+		SQLfield   *columns = SQLtableLatestColumns(table);
 
 		af_state->lbuf = lbuf;
-		af_state->lbuf_nbatches = lbuf->sql_table.nbatches;
+		af_state->lbuf_nbatches = table->nbatches;
 		af_state->lbuf_nitems = columns[0].nitems;
 	}
 	return af_state;
@@ -1896,7 +1897,7 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
 	{
 		arrowLocalBufferXactTracker *xtrack;
-		SQLtable	   *table = &lbuf->sql_table;
+		SQLtable	   *table = lbuf->sql_table;
 		SQLfield	   *columns = SQLtableLatestColumns(table);
 
 		xtrack = MemoryContextAllocZero(lbuf->memcxt,
@@ -1926,7 +1927,7 @@ ArrowExecForeignInsert(EState *estate,
 	Relation		frel = rrinfo->ri_RelationDesc;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	arrowLocalBuffer *lbuf = rrinfo->ri_FdwState;
-	SQLtable	   *table = &lbuf->sql_table;
+	SQLtable	   *table = lbuf->sql_table;
 	SQLfield	   *columns = SQLtableLatestColumns(table);
 	MemoryContext	oldcxt;
 	size_t			usage = 0;
@@ -1967,20 +1968,19 @@ ArrowExecForeignInsert(EState *estate,
 	/* if usage exceeds the record-batch size, switch to new SQLtable */
 	if (usage > table->segment_sz)
 	{
-		int			j, nfields = lbuf->sql_table.nfields;
-		int			base = nfields * lbuf->sql_table.nbatches++;
-		SQLfield   *dst;
-		SQLfield   *src;
+		SQLtable   *table = lbuf->sql_table;
+		SQLfield   *src, *dst;
+		int			j, nfields = table->nfields;
+		size_t		sz;
 
-		dlist_delete(&lbuf->chain);
-		lbuf = repalloc(lbuf, offsetof(arrowLocalBuffer,
-									   sql_table.columns[base + nfields]));
-		src = &lbuf->sql_table.columns[base - nfields];
-		dst = &lbuf->sql_table.columns[base];
+		sz = offsetof(SQLtable, columns[nfields * (table->nbatches + 1)]);
+		table = repalloc(table, sz);
+		src = SQLtableGetColumns(table, table->nbatches - 1);
+		dst = SQLtableGetColumns(table, table->nbatches);
 		for (j=0; j < nfields; j++)
-			duplicateArrowTypeBuffer(dst+j, src+j);
-		dlist_push_tail(&arrow_local_buffer_hash[lbuf->hindex], &lbuf->chain);
-		rrinfo->ri_FdwState = lbuf;
+			duplicateArrowTypeBuffer(&dst[j], &src[j]);
+		table->nbatches++;
+		lbuf->sql_table = table;
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -3816,7 +3816,7 @@ loadArrowLocalBuffer(arrowLocalBuffer *lbuf,
 					 GpuContext *gcontext,
 					 MemoryContext mcontext)
 {
-	SQLtable   *table = &lbuf->sql_table;
+	SQLtable   *table = lbuf->sql_table;
 	SQLfield   *columns;
 	kern_data_store *kds_head = lbuf->kds_head;
 	pgstrom_data_store *pds;
@@ -3893,7 +3893,7 @@ setupArrowLocalBufferField(arrowLocalBuffer *lbuf,
 						   Oid atttypid,
 						   int atttypmod)
 {
-	SQLtable	   *table = &lbuf->sql_table;
+	SQLtable	   *table = lbuf->sql_table;
 	kern_data_store *kds_head = lbuf->kds_head;
 	HeapTuple		tup;
 	Form_pg_type	formType;
@@ -3982,14 +3982,14 @@ createArrowLocalBuffer(Relation frel)
 	MemoryContext	oldcxt;
 	arrowLocalBuffer *lbuf;
 	SQLtable	   *table;
+	kern_data_store *kds_head;
 	int				j, head_sz;
 
 	memcxt = AllocSetContextCreate(TopMemoryContext,
 								   "arrowLocalBuffer",
 								   ALLOCSET_DEFAULT_SIZES);
 	oldcxt = MemoryContextSwitchTo(memcxt);
-	lbuf = palloc0(offsetof(arrowLocalBuffer,
-							sql_table.columns[tupdesc->natts]));
+	lbuf = palloc0(sizeof(arrowLocalBuffer));
 	lbuf->frel_oid = RelationGetRelid(frel);
 	lbuf->memcxt = memcxt;
 	lbuf->curr_sub_xid = InvalidSubTransactionId;
@@ -3997,25 +3997,28 @@ createArrowLocalBuffer(Relation frel)
 	lbuf->fdesc = -1;
 
 	head_sz = KDS_calculateHeadSize(tupdesc, false);
-	lbuf->kds_head = palloc0(head_sz);
-	init_kernel_data_store(lbuf->kds_head,
-						   tupdesc, head_sz, KDS_FORMAT_ARROW, 0, false);
+	lbuf->kds_head = kds_head = palloc0(head_sz);
+	init_kernel_data_store(kds_head,
+						   tupdesc,
+						   head_sz,
+						   KDS_FORMAT_ARROW, 0, false);
 
+	lbuf->sql_table = table = palloc0(offsetof(SQLtable,
+											   columns[tupdesc->natts]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		setupArrowLocalBufferField(lbuf,
-								   &lbuf->sql_table.columns[j],
-								   &lbuf->kds_head->colmeta[j],
+								   &table->columns[j],
+								   &kds_head->colmeta[j],
 								   NameStr(attr->attname),
 								   attr->atttypid,
 								   attr->atttypmod);
 	}
-	table = &lbuf->sql_table;
 	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
 	table->nbatches = 1;
 	table->nfields = tupdesc->natts;
-
+	
 	MemoryContextSwitchTo(oldcxt);
 
 	return lbuf;
@@ -4064,7 +4067,7 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 static off_t
 __arrowFdwXactPrepCreation(arrowLocalBuffer *lbuf)
 {
-	SQLtable   *table = &lbuf->sql_table;
+	SQLtable   *table = lbuf->sql_table;
 	ssize_t		nbytes;
 	off_t		offset;
 
@@ -4089,7 +4092,7 @@ __arrowFdwXactPrepCreation(arrowLocalBuffer *lbuf)
 static off_t
 __arrowFdwXactPrepAppend(arrowLocalBuffer *lbuf, struct stat *st_buf)
 {
-	SQLtable	   *table = &lbuf->sql_table;
+	SQLtable	   *table = lbuf->sql_table;
 	ArrowFileInfo	af_info;
 	ArrowSchema	   *schema;
 	int				j, nitems;
@@ -4152,7 +4155,7 @@ __arrowFdwXactPrepAppend(arrowLocalBuffer *lbuf, struct stat *st_buf)
 static void
 arrowFdwXactPreCommit(arrowLocalBuffer *lbuf)
 {
-	SQLtable	   *table = &lbuf->sql_table;
+	SQLtable	   *table = lbuf->sql_table;
 	ForeignTable   *ft = GetForeignTable(lbuf->frel_oid);
 	List		   *filesList;
 	const char	   *fname;
@@ -4290,7 +4293,7 @@ rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
 
 	for (xtrack = lbuf->savepoint_list; xtrack != NULL; xtrack = xtrack->prev)
 	{
-		SQLtable   *table = &lbuf->sql_table;
+		SQLtable   *table = lbuf->sql_table;
 		SQLfield *columns = SQLtableLatestColumns(table);
 		int			i, j;
 
