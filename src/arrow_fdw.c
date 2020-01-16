@@ -55,23 +55,6 @@ typedef struct RecordBatchState
 } RecordBatchState;
 
 /*
- * ArrowFdwState
- */
-struct ArrowFdwState
-{
-	List	   *filesList;
-	List	   *fdescList;
-	Bitmapset  *referenced;
-	pg_atomic_uint32   *rbatch_index;
-	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
-	pgstrom_data_store *curr_pds;	/* current focused buffer */
-	cl_ulong	curr_index;			/* current index to row on KDS */
-	/* state of RecordBatches */
-	uint32		num_rbatches;
-	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
-};
-
-/*
  * metadata cache (on shared memory)
  */
 typedef struct
@@ -116,16 +99,41 @@ typedef struct arrowLocalBufferXactTracker
 typedef struct
 {
 	dlist_node		chain;
+	uint32			hindex;
 	Oid				frel_oid;
 	MemoryContext	memcxt;
 	SubTransactionId curr_sub_xid;
 	arrowLocalBufferXactTracker *savepoint_list;
+	kern_data_store *kds_head;
+	/* state for transaction commit */
 	File			fdesc;
 	void		   *footer_backup;
 	off_t			footer_offset;
 	size_t			footer_length;
-	SQLtable		sql_table;		/* must be tail */
+	/* local buffer; must be tail */
+	SQLtable		sql_table;
 } arrowLocalBuffer;
+
+/*
+ * ArrowFdwState
+ */
+struct ArrowFdwState
+{
+	List	   *filesList;
+	List	   *fdescList;
+	Bitmapset  *referenced;
+	pg_atomic_uint32   *rbatch_index;
+	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
+	pgstrom_data_store *curr_pds;	/* current focused buffer */
+	cl_ulong	curr_index;			/* current index to row on KDS */
+	/* state of LocalBuffer */
+	arrowLocalBuffer *lbuf;
+	cl_int		lbuf_nbatches;
+	cl_long		lbuf_nitems;
+	/* state of RecordBatches */
+	uint32		num_rbatches;
+	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
+};
 
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
@@ -164,7 +172,13 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   size_t index,
 								   Datum *p_datum,
 								   bool *p_isnull);
-/* INSERT support */
+/* Local buffers for INSERT support */
+static pgstrom_data_store *loadArrowLocalBuffer(arrowLocalBuffer *lbuf,
+												cl_int lbuf_ibatch,
+												cl_long lbuf_nitems,
+												Bitmapset *referenced,
+												GpuContext *gcontext,
+												MemoryContext mcontext);
 static arrowLocalBuffer *lookupArrowLocalBuffer(Relation frel,
 												bool create_on_demand);
 
@@ -576,6 +590,60 @@ typedef struct
 } setupRecordBatchContext;
 
 static void
+assignArrowTypeOptions(ArrowTypeOptions *attopts, const ArrowType *atype)
+{
+	memset(attopts, 0, sizeof(ArrowTypeOptions));
+	switch (atype->node.tag)
+	{
+		case ArrowNodeTag__Decimal:
+			if (atype->Decimal.precision < SHRT_MIN ||
+				atype->Decimal.precision > SHRT_MAX)
+				elog(ERROR, "Decimal precision is out of range");
+			if (atype->Decimal.scale < SHRT_MIN ||
+				atype->Decimal.scale > SHRT_MAX)
+				elog(ERROR, "Decimal scale is out of range");
+			attopts->decimal.precision = atype->Decimal.precision;
+			attopts->decimal.scale     = atype->Decimal.scale;
+			break;
+		case ArrowNodeTag__Date:
+			if (atype->Date.unit == ArrowDateUnit__Day ||
+				atype->Date.unit == ArrowDateUnit__MilliSecond)
+				attopts->date.unit = atype->Date.unit;
+			else
+				elog(ERROR, "unknown unit of Date");
+			break;
+		case ArrowNodeTag__Time:
+			if (atype->Time.unit == ArrowTimeUnit__Second ||
+				atype->Time.unit == ArrowTimeUnit__MilliSecond ||
+				atype->Time.unit == ArrowTimeUnit__MicroSecond ||
+				atype->Time.unit == ArrowTimeUnit__NanoSecond)
+				attopts->time.unit = atype->Time.unit;
+			else
+				elog(ERROR, "unknown unit of Time");
+			break;
+		case ArrowNodeTag__Timestamp:
+			if (atype->Timestamp.unit == ArrowTimeUnit__Second ||
+				atype->Timestamp.unit == ArrowTimeUnit__MilliSecond ||
+				atype->Timestamp.unit == ArrowTimeUnit__MicroSecond ||
+				atype->Timestamp.unit == ArrowTimeUnit__NanoSecond)
+				attopts->time.unit = atype->Timestamp.unit;
+			else
+				elog(ERROR, "unknown unit of Timestamp");
+			break;
+		case ArrowNodeTag__Interval:
+			if (atype->Interval.unit == ArrowIntervalUnit__Year_Month ||
+				atype->Interval.unit == ArrowIntervalUnit__Day_Time)
+				attopts->interval.unit = atype->Interval.unit;
+			else
+				elog(ERROR, "unknown unit of Interval");
+			break;
+		default:
+			/* no extra attributes */
+			break;
+	}
+}
+
+static void
 setupRecordBatchField(setupRecordBatchContext *con,
 					  RecordBatchFieldState *fstate,
 					  ArrowField  *field,
@@ -734,72 +802,8 @@ setupRecordBatchField(setupRecordBatchContext *con,
 		default:
 			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
 	}
-
-	/* Extra attributes (precision, unitsz, ...) */
-	switch (field->type.node.tag)
-	{
-		case ArrowNodeTag__Decimal:
-			if (field->type.Decimal.precision < SHRT_MIN ||
-				field->type.Decimal.precision > SHRT_MAX)
-				elog(ERROR, "Decimal precision is out of range");
-			if (field->type.Decimal.scale < SHRT_MIN ||
-				field->type.Decimal.scale > SHRT_MAX)
-				elog(ERROR, "Decimal scale is out of range");
-			fstate->attopts.decimal.precision = field->type.Decimal.precision;
-			fstate->attopts.decimal.scale     = field->type.Decimal.scale;
-			break;
-		case ArrowNodeTag__Date:
-			switch (field->type.Date.unit)
-			{
-				case ArrowDateUnit__Day:
-				case ArrowDateUnit__MilliSecond:
-					break;
-				default:
-					elog(ERROR, "unknown unit of Date");
-			}
-			fstate->attopts.date.unit = field->type.Date.unit;
-			break;
-		case ArrowNodeTag__Time:
-			switch (field->type.Time.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					break;
-				default:
-					elog(ERROR, "unknown unit of Time");
-			}
-			fstate->attopts.time.unit = field->type.Time.unit;
-			break;
-		case ArrowNodeTag__Timestamp:
-			switch (field->type.Timestamp.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					break;
-				default:
-					elog(ERROR, "unknown unit of Time");
-			}
-			fstate->attopts.time.unit = field->type.Timestamp.unit;
-			break;
-		case ArrowNodeTag__Interval:
-			switch (field->type.Interval.unit)
-			{
-				case ArrowIntervalUnit__Year_Month:
-				case ArrowIntervalUnit__Day_Time:
-					break;
-				default:
-					elog(ERROR, "unknown unit of Interval");
-			}
-			fstate->attopts.interval.unit = field->type.Interval.unit;
-			break;
-		default:
-			/* no extra attributes */
-			break;
-	}
+	/* assign extra attributes (precision, unitsz, ...) */
+	assignArrowTypeOptions(&fstate->attopts, &field->type);
 }
 
 static RecordBatchState *
@@ -853,6 +857,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
 	int				i, num_rbatches;
+	arrowLocalBuffer *lbuf;
 
 	Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE &&
 		   memcmp(GetFdwRoutineForRelation(relation, false),
@@ -907,6 +912,16 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
 	af_state->num_rbatches = num_rbatches;
 
+	/* local buffers, if any */
+	lbuf = lookupArrowLocalBuffer(relation, false);
+	if (lbuf)
+	{
+		SQLfield   *columns = SQLtableLatestColumns(&lbuf->sql_table);
+
+		af_state->lbuf = lbuf;
+		af_state->lbuf_nbatches = lbuf->sql_table.nbatches;
+		af_state->lbuf_nitems = columns[0].nitems;
+	}
 	return af_state;
 }
 
@@ -1239,8 +1254,18 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 	/* fetch next RecordBatch */
 	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
 	if (rb_index >= af_state->num_rbatches)
-		return NULL;	/* no more RecordBatch to read */
+	{
+		cl_int		lbuf_ibatch = rb_index - af_state->num_rbatches;
 
+		if (af_state->lbuf && lbuf_ibatch < af_state->lbuf_nbatches)
+			return loadArrowLocalBuffer(af_state->lbuf,
+										lbuf_ibatch,
+										af_state->lbuf_nitems,
+										af_state->referenced,
+										gcontext,
+										estate->es_query_cxt);
+		return NULL;	/* no more RecordBatch to read */
+	}
 	return __arrowFdwLoadRecordBatch(af_state->rbatches[rb_index],
 									 relation,
 									 af_state->referenced,
@@ -1938,19 +1963,27 @@ ArrowExecForeignInsert(EState *estate,
 			elog(ERROR, "Bug? unsupported type format");
 		}
 	}
-	MemoryContextSwitchTo(oldcxt);
 
 	/* if usage exceeds the record-batch size, switch to new SQLtable */
 	if (usage > table->segment_sz)
 	{
-		
+		int			j, nfields = lbuf->sql_table.nfields;
+		int			base = nfields * lbuf->sql_table.nbatches++;
+		SQLfield   *dst;
+		SQLfield   *src;
 
-
-
-
-
-		
+		dlist_delete(&lbuf->chain);
+		lbuf = repalloc(lbuf, offsetof(arrowLocalBuffer,
+									   sql_table.columns[base + nfields]));
+		src = &lbuf->sql_table.columns[base - nfields];
+		dst = &lbuf->sql_table.columns[base];
+		for (j=0; j < nfields; j++)
+			duplicateArrowTypeBuffer(dst+j, src+j);
+		dlist_push_tail(&arrow_local_buffer_hash[lbuf->hindex], &lbuf->chain);
+		rrinfo->ri_FdwState = lbuf;
 	}
+	MemoryContextSwitchTo(oldcxt);
+
 	return slot;
 }
 
@@ -3706,15 +3739,162 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 }
 
 /*
+ * __loadArrowLocalBufferField
+ */
+static void
+__loadArrowLocalBufferField(kern_data_store *kds,
+							kern_colmeta *cmeta,
+							SQLfield *column,
+							size_t nitems)
+{
+	size_t		offset = kds->length;
+	size_t		length;
+
+	Assert(nitems <= column->nitems);
+	if (column->nullcount > 0)
+	{
+		length = ARROWALIGN(column->nullmap.usage);
+		Assert(length >= BITMAPLEN(nitems));
+		cmeta->nullmap_offset = __kds_packed(offset);
+		cmeta->nullmap_length = __kds_packed(length);
+		memcpy((char *)kds + offset, column->nullmap.data, length);
+		offset += length;
+	}
+
+	if (column->values.usage > 0)
+	{
+		length = ARROWALIGN(column->values.usage);
+		cmeta->values_offset = __kds_packed(offset);
+		cmeta->values_length = __kds_packed(length);
+		memcpy((char *)kds + offset, column->values.data, length);
+		offset += length;
+	}
+
+	if (column->extra.usage > 0)
+	{
+		length = ARROWALIGN(column->extra.usage);
+		cmeta->extra_offset = __kds_packed(offset);
+		cmeta->extra_length = __kds_packed(length);
+		memcpy((char *)kds + offset, column->extra.data, length);
+		offset += length;
+	}
+	kds->length = offset;
+
+	if (column->element)
+	{
+		kern_colmeta   *__cmeta = &kds->colmeta[cmeta->idx_subattrs];
+
+		Assert(cmeta->idx_subattrs >= kds->ncols &&
+			   cmeta->idx_subattrs <  kds->nr_colmeta &&
+			   cmeta->num_subattrs == 1);
+		__loadArrowLocalBufferField(kds, __cmeta, column->element, nitems);
+	}
+	else if (column->subfields)
+	{
+		kern_colmeta   *__cmeta = &kds->colmeta[cmeta->idx_subattrs];
+		int				j;
+
+		Assert(cmeta->idx_subattrs >= kds->ncols &&
+			   cmeta->idx_subattrs + cmeta->idx_subattrs <= kds->nr_colmeta &&
+			   cmeta->num_subattrs == column->nfields);
+		for (j=0; j < column->nfields; j++)
+			__loadArrowLocalBufferField(kds,
+										&__cmeta[j],
+										&column->subfields[j],
+										nitems);
+	}
+}
+
+/*
+ * loadArrowLocalBuffer
+ */
+static pgstrom_data_store *
+loadArrowLocalBuffer(arrowLocalBuffer *lbuf,
+					 cl_int lbuf_ibatch,
+					 cl_long lbuf_nitems,
+					 Bitmapset *referenced,
+					 GpuContext *gcontext,
+					 MemoryContext mcontext)
+{
+	SQLtable   *table = &lbuf->sql_table;
+	SQLfield   *columns;
+	kern_data_store *kds_head = lbuf->kds_head;
+	pgstrom_data_store *pds;
+	size_t		total_length;
+	size_t		nitems;
+	CUresult	rc;
+	int			j;
+
+	if (lbuf_ibatch >= table->nbatches)
+		return NULL;
+	columns = SQLtableGetColumns(table, lbuf_ibatch);
+	if (lbuf_ibatch < table->nbatches)
+		nitems = columns[0].nitems;
+	else
+		nitems = Min(lbuf_nitems, columns[0].nitems);
+	if (nitems == 0)
+		return NULL;
+	
+	/* Length estimation */
+	total_length = offsetof(pgstrom_data_store, kds) + kds_head->length;
+	for (j=0; j < table->nfields; j++)
+	{
+		int		attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
+
+		if (bms_is_member(attidx, referenced))
+			total_length += estimateArrowBufferLength(&columns[j], nitems);
+	}
+	/* Allocation of PDS buffer */
+	if (gcontext)
+	{
+		rc = gpuMemAllocManaged(gcontext,
+								(CUdeviceptr *)&pds,
+								total_length,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocHost: %s", errorText(rc));
+	}
+	else
+	{
+		pds = MemoryContextAllocHuge(mcontext, total_length);
+	}
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
+	pds->gcontext = gcontext;
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
+
+	/* Setup kern_data_store */
+	memcpy(&pds->kds, kds_head, kds_head->length);
+	pds->kds.nitems = nitems;
+	for (j=0; j < table->nfields; j++)
+	{
+		int		attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
+
+		if (bms_is_member(attidx, referenced))
+			__loadArrowLocalBufferField(&pds->kds,
+										&pds->kds.colmeta[j],
+										&columns[j],
+										nitems);
+	}
+	Assert(offsetof(pgstrom_data_store,
+					kds) + pds->kds.length == total_length);
+	return pds;
+}
+
+/*
  * setupArrowLocalBufferField
  */
 static void
-setupArrowLocalBufferField(SQLtable *table,
+setupArrowLocalBufferField(arrowLocalBuffer *lbuf,
 						   SQLfield *column,
+						   kern_colmeta *cmeta,
 						   const char *attname,
 						   Oid atttypid,
 						   int atttypmod)
 {
+	SQLtable	   *table = &lbuf->sql_table;
+	kern_data_store *kds_head = lbuf->kds_head;
 	HeapTuple		tup;
 	Form_pg_type	formType;
 	const char	   *typnamespace;
@@ -3738,12 +3918,18 @@ setupArrowLocalBufferField(SQLtable *table,
 											  formType->typalign,
 											  formType->typelem,
 											  formType->typrelid);
+	assignArrowTypeOptions(&cmeta->attopts, &column->arrow_type);
+
 	if (OidIsValid(formType->typelem))
 	{
 		/* array type */
+		Assert(cmeta->idx_subattrs >= kds_head->ncols &&
+			   cmeta->idx_subattrs <  kds_head->nr_colmeta &&
+			   cmeta->num_subattrs == 1);
 		column->element = palloc0(sizeof(SQLfield));
-		setupArrowLocalBufferField(table,
+		setupArrowLocalBufferField(lbuf,
 								   column->element,
+								   &kds_head->colmeta[cmeta->idx_subattrs],
 								   psprintf("%s[]", attname),
 								   formType->typelem, -1);
 	}
@@ -3752,22 +3938,25 @@ setupArrowLocalBufferField(SQLtable *table,
 		/* composite type */
 		Relation	comp;
 		TupleDesc	tupdesc;
-		int			j;
+		int			j, k;
 
 		comp = relation_open(formType->typrelid, AccessShareLock);
 		if (comp->rd_rel->relkind != RELKIND_COMPOSITE_TYPE)
 			elog(ERROR, "Bug? relation '%s' is not a composite type",
 				 RelationGetRelationName(comp));
 		tupdesc = RelationGetDescr(comp);
-
+		Assert(cmeta->idx_subattrs >= kds_head->ncols &&
+			   cmeta->idx_subattrs + tupdesc->natts <= kds_head->nr_colmeta &&
+			   cmeta->num_subattrs == tupdesc->natts);
 		column->nfields = tupdesc->natts;
 		column->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
-		for (j=0; j < tupdesc->natts; j++)
+		for (j=0, k=cmeta->idx_subattrs; j < tupdesc->natts; j++, k++)
 		{
 			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
 
-			setupArrowLocalBufferField(table,
+			setupArrowLocalBufferField(lbuf,
 									   &column->subfields[j],
+									   &kds_head->colmeta[k],
 									   NameStr(subattr->attname),
 									   subattr->atttypid,
 									   subattr->atttypmod);
@@ -3793,7 +3982,7 @@ createArrowLocalBuffer(Relation frel)
 	MemoryContext	oldcxt;
 	arrowLocalBuffer *lbuf;
 	SQLtable	   *table;
-	int				j;
+	int				j, head_sz;
 
 	memcxt = AllocSetContextCreate(TopMemoryContext,
 								   "arrowLocalBuffer",
@@ -3806,16 +3995,23 @@ createArrowLocalBuffer(Relation frel)
 	lbuf->curr_sub_xid = InvalidSubTransactionId;
 	lbuf->savepoint_list = NULL;
 	lbuf->fdesc = -1;
-	table = &lbuf->sql_table;
+
+	head_sz = KDS_calculateHeadSize(tupdesc, false);
+	lbuf->kds_head = palloc0(head_sz);
+	init_kernel_data_store(lbuf->kds_head,
+						   tupdesc, head_sz, KDS_FORMAT_ARROW, 0, false);
+
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		setupArrowLocalBufferField(table,
-								   &table->columns[j],
+		setupArrowLocalBufferField(lbuf,
+								   &lbuf->sql_table.columns[j],
+								   &lbuf->kds_head->colmeta[j],
 								   NameStr(attr->attname),
 								   attr->atttypid,
 								   attr->atttypmod);
 	}
+	table = &lbuf->sql_table;
 	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
 	table->nbatches = 1;
 	table->nfields = tupdesc->natts;
@@ -3834,10 +4030,11 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 	arrowLocalBuffer *lbuf = NULL;
 	Oid				frel_oid = RelationGetRelid(frel);
 	uint32			hash = hash_uint32(frel_oid);
+	uint32			hindex = hash % ARROW_LOCAL_BUFFER_HASHSIZE;
 	dlist_head	   *hslot;
 	dlist_iter		iter;
 
-	hslot = &arrow_local_buffer_hash[hash % ARROW_LOCAL_BUFFER_HASHSIZE];
+	hslot = &arrow_local_buffer_hash[hindex];
 	dlist_foreach(iter, hslot)
 	{
 		lbuf = dlist_container(arrowLocalBuffer, chain, iter.cur);
@@ -3848,6 +4045,7 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 	if (create_on_demand)
 	{
 		lbuf = createArrowLocalBuffer(frel);
+		lbuf->hindex = hindex;
 
 		dlist_push_tail(hslot, &lbuf->chain);
 		arrow_local_buffer_count++;

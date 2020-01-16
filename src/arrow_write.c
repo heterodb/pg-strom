@@ -1211,6 +1211,86 @@ setupArrowBuffer(ArrowBuffer *bnode, SQLfield *column, size_t *p_offset)
 	return retval;
 }
 
+size_t
+estimateArrowBufferLength(SQLfield *column, size_t nitems)
+{
+	size_t		len = 0;
+	int			j;
+
+	if (column->nitems != nitems)
+		Elog("Bug? number of items mismatch");
+	
+	if (column->enumdict)
+	{
+		/* Enum data types */
+		assert(column->arrow_type.node.tag == ArrowNodeTag__Utf8);
+		if (column->nullcount > 0)
+			len += ARROWALIGN(column->nullmap.usage);
+		len += ARROWALIGN(column->values.usage);
+		assert(column->extra.usage == 0);
+	}
+	else if (column->element)
+	{
+		/* Array data types */
+		assert(column->arrow_type.node.tag == ArrowNodeTag__List ||
+			   column->arrow_type.node.tag == ArrowNodeTag__LargeList);
+		if (column->nullcount > 0)
+			len += ARROWALIGN(column->nullmap.usage);
+		len += ARROWALIGN(column->values.usage);
+		assert(column->extra.usage == 0);
+		len += estimateArrowBufferLength(column->element, nitems);
+	}
+	else if (column->subfields)
+	{
+		/* Composite data types */
+		assert(column->arrow_type.node.tag == ArrowNodeTag__Struct);
+		if (column->nullcount > 0)
+			len += ARROWALIGN(column->nullmap.usage);
+		assert(column->values.usage == 0 ||
+			   column->extra.usage == 0);
+		for (j=0; j < column->nfields; j++)
+			len += estimateArrowBufferLength(&column->subfields[j], nitems);
+	}
+	else
+	{
+		switch (column->arrow_type.node.tag)
+		{
+			/* inline type */
+			case ArrowNodeTag__Int:
+			case ArrowNodeTag__FloatingPoint:
+			case ArrowNodeTag__Bool:
+			case ArrowNodeTag__Decimal:
+			case ArrowNodeTag__Date:
+			case ArrowNodeTag__Time:
+			case ArrowNodeTag__Timestamp:
+			case ArrowNodeTag__Interval:
+			case ArrowNodeTag__FixedSizeBinary:
+				if (column->nullcount > 0)
+					len += ARROWALIGN(column->nullmap.usage);
+				len += ARROWALIGN(column->values.usage);
+				assert(column->extra.usage == 0);
+				break;
+
+			/* variable length type */
+			case ArrowNodeTag__Utf8:
+			case ArrowNodeTag__Binary:
+			case ArrowNodeTag__LargeUtf8:
+			case ArrowNodeTag__LargeBinary:
+				if (column->nullcount > 0)
+					len += ARROWALIGN(column->nullmap.usage);
+				len += ARROWALIGN(column->values.usage);
+				len += ARROWALIGN(column->extra.usage);
+				break;
+
+			default:
+				Elog("Bug? Arrow Type %s is not supported right now",
+					 column->arrow_typename);
+				break;
+		}
+	}
+	return len;
+}
+
 static void
 writeArrowBuffer(SQLfield *column, int fdesc)
 {

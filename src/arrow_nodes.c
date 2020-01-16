@@ -1858,3 +1858,36 @@ rewindArrowTypeBuffer(SQLfield *column, size_t nitems)
 				 column->arrow_type.node.tag);
 	}
 }
+
+/*
+ * Duplicate Arrow Type Buffer (expect for data portion)
+ */
+void
+duplicateArrowTypeBuffer(SQLfield *dest, SQLfield *source)
+{
+	int		j;
+
+	memset(dest, 0, sizeof(SQLfield));
+	dest->field_name = pstrdup(source->field_name);
+	memcpy(&dest->sql_type, &source->sql_type, sizeof(SQLtype));
+	if (source->element)
+	{
+		dest->element = palloc0(sizeof(SQLfield));
+		duplicateArrowTypeBuffer(dest->element, source->element);
+	}
+	if (source->subfields)
+	{
+		assert(source->nfields > 0);
+		dest->nfields   = source->nfields;
+		dest->subfields = palloc0(sizeof(SQLfield) * source->nfields);
+		for (j=0; j < dest->nfields; j++)
+			duplicateArrowTypeBuffer(&dest->subfields[j],
+									 &source->subfields[j]);
+	}
+	/* dictionary batch is shared by multiple batches */
+	dest->enumdict = source->enumdict;
+	copyArrowNode((ArrowNode *)&dest->arrow_type,
+				  (ArrowNode *)&source->arrow_type);
+	dest->arrow_typename = pstrdup(source->arrow_typename);
+	dest->put_value = source->put_value;
+}

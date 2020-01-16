@@ -159,12 +159,14 @@ extern void		writeArrowDictionaryBatches(SQLtable *table);
 extern void		writeArrowRecordBatch(SQLtable *table,
 									  SQLfield *attrs);
 extern ssize_t	writeArrowFooter(SQLtable *table);
+extern size_t	estimateArrowBufferLength(SQLfield *column, size_t nitems);
 
 /* arrow_nodes.c */
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
-extern void		rewindArrowTypeBuffer(SQLfield *attr, size_t nitems);
+extern void		rewindArrowTypeBuffer(SQLfield *column, size_t nitems);
+extern void		duplicateArrowTypeBuffer(SQLfield *dest, SQLfield *source);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern char	   *dumpArrowNode(ArrowNode *node);
 
