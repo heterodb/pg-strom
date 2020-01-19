@@ -1438,9 +1438,9 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 	block->metaDataLength = metaLength;
 	block->bodyLength = bodyLength;
 
-	/* makes table/attributes empty again */
+	/* make the local buffer empty again */
 	for (j=0; j < table->nfields; j++)
-		rewindArrowTypeBuffer(&columns[j], 0);
+		sql_field_rewind(&columns[j], 0);
 }
 
 /*

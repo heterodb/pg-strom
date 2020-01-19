@@ -1063,7 +1063,7 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 				sz = PQgetlength(res, i, j);
 			}
 			assert(column->nitems == nitems);
-			usage += arrowFieldPutValue(column, addr, sz);
+			usage += sql_field_put_value(column, addr, sz);
 		}
 		/* exceeds the threshold to write? */
 		if (usage > table->segment_sz)

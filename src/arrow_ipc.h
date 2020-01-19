@@ -80,7 +80,6 @@ struct SQLfield
 	const char *arrow_typename;	/* typename in apache arrow */
 	/* data save as Apache Arrow datum */
 	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
-	Datum	(*get_value)(SQLfield *column, size_t index, bool *isnull);
 	/* data buffers of the field */
 	long		nitems;			/* number of rows */
 	long		nullcount;		/* number of null values */
@@ -92,6 +91,11 @@ struct SQLfield
 	ArrowKeyValue *customMetadata;
 	int			numCustomMetadata;
 };
+static inline size_t
+sql_field_put_value(SQLfield *column, const char *addr, int sz)
+{
+	return (column->__curr_usage__ = column->put_value(column, addr, sz));
+}
 
 struct SQLtable
 {
@@ -165,10 +169,28 @@ extern size_t	estimateArrowBufferLength(SQLfield *column, size_t nitems);
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 #define initArrowNode(PTR,NAME)					\
 	__initArrowNode((ArrowNode *)(PTR),ArrowNodeTag__##NAME)
+extern char	   *dumpArrowNode(ArrowNode *node);
+extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
+extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
+extern char	   *arrowTypeName(ArrowField *field);
+
+/* arrow_buf.c */
+extern void		sql_field_rewind(SQLfield *column, size_t nitems);
+extern void		sql_table_rewind(SQLtable *table, int nbatches, size_t nitems);
+extern SQLtable *sql_table_expand(SQLtable *table);
+extern void		sql_buffer_init(SQLbuffer *buf);
+extern void		sql_buffer_expand(SQLbuffer *buf, size_t required);
+extern void		sql_buffer_append(SQLbuffer *buf, const void *src, size_t len);
+extern void		sql_buffer_append_zero(SQLbuffer *buf, size_t len);
+extern void		sql_buffer_setbit(SQLbuffer *buf, size_t __index);
+extern void		sql_buffer_clrbit(SQLbuffer *buf, size_t __index);
+extern void		sql_buffer_clear(SQLbuffer *buf);
+extern void		sql_buffer_copy(SQLbuffer *dst, const SQLbuffer *src);
+extern void		sql_buffer_write(int fdesc, SQLbuffer *buf);
+
+
 extern void		rewindArrowTypeBuffer(SQLfield *column, size_t nitems);
 extern void		duplicateArrowTypeBuffer(SQLfield *dest, SQLfield *source);
-extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
-extern char	   *dumpArrowNode(ArrowNode *node);
 
 /* arrow_pgsql.c */
 extern int		assignArrowTypePgSQL(SQLfield *column,
@@ -183,165 +205,6 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 char typalign,
 									 Oid typelem,
 									 Oid typrelid);
-static inline size_t
-arrowFieldPutValue(SQLfield *column, const char *addr, int sz)
-{
-	return (column->__curr_usage__ = column->put_value(column, addr, sz));
-}
-
-static inline Datum
-arrowFieldGetValue(SQLfield *column, size_t row_index, bool *isnull)
-{
-	if (!column->get_value)
-		Elog("%s does not implement get_value() handler",
-			 column->arrow_typename);
-	return column->get_value(column, row_index, isnull);
-}
-
-/*
- * SQLbuffer related routines
- */
-static inline void
-sql_buffer_init(SQLbuffer *buf)
-{
-	buf->data = NULL;
-	buf->usage = 0;
-	buf->length = 0;
-}
-
-static inline void
-sql_buffer_expand(SQLbuffer *buf, size_t required)
-{
-	if (buf->length < required)
-	{
-		void	   *data;
-		size_t		length;
-
-		if (buf->data == NULL)
-		{
-			length = (1UL << 20);	/* start from 1MB */
-			while (length < required)
-				length *= 2;
-			data = palloc(length);
-			if (!data)
-				Elog("palloc: out of memory (sz=%zu)", length);
-			buf->data   = data;
-			buf->usage  = 0;
-			buf->length = length;
-		}
-		else
-		{
-			length = buf->length;
-			while (length < required)
-				length *= 2;
-			data = repalloc(buf->data, length);
-			if (!data)
-				Elog("repalloc: out of memory (sz=%zu)", length);
-			buf->data = data;
-			buf->length = length;
-		}
-	}
-}
-
-static inline void
-sql_buffer_append(SQLbuffer *buf, const void *src, size_t len)
-{
-	sql_buffer_expand(buf, buf->usage + len);
-	memcpy(buf->data + buf->usage, src, len);
-	buf->usage += len;
-	assert(buf->usage <= buf->length);
-}
-
-static inline void
-sql_buffer_append_zero(SQLbuffer *buf, size_t len)
-{
-	sql_buffer_expand(buf, buf->usage + len);
-	memset(buf->data + buf->usage, 0, len);
-	buf->usage += len;
-	assert(buf->usage <= buf->length);
-}
-
-static inline void
-sql_buffer_setbit(SQLbuffer *buf, size_t __index)
-{
-	size_t		index = __index >> 3;
-	int			mask  = (1 << (__index & 7));
-
-	sql_buffer_expand(buf, index + 1);
-	((uint8 *)buf->data)[index] |= mask;
-	buf->usage = Max(buf->usage, index + 1);
-}
-
-static inline void
-sql_buffer_clrbit(SQLbuffer *buf, size_t __index)
-{
-	size_t		index = __index >> 3;
-	int			mask  = (1 << (__index & 7));
-
-	sql_buffer_expand(buf, index + 1);
-	((uint8 *)buf->data)[index] &= ~mask;
-	buf->usage = Max(buf->usage, index + 1);
-}
-
-static inline void
-sql_buffer_clear(SQLbuffer *buf)
-{
-	buf->usage = 0;
-}
-
-static inline void
-sql_buffer_copy(SQLbuffer *dest, const SQLbuffer *orig)
-{
-	sql_buffer_init(dest);
-	if (orig->data)
-	{
-		assert(orig->usage <= orig->length);
-		sql_buffer_expand(dest, orig->length);
-		memcpy(dest->data, orig->data, orig->usage);
-		dest->usage = orig->usage;
-	}
-}
-
-static inline void
-sql_buffer_write(int fdesc, SQLbuffer *buf)
-{
-	ssize_t		length = buf->usage;
-	ssize_t		offset = 0;
-	ssize_t		nbytes;
-
-	while (offset < length)
-	{
-		nbytes = write(fdesc, buf->data + offset, length - offset);
-		if (nbytes < 0)
-		{
-			if (errno == EINTR)
-				continue;
-			Elog("failed on write(2): %m");
-		}
-		offset += nbytes;
-	}
-
-	if (length != ARROWALIGN(length))
-	{
-		ssize_t	gap = ARROWALIGN(length) - length;
-		char	zero[64];
-
-		offset = 0;
-		memset(zero, 0, sizeof(zero));
-		while (offset < gap)
-		{
-			nbytes = write(fdesc, zero + offset, gap - offset);
-			if (nbytes < 0)
-			{
-				if (errno == EINTR)
-					continue;
-				Elog("failed on write(2): %m");
-			}
-			offset += nbytes;
-		}
-	}
-}
-
 /*
  * Misc functions
  */

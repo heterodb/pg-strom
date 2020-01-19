@@ -1391,11 +1391,6 @@ extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
 extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
 extern cl_int GetOptimalGpuForArrowFdw(PlannerInfo *root,
 									   RelOptInfo *baserel);
-
-extern void readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
-extern char *dumpArrowNode(ArrowNode *node);
-extern void copyArrowNode(ArrowNode *dest, const ArrowNode *src);
-extern char *arrowTypeName(ArrowField *field);
 extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);

@@ -99,7 +99,6 @@ typedef struct arrowLocalBufferXactTracker
 typedef struct
 {
 	dlist_node		chain;
-	uint32			hindex;
 	Oid				frel_oid;
 	MemoryContext	memcxt;
 	SubTransactionId curr_sub_xid;
@@ -185,6 +184,7 @@ static arrowLocalBuffer *lookupArrowLocalBuffer(Relation frel,
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS);
 
 /*
  * baseRelIsArrowFdw
@@ -1891,28 +1891,8 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 						int eflags)
 {
 	Relation		frel = rrinfo->ri_RelationDesc;
-	arrowLocalBuffer *lbuf;
 
-	lbuf = lookupArrowLocalBuffer(frel, true);
-	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
-	{
-		arrowLocalBufferXactTracker *xtrack;
-		SQLtable	   *table = lbuf->sql_table;
-		SQLfield	   *columns = SQLtableLatestColumns(table);
-
-		xtrack = MemoryContextAllocZero(lbuf->memcxt,
-										sizeof(arrowLocalBufferXactTracker));
-		xtrack->sub_xid    = GetCurrentSubTransactionId();
-		xtrack->nbatches   = table->nbatches;
-		xtrack->nitems     = columns[0].nitems;
-		xtrack->prev       = lbuf->savepoint_list;
-		lbuf->savepoint_list = xtrack;
-        lbuf->curr_sub_xid   = xtrack->sub_xid;
-
-		elog(INFO, "xtrack subid=%u nbatches/nitems=%d/%zu",
-			 xtrack->sub_xid, xtrack->nbatches, xtrack->nitems);
-	}
-	rrinfo->ri_FdwState = lbuf;
+	rrinfo->ri_FdwState = lookupArrowLocalBuffer(frel, true);
 }
 
 /*
@@ -1944,12 +1924,12 @@ ArrowExecForeignInsert(EState *estate,
 
 		if (isnull)
 		{
-			usage += arrowFieldPutValue(column, NULL, 0);
+			usage += sql_field_put_value(column, NULL, 0);
 		}
 		else if (attr->attbyval)
 		{
 			Assert(column->sql_type.pgsql.typbyval);
-			usage += arrowFieldPutValue(column, (char *)&datum, attr->attlen);
+			usage += sql_field_put_value(column, (char *)&datum, attr->attlen);
 		}
 		else if (attr->attlen == -1)
 		{
@@ -1957,7 +1937,7 @@ ArrowExecForeignInsert(EState *estate,
 			char   *vl_ptr = VARDATA_ANY(datum);
 
 			Assert(column->sql_type.pgsql.typlen == -1);
-			usage += arrowFieldPutValue(column, vl_ptr, vl_len);
+			usage += sql_field_put_value(column, vl_ptr, vl_len);
 		}
 		else
 		{
@@ -1967,21 +1947,8 @@ ArrowExecForeignInsert(EState *estate,
 
 	/* if usage exceeds the record-batch size, switch to new SQLtable */
 	if (usage > table->segment_sz)
-	{
-		SQLtable   *table = lbuf->sql_table;
-		SQLfield   *src, *dst;
-		int			j, nfields = table->nfields;
-		size_t		sz;
+		lbuf->sql_table = sql_table_expand(table);
 
-		sz = offsetof(SQLtable, columns[nfields * (table->nbatches + 1)]);
-		table = repalloc(table, sz);
-		src = SQLtableGetColumns(table, table->nbatches - 1);
-		dst = SQLtableGetColumns(table, table->nbatches);
-		for (j=0; j < nfields; j++)
-			duplicateArrowTypeBuffer(&dst[j], &src[j]);
-		table->nbatches++;
-		lbuf->sql_table = table;
-	}
 	MemoryContextSwitchTo(oldcxt);
 
 	return slot;
@@ -3341,6 +3308,17 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
 
 /*
+ * pgstrom_arrow_fdw_truncate
+ */
+Datum
+pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
+
+
+/*
  * Routines for Arrow metadata cache
  */
 typedef struct
@@ -4033,29 +4011,42 @@ lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
 	arrowLocalBuffer *lbuf = NULL;
 	Oid				frel_oid = RelationGetRelid(frel);
 	uint32			hash = hash_uint32(frel_oid);
-	uint32			hindex = hash % ARROW_LOCAL_BUFFER_HASHSIZE;
 	dlist_head	   *hslot;
 	dlist_iter		iter;
 
-	hslot = &arrow_local_buffer_hash[hindex];
+	hslot = &arrow_local_buffer_hash[hash % ARROW_LOCAL_BUFFER_HASHSIZE];
 	dlist_foreach(iter, hslot)
 	{
 		lbuf = dlist_container(arrowLocalBuffer, chain, iter.cur);
 		if (lbuf->frel_oid == frel_oid)
-			return lbuf;
+			goto found;
 	}
 	/* not found */
-	if (create_on_demand)
+	if (!create_on_demand)
+		return NULL;
+	/* create local buffer on demand */
+	lbuf = createArrowLocalBuffer(frel);
+	dlist_push_tail(hslot, &lbuf->chain);
+	arrow_local_buffer_count++;
+found:
+	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
 	{
-		lbuf = createArrowLocalBuffer(frel);
-		lbuf->hindex = hindex;
+		arrowLocalBufferXactTracker *xtrack;
+		SQLtable   *table = lbuf->sql_table;
+		SQLfield   *columns = SQLtableLatestColumns(table);
 
-		dlist_push_tail(hslot, &lbuf->chain);
-		arrow_local_buffer_count++;
+		xtrack = MemoryContextAllocZero(lbuf->memcxt, sizeof(*xtrack));
+		xtrack->sub_xid = GetCurrentSubTransactionId();
+		xtrack->nbatches = table->nbatches;
+		xtrack->nitems = columns[0].nitems;
+		xtrack->prev = lbuf->savepoint_list;
+		lbuf->savepoint_list = xtrack;
+		lbuf->curr_sub_xid = xtrack->sub_xid;
 
-		return lbuf;
+		elog(INFO, "xtrack subid=%u nbatches/nitems=%d/%zu",
+			 xtrack->sub_xid, xtrack->nbatches, xtrack->nitems);
 	}
-	return NULL;
+	return lbuf;
 }
 
 /*
@@ -4284,48 +4275,6 @@ arrowFdwXactCallback(XactEvent event, void *arg)
 }
 
 /*
- * rewindArrowLocalBuffer
- */
-static void
-rewindArrowLocalBuffer(arrowLocalBuffer *lbuf, SubTransactionId sub_xid)
-{
-	arrowLocalBufferXactTracker *xtrack;
-
-	for (xtrack = lbuf->savepoint_list; xtrack != NULL; xtrack = xtrack->prev)
-	{
-		SQLtable   *table = lbuf->sql_table;
-		SQLfield *columns = SQLtableLatestColumns(table);
-		int			i, j;
-
-		if (xtrack->sub_xid != sub_xid)
-			continue;
-		if (table->nbatches > xtrack->nbatches ||
-			(table->nbatches == xtrack->nbatches &&
-			 columns[0].nitems > xtrack->nitems))
-		{
-			/* rewind the rows to be rollbacked */
-			for (i=table->nbatches; i >= xtrack->nbatches; i--)
-			{
-				columns = SQLtableGetColumns(table, i-1);
-				for (j=0; j < table->nfields; j++)
-				{
-					if (i > xtrack->nbatches)
-						rewindArrowTypeBuffer(&columns[j], 0);
-					else
-						rewindArrowTypeBuffer(&columns[j], xtrack->nitems);
-				}
-			}
-			table->nbatches = xtrack->nbatches;
-		}
-		lbuf->curr_sub_xid = InvalidSubTransactionId;
-		lbuf->savepoint_list = xtrack->prev;
-
-		elog(INFO, "rewind sub_xid=%u", sub_xid);
-		return;
-	}
-}
-
-/*
  * arrowFdwSubXactCallback
  */
 static void
@@ -4345,9 +4294,29 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 
 		dlist_foreach (iter, hslot)
 		{
+			arrowLocalBufferXactTracker *xtrack;
 			arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
 													   chain, iter.cur);
-			rewindArrowLocalBuffer(lbuf, mySubid);
+			for (xtrack = lbuf->savepoint_list;
+				 xtrack != NULL;
+				 xtrack = xtrack->prev)
+			{
+				/*
+				 * Rewind the local buffer at the point where sub-transaction
+				 * touched this local buffer first.
+				 */
+				if (xtrack->sub_xid == mySubid)
+				{
+					sql_table_rewind(lbuf->sql_table,
+									 xtrack->nbatches,
+									 xtrack->nitems);
+					lbuf->curr_sub_xid = InvalidSubTransactionId;
+					lbuf->savepoint_list = xtrack->prev;
+					elog(INFO, "rewind frel=%u sub_xid=%u",
+						 lbuf->frel_oid, mySubid);
+					break;
+				}
+			}
 		}
 	}
 }

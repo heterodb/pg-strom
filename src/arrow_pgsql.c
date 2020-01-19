@@ -832,10 +832,10 @@ put_array_value(SQLfield *column,
 			item_sz = __ntoh32(*((int32 *)pos));
 			pos += sizeof(int32);
 			if (item_sz < 0)
-				arrowFieldPutValue(element, NULL, 0);
+				sql_field_put_value(element, NULL, 0);
 			else
 			{
-				arrowFieldPutValue(element, pos, item_sz);
+				sql_field_put_value(element, pos, item_sz);
 				pos += item_sz;
 			}
 		}
@@ -911,7 +911,7 @@ put_composite_value(SQLfield *column,
 		/* NULL for all the subtypes */
 		for (j=0; j < column->nfields; j++)
 		{
-			usage += arrowFieldPutValue(&column->subfields[j], NULL, 0);
+			usage += sql_field_put_value(&column->subfields[j], NULL, 0);
 		}
 	}
 	else
@@ -932,7 +932,7 @@ put_composite_value(SQLfield *column,
 
 			if (j >= nvalids)
 			{
-				usage += arrowFieldPutValue(sub_field, NULL, 0);
+				usage += sql_field_put_value(sub_field, NULL, 0);
 				continue;
 			}
 			if ((pos - addr) + sizeof(Oid) + sizeof(int) > sz)
@@ -945,13 +945,13 @@ put_composite_value(SQLfield *column,
 			pos += sizeof(int32);
 			if (len == -1)
 			{
-				usage += arrowFieldPutValue(sub_field, NULL, 0);
+				usage += sql_field_put_value(sub_field, NULL, 0);
 			}
 			else
 			{
 				if ((pos - addr) + len > sz)
 					Elog("binary composite record corruption");
-				usage += arrowFieldPutValue(sub_field, pos, len);
+				usage += sql_field_put_value(sub_field, pos, len);
 				pos += len;
 			}
 			assert(column->nitems == sub_field->nitems);
@@ -973,14 +973,14 @@ put_composite_value(SQLfield *column,
 
 			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
 			{
-				usage += arrowFieldPutValue(field, NULL, 0);
+				usage += sql_field_put_value(field, NULL, 0);
 			}
 			else if (field->sql_type.pgsql.typbyval)
 			{
 				Assert(field->sql_type.pgsql.typlen > 0 &&
 					   field->sql_type.pgsql.typlen <= sizeof(Datum));
-				usage += arrowFieldPutValue(field, base + off,
-											field->sql_type.pgsql.typlen);
+				usage += sql_field_put_value(field, base + off,
+											 field->sql_type.pgsql.typlen);
 				off = TYPEALIGN(field->sql_type.pgsql.typalign,
 								off + field->sql_type.pgsql.typlen);
 			}
@@ -989,7 +989,7 @@ put_composite_value(SQLfield *column,
 				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
 				char   *vl_dat = VARDATA_ANY(base + off);
 
-				usage += arrowFieldPutValue(field, vl_dat, vl_len);
+				usage += sql_field_put_value(field, vl_dat, vl_len);
 				off = TYPEALIGN(field->sql_type.pgsql.typalign,
 								off + VARSIZE_ANY(base + off));
 			}
