@@ -16,31 +16,28 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifdef __PG2ARROW__
 #include "postgres.h"
 #include "port/pg_bswap.h"
 #include "utils/date.h"
 #include "utils/timestamp.h"
-typedef struct SQLbuffer	StringInfoData;
-typedef struct SQLbuffer   *StringInfo;
-#else	/* __PG2ARROW__ */
-#include "pg_strom.h"
-#endif	/* !__PG2ARROW__ */
 #include "arrow_ipc.h"
+
+static void		sql_buffer_printf(SQLbuffer *buf, const char *fmt, ...)
+					pg_attribute_printf(2,3);
 
 /*
  * Dump support of ArrowNode
  */
 static void
-__dumpArrowNode(StringInfo str, ArrowNode *node)
+__dumpArrowNode(SQLbuffer *buf, ArrowNode *node)
 {
-	node->dumpArrowNode(str, node);
+	node->dumpArrowNode(buf, node);
 }
 
 static void
-__dumpArrowNodeSimple(StringInfo str, ArrowNode *node)
+__dumpArrowNodeSimple(SQLbuffer *buf, ArrowNode *node)
 {
-	appendStringInfo(str, "{%s}", node->tagName);
+	sql_buffer_printf(buf, "{%s}", node->tagName);
 }
 #define __dumpArrowTypeNull			__dumpArrowNodeSimple
 #define __dumpArrowTypeUtf8			__dumpArrowNodeSimple
@@ -115,323 +112,361 @@ ArrowIntervalUnitAsCstring(ArrowIntervalUnit unit)
 }
 
 static void
-__dumpArrowTypeInt(StringInfo str, ArrowNode *node)
+__dumpArrowTypeInt(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeInt   *i = (ArrowTypeInt *)node;
 
-	appendStringInfo(str,"{%s%d}",
-					 i->is_signed ? "Int" : "Uint",
-					 i->bitWidth);
+	sql_buffer_printf(
+		buf, "{%s%d}",
+		i->is_signed ? "Int" : "Uint",
+		i->bitWidth);
 }
 
 static void
-__dumpArrowTypeFloatingPoint(StringInfo str, ArrowNode *node)
+__dumpArrowTypeFloatingPoint(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeFloatingPoint *f = (ArrowTypeFloatingPoint *)node;
 
-	appendStringInfo(
-		str,"{Float%s}",
+	sql_buffer_printf(
+		buf, "{Float%s}",
 		ArrowPrecisionAsCstring(f->precision));
 }
 
 static void
-__dumpArrowTypeDecimal(StringInfo str, ArrowNode *node)
+__dumpArrowTypeDecimal(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeDecimal *d = (ArrowTypeDecimal *)node;
 
-	appendStringInfo(str,"{Decimal: precision=%d, scale=%d}",
-					 d->precision,
-					 d->scale);
+	sql_buffer_printf(
+		buf, "{Decimal: precision=%d, scale=%d}",
+		d->precision,
+		d->scale);
 }
 
 static void
-__dumpArrowTypeDate(StringInfo str, ArrowNode *node)
+__dumpArrowTypeDate(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeDate *d = (ArrowTypeDate *)node;
 
-	appendStringInfo(
-		str,"{Date: unit=%s}",
+	sql_buffer_printf(
+		buf, "{Date: unit=%s}",
 		ArrowDateUnitAsCstring(d->unit));
 }
 
 static void
-__dumpArrowTypeTime(StringInfo str, ArrowNode *node)
+__dumpArrowTypeTime(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeTime *t = (ArrowTypeTime *)node;
 
-	appendStringInfo(
-		str,"{Time: unit=%s}",
+	sql_buffer_printf(
+		buf, "{Time: unit=%s}",
 		ArrowTimeUnitAsCstring(t->unit));
 }
 
 static void
-__dumpArrowTypeTimestamp(StringInfo str, ArrowNode *node)
+__dumpArrowTypeTimestamp(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeTimestamp *t = (ArrowTypeTimestamp *)node;
 
-	appendStringInfo(
-		str,"{Timestamp: unit=%s}",
+	sql_buffer_printf(
+		buf, "{Timestamp: unit=%s}",
 		ArrowTimeUnitAsCstring(t->unit));
 }
 
 static void
-__dumpArrowTypeInterval(StringInfo str, ArrowNode *node)
+__dumpArrowTypeInterval(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeInterval *t = (ArrowTypeInterval *)node;
 
-	appendStringInfo(
-		str,"{Interval: unit=%s}",
+	sql_buffer_printf(
+		buf, "{Interval: unit=%s}",
 		ArrowIntervalUnitAsCstring(t->unit));
 }
 
 static void
-__dumpArrowTypeUnion(StringInfo str, ArrowNode *node)
+__dumpArrowTypeUnion(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeUnion *u = (ArrowTypeUnion *)node;
 	int			i;
 
-	appendStringInfo(
-		str,"{Union: mode=%s, typeIds=[",
+	sql_buffer_printf(
+		buf, "{Union: mode=%s, typeIds=[",
 		u->mode == ArrowUnionMode__Sparse ? "Sparse" :
 		u->mode == ArrowUnionMode__Dense ? "Dense" : "???");
 	for (i=0; i < u->_num_typeIds; i++)
-		appendStringInfo(str, "%s%d", i > 0 ? ", " : " ",
-						 u->typeIds[i]);
-	appendStringInfo(str, "]}");
+		sql_buffer_printf(buf, "%s%d", i > 0 ? ", " : " ",
+						  u->typeIds[i]);
+	sql_buffer_printf(buf, "]}");
 }
 
 static void
-__dumpArrowTypeFixedSizeBinary(StringInfo str, ArrowNode *node)
+__dumpArrowTypeFixedSizeBinary(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeFixedSizeBinary *fb = (ArrowTypeFixedSizeBinary *)node;
 
-	appendStringInfo(
-		str,"{FixedSizeBinary: byteWidth=%d}", fb->byteWidth);
+	sql_buffer_printf(
+		buf, "{FixedSizeBinary: byteWidth=%d}",
+		fb->byteWidth);
 }
 
 static void
-__dumpArrowTypeFixedSizeList(StringInfo str, ArrowNode *node)
+__dumpArrowTypeFixedSizeList(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeFixedSizeList *fl = (ArrowTypeFixedSizeList *)node;
 
-	appendStringInfo(
-		str,"{FixedSizeList: listSize=%d}", fl->listSize);
+	sql_buffer_printf(
+		buf, "{FixedSizeList: listSize=%d}",
+		fl->listSize);
 }
 
 static void
-__dumpArrowTypeMap(StringInfo str, ArrowNode *node)
+__dumpArrowTypeMap(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeMap *m = (ArrowTypeMap *)node;
 
-	appendStringInfo(
-		str,"{Map: keysSorted=%s}", m->keysSorted ? "true" : "false");
+	sql_buffer_printf(
+		buf, "{Map: keysSorted=%s}",
+		m->keysSorted ? "true" : "false");
 }
 
 static void
-__dumpArrowTypeDuration(StringInfo str, ArrowNode *node)
+__dumpArrowTypeDuration(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeDuration *d = (ArrowTypeDuration *)node;
 
-	appendStringInfo(
-		str,"{Duration: unit=%s}",
+	sql_buffer_printf(
+		buf, "{Duration: unit=%s}",
 		ArrowTimeUnitAsCstring(d->unit));
 }
 
 static void
-__dumpArrowKeyValue(StringInfo str, ArrowNode *node)
+__dumpArrowKeyValue(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowKeyValue *kv = (ArrowKeyValue *)node;
 
-	appendStringInfo(str,"{KeyValue: key=\"%s\" value=\"%s\"}",
-					 kv->key ? kv->key : "",
-					 kv->value ? kv->value : "");
+	sql_buffer_printf(
+		buf, "{KeyValue: key=\"%s\" value=\"%s\"}",
+		kv->key ? kv->key : "",
+		kv->value ? kv->value : "");
 }
 
 static void
-__dumpArrowDictionaryEncoding(StringInfo str, ArrowNode *node)
+__dumpArrowDictionaryEncoding(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowDictionaryEncoding *d = (ArrowDictionaryEncoding *)node;
 
-	appendStringInfo(str,"{DictionaryEncoding: id=%ld, indexType=", d->id);
-	__dumpArrowNode(str, (ArrowNode *)&d->indexType);
-	appendStringInfo(str,", isOrdered=%s}",
-					 d->isOrdered ? "true" : "false");
+	sql_buffer_printf(
+		buf, "{DictionaryEncoding: id=%ld, indexType=", d->id);
+	__dumpArrowNode(buf, (ArrowNode *)&d->indexType);
+	sql_buffer_printf(
+		buf, ", isOrdered=%s}",
+		d->isOrdered ? "true" : "false");
 }
 
 static void
-__dumpArrowField(StringInfo str, ArrowNode *node)
+__dumpArrowField(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowField *f = (ArrowField *)node;
 	int		i;
 
-	appendStringInfo(str, "{Field: name=\"%s\", nullable=%s, type=",
-					 f->name ? f->name : "",
-					 f->nullable ? "true" : "false");
-	__dumpArrowNode(str, (ArrowNode *)&f->type);
+	sql_buffer_printf(
+		buf, "{Field: name=\"%s\", nullable=%s, type=",
+		f->name ? f->name : "",
+		f->nullable ? "true" : "false");
+	__dumpArrowNode(buf, (ArrowNode *)&f->type);
 	if (f->dictionary.indexType.node.tag == ArrowNodeTag__Int)
 	{
-		appendStringInfo(str, ", dictionary=");
-		__dumpArrowNode(str, (ArrowNode *)&f->dictionary);
+		sql_buffer_printf(buf, ", dictionary=");
+		__dumpArrowNode(buf, (ArrowNode *)&f->dictionary);
 	}
-	appendStringInfo(str, ", children=[");
+	sql_buffer_printf(buf, ", children=[");
 	for (i=0; i < f->_num_children; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&f->children[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&f->children[i]);
 	}
-	appendStringInfo(str, "], custom_metadata=[");
+	sql_buffer_printf(buf, "], custom_metadata=[");
 	for (i=0; i < f->_num_custom_metadata; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&f->custom_metadata[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&f->custom_metadata[i]);
 	}
-	appendStringInfo(str, "]}");
+	sql_buffer_printf(buf, "]}");
 }
 
 static void
-__dumpArrowFieldNode(StringInfo str, ArrowNode *node)
+__dumpArrowFieldNode(SQLbuffer *buf, ArrowNode *node)
 {
-	appendStringInfo(
-		str, "{FieldNode: length=%ld, null_count=%ld}",
+	sql_buffer_printf(
+		buf, "{FieldNode: length=%ld, null_count=%ld}",
 		((ArrowFieldNode *)node)->length,
 		((ArrowFieldNode *)node)->null_count);
 }
 
 static void
-__dumpArrowBuffer(StringInfo str, ArrowNode *node)
+__dumpArrowBuffer(SQLbuffer *buf, ArrowNode *node)
 {
-	appendStringInfo(
-		str, "{Buffer: offset=%ld, length=%ld}",
+	sql_buffer_printf(
+		buf, "{Buffer: offset=%ld, length=%ld}",
 		((ArrowBuffer *)node)->offset,
 		((ArrowBuffer *)node)->length);
 }
 
 static void
-__dumpArrowSchema(StringInfo str, ArrowNode *node)
+__dumpArrowSchema(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowSchema *s = (ArrowSchema *)node;
 	int		i;
 
-	appendStringInfo(
-		str, "{Schema: endianness=%s, fields=[",
+	sql_buffer_printf(
+		buf, "{Schema: endianness=%s, fields=[",
 		s->endianness == ArrowEndianness__Little ? "little" :
 		s->endianness == ArrowEndianness__Big ? "big" : "???");
 	for (i=0; i < s->_num_fields; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&s->fields[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&s->fields[i]);
 	}
-	appendStringInfo(str, "], custom_metadata=[");
+	sql_buffer_printf(buf, "], custom_metadata=[");
 	for (i=0; i < s->_num_custom_metadata; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&s->custom_metadata[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&s->custom_metadata[i]);
 	}
-	appendStringInfo(str, "]}");
+	sql_buffer_printf(buf, "]}");
 }
 
 static void
-__dumpArrowRecordBatch(StringInfo str, ArrowNode *node)
+__dumpArrowRecordBatch(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowRecordBatch *r = (ArrowRecordBatch *) node;
 	int		i;
 
-	appendStringInfo(str, "{RecordBatch: length=%ld, nodes=[", r->length);
+	sql_buffer_printf(buf, "{RecordBatch: length=%ld, nodes=[", r->length);
 	for (i=0; i < r->_num_nodes; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&r->nodes[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&r->nodes[i]);
 	}
-	appendStringInfo(str, "], buffers=[");
+	sql_buffer_printf(buf, "], buffers=[");
 	for (i=0; i < r->_num_buffers; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&r->buffers[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&r->buffers[i]);
 	}
-	appendStringInfo(str,"]}");
+	sql_buffer_printf(buf,"]}");
 }
 
 static void
-__dumpArrowDictionaryBatch(StringInfo str, ArrowNode *node)
+__dumpArrowDictionaryBatch(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowDictionaryBatch *d = (ArrowDictionaryBatch *)node;
 
-	appendStringInfo(str, "{DictionaryBatch: id=%ld, data=", d->id);
-	__dumpArrowNode(str, (ArrowNode *)&d->data);
-	appendStringInfo(str, ", isDelta=%s}",
-					 d->isDelta ? "true" : "false");
+	sql_buffer_printf(
+		buf, "{DictionaryBatch: id=%ld, data=", d->id);
+	__dumpArrowNode(buf, (ArrowNode *)&d->data);
+	sql_buffer_printf(
+		buf, ", isDelta=%s}",
+		d->isDelta ? "true" : "false");
 }
 
 static void
-__dumpArrowMessage(StringInfo str, ArrowNode *node)
+__dumpArrowMessage(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowMessage *m = (ArrowMessage *)node;
 
-	appendStringInfo(
-		str, "{Message: version=%s, body=",
+	sql_buffer_printf(
+		buf, "{Message: version=%s, body=",
 		m->version == ArrowMetadataVersion__V1 ? "V1" :
 		m->version == ArrowMetadataVersion__V2 ? "V2" :
 		m->version == ArrowMetadataVersion__V3 ? "V3" :
 		m->version == ArrowMetadataVersion__V4 ? "V4" : "???");
-	__dumpArrowNode(str, (ArrowNode *)&m->body);
-	appendStringInfo(str, ", bodyLength=%lu}", m->bodyLength);
+	__dumpArrowNode(buf, (ArrowNode *)&m->body);
+	sql_buffer_printf(buf, ", bodyLength=%lu}", m->bodyLength);
 }
 
 static void
-__dumpArrowBlock(StringInfo str, ArrowNode *node)
+__dumpArrowBlock(SQLbuffer *buf, ArrowNode *node)
 {
-	appendStringInfo(
-		str, "{Block: offset=%ld, metaDataLength=%d bodyLength=%ld}",
+	sql_buffer_printf(
+		buf, "{Block: offset=%ld, metaDataLength=%d bodyLength=%ld}",
 		((ArrowBlock *)node)->offset,
 		((ArrowBlock *)node)->metaDataLength,
 		((ArrowBlock *)node)->bodyLength);
 }
 
 static void
-__dumpArrowFooter(StringInfo str, ArrowNode *node)
+__dumpArrowFooter(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowFooter *f = (ArrowFooter *)node;
 	int		i;
 
-	appendStringInfo(
-		str, "{Footer: version=%s, schema=",
+	sql_buffer_printf(
+		buf, "{Footer: version=%s, schema=",
 		f->version == ArrowMetadataVersion__V1 ? "V1" :
 		f->version == ArrowMetadataVersion__V2 ? "V2" :
 		f->version == ArrowMetadataVersion__V3 ? "V3" :
 		f->version == ArrowMetadataVersion__V4 ? "V4" : "???");
-	__dumpArrowNode(str, (ArrowNode *)&f->schema);
-	appendStringInfo(str, ", dictionaries=[");
+	__dumpArrowNode(buf, (ArrowNode *)&f->schema);
+	sql_buffer_printf(buf, ", dictionaries=[");
 	for (i=0; i < f->_num_dictionaries; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&f->dictionaries[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&f->dictionaries[i]);
 	}
-	appendStringInfo(str, "], recordBatches=[");
+	sql_buffer_printf(buf, "], recordBatches=[");
 	for (i=0; i < f->_num_recordBatches; i++)
 	{
 		if (i > 0)
-			appendStringInfo(str, ", ");
-		__dumpArrowNode(str, (ArrowNode *)&f->recordBatches[i]);
+			sql_buffer_printf(buf, ", ");
+		__dumpArrowNode(buf, (ArrowNode *)&f->recordBatches[i]);
 	}
-	appendStringInfo(str, "]}");
+	sql_buffer_printf(buf, "]}");
 }
 
 char *
 dumpArrowNode(ArrowNode *node)
 {
-	StringInfoData str;
+	SQLbuffer	buf;
 
-	initStringInfo(&str);
-	__dumpArrowNode(&str, node);
+	sql_buffer_init(&buf);
+	__dumpArrowNode(&buf, node);
 
-	return str.data;
+	return buf.data;
+}
+
+/*
+ * sql_buffer_printf - equivalent to appendStringInfo in PG
+ */
+static void
+sql_buffer_printf(SQLbuffer *buf, const char *fmt, ...)
+{
+	if (!buf->data)
+		sql_buffer_expand(buf, 1024);
+	for (;;)
+	{
+		va_list		va_args;
+		size_t		avail = buf->length - buf->usage;
+		size_t		nbytes;
+
+		va_start(va_args, fmt);
+		nbytes = vsnprintf(buf->data + buf->usage, avail, fmt, va_args);
+		va_end(va_args);
+
+		if (nbytes < avail)
+		{
+			buf->usage += nbytes;
+			return;
+		}
+		sql_buffer_expand(buf, buf->usage + nbytes);
+	}
 }
 
 /*
@@ -832,7 +867,7 @@ arrowTypeName(ArrowField *field)
  *
  * ------------------------------------------------
  */
-typedef void (*dumpArrowNode_f)(StringInfo str, ArrowNode *node);
+typedef void (*dumpArrowNode_f)(SQLbuffer *buf, ArrowNode *node);
 typedef void (*copyArrowNode_f)(ArrowNode *dest, const ArrowNode *src);
 
 #define __INIT_ARROW_NODE(PTR,TYPENAME,NAME)				\

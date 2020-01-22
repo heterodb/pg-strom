@@ -8,10 +8,6 @@
  */
 #include "postgres.h"
 #include <assert.h>
-
-typedef struct SQLbuffer		StringInfoData;
-typedef struct SQLbuffer	   *StringInfo;
-
 #include "arrow_ipc.h"
 
 typedef struct

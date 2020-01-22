@@ -183,11 +183,13 @@ typedef enum
 /*
  * ArrowNode
  */
+struct SQLbuffer;
+
 struct ArrowNode
 {
 	ArrowNodeTag	tag;
 	const char	   *tagName;
-	void		  (*dumpArrowNode)(StringInfo str,
+	void		  (*dumpArrowNode)(struct SQLbuffer *buf,
 								   struct ArrowNode *node);
 	void		  (*copyArrowNode)(struct ArrowNode *dest,
 								   const struct ArrowNode *source);

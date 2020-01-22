@@ -183,15 +183,6 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 #endif
 
 /*
- * Misc functions
- */
-extern void initStringInfo(StringInfo buf);
-extern void resetStringInfo(StringInfo buf);
-extern void appendStringInfo(StringInfo buf,
-							 const char *fmt,...) pg_attribute_printf(2, 3);
-extern Datum hash_any(const unsigned char *k, int keylen);
-
-/*
  * SQLbuffer related routines
  */
 static inline void
@@ -334,4 +325,10 @@ sql_buffer_write(int fdesc, SQLbuffer *buf)
 		}
 	}
 }
+
+/*
+ * Misc functions
+ */
+extern Datum hash_any(const unsigned char *k, int keylen);
+
 #endif	/* ARROW_IPC_H */

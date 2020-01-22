@@ -9,14 +9,8 @@
 #include "postgres.h"
 #include <assert.h>
 #include <getopt.h>
-
 #include <libpq-fe.h>
-
-typedef struct SQLbuffer		StringInfoData;
-typedef struct SQLbuffer	   *StringInfo;
-
 #include "arrow_ipc.h"
-//#include "arrow_nodes.c"
 
 /* static functions */
 #define CURSOR_NAME		"curr_pg2arrow"
@@ -1206,46 +1200,6 @@ int main(int argc, char * const argv[])
 	nbytes = writeArrowFooter(table);
 
 	return 0;
-}
-
-/*
- * Misc server functions
- */
-void
-initStringInfo(StringInfo buf)
-{
-	sql_buffer_init(buf);
-}
-
-void
-resetStringInfo(StringInfo buf)
-{
-	buf->usage = 0;
-}
-
-void
-appendStringInfo(StringInfo buf, const char *fmt,...)
-{
-	if (!buf->data)
-		sql_buffer_expand(buf, 0);
-	for (;;)
-	{
-		char	   *pos = buf->data + buf->usage;
-		size_t		len = buf->length - buf->usage;
-		int			nbytes;
-		va_list		args;
-
-		va_start(args, fmt);
-		nbytes = vsnprintf(pos, len, fmt, args);
-		va_end(args);
-
-		if (nbytes < len)
-		{
-			buf->usage += nbytes;
-			break;
-		}
-		sql_buffer_expand(buf, 2 * nbytes + 1024);
-	}
 }
 
 /*

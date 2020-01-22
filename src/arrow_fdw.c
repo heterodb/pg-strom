@@ -4051,7 +4051,7 @@ applyArrowWriteRedoLog(arrowWriteRedoLog *redo)
 	}
 	close(fdesc);
 
-	elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->filename, redo->footer_offset, redo->footer_length);
+	//elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->filename, redo->footer_offset, redo->footer_length);
 }
 
 /*
@@ -4062,8 +4062,6 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 {
 	HASH_SEQ_STATUS		seq;
 	arrowWriteRedoLog  *redo;
-
-	elog(INFO, "__arrowFdwXactCallback: curr_xid=%u event=%s", curr_xid, is_commit ? "COMMIT" : "ABORT");
 
 	if (curr_xid == InvalidTransactionId)
 		return;
