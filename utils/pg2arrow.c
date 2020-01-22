@@ -760,7 +760,7 @@ pgsql_create_buffer(PGconn *conn, PGresult *res,
 
 	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->segment_sz = segment_sz;
-	table->nbatches = 1;
+	table->nitems = 0;
 	table->nfields = nfields;
 	for (j=0; j < nfields; j++)
 	{
@@ -1002,14 +1002,12 @@ initial_setup_append_file(SQLtable *table)
 static void
 pgsql_writeout_buffer(SQLtable *table)
 {
-	SQLfield   *columns = SQLtableLatestColumns(table);
-	size_t		nitems = columns[0].nitems;
+	size_t		nitems = table->nitems;
 
-	assert(table->nbatches == 1);
-	if (nitems == 0)
+	if (table->nitems == 0)
 		return;
 
-	writeArrowRecordBatch(table, columns);
+	writeArrowRecordBatch(table);
 	if (shows_progress)
 	{
 		ArrowBlock *block;
@@ -1038,8 +1036,7 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 	int		i, ntuples = PQntuples(res);
 	int		j, nfields = PQnfields(res);
 
-	assert(table->nfields == nfields &&
-		   table->nbatches == 1);
+	assert(table->nfields == nfields);
 	for (i=0; i < ntuples; i++)
 	{
 		size_t	usage = 0;
@@ -1065,6 +1062,7 @@ pgsql_append_results(SQLtable *table, PGresult *res)
 			assert(column->nitems == nitems);
 			usage += sql_field_put_value(column, addr, sz);
 		}
+		table->nitems++;
 		/* exceeds the threshold to write? */
 		if (usage > table->segment_sz)
 		{
@@ -1120,21 +1118,18 @@ pgsql_dump_attribute(SQLfield *column, const char *label, int indent)
 void
 pgsql_dump_buffer(SQLtable *table)
 {
-	SQLfield *columns = SQLtableLatestColumns(table);
+	char	label[64];
 	int		j;
 
-	assert(table->nbatches == 1);
 	printf("Dump of SQL buffer:\n"
 		   "nfields: %d\n"
 		   "nitems: %zu\n",
 		   table->nfields,
-		   columns[0].nitems);
+		   table->nitems);
 	for (j=0; j < table->nfields; j++)
 	{
-		char	label[64];
-
 		snprintf(label, sizeof(label), "attr[%d]", j);
-		pgsql_dump_attribute(&columns[j], label, 0);
+		pgsql_dump_attribute(&table->columns[j], label, 0);
 	}
 }
 

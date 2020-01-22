@@ -1292,7 +1292,7 @@ estimateArrowBufferLength(SQLfield *column, size_t nitems)
 }
 
 static void
-writeArrowBuffer(SQLfield *column, int fdesc)
+writeArrowBuffer(int fdesc, SQLfield *column)
 {
 	if (column->enumdict)
 	{
@@ -1310,7 +1310,7 @@ writeArrowBuffer(SQLfield *column, int fdesc)
 		if (column->nullcount > 0)
 			sql_buffer_write(fdesc, &column->nullmap);
 		sql_buffer_write(fdesc, &column->values);
-		writeArrowBuffer(column->element, fdesc);
+		writeArrowBuffer(fdesc, column->element);
 	}
 	else if (column->subfields)
 	{
@@ -1321,7 +1321,7 @@ writeArrowBuffer(SQLfield *column, int fdesc)
 		if (column->nullcount > 0)
 			sql_buffer_write(fdesc, &column->nullmap);
 		for (j=0; j < column->nfields; j++)
-			writeArrowBuffer(&column->subfields[j], fdesc);
+			writeArrowBuffer(fdesc, &column->subfields[j]);
 	}
 	else
 	{
@@ -1361,8 +1361,29 @@ writeArrowBuffer(SQLfield *column, int fdesc)
 	}
 }
 
+static void
+sql_field_clear(SQLfield *column)
+{
+	int		j;
+	
+	column->nitems = 0;
+	column->nullcount = 0;
+	sql_buffer_clear(&column->nullmap);
+	sql_buffer_clear(&column->values);
+	sql_buffer_clear(&column->extra);
+	column->__curr_usage__ = 0;
+
+	if (column->element)
+		sql_field_clear(column->element);
+	if (column->nfields > 0)
+	{
+		for (j=0; j < column->nfields; j++)
+			sql_field_clear(&column->subfields[j]);
+	}
+}
+
 void
-writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
+writeArrowRecordBatch(SQLtable *table)
 {
 	ArrowMessage	message;
 	ArrowRecordBatch *rbatch;
@@ -1374,8 +1395,8 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 	off_t			currPos;
 	size_t			metaLength;
 	size_t			bodyLength = 0;
-	size_t			nitems = columns[0].nitems;
 
+	assert(table->nitems > 0);
 	/* adjust current file position */
 	currPos = lseek(table->fdesc, 0, SEEK_CUR);
 	if (currPos < 0)
@@ -1393,8 +1414,8 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 	nodes = alloca(sizeof(ArrowFieldNode) * table->numFieldNodes);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		assert(columns[i].nitems == nitems);
-		j += setupArrowFieldNode(&nodes[j], &columns[i]);
+		assert(table->nitems == table->columns[i].nitems);
+		j += setupArrowFieldNode(&nodes[j], &table->columns[i]);
 	}
 	assert(j == table->numFieldNodes);
 
@@ -1402,7 +1423,8 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 	buffers = alloca(sizeof(ArrowBuffer) * table->numBuffers);
 	for (i=0, j=0; i < table->nfields; i++)
 	{
-		j += setupArrowBuffer(&buffers[j], &columns[i], &bodyLength);
+		j += setupArrowBuffer(&buffers[j], &table->columns[i],
+							  &bodyLength);
 	}
 	assert(j == table->numBuffers);
 
@@ -1413,17 +1435,15 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 
 	rbatch = &message.body.recordBatch;
 	initArrowNode(rbatch, RecordBatch);
-	rbatch->length = nitems;
+	rbatch->length = table->nitems;
 	rbatch->nodes = nodes;
 	rbatch->_num_nodes = table->numFieldNodes;
 	rbatch->buffers = buffers;
 	rbatch->_num_buffers = table->numBuffers;
 	/* serialization */
 	metaLength = writeFlatBufferMessage(table->fdesc, &message);
-	for (i=0; i < table->nfields; i++)
-	{
-		writeArrowBuffer(&columns[i], table->fdesc);
-	}
+	for (j=0; j < table->nfields; j++)
+		writeArrowBuffer(table->fdesc, &table->columns[j]);
 
 	/* save the offset/length at ArrowBlock */
 	index = table->numRecordBatches++;
@@ -1440,7 +1460,8 @@ writeArrowRecordBatch(SQLtable *table, SQLfield *columns)
 
 	/* make the local buffer empty again */
 	for (j=0; j < table->nfields; j++)
-		sql_field_rewind(&columns[j], 0);
+		sql_field_clear(&table->columns[j]);
+	table->nitems = 0;
 }
 
 /*

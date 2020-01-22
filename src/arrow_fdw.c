@@ -75,6 +75,7 @@ typedef struct
 	RecordBatchFieldState fstate[FLEXIBLE_ARRAY_MEMBER];
 } arrowMetadataCache;
 
+#define ARROW_METADATA_HASH_NSLOTS		2048
 typedef struct
 {
 	LWLock		lock;
@@ -82,36 +83,46 @@ typedef struct
 	cl_uint		nslots;
 	dlist_head	lru_list;
 	dlist_head	free_list;
-	dlist_head	hash_slots[FLEXIBLE_ARRAY_MEMBER];
+	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
+
+	/* shared information for truncate */
+	dlist_head	truncate_pending_list;
+	dlist_head	truncate_free_list;
 } arrowMetadataState;
 
 /*
- * Local Arrow Buffer - chunks pending to write
+ * Data structures for INSERT/TRUNCATE support
  */
-typedef struct arrowLocalBufferXactTracker
+#define ARROT_TRUNCATE_LOG_MAXITEMS		4096	//!FIXME!
+typedef struct
 {
-	struct arrowLocalBufferXactTracker *prev;
-	SubTransactionId sub_xid;
-	int				nbatches;
-	size_t			nitems;
-} arrowLocalBufferXactTracker;
+	dlist_node	chain;
+	dev_t		st_dev;
+	dev_t		st_ino;
+	TransactionId xid;
+	CommandId	cid;
+	uint32		file_suffix;	/* suffix number of the alternative file */
+} arrowTruncateLog;
 
 typedef struct
 {
-	dlist_node		chain;
-	Oid				frel_oid;
-	MemoryContext	memcxt;
-	SubTransactionId curr_sub_xid;
-	arrowLocalBufferXactTracker *savepoint_list;
-	/* local buffer */
-	SQLtable	   *sql_table;
-	kern_data_store *kds_head;
-	/* state for transaction commit */
-	File			fdesc;
-	void		   *footer_backup;
-	off_t			footer_offset;
-	size_t			footer_length;
-} arrowLocalBuffer;
+	dev_t		st_dev;
+	dev_t		st_ino;
+	TransactionId xid;
+	CommandId	cid;
+	char	   *filename;
+	loff_t		footer_offset;
+	size_t		footer_length;
+	char	   *footer_backup;
+} arrowWriteRedoLog;
+
+typedef struct
+{
+	arrowWriteRedoLog *redo_log;
+	MemoryContext memcxt;
+	File		file;
+	SQLtable	sql_table;
+} arrowWriteState;
 
 /*
  * ArrowFdwState
@@ -125,10 +136,6 @@ struct ArrowFdwState
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
 	cl_ulong	curr_index;			/* current index to row on KDS */
-	/* state of LocalBuffer */
-	arrowLocalBuffer *lbuf;
-	cl_int		lbuf_nbatches;
-	cl_long		lbuf_nitems;
 	/* state of RecordBatches */
 	uint32		num_rbatches;
 	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
@@ -138,6 +145,7 @@ struct ArrowFdwState
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
+static HTAB			   *arrow_write_redo_log_htab = NULL;
 static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static int				arrow_metadata_cache_width;		/* GUC */
@@ -147,9 +155,6 @@ static int				arrow_metadata_cache_width;		/* GUC */
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
 
-#define ARROW_LOCAL_BUFFER_HASHSIZE		256
-static long				arrow_local_buffer_count = 0;
-static dlist_head		arrow_local_buffer_hash[ARROW_LOCAL_BUFFER_HASHSIZE];
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
 static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
@@ -171,15 +176,11 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   size_t index,
 								   Datum *p_datum,
 								   bool *p_isnull);
-/* Local buffers for INSERT support */
-static pgstrom_data_store *loadArrowLocalBuffer(arrowLocalBuffer *lbuf,
-												cl_int lbuf_ibatch,
-												cl_long lbuf_nitems,
-												Bitmapset *referenced,
-												GpuContext *gcontext,
-												MemoryContext mcontext);
-static arrowLocalBuffer *lookupArrowLocalBuffer(Relation frel,
-												bool create_on_demand);
+/* routines for writable arrow_fdw foreign tables */
+static arrowWriteState *createArrowWriteState(Relation frel, File file);
+static void writeOutArrowRecordBatch(arrowWriteState *aw_state,
+									 bool with_footer);
+static arrowWriteRedoLog *createArrowWriteRedoLog(arrowWriteState *aw_state);
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
@@ -857,7 +858,6 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc;
 	int				i, num_rbatches;
-	arrowLocalBuffer *lbuf;
 
 	Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE &&
 		   memcmp(GetFdwRoutineForRelation(relation, false),
@@ -912,17 +912,6 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
 	af_state->num_rbatches = num_rbatches;
 
-	/* local buffers, if any */
-	lbuf = lookupArrowLocalBuffer(relation, false);
-	if (lbuf)
-	{
-		SQLtable   *table = lbuf->sql_table;
-		SQLfield   *columns = SQLtableLatestColumns(table);
-
-		af_state->lbuf = lbuf;
-		af_state->lbuf_nbatches = table->nbatches;
-		af_state->lbuf_nitems = columns[0].nitems;
-	}
 	return af_state;
 }
 
@@ -1255,18 +1244,8 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 	/* fetch next RecordBatch */
 	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
 	if (rb_index >= af_state->num_rbatches)
-	{
-		cl_int		lbuf_ibatch = rb_index - af_state->num_rbatches;
-
-		if (af_state->lbuf && lbuf_ibatch < af_state->lbuf_nbatches)
-			return loadArrowLocalBuffer(af_state->lbuf,
-										lbuf_ibatch,
-										af_state->lbuf_nitems,
-										af_state->referenced,
-										gcontext,
-										estate->es_query_cxt);
 		return NULL;	/* no more RecordBatch to read */
-	}
+
 	return __arrowFdwLoadRecordBatch(af_state->rbatches[rb_index],
 									 relation,
 									 af_state->referenced,
@@ -1874,8 +1853,23 @@ ArrowPlanForeignModify(PlannerInfo *root,
 					   Index resultRelation,
 					   int subplan_index)
 {
-	Assert(plan->operation == CMD_INSERT);
+	RangeTblEntry  *rte = planner_rt_fetch(resultRelation, root);
+	ForeignTable   *ft = GetForeignTable(rte->relid);
+	List		   *filesList;
+	bool			writable;
 
+	if (plan->operation != CMD_INSERT)
+		elog(ERROR, "not a supported operation on arrow_fdw foreign tables");
+
+	filesList = __arrowFdwExtractFilesList(ft->options,
+										   NULL,
+										   &writable,
+										   NULL);
+	if (!writable)
+		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
+			 get_rel_name(rte->relid));
+	if (list_length(filesList) != 1)
+		elog(ERROR, "Bug? there are multiple files on bahalf of the writable arrow_fdw foreign table: %s", get_rel_name(rte->relid));
 
 	return NIL;
 }
@@ -1891,8 +1885,21 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 						int eflags)
 {
 	Relation		frel = rrinfo->ri_RelationDesc;
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	const char	   *filename;
+	File			file;
 
-	rrinfo->ri_FdwState = lookupArrowLocalBuffer(frel, true);
+	if (list_length(filesList) != 1)
+		elog(ERROR, "multiple arrow files are on behalf of foreign table '%s'",
+			 RelationGetRelationName(frel));
+	filename = strVal(linitial(filesList));
+
+	LockRelation(frel, AccessExclusiveLock);
+
+	file = PathNameOpenFile(filename, O_RDWR | PG_BINARY);
+
+	rrinfo->ri_FdwState = createArrowWriteState(frel, file);
 }
 
 /*
@@ -1906,19 +1913,18 @@ ArrowExecForeignInsert(EState *estate,
 {
 	Relation		frel = rrinfo->ri_RelationDesc;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
-	arrowLocalBuffer *lbuf = rrinfo->ri_FdwState;
-	SQLtable	   *table = lbuf->sql_table;
-	SQLfield	   *columns = SQLtableLatestColumns(table);
+	arrowWriteState *aw_state = rrinfo->ri_FdwState;
+	SQLtable	   *table = &aw_state->sql_table;
 	MemoryContext	oldcxt;
 	size_t			usage = 0;
 	int				j;
 
 	slot_getallattrs(slot);
-	oldcxt = MemoryContextSwitchTo(lbuf->memcxt);
+	oldcxt = MemoryContextSwitchTo(aw_state->memcxt);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		SQLfield   *column = &columns[j];
+		SQLfield   *column = &table->columns[j];
 		Datum		datum = slot->tts_values[j];
 		bool		isnull = slot->tts_isnull[j];
 
@@ -1944,12 +1950,15 @@ ArrowExecForeignInsert(EState *estate,
 			elog(ERROR, "Bug? unsupported type format");
 		}
 	}
-
-	/* if usage exceeds the record-batch size, switch to new SQLtable */
-	if (usage > table->segment_sz)
-		lbuf->sql_table = sql_table_expand(table);
-
+	table->nitems++;
 	MemoryContextSwitchTo(oldcxt);
+
+	/*
+	 * If usage exceeds the threshold of record-batch size, make a redo-log
+	 * on demand, and write out the buffer.
+	 */
+	if (usage > table->segment_sz)
+		writeOutArrowRecordBatch(aw_state, false);
 
 	return slot;
 }
@@ -1959,11 +1968,11 @@ ArrowExecForeignInsert(EState *estate,
  */
 static void
 ArrowEndForeignModify(EState *estate,
-					  ResultRelInfo *rinfo)
+					  ResultRelInfo *rrinfo)
 {
-	//1. if nitems==0, release buffer
-	//   elsewhere, mark
+	arrowWriteState *aw_state = rrinfo->ri_FdwState;
 
+	writeOutArrowRecordBatch(aw_state, true);
 }
 
 /*
@@ -3313,6 +3322,7 @@ PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
 Datum
 pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 {
+	elog(ERROR, "pgstrom_arrow_fdw_truncate is not implemented now");
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
@@ -3717,517 +3727,365 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 }
 
 /*
- * __loadArrowLocalBufferField
+ * createArrowWriteState
  */
 static void
-__loadArrowLocalBufferField(kern_data_store *kds,
-							kern_colmeta *cmeta,
+__setupArrowWriteStateField(SQLtable *table,
 							SQLfield *column,
-							size_t nitems)
+							const char *attname,
+							Oid atttypid,
+                           int atttypmod)
 {
-	size_t		offset = kds->length;
-	size_t		length;
-
-	Assert(nitems <= column->nitems);
-	if (column->nullcount > 0)
-	{
-		length = ARROWALIGN(column->nullmap.usage);
-		Assert(length >= BITMAPLEN(nitems));
-		cmeta->nullmap_offset = __kds_packed(offset);
-		cmeta->nullmap_length = __kds_packed(length);
-		memcpy((char *)kds + offset, column->nullmap.data, length);
-		offset += length;
-	}
-
-	if (column->values.usage > 0)
-	{
-		length = ARROWALIGN(column->values.usage);
-		cmeta->values_offset = __kds_packed(offset);
-		cmeta->values_length = __kds_packed(length);
-		memcpy((char *)kds + offset, column->values.data, length);
-		offset += length;
-	}
-
-	if (column->extra.usage > 0)
-	{
-		length = ARROWALIGN(column->extra.usage);
-		cmeta->extra_offset = __kds_packed(offset);
-		cmeta->extra_length = __kds_packed(length);
-		memcpy((char *)kds + offset, column->extra.data, length);
-		offset += length;
-	}
-	kds->length = offset;
-
-	if (column->element)
-	{
-		kern_colmeta   *__cmeta = &kds->colmeta[cmeta->idx_subattrs];
-
-		Assert(cmeta->idx_subattrs >= kds->ncols &&
-			   cmeta->idx_subattrs <  kds->nr_colmeta &&
-			   cmeta->num_subattrs == 1);
-		__loadArrowLocalBufferField(kds, __cmeta, column->element, nitems);
-	}
-	else if (column->subfields)
-	{
-		kern_colmeta   *__cmeta = &kds->colmeta[cmeta->idx_subattrs];
-		int				j;
-
-		Assert(cmeta->idx_subattrs >= kds->ncols &&
-			   cmeta->idx_subattrs + cmeta->idx_subattrs <= kds->nr_colmeta &&
-			   cmeta->num_subattrs == column->nfields);
-		for (j=0; j < column->nfields; j++)
-			__loadArrowLocalBufferField(kds,
-										&__cmeta[j],
-										&column->subfields[j],
-										nitems);
-	}
-}
-
-/*
- * loadArrowLocalBuffer
- */
-static pgstrom_data_store *
-loadArrowLocalBuffer(arrowLocalBuffer *lbuf,
-					 cl_int lbuf_ibatch,
-					 cl_long lbuf_nitems,
-					 Bitmapset *referenced,
-					 GpuContext *gcontext,
-					 MemoryContext mcontext)
-{
-	SQLtable   *table = lbuf->sql_table;
-	SQLfield   *columns;
-	kern_data_store *kds_head = lbuf->kds_head;
-	pgstrom_data_store *pds;
-	size_t		total_length;
-	size_t		nitems;
-	CUresult	rc;
-	int			j;
-
-	if (lbuf_ibatch >= table->nbatches)
-		return NULL;
-	columns = SQLtableGetColumns(table, lbuf_ibatch);
-	if (lbuf_ibatch < table->nbatches)
-		nitems = columns[0].nitems;
-	else
-		nitems = Min(lbuf_nitems, columns[0].nitems);
-	if (nitems == 0)
-		return NULL;
-	
-	/* Length estimation */
-	total_length = offsetof(pgstrom_data_store, kds) + kds_head->length;
-	for (j=0; j < table->nfields; j++)
-	{
-		int		attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
-
-		if (bms_is_member(attidx, referenced))
-			total_length += estimateArrowBufferLength(&columns[j], nitems);
-	}
-	/* Allocation of PDS buffer */
-	if (gcontext)
-	{
-		rc = gpuMemAllocManaged(gcontext,
-								(CUdeviceptr *)&pds,
-								total_length,
-								CU_MEM_ATTACH_GLOBAL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocHost: %s", errorText(rc));
-	}
-	else
-	{
-		pds = MemoryContextAllocHuge(mcontext, total_length);
-	}
-	memset(pds, 0, offsetof(pgstrom_data_store, kds));
-	pds->gcontext = gcontext;
-	pg_atomic_init_u32(&pds->refcnt, 1);
-	pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
-
-	/* Setup kern_data_store */
-	memcpy(&pds->kds, kds_head, kds_head->length);
-	pds->kds.nitems = nitems;
-	for (j=0; j < table->nfields; j++)
-	{
-		int		attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
-
-		if (bms_is_member(attidx, referenced))
-			__loadArrowLocalBufferField(&pds->kds,
-										&pds->kds.colmeta[j],
-										&columns[j],
-										nitems);
-	}
-	Assert(offsetof(pgstrom_data_store,
-					kds) + pds->kds.length == total_length);
-	return pds;
-}
-
-/*
- * setupArrowLocalBufferField
- */
-static void
-setupArrowLocalBufferField(arrowLocalBuffer *lbuf,
-						   SQLfield *column,
-						   kern_colmeta *cmeta,
-						   const char *attname,
-						   Oid atttypid,
-						   int atttypmod)
-{
-	SQLtable	   *table = lbuf->sql_table;
-	kern_data_store *kds_head = lbuf->kds_head;
 	HeapTuple		tup;
-	Form_pg_type	formType;
+	Form_pg_type	typ;
 	const char	   *typnamespace;
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type: %u", atttypid);
-	formType = (Form_pg_type) GETSTRUCT(tup);
-	typnamespace = get_namespace_name(formType->typnamespace);
-	
+	typ = (Form_pg_type) GETSTRUCT(tup);
+	typnamespace = get_namespace_name(typ->typnamespace);
+
 	table->numFieldNodes++;
-	table->numBuffers += assignArrowTypePgSQL(column,
+    table->numBuffers += assignArrowTypePgSQL(column,
 											  attname,
 											  atttypid,
 											  atttypmod,
-											  NameStr(formType->typname),
+											  NameStr(typ->typname),
 											  typnamespace,
-											  formType->typlen,
-											  formType->typbyval,
-											  formType->typtype,
-											  formType->typalign,
-											  formType->typelem,
-											  formType->typrelid);
-	assignArrowTypeOptions(&cmeta->attopts, &column->arrow_type);
-
-	if (OidIsValid(formType->typelem))
+											  typ->typlen,
+											  typ->typbyval,
+											  typ->typtype,
+											  typ->typalign,
+											  typ->typrelid,
+											  typ->typelem);
+	if (OidIsValid(typ->typelem))
 	{
 		/* array type */
-		Assert(cmeta->idx_subattrs >= kds_head->ncols &&
-			   cmeta->idx_subattrs <  kds_head->nr_colmeta &&
-			   cmeta->num_subattrs == 1);
+		char		elem_name[NAMEDATALEN+10];
+
+		snprintf(elem_name, sizeof(elem_name), "_%s[]", attname);
 		column->element = palloc0(sizeof(SQLfield));
-		setupArrowLocalBufferField(lbuf,
-								   column->element,
-								   &kds_head->colmeta[cmeta->idx_subattrs],
-								   psprintf("%s[]", attname),
-								   formType->typelem, -1);
+		__setupArrowWriteStateField(table,
+									column->element,
+									elem_name,
+									typ->typelem,
+									-1);
 	}
-	else if (OidIsValid(formType->typrelid))
+	else if (OidIsValid(typ->typrelid))
 	{
 		/* composite type */
-		Relation	comp;
-		TupleDesc	tupdesc;
-		int			j, k;
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
+		int			j;
 
-		comp = relation_open(formType->typrelid, AccessShareLock);
-		if (comp->rd_rel->relkind != RELKIND_COMPOSITE_TYPE)
-			elog(ERROR, "Bug? relation '%s' is not a composite type",
-				 RelationGetRelationName(comp));
-		tupdesc = RelationGetDescr(comp);
-		Assert(cmeta->idx_subattrs >= kds_head->ncols &&
-			   cmeta->idx_subattrs + tupdesc->natts <= kds_head->nr_colmeta &&
-			   cmeta->num_subattrs == tupdesc->natts);
 		column->nfields = tupdesc->natts;
 		column->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
-		for (j=0, k=cmeta->idx_subattrs; j < tupdesc->natts; j++, k++)
+		for (j=0; j < tupdesc->natts; j++)
 		{
-			Form_pg_attribute	subattr = tupleDescAttr(tupdesc, j);
-
-			setupArrowLocalBufferField(lbuf,
-									   &column->subfields[j],
-									   &kds_head->colmeta[k],
-									   NameStr(subattr->attname),
-									   subattr->atttypid,
-									   subattr->atttypmod);
+			Form_pg_attribute sattr = tupleDescAttr(tupdesc, j);
+			__setupArrowWriteStateField(table,
+										&column->subfields[j],
+										NameStr(sattr->attname),
+										sattr->atttypid,
+										sattr->atttypmod);
 		}
-		relation_close(comp, AccessShareLock);
+		ReleaseTupleDesc(tupdesc);
 	}
-	else if (formType->typtype == 'e')
+	else if (typ->typtype == 'e')
 	{
-		/* enum type */
 		elog(ERROR, "Enum type is not supported right now");
 	}
 	ReleaseSysCache(tup);
 }
 
-/*
- * createArrowLocalBuffer
- */
-static arrowLocalBuffer *
-createArrowLocalBuffer(Relation frel)
+static arrowWriteState *
+createArrowWriteState(Relation frel, File file)
 {
-	TupleDesc		tupdesc = RelationGetDescr(frel);
-	MemoryContext	memcxt;
-	MemoryContext	oldcxt;
-	arrowLocalBuffer *lbuf;
-	SQLtable	   *table;
-	kern_data_store *kds_head;
-	int				j, head_sz;
+	TupleDesc	tupdesc = RelationGetDescr(frel);
+	arrowWriteState *aw_state;
+	SQLtable   *table;
+	int			j;
 
-	memcxt = AllocSetContextCreate(TopMemoryContext,
-								   "arrowLocalBuffer",
-								   ALLOCSET_DEFAULT_SIZES);
-	oldcxt = MemoryContextSwitchTo(memcxt);
-	lbuf = palloc0(sizeof(arrowLocalBuffer));
-	lbuf->frel_oid = RelationGetRelid(frel);
-	lbuf->memcxt = memcxt;
-	lbuf->curr_sub_xid = InvalidSubTransactionId;
-	lbuf->savepoint_list = NULL;
-	lbuf->fdesc = -1;
-
-	head_sz = KDS_calculateHeadSize(tupdesc, false);
-	lbuf->kds_head = kds_head = palloc0(head_sz);
-	init_kernel_data_store(kds_head,
-						   tupdesc,
-						   head_sz,
-						   KDS_FORMAT_ARROW, 0, false);
-
-	lbuf->sql_table = table = palloc0(offsetof(SQLtable,
-											   columns[tupdesc->natts]));
+	aw_state = palloc0(offsetof(arrowWriteState,
+								sql_table.columns[tupdesc->natts]));
+	aw_state->file = file;
+	aw_state->memcxt = CurrentMemoryContext;
+	table = &aw_state->sql_table;
+	table->filename = FilePathName(file);
+	table->fdesc = FileGetRawDesc(file);
+	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
+	table->nfields = tupdesc->natts;
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		setupArrowLocalBufferField(lbuf,
-								   &table->columns[j],
-								   &kds_head->colmeta[j],
-								   NameStr(attr->attname),
-								   attr->atttypid,
-								   attr->atttypmod);
+		__setupArrowWriteStateField(table,
+									&table->columns[j],
+									NameStr(attr->attname),
+									attr->atttypid,
+									attr->atttypmod);
 	}
-	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
-	table->nbatches = 1;
-	table->nfields = tupdesc->natts;
-	
-	MemoryContextSwitchTo(oldcxt);
-
-	return lbuf;
+	return aw_state;
 }
 
 /*
- * lookupArrowLocalBuffer
+ * createArrowWriteRedoLog
  */
-static arrowLocalBuffer *
-lookupArrowLocalBuffer(Relation frel, bool create_on_demand)
+static arrowWriteRedoLog *
+createArrowWriteRedoLog(arrowWriteState *aw_state)
 {
-	arrowLocalBuffer *lbuf = NULL;
-	Oid				frel_oid = RelationGetRelid(frel);
-	uint32			hash = hash_uint32(frel_oid);
-	dlist_head	   *hslot;
-	dlist_iter		iter;
+	SQLtable   *table = &aw_state->sql_table;
+	int			fdesc = table->fdesc;
+	arrowWriteRedoLog *redo, _key;
+	struct stat	st_buf;
+	bool		found;
 
-	hslot = &arrow_local_buffer_hash[hash % ARROW_LOCAL_BUFFER_HASHSIZE];
-	dlist_foreach(iter, hslot)
+	if (!arrow_write_redo_log_htab)
 	{
-		lbuf = dlist_container(arrowLocalBuffer, chain, iter.cur);
-		if (lbuf->frel_oid == frel_oid)
-			goto found;
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = offsetof(arrowWriteRedoLog,
+								xid) + sizeof(TransactionId);
+		hctl.entrysize = sizeof(arrowWriteRedoLog);
+		hctl.hcxt = CacheMemoryContext;
+
+		arrow_write_redo_log_htab =
+			hash_create("arrowWriteRedoLog", 512, &hctl,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-	/* not found */
-	if (!create_on_demand)
-		return NULL;
-	/* create local buffer on demand */
-	lbuf = createArrowLocalBuffer(frel);
-	dlist_push_tail(hslot, &lbuf->chain);
-	arrow_local_buffer_count++;
-found:
-	if (lbuf->curr_sub_xid != GetCurrentSubTransactionId())
+
+	if (fstat(fdesc, &st_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", table->filename);
+	memset(&_key, 0, sizeof(arrowWriteRedoLog));
+	_key.st_dev = st_buf.st_dev;
+	_key.st_ino = st_buf.st_ino;
+	_key.xid = GetCurrentTransactionId();
+
+	redo = hash_search(arrow_write_redo_log_htab,
+					   &_key, HASH_ENTER, &found);
+	Assert(redo->st_dev == _key.st_dev &&
+		   redo->st_ino == _key.st_ino &&
+		   redo->xid    == _key.xid);
+	if (found && redo->cid <  GetCurrentCommandId(true))
+		return redo;	/* nothing to do */
+
+	PG_TRY();
 	{
-		arrowLocalBufferXactTracker *xtrack;
-		SQLtable   *table = lbuf->sql_table;
-		SQLfield   *columns = SQLtableLatestColumns(table);
+		char   *filename = MemoryContextStrdup(CacheMemoryContext,
+											   table->filename);
+		if (st_buf.st_size == 0)
+		{
+			redo->cid = GetCurrentCommandId(true);
+			redo->filename = filename;
+			redo->footer_offset = 0;
+			redo->footer_length = 0;
+			redo->footer_backup = NULL;
+		}
+		else
+		{
+			ArrowFileInfo	af_info;
+			int				nitems;
+			ssize_t			nbytes;
+			off_t			offset;
+			char			temp[100];
+			void		   *footer_backup;
 
-		xtrack = MemoryContextAllocZero(lbuf->memcxt, sizeof(*xtrack));
-		xtrack->sub_xid = GetCurrentSubTransactionId();
-		xtrack->nbatches = table->nbatches;
-		xtrack->nitems = columns[0].nitems;
-		xtrack->prev = lbuf->savepoint_list;
-		lbuf->savepoint_list = xtrack;
-		lbuf->curr_sub_xid = xtrack->sub_xid;
+			readArrowFileDesc(table->fdesc, &af_info);
 
-		elog(INFO, "xtrack subid=%u nbatches/nitems=%d/%zu",
-			 xtrack->sub_xid, xtrack->nbatches, xtrack->nitems);
+			/* restore DictionaryBatches already in the file */
+			nitems = af_info.footer._num_dictionaries;
+			table->numDictionaries = nitems;
+			if (nitems > 0)
+			{
+				table->dictionaries =
+					MemoryContextAllocZero(aw_state->memcxt,
+										   sizeof(ArrowBlock) * nitems);
+				memcpy(table->dictionaries,
+					   af_info.footer.dictionaries,
+					   sizeof(ArrowBlock) * nitems);
+			}
+			else
+				table->dictionaries = NULL;
+
+			/* restore RecordBatches already in the file */
+			nitems = af_info.footer._num_recordBatches;
+			table->numRecordBatches = nitems;
+			if (nitems > 0)
+			{
+				table->recordBatches =
+					MemoryContextAllocZero(aw_state->memcxt,
+										   sizeof(ArrowBlock) * nitems);
+				memcpy(table->recordBatches,
+					   af_info.footer.recordBatches,
+					   sizeof(ArrowBlock) * nitems);
+			}
+			else
+				table->recordBatches = NULL;
+
+			/* make backup image of the Footer section */
+			nbytes = sizeof(int32) + 6;		/* = strlen("ARROW1") */
+			offset = lseek(table->fdesc, -nbytes, SEEK_END);
+			if (offset < 0)
+				elog(ERROR, "failed on lseek(2): %m");
+			if (__read(table->fdesc, temp, nbytes) != nbytes)
+				elog(ERROR, "failed on read(2): %m");
+			offset -= *((int32 *)temp);
+
+			nbytes = st_buf.st_size - offset;
+			footer_backup = MemoryContextAllocZero(CacheMemoryContext,
+												   nbytes);
+			if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
+				elog(ERROR, "failed on lseek(2): %m");
+			if (__read(table->fdesc, footer_backup, nbytes) != nbytes)
+				elog(ERROR, "failed on read(2): %m");
+			if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
+				elog(ERROR, "failed on lseek(2): %m");
+
+			redo->cid = GetCurrentCommandId(true);
+			redo->filename = filename;
+			redo->footer_offset = offset;
+			redo->footer_length = nbytes;
+			redo->footer_backup = footer_backup;
+		}
 	}
-	return lbuf;
+	PG_CATCH();
+	{
+		if (!found)
+			hash_search(arrow_write_redo_log_htab,
+						&_key, HASH_REMOVE, NULL);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return redo;
 }
 
 /*
- * __arrowFdwXactFileCreation
- *
- * If apache arrow file on behalf of the foreign table is empty, we try
- * to construct the file from scratch; including Schema header.
- */
-static off_t
-__arrowFdwXactPrepCreation(arrowLocalBuffer *lbuf)
-{
-	SQLtable   *table = lbuf->sql_table;
-	ssize_t		nbytes;
-	off_t		offset;
-
-	/* mark as an empty file */
-	lbuf->footer_backup = ((void *)(~0UL));
-
-	nbytes = write(table->fdesc, "ARROW1\0\0", 8);
-	if (nbytes != 8)
-		elog(ERROR, "failed on write(2): %m");
-	writeArrowSchema(table);
-	writeArrowDictionaryBatches(table);
-
-	offset = lseek(table->fdesc, 0, SEEK_CUR);
-	if (offset < 0)
-		elog(ERROR, "failed on lseek(2): %m");
-	return offset;
-}
-
-/*
- * __arrowFdwXactFileAppend
- */
-static off_t
-__arrowFdwXactPrepAppend(arrowLocalBuffer *lbuf, struct stat *st_buf)
-{
-	SQLtable	   *table = lbuf->sql_table;
-	ArrowFileInfo	af_info;
-	ArrowSchema	   *schema;
-	int				j, nitems;
-	ssize_t			nbytes;
-	off_t			offset;
-	void		   *backup;
-	char			temp[100];
-
-	readArrowFileDesc(table->fdesc, &af_info);
-	schema = &af_info.footer.schema;
-	if (schema->_num_fields != table->nfields)
-		elog(ERROR, "number of fields of Arrow file ('%s') mismatch",
-			 table->filename);
-	for (j=0; j < table->nfields; j++)
-	{
-		// compatibility checks
-
-	}
-	/* restore DictionaryBatches already in the file */
-	nitems = af_info.footer._num_dictionaries;
-	table->numDictionaries = nitems;
-	table->dictionaries = palloc0(sizeof(ArrowBlock) * nitems);
-	memcpy(table->dictionaries,
-		   af_info.footer.dictionaries,
-		   sizeof(ArrowBlock) * nitems);
-
-	/* restore RecordBatches already in the file */
-	nitems = af_info.footer._num_recordBatches;
-	table->numRecordBatches = nitems;
-	table->recordBatches = palloc0(sizeof(ArrowBlock) * nitems);
-	memcpy(table->recordBatches,
-		   af_info.footer.recordBatches,
-		   sizeof(ArrowBlock) * nitems);
-
-	/* make backup image of the Footer section */
-	nbytes = sizeof(int32) + 6;	/* strlen("ARROW1") */
-	offset = lseek(table->fdesc, -nbytes, SEEK_END);
-	if (offset < 0)
-		elog(ERROR, "failed on lseek(2): %m");
-	if (__read(table->fdesc, temp, nbytes) != nbytes)
-		elog(ERROR, "failed on read(2): %m");
-	offset -= *((int32 *)temp);
-
-	nbytes = st_buf->st_size - offset;
-	backup = palloc(nbytes);
-	if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
-		elog(ERROR, "failed on lseek(2): %m");
-	if (__read(table->fdesc, backup, nbytes) != nbytes)
-		elog(ERROR, "failed on read(2): %m");
-	lbuf->footer_backup = backup;
-	lbuf->footer_offset = offset;
-	lbuf->footer_length = nbytes;
-
-	return offset;
-}
-
-/*
- * arrowFdwXactPreCommit
+ * writeOutArrowRecordBatch
  */
 static void
-arrowFdwXactPreCommit(arrowLocalBuffer *lbuf)
+writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 {
-	SQLtable	   *table = lbuf->sql_table;
-	ForeignTable   *ft = GetForeignTable(lbuf->frel_oid);
-	List		   *filesList;
-	const char	   *fname;
-	File			fdesc;
-	struct stat		st_buf;
-	off_t			f_pos;
-	int				i;
+	SQLtable   *table = &aw_state->sql_table;
 
-	filesList = arrowFdwExtractFilesList(ft->options);
-	if (list_length(filesList) != 1)
-		elog(ERROR, "cannot expand arrow_fdw table with multiple files");
-	fname = strVal(linitial(filesList));
-	fdesc = PathNameOpenFile(fname, O_RDWR | PG_BINARY);
+	if (!aw_state->redo_log)
+	{
+		arrowWriteRedoLog *redo_log = createArrowWriteRedoLog(aw_state);
+		struct stat	st_buf;
+		ssize_t		nbytes;
+
+		if (fstat(table->fdesc, &st_buf) != 0)
+			elog(ERROR, "failed on fstat: %m");
+
+		if (st_buf.st_size == 0)
+		{
+			/* empty file */
+			if (table->nitems == 0)
+				return;
+			Assert(lseek(table->fdesc, 0, SEEK_END) == 0);
+			nbytes = __write(table->fdesc, "ARROW1\0\0", 8);
+			if (nbytes != 8)
+				elog(ERROR, "failed on __write(2): %m");
+			writeArrowSchema(table);
+			writeArrowDictionaryBatches(table);
+		}
+		aw_state->redo_log = redo_log;
+	}
+	if (table->nitems > 0)
+		writeArrowRecordBatch(table);
+	if (with_footer)
+		writeArrowFooter(table);
+}
+
+/*
+ * applyArrowWriteRedoLog
+ */
+static void
+applyArrowWriteRedoLog(arrowWriteRedoLog *redo)
+{
+	int		fdesc;
+
+	/* special case, if empty file */
+	if (redo->footer_offset == 0 &&
+		redo->footer_length == 0 &&
+		redo->footer_backup == NULL)
+	{
+		if (truncate(redo->filename, 0) != 0)
+			ereport(WARNING,
+					(errcode_for_file_access(),
+					 errmsg("failed on truncate('%s'): %m", redo->filename),
+					 errdetail("could not apply REDO image, therefore, garbages are still remained")));
+		return;
+	}
+
+	fdesc = open(redo->filename, O_RDWR);
 	if (fdesc < 0)
-		elog(ERROR, "failed on open('%s'): %m", fname);
-	lbuf->fdesc = fdesc;
-
-	table->filename = pstrdup(fname);
-	table->fdesc = FileGetRawDesc(fdesc);
-	if (fstat(table->fdesc, &st_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", fname);
-	if (st_buf.st_size == 0)
-		f_pos = __arrowFdwXactPrepCreation(lbuf);
-	else
-		f_pos = __arrowFdwXactPrepAppend(lbuf, &st_buf);
-	Assert(lbuf->footer_backup != NULL);
-	if (lseek(table->fdesc, f_pos, SEEK_SET) < 0)
-		elog(ERROR, "failed on lseek: %m");
-	for (i=0; i < table->nbatches; i++)
 	{
-		SQLfield   *columns = &table->columns[i * table->nfields];
-		writeArrowRecordBatch(table, columns);
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on open('%s'): %m", redo->filename),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
 	}
-	writeArrowFooter(table);
-	elog(INFO, "PRE_COMMIT lbuf (oid=%u) ", lbuf->frel_oid);
-}
+	else if (lseek(fdesc, redo->footer_offset, SEEK_SET) < 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on lseek('%s'): %m", redo->filename),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	else if (__write(fdesc,
+					 redo->footer_backup,
+					 redo->footer_length) != redo->footer_length)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on write('%s'): %m", redo->filename),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	else if (ftruncate(fdesc, (redo->footer_offset +
+							   redo->footer_length)) != 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on ftruncate('%s'): %m", redo->filename),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	close(fdesc);
 
-static void
-arrowFdwXactCommit(arrowLocalBuffer *lbuf)
-{
-	if (lbuf->fdesc >= 0)
-		FileClose(lbuf->fdesc);
-	lbuf->fdesc = -1;
+	elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->filename, redo->footer_offset, redo->footer_length);
 }
 
 /*
- * arrowFdwXactAbort
+ * __arrowFdwXactCallback
  */
 static void
-arrowFdwXactAbort(arrowLocalBuffer *lbuf)
+__arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 {
-	if (lbuf->fdesc >= 0)
-	{
-		/*
-		 * A non-NULL lbuf->footer_backup means arrowFdwXactPreCommit might
-		 * be already opened the arrow file on behalf of the foreign table.
-		 * In this case, we have to revert the file using backup image (or
-		 * make the file empty again).
-		 */
-		if (lbuf->footer_backup == ((void *)(~0UL)))
-		{
-			if (FileTruncate(lbuf->fdesc, 0,
-							 WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
-				elog(WARNING, "arrow_fdw: failed on FileTruncate: %m");
-		}
-		else if (lbuf->footer_backup != NULL)
-		{
-			void   *backup = lbuf->footer_backup;
-			off_t	offset = lbuf->footer_offset;
-			size_t	length = lbuf->footer_length;
-			int		fdesc = FileGetRawDesc(lbuf->fdesc);
+	HASH_SEQ_STATUS		seq;
+	arrowWriteRedoLog  *redo;
 
-			if (lseek(fdesc, offset, SEEK_SET) < 0)
-				elog(WARNING, "arrow_fdw: failed on lseek: %m");
-			else if (__write(fdesc, backup, length) != length)
-				elog(WARNING, "arrow_fdw: failed on __write: %m");
-			else if (ftruncate(fdesc, offset + length) < 0)
-				elog(WARNING, "arrow_fdw: failed on ftruncate: %m");
-		}
-		FileClose(lbuf->fdesc);
+	elog(INFO, "__arrowFdwXactCallback: curr_xid=%u event=%s", curr_xid, is_commit ? "COMMIT" : "ABORT");
+
+	if (curr_xid == InvalidTransactionId)
+		return;
+	if (!arrow_write_redo_log_htab)
+		return;
+	if (hash_get_num_entries(arrow_write_redo_log_htab) == 0)
+		return;
+
+	hash_seq_init(&seq, arrow_write_redo_log_htab);
+	while ((redo = hash_seq_search(&seq)) != NULL)
+	{
+		if (redo->xid != curr_xid)
+			continue;
+		if (!is_commit)
+			applyArrowWriteRedoLog(redo);
+		if (redo->filename)
+			pfree(redo->filename);
+		if (redo->footer_backup)
+			pfree(redo->footer_backup);
+		hash_search(arrow_write_redo_log_htab, redo, HASH_REMOVE, NULL);
 	}
+	elog(INFO, "num of REDO log = %ld", hash_get_num_entries(arrow_write_redo_log_htab));
 }
 
 /*
@@ -4236,42 +4094,12 @@ arrowFdwXactAbort(arrowLocalBuffer *lbuf)
 static void
 arrowFdwXactCallback(XactEvent event, void *arg)
 {
-	if (!arrow_local_buffer_count)
-		return;
-	if (event == XACT_EVENT_PRE_COMMIT ||
-		event == XACT_EVENT_COMMIT ||
-		event == XACT_EVENT_ABORT)
-	{
-		int		index;
+	TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
 
-		for (index=0; index < ARROW_LOCAL_BUFFER_HASHSIZE; index++)
-		{
-			dlist_head	   *hslot = &arrow_local_buffer_hash[index];
-			dlist_mutable_iter iter;
-
-			dlist_foreach_modify(iter, hslot)
-			{
-				arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
-														   chain, iter.cur);
-				if (event == XACT_EVENT_PRE_COMMIT)
-					arrowFdwXactPreCommit(lbuf);
-				else
-				{
-					if (event == XACT_EVENT_COMMIT)
-						arrowFdwXactCommit(lbuf);
-					else
-						arrowFdwXactAbort(lbuf);
-
-					elog(INFO, "release lbuf (oid=%u)", lbuf->frel_oid);
-					dlist_delete(&lbuf->chain);
-					MemoryContextDelete(lbuf->memcxt);
-				}
-			}
-		}
-		if (event == XACT_EVENT_COMMIT ||
-			event == XACT_EVENT_ABORT)
-			arrow_local_buffer_count = 0;
-	}
+	if (event == XACT_EVENT_COMMIT)
+		__arrowFdwXactCallback(curr_xid, true);
+	else if (event == XACT_EVENT_ABORT)
+		__arrowFdwXactCallback(curr_xid, false);
 }
 
 /*
@@ -4281,44 +4109,12 @@ static void
 arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 						SubTransactionId parentSubid, void *arg)
 {
-	int			index;
+	TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
 
-	if (event != SUBXACT_EVENT_ABORT_SUB)
-		return;
-	if (arrow_local_buffer_count == 0)
-		return;
-	for (index=0; index < ARROW_LOCAL_BUFFER_HASHSIZE; index++)
-	{
-		dlist_head *hslot = &arrow_local_buffer_hash[index];
-		dlist_iter	iter;
-
-		dlist_foreach (iter, hslot)
-		{
-			arrowLocalBufferXactTracker *xtrack;
-			arrowLocalBuffer   *lbuf = dlist_container(arrowLocalBuffer,
-													   chain, iter.cur);
-			for (xtrack = lbuf->savepoint_list;
-				 xtrack != NULL;
-				 xtrack = xtrack->prev)
-			{
-				/*
-				 * Rewind the local buffer at the point where sub-transaction
-				 * touched this local buffer first.
-				 */
-				if (xtrack->sub_xid == mySubid)
-				{
-					sql_table_rewind(lbuf->sql_table,
-									 xtrack->nbatches,
-									 xtrack->nitems);
-					lbuf->curr_sub_xid = InvalidSubTransactionId;
-					lbuf->savepoint_list = xtrack->prev;
-					elog(INFO, "rewind frel=%u sub_xid=%u",
-						 lbuf->frel_oid, mySubid);
-					break;
-				}
-			}
-		}
-	}
+	if (event == SUBXACT_EVENT_COMMIT_SUB)
+		__arrowFdwXactCallback(curr_xid, true);
+	else if (event == SUBXACT_EVENT_ABORT_SUB)
+		__arrowFdwXactCallback(curr_xid, false);
 }
 
 /*
@@ -4327,39 +4123,39 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 static void
 pgstrom_startup_arrow_fdw(void)
 {
-	size_t		metadata_cache_sz = (size_t)arrow_metadata_cache_size_kb << 10;
+	size_t		head_sz, body_sz, trun_sz;
 	bool		found;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
+	head_sz = MAXALIGN(sizeof(arrowMetadataState));
+	body_sz = ((size_t)arrow_metadata_cache_size_kb << 10);
+	trun_sz = MAXALIGN(sizeof(arrowTruncateLog))*ARROT_TRUNCATE_LOG_MAXITEMS;
+
 	arrow_metadata_state = ShmemInitStruct("arrow_metadata_state",
-										   metadata_cache_sz,
+										   head_sz + body_sz + trun_sz,
 										   &found);
-	if (!found)
+	if (!IsUnderPostmaster)
 	{
 		arrowMetadataCache *mcache;
+		arrowTruncateLog *tlog;
 		size_t		i, nitems;
 
-		nitems = (metadata_cache_sz - offsetof(arrowMetadataState, hash_slots))
-			/ (arrowMetadataCacheSize + 4 * sizeof(dlist_head));
+		nitems = body_sz / arrowMetadataCacheSize;
 		if (nitems < 100)
 			elog(ERROR, "pg_strom.arrow_metadata_cache_size is too small, or pg_strom.arrow_metadata_cache_num_columns is too large");
 
 		LWLockInitialize(&arrow_metadata_state->lock, -1);
-		arrow_metadata_state->nslots = nitems;
+		arrow_metadata_state->nslots = ARROW_METADATA_HASH_NSLOTS;
 		dlist_init(&arrow_metadata_state->free_list);
 		for (i=0; i < nitems; i++)
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
-
-		/* adjust nitems again */
-		nitems = MAXALIGN(metadata_cache_sz - offsetof(arrowMetadataState,
-													   hash_slots[nitems]))
-			/ arrowMetadataCacheSize;
-		arrow_metadata_state->nitems = nitems;
+		dlist_init(&arrow_metadata_state->truncate_free_list);
+		dlist_init(&arrow_metadata_state->truncate_pending_list);
 
 		mcache = (arrowMetadataCache *)
-			(arrow_metadata_state->hash_slots + nitems);
+			((char *)arrow_metadata_state + head_sz);
 		for (i=0; i < nitems; i++)
 		{
 			memset(mcache, 0, sizeof(arrowMetadataCache));
@@ -4367,6 +4163,15 @@ pgstrom_startup_arrow_fdw(void)
 							&mcache->chain);
 			mcache = (arrowMetadataCache *)
 				((char *)mcache + arrowMetadataCacheSize);
+		}
+
+		tlog = (arrowTruncateLog *)
+			((char *)arrow_metadata_state + head_sz + body_sz);
+		for (i=0; i < ARROT_TRUNCATE_LOG_MAXITEMS; i++, tlog++)
+		{
+			memset(tlog, 0, sizeof(arrowTruncateLog));
+			dlist_push_tail(&arrow_metadata_state->truncate_free_list,
+							&tlog->chain);
 		}
 	}
 }
@@ -4378,7 +4183,7 @@ void
 pgstrom_init_arrow_fdw(void)
 {
 	FdwRoutine *r = &pgstrom_arrow_fdw_routine;
-	int			i;
+	size_t		sz;
 
 	memset(r, 0, sizeof(FdwRoutine));
 	NodeSetTag(r, T_FdwRoutine);
@@ -4474,14 +4279,14 @@ pgstrom_init_arrow_fdw(void)
 							NULL, NULL, NULL);
 
 	/* shared memory size */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)) +
-						   ((size_t)arrow_metadata_cache_size_kb << 10));
+	sz = MAXALIGN(sizeof(arrowMetadataState)) +
+		((size_t)arrow_metadata_cache_size_kb << 10) +
+		MAXALIGN(sizeof(arrowTruncateLog)) * ARROT_TRUNCATE_LOG_MAXITEMS;
+	RequestAddinShmemSpace(sz);
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 
-	/* arrow local buffer and transaction callback */
-	for (i=0; i < ARROW_LOCAL_BUFFER_HASHSIZE; i++)
-		dlist_init(&arrow_local_buffer_hash[i]);
+	/* arrow transaction callback */
 	RegisterXactCallback(arrowFdwXactCallback, NULL);
 	RegisterSubXactCallback(arrowFdwSubXactCallback, NULL);
 }

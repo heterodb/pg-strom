@@ -27,7 +27,7 @@
 
 #include "arrow_defs.h"
 
-#define	ARROWALIGN(LEN)		TYPEALIGN(64, (LEN))
+#define	ARROWALIGN(LEN)			TYPEALIGN(64, (LEN))
 
 typedef struct SQLbuffer		SQLbuffer;
 typedef struct SQLtable			SQLtable;
@@ -111,14 +111,10 @@ struct SQLtable
 	int			numCustomMetadata;
 	SQLdictionary *sql_dict_list; /* list of SQLdictionary */
 	size_t		segment_sz;		/* threshold of the memory usage */
-	int			nbatches;		/* number of buffered record-batches */
+	size_t		nitems;			/* number of items */
 	int			nfields;		/* number of attributes */
 	SQLfield columns[FLEXIBLE_ARRAY_MEMBER];
 };
-#define SQLtableGetColumns(table,index)								\
-	((table)->columns + (table)->nfields * (index))
-#define SQLtableLatestColumns(table)									\
-	SQLtableGetColumns((table),(table)->nbatches - 1)
 
 typedef struct hashItem		hashItem;
 struct hashItem
@@ -143,25 +139,10 @@ struct SQLdictionary
 	hashItem   *hslots[FLEXIBLE_ARRAY_MEMBER];
 };
 
-/*
- * Error message and exit
- */
-#ifndef __PG2ARROW__
-#define Elog(fmt, ...)		elog(ERROR,(fmt),##__VA_ARGS__)
-#else
-#define Elog(fmt, ...)								\
-	do {											\
-		fprintf(stderr,"%s:%d  " fmt "\n",			\
-				__FILE__,__LINE__, ##__VA_ARGS__);	\
-		exit(1);									\
-	} while(0)
-#endif
-
 /* arrow_write.c */
 extern ssize_t	writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
-extern void		writeArrowRecordBatch(SQLtable *table,
-									  SQLfield *attrs);
+extern void		writeArrowRecordBatch(SQLtable *table);
 extern ssize_t	writeArrowFooter(SQLtable *table);
 extern size_t	estimateArrowBufferLength(SQLfield *column, size_t nitems);
 
@@ -174,24 +155,6 @@ extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern char	   *arrowTypeName(ArrowField *field);
 
-/* arrow_buf.c */
-extern void		sql_field_rewind(SQLfield *column, size_t nitems);
-extern void		sql_table_rewind(SQLtable *table, int nbatches, size_t nitems);
-extern SQLtable *sql_table_expand(SQLtable *table);
-extern void		sql_buffer_init(SQLbuffer *buf);
-extern void		sql_buffer_expand(SQLbuffer *buf, size_t required);
-extern void		sql_buffer_append(SQLbuffer *buf, const void *src, size_t len);
-extern void		sql_buffer_append_zero(SQLbuffer *buf, size_t len);
-extern void		sql_buffer_setbit(SQLbuffer *buf, size_t __index);
-extern void		sql_buffer_clrbit(SQLbuffer *buf, size_t __index);
-extern void		sql_buffer_clear(SQLbuffer *buf);
-extern void		sql_buffer_copy(SQLbuffer *dst, const SQLbuffer *src);
-extern void		sql_buffer_write(int fdesc, SQLbuffer *buf);
-
-
-extern void		rewindArrowTypeBuffer(SQLfield *column, size_t nitems);
-extern void		duplicateArrowTypeBuffer(SQLfield *dest, SQLfield *source);
-
 /* arrow_pgsql.c */
 extern int		assignArrowTypePgSQL(SQLfield *column,
 									 const char *field_name,
@@ -203,8 +166,22 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 bool typbyval,
 									 char typtype,
 									 char typalign,
-									 Oid typelem,
-									 Oid typrelid);
+									 Oid typrelid,
+									 Oid typelem);
+/*
+ * Error messages, and misc definitions for pg2arrow
+ */
+#ifndef __PG2ARROW__
+#define Elog(fmt, ...)		elog(ERROR,(fmt),##__VA_ARGS__)
+#else
+#define Elog(fmt, ...)								\
+	do {											\
+		fprintf(stderr,"%s:%d  " fmt "\n",			\
+				__FILE__,__LINE__, ##__VA_ARGS__);	\
+		exit(1);									\
+	} while(0)
+#endif
+
 /*
  * Misc functions
  */
@@ -214,4 +191,147 @@ extern void appendStringInfo(StringInfo buf,
 							 const char *fmt,...) pg_attribute_printf(2, 3);
 extern Datum hash_any(const unsigned char *k, int keylen);
 
+/*
+ * SQLbuffer related routines
+ */
+static inline void
+sql_buffer_init(SQLbuffer *buf)
+{
+	buf->data = NULL;
+	buf->usage = 0;
+	buf->length = 0;
+}
+
+static inline void
+sql_buffer_expand(SQLbuffer *buf, size_t required)
+{
+	if (buf->length < required)
+	{
+		void	   *data;
+		size_t		length;
+
+		if (buf->data == NULL)
+		{
+			length = (1UL << 20);	/* start from 1MB */
+			while (length < required)
+				length *= 2;
+			data = palloc(length);
+			if (!data)
+				Elog("palloc: out of memory (sz=%zu)", length);
+			buf->data   = data;
+			buf->usage  = 0;
+			buf->length = length;
+		}
+		else
+		{
+			length = buf->length;
+			while (length < required)
+				length *= 2;
+			data = repalloc(buf->data, length);
+			if (!data)
+				Elog("repalloc: out of memory (sz=%zu)", length);
+			buf->data = data;
+			buf->length = length;
+		}
+	}
+}
+
+static inline void
+sql_buffer_append(SQLbuffer *buf, const void *src, size_t len)
+{
+	sql_buffer_expand(buf, buf->usage + len);
+	memcpy(buf->data + buf->usage, src, len);
+	buf->usage += len;
+	assert(buf->usage <= buf->length);
+}
+
+static inline void
+sql_buffer_append_zero(SQLbuffer *buf, size_t len)
+{
+	sql_buffer_expand(buf, buf->usage + len);
+	memset(buf->data + buf->usage, 0, len);
+	buf->usage += len;
+	assert(buf->usage <= buf->length);
+}
+
+static inline void
+sql_buffer_setbit(SQLbuffer *buf, size_t __index)
+{
+	size_t		index = __index >> 3;
+	int			mask  = (1 << (__index & 7));
+
+	sql_buffer_expand(buf, index + 1);
+	((uint8 *)buf->data)[index] |= mask;
+	buf->usage = Max(buf->usage, index + 1);
+}
+
+static inline void
+sql_buffer_clrbit(SQLbuffer *buf, size_t __index)
+{
+	size_t		index = __index >> 3;
+	int			mask  = (1 << (__index & 7));
+
+	sql_buffer_expand(buf, index + 1);
+	((uint8 *)buf->data)[index] &= ~mask;
+	buf->usage = Max(buf->usage, index + 1);
+}
+
+static inline void
+sql_buffer_clear(SQLbuffer *buf)
+{
+	buf->usage = 0;
+}
+
+static inline void
+sql_buffer_copy(SQLbuffer *dest, const SQLbuffer *orig)
+{
+	sql_buffer_init(dest);
+	if (orig->data)
+	{
+		assert(orig->usage <= orig->length);
+		sql_buffer_expand(dest, orig->length);
+		memcpy(dest->data, orig->data, orig->usage);
+		dest->usage = orig->usage;
+	}
+}
+
+static inline void
+sql_buffer_write(int fdesc, SQLbuffer *buf)
+{
+	ssize_t		length = buf->usage;
+	ssize_t		offset = 0;
+	ssize_t		nbytes;
+
+	while (offset < length)
+	{
+		nbytes = write(fdesc, buf->data + offset, length - offset);
+		if (nbytes < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			Elog("failed on write(2): %m");
+		}
+		offset += nbytes;
+	}
+
+	if (length != ARROWALIGN(length))
+	{
+		ssize_t	gap = ARROWALIGN(length) - length;
+		char	zero[64];
+
+		offset = 0;
+		memset(zero, 0, sizeof(zero));
+		while (offset < gap)
+		{
+			nbytes = write(fdesc, zero + offset, gap - offset);
+			if (nbytes < 0)
+			{
+				if (errno == EINTR)
+					continue;
+				Elog("failed on write(2): %m");
+			}
+			offset += nbytes;
+		}
+	}
+}
 #endif	/* ARROW_IPC_H */
