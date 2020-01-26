@@ -28,9 +28,10 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 #
 # Source file of CPU portion
 #
-__STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
-		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
-		gpu_tasks.o gpuscan.o gpujoin.o inners.o gpupreagg.o \
+__STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
+        cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
+        nvme_strom.o relscan.o gpu_tasks.o \
+        gpuscan.o gpujoin.o inners.o gpupreagg.o \
 		aggfuncs.o pl_cuda.o gstore_buf.o gstore_fdw.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
 		matrix.o float2.o largeobject.o misc.o

@@ -82,6 +82,7 @@
 #include "lib/stringinfo.h"
 #include "libpq/be-fsstubs.h"
 #include "libpq/libpq-fs.h"
+#include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
@@ -657,6 +658,12 @@ extern CUresult gpuOptimalBlockSize(int *p_grid_sz,
 									CUdevice cuda_device,
 									size_t dyn_shmem_per_block,
 									size_t dyn_shmem_per_thread);
+/*
+ * shmbuf.c
+ */
+extern void				pgstrom_init_shmbuf(void);
+extern MemoryContext	TopSharedMemoryContext;
+
 /*
  * gpu_mmgr.c
  */
