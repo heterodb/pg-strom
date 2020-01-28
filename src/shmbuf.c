@@ -653,19 +653,24 @@ shmBufferCleanupOnPostmasterExit(int code, Datum arg)
 		DIR			   *dir = opendir("/dev/shm");
 		struct dirent  *dentry;
 		char			namebuf[NAMEDATALEN];
-		size_t			sz;
+		size_t			namelen;
 
-		sz = snprintf(namebuf, sizeof(namebuf),
-					  ".pg_shmbuf_%u.", PostPortNumber);
+		namelen = snprintf(namebuf, sizeof(namebuf),
+						   ".pg_shmbuf_%u.", PostPortNumber);
 		if (!dir)
 			return;
 		while ((dentry = readdir(dir)) != NULL)
 		{
 			if (dentry->d_type != DT_REG)
 				continue;
-			if (strncmp(dentry->d_name, namebuf, sz) == 0)
+			if (strncmp(dentry->d_name, namebuf, namelen) == 0)
 			{
-				elog(LOG, "[%s] to be removed", dentry->d_name);
+				if (shm_unlink(dentry->d_name) != 0)
+					elog(LOG, "failed on shm_unlink('%s'): %m",
+						 dentry->d_name);
+				else
+					elog(LOG, "shared memory segment [%s] is removed.",
+						 dentry->d_name);
 			}
 		}
 		closedir(dir);
