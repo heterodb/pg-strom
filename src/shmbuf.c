@@ -62,7 +62,8 @@ typedef struct
 
 typedef struct
 {
-	slock_t			lock;		/* protection of the free_segment_list below */
+	slock_t			lock;		/* protection of the list below */
+	dlist_head		shmem_context_list;
 	dlist_head		free_segment_list;
 	shmBufferSegment segments[FLEXIBLE_ARRAY_MEMBER];
 } shmBufferSegmentHead;
@@ -78,8 +79,10 @@ typedef struct
 typedef struct
 {
 	MemoryContextData header;	/* Standard memory-context fields */
+	dlist_node		chain;		/* link to shmem_context_list */
 	slock_t			lock;		/* Lock for shared memory allocation */
 	dlist_head		active_segment_list;
+	char			namebuf[FLEXIBLE_ARRAY_MEMBER];
 } shmBufferContext;
 
 /* -------- static variables -------- */
@@ -95,6 +98,9 @@ static char	   *shmbuf_segment_vaddr_head = NULL;
 static char	   *shmbuf_segment_vaddr_tail = NULL;
 static MemoryContextMethods sharedMemoryContextMethods;
 MemoryContext	TopSharedMemoryContext = NULL;
+
+/* -------- SQL functions -------- */
+Datum pgstrom_shmbuf_info(PG_FUNCTION_ARGS);
 
 /* -------- utility inline functions -------- */
 static inline int
@@ -234,6 +240,7 @@ shmBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 				 fdesc, 0) != mmap_ptr)
 		{
 			close(fdesc);
+			shm_unlink(namebuf);
 			SpinLockRelease(&lmap->mutex);
 			fprintf(stderr, "pid=%u: %s on %p (seg_id=%u,rev=%u) - "
 					"failed on mmap('%s'): %m",
@@ -883,6 +890,9 @@ shmemContextDelete(MemoryContext __context)
 	if (__context == TopSharedMemoryContext)
 		elog(ERROR, "unable to delete TopSharedMemoryContext");
 	shmemContextReset(__context);
+	SpinLockAcquire(&shmBufSegHead->lock);
+	dlist_delete(&context->chain);
+	SpinLockRelease(&shmBufSegHead->lock);
 	pfree(context);
 }
 
@@ -1029,7 +1039,6 @@ shmemContextCheck(MemoryContext __context)
 Datum pgstrom_shmbuf_alloc(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_free(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_realloc(PG_FUNCTION_ARGS);
-Datum pgstrom_shmbuf_info(PG_FUNCTION_ARGS);
 
 Datum
 pgstrom_shmbuf_alloc(PG_FUNCTION_ARGS)
@@ -1072,26 +1081,30 @@ pgstrom_shmbuf_realloc(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(new_ptr);
 }
 PG_FUNCTION_INFO_V1(pgstrom_shmbuf_realloc);
+#endif
 
 static void
-__pgstrom_shmbuf_info(StringInfo str, shmBufferSegment *seg)
+__pgstrom_shmbuf_segment_info(StringInfo str, shmBufferSegment *seg)
 {
 	uint32		segment_id = shmBufferSegmentId(seg);
+	uint32		revision = pg_atomic_read_u32(&seg->revision);
 	char	   *curr, *head, *tail;
 	int			active_chunks[SHMBUF_CHUNKSZ_MAX_BIT -
 							  SHMBUF_CHUNKSZ_MIN_BIT + 1];
 	int			free_chunks[SHMBUF_CHUNKSZ_MAX_BIT -
 							SHMBUF_CHUNKSZ_MIN_BIT + 1];
-	Size		logical_space = 0;
-	Size		physical_space = 0;
+	Size		required_space = 0;
+	Size		alloc_space = 0;
 	Size		free_space = 0;
-	int			i;
+	int			i, count = 0;
 
-	memset(active_chunks, 0, sizeof(active_chunks));
-	memset(free_chunks, 0, sizeof(free_chunks));
+	appendStringInfo(str, "{ \"segment-id\" : %u, \"revision\" : %u",
+					 segment_id, revision);
 	
 	curr = head = shmbuf_segment_vaddr_head + shmbuf_segment_size * segment_id;
 	tail = head + shmbuf_segment_size;
+	memset(active_chunks, 0, sizeof(active_chunks));
+	memset(free_chunks, 0, sizeof(free_chunks));
 	while (curr < tail)
 	{
 		shmBufferChunk *chunk = (shmBufferChunk *)curr;
@@ -1101,10 +1114,8 @@ __pgstrom_shmbuf_info(StringInfo str, shmBufferSegment *seg)
 			chunk->magic_head != SHMBUF_CHUNK_MAGIC_CODE ||
 			curr + (1UL << chunk->mclass) > tail)
 		{
-			elog(WARNING, "segment[%d] contains corrupted chunk at %p (offset=%zu, required=%zu, mclass=%d, magic_head=%08x)",
-				 segment_id, chunk, (curr - head),
-				 chunk->required, chunk->mclass, chunk->magic_head);
-			return;
+			appendStringInfo(str, ", \"corrupted\" : true");
+			goto out;
 		}
 
 		if (chunk->chain.prev && chunk->chain.next)
@@ -1115,57 +1126,139 @@ __pgstrom_shmbuf_info(StringInfo str, shmBufferSegment *seg)
 		else
 		{
 			active_chunks[chunk->mclass - SHMBUF_CHUNKSZ_MIN_BIT]++;
-			physical_space += (1UL << chunk->mclass);
-			logical_space += chunk->required;
+			alloc_space += (1UL << chunk->mclass);
+			required_space += chunk->required;
 		}
 		curr += (1UL << chunk->mclass);
 	}
 
+	appendStringInfo(str, ", \"chunks\" : [");
 	for (i=SHMBUF_CHUNKSZ_MIN_BIT; i<=SHMBUF_CHUNKSZ_MAX_BIT; i++)
 	{
-		appendStringInfo(str, "mclass[%d] active=%d, free=%d\n", i,
-						 active_chunks[i - SHMBUF_CHUNKSZ_MIN_BIT],
-						 free_chunks[i - SHMBUF_CHUNKSZ_MIN_BIT]);
-	}
-	appendStringInfo(str, "allocate space: %zu of %zu, free space: %zu (usage: %.2f%%)\n",
-					 logical_space, physical_space, free_space,
-					 (double)logical_space / (double)shmbuf_segment_size);
+		int			mindex = i - SHMBUF_CHUNKSZ_MIN_BIT;
+		char		label[100];
 
+		if (active_chunks[mindex] == 0 && free_chunks[mindex] == 0)
+			continue;
+		if (i < 10)
+			snprintf(label, sizeof(label), "%lub", (1UL << i));
+		else if (i < 20)
+			snprintf(label, sizeof(label), "%lukB", (1UL << (i-10)));
+		else if (i < 30)
+			snprintf(label, sizeof(label), "%luMB", (1UL << (i-20)));
+		else if (i < 40)
+			snprintf(label, sizeof(label), "%luGB", (1UL << (i-30)));
+		else
+			snprintf(label, sizeof(label), "%luTB", (1UL << (i-40)));
+		
+		if (count++ > 0)
+			appendStringInfo(str, ", ");
+		appendStringInfo(str, "{\"chunk-sz\" : \"%s\", \"active\" : %d, \"free\" : %d }",
+						 label, active_chunks[mindex], free_chunks[mindex]);
+	}
+	appendStringInfo(str, "]");
+	appendStringInfo(str, ", \"required-space\" : %zu", required_space);
+	appendStringInfo(str, ", \"alloc-space\" : %zu", alloc_space);
+	appendStringInfo(str, ", \"free-space\" : %zu", free_space);
+out:
+	appendStringInfo(str, "}");
+}
+
+static void
+__pgstrom_shmbuf_context_info(StringInfo str, shmBufferContext *context)
+{
+	dlist_iter		iter;
+	int				count = 0;
+
+	appendStringInfo(str,"{ \"name\" : \"%s\", \"segments\" : [",
+					 context->header.name);
+	dlist_foreach(iter, &context->active_segment_list)
+	{
+		shmBufferSegment *seg = dlist_container(shmBufferSegment,
+												chain, iter.cur);
+		if (count++ > 0)
+			appendStringInfo(str, ", ");
+		__pgstrom_shmbuf_segment_info(str, seg);
+	}
+	appendStringInfo(str, "]}");
 }
 
 Datum
 pgstrom_shmbuf_info(PG_FUNCTION_ARGS)
 {
-	shmBufferContext *context = (shmBufferContext *) TopSharedMemoryContext;
-	dlist_iter		iter;
 	StringInfoData	str;
 
 	initStringInfo(&str);
-	appendStringInfo(&str, "[%s]\n", TopSharedMemoryContext->name);
-	SpinLockAcquire(&context->lock);
+	str.len += VARHDRSZ;
+
+	appendStringInfo(&str, "[");
+	SpinLockAcquire(&shmBufSegHead->lock);
 	PG_TRY();
 	{
-		dlist_foreach (iter, &context->active_segment_list)
+		dlist_iter	iter;
+		int			count = 0;
+		
+		dlist_foreach(iter, &shmBufSegHead->shmem_context_list)
 		{
-			shmBufferSegment *seg = dlist_container(shmBufferSegment,
-													chain, iter.cur);
-			appendStringInfo(&str, "segment[%d]\n",
-							 shmBufferSegmentId(seg));
-			__pgstrom_shmbuf_info(&str, seg);
+			shmBufferContext *context = dlist_container(shmBufferContext,
+														chain, iter.cur);
+			SpinLockAcquire(&context->lock);
+			PG_TRY();
+			{
+				if (count++ > 0)
+					appendStringInfo(&str, ", ");
+				__pgstrom_shmbuf_context_info(&str, context);
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&context->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&context->lock);
 		}
 	}
 	PG_CATCH();
 	{
-		SpinLockRelease(&context->lock);
+		SpinLockRelease(&shmBufSegHead->lock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	SpinLockRelease(&context->lock);
+	SpinLockRelease(&shmBufSegHead->lock);
+	appendStringInfo(&str, "]");
 
-	PG_RETURN_TEXT_P(cstring_to_text(str.data));
+	SET_VARSIZE(str.data, str.len);
+	PG_RETURN_TEXT_P(str.data);
 }
 PG_FUNCTION_INFO_V1(pgstrom_shmbuf_info);
-#endif
+
+/*
+ * SharedMemoryContextCreate
+ */
+MemoryContext
+SharedMemoryContextCreate(const char *name)
+{
+	shmBufferContext   *scxt;
+	MemoryContext		mcxt;
+
+	scxt = MemoryContextAllocZero(TopSharedMemoryContext,
+								  offsetof(shmBufferContext,
+										   namebuf[strlen(name) + 1]));
+	strcpy(scxt->namebuf, name);
+	mcxt = &scxt->header;
+	/* A fake node tag to avoid Assert() checks */
+	NodeSetTag(mcxt, T_AllocSetContext);
+	mcxt->methods = &sharedMemoryContextMethods;
+	mcxt->name = scxt->namebuf;
+	SpinLockInit(&scxt->lock);
+	dlist_init(&scxt->active_segment_list);
+
+	SpinLockAcquire(&shmBufSegHead->lock);
+	dlist_push_tail(&shmBufSegHead->shmem_context_list, &scxt->chain);
+	SpinLockRelease(&shmBufSegHead->lock);
+
+	return mcxt;
+}
 
 /*
  * pgstrom_startup_shmbuf
@@ -1201,6 +1294,7 @@ pgstrom_startup_shmbuf(void)
 		Assert(found);
 
 	SpinLockInit(&shmBufSegHead->lock);
+	dlist_init(&shmBufSegHead->shmem_context_list);
 	dlist_init(&shmBufSegHead->free_segment_list);
 	for (i=0; i < shmbuf_num_logical_segment; i++)
 	{
@@ -1222,7 +1316,8 @@ pgstrom_startup_shmbuf(void)
 	 * Build TopSharedMemoryContext
 	 */
 	seg = shmBufferCreateSegment();
-	chunk = __shmBufferAllocChunkFromSegment(seg, sizeof(shmBufferContext));
+	chunk = __shmBufferAllocChunkFromSegment(seg, offsetof(shmBufferContext,
+														   namebuf));
 	if (!chunk)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -1240,6 +1335,8 @@ pgstrom_startup_shmbuf(void)
 	NodeSetTag(TopSharedMemoryContext, T_AllocSetContext);
 	TopSharedMemoryContext->methods = &sharedMemoryContextMethods;
 	TopSharedMemoryContext->name = "TopSharedMemoryContext";
+
+	dlist_push_tail(&shmBufSegHead->shmem_context_list, &scxt->chain);
 }
 
 /*
