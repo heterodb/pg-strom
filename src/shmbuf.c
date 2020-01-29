@@ -1279,9 +1279,6 @@ pgstrom_startup_shmbuf(void)
 	bool	found;
 	uint32	i, j;
 
-	if (shmem_startup_next)
-		(*shmem_startup_next)();
-
 	/* shmBufLocalMaps */
 	length = sizeof(shmBufferLocalMap) * shmbuf_num_logical_segment;
 	shmBufLocalMaps = MemoryContextAllocZero(TopMemoryContext, length);
@@ -1342,6 +1339,14 @@ pgstrom_startup_shmbuf(void)
 	TopSharedMemoryContext->name = "TopSharedMemoryContext";
 
 	dlist_push_tail(&shmBufSegHead->shmem_context_list, &scxt->chain);
+
+	/*
+	 * Because TopSharedMemoryContext must exist prior to creation
+	 * of other shared memory context, we call the shmem_startup_next
+	 * at the tail of _startup handler.
+	 */
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
 }
 
 /*

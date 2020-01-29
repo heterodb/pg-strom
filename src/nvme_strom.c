@@ -739,7 +739,7 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
  * GetOptimalGpuForFile
  */
 int
-GetOptimalGpuForFile(const char *fname, File fdesc)
+GetOptimalGpuForFile(File fdesc)
 {
 	StromCmd__CheckFile *uarg
 		= alloca(offsetof(StromCmd__CheckFile, rawdisks[100]));
@@ -755,7 +755,8 @@ retry:
 	{
 		ereport(DEBUG1,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("nvme_strom does not support file '%s'", fname)));
+				 errmsg("nvme_strom does not support file '%s'",
+						FilePathName(fdesc))));
 		return -1;
 	}
 	else if (uarg->ndisks > nrooms)
@@ -840,7 +841,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 		}
 		else
 		{
-			entry->nvme_optimal_gpu = GetOptimalGpuForFile(pathname, fdesc);
+			entry->nvme_optimal_gpu = GetOptimalGpuForFile(fdesc);
 			FileClose(fdesc);
 		}
 	}

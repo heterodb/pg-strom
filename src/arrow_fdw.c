@@ -42,7 +42,6 @@ typedef struct RecordBatchFieldState
 
 typedef struct RecordBatchState
 {
-	const char *fname;
 	File		fdesc;
 	struct stat	stat_buf;
 	int			rb_index;	/* index number in a file */
@@ -57,6 +56,12 @@ typedef struct RecordBatchState
 /*
  * metadata cache (on shared memory)
  */
+typedef struct
+{
+	dev_t		st_dev;
+	ino_t		st_ino;
+} MetadataCacheKey;
+
 typedef struct
 {
 	dlist_node	chain;
@@ -78,16 +83,11 @@ typedef struct
 #define ARROW_METADATA_HASH_NSLOTS		2048
 typedef struct
 {
-	LWLock		lock;
-	cl_uint		nitems;
-	cl_uint		nslots;
+	slock_t		lru_lock;
 	dlist_head	lru_list;
-	dlist_head	free_list;
+	pg_atomic_uint64 consumed;
+	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
-
-	/* shared information for truncate */
-	dlist_head	truncate_pending_list;
-	dlist_head	truncate_free_list;
 } arrowMetadataState;
 
 /*
@@ -129,7 +129,7 @@ typedef struct
  */
 struct ArrowFdwState
 {
-	List	   *filesList;
+//	List	   *filesList;
 	List	   *fdescList;
 	Bitmapset  *referenced;
 	pg_atomic_uint32   *rbatch_index;
@@ -148,10 +148,7 @@ static arrowMetadataState *arrow_metadata_state = NULL;
 static HTAB			   *arrow_write_redo_log_htab = NULL;
 static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
-static int				arrow_metadata_cache_width;		/* GUC */
-#define arrowMetadataCacheSize								\
-	MAXALIGN(offsetof(arrowMetadataCache,					\
-					  fstate[arrow_metadata_cache_width]))
+static size_t			arrow_metadata_cache_size;
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
 
@@ -170,7 +167,7 @@ static List	   *arrowFdwExtractFilesList(List *options_list);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
 											  ArrowRecordBatch *rbatch);
-static List	   *arrowLookupOrBuildMetadataCache(const char *fname, File fdesc);
+static List	   *arrowLookupOrBuildMetadataCache(File fdesc);
 static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   kern_colmeta *cmeta,
 								   size_t index,
@@ -207,7 +204,32 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
 }
 
 /*
- * ArrowGetForeignRelSize
+ * RecordBatchFieldCount
+ */
+static int
+__RecordBatchFieldCount(RecordBatchFieldState *fstate)
+{
+	int		j, count = 1;
+
+	for (j=0; j < fstate->num_children; j++)
+		count += __RecordBatchFieldCount(&fstate->children[j]);
+
+	return count;
+}
+
+static int
+RecordBatchFieldCount(RecordBatchState *rbstate)
+{
+	int		j, count = 0;
+
+	for (j=0; j < rbstate->ncols; j++)
+		count += __RecordBatchFieldCount(&rbstate->columns[j]);
+
+	return count;
+}
+
+/*
+ * RecordBatchFieldLength
  */
 static size_t
 RecordBatchFieldLength(RecordBatchFieldState *fstate)
@@ -286,6 +308,9 @@ apply_debug_row_numbers_hint(PlannerInfo *root,
 	pfree(config);
 }
 
+/*
+ * ArrowGetForeignRelSize
+ */
 static void
 ArrowGetForeignRelSize(PlannerInfo *root,
 					   RelOptInfo *baserel,
@@ -330,13 +355,13 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 				 fname, get_rel_name(foreigntableid));
 			continue;
 		}
-		k = GetOptimalGpuForFile(fname, fdesc);
+		k = GetOptimalGpuForFile(fdesc);
 		if (optimal_gpu == INT_MAX)
 			optimal_gpu = k;
 		else if (optimal_gpu != k)
 			optimal_gpu = -1;
 
-		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
@@ -889,7 +914,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 			elog(ERROR, "failed to open '%s'", fname);
 		fdescList = lappend_int(fdescList, fdesc);
 
-		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -903,7 +928,6 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 	}
 	num_rbatches = list_length(rb_state_list);
 	af_state = palloc0(offsetof(ArrowFdwState, rbatches[num_rbatches]));
-	af_state->filesList = filesList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
@@ -1351,7 +1375,7 @@ void
 ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
-	ListCell   *lc1, *lc2;
+	ListCell   *lc;
 	int			fcount = 0;
 	char		label[80];
 	size_t	   *chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
@@ -1378,11 +1402,10 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 	ExplainPropertyText("referenced", buf.data, es);
 
 	/* shows files on behalf of the foreign table */
-	forboth (lc1, af_state->filesList,
-			 lc2, af_state->fdescList)
+	foreach (lc, af_state->fdescList)
 	{
-		const char *fname = strVal(lfirst(lc1));
-		File		fdesc = (File)lfirst_int(lc2);
+		File		fdesc = (File)lfirst_int(lc);
+		const char *fname = FilePathName(fdesc);
 		int			rbcount = 0;
 		char	   *pos = label;
 		struct stat	st_buf;
@@ -1396,7 +1419,8 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 			if (st_buf.st_size == 0)
 				appendStringInfoString(&buf, fname);
 			else
-				appendStringInfo(&buf, "%s (size: %s)", fname,
+				appendStringInfo(&buf, "%s (size: %s)",
+								 fname,
 								 format_bytesz(st_buf.st_size));
 			ExplainPropertyText(label, buf.data, es);
 		}
@@ -1571,7 +1595,7 @@ ArrowAcquireSampleRows(Relation relation,
 		}
 		fdesc_array[fcount++] = fdesc;
 		
-		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -2627,16 +2651,17 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 {
 	char	   *result = palloc0(sizeof(struct NumericData));
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	int			precision = cmeta->attopts.decimal.precision;
+	int			dscale = cmeta->attopts.decimal.scale;
 	Int128_t	decimal;
 
 	decimal.ival = ((int128 *)base)[index];
-	while (precision > 0 && decimal.ival % 10 == 0)
+
+	while (dscale > 0 && decimal.ival % 10 == 0)
 	{
 		decimal.ival /= 10;
-		precision--;
+		dscale--;
 	}
-	pg_numeric_to_varlena(result, precision, decimal);
+	pg_numeric_to_varlena(result, dscale, decimal);
 
 	return PointerGetDatum(result);
 }
@@ -3237,7 +3262,7 @@ arrow_fdw_precheck_schema(Relation rel)
 		if (fdesc < 0)
 			elog(ERROR, "failed to open '%s'", fname);
 		/* check schema compatibility */
-		rb_cached = arrowLookupOrBuildMetadataCache(fname, fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -3329,58 +3354,41 @@ PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
 
 
 /*
- * Routines for Arrow metadata cache
+ * arrowInvalidateMetadataCache
+ *
+ * NOTE: caller must have lock_slots[] with EXCLUSIVE mode
  */
-typedef struct
+static uint64
+arrowInvalidateMetadataCache(arrowMetadataCache *mcache, bool detach_lru)
 {
-	dev_t		st_dev;
-	ino_t		st_ino;
-} MetadataCacheKey;
-
-static void
-arrowInvalidateMetadataCache(struct stat *stat_buf)
-{
-	MetadataCacheKey key;
-	dlist_head	   *slot;
+	arrowMetadataCache *mtemp;
 	dlist_node	   *dnode;
-	dlist_iter		iter;
-	uint32			hash, index;
+	uint64			released = 0;
 
-	memset(&key, 0, sizeof(key));
-	key.st_dev      = stat_buf->st_dev;
-	key.st_ino      = stat_buf->st_ino;
-	hash = hash_any((unsigned char *)&key, sizeof(key));
-	index = hash % arrow_metadata_state->nslots;
-	slot = &arrow_metadata_state->hash_slots[index];
-
-	dlist_foreach(iter, slot)
+	while (!dlist_is_empty(&mcache->siblings))
 	{
-		arrowMetadataCache *mcache, *mtemp;
-
-		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
-		if (mcache->hash == hash &&
-			mcache->stat_buf.st_dev == stat_buf->st_dev &&
-			mcache->stat_buf.st_ino == stat_buf->st_ino)
-		{
-			while (!dlist_is_empty(&mcache->siblings))
-			{
-				dnode = dlist_pop_head_node(&mcache->siblings);
-				mtemp = dlist_container(arrowMetadataCache, chain, dnode);
-				Assert(dlist_is_empty(&mtemp->siblings) &&
-					   mtemp->lru_chain.prev == NULL &&
-					   mtemp->lru_chain.next == NULL);
-				memset(mtemp, 0, arrowMetadataCacheSize);
-				dlist_push_head(&arrow_metadata_state->free_list,
-								&mtemp->chain);
-			}
-			dlist_delete(&mcache->chain);
-			dlist_delete(&mcache->lru_chain);
-			Assert(dlist_is_empty(&mcache->siblings));
-			dlist_push_head(&arrow_metadata_state->free_list,
-							&mcache->chain);
-			break;
-		}
+		dnode = dlist_pop_head_node(&mcache->siblings);
+		mtemp = dlist_container(arrowMetadataCache, chain, dnode);
+		Assert(dlist_is_empty(&mtemp->siblings) &&
+			   !mtemp->lru_chain.prev && !mtemp->lru_chain.next);
+		dlist_delete(&mtemp->chain);
+		released += MAXALIGN(offsetof(arrowMetadataCache,
+									  fstate[mtemp->nfields]));
+		pfree(mtemp);
 	}
+	released += MAXALIGN(offsetof(arrowMetadataCache,
+								  fstate[mcache->nfields]));
+	if (detach_lru)
+	{
+		SpinLockAcquire(&arrow_metadata_state->lru_lock);
+		dlist_delete(&mcache->lru_chain);
+		SpinLockRelease(&arrow_metadata_state->lru_lock);
+	}
+	dlist_delete(&mcache->chain);
+	pfree(mcache);
+
+	return pg_atomic_sub_fetch_u64(&arrow_metadata_state->consumed,
+								   released);
 }
 
 /*
@@ -3424,14 +3432,12 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
  *   - setup RecordBatchState from arrowMetadataCache
  */
 static RecordBatchState *
-makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
-							  const char *fname, File fdesc)
+makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
 {
 	RecordBatchState   *rbstate;
 
 	rbstate = palloc0(offsetof(RecordBatchState,
 							   columns[mcache->nfields]));
-	rbstate->fname = fname;
 	rbstate->fdesc = fdesc;
 	memcpy(&rbstate->stat_buf, &mcache->stat_buf, sizeof(struct stat));
 	rbstate->rb_index  = mcache->rb_index;
@@ -3447,33 +3453,165 @@ makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
 }
 
 /*
- * arrowLookupMetadataCache
+ * arrowReclaimMetadataCache
  */
-static List *
-arrowLookupMetadataCache(const char *fname, File fdesc)
+static void
+arrowReclaimMetadataCache(void)
+{
+	arrowMetadataCache *mcache;
+	LWLock	   *lock = NULL;
+	dlist_node *dnode;
+	uint32		lru_hash;
+	uint32		lru_index;
+	uint64		consumed;
+
+	consumed = pg_atomic_read_u64(&arrow_metadata_state->consumed);
+	if (consumed <= arrow_metadata_cache_size)
+		return;
+
+	SpinLockAcquire(&arrow_metadata_state->lru_lock);
+	if (dlist_is_empty(&arrow_metadata_state->lru_list))
+	{
+		SpinLockRelease(&arrow_metadata_state->lru_lock);
+		return;
+	}
+	dnode = dlist_tail_node(&arrow_metadata_state->lru_list);
+	mcache = dlist_container(arrowMetadataCache, lru_chain, dnode);
+	lru_hash = mcache->hash;
+	SpinLockRelease(&arrow_metadata_state->lru_lock);
+
+	do {
+		lru_index = lru_hash % ARROW_METADATA_HASH_NSLOTS;
+		lock = &arrow_metadata_state->lock_slots[lru_index];
+
+		LWLockAcquire(lock, LW_EXCLUSIVE);
+		SpinLockAcquire(&arrow_metadata_state->lru_lock);
+		if (dlist_is_empty(&arrow_metadata_state->lru_list))
+		{
+			SpinLockRelease(&arrow_metadata_state->lru_lock);
+			LWLockRelease(lock);
+			break;
+		}
+		dnode = dlist_tail_node(&arrow_metadata_state->lru_list);
+		mcache = dlist_container(arrowMetadataCache, lru_chain, dnode);
+		if (mcache->hash == lru_hash)
+		{
+			dlist_delete(&mcache->lru_chain);
+			memset(&mcache->lru_chain, 0, sizeof(dlist_node));
+			SpinLockRelease(&arrow_metadata_state->lru_lock);
+			consumed = arrowInvalidateMetadataCache(mcache, false);
+		}
+		else
+		{
+			/* LRU-tail was referenced by someone, try again */
+			lru_hash = mcache->hash;
+            SpinLockRelease(&arrow_metadata_state->lru_lock);
+		}
+		LWLockRelease(lock);
+	} while (consumed > arrow_metadata_cache_size);
+}
+
+/*
+ * __arrowBuildMetadataCache
+ *
+ * NOTE: caller must have exclusive lock on arrow_metadata_state->lock_slots[]
+ */
+static arrowMetadataCache *
+__arrowBuildMetadataCache(List *rb_state_list, uint32 hash)
+{
+	arrowMetadataCache *mcache = NULL;
+	arrowMetadataCache *mtemp;
+	dlist_node *dnode;
+	Size		sz, consumed = 0;
+	int			nfields;
+	ListCell   *lc;
+
+	foreach (lc, rb_state_list)
+	{
+		RecordBatchState *rbstate = lfirst(lc);
+
+		if (!mcache)
+			nfields = RecordBatchFieldCount(rbstate);
+		else
+			Assert(nfields == RecordBatchFieldCount(rbstate));
+
+		sz = offsetof(arrowMetadataCache, fstate[nfields]);
+		mtemp = MemoryContextAllocZero(TopSharedMemoryContext, sz);
+		if (!mtemp)
+		{
+			/* !!out of memory!! */
+			if (mcache)
+			{
+				while (!dlist_is_empty(&mcache->siblings))
+				{
+					dnode = dlist_pop_head_node(&mcache->siblings);
+					mtemp = dlist_container(arrowMetadataCache,
+											chain, dnode);
+					pfree(mtemp);
+				}
+				pfree(mcache);
+			}
+			return NULL;
+		}
+
+		dlist_init(&mtemp->siblings);
+		memcpy(&mtemp->stat_buf, &rbstate->stat_buf, sizeof(struct stat));
+		mtemp->hash      = hash;
+		mtemp->rb_index  = rbstate->rb_index;
+        mtemp->rb_offset = rbstate->rb_offset;
+        mtemp->rb_length = rbstate->rb_length;
+        mtemp->rb_nitems = rbstate->rb_nitems;
+        mtemp->ncols     = rbstate->ncols;
+		mtemp->nfields   =
+			copyMetadataFieldCache(mtemp->fstate,
+								   mtemp->fstate + nfields,
+								   rbstate->ncols,
+								   rbstate->columns);
+		Assert(mtemp->nfields == nfields);
+
+		if (!mcache)
+			mcache = mtemp;
+		else
+			dlist_push_tail(&mcache->siblings, &mtemp->chain);
+		consumed += MAXALIGN(sz);
+	}
+	pg_atomic_add_fetch_u64(&arrow_metadata_state->consumed, consumed);
+
+	return mcache;
+}
+/*
+ * arrowLookupOrBuildMetadataCache
+ */
+List *
+arrowLookupOrBuildMetadataCache(File fdesc)
 {
 	MetadataCacheKey key;
-	uint32			hash, index;
-	dlist_head	   *slot;
-	dlist_iter		iter, __iter;
-	struct stat		stat_buf;
-	List		   *result = NIL;
+	struct stat	stat_buf;
+	uint32		hash;
+	uint32		index;
+	LWLock	   *lock;
+	dlist_head *slot;
+	dlist_iter	iter1, iter2;
+	bool		has_exclusive = false;
+	List	   *rb_state_list = NIL;
 
 	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", fname);
+		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
 
 	memset(&key, 0, sizeof(key));
-	key.st_dev		= stat_buf.st_dev;
-	key.st_ino		= stat_buf.st_ino;
+	key.st_dev	= stat_buf.st_dev;
+	key.st_ino	= stat_buf.st_ino;
 	hash = hash_any((unsigned char *)&key, sizeof(key));
-	index = hash % arrow_metadata_state->nslots;
+	index = hash % ARROW_METADATA_HASH_NSLOTS;
+	lock = &arrow_metadata_state->lock_slots[index];
 	slot = &arrow_metadata_state->hash_slots[index];
-	LWLockAcquire(&arrow_metadata_state->lock, LW_EXCLUSIVE);
-	dlist_foreach(iter, slot)
+
+	LWLockAcquire(lock, LW_SHARED);
+retry:
+	dlist_foreach(iter1, slot)
 	{
 		arrowMetadataCache *mcache
-			= dlist_container(arrowMetadataCache, chain, iter.cur);
-
+			= dlist_container(arrowMetadataCache, chain, iter1.cur);
 		if (mcache->hash == hash &&
 			mcache->stat_buf.st_dev == stat_buf.st_dev &&
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
@@ -3483,218 +3621,61 @@ arrowLookupMetadataCache(const char *fname, File fdesc)
 			if (mcache->stat_buf.st_mtime < stat_buf.st_mtime ||
 				mcache->stat_buf.st_ctime < stat_buf.st_ctime)
 			{
-				char	buf1[50], buf2[50], buf3[50], buf4[50];
+				char	buf1[64], buf2[64], buf3[64], buf4[64];
 
-				arrowInvalidateMetadataCache(&stat_buf);
-				elog(DEBUG2, "arrow_fdw: metadata cache for '%s' (m=%s c=%s) is older than the file (m=%s c=%s), so invalidated",
-					 fname,
+				if (!has_exclusive)
+				{
+					LWLockRelease(lock);
+					LWLockAcquire(lock, LW_EXCLUSIVE);
+					has_exclusive = true;
+					goto retry;
+				}
+				elog(DEBUG2, "arrow_fdw: metadata cache for '%s' (m=%s c=%s) is older than the latest file (m=%s c=%s), so invalidated",
+					 FilePathName(fdesc),
 					 ctime_r(&mcache->stat_buf.st_mtime, buf1),
 					 ctime_r(&mcache->stat_buf.st_ctime, buf2),
 					 ctime_r(&stat_buf.st_mtime, buf3),
 					 ctime_r(&stat_buf.st_ctime, buf4));
-				result = NIL;
-				goto out;
+				arrowInvalidateMetadataCache(mcache, true);
+				break;
 			}
-			rbstate = makeRecordBatchStateFromCache(mcache,
-													fname, fdesc);
-			result = list_make1(rbstate);
-			dlist_foreach (__iter, &mcache->siblings)
+			/*
+			 * Ok, arrow file metadata cache found and still valid
+			 */
+			rbstate = makeRecordBatchStateFromCache(mcache, fdesc);
+			rb_state_list = list_make1(rbstate);
+			dlist_foreach (iter2, &mcache->siblings)
 			{
 				arrowMetadataCache *__mcache
-					= dlist_container(arrowMetadataCache, chain, __iter.cur);
-				rbstate = makeRecordBatchStateFromCache(__mcache,
-														fname, fdesc);
-				result = lappend(result, rbstate);
+					= dlist_container(arrowMetadataCache, chain, iter2.cur);
+				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc);
+				rb_state_list = lappend(rb_state_list, rbstate);
 			}
-			dlist_move_head(slot, &mcache->lru_chain);
-			break;
+			SpinLockAcquire(&arrow_metadata_state->lru_lock);
+			dlist_move_head(&arrow_metadata_state->lru_list,
+							&mcache->lru_chain);
+			SpinLockRelease(&arrow_metadata_state->lru_lock);
+			LWLockRelease(lock);
+
+			return rb_state_list;
 		}
 	}
-	elog(DEBUG2, "arrow_fdw: metadata cache for '%s'%s found", fname,
-		 result == NIL ? " not" : "");
-out:
-	LWLockRelease(&arrow_metadata_state->lock);
-	return result;
-}
 
-static void
-arrowUpdateMetadataCache(List *rbstateList)
-{
-	MetadataCacheKey key;
-	arrowMetadataCache *mcache;
-	dlist_head		free_list;
-	dlist_head	   *slot;
-	dlist_node	   *dnode;
-	dlist_iter		iter;
-	ListCell	   *lc;
-	const char	   *fname;
-	uint32			hash, index;
-	int				nitems;
-	char			buf1[50], buf2[50];
-	RecordBatchState *rbstate;
-
-	LWLockAcquire(&arrow_metadata_state->lock, LW_EXCLUSIVE);
-	/* check duplicated entry */
-	rbstate = linitial(rbstateList);
-	fname = rbstate->fname;
-	memset(&key, 0, sizeof(key));
-	key.st_dev = rbstate->stat_buf.st_dev;
-	key.st_ino = rbstate->stat_buf.st_ino;
-	hash = hash_any((unsigned char *)&key, sizeof(key));
-	index = hash % arrow_metadata_state->nslots;
-	slot = &arrow_metadata_state->hash_slots[index];
-	dlist_foreach (iter, slot)
-	{
-		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
-
-		if (mcache->hash == hash &&
-			mcache->stat_buf.st_dev == rbstate->stat_buf.st_dev &&
-			mcache->stat_buf.st_ino == rbstate->stat_buf.st_ino)
-		{
-			if (mcache->stat_buf.st_mtime >= rbstate->stat_buf.st_mtime &&
-				mcache->stat_buf.st_ctime >= rbstate->stat_buf.st_ctime)
-			{
-				elog(DEBUG2, "arrow_fdw: metadata cache for '%s' is already built at (m=%s c=%s)",
-					 fname,
-					 ctime_r(&mcache->stat_buf.st_mtime, buf1),
-					 ctime_r(&mcache->stat_buf.st_ctime, buf2));
-				goto out;	/* already built */
-			}
-			/* invalidation of old entries, prior to build new ones */
-			arrowInvalidateMetadataCache(&rbstate->stat_buf);
-			break;
-		}
-	}
 	/*
-	 * reclaim free entries
+	 * Hmm... no valid metadata cache was not found, so build a new entry
+	 * under the exclusive lock on the arrow file.
 	 */
-	nitems = list_length(rbstateList);
-	if (nitems > arrow_metadata_state->nitems / 4)
+	if (!has_exclusive)
 	{
-		elog(DEBUG2, "arrow_fdw: number of RecordBatch in '%s' is too large (%u of total %u cache items)",
-			 fname, nitems, arrow_metadata_state->nitems);
-		goto out;	/* it will consume too large entries */
+		LWLockRelease(lock);
+		LWLockAcquire(lock, LW_EXCLUSIVE);
+		has_exclusive = true;
+		goto retry;
 	}
-	/* # of columns too large, so unable to cache metadata */
-    if (rbstate->ncols > arrow_metadata_cache_width)
+	else
 	{
-		elog(DEBUG2, "arrow_fdw: file '%s' contains too much columns larger than unit size of metadata cache entry size (%d)",
-			 fname, arrow_metadata_cache_width);
-		goto out;
-	}
-
-	dlist_init(&free_list);
-	while (nitems > 0)
-	{
-		if (!dlist_is_empty(&arrow_metadata_state->free_list))
-		{
-			/* pick up a free entry */
-			dnode = dlist_pop_head_node(&arrow_metadata_state->free_list);
-			dlist_push_tail(&free_list, dnode);
-			nitems--;
-		}
-		else
-		{
-			/* we have no free entry, so reclaim one by LRU */
-			dnode = dlist_tail_node(&arrow_metadata_state->lru_list);
-			dlist_delete(dnode);
-			mcache = dlist_container(arrowMetadataCache, lru_chain, dnode);
-			dlist_delete(&mcache->chain);
-
-			while (!dlist_is_empty(&mcache->siblings))
-			{
-				arrowMetadataCache *mtemp;
-
-				dnode = dlist_pop_head_node(&mcache->siblings);
-				mtemp = dlist_container(arrowMetadataCache, chain, dnode);
-				Assert(dlist_is_empty(&mtemp->siblings));
-				Assert(mtemp->lru_chain.prev == NULL &&
-					   mtemp->lru_chain.next == NULL);
-				memset(mtemp, 0, arrowMetadataCacheSize);
-				dlist_push_tail(&arrow_metadata_state->free_list,
-								&mtemp->chain);
-			}
-			memset(mcache, 0, arrowMetadataCacheSize);
-			dlist_push_tail(&arrow_metadata_state->free_list,
-							&mcache->chain);
-		}
-	}
-	/* copy the RecordBatchState to metadata cache */
-	mcache = NULL;
-	foreach (lc, rbstateList)
-	{
-		RecordBatchState   *rbstate = lfirst(lc);
-		arrowMetadataCache *mtemp;
-
-		dnode = dlist_pop_head_node(&free_list);
-		mtemp = dlist_container(arrowMetadataCache, chain, dnode);
-
-		memset(mtemp, 0, offsetof(arrowMetadataCache, fstate));
-		dlist_init(&mtemp->siblings);
-		memcpy(&mtemp->stat_buf, &rbstate->stat_buf, sizeof(struct stat));
-		mtemp->hash      = hash;
-		mtemp->rb_index  = rbstate->rb_index;
-		mtemp->rb_offset = rbstate->rb_offset;
-		mtemp->rb_length = rbstate->rb_length;
-		mtemp->rb_nitems = rbstate->rb_nitems;
-		mtemp->ncols     = rbstate->ncols;
-		mtemp->nfields   =
-			copyMetadataFieldCache(mtemp->fstate,
-								   mtemp->fstate + arrow_metadata_cache_width,
-								   rbstate->ncols,
-								   rbstate->columns);
-		if (mtemp->nfields < 0)
-		{
-			/*
-			 * Unable to copy the private RecordBatchState on the shared cache
-			 * if number of attributes (including sub-fields) is larger then
-			 * the arrow_metadata_cache_width configuration.
-			 */
-			dlist_push_tail(&arrow_metadata_state->free_list,
-							&mtemp->chain);
-			while (!dlist_is_empty(&free_list))
-			{
-				dnode = dlist_pop_head_node(&free_list);
-				dlist_push_tail(&arrow_metadata_state->free_list, dnode);
-			}
-			Assert(!mcache);
-			elog(DEBUG2, "arrow_fdw: '%s' cannot have metadata cache because of number of attributes; we recommend to increase 'arrow_metadata_cache_width'",
-				 fname);
-			goto out;
-		}
-
-		if (!mcache)
-			mcache = mtemp;
-		else
-			dlist_push_tail(&mcache->siblings, &mtemp->chain);
-	}
-	dlist_push_head(slot, &mcache->chain);
-	dlist_push_head(&arrow_metadata_state->lru_list,
-					&mcache->lru_chain);
-	elog(DEBUG2, "arrow_fdw: metadata cache for '%s' is built (dev=%u:%u, ino=%lu, m=%s, c=%s)",
-		 fname,
-		 major(mcache->stat_buf.st_dev),
-		 minor(mcache->stat_buf.st_dev),
-		 (cl_ulong)mcache->stat_buf.st_ino,
-		 ctime_r(&mcache->stat_buf.st_mtime, buf1),
-		 ctime_r(&mcache->stat_buf.st_ctime, buf2));
-out:
-	LWLockRelease(&arrow_metadata_state->lock);
-}
-
-/*
- * arrowLookupOrBuildMetadataCache
- */
-List *
-arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
-{
-	List   *rb_cached;
-
-	rb_cached = arrowLookupMetadataCache(fname, fdesc);
-	if (rb_cached == NIL)
-	{
-		ArrowFileInfo af_info;
-		int			index;
+		ArrowFileInfo	af_info;
+		arrowMetadataCache *mcache;
 
 		readArrowFileDesc(FileGetRawDesc(fdesc), &af_info);
 		if (af_info.dictionaries != NULL)
@@ -3702,7 +3683,8 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 		Assert(af_info.footer._num_dictionaries == 0);
 
 		if (af_info.recordBatches == NULL)
-			elog(ERROR, "arrow file '%s' contains no RecordBatch", fname);
+			elog(ERROR, "arrow file '%s' contains no RecordBatch",
+				 FilePathName(fdesc));
 		Assert(af_info.footer._num_recordBatches > 0);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
@@ -3714,16 +3696,30 @@ arrowLookupOrBuildMetadataCache(const char *fname, File fdesc)
 
 			rb_state = makeRecordBatchState(&af_info.footer.schema,
 											block, rbatch);
-			rb_state->fname = fname;
 			rb_state->fdesc = fdesc;
-			if (fstat(FileGetRawDesc(fdesc), &rb_state->stat_buf) != 0)
-				elog(ERROR, "failed on stat('%s'): %m", fname);
+			memcpy(&rb_state->stat_buf, &stat_buf, sizeof(struct stat));
 			rb_state->rb_index = index;
-			rb_cached = lappend(rb_cached, rb_state);
+			rb_state_list = lappend(rb_state_list, rb_state);
 		}
-		arrowUpdateMetadataCache(rb_cached);
+		/* try to build a metadata cache for further references */
+		mcache = __arrowBuildMetadataCache(rb_state_list, hash);
+		if (mcache)
+		{
+			dlist_push_head(slot, &mcache->chain);
+			SpinLockAcquire(&arrow_metadata_state->lru_lock);
+            dlist_push_head(&arrow_metadata_state->lru_list,
+							&mcache->lru_chain);
+			SpinLockRelease(&arrow_metadata_state->lru_lock);
+		}
 	}
-	return rb_cached;
+	LWLockRelease(lock);
+	/*
+	 * reclaim unreferenced metadata cache entries based on LRU, if shared-
+	 * memory consumption exceeds the configured threshold.
+	 */
+	arrowReclaimMetadataCache();
+
+	return rb_state_list;
 }
 
 /*
@@ -4121,55 +4117,25 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 static void
 pgstrom_startup_arrow_fdw(void)
 {
-	size_t		head_sz, body_sz, trun_sz;
-	bool		found;
+	bool	found;
+	int		i;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
-	head_sz = MAXALIGN(sizeof(arrowMetadataState));
-	body_sz = ((size_t)arrow_metadata_cache_size_kb << 10);
-	trun_sz = MAXALIGN(sizeof(arrowTruncateLog))*ARROT_TRUNCATE_LOG_MAXITEMS;
-
-	arrow_metadata_state = ShmemInitStruct("arrow_metadata_state",
-										   head_sz + body_sz + trun_sz,
-										   &found);
+	arrow_metadata_state =
+		ShmemInitStruct("arrow_metadata_state",
+						MAXALIGN(sizeof(arrowMetadataState)),
+						&found);
 	if (!IsUnderPostmaster)
 	{
-		arrowMetadataCache *mcache;
-		arrowTruncateLog *tlog;
-		size_t		i, nitems;
-
-		nitems = body_sz / arrowMetadataCacheSize;
-		if (nitems < 100)
-			elog(ERROR, "pg_strom.arrow_metadata_cache_size is too small, or pg_strom.arrow_metadata_cache_num_columns is too large");
-
-		LWLockInitialize(&arrow_metadata_state->lock, -1);
-		arrow_metadata_state->nslots = ARROW_METADATA_HASH_NSLOTS;
-		dlist_init(&arrow_metadata_state->free_list);
-		for (i=0; i < nitems; i++)
+		SpinLockInit(&arrow_metadata_state->lru_lock);
+		dlist_init(&arrow_metadata_state->lru_list);
+		pg_atomic_init_u64(&arrow_metadata_state->consumed, 0UL);
+		for (i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
+		{
+			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
-		dlist_init(&arrow_metadata_state->truncate_free_list);
-		dlist_init(&arrow_metadata_state->truncate_pending_list);
-
-		mcache = (arrowMetadataCache *)
-			((char *)arrow_metadata_state + head_sz);
-		for (i=0; i < nitems; i++)
-		{
-			memset(mcache, 0, sizeof(arrowMetadataCache));
-			dlist_push_tail(&arrow_metadata_state->free_list,
-							&mcache->chain);
-			mcache = (arrowMetadataCache *)
-				((char *)mcache + arrowMetadataCacheSize);
-		}
-
-		tlog = (arrowTruncateLog *)
-			((char *)arrow_metadata_state + head_sz + body_sz);
-		for (i=0; i < ARROT_TRUNCATE_LOG_MAXITEMS; i++, tlog++)
-		{
-			memset(tlog, 0, sizeof(arrowTruncateLog));
-			dlist_push_tail(&arrow_metadata_state->truncate_free_list,
-							&tlog->chain);
 		}
 	}
 }
@@ -4181,7 +4147,6 @@ void
 pgstrom_init_arrow_fdw(void)
 {
 	FdwRoutine *r = &pgstrom_arrow_fdw_routine;
-	size_t		sz;
 
 	memset(r, 0, sizeof(FdwRoutine));
 	NodeSetTag(r, T_FdwRoutine);
@@ -4232,23 +4197,13 @@ pgstrom_init_arrow_fdw(void)
 							"size of shared metadata cache for arrow files",
 							NULL,
 							&arrow_metadata_cache_size_kb,
+							131072,		/* 128MB */
 							32768,		/* 32MB */
-							1024,		/* 1MB */
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-
-	DefineCustomIntVariable("arrow_fdw.metadata_cache_width",
-							"max number of columns on metadata cache entry for arrow files",
-							NULL,
-							&arrow_metadata_cache_width,
-							80,		/* up to 80 columns */
-							10,
-							SHRT_MAX,
-							PGC_POSTMASTER,
-                            GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-                            NULL, NULL, NULL);
+	arrow_metadata_cache_size = (size_t)arrow_metadata_cache_size_kb << 10;
 
 	/*
 	 * Debug option to hint number of rows
@@ -4277,10 +4232,7 @@ pgstrom_init_arrow_fdw(void)
 							NULL, NULL, NULL);
 
 	/* shared memory size */
-	sz = MAXALIGN(sizeof(arrowMetadataState)) +
-		((size_t)arrow_metadata_cache_size_kb << 10) +
-		MAXALIGN(sizeof(arrowTruncateLog)) * ARROT_TRUNCATE_LOG_MAXITEMS;
-	RequestAddinShmemSpace(sz);
+	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 

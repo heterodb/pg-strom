@@ -988,7 +988,7 @@ extern void pgstrom_init_gputasks(void);
  */
 extern Size	nvme_strom_threshold(void);
 extern int	nvme_strom_ioctl(int cmd, void *arg);
-extern int	GetOptimalGpuForFile(const char *fname, File fdesc);
+extern int	GetOptimalGpuForFile(File fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
 									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,

@@ -350,7 +350,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	else
 	{
 		memcpy(&temp.value, addr, sizeof(Int128_t));
-		temp.precision = cmeta->attopts.decimal.precision;
+		temp.precision = cmeta->attopts.decimal.scale;
 		temp.isnull = false;
 
 		result = pg_numeric_normalize(temp);
