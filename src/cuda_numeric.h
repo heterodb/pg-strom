@@ -310,7 +310,7 @@ __Int128_div(Int128_t x, cl_long a, cl_long *p_mod)
  * less mathmatical operation, we assume most of numeric usage can be stored
  * within 128bit fixed-point number; that is compatible to Decimal type in
  * Apache Arrow.
- * Internal data format (pg_numeric_t) has 128bit value and precision (16bit).
+ * Internal data format (pg_numeric_t) has 128bit value and weight (16bit).
  * Function that handles NUMERIC data type can aise CPU-FALLBACKed error,
  * if it detects overflow during calculation.
  */
@@ -318,7 +318,7 @@ __Int128_div(Int128_t x, cl_long a, cl_long *p_mod)
 #define PG_NUMERIC_TYPE_DEFINED
 typedef struct {
 	Int128_t	value;		/* 128bit value */
-	cl_short	precision;
+	cl_short	weight;
 	cl_bool		isnull;
 } pg_numeric_t;
 STROMCL_EXTERNAL_VARREF_TEMPLATE(numeric)

@@ -1111,21 +1111,13 @@ extern pgstrom_data_store *__PDS_clone(pgstrom_data_store *pds,
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
 
-extern size_t	KDS_calculateHeadSize(TupleDesc tupdesc, bool has_attnames);
-#if 0
-extern size_t	KDS_calculateRowSize(TupleDesc tupdesc,
-									 size_t nitems, size_t dataLen);
-extern size_t	KDS_calculateHashSize(TupleDesc tupdesc,
-									  size_t nitems, size_t dataLen);
-extern size_t	KDS_calculateSlotSz(TupleDesc tupdesc,
-									size_t nitems);
-#endif
+extern size_t	KDS_calculateHeadSize(TupleDesc tupdesc);
+
 extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
 								   int format,
-								   uint nrooms,
-								   bool has_attnames);
+								   uint nrooms);
 
 extern pgstrom_data_store *__PDS_create_row(GpuContext *gcontext,
 											TupleDesc tupdesc,

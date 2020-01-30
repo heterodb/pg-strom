@@ -1193,9 +1193,9 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	CUresult			rc;
 
 	/* setup KDS and I/O-vector */
-	head_sz = KDS_calculateHeadSize(tupdesc, false);
+	head_sz = KDS_calculateHeadSize(tupdesc);
 	kds = alloca(head_sz);
-	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0, false);
+	init_kernel_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW, 0);
 	kds->nitems = rb_state->rb_nitems;
 	kds->nrooms = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);

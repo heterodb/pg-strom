@@ -2095,7 +2095,7 @@ gpuscan_create_task(GpuScanState *gss,
 			Assert(pds_src->kds.nrows_per_block > 0);
 			ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
 		}
-		length = KDS_calculateHeadSize(scan_tupdesc, false) +
+		length = KDS_calculateHeadSize(scan_tupdesc) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
 			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
 		length = Max3(length, pds_src->kds.length, 8<<20);

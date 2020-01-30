@@ -825,6 +825,7 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 				offset = TYPEALIGN(cmeta.attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
 				offset = TYPEALIGN(cmeta.attalign, offset);
+
 			/* TODO: overrun checks here */
 			addr = ((char *) htup + offset);
 			if (i == colidx)

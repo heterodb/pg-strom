@@ -6953,7 +6953,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 
 		/* expand DSM on demand */
 		dsm_length = shared_mmap_length(seg);
-		kds_head_sz = KDS_calculateHeadSize(ps_desc, false);
+		kds_head_sz = KDS_calculateHeadSize(ps_desc);
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
 			size_t	new_length = TYPEALIGN(BLCKSZ, (3 * dsm_length) / 2);
@@ -6969,8 +6969,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 							   (istate->hash_inner_keys != NIL
 								? KDS_FORMAT_HASH
 								: KDS_FORMAT_ROW),
-							   UINT_MAX,
-							   false);
+							   UINT_MAX);
 		h_kmrels->chunks[i].chunk_offset = kmrels_usage;
 		if (istate->hash_inner_keys != NIL)
 			gpujoin_inner_hash_preload(istate, seg, kds, kmrels_usage);

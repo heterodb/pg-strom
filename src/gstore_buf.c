@@ -732,8 +732,7 @@ GpuStoreBufferCopyToKDS(kern_data_store *kds,
 						   tupdesc,
 						   SIZE_MAX,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
-						   nrooms,
-						   true);
+						   nrooms);
 	Assert(gs_buffer->nattrs == tupdesc->natts);
 
 	pos = KERN_DATA_STORE_BODY(kds);
@@ -1461,7 +1460,7 @@ GpuStoreBufferEstimateSize(Relation frel, GpuStoreBuffer *gs_buffer,
 		   gs_buffer->nattrs == tupdesc->natts);
 	if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
 	{
-		rawsize = KDS_calculateHeadSize(tupdesc, true);
+		rawsize = KDS_calculateHeadSize(tupdesc);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);

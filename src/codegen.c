@@ -538,7 +538,7 @@ pg_numeric_devtype_hashfunc(devtype_info *dtype, Datum datum)
 			 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
 
 	return hash_any((cl_uchar *)&temp.value,
-					offsetof(pg_numeric_t, precision) + sizeof(cl_short));
+					offsetof(pg_numeric_t, weight) + sizeof(cl_short));
 }
 
 static cl_uint

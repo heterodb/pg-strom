@@ -803,6 +803,9 @@ typedef struct {
 	cl_ushort		idx_subattrs;
 	cl_ushort		num_subattrs;
 
+	/* column name */
+	NameData		attname;
+
 	/*
 	 * (only arrow format)
 	 * @attoptions keeps extra information of Apache Arrow type. Unlike
@@ -868,8 +871,6 @@ typedef struct {
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
-	cl_char			has_attnames; /* true, if attname array exists next to
-								   * to the colmeta array */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
@@ -944,23 +945,8 @@ __kds_unpack(cl_uint offset)
 STATIC_INLINE(size_t)
 KERN_DATA_STORE_HEAD_LENGTH(kern_data_store *kds)
 {
-	size_t	headsz = STROMALIGN(offsetof(kern_data_store,
-										 colmeta[kds->nr_colmeta]));
-	if (kds->has_attnames)
-		headsz += STROMALIGN(sizeof(NameData) * kds->nr_colmeta);
-	return headsz;
-}
-/* attname array, if any */
-STATIC_INLINE(NameData *)
-KERN_DATA_STORE_ATTNAMES(kern_data_store *kds)
-{
-	size_t	offset;
-
-	if (!kds->has_attnames)
-		return NULL;
-	offset = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[kds->nr_colmeta]));
-	return (NameData *)((char *)kds + offset);
+	return STROMALIGN(offsetof(kern_data_store,
+							   colmeta[kds->nr_colmeta]));
 }
 /* Base address of the data body */
 STATIC_INLINE(char *)

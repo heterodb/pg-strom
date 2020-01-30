@@ -125,13 +125,13 @@ pg_numeric_normalize(pg_numeric_t num)
 	{
 #ifdef HAVE_INT128
 		if (num.value.ival == 0)
-			num.precision = 0;
+			num.weight = 0;
 		else
 		{
 			while (num.value.ival % 10 == 0)
 			{
 				num.value.ival /= 10;
-				num.precision--;
+				num.weight--;
 			}
 		}
 #else
@@ -139,7 +139,7 @@ pg_numeric_normalize(pg_numeric_t num)
 		if (num.value.hi == 0 &&
 			num.value.lo == 0)
 		{
-			num.precision = 0;
+			num.weight = 0;
 		}
 		else
 		{
@@ -151,7 +151,7 @@ pg_numeric_normalize(pg_numeric_t num)
 				temp = __Int128_div(num.value, 10, &mod);
 				if (mod != 0)
 					break;
-				num.precision--;
+				num.weight--;
 				num.value = temp;
 			}
 		}
@@ -208,8 +208,8 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 		/* sign of the value */
 		if (NUMERIC_SIGN(vl_datum) == NUMERIC_NEG)
 			result.value = __Int128_inverse(result.value);
-		/* precision */
-		result.precision = PG_DEC_DIGITS * (ndigits - weight);
+		/* weight */
+		result.weight = PG_DEC_DIGITS * (ndigits - weight);
 	}
 	return pg_numeric_normalize(result);
 }
@@ -217,48 +217,48 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum)
 /*
  * pg_numeric_to_varlena
  *
- * It transforms a pair of supplied precision and Int128_t value into
+ * It transforms a pair of supplied weight and Int128_t value into
  * numeric of PostgreSQL representation; as a form varlena on the vl_buffer.
  * Caller is responsible vl_buffer has enough space more than
  * sizeof(NumericData). Once this function makes a varlena datum on the
  * buffer, it returns total length of the written data.
  */
 PUBLIC_FUNCTION(cl_uint)
-pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
+pg_numeric_to_varlena(char *vl_buffer, cl_short weight, Int128_t value)
 {
 	NumericData	   *numData = (NumericData *)vl_buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
 	NumericDigit	n_data[PG_MAX_DATA];
 	int				ndigits;
 	cl_uint			len;
-	cl_ushort		n_header = (Max(precision, 0) & NUMERIC_DSCALE_MASK);
+	cl_ushort		n_header = (Max(weight, 0) & NUMERIC_DSCALE_MASK);
 	cl_bool			is_negative = (__Int128_sign(value) < 0);
 
 	if (is_negative)
 		value = __Int128_inverse(value);
 
-	switch (precision % PG_DEC_DIGITS)
+	switch (weight % PG_DEC_DIGITS)
 	{
 		case 3:
 		case -1:
 			value = __Int128_mul(value, 10);
-			precision += 1;
+			weight += 1;
 			break;
 		case 2:
 		case -2:
 			value = __Int128_mul(value, 100);
-			precision += 2;
+			weight += 2;
 			break;
 		case 1:
 		case -3:
 			value = __Int128_mul(value, 1000);
-			precision += 3;
+			weight += 3;
 			break;
 		default:
 			/* ok */
 			break;
 	}
-	assert(precision % PG_DEC_DIGITS == 0);
+	assert(weight % PG_DEC_DIGITS == 0);
 
 	ndigits = 0;
 	while (__Int128_sign(value) != 0)
@@ -281,7 +281,7 @@ pg_numeric_to_varlena(char *vl_buffer, cl_short precision, Int128_t value)
 		if (is_negative)
 			n_header |= NUMERIC_NEG;
 		numBody->n_sign_dscale = n_header;
-		numBody->n_weight = ndigits - (precision / PG_DEC_DIGITS) - 1;
+		numBody->n_weight = ndigits - (weight / PG_DEC_DIGITS) - 1;
 
 		SET_VARSIZE(numData, len);
 	}
@@ -349,8 +349,12 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 		result.isnull = true;
 	else
 	{
+		/*
+		 * Note that Decimal::scale is equivalent to numeric::weight.
+		 * It is the number of digits after the decimal point.
+		 */
 		memcpy(&temp.value, addr, sizeof(Int128_t));
-		temp.precision = cmeta->attopts.decimal.scale;
+		temp.weight = cmeta->attopts.decimal.scale;
 		temp.isnull = false;
 
 		result = pg_numeric_normalize(temp);
@@ -406,11 +410,11 @@ pg_numeric_array_from_arrow(kern_context *kcxt,
 			sz = TYPEALIGN(cmeta->attalign, sz);
 			if (dest)
 				sz += pg_numeric_to_varlena(dest + sz,
-											temp.precision,
+											temp.weight,
 											temp.value);
 			else
 				sz += pg_numeric_to_varlena(NULL,
-											temp.precision,
+											temp.weight,
 											temp.value);
 		}
 	}
@@ -438,7 +442,7 @@ pg_datum_store(kern_context *kcxt,
 		return 0;
 	}
 	pg_numeric_to_varlena(res,
-						  datum.precision,
+						  datum.weight,
 						  datum.value);
 	dclass = DATUM_CLASS__NORMAL;
 	value  = PointerGetDatum(res);
@@ -474,7 +478,7 @@ pg_comp_hash(kern_context *kcxt, pg_numeric_t datum)
 		return 0;
 
 	return pg_hash_any((cl_uchar *)&datum.value,
-					   offsetof(pg_numeric_t, precision) + sizeof(cl_short));
+					   offsetof(pg_numeric_t, weight) + sizeof(cl_short));
 }
 
 /*
@@ -486,7 +490,7 @@ numeric_to_integer(kern_context *kcxt, pg_numeric_t arg,
 				   cl_ulong max_value, cl_bool *p_isnull)
 {
 	Int128_t	curr = arg.value;
-	int			precision = arg.precision;
+	int			weight = arg.weight;
 	bool		is_negative = false;
 	cl_long		mod;
 
@@ -495,17 +499,17 @@ numeric_to_integer(kern_context *kcxt, pg_numeric_t arg,
 		is_negative = true;
 		curr = __Int128_inverse(curr);
 	}
-	while (precision > 0)
+	while (weight > 0)
 	{
-		if (precision == 1)
+		if (weight == 1)
 			curr = __Int128_add(curr, 5);	/* round of 0.x digit */
 		curr = __Int128_div(curr, 10, &mod);
-		precision--;
+		weight--;
 	}
-	while (precision < 0)
+	while (weight < 0)
 	{
 		curr = __Int128_mul(curr, 10);
-		precision++;
+		weight++;
 	}
 	/* overflow? */
 	if (curr.hi != 0 || curr.lo > max_value)
@@ -532,7 +536,7 @@ STATIC_FUNCTION(cl_double)
 numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 {
 	Int128_t	curr = arg.value;
-	cl_int		precision = arg.precision;
+	cl_int		weight = arg.weight;
 	bool		is_negative = (__Int128_sign(curr) < 0);
 	cl_ulong	fp64_mask = (~FP64_FRAC_MASK << 1);
 	cl_ulong	ival;
@@ -545,16 +549,16 @@ numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 		cl_long		mod;
 
 		curr = __Int128_div(curr, 10, &mod);
-		precision--;
+		weight--;
 	}
 	ival = curr.lo;
 	expo = FP64_FRAC_BITS;
-	while (precision > 0)
+	while (weight > 0)
 	{
 		if ((ival & fp64_mask) != 0)
 		{
 			ival /= 10;
-			precision--;
+			weight--;
 		}
 		else
 		{
@@ -562,12 +566,12 @@ numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 			expo--;
 		}
 	}
-	while (precision < 0)
+	while (weight < 0)
 	{
 		if ((ival & fp64_mask) == 0)
 		{
 			ival *= 10;
-			precision++;
+			weight++;
 		}
 		else
 		{
@@ -705,7 +709,7 @@ integer_to_numeric(kern_context *kcxt, cl_long ival)
 	pg_numeric_t	result;
 
 	result.isnull = false;
-	result.precision = 0;
+	result.weight = 0;
 	result.value.lo = ival;
 	result.value.hi = (ival < 0 ? ~0UL : 0);
 
@@ -771,7 +775,7 @@ float_to_numeric(kern_context *kcxt, cl_double fval, cl_long max_fraction)
 	}
 	result.value.hi = 0;
 	result.value.lo = frac;
-	result.precision = x;
+	result.weight = x;
 	if (sign)
 		result.value = __Int128_inverse(result.value);
 	return pg_numeric_normalize(result);
@@ -1026,15 +1030,15 @@ pgfn_numeric_add(kern_context *kcxt,
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (result.isnull)
 		return result;
-	while (arg1.precision > arg2.precision)
+	while (arg1.weight > arg2.weight)
 	{
 		arg2.value = __Int128_mul(arg2.value, 10);
-		arg2.precision++;
+		arg2.weight++;
 	}
-	while (arg1.precision < arg2.precision)
+	while (arg1.weight < arg2.weight)
 	{
 		arg1.value = __Int128_mul(arg1.value, 10);
-		arg1.precision++;
+		arg1.weight++;
 	}
 	asm volatile("add.cc.u64     %0, %2, %3;\n"
 				 "addc.u64       %1, %4, %5;\n"
@@ -1044,7 +1048,7 @@ pgfn_numeric_add(kern_context *kcxt,
 				   "l" (arg2.value.lo),
 				   "l" (arg1.value.hi),
 				   "l" (arg2.value.hi));
-	result.precision = arg1.precision;
+	result.weight = arg1.weight;
 
 	return pg_numeric_normalize(result);
 }
@@ -1096,7 +1100,7 @@ pgfn_numeric_mul(kern_context *kcxt,
 
 	if (is_negative_1 != is_negative_2)
 		result.value = __Int128_inverse(result.value);
-	result.precision = arg1.precision + arg2.precision;
+	result.weight = arg1.weight + arg2.weight;
 	return pg_numeric_normalize(result);
 }
 
@@ -1116,15 +1120,15 @@ numeric_cmp(kern_context *kcxt, pg_numeric_t arg1, pg_numeric_t arg2)
 	else if (sign1 < sign2)
 		return -1;
 	/* ok, both of arg1 and arg2 is not zero, and have same sign */
-	while (arg1.precision > arg2.precision)
+	while (arg1.weight > arg2.weight)
 	{
 		arg2.value = __Int128_mul(arg2.value, 10);
-		arg2.precision++;
+		arg2.weight++;
 	}
-	while (arg1.precision < arg2.precision)
+	while (arg1.weight < arg2.weight)
 	{
 		arg1.value = __Int128_mul(arg1.value, 10);
-		arg1.precision++;
+		arg1.weight++;
 	}
 	return __Int128_compare(arg1.value, arg2.value);
 }
