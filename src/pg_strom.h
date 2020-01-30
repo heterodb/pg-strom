@@ -183,6 +183,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <float.h>
+#include <libgen.h>
 #include <limits.h>
 #include <math.h>
 #include <sys/ioctl.h>

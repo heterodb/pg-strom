@@ -86,24 +86,30 @@ typedef struct
 	slock_t		lru_lock;
 	dlist_head	lru_list;
 	pg_atomic_uint64 consumed;
+
 	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
+	dlist_head	redo_slots[ARROW_METADATA_HASH_NSLOTS];
+	slock_t		truncate_lock;
+	dlist_head	truncate_list;
 } arrowMetadataState;
 
 /*
- * Data structures for INSERT/TRUNCATE support
+ * TRUNCATE Log
  */
-#define ARROT_TRUNCATE_LOG_MAXITEMS		4096	//!FIXME!
 typedef struct
 {
 	dlist_node	chain;
-	dev_t		st_dev;
-	dev_t		st_ino;
+	Oid			frel_oid;
 	TransactionId xid;
 	CommandId	cid;
-	uint32		file_suffix;	/* suffix number of the alternative file */
+	uint32		suffix;
+	char		pathname[FLEXIBLE_ARRAY_MEMBER];
 } arrowTruncateLog;
 
+/*
+ * REDO Log for INSERT (shared structure)
+ */
 typedef struct
 {
 	dev_t		st_dev;
@@ -129,7 +135,6 @@ typedef struct
  */
 struct ArrowFdwState
 {
-//	List	   *filesList;
 	List	   *fdescList;
 	Bitmapset  *referenced;
 	pg_atomic_uint32   *rbatch_index;
@@ -887,7 +892,6 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 	Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE &&
 		   memcmp(GetFdwRoutineForRelation(relation, false),
 				  &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0);
-
 	/* expand 'referenced' if it has whole-row reference */
 	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, outer_refs))
 		whole_row_ref = true;
@@ -1892,8 +1896,7 @@ ArrowPlanForeignModify(PlannerInfo *root,
 	if (!writable)
 		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
 			 get_rel_name(rte->relid));
-	if (list_length(filesList) != 1)
-		elog(ERROR, "Bug? there are multiple files on bahalf of the writable arrow_fdw foreign table: %s", get_rel_name(rte->relid));
+	Assert(list_length(filesList) == 1);
 
 	return NIL;
 }
@@ -1914,9 +1917,7 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 	const char	   *filename;
 	File			file;
 
-	if (list_length(filesList) != 1)
-		elog(ERROR, "multiple arrow files are on behalf of foreign table '%s'",
-			 RelationGetRelationName(frel));
+	Assert(list_length(filesList) == 1);
 	filename = strVal(linitial(filesList));
 
 	LockRelation(frel, AccessExclusiveLock);
@@ -3342,18 +3343,6 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
 
 /*
- * pgstrom_arrow_fdw_truncate
- */
-Datum
-pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "pgstrom_arrow_fdw_truncate is not implemented now");
-	PG_RETURN_VOID();
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
-
-
-/*
  * arrowInvalidateMetadataCache
  *
  * NOTE: caller must have lock_slots[] with EXCLUSIVE mode
@@ -3683,9 +3672,8 @@ retry:
 		Assert(af_info.footer._num_dictionaries == 0);
 
 		if (af_info.recordBatches == NULL)
-			elog(ERROR, "arrow file '%s' contains no RecordBatch",
+			elog(DEBUG2, "arrow file '%s' contains no RecordBatch",
 				 FilePathName(fdesc));
-		Assert(af_info.footer._num_recordBatches > 0);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
 			RecordBatchState *rb_state;
@@ -4051,6 +4039,155 @@ applyArrowWriteRedoLog(arrowWriteRedoLog *redo)
 }
 
 /*
+ * TRUNCATE support
+ */
+static void
+__arrowExecTruncateRelation(Relation frel)
+{
+	TupleDesc	tupdesc = RelationGetDescr(frel);
+	Oid			frel_oid = RelationGetRelid(frel);
+	ForeignTable *ft = GetForeignTable(frel_oid);
+	List	   *filesList;
+	SQLtable   *table;
+	const char *orig_name;
+	const char *dir_name;
+	const char *file_name;
+	int			dirfd = -1;
+	int			fdesc = -1;
+	int			j, nbytes;
+	uint32		suffix;
+	char		path[MAXPGPATH];
+	bool		writable;
+
+	filesList = __arrowFdwExtractFilesList(ft->options,
+										   NULL,
+										   &writable,
+										   NULL);
+	if (!writable)
+		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
+			 RelationGetRelationName(frel));
+	Assert(list_length(filesList) == 1);
+	orig_name = strVal(linitial(filesList));
+
+	/* build SQLtable to write out schema */
+	table = palloc0(offsetof(SQLtable, columns[tupdesc->natts]));
+	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
+	table->nfields = tupdesc->natts;
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+		__setupArrowWriteStateField(table,
+									&table->columns[j],
+									NameStr(attr->attname),
+									attr->atttypid,
+									attr->atttypmod);
+	}
+
+	/* open directory of the arrow file (must have write permission) */
+	dir_name = dirname(pstrdup(orig_name));
+	file_name = basename(pstrdup(orig_name));
+	dirfd = open(dir_name, O_RDONLY | O_DIRECTORY);
+	if (dirfd < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open directory '%s': %m", dir_name)));
+	PG_TRY();
+	{
+		arrowTruncateLog *tlog;
+
+		/* create an empty file */
+		do {
+			suffix = random();
+			snprintf(path, sizeof(path), "%s.%u.backup", file_name, suffix);
+			fdesc = openat(dirfd, path, O_RDWR | O_CREAT | O_EXCL, 0600);
+			if (fdesc < 0)
+			{
+				if (errno != EEXIST)
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not create a file '%s' at '%s': %m",
+									path, dir_name)));
+			}
+		} while (fdesc < 0);
+
+		/* swap two files atomically */
+		if (renameat2(dirfd, file_name,
+					  dirfd, path, RENAME_EXCHANGE) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("failed to swap '%s' and '%s' at '%s': %m",
+							file_name, path, dir_name)));
+
+		/* write out an empty arrow file */
+		table->filename = path;
+		table->fdesc = fdesc;
+		nbytes = __write(table->fdesc, "ARROW1\0\0", 8);
+		if (nbytes != 8)
+			elog(ERROR, "failed on __write('%s'): %m", path);
+		writeArrowSchema(table);
+		writeArrowFooter(table);
+
+		/* create truncate log entry */
+		tlog = MemoryContextAlloc(TopSharedMemoryContext,
+								  offsetof(arrowTruncateLog,
+										   pathname[strlen(orig_name)+1]));
+		tlog->frel_oid = frel_oid;
+		tlog->xid = GetCurrentTransactionId();
+		tlog->cid = GetCurrentCommandId(true);
+		tlog->suffix = suffix;
+		strcpy(tlog->pathname, orig_name);
+
+		SpinLockAcquire(&arrow_metadata_state->truncate_lock);
+		dlist_push_head(&arrow_metadata_state->truncate_list,
+						&tlog->chain);
+		SpinLockRelease(&arrow_metadata_state->truncate_lock);
+	}
+	PG_CATCH();
+	{
+		if (fdesc >= 0)
+		{
+			unlinkat(dirfd, path, 0);
+			close(fdesc);
+		}
+		close(dirfd);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	close(fdesc);
+	close(dirfd);
+}
+
+/*
+ * pgstrom_arrow_fdw_truncate
+ */
+Datum
+pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
+{
+	Oid			frel_oid = PG_GETARG_OID(0);
+	Relation	frel;
+	FdwRoutine *routine;
+
+	frel = table_open(frel_oid, AccessExclusiveLock);
+	if (frel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not arrow_fdw foreign table",
+						RelationGetRelationName(frel))));
+	routine = GetFdwRoutineForRelation(frel, false);
+	if (memcmp(routine, &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not arrow_fdw foreign table",
+						RelationGetRelationName(frel))));
+	__arrowExecTruncateRelation(frel);
+
+	table_close(frel, NoLock);
+
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
+
+/*
  * __arrowFdwXactCallback
  */
 static void
@@ -4058,28 +4195,64 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 {
 	HASH_SEQ_STATUS		seq;
 	arrowWriteRedoLog  *redo;
+	arrowTruncateLog   *tlog;
+	dlist_mutable_iter	iter;
 
 	if (curr_xid == InvalidTransactionId)
 		return;
-	if (!arrow_write_redo_log_htab)
-		return;
-	if (hash_get_num_entries(arrow_write_redo_log_htab) == 0)
-		return;
-
-	hash_seq_init(&seq, arrow_write_redo_log_htab);
-	while ((redo = hash_seq_search(&seq)) != NULL)
+	if (arrow_write_redo_log_htab &&
+		hash_get_num_entries(arrow_write_redo_log_htab) > 0)
 	{
-		if (redo->xid != curr_xid)
-			continue;
-		if (!is_commit)
-			applyArrowWriteRedoLog(redo);
-		if (redo->filename)
-			pfree(redo->filename);
-		if (redo->footer_backup)
-			pfree(redo->footer_backup);
-		hash_search(arrow_write_redo_log_htab, redo, HASH_REMOVE, NULL);
+		hash_seq_init(&seq, arrow_write_redo_log_htab);
+		while ((redo = hash_seq_search(&seq)) != NULL)
+		{
+			if (redo->xid != curr_xid)
+				continue;
+			if (!is_commit)
+				applyArrowWriteRedoLog(redo);
+			if (redo->filename)
+				pfree(redo->filename);
+			if (redo->footer_backup)
+				pfree(redo->footer_backup);
+			hash_search(arrow_write_redo_log_htab, redo, HASH_REMOVE, NULL);
+		}
 	}
-	elog(INFO, "num of REDO log = %ld", hash_get_num_entries(arrow_write_redo_log_htab));
+
+	SpinLockAcquire(&arrow_metadata_state->truncate_lock);
+	dlist_foreach_modify(iter, &arrow_metadata_state->truncate_list)
+	{
+		char		backup[MAXPGPATH];
+
+		tlog = dlist_container(arrowTruncateLog, chain, iter.cur);
+		if (tlog->xid != curr_xid)
+			continue;
+		snprintf(backup, MAXPGPATH, "%s.%u.backup",
+				 tlog->pathname, tlog->suffix);
+		if (is_commit)
+		{
+//			elog(INFO, "unlink [%s]", backup);
+			if (unlink(backup) != 0)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not remove truncated file \"%s\": %m",
+								backup),
+						 errhint("remove the \"%s\" manually", backup)));
+		}
+		else
+		{
+//			elog(INFO, "rename [%s]->[%s]", backup, tlog->pathname);
+			if (rename(backup, tlog->pathname) != 0)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not restore backup file \"%s\": %m",
+								backup),
+						 errhint("please restore \"%s\" to \"%s\" manually",
+								 backup, tlog->pathname)));
+		}
+		dlist_delete(&tlog->chain);
+		pfree(tlog);
+	}
+	SpinLockRelease(&arrow_metadata_state->truncate_lock);
 }
 
 /*
@@ -4137,6 +4310,8 @@ pgstrom_startup_arrow_fdw(void)
 			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
 		}
+		SpinLockInit(&arrow_metadata_state->truncate_lock);
+		dlist_init(&arrow_metadata_state->truncate_list);
 	}
 }
 
