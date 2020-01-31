@@ -89,10 +89,21 @@ typedef struct
 
 	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
-	dlist_head	redo_slots[ARROW_METADATA_HASH_NSLOTS];
-	slock_t		truncate_lock;
-	dlist_head	truncate_list;
+	dlist_head	insert_logs[ARROW_METADATA_HASH_NSLOTS];
 } arrowMetadataState;
+
+/*
+ * INSERT Log (shared structure)
+ */
+typedef struct
+{
+	dlist_node	chain;
+	dev_t		st_dev;
+	ino_t		st_ino;
+	TransactionId xid;
+	CommandId	cid;
+	uint32		rb_nitems;
+} arrowInsertLog;
 
 /*
  * TRUNCATE Log
@@ -100,7 +111,6 @@ typedef struct
 typedef struct
 {
 	dlist_node	chain;
-	Oid			frel_oid;
 	TransactionId xid;
 	CommandId	cid;
 	uint32		suffix;
@@ -122,6 +132,9 @@ typedef struct
 	char	   *footer_backup;
 } arrowWriteRedoLog;
 
+/*
+ * arrowWriteState
+ */
 typedef struct
 {
 	arrowWriteRedoLog *redo_log;
@@ -150,6 +163,7 @@ struct ArrowFdwState
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
+static dlist_head		arrow_truncate_logs_list;
 static HTAB			   *arrow_write_redo_log_htab = NULL;
 static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
@@ -3711,14 +3725,14 @@ retry:
 }
 
 /*
- * createArrowWriteState
+ * setupArrowSQLbufferSchema
  */
 static void
-__setupArrowWriteStateField(SQLtable *table,
-							SQLfield *column,
-							const char *attname,
-							Oid atttypid,
-                           int atttypmod)
+__setupArrowSQLbufferField(SQLtable *table,
+						   SQLfield *column,
+						   const char *attname,
+						   Oid atttypid,
+						   int atttypmod)
 {
 	HeapTuple		tup;
 	Form_pg_type	typ;
@@ -3750,11 +3764,11 @@ __setupArrowWriteStateField(SQLtable *table,
 
 		snprintf(elem_name, sizeof(elem_name), "_%s[]", attname);
 		column->element = palloc0(sizeof(SQLfield));
-		__setupArrowWriteStateField(table,
-									column->element,
-									elem_name,
-									typ->typelem,
-									-1);
+		__setupArrowSQLbufferField(table,
+								   column->element,
+								   elem_name,
+								   typ->typelem,
+								   -1);
 	}
 	else if (OidIsValid(typ->typrelid))
 	{
@@ -3767,11 +3781,11 @@ __setupArrowWriteStateField(SQLtable *table,
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute sattr = tupleDescAttr(tupdesc, j);
-			__setupArrowWriteStateField(table,
-										&column->subfields[j],
-										NameStr(sattr->attname),
-										sattr->atttypid,
-										sattr->atttypmod);
+			__setupArrowSQLbufferField(table,
+									   &column->subfields[j],
+									   NameStr(sattr->attname),
+									   sattr->atttypid,
+									   sattr->atttypmod);
 		}
 		ReleaseTupleDesc(tupdesc);
 	}
@@ -3782,13 +3796,33 @@ __setupArrowWriteStateField(SQLtable *table,
 	ReleaseSysCache(tup);
 }
 
+static void
+setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc)
+{
+	int		j;
+
+	table->nfields = tupdesc->natts;
+    for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+		__setupArrowSQLbufferField(table,
+								   &table->columns[j],
+								   NameStr(attr->attname),
+								   attr->atttypid,
+								   attr->atttypmod);
+	}
+	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
+}
+
+/*
+ * createArrowWriteState
+ */
 static arrowWriteState *
 createArrowWriteState(Relation frel, File file)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	arrowWriteState *aw_state;
 	SQLtable   *table;
-	int			j;
 
 	aw_state = palloc0(offsetof(arrowWriteState,
 								sql_table.columns[tupdesc->natts]));
@@ -3797,17 +3831,8 @@ createArrowWriteState(Relation frel, File file)
 	table = &aw_state->sql_table;
 	table->filename = FilePathName(file);
 	table->fdesc = FileGetRawDesc(file);
-	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
-	table->nfields = tupdesc->natts;
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		__setupArrowWriteStateField(table,
-									&table->columns[j],
-									NameStr(attr->attname),
-									attr->atttypid,
-									attr->atttypmod);
-	}
+	setupArrowSQLbufferSchema(table, tupdesc);
+
 	return aw_state;
 }
 
@@ -4047,15 +4072,15 @@ __arrowExecTruncateRelation(Relation frel)
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	Oid			frel_oid = RelationGetRelid(frel);
 	ForeignTable *ft = GetForeignTable(frel_oid);
+	arrowTruncateLog *tlog = NULL;
 	List	   *filesList;
 	SQLtable   *table;
-	const char *orig_name;
+	const char *path_name;
 	const char *dir_name;
 	const char *file_name;
 	int			dirfd = -1;
 	int			fdesc = -1;
-	int			j, nbytes;
-	uint32		suffix;
+	int			nbytes;
 	char		path[MAXPGPATH];
 	bool		writable;
 
@@ -4067,38 +4092,39 @@ __arrowExecTruncateRelation(Relation frel)
 		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
 			 RelationGetRelationName(frel));
 	Assert(list_length(filesList) == 1);
-	orig_name = strVal(linitial(filesList));
+	path_name = strVal(linitial(filesList));
 
 	/* build SQLtable to write out schema */
 	table = palloc0(offsetof(SQLtable, columns[tupdesc->natts]));
-	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
-	table->nfields = tupdesc->natts;
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		__setupArrowWriteStateField(table,
-									&table->columns[j],
-									NameStr(attr->attname),
-									attr->atttypid,
-									attr->atttypmod);
-	}
+	setupArrowSQLbufferSchema(table, tupdesc);
+
+	/* create arrowTruncateLog entry */
+	tlog = MemoryContextAllocZero(CacheMemoryContext,
+								  offsetof(arrowTruncateLog, pathname) +
+								  strlen(path_name) + 1);
+	tlog->xid = GetCurrentTransactionId();
+	tlog->cid = GetCurrentCommandId(true);
+	strcpy(tlog->pathname, path_name);
 
 	/* open directory of the arrow file (must have write permission) */
-	dir_name = dirname(pstrdup(orig_name));
-	file_name = basename(pstrdup(orig_name));
+	dir_name = dirname(pstrdup(path_name));
+	file_name = basename(pstrdup(path_name));
 	dirfd = open(dir_name, O_RDONLY | O_DIRECTORY);
 	if (dirfd < 0)
+	{
+		pfree(tlog);
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open directory '%s': %m", dir_name)));
+	}
+
 	PG_TRY();
 	{
-		arrowTruncateLog *tlog;
-
 		/* create an empty file */
 		do {
-			suffix = random();
-			snprintf(path, sizeof(path), "%s.%u.backup", file_name, suffix);
+			tlog->suffix = random();
+			snprintf(path, sizeof(path), "%s.%u.backup",
+					 file_name, tlog->suffix);
 			fdesc = openat(dirfd, path, O_RDWR | O_CREAT | O_EXCL, 0600);
 			if (fdesc < 0)
 			{
@@ -4110,14 +4136,6 @@ __arrowExecTruncateRelation(Relation frel)
 			}
 		} while (fdesc < 0);
 
-		/* swap two files atomically */
-		if (renameat2(dirfd, file_name,
-					  dirfd, path, RENAME_EXCHANGE) != 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("failed to swap '%s' and '%s' at '%s': %m",
-							file_name, path, dir_name)));
-
 		/* write out an empty arrow file */
 		table->filename = path;
 		table->fdesc = fdesc;
@@ -4127,20 +4145,16 @@ __arrowExecTruncateRelation(Relation frel)
 		writeArrowSchema(table);
 		writeArrowFooter(table);
 
-		/* create truncate log entry */
-		tlog = MemoryContextAlloc(TopSharedMemoryContext,
-								  offsetof(arrowTruncateLog,
-										   pathname[strlen(orig_name)+1]));
-		tlog->frel_oid = frel_oid;
-		tlog->xid = GetCurrentTransactionId();
-		tlog->cid = GetCurrentCommandId(true);
-		tlog->suffix = suffix;
-		strcpy(tlog->pathname, orig_name);
+		/* swap two files atomically */
+		if (renameat2(dirfd, file_name,
+					  dirfd, path, RENAME_EXCHANGE) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("failed to swap '%s' and '%s' at '%s': %m",
+							file_name, path, dir_name)));
 
-		SpinLockAcquire(&arrow_metadata_state->truncate_lock);
-		dlist_push_head(&arrow_metadata_state->truncate_list,
-						&tlog->chain);
-		SpinLockRelease(&arrow_metadata_state->truncate_lock);
+		/* save the arrowTruncateLog entry */
+		dlist_push_head(&arrow_truncate_logs_list, &tlog->chain);
 	}
 	PG_CATCH();
 	{
@@ -4150,6 +4164,7 @@ __arrowExecTruncateRelation(Relation frel)
 			close(fdesc);
 		}
 		close(dirfd);
+		pfree(tlog);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -4218,8 +4233,7 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 		}
 	}
 
-	SpinLockAcquire(&arrow_metadata_state->truncate_lock);
-	dlist_foreach_modify(iter, &arrow_metadata_state->truncate_list)
+	dlist_foreach_modify(iter, &arrow_truncate_logs_list)
 	{
 		char		backup[MAXPGPATH];
 
@@ -4230,7 +4244,7 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 				 tlog->pathname, tlog->suffix);
 		if (is_commit)
 		{
-//			elog(INFO, "unlink [%s]", backup);
+			elog(INFO, "unlink [%s]", backup);
 			if (unlink(backup) != 0)
 				ereport(WARNING,
 						(errcode_for_file_access(),
@@ -4240,7 +4254,7 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 		}
 		else
 		{
-//			elog(INFO, "rename [%s]->[%s]", backup, tlog->pathname);
+			elog(INFO, "rename [%s]->[%s]", backup, tlog->pathname);
 			if (rename(backup, tlog->pathname) != 0)
 				ereport(WARNING,
 						(errcode_for_file_access(),
@@ -4252,7 +4266,6 @@ __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 		dlist_delete(&tlog->chain);
 		pfree(tlog);
 	}
-	SpinLockRelease(&arrow_metadata_state->truncate_lock);
 }
 
 /*
@@ -4310,8 +4323,6 @@ pgstrom_startup_arrow_fdw(void)
 			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
 		}
-		SpinLockInit(&arrow_metadata_state->truncate_lock);
-		dlist_init(&arrow_metadata_state->truncate_list);
 	}
 }
 
@@ -4414,4 +4425,7 @@ pgstrom_init_arrow_fdw(void)
 	/* arrow transaction callback */
 	RegisterXactCallback(arrowFdwXactCallback, NULL);
 	RegisterSubXactCallback(arrowFdwSubXactCallback, NULL);
+
+	/* misc init */
+	dlist_init(&arrow_truncate_logs_list);
 }
