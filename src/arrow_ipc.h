@@ -142,7 +142,7 @@ struct SQLdictionary
 /* arrow_write.c */
 extern ssize_t	writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
-extern void		writeArrowRecordBatch(SQLtable *table);
+extern int		writeArrowRecordBatch(SQLtable *table);
 extern ssize_t	writeArrowFooter(SQLtable *table);
 extern size_t	estimateArrowBufferLength(SQLfield *column, size_t nitems);
 

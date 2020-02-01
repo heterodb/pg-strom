@@ -60,6 +60,7 @@ typedef struct
 {
 	dev_t		st_dev;
 	ino_t		st_ino;
+	uint32		hash;
 } MetadataCacheKey;
 
 typedef struct
@@ -89,47 +90,38 @@ typedef struct
 
 	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
-	dlist_head	insert_logs[ARROW_METADATA_HASH_NSLOTS];
+	dlist_head	mvcc_slots[ARROW_METADATA_HASH_NSLOTS];
 } arrowMetadataState;
 
 /*
- * INSERT Log (shared structure)
+ * MVCC state for the pending writes
  */
 typedef struct
 {
 	dlist_node	chain;
-	dev_t		st_dev;
-	ino_t		st_ino;
+	MetadataCacheKey key;
 	TransactionId xid;
 	CommandId	cid;
-	uint32		rb_nitems;
-} arrowInsertLog;
+	uint32		record_batch;
+} arrowWriteMVCCLog;
 
 /*
- * TRUNCATE Log
+ * REDO Log for INSERT/TRUNCATE
  */
 typedef struct
 {
 	dlist_node	chain;
+	MetadataCacheKey key;
 	TransactionId xid;
 	CommandId	cid;
+	char	   *pathname;
+	bool		is_truncate;
+	/* for TRUNCATE */
 	uint32		suffix;
-	char		pathname[FLEXIBLE_ARRAY_MEMBER];
-} arrowTruncateLog;
-
-/*
- * REDO Log for INSERT (shared structure)
- */
-typedef struct
-{
-	dev_t		st_dev;
-	dev_t		st_ino;
-	TransactionId xid;
-	CommandId	cid;
-	char	   *filename;
+	/* for INSERT */
 	loff_t		footer_offset;
 	size_t		footer_length;
-	char	   *footer_backup;
+	char		footer_backup[FLEXIBLE_ARRAY_MEMBER];
 } arrowWriteRedoLog;
 
 /*
@@ -137,9 +129,11 @@ typedef struct
  */
 typedef struct
 {
-	arrowWriteRedoLog *redo_log;
 	MemoryContext memcxt;
 	File		file;
+	MetadataCacheKey key;
+	uint32		hash;
+	bool		redo_log_written;
 	SQLtable	sql_table;
 } arrowWriteState;
 
@@ -163,8 +157,7 @@ struct ArrowFdwState
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
-static dlist_head		arrow_truncate_logs_list;
-static HTAB			   *arrow_write_redo_log_htab = NULL;
+static dlist_head		arrow_write_redo_list;
 static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
@@ -196,7 +189,6 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 static arrowWriteState *createArrowWriteState(Relation frel, File file);
 static void writeOutArrowRecordBatch(arrowWriteState *aw_state,
 									 bool with_footer);
-static arrowWriteRedoLog *createArrowWriteRedoLog(arrowWriteState *aw_state);
 
 Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
@@ -1510,10 +1502,13 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 static void
 readArrowFile(char *pathname, ArrowFileInfo *af_info)
 {
-    File        filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
+    File	filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
 
+	if (filp < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", pathname)));
     readArrowFileDesc(FileGetRawDesc(filp), af_info);
-
     FileClose(filp);
 }
 
@@ -1929,16 +1924,19 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	const char	   *filename;
-	File			file;
+	File			filp;
 
 	Assert(list_length(filesList) == 1);
 	filename = strVal(linitial(filesList));
 
-	LockRelation(frel, AccessExclusiveLock);
+	LockRelation(frel, ShareRowExclusiveLock);
 
-	file = PathNameOpenFile(filename, O_RDWR | PG_BINARY);
-
-	rrinfo->ri_FdwState = createArrowWriteState(frel, file);
+	filp = PathNameOpenFile(filename, O_RDWR | PG_BINARY);
+	if (filp < 0)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", filename)));
+	rrinfo->ri_FdwState = createArrowWriteState(frel, filp);
 }
 
 /*
@@ -3582,6 +3580,36 @@ __arrowBuildMetadataCache(List *rb_state_list, uint32 hash)
 
 	return mcache;
 }
+
+
+/*
+ * checkArrowRecordBatchIsVisible
+ *
+ * NOTE: It must be called under shared lock on lock_slots[]
+ */
+static bool
+checkArrowRecordBatchIsVisible(RecordBatchState *rbstate,
+							   dlist_head *mvcc_slot)
+{
+	dlist_iter		iter;
+
+	dlist_foreach(iter, mvcc_slot)
+	{
+		arrowWriteMVCCLog  *mvcc = dlist_container(arrowWriteMVCCLog,
+												   chain, iter.cur);
+		if (mvcc->key.st_dev == rbstate->stat_buf.st_dev &&
+			mvcc->key.st_ino == rbstate->stat_buf.st_ino &&
+			mvcc->record_batch == rbstate->rb_index)
+		{
+			if (TransactionIdIsCurrentTransactionId(mvcc->xid))
+				return true;
+			else
+				return false;
+		}
+	}
+	return true;
+}
+
 /*
  * arrowLookupOrBuildMetadataCache
  */
@@ -3590,13 +3618,13 @@ arrowLookupOrBuildMetadataCache(File fdesc)
 {
 	MetadataCacheKey key;
 	struct stat	stat_buf;
-	uint32		hash;
 	uint32		index;
 	LWLock	   *lock;
-	dlist_head *slot;
+	dlist_head *hash_slot;
+	dlist_head *mvcc_slot;
 	dlist_iter	iter1, iter2;
 	bool		has_exclusive = false;
-	List	   *rb_state_list = NIL;
+	List	   *results = NIL;
 
 	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
@@ -3604,23 +3632,25 @@ arrowLookupOrBuildMetadataCache(File fdesc)
 	memset(&key, 0, sizeof(key));
 	key.st_dev	= stat_buf.st_dev;
 	key.st_ino	= stat_buf.st_ino;
-	hash = hash_any((unsigned char *)&key, sizeof(key));
-	index = hash % ARROW_METADATA_HASH_NSLOTS;
+	key.hash = hash_any((unsigned char *)&key,
+						offsetof(MetadataCacheKey, hash));
+	index = key.hash % ARROW_METADATA_HASH_NSLOTS;
 	lock = &arrow_metadata_state->lock_slots[index];
-	slot = &arrow_metadata_state->hash_slots[index];
+	hash_slot = &arrow_metadata_state->hash_slots[index];
+	mvcc_slot = &arrow_metadata_state->mvcc_slots[index];
 
 	LWLockAcquire(lock, LW_SHARED);
 retry:
-	dlist_foreach(iter1, slot)
+	dlist_foreach(iter1, hash_slot)
 	{
 		arrowMetadataCache *mcache
 			= dlist_container(arrowMetadataCache, chain, iter1.cur);
-		if (mcache->hash == hash &&
-			mcache->stat_buf.st_dev == stat_buf.st_dev &&
+		if (mcache->stat_buf.st_dev == stat_buf.st_dev &&
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
 		{
 			RecordBatchState *rbstate;
 
+			Assert(mcache->hash == key.hash);
 			if (mcache->stat_buf.st_mtime < stat_buf.st_mtime ||
 				mcache->stat_buf.st_ctime < stat_buf.st_ctime)
 			{
@@ -3646,13 +3676,15 @@ retry:
 			 * Ok, arrow file metadata cache found and still valid
 			 */
 			rbstate = makeRecordBatchStateFromCache(mcache, fdesc);
-			rb_state_list = list_make1(rbstate);
+			if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
+				results = list_make1(rbstate);
 			dlist_foreach (iter2, &mcache->siblings)
 			{
 				arrowMetadataCache *__mcache
 					= dlist_container(arrowMetadataCache, chain, iter2.cur);
 				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc);
-				rb_state_list = lappend(rb_state_list, rbstate);
+				if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
+					results = lappend(results, rbstate);
 			}
 			SpinLockAcquire(&arrow_metadata_state->lru_lock);
 			dlist_move_head(&arrow_metadata_state->lru_list,
@@ -3660,7 +3692,7 @@ retry:
 			SpinLockRelease(&arrow_metadata_state->lru_lock);
 			LWLockRelease(lock);
 
-			return rb_state_list;
+			return results;
 		}
 	}
 
@@ -3679,6 +3711,7 @@ retry:
 	{
 		ArrowFileInfo	af_info;
 		arrowMetadataCache *mcache;
+		List		   *rb_state_any = NIL;
 
 		readArrowFileDesc(FileGetRawDesc(fdesc), &af_info);
 		if (af_info.dictionaries != NULL)
@@ -3701,13 +3734,16 @@ retry:
 			rb_state->fdesc = fdesc;
 			memcpy(&rb_state->stat_buf, &stat_buf, sizeof(struct stat));
 			rb_state->rb_index = index;
-			rb_state_list = lappend(rb_state_list, rb_state);
+
+			if (checkArrowRecordBatchIsVisible(rb_state, mvcc_slot))
+				results = lappend(results, rb_state);
+			rb_state_any = lappend(rb_state_any, rb_state);
 		}
 		/* try to build a metadata cache for further references */
-		mcache = __arrowBuildMetadataCache(rb_state_list, hash);
+		mcache = __arrowBuildMetadataCache(rb_state_any, key.hash);
 		if (mcache)
 		{
-			dlist_push_head(slot, &mcache->chain);
+			dlist_push_head(hash_slot, &mcache->chain);
 			SpinLockAcquire(&arrow_metadata_state->lru_lock);
             dlist_push_head(&arrow_metadata_state->lru_list,
 							&mcache->lru_chain);
@@ -3721,7 +3757,7 @@ retry:
 	 */
 	arrowReclaimMetadataCache();
 
-	return rb_state_list;
+	return results;
 }
 
 /*
@@ -3802,7 +3838,7 @@ setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc)
 	int		j;
 
 	table->nfields = tupdesc->natts;
-    for (j=0; j < tupdesc->natts; j++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		__setupArrowSQLbufferField(table,
@@ -3814,24 +3850,107 @@ setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc)
 	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
 }
 
+static void
+setupArrowSQLbufferBatches(SQLtable *table)
+{
+	ArrowFileInfo af_info;
+	struct stat	stat_buf;
+	MetadataCacheKey key;
+	uint32		index;
+	int			i, nitems;
+	loff_t		pos = 0;
+
+	if (fstat(table->fdesc, &stat_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", table->filename);
+	memset(&key, 0, sizeof(key));
+	key.st_dev = stat_buf.st_dev;
+	key.st_ino = stat_buf.st_ino;
+	key.hash = hash_any((unsigned char *)&key,
+						offsetof(MetadataCacheKey, hash));
+	index = key.hash % ARROW_METADATA_HASH_NSLOTS;
+
+	LWLockAcquire(&arrow_metadata_state->lock_slots[index], LW_SHARED);
+	readArrowFileDesc(table->fdesc, &af_info);
+	LWLockRelease(&arrow_metadata_state->lock_slots[index]);
+
+	/* restore DictionaryBatches already in the file */
+	nitems = af_info.footer._num_dictionaries;
+	table->numDictionaries = nitems;
+	if (nitems > 0)
+	{
+		table->dictionaries = palloc(sizeof(ArrowBlock) * nitems);
+		memcpy(table->dictionaries,
+			   af_info.footer.dictionaries,
+			   sizeof(ArrowBlock) * nitems);
+		for (i=0; i < nitems; i++)
+		{
+			ArrowBlock *block = &table->dictionaries[i];
+
+			pos = Max(pos, ARROWALIGN(block->offset +
+									  block->metaDataLength +
+									  block->bodyLength));
+		}
+	}
+	else
+		table->dictionaries = NULL;
+
+	/* restore RecordBatches already in the file */
+	nitems = af_info.footer._num_recordBatches;
+	table->numRecordBatches = nitems;
+	if (nitems > 0)
+	{
+		table->recordBatches = palloc(sizeof(ArrowBlock) * nitems);
+		memcpy(table->recordBatches,
+			   af_info.footer.recordBatches,
+			   sizeof(ArrowBlock) * nitems);
+		for (i=0; i < nitems; i++)
+		{
+			ArrowBlock *block = &table->recordBatches[i];
+
+			pos = Max(pos, ARROWALIGN(block->offset +
+									  block->metaDataLength +
+									  block->bodyLength));
+		}
+	}
+	else
+		table->recordBatches = NULL;
+
+	if (lseek(table->fdesc, pos, SEEK_SET) < 0)
+		elog(ERROR, "failed on lseek('%s',%lu): %m",
+			 table->filename, pos);
+}
+
 /*
  * createArrowWriteState
  */
 static arrowWriteState *
 createArrowWriteState(Relation frel, File file)
 {
-	TupleDesc	tupdesc = RelationGetDescr(frel);
+	TupleDesc		tupdesc = RelationGetDescr(frel);
 	arrowWriteState *aw_state;
-	SQLtable   *table;
+	SQLtable	   *table;
+	struct stat		stat_buf;
+	MetadataCacheKey key;
 
+	if (fstat(FileGetRawDesc(file), &stat_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(file));
+	memset(&key, 0, sizeof(key));
+	key.st_dev = stat_buf.st_dev;
+	key.st_ino = stat_buf.st_ino;
+	key.hash = hash_any((unsigned char *)&key,
+						offsetof(MetadataCacheKey, hash));
 	aw_state = palloc0(offsetof(arrowWriteState,
 								sql_table.columns[tupdesc->natts]));
-	aw_state->file = file;
 	aw_state->memcxt = CurrentMemoryContext;
+	aw_state->file = file;
+	aw_state->key = key;
+	aw_state->hash = key.hash;
+	aw_state->redo_log_written = false;
 	table = &aw_state->sql_table;
 	table->filename = FilePathName(file);
 	table->fdesc = FileGetRawDesc(file);
 	setupArrowSQLbufferSchema(table, tupdesc);
+	setupArrowSQLbufferBatches(table);
 
 	return aw_state;
 }
@@ -3839,133 +3958,90 @@ createArrowWriteState(Relation frel, File file)
 /*
  * createArrowWriteRedoLog
  */
-static arrowWriteRedoLog *
-createArrowWriteRedoLog(arrowWriteState *aw_state)
+static void
+createArrowWriteRedoLog(arrowWriteState *aw_state, off_t filesize)
 {
-	SQLtable   *table = &aw_state->sql_table;
-	int			fdesc = table->fdesc;
-	arrowWriteRedoLog *redo, _key;
-	struct stat	st_buf;
-	bool		found;
+	SQLtable	   *table = &aw_state->sql_table;
+	arrowWriteRedoLog *redo;
+	TransactionId	curr_xid = GetCurrentTransactionId();
+	CommandId		curr_cid = GetCurrentCommandId(true);
+	dlist_iter		iter;
+	size_t			main_sz;
 
-	if (!arrow_write_redo_log_htab)
+	dlist_foreach(iter, &arrow_write_redo_list)
 	{
-		HASHCTL		hctl;
+		redo = dlist_container(arrowWriteRedoLog, chain, iter.cur);
 
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize = offsetof(arrowWriteRedoLog,
-								xid) + sizeof(TransactionId);
-		hctl.entrysize = sizeof(arrowWriteRedoLog);
-		hctl.hcxt = CacheMemoryContext;
-
-		arrow_write_redo_log_htab =
-			hash_create("arrowWriteRedoLog", 512, &hctl,
-						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		if (redo->key.st_dev == aw_state->key.st_dev &&
+			redo->key.st_ino == aw_state->key.st_ino &&
+			redo->xid    == curr_xid &&
+			redo->cid    <= curr_cid)
+		{
+			Assert(redo->key.hash == aw_state->key.hash);
+			return;		/* nothing to do */
+		}
 	}
 
-	if (fstat(fdesc, &st_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", table->filename);
-	memset(&_key, 0, sizeof(arrowWriteRedoLog));
-	_key.st_dev = st_buf.st_dev;
-	_key.st_ino = st_buf.st_ino;
-	_key.xid = GetCurrentTransactionId();
-
-	redo = hash_search(arrow_write_redo_log_htab,
-					   &_key, HASH_ENTER, &found);
-	Assert(redo->st_dev == _key.st_dev &&
-		   redo->st_ino == _key.st_ino &&
-		   redo->xid    == _key.xid);
-	if (found && redo->cid <  GetCurrentCommandId(true))
-		return redo;	/* nothing to do */
-
-	PG_TRY();
+	if (filesize == 0)
 	{
-		char   *filename = MemoryContextStrdup(CacheMemoryContext,
-											   table->filename);
-		if (st_buf.st_size == 0)
+		main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup));
+		redo = MemoryContextAllocZero(CacheMemoryContext,
+									  main_sz + strlen(table->filename) + 1);
+		redo->key    = aw_state->key;
+		redo->xid    = curr_xid;
+		redo->cid    = curr_cid;
+		redo->pathname = (char *)redo + main_sz;
+		strcpy(redo->pathname, table->filename);
+		redo->is_truncate = false;
+	}
+	else
+	{
+		ssize_t			nbytes;
+		off_t			offset;
+		char			temp[100];
+
+		/* make backup image of the Footer section */
+		nbytes = sizeof(int32) + 6;		/* = strlen("ARROW1") */
+		offset = lseek(table->fdesc, -nbytes, SEEK_END);
+		if (offset < 0)
+			elog(ERROR, "failed on lseek(2): %m");
+		if (__read(table->fdesc, temp, nbytes) != nbytes)
+			elog(ERROR, "failed on read(2): %m");
+		offset -= *((int32 *)temp);
+
+		nbytes = filesize - offset;
+		if (nbytes <= 0)
+			elog(ERROR, "strange apache arrow format");
+		main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup[nbytes]));
+		redo = MemoryContextAllocZero(CacheMemoryContext,
+									  main_sz + strlen(table->filename) + 1);
+		redo->key    = aw_state->key;
+		redo->xid    = curr_xid;
+		redo->cid    = curr_cid;
+		redo->pathname = (char *)redo + main_sz;
+		strcpy(redo->pathname, table->filename);
+		PG_TRY();
 		{
-			redo->cid = GetCurrentCommandId(true);
-			redo->filename = filename;
-			redo->footer_offset = 0;
-			redo->footer_length = 0;
-			redo->footer_backup = NULL;
-		}
-		else
-		{
-			ArrowFileInfo	af_info;
-			int				nitems;
-			ssize_t			nbytes;
-			off_t			offset;
-			char			temp[100];
-			void		   *footer_backup;
-
-			readArrowFileDesc(table->fdesc, &af_info);
-
-			/* restore DictionaryBatches already in the file */
-			nitems = af_info.footer._num_dictionaries;
-			table->numDictionaries = nitems;
-			if (nitems > 0)
-			{
-				table->dictionaries =
-					MemoryContextAllocZero(aw_state->memcxt,
-										   sizeof(ArrowBlock) * nitems);
-				memcpy(table->dictionaries,
-					   af_info.footer.dictionaries,
-					   sizeof(ArrowBlock) * nitems);
-			}
-			else
-				table->dictionaries = NULL;
-
-			/* restore RecordBatches already in the file */
-			nitems = af_info.footer._num_recordBatches;
-			table->numRecordBatches = nitems;
-			if (nitems > 0)
-			{
-				table->recordBatches =
-					MemoryContextAllocZero(aw_state->memcxt,
-										   sizeof(ArrowBlock) * nitems);
-				memcpy(table->recordBatches,
-					   af_info.footer.recordBatches,
-					   sizeof(ArrowBlock) * nitems);
-			}
-			else
-				table->recordBatches = NULL;
-
-			/* make backup image of the Footer section */
-			nbytes = sizeof(int32) + 6;		/* = strlen("ARROW1") */
-			offset = lseek(table->fdesc, -nbytes, SEEK_END);
-			if (offset < 0)
-				elog(ERROR, "failed on lseek(2): %m");
-			if (__read(table->fdesc, temp, nbytes) != nbytes)
-				elog(ERROR, "failed on read(2): %m");
-			offset -= *((int32 *)temp);
-
-			nbytes = st_buf.st_size - offset;
-			footer_backup = MemoryContextAllocZero(CacheMemoryContext,
-												   nbytes);
 			if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
 				elog(ERROR, "failed on lseek(2): %m");
-			if (__read(table->fdesc, footer_backup, nbytes) != nbytes)
+			if (__read(table->fdesc, redo->footer_backup, nbytes) != nbytes)
 				elog(ERROR, "failed on read(2): %m");
 			if (lseek(table->fdesc, -nbytes, SEEK_END) < 0)
 				elog(ERROR, "failed on lseek(2): %m");
-
-			redo->cid = GetCurrentCommandId(true);
-			redo->filename = filename;
 			redo->footer_offset = offset;
 			redo->footer_length = nbytes;
-			redo->footer_backup = footer_backup;
 		}
+		PG_CATCH();
+		{
+			pfree(redo);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
-	PG_CATCH();
-	{
-		if (!found)
-			hash_search(arrow_write_redo_log_htab,
-						&_key, HASH_REMOVE, NULL);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	return redo;
+	elog(INFO, "REDO log on [%s] st_dev=%u/st_ino=%u/xid=%u/cid=%u offset=%lu length=%zu",
+		 redo->pathname, (uint32)redo->key.st_dev, (uint32)redo->key.st_ino, (uint32)redo->xid, (uint32)redo->cid, (uint64)redo->footer_offset, (uint64)redo->footer_length);
+
+	dlist_push_head(&arrow_write_redo_list, &redo->chain);
 }
 
 /*
@@ -3975,92 +4051,61 @@ static void
 writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 {
 	SQLtable   *table = &aw_state->sql_table;
+	int			index = aw_state->hash % ARROW_METADATA_HASH_NSLOTS;
+	struct stat	stat_buf;
+	ssize_t		nbytes;
+	arrowWriteMVCCLog *mvcc = NULL;
 
-	if (!aw_state->redo_log)
+	if (table->nitems > 0)
 	{
-		arrowWriteRedoLog *redo_log = createArrowWriteRedoLog(aw_state);
-		struct stat	st_buf;
-		ssize_t		nbytes;
+		mvcc = MemoryContextAllocZero(TopSharedMemoryContext,
+									  sizeof(arrowWriteMVCCLog));
+		mvcc->key = aw_state->key;
+		mvcc->xid = GetCurrentTransactionId();
+		mvcc->cid = GetCurrentCommandId(true);
+	}
 
-		if (fstat(table->fdesc, &st_buf) != 0)
-			elog(ERROR, "failed on fstat: %m");
-
-		if (st_buf.st_size == 0)
+	PG_TRY();
+	{
+		LWLockAcquire(&arrow_metadata_state->lock_slots[index],
+					  LW_EXCLUSIVE);
+		/* get the latest state of the file */
+		if (fstat(table->fdesc, &stat_buf) != 0)
+			elog(ERROR, "failed on fstat('%s'): %m", table->filename);
+		/* make a REDO log entry */
+		if (!aw_state->redo_log_written)
 		{
-			/* empty file */
-			if (table->nitems == 0)
-				return;
+			createArrowWriteRedoLog(aw_state, stat_buf.st_size);
+			aw_state->redo_log_written = true;
+		}
+		/* write out an empty arrow file */
+		if (stat_buf.st_size == 0)
+		{
 			Assert(lseek(table->fdesc, 0, SEEK_END) == 0);
 			nbytes = __write(table->fdesc, "ARROW1\0\0", 8);
 			if (nbytes != 8)
-				elog(ERROR, "failed on __write(2): %m");
+				elog(ERROR, "failed on __write('%s'): %m", table->filename);
 			writeArrowSchema(table);
-			writeArrowDictionaryBatches(table);
 		}
-		aw_state->redo_log = redo_log;
+		if (table->nitems > 0)
+		{
+			mvcc->record_batch = writeArrowRecordBatch(table);
+			dlist_push_tail(&arrow_metadata_state->mvcc_slots[index],
+							&mvcc->chain);
+			elog(INFO, "arrow mvcc: st_dev=%u, st_ino=%u, xid=%u, cid=%u, record_batch=%u",
+				 (uint32)mvcc->key.st_dev, (uint32)mvcc->key.st_ino, (uint32)mvcc->xid, (uint32)mvcc->cid, mvcc->record_batch);
+		}
+		if (with_footer)
+			writeArrowFooter(table);
+		LWLockRelease(&arrow_metadata_state->lock_slots[index]);
 	}
-	if (table->nitems > 0)
-		writeArrowRecordBatch(table);
-	if (with_footer)
-		writeArrowFooter(table);
-}
-
-/*
- * applyArrowWriteRedoLog
- */
-static void
-applyArrowWriteRedoLog(arrowWriteRedoLog *redo)
-{
-	int		fdesc;
-
-	/* special case, if empty file */
-	if (redo->footer_offset == 0 &&
-		redo->footer_length == 0 &&
-		redo->footer_backup == NULL)
+	PG_CATCH();
 	{
-		if (truncate(redo->filename, 0) != 0)
-			ereport(WARNING,
-					(errcode_for_file_access(),
-					 errmsg("failed on truncate('%s'): %m", redo->filename),
-					 errdetail("could not apply REDO image, therefore, garbages are still remained")));
-		return;
+		if (mvcc)
+			pfree(mvcc);
+		PG_RE_THROW();
 	}
-
-	fdesc = open(redo->filename, O_RDWR);
-	if (fdesc < 0)
-	{
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("failed on open('%s'): %m", redo->filename),
-				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
-	}
-	else if (lseek(fdesc, redo->footer_offset, SEEK_SET) < 0)
-	{
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("failed on lseek('%s'): %m", redo->filename),
-				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
-	}
-	else if (__write(fdesc,
-					 redo->footer_backup,
-					 redo->footer_length) != redo->footer_length)
-	{
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("failed on write('%s'): %m", redo->filename),
-				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
-	}
-	else if (ftruncate(fdesc, (redo->footer_offset +
-							   redo->footer_length)) != 0)
-	{
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("failed on ftruncate('%s'): %m", redo->filename),
-				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
-	}
-	close(fdesc);
-
-	//elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->filename, redo->footer_offset, redo->footer_length);
+	PG_END_TRY();
 }
 
 /*
@@ -4072,12 +4117,15 @@ __arrowExecTruncateRelation(Relation frel)
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	Oid			frel_oid = RelationGetRelid(frel);
 	ForeignTable *ft = GetForeignTable(frel_oid);
-	arrowTruncateLog *tlog = NULL;
+	arrowWriteRedoLog *redo;
+	struct stat	stat_buf;
+	MetadataCacheKey key;
 	List	   *filesList;
 	SQLtable   *table;
 	const char *path_name;
 	const char *dir_name;
 	const char *file_name;
+	size_t		main_sz;
 	int			dirfd = -1;
 	int			fdesc = -1;
 	int			nbytes;
@@ -4093,18 +4141,27 @@ __arrowExecTruncateRelation(Relation frel)
 			 RelationGetRelationName(frel));
 	Assert(list_length(filesList) == 1);
 	path_name = strVal(linitial(filesList));
-
+	if (stat(path_name, &stat_buf) != 0)
+		elog(ERROR, "failed on stat('%s'): %m", path_name);
+	memset(&key, 0, sizeof(key));
+	key.st_dev = stat_buf.st_dev;
+	key.st_ino = stat_buf.st_ino;
+	key.hash = hash_any((unsigned char *)&key,
+						offsetof(MetadataCacheKey, hash));
 	/* build SQLtable to write out schema */
 	table = palloc0(offsetof(SQLtable, columns[tupdesc->natts]));
 	setupArrowSQLbufferSchema(table, tupdesc);
 
-	/* create arrowTruncateLog entry */
-	tlog = MemoryContextAllocZero(CacheMemoryContext,
-								  offsetof(arrowTruncateLog, pathname) +
-								  strlen(path_name) + 1);
-	tlog->xid = GetCurrentTransactionId();
-	tlog->cid = GetCurrentCommandId(true);
-	strcpy(tlog->pathname, path_name);
+	/* create REDO log entry */
+	main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup));
+	redo = MemoryContextAllocZero(CacheMemoryContext,
+								  main_sz + strlen(path_name) + 1);
+	redo->key    = key;
+	redo->xid    = GetCurrentTransactionId();
+	redo->cid    = GetCurrentCommandId(true);
+	redo->pathname = (char *)redo + main_sz;
+	strcpy(redo->pathname, path_name);
+	redo->is_truncate = true;
 
 	/* open directory of the arrow file (must have write permission) */
 	dir_name = dirname(pstrdup(path_name));
@@ -4112,7 +4169,7 @@ __arrowExecTruncateRelation(Relation frel)
 	dirfd = open(dir_name, O_RDONLY | O_DIRECTORY);
 	if (dirfd < 0)
 	{
-		pfree(tlog);
+		pfree(redo);
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open directory '%s': %m", dir_name)));
@@ -4121,20 +4178,20 @@ __arrowExecTruncateRelation(Relation frel)
 	PG_TRY();
 	{
 		/* create an empty file */
-		do {
-			tlog->suffix = random();
-			snprintf(path, sizeof(path), "%s.%u.backup",
-					 file_name, tlog->suffix);
-			fdesc = openat(dirfd, path, O_RDWR | O_CREAT | O_EXCL, 0600);
-			if (fdesc < 0)
-			{
-				if (errno != EEXIST)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not create a file '%s' at '%s': %m",
-									path, dir_name)));
-			}
-		} while (fdesc < 0);
+	retry:
+		redo->suffix = random();
+		snprintf(path, sizeof(path), "%s.%u.backup",
+				 file_name, redo->suffix);
+		fdesc = openat(dirfd, path, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fdesc < 0)
+		{
+			if (errno == EEXIST)
+				goto retry;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create a file '%s' at '%s': %m",
+							path, dir_name)));
+		}
 
 		/* write out an empty arrow file */
 		table->filename = path;
@@ -4152,9 +4209,6 @@ __arrowExecTruncateRelation(Relation frel)
 					(errcode_for_file_access(),
 					 errmsg("failed to swap '%s' and '%s' at '%s': %m",
 							file_name, path, dir_name)));
-
-		/* save the arrowTruncateLog entry */
-		dlist_push_head(&arrow_truncate_logs_list, &tlog->chain);
 	}
 	PG_CATCH();
 	{
@@ -4164,12 +4218,15 @@ __arrowExecTruncateRelation(Relation frel)
 			close(fdesc);
 		}
 		close(dirfd);
-		pfree(tlog);
+		pfree(redo);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	close(fdesc);
 	close(dirfd);
+
+	/* save the REDO log entry */
+	dlist_push_head(&arrow_write_redo_list, &redo->chain);
 }
 
 /*
@@ -4202,70 +4259,161 @@ pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
 
+static void
+__applyArrowTruncateRedoLog(arrowWriteRedoLog *redo, bool is_commit)
+{
+	char		backup[MAXPGPATH];
+
+	snprintf(backup, MAXPGPATH, "%s.%u.backup",
+			 redo->pathname, redo->suffix);
+	if (is_commit)
+	{
+		elog(INFO, "unlink [%s]", backup);
+		if (unlink(backup) != 0)
+			ereport(WARNING,
+					(errcode_for_file_access(),
+					 errmsg("could not remove truncated file \"%s\": %m",
+							backup),
+					 errhint("remove the \"%s\" manually", backup)));
+	}
+	else
+	{
+		elog(INFO, "rename [%s]->[%s]", backup, redo->pathname);
+		if (rename(backup, redo->pathname) != 0)
+			ereport(WARNING,
+					(errcode_for_file_access(),
+					 errmsg("could not restore backup file \"%s\": %m",
+							backup),
+					 errhint("please restore \"%s\" to \"%s\" manually",
+							 backup, redo->pathname)));
+	}
+}
+
+static void
+__applyArrowInsertRedoLog(arrowWriteRedoLog *redo, bool is_commit)
+{
+	int		fdesc;
+	
+	if (is_commit)
+		return;
+
+	/* special case, if it was an empty file */
+	if (redo->footer_offset == 0 &&
+		redo->footer_length == 0)
+	{
+		if (truncate(redo->pathname, 0) != 0)
+			ereport(WARNING,
+					(errcode_for_file_access(),
+					 errmsg("failed on truncate('%s'): %m", redo->pathname),
+					 errdetail("could not apply REDO image, therefore, garbages are still remained")));
+		return;
+	}
+
+	fdesc = open(redo->pathname, O_RDWR);
+	if (fdesc < 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on open('%s'): %m", redo->pathname),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	else if (lseek(fdesc, redo->footer_offset, SEEK_SET) < 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on lseek('%s'): %m", redo->pathname),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	else if (__write(fdesc,
+					 redo->footer_backup,
+					 redo->footer_length) != redo->footer_length)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on write('%s'): %m", redo->pathname),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	else if (ftruncate(fdesc, (redo->footer_offset +
+							   redo->footer_length)) != 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("failed on ftruncate('%s'): %m", redo->pathname),
+				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
+	}
+	close(fdesc);
+
+	elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->pathname, redo->footer_offset, redo->footer_length);
+}
+
+static void
+__cleanupArrowWriteMVCCLog(TransactionId curr_xid, dlist_head *mvcc_slot)
+{
+	dlist_mutable_iter iter;
+
+	dlist_foreach_modify(iter, mvcc_slot)
+	{
+		arrowWriteMVCCLog *mvcc = dlist_container(arrowWriteMVCCLog,
+												  chain, iter.cur);
+		if (mvcc->xid == curr_xid)
+		{
+			dlist_delete(&mvcc->chain);
+			elog(INFO, "mvcc st_dev=%u, st_ino=%u, xid=%u, cid=%u, record_batch=%u", (uint32)mvcc->key.st_dev, (uint32)mvcc->key.st_ino, (uint32)mvcc->xid, (uint32)mvcc->cid, mvcc->record_batch);
+			pfree(mvcc);
+		}
+	}
+}
+
 /*
  * __arrowFdwXactCallback
  */
 static void
 __arrowFdwXactCallback(TransactionId curr_xid, bool is_commit)
 {
-	HASH_SEQ_STATUS		seq;
 	arrowWriteRedoLog  *redo;
-	arrowTruncateLog   *tlog;
 	dlist_mutable_iter	iter;
+	CommandId			curr_cid = InvalidCommandId;
+	uint32				index;
+	bool				locked[ARROW_METADATA_HASH_NSLOTS];
+	LWLock			   *locks[ARROW_METADATA_HASH_NSLOTS];
+	uint32				lcount = 0;
 
-	if (curr_xid == InvalidTransactionId)
+	if (curr_xid == InvalidTransactionId ||
+		dlist_is_empty(&arrow_write_redo_list))
 		return;
-	if (arrow_write_redo_log_htab &&
-		hash_get_num_entries(arrow_write_redo_log_htab) > 0)
-	{
-		hash_seq_init(&seq, arrow_write_redo_log_htab);
-		while ((redo = hash_seq_search(&seq)) != NULL)
-		{
-			if (redo->xid != curr_xid)
-				continue;
-			if (!is_commit)
-				applyArrowWriteRedoLog(redo);
-			if (redo->filename)
-				pfree(redo->filename);
-			if (redo->footer_backup)
-				pfree(redo->footer_backup);
-			hash_search(arrow_write_redo_log_htab, redo, HASH_REMOVE, NULL);
-		}
-	}
 
-	dlist_foreach_modify(iter, &arrow_truncate_logs_list)
+	memset(locked, 0, sizeof(locked));
+	dlist_foreach_modify(iter, &arrow_write_redo_list)
 	{
-		char		backup[MAXPGPATH];
-
-		tlog = dlist_container(arrowTruncateLog, chain, iter.cur);
-		if (tlog->xid != curr_xid)
+		redo = dlist_container(arrowWriteRedoLog, chain, iter.cur);
+		if (redo->xid != curr_xid)
 			continue;
-		snprintf(backup, MAXPGPATH, "%s.%u.backup",
-				 tlog->pathname, tlog->suffix);
-		if (is_commit)
+		if (curr_cid != InvalidCommandId &&
+			curr_cid < redo->cid)
+			elog(WARNING, "Bug? Order of REDO log is not be correct. ABORT transaction might generate wrong image restored.");
+
+		index = redo->key.hash % ARROW_METADATA_HASH_NSLOTS;
+		if (!locked[index])
 		{
-			elog(INFO, "unlink [%s]", backup);
-			if (unlink(backup) != 0)
-				ereport(WARNING,
-						(errcode_for_file_access(),
-						 errmsg("could not remove truncated file \"%s\": %m",
-								backup),
-						 errhint("remove the \"%s\" manually", backup)));
+			LWLock	   *lock = &arrow_metadata_state->lock_slots[index];
+			dlist_head *slot = &arrow_metadata_state->mvcc_slots[index];
+
+			LWLockAcquire(lock, LW_EXCLUSIVE);
+			__cleanupArrowWriteMVCCLog(curr_xid, slot);
+			locked[index] = true;
+			locks[lcount++] = lock;
 		}
+		if (redo->is_truncate)
+			__applyArrowTruncateRedoLog(redo, is_commit);
 		else
-		{
-			elog(INFO, "rename [%s]->[%s]", backup, tlog->pathname);
-			if (rename(backup, tlog->pathname) != 0)
-				ereport(WARNING,
-						(errcode_for_file_access(),
-						 errmsg("could not restore backup file \"%s\": %m",
-								backup),
-						 errhint("please restore \"%s\" to \"%s\" manually",
-								 backup, tlog->pathname)));
-		}
-		dlist_delete(&tlog->chain);
-		pfree(tlog);
+			__applyArrowInsertRedoLog(redo, is_commit);
+
+		dlist_delete(&redo->chain);
+		pfree(redo);
 	}
+
+	for (index=0; index < lcount; index++)
+		LWLockRelease(locks[index]);
 }
 
 /*
@@ -4322,6 +4470,7 @@ pgstrom_startup_arrow_fdw(void)
 		{
 			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
+			dlist_init(&arrow_metadata_state->mvcc_slots[i]);
 		}
 	}
 }
@@ -4427,5 +4576,5 @@ pgstrom_init_arrow_fdw(void)
 	RegisterSubXactCallback(arrowFdwSubXactCallback, NULL);
 
 	/* misc init */
-	dlist_init(&arrow_truncate_logs_list);
+	dlist_init(&arrow_write_redo_list);
 }

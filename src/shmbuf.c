@@ -19,7 +19,7 @@
 #include "nodes/memnodes.h"
 
 #define SHMBUF_CHUNK_MAGIC_CODE		0xdeadbeaf
-#define SHMBUF_CHUNKSZ_MIN_BIT		8		/* 256B */
+#define SHMBUF_CHUNKSZ_MIN_BIT		7		/* 128B */
 #define SHMBUF_CHUNKSZ_MAX_BIT		32		/* 4GB */
 #define SHMBUF_CHUNKSZ_MIN			(1U << SHMBUF_CHUNKSZ_MIN_BIT)
 #define SHMBUF_CHUNKSZ_MAX			(1U << SHMBUF_CHUNKSZ_MAX_BIT)

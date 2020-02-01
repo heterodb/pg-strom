@@ -1378,7 +1378,7 @@ sql_field_clear(SQLfield *column)
 	}
 }
 
-void
+int
 writeArrowRecordBatch(SQLtable *table)
 {
 	ArrowMessage	message;
@@ -1458,6 +1458,8 @@ writeArrowRecordBatch(SQLtable *table)
 	for (j=0; j < table->nfields; j++)
 		sql_field_clear(&table->columns[j]);
 	table->nitems = 0;
+
+	return index;
 }
 
 /*
