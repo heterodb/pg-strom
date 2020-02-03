@@ -20,3 +20,14 @@ CREATE OR REPLACE FUNCTION pgstrom.arrow_fdw_truncate(regclass)
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_truncate'
   LANGUAGE C STRICT;
 
+CREATE OR REPLACE FUNCTION
+pgstrom.arrow_fdw_export_cupy(regclass, text[] = null, int = null)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_export_cupy'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE OR REPLACE FUNCTION
+pgstrom.arrow_fdw_unload_gpu(text)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_unload_gpu'
+  LANGUAGE C STRICT;

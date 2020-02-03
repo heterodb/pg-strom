@@ -82,6 +82,7 @@ typedef struct
 } arrowMetadataCache;
 
 #define ARROW_METADATA_HASH_NSLOTS		2048
+#define ARROW_GPUBUF_HASH_NSLOTS		512
 typedef struct
 {
 	slock_t		lru_lock;
@@ -91,6 +92,10 @@ typedef struct
 	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	mvcc_slots[ARROW_METADATA_HASH_NSLOTS];
+
+	/* for ArrowGpuBuffer links */
+	LWLock		gpubuf_locks[ARROW_GPUBUF_HASH_NSLOTS];
+	dlist_head	gpubuf_slots[ARROW_GPUBUF_HASH_NSLOTS];
 } arrowMetadataState;
 
 /*
@@ -153,6 +158,38 @@ struct ArrowFdwState
 	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
 };
 
+/*
+ * ArrowGpuBuffer (shared structure)
+ */
+#define ARROW_GPUBUF_FORMAT__CUPY		1
+
+typedef struct 
+{
+	dlist_node	chain;
+	pg_atomic_uint32 refcnt;
+	bool		detached;
+	uint32		hash;
+	int			cuda_dindex;
+	CUipcMemHandle ipc_mhandle;
+	struct timespec timestamp;
+	size_t		nbytes;		/* size of device memory */
+	size_t		nrooms;
+	/* below is used for hash */
+	Oid			frel_oid;
+	int			format;		/* one of ARROW_GPUBUF_FORMAT__* */
+	int			nattrs;
+	AttrNumber	attnums[FLEXIBLE_ARRAY_MEMBER];
+} ArrowGpuBuffer;
+
+typedef struct
+{
+	dlist_node	chain;
+	Oid			frel_oid;
+	int			format;
+	int			nattrs;
+	AttrNumber	attnums[FLEXIBLE_ARRAY_MEMBER];
+} ArrowGpuBufferTracker;
+
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -163,6 +200,7 @@ static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
 static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
+static dlist_head		arrow_gpu_buffer_tracker_list;
 
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
@@ -173,8 +211,7 @@ static bool		arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 											  RecordBatchState *rb_state);
 static List	   *__arrowFdwExtractFilesList(List *options_list,
 										   int *p_parallel_nworkers,
-										   bool *p_writable,
-										   int *p_pinning);
+										   bool *p_writable);
 static List	   *arrowFdwExtractFilesList(List *options_list);
 static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
 											  ArrowBlock *block,
@@ -194,6 +231,9 @@ Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_export_cupy(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_export_cupy_pinned(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS);
 
 /*
  * baseRelIsArrowFdw
@@ -349,7 +389,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	filesList = __arrowFdwExtractFilesList(ft->options,
 										   &parallel_nworkers,
-										   NULL,
 										   NULL);
 	foreach (lc, filesList)
 	{
@@ -1900,8 +1939,7 @@ ArrowPlanForeignModify(PlannerInfo *root,
 
 	filesList = __arrowFdwExtractFilesList(ft->options,
 										   NULL,
-										   &writable,
-										   NULL);
+										   &writable);
 	if (!writable)
 		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
 			 get_rel_name(rte->relid));
@@ -3032,8 +3070,7 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 static List *
 __arrowFdwExtractFilesList(List *options_list,
 						   int *p_parallel_nworkers,
-						   bool *p_writable,
-						   int *p_pinning)
+						   bool *p_writable)
 {
 	ListCell   *lc;
 	List	   *filesList = NIL;
@@ -3041,7 +3078,6 @@ __arrowFdwExtractFilesList(List *options_list,
 	char	   *dir_suffix = NULL;
 	int			parallel_nworkers = -1;
 	bool		writable = false;	/* default: read-only */
-	int			pinning = -1;		/* default: not pinning */
 
 	foreach (lc, options_list)
 	{
@@ -3089,24 +3125,6 @@ __arrowFdwExtractFilesList(List *options_list,
 		else if (strcmp(defel->defname, "writable") == 0)
 		{
 			writable = defGetBoolean(defel);
-		}
-		else if (strcmp(defel->defname, "pinning") == 0)
-		{
-			int		dindex = -1;
-
-			pinning = pg_atoi(strVal(defel->arg), sizeof(int), '\0');
-			if (pinning < 0)
-				elog(ERROR, "arrow: pinning=%d is out of range", pinning);
-			for (dindex = -1; dindex < numDevAttrs; dindex++)
-			{
-				if (devAttrs[dindex].DEV_ID == pinning)
-					break;
-			}
-			if (dindex >= numDevAttrs)
-			{
-				elog(NOTICE, "arrow: pinning=%d is not a valid GPU device id. Ignored", pinning);
-				pinning = -1;
-			}
 		}
 		else
 			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
@@ -3170,8 +3188,6 @@ __arrowFdwExtractFilesList(List *options_list,
 		*p_parallel_nworkers = parallel_nworkers;
 	if (p_writable)
 		*p_writable = writable;
-	if (p_pinning)
-		*p_pinning = pinning;
 
 	return filesList;
 }
@@ -3179,7 +3195,7 @@ __arrowFdwExtractFilesList(List *options_list,
 static List *
 arrowFdwExtractFilesList(List *options_list)
 {
-	return __arrowFdwExtractFilesList(options_list, NULL, NULL, NULL);
+	return __arrowFdwExtractFilesList(options_list, NULL, NULL);
 }
 
 
@@ -4134,8 +4150,7 @@ __arrowExecTruncateRelation(Relation frel)
 
 	filesList = __arrowFdwExtractFilesList(ft->options,
 										   NULL,
-										   &writable,
-										   NULL);
+										   &writable);
 	if (!writable)
 		elog(ERROR, "arrow_fdw: foreign table \"%s\" is not writable",
 			 RelationGetRelationName(frel));
@@ -4446,6 +4461,715 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 /*
+ * PutArrowGpuBuffer
+ *
+ * NOTE: caller must have exclusive lock on gpubuf_locks[]
+ */
+static void
+PutArrowGpuBuffer(ArrowGpuBuffer *gpubuf)
+{
+	CUresult	rc;
+	uint32 count;
+
+	if ((count = pg_atomic_sub_fetch_u32(&gpubuf->refcnt, 1)) == 0)
+	{
+		rc = gpuMemFreePreserved(gpubuf->cuda_dindex,
+								 gpubuf->ipc_mhandle);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFreePreserved: %s", errorText(rc));
+		dlist_delete(&gpubuf->chain);
+		pfree(gpubuf);
+	}
+}
+
+/*
+ * BuildArrowGpuBufferCupy
+ */
+static ArrowGpuBuffer *
+BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
+						struct timespec timestamp, int cuda_dindex,
+						size_t unitsz, size_t nrooms)
+{
+	GpuContext *gcontext = NULL;
+	ArrowGpuBuffer *gpubuf = NULL;
+	int			min_dindex = (cuda_dindex >= 0 ? cuda_dindex : 0);
+	int			max_dindex = (cuda_dindex >= 0 ? cuda_dindex : numDevAttrs-1);
+	int			nattrs = list_length(attNums);
+	size_t		nbytes;
+	char	   *mmap_ptr = NULL;
+	size_t		mmap_len = 0UL;
+	CUdeviceptr	gmem_ptr = 0UL;
+	CUipcMemHandle ipc_mhandle;
+	dsm_handle	dsm_mhandle;
+	ListCell   *lc;
+	CUresult	rc = CUDA_ERROR_NO_DEVICE;
+
+	/*
+	 * Allocation of the preserved device memory
+	 */
+	nbytes = unitsz * nattrs * nrooms;
+	for (cuda_dindex =  min_dindex; cuda_dindex <= max_dindex; cuda_dindex++)
+	{
+		rc = gpuMemAllocPreserved(cuda_dindex,
+								  &ipc_mhandle,
+								  &dsm_mhandle,
+								  nbytes);
+		if (rc == CUDA_SUCCESS)
+			break;
+	}
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+
+	PG_TRY();
+	{
+		File	curr_filp = -1;
+		size_t	row_index = 0;
+		int		j = 0;
+
+		/*
+		 * setup ArrowGpuBuffer
+		 */
+		gpubuf = MemoryContextAllocZero(TopSharedMemoryContext,
+										offsetof(ArrowGpuBuffer,
+												 attnums[nattrs]));
+		memcpy(&gpubuf->ipc_mhandle, &ipc_mhandle, sizeof(CUipcMemHandle));
+		gpubuf->timestamp = timestamp;
+		gpubuf->nbytes = nbytes;
+		gpubuf->nrooms = nrooms;
+		gpubuf->cuda_dindex = cuda_dindex;
+		gpubuf->frel_oid = RelationGetRelid(frel);
+		gpubuf->format = ARROW_GPUBUF_FORMAT__CUPY;
+		gpubuf->nattrs = nattrs;
+		foreach (lc, attNums)
+			gpubuf->attnums[j++] = lfirst_int(lc);
+		gpubuf->hash = hash_any((unsigned char *)&gpubuf->frel_oid,
+								offsetof(ArrowGpuBuffer, attnums[nattrs]) -
+								offsetof(ArrowGpuBuffer, frel_oid));
+		pg_atomic_init_u32(&gpubuf->refcnt, 1);
+
+		/*
+		 * Open GPU device memory, and load the array from apache arrow files
+		 */
+		gcontext = AllocGpuContext(cuda_dindex, true, true, false);
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &gmem_ptr,
+								 gpubuf->ipc_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
+		foreach (lc, rb_state_list)
+		{
+			RecordBatchState *rb_state = lfirst(lc);
+
+			if (rb_state->fdesc != curr_filp)
+			{
+				if (mmap_ptr)
+				{
+					if (munmap(mmap_ptr, mmap_len) != 0)
+						elog(ERROR, "failed on munmap: %m");
+					mmap_ptr = NULL;
+				}
+				mmap_len = (rb_state->stat_buf.st_size +
+							PAGE_SIZE - 1) & ~PAGE_MASK;
+				mmap_ptr = mmap(NULL, mmap_len,
+								PROT_READ, MAP_SHARED,
+								FileGetRawDesc(rb_state->fdesc), 0);
+				if (mmap_ptr == MAP_FAILED)
+				{
+					mmap_ptr = NULL;
+					elog(ERROR, "failed on mmap: %m");
+				}
+				curr_filp = rb_state->fdesc;
+			}
+			/*
+			 * copy array to device memory
+			 */
+			for (j=0; j < gpubuf->nattrs; j++)
+			{
+				RecordBatchFieldState *column = &rb_state->columns[j];
+				size_t		offset;
+				size_t		length;
+				size_t		padding = 0;
+
+				offset = unitsz * (row_index + j * gpubuf->nrooms);
+				length = unitsz * Min(rb_state->rb_nitems, column->nitems);
+				if (length > column->values_length)
+					length = column->values_length;
+				if (length < unitsz * rb_state->rb_nitems)
+					padding = unitsz * rb_state->rb_nitems - length;
+				rc = cuMemcpyHtoD(gmem_ptr + offset,
+								  mmap_ptr + column->values_offset,
+								  length);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+				if (padding > 0)
+				{
+					rc = cuMemsetD8(gmem_ptr + offset + length, 0, padding);
+					if (rc != CUDA_SUCCESS)
+						elog(ERROR, "failed on cuMemsetD8: %s", errorText(rc));
+				}
+			}
+			row_index += rb_state->rb_nitems;
+		}
+		if (mmap_ptr)
+		{
+			if (munmap(mmap_ptr, mmap_len) != 0)
+				elog(ERROR, "failed on munmap: %m");
+		}
+		rc = gpuIpcCloseMemHandle(gcontext, gmem_ptr);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuIpcCloseMemHandle: %s",
+				 errorText(rc));
+		PutGpuContext(gcontext);
+	}
+	PG_CATCH();
+	{
+		if (gcontext)
+			PutGpuContext(gcontext);
+		if (gpubuf)
+			pfree(gpubuf);
+		rc = gpuMemFreePreserved(cuda_dindex, ipc_mhandle);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFreePreserved: %s",
+				 errorText(rc));
+		PG_RE_THROW();
+	}
+	PG_END_TRY();	
+
+	return gpubuf;
+}
+
+static text *
+lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
+								Oid element_oid, int cuda_dindex)
+{
+	Oid				frel_oid = RelationGetRelid(frel);
+	ForeignTable   *ft = GetForeignTable(frel_oid);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options);
+	List		   *fdescList = NIL;
+	List		   *rb_state_list = NIL;
+	ListCell	   *lc;
+	int				j, nattrs;
+	size_t			nrooms = 0;
+	size_t			unitsz;
+	const char	   *np_typename;
+	struct timespec	timestamp;
+	int				index;
+	LWLock		   *lock;
+	bool			has_exclusive = false;
+	dlist_mutable_iter iter;
+	ArrowGpuBuffer *gpubuf, *_key;
+	StringInfoData	ident;
+
+	/* type checks */
+	switch (element_oid)
+	{
+		case INT2OID:
+			unitsz = sizeof(uint16);
+			np_typename = "int16";
+			break;
+		case FLOAT2OID:
+			unitsz = sizeof(uint16);
+			np_typename = "float16";
+			break;
+		case INT4OID:
+			unitsz = sizeof(uint32);
+			np_typename = "int32";
+			break;
+		case FLOAT4OID:
+			unitsz = sizeof(uint32);
+			np_typename = "float32";
+			break;
+		case INT8OID:
+			unitsz = sizeof(uint64);
+			np_typename = "int64";
+			break;
+		case FLOAT8OID:
+			unitsz = sizeof(uint64);
+			np_typename = "float64";
+			break;
+		default:
+			elog(ERROR, "not a supported data type: %s",
+				 format_type_be(element_oid));
+	}
+
+	/*
+	 * Estimation of the data size
+	 */
+	memset(&timestamp, 0, sizeof(struct timespec));
+	foreach (lc, filesList)
+	{
+		char	   *fname = strVal(lfirst(lc));
+		File		filp;
+		List	   *rb_temp;
+		ListCell   *cell;
+
+		filp = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
+		if (filp < 0)
+			elog(ERROR, "failed to open '%s' on behalf of foreign table '%s'",
+				 fname, RelationGetRelationName(frel));
+		rb_temp = arrowLookupOrBuildMetadataCache(filp);
+		foreach (cell, rb_temp)
+		{
+			RecordBatchState *rb_state = lfirst(cell);
+			struct timespec *st_mtim = &rb_state->stat_buf.st_mtim;
+			struct timespec *st_ctim = &rb_state->stat_buf.st_ctim;
+
+			nrooms += rb_state->rb_nitems;
+
+			if (st_mtim->tv_sec > timestamp.tv_sec ||
+				(st_mtim->tv_sec == timestamp.tv_sec &&
+				 st_mtim->tv_nsec > timestamp.tv_nsec))
+				timestamp = *st_mtim;
+			if (st_ctim->tv_sec > timestamp.tv_sec ||
+				(st_ctim->tv_sec == timestamp.tv_sec &&
+				 st_ctim->tv_nsec > timestamp.tv_nsec))
+				timestamp = *st_ctim;
+
+			rb_state_list = lappend(rb_state_list, rb_state);
+		}
+		fdescList = lappend_int(fdescList, filp);
+	}
+	if (nrooms == 0)
+		elog(ERROR, "arrow_fdw: foreign table '%s' is empty",
+			 RelationGetRelationName(frel));
+	/*
+	 * Lookup preserved GPU device memory, or build it if not found
+	 */
+	nattrs = list_length(attNums);
+	_key = alloca(offsetof(ArrowGpuBuffer, attnums[nattrs]));
+	memset(_key, 0, offsetof(ArrowGpuBuffer, attnums[nattrs]));
+
+	_key->frel_oid = frel_oid;
+	_key->format = ARROW_GPUBUF_FORMAT__CUPY;
+	_key->nattrs = nattrs;
+	j = 0;
+	foreach (lc, attNums)
+		_key->attnums[j++] = lfirst_int(lc);
+	_key->hash = hash_any((unsigned char *)&_key->frel_oid,
+						  offsetof(ArrowGpuBuffer, attnums[nattrs]) -
+						  offsetof(ArrowGpuBuffer, frel_oid));
+	index = _key->hash % ARROW_GPUBUF_HASH_NSLOTS;
+
+	lock = &arrow_metadata_state->gpubuf_locks[index];
+	LWLockAcquire(lock, LW_SHARED);
+retry:
+	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
+	{
+		ArrowGpuBuffer *temp = dlist_container(ArrowGpuBuffer,
+											   chain, iter.cur);
+		/* ignore detached GPU buffer; might be still referenced */
+		if (temp->detached)
+			continue;
+
+		if (temp->hash == _key->hash &&
+			(cuda_dindex < 0 || temp->cuda_dindex == cuda_dindex) &&
+			temp->frel_oid == _key->frel_oid &&
+			temp->format == _key->format &&
+			temp->nattrs == _key->nattrs &&
+			memcmp(temp->attnums, _key->attnums,
+				   sizeof(AttrNumber) * _key->nattrs) == 0)
+		{
+			if (temp->timestamp.tv_sec == timestamp.tv_sec &&
+				temp->timestamp.tv_nsec == timestamp.tv_nsec)
+			{
+				/* Ok, valid GPU buffer is already built */
+				gpubuf = temp;
+				pg_atomic_fetch_and_u32(&gpubuf->refcnt, 1);
+				goto found;
+			}
+			else if (!has_exclusive)
+			{
+				/* further decision needs exclusive lock... */
+				LWLockRelease(lock);
+				LWLockAcquire(lock, LW_EXCLUSIVE);
+				has_exclusive = true;
+				goto retry;
+			}
+			else
+			{
+				temp->detached = true;
+				PutArrowGpuBuffer(temp);
+			}
+		}
+	}
+
+	if (!has_exclusive)
+	{
+		LWLockRelease(lock);
+		LWLockAcquire(lock, LW_EXCLUSIVE);
+		has_exclusive = true;
+		goto retry;
+	}
+	gpubuf = BuildArrowGpuBufferCupy(frel, attNums, rb_state_list,
+									 timestamp, cuda_dindex,
+									 unitsz, nrooms);
+	Assert(gpubuf->hash == _key->hash);
+	dlist_push_tail(&arrow_metadata_state->gpubuf_slots[index],
+					&gpubuf->chain);
+found:
+	initStringInfo(&ident);
+	ident.len = VARHDRSZ;
+	appendStringInfo(&ident,
+					 "device_id=%d,bytesize=%zu,ipc_handle=",
+					 devAttrs[gpubuf->cuda_dindex].DEV_ID,
+					 gpubuf->nbytes);
+	enlargeStringInfo(&ident, 2 * sizeof(CUipcMemHandle));
+	hex_encode((const char *)&gpubuf->ipc_mhandle,
+			   sizeof(CUipcMemHandle), ident.data + ident.len);
+	ident.len += 2 * sizeof(CUipcMemHandle);
+	appendStringInfo(&ident,",type=%s,width=%d,height=%zu",
+					 np_typename,
+					 gpubuf->nattrs,
+					 gpubuf->nrooms);
+	appendStringInfo(&ident,",table_oid=%u,attnums=",
+					 gpubuf->frel_oid);
+	for (j=0; j < gpubuf->nattrs; j++)
+	{
+		if (j > 0)
+			appendStringInfoChar(&ident,' ');
+		appendStringInfo(&ident, "%d", gpubuf->attnums[j]);
+	}
+	SET_VARSIZE(ident.data, ident.len);
+
+	LWLockRelease(lock);
+	/* cleanups */
+	foreach (lc, fdescList)
+		FileClose((File)lfirst_int(lc));
+	return (text *)ident.data;
+}
+
+/*
+ * pgstrom_arrow_fdw_export_cupy
+ *
+ * This SQL function exports a particular arrow_fdw foreign table
+ * as a ndarray of cupy; built as like a flat array.
+ *
+ * pgstrom.arrow_fdw_export_cupy[_pinned](regclass, -- oid of relation
+ *                               text[],   -- name of attributes
+ *                               int)      -- GPU device-id
+ */
+static Datum
+__pgstrom_arrow_fdw_export_cupy(Oid frel_oid,
+								ArrayType *attNames,
+								int device_id,
+								bool pinned)
+{
+	int32			cuda_dindex = -1;
+	List		   *attNums = NIL;
+	Relation		frel;
+	TupleDesc		tupdesc;
+	FdwRoutine	   *routine;
+	Oid				element_oid = InvalidOid;
+	int				j;
+	text		   *result;
+
+	/* sanity checks */
+	if (ARR_NDIM(attNames) != 1 ||
+		ARR_ELEMTYPE(attNames) != TEXTOID)
+		elog(ERROR, "column names must be 1-dimensional text array");
+	if (device_id >= 0)
+	{
+		for (j=0; j < numDevAttrs; j++)
+		{
+			if (devAttrs[j].DEV_ID == device_id)
+			{
+				cuda_dindex = j;
+				break;
+			}
+		}
+		if (j == numDevAttrs)
+			elog(ERROR, "GPU deviceId=%d not found", device_id);
+	}
+
+	/*
+	 * Open foreign table, and sanity checks
+	 */
+	frel = table_open(frel_oid, AccessShareLock);
+	if (frel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not arrow_fdw foreign table",
+						RelationGetRelationName(frel))));
+	routine = GetFdwRoutineForRelation(frel, false);
+	if (memcmp(routine, &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("\"%s\" is not arrow_fdw foreign table",
+						RelationGetRelationName(frel))));
+	/*
+	 * Pick up attributes to be fetched
+	 */
+	tupdesc = RelationGetDescr(frel);
+	if (!attNames)
+	{
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc,j);
+
+			if (attr->attisdropped)
+				continue;
+			if (!OidIsValid(element_oid))
+				element_oid = attr->atttypid;
+			else if (element_oid != attr->atttypid)
+				elog(ERROR, "multiple data types are mixtured in use");
+			attNums = lappend_int(attNums, attr->attnum);
+		}
+	}
+	else
+	{
+		ArrayIterator iter;
+		Datum		datum;
+		bool		isnull;
+		HeapTuple	tup;
+
+		iter = array_create_iterator(attNames, 0, NULL);
+		while (array_iterate(iter, &datum, &isnull))
+		{
+			Form_pg_attribute attr;
+			char   *colname;
+
+			if (isnull)
+				elog(ERROR, "NULL in attribute names");
+			colname = text_to_cstring((text *)datum);
+			tup = SearchSysCache2(ATTNAME,
+								  ObjectIdGetDatum(frel_oid),
+								  PointerGetDatum(colname));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "column \"%s\" of relation \"%s\" does not exist",
+					 colname, RelationGetRelationName(frel));
+			attr = (Form_pg_attribute) GETSTRUCT(tup);
+			if (attr->attnum < 0)
+				elog(ERROR, "cannot export system column: %s", colname);
+			if (!attr->attisdropped)
+			{
+				if (!OidIsValid(element_oid))
+					element_oid = attr->atttypid;
+				else if (element_oid != attr->atttypid)
+					elog(ERROR, "multiple data types are mixtured in use");
+				attNums = lappend_int(attNums, attr->attnum);
+			}
+			ReleaseSysCache(tup);
+			pfree(colname);
+		}
+		array_free_iterator(iter);
+	}
+	if (attNums == NIL)
+		elog(ERROR, "no valid attributes are specified");
+	result = lookupOrBuildArrowGpuBufferCupy(frel, attNums,
+											 element_oid,
+											 cuda_dindex);
+	table_close(frel, AccessShareLock);
+
+	PG_RETURN_TEXT_P(result);
+}
+
+Datum
+pgstrom_arrow_fdw_export_cupy(PG_FUNCTION_ARGS)
+{
+	Oid			frel_oid = InvalidOid;
+	ArrayType  *attNames = NULL;
+	int32		device_id = -1;
+
+	if (PG_ARGISNULL(0))
+		elog(ERROR, "no relation oid was specified");
+	frel_oid = PG_GETARG_OID(0);
+	if (!PG_ARGISNULL(1))
+		attNames = PG_GETARG_ARRAYTYPE_P(1);
+	if (!PG_ARGISNULL(2))
+		device_id = PG_GETARG_INT32(2);
+
+	PG_RETURN_TEXT_P(__pgstrom_arrow_fdw_export_cupy(frel_oid,
+													 attNames,
+													 device_id,
+													 false));
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_export_cupy);
+
+Datum
+pgstrom_arrow_fdw_export_cupy_pinned(PG_FUNCTION_ARGS)
+{
+	Oid			frel_oid = InvalidOid;
+	ArrayType  *attNames = NULL;
+	int32		device_id = -1;
+
+	if (PG_ARGISNULL(0))
+		elog(ERROR, "no relation oid was specified");
+	frel_oid = PG_GETARG_OID(0);
+	if (!PG_ARGISNULL(1))
+		attNames = PG_GETARG_ARRAYTYPE_P(1);
+	if (!PG_ARGISNULL(2))
+		device_id = PG_GETARG_INT32(2);
+
+	PG_RETURN_TEXT_P(__pgstrom_arrow_fdw_export_cupy(frel_oid,
+													 attNames,
+													 device_id,
+													 true));
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_export_cupy_pinned);
+
+/*
+ * unloadArrowGpuBuffer
+ */
+static void
+unloadArrowGpuBuffer(Oid frel_oid, List *attNums, int format,
+					 int cuda_dindex, CUipcMemHandle *ipc_mhandle)
+{
+	ArrowGpuBuffer *_key;
+	dlist_mutable_iter iter;
+	ListCell   *lc;
+	int			index;
+	int			j, nattrs = list_length(attNums);
+
+	_key = alloca(offsetof(ArrowGpuBuffer, attnums[nattrs]));
+	_key->frel_oid = frel_oid;
+	_key->format = format;
+	_key->nattrs = nattrs;
+	j = 0;
+	foreach (lc, attNums)
+		_key->attnums[j++] = lfirst_int(lc);
+	_key->hash = hash_any((unsigned char *)&_key->frel_oid,
+						  offsetof(ArrowGpuBuffer, attnums[nattrs]) -
+						  offsetof(ArrowGpuBuffer, frel_oid));
+	index = _key->hash % ARROW_GPUBUF_HASH_NSLOTS;
+	LWLockAcquire(&arrow_metadata_state->gpubuf_locks[index], LW_EXCLUSIVE);
+	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
+	{
+		ArrowGpuBuffer *temp = dlist_container(ArrowGpuBuffer,
+											   chain, iter.cur);
+		if (temp->detached)
+			continue;		/* ignore */
+		if (temp->hash == _key->hash &&
+			temp->cuda_dindex == cuda_dindex &&
+			temp->frel_oid == frel_oid &&
+			temp->format == format &&
+			temp->nattrs == nattrs &&
+			memcmp(temp->attnums, _key->attnums,
+				   sizeof(AttrNumber) * nattrs) == 0)
+		{
+			temp->detached = true;
+			PutArrowGpuBuffer(temp);
+			goto found;
+		}
+	}
+	elog(ERROR, "No ArrowGpuBuffer for the supplied identifier token");
+found:
+	LWLockRelease(&arrow_metadata_state->gpubuf_locks[index]);	
+}
+
+/*
+ * pgstrom_arrow_fdw_unload_gpu
+ *
+ * release preserved GPU memory specified by the handle
+ */
+Datum
+pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
+{
+	char	   *ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
+	char	   *tok, *save;
+	int			cuda_dindex = -1;
+	ssize_t		bytesize = -1;
+	CUipcMemHandle ipc_mhandle;
+	Oid			element_oid = InvalidOid;
+	int			nattrs = -1;
+	ssize_t		nrooms = -1;
+	Oid			frel_oid = InvalidOid;
+	List	   *attNums = NIL;
+
+	for (tok = strtok_r(ident, ",", &save);
+		 tok != NULL;
+		 tok = strtok_r(NULL,  ",", &save))
+	{
+		char   *pos = strchr(tok, '=');
+
+		if (!pos)
+			elog(ERROR, "invalid GPU buffer identifier token");
+		*pos++ = '\0';
+
+		if (strcmp(tok, "device_id") == 0)
+		{
+			int		i, device_id = atoi(pos);
+
+			for (i=0; i < numDevAttrs; i++)
+			{
+				if (devAttrs[i].DEV_ID == device_id)
+				{
+					cuda_dindex = i;
+					break;
+				}
+			}
+			if (i >= numDevAttrs)
+				elog(ERROR, "device_id (%d) was not found", device_id);
+		}
+		else if (strcmp(tok, "bytesize") == 0)
+		{
+			bytesize = (ssize_t)atoll(pos);
+		}
+		else if (strcmp(tok, "ipc_handle") == 0)
+		{
+			if (strlen(pos) != 2 * sizeof(CUipcMemHandle))
+				elog(ERROR, "ipc_handle (%s) was corrupted", pos);
+			hex_decode(pos, 2 * sizeof(CUipcMemHandle), (char *)&ipc_mhandle);
+		}
+		else if (strcmp(tok, "type") == 0)
+		{
+			if (strcmp(pos, "int16") == 0)
+				element_oid = INT2OID;
+			else if (strcmp(pos, "int32") == 0)
+				element_oid = INT4OID;
+			else if (strcmp(pos, "int64") == 0)
+				element_oid = INT8OID;
+			else if (strcmp(pos, "float16") == 0)
+				element_oid = FLOAT2OID;
+			else if (strcmp(pos, "float32") == 0)
+				element_oid = FLOAT4OID;
+			else if (strcmp(pos, "float64") == 0)
+				element_oid = FLOAT8OID;
+			else
+				elog(ERROR, "unknown np.type (%s)", pos);
+		}
+		else if (strcmp(tok, "width") == 0)
+		{
+			nattrs = atoi(pos);
+		}
+		else if (strcmp(tok, "height") == 0)
+		{
+			nrooms = atol(pos);
+		}
+		else if (strcmp(tok, "table_oid") == 0)
+		{
+			frel_oid = atooid(pos);
+		}
+		else if (strcmp(tok, "attnums") == 0)
+		{
+			char   *__tok, *__save;
+
+			for (__tok = strtok_r(pos, " ", &__save);
+				 __tok != NULL;
+				 __tok = strtok_r(NULL, " ", &__save))
+			{
+				attNums = lappend_int(attNums, atoi(__tok));
+			}
+		}
+		else
+			elog(ERROR, "invalid GPU buffer identifier token");
+	}
+	if (cuda_dindex < 0 ||
+		bytesize < 0 ||
+		!OidIsValid(element_oid) ||
+		nattrs != list_length(attNums) ||
+		nrooms < 0 ||
+		!OidIsValid(frel_oid))
+		elog(ERROR, "insufficient GPU buffer identifier token");
+
+	unloadArrowGpuBuffer(frel_oid, attNums,
+						 ARROW_GPUBUF_FORMAT__CUPY,
+						 cuda_dindex, &ipc_mhandle);
+	PG_RETURN_BOOL(true);
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_unload_gpu);
+
+/*
  * pgstrom_startup_arrow_fdw
  */
 static void
@@ -4471,6 +5195,12 @@ pgstrom_startup_arrow_fdw(void)
 			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
 			dlist_init(&arrow_metadata_state->mvcc_slots[i]);
+		}
+
+		for (i=0; i < ARROW_GPUBUF_HASH_NSLOTS; i++)
+		{
+			LWLockInitialize(&arrow_metadata_state->gpubuf_locks[i], -1);
+			dlist_init(&arrow_metadata_state->gpubuf_slots[i]);
 		}
 	}
 }
@@ -4577,4 +5307,5 @@ pgstrom_init_arrow_fdw(void)
 
 	/* misc init */
 	dlist_init(&arrow_write_redo_list);
+	dlist_init(&arrow_gpu_buffer_tracker_list);
 }
