@@ -4586,25 +4586,31 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 			 */
 			for (j=0; j < gpubuf->nattrs; j++)
 			{
-				RecordBatchFieldState *column = &rb_state->columns[j];
-				size_t		offset;
+				RecordBatchFieldState *column;
+				int			attnum = gpubuf->attnums[j];
+				size_t		hoffset = rb_state->rb_offset;
+				size_t		doffset;
 				size_t		length;
 				size_t		padding = 0;
 
-				offset = unitsz * (row_index + j * gpubuf->nrooms);
+				Assert(attnum > 0 && attnum <= rb_state->ncols);
+				column = &rb_state->columns[attnum-1];
+				hoffset += column->values_offset;
+				
+				doffset = unitsz * (row_index + j * gpubuf->nrooms);
 				length = unitsz * Min(rb_state->rb_nitems, column->nitems);
 				if (length > column->values_length)
 					length = column->values_length;
 				if (length < unitsz * rb_state->rb_nitems)
 					padding = unitsz * rb_state->rb_nitems - length;
-				rc = cuMemcpyHtoD(gmem_ptr + offset,
-								  mmap_ptr + column->values_offset,
+				rc = cuMemcpyHtoD(gmem_ptr + doffset,
+								  mmap_ptr + hoffset,
 								  length);
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
 				if (padding > 0)
 				{
-					rc = cuMemsetD8(gmem_ptr + offset + length, 0, padding);
+					rc = cuMemsetD8(gmem_ptr + doffset + length, 0, padding);
 					if (rc != CUDA_SUCCESS)
 						elog(ERROR, "failed on cuMemsetD8: %s", errorText(rc));
 				}
@@ -4818,10 +4824,9 @@ found:
 	hex_encode((const char *)&gpubuf->ipc_mhandle,
 			   sizeof(CUipcMemHandle), ident.data + ident.len);
 	ident.len += 2 * sizeof(CUipcMemHandle);
-	appendStringInfo(&ident,",type=%s,width=%d,height=%zu",
+	appendStringInfo(&ident,",format=cupy-%s,nitems=%zu",
 					 np_typename,
-					 gpubuf->nattrs,
-					 gpubuf->nrooms);
+					 gpubuf->nattrs * gpubuf->nrooms);
 	appendStringInfo(&ident,",table_oid=%u,attnums=",
 					 gpubuf->frel_oid);
 	for (j=0; j < gpubuf->nattrs; j++)
@@ -5071,8 +5076,7 @@ pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
 	ssize_t		bytesize = -1;
 	CUipcMemHandle ipc_mhandle;
 	Oid			element_oid = InvalidOid;
-	int			nattrs = -1;
-	ssize_t		nrooms = -1;
+	ssize_t		nitems = -1;
 	Oid			frel_oid = InvalidOid;
 	List	   *attNums = NIL;
 
@@ -5111,30 +5115,26 @@ pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
 				elog(ERROR, "ipc_handle (%s) was corrupted", pos);
 			hex_decode(pos, 2 * sizeof(CUipcMemHandle), (char *)&ipc_mhandle);
 		}
-		else if (strcmp(tok, "type") == 0)
+		else if (strcmp(tok, "format") == 0)
 		{
-			if (strcmp(pos, "int16") == 0)
+			if (strcmp(pos, "cupy-int16") == 0)
 				element_oid = INT2OID;
-			else if (strcmp(pos, "int32") == 0)
+			else if (strcmp(pos, "cupy-int32") == 0)
 				element_oid = INT4OID;
-			else if (strcmp(pos, "int64") == 0)
+			else if (strcmp(pos, "cupy-int64") == 0)
 				element_oid = INT8OID;
-			else if (strcmp(pos, "float16") == 0)
+			else if (strcmp(pos, "cupy-float16") == 0)
 				element_oid = FLOAT2OID;
-			else if (strcmp(pos, "float32") == 0)
+			else if (strcmp(pos, "cupy-float32") == 0)
 				element_oid = FLOAT4OID;
-			else if (strcmp(pos, "float64") == 0)
+			else if (strcmp(pos, "cupy-float64") == 0)
 				element_oid = FLOAT8OID;
 			else
 				elog(ERROR, "unknown np.type (%s)", pos);
 		}
-		else if (strcmp(tok, "width") == 0)
+		else if (strcmp(tok, "nitems") == 0)
 		{
-			nattrs = atoi(pos);
-		}
-		else if (strcmp(tok, "height") == 0)
-		{
-			nrooms = atol(pos);
+			nitems = atol(pos);
 		}
 		else if (strcmp(tok, "table_oid") == 0)
 		{
@@ -5157,8 +5157,8 @@ pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
 	if (cuda_dindex < 0 ||
 		bytesize < 0 ||
 		!OidIsValid(element_oid) ||
-		nattrs != list_length(attNums) ||
-		nrooms < 0 ||
+		attNums == NIL ||
+		nitems < 0 ||
 		!OidIsValid(frel_oid))
 		elog(ERROR, "insufficient GPU buffer identifier token");
 
