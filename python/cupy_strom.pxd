@@ -6,4 +6,4 @@ cdef extern from "pystrom.h":
 									  char *p_type_code,
 									  int *p_width,
 									  long *p_height)
-	void cupy_strom__ipcmem_close(uintptr_t device_ptr)
+	int cupy_strom__ipcmem_close(uintptr_t device_ptr)

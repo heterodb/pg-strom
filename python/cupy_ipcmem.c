@@ -4,54 +4,14 @@
 #include <cuda_runtime_api.h>
 #include "pystrom.h"
 
-static int
-hex_decode(const char *src, unsigned int len, char *dst)
-{
-	const char *pos = src;
-	const char *end = src + len;
-	char	   *start = dst;
-	int			c, h, l;
-
-	while (pos < end)
-	{
-		c = *pos++;
-		if (c >= '0' && c <= '9')
-			h = c - '0';
-		else if (c >= 'a' && c <= 'f')
-			h = c - 'a' + 10;
-		else if (c >= 'A' && c <= 'F')
-			h = c - 'A' + 10;
-		else
-		{
-			PyErr_Format(PyExc_ValueError, "invalid hexadecimal data");
-			return -1;
-		}
-
-		c = *pos++;
-		if (c >= '0' && c <= '9')
-			l = c - '0';
-		else if (c >= 'a' && c <= 'f')
-			l = c - 'a' + 10;
-		else if (c >= 'A' && c <= 'F')
-			l = c - 'A' + 10;
-		else
-		{
-			PyErr_Format(PyExc_ValueError, "invalid hexadecimal data");
-			return -1;
-		}
-		*dst++ = (h << 4) | l;
-	}
-	return (dst - start);
-}
-
 static bool
-cupy_strom__parse_ident(const char *ident,
-						int *p_device_id,
-						cudaIpcMemHandle_t *p_ipc_mhandle,
-						size_t *p_bytesize,
-						char *p_type_code,
-						int *p_width,
-						long *p_height)
+ipcmem__parse_ident(const char *ident,
+					int *p_device_id,
+					cudaIpcMemHandle_t *p_ipc_mhandle,
+					size_t *p_bytesize,
+					char *p_type_code,
+					int *p_nattrs,
+					long *p_nitems)
 {
 	char	   *buffer = alloca(strlen(ident) + 1);
 	char	   *tok, *save;
@@ -221,10 +181,10 @@ cupy_strom__parse_ident(const char *ident,
 		*p_bytesize = bytesize;
 	if (p_type_code)
 		*p_type_code = type_code;
-	if (p_width)
-		*p_width = nattrs;
-	if (p_height)
-		*p_height = nitems / nattrs;
+	if (p_nattrs)
+		*p_nattrs = nattrs;
+	if (p_nitems)
+		*p_nitems = nitems / nattrs;
 
 	return true;
 }
@@ -242,15 +202,13 @@ cupy_strom__ipcmem_open(const char *ident,
 	cudaError_t	rc;
 	void	   *result = NULL;
 
-	printf("ident [%s]\n", ident);
-
-	if (!cupy_strom__parse_ident(ident,
-								 &device_id,
-								 &ipc_mhandle,
-								 p_bytesize,
-								 p_type_code,
-								 p_width,
-								 p_height))
+	if (!ipcmem__parse_ident(ident,
+							 &device_id,
+							 &ipc_mhandle,
+							 p_bytesize,
+							 p_type_code,
+							 p_width,
+							 p_height))
 		return 0UL;
 
 	rc = cudaSetDevice(device_id);
@@ -263,20 +221,24 @@ cupy_strom__ipcmem_open(const char *ident,
 	}
 	rc = cudaIpcOpenMemHandle(&result, ipc_mhandle,
 							  cudaIpcMemLazyEnablePeerAccess);
-	if (rc != cudaSuccess)
+	if (rc == cudaErrorAlreadyMapped)
+	{
+
+	}
+	else if (rc != cudaSuccess)
 	{
 		PyErr_Format(PyExc_SystemError,
 					 "failed on cudaIpcOpenMemHandle: %s",
 					 cudaGetErrorString(rc));
 		return 0UL;
 	}
-
+	
 	if (p_device_id)
 		*p_device_id = device_id;
 	return (uintptr_t)result;
 }
 
-void
+int
 cupy_strom__ipcmem_close(uintptr_t device_ptr)
 {
 	cudaError_t	rc;
@@ -287,5 +249,7 @@ cupy_strom__ipcmem_close(uintptr_t device_ptr)
 		PyErr_Format(PyExc_SystemError,
 					 "failed on cudaIpcCloseMemHandle: %s",
 					 cudaGetErrorString(rc));
+		return -1;
 	}
+	return 0;
 }
