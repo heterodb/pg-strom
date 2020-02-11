@@ -72,11 +72,13 @@ MAXREGCOUNT := 128
 __STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm testapp_largeobject
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
+UTILS_RPATH := -Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)
+
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
 GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
                   $(STROM_BUILD_ROOT)/src/nvme_strom.h
-GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH)
+GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) $(UTILS_RPATH)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
 PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/pg2arrow.c \
@@ -91,7 +93,8 @@ PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
 			-I $(STROM_BUILD_ROOT)/utils \
 			-I $(shell $(PG_CONFIG) --includedir) \
 			-I $(shell $(PG_CONFIG) --includedir-server) \
-			-L $(shell $(PG_CONFIG) --libdir)
+			-L $(shell $(PG_CONFIG) --libdir) \
+			$(UTILS_RPATH)
 
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
@@ -101,7 +104,8 @@ SSBM_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/utils/ssbm/, \
 SSBM_DBGEN_DISTS_DSS = $(STROM_BUILD_ROOT)/utils/ssbm/dists.dss.h
 SSBM_DBGEN_CFLAGS = -DDBNAME=\"dss\" -DLINUX -DDB2 -DSSBM -DTANDEM \
                     -DSTATIC_DISTS=1 \
-                    -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/ssbm
+                    -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/ssbm \
+                    $(UTILS_RPATH)
 __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-21.sql ssbm-22.sql ssbm-23.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
@@ -312,7 +316,7 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 $(TESTAPP_LARGEOBJECT): $(TESTAPP_LARGEOBJECT_SOURCE)
 	$(NVCC) -I $(shell $(PG_CONFIG) --pkgincludedir) \
 	        -L $(shell $(PG_CONFIG) --pkglibdir) \
-	        -Xcompiler \"-Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)\" \
+	        -Xcompiler \"$(UTILS_RPATH)\" \
 	        -lpq -o $@ $^
 
 #
