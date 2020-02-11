@@ -1,6 +1,7 @@
 ---
 --- Test for CPU fallback and GPU kernel suspend / resume on PostgreSQL table
 ---
+SET pg_strom.regression_test_mode = on;
 
 -- this test uses pre-built test table
 SET search_path = pg_temp,pgstrom_regress,public;

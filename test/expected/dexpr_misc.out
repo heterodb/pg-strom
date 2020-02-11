@@ -1,6 +1,7 @@
 ---
 --- Test for misc device expressions
 ---
+SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_dexpr_misc_temp CASCADE;
 CREATE SCHEMA regtest_dexpr_misc_temp;

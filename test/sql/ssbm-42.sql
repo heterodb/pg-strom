@@ -1,3 +1,4 @@
+SET pg_strom.regression_test_mode = on;
 SET search_path = pgstrom_regress,public;
 SET pg_strom.debug_kernel_source = off;
 --Q4_2

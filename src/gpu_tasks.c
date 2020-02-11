@@ -565,8 +565,9 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 			snprintf(temp, sizeof(temp), "GPU%d (%s)%s",
 					 dattr->DEV_ID, dattr->DEV_NAME,
 					 gts->af_state ? " with NVMe-Strom" : "");
-			ExplainPropertyText("GPU Preference", temp, es);
 		}
+		if (!pgstrom_regression_test_mode)
+			ExplainPropertyText("GPU Preference", temp, es);
 	}
 
 	/* NVMe-Strom support */

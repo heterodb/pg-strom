@@ -1,6 +1,7 @@
 ---
 --- Micro test cases for floating-point operators / functions
 ---
+SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_dtype_float_temp CASCADE;
 CREATE SCHEMA regtest_dtype_float_temp;

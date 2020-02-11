@@ -25,6 +25,7 @@ PG_MODULE_MAGIC;
 bool		pgstrom_enabled;
 bool		pgstrom_debug_kernel_source;
 bool		pgstrom_cpu_fallback_enabled;
+bool		pgstrom_regression_test_mode;
 static int	pgstrom_chunk_size_kb;
 
 /* cost factors */
@@ -124,6 +125,15 @@ pgstrom_init_misc_guc(void)
 							 DEFAULT_CPU_OPERATOR_COST / 16.0,
 							 0,
 							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* disables some platform specific EXPLAIN output */
+	DefineCustomBoolVariable("pg_strom.regression_test_mode",
+							 "Disables some platform specific output in EXPLAIN; that can lead undesired test failed but harmless",
+							 NULL,
+							 &pgstrom_regression_test_mode,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

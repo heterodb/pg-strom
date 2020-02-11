@@ -1,6 +1,7 @@
 ---
 --- Micro test cases for date & time operators / functions
 ---
+SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_dtype_time_temp CASCADE;
 CREATE SCHEMA regtest_dtype_time_temp;
