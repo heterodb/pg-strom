@@ -168,9 +168,19 @@ __dumpArrowTypeTimestamp(SQLbuffer *buf, ArrowNode *node)
 {
 	ArrowTypeTimestamp *t = (ArrowTypeTimestamp *)node;
 
-	sql_buffer_printf(
-		buf, "{Timestamp: unit=%s}",
-		ArrowTimeUnitAsCstring(t->unit));
+	if (t->timezone)
+	{
+		sql_buffer_printf(
+			buf, "{Timestamp: unit=%s, timezone='%*s'}",
+			ArrowTimeUnitAsCstring(t->unit),
+			t->_timezone_len, t->timezone);
+	}
+	else
+	{
+		sql_buffer_printf(
+			buf, "{Timestamp: unit=%s}",
+			ArrowTimeUnitAsCstring(t->unit));
+	}
 }
 
 static void

@@ -1217,10 +1217,15 @@ assignArrowTypeTime(SQLfield *column)
 }
 
 static int
-assignArrowTypeTimestamp(SQLfield *column)
+assignArrowTypeTimestamp(SQLfield *column, const char *timezone)
 {
 	initArrowNode(&column->arrow_type, Timestamp);
 	column->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
+	if (timezone)
+	{
+		column->arrow_type.Timestamp.timezone = pstrdup(timezone);
+		column->arrow_type.Timestamp._timezone_len = strlen(timezone);
+	}
 	column->arrow_typename	= "Timestamp";
 	column->put_value		= put_timestamp_value;
 
@@ -1284,8 +1289,8 @@ assignArrowTypePgSQL(SQLfield *column,
 					 char typtype,
 					 char typalign,
 					 Oid typrelid,
-					 Oid typelemid)
-
+					 Oid typelemid,
+					 const char *timezone)
 {
 	SQLtype__pgsql	   *pgtype = &column->sql_type.pgsql;
 	
@@ -1351,10 +1356,13 @@ assignArrowTypePgSQL(SQLfield *column,
 		{
 			return assignArrowTypeTime(column);
 		}
-		else if (strcmp(typname, "timestamp") == 0 ||
-				 strcmp(typname, "timestamptz") == 0)
+		else if (strcmp(typname, "timestamp") == 0)
 		{
-			return assignArrowTypeTimestamp(column);
+			return assignArrowTypeTimestamp(column, NULL);
+		}
+		else if (strcmp(typname, "timestamptz") == 0)
+		{
+			return assignArrowTypeTimestamp(column, timezone);
 		}
 		else if (strcmp(typname, "interval") == 0)
 		{

@@ -167,7 +167,8 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 char typtype,
 									 char typalign,
 									 Oid typrelid,
-									 Oid typelem);
+									 Oid typelem,
+									 const char *timezone);
 /*
  * Error messages, and misc definitions for pg2arrow
  */

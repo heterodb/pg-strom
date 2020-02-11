@@ -41,6 +41,8 @@ static int		pgsql_password_prompt = 0;
 static char	   *pgsql_database = NULL;
 static char	   *dump_arrow_filename = NULL;
 static int		shows_progress = 0;
+/* server setting */
+static char	   *pgsql_server_timezone = NULL;
 /* dictionary batches */
 SQLdictionary  *pgsql_dictionary_list = NULL;
 
@@ -353,6 +355,39 @@ pgsql_server_connect(void)
 }
 
 /*
+ * pgsql_init_session
+ */
+static void
+pgsql_init_session(PGconn *conn)
+{
+	PGresult   *res;
+	const char *query;
+	
+	/*
+	 * ensure client encoding is UTF-8
+	 */
+	query = "set client_encoding = 'UTF8'";
+	res = PQexec(conn, query);
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("failed to change client_encoding to UTF-8: %s", query);
+
+	/*
+	 * collect server timezone info
+	 */
+	query = "show timezone";
+	res = PQexec(conn, query);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("failed to check server timezone setting: %s", query);
+	if (PQntuples(res) == 0 || PQgetisnull(res, 0, 0))
+		Elog("Bug? SHOW command returned empty result");
+	pgsql_server_timezone = strdup(PQgetvalue(res, 0, 0));
+	if (!pgsql_server_timezone)
+		Elog("out of memory");
+
+	PQclear(res);
+}
+
+/*
  * pgsql_begin_query
  */
 static PGresult *
@@ -584,7 +619,8 @@ pgsql_setup_attribute(PGconn *conn,
 										  typtype,
 										  attalign,
 										  typrelid,
-										  typelemid);
+										  typelemid,
+										  pgsql_server_timezone);
 	if (typrelid != InvalidOid)
 	{
 		assert(typtype == 'c');
@@ -1144,6 +1180,8 @@ int main(int argc, char * const argv[])
 
 	/* open PostgreSQL connection */
 	conn = pgsql_server_connect();
+	/* initialize the session */
+	pgsql_init_session(conn);
 	/* run SQL command */
 	res = pgsql_begin_query(conn, sql_command);
 	if (!res)
