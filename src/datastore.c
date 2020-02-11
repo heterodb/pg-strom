@@ -496,11 +496,13 @@ __init_kernel_column_metadata(kern_data_store *kds,
 				break;
 		}
 	}
-	if (p_attcacheoff && *p_attcacheoff > 0 && typ->typlen > 0)
-		*p_attcacheoff += typ->typlen;
-	else
-		*p_attcacheoff = -1;
-
+	if (p_attcacheoff)
+	{
+		if (*p_attcacheoff > 0 && typ->typlen > 0)
+			*p_attcacheoff += typ->typlen;
+		else
+			*p_attcacheoff = -1;
+	}
 	ReleaseSysCache(tup);
 }
 

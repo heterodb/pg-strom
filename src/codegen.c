@@ -3783,9 +3783,9 @@ __pgstrom_device_expression(PlannerInfo *root,
 		ereport(DEBUG2,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s:%d %s, at %s:%d",
-						basename(filename), lineno,
+						filename, lineno,
 						edata->message,
-						basename(edata->filename), edata->lineno),
+						edata->filename, edata->lineno),
 				 errdetail("expression: %s",
 						   nodeToString(__codegen_current_node))));
 		__codegen_current_node = NULL;
