@@ -106,7 +106,8 @@
  * flags from the PathNameOpenFile.
  */
 #if PG_VERSION_NUM < 110000
-#define PathNameOpenFile(a,b)	PathNameOpenFile((FileName)(a),(b),0600)
+#define PathNameOpenFilePerm(a,b,c)	PathNameOpenFile((FileName)(a),(b),(c))
+#define PathNameOpenFile(a,b)		PathNameOpenFile((FileName)(a),(b),0600)
 #endif
 
 /*
