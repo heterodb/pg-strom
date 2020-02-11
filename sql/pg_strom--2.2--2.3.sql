@@ -27,7 +27,19 @@ pgstrom.arrow_fdw_export_cupy(regclass, text[] = null, int = null)
   LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE OR REPLACE FUNCTION
-pgstrom.arrow_fdw_unload_gpu(text)
+pgstrom.arrow_fdw_export_cupy_pinned(regclass, text[] = null, int = null)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_export_cupy_pinned'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE OR REPLACE FUNCTION
+pgstrom.arrow_fdw_unpin_gpu_buffer(text)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_unload_gpu'
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_unpin_gpu_buffer'
+  LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION
+pgstrom.arrow_fdw_put_gpu_buffer(text)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_put_gpu_buffer'
   LANGUAGE C STRICT;

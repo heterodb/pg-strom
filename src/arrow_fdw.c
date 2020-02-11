@@ -167,7 +167,8 @@ typedef struct
 {
 	dlist_node	chain;
 	pg_atomic_uint32 refcnt;
-	bool		detached;
+	char	   *ident;
+	bool		pinned;
 	uint32		hash;
 	int			cuda_dindex;
 	CUipcMemHandle ipc_mhandle;
@@ -184,10 +185,8 @@ typedef struct
 typedef struct
 {
 	dlist_node	chain;
-	Oid			frel_oid;
-	int			format;
-	int			nattrs;
-	AttrNumber	attnums[FLEXIBLE_ARRAY_MEMBER];
+	ArrowGpuBuffer *gpubuf;
+	char		ident[FLEXIBLE_ARRAY_MEMBER];
 } ArrowGpuBufferTracker;
 
 /* ---------- static variables ---------- */
@@ -235,7 +234,8 @@ Datum	pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_export_cupy(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_export_cupy_pinned(PG_FUNCTION_ARGS);
-Datum	pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_unpin_gpu_buffer(PG_FUNCTION_ARGS);
+Datum	pgstrom_arrow_fdw_put_gpu_buffer(PG_FUNCTION_ARGS);
 
 /*
  * baseRelIsArrowFdw
@@ -4551,12 +4551,12 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 /*
- * PutArrowGpuBuffer
+ * putArrowGpuBuffer
  *
  * NOTE: caller must have exclusive lock on gpubuf_locks[]
  */
 static void
-PutArrowGpuBuffer(ArrowGpuBuffer *gpubuf)
+putArrowGpuBuffer(ArrowGpuBuffer *gpubuf)
 {
 	CUresult	rc;
 	uint32 count;
@@ -4573,18 +4573,61 @@ PutArrowGpuBuffer(ArrowGpuBuffer *gpubuf)
 }
 
 /*
+ * putAllArrowGpuBuffer - callback function when session is closed
+ */
+static void
+putAllArrowGpuBuffer(int code, Datum arg)
+{
+	/*
+	 * In case of urgent termination, we shall not touch existing GPU
+	 * buffer any more. It shall be destructed due to process termination
+	 * of GPU memory keeper.
+	 */
+	if (code != 0)
+		return;
+	
+	while (!dlist_is_empty(&arrow_gpu_buffer_tracker_list))
+	{
+		ArrowGpuBufferTracker *tracker;
+		dlist_node *dnode;
+		uint32		index;
+		LWLock	   *lock;
+
+		dnode = dlist_pop_head_node(&arrow_gpu_buffer_tracker_list);
+		tracker = dlist_container(ArrowGpuBufferTracker, chain, dnode);
+		index = tracker->gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
+		lock = &arrow_metadata_state->gpubuf_locks[index];
+
+		LWLockAcquire(lock, LW_EXCLUSIVE);
+		putArrowGpuBuffer(tracker->gpubuf);
+		LWLockRelease(lock);
+
+		elog(DEBUG2, "arrow GPU buffer [%s] was released", tracker->ident);
+		
+		pfree(tracker);
+	}
+}
+
+/*
  * BuildArrowGpuBufferCupy
  */
 static ArrowGpuBuffer *
-BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
-						struct timespec timestamp, int cuda_dindex,
-						size_t unitsz, size_t nrooms)
+BuildArrowGpuBufferCupy(Relation frel,
+						List *attNums,
+						List *rb_state_list,
+						struct timespec timestamp,
+						int cuda_dindex,
+						Oid element_oid,
+						size_t nrooms,
+						bool pinned)
 {
 	GpuContext *gcontext = NULL;
 	ArrowGpuBuffer *gpubuf = NULL;
 	int			min_dindex = (cuda_dindex >= 0 ? cuda_dindex : 0);
 	int			max_dindex = (cuda_dindex >= 0 ? cuda_dindex : numDevAttrs-1);
 	int			nattrs = list_length(attNums);
+	const char *np_typename;
+	size_t		unitsz;
 	size_t		nbytes;
 	char	   *mmap_ptr = NULL;
 	size_t		mmap_len = 0UL;
@@ -4592,8 +4635,41 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 	CUipcMemHandle ipc_mhandle;
 	dsm_handle	dsm_mhandle;
 	ListCell   *lc;
+	int			index;
 	CUresult	rc = CUDA_ERROR_NO_DEVICE;
 
+	/* get type name */
+	switch (element_oid)
+	{
+		case INT2OID:
+			unitsz = sizeof(uint16);
+			np_typename = "int16";
+			break;
+		case FLOAT2OID:
+			unitsz = sizeof(uint16);
+			np_typename = "float16";
+			break;
+		case INT4OID:
+			unitsz = sizeof(uint32);
+			np_typename = "int32";
+			break;
+		case FLOAT4OID:
+			unitsz = sizeof(uint32);
+			np_typename = "float32";
+			break;
+		case INT8OID:
+			unitsz = sizeof(uint64);
+			np_typename = "int64";
+			break;
+		case FLOAT8OID:
+			unitsz = sizeof(uint64);
+			np_typename = "float64";
+			break;
+		default:
+			elog(ERROR, "not a supported data type: %s",
+				 format_type_be(element_oid));
+	}
+	
 	/*
 	 * Allocation of the preserved device memory
 	 */
@@ -4612,21 +4688,50 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 
 	PG_TRY();
 	{
-		File	curr_filp = -1;
-		size_t	row_index = 0;
-		int		j = 0;
+		StringInfoData ident;
+		File		curr_filp = -1;
+		size_t		row_index = 0;
+		int			j = 0;
+
+		/*
+		 * Build identifier string
+		 */
+		initStringInfo(&ident);
+		appendStringInfo(&ident,
+						 "device_id=%d,bytesize=%zu,ipc_handle=",
+						 devAttrs[cuda_dindex].DEV_ID,
+						 nbytes);
+		enlargeStringInfo(&ident, 2 * sizeof(CUipcMemHandle));
+		hex_encode((const char *)&ipc_mhandle,
+				   sizeof(CUipcMemHandle),
+				   ident.data + ident.len);
+		ident.len += 2 * sizeof(CUipcMemHandle);
+		appendStringInfo(&ident,",format=cupy-%s,nitems=%zu,table_oid=%u",
+						 np_typename,
+						 nattrs * nrooms,
+						 RelationGetRelid(frel));
+		appendStringInfoString(&ident, ",attnums=");
+		foreach (lc, attNums)
+		{
+			if (lc != list_head(attNums))
+				appendStringInfoChar(&ident,' ');
+			appendStringInfo(&ident, "%d", lfirst_int(lc));
+		}
 
 		/*
 		 * setup ArrowGpuBuffer
 		 */
 		gpubuf = MemoryContextAllocZero(TopSharedMemoryContext,
-										offsetof(ArrowGpuBuffer,
-												 attnums[nattrs]));
+										MAXALIGN(offsetof(ArrowGpuBuffer,
+														  attnums[nattrs])) +
+										MAXALIGN(ident.len + 1));
+		pg_atomic_init_u32(&gpubuf->refcnt, pinned ? 2 : 1);
+		gpubuf->pinned = pinned;
+		gpubuf->cuda_dindex = cuda_dindex;
 		memcpy(&gpubuf->ipc_mhandle, &ipc_mhandle, sizeof(CUipcMemHandle));
 		gpubuf->timestamp = timestamp;
 		gpubuf->nbytes = nbytes;
 		gpubuf->nrooms = nrooms;
-		gpubuf->cuda_dindex = cuda_dindex;
 		gpubuf->frel_oid = RelationGetRelid(frel);
 		gpubuf->format = ARROW_GPUBUF_FORMAT__CUPY;
 		gpubuf->nattrs = nattrs;
@@ -4635,7 +4740,8 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 		gpubuf->hash = hash_any((unsigned char *)&gpubuf->frel_oid,
 								offsetof(ArrowGpuBuffer, attnums[nattrs]) -
 								offsetof(ArrowGpuBuffer, frel_oid));
-		pg_atomic_init_u32(&gpubuf->refcnt, 1);
+		gpubuf->ident = (char *)&gpubuf->attnums[nattrs];
+		strcpy(gpubuf->ident, ident.data);
 
 		/*
 		 * Open GPU device memory, and load the array from apache arrow files
@@ -4720,6 +4826,11 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 	}
 	PG_CATCH();
 	{
+		if (mmap_ptr)
+		{
+			if (munmap(mmap_ptr, mmap_len) != 0)
+				elog(WARNING, "failed on munmap: %m");
+		}
 		if (gcontext)
 			PutGpuContext(gcontext);
 		if (gpubuf)
@@ -4730,14 +4841,17 @@ BuildArrowGpuBufferCupy(Relation frel, List *attNums, List *rb_state_list,
 				 errorText(rc));
 		PG_RE_THROW();
 	}
-	PG_END_TRY();	
+	PG_END_TRY();
 
+	index = gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
+	dlist_push_tail(&arrow_metadata_state->gpubuf_slots[index],
+					&gpubuf->chain);
 	return gpubuf;
 }
 
 static text *
 lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
-								Oid element_oid, int cuda_dindex)
+								Oid element_oid, int cuda_dindex, bool pinned)
 {
 	Oid				frel_oid = RelationGetRelid(frel);
 	ForeignTable   *ft = GetForeignTable(frel_oid);
@@ -4747,47 +4861,13 @@ lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
 	ListCell	   *lc;
 	int				j, nattrs;
 	size_t			nrooms = 0;
-	size_t			unitsz;
-	const char	   *np_typename;
 	struct timespec	timestamp;
 	int				index;
 	LWLock		   *lock;
 	bool			has_exclusive = false;
 	dlist_mutable_iter iter;
 	ArrowGpuBuffer *gpubuf, *_key;
-	StringInfoData	ident;
-
-	/* type checks */
-	switch (element_oid)
-	{
-		case INT2OID:
-			unitsz = sizeof(uint16);
-			np_typename = "int16";
-			break;
-		case FLOAT2OID:
-			unitsz = sizeof(uint16);
-			np_typename = "float16";
-			break;
-		case INT4OID:
-			unitsz = sizeof(uint32);
-			np_typename = "int32";
-			break;
-		case FLOAT4OID:
-			unitsz = sizeof(uint32);
-			np_typename = "float32";
-			break;
-		case INT8OID:
-			unitsz = sizeof(uint64);
-			np_typename = "int64";
-			break;
-		case FLOAT8OID:
-			unitsz = sizeof(uint64);
-			np_typename = "float64";
-			break;
-		default:
-			elog(ERROR, "not a supported data type: %s",
-				 format_type_be(element_oid));
-	}
+	text		   *result = NULL;
 
 	/*
 	 * Estimation of the data size
@@ -4852,44 +4932,47 @@ lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
 retry:
 	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
 	{
-		ArrowGpuBuffer *temp = dlist_container(ArrowGpuBuffer,
-											   chain, iter.cur);
-		/* ignore detached GPU buffer; might be still referenced */
-		if (temp->detached)
-			continue;
-
-		if (temp->hash == _key->hash &&
-			(cuda_dindex < 0 || temp->cuda_dindex == cuda_dindex) &&
-			temp->frel_oid == _key->frel_oid &&
-			temp->format == _key->format &&
-			temp->nattrs == _key->nattrs &&
-			memcmp(temp->attnums, _key->attnums,
-				   sizeof(AttrNumber) * _key->nattrs) == 0)
+		gpubuf = dlist_container(ArrowGpuBuffer, chain, iter.cur);
+		if (gpubuf->hash == _key->hash &&
+			gpubuf->frel_oid == _key->frel_oid &&
+			gpubuf->format == _key->format &&
+			gpubuf->nattrs == _key->nattrs &&
+            memcmp(gpubuf->attnums, _key->attnums,
+				   sizeof(AttrNumber) * _key->nattrs) == 0 &&
+			(cuda_dindex < 0 || gpubuf->cuda_dindex == cuda_dindex) &&
+			gpubuf->timestamp.tv_sec == timestamp.tv_sec &&
+            gpubuf->timestamp.tv_nsec == timestamp.tv_nsec)
 		{
-			if (temp->timestamp.tv_sec == timestamp.tv_sec &&
-				temp->timestamp.tv_nsec == timestamp.tv_nsec)
+			/* Ok, found the latest one */
+			if (pinned)
 			{
-				/* Ok, valid GPU buffer is already built */
-				gpubuf = temp;
-				pg_atomic_fetch_and_u32(&gpubuf->refcnt, 1);
-				goto found;
-			}
-			else if (!has_exclusive)
-			{
-				/* further decision needs exclusive lock... */
-				LWLockRelease(lock);
-				LWLockAcquire(lock, LW_EXCLUSIVE);
-				has_exclusive = true;
-				goto retry;
+				if (gpubuf->pinned)
+				{
+					/* already pinned */
+					pg_atomic_fetch_add_u32(&gpubuf->refcnt, 1);
+				}
+				else if (!has_exclusive)
+				{
+					LWLockRelease(lock);
+					LWLockAcquire(lock, LW_EXCLUSIVE);
+					has_exclusive = true;
+					goto retry;
+				}
+				else
+				{
+					/* make this GPU buffed pinned */
+					gpubuf->pinned = true;
+					pg_atomic_fetch_add_u32(&gpubuf->refcnt, 2);
+				}
 			}
 			else
 			{
-				temp->detached = true;
-				PutArrowGpuBuffer(temp);
+				pg_atomic_fetch_add_u32(&gpubuf->refcnt, 1);
 			}
+			goto found;
 		}
 	}
-
+	/* Not found, so create a new Gpu memory buffer */
 	if (!has_exclusive)
 	{
 		LWLockRelease(lock);
@@ -4897,41 +4980,49 @@ retry:
 		has_exclusive = true;
 		goto retry;
 	}
-	gpubuf = BuildArrowGpuBufferCupy(frel, attNums, rb_state_list,
-									 timestamp, cuda_dindex,
-									 unitsz, nrooms);
+	gpubuf = BuildArrowGpuBufferCupy(frel,
+									 attNums,
+									 rb_state_list,
+									 timestamp,
+									 cuda_dindex,
+									 element_oid,
+									 nrooms,
+									 pinned);
 	Assert(gpubuf->hash == _key->hash);
-	dlist_push_tail(&arrow_metadata_state->gpubuf_slots[index],
-					&gpubuf->chain);
 found:
-	initStringInfo(&ident);
-	ident.len = VARHDRSZ;
-	appendStringInfo(&ident,
-					 "device_id=%d,bytesize=%zu,ipc_handle=",
-					 devAttrs[gpubuf->cuda_dindex].DEV_ID,
-					 gpubuf->nbytes);
-	enlargeStringInfo(&ident, 2 * sizeof(CUipcMemHandle));
-	hex_encode((const char *)&gpubuf->ipc_mhandle,
-			   sizeof(CUipcMemHandle), ident.data + ident.len);
-	ident.len += 2 * sizeof(CUipcMemHandle);
-	appendStringInfo(&ident,",format=cupy-%s,nitems=%zu",
-					 np_typename,
-					 gpubuf->nattrs * gpubuf->nrooms);
-	appendStringInfo(&ident,",table_oid=%u,attnums=",
-					 gpubuf->frel_oid);
-	for (j=0; j < gpubuf->nattrs; j++)
+	/* makes ArrowGpuBufferTracker */
+	PG_TRY();
 	{
-		if (j > 0)
-			appendStringInfoChar(&ident,' ');
-		appendStringInfo(&ident, "%d", gpubuf->attnums[j]);
-	}
-	SET_VARSIZE(ident.data, ident.len);
+		static bool	on_before_shmem_callback_registered = false;
+		ArrowGpuBufferTracker *tracker;
+		size_t		len = strlen(gpubuf->ident);
 
+		result = cstring_to_text(gpubuf->ident);
+
+		tracker = MemoryContextAllocZero(CacheMemoryContext,
+										 offsetof(ArrowGpuBufferTracker,
+												  ident[len+1]));
+		tracker->gpubuf = gpubuf;
+		strcpy(tracker->ident, gpubuf->ident);
+		dlist_push_head(&arrow_gpu_buffer_tracker_list, &tracker->chain);
+
+		if (!on_before_shmem_callback_registered)
+		{
+			before_shmem_exit(putAllArrowGpuBuffer, 0);
+			on_before_shmem_callback_registered = true;
+		}
+	}
+	PG_CATCH();
+	{
+		putArrowGpuBuffer(gpubuf);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	LWLockRelease(lock);
 	/* cleanups */
 	foreach (lc, fdescList)
 		FileClose((File)lfirst_int(lc));
-	return (text *)ident.data;
+	return result;
 }
 
 /*
@@ -5053,7 +5144,8 @@ __pgstrom_arrow_fdw_export_cupy(Oid frel_oid,
 		elog(ERROR, "no valid attributes are specified");
 	result = lookupOrBuildArrowGpuBufferCupy(frel, attNums,
 											 element_oid,
-											 cuda_dindex);
+											 cuda_dindex,
+											 pinned);
 	table_close(frel, AccessShareLock);
 
 	PG_RETURN_TEXT_P(result);
@@ -5107,8 +5199,8 @@ PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_export_cupy_pinned);
  * unloadArrowGpuBuffer
  */
 static void
-unloadArrowGpuBuffer(Oid frel_oid, List *attNums, int format,
-					 int cuda_dindex, CUipcMemHandle *ipc_mhandle)
+unloadArrowGpuBuffer(const char *ident,
+					 Oid frel_oid, List *attNums, int format)
 {
 	ArrowGpuBuffer *_key;
 	dlist_mutable_iter iter;
@@ -5130,20 +5222,15 @@ unloadArrowGpuBuffer(Oid frel_oid, List *attNums, int format,
 	LWLockAcquire(&arrow_metadata_state->gpubuf_locks[index], LW_EXCLUSIVE);
 	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
 	{
-		ArrowGpuBuffer *temp = dlist_container(ArrowGpuBuffer,
-											   chain, iter.cur);
-		if (temp->detached)
+		ArrowGpuBuffer *gpubuf = dlist_container(ArrowGpuBuffer,
+												 chain, iter.cur);
+		if (!gpubuf->pinned)
 			continue;		/* ignore */
-		if (temp->hash == _key->hash &&
-			temp->cuda_dindex == cuda_dindex &&
-			temp->frel_oid == frel_oid &&
-			temp->format == format &&
-			temp->nattrs == nattrs &&
-			memcmp(temp->attnums, _key->attnums,
-				   sizeof(AttrNumber) * nattrs) == 0)
+		if (gpubuf->hash == _key->hash &&
+			strcmp(gpubuf->ident, ident) == 0)
 		{
-			temp->detached = true;
-			PutArrowGpuBuffer(temp);
+			gpubuf->pinned = false;
+			putArrowGpuBuffer(gpubuf);
 			goto found;
 		}
 	}
@@ -5153,23 +5240,20 @@ found:
 }
 
 /*
- * pgstrom_arrow_fdw_unload_gpu
+ * pgstrom_arrow_fdw_unpin_gpu_buffer
  *
- * release preserved GPU memory specified by the handle
+ * release pinned GPU memory
  */
 Datum
-pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
+pgstrom_arrow_fdw_unpin_gpu_buffer(PG_FUNCTION_ARGS)
 {
-	char	   *ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
+	char	   *__ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
+	char	   *ident = pstrdup(__ident);
 	char	   *tok, *save;
-	int			cuda_dindex = -1;
-	ssize_t		bytesize = -1;
-	CUipcMemHandle ipc_mhandle;
-	Oid			element_oid = InvalidOid;
-	ssize_t		nitems = -1;
+	int			format = -1;
 	Oid			frel_oid = InvalidOid;
 	List	   *attNums = NIL;
-
+	
 	for (tok = strtok_r(ident, ",", &save);
 		 tok != NULL;
 		 tok = strtok_r(NULL,  ",", &save))
@@ -5180,56 +5264,20 @@ pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
 			elog(ERROR, "invalid GPU buffer identifier token");
 		*pos++ = '\0';
 
-		if (strcmp(tok, "device_id") == 0)
+		if (strcmp(tok, "format") == 0)
 		{
-			int		i, device_id = atoi(pos);
-
-			for (i=0; i < numDevAttrs; i++)
-			{
-				if (devAttrs[i].DEV_ID == device_id)
-				{
-					cuda_dindex = i;
-					break;
-				}
-			}
-			if (i >= numDevAttrs)
-				elog(ERROR, "device_id (%d) was not found", device_id);
-		}
-		else if (strcmp(tok, "bytesize") == 0)
-		{
-			bytesize = (ssize_t)atoll(pos);
-		}
-		else if (strcmp(tok, "ipc_handle") == 0)
-		{
-			if (strlen(pos) != 2 * sizeof(CUipcMemHandle))
-				elog(ERROR, "ipc_handle (%s) was corrupted", pos);
-			hex_decode(pos, 2 * sizeof(CUipcMemHandle), (char *)&ipc_mhandle);
-		}
-		else if (strcmp(tok, "format") == 0)
-		{
-			if (strcmp(pos, "cupy-int16") == 0)
-				element_oid = INT2OID;
-			else if (strcmp(pos, "cupy-int32") == 0)
-				element_oid = INT4OID;
-			else if (strcmp(pos, "cupy-int64") == 0)
-				element_oid = INT8OID;
-			else if (strcmp(pos, "cupy-float16") == 0)
-				element_oid = FLOAT2OID;
-			else if (strcmp(pos, "cupy-float32") == 0)
-				element_oid = FLOAT4OID;
-			else if (strcmp(pos, "cupy-float64") == 0)
-				element_oid = FLOAT8OID;
+			if (strcmp(pos, "cupy-int16") == 0 ||
+				strcmp(pos, "cupy-int32") == 0 ||
+				strcmp(pos, "cupy-int64") == 0 ||
+				strcmp(pos, "cupy-float16") == 0 ||
+				strcmp(pos, "cupy-float32") == 0 ||
+				strcmp(pos, "cupy-float64") == 0)
+				format = ARROW_GPUBUF_FORMAT__CUPY;
 			else
-				elog(ERROR, "unknown np.type (%s)", pos);
-		}
-		else if (strcmp(tok, "nitems") == 0)
-		{
-			nitems = atol(pos);
+				elog(ERROR, "unknown GPU buffer identifier format [%s]", pos);
 		}
 		else if (strcmp(tok, "table_oid") == 0)
-		{
 			frel_oid = atooid(pos);
-		}
 		else if (strcmp(tok, "attnums") == 0)
 		{
 			char   *__tok, *__save;
@@ -5241,23 +5289,57 @@ pgstrom_arrow_fdw_unload_gpu(PG_FUNCTION_ARGS)
 				attNums = lappend_int(attNums, atoi(__tok));
 			}
 		}
-		else
-			elog(ERROR, "invalid GPU buffer identifier token");
+		else if (strcmp(tok, "device_id")  != 0 &&
+				 strcmp(tok, "bytesize")   != 0 &&
+				 strcmp(tok, "ipc_handle") != 0 &&
+				 strcmp(tok, "nitems")     != 0)
+			elog(ERROR, "invalid GPU buffer identifier token [%s]", ident);
 	}
-	if (cuda_dindex < 0 ||
-		bytesize < 0 ||
-		!OidIsValid(element_oid) ||
-		attNums == NIL ||
-		nitems < 0 ||
-		!OidIsValid(frel_oid))
-		elog(ERROR, "insufficient GPU buffer identifier token");
 
-	unloadArrowGpuBuffer(frel_oid, attNums,
-						 ARROW_GPUBUF_FORMAT__CUPY,
-						 cuda_dindex, &ipc_mhandle);
+	if (format < 0 || !OidIsValid(frel_oid) || attNums == NIL)
+		elog(ERROR, "GPU buffer identifier is corrupted: [%s]", __ident);
+	
+	unloadArrowGpuBuffer(__ident, frel_oid, attNums, format);
+
 	PG_RETURN_BOOL(true);
 }
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_unload_gpu);
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_unpin_gpu_buffer);
+
+/*
+ * pgstrom_arrow_fdw_put_gpu_buffer
+ *
+ * release preserved GPU memory specified by the handle
+ */
+Datum
+pgstrom_arrow_fdw_put_gpu_buffer(PG_FUNCTION_ARGS)
+{
+	char	   *ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
+	dlist_iter	iter;
+
+	dlist_foreach(iter, &arrow_gpu_buffer_tracker_list)
+	{
+		ArrowGpuBufferTracker *tracker =
+			dlist_container(ArrowGpuBufferTracker, chain, iter.cur);
+
+		if (strcmp(tracker->ident, ident) == 0)
+		{
+			ArrowGpuBuffer *gpubuf = tracker->gpubuf;
+			uint32		index = gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
+			LWLock	   *lock = &arrow_metadata_state->gpubuf_locks[index];
+
+			LWLockAcquire(lock, LW_EXCLUSIVE);
+			putArrowGpuBuffer(gpubuf);
+			LWLockRelease(lock);
+
+			dlist_delete(&tracker->chain);
+			pfree(tracker);
+
+			PG_RETURN_BOOL(true);
+		}
+	}
+	elog(ERROR, "Not found GPU buffer with identifier=[%s]", ident);
+}
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_put_gpu_buffer);
 
 /*
  * pgstrom_startup_arrow_fdw
@@ -5391,10 +5473,10 @@ pgstrom_init_arrow_fdw(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 
-	/* arrow transaction callback */
+	/* transaction callback */
 	RegisterXactCallback(arrowFdwXactCallback, NULL);
 	RegisterSubXactCallback(arrowFdwSubXactCallback, NULL);
-
+	
 	/* misc init */
 	dlist_init(&arrow_write_redo_list);
 	dlist_init(&arrow_gpu_buffer_tracker_list);
