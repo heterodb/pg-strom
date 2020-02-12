@@ -238,6 +238,23 @@ Datum	pgstrom_arrow_fdw_unpin_gpu_buffer(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_put_gpu_buffer(PG_FUNCTION_ARGS);
 
 /*
+ * timespec_comp - compare timespec values
+ */
+static inline int
+timespec_comp(struct timespec *tv1, struct timespec *tv2)
+{
+	if (tv1->tv_sec < tv2->tv_sec)
+		return -1;
+	if (tv1->tv_sec > tv2->tv_sec)
+		return 1;
+	if (tv1->tv_nsec < tv2->tv_nsec)
+		return -1;
+	if (tv1->tv_nsec > tv2->tv_nsec)
+		return 1;
+	return 0;
+}
+
+/*
  * baseRelIsArrowFdw
  */
 bool
@@ -3802,12 +3819,15 @@ retry:
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
 		{
 			RecordBatchState *rbstate;
-
+			
 			Assert(mcache->hash == key.hash);
-			if (mcache->stat_buf.st_mtime < stat_buf.st_mtime ||
-				mcache->stat_buf.st_ctime < stat_buf.st_ctime)
+			if (timespec_comp(&mcache->stat_buf.st_mtim,
+							  &stat_buf.st_mtim) < 0 ||
+				timespec_comp(&mcache->stat_buf.st_ctim,
+							  &stat_buf.st_ctim) < 0)
 			{
-				char	buf1[64], buf2[64], buf3[64], buf4[64];
+				char	buf1[80], buf2[80], buf3[80], buf4[80];
+				char   *tail;
 
 				if (!has_exclusive)
 				{
@@ -3816,12 +3836,16 @@ retry:
 					has_exclusive = true;
 					goto retry;
 				}
-				elog(DEBUG2, "arrow_fdw: metadata cache for '%s' (m=%s c=%s) is older than the latest file (m=%s c=%s), so invalidated",
-					 FilePathName(fdesc),
-					 ctime_r(&mcache->stat_buf.st_mtime, buf1),
-					 ctime_r(&mcache->stat_buf.st_ctime, buf2),
-					 ctime_r(&stat_buf.st_mtime, buf3),
-					 ctime_r(&stat_buf.st_ctime, buf4));
+				ctime_r(&mcache->stat_buf.st_mtime, buf1);
+				ctime_r(&mcache->stat_buf.st_ctime, buf2);
+				ctime_r(&stat_buf.st_mtime, buf3);
+				ctime_r(&stat_buf.st_ctime, buf4);
+				for (tail=buf1+strlen(buf1)-1; isspace(*tail); *tail--='\0');
+				for (tail=buf2+strlen(buf2)-1; isspace(*tail); *tail--='\0');
+				for (tail=buf3+strlen(buf3)-1; isspace(*tail); *tail--='\0');
+				for (tail=buf4+strlen(buf4)-1; isspace(*tail); *tail--='\0');
+				elog(DEBUG2, "arrow_fdw: metadata cache for '%s' (m:%s, c:%s) is older than the latest file (m:%s, c:%s), so invalidated",
+					 FilePathName(fdesc), buf1, buf2, buf3, buf4);
 				arrowInvalidateMetadataCache(mcache, true);
 				break;
 			}
@@ -4960,20 +4984,12 @@ lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
 		foreach (cell, rb_temp)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
-			struct timespec *st_mtim = &rb_state->stat_buf.st_mtim;
-			struct timespec *st_ctim = &rb_state->stat_buf.st_ctim;
 
 			nrooms += rb_state->rb_nitems;
-
-			if (st_mtim->tv_sec > timestamp.tv_sec ||
-				(st_mtim->tv_sec == timestamp.tv_sec &&
-				 st_mtim->tv_nsec > timestamp.tv_nsec))
-				timestamp = *st_mtim;
-			if (st_ctim->tv_sec > timestamp.tv_sec ||
-				(st_ctim->tv_sec == timestamp.tv_sec &&
-				 st_ctim->tv_nsec > timestamp.tv_nsec))
-				timestamp = *st_ctim;
-
+			if (timespec_comp(&rb_state->stat_buf.st_mtim, &timestamp) > 0)
+				timestamp = rb_state->stat_buf.st_mtim;
+			if (timespec_comp(&rb_state->stat_buf.st_ctim, &timestamp) > 0)
+				timestamp = rb_state->stat_buf.st_ctim;
 			rb_state_list = lappend(rb_state_list, rb_state);
 		}
 		fdescList = lappend_int(fdescList, filp);
@@ -5012,8 +5028,7 @@ retry:
             memcmp(gpubuf->attnums, _key->attnums,
 				   sizeof(AttrNumber) * _key->nattrs) == 0 &&
 			(cuda_dindex < 0 || gpubuf->cuda_dindex == cuda_dindex) &&
-			gpubuf->timestamp.tv_sec == timestamp.tv_sec &&
-            gpubuf->timestamp.tv_nsec == timestamp.tv_nsec)
+			timespec_comp(&gpubuf->timestamp, &timestamp) == 0)
 		{
 			/* Ok, found the latest one */
 			if (pinned)
