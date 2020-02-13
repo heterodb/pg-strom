@@ -1,0 +1,286 @@
+--
+-- arrow_write - test for writable arrow_fdw
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_write_temp CASCADE;
+CREATE SCHEMA regtest_arrow_write_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_write_temp,public;
+CREATE TYPE comp AS (
+  x    int,
+  y    text,
+  z    timestamp
+);
+CREATE TABLE tt (
+  id   int,
+  a    smallint,
+  b    real,
+  c    numeric(12,4),
+  d    comp,
+  e    date,
+  f    time
+);
+SELECT pgstrom.random_setseed(20200213);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO tt (
+  SELECT x, pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_float(1, -100000.0, 100000.0),
+            pgstrom.random_float(1, -100000.0, 100000.0),
+            null,
+			pgstrom.random_date(1),
+			pgstrom.random_time(1)
+    FROM generate_series(1,1000) x);
+UPDATE tt SET d.x = pgstrom.random_int(1, -320000, 320000),
+              d.y = pgstrom.random_text_len(1, 50),
+			  d.z = pgstrom.random_timestamp(1);
+---
+--- DDL test for arrow_fdw
+---
+\! rm -f @abs_builddir@/test_arrow_write_*.arrow
+CREATE FOREIGN TABLE ft_1 (id int)
+SERVER arrow_fdw
+OPTIONS (file '@abs_builddir@/test_arrow_write_ft_1.arrow'); -- fail
+ERROR:  unable to read '@abs_builddir@/test_arrow_write_ft_1.arrow': No such file or directory
+CREATE FOREIGN TABLE ft_2 (id int)
+SERVER arrow_fdw
+OPTIONS (file '@abs_builddir@/test_arrow_write_ft_2.arrow', writable 'true');
+CREATE FOREIGN TABLE ft_3 (id int)
+SERVER arrow_fdw
+OPTIONS (files '@abs_builddir@/test_arrow_write_ft_3a.arrow,@abs_builddir@/test_arrow_write_ft_3b.arrow', writable 'true'); -- fail
+ERROR:  arrow: 'writable' cannot use multiple backend files
+CREATE FOREIGN TABLE ft (
+  id   int,
+  a    smallint,
+  b    real,
+  c    numeric(12,4),
+  d    comp,
+  e    date,
+  f    time
+) SERVER arrow_fdw
+  OPTIONS (file '@abs_builddir@/test_arrow_write_ft.arrow', writable 'true');
+INSERT INTO ft (SELECT * FROM tt WHERE id % 20 = 6 ORDER BY id);
+SELECT count(*) FROM ft;
+ count 
+-------
+    50
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                        d                                         |     e      |        f        
+----+--------+----------+-------------+----------------------------------------------------------------------------------+------------+-----------------
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                       | 09-20-2021 | 02:47:39.890506
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022") | 10-27-2018 | 08:16:35.188467
+ 46 |  -1491 |  70974.7 |  -4071.7638 | (-273609,cHp+4iNY7Jka/t63Ld,"Mon Apr 25 07:46:18.506243 2022")                   | 08-18-2022 | 02:53:02.73196
+ 66 |  -7026 |  91057.9 | -29300.6663 | (305745,VlSMsEtEA3Hhhrtjq24/UEKIFGpeSJ73BR,"Sat Oct 19 08:51:51.541384 2024")    | 07-18-2020 | 14:17:30.503136
+ 86 | -19878 |  43943.2 |  10560.4628 | (-87913,T9CQT65Q+tRPxrEH,"Sat May 15 22:14:07.791162 2021")                      | 04-28-2022 | 17:25:01.593062
+(5 rows)
+
+\! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6678
+BEGIN;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 7 ORDER BY id LIMIT 7);
+SELECT count(*) FROM ft;
+ count 
+-------
+    57
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                           d                                           |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------+------------+-----------------
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                            | 09-20-2021 | 02:47:39.890506
+  7 | -11117 | -75651.3 | -72470.3496 | (29198,v0,"Wed Nov 23 15:07:59.155401 2022")                                          | 12-11-2021 | 17:23:52.882003
+ 17 |  22853 |  29667.7 |  11369.6769 | (-179074,YxrzP+B3k5CY1GjHhLbLvZ1,"Fri Jul 29 20:59:18.287695 2016")                   | 01-16-2024 | 10:40:17.825912
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")      | 10-27-2018 | 08:16:35.188467
+ 27 |  10411 |  31518.9 | -44265.9645 | (,iekTjZkQevw/nuGJlQwIRCz5gnCzNPU8lj83V3NKI6CeXftH,"Wed Mar 13 23:09:26.792112 2024") | 10-31-2019 | 18:56:29.289349
+(5 rows)
+
+\! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:8254
+ABORT;
+SELECT count(*) FROM ft;
+ count 
+-------
+    50
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                        d                                         |     e      |        f        
+----+--------+----------+-------------+----------------------------------------------------------------------------------+------------+-----------------
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                       | 09-20-2021 | 02:47:39.890506
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022") | 10-27-2018 | 08:16:35.188467
+ 46 |  -1491 |  70974.7 |  -4071.7638 | (-273609,cHp+4iNY7Jka/t63Ld,"Mon Apr 25 07:46:18.506243 2022")                   | 08-18-2022 | 02:53:02.73196
+ 66 |  -7026 |  91057.9 | -29300.6663 | (305745,VlSMsEtEA3Hhhrtjq24/UEKIFGpeSJ73BR,"Sat Oct 19 08:51:51.541384 2024")    | 07-18-2020 | 14:17:30.503136
+ 86 | -19878 |  43943.2 |  10560.4628 | (-87913,T9CQT65Q+tRPxrEH,"Sat May 15 22:14:07.791162 2021")                      | 04-28-2022 | 17:25:01.593062
+(5 rows)
+
+\! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6678
+BEGIN;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 3 ORDER BY id LIMIT 10);
+SELECT count(*) FROM ft;
+ count 
+-------
+    60
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 23 |  29018 | -59691.6 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
+(5 rows)
+
+SAVEPOINT s1;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 5 ORDER BY id LIMIT 10);
+SELECT count(*) FROM ft;
+ count 
+-------
+    70
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  5 |  22652 | -91651.3 | -24001.2051 | (-282795,9kaaxDZx0EU8D0WW1SQpCTSCMw,"Fri Jul 20 12:30:47.871955 2018")                      | 11-09-2019 | 02:39:28.644098
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 15 |  -3423 |    26158 | -85162.0749 | (-200150,g2wEpqSS,"Wed Sep 08 12:04:56.553194 2021")                                        | 10-09-2021 | 13:04:05.561358
+(5 rows)
+
+SAVEPOINT s2;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 1 ORDER BY id LIMIT 8);
+SELECT count(*) FROM ft;
+ count 
+-------
+    78
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  1 |  11168 |   -26537 | -75489.8025 | (174459,xWZqcdYKEk6/3oNWfB/0eo/d75wL/bWCC/1nN8EG7aqPPlVc,"Sun Dec 04 08:03:17.507708 2016") | 09-08-2023 | 10:44:53.106828
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  5 |  22652 | -91651.3 | -24001.2051 | (-282795,9kaaxDZx0EU8D0WW1SQpCTSCMw,"Fri Jul 20 12:30:47.871955 2018")                      | 11-09-2019 | 02:39:28.644098
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+ 11 | -11798 | -68490.1 |  -42688.955 | (-292551,KH4D5KrjTsGd+qsTLfztN2To7kxwpWUDrkPaI,"Wed Mar 28 15:34:55.499765 2018")           | 12-07-2023 | 18:06:35.44055
+(5 rows)
+
+ROLLBACK TO SAVEPOINT s1;
+SELECT count(*) FROM ft;
+ count 
+-------
+    60
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 23 |  29018 | -59691.6 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
+(5 rows)
+
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 8 ORDER BY id LIMIT 5);
+SELECT count(*) FROM ft;
+ count 
+-------
+    65
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 5;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+  8 | -13222 |  23282.6 |             | (-266014,o/XTO5UxSulBR+mACkz7QX9exaou3t5Lzqje13SIqjVtPL,"Mon Oct 29 01:27:48.36778 2018")   | 01-07-2015 | 13:24:40.402521
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 18 | -28017 |  98803.7 |  -5750.4796 | (235191,LTeNChSf0eOUAbuYxmQAajXygmqDVVBMEeVMCQ,"Sun Jul 28 23:00:06.451477 2024")           | 03-14-2016 | 23:31:54.669633
+(5 rows)
+
+COMMIT;
+SELECT count(*) FROM ft;
+ count 
+-------
+    65
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 8;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+  8 | -13222 |  23282.6 |             | (-266014,o/XTO5UxSulBR+mACkz7QX9exaou3t5Lzqje13SIqjVtPL,"Mon Oct 29 01:27:48.36778 2018")   | 01-07-2015 | 13:24:40.402521
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 18 | -28017 |  98803.7 |  -5750.4796 | (235191,LTeNChSf0eOUAbuYxmQAajXygmqDVVBMEeVMCQ,"Sun Jul 28 23:00:06.451477 2024")           | 03-14-2016 | 23:31:54.669633
+ 23 |  29018 | -59691.6 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
+ 28 | -25276 |  80008.1 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
+(8 rows)
+
+BEGIN;
+SELECT pgstrom.arrow_fdw_truncate('ft');
+ arrow_fdw_truncate 
+--------------------
+ 
+(1 row)
+
+SELECT count(*) FROM ft;
+ count 
+-------
+     0
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 8;
+ id | a | b | c | d | e | f 
+----+---+---+---+---+---+---
+(0 rows)
+
+ABORT;
+SELECT count(*) FROM ft;
+ count 
+-------
+    65
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 8;
+ id |   a    |    b     |      c      |                                              d                                              |     e      |        f        
+----+--------+----------+-------------+---------------------------------------------------------------------------------------------+------------+-----------------
+  3 | -10095 |   -26621 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
+  6 | -27810 | -25407.7 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
+  8 | -13222 |  23282.6 |             | (-266014,o/XTO5UxSulBR+mACkz7QX9exaou3t5Lzqje13SIqjVtPL,"Mon Oct 29 01:27:48.36778 2018")   | 01-07-2015 | 13:24:40.402521
+ 13 | -22777 | -48037.6 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
+ 18 | -28017 |  98803.7 |  -5750.4796 | (235191,LTeNChSf0eOUAbuYxmQAajXygmqDVVBMEeVMCQ,"Sun Jul 28 23:00:06.451477 2024")           | 03-14-2016 | 23:31:54.669633
+ 23 |  29018 | -59691.6 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
+ 26 |  12508 | -24710.8 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
+ 28 | -25276 |  80008.1 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
+(8 rows)
+
+SELECT pgstrom.arrow_fdw_truncate('ft');
+ arrow_fdw_truncate 
+--------------------
+ 
+(1 row)
+
+SELECT count(*) FROM ft;
+ count 
+-------
+     0
+(1 row)
+
+SELECT * FROM ft ORDER by id LIMIT 8;
+ id | a | b | c | d | e | f 
+----+---+---+---+---+---+---
+(0 rows)
+

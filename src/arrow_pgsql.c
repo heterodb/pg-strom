@@ -582,6 +582,7 @@ __put_timestamp_value_generic(SQLfield *column,
 	{
 		assert(pgsql_sz == sizeof(Timestamp));
 		value = __ntoh64(*((const Timestamp *)addr));
+
 		/* adjust timezone if any */
 		if (column->timestamp__tz_offset)
 			value += column->timestamp__tz_offset;
@@ -976,6 +977,8 @@ put_composite_value(SQLfield *column,
 		for (j=0; j < column->nfields; j++)
 		{
 			SQLfield   *field = &column->subfields[j];
+			int			vl_len;
+			char	   *vl_dat;
 
 			if (j >= nvalids || (nullmap && att_isnull(j, nullmap)))
 			{
@@ -985,19 +988,20 @@ put_composite_value(SQLfield *column,
 			{
 				Assert(field->sql_type.pgsql.typlen > 0 &&
 					   field->sql_type.pgsql.typlen <= sizeof(Datum));
+
+				off = TYPEALIGN(field->sql_type.pgsql.typalign, off);
 				usage += sql_field_put_value(field, base + off,
 											 field->sql_type.pgsql.typlen);
-				off = TYPEALIGN(field->sql_type.pgsql.typalign,
-								off + field->sql_type.pgsql.typlen);
+				off += field->sql_type.pgsql.typlen;
 			}
 			else if (field->sql_type.pgsql.typlen == -1)
 			{
-				int		vl_len = VARSIZE_ANY_EXHDR(base + off);
-				char   *vl_dat = VARDATA_ANY(base + off);
-
+				if (!VARATT_NOT_PAD_BYTE(base + off))
+					off = TYPEALIGN(field->sql_type.pgsql.typalign, off);
+				vl_dat = VARDATA_ANY(base + off);
+				vl_len = VARSIZE_ANY_EXHDR(base + off);
 				usage += sql_field_put_value(field, vl_dat, vl_len);
-				off = TYPEALIGN(field->sql_type.pgsql.typalign,
-								off + VARSIZE_ANY(base + off));
+				off += VARSIZE_ANY(base + off);
 			}
 			else
 			{

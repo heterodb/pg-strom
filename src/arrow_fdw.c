@@ -4542,7 +4542,7 @@ __applyArrowInsertRedoLog(arrowWriteRedoLog *redo, bool is_commit)
 	}
 	close(fdesc);
 
-	elog(NOTICE, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->pathname, redo->footer_offset, redo->footer_length);
+	elog(DEBUG2, "arrow_fdw: REDO log applied (xid=%u, cid=%u, file=[%s], offset=%zu, length=%zu)", redo->xid, redo->cid, redo->pathname, redo->footer_offset, redo->footer_length);
 }
 
 static void
