@@ -135,6 +135,7 @@ Arrow_Fdwは以下のオプションに対応しています。現状、全て�
 |外部テーブル|`dir`|指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。|
 |外部テーブル|`suffix`|`dir`オプションの指定時、例えば`.arrow`など、特定の接尾句を持つファイルだけをマップします。|
 |外部テーブル|`parallel_workers`|この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける`parallel_workers`ストレージパラメータと同等の意味を持ちます。|
+|外部テーブル|`writable`|この外部テーブルに対する`INSERT`文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。|
 }
 @en{
 Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.
@@ -146,6 +147,7 @@ Arrow_Fdw supports the options below. Right now, all the options are for foreign
 |foreign table|`dir`|It maps all the Arrow files in the directory specified on the foreign table.
 |foreign table|`suffix`|When `dir` option is given, it maps only files with the specified suffix, like `.arrow` for example.
 |foreign table|`parallel_workers`|It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to `parallel_workers` storage parameter at normal tables.|
+|foreign table|`writable`|It allows execution of `INSERT` command on the foreign table. See the section of "Writable Arrow_Fdw"|
 }
 
 @ja:##データ型の対応
@@ -160,7 +162,7 @@ Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように�
 |`FloatingPoint`|`float2,float4,float8`|`float2`はPG-Stromによる独自拡張|
 |`Binary`       |`bytea`           |    |
 |`Utf8`         |`text`            |    |
-|`Decimal`      |`numeric          |    |
+|`Decimal`      |`numeric`         |    |
 |`Date`         |`date`            |`unitsz=Day`相当に補正|
 |`Time`         |`time`            |`unitsz=MicroSecond`相当に補正|
 |`Timestamp`    |`timestamp`       |`unitsz=MicroSecond`相当に補正|
@@ -363,7 +365,7 @@ On the other hand, `pg2arrow` command, developed by PG-Strom Development Team, e
 }
 
 ```
-$ pg2arrow --help
+$ ./pg2arrow --help
 Usage:
   pg2arrow [OPTION]... [DBNAME [USERNAME]]
 
@@ -373,7 +375,10 @@ General options:
   -f, --file=FILENAME     SQL command from file
       (-c and -f are exclusive, either of them must be specified)
   -o, --output=FILENAME   result file in Apache Arrow format
-      (default creates a temporary file)
+      --append=FILENAME   result file to be appended
+
+      --output and --append are exclusive to use at the same time.
+      If neither of them are specified, it creates a temporary file.)
 
 Arrow format options:
   -s, --segment-size=SIZE size of record batch for each
@@ -386,11 +391,12 @@ Connection options:
   -w, --no-password       never prompt for password
   -W, --password          force password prompt
 
-Debug options:
+Other options:
       --dump=FILENAME     dump information of arrow file
-      --progress          shows progress of the job.
+      --progress          shows progress of the job
+      --set=NAME:VALUE    GUC option to set before SQL execution
 
-Report bugs to <pgstrom@heterodbcom>.
+Report bugs to <pgstrom@heterodb.com>.
 ```
 @ja{
 PostgreSQLへの接続パラメータはpsqlやpg_dumpと同様に、`-h`や`-U`などのオプションで指定します。 基本的なコマンドの使用方法は、`-c|--command`オプションで指定したSQLをPostgreSQL上で実行し、その結果を`-o|--output`で指定したファイルへArrow形式で書き出します。
@@ -398,6 +404,13 @@ PostgreSQLへの接続パラメータはpsqlやpg_dumpと同様に、`-h`や`-U`
 @en{
 The `-h` or `-U` option specifies the connection parameters of PostgreSQL, like `psql` or `pg_dump`. The simplest usage of this command is running a SQL command specified by `-c|--command` option on PostgreSQL server, then write out results into the file specified by `-o|--output` option in Arrow format.
 }
+@ja{
+`-o|--output`オプションの代わりに`--append`オプションを使用する事ができ、これは既存のApache Arrowファイルへの追記を意味します。この場合、追記されるApache Arrowファイルは指定したSQLの実行結果と完全に一致するスキーマ構造を持たねばなりません。
+}
+@en{
+`--append` option is available, instead of `-o|--output` option. It means appending data to existing Apache Arrow file. In this case, the target Apache Arrow file must have fully identical schema definition towards the specified SQL command.
+}
+
 
 @ja{
 以下の例は、テーブル`t0`に格納されたデータを全て読込み、ファイル`/tmp/t0.arrow`へと書き出すというものです。
@@ -415,6 +428,119 @@ $ pg2arrow -U kaigai -d postgres -c "SELECT * FROM t0" -o /tmp/t0.arrow
 @en{
 Although it is an option for developers, `--dump <filename>` prints schema definition and record-batch location and size of Arrow file in human readable form.
 }
+@ja{
+`--progress`オプションを指定すると、処理の途中経過を表示する事が可能です。これは巨大なテーブルをApache Arrow形式に変換する際に有用です。
+}
+@en{
+`--progress` option enables to show progress of the task. It is useful when a huge table is transformed to Apache Arrow format.
+}
+
+@ja:##書き込み可能Arrow_Fdw
+@en:##Writable Arrow_Fdw
+@ja{
+`writable`オプションを付加したArrow_Fdw外部テーブルに対しては、`INSERT`構文によりデータを追記する事が可能です。また、`pgstrom.arrow_fdw_truncate()`関数を用いて外部テーブル全体、すなわちその背後にあるApache Arrowファイルの内容を消去する事が可能です。一方、`UPDATE`および`DELETE`構文に関してはサポートされていません。
+}
+@en{
+Arrow_Fdw foreign tables that have `writable` option allow to append data using `INSERT` command, and to erase entire contents of the foreign table (that is Apache Arrow file on behalf of the foreign table) using `pgstrom.arrow_fdw_truncate()` function. On the other hand, `UPDATE` and `DELETE` commands are not supported.
+}
+
+@ja{
+Arrow_Fdw外部テーブルに`writable`オプションを付与する場合、`file`または`files`オプションで指定するパス名は1個だけが許容されます。複数個のパス名を指定することはできません。また、`dir`オプションと併用する事もできません。
+外部テーブルを定義した時点で、指定したパスに実際にApache Arrowファイルが存在している必要はありませんが、その場合、PostgreSQLは当該パスにファイルを新規作成する権限が必要です。
+}
+@en{
+In case of `writable` option was enabled on Arrow_Fdw foreign tables, it accepts only one pathname specified by the `file` or `files` option. You cannot specify multiple pathnames, and exclusive to the `dir` option.
+It does not require that the Apache Arrow file actually exists on the specified path at the foreign table declaration time, on the other hands, PostgreSQL server needs to have permission to create a new file on the path.
+}
+
+![Writable Arrow_Fdw](./img/arrow_writable.png)
+
+@ja{
+上の図は Apache Arrow 形式ファイルの内部レイアウトを示したものです。ヘッダやフッタなどのメタデータのほか、辞書圧縮用の辞書情報であるDictionaryBatchや、ユーザデータを保持するRecordBatchと呼ばれる領域を複数個持つことができます。
+
+RecordBatchとは、ある一定の行数ごとに列データをまとめた記録単位です。例えば、`x`、`y`、`z`というフィールドを持つApache Arrowファイルにおいて、RecordBatch[0]が2,500行を含んでいる場合、RecordBatch[0]にはそれぞれ2,500個の`x`、`y`、`z`フィールドの値が列形式で格納され、続いてRecordBatch[1]が4,000行を含んでいる場合、同様にRecordBatch[1]には4,000行分の`x`、`y`、`z`フィールドの値が列形式で格納されます。したがって、Apache Arrowファイルにデータを追記するという事は、RecordBatchを追加するという事になります。
+
+Apache Arrow形式ファイルの内部で、Dictionary BatchやRecord Batchに対するファイルオフセット情報は、最後のRecord Batchの次の領域であるフッタ領域に保持されています。したがって、`INSERT`構文でデータを追記する時には(k+1)番目のRecord Batchで現在のフッタ領域を上書きし、その後、新たにフッタ領域を再作成するという手順を踏みます。
+このような構造を持っているため、新たに追加するRecord Batchは一度の`INSERT`コマンドで挿入された行数を持ちます。したがって、`INSERT`で数行だけ挿入するといった使い方では、ファイルの利用効率は最悪となってしまいます。Arrow_Fdwにデータを挿入する際は、一回の`INSERT`コマンドで可能な限り大量のレコードを投入するようにしてください。
+}
+@en{
+The diagram above introduces the internal layout of Apache Arrow files. In addition to the metadata like header or footer, it can have multiple DictionayBatch (dictionary data for dictionary compression) and RecordBatch (user data) chunks.
+
+RecordBatch is a unit of columnar data that have a particular number of rows. For example, on the Apache Arrow file that have `x`, `y` and `z` fields, when RecordBatch[0] contains 2,500 rows, it means 2,500 items of `x`, `y` and `z` fields are located at the RecordBatch[0] in columnar format. Also, when RecordBatch[1] contains 4,000 rows, it also means 4,000 items of `x`, `y` and `z` fields are located at the RecordBatch[1] in columnar format. Therefore, appending user data to Apache Arrow file is addition of a new RecordBatch.
+
+On Apache Arrow files, the file offset information towards DictionaryBatch and RecordBatch are internally held by the Footer chunk, which is next to the last RecordBatch. So, we can overwrite the original Footer chunk by the (k+1)th RecordBatch when `INSERT` command appends new data, then reconstruct a new Footer.
+Due to the data format, the newly appended RecordBatch has rows processed by the single `INSERT` command. So, it makes the file usage worst efficiency if an `INSERT` command added only a few rows. We recommend to insert as many rows as possible by a single `INSERT` command, when you add data to Arrow_Fdw foreign table.
+}
+
+@ja{
+Arrow_Fdw外部テーブルへの書き込みはPostgreSQLのトランザクション制御に従います。トランザクションがcommitされるまでは、他の並行トランザクションから追記した内容を参照する事はできず、また未コミットの追記データはrollbackする事が可能です。
+実装上の理由により、Arrow_Fdw外部テーブルへの書き込みは`ShareRowExclusiveLock`を獲得します（通常のPostgreSQLテーブルに対する`INSERT`や`UPDATE`が獲得するのは`RowExclusiveLock`）。これは、特定のArrow_Fdw外部テーブルへの書き込みを行う事ができるのは、同時に1トランザクションのみである事を意味します。
+Arrow_Fdw外部テーブルの期待する書き込みワークロードはバルクロードが中心であるため、通常これは大きな問題ではありませんが、多数の並行トランザクションからArrow_Fdwテーブルへの書き込みを行いたい場合は、一時テーブルの利用を検討してください。
+}
+@en{
+Write operations to Arrow_Fdw follows transaction control of PostgreSQL. No concurrent transactions can reference the rows newly appended until its commit, and user can rollback the pending written data, which is uncommited.
+Due to the implementation reason, writes to Arrow_Fdw foreign table acquires `ShareRowExclusiveLock`, although `INSERT` or `UPDATE` on regular PostgreSQL tables acquire `RowExclusiveLock`. It means only 1 transaction can write to a particular Arrow_Fdw foreign table concurrently.
+It is not a problem usually because the workloads Arrow_Fdw expects are mostly bulk data loading. When you design many concurrent transaction try to write Arrow_Fdw foreign table, we recomment to use a temporary table for many small writes.
+}
+
+```
+postgres=# CREATE FOREIGN TABLE ftest (x int)
+           SERVER arrow_fdw
+           OPTIONS (file '/dev/shm/ftest.arrow', writable 'true');
+CREATE FOREIGN TABLE
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,100));
+INSERT 0 100
+postgres=# BEGIN;
+BEGIN
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,50));
+INSERT 0 50
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   150
+(1 row)
+
+@ja:-- トランザクションをロールバックすると、上記の追記は取り消されます。
+@en:-- By the transaction rollback, the above INSERT shall be reverted.
+
+postgres=# ROLLBACK;
+ROLLBACK
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+```
+
+@ja{
+現在のところ、PostgreSQLは外部テーブルに対する`TRUNCATE`文の実行をサポートしていません。
+その代替としてArrow_Fdwには`pgstrom.arrow_fdw_truncate(regclass)`関数が用意されており、これを用いてArrow_Fdwの背後に存在するApache Arrowファイルの内容を消去する事ができます。
+}
+@en{
+Right now, PostgreSQL does not support `TRUNCATE` statement on foreign tables.
+As an alternative, Arrow_Fdw provide `pgstrom.arrow_fdw_truncate(regclass)` function that eliminates all the contents of Apache Arrow file on behalf of the foreign table.
+}
+
+```
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+
+postgres=# SELECT pgstrom.arrow_fdw_truncate('ftest');
+ arrow_fdw_truncate
+--------------------
+
+(1 row)
+
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+     0
+(1 row)
+```
+
 
 @ja:#先進的な使い方
 @en:#Advanced Usage

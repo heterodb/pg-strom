@@ -134,6 +134,8 @@
         
             <li><a class="toctree-l4" href="#using-pg2arrow">Using Pg2Arrow</a></li>
         
+            <li><a class="toctree-l4" href="#writable-arrow_fdw">Writable Arrow_Fdw</a></li>
+        
         </ul>
     
 
@@ -228,7 +230,7 @@
                 <h1>Columnar data store (Arrow_Fdw)</h1>
 
 <h1 id="overview">Overview</h1>
-<p>PostgreSQL tables internally consist of 8KB blocks<sup id="fnref:1"><a class="footnote-ref" href="#fn:1" rel="footnote">1</a></sup>, and block contains tuples which is a data structure of all the attributes and metadata per row. It collocates date of a row closely, so it works effectively for INSERT/UPDATE-major workloads, but not suitable for summarizing or analytics of mass-data.</p>
+<p>PostgreSQL tables internally consist of 8KB blocks<sup id="fnref:1"><a class="footnote-ref" href="#fn:1">1</a></sup>, and block contains tuples which is a data structure of all the attributes and metadata per row. It collocates date of a row closely, so it works effectively for INSERT/UPDATE-major workloads, but not suitable for summarizing or analytics of mass-data.</p>
 <p>It is not usual to reference all the columns in a table on mass-data processing, and we tend to reference a part of columns in most cases. In this case, the storage I/O bandwidth consumed by unreferenced columns are waste, however, we have no easy way to fetch only particular columns referenced from the row-oriented data structure.</p>
 <p>In case of column oriented data structure, in an opposite manner, it has extreme disadvantage on INSERT/UPDATE-major workloads, however, it can pull out maximum performance of storage I/O on mass-data processing workloads because it can loads only referenced columns. From the standpoint of processor efficiency also, column-oriented data structure looks like a flat array that pulls out maximum bandwidth of memory subsystem for GPU, by special memory access pattern called Coalesced Memory Access.</p>
 <p><img alt="Row/Column data structure" src="../img/row_column_structure.png" /></p>
@@ -301,6 +303,11 @@ OPTIONS (file '/path/to/logdata.arrow');
 <td align="left">foreign table</td>
 <td align="left"><code>parallel_workers</code></td>
 <td align="left">It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to <code>parallel_workers</code> storage parameter at normal tables.</td>
+</tr>
+<tr>
+<td align="left">foreign table</td>
+<td align="left"><code>writable</code></td>
+<td align="left">It allows execution of <code>INSERT</code> command on the foreign table. See the section of "Writable Arrow_Fdw"</td>
 </tr>
 </tbody>
 </table>
@@ -488,7 +495,7 @@ f.close()
 <h2 id="using-pg2arrow">Using Pg2Arrow</h2>
 <p>On the other hand, <code>pg2arrow</code> command, developed by PG-Strom Development Team, enables us to write out query result into Arrow file. This tool is designed to write out massive amount of data into storage device like NVME-SSD. It fetch query results from PostgreSQL database system, and write out Record Batches of Arrow format for each data size specified by the <code>-s|--segment-size</code> option. Thus, its memory consumption is relatively reasonable.</p>
 <p><code>pg2arrow</code> command is distributed with PG-Strom. It shall be installed on the <code>bin</code> directory of PostgreSQL related utilities.</p>
-<pre><code>$ pg2arrow --help
+<pre><code>$ ./pg2arrow --help
 Usage:
   pg2arrow [OPTION]... [DBNAME [USERNAME]]
 
@@ -498,7 +505,10 @@ General options:
   -f, --file=FILENAME     SQL command from file
       (-c and -f are exclusive, either of them must be specified)
   -o, --output=FILENAME   result file in Apache Arrow format
-      (default creates a temporary file)
+      --append=FILENAME   result file to be appended
+
+      --output and --append are exclusive to use at the same time.
+      If neither of them are specified, it creates a temporary file.)
 
 Arrow format options:
   -s, --segment-size=SIZE size of record batch for each
@@ -511,19 +521,82 @@ Connection options:
   -w, --no-password       never prompt for password
   -W, --password          force password prompt
 
-Debug options:
+Other options:
       --dump=FILENAME     dump information of arrow file
-      --progress          shows progress of the job.
+      --progress          shows progress of the job
+      --set=NAME:VALUE    GUC option to set before SQL execution
 
-Report bugs to &lt;pgstrom@heterodbcom.
+Report bugs to &lt;pgstrom@heterodbcom&gt;.
 </code></pre>
 
 <p>The <code>-h</code> or <code>-U</code> option specifies the connection parameters of PostgreSQL, like <code>psql</code> or <code>pg_dump</code>. The simplest usage of this command is running a SQL command specified by <code>-c|--command</code> option on PostgreSQL server, then write out results into the file specified by <code>-o|--output</code> option in Arrow format.</p>
+<p><code>--append</code> option is available, instead of <code>-o|--output</code> option. It means appending data to existing Apache Arrow file. In this case, the target Apache Arrow file must have fully identical schema definition towards the specified SQL command.</p>
 <p>The example below reads all the data in table <code>t0</code>, then write out them into the file <code>/tmp/t0.arrow</code>.</p>
 <pre><code>$ pg2arrow -U kaigai -d postgres -c &quot;SELECT * FROM t0&quot; -o /tmp/t0.arrow
 </code></pre>
 
 <p>Although it is an option for developers, <code>--dump &lt;filename&gt;</code> prints schema definition and record-batch location and size of Arrow file in human readable form.</p>
+<p><code>--progress</code> option enables to show progress of the task. It is useful when a huge table is transformed to Apache Arrow format.</p>
+<h2 id="writable-arrow_fdw">Writable Arrow_Fdw</h2>
+<p>Arrow_Fdw foreign tables that have <code>writable</code> option allow to append data using <code>INSERT</code> command, and to erase entire contents of the foreign table (that is Apache Arrow file on behalf of the foreign table) using <code>pgstrom.arrow_fdw_truncate()</code> function. On the other hand, <code>UPDATE</code> and <code>DELETE</code> commands are not supported.</p>
+<p>In case of <code>writable</code> option was enabled on Arrow_Fdw foreign tables, it accepts only one pathname specified by the <code>file</code> or <code>files</code> option. You cannot specify multiple pathnames, and exclusive to the <code>dir</code> option.
+It does not require that the Apache Arrow file actually exists on the specified path at the foreign table declaration time, on the other hands, PostgreSQL server needs to have permission to create a new file on the path.</p>
+<p><img alt="Writable Arrow_Fdw" src="../img/arrow_writable.png" /></p>
+<p>The diagram above introduces the internal layout of Apache Arrow files. In addition to the metadata like header or footer, it can have multiple DictionayBatch (dictionary data for dictionary compression) and RecordBatch (user data) chunks.</p>
+<p>RecordBatch is a unit of columnar data that have a particular number of rows. For example, on the Apache Arrow file that have <code>x</code>, <code>y</code> and <code>z</code> fields, when RecordBatch[0] contains 2,500 rows, it means 2,500 items of <code>x</code>, <code>y</code> and <code>z</code> fields are located at the RecordBatch[0] in columnar format. Also, when RecordBatch[1] contains 4,000 rows, it also means 4,000 items of <code>x</code>, <code>y</code> and <code>z</code> fields are located at the RecordBatch[1] in columnar format. Therefore, appending user data to Apache Arrow file is addition of a new RecordBatch.</p>
+<p>On Apache Arrow files, the file offset information towards DictionaryBatch and RecordBatch are internally held by the Footer chunk, which is next to the last RecordBatch. So, we can overwrite the original Footer chunk by the (k+1)th RecordBatch when <code>INSERT</code> command appends new data, then reconstruct a new Footer.
+Due to the data format, the newly appended RecordBatch has rows processed by the single <code>INSERT</code> command. So, it makes the file usage worst efficiency if an <code>INSERT</code> command added only a few rows. We recommend to insert as many rows as possible by a single <code>INSERT</code> command, when you add data to Arrow_Fdw foreign table.</p>
+<p>Write operations to Arrow_Fdw follows transaction control of PostgreSQL. No concurrent transactions can reference the rows newly appended until its commit, and user can rollback the pending written data, which is uncommited.
+Due to the implementation reason, writes to Arrow_Fdw foreign table acquires <code>ShareRowExclusiveLock</code>, although <code>INSERT</code> or <code>UPDATE</code> on regular PostgreSQL tables acquire <code>RowExclusiveLock</code>. It means only 1 transaction can write to a particular Arrow_Fdw foreign table concurrently.
+It is not a problem usually because the workloads Arrow_Fdw expects are mostly bulk data loading. When you design many concurrent transaction try to write Arrow_Fdw foreign table, we recomment to use a temporary table for many small writes.</p>
+<pre><code>postgres=# CREATE FOREIGN TABLE ftest (x int)
+           SERVER arrow_fdw
+           OPTIONS (file '/dev/shm/ftest.arrow', writable 'true');
+CREATE FOREIGN TABLE
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,100));
+INSERT 0 100
+postgres=# BEGIN;
+BEGIN
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,50));
+INSERT 0 50
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   150
+(1 row)
+
+-- By the transaction rollback, the above INSERT shall be reverted.
+
+postgres=# ROLLBACK;
+ROLLBACK
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+</code></pre>
+
+<p>Right now, PostgreSQL does not support <code>TRUNCATE</code> statement on foreign tables.
+As an alternative, Arrow_Fdw provide <code>pgstrom.arrow_fdw_truncate(regclass)</code> function that eliminates all the contents of Apache Arrow file on behalf of the foreign table.</p>
+<pre><code>postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+
+postgres=# SELECT pgstrom.arrow_fdw_truncate('ftest');
+ arrow_fdw_truncate
+--------------------
+
+(1 row)
+
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+     0
+(1 row)
+</code></pre>
+
 <h1 id="advanced-usage">Advanced Usage</h1>
 <h2 id="ssdtogpu-direct-sql">SSDtoGPU Direct SQL</h2>
 <p>In case when all the Arrow files mapped on the Arrow_Fdw foreign table satisfies the terms below, PG-Strom enables SSD-to-GPU Direct SQL to load columnar data.</p>
@@ -538,7 +611,7 @@ Report bugs to &lt;pgstrom@heterodbcom.
 <p>A typical usage scenario is processing of long-standing accumulated log-data.</p>
 <p>Unlike transactional data, log-data is mostly write-once and will never be updated / deleted. Thus, by migration of the log-data after a lapse of certain period into Arrow_Fdw foreign table that is read-only but rapid processing, we can accelerate summarizing and analytics workloads. In addition, log-data likely have timestamp, so it is quite easy design to add partition leafs periodically, like monthly, weekly or others.</p>
 <p>The example below defines a partitioned table that mixes a normal PostgreSQL table and Arrow_Fdw foreign tables.</p>
-<p>The normal PostgreSQL table, is read-writable, is specified as default partition<sup id="fnref:2"><a class="footnote-ref" href="#fn:2" rel="footnote">2</a></sup>, so DBA can migrate only past log-data into Arrow_Fdw foreign table under the database system operations.</p>
+<p>The normal PostgreSQL table, is read-writable, is specified as default partition<sup id="fnref:2"><a class="footnote-ref" href="#fn:2">2</a></sup>, so DBA can migrate only past log-data into Arrow_Fdw foreign table under the database system operations.</p>
 <pre><code>CREATE TABLE lineorder (
     lo_orderkey numeric,
     lo_linenumber integer,
@@ -641,10 +714,10 @@ COMMIT;
 <hr />
 <ol>
 <li id="fn:1">
-<p>For correctness, block size is configurable on build from 4KB to 32KB.&#160;<a class="footnote-backref" href="#fnref:1" rev="footnote" title="Jump back to footnote 1 in the text">&#8617;</a></p>
+<p>For correctness, block size is configurable on build from 4KB to 32KB.&#160;<a class="footnote-backref" href="#fnref:1" title="Jump back to footnote 1 in the text">&#8617;</a></p>
 </li>
 <li id="fn:2">
-<p>Supported at PostgreSQL v11 or later.&#160;<a class="footnote-backref" href="#fnref:2" rev="footnote" title="Jump back to footnote 2 in the text">&#8617;</a></p>
+<p>Supported at PostgreSQL v11 or later.&#160;<a class="footnote-backref" href="#fnref:2" title="Jump back to footnote 2 in the text">&#8617;</a></p>
 </li>
 </ol>
 </div>
