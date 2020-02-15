@@ -134,6 +134,8 @@
         
             <li><a class="toctree-l4" href="#pg2arrow">Pg2Arrow</a></li>
         
+            <li><a class="toctree-l4" href="#arrow_fdw">書き込み可能Arrow_Fdw</a></li>
+        
         </ul>
     
 
@@ -228,7 +230,7 @@
                 <h1>列指向データストア (Arrow_Fdw)</h1>
 
 <h1 id="_1">概要</h1>
-<p>PostgreSQLのテーブルは内部的に8KBのブロック<sup id="fnref:1"><a class="footnote-ref" href="#fn:1" rel="footnote">1</a></sup>と呼ばれる単位で編成され、ブロックは全ての属性及びメタデータを含むタプルと呼ばれるデータ構造を行単位で格納します。行を構成するデータが近傍に存在するため、これはINSERTやUPDATEの多いワークロードに有効ですが、一方で大量データの集計・解析ワークロードには不向きであるとされています。</p>
+<p>PostgreSQLのテーブルは内部的に8KBのブロック<sup id="fnref:1"><a class="footnote-ref" href="#fn:1">1</a></sup>と呼ばれる単位で編成され、ブロックは全ての属性及びメタデータを含むタプルと呼ばれるデータ構造を行単位で格納します。行を構成するデータが近傍に存在するため、これはINSERTやUPDATEの多いワークロードに有効ですが、一方で大量データの集計・解析ワークロードには不向きであるとされています。</p>
 <p>通常、大量データの集計においてはテーブル内の全ての列を参照する事は珍しく、多くの場合には一部の列だけを参照するといった処理になりがちです。この場合、実際には参照されない列のデータをストレージからロードするために消費されるI/Oの帯域は全く無駄ですが、行単位で編成されたデータに対して特定の列だけを取り出すという操作は困難です。</p>
 <p>逆に列単位でデータを編成した場合、INSERTやUPDATEの多いワークロードに対しては極端に不利ですが、大量データの集計・解析を行う際には被参照列だけをストレージからロードする事が可能になるため、I/Oの帯域を最大限に活用する事が可能です。 またプロセッサの処理効率の観点からも、列単位に編成されたデータは単純な配列であるかのように見えるため、GPUにとってはCoalesced Memory Accessというメモリバスの性能を最大限に引き出すアクセスパターンとなる事が期待できます。</p>
 <p><img alt="Row/Column data structure" src="../img/row_column_structure.png" /></p>
@@ -302,6 +304,11 @@ OPTIONS (file '/path/to/logdata.arrow');
 <td align="left"><code>parallel_workers</code></td>
 <td align="left">この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける<code>parallel_workers</code>ストレージパラメータと同等の意味を持ちます。</td>
 </tr>
+<tr>
+<td align="left">外部テーブル</td>
+<td align="left"><code>writable</code></td>
+<td align="left">この外部テーブルに対する<code>INSERT</code>文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。</td>
+</tr>
 </tbody>
 </table>
 <h2 id="_5">データ型の対応</h2>
@@ -337,7 +344,7 @@ OPTIONS (file '/path/to/logdata.arrow');
 </tr>
 <tr>
 <td align="left"><code>Decimal</code></td>
-<td align="left">`numeric</td>
+<td align="left"><code>numeric</code></td>
 <td align="left"></td>
 </tr>
 <tr>
@@ -488,7 +495,7 @@ f.close()
 <h2 id="pg2arrow">Pg2Arrow</h2>
 <p>一方、PG-Strom Development Teamが開発を行っている <code>pg2arrow</code> コマンドを使用して、PostgreSQLデータベースの内容をArrow形式ファイルへと書き出す事ができます。 このツールは比較的大量のデータをNVME-SSDなどストレージに書き出す事を念頭に設計されており、PostgreSQLデータベースから<code>-s|--segment-size</code>オプションで指定したサイズのデータを読み出すたびに、Arrow形式のレコードバッチ（Record Batch）としてファイルに書き出します。そのため、メモリ消費量は比較的リーズナブルな値となります。</p>
 <p><code>pg2arrow</code>コマンドはPG-Stromに同梱されており、PostgreSQL関連コマンドのインストール先ディレクトリに格納されます。</p>
-<pre><code>$ pg2arrow --help
+<pre><code>$ ./pg2arrow --help
 Usage:
   pg2arrow [OPTION]... [DBNAME [USERNAME]]
 
@@ -498,7 +505,10 @@ General options:
   -f, --file=FILENAME     SQL command from file
       (-c and -f are exclusive, either of them must be specified)
   -o, --output=FILENAME   result file in Apache Arrow format
-      (default creates a temporary file)
+      --append=FILENAME   result file to be appended
+
+      --output and --append are exclusive to use at the same time.
+      If neither of them are specified, it creates a temporary file.)
 
 Arrow format options:
   -s, --segment-size=SIZE size of record batch for each
@@ -511,19 +521,82 @@ Connection options:
   -w, --no-password       never prompt for password
   -W, --password          force password prompt
 
-Debug options:
+Other options:
       --dump=FILENAME     dump information of arrow file
-      --progress          shows progress of the job.
+      --progress          shows progress of the job
+      --set=NAME:VALUE    GUC option to set before SQL execution
 
-Report bugs to &lt;pgstrom@heterodbcom.
+Report bugs to &lt;pgstrom@heterodbcom&gt;.
 </code></pre>
 
 <p>PostgreSQLへの接続パラメータはpsqlやpg_dumpと同様に、<code>-h</code>や<code>-U</code>などのオプションで指定します。 基本的なコマンドの使用方法は、<code>-c|--command</code>オプションで指定したSQLをPostgreSQL上で実行し、その結果を<code>-o|--output</code>で指定したファイルへArrow形式で書き出します。</p>
+<p><code>-o|--output</code>オプションの代わりに<code>--append</code>オプションを使用する事ができ、これは既存のApache Arrowファイルへの追記を意味します。この場合、追記されるApache Arrowファイルは指定したSQLの実行結果と完全に一致するスキーマ構造を持たねばなりません。</p>
 <p>以下の例は、テーブル<code>t0</code>に格納されたデータを全て読込み、ファイル<code>/tmp/t0.arrow</code>へと書き出すというものです。</p>
 <pre><code>$ pg2arrow -U kaigai -d postgres -c &quot;SELECT * FROM t0&quot; -o /tmp/t0.arrow
 </code></pre>
 
 <p>開発者向けオプションですが、<code>--dump &lt;filename&gt;</code>でArrow形式ファイルのスキーマ定義やレコードバッチの位置とサイズを可読な形式で出力する事もできます。</p>
+<p><code>--progress</code>オプションを指定すると、処理の途中経過を表示する事が可能です。これは巨大なテーブルをApache Arrow形式に変換する際に有用です。</p>
+<h2 id="arrow_fdw">書き込み可能Arrow_Fdw</h2>
+<p><code>writable</code>オプションを付加したArrow_Fdw外部テーブルに対しては、<code>INSERT</code>構文によりデータを追記する事が可能です。また、<code>pgstrom.arrow_fdw_truncate()</code>関数を用いて外部テーブル全体、すなわちその背後にあるApache Arrowファイルの内容を消去する事が可能です。一方、<code>UPDATE</code>および<code>DELETE</code>構文に関してはサポートされていません。</p>
+<p>Arrow_Fdw外部テーブルに<code>writable</code>オプションを付与する場合、<code>file</code>または<code>files</code>オプションで指定するパス名は1個だけが許容されます。複数個のパス名を指定することはできません。また、<code>dir</code>オプションと併用する事もできません。
+外部テーブルを定義した時点で、指定したパスに実際にApache Arrowファイルが存在している必要はありませんが、その場合、PostgreSQLは当該パスにファイルを新規作成する権限が必要です。</p>
+<p><img alt="Writable Arrow_Fdw" src="../img/arrow_writable.png" /></p>
+<p>上の図は Apache Arrow 形式ファイルの内部レイアウトを示したものです。ヘッダやフッタなどのメタデータのほか、辞書圧縮用の辞書情報であるDictionaryBatchや、ユーザデータを保持するRecordBatchと呼ばれる領域を複数個持つことができます。</p>
+<p>RecordBatchとは、ある一定の行数ごとに列データをまとめた記録単位です。例えば、<code>x</code>、<code>y</code>、<code>z</code>というフィールドを持つApache Arrowファイルにおいて、RecordBatch[0]が2,500行を含んでいる場合、RecordBatch[0]にはそれぞれ2,500個の<code>x</code>、<code>y</code>、<code>z</code>フィールドの値が列形式で格納され、続いてRecordBatch[1]が4,000行を含んでいる場合、同様にRecordBatch[1]には4,000行分の<code>x</code>、<code>y</code>、<code>z</code>フィールドの値が列形式で格納されます。したがって、Apache Arrowファイルにデータを追記するという事は、RecordBatchを追加するという事になります。</p>
+<p>Apache Arrow形式ファイルの内部で、Dictionary BatchやRecord Batchに対するファイルオフセット情報は、最後のRecord Batchの次の領域であるフッタ領域に保持されています。したがって、<code>INSERT</code>構文でデータを追記する時には(k+1)番目のRecord Batchで現在のフッタ領域を上書きし、その後、新たにフッタ領域を再作成するという手順を踏みます。
+このような構造を持っているため、新たに追加するRecord Batchは一度の<code>INSERT</code>コマンドで挿入された行数を持ちます。したがって、<code>INSERT</code>で数行だけ挿入するといった使い方では、ファイルの利用効率は最悪となってしまいます。Arrow_Fdwにデータを挿入する際は、一回の<code>INSERT</code>コマンドで可能な限り大量のレコードを投入するようにしてください。</p>
+<p>Arrow_Fdw外部テーブルへの書き込みはPostgreSQLのトランザクション制御に従います。トランザクションがcommitされるまでは、他の並行トランザクションから追記した内容を参照する事はできず、また未コミットの追記データはrollbackする事が可能です。
+実装上の理由により、Arrow_Fdw外部テーブルへの書き込みは<code>ShareRowExclusiveLock</code>を獲得します（通常のPostgreSQLテーブルに対する<code>INSERT</code>や<code>UPDATE</code>が獲得するのは<code>RowExclusiveLock</code>）。これは、特定のArrow_Fdw外部テーブルへの書き込みを行う事ができるのは、同時に1トランザクションのみである事を意味します。
+Arrow_Fdw外部テーブルの期待する書き込みワークロードはバルクロードが中心であるため、通常これは大きな問題ではありませんが、多数の並行トランザクションからArrow_Fdwテーブルへの書き込みを行いたい場合は、一時テーブルの利用を検討してください。</p>
+<pre><code>postgres=# CREATE FOREIGN TABLE ftest (x int)
+           SERVER arrow_fdw
+           OPTIONS (file '/dev/shm/ftest.arrow', writable 'true');
+CREATE FOREIGN TABLE
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,100));
+INSERT 0 100
+postgres=# BEGIN;
+BEGIN
+postgres=# INSERT INTO ftest (SELECT * FROM generate_series(1,50));
+INSERT 0 50
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   150
+(1 row)
+
+-- トランザクションをロールバックすると、上記の追記は取り消されます。
+
+postgres=# ROLLBACK;
+ROLLBACK
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+</code></pre>
+
+<p>現在のところ、PostgreSQLは外部テーブルに対する<code>TRUNCATE</code>文の実行をサポートしていません。
+その代替としてArrow_Fdwには<code>pgstrom.arrow_fdw_truncate(regclass)</code>関数が用意されており、これを用いてArrow_Fdwの背後に存在するApache Arrowファイルの内容を消去する事ができます。</p>
+<pre><code>postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+   100
+(1 row)
+
+postgres=# SELECT pgstrom.arrow_fdw_truncate('ftest');
+ arrow_fdw_truncate
+--------------------
+
+(1 row)
+
+postgres=# SELECT count(*) FROM ftest;
+ count
+-------
+     0
+(1 row)
+</code></pre>
+
 <h1 id="_6">先進的な使い方</h1>
 <h2 id="ssdtogpusql">SSDtoGPUダイレクトSQL</h2>
 <p>Arrow_Fdw外部テーブルにマップされた全てのArrow形式ファイルが以下の条件を満たす場合には、列データの読み出しにSSD-to-GPUダイレクトSQLを使用する事ができます。</p>
@@ -538,7 +611,7 @@ Report bugs to &lt;pgstrom@heterodbcom.
 <p>典型的な利用シーンは、長期間にわたり蓄積したログデータの処理です。</p>
 <p>トランザクションデータと異なり、一般的にログデータは一度記録されたらその後更新削除されることはありません。 したがって、一定期間が経過したログデータは、読み出し専用ではあるものの集計処理が高速なArrow_Fdw外部テーブルに移し替えることで、集計・解析ワークロードの処理効率を引き上げる事が可能となります。また、ログデータにはほぼ間違いなくタイムスタンプが付与されている事から、月単位、週単位など、一定期間ごとにパーティション子テーブルを追加する事が可能です。</p>
 <p>以下の例は、PostgreSQLテーブルとArrow_Fdw外部テーブルを混在させたパーティションテーブルを定義したものです。</p>
-<p>書き込みが可能なPostgreSQLテーブルをデフォルトパーティションとして指定しておく<sup id="fnref:2"><a class="footnote-ref" href="#fn:2" rel="footnote">2</a></sup>事で、一定期間の経過後、DB運用を継続しながら過去のログデータだけをArrow_Fdw外部テーブルへ移す事が可能です。</p>
+<p>書き込みが可能なPostgreSQLテーブルをデフォルトパーティションとして指定しておく<sup id="fnref:2"><a class="footnote-ref" href="#fn:2">2</a></sup>事で、一定期間の経過後、DB運用を継続しながら過去のログデータだけをArrow_Fdw外部テーブルへ移す事が可能です。</p>
 <pre><code>CREATE TABLE lineorder (
     lo_orderkey numeric,
     lo_linenumber integer,
@@ -641,10 +714,10 @@ COMMIT;
 <hr />
 <ol>
 <li id="fn:1">
-<p>正確には、4KB～32KBの範囲でビルド時に指定できます&#160;<a class="footnote-backref" href="#fnref:1" rev="footnote" title="Jump back to footnote 1 in the text">&#8617;</a></p>
+<p>正確には、4KB～32KBの範囲でビルド時に指定できます&#160;<a class="footnote-backref" href="#fnref:1" title="Jump back to footnote 1 in the text">&#8617;</a></p>
 </li>
 <li id="fn:2">
-<p>PostgreSQL v11以降で対応&#160;<a class="footnote-backref" href="#fnref:2" rev="footnote" title="Jump back to footnote 2 in the text">&#8617;</a></p>
+<p>PostgreSQL v11以降で対応&#160;<a class="footnote-backref" href="#fnref:2" title="Jump back to footnote 2 in the text">&#8617;</a></p>
 </li>
 </ol>
 </div>
