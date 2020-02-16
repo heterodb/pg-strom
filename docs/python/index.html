@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Python collaboration - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Python collaboration";
+    var mkdocs_page_input_path = "python.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/python/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">Tutorial</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../operations/">Basic Operations</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../sys_admin/">System Administration</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../brin/">Index Support</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../partition/">Partitioning</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../troubles/">Trouble Shooting</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">Advanced Features</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../arrow_fdw/">Arrow_fdw</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">Python collaboration</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#background">Background</a></li>
+    
+
+    <li class="toctree-l3"><a href="#data-exchange-via-cupy">Data exchange via cuPy</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#installation-of-cupy_strom">Installation of cupy_strom</a></li>
+        
+            <li><a class="toctree-l4" href="#execution-of-custom-gpu-kernel-using-cupy">Execution of custom GPU kernel using cuPy</a></li>
+        
+            <li><a class="toctree-l4" href="#usage-from-plpython-user-defined-functions">Usage from PL/Python User Defined Functions</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">References</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">Data Types</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUC Parameters</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>Advanced Features &raquo;</li>
+        
+      
+    
+    <li>Python collaboration</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <p>This chapter introduces the way to connect machine-learning / statistical-analysis engines with PostgreSQL by the common data-frames and Python scripts (including PL/Python), and run these engines in-database.</p>
+<h1 id="background">Background</h1>
+<p><img alt="Data Processing Lifecycle" src="../img/data-processing-lifecycle.png" /></p>
+<h1 id="data-exchange-via-cupy">Data exchange via cuPy</h1>
+<p><strong>PostgreSQL-side operations</strong></p>
+<pre><code>=# CREATE FOREIGN TABLE ft (
+     id  int,
+     x   real,
+     y   real,
+     z   real
+   ) SERVER arrow_fdw
+     OPTIONS (file '/dev/shm/ftest.arrow', writable 'true');
+
+=# INSERT INTO ft (SELECT x, pgstrom.random_int(0,1,10000)::float/100.0,
+                             pgstrom.random_int(0,1,10000)::float/100.0,
+                             pgstrom.random_int(0,1,10000)::float/100.0
+                     FROM generate_series(1,5) x);
+
+=# SELECT * FROM ft;
+ id |   x   |   y   |   z
+----+-------+-------+-------
+  1 | 51.61 | 73.23 |  7.53
+  2 | 49.73 | 29.75 | 37.31
+  3 | 61.15 | 55.15 | 36.07
+  4 | 23.76 | 40.76 | 51.74
+  5 | 61.43 | 86.87 | 47.64
+(5 rows)
+</code></pre>
+
+<p><strong>Python-side operations</strong></p>
+<pre><code>import psycopg2
+import cupy
+import cupy_strom
+
+conn = psycopg2.connect(&quot;host=localhost dbname=postgres&quot;)
+curr = conn.cursor()
+curr.execute(&quot;select pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[])&quot;)
+row = curr.fetchone()
+
+X = cupy_strom.ipc_import(row[0])
+
+print(X)
+
+conn.close()
+</code></pre>
+
+<p><strong>Results</strong></p>
+<pre><code>$ python ftest.py
+[[51.61 49.73 61.15 23.76 61.43]
+ [73.23 29.75 55.15 40.76 86.87]
+ [ 7.53 37.31 36.07 51.74 47.64]]
+</code></pre>
+
+<h2 id="installation-of-cupy_strom">Installation of cupy_strom</h2>
+<pre><code>$ sudo pip3 install --upgrade numpy cupy cython
+$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/python
+$ python3 setup.py 
+</code></pre>
+
+<h2 id="execution-of-custom-gpu-kernel-using-cupy">Execution of custom GPU kernel using cuPy</h2>
+<pre><code>import psycopg2
+import cupy
+import cupy_strom
+
+// connect to PostgreSQL, and get identifier of GPU buffer
+conn = psycopg2.connect(&quot;host=localhost dbname=postgres&quot;)
+curr = conn.cursor()
+curr.execute(&quot;select pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[])&quot;)
+row = curr.fetchone()
+
+// import GPU buffer using the identifier string
+X = cupy_strom.ipc_import(row[0])
+nattrs = X.shape[0]
+nitems = X.shape[1]
+gridSz = (nitems + 2047) &gt;&gt; 11;
+Y = cupy.zeros((nattrs))
+
+// source code of the custom GPU kernel
+source='''
+extern &quot;C&quot; __global__
+           __launch_bounds__(1024)
+void
+kern_gpu_sum(double *y, const float *x, int nitems)
+{
+    __shared__ float lvalues[2048];
+    int     gridSz = (nitems + 2047) / 2048;
+    int     colIdx = blockIdx.x / gridSz;
+    int     rowBase = (blockIdx.x % gridSz) * 2048;
+    int     localId = 2 * threadIdx.x;
+    int     i, k;
+
+    // Load values to local shared buffer
+    x += colIdx * nitems;
+    for (i=threadIdx.x; i &lt; 2048; i+=blockDim.x)
+        lvalues[i] = (rowBase + i &lt; nitems ? x[rowBase + i] : 0.0);
+    __syncthreads();
+
+    // Run reduction operations
+    for (k=0; k &lt; 11; k++)
+    {
+        int     mask = ((1 &lt;&lt; k) - 1);
+
+        if ((threadIdx.x &amp; mask) == 0)
+            lvalues[localId] += lvalues[localId + (1&lt;&lt;k)];
+        __syncthreads();
+    }
+    // Write back the total sum
+    if (threadIdx.x == 0)
+        atomicAdd(&amp;y[colIdx], lvalues[0]);
+}
+'''
+kern = cupy.RawKernel(source, 'kern_gpu_sum')
+kern.__call__((gridSz * nattrs,1,1),
+              (1024,1,1),
+              (Y,X,nitems))
+print(Y / nitems)
+
+conn.close()
+</code></pre>
+
+<p><strong>Results</strong></p>
+<pre><code>=# SELECT pgstrom.arrow_fdw_truncate('ft');
+
+=# INSERT INTO ft (SELECT x, pgstrom.random_int(0,1,10000)::float/100.0,
+                             pgstrom.random_int(0,-7500,2500)::float/100.0,
+                             pgstrom.random_int(0,5000,15000)::float/100.0
+                     FROM generate_series(1,1000000) x);
+
+=# SELECT avg(x), avg(y), avg(z) FROM ft;
+       avg        |        avg        |       avg
+------------------+-------------------+------------------
+ 50.0225953391276 | -24.9964806686448 | 100.037490822002
+(1 row)
+</code></pre>
+
+<pre><code>$ python ftest.py
+[ 50.02259536 -24.99648063 100.03749086]
+</code></pre>
+
+<h2 id="usage-from-plpython-user-defined-functions">Usage from PL/Python User Defined Functions</h2>
+<p><strong>Example of PL/Python User Defined Function</strong></p>
+<pre><code>CREATE OR REPLACE FUNCTION custom_average(x_ident text)
+RETURNS float[] AS
+$$
+import cupy
+import cupy_strom
+
+X = cupy_strom.ipc_import(x_ident)
+nattrs = X.shape[0]
+nitems = X.shape[1]
+gridSz = (nitems + 2047) &gt;&gt; 11;
+
+Y = cupy.zeros((nattrs))
+
+source='''
+extern &quot;C&quot; __global__
+           __launch_bounds__(1024)
+void
+kern_gpu_sum(double *y, const float *x, int nitems)
+{
+    __shared__ float lvalues[2048];
+    int     gridSz = (nitems + 2047) / 2048;
+    int     colIdx = blockIdx.x / gridSz;
+    int     rowBase = (blockIdx.x % gridSz) * 2048;
+    int     localId = 2 * threadIdx.x;
+    int     i, k;
+
+    // Load values to local shared buffer
+    x += colIdx * nitems;
+    for (i=threadIdx.x; i &lt; 2048; i+=blockDim.x)
+        lvalues[i] = (rowBase + i &lt; nitems ? x[rowBase + i] : 0.0);
+    __syncthreads();
+
+    // Run reduction operations
+    for (k=0; k &lt; 11; k++)
+    {
+        int     mask = ((1 &lt;&lt; k) - 1);
+
+        if ((threadIdx.x &amp; mask) == 0)
+            lvalues[localId] += lvalues[localId + (1&lt;&lt;k)];
+        __syncthreads();
+    }
+    // Write back the total sum
+    if (threadIdx.x == 0)
+        atomicAdd(&amp;y[colIdx], lvalues[0]);
+}
+'''
+kern = cupy.RawKernel(source, 'kern_gpu_sum')
+kern.__call__((gridSz * nattrs,0,0),
+              (1024,0,0),
+              (Y,X,nitems))
+X = 0   # unmap GPU memory
+
+return Y / nitems
+$$ LANGUAGE 'plpython3u';
+</code></pre>
+
+<pre><code>=# SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
+                    custom_average
+-------------------------------------------------------
+ {50.0225953554688,-24.9964806318359,100.037490859375}
+(1 row)
+</code></pre>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../gstore_fdw/" class="btn btn-neutral float-right" title="Gstore_fdw">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../arrow_fdw/" class="btn btn-neutral" title="Arrow_fdw"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../arrow_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../gstore_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+
+</body>
+</html>

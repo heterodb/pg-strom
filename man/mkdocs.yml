@@ -22,6 +22,7 @@ nav:
 - 'Advanced Features' :
     - 'SSD2GPU Direct SQL' : 'ssd2gpu.md'
     - 'Arrow_fdw' : 'arrow_fdw.md'
+    - 'Python collaboration' : python.md
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'References' :
@@ -43,6 +44,7 @@ nav:
 - '先進機能' :
     - 'SSDtoGPUダイレクトSQL' : 'ssd2gpu.md'
     - 'Arrow_fdw' : 'arrow_fdw.md'
+    - 'Python連携' : python.md
     - 'Gstore_fdw' : 'gstore_fdw.md'
     - 'PL/CUDA' : 'plcuda.md'
 - 'リファレンス' :
