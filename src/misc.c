@@ -1295,3 +1295,102 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_abort_if);
+
+/*
+ * dummy entry for deprecated functions
+ */
+static void
+__pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+
+	if (OidIsValid(flinfo->fn_oid))
+		elog(ERROR, "'%s' on behalf of %s is already deprecated",
+			 cfunc_name, format_procedure(flinfo->fn_oid));
+	elog(ERROR, "'%s' is already deprecated", cfunc_name);
+}
+
+#define PG_DEPRECATED_FUNCTION(cfunc_name)				\
+	Datum	cfunc_name(PG_FUNCTION_ARGS);				\
+	Datum	cfunc_name(PG_FUNCTION_ARGS)				\
+	{													\
+		__pg_deprecated_function(fcinfo, __FUNCTION__);	\
+		PG_RETURN_NULL();								\
+	}													\
+	PG_FUNCTION_INFO_V1(cfunc_name)
+
+/* deadcode/matrix.c */
+PG_DEPRECATED_FUNCTION(array_matrix_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_accum_varbit);
+PG_DEPRECATED_FUNCTION(varbit_to_int4_array);
+PG_DEPRECATED_FUNCTION(int4_array_to_varbit);
+PG_DEPRECATED_FUNCTION(array_matrix_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_unnest);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_boolt);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_boolb);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int2t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int2b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int4t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int4b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int8t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int8b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float4t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float4b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float8t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float8b);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_booll);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_boolr);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int2l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int2r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int4l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int4r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int8l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int8r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float4l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float4r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float8l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float8r);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_float8);
+PG_DEPRECATED_FUNCTION(float4_as_int4);
+PG_DEPRECATED_FUNCTION(int4_as_float4);
+PG_DEPRECATED_FUNCTION(float8_as_int8);
+PG_DEPRECATED_FUNCTION(int8_as_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_validation);
+PG_DEPRECATED_FUNCTION(array_matrix_height);
+PG_DEPRECATED_FUNCTION(array_matrix_width);

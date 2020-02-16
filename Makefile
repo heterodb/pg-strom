@@ -34,7 +34,7 @@ __STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
         gpuscan.o gpujoin.o inners.o gpupreagg.o \
 		aggfuncs.o pl_cuda.o gstore_buf.o gstore_fdw.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-		matrix.o float2.o largeobject.o misc.o
+		float2.o largeobject.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
 		device_attrs.h cuda_filelist
 __PLCUDA_HOST = host_plcuda.o
