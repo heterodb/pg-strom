@@ -132,23 +132,19 @@
     <li class="toctree-l3"><a href="#_1">デバイス情報関数</a></li>
     
 
-    <li class="toctree-l3"><a href="#_2">配列ベース行列サポート</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l4" href="#_3">型キャスト</a></li>
-        
-            <li><a class="toctree-l4" href="#_4">配列ベース行列関数</a></li>
-        
-            <li><a class="toctree-l4" href="#_5">集約関数</a></li>
-        
-        </ul>
+    <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連</a></li>
     
 
-    <li class="toctree-l3"><a href="#_6">その他の関数</a></li>
+    <li class="toctree-l3"><a href="#gpu">GPUデータフレーム関数</a></li>
     
 
-    <li class="toctree-l3"><a href="#_7">システムビュー</a></li>
+    <li class="toctree-l3"><a href="#_2">テストデータ生成関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">その他の関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_4">システムビュー</a></li>
     
 
     </ul>
@@ -271,157 +267,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_2">配列ベース行列サポート</h1>
-<p>PL/CUDA関数と行列データを受け渡しするために、PostgreSQLの配列型を使用する事ができます。
-固定長の論理値/数値型データでNULLを含まない二次元配列は（配列データ型のヘッダ領域を除いて）フラットなデータ構造を持っており、行列のインデックスによって各要素のアドレスを一意に特定する事ができます。
-PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつか提供しています。</p>
-<h2 id="_3">型キャスト</h2>
-<table>
-<thead>
-<tr>
-<th align="left">変換先</th>
-<th align="left">変換元</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>int[]</code></td>
-<td align="left"><code>bit</code></td>
-<td align="left">ビット列型を32bit整数値の配列に変換します。不足するビットは0で埋められます。</td>
-</tr>
-<tr>
-<td align="left"><code>bit</code></td>
-<td align="left"><code>int[]</code></td>
-<td align="left">int配列をビット列型に変換します。</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_4">配列ベース行列関数</h2>
-<table>
-<thead>
-<tr>
-<th align="left">関数/演算子</th>
-<th align="left">返り値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>array_matrix_validation(anyarray)</code></td>
-<td align="left"><code>bool</code></td>
-<td align="left">配列が配列ベース行列の条件を満足しているかどうかチェックします。</td>
-</tr>
-<tr>
-<td align="left"><code>array_matrix_height(anyarray)</code></td>
-<td align="left"><code>int</code></td>
-<td align="left">配列ベース行列の高さを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>array_matrix_width(anyarray)</code></td>
-<td align="left"><code>int</code></td>
-<td align="left">配列ベース行列の幅を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>array_vector_rawsize(regtype,int)</code></td>
-<td align="left"><code>bigint</code></td>
-<td align="left">指定のデータ型で長さNのベクトルを作成した場合のサイズを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>array_matrix_rawsize(regtype,int,int)</code></td>
-<td align="left"><code>bigint</code></td>
-<td align="left">指定のデータ型で高さH幅Wの行列を作成した場合のサイズを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>array_cube_rawsize(regtype,int,int,int)</code></td>
-<td align="left"><code>bigint</code></td>
-<td align="left">指定のデータ型で高さH幅W深さDのキューブを作成した場合のサイズを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>type_len(regtype)</code></td>
-<td align="left"><code>bigint</code></td>
-<td align="left">指定のデータ型のサイズを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>composite_type_rawsize(LEN,...)</code></td>
-<td align="left"><code>bigint</code></td>
-<td align="left">指定のデータ長の並びで複合型を定義した時に必要なサイズを返します。<code>type_len()</code>を組み合わせて使用する事を想定しています。<br><code>LEN</code>は<code>int,bigint</code>のいずれか</td>
-</tr>
-<tr>
-<td align="left"><code>matrix_unnest(anyarray)</code></td>
-<td align="left"><code>record</code></td>
-<td align="left">集合を返す関数で、配列ベース行列の先頭行から順に1行ずつ取り出します。PostgreSQLはレコードの型情報を持っていませんので、<code>ROW()</code>句によって型情報を与える必要があります。</td>
-</tr>
-<tr>
-<td align="left"><code>rbind(MATRIX,MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列を縦方向に結合します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
-</tr>
-<tr>
-<td align="left"><code>rbind(TYPE,MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列の先頭行にスカラ値を結合します。複数列が存在する場合、先頭行の全ての列に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
-</tr>
-<tr>
-<td align="left"><code>rbind(MATRIX,TYPE)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列の末尾行にスカラ値を結合します。複数列が存在する場合、末尾行の全ての列に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
-</tr>
-<tr>
-<td align="left"><code>cbind(MATRIX,MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列を横方向に結合します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
-</tr>
-<tr>
-<td align="left"><code>cbind(TYPE,MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列の左側にスカラ値を結合します。複数行が存在する場合、左端の全ての行に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
-</tr>
-<tr>
-<td align="left"><code>cbind(MATRIX,TYPE)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列の右側にスカラ値を結合します。複数行が存在する場合、右端の全ての行に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
-</tr>
-<tr>
-<td align="left"><code>transpose(MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">配列ベース行列を転置します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_5">集約関数</h2>
-<table>
-<thead>
-<tr>
-<th align="left">関数/演算子</th>
-<th align="left">返り値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>array_matrix(TYPE,...)</code></td>
-<td align="left"><code>TYPE[]</code></td>
-<td align="left">可変長引数の集約関数です。M個の引数でN行が入力されると、M列xN行の配列ベース行列を返します。<br><code>TYPE</code>は<code>bool,int2,int4,int8,float4,float8</code>のいずれかです。</td>
-</tr>
-<tr>
-<td align="left"><code>array_matrix(bit)</code></td>
-<td align="left"><code>int[]</code></td>
-<td align="left">ビット列を32bit整数値の組と見なして、<code>int4[]</code>型の配列ベース行列として返す集約関数です。</td>
-</tr>
-<tr>
-<td align="left"><code>rbind(MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">入力された配列ベース行列を縦に連結する集約関数です。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
-</tr>
-<tr>
-<td align="left"><code>cbind(MATRIX)</code></td>
-<td align="left"><code>MATRIX</code></td>
-<td align="left">入力された配列ベース行列を横に連結する集約関数です。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
-</tr>
-</tbody>
-</table>
-<h1 id="_6">その他の関数</h1>
+<h1 id="arrow_fdw">Arrow_Fdw関連</h1>
 <table>
 <thead>
 <tr>
@@ -432,94 +278,13 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>gstore_fdw_format(reggstore)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">gstore_fdw外部テーブルの内部データ形式を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw_nitems(reggstore)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">gstore_fdw外部テーブルの行数を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw_nattrs(reggstore)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">gstore_fdw外部テーブルの列数を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw_rawsize(reggstore)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">gstore_fdw外部テーブルのバイト単位のサイズを返します。</td>
-</tr>
-</tbody>
-</table>
-<table>
-<thead>
-<tr>
-<th align="left">関数</th>
-<th align="center">戻り値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>gstore_export_ipchandle(reggstore)</code></td>
-<td align="center"><code>bytea</code></td>
-<td align="left">gstore_fdwのGPUデバイスメモリ領域のIPCハンドラを返します。</td>
-</tr>
-<tr>
-<td align="left"><code>lo_import_gpu(int, bytea, bigint, bigint, oid=0)</code></td>
-<td align="center"><code>oid</code></td>
-<td align="left">外部アプリケーションの確保したGPUデバイスメモリ領域をマップし、その内容をラージオブジェクトへインポートします。</td>
-</tr>
-<tr>
-<td align="left"><code>lo_export_gpu(oid, int, bytea, bigint, bigint)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">外部アプリケーションの確保したGPUデバイスメモリ領域をマップし、ラージオブジェクトの内容を当該領域へエクスポートします。</td>
-</tr>
-</tbody>
-</table>
-<table>
-<thead>
-<tr>
-<th align="left">関数定義</th>
-<th align="center">結果型</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>attnums_of(regclass,text[])</code></td>
-<td align="center"><code>smallint[]</code></td>
-<td align="left">第一引数で指定したテーブルの第二引数で指定した列名（複数可）の列番号を配列として返します。</td>
-</tr>
-<tr>
-<td align="left"><code>attnum_of(regclass,text)</code></td>
-<td align="center"><code>smallint</code></td>
-<td align="left">第一引数で指定したテーブルの第二引数で指定した列名の列番号を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>atttypes_of(regclass,text[])</code></td>
-<td align="center"><code>regtype[]</code></td>
-<td align="left">第一引数で指定したテーブルの第二引数で指定した列名（複数可）のデータ型を配列として返します。</td>
-</tr>
-<tr>
-<td align="left"><code>atttype_of(regclass,text)</code></td>
-<td align="center"><code>regtype</code></td>
-<td align="left">第一引数で指定したテーブルの第二引数で指定した列名のデータ型を返します。</td>
-</tr>
-<tr>
-<td align="left"><code>attrs_types_check(regclass,text[],regtype[])</code></td>
+<td align="left"><code>pgstrom.arrow_fdw_truncate(regclass)</code></td>
 <td align="center"><code>bool</code></td>
-<td align="left">第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、第三引数で指定したデータ型とそれぞれ一致しているかどうかを調べます。</td>
-</tr>
-<tr>
-<td align="left"><code>attrs_type_check(regclass,text[],regtype)</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left">第一引数で指定したテーブルの、第二引数で指定した列名（複数可）のデータ型が、全て第三引数で指定したデータ型と一致しているかどうかを調べます。</td>
+<td align="left">指定されたArrow_Fdw外部テーブルの内容を全て消去します。Arrow_Fdw外部テーブルは<code>writable</code>である必要があります。</td>
 </tr>
 </tbody>
 </table>
+<h1 id="gpu">GPUデータフレーム関数</h1>
 <table>
 <thead>
 <tr>
@@ -530,10 +295,129 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pgstrom.license_validation()</code></td>
+<td align="left"><code>pgstrom.arrow_fdw_export_cupy(regclass, text[], int)</code></td>
 <td align="center"><code>text</code></td>
-<td align="left">商用サブスクリプションを手動でロードします。</td>
+<td align="left">指定された列のArrow_Fdw外部テーブルの内容をcuPyのデータフレーム(<code>cupy.ndarray</code>)としてエクスポートします。GPUバッファはセッション終了時に自動的に解放されます。</td>
 </tr>
+<tr>
+<td align="left"><code>pgstrom.arrow_fdw_export_cupy_pinned(regclass, text[], int)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">指定された列のArrow_Fdw外部テーブルの内容をcuPyのデータフレーム(<code>cupy.ndarray</code>)としてエクスポートします。GPUバッファはピンニングされ、セッション終了後も有効です。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.arrow_fdw_put_gpu_buffer(text)</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">上記の関数でエクスポートされたGPUバッファを解放します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.arrow_fdw_unpin_gpu_buffer(text)</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left">上記の関数でエクスポートされたGPUバッファのピンニングを解除します。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_2">テストデータ生成関数</h1>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pgstrom.random_setseed(int)</code></td>
+<td align="center"><code>void</code></td>
+<td align="left">乱数の系列を初期化します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_int(float=0.0, bigint=0, bigint=INT_MAX)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left"><code>bigint</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_float(float=0.0, float=0.0, float=1.0)</code></td>
+<td align="center"><code>float</code></td>
+<td align="left"><code>float</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_date(float=0.0, date='2015-01-01', date='2025-12-31')</code></td>
+<td align="center"><code>date</code></td>
+<td align="left"><code>date</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_time(float=0.0, time='00:00:00', time='23:59:59')</code></td>
+<td align="center"><code>time</code></td>
+<td align="left"><code>time</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_timetz(float=0.0, time='00:00:00', time='23:59:59')</code></td>
+<td align="center"><code>timetz</code></td>
+<td align="left"><code>timetz</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_timestamp(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></td>
+<td align="center"><code>timestamp</code></td>
+<td align="left"><code>timestamp</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_macaddr(float=0.0, macaddr='ab:cd:00:00:00', macaddr='ab:cd:ff:ff:ff:ff')</code></td>
+<td align="center"><code>macaddr</code></td>
+<td align="left"><code>macaddr</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_inet(float=0.0, inet='192.168.0.1/16')</code></td>
+<td align="center"><code>inet</code></td>
+<td align="left"><code>inet</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_text(float=0.0, text='test_**')</code></td>
+<td align="center"><code>text</code></td>
+<td align="left"><code>text</code>型のランダムデータを生成します。第二引数の'*'文字をランダムに置き換えます。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_text_len(float=0.0, int=10)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left"><code>text</code>型のランダムデータを指定文字列長の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_int4range(float=0.0, bigint=0, bigint=INT_MAX)</code></td>
+<td align="center"><code>int4range</code></td>
+<td align="left"><code>int4range</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_int8range(float=0.0, bigint=0, bigint=LONG_MAX)</code></td>
+<td align="center"><code>int8range</code></td>
+<td align="left"><code>int8range</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_tsrange(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></td>
+<td align="center"><code>tsrange</code></td>
+<td align="left"><code>tsrange</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_tstzrange(float=0.0, timestamptz='2015-01-01', timestamptz='2025-01-01')</code></td>
+<td align="center"><code>tstzrange</code></td>
+<td align="left"><code>tstzrange</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')</code></td>
+<td align="center"><code>daterange</code></td>
+<td align="left"><code>daterange</code>型のランダムデータを指定の範囲内で生成します。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_3">その他の関数</h1>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
 <tr>
 <td align="left"><code>pgstrom.license_query()</code></td>
 <td align="center"><code>text</code></td>
@@ -541,7 +425,7 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </tr>
 </tbody>
 </table>
-<h1 id="_7">システムビュー</h1>
+<h1 id="_4">システムビュー</h1>
 <p>PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。
 これらのシステムビューは将来のバージョンで情報が追加される可能性があります。そのため、アプリケーションから<code>SELECT * FROM ...</code>によってこれらシステムビューを参照する事は避けてください。</p>
 <p><strong>pgstrom.device_info</strong></p>
@@ -580,7 +464,7 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
 </table>
 <p><strong>pgstrom.device_preserved_meminfo</strong></p>
 <p><code>pgstrom.device_preserved_meminfo</code>システムビューは、複数のPostgreSQLバックエンドプロセスから共有するために予め確保済みのGPUデバイスメモリ領域の情報を出力します。
-現在のところ、gstore_fdwのみが本機能を使用しています。</p>
+現在のところ、Arrow_FdwのPython連携機能がこれを使用しています。</p>
 <table>
 <thead>
 <tr>

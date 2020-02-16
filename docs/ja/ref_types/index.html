@@ -121,7 +121,7 @@
     <a class="current" href="./">データ型</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#_1">標準の数値データ型</a></li>
+    <li class="toctree-l3"><a href="#_1">数値データ型</a></li>
     
 
     <li class="toctree-l3"><a href="#_2">標準の日付時刻型</a></li>
@@ -130,13 +130,13 @@
     <li class="toctree-l3"><a href="#_3">標準の可変長データ型</a></li>
     
 
-    <li class="toctree-l3"><a href="#_4">標準の雑多なデータ型</a></li>
+    <li class="toctree-l3"><a href="#_4">標準の非構造データ型</a></li>
     
 
-    <li class="toctree-l3"><a href="#_5">標準の範囲型</a></li>
+    <li class="toctree-l3"><a href="#_5">標準の雑多なデータ型</a></li>
     
 
-    <li class="toctree-l3"><a href="#pg-strom">PG-Stromが追加で提供するデータ型</a></li>
+    <li class="toctree-l3"><a href="#_6">標準の範囲型</a></li>
     
 
     </ul>
@@ -200,7 +200,7 @@
                 <h1>データ型</h1>
 
 <p>PG-Stromは以下のデータ型をGPUで利用する事ができます。</p>
-<h1 id="_1">標準の数値データ型</h1>
+<h1 id="_1">数値データ型</h1>
 <table>
 <thead>
 <tr>
@@ -213,47 +213,57 @@
 <tbody>
 <tr>
 <td align="left"><code>smallint</code></td>
-<td align="left"><code>cl_short</code></td>
+<td align="left"><code>short</code></td>
 <td align="left">2 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>integer</code></td>
-<td align="left"><code>cl_int</code></td>
+<td align="left"><code>int</code></td>
 <td align="left">4 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>bigint</code></td>
-<td align="left"><code>cl_long</code></td>
+<td align="left"><code>long</code></td>
 <td align="left">8 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>short</code></td>
+<td align="left">2 bytes</td>
+<td align="left">半精度浮動小数点型。PG-Stromによる独自拡張。</td>
+</tr>
+<tr>
 <td align="left"><code>real</code></td>
-<td align="left"><code>cl_float</code></td>
+<td align="left"><code>float</code></td>
 <td align="left">4 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>float</code></td>
-<td align="left"><code>cl_double</code></td>
+<td align="left"><code>double</code></td>
 <td align="left">8 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>numeric</code></td>
-<td align="left"><code>cl_ulong</code></td>
+<td align="left"><code>int128</code></td>
 <td align="left">可変長</td>
-<td align="left">64bitの内部形式にマップ</td>
+<td align="left">内部形式は128bit固定少数点型</td>
 </tr>
 </tbody>
 </table>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>GPUが<code>numeric</code>型のデータを処理する際、実装上の理由からこれを64bitの内部表現に変換して処理します。
+<p>GPUが<code>numeric</code>型のデータを処理する際、実装上の理由からこれを128bit固定少数点の内部表現に変換して処理します。（これは Apache Arrow の<code>Decimal</code>型と同一の形式です）
 これら内部表現への/からの変換は透過的に行われますが、例えば、桁数の大きな<code>numeric</code>型のデータは表現する事ができないため、PG-StromはCPU側でのフォールバック処理を試みます。したがって、桁数の大きな<code>numeric</code>型のデータをGPUに与えると却って実行速度が低下してしまう事になります。
 これを避けるには、GUCパラメータ<code>pg_strom.enable_numeric_type</code>を使用して<code>numeric</code>データ型を含む演算式をGPUで実行しないように設定します。</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>GPUでは半精度浮動小数点型がハードウェアでサポートされていますが、CPU(x86_64プロセッサ)では未対応です。そのため、<code>float2</code>データ型をCPUで処理する場合には、これを一度<code>float</code>や<code>double</code>型に変換した上で演算を行います。そのため、GPUのように<code>float2</code>の方が演算速度で有利という事はありません。機械学習や統計解析用途にデータ量を抑制するための機能です。</p>
 </div>
 <h1 id="_2">標準の日付時刻型</h1>
 <table>
@@ -341,7 +351,32 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_4">標準の雑多なデータ型</h1>
+<h1 id="_4">標準の非構造データ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>jsonb</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>jsonb</code>データ型をGPUで処理させる場合には、次の2つの点に留意してください。
+実際に参照されない属性もストレージから読み出し、GPUに転送する必要があるため、I/Oバスの利用効率は必ずしも良くないデータ型である事。データ長が<a href="https://www.postgresql.jp/document/current/html/storage-toast.html">TOAST化</a>の閾値（通常は2kB弱）を越えてしまった場合、<code>jsonb</code>データ全体がTOASTテーブルへ書き出されるため、GPU側では処理できず非効率なCPU-fallback処理を呼び出してしまう事。
+後者の問題に対しては、テーブルのストレージオプション<code>toast_tuple_target</code>を拡大し、TOAST化の閾値を引き上げる事である程度は回避する事も可能です。</p>
+</div>
+<h1 id="_5">標準の雑多なデータ型</h1>
 <table>
 <thead>
 <tr>
@@ -390,7 +425,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_5">標準の範囲型</h1>
+<h1 id="_6">標準の範囲型</h1>
 <table>
 <thead>
 <tr>
@@ -430,31 +465,6 @@
 <td align="left"><code>__daterange</code></td>
 <td align="left">14 bytes</td>
 <td align="left"></td>
-</tr>
-</tbody>
-</table>
-<h1 id="pg-strom">PG-Stromが追加で提供するデータ型</h1>
-<table>
-<thead>
-<tr>
-<th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
-<th align="left">データ長</th>
-<th align="left">備考</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>float2</code></td>
-<td align="left"><code>half_t</code></td>
-<td align="left">2 bytes</td>
-<td align="left">半精度浮動小数点数</td>
-</tr>
-<tr>
-<td align="left"><code>reggstore</code></td>
-<td align="left"><code>cl_uint</code></td>
-<td align="left">4 bytes</td>
-<td align="left">gstore_fdwのregclass型。PL/CUDA関数呼出しで特別な扱い。</td>
 </tr>
 </tbody>
 </table>

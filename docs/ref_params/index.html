@@ -148,13 +148,13 @@
     <li class="toctree-l3"><a href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a></li>
     
 
-    <li class="toctree-l3"><a href="#gstore_fdw-configuration">gstore_fdw Configuration</a></li>
-    
-
     <li class="toctree-l3"><a href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a></li>
     
 
     <li class="toctree-l3"><a href="#gpu-device-configuration">GPU Device Configuration</a></li>
+    
+
+    <li class="toctree-l3"><a href="#system-shared-memory-configuration">System Shared Memory Configuration</a></li>
     
 
     </ul>
@@ -248,6 +248,12 @@
 <td align="left">Enables/disables GpuPreAgg</td>
 </tr>
 <tr>
+<td align="left"><code>pg_strom.enable_brin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables BRIN index support on tables scan</td>
+</tr>
+<tr>
 <td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
 <td align="center"><code>bool</code></td>
 <td align="center"><code>on</code></td>
@@ -282,6 +288,12 @@
 <td align="center"><code>bool</code></td>
 <td align="center"><code>off</code></td>
 <td align="left">Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.regression_test_mode</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">It disables some <code>EXPLAIN</code> command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.</td>
 </tr>
 </tbody>
 </table>
@@ -404,33 +416,14 @@
 <tr>
 <td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
 <td align="center"><code>int</code></td>
-<td align="center">32MB</td>
+<td align="center">128MB</td>
 <td align="left">Size of shared memory to cache metadata of Arrow files.<br>It needs to restart to update the parameter.</td>
 </tr>
 <tr>
-<td align="left"><code>arrow_fdw.metadata_cache_width</code></td>
+<td align="left"><code>arrow_fdw.record_batch_size</code></td>
 <td align="center"><code>int</code></td>
-<td align="center">80</td>
-<td align="left">Max number of columns for each metadata entry. Arrow_Fdw does not cache metadata if Arrow file has more columns than this configuration, so it loads metadata from the files on behalf of the foreign table for each references.<br>It needs to restart to update the parameter.</td>
-</tr>
-</tbody>
-</table>
-<h1 id="gstore_fdw-configuration">gstore_fdw Configuration</h1>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.gstore_max_relations</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">100</td>
-<td align="left">Upper limit of the number of foreign tables with gstore_fdw. It needs restart to update the parameter.</td>
+<td align="center">256MB</td>
+<td align="left">Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if <code>INSERT</code> command is not completed yet.</td>
 </tr>
 </tbody>
 </table>
@@ -499,6 +492,31 @@
 <td align="center"><code>int</code></td>
 <td align="center">2048</td>
 <td align="left">Upper limit of the number of preserved GPU device memory segment. Usually, don't need to change from the default value.</td>
+</tr>
+</tbody>
+</table>
+<h1 id="system-shared-memory-configuration">System Shared Memory Configuration</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">shmbuf.segment_size</td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>256MB</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left">shmbuf.num_logical_segments</td>
+<td align="center"><code>int</code></td>
+<td align="center">auto</td>
+<td align="left">Default logical segment size is double size of system physical memory size.</td>
 </tr>
 </tbody>
 </table>

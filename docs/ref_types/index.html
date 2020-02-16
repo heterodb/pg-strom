@@ -121,7 +121,7 @@
     <a class="current" href="./">Data Types</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#built-in-numeric-types">Built-in numeric types</a></li>
+    <li class="toctree-l3"><a href="#numeric-types">Numeric types</a></li>
     
 
     <li class="toctree-l3"><a href="#built-in-date-and-time-types">Built-in date and time types</a></li>
@@ -130,13 +130,13 @@
     <li class="toctree-l3"><a href="#built-in-variable-length-types">Built-in variable length types</a></li>
     
 
+    <li class="toctree-l3"><a href="#built-in-unstructured-data-types">Built-in unstructured data types</a></li>
+    
+
     <li class="toctree-l3"><a href="#built-in-miscellaneous-types">Built-in miscellaneous types</a></li>
     
 
     <li class="toctree-l3"><a href="#built-in-range-data-types">Built-in range data types</a></li>
-    
-
-    <li class="toctree-l3"><a href="#extra-types">Extra Types</a></li>
     
 
     </ul>
@@ -200,7 +200,7 @@
                 <h1>Data Types</h1>
 
 <p>PG-Strom support the following data types for use on GPU device.</p>
-<h1 id="built-in-numeric-types">Built-in numeric types</h1>
+<h1 id="numeric-types">Numeric types</h1>
 <table>
 <thead>
 <tr>
@@ -213,47 +213,57 @@
 <tbody>
 <tr>
 <td align="left"><code>smallint</code></td>
-<td align="left"><code>cl_short</code></td>
+<td align="left"><code>short</code></td>
 <td align="left">2 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>integer</code></td>
-<td align="left"><code>cl_int</code></td>
+<td align="left"><code>int</code></td>
 <td align="left">4 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>bigint</code></td>
-<td align="left"><code>cl_long</code></td>
+<td align="left"><code>long</code></td>
 <td align="left">8 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>short</code></td>
+<td align="left">2 bytes</td>
+<td align="left">Half precision data type. An extra data type by PG-Strom</td>
+</tr>
+<tr>
 <td align="left"><code>real</code></td>
-<td align="left"><code>cl_float</code></td>
+<td align="left"><code>float</code></td>
 <td align="left">4 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>float</code></td>
-<td align="left"><code>cl_double</code></td>
+<td align="left"><code>double</code></td>
 <td align="left">8 bytes</td>
 <td align="left"></td>
 </tr>
 <tr>
 <td align="left"><code>numeric</code></td>
-<td align="left"><code>cl_ulong</code></td>
+<td align="left"><code>int128</code></td>
 <td align="left">variable length</td>
-<td align="left">mapped to 64bit internal format</td>
+<td align="left">mapped to 128bit fixed-point numerical internal format</td>
 </tr>
 </tbody>
 </table>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>When GPU processes values in <code>numeric</code> data type, it is converted to an internal 64bit format because of implementation reason.
+<p>When GPU processes values in <code>numeric</code> data type, it is converted to an internal 128bit fixed-point number because of implementation reason. (This layout is identical to <code>Decimal</code> type in Apache Arrow.)
 It is transparently converted to/from the internal format, on the other hands, PG-Strom cannot convert <code>numaric</code> datum with large number of digits, so tries to fallback operations by CPU. Therefore, it may lead slowdown if <code>numeric</code> data with large number of digits are supplied to GPU device.
 To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type</code> not to run operational expression including <code>numeric</code> data types on GPU devices.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Even though GPU supports half-precision floating-point numbers by hardware, CPU (x86_64 processor) does not support it yet. So, when CPU processes <code>float2</code> data types, it transform them to <code>float</code> or <code>double</code> on calculations. So, CPU has no advantages for calculation performance of <code>float2</code>, unlike GPU. It is a feature to save storage/memory capacity for machine-learning / statistical-analytics. </p>
 </div>
 <h1 id="built-in-date-and-time-types">Built-in date and time types</h1>
 <table>
@@ -341,6 +351,32 @@ To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type
 </tr>
 </tbody>
 </table>
+<h1 id="built-in-unstructured-data-types">Built-in unstructured data types</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>jsonb</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">variable length</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Pay attention for the two points below, when GPU processes <code>jsonb</code> data types.
+<code>jsonb</code> is not performance efficient data types because it has to load unreferenced attributes onto GPU from the storage, so tend to consume I/O bandwidth by junk data.
+In case when <code>jsonb</code> data length exceeds the threshold of <a href="https://www.postgresql.org/docs/current/storage-toast.html">datum TOASTen</a>, entire <code>jsonb</code> value is written out to TOAST table, thus, GPU cannot process these values and invokes inefficient CPU-fallback operations.
+Regarding to the 2nd problem, you can extend table's storage option <code>toast_tuple_target</code> to enlarge the threshold for datum TOASTen.</p>
+</div>
 <h1 id="built-in-miscellaneous-types">Built-in miscellaneous types</h1>
 <table>
 <thead>
@@ -430,31 +466,6 @@ To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type
 <td align="left"><code>__daterange</code></td>
 <td align="left">14 bytes</td>
 <td align="left"></td>
-</tr>
-</tbody>
-</table>
-<h1 id="extra-types">Extra Types</h1>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Internal format</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>float2</code></td>
-<td align="left"><code>half_t</code></td>
-<td align="left">2 bytes</td>
-<td align="left">Half precision data type</td>
-</tr>
-<tr>
-<td align="left"><code>reggstore</code></td>
-<td align="left"><code>cl_uint</code></td>
-<td align="left">4 bytes</td>
-<td align="left">Specific version of regclass for gstore_fdw. Special handling at PL/CUDA function invocation.</td>
 </tr>
 </tbody>
 </table>

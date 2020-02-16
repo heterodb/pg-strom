@@ -19,12 +19,14 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.enable_gpuhashjoin`  |`bool`|`on` |HashJoinによるGpuJoinを有効化/無効化する。|
 |`pg_strom.enable_gpunestloop`  |`bool`|`on` |NestLoopによるGpuJoinを有効化/無効化する。|
 |`pg_strom.enable_gpupreagg`    |`bool`|`on` |GpuPreAggによる集約処理を有効化/無効化する。|
+|`pg_strom.enable_brin`         |`bool`|`on` |BRINインデックスを使ったテーブルスキャンを有効化/無効化する。|
 |`pg_strom.enable_partitionwise_gpujoin`|`bool`|`on`|GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。|
 |`pg_strom.enable_partitionwise_gpupreagg`|`bool`|`on`|GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。|
 |`pg_strom.pullup_outer_scan`   |`bool`|`on` |GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。|
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。|
 |`pg_strom.enable_numeric_aggfuncs` |`bool`|`on` |`numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。|
+|`pg_strom.regression_test_mode`|`bool`|`off`|GPUモデル名など、実行環境に依存して表示が変わる可能性のある`EXPLAIN`コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。|
 }
 
 @en{
@@ -37,12 +39,14 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.enable_gpuhashjoin`  |`bool`|`on` |Enables/disables GpuJoin by HashJoin|
 |`pg_strom.enable_gpunestloop`  |`bool`|`on` |Enables/disables GpuJoin by NestLoop|
 |`pg_strom.enable_gpupreagg`    |`bool`|`on` |Enables/disables GpuPreAgg|
+|`pg_strom.enable_brin`         |`bool`|`on` |Enables/disables BRIN index support on tables scan|
 |`pg_strom.enable_partitionwise_gpujoin`|`bool`|`on`|Enables/disables whether GpuJoin is pushed down to the partition children. Available only PostgreSQL v10 or later.|
 |`pg_strom.enable_partitionwise_gpupreagg`|`bool`|`on`|Enables/disables whether GpuPreAgg is pushed down to the partition children. Available only PostgreSQL v10 or later.|
 |`pg_strom.pullup_outer_scan`   |`bool`|`on` |Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.|
 |`pg_strom.pullup_outer_join`   |`bool`|`on` |Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.|
 |`pg_strom.enable_numeric_aggfuncs` |`bool`|`on` |Enables/disables support of aggregate function that takes `numeric` data type.|
 |`pg_strom.cpu_fallback`        |`bool`|`off`|Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"|
+|`pg_strom.regression_test_mode`|`bool`|`off`|It disables some `EXPLAIN` command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.|
 }
 
 @ja{
@@ -107,33 +111,16 @@ This session introduces PG-Strom's configuration parameters.
 |パラメータ名                    |型      |初期値    |説明       |
 |:-------------------------------|:------:|:---------|:----------|
 |`arrow_fdw.enabled`             |`bool`  |`on`      |推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。|
-|`arrow_fdw.metadata_cache_size` |`int`   |32MB      |Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。|
-|`arrow_fdw.metadata_cache_width`|`int`   |80        |メタ情報キャッシュ１個に格納できるカラムの上限を指定します。この値より多くの列を持つArrowファイルの場合は、メタ情報がキャッシュされないため、参照のたびにファイルからメタデータをロードします。<br>パラメータの更新には再起動が必要です。|
+|`arrow_fdw.metadata_cache_size` |`int`   |128MB     |Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。|
+|`arrow_fdw.record_batch_size`   |`int`   |256MB     |Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。`INSERT`コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。|
 }
 @en{
 #Arrow_Fdw Configuration
 |Parameter                       |Type  |Default|Description|
-|:-------------------------------|:----:|:----:|:----------|
-|`arrow_fdw.enabled`             |`bool`|`on`  |By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.|
-|`arrow_fdw.metadata_cache_size` |`int` |32MB  |Size of shared memory to cache metadata of Arrow files.<br>It needs to restart to update the parameter.|
-|`arrow_fdw.metadata_cache_width`|`int` |80    |Max number of columns for each metadata entry. Arrow_Fdw does not cache metadata if Arrow file has more columns than this configuration, so it loads metadata from the files on behalf of the foreign table for each references.<br>It needs to restart to update the parameter.|
-}
-
-
-
-@ja{
-#gstore_fdw関連の設定
-
-|パラメータ名                   |型      |初期値    |説明       |
-|:------------------------------|:------:|:---------|:----------|
-|`pg_strom.gstore_max_relations`|`int`   |100       |gstore_fdwを用いた外部表数の上限です。パラメータの更新には再起動が必要です。|
-}
-@en{
-#gstore_fdw Configuration
-
-|Parameter                      |Type  |Default|Description|
-|:------------------------------|:----:|:----:|:----------|
-|`pg_strom.gstore_max_relations`|`int`   |100       |Upper limit of the number of foreign tables with gstore_fdw. It needs restart to update the parameter.|
+|:-------------------------------|:----:|:-----:|:----------|
+|`arrow_fdw.enabled`             |`bool`|`on`   |By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.|
+|`arrow_fdw.metadata_cache_size` |`int` |128MB  |Size of shared memory to cache metadata of Arrow files.<br>It needs to restart to update the parameter.|
+|`arrow_fdw.record_batch_size`   |`int` |256MB  |Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if `INSERT` command is not completed yet.
 }
 
 @ja{
@@ -143,7 +130,8 @@ This session introduces PG-Strom's configuration parameters.
 |:------------------------------|:------:|:-------|:----------|
 |`pg_strom.program_cache_size`  |`int`   |`256MB` |ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。|
 |`pg_strom.num_program_builders`|`int`|`2`|GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。|
-|`pg_strom.debug_jit_compile_options`|`bool`|`off`|GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。||`pg_strom.debug_kernel_source` |`bool`  |`off`    |このオプションが`on`の場合、`EXPLAIN VERBOSE`コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。|
+|`pg_strom.debug_jit_compile_options`|`bool`|`off`|GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。|
+|`pg_strom.debug_kernel_source` |`bool`  |`off`    |このオプションが`on`の場合、`EXPLAIN VERBOSE`コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。|
 }
 @en{
 #Configuration of GPU code generation and build
@@ -169,8 +157,26 @@ This session introduces PG-Strom's configuration parameters.
 #GPU Device Configuration
 
 |Parameter                      |Type  |Default|Description|
-|:------------------------------|:----:|:----:|:----------|
+|:------------------------------|:----:|:-----:|:----------|
 |`pg_strom.cuda_visible_devices`|`string`|`''`   |List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup. It is equivalent to the environment variable `CUDAVISIBLE_DEVICES`|
 |`pg_strom.gpu_memory_segment_size`|`int`|`512MB`|Specifies the amount of device memory to be allocated per CUDA API call. Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.|
 |`pg_strom.max_num_preserved_gpu_memory`|`int`|2048|Upper limit of the number of preserved GPU device memory segment. Usually, don't need to change from the default value.|
 }
+
+@ja{
+#システム共有メモリに関連する設定
+|パラメータ名                   |型    |初期値 |説明       |
+|:------------------------------|:----:|:------|:----------|
+|shmbuf.segment_size            |`int` |`256MB`|           |
+|shmbuf.num_logical_segments    |`int` |自動   |デフォルトの論理セグメントサイズはシステム搭載物理メモリの2倍の大きさです。|
+
+}
+@en{
+#System Shared Memory Configuration
+|Parameter                      |Type  |Default|Description|
+|:------------------------------|:----:|:-----:|:----------|
+|shmbuf.segment_size            |`int` |`256MB`|
+|shmbuf.num_logical_segments    |`int` |auto   |Default logical segment size is double size of system physical memory size.|
+}
+
+

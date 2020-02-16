@@ -148,13 +148,13 @@
     <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連の設定</a></li>
     
 
-    <li class="toctree-l3"><a href="#gstore_fdw">gstore_fdw関連の設定</a></li>
-    
-
     <li class="toctree-l3"><a href="#gpu">GPUプログラムの生成とビルドに関連する設定</a></li>
     
 
     <li class="toctree-l3"><a href="#gpu_1">GPUデバイスに関連する設定</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_4">システム共有メモリに関連する設定</a></li>
     
 
     </ul>
@@ -248,6 +248,12 @@
 <td align="left">GpuPreAggによる集約処理を有効化/無効化する。</td>
 </tr>
 <tr>
+<td align="left"><code>pg_strom.enable_brin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</td>
+</tr>
+<tr>
 <td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
 <td align="center"><code>bool</code></td>
 <td align="center"><code>on</code></td>
@@ -282,6 +288,12 @@
 <td align="center"><code>bool</code></td>
 <td align="center"><code>off</code></td>
 <td align="left">GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.regression_test_mode</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</td>
 </tr>
 </tbody>
 </table>
@@ -404,33 +416,14 @@
 <tr>
 <td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
 <td align="center"><code>int</code></td>
-<td align="left">32MB</td>
+<td align="left">128MB</td>
 <td align="left">Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。</td>
 </tr>
 <tr>
-<td align="left"><code>arrow_fdw.metadata_cache_width</code></td>
+<td align="left"><code>arrow_fdw.record_batch_size</code></td>
 <td align="center"><code>int</code></td>
-<td align="left">80</td>
-<td align="left">メタ情報キャッシュ１個に格納できるカラムの上限を指定します。この値より多くの列を持つArrowファイルの場合は、メタ情報がキャッシュされないため、参照のたびにファイルからメタデータをロードします。<br>パラメータの更新には再起動が必要です。</td>
-</tr>
-</tbody>
-</table>
-<h1 id="gstore_fdw">gstore_fdw関連の設定</h1>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.gstore_max_relations</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">100</td>
-<td align="left">gstore_fdwを用いた外部表数の上限です。パラメータの更新には再起動が必要です。</td>
+<td align="left">256MB</td>
+<td align="left">Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。<code>INSERT</code>コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。</td>
 </tr>
 </tbody>
 </table>
@@ -463,6 +456,12 @@
 <td align="left"><code>off</code></td>
 <td align="left">GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</td>
 </tr>
+<tr>
+<td align="left"><code>pg_strom.debug_kernel_source</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>off</code></td>
+<td align="left">このオプションが<code>on</code>の場合、<code>EXPLAIN VERBOSE</code>コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。</td>
+</tr>
 </tbody>
 </table>
 <h1 id="gpu_1">GPUデバイスに関連する設定</h1>
@@ -493,6 +492,31 @@
 <td align="center"><code>int</code></td>
 <td align="left">2048</td>
 <td align="left">確保済みGPUデバイスメモリのセグメント数の上限を指定します。通常は初期値を変更する必要はありません。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_4">システム共有メモリに関連する設定</h1>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">shmbuf.segment_size</td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>256MB</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left">shmbuf.num_logical_segments</td>
+<td align="center"><code>int</code></td>
+<td align="left">自動</td>
+<td align="left">デフォルトの論理セグメントサイズはシステム搭載物理メモリの2倍の大きさです。</td>
 </tr>
 </tbody>
 </table>
