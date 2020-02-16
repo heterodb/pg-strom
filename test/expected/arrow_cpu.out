@@ -61,12 +61,12 @@ UPDATE regtest_data
        comp.c = pgstrom.random_text_len(2, 64),
        comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
        comp.e = pgstrom.random_timestamp(2);
-\! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o /home/kaigai/repo/pg-strom/test/../test/test_arrow_cpu_1.data
+\! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o /home/kaigai/repo/pg-strom/./test/test_arrow_cpu_1.data
 RecordBatch[0]: offset=1624 length=2383480 (meta=1144, body=2382336) nitems=10000
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
-OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/test_arrow_cpu_1.data');
+OPTIONS (file '/home/kaigai/repo/pg-strom/./test/test_arrow_cpu_1.data');
 SELECT attnum, attname, atttypid::regtype
   FROM pg_attribute
  WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0
@@ -102,12 +102,12 @@ INSERT INTO timezone_data (
             pgstrom.random_timestamp(1, '2020-02-11 12:00:00',
                                         '2020-02-13 12:00:00')
     FROM generate_series(1,1500) x);
-\! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o /home/kaigai/repo/pg-strom/test/../test/test_arrow_cpu_2.data
+\! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o /home/kaigai/repo/pg-strom/./test/test_arrow_cpu_2.data
 RecordBatch[0]: offset=400 length=30712 (meta=248, body=30464) nitems=1500
 IMPORT FOREIGN SCHEMA timezone_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
-OPTIONS (file '/home/kaigai/repo/pg-strom/test/../test/test_arrow_cpu_2.data');
+OPTIONS (file '/home/kaigai/repo/pg-strom/./test/test_arrow_cpu_2.data');
 SET pg_strom.enabled = off;
 -- should be empty results
 SELECT d.id, d.i2, d.i4, d.i8, a.i2, a.i4, a.i8

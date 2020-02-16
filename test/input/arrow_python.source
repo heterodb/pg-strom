@@ -1,0 +1,120 @@
+--
+-- arrow_python -- test for Arrow-Python collaboration
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_python_temp CASCADE;
+CREATE SCHEMA regtest_arrow_python_temp;
+RESET client_min_messages;
+
+SET search_path = regtest_arrow_python_temp,public;
+
+CREATE TABLE tt (
+  id    int,
+  x     real,
+  y     real,
+  z     real
+);
+SELECT pgstrom.random_setseed(20200214);
+INSERT INTO tt (
+  SELECT x, pgstrom.random_float(0, -2000.0, 4000.0),
+            pgstrom.random_float(0, -1000.0, 5000.0),
+            pgstrom.random_float(0, -3000.0, 3000.0)
+    FROM generate_series(1,1000000) x);
+
+\! rm -f '@abs_builddir@/test_arrow_python.arrow'
+CREATE FOREIGN TABLE ft (
+  id    int,
+  x     real,
+  y     real,
+  z     real
+) SERVER arrow_fdw
+  OPTIONS (file '@abs_builddir@/test_arrow_python.arrow', writable 'true');
+
+INSERT INTO ft (SELECT * FROM tt);
+
+--
+-- check Python libraries: cupy cupy_strom
+--
+CREATE OR REPLACE FUNCTION check_libraries()
+RETURNS bool AS
+$$
+import cupy
+import cupy_strom
+
+return True
+$$ LANGUAGE 'plpython3u';
+
+SELECT check_libraries();
+
+--
+-- calculation of average using custom GPU kernel
+--
+CREATE OR REPLACE FUNCTION custom_average(x_ident text)
+RETURNS float[] AS
+$$
+import cupy
+import cupy_strom
+
+X = cupy_strom.ipc_import(x_ident)
+nattrs = X.shape[0]
+nitems = X.shape[1]
+gridSz = (nitems + 2047) >> 11;
+
+Y = cupy.zeros((nattrs))
+
+source='''
+extern "C" __global__
+           __launch_bounds__(1024)
+void
+kern_gpu_sum(double *y, const float *x, int nitems)
+{
+	__shared__ float lvalues[2048];
+	int		gridSz = (nitems + 2047) / 2048;
+	int		colIdx = blockIdx.x / gridSz;
+	int		rowBase = (blockIdx.x % gridSz) * 2048;
+	int		localId = 2 * threadIdx.x;
+	int		i, k;
+
+	// Load values to local shared buffer
+	x += colIdx * nitems;
+	for (i=threadIdx.x; i < 2048; i+=blockDim.x)
+		lvalues[i] = (rowBase + i < nitems ? x[rowBase + i] : 0.0);
+	__syncthreads();
+
+	// Run reduction operations
+	for (k=0; k < 11; k++)
+	{
+		int		mask = ((1 << k) - 1);
+
+		if ((threadIdx.x & mask) == 0)
+			lvalues[localId] += lvalues[localId + (1<<k)];
+		__syncthreads();
+	}
+	// Write back the total sum
+	if (threadIdx.x == 0)
+		atomicAdd(&y[colIdx], lvalues[0]);
+}
+'''
+kern = cupy.RawKernel(source, 'kern_gpu_sum')
+kern.__call__((gridSz * nattrs,0,0),
+              (1024,0,0),
+			  (Y,X,nitems))
+X = 0	# unmap GPU memory
+
+return Y / nitems
+$$ LANGUAGE 'plpython3u';
+
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
+
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
+
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y}'::text[]));
+
+--
+-- calculation of average using SQL function
+--
+SELECT avg(x), avg(y), avg(z) FROM tt;
+SELECT avg(x), avg(y), avg(z) FROM ft;
+
+
