@@ -8,7 +8,7 @@
   
   <meta name="author" content="PG-Strom Development Team">
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>Python collaboration - PG-Strom Manual</title>
+  <title>In-database Analytics - PG-Strom Manual</title>
   <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
@@ -20,7 +20,7 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "Python collaboration";
+    var mkdocs_page_name = "In-database Analytics";
     var mkdocs_page_input_path = "python.md";
     var mkdocs_page_url = null;
   </script>
@@ -103,7 +103,7 @@
                 </li>
                 <li class=" current">
                     
-    <a class="current" href="./">Python collaboration</a>
+    <a class="current" href="./">In-database Analytics</a>
     <ul class="subnav">
             
     <li class="toctree-l3"><a href="#background">Background</a></li>
@@ -123,14 +123,6 @@
     
 
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../plcuda/">PL/CUDA</a>
                 </li>
     </ul>
 	    </li>
@@ -189,7 +181,7 @@
         
       
     
-    <li>Python collaboration</li>
+    <li>In-database Analytics</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -201,8 +193,21 @@
               
                 <p>This chapter introduces the way to connect machine-learning / statistical-analysis engines with PostgreSQL by the common data-frames and Python scripts (including PL/Python), and run these engines in-database.</p>
 <h1 id="background">Background</h1>
+<p>The earlier version of PG-Strom had provided PL/CUDA for the cooperation between database and machine-learning / statistical-analytics. This feature allowed users to describe CUDA C code as user-defined SQL functions, to run computing intensive workloads on thousands cores of GPU. It sometimes run more than hundred times faster then CPU.</p>
+<p>On the other hands, it becomes general that people usually build their application on top of Python modules at machine-learning / statistical-analytics area, and little data scientist developed parallel programs using CUDA C.</p>
+<p>Since v2.3, PG-Strom allows to exchange contents of the database as a common data-frame that has compatible layout for machine-learning / statistical-analytics at Python. It extends software productivity by Python, with keeping the characteristics of PL/CUDA, which can utilize GPU's computing power without data exporting / importing, and a</p>
 <p><img alt="Data Processing Lifecycle" src="../img/data-processing-lifecycle.png" /></p>
+<p>The features in this chapter basically focus on in-memory grade data size.
+Therefore, it should not be used to map terabytes data as a data-frame referable from Python.</p>
+<p>We assume a large scale raw log-data is once preprocessed with SSD-to-GPU Direct SQL, then supplied to machine-learning engine on Python over the common data-frames exchange, for example.</p>
 <h1 id="data-exchange-via-cupy">Data exchange via cuPy</h1>
+<p><a href="https://cupy.chainer.org/">cuPy</a> is a module for matrix operations with numPy compatible APIs, which is widely accepted at Python environment, and runs these calculations on GPU.</p>
+<p>The matrix data referenced by cuPy locates on GPU device memory, and we can control them on the script as <code>cupy.ndarray</code> object.
+See the [official documentation] for the installation of cuPy and API referenced.</p>
+<p>PG-Strom allows to load contents of Arrow_Fdw foreign tables onto GPU device memory, and map this device memory region on the runtime environment of Python script. It enables smart data exchange without data exporting from the database.</p>
+<p>The SQL function <code>pgstrom.arrow_fdw_export_cupy()</code> of PG-Strom allocates a certain amount of GPU device memory, and loads the contents of Arrow_Fdw foreign table. This function takes a foreign table, set of attribute names, and optionally target GPU device-id as its arguments, then returns an unique identifier of the GPU buffer (<code>text</code>).</p>
+<p>On the Python script side, <code>cupy_strom.ipc_import()</code> can open the GPU buffer by the identifier, and returns <code>cupy.ndarray</code> object that is already setup on GPU device memory.
+Below is an example.</p>
 <p><strong>PostgreSQL-side operations</strong></p>
 <pre><code>=# CREATE FOREIGN TABLE ft (
      id  int,
@@ -252,7 +257,11 @@ conn.close()
  [ 7.53 37.31 36.07 51.74 47.64]]
 </code></pre>
 
+<p>The above example introduces Python script connects to PostgreSQL and calls <code>pgstrom.arrow_fdw_export_cupy</code> to create a GPU buffer that consists of column <code>x</code>, <code>y</code> and <code>z</code> of foreign table <code>ft</code>. Then, identifier returned from the function is passed to <code>cupy_strom.ipc_import</code> function, to build <code>cupy.ndarray</code> object accessible to Python script.</p>
+<p>Once <code>cupy.ndarray</code> object is built, you can control the GPU buffer using usual cuPy APIs. This example shows a small 5rows x 3columns matrix, however, here is no essential differences even if it is billion rows. As above, we can exchange data-frames between PostgreSQL and Python scripts.</p>
+<p>The GPU buffer allocated shall be released when session is closed. If you want to keep the GPU buffer after the session closed, use <code>pgstrom.arrow_fdw_export_cupy_pinned</code> instead for the buffer allocation. Please note that GPU device memory is preserved until invocation of <code>pgstrom.arrow_fdw_unpin_gpu_buffer</code> for explicit unpinning.</p>
 <h2 id="installation-of-cupy_strom">Installation of cupy_strom</h2>
+<p>The above <code>cupy_strom</code> can be installed using <code>setup.py</code> script, as follows:</p>
 <pre><code>$ sudo pip3 install --upgrade numpy cupy cython
 $ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/python
@@ -260,6 +269,10 @@ $ python3 setup.py
 </code></pre>
 
 <h2 id="execution-of-custom-gpu-kernel-using-cupy">Execution of custom GPU kernel using cuPy</h2>
+<p>cuPy has many APIs for matrix operations to pull out GPU's computing capability without CUDA C programming. On the other hands, it also allows execution of custom GPU kernel functions defined by users.</p>
+<p>Below is an example of custom GPU kernel definition using <code>cupy.RawKernel</code> for calculation of the average for each column of the input values ('X').
+Construction of <code>cupy.RawKernel</code> object requires a source code of GPU kernel described in CUDA C and device function name of the entrypoint of GPU kernel. The CUDA C source code shall be compiled on the fly at the invocation of <code>__call__</code> method, if no pre-built binary is at the cache.</p>
+<p>The arguments of <code>__call__</code> method  are size of grids, size of blocks and arguments of GPU kernel function from the head. This GPU kernel split the input values 'X' to sub-region for each 2048 items, and cooperates 1024 threads to calculate total sum in 11 steps. This task works for each block, then the output buffer <code>Y</code> eventually have total sum for each column.</p>
 <pre><code>import psycopg2
 import cupy
 import cupy_strom
@@ -339,7 +352,13 @@ conn.close()
 [ 50.02259536 -24.99648063 100.03749086]
 </code></pre>
 
+<p>Its test data intentionally slides the central of distribution for each column. The execution result, which exchanged the values to cuPy over the GPU buffer and calculated by the custom GPU kernel, fits in the result by SQL.</p>
 <h2 id="usage-from-plpython-user-defined-functions">Usage from PL/Python User Defined Functions</h2>
+<p>PostgreSQL supports to implement user defined functions using Python language, using <a href="https://www.postgresql.jp/document/current/html/plpython.html">PL/Python</a> package as a part of the core distribution.</p>
+<p>The <code>LANGUAGE plpython3u</code> option at <code>CREATE FUNCTION</code> statement enables Python language handle at the user defined function.</p>
+<p>Below is an example of PL/Python user defined function. We reuse the GPU kernel function that calculates the average value again. </p>
+<p>The arguments of PL/Python user defined functions are mapped to suitable Python data types by the handler. This example receives the identifier (text) of GPU buffer that is acquired by <code>pgstrom.arrow_fdw_export_cupy</code>, then it is mapped to <code>cupy.ndarray</code> for references on the Python-side. Here is no significant differences from the case when we run Python script on the shell.</p>
+<p>Only one difference is that we ensure <code>cupy.ndarray</code> object is released by <code>X=0</code>, manually, after the execution of GPU kernel that stores total sum of <code>X</code> onto <code>Y</code> for each column. This is a workaround to release GPU device memory, because the <code>cupy.ndarray</code> object stored in <code>X</code> keeps alived after the execution of PL/Python script, so it continues to map GPU buffer.</p>
 <p><strong>Example of PL/Python User Defined Function</strong></p>
 <pre><code>CREATE OR REPLACE FUNCTION custom_average(x_ident text)
 RETURNS float[] AS
@@ -397,12 +416,17 @@ return Y / nitems
 $$ LANGUAGE 'plpython3u';
 </code></pre>
 
+<p>When you run custom GPU kernel on PL/Python user defined function, we take a bit different steps to invoke the Python script.</p>
+<p>Unlike script execution on the shell, we don't need to connect a session to PostgreSQL and to obtain the identifier using SELECT statement, because we can embed Python script as a part of user defined function in SQL execution.</p>
 <pre><code>=# SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
                     custom_average
 -------------------------------------------------------
  {50.0225953554688,-24.9964806318359,100.037490859375}
 (1 row)
 </code></pre>
+
+<p>In the above example, the identifier of GPU buffer, the result of <code>pgstrom.arrow_fdw_export_cupy</code>, is directly passed to the user defined function <code>custom_average</code>, then data-frame is exchanged to Python script. The further steps to invoke GPU kernel and return the results are identical.</p>
+<p>Note that the amount of data size to be passeed over the invocation of user defined function is much larger, if your query tries to read the foreign table 'ft' and provides them as argument of <code>ft</code>. The data-exchange mechanism using GPU buffer performs like a "pass-by-pointer" invocation, so invocation of user defined function itself is much lightweight operation than "pass-by-value" style.</p>
               
             </div>
           </div>
@@ -410,7 +434,7 @@ $$ LANGUAGE 'plpython3u';
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../gstore_fdw/" class="btn btn-neutral float-right" title="Gstore_fdw">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../ref_types/" class="btn btn-neutral float-right" title="Data Types">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href="../arrow_fdw/" class="btn btn-neutral" title="Arrow_fdw"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -442,7 +466,7 @@ $$ LANGUAGE 'plpython3u';
         <span><a href="../arrow_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../gstore_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../ref_types/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
