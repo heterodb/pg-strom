@@ -38,11 +38,6 @@ test: arrow_cpu arrow_write arrow_utils arrow_python
 test: fallback_pgsql
 
 # ----------
-# Test for largeobject
-# ----------
-test: largeobject
-
-# ----------
 # General Test by SSBM
 # ----------
 test: ssbm-11 ssbm-12 ssbm-13

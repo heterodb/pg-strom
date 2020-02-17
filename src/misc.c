@@ -1319,7 +1319,7 @@ __pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
 	}													\
 	PG_FUNCTION_INFO_V1(cfunc_name)
 
-/* deadcode/gstore_(fdw|buf) */
+/* deadcode/gstore_(fdw|buf).c */
 PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_validator);
 PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_handler);
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_in);
@@ -1333,6 +1333,10 @@ PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nitems);
 PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nattrs);
 PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_rawsize);
 PG_DEPRECATED_FUNCTION(pgstrom_gstore_export_ipchandle);
+
+/* deadcode/largeobject.c */
+PG_DEPRECATED_FUNCTION(pgstrom_lo_import_gpu);
+PG_DEPRECATED_FUNCTION(pgstrom_lo_export_gpu);
 
 /* deadcode/pl_cuda_v2.c */
 PG_DEPRECATED_FUNCTION(plcuda_function_validator);

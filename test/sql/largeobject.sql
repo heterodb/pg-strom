@@ -1,8 +1,0 @@
---
--- Test for largeobject import/export GPU
---
-CREATE TABLE pg_temp.command_log (test text, status text);
-
-\copy pg_temp.command_log FROM PROGRAM 'testapp_largeobject'
-
-SELECT * FROM pg_temp.command_log;

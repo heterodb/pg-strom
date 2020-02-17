@@ -198,4 +198,8 @@ DROP FUNCTION IF EXISTS pg_catalog.int4_as_float4(int4) CASCADE;
 DROP FUNCTION IF EXISTS pg_catalog.float8_as_int8(float8) CASCADE;
 DROP FUNCTION IF EXISTS pg_catalog.int8_as_float8(int8) CASCADE;
 
-
+--
+-- Drop GPU <-> Largeobject data exchange (deprecated)
+--
+DROP FUNCTION IF EXISTS public.lo_import_gpu(int, bytea, bigint, bigint, oid) CASCADE;
+DROP FUNCTION IF EXISTS public.lo_export_gpu(oid, int, bytea, bigint, bigint) CASCADE;

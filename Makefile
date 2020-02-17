@@ -32,9 +32,8 @@ __STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
         cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o inners.o gpupreagg.o \
-		aggfuncs.o float2.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-		largeobject.o misc.o
+		aggfuncs.o float2.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
 		device_attrs.h cuda_filelist
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
@@ -67,7 +66,7 @@ MAXREGCOUNT := 128
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm testapp_largeobject
+__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 UTILS_RPATH := -Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)
@@ -108,8 +107,6 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-21.sql ssbm-22.sql ssbm-23.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
                    ssbm-41.sql ssbm-42.sql ssbm-43.sql
-TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/utils/testapp_largeobject
-TESTAPP_LARGEOBJECT_SOURCE = $(TESTAPP_LARGEOBJECT).cu
 
 #
 # Markdown (document) files
@@ -212,8 +209,7 @@ EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
-	$(SSBM_DBGEN_DISTS_DSS) \
-	$(TESTAPP_LARGEOBJECT)
+	$(SSBM_DBGEN_DISTS_DSS)
 
 #
 # Regression Test
@@ -230,7 +226,7 @@ REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --load-extension=pg_strom \
                --launcher="env PGDATABASE=$(REGRESS_DBNAME) PATH=$(shell dirname $(SSBM_DBGEN)):$$PATH PGAPPNAME=$(REGRESS_REVISION)" \
                $(shell test "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" = "t" && echo "--use-existing")
-REGRESS_PREP = $(SSBM_DBGEN) $(TESTAPP_LARGEOBJECT) $(REGRESS_INIT_SQL)
+REGRESS_PREP = $(SSBM_DBGEN) $(REGRESS_INIT_SQL)
 
 #
 # Build chain of PostgreSQL
@@ -303,12 +299,6 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
 	  echo ";") > $@
-
-$(TESTAPP_LARGEOBJECT): $(TESTAPP_LARGEOBJECT_SOURCE)
-	$(NVCC) -I $(shell $(PG_CONFIG) --pkgincludedir) \
-	        -L $(shell $(PG_CONFIG) --pkglibdir) \
-	        -Xcompiler \"$(UTILS_RPATH)\" \
-	        -lpq -o $@ $^
 
 #
 # Tarball
