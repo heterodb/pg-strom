@@ -44,11 +44,33 @@ pgstrom.arrow_fdw_put_gpu_buffer(text)
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_put_gpu_buffer'
   LANGUAGE C STRICT;
 
-
 --
 -- Drop Gstore_Fdw support functions (deprecated)
 --
-
+DROP VIEW IF EXISTS pgstrom.gstore_fdw_chunk_info CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.gstore_fdw_chunk_info() CASCADE;
+DROP TYPE IF EXISTS pgstrom.__gstore_fdw_chunk_info CASCADE;
+DROP FUNCTION IF EXISTS public.gstore_fdw_format(reggstore) CASCADE;
+DROP FUNCTION IF EXISTS public.gstore_fdw_nitems(reggstore) CASCADE;
+DROP FUNCTION IF EXISTS public.gstore_fdw_nattrs(reggstore) CASCADE;
+DROP FUNCTION IF EXISTS public.gstore_fdw_rawsize(reggstore) CASCADE;
+DROP FUNCTION IF EXISTS public.gstore_export_ipchandle(reggstore) CASCADE;
+DROP CAST IF EXISTS (reggstore AS oid);
+DROP CAST IF EXISTS (oid AS reggstore);
+DROP CAST IF EXISTS (reggstore AS integer);
+DROP CAST IF EXISTS (reggstore AS bigint);
+DROP CAST IF EXISTS (integer AS reggstore);
+DROP CAST IF EXISTS (smallint AS reggstore);
+DROP CAST IF EXISTS (bigint AS reggstore);
+DROP TYPE IF EXISTS public.reggstore;
+DROP FUNCTION IF EXISTS pgstrom.reggstore_in(cstring) CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.reggstore_out(reggstore) CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.reggstore_recv(internal) CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.reggstore_send(reggstore) CASCADE;
+DROP SERVER IF EXISTS gstore_fdw;
+DROP FOREIGN DATA WRAPPER IF EXISTS gstore_fdw CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.gstore_fdw_handler() CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.gstore_fdw_validator(text[],oid) CASCADE;
 
 --
 -- Drop PL/CUDA support functions (deprecated)

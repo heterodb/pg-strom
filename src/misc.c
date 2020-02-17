@@ -1319,6 +1319,21 @@ __pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
 	}													\
 	PG_FUNCTION_INFO_V1(cfunc_name)
 
+/* deadcode/gstore_(fdw|buf) */
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_validator);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_handler);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_in);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_out);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_recv);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_send);
+
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_chunk_info);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_format);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nitems);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nattrs);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_rawsize);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_export_ipchandle);
+
 /* deadcode/pl_cuda_v2.c */
 PG_DEPRECATED_FUNCTION(plcuda_function_validator);
 PG_DEPRECATED_FUNCTION(plcuda_function_handler);

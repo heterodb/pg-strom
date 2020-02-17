@@ -91,8 +91,11 @@ CREATE FUNCTION pgstrom.pgstrom_device_preserved_meminfo()
 CREATE VIEW pgstrom.device_preserved_meminfo
   AS SELECT * FROM pgstrom.pgstrom_device_preserved_meminfo();
 
+/*
 --
 -- Functions/Languages to support PL/CUDA
+--
+-- FEATURES DEPRECATED AT V2.3
 --
 CREATE FUNCTION pgstrom.plcuda_function_validator(oid)
   RETURNS void
@@ -143,6 +146,7 @@ CREATE FUNCTION pg_catalog.attr_type_check(regclass,text,regtype)
   RETURNS bool
   AS 'MODULE_PATHNAME','pgsql_check_attr_of_type'
   LANGUAGE C STRICT;
+*/
 
 --
 -- Handlers for arrow_fdw extension
@@ -164,8 +168,11 @@ CREATE FOREIGN DATA WRAPPER arrow_fdw
 CREATE SERVER arrow_fdw
   FOREIGN DATA WRAPPER arrow_fdw;
 
+/*
 --
 -- Handlers for gstore_fdw extension
+--
+-- FEATURES DEPRECATED AT v2.3
 --
 CREATE FUNCTION pgstrom.gstore_fdw_handler()
   RETURNS fdw_handler
@@ -277,6 +284,7 @@ CREATE FUNCTION public.lo_export_gpu(oid, int, bytea, bigint, bigint)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_lo_export_gpu'
   LANGUAGE C STRICT VOLATILE;
+*/
 
 --
 -- Type re-interpretation routines
@@ -821,11 +829,12 @@ CREATE AGGREGATE pgstrom.regr_syy(float8[])
   parallel = safe
 );
 
--- ==================================================================
+/*
 --
 -- 2D-array like matrix type support routines
 --
--- ==================================================================
+-- FEATURES DEPRECATED AT v2.3
+--
 CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic bool[])
   RETURNS internal
   AS 'MODULE_PATHNAME','array_matrix_accum'
@@ -1345,7 +1354,7 @@ CREATE FUNCTION pg_catalog.transpose(float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_transpose_float8'
   LANGUAGE C STRICT;
-
+*/
 -- ==================================================================
 --
 -- float2 - half-precision floating point data support

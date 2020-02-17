@@ -574,20 +574,16 @@ _PG_init(void)
 	pgstrom_init_gpu_context();
 	pgstrom_init_cuda_program();
 	pgstrom_init_nvme_strom();
+	pgstrom_init_codegen();
 
-	/* registration of custom-scan providers */
+	/* init custom-scan providers/FDWs */
 	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpujoin();
 	pgstrom_init_inners();
 	pgstrom_init_gpupreagg();
 	pgstrom_init_relscan();
-
-	/* miscellaneous initializations */
-	pgstrom_init_codegen();
 	pgstrom_init_arrow_fdw();
-	pgstrom_init_gstore_buf();
-	pgstrom_init_gstore_fdw();
 
 	/* check commercial license, if any */
 	check_heterodb_license();
