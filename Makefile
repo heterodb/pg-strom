@@ -32,14 +32,12 @@ __STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
         cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o inners.o gpupreagg.o \
-		aggfuncs.o pl_cuda.o gstore_buf.o gstore_fdw.o \
+		aggfuncs.o gstore_buf.o gstore_fdw.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
 		float2.o largeobject.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
 		device_attrs.h cuda_filelist
-__PLCUDA_HOST = host_plcuda.o
-STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS) $(__PLCUDA_HOST))
-PLCUDA_HOST = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__PLCUDA_HOST:.o=.c))
+STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #
 # Source file of GPU portion
@@ -48,7 +46,7 @@ __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib cuda_jsonlib \
                 cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort
 __GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype \
-                 cuda_rangetype cuda_plcuda arrow_defs
+                 cuda_rangetype arrow_defs
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
                $(addsuffix .h, $(__GPU_HEADERS)))
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
@@ -209,7 +207,7 @@ DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN)
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(STROM_UTILS) $(PLCUDA_HOST) \
+EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
@@ -253,13 +251,6 @@ endif
 
 %.gfatbin: %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
-
-# PL/CUDA Host Template
-$(PLCUDA_HOST): $(PLCUDA_HOST:.c=.cu)
-	@(echo "const char *pgsql_host_plcuda_code =";			\
-	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
-	      -e 's/^/  "/g'   -e 's/$$/\\n"/g' < $*.cu;		\
-	  echo ";") > $@
 
 #
 # Build documentation

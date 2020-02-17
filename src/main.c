@@ -585,7 +585,6 @@ _PG_init(void)
 
 	/* miscellaneous initializations */
 	pgstrom_init_codegen();
-	pgstrom_init_plcuda();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_gstore_buf();
 	pgstrom_init_gstore_fdw();

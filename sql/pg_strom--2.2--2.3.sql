@@ -45,17 +45,24 @@ pgstrom.arrow_fdw_put_gpu_buffer(text)
   LANGUAGE C STRICT;
 
 
+--
+-- Drop Gstore_Fdw support functions (deprecated)
+--
 
 
 --
 -- Drop PL/CUDA support functions (deprecated)
 --
-
-
---
--- Drop Gstore_Fdw support functions (deprecated)
---
-
+DROP LANGUAGE IF EXISTS plcuda CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.plcuda_function_validator(oid) CASCADE;
+DROP FUNCTION IF EXISTS pgstrom.plcuda_function_handler() CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.attnums_of(regclass,text[]) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.attnum_of(regclass,text) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.atttypes_of(regclass,text[]) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.atttype_of(regclass,text) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.attrs_types_check(regclass,text[],regtype[]) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.attrs_type_check(regclass,text[],regtype) CASCADE;
+DROP FUNCTION IF EXISTS pg_catalog.attr_type_check(regclass,text,regtype) CASCADE;
 
 --
 -- Drop matrix support functions (deprecated)

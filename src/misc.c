@@ -1319,6 +1319,17 @@ __pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
 	}													\
 	PG_FUNCTION_INFO_V1(cfunc_name)
 
+/* deadcode/pl_cuda_v2.c */
+PG_DEPRECATED_FUNCTION(plcuda_function_validator);
+PG_DEPRECATED_FUNCTION(plcuda_function_handler);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_numbers_by_names);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_number_by_name);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_types_by_names);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_type_by_name);
+PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_types);
+PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_type);
+PG_DEPRECATED_FUNCTION(pgsql_check_attr_of_type);
+
 /* deadcode/matrix.c */
 PG_DEPRECATED_FUNCTION(array_matrix_accum);
 PG_DEPRECATED_FUNCTION(array_matrix_accum_varbit);
@@ -1387,10 +1398,10 @@ PG_DEPRECATED_FUNCTION(array_matrix_transpose_int4);
 PG_DEPRECATED_FUNCTION(array_matrix_transpose_int8);
 PG_DEPRECATED_FUNCTION(array_matrix_transpose_float4);
 PG_DEPRECATED_FUNCTION(array_matrix_transpose_float8);
-PG_DEPRECATED_FUNCTION(float4_as_int4);
-PG_DEPRECATED_FUNCTION(int4_as_float4);
-PG_DEPRECATED_FUNCTION(float8_as_int8);
-PG_DEPRECATED_FUNCTION(int8_as_float8);
+PG_DEPRECATED_FUNCTION(float4_as_int4);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(int4_as_float4);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(float8_as_int8);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(int8_as_float8);		/* duplicated, see float2.c */
 PG_DEPRECATED_FUNCTION(array_matrix_validation);
 PG_DEPRECATED_FUNCTION(array_matrix_height);
 PG_DEPRECATED_FUNCTION(array_matrix_width);
