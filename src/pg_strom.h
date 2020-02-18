@@ -709,7 +709,6 @@ extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  const char *filename, int lineno);
 extern CUresult __gpuMemAllocPreserved(cl_int cuda_dindex,
 									   CUipcMemHandle *ipc_mhandle,
-									   dsm_handle *dsm_mhandle,
 									   ssize_t bytesize,
 									   const char *filename, int lineno);
 extern CUresult __gpuIpcOpenMemHandle(GpuContext *gcontext,
@@ -725,18 +724,7 @@ extern CUresult gpuMemFreePreserved(cl_int cuda_dindex,
 									CUipcMemHandle m_handle);
 extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 									 CUdeviceptr m_deviceptr);
-extern CUresult gpuMemLoadPreserved(cl_int cuda_dindex,
-									CUipcMemHandle m_handle);
-extern void gpuIpcMemCopyFromHost(cl_int cuda_dindex,
-								  CUipcMemHandle m_handle,
-								  size_t offset,
-								  void *hbuffer,
-								  size_t length);
-extern void gpuIpcMemCopyToHost(void *hbuffer,
-								cl_int cuda_dindex,
-								CUipcMemHandle m_handle,
-								size_t offset,
-								size_t length);
+
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManagedRaw(a,b,c,d)		\
@@ -753,8 +741,8 @@ extern void gpuIpcMemCopyToHost(void *hbuffer,
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocHost(a,b,c)				\
 	__gpuMemAllocHost((a),(b),(c),__FILE__,__LINE__)
-#define gpuMemAllocPreserved(a,b,c,d)						\
-	__gpuMemAllocPreserved((a),(b),(c),(d),__FILE__,__LINE__)
+#define gpuMemAllocPreserved(a,b,c)						\
+	__gpuMemAllocPreserved((a),(b),(c),__FILE__,__LINE__)
 #define gpuIpcOpenMemHandle(a,b,c,d)		\
 	__gpuIpcOpenMemHandle((a),(b),(c),(d),__FILE__,__LINE__)
 

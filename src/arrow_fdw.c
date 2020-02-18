@@ -4729,7 +4729,6 @@ BuildArrowGpuBufferCupy(Relation frel,
 	size_t		mmap_len = 0UL;
 	CUdeviceptr	gmem_ptr = 0UL;
 	CUipcMemHandle ipc_mhandle;
-	dsm_handle	dsm_mhandle;
 	ListCell   *lc;
 	int			index;
 	CUresult	rc = CUDA_ERROR_NO_DEVICE;
@@ -4774,7 +4773,6 @@ BuildArrowGpuBufferCupy(Relation frel,
 	{
 		rc = gpuMemAllocPreserved(cuda_dindex,
 								  &ipc_mhandle,
-								  &dsm_mhandle,
 								  nbytes);
 		if (rc == CUDA_SUCCESS)
 			break;
