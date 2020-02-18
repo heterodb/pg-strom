@@ -1660,81 +1660,88 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 		Elog("failed on mmap: %m");
 	mmap_tail = mmap_head + file_sz - ARROW_FILE_TAIL_SIGNATURE_SZ;
 
-	/* check signature */
-	if (memcmp(mmap_head,
-			   ARROW_FILE_HEAD_SIGNATURE,
-			   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
-		memcmp(mmap_tail,
-			   ARROW_FILE_TAIL_SIGNATURE,
-			   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
+	TRY_BLOCK_BEGIN();
+	{
+		/* check signature */
+		if (memcmp(mmap_head,
+				   ARROW_FILE_HEAD_SIGNATURE,
+				   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
+			memcmp(mmap_tail,
+				   ARROW_FILE_TAIL_SIGNATURE,
+				   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
+		{
+			Elog("Signature mismatch on Apache Arrow file");
+		}
+
+		/* Read Footer chunk */
+		pos = mmap_tail - sizeof(int32);
+		offset = *((int32 *)pos);
+		pos -= offset;
+		offset = *((int32 *)pos);
+		readArrowFooter(&af_info->footer, pos + offset);
+
+		/* Read DictionaryBatch chunks */
+		nitems = af_info->footer._num_dictionaries;
+		if (nitems > 0)
+		{
+			af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
+			for (i=0; i < nitems; i++)
+			{
+				ArrowBlock	   *b = &af_info->footer.dictionaries[i];
+				ArrowMessage   *m = &af_info->dictionaries[i];
+				int32		   *ival = (int32 *)(mmap_head + b->offset);
+				int32			metaLength	__attribute__((unused));
+				int32		   *headOffset;
+
+				if (*ival == 0xffffffff)
+				{
+					metaLength = ival[1];
+					headOffset = ival + 2;
+				}
+				else
+				{
+					/* Older format prior to Arrow v0.15 */
+					metaLength = *ival;
+					headOffset = ival + 1;
+				}
+				pos = (const char *)headOffset + *headOffset;
+				readArrowMessage(m, pos);
+			}
+		}
+
+		/* Read RecordBatch chunks */
+		nitems = af_info->footer._num_recordBatches;
+		if (nitems > 0)
+		{
+			af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
+			for (i=0; i < nitems; i++)
+			{
+				ArrowBlock	   *b = &af_info->footer.recordBatches[i];
+				ArrowMessage   *m = &af_info->recordBatches[i];
+				int32		   *ival = (int32 *)(mmap_head + b->offset);
+				int32			metaLength	__attribute__((unused));
+				int32		   *headOffset;
+
+				if (*ival == 0xffffffff)
+				{
+					metaLength = ival[1];
+					headOffset = ival + 2;
+				}
+				else
+				{
+					/* Older format prior to Arrow v0.15 */
+					metaLength = *ival;
+					headOffset = ival + 1;
+				}
+				pos = (const char *)headOffset + *headOffset;
+				readArrowMessage(m, pos);
+			}
+		}
+	}
+	TRY_BLOCK_CATCH();
 	{
 		munmap(mmap_head, mmap_sz);
-		Elog("Signature mismatch on Apache Arrow file");
 	}
-
-	/* Read Footer chunk */
-	pos = mmap_tail - sizeof(int32);
-	offset = *((int32 *)pos);
-	pos -= offset;
-	offset = *((int32 *)pos);
-	readArrowFooter(&af_info->footer, pos + offset);
-
-	/* Read DictionaryBatch chunks */
-	nitems = af_info->footer._num_dictionaries;
-	if (nitems > 0)
-	{
-		af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
-		for (i=0; i < nitems; i++)
-		{
-			ArrowBlock	   *b = &af_info->footer.dictionaries[i];
-			ArrowMessage   *m = &af_info->dictionaries[i];
-			int32		   *ival = (int32 *)(mmap_head + b->offset);
-			int32			metaLength	__attribute__((unused));
-			int32		   *headOffset;
-
-			if (*ival == 0xffffffff)
-			{
-				metaLength = ival[1];
-				headOffset = ival + 2;
-			}
-			else
-			{
-				/* Older format prior to Arrow v0.15 */
-				metaLength = *ival;
-				headOffset = ival + 1;
-			}
-			pos = (const char *)headOffset + *headOffset;
-			readArrowMessage(m, pos);
-		}
-	}
-
-	/* Read RecordBatch chunks */
-	nitems = af_info->footer._num_recordBatches;
-	if (nitems > 0)
-	{
-		af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
-		for (i=0; i < nitems; i++)
-		{
-			ArrowBlock	   *b = &af_info->footer.recordBatches[i];
-			ArrowMessage   *m = &af_info->recordBatches[i];
-			int32		   *ival = (int32 *)(mmap_head + b->offset);
-			int32			metaLength	__attribute__((unused));
-			int32		   *headOffset;
-
-			if (*ival == 0xffffffff)
-			{
-				metaLength = ival[1];
-				headOffset = ival + 2;
-			}
-			else
-			{
-				/* Older format prior to Arrow v0.15 */
-				metaLength = *ival;
-				headOffset = ival + 1;
-			}
-			pos = (const char *)headOffset + *headOffset;
-			readArrowMessage(m, pos);
-		}
-	}
+	TRY_BLOCK_END();
 	munmap(mmap_head, mmap_sz);
 }

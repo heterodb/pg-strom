@@ -176,6 +176,9 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
  */
 #ifndef __PG2ARROW__
 #define Elog(fmt, ...)		elog(ERROR,(fmt),##__VA_ARGS__)
+#define TRY_BLOCK_BEGIN()	PG_TRY(); {
+#define TRY_BLOCK_CATCH()	} PG_CATCH(); {
+#define TRY_BLOCK_END()		PG_RE_THROW(); } PG_END_TRY()
 #else
 #define Elog(fmt, ...)								\
 	do {											\
@@ -183,6 +186,9 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 				__FILE__,__LINE__, ##__VA_ARGS__);	\
 		exit(1);									\
 	} while(0)
+#define TRY_BLOCK_BEGIN()	if (1) {
+#define TRY_BLOCK_CATCH()	} else {
+#define TRY_BLOCK_END()		assert(false); }
 #endif
 
 /*
