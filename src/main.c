@@ -55,7 +55,7 @@ pgstrom_chunk_size(void)
 }
 
 static void
-pgstrom_init_misc_guc(void)
+pgstrom_init_common_guc(void)
 {
 	/* turn on/off PG-Strom feature */
 	DefineCustomBoolVariable("pg_strom.enabled",
@@ -567,7 +567,7 @@ _PG_init(void)
 	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
 
 	/* init GPU/CUDA infrastracture */
-	pgstrom_init_misc_guc();
+	pgstrom_init_common_guc();
 	pgstrom_init_shmbuf();
 	pgstrom_init_gpu_device();
 	pgstrom_init_gpu_mmgr();

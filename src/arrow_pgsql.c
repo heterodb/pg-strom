@@ -29,8 +29,12 @@
 #define __ntoh32(x)			(x)
 #define __ntoh64(x)			(x)
 #else	/* WORDS_BIGENDIAN */
-#ifdef __PG2ARROW__
-/* build for client program in little endian */
+#ifdef __PGSTROM_MODULE__
+/* build for server module don't need endian translation */
+#define __ntoh16(x)			(x)
+#define __ntoh32(x)			(x)
+#define __ntoh64(x)			(x)
+#else  /* __PGSTROM_MODULE__ */
 #if PG_VERSION_NUM < 110000
 #define __ntoh16(x)			ntohs(x)
 #define __ntoh32(x)			BSWAP32(x)
@@ -40,13 +44,8 @@
 #define __ntoh32(x)			pg_ntoh32(x)
 #define __ntoh64(x)			pg_ntoh64(x)
 #endif	/* PG_VERSION */
-#else	/* __PG2ARROW__ */
-/* build for server module in little endian */
-#define __ntoh16(x)			(x)
-#define __ntoh32(x)			(x)
-#define __ntoh64(x)			(x)
-#endif	/* __PG2ARROW__ */
-#endif	/* WORDS_BIGENDIAN */
+#endif  /* __PGSTROM_MODULE__ */
+#endif  /* WORDS_BIGENDIAN */
 
 /* ----------------------------------------------------------------
  *
@@ -280,7 +279,7 @@ typedef struct NumericVar
 	NumericDigit *digits;	/* base-NBASE digits */
 } NumericVar;
 
-#ifndef __PG2ARROW__
+#ifdef  __PGSTROM_MODULE__
 #define NUMERIC_SHORT_SIGN_MASK			0x2000
 #define NUMERIC_SHORT_DSCALE_MASK		0x1F80
 #define NUMERIC_SHORT_DSCALE_SHIFT		7
@@ -330,7 +329,7 @@ init_var_from_num(NumericVar *nv, const char *addr, int sz)
 		nv->digits = (NumericDigit *)n_long->n_data;
 	}
 }
-#endif	/* !__PG2ARROW__ */
+#endif	/* __PGSTROM_MODULE__ */
 
 static size_t
 put_decimal_value(SQLfield *column,
@@ -346,7 +345,9 @@ put_decimal_value(SQLfield *column,
 		int				scale = column->arrow_type.Decimal.scale;
 		int128			value = 0;
 		int				d, dig;
-#ifdef __PG2ARROW__
+#ifdef __PGSTROM_MODULE__
+		init_var_from_num(&nv, addr, sz);
+#else
 		struct {
 			uint16		ndigits;	/* number of digits */
 			uint16		weight;		/* weight of first digit */
@@ -359,9 +360,7 @@ put_decimal_value(SQLfield *column,
 		nv.sign		= (int16)__ntoh16(rawdata->sign);
 		nv.dscale	= (int16)__ntoh16(rawdata->dscale);
 		nv.digits	= rawdata->digits;
-#else	/* __PG2ARROW__ */
-		init_var_from_num(&nv, addr, sz);
-#endif	/* __PG2ARROW__ */
+#endif	/* __PGSTROM_MODULE__ */
 		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
 			Elog("Decimal128 cannot map NaN in PostgreSQL Numeric");
 
@@ -807,46 +806,7 @@ put_array_value(SQLfield *column,
 	}
 	else
 	{
-#ifdef __PG2ARROW__
-		struct {
-			int32		ndim;
-			int32		hasnull;
-			int32		element_type;
-			struct {
-				int32	sz;
-				int32	lb;
-			} dim[FLEXIBLE_ARRAY_MEMBER];
-		}  *rawdata = (void *) addr;
-		int32		ndim = __ntoh32(rawdata->ndim);
-		//int32		hasnull = __ntoh32(rawdata->hasnull);
-		Oid			element_typeid = __ntoh32(rawdata->element_type);
-		size_t		i, nitems = 1;
-		int			item_sz;
-		char	   *pos;
-
-		if (element_typeid != element->sql_type.pgsql.typeid)
-			Elog("PostgreSQL array type mismatch");
-		if (ndim < 1)
-			Elog("Invalid dimension size of PostgreSQL Array (ndim=%d)", ndim);
-		for (i=0; i < ndim; i++)
-			nitems *= __ntoh32(rawdata->dim[i].sz);
-
-		pos = (char *)&rawdata->dim[ndim];
-		for (i=0; i < nitems; i++)
-		{
-			if (pos + sizeof(int32) > addr + sz)
-				Elog("out of range - binary array has corruption");
-			item_sz = __ntoh32(*((int32 *)pos));
-			pos += sizeof(int32);
-			if (item_sz < 0)
-				sql_field_put_value(element, NULL, 0);
-			else
-			{
-				sql_field_put_value(element, pos, item_sz);
-				pos += item_sz;
-			}
-		}
-#else	/* __PG2ARROW__ */
+#ifdef __PGSTROM_MODULE__
 		/*
 		 * NOTE: varlena of ArrayType may have short-header (1b, not 4b).
 		 * We assume (addr - VARHDRSZ) is a head of ArrayType for performance
@@ -893,7 +853,46 @@ put_array_value(SQLfield *column,
 				Elog("Bug? PostgreSQL Array has unsupported element type");
 			}
 		}
-#endif	/* !__PG2ARROW__ */
+#else  /* __PGSTROM_MODULE__ */
+		struct {
+			int32		ndim;
+			int32		hasnull;
+			int32		element_type;
+			struct {
+				int32	sz;
+				int32	lb;
+			} dim[FLEXIBLE_ARRAY_MEMBER];
+		}  *rawdata = (void *) addr;
+		int32		ndim = __ntoh32(rawdata->ndim);
+		//int32		hasnull = __ntoh32(rawdata->hasnull);
+		Oid			element_typeid = __ntoh32(rawdata->element_type);
+		size_t		i, nitems = 1;
+		int			item_sz;
+		char	   *pos;
+
+		if (element_typeid != element->sql_type.pgsql.typeid)
+			Elog("PostgreSQL array type mismatch");
+		if (ndim < 1)
+			Elog("Invalid dimension size of PostgreSQL Array (ndim=%d)", ndim);
+		for (i=0; i < ndim; i++)
+			nitems *= __ntoh32(rawdata->dim[i].sz);
+
+		pos = (char *)&rawdata->dim[ndim];
+		for (i=0; i < nitems; i++)
+		{
+			if (pos + sizeof(int32) > addr + sz)
+				Elog("out of range - binary array has corruption");
+			item_sz = __ntoh32(*((int32 *)pos));
+			pos += sizeof(int32);
+			if (item_sz < 0)
+				sql_field_put_value(element, NULL, 0);
+			else
+			{
+				sql_field_put_value(element, pos, item_sz);
+				pos += item_sz;
+			}
+		}
+#endif /* __PGSTROM_MODULE__ */
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
 	}
@@ -923,47 +922,7 @@ put_composite_value(SQLfield *column,
 	}
 	else
 	{
-#ifdef __PG2ARROW__
-		const char *pos = addr;
-		int			j, nvalids;
-
-		if (sz < sizeof(uint32))
-			Elog("binary composite record corruption");
-		nvalids = __ntoh32(*((const int *)pos));
-		pos += sizeof(int);
-		for (j=0; j < column->nfields; j++)
-		{
-			SQLfield *sub_field = &column->subfields[j];
-			Oid		typeid;
-			int32	len;
-
-			if (j >= nvalids)
-			{
-				usage += sql_field_put_value(sub_field, NULL, 0);
-				continue;
-			}
-			if ((pos - addr) + sizeof(Oid) + sizeof(int) > sz)
-				Elog("binary composite record corruption");
-			typeid = __ntoh32(*((Oid *)pos));
-			pos += sizeof(Oid);
-			if (sub_field->sql_type.pgsql.typeid != typeid)
-				Elog("composite subtype mismatch");
-			len = __ntoh32(*((int *)pos));
-			pos += sizeof(int32);
-			if (len == -1)
-			{
-				usage += sql_field_put_value(sub_field, NULL, 0);
-			}
-			else
-			{
-				if ((pos - addr) + len > sz)
-					Elog("binary composite record corruption");
-				usage += sql_field_put_value(sub_field, pos, len);
-				pos += len;
-			}
-			assert(column->nitems == sub_field->nitems);
-		}
-#else	/* __PG2ARROW__ */
+#ifdef __PGSTROM_MODULE__
 		HeapTupleHeader htup = (HeapTupleHeader)(addr - VARHDRSZ);
 		bits8	   *nullmap = NULL;
 		int			j, nvalids;
@@ -1011,7 +970,47 @@ put_composite_value(SQLfield *column,
 			}
 			assert(column->nitems == field->nitems);
 		}
-#endif	/* !__PG2ARROW__ */
+#else  /* __PGSTROM_MODULE__ */
+		const char *pos = addr;
+		int			j, nvalids;
+
+		if (sz < sizeof(uint32))
+			Elog("binary composite record corruption");
+		nvalids = __ntoh32(*((const int *)pos));
+		pos += sizeof(int);
+		for (j=0; j < column->nfields; j++)
+		{
+			SQLfield *sub_field = &column->subfields[j];
+			Oid		typeid;
+			int32	len;
+
+			if (j >= nvalids)
+			{
+				usage += sql_field_put_value(sub_field, NULL, 0);
+				continue;
+			}
+			if ((pos - addr) + sizeof(Oid) + sizeof(int) > sz)
+				Elog("binary composite record corruption");
+			typeid = __ntoh32(*((Oid *)pos));
+			pos += sizeof(Oid);
+			if (sub_field->sql_type.pgsql.typeid != typeid)
+				Elog("composite subtype mismatch");
+			len = __ntoh32(*((int *)pos));
+			pos += sizeof(int32);
+			if (len == -1)
+			{
+				usage += sql_field_put_value(sub_field, NULL, 0);
+			}
+			else
+			{
+				if ((pos - addr) + len > sz)
+					Elog("binary composite record corruption");
+				usage += sql_field_put_value(sub_field, pos, len);
+				pos += len;
+			}
+			assert(column->nitems == sub_field->nitems);
+		}
+#endif /* __PGSTROM_MODULE__ */
 		sql_buffer_setbit(&column->nullmap, row_index);
 	}
 	if (column->nullcount > 0)

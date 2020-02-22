@@ -1430,6 +1430,12 @@ extern bool pathtree_has_gpupath(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);
 extern const char *errorText(int errcode);
 
+extern ssize_t	__readFile(int fdesc, void *buffer, size_t nbytes);
+extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
+extern void	   *__mmapFile(void *addr, size_t length,
+						   int prot, int flags, int fdesc, off_t offset);
+extern int		__munmapFile(void *mmap_addr);
+
 /*
  * nvrtc.c
  */
@@ -1791,55 +1797,6 @@ pmemdup(const void *src, Size sz)
 	memcpy(dst, src, sz);
 
 	return dst;
-}
-
-
-/*
- * Simple wrapper for read(2) and write(2) to ensure full-buffer read and
- * write, regardless of i/o-size and signal interrupts.
- */
-static inline ssize_t
-__read(int fdesc, void *buffer, size_t nbytes)
-{
-	ssize_t		rv, count = 0;
-	do {
-		rv = read(fdesc, (char *)buffer + count, nbytes - count);
-		if (rv <= 0)
-		{
-			if (errno == EINTR)
-			{
-				CHECK_FOR_INTERRUPTS();
-				continue;
-			}
-			return -1;
-		}
-		else if (rv == 0)
-			break;
-		count += rv;
-	} while (count < nbytes);
-	return count;
-}
-
-static inline ssize_t
-__write(int fdesc, const void *buffer, size_t nbytes)
-{
-	ssize_t		rv, count = 0;
-	do {
-		rv = write(fdesc, (const char *)buffer + count, nbytes - count);
-		if (rv <= 0)
-		{
-			if (errno == EINTR)
-			{
-				CHECK_FOR_INTERRUPTS();
-				continue;
-			}
-			return -1;
-		}
-		else if (rv == 0)
-			break;
-		count += rv;
-	} while (count < nbytes);
-	return count;
 }
 
 /*

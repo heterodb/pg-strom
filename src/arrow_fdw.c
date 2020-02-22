@@ -4198,7 +4198,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 		offset = lseek(fdesc, -nbytes, SEEK_END);
 		if (offset < 0)
 			elog(ERROR, "failed on lseek(2): %m");
-		if (__read(fdesc, temp, nbytes) != nbytes)
+		if (__readFile(fdesc, temp, nbytes) != nbytes)
 			elog(ERROR, "failed on read(2): %m");
 		offset -= *((int32 *)temp);
 
@@ -4218,7 +4218,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 		{
 			if (lseek(fdesc, -nbytes, SEEK_END) < 0)
 				elog(ERROR, "failed on lseek(2): %m");
-			if (__read(fdesc, redo->footer_backup, nbytes) != nbytes)
+			if (__readFile(fdesc, redo->footer_backup, nbytes) != nbytes)
 				elog(ERROR, "failed on read(2): %m");
 			if (lseek(fdesc, -nbytes, SEEK_END) < 0)
 				elog(ERROR, "failed on lseek(2): %m");
@@ -4279,9 +4279,10 @@ writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 		if (stat_buf.st_size == 0)
 		{
 			Assert(lseek(table->fdesc, 0, SEEK_END) == 0);
-			nbytes = __write(table->fdesc, "ARROW1\0\0", 8);
+			nbytes = __writeFile(table->fdesc, "ARROW1\0\0", 8);
 			if (nbytes != 8)
-				elog(ERROR, "failed on __write('%s'): %m", table->filename);
+				elog(ERROR, "failed on __writeFile('%s'): %m",
+					 table->filename);
 			writeArrowSchema(table);
 		}
 		if (table->nitems > 0)
@@ -4395,9 +4396,9 @@ __arrowExecTruncateRelation(Relation frel)
 		/* write out an empty arrow file */
 		table->filename = path;
 		table->fdesc = fdesc;
-		nbytes = __write(table->fdesc, "ARROW1\0\0", 8);
+		nbytes = __writeFile(table->fdesc, "ARROW1\0\0", 8);
 		if (nbytes != 8)
-			elog(ERROR, "failed on __write('%s'): %m", path);
+			elog(ERROR, "failed on __writeFile('%s'): %m", path);
 		writeArrowSchema(table);
 		writeArrowFooter(table);
 
@@ -4523,9 +4524,9 @@ __applyArrowInsertRedoLog(arrowWriteRedoLog *redo, bool is_commit)
 				 errmsg("failed on lseek('%s'): %m", redo->pathname),
 				 errdetail("could not apply REDO image, therefore, arrow file might be corrupted")));
 	}
-	else if (__write(fdesc,
-					 redo->footer_backup,
-					 redo->footer_length) != redo->footer_length)
+	else if (__writeFile(fdesc,
+						 redo->footer_backup,
+						 redo->footer_length) != redo->footer_length)
 	{
 		ereport(WARNING,
 				(errcode_for_file_access(),

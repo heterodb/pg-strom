@@ -1297,6 +1297,188 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_abort_if);
 
 /*
+ * Simple wrapper for read(2) and write(2) to ensure full-buffer read and
+ * write, regardless of i/o-size and signal interrupts.
+ */
+ssize_t
+__readFile(int fdesc, void *buffer, size_t nbytes)
+{
+	ssize_t		rv, count = 0;
+
+	do {
+		rv = read(fdesc, (char *)buffer + count, nbytes - count);
+		if (rv < 0)
+		{
+			if (errno == EINTR)
+			{
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			return rv;
+		}
+		else if (rv == 0)
+			break;
+		count += rv;
+	} while (count < nbytes);
+
+	return count;
+}
+
+ssize_t
+__writeFile(int fdesc, const void *buffer, size_t nbytes)
+{
+	ssize_t		rv, count = 0;
+
+	do {
+		rv = write(fdesc, (const char *)buffer + count, nbytes - count);
+		if (rv < 0)
+		{
+			if (errno == EINTR)
+			{
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			return -1;
+		}
+		else if (rv == 0)
+			break;
+		count += rv;
+	} while (count < nbytes);
+
+	return count;
+}
+
+/*
+ * mmap/munmap wrapper that is automatically unmapped on regarding to
+ * the resource-owner.
+ */
+typedef struct
+{
+	void	   *mmap_addr;
+	size_t		mmap_size;
+	int			mmap_prot;
+	int			mmap_flags;
+	ResourceOwner owner;
+} mmapEntry;
+static HTAB	   *mmap_tracker_htab = NULL;
+
+static void
+cleanup_mmap_chunks(ResourceReleasePhase phase,
+					bool isCommit,
+					bool isTopLevel,
+					void *arg)
+{
+	if (mmap_tracker_htab &&
+		hash_get_num_entries(mmap_tracker_htab) > 0)
+	{
+		HASH_SEQ_STATUS	seq;
+		mmapEntry	   *entry;
+
+		hash_seq_init(&seq, mmap_tracker_htab);
+		while ((entry = hash_seq_search(&seq)) != NULL)
+		{
+			if (entry->owner != CurrentResourceOwner)
+				continue;
+			if (isCommit)
+				elog(WARNING, "mmap (%p-%p; sz=%zu) leaks, and still mapped",
+					 (char *)entry->mmap_addr,
+					 (char *)entry->mmap_addr + entry->mmap_size,
+					 entry->mmap_size);
+			if (munmap(entry->mmap_addr, entry->mmap_size) != 0)
+				elog(WARNING, "failed on munmap(%p, %zu): %m",
+					 entry->mmap_addr, entry->mmap_size);
+			hash_search(mmap_tracker_htab,
+						&entry->mmap_addr,
+						HASH_REMOVE,
+						NULL);
+		}
+	}
+}
+
+void *
+__mmapFile(void *addr, size_t length,
+		   int prot, int flags, int fdesc, off_t offset)
+{
+	void	   *mmap_addr;
+	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, length);
+	mmapEntry  *entry;
+	bool		found;
+
+	if (!mmap_tracker_htab)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(void *);
+		hctl.entrysize = sizeof(mmapEntry);
+		hctl.hcxt = CacheMemoryContext;
+		mmap_tracker_htab = hash_create("mmap_tracker_htab",
+										256,
+										&hctl,
+										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		RegisterResourceReleaseCallback(cleanup_mmap_chunks, 0);
+	}
+	mmap_addr = mmap(addr, mmap_size, prot, flags, fdesc, offset);
+	if (mmap_addr == MAP_FAILED)
+		return MAP_FAILED;
+	PG_TRY();
+	{
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr,
+							HASH_ENTER,
+							&found);
+		if (found)
+			elog(ERROR, "Bug? duplicated mmap entry");
+		Assert(entry->mmap_addr == mmap_addr);
+		entry->mmap_size = mmap_size;
+		entry->mmap_prot = prot;
+		entry->mmap_flags = flags;
+		entry->owner = CurrentResourceOwner;
+	}
+	PG_CATCH();
+	{
+		if (munmap(mmap_addr, mmap_size) != 0)
+			elog(WARNING, "failed on munmap(%p, %zu): %m",
+				 mmap_addr, mmap_size);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return mmap_addr;
+}
+
+int
+__munmapFile(void *mmap_addr)
+{
+	mmapEntry  *entry;
+	int			rv;
+
+	if (mmap_tracker_htab)
+	{
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr, HASH_REMOVE, NULL);
+		if (entry)
+		{
+			rv = munmap(entry->mmap_addr,
+						entry->mmap_size);
+			if (rv != 0)
+			{
+				int		errno_saved = errno;
+
+				elog(WARNING, "failed on munmap(%p, %zu): %m",
+					 entry->mmap_addr,
+					 entry->mmap_size);
+				errno = errno_saved;
+			}
+			return rv;
+		}
+	}
+	/* mmapEntry not found */
+	errno = EINVAL;
+	return -1;
+}
+
+/*
  * dummy entry for deprecated functions
  */
 static void

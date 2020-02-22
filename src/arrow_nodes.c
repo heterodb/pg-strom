@@ -1639,6 +1639,15 @@ readArrowFooter(ArrowFooter *node, const char *pos)
 #define ARROW_FILE_TAIL_SIGNATURE		"ARROW1"
 #define ARROW_FILE_TAIL_SIGNATURE_SZ	(sizeof(ARROW_FILE_TAIL_SIGNATURE) - 1)
 
+#ifdef __PGSTROM_MODULE__
+#include "pg_strom.h"
+#define __mmap(a,b,c,d,e,f)		__mmapFile((a),(b),(c),(d),(e),(f))
+#define __munmap(a,b)			__munmapFile((a))
+#else
+#define __mmap(a,b,c,d,e,f)		mmap((a),(b),(c),(d),(e),(f))
+#define __munmap(a,b)			munmap((a),(b))
+#endif /* __PGSTROM_MODULE__ */
+
 void
 readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 {
@@ -1655,93 +1664,85 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 		Elog("failed on fstat: %m");
 	file_sz = af_info->stat_buf.st_size;
 	mmap_sz = TYPEALIGN(sysconf(_SC_PAGESIZE), file_sz);
-	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+	mmap_head = __mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
 	if (mmap_head == MAP_FAILED)
 		Elog("failed on mmap: %m");
 	mmap_tail = mmap_head + file_sz - ARROW_FILE_TAIL_SIGNATURE_SZ;
 
-	TRY_BLOCK_BEGIN();
+	/* check signature */
+	if (memcmp(mmap_head,
+			   ARROW_FILE_HEAD_SIGNATURE,
+			   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
+		memcmp(mmap_tail,
+			   ARROW_FILE_TAIL_SIGNATURE,
+			   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
 	{
-		/* check signature */
-		if (memcmp(mmap_head,
-				   ARROW_FILE_HEAD_SIGNATURE,
-				   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
-			memcmp(mmap_tail,
-				   ARROW_FILE_TAIL_SIGNATURE,
-				   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
-		{
-			Elog("Signature mismatch on Apache Arrow file");
-		}
+		Elog("Signature mismatch on Apache Arrow file");
+	}
 
-		/* Read Footer chunk */
-		pos = mmap_tail - sizeof(int32);
-		offset = *((int32 *)pos);
-		pos -= offset;
-		offset = *((int32 *)pos);
-		readArrowFooter(&af_info->footer, pos + offset);
+	/* Read Footer chunk */
+	pos = mmap_tail - sizeof(int32);
+	offset = *((int32 *)pos);
+	pos -= offset;
+	offset = *((int32 *)pos);
+	readArrowFooter(&af_info->footer, pos + offset);
 
-		/* Read DictionaryBatch chunks */
-		nitems = af_info->footer._num_dictionaries;
-		if (nitems > 0)
+	/* Read DictionaryBatch chunks */
+	nitems = af_info->footer._num_dictionaries;
+	if (nitems > 0)
+	{
+		af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
+		for (i=0; i < nitems; i++)
 		{
-			af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
-			for (i=0; i < nitems; i++)
+			ArrowBlock	   *b = &af_info->footer.dictionaries[i];
+			ArrowMessage   *m = &af_info->dictionaries[i];
+			int32		   *ival = (int32 *)(mmap_head + b->offset);
+			int32			metaLength	__attribute__((unused));
+			int32		   *headOffset;
+
+			if (*ival == 0xffffffff)
 			{
-				ArrowBlock	   *b = &af_info->footer.dictionaries[i];
-				ArrowMessage   *m = &af_info->dictionaries[i];
-				int32		   *ival = (int32 *)(mmap_head + b->offset);
-				int32			metaLength	__attribute__((unused));
-				int32		   *headOffset;
-
-				if (*ival == 0xffffffff)
-				{
-					metaLength = ival[1];
-					headOffset = ival + 2;
-				}
-				else
-				{
-					/* Older format prior to Arrow v0.15 */
-					metaLength = *ival;
-					headOffset = ival + 1;
-				}
-				pos = (const char *)headOffset + *headOffset;
-				readArrowMessage(m, pos);
+				metaLength = ival[1];
+				headOffset = ival + 2;
 			}
-		}
-
-		/* Read RecordBatch chunks */
-		nitems = af_info->footer._num_recordBatches;
-		if (nitems > 0)
-		{
-			af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
-			for (i=0; i < nitems; i++)
+			else
 			{
-				ArrowBlock	   *b = &af_info->footer.recordBatches[i];
-				ArrowMessage   *m = &af_info->recordBatches[i];
-				int32		   *ival = (int32 *)(mmap_head + b->offset);
-				int32			metaLength	__attribute__((unused));
-				int32		   *headOffset;
-
-				if (*ival == 0xffffffff)
-				{
-					metaLength = ival[1];
-					headOffset = ival + 2;
-				}
-				else
-				{
-					/* Older format prior to Arrow v0.15 */
-					metaLength = *ival;
-					headOffset = ival + 1;
-				}
-				pos = (const char *)headOffset + *headOffset;
-				readArrowMessage(m, pos);
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
 			}
+			pos = (const char *)headOffset + *headOffset;
+			readArrowMessage(m, pos);
 		}
 	}
-	TRY_BLOCK_CATCH();
+
+	/* Read RecordBatch chunks */
+	nitems = af_info->footer._num_recordBatches;
+	if (nitems > 0)
 	{
-		munmap(mmap_head, mmap_sz);
+		af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
+		for (i=0; i < nitems; i++)
+		{
+			ArrowBlock	   *b = &af_info->footer.recordBatches[i];
+			ArrowMessage   *m = &af_info->recordBatches[i];
+			int32		   *ival = (int32 *)(mmap_head + b->offset);
+			int32			metaLength	__attribute__((unused));
+			int32		   *headOffset;
+
+			if (*ival == 0xffffffff)
+			{
+				metaLength = ival[1];
+				headOffset = ival + 2;
+			}
+			else
+			{
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
+			}
+			pos = (const char *)headOffset + *headOffset;
+			readArrowMessage(m, pos);
+		}
 	}
-	TRY_BLOCK_END();
-	munmap(mmap_head, mmap_sz);
+	__munmap(mmap_head, mmap_sz);
 }
