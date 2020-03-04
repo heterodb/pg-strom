@@ -82,6 +82,7 @@ typedef struct
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
+	List	   *ps_src_refby;	/* mask of GPUJOIN_ATTR_REFERENCED_BY_* */
 } GpuJoinInfo;
 
 static inline void
@@ -120,6 +121,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
+	privs = lappend(privs, gj_info->ps_src_refby);
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -164,6 +166,7 @@ deform_gpujoin_info(CustomScan *cscan)
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
+	gj_info->ps_src_refby = list_nth(privs, pindex++);
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
 
@@ -180,6 +183,12 @@ typedef struct
 	 */
 	PlanState		   *state;
 	ExprContext		   *econtext;
+
+	/* Inner-preload buffer */
+	size_t				preload_nitems;
+	size_t				preload_usage;
+	slist_head			preload_tuples;
+	Bitmapset		   *preload_flatten_attrs;
 
 	/*
 	 * Join properties; both nest-loop and hash-join
@@ -209,16 +218,14 @@ typedef struct
 typedef struct
 {
 	GpuTaskState	gts;
-	struct GpuJoinSharedState *gj_sstate;	/* may be on DSM */
-	struct GpuJoinRuntimeStat *gj_rtstat;	/* valid only PG10 or later */
+	struct GpuJoinSharedState *gj_sstate;	/* may be on DSM, if parallel */
 
 	/* Inner Buffers */
 	struct GpuJoinSiblingState *sibling;	/* only partition-wise join */
-	CUdeviceptr		m_kmrels;
-	CUdeviceptr	   *m_kmrels_array;		/* only master process */
-	GpuContext	  **m_kmrels_gcontext;	/* only master process */
-	shared_mmap_segment *seg_kmrels;
-	cl_int			curr_outer_depth;
+	kern_multirels *h_kmrels;			/* mmap of host shared memory */
+	CUdeviceptr		m_kmrels;			/* local map of preserved memory */
+	bool			m_kmrels_owner;
+	MemoryContext	preload_memcxt;		/* memory context for preloading */
 
 	/*
 	 * Expressions to be used in the CPU fallback path
@@ -254,22 +261,51 @@ typedef struct
 /*
  * GpuJoinSharedState - shared inner hash/heap buffer
  */
+#define INNER_PHASE__SCAN_RELATIONS		0
+#define INNER_PHASE__SETUP_BUFFERS		1
+#define INNER_PHASE__GPUJOIN_EXEC		2
+
 struct GpuJoinSharedState
 {
 	dsm_handle		ss_handle;		/* DSM handle of the SharedState */
 	cl_uint			ss_length;		/* Length of the SharedState */
-	size_t			offset_runtime_stat; /* offset to the runtime statistics */
-	Latch		   *masterLatch;	/* Latch of the master process */
-	dsm_handle		kmrels_handle;	/* DSM of kern_multirels */
+	cl_uint			shmem_handle;	/* identifier of host inner-buffer */
+	size_t			shmem_bytesize;	/* length of the host inner-buffer */
+	ConditionVariable cond;			/* synchronization object */
+	slock_t			mutex;			/* mutex for inner buffer */
+	int				phase;			/* one of INNER_PHASE__* above */
+	int				nr_workers_scanning;
+	int				nr_workers_setup;
+	pg_atomic_uint32 outer_scan_done;  /* non-zero, if outer is scanned */
 	pg_atomic_uint32 needs_colocation; /* non-zero, if colocation is needed */
-	pg_atomic_uint32 preload_done;	/* non-zero, if preload is done */
-	pg_atomic_uint32 pg_nworkers;	/* # of active PG workers */
+	cl_int			curr_outer_depth;
 	struct {
-		pg_atomic_uint32 pg_nworkers; /* # of PG workers per GPU device */
-		CUipcMemHandle	m_handle;	/* IPC handle for PG workers */
+		int			nr_workers_gpujoin;
+		size_t		bytesize;		/* not zero, if allocated */
+		CUipcMemHandle ipc_mhandle;	/* IPC handle of preserved memory */
 	} pergpu[FLEXIBLE_ARRAY_MEMBER];
 };
 typedef struct GpuJoinSharedState	GpuJoinSharedState;
+
+/*
+ * GpuJoinRuntimeStat - shared runtime statistics
+ */
+struct GpuJoinRuntimeStat
+{
+	GpuTaskRuntimeStat		c;		/* common statistics */
+	struct {
+		pg_atomic_uint64	inner_nrooms;
+		pg_atomic_uint64	inner_usage;
+		pg_atomic_uint64	inner_nitems;
+		pg_atomic_uint64	right_nitems;
+	} jstat[FLEXIBLE_ARRAY_MEMBER];
+};
+typedef struct GpuJoinRuntimeStat	GpuJoinRuntimeStat;
+
+#define GPUJOIN_RUNTIME_STAT(gj_sstate)									\
+	((GpuJoinRuntimeStat *)												\
+	 ((char *)(gj_sstate) + MAXALIGN(offsetof(GpuJoinSharedState,		\
+											  pergpu[numDevAttrs]))))
 
 /*
  * GpuJoinSiblingState - shared state if GpuJoin works as partition leaf.
@@ -282,32 +318,14 @@ typedef struct GpuJoinSharedState	GpuJoinSharedState;
  */
 struct GpuJoinSiblingState
 {
-	cl_int			n_actives;	/* number of active siblings */
-	GpuJoinSharedState *gj_sstate;
-	shared_mmap_segment *seg_kmrels;
+	GpuJoinState   *leader;
+	cl_int			nr_siblings;
+	cl_int			nr_processed;
 	struct {
 		CUdeviceptr	m_kmrels;	/* device memory of inner buffer */
-		GpuContext *gcontext;	/* GpuContext which allocates/opens m_kmrels */
 	} pergpu[FLEXIBLE_ARRAY_MEMBER];
 };
 typedef struct GpuJoinSiblingState	GpuJoinSiblingState;
-
-/*
- * GpuJoinRuntimeStat - shared runtime statistics
- */
-struct GpuJoinRuntimeStat
-{
-	GpuTaskRuntimeStat	c;		/* common statistics */
-	struct {
-		pg_atomic_uint64 inner_nitems;
-		pg_atomic_uint64 right_nitems;
-	} jstat[FLEXIBLE_ARRAY_MEMBER];
-};
-typedef struct GpuJoinRuntimeStat	GpuJoinRuntimeStat;
-
-#define GPUJOIN_RUNTIME_STAT(gj_sstate)							\
-	((GpuJoinRuntimeStat *)((char *)(gj_sstate) +				\
-							(gj_sstate)->offset_runtime_stat))
 
 /*
  * GpuJoinTask - task object of GpuJoin
@@ -352,6 +370,8 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static void createGpuJoinSharedState(GpuJoinState *gjs,
 									 ParallelContext *pcxt,
 									 void *coordinate);
+static void cleanupGpuJoinSharedStateOnAbort(dsm_segment *segment,
+											 Datum ptr);
 static void gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs);
 
 /*
@@ -2339,50 +2359,6 @@ try_add_gpujoin_paths(PlannerInfo *root,
 			}
 			outer_path = linitial(gjpath->cpath.custom_paths);
 		}
-#ifdef NOT_USED
-		/*
-		 * MEMO: We are not 100% certain whether it is safe operation to
-		 * pull up built-in JOIN as a part of GpuJoin. So, this code block
-		 * is disabled right now.
-		 */
-		else if (outer_path->pathtype == T_NestLoop ||
-				 outer_path->pathtype == T_HashJoin ||
-				 outer_path->pathtype == T_MergeJoin)
-		{
-			JoinPath   *join_path = (JoinPath *) outer_path;
-
-			/*
-			 * We cannot pull-up outer join path if its inner/outer paths
-			 * are mutually parameterized.
-			 */
-			if (bms_overlap(PATH_REQ_OUTER(join_path->innerjoinpath),
-							join_path->outerjoinpath->parent->relids) ||
-				bms_overlap(PATH_REQ_OUTER(join_path->outerjoinpath),
-							join_path->innerjoinpath->parent->relids))
-				return;
-
-			foreach (lc, join_path->joinrestrictinfo)
-			{
-				RestrictInfo *rinfo = lfirst(lc);
-
-				if (!pgstrom_device_expression(root, joinrel, rinfo->clause))
-					return;
-			}
-			ip_item = palloc0(sizeof(inner_path_item));
-			ip_item->join_type = join_path->jointype;
-			ip_item->inner_path = join_path->innerjoinpath;
-			ip_item->join_quals = join_path->joinrestrictinfo;
-			ip_item->hash_quals = extract_gpuhashjoin_quals(
-										root,
-										join_path->outerjoinpath->parent,
-										join_path->innerjoinpath->parent,
-										join_path->jointype,
-										join_path->joinrestrictinfo);
-			ip_item->join_nrows = join_path->path.parent->rows;
-			ip_items_list = lcons(ip_item, ip_items_list);
-			outer_path = join_path->outerjoinpath;
-		}
-#endif
 		else
 		{
 			break;
@@ -2467,7 +2443,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 			bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
 			continue;
 
-		foreach (lc2, innerrel->pathlist)
+//		foreach (lc2, innerrel->pathlist)
+		foreach (lc2, innerrel->partial_pathlist)
 		{
 			inner_path = lfirst(lc2);
 
@@ -2506,11 +2483,20 @@ typedef struct
 	List		   *ps_tlist;
 	List		   *ps_depth;
 	List		   *ps_resno;
+	List		   *ps_refby;
 	GpuJoinPath	   *gpath;
 	List		   *custom_plans;
 	Index			outer_scanrelid;
-	bool			resjunk;
+	int				att_refby;
 } build_device_tlist_context;
+
+#define GPUJOIN_ATTR_REFERENCE_BY__PROJECTION			0x0001
+#define GPUJOIN_ATTR_REFERENCE_BY__PROJECTION_ELEMS	0x0002
+#define GPUJOIN_ATTR_REFERENCE_BY__OUTER_QUALS			0x0004
+#define GPUJOIN_ATTR_REFERENCE_BY__JOIN_QUALS			0x0008
+#define GPUJOIN_ATTR_REFERENCE_BY__OTHER_QUALS			0x0010
+#define GPUJOIN_ATTR_REFERENCE_BY__HASH_INNER_KEY		0x0020
+#define GPUJOIN_ATTR_REFERENCE_BY__HASH_OUTER_KEY		0x0040
 
 static void
 build_device_tlist_walker(Node *node, build_device_tlist_context *context)
@@ -2519,10 +2505,13 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 	RelOptInfo	   *gjrel = gpath->cpath.path.parent;
 	RelOptInfo	   *rel;
 	ListCell	   *cell;
+	ListCell	   *lc1, *lc2;
+	bool			resjunk;
 	int				i;
 
 	if (!node)
 		return;
+	resjunk = (context->att_refby != GPUJOIN_ATTR_REFERENCE_BY__PROJECTION);
 	if (IsA(node, List))
 	{
 		List   *temp = (List *)node;
@@ -2541,9 +2530,10 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
 
-		foreach (cell, context->ps_tlist)
+		forboth (lc1, context->ps_tlist,
+				 lc2, context->ps_refby)
 		{
-			TargetEntry	   *tle = lfirst(cell);
+			TargetEntry	   *tle = lfirst(lc1);
 
 			if (!IsA(tle->expr, Var))
 				continue;
@@ -2553,10 +2543,10 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 				ps_node->varattno == varnode->varattno &&
 				ps_node->varlevelsup == varnode->varlevelsup)
 			{
-				/* sanity checks */
 				Assert(ps_node->vartype == varnode->vartype &&
 					   ps_node->vartypmod == varnode->vartypmod &&
 					   ps_node->varcollid == varnode->varcollid);
+				lfirst_int(lc2) |= context->att_refby;
 				return;
 			}
 		}
@@ -2578,11 +2568,13 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 						makeTargetEntry((Expr *) copyObject(varnode),
 										list_length(context->ps_tlist) + 1,
 										NULL,
-										context->resjunk);
+										resjunk);
 					context->ps_tlist = lappend(context->ps_tlist, ps_tle);
 					context->ps_depth = lappend_int(context->ps_depth, i);
 					context->ps_resno = lappend_int(context->ps_resno,
 													varnode->varattno);
+					context->ps_refby = lappend_int(context->ps_refby,
+													context->att_refby);
 					Assert(bms_is_member(varnode->varno, rel->relids));
 					Assert(varnode->varno == rel->relid);
 					return;
@@ -2605,11 +2597,13 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 							makeTargetEntry((Expr *) copyObject(varnode),
 											list_length(context->ps_tlist) + 1,
 											NULL,
-											context->resjunk);
+											resjunk);
 						context->ps_tlist = lappend(context->ps_tlist, ps_tle);
 						context->ps_depth = lappend_int(context->ps_depth, i);
 						context->ps_resno = lappend_int(context->ps_resno,
 														tle->resno);
+						context->ps_refby = lappend_int(context->ps_refby,
+														context->att_refby);
 						return;
 					}
 				}
@@ -2671,11 +2665,13 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 					ps_tle = makeTargetEntry((Expr *) copyObject(phvnode),
 											 ps_resno,
 											 NULL,
-											 context->resjunk);
+											 resjunk);
 					context->ps_tlist = lappend(context->ps_tlist, ps_tle);
 					context->ps_depth = lappend_int(context->ps_depth, i);
 					context->ps_resno = lappend_int(context->ps_resno,
 													tle->resno);
+					context->ps_refby = lappend_int(context->ps_refby,
+													context->att_refby);
 					return;
 				}
 			}
@@ -2683,34 +2679,39 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 		elog(ERROR, "Bug? uncertain origin of PlaceHolderVar-node: %s",
 			 nodeToString(phvnode));
 	}
-	else if (!context->resjunk &&
-			 pgstrom_device_expression(context->root, gjrel,
-									   (Expr *)node))
-	{
-		TargetEntry	   *ps_tle;
-
-		foreach (cell, context->ps_tlist)
-		{
-			TargetEntry	   *tle = lfirst(cell);
-
-			if (equal(node, tle->expr))
-				return;
-		}
-
-		ps_tle = makeTargetEntry((Expr *) copyObject(node),
-								 list_length(context->ps_tlist) + 1,
-								 NULL,
-								 context->resjunk);
-		context->ps_tlist = lappend(context->ps_tlist, ps_tle);
-		context->ps_depth = lappend_int(context->ps_depth, -1);	/* dummy */
-		context->ps_resno = lappend_int(context->ps_resno, -1);	/* dummy */
-	}
 	else
 	{
-		List   *temp = pull_var_clause(node, PVC_RECURSE_PLACEHOLDERS);
+		List   *vars_items;
+		int		att_refby_saved = context->att_refby;
 
-		foreach (cell, temp)
+		if (!resjunk && pgstrom_device_expression(context->root,
+												  gjrel, (Expr *)node))
+		{
+			TargetEntry	   *ps_tle;
+
+			context->att_refby |= GPUJOIN_ATTR_REFERENCE_BY__PROJECTION_ELEMS;
+			foreach (cell, context->ps_tlist)
+			{
+				TargetEntry	   *tle = lfirst(cell);
+
+				if (equal(node, tle->expr))
+					goto skip;
+			}
+			ps_tle = makeTargetEntry((Expr *) copyObject(node),
+									 list_length(context->ps_tlist) + 1,
+									 NULL,
+									 resjunk);
+			context->ps_tlist = lappend(context->ps_tlist, ps_tle);
+			context->ps_depth = lappend_int(context->ps_depth, -1);	/* dummy */
+			context->ps_resno = lappend_int(context->ps_resno, -1);	/* dummy */
+			context->ps_refby = lappend_int(context->ps_refby, 0);	/* dummy */
+		}
+	skip:
+		vars_items = pull_var_clause(node, PVC_RECURSE_PLACEHOLDERS);
+		foreach (cell, vars_items)
 			build_device_tlist_walker(lfirst(cell), context);
+		/* restore the context */
+		context->att_refby = att_refby_saved;
 	}
 }
 
@@ -2733,7 +2734,7 @@ build_device_targetlist(PlannerInfo *root,
 	context.gpath = gpath;
 	context.custom_plans = custom_plans;
 	context.outer_scanrelid = cscan->scan.scanrelid;
-	context.resjunk = false;
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__PROJECTION;
 	if (targetlist != NIL)
 		build_device_tlist_walker((Node *)targetlist, &context);
 	else
@@ -2759,19 +2760,30 @@ build_device_targetlist(PlannerInfo *root,
 	 * Also note that any Var nodes in the device executable expression
 	 * must be added with resjunk=true to solve the variable name.
 	 */
-	context.resjunk = true;
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__OUTER_QUALS;
 	build_device_tlist_walker((Node *)gj_info->outer_quals, &context);
+
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__JOIN_QUALS;
 	build_device_tlist_walker((Node *)gj_info->join_quals, &context);
+
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__OTHER_QUALS;
 	build_device_tlist_walker((Node *)gj_info->other_quals, &context);
+
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__HASH_INNER_KEY;
 	build_device_tlist_walker((Node *)gj_info->hash_inner_keys, &context);
+
+	context.att_refby = GPUJOIN_ATTR_REFERENCE_BY__HASH_OUTER_KEY;
 	build_device_tlist_walker((Node *)gj_info->hash_outer_keys, &context);
-	build_device_tlist_walker((Node *)targetlist, &context);
+
+//	build_device_tlist_walker((Node *)targetlist, &context);
 
 	Assert(list_length(context.ps_tlist) == list_length(context.ps_depth) &&
-		   list_length(context.ps_tlist) == list_length(context.ps_resno));
+		   list_length(context.ps_tlist) == list_length(context.ps_resno) &&
+		   list_length(context.ps_tlist) == list_length(context.ps_refby));
 
 	gj_info->ps_src_depth = context.ps_depth;
 	gj_info->ps_src_resno = context.ps_resno;
+	gj_info->ps_src_refby = context.ps_refby;
 	cscan->custom_scan_tlist = context.ps_tlist;
 }
 
@@ -3023,17 +3035,20 @@ fixup_varnode_to_origin_mutator(Node *node,
 }
 
 static List *
-fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
+fixup_varnode_to_origin(int depth,
+						List *ps_src_depth,
+						List *ps_src_resno,
 						List *expr_list)
 {
 	fixup_varnode_to_origin_context	context;
 
 	Assert(IsA(expr_list, List));
+	memset(&context, 0 , sizeof(fixup_varnode_to_origin_context));
 	context.depth = depth;
 	context.ps_src_depth = ps_src_depth;
 	context.ps_src_resno = ps_src_resno;
 
-	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
+	return (List *) fixup_varnode_to_origin_mutator((Node *)expr_list,
 													&context);
 }
 
@@ -3085,8 +3100,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	bool			fallback_needs_projection = false;
 	bool			fallback_meets_resjunk = false;
 	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
-	ListCell	   *lc1;
-	ListCell	   *lc2;
+	ListCell	   *lc1, *lc2, *lc3;
 	cl_int			i, j, nattrs;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
@@ -3129,9 +3143,10 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 	/* DSM & GPU memory of inner buffer */
 	gjs->m_kmrels = 0UL;
-	gjs->m_kmrels_array = NULL;
-	gjs->seg_kmrels = NULL;
-	gjs->curr_outer_depth = -1;
+	gjs->h_kmrels = NULL;
+	gjs->preload_memcxt = AllocSetContextCreate(estate->es_query_cxt,
+												"Inner GPU Buffer Preloading",
+												ALLOCSET_DEFAULT_SIZES);
 	if (gj_info->sibling_param_id >= 0)
 	{
 		ParamExecData  *param
@@ -3141,10 +3156,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			GpuJoinSiblingState *sibling
 				= palloc0(offsetof(GpuJoinSiblingState,
 								   pergpu[numDevAttrs]));
+			sibling->leader = gjs;
 			param->isnull = false;
 			param->value = PointerGetDatum(sibling);
 		}
 		gjs->sibling = (GpuJoinSiblingState *)DatumGetPointer(param->value);
+		gjs->sibling->nr_siblings++;
 	}
 
 	/*
@@ -3289,18 +3306,23 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	for (i=0; i < gj_info->num_rels; i++)
 	{
-		Plan	   *inner_plan = list_nth(cscan->custom_plans, i);
 		innerState *istate = &gjs->inners[i];
-		List	   *join_quals;
-		List	   *other_quals;
+		Plan	   *inner_plan = list_nth(cscan->custom_plans, i);
+		List	   *join_quals = list_nth(gj_info->join_quals, i);
+		List	   *other_quals = list_nth(gj_info->other_quals, i);
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
 		TupleTableSlot *inner_slot;
+		TupleDesc	inner_tupdesc;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
 
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		istate->econtext = CreateExprContext(estate);
+		istate->preload_nitems = 0;
+		istate->preload_usage = 0;
+		slist_init(&istate->preload_tuples);
+		
 		istate->depth = i + 1;
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, i));
 		plan_nrows_out = floatVal(list_nth(gj_info->plan_nrows_out, i));
@@ -3320,23 +3342,24 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		 * prior to GPU execution, so, we can expect input values
 		 * are deployed according to the result of child plans.
 		 */
-		join_quals = list_nth(gj_info->join_quals, i);
 		if (join_quals)
 		{
 			Assert(IsA(join_quals, List));
 			istate->join_quals = ExecInitQual(join_quals, &ss->ps);
 		}
 
-		other_quals = list_nth(gj_info->other_quals, i);
 		if (other_quals)
+		{
+			Assert(IsA(other_quals, List));
 			istate->other_quals = ExecInitQual(other_quals, &ss->ps);
+		}
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
 		Assert(list_length(hash_inner_keys) == list_length(hash_outer_keys));
 		if (hash_inner_keys != NIL && hash_outer_keys != NIL)
 		{
-			hash_inner_keys = fixup_varnode_to_origin(i+1,
+			hash_inner_keys = fixup_varnode_to_origin(istate->depth,
 													  gj_info->ps_src_depth,
 													  gj_info->ps_src_resno,
 													  hash_inner_keys);
@@ -3359,6 +3382,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		 * CPU fallback setup for INNER reference
 		 */
 		inner_slot = istate->state->ps_ResultTupleSlot;
+		inner_tupdesc = inner_slot->tts_tupleDescriptor;
 		nattrs = inner_slot->tts_tupleDescriptor->natts;
 		istate->inner_src_anum_min = nattrs;
 		istate->inner_src_anum_max = FirstLowInvalidHeapAttributeNumber;
@@ -3366,14 +3390,23 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		istate->inner_dst_resno = palloc0(sizeof(AttrNumber) * nattrs);
 
 		j = 1;
-		forboth (lc1, gj_info->ps_src_depth,
-				 lc2, gj_info->ps_src_resno)
+		forthree (lc1, gj_info->ps_src_depth,
+				  lc2, gj_info->ps_src_resno,
+				  lc3, gj_info->ps_src_refby)
 		{
 			int		depth = lfirst_int(lc1);
 			int		resno = lfirst_int(lc2);
+			int		refby = lfirst_int(lc3);
 
 			if (depth == istate->depth)
 			{
+				Form_pg_attribute	attr;
+
+				if (resno > 0)
+					attr = tupleDescAttr(inner_tupdesc, resno-1);
+				else
+					attr = SystemAttributeDefinition(resno);
+				
 				if (istate->inner_src_anum_min > resno)
 					istate->inner_src_anum_min = resno;
 				if (istate->inner_src_anum_max < resno)
@@ -3381,6 +3414,15 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				resno -= FirstLowInvalidHeapAttributeNumber;
 				Assert(resno > 0 && resno <= nattrs);
 				istate->inner_dst_resno[resno - 1] = j;
+
+				if (attr->attlen  == -1 &&
+					(refby & (GPUJOIN_ATTR_REFERENCE_BY__PROJECTION_ELEMS |
+							  GPUJOIN_ATTR_REFERENCE_BY__OUTER_QUALS |
+							  GPUJOIN_ATTR_REFERENCE_BY__JOIN_QUALS |
+							  GPUJOIN_ATTR_REFERENCE_BY__OTHER_QUALS |
+							  GPUJOIN_ATTR_REFERENCE_BY__HASH_INNER_KEY)) != 0)
+					istate->preload_flatten_attrs =
+						bms_add_member(istate->preload_flatten_attrs, resno);
 			}
 			j++;
 		}
@@ -3446,7 +3488,7 @@ static void
 ExecEndGpuJoin(CustomScanState *node)
 {
 	GpuJoinState *gjs = (GpuJoinState *) node;
-	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *)gjs->gj_rtstat;
+//	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs);
 	int		i;
 
 	/* wait for completion of any asynchronous GpuTask */
@@ -3460,7 +3502,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts, false);
 	/* shutdown the common portion */
-	pgstromReleaseGpuTaskState(&gjs->gts, gt_rtstat);
+	pgstromReleaseGpuTaskState(&gjs->gts, NULL);
 }
 
 static void
@@ -3504,7 +3546,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
+	GpuJoinRuntimeStat *gj_rtstat = NULL;
 	List		   *dcontext;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
@@ -3517,6 +3559,8 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	initStringInfo(&str);
 
+	if (gjs->gj_sstate)
+		gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	if (gj_rtstat)
 		mergeGpuTaskRuntimeStat(&gjs->gts, &gj_rtstat->c);
 	if (gjs->gts.css.ss.ps.instrument)
@@ -3585,11 +3629,8 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		double		exec_nrows_out1 = 0.0;	/* by INNER JOIN */
 		double		exec_nrows_out2 = 0.0;	/* by OUTER JOIN */
 
-		if (gjs->seg_kmrels)
-		{
-			kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
-			kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
-		}
+		if (gjs->h_kmrels)
+			kds_in = KERN_MULTIRELS_INNER_KDS(gjs->h_kmrels, depth);
 
 		/* fetch number of rows */
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, depth-1));
@@ -3778,6 +3819,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 static void
 OverWriteSharedStateIfPartitionLeaf(GpuJoinState *gjs)
 {
+#if 0
 	GpuJoinSiblingState *sibling = gjs->sibling;
 
 	if (sibling)
@@ -3787,6 +3829,7 @@ OverWriteSharedStateIfPartitionLeaf(GpuJoinState *gjs)
 		else
 			gjs->gj_sstate = sibling->gj_sstate;
 	}
+#endif
 }
 
 /*
@@ -3798,12 +3841,12 @@ ExecGpuJoinEstimateDSM(CustomScanState *node,
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 
-	return MAXALIGN(offsetof(GpuJoinSharedState,
-							 pergpu[numDevAttrs]))
-		+ MAXALIGN(offsetof(GpuJoinRuntimeStat,
-							jstat[gjs->num_rels + 1]))
-		+ pgstromSizeOfBrinIndexMap((GpuTaskState *) node)
-		+ pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt);
+	return (MAXALIGN(offsetof(GpuJoinSharedState,
+							  pergpu[numDevAttrs])) +
+			MAXALIGN(offsetof(GpuJoinRuntimeStat,
+							  jstat[gjs->num_rels + 1])) +
+			pgstromSizeOfBrinIndexMap((GpuTaskState *) node) +
+			pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt));
 }
 
 /*
@@ -3820,6 +3863,9 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 	gjs->gts.pcxt = pcxt;
 	/* setup shared-state and runtime-statistics */
 	createGpuJoinSharedState(gjs, pcxt, coordinate);
+	on_dsm_detach(pcxt->seg,
+				  cleanupGpuJoinSharedStateOnAbort,
+				  PointerGetDatum(gjs->gj_sstate));
 	on_dsm_detach(pcxt->seg,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gjs->gts.gcontext));
@@ -3848,7 +3894,6 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	GpuJoinSharedState *gj_sstate = (GpuJoinSharedState *) coordinate;
 
 	gjs->gj_sstate = gj_sstate;
-	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	/* ensure to stop workers prior to detach DSM */
 	on_dsm_detach(dsm_find_mapping(gj_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
@@ -3883,30 +3928,49 @@ ExecGpuJoinReInitializeDSM(CustomScanState *node,
 static void
 ExecShutdownGpuJoin(CustomScanState *node)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *) node;
-	GpuJoinRuntimeStat *gj_rtstat_old = gjs->gj_rtstat;
-	GpuJoinRuntimeStat *gj_rtstat_new;
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+	GpuJoinSharedState *gj_sstate_old = gjs->gj_sstate;
+	GpuJoinSharedState *gj_sstate_new;
+	size_t			i, length;
 
 	/*
 	 * If this GpuJoin node is located under the inner side of another
 	 * GpuJoin, it should not be called under the background worker
 	 * context, however, ExecShutdown walks down the node.
 	 */
-	if (!gj_rtstat_old)
+	if (!gj_sstate_old)
 		return;
 
 	/* parallel worker put runtime-stat on ExecEnd handler */
 	if (IsParallelWorker())
-		mergeGpuTaskRuntimeStatParallelWorker(&gjs->gts, &gj_rtstat_old->c);
+	{
+		GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
+		
+		mergeGpuTaskRuntimeStatParallelWorker(&gjs->gts, &gj_rtstat->c);
+	}
 	else
 	{
 		EState	   *estate = gjs->gts.css.ss.ps.state;
-		size_t		length = MAXALIGN(offsetof(GpuJoinRuntimeStat,
-											   jstat[gjs->num_rels + 1]));
-		gj_rtstat_new = MemoryContextAlloc(estate->es_query_cxt,
-										   MAXALIGN(length));
-		memcpy(gj_rtstat_new, gj_rtstat_old, length);
-		gjs->gj_rtstat = gj_rtstat_new;
+
+		length = (MAXALIGN(offsetof(GpuJoinSharedState,
+									pergpu[numDevAttrs])) +
+				  MAXALIGN(offsetof(GpuJoinRuntimeStat,
+									jstat[gjs->num_rels + 1])));
+		gj_sstate_new = MemoryContextAlloc(estate->es_query_cxt, length);
+		memcpy(gj_sstate_new, gj_sstate_old, length);
+		/*
+		 * Clear the ipc_mhandle and shmem_handle, not to release same
+		 * resource twice or mode. If inner-side has siblings, shared-
+		 * state shall be copied to local memory for each!
+		 */
+		gj_sstate_old->shmem_handle = UINT_MAX;
+		for (i=0; i < numDevAttrs; i++)
+		{
+			gj_sstate_old->pergpu[i].bytesize = 0;
+			memset(&gj_sstate_old->pergpu[i].ipc_mhandle,
+				   0, sizeof(CUipcMemHandle));
+		}
+		gjs->gj_sstate = gj_sstate_new;
 	}
 }
 
@@ -5133,100 +5197,126 @@ gpujoin_next_task(GpuTaskState *gts)
 		pds = GpuJoinExecOuterScanChunk(gts);
 	if (pds)
 		gtask = gpujoin_create_task(gjs, pds, -1);
+	else
+		pg_atomic_write_u32(&gjs->gj_sstate->outer_scan_done, 1);
+
 	return gtask;
 }
 
 /*
- * gpujoinNextRightOuterJoin
+ * gpujoinNextRightOuterJoinIfAny
  */
 int
-gpujoinNextRightOuterJoin(GpuTaskState *gts)
+gpujoinNextRightOuterJoinIfAny(GpuTaskState *gts)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
-	int				outer_depth = -1;
-
-	for (outer_depth = Max(gjs->curr_outer_depth + 1, 1);
-		 outer_depth <= gjs->num_rels;
-		 outer_depth++)
-	{
-		if (h_kmrels->chunks[outer_depth - 1].right_outer)
-		{
-			gjs->curr_outer_depth = outer_depth;
-			return outer_depth;
-		}
-	}
-	return -1;	/* no more RIGHT/FULL OUTER JOIN task */
-}
-
-/*
- * gpujoinSyncRightOuterJoin
- */
-void
-gpujoinSyncRightOuterJoin(GpuTaskState *gts)
-{
-	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinState   *gjs = (GpuJoinState *)gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
 	GpuContext	   *gcontext = gjs->gts.gcontext;
+	kern_multirels *h_kmrels = gjs->h_kmrels;
+	int				i, dindex = gcontext->cuda_dindex;
+	int				depth = -1;
+	uint32			needs_colocation;
 
-	/*
-	 * wait for completion of PG workers, if any
-	 */
-	if (!IsParallelWorker())
+	if (gjs->sibling)
 	{
-		ResetLatch(MyLatch);
-		while (pg_atomic_read_u32(&gj_sstate->pg_nworkers) > 1)
-		{
-			int		ev;
+		GpuJoinSiblingState *sibling = gjs->sibling;
 
-			CHECK_FOR_GPUCONTEXT(gcontext);
-
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   1000L,
-						   PG_WAIT_EXTENSION);
-			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "unexpected postmaster dead");
-			ResetLatch(MyLatch);
-		}
-		/* OK, no PG workers run GpuJoin at this point */
+		if (++sibling->nr_processed < sibling->nr_siblings)
+			return -1;
+		gj_sstate = sibling->leader->gj_sstate;
 	}
-	else
+	
+	SpinLockAcquire(&gj_sstate->mutex);
+	Assert(gj_sstate->phase == INNER_PHASE__GPUJOIN_EXEC);
+	Assert(h_kmrels != NULL);
+
+	if (h_kmrels->ojmaps_length == 0)
 	{
 		/*
-		 * In case of PG workers, the last process per GPU needs to write back
-		 * OUTER JOIN map to the DSM area. (only happen on multi-GPU mode)
+		 * This GpuJoin has no RIGHT/FULL OUTER JOIN.
+		 * So, we need to do nothing special at the end.
 		 */
-		kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
-		cl_int			dindex = gcontext->cuda_dindex;
-		uint32			pg_nworkers_pergpu =
-			pg_atomic_sub_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
-
-		if (pg_nworkers_pergpu == 0)
-		{
-			CUresult	rc;
-			size_t		offset = (h_kmrels->kmrels_length +
-								  h_kmrels->ojmaps_length * dindex);
-
-			rc = cuCtxPushCurrent(gcontext->cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuMemcpyDtoH((char *)h_kmrels + offset,
-							  gjs->m_kmrels + offset,
-							  h_kmrels->ojmaps_length);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		}
-		pg_atomic_fetch_sub_u32(&gj_sstate->pg_nworkers, 1);
-		SetLatch(gj_sstate->masterLatch);
+		gj_sstate->pergpu[dindex].nr_workers_gpujoin--;
+		goto out_unlock;
 	}
+
+	/*
+	 * Now we don't support RIGHT/FULL OUTER JOIN with asymmetric
+	 * partition-wise JOIN
+	 */
+	Assert(!gjs->sibling);
+
+	/*
+	 * This context is not the last one to process this GpuJoin
+	 * at the current GPU device. Likely, other backend/workers
+	 * that shares same GPU shall handle RIGHT/FULL OUTER JOIN.
+	 */
+	if (gj_sstate->pergpu[dindex].nr_workers_gpujoin > 1)
+	{
+		gj_sstate->pergpu[dindex].nr_workers_gpujoin--;
+		goto out_unlock;
+	}
+
+	/*
+	 * In case when RIGHT/FULL OUTER JOIN was processed on multiple
+	 * GPU devices, or CPU fallback happen, we must collocate the
+	 * outer-join-map once.
+	 */
+	needs_colocation = pg_atomic_read_u32(&gj_sstate->needs_colocation);
+	if (needs_colocation > 1)
+		gpujoinColocateOuterJoinMapsToHost(gjs);
+
+	/*
+	 * If this process is exactly the last player for the RIGHT/FULL
+	 * OUTER JOIN, we suggest to kick GpuJoin kernel with NULL outer
+	 * buffer from a particular depth.
+	 */
+	Assert(gj_sstate->pergpu[dindex].nr_workers_gpujoin == 1);
+	for (i=0; i < numDevAttrs; i++)
+	{
+		if (i == dindex)
+			continue;
+		if (gj_sstate->pergpu[i].nr_workers_gpujoin > 0)
+			break;
+	}
+	if (i >= numDevAttrs)
+	{
+		int		__depth;
+
+		for (__depth = Max(gj_sstate->curr_outer_depth + 1, 1);
+			 __depth <= gjs->num_rels;
+			 __depth++)
+		{
+			if (h_kmrels->chunks[__depth - 1].right_outer)
+			{
+				depth = __depth;
+				gj_sstate->curr_outer_depth = depth;
+				break;
+			}
+		}
+		/*
+		 * Once colocation happened, outer-join-map at the GPU device
+		 * memory is not latest. So, refresh it.
+		 */
+		if (depth >= 0 && needs_colocation > 1)
+		{
+			size_t		offset = h_kmrels->kmrels_length;
+			size_t		length = MAXALIGN(h_kmrels->ojmaps_length);
+			CUresult	rc;
+
+			rc = cuMemcpyHtoD(gjs->m_kmrels + offset,
+							  (char *)h_kmrels + offset,
+							  length);
+			if (rc != CUDA_SUCCESS)
+			{
+				 SpinLockRelease(&gj_sstate->mutex);
+				 elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+			}
+		}
+	}
+out_unlock:
+	SpinLockRelease(&gj_sstate->mutex);
+	return depth;
 }
 
 /*
@@ -5238,15 +5328,12 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuTask		   *gtask = NULL;
 	cl_int			outer_depth;
-
+	
 	/* Has RIGHT/FULL OUTER JOIN? */
-	if (gpujoinHasRightOuterJoin(&gjs->gts))
-	{
-		gpujoinSyncRightOuterJoin(&gjs->gts);
-		if (!IsParallelWorker() &&
-			(outer_depth = gpujoinNextRightOuterJoin(&gjs->gts)) > 0)
-			gtask = gpujoin_create_task(gjs, NULL, outer_depth);
-	}
+	outer_depth = gpujoinNextRightOuterJoinIfAny(&gjs->gts);
+	if (outer_depth > 0)
+		gtask = gpujoin_create_task(gjs, NULL, outer_depth);
+
 	return gtask;
 }
 
@@ -5462,7 +5549,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = gjs->h_kmrels;
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	kern_hashitem  *khitem;
@@ -5557,7 +5644,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = gjs->h_kmrels;
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5624,7 +5711,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 static int
 gpujoinFallbackLoadOuter(int depth, GpuJoinState *gjs)
 {
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = gjs->h_kmrels;
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	cl_uint			index;
@@ -5742,7 +5829,7 @@ gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
 							   pgstrom_data_store *pds_src,
 							   int outer_depth)
 {
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
+	kern_multirels *h_kmrels = gjs->h_kmrels;
 	cl_int		num_rels = gjs->num_rels;
 	cl_uint		block_sz = kgjoin->block_sz;
 	cl_uint		grid_sz = kgjoin->grid_sz;
@@ -5983,7 +6070,6 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 		cl_int		i, num_rels = gjs->num_rels;
 
 		/* init cpu fallback state for each GpuTask */
-		pg_atomic_write_u32(&gj_sstate->needs_colocation, 1);
 		if (pds_src)
 			Assert(outer_depth == 0);
 		else
@@ -5997,6 +6083,13 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 		for (i=0; i < num_rels; i++)
 			gjs->inners[i].fallback_inner_index = 0;
 
+		/*
+		 * Once CPU fallback happen, RIGHT/FULL OUTER JOIN map must
+		 * be colocated, regardless of the number of GPU devices.
+		 * So, we ensure colocation by setting number larger than 1.
+		 */
+		pg_atomic_write_u32(&gj_sstate->needs_colocation, 123);
+		
 		depth = outer_depth;
 	}
 	else
@@ -6123,7 +6216,7 @@ void
 gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *)gts;
-	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
+	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	cl_int		i;
 
 	pg_atomic_fetch_add_u64(&gj_rtstat->c.source_nitems,
@@ -6218,113 +6311,22 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 static void
 gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
 {
-	GpuContext	   *gcontext = gjs->gts.gcontext;
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
-	cl_bool		   *h_ojmaps;
-	CUdeviceptr		m_ojmaps;
+	kern_multirels *h_kmrels = gjs->h_kmrels;
+	size_t			offset = h_kmrels->kmrels_length;
+	size_t			length = h_kmrels->ojmaps_length;
+	cl_bool		   *h_ojmaps = (char *)h_kmrels + offset;
+	cl_bool		   *m_ojmaps = alloca(length);
 	CUresult		rc;
-	size_t			ojmaps_length = h_kmrels->ojmaps_length;
-	cl_uint			i, j, n;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-	h_ojmaps = ((char *)h_kmrels + h_kmrels->kmrels_length);
-	m_ojmaps = gjs->m_kmrels + h_kmrels->kmrels_length;
-	rc = cuMemcpyDtoH(h_ojmaps,
-					  m_ojmaps,
-					  ojmaps_length * numDevAttrs);
+	rc = cuMemcpyDtoH(m_ojmaps, gjs->m_kmrels + offset, length);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-	/* merge OJMaps */
-	n = ojmaps_length / sizeof(cl_ulong);
-	for (i=0; i < n; i++)
+	/* merge outer join map */
+	for (offset=0; offset < length; offset += sizeof(cl_ulong))
 	{
-		cl_ulong	mask = 0;
-		for (j=0; j < numDevAttrs; j++)
-			mask |= ((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i];
-		((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i] |= mask;
+		*((cl_ulong *)(h_ojmaps + offset))
+			|= *((cl_ulong *)(m_ojmaps + offset));
 	}
-}
-
-/*
- * gpujoinColocateOuterJoinMaps
- */
-void
-gpujoinColocateOuterJoinMaps(GpuTaskState *gts, CUmodule cuda_module)
-{
-	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	kern_multirels *h_kmrels = shared_mmap_address(gjs->seg_kmrels);
-	cl_bool		   *h_ojmaps;
-	CUdeviceptr		m_ojmaps;
-	CUfunction		kern_colocate;
-	CUresult		rc;
-	size_t			ojmaps_sz = h_kmrels->ojmaps_length;
-	cl_int			grid_sz;
-	cl_int			block_sz;
-	void		   *kern_args[4];
-
-	/* Is the co-location of OUTER JOIN Map needed? */
-	if (pg_atomic_read_u32(&gj_sstate->needs_colocation) == 0)
-		return;
-
-	rc = cuModuleGetFunction(&kern_colocate,
-							 cuda_module,
-							 "gpujoin_colocate_outer_join_map");
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuModuleGetFunction: %s", errorText(rc));
-
-	h_ojmaps = ((char *)h_kmrels + h_kmrels->kmrels_length);
-	m_ojmaps = gjs->m_kmrels + h_kmrels->kmrels_length;
-	if (CU_DINDEX_PER_THREAD > 0)
-	{
-		rc = cuMemcpyHtoD(m_ojmaps,
-						  h_ojmaps,
-						  ojmaps_sz * CU_DINDEX_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-	}
-	rc = cuMemcpyHtoD(m_ojmaps + ojmaps_sz * (CU_DINDEX_PER_THREAD + 1),
-					  h_ojmaps + ojmaps_sz * (CU_DINDEX_PER_THREAD + 1),
-					  (numDevAttrs - CU_DINDEX_PER_THREAD) * ojmaps_sz);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	/*
-	 * Launch)
-	 * KERNEL_FUNCTION(void)
-	 * gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
-	 *                                 cl_uint num_devices)
-	 */
-	rc = gpuOptimalBlockSize(&grid_sz,
-							 &block_sz,
-							 kern_colocate,
-							 CU_DEVICE_PER_THREAD,
-							 0, 0);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
-	grid_sz = Min(grid_sz, (ojmaps_sz / sizeof(cl_uint) +
-							block_sz - 1) / block_sz);
-	kern_args[0] = &gjs->m_kmrels;
-	kern_args[1] = &numDevAttrs;
-
-	rc = cuLaunchKernel(kern_colocate,
-						block_sz, 1, 1,
-						grid_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuLaunchKernel: %s", errorText(rc));
-	pg_atomic_write_u32(&gj_sstate->needs_colocation, 0);
 }
 
 static cl_int
@@ -6571,7 +6573,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	Assert(outer_depth > 0 && outer_depth <= gjs->num_rels);
 
 	/* Co-location of the outer join map */
-	gpujoinColocateOuterJoinMaps(&gjs->gts, cuda_module);
+	//gpujoinColocateOuterJoinMaps(&gjs->gts, cuda_module);
 
 	/* Lookup GPU kernel function */
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
@@ -6741,530 +6743,648 @@ get_tuple_hashvalue(innerState *istate,
 	return hash;
 }
 
-/*
- * gpujoin_expand_inner_kds
- */
-static kern_data_store *
-gpujoin_expand_inner_kds(shared_mmap_segment *seg, size_t kds_offset)
+typedef struct
 {
-	kern_data_store *kds;
-	size_t		new_dsmlen;
-	size_t		kds_length;
-	size_t		shift;
-	char	   *new_kmrels;
-	cl_uint	   *row_index;
-	cl_int		i;
+	slist_node	chain;
+	cl_uint		hash;		/* if hash-preload */
+	kern_tupitem titem;
+} tupleEntry;
 
-	/* check current size */
-	kds = (kern_data_store *)
-		((char *)shared_mmap_address(seg) + kds_offset);
-	if (kds->length >= 0x100000000)
-		elog(ERROR, "GpuJoin: inner hash table larger than 4GB is not supported right now (nitems=%u, usage=%u)", kds->nitems, kds->usage);
-
-	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * shared_mmap_length(seg)) / 2);
-	new_kmrels = shared_mmap_expand(seg, new_dsmlen);
-	kds = (kern_data_store *)(new_kmrels + kds_offset);
-	row_index = KERN_DATA_STORE_ROWINDEX(kds);
-	kds_length = Min(new_dsmlen - kds_offset, 0x400000000);	/* up to 16GB */
-	shift = kds_length - kds->length;
-	Assert(shift == MAXALIGN(shift));
-	if (kds->nitems > 0)
-	{
-		size_t	curr_usage = __kds_unpack(kds->usage);
-
-		Assert(curr_usage > 0);
-		memmove((char *)kds + kds_length  - curr_usage,	/* new pos */
-				(char *)kds + kds->length - curr_usage,	/* old pos */
-				curr_usage);
-		for (i=0; i < kds->nitems; i++)
-			row_index[i] += __kds_packed(shift);
-	}
-	kds->length = kds_length;
-	return kds;
-}
-
-/*
- * gpujoin_compaction_inner_kds - close the hole between row-index/hash-slots
- * and heap-tuples in the KDS tail.
- */
 static void
-gpujoin_compaction_inner_kds(kern_data_store *kds_in)
+innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 {
-	size_t		curr_usage = __kds_unpack(kds_in->usage);
-	size_t		front_sz;
-	size_t		shift;
-	cl_uint	   *row_index;
-	cl_uint		i;
-
-	Assert(kds_in->format == KDS_FORMAT_HASH ||
-		   kds_in->nslots == 0);
-	front_sz = KERN_DATA_STORE_HEAD_LENGTH(kds_in) +
-		STROMALIGN(sizeof(cl_uint) * kds_in->nitems) +
-		STROMALIGN(sizeof(cl_uint) * kds_in->nslots);
-	Assert(front_sz == MAXALIGN(front_sz));
-	Assert(front_sz + curr_usage <= kds_in->length);
-	shift = kds_in->length - (front_sz + curr_usage);
-	if (shift > 32 * 1024)	/* close the hole larger than 32KB */
-	{
-		memmove((char *)kds_in + front_sz,
-				(char *)kds_in + kds_in->length - curr_usage,
-				curr_usage);
-		row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
-		for (i=0; i < kds_in->nitems; i++)
-			row_index[i] -= __kds_packed(shift);
-		kds_in->length = front_sz + curr_usage;
-	}
-}
-
-/*
- * gpujoin_inner_hash_preload
- *
- * Preload inner relation to the data store with hash-format, for hash-
- * join execution.
- */
-static void
-gpujoin_inner_hash_preload(innerState *istate,
-						   shared_mmap_segment *seg,
-						   kern_data_store *kds_hash,
-						   size_t kds_offset)
-{
-	TupleTableSlot *scan_slot;
-	cl_uint		   *row_index;
-	cl_uint		   *hash_slot;
-	cl_uint			i, j;
-	pg_crc32		hash;
-	bool			is_null_keys;
+	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(leader->gj_sstate);
+	int				depth = istate->depth;
+	PlanState	   *ps = istate->state;
+	TupleTableSlot *slot = ps->ps_ResultTupleSlot;
+	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 
 	for (;;)
 	{
-		scan_slot = ExecProcNode(istate->state);
-		if (TupIsNull(scan_slot))
-			break;
+		HeapTuple	htup;
+		tupleEntry *entry;
+		cl_uint		hash;
+		int			j, k;
+		bool		is_null_keys;
+		size_t		usage;
+		ItemPointer	t_self = NULL;
+		Datum		datum;
+		bool		isnull;
 
-		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
-		hash = get_tuple_hashvalue(istate, true, scan_slot,
-								   &is_null_keys);
+		CHECK_FOR_INTERRUPTS();
+
+		slot = ExecProcNode(ps);
+		if (TupIsNull(slot))
+			break;
+		if (slot_getsysattr(slot, SelfItemPointerAttributeNumber,
+							&datum, &isnull) && !isnull)
+			t_self = (ItemPointer)datum;
+
+		if (bms_is_empty(istate->preload_flatten_attrs))
+			htup = ExecFetchSlotHeapTuple(slot, false, false);
+		else
+		{
+			/*
+			 * NOTE: If varlena datum is compressed / toasted, obviously,
+			 * GPU kernel cannot handle operators that reference these
+			 * values. Even though we cannot prevent this kind of datum
+			 * in OUTER side, we can fix up preloaded values on INNER-side.
+			 */
+			slot_getallattrs(slot);
+			for (k = bms_next_member(istate->preload_flatten_attrs, -1);
+				 k >= 0;
+				 k = bms_next_member(istate->preload_flatten_attrs, k))
+			{
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
+
+				Assert(tupleDescAttr(tupdesc, j)->attlen == -1);
+				if (slot->tts_isnull[j])
+					continue;
+				slot->tts_values[j] = (Datum)
+					PG_DETOAST_DATUM(slot->tts_values[j]);
+			}
+		}
+
+		if (istate->hash_inner_keys == NIL)
+			hash = 0;
+		else
+		{
+			hash = get_tuple_hashvalue(istate, true, slot, &is_null_keys);
+			/*
+			 * If join-keys are NULL, it is obvious that this inner tuple
+			 * shall not have any matching outer tuples.
+			 */
+			if (is_null_keys && (istate->join_type == JOIN_INNER ||
+								 istate->join_type == JOIN_LEFT))
+				continue;
+		}
 		/*
-		 * If join keys are NULLs, it is obvious that inner tuple shall not
-		 * match with outer tuples. Unless it is not referenced in outer join,
-		 * we don't need to keep this tuple in the 
+		 * Temporary, save the inner tuple
 		 */
-		if (is_null_keys && (istate->join_type == JOIN_INNER ||
-							 istate->join_type == JOIN_LEFT))
-			continue;
+		htup = ExecFetchSlotHeapTuple(slot, false, false);
+		entry = MemoryContextAlloc(leader->preload_memcxt,
+								   offsetof(tupleEntry,
+											titem.htup) + htup->t_len);
+		memset(entry, 0, offsetof(tupleEntry, titem.htup));
+		entry->hash = hash;
+		//FIXME: t_len is 16bit. It's sufficient for most cases, but...
+		entry->titem.t_len = htup->t_len;
+		if (t_self)
+			memcpy(&entry->titem.t_self, t_self, sizeof(ItemPointerData));
+		memcpy(&entry->titem.htup, htup->t_data, htup->t_len);
+		if (istate->hash_inner_keys == NIL)
+			usage = offsetof(kern_tupitem, htup) + htup->t_len;
+		else
+			usage = offsetof(kern_hashitem, t.htup) + htup->t_len;
 
-		while (!KDS_insert_hashitem(kds_hash, scan_slot, hash))
-			kds_hash = gpujoin_expand_inner_kds(seg, kds_offset);
+		istate->preload_nitems++;
+		istate->preload_usage += MAXALIGN(usage);
+		slist_push_head(&istate->preload_tuples, &entry->chain);
 	}
-	kds_hash->nslots = __KDS_NSLOTS(kds_hash->nitems);
-	gpujoin_compaction_inner_kds(kds_hash);
-	/* construction of the hash table */
-	row_index = KERN_DATA_STORE_ROWINDEX(kds_hash);
-	hash_slot = KERN_DATA_STORE_HASHSLOT(kds_hash);
-	memset(hash_slot, 0, sizeof(cl_uint) * kds_hash->nslots);
-	for (i=0; i < kds_hash->nitems; i++)
-	{
-		kern_hashitem  *khitem = (kern_hashitem *)
-			((char *)kds_hash
-			 + __kds_unpack(row_index[i])
-			 - offsetof(kern_hashitem, t));
-		Assert(khitem->rowid == i);
-		j = khitem->hash % kds_hash->nslots;
-		khitem->next = hash_slot[j];
-		hash_slot[j] = __kds_packed((char *)khitem -
-									(char *)kds_hash);
-	}
+	pg_atomic_add_fetch_u64(&gj_rtstat->jstat[depth].inner_nrooms,
+							istate->preload_nitems);
+	pg_atomic_add_fetch_u64(&gj_rtstat->jstat[depth].inner_usage,
+							istate->preload_usage);
 }
 
 /*
- * gpujoin_inner_heap_preload
- *
- * Preload inner relation to the data store with row-format, for nested-
- * loop execution.
+ * innerPreloadAllocHostBuffer
  */
 static void
-gpujoin_inner_heap_preload(innerState *istate,
-						   shared_mmap_segment *seg,
-						   kern_data_store *kds_heap,
-						   size_t kds_offset)
+innerPreloadAllocHostBuffer(GpuJoinState *leader)
 {
-	PlanState	   *scan_ps = istate->state;
-	TupleTableSlot *scan_slot;
+	GpuJoinSharedState *gj_sstate = leader->gj_sstate;
+	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+	kern_multirels *h_kmrels = NULL;
+	kern_data_store *kds = NULL;
+	int			num_rels = leader->num_rels;
+	size_t		kmrels_ofs;
+	size_t		ojmaps_ofs;
+	int			i;
 
-	for (;;)
-	{
-		scan_slot = ExecProcNode(scan_ps);
-		if (TupIsNull(scan_slot))
-			break;
-		(void)ExecFetchSlotHeapTuple(scan_slot, false, NULL);
-		while (!KDS_insert_tuple(kds_heap, scan_slot))
-			kds_heap = gpujoin_expand_inner_kds(seg, kds_offset);
-	}
-	Assert(kds_heap->nslots == 0);
-	gpujoin_compaction_inner_kds(kds_heap);
-	if (kds_heap->length > (size_t)UINT_MAX)
-		elog(ERROR, "GpuJoin: inner heap table larger than 4GB is not supported right now (%zu bytes)", kds_heap->length);		
-}
-
-/*
- * gpujoin_inner_preload
- *
- * It preload inner relation to the DSM buffer once.
- */
-static bool
-__gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
-{
-	GpuContext	   *gcontext = gjs->gts.gcontext;
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	kern_multirels *h_kmrels;
-	kern_data_store *kds;
-	shared_mmap_segment *seg;
-	int				i, num_rels = gjs->num_rels;
-	int				dindex_min;
-	int				dindex_max;
-	size_t			ojmaps_usage = 0;
-	size_t			kmrels_usage = 0;
-	size_t			required;
-	bool			result = true;
-
-	Assert(!IsParallelWorker());
-	gjs->m_kmrels_array = MemoryContextAllocZero(CurTransactionContext,
-										numDevAttrs * sizeof(CUdeviceptr));
-	gjs->m_kmrels_gcontext = MemoryContextAllocZero(CurTransactionContext,
-										numDevAttrs * sizeof(GpuContext *));
-	seg = shared_mmap_create(pgstrom_chunk_size());
-	h_kmrels = shared_mmap_address(seg);
-	kmrels_usage = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
-	memset(h_kmrels, 0, kmrels_usage);
+	/* already allocated? */
+	if (gj_sstate->shmem_bytesize != 0)
+		return;
 
 	/*
-	 * Load inner relations
+	 * 1st pass: calculation of buffer length
+	 * 2nd pass: initialization of buffer metadata
 	 */
+restart:
+	kmrels_ofs = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
+	ojmaps_ofs = 0;
 	for (i=0; i < num_rels; i++)
 	{
-		innerState	   *istate = &gjs->inners[i];
-		PlanState	   *scan_ps = istate->state;
-		TupleTableSlot *ps_slot = scan_ps->ps_ResultTupleSlot;
-		TupleDesc		ps_desc = ps_slot->tts_tupleDescriptor;
-		kern_data_store *kds;
-		size_t			dsm_length;
-		size_t			kds_length;
-		size_t			kds_head_sz;
+		innerState *istate = &leader->inners[i];
+		TupleTableSlot *slot = istate->state->ps_ResultTupleSlot;
+		TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+		size_t		nrooms;
+		size_t		usage;
+		size_t		nbytes;
 
-		/* expand DSM on demand */
-		dsm_length = shared_mmap_length(seg);
-		kds_head_sz = KDS_calculateHeadSize(ps_desc);
-		while (kmrels_usage + kds_head_sz > dsm_length)
+		nrooms = pg_atomic_read_u64(&gj_rtstat->jstat[i+1].inner_nrooms);
+		usage  = pg_atomic_read_u64(&gj_rtstat->jstat[i+1].inner_usage);
+		if (h_kmrels)
 		{
-			size_t	new_length = TYPEALIGN(BLCKSZ, (3 * dsm_length) / 2);
-
-			h_kmrels = shared_mmap_expand(seg, new_length);
-			dsm_length = shared_mmap_length(seg);
+			kds = (kern_data_store *)((char *)h_kmrels + kmrels_ofs);
+			h_kmrels->chunks[i].chunk_offset = kmrels_ofs;
 		}
-		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
-		kds_length = Min(dsm_length - kmrels_usage, 0x100000000L);
-		init_kernel_data_store(kds,
-							   ps_desc,
-							   kds_length,
-							   (istate->hash_inner_keys != NIL
-								? KDS_FORMAT_HASH
-								: KDS_FORMAT_ROW),
-							   UINT_MAX);
-		h_kmrels->chunks[i].chunk_offset = kmrels_usage;
+
+		nbytes = KDS_calculateHeadSize(tupdesc);
 		if (istate->hash_inner_keys != NIL)
-			gpujoin_inner_hash_preload(istate, seg, kds, kmrels_usage);
-		else
-			gpujoin_inner_heap_preload(istate, seg, kds, kmrels_usage);
-
-		/* NOTE: gpujoin_inner_xxxx_preload may expand and remap segment */
-		h_kmrels = shared_mmap_address(seg);
-		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
-
-		if (!istate->hash_outer_keys)
-			h_kmrels->chunks[i].is_nestloop = true;
-		if (istate->join_type == JOIN_RIGHT ||
-			istate->join_type == JOIN_FULL)
 		{
-			h_kmrels->chunks[i].right_outer = true;
-			h_kmrels->chunks[i].ojmap_offset = ojmaps_usage;
-			ojmaps_usage += STROMALIGN(kds->nitems);
+			nbytes += (STROMALIGN(sizeof(cl_uint) * nrooms) +
+					   STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nrooms)) +
+					   STROMALIGN(usage));
+			if (h_kmrels)
+			{
+				init_kernel_data_store(kds, tupdesc, nbytes,
+									   KDS_FORMAT_HASH, nrooms);
+				kds->nslots = __KDS_NSLOTS(nrooms);
+			}
+		}
+		else
+		{
+			nbytes += (STROMALIGN(sizeof(cl_uint) * nrooms) +
+					   STROMALIGN(usage));
+			if (h_kmrels)
+			{
+				init_kernel_data_store(kds, tupdesc, nbytes,
+									   KDS_FORMAT_ROW, nrooms);
+				h_kmrels->chunks[i].is_nestloop = true;
+			}
+		}
+		kmrels_ofs += nbytes;
+
+		if (istate->join_type == JOIN_RIGHT ||
+            istate->join_type == JOIN_FULL)
+		{
+			if (h_kmrels)
+			{
+				h_kmrels->chunks[i].right_outer = true;
+				h_kmrels->chunks[i].ojmap_offset = ojmaps_ofs;
+			}
+			ojmaps_ofs += STROMALIGN(nrooms);
 		}
 		if (istate->join_type == JOIN_LEFT ||
-			istate->join_type == JOIN_FULL)
+            istate->join_type == JOIN_FULL)
 		{
-			h_kmrels->chunks[i].left_outer = true;
-		}
-		kmrels_usage += STROMALIGN(kds->length);
-	}
-	Assert(kmrels_usage <= shared_mmap_length(seg));
-	h_kmrels->kmrels_length = kmrels_usage;
-	h_kmrels->ojmaps_length = ojmaps_usage;
-	h_kmrels->cuda_dindex = numDevAttrs;	/* host side */
-	h_kmrels->nrels = num_rels;
-
-	/*
-	 * NOTE: Special optimization case. In case when any chunk has no items,
-	 * and all deeper level is inner join, it is obvious no tuples shall be
-	 * produced in this GpuJoin. We can omit outer relation load that shall
-	 * be eventually dropped.
-	 */
-	for (i=num_rels; i > 0; i--)
-	{
-		kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
-		/* outer join can produce something from empty */
-		if (gjs->inners[i-1].join_type != JOIN_INNER)
-			break;
-		if (kds->nitems == 0)
-		{
-			result = false;
-			goto skip_device_malloc;
+			if (h_kmrels)
+				h_kmrels->chunks[i].left_outer = true;
 		}
 	}
-	required = h_kmrels->kmrels_length + ojmaps_usage * (numDevAttrs + 1);
 
-	/* expand DSM if outer-join map requires more */
-	if (required > shared_mmap_length(seg))
-		h_kmrels = shared_mmap_expand(seg, required);
-	memset((char *)h_kmrels + h_kmrels->kmrels_length,
-		   0,
-		   ojmaps_usage * (numDevAttrs + 1));
 	/*
-	 * Allocation of GPU device memory for each device if needed.
+	 * allocation of the host inner-buffer
 	 */
-	dindex_min = (!preload_multi_gpu ? gcontext->cuda_dindex : 0);
-	dindex_max = (!preload_multi_gpu ? gcontext->cuda_dindex : numDevAttrs-1);
-	for (i = dindex_min; i <= dindex_max; i++)
+	if (!h_kmrels)
 	{
-		GpuContext *__gcontext;
-		CUdeviceptr	m_deviceptr;
-		CUresult	rc;
+		size_t	bytesize = TYPEALIGN(PAGE_SIZE, kmrels_ofs + ojmaps_ofs);
+		int		fdesc;
+		char	name[200];
 
-		if (i == gcontext->cuda_dindex)
-			__gcontext = GetGpuContext(gcontext);
-		else
-			__gcontext = AllocGpuContext(i, false, true, false);
+		snprintf(name, sizeof(name), "gpujoin_kmrels.%u.%08x.buf",
+				 PostPortNumber, gj_sstate->shmem_handle);
+		fdesc = shm_open(name, O_RDWR | O_TRUNC, 0);
+		if (fdesc < 0)
+			elog(ERROR, "failed on shm_open('%s'): %m", name);
+		if (fallocate(fdesc, 0, 0, bytesize) != 0)
+		{
+			close(fdesc);
+			elog(ERROR, "failed on fallocate('%s'): %m", name);
+		}
+		h_kmrels = __mmapFile(NULL, bytesize,
+							  PROT_READ | PROT_WRITE,
+							  MAP_SHARED,
+							  fdesc, 0);
+		if (h_kmrels == MAP_FAILED)
+		{
+			close(fdesc);
+			elog(ERROR, "failed on mmap('%s'): %m", name);
+		}
+		close(fdesc);
+		gj_sstate->shmem_bytesize = bytesize;
 
-		rc = gpuMemAllocDev(__gcontext,
-							&m_deviceptr,
-							required,
-							&gj_sstate->pergpu[i].m_handle);
+		memset(h_kmrels, 0, offsetof(kern_multirels, chunks[num_rels]));
+		h_kmrels->kmrels_length = kmrels_ofs;
+		h_kmrels->ojmaps_length = ojmaps_ofs;
+		h_kmrels->cuda_dindex = 0;		/* deprecated parameter? */
+		h_kmrels->nrels = num_rels;
+
+		goto restart;
+	}
+	leader->h_kmrels = h_kmrels;
+}
+
+static void
+__innerPreloadSetupHeapBuffer(kern_data_store *kds,
+							  innerState *istate,
+							  cl_uint base_nitems,
+							  cl_uint base_usage)
+{
+	slist_iter	iter;
+	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds) + base_nitems;
+	size_t		count = 0;
+	char	   *tail_pos;
+	char	   *curr_pos;
+
+	tail_pos = (char *)kds + kds->length - __kds_unpack(base_usage);
+	curr_pos = tail_pos;
+	slist_foreach (iter, &istate->preload_tuples)
+	{
+		tupleEntry *entry = slist_container(tupleEntry, chain, iter.cur);
+		size_t		sz = MAXALIGN(offsetof(kern_tupitem,
+										   htup) + entry->titem.t_len);
+		kern_tupitem *titem = (kern_tupitem *)(curr_pos - sz);
+
+		Assert(entry->hash == 0);
+		memcpy(titem, &entry->titem, entry->titem.t_len);
+
+		row_index[count++] = __kds_packed((char *)titem - (char *)kds);
+		curr_pos -= sz;
+	}
+	Assert(istate->preload_nitems == count);
+	Assert(istate->preload_usage == (tail_pos - curr_pos));
+}
+
+static void
+__innerPreloadSetupHashBuffer(kern_data_store *kds,
+							  innerState *istate,
+							  cl_uint base_nitems,
+							  cl_uint base_usage)
+{
+	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+	cl_uint	   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
+	size_t		rowid = base_nitems;
+	char	   *tail_pos;
+	char	   *curr_pos;
+	slist_iter	iter;
+	
+	tail_pos = (char *)kds + kds->length - __kds_unpack(base_usage);
+	curr_pos = tail_pos;
+	slist_foreach (iter, &istate->preload_tuples)
+	{
+		tupleEntry *entry = slist_container(tupleEntry, chain, iter.cur);
+		size_t		sz = MAXALIGN(offsetof(kern_hashitem,
+										   t.htup) + entry->titem.t_len);
+		kern_hashitem *hitem = (kern_hashitem *)(curr_pos - sz);
+		size_t		hindex = entry->hash % kds->nslots;
+		cl_uint		next, self;
+
+		self = __kds_packed((char *)hitem - (char *)kds);
+		__atomic_exchange(&hash_slot[hindex], &self, &next,
+						  __ATOMIC_SEQ_CST);
+		memset(hitem, 0, offsetof(kern_hashitem, t.htup));
+		hitem->hash = entry->hash;
+		hitem->next = next;
+		hitem->rowid = rowid;
+		memcpy(&hitem->t, &entry->titem,
+			   offsetof(kern_tupitem,
+						htup) + entry->titem.t_len);
+		row_index[rowid++] = __kds_packed((char *)&hitem->t - (char *)kds);
+		curr_pos -= sz;
+	}
+	Assert(istate->preload_nitems == (rowid - base_nitems));
+	Assert(istate->preload_usage == (tail_pos - curr_pos));
+}
+
+static kern_multirels *
+innerPreloadMmapHostBuffer(GpuJoinState *leader, GpuJoinState *gjs)
+{
+	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	kern_multirels *h_kmrels;
+	char		name[200];
+	int			fdesc;
+	struct stat	stat_buf;
+
+	/* already mapped? */
+	if (gjs->h_kmrels)
+		return gjs->h_kmrels;
+
+	/* already mapped by the siblings? */
+	if (leader->h_kmrels)
+	{
+		gjs->h_kmrels = leader->h_kmrels;
+		return gjs->h_kmrels;
+	}
+
+	/* mmap host buffer */
+	snprintf(name, sizeof(name), "gpujoin_kmrels.%u.%08x.buf",
+			 PostPortNumber, gj_sstate->shmem_handle);
+	fdesc = shm_open(name, O_RDWR, 0);
+	if (fdesc < 0)
+		elog(ERROR, "failed on shm_open('%s'): %m", name);
+	if (fstat(fdesc, &stat_buf) != 0)
+	{
+		close(fdesc);
+		elog(ERROR, "failed on fstat('%s'): %m", name);
+	}
+	Assert(stat_buf.st_size == gj_sstate->shmem_bytesize);
+	
+	h_kmrels = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, stat_buf.st_size),
+						  PROT_READ | PROT_WRITE,
+						  MAP_SHARED,
+						  fdesc, 0);
+	if (h_kmrels == MAP_FAILED)
+	{
+		close(fdesc);
+		elog(ERROR, "failed on mmap('%s'): %m", name);
+	}
+	close(fdesc);
+
+	/* simple sanity checks */
+	if (h_kmrels->kmrels_length +
+		h_kmrels->ojmaps_length > stat_buf.st_size)
+		elog(ERROR, "Bug? filesize of '%s' is smaller than host buffer", name);
+	leader->h_kmrels = gjs->h_kmrels = h_kmrels;
+
+	return h_kmrels;
+}
+
+static void
+innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
+							 GpuJoinState *gjs)
+{
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	GpuJoinSiblingState *sibling = gjs->sibling;
+	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	kern_multirels *h_kmrels = gjs->h_kmrels;
+	int				dindex = gcontext->cuda_dindex;
+
+	Assert(leader->sibling == gjs->sibling);	
+	if (sibling && sibling->pergpu[dindex].m_kmrels != 0UL)
+	{
+		/*
+		 * In case of asymmetric partition-wise join, any of siblings
+		 * might already setup device buffer. Please note that leader
+		 * GpuJoinState prefers different GPU device from the current one.
+		 */
+		gjs->m_kmrels = sibling->pergpu[dindex].m_kmrels;
+		gjs->m_kmrels_owner = false;
+	}
+	else if (gj_sstate->pergpu[dindex].bytesize == 0)
+	{
+		CUdeviceptr		m_kmrels;
+		CUresult		rc;
+		size_t	bytesize = (h_kmrels->kmrels_length +
+							h_kmrels->ojmaps_length);
+
+		rc = gpuMemAllocPreserved(dindex,
+								  &gj_sstate->pergpu[dindex].ipc_mhandle,
+								  bytesize);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocDev: %s", errorText(rc));
-		if (i == gcontext->cuda_dindex)
-			gjs->m_kmrels = m_deviceptr;
-		gjs->m_kmrels_array[i] = m_deviceptr;
-		gjs->m_kmrels_gcontext[i] = __gcontext;
+			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+		gj_sstate->pergpu[dindex].bytesize = bytesize;
 
-		GPUCONTEXT_PUSH(__gcontext);
-		rc = cuMemcpyHtoD(m_deviceptr, h_kmrels, required);
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kmrels,
+								 gj_sstate->pergpu[dindex].ipc_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
+
+		rc = cuMemcpyHtoD(m_kmrels, h_kmrels, bytesize);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-		rc = cuMemsetD32(m_deviceptr + offsetof(kern_multirels,
-												cuda_dindex),
-						 (unsigned int)i,
-						 1);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
-		GPUCONTEXT_POP(__gcontext);
-	}
-skip_device_malloc:
-	gj_sstate->kmrels_handle = shared_mmap_handle(seg);
-	gjs->seg_kmrels = seg;
 
-	return result;
+		gjs->m_kmrels = m_kmrels;
+		gjs->m_kmrels_owner = true;
+		if (sibling)
+			sibling->pergpu[dindex].m_kmrels = m_kmrels;
+		/* add colocation count for each GPU device */
+		pg_atomic_fetch_add_u32(&gj_sstate->needs_colocation, 1);
+		gj_sstate->curr_outer_depth = -1;
+	}
+	else
+	{
+		CUdeviceptr		m_kmrels;
+		CUresult		rc;
+		
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kmrels,
+								 gj_sstate->pergpu[dindex].ipc_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
+
+		gjs->m_kmrels = m_kmrels;
+		gjs->m_kmrels_owner = true;
+		if (sibling)
+			sibling->pergpu[dindex].m_kmrels = m_kmrels;
+	}
 }
 
 bool
 GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinState   *gjs = (GpuJoinState *)gts;
+	GpuJoinState   *leader;
 	GpuContext	   *gcontext = gjs->gts.gcontext;
 	GpuJoinSharedState *gj_sstate;
-	GpuJoinSiblingState *sibling = gjs->sibling;
+	kern_multirels *h_kmrels = NULL;
 	int				i, dindex = gcontext->cuda_dindex;
-	bool			preload_multi_gpu = false;
-	uint32			preload_done;
-	CUdeviceptr		m_deviceptr;
-	CUresult		rc;
 
-	Assert(pgstrom_planstate_is_gpujoin(&gts->css.ss.ps));
-	if (gjs->gj_sstate)
-		preload_multi_gpu = true;
-	else
+	
+	/* Quick exit, if inner-buffer is now available */
+	if (gjs->m_kmrels != 0UL)
+	{
+		Assert(gjs->gj_sstate != NULL);
+		if (p_m_kmrels)
+			*p_m_kmrels = gjs->m_kmrels;
+		return (gjs->h_kmrels != NULL);
+	}
+
+	/* Allocation of a 'fake' shared-state, if single process */
+	if (!gjs->gj_sstate)
 	{
 		createGpuJoinSharedState(gjs, NULL, NULL);
 		OverWriteSharedStateIfPartitionLeaf(gjs);
-		preload_multi_gpu = (sibling != NULL);
-	}
-	gj_sstate = gjs->gj_sstate;
-
-	/*
-	 * Quick exit, if inner-preload already done
-	 */
-	if (gjs->seg_kmrels)
-	{
-		if (p_m_kmrels)
-			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != NULL);
-	}
-	pg_atomic_add_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
-	pg_atomic_add_fetch_u32(&gj_sstate->pg_nworkers, 1);
-
-	/*
-	 * In case of partition-wise GpuJoin, other sibling GpuJoin might already
-	 * load or attach inner hash/heap buffer. If so, we don't need to load
-	 * same buffer again. Just re-use the inner buffer.
-	 */
-	if (sibling && sibling->seg_kmrels)
-	{
-		if (sibling->pergpu[dindex].m_kmrels == (CUdeviceptr) 0UL)
-		{
-			Assert(sibling->pergpu[dindex].gcontext == NULL);
-			rc = gpuIpcOpenMemHandle(gcontext,
-									 &m_deviceptr,
-									 gj_sstate->pergpu[dindex].m_handle,
-									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
-					 errorText(rc));
-			sibling->pergpu[dindex].m_kmrels = m_deviceptr;
-			sibling->pergpu[dindex].gcontext = GetGpuContext(gcontext);
-		}
-		gjs->seg_kmrels = sibling->seg_kmrels;
-		gjs->m_kmrels = sibling->pergpu[dindex].m_kmrels;
-		sibling->n_actives++;
-		if (p_m_kmrels)
-			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != NULL);
 	}
 
 	/*
-	 * Preload inner hash/heap buffer, or wait for completion
+	 * In case of asymmetric partition-wise join, inner-nodes shall be
+	 * distributed for each partition leaf, and we have to build inner
+	 * heap/hash buffer from a particular inner node, to avoid read
+	 * duplication.
 	 */
-	ResetLatch(&MyProc->procLatch);
-	while ((preload_done = pg_atomic_read_u32(&gj_sstate->preload_done)) == 0)
+	if (gjs->sibling)
+		leader = gjs->sibling->leader;
+	else
+		leader = gjs;
+	gj_sstate = leader->gj_sstate;
+
+	/*
+	 * Inner PreLoad State Machine
+	 */
+	SpinLockAcquire(&gj_sstate->mutex);
+	switch (gj_sstate->phase)
 	{
-		if (!IsParallelWorker())
-		{
-			/* master process is responsible for inner preloading */
-			if (__gpujoin_inner_preload(gjs, preload_multi_gpu))
+		case INNER_PHASE__SCAN_RELATIONS:
+			gj_sstate->nr_workers_scanning++;
+			SpinLockRelease(&gj_sstate->mutex);
+
+			/*
+			 * Scan the inner relations, possively, parallel scan.
+			 */
+			for (i=0; i < leader->num_rels; i++)
+				innerPreloadExecOneDepth(leader, &leader->inners[i]);
+
+			/*
+			 * Once (parallel) scan completed, no other concurrent
+			 * workers will not be able to fetch any records from
+			 * the inner relations.
+			 * So, 'phase' shall be switched to WAIT_FOR_SCANNING
+			 * to prevent other worker try to start inner scan.
+			 */
+			SpinLockAcquire(&gj_sstate->mutex);
+			if (gj_sstate->phase == INNER_PHASE__SCAN_RELATIONS)
+				gj_sstate->phase = INNER_PHASE__SETUP_BUFFERS;
+			else
+				Assert(gj_sstate->phase == INNER_PHASE__SETUP_BUFFERS);
+			/*
+			 * Wake up any other concurrent workers, if current
+			 * process is the last guy who tried to scan inner
+			 * relations.
+			 */
+			if (--gj_sstate->nr_workers_scanning == 0)
+				ConditionVariableBroadcast(&gj_sstate->cond);
+
+		case INNER_PHASE__SETUP_BUFFERS:
+			/*
+			 * Wait for completion of other workers that still scan
+			 * the inner relations.
+			 */
+			gj_sstate->nr_workers_setup++;
+			if (gj_sstate->nr_workers_scanning > 0)
 			{
-				preload_done = 1;	/* valid inner buffer was loaded */
-				if (sibling)
+				ConditionVariablePrepareToSleep(&gj_sstate->cond);
+				while (gj_sstate->nr_workers_scanning > 0)
 				{
-					Assert(sibling->n_actives == 0);
-					sibling->seg_kmrels = gjs->seg_kmrels;
-					for (i=0; i < numDevAttrs; i++)
-					{
-						sibling->pergpu[i].m_kmrels
-							= gjs->m_kmrels_array[i];
-						sibling->pergpu[i].gcontext
-							= gjs->m_kmrels_gcontext[i];
-					}
-					sibling->n_actives = 1;
+					SpinLockRelease(&gj_sstate->mutex);
+					ConditionVariableSleep(&gj_sstate->cond,
+										   PG_WAIT_EXTENSION);
+					SpinLockAcquire(&gj_sstate->mutex);
 				}
+				ConditionVariableCancelSleep();
+			}
+			/*
+			 * Allocation of the host inner buffer, if not yet
+			 */
+			PG_TRY();
+			{
+				innerPreloadAllocHostBuffer(leader);
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&gj_sstate->mutex);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&gj_sstate->mutex);
+
+			/*
+			 * Setup  host inner buffer
+			 */
+			h_kmrels = innerPreloadMmapHostBuffer(leader, gjs);
+			for (i=0; i < leader->num_rels; i++)
+			{
+				innerState *istate = &leader->inners[i];
+				kern_data_store *kds = (kern_data_store *)
+					((char *)h_kmrels + h_kmrels->chunks[i].chunk_offset);
+				cl_uint		nitems_base;
+				cl_uint		usage_base;
+
+				SpinLockAcquire(&gj_sstate->mutex);
+				nitems_base = kds->nitems;
+				kds->nitems += istate->preload_nitems;
+				usage_base  = kds->usage;
+				kds->usage  += __kds_packed(istate->preload_usage);
+				SpinLockRelease(&gj_sstate->mutex);
+
+				if (kds->format == KDS_FORMAT_ROW)
+					__innerPreloadSetupHeapBuffer(kds, istate,
+												  nitems_base,
+												  usage_base);
+				else if (kds->format == KDS_FORMAT_HASH)
+					__innerPreloadSetupHashBuffer(kds, istate,
+												  nitems_base,
+												  usage_base);
+				else
+					elog(ERROR, "unexpected inner-KDS format");
+				
+				/* reset local buffer */
+				istate->preload_nitems = 0;
+				istate->preload_usage = 0;
+				slist_init(&istate->preload_tuples);
+			}
+			MemoryContextReset(gjs->preload_memcxt);
+
+			/*
+			 * Wait for completion of the host buffer setup
+			 * by other concurrent workers
+			 */
+			SpinLockAcquire(&gj_sstate->mutex);
+			gj_sstate->nr_workers_setup--;
+			if (gj_sstate->nr_workers_scanning == 0 &&
+				gj_sstate->nr_workers_setup == 0)
+			{
+				Assert(gj_sstate->phase == INNER_PHASE__SETUP_BUFFERS);
+				gj_sstate->phase = INNER_PHASE__GPUJOIN_EXEC;
+				ConditionVariableBroadcast(&gj_sstate->cond);
 			}
 			else
-				preload_done = INT_MAX;	/* no need to run GpuJoin */
-			pg_atomic_write_u32(&gj_sstate->preload_done, preload_done);
-
-			/* wake up parallel workers, if any */
-			if (gjs->gts.pcxt)
 			{
-				ParallelContext *pcxt = gjs->gts.pcxt;
-				pid_t		pid;
-				int			i;
-
-				for (i=0; i < pcxt->nworkers_launched; i++)
+				ConditionVariablePrepareToSleep(&gj_sstate->cond);
+				while (gj_sstate->nr_workers_scanning > 0 ||
+					   gj_sstate->nr_workers_setup > 0)
 				{
-					if (GetBackgroundWorkerPid(pcxt->worker[i].bgwhandle,
-											   &pid) == BGWH_STARTED)
-						ProcSendSignal(pid);
+					SpinLockRelease(&gj_sstate->mutex);
+					ConditionVariableSleep(&gj_sstate->cond,
+										   PG_WAIT_EXTENSION);
+					SpinLockAcquire(&gj_sstate->mutex);
 				}
+				ConditionVariableCancelSleep();
 			}
 
-			if (preload_done == 1)
+		case INNER_PHASE__GPUJOIN_EXEC:
+			(void)innerPreloadMmapHostBuffer(leader, gjs);
+			/*
+			 * If any of backend/workers already reached to the end of
+			 * outer relation, no need to load the inner buffer to make
+			 * an empty result.
+			 */
+			if (pg_atomic_read_u32(&gjs->gj_sstate->outer_scan_done) == 0)
 			{
-				if (p_m_kmrels)
-					*p_m_kmrels = gjs->m_kmrels;
-				return true;
+				gj_sstate->pergpu[dindex].nr_workers_gpujoin++;
+				PG_TRY();
+				{
+					innerPreloadLoadDeviceBuffer(leader, gjs);
+				}
+				PG_CATCH();
+				{
+					SpinLockRelease(&gj_sstate->mutex);
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
 			}
-			return false;
-		}
-		else
-		{
-			int		ev;
+			break;
 
-			/* wait for the completion of inner preload by the master */
-			CHECK_FOR_INTERRUPTS();
-
-			ev = WaitLatch(&MyProc->procLatch,
-						   WL_LATCH_SET |
-						   WL_POSTMASTER_DEATH,
-						   -1,
-						   PG_WAIT_EXTENSION);
-			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "unexpected postmaster dead");
-			ResetLatch(&MyProc->procLatch);
-		}
+		default:
+			SpinLockRelease(&gj_sstate->mutex);
+			elog(ERROR, "GpuJoin: unexpected inner buffer phase");
+			break;
 	}
-	/* the inner buffer ready? */
-	if (preload_done != 1)
-	{
-		gjs->m_kmrels = 0UL;
-		if (p_m_kmrels)
-			*p_m_kmrels = 0UL;
-		return false;
-	}
+	SpinLockRelease(&gj_sstate->mutex);
 
-	/* inner DSM segment */
-	if (sibling)
-	{
-		if (sibling->seg_kmrels)
-			gjs->seg_kmrels = sibling->seg_kmrels;
-		else
-		{
-			gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
-
-			sibling->seg_kmrels = gjs->seg_kmrels;
-		}
-		sibling->n_actives++;
-
-		if (sibling->pergpu[dindex].m_kmrels != (CUdeviceptr) 0UL)
-		{
-			gjs->m_kmrels = sibling->pergpu[dindex].m_kmrels;
-			Assert(sibling->pergpu[dindex].gcontext != NULL);
-		}
-		else
-		{
-			rc = gpuIpcOpenMemHandle(gcontext,
-									 &m_deviceptr,
-									 gj_sstate->pergpu[dindex].m_handle,
-									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
-					 errorText(rc));
-			gjs->m_kmrels = m_deviceptr;
-			sibling->pergpu[dindex].m_kmrels = m_deviceptr;
-			sibling->pergpu[dindex].gcontext = GetGpuContext(gcontext);
-		}
-	}
-	else
-	{
-		gjs->seg_kmrels = shared_mmap_attach(gj_sstate->kmrels_handle);
-
-		rc = gpuIpcOpenMemHandle(gcontext,
-								 &m_deviceptr,
-								 gj_sstate->pergpu[dindex].m_handle,
-								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
-		gjs->m_kmrels = m_deviceptr;
-	}
-
+	/*
+	 * Any backend or worker process, that tried to fetch the inner buffer
+	 * after the 'phase' is switched to INNER_PHASE__GPUJOIN_CLOSING, shall
+	 * not contribute any task of GpuJoin, so it returns false for
+	 * immediate exit.
+	 */
 	if (p_m_kmrels)
-		*p_m_kmrels = m_deviceptr;
-	return true;
+		*p_m_kmrels = gjs->m_kmrels;
+	return (gjs->m_kmrels != 0UL);
 }
 
 /*
@@ -7276,101 +7396,59 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
 	GpuContext	   *gcontext = gjs->gts.gcontext;
-	GpuJoinSiblingState *sibling = gjs->sibling;
-	cl_int			i;
 	CUresult		rc;
+	int				dindex;
 
-	if (!gj_sstate || !gjs->seg_kmrels)
-		return;
-
-	if (IsParallelWorker())
+	if (gjs->m_kmrels)
 	{
-		if (!sibling)
+		if (gjs->m_kmrels_owner)
 		{
 			rc = gpuIpcCloseMemHandle(gcontext, gjs->m_kmrels);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
+				elog(WARNING, "failed on gpuIpcCloseMemHandle: %s",
 					 errorText(rc));
-			shared_mmap_detach(gjs->seg_kmrels);
 		}
-		else if (--sibling->n_actives == 0)
-		{
-			for (i=0; i < numDevAttrs; i++)
-			{
-				if (sibling->pergpu[i].m_kmrels == (CUdeviceptr) 0UL)
-				{
-					Assert(sibling->pergpu[i].gcontext == NULL);
-					continue;
-				}
-				rc = gpuIpcCloseMemHandle(sibling->pergpu[i].gcontext,
-										  sibling->pergpu[i].m_kmrels);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
-						 errorText(rc));
-				PutGpuContext(sibling->pergpu[i].gcontext);
-				sibling->pergpu[i].gcontext = NULL;
-				sibling->pergpu[i].m_kmrels = (CUdeviceptr) 0UL;
-			}
-			Assert(gjs->seg_kmrels == sibling->seg_kmrels);
-			shared_mmap_detach(sibling->seg_kmrels);
-			gjs->seg_kmrels = NULL;
-			sibling->seg_kmrels = 0;
-		}
-		else
-		{
-			Assert(gjs->seg_kmrels == sibling->seg_kmrels);
-			gjs->seg_kmrels = NULL;
-		}
+		gjs->m_kmrels = 0UL;
 	}
-	else if (!sibling || --sibling->n_actives == 0)
+
+	if (gjs->h_kmrels)
 	{
-		/* Reset GpuJoinSharedState, if rescan */
-		if (is_rescan)
+		if (!gjs->sibling || gjs->sibling->leader == gjs)
 		{
-			gj_sstate->kmrels_handle	= UINT_MAX;	/* DSM */
-			pg_atomic_init_u32(&gj_sstate->needs_colocation,
-							   numDevAttrs > 1 ? 1 : 0);
-			pg_atomic_init_u32(&gj_sstate->preload_done, 0);
-			pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
-			memset(gj_sstate->pergpu, 0,
-				   offsetof(GpuJoinSharedState, pergpu[numDevAttrs]) -
-				   offsetof(GpuJoinSharedState, pergpu[0]));
+			if (__munmapFile(gjs->h_kmrels) != 0)
+				elog(WARNING, "failed on __munmapFile: %m");
+		}
+		gjs->h_kmrels = NULL;
+	}
+
+	if (gj_sstate && !IsParallelWorker())
+	{
+		char		name[200];
+		
+		for (dindex=0; dindex < numDevAttrs; dindex++)
+		{
+			if (gj_sstate->pergpu[dindex].bytesize == 0)
+				continue;
+			rc = gpuMemFreePreserved(dindex,
+									 gj_sstate->pergpu[dindex].ipc_mhandle);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on gpuMemFreePreserved: %s",
+					 errorText(rc));
+			gj_sstate->pergpu[dindex].bytesize = 0;
 		}
 
-		/* Release device memory */
-		if (gjs->m_kmrels_array)
+		if (gj_sstate->shmem_handle != UINT_MAX)
 		{
-			for (i=0; i < numDevAttrs; i++)
-			{
-				GpuContext *__gcontext = gjs->m_kmrels_gcontext[i];
-
-				if (gjs->m_kmrels_array[i] == 0UL)
-					continue;
-
-				rc = gpuMemFree(__gcontext, gjs->m_kmrels_array[i]);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
-				PutGpuContext(__gcontext);
-			}
-			pfree(gjs->m_kmrels_array);
-			pfree(gjs->m_kmrels_gcontext);
-			gjs->m_kmrels_array = NULL;
-			gjs->m_kmrels_gcontext = NULL;
-		}
-		/* Also release DSM */
-		shared_mmap_detach(gjs->seg_kmrels);
-		/* Clear sibling, if any */
-		if (sibling)
-		{
-			sibling->seg_kmrels = NULL;
-			memset(sibling->pergpu, 0,
-				   offsetof(GpuJoinSiblingState, pergpu[numDevAttrs]) -
-				   offsetof(GpuJoinSiblingState, pergpu[0]));
+			snprintf(name, sizeof(name), "gpujoin_kmrels.%u.%08x.buf",
+					 PostPortNumber, gj_sstate->shmem_handle);
+			if (shm_unlink(name) != 0)
+				elog(WARNING, "failed on shm_unlink('%s'): %m", name);
+			gj_sstate->shmem_handle = UINT_MAX;
 		}
 	}
-	gjs->curr_outer_depth = -1;
+	gjs->h_kmrels = NULL;
 	gjs->m_kmrels = 0UL;
-	gjs->seg_kmrels = NULL;
+	gjs->m_kmrels_owner = false;
 }
 
 /*
@@ -7387,16 +7465,34 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	EState	   *estate = gjs->gts.css.ss.ps.state;
 	GpuJoinSharedState *gj_sstate;
 	GpuJoinRuntimeStat *gj_rtstat;
-	size_t		sstate_len;
-	size_t		rtstat_len;
+	cl_uint		shmem_handle;
+	int			fdesc = -1;
+	char		name[200];
 	size_t		ss_length;
 
 	Assert(!IsParallelWorker());
-	sstate_len = MAXALIGN(offsetof(GpuJoinSharedState,
-								   pergpu[numDevAttrs]));
-	rtstat_len = MAXALIGN(offsetof(GpuJoinRuntimeStat,
-								   jstat[gjs->num_rels + 1]));
-	ss_length = sstate_len + rtstat_len;
+	/*
+	 * creation of the host inner buffer, but fallocate(2) and mmap(2)
+	 * shall be done after the inner-preloading.
+	 */
+	while (fdesc < 0)
+	{
+		shmem_handle = random();
+		if (shmem_handle == UINT_MAX)
+			continue;
+		snprintf(name, sizeof(name), "gpujoin_kmrels.%u.%08x.buf",
+				 PostPortNumber, shmem_handle);
+		fdesc = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fdesc < 0 && errno != EEXIST)
+			elog(ERROR, "failed on shm_open('%s'): %m", name);
+	}
+	close(fdesc);
+
+	/* allocation of the GpuJoinSharedState */
+	ss_length = (MAXALIGN(offsetof(GpuJoinSharedState,
+								   pergpu[numDevAttrs])) +
+				 MAXALIGN(offsetof(GpuJoinRuntimeStat,
+								   jstat[gjs->num_rels + 1])));
 	if (dsm_addr)
 		gj_sstate = dsm_addr;
 	else
@@ -7404,31 +7500,52 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	memset(gj_sstate, 0, ss_length);
 	gj_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gj_sstate->ss_length = ss_length;
-	gj_sstate->offset_runtime_stat = sstate_len;
-	gj_sstate->masterLatch = MyLatch;
-	gj_sstate->kmrels_handle = UINT_MAX;	/* to be set later */
-	pg_atomic_init_u32(&gj_sstate->needs_colocation,
-					   numDevAttrs > 1 ? 1 : 0);
-	pg_atomic_init_u32(&gj_sstate->preload_done, 0);
-	pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
+	gj_sstate->shmem_handle = shmem_handle;
+	ConditionVariableInit(&gj_sstate->cond);
+	SpinLockInit(&gj_sstate->mutex);
+	gj_sstate->phase = INNER_PHASE__SCAN_RELATIONS;
+	gj_sstate->nr_workers_scanning = 0;
+	gj_sstate->nr_workers_setup = 0;
+	pg_atomic_init_u32(&gj_sstate->outer_scan_done, 0);
+	pg_atomic_init_u32(&gj_sstate->needs_colocation, 0);
 
 	gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
 	SpinLockInit(&gj_rtstat->c.lock);
 
 	gjs->gj_sstate = gj_sstate;
-	gjs->gj_rtstat = gj_rtstat;
 }
 
 /*
- * gpujoinHasRightOuterJoin
+ * cleanupGpuJoinSharedStateOnAbort
  */
-bool
-gpujoinHasRightOuterJoin(GpuTaskState *gts)
+static void
+cleanupGpuJoinSharedStateOnAbort(dsm_segment *seg, Datum ptr)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	kern_multirels *kmrels = shared_mmap_address(gjs->seg_kmrels);
+	GpuJoinSharedState *gj_sstate = (GpuJoinSharedState *)DatumGetPointer(ptr);
+	char		name[200];
+	int			dindex;
+	CUresult	rc;
 
-	return (kmrels->ojmaps_length > 0);
+	for (dindex=0; dindex < numDevAttrs; dindex++)
+	{
+		if (gj_sstate->pergpu[dindex].bytesize == 0)
+			continue;
+		rc = gpuMemFreePreserved(dindex,
+								 gj_sstate->pergpu[dindex].ipc_mhandle);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFreePreserved: %s",
+				 errorText(rc));
+		gj_sstate->pergpu[dindex].bytesize = 0;
+	}
+
+	if (gj_sstate->shmem_handle != UINT_MAX)
+	{
+		snprintf(name, sizeof(name), "gpujoin_kmrels.%u.%08x.buf",
+				 PostPortNumber, gj_sstate->shmem_handle);
+		if (shm_unlink(name) != 0)
+			elog(WARNING, "failed on shm_unlink('%s'): %m", name);
+		gj_sstate->shmem_handle = UINT_MAX;
+	}
 }
 
 /*

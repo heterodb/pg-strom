@@ -417,7 +417,7 @@ gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
 			GPUCONTEXT_PUSH(gcontext);
 			rc = cuIpcCloseMemHandle(m_deviceptr);
 			GPUCONTEXT_POP(gcontext);
-
+			
 			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
 
@@ -501,14 +501,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 
 	Assert(!gcontext->worker_is_running);
 
-	if (gcontext->cuda_context)
-	{
-		rc = cuCtxDestroy(gcontext->cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "Failed on cuCtxDestroy: %s", errorText(rc));
-		gcontext->cuda_context = NULL;
-	}
-
 	/* OK, release other resources */
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 	{
@@ -526,10 +518,11 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 								__basename(tracker->filename),
 								tracker->lineno);
 					/*
-					 * NOTE: All the GPU related memory is already wipied
-					 * out by cuCtxDestroy(), so we don't need to release
+					 * NOTE: All the GPU related memory shall be wiped out
+					 * at the cuCtxDestroy() below, so no need to release
 					 * individual memory chunks by ourselves.
 					 */
+					Assert(gcontext->cuda_context != NULL);
 					break;
 				case RESTRACK_CLASS__GPUMEMORY_IPC:
 					if (normal_exit)
@@ -537,10 +530,23 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 								(void *)tracker->u.devmem.ptr,
 								__basename(tracker->filename),
 								tracker->lineno);
+					Assert(gcontext->cuda_context != NULL);
+					GPUCONTEXT_PUSH(gcontext);
+					rc = cuIpcCloseMemHandle(tracker->u.devmem.ptr);
+					if (rc != CUDA_SUCCESS)
+						wnotice("failed on cuIpcCloseMemHandle: %s",
+								errorText(rc));
+					GPUCONTEXT_POP(gcontext);
 					/*
-					 * NOTE: All the GPU related memory is already wipied
-					 * out by cuCtxDestroy(), so we don't need to release
-					 * individual memory chunks by ourselves.
+					 * Even though we expect cuCtxDestroy() releases all
+					 * the resources relevant the CUDA context, IPC device
+					 * memory that is not closed leaves some kind of state.
+					 * It leads a problem when we try to open another IPC
+					 * device memory in a new CUDA context, so we explicitly
+					 * close the IPC handle prior of cuCtxDestroy().
+					 *
+					 * (2020-03-04) This is reported to NVIDIA with a code
+					 * for bug reproduction, for CUDA 10.2 + 440.33.01.
 					 */
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
@@ -568,6 +574,16 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			free(tracker);
 		}
 	}
+
+	/* drop cuda context */
+	if (gcontext->cuda_context)
+	{
+		rc = cuCtxDestroy(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "Failed on cuCtxDestroy: %s", errorText(rc));
+		gcontext->cuda_context = NULL;
+	}
+
 	/* unmap GPU device memory segment */
 	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
 

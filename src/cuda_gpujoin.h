@@ -47,8 +47,6 @@ typedef struct
 	((cl_bool *)((kmrels)->chunks[(depth)-1].right_outer				\
 				 ? ((char *)(kmrels) +									\
 					(size_t)(kmrels)->kmrels_length +					\
-					(size_t)(kmrels)->cuda_dindex *						\
-					(size_t)(kmrels)->ojmaps_length +					\
 					(size_t)(kmrels)->chunks[(depth)-1].ojmap_offset)	\
 				 : NULL))
 

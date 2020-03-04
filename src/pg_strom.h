@@ -1285,33 +1285,13 @@ extern ProgramId GpuJoinCreateCombinedProgram(PlanState *node,
 extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts);
-extern bool gpujoinHasRightOuterJoin(GpuTaskState *gts);
-extern int  gpujoinNextRightOuterJoin(GpuTaskState *gts);
-extern void gpujoinSyncRightOuterJoin(GpuTaskState *gts);
-extern void gpujoinColocateOuterJoinMaps(GpuTaskState *gts,
-										 CUmodule cuda_module);
+extern int  gpujoinNextRightOuterJoinIfAny(GpuTaskState *gts);
 extern TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
 												struct kern_gpujoin *kgjoin,
 												pgstrom_data_store *pds_src,
 												cl_int outer_depth);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
-
-/*
- * inners.c
- */
-typedef struct shared_mmap_segment		shared_mmap_segment;
-
-extern shared_mmap_segment *shared_mmap_create(size_t size);
-extern shared_mmap_segment *shared_mmap_attach(uint32 handle);
-extern void shared_mmap_detach(shared_mmap_segment *shm_seg);
-extern void *shared_mmap_expand(shared_mmap_segment *shm_seg, size_t new_size);
-
-extern void *shared_mmap_address(shared_mmap_segment *shm_seg);
-extern size_t shared_mmap_length(shared_mmap_segment *shm_seg);
-extern uint64 shared_mmap_handle(shared_mmap_segment *shm_seg);
-
-extern void	pgstrom_init_inners(void);
 
 /*
  * gpupreagg.c

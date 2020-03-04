@@ -31,7 +31,7 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 __STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
         cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
-        gpuscan.o gpujoin.o inners.o gpupreagg.o \
+        gpuscan.o gpujoin.o gpupreagg.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
 		aggfuncs.o float2.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
@@ -160,7 +160,7 @@ CUDA_VERSION := $(shell grep -E '^\#define[ ]+CUDA_VERSION[ ]+[0-9]+$$' $(IPATH)
 #
 #       PGSTROM_FLAGS_CUSTOM := -g -O0 -Werror
 #
-PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
+PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM) -g -O0
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""

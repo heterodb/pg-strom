@@ -970,7 +970,7 @@ KERN_DATA_STORE_HASHSLOT(kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH);
 	return (cl_uint *)(KERN_DATA_STORE_BODY(kds) +
-					   STROMALIGN(sizeof(cl_uint) * kds->nitems));
+					   STROMALIGN(sizeof(cl_uint) * kds->nrooms));
 }
 
 /* access function for row- and hash-format */

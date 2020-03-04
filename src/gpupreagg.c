@@ -4807,18 +4807,10 @@ gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 		cl_int			outer_depth;
 
 		/* Has RIGHT/FULL OUTER JOIN? */
-		if (gpujoinHasRightOuterJoin(outer_gts))
-		{
-			gpujoinSyncRightOuterJoin(outer_gts);
-			if (!IsParallelWorker() &&
-				(outer_depth = gpujoinNextRightOuterJoin(outer_gts)) > 0)
-			{
-				if (GpuJoinInnerPreload(outer_gts, &m_kmrels))
-					return gpupreagg_create_task(gpas, NULL,
-												 m_kmrels,
-												 outer_depth);
-			}
-		}
+		outer_depth = gpujoinNextRightOuterJoinIfAny(outer_gts);
+		if (outer_depth > 0 &&
+			GpuJoinInnerPreload(outer_gts, &m_kmrels))
+			return gpupreagg_create_task(gpas, NULL, m_kmrels, outer_depth);
 	}
 	/* setup a terminator task */
 	gpas->terminator_done = true;
@@ -5601,7 +5593,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *)
 			outerPlanState(gpreagg->task.gts);
-		gpujoinColocateOuterJoinMaps(outer_gts, cuda_module);
 	}
 resume_kernel:
 	/* make kds_slot empty again */
