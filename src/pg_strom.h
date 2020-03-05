@@ -1445,6 +1445,16 @@ extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
 extern TimestampTz commercial_license_expired_at(void);
 
+extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
+										  RelOptInfo *rel,
+										  bool outer_parallel,
+										  bool inner_parallel);
+extern bool	gpu_path_remember(PlannerInfo *root,
+							  RelOptInfo *rel,
+							  bool outer_parallel,
+							  bool inner_parallel,
+							  const Path *gpu_path);
+
 extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
 									   Path *subpath,
 									   PathTarget *target);

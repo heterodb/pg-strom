@@ -351,7 +351,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 								   indexConds,
 								   indexQuals,
 								   indexNBlocks);
-	add_path(baserel, pathnode);
+	if (gpu_path_remember(root, baserel,
+						  false, false,
+						  pathnode))
+		add_path(baserel, pathnode);
 
 	/* If appropriate, consider parallel GpuScan */
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
@@ -376,7 +379,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									   indexConds,
 									   indexQuals,
 									   indexNBlocks);
-		add_partial_path(baserel, pathnode);
+		if (gpu_path_remember(root, baserel,
+							  true, false,
+							  pathnode))
+			add_partial_path(baserel, pathnode);
 	}
 }
 

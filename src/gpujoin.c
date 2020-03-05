@@ -2214,7 +2214,10 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 parallel_nworkers, true,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
-		add_partial_path(joinrel, (Path *) append_path);
+		if (gpu_path_remember(root, joinrel,
+							  true, false,
+							  &append_path->path))
+			add_partial_path(joinrel, (Path *) append_path);
 	}
 	else
 	{
@@ -2224,7 +2227,10 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 0, false,
 										 partitioned_rels, -1.0);
 		append_path->path.total_cost -= discount_cost;
-		add_path(joinrel, (Path *) append_path);
+		if (gpu_path_remember(root, joinrel,
+							  false, false,
+							  &append_path->path))
+			add_path(joinrel, (Path *) append_path);
 	}
 #endif
 }
@@ -2338,10 +2344,16 @@ try_add_gpujoin_paths(PlannerInfo *root,
 		if (gjpath)
 		{
 			gjpath->cpath.path.parallel_aware = try_parallel_path;
-			if (try_parallel_path)
-				add_partial_path(joinrel, (Path *)gjpath);
-			else
-				add_path(joinrel, (Path *)gjpath);
+			if (gpu_path_remember(root, joinrel,
+								  try_parallel_path,
+								  false,
+								  &gjpath->cpath.path))
+			{
+				if (try_parallel_path)
+					add_partial_path(joinrel, (Path *)gjpath);
+				else
+					add_path(joinrel, (Path *)gjpath);
+			}
 		}
 
 		/*
