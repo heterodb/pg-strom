@@ -36,6 +36,7 @@ typedef struct
 	List		   *index_quals;
 	cl_long			index_nblocks;
 	Cost			inner_cost;		/* cost to setup inner heap/hash */
+	bool			inner_parallel;	/* inner relations support parallel? */
 	cl_int		   *sibling_param_id; /* only if partition-wise join child */
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
@@ -66,7 +67,10 @@ typedef struct
 	Cost		outer_startup_cost;	/* copy of @startup_cost in outer path */
 	Cost		outer_total_cost;	/* copy of @total_cost in outer path */
 	cl_uint		outer_nrows_per_block;
+	/* inner relations */
+	cl_bool		inner_parallel;
 	cl_int		sibling_param_id;
+	/* BRIN-index support */
 	Oid			index_oid;			/* OID of BRIN-index, if any */
 	List	   *index_conds;		/* BRIN-index key conditions */
 	List	   *index_quals;		/* original BRIN-index qualifiers */
@@ -105,6 +109,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, pmakeFloat(gj_info->outer_startup_cost));
 	privs = lappend(privs, pmakeFloat(gj_info->outer_total_cost));
 	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
+	privs = lappend(privs, makeInteger(gj_info->inner_parallel));
 	privs = lappend(privs, makeInteger(gj_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(gj_info->index_oid));
 	privs = lappend(privs, gj_info->index_conds);
@@ -150,6 +155,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
+	gj_info->inner_parallel = intVal(list_nth(privs, pindex++));
 	gj_info->sibling_param_id = intVal(list_nth(privs, pindex++));
 	gj_info->index_oid = intVal(list_nth(privs, pindex++));
 	gj_info->index_conds = list_nth(privs, pindex++);
@@ -225,6 +231,7 @@ typedef struct
 	kern_multirels *h_kmrels;			/* mmap of host shared memory */
 	CUdeviceptr		m_kmrels;			/* local map of preserved memory */
 	bool			m_kmrels_owner;
+	bool			inner_parallel;
 	MemoryContext	preload_memcxt;		/* memory context for preloading */
 
 	/*
@@ -2443,8 +2450,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 			bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
 			continue;
 
-//		foreach (lc2, innerrel->pathlist)
-		foreach (lc2, innerrel->partial_pathlist)
+		foreach (lc2, innerrel->pathlist)
+		//foreach (lc2, innerrel->partial_pathlist)
 		{
 			inner_path = lfirst(lc2);
 
@@ -2850,6 +2857,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 		}
 		gj_info.sibling_param_id = param_id;
 	}
+	gj_info.inner_parallel = gjpath->inner_parallel;
 
 	outer_nrows = outer_plan->plan_rows;
 	for (i=0; i < gjpath->num_rels; i++)
@@ -3142,8 +3150,10 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_release_task	= gpujoin_release_task;
 
 	/* DSM & GPU memory of inner buffer */
-	gjs->m_kmrels = 0UL;
 	gjs->h_kmrels = NULL;
+	gjs->m_kmrels = 0UL;
+	gjs->m_kmrels_owner = false;
+	gjs->inner_parallel = gj_info->inner_parallel;
 	gjs->preload_memcxt = AllocSetContextCreate(estate->es_query_cxt,
 												"Inner GPU Buffer Preloading",
 												ALLOCSET_DEFAULT_SIZES);
@@ -3488,7 +3498,6 @@ static void
 ExecEndGpuJoin(CustomScanState *node)
 {
 	GpuJoinState *gjs = (GpuJoinState *) node;
-//	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs);
 	int		i;
 
 	/* wait for completion of any asynchronous GpuTask */
@@ -3814,25 +3823,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 }
 
 /*
- * OverWriteSharedStateIfPartitionLeaf
- */
-static void
-OverWriteSharedStateIfPartitionLeaf(GpuJoinState *gjs)
-{
-#if 0
-	GpuJoinSiblingState *sibling = gjs->sibling;
-
-	if (sibling)
-	{
-		if (!sibling->gj_sstate)
-			sibling->gj_sstate = gjs->gj_sstate;
-		else
-			gjs->gj_sstate = sibling->gj_sstate;
-	}
-#endif
-}
-
-/*
  * ExecGpuJoinEstimateDSM
  */
 static Size
@@ -3879,7 +3869,6 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 					  pgstromSizeOfBrinIndexMap(&gjs->gts));
 	}
 	pgstromInitDSMGpuTaskState(&gjs->gts, pcxt, coordinate);
-	OverWriteSharedStateIfPartitionLeaf(gjs);
 }
 
 /*
@@ -3906,7 +3895,6 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 					  pgstromSizeOfBrinIndexMap(&gjs->gts));
 	}
 	pgstromInitWorkerGpuTaskState(&gjs->gts, coordinate);
-	OverWriteSharedStateIfPartitionLeaf(gjs);
 }
 
 /*
@@ -7196,10 +7184,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 
 	/* Allocation of a 'fake' shared-state, if single process */
 	if (!gjs->gj_sstate)
-	{
 		createGpuJoinSharedState(gjs, NULL, NULL);
-		OverWriteSharedStateIfPartitionLeaf(gjs);
-	}
 
 	/*
 	 * In case of asymmetric partition-wise join, inner-nodes shall be
@@ -7220,45 +7205,49 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	switch (gj_sstate->phase)
 	{
 		case INNER_PHASE__SCAN_RELATIONS:
-			gj_sstate->nr_workers_scanning++;
-			SpinLockRelease(&gj_sstate->mutex);
+			if (gjs->inner_parallel || !IsParallelWorker())
+			{
+				gj_sstate->nr_workers_scanning++;
+				SpinLockRelease(&gj_sstate->mutex);
 
-			/*
-			 * Scan the inner relations, possively, parallel scan.
-			 */
-			for (i=0; i < leader->num_rels; i++)
-				innerPreloadExecOneDepth(leader, &leader->inners[i]);
+				/*
+				 * Scan inner relations, often in parallel
+				 */
+				for (i=0; i < leader->num_rels; i++)
+					innerPreloadExecOneDepth(leader, &leader->inners[i]);
 
-			/*
-			 * Once (parallel) scan completed, no other concurrent
-			 * workers will not be able to fetch any records from
-			 * the inner relations.
-			 * So, 'phase' shall be switched to WAIT_FOR_SCANNING
-			 * to prevent other worker try to start inner scan.
-			 */
-			SpinLockAcquire(&gj_sstate->mutex);
-			if (gj_sstate->phase == INNER_PHASE__SCAN_RELATIONS)
-				gj_sstate->phase = INNER_PHASE__SETUP_BUFFERS;
-			else
-				Assert(gj_sstate->phase == INNER_PHASE__SETUP_BUFFERS);
-			/*
-			 * Wake up any other concurrent workers, if current
-			 * process is the last guy who tried to scan inner
-			 * relations.
-			 */
-			if (--gj_sstate->nr_workers_scanning == 0)
-				ConditionVariableBroadcast(&gj_sstate->cond);
-
+				/*
+				 * Once (parallel) scan completed, no other concurrent
+				 * workers will not be able to fetch any records from
+				 * the inner relations.
+				 * So, 'phase' shall be switched to WAIT_FOR_SCANNING
+				 * to prevent other worker try to start inner scan.
+				 */
+				SpinLockAcquire(&gj_sstate->mutex);
+				if (gj_sstate->phase == INNER_PHASE__SCAN_RELATIONS)
+					gj_sstate->phase = INNER_PHASE__SETUP_BUFFERS;
+				else
+					Assert(gj_sstate->phase == INNER_PHASE__SETUP_BUFFERS);
+				/*
+				 * Wake up any other concurrent workers, if current
+				 * process is the last guy who tried to scan inner
+				 * relations.
+				 */
+				if (--gj_sstate->nr_workers_scanning == 0)
+					ConditionVariableBroadcast(&gj_sstate->cond);
+			}
 		case INNER_PHASE__SETUP_BUFFERS:
 			/*
 			 * Wait for completion of other workers that still scan
 			 * the inner relations.
 			 */
 			gj_sstate->nr_workers_setup++;
-			if (gj_sstate->nr_workers_scanning > 0)
+			if (gj_sstate->phase == INNER_PHASE__SCAN_RELATIONS ||
+				gj_sstate->nr_workers_scanning > 0)
 			{
 				ConditionVariablePrepareToSleep(&gj_sstate->cond);
-				while (gj_sstate->nr_workers_scanning > 0)
+				while (gj_sstate->phase == INNER_PHASE__SCAN_RELATIONS ||
+					   gj_sstate->nr_workers_scanning > 0)
 				{
 					SpinLockRelease(&gj_sstate->mutex);
 					ConditionVariableSleep(&gj_sstate->cond,
