@@ -1430,7 +1430,6 @@ extern void		pgstrom_init_nvrtc(void);
  * main.c
  */
 extern bool		pgstrom_enabled;
-extern bool		pgstrom_debug_kernel_source;
 extern bool		pgstrom_bulkexec_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern bool		pgstrom_regression_test_mode;

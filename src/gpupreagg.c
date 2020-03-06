@@ -5589,11 +5589,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 		}
 	}
-	else
-	{
-		GpuTaskState   *outer_gts = (GpuTaskState *)
-			outerPlanState(gpreagg->task.gts);
-	}
 resume_kernel:
 	/* make kds_slot empty again */
 	((kern_data_store *)m_kds_slot)->nitems = 0;

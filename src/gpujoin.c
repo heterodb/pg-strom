@@ -3675,6 +3675,13 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
                             gj_info->outer_total_cost,
                             gj_info->outer_nrows,
                             gj_info->outer_width);
+	/* siblings-identifier for asymmetric partition-wise join */
+	if (gj_info->sibling_param_id >= 0)
+	{
+		ExplainPropertyInteger("Inner sibling-id", NULL,
+							   gj_info->sibling_param_id, es);
+	}
+
 	/* join-qualifiers */
 	depth = 1;
 	forfour (lc1, gj_info->join_types,

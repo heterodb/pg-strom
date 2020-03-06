@@ -23,7 +23,6 @@ PG_MODULE_MAGIC;
  * miscellaneous GUC parameters
  */
 bool		pgstrom_enabled;
-bool		pgstrom_debug_kernel_source;
 bool		pgstrom_cpu_fallback_enabled;
 bool		pgstrom_regression_test_mode;
 static int	pgstrom_chunk_size_kb;
@@ -72,15 +71,6 @@ pgstrom_init_common_guc(void)
 							 "Enables CPU fallback if GPU required re-run",
 							 NULL,
 							 &pgstrom_cpu_fallback_enabled,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turn on/off cuda kernel source saving */
-	DefineCustomBoolVariable("pg_strom.debug_kernel_source",
-							 "Turn on/off to display the kernel source path",
-							 NULL,
-							 &pgstrom_debug_kernel_source,
 							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -136,7 +126,7 @@ pgstrom_init_common_guc(void)
 							 &pgstrom_regression_test_mode,
 							 false,
 							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 }
 

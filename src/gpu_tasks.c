@@ -607,7 +607,7 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
-		pgstrom_debug_kernel_source)
+		!pgstrom_regression_test_mode)
 	{
 		const char *cuda_source = pgstrom_cuda_source_file(gts->program_id);
 		const char *cuda_binary = pgstrom_cuda_binary_file(gts->program_id);
