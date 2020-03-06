@@ -825,29 +825,26 @@ create_gpujoin_path(PlannerInfo *root,
 					List *inner_path_items_list,
 					ParamPathInfo *param_info,
 					Relids required_outer,
-					bool try_parallel_path)
+					bool try_outer_parallel,
+					bool try_inner_parallel)
 {
 	GpuJoinPath *gjpath;
 	cl_int		num_rels = list_length(inner_path_items_list);
 	ListCell   *lc;
-	int			parallel_nworkers = 0;
-	bool		inner_parallel_safe = true;
+	bool		parallel_safe = outer_path->parallel_safe;
+	int			parallel_nworkers = outer_path->parallel_workers;
 	int			i;
 
-	/* parallel path must have parallel_safe sub-paths */
-	if (try_parallel_path)
+	/* check parallel_safe flag */
+	foreach (lc, inner_path_items_list)
 	{
-		if (!outer_path->parallel_safe)
-			return NULL;
-		foreach (lc, inner_path_items_list)
-		{
-			inner_path_item *ip_item = lfirst(lc);
+		inner_path_item *ip_item = lfirst(lc);
 
-			if (!ip_item->inner_path->parallel_safe)
-				return NULL;
-		}
-		parallel_nworkers = outer_path->parallel_workers;
+		if (!ip_item->inner_path->parallel_safe)
+			parallel_safe = false;
 	}
+	if ((try_outer_parallel | try_inner_parallel) && !parallel_safe)
+		return NULL;
 
 	gjpath = palloc0(offsetof(GpuJoinPath, inners[num_rels + 1]));
 	NodeSetTag(gjpath, T_CustomPath);
@@ -855,7 +852,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.path.parent = joinrel;
 	gjpath->cpath.path.pathtarget = joinrel->reltarget;
 	gjpath->cpath.path.param_info = param_info;	// XXXXXX
-	gjpath->cpath.path.parallel_safe = try_parallel_path;
+	gjpath->cpath.path.parallel_safe = parallel_safe;
 	gjpath->cpath.path.parallel_workers = parallel_nworkers;
 	gjpath->cpath.path.pathkeys = NIL;
 	gjpath->cpath.path.rows = joinrel->rows;
@@ -864,6 +861,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->outer_relid = 0;
 	gjpath->outer_quals = NULL;
 	gjpath->num_rels = num_rels;
+	gjpath->inner_parallel = try_inner_parallel;
 
 	i = 0;
 	foreach (lc, inner_path_items_list)
@@ -882,8 +880,6 @@ create_gpujoin_path(PlannerInfo *root,
 			pfree(gjpath);
 			return NULL;
 		}
-		if (!ip_item->inner_path->parallel_safe)
-			inner_parallel_safe = false;
 		gjpath->inners[i].join_type = ip_item->join_type;
 		gjpath->inners[i].join_nrows = ip_item->join_nrows;
 		gjpath->inners[i].scan_path = ip_item->inner_path;
@@ -903,7 +899,7 @@ create_gpujoin_path(PlannerInfo *root,
 							  &gjpath->index_conds,
 							  &gjpath->index_quals,
 							  &gjpath->index_nblocks);
-	if (try_parallel_path && gjpath->outer_relid != 0)
+	if (try_outer_parallel && gjpath->outer_relid != 0)
 		gjpath->cpath.path.parallel_aware = true;
 
 	/*
@@ -923,15 +919,13 @@ create_gpujoin_path(PlannerInfo *root,
 		for (i=0; i < num_rels; i++)
 			custom_paths = lappend(custom_paths, gjpath->inners[i].scan_path);
 		gjpath->cpath.custom_paths = custom_paths;
-		gjpath->cpath.path.parallel_safe = (joinrel->consider_parallel &&
-											outer_path->parallel_safe &&
-											inner_parallel_safe);
 		return gjpath;
 	}
 	pfree(gjpath);
 	return NULL;
 }
 
+#if 0
 /*
  * gpujoin_find_cheapest_path
  *
@@ -974,6 +968,7 @@ gpujoin_find_cheapest_path(PlannerInfo *root,
 
 	return input_path;
 }
+#endif
 
 /*
  * extract_gpuhashjoin_quals - pick up qualifiers usable for GpuHashJoin
@@ -2245,15 +2240,21 @@ try_add_gpujoin_paths(PlannerInfo *root,
 					  Path *inner_path,
 					  JoinType join_type,
 					  JoinPathExtraData *extra,
-					  bool try_parallel_path)
+					  bool try_outer_parallel,
+					  bool try_inner_parallel)
 {
 	Relids			required_outer;
 	ParamPathInfo  *param_info;
+	GpuJoinPath	   *gjpath;
+	const Path	   *pathnode;
 	inner_path_item *ip_item;
 	List		   *ip_items_list;
 	List		   *restrict_clauses = extra->restrictlist;
 	ListCell	   *lc;
 
+	/* Sanity checks */
+	Assert(try_outer_parallel || !try_inner_parallel);
+	
 	/* Quick exit if unsupported join type */
 	if (join_type != JOIN_INNER &&
 		join_type != JOIN_FULL &&
@@ -2334,49 +2335,48 @@ try_add_gpujoin_paths(PlannerInfo *root,
 
 	for (;;)
 	{
-		GpuJoinPath	   *gjpath = create_gpujoin_path(root,
-													 joinrel,
-													 outer_path,
-													 ip_items_list,
-													 param_info,
-													 required_outer,
-													 try_parallel_path);
-		if (gjpath)
+		gjpath = create_gpujoin_path(root,
+									 joinrel,
+									 outer_path,
+									 ip_items_list,
+									 param_info,
+									 required_outer,
+									 try_outer_parallel,
+									 try_inner_parallel);
+		if (gjpath && gpu_path_remember(root, joinrel,
+										try_outer_parallel,
+										try_inner_parallel,
+										(Path *)gjpath))
 		{
-			gjpath->cpath.path.parallel_aware = try_parallel_path;
-			if (gpu_path_remember(root, joinrel,
-								  try_parallel_path,
-								  false,
-								  &gjpath->cpath.path))
-			{
-				if (try_parallel_path)
-					add_partial_path(joinrel, (Path *)gjpath);
-				else
-					add_path(joinrel, (Path *)gjpath);
-			}
+			if (try_outer_parallel)
+				add_partial_path(joinrel, (Path *)gjpath);
+			else
+				add_path(joinrel, (Path *)gjpath);
 		}
 
-		/*
-		 * pull up outer GpuJoin, and merge if possible
-		 */
-		if (pgstrom_path_is_gpujoin(outer_path))
+		/* try to pull-up outer GpuJoin, if any */
+		pathnode = gpu_path_find_cheapest(root,
+										  outer_path->parent,
+										  try_outer_parallel,
+										  try_inner_parallel);
+		if (pathnode && pgstrom_path_is_gpujoin(pathnode))
 		{
-			GpuJoinPath	   *gjpath = (GpuJoinPath *) outer_path;
-			int				i;
+			const GpuJoinPath *gjtemp = (const GpuJoinPath *)pathnode;
+			int		i;
 
-			for (i=gjpath->num_rels-1; i>=0; i--)
+			for (i=gjtemp->num_rels-1; i>=0; i--)
 			{
 				inner_path_item *ip_temp = palloc0(sizeof(inner_path_item));
 
-				ip_temp->join_type  = gjpath->inners[i].join_type;
-				ip_temp->inner_path = gjpath->inners[i].scan_path;
-				ip_temp->join_quals = gjpath->inners[i].join_quals;
-				ip_temp->hash_quals = gjpath->inners[i].hash_quals;
-				ip_temp->join_nrows = gjpath->inners[i].join_nrows;
+				ip_temp->join_type  = gjtemp->inners[i].join_type;
+				ip_temp->inner_path = gjtemp->inners[i].scan_path;
+				ip_temp->join_quals = gjtemp->inners[i].join_quals;
+				ip_temp->hash_quals = gjtemp->inners[i].hash_quals;
+				ip_temp->join_nrows = gjtemp->inners[i].join_nrows;
 
 				ip_items_list = lcons(ip_temp, ip_items_list);
 			}
-			outer_path = linitial(gjpath->cpath.custom_paths);
+			outer_path = linitial(gjtemp->cpath.custom_paths);
 		}
 		else
 		{
@@ -2393,7 +2393,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 									 join_type,
 									 extra,
 									 required_outer,
-									 try_parallel_path);
+									 try_outer_parallel);
 }
 
 /*
@@ -2412,6 +2412,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *outer_path;
 	Path	   *inner_path;
 	ListCell   *lc1, *lc2;
+	bool		outer_parallel_done = false;
+	bool		inner_parallel_done = false;
 
 	/* calls secondary module if exists */
 	if (set_join_pathlist_next)
@@ -2427,54 +2429,97 @@ gpujoin_add_join_path(PlannerInfo *root,
 		return;
 
 	/*
-	 * make a traditional sequential path
+	 * make a none-parallel GpuJoin path
 	 */
-	outer_path = gpujoin_find_cheapest_path(root,
-											joinrel,
-											outerrel,
-											false);
-	if (outer_path)
+	foreach (lc1, outerrel->pathlist)
 	{
-		inner_path = gpujoin_find_cheapest_path(root,
-												joinrel,
-												innerrel,
-												false);
-		if (inner_path)
+		outer_path = lfirst(lc1);
+
+		if (bms_overlap(PATH_REQ_OUTER(outer_path),
+						innerrel->relids))
+			continue;
+		foreach (lc2, innerrel->pathlist)
+		{
+			inner_path = lfirst(lc2);
+
+			if (bms_overlap(PATH_REQ_OUTER(inner_path),
+							outerrel->relids))
+				continue;
+
 			try_add_gpujoin_paths(root,
 								  joinrel,
 								  outer_path,
 								  inner_path,
-								  jointype, extra, false);
+								  jointype,
+								  extra,
+								  false,
+								  false);
+			break;
+		}
+		break;
 	}
-
-	/*
-	 * consider partial paths if any partial outers
-	 */
 	if (!joinrel->consider_parallel)
 		return;
-
+	/*
+	 * Consider parallel GpuJoin path
+	 */
 	foreach (lc1, outerrel->partial_pathlist)
 	{
 		outer_path = lfirst(lc1);
 
-		if (!outer_path->parallel_safe ||
-			outer_path->parallel_workers == 0 ||
-			bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
+		Assert(outer_path->parallel_safe);
+		if (bms_overlap(PATH_REQ_OUTER(outer_path),
+						innerrel->relids) ||
+			outer_path->parallel_workers == 0)
 			continue;
 
-		foreach (lc2, innerrel->pathlist)
-		//foreach (lc2, innerrel->partial_pathlist)
+		if (!outer_parallel_done)
 		{
-			inner_path = lfirst(lc2);
+			foreach (lc2, innerrel->pathlist)
+			{
+				inner_path = lfirst(lc2);
 
-			if (!inner_path->parallel_safe ||
-				bms_overlap(PATH_REQ_OUTER(inner_path), outerrel->relids))
-				continue;
-
-			try_add_gpujoin_paths(root, joinrel,
-								  outer_path, inner_path,
-								  jointype, extra, true);
+				if (!inner_path->parallel_safe ||
+					bms_overlap(PATH_REQ_OUTER(inner_path),
+								outerrel->relids))
+					continue;
+				try_add_gpujoin_paths(root,
+									  joinrel,
+									  outer_path,
+									  inner_path,
+									  jointype,
+									  extra,
+									  true,
+									  false);
+				outer_parallel_done = true;
+				break;
+			}
 		}
+
+		if (!inner_parallel_done)
+		{
+			foreach (lc2, innerrel->partial_pathlist)
+			{
+				inner_path = lfirst(lc2);
+
+				if (!inner_path->parallel_safe ||
+					bms_overlap(PATH_REQ_OUTER(inner_path),
+								outerrel->relids))
+					continue;
+				try_add_gpujoin_paths(root,
+									  joinrel,
+									  outer_path,
+									  inner_path,
+									  jointype,
+									  extra,
+									  true,
+									  true);
+				inner_parallel_done = true;
+				break;
+			}
+		}
+		if (outer_parallel_done && inner_parallel_done)
+			return;
 	}
 }
 
@@ -7051,7 +7096,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 static kern_multirels *
 innerPreloadMmapHostBuffer(GpuJoinState *leader, GpuJoinState *gjs)
 {
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	GpuJoinSharedState *gj_sstate = leader->gj_sstate;
 	kern_multirels *h_kmrels;
 	char		name[200];
 	int			fdesc;
@@ -7080,7 +7125,7 @@ innerPreloadMmapHostBuffer(GpuJoinState *leader, GpuJoinState *gjs)
 		elog(ERROR, "failed on fstat('%s'): %m", name);
 	}
 	Assert(stat_buf.st_size == gj_sstate->shmem_bytesize);
-	
+
 	h_kmrels = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, stat_buf.st_size),
 						  PROT_READ | PROT_WRITE,
 						  MAP_SHARED,
