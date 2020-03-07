@@ -234,6 +234,110 @@ INSERT INTO fallback_enlarge (
             md5(x::text)
     FROM generate_series(1,20000) x);
 
+-- test for partition-wise GpuJoin
+CREATE TABLE rtable (
+  id    int,
+  label text,
+  aid   int,
+  bid   int,
+  cid   int,
+  x     text
+);
+
+CREATE TABLE ptable (
+  id    int,
+  label text,
+  aid   int,
+  bid   int,
+  cid   int,
+  x     text
+)
+PARTITION BY HASH (id);
+
+CREATE TABLE ptable__p0 PARTITION OF ptable
+       FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+CREATE TABLE ptable__p1 PARTITION OF ptable
+       FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+CREATE TABLE ptable__p2 PARTITION OF ptable
+       FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+CREATE TABLE ptable__p3 PARTITION OF ptable
+       FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+
+INSERT INTO rtable (
+  SELECT x, CASE pgstrom.random_int(0.1) % 28
+            WHEN  0 THEN 'aaa'
+            WHEN  1 THEN 'bbb'
+            WHEN  2 THEN 'ccc'
+            WHEN  3 THEN 'ddd'
+            WHEN  4 THEN 'eee'
+            WHEN  5 THEN 'fff'
+            WHEN  6 THEN 'ggg'
+            WHEN  7 THEN 'hhh'
+            WHEN  8 THEN 'iii'
+            WHEN  9 THEN 'jjj'
+            WHEN 10 THEN 'kkk'
+            WHEN 11 THEN 'lll'
+            WHEN 12 THEN 'mmm'
+            WHEN 13 THEN 'nnn'
+            WHEN 14 THEN 'ooo'
+            WHEN 15 THEN 'ppp'
+            WHEN 16 THEN 'qqq'
+            WHEN 17 THEN 'rrr'
+            WHEN 18 THEN 'sss'
+            WHEN 19 THEN 'ttt'
+            WHEN 20 THEN 'uuu'
+            WHEN 21 THEN 'vvv'
+            WHEN 22 THEN 'www'
+            WHEN 23 THEN 'xxx'
+            WHEN 24 THEN 'yyy'
+            WHEN 25 THEN 'zzz'
+            WHEN 26 THEN 'abc'  -- no match with ltable
+            WHEN 27 THEN 'xyz'  -- no match with ltable
+            ELSE null
+            END,
+            pgstrom.random_int(0.1,     1, 20000),
+            pgstrom.random_int(0.1, -1000, 19000),
+            pgstrom.random_int(0.1, -2000, 18000),
+            md5(x::text)
+    FROM generate_series(1,40000000) x);
+
+INSERT INTO ptable (SELECT * FROM rtable);
+
+CREATE TABLE atable (
+  aid     int primary key,
+  x       float
+);
+
+CREATE TABLE btable (
+  bid     int primary key,
+  y       float
+);
+
+CREATE TABLE ctable (
+  cid     int primary key,
+  z       float
+);
+
+CREATE TABLE ltable (
+  lid     int primary key,
+  label   text
+);
+
+INSERT INTO atable (SELECT x, pgstrom.random_float(0, 0.0, 100.0)
+                      FROM generate_series(1,20000) x);
+INSERT INTO btable (SELECT x, pgstrom.random_float(0, 0.0, 100.0)
+                      FROM generate_series(1,20000) x);
+INSERT INTO ctable (SELECT x, pgstrom.random_float(0, 0.0, 100.0)
+                      FROM generate_series(1,20000) x);
+INSERT INTO ltable
+     VALUES ( 1, 'aaa'), ( 2, 'bbb'), ( 3, 'ccc'), ( 4, 'ddd'),
+            ( 5, 'eee'), ( 6, 'fff'), ( 7, 'ggg'), ( 8, 'hhh'),
+            ( 9, 'iii'), (10, 'jjj'), (11, 'kkk'), (12, 'lll'),
+            (13, 'mmm'), (14, 'nnn'), (15, 'ooo'), (16, 'ppp'),
+            (17, 'qqq'), (18, 'rrr'), (19, 'sss'), (20, 'ttt'),
+            (21, 'uuu'), (22, 'vvv'), (23, 'www'), (24, 'xxx'),
+            (25, 'yyy'), (26, 'zzz'), (27,'hoge'), (28,'piyo');
+
 -- mark regression test database (large ones) is built
 \set sql_func_body 'SELECT ':application_name
 CREATE OR REPLACE FUNCTION
