@@ -181,12 +181,14 @@ gpu_path_entry_compare(const void *key1, const void *key2, Size keysize)
 	gpu_path_entry *gent2 = (gpu_path_entry *)key2;
 
 	Assert(keysize == 0);
+
 	if (gent1->root == gent2->root &&
 		bms_equal(gent1->relids, gent2->relids) &&
 		gent1->outer_parallel == gent2->outer_parallel &&
 		gent1->inner_parallel == gent2->inner_parallel)
-		return 1;
-	return 0;
+		return 0;
+	/* not equal */
+	return 1;
 }
 
 static void *
@@ -252,7 +254,7 @@ gpu_path_remember(PlannerInfo *root, RelOptInfo *rel,
 		   gent->outer_parallel == outer_parallel &&
 		   gent->inner_parallel == inner_parallel);
 	gent->cheapest_gpu_path = pgstrom_copy_pathnode(gpu_path);
-	
+
 	return true;
 }
 

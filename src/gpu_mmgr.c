@@ -1126,7 +1126,7 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 	dlist_push_tail(&gmemp_head->gmemp_active_list[i],
 					&gmemp->chain);
 
-	elog(LOG, "alloc: preserved memory %zu bytes", gmemp_req->bytesize);
+	elog(DEBUG1, "alloc: preserved memory %zu bytes", gmemp_req->bytesize);
 
 	/* successfully done */
 	memcpy(&gmemp_req->m_handle, &m_handle, sizeof(CUipcMemHandle));
@@ -1179,7 +1179,7 @@ gpummgrHandleFreePreserved(GpuMemPreservedRequest *gmemp_req)
 		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 		result = rc;
 	}
-	elog(LOG, "free: preserved memory at %p", (void *)gmemp->m_devptr);
+	elog(DEBUG1, "free: preserved memory at %p", (void *)gmemp->m_devptr);
 
 	dlist_delete(&gmemp->chain);
 	memset(gmemp, 0, sizeof(GpuMemPreserved));

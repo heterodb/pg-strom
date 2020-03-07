@@ -852,6 +852,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.path.parent = joinrel;
 	gjpath->cpath.path.pathtarget = joinrel->reltarget;
 	gjpath->cpath.path.param_info = param_info;	// XXXXXX
+	gjpath->cpath.path.parallel_aware = try_outer_parallel;
 	gjpath->cpath.path.parallel_safe = parallel_safe;
 	gjpath->cpath.path.parallel_workers = parallel_nworkers;
 	gjpath->cpath.path.pathkeys = NIL;
@@ -899,8 +900,6 @@ create_gpujoin_path(PlannerInfo *root,
 							  &gjpath->index_conds,
 							  &gjpath->index_quals,
 							  &gjpath->index_nblocks);
-	if (try_outer_parallel && gjpath->outer_relid != 0)
-		gjpath->cpath.path.parallel_aware = true;
 
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
@@ -924,51 +923,6 @@ create_gpujoin_path(PlannerInfo *root,
 	pfree(gjpath);
 	return NULL;
 }
-
-#if 0
-/*
- * gpujoin_find_cheapest_path
- *
- * finds the cheapest path-node but not parameralized by other relations
- * involved in this GpuJoin.
- */
-static Path *
-gpujoin_find_cheapest_path(PlannerInfo *root,
-						   RelOptInfo *joinrel,
-						   RelOptInfo *inputrel,
-						   bool only_parallel_safe)
-{
-	Path	   *input_path = inputrel->cheapest_total_path;
-	Relids		other_relids;
-
-	ListCell   *lc;
-
-	other_relids = bms_difference(joinrel->relids, inputrel->relids);
-	if ((only_parallel_safe && !input_path->parallel_safe) ||
-		bms_overlap(PATH_REQ_OUTER(input_path), other_relids))
-	{
-		/*
-		 * We try to find out the second best path if cheapest path is not
-		 * sufficient for the requiement of GpuJoin
-		 */
-		foreach (lc, inputrel->pathlist)
-		{
-			Path   *curr_path = lfirst(lc);
-
-			if (only_parallel_safe && !curr_path->parallel_safe)
-				continue;
-			if (bms_overlap(PATH_REQ_OUTER(curr_path), other_relids))
-				continue;
-			if (input_path == NULL ||
-				input_path->total_cost > curr_path->total_cost)
-				input_path = curr_path;
-		}
-	}
-	bms_free(other_relids);
-
-	return input_path;
-}
-#endif
 
 /*
  * extract_gpuhashjoin_quals - pick up qualifiers usable for GpuHashJoin
@@ -2254,7 +2208,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 
 	/* Sanity checks */
 	Assert(try_outer_parallel || !try_inner_parallel);
-	
+
 	/* Quick exit if unsupported join type */
 	if (join_type != JOIN_INNER &&
 		join_type != JOIN_FULL &&
@@ -2460,6 +2414,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	}
 	if (!joinrel->consider_parallel)
 		return;
+
 	/*
 	 * Consider parallel GpuJoin path
 	 */

@@ -160,7 +160,7 @@ CUDA_VERSION := $(shell grep -E '^\#define[ ]+CUDA_VERSION[ ]+[0-9]+$$' $(IPATH)
 #
 #       PGSTROM_FLAGS_CUSTOM := -g -O0 -Werror
 #
-PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM) -g -O0
+PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
@@ -219,12 +219,13 @@ USE_MODULE_DB := 1
 REGRESS := --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
 REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/sql/init_regress.sql
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
-REGRESS_REVISION := 20191112
+REGRESS_REVISION := 20200306
 REGRESS_REVISION_QUERY := 'SELECT pgstrom.regression_testdb_revision() = $(REGRESS_REVISION)'
 REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
                --outputdir=$(STROM_BUILD_ROOT)/test \
                --encoding=UTF-8 \
                --load-extension=pg_strom \
+               --load-extension=plpython3u \
                --launcher="env PGDATABASE=$(REGRESS_DBNAME) PATH=$(shell dirname $(SSBM_DBGEN)):$$PATH PGAPPNAME=$(REGRESS_REVISION)" \
                $(shell test "`$(PSQL) -At -c $(REGRESS_REVISION_QUERY) $(REGRESS_DBNAME)`" = "t" && echo "--use-existing")
 REGRESS_PREP = $(SSBM_DBGEN) $(REGRESS_INIT_SQL)
