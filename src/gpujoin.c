@@ -1099,7 +1099,6 @@ buildPartitionLeafJoinRel(PlannerInfo *root,
 	reltarget->exprs = (List *)
 		adjust_appendrel_attrs(root, (Node *)parent_reltarget->exprs,
 							   nappinfos, appinfos);
-
 	reltarget->cost.startup = parent_joinrel->reltarget->cost.startup;
 	reltarget->cost.per_tuple = parent_joinrel->reltarget->cost.per_tuple;
 	reltarget->width = parent_joinrel->reltarget->width;
@@ -1292,6 +1291,9 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 										   try_inner_parallel,
 										   &inner_relids,
 										   &join_nrows);
+	if (inner_items_base == NIL)
+		return NIL;
+
 	foreach (lc, append_path->subpaths)
 	{
 		Path	   *leaf_path = lfirst(lc);

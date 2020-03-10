@@ -53,24 +53,84 @@ make_flat_ands_explicit(List *andclauses)
  *
  * It is almost equivalent to find_appinfos_by_relids(), but ignores
  * relations that are not partition leafs, instead of ereport().
+ * In addition, it tries to solve multi-leve parent-child relations.
  */
+static AppendRelInfo *
+build_multilevel_appinfos(PlannerInfo *root,
+						  AppendRelInfo **appstack, int nlevels)
+{
+	AppendRelInfo *apinfo = appstack[nlevels-1];
+	AppendRelInfo *apleaf = appstack[0];
+	AppendRelInfo *result;
+	ListCell   *lc;
+	int			i;
+
+	foreach (lc, root->append_rel_list)
+	{
+		AppendRelInfo *aptemp = lfirst(lc);
+
+		if (aptemp->child_relid == apinfo->parent_relid)
+		{
+			appstack[nlevels] = aptemp;
+			return build_multilevel_appinfos(root, appstack, nlevels+1);
+		}
+	}
+	/* shortcut if a simple single-level relationship */
+	if (nlevels == 1)
+		return apinfo;
+
+	result = makeNode(AppendRelInfo);
+	result->parent_relid = apinfo->parent_relid;
+	result->child_relid = apleaf->child_relid;
+	result->parent_reltype = apinfo->parent_reltype;
+	result->child_reltype = apleaf->child_reltype;
+	foreach (lc, apinfo->translated_vars)
+	{
+		Var	   *var = lfirst(lc);
+
+		for (i=nlevels-1; i>=0; i--)
+		{
+			AppendRelInfo *apcurr = appstack[i];
+			Var	   *temp;
+
+			if (var->varattno > list_length(apcurr->translated_vars))
+				elog(ERROR, "attribute %d of relation \"%s\" does not exist",
+					 var->varattno, get_rel_name(apcurr->parent_reloid));
+			temp = list_nth(apcurr->translated_vars, var->varattno - 1);
+			if (!temp)
+				elog(ERROR, "attribute %d of relation \"%s\" does not exist",
+					 var->varattno, get_rel_name(apcurr->parent_reloid));
+			var = temp;
+		}
+		result->translated_vars = lappend(result->translated_vars, var);
+	}
+	result->parent_reloid = apinfo->parent_reloid;
+
+	return result;
+}
+
 AppendRelInfo **
 find_appinfos_by_relids_nofail(PlannerInfo *root,
 							   Relids relids,
 							   int *nappinfos)
 {
+	AppendRelInfo **appstack;
 	AppendRelInfo **appinfos;
 	ListCell   *lc;
 	int			nrooms = bms_num_members(relids);
 	int			nitems = 0;
 
 	appinfos = palloc0(sizeof(AppendRelInfo *) * nrooms);
+	appstack = alloca(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
 	foreach (lc, root->append_rel_list)
 	{
 		AppendRelInfo *apinfo = lfirst(lc);
 
 		if (bms_is_member(apinfo->child_relid, relids))
-			appinfos[nitems++] = apinfo;
+		{
+			appstack[0] = apinfo;
+			appinfos[nitems++] = build_multilevel_appinfos(root, appstack, 1);
+		}
 	}
 	Assert(nitems <= nrooms);
 	*nappinfos = nitems;
