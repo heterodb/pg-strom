@@ -228,6 +228,7 @@ CREATE TABLE rtable (
   aid   int,
   bid   int,
   cid   int,
+  ymd   date,
   x     text
 );
 CREATE TABLE ptable (
@@ -236,17 +237,37 @@ CREATE TABLE ptable (
   aid   int,
   bid   int,
   cid   int,
+  ymd   date,
   x     text
 )
 PARTITION BY HASH (id);
 CREATE TABLE ptable__p0 PARTITION OF ptable
-       FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+       FOR VALUES WITH (MODULUS 3, REMAINDER 0)
+	   PARTITION BY RANGE (ymd);
 CREATE TABLE ptable__p1 PARTITION OF ptable
-       FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+       FOR VALUES WITH (MODULUS 3, REMAINDER 1)
+	   PARTITION BY RANGE (ymd);
 CREATE TABLE ptable__p2 PARTITION OF ptable
-       FOR VALUES WITH (MODULUS 4, REMAINDER 2);
-CREATE TABLE ptable__p3 PARTITION OF ptable
-       FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+       FOR VALUES WITH (MODULUS 3, REMAINDER 2)
+	   PARTITION BY RANGE (ymd);
+CREATE TABLE ptable__p0__2017 PARTITION OF ptable__p0
+       FOR VALUES FROM ('2017-01-01') TO ('2018-01-01');
+CREATE TABLE ptable__p0__2018 PARTITION OF ptable__p0
+       FOR VALUES FROM ('2018-01-01') TO ('2019-01-01');
+CREATE TABLE ptable__p0__2019 PARTITION OF ptable__p0
+       FOR VALUES FROM ('2019-01-01') TO ('2020-01-01');
+CREATE TABLE ptable__p1__2017 PARTITION OF ptable__p1
+       FOR VALUES FROM ('2017-01-01') TO ('2018-01-01');
+CREATE TABLE ptable__p1__2018 PARTITION OF ptable__p1
+       FOR VALUES FROM ('2018-01-01') TO ('2019-01-01');
+CREATE TABLE ptable__p1__2019 PARTITION OF ptable__p1
+       FOR VALUES FROM ('2019-01-01') TO ('2020-01-01');
+CREATE TABLE ptable__p2__2017 PARTITION OF ptable__p2
+       FOR VALUES FROM ('2017-01-01') TO ('2018-01-01');
+CREATE TABLE ptable__p2__2018 PARTITION OF ptable__p2
+       FOR VALUES FROM ('2018-01-01') TO ('2019-01-01');
+CREATE TABLE ptable__p2__2019 PARTITION OF ptable__p2
+       FOR VALUES FROM ('2019-01-01') TO ('2020-01-01');
 INSERT INTO rtable (
   SELECT x, CASE pgstrom.random_int(0.1) % 28
             WHEN  0 THEN 'aaa'
@@ -282,6 +303,7 @@ INSERT INTO rtable (
             pgstrom.random_int(0.1,     1, 20000),
             pgstrom.random_int(0.1, -1000, 19000),
             pgstrom.random_int(0.1, -2000, 18000),
+			pgstrom.random_date(0, '2017-01-01','2019-12-31'),
             md5(x::text)
     FROM generate_series(1,40000000) x);
 INSERT INTO ptable (SELECT * FROM rtable);
@@ -297,6 +319,11 @@ CREATE TABLE ctable (
   cid     int primary key,
   z       float
 );
+CREATE TABLE dtable (
+  did     int primary key,
+  ymd     date,
+  v       float
+);
 CREATE TABLE ltable (
   lid     int primary key,
   label   text
@@ -307,6 +334,13 @@ INSERT INTO btable (SELECT x, pgstrom.random_float(0, 0.0, 100.0)
                       FROM generate_series(1,20000) x);
 INSERT INTO ctable (SELECT x, pgstrom.random_float(0, 0.0, 100.0)
                       FROM generate_series(1,20000) x);
+INSERT INTO dtable
+      (SELECT x, ymd, pgstrom.random_float(0, 0.0, 100.0)
+         FROM (SELECT row_number() OVER () x, ymd 
+	             FROM (SELECT distinct
+				              pgstrom.random_date(0, '2016-10-01',
+                                                     '2020-03-31') ymd
+                         FROM generate_series(1,1000)) subqry_1) subqry_2);
 INSERT INTO ltable
      VALUES ( 1, 'aaa'), ( 2, 'bbb'), ( 3, 'ccc'), ( 4, 'ddd'),
             ( 5, 'eee'), ( 6, 'fff'), ( 7, 'ggg'), ( 8, 'hhh'),

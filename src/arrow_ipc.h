@@ -78,8 +78,6 @@ struct SQLfield
 
 	ArrowType	arrow_type;		/* type in apache arrow */
 	const char *arrow_typename;	/* typename in apache arrow */
-	/* other type specific attributes */
-	int64		timestamp__tz_offset; /* offset from UTC, if Timestamp */
 	/* data save as Apache Arrow datum */
 	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
 	/* data buffers of the field */
@@ -170,7 +168,7 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 char typalign,
 									 Oid typrelid,
 									 Oid typelem,
-									 const char *tz_name, int64_t tz_offset);
+									 const char *tz_name);
 /*
  * Error messages, and misc definitions for pg2arrow
  */

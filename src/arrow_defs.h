@@ -131,7 +131,6 @@ typedef union		ArrowTypeOptions
 	} time;
 	struct {
 		ArrowTimeUnit		unit;
-		int					tz_offset;
 	} timestamp;
 	struct {
 		ArrowIntervalUnit	unit;

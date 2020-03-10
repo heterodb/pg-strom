@@ -582,9 +582,6 @@ __put_timestamp_value_generic(SQLfield *column,
 		assert(pgsql_sz == sizeof(Timestamp));
 		value = __ntoh64(*((const Timestamp *)addr));
 
-		/* adjust timezone if any */
-		if (column->timestamp__tz_offset)
-			value += column->timestamp__tz_offset;
 		/* convert PostgreSQL epoch to UNIX epoch */
 		value += (POSTGRES_EPOCH_JDATE -
 				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
@@ -1224,7 +1221,7 @@ assignArrowTypeTime(SQLfield *column)
 
 static int
 assignArrowTypeTimestamp(SQLfield *column,
-						 const char *tz_name, int64_t tz_offset)
+						 const char *tz_name)
 {
 	initArrowNode(&column->arrow_type, Timestamp);
 	column->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
@@ -1232,7 +1229,6 @@ assignArrowTypeTimestamp(SQLfield *column,
 	{
 		column->arrow_type.Timestamp.timezone = pstrdup(tz_name);
 		column->arrow_type.Timestamp._timezone_len = strlen(tz_name);
-		column->timestamp__tz_offset = tz_offset;
 	}
 	column->arrow_typename	= "Timestamp";
 	column->put_value		= put_timestamp_value;
@@ -1298,7 +1294,7 @@ assignArrowTypePgSQL(SQLfield *column,
 					 char typalign,
 					 Oid typrelid,
 					 Oid typelemid,
-					 const char *tz_name, int64_t tz_offset)
+					 const char *tz_name)
 {
 	SQLtype__pgsql	   *pgtype = &column->sql_type.pgsql;
 	
@@ -1366,11 +1362,11 @@ assignArrowTypePgSQL(SQLfield *column,
 		}
 		else if (strcmp(typname, "timestamp") == 0)
 		{
-			return assignArrowTypeTimestamp(column, NULL, 0);
+			return assignArrowTypeTimestamp(column, NULL);
 		}
 		else if (strcmp(typname, "timestamptz") == 0)
 		{
-			return assignArrowTypeTimestamp(column, tz_name, tz_offset);
+			return assignArrowTypeTimestamp(column, tz_name);
 		}
 		else if (strcmp(typname, "interval") == 0)
 		{

@@ -40,7 +40,7 @@ test: fallback_pgsql
 # ----------
 # Test for Asymmetric Partition-wise JOIN
 # ----------
-#test: partition
+test: partition
 
 # ----------
 # General Test by SSBM

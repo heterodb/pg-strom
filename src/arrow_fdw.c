@@ -678,61 +678,6 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
-/*
- * getTimezoneOffset - returns timezone offset in second
- */
-static int64_t
-getTimezoneOffset(const char *timezone)
-{
-	char		tzname[TZ_STRLEN_MAX + 1];
-	char	   *lowzone;
-	int			tz;
-	int			type, val;
-	pg_tz	   *tzp;
-
-	if (!timezone)
-		return 0;	/* no timezone adjustment */
-
-	strncpy(tzname, timezone, sizeof(tzname));
-	lowzone = downcase_truncate_identifier(tzname, strlen(tzname), false);
-	type = DecodeTimezoneAbbrev(0, lowzone, &val, &tzp);
-	if (type == TZ || type == DTZ)
-	{
-		/* fixed-offset abbreviation */
-		tz = -val;
-	}
-	else if (type == DYNTZ)
-	{
-		/* dynamic-offset abbreviation, resolve using current time */
-		pg_time_t	now = (pg_time_t) time(NULL);
-		struct pg_tm *tm;
-
-		tm = pg_localtime(&now, tzp);
-		tz = DetermineTimeZoneAbbrevOffset(tm, tzname, tzp);
-	}
-	else
-	{
-		/* try it as a full zone name */
-		tzp = pg_tzset(tzname);
-		if (tzp)
-		{
-			pg_time_t	now = (pg_time_t) time(NULL);
-			struct pg_tm *tm;
-
-			tm = pg_localtime(&now, tzp);
-			tz = -tm->tm_gmtoff;
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("time zone \"%s\" not recognized", timezone)));
-		}
-	}
-//	elog(INFO, "getTimezoneOffset: timezone=[%s] tz_offset=%d", timezone, tz);
-	return tz;
-}
-
 typedef struct
 {
 	ArrowBuffer    *buffer_curr;
@@ -781,8 +726,6 @@ assignArrowTypeOptions(ArrowTypeOptions *attopts, const ArrowType *atype)
 				attopts->timestamp.unit = atype->Timestamp.unit;
 			else
 				elog(ERROR, "unknown unit of Timestamp");
-			attopts->timestamp.tz_offset
-				= getTimezoneOffset(atype->Timestamp.timezone);
 			break;
 		case ArrowNodeTag__Interval:
 			if (atype->Interval.unit == ArrowIntervalUnit__Year_Month ||
@@ -2890,30 +2833,21 @@ pg_timestamp_arrow_ref(kern_data_store *kds,
 					   kern_colmeta *cmeta, size_t index)
 {
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	cl_long		tz_offset = cmeta->attopts.timestamp.tz_offset;
 	Timestamp	ts;
 
 	switch (cmeta->attopts.timestamp.unit)
 	{
 		case ArrowTimeUnit__Second:
 			ts = ((cl_ulong *)base)[index] * 1000000UL;
-			if (tz_offset != 0)
-				ts += tz_offset;
 			break;
 		case ArrowTimeUnit__MilliSecond:
 			ts = ((cl_ulong *)base)[index] * 1000UL;
-			if (tz_offset != 0)
-				ts += tz_offset * 1000UL;
 			break;
 		case ArrowTimeUnit__MicroSecond:
 			ts = ((cl_ulong *)base)[index];
-			if (tz_offset != 0)
-				ts += tz_offset * 1000000UL;
 			break;
 		case ArrowTimeUnit__NanoSecond:
 			ts = ((cl_ulong *)base)[index] / 1000UL;
-			if (tz_offset != 0)
-				ts += tz_offset * 1000000000UL;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Timestamp type");
@@ -3950,7 +3884,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 	HeapTuple		tup;
 	Form_pg_type	typ;
 	const char	   *typnamespace;
-	const char	   *tz = show_timezone();
+	const char	   *timezone = show_timezone();
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
 	if (!HeapTupleIsValid(tup))
@@ -3972,8 +3906,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 							 typ->typalign,
 							 typ->typrelid,
 							 typ->typelem,
-							 tz,
-							 getTimezoneOffset(tz) * -1000000L);	/* [us]*/
+							 timezone);
 	if (OidIsValid(typ->typelem))
 	{
 		/* array type */

@@ -1053,29 +1053,21 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 				result.isnull = false;
 				result.value = *aval * 1000000L -
 					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				if (cmeta->attopts.timestamp.tz_offset != 0)
-					result.value += cmeta->attopts.timestamp.tz_offset;
 				break;
 			case ArrowTimeUnit__MilliSecond:
 				result.isnull = false;
 				result.value = *aval * 1000L -
 					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				if (cmeta->attopts.timestamp.tz_offset != 0)
-					result.value += cmeta->attopts.timestamp.tz_offset * 1000;
 				break;
 			case ArrowTimeUnit__MicroSecond:
 				result.isnull = false;
 				result.value = *aval -
 					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				if (cmeta->attopts.timestamp.tz_offset != 0)
-					result.value += cmeta->attopts.timestamp.tz_offset * 1000000L;
 				break;
 			case ArrowTimeUnit__NanoSecond:
 				result.isnull = false;
 				result.value = *aval / 1000L -
 					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				if (cmeta->attopts.timestamp.tz_offset != 0)
-					result.value += cmeta->attopts.timestamp.tz_offset * 1000000000L;
 				break;
 			default:
 				result.isnull = true;

@@ -52,8 +52,7 @@ static char	   *dump_arrow_filename = NULL;
 static int		shows_progress = 0;
 static userConfigOption *session_preset_commands = NULL;
 /* server settings */
-static char	   *server_timezone_name = NULL;
-static int64_t	server_timezone_offset = 0;
+static char	   *server_timezone = NULL;
 /* dictionary batches */
 SQLdictionary  *pgsql_dictionary_list = NULL;
 
@@ -409,7 +408,6 @@ pgsql_init_session(PGconn *conn)
 {
 	PGresult   *res;
 	const char *query;
-	const char *ptr;
 	userConfigOption *conf;
 
 	/*
@@ -448,22 +446,10 @@ pgsql_init_session(PGconn *conn)
 		PQntuples(res) != 1 ||
 		PQgetisnull(res, 0, 0))
 		Elog("failed on getting server timezone configuration: %s", query);
-	server_timezone_name = strdup(PQgetvalue(res, 0, 0));
-	if (!server_timezone_name)
+	server_timezone = strdup(PQgetvalue(res, 0, 0));
+	if (!server_timezone)
 		Elog("out of memory");
 	PQclear(res);
-
-	query = "SELECT '2000-01-01 00:00:00'::timestamptz";
-	res = PQexecParams(conn,
-					   query,
-					   0, NULL, NULL,
-					   NULL, NULL, 1);
-	if (PQresultStatus(res) != PGRES_TUPLES_OK ||
-		PQntuples(res) != 1 ||
-		PQgetisnull(res, 0, 0))
-		Elog("failed on getting server timezone offset: %s", query);
-	ptr = PQgetvalue(res, 0, 0);
-	server_timezone_offset = -ntohll(*((uint64_t *)ptr));
 }
 
 /*
@@ -699,8 +685,7 @@ pgsql_setup_attribute(PGconn *conn,
 										  attalign,
 										  typrelid,
 										  typelemid,
-										  server_timezone_name,
-										  server_timezone_offset);
+										  server_timezone);
 	if (typrelid != InvalidOid)
 	{
 		assert(typtype == 'c');
