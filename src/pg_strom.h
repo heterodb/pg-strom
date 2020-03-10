@@ -1262,7 +1262,8 @@ extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
 #if PG_VERSION_NUM >= 110000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											Path *outer_path,
-											bool try_parallel_path,
+											bool try_outer_parallel,
+											bool try_inner_parallel,
 											AppendPath **p_append_path,
 											int *p_parallel_nworkers,
 											Cost *p_discount_cost);
@@ -1385,9 +1386,9 @@ extern void pgstrom_init_arrow_fdw(void);
  * misc.c
  */
 extern Expr *make_flat_ands_explicit(List *andclauses);
-extern AppendRelInfo **__find_appinfos_by_relids(PlannerInfo *root,
-												 Relids relids,
-												 int *nappinfos);
+extern AppendRelInfo **find_appinfos_by_relids_nofail(PlannerInfo *root,
+													  Relids relids,
+													  int *nappinfos);
 extern double get_parallel_divisor(Path *path);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */

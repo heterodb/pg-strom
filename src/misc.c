@@ -49,11 +49,15 @@ make_flat_ands_explicit(List *andclauses)
 }
 
 /*
- * __find_appinfos_by_relids - almost equivalent to find_appinfos_by_relids
- * that is added at PG11, but ignores relations that are not partition leafs.
+ * find_appinfos_by_relids_nofail
+ *
+ * It is almost equivalent to find_appinfos_by_relids(), but ignores
+ * relations that are not partition leafs, instead of ereport().
  */
 AppendRelInfo **
-__find_appinfos_by_relids(PlannerInfo *root, Relids relids, int *nappinfos)
+find_appinfos_by_relids_nofail(PlannerInfo *root,
+							   Relids relids,
+							   int *nappinfos)
 {
 	AppendRelInfo **appinfos;
 	ListCell   *lc;

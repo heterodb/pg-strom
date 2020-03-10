@@ -1492,9 +1492,10 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   double num_groups,
 							   AggClauseCosts *agg_final_costs,
 							   bool can_pullup_outerscan,
-							   bool try_parallel_path)
+							   bool try_outer_parallel)
 {
 #if PG_VERSION_NUM >= 110000
+	bool		try_inner_parallel = false;
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
@@ -1504,9 +1505,11 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	Path	   *partial_path;
 	ListCell   *lc;
 
+retry:
 	sub_paths_list = extract_partitionwise_pathlist(root,
 													input_path,
-													try_parallel_path,
+													try_outer_parallel,
+													false,
 													&append_path,
 													&parallel_nworkers,
 													&discount_cost);
@@ -1527,8 +1530,8 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		AppendRelInfo **appinfos;
 		int				nappinfos;
 
-		appinfos = __find_appinfos_by_relids(root, sub_rel->relids,
-											 &nappinfos);
+		appinfos = find_appinfos_by_relids_nofail(root, sub_rel->relids,
+												  &nappinfos);
 		/* fixup varno */
 		curr_partial->exprs = (List *)
 			adjust_appendrel_attrs(root, (Node *)curr_partial->exprs,
@@ -1553,7 +1556,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	}
 	/* also see create_append_path(), some fields must be fixed up */
 	partitioned_rels = copyObject(append_path->partitioned_rels);
-	if (try_parallel_path)
+	if (try_outer_parallel)
 		append_path = create_append_path(root, input_path->parent,
 										 NIL, append_paths_list,
 										 NIL, NULL,
@@ -1569,7 +1572,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	append_path->path.total_cost -= discount_cost;
 
 	/* prepend Gather on demand */
-	if (try_parallel_path &&
+	if (try_outer_parallel &&
 		append_path->path.parallel_safe &&
 		append_path->path.parallel_workers > 0)
 	{
@@ -1584,7 +1587,10 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 												  &total_groups);
 	}
 	else
+	{
 		partial_path = &append_path->path;
+		try_outer_parallel = false;		/* never retry again */
+	}
 
 	try_add_final_aggregation_paths(root,
 									group_rel,
@@ -1593,6 +1599,11 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 									(List *) havingQual,
 									num_groups,
 									agg_final_costs);
+	if (try_outer_parallel && !try_inner_parallel)
+	{
+		try_inner_parallel = true;
+		goto retry;
+	}
 #endif	/* PG_VERSION_NUM >= 110000 */
 }
 
