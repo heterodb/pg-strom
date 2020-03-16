@@ -4260,10 +4260,9 @@ __arrowExecTruncateRelation(Relation frel)
 	const char *dir_name;
 	const char *file_name;
 	size_t		main_sz;
-	int			dirfd = -1;
 	int			fdesc = -1;
 	int			nbytes;
-	char		path[MAXPGPATH];
+	char		backup_path[MAXPGPATH];
 	bool		writable;
 
 	filesList = __arrowFdwExtractFilesList(ft->options,
@@ -4296,68 +4295,64 @@ __arrowExecTruncateRelation(Relation frel)
 	strcpy(redo->pathname, path_name);
 	redo->is_truncate = true;
 
-	/* open directory of the arrow file (must have write permission) */
-	dir_name = dirname(pstrdup(path_name));
-	file_name = basename(pstrdup(path_name));
-	dirfd = open(dir_name, O_RDONLY | O_DIRECTORY);
-	if (dirfd < 0)
-	{
-		pfree(redo);
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open directory '%s': %m", dir_name)));
-	}
-
 	PG_TRY();
 	{
-		/* create an empty file */
-	retry:
-		redo->suffix = random();
-		snprintf(path, sizeof(path), "%s.%u.backup",
-				 file_name, redo->suffix);
-		fdesc = openat(dirfd, path, O_RDWR | O_CREAT | O_EXCL, 0600);
-		if (fdesc < 0)
+		/*
+		 * move the current arrow file to the backup
+		 */
+		dir_name = dirname(pstrdup(path_name));
+		file_name = basename(pstrdup(path_name));
+		for (;;)
 		{
-			if (errno == EEXIST)
-				goto retry;
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not create a file '%s' at '%s': %m",
-							path, dir_name)));
+			redo->suffix = random();
+			snprintf(backup_path, sizeof(backup_path),
+					 "%s/%s.%u.backup",
+					 dir_name, file_name, redo->suffix);
+			if (stat(backup_path, &stat_buf) != 0)
+			{
+				if (errno == ENOENT)
+					break;
+				elog(ERROR, "failed on stat('%s'): %m", backup_path);
+			}
 		}
+		if (rename(path_name, backup_path) != 0)
+			elog(ERROR, "failed on rename('%s','%s'): %m",
+				 path_name, backup_path);
 
-		/* write out an empty arrow file */
-		table->filename = path;
-		table->fdesc = fdesc;
-		nbytes = __writeFile(table->fdesc, "ARROW1\0\0", 8);
-		if (nbytes != 8)
-			elog(ERROR, "failed on __writeFile('%s'): %m", path);
-		writeArrowSchema(table);
-		writeArrowFooter(table);
-
-		/* swap two files atomically */
-		if (renameat2(dirfd, file_name,
-					  dirfd, path, RENAME_EXCHANGE) != 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("failed to swap '%s' and '%s' at '%s': %m",
-							file_name, path, dir_name)));
+		/*
+		 * create an empty arrow file
+		 */
+		PG_TRY();
+		{
+			fdesc = open(path_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+			if (fdesc < 0)
+				elog(ERROR, "failed on open('%s'): %m", path_name);
+			table->filename = path_name;
+			table->fdesc = fdesc;
+			nbytes = __writeFile(fdesc, "ARROW1\0\0", 8);
+			if (nbytes != 8)
+				elog(ERROR, "failed on __writeFile('%s'): %m", path_name);
+			writeArrowSchema(table);
+			writeArrowFooter(table);
+		}
+		PG_CATCH();
+		{
+			if (fdesc >= 0)
+				close(fdesc);
+			if (rename(backup_path, path_name) != 0)
+				elog(WARNING, "failed on rename('%s', '%s'): %m",
+					 backup_path, path_name);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		close(fdesc);
 	}
 	PG_CATCH();
 	{
-		if (fdesc >= 0)
-		{
-			unlinkat(dirfd, path, 0);
-			close(fdesc);
-		}
-		close(dirfd);
 		pfree(redo);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	close(fdesc);
-	close(dirfd);
-
 	/* save the REDO log entry */
 	dlist_push_head(&arrow_write_redo_list, &redo->chain);
 }
