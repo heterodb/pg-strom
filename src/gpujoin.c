@@ -1278,6 +1278,7 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 	List	   *inner_items_leaf;
 	Relids		inner_relids = NULL;
 	double		join_nrows = 0.0;
+	GpuJoinPath *gjpath_leader = NULL;
 	bool		assign_sibling_param_id = true;
 	int			parallel_nworkers = 0;
 
@@ -1345,7 +1346,8 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 
 					inner_items_leaf = lcons(ip_temp, inner_items_leaf);
 				}
-				assign_sibling_param_id = false;
+				leaf_path = linitial(gjtemp->cpath.custom_paths);
+				leaf_rel  = leaf_path->parent;
 			}
 		}
 
@@ -1371,7 +1373,30 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 									 try_inner_parallel);
 		if (!gjpath)
 			return NIL;
+		if (!gjpath_leader)
+			gjpath_leader = gjpath;
+		else
+		{
+			if (gjpath_leader->num_rels != gjpath->num_rels)
+				assign_sibling_param_id = false;
+			else
+			{
+				int		i;
 
+				for (i=0; i < gjpath->num_rels; i++)
+				{
+					Path   *ipath_l = gjpath_leader->inners[i].scan_path;
+					Path   *ipath_c = gjpath->inners[i].scan_path;
+
+					if (!bms_equal(ipath_l->parent->relids,
+								   ipath_c->parent->relids))
+					{
+						assign_sibling_param_id = false;
+						break;
+					}
+				}
+			}
+		}
 		parallel_nworkers = Max(parallel_nworkers,
 								gjpath->cpath.path.parallel_workers);
 		results = lappend(results, gjpath);
@@ -6052,7 +6077,7 @@ resume_kernel:
 			memcpy(last_suspend,
 				   KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
 				   pgjoin->kern.suspend_size);
-			fprintf(stderr, "suspend / resume\n");
+			//fprintf(stderr, "suspend / resume\n");
 			/* renew buffer and restart */
 			pds_dst = pgjoin->pds_dst;
 			goto resume_kernel;
@@ -6662,7 +6687,7 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 {
 	GpuContext	   *gcontext = gjs->gts.gcontext;
 	GpuJoinSiblingState *sibling = gjs->sibling;
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	GpuJoinSharedState *gj_sstate = leader->gj_sstate;
 	kern_multirels *h_kmrels = gjs->h_kmrels;
 	int				dindex = gcontext->cuda_dindex;
 
@@ -6698,9 +6723,11 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
 
+		GPUCONTEXT_PUSH(gcontext);
 		rc = cuMemcpyHtoD(m_kmrels, h_kmrels, bytesize);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		GPUCONTEXT_POP(gcontext);
 
 		gjs->m_kmrels = m_kmrels;
 		gjs->m_kmrels_owner = true;
@@ -6714,7 +6741,7 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 	{
 		CUdeviceptr		m_kmrels;
 		CUresult		rc;
-		
+
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &m_kmrels,
 								 gj_sstate->pergpu[dindex].ipc_mhandle,
@@ -6845,8 +6872,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 			for (i=0; i < leader->num_rels; i++)
 			{
 				innerState *istate = &leader->inners[i];
-				kern_data_store *kds = (kern_data_store *)
-					((char *)h_kmrels + h_kmrels->chunks[i].chunk_offset);
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i+1);
 				cl_uint		nitems_base;
 				cl_uint		usage_base;
 

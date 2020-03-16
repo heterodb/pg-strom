@@ -1095,8 +1095,6 @@ gpujoin_main(kern_context *kcxt,
 		+ get_group_id() * pstack_nrooms * ((max_depth+1) *
 											(max_depth+2)) / 2;
 	/* init per-depth context */
-	memset(l_state, 0, sizeof(l_state));
-	memset(matched, 0, sizeof(matched));
 	if (get_local_id() == 0)
 	{
 		src_read_pos = UINT_MAX;

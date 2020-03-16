@@ -281,6 +281,8 @@ kern_gpujoin_main(kern_gpujoin *kgjoin,
 	DECL_KERNEL_CONTEXT(u);
 
 	assert(kgjoin->num_rels == GPUJOIN_MAX_DEPTH);
+	memset(l_state, 0, sizeof(l_state));
+	memset(matched, 0, sizeof(matched));
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpujoin_main(&u.kcxt,
 				 kgjoin,
@@ -306,6 +308,8 @@ kern_gpujoin_right_outer(kern_gpujoin *kgjoin,
 	DECL_KERNEL_CONTEXT(u);
 
 	assert(kgjoin->num_rels == GPUJOIN_MAX_DEPTH);
+	memset(l_state, 0, sizeof(l_state));
+	memset(matched, 0, sizeof(matched));
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	gpujoin_right_outer(&u.kcxt,
 						kgjoin,
