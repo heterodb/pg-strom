@@ -1,0 +1,350 @@
+---
+--- Test cases for asymmetric partition-wise GpuJoin
+---
+SET search_path = pgstrom_regress,public;
+SET pg_strom.regression_test_mode = on;
+-- INNER JOIN
+RESET pg_strom.enabled;
+EXPLAIN (costs off)
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p, atable a, btable b, ctable c
+ WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ GroupAggregate
+   Group Key: p_1.label
+   ->  Sort
+         Sort Key: p_1.label
+         ->  Gather
+               Workers Planned: 3
+               ->  Parallel Append
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p1 p_1
+                                 Outer Scan: ptable__p1 p_1
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashJoin
+                                          HashKeys: p_1.aid
+                                          JoinQuals: (p_1.aid = a.aid)
+                                 Depth 2: GpuHashJoin
+                                          HashKeys: p_1.cid
+                                          JoinQuals: (p_1.cid = c.cid)
+                                 Depth 3: GpuHashJoin
+                                          HashKeys: p_1.bid
+                                          JoinQuals: (p_1.bid = b.bid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on ctable c
+                                 ->  Seq Scan on btable b
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p2 p_2
+                                 Outer Scan: ptable__p2 p_2
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashJoin
+                                          HashKeys: p_2.aid
+                                          JoinQuals: (p_2.aid = a.aid)
+                                 Depth 2: GpuHashJoin
+                                          HashKeys: p_2.cid
+                                          JoinQuals: (p_2.cid = c.cid)
+                                 Depth 3: GpuHashJoin
+                                          HashKeys: p_2.bid
+                                          JoinQuals: (p_2.bid = b.bid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on ctable c
+                                 ->  Seq Scan on btable b
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p3 p_3
+                                 Outer Scan: ptable__p3 p_3
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashJoin
+                                          HashKeys: p_3.aid
+                                          JoinQuals: (p_3.aid = a.aid)
+                                 Depth 2: GpuHashJoin
+                                          HashKeys: p_3.cid
+                                          JoinQuals: (p_3.cid = c.cid)
+                                 Depth 3: GpuHashJoin
+                                          HashKeys: p_3.bid
+                                          JoinQuals: (p_3.bid = b.bid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on ctable c
+                                 ->  Seq Scan on btable b
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p0 p
+                                 Outer Scan: ptable__p0 p
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashJoin
+                                          HashKeys: p.aid
+                                          JoinQuals: (p.aid = a.aid)
+                                 Depth 2: GpuHashJoin
+                                          HashKeys: p.cid
+                                          JoinQuals: (p.cid = c.cid)
+                                 Depth 3: GpuHashJoin
+                                          HashKeys: p.bid
+                                          JoinQuals: (p.bid = b.bid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on ctable c
+                                 ->  Seq Scan on btable b
+(79 rows)
+
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p, atable a, btable b, ctable c
+ WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+  count  | label |  sum   |   sum    |   sum    
+---------+-------+--------+----------+----------
+ 1216081 | aaa   | 960898 | -1400219 | -1040104
+ 1215952 | abc   | 359343 | -1127171 |  -930629
+ 1217406 | bbb   | 721430 | -1475955 |  -907425
+ 1217643 | ccc   | 346491 | -1164049 |  -937860
+ 1217096 | ddd   | 508280 | -1241361 |  -686142
+ 1216722 | eee   | 613177 | -1087686 | -1149402
+ 1215793 | fff   | 856702 | -1156156 |  -755299
+ 1215709 | ggg   | 487456 | -1337410 |  -785326
+ 1216254 | hhh   | 283787 | -1318627 |  -810123
+ 1215845 | iii   | 431187 | -1547111 | -1042898
+ 1216114 | jjj   | 631471 | -1378874 |  -998155
+ 1216005 | kkk   | 376279 | -1199438 |  -808669
+ 1215718 | lll   | 407263 | -1339908 |  -982381
+ 1217784 | mmm   | 535731 | -1185537 |  -991530
+ 1216077 | nnn   | 667043 | -1445185 | -1007274
+ 1215770 | ooo   | 378832 | -1268160 |  -808513
+ 1216772 | ppp   | 649311 | -1235249 | -1089838
+ 1219621 | qqq   | 502324 | -1362959 |  -978780
+ 1216402 | rrr   | 605650 | -1282085 |  -992381
+ 1215940 | sss   | 458054 | -1304159 |  -781649
+ 1217642 | ttt   | 612076 | -1213070 |  -877652
+ 1215380 | uuu   | 696314 | -1454825 |  -754268
+ 1216138 | vvv   | 283274 | -1114063 |  -843748
+ 1214746 | www   | 757215 | -1257527 |  -704893
+ 1216615 | xxx   | 816530 | -1528477 | -1072468
+ 1215689 | xyz   | 705782 | -1071380 | -1078000
+ 1215577 | yyy   | 608441 | -1477415 |  -815320
+ 1217703 | zzz   | 661810 | -1450250 |  -889058
+   33934 |       |  12375 |   -26898 |   -46285
+(29 rows)
+
+SET pg_strom.enabled = off;
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p, atable a, btable b, ctable c
+ WHERE p.aid = a.aid AND p.bid = b.bid AND p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+  count  | label |  sum   |   sum    |   sum    
+---------+-------+--------+----------+----------
+ 1216081 | aaa   | 960898 | -1400219 | -1040104
+ 1215952 | abc   | 359343 | -1127171 |  -930629
+ 1217406 | bbb   | 721430 | -1475955 |  -907425
+ 1217643 | ccc   | 346491 | -1164049 |  -937860
+ 1217096 | ddd   | 508280 | -1241361 |  -686142
+ 1216722 | eee   | 613177 | -1087686 | -1149402
+ 1215793 | fff   | 856702 | -1156156 |  -755299
+ 1215709 | ggg   | 487456 | -1337410 |  -785326
+ 1216254 | hhh   | 283787 | -1318627 |  -810123
+ 1215845 | iii   | 431187 | -1547111 | -1042898
+ 1216114 | jjj   | 631471 | -1378874 |  -998155
+ 1216005 | kkk   | 376279 | -1199438 |  -808669
+ 1215718 | lll   | 407263 | -1339908 |  -982381
+ 1217784 | mmm   | 535731 | -1185537 |  -991530
+ 1216077 | nnn   | 667043 | -1445185 | -1007274
+ 1215770 | ooo   | 378832 | -1268160 |  -808513
+ 1216772 | ppp   | 649311 | -1235249 | -1089838
+ 1219621 | qqq   | 502324 | -1362959 |  -978780
+ 1216402 | rrr   | 605650 | -1282085 |  -992381
+ 1215940 | sss   | 458054 | -1304159 |  -781649
+ 1217642 | ttt   | 612076 | -1213070 |  -877652
+ 1215380 | uuu   | 696314 | -1454825 |  -754268
+ 1216138 | vvv   | 283274 | -1114063 |  -843748
+ 1214746 | www   | 757215 | -1257527 |  -704893
+ 1216615 | xxx   | 816530 | -1528477 | -1072468
+ 1215689 | xyz   | 705782 | -1071380 | -1078000
+ 1215577 | yyy   | 608441 | -1477415 |  -815320
+ 1217703 | zzz   | 661810 | -1450250 |  -889058
+   33934 |       |  12375 |   -26898 |   -46285
+(29 rows)
+
+-- LEFT OUTER JOIN
+RESET pg_strom.enabled;
+EXPLAIN (costs off)
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p
+  LEFT OUTER JOIN atable a ON p.aid = a.aid
+  LEFT OUTER JOIN btable b ON p.bid = b.bid
+  LEFT OUTER JOIN ctable c ON p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ GroupAggregate
+   Group Key: p_1.label
+   ->  Sort
+         Sort Key: p_1.label
+         ->  Gather
+               Workers Planned: 3
+               ->  Parallel Append
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p1 p_1
+                                 Outer Scan: ptable__p1 p_1
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashLeftJoin
+                                          HashKeys: p_1.aid
+                                          JoinQuals: (p_1.aid = a.aid)
+                                 Depth 2: GpuHashLeftJoin
+                                          HashKeys: p_1.bid
+                                          JoinQuals: (p_1.bid = b.bid)
+                                 Depth 3: GpuHashLeftJoin
+                                          HashKeys: p_1.cid
+                                          JoinQuals: (p_1.cid = c.cid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on btable b
+                                 ->  Seq Scan on ctable c
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p2 p_2
+                                 Outer Scan: ptable__p2 p_2
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashLeftJoin
+                                          HashKeys: p_2.aid
+                                          JoinQuals: (p_2.aid = a.aid)
+                                 Depth 2: GpuHashLeftJoin
+                                          HashKeys: p_2.bid
+                                          JoinQuals: (p_2.bid = b.bid)
+                                 Depth 3: GpuHashLeftJoin
+                                          HashKeys: p_2.cid
+                                          JoinQuals: (p_2.cid = c.cid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on btable b
+                                 ->  Seq Scan on ctable c
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p3 p_3
+                                 Outer Scan: ptable__p3 p_3
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashLeftJoin
+                                          HashKeys: p_3.aid
+                                          JoinQuals: (p_3.aid = a.aid)
+                                 Depth 2: GpuHashLeftJoin
+                                          HashKeys: p_3.bid
+                                          JoinQuals: (p_3.bid = b.bid)
+                                 Depth 3: GpuHashLeftJoin
+                                          HashKeys: p_3.cid
+                                          JoinQuals: (p_3.cid = c.cid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on btable b
+                                 ->  Seq Scan on ctable c
+                     ->  Parallel Custom Scan (GpuPreAgg)
+                           Reduction: Local
+                           Combined GpuJoin: enabled
+                           ->  Parallel Custom Scan (GpuJoin) on ptable__p0 p
+                                 Outer Scan: ptable__p0 p
+                                 Inner sibling-id: 0
+                                 Depth 1: GpuHashLeftJoin
+                                          HashKeys: p.aid
+                                          JoinQuals: (p.aid = a.aid)
+                                 Depth 2: GpuHashLeftJoin
+                                          HashKeys: p.bid
+                                          JoinQuals: (p.bid = b.bid)
+                                 Depth 3: GpuHashLeftJoin
+                                          HashKeys: p.cid
+                                          JoinQuals: (p.cid = c.cid)
+                                 ->  Seq Scan on atable a
+                                 ->  Seq Scan on btable b
+                                 ->  Seq Scan on ctable c
+(79 rows)
+
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p
+  LEFT OUTER JOIN atable a ON p.aid = a.aid
+  LEFT OUTER JOIN btable b ON p.bid = b.bid
+  LEFT OUTER JOIN ctable c ON p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+  count  | label |   sum   |   sum    |   sum    
+---------+-------+---------+----------+----------
+ 1426761 | aaa   | 1113543 | -1515254 | -1120491
+ 1426869 | abc   |  450592 | -1204991 |  -968657
+ 1427589 | bbb   |  899622 | -1573470 |  -954670
+ 1428017 | ccc   |  489321 | -1437975 |  -985360
+ 1426946 | ddd   |  670444 | -1289888 |  -753587
+ 1427665 | eee   |  740926 | -1237334 | -1174916
+ 1425951 | fff   | 1061685 | -1315055 |  -819180
+ 1425830 | ggg   |  610290 | -1574719 |  -821069
+ 1428009 | hhh   |  423243 | -1452747 |  -887050
+ 1426360 | iii   |  505867 | -1751944 | -1056774
+ 1427647 | jjj   |  769287 | -1598496 | -1031822
+ 1425334 | kkk   |  498622 | -1315070 |  -780962
+ 1427505 | lll   |  463014 | -1492651 |  -948897
+ 1426929 | mmm   |  697065 | -1287528 | -1032193
+ 1426141 | nnn   |  760346 | -1464175 | -1030442
+ 1426536 | ooo   |  314729 | -1526947 |  -926794
+ 1428201 | ppp   |  720285 | -1246065 | -1096772
+ 1429459 | qqq   |  564565 | -1495332 | -1039701
+ 1426672 | rrr   |  573926 | -1464428 | -1022084
+ 1427754 | sss   |  532084 | -1403200 |  -826933
+ 1428591 | ttt   |  782923 | -1303115 |  -895684
+ 1426025 | uuu   |  784318 | -1597898 |  -810333
+ 1428734 | vvv   |  374344 | -1221513 |  -905072
+ 1426054 | www   |  860969 | -1414665 |  -822880
+ 1426418 | xxx   |  951017 | -1645102 | -1192448
+ 1425127 | xyz   |  835900 | -1150397 | -1060178
+ 1427185 | yyy   |  750602 | -1558452 |  -903774
+ 1429898 | zzz   |  787553 | -1629396 |  -901536
+   39793 |       |   13173 |   -30567 |   -56582
+(29 rows)
+
+SET pg_strom.enabled = off;
+SELECT count(*), label, sum(a.x), sum(b.y), sum(c.z)
+  FROM ptable p
+  LEFT OUTER JOIN atable a ON p.aid = a.aid
+  LEFT OUTER JOIN btable b ON p.bid = b.bid
+  LEFT OUTER JOIN ctable c ON p.cid = c.cid
+ GROUP BY label
+ ORDER BY label;
+  count  | label |   sum   |   sum    |   sum    
+---------+-------+---------+----------+----------
+ 1426761 | aaa   | 1113543 | -1515254 | -1120491
+ 1426869 | abc   |  450592 | -1204991 |  -968657
+ 1427589 | bbb   |  899622 | -1573470 |  -954670
+ 1428017 | ccc   |  489321 | -1437975 |  -985360
+ 1426946 | ddd   |  670444 | -1289888 |  -753587
+ 1427665 | eee   |  740926 | -1237334 | -1174916
+ 1425951 | fff   | 1061685 | -1315055 |  -819180
+ 1425830 | ggg   |  610290 | -1574719 |  -821069
+ 1428009 | hhh   |  423243 | -1452747 |  -887050
+ 1426360 | iii   |  505867 | -1751944 | -1056774
+ 1427647 | jjj   |  769287 | -1598496 | -1031822
+ 1425334 | kkk   |  498622 | -1315070 |  -780962
+ 1427505 | lll   |  463014 | -1492651 |  -948897
+ 1426929 | mmm   |  697065 | -1287528 | -1032193
+ 1426141 | nnn   |  760346 | -1464175 | -1030442
+ 1426536 | ooo   |  314729 | -1526947 |  -926794
+ 1428201 | ppp   |  720285 | -1246065 | -1096772
+ 1429459 | qqq   |  564565 | -1495332 | -1039701
+ 1426672 | rrr   |  573926 | -1464428 | -1022084
+ 1427754 | sss   |  532084 | -1403200 |  -826933
+ 1428591 | ttt   |  782923 | -1303115 |  -895684
+ 1426025 | uuu   |  784318 | -1597898 |  -810333
+ 1428734 | vvv   |  374344 | -1221513 |  -905072
+ 1426054 | www   |  860969 | -1414665 |  -822880
+ 1426418 | xxx   |  951017 | -1645102 | -1192448
+ 1425127 | xyz   |  835900 | -1150397 | -1060178
+ 1427185 | yyy   |  750602 | -1558452 |  -903774
+ 1429898 | zzz   |  787553 | -1629396 |  -901536
+   39793 |       |   13173 |   -30567 |   -56582
+(29 rows)
+
+--
+-- RIGHT/FULL OUTER JOIN is not supported right now
+--
