@@ -93,6 +93,22 @@ PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
 			-L $(shell $(PG_CONFIG) --libdir) \
 			$(UTILS_RPATH)
 
+MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
+MYSQL2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
+                     $(STROM_BUILD_ROOT)/utils/mysql_client.c \
+                     $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
+                     $(STROM_BUILD_ROOT)/src/arrow_write.c
+MYSQL2ARROW_DEPEND = $(MYSQL2ARROW_SOURCE) \
+                     $(STROM_BUILD_ROOT)/src/arrow_defs.h \
+                     $(STROM_BUILD_ROOT)/src/arrow_ipc.h \
+                     $(STROM_BUILD_ROOT)/utils/sql2arrow.h
+MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
+                     -I $(STROM_BUILD_ROOT)/src \
+                     -I $(STROM_BUILD_ROOT)/utils \
+                     -I $(shell $(PG_CONFIG) --includedir) \
+                     -I $(shell $(PG_CONFIG) --includedir-server) \
+                     -L /usr/lib64/mysql -Wl,-rpath,/usr/lib64/mysql
+
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -292,6 +308,11 @@ $(GPUINFO): $(GPUINFO_DEPEND)
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
 	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
+
+$(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
+	$(CC) $(MYSQL2ARROW_CFLAGS) $(MYSQL2ARROW_SOURCE) -o $@ -lmysqlclient
+
+mysql2arrow: $(MYSQL2ARROW)
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm

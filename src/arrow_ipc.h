@@ -58,7 +58,7 @@ struct SQLtype__pgsql
 
 struct SQLtype__mysql
 {
-	const char *typname;
+	int			typeid;
 };
 
 union SQLtype
@@ -186,6 +186,11 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 /*
  * SQLbuffer related routines
  */
+extern void	   *palloc(Size sz);
+extern void	   *palloc0(Size sz);
+extern char	   *pstrdup(const char *orig);
+extern void	   *repalloc(void *ptr, Size sz);
+
 static inline void
 sql_buffer_init(SQLbuffer *buf)
 {
