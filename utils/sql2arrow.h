@@ -12,7 +12,7 @@ struct userConfigOption
 
 extern void *
 sqldb_server_connect(const char *sqldb_hostname,
-					 int         sqldb_port_num,
+					 const char *sqldb_port_num,
 					 const char *sqldb_username,
 					 const char *sqldb_password,
 					 const char *sqldb_database,

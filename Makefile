@@ -78,7 +78,8 @@ GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
 GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) $(UTILS_RPATH)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
-PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/pg2arrow.c \
+PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
+                  $(STROM_BUILD_ROOT)/utils/pgsql_client.c \
                   $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
                   $(STROM_BUILD_ROOT)/src/arrow_write.c \
                   $(STROM_BUILD_ROOT)/src/arrow_pgsql.c
@@ -221,7 +222,7 @@ DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN)
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(STROM_UTILS) \
+EXTRA_CLEAN = $(STROM_UTILS) $(MYSQL2ARROW) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \

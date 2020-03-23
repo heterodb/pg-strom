@@ -938,7 +938,7 @@ typedef struct {
  */
 void *
 sqldb_server_connect(const char *sqldb_hostname,
-					 int         sqldb_port_num,
+					 const char *sqldb_port_num,
 					 const char *sqldb_username,
 					 const char *sqldb_password,
 					 const char *sqldb_database,
@@ -948,6 +948,7 @@ sqldb_server_connect(const char *sqldb_hostname,
 	MYSQL	   *conn;
 	MYSQL_RES  *res;
 	MYSQL_ROW	row;
+	int			port_num = 0;
 	userConfigOption *conf;
 	const char *query;
 
@@ -955,12 +956,14 @@ sqldb_server_connect(const char *sqldb_hostname,
 	if (!conn)
 		Elog("failed on mysql_init");
 
+	if (sqldb_port_num)
+		port_num = atoi(sqldb_port_num);
 	if (!mysql_real_connect(conn,
 							sqldb_hostname,
 							sqldb_username,
 							sqldb_password,
 							sqldb_database,
-							sqldb_port_num,
+							port_num,
 							NULL, 0))
 		Elog("failed on mysql_real_connect: %s", mysql_error(conn));
 
@@ -1088,15 +1091,15 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 		ssize_t		usage = 0;
 		int			j;
 
+		table->nitems++;
 		for (j=0; j < table->nfields; j++)
 		{
 			SQLfield   *column = &table->columns[j];
 			size_t		sz = (row[j] != NULL ? row_sz[j] : 0);
 
 			usage += sql_field_put_value(column, row[j], sz);
+			assert(table->nitems == column->nitems);
 		}
-		table->nitems++;
-
 		return usage;
 	}
 	return -1;
@@ -1109,4 +1112,48 @@ sqldb_close_connection(void *sqldb_state)
 
 	mysql_free_result(mystate->res);
 	mysql_close(mystate->conn);
+}
+
+/*
+ * misc functions
+ */
+void *
+palloc(Size sz)
+{
+	void   *ptr = malloc(sz);
+
+	if (!ptr)
+		Elog("out of memory");
+	return ptr;
+}
+
+void *
+palloc0(Size sz)
+{
+	void   *ptr = malloc(sz);
+
+	if (!ptr)
+		Elog("out of memory");
+	memset(ptr, 0, sz);
+	return ptr;
+}
+
+char *
+pstrdup(const char *str)
+{
+	char   *ptr = strdup(str);
+
+	if (!ptr)
+		Elog("out of memory");
+	return ptr;
+}
+
+void *
+repalloc(void *old, Size sz)
+{
+	char   *ptr = realloc(old, sz);
+
+	if (!ptr)
+		Elog("out of memory");
+	return ptr;
 }

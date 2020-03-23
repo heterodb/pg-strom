@@ -3906,7 +3906,8 @@ __setupArrowSQLbufferField(SQLtable *table,
 							 typ->typalign,
 							 typ->typrelid,
 							 typ->typelem,
-							 timezone);
+							 timezone,
+							 NULL);
 	if (OidIsValid(typ->typelem))
 	{
 		/* array type */

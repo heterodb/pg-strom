@@ -122,20 +122,19 @@ struct hashItem
 	struct hashItem	*next;
 	uint32		hash;
 	uint32		index;
-	uint32		label_len;
+	uint32		label_sz;
 	char		label[FLEXIBLE_ARRAY_MEMBER];
 };
 
 struct SQLdictionary
 {
 	struct SQLdictionary *next;
-	Oid			enum_typeid;
-	int			dict_id;
-	char		is_delta;
+	int64		dict_id;
 	SQLbuffer	values;
 	SQLbuffer	extra;
+	int			nloaded;	/* # of items loaded from existing file */
 	int			nitems;
-	int			nslots;			/* width of hash slot */
+	int			nslots;		/* width of hash slot */
 	hashItem   *hslots[FLEXIBLE_ARRAY_MEMBER];
 };
 
@@ -168,7 +167,8 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 char typalign,
 									 Oid typrelid,
 									 Oid typelem,
-									 const char *tz_name);
+									 const char *tz_name,
+									 ArrowField *arrow_field);
 /*
  * Error messages, and misc definitions for pg2arrow
  */

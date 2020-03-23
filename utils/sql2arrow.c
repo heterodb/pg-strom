@@ -21,53 +21,13 @@ static char	   *output_filename = NULL;
 static char	   *append_filename = NULL;
 static size_t	batch_segment_sz = 0;
 static char	   *sqldb_hostname = NULL;
-static int		sqldb_port_num = 0;
+static char	   *sqldb_port_num = NULL;
 static char	   *sqldb_username = NULL;
 static char	   *sqldb_password = NULL;
 static char	   *sqldb_database = NULL;
 static char	   *dump_arrow_filename = NULL;
 static int		shows_progress = 0;
 static userConfigOption *sqldb_session_configs = NULL;
-
-static void
-usage(void)
-{
-	fputs("Usage:\n"
-		  "  mysql2arrow [OPTION] [database]\n"
-		  "\n"
-		  "General options:\n"
-		  "  -d, --dbname=DBNAME   Database name to connect to\n"
-		  "  -c, --command=COMMAND SQL command to run\n"
-		  "  -t, --table=TABLENAME Table name to be dumped\n"
-		  "      (-c and -t are exclusive, either of them must be given)\n"
-		  "  -o, --output=FILENAME result file in Apache Arrow format\n"
-		  "      --append=FILENAME result Apache Arrow file to be appended\n"
-		  "      (--output and --append are exclusive. If neither of them\n"
-		  "       are given, it creates a temporary file.)\n"
-		  "\n"
-		  "Arrow format options:\n"
-		  "  -s, --segment-size=SIZE size of record batch for each\n"
-		  "\n"
-		  "Connection options:\n"
-		  "  -h, --host=HOSTNAME  database server host\n"
-		  "  -p, --port=PORT      database server port\n"
-		  "  -u, --user=USERNAME  database user name\n"
-#ifdef __PG2ARROW__
-		  "  -w, --no-password    never prompt for password\n"
-		  "  -W, --password       force password prompt\n"
-#else
-		  "  -P, --password=PASS  Password to use when connecting to server\n"
-#endif
-		  "\n"
-		  "Other options:\n"
-		  "      --dump=FILENAME  dump information of arrow file\n"
-		  "      --progress       shows progress of the job\n"
-		  "      --set=NAME:VALUE config option to set before SQL execution\n"
-		  "\n"
-		  "Report bugs to <pgstrom@heterodb.com>.\n",
-		  stderr);
-	exit(1);
-}
 
 /*
  * loadArrowDictionaryBatches
@@ -76,47 +36,40 @@ static SQLdictionary *
 __loadArrowDictionaryBatchOne(const char *message_head,
 							  ArrowDictionaryBatch *dbatch)
 {
+	SQLdictionary  *dict;
 	ArrowBuffer	   *v_buffer = &dbatch->data.buffers[1];
 	ArrowBuffer	   *e_buffer = &dbatch->data.buffers[2];
-	SQLdictionary  *dict;
-	uint32		   *values;
+	uint32		   *values = (uint32 *)(message_head + v_buffer->offset);
+	char		   *extra = (char *)(message_head + e_buffer->offset);
 	int				i;
 
 	dict = palloc0(offsetof(SQLdictionary, hslots[1024]));
 	dict->dict_id = dbatch->id;
-	sql_buffer_expand(&dict->values, v_buffer->length);
-	memcpy(dict->values.data,
-		   message_head + v_buffer->offset,
-		   v_buffer->length);
-	sql_buffer_expand(&dict->extra, e_buffer->length);
-	memcpy(dict->extra.data,
-		   message_head + e_buffer->offset,
-		   e_buffer->length);
-	dict->nitems = dbatch->data.length;
+	sql_buffer_init(&dict->values);
+	sql_buffer_init(&dict->extra);
+	dict->nloaded = dbatch->data.length;
+	dict->nitems  = dbatch->data.length;
 	dict->nslots = 1024;
 
-	values = (uint32 *)dict->values.data;
-	for (i=0; i < dict->nitems; i++)
+	for (i=0; i < dict->nloaded; i++)
 	{
 		hashItem   *hitem;
 		uint32		len = values[i+1] - values[i];
-		char	   *pos = dict->extra.data + values[i];
+		char	   *pos = extra + values[i];
 		uint32		hindex;
 
 		hitem = palloc(offsetof(hashItem, label[len+1]));
 		hitem->hash = hash_any((unsigned char *)pos, len);
 		hitem->index = i;
-		hitem->label_len = len;
+		hitem->label_sz = len;
 		memcpy(hitem->label, pos, len);
 		hitem->label[len] = '\0';
-
-		printf("dict reload[%d] ... hash=%08x label=[%s]\n",
-			   i, hitem->hash, hitem->label);
 		
 		hindex = hitem->hash % dict->nslots;
 		hitem->next = dict->hslots[hindex];
 		dict->hslots[hindex] = hitem;
 	}
+	assert(dict->nitems == dict->nloaded);
 	return dict;
 }
 
@@ -142,6 +95,7 @@ loadArrowDictionaryBatches(int fdesc, ArrowFileInfo *af_info)
 		ArrowDictionaryBatch *dbatch;
 		SQLdictionary  *dict;
 		char		   *message_head;
+		char		   *message_body;
 
 		dbatch = &af_info->dictionaries[i].body.dictionaryBatch;
 		if (dbatch->node.tag != ArrowNodeTag__DictionaryBatch ||
@@ -150,7 +104,8 @@ loadArrowDictionaryBatches(int fdesc, ArrowFileInfo *af_info)
 			Elog("DictionaryBatch (dictionary_id=%ld) has unexpected format",
 				 dbatch->id);
 		message_head = mmap_head + block->offset;
-		dict = __loadArrowDictionaryBatchOne(message_head, dbatch);
+		message_body = message_head + block->metaDataLength;
+		dict = __loadArrowDictionaryBatchOne(message_body, dbatch);
 		dict->next = dictionary_list;
 		dictionary_list = dict;
 	}
@@ -291,6 +246,50 @@ dumpArrowFile(const char *filename)
 }
 
 static void
+usage(void)
+{
+	fputs("Usage:\n"
+#ifdef __PG2ARROW__
+		  "  pg2arrow [OPTION] [database] [username]\n\n"
+#else
+		  "  mysql2arrow [OPTION] [database] [username]\n\n"
+#endif
+		  "General options:\n"
+		  "  -d, --dbname=DBNAME   Database name to connect to\n"
+		  "  -c, --command=COMMAND SQL command to run\n"
+		  "  -t, --table=TABLENAME Table name to be dumped\n"
+		  "      (-c and -t are exclusive, either of them must be given)\n"
+		  "  -o, --output=FILENAME result file in Apache Arrow format\n"
+		  "      --append=FILENAME result Apache Arrow file to be appended\n"
+		  "      (--output and --append are exclusive. If neither of them\n"
+		  "       are given, it creates a temporary file.)\n"
+		  "\n"
+		  "Arrow format options:\n"
+		  "  -s, --segment-size=SIZE size of record batch for each\n"
+		  "\n"
+		  "Connection options:\n"
+		  "  -h, --host=HOSTNAME  database server host\n"
+		  "  -p, --port=PORT      database server port\n"
+		  "  -u, --user=USERNAME  database user name\n"
+#ifdef __PG2ARROW__
+		  "  -w, --no-password    never prompt for password\n"
+		  "  -W, --password       force password prompt\n"
+#endif
+#ifdef __MYSQL2ARROW__
+		  "  -P, --password=PASS  Password to use when connecting to server\n"
+#endif
+		  "\n"
+		  "Other options:\n"
+		  "      --dump=FILENAME  dump information of arrow file\n"
+		  "      --progress       shows progress of the job\n"
+		  "      --set=NAME:VALUE config option to set before SQL execution\n"
+		  "\n"
+		  "Report bugs to <pgstrom@heterodb.com>.\n",
+		  stderr);
+	exit(1);
+}
+
+static void
 parse_options(int argc, char * const argv[])
 {
 	static struct option long_options[] = {
@@ -306,9 +305,10 @@ parse_options(int argc, char * const argv[])
 #ifdef __PG2ARROW__
 		{"no-password",  no_argument,       NULL, 'w'},
 		{"password",     no_argument,       NULL, 'W'},
-#else
+#endif /* __PG2ARROW__ */
+#ifdef __MYSQL2ARROW__
 		{"password",     required_argument, NULL, 'P'},
-#endif
+#endif /* __MYSQL2ARROW__ */
 		{"dump",         required_argument, NULL, 1001},
 		{"progress",     no_argument,       NULL, 1002},
 		{"set",          required_argument, NULL, 1003},
@@ -395,7 +395,9 @@ parse_options(int argc, char * const argv[])
 				break;
 
 			case 'p':
-				sqldb_port_num = atoi(optarg);
+				if (sqldb_port_num)
+					Elog("-p option was supplied twice");
+				sqldb_port_num = optarg;
 				break;
 
 			case 'u':
@@ -414,13 +416,14 @@ parse_options(int argc, char * const argv[])
 					Elog("-w and -W options are exclusive");
 				password_prompt = 1;
 				break;
-#else
+#endif	/* __PG2ARROW__ */
+#ifdef __MYSQL2ARROW__
 			case 'P':
 				if (sqldb_password)
 					Elog("-p option was supplied twice");
 				sqldb_password = optarg;
 				break;
-#endif
+#endif /* __MYSQL2ARROW__ */
 			case 1001:		/* --dump */
 				if (dump_arrow_filename)
 					Elog("--dump option was supplied twice");
@@ -469,6 +472,15 @@ parse_options(int argc, char * const argv[])
 		if (sqldb_database)
 			Elog("database name was supplied twice");
 		sqldb_database = argv[optind];
+	}
+	else if (optind + 2 == argc)
+	{
+		if (sqldb_database)
+			Elog("database name was supplied twice");
+		if (sqldb_username)
+			Elog("database user was specified twice");
+		sqldb_database = argv[optind];
+		sqldb_username = argv[optind + 1];
 	}
 	else if (optind != argc)
 		Elog("too much command line arguments");
@@ -532,6 +544,8 @@ int main(int argc, char * const argv[])
 							  sqldb_command,
 							  append_filename ? &af_info : NULL,
 							  sql_dict_list);
+	if (!table)
+		Elog("Empty results by the query: %s", sqldb_command);
 	table->segment_sz = batch_segment_sz;
 
 	/* save the SQL command as custom metadata */
@@ -553,6 +567,8 @@ int main(int argc, char * const argv[])
 		table->filename = append_filename;
 		setup_append_file(table, &af_info);
 	}
+	/* write out dictionary batch, if any */
+	writeArrowDictionaryBatches(table);
 	/* main loop to fetch and write result */
 	while ((usage = sqldb_fetch_results(sqldb_state, table)) >= 0)
 	{
@@ -571,8 +587,6 @@ int main(int argc, char * const argv[])
 		writeArrowRecordBatch(table);
 		shows_record_batch_progress(table, nitems);
 	}
-	/* write out dictionary batch, if any */
-	writeArrowDictionaryBatches(table);
 	/* write out footer portion */
 	writeArrowFooter(table);
 
@@ -581,50 +595,6 @@ int main(int argc, char * const argv[])
 	close(table->fdesc);
 
 	return 0;
-}
-
-/*
- * misc functions
- */
-void *
-palloc(Size sz)
-{
-	void   *ptr = malloc(sz);
-
-	if (!ptr)
-		Elog("out of memory");
-	return ptr;
-}
-
-void *
-palloc0(Size sz)
-{
-	void   *ptr = malloc(sz);
-
-	if (!ptr)
-		Elog("out of memory");
-	memset(ptr, 0, sz);
-	return ptr;
-}
-
-char *
-pstrdup(const char *str)
-{
-	char   *ptr = strdup(str);
-
-	if (!ptr)
-		Elog("out of memory");
-	return ptr;
-}
-
-void *
-repalloc(void *old, Size sz)
-{
-	char   *ptr = realloc(old, sz);
-
-	if (!ptr)
-		Elog("out of memory");
-	return ptr;
 }
 
 /*
