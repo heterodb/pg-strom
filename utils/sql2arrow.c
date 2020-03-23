@@ -283,6 +283,7 @@ usage(void)
 		  "      --dump=FILENAME  dump information of arrow file\n"
 		  "      --progress       shows progress of the job\n"
 		  "      --set=NAME:VALUE config option to set before SQL execution\n"
+		  "      --help           shows this message\n"
 		  "\n"
 		  "Report bugs to <pgstrom@heterodb.com>.\n",
 		  stderr);
@@ -312,6 +313,7 @@ parse_options(int argc, char * const argv[])
 		{"dump",         required_argument, NULL, 1001},
 		{"progress",     no_argument,       NULL, 1002},
 		{"set",          required_argument, NULL, 1003},
+		{"help",         no_argument,       NULL, 9999},
 		{NULL, 0, NULL, 0},
 	};
 	int			c;
