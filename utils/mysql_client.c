@@ -580,6 +580,16 @@ put_variable_value(SQLfield *column, const char *addr, int sz)
 	return __buffer_usage_variable_type(column);
 }
 
+#if 0
+/*
+ * NOTE: Right now, we have no way to fetch column's attribute during
+ * query execution (for more correctness, libmysqlclient does not allow
+ * to run another query before mysql_free_result(), so we cannot run
+ *   SHOW COLUMNS FROM <tablename> LIKE '<columnname>'
+ * according to the query results.
+ * So, mysql2arrow saves Enum data type in MySQL as normal Utf8/Binary
+ * values, without creation of DictionaryBatch chunks.
+ */
 static size_t
 put_dictionary_value(SQLfield *column, const char *addr, int sz)
 {
@@ -599,30 +609,25 @@ put_dictionary_value(SQLfield *column, const char *addr, int sz)
 			 hitem = hitem->next)
 		{
 			if (hitem->hash == hash &&
-				hitem->label_len == sz &&
+				hitem->label_sz == sz &&
 				memcmp(hitem->label, addr, sz) == 0)
-				goto found;
+				break;
 		}
-		/* not found, insert new entry */
-		hitem = palloc(offsetof(hashItem, label[sz]));
-		hitem->hash = hash;
-		hitem->index = enumdict->nitems++;
-		hitem->label_len = sz;
-		memcpy(hitem->label, addr, sz);
-		hitem->next = enumdict->hslots[hindex];
-		enumdict->hslots[hindex] = hitem;
-	found:
+		if (!hitem)
+			Elog("Enum label was not found");
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &hitem->index, sizeof(uint32));
 	}
 	return __buffer_usage_variable_type(column);
 }
+#endif
 
 /*
  * mysql_setup_attribute
  */
 static int
-mysql_setup_attribute(MYSQL_FIELD *my_field,
+mysql_setup_attribute(MYSQL *conn,
+					  MYSQL_FIELD *my_field,
 					  ArrowField *arrow_field,
 					  SQLtable *table,
 					  SQLfield *column,
@@ -631,14 +636,13 @@ mysql_setup_attribute(MYSQL_FIELD *my_field,
 	ArrowType  *arrow_type = (arrow_field ? &arrow_field->type : NULL);
 	bool		is_signed = ((my_field->flags & UNSIGNED_FLAG) == 0);
 	bool		is_binary = ((my_field->flags & BINARY_FLAG) != 0);
-	bool		is_enum   = ((my_field->flags & ENUM_FLAG) != 0);
+//	bool		is_enum   = ((my_field->flags & ENUM_FLAG) != 0);
 	int			bitWidth = -1;
 	int			precision = -1;
 	int			dscale;
 	int			unit;
 	char		temp[120];
 	const char *tz_name = NULL;
-	SQLdictionary *dict = NULL;
 	
 	memset(column, 0, sizeof(SQLfield));
 	column->field_name = pstrdup(my_field->name);
@@ -854,18 +858,7 @@ mysql_setup_attribute(MYSQL_FIELD *my_field,
 		case MYSQL_TYPE_TINY_BLOB:
 		case MYSQL_TYPE_MEDIUM_BLOB:
 		case MYSQL_TYPE_LONG_BLOB:
-			if (is_binary)
-			{
-				/*
-				 * ArrowTypeBinary
-				 */
-				initArrowNode(&column->arrow_type, Binary);
-				column->arrow_typename  = "Binary";
-				column->put_value       = put_variable_value;
-
-				return 3;	/* nullmap + index + extra */
-			}
-			else if (!is_enum)
+			if (!is_binary)
 			{
 				/*
 				 * ArrowTypeUtf8
@@ -873,44 +866,22 @@ mysql_setup_attribute(MYSQL_FIELD *my_field,
 				initArrowNode(&column->arrow_type, Utf8);
 				column->arrow_typename  = "Utf8";
 				column->put_value       = put_variable_value;
-
-				return 3;	/* nullmap + index + extra */
-			}
-		/*
-		 * ArrowTypeUtf8 + DictionaryBatch
-		 */
-		case MYSQL_TYPE_ENUM:
-			if (arrow_field)
-			{
-				for (dict=table->sql_dict_list; dict; dict = dict->next)
-				{
-					if (dict->dict_id == arrow_field->dictionary.id)
-						break;
-				}
-				if (!dict)
-					Elog("attribute %d is Enum type but base Arrow File has no relevant DictionaryBatch", attnum);
 			}
 			else
 			{
-				/* make an empty dictionary */
-				dict = palloc0(offsetof(SQLdictionary, hslots[1024]));
-				dict->enum_typeid = -1;
-				dict->dict_id = attnum;
-				dict->is_delta = false;
-				dict->nslots = 1024;
-				dict->next = table->sql_dict_list;
-				table->sql_dict_list = dict;
+				/*
+				 * ArrowTypeBinary
+				 */
+				initArrowNode(&column->arrow_type, Binary);
+				column->arrow_typename  = "Binary";
+				column->put_value       = put_variable_value;
 			}
-			initArrowNode(&column->arrow_type, Utf8);
-			snprintf(temp, sizeof(temp),
-					 "Enum; dictionary=%u", dict->dict_id);
-			column->arrow_typename = pstrdup(temp);
-			column->enumdict = dict;
-			column->put_value = put_dictionary_value;
-			return 2;		/* nullmap + values */
+			return 3;	/* nullmap + index + extra */
 
 		case MYSQL_TYPE_NULL:
 			Elog("MySQL Null data type is not supported");
+		case MYSQL_TYPE_ENUM:
+			Elog("MySQL Enum data type is not supported");
 		case MYSQL_TYPE_SET:
 			Elog("MySQL SET data type is not supported");
 		case MYSQL_TYPE_BIT:
@@ -1069,7 +1040,8 @@ sqldb_begin_query(void *sqldb_state,
 			arrow_field = &af_info->footer.schema.fields[j];
 
 		table->numBuffers +=
-			mysql_setup_attribute(my_field,
+			mysql_setup_attribute(conn,
+								  my_field,
 								  arrow_field,
 								  table,
 								  &table->columns[j],
