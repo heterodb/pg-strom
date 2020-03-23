@@ -392,7 +392,7 @@ typedef struct		ArrowField
 	int				_name_len;
 	bool			nullable;
 	ArrowType		type;
-	ArrowDictionaryEncoding dictionary;
+	ArrowDictionaryEncoding *dictionary;
 	/* vector of nested data types */
 	struct ArrowField *children;
 	int				_num_children;

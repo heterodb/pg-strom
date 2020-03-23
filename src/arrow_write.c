@@ -589,8 +589,6 @@ createArrowDictionaryEncoding(ArrowDictionaryEncoding *node)
 	FBTableBuf *typeInt;
 
 	assert(ArrowNodeIs(node, DictionaryEncoding));
-	if (!ArrowNodeIs(&node->indexType, Int))
-		return NULL;
 	addBufferLong(buf, 0, node->id);
 	typeInt = createArrowTypeInt(&node->indexType);
 	addBufferOffset(buf, 1, typeInt);
@@ -616,8 +614,11 @@ createArrowField(ArrowField *node)
 	addBufferChar(buf, 2, type_tag);
 	if (type)
 		addBufferOffset(buf, 3, type);
-	dictionary = createArrowDictionaryEncoding(&node->dictionary);
-	addBufferOffset(buf, 4, dictionary);
+	if (node->dictionary)
+	{
+		dictionary = createArrowDictionaryEncoding(node->dictionary);
+		addBufferOffset(buf, 4, dictionary);
+	}
 	if (node->_num_children == 0)
 		vector = NULL;
 	else
@@ -893,19 +894,15 @@ static void
 setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 							 SQLfield *column)
 {
-	initArrowNode(dict, DictionaryEncoding);
-	if (column->enumdict)
-	{
-		SQLdictionary  *enumdict = column->enumdict;
-		ArrowTypeInt   *indexType = &dict->indexType;
+	SQLdictionary  *enumdict = column->enumdict;
 
-		dict->id = enumdict->dict_id;
-		/* dictionary index must be Int32 */
-		initArrowNode(indexType, Int);
-		indexType->bitWidth  = 32;
-		indexType->is_signed = true;
-		dict->isOrdered = false;
-	}
+	initArrowNode(dict, DictionaryEncoding);
+	dict->id = enumdict->dict_id;
+	/* dictionary index must be Int32 */
+	initArrowNode(&dict->indexType, Int);
+	dict->indexType.bitWidth = 32;
+	dict->indexType.is_signed = true;
+	dict->isOrdered = false;
 }
 
 static void
@@ -916,7 +913,12 @@ setupArrowField(ArrowField *field, SQLfield *column)
 	field->_name_len = strlen(column->field_name);
 	field->nullable = true;
 	field->type = column->arrow_type;
-	setupArrowDictionaryEncoding(&field->dictionary, column);
+	/* dictionary */
+	if (column->enumdict)
+	{
+		field->dictionary = palloc0(sizeof(ArrowDictionaryEncoding));
+		setupArrowDictionaryEncoding(field->dictionary, column);
+	}
 	/* array type */
 	if (column->element)
 	{

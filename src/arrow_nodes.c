@@ -284,10 +284,10 @@ __dumpArrowField(SQLbuffer *buf, ArrowNode *node)
 		f->name ? f->name : "",
 		f->nullable ? "true" : "false");
 	__dumpArrowNode(buf, (ArrowNode *)&f->type);
-	if (f->dictionary.indexType.node.tag == ArrowNodeTag__Int)
+	if (f->dictionary)
 	{
 		sql_buffer_printf(buf, ", dictionary=");
-		__dumpArrowNode(buf, (ArrowNode *)&f->dictionary);
+		__dumpArrowNode(buf, (ArrowNode *)f->dictionary);
 	}
 	sql_buffer_printf(buf, ", children=[");
 	for (i=0; i < f->_num_children; i++)
@@ -660,7 +660,13 @@ __copyArrowField(ArrowField *dest, const ArrowField *src)
 	COPY_CSTRING(name);
 	COPY_SCALAR(nullable);
 	__copyArrowType(&dest->type, &src->type);
-	__copyArrowDictionaryEncoding(&dest->dictionary, &src->dictionary);
+	if (!src->dictionary)
+		dest->dictionary = NULL;
+	else
+	{
+		dest->dictionary = palloc0(sizeof(ArrowDictionaryEncoding));
+		__copyArrowDictionaryEncoding(dest->dictionary, src->dictionary);
+	}
 	COPY_VECTOR(children, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
 }
@@ -1371,8 +1377,13 @@ readArrowField(ArrowField *field, const char *pos)
 
 	/* dictionary */
 	dict_pos = fetchOffset(&t, 4);
-	if (dict_pos)
-		readArrowDictionaryEncoding(&field->dictionary, dict_pos);
+	if (!dict_pos)
+		field->dictionary = NULL;
+	else
+	{
+		field->dictionary = palloc0(sizeof(ArrowDictionaryEncoding));
+		readArrowDictionaryEncoding(field->dictionary, dict_pos);
+	}
 
 	/* children */
 	vector = fetchVector(&t, 5, &nitems);

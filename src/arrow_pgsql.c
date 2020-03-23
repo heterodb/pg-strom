@@ -1339,7 +1339,7 @@ assignArrowTypeStruct(SQLfield *column, ArrowField *arrow_field)
 	if (arrow_field &&
 		arrow_field->type.node.tag != ArrowNodeTag__Struct)
 		Elog("attribute %s is not compatible", column->field_name);
-	
+
 	initArrowNode(&column->arrow_type, Struct);
 	column->arrow_typename	= "Struct";
 	column->put_value		= put_composite_value;
@@ -1352,10 +1352,17 @@ assignArrowTypeDictionary(SQLfield *column, ArrowField *arrow_field)
 {
 	if (arrow_field)
 	{
+		ArrowTypeInt   *indexType;
+
 		if (arrow_field->type.node.tag != ArrowNodeTag__Utf8)
 			Elog("attribute %s is not compatible", column->field_name);
-		//check dictionary id
-
+		if (!arrow_field->dictionary)
+			Elog("attribute has no dictionary");
+		indexType = &arrow_field->dictionary->indexType;
+		if (indexType->node.tag == ArrowNodeTag__Int &&
+			indexType->bitWidth == sizeof(uint32) &&
+			!indexType->is_signed)
+			Elog("IndexType of ArrowDictionaryEncoding must be Int32");
 	}
 
 	initArrowNode(&column->arrow_type, Utf8);

@@ -165,7 +165,10 @@ pgsql_create_dictionary(PGconn *conn, SQLtable *root,
 	int64		dict_id = enum_typeid;
 
 	if (arrow_field)
-		dict_id = arrow_field->dictionary.id;
+	{
+		assert(arrow_field->dictionary);
+		dict_id = arrow_field->dictionary->id;
+	}
 
 	for (dict = root->sql_dict_list; dict != NULL; dict = dict->next)
 	{
