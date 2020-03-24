@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <getopt.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <strings.h>
@@ -115,14 +116,102 @@ loadArrowDictionaryBatches(int fdesc, ArrowFileInfo *af_info)
 }
 
 /*
+ * MEMO: Program termision may lead file corruption if arrow file is
+ * already overwritten with --append mode. The callback below tries to
+ * revert the arrow file using UNDO log; that is Footer portion saved
+ * before any writing stuff.
+ */
+typedef struct
+{
+	int			append_fdesc;
+	off_t		footer_offset;
+	size_t		footer_length;
+	char		footer_backup[FLEXIBLE_ARRAY_MEMBER];
+} arrowFileUndoLog;
+
+static arrowFileUndoLog	   *arrow_file_undo_log = NULL;
+
+/*
+ * fixup_append_file_on_exit
+ */
+static void
+fixup_append_file_on_exit(int status, void *p)
+{
+	arrowFileUndoLog *undo = arrow_file_undo_log;
+	ssize_t		count = 0;
+	ssize_t		nbytes;
+
+	if (status == 0 || !undo)
+		return;
+	/* avoid infinite recursion */
+	arrow_file_undo_log = NULL;
+
+	if (lseek(undo->append_fdesc,
+			  undo->footer_offset, SEEK_SET) != undo->footer_offset)
+	{
+		fprintf(stderr, "failed on lseek(2) on applying undo log.\n");
+		return;
+	}
+
+	while (count < undo->footer_length)
+	{
+		nbytes = write(undo->append_fdesc,
+					   undo->footer_backup + count,
+					   undo->footer_length - count);
+		if (nbytes > 0)
+			count += nbytes;
+		else if (errno != EINTR)
+		{
+			fprintf(stderr, "failed on write(2) on applying undo log.\n");
+			return;
+		}
+	}
+
+	if (ftruncate(undo->append_fdesc,
+				  undo->footer_offset + undo->footer_length) != 0)
+	{
+		fprintf(stderr, "failed on ftruncate(2) on applying undo log.\n");
+		return;
+	}
+}
+
+/*
+ * fixup_append_file_on_signal
+ */
+static void
+fixup_append_file_on_signal(int signum)
+{
+	fixup_append_file_on_exit(0x80 + signum, NULL);
+	switch (signum)
+	{
+		/* SIG_DFL == Term */
+		case SIGHUP:
+		case SIGINT:
+		case SIGTERM:
+			exit(0x80 + signum);
+
+		/* SIG_DFL == Core */
+		default:
+			fprintf(stderr, "unexpected signal (%d) was caught by %s\n",
+					signum, __FUNCTION__);
+		case SIGSEGV:
+		case SIGBUS:
+			abort();
+	}
+}
+
+/*
  * setup_append_file
  */
 static void
 setup_append_file(SQLtable *table, ArrowFileInfo *af_info)
 {
+	arrowFileUndoLog *undo;
 	uint32			nitems;
 	ssize_t			nbytes;
+	ssize_t			length;
 	loff_t			offset;
+	char		   *pos;
 	char			buffer[64];
 
 	/* restore DictionaryBatches already in the file */
@@ -153,6 +242,38 @@ setup_append_file(SQLtable *table, ArrowFileInfo *af_info)
 	if (lseek(table->fdesc, offset, SEEK_SET) < 0)
 		Elog("failed on lseek(%d, %zu, SEEK_SET): %m",
 			 table->fdesc, offset);
+	length = af_info->stat_buf.st_size - offset;
+
+	/* makes Undo log to recover process termination */
+	undo = palloc(offsetof(arrowFileUndoLog,
+						   footer_backup[length]));
+	undo->append_fdesc = table->fdesc;
+	undo->footer_offset = offset;
+	undo->footer_length = length;
+	pos = undo->footer_backup;
+	while (length > 0)
+	{
+		nbytes = pread(undo->append_fdesc,
+					   pos, length, offset);
+		if (nbytes > 0)
+		{
+			pos += nbytes;
+			length -= nbytes;
+			offset += nbytes;
+		}
+		else if (nbytes == 0)
+			Elog("pread: unexpected EOF; arrow file corruption?");
+		else if (nbytes < 0 && errno != EINTR)
+			Elog("failed on pread(2): %m");
+	}
+	arrow_file_undo_log = undo;
+	/* register callbacks for unexpected process termination */
+	on_exit(fixup_append_file_on_exit, NULL);
+	signal(SIGHUP,  fixup_append_file_on_signal);
+	signal(SIGINT,  fixup_append_file_on_signal);
+	signal(SIGTERM, fixup_append_file_on_signal);
+	signal(SIGSEGV, fixup_append_file_on_signal);
+	signal(SIGBUS,  fixup_append_file_on_signal);
 }
 
 /*
@@ -540,7 +661,6 @@ int main(int argc, char * const argv[])
 		readArrowFileDesc(append_fdesc, &af_info);
 		sql_dict_list = loadArrowDictionaryBatches(append_fdesc, &af_info);
 	}
-
 	/* begin SQL command execution */
 	table = sqldb_begin_query(sqldb_state,
 							  sqldb_command,
