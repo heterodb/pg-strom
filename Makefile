@@ -2,9 +2,8 @@
 # Common definitions for PG-Strom Makefile
 #
 PG_CONFIG := pg_config
-PSQL := $(shell dirname $(shell which $(PG_CONFIG)))/psql
-CREATEDB := $(shell dirname $(shell which $(PG_CONFIG)))/createdb
-MKDOCS := mkdocs
+PSQL = $(shell dirname $(shell which $(PG_CONFIG)))/psql
+MKDOCS = mkdocs
 
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT = .
@@ -67,6 +66,9 @@ MAXREGCOUNT := 128
 # Source file of utilities
 #
 __STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
+ifdef WITH_MYSQL2ARROW
+__STROM_UTILS += mysql2arrow
+endif
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
@@ -314,11 +316,6 @@ $(PG2ARROW): $(PG2ARROW_DEPEND)
 $(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
 	$(CC) $(MYSQL2ARROW_CFLAGS) \
               $(MYSQL2ARROW_SOURCE) -o $@ -lmysqlclient
-
-mysql2arrow: $(MYSQL2ARROW)
-
-mysql2arrow-install: $(MYSQL2ARROW)
-	$(INSTALL) -m 0755 $(MYSQL2ARROW) $(shell $(PG_CONFIG) --bindir)
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm
