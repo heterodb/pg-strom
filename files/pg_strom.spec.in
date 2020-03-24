@@ -12,6 +12,7 @@ Source1: systemd-pg_strom.conf
 BuildRequires: postgresql%{PGSQL_PKGVER}
 BuildRequires: postgresql%{PGSQL_PKGVER}-devel
 BuildRequires: cuda >= 9.2
+BuildRequires: mysql-devel
 Requires: nvidia-kmod
 Requires: cuda >= 9.2
 %if "%{PGSQL_PKGVER}" == "96"
@@ -29,6 +30,11 @@ Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
 
+%package mysql2arrow
+Summary: A utility to dump query results from MySQL server as Apache Arrow files
+Group: Applications/Databases
+Requires: mysql-libs
+
 %package test
 Summary: PG-Strom related test tools and scripts
 Group: Applications/Databases
@@ -44,6 +50,10 @@ Group: Applications/Databases
 PG-Strom is an extension for PostgreSQL, to accelerate analytic queries
 towards large data set using the capability of GPU devices.
 
+%description mysql2arrow
+mysql2arrow is a utility to dump a query results from MySQL server
+as Apache Arrow files.
+
 %description test
 This package provides test tools and scripts related to PG-Strom
 
@@ -52,11 +62,11 @@ This package provides test tools and scripts related to PG-Strom
 
 %build
 rm -rf %{buildroot}
-%{__make} -j 8 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config}
+%{__make} -j 8 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} WITH_MYSQL2ARROW=1
 
 %install
 rm -rf %{buildroot}
-%{__make} CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} DESTDIR=%{buildroot} install
+%{__make} CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} WITH_MYSQL2ARROW=1 DESTDIR=%{buildroot} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
 %clean
@@ -72,6 +82,14 @@ ldconfig
 if [ "$1" -eq 0 ]; then
     %{_sbindir}/update-alternatives --remove pgsql-gpuinfo  %{__pkgbindir}/gpuinfo
     %{_sbindir}/update-alternatives --remove pgsql-pg2arrow %{__pkgbindir}/pg2arrow
+fi
+
+%post mysql2arrow
+%{_sbindir}/update-alternatives --install %{_bindir}/mysql2arrow pgsql-mysql2arrow %{__pkgbindir}/mysql2arrow %{PGSQL_PKGVER}0
+
+%postun mysql2arrow
+if [ "$1" -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove pgsql-mysql2arrow %{__pkgbindir}/mysql2arrow
 fi
 
 %post test
@@ -94,6 +112,9 @@ fi
 %if "%{PGSQL_PKGVER}" != "96" && "%{PGSQL_PKGVER}" != "10"
 %{__pkglibdir}/bitcode/pg_strom*
 %endif
+
+%files mysql2arrow
+%{__pkgbindir}/mysql2arrow
 
 %files test
 %{__pkgbindir}/dbgen-ssbm
