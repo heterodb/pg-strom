@@ -91,8 +91,7 @@ PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                   -I $(shell $(PG_CONFIG) --includedir) \
                   -I $(shell $(PG_CONFIG) --includedir-server) \
                   -L $(shell $(PG_CONFIG) --libdir) \
-                  $(shell $(PG_CONFIG) --ldflags) \
-                  -lpq -lpgcommon -lpgport
+                  $(shell $(PG_CONFIG) --ldflags)
 
 MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
 MYSQL2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
@@ -108,7 +107,7 @@ MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                      -I $(STROM_BUILD_ROOT)/utils \
                      -I $(shell $(PG_CONFIG) --includedir-server) \
                      $(shell pkgconf mysqlclient --cflags) \
-                     $(shell pkgconf mysqlclient --libs) \
+                     $(shell pkgconf mysqlclient --libs-only-L) \
                      -Wl,-rpath,$(shell pkgconf mysqlclient --libs-only-L)
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
@@ -305,13 +304,16 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 # Build utilities
 #
 $(GPUINFO): $(GPUINFO_DEPEND)
-	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
+	$(CC) $(GPUINFO_CFLAGS) \
+              $(GPUINFO_SOURCE)  -o $@ -lcuda
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
-	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@
+	$(CC) $(PG2ARROW_CFLAGS) \
+              $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
 
 $(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
-	$(CC) $(MYSQL2ARROW_CFLAGS) $(MYSQL2ARROW_SOURCE) -o $@
+	$(CC) $(MYSQL2ARROW_CFLAGS) \
+              $(MYSQL2ARROW_SOURCE) -o $@ -lmysqlclient
 
 mysql2arrow: $(MYSQL2ARROW)
 
