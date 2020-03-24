@@ -69,13 +69,12 @@ MAXREGCOUNT := 128
 __STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
-UTILS_RPATH := -Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)
-
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
 GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
                   $(STROM_BUILD_ROOT)/src/nvme_strom.h
-GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) $(UTILS_RPATH)
+GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) \
+                 $(shell $(PG_CONFIG) --ldflags)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
 PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
@@ -87,12 +86,13 @@ PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
                   $(STROM_BUILD_ROOT)/src/arrow_defs.h \
                   $(STROM_BUILD_ROOT)/src/arrow_ipc.h
 PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
-			-I $(STROM_BUILD_ROOT)/src \
-			-I $(STROM_BUILD_ROOT)/utils \
-			-I $(shell $(PG_CONFIG) --includedir) \
-			-I $(shell $(PG_CONFIG) --includedir-server) \
-			-L $(shell $(PG_CONFIG) --libdir) \
-			$(UTILS_RPATH)
+                  -I $(STROM_BUILD_ROOT)/src \
+                  -I $(STROM_BUILD_ROOT)/utils \
+                  -I $(shell $(PG_CONFIG) --includedir) \
+                  -I $(shell $(PG_CONFIG) --includedir-server) \
+                  -L $(shell $(PG_CONFIG) --libdir) \
+                  $(shell $(PG_CONFIG) --ldflags) \
+                  -lpq -lpgcommon -lpgport
 
 MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
 MYSQL2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
@@ -106,10 +106,10 @@ MYSQL2ARROW_DEPEND = $(MYSQL2ARROW_SOURCE) \
 MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                      -I $(STROM_BUILD_ROOT)/src \
                      -I $(STROM_BUILD_ROOT)/utils \
-                     -I $(shell $(PG_CONFIG) --includedir) \
                      -I $(shell $(PG_CONFIG) --includedir-server) \
-                     -L /usr/lib64/mysql -Wl,-rpath,/usr/lib64/mysql
-
+                     $(shell pkgconf mysqlclient --cflags) \
+                     $(shell pkgconf mysqlclient --libs) \
+                     -Wl,-rpath,$(shell pkgconf mysqlclient --libs-only-L)
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -119,7 +119,7 @@ SSBM_DBGEN_DISTS_DSS = $(STROM_BUILD_ROOT)/utils/ssbm/dists.dss.h
 SSBM_DBGEN_CFLAGS = -DDBNAME=\"dss\" -DLINUX -DDB2 -DSSBM -DTANDEM \
                     -DSTATIC_DISTS=1 \
                     -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/ssbm \
-                    $(UTILS_RPATH)
+                    $(shell $(PG_CONFIG) --ldflags)
 __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-21.sql ssbm-22.sql ssbm-23.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
@@ -138,7 +138,7 @@ __DOC_FILES = index.md install.md partition.md \
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	          src sql utils test man
+	          src sql utils python test man
 ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
@@ -308,12 +308,15 @@ $(GPUINFO): $(GPUINFO_DEPEND)
 	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
-	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
+	$(CC) $(PG2ARROW_CFLAGS) $(PG2ARROW_SOURCE) -o $@
 
 $(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
-	$(CC) $(MYSQL2ARROW_CFLAGS) $(MYSQL2ARROW_SOURCE) -o $@ -lmysqlclient
+	$(CC) $(MYSQL2ARROW_CFLAGS) $(MYSQL2ARROW_SOURCE) -o $@
 
 mysql2arrow: $(MYSQL2ARROW)
+
+mysql2arrow-install: $(MYSQL2ARROW)
+	$(INSTALL) -m 0755 $(MYSQL2ARROW) $(shell $(PG_CONFIG) --bindir)
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm
