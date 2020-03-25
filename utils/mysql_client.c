@@ -377,7 +377,7 @@ __put_time_value_generic(SQLfield *column, const char *addr, int sz,
 {
 	size_t	row_index = column->nitems++;
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(int32));
+		__put_inline_null_value(column, row_index, arrow_sz);
 	else
 	{
 		int		h, m, s, frac = 0;
@@ -470,7 +470,7 @@ __put_timestamp_value_generic(SQLfield *column, const char *addr, int sz,
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(int32));
+		__put_inline_null_value(column, row_index, arrow_sz);
 	else
 	{
 		int		year, mon, day, hour, min, sec, frac = 0;
