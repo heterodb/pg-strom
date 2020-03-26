@@ -2995,7 +2995,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 			if (depth == istate->depth)
 			{
-				Form_pg_attribute	attr;
+				const FormData_pg_attribute *attr;
 
 				if (resno > 0)
 					attr = tupleDescAttr(inner_tupdesc, resno-1);
@@ -6356,8 +6356,8 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 		slot = ExecProcNode(ps);
 		if (TupIsNull(slot))
 			break;
-		if (slot_getsysattr(slot, SelfItemPointerAttributeNumber,
-							&datum, &isnull) && !isnull)
+		datum = slot_getsysattr(slot, SelfItemPointerAttributeNumber, &isnull);
+		if (!isnull)
 			t_self = (ItemPointer)datum;
 
 		if (bms_is_empty(istate->preload_flatten_attrs))

@@ -252,6 +252,24 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #endif	/* < PG12 */
 
 /*
+ * PG12 changed slot_getsysattr() API. If slot cannot have system attribute,
+ * it raises an error, so caller should ensure that slot type has system
+ * attribute.
+ */
+#if PG_VERSION_NUM < 120000
+static inline Datum
+__slot_getsysattr(TupleTableSlot *slot, int attnum, bool *isnull)
+{
+	Datum	value;
+
+	if (slot_getsysattr(slot, attnum, &value, isnull))
+		return value;
+	elog(ERROR, "minimal or virtual tuple has no system attribute");
+}
+#define slot_getsysattr(a,b,c)		__slot_getsysattr((a),(b),(c))
+#endif	/* < PG12 */
+
+/*
  * PG12 added 'pathkey' argument of create_append_path().
  * It shall be ignored on the older versions.
  */

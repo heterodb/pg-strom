@@ -930,11 +930,30 @@ shmemContextIsEmpty(MemoryContext __context)
 
 /*
  * shmemContextStatsPrint
+ *
+ * NOTE: PG11 changed MemoryContextMethods->stat API
  */
+#if PG_VERSION_NUM < 110000
+typedef void (*MemoryStatsPrintFunc) (MemoryContext context,
+									  void *passthru,
+									  const char *stats_string);
 static void
-shmemContextStatsPrint(MemoryContext __context,
-					   MemoryStatsPrintFunc printfunc, void *passthru,
-					   MemoryContextCounters *totals)
+MemoryStatsPrintfStderr(MemoryContext context,
+						void *passthru,
+						const char *stats_string)
+{
+	int		i, level = *((int *)passthru);
+
+	for (i=0; i < level; i++)
+		fputc(' ', stderr);
+	fputs(stats_string, stderr);
+}
+#endif
+
+static void
+__shmemContextStatsPrint(MemoryContext __context,
+						 MemoryStatsPrintFunc printfunc, void *passthru,
+						 MemoryContextCounters *totals)
 {
 	shmBufferContext *context = (shmBufferContext *) __context;
 	dlist_iter	iter;
@@ -998,6 +1017,26 @@ shmemContextStatsPrint(MemoryContext __context,
 		totals->freespace += free_space;
 	}
 }
+
+#if PG_VERSION_NUM < 110000
+static void
+shmemContextStatsPrint(MemoryContext __context, int level, bool print,
+					   MemoryContextCounters *totals)
+{
+	__shmemContextStatsPrint(__context,
+							 print ? MemoryStatsPrintfStderr : NULL,
+							 &level,
+							 totals);
+}
+#else	/* PG10 or older */
+static void
+shmemContextStatsPrint(MemoryContext __context,
+					   MemoryStatsPrintFunc printfunc, void *passthru,
+					   MemoryContextCounters *totals)
+{
+	__shmemContextStatsPrint(__context, printfunc, passthru, totals);
+}
+#endif	/* PG11 or newer */
 
 #ifdef MEMORY_CONTEXT_CHECKING
 /*
