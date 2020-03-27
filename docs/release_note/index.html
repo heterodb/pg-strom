@@ -136,7 +136,7 @@
     <a class="current" href="./">Release Note</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#pg-strom-v22-release">PG-Strom v2.2 Release</a></li>
+    <li class="toctree-l2"><a href="#pg-strom-v23-release">PG-Strom v2.3 Release</a></li>
     
         <ul>
         
@@ -145,6 +145,23 @@
             <li><a class="toctree-l3" href="#prerequisites">Prerequisites</a></li>
         
             <li><a class="toctree-l3" href="#new-features">New Features</a></li>
+        
+            <li><a class="toctree-l3" href="#significant-bug-fixes">Significant bug fixes</a></li>
+        
+            <li><a class="toctree-l3" href="#deprecated-features">Deprecated Features</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom-v22-release">PG-Strom v2.2 Release</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#overview_1">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#prerequisites_1">Prerequisites</a></li>
+        
+            <li><a class="toctree-l3" href="#new-features_1">New Features</a></li>
         
             <li><a class="toctree-l3" href="#features-to-be-deprecated">Features to be deprecated</a></li>
         
@@ -157,11 +174,11 @@
     
         <ul>
         
-            <li><a class="toctree-l3" href="#overview_1">Overview</a></li>
+            <li><a class="toctree-l3" href="#overview_2">Overview</a></li>
         
-            <li><a class="toctree-l3" href="#prerequisites_1">Prerequisites</a></li>
+            <li><a class="toctree-l3" href="#prerequisites_2">Prerequisites</a></li>
         
-            <li><a class="toctree-l3" href="#new-features_1">New Features</a></li>
+            <li><a class="toctree-l3" href="#new-features_2">New Features</a></li>
         
             <li><a class="toctree-l3" href="#dropped-features_1">Dropped features</a></li>
         
@@ -203,10 +220,96 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="pg-strom-v22-release">PG-Strom v2.2 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
+                <h1 id="pg-strom-v23-release">PG-Strom v2.3 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
 <h2 id="overview">Overview</h2>
+<p>Major changes in PG-Strom v2.3 includes:
+- GpuJoin supports parallel construction of inner buffer
+- Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.
+- pg2arrow command supports 'append' mode.
+- mysql2arrow command was added.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v10, v11, v12</li>
+<li>CUDA Toolkit 10.1 or later</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+</ul>
+<h2 id="new-features">New Features</h2>
+<ul>
+<li>GpuJoin supports parallel construction of inner buffer<ul>
+<li>The older version construct inner buffer of GpuJoin by the backend process only. This restriction leads a problem; parallel scan of partitioned table delays extremely.</li>
+<li>This version allows both of the backend and worker processes to construct inner buffer. In case when we scan a partitioned table, any processes that is assigned to a particular child table can start GpuJoin operations immediately.</li>
+</ul>
+</li>
+<li>Refactoring of the partition-wise asymmetric GpuJoin<ul>
+<li>By the refactoring of the partition-wise asymmetric GpuJoin, optimizer becomes to prefer multi-level GpuJoin in case when it offers cheaper execution cost.</li>
+</ul>
+</li>
+<li>Arrow_Fdw becomes writable; INSERT/TRUNCATE supported<ul>
+<li>Arrow_Fdw foreign table allows bulk-loading by <code>INSERT</code> and data elimination by <code>pgstrom.arrow_fdw_truncate</code>.</li>
+</ul>
+</li>
+<li>pg2arrow command supports 'append' mode.<ul>
+<li>We added <code>--append</code> option for <code>pg2arrow</code> command. As literal, it appends query results on existing Apache Arrow file.</li>
+<li>Also, <code>-t table</code> option was added as an alias of <code>SELECT * FROM table</code>.</li>
+</ul>
+</li>
+<li>mysql2arrow command was added.<ul>
+<li>We added <code>mysql2arrow</code> command that connects to MySQL server, not PostgreSQL, and write out SQL query results as Apache Arrow files.</li>
+<li>It has equivalent functionality to <code>pg2arrow</code> except for enum data type. <code>mysql2arrow</code> saves enum values as flat Utf8 values without DictionaryBatch chunks.</li>
+</ul>
+</li>
+<li>Regression test was added<ul>
+<li>Several test cases were added according to the PostgreSQL regression test framework.</li>
+</ul>
+</li>
+</ul>
+<h2 id="significant-bug-fixes">Significant bug fixes</h2>
+<ul>
+<li>Revised cache invalidation logic for GPU device functions / types<ul>
+<li>The older version had invalidated all the metadata cache entries of GPU device functions / type on execution of ALTER command. It was revised to invalidate the entries that are actually updated.</li>
+</ul>
+</li>
+<li>Revised extreme performance degradation if GROUP BY has same grouping key twice or even number times.<ul>
+<li>GpuPreAgg combined hash values of grouping key of GROUP BY using XOR. So, if case when same column appeared even number time, it always leads 0 for hash-index problematically. Now we add a randomization for better hash distribution.</li>
+</ul>
+</li>
+<li>Potential infinite loop on GpuScan<ul>
+<li>By uninitialized values, GpuScan potentially goes to infinite loop when SSD2GPU Direct SQL is available.</li>
+</ul>
+</li>
+<li>Potential GPU kernel crash on GpuJoin<ul>
+<li>By uninitialized values, GpuJoin potentially makes GPU kernel crash when 3 or more tables are joined.</li>
+</ul>
+</li>
+</ul>
+<h2 id="deprecated-features">Deprecated Features</h2>
+<ul>
+<li>PostgreSQL v9.6 Support<ul>
+<li>CustomScan API in PostgreSQL v9.6 lacks a few APIs to handle dynamic shared memory (DSM). It has been a problem to handle a common code for v10 or later. To avoid the problem, we dropped PostgreSQL v9.6 support in this version.</li>
+</ul>
+</li>
+<li>PL/CUDA<ul>
+<li>According to the usecase analytics, users prefer familiar programming language environment like Python, rather than own special environment.</li>
+<li>A combination of Arrow_Fdw's GPU export functionality and CuPy invocation at PL/Python is a successor of PL/CUDA, for in-database machine-learning / statistical analytics.</li>
+</ul>
+</li>
+<li>Gstore_Fdw<ul>
+<li>This feature is replaced by the writable Arrow_Fdw and its GPU export functionality.</li>
+</ul>
+</li>
+<li>Largeobject export to/import from GPU<ul>
+<li>According to the usecase analytics, we determined this feature is not needed.</li>
+</ul>
+</li>
+</ul>
+<h1 id="pg-strom-v22-release">PG-Strom v2.2 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
+
+<h2 id="overview_1">Overview</h2>
 <p>Major enhancement in PG-Strom v2.2 includes:</p>
 <ul>
 <li>Table partitioning support</li>
@@ -216,7 +319,7 @@
 <li>GpuSort support on GPU memory store (Gstore_Fdw)</li>
 <li>NVME-oF support (Experimental)</li>
 </ul>
-<h2 id="prerequisites">Prerequisites</h2>
+<h2 id="prerequisites_1">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v9.6, v10, v11</li>
 <li>CUDA Toolkit 10.1</li>
@@ -224,7 +327,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features">New Features</h2>
+<h2 id="new-features_1">New Features</h2>
 <ul>
 <li>Table partitioning support<ul>
 <li>If multi-GPUs configuration, an optimal GPU shall be chosen according to the physical distance between GPU and child tables that construct a partition. If PG-Strom cannot identify the distance from PCIe-bus topology, like NVME-oF configuration, DBA can configure the relation of GPU and NVME-SSD using <code>pg_strom.nvme_distance_map</code>.</li>
@@ -291,7 +394,7 @@
 <h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-<h2 id="overview_1">Overview</h2>
+<h2 id="overview_2">Overview</h2>
 <p>Major enhancement in PG-Strom v2.0 includes:</p>
 <ul>
 <li>Overall redesign of the internal infrastructure to manage GPU and stabilization</li>
@@ -303,7 +406,7 @@
 <li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
 </ul>
 <p>You can download the summary of new features from: <a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
-<h2 id="prerequisites_1">Prerequisites</h2>
+<h2 id="prerequisites_2">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
 <li>CUDA Toolkit 9.1</li>
@@ -311,7 +414,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features_1">New Features</h2>
+<h2 id="new-features_2">New Features</h2>
 <ul>
 <li>
 <p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
