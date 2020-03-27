@@ -169,11 +169,15 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 		elog(ERROR, "Sysfs '%s' has unexpected value", path);
 
 	snprintf(path, sizeof(path), "%s/%s/serial", dirname, nvme_name);
-	temp = sysfs_read_line(path, true);
+	temp = sysfs_read_line(path, false);
+	if (!temp)
+		temp = "NVME serial unknown";
 	strncpy(nvmeAttr->nvme_serial, temp, sizeof(nvmeAttr->nvme_serial));
 
 	snprintf(path, sizeof(path), "%s/%s/model", dirname, nvme_name);
-	temp = sysfs_read_line(path, true);
+	temp = sysfs_read_line(path, false);
+	if (!temp)
+		temp = "NVME model unknown";
 	strncpy(nvmeAttr->nvme_model, temp, sizeof(nvmeAttr->nvme_model));
 
 	if (pcie_nvme)
