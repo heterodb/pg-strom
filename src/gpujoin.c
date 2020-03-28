@@ -6347,19 +6347,12 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 		int			j, k;
 		bool		is_null_keys;
 		size_t		usage;
-		ItemPointer	t_self = NULL;
-		Datum		datum;
-		bool		isnull;
 
 		CHECK_FOR_INTERRUPTS();
 
 		slot = ExecProcNode(ps);
 		if (TupIsNull(slot))
 			break;
-		datum = slot_getsysattr(slot, SelfItemPointerAttributeNumber, &isnull);
-		if (!isnull)
-			t_self = (ItemPointer)datum;
-
 		if (bms_is_empty(istate->preload_flatten_attrs))
 			htup = ExecFetchSlotHeapTuple(slot, false, false);
 		else
@@ -6409,8 +6402,7 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 		entry->hash = hash;
 		//FIXME: t_len is 16bit. It's sufficient for most cases, but...
 		entry->titem.t_len = htup->t_len;
-		if (t_self)
-			memcpy(&entry->titem.t_self, t_self, sizeof(ItemPointerData));
+		memcpy(&entry->titem.t_self, &htup->t_self, sizeof(ItemPointerData));
 		memcpy(&entry->titem.htup, htup->t_data, htup->t_len);
 		if (istate->hash_inner_keys == NIL)
 			usage = offsetof(kern_tupitem, htup) + htup->t_len;
