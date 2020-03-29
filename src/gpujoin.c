@@ -6337,7 +6337,8 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 	int				depth = istate->depth;
 	PlanState	   *ps = istate->state;
 	TupleTableSlot *slot = ps->ps_ResultTupleSlot;
-	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
+	TupleDesc		tupdesc		__attribute__((unused))
+		= slot->tts_tupleDescriptor;
 
 	for (;;)
 	{

@@ -6,9 +6,9 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License. See the LICENSE file.
  */
+#include <mysql.h>
 #include "sql2arrow.h"
 #include <limits.h>
-#include <mysql/mysql.h>
 
 /* static variables */
 static char	   *mysql_timezone = NULL;
@@ -886,12 +886,14 @@ mysql_setup_attribute(MYSQL *conn,
 			Elog("MySQL SET data type is not supported");
 		case MYSQL_TYPE_BIT:
 			Elog("MySQL Bit data type is not supported");
+#if MYSQL_VERSION_ID >= 50700
 		case MYSQL_TYPE_JSON:
 			Elog("MySQL JSON data type is not supported");
+#endif /* >= MySQL 5.7.00 */
 		case MYSQL_TYPE_GEOMETRY:
 			Elog("MySQL Geometry data type is not supported");
 		default:
-			Elog("unknown MySQL data type: %d", (int)my_field->type);
+			Elog("unsupported MySQL data type: %d", (int)my_field->type);
 	}
 	return -1;
 }

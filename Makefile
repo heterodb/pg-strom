@@ -68,6 +68,7 @@ MAXREGCOUNT := 128
 __STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
 ifdef WITH_MYSQL2ARROW
 __STROM_UTILS += mysql2arrow
+MYSQL_CONFIG = mysql_config
 endif
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
@@ -108,9 +109,9 @@ MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                      -I $(STROM_BUILD_ROOT)/src \
                      -I $(STROM_BUILD_ROOT)/utils \
                      -I $(shell $(PG_CONFIG) --includedir-server) \
-                     $(shell pkgconf mysqlclient --cflags) \
-                     $(shell pkgconf mysqlclient --libs-only-L) \
-                     -Wl,-rpath,$(shell pkgconf mysqlclient --libs-only-L)
+                     $(shell $(MYSQL_CONFIG) --cflags) \
+                     $(shell $(MYSQL_CONFIG) --libs) \
+                     -Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -314,8 +315,7 @@ $(PG2ARROW): $(PG2ARROW_DEPEND)
               $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
 
 $(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
-	$(CC) $(MYSQL2ARROW_CFLAGS) \
-              $(MYSQL2ARROW_SOURCE) -o $@ -lmysqlclient
+	$(CC) $(MYSQL2ARROW_SOURCE) -o $@ $(MYSQL2ARROW_CFLAGS)
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm

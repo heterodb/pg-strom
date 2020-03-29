@@ -1969,7 +1969,7 @@ ArrowPlanForeignModify(PlannerInfo *root,
 {
 	RangeTblEntry  *rte = planner_rt_fetch(resultRelation, root);
 	ForeignTable   *ft = GetForeignTable(rte->relid);
-	List		   *filesList;
+	List		   *filesList	__attribute__((unused));
 	bool			writable;
 
 	if (plan->operation != CMD_INSERT)
