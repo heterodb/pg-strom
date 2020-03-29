@@ -1131,3 +1131,77 @@ repalloc(void *old, Size sz)
 		Elog("out of memory");
 	return ptr;
 }
+
+/*
+ * PG12 or later replaces XXprintf by pg_XXprintf
+ */
+#ifdef vprintf
+#undef vprintf
+#endif
+#ifdef vfprintf
+#undef vfprintf
+#endif
+#ifdef vsprintf
+#undef vsprintf
+#endif
+#ifdef vsnprintf
+#undef vsnprintf
+#endif
+
+int
+pg_printf(const char *fmt,...)
+{
+	va_list	args;
+	int		r;
+
+	va_start(args, fmt);
+	r = vprintf(fmt, args);
+	va_end(args);
+
+	return r;
+}
+
+int
+pg_fprintf(FILE *stream, const char *fmt,...)
+{
+	va_list args;
+	int		r;
+
+	va_start(args, fmt);
+	r = vfprintf(stream, fmt, args);
+    va_end(args);
+
+	return r;
+}
+
+int
+pg_sprintf(char *str, const char *fmt,...)
+{
+	va_list	args;
+	int		r;
+
+	va_start(args, fmt);
+	r = vsprintf(str, fmt, args);
+	va_end(args);
+
+	return r;
+}
+
+int
+pg_snprintf(char *str, size_t count, const char *fmt,...)
+{
+	va_list	args;
+	int		r;
+
+	va_start(args, fmt);
+	r = vsnprintf(str, count, fmt, args);
+	va_end(args);
+
+	return r;
+}
+
+int
+pg_vsnprintf(char *str, size_t count, const char *fmt, va_list args)
+{
+	return vsnprintf(str, count, fmt, args);
+}
