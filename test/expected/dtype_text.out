@@ -409,11 +409,11 @@ SELECT id, length(tc1) v1,
   INTO test32g
   FROM rt_text
  WHERE id > 0;
-                                                                                                                 QUERY PLAN                                                                                                                 
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                             QUERY PLAN                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
-   Output: id, (length(tc1)), concat(tc1, '_foo'), concat(("substring"(tc1, 1, 10)), '_bar'), concat(("substring"(tc1, 1, 8)), '--hoge--', ("substring"(tc1, 8, 16))), concat(("substring"(tc1, 1, 8)), ("substring"(tc2, 1, 8)), vc1, vc2)
-   GPU Projection: rt_text.id, length(rt_text.tc1), rt_text.tc1, "substring"(rt_text.tc1, 1, 10), "substring"(rt_text.tc1, 1, 8), "substring"(rt_text.tc1, 8, 16), "substring"(rt_text.tc2, 1, 8), rt_text.vc1, rt_text.vc2
+   Output: id, (length(tc1)), concat(tc1, '_foo'), concat(("substring"(tc1, 1, 10)), '_bar'), concat(("substring"(tc1, 1, 8)), '--hoge--', ("substring"(tc1, 8, 16))), (concat("substring"(tc1, 1, 8), "substring"(tc2, 1, 8), vc1, vc2))
+   GPU Projection: rt_text.id, length(rt_text.tc1), rt_text.tc1, "substring"(rt_text.tc1, 1, 10), "substring"(rt_text.tc1, 1, 8), "substring"(rt_text.tc1, 8, 16), concat("substring"(rt_text.tc1, 1, 8), "substring"(rt_text.tc2, 1, 8), rt_text.vc1, rt_text.vc2)
    GPU Filter: (rt_text.id > 0)
 (4 rows)
 

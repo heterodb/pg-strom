@@ -53,11 +53,11 @@ SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8
   INTO test01g
   FROM rt_data
  WHERE c BETWEEN -80.0 AND 80.0;
-                                                       QUERY PLAN                                                        
--------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
-   Output: id, abs(e), (abs(f)), (abs(a)), (abs(x)), (abs(y)), (abs(z))
-   GPU Projection: rt_data.id, rt_data.e, abs(rt_data.f), abs(rt_data.a), abs(rt_data.x), abs(rt_data.y), abs(rt_data.z)
+   Output: id, (abs(e)), (abs(f)), (abs(a)), (abs(x)), (abs(y)), (abs(z))
+   GPU Projection: rt_data.id, abs(rt_data.e), abs(rt_data.f), abs(rt_data.a), abs(rt_data.x), abs(rt_data.y), abs(rt_data.z)
    GPU Filter: ((rt_data.c >= '-80'::double precision) AND (rt_data.c <= '80'::double precision))
 (4 rows)
 
