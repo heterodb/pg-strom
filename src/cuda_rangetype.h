@@ -58,8 +58,6 @@
 	pg_##NAME##_datum_ref(kern_context *kcxt, void *addr)			\
 	{																\
 		pg_##NAME##_t result;										\
-		char		vl_buf[MAXALIGN(VARHDRSZ + sizeof(cl_uint) +	\
-									2 * sizeof(BASE) + 1)];			\
 		char		flags;											\
 		char	   *pos;											\
 		cl_uint		type_oid;										\
@@ -110,7 +108,6 @@
 		result.value.u.infinite = ((flags & RANGE_UB_INF) != 0);	\
 		result.value.u.inclusive = ((flags & RANGE_UB_INC) != 0);	\
 		result.value.u.lower = false;								\
-																	\
 		return result;												\
 	}																\
 	STATIC_INLINE(void)												\
@@ -135,11 +132,11 @@
 	STATIC_FUNCTION(cl_int)											\
 	pg_datum_store(kern_context *kcxt,								\
 				   pg_##NAME##_t datum,								\
-				   Datum &value,									\
-                   cl_bool &isnull)									\
+				   cl_char &dclass,									\
+                   Datum &value)									\
 	{																\
 		char			flags;										\
-		struct {													\
+		struct range_raw {											\
 			cl_uint		vl_len_;									\
 			cl_uint		rangetypid;									\
 			BASE		l_val;										\
@@ -147,13 +144,16 @@
 			cl_char		flags;										\
 		} *res;														\
 																	\
-		isnull = datum.isnull;										\
 		if (datum.isnull)											\
+		{															\
+			dclass = DATUM_CLASS__NULL;								\
 			return 0;												\
-		res = kern_context_alloc(kcxt, sizeof(*res));				\
+		}															\
+		res = (struct range_raw *)									\
+			kern_context_alloc(kcxt, sizeof(*res));					\
 		if (!res)													\
 		{															\
-			isnull = true;											\
+			dclass = DATUM_CLASS__NULL;								\
 			STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,			\
 							   "out of memory");					\
 			return 0;												\
@@ -168,6 +168,7 @@
 		res->u_val = datum.value.u.val;								\
 		res->flags = flags;											\
 		SET_VARSIZE(res, sizeof(*res));								\
+		dclass = DATUM_CLASS__NORMAL;								\
 		value  = PointerGetDatum(res);								\
 		return sizeof(*res);										\
 	}																\
@@ -195,7 +196,7 @@
 			Datum	l_val;											\
 			Datum	u_val;											\
 			char	flags;											\
-		} temp														\
+		} temp;														\
 																	\
 		if (datum.isnull)											\
 			return 0;												\
@@ -214,32 +215,38 @@
 			temp.u_val = 0;											\
 		return pg_hash_any((unsigned char *)&temp,					\
 						   2*sizeof(Datum)+sizeof(char));			\
-	}
+	}																\
+	STROMCL_UNSUPPORTED_ARROW_TEMPLATE(NAME)
 
 #ifndef PG_INT4RANGE_TYPE_DEFINED
 #define PG_INT4RANGE_TYPE_DEFINED
+#define PG_INT4RANGEOID		3904
 PG_RANGETYPE_TEMPLATE(int4range,cl_int,PG_INT4RANGEOID,(cl_long))
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifndef PG_INT8RANGE_TYPE_DEFINED
 #define PG_INT8RANGE_TYPE_DEFINED
+#define PG_INT8RANGEOID		3926
 PG_RANGETYPE_TEMPLATE(int8range,cl_long,PG_INT8RANGEOID,)
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifdef CUDA_TIMELIB_H
 #ifndef PG_TSRANGE_TYPE_DEFINED
 #define PG_TSRANGE_TYPE_DEFINED
+#define PG_TSRANGEOID		3908
 PG_RANGETYPE_TEMPLATE(tsrange,Timestamp,PG_TSRANGEOID,)
 #endif	/* PG_TSRANGE_TYPE_DEFINED */
 
 #ifndef PG_TSTZRANGE_TYPE_DEFINED
 #define PG_TSTZRANGE_TYPE_DEFINED
+#define PG_TSTZRANGEOID		3910
 PG_RANGETYPE_TEMPLATE(tstzrange,TimestampTz,PG_TSTZRANGEOID,)
 #endif	/* PG_TSTZRANGE_TYPE_DEFINED */
 
 #ifndef PG_DATERANGE_TYPE_DEFINED
 #define PG_DATERANGE_TYPE_DEFINED
-	PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
+#define PG_DATERANGEOID		3912
+PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 #endif	/* PG_DATERANGE_TYPE_DEFINED */
 #endif	/* CUDA_TIMELIB_H */
 
@@ -383,7 +390,7 @@ pgfn_tsrange_upper(kern_context *kcxt, pg_tsrange_t arg1)
 STATIC_FUNCTION(pg_timestamptz_t)
 pgfn_tstzrange_upper(kern_context *kcxt, pg_tstzrange_t arg1)
 {
-	pg_timestamp_t	result;
+	pg_timestamptz_t	result;
 
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
