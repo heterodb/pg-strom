@@ -372,6 +372,10 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_rangetype.h\"\n");
+	/* cuda_postgis.h */
+	if ((extra_flags & DEVKERNEL_NEEDS_POSTGIS) != 0)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_postgis.h\"\n");
 	/* cuda_primitive.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -487,6 +491,8 @@ link_cuda_libraries(char *ptx_image,
 			{ "cuda_timelib",   DEVKERNEL_NEEDS_TIMELIB },
 			{ "cuda_misclib",   DEVKERNEL_NEEDS_MISCLIB },
 			{ "cuda_jsonlib",   DEVKERNEL_NEEDS_JSONLIB },
+			{ "cuda_rangetype",	DEVKERNEL_NEEDS_RANGETYPE },
+			{ "cuda_postgis",	DEVKERNEL_NEEDS_POSTGIS },
 			{ "cuda_gpuscan",   DEVKERNEL_NEEDS_GPUSCAN },
 			{ "cuda_gpujoin",   DEVKERNEL_NEEDS_GPUJOIN },
 			{ "cuda_gpupreagg", DEVKERNEL_NEEDS_GPUPREAGG },

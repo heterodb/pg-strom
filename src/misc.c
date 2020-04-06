@@ -1154,22 +1154,16 @@ simple_make_range(TypeCacheEntry *typcache, Datum x_val, Datum y_val)
 	x.val = x_val;
 	x.infinite = generate_null(0.5);
 	x.inclusive = generate_null(25.0);
+	x.lower = true;
 
 	memset(&y, 0, sizeof(RangeBound));
 	y.val = y_val;
 	y.infinite = generate_null(0.5);
 	y.inclusive = generate_null(25.0);
+	y.lower = false;
 
-	if (x.infinite || y.infinite || x.val <= y.val)
-	{
-		x.lower = true;
-		range = make_range(typcache, &x, &y, false);
-	}
-	else
-	{
-		y.lower = true;
-		range = make_range(typcache, &y, &x, false);
-	}
+	range = make_range(typcache, &x, &y, false);
+
 	return PointerGetDatum(range);
 }
 
@@ -1190,8 +1184,8 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
-							 Int32GetDatum(x),
-							 Int32GetDatum(y));
+							 Int32GetDatum(Min(x,y)),
+							 Int32GetDatum(Max(x,y)));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
 
@@ -1214,8 +1208,8 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
-							 Int64GetDatum(x),
-							 Int64GetDatum(y));
+							 Int64GetDatum(Min(x,y)),
+							 Int64GetDatum(Max(x,y)));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
 
@@ -1262,8 +1256,8 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
-							 TimestampGetDatum(x),
-							 TimestampGetDatum(y));	
+							 TimestampGetDatum(Min(x,y)),
+							 TimestampGetDatum(Max(x,y)));	
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
 
@@ -1310,8 +1304,8 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
 	return simple_make_range(typcache,
-							 TimestampTzGetDatum(x),
-							 TimestampTzGetDatum(y));	
+							 TimestampTzGetDatum(Min(x,y)),
+							 TimestampTzGetDatum(Max(x,y)));	
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
 
@@ -1343,8 +1337,8 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
 	return simple_make_range(typcache,
-							 DateADTGetDatum(x),
-							 DateADTGetDatum(y));
+							 DateADTGetDatum(Min(x,y)),
+							 DateADTGetDatum(Max(x,y)));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
 

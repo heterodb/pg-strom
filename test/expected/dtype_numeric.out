@@ -51,11 +51,11 @@ SELECT id, a::numeric, b::numeric, c::numeric,
   INTO test01g
   FROM rt_numeric
  WHERE id > 0;
-                                                                                 QUERY PLAN                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                      QUERY PLAN                                                                                       
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_numeric_temp.rt_numeric
-   Output: id, ((a)::numeric), ((b)::numeric), ((c)::numeric), (d)::numeric, ((e)::numeric), ((f)::numeric)
-   GPU Projection: rt_numeric.id, (rt_numeric.a)::numeric, (rt_numeric.b)::numeric, (rt_numeric.c)::numeric, rt_numeric.d, (rt_numeric.e)::numeric, (rt_numeric.f)::numeric
+   Output: id, ((a)::numeric), ((b)::numeric), ((c)::numeric), ((d)::numeric), ((e)::numeric), ((f)::numeric)
+   GPU Projection: rt_numeric.id, (rt_numeric.a)::numeric, (rt_numeric.b)::numeric, (rt_numeric.c)::numeric, (rt_numeric.d)::numeric, (rt_numeric.e)::numeric, (rt_numeric.f)::numeric
    GPU Filter: (rt_numeric.id > 0)
 (4 rows)
 

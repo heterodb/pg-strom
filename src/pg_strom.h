@@ -45,6 +45,7 @@
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
@@ -57,6 +58,8 @@
 #include "catalog/pg_type.h"
 #if PG_VERSION_NUM < 110000
 #include "catalog/pg_type_fn.h"
+#else
+#include "catalog/pg_type_d.h"
 #endif
 #include "catalog/pg_user_mapping.h"
 #include "commands/dbcommands.h"
@@ -231,8 +234,6 @@
 #endif
 #include "cuda_common.h"
 #include "pg_compat.h"
-
-#define PGSTROM_SCHEMA_NAME		"pgstrom"
 
 #define RESTRACK_HASHSIZE		53
 #define CUDA_MODULES_HASHSIZE	25
@@ -482,7 +483,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_JSONLIB			0x00000800
 #define DEVKERNEL_NEEDS_MISCLIB			0x00001000
 #define DEVKERNEL_NEEDS_RANGETYPE		0x00002000
-
+#define DEVKERNEL_NEEDS_POSTGIS			0x00004000
 
 #define DEVKERNEL_BUILD_DEBUG_INFO		0x80000000
 
@@ -1425,7 +1426,9 @@ extern void		pgstrom_init_nvrtc(void);
 /*
  * float2.c
  */
-#define		FLOAT2OID		421
+#ifndef FLOAT2OID
+#define FLOAT2OID		421
+#endif
 
 /*
  * main.c
