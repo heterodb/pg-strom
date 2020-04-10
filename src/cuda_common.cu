@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "cuda_common.h"
+#include "cuda_postgis.h"
 
 /*
  * __compute_heaptuple_size
@@ -64,6 +65,10 @@ __compute_heaptuple_size(kern_context *kcxt,
 					break;
 				case DATUM_CLASS__COMPOSITE:
 					vl_len = pg_composite_datum_length(kcxt,datum);
+					datalen = TYPEALIGN(cmeta->attalign, datalen);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					vl_len = pg_geometry_datum_length(kcxt,datum);
 					datalen = TYPEALIGN(cmeta->attalign, datalen);
 					break;
 				default:
@@ -309,6 +314,13 @@ __form_kern_heaptuple(kern_context *kcxt,
 					vl_len = pg_composite_datum_write(kcxt,
 													  (char *)htup+curr,
 													  datum);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					while (padding-- > 0)
+						((char *)htup)[curr++] = '\0';
+					vl_len = pg_geometry_datum_write(kcxt,
+													 (char *)htup+curr,
+													 datum);
 					break;
 				default:
 					assert(dclass == DATUM_CLASS__NORMAL);
@@ -2015,4 +2027,75 @@ pg_composite_datum_write(kern_context *kcxt, char *dest, Datum datum)
 								  tup_values);
 	kcxt->vlpos = vlpos_saved;
 	return sz;
+}
+
+/* ================================================================
+ *
+ * PotsGIS Support Routines
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(cl_uint)
+pg_geometry_datum_length(kern_context *kcxt, Datum datum)
+{
+	pg_geometry_t *geom = (pg_geometry_t *)DatumGetPointer(datum);
+	size_t		sz = offsetof(GSERIALIZED, body.data);
+
+	/*
+	 * NOTE: We always use v1 format of GSERIALIZED, because v2 has
+	 * no functional differences right now, and v1 is shorter than
+	 * the v2 format, by 8 bytes for extra flags.
+	 */
+	if ((geom->flags & GEOM_FLAG__BBOX) != 0 && geom->bbox)
+		sz += geometry_bbox_size(geom->flags);
+	return sz + (sizeof(cl_uint) +	/* geometry type */
+				 sizeof(cl_uint) + 	/* nitems of top-level items */
+				 geom->rawsize);	/* payload of points/vertexes */
+}
+
+DEVICE_FUNCTION(cl_uint)
+pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum)
+{
+	pg_geometry_t *geom = (pg_geometry_t *)DatumGetPointer(datum);
+	GSERIALIZED	   *gs = (GSERIALIZED *)dest;
+	char		   *rawdata = gs->body.data;
+	cl_uchar		gflags = G1FLAG_READONLY;
+
+	/* extract SRID */
+	gs->body.srid[0] = (geom->srid & 0x001f0000) >> 16;
+	gs->body.srid[1] = (geom->srid & 0x0000ff00) >>  8;
+	gs->body.srid[2] = (geom->srid & 0x000000ff);
+
+	/* extract flags */
+	if ((geom->flags & GEOM_FLAG__Z) != 0)
+		gflags |= G1FLAG_Z;
+	if ((geom->flags & GEOM_FLAG__M) != 0)
+		gflags |= G1FLAG_M;
+	if ((geom->flags & GEOM_FLAG__BBOX) != 0 && geom->bbox)
+		gflags |= G1FLAG_BBOX;
+	if ((geom->flags & GEOM_FLAG__GEODETIC) != 0)
+		gflags |= G1FLAG_GEODETIC;
+	if ((geom->flags & GEOM_FLAG__SOLID) != 0)
+		gflags |= G1FLAG_SOLID;
+	gs->body.gflags = gflags;
+
+	if ((gflags & G1FLAG_BBOX) != 0)
+	{
+		cl_uint		sz = geometry_bbox_size(geom->flags);
+
+		memcpy(rawdata, geom->bbox, sz);
+		rawdata += sz;
+	}
+
+	/* type and nitems */
+	memcpy(rawdata, &geom->type, sizeof(cl_int));
+	rawdata += sizeof(cl_int);
+	memcpy(rawdata, &geom->nitems, sizeof(cl_uint));
+	rawdata += sizeof(cl_uint);
+
+	/* other payload */
+	memcpy(rawdata, geom->rawdata, geom->rawsize);
+	rawdata += geom->rawsize;
+
+	return (rawdata - dest);
 }

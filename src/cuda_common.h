@@ -1493,6 +1493,7 @@ typedef struct
 #define DATUM_CLASS__VARLENA	2	/* datum is pg_varlena_t reference */
 #define DATUM_CLASS__ARRAY		3	/* datum is pg_array_t reference */
 #define DATUM_CLASS__COMPOSITE	4	/* datum is pg_composite_t reference */
+#define DATUM_CLASS__GEOMETRY	5	/* datum is pg_geometry_t reference */
 
 /*
  * device functions in cuda_common.fatbin

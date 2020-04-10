@@ -876,6 +876,16 @@ vlbuf_estimate_jsonb(codegen_context *context,
 	return TOAST_TUPLE_THRESHOLD;
 }
 
+static int
+vlbuf_estimate__st_makepoint(codegen_context *context,
+							 devfunc_info *dfunc,
+							 Expr **args, int *vl_width)
+{
+	int		nargs = list_length(dfunc->func_args);
+
+	return sizeof(cl_double) * nargs;
+}
+
 /*
  * Catalog of functions supported by device code
  *
@@ -897,6 +907,7 @@ vlbuf_estimate_jsonb(codegen_context *context,
  * 'j' : this function needs cuda_jsonlib.h
  * 'm' : this function needs cuda_misclib.h
  * 'r' : this function needs cuda_rangetype.h
+ * 'g' : this function needs cuda_postgis.h
  *
  * class character:
  * 'r' : right operator that takes an argument (deprecated)
@@ -1941,6 +1952,17 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  4, "r/f:daterange_intersect" },
 	{ NULL, "daterange range_minus(daterange,daterange)",
 	  4, "r/f:daterange_minus" },
+
+	/*
+	 * PostGIS functions
+	 */
+	{ POSTGIS3, "geometry st_setsrid(geometry,int4)", 1, "g/f:st_setsrid" },
+	{ POSTGIS3, "geometry st_makepoint(float8,float8)",
+	  10, "g/f:st_makepoint2", vlbuf_estimate__st_makepoint },
+	{ POSTGIS3, "geometry st_makepoint(float8,float8,float8)",
+	  10, "g/f:st_makepoint3", vlbuf_estimate__st_makepoint },
+	{ POSTGIS3, "geometry st_makepoint(float8,float8,float8,float8)",
+	  10, "g/f:st_makepoint4", vlbuf_estimate__st_makepoint },
 };
 #undef PGSTROM
 #undef POSTGIS3
@@ -2013,6 +2035,9 @@ __construct_devfunc_info(HeapTuple protup,
 					break;
 				case 'r':
 					flags |= DEVKERNEL_NEEDS_RANGETYPE;
+					break;
+				case 'g':
+					flags |= DEVKERNEL_NEEDS_POSTGIS;
 					break;
 				default:
 					elog(NOTICE,
