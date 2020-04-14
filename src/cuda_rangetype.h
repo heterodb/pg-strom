@@ -50,7 +50,7 @@ PG_RANGETYPE_TEMPLATE(int4range,cl_int)
 #define PG_INT8RANGE_TYPE_DEFINED
 #define PG_INT8RANGEOID				3926
 PG_RANGETYPE_TEMPLATE(int8range,cl_long)
-#endif	/* PG_INT4RANGE_TYPE_DEFINED */
+#endif	/* PG_INT8RANGE_TYPE_DEFINED */
 
 #ifdef CUDA_TIMELIB_H
 #ifndef PG_TSRANGE_TYPE_DEFINED
@@ -77,109 +77,109 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT)
 #define PG_RANGETYPE_DECLARATION_TEMPLATE(ELEMENT,RANGE)		\
 	DEVICE_FUNCTION(pg_##ELEMENT##_t)							\
 	pgfn_##RANGE##_lower(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1);					\
+						 const pg_##RANGE##_t &arg1);			\
 	DEVICE_FUNCTION(pg_##ELEMENT##_t)							\
 	pgfn_##RANGE##_upper(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1);					\
+						 const pg_##RANGE##_t &arg1);			\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_isempty(kern_context *kcxt,					\
-						   pg_##RANGE##_t &arg1);				\
+						   const pg_##RANGE##_t &arg1);			\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_lower_inc(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1);				\
+							 const pg_##RANGE##_t &arg1);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_upper_inc(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1);				\
+							 const pg_##RANGE##_t &arg1);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_lower_inf(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1);				\
+							 const pg_##RANGE##_t &arg1);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_upper_inf(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1);				\
+							 const pg_##RANGE##_t &arg1);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_eq(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_ne(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_lt(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_le(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_gt(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_ge(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_INLINE(pg_int4_t)									\
 	pgfn_type_compare(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2);					\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2);				\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_overlaps(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2);				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_contains_elem(kern_context *kcxt,			\
-								 pg_##RANGE##_t &arg1,			\
-								 pg_##ELEMENT##_t &arg2);		\
+								 const pg_##RANGE##_t &arg1,	\
+								 const pg_##ELEMENT##_t &arg2);	\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_contains(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2);				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_elem_contained_by_##RANGE(kern_context *kcxt,			\
-								   pg_##ELEMENT##_t &arg1,		\
-								   pg_##RANGE##_t &arg2);		\
+								   const pg_##ELEMENT##_t &arg1,\
+								   const pg_##RANGE##_t &arg2);	\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_contained_by(kern_context *kcxt,				\
-								pg_##RANGE##_t &arg1,			\
-								pg_##RANGE##_t &arg2);			\
+								const pg_##RANGE##_t &arg1,		\
+								const pg_##RANGE##_t &arg2);	\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_adjacent(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2);				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_before(kern_context *kcxt,					\
-						  pg_##RANGE##_t &arg1,					\
-						  pg_##RANGE##_t &arg2);				\
+						  const pg_##RANGE##_t &arg1,			\
+						  const pg_##RANGE##_t &arg2);			\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_after(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2);					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2);			\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_overright(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1,				\
-							 pg_##RANGE##_t &arg2);				\
+							 const pg_##RANGE##_t &arg1,		\
+							 const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_overleft(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2);				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_union(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2);					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2);			\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_merge(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2);					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2);			\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_intersect(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1,				\
-							 pg_##RANGE##_t &arg2);				\
+							 const pg_##RANGE##_t &arg1,		\
+							 const pg_##RANGE##_t &arg2);		\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_minus(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2);
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2);
 
 PG_RANGETYPE_DECLARATION_TEMPLATE(int4,int4range)
 PG_RANGETYPE_DECLARATION_TEMPLATE(int8,int8range)

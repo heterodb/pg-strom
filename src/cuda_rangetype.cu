@@ -226,7 +226,7 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 #define __GENERIC_RANGE_LOWER(ELEMENT,RANGE)				\
 	DEVICE_FUNCTION(pg_##ELEMENT##_t)						\
 	pgfn_##RANGE##_lower(kern_context *kcxt,				\
-						 pg_##RANGE##_t &arg1)				\
+						 const pg_##RANGE##_t &arg1)		\
 	{														\
 		pg_##ELEMENT##_t result;							\
 															\
@@ -244,7 +244,7 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 #define __GENERIC_RANGE_UPPER(ELEMENT,RANGE)				\
 	DEVICE_FUNCTION(pg_##ELEMENT##_t)						\
 	pgfn_##RANGE##_upper(kern_context *kcxt,				\
-						 pg_##RANGE##_t &arg1)				\
+						 const pg_##RANGE##_t &arg1)		\
 	{														\
 		pg_##ELEMENT##_t result;							\
 															\
@@ -261,7 +261,7 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_isempty(kern_context *kcxt, R &arg1)
+__generic_range_isempty(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
 
@@ -273,7 +273,7 @@ __generic_range_isempty(kern_context *kcxt, R &arg1)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_lower_inc(kern_context *kcxt, R &arg1)
+__generic_range_lower_inc(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
 
@@ -285,7 +285,7 @@ __generic_range_lower_inc(kern_context *kcxt, R &arg1)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_upper_inc(kern_context *kcxt, R &arg1)
+__generic_range_upper_inc(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
 
@@ -297,7 +297,7 @@ __generic_range_upper_inc(kern_context *kcxt, R &arg1)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_lower_inf(kern_context *kcxt, R &arg1)
+__generic_range_lower_inf(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
 
@@ -309,7 +309,7 @@ __generic_range_lower_inf(kern_context *kcxt, R &arg1)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_upper_inf(kern_context *kcxt, R &arg1)
+__generic_range_upper_inf(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
 
@@ -321,7 +321,7 @@ __generic_range_upper_inf(kern_context *kcxt, R &arg1)
 
 template <typename RangeBound>
 STATIC_FUNCTION(int)
-__range_cmp_bound_values(RangeBound *b1, RangeBound *b2)
+__range_cmp_bound_values(const RangeBound *b1, const RangeBound *b2)
 {
 	if (b1->infinite && b2->infinite)
 	{
@@ -340,7 +340,7 @@ __range_cmp_bound_values(RangeBound *b1, RangeBound *b2)
 
 template <typename RangeBound>
 STATIC_FUNCTION(int)
-__range_cmp_bounds(RangeBound *b1, RangeBound *b2)
+__range_cmp_bounds(const RangeBound *b1, const RangeBound *b2)
 {
 	int		cmp = __range_cmp_bound_values(b1, b2);
 
@@ -363,7 +363,7 @@ __range_cmp_bounds(RangeBound *b1, RangeBound *b2)
 
 template <typename RangeType>
 STATIC_FUNCTION(int)
-__range_cmp(RangeType *r1, RangeType *r2)
+__range_cmp(const RangeType *r1, const RangeType *r2)
 {
 	int		cmp;
 
@@ -384,7 +384,8 @@ __range_cmp(RangeType *r1, RangeType *r2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_eq(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_eq(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -407,7 +408,8 @@ __generic_range_eq(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_ne(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_ne(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -430,7 +432,8 @@ __generic_range_ne(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_gt(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_gt(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -442,7 +445,8 @@ __generic_range_gt(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_ge(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_ge(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -454,7 +458,8 @@ __generic_range_ge(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_lt(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_lt(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -466,7 +471,8 @@ __generic_range_lt(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_le(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_le(kern_context *kcxt,
+				   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -478,7 +484,8 @@ __generic_range_le(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_int4_t)
-__generic_range_cmp(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_cmp(kern_context *kcxt,
+					const R &arg1, const R &arg2)
 {
 	pg_int4_t	result;
 
@@ -503,9 +510,10 @@ __range_overlaps_internal(RangeType *r1, RangeType *r2)
 	return false;
 }
 
-template <typename T>
+template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_overlaps(kern_context *kcxt, T &arg1, T &arg2)
+__generic_range_overlaps(kern_context *kcxt,
+						 const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -546,7 +554,8 @@ __range_contains_elem_internal(RangeType *r, ElementType *val)
 
 template <typename R, typename E>
 STATIC_INLINE(pg_bool_t)
-__generic_range_contains_elem(kern_context *kcxt, R &arg1, E &arg2)
+__generic_range_contains_elem(kern_context *kcxt,
+							  const R &arg1, const E &arg2)
 {
 	pg_bool_t	result;
 
@@ -576,7 +585,8 @@ __range_contains_internal(RangeType *r1, RangeType *r2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_contains(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_contains(kern_context *kcxt,
+						 const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -589,7 +599,8 @@ __generic_range_contains(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R, typename E>
 STATIC_INLINE(pg_bool_t)
-__generic_elem_contained_by_range(kern_context *kcxt, E &arg1, R &arg2)
+__generic_elem_contained_by_range(kern_context *kcxt,
+								  const E &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -602,7 +613,8 @@ __generic_elem_contained_by_range(kern_context *kcxt, E &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_contained_by(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_contained_by(kern_context *kcxt,
+							 const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -649,7 +661,8 @@ __range_adjacent_internal(RangeType *r1, RangeType *r2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_adjacent(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_adjacent(kern_context *kcxt,
+						 const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -662,7 +675,8 @@ __generic_range_adjacent(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_before(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_before(kern_context *kcxt,
+					   const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -680,7 +694,8 @@ __generic_range_before(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_after(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_after(kern_context *kcxt,
+					  const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -698,7 +713,8 @@ __generic_range_after(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_overright(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_overright(kern_context *kcxt,
+						  const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -716,7 +732,8 @@ __generic_range_overright(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(pg_bool_t)
-__generic_range_overleft(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_overleft(kern_context *kcxt,
+						 const R &arg1, const R &arg2)
 {
 	pg_bool_t	result;
 
@@ -734,7 +751,8 @@ __generic_range_overleft(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 DEVICE_FUNCTION(R)
-__generic_range_union(kern_context *kcxt, R &arg1, R &arg2, bool strict)
+__generic_range_union(kern_context *kcxt,
+					  const R &arg1, const R &arg2, bool strict)
 {
 	R	result;
 
@@ -774,7 +792,7 @@ __generic_range_union(kern_context *kcxt, R &arg1, R &arg2, bool strict)
 
 template <typename R>
 STATIC_INLINE(R)
-__generic_range_intersect(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_intersect(kern_context *kcxt, const R &arg1, const R &arg2)
 {
 	R	result;
 
@@ -808,7 +826,7 @@ __generic_range_intersect(kern_context *kcxt, R &arg1, R &arg2)
 
 template <typename R>
 STATIC_INLINE(R)
-__generic_range_minus(kern_context *kcxt, R &arg1, R &arg2)
+__generic_range_minus(kern_context *kcxt, const R &arg1, const R &arg2)
 {
 	R	result;
 
@@ -873,178 +891,178 @@ __generic_range_minus(kern_context *kcxt, R &arg1, R &arg2)
 	__GENERIC_RANGE_UPPER(ELEMENT,RANGE)						\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_isempty(kern_context *kcxt,					\
-						   pg_##RANGE##_t &arg1)				\
+						   const pg_##RANGE##_t &arg1)			\
 	{															\
 		return __generic_range_isempty(kcxt,arg1);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_lower_inc(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1)				\
+							 const pg_##RANGE##_t &arg1)		\
 	{															\
 		return __generic_range_lower_inc(kcxt,arg1);			\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_upper_inc(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1)				\
+							 const pg_##RANGE##_t &arg1)		\
 	{															\
 		return __generic_range_upper_inc(kcxt,arg1);			\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_lower_inf(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1)				\
+							 const pg_##RANGE##_t &arg1)		\
 	{															\
 		return __generic_range_lower_inf(kcxt,arg1);			\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_upper_inf(kern_context *kcxt,				\
-                             pg_##RANGE##_t &arg1)				\
+                             const pg_##RANGE##_t &arg1)		\
 	{															\
 		return __generic_range_upper_inf(kcxt,arg1);			\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_eq(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_eq(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_ne(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_ne(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_gt(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_gt(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_ge(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_ge(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_lt(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_lt(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_le(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_le(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_int4_t)									\
 	pgfn_type_compare(kern_context *kcxt,						\
-					  pg_##RANGE##_t &arg1,						\
-					  pg_##RANGE##_t &arg2)						\
+					  const pg_##RANGE##_t &arg1,				\
+					  const pg_##RANGE##_t &arg2)				\
 	{															\
 		return __generic_range_cmp(kcxt,arg1,arg2);				\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_overlaps(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2)				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_overlaps(kcxt, arg1, arg2);		\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_contains_elem(kern_context *kcxt,			\
-								 pg_##RANGE##_t &arg1,			\
-								 pg_##ELEMENT##_t &arg2)		\
+								 const pg_##RANGE##_t &arg1,	\
+								 const pg_##ELEMENT##_t &arg2)	\
 	{															\
 		return __generic_range_contains_elem(kcxt,arg1,arg2);	\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_contains(kern_context *kcxt,					\
-							pg_##RANGE##_t &arg1,				\
-							pg_##RANGE##_t &arg2)				\
+							const pg_##RANGE##_t &arg1,			\
+							const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_contains(kcxt,arg1,arg2);		\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_elem_contained_by_##RANGE(kern_context *kcxt,			\
-								   pg_##ELEMENT##_t &arg1,		\
-								   pg_##RANGE##_t &arg2)		\
+								   const pg_##ELEMENT##_t &arg1,\
+								   const pg_##RANGE##_t &arg2)	\
 	{															\
 		return __generic_elem_contained_by_range(kcxt,arg1,arg2); \
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_contained_by(kern_context *kcxt,				\
-                                pg_##RANGE##_t &arg1,			\
-                                pg_##RANGE##_t &arg2)			\
+                                const pg_##RANGE##_t &arg1,		\
+                                const pg_##RANGE##_t &arg2)		\
 	{															\
 		return __generic_range_contained_by(kcxt,arg1,arg2);	\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_adjacent(kern_context *kcxt,					\
-                            pg_##RANGE##_t &arg1,				\
-                            pg_##RANGE##_t &arg2)				\
+                            const pg_##RANGE##_t &arg1,			\
+                            const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_adjacent(kcxt,arg1,arg2);		\
 	}															\
 	DEVICE_FUNCTION(pg_bool_t)									\
 	pgfn_##RANGE##_before(kern_context *kcxt,					\
-						  pg_##RANGE##_t &arg1,					\
-						  pg_##RANGE##_t &arg2)					\
+						  const pg_##RANGE##_t &arg1,			\
+						  const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_before(kcxt,arg1,arg2);			\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_after(kern_context *kcxt,					\
-                         pg_##RANGE##_t &arg1,					\
-                         pg_##RANGE##_t &arg2)					\
+                         const pg_##RANGE##_t &arg1,			\
+                         const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_after(kcxt,arg1,arg2);			\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_overright(kern_context *kcxt,				\
-							 pg_##RANGE##_t &arg1,				\
-							 pg_##RANGE##_t &arg2)				\
+							 const pg_##RANGE##_t &arg1,		\
+							 const pg_##RANGE##_t &arg2)		\
 	{															\
 		return __generic_range_overright(kcxt,arg1,arg2);		\
 	}															\
     DEVICE_FUNCTION(pg_bool_t)									\
     pgfn_##RANGE##_overleft(kern_context *kcxt,					\
-                            pg_##RANGE##_t &arg1,				\
-                            pg_##RANGE##_t &arg2)				\
+                            const pg_##RANGE##_t &arg1,			\
+                            const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_overleft(kcxt,arg1,arg2);		\
 	}															\
     DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_union(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2)					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_union(kcxt,arg1,arg2,true);		\
 	}															\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_merge(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2)					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_union(kcxt,arg1,arg2,false);		\
 	}															\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
     pgfn_##RANGE##_intersect(kern_context *kcxt,				\
-                             pg_##RANGE##_t &arg1,				\
-                             pg_##RANGE##_t &arg2)				\
+                             const pg_##RANGE##_t &arg1,		\
+                             const pg_##RANGE##_t &arg2)		\
 	{															\
 		return __generic_range_intersect(kcxt,arg1,arg2);		\
 	}															\
 	DEVICE_FUNCTION(pg_##RANGE##_t)								\
 	pgfn_##RANGE##_minus(kern_context *kcxt,					\
-						 pg_##RANGE##_t &arg1,					\
-						 pg_##RANGE##_t &arg2)					\
+						 const pg_##RANGE##_t &arg1,			\
+						 const pg_##RANGE##_t &arg2)			\
 	{															\
 		return __generic_range_minus(kcxt,arg1,arg2);			\
 	}
