@@ -83,7 +83,7 @@ typedef struct
 #define GEOM_FLAG__GEODETIC		0x08
 #define GEOM_FLAG__READONLY		0x10
 #define GEOM_FLAG__SOLID		0x20
-#define GEOM_FLAGS_NDIMS(flags)	\
+#define GEOM_FLAGS_NDIMS(flags)		\
 	(2 + ((flags) & GEOM_FLAG__Z) + (((flags) & GEOM_FLAG__M) >> 1))
 
 /*
@@ -150,7 +150,7 @@ typedef struct
 	cl_uint		nitems;		/* # of items; what it exactly means depends on
 							 * the geometry type */
 	cl_uint		rawsize;	/* length of the rawdata buffer */
-	char	   *rawdata;	/* pointer to the raw-data; it may not be aligned,
+	const char *rawdata;	/* pointer to the raw-data; it may not be aligned,
 							 * so needs to copy local buffer once */
 	geom_bbox  *bbox;		/* boundary box if any */
 } pg_geometry_t;
@@ -201,9 +201,11 @@ pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum);
  * PostGIS functions
  */
 DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_setsrid(kern_context *kcxt, pg_geometry_t arg1, pg_int4_t arg2);
+pgfn_st_setsrid(kern_context *kcxt,
+				const pg_geometry_t &arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_makepoint2(kern_context *kcxt, pg_float8_t x, pg_float8_t y);
+pgfn_st_makepoint2(kern_context *kcxt,
+				   pg_float8_t x, pg_float8_t y);
 DEVICE_FUNCTION(pg_geometry_t)
 pgfn_st_makepoint3(kern_context *kcxt,
 				   pg_float8_t x, pg_float8_t y, pg_float8_t z);
@@ -211,6 +213,24 @@ DEVICE_FUNCTION(pg_geometry_t)
 pgfn_st_makepoint4(kern_context *kcxt,
 				   pg_float8_t x, pg_float8_t y,
 				   pg_float8_t z, pg_float8_t m);
+DEVICE_FUNCTION(pg_float8_t)
+pgfn_st_distance(kern_context *kcxt,
+				 const pg_geometry_t &arg1,
+				 const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_dwithin(kern_context *kcxt,
+				const pg_geometry_t &arg1,
+				const pg_geometry_t &arg2,
+				pg_float8_t arg3);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_contains(kern_context *kcxt,
+				 const pg_geometry_t &arg1,
+				 const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_crosses(kern_context *kcxt,
+				const pg_geometry_t &arg1,
+				const pg_geometry_t &arg2);
+
 #endif /* __CUDACC__ */
 
 #endif /* CUDA_POSTGIS_H */

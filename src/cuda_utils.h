@@ -136,6 +136,18 @@ __strncmp(const char *__s1, const char *__s2, cl_uint n)
 	return c1 - c2;
 }
 
+/* swap values */
+template <typename T>
+STATIC_INLINE(void)
+__swap(T &value_x, T &value_y)
+{
+	T	temp;
+
+	temp = value_x;
+	value_x = value_y;
+	value_y = temp;
+}
+
 /*
  * pgstromTotalSum
  *

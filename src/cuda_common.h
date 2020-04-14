@@ -472,6 +472,9 @@ __STROM_EREPORT(kern_context *kcxt, cl_int errcode,
 	}
 }
 
+#define STROM_ELOG(kcxt, message)										\
+	__STROM_EREPORT((kcxt),ERRCODE_INTERNAL_ERROR,						\
+					__FILE__,__LINE__,__FUNCTION__,(message))
 #define STROM_EREPORT(kcxt, errcode, message)							\
 	__STROM_EREPORT((kcxt),(errcode),									\
 					__FILE__,__LINE__,__FUNCTION__,(message))
