@@ -44,25 +44,19 @@
 #define FP_CONTAINS_EXCL(A, X, B) (FP_LT(A, X) && FP_LT(X, B))
 #define FP_CONTAINS(A, X, B) FP_CONTAINS_EXCL(A, X, B)
 
-STATIC_INLINE(cl_uint)
-geometry_points_unitsz(pg_geometry_t *geom)
-{
-	return sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
-}
-
 STATIC_INLINE(cl_bool)
-geometry_type_is_collection(cl_int geom_type)
+geometry_is_collection(const pg_geometry_t *geom)
 {
 	/* see lw_dist2d_is_collection */
-	if (geom_type == GEOM_TINTYPE ||
-		geom_type == GEOM_MULTIPOINTTYPE ||
-		geom_type == GEOM_MULTILINETYPE ||
-		geom_type == GEOM_MULTIPOLYGONTYPE ||
-		geom_type == GEOM_COLLECTIONTYPE ||
-		geom_type == GEOM_MULTICURVETYPE ||
-		geom_type == GEOM_MULTISURFACETYPE ||
-		geom_type == GEOM_COMPOUNDTYPE ||
-		geom_type == GEOM_POLYHEDRALSURFACETYPE)
+	if (geom->type == GEOM_TINTYPE ||
+		geom->type == GEOM_MULTIPOINTTYPE ||
+		geom->type == GEOM_MULTILINETYPE ||
+		geom->type == GEOM_MULTIPOLYGONTYPE ||
+		geom->type == GEOM_COLLECTIONTYPE ||
+		geom->type == GEOM_MULTICURVETYPE ||
+		geom->type == GEOM_MULTISURFACETYPE ||
+		geom->type == GEOM_COMPOUNDTYPE ||
+		geom->type == GEOM_POLYHEDRALSURFACETYPE)
 		return true;
 
 	return false;
@@ -129,6 +123,108 @@ setup_geometry_rawsize(pg_geometry_t *geom)
 			break;
 	}
 	return false;
+}
+
+STATIC_FUNCTION(const char *)
+geometry_load_subitem(pg_geometry_t *gsub,
+					  const pg_geometry_t *geom,
+					  const char *pos, int index,
+					  kern_context *kcxt = NULL)
+{
+	switch (geom->type)
+	{
+		case GEOM_POINTTYPE:
+		case GEOM_LINETYPE:
+		case GEOM_TRIANGLETYPE:
+		case GEOM_CIRCSTRINGTYPE:
+			/* no sub-geometry */
+			if (kcxt)
+				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+							  "geometry data curruption (no sub-items)");
+			break;
+		case GEOM_POLYGONTYPE:
+			if (index == 0)
+				pos = geom->rawdata + LONGALIGN(sizeof(cl_int) * geom->nitems);
+			else if (index >= geom->nitems)
+				break;
+			gsub->isnull = false;
+			gsub->type   = GEOM_LINETYPE;
+			gsub->flags  = geom->flags;
+			gsub->srid   = geom->srid;
+			gsub->nitems = __Fetch(((cl_uint *)geom->rawdata) + index);
+			gsub->rawdata = pos;
+			gsub->bbox   = geom->bbox;
+			setup_geometry_rawsize(gsub);
+			pos += gsub->rawsize;
+			if (pos > geom->rawdata + geom->rawsize)
+			{
+				if (kcxt)
+					STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+								  "geometry data curruption (polygon)");
+				break;
+			}
+			return pos;
+
+		case GEOM_MULTIPOINTTYPE:
+        case GEOM_MULTILINETYPE:
+        case GEOM_MULTIPOLYGONTYPE:
+        case GEOM_COLLECTIONTYPE:
+        case GEOM_COMPOUNDTYPE:
+        case GEOM_CURVEPOLYTYPE:
+        case GEOM_MULTICURVETYPE:
+        case GEOM_MULTISURFACETYPE:
+        case GEOM_POLYHEDRALSURFACETYPE:
+        case GEOM_TINTYPE:
+			if (index == 0)
+				pos = geom->rawdata;
+			else if (index >= geom->nitems)
+				break;
+			gsub->isnull = false;
+			gsub->type = __Fetch((cl_int *)pos);
+			pos += sizeof(cl_int);
+			gsub->flags = geom->flags;
+			gsub->srid = geom->srid;
+			gsub->nitems = __Fetch((cl_uint *)pos);
+			pos += sizeof(cl_uint);
+			gsub->rawdata = pos;
+			gsub->bbox = geom->bbox;
+			setup_geometry_rawsize(gsub);
+			pos += gsub->rawsize;
+			if (pos > geom->rawdata + geom->rawsize)
+			{
+				if (kcxt)
+					STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+								  "geometry data curruption (collection)");
+				break;
+			}
+			return pos;
+
+		default:
+			/* unknown geometry type */
+			break;
+	}
+	memset(gsub, 0, sizeof(pg_geometry_t));
+	gsub->isnull = true;
+	return NULL;
+}
+
+STATIC_FUNCTION(cl_bool)
+geometry_is_empty(const pg_geometry_t *geom)
+{
+	if (geometry_is_collection(geom))
+	{
+		pg_geometry_t	__geom;
+		const char	   *pos = NULL;
+
+		for (int i=0; i < geom->nitems; i++)
+		{
+			pos = geometry_load_subitem(&__geom, geom, pos, i);
+			if (!geometry_is_empty(&__geom))
+				return false;
+		}
+		return true;	/* empty */
+	}
+	return (geom->nitems == 0 ? true : false);
 }
 
 /* ================================================================
@@ -504,6 +600,23 @@ pgfn_st_makepoint4(kern_context *kcxt,
 
 /* ================================================================
  *
+ * Internal utility functions
+ *
+ * ================================================================
+ */
+
+
+
+
+
+
+
+
+
+
+
+/* ================================================================
+ *
  * St_Distance(geometry,geometry)
  *
  * ================================================================
@@ -513,70 +626,6 @@ __loadPoint2d(POINT2D *pt, const char *rawdata, cl_uint unitsz)
 {
 	memcpy(pt, rawdata, sizeof(POINT2D));
 	return rawdata + unitsz;
-}
-
-STATIC_FUNCTION(const char *)
-__load_sub_geometry(pg_geometry_t *gsub,
-					const pg_geometry_t *geom, const char *pos, int index)
-{
-	switch (geom->type)
-	{
-		case GEOM_POINTTYPE:
-		case GEOM_LINETYPE:
-		case GEOM_TRIANGLETYPE:
-		case GEOM_CIRCSTRINGTYPE:
-			/* no sub-geometry */
-			break;
-		case GEOM_POLYGONTYPE:
-			if (index == 0)
-				pos = geom->rawdata + LONGALIGN(sizeof(cl_int) * geom->nitems);
-			else if (index >= geom->nitems)
-				break;
-			gsub->isnull = false;
-			gsub->type   = GEOM_LINETYPE;
-			gsub->flags  = geom->flags;
-			gsub->srid   = geom->srid;
-			gsub->nitems = __Fetch(((cl_uint *)geom->rawdata) + index);
-			gsub->rawdata = pos;
-			gsub->bbox   = geom->bbox;
-			setup_geometry_rawsize(gsub);
-			pos += gsub->rawsize;
-			return pos;
-
-		case GEOM_MULTIPOINTTYPE:
-        case GEOM_MULTILINETYPE:
-        case GEOM_MULTIPOLYGONTYPE:
-        case GEOM_COLLECTIONTYPE:
-        case GEOM_COMPOUNDTYPE:
-        case GEOM_CURVEPOLYTYPE:
-        case GEOM_MULTICURVETYPE:
-        case GEOM_MULTISURFACETYPE:
-        case GEOM_POLYHEDRALSURFACETYPE:
-        case GEOM_TINTYPE:
-			if (index == 0)
-				pos = geom->rawdata;
-			else if (index >= geom->nitems)
-				break;
-			gsub->isnull = false;
-			gsub->type = __Fetch((cl_int *)pos);
-			pos += sizeof(cl_int);
-			gsub->flags = geom->flags;
-			gsub->srid = geom->srid;
-			gsub->nitems = __Fetch((cl_uint *)pos);
-			pos += sizeof(cl_uint);
-			gsub->rawdata = pos;
-			gsub->bbox = geom->bbox;
-			setup_geometry_rawsize(gsub);
-			pos += gsub->rawsize;
-			return pos;
-
-		default:
-			/* unknown geometry type */
-			break;
-	}
-	memset(gsub, 0, sizeof(pg_geometry_t));
-	gsub->isnull = true;
-	return NULL;
 }
 
 STATIC_INLINE(int)
@@ -1646,7 +1695,9 @@ geom_dist2d_point_poly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		status = __geom_contains_point(&__geom, &pt, dl);
 		if (status == PT_ERROR)
 			return false;
@@ -1706,8 +1757,9 @@ geom_dist2d_point_curvepoly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
-
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		status = __geom_contains_point(&__geom, &pt, dl);
 		if (status == PT_ERROR)
 			return false;
@@ -1781,7 +1833,9 @@ geom_dist2d_line_poly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		if (i == 0)
 		{
 			/* Line has a point outside of the polygon.
@@ -1844,7 +1898,9 @@ geom_dist2d_line_curvepoly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		if (i == 0)
 		{
 			status = __geom_contains_point(&__geom, &pt0, dl);
@@ -1933,7 +1989,9 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		if (i == 0)
 		{
 			status = __geom_contains_point(&__geom, &pt, dl);
@@ -2050,7 +2108,9 @@ geom_dist2d_tri_curvepoly(const pg_geometry_t *geom1,
 		pg_geometry_t __geom;
 		cl_int		status;
 
-		pos = __load_sub_geometry(&__geom, geom2, pos, i);
+		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+		if (!pos)
+			return false;
 		if (i == 0)
 		{
 			status = __geom_contains_point(&__geom, &pt, dl);
@@ -2141,7 +2201,8 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	pg_geometry_t __geom1;
 	pg_geometry_t __geom2;
 	pg_geometry_t __gtemp;
-	const char *pos = NULL;
+	const char *pos1 = NULL;
+	const char *pos2 = NULL;
 	POINT2D		pt;
 	int			status;
 
@@ -2149,10 +2210,12 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 			geom1->type == GEOM_CURVEPOLYTYPE) &&
 		   (geom2->type == GEOM_POLYGONTYPE ||
 			geom2->type == GEOM_CURVEPOLYTYPE));
-	__load_sub_geometry(&__geom1, geom1, NULL, 0);
-	__load_sub_geometry(&__geom2, geom2, NULL, 0);
+	pos1 = geometry_load_subitem(&__geom1, geom1, pos1, 0, dl->kcxt);
+	pos2 = geometry_load_subitem(&__geom2, geom2, pos2, 0, dl->kcxt);
+	if (!pos1 || !pos2)
+		return false;
 
-    /* 2. check if poly1 has first point outside poly2 and vice versa,
+	/* 2. check if poly1 has first point outside poly2 and vice versa,
 	 * if so, just check outer rings here it would be possible to handle
 	 * the information about which one is inside which one and only search
 	 * for the smaller ones in the bigger ones holes.
@@ -2175,10 +2238,11 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	 * If so check outer ring of poly2 against that hole of poly1
 	 */
 	__loadPoint2d(&pt, __geom2.rawdata, 0);
-	pos = __geom1.rawdata + __geom1.rawsize;
 	for (int i = 1; i < geom1->nitems; i++)
 	{
-		pos = __load_sub_geometry(&__gtemp, geom1, pos, i);
+		pos1 = geometry_load_subitem(&__gtemp, geom1, pos1, i, dl->kcxt);
+		if (!pos1)
+			return false;
 		status = __geom_contains_point(&__gtemp, &pt, dl);
 		if (status == PT_ERROR)
 			return false;
@@ -2190,10 +2254,11 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	 * If so check outer ring of poly1 against that hole of poly2
 	 */
 	 __loadPoint2d(&pt, __geom1.rawdata, 0);
-	 pos = __geom2.rawdata + __geom2.rawsize;
 	 for (int i = 1; i < geom2->nitems; i++)
 	 {
-		 pos = __load_sub_geometry(&__gtemp, geom2, pos, i);
+		 pos2 = geometry_load_subitem(&__gtemp, geom2, pos2, i, dl->kcxt);
+		 if (!pos2)
+			 return false;
 		 status = __geom_contains_point(&__gtemp, &pt, dl);
 		 if (status == PT_ERROR)
 			 return false;
@@ -2271,57 +2336,25 @@ geom_dist2d_recursive(const pg_geometry_t *geom1,
 {
 	/* see lw_dist2d_recursive() */
 	pg_geometry_t	__geom;
-	const char	   *rawdata;
+	const char	   *pos = NULL;
 
 	assert(!geom1->isnull && !geom2->isnull);
-	if (geometry_type_is_collection(geom1->type))
+	if (geometry_is_collection(geom1))
 	{
-		rawdata = geom1->rawdata;
 		for (int i=0; i < geom1->nitems; i++)
 		{
-			memset(&__geom, 0, sizeof(pg_geometry_t));
-			__geom.type = __Fetch((cl_int *)rawdata);
-			rawdata += sizeof(cl_int);
-			__geom.flags = geom1->flags;
-			__geom.srid  = geom1->srid;
-			__geom.nitems = __Fetch((cl_uint *)rawdata);
-			rawdata += sizeof(cl_uint);
-			__geom.rawdata = rawdata;
-			if (!setup_geometry_rawsize(&__geom) ||
-				__geom.rawdata+__geom.rawsize > geom1->rawdata+geom1->rawsize)
-			{
-				STROM_EREPORT(dl->kcxt, ERRCODE_DATA_CORRUPTED,
-							  "geometry data curruption");
+			pos = geometry_load_subitem(&__geom, geom1, pos, i, dl->kcxt);
+			if (!pos || !geom_dist2d_recursive(&__geom, geom2, dl))
 				return false;
-			}
-			if (!geom_dist2d_recursive(&__geom, geom2, dl))
-				return false;
-			rawdata += __geom.rawsize;
 		}
 	}
-	else if (geometry_type_is_collection(geom2->type))
+	else if (geometry_is_collection(geom2))
 	{
-		rawdata = geom2->rawdata;
 		for (int i=0; i < geom2->nitems; i++)
 		{
-			memset(&__geom, 0, sizeof(pg_geometry_t));
-            __geom.type = __Fetch((cl_int *)rawdata);
-			rawdata += sizeof(cl_int);
-			__geom.flags = geom2->flags;
-            __geom.srid  = geom2->srid;
-            __geom.nitems = __Fetch((cl_uint *)rawdata);
-			rawdata += sizeof(cl_uint);
-			__geom.rawdata = rawdata;
-			if (!setup_geometry_rawsize(&__geom) ||
-				__geom.rawdata+__geom.rawsize > geom2->rawdata+geom2->rawsize)
-			{
-				STROM_EREPORT(dl->kcxt, ERRCODE_DATA_CORRUPTED,
-							  "geometry data curruption");
+			pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
+			if (!pos || !geom_dist2d_recursive(geom1, &__geom, dl))
 				return false;
-			}
-			if (!geom_dist2d_recursive(geom1, &__geom, dl))
-				return false;
-			rawdata += __geom.rawsize;
 		}
 	}
 	else if (geom1->nitems > 0 && geom2->nitems)
@@ -2507,3 +2540,29 @@ pgfn_st_distance(kern_context *kcxt,
 	}
 	return result;
 }
+
+/* ================================================================
+ *
+ * St_Contains(geometry,geometry)
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_contains(kern_context *kcxt,
+                 const pg_geometry_t &geom1,
+                 const pg_geometry_t &geom2)
+{
+	pg_bool_t	result;
+
+	result.isnull = geom1.isnull | geom2.isnull;
+	if (!result.isnull)
+	{
+		
+		
+		
+		
+	}
+	return result;
+}
+
+
