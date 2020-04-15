@@ -2685,8 +2685,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ScanState	   *ss = &gjs->gts.css.ss;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	TupleTableSlot *result_slot = gjs->gts.css.ss.ps.ps_ResultTupleSlot;
-	TupleDesc		result_tupdesc = result_slot->tts_tupleDescriptor;
+	TupleDesc		result_tupdesc = planStateResultTupleDesc(&ss->ps);
 	TupleDesc		scan_tupdesc;
 	TupleDesc		junk_tupdesc;
 	List		   *tlist_fallback = NIL;
@@ -2794,11 +2793,11 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	}
 	else
 	{
-		TupleTableSlot *outer_slot;
+		TupleDesc	outer_desc;
 
 		outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
-		outer_slot = outerPlanState(gjs)->ps_ResultTupleSlot;
-		nattrs = outer_slot->tts_tupleDescriptor->natts;
+		outer_desc = planStateResultTupleDesc(outerPlanState(gjs));
+		nattrs = outer_desc->natts;
 		Assert(!OidIsValid(gj_info->index_oid));
 	}
 
@@ -2907,7 +2906,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		List	   *other_quals = list_nth(gj_info->other_quals, i);
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
-		TupleTableSlot *inner_slot;
 		TupleDesc	inner_tupdesc;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
@@ -2976,9 +2974,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		/*
 		 * CPU fallback setup for INNER reference
 		 */
-		inner_slot = istate->state->ps_ResultTupleSlot;
-		inner_tupdesc = inner_slot->tts_tupleDescriptor;
-		nattrs = inner_slot->tts_tupleDescriptor->natts;
+		inner_tupdesc = planStateResultTupleDesc(istate->state);
+		nattrs = inner_tupdesc->natts;
 		istate->inner_src_anum_min = nattrs;
 		istate->inner_src_anum_max = FirstLowInvalidHeapAttributeNumber;
 		nattrs -= FirstLowInvalidHeapAttributeNumber;
@@ -6336,9 +6333,9 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(leader->gj_sstate);
 	int				depth = istate->depth;
 	PlanState	   *ps = istate->state;
-	TupleTableSlot *slot = ps->ps_ResultTupleSlot;
+	TupleTableSlot *slot;
 	TupleDesc		tupdesc		__attribute__((unused))
-		= slot->tts_tupleDescriptor;
+		= planStateResultTupleDesc(ps);
 
 	for (;;)
 	{
@@ -6449,8 +6446,7 @@ restart:
 	for (i=0; i < num_rels; i++)
 	{
 		innerState *istate = &leader->inners[i];
-		TupleTableSlot *slot = istate->state->ps_ResultTupleSlot;
-		TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+		TupleDesc	tupdesc = planStateResultTupleDesc(istate->state);
 		size_t		nrooms;
 		size_t		usage;
 		size_t		nbytes;

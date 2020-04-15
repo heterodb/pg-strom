@@ -184,6 +184,9 @@ PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 endif
+ifeq ($(PGSTROM_DEBUG),1)
+PGSTROM_FLAGS += -g -O0
+endif
 PGSTROM_FLAGS += -DCPU_ARCH=\"$(shell uname -m)\"
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DPGSERV_INCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)\"

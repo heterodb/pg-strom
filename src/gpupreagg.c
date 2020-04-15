@@ -4129,7 +4129,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		}
 		outerPlanState(gpas) = outer_ps;
 		/* GpuPreAgg don't need re-initialization of projection info */
-		outer_tupdesc = outer_ps->ps_ResultTupleSlot->tts_tupleDescriptor;
+		outer_tupdesc = planStateResultTupleDesc(outer_ps);
 		/* should not have any usage of BRIN-index */
 		Assert(!OidIsValid(gpa_info->index_oid));
 	}

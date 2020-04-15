@@ -252,6 +252,21 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #endif	/* < PG12 */
 
 /*
+ * PG12 (commit: 1ef6bd2954c4ec63ff8a2c9c4ebc38251d7ef5c5) don't
+ * require return slots for nodes without projection.
+ * Instead of the ps_ResultTupleSlot->tts_tupleDescriptor,
+ * ps_ResultTupleDesc is now reliable source to determine the tuple
+ * definition. For the compatibility to PG11 or older, we use the
+ * access macro below.
+ */
+#if PG_VERSION_NUM < 120000
+#define planStateResultTupleDesc(ps)			\
+	((ps)->ps_ResultTupleSlot->tts_tupleDescriptor)
+#else
+#define planStateResultTupleDesc(ps)	((ps)->ps_ResultTupleDesc)
+#endif
+
+/*
  * PG12 added 'pathkey' argument of create_append_path().
  * It shall be ignored on the older versions.
  */
