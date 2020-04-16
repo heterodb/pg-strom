@@ -2547,6 +2547,176 @@ pgfn_st_distance(kern_context *kcxt,
  *
  * ================================================================
  */
+STATIC_INLINE(double)
+determineSide(const POINT2D *seg1,
+			  const POINT2D *seg2,
+			  const POINT2D *point)
+{
+	return ((seg2->x - seg1->x) * (point->y - seg1->y) -
+			(point->x - seg1->x) * (seg2->y - seg1->y));
+}
+
+STATIC_INLINE(cl_bool)
+isOnSegment(const POINT2D *seg1,
+			const POINT2D *seg2,
+			const POINT2D *point)
+{
+	if (Max(seg1->x, seg2->x) < point->x ||
+		Min(seg1->x, seg2->x) > point->x)
+		return false;
+	if (Max(seg1->y, seg2->y) < point->y ||
+		Min(seg1->y, seg2->y) > point->y)
+		return false;
+	return true;
+}
+
+STATIC_FUNCTION(cl_int)
+__geom_point_in_ring(const pg_geometry_t *geom, const POINT2D *pt,
+					 kern_context *kcxt)
+{
+	/* see, point_in_ring */
+	cl_uint		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
+	POINT2D		seg1;
+	POINT2D		seg2;
+	const char *pos;
+	int			wn = 0;
+	double		side;
+
+	pos = __loadPoint2d(&seg1, geom->rawdata, unitsz);
+	for (int i=1; i < geom->nitems; i++, seg1 = seg2)
+	{
+		pos = __loadPoint2d(&seg2, pos, unitsz);
+
+		/* zero length segments are ignored. */
+		if (seg1.x == seg2.x && seg1.y == seg2.y)
+			continue;
+
+		side = determineSide(&seg1, &seg2, pt);
+		if (side == 0.0)
+		{
+			if (isOnSegment(&seg1, &seg2, pt))
+				return PT_BOUNDARY;		/* on boundary */
+		}
+
+		if (seg1.y <= pt->y && pt->y < seg2.y && side > 0.0)
+		{
+			/*
+			 * If the point is to the left of the line, and it's rising,
+			 * then the line is to the right of the point and
+			 * circling counter-clockwise, so increment.
+			 */
+			wn++;
+		}
+		else if (seg2.y <= pt->y && pt->y < seg1.y && side < 0.0)
+		{
+			/*
+			 * If the point is to the right of the line, and it's falling,
+			 * then the line is to the right of the point and circling
+			 * clockwise, so decrement.
+			 */
+			wn--;
+		}
+	}
+	if (wn == 0)
+		return PT_OUTSIDE;
+	return PT_INSIDE;
+}
+
+STATIC_FUNCTION(cl_int)
+__geom_point_in_polygon(const pg_geometry_t *poly, const POINT2D *pt,
+						kern_context *kcxt)
+{
+	/* see, point_in_polygon */
+	pg_geometry_t	ring;
+	const char	   *pos = NULL;
+	cl_int			status;
+	cl_int			retval = PT_OUTSIDE;
+
+	assert(poly->type == GEOM_POLYGONTYPE);
+	for (int i=0; i < poly->nitems; i++)
+	{
+		pos = geometry_load_subitem(&ring, poly, pos, i, kcxt);
+		if (!pos)
+			return PT_ERROR;
+		status = __geom_point_in_ring(&ring, pt, kcxt);
+		if (status == PT_ERROR)
+			return PT_ERROR;
+		if (i == 0)
+		{
+			if (status == PT_OUTSIDE)
+				return PT_OUTSIDE;
+			retval = status;
+		}
+		else
+		{
+			/* inside a hole => outside the polygon */
+			if (status == PT_INSIDE)
+				return PT_OUTSIDE;
+			/* on the edge of a hole */
+			if (status == PT_BOUNDARY)
+				return PT_BOUNDARY;
+		}
+	}
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+__geom_point_in_multipolygon(const pg_geometry_t *geom, const POINT2D *pt,
+							 kern_context *kcxt)
+{
+	/* see, point_in_multipolygon */
+	pg_geometry_t poly;
+	pg_geometry_t ring;
+	const char *pos1 = NULL;
+	const char *pos2;
+	cl_int		status;
+	cl_int		retval = PT_OUTSIDE;
+
+	assert(geom->type == GEOM_MULTIPOLYGONTYPE);
+	for (int j=0; j < geom->nitems; j++)
+	{
+		pos1 = geometry_load_subitem(&poly, geom, pos1, j, kcxt);
+		if (!pos1)
+			return PT_ERROR;
+		if (poly.nitems == 0)
+			continue;	/* skip empty polygon */
+
+		pos2 = geometry_load_subitem(&ring, &poly, NULL, 0, kcxt);
+		if (!pos2)
+			return PT_ERROR;
+		status = __geom_point_in_ring(&ring, pt, kcxt);
+		if (status == PT_ERROR)
+			return PT_ERROR;
+		if (status == PT_OUTSIDE)
+			continue;	/* outside the exterior ring */
+		if (status == PT_BOUNDARY)
+			return PT_BOUNDARY;
+
+		retval = status;
+		for (int i=1; i < poly.nitems; i++)
+		{
+			pos2 = geometry_load_subitem(&ring, &poly, pos2, i, kcxt);
+			if (!pos2)
+				return PT_ERROR;
+			status = __geom_point_in_ring(&ring, pt, kcxt);
+			if (status == PT_ERROR)
+				return PT_ERROR;
+			/* inside a hole => outside the polygon */
+			if (status == PT_INSIDE)
+			{
+				retval = PT_OUTSIDE;
+				break;
+			}
+			/* on the edge of a hole */
+			if (status == PT_BOUNDARY)
+				return PT_BOUNDARY;
+		}
+		if (retval != PT_OUTSIDE)
+			return retval;
+	}
+	return retval;
+}
+
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_st_contains(kern_context *kcxt,
                  const pg_geometry_t &geom1,
@@ -2555,14 +2725,102 @@ pgfn_st_contains(kern_context *kcxt,
 	pg_bool_t	result;
 
 	result.isnull = geom1.isnull | geom2.isnull;
-	if (!result.isnull)
+	result.value  = false;
+	if (result.isnull)
+		return result;
+
+	if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+		return result;
+
+	/*
+	 * shortcut-1: if geom2 bounding box is not completely inside
+	 * geom1 bounding box we can return FALSE.
+	 */
+	if (geom1.bbox && geom2.bbox)
 	{
-		
-		
-		
-		
+		geom_bbox_2d   *bbox1 = &geom1.bbox->d2;
+		geom_bbox_2d   *bbox2 = &geom2.bbox->d2;
+
+		if (bbox2->xmin < bbox1->xmin || bbox2->xmax > bbox1->xmax ||
+			bbox2->ymin < bbox1->ymin || bbox2->ymax > bbox1->ymax)
+			return result;
 	}
+
+	/*
+	 * shortcut-2: if geom2 is a point and geom1 is a polygon
+	 * call the point-in-polygon function.
+	 */
+	if ((geom1.type == GEOM_POLYGONTYPE ||
+		 geom1.type == GEOM_MULTIPOLYGONTYPE) &&
+		(geom2.type == GEOM_POINTTYPE ||
+		 geom2.type == GEOM_MULTIPOINTTYPE))
+	{
+		POINT2D		pt;
+		int			status;
+		
+		if (geom2.type == GEOM_POINTTYPE)
+		{
+			__loadPoint2d(&pt, geom2.rawdata, 0);
+			if (geom1.bbox)
+			{
+				geom_bbox_2d   *bbox = &geom1.bbox->d2;
+
+				if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
+					pt.y < bbox->ymin || pt.y > bbox->ymax)
+					return result;
+			}
+			if (geom1.type == GEOM_POLYGONTYPE)
+				status = __geom_point_in_polygon(&geom1, &pt, kcxt);
+			else
+				status = __geom_point_in_multipolygon(&geom1, &pt, kcxt);
+			if (status == PT_ERROR)
+				goto error;
+			result.value = (status == PT_INSIDE);
+		}
+		else
+		{
+			pg_geometry_t __geom;
+			const char *pos = NULL;
+			cl_bool		meet_inside = false;
+
+			for (int i=0; i < geom2.nitems; i++)
+			{
+				pos = geometry_load_subitem(&__geom, &geom2, pos, i);
+				if (!pos)
+					return result;
+				__loadPoint2d(&pt, __geom.rawdata, 0);
+				if (geom1.bbox)
+				{
+					geom_bbox_2d   *bbox = &geom2.bbox->d2;
+
+					if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
+						pt.y < bbox->ymin || pt.y > bbox->ymax)
+						return result;
+				}
+				if (geom1.type == GEOM_POLYGONTYPE)
+					status = __geom_point_in_polygon(&geom1, &pt, kcxt);
+				else
+					status = __geom_point_in_multipolygon(&geom1, &pt, kcxt);
+				if (status == PT_ERROR)
+					goto error;
+				else if (status == PT_INSIDE)
+					meet_inside = true;
+				else if (status == PT_OUTSIDE)
+					break;
+			}
+			result.value = (meet_inside && status != PT_OUTSIDE);
+		}
+		return result;
+	}
+
+	/*
+	 * XXX - need to port the logic in GEOS library
+	 */
+	printf("gid=%u type1=%d type2=%d\n",
+		   get_global_id(), geom1.type, geom2.type);
+	STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+					   "Not supported geometry type by st_contains");
+error:
+	result.isnull = true;
 	return result;
 }
-
-
