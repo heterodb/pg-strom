@@ -661,11 +661,12 @@ __geom_pt_in_seg(const POINT2D *P,
  */
 typedef struct
 {
-	kern_context *kcxt;	/* for error reporting */
+	kern_context *kcxt;		/* for error reporting */
 	double		distance;
 	POINT2D		p1;
 	POINT2D		p2;
-	int			twisted;/* to preserve the order of incoming points */
+	int			twisted;	/* to preserve the order of incoming points */
+	double		tolerance;	/* the tolerance for dwithin and dfullywithin */
 } DISTPTS;
 
 #define PT_INSIDE		1
@@ -1497,6 +1498,9 @@ __geom_dist2d_pt_ptarray(const POINT2D *pt,
 
 		if (!__geom_dist2d_pt_seg(pt, &start, &end, dl))
 			return false;
+		/* just a check if the answer is already given */
+		if (dl->distance <= dl->tolerance)
+			return true;
 		start = end;
 	}
 	return true;
@@ -1559,6 +1563,7 @@ __geom_dist2d_ptarray_ptarrayarc(const pg_geometry_t *geom,
 								 const pg_geometry_t *garc,
 								 DISTPTS *dl)
 {
+	/* see, lw_dist2d_ptarray_ptarrayarc */
 	POINT2D		A1, A2;
 	POINT2D		B1, B2, B3;
 	cl_uint		unitsz_a = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
@@ -1847,16 +1852,23 @@ geom_dist2d_line_poly(const pg_geometry_t *geom1,
 			if (status == PT_OUTSIDE)
 				return __geom_dist2d_ptarray_ptarray(geom1, &__geom, dl);
 		}
-		else if (!meet_inside)
+		else
 		{
-			status = __geom_contains_point(&__geom, &pt0, dl);
-			if (status == PT_ERROR)
+			if (!__geom_dist2d_ptarray_ptarray(geom1, &__geom, dl))
 				return false;
-			if (status != PT_OUTSIDE)
-				meet_inside = true;
+			/* just a check if the answer is already given */
+			if (dl->distance <= dl->tolerance)
+				return true;
+			if (!meet_inside)
+			{
+				status = __geom_contains_point(&__geom, &pt0, dl);
+				if (status == PT_ERROR)
+					return false;
+				if (status != PT_OUTSIDE)
+					meet_inside = true;
+			}
 		}
 	}
-
 	if (!meet_inside)
 	{
 		dl->distance = 0.0;
@@ -1913,6 +1925,9 @@ geom_dist2d_line_curvepoly(const pg_geometry_t *geom1,
 		{
 			if (!geom_dist2d_recursive(geom1, &__geom, dl))
 				return false;
+			/* just a check if the answer is already given */
+			if (dl->distance <= dl->tolerance)
+				return true;
 			if (!meet_inside)
 			{
 				status = __geom_contains_point(&__geom, &pt0, dl);
@@ -2003,6 +2018,9 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 
 				if (!__geom_dist2d_ptarray_ptarray(geom1, &__geom, dl))
 					return false;
+				/* just a check if the answer is already given */
+				if (dl->distance <= dl->tolerance)
+					return true;
 				__loadPoint2d(&pt2, __geom.rawdata, 0);
 				status = __geom_contains_point(geom1, &pt2, dl);
 				if (status == PT_ERROR)
@@ -2020,6 +2038,9 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 		{
 			if (!__geom_dist2d_ptarray_ptarray(geom1, &__geom, dl))
 				return false;
+			/* just a check if the answer is already given */
+			if (dl->distance <= dl->tolerance)
+				return true;
 			if (!meet_inside)
 			{
 				status = __geom_contains_point(&__geom, &pt, dl);
@@ -2141,6 +2162,9 @@ geom_dist2d_tri_curvepoly(const pg_geometry_t *geom1,
 		{
 			if (!geom_dist2d_recursive(geom1, &__geom, dl))
 				return false;
+			/* just a check if the answer is already given */
+			if (dl->distance <= dl->tolerance)
+				return true;
 			if (!meet_inside)
 			{
 				status = __geom_contains_point(&__geom, &pt, dl);
@@ -2346,6 +2370,8 @@ geom_dist2d_recursive(const pg_geometry_t *geom1,
 			pos = geometry_load_subitem(&__geom, geom1, pos, i, dl->kcxt);
 			if (!pos || !geom_dist2d_recursive(&__geom, geom2, dl))
 				return false;
+			if (dl->distance <= dl->tolerance)
+				return true; /* just a check if the answer is already given */
 		}
 	}
 	else if (geometry_is_collection(geom2))
@@ -2355,6 +2381,8 @@ geom_dist2d_recursive(const pg_geometry_t *geom1,
 			pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
 			if (!pos || !geom_dist2d_recursive(geom1, &__geom, dl))
 				return false;
+			if (dl->distance <= dl->tolerance)
+				return true; /* just a check if the answer is already given */
 		}
 	}
 	else if (geom1->nitems > 0 && geom2->nitems)
@@ -2532,10 +2560,55 @@ pgfn_st_distance(kern_context *kcxt,
 			memset(&dl, 0, sizeof(DISTPTS));
 			dl.kcxt = kcxt;
 			dl.distance = DBL_MAX;
+			dl.tolerance = 0.0;
 			if (!geom_dist2d_recursive(&geom1, &geom2, &dl))
 				result.isnull = true;
 			else
 				result.value = dl.distance;
+		}
+	}
+	return result;
+}
+
+/*
+ * St_Dwithin - Returns true if the geometries are within the specified
+ *              distance of one another
+ */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_dwithin(kern_context *kcxt,
+				const pg_geometry_t &geom1,
+				const pg_geometry_t &geom2,
+				pg_float8_t arg3)
+{
+	/* see, LWGEOM_dwithin */
+	pg_bool_t	result;
+	DISTPTS		dl;
+
+	result.isnull = geom1.isnull | geom2.isnull | arg3.isnull;
+	if (!result.isnull)
+	{
+		if (geom1.srid != geom2.srid)
+		{
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+						  "Operation on mixed SRID geometries");
+			result.isnull = true;
+		}
+		else if (arg3.value < 0.0)
+		{
+			STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
+						  "Tolerance cannot be less than zero");
+			result.isnull = true;
+		}
+		else
+		{
+			memset(&dl, 0, sizeof(DISTPTS));
+			dl.kcxt = kcxt;
+			dl.distance = DBL_MAX;
+			dl.tolerance = arg3.value;
+			if (!geom_dist2d_recursive(&geom1, &geom2, &dl))
+				result.isnull = true;
+			else
+				result.value = (dl.distance <= arg3.value);
 		}
 	}
 	return result;

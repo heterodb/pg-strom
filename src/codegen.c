@@ -1966,8 +1966,10 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  10, "g/f:st_makepoint4", vlbuf_estimate__st_makepoint },
 	{ POSTGIS3, "float8 st_distance(geometry,geometry)",
 	  50, "g/f:st_distance" },
+	{ POSTGIS3, "bool st_dwithin(geometry,geometry,float8)",
+	  50, "g/f:st_dwithin" },
 	{ POSTGIS3, "bool st_contains(geometry,geometry)",
-	  50, "g/f:st_contains" },
+	  9999, "g/f:st_contains" },
 };
 #undef PGSTROM
 #undef POSTGIS3
