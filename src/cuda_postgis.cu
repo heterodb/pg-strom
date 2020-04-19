@@ -2616,6 +2616,164 @@ pgfn_st_dwithin(kern_context *kcxt,
 
 /* ================================================================
  *
+ * ST_LineCrossingDirection
+ *
+ * ================================================================
+ */
+#define SEG_ERROR		   -1
+#define SEG_NO_INTERSECTION	0
+#define SEG_COLINEAR		1
+#define SEG_CROSS_LEFT		2
+#define SEG_CROSS_RIGHT		3
+
+STATIC_FUNCTION(cl_int)
+__geom_segment_intersects(const POINT2D *p1, const POINT2D *p2,
+						  const POINT2D *q1, const POINT2D *q2)
+{
+	/* see, lw_segment_intersects */
+	int		pq1, pq2, qp1, qp2;
+
+	/* No envelope interaction => we are done. */
+	if (Min(p1->x, p2->x) > Max(q1->x, q2->x) ||
+		Max(p1->x, p2->x) < Min(q1->x, q2->x) ||
+		Min(p1->y, p2->y) > Max(q1->y, q2->y) ||
+		Max(p1->y, p2->y) < Min(q1->y, q2->y))
+		return SEG_NO_INTERSECTION;
+
+	/* Are the start and end points of q on the same side of p? */
+	pq1 = __geom_segment_side(p1, p2, q1);
+	pq2 = __geom_segment_side(p1, p2, q2);
+	if ((pq1 > 0 && pq2 > 0) || (pq1 < 0 && pq2 < 0))
+		return SEG_NO_INTERSECTION;
+
+	 /* Are the start and end points of p on the same side of q? */
+	qp1 = __geom_segment_side(q1, q2, p1);
+	qp2 = __geom_segment_side(q1, q2, p2);
+	if ((qp1 > 0 && qp2 > 0) || (qp1 < 0 && qp2 < 0))
+		return SEG_NO_INTERSECTION;
+
+	/* Nobody is on one side or another? Must be colinear. */
+	if (pq1 == 0 && pq2 == 0 && qp1 == 0 && qp2 == 0)
+		return SEG_COLINEAR;
+
+	/* Second point of p or q touches, it's not a crossing. */
+	if (pq2 == 0 || qp2 == 0)
+		return SEG_NO_INTERSECTION;
+
+	/* First point of p touches, it's a "crossing". */
+	if (pq1 == 0)
+		return (pq2 > 0 ? SEG_CROSS_RIGHT : SEG_CROSS_LEFT);
+
+	/* The segments cross, what direction is the crossing? */
+	return (pq1 < pq2 ? SEG_CROSS_RIGHT : SEG_CROSS_LEFT);
+}
+
+#define LINE_NO_CROSS				0
+#define LINE_CROSS_LEFT			   -1
+#define LINE_CROSS_RIGHT			1
+#define LINE_MULTICROSS_END_LEFT   -2
+#define LINE_MULTICROSS_END_RIGHT	2
+#define LINE_MULTICROSS_END_SAME_FIRST_LEFT	   -3
+#define LINE_MULTICROSS_END_SAME_FIRST_RIGHT	3
+
+STATIC_FUNCTION(cl_int)
+__geom_crossing_direction(kern_context *kcxt,
+						  const pg_geometry_t *geom1,
+						  const pg_geometry_t *geom2)
+{
+	/* see, lwline_crossing_direction */
+	POINT2D		p1, p2;
+	POINT2D		q1, q2;
+	int			unitsz1 = sizeof(double) * GEOM_FLAGS_NDIMS(geom1->flags);
+	int			unitsz2 = sizeof(double) * GEOM_FLAGS_NDIMS(geom2->flags);
+	const char *pos1;
+	const char *pos2;
+	int			cross_left = 0;
+	int			cross_right = 0;
+	int			first_cross = 0;
+	int			this_cross = 0;
+
+	/* one-point lines can't intersect (and shouldn't exist). */
+	if (geom1->nitems < 2 || geom2->nitems < 2)
+		return LINE_NO_CROSS;
+
+	pos2 = __loadPoint2d(&q1, geom2->rawdata, unitsz2);
+	for (int i=1; i < geom2->nitems; i++, q1=q2)
+	{
+		pos2 = __loadPoint2d(&q2, pos2, unitsz2);
+
+		pos1 = __loadPoint2d(&p1, geom1->rawdata, unitsz1);
+		for (int j=1; j < geom1->nitems; j++, p1=p2)
+		{
+			pos1 = __loadPoint2d(&p2, pos1, unitsz1);
+
+			this_cross = __geom_segment_intersects(&p1, &p2, &q1, &q2);
+			if (this_cross == SEG_CROSS_LEFT)
+			{
+				cross_left++;
+				if (!first_cross)
+					first_cross = SEG_CROSS_LEFT;
+			}
+			if (this_cross == SEG_CROSS_RIGHT)
+			{
+				cross_right++;
+				if (!first_cross)
+					first_cross = SEG_CROSS_RIGHT;
+			}
+		}
+	}
+
+    if (!cross_left && !cross_right)
+		return LINE_NO_CROSS;
+	if (!cross_left && cross_right == 1)
+        return LINE_CROSS_RIGHT;
+    if (!cross_right && cross_left == 1)
+        return LINE_CROSS_LEFT;
+	if (cross_left - cross_right == 1)
+        return LINE_MULTICROSS_END_LEFT;
+	if (cross_left - cross_right == -1)
+        return LINE_MULTICROSS_END_RIGHT;
+	if (cross_left - cross_right == 0 &&
+		first_cross == SEG_CROSS_LEFT)
+        return LINE_MULTICROSS_END_SAME_FIRST_LEFT;
+	if (cross_left - cross_right == 0 &&
+		first_cross == SEG_CROSS_RIGHT)
+		return LINE_MULTICROSS_END_SAME_FIRST_RIGHT;
+	return LINE_NO_CROSS;
+}
+
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_st_linecrossingdirection(kern_context *kcxt,
+							  const pg_geometry_t &geom1,
+							  const pg_geometry_t &geom2)
+{
+	pg_int4_t	result;
+
+	result.isnull = geom1.isnull | geom2.isnull;
+	if (!result.isnull)
+	{
+		if (geom1.srid != geom2.srid)
+		{
+			STROM_ELOG(kcxt, "Operation on mixed SRID geometries");
+			result.isnull = true;
+		}
+		else if (geom1.type != GEOM_LINETYPE ||
+				 geom2.type != GEOM_LINETYPE)
+		{
+			STROM_ELOG(kcxt,
+					   "St_LineCrossingDirection only accepts LINESTRING");
+			result.isnull = true;
+		}
+		else
+		{
+			result.value = __geom_crossing_direction(kcxt, &geom1, &geom2);
+		}
+	}
+	return result;
+}
+
+/* ================================================================
+ *
  * St_Contains(geometry,geometry)
  *
  * ================================================================

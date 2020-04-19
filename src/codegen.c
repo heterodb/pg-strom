@@ -1968,6 +1968,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  50, "g/f:st_distance" },
 	{ POSTGIS3, "bool st_dwithin(geometry,geometry,float8)",
 	  50, "g/f:st_dwithin" },
+	{ POSTGIS3, "int4 st_linecrossingdirection(geometry,geometry)",
+	  50, "g/f:st_linecrossingdirection" },
 	{ POSTGIS3, "bool st_contains(geometry,geometry)",
 	  9999, "g/f:st_contains" },
 };
