@@ -61,6 +61,10 @@ typedef double				cl_double;
 typedef cl_ulong			uintptr_t;
 #endif
 
+#define CL_SHORT_NBITS		(sizeof(cl_short) * BITS_PER_BYTE)
+#define CL_INT_NBITS		(sizeof(cl_int) * BITS_PER_BYTE)
+#define CL_LONG_NBITS		(sizeof(cl_long) * BITS_PER_BYTE)
+
 /* PG's utility macros */
 #ifndef PG_STROM_H
 #ifdef offsetof

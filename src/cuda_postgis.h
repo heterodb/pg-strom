@@ -226,6 +226,10 @@ DEVICE_FUNCTION(pg_int4_t)
 pgfn_st_linecrossingdirection(kern_context *kcxt,
 							  const pg_geometry_t &arg1,
 							  const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_text_t)
+pgfn_st_relate(kern_context *kcxt,
+			   const pg_geometry_t &arg1,
+			   const pg_geometry_t &arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_st_contains(kern_context *kcxt,
 				 const pg_geometry_t &arg1,

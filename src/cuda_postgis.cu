@@ -675,29 +675,27 @@ typedef struct
 #define PT_ERROR		9999
 
 STATIC_FUNCTION(int)
-__geom_contains_point_partial(const pg_geometry_t *geom,
-							  const POINT2D *pt,
-							  cl_bool check_closed,
-							  DISTPTS *dl)
+__geom_contains_point(const pg_geometry_t *ring,
+					  const POINT2D *pt,
+					  kern_context *kcxt)
 {
 	/* see ptarray_contains_point_partial */
-	cl_uint		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
+	cl_uint		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(ring->flags);
 	POINT2D		seg1, seg2;
 	int			side, wn = 0;
 
-	__loadPoint2d(&seg1, geom->rawdata, unitsz);
-	__loadPoint2d(&seg2, geom->rawdata + unitsz * (geom->nitems-1), unitsz);
-	if (check_closed && (!FP_EQUALS(seg1.x, seg2.x) ||
-						 !FP_EQUALS(seg1.y, seg2.y)))
+	__loadPoint2d(&seg1, ring->rawdata, unitsz);
+	__loadPoint2d(&seg2, ring->rawdata + unitsz * (ring->nitems-1), unitsz);
+	if (!FP_EQUALS(seg1.x, seg2.x) || !FP_EQUALS(seg1.y, seg2.y))
 	{
-		STROM_EREPORT(dl->kcxt, ERRCODE_DATA_CORRUPTED,
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
 					  "__geom_contains_point called on unclosed ring");
 		return PT_ERROR;
 	}
 
-	for (int i=1; i < geom->nitems; i++, seg1 = seg2)
+	for (int i=1; i < ring->nitems; i++, seg1 = seg2)
 	{
-		__loadPoint2d(&seg2, geom->rawdata + i * unitsz, unitsz);
+		__loadPoint2d(&seg2, ring->rawdata + i * unitsz, unitsz);
 		/* zero length segments are ignored. */
 		if (seg1.x == seg2.x && seg1.y == seg2.y)
 			continue;
@@ -731,14 +729,6 @@ __geom_contains_point_partial(const pg_geometry_t *geom,
 		}
 	}
 	return (wn == 0 ? PT_OUTSIDE : PT_INSIDE);
-}
-
-STATIC_INLINE(int)
-__geom_contains_point(const pg_geometry_t *geom,
-					  const POINT2D *pt,
-					  DISTPTS *dl)
-{
-	return __geom_contains_point_partial(geom, pt, true, dl);
 }
 
 STATIC_INLINE(cl_bool)
@@ -1669,7 +1659,7 @@ geom_dist2d_point_tri(const pg_geometry_t *geom1,
 	assert(geom1->type == GEOM_POINTTYPE &&
 		   geom2->type == GEOM_TRIANGLETYPE);
 	__loadPoint2d(&pt, geom1->rawdata, 0);
-	status = __geom_contains_point(geom2, &pt, dl);
+	status = __geom_contains_point(geom2, &pt, dl->kcxt);
 	if (status == PT_ERROR)
 		return false;
 	else if (status != PT_OUTSIDE)
@@ -1703,7 +1693,7 @@ geom_dist2d_point_poly(const pg_geometry_t *geom1,
 		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
 		if (!pos)
 			return false;
-		status = __geom_contains_point(&__geom, &pt, dl);
+		status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 		if (status == PT_ERROR)
 			return false;
 		if (i == 0)
@@ -1765,7 +1755,7 @@ geom_dist2d_point_curvepoly(const pg_geometry_t *geom1,
 		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
 		if (!pos)
 			return false;
-		status = __geom_contains_point(&__geom, &pt, dl);
+		status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 		if (status == PT_ERROR)
 			return false;
 		if (i == 0)
@@ -1809,7 +1799,7 @@ geom_dist2d_line_tri(const pg_geometry_t *geom1,
 		   geom2->type == GEOM_TRIANGLETYPE);
 	/* XXX why only point-0? */
 	__loadPoint2d(&pt, geom1->rawdata, 0);
-	if (__geom_contains_point(geom2, &pt, dl))
+	if (__geom_contains_point(geom2, &pt, dl->kcxt))
 	{
 		dl->distance = 0.0;
 		dl->p1 = pt;
@@ -1846,7 +1836,7 @@ geom_dist2d_line_poly(const pg_geometry_t *geom1,
 			/* Line has a point outside of the polygon.
 			 * Check distance to outer ring only.
 			 */
-			status = __geom_contains_point(&__geom, &pt0, dl);
+			status = __geom_contains_point(&__geom, &pt0, dl->kcxt);
 			if (status == PT_ERROR)
 				return false;
 			if (status == PT_OUTSIDE)
@@ -1861,7 +1851,7 @@ geom_dist2d_line_poly(const pg_geometry_t *geom1,
 				return true;
 			if (!meet_inside)
 			{
-				status = __geom_contains_point(&__geom, &pt0, dl);
+				status = __geom_contains_point(&__geom, &pt0, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -1915,7 +1905,7 @@ geom_dist2d_line_curvepoly(const pg_geometry_t *geom1,
 			return false;
 		if (i == 0)
 		{
-			status = __geom_contains_point(&__geom, &pt0, dl);
+			status = __geom_contains_point(&__geom, &pt0, dl->kcxt);
 			if (status == PT_ERROR)
 				return false;
 			if (status == PT_OUTSIDE)
@@ -1930,7 +1920,7 @@ geom_dist2d_line_curvepoly(const pg_geometry_t *geom1,
 				return true;
 			if (!meet_inside)
 			{
-				status = __geom_contains_point(&__geom, &pt0, dl);
+				status = __geom_contains_point(&__geom, &pt0, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -1961,7 +1951,7 @@ geom_dist2d_tri_tri(const pg_geometry_t *geom1,
 		   geom2->type == GEOM_TRIANGLETYPE);
 
 	__loadPoint2d(&pt, geom2->rawdata, 0);
-	status = __geom_contains_point(geom1, &pt, dl);
+	status = __geom_contains_point(geom1, &pt, dl->kcxt);
 	if (status == PT_ERROR)
 		return false;
 	else if (status != PT_OUTSIDE)
@@ -1973,7 +1963,7 @@ geom_dist2d_tri_tri(const pg_geometry_t *geom1,
 	}
 
 	__loadPoint2d(&pt, geom1->rawdata, 0);
-	status = __geom_contains_point(geom2, &pt, dl);
+	status = __geom_contains_point(geom2, &pt, dl->kcxt);
 	if (status == PT_ERROR)
 		return false;
 	else if (status != PT_OUTSIDE)
@@ -2009,7 +1999,7 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 			return false;
 		if (i == 0)
 		{
-			status = __geom_contains_point(&__geom, &pt, dl);
+			status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 			if (status == PT_ERROR)
 				return false;
 			if (status == PT_OUTSIDE)
@@ -2022,7 +2012,7 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 				if (dl->distance <= dl->tolerance)
 					return true;
 				__loadPoint2d(&pt2, __geom.rawdata, 0);
-				status = __geom_contains_point(geom1, &pt2, dl);
+				status = __geom_contains_point(geom1, &pt2, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -2043,7 +2033,7 @@ geom_dist2d_tri_poly(const pg_geometry_t *geom1,
 				return true;
 			if (!meet_inside)
 			{
-				status = __geom_contains_point(&__geom, &pt, dl);
+				status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -2074,7 +2064,7 @@ geom_dist2d_tri_circstring(const pg_geometry_t *geom1,
 		   geom2->type == GEOM_CIRCSTRINGTYPE);
 
 	__loadPoint2d(&pt, geom2->rawdata, 0);
-	status = __geom_contains_point(geom1, &pt, dl);
+	status = __geom_contains_point(geom1, &pt, dl->kcxt);
 	if (status == PT_ERROR)
 		return false;
 	if (status != PT_OUTSIDE)
@@ -2134,7 +2124,7 @@ geom_dist2d_tri_curvepoly(const pg_geometry_t *geom1,
 			return false;
 		if (i == 0)
 		{
-			status = __geom_contains_point(&__geom, &pt, dl);
+			status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 			if (status == PT_ERROR)
 				return false;
 			if (status == PT_OUTSIDE)
@@ -2146,7 +2136,7 @@ geom_dist2d_tri_curvepoly(const pg_geometry_t *geom1,
 				if (!__geom_curvering_getfirstpoint2d(&pt2, &__geom, dl))
 					return false;
 				/* maybe poly is inside triangle? */
-				status = __geom_contains_point(geom1, &pt2, dl);
+				status = __geom_contains_point(geom1, &pt2, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -2167,7 +2157,7 @@ geom_dist2d_tri_curvepoly(const pg_geometry_t *geom1,
 				return true;
 			if (!meet_inside)
 			{
-				status = __geom_contains_point(&__geom, &pt, dl);
+				status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 				if (status == PT_ERROR)
 					return false;
 				if (status != PT_OUTSIDE)
@@ -2245,13 +2235,13 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	 * for the smaller ones in the bigger ones holes.
 	 */
 	__loadPoint2d(&pt, __geom1.rawdata, 0);
-	status = __geom_contains_point(&__geom2, &pt, dl);
+	status = __geom_contains_point(&__geom2, &pt, dl->kcxt);
 	if (status == PT_ERROR)
 		return false;
 	if (status == PT_OUTSIDE)
 	{
 		__loadPoint2d(&pt, __geom2.rawdata, 0);
-		status = __geom_contains_point(&__geom1, &pt, dl);
+		status = __geom_contains_point(&__geom1, &pt, dl->kcxt);
 		if (status == PT_ERROR)
 			return false;
 		if (status == PT_OUTSIDE)
@@ -2267,7 +2257,7 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 		pos1 = geometry_load_subitem(&__gtemp, geom1, pos1, i, dl->kcxt);
 		if (!pos1)
 			return false;
-		status = __geom_contains_point(&__gtemp, &pt, dl);
+		status = __geom_contains_point(&__gtemp, &pt, dl->kcxt);
 		if (status == PT_ERROR)
 			return false;
 		if (status != PT_OUTSIDE)
@@ -2283,7 +2273,7 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 		 pos2 = geometry_load_subitem(&__gtemp, geom2, pos2, i, dl->kcxt);
 		 if (!pos2)
 			 return false;
-		 status = __geom_contains_point(&__gtemp, &pt, dl);
+		 status = __geom_contains_point(&__gtemp, &pt, dl->kcxt);
 		 if (status == PT_ERROR)
 			 return false;
 		 if (status != PT_OUTSIDE)
@@ -2295,7 +2285,7 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	  * not in holes so we check wich one is inside.
 	  */
 	 __loadPoint2d(&pt, __geom1.rawdata, 0);
-	 status = __geom_contains_point(&__geom2, &pt, dl);
+	 status = __geom_contains_point(&__geom2, &pt, dl->kcxt);
 	 if (status == PT_ERROR)
 		 return false;
 	 if (status != PT_OUTSIDE)
@@ -2307,7 +2297,7 @@ __geom_dist2d_xpoly_xpoly(const pg_geometry_t *geom1,
 	 }
 
 	 __loadPoint2d(&pt, __geom2.rawdata, 0);
-	 status = __geom_contains_point(&__geom1, &pt, dl);
+	 status = __geom_contains_point(&__geom1, &pt, dl->kcxt);
 	 if (status == PT_ERROR)
 		 return false;
 	 if (status != PT_OUTSIDE)
@@ -3055,3 +3045,675 @@ error:
 	result.isnull = true;
 	return result;
 }
+
+/* ================================================================
+ *
+ * Routines to generate intersection-matrix
+ *
+ * ================================================================
+ */
+#define IM__INTER_INTER_0D		0000000001U
+#define IM__INTER_INTER_1D		0000000003U
+#define IM__INTER_INTER_2D		0000000007U
+#define IM__INTER_BOUND_0D		0000000010U
+#define IM__INTER_BOUND_1D		0000000030U
+#define IM__INTER_BOUND_2D		0000000070U
+#define IM__INTER_EXTER_0D		0000000100U
+#define IM__INTER_EXTER_1D		0000000300U
+#define IM__INTER_EXTER_2D		0000000700U
+#define IM__BOUND_INTER_0D		0000001000U
+#define IM__BOUND_INTER_1D		0000003000U
+#define IM__BOUND_INTER_2D		0000007000U
+#define IM__BOUND_BOUND_0D		0000010000U
+#define IM__BOUND_BOUND_1D		0000030000U
+#define IM__BOUND_BOUND_2D		0000070000U
+#define IM__BOUND_EXTER_0D		0000100000U
+#define IM__BOUND_EXTER_1D		0000300000U
+#define IM__BOUND_EXTER_2D		0000700000U
+#define IM__EXTER_INTER_0D		0001000000U
+#define IM__EXTER_INTER_1D		0003000000U
+#define IM__EXTER_INTER_2D		0007000000U
+#define IM__EXTER_BOUND_0D		0010000000U
+#define IM__EXTER_BOUND_1D		0030000000U
+#define IM__EXTER_BOUND_2D		0070000000U
+#define IM__EXTER_EXTER_0D		0100000000U
+#define IM__EXTER_EXTER_1D		0300000000U
+#define IM__EXTER_EXTER_2D		0700000000U
+
+STATIC_INLINE(cl_int)
+IM__TWIST(cl_int status)
+{
+	if (status < 0)
+		return status;		/* error */
+	return (((status & IM__INTER_INTER_2D))       |
+			((status & IM__INTER_BOUND_2D) <<  6) |
+			((status & IM__INTER_EXTER_2D) << 12) |
+			((status & IM__BOUND_INTER_2D) >>  6) |
+			((status & IM__BOUND_BOUND_2D))       |
+			((status & IM__BOUND_EXTER_2D) <<  6) |
+			((status & IM__EXTER_INTER_2D) >> 12) |
+			((status & IM__EXTER_BOUND_2D) >>  6) |
+			((status & IM__EXTER_EXTER_2D)));
+}
+
+STATIC_INLINE(cl_int)
+__geom_relate_pt_pt(kern_context *kcxt,
+					const pg_geometry_t *geom1,
+					const pg_geometry_t *geom2)
+{
+	pg_geometry_t	__geom;
+	const char	   *pos;
+	POINT2D			pt1, pt2;
+
+	if (geom1->type == GEOM_POINTTYPE)
+		__loadPoint2d(&pt1, geom1->rawdata, 0);
+	else
+	{
+		pos = geometry_load_subitem(&__geom, geom1, NULL, 0);
+		if (!pos)
+			return -1;
+		__loadPoint2d(&pt1, __geom.rawdata, 0);
+	}
+
+	if (geom2->type == GEOM_POINTTYPE)
+		__loadPoint2d(&pt2, geom2->rawdata, 0);
+	else
+	{
+		pos = geometry_load_subitem(&__geom, geom2, NULL, 0);
+		if (!pos)
+			return -1;
+		__loadPoint2d(&pt2, __geom.rawdata, 0);
+	}
+
+	if (pt1.x == pt2.y && pt1.y == pt2.y)
+		return (IM__INTER_INTER_0D | IM__EXTER_EXTER_2D);
+
+	return (IM__INTER_EXTER_0D | IM__EXTER_INTER_0D | IM__EXTER_EXTER_2D);
+}
+
+STATIC_FUNCTION(cl_int)
+__geom_relate_pt_ptarray(kern_context *kcxt,
+						 const pg_geometry_t *geom1,
+						 const pg_geometry_t *geom2)
+{
+	pg_geometry_t	__geom;
+	const char	   *pos = NULL;
+	POINT2D			pt0, pt1;
+	cl_uint			nitems;
+	cl_bool			matched = false;
+	cl_bool			unmatched = false;
+	cl_int			retval = IM__EXTER_EXTER_2D;
+
+	assert(geom1->type == GEOM_POINTTYPE);
+	__loadPoint2d(&pt0, geom1->rawdata, 0);
+
+	nitems = (geom2->type == GEOM_POINTTYPE ? 1 : geom2->nitems);
+	for (int i=0; i < nitems; i++)
+	{
+		if (geom2->type == GEOM_POINTTYPE)
+			__loadPoint2d(&pt1, geom2->rawdata, 0);
+		else
+		{
+			pos = geometry_load_subitem(&__geom, geom2, pos, i);
+			if (!pos)
+				return -1;
+			__loadPoint2d(&pt1, __geom.rawdata, 0);
+		}
+		if (pt0.x == pt1.x && pt0.y == pt1.y)
+			matched = true;
+		else
+			unmatched = true;
+		if (matched && unmatched)
+			break;
+	}
+
+	if (matched)
+	{
+		retval |= IM__INTER_INTER_0D;
+		if (unmatched)
+			retval |= IM__EXTER_INTER_0D;
+	}
+	else if (unmatched)
+		retval |= IM__INTER_EXTER_0D | IM__EXTER_INTER_0D;
+
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_point_point(kern_context *kcxt,
+						const pg_geometry_t *geom1,
+						const pg_geometry_t *geom2)
+{
+	const char	   *pos;
+	pg_geometry_t	__geom;
+	cl_int			retval, mask;
+	cl_int			status;
+
+	assert((geom1->type == GEOM_POINTTYPE ||
+			geom1->type == GEOM_MULTIPOINTTYPE) &&
+		   (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE));
+
+	/* shortcut if either-geometry is empty */
+	if (geom1->nitems == 0 && geom2->nitems == 0)
+		return IM__EXTER_EXTER_2D;
+	if (geom1->nitems == 0)
+		return IM__EXTER_INTER_0D | IM__EXTER_EXTER_2D;
+	if (geom2->nitems == 0)
+		return IM__INTER_EXTER_0D | IM__EXTER_EXTER_2D;
+
+	if (geom1->type == GEOM_POINTTYPE || geom1->nitems == 1)
+	{
+		/* 1:1 case */
+		if (geom2->type == GEOM_POINTTYPE || geom2->nitems == 1)
+			return __geom_relate_pt_pt(kcxt, geom1, geom2);
+		/* 1:N case */
+		return __geom_relate_pt_ptarray(kcxt, geom1, geom2);
+	}
+	/* N:1 case */
+	if (geom2->type == GEOM_POINTTYPE || geom2->nitems == 1)
+		return IM__TWIST(__geom_relate_pt_ptarray(kcxt, geom2, geom1));
+
+	/* Elsewhere, N:M cases */
+	retval = IM__EXTER_EXTER_2D;
+	mask = IM__INTER_INTER_0D | IM__INTER_EXTER_0D;
+	for (int i=0; i < geom1->nitems; i++)
+	{
+		pos = geometry_load_subitem(&__geom, geom1, pos, i);
+		if (!pos)
+			return -1;
+		status = __geom_relate_pt_ptarray(kcxt, &__geom, geom2);
+		if (status < 0)
+			return -1;
+		retval |= (status & IM__INTER_INTER_0D);
+		if (status & IM__INTER_EXTER_0D)
+			retval |= IM__INTER_EXTER_0D;
+		if ((retval & mask) == mask)
+			break;
+	}
+
+	mask = IM__INTER_INTER_0D | IM__EXTER_INTER_0D;
+	for (int j=0; j < geom2->nitems; j++)
+	{
+		pos = geometry_load_subitem(&__geom, geom2, pos, j);
+		if (!pos)
+			return -1;
+		status = __geom_relate_pt_ptarray(kcxt, &__geom, geom1);
+		if (status < 0)
+			return -1;
+		retval |= (status & IM__INTER_INTER_0D);
+		if (status & IM__INTER_EXTER_0D)
+			retval |= IM__EXTER_INTER_0D;	/* twisted */
+		if ((retval & mask) == mask)
+			break;
+	}
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_point_line(kern_context *kcxt,
+					   const pg_geometry_t *geom1,	/* (multi)point */
+					   const pg_geometry_t *geom2)	/* (multi)line */
+{
+	const char *pos1 = NULL;
+	const char *pos2 = NULL;
+	cl_uint		nloops1;
+	cl_uint		nloops2;
+	cl_int		retval;
+	cl_uint		unitsz;
+
+	assert((geom1->type == GEOM_POINTTYPE ||
+			geom1->type == GEOM_MULTIPOINTTYPE) &&
+		   (geom2->type == GEOM_LINETYPE ||
+			geom2->type == GEOM_MULTILINETYPE));
+	/* shortcut if either-geometry is empty */
+	if (geom1->nitems == 0 && geom2->nitems == 0)
+		return IM__EXTER_EXTER_2D;
+    if (geom1->nitems == 0)
+		return IM__EXTER_INTER_1D | IM__EXTER_BOUND_0D | IM__EXTER_EXTER_2D;
+	if (geom2->nitems == 0)
+		return IM__INTER_EXTER_0D | IM__EXTER_EXTER_2D;
+
+	nloops1 = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
+	nloops2 = (geom2->type == GEOM_LINETYPE  ? 1 : geom2->nitems);
+
+	retval = IM__EXTER_INTER_1D | IM__EXTER_EXTER_2D;
+	unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom2->flags);
+	for (int base=0; base < nloops2; base += CL_LONG_NBITS)
+	{
+		cl_ulong	head_matched = 0UL;
+		cl_ulong	tail_matched = 0UL;
+		cl_ulong	__mask;
+	
+		/* walks on for each points */
+		for (int i=0; i < nloops1; i++)
+		{
+			POINT2D		pt;
+			cl_bool		matched = false;
+
+			/* fetch a point */
+			if (geom1->type == GEOM_POINTTYPE)
+				__loadPoint2d(&pt, geom1->rawdata, 0);
+			else
+			{
+				pg_geometry_t   __temp1;
+
+				pos1 = geometry_load_subitem(&__temp1, geom1, pos1, i);
+				if (!pos1)
+					return -1;
+				__loadPoint2d(&pt, __temp1.rawdata, 0);
+			}
+
+			/* walks on for each linestrings */
+			for (int j=0; j < nloops2; j++)
+			{
+				pg_geometry_t	__line_data;
+				const pg_geometry_t *line;
+				const char	   *lpos;
+				POINT2D			seg1, seg2;
+
+				/* fetch a linestring */
+				if (geom2->type == GEOM_LINETYPE)
+					line = geom2;
+				else
+				{
+					pos2 = geometry_load_subitem(&__line_data, geom2, pos2, j);
+					if (!pos2)
+						return -1;
+					line = &__line_data;
+				}
+				/* walks on vertex of the line edges */
+				lpos = __loadPoint2d(&seg1, line->rawdata, unitsz);
+				for (int k=2; k <= line->nitems; k++, seg1=seg2)
+				{
+					lpos = __loadPoint2d(&seg2, lpos, unitsz);
+
+					if (k==2 && pt.x==seg1.x && pt.y==seg1.y)
+					{
+						/* edge case handling (head) */
+						retval |= IM__INTER_BOUND_0D;
+						matched = true;
+						if (j >= base && j < base + CL_LONG_NBITS)
+							head_matched |= (1UL << (j - base));
+					}
+					else if (k==line->nitems && pt.x==seg2.x && pt.y==seg2.y)
+					{
+						/* edge case handling (tail) */
+						retval |= IM__INTER_BOUND_0D;
+						matched = true;
+						if (j >= base && j < base + CL_LONG_NBITS)
+							tail_matched |= (1UL << (j - base));
+					}
+					else if (__geom_segment_side(&seg1, &seg2, &pt) == 0 &&
+							 __geom_pt_in_seg(&pt, &seg1, &seg2))
+					{
+						retval |= IM__INTER_INTER_0D;
+						matched = true;
+					}
+				}
+			}
+			/*
+			 * This point is neither interior nor boundary of linestrings
+			 */
+			if (!matched)
+				retval |= IM__INTER_EXTER_0D;
+		}
+		/*
+		 * If herea are any linestring-edges not referenced by the points,
+		 * it needs to set EXTER-BOUND item.
+		 */
+		if (base + CL_LONG_NBITS >= nloops2)
+			__mask = (1UL << (nloops2 - base)) - 1;
+		else
+			__mask = ~0UL;
+		if (head_matched != __mask || tail_matched != __mask)
+		{
+			retval |= IM__EXTER_BOUND_0D;
+			break;
+		}
+	}
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_point_tri(kern_context *kcxt,
+					  const pg_geometry_t *geom1,
+					  const pg_geometry_t *geom2)
+{
+	cl_uint		nloops;
+	cl_int		retval, f_mask;
+	const char *pos = NULL;
+
+	assert((geom1->type == GEOM_POINTTYPE ||
+			geom1->type == GEOM_MULTIPOINTTYPE) &&
+		   (geom2->type == GEOM_TRIANGLETYPE));
+
+	nloops = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
+	retval = IM__EXTER_INTER_2D | IM__EXTER_INTER_1D | IM__EXTER_EXTER_2D;
+	f_mask = IM__INTER_INTER_0D | IM__INTER_BOUND_0D | IM__INTER_EXTER_0D;
+	for (int i=0; i < nloops; i++)
+	{
+		POINT2D		pt;
+		cl_int		status;
+
+		if (geom1->type == GEOM_POINTTYPE)
+			__loadPoint2d(&pt, geom1->rawdata, 0);
+		else
+		{
+			pg_geometry_t __temp;
+
+			pos = geometry_load_subitem(&__temp, geom1, pos, i, kcxt);
+			if (!pos)
+				return -1;
+			__loadPoint2d(&pt, __temp.rawdata, 0);
+		}
+		status = __geom_contains_point(geom2, &pt, kcxt);
+		if (status == PT_INSIDE)
+			retval |= IM__INTER_INTER_0D;
+		else if (status == PT_BOUNDARY)
+			retval |= IM__INTER_BOUND_0D;
+		else if (status == PT_OUTSIDE)
+			retval |= IM__INTER_EXTER_0D;
+		else
+			return -1;
+		/* no longer we need to walk on the points */
+		if ((retval & f_mask) == f_mask)
+			break;
+	}
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_point_poly(kern_context *kcxt,
+					   const pg_geometry_t *geom1,
+					   const pg_geometry_t *geom2)
+{
+	cl_uint		nloops1;
+	cl_uint		nloops2;
+	const char *pos1 = NULL;
+	const char *pos2 = NULL;
+	cl_int		retval, f_mask;
+
+	assert((geom1->type == GEOM_POINTTYPE ||
+			geom1->type == GEOM_MULTIPOINTTYPE) &&
+           (geom2->type == GEOM_POLYGONTYPE ||
+			geom2->type == GEOM_MULTIPOLYGONTYPE));
+	nloops1 = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
+	nloops2 = (geom2->type == GEOM_POLYGONTYPE ? 1 : geom2->nitems);
+
+	retval = (IM__EXTER_INTER_2D |
+			  IM__EXTER_BOUND_1D |
+			  IM__EXTER_EXTER_2D);
+	f_mask = (IM__INTER_EXTER_0D |
+			  IM__INTER_BOUND_0D |
+			  IM__INTER_INTER_0D | retval);
+	for (int i=0; i < nloops1; i++)
+	{
+		pg_geometry_t __temp;
+		POINT2D		pt;
+
+		if (geom1->type == GEOM_POINTTYPE)
+			__loadPoint2d(&pt, geom1->rawdata, 0);
+		else
+		{
+			pos1 = geometry_load_subitem(&__temp, geom1, pos1, i, kcxt);
+			if (!pos1)
+				return -1;
+			__loadPoint2d(&pt, __temp.rawdata, 0);
+		}
+
+		for (int j=0; j < nloops2; j++)
+		{
+			const pg_geometry_t *poly;
+			cl_int		status;
+
+			if (geom2->type == GEOM_POLYGONTYPE)
+				poly = geom2;
+			else
+			{
+				pos2 = geometry_load_subitem(&__temp, geom2, pos2, j, kcxt);
+				if (!pos2)
+					return -1;
+				poly = &__temp;
+			}
+
+			/*
+			 * shortcut by boundary-box of the polygon, if any
+			 */
+			if (poly->bbox)
+			{
+				geom_bbox_2d   *bbox = &poly->bbox->d2;
+
+				if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
+					pt.y < bbox->ymin || pt.y > bbox->ymax)
+				{
+					retval |= IM__INTER_EXTER_0D;
+					if ((retval & f_mask) == f_mask)
+						return retval;	/* no need to walk on any more */
+					continue;
+				}
+			}
+			/*
+			 * dive into the polygon
+			 */
+			status = __geom_point_in_polygon(poly, &pt, kcxt);
+			if (status == PT_OUTSIDE)
+				retval |= IM__INTER_EXTER_0D;
+			else if (status == PT_BOUNDARY)
+				retval |= IM__INTER_BOUND_0D;
+			else if (status == PT_INSIDE)
+				retval |= IM__INTER_INTER_0D;
+			else
+				return -1;	/* error */
+
+			if ((retval & f_mask) == f_mask)
+				return retval;	/* no need to walk on any more */
+		}
+	}
+	return retval;
+}
+
+
+
+STATIC_FUNCTION(cl_int)
+geom_relate_internal(kern_context *kcxt,
+					 const pg_geometry_t *geom1,
+					 const pg_geometry_t *geom2)
+{
+	assert(!geom1->isnull && !geom2->isnull);
+	switch (geom1->type)
+	{
+		case GEOM_POINTTYPE:
+		case GEOM_MULTIPOINTTYPE:
+			switch (geom2->type)
+			{
+				case GEOM_POINTTYPE:
+				case GEOM_MULTIPOINTTYPE:
+					return geom_relate_point_point(kcxt, geom1, geom2);
+				case GEOM_LINETYPE:
+				case GEOM_MULTILINETYPE:
+					return geom_relate_point_line(kcxt, geom1, geom2);
+
+				case GEOM_TRIANGLETYPE:
+					return geom_relate_point_tri(kcxt, geom1, geom2);
+
+				case GEOM_POLYGONTYPE:
+				case GEOM_MULTIPOLYGONTYPE:
+					return geom_relate_point_poly(kcxt, geom1, geom2);
+
+				default:
+					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									   "unsupported geometry type");
+					break;
+			}
+			break;
+		case GEOM_LINETYPE:
+		case GEOM_MULTILINETYPE:
+			switch (geom2->type)
+			{
+				case GEOM_POINTTYPE:
+				case GEOM_MULTIPOINTTYPE:
+					return IM__TWIST(geom_relate_point_line(kcxt,
+															geom2, geom1));
+				case GEOM_LINETYPE:
+				case GEOM_MULTILINETYPE:
+
+				case GEOM_TRIANGLETYPE:
+
+				case GEOM_POLYGONTYPE:
+				case GEOM_MULTIPOLYGONTYPE:
+
+				default:
+					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									   "unsupported geometry type");
+					break;
+			}
+			break;
+		case GEOM_TRIANGLETYPE:
+			switch (geom2->type)
+			{
+				case GEOM_POINTTYPE:
+				case GEOM_MULTIPOINTTYPE:
+					return IM__TWIST(geom_relate_point_tri(kcxt,
+														   geom2, geom1));
+				case GEOM_LINETYPE:
+				case GEOM_MULTILINETYPE:
+
+				case GEOM_TRIANGLETYPE:
+
+				case GEOM_POLYGONTYPE:
+				case GEOM_MULTIPOLYGONTYPE:
+
+				default:
+					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									   "unsupported geometry type");
+					break;
+			}
+			break;
+		case GEOM_POLYGONTYPE:
+		case GEOM_MULTIPOLYGONTYPE:
+			switch (geom2->type)
+			{
+				case GEOM_POINTTYPE:
+				case GEOM_MULTIPOINTTYPE:
+					return IM__TWIST(geom_relate_point_poly(kcxt,
+															geom2, geom1));
+				case GEOM_LINETYPE:
+				case GEOM_MULTILINETYPE:
+
+				case GEOM_TRIANGLETYPE:
+
+				case GEOM_POLYGONTYPE:
+				case GEOM_MULTIPOLYGONTYPE:
+
+				default:
+					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+									   "unsupported geometry type");
+					break;
+			}
+			break;
+		default:
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+							   "unsupported geometry type");
+			break;
+	}
+	return -1;	/* error */
+}
+
+/* ================================================================
+ *
+ * St_Relate(geometry,geometry)
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(pg_text_t)
+pgfn_st_relate(kern_context *kcxt,
+			   const pg_geometry_t &geom1,
+			   const pg_geometry_t &geom2)
+{
+	pg_text_t	result;
+	cl_int		status;
+	char	   *pos;
+
+	memset(&result, 0, sizeof(pg_bool_t));
+	result.isnull = geom1.isnull | geom2.isnull;
+	if (result.isnull)
+		return result;
+
+	status = geom_relate_internal(kcxt, &geom1, &geom2);
+	if (status < 0)
+	{
+		result.isnull = true;
+		return result;
+	}
+
+	pos = (char *)kern_context_alloc(kcxt, VARHDRSZ + 9);
+	if (!pos)
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
+						   "out of memory");
+		result.isnull = true;
+		return result;
+	}
+	result.value = pos;
+	result.length = -1;
+	SET_VARSIZE(pos, VARHDRSZ + 9);
+
+	pos += VARHDRSZ;
+	for (int i=0; i < 9; i++, status >>= 3)
+	{
+		int		mask = (status & 0x7);
+
+		*pos++ = ((mask & 0x04) != 0 ? '2' :
+				  (mask & 0x02) != 0 ? '1' :
+				  (mask & 0x01) != 0 ? '0' : 'F');
+	}
+	return result;
+}
+
+/* ================================================================
+ *
+ * St_Crosses(geometry,geometry)
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_crosses(kern_context *kcxt,
+				const pg_geometry_t &geom1,
+				const pg_geometry_t &geom2)
+{
+	pg_bool_t	result;
+	int			status;
+
+	memset(&result, 0, sizeof(pg_bool_t));
+	result.isnull = geom1.isnull | geom2.isnull;
+	if (result.isnull)
+		return result;
+
+	if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+		return result;
+
+	/*
+	 * shortcut: if bounding boxes are disjoint obviously,
+	 * we can return FALSE immediately.
+	 */
+	if (geom1.bbox && geom2.bbox)
+	{
+		geom_bbox_2d   *bbox1 = &geom1.bbox->d2;
+		geom_bbox_2d   *bbox2 = &geom2.bbox->d2;
+
+		if (bbox1->xmax < bbox2->xmin || bbox1->ymax < bbox2->ymin ||
+			bbox1->xmin > bbox2->xmax || bbox1->ymin > bbox2->ymax)
+			return result;
+	}
+	status = geom_relate_internal(kcxt, &geom1, &geom2);
+	if (status < 0)
+		result.isnull = true;
+	else
+	{
+		//assign result
+		result.value = true;
+	}
+	return result;
+}
+

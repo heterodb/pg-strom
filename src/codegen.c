@@ -886,6 +886,14 @@ vlbuf_estimate__st_makepoint(codegen_context *context,
 	return sizeof(cl_double) * nargs;
 }
 
+static int
+vlbuf_estimate__st_relate(codegen_context *context,
+						  devfunc_info *dfunc,
+						  Expr **args, int *vl_width)
+{
+	return VARHDRSZ + 9;
+}
+
 /*
  * Catalog of functions supported by device code
  *
@@ -1970,8 +1978,12 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  50, "g/f:st_dwithin" },
 	{ POSTGIS3, "int4 st_linecrossingdirection(geometry,geometry)",
 	  50, "g/f:st_linecrossingdirection" },
+	{ POSTGIS3, "text st_relate(geometry,geometry)",
+	  999, "g/f:st_relate", vlbuf_estimate__st_relate },
 	{ POSTGIS3, "bool st_contains(geometry,geometry)",
-	  9999, "g/f:st_contains" },
+	  999, "g/f:st_contains" },
+	{ POSTGIS3, "bool st_crosses(geometry,geometry)",
+	  999, "g/f:st_crosses" },
 };
 #undef PGSTROM
 #undef POSTGIS3
