@@ -111,6 +111,7 @@ setup_geometry_rawsize(pg_geometry_t *geom)
 					__geom.flags = geom->flags;
 					__geom.nitems = __Fetch((cl_uint *)pos);
 					pos += sizeof(cl_uint);
+					__geom.rawdata = pos;
 					if (!setup_geometry_rawsize(&__geom))
 						return false;
 					pos += __geom.rawsize;
@@ -3096,98 +3097,17 @@ IM__TWIST(cl_int status)
 			((status & IM__EXTER_EXTER_2D)));
 }
 
-STATIC_INLINE(cl_int)
-__geom_relate_pt_pt(kern_context *kcxt,
-					const pg_geometry_t *geom1,
-					const pg_geometry_t *geom2)
-{
-	pg_geometry_t	__geom;
-	const char	   *pos;
-	POINT2D			pt1, pt2;
-
-	if (geom1->type == GEOM_POINTTYPE)
-		__loadPoint2d(&pt1, geom1->rawdata, 0);
-	else
-	{
-		pos = geometry_load_subitem(&__geom, geom1, NULL, 0);
-		if (!pos)
-			return -1;
-		__loadPoint2d(&pt1, __geom.rawdata, 0);
-	}
-
-	if (geom2->type == GEOM_POINTTYPE)
-		__loadPoint2d(&pt2, geom2->rawdata, 0);
-	else
-	{
-		pos = geometry_load_subitem(&__geom, geom2, NULL, 0);
-		if (!pos)
-			return -1;
-		__loadPoint2d(&pt2, __geom.rawdata, 0);
-	}
-
-	if (pt1.x == pt2.y && pt1.y == pt2.y)
-		return (IM__INTER_INTER_0D | IM__EXTER_EXTER_2D);
-
-	return (IM__INTER_EXTER_0D | IM__EXTER_INTER_0D | IM__EXTER_EXTER_2D);
-}
-
-STATIC_FUNCTION(cl_int)
-__geom_relate_pt_ptarray(kern_context *kcxt,
-						 const pg_geometry_t *geom1,
-						 const pg_geometry_t *geom2)
-{
-	pg_geometry_t	__geom;
-	const char	   *pos = NULL;
-	POINT2D			pt0, pt1;
-	cl_uint			nitems;
-	cl_bool			matched = false;
-	cl_bool			unmatched = false;
-	cl_int			retval = IM__EXTER_EXTER_2D;
-
-	assert(geom1->type == GEOM_POINTTYPE);
-	__loadPoint2d(&pt0, geom1->rawdata, 0);
-
-	nitems = (geom2->type == GEOM_POINTTYPE ? 1 : geom2->nitems);
-	for (int i=0; i < nitems; i++)
-	{
-		if (geom2->type == GEOM_POINTTYPE)
-			__loadPoint2d(&pt1, geom2->rawdata, 0);
-		else
-		{
-			pos = geometry_load_subitem(&__geom, geom2, pos, i);
-			if (!pos)
-				return -1;
-			__loadPoint2d(&pt1, __geom.rawdata, 0);
-		}
-		if (pt0.x == pt1.x && pt0.y == pt1.y)
-			matched = true;
-		else
-			unmatched = true;
-		if (matched && unmatched)
-			break;
-	}
-
-	if (matched)
-	{
-		retval |= IM__INTER_INTER_0D;
-		if (unmatched)
-			retval |= IM__EXTER_INTER_0D;
-	}
-	else if (unmatched)
-		retval |= IM__INTER_EXTER_0D | IM__EXTER_INTER_0D;
-
-	return retval;
-}
-
 STATIC_FUNCTION(cl_int)
 geom_relate_point_point(kern_context *kcxt,
 						const pg_geometry_t *geom1,
 						const pg_geometry_t *geom2)
 {
-	const char	   *pos;
-	pg_geometry_t	__geom;
-	cl_int			retval, mask;
-	cl_int			status;
+	const char *pos1 = NULL;
+	const char *pos2 = NULL;
+	cl_int		nloops1;
+	cl_int		nloops2;
+	cl_int		retval;
+	cl_bool		twist_retval = false;
 
 	assert((geom1->type == GEOM_POINTTYPE ||
 			geom1->type == GEOM_MULTIPOINTTYPE) &&
@@ -3202,58 +3122,86 @@ geom_relate_point_point(kern_context *kcxt,
 	if (geom2->nitems == 0)
 		return IM__INTER_EXTER_0D | IM__EXTER_EXTER_2D;
 
-	if (geom1->type == GEOM_POINTTYPE || geom1->nitems == 1)
+	/*
+	 * micro optimization: geom2 should have smaller number of items
+	 */
+	if (geom2->type != GEOM_POINTTYPE)
 	{
-		/* 1:1 case */
-		if (geom2->type == GEOM_POINTTYPE || geom2->nitems == 1)
-			return __geom_relate_pt_pt(kcxt, geom1, geom2);
-		/* 1:N case */
-		return __geom_relate_pt_ptarray(kcxt, geom1, geom2);
+		if (geom1->type == GEOM_POINTTYPE ||
+			geom1->nitems < geom2->nitems)
+		{
+			__swap(geom1, geom2);
+			twist_retval = true;
+		}
 	}
-	/* N:1 case */
-	if (geom2->type == GEOM_POINTTYPE || geom2->nitems == 1)
-		return IM__TWIST(__geom_relate_pt_ptarray(kcxt, geom2, geom1));
-
-	/* Elsewhere, N:M cases */
 	retval = IM__EXTER_EXTER_2D;
-	mask = IM__INTER_INTER_0D | IM__INTER_EXTER_0D;
-	for (int i=0; i < geom1->nitems; i++)
-	{
-		pos = geometry_load_subitem(&__geom, geom1, pos, i);
-		if (!pos)
-			return -1;
-		status = __geom_relate_pt_ptarray(kcxt, &__geom, geom2);
-		if (status < 0)
-			return -1;
-		retval |= (status & IM__INTER_INTER_0D);
-		if (status & IM__INTER_EXTER_0D)
-			retval |= IM__INTER_EXTER_0D;
-		if ((retval & mask) == mask)
-			break;
-	}
 
-	mask = IM__INTER_INTER_0D | IM__EXTER_INTER_0D;
-	for (int j=0; j < geom2->nitems; j++)
+	nloops1 = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
+	nloops2 = (geom2->type == GEOM_POINTTYPE ? 1 : geom2->nitems);
+	for (int base=0; base < nloops2; base += CL_LONG_NBITS)
 	{
-		pos = geometry_load_subitem(&__geom, geom2, pos, j);
-		if (!pos)
-			return -1;
-		status = __geom_relate_pt_ptarray(kcxt, &__geom, geom1);
-		if (status < 0)
-			return -1;
-		retval |= (status & IM__INTER_INTER_0D);
-		if (status & IM__INTER_EXTER_0D)
-			retval |= IM__EXTER_INTER_0D;	/* twisted */
-		if ((retval & mask) == mask)
+		cl_ulong	matched2 = 0;
+		cl_ulong	__mask;
+		pg_geometry_t temp;
+
+		for (int i=0; i < nloops1; i++)
+		{
+			POINT2D		pt1;
+			bool		matched1 = false;
+
+			if (geom1->type == GEOM_POINTTYPE)
+				__loadPoint2d(&pt1, geom1->rawdata, 0);
+			else
+			{
+				pos1 = geometry_load_subitem(&temp, geom1, pos1, i, kcxt);
+				if (!pos1)
+					return -1;
+				__loadPoint2d(&pt1, temp.rawdata, 0);
+			}
+
+			for (int j=0; j < nloops2; j++)
+			{
+				POINT2D		pt2;
+
+				if (geom2->type == GEOM_POINTTYPE)
+					__loadPoint2d(&pt2, geom2->rawdata, 0);
+				else
+				{
+					pos2 = geometry_load_subitem(&temp, geom2, pos2, j, kcxt);
+					if (!pos2)
+						return -1;
+					__loadPoint2d(&pt2, temp.rawdata, 0);
+				}
+
+				if (pt1.x == pt2.x && pt1.y == pt2.y)
+				{
+					retval |= IM__INTER_INTER_0D;
+					matched1 = true;
+					if (j >= base && j < base + CL_LONG_NBITS)
+						matched2 |= (1UL << (j - base));
+				}
+			}
+			if (!matched1)
+				retval |= IM__INTER_EXTER_0D;
+		}
+		if (base + CL_LONG_NBITS >= nloops2)
+			__mask = (1UL << (nloops2 - base)) - 1;
+		else
+			__mask = ~0UL;
+
+		if (__mask != matched2)
+		{
+			retval |= IM__EXTER_INTER_0D;
 			break;
+		}
 	}
-	return retval;
+	return (twist_retval ? IM__TWIST(retval) : retval);
 }
 
 STATIC_FUNCTION(cl_int)
 geom_relate_point_line(kern_context *kcxt,
-					   const pg_geometry_t *geom1,	/* (multi)point */
-					   const pg_geometry_t *geom2)	/* (multi)line */
+					   const pg_geometry_t *geom1,
+					   const pg_geometry_t *geom2)
 {
 	const char *pos1 = NULL;
 	const char *pos2 = NULL;
@@ -3380,17 +3328,28 @@ geom_relate_point_tri(kern_context *kcxt,
 					  const pg_geometry_t *geom1,
 					  const pg_geometry_t *geom2)
 {
-	cl_uint		nloops;
-	cl_int		retval, f_mask;
-	const char *pos = NULL;
+	cl_uint			nloops;
+	cl_int			retval;
+	const char	   *pos = NULL;
+	geom_bbox_2d	bbox;
 
 	assert((geom1->type == GEOM_POINTTYPE ||
 			geom1->type == GEOM_MULTIPOINTTYPE) &&
 		   (geom2->type == GEOM_TRIANGLETYPE));
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_0D | IM__EXTER_EXTER_2D;
 
 	nloops = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
-	retval = IM__EXTER_INTER_2D | IM__EXTER_INTER_1D | IM__EXTER_EXTER_2D;
-	f_mask = IM__INTER_INTER_0D | IM__INTER_BOUND_0D | IM__INTER_EXTER_0D;
+	retval = IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+
+	if (geom2->bbox)
+		memcpy(&bbox, geom2->bbox, sizeof(geom_bbox_2d));
 	for (int i=0; i < nloops; i++)
 	{
 		POINT2D		pt;
@@ -3407,7 +3366,14 @@ geom_relate_point_tri(kern_context *kcxt,
 				return -1;
 			__loadPoint2d(&pt, __temp.rawdata, 0);
 		}
-		status = __geom_contains_point(geom2, &pt, kcxt);
+
+		/* shortcut if boundary-box is available */
+		if (geom2->bbox && (pt.x < bbox.xmin || pt.x > bbox.xmax ||
+							pt.y < bbox.ymin || pt.y > bbox.ymax))
+			status = PT_OUTSIDE;
+		else
+			status = __geom_contains_point(geom2, &pt, kcxt);
+
 		if (status == PT_INSIDE)
 			retval |= IM__INTER_INTER_0D;
 		else if (status == PT_BOUNDARY)
@@ -3416,10 +3382,12 @@ geom_relate_point_tri(kern_context *kcxt,
 			retval |= IM__INTER_EXTER_0D;
 		else
 			return -1;
-		/* no longer we need to walk on the points */
-		if ((retval & f_mask) == f_mask)
-			break;
 	}
+	if (retval & IM__INTER_INTER_0D)
+		retval |= IM__EXTER_INTER_0D;
+	if (retval & IM__INTER_BOUND_0D)
+		retval |= IM__EXTER_BOUND_0D;
+
 	return retval;
 }
 
@@ -3428,90 +3396,97 @@ geom_relate_point_poly(kern_context *kcxt,
 					   const pg_geometry_t *geom1,
 					   const pg_geometry_t *geom2)
 {
-	cl_uint		nloops1;
-	cl_uint		nloops2;
 	const char *pos1 = NULL;
 	const char *pos2 = NULL;
-	cl_int		retval, f_mask;
+	cl_uint		nloops1;
+	cl_uint		nloops2;
+	cl_int		retval = IM__EXTER_EXTER_2D;
 
 	assert((geom1->type == GEOM_POINTTYPE ||
 			geom1->type == GEOM_MULTIPOINTTYPE) &&
            (geom2->type == GEOM_POLYGONTYPE ||
 			geom2->type == GEOM_MULTIPOLYGONTYPE));
-	nloops1 = (geom1->type == GEOM_POINTTYPE ? 1 : geom1->nitems);
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_0D | IM__EXTER_EXTER_2D;
+
+	nloops1 = (geom1->type == GEOM_POINTTYPE   ? 1 : geom1->nitems);
 	nloops2 = (geom2->type == GEOM_POLYGONTYPE ? 1 : geom2->nitems);
 
-	retval = (IM__EXTER_INTER_2D |
-			  IM__EXTER_BOUND_1D |
-			  IM__EXTER_EXTER_2D);
-	f_mask = (IM__INTER_EXTER_0D |
-			  IM__INTER_BOUND_0D |
-			  IM__INTER_INTER_0D | retval);
+	retval = IM__EXTER_EXTER_2D;
 	for (int i=0; i < nloops1; i++)
 	{
-		pg_geometry_t __temp;
+		pg_geometry_t temp;
 		POINT2D		pt;
+		cl_bool		matched = false;
 
 		if (geom1->type == GEOM_POINTTYPE)
 			__loadPoint2d(&pt, geom1->rawdata, 0);
 		else
 		{
-			pos1 = geometry_load_subitem(&__temp, geom1, pos1, i, kcxt);
+			pos1 = geometry_load_subitem(&temp, geom1, pos1, i, kcxt);
 			if (!pos1)
 				return -1;
-			__loadPoint2d(&pt, __temp.rawdata, 0);
+			__loadPoint2d(&pt, temp.rawdata, 0);
 		}
 
 		for (int j=0; j < nloops2; j++)
 		{
 			const pg_geometry_t *poly;
-			cl_int		status;
+			cl_int			status;
 
 			if (geom2->type == GEOM_POLYGONTYPE)
 				poly = geom2;
 			else
 			{
-				pos2 = geometry_load_subitem(&__temp, geom2, pos2, j, kcxt);
+				pos2 = geometry_load_subitem(&temp, geom2, pos2, j, kcxt);
 				if (!pos2)
 					return -1;
-				poly = &__temp;
+				poly = &temp;
 			}
+			/* skip empty polygon */
+			if (poly->nitems == 0)
+				continue;
+			retval |= IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D;
 
-			/*
-			 * shortcut by boundary-box of the polygon, if any
-			 */
+			/* shortcut by boundary-box, if any */
 			if (poly->bbox)
 			{
-				geom_bbox_2d   *bbox = &poly->bbox->d2;
+				geom_bbox_2d	bbox;
 
-				if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
-					pt.y < bbox->ymin || pt.y > bbox->ymax)
-				{
-					retval |= IM__INTER_EXTER_0D;
-					if ((retval & f_mask) == f_mask)
-						return retval;	/* no need to walk on any more */
+				memcpy(&bbox, poly->bbox, sizeof(geom_bbox_2d));
+				if (pt.x < bbox.xmin || pt.x > bbox.xmax ||
+					pt.y < bbox.ymin || pt.y > bbox.ymax)
 					continue;
-				}
 			}
-			/*
-			 * dive into the polygon
-			 */
-			status = __geom_point_in_polygon(poly, &pt, kcxt);
-			if (status == PT_OUTSIDE)
-				retval |= IM__INTER_EXTER_0D;
-			else if (status == PT_BOUNDARY)
-				retval |= IM__INTER_BOUND_0D;
-			else if (status == PT_INSIDE)
-				retval |= IM__INTER_INTER_0D;
-			else
-				return -1;	/* error */
 
-			if ((retval & f_mask) == f_mask)
-				return retval;	/* no need to walk on any more */
+			/* dive into the polygon */
+			status = __geom_point_in_polygon(poly, &pt, kcxt);
+			if (status == PT_INSIDE)
+			{
+				matched = true;
+				retval |= IM__INTER_INTER_0D;
+			}
+			else if (status == PT_BOUNDARY)
+			{
+				matched = true;
+				retval |= IM__INTER_BOUND_0D;
+			}
+			else if (status != PT_OUTSIDE)
+				return -1;	/* error */
 		}
+		if (!matched)
+			retval |= IM__INTER_EXTER_0D;
 	}
 	return retval;
 }
+
+
 
 
 

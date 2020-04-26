@@ -74,3 +74,47 @@ INSERT INTO _gistest(a,b) VALUES
 ('MULTIPOINT (1 1,2 2,3 3,4 4)','MULTILINESTRING ((0 0,5 0,4 4),(0 5,5 5,5 0))'),
 ('MULTIPOINT (1 1,2 2,3 3,4 4)','MULTILINESTRING ((0 0,5 0,4 4),(0 5,3 3,5 0))'),
 ('MULTIPOINT (1 1,2 2,3 3,4 4)','MULTILINESTRING ((1 1,1 0,2 0,2 2),(3 3,3 0,4 0,4 4))');
+
+-- point - triangle
+INSERT INTO _gistest(a,b) VALUES
+('POINT EMPTY','TRIANGLE EMPTY'),
+('POINT (1 1)','TRIANGLE EMPTY'),
+('MULTIPOINT (1 1,2 2,3 3)','TRIANGLE EMPTY'),
+('POINT EMPTY','TRIANGLE ((0 0,2 0,0 2,0 0))'),
+('POINT (2 2)','TRIANGLE ((0 0,5 0,0 5,0 0))'),
+('POINT (2 2)','TRIANGLE ((0 0,4 0,0 4,0 0))'),
+('POINT (2 2)','TRIANGLE ((0 0,2 2,4 0,0 0))'),
+('POINT (8 8)','TRIANGLE ((-2 -2,2 -2,0 3,-2 -2))'),
+('MULTIPOINT (2 2,6 6)','TRIANGLE ((0 0,6 0,0 6,0 0))'),
+('MULTIPOINT (2 2,3 3,4 4)','TRIANGLE ((0 0,6 0,0 6,0 0))'),
+('MULTIPOINT (4 2,2 4)','TRIANGLE ((0 0,6 0,0 6,0 0))'),
+('MULTIPOINT (4 2,2 4,0 6)','TRIANGLE ((0 0,6 0,0 6,0 0))'),
+('MULTIPOINT (1 3,2 2,3 1)','TRIANGLE ((0 0,6 0,0 6,0 0))');
+
+-- point - polygon
+INSERT INTO _gistest(a,b) VALUES
+('POINT EMPTY','POLYGON EMPTY'),
+('POINT (1 1)','POLYGON EMPTY'),
+('POINT (1 1)','MULTIPOLYGON(EMPTY,EMPTY)'),
+('POINT (2 2)','POLYGON ((0 0,4 0,4 4,0 4,0 0))'),
+('POINT (2 2)','POLYGON ((2 0,3 1,2 2,1 1,2 0))'),
+('POINT (2 2)','POLYGON ((0 0,3 0,3 2,0 2,0 0))'),
+('POINT (2 2)','POLYGON ((0 0,1 0,1 1,0 1,0 0))'),
+('POINT (3 3)','POLYGON ((0 0,5 0,5 5,0 5,0 0),(3 2,4 3,2 5,1 4,3 2))'),
+('POINT (3 3)','POLYGON ((0 0,5 0,5 5,0 5,0 0),(2 2,3 2,3 3,2 3,2 2))'),
+('POINT (3 3)','POLYGON ((0 0,5 0,5 5,0 5,0 0),(2 2,3 2,3 4,2 4,2 2))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,1 0,0 1,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,3 0,3 3,0 3,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,2 0,2 2,0 2,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,2 0,2 3,0 3,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,4 0,4 4,0 4,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((0 0,5 0,5 5,0 5,0 0))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((3 3,5 3,5 5,3 5,3 3))'),
+('MULTIPOINT (2 2,4 4)','POLYGON ((1 3,3 1,5 3,3 5,1 3))'),
+('MULTIPOINT (2 2,4 4,6 6)','POLYGON((0 0,8 0,8 8,0 8,0 0),(1 2,2 1,3 2,2 3,1 2),(3 4,4 3,5 4,4 5,3 4),(5 6,6 5,7 6,6 7,5 6))'),
+('MULTIPOINT (2 2,4 4,6 6,8 8)','POLYGON((0 0,8 0,8 8,0 8,0 0),(1 2,2 1,3 2,2 3,1 2),(3 4,4 3,5 4,4 5,3 4),(5 6,6 5,7 6,6 7,5 6))'),
+('MULTIPOINT (2 2,4 4)','MULTIPOLYGON(((0 0,1 1,2 0,0 0)),((0 2,1 3,0 4,0 2)),((2 0,3 1,4 0,2 0)))'),
+('MULTIPOINT (2 2,4 4)','MULTIPOLYGON(((1 2,2 1,3 2,2 3,1 2)),((3 4,4 3,5 4,4 5,3 4)))'),
+('MULTIPOINT (2 2,4 4)','MULTIPOLYGON(((2 2,3 2,3 3,2 3,2 2)),((3 3,4 3,4 4,3 4,3 3)))'),
+('MULTIPOINT (2 2,4 4)','MULTIPOLYGON(((2 2,3 2,3 3,2 3,2 2)),((3 3,4 3,4 4,3 4,3 3)),((4 5,5 4,6 5,5 6,4 5)))'),
+('MULTIPOINT (2 2,4 4)','MULTIPOLYGON(((1 2,2 1,2 3,1 2)),((2 4,4 2,6 4,4 6,2 4),(3 4,4 3,5 4,4 5,3 4)))');
