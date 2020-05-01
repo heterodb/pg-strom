@@ -3507,54 +3507,74 @@ geom_relate_point_poly(kern_context *kcxt,
 #define PT_NE(P1,P2)	((P1).x != (P2).x || (P1).y != (P2).y)
 
 STATIC_FUNCTION(cl_int)
-__geom_relate_seg_line(kern_context *kcxt,
-					   const POINT2D &P1, cl_bool p1_is_head,
-					   const POINT2D &P2, cl_bool p2_is_tail,
-					   const pg_geometry_t *geom,
-					   cl_uint base, cl_ulong &l2_contained)
+__geom_relate_seg_line(kern_context *kcxt, cl_int depth,
+					   POINT2D P1, cl_bool p1_is_head,
+					   POINT2D P2, cl_bool p2_is_tail,
+					   const pg_geometry_t *geom, cl_uint start)
 {
-	pg_geometry_t __temp;
 	const char *gpos = NULL;
 	cl_int		retval = IM__EXTER_EXTER_2D;
 	cl_bool		p1_contained = false;
 	cl_bool		p2_contained = false;
 	cl_uint		nloops;
-	cl_uint		l2_index = 0;
+	cl_uint		index;
+
+	if (depth > 5)
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_RECURSION_TOO_DEEP,
+						   "too deep recursive calls");
+		return -1;
+	}
 
 	nloops = (geom->type == GEOM_LINETYPE ? 1 : geom->nitems);
 	for (int k=0; k < nloops; k++)
 	{
-		const pg_geometry_t *line2;
-		const char *ppos;
+		pg_geometry_t __temp;
+		const pg_geometry_t *line;
+		const char *ppos = NULL;
 		POINT2D		Q1, Q2;
 		cl_uint		unitsz;
+		cl_int		__j = 2;
 
 		if (geom->type == GEOM_LINETYPE)
-			line2 = geom;
+			line = geom;
 		else
 		{
 			gpos = geometry_load_subitem(&__temp, geom, gpos, k, kcxt);
 			if (!gpos)
 				return -1;
-			line2 = &__temp;
+			line = &__temp;
+		}
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(line->flags);
+
+		if (start == 0)
+		{
+			ppos = __loadPoint2d(&Q1, line->rawdata, unitsz);
+			index++;
+		}
+		else if (index + line->nitems <= start)
+		{
+			index += line->nitems;
+			continue;	/* skip this sub-line */
+		}
+		else
+		{
+			ppos = __loadPoint2dIndex(&Q1, line->rawdata, unitsz,
+									  index - start);
+			index++;
+			__j = index - start + 2;
+			start = 0;
 		}
 
-		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(line2->flags);
-		ppos = __loadPoint2d(&Q1, line2->rawdata, unitsz);
-		for (int j=2; j <= line2->nitems; j++)
+		for (int j=__j; j <= line->nitems; j++, index++, Q1=Q2)
 		{
 			cl_bool		q1_is_head = (j==2);
-			cl_bool		q2_is_tail = (j==line2->nitems);
-			cl_int		pq1, pq2, qp1, qp2;
+			cl_bool		q2_is_tail = (j==line->nitems);
+			cl_int		qp1, qp2;
 			cl_int		p1_in_qq, p2_in_qq;
-			cl_int		q1_in_pp, q2_in_pp;
-			cl_bool		meet_boundary = false;
+			cl_int		status;
 
 			ppos = __loadPoint2d(&Q2, ppos, unitsz);
-			pq1 = __geom_segment_side(&P1,&P2,&Q1);
-			pq2 = __geom_segment_side(&P1,&P2,&Q2);
-			if ((pq1 > 0 && pq2 > 0) || (pq1 < 0 && pq2 < 0))
-				continue;	/* no intersection */
 			qp1 = __geom_segment_side(&Q1, &Q2, &P1);
 			qp2 = __geom_segment_side(&Q1, &Q2, &P2);
 			if ((qp1 > 0 && qp2 > 0) || (qp1 < 0 && qp2 < 0))
@@ -3562,22 +3582,13 @@ __geom_relate_seg_line(kern_context *kcxt,
 
 			p1_in_qq = __geom_pt_within_seg(&P1,&Q1,&Q2);
 			p2_in_qq = __geom_pt_within_seg(&P2,&Q1,&Q2);
-			q1_in_pp = __geom_pt_within_seg(&Q1,&P1,&P2);
-			q2_in_pp = __geom_pt_within_seg(&Q2,&P1,&P2);
-#if 0
-			printf("P1(%.2f, %.2f) - P2(%.2f, %.2f) "
-				   "Q1(%.2f, %.2f) - Q2(%.2f, %.2f) "
-				   "pq1=%d pq2=%d qp1=%d qp2=%d\n",
-				   P1.x, P1.y, P2.x, P2.y,
-				   Q1.x, Q1.y, Q2.x, Q2.y,
-				   pq1, pq2, qp1, qp2);
-#endif		
+
 			/* P1 is on Q1-Q2 */
 			if (qp1==0 && p1_in_qq != PT_OUTSIDE)
 			{
+				p1_contained = true;
 				if (p1_is_head)
 				{
-					meet_boundary = true;
 					if ((q1_is_head && PT_EQ(P1,Q1)) ||
 						(q2_is_tail && PT_EQ(P1,Q2)))
 						retval |= IM__BOUND_BOUND_0D;
@@ -3586,15 +3597,14 @@ __geom_relate_seg_line(kern_context *kcxt,
 				}
 				else
 					retval |= IM__INTER_INTER_0D;
-				p1_contained = true;
 			}
 
 			/* P2 is on Q1-Q2 */
 			if (qp2==0 && p2_in_qq != PT_OUTSIDE)
 			{
+				p2_contained = true;
 				if (p2_is_tail)
 				{
-					meet_boundary = true;
 					if ((q1_is_head && PT_EQ(P2,Q1)) ||
 						(q2_is_tail && PT_EQ(P2,Q2)))
 						retval |= IM__BOUND_BOUND_0D;
@@ -3603,89 +3613,144 @@ __geom_relate_seg_line(kern_context *kcxt,
 				}
 				else
 					retval |= IM__INTER_INTER_0D;
-				p2_contained = true;
 			}
 
-			/* Q1 is on P1-P2 */
-			if (pq1==0 && q1_in_pp != PT_OUTSIDE)
-			{
-				if (q1_is_head)
-				{
-					meet_boundary = true;
-					if ((p1_is_head && PT_EQ(Q1,P1)) ||
-						(p2_is_tail && PT_EQ(Q1,P2)))
-						retval |= IM__BOUND_BOUND_0D;
-					else
-						retval |= IM__INTER_BOUND_0D;
-				}
-				else
-					retval |= IM__INTER_INTER_0D;
-				if (l2_index + j - 2 >= base &&
-					l2_index + j - 2 <  base + CL_LONG_NBITS)
-					l2_contained |= (1UL << (l2_index + j - 2 - base));
-			}
-
-			/* Q2 is on P1-P2 */
-			if (pq2==0 && q2_in_pp != PT_OUTSIDE)
-			{
-				if (q2_is_tail)
-				{
-					meet_boundary = true;
-					if ((p1_is_head && PT_EQ(Q2,P1)) ||
-						(p2_is_tail && PT_EQ(Q2,P2)))
-						retval |= IM__BOUND_BOUND_0D;
-					else
-						retval |= IM__INTER_BOUND_0D;
-				}
-				else
-					retval |= IM__INTER_INTER_0D;
-				if (l2_index + j - 1 >= base &&
-					l2_index + j - 1 <  base + CL_LONG_NBITS)
-					l2_contained |= (1UL << (l2_index + j - 1 - base));
-			}
-			
 			/* P1-P2 and Q1-Q2 are colinear */
-			if (!pq1 && !pq2 && !qp1 && !qp2)
+			if (qp1 == 0 && qp2 == 0)
 			{
-				/* Is the intersection of P1-P2 and Q1-Q2 a point? */
-				if ((p1_in_qq == PT_BOUNDARY && p2_in_qq != PT_INSIDE) ||
-					(p2_in_qq == PT_BOUNDARY && p1_in_qq != PT_INSIDE) ||
-					(q1_in_pp == PT_BOUNDARY && q2_in_pp != PT_INSIDE) ||
-					(q2_in_pp == PT_BOUNDARY && q1_in_pp != PT_INSIDE))
+				if (p1_in_qq != PT_OUTSIDE &&
+					p2_in_qq != PT_OUTSIDE)
 				{
-					if (!meet_boundary)
+					/* P1-P2 is fully contained by Q1-Q2 */
+					p1_contained = p2_contained = true;
+					if (PT_EQ(P1,P2))
 						retval |= IM__INTER_INTER_0D;
+					else
+						retval |= IM__INTER_INTER_1D;
+					goto out;
+				}
+				else if (p1_in_qq != PT_OUTSIDE &&
+						 p2_in_qq == PT_OUTSIDE)
+				{
+					/* P1 is in Q1-Q2, but P2 is not, so Qx-P2 shall remain */
+					p1_contained = true;
+					if (PT_EQ(P1, Q2) ||
+						__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
+					{
+						P1 = Q1;
+						p1_is_head = false;
+						retval |= IM__INTER_INTER_1D;
+					}
+					else if (PT_EQ(P1,Q1) ||
+							 __geom_pt_within_seg(&Q2,&P1,&P2) == PT_INSIDE)
+					{
+						P1 = Q2;
+						p1_is_head = false;
+						retval |= IM__INTER_INTER_1D;
+					}
+					else
+						return -1;	/* should not happen */
+					if (PT_EQ(P1,P2))
+						goto out;
+				}
+				else if (p1_in_qq == PT_OUTSIDE &&
+						 p2_in_qq != PT_OUTSIDE)
+				{
+					/* P2 is in Q1-Q2, but P1 is not, so Qx-P1 shall remain */
+					p2_contained = true;
+					if (PT_EQ(P2, Q2) ||
+						__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
+					{
+						P2 = Q1;
+						p2_is_tail = false;
+					}
+					else if (PT_EQ(P2, Q1) ||
+							 __geom_pt_within_seg(&Q2,&P1,&P2) != PT_INSIDE)
+					{
+						P2 = Q2;
+						p2_is_tail = false;
+					}
+					else
+						return -1;	/* should not happen */
+					if (PT_EQ(P1,P2))
+						goto out;
+				}
+				else if (__geom_pt_within_seg(&Q1,&P1,&Q2) != PT_OUTSIDE &&
+						 __geom_pt_within_seg(&Q2,&Q1,&P2) != PT_OUTSIDE)
+				{
+					/* P1-Q1-Q2-P2 */
+					if (PT_NE(P1,Q1))
+					{
+						status = __geom_relate_seg_line(kcxt, depth+1,
+														P1, p1_is_head,
+														Q1, false,
+														geom, index+1);
+						if (status < 0)
+							return -1;
+						retval |= status;
+					}
+					if (PT_NE(Q2,P2))
+					{
+						status = __geom_relate_seg_line(kcxt, depth+1,
+														Q2, false,
+														P2, p2_is_tail,
+														geom, index+1);
+						if (status < 0)
+							return -1;
+						retval |= status;
+					}
+				}
+				else if (__geom_pt_within_seg(&Q2,&P1,&Q1) != PT_OUTSIDE &&
+						 __geom_pt_within_seg(&Q1,&Q2,&P2) != PT_OUTSIDE)
+				{
+					/* P1-Q2-Q1-P2 */
+					if (PT_NE(P1,Q2))
+					{
+						status = __geom_relate_seg_line(kcxt, depth+1,
+														P1, p1_is_head,
+														Q2, false,
+														geom, index+1);
+						if (status < 0)
+							return -1;
+						retval |= status;
+					}
+					if (PT_NE(Q1,P2))
+					{
+						status = __geom_relate_seg_line(kcxt, depth+1,
+														Q1, false,
+														P2, p2_is_tail,
+														geom, index+1);
+						if (status < 0)
+							return -1;
+						retval |= status;
+					}
 				}
 				else
 				{
-					/* intersection is 1-dimensional */
-					retval |= IM__INTER_INTER_1D;
+					/* elsewhere P1-P2 and Q1-Q2 have no intersection */
 				}
 			}
-			/* P1-P2 and Q1-Q2 crosses mutually */
-			else if (((pq1 > 0 && pq2 < 0) || (pq1 < 0 && pq2 > 0)) &&
-					 ((qp1 > 0 && qp2 < 0) || (qp1 < 0 && qp2 > 0)))
+			else
 			{
-				retval |= IM__INTER_INTER_0D;
+				cl_int	pq1 = __geom_segment_side(&P1,&P2,&Q1);
+				cl_int	pq2 = __geom_segment_side(&P1,&P2,&Q2);
+
+				/* P1-P2 and Q1-Q2 crosses mutually */
+				if (((pq1 > 0 && pq2 < 0) || (pq1 < 0 && pq2 > 0)) &&
+					((qp1 > 0 && qp2 < 0) || (qp1 < 0 && qp2 > 0)))
+				{
+					retval |= IM__INTER_INTER_0D;
+				}
 			}
 		}
-		l2_index += line2->nitems;
 	}
-
-	if (!p1_contained)
-	{
-		if (p1_is_head)
-			retval |= IM__INTER_EXTER_1D | IM__BOUND_EXTER_0D;
-		else
-			retval |= IM__INTER_EXTER_1D;
-	}
-	if (!p2_contained)
-	{
-		if (p2_is_tail)
-			retval |= IM__INTER_EXTER_1D | IM__BOUND_EXTER_0D;
-		else
-			retval |= IM__INTER_EXTER_1D;
-	}
+	if (PT_NE(P1,P2))
+		retval |= IM__INTER_EXTER_1D;
+out:
+	if (p1_is_head && !p1_contained)
+		retval |= IM__BOUND_EXTER_0D;
+	if (p2_is_tail && !p2_contained)
+		retval |= IM__BOUND_EXTER_0D;
 	return retval;
 }
 
@@ -3695,10 +3760,14 @@ geom_relate_line_line(kern_context *kcxt,
 					  const pg_geometry_t *geom2)
 {
 	const char *gpos = NULL;
+	const char *ppos = NULL;
+	const pg_geometry_t *line;
 	pg_geometry_t __temp;
-	cl_uint		npoints;
-	cl_uint		nloops1;
-	cl_int		retval = IM__EXTER_EXTER_2D;
+	POINT2D		P1, P2;
+	cl_uint		nloops;
+	cl_uint		unitsz;
+	cl_int		retval1 = IM__EXTER_EXTER_2D;
+	cl_int		retval2 = IM__EXTER_EXTER_2D;
 
 	assert((geom1->type == GEOM_LINETYPE ||
 			geom1->type == GEOM_MULTILINETYPE) &&
@@ -3714,96 +3783,55 @@ geom_relate_line_line(kern_context *kcxt,
 	else if (geom2->nitems == 0)
 		return IM__INTER_EXTER_1D | IM__BOUND_EXTER_0D | IM__EXTER_EXTER_2D;
 
-	/* count number of points in geom2 */
-	if (geom2->type == GEOM_LINETYPE)
-		npoints = geom2->nitems;
-	else
+	/* 1st loop */
+	nloops = (geom1->type == GEOM_LINETYPE ? 1 : geom1->nitems);
+	for (int k=0; k < nloops; k++)
 	{
-		npoints = 0;
-		for (int j=0; j < geom2->nitems; j++)
+		if (geom1->type == GEOM_LINETYPE)
+			line = geom1;
+		else
 		{
-			gpos = geometry_load_subitem(&__temp, geom2, gpos, j);
-			npoints += __temp.nitems;
+			gpos = geometry_load_subitem(&__temp, geom1, gpos, k, kcxt);
+			if (!gpos)
+				return -1;
+			line = &__temp;
+		}
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(line->flags);
+		ppos = __loadPoint2d(&P1, line->rawdata, unitsz);
+		for (int i=2; i <= line->nitems; i++, P1=P2)
+		{
+			ppos = __loadPoint2d(&P2, ppos, unitsz);
+			retval1 |= __geom_relate_seg_line(kcxt, 0,
+											  P1, i==2,
+											  P2, i==line->nitems,
+											  geom2, 0);
 		}
 	}
-
-	nloops1 = (geom1->type == GEOM_LINETYPE ? 1 : geom1->nitems);
-	for (cl_uint l2_base=0; l2_base < npoints; l2_base += CL_LONG_NBITS)
+	/* 2nd loop (twisted) */
+	nloops = (geom2->type == GEOM_LINETYPE ? 1 : geom2->nitems);
+	for (int k=0; k < nloops; k++)
 	{
-		cl_ulong	l2_contained = 0UL;
-		cl_ulong	__mask;
-
-		for (int k=0; k < nloops1; k++)
-		{
-			const char *ppos = NULL;
-			const pg_geometry_t *line1;
-			POINT2D		P1, P2;
-			cl_uint		unitsz;
-
-			if (geom1->type == GEOM_LINETYPE)
-				line1 = geom1;
-			else
-			{
-				gpos = geometry_load_subitem(&__temp, geom1, gpos, k, kcxt);
-				if (!gpos)
-					return -1;
-				line1 = &__temp;
-			}
-
-			unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom1->flags);
-			ppos = __loadPoint2d(&P1, line1->rawdata, unitsz);
-			for (int i=2; i <= line1->nitems; i++, P1=P2)
-			{
-				ppos = __loadPoint2d(&P2, ppos, unitsz);
-				retval |= __geom_relate_seg_line(kcxt,
-												 P1, i==2,
-												 P2, i==line1->nitems,
-												 geom2,
-												 l2_base, l2_contained);
-			}
-		}
-		/* check vertex in the line2 that are not contained */
-		if (l2_base + CL_LONG_NBITS < npoints)
-			__mask = ~0UL;
-		else
-			__mask = (1UL << (npoints - l2_base)) - 1;
-		if (l2_contained != __mask)
-			retval |= IM__EXTER_INTER_1D;
-
 		if (geom2->type == GEOM_LINETYPE)
-		{
-			__mask = 0;
-			if (l2_base == 0)
-				__mask |= 1;
-			if (geom2->nitems-1 >= l2_base &&
-				geom2->nitems-1 <  l2_base + CL_LONG_NBITS)
-				__mask |= (1UL << (geom2->nitems - 1 - l2_base));
-			if ((l2_contained & __mask) != __mask)
-				retval |= IM__EXTER_BOUND_0D;
-		}
+			line = geom2;
 		else
 		{
-			cl_uint		l2_index = 0;
-
-			__mask = 0;
-			for (int k=0; k < geom2->nitems; k++)
-			{
-				gpos = geometry_load_subitem(&__temp, geom2, gpos, k, kcxt);
-				if (!gpos)
-					return -1;
-				if (l2_index >= l2_base &&
-					l2_index <  l2_base + CL_LONG_NBITS)
-					__mask |= (1UL << (l2_index - l2_base));
-				l2_index += geom2->nitems;
-				if (l2_index-1 >= l2_base &&
-					l2_index-1 <  l2_base + CL_LONG_NBITS)
-					__mask |= (1UL << (l2_index - 1 - l2_base));
-			}
-			if ((l2_contained & __mask) != __mask)
-                retval |= IM__EXTER_BOUND_0D;
+			gpos = geometry_load_subitem(&__temp, geom2, gpos, k, kcxt);
+			if (!gpos)
+				return -1;
+			line = &__temp;
+		}
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(line->flags);
+		ppos = __loadPoint2d(&P1, line->rawdata, unitsz);
+		for (int j=2; j <= line->nitems; j++, P1=P2)
+		{
+			ppos = __loadPoint2d(&P2, ppos, unitsz);
+			retval2 |= __geom_relate_seg_line(kcxt, 0,
+											  P1, j==2,
+											  P2, j==line->nitems,
+											  geom1, 0);
 		}
 	}
-	return retval;
+	return retval1 | IM__TWIST(retval2);
 }
 
 STATIC_FUNCTION(cl_int)
