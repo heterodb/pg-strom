@@ -13,7 +13,7 @@ CREATE EVENT TRIGGER pgstrom_arrow_fdw_precheck_schema
     ON ddl_command_end
   WHEN tag IN ('CREATE FOREIGN TABLE',
                'ALTER FOREIGN TABLE')
-EXECUTE FUNCTION pgstrom.arrow_fdw_precheck_schema();
+EXECUTE PROCEDURE pgstrom.arrow_fdw_precheck_schema();
 
 CREATE OR REPLACE FUNCTION pgstrom.arrow_fdw_truncate(regclass)
   RETURNS void
