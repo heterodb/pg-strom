@@ -89,6 +89,7 @@ typedef struct
 static int		program_cache_size_kb;
 static int		num_program_builders;
 static bool		pgstrom_debug_jit_compile_options;
+static int		pgstrom_extra_kernel_stack_size;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -336,6 +337,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 {
 	size_t		ofs = 0;
 	size_t		len = strlen(kern_define) + strlen(kern_source) + 25000;
+	size_t		stack_sz;
 	char	   *source;
 
 	source = malloc(len);
@@ -346,6 +348,21 @@ construct_flat_cuda_source(cl_uint extra_flags,
 					"#include <cuda_device_runtime_api.h>\n"
 					"#define KERN_CONTEXT_VARLENA_BUFSZ %u\n",
 					Max(varlena_bufsz, 1));
+	/*
+	 * Stack checker for recursive calls.
+	 *
+	 * Note that we don't consider the consumption by varlena buffer,
+	 * because stack area grows from higher to lower address, and
+	 * CHECK_KERNEL_STACK_DEPTH() macro compares the address of the
+	 * kern_context and local pointer in this invocation, thus,
+	 * KERN_CONTEXT_VARLENA_BUFSZ shall not affect.
+	 */
+	stack_sz = 1024 + pgstrom_extra_kernel_stack_size;
+	if ((extra_flags & DEVKERNEL_NEEDS_POSTGIS) != 0)
+		stack_sz += 2048;
+	ofs += snprintf(source + ofs, len - ofs,
+					"#define KERN_CONTEXT_STACK_LIMIT %zu\n", stack_sz);
+
 	/* Enables Debug build? */
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -1621,7 +1638,10 @@ retry_checks:
 		 * In addition, build with debug option also requires more stack than
 		 * optimized kernel.
 		 */
-		stack_sz = 1800 + MAXALIGN(entry->varlena_bufsz);
+		stack_sz = (1800 + MAXALIGN(entry->varlena_bufsz) +
+					pgstrom_extra_kernel_stack_size);
+		if ((entry->extra_flags & DEVKERNEL_NEEDS_POSTGIS) != 0)
+			stack_sz += 2048;
 		if ((entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 			stack_sz += 4096;
 #ifdef USE_ASSERT_CHECKING
@@ -2045,6 +2065,20 @@ pgstrom_init_cuda_program(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							 NULL, NULL, NULL);
+
+	/*
+	 * Configure extra kernel stack for heavy CUDA programs
+	 */
+	DefineCustomIntVariable("pg_strom.extra_kernel_stack_size",
+							"extra stack size for CUDA kernel programs",
+							NULL,
+							&pgstrom_extra_kernel_stack_size,
+							0,
+							0,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 
 	/* allocation of static shared memory */
 	RequestAddinShmemSpace(offsetof(program_cache_head, base) +

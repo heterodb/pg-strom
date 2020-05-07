@@ -395,6 +395,7 @@ typedef struct
 	const char	   *error_funcname;
 	const char	   *error_message;	/* !!only const static cstring!! */
 	struct kern_parambuf *kparams;
+	void		   *stack_bounds;
 	cl_char		   *vlpos;
 	cl_char		   *vlend;
 	cl_char			vlbuf[1];
@@ -418,11 +419,12 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(kcxt,__kparams)							\
 	do {															\
-		memset(kcxt, 0, offsetof(kern_context, vlbuf));				\
-		(kcxt)->kparams = (__kparams);								\
-		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));		\
-		(kcxt)->vlpos = (kcxt)->vlbuf;								\
-		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ; \
+		memset(kcxt, 0, offsetof(kern_context, vlbuf));					\
+		(kcxt)->kparams = (__kparams);									\
+		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));			\
+		(kcxt)->stack_bounds = (char *)(kcxt) - KERN_CONTEXT_STACK_LIMIT; \
+		(kcxt)->vlpos = (kcxt)->vlbuf;									\
+		(kcxt)->vlend = (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ;		\
 	} while(0)
 
 #define PTR_ON_VLBUF(kcxt,ptr,len)							\
@@ -441,6 +443,9 @@ kern_context_alloc(kern_context *kcxt, size_t len)
 	}
 	return NULL;
 }
+
+#define CHECK_KERNEL_STACK_DEPTH(kcxt)						\
+	(((cl_ulong)((kcxt)->stack_bounds)) > ((cl_ulong)(&(kcxt))))
 
 #ifdef __CUDA_ARCH__
 /*

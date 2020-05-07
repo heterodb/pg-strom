@@ -3508,7 +3508,7 @@ geom_relate_point_poly(kern_context *kcxt,
 #define PT_NE(A,B)		(FP_NEQUALS((A).x,(B).x) || FP_NEQUALS((A).y,(B).y))
 
 STATIC_FUNCTION(cl_int)
-__geom_relate_seg_line(kern_context *kcxt, cl_int depth,
+__geom_relate_seg_line(kern_context *kcxt,
 					   POINT2D P1, cl_bool p1_is_head,
 					   POINT2D P2, cl_bool p2_is_tail,
 					   const pg_geometry_t *geom, cl_uint start)
@@ -3520,7 +3520,7 @@ __geom_relate_seg_line(kern_context *kcxt, cl_int depth,
 	cl_uint		nloops;
 	cl_uint		index;
 
-	if (depth > 5)
+	if (CHECK_KERNEL_STACK_DEPTH(kcxt))
 	{
 		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_RECURSION_TOO_DEEP,
 						   "too deep recursive calls");
@@ -3682,7 +3682,7 @@ __geom_relate_seg_line(kern_context *kcxt, cl_int depth,
 					/* P1-Q1-Q2-P2 */
 					if (PT_NE(P1,Q1))
 					{
-						status = __geom_relate_seg_line(kcxt, depth+1,
+						status = __geom_relate_seg_line(kcxt,
 														P1, p1_is_head,
 														Q1, false,
 														geom, index+1);
@@ -3692,7 +3692,7 @@ __geom_relate_seg_line(kern_context *kcxt, cl_int depth,
 					}
 					if (PT_NE(Q2,P2))
 					{
-						status = __geom_relate_seg_line(kcxt, depth+1,
+						status = __geom_relate_seg_line(kcxt,
 														Q2, false,
 														P2, p2_is_tail,
 														geom, index+1);
@@ -3707,7 +3707,7 @@ __geom_relate_seg_line(kern_context *kcxt, cl_int depth,
 					/* P1-Q2-Q1-P2 */
 					if (PT_NE(P1,Q2))
 					{
-						status = __geom_relate_seg_line(kcxt, depth+1,
+						status = __geom_relate_seg_line(kcxt,
 														P1, p1_is_head,
 														Q2, false,
 														geom, index+1);
@@ -3717,7 +3717,7 @@ __geom_relate_seg_line(kern_context *kcxt, cl_int depth,
 					}
 					if (PT_NE(Q1,P2))
 					{
-						status = __geom_relate_seg_line(kcxt, depth+1,
+						status = __geom_relate_seg_line(kcxt,
 														Q1, false,
 														P2, p2_is_tail,
 														geom, index+1);
@@ -3802,7 +3802,7 @@ geom_relate_line_line(kern_context *kcxt,
 		for (int i=2; i <= line->nitems; i++, P1=P2)
 		{
 			ppos = __loadPoint2d(&P2, ppos, unitsz);
-			retval1 |= __geom_relate_seg_line(kcxt, 0,
+			retval1 |= __geom_relate_seg_line(kcxt,
 											  P1, i==2,
 											  P2, i==line->nitems,
 											  geom2, 0);
@@ -3826,7 +3826,7 @@ geom_relate_line_line(kern_context *kcxt,
 		for (int j=2; j <= line->nitems; j++, P1=P2)
 		{
 			ppos = __loadPoint2d(&P2, ppos, unitsz);
-			retval2 |= __geom_relate_seg_line(kcxt, 0,
+			retval2 |= __geom_relate_seg_line(kcxt,
 											  P1, j==2,
 											  P2, j==line->nitems,
 											  geom1, 0);
@@ -4163,7 +4163,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						  const POINT2D &P1, cl_bool p1_is_head,
 						  const POINT2D &P2, cl_bool p2_is_tail,
 						  const pg_geometry_t *geom,
-						  cl_uint depth,	/* depth of recursion */
 						  cl_uint nskips)	/* # of rings to be skipped */
 {
 	const char *pos1 = NULL;
@@ -4175,7 +4174,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 	cl_uint		nrings = 0;
 	cl_uint		__nrings_next;
 
-	if (depth > 5)
+	if (CHECK_KERNEL_STACK_DEPTH(kcxt))
 	{
 		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_RECURSION_TOO_DEEP,
 						   "too deep recursive calls");
@@ -4324,7 +4323,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															  Q1, false,
 															  P2, false,
 															  geom,
-															  depth+1,
 															  nrings));
 						}
 						if ((p1_in_qq == PT_INSIDE || PT_EQ(P1,Q1)) &&
@@ -4336,7 +4334,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															  Q2, false,
 															  P2, false,
 															  geom,
-															  depth+1,
 															  nrings));
 						}
 						return -1;	/* should not happen */
@@ -4360,7 +4357,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															  P1, p1_is_head,
 															  Q2, false,
 															  geom,
-															  depth+1,
 															  nrings));
 						}
 						if ((p2_in_qq == PT_INSIDE || PT_EQ(P2,Q2)) &&
@@ -4372,7 +4368,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															  P1, p1_is_head,
 															  Q1, false,
 															  geom,
-															  depth+1,
 															  nrings));
 						}
 						return -1;	/* should not happen */
@@ -4384,13 +4379,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															P1, p1_is_head,
 															Q1, false,
 															geom,
-															depth+1,
 															nrings);
 						retval |= __geom_relate_seg_polygon(kcxt,
 															Q2, false,
 															P2, p2_is_tail,
 															geom,
-															depth+1,
 															nrings);
 						return (retval | IM__INTER_BOUND_1D);
 					}
@@ -4401,13 +4394,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															P1, p1_is_head,
 															Q2, false,
 															geom,
-															depth+1,
 															nrings);
 						retval |= __geom_relate_seg_polygon(kcxt,
 															Q1, false,
 															P2, p2_is_tail,
 															geom,
-															depth+1,
 															nrings);
 						return (retval | IM__INTER_BOUND_1D);
 					}
@@ -4496,14 +4487,12 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 															P1, p1_is_head,
 															C, false,
 															geom,
-															depth+1,
 															nrings);
 						/* try C-P2 recursively */
 						retval |= __geom_relate_seg_polygon(kcxt,
 															C, false,
 															P2, p2_is_tail,
 															geom,
-															depth+1,
 															nrings);
 						return (retval | IM__INTER_BOUND_0D);
 					}
@@ -4657,7 +4646,7 @@ geom_relate_line_polygon(kern_context *kcxt,
 				retval |= __geom_relate_seg_polygon(kcxt,
 													P1, i==2,
 													P2, i==line->nitems,
-													geom2, 0, 0);
+													geom2, 0);
 			}
 		}
 	}
