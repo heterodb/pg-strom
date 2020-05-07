@@ -3342,9 +3342,9 @@ geom_relate_point_line(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(cl_int)
-geom_relate_point_tri(kern_context *kcxt,
-					  const pg_geometry_t *geom1,
-					  const pg_geometry_t *geom2)
+geom_relate_point_triangle(kern_context *kcxt,
+						   const pg_geometry_t *geom1,
+						   const pg_geometry_t *geom2)
 {
 	cl_uint			nloops;
 	cl_int			retval;
@@ -3839,6 +3839,326 @@ geom_relate_line_line(kern_context *kcxt,
 #define IM__LINE_TAIL_CONTAINED		02000000000U
 
 STATIC_FUNCTION(cl_int)
+__geom_relate_seg_triangle(kern_context *kcxt,
+						   const POINT2D &P1, cl_bool p1_is_head,
+						   const POINT2D &P2, cl_bool p2_is_tail,
+						   const pg_geometry_t *ring)
+{
+	POINT2D		Q1,Q2, Pc;
+	const char *pos;
+	cl_uint		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(ring->flags);
+	cl_char		p1_location = '?';
+	cl_char		p2_location = '?';
+	cl_char		pc_location = '?';
+	cl_int		wn1 = 0;
+	cl_int		wn2 = 0;
+	cl_int		wnc = 0;
+	cl_int		ncrosses = 0;
+	cl_int		retval = 0;
+
+	Pc.x = (P1.x + P2.x) / 2.0;
+	Pc.y = (P2.y + P2.y) / 2.0;
+
+	pos = __loadPoint2d(&Q1, ring->rawdata, unitsz);
+	__loadPoint2dIndex(&Q2, ring->rawdata, unitsz, ring->nitems-1);
+	if (PT_NE(Q1,Q2))
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "triangle corruption: unclosed ring");
+		return -1;
+	}
+
+	for (int j=2; j <= ring->nitems; j++, Q1=Q2)
+	{
+		cl_int		qp1, qp2, qpc;
+
+		pos = __loadPoint2d(&Q2, pos, unitsz);
+		/*
+		 * Update the state of winding number algorithm to determine
+		 * the location of P1/P2 whether they are inside or outside
+		 * of the Q1-Q2 edge.
+		 */
+		qp1 = __geom_segment_side(&Q1, &Q2, &P1);
+		if (qp1 < 0 && Q1.y <= P1.y && P1.y < Q2.y)
+			wn1++;
+		else if (qp1 > 0 && Q2.y <= P1.y && P1.y < Q1.y)
+			wn1--;
+		if (qp1 == 0 && __geom_pt_within_seg(&P1,&Q1,&Q2) != PT_OUTSIDE)
+			p1_location = 'B';
+
+		qp2 = __geom_segment_side(&Q1, &Q2, &P2);
+		if (qp2 < 0 && Q1.y <= P2.y && P2.y < Q2.y)
+			wn2++;
+		else if (qp2 > 0 && Q2.y <= P2.y && P2.y < Q1.y)
+			wn2--;
+		if (qp2 == 0 && __geom_pt_within_seg(&P2,&Q1,&Q2) != PT_OUTSIDE)
+			p2_location = 'B';
+
+		qpc = __geom_segment_side(&Q1, &Q2, &Pc);
+		if (qpc < 0 && Q1.y <= Pc.y && Pc.y < Q2.y)
+			wnc++;
+		else if (qpc > 0 && Q2.y <= Pc.y && Pc.y < Q1.y)
+			wnc--;
+		if (qpc == 0 && __geom_pt_within_seg(&Pc,&Q1,&Q2) != PT_OUTSIDE)
+			pc_location = 'B';
+
+		if ((qp1 > 0 && qp2 > 0) || (qp1 < 0 && qp2 < 0))
+		{
+			/* P1-P2 and Q1-Q2 are not crosses/touched */
+		}
+		else if (!qp1 && !qp2)
+		{
+			/* P1-P2 and Q1-Q2 are colinear */
+			cl_int	p1_in_qq = __geom_pt_within_seg(&P1,&Q1,&Q2);
+			cl_int	p2_in_qq = __geom_pt_within_seg(&P2,&Q1,&Q2);
+			cl_int	q1_in_pp = __geom_pt_within_seg(&Q1,&P1,&P2);
+			cl_int	q2_in_pp = __geom_pt_within_seg(&Q2,&P1,&P2);
+
+			if (p1_in_qq != PT_OUTSIDE &&
+				p2_in_qq != PT_OUTSIDE)
+			{
+				/* P1-P2 is fully contained by Q1-Q2 */
+				if (p1_is_head)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_HEAD_CONTAINED;
+				if (p2_is_tail)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_TAIL_CONTAINED;
+				if (PT_EQ(P1,P2))
+				{
+					if (!p1_is_head && !p2_is_tail)
+						retval |= IM__INTER_BOUND_0D;
+				}
+				else
+					retval |= IM__INTER_BOUND_1D;
+				return retval;
+			}
+			else if (p1_in_qq != PT_OUTSIDE &&
+					 p2_in_qq == PT_OUTSIDE)
+			{
+				/* P1 is contained by Q1-Q2, but P2 is not */
+				if (p1_is_head)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_HEAD_CONTAINED;
+				if (p1_in_qq == PT_INSIDE)
+					retval |= IM__INTER_BOUND_1D;
+				else if ((PT_EQ(P1,Q1) && q2_in_pp != PT_OUTSIDE) ||
+						 (PT_EQ(P1,Q2) && q1_in_pp != PT_OUTSIDE))
+					retval |= IM__INTER_BOUND_1D;
+			}
+			else if (p1_in_qq == PT_OUTSIDE &&
+					 p2_in_qq != PT_OUTSIDE)
+			{
+				/* P2 is contained by Q1-Q2, but P1 is not */
+				if (p2_is_tail)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_TAIL_CONTAINED;
+				if (p2_in_qq == PT_INSIDE)
+					retval |= IM__INTER_BOUND_1D;
+				else if ((PT_EQ(P2,Q1) && q2_in_pp != PT_OUTSIDE) ||
+						 (PT_EQ(P2,Q2) && q1_in_pp != PT_OUTSIDE))
+					retval |= IM__INTER_BOUND_1D;
+			}
+			else if (q1_in_pp != PT_OUTSIDE &&
+					 q2_in_pp != PT_OUTSIDE)
+			{
+				/* Q1-Q2 is fully contained by P1-P2 */
+				retval |= IM__INTER_BOUND_1D;
+			}
+		}
+		else
+		{
+			cl_int	pq1 = __geom_segment_side(&Q1,&P1,&P2);
+			cl_int	pq2 = __geom_segment_side(&Q2,&P1,&P2);
+#if 0
+			printf("P1(%d,%d)[%d]-P2(%d,%d)[%d] Q1(%d,%d)[%d]-Q2(%d,%d)[%d]\n",
+				   (int)P1.x, (int)P1.y, qp1,
+				   (int)P2.x, (int)P2.y, qp2,
+				   (int)Q1.x, (int)Q1.y, pq1,
+				   (int)Q2.x, (int)Q2.y, pq2);
+#endif
+			if (qp1==0 && ((pq1 >= 0 && pq2 <= 0) ||
+						   (pq1 <= 0 && pq2 >= 0)))
+			{
+				/* P1 is on Q1-Q2 */
+				if (p1_is_head)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_HEAD_CONTAINED;
+				else
+					retval |= IM__INTER_BOUND_0D;
+			}
+			else if (qp2==0 && ((pq1 >= 0 && pq2 <= 0) ||
+								(pq1 <= 0 && pq2 >= 0)))
+			{
+				/* P2 is on Q1-Q2 */
+				if (p2_is_tail)
+					retval |= IM__BOUND_BOUND_0D | IM__LINE_TAIL_CONTAINED;
+				else
+					retval |= IM__INTER_BOUND_0D;
+			}
+			else if (pq1==0 && ((qp1 >= 0 && qp2 <= 0) ||
+								(qp1 <= 0 && qp2 >= 0)))
+			{
+				/* Q1 on P1-P2 */
+				retval |= IM__INTER_BOUND_0D;
+			}
+			else if (pq2==0 && ((qp1 >= 0 && qp2 <= 0) ||
+								(qp1 <= 0 && qp2 >= 0)))
+			{
+				/* Q2 on P1-P2 */
+				retval |= IM__INTER_BOUND_0D;
+			}
+			else if (((qp1 > 0 && qp2 < 0) || (qp1 < 0 && qp2 > 0)) &&
+					 ((pq1 > 0 && pq2 < 0) || (pq1 < 0 && pq2 > 0)))
+			{
+				/* P1-P2 and Q1-Q2 crosses */
+				retval |= IM__INTER_BOUND_0D;
+				ncrosses++;
+			}
+		}
+	}
+	/* check P1,P2 locations */
+	if (p1_location == '?')
+		p1_location = (wn1 == 0 ? 'E' : 'I');
+	if (p2_location == '?')
+		p2_location = (wn2 == 0 ? 'E' : 'I');
+	if (pc_location == '?')
+		pc_location = (wnc == 0 ? 'E' : 'I');
+
+	if (p1_location == 'I' || p2_location == 'I')
+	{
+		if (PT_EQ(P1,P2))
+			retval |= IM__INTER_INTER_0D;
+		else
+			retval |= IM__INTER_INTER_1D;
+	}
+	if (p1_location == 'E' || p2_location == 'E')
+	{
+		if (PT_EQ(P1,P2))
+			retval |= IM__INTER_EXTER_0D;
+		else
+			retval |= IM__INTER_EXTER_1D;
+	}
+	if (p1_location == 'B' && p2_location == 'B')
+	{
+		if (pc_location == 'I')
+			retval |= IM__INTER_INTER_1D;
+	}
+	else if ((p1_location == 'E' && p2_location == 'B') ||
+			 (p1_location == 'B' && p2_location == 'E') ||
+			 (p1_location == 'E' && p2_location == 'E'))
+	{
+		if (ncrosses > 0)
+			retval |= IM__INTER_INTER_1D;
+		retval |= IM__INTER_EXTER_1D;
+	}
+	if (p1_is_head && p1_location == 'I')
+		retval |= IM__BOUND_INTER_0D | IM__LINE_HEAD_CONTAINED;
+	if (p2_is_tail && p2_location == 'I')
+		retval |= IM__BOUND_INTER_0D | IM__LINE_TAIL_CONTAINED;
+	if ((p1_is_head && p1_location == 'E') ||
+		(p2_is_tail && p2_location == 'E'))
+		retval |= IM__BOUND_EXTER_0D;
+#if 0
+	printf("P1(%d,%d)[%c]-P2(%d,%d)[%c]\n",
+		   (int)P1.x, (int)P1.y, p1_location,
+		   (int)P2.x, (int)P2.y, p2_location);
+#endif
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_line_triangle(kern_context *kcxt,
+						  const pg_geometry_t *geom1,
+						  const pg_geometry_t *geom2)
+{
+	const char *gpos = NULL;
+	const char *ppos = NULL;
+	cl_int		nloops;
+	cl_uint		unitsz;
+	cl_int		retval, __mask;
+	geom_bbox_2d bbox2;
+
+	assert((geom1->type == GEOM_LINETYPE ||
+			geom1->type == GEOM_MULTILINETYPE) &&
+		   (geom2->type == GEOM_TRIANGLETYPE));
+	/* special empty cases */
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_1D | IM__BOUND_EXTER_0D | IM__EXTER_EXTER_2D;
+
+	/* sanity check of the triangle */
+	if (geom2->nitems != 4)
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "triangle must have exactly 4 points");
+		return -1;
+	}
+	retval = IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+
+	/* shortcut if both of geometry has bounding box */
+	if (geom2->bbox)
+	{
+		memcpy(&bbox2, geom2->bbox, sizeof(geom_bbox_2d));
+		if (geom1->bbox)
+		{
+			geom_bbox_2d	bbox1;
+
+			memcpy(&bbox1, geom1->bbox, sizeof(geom_bbox_2d));
+
+			if (bbox1.xmax < bbox2.xmin || bbox1.xmin > bbox2.xmax ||
+				bbox1.ymax < bbox2.ymin || bbox2.ymin > bbox2.ymax)
+				return (retval | IM__INTER_EXTER_1D | IM__BOUND_EXTER_0D);
+		}
+	}
+
+	nloops = (geom1->type == GEOM_LINETYPE ? 1 : geom1->nitems);
+    for (int k=0; k < nloops; k++)
+	{
+		const pg_geometry_t *line;
+		POINT2D		P1, P2;
+
+		if (geom1->type == GEOM_LINETYPE)
+            line = geom1;
+		else
+		{
+			pg_geometry_t __temp;
+
+			gpos = geometry_load_subitem(&__temp, geom1, gpos, k, kcxt);
+			if (!gpos)
+				return -1;
+			line = &__temp;
+		}
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(line->flags);
+		ppos = __loadPoint2d(&P1, line->rawdata, unitsz);
+		for (int i=2; i <= line->nitems; i++, P1=P2)
+		{
+			ppos = __loadPoint2d(&P2, ppos, unitsz);
+			/* shortcut, if this edge is obviously disjoint */
+			if (geom2->bbox && (Max(P1.x,P2.x) < bbox2.xmin ||
+								Min(P1.x,P2.x) > bbox2.xmax ||
+								Max(P1.y,P2.y) < bbox2.ymin ||
+								Min(P1.y,P2.y) > bbox2.ymax))
+			{
+				retval |= IM__INTER_EXTER_1D;
+			}
+			else
+			{
+				retval |= __geom_relate_seg_triangle(kcxt,
+													 P1, i==2,
+													 P2, i==line->nitems,
+													 geom2);
+			}
+		}
+	}
+	__mask = (IM__LINE_HEAD_CONTAINED | IM__LINE_TAIL_CONTAINED);
+	if ((retval & __mask) != __mask)
+		retval |= IM__BOUND_EXTER_0D;
+
+	return (retval & IM__MASK_FULL);
+}
+
+STATIC_FUNCTION(cl_int)
 __geom_relate_seg_polygon(kern_context *kcxt,
 						  const POINT2D &P1, cl_bool p1_is_head,
 						  const POINT2D &P2, cl_bool p2_is_tail,
@@ -3977,7 +4297,10 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 							retval |= (IM__BOUND_BOUND_0D |
 									   IM__LINE_TAIL_CONTAINED);
 						if (PT_NE(P1,P2))
-							retval |= IM__INTER_BOUND_0D;
+						{
+							if (!p1_is_head && !p2_is_tail)
+								retval |= IM__INTER_BOUND_0D;
+						}
 						else
 							retval |= IM__INTER_BOUND_1D;
 						return retval;
@@ -4365,7 +4688,7 @@ geom_relate_internal(kern_context *kcxt,
 					return geom_relate_point_line(kcxt, geom1, geom2);
 
 				case GEOM_TRIANGLETYPE:
-					return geom_relate_point_tri(kcxt, geom1, geom2);
+					return geom_relate_point_triangle(kcxt, geom1, geom2);
 
 				case GEOM_POLYGONTYPE:
 				case GEOM_MULTIPOLYGONTYPE:
@@ -4390,6 +4713,7 @@ geom_relate_internal(kern_context *kcxt,
 					return geom_relate_line_line(kcxt, geom1, geom2);
 
 				case GEOM_TRIANGLETYPE:
+					return geom_relate_line_triangle(kcxt, geom1, geom2);
 
 				case GEOM_POLYGONTYPE:
 				case GEOM_MULTIPOLYGONTYPE:
@@ -4406,12 +4730,15 @@ geom_relate_internal(kern_context *kcxt,
 			{
 				case GEOM_POINTTYPE:
 				case GEOM_MULTIPOINTTYPE:
-					return IM__TWIST(geom_relate_point_tri(kcxt,
-														   geom2, geom1));
-				case GEOM_TRIANGLETYPE:
-					
+					return IM__TWIST(geom_relate_point_triangle(kcxt,
+																geom2,
+																geom1));
 				case GEOM_LINETYPE:
 				case GEOM_MULTILINETYPE:
+					return IM__TWIST(geom_relate_line_triangle(kcxt,
+															   geom2,
+															   geom1));
+				case GEOM_TRIANGLETYPE:
 
 				case GEOM_POLYGONTYPE:
 				case GEOM_MULTIPOLYGONTYPE:
@@ -4432,13 +4759,11 @@ geom_relate_internal(kern_context *kcxt,
 															geom2, geom1));
 				case GEOM_LINETYPE:
 				case GEOM_MULTILINETYPE:
-
-				case GEOM_TRIANGLETYPE:
-
-				case GEOM_POLYGONTYPE:
-				case GEOM_MULTIPOLYGONTYPE:
 					return IM__TWIST(geom_relate_line_polygon(kcxt,
 															  geom2, geom1));
+				case GEOM_TRIANGLETYPE:
+				case GEOM_POLYGONTYPE:
+				case GEOM_MULTIPOLYGONTYPE:
 				default:
 					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
 									   "unsupported geometry type");
