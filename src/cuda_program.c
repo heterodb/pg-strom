@@ -359,7 +359,7 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	 */
 	stack_sz = 1024 + pgstrom_extra_kernel_stack_size;
 	if ((extra_flags & DEVKERNEL_NEEDS_POSTGIS) != 0)
-		stack_sz += 2048;
+		stack_sz += 4096;
 	ofs += snprintf(source + ofs, len - ofs,
 					"#define KERN_CONTEXT_STACK_LIMIT %zu\n", stack_sz);
 
@@ -1641,7 +1641,7 @@ retry_checks:
 		stack_sz = (1800 + MAXALIGN(entry->varlena_bufsz) +
 					pgstrom_extra_kernel_stack_size);
 		if ((entry->extra_flags & DEVKERNEL_NEEDS_POSTGIS) != 0)
-			stack_sz += 2048;
+			stack_sz += 4096;
 		if ((entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 			stack_sz += 4096;
 #ifdef USE_ASSERT_CHECKING
