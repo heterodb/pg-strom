@@ -7,9 +7,27 @@ CREATE TABLE _gistest
   b   geometry
 );
 
-CREATE OR REPLACE FUNCTION _st_relate(geometry,geometry)
+CREATE OR REPLACE FUNCTION __st_relate(geometry,geometry)
 RETURNS text
 AS '$libdir/postgis-3','relate_full'
+LANGUAGE C
+STRICT
+IMMUTABLE
+PARALLEL SAFE
+COST 10000;
+
+CREATE OR REPLACE FUNCTION __st_contains(geometry,geometry)
+RETURNS bool
+AS '$libdir/postgis-3','contains'
+LANGUAGE C
+STRICT
+IMMUTABLE
+PARALLEL SAFE
+COST 10000;
+
+CREATE OR REPLACE FUNCTION __st_crosses(geometry,geometry)
+RETURNS bool
+AS '$libdir/postgis-3','crosses'
 LANGUAGE C
 STRICT
 IMMUTABLE
@@ -20,7 +38,7 @@ CREATE VIEW gistest AS
 SELECT id, st_astext(a) a, st_astext(b) b, cpu, gpu,
        CASE WHEN cpu != gpu THEN '***' ELSE null END diff
   FROM (SELECT  id, a, b,
-                _st_relate(a,b) cpu,
+                __st_relate(a,b) cpu,
 				st_relate(a,b) gpu
           FROM _gistest
 		 WHERE id > 0) qry
@@ -30,9 +48,35 @@ CREATE VIEW gistest_r AS
 SELECT id, st_astext(b) b, st_astext(a) a, cpu, gpu,
        CASE WHEN cpu != gpu THEN '***' ELSE null END diff
   FROM (SELECT  id, b, a,
-                _st_relate(b,a) cpu,
+                __st_relate(b,a) cpu,
 				st_relate(b,a) gpu
           FROM _gistest
+		 WHERE id > 0) qry
+ ORDER BY id;
+
+CREATE VIEW test_st_contains AS
+SELECT id, st_astext(a) a, st_astext(b) b,
+       cpu1, gpu1, CASE WHEN cpu1 != gpu1 THEN '***' ELSE null END diff1,
+       cpu2, gpu2, CASE WHEN cpu2 != gpu2 THEN '***' ELSE null END diff2
+  FROM (SELECT id, a, b,
+               __st_contains(a,b) cpu1,
+			   st_contains(a,b) gpu1,
+			   __st_contains(b,a) cpu2,
+			   st_contains(b,a) gpu2
+		  FROM _gistest
+		 WHERE id > 0) qry
+ ORDER BY id;
+
+CREATE VIEW test_st_crosses AS
+SELECT id, st_astext(a) a, st_astext(b) b,
+       cpu1, gpu1, CASE WHEN cpu1 != gpu1 THEN '***' ELSE null END diff1,
+       cpu2, gpu2, CASE WHEN cpu2 != gpu2 THEN '***' ELSE null END diff2
+  FROM (SELECT id, a, b,
+               __st_crosses(a,b) cpu1,
+			   st_crosses(a,b) gpu1,
+			   __st_crosses(b,a) cpu2,
+			   st_crosses(b,a) gpu2
+		  FROM _gistest
 		 WHERE id > 0) qry
  ORDER BY id;
 

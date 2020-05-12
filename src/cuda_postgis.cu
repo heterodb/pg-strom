@@ -2782,7 +2782,7 @@ pgfn_st_linecrossingdirection(kern_context *kcxt,
 
 /* ================================================================
  *
- * St_Contains(geometry,geometry)
+ * St_Relate(geometry,geometry)
  *
  * ================================================================
  */
@@ -2954,114 +2954,6 @@ __geom_point_in_multipolygon(const pg_geometry_t *geom, const POINT2D *pt,
 			return retval;
 	}
 	return retval;
-}
-
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_st_contains(kern_context *kcxt,
-                 const pg_geometry_t &geom1,
-                 const pg_geometry_t &geom2)
-{
-	pg_bool_t	result;
-
-	result.isnull = geom1.isnull | geom2.isnull;
-	result.value  = false;
-	if (result.isnull)
-		return result;
-
-	if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
-		return result;
-
-	/*
-	 * shortcut-1: if geom2 bounding box is not completely inside
-	 * geom1 bounding box we can return FALSE.
-	 */
-	if (geom1.bbox && geom2.bbox)
-	{
-		geom_bbox_2d   *bbox1 = &geom1.bbox->d2;
-		geom_bbox_2d   *bbox2 = &geom2.bbox->d2;
-
-		if (bbox2->xmin < bbox1->xmin || bbox2->xmax > bbox1->xmax ||
-			bbox2->ymin < bbox1->ymin || bbox2->ymax > bbox1->ymax)
-			return result;
-	}
-
-	/*
-	 * shortcut-2: if geom2 is a point and geom1 is a polygon
-	 * call the point-in-polygon function.
-	 */
-	if ((geom1.type == GEOM_POLYGONTYPE ||
-		 geom1.type == GEOM_MULTIPOLYGONTYPE) &&
-		(geom2.type == GEOM_POINTTYPE ||
-		 geom2.type == GEOM_MULTIPOINTTYPE))
-	{
-		POINT2D		pt;
-		int			status;
-		
-		if (geom2.type == GEOM_POINTTYPE)
-		{
-			__loadPoint2d(&pt, geom2.rawdata, 0);
-			if (geom1.bbox)
-			{
-				geom_bbox_2d   *bbox = &geom1.bbox->d2;
-
-				if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
-					pt.y < bbox->ymin || pt.y > bbox->ymax)
-					return result;
-			}
-			if (geom1.type == GEOM_POLYGONTYPE)
-				status = __geom_point_in_polygon(&geom1, &pt, kcxt);
-			else
-				status = __geom_point_in_multipolygon(&geom1, &pt, kcxt);
-			if (status == PT_ERROR)
-				goto error;
-			result.value = (status == PT_INSIDE);
-		}
-		else
-		{
-			pg_geometry_t __geom;
-			const char *pos = NULL;
-			cl_bool		meet_inside = false;
-
-			for (int i=0; i < geom2.nitems; i++)
-			{
-				pos = geometry_load_subitem(&__geom, &geom2, pos, i);
-				if (!pos)
-					return result;
-				__loadPoint2d(&pt, __geom.rawdata, 0);
-				if (geom1.bbox)
-				{
-					geom_bbox_2d   *bbox = &geom2.bbox->d2;
-
-					if (pt.x < bbox->xmin || pt.x > bbox->xmax ||
-						pt.y < bbox->ymin || pt.y > bbox->ymax)
-						return result;
-				}
-				if (geom1.type == GEOM_POLYGONTYPE)
-					status = __geom_point_in_polygon(&geom1, &pt, kcxt);
-				else
-					status = __geom_point_in_multipolygon(&geom1, &pt, kcxt);
-				if (status == PT_ERROR)
-					goto error;
-				else if (status == PT_INSIDE)
-					meet_inside = true;
-				else if (status == PT_OUTSIDE)
-					break;
-			}
-			result.value = (meet_inside && status != PT_OUTSIDE);
-		}
-		return result;
-	}
-
-	/*
-	 * XXX - need to port the logic in GEOS library
-	 */
-	printf("gid=%u type1=%d type2=%d\n",
-		   get_global_id(), geom1.type, geom2.type);
-	STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-					   "Not supported geometry type by st_contains");
-error:
-	result.isnull = true;
-	return result;
 }
 
 /* ================================================================
@@ -4417,7 +4309,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 							/* P1-Q1-P2-Q2; P1-Q1 is out of bounds */
 							status = __geom_relate_seg_polygon(kcxt,
 															   P1, p1_is_head,
-															   Q2, false,
+															   Q1, false,
 															   geom,
 															   nrings,
 															   last_polygons);
@@ -5361,6 +5253,141 @@ pgfn_st_relate(kern_context *kcxt,
 
 /* ================================================================
  *
+ * St_Contains(geometry,geometry)
+ *
+ * ================================================================
+ */
+STATIC_FUNCTION(pg_bool_t)
+fast_geom_contains_polygon_point(kern_context *kcxt,
+								 const pg_geometry_t *geom1,
+								 const pg_geometry_t *geom2)
+{
+	POINT2D		pt;
+	cl_int		status = PT_ERROR;
+	pg_bool_t	result;
+	geom_bbox_2d bbox;
+
+	assert((geom1->type == GEOM_POLYGONTYPE ||
+			geom1->type == GEOM_MULTIPOLYGONTYPE) &&
+		   (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE));
+	memset(&result, 0, sizeof(pg_bool_t));
+	if (geom1->bbox)
+		memcpy(&bbox, &geom1->bbox->d2, sizeof(geom_bbox_2d));
+
+	if (geom2->type == GEOM_POINTTYPE)
+	{
+		__loadPoint2d(&pt, geom2->rawdata, 0);
+		if (geom1->bbox)
+		{
+			if (pt.x < bbox.xmin || pt.x > bbox.xmax ||
+				pt.y < bbox.ymin || pt.y > bbox.ymax)
+				return result;
+		}
+		if (geom1->type == GEOM_POLYGONTYPE)
+			status = __geom_point_in_polygon(geom1, &pt, kcxt);
+		else
+			status = __geom_point_in_multipolygon(geom1, &pt, kcxt);
+		if (status == PT_ERROR)
+			goto error;
+		result.value = (status == PT_INSIDE);
+	}
+	else
+	{
+		pg_geometry_t __geom;
+		const char *pos = NULL;
+		cl_bool		meet_inside = false;
+
+		for (int i=0; i < geom2->nitems; i++)
+		{
+			pos = geometry_load_subitem(&__geom, geom2, pos, i);
+			if (!pos)
+				goto error;
+			__loadPoint2d(&pt, __geom.rawdata, 0);
+			if (geom1->bbox && (pt.x < bbox.xmin || pt.x > bbox.xmax ||
+								pt.y < bbox.ymin || pt.y > bbox.ymax))
+			{
+				status = PT_OUTSIDE;
+				break;
+			}
+			if (geom1->type == GEOM_POLYGONTYPE)
+				status = __geom_point_in_polygon(geom1, &pt, kcxt);
+			else
+				status = __geom_point_in_multipolygon(geom1, &pt, kcxt);
+			printf("PT(%d,%d) %d\n", (int)pt.x, (int)pt.y, status);
+			if (status == PT_ERROR)
+				goto error;
+			else if (status == PT_INSIDE)
+				meet_inside = true;
+			else if (status == PT_OUTSIDE)
+				break;
+		}
+		printf("meet_inside = %d status = %d\n", (int)meet_inside, status);
+		result.value = (meet_inside && status != PT_OUTSIDE);
+	}
+	return result;
+error:
+	result.isnull = true;
+	return result;
+}
+
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_st_contains(kern_context *kcxt,
+                 const pg_geometry_t &geom1,
+                 const pg_geometry_t &geom2)
+{
+	pg_bool_t	result;
+	cl_int		status;
+
+	result.isnull = geom1.isnull | geom2.isnull;
+	result.value  = false;
+	if (result.isnull)
+		return result;
+
+	if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+		return result;
+
+	/*
+	 * shortcut-1: if geom1 is a polygon and geom2 is a point type,
+	 * call the fast point-in-polygon function.
+	 */
+	if ((geom1.type == GEOM_POLYGONTYPE ||
+		 geom1.type == GEOM_MULTIPOLYGONTYPE) &&
+		(geom2.type == GEOM_POINTTYPE ||
+		 geom2.type == GEOM_MULTIPOINTTYPE))
+		return fast_geom_contains_polygon_point(kcxt, &geom1, &geom2);
+
+	/*
+	 * shortcut-2: if geom2 bounding box is not completely inside
+	 * geom1 bounding box we can return FALSE.
+	 */
+	if (geom1.bbox && geom2.bbox)
+	{
+		geom_bbox_2d	bbox1, bbox2;
+
+		memcpy(&bbox1, &geom1.bbox->d2, sizeof(geom_bbox_2d));
+		memcpy(&bbox2, &geom2.bbox->d2, sizeof(geom_bbox_2d));
+
+		if (bbox2.xmin < bbox1.xmin || bbox1.xmax < bbox2.xmax ||
+			bbox2.ymin < bbox1.ymin || bbox1.ymax < bbox2.ymax)
+			return result;
+	}
+
+	/* elsewhere, use st_relate and DE9-IM */
+	status = geom_relate_internal(kcxt, &geom1, &geom2);
+	if (status < 0)
+		result.isnull = true;
+	else
+	{
+		result.value = ((status & IM__INTER_INTER_2D) != 0 &&
+						(status & IM__EXTER_INTER_2D) == 0 &&
+						(status & IM__EXTER_BOUND_2D) == 0);
+	}
+	return result;
+}
+
+/* ================================================================
+ *
  * St_Crosses(geometry,geometry)
  *
  * ================================================================
@@ -5371,7 +5398,7 @@ pgfn_st_crosses(kern_context *kcxt,
 				const pg_geometry_t &geom2)
 {
 	pg_bool_t	result;
-	int			status;
+	cl_int		status;
 
 	memset(&result, 0, sizeof(pg_bool_t));
 	result.isnull = geom1.isnull | geom2.isnull;
@@ -5387,21 +5414,83 @@ pgfn_st_crosses(kern_context *kcxt,
 	 */
 	if (geom1.bbox && geom2.bbox)
 	{
-		geom_bbox_2d   *bbox1 = &geom1.bbox->d2;
-		geom_bbox_2d   *bbox2 = &geom2.bbox->d2;
+		geom_bbox_2d	bbox1, bbox2;
 
-		if (bbox1->xmax < bbox2->xmin || bbox1->ymax < bbox2->ymin ||
-			bbox1->xmin > bbox2->xmax || bbox1->ymin > bbox2->ymax)
+		memcpy(&bbox1, &geom1.bbox->d2, sizeof(geom_bbox_2d));
+		memcpy(&bbox2, &geom2.bbox->d2, sizeof(geom_bbox_2d));
+
+		if (bbox1.xmax < bbox2.xmin ||
+			bbox1.xmin > bbox2.xmax ||
+			bbox1.ymax < bbox2.ymin ||
+			bbox1.ymin > bbox2.ymax)
 			return result;
 	}
+
+#if 0
+	/*
+	 * TODO: fast path for line-polygon situation
+	 */
+	if ((geom1.type == GEOM_LINETYPE ||
+		 geom1.type == GEOM_MULTILINETYPE) &&
+		(geom2.type == GEOM_POLYGONTYPE ||
+		 geom2.type == GEOM_MULTIPOLYGONTYPE))
+		return fast_geom_crosses_line_polygon(kcxt, &geom1, &geom2);
+	if ((geom1.type == GEOM_POLYGONTYPE ||
+		 geom1.type == GEOM_MULTIPOLYGONTYPE) &&
+		(geom2.type == GEOM_LINETYPE ||
+		 geom2.type == GEOM_MULTILINETYPE))
+		return fast_geom_crosses_line_polygon(kcxt, &geom2, &geom2);
+#endif
 	status = geom_relate_internal(kcxt, &geom1, &geom2);
 	if (status < 0)
 		result.isnull = true;
-	else
+	else if (geom1.type == GEOM_POINTTYPE ||
+			 geom1.type == GEOM_MULTIPOINTTYPE)
 	{
-		//assign result
-		result.value = true;
+		if (geom2.type == GEOM_LINETYPE ||
+			geom2.type == GEOM_MULTILINETYPE ||
+			geom2.type == GEOM_TRIANGLETYPE ||
+            geom2.type == GEOM_POLYGONTYPE ||
+            geom2.type == GEOM_MULTIPOLYGONTYPE)
+		{
+			result.value = ((status & IM__INTER_INTER_2D) != 0 &&
+							(status & IM__INTER_EXTER_2D) != 0);
+		}
+	}
+	else if (geom1.type == GEOM_LINETYPE ||
+			 geom1.type == GEOM_MULTILINETYPE)
+	{
+		if (geom2.type == GEOM_POINTTYPE ||
+			geom2.type == GEOM_MULTIPOINTTYPE)
+		{
+			result.value = ((status & IM__INTER_INTER_2D) != 0 &&
+							(status & IM__EXTER_INTER_2D) != 0);
+		}
+		else if (geom2.type == GEOM_LINETYPE ||
+				 geom2.type == GEOM_MULTILINETYPE)
+		{
+			result.value = ((status & IM__INTER_INTER_2D)==IM__INTER_INTER_0D);
+		}
+		else if (geom2.type == GEOM_TRIANGLETYPE ||
+				 geom2.type == GEOM_POLYGONTYPE ||
+				 geom2.type == GEOM_MULTIPOLYGONTYPE)
+		{
+			result.value = ((status & IM__INTER_INTER_2D) != 0 &&
+							(status & IM__INTER_EXTER_2D) != 0);
+		}
+	}
+	else if (geom1.type == GEOM_TRIANGLETYPE ||
+			 geom1.type == GEOM_POLYGONTYPE ||
+			 geom1.type == GEOM_MULTIPOLYGONTYPE)
+	{
+		if (geom2.type == GEOM_POINTTYPE ||
+			geom2.type == GEOM_MULTIPOINTTYPE ||
+			geom2.type == GEOM_LINETYPE ||
+			geom2.type == GEOM_MULTILINETYPE)
+		{
+			result.value = ((status & IM__INTER_INTER_2D) != 0 &&
+							(status & IM__EXTER_INTER_2D) != 0);
+		}
 	}
 	return result;
 }
-
