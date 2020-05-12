@@ -3115,6 +3115,22 @@ IM__TWIST(cl_int status)
 			((status & IM__EXTER_EXTER_2D)));
 }
 
+STATIC_INLINE(void)
+IM__PRINTF(const char *label, cl_int status)
+{
+	printf("[%s]\n%d %d %d\n%d %d %d\n%d %d %d\n",
+		   label,
+		   (status & IM__INTER_INTER_2D) != 0 ? 1 : 0,
+		   (status & IM__INTER_BOUND_2D) != 0 ? 1 : 0,
+		   (status & IM__INTER_EXTER_2D) != 0 ? 1 : 0,
+		   (status & IM__BOUND_INTER_2D) != 0 ? 1 : 0,
+		   (status & IM__BOUND_BOUND_2D) != 0 ? 1 : 0,
+		   (status & IM__BOUND_EXTER_2D) != 0 ? 1 : 0,
+		   (status & IM__EXTER_INTER_2D) != 0 ? 1 : 0,
+		   (status & IM__EXTER_BOUND_2D) != 0 ? 1 : 0,
+		   (status & IM__EXTER_EXTER_2D) != 0 ? 1 : 0);
+}
+
 STATIC_FUNCTION(cl_int)
 geom_relate_point_point(kern_context *kcxt,
 						const pg_geometry_t *geom1,
@@ -4792,112 +4808,386 @@ geom_relate_line_polygon(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(cl_int)
+__geom_relate_ring_polygon(kern_context *kcxt,
+						   const pg_geometry_t *ring,
+						   const pg_geometry_t *geom)
+{
+	const char *gpos;
+	const char *ppos;
+	cl_uint		unitsz;
+	cl_uint		nitems;
+	cl_int		nloops;
+	cl_bool		poly_has_inside = false;
+	cl_bool		poly_has_outside = false;
+	cl_int		rflags = 0;
+	cl_int		boundary = 0;
+	cl_int		status;
+	POINT2D		P1, P2;
+	geom_bbox_2d bbox;
+
+	if (ring->nitems == 0)
+		return 0;		/* empty */
+	unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
+	if (geom->bbox)
+		memcpy(&bbox, geom->bbox, sizeof(geom_bbox_2d));
+
+	/* decrement nitems if tail items are duplicated */
+	__loadPoint2dIndex(&P1, ring->rawdata, unitsz, ring->nitems-1);
+	for (nitems = ring->nitems; nitems >= 2; nitems--)
+	{
+		__loadPoint2dIndex(&P2, ring->rawdata, unitsz, nitems-2);
+		if (PT_NE(P1,P2))
+			break;
+	}
+	/* checks for each edge */
+	ppos = __loadPoint2d(&P1, ring->rawdata, unitsz);
+	for (int i=2; i <= nitems; i++)
+	{
+		ppos = __loadPoint2d(&P2, ppos, unitsz);
+		if (PT_EQ(P1,P2))
+			continue;
+		if (geom->bbox && (Max(P1.x,P2.x) < bbox.xmin ||
+						   Min(P1.x,P2.x) > bbox.xmax ||
+						   Max(P1.y,P2.y) < bbox.ymin ||
+						   Min(P1.y,P2.y) > bbox.ymax))
+		{
+			status = (IM__INTER_EXTER_1D |
+					  IM__BOUND_EXTER_0D |
+					  IM__EXTER_INTER_2D |
+					  IM__EXTER_BOUND_1D |
+					  IM__EXTER_EXTER_2D);
+        }
+        else
+        {
+            status = __geom_relate_seg_polygon(kcxt,
+                                               P1, false,
+                                               P2, false,
+                                               geom, 0, false);
+			if (status < 0)
+				return -1;
+		}
+		rflags |= status;
+		P1=P2;
+	}
+	/*
+	 * Simple check whether polygon is fully contained by the ring
+	 */
+	nloops = (geom->type == GEOM_POLYGONTYPE ? 1 : geom->nitems);
+	for (int k=0; k < nloops; k++)
+	{
+		pg_geometry_t	poly0;
+		cl_int			location;
+
+		if (geom->type == GEOM_POLYGONTYPE)
+		{
+			if (!geometry_load_subitem(&poly0, geom, NULL, 0, kcxt))
+				return -1;
+		}
+		else
+		{
+			pg_geometry_t	__temp;
+
+			gpos = geometry_load_subitem(&__temp, geom, gpos, k, kcxt);
+			if (!gpos)
+				return -1;
+			if (!geometry_load_subitem(&poly0, &__temp, NULL, 0, kcxt))
+				return -1;
+		}
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(poly0.flags);
+		ppos = poly0.rawdata;
+		for (int i=0; i < poly0.nitems; i++)
+		{
+			ppos = __loadPoint2d(&P1, ppos, unitsz);
+			location = __geom_point_in_ring(ring, &P1, kcxt);
+			if (location == PT_INSIDE)
+				poly_has_inside = true;
+			else if (location == PT_OUTSIDE)
+				poly_has_outside = true;
+			else if (location != PT_BOUNDARY)
+				return -1;
+		}
+		if (poly_has_inside && poly_has_outside)
+			break;
+	}
+
+	/*
+	 * transform rflags to ring-polygon relationship
+	 */
+	if ((rflags & IM__INTER_BOUND_2D) == IM__INTER_BOUND_1D)
+		boundary = IM__BOUND_BOUND_1D;
+	else if ((rflags & IM__INTER_BOUND_2D) == IM__INTER_BOUND_0D)
+		boundary = IM__BOUND_BOUND_0D;
+
+	if ((rflags & IM__INTER_INTER_2D) == 0 &&
+		(rflags & IM__INTER_BOUND_2D) != 0 &&
+		(rflags & IM__INTER_EXTER_2D) == 0)
+	{
+		/* ring equals to the polygon */
+		return (IM__INTER_INTER_2D |
+				IM__BOUND_BOUND_1D |
+				IM__EXTER_EXTER_2D);
+	}
+	else if ((rflags & IM__INTER_INTER_2D) == 0 &&
+			 (rflags & IM__INTER_BOUND_2D) == 0 &&
+			 (rflags & IM__INTER_EXTER_2D) != 0)
+	{
+		if (poly_has_outside)
+		{
+			/* disjoint */
+			return (IM__INTER_EXTER_2D |
+					IM__BOUND_EXTER_1D |
+					IM__EXTER_INTER_2D |
+					IM__EXTER_BOUND_1D |
+					IM__EXTER_EXTER_2D);
+		}
+		else
+		{
+			/* ring fully contains the polygons */
+			return (IM__INTER_INTER_2D |
+					IM__INTER_BOUND_1D |
+					IM__INTER_EXTER_2D |
+					IM__BOUND_EXTER_1D |
+					IM__EXTER_EXTER_2D);
+		}
+	}
+	else if ((rflags & IM__INTER_INTER_2D) != 0 &&
+			 (rflags & IM__INTER_BOUND_2D) != 0 &&
+			 (rflags & IM__INTER_EXTER_2D) != 0)
+	{
+		/* ring has intersection to the polygon */
+		assert(boundary != 0);
+		return boundary | (IM__INTER_INTER_2D |
+						   IM__INTER_BOUND_1D |
+						   IM__INTER_EXTER_2D |
+						   IM__BOUND_INTER_1D |
+						   IM__BOUND_EXTER_1D |
+						   IM__EXTER_INTER_2D |
+						   IM__EXTER_BOUND_1D |
+						   IM__EXTER_EXTER_2D);
+	}
+	else if ((rflags & IM__INTER_INTER_2D) == 0 &&
+			 (rflags & IM__INTER_BOUND_2D) != 0 &&
+			 (rflags & IM__INTER_EXTER_2D) != 0)
+	{
+		if (poly_has_outside)
+		{
+			/* ring touched the polygon at a boundary, but no intersection */
+			assert(boundary != 0);
+			return boundary | (IM__INTER_EXTER_2D |
+							   IM__BOUND_EXTER_1D |
+							   IM__EXTER_INTER_2D |
+							   IM__EXTER_BOUND_1D |
+							   IM__EXTER_EXTER_2D);
+		}
+		else
+		{
+			/* ring fully contains the polygon touched at boundaries */
+			assert(boundary != 0);
+			return boundary | (IM__INTER_INTER_2D |
+							   IM__INTER_BOUND_1D |
+							   IM__INTER_EXTER_2D |
+							   IM__BOUND_EXTER_1D |
+							   IM__EXTER_EXTER_2D);
+		}
+	}
+	else if ((rflags & IM__INTER_INTER_2D) != 0 &&
+             (rflags & IM__INTER_EXTER_2D) == 0)
+	{
+		/* ring is fully contained by the polygon; might be touched */
+		return boundary | (IM__INTER_INTER_2D |
+						   IM__INTER_BOUND_1D |
+						   IM__INTER_EXTER_2D |
+						   IM__BOUND_EXTER_1D |
+						   IM__EXTER_EXTER_2D);
+	}
+	return -1;		/* unknown intersection */
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_polygon_polygon(kern_context *kcxt,
+							const pg_geometry_t *geom1,
+							const pg_geometry_t *geom2)
+{
+	pg_geometry_t __polyData;
+	const pg_geometry_t *poly;
+	const char *gpos = NULL;
+	const char *rpos = NULL;
+	cl_int		nloops;
+	cl_int		retval = IM__EXTER_EXTER_2D;
+
+	assert((geom1->type == GEOM_POLYGONTYPE ||
+			geom1->type == GEOM_MULTIPOLYGONTYPE) &&
+		   (geom2->type == GEOM_POLYGONTYPE ||
+			geom2->type == GEOM_MULTIPOLYGONTYPE));
+	/* special empty cases */
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_2D | IM__BOUND_EXTER_1D | IM__EXTER_EXTER_2D;
+
+	/* shortcut if both of geometry has bounding box */
+	if (geom1->bbox && geom2->bbox)
+	{
+		geom_bbox_2d bbox1;
+		geom_bbox_2d bbox2;
+
+		memcpy(&bbox1, geom1->bbox, sizeof(geom_bbox_2d));
+		memcpy(&bbox2, geom2->bbox, sizeof(geom_bbox_2d));
+		if (bbox1.xmax < bbox2.xmin || bbox1.xmin > bbox2.xmax ||
+			bbox1.ymax < bbox2.ymin || bbox2.ymin > bbox2.ymax)
+			return (IM__INTER_EXTER_2D |
+					IM__BOUND_EXTER_1D |
+					IM__EXTER_INTER_2D |
+					IM__EXTER_BOUND_1D |
+					IM__EXTER_EXTER_2D);
+	}
+
+	nloops = (geom1->type == GEOM_POLYGONTYPE ? 1 : geom1->nitems);
+	for (int k=0; k < nloops; k++)
+	{
+		cl_int		__retval = 0;	/* pending result for each polygon */
+
+		if (geom1->type == GEOM_POLYGONTYPE)
+			poly = geom1;
+		else
+		{
+			gpos = geometry_load_subitem(&__polyData, geom1, gpos, k, kcxt);
+			if (!gpos)
+				return -1;
+			poly = &__polyData;
+		}
+
+		for (int i=0; i < poly->nitems; i++)
+		{
+			pg_geometry_t ring;
+			cl_int		status;
+
+			rpos = geometry_load_subitem(&ring, poly, rpos, i, kcxt);
+			if (!rpos)
+				return -1;
+
+			status = __geom_relate_ring_polygon(kcxt, &ring, geom2);
+			if (status < 0)
+				return -1;
+			if (i == 0)
+			{
+				__retval = status;
+				if ((__retval & IM__INTER_INTER_2D) == 0)
+					break;	/* disjoint, so we can skip holes */
+			}
+			else
+			{
+				/* add boundaries, if touched/crossed */
+				__retval |= (status & IM__BOUND_BOUND_2D);
+
+				/* geom2 is disjoint from the hole? */
+				if ((status & IM__INTER_INTER_2D) == 0)
+					continue;
+				/*
+				 * geom2 is fully contained by the hole, so reconstruct
+				 * the DE9-IM as disjointed polygon.
+				 */
+				if ((status & IM__INTER_EXTER_2D) != 0 &&
+					(status & IM__EXTER_INTER_2D) == 0)
+				{
+					__retval = ((status & IM__BOUND_BOUND_2D) |
+								IM__INTER_EXTER_2D |
+								IM__BOUND_EXTER_1D |
+								IM__EXTER_INTER_2D |
+								IM__EXTER_BOUND_1D |
+								IM__EXTER_EXTER_2D);
+					break;
+				}
+
+				/*
+				 * geom2 has a valid intersection with the hole, add it.
+				 */
+				if ((status & IM__INTER_INTER_2D) != 0)
+				{
+					__retval |= (IM__BOUND_INTER_1D |
+								 IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D);
+					break;
+				}
+			}
+		}
+		retval |= __retval;
+	}
+	return retval;
+}
+
+STATIC_FUNCTION(cl_int)
 geom_relate_internal(kern_context *kcxt,
 					 const pg_geometry_t *geom1,
 					 const pg_geometry_t *geom2)
 {
 	assert(!geom1->isnull && !geom2->isnull);
-	switch (geom1->type)
+	if (geom1->type == GEOM_POINTTYPE ||
+		geom1->type == GEOM_MULTIPOINTTYPE)
 	{
-		case GEOM_POINTTYPE:
-		case GEOM_MULTIPOINTTYPE:
-			switch (geom2->type)
-			{
-				case GEOM_POINTTYPE:
-				case GEOM_MULTIPOINTTYPE:
-					return geom_relate_point_point(kcxt, geom1, geom2);
-				case GEOM_LINETYPE:
-				case GEOM_MULTILINETYPE:
-					return geom_relate_point_line(kcxt, geom1, geom2);
-
-				case GEOM_TRIANGLETYPE:
-					return geom_relate_point_triangle(kcxt, geom1, geom2);
-
-				case GEOM_POLYGONTYPE:
-				case GEOM_MULTIPOLYGONTYPE:
-					return geom_relate_point_poly(kcxt, geom1, geom2);
-
-				default:
-					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-									   "unsupported geometry type");
-					break;
-			}
-			break;
-		case GEOM_LINETYPE:
-		case GEOM_MULTILINETYPE:
-			switch (geom2->type)
-			{
-				case GEOM_POINTTYPE:
-				case GEOM_MULTIPOINTTYPE:
-					return IM__TWIST(geom_relate_point_line(kcxt,
-															geom2, geom1));
-				case GEOM_LINETYPE:
-				case GEOM_MULTILINETYPE:
-					return geom_relate_line_line(kcxt, geom1, geom2);
-
-				case GEOM_TRIANGLETYPE:
-					return geom_relate_line_triangle(kcxt, geom1, geom2);
-
-				case GEOM_POLYGONTYPE:
-				case GEOM_MULTIPOLYGONTYPE:
-					return geom_relate_line_polygon(kcxt, geom1, geom2);
-
-				default:
-					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-									   "unsupported geometry type");
-					break;
-			}
-			break;
-		case GEOM_TRIANGLETYPE:
-			switch (geom2->type)
-			{
-				case GEOM_POINTTYPE:
-				case GEOM_MULTIPOINTTYPE:
-					return IM__TWIST(geom_relate_point_triangle(kcxt,
-																geom2,
-																geom1));
-				case GEOM_LINETYPE:
-				case GEOM_MULTILINETYPE:
-					return IM__TWIST(geom_relate_line_triangle(kcxt,
-															   geom2,
-															   geom1));
-				case GEOM_TRIANGLETYPE:
-
-				case GEOM_POLYGONTYPE:
-				case GEOM_MULTIPOLYGONTYPE:
-					
-				default:
-					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-									   "unsupported geometry type");
-					break;
-			}
-			break;
-		case GEOM_POLYGONTYPE:
-		case GEOM_MULTIPOLYGONTYPE:
-			switch (geom2->type)
-			{
-				case GEOM_POINTTYPE:
-				case GEOM_MULTIPOINTTYPE:
-					return IM__TWIST(geom_relate_point_poly(kcxt,
-															geom2, geom1));
-				case GEOM_LINETYPE:
-				case GEOM_MULTILINETYPE:
-					return IM__TWIST(geom_relate_line_polygon(kcxt,
-															  geom2, geom1));
-				case GEOM_TRIANGLETYPE:
-				case GEOM_POLYGONTYPE:
-				case GEOM_MULTIPOLYGONTYPE:
-				default:
-					STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-									   "unsupported geometry type");
-					break;
-			}
-			break;
-		default:
-			STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
-							   "unsupported geometry type");
-			break;
+		if (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE)
+			return geom_relate_point_point(kcxt, geom1, geom2);
+		else if (geom2->type == GEOM_LINETYPE ||
+				 geom2->type == GEOM_MULTILINETYPE)
+			return geom_relate_point_line(kcxt, geom1, geom2);
+		else if (geom2->type == GEOM_TRIANGLETYPE)
+			return geom_relate_point_triangle(kcxt, geom1, geom2);
+		else if (geom2->type == GEOM_POLYGONTYPE ||
+				 geom2->type == GEOM_MULTIPOLYGONTYPE)
+			return geom_relate_point_poly(kcxt, geom1, geom2);
 	}
+	else if (geom1->type == GEOM_LINETYPE ||
+			 geom1->type == GEOM_MULTILINETYPE)
+	{
+		if (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE)
+			return IM__TWIST(geom_relate_point_line(kcxt, geom2, geom1));
+		else if (geom2->type == GEOM_LINETYPE ||
+				 geom2->type == GEOM_MULTILINETYPE)
+			return geom_relate_line_line(kcxt, geom1, geom2);
+		else if (geom2->type == GEOM_TRIANGLETYPE)
+			return geom_relate_line_triangle(kcxt, geom1, geom2);
+		else if (geom2->type == GEOM_POLYGONTYPE ||
+				 geom2->type == GEOM_MULTIPOLYGONTYPE)
+			return geom_relate_line_polygon(kcxt, geom1, geom2);
+	}
+	else if (geom1->type == GEOM_TRIANGLETYPE)
+	{
+		if (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE)
+			return IM__TWIST(geom_relate_point_triangle(kcxt,geom2,geom1));
+		else if (geom2->type == GEOM_LINETYPE ||
+				 geom2->type == GEOM_MULTILINETYPE)
+			return IM__TWIST(geom_relate_line_triangle(kcxt,geom2,geom1));
+#if 0
+		else if (geom2->type == GEOM_TRIANGLETYPE)
+			;
+		else if (geom2->type == GEOM_POLYGONTYPE ||
+				 geom2->type == GEOM_MULTIPOLYGONTYPE)
+			;
+#endif
+	}
+	else if (geom1->type == GEOM_POLYGONTYPE ||
+			 geom1->type == GEOM_MULTIPOLYGONTYPE)
+	{
+		if (geom2->type == GEOM_POINTTYPE ||
+			geom2->type == GEOM_MULTIPOINTTYPE)
+			return IM__TWIST(geom_relate_point_poly(kcxt,geom2,geom1));
+		else if (geom2->type == GEOM_LINETYPE ||
+				 geom2->type == GEOM_MULTILINETYPE)
+			return IM__TWIST(geom_relate_line_polygon(kcxt,geom2,geom1));
+		else if (geom2->type == GEOM_TRIANGLETYPE)
+			;
+		else if (geom2->type == GEOM_POLYGONTYPE ||
+				 geom2->type == GEOM_MULTIPOLYGONTYPE)
+			return geom_relate_polygon_polygon(kcxt,geom1,geom2);
+	}
+	STROM_CPU_FALLBACK(kcxt, ERRCODE_FEATURE_NOT_SUPPORTED,
+					   "unsupported geometry type");
 	return -1;	/* error */
 }
 

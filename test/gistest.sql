@@ -179,3 +179,32 @@ INSERT INTO _gistest(a,b) VALUES
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (-2 0,6 0)'),
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (4 0,4 0,0 4)'),
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (4 0,4 0,-1 4)');
+
+
+-- polygon-polygon
+INSERT INTO _gistest(a,b) VALUES
+('POLYGON EMPTY','POLYGON EMPTY'),
+('POLYGON ((0 0,2 0,0 2,0 0))','POLYGON EMPTY'),
+('POLYGON EMPTY','POLYGON ((0 0,2 0,0 2,0 0))'),
+('POLYGON ((0 0,4 0,4 4,0 4,0 0))','POLYGON((4 2,8 2,8 6,4 6,4 2))'),
+('POLYGON ((0 0,4 0,4 4,0 4,0 0))','POLYGON((5 0,9 0,9 4,5 4,5 0))'),
+('POLYGON ((0 0,4 0,4 4,0 4,0 0))','POLYGON((1 1,3 1,3 3,1 3,1 1))'),
+('POLYGON ((0 0,4 0,4 4,0 4,0 0))','POLYGON((2 2,6 2,6 6,2 6,2 2))'),
+('POLYGON ((0 0,4 0,4 4,0 4,0 0))','POLYGON((4 8,4 4,8 4,8 8,4 8))'),
+
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(1 1,5 1,5 5,1 5,1 1))',
+ 'POLYGON ((2 2,4 2,4 4,2 4,2 2))'),	-- fully contained in hole
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(1 2,5 2,5 4,1 4,1 2))',
+ 'POLYGON ((2 3,3 2,4 3,3 4,2 3))'),	-- touched hole at points
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(1 2,5 2,5 4,1 4,1 2))',
+ 'POLYGON ((2 2,4 2,4 4,2 4,2 2))'),	-- touched hole at line
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(1 2,5 2,5 4,1 4,1 2))',
+ 'POLYGON ((2 1,4 1,4 5,2 5,2 1))'), 	-- intersection to hole
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(1 2,5 2,5 4,1 4,1 2))',
+ 'POLYGON ((0 8,0 3,3 3,3 8,0 8))'),	-- intersection to ring/hole
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(3 3,5 3,5 5,3 5,3 3))',
+ 'POLYGON ((1 1,3 1,3 3,1 3,1 1))'),	-- touched hole at point
+('POLYGON ((0 0,6 0,6 6,0 6,0 0),(3 3,4 2,5 3,4 4,3 3))',
+ 'POLYGON ((2 3,3 2,2 1,1 2,2 3))');	-- disjoint to hole
+
+
