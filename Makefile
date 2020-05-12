@@ -212,6 +212,7 @@ else ifeq ($(shell test $(CUDA_VERSION) -ge 9000; echo $$?), 0)
 else
   NVCC_FLAGS += --gpu-code=sm_60,sm_61
 endif
+NVCC_FLAGS += --device-debug
 NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 
 #

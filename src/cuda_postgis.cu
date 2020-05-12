@@ -4995,12 +4995,131 @@ __geom_relate_ring_polygon(kern_context *kcxt,
 	{
 		/* ring is fully contained by the polygon; might be touched */
 		return boundary | (IM__INTER_INTER_2D |
-						   IM__INTER_BOUND_1D |
-						   IM__INTER_EXTER_2D |
-						   IM__BOUND_EXTER_1D |
+						   IM__BOUND_INTER_1D |
+						   IM__EXTER_INTER_2D |
+						   IM__EXTER_BOUND_1D |
 						   IM__EXTER_EXTER_2D);
 	}
 	return -1;		/* unknown intersection */
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_triangle_triangle(kern_context *kcxt,
+							  const pg_geometry_t *geom1,
+							  const pg_geometry_t *geom2)
+{
+	pg_geometry_t poly;
+	cl_double	polyData[9];
+	cl_uint		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom2->flags);
+	const char *pos;
+	POINT2D		P;
+
+	assert(geom1->type == GEOM_TRIANGLETYPE &&
+		   geom2->type == GEOM_TRIANGLETYPE);
+	/* special empty cases */
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_2D | IM__BOUND_EXTER_1D | IM__EXTER_EXTER_2D;
+
+	/* sanity checks */
+	if (geom1->nitems != 4 || geom2->nitems != 4)
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "triangle must have exactly 4 points");
+		return -1;
+	}
+
+	/* shortcut if both of geometry has bounding box */
+	if (geom1->bbox && geom2->bbox)
+	{
+		geom_bbox_2d	bbox1;
+		geom_bbox_2d	bbox2;
+
+		memcpy(&bbox1, geom1->bbox, sizeof(geom_bbox_2d));
+		memcpy(&bbox2, geom2->bbox, sizeof(geom_bbox_2d));
+		if (bbox1.xmax < bbox2.xmin || bbox1.xmin > bbox2.xmax ||
+			bbox1.ymax < bbox2.ymin || bbox2.ymin > bbox2.ymax)
+			return (IM__INTER_EXTER_2D |
+					IM__BOUND_EXTER_1D |
+					IM__EXTER_INTER_2D |
+					IM__EXTER_BOUND_1D |
+					IM__EXTER_EXTER_2D);
+	}
+
+	/* setup pseudo polygon for code reuse */
+	pos = geom2->rawdata;
+
+	memset(polyData, 0, sizeof(polyData));
+	((cl_uint *)polyData)[0] = 4;
+	for (int i=0; i < 4; i++)
+	{
+		pos = __loadPoint2d(&P, pos, unitsz);
+		if (!pos)
+			return -1;
+		polyData[2*i+1] = P.x;
+		polyData[2*i+2] = P.y;
+	}
+
+	poly.isnull = false;
+	poly.type = GEOM_POLYGONTYPE;
+	poly.flags = GEOM_FLAG__READONLY;
+	poly.srid = geom2->srid;
+	poly.nitems = 1;	/* only ring-0 */
+	poly.rawsize = sizeof(polyData);
+	poly.rawdata = (const char *)polyData;
+	poly.bbox = NULL;
+	
+	return __geom_relate_ring_polygon(kcxt, geom1, &poly);
+}
+
+STATIC_FUNCTION(cl_int)
+geom_relate_triangle_polygon(kern_context *kcxt,
+							 const pg_geometry_t *geom1,
+							 const pg_geometry_t *geom2)
+{
+	assert((geom1->type == GEOM_TRIANGLETYPE) &&
+		   (geom2->type == GEOM_POLYGONTYPE ||
+			geom2->type == GEOM_MULTIPOLYGONTYPE));
+	/* special empty cases */
+	if (geom1->nitems == 0)
+	{
+		if (geom2->nitems == 0)
+			return IM__EXTER_EXTER_2D;
+		return IM__EXTER_INTER_2D | IM__EXTER_BOUND_1D | IM__EXTER_EXTER_2D;
+	}
+	else if (geom2->nitems == 0)
+		return IM__INTER_EXTER_2D | IM__BOUND_EXTER_1D | IM__EXTER_EXTER_2D;
+
+	/* sanity checks */
+	if (geom1->nitems != 4)
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "triangle must have exactly 4 points");
+		return -1;
+	}
+
+	/* shortcut if both of geometry has bounding box */
+	if (geom1->bbox && geom2->bbox)
+	{
+		geom_bbox_2d	bbox1;
+		geom_bbox_2d	bbox2;
+
+		memcpy(&bbox1, geom1->bbox, sizeof(geom_bbox_2d));
+		memcpy(&bbox2, geom2->bbox, sizeof(geom_bbox_2d));
+		if (bbox1.xmax < bbox2.xmin || bbox1.xmin > bbox2.xmax ||
+			bbox1.ymax < bbox2.ymin || bbox2.ymin > bbox2.ymax)
+			return (IM__INTER_EXTER_2D |
+					IM__BOUND_EXTER_1D |
+					IM__EXTER_INTER_2D |
+					IM__EXTER_BOUND_1D |
+					IM__EXTER_EXTER_2D);
+	}
+	return __geom_relate_ring_polygon(kcxt, geom1, geom2);
 }
 
 STATIC_FUNCTION(cl_int)
@@ -5163,13 +5282,11 @@ geom_relate_internal(kern_context *kcxt,
 		else if (geom2->type == GEOM_LINETYPE ||
 				 geom2->type == GEOM_MULTILINETYPE)
 			return IM__TWIST(geom_relate_line_triangle(kcxt,geom2,geom1));
-#if 0
 		else if (geom2->type == GEOM_TRIANGLETYPE)
-			;
+			return geom_relate_triangle_triangle(kcxt,geom1,geom2);
 		else if (geom2->type == GEOM_POLYGONTYPE ||
 				 geom2->type == GEOM_MULTIPOLYGONTYPE)
-			;
-#endif
+			return geom_relate_triangle_polygon(kcxt,geom1,geom2);
 	}
 	else if (geom1->type == GEOM_POLYGONTYPE ||
 			 geom1->type == GEOM_MULTIPOLYGONTYPE)
@@ -5181,7 +5298,7 @@ geom_relate_internal(kern_context *kcxt,
 				 geom2->type == GEOM_MULTILINETYPE)
 			return IM__TWIST(geom_relate_line_polygon(kcxt,geom2,geom1));
 		else if (geom2->type == GEOM_TRIANGLETYPE)
-			;
+			return IM__TWIST(geom_relate_triangle_polygon(kcxt,geom2,geom1));
 		else if (geom2->type == GEOM_POLYGONTYPE ||
 				 geom2->type == GEOM_MULTIPOLYGONTYPE)
 			return geom_relate_polygon_polygon(kcxt,geom1,geom2);

@@ -126,7 +126,6 @@ INSERT INTO _gistest(a,b) VALUES
 ('LINESTRING EMPTY','LINESTRING (1 1,2 2,3 1)'),
 ('LINESTRING (0 0,2 2)','LINESTRING (0 2,2 0)'),
 ('LINESTRING (0 0,2 2,4 0)','LINESTRING (0 2,4 2)'),
--- issue #461
 ('LINESTRING (1 1,2 0,3 0,4 1)','LINESTRING(1 1,4 1)'),
 ('LINESTRING (0 0,2 0,2 2,3 2,3 0,5 0)','LINESTRING(1 0,4 0)'),
 ('LINESTRING (0 0,1 1,2 0)','LINESTRING (0 1,2 1)'),
@@ -160,6 +159,33 @@ INSERT INTO _gistest(a,b) VALUES
 ('TRIANGLE ((0 0,4 0,0 4,0 0))','LINESTRING (1 2,4 4,2 1)'),
 ('TRIANGLE ((0 0,4 0,0 4,0 0))','LINESTRING (5 5,8 8)');
 
+-- triangle-triangle
+INSERT INTO _gistest(a,b) VALUES
+('TRIANGLE EMPTY','TRIANGLE EMPTY'),
+('TRIANGLE ((0 0,1 0,0 1,0 0))','TRIANGLE EMPTY'),
+('TRIANGLE EMPTY','TRIANGLE ((0 0,1 0,0 1,0 0))'),
+('TRIANGLE ((0 0,1 0,0 1,0 0))','TRIANGLE ((2 1,3 0,3 1,2 1))'),
+('TRIANGLE ((0 0,1 0,0 1,0 0))','TRIANGLE ((1 0,2 0,2 1,1 0))'),
+('TRIANGLE ((0 0,1 0,1 1,0 0))','TRIANGLE ((1 0,2 0,1 1,1 0))'),
+('TRIANGLE ((0 0,4 0,2 2,0 0))','TRIANGLE ((0 3,4 3,2 1,0 3))'),
+('TRIANGLE ((0 0,4 0,2 3,0 0))','TRIANGLE ((1 1,3 1,2 2,1 1))');
+
+-- triangle-polygon
+INSERT INTO _gistest(a,b) VALUES
+('TRIANGLE EMPTY','POLYGON EMPTY'),
+('TRIANGLE ((0 0,1 0,0 1,0 0))','POLYGON EMPTY'),
+('TRIANGLE EMPTY','POLYGON ((0 0,1 0,1 1,0 1,0 0))'),
+('TRIANGLE ((0 0,2 0,1 1,0 0))','POLYGON ((3 0,3 2,5 2,5 0,3 0))'),
+('TRIANGLE ((0 0,2 0,1 1,0 0))','POLYGON ((0 1,2 1,2 2,0 2,0 1))'),
+('TRIANGLE ((0 0,2 0,1 1,0 0))','POLYGON ((0 2,1 1,2 2,1 3,0 2))'),
+('TRIANGLE ((0 0,2 3,4 0,0 0))','POLYGON ((0 2,4 2,4 4,0 4,0 2))'),
+('TRIANGLE ((0 0,2 0,0 2,0 0))','POLYGON ((0 2,2 4,4 2,2 0,0 2))'),
+('TRIANGLE ((0 0,2 0,0 2,0 0))','POLYGON ((0 0,2 0,0 2,0 0))'),
+('TRIANGLE ((0 0,2 0,0 2,0 0))','POLYGON ((0 2,2 0,0 -2,0 2))'),
+('TRIANGLE ((0 0,2 0,0 2,0 0))','POLYGON ((-3 0,0 3,3 0,0 -1,-3 0))'),
+('TRIANGLE ((0 0,4 0,0 4,0 0))','POLYGON ((1 1,2 1,2 2,1 2,1 1))'),
+('TRIANGLE ((0 0,5 0,0 5,0 0))','POLYGON ((1 1,2 1,2 2,1 2,1 1))');
+
 -- polygon-line
 INSERT INTO _gistest(a,b) VALUES
 ('POLYGON EMPTY','LINESTRING EMPTY'),
@@ -179,7 +205,6 @@ INSERT INTO _gistest(a,b) VALUES
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (-2 0,6 0)'),
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (4 0,4 0,0 4)'),
 ('POLYGON ((0 0,4 0,4 4,0 4,0 0))','LINESTRING (4 0,4 0,-1 4)');
-
 
 -- polygon-polygon
 INSERT INTO _gistest(a,b) VALUES
