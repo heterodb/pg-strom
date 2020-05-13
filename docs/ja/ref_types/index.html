@@ -135,6 +135,9 @@
     <li class="toctree-l3"><a href="#_6">標準の範囲型</a></li>
     
 
+    <li class="toctree-l3"><a href="#postgis">PostGISデータ型</a></li>
+    
+
     </ul>
                 </li>
                 <li class="">
@@ -201,7 +204,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -209,43 +211,36 @@
 <tbody>
 <tr>
 <td align="left"><code>smallint</code></td>
-<td align="left"><code>short</code></td>
 <td align="left">2 bytes</td>
-<td align="left"></td>
+<td align="left">16bit 整数型</td>
 </tr>
 <tr>
 <td align="left"><code>integer</code></td>
-<td align="left"><code>int</code></td>
 <td align="left">4 bytes</td>
-<td align="left"></td>
+<td align="left">32bit 整数型</td>
 </tr>
 <tr>
 <td align="left"><code>bigint</code></td>
-<td align="left"><code>long</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">64bit 整数型</td>
 </tr>
 <tr>
 <td align="left"><code>float2</code></td>
-<td align="left"><code>short</code></td>
 <td align="left">2 bytes</td>
 <td align="left">半精度浮動小数点型。PG-Stromによる独自拡張。</td>
 </tr>
 <tr>
 <td align="left"><code>real</code></td>
-<td align="left"><code>float</code></td>
 <td align="left">4 bytes</td>
-<td align="left"></td>
+<td align="left">単精度浮動小数点型</td>
 </tr>
 <tr>
 <td align="left"><code>float</code></td>
-<td align="left"><code>double</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">倍精度浮動小数点型</td>
 </tr>
 <tr>
 <td align="left"><code>numeric</code></td>
-<td align="left"><code>int128</code></td>
 <td align="left">可変長</td>
 <td align="left">内部形式は128bit固定少数点型</td>
 </tr>
@@ -266,7 +261,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -274,39 +268,33 @@
 <tbody>
 <tr>
 <td align="left"><code>date</code></td>
-<td align="left"><code>DateADT</code></td>
 <td align="left">4 bytes</td>
-<td align="left"></td>
+<td align="left">日付データ型</td>
 </tr>
 <tr>
 <td align="left"><code>time</code></td>
-<td align="left"><code>TimeADT</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">時刻データ型</td>
 </tr>
 <tr>
 <td align="left"><code>timetz</code></td>
-<td align="left"><code>TimeTzADT</code></td>
 <td align="left">12 bytes</td>
-<td align="left"></td>
+<td align="left">タイムゾーン付き時刻データ型</td>
 </tr>
 <tr>
 <td align="left"><code>timestamp</code></td>
-<td align="left"><code>Timestamp</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">タイムスタンプ型</td>
 </tr>
 <tr>
 <td align="left"><code>timestamptz</code></td>
-<td align="left"><code>TimestampTz</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">タイムゾーン付きタイムスタンプ型</td>
 </tr>
 <tr>
 <td align="left"><code>interval</code></td>
-<td align="left"><code>Interval</code></td>
 <td align="left">16 bytes</td>
-<td align="left">time interval</td>
+<td align="left">時間間隔型</td>
 </tr>
 </tbody>
 </table>
@@ -315,7 +303,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -323,27 +310,23 @@
 <tbody>
 <tr>
 <td align="left"><code>bpchar</code></td>
-<td align="left"><code>varlena *</code></td>
 <td align="left">可変長</td>
-<td align="left"></td>
+<td align="left">可変長テキスト型（空白パディングあり）</td>
 </tr>
 <tr>
 <td align="left"><code>varchar</code></td>
-<td align="left"><code>varlena *</code></td>
 <td align="left">可変長</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>bytea</code></td>
-<td align="left"><code>varlena *</code></td>
-<td align="left">可変長</td>
-<td align="left"></td>
+<td align="left">可変長テキスト型</td>
 </tr>
 <tr>
 <td align="left"><code>text</code></td>
-<td align="left"><code>varlena *</code></td>
 <td align="left">可変長</td>
-<td align="left"></td>
+<td align="left">可変長テキスト型</td>
+</tr>
+<tr>
+<td align="left"><code>bytea</code></td>
+<td align="left">可変長</td>
+<td align="left">可変長バイナリ型</td>
 </tr>
 </tbody>
 </table>
@@ -352,7 +335,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -360,7 +342,6 @@
 <tbody>
 <tr>
 <td align="left"><code>jsonb</code></td>
-<td align="left"><code>varlena *</code></td>
 <td align="left">可変長</td>
 <td align="left"></td>
 </tr>
@@ -377,7 +358,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -385,39 +365,33 @@
 <tbody>
 <tr>
 <td align="left"><code>boolean</code></td>
-<td align="left"><code>cl_bool</code></td>
 <td align="left">1 byte</td>
-<td align="left"></td>
+<td align="left">論理値データ型</td>
 </tr>
 <tr>
 <td align="left"><code>money</code></td>
-<td align="left"><code>cl_long</code></td>
 <td align="left">8 bytes</td>
-<td align="left"></td>
+<td align="left">通貨データ型</td>
 </tr>
 <tr>
 <td align="left"><code>uuid</code></td>
-<td align="left"><code>pg_uuid</code></td>
 <td align="left">16 bytes</td>
-<td align="left"></td>
+<td align="left">UUIDデータ型</td>
 </tr>
 <tr>
 <td align="left"><code>macaddr</code></td>
-<td align="left"><code>macaddr</code></td>
 <td align="left">6 bytes</td>
-<td align="left"></td>
+<td align="left">ネットワークMACアドレス型</td>
 </tr>
 <tr>
 <td align="left"><code>inet</code></td>
-<td align="left"><code>inet_struct</code></td>
-<td align="left">7 bytes or 19 bytes</td>
-<td align="left"></td>
+<td align="left">7 or 19 bytes</td>
+<td align="left">ネットワークアドレス型</td>
 </tr>
 <tr>
 <td align="left"><code>cidr</code></td>
-<td align="left"><code>inet_struct</code></td>
-<td align="left">7 bytes or 19 bytes</td>
-<td align="left"></td>
+<td align="left">7 or 19 bytes</td>
+<td align="left">ネットワークアドレス型</td>
 </tr>
 </tbody>
 </table>
@@ -426,7 +400,6 @@
 <thead>
 <tr>
 <th align="left">SQLデータ型</th>
-<th align="left">内部データ形式</th>
 <th align="left">データ長</th>
 <th align="left">備考</th>
 </tr>
@@ -434,33 +407,45 @@
 <tbody>
 <tr>
 <td align="left"><code>int4range</code></td>
-<td align="left"><code>__int4range</code></td>
 <td align="left">14 bytes</td>
-<td align="left"></td>
+<td align="left">32bit整数値範囲型</td>
 </tr>
 <tr>
 <td align="left"><code>int8range</code></td>
-<td align="left"><code>__int8range</code></td>
 <td align="left">22 bytes</td>
-<td align="left"></td>
+<td align="left">64bit整数値範囲型</td>
 </tr>
 <tr>
 <td align="left"><code>tsrange</code></td>
-<td align="left"><code>__tsrange</code></td>
 <td align="left">22 bytes</td>
-<td align="left"></td>
+<td align="left">タイムスタンプ範囲型</td>
 </tr>
 <tr>
 <td align="left"><code>tstzrange</code></td>
-<td align="left"><code>__tstzrange</code></td>
 <td align="left">22 bytes</td>
-<td align="left"></td>
+<td align="left">タイムゾーン付きタイムスタンプ範囲型</td>
 </tr>
 <tr>
 <td align="left"><code>daterange</code></td>
-<td align="left"><code>__daterange</code></td>
 <td align="left">14 bytes</td>
-<td align="left"></td>
+<td align="left">日付データ範囲型</td>
+</tr>
+</tbody>
+</table>
+<h1 id="postgis">PostGISデータ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>geometry</code></td>
+<td align="left">可変長</td>
+<td align="left">PostGISジオメトリオブジェクト</td>
 </tr>
 </tbody>
 </table>

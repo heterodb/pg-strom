@@ -106,6 +106,9 @@
         </ul>
     
 
+    <li class="toctree-l2"><a href="#postgis">PostGISのインストール</a></li>
+    
+
     </ul>
 	    </li>
           
@@ -382,7 +385,7 @@ EOF
 <p>PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
 EPELの設定のように、yumリポジトリの設定を行うだけの小さなパッケージをインストールし、その後、PostgreSQLやその他のソフトウェアをインストールします。</p>
 <p>yumリポジトリ定義の一覧は <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a> です。</p>
-<p>PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 9.6以降のものを選択する必要があります。</p>
+<p>PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 10以降のものを選択する必要があります。</p>
 <p>以下のように、yumリポジトリの定義をインストールし、次いで、PostgreSQLパッケージをインストールすれば完了です。 PostgreSQL v10を使用する場合、PG-Stromのインストールには以下のパッケージが必要です。</p>
 <ul>
 <li>postgresql10-devel</li>
@@ -413,6 +416,15 @@ Dependency Installed:
   postgresql10.x86_64 0:10.2-1PGDG.rhel7
   postgresql10-libs.x86_64 0:10.2-1PGDG.rhel7
 
+Complete!
+</code></pre>
+
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。以下のように、ディストリビューション標準の<code>postgresql</code>モジュールを無効化してください。</p>
+</div>
+<pre><code># dnf -y module disable postgresql
+   :
 Complete!
 </code></pre>
 
@@ -749,6 +761,34 @@ LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
 NVMEデバイスの能力を越えるペースで非同期DMA要求が投入されると、NVME-SSDコントローラはDMA要求を順に処理する事になるため、DMA要求のレイテンシは極めて悪化します。（一方、NVME-SSDコントローラには切れ目なくDMA要求が来るため、スループットは最大になります）
 DMA要求の発行から処理結果が返ってくるまでの時間があまりにも長いと、場合によっては、これが何らかのエラーと誤認され、I/O要求のタイムアウトとエラーを引き起こす可能性があります。そのため、NVMEデバイスが遊ばない程度にDMA要求をI/Oキューに詰めておけば、それ以上のDMA要求を一度にキューに投入するのは有害無益という事になります。</p>
 <p><code>p2p_dma_max_depth</code>パラメータは、NVMEデバイス毎に、一度にI/Oキューに投入する事のできる非同期P2P DMA要求の数を制御します。設定値以上のDMA要求を投入しようとすると、スレッドは現在実行中のDMAが完了するまでブロックされ、それによってNVMEデバイスの高負荷を避ける事が可能となります。</p>
+<h1 id="postgis">PostGISのインストール</h1>
+<p>PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。
+本節ではPostGISのインストール手順について説明を行いますが、必要に応じて読み飛ばしてください。</p>
+<p>PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
+以下の例は、PostgreSQL v12向けにビルドされたPostGIS v3.0をインストールするものです。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>CentOS 8の場合、PostGISの依存するライブラリが初期状態で有効となっているリポジトリに含まれていないため、
+<code>dnf</code>コマンドに<code>--enablerepo=PowerTools</code>オプションを付加してPowerToolsリポジトリを有効化してください。</p>
+</div>
+<pre><code># dnf install postgis30_12 --enablerepo=PowerTools
+Dependencies resolved.
+====================================================================================================
+ Package                           Architecture  Version                   Repository          Size
+====================================================================================================
+Installing:
+ postgis30_12                      x86_64        3.0.1-5.rhel8             pgdg12             4.7 M
+Installing dependencies:
+ blas                              x86_64        3.8.0-8.el8               AppStream          429 k
+   :                                  :                 :                     :                :
+Complete!
+</code></pre>
+
+<p>データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから<code>CREATE EXTENSION</code>コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。
+これでPostGISのインストールは完了です。</p>
+<pre><code>postgres=# CREATE EXTENSION postgis;
+CREATE EXTENSION
+</code></pre>
               
             </div>
           </div>

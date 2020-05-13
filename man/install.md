@@ -340,12 +340,12 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 @ja{
 yumリポジトリ定義の一覧は [http://yum.postgresql.org/repopackages.php](http://yum.postgresql.org/repopackages.php) です。
 
-PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 9.6以降のものを選択する必要があります。
+PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 10以降のものを選択する必要があります。
 }
 @en{
 Here is the list of yum repository definition: [http://yum.postgresql.org/repopackages.php](http://yum.postgresql.org/repopackages.php).
 
-Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v9.6 or later.
+Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v10 or later.
 }
 
 @ja{
@@ -382,6 +382,20 @@ Dependency Installed:
   postgresql10.x86_64 0:10.2-1PGDG.rhel7
   postgresql10-libs.x86_64 0:10.2-1PGDG.rhel7
 
+Complete!
+```
+
+@ja{
+!!! Note
+    Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。以下のように、ディストリビューション標準の`postgresql`モジュールを無効化してください。
+}
+@en{
+!!! Note
+    On the Red Hat Enterprise Linux 8 and CentOS 8, the package name `postgresql` conflicts to the default one at the distribution, then unable to install the package from PGDG. Disable the `postgresql` package by the distribution, using the command below.
+}
+```
+# dnf -y module disable postgresql
+   :
 Complete!
 ```
 
@@ -947,3 +961,60 @@ If turn-around time of the DMA requests are too large, it may be wrongly conside
 
 `p2p_dma_max_depth` parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.
 }
+
+@ja:#PostGISのインストール
+@en:#PostGIS Installation
+
+@ja{
+PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。
+本節ではPostGISのインストール手順について説明を行いますが、必要に応じて読み飛ばしてください。
+}
+@en{
+PG-Strom supports execution of a part of PostGIS functions on GPU devices.
+This section introduces the steps to install PostGIS module. Skip it on your demand.
+}
+
+@ja{
+PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
+以下の例は、PostgreSQL v12向けにビルドされたPostGIS v3.0をインストールするものです。
+
+!!! Note
+    CentOS 8の場合、PostGISの依存するライブラリが初期状態で有効となっているリポジトリに含まれていないため、
+    `dnf`コマンドに`--enablerepo=PowerTools`オプションを付加してPowerToolsリポジトリを有効化してください。
+}
+@en{
+PostGIS module can be installed from the yum repository by PostgreSQL Global Development Group, like PostgreSQL itself.
+The example below shows the command to install PostGIS v3.0 built for PostgreSQL v12.
+
+!!! Note
+    CentOS 8 initial configuration does not enable the repository that delivers some libraries required by PostgreSQL,
+    add `--enablerepo=PowerTools` on the `dnf` command to activate PowerTools repository.
+}
+
+```
+# dnf install postgis30_12 --enablerepo=PowerTools
+Dependencies resolved.
+====================================================================================================
+ Package                           Architecture  Version                   Repository          Size
+====================================================================================================
+Installing:
+ postgis30_12                      x86_64        3.0.1-5.rhel8             pgdg12             4.7 M
+Installing dependencies:
+ blas                              x86_64        3.8.0-8.el8               AppStream          429 k
+   :                                  :                 :                     :                :
+Complete!
+```
+
+@ja{
+データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから`CREATE EXTENSION`コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。
+これでPostGISのインストールは完了です。
+}
+@en{
+Start PostgreSQL server after the initial setup of database cluster, then run `CREATE EXTENSION` command from SQL client to define geometry data type and SQL functions for geoanalytics.
+}
+
+```
+postgres=# CREATE EXTENSION postgis;
+CREATE EXTENSION
+```
+

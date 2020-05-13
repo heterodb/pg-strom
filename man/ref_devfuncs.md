@@ -250,16 +250,35 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`upper_inf(RANGE)` |`RANGE` is any of `int4range,int8range,tsrange,tstzrange,daterange`|
 |`range_merge(RANGE,RANGE)` |`RANGE` is any of `int4range,int8range,tsrange,tstzrange,daterange`|
 
+@ja:#PostGIS関数
+@en:#PostGIS Functions
 
-@ja:#その他のデバイス関数
-@en:#Miscellaneous device functions
+@ja{
+|functions/operators|description|
+|:------------------|:----------|
+|`st_makepoint(float8,float8)`|2次元座標を含むPOINT型ジオメトリを返す|
+|`st_makepoint(float8,float8,float8)`|3次元座標を含むPOINT型ジオメトリを返す|
+|`st_makepoint(float8,float8,float8,float8)`|ZM座標を含むPOINT型ジオメトリを返す|
+|`st_distance(geometry,geometry)`|ジオメトリ間の距離を`float8`で返す|
+|`st_dwithin(geometry,geometry,float8)`|ジオメトリ間の距離が指定値以内なら真を返す。`st_distance`と比較演算子の組み合わせよりも高速な場合がある。
+|`st_relate(geometry,geometry)`|ジオメトリ間の交差状態を判定し、DE9-IM(Dimensionally Extended Nine-Intersection Matrix)書式を返す。|
+|`st_contains(geometry,geometry)`|ジオメトリ1がジオメトリ2を包含する時、真を返す。|
+|`st_crosses(geometry,geometry)`|ジオメトリ同士が空間的に交差する時、真を返す。|
+|`st_linecrossingdirection(geometry,geometry)`|2つのLINESTRING型ジオメトリがどのように交差するか（しないか）を返す。|
+}
 
-|functions/operators|result|description|
-|:------------------|:-----|:----------|
-|`as_int8(float8)`  |`int8`  |Re-interpret double-precision floating point bit-pattern as 64bit integer value|
-|`as_int4(float4)`  |`int4`  |Re-interpret single-precision floating point bit-pattern as 32bit integer value|
-|`as_int2(float2)`  |`int2`  |Re-interpret half-precision floating point bit-pattern as 16bit integer value|
-|`as_float8(int8)`  |`float8`|Re-interpret 64bit integer bit-pattern as double-precision floating point value|
-|`as_float4(int4)`  |`float4`|Re-interpret 32bit integer bit-pattern as single-precision floating point value|
-|`as_float2(int2)`  |`float2`|Re-interpret 16bit integer bit-pattern as half-precision floating point value|
+@en{
+|functions/operators|description|
+|:------------------|:----------|
+|`st_makepoint(float8,float8)`|It makes 2-dimensional POINT geometry.|
+|`st_makepoint(float8,float8,float8)`|It makes 3-dimensional POINT geometry.|
+|`st_makepoint(float8,float8,float8,float8)`|It makes 4-dimensional POINT geometry.|
+|`st_distance(geometry,geometry)`|It returns the distance between geometries in `float8`.|
+|`st_dwithin(geometry,geometry,float8)`|It returns `true` if the distance between geometries is shorter than the specified threshold. It is often faster than the combination of `st_distance` and comparison operator.|
+|`st_relate(geometry,geometry)`|It checks intersection of geometries, then returns DE9-IM(Dimensionally Extended Nine-Intersection Matrix) format string.|
+|`st_contains(geometry,geometry)`|It returns whether the geometry1 fully contains the geometry1.|
+|`st_crosses(geometry,geometry)`|It returns whether the geometries are crossed.|
+|`st_linecrossingdirection(geometry,geometry)`||
+}
+
 

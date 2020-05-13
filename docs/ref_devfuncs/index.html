@@ -154,7 +154,7 @@
     <li class="toctree-l3"><a href="#range-type-functionsoperators">Range type functions/operators</a></li>
     
 
-    <li class="toctree-l3"><a href="#miscellaneous-device-functions">Miscellaneous device functions</a></li>
+    <li class="toctree-l3"><a href="#postgis-functions">PostGIS Functions</a></li>
     
 
     </ul>
@@ -1008,45 +1008,50 @@ PG-Strom optimizes the GPU code using a special device function to fetch a numer
 </tr>
 </tbody>
 </table>
-<h1 id="miscellaneous-device-functions">Miscellaneous device functions</h1>
+<h1 id="postgis-functions">PostGIS Functions</h1>
 <table>
 <thead>
 <tr>
 <th align="left">functions/operators</th>
-<th align="left">result</th>
 <th align="left">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>as_int8(float8)</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Re-interpret double-precision floating point bit-pattern as 64bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8)</code></td>
+<td align="left">It makes 2-dimensional POINT geometry.</td>
 </tr>
 <tr>
-<td align="left"><code>as_int4(float4)</code></td>
-<td align="left"><code>int4</code></td>
-<td align="left">Re-interpret single-precision floating point bit-pattern as 32bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8,float8)</code></td>
+<td align="left">It makes 3-dimensional POINT geometry.</td>
 </tr>
 <tr>
-<td align="left"><code>as_int2(float2)</code></td>
-<td align="left"><code>int2</code></td>
-<td align="left">Re-interpret half-precision floating point bit-pattern as 16bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8,float8,float8)</code></td>
+<td align="left">It makes 4-dimensional POINT geometry.</td>
 </tr>
 <tr>
-<td align="left"><code>as_float8(int8)</code></td>
-<td align="left"><code>float8</code></td>
-<td align="left">Re-interpret 64bit integer bit-pattern as double-precision floating point value</td>
+<td align="left"><code>st_distance(geometry,geometry)</code></td>
+<td align="left">It returns the distance between geometries in <code>float8</code>.</td>
 </tr>
 <tr>
-<td align="left"><code>as_float4(int4)</code></td>
-<td align="left"><code>float4</code></td>
-<td align="left">Re-interpret 32bit integer bit-pattern as single-precision floating point value</td>
+<td align="left"><code>st_dwithin(geometry,geometry,float8)</code></td>
+<td align="left">It returns <code>true</code> if the distance between geometries is shorter than the specified threshold. It is often faster than the combination of <code>st_distance</code> and comparison operator.</td>
 </tr>
 <tr>
-<td align="left"><code>as_float2(int2)</code></td>
-<td align="left"><code>float2</code></td>
-<td align="left">Re-interpret 16bit integer bit-pattern as half-precision floating point value</td>
+<td align="left"><code>st_relate(geometry,geometry)</code></td>
+<td align="left">It checks intersection of geometries, then returns DE9-IM(Dimensionally Extended Nine-Intersection Matrix) format string.</td>
+</tr>
+<tr>
+<td align="left"><code>st_contains(geometry,geometry)</code></td>
+<td align="left">It returns whether the geometry1 fully contains the geometry1.</td>
+</tr>
+<tr>
+<td align="left"><code>st_crosses(geometry,geometry)</code></td>
+<td align="left">It returns whether the geometries are crossed.</td>
+</tr>
+<tr>
+<td align="left"><code>st_linecrossingdirection(geometry,geometry)</code></td>
+<td align="left"></td>
 </tr>
 </tbody>
 </table>

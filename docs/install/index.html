@@ -106,6 +106,9 @@
         </ul>
     
 
+    <li class="toctree-l2"><a href="#postgis-installation">PostGIS Installation</a></li>
+    
+
     </ul>
 	    </li>
           
@@ -382,7 +385,7 @@ We don't introduce the installation steps from the source because there are many
 <p>PostgreSQL Global Development Group provides yum repository to distribute the latest PostgreSQL and related packages.
 Like the configuration of EPEL, you can install a small package to set up yum repository, then install PostgreSQL and related software.</p>
 <p>Here is the list of yum repository definition: <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a>.</p>
-<p>Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v9.6 or later.</p>
+<p>Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v10 or later.</p>
 <p>All you need to install are yum repository definition, and PostgreSQL packages. If you choose PostgreSQL v10, the pakages below are required to install PG-Strom.</p>
 <ul>
 <li>postgresql10-devel</li>
@@ -413,6 +416,15 @@ Dependency Installed:
   postgresql10.x86_64 0:10.2-1PGDG.rhel7
   postgresql10-libs.x86_64 0:10.2-1PGDG.rhel7
 
+Complete!
+</code></pre>
+
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>On the Red Hat Enterprise Linux 8 and CentOS 8, the package name <code>postgresql</code> conflicts to the default one at the distribution, then unable to install the package from PGDG. Disable the <code>postgresql</code> package by the distribution, using the command below.</p>
+</div>
+<pre><code># dnf -y module disable postgresql
+   :
 Complete!
 </code></pre>
 
@@ -745,6 +757,33 @@ If <code>fast_ssd_mode</code> is <code>0</code>, NVME-Strom once writes back pag
 When asynchronous DMA requests are enqueued more than the capacity of NVME devices, latency of individual DMA requests become terrible because NVME-SSD controler processes the DMA requests in order of arrival. (On the other hands, it maximizes the throughput because NVME-SSD controler receives DMA requests continuously.)
 If turn-around time of the DMA requests are too large, it may be wrongly considered as errors, then can lead timeout of I/O request and return an error status. Thus, it makes no sense to enqueue more DMA requests to the I/O-queue more than the reasonable amount of pending requests for full usage of NVME devices.</p>
 <p><code>p2p_dma_max_depth</code> parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.</p>
+<h1 id="postgis-installation">PostGIS Installation</h1>
+<p>PG-Strom supports execution of a part of PostGIS functions on GPU devices.
+This section introduces the steps to install PostGIS module. Skip it on your demand.</p>
+<p>PostGIS module can be installed from the yum repository by PostgreSQL Global Development Group, like PostgreSQL itself.
+The example below shows the command to install PostGIS v3.0 built for PostgreSQL v12.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>CentOS 8 initial configuration does not enable the repository that delivers some libraries required by PostgreSQL,
+add <code>--enablerepo=PowerTools</code> on the <code>dnf</code> command to activate PowerTools repository.</p>
+</div>
+<pre><code># dnf install postgis30_12 --enablerepo=PowerTools
+Dependencies resolved.
+====================================================================================================
+ Package                           Architecture  Version                   Repository          Size
+====================================================================================================
+Installing:
+ postgis30_12                      x86_64        3.0.1-5.rhel8             pgdg12             4.7 M
+Installing dependencies:
+ blas                              x86_64        3.8.0-8.el8               AppStream          429 k
+   :                                  :                 :                     :                :
+Complete!
+</code></pre>
+
+<p>Start PostgreSQL server after the initial setup of database cluster, then run <code>CREATE EXTENSION</code> command from SQL client to define geometry data type and SQL functions for geoanalytics.</p>
+<pre><code>postgres=# CREATE EXTENSION postgis;
+CREATE EXTENSION
+</code></pre>
               
             </div>
           </div>

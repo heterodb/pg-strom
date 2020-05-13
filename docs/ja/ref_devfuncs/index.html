@@ -154,7 +154,7 @@
     <li class="toctree-l3"><a href="#_9">範囲型演算子</a></li>
     
 
-    <li class="toctree-l3"><a href="#_10">その他のデバイス関数</a></li>
+    <li class="toctree-l3"><a href="#postgis">PostGIS関数</a></li>
     
 
     </ul>
@@ -1008,45 +1008,50 @@ PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキス�
 </tr>
 </tbody>
 </table>
-<h1 id="_10">その他のデバイス関数</h1>
+<h1 id="postgis">PostGIS関数</h1>
 <table>
 <thead>
 <tr>
 <th align="left">functions/operators</th>
-<th align="left">result</th>
 <th align="left">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>as_int8(float8)</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Re-interpret double-precision floating point bit-pattern as 64bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8)</code></td>
+<td align="left">2次元座標を含むPOINT型ジオメトリを返す</td>
 </tr>
 <tr>
-<td align="left"><code>as_int4(float4)</code></td>
-<td align="left"><code>int4</code></td>
-<td align="left">Re-interpret single-precision floating point bit-pattern as 32bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8,float8)</code></td>
+<td align="left">3次元座標を含むPOINT型ジオメトリを返す</td>
 </tr>
 <tr>
-<td align="left"><code>as_int2(float2)</code></td>
-<td align="left"><code>int2</code></td>
-<td align="left">Re-interpret half-precision floating point bit-pattern as 16bit integer value</td>
+<td align="left"><code>st_makepoint(float8,float8,float8,float8)</code></td>
+<td align="left">ZM座標を含むPOINT型ジオメトリを返す</td>
 </tr>
 <tr>
-<td align="left"><code>as_float8(int8)</code></td>
-<td align="left"><code>float8</code></td>
-<td align="left">Re-interpret 64bit integer bit-pattern as double-precision floating point value</td>
+<td align="left"><code>st_distance(geometry,geometry)</code></td>
+<td align="left">ジオメトリ間の距離を<code>float8</code>で返す</td>
 </tr>
 <tr>
-<td align="left"><code>as_float4(int4)</code></td>
-<td align="left"><code>float4</code></td>
-<td align="left">Re-interpret 32bit integer bit-pattern as single-precision floating point value</td>
+<td align="left"><code>st_dwithin(geometry,geometry,float8)</code></td>
+<td align="left">ジオメトリ間の距離が指定値以内なら真を返す。<code>st_distance</code>と比較演算子の組み合わせよりも高速な場合がある。</td>
 </tr>
 <tr>
-<td align="left"><code>as_float2(int2)</code></td>
-<td align="left"><code>float2</code></td>
-<td align="left">Re-interpret 16bit integer bit-pattern as half-precision floating point value</td>
+<td align="left"><code>st_relate(geometry,geometry)</code></td>
+<td align="left">ジオメトリ間の交差状態を判定し、DE9-IM(Dimensionally Extended Nine-Intersection Matrix)書式を返す。</td>
+</tr>
+<tr>
+<td align="left"><code>st_contains(geometry,geometry)</code></td>
+<td align="left">ジオメトリ1がジオメトリ2を包含する時、真を返す。</td>
+</tr>
+<tr>
+<td align="left"><code>st_crosses(geometry,geometry)</code></td>
+<td align="left">ジオメトリ同士が空間的に交差する時、真を返す。</td>
+</tr>
+<tr>
+<td align="left"><code>st_linecrossingdirection(geometry,geometry)</code></td>
+<td align="left">2つのLINESTRING型ジオメトリがどのように交差するか（しないか）を返す。</td>
 </tr>
 </tbody>
 </table>
