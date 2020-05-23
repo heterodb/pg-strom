@@ -12,6 +12,7 @@ Source1: systemd-pg_strom.conf
 BuildRequires: postgresql%{PGSQL_PKGVER}
 BuildRequires: postgresql%{PGSQL_PKGVER}-devel
 BuildRequires: cuda >= 9.2
+BuildRequires: libpmem-devel
 BuildRequires: mysql-devel
 Requires: nvidia-kmod
 Requires: cuda >= 9.2
@@ -24,6 +25,7 @@ Requires: postgresql%{PGSQL_PKGVER}-server >= 10.4
 Requires: postgresql%{PGSQL_PKGVER}-server
 %endif
 %endif
+Requires: libpmem
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 Obsoletes: nvme_strom < 2.0

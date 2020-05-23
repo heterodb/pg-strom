@@ -1104,7 +1104,8 @@ extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
 
 extern size_t	KDS_calculateHeadSize(TupleDesc tupdesc);
-
+extern bool		KDS_schemaIsCompatible(TupleDesc tupdesc,
+									   kern_data_store *kds);
 extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
@@ -1417,6 +1418,7 @@ extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern void	   *__mmapFile(void *addr, size_t length,
 						   int prot, int flags, int fdesc, off_t offset);
 extern int		__munmapFile(void *mmap_addr);
+extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
 
 /*
  * nvrtc.c

@@ -32,7 +32,7 @@ __STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o gpupreagg.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-		aggfuncs.o float2.o misc.o
+		gstore_fdw.o aggfuncs.o float2.o misc.o
 __STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
 		device_attrs.h cuda_filelist
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
@@ -196,7 +196,7 @@ PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
-SHLIB_LINK := -L $(LPATH) -lcuda
+SHLIB_LINK := -L $(LPATH) -lcuda -lpmem
 
 # also, flags to build GPU libraries
 NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)

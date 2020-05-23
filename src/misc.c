@@ -1536,6 +1536,37 @@ __munmapFile(void *mmap_addr)
 	return -1;
 }
 
+void *
+__mremapFile(void *mmap_addr, size_t new_size)
+{
+	mmapEntry  *entry = NULL;
+	void	   *addr;
+
+	if (mmap_tracker_htab)
+	{
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr, HASH_FIND, NULL);
+	}
+	if (!entry)
+	{
+		errno = EINVAL;
+		return MAP_FAILED;
+	}
+	/* nothing to do */
+	if (new_size <= entry->mmap_size)
+		return entry->mmap_addr;
+	addr = mremap(entry->mmap_addr,
+				  entry->mmap_size,
+				  new_size,
+				  MREMAP_MAYMOVE);
+	if (addr == MAP_FAILED)
+		return MAP_FAILED;
+
+	entry->mmap_addr = addr;
+	entry->mmap_size = new_size;
+	return addr;
+}
+
 /*
  * dummy entry for deprecated functions
  */
@@ -1560,8 +1591,6 @@ __pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
 	PG_FUNCTION_INFO_V1(cfunc_name)
 
 /* deadcode/gstore_(fdw|buf).c */
-PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_validator);
-PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_handler);
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_in);
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_out);
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_recv);

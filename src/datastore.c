@@ -573,10 +573,90 @@ KDS_calculateHeadSize(TupleDesc tupdesc)
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
 	return STROMALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
+}
+
+/*
+ * Check compatibility of KDS schema-definition
+ */
+static bool
+__check_kern_colmeta_compatibility(Oid type_oid, int type_mod,
+								   kern_data_store *kds, kern_colmeta *cmeta)
+{
+	HeapTuple		tup;
+	Form_pg_type	typ;
+	bool			retval = false;
+
+	if (cmeta->atttypid != type_oid ||
+		cmeta->atttypmod != type_mod)
+		return false;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	typ = (Form_pg_type) GETSTRUCT(tup);
+
+	if ((cmeta->attbyval && !typ->typbyval) ||
+        (!cmeta->attbyval && typ->typbyval) ||
+		(cmeta->attalign != typealign_get_width(typ->typalign)) ||
+		(cmeta->attlen != typ->typlen))
+		goto not_compatible;
+
+	if (OidIsValid(typ->typelem))
+	{
+		kern_colmeta   *__cmeta = kds->colmeta + cmeta->idx_subattrs;
+
+		if (cmeta->idx_subattrs >= kds->nr_colmeta ||
+			cmeta->num_subattrs != 1 ||
+			!__check_kern_colmeta_compatibility(typ->typelem, -1,
+												kds, __cmeta))
+			goto not_compatible;
+	}
+	else if (OidIsValid(typ->typrelid))
+	{
+		kern_colmeta   *__cmeta = kds->colmeta + cmeta->idx_subattrs;
+		TupleDesc		rowdesc;
+		int				j;
+
+		rowdesc = lookup_rowtype_tupdesc(type_oid, type_mod);
+		if (rowdesc->natts != cmeta->num_subattrs ||
+			cmeta->idx_subattrs + cmeta->num_subattrs > kds->nr_colmeta)
+			goto not_compatible;
+		for (j=0; j < rowdesc->natts; j++)
+		{
+			Form_pg_attribute __attr = tupleDescAttr(rowdesc, j);
+
+			if (!__check_kern_colmeta_compatibility(__attr->atttypid,
+													__attr->atttypmod,
+													kds, __cmeta+j))
+				goto not_compatible;
+		}
+	}
+	retval = true;
+not_compatible:
+	ReleaseSysCache(tup);
+	return retval;
+}
+
+bool
+KDS_schemaIsCompatible(TupleDesc tupdesc, kern_data_store *kds)
+{
+	int		j;
+	
+	if (kds->ncols != tupdesc->natts)
+		return false;
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+		if (!__check_kern_colmeta_compatibility(attr->atttypid,
+												attr->atttypmod,
+												kds, &kds->colmeta[j]))
+			return false;
+	}
+	return true;
 }
 
 pgstrom_data_store *
