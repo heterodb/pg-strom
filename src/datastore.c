@@ -405,10 +405,13 @@ __init_kernel_column_metadata(kern_data_store *kds,
 	typ = (Form_pg_type) GETSTRUCT(tup);
 
 	cmeta->attbyval = typ->typbyval;
-	if (!cmeta->attbyval)
-		kds->has_notbyval = true;
 	cmeta->attalign = typealign_get_width(typ->typalign);
 	cmeta->attlen   = typ->typlen;
+	if (cmeta->attlen == 0 || cmeta->attlen < -1)
+		elog(ERROR, "type %s has unexpected length (%d)",
+			 NameStr(typ->typname), typ->typlen);
+	else if (cmeta->attlen == -1)
+		kds->has_varlena = true;
 	cmeta->attnum   = attnum;
 	if (p_attcacheoff && *p_attcacheoff > 0)
 		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);

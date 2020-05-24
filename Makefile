@@ -15,13 +15,14 @@ endif
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 2.3
+PGSTROM_VERSION := 3.0
 PGSTROM_RELEASE := devel
 
 #
 # Installation related
 #
-__PGSTROM_SQL = pg_strom--2.2.sql pg_strom--2.2--2.3.sql
+__PGSTROM_SQL = pg_strom--2.2.sql pg_strom--2.2--2.3.sql \
+                                  pg_strom--2.3--3.0.sql
 PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 
 #

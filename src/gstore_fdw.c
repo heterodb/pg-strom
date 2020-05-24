@@ -21,6 +21,9 @@
 #define GPUSTORE_SHARED_DESC_NSLOTS		107
 typedef struct
 {
+	/* Database name to connect */
+	char			kicker_next_database[NAMEDATALEN];
+	
 	/* IPC to GPU Memory Synchronizer */
 	Latch		   *gpumem_sync_latch;
 	dlist_head		gpumem_sync_list;
@@ -168,14 +171,15 @@ static FdwRoutine	pgstrom_gstore_fdw_routine;
 static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
+static bool			pgstrom_gstore_fdw_auto_preload;	/* GUC */
 
 /* ---- Forward declarations ---- */
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_synchronize(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS);
-Datum pgstrom_gstore_fdw_precheck_schema(PG_FUNCTION_ARGS);
-void  GstoreFdwGpuBufferUpdater(Datum arg);
+Datum pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS);
+void  GstoreFdwStartupKicker(Datum arg);
 
 static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
 
@@ -348,93 +352,101 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 	Oid			catalog = PG_GETARG_OID(1);
 	ListCell   *lc;
 
+	if (catalog != ForeignTableRelationId)
+		elog(ERROR, "unknown FDW options");
 	/*
-	 * NOTE: we check option's syntax only at the validator.
+	 * Only syntax shall be checked here, then OAT_POST_CREATE hook
+	 * actually validates the configuration.
 	 */
 	foreach (lc, options)
 	{
 		DefElem	   *def = (DefElem *) lfirst(lc);
 		char	   *endp;
 
-		if (catalog == AttributeRelationId)
+		if (catalog != ForeignTableRelationId)
 		{
-			if (strcmp(def->defname, "primary_key") == 0)
-			{
-				char   *token = defGetString(def);
-				if (strcmp(token, "hash") != 0)
-					elog(ERROR, "unknown index type \"%s\" for 'primary_key' option of Gstore_Fdw", token);
-				continue;
-			}
+			const char *suffix;
+			
+			if (catalog == AttributeRelationId)
+				suffix = " at columns";
+			if (catalog == ForeignServerRelationId)
+				suffix = " at foreign-servers";
+			if (catalog == ForeignDataWrapperRelationId)
+				suffix = " at foreign-data-wrappers";
+			elog(ERROR, "No FDW options are supported%s.", suffix);
 		}
-		else if (catalog == RelationRelationId)
+		else if (strcmp(def->defname, "gpu_device_id") == 0)
 		{
-			if (strcmp(def->defname, "gpu_device_id") == 0)
-			{
-				char   *token = defGetString(def);
-				if (strtol(token, &endp, 10) < 0 || *endp != '\0')
-					elog(ERROR, "gpu_device_id = '%s' is not valid", token);
-				continue;
-			}
-			if (strcmp(def->defname, "max_num_rows") == 0)
-			{
-				char   *token = defGetString(def);
+			char   *token = defGetString(def);
 
-				if (strtol(token, &endp, 10) < 0 || *endp != '\0')
-					elog(ERROR, "max_num_rows = '%s' is not valid", token);
-				continue;
-			}
-			if (strcmp(def->defname, "base_file") == 0 ||
-				strcmp(def->defname, "redo_log_file") == 0 ||
-				strcmp(def->defname, "redo_log_backup_dir") == 0)
-			{
-				/* file pathnames are checked on runtime */
-				continue;
-			}
-			if (strcmp(def->defname, "redo_log_sync_method") == 0)
-			{
-				char   *token = defGetString(def);
-
-				if (strcmp(token, "pmem") == 0 &&
-					strcmp(token, "msync") == 0 &&
-					strcmp(token, "none") == 0)
-					continue;
-				elog(ERROR, "redo_log_sync_method = '%s' is not valid", token);
-			}
-			if (strcmp(def->defname, "redo_log_limit") == 0)
-			{
-				char   *token = defGetString(def);
-
-				if (strtol(token, &endp, 10) > 0 &&
-					(strcasecmp(endp, "k") == 0 ||
-					 strcasecmp(endp, "kb") == 0 ||
-					 strcasecmp(endp, "m") == 0 ||
-					 strcasecmp(endp, "mb") == 0 ||
-					 strcasecmp(endp, "g") == 0 ||
-					 strcasecmp(endp, "gb") == 0))
-					continue;	/* Ok */
-				elog(ERROR, "redo_log_limit = '%s' is not valid", token);
-			}
-			if (strcmp(def->defname, "gpu_update_interval") == 0)
-			{
-				long	interval = strtol(defGetString(def), &endp, 10);
-
-				if (interval <= 0 || interval > INT_MAX || *endp != '\0')
-					elog(ERROR, "gpu_update_interval = '%s' is not valid",
-						 defGetString(def));
-				continue;
-			}
-			if (strcmp(def->defname, "gpu_update_threshold") == 0)
-			{
-				long	threshold = strtol(defGetString(def), &endp, 10);
-
-				if (threshold <= 0 || threshold > INT_MAX || *endp != '\0')
-					elog(ERROR, "gpu_update_threshold = '%s' is not valid",
-						 defGetString(def));
-			}
+			if (strtol(token, &endp, 10) < 0 || *endp != '\0')
+				elog(ERROR, "gpu_device_id = '%s' is not valid", token);
 		}
-		ereport(ERROR,
-				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-				 errmsg("invalid option \"%s\"", def->defname)));
+		else if (strcmp(def->defname, "max_num_rows") == 0)
+		{
+			char   *token = defGetString(def);
+
+			if (strtol(token, &endp, 10) < 0 || *endp != '\0')
+				elog(ERROR, "max_num_rows = '%s' is not valid", token);
+		}
+		else if (strcmp(def->defname, "base_file") == 0 ||
+				 strcmp(def->defname, "redo_log_file") == 0 ||
+				 strcmp(def->defname, "redo_log_backup_dir") == 0)
+		{
+			/* file pathname shall be checked at post-creation steps */
+		}
+		else if (strcmp(def->defname, "redo_log_sync_method") == 0)
+		{
+			char   *token = defGetString(def);
+
+			if (strcmp(token, "pmem") != 0 &&
+				strcmp(token, "msync") != 0 &&
+				strcmp(token, "none") != 0)
+				elog(ERROR, "'%s' is not a valid configuration for '%s'",
+					 token, def->defname);
+		}
+		else if (strcmp(def->defname, "redo_log_limit") == 0)
+		{
+			char   *token = defGetString(def);
+
+			if (strtol(token, &endp, 10) <= 0 ||
+				(strcasecmp(endp, "k")  != 0 &&
+				 strcasecmp(endp, "kb") != 0 &&
+				 strcasecmp(endp, "m")  != 0 &&
+				 strcasecmp(endp, "mb") != 0 &&
+				 strcasecmp(endp, "g")  != 0 &&
+				 strcasecmp(endp, "gb") != 0))
+				elog(ERROR, "'%s' is not a valid configuration for '%s'",
+					 token, def->defname);
+		}
+		else if (strcmp(def->defname, "gpu_update_interval") == 0)
+		{
+			char   *token = defGetString(def);
+			long	interval = strtol(token, &endp, 10);
+
+			if (interval <= 0 || interval > INT_MAX || *endp != '\0')
+				elog(ERROR, "'%s' is not a valid configuration for '%s'",
+					 token, def->defname);
+		}
+		else if (strcmp(def->defname, "gpu_update_threshold") == 0)
+		{
+			char   *token = defGetString(def);
+			long	threshold = strtol(token, &endp, 10);
+
+			if (threshold <= 0 || threshold > INT_MAX || *endp != '\0')
+				elog(ERROR, "'%s' is not a valid configuration for '%s'",
+					 token, def->defname);
+		}
+		else if (strcmp(def->defname, "primary_key") == 0)
+		{
+			/* column name shall be validated later */
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\"", def->defname)));
+		}
 	}
 	PG_RETURN_VOID();
 }
@@ -456,7 +468,7 @@ gstoreFdwExtractOptions(Relation frel,
 	ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	ListCell   *lc;
-	cl_int		cuda_dindex = -1;
+	cl_int		cuda_dindex = 0;
 	cl_long		max_num_rows = -1;
 	const char *base_file = NULL;
 	const char *redo_log_file = NULL;
@@ -466,7 +478,6 @@ gstoreFdwExtractOptions(Relation frel,
 	cl_int		gpu_update_interval = 15;		/* default: 15s */
 	cl_int		gpu_update_threshold = 40000;	/* default: 40k rows */
 	AttrNumber	primary_key = -1;
-	int			i, j;
 	
 	/*
 	 * check foreign relation's option
@@ -479,7 +490,7 @@ gstoreFdwExtractOptions(Relation frel,
 		if (strcmp(def->defname, "gpu_device_id") == 0)
 		{
 			long	device_id = strtol(defGetString(def), &endp, 10);
-			int		cuda_dindex = -1;
+			int		i, cuda_dindex = -1;
 
 			if (device_id < 0 || device_id > INT_MAX || *endp != '\0')
 				elog(ERROR, "unexpected input for gpu_device_id: %s",
@@ -597,43 +608,32 @@ gstoreFdwExtractOptions(Relation frel,
 				elog(ERROR, "invalid gpu_update_threshold: %s", value);
 			gpu_update_threshold = threshold;
 		}
+		else if (strcmp(def->defname, "primary_key") == 0)
+		{
+			char   *pk_name = defGetString(def);
+			int		j;
+
+			for (j=0; j < tupdesc->natts; j++)
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc,j);
+
+				if (strcmp(pk_name, NameStr(attr->attname)) == 0)
+				{
+					primary_key = attr->attnum;
+					break;
+				}
+			}
+			if (primary_key < 0)
+				elog(ERROR, "'%s' specified by 'primary_key' option not found",
+					 pk_name);
+		}
 		else
 			elog(ERROR, "gstore_fdw: unknown option: %s", def->defname);
 	}
 
 	/*
-	 * check attribute options
-	 */
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc,j);
-		List   *options = GetForeignColumnOptions(attr->attrelid,
-												  attr->attnum);
-		foreach (lc, options)
-		{
-			DefElem	   *def = lfirst(lc);
-
-			if (strcmp(def->defname, "primary_key") == 0)
-			{
-				char   *token = defGetString(def);
-
-				if (strcmp(token, "hash") != 0)
-					elog(ERROR, "gstore_fdw: unknown index type: %s", token);
-				if (primary_key < 0)
-					primary_key = attr->attnum;
-				else
-					elog(ERROR, "gstore_fdw: primary_key specified twice");
-			}
-			else
-				elog(ERROR, "gstore_fdw: unknown option '%s'", def->defname);
-		}
-	}
-
-	/*
 	 * Check Mandatory Options
 	 */
-	if (cuda_dindex < 0)
-		elog(ERROR, "gpu_device_id must be specified");
 	if (max_num_rows < 0)
 		elog(ERROR, "max_num_rows must be specified");
 	if (!redo_log_file)
@@ -776,11 +776,15 @@ gstoreFdwAllocSharedState(Relation frel)
  * gstoreFdwOpenBaseFile
  */
 static File
-gstoreFdwOpenBaseFile(Relation frel, const char *base_file, cl_uint nrooms)
+gstoreFdwOpenBaseFile(Relation frel,
+					  const char *base_file,
+					  cl_uint nrooms)
 {
 	TupleDesc	__tupdesc = gstoreFdwDeviceTupleDesc(frel);
 	File		fdesc;
 	size_t		kds_sz = KDS_calculateHeadSize(__tupdesc);
+	size_t		hbuf_sz = offsetof(GpuStoreFileHead, schema) + kds_sz;
+	GpuStoreFileHead *hbuf = alloca(hbuf_sz);
 	size_t		main_sz, extra_sz, sz;
 	kern_data_store *schema;
 	int			j, unitsz;
@@ -835,9 +839,6 @@ gstoreFdwOpenBaseFile(Relation frel, const char *base_file, cl_uint nrooms)
 	fdesc = PathNameOpenFile(base_file, O_RDWR);
 	if (fdesc < 0)
 	{
-		GpuStoreFileHead *hbuf;
-		size_t		hbuf_sz = offsetof(GpuStoreFileHead, schema) + kds_sz;
-
 		if (errno != ENOENT)
 			elog(ERROR, "failed on open('%s'): %m", base_file);
 		fdesc = PathNameOpenFile(base_file, O_RDWR | O_CREAT | O_EXCL);
@@ -861,9 +862,6 @@ gstoreFdwOpenBaseFile(Relation frel, const char *base_file, cl_uint nrooms)
 	}
 	else
 	{
-		GpuStoreFileHead *hbuf;
-		size_t		hbuf_sz;
-		
 		if (__readFile(FileGetRawDesc(fdesc), hbuf, hbuf_sz) != hbuf_sz)
 			elog(ERROR, "failed on __readFile('%s'): %m", base_file);
 		/* check signature */
@@ -1127,7 +1125,7 @@ gstoreFdwCreateSharedState(Relation frel)
 
 	PG_TRY();
 	{
-		/* open or create base file */
+		/* Open or Create base file */
 		base_fdesc = gstoreFdwOpenBaseFile(frel,
 										   gs_sstate->base_file,
 										   gs_sstate->max_num_rows);
@@ -1148,8 +1146,14 @@ gstoreFdwCreateSharedState(Relation frel)
 	}
 	PG_END_TRY();
 	FileClose(base_fdesc);
-	/* Kick GPU memory synchronizer */
-	//TODO:
+
+	/* Kick GPU memory synchronizer for initial allocation */
+	SpinLockAcquire(&gstore_shared_head->gpumem_sync_lock);
+	dlist_push_tail(&gstore_shared_head->gpumem_sync_list,
+					&gs_sstate->sync_chain);
+	if (gstore_shared_head->gpumem_sync_latch)
+		SetLatch(gstore_shared_head->gpumem_sync_latch);
+	SpinLockRelease(&gstore_shared_head->gpumem_sync_lock);
 
 	return gs_sstate;
 }
@@ -1158,72 +1162,70 @@ static GpuStoreDesc *
 __gstoreFdwSetupGpuStoreDesc(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	void	   *mmap_ptr;
+	size_t		mmap_sz;
+	File		fdesc;
+	struct stat	stat_buf;
 
-	if (gs_desc->mmap_revision != gs_sstate->mmap_revision)
+	if (gs_desc->mmap_revision == gs_sstate->mmap_revision)
+		return gs_desc;		/* nothing to do */
+	PG_TRY();
 	{
-		void	   *mmap_ptr;
-		size_t		mmap_sz;
-		File		fdesc;
-		struct stat	stat_buf;
+		int		redo_log_sync_method = gs_sstate->redo_log_sync_method;
+		int		is_pmem;
 
-		PG_TRY();
-		{
-			int		redo_log_sync_method = gs_sstate->redo_log_sync_method;
-			int		is_pmem;
+		/* mmap Base-file */
+		fdesc = PathNameOpenFile(gs_sstate->base_file, O_RDWR);
+		if (fdesc < 0)
+			elog(ERROR, "failed on open('%s'): %m",
+				 gs_sstate->base_file);
+		if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
+			elog(ERROR, "failed on fstat('%s'): %m",
+				 gs_sstate->base_file);
+		mmap_sz = TYPEALIGN(PAGE_SIZE, stat_buf.st_size);
+		mmap_ptr = mmap(NULL, mmap_sz,
+						PROT_READ | PROT_WRITE,
+						MAP_SHARED | MAP_POPULATE,
+						FileGetRawDesc(fdesc), 0);
+		if (mmap_ptr == MAP_FAILED)
+			elog(ERROR, "failed on mmap('%s',%zu): %m",
+				 gs_sstate->base_file, mmap_sz);
+		gs_desc->base_file_mmap = mmap_ptr;
+		gs_desc->base_file_sz   = mmap_sz;
+		FileClose(fdesc);
 
-			/* mmap Base-file */
-			fdesc = PathNameOpenFile(gs_sstate->base_file, O_RDWR);
-			if (fdesc < 0)
-				elog(ERROR, "failed on open('%s'): %m",
-					 gs_sstate->base_file);
-			if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
-				elog(ERROR, "failed on fstat('%s'): %m",
-					 gs_sstate->base_file);
-			mmap_sz = TYPEALIGN(PAGE_SIZE, stat_buf.st_size);
-			mmap_ptr = mmap(NULL, mmap_sz,
-							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
-							FileGetRawDesc(fdesc), 0);
-			if (mmap_ptr == MAP_FAILED)
-				elog(ERROR, "failed on mmap('%s',%zu): %m",
-					 gs_sstate->base_file, mmap_sz);
-			gs_desc->base_file_mmap = mmap_ptr;
-			gs_desc->base_file_sz   = mmap_sz;
-			FileClose(fdesc);
-
-			/* pmem_map REDO Log file */
-			mmap_sz = TYPEALIGN(PAGE_SIZE, gs_sstate->redo_log_limit);
-			mmap_ptr = pmem_map_file(gs_sstate->redo_log_file, mmap_sz,
-									 0, 0600,
-									 &gs_desc->redo_log_sz,
-									 &is_pmem);
-			if (!mmap_ptr)
-				elog(ERROR, "failed on pmem_map_file('%s',%zu): %m",
-					 gs_sstate->redo_log_file, mmap_sz);
-			gs_desc->redo_log_mmap = mmap_ptr;
-			/* degrade sync-method, if not persistent memory */
-			if (!is_pmem && redo_log_sync_method == REDO_LOG_SYNC__PMEM)
-				redo_log_sync_method = REDO_LOG_SYNC__MSYNC;
-			gs_desc->redo_log_sync_method = redo_log_sync_method;
-		}
-		PG_CATCH();
-		{
-			if (gs_desc->base_file_mmap)
-			{
-				munmap(gs_desc->base_file_mmap,
-					   gs_desc->base_file_sz);
-				gs_desc->base_file_mmap = NULL;
-			}
-			if (gs_desc->redo_log_mmap)
-			{
-				pmem_unmap(gs_desc->redo_log_mmap,
-						   gs_desc->redo_log_sz);
-				gs_desc->redo_log_mmap = NULL;
-			}
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		/* pmem_map entire REDO Log file */
+		mmap_ptr = pmem_map_file(gs_sstate->redo_log_file, 0,
+								 0, 0600,
+								 &gs_desc->redo_log_sz,
+								 &is_pmem);
+		if (!mmap_ptr)
+			elog(ERROR, "failed on pmem_map_file('%s',%zu): %m",
+				 gs_sstate->redo_log_file, mmap_sz);
+		gs_desc->redo_log_mmap = mmap_ptr;
+		/* degrade sync-method, if not persistent memory */
+		if (!is_pmem && redo_log_sync_method == REDO_LOG_SYNC__PMEM)
+			redo_log_sync_method = REDO_LOG_SYNC__MSYNC;
+		gs_desc->redo_log_sync_method = redo_log_sync_method;
 	}
+	PG_CATCH();
+	{
+		if (gs_desc->base_file_mmap)
+		{
+			munmap(gs_desc->base_file_mmap,
+				   gs_desc->base_file_sz);
+			gs_desc->base_file_mmap = NULL;
+		}
+		if (gs_desc->redo_log_mmap)
+		{
+			pmem_unmap(gs_desc->redo_log_mmap,
+					   gs_desc->redo_log_sz);
+			gs_desc->redo_log_mmap = NULL;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
 	return gs_desc;
 }
 
@@ -1312,11 +1314,45 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 
 
 Datum
-pgstrom_gstore_fdw_precheck_schema(PG_FUNCTION_ARGS)
+pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 {
+	EventTriggerData   *trigdata;
+
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "%s must be called as a event trigger", __FUNCTION__);
+
+	trigdata = (EventTriggerData *) fcinfo->context;
+	if (strcmp(trigdata->event, "ddl_command_end") != 0)
+		elog(ERROR, "%s must be called at ddl_command_end", __FUNCTION__);
+	elog(INFO, "tag [%s]", trigdata->tag);
+	if (strcmp(trigdata->tag, "CREATE FOREIGN TABLE") == 0)
+	{
+		CreateStmt *stmt = (CreateStmt *)trigdata->parsetree;
+		Relation	frel;
+
+		frel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
+		if (!frel)
+			PG_RETURN_NULL();
+		elog(INFO, "table [%s]", RelationGetRelationName(frel));
+		if (frel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+		{
+			FdwRoutine	   *routine = GetFdwRoutineForRelation(frel, false);
+
+			if (memcmp(routine, &pgstrom_gstore_fdw_routine,
+					   sizeof(FdwRoutine)) == 0)
+			{
+				/*
+				 * Ensure the supplied FDW options are reasonable,
+				 * and create base/redo-log files preliminary.
+				 */
+				gstoreFdwLookupGpuStoreDesc(frel);
+			}
+		}
+		relation_close(frel, AccessShareLock);
+	}
 	PG_RETURN_NULL();
 }
-PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_precheck_schema);
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_post_creation);
 
 Datum
 pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
@@ -1342,69 +1378,6 @@ pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_compaction);
 
 /*
- * GstoreFdwGpuBufferUpdater
- */
-static bool gpumem_updater_got_signal = false;
-
-static void
-GpuBufferUpdaterSigTerm(SIGNAL_ARGS)
-{
-	int		saved_errno = errno;
-
-	gpumem_updater_got_signal = true;
-
-	pg_memory_barrier();
-
-	SetLatch(MyLatch);
-
-	errno = saved_errno;
-}
-
-static void
-GpuBufferUpdaterSwitchCudaContext(cl_int cuda_dindex)
-{
-	static CUcontext   *cuda_contexts_array = NULL;
-	static CUmodule	   *cuda_modules_array = NULL;
-	CUdevice			cuda_device;
-	CUcontext			cuda_context;
-//	CUmodule			cuda_module;
-	CUresult			rc;
-
-	if (!cuda_contexts_array)
-	{
-		cuda_contexts_array = calloc(numDevAttrs, sizeof(CUcontext));
-		if (!cuda_contexts_array)
-			elog(ERROR, "out of memory");
-	}
-	if (!cuda_modules_array)
-	{
-		cuda_modules_array = calloc(numDevAttrs, sizeof(CUmodule));
-		if (!cuda_modules_array)
-			elog(ERROR, "out of memory");
-	}
-	Assert(cuda_dindex < numDevAttrs);
-
-	if (!cuda_contexts_array[cuda_dindex])
-	{
-		rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-		rc = cuCtxCreate(&cuda_context,
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-		//load module
-	}
-	else
-	{
-		rc = cuCtxPushCurrent(cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-	}
-}
-
-/*
  * GpuBufferUpdaterInitialLoad
  *
  * must be called under the exclusive lock of gs_sstate->gpu_bufer_lock
@@ -1414,6 +1387,7 @@ GpuBufferUpdaterInitialLoad(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	kern_data_store *kds_head = &gs_desc->base_file_mmap->schema;
+	const char *ftable_name = gs_desc->base_file_mmap->ftable_name;
 	size_t		base_sz = kds_head->length;
 	size_t		extra_sz;
 	CUresult	rc;
@@ -1429,22 +1403,30 @@ GpuBufferUpdaterInitialLoad(GpuStoreDesc *gs_desc)
 						   gs_desc->gpu_main_devptr);
 	if (rc != CUDA_SUCCESS)
 		goto error_1;
+	elog(LOG, "GstoreFdw: %s main buffer (sz: %lu) allocated",
+		 ftable_name, base_sz);
 
-	/* extra portion of the device buffer */
-	extra_sz = __kds_unpack(kds_head->usage); //right?
-	rc = cuMemAlloc(&gs_desc->gpu_extra_devptr, extra_sz);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr,
-					  (char *)kds_head + base_sz,
-					  extra_sz);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-	rc = cuIpcGetMemHandle(&gs_sstate->gpu_extra_mhandle,
-						   gs_desc->gpu_extra_devptr);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-	
+	/* extra portion of the device buffer (if needed) */
+	if (kds_head->has_varlena)
+	{
+		extra_sz = gs_desc->base_file_sz -
+			(offsetof(GpuStoreFileHead, schema) + base_sz);
+		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr, extra_sz);
+		if (rc != CUDA_SUCCESS)
+			goto error_1;
+		rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr,
+						  (char *)kds_head + base_sz,
+						  extra_sz);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+		rc = cuIpcGetMemHandle(&gs_sstate->gpu_extra_mhandle,
+							   gs_desc->gpu_extra_devptr);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+
+		elog(LOG, "GstoreFdw: %s extra buffer (sz: %lu) allocated",
+			 ftable_name, extra_sz);
+	}
 	return true;
 
 error_2:
@@ -1469,115 +1451,184 @@ GpuBufferUpdaterApplyLogs(GpuStoreDesc *gs_desc)
 	
 }
 
+/*
+ * BeginGstoreFdwGpuBufferUpdate
+ *
+ * It is called once when GPU memory keeper bgworker process launched.
+ */
 void
-GstoreFdwGpuBufferUpdater(Datum arg)
+BeginGstoreFdwGpuBufferUpdate(void)
 {
-	CUcontext  *cuda_context_array;
-	CUresult	rc;
-	
-	pqsignal(SIGTERM, GpuBufferUpdaterSigTerm);
-	BackgroundWorkerUnblockSignals();
+	gstore_shared_head->gpumem_sync_latch = MyLatch;
+}
 
-	/* force disable to use MPS */
-	if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
-		elog(ERROR, "failed on setenv: %m");
-	/* init CUDA driver  */
-	rc = cuInit(0);
+/*
+ * DispatchGstoreFdwGpuUpdator
+ *
+ * It is called every time when GPU memory keeper bgworker process wake up.
+ */
+bool
+DispatchGstoreFdwGpuUpdator(CUcontext *cuda_context_array)
+{
+	GpuStoreSharedState *gs_sstate = NULL;
+	GpuStoreDesc   *gs_desc = NULL;
+	dlist_node	   *dnode;
+	CUcontext		cuda_context;
+	CUresult		rc;
+	bool			found;
+	bool			retval = false;
+
+	SpinLockAcquire(&gstore_shared_head->gpumem_sync_lock);
+	if (dlist_is_empty(&gstore_shared_head->gpumem_sync_list))
+	{
+		SpinLockRelease(&gstore_shared_head->gpumem_sync_lock);
+		return false;
+	}
+	dnode = dlist_pop_head_node(&gstore_shared_head->gpumem_sync_list);
+	gs_sstate = dlist_container(GpuStoreSharedState, sync_chain, dnode);
+	memset(&gs_sstate->sync_chain, 0, sizeof(dlist_node));
+	if (!dlist_is_empty(&gstore_shared_head->gpumem_sync_list))
+		retval = true;
+	SpinLockRelease(&gstore_shared_head->gpumem_sync_lock);
+
+	/* switch CUDA context */
+	cuda_context = cuda_context_array[gs_sstate->cuda_dindex];
+	rc = cuCtxPushCurrent(cuda_context);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit: %s", errorText(rc));
-	/* CUDA context shall be built on demand */
-	cuda_context_array = alloca(sizeof(CUcontext) * numDevAttrs);
-	memset(cuda_context_array, 0, sizeof(CUcontext) * numDevAttrs);
+	{
+		elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
+		goto out;
+	}
 
 	/*
-	 * Event Loop
+	 * Do GPU Buffer Synchronization
 	 */
-	gstore_shared_head->gpumem_sync_latch = MyLatch;
-	pg_memory_barrier();
-	while (!gpumem_updater_got_signal)
+	pthreadRWLockReadLock(&gs_sstate->mmap_lock);
+	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
+	PG_TRY();
 	{
-		GpuStoreSharedState *gs_sstate;
-		GpuStoreDesc   *gs_desc;
-		dlist_node	   *dnode;
-
-		SpinLockAcquire(&gstore_shared_head->gpumem_sync_lock);
-		if (dlist_is_empty(&gstore_shared_head->gpumem_sync_list))
+		/* Lookup local mapping */
+		gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
+											   gs_sstate,
+											   HASH_ENTER,
+											   &found);
+		if (!found)
+			gs_desc->gs_sstate = gs_sstate;
+		else
+			Assert(gs_desc->gs_sstate == gs_sstate);
+		__gstoreFdwSetupGpuStoreDesc(gs_desc);
+		if (gs_desc->gpu_main_devptr == 0UL)
 		{
-			int		ev;
-
-			SpinLockRelease(&gstore_shared_head->gpumem_sync_lock);
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   5000L,
-						   PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
-			if (ev & WL_POSTMASTER_DEATH)
-			{
-				ConditionVariableBroadcast(&gstore_shared_head->gpumem_sync_cond);
-				elog(FATAL, "unexpected Postmaster dead");
-			}
-			CHECK_FOR_INTERRUPTS();
-			continue;
+			GpuBufferUpdaterInitialLoad(gs_desc);
 		}
-		dnode = dlist_pop_head_node(&gstore_shared_head->gpumem_sync_list);
-		gs_sstate = dlist_container(GpuStoreSharedState, sync_chain, dnode);
-		memset(&gs_sstate->sync_chain, 0, sizeof(dlist_node));
-		SpinLockRelease(&gstore_shared_head->gpumem_sync_lock);
-
-		PG_TRY();
+		else
 		{
-			bool		found;
-			
-			GpuBufferUpdaterSwitchCudaContext(gs_sstate->cuda_dindex);
-
-			pthreadRWLockReadLock(&gs_sstate->mmap_lock);
-			pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
-			/* Lookup local mapping */
-			gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
-												   gs_sstate,
-												   HASH_ENTER,
-												   &found);
-			if (!found)
-				gs_desc->gs_sstate = gs_sstate;
-			__gstoreFdwSetupGpuStoreDesc(gs_desc);
-
-			PG_TRY();
-			{
-				if (gs_desc->gpu_main_devptr == 0UL)
-				{
-					GpuBufferUpdaterInitialLoad(gs_desc);
-				}
-				else
-				{
-					GpuBufferUpdaterApplyLogs(gs_desc);
-				}
-			}
-			PG_CATCH();
-			{
-				pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
-				pthreadRWLockUnlock(&gs_sstate->mmap_lock);
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-			pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
-			pthreadRWLockUnlock(&gs_sstate->mmap_lock);
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(LOG, "failed on cuCtxPopCurrent: %s", errorText(rc));
+			GpuBufferUpdaterApplyLogs(gs_desc);
 		}
-		PG_CATCH();
+	}
+	PG_CATCH();
+	{
+		pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+		pthreadRWLockUnlock(&gs_sstate->mmap_lock);
+		FlushErrorState();
+		gs_sstate->gpu_sync_status = CUDA_ERROR_MAP_FAILED;
+	}
+	PG_END_TRY();
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+	pthreadRWLockUnlock(&gs_sstate->mmap_lock);
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+out:
+	ConditionVariableBroadcast(&gstore_shared_head->gpumem_sync_cond);
+
+	return retval;
+}
+
+/*
+ * GstoreFdwStartupKicker
+ */
+void
+GstoreFdwStartupKicker(Datum arg)
+{
+	const char *database_name;
+	bool		first_launch = false;
+	Relation	srel;
+	SysScanDesc	sscan;
+	ScanKeyData	skey;
+	HeapTuple	tuple;
+	int			exit_code = 1;
+
+	BackgroundWorkerUnblockSignals();
+	database_name = pstrdup(gstore_shared_head->kicker_next_database);
+	if (*database_name == '\0')
+	{
+		database_name = "template1";
+		first_launch = true;
+	}
+	BackgroundWorkerInitializeConnection(database_name, NULL, 0);
+
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	srel = table_open(DatabaseRelationId, AccessShareLock);
+	ScanKeyInit(&skey,
+				Anum_pg_database_datname,
+				BTGreaterStrategyNumber, F_NAMEGT,
+				CStringGetDatum(database_name));
+	sscan = systable_beginscan(srel, DatabaseNameIndexId,
+							   true,
+							   NULL,
+							   first_launch ? 0 : 1, &skey);
+next_database:
+	tuple = systable_getnext(sscan);
+	if (HeapTupleIsValid(tuple))
+	{
+		Form_pg_database dat = (Form_pg_database) GETSTRUCT(tuple);
+		if (!dat->datallowconn)
+			goto next_database;
+		strncpy(gstore_shared_head->kicker_next_database,
+				NameStr(dat->datname),
+				NAMEDATALEN);
+	}
+	else
+	{
+		/* current database is the last one */
+		exit_code = 0;
+	}
+	systable_endscan(sscan);
+	table_close(srel, AccessShareLock);
+
+	if (!first_launch)
+	{
+		Form_pg_foreign_table ftable;
+		Relation	frel;
+		FdwRoutine *routine;
+
+		srel = table_open(ForeignTableRelationId, AccessShareLock);
+		sscan = systable_beginscan(srel, InvalidOid, false, NULL, 0, NULL);
+		while ((tuple = systable_getnext(sscan)) != NULL)
 		{
-			ConditionVariableBroadcast(&gstore_shared_head->gpumem_sync_cond);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+			ftable = (Form_pg_foreign_table)GETSTRUCT(tuple);
+			frel = heap_open(ftable->ftrelid, AccessShareLock);
+			routine = GetFdwRoutineForRelation(frel, false);
 
-		ConditionVariableBroadcast(&gstore_shared_head->gpumem_sync_cond);
+			if (memcmp(routine, &pgstrom_gstore_fdw_routine,
+					   sizeof(FdwRoutine)) == 0)
+			{
+				gstoreFdwLookupGpuStoreDesc(frel);
+				elog(LOG, "GstoreFdw preload '%s' in database '%s'",
+					 RelationGetRelationName(frel), database_name);
+			}
+			heap_close(frel, AccessShareLock);
+		}
+		systable_endscan(sscan);
+		table_close(srel, AccessShareLock);
 	}
 	
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	proc_exit(exit_code);
 }
 
 /*
@@ -1661,24 +1712,36 @@ pgstrom_init_gstore_fdw(void)
 	gstore_desc_htab = hash_create("GpuStoreDesc Hash-table", 256,
 								   &hctl,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-	/*
-	 * Background worker to synchronize GPU device memory
-	 */
-	memset(&worker, 0, sizeof(BackgroundWorker));
-    snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-			 "GstoreFdw GPU Buffer Updater");
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
-	worker.bgw_restart_time = 1;
-	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_strom");
-	snprintf(worker.bgw_function_name, BGW_MAXLEN,
-			 "GstoreFdwGpuBufferUpdater");
-	worker.bgw_main_arg = 0;
-	RegisterBackgroundWorker(&worker);
 
+	/* GUC: pg_strom.gstore_fdw_auto_preload  */
+	DefineCustomBoolVariable("pg_strom.gstore_fdw_auto_preload",
+							 "Enables auto preload of GstoreFdw GPU buffers",
+							 NULL,
+							 &pgstrom_gstore_fdw_auto_preload,
+							 true,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/*
-	 * Request for the static shared memory
+	 * Background worker to load GPU store on startup
 	 */
+	if (pgstrom_gstore_fdw_auto_preload)
+	{
+		memset(&worker, 0, sizeof(BackgroundWorker));
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "GstoreFdw Starup Kicker");
+		worker.bgw_flags = (BGWORKER_SHMEM_ACCESS |
+							BGWORKER_BACKEND_DATABASE_CONNECTION);
+		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+		worker.bgw_restart_time = 1;
+		snprintf(worker.bgw_library_name, BGW_MAXLEN,
+				 "$libdir/pg_strom");
+		snprintf(worker.bgw_function_name, BGW_MAXLEN,
+				 "GstoreFdwStartupKicker");
+		worker.bgw_main_arg = 0;
+		RegisterBackgroundWorker(&worker);
+	}
+	/* Request for the static shared memory */
 	RequestAddinShmemSpace(STROMALIGN(sizeof(GpuStoreSharedHead)));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;

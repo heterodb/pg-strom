@@ -131,7 +131,6 @@ static size_t		gm_segment_sz;	/* bytesize */
 static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
-static	CUcontext  *gpummgr_cuda_context = NULL;
 
 Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
@@ -1082,13 +1081,6 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 	gmemp = dlist_container(GpuMemPreserved, chain, dnode);
 	memset(&gmemp->chain, 0, sizeof(dlist_node));
 
-	rc = cuCtxPushCurrent(gpummgr_cuda_context[gmemp_req->cuda_dindex]);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
-		goto error_1;
-	}
-
 	rc = cuMemAlloc(&m_devptr, gmemp_req->bytesize);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1100,13 +1092,6 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
-		goto error_2;
-	}
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 		goto error_2;
 	}
 	INIT_LEGACY_CRC32(crc);
@@ -1188,6 +1173,58 @@ gpummgrHandleFreePreserved(GpuMemPreservedRequest *gmemp_req)
 	return result;
 }
 
+static void
+BeginPreservedGpuMemoryRequest(void)
+{
+	gmemp_head->gmemp_keeper = MyLatch;
+}
+
+static bool
+DispatchPreservedGpuMemoryRequest(CUcontext *cuda_context_array)
+{
+	bool	retval = false;
+	
+	SpinLockAcquire(&gmemp_head->lock);
+	if (!dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+	{
+		GpuMemPreservedRequest *gmemp_req;
+		dlist_node	   *dnode;
+		CUcontext		cuda_context;
+		CUresult		rc;
+
+		dnode = dlist_pop_head_node(&gmemp_head->gmemp_req_pending_list);
+		gmemp_req = dlist_container(GpuMemPreservedRequest, chain, dnode);
+
+		memset(&gmemp_req->chain, 0, sizeof(dlist_node));
+		Assert(gmemp_req->cuda_dindex >= 0 &&
+			   gmemp_req->cuda_dindex < numDevAttrs);
+		cuda_context = cuda_context_array[gmemp_req->cuda_dindex];
+
+		rc = cuCtxPushCurrent(cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
+		else
+		{
+			if (gmemp_req->bytesize > 0)
+				rc = gpummgrHandleAllocPreserved(gmemp_req);
+			else if (gmemp_req->bytesize == 0)
+				rc = gpummgrHandleFreePreserved(gmemp_req);
+			else
+				rc = CUDA_ERROR_INVALID_VALUE;
+
+			if (cuCtxPopCurrent(NULL) != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuCtxPopCurrent(NULL)");
+		}
+		gmemp_req->result = rc;
+		SetLatch(gmemp_req->backend);
+
+		if (!dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+			retval = true;
+	}
+	SpinLockRelease(&gmemp_head->lock);
+	return retval;
+}
+
 /*
  * gpummgrBgWorkerSigTerm
  */
@@ -1212,6 +1249,7 @@ void
 gpummgrBgWorkerMain(Datum arg)
 {
 	CUdevice	cuda_device;
+	CUcontext  *cuda_context_array;
 	CUresult	rc;
 	int			i;
 
@@ -1226,8 +1264,8 @@ gpummgrBgWorkerMain(Datum arg)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", errorText(rc));
 
-	gpummgr_cuda_context = calloc(numDevAttrs, sizeof(CUcontext));
-	if (!gpummgr_cuda_context)
+	cuda_context_array = calloc(numDevAttrs, sizeof(CUcontext));
+	if (!cuda_context_array)
 		elog(ERROR, "out of memory");
 
 	for (i=0; i < numDevAttrs; i++)
@@ -1236,14 +1274,15 @@ gpummgrBgWorkerMain(Datum arg)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
 
-		rc = cuCtxCreate(&gpummgr_cuda_context[i],
+		rc = cuCtxCreate(&cuda_context_array[i],
 						 CU_CTX_SCHED_AUTO,
 						 cuda_device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
 	}
-
-	gmemp_head->gmemp_keeper = MyLatch;
+	/* initial setup */
+	BeginPreservedGpuMemoryRequest();
+	BeginGstoreFdwGpuBufferUpdate();
 	pg_memory_barrier();
 
 	/*
@@ -1251,15 +1290,15 @@ gpummgrBgWorkerMain(Datum arg)
 	 */
 	while (!gpummgr_bgworker_got_signal)
 	{
-		GpuMemPreservedRequest *gmemp_req;
+		bool	dispatch_next = false;
+		int		ev;
 
-		SpinLockAcquire(&gmemp_head->lock);
-		if (dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+		if (DispatchPreservedGpuMemoryRequest(cuda_context_array))
+			dispatch_next = true;
+		if (DispatchGstoreFdwGpuUpdator(cuda_context_array))
+			dispatch_next = true;
+		if (!dispatch_next)
 		{
-			int		ev;
-
-			SpinLockRelease(&gmemp_head->lock);
-
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
@@ -1269,24 +1308,6 @@ gpummgrBgWorkerMain(Datum arg)
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected Postmaster dead");
-		}
-		else
-		{
-			gmemp_req = dlist_container(GpuMemPreservedRequest, chain,
-				dlist_pop_head_node(&gmemp_head->gmemp_req_pending_list));
-			memset(&gmemp_req->chain, 0, sizeof(dlist_node));
-			Assert(gmemp_req->cuda_dindex >= 0 &&
-				   gmemp_req->cuda_dindex < numDevAttrs);
-			if (gmemp_req->bytesize > 0)
-				rc = gpummgrHandleAllocPreserved(gmemp_req);
-			else if (gmemp_req->bytesize == 0)
-				rc = gpummgrHandleFreePreserved(gmemp_req);
-			else
-				rc = CUDA_ERROR_INVALID_VALUE;
-
-			gmemp_req->result = rc;
-			SetLatch(gmemp_req->backend);
-			SpinLockRelease(&gmemp_head->lock);
 		}
 	}
 }

@@ -1385,6 +1385,15 @@ extern void ExplainArrowFdw(ArrowFdwState *af_state,
 extern void pgstrom_init_arrow_fdw(void);
 
 /*
+ * gstore_fdw.c
+ */
+
+
+extern void BeginGstoreFdwGpuBufferUpdate(void);
+extern bool DispatchGstoreFdwGpuUpdator(CUcontext *cuda_context_array);
+extern void pgstrom_init_gstore_fdw(void);
+
+/*
  * misc.c
  */
 extern Expr *make_flat_ands_explicit(List *andclauses);
