@@ -39,7 +39,6 @@ typedef struct
 #define GPUSTORE_REDOLOG_SIGNATURE		"@REDO-1@"
 #define GPUSTORE_HASHINDEX_SIGNATURE	"@HASH-1@"
 
-
 typedef struct
 {
 	char		signature[8];
@@ -47,6 +46,20 @@ typedef struct
 	char		ftable_name[NAMEDATALEN];
 	kern_data_store schema;
 } GpuStoreFileHead;
+
+/*
+ * GpuStoreHashHead - Hash-index for Primary-key
+ */
+typedef struct
+{
+	char		signature[8];
+	uint64		nrooms;
+	uint64		nslots;
+	struct {
+		slock_t	lock;
+		uint32	rowid;
+	} slots[FLEXIBLE_ARRAY_MEMBER];
+} GpuStoreHashHead;
 
 #define REDO_LOG_SYNC__NONE			1
 #define REDO_LOG_SYNC__MSYNC		2
@@ -70,7 +83,7 @@ typedef struct
 	/* Base file buffer */
 	pthread_rwlock_t base_file_lock;
 	const char	   *base_file;
-	uint32			hash_index_suffix;
+	uint32			index_suffix;
 
 	/* REDO Log state */
 	const char	   *redo_log_file;
@@ -196,13 +209,132 @@ static void
 GstoreGetForeignRelSize(PlannerInfo *root,
 						RelOptInfo *baserel,
 						Oid foreigntableid)
-{}
+{
+	Relation	frel;
+	GpuStoreDesc *gs_desc;
+
+	frel = heap_open(foreigntableid, AccessShareLock);
+	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	heap_close(frel, AccessShareLock);
+
+	baserel->tuples = (double) gs_desc->base_file_mmap->schema.nitems;
+	baserel->rows = baserel->tuples *
+		clauselist_selectivity(root,
+							   baserel->baserestrictinfo,
+							   0,
+							   JOIN_INNER,
+							   NULL);
+	baserel->fdw_private = gs_desc;
+}
+
+static Node *
+match_clause_to_primary_key(PlannerInfo *root,
+							RelOptInfo *baserel,
+							RestrictInfo *rinfo,
+							int primary_key)
+{
+	OpExpr	   *op = (OpExpr *)rinfo->clause;
+	Node	   *left;
+	Node	   *right;
+
+	if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+		return false;
+	left = (Node *) linitial(op->args);
+	if (IsA(left, RelabelType))
+		left = (Node *)((RelabelType *)left)->arg;
+	right = (Node *) lsecond(op->args);
+	if (IsA(right, RelabelType))
+		right = (Node *)((RelabelType *)right)->arg;
+
+	if (IsA(left, Var))
+	{
+		Var	   *var = (Var *)left;
+
+		if (var->varno == baserel->relid &&
+			var->varattno == primary_key &&
+			!bms_is_member(baserel->relid, rinfo->right_relids) &&
+			!contain_volatile_functions(right))
+		{
+			/* Ok, Left-VAR = Right-Expression */
+			return right;
+		}
+	}
+
+	if (IsA(right, Var))
+	{
+		Var	   *var = (Var *)right;
+
+		if (var->varno == baserel->relid &&
+			var->varattno == primary_key &&
+			!bms_is_member(baserel->relid, rinfo->left_relids) &&
+			!contain_volatile_functions(left))
+		{
+			/* Ok, Right-Var = Left-Expression */
+			return left;
+		}
+	}
+	return NULL;
+}
 
 static void
 GstoreGetForeignPaths(PlannerInfo *root,
 					  RelOptInfo *baserel,
 					  Oid foreigntableid)
-{}
+{
+	GpuStoreDesc   *gs_desc = baserel->fdw_private;
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	AttrNumber		primary_key = gs_sstate->primary_key;
+	Relids			required_outer = baserel->lateral_relids;
+	ParamPathInfo  *param_info;
+	ForeignPath	   *fpath;
+	ListCell	   *lc;
+	Node		   *indexNode = NULL;
+	QualCost		qual_cost;
+	Cost			startup_cost = 0.0;
+	Cost			total_cost = 0.0;
+	double			ntuples = baserel->tuples;
+
+	if (primary_key > 0)
+	{
+		foreach (lc, baserel->baserestrictinfo)
+		{
+			RestrictInfo   *rinfo = lfirst(lc);
+
+			indexNode = match_clause_to_primary_key(root,
+													baserel,
+													rinfo,
+													primary_key);
+			if (indexNode)
+				break;
+		}
+	}
+	/* simple cost estimation */
+	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
+	if (param_info)
+		cost_qual_eval(&qual_cost, param_info->ppi_clauses, root);
+	else
+		qual_cost = baserel->baserestrictcost;
+	if (indexNode)
+		ntuples = 1.0;
+	startup_cost += qual_cost.startup;
+	startup_cost += baserel->reltarget->cost.startup;
+	total_cost += (cpu_tuple_cost + qual_cost.per_tuple) * ntuples;
+	total_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
+
+	fpath = create_foreignscan_path(root,
+									baserel,
+									NULL,	/* default pathtarget */
+									baserel->rows,
+									startup_cost,
+									total_cost,
+									NIL,	/* no pathkeys */
+									required_outer,
+									NULL,	/* no extra plan */
+									list_make1(indexNode));
+	add_path(baserel, (Path *)fpath);
+	
+	//TODO: parameterized paths
+}
 
 static ForeignScan *
 GstoreGetForeignPlan(PlannerInfo *root,
@@ -213,7 +345,16 @@ GstoreGetForeignPlan(PlannerInfo *root,
 					 List *scan_clauses,
 					 Plan *outer_plan)
 {
-	return NULL;
+	scan_clauses = extract_actual_clauses(scan_clauses, false);
+
+	return make_foreignscan(tlist,
+							scan_clauses,
+							baserel->relid,
+							best_path->fdw_private,
+							NIL,
+							NIL,	/* no custom tlist */
+							NIL,	/* no remote quals */
+							outer_plan);
 }
 
 static void
@@ -239,7 +380,7 @@ GstoreIsForeignScanParallelSafe(PlannerInfo *root,
 								RelOptInfo *rel,
 								RangeTblEntry *rte)
 {
-	return true;
+	return false;
 }
 
 static Size
@@ -509,7 +650,7 @@ gstoreFdwExtractOptions(Relation frel,
 		else if (strcmp(def->defname, "max_num_rows") == 0)
 		{
 			max_num_rows = strtol(defGetString(def), &endp, 10);
-			if (max_num_rows < 0 || max_num_rows > UINT_MAX || *endp != '\0')
+			if (max_num_rows < 0 || max_num_rows >= UINT_MAX || *endp != '\0')
 				elog(ERROR, "unexpected input for max_num_rows: %s",
 					 defGetString(def));
 		}
@@ -753,7 +894,7 @@ gstoreFdwAllocSharedState(Relation frel)
 	do {
 		gs_sstate->mmap_revision = random();
 	} while (gs_sstate->mmap_revision == 0);
-	gs_sstate->hash_index_suffix = 0;	/* set later, if any */
+	gs_sstate->index_suffix = 0;	/* set later, if any */
 	gs_sstate->redo_log_sync_method = redo_log_sync_method;
 	gs_sstate->redo_log_limit = redo_log_limit;
 
@@ -1116,6 +1257,166 @@ gstoreFdwApplyRedoLog(Relation frel,
 	return redo_pos;
 }
 
+static void
+__gstoreFdwBuildHashIndexMain(kern_data_store *kds,
+							  AttrNumber primary_key,
+							  char *extra_buf, size_t extra_sz,
+							  GpuStoreHashHead *hash_head)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[primary_key - 1];	/* PK column */
+	kern_colmeta   *smeta = &kds->colmeta[kds->ncols - 1];	/* Sys column */
+	TypeCacheEntry *tcache;
+	char		   *nullmap;
+	char		   *cbase;
+	char		   *sbase;
+	uint32		   *hash_rowmap;
+	cl_uint			i, unitsz;
+
+	tcache = lookup_type_cache(cmeta->atttypid,
+							   TYPECACHE_HASH_PROC |
+							   TYPECACHE_HASH_PROC_FINFO);
+	if (!OidIsValid(tcache->hash_proc))
+		elog(ERROR, "type '%s' has no hash function",
+			 format_type_be(cmeta->atttypid));
+
+	Assert(smeta->attbyval && smeta->attlen == sizeof(cl_ulong));
+	nullmap = (char *)kds + cmeta->nullmap_offset;
+	cbase = (char *)kds + cmeta->values_offset;
+	sbase = (char *)kds + smeta->values_offset;
+
+	hash_rowmap = (uint32 *)&hash_head->slots[hash_head->nslots];
+	for (i=0; i < kds->nrooms; i++)
+	{
+		Timestamp	ts = ((uint64 *)sbase)[i];
+		Datum		datum;
+		Datum		hash;
+		uint32		rowid;
+
+		/* Is this row already removed? */
+		if ((ts & GSTORE_SYSATTR__REMOVED) != 0)
+			continue;
+		/* PK should never be NULL */
+		if (att_isnull(i, nullmap))
+			elog(ERROR, "data corruption? Primary Key is NULL (rowid=%u)", i);
+		/* Fetch value */
+		if (cmeta->attbyval)
+		{
+			if (cmeta->attlen == sizeof(cl_ulong))
+				datum = ((cl_ulong *)cbase)[i];
+			else if (cmeta->attlen == sizeof(cl_uint))
+				datum = ((cl_uint *)cbase)[i];
+			else if (cmeta->attlen == sizeof(cl_ushort))
+				datum = ((cl_ushort *)cbase)[i];
+			else if (cmeta->attlen == sizeof(cl_uchar))
+				datum = ((cl_uchar *)cbase)[i];
+			else
+				elog(ERROR, "unexpected type definition");
+		}
+		else if (cmeta->attlen > 0)
+		{
+			unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
+			datum = PointerGetDatum(cbase + unitsz * i);
+		}
+		else if (cmeta->attlen == -1)
+		{
+			size_t		offset = __kds_unpack(((cl_uint *)cbase)[i]);
+			if (offset >= extra_sz)
+				elog(ERROR, "varlena points out of extra buffer");
+			datum = PointerGetDatum(extra_buf + offset);
+		}
+		else
+			elog(ERROR, "unexpected type definition");
+		/* call the type hash function */
+		hash = FunctionCall1(&tcache->hash_proc_finfo, datum);
+		hash = hash % hash_head->nslots;
+		rowid = hash_head->slots[hash].rowid;
+
+		hash_head->slots[hash].rowid = i;
+		if (rowid != UINT_MAX)
+			hash_rowmap[i] = rowid;
+	}
+}
+
+static uint32
+gstoreFdwBuildHashIndex(Relation frel, File base_fdesc,
+						AttrNumber primary_key)
+{
+	GpuStoreFileHead *base_head;
+	kern_data_store *kds;
+	char		   *extra_buf;
+	size_t			extra_sz;
+	size_t			main_sz;
+	char			namebuf[200];
+	uint32			suffix;
+	int				rawfd = -1;
+	uint64			nslots;
+	size_t			hash_sz;
+	struct stat 	stat_buf;
+	GpuStoreHashHead *hash_head;
+
+	/* mmap base file */
+	if (fstat(FileGetRawDesc(base_fdesc), &stat_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(base_fdesc));
+	base_head = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, stat_buf.st_size),
+						   PROT_READ | PROT_WRITE,
+						   MAP_SHARED | MAP_POPULATE,
+						   FileGetRawDesc(base_fdesc), 0);
+	kds = &base_head->schema;
+	main_sz = offsetof(GpuStoreFileHead, schema) + kds->length;
+	if (stat_buf.st_size < main_sz)
+		elog(ERROR, "base file ('%s') header corruption",
+			 FilePathName(base_fdesc));
+	extra_buf = (char *)base_head + main_sz;
+	extra_sz = stat_buf.st_size - main_sz;
+
+	/* open a new shared memory segment */
+	do {
+		suffix = random();
+		if (suffix == 0)
+			continue;
+		snprintf(namebuf, sizeof(namebuf), "/gstore_fdw.index.%u", suffix);
+		rawfd = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (rawfd < 0 && errno != EEXIST)
+			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
+	} while (rawfd < 0);
+
+	PG_TRY();
+	{
+		nslots = 1.2 * (double)kds->nrooms + 1000;
+		hash_sz = offsetof(GpuStoreHashHead,
+						   slots[nslots]) + sizeof(uint32) * kds->nrooms;
+		if (fallocate(rawfd, 0, 0, hash_sz) != 0)
+			elog(ERROR, "failed on fallocate('%s',%zu): %m", namebuf, hash_sz);
+		hash_head = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, hash_sz),
+							   PROT_READ | PROT_WRITE,
+							   MAP_SHARED | MAP_POPULATE,
+							   rawfd, 0);
+		if (hash_head == MAP_FAILED)
+			elog(ERROR, "failed on mmap('%s',%zu): %m", namebuf, hash_sz);
+
+		memset(hash_head, -1, hash_sz);
+		memcpy(hash_head->signature, GPUSTORE_HASHINDEX_SIGNATURE, 8);
+		hash_head->nrooms = kds->nrooms;
+		hash_head->nslots = nslots;
+
+		close(rawfd);
+	}
+	PG_CATCH();
+	{
+		close(rawfd);
+		shm_unlink(namebuf);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	/* Ok, both of base/hash files are mapped, go to the index build */
+	__gstoreFdwBuildHashIndexMain(kds, primary_key,
+								  extra_buf, extra_sz, hash_head);
+	__munmapFile(hash_head);
+	__munmapFile(base_head);
+
+	return suffix;
+}
+
 static GpuStoreSharedState *
 gstoreFdwCreateSharedState(Relation frel)
 {
@@ -1129,15 +1430,20 @@ gstoreFdwCreateSharedState(Relation frel)
 		base_fdesc = gstoreFdwOpenBaseFile(frel,
 										   gs_sstate->base_file,
 										   gs_sstate->max_num_rows);
-		/* apply REDO-log file */
+		/* Apply REDO-log file */
 		redo_pos = gstoreFdwApplyRedoLog(frel, base_fdesc,
 										 gs_sstate->redo_log_file,
 										 gs_sstate->redo_log_limit);
 		pg_atomic_init_u64(&gs_sstate->redo_log_pos, redo_pos);
 
-		//TODO: make hash-index 
+		/* Build Hash-index of Primary-Key */
+		if (gs_sstate->primary_key > 0)
+		{
+			gs_sstate->index_suffix
+				= gstoreFdwBuildHashIndex(frel, base_fdesc,
+										  gs_sstate->primary_key);
 
-
+		}
 	}
 	PG_CATCH();
 	{
