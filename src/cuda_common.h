@@ -838,8 +838,8 @@ typedef struct {
 	 * @va_length is length of the values array and extra area which is
 	 * used to dictionary of varlena or nullmap of fixed-length values.
 	 */
-	cl_uint			va_offset;
-	cl_uint			va_length;
+//	cl_uint			va_offset;
+//	cl_uint			va_length;
 } kern_colmeta;
 
 /*
@@ -1665,10 +1665,6 @@ kern_get_datum_row(kern_data_store *kds,
 DEVICE_FUNCTION(void *)
 kern_get_datum_slot(kern_data_store *kds,
 					cl_uint colidx, cl_uint rowidx);
-//see below
-//DEVICE_FUNCTION(void *)
-//kern_get_datum_column(kern_data_store *kds,
-//					  cl_uint colidx, cl_uint rowidx);
 
 /*
  * device functions to form/deform HeapTuple
@@ -1706,6 +1702,7 @@ DEVICE_FUNCTION(cl_uint)
 pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 #endif	/* __CUDACC__ */
 
+#if 0
 /*
  * Some host code uses kern_get_datum_column() to implement fallback code
  * on KDS_FORMAT_COLUMN, however, this data-store format shall be deprecated
@@ -1759,6 +1756,7 @@ kern_get_datum_column(kern_data_store *kds,
 	}
 	return (void *)values;
 }
+#endif
 
 /* base type definitions and templates */
 #include "cuda_basetype.h"

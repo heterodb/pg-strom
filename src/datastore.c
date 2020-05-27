@@ -113,56 +113,89 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 	return false;
 }
 
+Datum
+KDS_fetch_datum_column(kern_data_store *kds,
+					   kern_colmeta *cmeta,
+					   size_t row_index,
+					   bool *p_isnull)
+{
+	bits8	   *nullmap;
+	char	   *values;
+	Datum		datum;
+
+	Assert(cmeta >= &kds->colmeta[0] &&
+		   cmeta <  &kds->colmeta[kds->nr_colmeta]);
+	nullmap = (bits8 *)kds + __kds_unpack(cmeta->nullmap_offset);
+	values  = (char *)kds  + __kds_unpack(cmeta->values_offset);
+	if (att_isnull(row_index, nullmap))
+	{
+		*p_isnull = true;
+		return 0;
+	}
+
+	*p_isnull = false;
+	if (cmeta->attbyval)
+	{
+		if (cmeta->attlen == sizeof(cl_uchar))
+			datum = UInt8GetDatum(((cl_uchar *)values)[row_index]);
+		else if (cmeta->attlen == sizeof(cl_ushort))
+			datum = UInt16GetDatum(((cl_ushort *)values)[row_index]);
+		else if (cmeta->attlen == sizeof(cl_uint))
+			datum = UInt32GetDatum(((cl_uint *)values)[row_index]);
+		else if (cmeta->attlen == sizeof(cl_ulong))
+			datum = UInt64GetDatum(((cl_ulong *)values)[row_index]);
+		else
+			elog(ERROR, "unsupported type definition");
+	}
+	else if (cmeta->attlen > 0)
+	{
+		size_t		unitsz = TYPEALIGN(cmeta->attalign,
+									   cmeta->attlen);
+		Assert(unitsz * row_index < __kds_unpack(cmeta->values_length));
+		datum = PointerGetDatum(values + unitsz * row_index);
+	}
+	else if (cmeta->attlen == -1)
+	{
+		char	   *extra = (char *)kds + kds->length;
+		size_t		offset = __kds_unpack(((uint32 *)values)[row_index]);
+		datum = PointerGetDatum(extra + offset);
+	}
+	else
+	{
+		elog(ERROR, "unsupported type definition");
+	}
+	return datum;
+}
+
 bool
 KDS_fetch_tuple_column(TupleTableSlot *slot,
 					   kern_data_store *kds,
 					   size_t row_index)
 {
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
-	int			j;
 
-	/*
-	 * XXX - Is a mode to fetch system columns (if any) valuable?
-	 * Right now, KDS_fetch_tuple_column() is only used by gstore_fdw.c
-	 * to fetch rows from KDS(column), however, its transaction control
-	 * properties are separately saved, thus, nobody tries to pick up
-	 * system columns via this API.
-	 */
 	Assert(kds->format == KDS_FORMAT_COLUMN);
-	Assert(kds->ncols == tupdesc->natts);
-	if (row_index >= kds->nitems)
+	Assert(kds->ncols >= tupdesc->natts);
+	if (row_index < kds->nitems)
 	{
-		ExecClearTuple(slot);
-		return false;
-	}
+		Datum		datum;
+		bool		isnull;
+		int			j;
 
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		void   *addr = kern_get_datum_column(kds, j, row_index);
-		int		attlen = kds->colmeta[j].attlen;
-
-		if (!addr)
-			slot->tts_isnull[j] = true;
-		else
+		for (j=0; j < tupdesc->natts; j++)
 		{
-			slot->tts_isnull[j] = false;
-			if (!kds->colmeta[j].attbyval)
-				slot->tts_values[j] = PointerGetDatum(addr);
-			else if (attlen == sizeof(cl_char))
-				slot->tts_values[j] = CharGetDatum(*((cl_char *)addr));
-			else if (attlen == sizeof(cl_short))
-				slot->tts_values[j] = Int16GetDatum(*((cl_short *)addr));
-			else if (attlen == sizeof(cl_int))
-				slot->tts_values[j] = Int32GetDatum(*((cl_int *)addr));
-			else if (attlen == sizeof(cl_long))
-				slot->tts_values[j] = Int64GetDatum(*((cl_long *)addr));
-			else
-				elog(ERROR, "unexpected attlen: %d", attlen);
+			kern_colmeta   *cmeta = &kds->colmeta[j];
+			
+			datum = KDS_fetch_datum_column(kds, cmeta, row_index, &isnull);
+			slot->tts_isnull[j] = isnull;
+			slot->tts_values[j] = datum;
 		}
-	}
-	ExecStoreVirtualTuple(slot);
+		ExecStoreVirtualTuple(slot);
 
-	return true;
+		return true;
+	}
+	ExecClearTuple(slot);
+	return false;
 }
 
 static inline bool

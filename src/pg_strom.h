@@ -1089,6 +1089,10 @@ extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
 extern bool KDS_fetch_tuple_slot(TupleTableSlot *slot,
 								 kern_data_store *kds,
 								 size_t row_index);
+extern Datum KDS_fetch_datum_column(kern_data_store *kds,
+									kern_colmeta *cmeta,
+									size_t row_index,
+									bool *p_isnull);
 extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 								   kern_data_store *kds,
 								   size_t row_index);
@@ -1387,8 +1391,6 @@ extern void pgstrom_init_arrow_fdw(void);
 /*
  * gstore_fdw.c
  */
-
-
 extern void BeginGstoreFdwGpuBufferUpdate(void);
 extern bool DispatchGstoreFdwGpuUpdator(CUcontext *cuda_context_array);
 extern void pgstrom_init_gstore_fdw(void);
