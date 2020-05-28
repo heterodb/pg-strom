@@ -47,6 +47,10 @@ typedef struct
 	kern_data_store schema;
 } GpuStoreFileHead;
 
+/*
+ * RowID map - it shall locate next to the base area (schema + fixed-length
+ * array of base file), and prior to the extra buffer.
+ */
 typedef struct
 {
 	size_t		length;
@@ -1045,17 +1049,21 @@ gstoreFdwRowIdMapSize(cl_uint nrooms)
 }
 
 static cl_uint
-__gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms, int depth,
-						 cl_uint offset)
+__gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
+						 cl_uint min_id, int depth, cl_uint offset,
+						 cl_bool *p_has_unused_rowids)
 {
 	cl_ulong   *next = NULL;
-	cl_ulong	map;
-	cl_uint		rowid;
-	int			k;
+	cl_ulong	mask = (1UL << ((min_id >> 24) & 0x3fU)) - 1;
+	int			k, start = (min_id >> 30);
+	cl_uint		rowid = UINT_MAX;
 
 	if ((offset << 8) >= nrooms)
+	{
+		*p_has_unused_rowids = false;
 		return UINT_MAX;	/* obviously, out of range */
-	
+	}
+
 	switch (depth)
 	{
 		case 0:
@@ -1077,53 +1085,78 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms, int depth,
 			return UINT_MAX;	/* Bug? */
 	}
 	base += (4 * offset);
-	for (k=0; k < 4; k++)
+	for (k=start; k < 4; k++, mask=0)
 	{
+		cl_ulong	map = base[k] | mask;
+		cl_ulong	bit;
 	retry:
-		if ((map = base[k]) == ~0UL)
-			continue;
-		/* lookup the first zero position */
-		rowid = (__builtin_ffsl(~map) - 1);
-		map |= (1UL << rowid);
-		rowid |= (offset << 8) | (k << 6);	/* add offset */
+		if (map != ~0UL)
+		{
+			/* lookup the first zero position */
+			rowid = (__builtin_ffsl(~map) - 1);
+			bit = (1UL << rowid);
+			rowid |= (offset << 8) | (k << 6);	/* add offset */
 
-		if (!next)
-		{
-			if (rowid < nrooms)
+			if (!next)
 			{
-				base[k] = map;
-				return rowid;
+				if (rowid < nrooms)
+					base[k] |= bit;
+				else
+					rowid = UINT_MAX;	/* not a valid RowID */
 			}
-			return UINT_MAX;
-		}
-		else
-		{
-			rowid = __gstoreFdwAllocateRowId(next, nrooms, depth+1, rowid);
-			if (rowid == UINT_MAX)
+			else
 			{
-				/* cannot allocate a new Row-Id from the sub-tree any more */
-				base[k] = map;
-				goto retry;
+				cl_bool		has_unused_rowids;
+			
+				rowid = __gstoreFdwAllocateRowId(next, nrooms,
+												 min_id << 8,
+												 depth+1, rowid,
+												 &has_unused_rowids);
+				if (!has_unused_rowids)
+					base[k] |= bit;
+				if (rowid == UINT_MAX)
+				{
+					map |= bit;
+					min_id = 0;
+					goto retry;
+				}
 			}
-			return rowid;
+			break;
 		}
 	}
-	return UINT_MAX;
+
+	if ((base[0] & base[1] & base[2] & base[3]) == ~0UL)
+		*p_has_unused_rowids = false;
+	else
+		*p_has_unused_rowids = true;
+	
+	return rowid;
 }
 
 static cl_uint
 gstoreFdwAllocateRowId(GpuStoreRowIdMapHead *rowid_map, cl_uint min_rowid)
 {
 	cl_uint		rowid;
+	cl_bool		has_unused_rowids;
 
-	if (min_rowid >= rowid_map->nrooms)
-		return UINT_MAX;	/* obviously, no RowId is available */
-	SpinLockAcquire(&rowid_map->lock);
-	rowid = __gstoreFdwAllocateRowId(rowid_map->base,
-									 rowid_map->nrooms, 0, 0);
-	SpinLockRelease(&rowid_map->lock);
+	if (min_rowid < rowid_map->nrooms)
+	{
+		if (rowid_map->nrooms <= (1U << 8))
+			min_rowid = (min_rowid << 24);		/* single level */
+		else if (rowid_map->nrooms <= (1U << 16))
+			min_rowid = (min_rowid << 16);		/* dual level */
+		else if (rowid_map->nrooms <= (1U << 24))
+			min_rowid = (min_rowid << 8);		/* triple level */
+		SpinLockAcquire(&rowid_map->lock);
+		rowid = __gstoreFdwAllocateRowId(rowid_map->base,
+										 rowid_map->nrooms,
+										 min_rowid, 0, 0,
+										 &has_unused_rowids);
+		SpinLockRelease(&rowid_map->lock);
 
-	return rowid;
+		return rowid;
+	}
+	return UINT_MAX;
 }
 
 static bool
