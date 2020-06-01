@@ -119,52 +119,148 @@ KDS_fetch_datum_column(kern_data_store *kds,
 					   size_t row_index,
 					   bool *p_isnull)
 {
-	bits8	   *nullmap;
-	char	   *values;
+	char	   *addr;
 	Datum		datum;
 
 	Assert(cmeta >= &kds->colmeta[0] &&
 		   cmeta <  &kds->colmeta[kds->nr_colmeta]);
-	nullmap = (bits8 *)kds + __kds_unpack(cmeta->nullmap_offset);
-	values  = (char *)kds  + __kds_unpack(cmeta->values_offset);
-	if (att_isnull(row_index, nullmap))
+	if (row_index >= kds->nitems)
 	{
 		*p_isnull = true;
 		return 0;
 	}
 
+	if (cmeta->nullmap_offset != 0)
+	{
+		bits8  *nullmap = (bits8 *)
+			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+		if (att_isnull(row_index, nullmap))
+		{
+			*p_isnull = true;
+			return 0;
+		}
+	}
 	*p_isnull = false;
+
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
 	if (cmeta->attbyval)
 	{
-		if (cmeta->attlen == sizeof(cl_uchar))
-			datum = UInt8GetDatum(((cl_uchar *)values)[row_index]);
-		else if (cmeta->attlen == sizeof(cl_ushort))
-			datum = UInt16GetDatum(((cl_ushort *)values)[row_index]);
-		else if (cmeta->attlen == sizeof(cl_uint))
-			datum = UInt32GetDatum(((cl_uint *)values)[row_index]);
-		else if (cmeta->attlen == sizeof(cl_ulong))
-			datum = UInt64GetDatum(((cl_ulong *)values)[row_index]);
-		else
-			elog(ERROR, "unsupported type definition");
+		addr += TYPEALIGN(cmeta->attalign,
+						  cmeta->attlen) * row_index;
+		switch (cmeta->attlen)
+		{
+			case sizeof(cl_uchar):
+				datum = UInt8GetDatum(*((cl_uchar *)addr));
+				break;
+			case sizeof(cl_ushort):
+				datum = UInt16GetDatum(*((cl_ushort *)addr));
+				break;
+			case sizeof(cl_uint):
+				datum = UInt32GetDatum(*((cl_uint *)addr));
+				break;
+			case sizeof(cl_ulong):
+				datum = UInt64GetDatum(*((cl_ulong *)addr));
+				break;
+			default:
+				elog(ERROR, "unexpected type definition");
+		}
 	}
 	else if (cmeta->attlen > 0)
 	{
-		size_t		unitsz = TYPEALIGN(cmeta->attalign,
-									   cmeta->attlen);
-		Assert(unitsz * row_index < __kds_unpack(cmeta->values_length));
-		datum = PointerGetDatum(values + unitsz * row_index);
+		addr += TYPEALIGN(cmeta->attalign,
+						  cmeta->attlen) * row_index;
+		datum = PointerGetDatum(addr);
 	}
 	else if (cmeta->attlen == -1)
 	{
-		char	   *extra = (char *)kds + kds->length;
-		size_t		offset = __kds_unpack(((uint32 *)values)[row_index]);
-		datum = PointerGetDatum(extra + offset);
+		char	   *extra = (char *)kds + kds->extra_hoffset;
+		size_t		off = __kds_unpack(((cl_uint *)addr)[row_index]);
+
+		Assert(off < kds->extra_hlength);
+		datum = PointerGetDatum(extra + off);
 	}
 	else
 	{
 		elog(ERROR, "unsupported type definition");
 	}
 	return datum;
+}
+
+void
+KDS_store_datum_column(kern_data_store *kds,
+					   kern_colmeta *cmeta,
+					   size_t row_index,
+					   Datum datum, bool isnull)
+{
+	char	   *addr;
+
+	Assert(kds->format == KDS_FORMAT_COLUMN &&
+		   cmeta >= &kds->colmeta[0] &&
+		   cmeta <  &kds->colmeta[kds->ncols] &&
+		   row_index < kds->nrooms);
+	if (cmeta->nullmap_offset != 0)
+	{
+		bits8  *nullmap = (bits8 *)
+			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+
+		if (!isnull)
+			nullmap[row_index>>3] |=  (1 << (row_index & 7));
+		else
+		{
+			nullmap[row_index>>3] &= ~(1 << (row_index & 7));
+			return;
+		}
+	}
+	else if (isnull)
+	{
+		elog(ERROR, "NULL value on '%s' column with NOT NULL constraint",
+			 NameStr(cmeta->attname));
+	}
+
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
+	if (cmeta->attbyval)
+	{
+		switch (cmeta->attlen)
+		{
+			case sizeof(cl_uchar):
+				((cl_uchar *)addr)[row_index] = DatumGetUInt8(datum);
+				break;
+			case sizeof(cl_ushort):
+				((cl_ushort *)addr)[row_index] = DatumGetUInt16(datum);
+				break;
+			case sizeof(cl_uint):
+				((cl_uint *)addr)[row_index] = DatumGetUInt32(datum);
+				break;
+			case sizeof(cl_ulong):
+				((cl_ulong *)addr)[row_index] = DatumGetUInt64(datum);
+				break;
+			default:
+				elog(ERROR, "unsupported type definition");
+		}
+	}
+	else if (cmeta->attlen > 0)
+	{
+		addr += TYPEALIGN(cmeta->attalign,
+						  cmeta->attlen) * row_index;
+		memcpy(addr, DatumGetPointer(datum), cmeta->attlen);
+	}
+	else if (cmeta->attlen == -1)
+	{
+		char	   *extra;
+		size_t		sz = VARSIZE_ANY(datum);
+
+		Assert(kds->extra_hoffset > 0);
+		extra = (char *)kds
+			+ kds->extra_hoffset
+			+ __kds_unpack(kds->usage);
+		((cl_uint *)addr)[row_index] = kds->usage;
+		memcpy(extra, DatumGetPointer(datum), sz);
+		kds->usage += __kds_packed(MAXALIGN(sz));
+	}
+	else
+	{
+		elog(ERROR, "unsupported type definition");
+	}	
 }
 
 bool

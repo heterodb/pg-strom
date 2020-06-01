@@ -1093,6 +1093,10 @@ extern Datum KDS_fetch_datum_column(kern_data_store *kds,
 									kern_colmeta *cmeta,
 									size_t row_index,
 									bool *p_isnull);
+extern void  KDS_store_datum_column(kern_data_store *kds,
+									kern_colmeta *cmeta,
+									size_t row_index,
+									Datum datum, bool isnull);
 extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 								   kern_data_store *kds,
 								   size_t row_index);
@@ -1459,6 +1463,7 @@ extern long		PAGE_SIZE;
 extern long		PAGE_MASK;
 extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
+#define PAGE_ALIGN(sz)		TYPEALIGN(PAGE_SIZE,(sz))
 extern TimestampTz commercial_license_expired_at(void);
 
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,

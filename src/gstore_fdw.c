@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_gstore.h"
 #include <libpmem.h>
 
 #define GPUSTORE_SHARED_DESC_NSLOTS		107
@@ -35,17 +36,59 @@ typedef struct
 	dlist_head		gstore_sstate_slot[GPUSTORE_SHARED_DESC_NSLOTS];
 } GpuStoreSharedHead;
 
+/*
+ * GstoreFdw Base file structure
+ *
+ * +------------------------+
+ * | GpuStoreBaseFileHead   |
+ * |  * rowid_map_offset   --------+
+ * |  * hash_index_offset  ------+ |
+ * | +----------------------+    | |
+ * | | schema definition    |    | |
+ * | | (kern_data_store)    |    | |
+ * | | * extra_hoffset   ------------+
+ * | =                      =    | | |
+ * | | fixed length portion |    | | |
+ * | | (nullmap + values)   |    | | |
+ * +-+----------------------+ <--+ | |
+ * | GpuStoreRowIdMap       |      | |
+ * |                        |      | |
+ * +------------------------+ <----+ |
+ * | GpuStoreHashHead       |        |
+ * | (optional, if PK)      |        |
+ * +------------------------+ <------+
+ * | Extra Buffer           |
+ * | (optional, if varlena) |
+ * =                        =
+ * | buffer size shall be   |
+ * | expanded on demand     |
+ * +------------------------+
+ *
+ * The base file contains four sections internally.
+ * The 1st section contains schema definition in device side (thus, it
+ * additionally has xmin,xmax,cid columns after the user defined columns).
+ * The 2nd section contains row-id map for fast row-id allocation.
+ * The 3rd section is hash-based PK index.
+ * The above three sections are all fixed-length, thus, its size shall not
+ * be changed unless 'max_num_rows' is not reconfigured.
+ * The 4th section (extra buffer) is used to store the variable length
+ * values, and can be expanded on the demand.
+ */
+
 #define GPUSTORE_BASEFILE_SIGNATURE		"@BASE-1@"
+#define GPUSTORE_BASEFILE_MAPPED_SIGNATURE "%Base-1%"
+#define GPUSTORE_ROWIDMAP_SIGNATURE		"@ROW-ID@"
+#define GPUSTORE_HASHINDEX_SIGNATURE	"@HINDEX@"
 #define GPUSTORE_REDOLOG_SIGNATURE		"@REDO-1@"
-#define GPUSTORE_HASHINDEX_SIGNATURE	"@HASH-1@"
 
 typedef struct
 {
 	char		signature[8];
-	uint64		checkpoint_offset;	/* valid only REDO log */
+	uint64		rowid_map_offset;
+	uint64		hash_index_offset;	/* optionsl (if primary key exist)  */
 	char		ftable_name[NAMEDATALEN];
 	kern_data_store schema;
-} GpuStoreFileHead;
+} GpuStoreBaseFileHead;
 
 /*
  * RowID map - it shall locate next to the base area (schema + fixed-length
@@ -53,33 +96,37 @@ typedef struct
  */
 typedef struct
 {
+	char		signature[8];
 	size_t		length;
-	slock_t		lock;
 	cl_uint		nrooms;
-	cl_ulong	base[1];
+	cl_ulong	base[FLEXIBLE_ARRAY_MEMBER];
 } GpuStoreRowIdMapHead;
 
-
-
-
 /*
- * GpuStoreHashHead - Hash-index for Primary-key
+ * GpuStoreHashIndexHead - section for optional hash-based PK index
  */
 typedef struct
 {
 	char		signature[8];
-	int32		primary_key;
-	uint32		nrooms;
+	uint64		nrooms;
 	uint64		nslots;
-	struct {
-		slock_t	lock;
-		uint32	rowid;
-	} slots[FLEXIBLE_ARRAY_MEMBER];
-} GpuStoreHashHead;
+	uint32		slots[FLEXIBLE_ARRAY_MEMBER];
+} GpuStoreHashIndexHead;
 
-#define REDO_LOG_SYNC__NONE			1
-#define REDO_LOG_SYNC__MSYNC		2
-#define REDO_LOG_SYNC__PMEM			3
+/*
+ * GpuStoreRedoLogHead - file header of REDO-Log
+ */
+typedef struct
+{
+	char		signature[8];
+	uint64		timestamp;	/* timestamp when REDO-Log is switched */
+	uint64		checkpoint_offset;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+} GpuStoreRedoLogHead;
+
+#define MMAP_SYNC_METHOD__NONE		0
+#define MMAP_SYNC_METHOD__MSYNC		1
+#define MMAP_SYNC_METHOD__PMEM		2
 
 typedef struct
 {
@@ -88,26 +135,27 @@ typedef struct
 	Oid				database_oid;
 	Oid				ftable_oid;
 
-	/* misc fields */
+	/* FDW options */
 	cl_int			cuda_dindex;
-	cl_long			max_num_rows;
+	ssize_t			max_num_rows;
+	ssize_t			num_hash_slots;
 	AttrNumber		primary_key;
+	const char	   *base_file;
+	const char	   *redo_log_file;
+	size_t			redo_log_limit;
+	int				redo_log_sync_method;	/* one of REDO_LOG_SYNC__* */
+	const char	   *redo_log_backup_dir;
+	cl_int			gpu_update_interval;
+	cl_int			gpu_update_threshold;
 
+	/* Runtime state */
 	pthread_rwlock_t mmap_lock;
 	uint32			mmap_revision;
+	slock_t			rowid_map_lock;		/* lock for RowID-map */
+	slock_t		   *hash_slots_lock;	/* locks for PK hash-slots */
 
-	/* Base file buffer */
-	pthread_rwlock_t base_file_lock;
-	const char	   *base_file;
-	uint32			index_suffix;
-
-	/* REDO Log state */
-	const char	   *redo_log_file;
-	int				redo_log_sync_method;
-	size_t			redo_log_limit;
 	pg_atomic_uint64 redo_log_pos;
-	const char	   *redo_log_backup_dir;
-	
+
 	/* Device data store */
 	pthread_rwlock_t gpu_bufer_lock;
 	CUresult		gpu_sync_status;
@@ -116,8 +164,6 @@ typedef struct
 	size_t			gpu_main_size;
 	size_t			gpu_extra_size;
 	Timestamp		gpu_update_timestamp;	/* time when last update */
-	cl_int			gpu_update_interval;	/* fdw-option */
-	cl_int			gpu_update_threshold;	/* fdw-option */
 } GpuStoreSharedState;
 
 typedef struct
@@ -125,15 +171,17 @@ typedef struct
 	Oid				database_oid;
 	Oid				ftable_oid;
 	GpuStoreSharedState *gs_sstate;
-	/* host mapped buffers */
+	/* base file mapping */
 	uint32			mmap_revision;
-	GpuStoreFileHead *base_file_mmap;
-	size_t			base_file_sz;
-	GpuStoreFileHead *redo_log_mmap;
-	size_t			redo_log_sz;
-	int				redo_log_sync_method;
-	GpuStoreHashHead *hash_index_mmap;
-	size_t			hash_index_sz;
+	GpuStoreBaseFileHead *base_mmap;
+	size_t			base_mmap_sz;
+	bool			base_mmap_is_pmem;
+	GpuStoreRowIdMapHead *rowid_map;	/* RowID map section */
+	GpuStoreHashIndexHead *hash_index;	/* Hash-index section (optional) */
+	/* redo log mapping */
+	GpuStoreRedoLogHead *redo_mmap;
+	size_t			redo_mmap_sz;
+	bool			redo_mmap_is_pmem;
 	/* fields below are valid only GpuUpdator */
 	CUdeviceptr		gpu_main_devptr;
 	CUdeviceptr		gpu_extra_devptr;
@@ -150,7 +198,11 @@ typedef struct
 	pg_atomic_uint64 *read_pos;
 
 	Bitmapset	   *attr_refs;
+	cl_uint			nitems;			/* kds->nitems on BeginScan */
+	cl_bool			is_first;
+	cl_uint			last_rowid;		/* last rowid returned */
 	ExprState	   *indexExprState;
+	Datum			indexExprHash;
 } GpuStoreFdwState;
 
 /*
@@ -207,10 +259,20 @@ void  GstoreFdwStartupKicker(Datum arg);
 
 static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
-static cl_uint	gstoreFdwAllocateRowId(GpuStoreRowIdMapHead *rowid_map,
+static cl_uint	gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc,
 									   cl_uint min_rowid);
-static void		gstoreFdwReleaseRowId(GpuStoreRowIdMapHead *rowid_map,
-									  cl_uint rowid);
+static void		gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid);
+
+/* ---- Atomic operations ---- */
+static inline cl_uint atomicRead32(volatile cl_uint *ptr)
+{
+	return *ptr;
+}
+
+
+
+
+
 
 
 
@@ -226,7 +288,7 @@ GstoreGetForeignRelSize(PlannerInfo *root,
 	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
 	heap_close(frel, AccessShareLock);
 
-	baserel->tuples = (double) gs_desc->base_file_mmap->schema.nitems;
+	baserel->tuples = (double) gs_desc->base_mmap->schema.nitems;
 	baserel->rows = baserel->tuples *
 		clauselist_selectivity(root,
 							   baserel->baserestrictinfo,
@@ -380,13 +442,17 @@ GstoreBeginForeignScan(ForeignScanState *node, int eflags)
 	Relation			frel = node->ss.ss_currentRelation;
 	ForeignScan		   *fscan = (ForeignScan *)node->ss.ps.plan;
 	GpuStoreFdwState   *fdw_state = palloc0(sizeof(GpuStoreFdwState));
+	GpuStoreDesc	   *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
 	Bitmapset		   *attr_refs = NULL;
 	ListCell		   *lc;
 
 	/* setup GpuStoreExecState */
-	fdw_state->gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	fdw_state->gs_desc = gs_desc;
 	pg_atomic_init_u64(&fdw_state->__read_pos, 0);
 	fdw_state->read_pos = &fdw_state->__read_pos;
+	fdw_state->nitems = gs_desc->base_mmap->schema.nitems;
+	fdw_state->last_rowid = UINT_MAX;
+	fdw_state->is_first = true;
 
 	foreach (lc, fscan->fdw_private)
 	{
@@ -405,16 +471,17 @@ GstoreBeginForeignScan(ForeignScanState *node, int eflags)
 }
 
 static uint64
-lookupGpuStorePrimaryKey(kern_data_store *kds,
-						 AttrNumber primary_key,
-						 GpuStoreHashHead *hash_mmap,
-						 size_t hash_sz,
-						 Datum key_value)
+lookupGpuStorePrimaryKey(GpuStoreDesc *gs_desc,
+						 Datum key_value, cl_uint last_rowid)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[primary_key - 1];
-//	kern_colmeta   *smeta = &kds->colmeta[kds->ncols - 1];
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
+	AttrNumber		primary_key = gs_sstate->primary_key;
+	kern_data_store *kds = &gs_desc->base_mmap->schema;
+	kern_colmeta	*cmeta = &kds->colmeta[primary_key - 1];
 	TypeCacheEntry *tcache;
 	Datum			hash;
+	size_t			hindex;
 	uint32			rowid;
 	uint32		   *rowmap;
 
@@ -422,19 +489,26 @@ lookupGpuStorePrimaryKey(kern_data_store *kds,
 							   TYPECACHE_HASH_PROC_FINFO |
 							   TYPECACHE_EQ_OPR_FINFO);
 	hash = FunctionCall1(&tcache->hash_proc_finfo, key_value);
-	hash = hash % hash_mmap->nslots;
-	rowmap = (uint32 *)&hash_mmap->slots[hash_mmap->nslots];
+	hindex = hash % hash_index->nslots;
+	rowmap = (uint32 *)&hash_index->slots[hash_index->nslots];
 
-	SpinLockAcquire(&hash_mmap->slots[hash].lock);
-	rowid = hash_mmap->slots[hash].rowid;
-	do {
+	SpinLockAcquire(&gs_sstate->hash_slots_lock[hindex]);
+	if (last_rowid == UINT_MAX)
+		rowid = hash_index->slots[hindex];
+	else if (last_rowid < hash_index->nrooms)
+		rowid = rowmap[last_rowid];
+	else
+		rowid = UINT_MAX;
+
+	while (rowid != UINT_MAX)
+	{
 		Datum	comp;
 		Datum	datum;
 		bool	isnull;
 
-		if (rowid >= hash_mmap->nrooms)
+		if (rowid >= hash_index->nrooms)
 		{
-			/* corruption? */
+			/* index corruption? */
 			rowid = UINT_MAX;
 			break;
 		}
@@ -447,36 +521,116 @@ lookupGpuStorePrimaryKey(kern_data_store *kds,
 		}
 		rowid = rowmap[rowid];
 	} while (rowid != UINT_MAX);
-	SpinLockRelease(&hash_mmap->slots[hash].lock);
+	SpinLockRelease(&gs_sstate->hash_slots_lock[hindex]);
 
 	return rowid;
+}
+
+static bool
+KDS_column_check_visibility(kern_data_store *kds, size_t row_index,
+							Snapshot snapshot)
+{
+	/*
+	 * NOTE: Right now, Gstore_Fdw only supports Read-Committed
+	 *       isolation level.
+	 */
+	kern_colmeta   *cmeta = &kds->colmeta[kds->ncols-3];
+	TransactionId	xmin;
+	TransactionId	xmax;
+	CommandId		cid;
+	bool			isnull;
+
+	Assert(kds->format == KDS_FORMAT_COLUMN &&
+		   kds->ncols >= 3);
+	xmin = KDS_fetch_datum_column(kds, cmeta++, row_index, &isnull);
+	Assert(!isnull);
+	xmax = KDS_fetch_datum_column(kds, cmeta++, row_index, &isnull);
+	Assert(!isnull);
+	cid  = KDS_fetch_datum_column(kds, cmeta++, row_index, &isnull);
+	Assert(!isnull);
+
+	if (xmin == InvalidTransactionId)
+		return false;
+	if (xmin != FrozenTransactionId)
+	{
+		if (TransactionIdIsCurrentTransactionId(xmin))
+		{
+			if (cid >= snapshot->curcid)
+				return false;	/* inserted after scan started */
+			if (xmax == InvalidTransactionId)
+				return true;	/* not deleted yet */
+			if (xmax == FrozenTransactionId)
+				return false;	/* deleted, and committed */
+			if (!TransactionIdIsCurrentTransactionId(xmax))
+				return true;	/* deleted by others, but not committed */
+		}
+		else
+			return false;		/* inserted by others, but not committed */
+	}
+	/* by here, the inserting transaction has committed */
+	if (xmax == InvalidTransactionId)
+		return true;			/* not deleted yet */
+	if (xmax != FrozenTransactionId)
+	{
+		if (TransactionIdIsCurrentTransactionId(xmax))
+		{
+			if (cid >= snapshot->curcid)
+				return true;	/* deleted after scan started */
+			else
+				return false;	/* deleted before scan started */
+		}
+		return true;	/* deleted by others, but not committed */
+	}
+	/* deleted, and transaction committed */
+	return false;
 }
 
 static TupleTableSlot *
 GstoreIterateForeignScan(ForeignScanState *node)
 {
-	GpuStoreFdwState   *fdw_state = node->fdw_state;
-	GpuStoreDesc	   *gs_desc = fdw_state->gs_desc;
-	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	kern_data_store	   *kds = &gs_desc->base_file_mmap->schema;
-	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
-	uint64				rowid;
+	GpuStoreFdwState *fdw_state = node->fdw_state;
+	EState		   *estate = node->ss.ps.state;
+	GpuStoreDesc   *gs_desc = fdw_state->gs_desc;
+	kern_data_store *kds = &gs_desc->base_mmap->schema;
+	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	Datum			keyval;
+	bool			isnull;
+	uint64			rowid;
 
-	rowid = pg_atomic_fetch_add_u64(fdw_state->read_pos, 1);
 	if (fdw_state->indexExprState)
 	{
-		Datum	keyval;
-		bool	isnull;
+		/* PK Index Scan */
+		rowid = pg_atomic_fetch_add_u64(fdw_state->read_pos, 1);
+		if (rowid > 0)
+			return NULL;	/* PK already fetched */
 
 		keyval = ExecEvalExpr(fdw_state->indexExprState,
 							  node->ss.ps.ps_ExprContext,
 							  &isnull);
-		if (isnull || rowid > 0)
+		if (isnull)
 			return NULL;
-		rowid = lookupGpuStorePrimaryKey(kds, gs_sstate->primary_key,
-										 gs_desc->hash_index_mmap,
-										 gs_desc->hash_index_sz,
-										 keyval);
+
+		rowid = UINT_MAX;
+		for (;;)
+		{
+			rowid = lookupGpuStorePrimaryKey(gs_desc, keyval, rowid);
+			if (rowid == UINT_MAX)
+				return NULL;	/* not found */
+			if (KDS_column_check_visibility(kds, rowid, estate->es_snapshot))
+				break;
+		}
+	}
+	else
+	{
+		/* SeqScan */
+		for (;;)
+		{
+			rowid = pg_atomic_fetch_add_u64(fdw_state->read_pos, 1);
+			if (rowid >= fdw_state->nitems)
+				return NULL;
+			if (KDS_column_check_visibility(kds, rowid, estate->es_snapshot))
+				break;
+		}
 	}
 	if (KDS_fetch_tuple_column(slot, kds, rowid))
 		return slot;
@@ -658,16 +812,6 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 		{
 			/* file pathname shall be checked at post-creation steps */
 		}
-		else if (strcmp(def->defname, "redo_log_sync_method") == 0)
-		{
-			char   *token = defGetString(def);
-
-			if (strcmp(token, "pmem") != 0 &&
-				strcmp(token, "msync") != 0 &&
-				strcmp(token, "none") != 0)
-				elog(ERROR, "'%s' is not a valid configuration for '%s'",
-					 token, def->defname);
-		}
 		else if (strcmp(def->defname, "redo_log_limit") == 0)
 		{
 			char   *token = defGetString(def);
@@ -718,11 +862,10 @@ PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_validator);
 static void
 gstoreFdwExtractOptions(Relation frel,
 						cl_int *p_cuda_dindex,
-						cl_long *p_max_num_rows,
+						ssize_t *p_max_num_rows,
 						const char **p_base_file,
 						const char **p_redo_log_file,
 						const char **p_redo_log_backup_dir,
-						cl_int *p_redo_log_sync_method,
 						size_t *p_redo_log_limit,
 						cl_int *p_gpu_update_interval,
 						cl_int *p_gpu_update_threshold,
@@ -732,11 +875,10 @@ gstoreFdwExtractOptions(Relation frel,
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	ListCell   *lc;
 	cl_int		cuda_dindex = 0;
-	cl_long		max_num_rows = -1;
+	ssize_t		max_num_rows = -1;
 	const char *base_file = NULL;
 	const char *redo_log_file = NULL;
 	const char *redo_log_backup_dir = NULL;
-	int			redo_log_sync_method = REDO_LOG_SYNC__PMEM; /* default: pmem */
 	size_t		redo_log_limit = (512U << 20);	/* default: 512MB */
 	cl_int		gpu_update_interval = 15;		/* default: 15s */
 	cl_int		gpu_update_threshold = 40000;	/* default: 40k rows */
@@ -819,19 +961,6 @@ gstoreFdwExtractOptions(Relation frel,
 					 redo_log_backup_dir);
 			}
 		}
-		else if (strcmp(def->defname, "redo_log_sync_method") == 0)
-		{
-			char   *value = defGetString(def);
-
-			if (strcmp(value, "pmem") == 0)
-				redo_log_sync_method = REDO_LOG_SYNC__PMEM;
-			else if (strcmp(value, "msync") == 0)
-				redo_log_sync_method = REDO_LOG_SYNC__MSYNC;
-			else if (strcmp(value, "none") == 0)
-				redo_log_sync_method = REDO_LOG_SYNC__NONE;
-			else
-				elog(ERROR, "redo_log_sync_method = '%s' is unknown", value);
-		}
 		else if (strcmp(def->defname, "redo_log_limit") == 0)
 		{
 			char   *value = defGetString(def);
@@ -910,7 +1039,6 @@ gstoreFdwExtractOptions(Relation frel,
 	*p_base_file            = base_file;
 	*p_redo_log_file        = redo_log_file;
 	*p_redo_log_backup_dir  = redo_log_backup_dir;
-	*p_redo_log_sync_method = redo_log_sync_method;
 	*p_redo_log_limit       = redo_log_limit;
 	*p_gpu_update_interval  = gpu_update_interval;
 	*p_gpu_update_threshold = gpu_update_threshold;
@@ -928,7 +1056,8 @@ static TupleDesc
 gstoreFdwDeviceTupleDesc(Relation frel)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
-	TupleDesc	__tupdesc = CreateTemplateTupleDesc(tupdesc->natts + 1);
+	TupleDesc	__tupdesc = CreateTemplateTupleDesc(tupdesc->natts + 3);
+	Form_pg_attribute attr;
 
 	for (int j=0; j < tupdesc->natts; j++)
 	{
@@ -937,11 +1066,26 @@ gstoreFdwDeviceTupleDesc(Relation frel)
 			   ATTRIBUTE_FIXED_PART_SIZE);
 	}
 	TupleDescInitEntry(__tupdesc,
-					   __tupdesc->natts,
-					   "..gstore_fdw.sysattr..",
-					   INT8OID,
-					   -1,
-					   0);
+					   tupdesc->natts + 1,
+					   "..sysattr.xmin..",
+					   XIDOID, -1, 0);
+	attr = tupleDescAttr(__tupdesc, tupdesc->natts);
+	attr->attnotnull = true;
+
+	TupleDescInitEntry(__tupdesc,
+					   tupdesc->natts + 2,
+					   "..sysattr.xmax..",
+					   XIDOID, -1, 0);
+	attr = tupleDescAttr(__tupdesc, tupdesc->natts + 1);
+	attr->attnotnull = true;
+
+	TupleDescInitEntry(__tupdesc,
+					   tupdesc->natts + 3,
+					   "..sysattr.cid..",
+					   CIDOID, -1, 0);
+	attr = tupleDescAttr(__tupdesc, tupdesc->natts + 2);
+	attr->attnotnull = true;
+
 	return __tupdesc;
 }
 
@@ -953,11 +1097,11 @@ gstoreFdwAllocSharedState(Relation frel)
 {
 	GpuStoreSharedState *gs_sstate;
 	cl_int		cuda_dindex;
-	cl_long		max_num_rows;
+	ssize_t		max_num_rows;
+	ssize_t		num_hash_slots = -1;
 	const char *base_file;
 	const char *redo_log_file;
 	const char *redo_log_backup_dir;
-	cl_int		redo_log_sync_method;
 	size_t		redo_log_limit;
 	cl_int		gpu_update_interval;
 	cl_int		gpu_update_threshold;
@@ -972,7 +1116,6 @@ gstoreFdwAllocSharedState(Relation frel)
 							&base_file,
 							&redo_log_file,
 							&redo_log_backup_dir,
-							&redo_log_sync_method,
 							&redo_log_limit,
 							&gpu_update_interval,
 							&gpu_update_threshold,
@@ -985,6 +1128,11 @@ gstoreFdwAllocSharedState(Relation frel)
 		len += MAXALIGN(strlen(redo_log_file) + 1);
 	if (redo_log_backup_dir)
 		len += MAXALIGN(strlen(redo_log_backup_dir) + 1);
+	if (primary_key >= 0)
+	{
+		num_hash_slots = 1.2 * (double)max_num_rows + 1000.0;
+		len += MAXALIGN(sizeof(slock_t) * num_hash_slots);
+	}
 
 	gs_sstate = MemoryContextAllocZero(TopSharedMemoryContext, len);
 	pos = (char *)gs_sstate + MAXALIGN(sizeof(GpuStoreSharedState));
@@ -1006,27 +1154,41 @@ gstoreFdwAllocSharedState(Relation frel)
 		gs_sstate->redo_log_backup_dir = pos;
 		pos += MAXALIGN(strlen(redo_log_backup_dir) + 1);
 	}
+	if (num_hash_slots > 0)
+	{
+		gs_sstate->hash_slots_lock = (slock_t *)pos;
+		pos += MAXALIGN(sizeof(slock_t) * num_hash_slots);
+	}
 	Assert(pos - (char *)gs_sstate == len);
 
 	gs_sstate->cuda_dindex = cuda_dindex;
 	gs_sstate->max_num_rows = max_num_rows;
+	gs_sstate->num_hash_slots = num_hash_slots;
 	gs_sstate->primary_key = primary_key;
-
-	pthreadRWLockInit(&gs_sstate->mmap_lock);
-	do {
-		gs_sstate->mmap_revision = random();
-	} while (gs_sstate->mmap_revision == 0);
-	gs_sstate->index_suffix = 0;	/* set later, if any */
-	gs_sstate->redo_log_sync_method = redo_log_sync_method;
 	gs_sstate->redo_log_limit = redo_log_limit;
-
-	pthreadRWLockInit(&gs_sstate->gpu_bufer_lock);
-	gs_sstate->gpu_sync_status = CUDA_ERROR_NOT_INITIALIZED;
 	gs_sstate->gpu_update_interval = gpu_update_interval;
 	gs_sstate->gpu_update_threshold = gpu_update_threshold;
 
+	pthreadRWLockInit(&gs_sstate->mmap_lock);
+	gs_sstate->mmap_revision = random();
+
+	pthreadRWLockInit(&gs_sstate->gpu_bufer_lock);
+	gs_sstate->gpu_sync_status = CUDA_ERROR_NOT_INITIALIZED;
+
 	return gs_sstate;
 }
+
+
+
+/*
+ * Routines to Hash-based Primary-Key Index
+ */
+
+
+
+
+
+
 
 /*
  * Routines to allocate/release RowIDs
@@ -1134,8 +1296,10 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 }
 
 static cl_uint
-gstoreFdwAllocateRowId(GpuStoreRowIdMapHead *rowid_map, cl_uint min_rowid)
+gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc, cl_uint min_rowid)
 {
+	GpuStoreRowIdMapHead *rowid_map = gs_desc->rowid_map;
+	GpuStoreSharedState *gs_sstate  = gs_desc->gs_sstate;
 	cl_uint		rowid;
 	cl_bool		has_unused_rowids;
 
@@ -1147,13 +1311,12 @@ gstoreFdwAllocateRowId(GpuStoreRowIdMapHead *rowid_map, cl_uint min_rowid)
 			min_rowid = (min_rowid << 16);		/* dual level */
 		else if (rowid_map->nrooms <= (1U << 24))
 			min_rowid = (min_rowid << 8);		/* triple level */
-		SpinLockAcquire(&rowid_map->lock);
+		SpinLockAcquire(&gs_sstate->rowid_map_lock);
 		rowid = __gstoreFdwAllocateRowId(rowid_map->base,
 										 rowid_map->nrooms,
 										 min_rowid, 0, 0,
 										 &has_unused_rowids);
-		SpinLockRelease(&rowid_map->lock);
-
+		SpinLockRelease(&gs_sstate->rowid_map_lock);
 		return rowid;
 	}
 	return UINT_MAX;
@@ -1219,67 +1382,72 @@ __gstoreFdwReleaseRowId(cl_ulong *base, cl_uint nrooms, cl_uint rowid)
 }
 
 static void
-gstoreFdwReleaseRowId(GpuStoreRowIdMapHead *rowid_map, cl_uint rowid)
+gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid)
 {
-	SpinLockAcquire(&rowid_map->lock);
-	__gstoreFdwReleaseRowId(rowid_map->base, rowid_map->nrooms, rowid);
-	SpinLockRelease(&rowid_map->lock);
+    GpuStoreRowIdMapHead *rowid_map = gs_desc->rowid_map;
+    GpuStoreSharedState  *gs_sstate = gs_desc->gs_sstate;
+
+	SpinLockAcquire(&gs_sstate->rowid_map_lock);
+	__gstoreFdwReleaseRowId(rowid_map->base,
+							rowid_map->nrooms, rowid);
+	SpinLockRelease(&gs_sstate->rowid_map_lock);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /*
- * gstoreFdwOpenBaseFile
+ * gstoreFdwCreateBaseFile
  */
-static File
-gstoreFdwOpenBaseFile(Relation frel,
-					  const char *base_file,
-					  cl_uint nrooms)
+static void
+gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
+						File fdesc)
 {
 	TupleDesc	__tupdesc = gstoreFdwDeviceTupleDesc(frel);
-	File		fdesc;
-	size_t		kds_sz = KDS_calculateHeadSize(__tupdesc);
-	size_t		hbuf_sz = offsetof(GpuStoreFileHead, schema) + kds_sz;
-	GpuStoreFileHead *hbuf = alloca(hbuf_sz);
-	size_t		main_sz, extra_sz, sz;
+	GpuStoreBaseFileHead *hbuf;
 	kern_data_store *schema;
+	int			rawfd = FileGetRawDesc(fdesc);
+	const char *base_file = FilePathName(fdesc);
+	size_t		hbuf_sz, main_sz, sz;
+	size_t		rowmap_sz = 0;
+	size_t		hash_sz = 0;
+	size_t		extra_sz = 0;
+	size_t		file_sz;
+	size_t		nrooms = gs_sstate->max_num_rows;
+	size_t		nslots = gs_sstate->num_hash_slots;
 	int			j, unitsz;
 
-	/* setup schema definition according to the __tupdesc */
-	schema = alloca(kds_sz);
-	memset(schema, 0, kds_sz);
-	init_kernel_data_store(schema,
+	/*
+	 * Setup GpuStoreBaseFileHead
+	 */
+	main_sz = KDS_calculateHeadSize(__tupdesc);
+	hbuf_sz = offsetof(GpuStoreBaseFileHead, schema) + main_sz;
+	hbuf = alloca(hbuf_sz);
+	memset(hbuf, 0, hbuf_sz);
+	memcpy(hbuf->signature, GPUSTORE_BASEFILE_SIGNATURE, 8);
+	strcpy(hbuf->ftable_name, RelationGetRelationName(frel));
+
+	init_kernel_data_store(&hbuf->schema,
 						   __tupdesc,
 						   0,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
 						   nrooms);
-	main_sz = kds_sz;
-	extra_sz = 0;
+	hbuf->schema.table_oid = RelationGetRelid(frel);
+	schema = &hbuf->schema;
 	for (j=0; j < __tupdesc->natts; j++)
 	{
 		Form_pg_attribute	attr = tupleDescAttr(__tupdesc, j);
 		kern_colmeta	   *cmeta = &schema->colmeta[j];
 
-		sz = MAXALIGN(BITMAPLEN(nrooms));
-		cmeta->nullmap_offset = __kds_packed(main_sz);
-		cmeta->nullmap_length = __kds_packed(sz);
-		main_sz += sz;
+		if (!attr->attnotnull)
+		{
+			sz = MAXALIGN(BITMAPLEN(nrooms));
+			cmeta->nullmap_offset = __kds_packed(main_sz);
+			cmeta->nullmap_length = __kds_packed(sz);
+			main_sz += sz;
+		}
+		
 		if (attr->attlen > 0)
 		{
-			unitsz = att_align_nominal(attr->attlen, attr->attalign);
+			unitsz = att_align_nominal(attr->attlen,
+									   attr->attalign);
 			sz = MAXALIGN(unitsz * nrooms);
 			cmeta->values_offset = __kds_packed(main_sz);
 			cmeta->values_length = __kds_packed(sz);
@@ -1287,12 +1455,13 @@ gstoreFdwOpenBaseFile(Relation frel,
 		}
 		else if (attr->attlen == -1)
 		{
+			/* offset == 0 means NULL-value for varlena */
 			sz = MAXALIGN(sizeof(cl_uint) * nrooms);
 			cmeta->values_offset = __kds_packed(main_sz);
 			cmeta->values_length = __kds_packed(sz);
 			main_sz += sz;
-
-			unitsz = get_typavgwidth(attr->atttypid, attr->atttypmod);
+			unitsz = get_typavgwidth(attr->atttypid,
+									 attr->atttypmod);
 			extra_sz += MAXALIGN(unitsz) * nrooms;
 		}
 		else
@@ -1305,286 +1474,718 @@ gstoreFdwOpenBaseFile(Relation frel,
 	}
 	schema->length = main_sz;
 
-	fdesc = PathNameOpenFile(base_file, O_RDWR);
-	if (fdesc < 0)
+	file_sz = PAGE_ALIGN(offsetof(GpuStoreBaseFileHead, schema) + main_sz);
+	hbuf->rowid_map_offset = file_sz;
+	rowmap_sz = gstoreFdwRowIdMapSize(nrooms);
+	file_sz += PAGE_ALIGN(rowmap_sz);
+	if (gs_sstate->primary_key >= 0)
 	{
-		if (errno != ENOENT)
-			elog(ERROR, "failed on open('%s'): %m", base_file);
-		fdesc = PathNameOpenFile(base_file, O_RDWR | O_CREAT | O_EXCL);
-		if (fdesc < 0)
-			elog(ERROR, "failed on creat('%s'): %m", base_file);
+		hbuf->hash_index_offset = file_sz;
+		hash_sz = offsetof(GpuStoreHashIndexHead, slots[nslots + nrooms]);
+		file_sz += PAGE_ALIGN(hash_sz);
+	}
+	if (schema->has_varlena)
+	{
+		hbuf->schema.extra_hoffset
+			= file_sz - offsetof(GpuStoreBaseFileHead, schema);
+		hbuf->schema.extra_hlength = extra_sz;
+		file_sz += PAGE_ALIGN(extra_sz);
+	}
+	/* Write out GpuStoreBaseFileHead section */
+	if (__writeFile(rawfd, hbuf, hbuf_sz) != hbuf_sz)
+		elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
+	/* Expand the file size */
+	if (posix_fallocate(rawfd, 0, file_sz) != 0)
+		elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
+			 base_file, file_sz);
+	/* Write out GpuStoreRowIdMapHead section */
+	{
+		GpuStoreRowIdMapHead rowmap_buf;
 
-		/* setup header */
-		hbuf = alloca(hbuf_sz);
-		memset(hbuf, 0, hbuf_sz);
-		memcpy(hbuf->signature, GPUSTORE_BASEFILE_SIGNATURE, sizeof(cl_ulong));
-		strcpy(hbuf->ftable_name, RelationGetRelationName(frel));
-		memcpy(&hbuf->schema, schema, kds_sz);
-		if (__writeFile(FileGetRawDesc(fdesc), hbuf, hbuf_sz) != hbuf_sz)
+		memset(&rowmap_buf, 0, sizeof(GpuStoreRowIdMapHead));
+		memcpy(rowmap_buf.signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
+		rowmap_buf.length = rowmap_sz;
+		rowmap_buf.nrooms = gs_sstate->max_num_rows;
+
+		if (lseek(rawfd, hbuf->rowid_map_offset, SEEK_SET) < 0)
+			elog(ERROR, "failed on lseek('%s',%zu): %m",
+				 base_file, hbuf->rowid_map_offset);
+		sz = offsetof(GpuStoreRowIdMapHead, base);
+		if (__writeFile(rawfd, &rowmap_buf, sz) != sz)
+			elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
+	}
+	/* Write out GpuStoreHashHead section (if PK is configured) */
+	if (gs_sstate->primary_key >= 0)
+	{
+		GpuStoreHashIndexHead hindex_buf;
+		uint32		rowid_buf[4096];
+		size_t		nbytes;
+
+		memset(&hindex_buf, 0, sizeof(GpuStoreHashIndexHead));
+		memcpy(hindex_buf.signature, GPUSTORE_HASHINDEX_SIGNATURE, 8);
+		hindex_buf.nrooms = gs_sstate->max_num_rows;
+		hindex_buf.nslots = gs_sstate->num_hash_slots;
+
+		if (lseek(rawfd, hbuf->hash_index_offset, SEEK_SET) < 0)
+			elog(ERROR, "failed on lseek('%s',%zu): %m",
+				 base_file, hbuf->hash_index_offset);
+		sz = offsetof(GpuStoreHashIndexHead, slots);
+		if (__writeFile(rawfd, &hindex_buf, sz) != sz)
 			elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
 
-		/* expand file size */
-		sz = offsetof(GpuStoreFileHead, schema) + main_sz + extra_sz;
-		if (FileTruncate(fdesc, sz, WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
-			elog(ERROR, "failed on FileTruncate('%s',%zu): %m",
-				 base_file, sz);
-	}
-	else
-	{
-		if (__readFile(FileGetRawDesc(fdesc), hbuf, hbuf_sz) != hbuf_sz)
-			elog(ERROR, "failed on __readFile('%s'): %m", base_file);
-		/* check signature */
-		if (memcmp(hbuf->signature, GPUSTORE_BASEFILE_SIGNATURE, 8) != 0)
-			elog(ERROR, "fail '%s' has incompatible signature", base_file);
-		/* check schema compatibility */
-		if (hbuf->schema.length != schema->length ||
-			hbuf->schema.nrooms != schema->nrooms ||
-			hbuf->schema.ncols  != schema->ncols  ||
-			hbuf->schema.format != schema->format ||
-			hbuf->schema.tdtypeid != schema->tdtypeid ||
-			hbuf->schema.tdtypmod != schema->tdtypmod ||
-			hbuf->schema.table_oid != schema->table_oid ||
-			hbuf->schema.nr_colmeta != schema->nr_colmeta ||
-			memcmp(hbuf->schema.colmeta, schema->colmeta,
-				   sizeof(kern_colmeta) * schema->nr_colmeta) != 0)
-			elog(ERROR, "file '%s' is not compatible to foreign table %s",
-				 base_file, RelationGetRelationName(frel));
+		/* '-1' initialization for all the hash-slots/rowid-array */
+		memset(rowid_buf, -1, sizeof(rowid_buf));
+		nbytes = sizeof(uint32) * (hindex_buf.nrooms + hindex_buf.nslots);
+		while (nbytes > 0)
+		{
+			sz = Min(nbytes, sizeof(rowid_buf));
+			if (__writeFile(rawfd, rowid_buf, sz) != sz)
+				elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
+			nbytes -= sz;
+		}
 	}
 	pfree(__tupdesc);
-	return fdesc;
 }
 
-static size_t
-__ApplyRedoLogMain(GpuStoreFileHead *redo_head, char *redo_tail,
-				   TupleDesc __tupdesc, File base_fdesc)
+/*
+ * gstoreFdwValidateBaseFile
+ */
+static void
+gstoreFdwValidateBaseFile(Relation frel,
+						  GpuStoreSharedState *gs_sstate,
+						  bool *p_basefile_is_sanity)
 {
-	GpuStoreFileHead *base_head;
-	char	   *extra_buf;
-	size_t		extra_sz;
-	size_t		main_sz;
-	Datum	   *values = alloca(sizeof(Datum) * __tupdesc->natts);
-	bool	   *isnull = alloca(sizeof(bool)  * __tupdesc->natts);
-	char	   *redo_pos;
-	struct stat	stat_buf;
+	TupleDesc	__tupdesc = gstoreFdwDeviceTupleDesc(frel);
+	size_t		nrooms = gs_sstate->max_num_rows;
+	size_t		nslots = gs_sstate->num_hash_slots;
+	size_t		mmap_sz;
+	int			mmap_is_pmem;
+	size_t		main_sz, sz;
+	int			j, unitsz;
+	GpuStoreBaseFileHead *base_mmap;
+	GpuStoreRowIdMapHead *rowid_map = NULL;
+	GpuStoreHashIndexHead *hash_index = NULL;
+	kern_data_store *schema;
 
-	/* mmap base file */
-	if (fstat(FileGetRawDesc(base_fdesc), &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(base_fdesc));
-	base_head = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, stat_buf.st_size),
-						   PROT_READ | PROT_WRITE,
-						   MAP_SHARED | MAP_POPULATE,
-						   FileGetRawDesc(base_fdesc), 0);
-	if (base_head == MAP_FAILED)
-		elog(ERROR, "failed on __mmapFile('%s'): %m",
-			 FilePathName(base_fdesc));
-	main_sz = offsetof(GpuStoreFileHead, schema) + base_head->schema.length;
-	if (stat_buf.st_size < main_sz)
-		elog(ERROR, "base file ('%s') header corruption",
-			 FilePathName(base_fdesc));
-	extra_buf = (char *)base_head + main_sz;
-	extra_sz  = stat_buf.st_size - main_sz;
-
-	/* read the redo log file */
-	redo_pos = (char *)redo_head + redo_head->checkpoint_offset;
-	while (redo_pos + sizeof(cl_ushort) < redo_tail)
+	base_mmap = pmem_map_file(gs_sstate->base_file, 0,
+							  0, 0600,
+							  &mmap_sz,
+							  &mmap_is_pmem);
+	if (!base_mmap)
+		elog(ERROR, "failed on pmem_map_file('%s'): %m",
+			 gs_sstate->base_file);
+	PG_TRY();
 	{
-		kern_tupitem   *tupitem = (kern_tupitem *)redo_pos;
-		kern_data_store *kds;
-		HeapTupleData	tupData;
-		cl_int			logkind;
-		cl_uint			rowid;
-		size_t			vlpos;
-		size_t			sz;
-		int				j;
-
-		if (tupitem->t_len == 0)
-			break;		/* no more items */
-		sz = offsetof(kern_tupitem, htup) + tupitem->t_len;
-		if (redo_pos + sz > redo_tail)
-			break;		/* data corruption? */
-		redo_pos += MAXALIGN(sz);
-
-		logkind = gstore_get_tupitem_logkind(tupitem);
-		rowid = gstore_get_tupitem_rowid(tupitem);
-		vlpos = gstore_get_tupitem_vlpos(tupitem);
-		if (rowid >= base_head->schema.nrooms)
-			elog(NOTICE, "REDO rowid=%u, larger than max_num_rows=%u found in the REDO log file, skipped",
-				 rowid, base_head->schema.nrooms);
-		if (logkind != REDO_LOG_TYPE__INSERT &&
-			logkind != REDO_LOG_TYPE__UPDATE &&
-			logkind != REDO_LOG_TYPE__DELETE)
-			elog(NOTICE, "REDO rowid=%u is neither INSERT, UPDATE nor DELETE",
-				 rowid);
-
-		/* expand the extra buffer on demand */
-		if (vlpos > 0 && vlpos + tupitem->t_len > extra_sz)
+		/* GpuStoreBaseFileHead validation  */
+		if (memcmp(base_mmap->signature,
+				   GPUSTORE_BASEFILE_SIGNATURE, 8) != 0)
 		{
-			sz = main_sz + vlpos + tupitem->t_len + (64UL << 20);
-			sz = TYPEALIGN(PAGE_SIZE, sz);
-			if (fallocate(FileGetRawDesc(base_fdesc), 0, 0, sz) != 0)
-				elog(ERROR, "failed on fallocate('%s',%zu): %m",
-					 FilePathName(base_fdesc), sz);
-			base_head = __mremapFile(base_head, sz);
-			if (base_head == MAP_FAILED)
-				elog(ERROR, "failed on __mremapFile('%s',%zu): %m",
-                     FilePathName(base_fdesc), sz);
-			extra_buf = (char *)base_head + main_sz;
-			extra_sz  = sz - main_sz;
+			if (memcmp(base_mmap->signature,
+					   GPUSTORE_BASEFILE_MAPPED_SIGNATURE, 8) == 0)
+				*p_basefile_is_sanity = false;
+			else
+				elog(ERROR, "file '%s' has wrong signature",
+					 gs_sstate->base_file);
 		}
-		kds = &base_head->schema;
+		main_sz = KDS_calculateHeadSize(__tupdesc);
+		if (offsetof(GpuStoreBaseFileHead, schema) + main_sz > mmap_sz)
+			elog(ERROR, "file '%s' is too small than expects",
+				 gs_sstate->base_file);
 
-		tupData.t_data = &tupitem->htup;
-		heap_deform_tuple(&tupData, __tupdesc, values, isnull);
+		schema = &base_mmap->schema;
+		if (schema->ncols != __tupdesc->natts ||
+			schema->nrooms != nrooms ||
+			schema->format != KDS_FORMAT_COLUMN ||
+			schema->tdtypeid != __tupdesc->tdtypeid ||
+			schema->tdtypmod != __tupdesc->tdtypmod ||
+			schema->table_oid != RelationGetRelid(frel))
+		{
+			elog(ERROR, "Base file '%s' has incompatible schema definition",
+				 gs_sstate->base_file);
+		}
+
 		for (j=0; j < __tupdesc->natts; j++)
 		{
-			kern_colmeta *cmeta = &base_head->schema.colmeta[j];
-			char	   *nullmap, *vaddr;
+			Form_pg_attribute	attr = tupleDescAttr(__tupdesc, j);
+			kern_colmeta	   *cmeta = &schema->colmeta[j];
 
-			Assert(cmeta->nullmap_offset != 0 &&
-				   cmeta->values_offset != 0);
-			nullmap = (char *)kds + __kds_unpack(cmeta->nullmap_offset);
-			vaddr   = (char *)kds + __kds_unpack(cmeta->values_offset);
-
-			if (j == __tupdesc->natts - 1)
+			if ((cmeta->attbyval && !attr->attbyval) ||
+				(!cmeta->attbyval && attr->attbyval) ||
+				cmeta->attalign != typealign_get_width(attr->attalign) ||
+				cmeta->attnum != attr->attnum ||
+				cmeta->atttypid != attr->atttypid ||
+				cmeta->atttypmod != attr->atttypmod ||
+				(cmeta->nullmap_offset != 0 && attr->attnotnull) ||
+				(cmeta->nullmap_offset == 0 && !attr->attnotnull))
+				elog(ERROR, "Base file '%s' column '%s' is incompatible",
+					 gs_sstate->base_file, NameStr(attr->attname));
+			if (attr->attnotnull)
 			{
-				Timestamp	ts = DatumGetTimestamp(values[j]);
-				/* internal system attribute (timestamp + delete flag) */
-				Assert(cmeta->attbyval && cmeta->attlen == sizeof(Timestamp));
-				if (isnull[j])
-					elog(ERROR, "REDO log corruption? sysattr is NULL");
-				nullmap[rowid >> 3] |= (1 << (rowid & 7));
-				ts &= ~GSTORE_SYSATTR__MASK;
-				if (logkind == REDO_LOG_TYPE__DELETE)
-					ts |= GSTORE_SYSATTR__REMOVED;
-				((Timestamp *)vaddr)[j] = ts;
-			}
-			else if (isnull[j])
-			{
-				if (j == __tupdesc->natts - 1)
-					elog(ERROR, "REDO log corruption? timestamp is NULL");
-				nullmap[rowid >> 3] |= (1 << (rowid & 7));
+				if (cmeta->nullmap_offset != 0 ||
+					cmeta->nullmap_length != 0)
+					elog(ERROR, "Base file '%s' column '%s' is incompatible",
+						 gs_sstate->base_file, NameStr(attr->attname));
 			}
 			else
 			{
-				nullmap[rowid >> 3] |= (1 << (rowid & 7));
-
-				if (cmeta->attbyval)
-				{
-					Assert(cmeta->attlen <= sizeof(cl_ulong));
-					memcpy(vaddr + rowid * cmeta->attlen,
-						   &values[j], cmeta->attlen);
-				}
-				else if (cmeta->attlen > 0)
-				{
-					memcpy(vaddr + rowid * cmeta->attlen,
-						   DatumGetPointer(values[j]), cmeta->attlen);
-				}
-				else if (cmeta->attlen == -1)
-				{
-					char	   *vlbuf = extra_buf + vlpos;
-					cl_uint		vl_sz = VARSIZE_ANY(values[j]);
-
-					Assert(vlpos > 0);
-					memcpy(vlbuf, DatumGetPointer(values[j]), vl_sz);
-					((cl_uint *)vaddr)[rowid] = __kds_packed(vlpos);
-					vlpos += MAXALIGN(vl_sz);
-				}
-				else
-					elog(ERROR, "unexpected type definition");
+				sz = MAXALIGN(BITMAPLEN(nrooms));
+				if (cmeta->nullmap_offset != __kds_packed(main_sz) ||
+					cmeta->nullmap_length != __kds_packed(sz))
+					elog(ERROR, "Base file '%s' column '%s' is incompatible",
+						 gs_sstate->base_file, NameStr(attr->attname));
+				main_sz += sz;
+			}
+			
+			if (attr->attlen > 0)
+			{
+				unitsz = att_align_nominal(attr->attlen,
+										   attr->attalign);
+				sz = MAXALIGN(unitsz * nrooms);
+				if (cmeta->values_offset != __kds_packed(main_sz) ||
+					cmeta->values_length != __kds_packed(sz))
+					elog(ERROR, "Base file '%s' column '%s' is incompatible",
+						 gs_sstate->base_file, NameStr(attr->attname));
+				main_sz += sz;
+			}
+			else if (attr->attlen == -1)
+			{
+				sz = MAXALIGN(sizeof(cl_uint) * nrooms);
+				if (cmeta->values_offset != __kds_packed(main_sz) ||
+					cmeta->values_length != __kds_packed(sz))
+					elog(ERROR, "Base file '%s' column '%s' is incompatible",
+						 gs_sstate->base_file, NameStr(attr->attname));
+				main_sz += sz;
+			}
+			else
+			{
+				elog(ERROR, "unexpected type length (%d) at %s.%s",
+					 attr->attlen,
+					 RelationGetRelationName(frel),
+					 NameStr(attr->attname));
 			}
 		}
+		if (main_sz != schema->length ||
+			main_sz >  mmap_sz)
+			elog(ERROR, "Base file '%s' is too small then required",
+				 gs_sstate->base_file);
+
+		/*
+		 * validate GpuStoreRowIdMapHead section
+		 */
+		sz = gstoreFdwRowIdMapSize(nrooms);
+		if (base_mmap->rowid_map_offset + sz > mmap_sz)
+			elog(ERROR, "Base file '%s' is too small then necessity",
+				 gs_sstate->base_file);
+		rowid_map = (GpuStoreRowIdMapHead *)
+			((char *)base_mmap + base_mmap->rowid_map_offset);
+		if (memcmp(rowid_map->signature,
+				   GPUSTORE_ROWIDMAP_SIGNATURE, 8) != 0 ||
+			rowid_map->length != sz ||
+			rowid_map->nrooms != nrooms)
+			elog(ERROR, "Base file '%s' has corrupted RowID-map",
+				 gs_sstate->base_file);
+
+		/*
+		 * validate GpuStoreHashIndexHead section, if any
+		 */
+		if (gs_sstate->primary_key < 0)
+		{
+			if (base_mmap->hash_index_offset != 0)
+				elog(ERROR, "Base file '%s' has PK Index, but foreign-table '%s' has no primary key definition",
+					 gs_sstate->base_file, RelationGetRelationName(frel));
+		}
+		else
+		{
+			if (base_mmap->hash_index_offset == 0)
+				elog(ERROR, "Base file '%s' has no PK Index, but foreign-table '%s' has primary key definition",
+					 gs_sstate->base_file,
+					 RelationGetRelationName(frel));
+		sz = offsetof(GpuStoreRowIdMapHead, base[nslots + nrooms]);
+		if (base_mmap->hash_index_offset + sz > mmap_sz)
+			elog(ERROR, "Base file '%s' is smaller then the estimation",
+				 gs_sstate->base_file);
+		hash_index = (GpuStoreHashIndexHead *)
+			((char *)base_mmap + base_mmap->hash_index_offset);
+		if (memcmp(hash_index->signature,
+				   GPUSTORE_HASHINDEX_SIGNATURE, 8) != 0 ||
+			hash_index->nrooms != nrooms ||
+			hash_index->nslots != nslots)
+			elog(ERROR, "Base file '%s' has corrupted Hash-index",
+				 gs_sstate->base_file);
+		}
+
+		/*
+		 * validate Extra Buffer of varlena, if any
+		 */
+		if (!schema->has_varlena)
+		{
+			if (base_mmap->schema.extra_hoffset != 0 ||
+				base_mmap->schema.extra_hlength != 0)
+				elog(ERROR, "Base file '%s' has extra buffer, but foreign-table '%s' has no variable-length fields",
+					 gs_sstate->base_file, RelationGetRelationName(frel));
+		}
+		else
+		{
+			if (base_mmap->schema.extra_hoffset == 0 ||
+				base_mmap->schema.extra_hlength == 0)
+				elog(ERROR, "Base file '%s' has no extra buffer, but foreign-table '%s' has variable-length fields",
+					 gs_sstate->base_file, RelationGetRelationName(frel));
+			if (offsetof(GpuStoreBaseFileHead, schema) +
+				base_mmap->schema.extra_hoffset +
+				base_mmap->schema.extra_hlength < mmap_sz)
+				elog(ERROR, "Base file '%s' is smaller then the required",
+					 gs_sstate->base_file);
+		}
 	}
-	__munmapFile(base_head);
-	return redo_pos - (char *)redo_head;
+	PG_CATCH();
+	{
+		if (pmem_unmap(base_mmap, mmap_sz) != 0)
+			elog(WARNING, "failed on pmem_unmap: %m");
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	/* Ok, validated */
+	if (pmem_unmap(base_mmap, mmap_sz) != 0)
+		elog(WARNING, "failed on pmem_unmap: %m");
+	pfree(__tupdesc);
 }
 
-static uint64
-gstoreFdwApplyRedoLog(Relation frel,
-					  File base_fdesc,
-					  const char *redo_log_file,
-					  size_t redo_log_file_limit)
+/*
+ * gstoreFdwCreateOrValidateBaseFile
+ */
+static void
+gstoreFdwCreateOrValidateBaseFile(Relation frel,
+								  GpuStoreSharedState *gs_sstate,
+								  bool *p_basefile_is_sanity)
 {
-	TupleDesc   __tupdesc = gstoreFdwDeviceTupleDesc(frel);
+	File		fdesc;
+
+	fdesc = PathNameOpenFile(gs_sstate->base_file, O_RDWR | O_CREAT | O_EXCL);
+	if (fdesc < 0)
+	{
+		if (errno != EEXIST)
+			elog(ERROR, "failed on open('%s'): %m", gs_sstate->base_file);
+		/* Base file already exists */
+		gstoreFdwValidateBaseFile(frel, gs_sstate, p_basefile_is_sanity);
+	}
+	else
+	{
+		PG_TRY();
+		{
+			gstoreFdwCreateBaseFile(frel, gs_sstate, fdesc);
+		}
+		PG_CATCH();
+		{
+			if (unlink(gs_sstate->base_file) != 0)
+				elog(WARNING, "failed on unlink('%s'): %m",
+					 gs_sstate->base_file);
+			FileClose(fdesc);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		FileClose(fdesc);
+	}
+}
+
+/*
+ * gstoreFdwOpenRedoLog
+ */
+static void
+gstoreFdwCreateRedoLog(Relation frel,
+					   GpuStoreSharedState *gs_sstate)
+{
+	const char *redo_log_file = gs_sstate->redo_log_file;
 	File		redo_fdesc;
-	GpuStoreFileHead *redo_head;
-	char	   *redo_tail;
-	size_t		redo_pos;
-	struct stat	stat_buf;
 
 	redo_fdesc = PathNameOpenFile(redo_log_file, O_RDWR);
 	if (redo_fdesc < 0)
 	{
-		size_t	sz;
-		/*
-		 * Create a new REDO log file. Of course, new file shall not have
-		 * any written-logs to be applied.
-		 */
+		/* Create a new REDO log file; which is empty of course. */
 		if (errno != ENOENT)
 			elog(ERROR, "failed on open('%s'): %m", redo_log_file);
 		redo_fdesc = PathNameOpenFile(redo_log_file,
 									  O_RDWR | O_CREAT | O_EXCL);
 		if (redo_fdesc < 0)
 			elog(ERROR, "failed on open('%s'): %m", redo_log_file);
-		if (FileTruncate(redo_fdesc, redo_log_file_limit,
-						 WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
-			elog(ERROR, "failed on FileTruncate('%s'): %m", redo_log_file);
+		PG_TRY();
+		{
+			GpuStoreRedoLogHead temp;
+			int			rawfd = FileGetRawDesc(redo_fdesc);
+			size_t		sz;
 
-		sz = (offsetof(GpuStoreFileHead, schema) +
-			  KDS_calculateHeadSize(__tupdesc));
-		redo_head = alloca(sz);
-		memset(redo_head, 0, sz);
-		memcpy(redo_head->signature, GPUSTORE_REDOLOG_SIGNATURE, 8);
-		redo_head->checkpoint_offset = sz;
-		strcpy(redo_head->ftable_name, RelationGetRelationName(frel));
-		init_kernel_data_store(&redo_head->schema,
-							   __tupdesc,
-							   0,
-							   KDS_FORMAT_ROW,
-							   UINT_MAX);
-		if (__writeFile(FileGetRawDesc(redo_fdesc), redo_head, sz) != sz)
-			elog(ERROR, "failed on __writeFile('%s'): %m", redo_log_file);
+			sz = PAGE_ALIGN(gs_sstate->redo_log_limit);
+			if (posix_fallocate(rawfd, 0, sz) != 0)
+				elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
+					 redo_log_file, sz);
+
+			memset(&temp, 0, sizeof(temp));
+			memcpy(temp.signature, GPUSTORE_REDOLOG_SIGNATURE, 8);
+			temp.timestamp = GetCurrentTimestamp();
+			sz = MAXALIGN(offsetof(GpuStoreRedoLogHead, data));
+			temp.checkpoint_offset = sz;
+			if (__writeFile(rawfd, &temp, sz) != sz)
+				elog(ERROR, "failed on __writeFile('%s'): %m", redo_log_file);
+		}
+		PG_CATCH();
+		{
+			unlink(redo_log_file);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 		FileClose(redo_fdesc);
-
-		return sz;
-	}
-	/* mmap redo file */
-	if (fstat(FileGetRawDesc(redo_fdesc), &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", redo_log_file);
-	if (stat_buf.st_size < redo_log_file_limit)
-	{
-		if (FileTruncate(redo_fdesc, redo_log_file_limit,
-						 WAIT_EVENT_DATA_FILE_TRUNCATE) < 0)
-			elog(ERROR, "failed on FileTruncate('%s'): %m", redo_log_file);
-	}
-	redo_head = __mmapFile(NULL, TYPEALIGN(PAGE_SIZE, stat_buf.st_size),
-						   PROT_READ | PROT_WRITE,
-						   MAP_SHARED | MAP_POPULATE,
-						   FileGetRawDesc(redo_fdesc), 0);
-	if (redo_head == MAP_FAILED)
-		elog(ERROR, "failed on __mmapFile('%s'): %m", redo_log_file);
-	redo_tail = (char *)redo_head + stat_buf.st_size;
-
-	redo_pos = __ApplyRedoLogMain(redo_head, redo_tail,
-								  __tupdesc, base_fdesc);
-	/* ensure the changes at page-cache */
-	if (fdatasync(FileGetRawDesc(base_fdesc)) != 0)
-	{
-		elog(WARNING, "failed on fdatasync('%s'): %m",
-			 FilePathName(base_fdesc));
 	}
 	else
 	{
-		redo_head->checkpoint_offset = redo_pos;
-		if (fdatasync(FileGetRawDesc(redo_fdesc)) != 0)
-			elog(WARNING, "failed on fdatasync('%s'): %m",
-				 FilePathName(redo_fdesc));
+		struct stat	stat_buf;
+		int			rawfd = FileGetRawDesc(redo_fdesc);
+		size_t		sz;
+
+		if (fstat(rawfd, &stat_buf) != 0)
+			elog(ERROR, "failed on fstat('%s'): %m", redo_log_file);
+		/* expand the Redo-log file on demand */
+		sz = PAGE_ALIGN(gs_sstate->redo_log_limit);
+		if (stat_buf.st_size < sz)
+		{
+			if (posix_fallocate(rawfd, 0, sz) != 0)
+				elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
+					 redo_log_file, sz);
+		}
+		FileClose(redo_fdesc);
 	}
-	__munmapFile(redo_head);
-	FileClose(redo_fdesc);
+}
+
+/*
+ * GSTORE_TX_LOG__INSERT
+ */
+static void
+__ApplyRedoLogInsert(Relation frel,
+					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
+					 GstoreTxLogRow *r_log)
+{
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	Datum		   *values = alloca(sizeof(Datum) * tupdesc->natts);
+	bool		   *isnull = alloca(sizeof(bool) * tupdesc->natts);
+	kern_data_store *kds = &base_mmap->schema;
+	HeapTupleData	tuple;
+	TransactionId	t_xmin = r_log->htup.t_choice.t_heap.t_xmin;
+	CommandId		t_cid = r_log->htup.t_choice.t_heap.t_field3.t_cid;
+	int				j;
+
+	memset(&tuple, 0, sizeof(HeapTupleData));
+	tuple.t_data = &r_log->htup;
+	heap_deform_tuple(&tuple, tupdesc,
+					  values, isnull);
+	Assert(kds->ncols == tupdesc->natts + 3);	/* xmin,xmax,cid */
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		KDS_store_datum_column(kds, &kds->colmeta[j],
+							   r_log->rowid,
+							   values[j], isnull[j]);
+	}
+	/* xmin */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts],
+						   r_log->rowid, t_xmin, false);
+	/* xmax */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+1],
+						   r_log->rowid, InvalidTransactionId, false);
+	/* cid */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+2],
+						   r_log->rowid, t_cid, false);
+}
+
+/*
+ * GSTORE_TX_LOG__UPDATE
+ */
+static void
+__ApplyRedoLogUpdate(Relation frel,
+					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
+					 GstoreTxLogRow *r_log)
+{
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	Datum		   *values = alloca(sizeof(Datum) * tupdesc->natts);
+	bool		   *isnull = alloca(sizeof(bool)  * tupdesc->natts);
+	kern_data_store *kds = &base_mmap->schema;
+	HeapTupleData	tuple;
+	bits8		   *update_mask = NULL;
+	TransactionId	t_xmin = r_log->htup.t_choice.t_heap.t_xmin;
+	CommandId		t_cid = r_log->htup.t_choice.t_heap.t_field3.t_cid;
+	cl_uint			oldid;
+	int				j;
+
+	oldid = (((cl_uint)r_log->htup.t_ctid.ip_blkid.bi_hi << 16) |
+			 ((cl_uint)r_log->htup.t_ctid.ip_blkid.bi_lo));
+	if (r_log->update_mask != 0)
+		update_mask = (bits8 *)((char *)r_log + r_log->update_mask);
+
+	memset(&tuple, 0, sizeof(HeapTupleData));
+	tuple.t_data = &r_log->htup;
+	heap_deform_tuple(&tuple, tupdesc,
+					  values, isnull);
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Datum		__datum = values[j];
+		bool		__isnull = isnull[j];
+
+		if (update_mask && (update_mask[j>>3] & (1<<(j&7))) != 0)
+		{
+			/* column is not updated */
+			__datum = KDS_fetch_datum_column(kds, &kds->colmeta[j],
+											 oldid,
+											 &__isnull);
+		}
+		KDS_store_datum_column(kds, &kds->colmeta[j],
+							   r_log->rowid,
+							   __datum, __isnull);		
+	}
+	/* xmin (new) */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts],
+                           r_log->rowid, t_xmin, false);
+	/* cid (new) */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+2],
+						   r_log->rowid, t_cid, false);
+	/* xmax (old) */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+1],
+						   oldid, t_xmin, false);
+	/* cid (old) */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+2],
+						   oldid, t_cid, false);
+}
+
+/*
+ * GSTORE_TX_LOG__DELETE
+ */
+static void
+__ApplyRedoLogDelete(Relation frel,
+					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
+					 GstoreTxLogRow *r_log)
+{
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	kern_data_store *kds = &base_mmap->schema;
+	TransactionId	t_xmax = r_log->htup.t_choice.t_heap.t_xmax;
+	CommandId		t_cid = r_log->htup.t_choice.t_heap.t_field3.t_cid;
+
+	/* xmax */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+1],
+						   r_log->rowid, t_xmax, false);
+	/* cid */
+	KDS_store_datum_column(kds, &kds->colmeta[tupdesc->natts+2],
+						   r_log->rowid, t_cid, false);
+}
+
+static void
+__rebuildRowIdMap(Relation frel, GpuStoreSharedState *gs_sstate,
+				  GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz)
+{
+	/* TODO: rebuild RowIdMap */
+}
+
+static void
+__rebuildHashIndex(Relation frel, GpuStoreSharedState *gs_sstate,
+				   GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz)
+{
+	/* TODO: rebuild HashIndex */
+}
+
+/*
+ * __applyRedoLogMain
+ */
+static size_t
+__ApplyRedoLogMain(Relation frel, GpuStoreSharedState *gs_sstate,
+				   GpuStoreRedoLogHead *redo_mmap, size_t redo_mmap_sz)
+{
+	GpuStoreBaseFileHead *base_mmap = NULL;
+	size_t		base_mmap_sz;
+	int			base_is_pmem;
+	size_t		redo_pos = 0;
+
+	/* Map the base file */
+	base_mmap = pmem_map_file(gs_sstate->base_file, 0,
+							  0, 0600,
+							  &base_mmap_sz,
+							  &base_is_pmem);
+	if (!base_mmap)
+		elog(ERROR, "failed on pmem_map_file('%s'): %m",
+			 gs_sstate->base_file);
+	PG_TRY();
+	{
+		redo_pos = redo_mmap->checkpoint_offset;
+		while (redo_pos + offsetof(GstoreTxLogCommon, data) < redo_mmap_sz)
+		{
+			GstoreTxLogCommon *tx_log = (GstoreTxLogCommon *)
+				((char *)redo_mmap + redo_pos);
+
+			if (tx_log->type == GSTORE_TX_LOG__INSERT ||
+				tx_log->type == GSTORE_TX_LOG__UPDATE ||
+				tx_log->type == GSTORE_TX_LOG__DELETE)
+			{
+				GstoreTxLogRow *r_log = (GstoreTxLogRow *)tx_log;
+				size_t		sz;
+
+				/* expand the extra buffer on demand */
+				if (base_mmap->schema.has_varlena &&
+					(r_log->type == GSTORE_TX_LOG__INSERT ||
+					 r_log->type == GSTORE_TX_LOG__UPDATE))
+				{
+					/*
+					 * This length calculation is not correct strictly,
+					 * however, can allocate sufficient amount of extra
+					 * buffer preliminary. We expect it shall be consumed
+					 * later. ;-)
+					 */
+					sz = r_log->length - offsetof(GstoreTxLogRow, htup);
+					sz += __kds_unpack(base_mmap->schema.usage);
+					if (sz > base_mmap->schema.extra_hlength)
+					{
+						int		rawfd;
+						
+						if (pmem_unmap(base_mmap, base_mmap_sz) != 0)
+							elog(ERROR, "failed on pmem_unmap: %m");
+						base_mmap = NULL;
+
+						sz = PAGE_ALIGN(sz + (64UL << 20));
+						rawfd = open(gs_sstate->base_file, O_RDWR);
+						if (rawfd < 0)
+							elog(ERROR, "failed on open('%s'): %m",
+								 gs_sstate->base_file);
+
+						if (posix_fallocate(rawfd, 0, sz) != 0)
+						{
+							close(rawfd);
+							elog(ERROR, "failed on posix_fallocate('%s'): %m",
+								 gs_sstate->base_file);
+						}
+						close(rawfd);
+
+						/* Map the base file again */
+						base_mmap = pmem_map_file(gs_sstate->base_file, 0,
+												  0, 0600,
+												  &base_mmap_sz,
+												  &base_is_pmem);
+						if (!base_mmap)
+							elog(ERROR, "failed on pmem_map_file('%s'): %m",
+								 gs_sstate->base_file);
+						/* adjust extra buffer size */
+						base_mmap->schema.extra_hlength = base_mmap_sz -
+							(offsetof(GpuStoreBaseFileHead, schema) +
+							 base_mmap->schema.extra_hoffset);
+						if (base_is_pmem)
+							pmem_persist(base_mmap, PAGE_SIZE);
+						else
+							pmem_msync(base_mmap, PAGE_SIZE);
+					}
+				}
+				if (r_log->type == GSTORE_TX_LOG__INSERT)
+					__ApplyRedoLogInsert(frel, base_mmap, base_mmap_sz, r_log);
+                else if (r_log->type == GSTORE_TX_LOG__UPDATE)
+					__ApplyRedoLogUpdate(frel, base_mmap, base_mmap_sz, r_log);
+				else if (r_log->type == GSTORE_TX_LOG__DELETE)
+					__ApplyRedoLogDelete(frel, base_mmap, base_mmap_sz, r_log);
+				else
+					elog(ERROR, "Bug? unexpected Redo-Log type");
+				redo_pos += r_log->length;
+			}
+			else if (tx_log->type == GSTORE_TX_LOG__COMMIT)
+			{
+				/* commit log can be ignored on CPU side */
+				redo_pos += tx_log->length;
+			}
+			else
+			{
+				/* end of the REDO log */
+				break;
+			}
+		}
+		/* Rebuild indexes */
+		 __rebuildRowIdMap(frel, gs_sstate, base_mmap, base_mmap_sz);
+		 __rebuildHashIndex(frel, gs_sstate, base_mmap, base_mmap_sz);
+		 if (base_is_pmem)
+			 pmem_persist(base_mmap, base_mmap_sz);
+		 else
+			 pmem_msync(base_mmap, base_mmap_sz);
+	}
+	PG_CATCH();
+	{
+		if (base_mmap)
+			pmem_unmap(base_mmap, base_mmap_sz);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (pmem_unmap(base_mmap, base_mmap_sz) != 0)
+		elog(WARNING, "failed on pmem_unmap('%s',%zu): %m",
+			 gs_sstate->base_file, base_mmap_sz);
+	return redo_pos;
+}
+
+static uint64
+gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate,
+					  bool basefile_is_sanity)
+{
+	GpuStoreRedoLogHead *redo_mmap;
+	size_t		redo_mmap_sz;
+	int			redo_is_pmem;
+	uint64		redo_pos;
+
+	/* Map REDO-Log */
+	redo_mmap = pmem_map_file(gs_sstate->redo_log_file, 0,
+							  0, 0600,
+							  &redo_mmap_sz,
+							  &redo_is_pmem);
+	if (!redo_mmap)
+		elog(ERROR, "failed on pmem_map_file('%s'): %m",
+			 gs_sstate->redo_log_file);
+	PG_TRY();
+	{
+		if (!basefile_is_sanity)
+		{
+			/* Apply REDO-log and rebuild row/hash index */
+			redo_pos = __ApplyRedoLogMain(frel, gs_sstate,
+										  redo_mmap, redo_mmap_sz);
+		}
+		else
+		{
+			/* No need to apply REDO-log, just seek to the position */
+			redo_pos = redo_mmap->checkpoint_offset;
+			while (redo_pos + offsetof(GstoreTxLogCommon,
+									   data) < redo_mmap_sz)
+			{
+				GstoreTxLogCommon  *tx_log = (GstoreTxLogCommon *)
+					((char *)redo_mmap + redo_pos);
+
+				if (tx_log->type == GSTORE_TX_LOG__INSERT ||
+					tx_log->type == GSTORE_TX_LOG__UPDATE ||
+					tx_log->type == GSTORE_TX_LOG__DELETE ||
+					tx_log->type == GSTORE_TX_LOG__COMMIT)
+				{
+					/* Ok, likely it is a valid REDO log, move to the next */
+					redo_pos += tx_log->length;
+				}
+				else
+				{
+					if (tx_log->type != 0)
+						elog(LOG, "Redo Log file '%s' meets uncertain magic code %08x at %lu. Base file '%s' is sanity, so restart logs from here.\n",
+							 gs_sstate->redo_log_file,
+							 tx_log->type,
+							 redo_pos,
+							 gs_sstate->base_file);
+					break;
+				}
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		pmem_unmap(redo_mmap, redo_mmap_sz);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (pmem_unmap(redo_mmap, redo_mmap_sz) != 0)
+		elog(WARNING, "failed on pmem_unmap('%s',%zu): %m",
+			 gs_sstate->redo_log_file, redo_mmap_sz);
 
 	return redo_pos;
 }
 
+#if 0
 static void
 __gstoreFdwBuildHashIndexMain(kern_data_store *kds,
 							  AttrNumber primary_key,
@@ -1745,34 +2346,27 @@ gstoreFdwBuildHashIndex(Relation frel, File base_fdesc,
 
 	return suffix;
 }
+#endif
 
 static GpuStoreSharedState *
 gstoreFdwCreateSharedState(Relation frel)
 {
 	GpuStoreSharedState *gs_sstate = gstoreFdwAllocSharedState(frel);
-	File		base_fdesc;
 	uint64		redo_pos;
 
 	PG_TRY();
 	{
-		/* Open or Create base file */
-		base_fdesc = gstoreFdwOpenBaseFile(frel,
-										   gs_sstate->base_file,
-										   gs_sstate->max_num_rows);
-		/* Apply REDO-log file */
-		redo_pos = gstoreFdwApplyRedoLog(frel, base_fdesc,
-										 gs_sstate->redo_log_file,
-										 gs_sstate->redo_log_limit);
+		bool	basefile_is_sanity = true;
+
+		/* Create or validate base file */
+		gstoreFdwCreateOrValidateBaseFile(frel, gs_sstate,
+										  &basefile_is_sanity);
+		/* Create redo-log file on demand */
+		gstoreFdwCreateRedoLog(frel, gs_sstate);
+		/* Apply REDO-log, if needed */
+		redo_pos = gstoreFdwApplyRedoLog(frel, gs_sstate,
+										 basefile_is_sanity);
 		pg_atomic_init_u64(&gs_sstate->redo_log_pos, redo_pos);
-
-		/* Build Hash-index of Primary-Key */
-		if (gs_sstate->primary_key > 0)
-		{
-			gs_sstate->index_suffix
-				= gstoreFdwBuildHashIndex(frel, base_fdesc,
-										  gs_sstate->primary_key);
-
-		}
 	}
 	PG_CATCH();
 	{
@@ -1780,7 +2374,6 @@ gstoreFdwCreateSharedState(Relation frel)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	FileClose(base_fdesc);
 
 	/* Kick GPU memory synchronizer for initial allocation */
 	SpinLockAcquire(&gstore_shared_head->gpumem_sync_lock);
@@ -1797,98 +2390,63 @@ static GpuStoreDesc *
 __gstoreFdwSetupGpuStoreDesc(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	void	   *mmap_ptr;
+	GpuStoreBaseFileHead *base_mmap;
+	GpuStoreRedoLogHead *redo_mmap;
 	size_t		mmap_sz;
-	File		fdesc;
-	struct stat	stat_buf;
+	int			is_pmem;
 
 	if (gs_desc->mmap_revision == gs_sstate->mmap_revision)
 		return gs_desc;		/* nothing to do */
 	PG_TRY();
 	{
-		int		redo_log_sync_method = gs_sstate->redo_log_sync_method;
-		int		is_pmem;
-
-		/* mmap Base-file */
-		fdesc = PathNameOpenFile(gs_sstate->base_file, O_RDWR);
-		if (fdesc < 0)
-			elog(ERROR, "failed on open('%s'): %m",
+		/* mmap base-file */
+		base_mmap = pmem_map_file(gs_sstate->base_file, 0,
+								  0, 0600,
+								  &mmap_sz,
+								  &is_pmem);
+		if (!base_mmap)
+			elog(ERROR, "failed on pmem_map_file('%s'): %m",
 				 gs_sstate->base_file);
-		if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
-			elog(ERROR, "failed on fstat('%s'): %m",
-				 gs_sstate->base_file);
-		mmap_sz = TYPEALIGN(PAGE_SIZE, stat_buf.st_size);
-		mmap_ptr = mmap(NULL, mmap_sz,
-						PROT_READ | PROT_WRITE,
-						MAP_SHARED | MAP_POPULATE,
-						FileGetRawDesc(fdesc), 0);
-		if (mmap_ptr == MAP_FAILED)
-			elog(ERROR, "failed on mmap('%s',%zu): %m",
-				 gs_sstate->base_file, mmap_sz);
-		gs_desc->base_file_mmap = mmap_ptr;
-		gs_desc->base_file_sz   = mmap_sz;
-		FileClose(fdesc);
+		gs_desc->base_mmap = base_mmap;
+		gs_desc->base_mmap_sz = mmap_sz;
+		gs_desc->base_mmap_is_pmem = is_pmem;
+		gs_desc->rowid_map = (GpuStoreRowIdMapHead *)
+			((char *)base_mmap + base_mmap->rowid_map_offset);
+		if (base_mmap->hash_index_offset != 0)
+			gs_desc->hash_index = (GpuStoreHashIndexHead *)
+				((char *)base_mmap + base_mmap->hash_index_offset);
 
-		/* pmem_map entire REDO Log file */
-		mmap_ptr = pmem_map_file(gs_sstate->redo_log_file, 0,
-								 0, 0600,
-								 &gs_desc->redo_log_sz,
-								 &is_pmem);
-		if (!mmap_ptr)
-			elog(ERROR, "failed on pmem_map_file('%s',%zu): %m",
-				 gs_sstate->redo_log_file, mmap_sz);
-		gs_desc->redo_log_mmap = mmap_ptr;
-		/* degrade sync-method, if not persistent memory */
-		if (!is_pmem && redo_log_sync_method == REDO_LOG_SYNC__PMEM)
-			redo_log_sync_method = REDO_LOG_SYNC__MSYNC;
-		gs_desc->redo_log_sync_method = redo_log_sync_method;
+		/* mmap redo-log */
+		redo_mmap = pmem_map_file(gs_sstate->redo_log_file, 0,
+								  0, 0600,
+								  &mmap_sz,
+								  &is_pmem);
+		if (!redo_mmap)
+			elog(ERROR, "failed on pmem_map_file('%s'): %m",
+				 gs_sstate->redo_log_file);
+		gs_desc->redo_mmap = redo_mmap;
+		gs_desc->redo_mmap_sz = mmap_sz;
+		gs_desc->redo_mmap_is_pmem = is_pmem;
 
-		/* mmap hash-index, if any */
-		if (gs_sstate->index_suffix != 0)
-		{
-			char	namebuf[200];
-			int		rawfd;
-			size_t	hash_sz;
-			void   *hash_ptr;
-
-			snprintf(namebuf, sizeof(namebuf),
-					 "/gstore_fdw.index.%u", gs_sstate->index_suffix);
-			rawfd = shm_open(namebuf, O_RDWR, 0600);
-			if (rawfd < 0)
-				elog(ERROR, "failed on open('%s'): %m", namebuf);
-			if (fstat(rawfd, &stat_buf) != 0)
-			{
-				close(rawfd);
-				elog(ERROR, "failed on fstat('%s'): %m", namebuf);
-			}
-			hash_sz = TYPEALIGN(PAGE_SIZE, stat_buf.st_size);
-			hash_ptr = mmap(NULL, hash_sz,
-							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_POPULATE,
-							rawfd, 0);
-			if (hash_ptr == MAP_FAILED)
-			{
-				close(rawfd);
-				elog(ERROR, "failed on mmap('%s',%zu): %m", namebuf, hash_sz);
-			}
-			gs_desc->hash_index_mmap = hash_ptr;
-			gs_desc->hash_index_sz = hash_sz;
-			close(rawfd);
-		}
+		gs_desc->mmap_revision = gs_sstate->mmap_revision;
 	}
 	PG_CATCH();
 	{
-		if (gs_desc->base_file_mmap)
+		if (gs_desc->base_mmap)
 		{
-			munmap(gs_desc->base_file_mmap,
-				   gs_desc->base_file_sz);
-			gs_desc->base_file_mmap = NULL;
+			pmem_unmap(gs_desc->base_mmap,
+					   gs_desc->base_mmap_sz);
+			gs_desc->base_mmap = NULL;
+			gs_desc->base_mmap_sz = 0;
+			gs_desc->base_mmap_is_pmem = 0;
 		}
-		if (gs_desc->redo_log_mmap)
+		if (gs_desc->redo_mmap)
 		{
-			pmem_unmap(gs_desc->redo_log_mmap,
-					   gs_desc->redo_log_sz);
-			gs_desc->redo_log_mmap = NULL;
+			pmem_unmap(gs_desc->redo_mmap,
+					   gs_desc->redo_mmap_sz);
+			gs_desc->redo_mmap = NULL;
+			gs_desc->redo_mmap_sz = 0;
+			gs_desc->redo_mmap_is_pmem = 0;
 		}
 		PG_RE_THROW();
 	}
@@ -2054,17 +2612,16 @@ static bool
 GpuBufferUpdaterInitialLoad(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	kern_data_store *kds_head = &gs_desc->base_file_mmap->schema;
-	const char *ftable_name = gs_desc->base_file_mmap->ftable_name;
-	size_t		base_sz = kds_head->length;
-	size_t		extra_sz;
+	GpuStoreBaseFileHead *base_mmap = gs_desc->base_mmap;
+	kern_data_store *schema = &base_mmap->schema;
+	const char *ftable_name = base_mmap->ftable_name;
 	CUresult	rc;
 
 	/* main portion of the device buffer */
-	rc = cuMemAlloc(&gs_desc->gpu_main_devptr, base_sz);
+	rc = cuMemAlloc(&gs_desc->gpu_main_devptr, schema->length);
 	if (rc != CUDA_SUCCESS)
 		goto error_0;
-	rc = cuMemcpyHtoD(gs_desc->gpu_main_devptr, kds_head, base_sz);
+	rc = cuMemcpyHtoD(gs_desc->gpu_main_devptr, schema, schema->length);
 	if (rc != CUDA_SUCCESS)
 		goto error_1;
 	rc = cuIpcGetMemHandle(&gs_sstate->gpu_main_mhandle,
@@ -2072,19 +2629,18 @@ GpuBufferUpdaterInitialLoad(GpuStoreDesc *gs_desc)
 	if (rc != CUDA_SUCCESS)
 		goto error_1;
 	elog(LOG, "GstoreFdw: %s main buffer (sz: %lu) allocated",
-		 ftable_name, base_sz);
+		 ftable_name, schema->length);
 
 	/* extra portion of the device buffer (if needed) */
-	if (kds_head->has_varlena)
+	if (schema->has_varlena)
 	{
-		extra_sz = gs_desc->base_file_sz -
-			(offsetof(GpuStoreFileHead, schema) + base_sz);
-		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr, extra_sz);
+		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr,
+						schema->extra_hlength);
 		if (rc != CUDA_SUCCESS)
 			goto error_1;
 		rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr,
-						  (char *)kds_head + base_sz,
-						  extra_sz);
+						  (char *)schema + schema->extra_hoffset,
+						  schema->extra_hlength);
 		if (rc != CUDA_SUCCESS)
 			goto error_2;
 		rc = cuIpcGetMemHandle(&gs_sstate->gpu_extra_mhandle,
@@ -2093,7 +2649,7 @@ GpuBufferUpdaterInitialLoad(GpuStoreDesc *gs_desc)
 			goto error_2;
 
 		elog(LOG, "GstoreFdw: %s extra buffer (sz: %lu) allocated",
-			 ftable_name, extra_sz);
+			 ftable_name, schema->extra_hlength);
 	}
 	return true;
 

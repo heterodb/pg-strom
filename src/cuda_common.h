@@ -819,7 +819,7 @@ typedef struct {
 	NameData		attname;
 
 	/*
-	 * (only arrow format)
+	 * (only arrow/column format)
 	 * @attoptions keeps extra information of Apache Arrow type. Unlike
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
@@ -831,15 +831,6 @@ typedef struct {
 	cl_uint			values_length;
 	cl_uint			extra_offset;
 	cl_uint			extra_length;
-
-	/*
-	 * (only column format)
-	 * @va_offset is offset of the values array from the kds-head.
-	 * @va_length is length of the values array and extra area which is
-	 * used to dictionary of varlena or nullmap of fixed-length values.
-	 */
-//	cl_uint			va_offset;
-//	cl_uint			va_length;
 } kern_colmeta;
 
 /*
@@ -890,6 +881,17 @@ typedef struct {
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
 	cl_uint			nrows_per_block; /* average number of rows per
 									  * PostgreSQL block (only BLOCK format) */
+#ifndef __CUDACC__
+	/*
+	 * Offset to the extra buffer (only COLUMN format, with varlena)
+	 * at the host-side, shall not be refered at the device-side.
+	 */
+	cl_ulong		extra_hoffset;
+	cl_ulong		extra_hlength;
+#else
+	cl_ulong		__no_such_field__1;
+	cl_ulong		__no_such_field__2;
+#endif
 	cl_uint			nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
