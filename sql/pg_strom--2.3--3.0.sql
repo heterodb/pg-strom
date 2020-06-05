@@ -36,3 +36,20 @@ CREATE FUNCTION public.gstore_fdw_compaction(regclass)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_compaction'
   LANGUAGE C STRICT;
+
+SELECT pgstrom.define_shell_type('gstore_fdw_sysattr',6116,'pgstrom');
+CREATE FUNCTION pgstrom.gstore_fdw_sysattr_in(cstring)
+  RETURNS pgstrom.gstore_fdw_sysattr
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_sysattr_in'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.gstore_fdw_sysattr_out(pgstrom.gstore_fdw_sysattr)
+  RETURNS cstring
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_sysattr_out'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE TYPE pgstrom.gstore_fdw_sysattr
+(
+  INPUT = pgstrom.gstore_fdw_sysattr_in,
+  OUTPUT = pgstrom.gstore_fdw_sysattr_out,
+  INTERNALLENGTH = 12,
+  ALIGNMENT = int4
+);

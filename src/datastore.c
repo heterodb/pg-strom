@@ -123,12 +123,8 @@ KDS_fetch_datum_column(kern_data_store *kds,
 	Datum		datum;
 
 	Assert(cmeta >= &kds->colmeta[0] &&
-		   cmeta <  &kds->colmeta[kds->nr_colmeta]);
-	if (row_index >= kds->nitems)
-	{
-		*p_isnull = true;
-		return 0;
-	}
+		   cmeta <  &kds->colmeta[kds->nr_colmeta] &&
+		   row_index < kds->nrooms);
 
 	if (cmeta->nullmap_offset != 0)
 	{
@@ -269,29 +265,26 @@ KDS_fetch_tuple_column(TupleTableSlot *slot,
 					   size_t row_index)
 {
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	int			j;
 
 	Assert(kds->format == KDS_FORMAT_COLUMN);
 	Assert(kds->ncols >= tupdesc->natts);
-	if (row_index < kds->nitems)
-	{
-		Datum		datum;
-		bool		isnull;
-		int			j;
+	Assert(row_index < kds->nrooms);
 
-		for (j=0; j < tupdesc->natts; j++)
-		{
-			kern_colmeta   *cmeta = &kds->colmeta[j];
-			
-			datum = KDS_fetch_datum_column(kds, cmeta, row_index, &isnull);
-			slot->tts_isnull[j] = isnull;
-			slot->tts_values[j] = datum;
-		}
-		ExecStoreVirtualTuple(slot);
-
-		return true;
-	}
 	ExecClearTuple(slot);
-	return false;
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[j];
+		Datum	datum;
+		bool	isnull;
+
+		datum = KDS_fetch_datum_column(kds, cmeta, row_index, &isnull);
+		slot->tts_isnull[j] = isnull;
+		slot->tts_values[j] = datum;
+	}
+	ExecStoreVirtualTuple(slot);
+
+	return true;
 }
 
 static inline bool

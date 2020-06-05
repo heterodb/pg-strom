@@ -58,7 +58,6 @@ typedef struct {
  * heap-tuple structure, and update-mask at tail of the transaction log.
  * It indicates which columns were updated on UPDATE to save the extra
  * buffer area if schema contains variable-length field.
- * If no update-mask is given, we assume all the columns are updated.
  * INSERT/DELETE log shall not have the update-mask, and usually DELETE
  * log does not carray any values (t_infomask & HEAP_NATTS_MASK) == 0.
  */
@@ -67,7 +66,7 @@ typedef struct {
 	cl_uint		length;
 	cl_ulong	timestamp;
 	cl_uint		rowid;
-	cl_uint		update_mask;
+	cl_uint		xid;
 	HeapTupleHeaderData htup;
 } GstoreTxLogRow;
 
@@ -101,7 +100,26 @@ typedef struct {
 	cl_uint		length;
 	cl_ulong	timestamp;
 	cl_uint		nitems;
+	cl_uint		xid;
 	cl_uint		rowids[1];		/* variable length */
 } GstoreTxLogCommit;
+
+
+/*
+ * GstoreFdwSysattr
+ *
+ * A fixed-length system attribute for each row.
+ */
+typedef struct
+{
+	cl_uint		xmin;
+	cl_uint		xmax;
+#ifndef __CUDACC__
+	cl_uint		cid;
+#else
+	/* get_global_id() of the thread who tries to update the row. */
+	cl_uint		owner_id;
+#endif
+} GstoreFdwSysattr;
 
 #endif /* CUDA_GSTORE_H */

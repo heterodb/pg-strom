@@ -1325,14 +1325,7 @@ extern void pgstrom_init_plcuda(void);
 /*
  * gstore_fdw.c
  */
-extern void gstore_fdw_table_options(Oid gstore_oid,
-									 int *p_pinning, int *p_format);
-extern void gstore_fdw_column_options(Oid gstore_oid, AttrNumber attnum,
-									  int *p_compression);
-extern bool relation_is_gstore_fdw(Oid table_oid);
-extern bool type_is_reggstore(Oid type_oid);
-extern Oid	get_reggstore_type_oid(void);
-#define REGGSTOREOID		get_reggstore_type_oid()
+#define GSTORE_FDW_SYSATTR_OID		6116
 extern void pgstrom_init_gstore_fdw(void);
 
 /*
