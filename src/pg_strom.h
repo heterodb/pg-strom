@@ -1317,50 +1317,6 @@ extern void assign_gpupreagg_session_info(StringInfo buf,
 extern void pgstrom_init_gpupreagg(void);
 
 /*
- * pl_cuda.c
- */
-extern const char *pgsql_host_plcuda_code;
-extern void pgstrom_init_plcuda(void);
-
-/*
- * gstore_fdw.c
- */
-#define GSTORE_FDW_SYSATTR_OID		6116
-extern void pgstrom_init_gstore_fdw(void);
-
-/*
- * gstore_buf.c
- */
-typedef struct GpuStoreBuffer	GpuStoreBuffer;
-
-extern GpuStoreBuffer *GpuStoreBufferCreate(Relation frel,
-											Snapshot snapshot);
-extern CUdeviceptr GpuStoreBufferOpenDevPtr(GpuContext *gcontext,
-											GpuStoreBuffer *gs_buffer);
-extern int GpuStoreBufferGetTuple(Relation frel,
-								  Snapshot snapshot,
-								  TupleTableSlot *slot,
-								  GpuStoreBuffer *gs_buffer,
-								  size_t row_index,
-								  bool needs_system_columns);
-extern void GpuStoreBufferAppendRow(GpuStoreBuffer *gs_buffer,
-									TupleDesc tupdesc,
-									Snapshot snapshot,
-									TupleTableSlot *slot);
-extern void GpuStoreBufferRemoveRow(GpuStoreBuffer *gs_buffer,
-									TupleDesc tupdesc,
-									Snapshot snapshot,
-									size_t old_index);
-extern void GpuStoreBufferGetSize(Oid table_oid, Snapshot snapshot,
-								  Size *p_rawsize,
-								  Size *p_nitems);
-extern size_t GpuStoreBufferGetNitems(GpuStoreBuffer *gs_buffer);
-
-extern void pgstrom_init_gstore_buf(void);
-
-extern GstoreIpcHandle *__pgstrom_gstore_export_ipchandle(Oid ftable_oid);
-
-/*
  * arrow_fdw.c and arrow_read.c
  */
 extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
@@ -1388,8 +1344,7 @@ extern void pgstrom_init_arrow_fdw(void);
 /*
  * gstore_fdw.c
  */
-extern void BeginGstoreFdwGpuBufferUpdate(void);
-extern bool DispatchGstoreFdwGpuUpdator(CUcontext *cuda_context_array);
+#define GSTORE_FDW_SYSATTR_OID		6116
 extern void pgstrom_init_gstore_fdw(void);
 
 /*
