@@ -23,10 +23,10 @@
 /*
  * GpuStoreMaintainerCommand
  */
-#define GSTORE_MAINTAINER_CMD__INITIAL_LOAD		'I'
-#define GSTORE_MAINTAINER_CMD__APPLY_REDO		'A'
-#define GSTORE_MAINTAINER_CMD__EXPAND_EXTRA		'E'
-#define GSTORE_MAINTAINER_CMD__COMPACTION		'C'
+#define GSTORE_BACKGROUND_CMD__INITIAL_LOAD		'I'
+#define GSTORE_BACKGROUND_CMD__APPLY_REDO		'A'
+#define GSTORE_BACKGROUND_CMD__EXPAND_EXTRA		'E'
+#define GSTORE_BACKGROUND_CMD__COMPACTION		'C'
 typedef struct
 {
 	dlist_node	chain;
@@ -35,6 +35,13 @@ typedef struct
 	Latch	   *backend;		/* MyLatch of the backend, if any */
 	int			command;		/* one of GSTORE_MAINTAIN_CMD__* */
 	CUresult	retval;
+	/* for APPLY_REDO */
+	uint64		suffix;
+	uint64		start_pos;
+	uint64		end_pos;
+	uint32		num_log_entries;
+
+	
 } GpuStoreMaintainerCommand;
 
 /*
@@ -47,10 +54,10 @@ typedef struct
 	char		kicker_next_database[NAMEDATALEN];
 
 	/* IPC to GpuStore Background Worker */
-	Latch	   *maintainer_latch;
-	slock_t		maintainer_cmd_lock;
-	dlist_head	maintainer_cmd_queue;
-	dlist_head	maintainer_free_cmds;
+	Latch	   *background_latch;
+	slock_t		background_cmd_lock;
+	dlist_head	background_cmd_queue;
+	dlist_head	background_free_cmds;
 	GpuStoreMaintainerCommand __maintainer_cmds[120];
 
 	/* Hash slot for GpuStoreSharedState */
@@ -238,7 +245,6 @@ static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static bool		pgstrom_gstore_fdw_auto_preload;	/* GUC */
-static bool		gstore_fdw_bgworker_got_signal = false;
 
 /* ---- Forward declarations ---- */
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
@@ -252,6 +258,8 @@ void  GstoreFdwStartupKicker(Datum arg);
 void  GstoreFdwMaintainerMain(Datum arg);
 
 static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
+static CUresult	gstoreFdwInvokeInitialLoad(Relation frel, bool is_async);
+static CUresult gstoreFdwInvokeApplyRedo(Relation frel, bool is_async);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
 static cl_uint	gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc,
 									   cl_uint min_rowid);
@@ -2922,83 +2930,6 @@ gstoreFdwBuildHashIndex(Relation frel, File base_fdesc,
 }
 #endif
 
-static CUresult
-GpuStoreMaintainerInitialLoad(Oid ftable_oid, bool is_async)
-{
-	GpuStoreMaintainerCommand *cmd;
-	dlist_node	   *dnode;
-	CUresult		retval = CUDA_SUCCESS;
-
-	SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-	for (;;)
-	{
-		if (!gstore_shared_head->maintainer_latch)
-		{
-			SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-			return CUDA_ERROR_NOT_READY;
-		}
-		if (!dlist_is_empty(&gstore_shared_head->maintainer_free_cmds))
-			break;
-		SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-		CHECK_FOR_INTERRUPTS();
-		pg_usleep(20000L);		/* 20msec */
-		SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-	}
-	dnode = dlist_pop_head_node(&gstore_shared_head->maintainer_free_cmds);
-	cmd = dlist_container(GpuStoreMaintainerCommand, chain, dnode);
-	memset(cmd, 0, sizeof(GpuStoreMaintainerCommand));
-	cmd->database_oid = MyDatabaseId;
-	cmd->ftable_oid = ftable_oid;
-	cmd->backend = (is_async ? NULL : MyLatch);
-	cmd->command = GSTORE_MAINTAINER_CMD__INITIAL_LOAD;
-	cmd->retval = (CUresult) UINT_MAX;
-	dlist_push_tail(&gstore_shared_head->maintainer_cmd_queue,
-					&cmd->chain);
-	SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-	SetLatch(gstore_shared_head->maintainer_latch);
-	if (!is_async)
-	{
-		SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-		while (cmd->retval == (CUresult) UINT_MAX)
-		{
-			SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-			PG_TRY();
-			{
-				int		ev = WaitLatch(MyLatch,
-									   WL_LATCH_SET |
-									   WL_TIMEOUT |
-									   WL_POSTMASTER_DEATH,
-									   1000L,
-									   PG_WAIT_EXTENSION);
-				ResetLatch(MyLatch);
-				if (ev & WL_POSTMASTER_DEATH)
-					elog(FATAL, "unexpected postmaster dead");
-				CHECK_FOR_INTERRUPTS();
-			}
-			PG_CATCH();
-			{
-				/*
-				 * switch the request to async mode - because nobody can
-				 * return the GpuStoreMaintainerCommand to free-list.
-				 */
-				SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-				if (cmd->retval == (CUresult) UINT_MAX)
-					cmd->backend = NULL;
-				else
-					dlist_push_tail(&gstore_shared_head->maintainer_free_cmds,
-									&cmd->chain);
-				SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-			SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-		}
-		retval = cmd->retval;
-		SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-	}
-	return retval;
-}
-
 static GpuStoreSharedState *
 gstoreFdwCreateSharedState(Relation frel)
 {
@@ -3112,7 +3043,7 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 	GpuStoreDesc *gs_desc;
 	Oid			hkey[2];
 	bool		found;
-	bool		kick_initial_load = false;
+	bool		invoke_initial_load = false;
 
 	hkey[0] = MyDatabaseId;
 	hkey[1] = RelationGetRelid(frel);
@@ -3151,7 +3082,7 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 				dlist_push_tail(&gstore_shared_head->gstore_sstate_slot[hindex],
 								&gs_sstate->hash_chain);
 				gs_desc->gs_sstate = gs_sstate;
-				kick_initial_load = true;
+				invoke_initial_load = true;
 			}
 			/* ensure to map main/redo files */
 			gs_desc->base_mmap_revision = UINT_MAX;
@@ -3166,8 +3097,8 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 		PG_END_TRY();
 		SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
 		/* Preload GPU Memory Store, if new segment */
-		if (kick_initial_load)
-			GpuStoreMaintainerInitialLoad(RelationGetRelid(frel), true);
+		if (invoke_initial_load)
+			gstoreFdwInvokeInitialLoad(frel, true);
 	}
 	/* ensure the file mapping is latest */
 	gstoreFdwSetupGpuStoreDesc(gs_desc, true);
@@ -3297,11 +3228,107 @@ pgstrom_gstore_fdw_sysattr_out(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_sysattr_out);
 
 /*
- * GstoreFdwMaintainerInitialLoad
+ * __gstoreFdwInvokeBackgroundCommand
  */
 static CUresult
-GstoreFdwMaintainerInitialLoad(GpuStoreDesc *gs_desc,
-							   GpuStoreMaintainerCommand *cmd)
+__gstoreFdwInvokeBackgroundCommand(GpuStoreMaintainerCommand *__lcmd, bool is_async)
+{
+	GpuStoreMaintainerCommand *cmd;
+	dlist_node	   *dnode;
+	CUresult		retval = CUDA_SUCCESS;
+
+	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	for (;;)
+	{
+		if (!gstore_shared_head->background_latch)
+		{
+			SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+			return CUDA_ERROR_NOT_READY;
+		}
+		if (!dlist_is_empty(&gstore_shared_head->background_free_cmds))
+			break;
+		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+		CHECK_FOR_INTERRUPTS();
+		pg_usleep(20000L);		/* 20msec */
+		SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	}
+	dnode = dlist_pop_head_node(&gstore_shared_head->background_free_cmds);
+	cmd = dlist_container(GpuStoreMaintainerCommand, chain, dnode);
+	memcpy(cmd, __lcmd, sizeof(GpuStoreMaintainerCommand));
+	cmd->backend = (is_async ? NULL : MyLatch);
+	cmd->retval = (CUresult) UINT_MAX;
+	dlist_push_tail(&gstore_shared_head->background_cmd_queue,
+					&cmd->chain);
+	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	SetLatch(gstore_shared_head->background_latch);
+	if (!is_async)
+	{
+		SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+		while (cmd->retval == (CUresult) UINT_MAX)
+		{
+			SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+			PG_TRY();
+			{
+				int		ev = WaitLatch(MyLatch,
+									   WL_LATCH_SET |
+									   WL_TIMEOUT |
+									   WL_POSTMASTER_DEATH,
+									   1000L,
+									   PG_WAIT_EXTENSION);
+				ResetLatch(MyLatch);
+				if (ev & WL_POSTMASTER_DEATH)
+					elog(FATAL, "unexpected postmaster dead");
+				CHECK_FOR_INTERRUPTS();
+			}
+			PG_CATCH();
+			{
+				/*
+				 * switch the request to async mode - because nobody can
+				 * return the GpuStoreMaintainerCommand to free-list.
+				 */
+				SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+				if (cmd->retval == (CUresult) UINT_MAX)
+					cmd->backend = NULL;
+				else
+					dlist_push_tail(&gstore_shared_head->background_free_cmds,
+									&cmd->chain);
+				SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+		}
+		retval = cmd->retval;
+		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	}
+	return retval;
+}
+
+static CUresult
+gstoreFdwInvokeInitialLoad(Relation frel, bool is_async)
+{
+	GpuStoreMaintainerCommand lcmd;
+
+	memset(&lcmd, 0, sizeof(GpuStoreMaintainerCommand));
+	lcmd.database_oid = MyDatabaseId;
+	lcmd.ftable_oid = RelationGetRelid(frel);
+	lcmd.backend = (is_async ? NULL : MyLatch);
+	lcmd.command = GSTORE_BACKGROUND_CMD__INITIAL_LOAD;
+
+	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+}
+
+
+
+
+
+
+
+/*
+ * GstoreFdwBackgrondInitialLoad
+ */
+static CUresult
+GstoreFdwBackgroundInitialLoad(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreBaseFileHead *base_mmap = gs_desc->base_mmap;
@@ -3359,18 +3386,185 @@ error_0:
 }
 
 /*
- * GstoreFdwMaintainerDispatchCommand
+ * GSTORE_BACKGROUND_CMD__APPLY_REDO command
  */
 static CUresult
-GstoreFdwMaintainerDispatchCommand(GpuStoreMaintainerCommand *cmd)
+GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
+								GpuStoreMaintainerCommand *cmd)
 {
-	static CUcontext *__cuda_context_array = NULL;
-	GpuStoreDesc *gs_desc;
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	GpuStoreRedoLogHead *redo_mmap = NULL;
+	size_t		redo_mmap_sz;
+	int			redo_mmap_is_pmem;
+	const char *redo_log_file;
+	size_t		length;
+	size_t		offset;
+	int			index;
+	char	   *cur_pos;
+	char	   *end_pos;
+	kern_gpustore_redolog *h_redo;
+	CUdeviceptr	m_redo = 0UL;
 	CUresult	rc;
+
+	/* device memory must be allocated */
+	if (gs_desc->gpu_main_devptr == 0UL)
+	{
+		rc = GstoreFdwBackgroundInitialLoad(gs_desc);
+		if (rc != CUDA_SUCCESS)
+			return rc;
+	}
+
+	Assert(cmd->start_pos <= cmd->end_pos);
+	if (cmd->suffix == 0)
+	{
+		if (cmd->start_pos == cmd->end_pos)
+			return CUDA_SUCCESS;
+		/* Log Apply from the latest REDO log buffer */
+		redo_mmap = gs_desc->redo_mmap;
+		redo_mmap_sz = gs_desc->redo_mmap_sz;
+		redo_mmap_is_pmem = gs_desc->redo_mmap_is_pmem;
+		redo_log_file = gs_sstate->redo_log_file;
+	}
+	else
+	{
+		redo_log_file = alloca(strlen(gs_sstate->redo_log_file) + 100);
+		sprintf((char *)redo_log_file, "%s.%lu",
+				gs_sstate->redo_log_file, cmd->suffix);
+		/*
+		 * special case if old redo-log is already applied to GPU buffer,
+		 * we can skip kernel invocation. Just run post-processing.
+		 */
+		if (cmd->start_pos == cmd->end_pos)
+			goto post_processing;
+		redo_mmap = pmem_map_file(redo_log_file, 0,
+								  0, 0600,
+								  &redo_mmap_sz,
+								  &redo_mmap_is_pmem);
+		if (!redo_mmap)
+		{
+			elog(LOG, "failed on pmem_map_file('%s'): %m", redo_log_file);
+			return CUDA_ERROR_MAP_FAILED;
+		}
+	}
+
+	/*
+	 * allocation of managed memory for index + redo-log buffer
+	 */
+	length = (MAXALIGN(offsetof(kern_gpustore_redolog,
+								log_index[cmd->num_log_entries])) +
+			  MAXALIGN(cmd->end_pos - cmd->start_pos));
+	rc = cuMemAllocManaged(&m_redo, length, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "failed on cuMemAllocManaged(%zu): %s",
+			 length, errorText(rc));
+		goto error_1;
+	}
+	h_redo = (kern_gpustore_redolog *)m_redo;
+	memset(h_redo, 0, offsetof(kern_gpustore_redolog, log_index));
+	h_redo->nrooms = cmd->num_log_entries;
+	h_redo->length = length;
+
+	cur_pos = ((char *)redo_mmap + cmd->start_pos);
+	end_pos = ((char *)redo_mmap + cmd->end_pos);
+	offset = MAXALIGN(offsetof(kern_gpustore_redolog,
+							   log_index[cmd->num_log_entries]));
+	for (index=0; cur_pos + offsetof(GstoreTxLogCommon, data) < end_pos; index++)
+	{
+		GstoreTxLogCommon *tx_log = (GstoreTxLogCommon *)cur_pos;
+
+		memcpy((char *)h_redo + offset, tx_log, tx_log->length);
+		h_redo->log_index[index++] = __kds_packed(offset);
+		offset += MAXALIGN(tx_log->length);
+	}
+	h_redo->nitems = index;
+
+	/*
+	 * Kick the kernel to apply REDO log
+	 */
+	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
+	//call kernel
+	//sync stream
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+
+	/*
+	 * Post-process of the old REDO log file
+	 */
+post_processing:
+	if (cmd->suffix != 0)
+	{
+		if (!gs_sstate->redo_log_backup_dir)
+		{
+			/* no backup, REDO log can be removed */
+			if (unlink(redo_log_file) != 0)
+				elog(WARNING, "failed on unlink('%s'): %m", redo_log_file);
+		}
+		else
+		{
+			/* backup REDO log file, with human readable timestamp */
+			char	   *backup_cmd;
+			time_t		tval;
+			int			fsec;
+			struct tm	tm;
+
+			backup_cmd = alloca(strlen(gs_sstate->redo_log_backup_dir) +
+								2 * strlen(gs_sstate->redo_log_file) + 100);
+			tval = cmd->suffix / 1000000;
+			fsec = cmd->suffix % 1000000;
+			localtime_r(&tval, &tm);
+			sprintf(backup_cmd,
+					"/usr/bin/mv -f '%s' '%s/%s.%04d-%02d-%02d_%02d:%02d:%02d.%06d' &",
+					redo_log_file,
+					gs_sstate->redo_log_backup_dir,
+					gs_sstate->redo_log_file,
+					tm.tm_year + 1900,
+					tm.tm_mon,
+					tm.tm_mday,
+					tm.tm_hour,
+					tm.tm_min,
+					tm.tm_sec,
+					fsec);
+			system(backup_cmd);
+		}
+	}
+
+error_2:
+	if (m_redo != 0UL)
+	{
+		CUresult	__rc = cuMemFree(m_redo);
+		if (__rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree: %s", errorText(__rc));
+	}
+error_1:
+	if (cmd->suffix != 0 && redo_mmap != NULL)
+	{
+		if (pmem_unmap(redo_mmap, redo_mmap_sz) != 0)
+			elog(WARNING, "failed on pmem_unmap('%s'): %m", redo_log_file);
+	}
+	return rc;
+}
+
+/*
+ * gstoreFdwBgWorkerXXXX
+ */
+void
+gstoreFdwBgWorkerBegin(void)
+{
+	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	gstore_shared_head->background_latch = MyLatch;
+	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+}
+
+static CUresult
+__gstoreFdwBgWorkerDispatchCommand(GpuStoreMaintainerCommand *cmd,
+								 CUcontext *cuda_context_array)
+{
+	GpuStoreDesc *gs_desc;
 	Oid			hkey[2];
 	bool		found;
 	int			cuda_dindex;
-
+	CUresult	rc;
+	
 	/*
 	 * Lookup GpuStoreDesc, but never construct GpuStoreSharedState
 	 * unlike gstoreFdwLookupGpuStoreDesc. It is not our role.
@@ -3423,33 +3617,7 @@ GstoreFdwMaintainerDispatchCommand(GpuStoreMaintainerCommand *cmd)
 	/* Switch CUDA Context to the target device */
 	cuda_dindex = gs_desc->gs_sstate->cuda_dindex;
 	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
-	if (!__cuda_context_array)
-	{
-		__cuda_context_array = MemoryContextAllocZero(TopMemoryContext,
-													  numDevAttrs * sizeof(CUcontext));
-	}
-	if (__cuda_context_array[cuda_dindex] == NULL)
-	{
-		CUdevice	cuda_device;
-		CUcontext	cuda_context;
-
-		rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(LOG, "failed on cuDeviceGet: %s", errorText(rc));
-			return rc;
-		}
-		rc = cuCtxCreate(&cuda_context,
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(LOG, "failed on cuCtxCreate: %s", errorText(rc));
-			return rc;
-		}
-		__cuda_context_array[cuda_dindex] = cuda_context;
-	}
-	rc = cuCtxSetCurrent(__cuda_context_array[cuda_dindex]);
+	rc = cuCtxSetCurrent(cuda_context_array[cuda_dindex]);
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(LOG, "failed on cuCtxSetCurrent: %s", errorText(rc));
@@ -3459,12 +3627,14 @@ GstoreFdwMaintainerDispatchCommand(GpuStoreMaintainerCommand *cmd)
 	/* handle the command for each */
 	switch (cmd->command)
 	{
-		case GSTORE_MAINTAINER_CMD__INITIAL_LOAD:
-			rc = GstoreFdwMaintainerInitialLoad(gs_desc, cmd);
+		case GSTORE_BACKGROUND_CMD__INITIAL_LOAD:
+			rc = GstoreFdwBackgroundInitialLoad(gs_desc);
 			break;
-		case GSTORE_MAINTAINER_CMD__APPLY_REDO:
-		case GSTORE_MAINTAINER_CMD__EXPAND_EXTRA:
-		case GSTORE_MAINTAINER_CMD__COMPACTION:
+		case GSTORE_BACKGROUND_CMD__APPLY_REDO:
+			rc = GstoreFdwBackgroundApplyRedoLog(gs_desc, cmd);
+			break;
+		case GSTORE_BACKGROUND_CMD__EXPAND_EXTRA:
+		case GSTORE_BACKGROUND_CMD__COMPACTION:
 		default:
 			elog(LOG, "Unsupported Gstore maintainer command: %d", cmd->command);
 			rc = CUDA_ERROR_INVALID_VALUE;
@@ -3475,99 +3645,55 @@ GstoreFdwMaintainerDispatchCommand(GpuStoreMaintainerCommand *cmd)
 	return rc;
 }
 
-/*
- * GstoreFdwMaintainerMain
- */
-static void
-GstoreFdwMaintainerSigTerm(SIGNAL_ARGS)
+bool
+gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array)
 {
-	int		saved_errno = errno;
+	GpuStoreMaintainerCommand *cmd;
+	dlist_node	   *dnode;
 
-	gstore_fdw_bgworker_got_signal = true;
+	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	if (dlist_is_empty(&gstore_shared_head->background_cmd_queue))
+	{
+		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+		return true;	/* gstoreFdw allows bgworker to sleep */
+	}
+	dnode = dlist_pop_head_node(&gstore_shared_head->background_cmd_queue);
+	cmd = dlist_container(GpuStoreMaintainerCommand, chain, dnode);
+	memset(&cmd->chain, 0, sizeof(dlist_node));
+	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
 
-	pg_memory_barrier();
+	cmd->retval = __gstoreFdwBgWorkerDispatchCommand(cmd, cuda_context_array);
 
-	SetLatch(MyLatch);
-
-	errno = saved_errno;
+	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	if (cmd->backend)
+	{
+		/*
+		 * A backend process who kicked GpuStore maintainer is waiting
+		 * for the response. It shall check the retval, and return the
+		 * GpuStoreMaintainerCommand to free list again.
+		 */
+		SetLatch(cmd->backend);
+	}
+	else
+	{
+		/*
+		 * GpuStore maintainer was kicked asynchronously, so nobody is
+		 * waiting for the response, thus, GpuStoreMaintainerCommand
+		 * must be backed to the free list again.
+		 */
+		dlist_push_head(&gstore_shared_head->background_free_cmds,
+						&cmd->chain);
+	}
+	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	return false;
 }
 
 void
-GstoreFdwMaintainerMain(Datum arg)
+gstoreFdwBgWorkerEnd(void)
 {
-	CUresult	rc;
-	
-	pqsignal(SIGTERM, GstoreFdwMaintainerSigTerm);
-	BackgroundWorkerUnblockSignals();
-
-	/* init CUDA Driver API */
-	if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
-		elog(ERROR, "failed on setenv: %m");
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit: %s", errorText(rc));
-
-	/*
-	 * Event Loop
-	 */
-	SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-	gstore_shared_head->maintainer_latch = MyLatch;
-	while (!gstore_fdw_bgworker_got_signal)
-	{
-		GpuStoreMaintainerCommand *cmd;
-		dlist_node *dnode;
-		int			ev;
-
-		if (!dlist_is_empty(&gstore_shared_head->maintainer_cmd_queue))
-		{
-			dnode = dlist_pop_head_node(&gstore_shared_head->maintainer_cmd_queue);
-			cmd = dlist_container(GpuStoreMaintainerCommand, chain, dnode);
-			memset(&cmd->chain, 0, sizeof(dlist_node));
-			SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-
-			elog(LOG, "maintainer got a request");
-			cmd->retval = GstoreFdwMaintainerDispatchCommand(cmd);
-
-			SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-			if (cmd->backend)
-			{
-				/*
-				 * A backend process who kicked GpuStore maintainer is waiting
-				 * for the response. It shall check the retval, and return the
-				 * GpuStoreMaintainerCommand to free list again.
-				 */
-				SetLatch(cmd->backend);
-			}
-			else
-			{
-				/*
-				 * GpuStore maintainer was kicked asynchronously, so nobody is
-				 * waiting for the response, thus, GpuStoreMaintainerCommand
-				 * must be backed to the free list again.
-				 */
-				dlist_push_head(&gstore_shared_head->maintainer_free_cmds,
-								&cmd->chain);
-			}
-		}
-		else
-		{
-			SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
-
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   5000L,
-						   PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
-			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "unexpected Postmaster dead");
-
-			SpinLockAcquire(&gstore_shared_head->maintainer_cmd_lock);
-		}
-	}
-	gstore_shared_head->maintainer_latch = NULL;
-	SpinLockRelease(&gstore_shared_head->maintainer_cmd_lock);
+	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	gstore_shared_head->background_latch = NULL;
+	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
 }
 
 /*
@@ -3673,15 +3799,15 @@ pgstrom_startup_gstore_fdw(void)
 	if (found)
 		elog(ERROR, "Bug? GpuStoreSharedHead already exists");
 	memset(gstore_shared_head, 0, sizeof(GpuStoreSharedHead));
-	SpinLockInit(&gstore_shared_head->maintainer_cmd_lock);
-	dlist_init(&gstore_shared_head->maintainer_cmd_queue);
-	dlist_init(&gstore_shared_head->maintainer_free_cmds);
+	SpinLockInit(&gstore_shared_head->background_cmd_lock);
+	dlist_init(&gstore_shared_head->background_cmd_queue);
+	dlist_init(&gstore_shared_head->background_free_cmds);
 	for (i=0; i < lengthof(gstore_shared_head->__maintainer_cmds); i++)
 	{
 		GpuStoreMaintainerCommand *cmd;
 
 		cmd = &gstore_shared_head->__maintainer_cmds[i];
-		dlist_push_tail(&gstore_shared_head->maintainer_free_cmds,
+		dlist_push_tail(&gstore_shared_head->background_free_cmds,
 						&cmd->chain);
 	}
 
@@ -3774,23 +3900,6 @@ pgstrom_init_gstore_fdw(void)
 		worker.bgw_main_arg = 0;
 		RegisterBackgroundWorker(&worker);
 	}
-
-	/*
-	 * Background worker to manage GPU data store
-	 */
-	memset(&worker, 0, sizeof(BackgroundWorker));
-	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-			 "GPU Store Maintainer");
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
-	worker.bgw_restart_time = 1;
-	snprintf(worker.bgw_library_name, BGW_MAXLEN,
-			 "$libdir/pg_strom");
-	snprintf(worker.bgw_function_name, BGW_MAXLEN,
-			 "GstoreFdwMaintainerMain");
-	worker.bgw_main_arg = 0;
-	RegisterBackgroundWorker(&worker);
-
 	/* Request for the static shared memory */
 	RequestAddinShmemSpace(STROMALIGN(sizeof(GpuStoreSharedHead)));
 	shmem_startup_next = shmem_startup_hook;

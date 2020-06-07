@@ -122,4 +122,16 @@ typedef struct
 #endif
 } GstoreFdwSysattr;
 
+/*
+ * kern_gpustore_redolog
+ */
+typedef struct
+{
+	kern_errorbuf	kerror;
+	size_t			length;
+	cl_uint			nrooms;
+	cl_uint			nitems;
+	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
+} kern_gpustore_redolog;
+
 #endif /* CUDA_GSTORE_H */

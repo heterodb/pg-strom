@@ -1345,6 +1345,9 @@ extern void pgstrom_init_arrow_fdw(void);
  * gstore_fdw.c
  */
 #define GSTORE_FDW_SYSATTR_OID		6116
+extern void gstoreFdwBgWorkerBegin(void);
+extern bool gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array);
+extern void gstoreFdwBgWorkerEnd(void);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

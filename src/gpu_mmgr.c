@@ -1174,6 +1174,69 @@ gpummgrHandleFreePreserved(GpuMemPreservedRequest *gmemp_req)
 }
 
 /*
+ * gpummgrBgWorker(Begin|Dispatch|End)
+ */
+static void
+gpummgrBgWorkerBegin(void)
+{
+	SpinLockAcquire(&gmemp_head->lock);
+    gmemp_head->gmemp_keeper = MyLatch;
+	SpinLockRelease(&gmemp_head->lock);
+}
+
+static bool
+gpummgrBgWorkerDispatch(CUcontext *cuda_context_array)
+{
+	GpuMemPreservedRequest *gmemp_req;
+	dlist_node *dnode;
+	CUcontext	cuda_context;
+	CUresult	rc;
+
+	SpinLockAcquire(&gmemp_head->lock);
+	if (dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+	{
+		SpinLockRelease(&gmemp_head->lock);
+		return true;	/* gpummgr can go to sleep */
+	}
+	dnode = dlist_pop_head_node(&gmemp_head->gmemp_req_pending_list);
+	gmemp_req = dlist_container(GpuMemPreservedRequest, chain, dnode);
+	memset(&gmemp_req->chain, 0, sizeof(dlist_node));
+	SpinLockRelease(&gmemp_head->lock);
+
+	Assert(gmemp_req->cuda_dindex >= 0 &&
+		   gmemp_req->cuda_dindex < numDevAttrs);
+	cuda_context = cuda_context_array[gmemp_req->cuda_dindex];
+
+	rc = cuCtxPushCurrent(cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
+	else
+	{
+		if (gmemp_req->bytesize > 0)
+			rc = gpummgrHandleAllocPreserved(gmemp_req);
+		else if (gmemp_req->bytesize == 0)
+			rc = gpummgrHandleFreePreserved(gmemp_req);
+		else
+			rc = CUDA_ERROR_INVALID_VALUE;
+
+		if (cuCtxPopCurrent(NULL) != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent(NULL)");
+	}
+	gmemp_req->result = rc;
+	SetLatch(gmemp_req->backend);
+
+	return false;
+}
+
+static void
+gpummgrBgWorkerEnd(void)
+{
+	SpinLockAcquire(&gmemp_head->lock);
+	gmemp_head->gmemp_keeper = NULL;
+	SpinLockRelease(&gmemp_head->lock);
+}
+
+/*
  * gpummgrBgWorkerSigTerm
  */
 static void
@@ -1229,66 +1292,30 @@ gpummgrBgWorkerMain(Datum arg)
 			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
 	}
 	/* initial setup */
-	gmemp_head->gmemp_keeper = MyLatch;
-	pg_memory_barrier();
-
+	gpummgrBgWorkerBegin();
+	gstoreFdwBgWorkerBegin();
 	/*
 	 * Event loop
 	 */
 	while (!gpummgr_bgworker_got_signal)
 	{
-		SpinLockAcquire(&gmemp_head->lock);
-		if (!dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+		if (gpummgrBgWorkerDispatch(cuda_context_array) &
+			gstoreFdwBgWorkerDispatch(cuda_context_array))
 		{
-			GpuMemPreservedRequest *gmemp_req;
-			dlist_node *dnode;
-			CUcontext	cuda_context;
-			CUresult	rc;
-
-			dnode = dlist_pop_head_node(&gmemp_head->gmemp_req_pending_list);
-			gmemp_req = dlist_container(GpuMemPreservedRequest, chain, dnode);
-			memset(&gmemp_req->chain, 0, sizeof(dlist_node));
-			SpinLockRelease(&gmemp_head->lock);
-
-			Assert(gmemp_req->cuda_dindex >= 0 &&
-				   gmemp_req->cuda_dindex < numDevAttrs);
-			cuda_context = cuda_context_array[gmemp_req->cuda_dindex];
-
-			rc = cuCtxPushCurrent(cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
-			else
-			{
-				if (gmemp_req->bytesize > 0)
-					rc = gpummgrHandleAllocPreserved(gmemp_req);
-				else if (gmemp_req->bytesize == 0)
-					rc = gpummgrHandleFreePreserved(gmemp_req);
-				else
-					rc = CUDA_ERROR_INVALID_VALUE;
-
-				if (cuCtxPopCurrent(NULL) != CUDA_SUCCESS)
-					elog(WARNING, "failed on cuCtxPopCurrent(NULL)");
-			}
-			gmemp_req->result = rc;
-			SetLatch(gmemp_req->backend);
-		}
-		else
-		{
-			int			ev;
-
-			SpinLockRelease(&gmemp_head->lock);
-
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   5000L,
-						   PG_WAIT_EXTENSION);
+			int		ev = WaitLatch(MyLatch,
+								   WL_LATCH_SET |
+								   WL_TIMEOUT |
+								   WL_POSTMASTER_DEATH,
+								   4000L,
+								   PG_WAIT_EXTENSION);
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected Postmaster dead");
 		}
 	}
+	/* Exit */
+	gpummgrBgWorkerEnd();
+	gstoreFdwBgWorkerEnd();
 }
 
 /*
