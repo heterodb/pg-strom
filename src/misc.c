@@ -1359,7 +1359,8 @@ PG_FUNCTION_INFO_V1(pgstrom_abort_if);
  * write, regardless of i/o-size and signal interrupts.
  */
 ssize_t
-__readFile(int fdesc, void *buffer, size_t nbytes)
+__readFileSignal(int fdesc, void *buffer, size_t nbytes,
+				 bool interruptible)
 {
 	ssize_t		rv, count = 0;
 
@@ -1369,7 +1370,40 @@ __readFile(int fdesc, void *buffer, size_t nbytes)
 		{
 			if (errno == EINTR)
 			{
-				CHECK_FOR_INTERRUPTS();
+				if (interruptible)
+					CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			return rv;
+		}
+		else if (rv == 0)
+			break;
+		count += rv;
+	} while (count < nbytes);
+
+	return count;
+}
+
+ssize_t
+__readFile(int fdesc, void *buffer, size_t nbytes)
+{
+	return __readFileSignal(fdesc, buffer, nbytes, true);
+}
+
+ssize_t
+__writeFileSignal(int fdesc, const void *buffer, size_t nbytes,
+				  bool interruptible)
+{
+	ssize_t		rv, count = 0;
+
+	do {
+		rv = write(fdesc, (const char *)buffer + count, nbytes - count);
+		if (rv < 0)
+		{
+			if (errno == EINTR)
+			{
+				if (interruptible)
+					CHECK_FOR_INTERRUPTS();
 				continue;
 			}
 			return rv;
@@ -1385,26 +1419,9 @@ __readFile(int fdesc, void *buffer, size_t nbytes)
 ssize_t
 __writeFile(int fdesc, const void *buffer, size_t nbytes)
 {
-	ssize_t		rv, count = 0;
-
-	do {
-		rv = write(fdesc, (const char *)buffer + count, nbytes - count);
-		if (rv < 0)
-		{
-			if (errno == EINTR)
-			{
-				CHECK_FOR_INTERRUPTS();
-				continue;
-			}
-			return -1;
-		}
-		else if (rv == 0)
-			break;
-		count += rv;
-	} while (count < nbytes);
-
-	return count;
+	return __writeFileSignal(fdesc, buffer, nbytes, true);
 }
+
 
 /*
  * mmap/munmap wrapper that is automatically unmapped on regarding to

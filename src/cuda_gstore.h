@@ -25,8 +25,10 @@
 #define GSTORE_TX_LOG__COMMIT		(GSTORE_TX_LOG__MAGIC | 'C')
 
 typedef struct {
+	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
+	cl_uint		xid;
 	cl_ulong	timestamp;
 	char		data[1];		/* variable length */
 } GstoreTxLogCommon;
@@ -36,8 +38,10 @@ typedef struct {
  *
  * +----------------------+        -----
  * | GstoreTxLogCommon    |          ^
+ * | - u32 crc32          |          |
  * | - u32 type           |          |
  * | - u32 length       o-------> length
+ * | - u32 xid            |          |
  * | - u64 timestamp      |          |
  * +----------------------|          |
  * | - u32 rowid          |          |
@@ -62,11 +66,14 @@ typedef struct {
  * log does not carray any values (t_infomask & HEAP_NATTS_MASK) == 0.
  */
 typedef struct {
+	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
-	cl_uint		rowid;
 	cl_uint		xid;
+	cl_ulong	timestamp;
+	/* above are common */
+	cl_uint		rowid;
+	cl_uint		update_mask;
 	HeapTupleHeaderData htup;
 } GstoreTxLogRow;
 
@@ -75,11 +82,12 @@ typedef struct {
  *
  * +---------------------+    -----
  * | GstoreTxLogCommon   |      ^
+ * | - u32 crc32         |      |
  * | - u32 type          |      |
  * | - u32 length      o---> length
+ * | - u32 xid           |      |
  * | - u64 timestamp     |      |
  * +---------------------|      |
- * | - u32 xid           |      |
  * | - u32 nitems        |      |
  * | - u32 rowids[]      |      |
  * | +-------------------+      |
@@ -96,11 +104,13 @@ typedef struct {
  * and (2) Xmax=Invalid or not own transactions.
  */
 typedef struct {
+	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
-	cl_uint		nitems;
 	cl_uint		xid;
+	cl_ulong	timestamp;
+	/* above fields are common */
+	cl_uint		nitems;
 	cl_uint		rowids[1];		/* variable length */
 } GstoreTxLogCommit;
 
