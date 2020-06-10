@@ -300,40 +300,48 @@ static inline cl_uint atomicMax32(volatile cl_uint *ptr, cl_uint newval)
 }
 
 /* ---- Lock/unlock rows/hash-slot ---- */
-static inline void
+static inline bool
 gstoreFdwSpinLockBaseRow(GpuStoreDesc *gs_desc, cl_uint rowid)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	cl_uint		lindex = rowid % GSTORE_NUM_BASE_ROW_LOCKS;
 
 	SpinLockAcquire(&gs_sstate->base_row_lock[lindex]);
+
+	return true;
 }
 
-static inline void
+static inline bool
 gstoreFdwSpinUnlockBaseRow(GpuStoreDesc *gs_desc, cl_uint rowid)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	cl_uint		lindex = rowid % GSTORE_NUM_BASE_ROW_LOCKS;
 
 	SpinLockRelease(&gs_sstate->base_row_lock[lindex]);
+
+	return false;
 }
 
-static inline void
+static inline bool
 gstoreFdwSpinLockHashSlot(GpuStoreDesc *gs_desc, Datum hash)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	cl_uint		lindex = hash % GSTORE_NUM_HASH_SLOT_LOCKS;
 
 	SpinLockAcquire(&gs_sstate->hash_slot_lock[lindex]);
+
+	return true;
 }
 
-static inline void
+static inline bool
 gstoreFdwSpinUnlockHashSlot(GpuStoreDesc *gs_desc, Datum hash)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	cl_uint		lindex = hash % GSTORE_NUM_HASH_SLOT_LOCKS;
 
 	SpinLockRelease(&gs_sstate->hash_slot_lock[lindex]);
+
+	return false;
 }
 
 
@@ -479,7 +487,7 @@ GstoreGetForeignPaths(PlannerInfo *root,
 }
 
 /*
- * gstoreCheckVisibilityFor(Read|Write)
+ * gstoreCheckVisibilityForXXXX
  *
  * It checks visibility of row on the GPU-Store. Caller must lock the rowid
  * on invocation.
@@ -634,6 +642,100 @@ gstoreCheckVisibilityForWrite(GpuStoreDesc *gs_desc, cl_uint rowid,
 	}
 	return true;	/* completely dead, and removable */
 }
+
+/*
+ * gstoreCheckVisibilityForIndex
+ *
+ * It checks row's visibility on the primary-key duplication checks.
+ * Caller must not hold any row-spinlock.
+ * It returns positive (1) for visible, zero for invisible, or -1 for pending to
+ * update/delete. If -1 is returned, caller must wait for commit/abort of the
+ * blocker transaction, then retry violation checks.
+ */
+static int
+gstoreCheckVisibilityForIndex(GpuStoreDesc *gs_desc, cl_uint rowid)
+{
+	kern_data_store *kds = &gs_desc->base_mmap->schema;
+	kern_colmeta   *cmeta = &kds->colmeta[kds->ncols - 1];
+	GstoreFdwSysattr *sysattr;
+	Datum			datum;
+	bool			isnull;	
+
+	datum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+	Assert(!isnull);
+	sysattr = (GstoreFdwSysattr *)DatumGetPointer(datum);
+
+	if (sysattr->xmin != FrozenTransactionId)
+	{
+		if (sysattr->xmin == InvalidTransactionId)
+		{
+			/* row is not written yet, but on the index. corruption? */
+			elog(WARNING, "index corruption? rowid=%u has xmin=Invalid", rowid);
+			return 0;
+		}
+		else if (TransactionIdIsCurrentTransactionId(sysattr->xmin))
+		{
+			if (sysattr->xmax == InvalidTransactionId)
+				return 1;	/* not deleted yet */
+			if (sysattr->xmax == FrozenTransactionId)
+				return 0;	/* deleted, and committed */
+			if (!TransactionIdIsCurrentTransactionId(sysattr->xmax))
+				return -1;	/* deleted in other transaction, but not commited.
+							 * so, caller shall be blocked by row-lock. */
+		}
+		else if (TransactionIdIsInProgress(sysattr->xmin))
+		{
+			/* inserted by the concurrent transaction; must be blocked */
+			return -1;
+		}
+		else if (!TransactionIdDidCommit(sysattr->xmin))
+		{
+			/* not in progress, not committed, so either aborted or crashed */
+			return 0;
+		}
+	}
+	/* Ok, row is inserted and committed */
+	if (sysattr->xmax == InvalidTransactionId)
+		return 1;		/* row still lives */
+	if (sysattr->xmax != FrozenTransactionId)
+	{
+		if (TransactionIdIsCurrentTransactionId(sysattr->xmax))
+		{
+			/*
+			 * deleted by the current transaction. it should be invisible
+			 * for primary key checks, regardless of the command-id.
+			 */
+			return 0;
+		}
+		else if (TransactionIdIsInProgress(sysattr->xmax))
+		{
+			/* removed by other transaction, but not committed yet */
+			return -1;
+		}
+		else if (TransactionIdDidCommit(sysattr->xmax))
+		{
+			/* deleter is already committed */
+			return 0;
+		}
+		else
+		{
+			/* deleter is aborted or crashed */
+			return 1;
+		}
+	}
+	return 0;	/* completely dead, and removable */
+}
+
+
+
+
+
+
+
+
+
+
+
 
 
 static ForeignScan *
@@ -1143,7 +1245,7 @@ gstoreFdwAppendCommitLog(GpuStoreModifiedRows *gs_modrows,
 		c_log->xid = gs_modrows->xid;
 		c_log->timestamp = GetCurrentTimestamp();
 		c_log->nitems = 0;
-		gs_modrows->buf.len = offsetof(GstoreTxLogCommit, rowids[0]);
+		gs_modrows->buf.len += offsetof(GstoreTxLogCommit, rowids[0]);
 
 		gs_modrows->curr = c_log;
 	}
@@ -1298,6 +1400,7 @@ GstoreExecForeignInsert(EState *estate,
 										  gs_mstate->oldestXmin))
 			break;
 		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+		elog(INFO, "rowid=%u is not possible", rowid);
 	}
 	/* set up user defined attributes under the row-lock */
 	PG_TRY();
@@ -2073,57 +2176,96 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	kern_data_store	*kds = &gs_desc->base_mmap->schema;
-	kern_colmeta   *cmeta = &kds->colmeta[gs_sstate->primary_key - 1];
+	kern_colmeta   *cmeta;
 	TypeCacheEntry *tcache;
-	Datum			datum;
+	Datum			kdatum;
 	Datum			hash;
 	bool			isnull;
-	cl_uint		   *rowmap;
+	bool			is_locked;
 
-	if (gs_sstate->primary_key < 1 ||
-		gs_sstate->primary_key >= kds->ncols)
-		return;		/* no primary key is configured */
-	Assert(hash_index != NULL);
-	rowmap = &hash_index->slots[hash_index->nslots];
+	if (!hash_index)
+		return;		/* no primary key index */
+	Assert(gs_sstate->primary_key > 0 &&
+		   gs_sstate->primary_key <= kds->ncols);
+	Assert(hash_index->nrooms == kds->nrooms);
 	if (rowid >= hash_index->nrooms)
-		elog(ERROR, "index corruption? rowid=%u is larger than index's nrooms=%lu",
+		elog(ERROR, "Bug? rowid=%u is larger than index's nrooms=%lu",
 			 rowid, hash_index->nrooms);
-
+	/* calculation of hash-value for the PK */
+	cmeta = &kds->colmeta[gs_sstate->primary_key - 1];
 	tcache = lookup_type_cache(cmeta->atttypid,
 							   TYPECACHE_EQ_OPR_FINFO |
 							   TYPECACHE_HASH_PROC_FINFO);
-	datum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+	kdatum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
 	if (isnull)
 		elog(ERROR, "primary key '%s' of foreign table '%s' is NULL",
 			 NameStr(cmeta->attname), get_rel_name(kds->table_oid));
-	hash = FunctionCall1(&tcache->hash_proc_finfo, datum);
-	gstoreFdwSpinLockHashSlot(gs_desc, hash);
-	/* Insert RowId to the Hash-Index */
+	hash = FunctionCall1(&tcache->hash_proc_finfo, kdatum);
+	is_locked = gstoreFdwSpinLockHashSlot(gs_desc, hash);
 	PG_TRY();
 	{
-		kern_colmeta *smeta = &kds->colmeta[kds->ncols - 1];
-		cl_uint		k = hash % hash_index->nslots;
-		cl_uint	   *next = &hash_index->slots[k];
+		cl_uint	   *rowmap = &hash_index->slots[hash_index->nslots];
 		cl_uint		curr_id;
+		cl_uint		k = hash % hash_index->nslots;
 
-		/*
-		 * duplication check of primary key
-		 */
-		while ((curr_id = *next) < hash_index->nrooms)
+		/* duplication check of the primary key */
+		ConditionVariablePrepareToSleep(&gstore_shared_head->row_lock_cond);
+	wakeup_retry:
+		for (curr_id = hash_index->slots[k];
+			 curr_id < hash_index->nrooms;
+			 curr_id = rowmap[curr_id])
 		{
-			GstoreFdwSysattr *sysattr = (GstoreFdwSysattr *)
-				KDS_fetch_datum_column(kds, smeta, curr_id, &isnull);
+			int		visible;
+			Datum	cdatum;
 
-		}		
+			visible = gstoreCheckVisibilityForIndex(gs_desc, curr_id);
+			if (visible == 0)
+				continue;
+			cdatum = KDS_fetch_datum_column(kds, cmeta, curr_id, &isnull);
+			if (isnull)
+			{
+				elog(WARNING, "Bug? primary key '%s' has NULL at rowid=%u",
+					 NameStr(cmeta->attname), curr_id);
+				continue;
+			}
+			if (DatumGetBool(FunctionCall2(&tcache->eq_opr_finfo,
+										   kdatum, cdatum)))
+			{
+				if (visible > 0)
+				{
+					Oid		typoutput;
+					bool	typisvarlena;
+
+					getTypeOutputInfo(cmeta->atttypid,
+									  &typoutput,
+									  &typisvarlena);
+					elog(ERROR,"duplicate primary key violation; %s = %s already exists",
+						 NameStr(cmeta->attname),
+						 OidOutputFunctionCall(typoutput, kdatum));
+				}
+				/*
+				 * NOTE: This row has duplicated value, however, not committed
+				 * yet, thus, this session must be blocked by the row-level lock.
+				 */
+				is_locked = gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+				ConditionVariableSleep(&gstore_shared_head->row_lock_cond,
+									   PG_WAIT_LOCK);
+				is_locked = gstoreFdwSpinLockHashSlot(gs_desc, hash);
+				goto wakeup_retry;
+			}
+		}
+		/* Ok, no primary key violation */
 		rowmap[rowid] = hash_index->slots[k];
 		hash_index->slots[k] = rowid;
 	}
 	PG_CATCH();
 	{
-		gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+		if (is_locked)
+			gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	Assert(is_locked);
 	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 
 	elog(INFO, "Insert PK of rowid=%u, hash=%08lx", rowid, hash);
