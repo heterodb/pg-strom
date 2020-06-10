@@ -111,7 +111,7 @@ typedef struct {
 	cl_ulong	timestamp;
 	/* above fields are common */
 	cl_uint		nitems;
-	cl_uint		rowids[1];		/* variable length */
+	cl_uint		rowids[13];		/* variable length to to 13 items (=80bytes) */
 } GstoreTxLogCommit;
 
 
