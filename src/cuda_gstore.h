@@ -88,13 +88,14 @@ typedef struct {
  * | - u32 xid           |      |
  * | - u64 timestamp     |      |
  * +---------------------|      |
- * | - u32 nitems        |      |
- * | - u32 rowids[]      |      |
+ * | - u16 nitems        |      |
+ * | - char data[]       |      |
  * | +-------------------+      |
- * | | rowid-1 committed |      |
- * | | rowid-2 committed |      |
+ * | | 'I' + newid(u32)  |      |
+ * | | 'U' + oldid(u32)  |      |
+ * | |     + newid(u32)  |      |
+ * | | 'D' + oldid(u32)  |      |
  * | |        :          |      |
- * | | rowid-N committed |      v
  * +-+-------------------+    -----
  *
  * GstoreTxLogCommit is just a hint for CPU code, but informs GPU code
@@ -102,7 +103,18 @@ typedef struct {
  * xmin/xmax field of GPU device buffer according to the commit-log.
  * GPU code can see the rows only (1) Xmin=Frozen or own transactions
  * and (2) Xmax=Invalid or not own transactions.
+ * The affected rows are stored with leading character byte; 'I' for
+ * INSERT, 'U' for UPDATE, or 'D' for DELETE.
+ * UPDATE takes two rowids for new and old rows, and others take one.
+ *  'I' + newid (u32) : 5bytes for each
+ *  'U' + oldid (u32) + newid (u32) : 9bytes for each
+ *  'D' + oldid (u32) : 5bytes for each
+ *
+ * 32bit RowId are not aligned, so need to copy when GPU code references.
  */
+#define GSTORE_TX_LOG_COMMIT_LIMIT		118
+#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	\
+	offsetof(GstoreTxLogCommit, data[GSTORE_TX_LOG_COMMIT_LIMIT + 32])
 typedef struct {
 	cl_uint		crc;
 	cl_uint		type;
@@ -110,10 +122,9 @@ typedef struct {
 	cl_uint		xid;
 	cl_ulong	timestamp;
 	/* above fields are common */
-	cl_uint		nitems;
-	cl_uint		rowids[13];		/* variable length to to 13 items (=80bytes) */
+	cl_ushort	nitems;
+	char		data[1];		/* variable length */
 } GstoreTxLogCommit;
-
 
 /*
  * GstoreFdwSysattr

@@ -229,7 +229,7 @@ typedef struct
 } GpuStoreFdwState;
 
 /*
- * GpuStoreModifiedRows
+ * GpuStoreModifiedRows - track rowid modified for each transaction
  */
 typedef struct
 {
@@ -240,6 +240,18 @@ typedef struct
 	GstoreTxLogCommit *curr;
 	StringInfoData	buf;			/* raw logs to be written */
 } GpuStoreModifiedRows;
+
+/*
+ * GpuStoreFdwModify - runtime state object for WRITE
+ */
+typedef struct
+{
+	GpuStoreDesc   *gs_desc;
+	Bitmapset	   *updatedCols;
+	cl_uint			next_rowid;
+	TransactionId	oldestXmin;
+	GpuStoreModifiedRows *gs_modrows;
+} GpuStoreFdwModify;
 
 /* ---- static variables ---- */
 static FdwRoutine	pgstrom_gstore_fdw_routine;
@@ -274,9 +286,6 @@ static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
 											  cl_uint rowid);
 static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc,
 											  cl_uint rowid);
-static int		gstoreFdwLookupByPrimaryKey(GpuStoreDesc *gs_desc,
-											Datum key_value,
-											StringInfo result);
 
 /* ---- Atomic operations ---- */
 static inline cl_uint atomicRead32(volatile cl_uint *ptr)
@@ -653,7 +662,7 @@ gstoreCheckVisibilityForWrite(GpuStoreDesc *gs_desc, cl_uint rowid,
  * blocker transaction, then retry violation checks.
  */
 static int
-gstoreCheckVisibilityForIndex(GpuStoreDesc *gs_desc, cl_uint rowid)
+__gstoreCheckVisibilityForIndexNoLock(GpuStoreDesc *gs_desc, cl_uint rowid)
 {
 	kern_data_store *kds = &gs_desc->base_mmap->schema;
 	kern_colmeta   *cmeta = &kds->colmeta[kds->ncols - 1];
@@ -726,15 +735,26 @@ gstoreCheckVisibilityForIndex(GpuStoreDesc *gs_desc, cl_uint rowid)
 	return 0;	/* completely dead, and removable */
 }
 
+static int
+gstoreCheckVisibilityForIndex(GpuStoreDesc *gs_desc, cl_uint rowid)
+{
+	int		retval;
 
+	gstoreFdwSpinLockBaseRow(gs_desc, rowid);
+	PG_TRY();
+	{
+		retval = __gstoreCheckVisibilityForIndexNoLock(gs_desc, rowid);
+	}
+	PG_CATCH();
+	{
+		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
 
-
-
-
-
-
-
-
+	return retval;
+}
 
 
 
@@ -760,23 +780,12 @@ GstoreGetForeignPlan(PlannerInfo *root,
 										FirstLowInvalidHeapAttributeNumber);
 	}
 
-	i = -1;
-	while ((i = bms_next_member(referenced, i)) >= 0)
+	for (j = bms_next_member(referenced, -1);
+		 j >= 0;
+		 j = bms_next_member(referenced, j))
 	{
-		j = i + FirstLowInvalidHeapAttributeNumber;
-		if (j == 0)
-		{
-			/* whole-row referenced */
-			attr_refs = NIL;
-			for (j=1; j <= baserel->max_attr; j++)
-				attr_refs = lappend_int(attr_refs, j);
-			break;
-		}
-		else if (j > 0)
-		{
-			/* user-defined columns */
-			attr_refs = lappend_int(attr_refs, j);
-		}
+		attr_refs = lappend_int(attr_refs, j +
+								FirstLowInvalidHeapAttributeNumber);
 	}
 
 	return make_foreignscan(tlist,
@@ -1208,52 +1217,77 @@ gstoreFdwAppendRedoLog(Relation frel,
 
 static void
 gstoreFdwAppendCommitLog(GpuStoreModifiedRows *gs_modrows,
-						 TransactionId xid, cl_uint rowid)
+						 cl_uint oldid, cl_uint rowid)
 {
-	GstoreTxLogCommit  *c_log = gs_modrows->curr;
+	GstoreTxLogCommit *c_log = gs_modrows->curr;
+	char	   *pos;
+	size_t		sz;
 
-	Assert(gs_modrows->xid == xid);
-	if (c_log != NULL && c_log->nitems == lengthof(c_log->rowids))
+	if (c_log->length > GSTORE_TX_LOG_COMMIT_LIMIT)
 	{
+		/*
+		 * Finalize the current commit log entry. If a GstoreTxLogCommit hold
+		 * many of rowid, it leads unexpected performance degradation at GPU,
+		 * because a particular CUDA core must loop all the rowid's
+		 * So, we have threshold at GSTORE_TX_LOG_COMMIT_LIMIT
+		 */
 		int			diff = MAXALIGN(gs_modrows->buf.len) - gs_modrows->buf.len;
 		uint64		zero = 0;
 		pg_crc32c	crc;
 
 		if (diff > 0)
 			appendBinaryStringInfo(&gs_modrows->buf, (char *)&zero, diff);
-
-		c_log->length = MAXALIGN(offsetof(GstoreTxLogCommit,
-										  rowids[c_log->nitems]));
+		c_log->length = MAXALIGN(c_log->length);
+		Assert((char *)c_log + c_log->length == (gs_modrows->buf.data +
+												 gs_modrows->buf.len));
 		INIT_CRC32C(crc);
-		COMP_CRC32C(crc, (char *)c_log + sizeof(cl_uint),
-					c_log->length - sizeof(cl_uint));
+		COMP_CRC32C(crc, (char *)c_log + sizeof(uint32), c_log->length - sizeof(uint32));
 		FIN_CRC32C(crc);
 		c_log->crc = crc;
 
-		c_log = NULL;	/* force to switch next */
-	}
-
-	if (!c_log)
-	{
+		/*
+		 * Switch to the next GstoreTxLogCommit entry
+		 */
+		enlargeStringInfo(&gs_modrows->buf, GSTORE_TX_LOG_COMMIT_ALLOCSZ);
 		c_log = (GstoreTxLogCommit *)(gs_modrows->buf.data +
 									  gs_modrows->buf.len);
-		enlargeStringInfo(&gs_modrows->buf, offsetof(GstoreTxLogCommit,
-													 rowids[0]));
 		c_log->crc = 0;		/* to be set later */
 		c_log->type = GSTORE_TX_LOG__COMMIT;
-		c_log->length = 0;	/* to be set later */
+		c_log->length = offsetof(GstoreTxLogCommit, data);
 		c_log->xid = gs_modrows->xid;
-		c_log->timestamp = GetCurrentTimestamp();
-		c_log->nitems = 0;
-		gs_modrows->buf.len += offsetof(GstoreTxLogCommit, rowids[0]);
-
+        c_log->timestamp = GetCurrentTimestamp();
+        c_log->nitems = 0;
 		gs_modrows->curr = c_log;
 	}
-	Assert((char *)c_log + offsetof(GstoreTxLogCommit, rowids[c_log->nitems]) ==
-		   gs_modrows->buf.data + gs_modrows->buf.len);
-	enlargeStringInfo(&gs_modrows->buf, sizeof(cl_uint));
-	c_log->rowids[c_log->nitems++] = rowid;
-	gs_modrows->buf.len += sizeof(cl_uint);
+	pos = (char *)c_log + c_log->length;
+	if (oldid != UINT_MAX && rowid != UINT_MAX)
+	{
+		/* UPDATE */
+		*pos = 'U';
+		memcpy(pos + 1, &oldid, sizeof(cl_uint));
+		memcpy(pos + 5, &rowid, sizeof(cl_uint));
+		sz = sizeof(char) + 2 * sizeof(cl_uint);
+	}
+	else if (oldid == UINT_MAX && rowid != UINT_MAX)
+	{
+		/* INSERT */
+		*pos = 'I';
+		memcpy(pos + 1, &rowid, sizeof(cl_uint));
+		sz = sizeof(char) + sizeof(cl_uint);
+	}
+	else if (oldid != UINT_MAX && rowid == UINT_MAX)
+	{
+		/* DELETE */
+		*pos = 'D';
+		memcpy(pos + 1, &oldid, sizeof(cl_uint));
+		sz = sizeof(char) + sizeof(cl_uint);
+	}
+	else
+		elog(ERROR, "unexpexted commit-log pattern");
+
+	c_log->nitems++;
+	c_log->length += sz;
+	gs_modrows->buf.len += sz;
 }
 
 static GpuStoreModifiedRows *
@@ -1263,6 +1297,7 @@ gstoreFdwLookupCommitLog(GpuStoreDesc *gs_desc, TransactionId xid)
 	dlist_iter		iter;
 	GpuStoreModifiedRows *gs_modrows;
 	MemoryContext	oldcxt;
+	GstoreTxLogCommit *c_log;
 
 	dlist_foreach(iter, &gstore_modified_rowids_slots[hindex])
 	{
@@ -1278,18 +1313,26 @@ gstoreFdwLookupCommitLog(GpuStoreDesc *gs_desc, TransactionId xid)
 	gs_modrows->ftable_oid = gs_desc->ftable_oid;
 	gs_modrows->xid = xid;
 	gs_modrows->gs_desc = gs_desc;
-	gs_modrows->curr = NULL;
 	initStringInfo(&gs_modrows->buf);
+	enlargeStringInfo(&gs_modrows->buf, GSTORE_TX_LOG_COMMIT_ALLOCSZ);
+	/* setup the first GstoreTxLogCommit */
+	c_log = (GstoreTxLogCommit *)gs_modrows->buf.data;
+	c_log->crc = 0;	/* set later */
+	c_log->type = GSTORE_TX_LOG__COMMIT;
+	c_log->length = offsetof(GstoreTxLogCommit, data);
+	c_log->xid = xid;
+	c_log->timestamp = GetCurrentTimestamp();
+	c_log->nitems = 0;
+	
+	gs_modrows->curr = c_log;
+	gs_modrows->buf.len = c_log->length;
+
 	MemoryContextSwitchTo(oldcxt);
 
 	dlist_push_tail(&gstore_modified_rowids_slots[hindex],
 					&gs_modrows->chain);
 	return gs_modrows;
 }
-
-
-
-
 
 static void
 GstoreAddForeignUpdateTargets(Query *parsetree,
@@ -1314,18 +1357,6 @@ GstoreAddForeignUpdateTargets(Query *parsetree,
 						  true);
 	parsetree->targetList = lappend(parsetree->targetList, tle);
 }
-
-/*
- * GpuStoreFdwModify - runtime state object for WRITE
- */
-typedef struct
-{
-	GpuStoreDesc   *gs_desc;
-	Bitmapset	   *updatedCols;
-	cl_uint			next_rowid;
-	TransactionId	oldestXmin;
-	GpuStoreModifiedRows *gs_modrows;
-} GpuStoreFdwModify;
 
 static List *
 GstorePlanForeignModify(PlannerInfo *root,
@@ -1414,7 +1445,7 @@ GstoreExecForeignInsert(EState *estate,
 
 		gstoreFdwAppendRedoLog(frel, gs_desc, GSTORE_TX_LOG__INSERT,
 							   rowid, xid, tuple, NULL);
-		gstoreFdwAppendCommitLog(gs_mstate->gs_modrows, xid, rowid);
+		gstoreFdwAppendCommitLog(gs_mstate->gs_modrows, UINT_MAX, rowid);
 
 		/* update base file */
 		for (j=0; j < natts; j++)
@@ -1434,6 +1465,7 @@ GstoreExecForeignInsert(EState *estate,
 	PG_CATCH();
 	{
 		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+		gstoreFdwReleaseRowId(gs_desc, rowid);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -2326,58 +2358,6 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 
 	elog(INFO, "Remove PK of rowid=%u, hash=%08lx", rowid, hash);
-}
-
-static int
-gstoreFdwLookupByPrimaryKey(GpuStoreDesc *gs_desc, Datum key_value,
-							StringInfo result)
-{
-	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
-	kern_data_store *kds = &gs_desc->base_mmap->schema;
-	kern_colmeta   *cmeta = &kds->colmeta[gs_sstate->primary_key - 1];
-	TypeCacheEntry *tcache;
-	Datum		hash;
-	cl_uint	   *rowmap;
-	cl_uint		rowid;
-	int			count;
-
-	if (gs_sstate->primary_key < 1 ||
-		gs_sstate->primary_key >= kds->ncols)
-		return -1;		/* no index configured */
-	Assert(hash_index != NULL);
-	rowmap = &hash_index->slots[hash_index->nslots];
-
-	tcache = lookup_type_cache(cmeta->atttypid,
-							   TYPECACHE_HASH_PROC_FINFO |
-							   TYPECACHE_EQ_OPR_FINFO);
-	hash = FunctionCall1(&tcache->hash_proc_finfo, key_value);
-
-	resetStringInfo(result);
-	/* walk on the hash-chain */
-	gstoreFdwSpinLockHashSlot(gs_desc, hash);
-	PG_TRY();
-	{
-		count = 0;
-		rowid = hash_index->slots[hash % hash_index->nslots];
-		while (rowid < hash_index->nrooms)
-		{
-			enlargeStringInfo(result, sizeof(cl_uint));
-			((cl_uint *)result->data)[count++] = rowid;
-			result->len += sizeof(cl_uint);
-
-			rowid = rowmap[rowid];
-		}
-	}
-	PG_CATCH();
-	{
-		gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
-
-	return count;
 }
 
 /*
@@ -3420,68 +3400,93 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 }
 
 /*
- * __gstoreFdwXactCallback
+ * __gstoreFdwXactCallbackOne
  */
 static void
-__gstoreFdwXactCallback(TransactionId xid, bool is_commit)
+__gstoreFdwXactCallbackOne(GpuStoreModifiedRows *gs_modrows, bool is_commit)
 {
-	dlist_mutable_iter iter;
-	int			hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
+	GstoreTxLogCommit *c_log = gs_modrows->curr;
+	char   *pos = gs_modrows->buf.data;
+	char   *end = (char *)c_log;
 
-	dlist_foreach_modify(iter, &gstore_modified_rowids_slots[hindex])
+	Assert((char *)c_log + c_log->length == (gs_modrows->buf.data +
+											 gs_modrows->buf.len));
+	if (c_log->nitems > 0)
 	{
-		GpuStoreModifiedRows *gs_modrows
-			= dlist_container(GpuStoreModifiedRows, chain, iter.cur);
+		/* finalize the last log item */
+		int			diff = MAXALIGN(gs_modrows->buf.len) - gs_modrows->buf.len;
+		uint64		zero = 0;
+		pg_crc32c	crc;
 
-		if (gs_modrows->xid != xid)
-			continue;
-		if (is_commit)
+		if (diff > 0)
+			appendBinaryStringInfo(&gs_modrows->buf, (char *)&zero, diff);
+		c_log->length = MAXALIGN(c_log->length);
+		INIT_CRC32C(crc);
+		COMP_CRC32C(crc, (char *)c_log + sizeof(uint32), c_log->length - sizeof(uint32));
+		FIN_CRC32C(crc);
+		c_log->crc = crc;
+
+		end += c_log->length;
+	}
+
+	while (pos < end)
+	{
+		GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)pos;
+
+		if (c_log->nitems > 0)
 		{
-			GstoreTxLogCommit *c_log = gs_modrows->curr;
-			char   *pos, *end;
+			char   *__pos = c_log->data;
+			int		count = 0;
 
-			/* finalize the last log item */
-			if (c_log)
+			for (count=0; count < c_log->nitems; count++)
 			{
-				int			diff = MAXALIGN(gs_modrows->buf.len) - gs_modrows->buf.len;
-				uint64		zero = 0;
-				pg_crc32c	crc;
+				cl_uint		oldid = UINT_MAX;
+				cl_uint		rowid = UINT_MAX;
 
-				if (diff > 0)
-					appendBinaryStringInfo(&gs_modrows->buf, (char *)&zero, diff);
-
-				c_log = gs_modrows->curr;
-				c_log->length = MAXALIGN(offsetof(GstoreTxLogCommit,
-												  rowids[c_log->nitems]));
-				INIT_CRC32C(crc);
-				COMP_CRC32C(crc, (char *)c_log + sizeof(cl_uint),
-							c_log->length - sizeof(cl_uint));
-				FIN_CRC32C(crc);
-				c_log->crc = crc;
-			}
-			pos = gs_modrows->buf.data;
-			end = gs_modrows->buf.data + gs_modrows->buf.len;
-
-			while (pos < end)
-			{
-				GstoreTxLogCommon *tx_log = (GstoreTxLogCommon *)pos;
+				if (*__pos == 'U')
 				{
-					GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)tx_log;
-					int		i;
-
-					for (i=0; i < c_log->nitems; i++)
-					{
-						elog(INFO, "CLOG[%d] {xid=%u rowid=%u}", i, c_log->xid, c_log->rowids[i]);
-					}
+					/* UPDATE */
+					Assert(__pos + 9 <= (char *)c_log + c_log->length);
+					memcpy(&oldid, __pos + 1, sizeof(cl_uint));
+					memcpy(&rowid, __pos + 5, sizeof(cl_uint));
+					if (is_commit)
+						gstoreFdwReleaseRowId(gs_modrows->gs_desc, oldid);
+					else
+						gstoreFdwReleaseRowId(gs_modrows->gs_desc, rowid);
+					__pos += 9;
+					elog(INFO, "Commit [U] old=%u, new=%u", oldid, rowid);
 				}
-				Assert(tx_log->length > offsetof(GstoreTxLogCommon, data));
-				__gstoreFdwAppendRedoLog(gs_modrows->gs_desc, tx_log);
-				pos += tx_log->length;
+				else if (*__pos == 'D')
+				{
+					/* DELETE */
+					Assert(__pos + 5 <= (char *)c_log + c_log->length);
+					memcpy(&oldid, __pos + 1, sizeof(cl_uint));
+					if (is_commit)
+						gstoreFdwReleaseRowId(gs_modrows->gs_desc, oldid);
+					__pos += 5;
+					elog(INFO, "Commit [D] old=%u", oldid);
+				}
+				else if (*__pos == 'I')
+				{
+					/* INSERT */
+					Assert(__pos + 5 <= (char *)c_log + c_log->length);
+					Assert(*__pos == 'I');
+					memcpy(&rowid, __pos + 1, sizeof(cl_uint));
+					if (!is_commit)
+						gstoreFdwReleaseRowId(gs_modrows->gs_desc, rowid);
+					__pos += 5;
+				}
+				else
+				{
+					elog(FATAL, "unexpected commit log type: %c", *__pos);
+				}
 			}
+			Assert(count == c_log->nitems);
+			if (is_commit)
+				__gstoreFdwAppendRedoLog(gs_modrows->gs_desc,
+										 (GstoreTxLogCommon *)c_log);
 		}
-		dlist_delete(&gs_modrows->chain);
-		pfree(gs_modrows->buf.data);
-		pfree(gs_modrows);
+		pos += c_log->length;
 	}
 }
 
@@ -3491,7 +3496,6 @@ __gstoreFdwXactCallback(TransactionId xid, bool is_commit)
 static void
 gstoreFdwXactCallback(XactEvent event, void *arg)
 {
-	TransactionId	xid;
 #if 0
 	elog(INFO, "XactCallback: ev=%s xid=%u",
 		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
@@ -3501,25 +3505,36 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		 event == XACT_EVENT_PRE_PREPARE ? "XACT_EVENT_PRE_PREPARE" : "????",
 		 GetCurrentTransactionIdIfAny());
 #endif
-	switch (event)
+	if (event == XACT_EVENT_PRE_COMMIT ||
+		event == XACT_EVENT_ABORT)
 	{
-		case XACT_EVENT_PRE_COMMIT:
-			xid = GetCurrentTransactionIdIfAny();
-			if (TransactionIdIsNormal(xid))
-				__gstoreFdwXactCallback(xid, true);
-			break;
-		case XACT_EVENT_COMMIT:
-			/* Wake up other backend processes blocked by row-level locks. */
-			ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
-			break;
-		case XACT_EVENT_ABORT:
-			xid = GetCurrentTransactionIdIfAny();
-			if (TransactionIdIsNormal(xid))
-				__gstoreFdwXactCallback(xid, false);
-			ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
-			break;
-		default:
-			break;
+		dlist_mutable_iter iter;
+		TransactionId	xid = GetCurrentTransactionIdIfAny();
+		int				hindex;
+
+		if (!TransactionIdIsNormal(xid))
+			return;
+		
+		hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
+		dlist_foreach_modify(iter, &gstore_modified_rowids_slots[hindex])
+		{
+			GpuStoreModifiedRows *gs_modrows
+				= dlist_container(GpuStoreModifiedRows, chain, iter.cur);
+
+			if (gs_modrows->xid == xid)
+			{
+				__gstoreFdwXactCallbackOne(gs_modrows, event == XACT_EVENT_PRE_COMMIT);
+				dlist_delete(&gs_modrows->chain);
+				pfree(gs_modrows->buf.data);
+				pfree(gs_modrows);
+			}
+		}
+	}
+	/* Wake up other backend processes blocked by row-level locks. */
+	if (event == XACT_EVENT_COMMIT ||
+		event == XACT_EVENT_ABORT)
+	{
+		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
 	}
 }
 
@@ -3531,7 +3546,6 @@ gstoreFdwSubXactCallback(SubXactEvent event,
 						 SubTransactionId mySubid,
 						 SubTransactionId parentSubid, void *arg)
 {
-	TransactionId	xid;
 #if 0
 	elog(INFO, "SubXactCallback: ev=%s xid=%u mySubid=%u parentSubid=%u",
 		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
@@ -3541,18 +3555,29 @@ gstoreFdwSubXactCallback(SubXactEvent event,
 		 GetCurrentTransactionIdIfAny(),
 		 mySubid, parentSubid);
 #endif
-	switch (event)
+	if (event == SUBXACT_EVENT_PRE_COMMIT_SUB ||
+		event == SUBXACT_EVENT_ABORT_SUB)
 	{
-		case SUBXACT_EVENT_PRE_COMMIT_SUB:
-			xid = GetCurrentTransactionIdIfAny();
-			__gstoreFdwXactCallback(xid, true);
-			break;
-		case SUBXACT_EVENT_ABORT_SUB:
-			xid = GetCurrentTransactionIdIfAny();
-			__gstoreFdwXactCallback(xid, false);
-			break;
-		default:
-			break;
+		dlist_mutable_iter iter;
+		TransactionId	xid = GetCurrentTransactionIdIfAny();
+		int				hindex;
+
+		if (!TransactionIdIsNormal(xid))
+			return;
+		hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
+        dlist_foreach_modify(iter, &gstore_modified_rowids_slots[hindex])
+		{
+			GpuStoreModifiedRows *gs_modrows
+				= dlist_container(GpuStoreModifiedRows, chain, iter.cur);
+			if (gs_modrows->xid == xid)
+			{
+				__gstoreFdwXactCallbackOne(gs_modrows,
+										   event == SUBXACT_EVENT_PRE_COMMIT_SUB);
+				dlist_delete(&gs_modrows->chain);
+				pfree(gs_modrows->buf.data);
+				pfree(gs_modrows);
+			}
+		}
 	}
 }
 
