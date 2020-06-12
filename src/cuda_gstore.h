@@ -112,9 +112,7 @@ typedef struct {
  *
  * 32bit RowId are not aligned, so need to copy when GPU code references.
  */
-#define GSTORE_TX_LOG_COMMIT_LIMIT		118
-#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	\
-	offsetof(GstoreTxLogCommit, data[GSTORE_TX_LOG_COMMIT_LIMIT + 32])
+#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	128
 typedef struct {
 	cl_uint		crc;
 	cl_uint		type;

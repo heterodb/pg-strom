@@ -229,17 +229,18 @@ typedef struct
 } GpuStoreFdwState;
 
 /*
- * GpuStoreModifiedRows - track rowid modified for each transaction
+ * GpuStoreUndoLogs 
  */
 typedef struct
 {
 	dlist_node		chain;
 	Oid				ftable_oid;
-	TransactionId	xid;
+	TransactionId	xid_top;
+	TransactionId	xid_sub;
 	GpuStoreDesc   *gs_desc;
-	GstoreTxLogCommit *curr;
-	StringInfoData	buf;			/* raw logs to be written */
-} GpuStoreModifiedRows;
+	cl_uint			nitems;
+	StringInfoData	buf;
+} GpuStoreUndoLogs;
 
 /*
  * GpuStoreFdwModify - runtime state object for WRITE
@@ -250,7 +251,7 @@ typedef struct
 	Bitmapset	   *updatedCols;
 	cl_uint			next_rowid;
 	TransactionId	oldestXmin;
-	GpuStoreModifiedRows *gs_modrows;
+	GpuStoreUndoLogs *gs_undo;
 } GpuStoreFdwModify;
 
 /* ---- static variables ---- */
@@ -259,8 +260,8 @@ static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB		   *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static bool			pgstrom_gstore_fdw_auto_preload;	/* GUC */
-#define GSTORE_MODIFIED_ROWIDS_NSLOTS		200
-static dlist_head	gstore_modified_rowids_slots[GSTORE_MODIFIED_ROWIDS_NSLOTS];
+#define GSTORE_UNDO_LOGS_NSLOTS			200
+static dlist_head	gstore_undo_logs_slots[GSTORE_UNDO_LOGS_NSLOTS];
 
 /* ---- Forward declarations ---- */
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
@@ -282,9 +283,9 @@ static cl_uint	gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc,
 									   cl_uint min_rowid);
 static void		gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid);
 
-static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
+static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
-static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc,
+static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
 
 /* ---- Atomic operations ---- */
@@ -571,13 +572,13 @@ gstoreCheckVisibilityForRead(GpuStoreDesc *gs_desc, cl_uint rowid,
 		else if (TransactionIdDidCommit(sysattr->xmax))
 		{
 			/* transaction that removed this row has been committed */
-			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
+//			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
 			sysattr->xmax = FrozenTransactionId;
 		}
 		else
 		{
 			/* deleter is aborted or crashed */
-			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
+//			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
 			sysattr->xmax = InvalidTransactionId;
 		}
 	}
@@ -638,13 +639,13 @@ gstoreCheckVisibilityForWrite(GpuStoreDesc *gs_desc, cl_uint rowid,
 			 */
 			if (!TransactionIdPrecedes(sysattr->xmax, oldestXmin))
 				return false;
-			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
+//			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
 			sysattr->xmax = FrozenTransactionId;
 		}
 		else
 		{
 			/* not in progress, not committed, so either aborted or crashed */
-			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
+//			gstoreFdwRemoveFromPrimaryKey(gs_desc, rowid);
 			sysattr->xmax = InvalidTransactionId;
 			return false;
 		}
@@ -1215,123 +1216,40 @@ gstoreFdwAppendRedoLog(Relation frel,
 	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)r_log);
 }
 
-static void
-gstoreFdwAppendCommitLog(GpuStoreModifiedRows *gs_modrows,
-						 cl_uint oldid, cl_uint rowid)
+static GpuStoreUndoLogs *
+gstoreFdwLookupUndoLogs(GpuStoreDesc *gs_desc)
 {
-	GstoreTxLogCommit *c_log = gs_modrows->curr;
-	char	   *pos;
-	size_t		sz;
-
-	if (c_log->length > GSTORE_TX_LOG_COMMIT_LIMIT)
-	{
-		/*
-		 * Finalize the current commit log entry. If a GstoreTxLogCommit hold
-		 * many of rowid, it leads unexpected performance degradation at GPU,
-		 * because a particular CUDA core must loop all the rowid's
-		 * So, we have threshold at GSTORE_TX_LOG_COMMIT_LIMIT
-		 */
-		int			diff = MAXALIGN(gs_modrows->buf.len) - gs_modrows->buf.len;
-		uint64		zero = 0;
-		pg_crc32c	crc;
-
-		if (diff > 0)
-			appendBinaryStringInfo(&gs_modrows->buf, (char *)&zero, diff);
-		c_log->length = MAXALIGN(c_log->length);
-		Assert((char *)c_log + c_log->length == (gs_modrows->buf.data +
-												 gs_modrows->buf.len));
-		INIT_CRC32C(crc);
-		COMP_CRC32C(crc, (char *)c_log + sizeof(uint32), c_log->length - sizeof(uint32));
-		FIN_CRC32C(crc);
-		c_log->crc = crc;
-
-		/*
-		 * Switch to the next GstoreTxLogCommit entry
-		 */
-		enlargeStringInfo(&gs_modrows->buf, GSTORE_TX_LOG_COMMIT_ALLOCSZ);
-		c_log = (GstoreTxLogCommit *)(gs_modrows->buf.data +
-									  gs_modrows->buf.len);
-		c_log->crc = 0;		/* to be set later */
-		c_log->type = GSTORE_TX_LOG__COMMIT;
-		c_log->length = offsetof(GstoreTxLogCommit, data);
-		c_log->xid = gs_modrows->xid;
-        c_log->timestamp = GetCurrentTimestamp();
-        c_log->nitems = 0;
-		gs_modrows->curr = c_log;
-	}
-	pos = (char *)c_log + c_log->length;
-	if (oldid != UINT_MAX && rowid != UINT_MAX)
-	{
-		/* UPDATE */
-		*pos = 'U';
-		memcpy(pos + 1, &oldid, sizeof(cl_uint));
-		memcpy(pos + 5, &rowid, sizeof(cl_uint));
-		sz = sizeof(char) + 2 * sizeof(cl_uint);
-	}
-	else if (oldid == UINT_MAX && rowid != UINT_MAX)
-	{
-		/* INSERT */
-		*pos = 'I';
-		memcpy(pos + 1, &rowid, sizeof(cl_uint));
-		sz = sizeof(char) + sizeof(cl_uint);
-	}
-	else if (oldid != UINT_MAX && rowid == UINT_MAX)
-	{
-		/* DELETE */
-		*pos = 'D';
-		memcpy(pos + 1, &oldid, sizeof(cl_uint));
-		sz = sizeof(char) + sizeof(cl_uint);
-	}
-	else
-		elog(ERROR, "unexpexted commit-log pattern");
-
-	c_log->nitems++;
-	c_log->length += sz;
-	gs_modrows->buf.len += sz;
-}
-
-static GpuStoreModifiedRows *
-gstoreFdwLookupCommitLog(GpuStoreDesc *gs_desc, TransactionId xid)
-{
-	int				hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
+	TransactionId	xid_top = GetTopTransactionId();
+	TransactionId	xid_sub = GetCurrentTransactionId();
+	int				hindex = xid_top % GSTORE_UNDO_LOGS_NSLOTS;
 	dlist_iter		iter;
-	GpuStoreModifiedRows *gs_modrows;
+	GpuStoreUndoLogs *gs_undo;
 	MemoryContext	oldcxt;
-	GstoreTxLogCommit *c_log;
 
-	dlist_foreach(iter, &gstore_modified_rowids_slots[hindex])
+	dlist_foreach(iter, &gstore_undo_logs_slots[hindex])
 	{
-		gs_modrows = dlist_container(GpuStoreModifiedRows, chain, iter.cur);
+		gs_undo = dlist_container(GpuStoreUndoLogs, chain, iter.cur);
 
-		if (gs_modrows->xid == xid &&
-			gs_modrows->ftable_oid == gs_desc->ftable_oid)
-			return gs_modrows;
+		if (gs_undo->xid_top == xid_top &&
+			gs_undo->xid_sub == xid_sub &&
+			gs_undo->ftable_oid == gs_desc->ftable_oid)
+			return gs_undo;
 	}
 	/* construct a new one */
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
-	gs_modrows = palloc0(sizeof(GpuStoreModifiedRows));
-	gs_modrows->ftable_oid = gs_desc->ftable_oid;
-	gs_modrows->xid = xid;
-	gs_modrows->gs_desc = gs_desc;
-	initStringInfo(&gs_modrows->buf);
-	enlargeStringInfo(&gs_modrows->buf, GSTORE_TX_LOG_COMMIT_ALLOCSZ);
-	/* setup the first GstoreTxLogCommit */
-	c_log = (GstoreTxLogCommit *)gs_modrows->buf.data;
-	c_log->crc = 0;	/* set later */
-	c_log->type = GSTORE_TX_LOG__COMMIT;
-	c_log->length = offsetof(GstoreTxLogCommit, data);
-	c_log->xid = xid;
-	c_log->timestamp = GetCurrentTimestamp();
-	c_log->nitems = 0;
-	
-	gs_modrows->curr = c_log;
-	gs_modrows->buf.len = c_log->length;
-
+	gs_undo = palloc0(sizeof(GpuStoreUndoLogs));
+	gs_undo->ftable_oid = gs_desc->ftable_oid;
+	gs_undo->xid_top = xid_top;
+	gs_undo->xid_sub = xid_sub;
+	elog(INFO, "xid_top=%u xid_sub=%u", gs_undo->xid_top, gs_undo->xid_sub);
+	gs_undo->gs_desc = gs_desc;
+	gs_undo->nitems = 0;
+	initStringInfo(&gs_undo->buf);
 	MemoryContextSwitchTo(oldcxt);
 
-	dlist_push_tail(&gstore_modified_rowids_slots[hindex],
-					&gs_modrows->chain);
-	return gs_modrows;
+	dlist_push_tail(&gstore_undo_logs_slots[hindex],
+					&gs_undo->chain);
+	return gs_undo;
 }
 
 static void
@@ -1399,8 +1317,7 @@ GstoreBeginForeignModify(ModifyTableState *mtstate,
 	gs_mstate->updatedCols = updatedCols;
 	gs_mstate->next_rowid = 0;
 	gs_mstate->oldestXmin = GetOldestXmin(frel, PROCARRAY_FLAGS_VACUUM);
-	gs_mstate->gs_modrows = gstoreFdwLookupCommitLog(gs_mstate->gs_desc,
-													 GetCurrentTransactionId());
+	gs_mstate->gs_undo = gstoreFdwLookupUndoLogs(gs_mstate->gs_desc);
 	rinfo->ri_FdwState = gs_mstate;
 }
 
@@ -1412,13 +1329,16 @@ GstoreExecForeignInsert(EState *estate,
 {
 	GpuStoreFdwModify *gs_mstate = rinfo->ri_FdwState;
 	GpuStoreDesc   *gs_desc = gs_mstate->gs_desc;
+	GpuStoreUndoLogs *gs_undo = gs_mstate->gs_undo;
 	kern_data_store *kds = &gs_desc->base_mmap->schema;
 	Relation		frel = rinfo->ri_RelationDesc;
 	cl_uint			rowid;
 	int				j, natts = RelationGetNumberOfAttributes(frel);
+	char			temp[8];
 
 	slot_getallattrs(slot);
 	/* new RowId allocation */
+	enlargeStringInfo(&gs_undo->buf, sizeof(char) + sizeof(cl_uint));
 	for (;;)
 	{
 		rowid = gstoreFdwAllocateRowId(gs_desc, gs_mstate->next_rowid);
@@ -1429,9 +1349,16 @@ GstoreExecForeignInsert(EState *estate,
 		gstoreFdwSpinLockBaseRow(gs_desc, rowid);
 		if (gstoreCheckVisibilityForWrite(gs_desc, rowid,
 										  gs_mstate->oldestXmin))
+		{
+			temp[0] = 'I';		/* INSERT */
+			*((cl_uint *)(temp + 1)) = rowid;
+			appendBinaryStringInfo(&gs_undo->buf, temp,
+								   sizeof(char) + sizeof(cl_uint));
+			gs_undo->nitems++;
 			break;
+		}
 		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-		elog(INFO, "rowid=%u is not possible", rowid);
+		gstoreFdwReleaseRowId(gs_desc, rowid);
 	}
 	/* set up user defined attributes under the row-lock */
 	PG_TRY();
@@ -1440,13 +1367,11 @@ GstoreExecForeignInsert(EState *estate,
 		HeapTuple		tuple;
 		cl_uint			xid = GetCurrentTransactionId();
 
-		/* append REDO/COMMIT logs */
+		/* append redo logs */
 		tuple = ExecFetchSlotHeapTuple(slot, false, false);
 
 		gstoreFdwAppendRedoLog(frel, gs_desc, GSTORE_TX_LOG__INSERT,
 							   rowid, xid, tuple, NULL);
-		gstoreFdwAppendCommitLog(gs_mstate->gs_modrows, UINT_MAX, rowid);
-
 		/* update base file */
 		for (j=0; j < natts; j++)
 		{
@@ -1471,7 +1396,7 @@ GstoreExecForeignInsert(EState *estate,
 	PG_END_TRY();
 	gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
 
-	gstoreFdwInsertIntoPrimaryKey(gs_desc, rowid);
+	gstoreFdwInsertIntoPrimaryKey(gs_undo, rowid);
 	
 	return slot;
 }
@@ -2203,8 +2128,9 @@ gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid)
  * ----------------------------------------------------------------
  */
 static void
-gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
+gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 {
+	GpuStoreDesc   *gs_desc = gs_undo->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	kern_data_store	*kds = &gs_desc->base_mmap->schema;
@@ -2214,6 +2140,7 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 	Datum			hash;
 	bool			isnull;
 	bool			is_locked;
+	char			temp[10];
 
 	if (!hash_index)
 		return;		/* no primary key index */
@@ -2223,6 +2150,8 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 	if (rowid >= hash_index->nrooms)
 		elog(ERROR, "Bug? rowid=%u is larger than index's nrooms=%lu",
 			 rowid, hash_index->nrooms);
+	enlargeStringInfo(&gs_undo->buf, sizeof(char) + 2 * sizeof(cl_uint));
+
 	/* calculation of hash-value for the PK */
 	cmeta = &kds->colmeta[gs_sstate->primary_key - 1];
 	tcache = lookup_type_cache(cmeta->atttypid,
@@ -2286,6 +2215,14 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 				goto wakeup_retry;
 			}
 		}
+		/* Undo Log - Add PK with hash(u32) + rowid(u32) */
+		temp[0] = 'A';
+		*((cl_uint *)(temp + 1)) = hash;
+		*((cl_uint *)(temp + 5)) = rowid;
+		appendBinaryStringInfo(&gs_undo->buf, temp,
+							   sizeof(char) + 2 * sizeof(cl_uint));
+		gs_undo->nitems++;
+		
 		/* Ok, no primary key violation */
 		rowmap[rowid] = hash_index->slots[k];
 		hash_index->slots[k] = rowid;
@@ -2304,8 +2241,9 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 }
 
 static void
-gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
+gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 {
+	GpuStoreDesc	*gs_desc = gs_undo->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	kern_data_store	*kds = &gs_desc->base_mmap->schema;
@@ -2314,13 +2252,11 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 	Datum			datum;
 	Datum			hash;
 	bool			isnull;
-	cl_uint		   *rowmap;
 
 	if (gs_sstate->primary_key < 1 ||
 		gs_sstate->primary_key >= kds->ncols)
 		return;		/* no primary key is configured */
 	Assert(hash_index != NULL);
-	rowmap = &hash_index->slots[hash_index->nslots];
 	if (rowid >= hash_index->nrooms)
 		elog(ERROR, "index corruption? rowid=%u is larger than index's nrooms=%lu",
 			 rowid, hash_index->nrooms);
@@ -2333,27 +2269,44 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc, cl_uint rowid)
 		elog(ERROR, "primary key '%s' of foreign table '%s' is NULL",
 			 NameStr(cmeta->attname), get_rel_name(kds->table_oid));
 	hash = FunctionCall1(&tcache->hash_proc_finfo, datum);
+
+	enlargeStringInfo(&gs_undo->buf, sizeof(char) + 2*sizeof(cl_uint));
 	gstoreFdwSpinLockHashSlot(gs_desc, hash);
-	/* Remove RowId from the Hash-Index */
+	/*
+	 * Ensure rowid exists on the hash-index.
+	 */
 	{
-		cl_uint		k = hash % hash_index->nslots;
-		cl_uint	   *next = &hash_index->slots[k];
+		cl_uint	   *rowmap = &hash_index->slots[hash_index->nslots];
 		cl_uint		curr_id;
+		char		temp[10];
 		bool		found = false;
 
-		while ((curr_id = *next) < hash_index->nrooms)
+		for (curr_id = hash_index->slots[hash % hash_index->nslots];
+			 curr_id < hash_index->nrooms;
+			 curr_id = rowmap[curr_id])
 		{
 			if (curr_id == rowid)
 			{
-				*next = rowmap[rowid];
 				found = true;
 				break;
 			}
-			next = &rowmap[curr_id];
 		}
-		if (!found)
+
+		if (found)
+		{
+			/* Remove from PK with hash(u32) + rowid(u32) */
+			temp[0] = 'R';
+			*((cl_uint *)(temp + 1)) = hash;
+			*((cl_uint *)(temp + 5)) = rowid;
+			appendBinaryStringInfo(&gs_undo->buf, temp,
+								   sizeof(char) + 2 * sizeof(cl_uint));
+			gs_undo->nitems++;
+		}
+		else
+		{
 			elog(WARNING, "primary key '%s' for rowid='%u' not found",
 				 NameStr(cmeta->attname), rowid);
+		}
 	}
 	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 
@@ -3400,94 +3353,202 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 }
 
 /*
- * __gstoreFdwXactCallbackOne
+ * __gstoreFdwXactOnPreCommit
  */
 static void
-__gstoreFdwXactCallbackOne(GpuStoreModifiedRows *gs_modrows, bool is_commit)
+__gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
 {
-	GstoreTxLogCommit *c_log = gs_modrows->curr;
-	char   *pos = gs_modrows->buf.data;
-	char   *end = (char *)c_log;
+	GstoreTxLogCommit *c_log = alloca(GSTORE_TX_LOG_COMMIT_ALLOCSZ);
+	char		   *pos = gs_undo->buf.data;
+	cl_uint			count = 1;
 
-	Assert((char *)c_log + c_log->length == (gs_modrows->buf.data +
-											 gs_modrows->buf.len));
-	if (c_log->nitems > 0)
+	/* setup commit log buffer */
+	c_log->type = GSTORE_TX_LOG__COMMIT;
+	c_log->length = offsetof(GstoreTxLogCommit, data);
+	c_log->xid = gs_undo->xid_sub;
+	c_log->timestamp = GetCurrentTimestamp();
+	c_log->nitems = 0;
+
+	while (count <= gs_undo->nitems)
 	{
-		/* finalize the last log item */
-		int			diff = MAXALIGN(gs_modrows->buf.len) - gs_modrows->buf.len;
-		uint64		zero = 0;
-		pg_crc32c	crc;
-
-		if (diff > 0)
-			appendBinaryStringInfo(&gs_modrows->buf, (char *)&zero, diff);
-		c_log->length = MAXALIGN(c_log->length);
-		INIT_CRC32C(crc);
-		COMP_CRC32C(crc, (char *)c_log + sizeof(uint32), c_log->length - sizeof(uint32));
-		FIN_CRC32C(crc);
-		c_log->crc = crc;
-
-		end += c_log->length;
-	}
-
-	while (pos < end)
-	{
-		GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)pos;
-
-		if (c_log->nitems > 0)
+		bool	flush_commit_log = (count == gs_undo->nitems);
+		
+		switch (*pos)
 		{
-			char   *__pos = c_log->data;
-			int		count = 0;
+			case 'I':	/* INSERT with rowid(u32) */
+				if (c_log->length + 5 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
+				{
+					flush_commit_log = true;
+					break;
+				}
+				memcpy((char *)c_log + c_log->length, pos, 5);
+				c_log->length += 5;
+				c_log->nitems++;
+				pos += 5;
+				count++;
+				break;
 
-			for (count=0; count < c_log->nitems; count++)
-			{
-				cl_uint		oldid = UINT_MAX;
-				cl_uint		rowid = UINT_MAX;
+			case 'U':	/* UPDATE with oldid(u32) + rowid(u32) */
+				if (c_log->length + 9 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
+				{
+					flush_commit_log = true;
+					break;
+				}
+				memcpy((char *)c_log + c_log->length, pos, 9);
+				c_log->length += 9;
+				c_log->nitems++;
+				pos += 9;
+				count++;
+				break;
 
-				if (*__pos == 'U')
+			case 'D':	/* DELETE with oldid(u32) */
+				if (c_log->length + 5 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
 				{
-					/* UPDATE */
-					Assert(__pos + 9 <= (char *)c_log + c_log->length);
-					memcpy(&oldid, __pos + 1, sizeof(cl_uint));
-					memcpy(&rowid, __pos + 5, sizeof(cl_uint));
-					if (is_commit)
-						gstoreFdwReleaseRowId(gs_modrows->gs_desc, oldid);
-					else
-						gstoreFdwReleaseRowId(gs_modrows->gs_desc, rowid);
-					__pos += 9;
-					elog(INFO, "Commit [U] old=%u, new=%u", oldid, rowid);
+					flush_commit_log = true;
+					break;
 				}
-				else if (*__pos == 'D')
-				{
-					/* DELETE */
-					Assert(__pos + 5 <= (char *)c_log + c_log->length);
-					memcpy(&oldid, __pos + 1, sizeof(cl_uint));
-					if (is_commit)
-						gstoreFdwReleaseRowId(gs_modrows->gs_desc, oldid);
-					__pos += 5;
-					elog(INFO, "Commit [D] old=%u", oldid);
-				}
-				else if (*__pos == 'I')
-				{
-					/* INSERT */
-					Assert(__pos + 5 <= (char *)c_log + c_log->length);
-					Assert(*__pos == 'I');
-					memcpy(&rowid, __pos + 1, sizeof(cl_uint));
-					if (!is_commit)
-						gstoreFdwReleaseRowId(gs_modrows->gs_desc, rowid);
-					__pos += 5;
-				}
-				else
-				{
-					elog(FATAL, "unexpected commit log type: %c", *__pos);
-				}
-			}
-			Assert(count == c_log->nitems);
-			if (is_commit)
-				__gstoreFdwAppendRedoLog(gs_modrows->gs_desc,
-										 (GstoreTxLogCommon *)c_log);
+				memcpy((char *)c_log + c_log->length, pos, 5);
+				c_log->length += 5;
+				c_log->nitems++;
+				pos += 5;
+				count++;
+				break;
+
+			case 'A':	/* Add PK Index with hash(u32) + rowid(u32) */
+			case 'R':	/* Remove PK Index + hash(u32) + rowid(u32) */
+				/* skip in the pre-commit phase */
+				pos += sizeof(char) + 2 * sizeof(cl_uint);
+				count++;
+				break;
+			default:
+				elog(FATAL, "Broken internal Undo log: tag='%c'", *pos);
+				break;
 		}
-		pos += c_log->length;
+
+		if (flush_commit_log)
+		{
+			int			diff = MAXALIGN(c_log->length) - c_log->length;
+			pg_crc32c	crc;
+
+			if (diff > 0)
+			{
+				memset((char *)c_log + c_log->length, 0, diff);
+				c_log->length += diff;
+			}
+			INIT_CRC32C(crc);
+			COMP_CRC32C(crc, (char *)c_log + sizeof(uint32),
+						c_log->length - sizeof(uint32));
+			FIN_CRC32C(crc);
+			c_log->crc = crc;
+
+			__gstoreFdwAppendRedoLog(gs_undo->gs_desc,
+									 (GstoreTxLogCommon *)c_log);
+			/* rewind */
+			c_log->length = offsetof(GstoreTxLogCommit, data);
+			c_log->nitems = 0;
+		}
 	}
+	Assert(pos <= gs_undo->buf.data + gs_undo->buf.len);
+}
+
+/*
+ * __gstoreFdwXactFinalize
+ */
+static void
+__gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
+{
+	GpuStoreDesc *gs_desc = gs_undo->gs_desc;
+	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
+	char	   *pos = gs_undo->buf.data;
+    cl_uint		count;
+	
+	for (count=0; count < gs_undo->nitems; count++)
+	{
+		uint32		rowid;
+
+		switch (*pos)
+		{
+			case 'I':	/* INSERT */
+				if (!is_commit)
+				{
+					rowid = *((uint32 *)(pos + 1));
+					gstoreFdwReleaseRowId(gs_desc, rowid);
+				}
+				pos += sizeof(char) + sizeof(uint32);
+				break;
+			case 'U':	/* UPDATE */
+				if (is_commit)
+					rowid = *((uint32 *)(pos + 1));		/* oldid */
+				else
+					rowid = *((uint32 *)(pos + 5));		/* newid */
+				rowid = *((uint32 *)(pos + 1));
+				gstoreFdwReleaseRowId(gs_desc, rowid);
+				pos += sizeof(char) + 2 * sizeof(uint32);
+				break;
+			case 'D':	/* DELETE */
+				if (is_commit)
+				{
+					rowid = *((uint32 *)(pos + 1));
+					gstoreFdwReleaseRowId(gs_desc, rowid);
+				}
+				pos += sizeof(char) + sizeof(uint32);
+				break;
+			case 'A':	/* Add PK */
+				if (!is_commit)
+				{
+					/* remove rowid from the index on abort  */
+					uint32	   *rowmap = &hash_index->slots[hash_index->nslots];
+					uint32		hash  = *((uint32 *)(pos + 1));
+					uint32		rowid = *((uint32 *)(pos + 5));
+					uint32	   *next;
+
+					gstoreFdwSpinLockHashSlot(gs_desc, hash);
+                    next = &hash_index->slots[hash % hash_index->nslots];
+					while (*next < hash_index->nrooms)
+					{
+						if (*next == rowid)
+						{
+							*next = rowmap[rowid];
+							rowmap[rowid] = UINT_MAX;
+							break;
+						}
+						next = rowmap + *next;
+					}
+					gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+				}
+				pos += sizeof(char) + 2 * sizeof(uint32);
+				break;
+			case 'R':	/* Remove PK */
+				Assert(hash_index != NULL);
+				if (is_commit)
+				{
+					/* remove rowid from the index on commit */
+					uint32	   *rowmap = &hash_index->slots[hash_index->nslots];
+					uint32		hash  = *((uint32 *)(pos + 1));
+					uint32		rowid = *((uint32 *)(pos + 5));
+					uint32	   *next;
+
+					gstoreFdwSpinLockHashSlot(gs_desc, hash);
+					next = &hash_index->slots[hash % hash_index->nslots];
+					while (*next < hash_index->nrooms)
+					{
+						if (*next == rowid)
+						{
+							*next = rowmap[rowid];
+							rowmap[rowid] = UINT_MAX;
+							break;
+						}
+						next = rowmap + *next;
+					}
+					gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+				}
+				pos += sizeof(char) + 2 * sizeof(uint32);
+				break;
+			default:
+				elog(FATAL, "wrong undo log entry tag '%c'", *pos);
+		}
+	}
+	Assert(pos <= gs_undo->buf.data + gs_undo->buf.len);
 }
 
 /*
@@ -3497,87 +3558,50 @@ static void
 gstoreFdwXactCallback(XactEvent event, void *arg)
 {
 #if 0
-	elog(INFO, "XactCallback: ev=%s xid=%u",
+	elog(INFO, "XactCallback: ev=%s xid=%u top-xid=%u",
 		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
 		 event == XACT_EVENT_ABORT   ? "XACT_EVENT_ABORT"  :
 		 event == XACT_EVENT_PREPARE ? "XACT_EVENT_PREPARE" :
 		 event == XACT_EVENT_PRE_COMMIT ? "XACT_EVENT_PRE_COMMIT" :
 		 event == XACT_EVENT_PRE_PREPARE ? "XACT_EVENT_PRE_PREPARE" : "????",
-		 GetCurrentTransactionIdIfAny());
-#endif
-	if (event == XACT_EVENT_PRE_COMMIT ||
-		event == XACT_EVENT_ABORT)
-	{
-		dlist_mutable_iter iter;
-		TransactionId	xid = GetCurrentTransactionIdIfAny();
-		int				hindex;
-
-		if (!TransactionIdIsNormal(xid))
-			return;
-		
-		hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
-		dlist_foreach_modify(iter, &gstore_modified_rowids_slots[hindex])
-		{
-			GpuStoreModifiedRows *gs_modrows
-				= dlist_container(GpuStoreModifiedRows, chain, iter.cur);
-
-			if (gs_modrows->xid == xid)
-			{
-				__gstoreFdwXactCallbackOne(gs_modrows, event == XACT_EVENT_PRE_COMMIT);
-				dlist_delete(&gs_modrows->chain);
-				pfree(gs_modrows->buf.data);
-				pfree(gs_modrows);
-			}
-		}
-	}
-	/* Wake up other backend processes blocked by row-level locks. */
-	if (event == XACT_EVENT_COMMIT ||
-		event == XACT_EVENT_ABORT)
-	{
-		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
-	}
-}
-
-/*
- * gstoreFdwSubXactCallback
- */
-static void
-gstoreFdwSubXactCallback(SubXactEvent event,
-						 SubTransactionId mySubid,
-						 SubTransactionId parentSubid, void *arg)
-{
-#if 0
-	elog(INFO, "SubXactCallback: ev=%s xid=%u mySubid=%u parentSubid=%u",
-		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
-		 event == SUBXACT_EVENT_COMMIT_SUB ? "SUBXACT_EVENT_COMMIT_SUB" :
-		 event == SUBXACT_EVENT_ABORT_SUB ? "SUBXACT_EVENT_ABORT_SUB" :
-		 event == SUBXACT_EVENT_PRE_COMMIT_SUB ? "SUBXACT_EVENT_PRE_COMMIT_SUB" : "???",
 		 GetCurrentTransactionIdIfAny(),
-		 mySubid, parentSubid);
+		 GetTopTransactionIdIfAny());
 #endif
-	if (event == SUBXACT_EVENT_PRE_COMMIT_SUB ||
-		event == SUBXACT_EVENT_ABORT_SUB)
+	if (event == XACT_EVENT_PRE_COMMIT)
+	{
+		dlist_iter		iter;
+		TransactionId	xid = GetCurrentTransactionIdIfAny();
+		int				hindex = xid % GSTORE_UNDO_LOGS_NSLOTS;
+
+		dlist_foreach(iter, &gstore_undo_logs_slots[hindex])
+		{
+			GpuStoreUndoLogs *gs_undo
+				= dlist_container(GpuStoreUndoLogs, chain, iter.cur);
+			if (gs_undo->xid_top == xid)
+				__gstoreFdwXactOnPreCommit(gs_undo);
+		}
+	}
+	else if (event == XACT_EVENT_COMMIT ||
+			 event == XACT_EVENT_ABORT)
 	{
 		dlist_mutable_iter iter;
 		TransactionId	xid = GetCurrentTransactionIdIfAny();
-		int				hindex;
+		int				hindex = xid % GSTORE_UNDO_LOGS_NSLOTS;
 
-		if (!TransactionIdIsNormal(xid))
-			return;
-		hindex = hash_uint32(xid) % GSTORE_MODIFIED_ROWIDS_NSLOTS;
-        dlist_foreach_modify(iter, &gstore_modified_rowids_slots[hindex])
+		dlist_foreach_modify(iter, &gstore_undo_logs_slots[hindex])
 		{
-			GpuStoreModifiedRows *gs_modrows
-				= dlist_container(GpuStoreModifiedRows, chain, iter.cur);
-			if (gs_modrows->xid == xid)
+			GpuStoreUndoLogs *gs_undo
+				= dlist_container(GpuStoreUndoLogs, chain, iter.cur);
+			if (gs_undo->xid_top == xid)
 			{
-				__gstoreFdwXactCallbackOne(gs_modrows,
-										   event == SUBXACT_EVENT_PRE_COMMIT_SUB);
-				dlist_delete(&gs_modrows->chain);
-				pfree(gs_modrows->buf.data);
-				pfree(gs_modrows);
+				__gstoreFdwXactFinalize(gs_undo, event == XACT_EVENT_COMMIT);
+				dlist_delete(&gs_undo->chain);
+				pfree(gs_undo->buf.data);
+				pfree(gs_undo);
 			}
 		}
+		/* Wake up other backends blocked by row-level lock */
+		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
 	}
 }
 
@@ -4411,10 +4435,10 @@ pgstrom_init_gstore_fdw(void)
 								   &hctl,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	/*
-	 * Local hash slot for GpuStoreModifiedRows
+	 * Local hash slot for GpuStoreUndoLogs
 	 */
-	for (i=0; i < GSTORE_MODIFIED_ROWIDS_NSLOTS; i++)
-		dlist_init(&gstore_modified_rowids_slots[i]);
+	for (i=0; i < GSTORE_UNDO_LOGS_NSLOTS; i++)
+		dlist_init(&gstore_undo_logs_slots[i]);
 	
 	/* GUC: pg_strom.gstore_fdw_auto_preload  */
 	DefineCustomBoolVariable("pg_strom.gstore_fdw_auto_preload",
@@ -4451,5 +4475,4 @@ pgstrom_init_gstore_fdw(void)
 
 	/* transaction callbacks */
 	RegisterXactCallback(gstoreFdwXactCallback, NULL);
-	RegisterSubXactCallback(gstoreFdwSubXactCallback, NULL);	
 }
