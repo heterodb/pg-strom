@@ -183,11 +183,13 @@ KDS_fetch_datum_column(kern_data_store *kds,
 }
 
 void
-KDS_store_datum_column(kern_data_store *kds,
-					   kern_colmeta *cmeta,
-					   size_t row_index,
-					   Datum datum, bool isnull)
+__KDS_store_datum_column(kern_data_store *kds,
+						 kern_colmeta *cmeta,
+						 size_t row_index,
+						 Datum datum, bool isnull)
 {
+
+
 	char	   *addr;
 
 	Assert(kds->format == KDS_FORMAT_COLUMN &&
@@ -242,21 +244,38 @@ KDS_store_datum_column(kern_data_store *kds,
 	}
 	else if (cmeta->attlen == -1)
 	{
-		char	   *extra;
+		char	   *extra_head = (char *)kds + kds->extra_hoffset;
 		size_t		sz = VARSIZE_ANY(datum);
 
-		Assert(kds->extra_hoffset > 0);
-		extra = (char *)kds
-			+ kds->extra_hoffset
-			+ __kds_unpack(kds->usage);
-		((cl_uint *)addr)[row_index] = kds->usage;
-		memcpy(extra, DatumGetPointer(datum), sz);
-		kds->usage += __kds_packed(MAXALIGN(sz));
+		Assert(kds->extra_hoffset > 0 && kds->extra_hlength);
+		Assert((char *)datum >= extra_head &&
+			   (char *)datum + sz <= extra_head + kds->extra_hlength);
+		((cl_uint *)addr)[row_index] = __kds_packed((char *)datum - extra_head);
 	}
 	else
 	{
 		elog(ERROR, "unsupported type definition");
 	}	
+}
+
+void
+KDS_store_datum_column(kern_data_store *kds,
+					   kern_colmeta *cmeta,
+					   size_t row_index,
+					   Datum datum, bool isnull)
+{
+	/* allocation of extra buffer, and copy the varlena datum */
+	if (cmeta->attlen == -1)
+	{
+		size_t		sz = VARSIZE_ANY(datum);
+		char	   *extra = (char *)kds + kds->extra_hoffset;
+
+		extra += __kds_unpack(kds->usage);
+		kds->usage += __kds_packed(MAXALIGN(sz));
+		memcpy(extra, DatumGetPointer(datum), sz);
+		datum = PointerGetDatum(extra);
+	}
+	__KDS_store_datum_column(kds, cmeta, row_index, datum, isnull);
 }
 
 bool

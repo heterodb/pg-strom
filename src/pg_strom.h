@@ -1093,6 +1093,10 @@ extern Datum KDS_fetch_datum_column(kern_data_store *kds,
 									kern_colmeta *cmeta,
 									size_t row_index,
 									bool *p_isnull);
+extern void __KDS_store_datum_column(kern_data_store *kds,
+									 kern_colmeta *cmeta,
+									 size_t row_index,
+									 Datum datum, bool isnull);
 extern void  KDS_store_datum_column(kern_data_store *kds,
 									kern_colmeta *cmeta,
 									size_t row_index,
