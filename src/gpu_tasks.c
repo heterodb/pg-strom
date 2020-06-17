@@ -18,6 +18,63 @@
 #include "pg_strom.h"
 
 /*
+ * see definition at xact.c
+ *
+ * SerializedTransactionState is newly defined at PG12.
+ * PG10/11 packed all the attributes in TransactionId[] array.
+ */
+typedef struct SerializedTransactionState
+{
+#if PG_VERSION_NUM >= 12000
+	int				xactIsoLevel;
+	bool			xactDeferrable;
+	FullTransactionId topFullTransactionId;
+	FullTransactionId currentFullTransactionId;
+	CommandId		currentCommandId;
+	int				nParallelCurrentXids;
+#else
+	TransactionId	XactIsoLevel;
+	TransactionId	XactDeferrable;
+	TransactionId	topFullTransactionId;
+	TransactionId	currentFullTransactionId;
+	TransactionId	currentCommandId;
+	TransactionId	nParallelCurrentXids;
+#endif
+	TransactionId	parallelCurrentXids[FLEXIBLE_ARRAY_MEMBER];
+} SerializedTransactionState;
+
+/*
+ * __appendXactIdVector
+ */
+static cl_uint
+__appendXactIdVector(StringInfo buf)
+{
+	cl_uint		xactIdVector = buf->len;
+	Size		maxsize = EstimateTransactionStateSpace();
+	SerializedTransactionState *temp = alloca(maxsize);
+	xidvector  *xvec;
+	size_t		sz;
+
+	/* obtain the current transaction state */
+	SerializeTransactionState(maxsize, (char *)temp);
+	sz = offsetof(xidvector, values[temp->nParallelCurrentXids]);
+	enlargeStringInfo(buf, MAXALIGN(sz));
+	xvec = (xidvector *)(buf->data + buf->len);
+	buf->len += MAXALIGN(sz);
+
+	memset(xvec, 0, MAXALIGN(sz));
+	SET_VARSIZE(xvec, sz);
+	xvec->ndim = 1;
+	xvec->dataoffset = 0;
+	xvec->elemtype = XIDOID;
+	xvec->dim1 = temp->nParallelCurrentXids;
+	xvec->lbound1 = 1;
+	memcpy(xvec->values, temp->parallelCurrentXids,
+		   sizeof(TransactionId) * xvec->dim1);
+	return xactIdVector;
+}
+
+/*
  * construct_kern_parambuf
  *
  * It construct a kernel parameter buffer to deliver Const/Param nodes.
@@ -28,16 +85,16 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 {
 	StringInfoData	str;
 	kern_parambuf  *kparams;
-	char		padding[STROMALIGN_LEN];
+	cl_ulong	zero = 0;
 	ListCell   *cell;
 	Size		offset;
 	int			index = 0;
 	int			nparams = list_length(used_params);
-
-	memset(padding, 0, sizeof(padding));
+	cl_uint		xactIdVector;
 
 	/* seek to the head of variable length field */
-	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
+	offset = MAXALIGN(offsetof(kern_parambuf,
+							   poffset[nparams + 1]));
 	initStringInfo(&str);
 	enlargeStringInfo(&str, offset);
 	memset(str.data, 0, offset);
@@ -195,15 +252,18 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 			elog(ERROR, "unexpected node: %s", nodeToString(node));
 
 		/* alignment */
-		if (STROMALIGN(str.len) != str.len)
-			appendBinaryStringInfo(&str, padding,
-								   STROMALIGN(str.len) - str.len);
+		if (MAXALIGN(str.len) != str.len)
+			appendBinaryStringInfo(&str, (const char *)&zero,
+								   MAXALIGN(str.len) - str.len);
 		index++;
 	}
-	Assert(STROMALIGN(str.len) == str.len);
+	/* array of current transaction id */
+	xactIdVector = __appendXactIdVector(&str);
+
+	Assert(MAXALIGN(str.len) == str.len);
 	kparams = (kern_parambuf *)str.data;
-	kparams->hostptr = (hostptr_t) &kparams->hostptr;
 	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
+	kparams->xactIdVector = xactIdVector;
 	kparams->length = str.len;
 	kparams->nparams = nparams;
 

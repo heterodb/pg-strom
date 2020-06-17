@@ -635,6 +635,20 @@ typedef cl_uint		TransactionId;
 #define InvalidTransactionId		((TransactionId) 0)
 #define FrozenTransactionId			((TransactionId) 2)
 
+#endif		/* !PG_STROM_H */
+
+typedef struct
+{
+	cl_int		vl_len_;
+	cl_int		ndim;			/* always 1 for xidvector */
+	cl_int		dataoffset;		/* always 0 for xidvector */
+	cl_uint		elemtype;		/* XIDOID */
+	cl_int		dim1;			/* number of items */
+	cl_int		lbound1;		/* always 1 for xidvector */
+	TransactionId values[FLEXIBLE_ARRAY_MEMBER];
+} xidvector;
+
+#ifndef PG_STROM_H
 /* definitions at storage/itemid.h */
 typedef struct ItemIdData
 {
@@ -1190,12 +1204,11 @@ kern_fetch_varlena_datum_arrow(kern_colmeta *cmeta,
  */
 typedef struct kern_parambuf
 {
-	hostptr_t	hostptr;	/* address of the parambuf on host-side */
-
 	/*
 	 * Fields of system information on execution
 	 */
 	cl_long		xactStartTimestamp;	/* timestamp when transaction start */
+	cl_uint		xactIdVector;		/* offset to xidvector */
 
 	/* variable length parameters / constants */
 	cl_uint		length;		/* total length of parambuf */
