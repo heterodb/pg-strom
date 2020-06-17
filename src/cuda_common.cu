@@ -851,38 +851,6 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 	return NULL;
 }
 
-#if 0
-/* nobody uses these routines now? */
-DEVICE_FUNCTION(void *)
-kern_get_datum_row(kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx)
-{
-	kern_tupitem   *tupitem;
-
-	if (colidx >= kds->ncols ||
-		rowidx >= kds->nitems)
-		return NULL;	/* likely a BUG */
-	tupitem = KERN_DATA_STORE_TUPITEM(kds, rowidx);
-
-	return kern_get_datum_tuple(kds->colmeta, &tupitem->htup, colidx);
-}
-
-DEVICE_FUNCTION(void *)
-kern_get_datum_slot(kern_data_store *kds,
-					cl_uint colidx, cl_uint rowidx)
-{
-	Datum	   *values = KERN_DATA_STORE_VALUES(kds,rowidx);
-	cl_bool	   *isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
-	kern_colmeta		cmeta = kds->colmeta[colidx];
-
-	if (isnull[colidx])
-		return NULL;
-	if (cmeta.attbyval)
-		return values + colidx;
-	return (char *)values[colidx];
-}
-#endif
-
 /*
  * Routines to reference values on KDS_FORMAT_ARROW for base types.
  * Usually, these routines are referenced via pg_datum_ref_arrow().

@@ -20,106 +20,45 @@
 
 #define GSTORE_TX_LOG__MAGIC		0xEBAD7C00
 #define GSTORE_TX_LOG__INSERT		(GSTORE_TX_LOG__MAGIC | 'I')
-#define GSTORE_TX_LOG__UPDATE		(GSTORE_TX_LOG__MAGIC | 'U')
 #define GSTORE_TX_LOG__DELETE		(GSTORE_TX_LOG__MAGIC | 'D')
 #define GSTORE_TX_LOG__COMMIT		(GSTORE_TX_LOG__MAGIC | 'C')
+#define GSTORE_TX_LOG__TERMINATOR	0xFBADBEEF
 
 typedef struct {
-	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
-	cl_uint		xid;
 	cl_ulong	timestamp;
 	char		data[1];		/* variable length */
 } GstoreTxLogCommon;
 
-/*
- * INSERT/UPDATE/DELETE
- *
- * +----------------------+        -----
- * | GstoreTxLogCommon    |          ^
- * | - u32 crc32          |          |
- * | - u32 type           |          |
- * | - u32 length       o-------> length
- * | - u32 xid            |          |
- * | - u64 timestamp      |          |
- * +----------------------|          |
- * | - u32 rowid          |          |
- * | - u32 update_mask  o------+     |
- * | - HeapTupleHeaderData|    |
- * | +--------------------+    | ((char *)tx_log_row
- * | | PostgreSQL's       |    |        + tx_log_row->update_mask)
- * | | HeapTupleHeader    |    |
- * | |  + Nullmap + Data  |    |     |
- * = =                    =    |     |
- * +-+--------------------+ <--+     |
- * | Update Mask          |          |
- * | (bitmap of updated   |          |
- * |  columns)            |          v
- * +----------------------+        -----
- *
- * GstoreTxLogRow contains HeapTupleHeaderData that is usual PostgreSQL's
- * heap-tuple structure, and update-mask at tail of the transaction log.
- * It indicates which columns were updated on UPDATE to save the extra
- * buffer area if schema contains variable-length field.
- * INSERT/DELETE log shall not have the update-mask, and usually DELETE
- * log does not carray any values (t_infomask & HEAP_NATTS_MASK) == 0.
- */
 typedef struct {
-	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
-	cl_uint		xid;
 	cl_ulong	timestamp;
-	/* above are common */
 	cl_uint		rowid;
-	cl_uint		update_mask;
-	HeapTupleHeaderData htup;
-} GstoreTxLogRow;
+	HeapTupleHeaderData htup __attribute__((aligned(8)));
+	/* + GSTORE_TX_LOG__TERMINATOR */
+} GstoreTxLogInsert;
+
+typedef struct {
+	cl_uint		type;
+	cl_uint		length;
+	cl_ulong	timestamp;
+	cl_uint		rowid;
+	cl_uint		xmin;
+	cl_uint		xmax;
+	cl_uint		__terminator;	/* =GSTORE_TX_LOG__TERMINATOR */
+} GstoreTxLogDelete;
 
 /*
- * COMMIT
- *
- * +---------------------+    -----
- * | GstoreTxLogCommon   |      ^
- * | - u32 crc32         |      |
- * | - u32 type          |      |
- * | - u32 length      o---> length
- * | - u32 xid           |      |
- * | - u64 timestamp     |      |
- * +---------------------|      |
- * | - u16 nitems        |      |
- * | - char data[]       |      |
- * | +-------------------+      |
- * | | 'I' + newid(u32)  |      |
- * | | 'U' + oldid(u32)  |      |
- * | |     + newid(u32)  |      |
- * | | 'D' + oldid(u32)  |      |
- * | |        :          |      |
- * +-+-------------------+    -----
- *
- * GstoreTxLogCommit is just a hint for CPU code, but informs GPU code
- * which rows are committed. The synchronizer kernel shall update the
- * xmin/xmax field of GPU device buffer according to the commit-log.
- * GPU code can see the rows only (1) Xmin=Frozen or own transactions
- * and (2) Xmax=Invalid or not own transactions.
- * The affected rows are stored with leading character byte; 'I' for
- * INSERT, 'U' for UPDATE, or 'D' for DELETE.
- * UPDATE takes two rowids for new and old rows, and others take one.
- *  'I' + newid (u32) : 5bytes for each
- *  'U' + oldid (u32) + newid (u32) : 9bytes for each
- *  'D' + oldid (u32) : 5bytes for each
- *
- * 32bit RowId are not aligned, so need to copy when GPU code references.
+ * COMMIT/ABORT
  */
-#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	128
+#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	96
 typedef struct {
-	cl_uint		crc;
 	cl_uint		type;
 	cl_uint		length;
-	cl_uint		xid;
 	cl_ulong	timestamp;
-	/* above fields are common */
+	cl_uint		xid;
 	cl_ushort	nitems;
 	char		data[1];		/* variable length */
 } GstoreTxLogCommit;
@@ -152,5 +91,16 @@ typedef struct
 	cl_uint			nitems;
 	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
 } kern_gpustore_redolog;
+
+/*
+ * kern_data_extra - extra buffer of KDS_FORMAT_COLUMN
+ */
+typedef struct
+{
+	char		signature[8];	/* "@EXTRA1@" */
+	cl_ulong	length;
+	cl_ulong	usage;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+} kern_data_extra;
 
 #endif /* CUDA_GSTORE_H */

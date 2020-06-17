@@ -424,6 +424,45 @@ gpuOptimalBlockSize(int *p_grid_sz,
 	return CUDA_SUCCESS;
 }
 
+CUresult
+__gpuOptimalBlockSize(int *p_grid_sz,
+					  int *p_block_sz,
+					  CUfunction kern_function,
+					  int cuda_dindex,
+					  size_t dynamic_shmem_per_block,
+					  size_t dynamic_shmem_per_thread)
+{
+	cl_int		mp_count = devAttrs[cuda_dindex].MULTIPROCESSOR_COUNT;
+	cl_int		min_grid_sz;
+	cl_int		max_block_sz;
+	cl_int		max_multiplicity;
+	size_t		dynamic_shmem_sz;
+	CUresult	rc;
+
+	rc = gpuOccupancyMaxPotentialBlockSize(&min_grid_sz,
+										   &max_block_sz,
+										   kern_function,
+										   dynamic_shmem_per_block,
+										   dynamic_shmem_per_thread);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+
+	dynamic_shmem_sz = (dynamic_shmem_per_block +
+						dynamic_shmem_per_thread * max_block_sz);
+	rc = cuOccupancyMaxActiveBlocksPerMultiprocessor(&max_multiplicity,
+													 kern_function,
+													 max_block_sz,
+													 dynamic_shmem_sz);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+
+	*p_grid_sz = Min(GPUKERNEL_MAX_SM_MULTIPLICITY,
+					 max_multiplicity) * mp_count;
+	*p_block_sz = max_block_sz;
+
+	return CUDA_SUCCESS;
+}
+
 /*
  * pgstrom_device_info - SQL function to dump device info
  */

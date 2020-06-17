@@ -51,6 +51,7 @@ GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
+GSTORE_FDW_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gstore.fatbin
 
 # 32k / 128 = 256 threads per SM
 MAXREGCOUNT := 128
@@ -202,7 +203,7 @@ SHLIB_LINK := -L $(LPATH) -lcuda -lpmem
 # also, flags to build GPU libraries
 NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
 NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
-              --fatbin --relocatable-device-code=true \
+              --fatbin \
               --maxrregcount=$(MAXREGCOUNT) \
               --gpu-architecture=compute_60
 # supported device depends on CUDA version
@@ -224,7 +225,7 @@ MODULEDIR = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL)
-DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN)
+DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GSTORE_FDW_FATBIN)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -268,11 +269,14 @@ endif
 #
 # GPU Libraries
 #
+$(GSTORE_FDW_FATBIN): $(GSTORE_FDW_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
+	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
+
 %.fatbin:  %.cu $(GPU_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=true -o $@ $<
 
 %.gfatbin: %.cu $(GPU_HEADERS)
-	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
+	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=true -o $@ $<
 
 #
 # Build documentation

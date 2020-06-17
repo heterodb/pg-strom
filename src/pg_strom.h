@@ -662,6 +662,12 @@ extern CUresult gpuOptimalBlockSize(int *p_grid_sz,
 									CUdevice cuda_device,
 									size_t dyn_shmem_per_block,
 									size_t dyn_shmem_per_thread);
+extern CUresult __gpuOptimalBlockSize(int *p_grid_sz,
+									  int *p_block_sz,
+									  CUfunction kern_function,
+									  int cuda_dindex,
+									  size_t dyn_shmem_per_block,
+									  size_t dyn_shmem_per_thread);
 /*
  * shmbuf.c
  */

@@ -27,13 +27,13 @@ CREATE EVENT TRIGGER pgstrom_gstore_fdw_post_creation
 WHEN tag IN ('CREATE FOREIGN TABLE')
 EXECUTE PROCEDURE pgstrom.gstore_fdw_post_creation();
 
-CREATE FUNCTION public.gstore_fdw_synchronize(regclass)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_synchronize'
+CREATE FUNCTION public.gstore_fdw_apply_redo(regclass)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_apply_redo'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION public.gstore_fdw_compaction(regclass)
-  RETURNS bigint
+  RETURNS int
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_compaction'
   LANGUAGE C STRICT;
 

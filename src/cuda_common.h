@@ -632,6 +632,8 @@ typedef struct {
  * visible to the current scan snapshot.
  */
 typedef cl_uint		TransactionId;
+#define InvalidTransactionId		((TransactionId) 0)
+#define FrozenTransactionId			((TransactionId) 2)
 
 /* definitions at storage/itemid.h */
 typedef struct ItemIdData
@@ -887,10 +889,8 @@ typedef struct {
 	 * at the host-side, shall not be refered at the device-side.
 	 */
 	cl_ulong		extra_hoffset;
-	cl_ulong		extra_hlength;
 #else
-	cl_ulong		__no_such_field__1;
-	cl_ulong		__no_such_field__2;
+	cl_ulong		__no_such_field__;
 #endif
 	cl_uint			nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
@@ -1661,12 +1661,6 @@ DEVICE_FUNCTION(void *)
 kern_get_datum_tuple(kern_colmeta *colmeta,
 					 HeapTupleHeaderData *htup,
 					 cl_uint colidx);
-DEVICE_FUNCTION(void *)
-kern_get_datum_row(kern_data_store *kds,
-				   cl_uint colidx, cl_uint rowidx);
-DEVICE_FUNCTION(void *)
-kern_get_datum_slot(kern_data_store *kds,
-					cl_uint colidx, cl_uint rowidx);
 
 /*
  * device functions to form/deform HeapTuple
@@ -1703,62 +1697,6 @@ pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum);
 DEVICE_FUNCTION(cl_uint)
 pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count);
 #endif	/* __CUDACC__ */
-
-#if 0
-/*
- * Some host code uses kern_get_datum_column() to implement fallback code
- * on KDS_FORMAT_COLUMN, however, this data-store format shall be deprecated
- * in the near future. So, we keep this inline function for a while.
- */
-STATIC_INLINE(void *)
-kern_get_datum_column(kern_data_store *kds,
-					  cl_uint colidx, cl_uint rowidx)
-{
-	kern_colmeta *cmeta;
-	size_t		offset;
-	size_t		length;
-	char	   *values;
-	char	   *nullmap;
-
-	Assert(colidx < kds->ncols);
-	cmeta = &kds->colmeta[colidx];
-	/* special case handling if 'tableoid' system column */
-	if (cmeta->attnum == TableOidAttributeNumber)
-		return &kds->table_oid;
-	offset = __kds_unpack(cmeta->va_offset);
-	if (offset == 0)
-		return NULL;
-	values = (char *)kds + offset;
-	length = __kds_unpack(cmeta->va_length);
-	if (cmeta->attlen < 0)
-	{
-		Assert(!cmeta->attbyval);
-		offset = ((cl_uint *)values)[rowidx];
-		if (offset == 0)
-			return NULL;
-		Assert(offset < length);
-		values += __kds_unpack(offset);
-	}
-	else
-	{
-		cl_int	unitsz = TYPEALIGN(cmeta->attalign,
-								   cmeta->attlen);
-		size_t	array_sz = MAXALIGN(unitsz * kds->nitems);
-
-		Assert(length >= array_sz);
-		if (length > array_sz)
-		{
-			length -= array_sz;
-			Assert(MAXALIGN(BITMAPLEN(kds->nitems)) == length);
-			nullmap = values + array_sz;
-			if (att_isnull(rowidx, nullmap))
-				return NULL;
-		}
-		values += unitsz * rowidx;
-	}
-	return (void *)values;
-}
-#endif
 
 /* base type definitions and templates */
 #include "cuda_basetype.h"

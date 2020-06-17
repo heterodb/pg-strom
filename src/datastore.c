@@ -18,6 +18,7 @@
  */
 #include "pg_strom.h"
 #include "cuda_numeric.h"
+#include "cuda_gstore.h"
 #include "nvme_strom.h"
 
 /*
@@ -169,15 +170,15 @@ KDS_fetch_datum_column(kern_data_store *kds,
 	}
 	else if (cmeta->attlen == -1)
 	{
-		char	   *extra = (char *)kds + kds->extra_hoffset;
+		kern_data_extra *extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
 		size_t		off = __kds_unpack(((cl_uint *)addr)[row_index]);
 
-		Assert(off < kds->extra_hlength);
-		datum = PointerGetDatum(extra + off);
+		Assert(off < extra->length);
+		datum = PointerGetDatum((char *)extra + off);
 	}
 	else
 	{
-		elog(ERROR, "unsupported type definition");
+		elog(ERROR, "unsupported type definition attlen=%d attbyval=%d", cmeta->attlen, cmeta->attbyval);
 	}
 	return datum;
 }
@@ -244,13 +245,13 @@ __KDS_store_datum_column(kern_data_store *kds,
 	}
 	else if (cmeta->attlen == -1)
 	{
-		char	   *extra_head = (char *)kds + kds->extra_hoffset;
+		kern_data_extra *extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
 		size_t		sz = VARSIZE_ANY(datum);
 
-		Assert(kds->extra_hoffset > 0 && kds->extra_hlength);
-		Assert((char *)datum >= extra_head &&
-			   (char *)datum + sz <= extra_head + kds->extra_hlength);
-		((cl_uint *)addr)[row_index] = __kds_packed((char *)datum - extra_head);
+		Assert(kds->extra_hoffset > 0);
+		Assert((char *)datum >= (char *)extra &&
+			   (char *)datum + sz <= (char *)extra + extra->length);
+		((cl_uint *)addr)[row_index] = __kds_packed((char *)datum - (char *)extra);
 	}
 	else
 	{

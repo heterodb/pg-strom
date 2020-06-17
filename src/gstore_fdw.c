@@ -25,7 +25,6 @@
  */
 #define GSTORE_BACKGROUND_CMD__INITIAL_LOAD		'I'
 #define GSTORE_BACKGROUND_CMD__APPLY_REDO		'A'
-#define GSTORE_BACKGROUND_CMD__EXPAND_EXTRA		'E'
 #define GSTORE_BACKGROUND_CMD__COMPACTION		'C'
 typedef struct
 {
@@ -38,8 +37,6 @@ typedef struct
 	/* for APPLY_REDO */
 	uint64		end_pos;
 	uint32		nitems;
-	/* for EXPAND_EXTRA */
-	uint64		extra_sz;
 } GpuStoreBackgroundCommand;
 
 /*
@@ -109,6 +106,7 @@ typedef struct
 #define GPUSTORE_BASEFILE_MAPPED_SIGNATURE "%Base-1%"
 #define GPUSTORE_ROWIDMAP_SIGNATURE		"@ROW-ID@"
 #define GPUSTORE_HASHINDEX_SIGNATURE	"@HINDEX@"
+#define GPUSTORE_EXTRABUF_SIGNATURE		"@EXTRA1@"
 
 typedef struct
 {
@@ -267,7 +265,7 @@ static dlist_head	gstore_undo_logs_slots[GSTORE_UNDO_LOGS_NSLOTS];
 /* ---- Forward declarations ---- */
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
-Datum pgstrom_gstore_fdw_synchronize(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_apply_redo(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_sysattr_in(PG_FUNCTION_ARGS);
@@ -281,7 +279,7 @@ static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
 static CUresult	gstoreFdwInvokeInitialLoad(Relation frel, bool is_async);
 static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 										 uint64 end_pos, uint32 nitems);
-static CUresult	gstoreFdwInvokeExpandExtra(Oid ftable_oid, uint64 extra_sz);
+static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
 static cl_uint	gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc,
 									   cl_uint min_rowid);
@@ -293,20 +291,19 @@ static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
 
 /* ---- Atomic operations ---- */
-static inline cl_uint atomicRead32(volatile cl_uint *ptr)
+static inline cl_ulong atomicRead64(volatile cl_ulong *ptr)
 {
 	return *ptr;
 }
 
-static inline cl_bool atomicCAS32(volatile cl_uint *ptr,
-								  cl_uint oldval, cl_uint newval)
+static inline cl_bool atomicCAS64(volatile cl_ulong *ptr,
+								  cl_ulong *oldval, cl_ulong newval)
 {
-	return __atomic_compare_exchange_n(ptr, &oldval, newval,
+	return __atomic_compare_exchange_n(ptr, oldval, newval,
 									   false,
 									   __ATOMIC_SEQ_CST,
 									   __ATOMIC_SEQ_CST);
 }
-
 
 static inline cl_uint atomicMax32(volatile cl_uint *ptr, cl_uint newval)
 {
@@ -316,8 +313,10 @@ static inline cl_uint atomicMax32(volatile cl_uint *ptr, cl_uint newval)
 		oldval = *ptr;
 		if (oldval >= newval)
 			return oldval;
-	} while (!atomicCAS32(ptr, oldval, newval));
-
+	} while (!__atomic_compare_exchange_n(ptr, &oldval, newval,
+										  false,
+										  __ATOMIC_SEQ_CST,
+										  __ATOMIC_SEQ_CST));
 	return newval;
 }
 
@@ -365,9 +364,6 @@ gstoreFdwSpinUnlockHashSlot(GpuStoreDesc *gs_desc, Datum hash)
 
 	return false;
 }
-
-
-
 
 static void
 GstoreGetForeignRelSize(PlannerInfo *root,
@@ -664,20 +660,10 @@ gstoreCheckVisibilityForInsert(GpuStoreDesc *gs_desc, cl_uint rowid,
  * it checks visibility and mark 'deleted' if possible
  */
 static int
-gstoreCheckVisibilityTryDelete(GpuStoreDesc *gs_desc, cl_uint rowid,
-							   TransactionId curr_xid)
+__gstoreCheckVisibilityTryDelete(GpuStoreDesc *gs_desc, cl_uint rowid,
+								 TransactionId curr_xid,
+								 GstoreFdwSysattr *sysattr)
 {
-	/* see logic in HeapTupleSatisfiesVacuum */
-	kern_data_store *kds = &gs_desc->base_mmap->schema;
-	kern_colmeta   *cmeta = &kds->colmeta[kds->ncols - 1];
-	GstoreFdwSysattr *sysattr;
-	Datum			datum;
-	bool			isnull;	
-
-	datum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
-	Assert(!isnull);
-	sysattr = (GstoreFdwSysattr *)DatumGetPointer(datum);
-
 	if (sysattr->xmin != FrozenTransactionId)
 	{
 		if (sysattr->xmin == InvalidTransactionId)
@@ -751,6 +737,28 @@ gstoreCheckVisibilityTryDelete(GpuStoreDesc *gs_desc, cl_uint rowid,
 		}
 	}
 	return 0;		/* already removed */
+}
+
+static int
+gstoreCheckVisibilityTryDelete(GpuStoreDesc *gs_desc, cl_uint rowid,
+                               TransactionId curr_xid,
+                               GstoreFdwSysattr *p_sysattr)
+{
+    /* see logic in HeapTupleSatisfiesVacuum */
+    kern_data_store *kds = &gs_desc->base_mmap->schema;
+    kern_colmeta   *cmeta = &kds->colmeta[kds->ncols - 1];
+    GstoreFdwSysattr *sysattr;
+    Datum           datum;
+    bool            isnull;
+	int				rv;
+
+	datum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+    Assert(!isnull);
+    sysattr = (GstoreFdwSysattr *)DatumGetPointer(datum);
+	rv = __gstoreCheckVisibilityTryDelete(gs_desc, rowid, curr_xid, sysattr);
+	if (p_sysattr)
+		memcpy(p_sysattr, sysattr, sizeof(GstoreFdwSysattr));
+	return rv;
 }
 
 /*
@@ -1238,6 +1246,13 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 		if (curr_pos + padding + tx_len <= (gs_sstate->redo_read_pos +
 											gs_sstate->redo_log_limit))
 		{
+			/*
+			 * NOTE: Even though we check the free space by tx_len + 64bits
+			 * for overwrite_marker, and make 'redo_write_pos' advanced by
+			 * tx_len, because the overwrite_marker shall be overwritten by
+			 * the next log, thus we can detect the tail of REDO log in case
+			 * of the crash recovery.
+			 */
 			gs_sstate->redo_write_pos += (padding + tx_len);
 			gs_sstate->redo_write_nitems++;
 			SpinLockRelease(&gs_sstate->redo_pos_lock);
@@ -1266,54 +1281,54 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 }
 
 static void
-gstoreFdwAppendRedoLog(Relation frel,
-					   GpuStoreDesc *gs_desc,
-					   cl_uint log_type,
-					   cl_uint rowid,
-					   TransactionId xid,
-					   HeapTuple tuple,
-					   Bitmapset *updatedCols)
+gstoreFdwAppendInsertLog(Relation frel,
+						 GpuStoreDesc *gs_desc,
+						 cl_uint rowid,
+						 cl_uint oldid,		/* UINT_MAX, if INSERT */
+						 TransactionId xmin,
+						 HeapTuple tuple)
 {
-	TupleDesc	tupdesc = RelationGetDescr(frel);
-	GstoreTxLogRow *r_log;
-	size_t		r_len;
-	pg_crc32c	crc;
+	GstoreTxLogInsert *i_log;
+	size_t		sz;
 
-	/* buffer allocation */
-	r_len = offsetof(GstoreTxLogRow, htup) + tuple->t_len;
-	if (updatedCols)
-		r_len += offsetof(Bitmapset, words[updatedCols->nwords]);
-	r_len = MAXALIGN(r_len);
-	r_log = alloca(r_len);
-	memset(r_log, 0, r_len);
+	sz = MAXALIGN(offsetof(GstoreTxLogInsert, htup) + tuple->t_len + sizeof(cl_uint));
+	i_log = alloca(sz + sizeof(cl_uint));
+	memset(i_log, 0, sz + sizeof(cl_uint));
+	i_log->type = GSTORE_TX_LOG__INSERT;
+	i_log->length = sz;
+	i_log->timestamp = GetCurrentTimestamp();
+	i_log->rowid = rowid;
+	memcpy(&i_log->htup, tuple->t_data, tuple->t_len);
+	HeapTupleHeaderSetXmin(&i_log->htup, xmin);
+	HeapTupleHeaderSetXmax(&i_log->htup, InvalidTransactionId);
+	HeapTupleHeaderSetCmin(&i_log->htup, InvalidCommandId);
+	i_log->htup.t_ctid.ip_blkid.bi_hi = (oldid >> 16);
+	i_log->htup.t_ctid.ip_blkid.bi_lo = (oldid & 0x0000ffffU);
+	i_log->htup.t_ctid.ip_posid = 0;
+	((cl_uint *)((char *)i_log + sz))[-1] = GSTORE_TX_LOG__TERMINATOR;
 
-	/* setup GstoreTxLogRow */
-	r_log->type = log_type;
-	r_log->length = r_len;
-	r_log->xid   = xid;
-	r_log->timestamp = GetCurrentTimestamp();
-	r_log->rowid = rowid;
-	if (updatedCols)
-		r_log->update_mask = offsetof(GstoreTxLogRow, htup) + tuple->t_len;
-	memcpy(&r_log->htup, tuple->t_data, tuple->t_len);
-	HeapTupleHeaderSetDatumLength(&r_log->htup, tuple->t_len);
-	HeapTupleHeaderSetTypeId(&r_log->htup, tupdesc->tdtypeid);
-	HeapTupleHeaderSetTypMod(&r_log->htup, tupdesc->tdtypmod);
-	if (updatedCols)
-	{
-		int		natts = HeapTupleHeaderGetNatts(tuple->t_data);
+	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)i_log);
+}
 
-		Assert(log_type == GSTORE_TX_LOG__UPDATE);
-		Assert(BITS_PER_BITMAPWORD * updatedCols->nwords >= natts);
-		memcpy((char *)&r_log->htup + tuple->t_len, updatedCols->words,
-			   BITS_PER_BITMAPWORD * updatedCols->nwords);
-	}
-	INIT_CRC32C(crc);
-	COMP_CRC32C(crc, (char *)r_log + sizeof(cl_uint), r_len - sizeof(cl_uint));
-	FIN_CRC32C(crc);
-	r_log->crc = crc;
+static void
+gstoreFdwAppendDeleteLog(Relation frel,
+						 GpuStoreDesc *gs_desc,
+						 cl_uint rowid,
+						 TransactionId xmin,
+						 TransactionId xmax)
+{
+	GstoreTxLogDelete d_log;
 
-	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)r_log);
+	memset(&d_log, 0, sizeof(GstoreTxLogDelete));
+	d_log.type = GSTORE_TX_LOG__DELETE;
+	d_log.length = sizeof(GstoreTxLogDelete);
+	d_log.timestamp = GetCurrentTimestamp();
+	d_log.rowid = rowid;
+	d_log.xmin = xmin;
+	d_log.xmax = xmax;
+	d_log.__terminator = GSTORE_TX_LOG__TERMINATOR;
+
+	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)&d_log);
 }
 
 static GpuStoreUndoLogs *
@@ -1439,80 +1454,82 @@ static char *
 __gstoreAllocExtraBuffer(GpuStoreDesc *gs_desc, size_t extra_sz)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	kern_data_store *kds = &gs_desc->base_mmap->schema;
-	size_t		sz;
-	CUresult	rc;
-	int			rawfd;
-	uint32		revision;
+	kern_data_store *kds;
+	kern_data_extra *extra;
 	bool		has_exclusive_lock = false;
 
 	/* must be aligned */
 	Assert(extra_sz == MAXALIGN(extra_sz));
+	elog(INFO, "%s: extra_sz=%zu", __FUNCTION__, extra_sz);
 	LWLockAcquire(&gs_sstate->base_mmap_lock, LW_SHARED);
 retry:
 	if (gs_desc->base_mmap_revision != gs_sstate->base_mmap_revision)
 		gstoreFdwRemapBaseFile(gs_desc, true);
-
-	/* expand kds->usage, but up to the kds->extra_hlength */
+	kds = &gs_desc->base_mmap->schema;
+	extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
 	for (;;)
 	{
-		cl_uint		old_usage = atomicRead32(&kds->usage);
-		cl_uint		new_usage = old_usage + __kds_packed(extra_sz);
-		char	   *extra;
+		cl_ulong	old_usage = atomicRead64(&extra->usage);
+		cl_ulong	new_usage = old_usage + extra_sz;
 
-		if (__kds_unpack(new_usage) > kds->extra_hlength)
+		elog(INFO, "old_usage=%lu new_usage=%lu length=%lu", old_usage, new_usage, extra->length);
+		Assert(old_usage >= offsetof(kern_data_extra, data));
+		if (new_usage <= extra->length)
 		{
-			/* oops, we have to expand the base file */
-			if (!has_exclusive_lock)
+			if (atomicCAS64(&extra->usage, &old_usage, new_usage))
 			{
+				elog(INFO, "--> usage=%lu length=%lu", extra->usage, extra->length);
 				LWLockRelease(&gs_sstate->base_mmap_lock);
-				LWLockAcquire(&gs_sstate->base_mmap_lock, LW_EXCLUSIVE);
-				has_exclusive_lock = true;
-				goto retry;
+
+				return (char *)extra + old_usage;
 			}
-			break;
 		}
-		/* Ok, allocate extra buffer with current mapping */
-		if (atomicCAS32(&kds->usage, old_usage, new_usage))
+		else if (!has_exclusive_lock)
 		{
+			/* oops, we have to expand the base file, but no exclusive lock */
 			LWLockRelease(&gs_sstate->base_mmap_lock);
-			extra = (char *)kds + kds->extra_hoffset + __kds_unpack(old_usage);
-			return extra;
+			LWLockAcquire(&gs_sstate->base_mmap_lock, LW_EXCLUSIVE);
+			has_exclusive_lock = true;
+			goto retry;
+		}
+		else
+		{
+			/* expand the base file */
+			size_t		sz = extra->length;
+			size_t		off;
+			int			rawfd;
+			uint32		revision;
+
+			sz = extra->length;
+			if (kds->nitems > 0)
+				sz = ((double)kds->nrooms / (double)kds->nitems) * (double)sz;
+			sz = Max(sz, extra->length + (64UL << 20));
+			sz = PAGE_ALIGN(sz);
+			off = offsetof(GpuStoreBaseFileHead, schema) + kds->extra_hoffset;
+
+			elog(INFO, "sz = %zu off = %zu", sz, off);
+			
+			rawfd = open(gs_sstate->base_file, O_RDWR);
+			if (rawfd < 0)
+				elog(ERROR, "failed on open('%s'): %m", gs_sstate->base_file);
+			if (posix_fallocate(rawfd, off, sz) != 0)
+			{
+				close(rawfd);
+				elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
+					 gs_sstate->base_file, sz);
+			}
+			close(rawfd);
+			extra->length = sz;
+
+			do {
+				revision = random();
+			} while (revision == UINT_MAX ||
+					 revision == gs_sstate->base_mmap_revision);
+			gs_sstate->base_mmap_revision = revision;
+			/* Ok, remap base and retry */
+			goto retry;
 		}
 	}
-	/* By here, base file has less enough space to store the extra */
-	Assert(has_exclusive_lock);
-
-	/*
-	 * Expand the base file
-	 */
-	sz = kds->extra_hlength;
-	if (kds->nitems > 0)
-		sz = ((double)kds->nrooms / (double)kds->nitems) * (double)sz;
-	sz = Max(sz, kds->extra_hlength + (64UL << 20));
-
-	rc = gstoreFdwInvokeExpandExtra(gs_desc->ftable_oid, sz);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on EXPAND_EXTRA request (sz=%zu): %s",
-			 sz, errorText(rc));
-
-	rawfd = open(gs_sstate->base_file, O_RDWR);
-	if (rawfd < 0)
-		elog(ERROR, "failed on open('%s'): %m", gs_sstate->base_file);
-	if (posix_fallocate(rawfd, 0, sz) != 0)
-	{
-		close(rawfd);
-		elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
-			 gs_sstate->base_file, sz);
-	}
-
-	do {
-		revision = random();
-	} while (revision == UINT_MAX ||
-			 revision == gs_sstate->base_mmap_revision);
-	gs_sstate->base_mmap_revision = revision;
-	/* Ok, remap base and retry */
-	goto retry;
 }
 
 static TupleTableSlot *
@@ -1531,15 +1548,16 @@ __gstoreExecForeignModify(EState *estate,
 	cl_uint			rowid = UINT_MAX;
 	cl_uint			oldid = UINT_MAX;
 	int				j, natts = RelationGetNumberOfAttributes(frel);
-	char			temp[12];
+	char			temp[10];
 
-	enlargeStringInfo(&gs_undo->buf, sizeof(char) + 2 * sizeof(cl_uint));
+	enlargeStringInfo(&gs_undo->buf, 2 * (sizeof(char) + sizeof(cl_uint)));
 	/*
 	 * UPDATE or DELETE marks 'removed' on the old row; it shall work as
 	 * low-level lock for other concurrent transactions.
 	 */
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)
 	{
+		GstoreFdwSysattr sysattr;
 		ItemPointer	ctid;
 		Datum		datum;
 		bool		isnull;
@@ -1558,7 +1576,8 @@ __gstoreExecForeignModify(EState *estate,
 			int		visible;
 		wakeup_retry:
 			locked = gstoreFdwSpinLockBaseRow(gs_desc, oldid);
-			visible = gstoreCheckVisibilityTryDelete(gs_desc, oldid, curr_xid);
+			visible = gstoreCheckVisibilityTryDelete(gs_desc, oldid, curr_xid,
+													 &sysattr);
 			locked = gstoreFdwSpinUnlockBaseRow(gs_desc, oldid);
 			if (visible < 0)
 			{
@@ -1580,21 +1599,15 @@ __gstoreExecForeignModify(EState *estate,
 		PG_END_TRY();
 		ConditionVariableCancelSleep();
 
-		/* add DELETE log */
-		if (operation == CMD_DELETE)
-		{
-			TupleDesc	tupdesc = RelationGetDescr(frel);
-			Datum	   *__values = alloca(sizeof(Datum) * tupdesc->natts);
-			bool	   *__isnull = alloca(sizeof(bool)  * tupdesc->natts);
-			HeapTuple	tuple;
-
-			memset(__values,  0, sizeof(Datum) * tupdesc->natts);
-			memset(__isnull, -1, sizeof(bool)  * tupdesc->natts);
-			tuple = heap_form_tuple(tupdesc, __values, __isnull);
-			gstoreFdwAppendRedoLog(frel, gs_desc, GSTORE_TX_LOG__DELETE,
-								   rowid, curr_xid, tuple, NULL);
-			pfree(tuple);
-		}
+		/* Put DELETE log */
+		gstoreFdwAppendDeleteLog(frel, gs_desc, oldid,
+								 sysattr.xmin,
+								 sysattr.xmax);
+		/* UNDO Log also */
+		temp[0] = 'D';
+		*((uint32 *)(temp + 1)) = oldid;
+        appendBinaryStringInfo(&gs_undo->buf, temp, 5);
+        gs_undo->nitems++;
 	}
 
 	/*
@@ -1607,16 +1620,18 @@ __gstoreExecForeignModify(EState *estate,
 		char	   *extra_buf = NULL;
 
 		slot_getallattrs(slot);
+
 		/* calculation of required extra buffer size */
-		for (j=0; j < natts; j++)
+		if (kds->has_varlena)
 		{
-			kern_colmeta   *cmeta = &kds->colmeta[j];
-			Datum			datum = slot->tts_values[j];
-			bool			isnull = slot->tts_isnull[j];
+			for (j=0; j < natts; j++)
+			{
+				kern_colmeta   *cmeta = &kds->colmeta[j];
+				Datum			datum = slot->tts_values[j];
+				bool			isnull = slot->tts_isnull[j];
 
 			if (cmeta->attlen == -1 && !isnull &&
 				(!updatedCols || bms_is_member(cmeta->attnum, updatedCols)))
-			{
 				extra_sz += MAXALIGN(VARSIZE_ANY(datum));
 			}
 		}
@@ -1642,29 +1657,18 @@ __gstoreExecForeignModify(EState *estate,
 			GstoreFdwSysattr sysattr;
 			HeapTuple		tuple;
 
-			/* append redo logs */
+			/* Put INSERT Log */
 			tuple = ExecFetchSlotHeapTuple(slot, false, false);
-			if (operation == CMD_INSERT)
-			{
-				gstoreFdwAppendRedoLog(frel, gs_desc,
-									   GSTORE_TX_LOG__INSERT,
-									   rowid, curr_xid, tuple, NULL);
-			}
-			else
-			{
-				HeapTupleHeader	htup = tuple->t_data;
+			gstoreFdwAppendInsertLog(frel, gs_desc, rowid, oldid, curr_xid, tuple);
+			/* UNDO Log also */
+			temp[0] = 'I';
+			*((uint32 *)(temp + 1)) = rowid;
+			appendBinaryStringInfo(&gs_undo->buf, temp, 5);
+			gs_undo->nitems++;
 
-				/* oldid; the row to be updated */
-				htup->t_ctid.ip_blkid.bi_hi = (oldid >> 16);
-				htup->t_ctid.ip_blkid.bi_lo = (oldid & 0x0000ffffU);
-				htup->t_ctid.ip_posid       = 0;
-				gstoreFdwAppendRedoLog(frel, gs_desc,
-									   GSTORE_TX_LOG__UPDATE,
-									   rowid, curr_xid, tuple, updatedCols);
-			}
-			/* update base file */
 			if (extra_sz > 0)
 				extra_buf = __gstoreAllocExtraBuffer(gs_desc, extra_sz);
+			kds = &gs_desc->base_mmap->schema;
 			for (j=0; j < natts; j++)
 			{
 				kern_colmeta   *cmeta = &kds->colmeta[j];
@@ -1690,12 +1694,13 @@ __gstoreExecForeignModify(EState *estate,
 						 * of the unchanged value. It also saves consumption of
 						 * GPU device memory.
 						 */
+						kern_data_extra *extra = (kern_data_extra *)
+							((char *)kds + kds->extra_hoffset);
 						datum = KDS_fetch_datum_column(kds, cmeta, oldid, &isnull);
 						if (isnull)
 							elog(ERROR, "Bug? unchanged column has different value");
-						Assert((char *)datum >= (char *)kds + kds->extra_hoffset &&
-							   (char *)datum < ((char *)kds + kds->extra_hoffset
-															+ kds->extra_hlength));
+						Assert((char *)datum >= (char *)extra &&
+							   (char *)datum <  (char *)extra + extra->length);
 					}
 				}
 				__KDS_store_datum_column(kds, cmeta, rowid, datum, isnull);
@@ -1716,37 +1721,6 @@ __gstoreExecForeignModify(EState *estate,
 		}
 		PG_END_TRY();
 		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-	}
-
-	/* UNLO log */
-	if (operation == CMD_INSERT)
-	{
-		Assert(oldid == UINT_MAX && rowid != UINT_MAX);
-		temp[0] = 'I';
-		*((uint32 *)(temp + 1)) = rowid;
-		appendBinaryStringInfo(&gs_undo->buf, temp, 5);
-        gs_undo->nitems++;
-	}
-	else if (operation == CMD_UPDATE)
-	{
-		Assert(oldid != UINT_MAX && rowid != UINT_MAX);
-		temp[0] = 'U';
-		*((uint32 *)(temp + 1)) = oldid;
-		*((uint32 *)(temp + 5)) = rowid;
-		appendBinaryStringInfo(&gs_undo->buf, temp, 9);
-		gs_undo->nitems++;
-	}
-	else if (operation == CMD_DELETE)
-	{
-		Assert(oldid != UINT_MAX && rowid == UINT_MAX);
-		temp[0] = 'D';
-		*((uint32 *)(temp + 1)) = oldid;
-		appendBinaryStringInfo(&gs_undo->buf, temp, 5);
-        gs_undo->nitems++;
-	}
-	else
-	{
-		elog(FATAL, "Bug? both of slot and planSlot are NULL");
 	}
 	/* UPDATE or DELETE */
 	if (oldid != UINT_MAX)
@@ -2782,7 +2756,6 @@ gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
 	{
 		hbuf->schema.extra_hoffset
 			= file_sz - offsetof(GpuStoreBaseFileHead, schema);
-		hbuf->schema.extra_hlength = extra_sz;
 		file_sz += PAGE_ALIGN(extra_sz);
 	}
 	/* Write out GpuStoreBaseFileHead section */
@@ -2837,6 +2810,26 @@ gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
 				elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
 			nbytes -= sz;
 		}
+	}
+
+	/* write out kern_data_extra section (if any varlena) */
+	if (schema->has_varlena)
+	{
+		kern_data_extra		extra;
+
+		memset(&extra, 0, offsetof(kern_data_extra, data));
+		memcpy(extra.signature, GPUSTORE_EXTRABUF_SIGNATURE, 8);
+		extra.length = extra_sz;
+		extra.usage = offsetof(kern_data_extra, data);
+
+		sz = offsetof(GpuStoreBaseFileHead,
+					  schema) + hbuf->schema.extra_hoffset;
+		if (lseek(rawfd, sz, SEEK_SET) < 0)
+			elog(ERROR, "failed on lseek('%s',%zu): %m",
+				 base_file, hbuf->schema.extra_hoffset);
+		sz = offsetof(kern_data_extra, data);
+		if (__writeFile(rawfd, &extra, sz) != sz)
+			elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
 	}
 	pfree(__tupdesc);
 }
@@ -3013,22 +3006,25 @@ gstoreFdwValidateBaseFile(Relation frel,
 		 */
 		if (!schema->has_varlena)
 		{
-			if (base_mmap->schema.extra_hoffset != 0 ||
-				base_mmap->schema.extra_hlength != 0)
+			if (base_mmap->schema.extra_hoffset != 0)
 				elog(ERROR, "Base file '%s' has extra buffer, but foreign-table '%s' has no variable-length fields",
 					 gs_sstate->base_file, RelationGetRelationName(frel));
 		}
 		else
 		{
-			if (base_mmap->schema.extra_hoffset == 0 ||
-				base_mmap->schema.extra_hlength == 0)
+			kern_data_store *schema = &base_mmap->schema;
+			kern_data_extra *extra = (kern_data_extra *)
+				((char *)schema + schema->extra_hoffset);
+
+			if (schema->extra_hoffset == 0)
 				elog(ERROR, "Base file '%s' has no extra buffer, but foreign-table '%s' has variable-length fields",
 					 gs_sstate->base_file, RelationGetRelationName(frel));
 			if (offsetof(GpuStoreBaseFileHead, schema) +
-				base_mmap->schema.extra_hoffset +
-				base_mmap->schema.extra_hlength > mmap_sz)
+				schema->extra_hoffset + extra->length > mmap_sz)
 				elog(ERROR, "Base file '%s' is smaller then the required",
 					 gs_sstate->base_file);
+			if (extra->usage > extra->length)
+				elog(ERROR, "Extra buffer of base file '%s' has larger usage (%lu) than length (%lu)", gs_sstate->base_file, extra->usage, extra->length);
 		}
 	}
 	PG_CATCH();
@@ -3117,7 +3113,7 @@ gstoreFdwCreateRedoLog(Relation frel,
 static void
 __ApplyRedoLogInsert(Relation frel,
 					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
-					 GstoreTxLogRow *r_log)
+					 GstoreTxLogInsert *i_log)
 {
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	Datum		   *values = alloca(sizeof(Datum) * tupdesc->natts);
@@ -3128,90 +3124,22 @@ __ApplyRedoLogInsert(Relation frel,
 	int				j;
 
 	memset(&tuple, 0, sizeof(HeapTupleData));
-	tuple.t_data = &r_log->htup;
-	heap_deform_tuple(&tuple, tupdesc,
-					  values, isnull);
-	Assert(kds->ncols == tupdesc->natts + 3);	/* xmin,xmax,cid */
+	tuple.t_data = &i_log->htup;
+	heap_deform_tuple(&tuple, tupdesc, values, isnull);
+	Assert(kds->ncols == tupdesc->natts + 1);	/* + sysattr */
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		KDS_store_datum_column(kds, &kds->colmeta[j],
-							   r_log->rowid,
+							   i_log->rowid,
 							   values[j], isnull[j]);
 	}
 	memset(&sysattr, 0, sizeof(GstoreFdwSysattr));
-	sysattr.xmin = r_log->htup.t_choice.t_heap.t_xmin;
-	sysattr.xmax = InvalidTransactionId;
-	sysattr.cid  = r_log->htup.t_choice.t_heap.t_field3.t_cid;
+	sysattr.xmin = HeapTupleHeaderGetRawXmin(&i_log->htup);
+	sysattr.xmax = HeapTupleHeaderGetRawXmax(&i_log->htup);
+	sysattr.cid  = HeapTupleHeaderGetRawCommandId(&i_log->htup);
 	KDS_store_datum_column(kds, &kds->colmeta[kds->ncols-1],
-						   r_log->rowid,
+						   i_log->rowid,
 						   PointerGetDatum(&sysattr), false);
-}
-
-/*
- * GSTORE_TX_LOG__UPDATE
- */
-static void
-__ApplyRedoLogUpdate(Relation frel,
-					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
-					 GstoreTxLogRow *r_log)
-{
-	TupleDesc		tupdesc = RelationGetDescr(frel);
-	Datum		   *values = alloca(sizeof(Datum) * tupdesc->natts);
-	bool		   *isnull = alloca(sizeof(bool)  * tupdesc->natts);
-	kern_data_store *kds = &base_mmap->schema;
-	HeapTupleData	tuple;
-	bits8		   *update_mask = NULL;
-	GstoreFdwSysattr *sysattr;
-	GstoreFdwSysattr *oldattr;
-	cl_uint			oldid;
-	Datum			__datum;
-	bool			__isnull;
-	int				j;
-
-	oldid = (((cl_uint)r_log->htup.t_ctid.ip_blkid.bi_hi << 16) |
-			 ((cl_uint)r_log->htup.t_ctid.ip_blkid.bi_lo));
-	if (r_log->type == GSTORE_TX_LOG__UPDATE)
-	{
-		update_mask = (bits8 *)
-			((char *)r_log + HeapTupleHeaderGetDatumLength(&r_log->htup));
-	}
-
-	memset(&tuple, 0, sizeof(HeapTupleData));
-	tuple.t_data = &r_log->htup;
-	heap_deform_tuple(&tuple, tupdesc,
-					  values, isnull);
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		__datum = values[j];
-		__isnull = isnull[j];
-		if (update_mask && (update_mask[j>>3] & (1<<(j&7))) != 0)
-		{
-			/* column is not updated */
-			__datum = KDS_fetch_datum_column(kds, &kds->colmeta[j],
-											 oldid,
-											 &__isnull);
-		}
-		KDS_store_datum_column(kds, &kds->colmeta[j],
-							   r_log->rowid,
-							   __datum, __isnull);		
-	}
-	/* old xmax & cid */
-	oldattr = (GstoreFdwSysattr *)
-		KDS_fetch_datum_column(kds, &kds->colmeta[kds->ncols-1],
-							   r_log->rowid, &__isnull);
-	if (__isnull)
-		elog(ERROR, "Bug? system column is missing (rowid=%u)", r_log->rowid);
-	oldattr->xmax = r_log->htup.t_choice.t_heap.t_xmin;
-	oldattr->cid  = r_log->htup.t_choice.t_heap.t_field3.t_cid;
-
-	/* new xmin & cid */
-	sysattr = (GstoreFdwSysattr *)
-		KDS_fetch_datum_column(kds, &kds->colmeta[kds->ncols-1],
-							   oldid, &__isnull);
-	if (__isnull)
-		elog(ERROR, "Bug? system column is missing (rowid=%u)", oldid);
-	sysattr->xmin = r_log->htup.t_choice.t_heap.t_xmin;
-	sysattr->cid  = r_log->htup.t_choice.t_heap.t_field3.t_cid;
 }
 
 /*
@@ -3220,7 +3148,7 @@ __ApplyRedoLogUpdate(Relation frel,
 static void
 __ApplyRedoLogDelete(Relation frel,
 					 GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz,
-					 GstoreTxLogRow *r_log)
+					 GstoreTxLogDelete *d_log)
 {
 	kern_data_store *kds = &base_mmap->schema;
 	GstoreFdwSysattr *sysattr;
@@ -3228,17 +3156,57 @@ __ApplyRedoLogDelete(Relation frel,
 
 	sysattr = (GstoreFdwSysattr *)
 		KDS_fetch_datum_column(kds, &kds->colmeta[kds->ncols-1],
-							   r_log->rowid, &isnull);
+							   d_log->rowid, &isnull);
+	Assert(!isnull);
 	/* xmax & cid */
-	sysattr->xmax = r_log->htup.t_choice.t_heap.t_xmax;
-	sysattr->cid  = r_log->htup.t_choice.t_heap.t_field3.t_cid;
+	sysattr->xmin = d_log->xmin;
+	sysattr->xmax = d_log->xmax;
+	sysattr->cid  = InvalidCommandId;
 }
 
 static void
 __rebuildRowIdMap(Relation frel, GpuStoreSharedState *gs_sstate,
 				  GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz)
 {
-	/* TODO: rebuild RowIdMap */
+#if 0
+	kern_data_store *kds = &base_mmap->schema;
+	kern_colmeta *cmeta = &kds->colmeta[kds->ncols - 1];
+	GpuStoreRowIdMapHead *rowmap;
+	size_t		rowmap_sz;
+	cl_uint		rowid;
+
+	/* clear the rowid-map */
+	rowmap_sz = gstoreFdwRowIdMapSize(kds->nrooms);
+	rowmap = (GpuStoreRowIdMapHead *)
+		((char *)base_mmap + base_mmap->rowid_map_offset);
+	memset(rowmap, 0, rowmap_sz);
+	memcpy(rowmap->signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
+	rowmap->length = rowmap_sz;
+	rowmap->nrooms = kds->nrooms;
+
+	for (rowid=0; rowid < kds->nitems; rowid++)
+	{
+		GstoreFdwSysattr *sysattr;
+		bool		isnull;
+
+		sysattr = (GstoreFdwSysattr *)
+			KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+		if (isnull)
+		{
+			elog(WARNING, "foreign table '%s', rowid=%u has NULL on system column",
+				 RelationGetRelationName(frel), rowid);
+			continue;
+		}
+
+		if ((sysattr->xmin == FrozenTransactionId ||
+			 TransactionIdDidCommit(sysattr->xmin)) &&
+			(sysattr->xmax != FrozenTransactionId &&
+			 !TransactionIdDidCommit(sysattr->xmax)))
+		{
+			gstoreFdwAllocateRowId();
+		}
+	}
+#endif
 }
 
 static void
@@ -3273,12 +3241,12 @@ gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
 
 	PG_TRY();
 	{
-		GstoreTxLogCommon *__tx_log_head = NULL;
-		GstoreTxLogCommon *__tx_log_tail = NULL;
+		GstoreTxLogCommon *tail_log = NULL;
 		cl_uint		i, nitems = 0;
 		char	   *pos, *end;
 		StringInfoData buf;
 
+		elog(INFO, "gstoreFdwApplyRedoLog calls pmem_map_file");
 		base_mmap = pmem_map_file(gs_sstate->base_file, 0,
 								  0, 0600,
 								  &base_mmap_sz,
@@ -3303,34 +3271,22 @@ gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
 		while (pos + offsetof(GstoreTxLogCommon, data) <= end)
 		{
 			GstoreTxLogCommon *curr = (GstoreTxLogCommon *)pos;
-			pg_crc32c	crc;
 
 			/* Quick validation of the Log */
 			if (((curr->type != GSTORE_TX_LOG__INSERT) &&
-				 (curr->type != GSTORE_TX_LOG__UPDATE) &&
 				 (curr->type != GSTORE_TX_LOG__DELETE) &&
 				 (curr->type != GSTORE_TX_LOG__COMMIT)) ||
-				(char *)curr + curr->length > end ||
-				curr->length != MAXALIGN(curr->length))
+				(char *)curr + curr->length + sizeof(uint64) > end ||
+				curr->length != MAXALIGN(curr->length) ||
+				((cl_uint *)curr + curr->length)[-1] != GSTORE_TX_LOG__TERMINATOR)
 			{
 				pos += sizeof(cl_long);
 				continue;
 			}
-			/* CRC check of the Log */
-			INIT_CRC32C(crc);
-			COMP_CRC32C(crc, (char *)curr + sizeof(cl_uint),
-						curr->length - sizeof(cl_uint));
-			FIN_CRC32C(crc);
-			if (curr->crc != crc)
-			{
-				pos += sizeof(cl_long);
-				continue;
-			}
-			/* Ok, this TxLog is likely valid one */
-			if (!__tx_log_head || __tx_log_head->timestamp > curr->timestamp)
-				__tx_log_head = curr;
-			if (!__tx_log_tail || __tx_log_tail->timestamp < curr->timestamp)
-				__tx_log_tail = curr;
+
+			if (!tail_log || curr->timestamp > tail_log->timestamp)
+				tail_log = curr;
+
 			if (curr->type != GSTORE_TX_LOG__COMMIT)
 			{
 				enlargeStringInfo(&buf, sizeof(GstoreTxLogCommon *));
@@ -3349,21 +3305,21 @@ gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
 				  __GstoreTxLogCommonCompare);
 			for (i=0; i < nitems; i++)
 			{
-				GstoreTxLogRow *r_log = ((GstoreTxLogRow **)buf.data)[i];
+				GstoreTxLogCommon *tx_log = ((GstoreTxLogCommon **)buf.data)[i];
 
-				switch (r_log->type)
+				if (tx_log->type == GSTORE_TX_LOG__INSERT)
 				{
-					case GSTORE_TX_LOG__INSERT:
-						__ApplyRedoLogInsert(frel, base_mmap, base_mmap_sz, r_log);
-						break;
-					case GSTORE_TX_LOG__UPDATE:
-						__ApplyRedoLogUpdate(frel, base_mmap, base_mmap_sz, r_log);
-						break;
-					case GSTORE_TX_LOG__DELETE:
-						__ApplyRedoLogDelete(frel, base_mmap, base_mmap_sz, r_log);
-						break;
-					default:
-						elog(ERROR, "unexpected log type here");
+					__ApplyRedoLogInsert(frel, base_mmap, base_mmap_sz,
+										 (GstoreTxLogInsert *)tx_log);
+				}
+				else if (tx_log->type == GSTORE_TX_LOG__DELETE)
+				{
+					__ApplyRedoLogDelete(frel, base_mmap, base_mmap_sz,
+										 (GstoreTxLogDelete *)tx_log);
+				}
+				else
+				{
+					elog(ERROR, "unexpected log type on REDO File");
 				}
 			}
 			/* rebbuild row-id map, and PK hash-index */
@@ -3375,9 +3331,7 @@ gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
 				pmem_msync(base_mmap, base_mmap_sz);
 
 			/* Seek the redo_xxx_pos next to the tail */
-			start_pos = ((char *)__tx_log_tail
-						 + __tx_log_tail->length
-						 - (char *)redo_mmap);
+			start_pos = (char *)tail_log + tail_log->length - (char *)redo_mmap;
 			gs_sstate->redo_write_pos = start_pos;
 			gs_sstate->redo_read_pos  = start_pos;
 			gs_sstate->redo_sync_pos  = start_pos;
@@ -3605,6 +3559,7 @@ gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc, bool abort_on_error)
 			elog(WARNING, "failed on pmem_unmap('%s'): %m",
 				 gs_sstate->base_file);
 	}
+	elog(INFO, "gstoreFdwRemapBaseFile calls pmem_map_file");
 	gs_desc->base_mmap = pmem_map_file(gs_sstate->base_file, 0,
 									   0, 0600,
 									   &gs_desc->base_mmap_sz,
@@ -3676,7 +3631,17 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 	Oid			hkey[2];
 	bool		found;
 	bool		invoke_initial_load = false;
+	FdwRoutine *routine;
 
+	/* ensure relation is foreign-relation managed by gstore_fdw */
+	if (RelationGetForm(frel)->relkind != RELKIND_FOREIGN_TABLE)
+		elog(ERROR, "relation '%s' is not foreign table",
+			 RelationGetRelationName(frel));
+	routine = GetFdwRoutineForRelation(frel, false);
+	if (memcmp(routine, &pgstrom_gstore_fdw_routine, sizeof(FdwRoutine)) != 0)
+		elog(ERROR, "relation '%s' is not a foreign table managed by gstore_fdw",
+			 RelationGetRelationName(frel));
+	
 	hkey[0] = MyDatabaseId;
 	hkey[1] = RelationGetRelid(frel);
 	gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
@@ -3762,32 +3727,7 @@ __gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
 		switch (*pos)
 		{
 			case 'I':	/* INSERT with rowid(u32) */
-				if (c_log->length + 5 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
-				{
-					flush_commit_log = true;
-					break;
-				}
-				memcpy((char *)c_log + c_log->length, pos, 5);
-				c_log->length += 5;
-				c_log->nitems++;
-				pos += 5;
-				count++;
-				break;
-
-			case 'U':	/* UPDATE with oldid(u32) + rowid(u32) */
-				if (c_log->length + 9 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
-				{
-					flush_commit_log = true;
-					break;
-				}
-				memcpy((char *)c_log + c_log->length, pos, 9);
-				c_log->length += 9;
-				c_log->nitems++;
-				pos += 9;
-				count++;
-				break;
-
-			case 'D':	/* DELETE with oldid(u32) */
+			case 'D':	/* DELETE with rowid(u32) */
 				if (c_log->length + 5 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
 				{
 					flush_commit_log = true;
@@ -3814,19 +3754,12 @@ __gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
 		if (flush_commit_log)
 		{
 			int			diff = MAXALIGN(c_log->length) - c_log->length;
-			pg_crc32c	crc;
 
 			if (diff > 0)
 			{
 				memset((char *)c_log + c_log->length, 0, diff);
 				c_log->length += diff;
 			}
-			INIT_CRC32C(crc);
-			COMP_CRC32C(crc, (char *)c_log + sizeof(uint32),
-						c_log->length - sizeof(uint32));
-			FIN_CRC32C(crc);
-			c_log->crc = crc;
-
 			__gstoreFdwAppendRedoLog(gs_undo->gs_desc,
 									 (GstoreTxLogCommon *)c_log);
 			/* rewind */
@@ -3861,15 +3794,6 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 					gstoreFdwReleaseRowId(gs_desc, rowid);
 				}
 				pos += sizeof(char) + sizeof(uint32);
-				break;
-			case 'U':	/* UPDATE */
-				if (is_commit)
-					rowid = *((uint32 *)(pos + 1));		/* oldid */
-				else
-					rowid = *((uint32 *)(pos + 5));		/* newid */
-				rowid = *((uint32 *)(pos + 1));
-				gstoreFdwReleaseRowId(gs_desc, rowid);
-				pos += sizeof(char) + 2 * sizeof(uint32);
 				break;
 			case 'D':	/* DELETE */
 				if (is_commit)
@@ -4045,18 +3969,51 @@ pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_handler);
 
 Datum
-pgstrom_gstore_fdw_synchronize(PG_FUNCTION_ARGS)
+pgstrom_gstore_fdw_apply_redo(PG_FUNCTION_ARGS)
 {
-	/* not implement yet */
-	PG_RETURN_NULL();
+	Oid				ftable_oid = PG_GETARG_OID(0);
+	Relation		frel = table_open(ftable_oid, AccessShareLock);
+	GpuStoreDesc   *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	cl_uint			nitems;
+	size_t			curr_pos;
+	CUresult		rc;
+
+	/* see  __gstoreFdwAppendRedoLog */
+	SpinLockAcquire(&gs_sstate->redo_pos_lock);
+	curr_pos = gs_sstate->redo_write_pos;
+	nitems = (gs_sstate->redo_write_nitems -
+			  gs_sstate->redo_read_nitems);
+	SpinLockRelease(&gs_sstate->redo_pos_lock);
+
+	rc = gstoreFdwInvokeApplyRedo(ftable_oid, false, curr_pos, nitems);
+
+	table_close(frel, NoLock);
+
+	PG_RETURN_INT32((int)rc);
 }
-PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_synchronize);
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_apply_redo);
 
 Datum
 pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS)
 {
-	/* not implement yet */
-	PG_RETURN_NULL();
+	Oid			ftable_oid = PG_GETARG_OID(0);
+	bool		with_host_buffer = PG_GETARG_BOOL(1);
+	Relation	frel;
+	CUresult	rc;
+
+	frel = table_open(ftable_oid, (with_host_buffer 
+								   ? AccessExclusiveLock
+								   : AccessShareLock));
+#if 0
+	if (with_host_buffer)
+		do host buffer compaction...;
+#endif
+	rc = gstoreFdwInvokeCompaction(frel, false);
+
+	table_close(frel, NoLock);
+
+	PG_RETURN_INT32((int)rc);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_compaction);
 
@@ -4227,18 +4184,17 @@ gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 }
 
 static CUresult
-gstoreFdwInvokeExpandExtra(Oid ftable_oid, uint64 extra_sz)
+gstoreFdwInvokeCompaction(Relation frel, bool is_async)
 {
 	GpuStoreBackgroundCommand lcmd;
 
 	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
 	lcmd.database_oid = MyDatabaseId;
-	lcmd.ftable_oid = ftable_oid;
-	lcmd.backend = MyLatch;
-	lcmd.command = GSTORE_BACKGROUND_CMD__EXPAND_EXTRA;
-	lcmd.extra_sz = extra_sz;
+	lcmd.ftable_oid = RelationGetRelid(frel);
+	lcmd.backend = (is_async ? NULL : MyLatch);
+	lcmd.command = GSTORE_BACKGROUND_CMD__COMPACTION;
 
-	return __gstoreFdwInvokeBackgroundCommand(&lcmd, false);
+	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
 }
 
 /*
@@ -4277,6 +4233,224 @@ GstoreFdwOpenLogBackupFile(GpuStoreSharedState *gs_sstate)
 }
 
 /*
+ * __gstoreFdwGetCudaModule
+ */
+static CUresult
+__gstoreFdwGetCudaModule(CUmodule *p_cuda_module, cl_int cuda_dindex)
+{
+	static void		*cuda_fatbin_image = NULL;
+	static CUmodule *cuda_modules_array = NULL;
+
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+	if (!cuda_fatbin_image)
+	{
+		const char *path = PGSHAREDIR "/pg_strom/cuda_gstore.fatbin";
+		int			rawfd;
+		struct stat	stat_buf;
+		ssize_t		nbytes;
+
+		rawfd = open(path, O_RDONLY);
+		if (rawfd < 0)
+			elog(ERROR, "failed on open('%s'): %m", path);
+		PG_TRY();
+		{
+			if (fstat(rawfd, &stat_buf) != 0)
+				elog(ERROR, "failed on fstat('%s'): %m", path);
+			cuda_fatbin_image = malloc(stat_buf.st_size);
+			nbytes = __readFileSignal(rawfd, cuda_fatbin_image,
+									  stat_buf.st_size, false);
+			if (nbytes != stat_buf.st_size)
+				elog(ERROR, "failed on __readFile('%s'): %m", path);
+		}
+		PG_CATCH();
+		{
+			if (cuda_fatbin_image)
+			{
+				free(cuda_fatbin_image);
+				cuda_fatbin_image = NULL;
+			}
+			close(rawfd);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		close(rawfd);
+	}
+	if (!cuda_modules_array)
+	{
+		cuda_modules_array = calloc(numDevAttrs, sizeof(CUmodule));
+		if (!cuda_modules_array)
+			elog(ERROR, "out of memory");
+	}
+	if (cuda_modules_array[cuda_dindex] == NULL)
+	{
+		CUmodule	cuda_module;
+		CUresult	rc;
+
+		rc = cuModuleLoadFatBinary(&cuda_module, cuda_fatbin_image);
+		if (rc != CUDA_SUCCESS)
+		{
+			elog(LOG, "failed on cuModuleLoadFatBinary: %s", errorText(rc));
+			return rc;
+		}
+		cuda_modules_array[cuda_dindex] = cuda_module;
+	}
+	*p_cuda_module = cuda_modules_array[cuda_dindex];
+	return CUDA_SUCCESS;
+}
+
+/*
+ * __gstoreFdwCallKernelApplyRedo
+ */
+
+
+
+
+/*
+ * __gstoreFdwCallKernelApplyRedo
+ */
+static CUresult
+__gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
+{
+	size_t		nitems = ((kern_gpustore_redolog *)m_redo)->nitems;
+	int			cuda_dindex = gs_desc->gs_sstate->cuda_dindex;
+	CUmodule	cuda_module;
+	CUfunction	kfunc_setup_owner;
+	CUfunction	kfunc_apply_redo;
+	CUresult	rc;
+	int			phase;
+	int			grid_sz, __grid_sz;
+	int			block_sz, __block_sz;
+	void	   *kern_args[4];
+
+	rc = __gstoreFdwGetCudaModule(&cuda_module, cuda_dindex);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	rc = cuModuleGetFunction(&kfunc_setup_owner, cuda_module,
+							 "kern_gpustore_setup_owner");
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	rc = cuModuleGetFunction(&kfunc_apply_redo, cuda_module,
+							 "kern_gpustore_apply_redo");
+	if (rc != CUDA_SUCCESS)
+		return rc;
+
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
+							   kfunc_setup_owner,
+							   cuda_dindex, 0, 0);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	rc = __gpuOptimalBlockSize(&__grid_sz,
+                               &__block_sz,
+							   kfunc_apply_redo,
+							   cuda_dindex, 0, 0);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	block_sz = Min(block_sz, __block_sz);
+	grid_sz = Min3(grid_sz, __grid_sz, (nitems + block_sz - 1) / block_sz);
+	
+	/*
+	 * setup-owner (phase-0) - clear the owner-id field
+	 */
+	phase = 0;
+	kern_args[0] = &m_redo;
+	kern_args[1] = &gs_desc->gpu_main_devptr;
+	kern_args[2] = &gs_desc->gpu_extra_devptr;
+	kern_args[3] = &phase;
+	rc = cuLaunchKernel(kfunc_setup_owner,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto out_error;
+	}
+
+	/*
+	 * setup-owner (phase-1) - assign largest owner-id for each rows modified
+	 */
+	phase = 1;
+	rc = cuLaunchKernel(kfunc_setup_owner,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto out_error;
+	}
+
+	/*
+	 * apply redo logs (phase-2) - apply INSERT/DELETE logs
+	 */
+	phase = 2;
+	rc = cuLaunchKernel(kfunc_apply_redo,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto out_error;
+	}
+
+	/*
+	 * setup-owner (phase-3) - assign largest owner-id of commit-logs
+	 */
+	phase = 3;
+	rc = cuLaunchKernel(kfunc_apply_redo,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto out_error;
+	}
+
+	/*
+	 * apply redo logs (phase-4) - apply COMMIT logs
+	 */
+	phase = 4;
+	rc = cuLaunchKernel(kfunc_apply_redo,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto out_error;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+
+	//if out of memory, do compaction and retry.
+	return CUDA_SUCCESS;
+
+out_error:
+	cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	return rc;
+}
+
+/*
  * GstoreFdwBackgrondInitialLoad
  */
 static CUresult
@@ -4299,28 +4473,30 @@ GstoreFdwBackgroundInitialLoad(GpuStoreDesc *gs_desc)
 						   gs_desc->gpu_main_devptr);
 	if (rc != CUDA_SUCCESS)
 		goto error_1;
+	gs_sstate->gpu_main_size = schema->length;
 	elog(LOG, "GstoreFdw: %s main buffer (sz: %lu) allocated",
 		 ftable_name, schema->length);
 
 	/* extra portion of the device buffer (if needed) */
 	if (schema->has_varlena)
 	{
-		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr,
-						schema->extra_hlength);
+		kern_data_extra *extra = (kern_data_extra *)
+			((char *)schema + schema->extra_hoffset);
+
+		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr, extra->length);
 		if (rc != CUDA_SUCCESS)
 			goto error_1;
-		rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr,
-						  (char *)schema + schema->extra_hoffset,
-						  schema->extra_hlength);
+		rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr, extra, extra->length);
 		if (rc != CUDA_SUCCESS)
 			goto error_2;
 		rc = cuIpcGetMemHandle(&gs_sstate->gpu_extra_mhandle,
 							   gs_desc->gpu_extra_devptr);
 		if (rc != CUDA_SUCCESS)
 			goto error_2;
+		gs_sstate->gpu_extra_size = extra->length;
 
 		elog(LOG, "GstoreFdw: %s extra buffer (sz: %lu) allocated",
-			 ftable_name, schema->extra_hlength);
+			 ftable_name, extra->length);
 	}
 	return CUDA_SUCCESS;
 
@@ -4342,7 +4518,7 @@ error_0:
  */
 static CUresult
 GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
-								GpuStoreBackgroundCommand *cmd)
+								uint64 end_pos, uint32 nitems)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	size_t		length;
@@ -4364,14 +4540,14 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	}
 
 	SpinLockAcquire(&gs_sstate->redo_pos_lock);
-	if (cmd->end_pos <= gs_sstate->redo_read_pos)
+	if (end_pos <= gs_sstate->redo_read_pos)
 	{
 		/* nothing to do */
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
 		return CUDA_SUCCESS;
 	}
 	head_pos = curr_pos = gs_sstate->redo_read_pos;
-	Assert(cmd->end_pos <= gs_sstate->redo_write_pos);
+	Assert(end_pos <= gs_sstate->redo_write_pos);
 	SpinLockRelease(&gs_sstate->redo_pos_lock);
 
 	/*
@@ -4379,8 +4555,8 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 * (index to log and redo-log itself)
 	 */
 	length = (MAXALIGN(offsetof(kern_gpustore_redolog,
-								log_index[cmd->nitems])) +
-			  MAXALIGN(cmd->end_pos - head_pos));
+								log_index[nitems])) +
+			  MAXALIGN(end_pos - head_pos));
 	rc = cuMemAllocManaged(&m_redo, length, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -4390,12 +4566,12 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	}
 	h_redo = (kern_gpustore_redolog *)m_redo;
 	memset(h_redo, 0, offsetof(kern_gpustore_redolog, log_index));
-	h_redo->nrooms = cmd->nitems;
+	h_redo->nrooms = nitems;
 	h_redo->length = length;
 	offset = MAXALIGN(offsetof(kern_gpustore_redolog,
-							   log_index[cmd->nitems]));
+							   log_index[nitems]));
 	index = 0;
-	while (curr_pos < cmd->end_pos && index < cmd->nitems)
+	while (curr_pos < end_pos && index < nitems)
 	{
 		uint64		file_pos = (curr_pos % gs_sstate->redo_log_limit);
 		GstoreTxLogCommon *tx_log
@@ -4426,8 +4602,7 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 * Kick the kernel to apply REDO log
 	 */
 	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
-	//call kernel
-	//sync stream
+	__gstoreFdwCallKernelApplyRedo(gs_desc, m_redo);
 	elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu",
 		 h_redo->nitems, h_redo->length,
 		 head_pos, curr_pos);
@@ -4506,66 +4681,113 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 }
 
 /*
- * GSTORE_BACKGROUND_CMD__EXPAND_EXTRA command
+ * GSTORE_BACKGROUND_CMD__COMPACTION command
  */
 static CUresult
-GstoreFdwBackgroundExpandExtra(GpuStoreDesc *gs_desc,
-							   GpuStoreBackgroundCommand *cmd)
+GstoreFdwBackgroundCompation(GpuStoreDesc *gs_desc)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	CUdeviceptr		new_extra_devptr;
-	CUipcMemHandle	new_ipc_mhandle;
+	kern_data_extra	h_extra;
+	CUdeviceptr		m_new_extra;
+	CUdeviceptr		m_temp;
+	CUipcMemHandle	new_extra_mhandle;
+	CUmodule		cuda_module;
+	CUfunction		kfunc_compaction;
 	CUresult		rc;
-
-	if (cmd->extra_sz <= gs_sstate->gpu_extra_size)
-		return CUDA_SUCCESS;	/* nothing to do */
+	int				grid_sz, block_sz;
+	void		   *kern_args[4];
 
 	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
+
+	memset(&h_extra, 0, offsetof(kern_data_extra, data));
+	memcpy(h_extra.signature, GPUSTORE_EXTRABUF_SIGNATURE, 8);
+	h_extra.length = gs_sstate->gpu_extra_size;
+	h_extra.usage  = offsetof(kern_data_extra, data);
 	
-	rc = cuMemAlloc(&new_extra_devptr, cmd->extra_sz);
-	if (rc != CUDA_SUCCESS)
+	/* device memory must be allocated */
+	if (gs_desc->gpu_main_devptr == 0UL)
 	{
-		elog(WARNING, "failed on cuMemAlloc('%zu'): %s",
-			 cmd->extra_sz, errorText(rc));
-		goto error_0;
+		rc = GstoreFdwBackgroundInitialLoad(gs_desc);
+		if (rc != CUDA_SUCCESS)
+			goto error_0;
 	}
 
-	rc = cuIpcGetMemHandle(&new_ipc_mhandle, new_extra_devptr);
+	/* main portion of the compaction */
+	rc = cuMemAlloc(&m_new_extra, h_extra.length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemAlloc(%zu): %s",
+			 h_extra.length, errorText(rc));
+		goto error_0;
+	}
+	rc = cuIpcGetMemHandle(&new_extra_mhandle, m_new_extra);
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
 		goto error_1;
 	}
-
-	rc = cuMemcpyDtoD(new_extra_devptr,
-					  gs_desc->gpu_extra_devptr,
-					  gs_sstate->gpu_extra_size);
+	rc = cuMemcpyHtoD(m_new_extra, &h_extra, offsetof(kern_data_extra, data));
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuMemcpyDtoD: %s", errorText(rc));
+		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
 		goto error_1;
 	}
-
-	rc = cuMemFree(gs_desc->gpu_extra_devptr);
+	/* kick the compaction kernel */
+	rc = __gstoreFdwGetCudaModule(&cuda_module, gs_sstate->cuda_dindex);
 	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-
-	elog(LOG, "gstore_fdw: expand extra buffer %zu => %zu (database=%u, ftable=%u)",
-		 gs_sstate->gpu_extra_size, cmd->extra_sz,
-		 gs_desc->database_oid, gs_desc->ftable_oid);
-
-	gs_desc->gpu_extra_devptr = new_extra_devptr;
+	{
+		elog(WARNING, "failed on __gstoreFdwGetCudaModule: %s", errorText(rc));
+		goto error_1;
+	}
+	rc = cuModuleGetFunction(&kfunc_compaction, cuda_module,
+							 "kern_gpustore_compaction");
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "GPU kernel function 'kern_gpustore_compaction' not found: %s",
+			 errorText(rc));
+		goto error_1;
+	}
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
+							   kfunc_compaction,
+							   gs_sstate->cuda_dindex, 0, 0);
+	if (rc != CUDA_SUCCESS)
+		goto error_1;
+	kern_args[0] = &gs_desc->gpu_main_devptr;
+	kern_args[1] = &gs_desc->gpu_extra_devptr;
+	kern_args[2] = &m_new_extra;
+	rc = cuLaunchKernel(kfunc_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto error_1;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		goto error_1;
+	rc = cuMemcpyDtoH(&h_extra, m_new_extra, offsetof(kern_data_extra, data));
+	if (rc != CUDA_SUCCESS)
+		goto error_1;
+	/* All Ok, swap old and new */
+	m_temp = gs_desc->gpu_extra_devptr;
+	gs_desc->gpu_extra_devptr = m_new_extra;
+	m_new_extra = m_temp;
 	memcpy(&gs_sstate->gpu_extra_mhandle,
-		   &new_ipc_mhandle, sizeof(CUipcMemHandle));
-	gs_sstate->gpu_extra_size = cmd->extra_sz;
-	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
-	
-	return CUDA_SUCCESS;
+		   &new_extra_mhandle, sizeof(CUipcMemHandle));
+
+	elog(LOG, "Gstore_Fdw compaction: extra {length=%zu, usage=%zu}", h_extra.length, h_extra.usage);
 	
 error_1:
-	cuMemFree(new_extra_devptr);
+	cuMemFree(m_new_extra);
 error_0:
-	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);	
 	return rc;
 }
 
@@ -4582,7 +4804,7 @@ gstoreFdwBgWorkerBegin(void)
 
 static CUresult
 __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
-								 CUcontext *cuda_context_array)
+								   CUcontext *cuda_context_array)
 {
 	GpuStoreDesc *gs_desc;
 	Oid			hkey[2];
@@ -4657,12 +4879,11 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			rc = GstoreFdwBackgroundInitialLoad(gs_desc);
 			break;
 		case GSTORE_BACKGROUND_CMD__APPLY_REDO:
-			rc = GstoreFdwBackgroundApplyRedoLog(gs_desc, cmd);
-			break;
-		case GSTORE_BACKGROUND_CMD__EXPAND_EXTRA:
-			rc = GstoreFdwBackgroundExpandExtra(gs_desc, cmd);
+			rc = GstoreFdwBackgroundApplyRedoLog(gs_desc, cmd->end_pos, cmd->nitems);
 			break;
 		case GSTORE_BACKGROUND_CMD__COMPACTION:
+			rc = GstoreFdwBackgroundCompation(gs_desc);
+			break;
 		default:
 			elog(LOG, "Unsupported Gstore maintainer command: %d", cmd->command);
 			rc = CUDA_ERROR_INVALID_VALUE;
