@@ -316,7 +316,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	 */
 	if (rte->relkind == RELKIND_FOREIGN_TABLE)
 	{
-		if (!baseRelIsArrowFdw(baserel))
+		if (!baseRelIsArrowFdw(baserel) &&
+			!baseRelIsGstoreFdw(baserel))
 			return;
 	}
 	else if (rte->relkind != RELKIND_RELATION &&
@@ -446,7 +447,8 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 {
 	devtype_info   *dtype;
 	StringInfoData	tfunc;
-	StringInfoData	cfunc;
+	StringInfoData	afunc;
+	StringInfoData  cfunc;
 	StringInfoData	temp;
 	Node		   *dev_quals;
 	Var			   *var;
@@ -454,6 +456,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	ListCell	   *lc;
 
 	initStringInfo(&tfunc);
+	initStringInfo(&afunc);
 	initStringInfo(&cfunc);
 	initStringInfo(&temp);
 
@@ -463,8 +466,9 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	dev_quals = (Node *)make_flat_ands_explicit(dev_quals_list);
 	expr_code = pgstrom_codegen_expression(dev_quals, context);
 	/* Const/Param declarations */
-	pgstrom_codegen_param_declarations(&cfunc, context);
 	pgstrom_codegen_param_declarations(&tfunc, context);
+	pgstrom_codegen_param_declarations(&afunc, context);
+	pgstrom_codegen_param_declarations(&cfunc, context);
 	/* Sanity check of used_vars */
 	foreach (lc, context->used_vars)
 	{
@@ -503,19 +507,26 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				"  addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
 				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
 				dtype->type_name,
-				context->var_label,
-				var->varattno,
+				context->var_label, var->varattno,
 				var->varattno - 1,
-				context->var_label,
-                var->varattno);
+				context->var_label, var->varattno);
 			appendStringInfo(
-				&cfunc,
+				&afunc,
 				"  pg_%s_t %s_%u;\n\n"
 				"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
 				dtype->type_name,
 				context->var_label, var->varattno,
 				context->var_label, var->varattno,
 				var->varattno - 1);
+			appendStringInfo(
+				&cfunc,
+				"  pg_%s_t %s_%u;\n\n"
+				"  addr = kern_get_datum_column(kds,extra,%u,row_index);\n"
+				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
+				dtype->type_name,
+				context->var_label, var->varattno,
+				var->varattno - 1,
+				context->var_label, var->varattno);
 		}
 	}
 	else
@@ -534,11 +545,11 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				&temp,
 				"  pg_%s_t %s_%u;\n",
 				dtype->type_name,
-				context->var_label,
-				var->varattno);
+				context->var_label, var->varattno);
 			varattno_max = Max(varattno_max, var->varattno);
 		}
 		appendStringInfoString(&tfunc, temp.data);
+		appendStringInfoString(&afunc, temp.data);
 		appendStringInfoString(&cfunc, temp.data);
 
 		appendStringInfoString(
@@ -558,15 +569,20 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 					appendStringInfo(
 						&tfunc,
 						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
-						context->var_label,
-                        var->varattno,
+						context->var_label, var->varattno,
 						dtype->type_name);
 					appendStringInfo(
-						&cfunc,
+						&afunc,
 						"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
-						context->var_label,
-						var->varattno,
+						context->var_label, var->varattno,
 						var->varattno - 1);
+					appendStringInfo(
+						&cfunc,
+						"  addr = kern_get_datum_column(kds,extra,%u,row_index);\n"
+						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
+						var->varattno - 1,
+						context->var_label, var->varattno,
+						dtype->type_name);
 					break;	/* no need to read same value twice */
 				}
 			}
@@ -601,10 +617,24 @@ output:
 		"  void *addr __attribute__((unused));\n"
 		"%s%s\n"
 		"  return %s;\n"
+		"}\n\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
+		"%s_quals_eval_column(kern_context *kcxt,\n"
+		"                         kern_data_store *kds,\n"
+		"                         kern_data_extra *extra,\n"
+		"                         cl_uint row_index)\n"
+		"{\n"
+		"  void *addr __attribute__((unused));\n"
+		"%s%s\n"
+		"  return %s;\n"
 		"}\n\n",
 		component,
 		context->decl_temp.data,
 		tfunc.data,
+		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
+		component,
+		context->decl_temp.data,
+		afunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
 		component,
 		context->decl_temp.data,
@@ -637,11 +667,13 @@ codegen_gpuscan_projection(StringInfo kern,
 	devtype_info   *dtype;
 	StringInfoData	decl;
 	StringInfoData	tbody;
+	StringInfoData	abody;
 	StringInfoData	cbody;
 	StringInfoData	temp;
 
 	initStringInfo(&decl);
 	initStringInfo(&tbody);
+	initStringInfo(&abody);
 	initStringInfo(&cbody);
 	initStringInfo(&temp);
 
@@ -677,16 +709,17 @@ codegen_gpuscan_projection(StringInfo kern,
 
 			dtype = pgstrom_devtype_lookup(attr->atttypid);
 			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+			/* arrow */
 			if (!bms_is_member(k, outer_refs) || !dtype)
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
 			else
 			{
 				type_oid_list = list_append_unique_oid(type_oid_list,
 													   dtype->type_oid);
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n"
 					"  if (temp.%s_v.isnull)\n"
 					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
@@ -701,6 +734,42 @@ codegen_gpuscan_projection(StringInfo kern,
 					dtype->type_name, j, j);
 				context->extra_flags |= dtype->type_flags;
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+			}
+			/* column */
+			if (!bms_is_member(k, outer_refs))
+			{
+				appendStringInfo(
+					&cbody,
+					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
+			}
+			else if (attr->attbyval)
+			{
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n"
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = READ_INT%u_PTR(addr);\n"
+					"  }\n",
+					j, j, j, j, 8 * attr->attlen);
+			}
+			else
+			{
+				Assert(attr->attlen > 0 || attr->attlen == -1);
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n"
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = PointerGetDatum(addr);\n"
+					"  }\n",
+					j, j, j, j);
 			}
 		}
 
@@ -725,10 +794,24 @@ codegen_gpuscan_projection(StringInfo kern,
 			"                         cl_char *tup_dclass,\n"
 			"                         Datum   *tup_values)\n"
 			"{\n"
-			"  void        *addr __attribute__((unused));\n");
-		pgstrom_union_type_declarations(kern, "temp", type_oid_list); 
-		appendStringInfoString(kern, cbody.data);
-		appendStringInfoString(kern, "}\n");
+			"  void *addr __attribute__((unused));\n");
+		pgstrom_union_type_declarations(kern, "temp", type_oid_list);
+		appendStringInfoString(kern, abody.data);
+		appendStringInfo(
+			kern,
+			"}\n"
+			"\n"
+			"DEVICE_FUNCTION(void)\n"
+			"gpuscan_projection_column(kern_context *kcxt,"
+			"                          kern_data_store *kds_src,\n"
+			"                          kern_data_extra *kds_extra,\n"
+			"                          size_t   rowid,\n"
+			"                          cl_char *tup_dclass,\n"
+			"                          Datum   *tup_values)\n"
+			"{\n"
+			"  void *addr __attribute__((unused));\n"
+			"%s"
+			"}\n", cbody.data);
 		return;
 	}
 
@@ -824,22 +907,22 @@ codegen_gpuscan_projection(StringInfo kern,
 					j, j);
 			}
 
-			/* column */
+			/* arrow */
 			if (!dtype)
 			{
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
 			}
 			else
 			{
 				if (!referenced)
 					appendStringInfo(
-						&cbody,
+						&abody,
 						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n",
 						dtype->type_name, attr->attnum-1);
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  pg_datum_store(kcxt, temp.%s_v,\n"
 					"                 tup_dclass[%d],\n"
 					"                 tup_values[%d]);\n",
@@ -848,6 +931,36 @@ codegen_gpuscan_projection(StringInfo kern,
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				type_oid_list = list_append_unique_oid(type_oid_list,
 													   dtype->type_oid);
+			}
+
+			/* column */
+			if (!referenced)
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n", j);
+			if (attr->attbyval)
+			{
+				appendStringInfo(
+					&cbody,
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = READ_INT%u_PTR(addr);\n"
+					"  }\n", j, j, j, 8 * attr->attlen);
+			}
+			else
+			{
+				appendStringInfo(
+					&cbody,
+					"  if (!addr)\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"  else\n"
+					"  {\n"
+					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"    tup_values[%d] = PointerGetDatum(addr);\n"
+					"  }\n", j, j, j);
 			}
 			referenced = true;
 		}
@@ -861,22 +974,31 @@ codegen_gpuscan_projection(StringInfo kern,
 				&temp,
 				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
 				attr->attnum);
-
-			/* column */
+			/* arrow */
 			if (!referenced)
 			{
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%u,index);\n",
 					attr->attnum, attr->attnum - 1);
 			}
 			else
 			{
 				appendStringInfo(
-					&cbody,
+					&abody,
 					"  KVAR_%u = temp.%s_v;\n",
 					attr->attnum, dtype->type_name);
 			}
+			/* column */
+			if (!referenced)
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n",
+					attr->attnum - 1);
+			appendStringInfo(
+				&cbody,
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n", attr->attnum);
+
 			type_oid_list = list_append_unique_oid(type_oid_list,
 												   dtype->type_oid);
 			referenced = true;
@@ -937,6 +1059,7 @@ codegen_gpuscan_projection(StringInfo kern,
 											   dtype->type_oid);
 	}
 	appendStringInfoString(&tbody, temp.data);
+	appendStringInfoString(&abody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
 
 	/* parameter references */
@@ -959,6 +1082,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		"%s%s", decl.data, context->decl_temp.data);
 	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
 	appendStringInfo(kern, "\n%s}\n\n", tbody.data);
+
 	appendStringInfo(
 		kern,
 		"DEVICE_FUNCTION(void)\n"
@@ -971,6 +1095,21 @@ codegen_gpuscan_projection(StringInfo kern,
 		"  void        *addr __attribute__((unused));\n"
 		"%s%s", decl.data, context->decl_temp.data);
 	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
+	appendStringInfo(kern, "\n%s}\n\n", abody.data);
+
+	appendStringInfo(
+		kern,
+		"DEVICE_FUNCTION(void)\n"
+		"gpuscan_projection_column(kern_context *kcxt,\n"
+		"                          kern_data_store *kds_src,\n"
+		"                          kern_data_extra *kds_extra,\n"
+		"                          size_t rowid,\n"
+		"                          cl_char *tup_dclass,\n"
+		"                          Datum *tup_values)\n"
+		"{\n"
+		"  void        *addr __attribute__((unused));\n"
+		"%s%s", decl.data, context->decl_temp.data);
+	pgstrom_union_type_declarations(kern, "temp", type_oid_list);
 	appendStringInfo(kern, "\n%s}\n\n", cbody.data);
 
 	list_free(tlist_dev);
@@ -978,6 +1117,7 @@ codegen_gpuscan_projection(StringInfo kern,
 	pfree(temp.data);
 	pfree(decl.data);
 	pfree(tbody.data);
+	pfree(abody.data);
 	pfree(cbody.data);
 }
 
@@ -1644,12 +1784,15 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
+	struct timeval	tv1, tv2;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(scan_rel != NULL);
 	Assert(outerPlanState(node) == NULL);
 	Assert(innerPlanState(node) == NULL);
 
+	gettimeofday(&tv1, NULL);
+	
 	/* setup GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(gs_info->optimal_gpu,
 							   false, false, false);
@@ -1758,6 +1901,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 explain_only);
 	gss->gts.program_id = program_id;
 	pfree(kern_define.data);
+
+	gettimeofday(&tv2, NULL);
+	elog(INFO, "ExecInitGpuScan = %.3fms", tv_diff(&tv2,&tv1));
 }
 
 /*
@@ -1826,15 +1972,23 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *) gss->gs_rtstat;
-
+	struct timeval		tv1, tv2, tv3;
+	
+	gettimeofday(&tv1, NULL);
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
+	gettimeofday(&tv2, NULL);
 	/* close index related stuff if any */
 	pgstromExecEndBrinIndexMap(&gss->gts);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
+	gettimeofday(&tv3, NULL);
+
+	elog(INFO, "ExecEndGpuScan sync=%.3fms other=%.3fms",
+		 tv_diff(&tv2,&tv1),
+		 tv_diff(&tv3,&tv2));
 }
 
 /*
@@ -2096,16 +2250,29 @@ gpuscan_create_task(GpuScanState *gss,
 		cl_int	sm_count;
 		Size	length;
 
-		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
 		{
-			Assert(pds_src->kds.nrows_per_block > 0);
-			ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
+			/*
+			 * A rough estimation for the result buffer. Gstore_Fdw usually
+			 * preserves several gigabytes on GPU device memory. It is a bit
+			 * large to store the result of GpuScan at a single chunk.
+			 * So, we leverage suspend/resume GPU kernel to generate multiple
+			 * small chunks to store the result, if needed.
+			 */
+			length = pgstrom_chunk_size();
 		}
-		length = KDS_calculateHeadSize(scan_tupdesc) +
-			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
-			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
-		length = Max3(length, pds_src->kds.length, 8<<20);
-
+		else
+		{
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			{
+				Assert(pds_src->kds.nrows_per_block > 0);
+				ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
+			}
+			length = KDS_calculateHeadSize(scan_tupdesc) +
+				STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
+				STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
+			length = Max3(length, pds_src->kds.length, 8<<20);
+		}
 		pds_dst = PDS_create_row(gcontext,
 								 scan_tupdesc,
 								 length);
@@ -2166,6 +2333,8 @@ gpuscan_next_task(GpuTaskState *gts)
 
 	if (gss->gts.af_state)
 		pds = ExecScanChunkArrowFdw(gts);
+	else if (gss->gts.gs_state)
+		pds = ExecScanChunkGstoreFdw(gts);
 	else
 		pds = pgstromExecScanChunk(gts);
 	if (!pds)
@@ -2460,7 +2629,7 @@ gpuscan_throw_partial_result(GpuScanTask *gscan, pgstrom_data_store *pds_dst)
  * gpuscan_process_task
  */
 static int
-gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
+__gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
@@ -2469,6 +2638,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUfunction		kern_gpuscan_quals;
 	CUdeviceptr		m_gpuscan = (CUdeviceptr)&gscan->kern;
 	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kds_dst = (pds_dst ? (CUdeviceptr)&pds_dst->kds : 0UL);
 	bool			m_kds_src_release = false;
 	const char	   *kern_fname;
@@ -2493,6 +2663,8 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		kern_fname = "kern_gpuscan_main_block";
 	else if (pds_src->kds.format == KDS_FORMAT_ARROW)
 		kern_fname = "kern_gpuscan_main_arrow";
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+		kern_fname = "kern_gpuscan_main_column";
 	else
 		werror("GpuScan: unknown PDS format: %d", pds_src->kds.format);
 
@@ -2548,6 +2720,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+	{
+		m_kds_src = pds_src->m_kds_base;
+		m_kds_extra = pds_src->m_kds_extra;
+	}
 	else
 	{
 		m_kds_src = (CUdeviceptr)&pds_src->kds;
@@ -2578,7 +2755,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
-	else
+	else if (pds_src->kds.format != KDS_FORMAT_COLUMN)
 	{
 		rc = cuMemPrefetchAsync(m_kds_src,
 								pds_src->kds.length,
@@ -2622,7 +2799,8 @@ resume_kernel:
 	gscan->kern.suspend_count = 0;
 	kern_args[0] = &m_gpuscan;
 	kern_args[1] = &m_kds_src;
-	kern_args[2] = &m_kds_dst;
+	kern_args[2] = &m_kds_extra;
+	kern_args[3] = &m_kds_dst;
 
 	rc = cuLaunchKernel(kern_gpuscan_quals,
 						grid_sz, 1, 1,
@@ -2765,6 +2943,36 @@ resume_kernel:
 out_of_resource:
 	if (m_kds_src_release)
 		gpuMemFree(gcontext, m_kds_src);
+	return retval;
+}
+
+static int
+gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
+{
+	GpuContext	   *gcontext = GpuWorkerCurrentContext;
+	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
+	pgstrom_data_store *pds_src = gscan->pds_src;
+	CUresult		rc;
+	int				retval;
+
+	if (pds_src->kds.format != KDS_FORMAT_COLUMN)
+		return __gpuscan_process_task(gtask, cuda_module);
+
+	rc = gstoreFdwMapDeviceMemory(gcontext, pds_src);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
+	STROM_TRY();
+	{
+		retval = __gpuscan_process_task(gtask, cuda_module);
+	}
+	STROM_CATCH();
+	{
+		gstoreFdwUnmapDeviceMemory(gcontext, pds_src);
+		STROM_RE_THROW();
+	}
+	STROM_END_TRY();
+	gstoreFdwUnmapDeviceMemory(gcontext, pds_src);
+
 	return retval;
 }
 

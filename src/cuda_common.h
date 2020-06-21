@@ -634,6 +634,7 @@ typedef struct {
 typedef cl_uint		TransactionId;
 #define InvalidTransactionId		((TransactionId) 0)
 #define FrozenTransactionId			((TransactionId) 2)
+#define InvalidCommandId			(~0U)
 
 #endif		/* !PG_STROM_H */
 
@@ -733,61 +734,6 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 
 /*
  * kern_data_store
- *
- * +---------------------------------------------------------------+
- * | Common header portion of the kern_data_store                  |
- * |         :                                                     |
- * | 'format' determines the layout below                          |
- * |                                                               |
- * | 'nitems' and 'nrooms' mean number of tuples except for BLOCK  |
- * | format. In BLOCK format, these fields mean number of the      |
- * | PostgreSQL blocks. We cannot know exact number of tuples      |
- * | without scanning of the data-store                            |
- * +---------------------------------------------------------------+
- * | Attributes of columns                                         |
- * |                                                               |
- * | kern_colmeta colmeta[0]                                       |
- * | kern_colmeta colmeta[1]       <--+                            |
- * |        :                         :   column definition of     |
- * | kern_colmeta colmeta[ncols-1] <--+-- regular tables           |
- * |        :                                                      |
- * | kern_colmeta colmeta[idx_subattrs]     <--+                   |
- * |        :                                  : field definition  |
- * | kern_colmeta colmeta[idx_subattrs +       : of composite type |
- * |                      num_subattrs - 1] <--+                   |
- * +---------------------------------------------------------------+
- * | <slot format> | <row format> / <hash format> | <block format> |
- * +---------------+------------------------------+----------------+
- * | values/isnull | Offset to the first hash-    | BlockNumber of |
- * | pair of the   | item for each slot (*).      | PostgreSQL;    |
- * | 1st tuple     |                              | used to setup  |
- * | +-------------+ (*) nslots=0 if row-format,  | ctid system    |
- * | | values[0]   | thus, it has no offset to    | column.        |
- * | |    :        | hash items.                  |                |
- * | | values[M-1] |                              | (*) N=nrooms   |
- * | +-------------+  hash_slot[0]                | block_num[0]   |
- * | | isnull[0]   |  hash_slot[1]                | block_num[1]   |
- * | |    :        |      :                       |      :         |
- * | | isnull[M-1] |  hash_slot[nslots-1]         |      :         |
- * +-+-------------+------------------------------+ block_num[N-1] |
- * | values/isnull | Offset to the individual     +----------------+ 
- * | pair of the   | kern_tupitem.                |     ^          |
- * | 2nd tuple     |                              |     |          |
- * | +-------------+ row_index[0]                 | Raw PostgreSQL |
- * | | values[0]   | row_index[1]                 | Block-0        |
- * | |    :        |    :                         |     |          |
- * | | values[M-1] | row_index[nitems-1]          |   BLCKSZ(8KB)  |
- * | +-------------+--------------+---------------+     |          |
- * | | isnull[0]   |    :         |       :       |     v          |
- * | |    :        +--------------+---------------+----------------+
- * | | isnull[M-1] | kern_tupitem | kern_hashitem |                |
- * +-+-------------+--------------+---------------+                |   
- * | values/isnull | kern_tupitem | kern_hashitem | Raw PostgreSQL |
- * | pair of the   +--------------+---------------+ Block-1        |
- * | 3rd tuple     | kern_tupitem | kern_hashitem |                |
- * |      :        |     :        |     :         |     :          |
- * |      :        |     :        |     :         |     :          |
- * +---------------+--------------+---------------+----------------+
  */
 #include "arrow_defs.h"
 
@@ -910,6 +856,17 @@ typedef struct {
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
+
+/*
+ * kern_data_extra - extra buffer of KDS_FORMAT_COLUMN
+ */
+typedef struct
+{
+	char		signature[8];	/* signature on the base file */
+	cl_ulong	length;
+	cl_ulong	usage;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+} kern_data_extra;
 
 /* attribute number of system columns */
 #ifndef SYSATTR_H
@@ -1232,38 +1189,6 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 	return kparams && ((char *)ptr >= (char *)kparams &&
 					   (char *)ptr <  (char *)kparams + kparams->length);
 }
-
-/*
- * GstoreIpcHandle
- *
- * Format definition when Gstore_fdw exports IPChandle of the GPU memory.
- */
-
-/* Gstore_fdw's internal data format */
-#define GSTORE_FDW_FORMAT__PGSTROM		50		/* KDS_FORMAT_COLUMN */
-//#define GSTORE_FDW_FORMAT__ARROW		51		/* Apache Arrow compatible */
-
-/* column 'compression' option */
-#define GSTORE_COMPRESSION__NONE		0
-#define GSTORE_COMPRESSION__PGLZ		1
-
-typedef struct
-{
-	cl_uint		__vl_len;		/* 4B varlena header */
-	cl_short	device_id;		/* GPU device where pinning on */
-	cl_char		format;			/* one of GSTORE_FDW_FORMAT__* */
-	cl_char		__padding__;	/* reserved */
-	cl_long		rawsize;		/* length in bytes */
-	union {
-#ifdef CU_IPC_HANDLE_SIZE
-		CUipcMemHandle		d;	/* CUDA driver API */
-#endif
-#ifdef CUDA_IPC_HANDLE_SIZE
-		cudaIpcMemHandle_t	r;	/* CUDA runtime API */
-#endif
-		char				data[64];
-	} ipc_mhandle;
-} GstoreIpcHandle;
 
 /*
  * PostgreSQL varlena related definitions
@@ -1675,6 +1600,16 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 					 HeapTupleHeaderData *htup,
 					 cl_uint colidx);
 
+struct GstoreFdwSysattr;	/* not to include cuda_gstore.h here */
+DEVICE_FUNCTION(void *)
+kern_get_datum_column(kern_data_store *kds,
+					  kern_data_extra *extra,
+					  cl_uint colidx, cl_uint rowidx);
+DEVICE_FUNCTION(cl_bool)
+kern_check_visibility_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowidx,
+							 struct GstoreFdwSysattr *p_sysattr);
 /*
  * device functions to form/deform HeapTuple
  */

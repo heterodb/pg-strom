@@ -68,7 +68,7 @@ typedef struct {
  *
  * A fixed-length system attribute for each row.
  */
-typedef struct
+struct GstoreFdwSysattr
 {
 	cl_uint		xmin;
 	cl_uint		xmax;
@@ -78,7 +78,8 @@ typedef struct
 	/* get_global_id() of the thread who tries to update the row. */
 	cl_uint		owner_id;
 #endif
-} GstoreFdwSysattr;
+};
+typedef struct GstoreFdwSysattr	GstoreFdwSysattr;
 
 /*
  * kern_gpustore_redolog
@@ -91,16 +92,5 @@ typedef struct
 	cl_uint			nitems;
 	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
 } kern_gpustore_redolog;
-
-/*
- * kern_data_extra - extra buffer of KDS_FORMAT_COLUMN
- */
-typedef struct
-{
-	char		signature[8];	/* "@EXTRA1@" */
-	cl_ulong	length;
-	cl_ulong	usage;
-	char		data[FLEXIBLE_ARRAY_MEMBER];
-} kern_data_extra;
 
 #endif /* CUDA_GSTORE_H */

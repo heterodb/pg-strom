@@ -210,21 +210,20 @@ typedef struct
 /*
  * GpuStoreFdwState - runtime state object for READ
  */
-typedef struct
+struct GpuStoreFdwState
 {
 	GpuStoreDesc   *gs_desc;
 
 	pg_atomic_uint64  __read_pos;
 	pg_atomic_uint64 *read_pos;
 
-	Bitmapset	   *attr_refs;
+	Bitmapset	   *referenced;
 	cl_bool			sysattr_refs;
 	cl_uint			nitems;			/* kds->nitems on BeginScan */
 	cl_bool			is_first;
 	cl_uint			last_rowid;		/* last rowid returned */
 	ExprState	   *indexExprState;
-	StringInfoData	indexResults;
-} GpuStoreFdwState;
+};
 
 /*
  * GpuStoreUndoLogs 
@@ -258,7 +257,7 @@ static FdwRoutine	pgstrom_gstore_fdw_routine;
 static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB		   *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static bool			pgstrom_gstore_fdw_auto_preload;	/* GUC */
+static bool			gstore_fdw_enabled;		/* GUC */
 #define GSTORE_UNDO_LOGS_NSLOTS			200
 static dlist_head	gstore_undo_logs_slots[GSTORE_UNDO_LOGS_NSLOTS];
 
@@ -365,6 +364,42 @@ gstoreFdwSpinUnlockHashSlot(GpuStoreDesc *gs_desc, Datum hash)
 	return false;
 }
 
+/*
+ * baseRelIsGstoreFdw
+ */
+bool
+baseRelIsGstoreFdw(RelOptInfo *baserel)
+{
+	if ((baserel->reloptkind == RELOPT_BASEREL ||
+		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL) &&
+		baserel->rtekind == RTE_RELATION &&
+		OidIsValid(baserel->serverid) &&
+		baserel->fdwroutine &&
+		memcmp(baserel->fdwroutine,
+			   &pgstrom_gstore_fdw_routine,
+			   sizeof(FdwRoutine)) == 0)
+		return true;
+
+	return false;
+}
+
+/*
+ * RelationIsGstoreFdw
+ */
+bool
+RelationIsGstoreFdw(Relation frel)
+{
+	if (RelationGetForm(frel)->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		FdwRoutine *routine = GetFdwRoutineForRelation(frel, false);
+
+		if (memcmp(routine, &pgstrom_gstore_fdw_routine,
+				   sizeof(FdwRoutine)) == 0)
+			return true;
+	}
+	return false;
+}
+
 static void
 GstoreGetForeignRelSize(PlannerInfo *root,
 						RelOptInfo *baserel,
@@ -444,6 +479,25 @@ match_clause_to_primary_key(PlannerInfo *root,
 	return NULL;
 }
 
+/*
+ * GetOptimalGpuForGstoreFdw
+ */
+int
+GetOptimalGpuForGstoreFdw(PlannerInfo *root,
+						  RelOptInfo *baserel)
+{
+	GpuStoreDesc   *gs_desc;
+	
+	if (!baserel->fdw_private)
+	{
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+
+		GstoreGetForeignRelSize(root, baserel, rte->relid);
+	}
+	gs_desc = baserel->fdw_private;
+	return gs_desc->gs_sstate->cuda_dindex;
+}
+
 static void
 GstoreGetForeignPaths(PlannerInfo *root,
 					  RelOptInfo *baserel,
@@ -459,8 +513,12 @@ GstoreGetForeignPaths(PlannerInfo *root,
 	Node		   *indexExpr = NULL;
 	QualCost		qual_cost;
 	Cost			startup_cost = 0.0;
-	Cost			total_cost = 0.0;
+	Cost			run_cost = 0.0;
 	double			ntuples = baserel->tuples;
+
+	/* gstore_fdw.enabled */
+	if (gstore_fdw_enabled)
+		startup_cost += disable_cost;
 
 	if (primary_key > 0)
 	{
@@ -486,15 +544,15 @@ GstoreGetForeignPaths(PlannerInfo *root,
 		ntuples = 1.0;
 	startup_cost += qual_cost.startup;
 	startup_cost += baserel->reltarget->cost.startup;
-	total_cost += (cpu_tuple_cost + qual_cost.per_tuple) * ntuples;
-	total_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
+	run_cost += (cpu_tuple_cost + qual_cost.per_tuple) * ntuples;
+	run_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
 
 	fpath = create_foreignscan_path(root,
 									baserel,
 									NULL,	/* default pathtarget */
 									baserel->rows,
 									startup_cost,
-									total_cost,
+									startup_cost + run_cost,
 									NIL,	/* no pathkeys */
 									required_outer,
 									NULL,	/* no extra plan */
@@ -877,58 +935,51 @@ GstoreGetForeignPlan(PlannerInfo *root,
 					 Plan *outer_plan)
 {
 	Bitmapset  *referenced = NULL;
-	List	   *attr_refs = NIL;
-	int			i, j;
+	List	   *outer_refs = NIL;
+	int			i, j, k;
 
 	scan_clauses = extract_actual_clauses(scan_clauses, false);
 	pull_varattnos((Node *)scan_clauses, baserel->relid, &referenced);
 	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
 	{
+		k = i - FirstLowInvalidHeapAttributeNumber;
 		if (!bms_is_empty(baserel->attr_needed[j]))
-			referenced = bms_add_member(referenced, i -
-										FirstLowInvalidHeapAttributeNumber);
+			referenced = bms_add_member(referenced, k);
 	}
 
 	for (j = bms_next_member(referenced, -1);
 		 j >= 0;
 		 j = bms_next_member(referenced, j))
 	{
-		attr_refs = lappend_int(attr_refs, j +
-								FirstLowInvalidHeapAttributeNumber);
+		k = j + FirstLowInvalidHeapAttributeNumber;
+		outer_refs = lappend_int(outer_refs, k);
 	}
 
 	return make_foreignscan(tlist,
 							scan_clauses,
 							baserel->relid,
 							best_path->fdw_private,	/* indexExpr */
-							attr_refs,	/* referenced attnums */
+							outer_refs,	/* referenced attnums */
 							NIL,		/* no custom tlist */
 							NIL,		/* no remote quals */
 							outer_plan);
 }
 
-static void
-GstoreBeginForeignScan(ForeignScanState *node, int eflags)
+GpuStoreFdwState *
+ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr)
 {
-	Relation		frel = node->ss.ss_currentRelation;
+	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
-	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
 	GpuStoreFdwState *fdw_state = palloc0(sizeof(GpuStoreFdwState));
 	GpuStoreDesc   *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
-	Bitmapset	   *attr_refs = NULL;
-	ListCell	   *lc;
+	Bitmapset	   *referenced = NULL;
+	int				j, k;
 
-	/* setup GpuStoreExecState */
-	fdw_state->gs_desc = gs_desc;
-	pg_atomic_init_u64(&fdw_state->__read_pos, 0);
-	fdw_state->read_pos = &fdw_state->__read_pos;
-	fdw_state->nitems = gs_desc->base_mmap->schema.nitems;
-	fdw_state->last_rowid = UINT_MAX;
-	fdw_state->is_first = true;
-
-	foreach (lc, fscan->fdw_private)
+	for (j = bms_next_member(outer_refs, -1);
+		 j >= 0;
+		 j = bms_next_member(outer_refs, j))
 	{
-		int		j, anum = lfirst_int(lc);
+		int		anum = j + FirstLowInvalidHeapAttributeNumber;
 
 		if (anum < 0)
 		{
@@ -945,32 +996,152 @@ GstoreBeginForeignScan(ForeignScanState *node, int eflags)
 		}
 		else if (anum == 0)
 		{
-			for (j=0; j < tupdesc->natts; j++)
+			for (k=0; k < tupdesc->natts; k++)
 			{
-				Form_pg_attribute attr = tupleDescAttr(tupdesc,j);
+				Form_pg_attribute attr = tupleDescAttr(tupdesc,k);
 
 				if (attr->attisdropped)
 					continue;
-				attr_refs = bms_add_member(attr_refs, attr->attnum);
+				referenced = bms_add_member(referenced, attr->attnum -
+											FirstLowInvalidHeapAttributeNumber);
 			}
 		}
 		else
 		{
-			attr_refs = bms_add_member(attr_refs, anum);
-		}
+			referenced = bms_add_member(referenced, anum -
+										FirstLowInvalidHeapAttributeNumber);
+        }
 	}
-	fdw_state->attr_refs = attr_refs;
+	
+	/* setup GpuStoreExecState */
+	fdw_state->gs_desc = gs_desc;
+	pg_atomic_init_u64(&fdw_state->__read_pos, 0);
+	fdw_state->read_pos = &fdw_state->__read_pos;
+	fdw_state->nitems = gs_desc->base_mmap->schema.nitems;
+	fdw_state->last_rowid = UINT_MAX;
+	fdw_state->is_first = true;
+	fdw_state->referenced = referenced;
+	if (indexExpr != NULL)
+		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
 
-	if (fscan->fdw_exprs != NIL)
-	{
-		Expr   *indexExpr = linitial(fscan->fdw_exprs);
-
-		fdw_state->indexExprState = ExecInitExpr(indexExpr, &node->ss.ps);
-		initStringInfo(&fdw_state->indexResults);
-	}
-	node->fdw_state = fdw_state;
+	return fdw_state;
 }
 
+static void
+GstoreBeginForeignScan(ForeignScanState *node, int eflags)
+{
+	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
+	Bitmapset	   *outer_refs = NULL;
+	Expr		   *indexExpr = NULL;
+	ListCell	   *lc;
+
+	foreach (lc, fscan->fdw_private)
+	{
+		int		anum = lfirst_int(lc);
+
+		outer_refs = bms_add_member(outer_refs, anum -
+									FirstLowInvalidHeapAttributeNumber);
+	}
+
+	if (fscan->fdw_exprs != NIL)
+		indexExpr = linitial(fscan->fdw_exprs);
+
+	node->fdw_state = ExecInitGstoreFdw(&node->ss, outer_refs, indexExpr);
+}
+
+/*
+ * ExecScanChunkGstoreFdw
+ */
+pgstrom_data_store *
+ExecScanChunkGstoreFdw(GpuTaskState *gts)
+{
+	Relation		frel = gts->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	GpuStoreFdwState *fdw_state = gts->gs_state;
+	pgstrom_data_store *pds = NULL;
+
+	if (pg_atomic_fetch_add_u64(fdw_state->read_pos, 1) == 0)
+	{
+		EState		   *estate = gts->css.ss.ps.state;
+		GpuStoreDesc   *gs_desc = fdw_state->gs_desc;
+		GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+		size_t			sz = KDS_calculateHeadSize(tupdesc);
+
+		pds = MemoryContextAllocZero(estate->es_query_cxt,
+									 offsetof(pgstrom_data_store, kds) + sz);
+		pg_atomic_init_u32(&pds->refcnt, 1);
+		pds->gs_sstate = gs_sstate;
+		init_kernel_data_store(&pds->kds, tupdesc, sz, KDS_FORMAT_COLUMN, 0);
+	}
+	return pds;
+}
+
+/*
+ * gstoreFdwMapDeviceMemory
+ */
+CUresult
+gstoreFdwMapDeviceMemory(GpuContext *gcontext, pgstrom_data_store *pds)
+{
+	GpuStoreSharedState *gs_sstate = pds->gs_sstate;
+	CUdeviceptr	m_kds_base = 0UL;
+	CUdeviceptr	m_kds_extra = 0UL;
+	CUresult	rc;
+
+	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
+	pthreadRWLockReadLock(&gs_sstate->gpu_bufer_lock);
+	if (gs_sstate->gpu_main_size > 0)
+	{
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kds_base,
+								 gs_sstate->gpu_main_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			goto error_1;
+	}
+
+	if (gs_sstate->gpu_extra_size > 0)
+	{
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kds_extra,
+								 gs_sstate->gpu_extra_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+	}
+	pds->m_kds_base = m_kds_base;
+	pds->m_kds_extra = m_kds_extra;
+
+	return CUDA_SUCCESS;
+
+error_2:
+	gpuIpcCloseMemHandle(gcontext, m_kds_base);
+error_1:
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+	return rc;
+}
+
+void
+gstoreFdwUnmapDeviceMemory(GpuContext *gcontext, pgstrom_data_store *pds)
+{
+	GpuStoreSharedState *gs_sstate = pds->gs_sstate;
+
+	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
+	if (pds->m_kds_base != 0UL)
+	{
+		gpuIpcCloseMemHandle(gcontext, pds->m_kds_base);
+		pds->m_kds_base = 0UL;
+	}
+	if (pds->m_kds_extra != 0UL)
+	{
+		gpuIpcCloseMemHandle(gcontext, pds->m_kds_extra);
+		pds->m_kds_extra = 0UL;
+	}
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+}
+
+/*
+ * GstoreIterateForeignScan
+ */
 static TupleTableSlot *
 __gstoreFillupTupleTableSlot(TupleTableSlot *slot,
 							 GpuStoreDesc *gs_desc,
@@ -988,7 +1159,9 @@ __gstoreFillupTupleTableSlot(TupleTableSlot *slot,
 	Assert(tupdesc->natts == kds->ncols - 1);
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		if (!bms_is_member(j+1, fdw_state->attr_refs))
+		int		k = j + 1 - FirstLowInvalidHeapAttributeNumber;
+
+		if (!bms_is_member(k, fdw_state->referenced))
 		{
 			slot->tts_values[j] = 0;
 			slot->tts_isnull[j] = true;
@@ -1171,18 +1344,28 @@ GstoreIterateForeignScan(ForeignScanState *node)
 		return __gstoreIterateForeignSeqScan(node);
 }
 
+void
+ExecReScanGstoreFdw(GpuStoreFdwState *fdw_state)
+{
+	pg_atomic_write_u64(fdw_state->read_pos, 0);
+}
+
 static void
 GstoreReScanForeignScan(ForeignScanState *node)
 {
-	GpuStoreFdwState  *fdw_state = node->fdw_state;
+	ExecReScanGstoreFdw((GpuStoreFdwState *)node->fdw_state);
+}
 
-	pg_atomic_write_u64(fdw_state->read_pos, 0);
+void
+ExecEndGstoreFdw(GpuStoreFdwState *fdw_state)
+{
+	/* nothing to do */
 }
 
 static void
 GstoreEndForeignScan(ForeignScanState *node)
 {
-	/* nothing to do */
+	ExecEndGstoreFdw((GpuStoreFdwState *)node->fdw_state);
 }
 
 static bool
@@ -1197,30 +1380,71 @@ static Size
 GstoreEstimateDSMForeignScan(ForeignScanState *node,
 							 ParallelContext *pcxt)
 {
-	return 0;
+	return MAXALIGN(sizeof(pg_atomic_uint64));
+}
+
+void
+ExecInitDSMGstoreFdw(GpuStoreFdwState *fdw_state,
+					 pg_atomic_uint64 *gstore_read_pos)
+{
+	pg_atomic_write_u64(gstore_read_pos, 0);
+	fdw_state->read_pos = gstore_read_pos;
 }
 
 static void
 GstoreInitializeDSMForeignScan(ForeignScanState *node,
 							   ParallelContext *pcxt,
 							   void *coordinate)
-{}
+{
+	GpuStoreFdwState *fdw_state = node->fdw_state;
+	
+	ExecInitDSMGstoreFdw(fdw_state, (pg_atomic_uint64 *)coordinate);
+}
+
+void
+ExecReInitDSMGstoreFdw(GpuStoreFdwState *fdw_state)
+{
+	pg_atomic_write_u64(fdw_state->read_pos, 0);
+}
 
 static void
 GstoreReInitializeDSMForeignScan(ForeignScanState *node,
 								 ParallelContext *pcxt,
 								 void *coordinate)
-{}
+{
+	GpuStoreFdwState   *fdw_state = node->fdw_state;
+
+	Assert(fdw_state->read_pos == coordinate);
+	ExecReInitDSMGstoreFdw(fdw_state);
+}
+
+void
+ExecInitWorkerGstoreFdw(GpuStoreFdwState *fdw_state,
+						pg_atomic_uint64 *gstore_read_pos)
+{
+	fdw_state->read_pos = gstore_read_pos;
+}
 
 static void
 GstoreInitializeWorkerForeignScan(ForeignScanState *node,
 								  shm_toc *toc,
 								  void *coordinate)
-{}
+{
+	GpuStoreFdwState *fdw_state = node->fdw_state;
+	ExecInitWorkerGstoreFdw(fdw_state, (pg_atomic_uint64 *)coordinate);
+}
+
+void
+ExecShutdownGstoreFdw(GpuStoreFdwState *fdw_state)
+{
+	/* nothing to do */
+}
 
 static void
 GstoreShutdownForeignScan(ForeignScanState *node)
-{}
+{
+	ExecShutdownGstoreFdw((GpuStoreFdwState *)node->fdw_state);
+}
 
 static void
 __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
@@ -1768,12 +1992,11 @@ static void
 GstoreEndForeignModify(EState *estate, ResultRelInfo *rinfo)
 {}
 
-static void
-GstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
+void
+ExplainGstoreFdw(GpuStoreFdwState *fdw_state,
+				 Relation frel, ExplainState *es)
 {
-	Relation		frel = node->ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
-	GpuStoreFdwState *fdw_state = node->fdw_state;
 	GpuStoreDesc   *gs_desc = fdw_state->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	int				j = -1;
@@ -1783,10 +2006,14 @@ GstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	initStringInfo(&buf);
 	if (es->verbose)
 	{
-		while ((j = bms_next_member(fdw_state->attr_refs, j)) >= 0)
+		while ((j = bms_next_member(fdw_state->referenced, j)) >= 0)
 		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, j-1);
+			int		anum = j + FirstLowInvalidHeapAttributeNumber;
+			Form_pg_attribute attr;
 
+			if (anum <= 0)
+				continue;
+			attr = tupleDescAttr(tupdesc, anum-1);
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			appendStringInfo(&buf, "%s", NameStr(attr->attname));
@@ -1798,8 +2025,7 @@ GstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	resetStringInfo(&buf);
 	if (fdw_state->indexExprState)
 	{
-		ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
-		Node		   *indexExpr = linitial(fscan->fdw_exprs);
+		Node	   *indexExpr = (Node *)fdw_state->indexExprState->expr;
 		Form_pg_attribute attr;
 
 		Assert(gs_sstate->primary_key > 0 &&
@@ -1821,6 +2047,13 @@ GstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
 								gs_sstate->redo_log_backup_dir, es);
 	}
 	pfree(buf.data);
+}
+
+static void
+GstoreExplainForeignScan(ForeignScanState *node, ExplainState *es)
+{
+	ExplainGstoreFdw((GpuStoreFdwState *)node->fdw_state,
+					 node->ss.ss_currentRelation, es);
 }
 
 static void
@@ -3631,14 +3864,8 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 	Oid			hkey[2];
 	bool		found;
 	bool		invoke_initial_load = false;
-	FdwRoutine *routine;
 
-	/* ensure relation is foreign-relation managed by gstore_fdw */
-	if (RelationGetForm(frel)->relkind != RELKIND_FOREIGN_TABLE)
-		elog(ERROR, "relation '%s' is not foreign table",
-			 RelationGetRelationName(frel));
-	routine = GetFdwRoutineForRelation(frel, false);
-	if (memcmp(routine, &pgstrom_gstore_fdw_routine, sizeof(FdwRoutine)) != 0)
+	if (!RelationIsGstoreFdw(frel))
 		elog(ERROR, "relation '%s' is not a foreign table managed by gstore_fdw",
 			 RelationGetRelationName(frel));
 	
@@ -3941,19 +4168,13 @@ pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 		if (!frel)
 			PG_RETURN_NULL();
 		elog(INFO, "table [%s]", RelationGetRelationName(frel));
-		if (frel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+		if (RelationIsGstoreFdw(frel))
 		{
-			FdwRoutine	   *routine = GetFdwRoutineForRelation(frel, false);
-
-			if (memcmp(routine, &pgstrom_gstore_fdw_routine,
-					   sizeof(FdwRoutine)) == 0)
-			{
-				/*
-				 * Ensure the supplied FDW options are reasonable,
-				 * and create base/redo-log files preliminary.
-				 */
-				gstoreFdwLookupGpuStoreDesc(frel);
-			}
+			/*
+			 * Ensure the supplied FDW options are reasonable,
+			 * and create base/redo files preliminary.
+			 */
+			gstoreFdwLookupGpuStoreDesc(frel);
 		}
 		relation_close(frel, AccessShareLock);
 	}
@@ -5074,6 +5295,7 @@ pgstrom_startup_gstore_fdw(void)
 void
 pgstrom_init_gstore_fdw(void)
 {
+	static bool		gstore_fdw_auto_preload;	/* GUC */
 	FdwRoutine	   *r = &pgstrom_gstore_fdw_routine;
 	HASHCTL			hctl;
 	BackgroundWorker worker;
@@ -5127,12 +5349,22 @@ pgstrom_init_gstore_fdw(void)
 	 */
 	for (i=0; i < GSTORE_UNDO_LOGS_NSLOTS; i++)
 		dlist_init(&gstore_undo_logs_slots[i]);
+
+	/* GUC: gstore_fdw.enabled */
+	DefineCustomBoolVariable("gstore_fdw.enabled",
+							 "Enables the  planner's use of Gstore_Fdw",
+							 NULL,
+							 &gstore_fdw_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	
-	/* GUC: pg_strom.gstore_fdw_auto_preload  */
-	DefineCustomBoolVariable("pg_strom.gstore_fdw_auto_preload",
+	/* GUC: gstore_fdw.auto_preload  */
+	DefineCustomBoolVariable("gstore_fdw.auto_preload",
 							 "Enables auto preload of GstoreFdw GPU buffers",
 							 NULL,
-							 &pgstrom_gstore_fdw_auto_preload,
+							 &gstore_fdw_auto_preload,
 							 true,
 							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
@@ -5140,7 +5372,7 @@ pgstrom_init_gstore_fdw(void)
 	/*
 	 * Background worker to load GPU store on startup
 	 */
-	if (pgstrom_gstore_fdw_auto_preload)
+	if (gstore_fdw_auto_preload)
 	{
 		memset(&worker, 0, sizeof(BackgroundWorker));
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name),

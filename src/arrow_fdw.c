@@ -274,6 +274,23 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
 }
 
 /*
+ * RelationIsArrowFdw
+ */
+bool
+RelationIsArrowFdw(Relation frel)
+{
+	if (RelationGetForm(frel)->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		FdwRoutine *routine = GetFdwRoutineForRelation(frel, false);
+
+		if (memcmp(routine, &pgstrom_arrow_fdw_routine,
+				   sizeof(FdwRoutine)) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
  * RecordBatchFieldCount
  */
 static int

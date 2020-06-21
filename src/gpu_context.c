@@ -498,8 +498,10 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	dlist_node *dnode;
 	CUresult	rc;
 	int			i;
+	struct timeval tv1,tv2,tv3,tv4,tv5;
 
 	Assert(!gcontext->worker_is_running);
+	gettimeofday(&tv1,NULL);
 
 	/* OK, release other resources */
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
@@ -574,6 +576,7 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			free(tracker);
 		}
 	}
+	gettimeofday(&tv2, NULL);
 
 	/* drop cuda context */
 	if (gcontext->cuda_context)
@@ -583,10 +586,13 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			elog(WARNING, "Failed on cuCtxDestroy: %s", errorText(rc));
 		gcontext->cuda_context = NULL;
 	}
+	gettimeofday(&tv3, NULL);
 
 	/* unmap GPU device memory segment */
 	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
 
+	gettimeofday(&tv4, NULL);
+	
 	/* NOTE: cuda_module is already released by cuCtxDestroy() */
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
 	{
@@ -601,6 +607,14 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 		}
 	}
 	free(gcontext);
+
+	gettimeofday(&tv5, NULL);
+
+	elog(INFO, "ReleaseLocalResources=%.3fms %.3fms %.3fms %.3fms",
+		 tv_diff(&tv2, &tv1),
+		 tv_diff(&tv3, &tv2),
+		 tv_diff(&tv4, &tv3),
+		 tv_diff(&tv5, &tv4));
 }
 
 /*
@@ -835,9 +849,11 @@ activate_cuda_context(GpuContext *gcontext)
 	CUcontext	cuda_context;
 	CUresult	rc;
 	cl_int		dindex = gcontext->cuda_dindex;
+	struct timeval tv1, tv2;
 
 	if (gcontext->cuda_context)
 		return;
+	gettimeofday(&tv1, NULL);
 	Assert(dindex >= 0 && dindex < numDevAttrs);
 	rc = cuDeviceGet(&cuda_device, devAttrs[dindex].DEV_ID);
 	if (rc != CUDA_SUCCESS)
@@ -866,6 +882,8 @@ activate_cuda_context(GpuContext *gcontext)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuCtxCreate: %s", errorText(rc));
 	gcontext->cuda_context = cuda_context;
+	gettimeofday(&tv2, NULL);
+	elog(INFO, "activate_cuda_context %.3fms", tv_diff(&tv2, &tv1));
 }
 
 /*
@@ -1097,18 +1115,27 @@ void
 PutGpuContext(GpuContext *gcontext)
 {
 	uint32		newcnt;
+	struct timeval tv1, tv2, tv3, tv4;
 
 	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
 	if (newcnt == 0)
 	{
+		gettimeofday(&tv1, NULL);
 		DetachGpuContextIPCEntry(gcontext);
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
 		SpinLockRelease(&activeGpuContextLock);
+		gettimeofday(&tv2, NULL);
 		/* wait for completion of worker threads */
 		SynchronizeGpuContext(gcontext);
+		gettimeofday(&tv3, NULL);
 		/* cleanup local resources */
 		ReleaseLocalResources(gcontext, true);
+		gettimeofday(&tv4, NULL);
+		elog(INFO, "PutGpuContext=%.3fms %.3fms %.3fms",
+			 tv_diff(&tv2,&tv1),
+			 tv_diff(&tv3,&tv2),
+			 tv_diff(&tv4,&tv3));
 	}
 }
 

@@ -472,7 +472,8 @@ PDS_release(pgstrom_data_store *pds)
 	{
 		if (!pds->gcontext)
 		{
-			Assert(pds->kds.format == KDS_FORMAT_ARROW);
+			Assert(pds->kds.format == KDS_FORMAT_ARROW ||
+				   pds->kds.format == KDS_FORMAT_COLUMN);
 			pfree(pds);
 		}
 #if 0

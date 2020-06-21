@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "cuda_common.h"
+#include "cuda_gstore.h"
 #include "cuda_postgis.h"
 
 /*
@@ -849,6 +850,82 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 		}
 	}
 	return NULL;
+}
+
+/*
+ * kern_get_datum_column - datum referer to KDS_FORMAT_COLUMN
+ */
+DEVICE_FUNCTION(void *)
+kern_get_datum_column(kern_data_store *kds,
+					  kern_data_extra *extra,
+					  cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	char		   *addr;
+
+	if (rowidx >= kds->nitems)
+		return NULL;	/* out of range */
+	if (cmeta->nullmap_offset != 0)
+	{
+		cl_uint	   *nullmap = (cl_uint *)
+			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+		if ((nullmap[rowidx>>5] & (1U << (rowidx & 0x1f))) == 0)
+			return NULL;
+	}
+
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
+	if (cmeta->attlen > 0)
+	{
+		addr += TYPEALIGN(cmeta->attalign,
+						  cmeta->attlen) * rowidx;
+		return addr;
+	}
+	else if (cmeta->attlen == -1)
+	{
+		assert(extra != NULL);
+		return (char *)extra + __kds_unpack(((cl_uint *)addr)[rowidx]);
+	}
+	return NULL;
+}
+
+DEVICE_FUNCTION(cl_bool)
+kern_check_visibility_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowidx,
+							 GstoreFdwSysattr *p_sysattr)
+{
+	kern_parambuf  *kparams = kcxt->kparams;
+	xidvector	   *xvec = (xidvector *)
+		kparam_get_value(kparams, kparams->xactIdVector);
+	GstoreFdwSysattr *sysattr = (GstoreFdwSysattr *)
+		kern_get_datum_column(kds, NULL, kds->ncols-1, rowidx);
+
+	assert(xvec != NULL);
+	assert(sysattr != NULL);
+	assert(xvec != NULL && sysattr != NULL);
+	memcpy(p_sysattr, sysattr, sizeof(GstoreFdwSysattr));
+	if (sysattr->xmin == InvalidTransactionId)
+		return false;
+	if (sysattr->xmin != FrozenTransactionId)
+	{
+		for (int i=0; i < xvec->dim1; i++)
+		{
+			if (sysattr->xmin == xvec->values[i])
+				goto xmin_is_visible;
+		}
+		return false;
+	}
+xmin_is_visible:
+	if (sysattr->xmax == InvalidTransactionId)
+		return true;
+	if (sysattr->xmax == FrozenTransactionId)
+		return false;
+	for (int i=0; i < xvec->dim1; i++)
+	{
+		if (sysattr->xmax == xvec->values[i])
+			return false;
+	}
+	return true;
 }
 
 /*

@@ -49,7 +49,7 @@ typedef struct SerializedTransactionState
 static cl_uint
 __appendXactIdVector(StringInfo buf)
 {
-	cl_uint		xactIdVector = buf->len;
+	cl_uint		poffset = buf->len;
 	Size		maxsize = EstimateTransactionStateSpace();
 	SerializedTransactionState *temp = alloca(maxsize);
 	xidvector  *xvec;
@@ -71,7 +71,7 @@ __appendXactIdVector(StringInfo buf)
 	xvec->lbound1 = 1;
 	memcpy(xvec->values, temp->parallelCurrentXids,
 		   sizeof(TransactionId) * xvec->dim1);
-	return xactIdVector;
+	return poffset;
 }
 
 /*
@@ -90,7 +90,6 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 	Size		offset;
 	int			index = 0;
 	int			nparams = list_length(used_params);
-	cl_uint		xactIdVector;
 
 	/* seek to the head of variable length field */
 	offset = MAXALIGN(offsetof(kern_parambuf,
@@ -258,12 +257,11 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 		index++;
 	}
 	/* array of current transaction id */
-	xactIdVector = __appendXactIdVector(&str);
-
 	Assert(MAXALIGN(str.len) == str.len);
 	kparams = (kern_parambuf *)str.data;
 	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-	kparams->xactIdVector = xactIdVector;
+	kparams->xactIdVector = nparams;
+	kparams->poffset[nparams++] = __appendXactIdVector(&str);
 	kparams->length = str.len;
 	kparams->nparams = nparams;
 
@@ -321,9 +319,10 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 				outer_refs = bms_add_member(outer_refs, anum);
 			}
 		}
-		/* setup ArrowFdwState, if foreign-table */
-		if (RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE)
+		if (RelationIsArrowFdw(relation))
 			gts->af_state = ExecInitArrowFdw(relation, outer_refs);
+		if (RelationIsGstoreFdw(relation))
+			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, outer_refs, NULL);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;
@@ -520,6 +519,7 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
 		GpuTask	   *gtask = gts->curr_task;
+		struct timeval tv1,tv2;
 
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
@@ -530,9 +530,13 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 			gts->curr_lp_index = 0;
 		}
 		/* reload next chunk to be scanned */
+		gettimeofday(&tv1, NULL);
 		gtask = fetch_next_gputask(gts);
 		if (!gtask)
 			return NULL;
+		gettimeofday(&tv2, NULL);
+		elog(INFO, "fetch_next_gputask = %.3fms", TV_DIFF(tv2,tv1));
+		
 		if (gtask->cpu_fallback)
 			gts->num_cpu_fallbacks++;
 		gts->curr_task = gtask;
@@ -566,9 +570,11 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 	/* rewind the scan position if GTS scans a table */
 	pgstromRewindScanChunk(gts);
 
-	/* Also rewind the scan state of Arrow_Fdw */
+	/* Also rewind the scan state of Arrow_Fdw/Gstore_Fdw */
 	if (gts->af_state)
 		ExecReScanArrowFdw(gts->af_state);
+	if (gts->gs_state)
+		ExecReScanGstoreFdw(gts->gs_state);
 }
 
 /*
@@ -594,9 +600,11 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);
-	/* shutdown Arrow_Fdw state */
+	/* shutdown Arrow_Fdw/Gstore_Fdw state */
 	if (gts->af_state)
 		ExecEndArrowFdw(gts->af_state);
+	if (gts->gs_state)
+		ExecEndGstoreFdw(gts->gs_state);
 	/* unreference CUDA program */
 	if (gts->program_id != INVALID_PROGRAM_ID)
 		pgstrom_put_cuda_program(gts->gcontext, gts->program_id);
@@ -661,9 +669,11 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	if (es->analyze && gts->num_cpu_fallbacks > 0)
 		ExplainPropertyInteger("CPU fallbacks",
 							   NULL, gts->num_cpu_fallbacks, es);
-	/* Properties of Arrow_Fdw if any */
+	/* Properties of Arrow_Fdw/Gstore_Fdw if any */
 	if (gts->af_state)
 		ExplainArrowFdw(gts->af_state, rel, es);
+	if (gts->gs_state)
+		ExplainGstoreFdw(gts->gs_state, rel, es);
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
@@ -713,8 +723,11 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 
 	if (gts->af_state)
 	{
-		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
 		ExecInitDSMArrowFdw(gts->af_state, &gtss->af_rbatch_index);
+	}
+	else if (gts->gs_state)
+	{
+		ExecInitDSMGstoreFdw(gts->gs_state, &gtss->gstore_read_pos);
 	}
 	else if (relation)
 	{
@@ -743,8 +756,11 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 
 	if (gts->af_state)
 	{
-		Assert(RelationGetForm(relation)->relkind == RELKIND_FOREIGN_TABLE);
 		ExecInitWorkerArrowFdw(gts->af_state, &gtss->af_rbatch_index);
+	}
+	else if (gts->gs_state)
+	{
+		ExecInitWorkerGstoreFdw(gts->gs_state, &gtss->gstore_read_pos);
 	}
 	else if (relation)
 	{
@@ -774,6 +790,8 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
+	else if (gts->gs_state)
+		ExecReInitDSMGstoreFdw(gts->gs_state);
 	else if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }

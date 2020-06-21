@@ -662,3 +662,172 @@ out_nostat:
 		my_suspend->line_index = 0;
 	}
 }
+
+/*
+ * gpuscan_main_column - GpuScan logic for KDS_FORMAT_COLUMN
+ */
+DEVICE_FUNCTION(void)
+gpuscan_main_column(kern_context *kcxt,
+					kern_gpuscan *kgpuscan,
+					kern_data_store *kds_src,
+					kern_data_extra *kds_extra,
+					kern_data_store *kds_dst)
+{
+	gpuscanSuspendContext *my_suspend
+		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
+	cl_uint		part_index = 0;
+	cl_uint		src_base;
+	__shared__ cl_uint	dst_nitems_base;
+	__shared__ cl_ulong	dst_usage_base;
+
+	assert(kds_src->format == KDS_FORMAT_COLUMN &&
+		   kds_dst->format == KDS_FORMAT_ROW);
+	/* quick bailout if any error happen on the prior kernel */
+	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+		return;
+	/* resume kernel from the point where suspended, if any */
+	if (kgpuscan->resume_context)
+	{
+		assert(my_suspend != NULL);
+		part_index = my_suspend->part_index;
+	}
+
+	for (src_base = get_global_base() + part_index * get_global_size();
+		 src_base < kds_src->nitems;
+		 src_base += get_global_size(), part_index++)
+	{
+		cl_uint		src_index = src_base + get_local_id();
+		cl_bool		rc = false;
+		cl_uint		nvalids;
+		cl_uint		required = 0;
+		cl_uint		nitems_offset;
+		cl_uint		usage_offset = 0;
+		cl_uint		usage_length = 0;
+		cl_uint		suspend_kernel = 0;
+		cl_char	   *tup_dclass = NULL;
+		Datum	   *tup_values = NULL;
+		GstoreFdwSysattr tup_sysattr;
+
+		/* rewind the varlena buffer */
+		kcxt->vlpos = kcxt->vlbuf;
+		/* evaluation of the row using WHERE-clause */
+		if (src_index < kds_src->nitems)
+		{
+			if (kern_check_visibility_column(kcxt,kds_src,
+											 src_index,
+											 &tup_sysattr))
+			{
+				rc = gpuscan_quals_eval_column(kcxt,
+											   kds_src,
+											   kds_extra,
+											   src_index);
+			}
+		}
+		/* bailout if any error */
+		if (__syncthreads_count(kcxt->errcode) > 0)
+			break;
+		/* how many rows servived the evaluation above? */
+		nitems_offset = pgstromStairlikeBinaryCount(rc, &nvalids);
+		if (nvalids > 0)
+		{
+			/* Ok, extract the source columns to form a result row */
+			kcxt->vlpos = kcxt->vlbuf;		/* rewind */
+			if (rc)
+			{
+				tup_dclass = (cl_char *)
+					kern_context_alloc(kcxt, sizeof(cl_char) * kds_dst->ncols);
+				tup_values = (Datum *)
+					kern_context_alloc(kcxt, sizeof(Datum) * kds_dst->ncols);
+				gpuscan_projection_column(kcxt,
+										  kds_src,
+										  kds_extra,
+										  src_index,
+										  tup_dclass,
+										  tup_values);
+				required = MAXALIGN(offsetof(kern_tupitem, htup) +
+									compute_heaptuple_size(kcxt,
+														   kds_dst,
+														   tup_dclass,
+														   tup_values));
+			}
+			/* bailout if any error */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				break;
+			/* allocation of the destination buffer */
+			usage_offset = pgstromStairlikeSum(required, &usage_length);
+			if (get_local_id() == 0)
+			{
+				union {
+					struct {
+						cl_uint	nitems;
+						cl_uint	usage;
+					} i;
+					cl_ulong	v64;
+				} oldval, curval, newval;
+
+				curval.i.nitems = kds_dst->nitems;
+				curval.i.usage  = kds_dst->usage;
+				do {
+					newval = oldval = curval;
+					newval.i.nitems += nvalids;
+					newval.i.usage  += __kds_packed(usage_length);
+
+					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+						__kds_unpack(newval.i.usage) > kds_dst->length)
+					{
+						atomicAdd(&kgpuscan->suspend_count, 1);
+						suspend_kernel = 1;
+						break;
+					}
+				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+												 oldval.v64,
+												 newval.v64)) != oldval.v64);
+				dst_nitems_base = oldval.i.nitems;
+				dst_usage_base  = __kds_unpack(oldval.i.usage);
+			}
+			if (__syncthreads_count(suspend_kernel) > 0)
+				break;
+			/* store the result tuple on the destination buffer */
+			if (rc)
+			{
+				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+				kern_tupitem *tupitem;
+
+				tupitem = (kern_tupitem *)
+					((char *)kds_dst
+					 + kds_dst->length
+					 - (dst_usage_base + usage_offset + required));
+				tup_index[dst_nitems_base + nitems_offset]
+					= __kds_packed((char *)tupitem - (char *)kds_dst);
+				form_kern_heaptuple(kcxt,
+									tupitem,
+									kds_dst,
+									NULL,
+									NULL,
+									tup_dclass,
+									tup_values);
+				/* add system attributes */
+				tupitem->t_self.ip_blkid.bi_hi = (src_index >> 16);
+				tupitem->t_self.ip_blkid.bi_lo = (src_index & 0xffffU);
+				tupitem->htup.t_choice.t_heap.t_xmin = tup_sysattr.xmin;
+				tupitem->htup.t_choice.t_heap.t_xmax = tup_sysattr.xmax;
+				tupitem->htup.t_choice.t_heap.t_field3.t_cid  = InvalidCommandId;
+			}
+		}
+		/* write back statistics */
+		if (get_local_id() == 0)
+		{
+			atomicAdd(&kgpuscan->nitems_in, Min(kds_src->nitems - src_base,
+												get_local_size()));
+			atomicAdd(&kgpuscan->nitems_out, nvalids);
+			atomicAdd(&kgpuscan->extra_size, usage_length);
+		}
+	}
+	/* suspend the current position (even if normal exit) */
+	if (my_suspend && get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = 0;
+	}
+}

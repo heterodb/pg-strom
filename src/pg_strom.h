@@ -302,6 +302,7 @@ typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
 typedef struct GpuTaskSharedState	GpuTaskSharedState;
 typedef struct ArrowFdwState		ArrowFdwState;
+typedef struct GpuStoreFdwState		GpuStoreFdwState;
 
 /*
  * GpuTaskState
@@ -338,6 +339,7 @@ struct GpuTaskState
 	long			outer_brin_count;	/* # of blocks skipped by index */
 
 	ArrowFdwState  *af_state;			/* for GpuTask on Arrow_Fdw */
+	GpuStoreFdwState *gs_state;			/* for GpuTask on Gstore_Fdw */
 
 	/*
 	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
@@ -391,7 +393,8 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-
+	/* for gstore_fdw file scan */
+	pg_atomic_uint64 gstore_read_pos;
 	/* for block-based regular table scan */
 	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
 	slock_t			pbs_mutex;		/* lock of the fields below */
@@ -595,11 +598,19 @@ typedef struct pgstrom_data_store
 	 * If NULL, KDS is preliminary loaded by CPU and filesystem, and
 	 * PDS is also allocated on managed memory area. So, worker don't
 	 * need to kick DMA operations explicitly.
+	 *
+	 * NOTE: Extra information for KDS_FORMAT_COLUMN
+	 * @gs_sstate points the GpuStoreShareState for reference IPC handle
+	 * of the main/extra buffer on the device. This IPC handle is only
+	 * valid under the read lock.
 	 */
 	cl_uint				nblocks_uncached;	/* for KDS_FORMAT_BLOCK */
 	cl_int				filedesc;
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
-
+	/* for KDS_FORMAT_COLUMN */
+	void			   *gs_sstate;
+	CUdeviceptr			m_kds_base;
+	CUdeviceptr			m_kds_extra;
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
 } pgstrom_data_store;
@@ -1330,6 +1341,7 @@ extern void pgstrom_init_gpupreagg(void);
  * arrow_fdw.c and arrow_read.c
  */
 extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
+extern bool RelationIsArrowFdw(Relation frel);
 extern cl_int GetOptimalGpuForArrowFdw(PlannerInfo *root,
 									   RelOptInfo *baserel);
 extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
@@ -1354,6 +1366,29 @@ extern void pgstrom_init_arrow_fdw(void);
 /*
  * gstore_fdw.c
  */
+extern bool	baseRelIsGstoreFdw(RelOptInfo *baserel);
+extern bool RelationIsGstoreFdw(Relation frel);
+extern int	GetOptimalGpuForGstoreFdw(PlannerInfo *root,
+									  RelOptInfo *baserel);
+extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss,
+										   Bitmapset *outer_refs,
+										   Expr *indexExpr);
+extern pgstrom_data_store *ExecScanChunkGstoreFdw(GpuTaskState *gts);
+extern void ExecReScanGstoreFdw(GpuStoreFdwState *gstore_state);
+extern void ExecEndGstoreFdw(GpuStoreFdwState *gstore_state);
+extern void ExecInitDSMGstoreFdw(GpuStoreFdwState *gstore_state,
+								 pg_atomic_uint64 *gstore_read_pos);
+extern void ExecReInitDSMGstoreFdw(GpuStoreFdwState *gstore_state);
+extern void ExecInitWorkerGstoreFdw(GpuStoreFdwState *gstore_state,
+									pg_atomic_uint64 *gstore_read_pos);
+extern void ExecShutdownGstoreFdw(GpuStoreFdwState *gstore_state);
+extern void ExplainGstoreFdw(GpuStoreFdwState *af_state,
+							 Relation frel, ExplainState *es);
+extern CUresult gstoreFdwMapDeviceMemory(GpuContext *gcontext,
+										 pgstrom_data_store *pds);
+extern void gstoreFdwUnmapDeviceMemory(GpuContext *gcontext,
+									   pgstrom_data_store *pds);
+
 #define GSTORE_FDW_SYSATTR_OID		6116
 extern void gstoreFdwBgWorkerBegin(void);
 extern bool gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array);
@@ -1934,35 +1969,17 @@ pthreadCondSignal(pthread_cond_t *cond)
 }
 
 /*
- * functions for execution time measurement
+ * utility to calculate time diff
  */
-typedef struct timeval		timeval_t;
+#define TV_DIFF(tv2,tv1)								\
+	(((double)(tv2.tv_sec  - tv1.tv_sec) * 1000000.0 +	\
+	  (double)(tv2.tv_usec - tv1.tv_usec)) / 1000.0)
 
-static inline timeval_t
-stat_time_begin(void)
+static inline double
+tv_diff(struct timeval *tv2, struct timeval *tv1)
 {
-	timeval_t	tv_start;
-
-	gettimeofday(&tv_start, NULL);
-
-	return tv_start;
-}
-
-static inline void
-stat_time_end(timeval_t tv_start, const char *label)
-{
-	timeval_t	tv_end;
-	cl_long		delta;		/* us */
-
-	gettimeofday(&tv_end, NULL);
-	delta = ((tv_end.tv_sec - tv_start.tv_sec) * 1000000 +
-			 (tv_end.tv_usec - tv_start.tv_usec));
-	if (delta > 4000000)
-		elog(INFO, "%s: %.2fs", label, (double)delta / 1000000.0);
-	else if (delta > 4000)
-		elog(INFO, "%s: %.2fms", label, (double)delta / 1000.0);
-	else
-		elog(INFO, "%s: %luus", label, delta);
+	return ((double)(tv2->tv_sec  - tv1->tv_sec) * 1000000.0 +
+			(double)(tv2->tv_usec - tv1->tv_usec)) / 1000.0;
 }
 
 /*

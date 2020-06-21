@@ -45,7 +45,7 @@ __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib \
                 cuda_jsonlib cuda_rangetype cuda_postgis \
                 cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort
-__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype arrow_defs
+__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype cuda_gstore arrow_defs
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
                $(addsuffix .h, $(__GPU_HEADERS)))
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
