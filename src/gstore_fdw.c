@@ -965,6 +965,23 @@ GstoreGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
+static CUresult
+gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
+{
+	cl_uint		nitems;
+	size_t		curr_pos;
+
+	/* see  __gstoreFdwAppendRedoLog */
+	SpinLockAcquire(&gs_sstate->redo_pos_lock);
+	curr_pos = gs_sstate->redo_write_pos;
+	nitems = (gs_sstate->redo_write_nitems -
+			  gs_sstate->redo_read_nitems);
+	SpinLockRelease(&gs_sstate->redo_pos_lock);
+
+	return gstoreFdwInvokeApplyRedo(RelationGetRelid(frel), false,
+									curr_pos, nitems);
+}
+
 GpuStoreFdwState *
 ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr)
 {
@@ -1024,6 +1041,9 @@ ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr)
 	if (indexExpr != NULL)
 		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
 
+	/* synchronize device buffer prior to the kernel call */
+	gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
+	
 	return fdw_state;
 }
 
@@ -3463,7 +3483,7 @@ __GstoreTxLogCommonCompare(const void *pos1, const void *pos2)
 }
 
 static void
-gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
+gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 {
 	GpuStoreBaseFileHead *base_mmap = NULL;
 	size_t		base_mmap_sz;
@@ -3479,7 +3499,6 @@ gstoreFdwApplyRedoLog(Relation frel, GpuStoreSharedState *gs_sstate)
 		char	   *pos, *end;
 		StringInfoData buf;
 
-		elog(INFO, "gstoreFdwApplyRedoLog calls pmem_map_file");
 		base_mmap = pmem_map_file(gs_sstate->base_file, 0,
 								  0, 0600,
 								  &base_mmap_sz,
@@ -3767,7 +3786,7 @@ gstoreFdwCreateSharedState(Relation frel)
 		gstoreFdwCreateRedoLog(frel, gs_sstate);
 		/* Apply Redo-Log, if needed */
 		if (!basefile_is_sanity)
-			gstoreFdwApplyRedoLog(frel, gs_sstate);
+			gstoreFdwApplyRedoHostBuffer(frel, gs_sstate);
 	}
 	PG_CATCH();
 	{
@@ -4195,19 +4214,9 @@ pgstrom_gstore_fdw_apply_redo(PG_FUNCTION_ARGS)
 	Oid				ftable_oid = PG_GETARG_OID(0);
 	Relation		frel = table_open(ftable_oid, AccessShareLock);
 	GpuStoreDesc   *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
-	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	cl_uint			nitems;
-	size_t			curr_pos;
 	CUresult		rc;
-
-	/* see  __gstoreFdwAppendRedoLog */
-	SpinLockAcquire(&gs_sstate->redo_pos_lock);
-	curr_pos = gs_sstate->redo_write_pos;
-	nitems = (gs_sstate->redo_write_nitems -
-			  gs_sstate->redo_read_nitems);
-	SpinLockRelease(&gs_sstate->redo_pos_lock);
-
-	rc = gstoreFdwInvokeApplyRedo(ftable_oid, false, curr_pos, nitems);
+	
+	rc = gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
 
 	table_close(frel, NoLock);
 
