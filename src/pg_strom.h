@@ -1370,9 +1370,7 @@ extern bool	baseRelIsGstoreFdw(RelOptInfo *baserel);
 extern bool RelationIsGstoreFdw(Relation frel);
 extern int	GetOptimalGpuForGstoreFdw(PlannerInfo *root,
 									  RelOptInfo *baserel);
-extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss,
-										   Bitmapset *outer_refs,
-										   Expr *indexExpr);
+extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkGstoreFdw(GpuTaskState *gts);
 extern void ExecReScanGstoreFdw(GpuStoreFdwState *gstore_state);
 extern void ExecEndGstoreFdw(GpuStoreFdwState *gstore_state);

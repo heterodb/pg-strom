@@ -1582,8 +1582,9 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		if (pgstrom_path_is_gpuscan(outer_path))
 			break;	/* OK, only if GpuScan */
 		if (outer_path->pathtype == T_ForeignScan &&
-			baseRelIsArrowFdw(outer_path->parent))
-			break;	/* OK, only if ArrowFdw */
+			(baseRelIsArrowFdw(outer_path->parent) ||
+			 baseRelIsGstoreFdw(outer_path->parent)))
+			break;	/* OK, only if ArrowFdw or GstoreFdw */
 		if (IsA(outer_path, ProjectionPath))
 		{
 			ProjectionPath *ppath = (ProjectionPath *) outer_path;
@@ -2949,29 +2950,32 @@ out_of_resource:
 static int
 gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
-	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
-	CUresult		rc;
+	bool			gstore_locked = false;
 	int				retval;
+	CUresult		rc;
 
-	if (pds_src->kds.format != KDS_FORMAT_COLUMN)
-		return __gpuscan_process_task(gtask, cuda_module);
-
-	rc = gstoreFdwMapDeviceMemory(gcontext, pds_src);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
 	STROM_TRY();
 	{
+		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+		{
+			rc = gstoreFdwMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
+			gstore_locked = true;
+		}
 		retval = __gpuscan_process_task(gtask, cuda_module);
 	}
 	STROM_CATCH();
-	{
-		gstoreFdwUnmapDeviceMemory(gcontext, pds_src);
-		STROM_RE_THROW();
-	}
-	STROM_END_TRY();
-	gstoreFdwUnmapDeviceMemory(gcontext, pds_src);
+    {
+		if (gstore_locked)
+			gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+        STROM_RE_THROW();
+    }
+    STROM_END_TRY();
+	if (gstore_locked)
+		gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 
 	return retval;
 }

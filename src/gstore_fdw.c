@@ -982,8 +982,9 @@ gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 									curr_pos, nitems);
 }
 
-GpuStoreFdwState *
-ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr)
+static GpuStoreFdwState *
+__ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr,
+					bool skip_apply_redo_log)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -1042,9 +1043,16 @@ ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr)
 		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
 
 	/* synchronize device buffer prior to the kernel call */
-	gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
-	
+	if (!skip_apply_redo_log)
+		gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
+
 	return fdw_state;
+}
+
+GpuStoreFdwState *
+ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs)
+{
+	return __ExecInitGstoreFdw(ss, outer_refs, NULL, false);
 }
 
 static void
@@ -1066,7 +1074,7 @@ GstoreBeginForeignScan(ForeignScanState *node, int eflags)
 	if (fscan->fdw_exprs != NIL)
 		indexExpr = linitial(fscan->fdw_exprs);
 
-	node->fdw_state = ExecInitGstoreFdw(&node->ss, outer_refs, indexExpr);
+	node->fdw_state = __ExecInitGstoreFdw(&node->ss, outer_refs, indexExpr, true);
 }
 
 /*
@@ -4638,7 +4646,7 @@ __gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
 	 * setup-owner (phase-3) - assign largest owner-id of commit-logs
 	 */
 	phase = 3;
-	rc = cuLaunchKernel(kfunc_apply_redo,
+	rc = cuLaunchKernel(kfunc_setup_owner,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
 						0,

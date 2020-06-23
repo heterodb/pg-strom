@@ -18,6 +18,7 @@
  */
 #include "cuda_common.h"
 #include "cuda_gpupreagg.h"
+#include "cuda_gstore.h"
 #include "cuda_postgis.h"
 /*
  * gpupreagg_final_data_move
@@ -694,7 +695,118 @@ gpupreagg_setup_arrow(kern_context *kcxt,
 				break;
 		}
 		/* update statistics */
-		count = __syncthreads_count(rc);
+		count = __syncthreads_count(src_index < src_nitems);
+		if (get_local_id() == 0)
+		{
+			atomicAdd(&kgpreagg->nitems_real, count);
+			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
+		}
+		/* move to the next window */
+		src_base += get_global_size();
+	}
+skip:
+	/* save the current execution context */
+	if (get_local_id() == 0)
+		my_suspend->c.src_base = src_base;
+}
+
+/*
+ * gpupreagg_setup_column
+ */
+DEVICE_FUNCTION(void)
+gpupreagg_setup_column(kern_context *kcxt,
+                       kern_gpupreagg *kgpreagg,
+                       kern_data_store *kds_src,    /* in: KDS_FORMAT_COLUMN */
+                       kern_data_extra *kds_extra,
+                       kern_data_store *kds_slot)
+{
+	cl_uint		src_base;
+	cl_char	   *tup_dclass;
+	Datum	   *tup_values;
+	cl_int	   *tup_extra;	/* !!not related to extra buffer of column format!! */
+	cl_char	   *vlbuf_base;
+	gpupreaggSuspendContext *my_suspend;
+
+	assert(kds_src->format == KDS_FORMAT_COLUMN &&
+		   kds_slot->format == KDS_FORMAT_SLOT);
+	/* resume kernel from the point where suspended, if any */
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
+	if (kgpreagg->resume_context)
+		src_base = my_suspend->c.src_base;
+	else
+		src_base = get_global_base();
+
+	tup_dclass = (cl_char *)
+		kern_context_alloc(kcxt, sizeof(cl_char) * kds_slot->ncols);
+	tup_values = (Datum *)
+		kern_context_alloc(kcxt, sizeof(Datum)   * kds_slot->ncols);
+	tup_extra  = (cl_int *)
+		kern_context_alloc(kcxt, sizeof(cl_int)  * kds_slot->ncols);
+	if (!tup_dclass || !tup_values || !tup_extra)
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+	/* bailout if any errors */
+	if (__syncthreads_count(kcxt->errcode) > 0)
+		goto skip;
+	vlbuf_base = kcxt->vlpos;
+
+	while (src_base < kds_src->nitems)
+	{
+		cl_uint		src_index = src_base + get_local_id();
+		cl_uint		slot_index;
+		cl_uint		nvalids;
+		cl_uint		count;
+		cl_bool		visible = false;
+		cl_bool		rc = false;
+
+		kcxt->vlpos = vlbuf_base;		/* rewind */
+		if (src_index < kds_src->nitems)
+		{
+			visible = kern_check_visibility_column(kcxt,
+												   kds_src,
+												   src_index,
+												   NULL);
+			if (visible)
+			{
+				rc = gpupreagg_quals_eval_column(kcxt,
+												 kds_src,
+												 kds_extra,
+												 src_index);
+			}
+			kcxt->vlpos = vlbuf_base;	/* rewind */
+		}
+		/* bailout if any errors */
+		if (__syncthreads_count(kcxt->errcode) > 0)
+			break;
+		/* allocation of kds_slot buffer, if any */
+		slot_index = pgstromStairlikeBinaryCount(rc ? 1 : 0, &nvalids);
+		if (nvalids > 0)
+		{
+			if (rc)
+			{
+				gpupreagg_projection_column(kcxt,
+											kds_src,
+											kds_extra,
+											src_index,
+											tup_dclass,
+											tup_values);
+			}
+			/* bailout if any errors */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				break;
+			/* common portion */
+			if (!gpupreagg_setup_common(kcxt,
+										kgpreagg,
+										kds_src,
+										kds_slot,
+										nvalids,
+										rc ? slot_index : UINT_MAX,
+										tup_dclass,
+										tup_values,
+										tup_extra))
+				break;
+		}
+		/* update  statistics */
+		count = __syncthreads_count(visible);
 		if (get_local_id() == 0)
 		{
 			atomicAdd(&kgpreagg->nitems_real, count);
@@ -725,8 +837,6 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	cl_uint			nvalids;
 	cl_int			i, j;
 	cl_bool			is_last_reduction = false;
-	cl_char		   *slot_dclass;
-	Datum		   *slot_values;
 	cl_char		   *row_inval_map;
 #define NOGROUP_BLOCK_SZ		4096	/* 36kB of shared memory consumption */
 	__shared__ cl_bool	l_dclass[NOGROUP_BLOCK_SZ];

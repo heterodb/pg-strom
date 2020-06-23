@@ -270,7 +270,7 @@ endif
 # GPU Libraries
 #
 $(GSTORE_FDW_FATBIN): $(GSTORE_FDW_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
+	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
 
 %.fatbin:  %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=true -o $@ $<

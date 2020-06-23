@@ -117,22 +117,19 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 {
 	cl_uint		owner_id;
 	cl_uint		rowid;
-
-	if (get_global_id() == 0)
-	{
-		printf("kern_gpustore_setup_owner: (gsize=%u/lsize=%u) phase=%d\n", get_global_size(), get_local_size(), phase);
-		printf("redo=%p kds=%p extra=%p\n", redo, kds, extra);
-		printf("redo {nitems=%u nrooms=%u}\n", (int)redo->nitems, (int)redo->nrooms);
-	}
 	
 	for (owner_id = get_global_id();
 		 owner_id < redo->nitems;
 		 owner_id += get_global_size())
 	{
 		GstoreFdwSysattr *sysattr;
-		GstoreTxLogCommon *tx_log = (GstoreTxLogCommon *)
-			((char *)redo + __kds_unpack(redo->log_index[owner_id]));
+		GstoreTxLogCommon *tx_log;
+		cl_uint		offset = redo->log_index[owner_id];
 
+		/* this log entry is successfully applied, and can be ignored */
+		if (offset == UINT_MAX)
+			continue;
+		tx_log = (GstoreTxLogCommon *)((char *)redo + __kds_unpack(offset));
 		if (tx_log->type == GSTORE_TX_LOG__INSERT)
 		{
 			rowid = ((GstoreTxLogInsert *)tx_log)->rowid;
@@ -351,9 +348,6 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 {
 	kern_context kcxt;
 	cl_uint		owner_id;
-
-	if (get_global_id() == 0)
-		printf("kern_gpustore_apply_redo: (gsize=%u/lsize=%u) phase=%d\n", get_global_size(), get_local_size(), phase);
 	
 	INIT_KERNEL_CONTEXT(&kcxt, NULL);	/* no kparams */
 	for (owner_id = get_global_id();

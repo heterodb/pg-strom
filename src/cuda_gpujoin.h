@@ -184,7 +184,11 @@ DEVICE_FUNCTION(cl_bool)
 gpujoin_quals_eval_arrow(kern_context *kcxt,
 						 kern_data_store *kds,
 						 cl_uint row_index);
-
+DEVICE_FUNCTION(cl_bool)
+gpujoin_quals_eval_column(kern_context *kcxt,
+						  kern_data_store *kds,
+						  kern_data_extra *extra,
+						  cl_uint row_index);
 /*
  * gpujoin_join_quals
  *
@@ -199,6 +203,7 @@ gpujoin_quals_eval_arrow(kern_context *kcxt,
 DEVICE_FUNCTION(cl_bool)
 gpujoin_join_quals(kern_context *kcxt,
 				   kern_data_store *kds,
+				   kern_data_extra *extra,
 				   kern_multirels *kmrels,
 				   int depth,
 				   cl_uint *x_buffer,
@@ -213,6 +218,7 @@ gpujoin_join_quals(kern_context *kcxt,
 DEVICE_FUNCTION(cl_uint)
 gpujoin_hash_value(kern_context *kcxt,
 				   kern_data_store *kds,
+				   kern_data_extra *extra,
 				   kern_multirels *kmrels,
 				   cl_int depth,
 				   cl_uint *x_buffer,
@@ -227,6 +233,7 @@ gpujoin_hash_value(kern_context *kcxt,
 DEVICE_FUNCTION(cl_uint)
 gpujoin_projection(kern_context *kcxt,
 				   kern_data_store *kds_src,
+				   kern_data_extra *kds_extra,
 				   kern_multirels *kmrels,
 				   cl_uint *r_buffer,
 				   kern_data_store *kds_dst,
@@ -241,6 +248,7 @@ gpujoin_main(kern_context *kcxt,
 			 kern_gpujoin *kgjoin,
 			 kern_multirels *kmrels,
 			 kern_data_store *kds_src,
+			 kern_data_extra *kds_extra,
 			 kern_data_store *kds_dst,
 			 kern_parambuf *kparams_gpreagg,		/* only if combined Join */
 			 cl_uint *l_state,
@@ -272,6 +280,7 @@ KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_gpujoin *kgjoin,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
+				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst,
 				  kern_parambuf *kparams_gpreagg)
 {
@@ -288,6 +297,7 @@ kern_gpujoin_main(kern_gpujoin *kgjoin,
 				 kgjoin,
 				 kmrels,
 				 kds_src,
+				 kds_extra,
 				 kds_dst,
 				 kparams_gpreagg,
 				 l_state,

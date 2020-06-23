@@ -3566,10 +3566,12 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	ListCell   *cell;
 	int			depth;
 	StringInfoData row;
+	StringInfoData arrow;
 	StringInfoData column;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	initStringInfo(&row);
+	initStringInfo(&arrow);
 	initStringInfo(&column);
 
 	/*
@@ -3686,13 +3688,26 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		if (depth != keynode->varno)
 		{
 			/* close the previous block */
-			if (depth >= 0)
+			if (depth == 0)
+			{
 				appendStringInfo(
 					source,
-					"%s%s  }\n",
-					row.data,
-					column.data);
+					"  }\n"
+					"%s  }\n"
+					"%s  }\n"
+					"%s  }\n",
+					arrow.data,
+					column.data,
+					row.data);
+			}
+			else if (depth > 0)
+			{
+				appendStringInfo(
+					source,
+					"%s  }\n", row.data);
+			}
 			resetStringInfo(&row);
+			resetStringInfo(&arrow);
 			resetStringInfo(&column);
 
 			depth = keynode->varno;
@@ -3706,23 +3721,25 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  {\n");
 				appendStringInfoString(
 					&row,
-					"  }\n"
-					"  else if (__ldg(&kds->format) != KDS_FORMAT_ARROW)\n"
+					"  else\n"
 					"  {\n"
+					"    /* KDS_FORMAT_ROW or KDS_FORMAT_BLOCK */\n"
 					"    if (offset == 0)\n"
 					"      htup = NULL;\n"
-					"    else if (__ldg(&kds->format) == KDS_FORMAT_ROW)\n"
+					"    else if (kds->format == KDS_FORMAT_ROW)\n"
 					"      htup = KDS_ROW_REF_HTUP(kds,offset,NULL,NULL);\n"
-					"    else if (__ldg(&kds->format) == KDS_FORMAT_BLOCK)\n"
+					"    else if (kds->format == KDS_FORMAT_BLOCK)\n"
 					"      htup = KDS_BLOCK_REF_HTUP(kds,offset,NULL,NULL);\n"
 					"    else\n"
 					"      htup = NULL; /* bug */\n");
 				appendStringInfoString(
+					&arrow,
+					"  else if (kds->format == KDS_FORMAT_ARROW)\n"
+					"  {\n");
+				appendStringInfoString(
 					&column,
-					"  }\n"
-					"  else\n"
-					"  {\n"
-					);
+					"  else if (kds->format == KDS_FORMAT_COLUMN)\n"
+					"  {\n");
 			}
 			else if (depth < cur_depth)
 			{
@@ -3731,7 +3748,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  /* variable load in depth-%u (inner KDS) */\n"
 					"  {\n"
 					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"    assert(__ldg(&kds_in->format) == %s);\n"
+					"    assert(kds_in->format == %s);\n"
 					"    if (!o_buffer)\n"
 					"      htup = NULL;\n"
 					"    else\n"
@@ -3780,28 +3797,55 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			keynode->varattno - 1,
 			keynode->varoattno, dtype->type_name);
 
-		/* KDS_FORMAT_COLUMN only if depth == 0 */
+		/* KDS_FORMAT_ARROW only if depth == 0 */
 		if (depth == 0)
 			appendStringInfo(
-				&column,
+				&arrow,
 				"    if (offset > 0)\n"
 				"      pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,offset-1);\n"
 				"    else\n"
 				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n",
 				keynode->varoattno, keynode->varattno - 1,
 				keynode->varoattno);
+		/* KDS_FORMAT_COLUMN only if depth == 0 */
+		if (depth == 0)
+			appendStringInfo(
+				&column,
+				"    if (offset == 0)\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n"
+				"    else\n"
+				"    {\n"
+				"      datum = kern_get_datum_column(kds,extra,%u,offset-1);\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,datum);\n"
+				"    }\n",
+				keynode->varoattno,
+				keynode->varattno-1, keynode->varoattno);
 	}
 
 	/* close the previous block */
 	if (depth >= 0)
 	{
-		appendStringInfo(
-			source,
-			"%s%s  }\n",
-			row.data,
-			column.data);
+		if (depth == 0)
+		{
+			appendStringInfo(
+				source,
+				"  }\n"
+				"%s  }\n"
+				"%s  }\n"
+				"%s  }\n",
+				arrow.data,
+				column.data,
+				row.data);
+		}
+		else
+		{
+			appendStringInfo(
+				source,
+				"%s  }\n", row.data);
+		}
 	}
 	pfree(row.data);
+	pfree(arrow.data);
 	pfree(column.data);
 
 	appendStringInfo(source, "\n");
@@ -3812,6 +3856,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  * STATIC_FUNCTION(cl_bool)
  * gpujoin_join_quals_depth%u(kern_context *kcxt,
  *                            kern_data_store *kds,
+ *                            kern_data_extra *extra,
  *                            kern_multirels *kmrels,
  *                            cl_int *o_buffer,
  *                            HeapTupleHeaderData *i_htup,
@@ -3852,6 +3897,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpujoin_join_quals_depth%d(kern_context *kcxt,\n"
 		"                          kern_data_store *kds,\n"
+		"                          kern_data_extra *extra,\n"
         "                          kern_multirels *kmrels,\n"
 		"                          cl_uint *o_buffer,\n"
 		"                          HeapTupleHeaderData *i_htup,\n"
@@ -3904,6 +3950,7 @@ gpujoin_codegen_join_quals(StringInfo source,
  * STATIC_FUNCTION(cl_uint)
  * gpujoin_hash_value_depth%u(kern_context *kcxt,
  *                            kern_data_store *kds,
+ *                            kern_data_extra *extra,
  *                            kern_multirels *kmrels,
  *                            cl_int *o_buffer,
  *                            cl_bool *is_null_keys)
@@ -3970,6 +4017,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
 		"                          kern_data_store *kds,\n"
+		"                          kern_data_extra *extra,\n"
 		"                          kern_multirels *kmrels,\n"
 		"                          cl_uint *o_buffer,\n"
 		"                          cl_bool *p_is_null_keys)\n"
@@ -4014,6 +4062,7 @@ gpujoin_codegen_projection(StringInfo source,
 	StringInfoData	body;
 	StringInfoData	temp;
 	StringInfoData	row;
+	StringInfoData	arrow;
 	StringInfoData	column;
 	StringInfoData	outer;
 	cl_int			nfields = list_length(tlist_dev);
@@ -4025,6 +4074,7 @@ gpujoin_codegen_projection(StringInfo source,
 	initStringInfo(&body);
 	initStringInfo(&temp);
 	initStringInfo(&row);
+	initStringInfo(&arrow);
 	initStringInfo(&column);
 	initStringInfo(&outer);
 
@@ -4087,7 +4137,7 @@ gpujoin_codegen_projection(StringInfo source,
 		bool		sysattr_refs = false;
 
 		resetStringInfo(&row);
-		resetStringInfo(&column);
+		resetStringInfo(&arrow);
 		resetStringInfo(&outer);
 
 		/* collect information in this depth */
@@ -4140,6 +4190,7 @@ gpujoin_codegen_projection(StringInfo source,
 			if (varattmaps[tle->resno-1] >= 0)
 				continue;
 			attr = SystemAttributeDefinition(varattmaps[tle->resno-1]);
+			/* row or block */
 			appendStringInfo(
 				&row,
 				"  sz = pg_sysattr_%s_store(kcxt,%s,htup,&t_self,\n"
@@ -4152,12 +4203,27 @@ gpujoin_codegen_projection(StringInfo source,
 				tle->resno - 1,
 				tle->resno - 1,
 				tle->resno - 1);
+			/* arrow */
 			appendStringInfo(
-				&column,
+				&arrow,
 				"    sz = pg_sysattr_%s_store(kcxt,(offset == 0 ? NULL : %s),\n"
 				"                             NULL, NULL,\n"
 				"                             tup_dclass[%d],\n"
 				"                             tup_values[%d]);\n"
+				"    if (tup_extras)\n"
+				"      tup_extras[%d] = sz;\n",
+				NameStr(attr->attname),
+				kds_label,
+				tle->resno - 1,
+				tle->resno - 1,
+				tle->resno - 1);
+			/* column */
+			appendStringInfo(
+				&column,
+				"    sz = pg_sysattr_%s_fetch_column(kcxt,(offset == 0 ? NULL : %s),\n"
+				"                                    offset-1,\n"
+				"                                    tup_dclass[%d],\n"
+				"                                    tup_values[%d]);\n"
 				"    if (tup_extras)\n"
 				"      tup_extras[%d] = sz;\n",
 				NameStr(attr->attname),
@@ -4199,46 +4265,47 @@ gpujoin_codegen_projection(StringInfo source,
 				type_oid = exprType((Node *)tle->expr);
 				get_typlenbyval(type_oid, &typelen, &typebyval);
 				dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
-
+				if (dtype)
+					type_oid_list = list_append_unique_oid(type_oid_list,
+														   dtype->type_oid);
 				/* row */
-				if (typebyval)
-				{
-					appendStringInfo(
-						&temp,
-						"    EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],tup_values[%d]);\n",
-						8 * typelen, tle->resno - 1, tle->resno - 1);
-				}
-				else
-				{
-					appendStringInfo(
-						&temp,
-						"    EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],tup_values[%d]);\n",
-						tle->resno - 1, tle->resno - 1);
-				}
-				/* column */
+				appendStringInfo(
+					&temp,
+					"  EXTRACT_HEAP_%s(addr,tup_dclass[%d],tup_values[%d]);\n",
+					(!typebyval   ? "READ_POINTER" :
+					 typelen == 1 ? "READ_8BIT"    :
+					 typelen == 2 ? "READ_16BIT"   :
+					 typelen == 4 ? "READ_32BIT"   :
+					 typelen == 8 ? "READ_64BIT"   : "__invalid_typlen__"),
+					tle->resno - 1,
+					tle->resno - 1);
+				/* arrow */
 				if (!dtype)
 				{
 					appendStringInfo(
-						&column,
+						&arrow,
 						"    tup_dclass[%d] = DATUM_CLASS__NULL;\n",
 						tle->resno - 1);
 				}
 				else
 				{
+					if (!referenced)
+						appendStringInfo(
+							&arrow,
+							"    if (r_idx == 0)\n"
+							"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n"
+							"    else\n"
+							"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,r_idx-1);\n",
+							dtype->type_name,
+							dtype->type_name, kds_label, i-1);
 					appendStringInfo(
-						&column,
-						"    if (offset > 0)\n"
-						"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,offset-1);\n"
-						"    else\n"
-						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n"
+						&arrow,
 						"    sz = pg_datum_store(kcxt, temp.%s_v,\n"
 						"                        tup_dclass[%d],\n"
 						"                        tup_values[%d]);\n"
 						"    if (tup_extras)\n"
 						"      tup_extras[%d] = sz;\n"
 						"    extra_sum += MAXALIGN(sz);\n",
-						dtype->type_name, kds_label, i-1,
-						dtype->type_name,
 						dtype->type_name,
 						tle->resno - 1,
 						tle->resno - 1,
@@ -4247,6 +4314,32 @@ gpujoin_codegen_projection(StringInfo source,
 					type_oid_list = list_append_unique_oid(type_oid_list,
 														   dtype->type_oid);
 				}
+				/* column */
+				if (!referenced)
+					appendStringInfo(
+						&column,
+						"    if (r_idx == 0)\n"
+						"      addr = NULL;\n"
+						"    else\n"
+						"      addr = kern_get_datum_column(%s,kds_extra,%d,r_idx-1);\n",
+						kds_label, i-1);
+				appendStringInfo(
+					&column,
+					"    if (!addr)\n"
+					"      tup_dclass[%d] = DATUM_CLASS__NULL;\n"
+					"    else\n"
+					"    {\n"
+					"      tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+					"      tup_values[%d] = %s(addr);\n"
+					"    }\n",
+					tle->resno-1,
+					tle->resno-1,
+					tle->resno-1,
+					(!typebyval ? "PointerGetDatum" :
+					 typelen == 1 ? "READ_INT8_PTR"  :
+					 typelen == 2 ? "READ_INT16_PTR" :
+					 typelen == 4 ? "READ_INT32_PTR" :
+					 typelen == 8 ? "READ_INT64_PTR" : "__invalid_typlen__"));
 				/* NULL-initialization for LEFT OUTER JOIN */
 				appendStringInfo(
 					&outer,
@@ -4273,7 +4366,9 @@ gpujoin_codegen_projection(StringInfo source,
 				if (!dtype)
 					elog(ERROR, "cache lookup failed for device type: %s",
 						 format_type_be(type_oid));
+				type_oid_list = list_append_unique_oid(type_oid_list, type_oid);
 
+				/* row */
 				appendStringInfo(
 					&decl,
 					"  pg_%s_t KVAR_%u;\n",
@@ -4282,27 +4377,33 @@ gpujoin_codegen_projection(StringInfo source,
 				appendStringInfo(
 					&temp,
 					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
+				/* arrow */
 				if (!referenced)
-				{
 					appendStringInfo(
-						&column,
-						"    if (offset > 0)\n"
-						"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,offset-1);\n"
+						&arrow,
+						"    if (r_idx == 0)\n"
+						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n"
 						"    else\n"
-						"      pg_datum_ref(kcxt,temp.%s_v,NULL);\n",
-						dtype->type_name, kds_label, i-1,
-						dtype->type_name);
-					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-					type_oid_list = list_append_unique_oid(type_oid_list,
-														   dtype->type_oid);
-				}
-				else
-				{
+						"      pg_datum_ref_arrow(kcxt,temp.%s_v,%s,%d,r_idx-1);\n",
+						dtype->type_name,
+						dtype->type_name, kds_label, i-1);
+				appendStringInfo(
+					&arrow,
+					"    KVAR_%u = temp.%s_v;\n",
+					dst_num, dtype->type_name);
+				/* column */
+				if (!referenced)
 					appendStringInfo(
 						&column,
-						"    KVAR_%u = temp.%s_v;\n",
-						dst_num, dtype->type_name);
-				}
+						"    if (r_idx == 0)\n"
+						"      addr = NULL;\n"
+						"    else\n"
+						"      addr = kern_get_datum_column(%s,kds_extra,%d,r_idx-1);\n",
+						kds_label, i-1);
+				appendStringInfo(
+					&column,
+					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
+
 				referenced = true;
 			}
 
@@ -4342,13 +4443,19 @@ gpujoin_codegen_projection(StringInfo source,
 				"      htup = KDS_BLOCK_REF_HTUP(kds_src,offset,&t_self,NULL);\n"
 				"%s"
 				"  }\n"
-				"  else\n"
+				"  else if (kds_src->format == KDS_FORMAT_ARROW)\n\n"
 				"  {\n"
-				"    offset = r_buffer[0];\n"
+				"    cl_uint r_idx = r_buffer[0];\n"
+				"%s"
+				"  }\n"
+				"  else if (kds_src->format == KDS_FORMAT_COLUMN)\n"
+				"  {\n"
+				"    cl_uint r_idx = r_buffer[0];\n"
 				"%s"
 				"  }\n",
 				outer.data,
 				row.data,
+				arrow.data,
 				column.data);
 		}
 		else
@@ -4430,6 +4537,7 @@ gpujoin_codegen_projection(StringInfo source,
 		"DEVICE_FUNCTION(cl_uint)\n"
 		"gpujoin_projection(kern_context *kcxt,\n"
 		"                   kern_data_store *kds_src,\n"
+		"                   kern_data_extra *kds_extra,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_uint *r_buffer,\n"
 		"                   kern_data_store *kds_dst,\n"
@@ -4454,7 +4562,7 @@ gpujoin_codegen_projection(StringInfo source,
 	pfree(body.data);
 	pfree(temp.data);
 	pfree(row.data);
-	pfree(column.data);
+	pfree(arrow.data);
 }
 
 static char *
@@ -4497,6 +4605,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"DEVICE_FUNCTION(cl_bool)\n"
 		"gpujoin_join_quals(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
+		"                   kern_data_extra *extra,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
 		"                   cl_uint *o_buffer,\n"
@@ -4511,7 +4620,7 @@ gpujoin_codegen(PlannerInfo *root,
 		appendStringInfo(
 			&source,
 			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels,\n"
+			"    return gpujoin_join_quals_depth%d(kcxt, kds, extra, kmrels,\n"
 			"                                     o_buffer, i_htup,\n"
 			"                                     needs_outer_row);\n",
 			depth, depth);
@@ -4547,6 +4656,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"DEVICE_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value(kern_context *kcxt,\n"
 		"                   kern_data_store *kds,\n"
+		"                   kern_data_extra *extra,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_int depth,\n"
 		"                   cl_uint *o_buffer,\n"
@@ -4562,7 +4672,7 @@ gpujoin_codegen(PlannerInfo *root,
 			appendStringInfo(
 				&source,
 				"  case %u:\n"
-				"    return gpujoin_hash_value_depth%u(kcxt,kds,kmrels,\n"
+				"    return gpujoin_hash_value_depth%u(kcxt,kds,extra,kmrels,\n"
 				"                                      o_buffer,is_null_keys);\n",
 				depth, depth);
 		}
@@ -4770,6 +4880,8 @@ gpujoin_next_task(GpuTaskState *gts)
 
 	if (gjs->gts.af_state)
 		pds = ExecScanChunkArrowFdw(gts);
+	else if (gjs->gts.gs_state)
+		pds = ExecScanChunkGstoreFdw(gts);
 	else
 		pds = GpuJoinExecOuterScanChunk(gts);
 	if (pds)
@@ -5916,6 +6028,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	CUfunction			kern_gpujoin_main;
 	CUdeviceptr			m_kgjoin = (CUdeviceptr)&pgjoin->kern;
 	CUdeviceptr			m_kds_src = 0UL;
+	CUdeviceptr			m_kds_extra = 0UL;
 	CUdeviceptr			m_kds_dst;
 	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
@@ -5927,9 +6040,10 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	void			   *last_suspend = NULL;
 
 	/* sanity checks */
-	Assert(!pds_src || (pds_src->kds.format == KDS_FORMAT_ROW ||
-						pds_src->kds.format == KDS_FORMAT_BLOCK ||
-						pds_src->kds.format == KDS_FORMAT_ARROW));
+	Assert(pds_src->kds.format == KDS_FORMAT_ROW ||
+		   pds_src->kds.format == KDS_FORMAT_BLOCK ||
+		   pds_src->kds.format == KDS_FORMAT_ARROW ||
+		   pds_src->kds.format == KDS_FORMAT_COLUMN);
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW);
 
 	/* Lookup GPU kernel function */
@@ -5981,6 +6095,11 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+	{
+		m_kds_src = pds_src->m_kds_base;
+		m_kds_extra = pds_src->m_kds_extra;
+	}
 	else
 	{
 		m_kds_src = (CUdeviceptr)&pds_src->kds;
@@ -6003,7 +6122,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 
 	}
-	else
+	else if (pds_src->kds.format != KDS_FORMAT_COLUMN)
 	{
 		rc = cuMemPrefetchAsync(m_kds_src,
 								pds_src->kds.length,
@@ -6018,6 +6137,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 * gpujoin_main(kern_gpujoin *kgjoin,
 	 *              kern_multirels *kmrels,
 	 *              kern_data_store *kds_src,
+	 *              kern_data_extra *kds_extra,
 	 *              kern_data_store *kds_dst,
 	 *              kern_parambuf *kparams_gpreagg)
 	 */
@@ -6036,8 +6156,9 @@ resume_kernel:
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &m_kds_src;
-	kern_args[3] = &m_kds_dst;
-	kern_args[4] = &m_nullptr;
+	kern_args[3] = &m_kds_extra;
+	kern_args[4] = &m_kds_dst;
+	kern_args[5] = &m_nullptr;
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
@@ -6251,13 +6372,37 @@ int
 gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuJoinTask *pgjoin = (GpuJoinTask *) gtask;
-	int		retval;
+	pgstrom_data_store *pds_src = pgjoin->pds_src;
+	bool		gstore_locked = false;
+	int			retval;
+	CUresult	rc;
 
-	if (pgjoin->pds_src)
-		retval = gpujoin_process_inner_join(pgjoin, cuda_module);
-	else
-		retval = gpujoin_process_right_outer(pgjoin, cuda_module);
-
+	STROM_TRY();
+	{
+		if (pds_src)
+		{
+			if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+			{
+				rc = gstoreFdwMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
+			}
+			retval = gpujoin_process_inner_join(pgjoin, cuda_module);
+		}
+		else
+		{
+			retval = gpujoin_process_right_outer(pgjoin, cuda_module);
+		}
+	}
+	STROM_CATCH();
+	{
+		if (gstore_locked)
+			gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+		STROM_RE_THROW();
+	}
+	STROM_END_TRY();
+	if (gstore_locked)
+		gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 	return retval;
 }
 

@@ -81,6 +81,146 @@ struct GstoreFdwSysattr
 };
 typedef struct GstoreFdwSysattr	GstoreFdwSysattr;
 
+#ifdef __CUDACC_RTC__
+DEVICE_INLINE(cl_int)
+pg_sysattr_ctid_fetch_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowid,
+							 cl_char &dclass,
+							 Datum   &value)
+{
+	if (kds)
+	{
+		ItemPointerData *t_self = (ItemPointerData *)
+			kern_context_alloc(kcxt, sizeof(ItemPointerData));
+		if (t_self)
+		{
+			t_self->ip_blkid.bi_hi = (rowid >> 16);
+			t_self->ip_blkid.bi_lo = (rowid & 0xffffU);
+			t_self->ip_posid       = 0;
+			dclass = DATUM_CLASS__NORMAL;
+			value  = PointerGetDatum(t_self);
+			return sizeof(ItemPointerData);
+		}
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+	}
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_oid_fetch_column(kern_context *kcxt,
+							kern_data_store *kds,
+							cl_uint rowid,
+							cl_char &dclass,
+							Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = 0;
+	}
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_xmin_fetch_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowid,
+							 cl_char &dclass,
+							 Datum   &value)
+{
+	if (kds)
+	{
+		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
+			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
+		if (sysattr)
+		{
+			dclass = DATUM_CLASS__NORMAL;
+			value  = sysattr->xmin;
+			return 0;
+		}
+	}
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_xmax_fetch_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowid,
+							 cl_char &dclass,
+							 Datum   &value)
+{
+	if (kds)
+	{
+		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
+			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
+		if (sysattr)
+		{
+			dclass = DATUM_CLASS__NORMAL;
+			value  = sysattr->xmax;
+			return 0;
+		}
+	}
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_cmin_fetch_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowid,
+							 cl_char &dclass,
+							 Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = (Datum)InvalidCommandId;
+	}
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_cmax_fetch_column(kern_context *kcxt,
+							 kern_data_store *kds,
+							 cl_uint rowid,
+							 cl_char &dclass,
+							 Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = (Datum)InvalidCommandId;
+	}
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
+								 kern_data_store *kds,
+								 cl_uint rowid,
+								 cl_char &dclass,
+								 Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = kds->table_oid;
+	}
+	return 0;
+}
+#endif
+
 /*
  * kern_gpustore_redolog
  */

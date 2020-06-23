@@ -322,7 +322,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 		if (RelationIsArrowFdw(relation))
 			gts->af_state = ExecInitArrowFdw(relation, outer_refs);
 		if (RelationIsGstoreFdw(relation))
-			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, outer_refs, NULL);
+			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, outer_refs);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;

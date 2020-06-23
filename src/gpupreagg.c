@@ -2947,6 +2947,14 @@ make_tlist_device_projection(List *tlist_dev,
  *                            cl_uint src_index,
  *                            Datum *dst_values,
  *                            cl_char *dst_isnull);
+ * and
+ * DEVICE_FUNCTION(void)
+ * gpupreagg_projection_column(kern_context *kcxt,
+ *                             kern_data_store *kds,
+ *                             kern_data_extra *extra,
+ *                             cl_uint rowid,
+ *                             cl_char *dst_dclass,
+ *                             Datum   *dst_values);
  */
 static Expr *
 codegen_projection_partial_funcion(FuncExpr *f,
@@ -3099,9 +3107,10 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 {
 	PlannerInfo	   *root = context->root;
 	StringInfoData	decl;
-	StringInfoData	tbody;
-	StringInfoData	sbody;
-	StringInfoData	cbody;
+	StringInfoData	tbody;		/* Row/Block */
+	StringInfoData	sbody;		/* Slot */
+	StringInfoData	abody;		/* Arrow */
+	StringInfoData	cbody;		/* Column */
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
 	TupleDesc		outer_desc = NULL;
@@ -3112,6 +3121,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	initStringInfo(&decl);
 	initStringInfo(&tbody);
 	initStringInfo(&sbody);
+	initStringInfo(&abody);
 	initStringInfo(&cbody);
 	initStringInfo(&temp);
 	context->param_refs = NULL;
@@ -3225,7 +3235,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 
 					/* arrow */
 					appendStringInfo(
-						&cbody,
+						&abody,
 						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
 						"  pg_datum_store(kcxt, temp.%s_v,\n"
 						"                 dst_dclass[%d],\n"
@@ -3234,6 +3244,24 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						dtype->type_name,
 						tle->resno-1,
 						tle->resno-1);
+					/* column */
+					appendStringInfo(
+						&cbody,
+						"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n"
+						"  if (!addr)\n"
+						"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
+						"  else\n"
+						"  {\n"
+						"    dst_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+						"    dst_values[%d] = %s(addr);\n"
+						"  }\n",
+						i-1, tle->resno-1, tle->resno-1, tle->resno-1,
+						dtype->type_byval
+						? (dtype->type_length == 1 ? "READ_INT8_PTR"  :
+						   dtype->type_length == 2 ? "READ_INT16_PTR" :
+						   dtype->type_length == 4 ? "READ_INT32_PTR" :
+						   dtype->type_length == 8 ? "READ_INT64_PTR" : "NO_SUCH_TYPLEN")
+						: "PointerGetDatum");
 					referenced = true;
 				}
 
@@ -3262,17 +3290,26 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					if (referenced)
 					{
 						appendStringInfo(
-							&cbody,
+							&abody,
 							"  KVAR_%u = temp.%s_v;\n",
 							i, dtype->type_name);
 					}
 					else
 					{
 						appendStringInfo(
-							&cbody,
+							&abody,
 							"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
 							i, i-1);
 					}
+					/* column */
+					if (!referenced)
+						appendStringInfo(
+							&cbody,
+							"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n",
+							i-1);
+					appendStringInfo(
+						&cbody,
+						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
 				}
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				type_oid_list = list_append_unique_oid(type_oid_list,
@@ -3360,6 +3397,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);
+	appendStringInfoString(&abody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
 
 	/* const/params and temporary variable */
@@ -3397,11 +3435,23 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                           Datum   *dst_values)\n"
 		"{\n"
 		"%s%s\n%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_projection_column(kern_context *kcxt,\n"
+		"                            kern_data_store *kds,\n"
+		"                            kern_data_extra *extra,\n"
+		"                            cl_uint rowid,\n"
+		"                            cl_char *dst_dclass,\n"
+		"                            Datum   *dst_values)\n"
+		"{\n"
+		"%s%s\n%s"
 		"}\n\n",
 		decl.data, context->decl_temp.data,
 		tbody.data,
 		decl.data, context->decl_temp.data,
 		sbody.data,
+		decl.data, context->decl_temp.data,
+		abody.data,
 		decl.data, context->decl_temp.data,
 		cbody.data);
 
@@ -3411,7 +3461,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	pfree(decl.data);
 	pfree(tbody.data);
 	pfree(sbody.data);
-	pfree(cbody.data);
+	pfree(abody.data);
 	pfree(temp.data);
 }
 
@@ -4749,6 +4799,8 @@ gpupreagg_next_task(GpuTaskState *gts)
 	{
 		if (gpas->gts.af_state)
 			pds = ExecScanChunkArrowFdw(&gpas->gts);
+		else if (gpas->gts.gs_state)
+			pds = ExecScanChunkGstoreFdw(&gpas->gts);
 		else
 			pds = pgstromExecScanChunk(&gpas->gts);
 	}
@@ -5110,6 +5162,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
 	CUdeviceptr		m_nullptr = 0UL;
 	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
@@ -5140,6 +5193,9 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 			break;
 		case KDS_FORMAT_ARROW:
 			kfunc_setup = "kern_gpupreagg_setup_arrow";
+			break;
+		case KDS_FORMAT_COLUMN:
+			kfunc_setup = "kern_gpupreagg_setup_column";
 			break;
 		default:
 			werror("GpuPreAgg: unknown PDS format: %d", pds_src->kds.format);
@@ -5202,6 +5258,11 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+	{
+		m_kds_src = pds_src->m_kds_base;
+		m_kds_extra = pds_src->m_kds_extra;
+	}
 	else
 	{
 		m_kds_src = (CUdeviceptr)&pds_src->kds;
@@ -5240,7 +5301,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 	}
-	else
+	else if (pds_src->kds.format != KDS_FORMAT_COLUMN)
 	{
 		rc = cuMemPrefetchAsync(m_kds_src,
 								pds_src->kds.length,
@@ -5272,7 +5333,8 @@ resume_kernel:
 
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_src;
-	kern_args[2] = &m_kds_slot;
+	kern_args[2] = &m_kds_extra;
+	kern_args[3] = &m_kds_slot;
 	rc = cuLaunchKernel(kern_setup,
 						gpreagg->kern.grid_sz, 1, 1,
 						gpreagg->kern.block_sz, 1, 1,
@@ -5468,6 +5530,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUdeviceptr		m_kgjoin = (CUdeviceptr)kgjoin;
 	CUdeviceptr		m_kmrels = gpreagg->m_kmrels;
 	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
@@ -5611,6 +5674,7 @@ resume_kernel:
 	 * gpujoin_main(kern_gpujoin *kgjoin,
 	 *              kern_multirels *kmrels,
 	 *              kern_data_store *kds_src,
+	 *              kern_data_extra *kds_extra,
 	 *              kern_data_store *kds_slot,
 	 *              kern_parambuf *kparams_gpreagg)
 	 * OR
@@ -5635,12 +5699,18 @@ resume_kernel:
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &m_kmrels;
 	if (pds_src != NULL)
+	{
 		kern_args[2] = &m_kds_src;
+		kern_args[3] = &m_kds_extra;
+		kern_args[4] = &m_kds_slot;
+		kern_args[5] = &m_kparams;
+	}
 	else
+	{
 		kern_args[2] = &gpreagg->outer_depth;
-	kern_args[3] = &m_kds_slot;
-	kern_args[4] = &m_kparams;
-
+		kern_args[3] = &m_kds_slot;
+		kern_args[4] = &m_kparams;
+	}
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
@@ -5830,13 +5900,34 @@ static int
 gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
-	int		retval;
+	pgstrom_data_store *pds_src = gpreagg->pds_src;
+	bool		gstore_locked = false;
+	int			retval;
+	CUresult	rc;
 
-	if (!gpreagg->kgjoin)
-		retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
-	else
-		retval = gpupreagg_process_combined_task(gpreagg, cuda_module);
-
+	STROM_TRY();
+	{
+		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+		{
+			rc = gstoreFdwMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
+			gstore_locked = true;
+		}
+		if (!gpreagg->kgjoin)
+			retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
+		else
+			retval = gpupreagg_process_combined_task(gpreagg, cuda_module);
+	}
+	STROM_CATCH();
+	{
+		if (gstore_locked)
+			gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+		STROM_RE_THROW();
+	}
+	STROM_END_TRY();
+	if (gstore_locked)
+		gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 	return retval;
 }
 

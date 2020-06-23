@@ -164,6 +164,7 @@ STATIC_FUNCTION(cl_int)
 gpujoin_load_source(kern_context *kcxt,
 					kern_gpujoin *kgjoin,
 					kern_data_store *kds_src,
+					kern_data_extra *kds_extra,
 					cl_uint *wr_stack,
 					cl_uint *l_state)
 {
@@ -173,7 +174,7 @@ gpujoin_load_source(kern_context *kcxt,
 	cl_uint		wr_index;
 
 	/* extract a HeapTupleHeader */
-	if (__ldg(&kds_src->format) == KDS_FORMAT_ROW)
+	if (kds_src->format == KDS_FORMAT_ROW)
 	{
 		kern_tupitem   *tupitem;
 		cl_uint			row_index;
@@ -197,7 +198,7 @@ gpujoin_load_source(kern_context *kcxt,
 		}
 		assert(wip_count[0] == 0);
 	}
-	else if (__ldg(&kds_src->format) == KDS_FORMAT_BLOCK)
+	else if (kds_src->format == KDS_FORMAT_BLOCK)
 	{
 		cl_uint		part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 		cl_uint		n_parts = get_local_size() / part_sz;
@@ -245,9 +246,8 @@ gpujoin_load_source(kern_context *kcxt,
 			}
 		}
 	}
-	else
+	else if (kds_src->format == KDS_FORMAT_ARROW)
 	{
-		assert(__ldg(&kds_src->format) == KDS_FORMAT_ARROW);
 		cl_uint			row_index;
 
 		/* fetch next window */
@@ -266,6 +266,32 @@ gpujoin_load_source(kern_context *kcxt,
 		}
 		assert(wip_count[0] == 0);
 	}
+	else if (kds_src->format == KDS_FORMAT_COLUMN)
+	{
+		cl_uint			row_index;
+
+		/* fetch next window */
+		if (get_local_id() == 0)
+			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
+									 get_local_size());
+		__syncthreads();
+
+		row_index = src_read_pos + get_local_id();
+		if (row_index < kds_src->nitems &&
+			kern_check_visibility_column(kcxt, kds_src, row_index, NULL))
+		{
+			t_offset = row_index + 1;
+			visible = gpujoin_quals_eval_column(kcxt,
+												kds_src,
+												kds_extra,
+												row_index);
+		}
+		assert(wip_count[0] == 0);
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "unsupported KDS format");
+	}	
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;
@@ -429,6 +455,7 @@ gpujoin_projection_row(kern_context *kcxt,
 					   kern_gpujoin *kgjoin,
 					   kern_multirels *kmrels,
 					   kern_data_store *kds_src,
+					   kern_data_extra *kds_extra,
 					   kern_data_store *kds_dst,
 					   cl_uint *rd_stack,
 					   cl_uint *l_state,
@@ -475,6 +502,7 @@ gpujoin_projection_row(kern_context *kcxt,
 
 		gpujoin_projection(kcxt,
 						   kds_src,
+						   kds_extra,
 						   kmrels,
 						   rd_stack,
 						   kds_dst,
@@ -578,6 +606,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 						kern_gpujoin *kgjoin,
 						kern_multirels *kmrels,
 						kern_data_store *kds_src,
+						kern_data_extra *kds_extra,
 						kern_data_store *kds_dst,
 						cl_uint *rd_stack,
 						cl_uint *l_state,
@@ -629,6 +658,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 
 		extra_sz = gpujoin_projection(kcxt,
 									  kds_src,
+									  kds_extra,
 									  kmrels,
 									  rd_stack,
 									  kds_dst,
@@ -741,6 +771,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 					  kern_gpujoin *kgjoin,
 					  kern_multirels *kmrels,
 					  kern_data_store *kds_src,
+					  kern_data_extra *kds_extra,
 					  cl_int depth,
 					  cl_uint *rd_stack,
 					  cl_uint *wr_stack,
@@ -837,6 +868,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 
 			result = gpujoin_join_quals(kcxt,
 										kds_src,
+										kds_extra,
 										kmrels,
 										depth,
 										rd_stack,
@@ -886,6 +918,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 					  kern_gpujoin *kgjoin,
 					  kern_multirels *kmrels,
 					  kern_data_store *kds_src,
+					  kern_data_extra *kds_extra,
 					  cl_int depth,
 					  cl_uint *rd_stack,
 					  cl_uint *wr_stack,
@@ -950,6 +983,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 
 			hash_value = gpujoin_hash_value(kcxt,
 											kds_src,
+											kds_extra,
 											kmrels,
 											depth,
 											rd_stack,
@@ -992,6 +1026,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 
 		result = gpujoin_join_quals(kcxt,
 									kds_src,
+									kds_extra,
 									kmrels,
 									depth,
 									rd_stack,
@@ -1071,6 +1106,7 @@ gpujoin_main(kern_context *kcxt,
 			 kern_gpujoin *kgjoin,
 			 kern_multirels *kmrels,
 			 kern_data_store *kds_src,
+			 kern_data_extra *kds_extra,
 			 kern_data_store *kds_dst,
 			 kern_parambuf *kparams_gpreagg, /* only if combined GpuJoin */
 			 cl_uint *l_state,
@@ -1083,9 +1119,10 @@ gpujoin_main(kern_context *kcxt,
 	cl_uint		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
-	assert(__ldg(&kds_src->format) == KDS_FORMAT_ROW ||
-		   __ldg(&kds_src->format) == KDS_FORMAT_BLOCK ||
-		   __ldg(&kds_src->format) == KDS_FORMAT_ARROW);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK ||
+		   kds_src->format == KDS_FORMAT_ARROW ||
+		   kds_src->format == KDS_FORMAT_COLUMN);
 	assert((kds_dst->format == KDS_FORMAT_ROW  && kparams_gpreagg == NULL) ||
 		   (kds_dst->format == KDS_FORMAT_SLOT && kparams_gpreagg != NULL));
 
@@ -1124,6 +1161,7 @@ gpujoin_main(kern_context *kcxt,
 			depth = gpujoin_load_source(kcxt,
 										kgjoin,
 										kds_src,
+										kds_extra,
 										PSTACK_DEPTH(depth),
 										l_state);
 		}
@@ -1137,6 +1175,7 @@ gpujoin_main(kern_context *kcxt,
 											   kgjoin,
 											   kmrels,
 											   kds_src,
+											   kds_extra,
 											   kds_dst,
 											   PSTACK_DEPTH(kgjoin->num_rels),
 											   l_state,
@@ -1150,6 +1189,7 @@ gpujoin_main(kern_context *kcxt,
 												kgjoin,
 												kmrels,
 												kds_src,
+												kds_extra,
 												kds_dst,
 												PSTACK_DEPTH(kgjoin->num_rels),
 												l_state,
@@ -1163,6 +1203,7 @@ gpujoin_main(kern_context *kcxt,
 										  kgjoin,
 										  kmrels,
 										  kds_src,
+										  kds_extra,
 										  depth,
 										  PSTACK_DEPTH(depth-1),
 										  PSTACK_DEPTH(depth),
@@ -1176,6 +1217,7 @@ gpujoin_main(kern_context *kcxt,
 										  kgjoin,
 										  kmrels,
 										  kds_src,
+										  kds_extra,
 										  depth,
 										  PSTACK_DEPTH(depth-1),
 										  PSTACK_DEPTH(depth),
@@ -1307,6 +1349,7 @@ gpujoin_right_outer(kern_context *kcxt,
 											   kgjoin,
 											   kmrels,
 											   NULL,
+											   NULL,
 											   kds_dst,
 											   PSTACK_DEPTH(kgjoin->num_rels),
 											   l_state,
@@ -1319,6 +1362,7 @@ gpujoin_right_outer(kern_context *kcxt,
 												kparams_gpreagg,
 												kgjoin,
 												kmrels,
+												NULL,
 												NULL,
 												kds_dst,
 												PSTACK_DEPTH(kgjoin->num_rels),
@@ -1333,6 +1377,7 @@ gpujoin_right_outer(kern_context *kcxt,
 										  kgjoin,
 										  kmrels,
 										  NULL,
+										  NULL,
 										  depth,
 										  PSTACK_DEPTH(depth-1),
 										  PSTACK_DEPTH(depth),
@@ -1345,6 +1390,7 @@ gpujoin_right_outer(kern_context *kcxt,
 			depth = gpujoin_exec_hashjoin(kcxt,
 										  kgjoin,
 										  kmrels,
+										  NULL,
 										  NULL,
 										  depth,
 										  PSTACK_DEPTH(depth-1),
