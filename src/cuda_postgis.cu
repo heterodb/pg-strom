@@ -3426,7 +3426,7 @@ __geom_relate_seg_line(kern_context *kcxt,
 	cl_bool		p1_contained = false;
 	cl_bool		p2_contained = false;
 	cl_uint		nloops;
-	cl_uint		index;
+	cl_uint		index = start;
 
 	if (CHECK_KERNEL_STACK_DEPTH(kcxt))
 	{
@@ -3468,6 +3468,7 @@ __geom_relate_seg_line(kern_context *kcxt,
 		}
 		else
 		{
+			assert(index - start < line->nitems);
 			ppos = __loadPoint2dIndex(&Q1, line->rawdata, unitsz,
 									  index - start);
 			index++;
@@ -3543,50 +3544,47 @@ __geom_relate_seg_line(kern_context *kcxt,
 				{
 					/* P1 is in Q1-Q2, but P2 is not, so Qx-P2 shall remain */
 					p1_contained = true;
-					if (PT_EQ(P1, Q2) ||
-						__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
+					if (__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
 					{
 						P1 = Q1;
 						p1_is_head = false;
 						retval |= IM__INTER_INTER_1D;
 					}
-					else if (PT_EQ(P1,Q1) ||
-							 __geom_pt_within_seg(&Q2,&P1,&P2) == PT_INSIDE)
+					else if (__geom_pt_within_seg(&Q2,&P1,&P2) == PT_INSIDE)
 					{
 						P1 = Q2;
 						p1_is_head = false;
 						retval |= IM__INTER_INTER_1D;
 					}
-					else
-						return -1;	/* should not happen */
-					if (PT_EQ(P1,P2))
-						goto out;
 				}
 				else if (p1_in_qq == PT_OUTSIDE &&
 						 p2_in_qq != PT_OUTSIDE)
 				{
 					/* P2 is in Q1-Q2, but P1 is not, so Qx-P1 shall remain */
 					p2_contained = true;
-					if (PT_EQ(P2, Q2) ||
-						__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
+					if (__geom_pt_within_seg(&Q1,&P1,&P2) == PT_INSIDE)
 					{
 						P2 = Q1;
 						p2_is_tail = false;
+						retval |= IM__INTER_INTER_1D;
 					}
-					else if (PT_EQ(P2, Q1) ||
-							 __geom_pt_within_seg(&Q2,&P1,&P2) == PT_INSIDE)
+					else if (__geom_pt_within_seg(&Q2,&P1,&P2) == PT_INSIDE)
 					{
 						P2 = Q2;
 						p2_is_tail = false;
+						retval |= IM__INTER_INTER_1D;
 					}
-					else
-						return -1;	/* should not happen */
-					if (PT_EQ(P1,P2))
-						goto out;
 				}
 				else if (__geom_pt_within_seg(&Q1,&P1,&Q2) != PT_OUTSIDE &&
 						 __geom_pt_within_seg(&Q2,&Q1,&P2) != PT_OUTSIDE)
 				{
+#if 0
+					printf("P1-Q1-Q2-P2 P(%u,%u)-(%u,%u) Q(%u,%u)-(%u,%u)\n",
+						   (int)P1.x, (int)P1.y,
+						   (int)P2.x, (int)P2.y,
+						   (int)Q1.x, (int)Q1.y,
+						   (int)Q2.x, (int)Q2.y);
+#endif
 					/* P1-Q1-Q2-P2 */
 					if (PT_NE(P1,Q1))
 					{
@@ -3608,11 +3606,19 @@ __geom_relate_seg_line(kern_context *kcxt,
 							return -1;
 						retval |= status;
 					}
+					goto out;
 				}
 				else if (__geom_pt_within_seg(&Q2,&P1,&Q1) != PT_OUTSIDE &&
 						 __geom_pt_within_seg(&Q1,&Q2,&P2) != PT_OUTSIDE)
 				{
 					/* P1-Q2-Q1-P2 */
+#if 0
+					printf("P1-Q2-Q1-P2 P(%u,%u)-(%u,%u) Q(%u,%u)-(%u,%u)\n",
+						   (int)P1.x, (int)P1.y,
+						   (int)P2.x, (int)P2.y,
+						   (int)Q1.x, (int)Q1.y,
+						   (int)Q2.x, (int)Q2.y);
+#endif
 					if (PT_NE(P1,Q2))
 					{
 						status = __geom_relate_seg_line(kcxt,
@@ -3633,6 +3639,7 @@ __geom_relate_seg_line(kern_context *kcxt,
 							return -1;
 						retval |= status;
 					}
+					goto out;
 				}
 				else
 				{
