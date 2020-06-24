@@ -272,10 +272,9 @@ typedef struct GpuContext
 	char			error_message[200];
 	/* management of the work-queue */
 	bool			worker_is_running;
-	pg_atomic_uint32 *global_num_running_tasks;
-	pthread_mutex_t	*mutex;				/* IPC stuff */
-	pthread_cond_t	*cond;				/* IPC stuff */
-	pg_atomic_uint32 *command;			/* IPC stuff */
+	pg_atomic_uint32 *global_num_running_tasks;		/* shared statistics */
+	pthread_mutex_t	worker_mutex;
+	pthread_cond_t	worker_cond;
 	pg_atomic_uint32 terminate_workers;
 	dlist_head		pending_tasks;		/* list of GpuTask */
 	cl_int			num_workers;

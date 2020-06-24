@@ -362,7 +362,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	Assert(gcontext->worker_is_running);
 	CHECK_FOR_GPUCONTEXT(gcontext);
 
-	pthreadMutexLock(gcontext->mutex);
+	pthreadMutexLock(&gcontext->worker_mutex);
 	while (!gts->scan_done)
 	{
 		ResetLatch(MyLatch);
@@ -375,9 +375,9 @@ fetch_next_gputask(GpuTaskState *gts)
 			(dlist_is_empty(&gts->ready_tasks) &&
 			 gts->num_running_tasks == 0))
 		{
-			pthreadMutexUnlock(gcontext->mutex);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
 			gtask = gts->cb_next_task(gts);
-			pthreadMutexLock(gcontext->mutex);
+			pthreadMutexLock(&gcontext->worker_mutex);
 			if (!gtask)
 			{
 				gts->scan_done = true;
@@ -386,7 +386,7 @@ fetch_next_gputask(GpuTaskState *gts)
 			dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
 			gts->num_running_tasks++;
 			pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-			pthreadCondSignal(gcontext->cond);
+			pthreadCondSignal(&gcontext->worker_cond);
 		}
 		else if (!dlist_is_empty(&gts->ready_tasks))
 		{
@@ -395,7 +395,7 @@ fetch_next_gputask(GpuTaskState *gts)
 			 * the number of concurrent tasks, GTS already has ready tasks,
 			 * so pick them up instead of wait.
 			 */
-			pthreadMutexUnlock(gcontext->mutex);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
 			goto pickup_gputask;
 		}
 		else if (gts->num_running_tasks > 0)
@@ -404,7 +404,7 @@ fetch_next_gputask(GpuTaskState *gts)
 			 * Even though a few GpuTasks are running, but nobody gets
 			 * completed yet. Try to wait for completion to 
 			 */
-			pthreadMutexUnlock(gcontext->mutex);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
 
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
@@ -418,28 +418,28 @@ fetch_next_gputask(GpuTaskState *gts)
 						 errmsg("Unexpected Postmaster dead")));
 			CHECK_FOR_GPUCONTEXT(gcontext);
 
-			pthreadMutexLock(gcontext->mutex);
+			pthreadMutexLock(&gcontext->worker_mutex);
 		}
 		else
 		{
-			pthreadMutexUnlock(gcontext->mutex);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
 			/*
 			 * Sadly, we touched a threshold. Taks a short break.
 			 */
 			pg_usleep(20000L);	/* wait for 20msec */
 
 			CHECK_FOR_GPUCONTEXT(gcontext);
-			pthreadMutexLock(gcontext->mutex);
+			pthreadMutexLock(&gcontext->worker_mutex);
 		}
 	}
-	pthreadMutexUnlock(gcontext->mutex);
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 
 	/*
 	 * Once we exit the above loop, either a completed task was returned,
 	 * or relation scan has already done thus wait for synchronously.
 	 */
 	Assert(gts->scan_done);
-	pthreadMutexLock(gcontext->mutex);
+	pthreadMutexLock(&gcontext->worker_mutex);
 retry:
 	ResetLatch(MyLatch);
 	while (dlist_is_empty(&gts->ready_tasks))
@@ -447,7 +447,7 @@ retry:
 		Assert(gts->num_running_tasks >= 0);
 		if (gts->num_running_tasks == 0)
 		{
-			pthreadMutexUnlock(gcontext->mutex);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
 
 			CHECK_FOR_GPUCONTEXT(gcontext);
 
@@ -456,7 +456,7 @@ retry:
 				cl_bool		is_ready = false;
 
 				gtask = gts->cb_terminator_task(gts, &is_ready);
-				pthreadMutexLock(gcontext->mutex);
+				pthreadMutexLock(&gcontext->worker_mutex);
 				if (gtask)
 				{
 					if (is_ready)
@@ -471,15 +471,15 @@ retry:
 										&gtask->chain);
 						gts->num_running_tasks++;
 						pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-						pthreadCondSignal(gcontext->cond);
+						pthreadCondSignal(&gcontext->worker_cond);
 					}
 					goto retry;
 				}
-				pthreadMutexUnlock(gcontext->mutex);
+				pthreadMutexUnlock(&gcontext->worker_mutex);
 			}
 			return NULL;
 		}
-		pthreadMutexUnlock(gcontext->mutex);
+		pthreadMutexUnlock(&gcontext->worker_mutex);
 
 		CHECK_FOR_GPUCONTEXT(gcontext);
 
@@ -494,10 +494,10 @@ retry:
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Unexpected Postmaster dead")));
 
-		pthreadMutexLock(gcontext->mutex);
+		pthreadMutexLock(&gcontext->worker_mutex);
 		ResetLatch(MyLatch);
 	}
-	pthreadMutexUnlock(gcontext->mutex);
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 pickup_gputask:
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);

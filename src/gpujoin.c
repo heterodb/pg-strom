@@ -5981,11 +5981,11 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 	pgjoin->pds_dst			= pds_new;
 
 	/* Back GpuTask to GTS */
-	pthreadMutexLock(gcontext->mutex);
+	pthreadMutexLock(&gcontext->worker_mutex);
 	dlist_push_tail(&gts->ready_tasks,
 					&gresp->task.chain);
 	gts->num_ready_tasks++;
-	pthreadMutexUnlock(gcontext->mutex);
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 
 	SetLatch(MyLatch);
 }

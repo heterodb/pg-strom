@@ -2616,11 +2616,11 @@ gpuscan_throw_partial_result(GpuScanTask *gscan, pgstrom_data_store *pds_dst)
 	gresp->kern.extra_size	= gscan->kern.extra_size;
 
 	/* Back GpuTask to GTS */
-	pthreadMutexLock(gcontext->mutex);
+	pthreadMutexLock(&gcontext->worker_mutex);
 	dlist_push_tail(&gts->ready_tasks,
 					&gresp->task.chain);
 	gts->num_ready_tasks++;
-	pthreadMutexUnlock(gcontext->mutex);
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 
 	SetLatch(MyLatch);
 }
