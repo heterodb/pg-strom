@@ -109,7 +109,6 @@ typedef struct {
 	GpuTaskState	gts;
 	GpuScanSharedState *gs_sstate;
 	GpuScanRuntimeStat *gs_rtstat;
-	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 	ExprState	   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_tuple_sz;
@@ -1811,11 +1810,12 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		TupleDesc		scan_tupdesc
 			= ExecCleanTypeFromTL(cscan->custom_scan_tlist);
 		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
-							  &TTSOpsHeapTuple);
+							  &TTSOpsVirtual);
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 		/* valid @custom_scan_tlist means device projection is required */
 		gss->dev_projection = true;
 	}
+#if 0
 	else
 	{
 		TupleDesc		scan_tupdesc = RelationGetDescr(scan_rel);
@@ -1825,6 +1825,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss,
 											  cscan->scan.scanrelid);
 	}
+#endif
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
@@ -1864,8 +1865,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* device projection related resource consumption */
 	gss->proj_tuple_sz = gs_info->proj_tuple_sz;
 	gss->proj_extra_sz = gs_info->proj_extra_sz;
-	/* 'tableoid' should not change during relation scan */
-	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* initialize resource for CPU fallback */
 	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel),
 											  &TTSOpsHeapTuple);
@@ -1929,7 +1928,7 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *epq_slot)
 	 * because it may not be compatible with relations's definition
 	 * if device projection is valid.
 	 */
-	ExecStoreHeapTuple(tuple, gss->base_slot, false);
+	ExecForceStoreHeapTuple(tuple, gss->base_slot, false);
 	econtext->ecxt_scantuple = gss->base_slot;
 	ResetExprContext(econtext);
 
@@ -2455,7 +2454,7 @@ gpuscan_next_tuple_suspended_block(GpuScanState *gss, GpuScanTask *gscan)
 				tuple->t_tableOid = pds_src->kds.table_oid;
 				tuple->t_data = (HeapTupleHeader)((char *)hpage +
 												  ItemIdGetOffset(lpp));
-				ExecStoreHeapTuple(tuple, gss->base_slot, false);
+				ExecForceStoreHeapTuple(tuple, gss->base_slot, false);
 
 				return true;
 			}
@@ -2565,7 +2564,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 		Assert(pds_src->kds.format == KDS_FORMAT_ROW);
 		if (gss->gts.curr_index < gs_results->nitems)
 		{
-			HeapTuple	tuple = &gss->scan_tuple;
+			HeapTuple	tuple = &gss->gts.curr_tuple;
 			cl_uint		kds_offset;
 
 			kds_offset = gs_results->results[gss->gts.curr_index++];
@@ -2574,7 +2573,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 											 &tuple->t_self,
 											 &tuple->t_len);
 			slot = gss->gts.css.ss.ss_ScanTupleSlot;
-			ExecStoreHeapTuple(tuple, slot, false);
+			ExecForceStoreHeapTuple(tuple, slot, false);
 		}
 	}
 	return slot;

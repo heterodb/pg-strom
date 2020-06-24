@@ -5189,7 +5189,7 @@ gstoreFdwBgWorkerEnd(void)
 void
 GstoreFdwStartupKicker(Datum arg)
 {
-	const char *database_name;
+	char	   *database_name;
 	bool		first_launch = false;
 	Relation	srel;
 	SysScanDesc	sscan;

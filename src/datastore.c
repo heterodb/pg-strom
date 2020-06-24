@@ -65,15 +65,16 @@ KDS_fetch_tuple_row(TupleTableSlot *slot,
 {
 	if (row_index < kds->nitems)
 	{
+		HeapTupleData	tupleData;
 		kern_tupitem   *tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
 
 		ExecClearTuple(slot);
-		tuple_buf->t_len  = tup_item->t_len;
-		tuple_buf->t_self = tup_item->t_self;
-		tuple_buf->t_tableOid = kds->table_oid;
-		tuple_buf->t_data = &tup_item->htup;
+		tupleData.t_len  = tup_item->t_len;
+		tupleData.t_self = tup_item->t_self;
+		tupleData.t_tableOid = kds->table_oid;
+		tupleData.t_data = &tup_item->htup;
 
-		ExecStoreHeapTuple(tuple_buf, slot, false);
+		ExecForceStoreHeapTuple(&tupleData, slot, false);
 
 		return true;
 	}
@@ -339,7 +340,7 @@ KDS_fetch_tuple_block(TupleTableSlot *slot,
 			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
 			tuple->t_data = (HeapTupleHeader)((char *)hpage +
 											  ItemIdGetOffset(lpp));
-			ExecStoreHeapTuple(tuple, slot, false);
+			ExecForceStoreHeapTuple(tuple, slot, false);
 			return true;
 		}
 		/* move to the next block */

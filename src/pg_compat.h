@@ -240,8 +240,8 @@ typedef ParallelHeapScanDescData		ParallelTableScanDescData;
 
 #define MakeSingleTupleTableSlot(tdesc,tts_ops)			\
 	MakeSingleTupleTableSlot((tdesc))
-#define ExecStoreHeapTuple(tup,slot,shouldFree)			\
-	ExecStoreTuple((tup),(slot),InvalidBuffer,(shouldFree))
+#define ExecForceStoreHeapTuple(tuple,slot,shouldFree)	\
+	ExecStoreTuple((tuple),(slot),InvalidBuffer,(shouldFree))
 static inline HeapTuple
 ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 					   bool materialize, bool *shouldFree)
@@ -273,6 +273,14 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #if PG_VERSION_NUM < 120000
 #define create_append_path(a,b,c,d,e,f,g,h,i,j)	\
 	create_append_path((a),(b),(c),(d),(f),(g),(h),(i),(j))
+#endif
+
+/*
+ * PG11 added 'flags' argument for BackgroundWorkerInitializeConnection
+ */
+#if PG_VERSION_NUM < 110000
+#define BackgroundWorkerInitializeConnection(dbname,username,flags)	\
+	BackgroundWorkerInitializeConnection((dbname),(username))
 #endif
 
 #endif	/* PG_COMPAT_H */

@@ -25,7 +25,7 @@
  */
 typedef struct SerializedTransactionState
 {
-#if PG_VERSION_NUM >= 12000
+#if PG_VERSION_NUM >= 120000
 	int				xactIsoLevel;
 	bool			xactDeferrable;
 	FullTransactionId topFullTransactionId;
