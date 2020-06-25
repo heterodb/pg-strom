@@ -3578,13 +3578,6 @@ __geom_relate_seg_line(kern_context *kcxt,
 				else if (__geom_pt_within_seg(&Q1,&P1,&Q2) != PT_OUTSIDE &&
 						 __geom_pt_within_seg(&Q2,&Q1,&P2) != PT_OUTSIDE)
 				{
-#if 0
-					printf("P1-Q1-Q2-P2 P(%u,%u)-(%u,%u) Q(%u,%u)-(%u,%u)\n",
-						   (int)P1.x, (int)P1.y,
-						   (int)P2.x, (int)P2.y,
-						   (int)Q1.x, (int)Q1.y,
-						   (int)Q2.x, (int)Q2.y);
-#endif
 					/* P1-Q1-Q2-P2 */
 					if (PT_NE(P1,Q1))
 					{
@@ -3612,13 +3605,6 @@ __geom_relate_seg_line(kern_context *kcxt,
 						 __geom_pt_within_seg(&Q1,&Q2,&P2) != PT_OUTSIDE)
 				{
 					/* P1-Q2-Q1-P2 */
-#if 0
-					printf("P1-Q2-Q1-P2 P(%u,%u)-(%u,%u) Q(%u,%u)-(%u,%u)\n",
-						   (int)P1.x, (int)P1.y,
-						   (int)P2.x, (int)P2.y,
-						   (int)Q1.x, (int)Q1.y,
-						   (int)Q2.x, (int)Q2.y);
-#endif
 					if (PT_NE(P1,Q2))
 					{
 						status = __geom_relate_seg_line(kcxt,
@@ -4387,8 +4373,6 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						}
 						return (retval | IM__INTER_BOUND_1D);
 					}
-					else
-						return -1;	/* should not happen */
 				}
 				else if (qp1 == 0 && ((pq1 >= 0 && pq2 <= 0) ||
 									  (pq1 <= 0 && pq2 >= 0)))
@@ -4412,15 +4396,8 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						retval |= IM__INTER_BOUND_0D;
 					p2_location = 'B';
 				}
-				else if ((pq1 == 0 || pq2 == 0 )
-						 && ((qp1 >= 0 && qp2 <= 0) ||
-							 (qp1 <= 0 && qp2 >= 0)))
-				{
-					/* Q1 or Q2 touched P1-P2 */
-					retval |= IM__INTER_BOUND_0D;
-				}
-				else if (((qp1 > 0 && qp2 < 0) || (qp1 < 0 && qp2 > 0)) &&
-						 ((pq1 > 0 && pq2 < 0) || (pq1 < 0 && pq2 > 0)))
+				else if (((qp1 >= 0 && qp2 <= 0) || (qp1 <= 0 && qp2 >= 0)) &&
+						 ((pq1 >= 0 && pq2 <= 0) || (pq1 <= 0 && pq2 >= 0)))
 				{
 					/*
 					 * P1-P2 and Q1-Q2 crosses.
@@ -4554,6 +4531,9 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 					 * If P1-P2 would be I-E or E-I, it obviously goes
 					 * across the boundary line; should not happen.
 					 */
+					printf("P1 [%c] (%.2f,%.2f) P2 [%c] (%.2f,%.2f)\n",
+						   p1_location, P1.x, P1.y,
+						   p2_location, P2.x, P2.y);
 					return -1;
 				}
 			}
