@@ -3023,6 +3023,9 @@ IM__PRINTF(const char *label, cl_int status)
 		   (status & IM__EXTER_EXTER_2D) != 0 ? 1 : 0);
 }
 
+#define PT_EQ(A,B)		(FP_EQUALS((A).x,(B).x) && FP_EQUALS((A).y,(B).y))
+#define PT_NE(A,B)		(FP_NEQUALS((A).x,(B).x) || FP_NEQUALS((A).y,(B).y))
+
 STATIC_FUNCTION(cl_int)
 geom_relate_point_point(kern_context *kcxt,
 						const pg_geometry_t *geom1,
@@ -3157,17 +3160,17 @@ geom_relate_point_line(kern_context *kcxt,
 	{
 		cl_ulong	head_matched = 0UL;
 		cl_ulong	tail_matched = 0UL;
-		cl_ulong	__mask;
-	
+		cl_ulong	boundary_mask = 0UL;
+
 		/* walks on for each points */
 		for (int i=0; i < nloops1; i++)
 		{
-			POINT2D		pt;
+			POINT2D		P;
 			cl_bool		matched = false;
 
 			/* fetch a point */
 			if (geom1->type == GEOM_POINTTYPE)
-				__loadPoint2d(&pt, geom1->rawdata, 0);
+				__loadPoint2d(&P, geom1->rawdata, 0);
 			else
 			{
 				pg_geometry_t   __temp1;
@@ -3175,7 +3178,7 @@ geom_relate_point_line(kern_context *kcxt,
 				pos1 = geometry_load_subitem(&__temp1, geom1, pos1, i);
 				if (!pos1)
 					return -1;
-				__loadPoint2d(&pt, __temp1.rawdata, 0);
+				__loadPoint2d(&P, __temp1.rawdata, 0);
 			}
 
 			/* walks on for each linestrings */
@@ -3184,7 +3187,8 @@ geom_relate_point_line(kern_context *kcxt,
 				pg_geometry_t	__line_data;
 				const pg_geometry_t *line;
 				const char	   *lpos;
-				POINT2D			seg1, seg2;
+				POINT2D			Q1, Q2;
+				cl_bool			has_boundary;
 
 				/* fetch a linestring */
 				if (geom2->type == GEOM_LINETYPE)
@@ -3197,29 +3201,38 @@ geom_relate_point_line(kern_context *kcxt,
 					line = &__line_data;
 				}
 				/* walks on vertex of the line edges */
-				lpos = __loadPoint2d(&seg1, line->rawdata, unitsz);
-				for (int k=2; k <= line->nitems; k++, seg1=seg2)
+				__loadPoint2dIndex(&Q2, line->rawdata, unitsz, line->nitems-1);
+				lpos = __loadPoint2d(&Q1, line->rawdata, unitsz);
+				has_boundary = PT_NE(Q1,Q2);
+				if (has_boundary && (j >= base && j < base + CL_LONG_NBITS))
+					boundary_mask |= (1UL << (j - base));
+				for (int k=2; k <= line->nitems; k++, Q1=Q2)
 				{
-					lpos = __loadPoint2d(&seg2, lpos, unitsz);
+					lpos = __loadPoint2d(&Q2, lpos, unitsz);
 
-					if (k==2 && pt.x==seg1.x && pt.y==seg1.y)
+					if (has_boundary)
 					{
-						/* edge case handling (head) */
-						retval |= IM__INTER_BOUND_0D;
-						matched = true;
-						if (j >= base && j < base + CL_LONG_NBITS)
-							head_matched |= (1UL << (j - base));
+						if (k==2 && PT_EQ(P,Q1))
+						{
+							/* boundary case handling (head) */
+							retval |= IM__INTER_BOUND_0D;
+							matched = true;
+							if (j >= base && j < base + CL_LONG_NBITS)
+								head_matched |= (1UL << (j - base));
+							continue;
+						}
+						else if (k == line->nitems && PT_EQ(P,Q2))
+						{
+							/* boundary case handling (tail) */
+							retval |= IM__INTER_BOUND_0D;
+							matched = true;
+							if (j >= base && j < base + CL_LONG_NBITS)
+								tail_matched |= (1UL << (j - base));
+							continue;
+						}
 					}
-					else if (k==line->nitems && pt.x==seg2.x && pt.y==seg2.y)
-					{
-						/* edge case handling (tail) */
-						retval |= IM__INTER_BOUND_0D;
-						matched = true;
-						if (j >= base && j < base + CL_LONG_NBITS)
-							tail_matched |= (1UL << (j - base));
-					}
-					else if (__geom_segment_side(&seg1, &seg2, &pt) == 0 &&
-							 __geom_pt_in_seg(&pt, &seg1, &seg2))
+					if (__geom_segment_side(&Q1, &Q2, &P) == 0 &&
+						__geom_pt_in_seg(&P, &Q1, &Q2))
 					{
 						retval |= IM__INTER_INTER_0D;
 						matched = true;
@@ -3236,11 +3249,7 @@ geom_relate_point_line(kern_context *kcxt,
 		 * If herea are any linestring-edges not referenced by the points,
 		 * it needs to set EXTER-BOUND item.
 		 */
-		if (base + CL_LONG_NBITS >= nloops2)
-			__mask = (1UL << (nloops2 - base)) - 1;
-		else
-			__mask = ~0UL;
-		if (head_matched != __mask || tail_matched != __mask)
+		if (head_matched != boundary_mask || tail_matched != boundary_mask)
 		{
 			retval |= IM__EXTER_BOUND_0D;
 			break;
@@ -3411,9 +3420,6 @@ geom_relate_point_poly(kern_context *kcxt,
 	}
 	return retval;
 }
-
-#define PT_EQ(A,B)		(FP_EQUALS((A).x,(B).x) && FP_EQUALS((A).y,(B).y))
-#define PT_NE(A,B)		(FP_NEQUALS((A).x,(B).x) || FP_NEQUALS((A).y,(B).y))
 
 STATIC_FUNCTION(cl_int)
 __geom_relate_seg_line(kern_context *kcxt,
