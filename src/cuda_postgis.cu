@@ -4145,6 +4145,8 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 			cl_int		wnc = 0;
 			cl_int		pq1, pq2;
 
+			p1_location = p2_location = pc_location = '?';
+
 			pos2 = geometry_load_subitem(&ring, poly, pos2, i, kcxt);
 			if (!pos2)
 				return -1;
