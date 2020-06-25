@@ -6,6 +6,7 @@ CREATE TABLE _gistest
   a   geometry,
   b   geometry
 );
+CREATE VIEW gisview AS SELECT id,st_astext(a) a,st_astext(b) b FROM _gistest;
 
 CREATE OR REPLACE FUNCTION __st_relate(geometry,geometry)
 RETURNS text

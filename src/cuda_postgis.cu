@@ -4256,17 +4256,10 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						else
 							retval |= IM__INTER_BOUND_0D;
 
-						if ((PT_EQ(P1,Q1) && q2_in_pp == PT_OUTSIDE) ||
-							(PT_EQ(P1,Q2) && q1_in_pp == PT_OUTSIDE))
-						{
-							/*
-							 * case of P2-P1=Q1-Q2 or P2-P1=Q2-Q1
-							 * contacted at a point.
-							 */
-						}
-						else if (q1_in_pp != PT_OUTSIDE)
+						if (q1_in_pp == PT_INSIDE)
 						{
 							/* case of Q2-P1-Q1-P2; Q1-P2 is out of bounds */
+							assert(q2_in_pp != PT_INSIDE);
 							status = __geom_relate_seg_polygon(kcxt,
 															   Q1, false,
 															   P2, p2_is_tail,
@@ -4277,9 +4270,10 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 								return -1;
 							return (retval | status | IM__INTER_BOUND_1D);
 						}
-						else if (q2_in_pp != PT_OUTSIDE)
+						else if (q2_in_pp == PT_INSIDE)
 						{
 							/* case of Q1-P1-Q2-P2; Q2-P2 is out of bounds */
+							assert(q1_in_pp != PT_INSIDE);
 							status = __geom_relate_seg_polygon(kcxt,
 															   Q2, false,
 															   P2, p2_is_tail,
@@ -4291,7 +4285,10 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 							return (retval | status | IM__INTER_BOUND_1D);
 						}
 						else
-							return -1;	/* should not happen */
+						{
+							assert(q1_in_pp == PT_BOUNDARY ||
+								   q2_in_pp == PT_BOUNDARY);
+						}
 					}
 					else if (p1_in_qq == PT_OUTSIDE &&
 							 p2_in_qq != PT_OUTSIDE)
@@ -4303,15 +4300,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						else
 							retval |= IM__INTER_BOUND_0D;
 
-						if ((q2_in_pp == PT_OUTSIDE && PT_EQ(P2,Q1)) ||
-							(q1_in_pp == PT_OUTSIDE && PT_EQ(P2,Q2)))
-						{
-							/*
-							 * case of P1-P2=Q1-Q2 or P1-P2=Q2-Q1
-							 * touched at a point
-							 */
-						}
-						else if (q1_in_pp != PT_OUTSIDE)
+						if (q1_in_pp == PT_INSIDE)
 						{
 							/* P1-Q1-P2-Q2; P1-Q1 is out of bounds */
 							status = __geom_relate_seg_polygon(kcxt,
@@ -4324,7 +4313,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 								return -1;
 							return (retval | status | IM__INTER_BOUND_1D);
 						}
-						else if (q2_in_pp != PT_OUTSIDE)
+						else if (q2_in_pp == PT_INSIDE)
 						{
 							/* P1-Q2-P2-Q1; P1-Q2 is out of bounds */
 							status = __geom_relate_seg_polygon(kcxt,
@@ -4337,55 +4326,65 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 								return -1;
 							return (retval | status | IM__INTER_BOUND_1D);
 						}
-						else
-							return -1;		/* should not happen */
 					}
-					else if (__geom_pt_within_seg(&Q1,&P1,&Q2) != PT_OUTSIDE)
+					else if (__geom_pt_within_seg(&Q1,&P1,&Q2) != PT_OUTSIDE &&
+							 __geom_pt_within_seg(&Q2,&Q1,&P2) != PT_OUTSIDE)
 					{
 						/* case of P1-Q1-Q2-P2 */
-						status = __geom_relate_seg_polygon(kcxt,
-														   P1, p1_is_head,
-														   Q1, false,
-														   geom,
-														   nrings,
-														   last_polygons);
-						if (status < 0)
-							return -1;
-						retval |= status;
-
-						status = __geom_relate_seg_polygon(kcxt,
-														   Q2, false,
-														   P2, p2_is_tail,
-														   geom,
-														   nrings,
-														   last_polygons);
-						if (status < 0)
-							return -1;
-						retval |= status;
+						if (PT_NE(P1,Q1))
+						{
+							status = __geom_relate_seg_polygon(kcxt,
+															   P1, p1_is_head,
+															   Q1, false,
+															   geom,
+															   nrings,
+															   last_polygons);
+							if (status < 0)
+								return -1;
+							retval |= status;
+						}
+						if (PT_NE(Q2,P2))
+						{
+							status = __geom_relate_seg_polygon(kcxt,
+															   Q2, false,
+															   P2, p2_is_tail,
+															   geom,
+															   nrings,
+															   last_polygons);
+							if (status < 0)
+								return -1;
+							retval |= status;
+						}
 						return (retval | IM__INTER_BOUND_1D);
 					}
-					else if (__geom_pt_within_seg(&Q2,&P1,&Q1) != PT_OUTSIDE)
+					else if (__geom_pt_within_seg(&Q2,&P1,&Q1) != PT_OUTSIDE &&
+							 __geom_pt_within_seg(&Q1,&Q2,&P1) != PT_OUTSIDE)
 					{
 						/* case of P1-Q2-Q1-P2 */
-						status = __geom_relate_seg_polygon(kcxt,
-														   P1, p1_is_head,
-														   Q2, false,
-														   geom,
-														   nrings,
-														   last_polygons);
-						if (status < 0)
-							return -1;
-						retval |= status;
-
-						status = __geom_relate_seg_polygon(kcxt,
-														   Q1, false,
-														   P2, p2_is_tail,
-														   geom,
-														   nrings,
-														   last_polygons);
-						if (status < 0)
-							return -1;
-						retval |= status;
+						if (PT_NE(P1,Q2))
+						{
+							status = __geom_relate_seg_polygon(kcxt,
+															   P1, p1_is_head,
+															   Q2, false,
+															   geom,
+															   nrings,
+															   last_polygons);
+							if (status < 0)
+								return -1;
+							retval |= status;
+						}
+						if (PT_NE(Q1,P2))
+						{
+							status = __geom_relate_seg_polygon(kcxt,
+															   Q1, false,
+															   P2, p2_is_tail,
+															   geom,
+															   nrings,
+															   last_polygons);
+							if (status < 0)
+								return -1;
+							retval |= status;
+						}
 						return (retval | IM__INTER_BOUND_1D);
 					}
 					else
