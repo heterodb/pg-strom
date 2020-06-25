@@ -4629,6 +4629,7 @@ geom_relate_line_polygon(kern_context *kcxt,
 	{
 		const pg_geometry_t *line;
 		cl_uint		nitems;
+		cl_bool		has_boundary;
 		cl_bool		p1_is_head = true;
 		POINT2D		P1, P2;
 
@@ -4647,15 +4648,16 @@ geom_relate_line_polygon(kern_context *kcxt,
 		if (line->nitems == 0)
 			continue;	/* empty */
 		/* decrement nitems if tail items are duplicated */
-		__loadPoint2dIndex(&P1, line->rawdata, unitsz, line->nitems-1);
+		__loadPoint2dIndex(&P2, line->rawdata, unitsz, line->nitems-1);
 		for (nitems = line->nitems; nitems >= 2; nitems--)
 		{
-			__loadPoint2dIndex(&P2, line->rawdata, unitsz, nitems-2);
+			__loadPoint2dIndex(&P1, line->rawdata, unitsz, nitems-2);
 			if (PT_NE(P1, P2))
 				break;
 		}
 		/* checks for each edge */
 		ppos = __loadPoint2d(&P1, line->rawdata, unitsz);
+		has_boundary = PT_NE(P1, P2);
 		for (int i=2; i <= nitems; i++)
 		{
 			ppos = __loadPoint2d(&P2, ppos, unitsz);
@@ -4673,8 +4675,8 @@ geom_relate_line_polygon(kern_context *kcxt,
 			else
 			{
 				temp = __geom_relate_seg_polygon(kcxt,
-												 P1, p1_is_head,
-												 P2, i==line->nitems,
+												 P1, (has_boundary && p1_is_head),
+												 P2, (has_boundary && i==nitems),
 												 geom2, 0, false);
 				if (temp < 0)
 					return -1;
@@ -4683,11 +4685,14 @@ geom_relate_line_polygon(kern_context *kcxt,
 			P1=P2;
 			p1_is_head = false;
 		}
-	}
-	temp = (IM__LINE_HEAD_CONTAINED | IM__LINE_TAIL_CONTAINED);
-	if ((retval & temp) != temp)
-		retval |= IM__BOUND_EXTER_0D;
 
+		if (has_boundary)
+		{
+			temp = (IM__LINE_HEAD_CONTAINED | IM__LINE_TAIL_CONTAINED);
+			if ((retval & temp) != temp)
+				retval |= IM__BOUND_EXTER_0D;
+		}
+	}
 	return (retval & IM__MASK_FULL);
 }
 
