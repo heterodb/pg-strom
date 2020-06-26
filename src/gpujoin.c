@@ -2714,7 +2714,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
 	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc,
-						  &TTSOpsHeapTuple);
+						  &TTSOpsVirtual);
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
@@ -6850,6 +6850,14 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
 		gj_sstate->pergpu[dindex].bytesize = bytesize;
 
+		{
+			cl_long		mhandle[8];
+
+			memcpy(mhandle, &gj_sstate->pergpu[dindex].ipc_mhandle, sizeof(CUipcMemHandle));
+			elog(INFO, "Open mhandle %lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx",
+				 mhandle[0], mhandle[1], mhandle[2], mhandle[3],
+				 mhandle[4], mhandle[5], mhandle[6], mhandle[7]);
+		}
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &m_kmrels,
 								 gj_sstate->pergpu[dindex].ipc_mhandle,
@@ -6876,6 +6884,14 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 		CUdeviceptr		m_kmrels;
 		CUresult		rc;
 
+		{
+			cl_long		mhandle[8];
+
+			memcpy(mhandle, &gj_sstate->pergpu[dindex].ipc_mhandle, sizeof(CUipcMemHandle));
+			elog(INFO, "OPEN mhandle %lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx",
+				 mhandle[0], mhandle[1], mhandle[2], mhandle[3],
+				 mhandle[4], mhandle[5], mhandle[6], mhandle[7]);
+		}
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &m_kmrels,
 								 gj_sstate->pergpu[dindex].ipc_mhandle,

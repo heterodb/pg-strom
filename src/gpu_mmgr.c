@@ -53,6 +53,7 @@ typedef struct
 typedef struct
 {
 	dlist_node		chain;
+	cl_int			cuda_dindex;
 	GpuMemKind		gm_kind;	/* one of GpuMemKind__* */
 	CUdeviceptr		m_segment;	/* device pointer of the segment */
 	unsigned long	iomap_handle; /* only if GpuMemKind__IOMapMemory */
@@ -133,9 +134,6 @@ static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
 
 Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
-
-#define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
-#define GPUMEM_HOST_RAW_EXTRA		((void *)(~1L))
 
 /*
  * gpuMemFreeChunk
@@ -612,6 +610,7 @@ retry:
 		return rc;
 	}
 	/* setup of GpuMemSegment */
+	gm_seg->cuda_dindex = gcontext->cuda_dindex;
 	gm_seg->gm_kind		= gm_kind;
 	gm_seg->m_segment	= m_segment;
 	SpinLockInit(&gm_seg->lock);
@@ -1025,13 +1024,15 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	GpuMemStatistics *gm_stat = &gm_stat_array[gcontext->cuda_dindex];
 	GpuMemSegment  *gm_seg;
 	dlist_node	   *dnode;
-
-	Assert(!gcontext->cuda_context);
+	CUresult		rc;
 
 	while (!dlist_is_empty(&gcontext->gm_normal_list))
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_normal_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		rc = cuMemFree(gm_seg->m_segment);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree(normal): %s", errorText(rc));
 		pg_atomic_sub_fetch_u64(&gm_stat->normal_usage, gm_segment_sz);
 		free(gm_seg);
 	}
@@ -1040,6 +1041,9 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_managed_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		rc = cuMemFree(gm_seg->m_segment);
+        if (rc != CUDA_SUCCESS)
+            elog(WARNING, "failed on cuMemFree(managed): %s", errorText(rc));
 		pg_atomic_sub_fetch_u64(&gm_stat->managed_usage, gm_segment_sz);
 		free(gm_seg);
 	}
@@ -1048,6 +1052,9 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_iomap_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		rc = cuMemFree(gm_seg->m_segment);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree(io-map): %s", errorText(rc));
 		pg_atomic_sub_fetch_u64(&gm_stat->iomap_usage, gm_segment_sz);
 		free(gm_seg);
 	}
@@ -1056,6 +1063,9 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_hostmem_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		rc = cuMemFreeHost((void *)gm_seg->m_segment);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFreeHost: %s", errorText(rc));
 		free(gm_seg);
 	}
 }
@@ -1111,7 +1121,16 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 	dlist_push_tail(&gmemp_head->gmemp_active_list[i],
 					&gmemp->chain);
 
-	elog(DEBUG1, "alloc: preserved memory %zu bytes", gmemp_req->bytesize);
+	elog(LOG, "alloc: preserved memory %zu bytes (%lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx)",
+		 gmemp_req->bytesize,
+		 ((cl_ulong *)&m_handle)[0],
+		 ((cl_ulong *)&m_handle)[1],
+		 ((cl_ulong *)&m_handle)[2],
+		 ((cl_ulong *)&m_handle)[3],
+		 ((cl_ulong *)&m_handle)[4],
+		 ((cl_ulong *)&m_handle)[5],
+		 ((cl_ulong *)&m_handle)[6],
+		 ((cl_ulong *)&m_handle)[7]);
 
 	/* successfully done */
 	memcpy(&gmemp_req->m_handle, &m_handle, sizeof(CUipcMemHandle));

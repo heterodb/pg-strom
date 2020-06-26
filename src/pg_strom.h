@@ -235,11 +235,8 @@
 #include "cuda_common.h"
 #include "pg_compat.h"
 
-#define RESTRACK_HASHSIZE		53
 #define CUDA_MODULES_HASHSIZE	25
-
-#define GPUCTX_CMD__RECLAIM_MEMORY		0x0001
-
+#define RESTRACK_HASHSIZE		53
 typedef struct GpuContext
 {
 	dlist_node		chain;
@@ -837,6 +834,9 @@ extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContextOnDSMDetach(dsm_segment *seg, Datum arg);
+
+#define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
+#define GPUMEM_HOST_RAW_EXTRA		((void *)(~1L))
 
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id,
 							 const char *filename, int lineno);
