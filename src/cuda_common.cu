@@ -977,7 +977,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 			{
 				result.isnull = false;
 				result.value = *((cl_uint *)addr)
-					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			}
 			break;
 		case ArrowDateUnit__MilliSecond:
@@ -991,7 +991,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 			{
 				result.isnull = false;
 				result.value = *((cl_ulong *)addr) / 1000
-					+ (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			}
 			break;
 		default:
