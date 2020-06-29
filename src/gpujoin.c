@@ -1939,8 +1939,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *outer_path;
 	Path	   *inner_path;
 	ListCell   *lc1, *lc2;
-	bool		outer_parallel_done = false;
-	bool		inner_parallel_done = false;
+	bool		half_parallel_done = false;
+	bool		full_parallel_done = false;
 
 	/* calls secondary module if exists */
 	if (set_join_pathlist_next)
@@ -2001,7 +2001,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 			outer_path->parallel_workers == 0)
 			continue;
 
-		if (!outer_parallel_done)
+		if (!half_parallel_done)
 		{
 			foreach (lc2, innerrel->pathlist)
 			{
@@ -2019,12 +2019,12 @@ gpujoin_add_join_path(PlannerInfo *root,
 									  extra,
 									  true,
 									  false);
-				outer_parallel_done = true;
+				half_parallel_done = true;
 				break;
 			}
 		}
 
-		if (!inner_parallel_done)
+		if (!full_parallel_done)
 		{
 			foreach (lc2, innerrel->partial_pathlist)
 			{
@@ -2042,11 +2042,11 @@ gpujoin_add_join_path(PlannerInfo *root,
 									  extra,
 									  true,
 									  true);
-				inner_parallel_done = true;
+				full_parallel_done = true;
 				break;
 			}
 		}
-		if (outer_parallel_done && inner_parallel_done)
+		if (half_parallel_done && full_parallel_done)
 			return;
 	}
 }
@@ -6949,7 +6949,8 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	switch (gj_sstate->phase)
 	{
 		case INNER_PHASE__SCAN_RELATIONS:
-			if (gjs->inner_parallel || !IsParallelWorker())
+			if (gjs->inner_parallel ||
+				gj_sstate->nr_workers_scanning == 0)
 			{
 				gj_sstate->nr_workers_scanning++;
 				SpinLockRelease(&gj_sstate->mutex);
