@@ -471,21 +471,15 @@ PDS_release(pgstrom_data_store *pds)
 	Assert(refcnt >= 0);
 	if (refcnt == 0)
 	{
+
+
+		
 		if (!pds->gcontext)
 		{
 			Assert(pds->kds.format == KDS_FORMAT_ARROW ||
 				   pds->kds.format == KDS_FORMAT_COLUMN);
 			pfree(pds);
 		}
-#if 0
-		else if ((pds->kds.format == KDS_FORMAT_BLOCK) ||
-				 (pds->kds.format == KDS_FORMAT_ARROW && pds->iovec))
-		{
-			rc = gpuMemFreeHost(gcontext, pds);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuMemFreeHost: %s", errorText(rc));
-		}
-#endif
 		else
 		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);

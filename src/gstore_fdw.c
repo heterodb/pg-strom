@@ -156,8 +156,8 @@ typedef struct
 	size_t			redo_log_limit;
 	const char	   *redo_log_backup_dir;
 	size_t			redo_log_backup_limit;
-	cl_int			gpu_update_interval;
-	cl_int			gpu_update_threshold;
+	cl_long			gpu_update_interval;
+	size_t			gpu_update_threshold;
 
 #define GSTORE_NUM_BASE_ROW_LOCKS		4000
 #define GSTORE_NUM_HASH_SLOT_LOCKS		5000
@@ -175,14 +175,15 @@ typedef struct
 	uint64			redo_read_nitems;
 	uint64			redo_read_pos;
 	uint64			redo_sync_pos;
-
+	uint64			redo_last_timestamp;	/* time when last command sent.
+											 * not a timestamp redo-logs are
+											 * applied on the GPU buffer. */
 	/* Device data store */
 	pthread_rwlock_t gpu_bufer_lock;
 	CUipcMemHandle	gpu_main_mhandle;		/* mhandle to main portion */
 	CUipcMemHandle	gpu_extra_mhandle;		/* mhandle to extra portion */
 	size_t			gpu_main_size;
 	size_t			gpu_extra_size;
-	Timestamp		gpu_update_timestamp;	/* time when last update */
 } GpuStoreSharedState;
 
 typedef struct
@@ -304,18 +305,43 @@ static inline cl_bool atomicCAS64(volatile cl_ulong *ptr,
 									   __ATOMIC_SEQ_CST);
 }
 
+static inline cl_ulong atomicMax64(volatile cl_ulong *ptr, cl_ulong newval)
+{
+	cl_ulong	oldval;
+
+	do {
+		oldval = atomicRead64(ptr);
+		if (oldval >= newval)
+			return oldval;
+	} while (!atomicCAS64(ptr, &oldval, newval));
+
+	return newval;
+}
+
+static inline cl_ulong atomicRead32(volatile cl_uint *ptr)
+{
+	return *ptr;
+}
+
+static inline cl_bool atomicCAS32(volatile cl_uint *ptr,
+                                  cl_uint *oldval, cl_uint newval)
+{
+	return __atomic_compare_exchange_n(ptr, oldval, newval,
+									   false,
+									   __ATOMIC_SEQ_CST,
+									   __ATOMIC_SEQ_CST);
+}
+
 static inline cl_uint atomicMax32(volatile cl_uint *ptr, cl_uint newval)
 {
 	cl_uint		oldval;
-	
+
 	do {
-		oldval = *ptr;
+		oldval = atomicRead32(ptr);
 		if (oldval >= newval)
 			return oldval;
-	} while (!__atomic_compare_exchange_n(ptr, &oldval, newval,
-										  false,
-										  __ATOMIC_SEQ_CST,
-										  __ATOMIC_SEQ_CST));
+	} while (!atomicCAS32(ptr, &oldval, newval));
+
 	return newval;
 }
 
@@ -984,7 +1010,7 @@ gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 
 static GpuStoreFdwState *
 __ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr,
-					bool skip_apply_redo_log)
+					bool apply_redo_log)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -1043,16 +1069,19 @@ __ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr,
 		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
 
 	/* synchronize device buffer prior to the kernel call */
-	if (!skip_apply_redo_log)
+	if (apply_redo_log)
 		gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
 
 	return fdw_state;
 }
 
 GpuStoreFdwState *
-ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs)
+ExecInitGstoreFdw(ScanState *ss, int eflags,
+				  Bitmapset *outer_refs)
 {
-	return __ExecInitGstoreFdw(ss, outer_refs, NULL, false);
+	bool	apply_redo_log = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+
+	return __ExecInitGstoreFdw(ss, outer_refs, NULL, apply_redo_log);
 }
 
 static void
@@ -1074,7 +1103,7 @@ GstoreBeginForeignScan(ForeignScanState *node, int eflags)
 	if (fscan->fdw_exprs != NIL)
 		indexExpr = linitial(fscan->fdw_exprs);
 
-	node->fdw_state = __ExecInitGstoreFdw(&node->ss, outer_refs, indexExpr, true);
+	node->fdw_state = __ExecInitGstoreFdw(&node->ss, outer_refs, indexExpr, false);
 }
 
 /*
@@ -1479,57 +1508,119 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 						 GstoreTxLogCommon *tx_log)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	size_t		required = tx_log->length + sizeof(uint32);
+	uint32		terminator = GSTORE_TX_LOG__TERMINATOR;
+	bool		has_base_mmap_lock = false;
 
 	Assert(tx_log->length == MAXALIGN(tx_log->length));
+	if (required > gs_sstate->redo_log_limit)
+		elog(ERROR, "gstore_fdw: length of REDO must be larger than 'redo_log_limit'");
 	for (;;)
 	{
-		size_t		tx_len = tx_log->length;
-		size_t		curr_pos;
+		char	   *dest_ptr;
 		size_t		dest_pos;
-		size_t		padding = 0;
-		cl_uint		nitems;
+		size_t		len;
 
 		SpinLockAcquire(&gs_sstate->redo_pos_lock);
 		Assert(gs_sstate->redo_write_pos >= gs_sstate->redo_read_pos);
-		curr_pos = gs_sstate->redo_write_pos;
-		dest_pos = curr_pos % gs_sstate->redo_log_limit;
-		if (dest_pos + tx_len > gs_sstate->redo_log_limit)
-			padding = (dest_pos + tx_len) - gs_sstate->redo_log_limit;
-		if (curr_pos + padding + tx_len <= (gs_sstate->redo_read_pos +
-											gs_sstate->redo_log_limit))
+		/*
+		 * If this redo-log makes the write position rewound, we must ensure
+		 * the base_mmap is up-to-date prior to the overwrites of redo-log
+		 * buffer.
+		 */
+		dest_pos = gs_sstate->redo_write_pos % gs_sstate->redo_log_limit;
+		if (dest_pos + required > gs_sstate->redo_log_limit)
+		{
+			if (!has_base_mmap_lock)
+			{
+				SpinLockRelease(&gs_sstate->redo_pos_lock);
+
+				LWLockAcquire(&gs_sstate->base_mmap_lock, LW_SHARED);
+				if (gs_desc->base_mmap_revision != gs_sstate->base_mmap_revision)
+					gstoreFdwRemapBaseFile(gs_desc, true);
+				has_base_mmap_lock = true;
+				continue;
+			}
+			len = gs_sstate->redo_log_limit - dest_pos;
+			memset(gs_desc->redo_mmap + dest_pos, 0, len);
+			gs_sstate->redo_write_pos += len;
+
+			/* checkpoint of the base file */
+			if (gs_desc->base_mmap_is_pmem)
+				pmem_persist(gs_desc->base_mmap,
+							 gs_desc->base_mmap_sz);
+			else if (pmem_msync(gs_desc->base_mmap,
+								gs_desc->base_mmap_sz) != 0)
+			{
+				elog(WARNING, "failed on pmem_msync('%s'): %m", gs_sstate->base_file);
+			}
+			//CheckPointWarning
+			elog(LOG, "gstore_fdw: checkpoint applied on '%s'", gs_sstate->base_file);
+			dest_pos = 0;
+		}
+
+		len = gs_sstate->redo_write_pos - gs_sstate->redo_read_pos;
+		if (len + required > gs_sstate->redo_log_limit)
 		{
 			/*
-			 * NOTE: Even though we check the free space by tx_len + 64bits
-			 * for overwrite_marker, and make 'redo_write_pos' advanced by
-			 * tx_len, because the overwrite_marker shall be overwritten by
-			 * the next log, thus we can detect the tail of REDO log in case
-			 * of the crash recovery.
+			 * We have no space to write out redo-log any more, so we must
+			 * kick the background worker to apply redo-log, and wait for
+			 * completion of the task.
+			 * If redo_last_timestamp is very recently updated, concurrent
+			 * session might kick APPLY_REDO command. In this case, we just
+			 * sleep for a moment, and recheck it.
 			 */
-			gs_sstate->redo_write_pos += (padding + tx_len);
-			gs_sstate->redo_write_nitems++;
-			SpinLockRelease(&gs_sstate->redo_pos_lock);
-			if (padding > 0)
+			uint64	curr_timestamp = GetCurrentTimestamp();
+			uint64	last_timestamp = gs_sstate->redo_last_timestamp;
+
+			if (curr_timestamp < last_timestamp + 20000)	/* 20ms margin */
 			{
-				Assert(dest_pos + padding == gs_sstate->redo_log_limit);
-				memset((char *)gs_desc->redo_mmap + dest_pos, 0, padding);
-				memcpy((char *)gs_desc->redo_mmap, tx_log, tx_len);
+				SpinLockRelease(&gs_sstate->redo_pos_lock);
+				pg_usleep(4000L);	/* wait for 4ms */
 			}
 			else
 			{
-				memcpy((char *)gs_desc->redo_mmap + dest_pos, tx_log, tx_len);
+				size_t		curr_pos = gs_sstate->redo_read_pos;
+				cl_uint		nitems = (gs_sstate->redo_write_nitems -
+									  gs_sstate->redo_read_nitems);
+				gs_sstate->redo_last_timestamp = curr_timestamp;
+				SpinLockRelease(&gs_sstate->redo_pos_lock);
+				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, false, curr_pos, nitems);
 			}
-			break;
+			continue;
 		}
-		/*
-		 * REDO-Log buffer can be over-written, so we invoke the background
-		 * worker to synchronize the GPU buffer using the REDO-Log.
-		 * It shall make forward the 'redo_read_pos', then retry again.
-		 */
-		nitems = (gs_sstate->redo_write_nitems -
-				  gs_sstate->redo_read_nitems);
+		/* Ok, we have enough space to write out redo-log buffer */
+		if (len > gs_sstate->gpu_update_threshold)
+		{
+			uint64	curr_timestamp = GetCurrentTimestamp();
+			uint64	last_timestamp = gs_sstate->redo_last_timestamp;
+
+			if (curr_timestamp >= last_timestamp + 20000)	/* 20ms margin */
+			{
+				/*
+				 * Even though redo-log buffer has space to write out, amount of
+				 * logs not applied yet exceeds the threshold to kick the baclground
+				 * worker, but to be asynchronous.
+				 */
+				size_t		curr_pos = gs_sstate->redo_read_pos;
+				cl_uint		nitems = (gs_sstate->redo_write_nitems -
+									  gs_sstate->redo_read_nitems);
+				gs_sstate->redo_last_timestamp = curr_timestamp;
+				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, true, curr_pos, nitems);
+			}
+		}
+		dest_ptr = gs_desc->redo_mmap + dest_pos;
+
+		memcpy(dest_ptr, tx_log, tx_log->length);
+		memcpy(dest_ptr + tx_log->length, &terminator, sizeof(uint32));
+		gs_sstate->redo_write_pos += tx_log->length;
+		gs_sstate->redo_write_nitems++;
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
-		gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, false, curr_pos, nitems);
+
+		break;
 	}
+	if (has_base_mmap_lock)
+		LWLockRelease(&gs_sstate->base_mmap_lock);
 }
 
 static void
@@ -1543,7 +1634,7 @@ gstoreFdwAppendInsertLog(Relation frel,
 	GstoreTxLogInsert *i_log;
 	size_t		sz;
 
-	sz = MAXALIGN(offsetof(GstoreTxLogInsert, htup) + tuple->t_len + sizeof(cl_uint));
+	sz = MAXALIGN(offsetof(GstoreTxLogInsert, htup) + tuple->t_len);
 	i_log = alloca(sz + sizeof(cl_uint));
 	memset(i_log, 0, sz + sizeof(cl_uint));
 	i_log->type = GSTORE_TX_LOG__INSERT;
@@ -1557,7 +1648,6 @@ gstoreFdwAppendInsertLog(Relation frel,
 	i_log->htup.t_ctid.ip_blkid.bi_hi = (oldid >> 16);
 	i_log->htup.t_ctid.ip_blkid.bi_lo = (oldid & 0x0000ffffU);
 	i_log->htup.t_ctid.ip_posid = 0;
-	((cl_uint *)((char *)i_log + sz))[-1] = GSTORE_TX_LOG__TERMINATOR;
 
 	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)i_log);
 }
@@ -1573,12 +1663,11 @@ gstoreFdwAppendDeleteLog(Relation frel,
 
 	memset(&d_log, 0, sizeof(GstoreTxLogDelete));
 	d_log.type = GSTORE_TX_LOG__DELETE;
-	d_log.length = sizeof(GstoreTxLogDelete);
+	d_log.length = MAXALIGN(sizeof(GstoreTxLogDelete));
 	d_log.timestamp = GetCurrentTimestamp();
 	d_log.rowid = rowid;
 	d_log.xmin = xmin;
 	d_log.xmax = xmax;
-	d_log.__terminator = GSTORE_TX_LOG__TERMINATOR;
 
 	__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)&d_log);
 }
@@ -2154,7 +2243,8 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 		{
 			/* file pathname shall be checked at post-creation steps */
 		}
-		else if (strcmp(def->defname, "redo_log_limit") == 0)
+		else if (strcmp(def->defname, "redo_log_limit") == 0 ||
+				 strcmp(def->defname, "gpu_update_threshold") == 0)
 		{
 			char   *token = defGetString(def);
 
@@ -2174,15 +2264,6 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 			long	interval = strtol(token, &endp, 10);
 
 			if (interval <= 0 || interval > INT_MAX || *endp != '\0')
-				elog(ERROR, "'%s' is not a valid configuration for '%s'",
-					 token, def->defname);
-		}
-		else if (strcmp(def->defname, "gpu_update_threshold") == 0)
-		{
-			char   *token = defGetString(def);
-			long	threshold = strtol(token, &endp, 10);
-
-			if (threshold <= 0 || threshold > INT_MAX || *endp != '\0')
 				elog(ERROR, "'%s' is not a valid configuration for '%s'",
 					 token, def->defname);
 		}
@@ -2209,8 +2290,8 @@ gstoreFdwExtractOptions(Relation frel,
 						const char **p_redo_log_file,
 						const char **p_redo_log_backup_dir,
 						size_t *p_redo_log_limit,
-						cl_int *p_gpu_update_interval,
-						cl_int *p_gpu_update_threshold,
+						cl_long *p_gpu_update_interval,
+						size_t *p_gpu_update_threshold,
 						AttrNumber *p_primary_key)
 {
 	ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
@@ -2222,8 +2303,8 @@ gstoreFdwExtractOptions(Relation frel,
 	const char *redo_log_file = NULL;
 	const char *redo_log_backup_dir = NULL;
 	ssize_t		redo_log_limit = (512U << 20);	/* default: 512MB */
-	cl_int		gpu_update_interval = 15;		/* default: 15s */
-	cl_int		gpu_update_threshold = 40000;	/* default: 40k rows */
+	cl_long		gpu_update_interval = 15;		/* default: 15s */
+	ssize_t		gpu_update_threshold = -1;		/* default: 20% of redo_log_limit */
 	AttrNumber	primary_key = -1;
 	
 	/*
@@ -2336,10 +2417,18 @@ gstoreFdwExtractOptions(Relation frel,
 		else if (strcmp(def->defname, "gpu_update_threshold") == 0)
 		{
 			char   *value = defGetString(def);
-			long	threshold = strtol(value, &endp, 10);
+			ssize_t	threshold = strtol(value, &endp, 10);
 
-			if (threshold <= 0 || threshold > INT_MAX || *endp != '\0')
+			if (threshold <= 0)
 				elog(ERROR, "invalid gpu_update_threshold: %s", value);
+			if (strcmp(endp, "k") == 0 || strcmp(endp, "kb") == 0)
+				threshold *= (1UL << 10);
+			else if (strcmp(endp, "m") == 0 || strcmp(endp, "mb") == 0)
+				threshold *= (1UL << 20);
+			else if (strcmp(endp, "g") == 0 || strcmp(endp, "gb") == 0)
+				threshold *= (1UL << 30);
+			else if (*endp != '\0')
+				elog(ERROR, "invalid redo_log_sz: %s", value);
 			gpu_update_threshold = threshold;
 		}
 		else if (strcmp(def->defname, "primary_key") == 0)
@@ -2372,7 +2461,12 @@ gstoreFdwExtractOptions(Relation frel,
 		elog(ERROR, "max_num_rows must be specified");
 	if (!redo_log_file)
 		elog(ERROR, "redo_log_file must be specified");
-
+	if (gpu_update_threshold < 0)
+		gpu_update_threshold = redo_log_limit / 5;
+	else if (gpu_update_threshold < redo_log_limit / 50 ||
+			 gpu_update_threshold > redo_log_limit / 2)
+		elog(ERROR, "gpu_update_threshold is out of range: must be [%zu..%zu]",
+			 redo_log_limit / 50, redo_log_limit / 2);
 	/*
 	 * Write-back Results
 	 */
@@ -2429,8 +2523,8 @@ gstoreFdwAllocSharedState(Relation frel)
 	const char *redo_log_file;
 	const char *redo_log_backup_dir;
 	size_t		redo_log_limit;
-	cl_int		gpu_update_interval;
-	cl_int		gpu_update_threshold;
+	cl_long		gpu_update_interval;
+	size_t		gpu_update_threshold;
 	AttrNumber	primary_key;
 	size_t		len;
 	char	   *pos;
@@ -4539,13 +4633,6 @@ __gstoreFdwGetCudaModule(CUmodule *p_cuda_module, cl_int cuda_dindex)
 /*
  * __gstoreFdwCallKernelApplyRedo
  */
-
-
-
-
-/*
- * __gstoreFdwCallKernelApplyRedo
- */
 static CUresult
 __gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
 {
@@ -4840,7 +4927,12 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 * Kick the kernel to apply REDO log
 	 */
 	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
-	__gstoreFdwCallKernelApplyRedo(gs_desc, m_redo);
+	if (__gstoreFdwCallKernelApplyRedo(gs_desc, m_redo) == CUDA_SUCCESS)
+	{
+		SpinLockAcquire(&gs_sstate->redo_pos_lock);
+		gs_sstate->redo_read_pos = curr_pos;
+		SpinLockRelease(&gs_sstate->redo_pos_lock);
+	}
 	elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu",
 		 h_redo->nitems, h_redo->length,
 		 head_pos, curr_pos);
@@ -5173,6 +5265,64 @@ gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array)
 	}
 	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
 	return false;
+}
+
+bool
+gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
+{
+	int			hindex;
+	bool		retval = true;
+
+	for (hindex=0; hindex < GPUSTORE_SHARED_DESC_NSLOTS; hindex++)
+	{
+		slock_t	   *lock = &gstore_shared_head->gstore_sstate_lock[hindex];
+		dlist_head *slot = &gstore_shared_head->gstore_sstate_slot[hindex];
+		dlist_iter	iter;
+
+		SpinLockAcquire(lock);
+		dlist_foreach(iter, slot)
+		{
+			GpuStoreSharedState *gs_sstate;
+			uint64		threshold;
+
+			gs_sstate = dlist_container(GpuStoreSharedState,
+										hash_chain, iter.cur);
+			SpinLockAcquire(&gs_sstate->redo_pos_lock);
+			threshold = (gs_sstate->gpu_update_interval * 1000000L +
+						 gs_sstate->redo_last_timestamp);
+			if (GetCurrentTimestamp () > threshold &&
+				gs_sstate->redo_write_nitems > gs_sstate->redo_read_nitems)
+			{
+				dlist_head *cmd_flist = &gstore_shared_head->background_free_cmds;
+				slock_t	   *cmd_lock  = &gstore_shared_head->background_cmd_lock;
+
+				SpinLockAcquire(cmd_lock);
+				if (!dlist_is_empty(cmd_flist))
+				{
+					GpuStoreBackgroundCommand *cmd;
+
+					cmd = dlist_container(GpuStoreBackgroundCommand, chain,
+										  dlist_pop_head_node(cmd_flist));
+					memset(cmd, 0, sizeof(GpuStoreBackgroundCommand));
+					cmd->database_oid = gs_sstate->database_oid;
+					cmd->ftable_oid   = gs_sstate->ftable_oid;
+					cmd->command      = GSTORE_BACKGROUND_CMD__APPLY_REDO;
+					cmd->end_pos      = gs_sstate->redo_write_pos;
+					cmd->nitems       = (gs_sstate->redo_write_nitems -
+										 gs_sstate->redo_read_nitems);
+					cmd->retval = (CUresult) UINT_MAX;
+					dlist_push_tail(&gstore_shared_head->background_cmd_queue,
+									&cmd->chain);
+					retval = true;
+				}
+				SpinLockRelease(cmd_lock);
+				gs_sstate->redo_last_timestamp = GetCurrentTimestamp();
+			}
+			SpinLockRelease(&gs_sstate->redo_pos_lock);
+		}
+		SpinLockRelease(lock);
+	}
+	return retval;
 }
 
 void

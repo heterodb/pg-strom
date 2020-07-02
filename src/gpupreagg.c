@@ -4155,7 +4155,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 							gpa_info->used_params,
 							gpa_info->optimal_gpu,
 							gpa_info->outer_nrows_per_block,
-							estate);
+							eflags);
 	gpas->gts.cb_next_task       = gpupreagg_next_task;
 	gpas->gts.cb_terminator_task = gpupreagg_terminator_task;
 	gpas->gts.cb_next_tuple      = gpupreagg_next_tuple;
@@ -5901,7 +5901,7 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
-	bool		gstore_locked = false;
+	bool		gstore_loaded = false;
 	int			retval;
 	CUresult	rc;
 
@@ -5912,7 +5912,7 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 			rc = gstoreFdwMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
-			gstore_locked = true;
+			gstore_loaded = true;
 		}
 		if (!gpreagg->kgjoin)
 			retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
@@ -5921,12 +5921,12 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 	STROM_CATCH();
 	{
-		if (gstore_locked)
+		if (gstore_loaded)
 			gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
-	if (gstore_locked)
+	if (gstore_loaded)
 		gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 	return retval;
 }

@@ -971,7 +971,7 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									List *used_params,
 									cl_int optimal_gpu,
 									cl_uint outer_nrows_per_block,
-									EState *estate);
+									cl_int eflags);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts,
@@ -1369,7 +1369,8 @@ extern bool	baseRelIsGstoreFdw(RelOptInfo *baserel);
 extern bool RelationIsGstoreFdw(Relation frel);
 extern int	GetOptimalGpuForGstoreFdw(PlannerInfo *root,
 									  RelOptInfo *baserel);
-extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs);
+extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss, int eflags,
+										   Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkGstoreFdw(GpuTaskState *gts);
 extern void ExecReScanGstoreFdw(GpuStoreFdwState *gstore_state);
 extern void ExecEndGstoreFdw(GpuStoreFdwState *gstore_state);
@@ -1389,6 +1390,7 @@ extern void gstoreFdwUnmapDeviceMemory(GpuContext *gcontext,
 #define GSTORE_FDW_SYSATTR_OID		6116
 extern void gstoreFdwBgWorkerBegin(void);
 extern bool gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array);
+extern bool gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array);
 extern void gstoreFdwBgWorkerEnd(void);
 extern void pgstrom_init_gstore_fdw(void);
 

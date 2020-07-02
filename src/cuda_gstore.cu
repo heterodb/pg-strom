@@ -252,17 +252,29 @@ __gpustore_apply_insert(kern_context *kcxt,
 				datum = kern_datum_get_column(kds, extra, j, oldid, &isnull);
 				if (!isnull)
 				{
-					cl_uint		sz1 = VARSIZE_EXHDR(var);
-					cl_uint		sz2 = VARSIZE_EXHDR(datum);
+					cl_uint		sz1 = VARSIZE_ANY_EXHDR(var);
+					cl_uint		sz2 = VARSIZE_ANY_EXHDR(datum);
 
-					assert((char *)datum >= (char *)extra &&
-						   (char *)datum + sz2 <= (char *)extra + extra->length);
+//					assert((char *)datum >= (char *)extra &&
+//						   (char *)datum + sz2 <= (char *)extra + extra->length);
+					printf("gid=%u datum=%p extra[%p..%p], sz1=%u sz2=%u\n",
+						   get_global_id(),
+						   datum,
+						   (char *)extra,
+						   (char *)extra + extra->length,
+						   sz1, sz2);
+					if ((char *)datum >= (char *)extra &&
+						(char *)datum <= (char *)extra + extra->length)
+					{
+					
 					if (sz1 == sz2 && __memcmp(VARDATA_ANY(var),
 											   VARDATA_ANY(datum), sz1) == 0)
 					{
 						/* Ok, this attribute is not updated */
 						offset = (char *)datum - (char *)extra;
 						goto reuse_extra;
+					}
+
 					}
 				}
 			}

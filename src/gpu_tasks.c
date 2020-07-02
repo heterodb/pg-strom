@@ -279,10 +279,11 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						List *used_params,
 						cl_int optimal_gpu,
 						cl_uint outer_nrows_per_block,
-						EState *estate)
+						cl_int eflags)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
+	EState		   *estate = gts->css.ss.ps.state;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
 	Bitmapset	   *outer_refs = NULL;
 	ListCell	   *lc;
@@ -322,7 +323,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 		if (RelationIsArrowFdw(relation))
 			gts->af_state = ExecInitArrowFdw(relation, outer_refs);
 		if (RelationIsGstoreFdw(relation))
-			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, outer_refs);
+			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, eflags, outer_refs);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;

@@ -1835,7 +1835,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							gs_info->used_params,
 							gs_info->optimal_gpu,
 							gs_info->nrows_per_block,
-							estate);
+							eflags);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = gpuscan_switch_task;

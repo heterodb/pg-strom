@@ -1247,6 +1247,12 @@ gpummgrBgWorkerDispatch(CUcontext *cuda_context_array)
 	return false;
 }
 
+static bool
+gpummgrBgWorkerIdleTask(CUcontext *cuda_context_array)
+{
+	return true;
+}
+
 static void
 gpummgrBgWorkerEnd(void)
 {
@@ -1321,15 +1327,19 @@ gpummgrBgWorkerMain(Datum arg)
 		if (gpummgrBgWorkerDispatch(cuda_context_array) &
 			gstoreFdwBgWorkerDispatch(cuda_context_array))
 		{
-			int		ev = WaitLatch(MyLatch,
-								   WL_LATCH_SET |
-								   WL_TIMEOUT |
-								   WL_POSTMASTER_DEATH,
-								   4000L,
-								   PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
-			if (ev & WL_POSTMASTER_DEATH)
-				elog(FATAL, "unexpected Postmaster dead");
+			if (gpummgrBgWorkerIdleTask(cuda_context_array) &
+				gstoreFdwBgWorkerIdleTask(cuda_context_array))
+			{
+				int		ev = WaitLatch(MyLatch,
+									   WL_LATCH_SET |
+									   WL_TIMEOUT |
+									   WL_POSTMASTER_DEATH,
+									   1000L,
+									   PG_WAIT_EXTENSION);
+				ResetLatch(MyLatch);
+				if (ev & WL_POSTMASTER_DEATH)
+					elog(FATAL, "unexpected Postmaster dead");
+			}
 		}
 	}
 	/* Exit */

@@ -47,7 +47,6 @@ typedef struct {
 	cl_uint		rowid;
 	cl_uint		xmin;
 	cl_uint		xmax;
-	cl_uint		__terminator;	/* =GSTORE_TX_LOG__TERMINATOR */
 } GstoreTxLogDelete;
 
 /*
