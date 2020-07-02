@@ -543,7 +543,7 @@ GstoreGetForeignPaths(PlannerInfo *root,
 	double			ntuples = baserel->tuples;
 
 	/* gstore_fdw.enabled */
-	if (gstore_fdw_enabled)
+	if (!gstore_fdw_enabled)
 		startup_cost += disable_cost;
 
 	if (primary_key > 0)
