@@ -1333,11 +1333,11 @@ __gstoreIterateForeignIndexScan(ForeignScanState *node)
 			}
 			PG_CATCH();
 			{
-				gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+				gstoreFdwSpinUnlockBaseRow(gs_desc, curr_id);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+			gstoreFdwSpinUnlockBaseRow(gs_desc, curr_id);
 
 			curr_id = rowmap[curr_id];
 		}
@@ -1378,6 +1378,7 @@ __gstoreIterateForeignSeqScan(ForeignScanState *node)
 		if (rowid >= fdw_state->nitems)
 			return NULL;
 		gstoreFdwSpinLockBaseRow(gs_desc, rowid);
+		//
 		visible = gstoreCheckVisibilityForRead(gs_desc, rowid,
 											   estate->es_snapshot,
 											   &sysattr);
@@ -1801,7 +1802,6 @@ __gstoreAllocExtraBuffer(GpuStoreDesc *gs_desc, size_t extra_sz)
 
 	/* must be aligned */
 	Assert(extra_sz == MAXALIGN(extra_sz));
-	elog(INFO, "%s: extra_sz=%zu", __FUNCTION__, extra_sz);
 	LWLockAcquire(&gs_sstate->base_mmap_lock, LW_SHARED);
 retry:
 	if (gs_desc->base_mmap_revision != gs_sstate->base_mmap_revision)
@@ -1813,13 +1813,11 @@ retry:
 		cl_ulong	old_usage = atomicRead64(&extra->usage);
 		cl_ulong	new_usage = old_usage + extra_sz;
 
-		elog(INFO, "old_usage=%lu new_usage=%lu length=%lu", old_usage, new_usage, extra->length);
 		Assert(old_usage >= offsetof(kern_data_extra, data));
 		if (new_usage <= extra->length)
 		{
 			if (atomicCAS64(&extra->usage, &old_usage, new_usage))
 			{
-				elog(INFO, "--> usage=%lu length=%lu", extra->usage, extra->length);
 				LWLockRelease(&gs_sstate->base_mmap_lock);
 
 				return (char *)extra + old_usage;
