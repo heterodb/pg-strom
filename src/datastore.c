@@ -90,25 +90,11 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 	{
 		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
 		char   *tts_isnull = KERN_DATA_STORE_DCLASS(kds, row_index);
-		int		i, natts = slot->tts_tupleDescriptor->natts;
-
-		for (i=0; i < natts; i++)
-			Assert(tts_isnull[i] == DATUM_CLASS__NORMAL ||
-				   tts_isnull[i] == DATUM_CLASS__NULL);
+		int		natts = slot->tts_tupleDescriptor->natts;
 
 		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
 		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * natts);
-#ifdef NOT_USED
-		/*
-		 * XXX - pointer reference is better than memcpy from performance
-		 * perspectives, however, we need to ensure tts_values/tts_isnull
-		 * shall be restored when pgstrom-data-store is released.
-		 * It will be cause of complicated / invisible bugs.
-		 */
-		slot->tts_values = tts_values;
-		slot->tts_isnull = tts_isnull;
-#endif
 		ExecStoreVirtualTuple(slot);
 		return true;
 	}

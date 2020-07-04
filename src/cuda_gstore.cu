@@ -255,14 +255,6 @@ __gpustore_apply_insert(kern_context *kcxt,
 					cl_uint		sz1 = VARSIZE_ANY_EXHDR(var);
 					cl_uint		sz2 = VARSIZE_ANY_EXHDR(datum);
 
-//					assert((char *)datum >= (char *)extra &&
-//						   (char *)datum + sz2 <= (char *)extra + extra->length);
-					printf("gid=%u datum=%p extra[%p..%p], sz1=%u sz2=%u\n",
-						   get_global_id(),
-						   datum,
-						   (char *)extra,
-						   (char *)extra + extra->length,
-						   sz1, sz2);
 					if ((char *)datum >= (char *)extra &&
 						(char *)datum <= (char *)extra + extra->length)
 					{

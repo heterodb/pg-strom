@@ -197,7 +197,6 @@ pgstromTotalSum(T *values, cl_uint nitems)
 
 /*
  * Utility functions to reference system columns
- *   (except for ctid and table_oid)
  */
 DEVICE_INLINE(cl_int)
 pg_sysattr_ctid_store(kern_context *kcxt,
@@ -347,6 +346,96 @@ pg_sysattr_tableoid_store(kern_context *kcxt,
 	}
 	return 0;
 }
+/*
+ * System attribute reference for Apache Arrow
+ */
+DEVICE_INLINE(cl_int)
+pg_sysattr_ctid_fetch_arrow(kern_context *kcxt,
+							kern_data_store *kds,
+							cl_uint row_index,
+							cl_char &dclass,
+							Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_oid_fetch_arrow(kern_context *kcxt,
+						   kern_data_store *kds,
+                           cl_uint row_index,
+                           cl_char &dclass,
+                           Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_xmin_fetch_arrow(kern_context *kcxt,
+							kern_data_store *kds,
+							cl_uint row_index,
+							cl_char &dclass,
+							Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_xmax_fetch_arrow(kern_context *kcxt,
+                            kern_data_store *kds,
+                            cl_uint row_index,
+                            cl_char &dclass,
+                            Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_cmin_fetch_arrow(kern_context *kcxt,
+							kern_data_store *kds,
+							cl_uint row_index,
+							cl_char &dclass,
+							Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_cmax_fetch_arrow(kern_context *kcxt,
+							kern_data_store *kds,
+							cl_uint row_index,
+							cl_char &dclass,
+							Datum   &value)
+{
+	dclass = DATUM_CLASS__NULL;
+	return 0;
+}
+
+DEVICE_INLINE(cl_int)
+pg_sysattr_tableoid_fetch_arrow(kern_context *kcxt,
+								kern_data_store *kds,
+								cl_uint row_index,
+								cl_char &dclass,
+								Datum   &value)
+{
+	if (!kds)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = (Datum)kds->table_oid;
+	}
+	return 0;
+}
+
+/*
+ * System attribute reference for GPU memory Store
+ */
+#include "cuda_gstore.h"
 
 /*
  * inline functions to form/deform HeapTuple

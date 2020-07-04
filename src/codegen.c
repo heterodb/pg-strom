@@ -3742,7 +3742,7 @@ pgstrom_union_type_declarations(StringInfo buf,
 						 dtype->type_name,
 						 dtype->type_name);
 	}
-	appendStringInfo(buf, "  } %s;\n", name);
+	appendStringInfo(buf, "  } %s __attribute__((unused));\n", name);
 }
 
 /*

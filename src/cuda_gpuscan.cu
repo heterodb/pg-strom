@@ -32,20 +32,17 @@ gpuscan_main_row(kern_context *kcxt,
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	gpuscanResultIndex *gs_results	__attribute__((unused))
 		= KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
-	cl_uint		dst_ncols = (kds_dst ? kds_dst->ncols : kds_src->ncols);
 	cl_uint		part_index = 0;
 	cl_uint		src_index;
 	cl_uint		src_base;
-	cl_uint		nitems_offset;
-	cl_uint		usage_offset	__attribute__((unused));
 	cl_uint		total_nitems_in = 0;	/* stat */
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
-	__shared__ cl_uint	nitems_base;
-	__shared__ cl_ulong	usage_base	__attribute__((unused));
+	__shared__ cl_uint	dst_nitems_base;
+	__shared__ cl_ulong	dst_usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_ROW);
-	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -60,12 +57,14 @@ gpuscan_main_row(kern_context *kcxt,
 		 src_base < kds_src->nitems;
 		 src_base += get_global_size(), part_index++)
 	{
-		kern_tupitem   *tupitem;
-		cl_bool			rc;
+		kern_tupitem   *tupitem = NULL;
+		cl_bool			rc = false;
 		cl_uint			nvalids;
-		cl_uint			required	__attribute__((unused));
-		cl_uint			extra_sz = 0;
-		cl_uint			suspend_kernel	__attribute__((unused)) = 0;
+		cl_uint			required = 0;
+		cl_uint			nitems_offset;
+		cl_uint			usage_offset = 0;
+		cl_uint			usage_length = 0;
+		cl_uint			suspend_kernel = 0;
 		cl_char		   *tup_dclass = NULL;
 		Datum		   *tup_values = NULL;
 
@@ -80,34 +79,24 @@ gpuscan_main_row(kern_context *kcxt,
 									&tupitem->t_self,
 									&tupitem->htup);
 		}
-		else
-		{
-			tupitem = NULL;
-			rc = false;
-		}
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt->errcode) > 0)
-			goto out_nostat;
-
+			break;
 		/* how many rows servived WHERE-clause evaluation? */
-		nitems_offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
-		if (nvalids == 0)
-			goto skip;
-
-		if (has_device_projection)
+		nitems_offset = pgstromStairlikeBinaryCount(rc, &nvalids);
+		if (nvalids > 0)
 		{
 			/* extract the source tuple to the private slot, if any */
-			if (tupitem && rc)
+			if (rc)
 			{
 				kcxt->vlpos = kcxt->vlbuf;	/* rewind */
 				tup_dclass = (cl_char *)
-					kern_context_alloc(kcxt, sizeof(cl_char) * dst_ncols);
+					kern_context_alloc(kcxt, sizeof(cl_char) * kds_dst->ncols);
 				tup_values = (Datum *)
-					kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
+					kern_context_alloc(kcxt, sizeof(Datum) * kds_dst->ncols);
 
 				if (!tup_dclass || !tup_values)
 				{
-					required = 0;
 					STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY,
 									   "out of memory");
 				}
@@ -119,20 +108,18 @@ gpuscan_main_row(kern_context *kcxt,
 											 &tupitem->t_self,
 											 tup_dclass,
 											 tup_values);
-					required = MAXALIGN(offsetof(kern_tupitem, htup) +
-										compute_heaptuple_size(kcxt,
-															   kds_dst,
-															   tup_dclass,
-															   tup_values));
+					required = kds_slot_compute_extra(kcxt,
+													  kds_dst,
+													  tup_dclass,
+													  tup_values);
 				}
 			}
-			else
-				required = 0;
 			/* bailout if any error */
 			if (__syncthreads_count(kcxt->errcode) > 0)
-				goto out_nostat;
-
-			usage_offset = pgstromStairlikeSum(required, &extra_sz);
+				break;;
+			/* allocation of the destination buffer */
+			usage_offset = pgstromStairlikeSum(__kds_packed(required),
+											   &usage_length);
 			if (get_local_id() == 0)
 			{
 				union {
@@ -148,10 +135,9 @@ gpuscan_main_row(kern_context *kcxt,
 				do {
 					newval = oldval = curval;
 					newval.i.nitems += nvalids;
-					newval.i.usage  += __kds_packed(extra_sz);
+					newval.i.usage  += usage_length;
 
-					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+					if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
 						__kds_unpack(newval.i.usage) > kds_dst->length)
 					{
 						atomicAdd(&kgpuscan->suspend_count, 1);
@@ -161,60 +147,42 @@ gpuscan_main_row(kern_context *kcxt,
 				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
 												 oldval.v64,
 												 newval.v64)) != oldval.v64);
-				nitems_base = oldval.i.nitems;
-				usage_base  = __kds_unpack(oldval.i.usage);
+				dst_nitems_base = oldval.i.nitems;
+				dst_usage_base  = oldval.i.usage;
 			}
 			if (__syncthreads_count(suspend_kernel) > 0)
 				break;
-
-			/* store the result heap-tuple on destination buffer */
-			if (tupitem && rc)
+			/* store the result tuple on the destination buffer */
+			if (rc)
 			{
-				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				size_t		pos;
-
-				pos = kds_dst->length - (usage_base + usage_offset + required);
-				tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-				form_kern_heaptuple(kcxt,
-									(kern_tupitem *)((char *)kds_dst + pos),
-									kds_dst,
-									&tupitem->t_self,
-									&tupitem->htup,
-									tup_dclass,
-									tup_values);
+				cl_uint	dst_index = dst_nitems_base + nitems_offset;
+				char   *dst_extra = ((char *)kds_dst + kds_dst->length -
+									 __kds_unpack(dst_usage_base +
+												  usage_offset) - required);
+				kds_slot_store_values(kcxt,
+									  kds_dst,
+									  dst_index,
+									  dst_extra,
+									  tup_dclass,
+									  tup_values);
 			}
 		}
-		else
-		{
-			if (get_local_id() == 0)
-				nitems_base = atomicAdd(&gs_results->nitems, nvalids);
-			__syncthreads();
-			if (tupitem && rc)
-			{
-				assert(nitems_base + nitems_offset < kds_src->nrooms);
-				gs_results->results[nitems_base + nitems_offset]
-					= __kds_packed((char *)&tupitem->htup -
-								   (char *)kds_src);
-			}
-		}
-	skip:
 		/* update statistics */
 		if (get_local_id() == 0)
 		{
 			total_nitems_in  += Min(kds_src->nitems - src_base,
 									get_local_size());
 			total_nitems_out += nvalids;
-			total_extra_size += extra_sz;
+			total_extra_size += __kds_unpack(usage_length);
 		}
 	}
-	/* write back statistics and error code */
+	/* write back statistics */
 	if (get_local_id() == 0)
 	{
 		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-out_nostat:
 	/* suspend the current position (even if normal exit) */
 	if (my_suspend && get_local_id() == 0)
 	{
@@ -235,12 +203,8 @@ gpuscan_main_block(kern_context *kcxt,
 {
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
-	cl_uint		src_nitems = kds_src->nitems;
-	cl_uint		dst_ncols = kds_dst->ncols;
 	cl_uint		part_sz;
 	cl_uint		n_parts;
-	cl_uint		nitems_offset;
-	cl_uint		usage_offset;
 	cl_uint		window_sz;
 	cl_uint		part_base;
 	cl_uint		part_index = 0;
@@ -249,11 +213,11 @@ gpuscan_main_block(kern_context *kcxt,
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
 	cl_bool		thread_is_valid = false;
-	__shared__ cl_uint	nitems_base;
-	__shared__ cl_ulong	usage_base;
+	__shared__ cl_uint	dst_nitems_base;
+	__shared__ cl_uint	dst_usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK);
-	assert(kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -279,8 +243,6 @@ gpuscan_main_block(kern_context *kcxt,
 		cl_uint		part_id;
 		cl_uint		line_no;
 		cl_uint		n_lines = 0;
-		cl_uint		nvalids;
-		cl_uint		nitems_real;
 
 		part_base = part_index * window_sz + get_group_id() * n_parts;
 		if (part_base >= kds_src->nitems)
@@ -294,10 +256,14 @@ gpuscan_main_block(kern_context *kcxt,
 			PageHeaderData *pg_page;
 			BlockNumber	block_nr;
 			cl_ushort	t_len	__attribute__((unused));
-			cl_uint		required;
-			cl_uint		extra_sz = 0;
+			cl_uint		nvalids;
+			cl_uint		required = 0;
+			cl_uint		nitems_real;
+			cl_uint		nitems_offset;
+			cl_uint		usage_offset = 0;
+			cl_uint		usage_length = 0;
 			cl_uint		suspend_kernel = 0;
-			cl_bool		rc;
+			cl_bool		rc = false;
 			cl_char	   *tup_dclass = NULL;
 			Datum	   *tup_values = NULL;
 
@@ -305,7 +271,7 @@ gpuscan_main_block(kern_context *kcxt,
 			kcxt->vlpos = kcxt->vlbuf;
 
 			/* identify the block */
-			if (thread_is_valid && part_id < src_nitems)
+			if (thread_is_valid && part_id < kds_src->nitems)
 			{
 				pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
 				n_lines = PageGetMaxOffsetNumber(pg_page);
@@ -325,33 +291,30 @@ gpuscan_main_block(kern_context *kcxt,
 
 			/* evaluation of the qualifiers */
 			if (htup)
-				rc = gpuscan_quals_eval(kcxt, kds_src,
+			{
+				rc = gpuscan_quals_eval(kcxt,
+										kds_src,
 										&t_self,
 										htup);
-			else
-				rc = false;
+			}
 			/* bailout if any error */
 			if (__syncthreads_count(kcxt->errcode) > 0)
 				goto out_nostat;
 
 			/* how many rows servived WHERE-clause evaluations? */
-			nitems_offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
-			if (nvalids == 0)
-				goto skip;
-
-			/* store the result heap-tuple to destination buffer */
-			if (htup && rc)
+			nitems_offset = pgstromStairlikeBinaryCount(rc, &nvalids);
+			if (nvalids > 0)
 			{
-				if (has_device_projection)
+				/* store the result heap-tuple to destination buffer */
+				if (rc)
 				{
 					tup_dclass = (cl_char *)
-						kern_context_alloc(kcxt, sizeof(cl_char) * dst_ncols);
+						kern_context_alloc(kcxt, sizeof(cl_char) * kds_dst->ncols);
 					tup_values = (Datum *)
-						kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
+						kern_context_alloc(kcxt, sizeof(Datum) * kds_dst->ncols);
 
 					if (!tup_dclass || !tup_values)
 					{
-						required = 0;
 						STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
 									  "out of memory");
 					}
@@ -363,95 +326,72 @@ gpuscan_main_block(kern_context *kcxt,
 												 &t_self,
 												 tup_dclass,
 												 tup_values);
-						required = MAXALIGN(offsetof(kern_tupitem, htup) +
-											compute_heaptuple_size(kcxt,
-																   kds_dst,
-																   tup_dclass,
-																   tup_values));
+						required = kds_slot_compute_extra(kcxt,
+														  kds_dst,
+														  tup_dclass,
+														  tup_values);
 					}
 				}
-				else
+				/* bailout if any error */
+				if (__syncthreads_count(kcxt->errcode) > 0)
+					goto out;
+				/* allocation of the destination buffer */
+				usage_offset = pgstromStairlikeSum(__kds_packed(required),
+												   &usage_length);
+				if (get_local_id() == 0)
 				{
-					/* no projection; just write the source tuple as is */
-					required = MAXALIGN(offsetof(kern_tupitem, htup) + t_len);
+					union {
+						struct {
+							cl_uint	nitems;
+							cl_uint	usage;
+						} i;
+						cl_ulong	v64;
+					} oldval, curval, newval;
+
+					curval.i.nitems = kds_dst->nitems;
+					curval.i.usage  = kds_dst->usage;
+					do {
+						newval = oldval = curval;
+						newval.i.nitems += nvalids;
+						newval.i.usage  += usage_length;
+
+						if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
+							__kds_unpack(newval.i.usage) > kds_dst->length)
+						{
+							atomicAdd(&kgpuscan->suspend_count, 1);
+							suspend_kernel = 1;
+							break;
+						}
+					} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+													 oldval.v64,
+													 newval.v64)) != oldval.v64);
+					dst_nitems_base = oldval.i.nitems;
+					dst_usage_base  = oldval.i.usage;
+				}
+				if (__syncthreads_count(suspend_kernel) > 0)
+					goto out;
+				/* store the result heap tuple */
+				if (rc)
+				{
+					cl_uint	dst_index = dst_nitems_base + nitems_offset;
+					char   *dst_extra = ((char *)kds_dst + kds_dst->length -
+										 __kds_unpack(dst_usage_base +
+													  usage_offset) - required);
+					kds_slot_store_values(kcxt,
+										  kds_dst,
+										  dst_index,
+										  dst_extra,
+										  tup_dclass,
+										  tup_values);
 				}
 			}
-			else
-				required = 0;
-			/* bailout if any error */
-			if (__syncthreads_count(kcxt->errcode) > 0)
-				goto out;
-
-			usage_offset = pgstromStairlikeSum(required, &extra_sz);
-			if (get_local_id() == 0)
-			{
-				union {
-					struct {
-						cl_uint	nitems;
-						cl_uint	usage;
-					} i;
-					cl_ulong	v64;
-				} oldval, curval, newval;
-
-				curval.i.nitems = kds_dst->nitems;
-				curval.i.usage  = kds_dst->usage;
-				do {
-					newval = oldval = curval;
-					newval.i.nitems += nvalids;
-					newval.i.usage  += __kds_packed(extra_sz);
-
-					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
-						__kds_unpack(newval.i.usage) > kds_dst->length)
-					{
-						atomicAdd(&kgpuscan->suspend_count, 1);
-						suspend_kernel = 1;
-						break;
-					}
-				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
-												 oldval.v64,
-												 newval.v64)) != oldval.v64);
-				nitems_base = oldval.i.nitems;
-				usage_base  = __kds_unpack(oldval.i.usage);
-			}
-			if (__syncthreads_count(suspend_kernel) > 0)
-				goto out;
-
-			/* store the result heap tuple */
-			if (htup && rc)
-			{
-				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				size_t		pos = (kds_dst->length
-								   - (usage_base + usage_offset + required));
-				if (has_device_projection)
-				{
-					form_kern_heaptuple(kcxt,
-										(kern_tupitem *)((char *)kds_dst + pos),
-										kds_dst,
-										&t_self,
-										htup,
-										tup_dclass,
-										tup_values);
-				}
-				else
-				{
-					kern_tupitem *tupitem;
-
-					tupitem = (kern_tupitem *)((char *)kds_dst + pos);
-					tupitem->t_len = t_len;
-					tupitem->t_self = t_self;
-					memcpy(&tupitem->htup, htup, t_len);
-				}
-				tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			}
-		skip:
 			/* update statistics */
-			pgstromStairlikeBinaryCount(htup != NULL, &nitems_real);
+			nitems_real = __syncthreads_count(htup != NULL);
 			if (get_local_id() == 0)
 			{
 				total_nitems_in		+= nitems_real;
 				total_nitems_out	+= nvalids;
-				total_extra_size	+= extra_sz;
+				total_extra_size	+= __kds_unpack(usage_length);
 			}
 
 			/*
@@ -495,19 +435,16 @@ gpuscan_main_arrow(kern_context *kcxt,
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	cl_uint		part_index = 0;
-	cl_uint		dst_ncols = kds_dst->ncols;
 	cl_uint		src_base;
 	cl_uint		src_index;
-	cl_uint		nitems_offset;
-	cl_uint		usage_offset	__attribute__((unused));
 	cl_uint		total_nitems_in = 0;	/* stat */
 	cl_uint		total_nitems_out = 0;	/* stat */
 	cl_uint		total_extra_size = 0;	/* stat */
-	__shared__ cl_uint	nitems_base;
-	__shared__ cl_ulong	usage_base	__attribute__((unused));
+	__shared__ cl_uint	dst_nitems_base;
+	__shared__ cl_uint	dst_usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_ARROW);
-	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -525,8 +462,10 @@ gpuscan_main_arrow(kern_context *kcxt,
 		kern_tupitem   *tupitem		__attribute__((unused));
 		cl_bool			rc;
 		cl_uint			nvalids;
-		cl_uint			required	__attribute__((unused));
-		cl_uint			extra_sz = 0;
+		cl_uint			required = 0;
+		cl_uint			nitems_offset;
+		cl_uint			usage_offset = 0;
+		cl_uint			usage_length = 0;
 		cl_uint			suspend_kernel = 0;
 		cl_char		   *tup_dclass = NULL;
 		Datum		   *tup_values = NULL;
@@ -542,119 +481,110 @@ gpuscan_main_arrow(kern_context *kcxt,
 			rc = false;
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt->errcode) > 0)
-			goto out_nostat;
+			break;
 
 		/* how many rows servived WHERE-clause evaluation? */
 		nitems_offset = pgstromStairlikeBinaryCount(rc, &nvalids);
-		if (nvalids == 0)
-			goto skip;
-
-		/*
-		 * OK, extract the source columns to form a result row
-		 */
-		if (rc)
+		if (nvalids > 0)
 		{
-			kcxt->vlpos = kcxt->vlbuf;	/* rewind */
-			tup_dclass = (cl_char *)
-				kern_context_alloc(kcxt, sizeof(cl_char) * dst_ncols);
-			tup_values = (Datum *)
-				kern_context_alloc(kcxt, sizeof(Datum) * dst_ncols);
-
-			if (!tup_dclass || !tup_values)
+			if (rc)
 			{
-				required = 0;
-				STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
-							  "out of memory");
-			}
-			else
-			{
-				gpuscan_projection_arrow(kcxt,
-										 kds_src,
-										 src_index,
-										 tup_dclass,
-										 tup_values);
-				required = MAXALIGN(offsetof(kern_tupitem, htup) +
-									compute_heaptuple_size(kcxt,
-														   kds_dst,
-														   tup_dclass,
-														   tup_values));
-			}
-		}
-		else
-			required = 0;
+				kcxt->vlpos = kcxt->vlbuf;	/* rewind */
+				tup_dclass = (cl_char *)
+					kern_context_alloc(kcxt, sizeof(cl_char) * kds_dst->ncols);
+				tup_values = (Datum *)
+					kern_context_alloc(kcxt, sizeof(Datum) * kds_dst->ncols);
 
-		usage_offset = pgstromStairlikeSum(required, &extra_sz);
-		if (get_local_id() == 0)
-		{
-			union {
-				struct {
-					cl_uint	nitems;
-					cl_uint	usage;
-				} i;
-				cl_ulong	v64;
-			} oldval, curval, newval;
-
-			curval.i.nitems = kds_dst->nitems;
-			curval.i.usage  = kds_dst->usage;
-			do {
-				newval = oldval = curval;
-				newval.i.nitems += nvalids;
-				newval.i.usage  += __kds_packed(extra_sz);
-
-				if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-					STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
-					__kds_unpack(newval.i.usage) > kds_dst->length)
+				if (!tup_dclass || !tup_values)
 				{
-					atomicAdd(&kgpuscan->suspend_count, 1);
-					suspend_kernel = 1;
-					break;
+					STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+								  "out of memory");
 				}
-			} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
-											 oldval.v64,
-											 newval.v64)) != oldval.v64);
-			nitems_base = oldval.i.nitems;
-			usage_base  = __kds_unpack(oldval.i.usage);
-		}
-		if (__syncthreads_count(suspend_kernel) > 0)
-			break;
+				else
+				{
+					gpuscan_projection_arrow(kcxt,
+											 kds_src,
+											 src_index,
+											 tup_dclass,
+											 tup_values);
+					required = kds_slot_compute_extra(kcxt,
+													  kds_dst,
+													  tup_dclass,
+													  tup_values);
+				}
+			}
+			/* bailout if any error */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				break;
+			/* allocation of the destination buffer */
+			usage_offset = pgstromStairlikeSum(__kds_packed(required),
+											   &usage_length);
+			if (get_local_id() == 0)
+			{
+				union {
+					struct {
+						cl_uint	nitems;
+						cl_uint	usage;
+					} i;
+					cl_ulong	v64;
+				} oldval, curval, newval;
 
-		/* store the result heap-tuple on destination buffer */
-		if (required > 0)
-		{
-			cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-			cl_uint		pos;
+				curval.i.nitems = kds_dst->nitems;
+				curval.i.usage  = kds_dst->usage;
+				do {
+					newval = oldval = curval;
+					newval.i.nitems += nvalids;
+					newval.i.usage  += usage_length;
 
-			pos = kds_dst->length - (usage_base + usage_offset + required);
-			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
-			form_kern_heaptuple(kcxt,
-								(kern_tupitem *)((char *)kds_dst + pos),
-								kds_dst,
-								NULL,	/* ItemPointerData */
-								NULL,	/* HeapTupleHeaderData */
-								tup_dclass,
-								tup_values);
+					if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
+						__kds_unpack(newval.i.usage) > kds_dst->length)
+					{
+						atomicAdd(&kgpuscan->suspend_count, 1);
+						suspend_kernel = 1;
+						break;
+					}
+				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+												 oldval.v64,
+												 newval.v64)) != oldval.v64);
+				dst_nitems_base = oldval.i.nitems;
+				dst_usage_base  = oldval.i.usage;
+			}
+			if (__syncthreads_count(suspend_kernel) > 0)
+				break;
+			/* store the result virtual-tuple on the destination buffer */
+			if (rc)
+			{
+				cl_uint		dst_index = dst_nitems_base + nitems_offset;
+				char	   *dst_extra = ((char *)kds_dst + kds_dst->length -
+										 __kds_unpack(dst_usage_base +
+													  usage_offset) - required);
+				kds_slot_store_values(kcxt,
+									  kds_dst,
+									  dst_index,
+									  dst_extra,
+									  tup_dclass,
+									  tup_values);
+			}
+			/* bailout if any error */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				break;
 		}
-		/* bailout if any error */
-		if (__syncthreads_count(kcxt->errcode) > 0)
-			break;
-	skip:
-		/* update statistics */
+		/* write back statistics */
 		if (get_local_id() == 0)
 		{
-			total_nitems_in  += Min(kds_src->nitems - src_base,
-									get_local_size());
+			total_nitems_in += Min(kds_src->nitems - src_base,
+								   get_local_size());
 			total_nitems_out += nvalids;
-			total_extra_size += extra_sz;
+			total_extra_size += __kds_unpack(usage_length);
 		}
 	}
-	/* write back statistics and error code */
+	/* write back statistics */
 	if (get_local_id() == 0)
 	{
-		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
+		atomicAdd(&kgpuscan->nitems_in, total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-out_nostat:
 	/* suspend the current position (even if normal exit) */
 	if (my_suspend && get_local_id() == 0)
 	{
@@ -677,11 +607,14 @@ gpuscan_main_column(kern_context *kcxt,
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	cl_uint		part_index = 0;
 	cl_uint		src_base;
+	cl_uint		total_nitems_in = 0;
+	cl_uint		total_nitems_out = 0;
+	cl_uint		total_extra_size = 0;
 	__shared__ cl_uint	dst_nitems_base;
-	__shared__ cl_ulong	dst_usage_base;
+	__shared__ cl_uint	dst_usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_COLUMN &&
-		   kds_dst->format == KDS_FORMAT_ROW);
+		   kds_dst->format == KDS_FORMAT_SLOT);
 	/* quick bailout if any error happen on the prior kernel */
 	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
 		return;
@@ -744,17 +677,17 @@ gpuscan_main_column(kern_context *kcxt,
 										  src_index,
 										  tup_dclass,
 										  tup_values);
-				required = MAXALIGN(offsetof(kern_tupitem, htup) +
-									compute_heaptuple_size(kcxt,
-														   kds_dst,
-														   tup_dclass,
-														   tup_values));
+				required = kds_slot_compute_extra(kcxt,
+												  kds_dst,
+												  tup_dclass,
+												  tup_values);
 			}
 			/* bailout if any error */
 			if (__syncthreads_count(kcxt->errcode) > 0)
 				break;
 			/* allocation of the destination buffer */
-			usage_offset = pgstromStairlikeSum(required, &usage_length);
+			usage_offset = pgstromStairlikeSum(__kds_packed(required),
+											   &usage_length);
 			if (get_local_id() == 0)
 			{
 				union {
@@ -770,10 +703,9 @@ gpuscan_main_column(kern_context *kcxt,
 				do {
 					newval = oldval = curval;
 					newval.i.nitems += nvalids;
-					newval.i.usage  += __kds_packed(usage_length);
+					newval.i.usage  += usage_length;
 
-					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+					if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
 						__kds_unpack(newval.i.usage) > kds_dst->length)
 					{
 						atomicAdd(&kgpuscan->suspend_count, 1);
@@ -784,45 +716,40 @@ gpuscan_main_column(kern_context *kcxt,
 												 oldval.v64,
 												 newval.v64)) != oldval.v64);
 				dst_nitems_base = oldval.i.nitems;
-				dst_usage_base  = __kds_unpack(oldval.i.usage);
+				dst_usage_base  = oldval.i.usage;
 			}
 			if (__syncthreads_count(suspend_kernel) > 0)
 				break;
 			/* store the result tuple on the destination buffer */
 			if (rc)
 			{
-				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				kern_tupitem *tupitem;
-
-				tupitem = (kern_tupitem *)
-					((char *)kds_dst
-					 + kds_dst->length
-					 - (dst_usage_base + usage_offset + required));
-				tup_index[dst_nitems_base + nitems_offset]
-					= __kds_packed((char *)tupitem - (char *)kds_dst);
-				form_kern_heaptuple(kcxt,
-									tupitem,
-									kds_dst,
-									NULL,
-									NULL,
-									tup_dclass,
-									tup_values);
-				/* add system attributes */
-				tupitem->t_self.ip_blkid.bi_hi = (src_index >> 16);
-				tupitem->t_self.ip_blkid.bi_lo = (src_index & 0xffffU);
-				tupitem->htup.t_choice.t_heap.t_xmin = tup_sysattr.xmin;
-				tupitem->htup.t_choice.t_heap.t_xmax = tup_sysattr.xmax;
-				tupitem->htup.t_choice.t_heap.t_field3.t_cid  = InvalidCommandId;
+				cl_uint		dst_index = dst_nitems_base + nitems_offset;
+				char	   *dst_extra = ((char *)kds_dst + kds_dst->length -
+										 __kds_unpack(dst_usage_base +
+													  usage_offset) - required);
+				kds_slot_store_values(kcxt,
+									  kds_dst,
+									  dst_index,
+									  dst_extra,
+									  tup_dclass,
+									  tup_values);
 			}
 		}
-		/* write back statistics */
+		/* update statistics */
 		if (get_local_id() == 0)
 		{
-			atomicAdd(&kgpuscan->nitems_in, Min(kds_src->nitems - src_base,
-												get_local_size()));
-			atomicAdd(&kgpuscan->nitems_out, nvalids);
-			atomicAdd(&kgpuscan->extra_size, usage_length);
+			total_nitems_in  += Min(kds_src->nitems - src_base,
+									get_local_size());
+			total_nitems_out += nvalids;
+			total_extra_size += __kds_unpack(usage_length);
 		}
+	}
+	/* write back statistics */
+	if (get_local_id() == 0)
+	{
+		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
+		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
+		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
 	/* suspend the current position (even if normal exit) */
 	if (my_suspend && get_local_id() == 0)

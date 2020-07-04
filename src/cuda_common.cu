@@ -346,6 +346,146 @@ __form_kern_heaptuple(kern_context *kcxt,
 }
 
 /*
+ * kds_slot_compute_extra
+ */
+DEVICE_FUNCTION(cl_uint)
+kds_slot_compute_extra(kern_context *kcxt,
+					   kern_data_store *kds,
+					   cl_char *tup_dclass,
+					   Datum   *tup_values)
+{
+	cl_uint		extra_sz = 0;
+
+	for (int j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[j];
+		cl_char		dclass = tup_dclass[j];
+
+		if (dclass == DATUM_CLASS__NULL)
+			continue;
+
+		if (cmeta->attbyval)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+		}
+		else if (cmeta->attlen > 0)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+			extra_sz = TYPEALIGN(cmeta->attalign, extra_sz);
+			extra_sz += cmeta->attlen;
+		}
+		else
+		{
+			Datum	datum = tup_values[j];
+
+			extra_sz = TYPEALIGN(cmeta->attalign, extra_sz);
+			switch (dclass)
+			{
+				case DATUM_CLASS__NORMAL:
+					extra_sz += VARSIZE_ANY(datum);
+					break;
+				case DATUM_CLASS__VARLENA:
+					extra_sz += pg_varlena_datum_length(kcxt,datum);
+					break;
+				case DATUM_CLASS__ARRAY:
+					extra_sz += pg_array_datum_length(kcxt,datum);
+					break;
+				case DATUM_CLASS__COMPOSITE:
+					extra_sz += pg_composite_datum_length(kcxt,datum);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					extra_sz += pg_geometry_datum_length(kcxt,datum);
+					break;
+				default:
+					STROM_ELOG(kcxt, "unexpected DATUM_CLASS");
+					return 0;
+			}
+		}
+	}
+	return MAXALIGN(extra_sz);
+}
+
+DEVICE_FUNCTION(void)
+kds_slot_store_values(kern_context *kcxt,
+					  kern_data_store *kds_dst,
+					  cl_uint  dst_index,
+					  char    *dst_extra,
+					  cl_char *tup_dclass,
+					  Datum   *tup_values)
+{
+	Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, dst_index);
+	cl_char	   *dst_dclass = KERN_DATA_STORE_DCLASS(kds_dst, dst_index);
+
+	assert(dst_extra == (char *)MAXALIGN(dst_extra));
+	assert(dst_extra >= (char *)(dst_dclass + kds_dst->ncols) &&
+		   dst_extra <= (char *)kds_dst + kds_dst->length);
+	for (int j=0; j < kds_dst->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds_dst->colmeta[j];
+		cl_char		dclass = tup_dclass[j];
+		cl_int		sz, padding;
+
+		if (dclass == DATUM_CLASS__NULL)
+		{
+			dst_dclass[j] = DATUM_CLASS__NULL;
+			dst_values[j] = 0;
+		}
+		else if (cmeta->attbyval)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+			dst_dclass[j] = DATUM_CLASS__NORMAL;
+			dst_values[j] = tup_values[j];
+		}
+		else if (cmeta->attlen > 0)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+			padding = (char *)TYPEALIGN(cmeta->attalign,
+										dst_extra) - dst_extra;
+			while (padding-- > 0)
+				*dst_extra++ = '\0';
+			memcpy(dst_extra, (char *)tup_values[j], cmeta->attlen);
+			dst_dclass[j] = DATUM_CLASS__NORMAL;
+			dst_values[j] = PointerGetDatum(dst_extra);
+			dst_extra += cmeta->attlen;
+		}
+		else
+		{
+			Datum	datum = tup_values[j];
+
+			padding = (char *)TYPEALIGN(cmeta->attalign,
+										dst_extra) - dst_extra;
+			while (padding-- > 0)
+				*dst_extra++ = '\0';
+			switch (dclass)
+			{
+				case DATUM_CLASS__NORMAL:
+					sz = VARSIZE_ANY(datum);
+					memcpy(dst_extra, DatumGetPointer(datum), sz);
+					break;
+				case DATUM_CLASS__VARLENA:
+					sz = pg_varlena_datum_write(kcxt, dst_extra, datum);
+					break;
+				case DATUM_CLASS__ARRAY:
+					sz = pg_array_datum_write(kcxt, dst_extra, datum);
+					break;
+				case DATUM_CLASS__COMPOSITE:
+					sz = pg_composite_datum_write(kcxt, dst_extra, datum);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					sz = pg_geometry_datum_write(kcxt, dst_extra, datum);
+					break;
+				default:
+					STROM_ELOG(kcxt, "unexpected DATUM_CLASS");
+					return;
+			}
+			dst_dclass[j] = DATUM_CLASS__NORMAL;
+            dst_values[j] = PointerGetDatum(dst_extra);
+			dst_extra += sz;
+		}
+	}
+}
+
+/*
  * pgstromStairlikeSum
  *
  * A utility routine to calculate sum of values when we have N items and 

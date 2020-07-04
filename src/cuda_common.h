@@ -1638,6 +1638,21 @@ __form_kern_heaptuple(kern_context *kcxt,
 					  cl_char  *tup_dclass,		/* in */
 					  Datum	   *tup_values);	/* in */
 /*
+ * support function for KDS_FORMAT_SLOT
+ */
+DEVICE_FUNCTION(cl_uint)
+kds_slot_compute_extra(kern_context *kcxt,
+					   kern_data_store *kds,
+					   cl_char *tup_dclass,
+					   Datum   *tup_values);
+DEVICE_FUNCTION(void)
+kds_slot_store_values(kern_context *kcxt,
+					  kern_data_store *kds_dst,
+					  cl_uint  dst_index,
+					  char    *dst_extra,
+					  cl_char *tup_dclass,
+					  Datum   *tup_values);
+/*
  * Reduction Operations
  */
 DEVICE_FUNCTION(cl_uint)

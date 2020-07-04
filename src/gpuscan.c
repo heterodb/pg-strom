@@ -110,7 +110,6 @@ typedef struct {
 	GpuScanSharedState *gs_sstate;
 	GpuScanRuntimeStat *gs_rtstat;
 	ExprState	   *dev_quals;		/* quals to be run on the device */
-	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_tuple_sz;
 	cl_uint			proj_extra_sz;
 	/* resource for CPU fallback */
@@ -696,124 +695,6 @@ codegen_gpuscan_projection(StringInfo kern,
 		nfields = RelationGetNumberOfAttributes(relation);
 	context->varlena_bufsz += (MAXALIGN(sizeof(Datum) * nfields) +
 							   MAXALIGN(sizeof(cl_char) * nfields));
-
-	/*
-	 * step.3 - make an "as-is" projection for columnar case
-	 */
-	if (!tlist_dev)
-	{
-		for (j=0; j < tupdesc->natts; j++)
-		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-			dtype = pgstrom_devtype_lookup(attr->atttypid);
-			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-			/* arrow */
-			if (!bms_is_member(k, outer_refs) || !dtype)
-				appendStringInfo(
-					&abody,
-					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
-			else
-			{
-				type_oid_list = list_append_unique_oid(type_oid_list,
-													   dtype->type_oid);
-				appendStringInfo(
-					&abody,
-					"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%u,index);\n"
-					"  if (temp.%s_v.isnull)\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
-					"  else\n"
-					"  {\n"
-					"    pg_datum_store(kcxt,temp.%s_v,\n"
-					"                   tup_dclass[%d],\n"
-					"                   tup_values[%d]);\n"
-					"  }\n",
-					dtype->type_name, j,
-					dtype->type_name, j,
-					dtype->type_name, j, j);
-				context->extra_flags |= dtype->type_flags;
-				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-			}
-			/* column */
-			if (!bms_is_member(k, outer_refs))
-			{
-				appendStringInfo(
-					&cbody,
-					"  tup_dclass[%d] = DATUM_CLASS__NULL;\n", j);
-			}
-			else if (attr->attbyval)
-			{
-				appendStringInfo(
-					&cbody,
-					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n"
-					"  if (!addr)\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
-					"  else\n"
-					"  {\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-					"    tup_values[%d] = READ_INT%u_PTR(addr);\n"
-					"  }\n",
-					j, j, j, j, 8 * attr->attlen);
-			}
-			else
-			{
-				Assert(attr->attlen > 0 || attr->attlen == -1);
-				appendStringInfo(
-					&cbody,
-					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n"
-					"  if (!addr)\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NULL;\n"
-					"  else\n"
-					"  {\n"
-					"    tup_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-					"    tup_values[%d] = PointerGetDatum(addr);\n"
-					"  }\n",
-					j, j, j, j);
-			}
-		}
-
-		appendStringInfo(
-			kern,
-			"DEVICE_FUNCTION(void)\n"
-			"gpuscan_projection_tuple(kern_context *kcxt,\n"
-			"                         kern_data_store *kds_src,\n"
-			"                         HeapTupleHeaderData *htup,\n"
-			"                         ItemPointerData *t_self,\n"
-			"                         cl_char *tup_dclass,\n"
-			"                         Datum *tup_values)\n"
-			"{\n"
-			"  STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
-			"                \"GpuScan: wrong code generation\");\n"
-			"}\n"
-			"\n"
-			"DEVICE_FUNCTION(void)\n"
-			"gpuscan_projection_arrow(kern_context *kcxt,\n"
-			"                         kern_data_store *kds_src,\n"
-			"                         size_t   index,\n"
-			"                         cl_char *tup_dclass,\n"
-			"                         Datum   *tup_values)\n"
-			"{\n"
-			"  void *addr __attribute__((unused));\n");
-		pgstrom_union_type_declarations(kern, "temp", type_oid_list);
-		appendStringInfoString(kern, abody.data);
-		appendStringInfo(
-			kern,
-			"}\n"
-			"\n"
-			"DEVICE_FUNCTION(void)\n"
-			"gpuscan_projection_column(kern_context *kcxt,"
-			"                          kern_data_store *kds_src,\n"
-			"                          kern_data_extra *kds_extra,\n"
-			"                          size_t   rowid,\n"
-			"                          cl_char *tup_dclass,\n"
-			"                          Datum   *tup_values)\n"
-			"{\n"
-			"  void *addr __attribute__((unused));\n"
-			"%s"
-			"}\n", cbody.data);
-		return;
-	}
-
 	/*
 	 * step.2 - setup of varremaps / varattnos
 	 */
@@ -837,8 +718,7 @@ codegen_gpuscan_projection(StringInfo kern,
 			Var	   *var = (Var *) tle->expr;
 
 			Assert(var->varno == scanrelid);
-			Assert(var->varattno > 0 &&
-				   var->varattno <= tupdesc->natts);
+			Assert(var->varattno != InvalidAttrNumber);
 			varremaps[tle->resno - 1] = var->varattno;
 		}
 		else
@@ -867,6 +747,43 @@ codegen_gpuscan_projection(StringInfo kern,
 			elog(ERROR, "Bug? system column appear in device expression");
 		appendStringInfo(&decl, "  pg_%s_t KVAR_%u;\n",
 						 dtype->type_name, anum);
+	}
+
+	/*
+	 * step.4 - system attribute references if any
+	 */
+	for (i=FirstLowInvalidHeapAttributeNumber+1; i < 0; i++)
+	{
+		const FormData_pg_attribute *attr = SystemAttributeDefinition(i);
+
+		for (j=0; j < list_length(tlist_dev); j++)
+		{
+			if (varremaps[j] != attr->attnum)
+				continue;
+			/* row&block */
+			appendStringInfo(
+				&tbody,
+				"  pg_sysattr_%s_store(kcxt,kds_src,htup,t_self,\n"
+				"                      tup_dclass[%d],\n"
+				"                      tup_values[%d]);\n",
+				NameStr(attr->attname), j, j);
+			/* arrow */
+			appendStringInfo(
+				&abody,
+				"  pg_sysattr_%s_fetch_arrow(kcxt,kds_src,index,\n"
+				"                            tup_dclass[%d],\n"
+				"                            tup_values[%d]);\n",
+				NameStr(attr->attname), j, j);
+			/* column */
+			appendStringInfo(
+				&cbody,
+				"  pg_sysattr_%s_fetch_column(kcxt,kds_src,index,\n"
+				"                             tup_dclass[%d],\n"
+				"                             tup_values[%d]);\n",
+				NameStr(attr->attname), j, j);
+
+			context->varlena_bufsz += MAXALIGN(sizeof(ItemPointerData));
+		}
 	}
 
 	/*
@@ -936,7 +853,7 @@ codegen_gpuscan_projection(StringInfo kern,
 			if (!referenced)
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n", j);
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,index);\n", j);
 			if (attr->attbyval)
 			{
 				appendStringInfo(
@@ -992,7 +909,7 @@ codegen_gpuscan_projection(StringInfo kern,
 			if (!referenced)
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,rowid);\n",
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,index);\n",
 					attr->attnum - 1);
 			appendStringInfo(
 				&cbody,
@@ -1102,7 +1019,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		"gpuscan_projection_column(kern_context *kcxt,\n"
 		"                          kern_data_store *kds_src,\n"
 		"                          kern_data_extra *kds_extra,\n"
-		"                          size_t rowid,\n"
+		"                          size_t index,\n"
 		"                          cl_char *tup_dclass,\n"
 		"                          Datum *tup_values)\n"
 		"{\n"
@@ -1230,27 +1147,24 @@ build_gpuscan_projection(PlannerInfo *root,
 						 cl_int *p_extra_sz)
 {
 	build_gpuscan_projection_context context;
-	Index		scanrelid = baserel->relid;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	bool		compatible = true;
 	List	   *tlist_dev = NIL;
+	List	   *vars_list;
 	ListCell   *lc;
-	cl_int		tuple_sz = 0;
-	cl_int		data_len = 0;
+	cl_uint		extra_sz = 0;
+	cl_uint		tuple_sz = 0;
 	int			j;
 
 	memset(&context, 0, sizeof(context));
 	context.root = root;
 	context.baserel = baserel;
-
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)
 		{
 			TargetEntry	   *tle = lfirst(lc);
 
-			if (build_gpuscan_projection_walker((Node *)tle->expr,
-												&context))
+			if (build_gpuscan_projection_walker((Node *)tle->expr, &context))
 				goto no_gpu_projection;
 		}
 	}
@@ -1267,8 +1181,7 @@ build_gpuscan_projection(PlannerInfo *root,
 		 */
 		foreach (lc, baserel->reltarget->exprs)
 		{
-			if (build_gpuscan_projection_walker((Node *)lfirst(lc),
-												&context))
+			if (build_gpuscan_projection_walker((Node *)lfirst(lc), &context))
 				goto no_gpu_projection;
 		}
 	}
@@ -1276,20 +1189,18 @@ build_gpuscan_projection(PlannerInfo *root,
 		goto no_gpu_projection;
 
 	/*
-	 * Host quals need
+	 * Referenced by the host quals
 	 */
 	if (host_quals)
 	{
-		List	   *vars_list = pull_vars_of_level((Node *)host_quals, 0);
-
+		vars_list = pull_vars_of_level((Node *)host_quals, 0);
 		foreach (lc, vars_list)
 		{
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				goto no_gpu_projection;
-			context.tlist_temp
-				= add_unique_expression(context.tlist_temp,
-										(Node *) var, var->varattno < 0);
+			context.tlist_temp = add_unique_expression(context.tlist_temp,
+													   (Node *)var, false);
 		}
 		list_free(vars_list);
 	}
@@ -1300,109 +1211,106 @@ build_gpuscan_projection(PlannerInfo *root,
 	context.resjunk = true;
 	if (dev_quals)
 	{
-		List	   *vars_list = pull_vars_of_level((Node *)dev_quals, 0);
-
+		vars_list = pull_vars_of_level((Node *)dev_quals, 0);
 		foreach (lc, vars_list)
 		{
 			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				goto no_gpu_projection;
-			context.tlist_temp
-				= add_unique_expression(context.tlist_temp,
-										(Node *) var, true);
+			context.tlist_temp = add_unique_expression(context.tlist_temp,
+													   (Node *) var, true);
 		}
 		list_free(vars_list);
 	}
+	tlist_dev = context.tlist_temp;
+no_gpu_projection:
+	if (tlist_dev == NIL)
+	{
+		if (tlist)
+			vars_list = pull_vars_of_level((Node *)tlist, 0);
+		else
+			vars_list = pull_vars_of_level((Node *)baserel->reltarget->exprs, 0);
+		if (host_quals != NIL)
+			vars_list = list_concat(vars_list,
+									pull_vars_of_level((Node *)host_quals, 0));
+		foreach (lc, vars_list)
+		{
+			Var	   *var = lfirst(lc);
 
-	/*
-	 * Reorder of target-entry; non-junk first, then junk attributes
-	 */
+			if (var->varattno != InvalidAttrNumber)
+				tlist_dev = add_unique_expression(tlist_dev, (Node *)var, false);
+			else
+			{
+				/* whole-row references */
+				for (j=0; j < tupdesc->natts; j++)
+				{
+					Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+					if (attr->attisdropped)
+						continue;
+					var = makeVar(baserel->relid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation, 0);
+					tlist_dev = add_unique_expression(tlist_dev, (Node *)var, false);
+				}
+			}
+		}
+		list_free(vars_list);
+
+		if (dev_quals != NIL)
+		{
+			vars_list = pull_vars_of_level((Node *)dev_quals, 0);
+			foreach (lc, vars_list)
+			{
+				Var	   *var = lfirst(lc);
+				Assert(var->varattno != InvalidAttrNumber);
+				tlist_dev = add_unique_expression(tlist_dev, (Node *)var, true);
+			}
+			list_free(vars_list);
+		}
+	}
+	/* calculation of tuple/extra size */
 	tuple_sz = offsetof(kern_tupitem,
 						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
 	if (tupleDescHasOid(tupdesc))
 		tuple_sz += sizeof(Oid);
 	tuple_sz = MAXALIGN(tuple_sz);
-
-	foreach (lc, context.tlist_temp)
+	extra_sz = MAXALIGN(context.extra_sz);
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
-		Oid			type_id = exprType((Node *)tle->expr);
-		int			type_mod = exprTypmod((Node *)tle->expr);
-		AttrNumber	resno = list_length(tlist_dev) + 1;
 		int16		typlen;
 		bool		typbyval;
 		char		typalign;
 
 		if (tle->resjunk)
 			continue;
-		get_typlenbyvalalign(type_id, &typlen, &typbyval, &typalign);
-		data_len = att_align_nominal(data_len, typalign);
-
-		if (!IsA(tle->expr, Var))
+		if (IsA(tle->expr, Var))
 		{
-			compatible = false;
-			data_len += get_typavgwidth(type_id, type_mod);
+			Var	   *var = (Var *)tle->expr;
+
+			get_typlenbyvalalign(var->vartype, &typlen, &typbyval, &typalign);
+			tuple_sz = att_align_nominal(tuple_sz, typalign);
+			tuple_sz += baserel->attr_widths[var->varattno - 1];
+			/* Apache Arrow may consume extra buffer for varlena */
+			if (typlen == -1)
+				extra_sz += 48;
 		}
 		else
 		{
-			Var		   *varnode = (Var *)tle->expr;
+			Oid		type_id = exprType((Node *)tle->expr);
+			int		type_mod = exprTypmod((Node *)tle->expr);
 
-			if (resno >= tupdesc->natts)
-				compatible = false;
-			else
-			{
-				Form_pg_attribute attr = tupleDescAttr(tupdesc, resno - 1);
-	
-				if (varnode->varno == scanrelid &&
-					varnode->varattno == attr->attnum)
-				{
-					Assert(varnode->vartype == attr->atttypid &&
-						   varnode->vartypmod == attr->atttypmod &&
-						   varnode->varcollid == attr->attcollation &&
-						   varnode->varlevelsup == 0);
-				}
-				else
-					compatible = false;
-			}
-			data_len += baserel->attr_widths[varnode->varattno - 1];
+			get_typlenbyvalalign(type_id, &typlen, &typbyval, &typalign);
+			tuple_sz = att_align_nominal(tuple_sz, typalign);
+			tuple_sz += get_typavgwidth(type_id, type_mod);
 		}
-		tle->resno = resno;
-		tlist_dev = lappend(tlist_dev, tle);
-	}
-	/* check number of valid attributes */
-	if (compatible &&
-		list_length(tlist_dev) != tupdesc->natts)
-		goto no_gpu_projection;
-
-	foreach (lc, context.tlist_temp)
-	{
-		TargetEntry	   *tle = (TargetEntry *) lfirst(lc);
-
-		if (!tle->resjunk)
-			continue;
-		tle->resno = list_length(tlist_dev) + 1;
-		tlist_dev = lappend(tlist_dev, tle);
 	}
 	*p_tuple_sz = MAXALIGN(tuple_sz);
-	*p_extra_sz = context.extra_sz;
+	*p_extra_sz = extra_sz;
 	return tlist_dev;
-
-no_gpu_projection:
-	tuple_sz = offsetof(kern_tupitem,
-						htup.t_bits[BITMAPLEN(tupdesc->natts)]);
-	if (tupleDescHasOid(tupdesc))
-		tuple_sz += sizeof(Oid);
-	tuple_sz = MAXALIGN(tuple_sz);
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-		tuple_sz = att_align_nominal(tuple_sz, attr->attalign);
-		tuple_sz += baserel->attr_widths[j + 1 - baserel->min_attr];
-	}
-	*p_tuple_sz = MAXALIGN(tuple_sz);
-	*p_extra_sz = 0;
-	return NIL;
 }
 
 /*
@@ -1778,6 +1686,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
 	GpuContext	   *gcontext;
+	TupleDesc		scan_tupdesc;
 	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
@@ -1805,27 +1714,10 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	 * of ExecCleanTypeFromTL; that leads incorrect projection.
 	 * So, we try to remove junk attributes from the scan-descriptor.
 	 */
-	if (cscan->custom_scan_tlist != NIL)
-	{
-		TupleDesc		scan_tupdesc
-			= ExecCleanTypeFromTL(cscan->custom_scan_tlist);
-		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
-							  &TTSOpsVirtual);
-		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
-		/* valid @custom_scan_tlist means device projection is required */
-		gss->dev_projection = true;
-	}
-#if 0
-	else
-	{
-		TupleDesc		scan_tupdesc = RelationGetDescr(scan_rel);
-
-		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
-							  &TTSOpsHeapTuple);
-		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss,
-											  cscan->scan.scanrelid);
-	}
-#endif
+	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+	ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc,
+						  &TTSOpsVirtual);
+	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
@@ -1868,19 +1760,11 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* initialize resource for CPU fallback */
 	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel),
 											  &TTSOpsHeapTuple);
-	if (gss->dev_projection)
-	{
-		ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
-		TupleTableSlot *scan_slot = gss->gts.css.ss.ss_ScanTupleSlot;
-
-		gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
-												 econtext,
-												 scan_slot,
-												 &gss->gts.css.ss.ps,
-												 RelationGetDescr(scan_rel));
-	}
-	else
-		gss->base_proj = NULL;
+	gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
+											 gss->gts.css.ss.ps.ps_ExprContext,
+											 gss->gts.css.ss.ss_ScanTupleSlot,
+											 &gss->gts.css.ss.ps,
+											 RelationGetDescr(scan_rel));
 	/* init BRIN-index support, if any */
 	pgstromExecInitBrinIndexMap(&gss->gts,
 								gs_info->index_oid,
@@ -2227,7 +2111,7 @@ gpuscan_create_task(GpuScanState *gss,
 	GpuContext	   *gcontext = gss->gts.gcontext;
 	pgstrom_data_store *pds_dst = NULL;
 	GpuScanTask	   *gscan;
-	cl_uint			nresults = 0;
+	cl_int			sm_count = 0;
 	size_t			suspend_sz = 0;
 	size_t			result_index_sz = 0;
 	size_t			length;
@@ -2235,51 +2119,19 @@ gpuscan_create_task(GpuScanState *gss,
 	CUresult		rc;
 
 	/*
-	 * allocation of destination buffer
+	 * A rough estimation for length of the destination buffer. Even though
+	 * pgstrom_chunk_size() is not sufficient for the GpuScan result, we can
+	 * suspend the kernel execution then resume it with new buffer. So, here
+	 * is no problem, and allocation of identical length has another benefit
+	 * because gpu_mmgr.c caches the recently released buffer.
 	 */
-	if (pds_src->kds.format == KDS_FORMAT_ROW && !gss->dev_projection)
-	{
-		nresults = pds_src->kds.nitems;
-		result_index_sz = offsetof(gpuscanResultIndex,
-								   results[nresults]);
-	}
-	else
-	{
-		double	ntuples = pds_src->kds.nitems;
-		double	proj_tuple_sz = gss->proj_tuple_sz;
-		cl_int	sm_count;
-		Size	length;
+	pds_dst = PDS_create_slot(gcontext,
+							  scan_tupdesc,
+							  pgstrom_chunk_size());
 
-		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
-		{
-			/*
-			 * A rough estimation for the result buffer. Gstore_Fdw usually
-			 * preserves several gigabytes on GPU device memory. It is a bit
-			 * large to store the result of GpuScan at a single chunk.
-			 * So, we leverage suspend/resume GPU kernel to generate multiple
-			 * small chunks to store the result, if needed.
-			 */
-			length = pgstrom_chunk_size();
-		}
-		else
-		{
-			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-			{
-				Assert(pds_src->kds.nrows_per_block > 0);
-				ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
-			}
-			length = KDS_calculateHeadSize(scan_tupdesc) +
-				STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
-				STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
-			length = Max3(length, pds_src->kds.length, 8<<20);
-		}
-		pds_dst = PDS_create_row(gcontext,
-								 scan_tupdesc,
-								 length);
-		sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
-		suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
-								GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
-	}
+	sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
+	suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
+							GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
 
 	/*
 	 * allocation of pgstrom_gpuscan
@@ -2856,29 +2708,32 @@ resume_kernel:
 		}
 		else if (nitems_out > 0)
 		{
-			Assert(extra_size > 0);
-			offset = pds_dst->kds.length - extra_size;
-			rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
-									extra_size,
+			length = KERN_DATA_STORE_SLOT_LENGTH(&pds_dst->kds, nitems_out);
+			rc = cuMemPrefetchAsync((CUdeviceptr)&pds_dst->kds,
+									length,
 									CU_DEVICE_CPU,
 									CU_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
-			length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
-			rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds),
-									length + sizeof(cl_uint) * nitems_out,
-									CU_DEVICE_CPU,
-									CU_STREAM_PER_THREAD);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+			if (pds_dst->kds.usage > 0)
+			{
+				length = __kds_unpack(pds_dst->kds.usage);
+				offset = pds_dst->kds.length - length;
+				rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
+										length,
+										CU_DEVICE_CPU,
+										CU_STREAM_PER_THREAD);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+			}
 		}
 
 		/* resume gpuscan kernel, if suspended */
 		if (gscan->kern.suspend_count > 0)
 		{
 			void	   *temp;
-
+			
 			CHECK_WORKER_TERMINATION();
 			/* return partial result */
 			pds_dst = PDS_clone(gscan->pds_dst);

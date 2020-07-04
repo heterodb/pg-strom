@@ -4206,10 +4206,10 @@ gpujoin_codegen_projection(StringInfo source,
 			/* arrow */
 			appendStringInfo(
 				&arrow,
-				"    sz = pg_sysattr_%s_store(kcxt,(offset == 0 ? NULL : %s),\n"
-				"                             NULL, NULL,\n"
-				"                             tup_dclass[%d],\n"
-				"                             tup_values[%d]);\n"
+				"    sz = pg_sysattr_%s_fetch_arrow(kcxt,(offset==0 ? NULL : %s),\n"
+				"                                   offset-1,\n"
+				"                                   tup_dclass[%d],\n"
+				"                                   tup_values[%d]);\n"
 				"    if (tup_extras)\n"
 				"      tup_extras[%d] = sz;\n",
 				NameStr(attr->attname),
@@ -4220,7 +4220,7 @@ gpujoin_codegen_projection(StringInfo source,
 			/* column */
 			appendStringInfo(
 				&column,
-				"    sz = pg_sysattr_%s_fetch_column(kcxt,(offset == 0 ? NULL : %s),\n"
+				"    sz = pg_sysattr_%s_fetch_column(kcxt,(offset==0 ? NULL : %s),\n"
 				"                                    offset-1,\n"
 				"                                    tup_dclass[%d],\n"
 				"                                    tup_values[%d]);\n"
