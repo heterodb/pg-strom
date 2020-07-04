@@ -520,7 +520,6 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
 		GpuTask	   *gtask = gts->curr_task;
-		struct timeval tv1,tv2;
 
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
@@ -531,13 +530,9 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 			gts->curr_lp_index = 0;
 		}
 		/* reload next chunk to be scanned */
-		gettimeofday(&tv1, NULL);
 		gtask = fetch_next_gputask(gts);
 		if (!gtask)
 			return NULL;
-		gettimeofday(&tv2, NULL);
-		elog(INFO, "fetch_next_gputask = %.3fms", TV_DIFF(tv2,tv1));
-		
 		if (gtask->cpu_fallback)
 			gts->num_cpu_fallbacks++;
 		gts->curr_task = gtask;

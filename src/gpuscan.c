@@ -1693,14 +1693,11 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
-	struct timeval	tv1, tv2;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(scan_rel != NULL);
 	Assert(outerPlanState(node) == NULL);
 	Assert(innerPlanState(node) == NULL);
-
-	gettimeofday(&tv1, NULL);
 	
 	/* setup GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(gs_info->optimal_gpu,
@@ -1785,9 +1782,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 explain_only);
 	gss->gts.program_id = program_id;
 	pfree(kern_define.data);
-
-	gettimeofday(&tv2, NULL);
-	elog(INFO, "ExecInitGpuScan = %.3fms", tv_diff(&tv2,&tv1));
 }
 
 /*
@@ -1856,23 +1850,15 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *) gss->gs_rtstat;
-	struct timeval		tv1, tv2, tv3;
 	
-	gettimeofday(&tv1, NULL);
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
-	gettimeofday(&tv2, NULL);
 	/* close index related stuff if any */
 	pgstromExecEndBrinIndexMap(&gss->gts);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
-	gettimeofday(&tv3, NULL);
-
-	elog(INFO, "ExecEndGpuScan sync=%.3fms other=%.3fms",
-		 tv_diff(&tv2,&tv1),
-		 tv_diff(&tv3,&tv2));
 }
 
 /*
