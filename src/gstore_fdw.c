@@ -1983,7 +1983,6 @@ __gstoreExecForeignModify(EState *estate,
 			rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
 										   gs_desc->rowid_map,
 										   gs_mstate->next_rowid);
-			elog(INFO, "gstoreFdwAllocateRowId -> rowid = %u (min = %u)", rowid, gs_mstate->next_rowid);
 			if (rowid >= kds->nrooms)
 				elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows",
 					 RelationGetRelationName(frel));
@@ -2646,15 +2645,16 @@ gstoreFdwRowIdMapSize(cl_uint nrooms)
 
 static cl_uint
 __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
-						 cl_uint min_id, int depth, cl_uint offset,
+						 cl_uint lbound, int depth, cl_uint offset,
 						 cl_bool *p_has_unused_rowids)
 {
 	cl_ulong   *next = NULL;
-	cl_ulong	mask = (1UL << ((min_id >> 24) & 0x3fU)) - 1;
-	int			k, start = (min_id >> 30);
+	int			k, start = (lbound >> 30);
+	cl_ulong	mask = (1UL << ((lbound >> 24) & 0x3fU)) - 1;
 	cl_uint		rowid = UINT_MAX;
+	cl_uint		upper = (offset << 8);
 
-	if ((offset << 8) >= nrooms)
+	if (upper >= nrooms)
 	{
 		*p_has_unused_rowids = false;
 		return UINT_MAX;	/* obviously, out of range */
@@ -2680,7 +2680,8 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 		default:
 			return UINT_MAX;	/* Bug? */
 	}
-	base += (4 * offset);
+	base += (offset << 2);
+
 	for (k=start; k < 4; k++, mask=0)
 	{
 		cl_ulong	map = base[k] | mask;
@@ -2691,7 +2692,7 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 			/* lookup the first zero position */
 			rowid = (__builtin_ffsl(~map) - 1);
 			bit = (1UL << rowid);
-			rowid |= (offset << 8) | (k << 6);	/* add offset */
+			rowid |= upper | (k << 6);	/* add offset */
 
 			if (!next)
 			{
@@ -2703,17 +2704,20 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 			else
 			{
 				cl_bool		has_unused_rowids;
-			
+
+
 				rowid = __gstoreFdwAllocateRowId(next, nrooms,
-												 min_id << 8,
+												 (lbound >> 24) == rowid ? lbound << 8 : 0,
 												 depth+1, rowid,
 												 &has_unused_rowids);
 				if (!has_unused_rowids)
+				{
 					base[k] |= bit;
+				}
 				if (rowid == UINT_MAX)
 				{
 					map |= bit;
-					min_id = 0;
+					lbound = 0;
 					goto retry;
 				}
 			}
@@ -2734,28 +2738,25 @@ gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
 					   GpuStoreRowIdMapHead *rowid_map,
 					   cl_uint min_rowid)
 {
+	cl_uint		lbound;
 	cl_uint		rowid;
 	cl_bool		has_unused_rowids;
-
-	{
-		elog(INFO, "rowmap = [%016lx][%016lx][%016lx]",
-			 rowid_map->base[0],
-			 rowid_map->base[4],
-			 rowid_map->base[4 + 1024]);
-	}
 	
 	if (min_rowid < rowid_map->nrooms)
 	{
 		if (rowid_map->nrooms <= (1U << 8))
-			min_rowid = (min_rowid << 24);		/* single level */
+			lbound = (min_rowid << 24);		/* single level */
 		else if (rowid_map->nrooms <= (1U << 16))
-			min_rowid = (min_rowid << 16);		/* dual level */
+			lbound = (min_rowid << 16);		/* dual level */
 		else if (rowid_map->nrooms <= (1U << 24))
-			min_rowid = (min_rowid << 8);		/* triple level */
+			lbound = (min_rowid << 8);		/* triple level */
+		else
+			lbound = min_rowid;				/* full level */
+
 		SpinLockAcquire(&gs_sstate->rowid_map_lock);
 		rowid = __gstoreFdwAllocateRowId(rowid_map->base,
 										 rowid_map->nrooms,
-										 min_rowid, 0, 0,
+										 lbound, 0, 0,
 										 &has_unused_rowids);
 		SpinLockRelease(&gs_sstate->rowid_map_lock);
 		return rowid;
@@ -4198,7 +4199,6 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 					rowid = *((uint32 *)(pos + 1));
 					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
 										  gs_desc->rowid_map, rowid);
-					elog(INFO, "release rowid=%u", rowid);
 				}
 				pos += sizeof(char) + sizeof(uint32);
 				break;
@@ -4208,7 +4208,6 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 					rowid = *((uint32 *)(pos + 1));
 					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
 										  gs_desc->rowid_map, rowid);
-					elog(INFO, "release rowid=%u", rowid);
 				}
 				pos += sizeof(char) + sizeof(uint32);
 				break;
