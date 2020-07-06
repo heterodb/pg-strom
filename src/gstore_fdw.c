@@ -281,10 +281,12 @@ static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 										 uint64 end_pos, uint32 nitems);
 static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
-static cl_uint	gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc,
+static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
+									   GpuStoreRowIdMapHead *rowid_map,
 									   cl_uint min_rowid);
-static void		gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid);
-
+static void		gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
+									  GpuStoreRowIdMapHead *rowid_map,
+									  cl_uint rowid);
 static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
 static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo,
@@ -1978,17 +1980,21 @@ __gstoreExecForeignModify(EState *estate,
 		/* new RowId allocation */
 		for (;;)
 		{
-			rowid = gstoreFdwAllocateRowId(gs_desc, gs_mstate->next_rowid);
+			rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
+										   gs_desc->rowid_map,
+										   gs_mstate->next_rowid);
+			elog(INFO, "gstoreFdwAllocateRowId -> rowid = %u (min = %u)", rowid, gs_mstate->next_rowid);
 			if (rowid >= kds->nrooms)
-			elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows",
-				 RelationGetRelationName(frel));
+				elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows",
+					 RelationGetRelationName(frel));
 			gs_mstate->next_rowid = rowid + 1;
 			gstoreFdwSpinLockBaseRow(gs_desc, rowid);
 			if (gstoreCheckVisibilityForInsert(gs_desc, rowid,
 											   gs_mstate->oldestXmin))
 				break;
 			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-			gstoreFdwReleaseRowId(gs_desc, rowid);
+			gstoreFdwReleaseRowId(gs_desc->gs_sstate,
+								  gs_desc->rowid_map, rowid);
 		}
 		/* set up user defined attributes under the row-lock */
 		PG_TRY();
@@ -2055,7 +2061,8 @@ __gstoreExecForeignModify(EState *estate,
 		PG_CATCH();
 		{
 			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-			gstoreFdwReleaseRowId(gs_desc, rowid);
+			gstoreFdwReleaseRowId(gs_desc->gs_sstate,
+								  gs_desc->rowid_map, rowid);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -2630,9 +2637,9 @@ gstoreFdwRowIdMapSize(cl_uint nrooms)
 	else if (nrooms <= (1U << 16))	/* double level */
 		n = 4 + TYPEALIGN(256, nrooms) / 64;
 	else if (nrooms <= (1U << 24))	/* triple level */
-		n = 4 + (4 << 8) + TYPEALIGN(256, nrooms) / 64;
+		n = 4 + 1024 + TYPEALIGN(256, nrooms) / 64;
 	else
-		n = 4 + (4 << 8) + (4 << 16) + TYPEALIGN(256, nrooms) / 64;
+		n = 4 + 1024 + 262144 + TYPEALIGN(256, nrooms) / 64;
 
 	return offsetof(GpuStoreRowIdMapHead, base[n]);
 }
@@ -2661,11 +2668,11 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 			break;
 		case 1:
 			if (nrooms > 65536)
-				next = base + 4 + (4 << 8);
+				next = base + 1024;
 			break;
 		case 2:
 			if (nrooms > 16777216)
-				next = base + 4 + (4 << 8) + (4 << 16);
+				next = base + 262144;
 			break;
 		case 3:
 			next = NULL;
@@ -2723,13 +2730,20 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 }
 
 static cl_uint
-gstoreFdwAllocateRowId(GpuStoreDesc *gs_desc, cl_uint min_rowid)
+gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
+					   GpuStoreRowIdMapHead *rowid_map,
+					   cl_uint min_rowid)
 {
-	GpuStoreRowIdMapHead *rowid_map = gs_desc->rowid_map;
-	GpuStoreSharedState *gs_sstate  = gs_desc->gs_sstate;
 	cl_uint		rowid;
 	cl_bool		has_unused_rowids;
 
+	{
+		elog(INFO, "rowmap = [%016lx][%016lx][%016lx]",
+			 rowid_map->base[0],
+			 rowid_map->base[4],
+			 rowid_map->base[4 + 1024]);
+	}
+	
 	if (min_rowid < rowid_map->nrooms)
 	{
 		if (rowid_map->nrooms <= (1U << 8))
@@ -2809,11 +2823,10 @@ __gstoreFdwReleaseRowId(cl_ulong *base, cl_uint nrooms, cl_uint rowid)
 }
 
 static void
-gstoreFdwReleaseRowId(GpuStoreDesc *gs_desc, cl_uint rowid)
+gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
+					  GpuStoreRowIdMapHead *rowid_map,
+					  cl_uint rowid)
 {
-    GpuStoreRowIdMapHead *rowid_map = gs_desc->rowid_map;
-    GpuStoreSharedState  *gs_sstate = gs_desc->gs_sstate;
-
 	SpinLockAcquire(&gs_sstate->rowid_map_lock);
 	__gstoreFdwReleaseRowId(rowid_map->base,
 							rowid_map->nrooms, rowid);
@@ -2937,8 +2950,7 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 	Assert(is_locked);
 	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 	ConditionVariableCancelSleep();
-
-	elog(INFO, "Insert PK of rowid=%u, hash=%08lx", rowid, hash);
+//	elog(INFO, "Insert PK of rowid=%u, hash=%08lx", rowid, hash);
 }
 
 static void
@@ -3010,8 +3022,7 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 		}
 	}
 	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
-
-	elog(INFO, "Remove PK of rowid=%u, hash=%08lx", rowid, hash);
+//	elog(INFO, "Remove PK of rowid=%u, hash=%08lx", rowid, hash);
 }
 
 /*
@@ -3042,7 +3053,7 @@ gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
 	hbuf_sz = offsetof(GpuStoreBaseFileHead, schema) + main_sz;
 	hbuf = alloca(hbuf_sz);
 	memset(hbuf, 0, hbuf_sz);
-	memcpy(hbuf->signature, GPUSTORE_BASEFILE_SIGNATURE, 8);
+	memcpy(hbuf->signature, GPUSTORE_BASEFILE_MAPPED_SIGNATURE, 8);
 	strcpy(hbuf->ftable_name, RelationGetRelationName(frel));
 
 	init_kernel_data_store(&hbuf->schema,
@@ -3340,7 +3351,7 @@ gstoreFdwValidateBaseFile(Relation frel,
 				elog(ERROR, "Base file '%s' has no PK Index, but foreign-table '%s' has primary key definition",
 					 gs_sstate->base_file,
 					 RelationGetRelationName(frel));
-		sz = offsetof(GpuStoreRowIdMapHead, base[nslots + nrooms]);
+		sz = offsetof(GpuStoreHashIndexHead, slots[nslots + nrooms]);
 		if (base_mmap->hash_index_offset + sz > mmap_sz)
 			elog(ERROR, "Base file '%s' is smaller then the estimation",
 				 gs_sstate->base_file);
@@ -3388,6 +3399,7 @@ gstoreFdwValidateBaseFile(Relation frel,
 	}
 	PG_END_TRY();
 	/* Ok, validated */
+	memcpy(base_mmap->signature, GPUSTORE_BASEFILE_MAPPED_SIGNATURE, 8);
 	if (pmem_unmap(base_mmap, mmap_sz) != 0)
 		elog(WARNING, "failed on pmem_unmap: %m");
 	pfree(__tupdesc);
@@ -3517,25 +3529,103 @@ __ApplyRedoLogDelete(Relation frel,
 	sysattr->cid  = InvalidCommandId;
 }
 
+/*
+ * Rebuild HashIndex
+ */
 static void
-__rebuildRowIdMap(Relation frel, GpuStoreSharedState *gs_sstate,
-				  GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz)
+__rebuildHashIndexEntry(GpuStoreSharedState *gs_sstate,
+						kern_data_store *kds,
+						GpuStoreHashIndexHead *hash_index,
+						cl_uint rowid)
 {
-#if 0
-	kern_data_store *kds = &base_mmap->schema;
-	kern_colmeta *cmeta = &kds->colmeta[kds->ncols - 1];
-	GpuStoreRowIdMapHead *rowmap;
-	size_t		rowmap_sz;
-	cl_uint		rowid;
+	kern_colmeta   *cmeta;
+	TypeCacheEntry *tcache;
+	Datum			hash;
+	Datum			kdatum;
+	Datum			cdatum;
+	bool			isnull;
+	cl_uint		   *rowmap = &hash_index->slots[hash_index->nslots];
+	cl_uint			curr_id, k;
 
-	/* clear the rowid-map */
-	rowmap_sz = gstoreFdwRowIdMapSize(kds->nrooms);
-	rowmap = (GpuStoreRowIdMapHead *)
+	Assert(gs_sstate->primary_key > 0 &&
+		   gs_sstate->primary_key <= kds->ncols);
+	Assert(hash_index->nrooms == kds->nrooms);
+	if (rowid >= hash_index->nrooms)
+		elog(ERROR, "Bug? rowid=%u is larger than index's nrooms=%lu",
+			 rowid, hash_index->nrooms);
+	cmeta = &kds->colmeta[gs_sstate->primary_key - 1];
+	tcache = lookup_type_cache(cmeta->atttypid,
+							   TYPECACHE_EQ_OPR_FINFO |
+							   TYPECACHE_HASH_PROC_FINFO);
+	kdatum = KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+	if (isnull)
+		elog(ERROR, "primary key '%s' of foreign table '%s' is NULL",
+			 NameStr(cmeta->attname), get_rel_name(kds->table_oid));
+	hash = FunctionCall1(&tcache->hash_proc_finfo, kdatum);
+	k = hash % hash_index->nslots;
+	for (curr_id = hash_index->slots[k];
+		 curr_id < hash_index->nrooms;
+		 curr_id = rowmap[curr_id])
+	{
+		cdatum = KDS_fetch_datum_column(kds, cmeta, curr_id, &isnull);
+		if (isnull)
+		{
+			elog(WARNING, "Bug? primary key '%s' has NULL at rowid=%u, ignored",
+				 NameStr(cmeta->attname), curr_id);
+			continue;
+		}
+		if (DatumGetBool(FunctionCall2(&tcache->eq_opr_finfo,
+									   kdatum, cdatum)))
+		{
+			Oid		typoutput;
+			bool	typisvarlena;
+
+			getTypeOutputInfo(cmeta->atttypid,
+							  &typoutput,
+							  &typisvarlena);
+			elog(WARNING, "duplicate PK violation; %s = %s already exists, ignored",
+				 NameStr(cmeta->attname),
+				 OidOutputFunctionCall(typoutput, kdatum));
+		}
+	}
+	rowmap[rowid] = hash_index->slots[k];
+	hash_index->slots[k] = rowid;
+}
+
+static void
+__rebuildRowIdMapAndHashIndex(Relation frel,
+							  GpuStoreSharedState *gs_sstate,
+							  GpuStoreBaseFileHead *base_mmap,
+							  size_t base_mmap_sz)
+{
+	kern_data_store *kds = &base_mmap->schema;
+	kern_colmeta *smeta = &kds->colmeta[kds->ncols - 1];	/* sysattr */
+	GpuStoreRowIdMapHead *rowid_map = NULL;
+	GpuStoreHashIndexHead *hash_index = NULL;
+	size_t		nrooms = gs_sstate->max_num_rows;
+	size_t		nslots = gs_sstate->num_hash_slots;
+	size_t		rowid_map_sz;
+	cl_uint		rowid, newid;
+
+	/* clean-up rowid-map */
+	rowid_map_sz = gstoreFdwRowIdMapSize(kds->nrooms);
+	rowid_map = (GpuStoreRowIdMapHead *)
 		((char *)base_mmap + base_mmap->rowid_map_offset);
-	memset(rowmap, 0, rowmap_sz);
-	memcpy(rowmap->signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
-	rowmap->length = rowmap_sz;
-	rowmap->nrooms = kds->nrooms;
+	memset(rowid_map, 0, rowid_map_sz);
+	memcpy(rowid_map->signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
+	rowid_map->length = rowid_map_sz;
+	rowid_map->nrooms = kds->nrooms;
+
+	/* clean-up hash-index */
+	if (base_mmap->hash_index_offset != 0)
+	{
+		hash_index = (GpuStoreHashIndexHead *)
+			((char *)base_mmap + base_mmap->hash_index_offset);
+		memcpy(hash_index->signature, GPUSTORE_HASHINDEX_SIGNATURE, 8);
+		hash_index->nrooms = nrooms;
+		hash_index->nslots = nslots;
+		memset(hash_index->slots, -1, sizeof(cl_uint) * (nslots + nrooms));
+	}
 
 	for (rowid=0; rowid < kds->nitems; rowid++)
 	{
@@ -3543,47 +3633,29 @@ __rebuildRowIdMap(Relation frel, GpuStoreSharedState *gs_sstate,
 		bool		isnull;
 
 		sysattr = (GstoreFdwSysattr *)
-			KDS_fetch_datum_column(kds, cmeta, rowid, &isnull);
+			KDS_fetch_datum_column(kds, smeta, rowid, &isnull);
 		if (isnull)
 		{
 			elog(WARNING, "foreign table '%s', rowid=%u has NULL on system column",
 				 RelationGetRelationName(frel), rowid);
 			continue;
 		}
-
 		if ((sysattr->xmin == FrozenTransactionId ||
 			 TransactionIdDidCommit(sysattr->xmin)) &&
 			(sysattr->xmax != FrozenTransactionId &&
 			 !TransactionIdDidCommit(sysattr->xmax)))
 		{
-			gstoreFdwAllocateRowId();
+			newid = gstoreFdwAllocateRowId(gs_sstate, rowid_map, rowid);
+			Assert(newid == rowid);
+			if (hash_index)
+				__rebuildHashIndexEntry(gs_sstate, kds, hash_index, rowid);
 		}
 	}
-#endif
 }
 
 static void
-__rebuildHashIndex(Relation frel, GpuStoreSharedState *gs_sstate,
-				   GpuStoreBaseFileHead *base_mmap, size_t base_mmap_sz)
-{
-	/* TODO: rebuild HashIndex */
-}
-
-static int
-__GstoreTxLogCommonCompare(const void *pos1, const void *pos2)
-{
-	const GstoreTxLogCommon *tx_log1 = pos1;
-	const GstoreTxLogCommon *tx_log2 = pos2;
-
-	if (tx_log1->timestamp < tx_log2->timestamp)
-		return -1;
-	if (tx_log1->timestamp > tx_log2->timestamp)
-		return  1;
-	return 0;
-}
-
-static void
-gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
+gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate,
+							 bool basefile_is_sanity)
 {
 	GpuStoreBaseFileHead *base_mmap = NULL;
 	size_t		base_mmap_sz;
@@ -3594,9 +3666,9 @@ gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 
 	PG_TRY();
 	{
-		GstoreTxLogCommon *tail_log = NULL;
 		cl_uint		i, nitems = 0;
 		char	   *pos, *end;
+		uint64		start_pos;
 		StringInfoData buf;
 
 		base_mmap = pmem_map_file(gs_sstate->base_file, 0,
@@ -3613,9 +3685,8 @@ gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 		if (!redo_mmap)
 			elog(ERROR, "failed on pmem_map_file('%s'): %m",
 				 gs_sstate->redo_log_file);
-
 		/*
-		 * Seek to the first and last log position
+		 * Seek to the position where last written
 		 */
 		initStringInfo(&buf);
 		pos = redo_mmap;
@@ -3624,70 +3695,59 @@ gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 		{
 			GstoreTxLogCommon *curr = (GstoreTxLogCommon *)pos;
 
-			/* Quick validation of the Log */
-			if (((curr->type != GSTORE_TX_LOG__INSERT) &&
-				 (curr->type != GSTORE_TX_LOG__DELETE) &&
-				 (curr->type != GSTORE_TX_LOG__COMMIT)) ||
-				(char *)curr + curr->length + sizeof(uint64) > end ||
-				curr->length != MAXALIGN(curr->length) ||
-				((cl_uint *)curr + curr->length)[-1] != GSTORE_TX_LOG__TERMINATOR)
-			{
-				pos += sizeof(cl_long);
-				continue;
-			}
-
-			if (!tail_log || curr->timestamp > tail_log->timestamp)
-				tail_log = curr;
-
-			if (curr->type != GSTORE_TX_LOG__COMMIT)
+			if (((curr->type == GSTORE_TX_LOG__INSERT) ||
+				 (curr->type == GSTORE_TX_LOG__DELETE) ||
+				 (curr->type == GSTORE_TX_LOG__COMMIT)) &&
+				curr->length == MAXALIGN(curr->length) &&
+				(char *)curr + curr->length <= end)
 			{
 				enlargeStringInfo(&buf, sizeof(GstoreTxLogCommon *));
 				((GstoreTxLogCommon **)buf.data)[nitems++] = curr;
 				buf.len += sizeof(GstoreTxLogCommon *);
+				pos += curr->length;
+				continue;
 			}
-			pos += curr->length;
+			break;
 		}
 
-		if (nitems > 0)
+		if (!basefile_is_sanity)
 		{
-			uint64		start_pos;
-
-			/* apply GstoreTxLogRow records */
-			qsort(buf.data, nitems, sizeof(GstoreTxLogCommon *),
-				  __GstoreTxLogCommonCompare);
+			elog(LOG, "foreign table '%s' begins to apply redo log [%s] onto the base file[%s]",
+				 RelationGetRelationName(frel),
+				 gs_sstate->redo_log_file,
+				 gs_sstate->base_file);
 			for (i=0; i < nitems; i++)
 			{
 				GstoreTxLogCommon *tx_log = ((GstoreTxLogCommon **)buf.data)[i];
 
-				if (tx_log->type == GSTORE_TX_LOG__INSERT)
+				switch (tx_log->type)
 				{
-					__ApplyRedoLogInsert(frel, base_mmap, base_mmap_sz,
-										 (GstoreTxLogInsert *)tx_log);
-				}
-				else if (tx_log->type == GSTORE_TX_LOG__DELETE)
-				{
-					__ApplyRedoLogDelete(frel, base_mmap, base_mmap_sz,
-										 (GstoreTxLogDelete *)tx_log);
-				}
-				else
-				{
-					elog(ERROR, "unexpected log type on REDO File");
+					case GSTORE_TX_LOG__INSERT:
+						__ApplyRedoLogInsert(frel, base_mmap, base_mmap_sz,
+											 (GstoreTxLogInsert *)tx_log);
+						break;
+					case GSTORE_TX_LOG__DELETE:
+						__ApplyRedoLogDelete(frel, base_mmap, base_mmap_sz,
+											 (GstoreTxLogDelete *)tx_log);
+						break;
+					default:
+						/* skip GSTORE_TX_LOG__COMMIT - to be fixed up later */
+						break;
 				}
 			}
-			/* rebbuild row-id map, and PK hash-index */
-			__rebuildRowIdMap(frel, gs_sstate, base_mmap, base_mmap_sz);
-			__rebuildHashIndex(frel, gs_sstate, base_mmap, base_mmap_sz);
+			/* rebuild row-id map and PK hash-index */
+			__rebuildRowIdMapAndHashIndex(frel, gs_sstate, base_mmap, base_mmap_sz);
 			if (base_is_pmem)
 				pmem_persist(base_mmap, base_mmap_sz);
 			else
 				pmem_msync(base_mmap, base_mmap_sz);
-
-			/* Seek the redo_xxx_pos next to the tail */
-			start_pos = (char *)tail_log + tail_log->length - (char *)redo_mmap;
-			gs_sstate->redo_write_pos = start_pos;
-			gs_sstate->redo_read_pos  = start_pos;
-			gs_sstate->redo_sync_pos  = start_pos;
+			elog(LOG, "foreign table '%s' recovery done %u logs were applied",
+				RelationGetRelationName(frel), nitems);
 		}
+		start_pos = (pos - (char *)redo_mmap);
+		gs_sstate->redo_write_pos = start_pos;
+		gs_sstate->redo_read_pos  = start_pos;
+		gs_sstate->redo_sync_pos  = start_pos;
 		pfree(buf.data);
 	}
 	PG_CATCH();
@@ -3885,8 +3945,7 @@ gstoreFdwCreateSharedState(Relation frel)
 		/* Create redo-log file on demand */
 		gstoreFdwCreateRedoLog(frel, gs_sstate);
 		/* Apply Redo-Log, if needed */
-		if (!basefile_is_sanity)
-			gstoreFdwApplyRedoHostBuffer(frel, gs_sstate);
+		gstoreFdwApplyRedoHostBuffer(frel, gs_sstate, basefile_is_sanity);
 	}
 	PG_CATCH();
 	{
@@ -4137,7 +4196,9 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 				if (!is_commit)
 				{
 					rowid = *((uint32 *)(pos + 1));
-					gstoreFdwReleaseRowId(gs_desc, rowid);
+					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
+										  gs_desc->rowid_map, rowid);
+					elog(INFO, "release rowid=%u", rowid);
 				}
 				pos += sizeof(char) + sizeof(uint32);
 				break;
@@ -4145,7 +4206,9 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 				if (is_commit)
 				{
 					rowid = *((uint32 *)(pos + 1));
-					gstoreFdwReleaseRowId(gs_desc, rowid);
+					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
+										  gs_desc->rowid_map, rowid);
+					elog(INFO, "release rowid=%u", rowid);
 				}
 				pos += sizeof(char) + sizeof(uint32);
 				break;
@@ -4258,6 +4321,46 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		}
 		/* Wake up other backends blocked by row-level lock */
 		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
+	}
+}
+
+/*
+ * gstoreFdwOnExitCallback
+ */
+static void
+gstoreFdwOnExitCallback(int code, Datum arg)
+{
+	int			hindex;
+	char		signature[8];
+
+	if (code)
+		return;		/* not normal exit */
+
+	memcpy(signature, GPUSTORE_BASEFILE_SIGNATURE, 8);
+	for (hindex=0; hindex < GPUSTORE_SHARED_DESC_NSLOTS; hindex++)
+	{
+		slock_t	   *lock = &gstore_shared_head->gstore_sstate_lock[hindex];
+		dlist_head *slot = &gstore_shared_head->gstore_sstate_slot[hindex];
+		dlist_iter	iter;
+		int			fdesc;
+
+		SpinLockAcquire(lock);
+		dlist_foreach(iter, slot)
+		{
+			GpuStoreSharedState *gs_sstate = (GpuStoreSharedState *)
+				dlist_container(GpuStoreSharedState, hash_chain, iter.cur);
+
+			fdesc = open(gs_sstate->base_file, O_RDWR);
+			if (fdesc < 0)
+			{
+				elog(LOG, "failed on open('%s'): %m", gs_sstate->base_file);
+				continue;
+			}
+			if (write(fdesc, signature, 8) != 8)
+				elog(LOG, "failed on write('%s'): %m", gs_sstate->base_file);
+			close(fdesc);
+		}
+		SpinLockRelease(lock);
 	}
 }
 
@@ -5553,11 +5656,12 @@ pgstrom_init_gstore_fdw(void)
 		worker.bgw_main_arg = 0;
 		RegisterBackgroundWorker(&worker);
 	}
-	/* Request for the static shared memory */
+	/* request for the static shared memory */
 	RequestAddinShmemSpace(STROMALIGN(sizeof(GpuStoreSharedHead)));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
-
 	/* transaction callbacks */
 	RegisterXactCallback(gstoreFdwXactCallback, NULL);
+	/* cleanup on postmaster exit */
+	before_shmem_exit(gstoreFdwOnExitCallback, 0);
 }
