@@ -1974,13 +1974,6 @@ pthreadCondSignal(pthread_cond_t *cond)
 	(((double)(tv2.tv_sec  - tv1.tv_sec) * 1000000.0 +	\
 	  (double)(tv2.tv_usec - tv1.tv_usec)) / 1000.0)
 
-static inline double
-tv_diff(struct timeval *tv2, struct timeval *tv1)
-{
-	return ((double)(tv2->tv_sec  - tv1->tv_sec) * 1000000.0 +
-			(double)(tv2->tv_usec - tv1->tv_usec)) / 1000.0;
-}
-
 /*
  * simple wrapper for permission checks
  */

@@ -19,7 +19,6 @@
 #include "cuda_gstore.h"
 #include <libpmem.h>
 
-
 /*
  * GpuStoreBackgroundCommand
  */
@@ -1847,8 +1846,6 @@ retry:
 			sz = Max(sz, extra->length + (64UL << 20));
 			sz = PAGE_ALIGN(sz);
 			off = offsetof(GpuStoreBaseFileHead, schema) + kds->extra_hoffset;
-
-			elog(INFO, "sz = %zu off = %zu", sz, off);
 			
 			rawfd = open(gs_sstate->base_file, O_RDWR);
 			if (rawfd < 0)
@@ -3971,7 +3968,6 @@ gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc, bool abort_on_error)
 			elog(WARNING, "failed on pmem_unmap('%s'): %m",
 				 gs_sstate->base_file);
 	}
-	elog(INFO, "gstoreFdwRemapBaseFile calls pmem_map_file");
 	gs_desc->base_mmap = pmem_map_file(gs_sstate->base_file, 0,
 									   0, 0600,
 									   &gs_desc->base_mmap_sz,
