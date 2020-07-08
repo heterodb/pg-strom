@@ -25,6 +25,7 @@
 #define GSTORE_BACKGROUND_CMD__INITIAL_LOAD		'I'
 #define GSTORE_BACKGROUND_CMD__APPLY_REDO		'A'
 #define GSTORE_BACKGROUND_CMD__COMPACTION		'C'
+#define GSTORE_BACKGROUND_CMD__DROP_UNLOAD		'D'
 typedef struct
 {
 	dlist_node	chain;
@@ -144,7 +145,7 @@ typedef struct
 	dlist_node		hash_chain;
 	Oid				database_oid;
 	Oid				ftable_oid;
-
+	uint32			hash;
 	/* FDW options */
 	cl_int			cuda_dindex;
 	ssize_t			max_num_rows;
@@ -189,6 +190,8 @@ typedef struct
 {
 	Oid				database_oid;
 	Oid				ftable_oid;
+	TransactionId	owner_xid;
+	bool			is_dropped;
 	GpuStoreSharedState *gs_sstate;
 	/* base file mapping */
 	GpuStoreBaseFileHead *base_mmap;
@@ -258,6 +261,7 @@ static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB		   *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static bool			gstore_fdw_enabled;		/* GUC */
+static object_access_hook_type object_access_next = NULL;
 #define GSTORE_UNDO_LOGS_NSLOTS			200
 static dlist_head	gstore_undo_logs_slots[GSTORE_UNDO_LOGS_NSLOTS];
 
@@ -279,6 +283,7 @@ static CUresult	gstoreFdwInvokeInitialLoad(Relation frel, bool is_async);
 static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 										 uint64 end_pos, uint32 nitems);
 static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
+static CUresult gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
 static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
 									   GpuStoreRowIdMapHead *rowid_map,
@@ -2582,6 +2587,8 @@ gstoreFdwAllocSharedState(Relation frel)
 
 	gs_sstate->database_oid = MyDatabaseId;
 	gs_sstate->ftable_oid = RelationGetRelid(frel);
+	gs_sstate->hash = hash_any((const unsigned char *)&gs_sstate->database_oid,
+							   2 * sizeof(Oid));
 	gs_sstate->cuda_dindex = cuda_dindex;
 	gs_sstate->max_num_rows = max_num_rows;
 	gs_sstate->num_hash_slots = num_hash_slots;
@@ -3873,30 +3880,34 @@ static GpuStoreDesc *
 gstoreFdwLookupGpuStoreDesc(Relation frel)
 {
 	GpuStoreDesc *gs_desc;
-	Oid			hkey[2];
+	struct {
+		Oid		database_oid;
+		Oid		ftable_oid;
+		TransactionId owner_xid;
+	} hkey;
 	bool		found;
-	bool		invoke_initial_load = false;
 
 	if (!RelationIsGstoreFdw(frel))
 		elog(ERROR, "relation '%s' is not a foreign table managed by gstore_fdw",
 			 RelationGetRelationName(frel));
-	
-	hkey[0] = MyDatabaseId;
-	hkey[1] = RelationGetRelid(frel);
+
+	hkey.database_oid = MyDatabaseId;
+	hkey.ftable_oid = RelationGetRelid(frel);
+	hkey.owner_xid = GetTopTransactionId();
 	gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
-										   hkey,
+										   &hkey,
 										   HASH_ENTER,
 										   &found);
 	if (!found)
 	{
 		GpuStoreSharedState *gs_sstate = NULL;
+		uint32		hash;
 		int			hindex;
 		dlist_iter	iter;
 
 		memset((char *)gs_desc + sizeof(hkey), 0, sizeof(GpuStoreDesc) - sizeof(hkey));
-		
-		hindex = hash_any((const unsigned char *)hkey,
-						  sizeof(hkey)) % GPUSTORE_SHARED_DESC_NSLOTS;
+		hash = hash_any((const unsigned char *)&hkey, 2 * sizeof(Oid));
+		hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
 		SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
 		PG_TRY();
 		{
@@ -3919,8 +3930,9 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 				gs_sstate = gstoreFdwCreateSharedState(frel);
 				dlist_push_tail(&gstore_shared_head->gstore_sstate_slot[hindex],
 								&gs_sstate->hash_chain);
+				gstoreFdwInvokeInitialLoad(frel, true);
 				gs_desc->gs_sstate = gs_sstate;
-				invoke_initial_load = true;
+				Assert(gs_sstate->hash == hash);
 			}
 			gs_desc->gs_sstate = gs_sstate;
 			gs_desc->base_mmap_revision = UINT_MAX;
@@ -3928,14 +3940,11 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 		PG_CATCH();
 		{
 			SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
-			hash_search(gstore_desc_htab, hkey, HASH_REMOVE, NULL);
+			hash_search(gstore_desc_htab, &hkey, HASH_REMOVE, NULL);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
 		SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
-		/* Preload GPU Memory Store, if new segment */
-		if (invoke_initial_load)
-			gstoreFdwInvokeInitialLoad(frel, true);
 	}
 	/* ensure the file mapping is latest */
 	gstoreFdwSetupGpuStoreDesc(gs_desc, true);
@@ -4103,6 +4112,43 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 }
 
 /*
+ * __gstoreFdwXactDropResources
+ */
+static void
+__gstoreFdwXactDropResources(GpuStoreDesc *gs_desc, bool normal_commit)
+{
+	if (gs_desc->is_dropped && normal_commit)
+	{
+		GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+		uint32		hindex = gs_sstate->hash % GPUSTORE_SHARED_DESC_NSLOTS;
+		CUresult	rc;
+
+		rc = gstoreFdwInvokeDropUnload(gs_desc->ftable_oid, false);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gstoreFdwInvokeDropUnload: %s", errorText(rc));
+		SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
+		dlist_delete(&gs_sstate->hash_chain);
+		SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
+	}
+
+	if (gs_desc->base_mmap)
+	{
+		if (pmem_unmap(gs_desc->base_mmap,
+					   gs_desc->base_mmap_sz) != 0)
+			elog(WARNING, "failed on pmem_unmap(): %m");
+		gs_desc->base_mmap = NULL;
+	}
+
+	if (gs_desc->redo_mmap)
+	{
+		if (pmem_unmap(gs_desc->redo_mmap,
+					   gs_desc->redo_mmap_sz) != 0)
+			elog(WARNING, "failed on pmem_unmap(): %m");
+		gs_desc->redo_mmap = NULL;
+	}
+}
+
+/*
  * gstoreFdwXactCallback
  */
 static void
@@ -4138,6 +4184,8 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		dlist_mutable_iter iter;
 		TransactionId	xid = GetCurrentTransactionIdIfAny();
 		int				hindex = xid % GSTORE_UNDO_LOGS_NSLOTS;
+		HASH_SEQ_STATUS	hseq;
+		GpuStoreDesc   *gs_desc;
 
 		dlist_foreach_modify(iter, &gstore_undo_logs_slots[hindex])
 		{
@@ -4149,6 +4197,25 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 				dlist_delete(&gs_undo->chain);
 				pfree(gs_undo->buf.data);
 				pfree(gs_undo);
+			}
+		}
+
+		if (hash_get_num_entries(gstore_desc_htab) > 0)
+		{
+			hash_seq_init(&hseq, gstore_desc_htab);
+			while ((gs_desc = hash_seq_search(&hseq)) != NULL)
+			{
+				if (gs_desc->owner_xid == xid)
+				{
+					elog(INFO, "release gs_desc (%u,%u,%u)",
+						 gs_desc->database_oid,
+						 gs_desc->ftable_oid,
+						 gs_desc->owner_xid);
+				
+					__gstoreFdwXactDropResources(gs_desc, event == XACT_EVENT_COMMIT);
+
+					hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
+				}
 			}
 		}
 		/* Wake up other backends blocked by row-level lock */
@@ -4194,6 +4261,40 @@ gstoreFdwOnExitCallback(int code, Datum arg)
 		}
 		SpinLockRelease(lock);
 	}
+}
+
+/*
+ * callback on DROP FOREIGN TABLE, or cascaded deletion
+ */
+static void
+pgstrom_gstore_fdw_post_deletion(ObjectAccessType access,
+								 Oid classId,
+								 Oid objectId,
+								 int subId,
+								 void *arg)
+{
+	Relation	frel;
+	FdwRoutine *routine;
+
+	if (object_access_next)
+		object_access_next(access, classId, objectId, subId, arg);
+
+	if (access != OAT_DROP ||
+		classId != RelationRelationId ||
+		get_rel_relkind(objectId) != RELKIND_FOREIGN_TABLE ||
+		subId != InvalidAttrNumber)
+		return;		/* not a foreign table */
+	frel = table_open(objectId, NoLock);
+	Assert(CheckRelationLockedByMe(frel, AccessExclusiveLock, false));
+	routine = GetFdwRoutineForRelation(frel, false);
+	if (memcmp(routine, &pgstrom_gstore_fdw_routine,
+			   sizeof(FdwRoutine)) == 0)
+	{
+		GpuStoreDesc *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+
+		gs_desc->is_dropped = true;
+	}
+	table_close(frel, NoLock);
 }
 
 /* ----------------------------------------------------------------
@@ -4458,6 +4559,20 @@ gstoreFdwInvokeCompaction(Relation frel, bool is_async)
 	lcmd.ftable_oid = RelationGetRelid(frel);
 	lcmd.backend = (is_async ? NULL : MyLatch);
 	lcmd.command = GSTORE_BACKGROUND_CMD__COMPACTION;
+
+	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+}
+
+static CUresult
+gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async)
+{
+	GpuStoreBackgroundCommand lcmd;
+
+	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
+	lcmd.database_oid = MyDatabaseId;
+	lcmd.ftable_oid = ftable_oid;
+	lcmd.backend = (is_async ? NULL : MyLatch);
+	lcmd.command = GSTORE_BACKGROUND_CMD__DROP_UNLOAD;
 
 	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
 }
@@ -5055,6 +5170,46 @@ error_0:
 }
 
 /*
+ * GSTORE_BACKGROUND_CMD__DROP_UNLOAD command
+ */
+static CUresult
+GstoreFdwBackgroundDropUnload(GpuStoreDesc *gs_desc)
+{
+	CUresult	rc;
+	
+	elog(LOG, "run GSTORE_BACKGROUND_CMD__DROP_UNLOAD");
+	if (gs_desc->gpu_main_devptr != 0UL)
+	{
+		rc = cuMemFree(gs_desc->gpu_main_devptr);
+		if (rc != CUDA_SUCCESS)
+			elog(LOG, "Gstore_Fdw drop unload: failed on cuMemFree: %s",
+				 errorText(rc));
+	}
+	if (gs_desc->gpu_extra_devptr != 0UL)
+	{
+		rc = cuMemFree(gs_desc->gpu_extra_devptr);
+		if (rc != CUDA_SUCCESS)
+			elog(LOG, "Gstore_Fdw drop unload: failed on cuMemFree: %s",
+				 errorText(rc));
+	}
+	if (gs_desc->base_mmap)
+	{
+		if (pmem_unmap(gs_desc->base_mmap,
+					   gs_desc->base_mmap_sz) != 0)
+			elog(LOG, "Gstore_Fdw drop unload: failed on pmem_unmap(3): %m");
+	}
+	if (gs_desc->redo_mmap)
+	{
+		if (pmem_unmap(gs_desc->redo_mmap,
+					   gs_desc->redo_mmap_sz) != 0)
+			elog(LOG, "Gstore_Fdw drop unload: failed on pmem_unmap(3): %m");
+	}
+	hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
+
+	return CUDA_SUCCESS;
+}
+
+/*
  * gstoreFdwBgWorkerXXXX
  */
 void
@@ -5070,7 +5225,11 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 								   CUcontext *cuda_context_array)
 {
 	GpuStoreDesc *gs_desc;
-	Oid			hkey[2];
+	struct {
+		Oid		database_oid;
+		Oid		ftable_oid;
+		TransactionId owner_xid;
+	} hkey;
 	bool		found;
 	int			cuda_dindex;
 	CUresult	rc;
@@ -5079,20 +5238,22 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 	 * Lookup GpuStoreDesc, but never construct GpuStoreSharedState
 	 * unlike gstoreFdwLookupGpuStoreDesc. It is not our role.
 	 */
-	hkey[0] = cmd->database_oid;
-	hkey[1] = cmd->ftable_oid;
+	hkey.database_oid = cmd->database_oid;
+	hkey.ftable_oid   = cmd->ftable_oid;
+	hkey.owner_xid    = InvalidTransactionId;
 	gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
-										   hkey,
+										   &hkey,
 										   HASH_ENTER,
 										   &found);
 	if (!found)
 	{
 		GpuStoreSharedState *gs_sstate = NULL;
 		dlist_iter	iter;
+		uint32		hash;
 		int			hindex;
 
-		hindex = hash_any((const unsigned char *)hkey,
-						  sizeof(hkey)) % GPUSTORE_SHARED_DESC_NSLOTS;
+		hash = hash_any((const unsigned char *)&hkey, 2 * sizeof(Oid));
+		hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
 		SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
 		dlist_foreach(iter, &gstore_shared_head->gstore_sstate_slot[hindex])
 		{
@@ -5111,7 +5272,7 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 		{
 			elog(LOG, "No GpuStoreSharedState found for database=%u, ftable=%u",
 				 cmd->database_oid, cmd->ftable_oid);
-			hash_search(gstore_desc_htab, hkey, HASH_REMOVE, NULL);
+			hash_search(gstore_desc_htab, &hkey, HASH_REMOVE, NULL);
 			return CUDA_ERROR_INVALID_VALUE;
 		}
 		gs_desc->gs_sstate = gs_sstate;
@@ -5146,6 +5307,9 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			break;
 		case GSTORE_BACKGROUND_CMD__COMPACTION:
 			rc = GstoreFdwBackgroundCompation(gs_desc);
+			break;
+		case GSTORE_BACKGROUND_CMD__DROP_UNLOAD:
+			rc = GstoreFdwBackgroundDropUnload(gs_desc);
 			break;
 		default:
 			elog(LOG, "Unsupported Gstore maintainer command: %d", cmd->command);
@@ -5438,7 +5602,7 @@ pgstrom_init_gstore_fdw(void)
 	 * Local hash table for GpuStoreDesc
 	 */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize	= 2 * sizeof(Oid);		/* database_oid + ftable_oid */
+	hctl.keysize	= 2 * sizeof(Oid) + sizeof(TransactionId);
 	hctl.entrysize	= sizeof(GpuStoreDesc);
 	hctl.hcxt		= CacheMemoryContext;
 	gstore_desc_htab = hash_create("GpuStoreDesc Hash-table", 256,
@@ -5492,6 +5656,9 @@ pgstrom_init_gstore_fdw(void)
 	RequestAddinShmemSpace(STROMALIGN(sizeof(GpuStoreSharedHead)));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
+	/* callback for DROP FOREIGN TABLE support */
+	object_access_next = object_access_hook;
+	object_access_hook = pgstrom_gstore_fdw_post_deletion;
 	/* transaction callbacks */
 	RegisterXactCallback(gstoreFdwXactCallback, NULL);
 	/* cleanup on postmaster exit */
