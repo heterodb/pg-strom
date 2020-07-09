@@ -1430,21 +1430,11 @@ GstoreEndForeignScan(ForeignScanState *node)
 	ExecEndGstoreFdw((GpuStoreFdwState *)node->fdw_state);
 }
 
-static bool
-GstoreIsForeignScanParallelSafe(PlannerInfo *root,
-								RelOptInfo *rel,
-								RangeTblEntry *rte)
-{
-	return false;
-}
-
-static Size
-GstoreEstimateDSMForeignScan(ForeignScanState *node,
-							 ParallelContext *pcxt)
-{
-	return MAXALIGN(sizeof(pg_atomic_uint64));
-}
-
+#if 1
+/*
+ * NOTE: Right now, gstore_fdw does not support CPU parallel because
+ *       it makes little sense. So, routines below are just dummy.
+ */
 void
 ExecInitDSMGstoreFdw(GpuStoreFdwState *fdw_state,
 					 pg_atomic_uint64 *gstore_read_pos)
@@ -1453,31 +1443,10 @@ ExecInitDSMGstoreFdw(GpuStoreFdwState *fdw_state,
 	fdw_state->read_pos = gstore_read_pos;
 }
 
-static void
-GstoreInitializeDSMForeignScan(ForeignScanState *node,
-							   ParallelContext *pcxt,
-							   void *coordinate)
-{
-	GpuStoreFdwState *fdw_state = node->fdw_state;
-	
-	ExecInitDSMGstoreFdw(fdw_state, (pg_atomic_uint64 *)coordinate);
-}
-
 void
 ExecReInitDSMGstoreFdw(GpuStoreFdwState *fdw_state)
 {
 	pg_atomic_write_u64(fdw_state->read_pos, 0);
-}
-
-static void
-GstoreReInitializeDSMForeignScan(ForeignScanState *node,
-								 ParallelContext *pcxt,
-								 void *coordinate)
-{
-	GpuStoreFdwState   *fdw_state = node->fdw_state;
-
-	Assert(fdw_state->read_pos == coordinate);
-	ExecReInitDSMGstoreFdw(fdw_state);
 }
 
 void
@@ -1487,26 +1456,12 @@ ExecInitWorkerGstoreFdw(GpuStoreFdwState *fdw_state,
 	fdw_state->read_pos = gstore_read_pos;
 }
 
-static void
-GstoreInitializeWorkerForeignScan(ForeignScanState *node,
-								  shm_toc *toc,
-								  void *coordinate)
-{
-	GpuStoreFdwState *fdw_state = node->fdw_state;
-	ExecInitWorkerGstoreFdw(fdw_state, (pg_atomic_uint64 *)coordinate);
-}
-
 void
 ExecShutdownGstoreFdw(GpuStoreFdwState *fdw_state)
 {
 	/* nothing to do */
 }
-
-static void
-GstoreShutdownForeignScan(ForeignScanState *node)
-{
-	ExecShutdownGstoreFdw((GpuStoreFdwState *)node->fdw_state);
-}
+#endif
 
 static void
 __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
@@ -5666,7 +5621,7 @@ pgstrom_init_gstore_fdw(void)
     r->IterateForeignScan			= GstoreIterateForeignScan;
     r->ReScanForeignScan			= GstoreReScanForeignScan;
     r->EndForeignScan				= GstoreEndForeignScan;
-
+#if 0
 	/* Parallel support */
 	r->IsForeignScanParallelSafe	= GstoreIsForeignScanParallelSafe;
     r->EstimateDSMForeignScan		= GstoreEstimateDSMForeignScan;
@@ -5674,7 +5629,7 @@ pgstrom_init_gstore_fdw(void)
     r->ReInitializeDSMForeignScan	= GstoreReInitializeDSMForeignScan;
     r->InitializeWorkerForeignScan	= GstoreInitializeWorkerForeignScan;
     r->ShutdownForeignScan			= GstoreShutdownForeignScan;
-
+#endif
 	/* UPDATE/INSERT/DELETE */
     r->AddForeignUpdateTargets		= GstoreAddForeignUpdateTargets;
     r->PlanForeignModify			= GstorePlanForeignModify;
