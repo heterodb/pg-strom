@@ -193,6 +193,7 @@ typedef struct
 	TransactionId	owner_xid;
 	bool			is_dropped;
 	GpuStoreSharedState *gs_sstate;
+	dlist_head		gs_undo_logs;		/* list of GpuStoreUndoLogs */
 	/* base file mapping */
 	GpuStoreBaseFileHead *base_mmap;
 	uint32			base_mmap_revision;
@@ -234,10 +235,7 @@ struct GpuStoreFdwState
 typedef struct
 {
 	dlist_node		chain;
-	Oid				ftable_oid;
-	TransactionId	xid_top;
-	TransactionId	xid_sub;
-	GpuStoreDesc   *gs_desc;
+	TransactionId	curr_xid;
 	cl_uint			nitems;
 	StringInfoData	buf;
 } GpuStoreUndoLogs;
@@ -262,8 +260,6 @@ static HTAB		   *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static bool			gstore_fdw_enabled;		/* GUC */
 static object_access_hook_type object_access_next = NULL;
-#define GSTORE_UNDO_LOGS_NSLOTS			200
-static dlist_head	gstore_undo_logs_slots[GSTORE_UNDO_LOGS_NSLOTS];
 
 /* ---- Forward declarations ---- */
 Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
@@ -291,9 +287,11 @@ static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
 static void		gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
 									  GpuStoreRowIdMapHead *rowid_map,
 									  cl_uint rowid);
-static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo,
+static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
+											  GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
-static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo,
+static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc,
+											  GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
 
 /* ---- Atomic operations ---- */
@@ -1682,34 +1680,26 @@ gstoreFdwAppendDeleteLog(Relation frel,
 static GpuStoreUndoLogs *
 gstoreFdwLookupUndoLogs(GpuStoreDesc *gs_desc)
 {
-	TransactionId	xid_top = GetTopTransactionId();
-	TransactionId	xid_sub = GetCurrentTransactionId();
-	int				hindex = xid_top % GSTORE_UNDO_LOGS_NSLOTS;
+	TransactionId	curr_xid = GetCurrentTransactionId();
 	dlist_iter		iter;
 	GpuStoreUndoLogs *gs_undo;
 	MemoryContext	oldcxt;
 
-	dlist_foreach(iter, &gstore_undo_logs_slots[hindex])
+	dlist_foreach(iter, &gs_desc->gs_undo_logs)
 	{
 		gs_undo = dlist_container(GpuStoreUndoLogs, chain, iter.cur);
-
-		if (gs_undo->xid_top == xid_top &&
-			gs_undo->xid_sub == xid_sub &&
-			gs_undo->ftable_oid == gs_desc->ftable_oid)
+		if (gs_undo->curr_xid == curr_xid)
 			return gs_undo;
 	}
 	/* construct a new one */
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 	gs_undo = palloc0(sizeof(GpuStoreUndoLogs));
-	gs_undo->ftable_oid = gs_desc->ftable_oid;
-	gs_undo->xid_top = xid_top;
-	gs_undo->xid_sub = xid_sub;
-	gs_undo->gs_desc = gs_desc;
+	gs_undo->curr_xid = curr_xid;
 	gs_undo->nitems = 0;
 	initStringInfo(&gs_undo->buf);
 	MemoryContextSwitchTo(oldcxt);
 
-	dlist_push_tail(&gstore_undo_logs_slots[hindex],
+	dlist_push_head(&gs_desc->gs_undo_logs,
 					&gs_undo->chain);
 	return gs_undo;
 }
@@ -2073,13 +2063,13 @@ __gstoreExecForeignModify(EState *estate,
 	if (oldid != UINT_MAX)
 	{
 		Assert(operation == CMD_UPDATE || operation == CMD_DELETE);
-		gstoreFdwRemoveFromPrimaryKey(gs_undo, oldid);
+		gstoreFdwRemoveFromPrimaryKey(gs_desc, gs_undo, oldid);
 	}
 	/* INSERT or UPDATE */
 	if (rowid != UINT_MAX)
 	{
 		Assert(operation == CMD_INSERT || operation == CMD_UPDATE);
-		gstoreFdwInsertIntoPrimaryKey(gs_undo, rowid);
+		gstoreFdwInsertIntoPrimaryKey(gs_desc, gs_undo, rowid);
 	}
 	return slot;
 }
@@ -2845,9 +2835,9 @@ gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
  * ----------------------------------------------------------------
  */
 static void
-gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
+gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
+							  GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 {
-	GpuStoreDesc   *gs_desc = gs_undo->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	kern_data_store	*kds = &gs_desc->base_mmap->schema;
@@ -2959,9 +2949,9 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 }
 
 static void
-gstoreFdwRemoveFromPrimaryKey(GpuStoreUndoLogs *gs_undo, cl_uint rowid)
+gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
+							  GpuStoreUndoLogs *gs_undo, cl_uint rowid)
 {
-	GpuStoreDesc	*gs_desc = gs_undo->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	kern_data_store	*kds = &gs_desc->base_mmap->schema;
@@ -3839,6 +3829,28 @@ gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc, bool abort_on_error)
 	return true;
 }
 
+static void
+gstoreFdwInitGpuStoreDesc(GpuStoreDesc *gs_desc, GpuStoreSharedState *gs_sstate)
+{
+	gs_desc->is_dropped = false;
+	gs_desc->gs_sstate  = gs_sstate;
+	dlist_init(&gs_desc->gs_undo_logs);
+	/* base file mapping */
+	gs_desc->base_mmap = NULL;
+	gs_desc->base_mmap_revision = UINT_MAX;
+	gs_desc->base_mmap_is_pmem = 0;
+	gs_desc->rowid_map = NULL;
+	gs_desc->hash_index = NULL;
+	/* redo-log file mapping */
+	gs_desc->redo_mmap = NULL;
+	gs_desc->redo_mmap_sz = 0;
+	gs_desc->redo_mmap_is_pmem = 0;
+	/* background-worker only fields */
+	gs_desc->redo_backup_fdesc = -1;
+	gs_desc->gpu_main_devptr = 0UL;
+	gs_desc->gpu_extra_devptr = 0UL;
+}
+
 static bool
 gstoreFdwSetupGpuStoreDesc(GpuStoreDesc *gs_desc, bool abort_on_error)
 {
@@ -3905,7 +3917,6 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 		int			hindex;
 		dlist_iter	iter;
 
-		memset((char *)gs_desc + sizeof(hkey), 0, sizeof(GpuStoreDesc) - sizeof(hkey));
 		hash = hash_any((const unsigned char *)&hkey, 2 * sizeof(Oid));
 		hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
 		SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
@@ -3934,8 +3945,7 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 				gs_desc->gs_sstate = gs_sstate;
 				Assert(gs_sstate->hash == hash);
 			}
-			gs_desc->gs_sstate = gs_sstate;
-			gs_desc->base_mmap_revision = UINT_MAX;
+			gstoreFdwInitGpuStoreDesc(gs_desc, gs_sstate);
 		}
 		PG_CATCH();
 		{
@@ -3955,7 +3965,7 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
  * __gstoreFdwXactOnPreCommit
  */
 static void
-__gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
+__gstoreFdwXactOnPreCommit(GpuStoreDesc *gs_desc, GpuStoreUndoLogs *gs_undo)
 {
 	GstoreTxLogCommit *c_log = alloca(GSTORE_TX_LOG_COMMIT_ALLOCSZ);
 	char		   *pos = gs_undo->buf.data;
@@ -3964,7 +3974,7 @@ __gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
 	/* setup commit log buffer */
 	c_log->type = GSTORE_TX_LOG__COMMIT;
 	c_log->length = offsetof(GstoreTxLogCommit, data);
-	c_log->xid = gs_undo->xid_sub;
+	c_log->xid = gs_undo->curr_xid;
 	c_log->timestamp = GetCurrentTimestamp();
 	c_log->nitems = 0;
 
@@ -4008,8 +4018,7 @@ __gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
 				memset((char *)c_log + c_log->length, 0, diff);
 				c_log->length += diff;
 			}
-			__gstoreFdwAppendRedoLog(gs_undo->gs_desc,
-									 (GstoreTxLogCommon *)c_log);
+			__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)c_log);
 			/* rewind */
 			c_log->length = offsetof(GstoreTxLogCommit, data);
 			c_log->nitems = 0;
@@ -4022,9 +4031,9 @@ __gstoreFdwXactOnPreCommit(GpuStoreUndoLogs *gs_undo)
  * __gstoreFdwXactFinalize
  */
 static void
-__gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
+__gstoreFdwXactFinalize(GpuStoreDesc *gs_desc,
+						GpuStoreUndoLogs *gs_undo, bool normal_commit)
 {
-	GpuStoreDesc *gs_desc = gs_undo->gs_desc;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
 	char	   *pos = gs_undo->buf.data;
     cl_uint		count;
@@ -4036,7 +4045,7 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 		switch (*pos)
 		{
 			case 'I':	/* INSERT */
-				if (!is_commit)
+				if (!normal_commit)
 				{
 					rowid = *((uint32 *)(pos + 1));
 					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
@@ -4045,7 +4054,7 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 				pos += sizeof(char) + sizeof(uint32);
 				break;
 			case 'D':	/* DELETE */
-				if (is_commit)
+				if (normal_commit)
 				{
 					rowid = *((uint32 *)(pos + 1));
 					gstoreFdwReleaseRowId(gs_desc->gs_sstate,
@@ -4054,7 +4063,7 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 				pos += sizeof(char) + sizeof(uint32);
 				break;
 			case 'A':	/* Add PK */
-				if (!is_commit)
+				if (!normal_commit)
 				{
 					/* remove rowid from the index on abort  */
 					uint32	   *rowmap = &hash_index->slots[hash_index->nslots];
@@ -4080,7 +4089,7 @@ __gstoreFdwXactFinalize(GpuStoreUndoLogs *gs_undo, bool is_commit)
 				break;
 			case 'R':	/* Remove PK */
 				Assert(hash_index != NULL);
-				if (is_commit)
+				if (normal_commit)
 				{
 					/* remove rowid from the index on commit */
 					uint32	   *rowmap = &hash_index->slots[hash_index->nslots];
@@ -4154,6 +4163,10 @@ __gstoreFdwXactDropResources(GpuStoreDesc *gs_desc, bool normal_commit)
 static void
 gstoreFdwXactCallback(XactEvent event, void *arg)
 {
+	HASH_SEQ_STATUS	hseq;
+	GpuStoreDesc   *gs_desc;
+	GpuStoreUndoLogs *gs_undo;
+	TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
 #if 0
 	elog(INFO, "XactCallback: ev=%s xid=%u top-xid=%u",
 		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
@@ -4164,57 +4177,91 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		 GetCurrentTransactionIdIfAny(),
 		 GetTopTransactionIdIfAny());
 #endif
+	if (hash_get_num_entries(gstore_desc_htab) == 0)
+		return;
+	
 	if (event == XACT_EVENT_PRE_COMMIT)
 	{
 		dlist_iter		iter;
-		TransactionId	xid = GetCurrentTransactionIdIfAny();
-		int				hindex = xid % GSTORE_UNDO_LOGS_NSLOTS;
 
-		dlist_foreach(iter, &gstore_undo_logs_slots[hindex])
+		hash_seq_init(&hseq, gstore_desc_htab);
+		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			GpuStoreUndoLogs *gs_undo
-				= dlist_container(GpuStoreUndoLogs, chain, iter.cur);
-			if (gs_undo->xid_top == xid)
-				__gstoreFdwXactOnPreCommit(gs_undo);
+			if (gs_desc->owner_xid != curr_xid)
+				continue;
+			dlist_foreach (iter, &gs_desc->gs_undo_logs)
+			{
+				gs_undo = dlist_container(GpuStoreUndoLogs, chain, iter.cur);
+				__gstoreFdwXactOnPreCommit(gs_desc, gs_undo);
+			}
 		}
 	}
 	else if (event == XACT_EVENT_COMMIT ||
 			 event == XACT_EVENT_ABORT)
 	{
-		dlist_mutable_iter iter;
-		TransactionId	xid = GetCurrentTransactionIdIfAny();
-		int				hindex = xid % GSTORE_UNDO_LOGS_NSLOTS;
-		HASH_SEQ_STATUS	hseq;
-		GpuStoreDesc   *gs_desc;
+		dlist_node	   *dnode;
 
-		dlist_foreach_modify(iter, &gstore_undo_logs_slots[hindex])
+		hash_seq_init(&hseq, gstore_desc_htab);
+		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			GpuStoreUndoLogs *gs_undo
-				= dlist_container(GpuStoreUndoLogs, chain, iter.cur);
-			if (gs_undo->xid_top == xid)
+			if (gs_desc->owner_xid != curr_xid)
+				continue;
+			while (!dlist_is_empty(&gs_desc->gs_undo_logs))
 			{
-				__gstoreFdwXactFinalize(gs_undo, event == XACT_EVENT_COMMIT);
-				dlist_delete(&gs_undo->chain);
+				dnode = dlist_pop_head_node(&gs_desc->gs_undo_logs);
+				gs_undo = dlist_container(GpuStoreUndoLogs, chain, dnode);
+				__gstoreFdwXactFinalize(gs_desc, gs_undo,
+										event == XACT_EVENT_COMMIT);
 				pfree(gs_undo->buf.data);
 				pfree(gs_undo);
 			}
+			__gstoreFdwXactDropResources(gs_desc, event == XACT_EVENT_COMMIT);
+			hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
 		}
+		/* Wake up other backends blocked by row-level lock */
+		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
+	}
+}
 
-		if (hash_get_num_entries(gstore_desc_htab) > 0)
+/*
+ * gstoreFdwSubXactCallback
+ */
+static void
+gstoreFdwSubXactCallback(SubXactEvent event,
+						 SubTransactionId mySubid,
+						 SubTransactionId parentSubid, void *arg)
+{
+#if 0
+    elog(INFO, "SubXactCallback: ev=%s xid=%u top-xid=%u",
+		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
+		 event == SUBXACT_EVENT_COMMIT_SUB ? "SUBXACT_EVENT_COMMIT_SUB" :
+		 event == SUBXACT_EVENT_ABORT_SUB ? "SUBXACT_EVENT_ABORT_SUB" :
+		 event == SUBXACT_EVENT_PRE_COMMIT_SUB ? "SUBXACT_EVENT_PRE_COMMIT_SUB" : "???",
+		 GetCurrentTransactionIdIfAny(),
+		 GetTopTransactionIdIfAny());
+#endif
+	if (hash_get_num_entries(gstore_desc_htab) == 0)
+		return;
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
+		HASH_SEQ_STATUS	hseq;
+		GpuStoreDesc   *gs_desc;
+		GpuStoreUndoLogs *gs_undo;
+		dlist_mutable_iter iter;
+
+		hash_seq_init(&hseq, gstore_desc_htab);
+		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			hash_seq_init(&hseq, gstore_desc_htab);
-			while ((gs_desc = hash_seq_search(&hseq)) != NULL)
+			dlist_foreach_modify(iter, &gs_desc->gs_undo_logs)
 			{
-				if (gs_desc->owner_xid == xid)
+				gs_undo = dlist_container(GpuStoreUndoLogs, chain, iter.cur);
+				if (gs_undo->curr_xid == curr_xid)
 				{
-					elog(INFO, "release gs_desc (%u,%u,%u)",
-						 gs_desc->database_oid,
-						 gs_desc->ftable_oid,
-						 gs_desc->owner_xid);
-				
-					__gstoreFdwXactDropResources(gs_desc, event == XACT_EVENT_COMMIT);
-
-					hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
+					dlist_delete(&gs_undo->chain);
+					__gstoreFdwXactFinalize(gs_desc, gs_undo, false);
+					pfree(gs_undo->buf.data);
+					pfree(gs_undo);
 				}
 			}
 		}
@@ -5275,13 +5322,7 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			hash_search(gstore_desc_htab, &hkey, HASH_REMOVE, NULL);
 			return CUDA_ERROR_INVALID_VALUE;
 		}
-		gs_desc->gs_sstate = gs_sstate;
-		gs_desc->base_mmap = NULL;
-		gs_desc->base_mmap_revision = UINT_MAX;
-		gs_desc->redo_mmap = NULL;
-		gs_desc->gpu_main_devptr = 0UL;
-		gs_desc->gpu_extra_devptr = 0UL;
-		gs_desc->redo_backup_fdesc = GstoreFdwOpenLogBackupFile(gs_sstate);
+		gstoreFdwInitGpuStoreDesc(gs_desc, gs_sstate);
 	}
 	if (!gstoreFdwSetupGpuStoreDesc(gs_desc, false))
 		return CUDA_ERROR_MAP_FAILED;
@@ -5563,7 +5604,6 @@ pgstrom_init_gstore_fdw(void)
 	FdwRoutine	   *r = &pgstrom_gstore_fdw_routine;
 	HASHCTL			hctl;
 	BackgroundWorker worker;
-	int				i;
 
 	memset(r, 0, sizeof(FdwRoutine));
 	NodeSetTag(r, T_FdwRoutine);
@@ -5608,12 +5648,6 @@ pgstrom_init_gstore_fdw(void)
 	gstore_desc_htab = hash_create("GpuStoreDesc Hash-table", 256,
 								   &hctl,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-	/*
-	 * Local hash slot for GpuStoreUndoLogs
-	 */
-	for (i=0; i < GSTORE_UNDO_LOGS_NSLOTS; i++)
-		dlist_init(&gstore_undo_logs_slots[i]);
-
 	/* GUC: gstore_fdw.enabled */
 	DefineCustomBoolVariable("gstore_fdw.enabled",
 							 "Enables the  planner's use of Gstore_Fdw",
@@ -5661,6 +5695,7 @@ pgstrom_init_gstore_fdw(void)
 	object_access_hook = pgstrom_gstore_fdw_post_deletion;
 	/* transaction callbacks */
 	RegisterXactCallback(gstoreFdwXactCallback, NULL);
+	RegisterSubXactCallback(gstoreFdwSubXactCallback, NULL);
 	/* cleanup on postmaster exit */
 	before_shmem_exit(gstoreFdwOnExitCallback, 0);
 }
