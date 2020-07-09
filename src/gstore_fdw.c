@@ -3024,7 +3024,8 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
  * gstoreFdwCreateBaseFile
  */
 static void
-gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
+gstoreFdwCreateBaseFile(Relation frel,
+						GpuStoreSharedState *gs_sstate,
 						File fdesc)
 {
 	TupleDesc	__tupdesc = gstoreFdwDeviceTupleDesc(frel);
@@ -3196,10 +3197,10 @@ gstoreFdwCreateBaseFile(Relation frel, GpuStoreSharedState *gs_sstate,
 /*
  * gstoreFdwValidateBaseFile
  */
-static void
+static bool
 gstoreFdwValidateBaseFile(Relation frel,
 						  GpuStoreSharedState *gs_sstate,
-						  bool *p_basefile_is_sanity)
+						  bool validation_by_reuse)
 {
 	TupleDesc	__tupdesc = gstoreFdwDeviceTupleDesc(frel);
 	size_t		nrooms = gs_sstate->max_num_rows;
@@ -3208,6 +3209,7 @@ gstoreFdwValidateBaseFile(Relation frel,
 	int			mmap_is_pmem;
 	size_t		main_sz, sz;
 	int			j, unitsz;
+	bool		retval = false;
 	GpuStoreBaseFileHead *base_mmap;
 	GpuStoreRowIdMapHead *rowid_map = NULL;
 	GpuStoreHashIndexHead *hash_index = NULL;
@@ -3227,11 +3229,11 @@ gstoreFdwValidateBaseFile(Relation frel,
 				   GPUSTORE_BASEFILE_SIGNATURE, 8) != 0)
 		{
 			if (memcmp(base_mmap->signature,
-					   GPUSTORE_BASEFILE_MAPPED_SIGNATURE, 8) == 0)
-				*p_basefile_is_sanity = false;
-			else
+					   GPUSTORE_BASEFILE_MAPPED_SIGNATURE, 8) != 0)
 				elog(ERROR, "file '%s' has wrong signature",
-					 gs_sstate->base_file);
+                     gs_sstate->base_file);
+			/* PostgreSQL might exit by crash last time */
+			retval = false;
 		}
 		main_sz = KDS_calculateHeadSize(__tupdesc);
 		if (offsetof(GpuStoreBaseFileHead, schema) + main_sz > mmap_sz)
@@ -3243,13 +3245,19 @@ gstoreFdwValidateBaseFile(Relation frel,
 			schema->nrooms != nrooms ||
 			schema->format != KDS_FORMAT_COLUMN ||
 			schema->tdtypeid != __tupdesc->tdtypeid ||
-			schema->tdtypmod != __tupdesc->tdtypmod ||
-			schema->table_oid != RelationGetRelid(frel))
+			schema->tdtypmod != __tupdesc->tdtypmod)
 		{
 			elog(ERROR, "Base file '%s' has incompatible schema definition",
 				 gs_sstate->base_file);
 		}
-
+		if (schema->table_oid != RelationGetRelid(frel))
+		{
+			if (!validation_by_reuse)
+				elog(ERROR, "Base file '%s' has incompatible schema definition",
+					 gs_sstate->base_file);
+			schema->table_oid = RelationGetRelid(frel);
+		}
+		
 		for (j=0; j < __tupdesc->natts; j++)
 		{
 			Form_pg_attribute	attr = tupleDescAttr(__tupdesc, j);
@@ -3265,6 +3273,15 @@ gstoreFdwValidateBaseFile(Relation frel,
 				(cmeta->nullmap_offset == 0 && !attr->attnotnull))
 				elog(ERROR, "Base file '%s' column '%s' is incompatible",
 					 gs_sstate->base_file, NameStr(attr->attname));
+			if (strcmp(NameStr(cmeta->attname), NameStr(attr->attname)) != 0)
+			{
+				if (!validation_by_reuse)
+					elog(ERROR, "Base file '%s' column '%s' is incompatible",
+						 gs_sstate->base_file,
+						 NameStr(attr->attname));
+				memcpy(&cmeta->attname, &attr->attname, sizeof(NameData));
+			}
+			
 			if (attr->attnotnull)
 			{
 				if (cmeta->nullmap_offset != 0 ||
@@ -3398,73 +3415,8 @@ gstoreFdwValidateBaseFile(Relation frel,
 	if (pmem_unmap(base_mmap, mmap_sz) != 0)
 		elog(WARNING, "failed on pmem_unmap: %m");
 	pfree(__tupdesc);
-}
 
-/*
- * gstoreFdwCreateOrValidateBaseFile
- */
-static void
-gstoreFdwCreateOrValidateBaseFile(Relation frel,
-								  GpuStoreSharedState *gs_sstate,
-								  bool *p_basefile_is_sanity)
-{
-	File		fdesc;
-
-	fdesc = PathNameOpenFile(gs_sstate->base_file, O_RDWR | O_CREAT | O_EXCL);
-	if (fdesc < 0)
-	{
-		if (errno != EEXIST)
-			elog(ERROR, "failed on open('%s'): %m", gs_sstate->base_file);
-		/* Base file already exists */
-		gstoreFdwValidateBaseFile(frel, gs_sstate, p_basefile_is_sanity);
-	}
-	else
-	{
-		PG_TRY();
-		{
-			gstoreFdwCreateBaseFile(frel, gs_sstate, fdesc);
-		}
-		PG_CATCH();
-		{
-			if (unlink(gs_sstate->base_file) != 0)
-				elog(WARNING, "failed on unlink('%s'): %m",
-					 gs_sstate->base_file);
-			FileClose(fdesc);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		FileClose(fdesc);
-	}
-	gs_sstate->base_mmap_revision = random();
-}
-
-/*
- * gstoreFdwOpenRedoLog
- */
-static void
-gstoreFdwCreateRedoLog(Relation frel,
-					   GpuStoreSharedState *gs_sstate)
-{
-	const char *redo_log_file = gs_sstate->redo_log_file;
-	File		redo_fdesc;
-	size_t		sz;
-	
-	redo_fdesc = PathNameOpenFile(redo_log_file, O_RDWR);
-	if (redo_fdesc < 0)
-	{
-		/* Create a new REDO log file; which is empty of course. */
-		if (errno != ENOENT)
-			elog(ERROR, "failed on open('%s'): %m", redo_log_file);
-		redo_fdesc = PathNameOpenFile(redo_log_file,
-									  O_RDWR | O_CREAT | O_EXCL);
-		if (redo_fdesc < 0)
-			elog(ERROR, "failed on open('%s'): %m", redo_log_file);
-	}
-	sz = PAGE_ALIGN(gs_sstate->redo_log_limit);
-	if (posix_fallocate(FileGetRawDesc(redo_fdesc), 0, sz) != 0)
-		elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
-			 redo_log_file, sz);
-	FileClose(redo_fdesc);
+	return retval;
 }
 
 /*
@@ -3763,24 +3715,74 @@ gstoreFdwApplyRedoHostBuffer(Relation frel, GpuStoreSharedState *gs_sstate,
 }
 
 static GpuStoreSharedState *
-gstoreFdwCreateSharedState(Relation frel)
+gstoreFdwCreateSharedState(Relation frel, bool may_create_files)
 {
 	GpuStoreSharedState *gs_sstate = gstoreFdwAllocSharedState(frel);
+	File		fdesc;
+	size_t		sz;
+	bool		base_is_sanity = true;
+	bool		base_create = false;
+	bool		redo_create = false;
 
 	PG_TRY();
 	{
-		bool	basefile_is_sanity = true;
+		/*
+		 * Try to create a new base file only if post-creation event trigger.
+		 * Or, validate existing base file
+		 */
+		if (may_create_files)
+		{
+			fdesc = PathNameOpenFile(gs_sstate->base_file,
+									 O_RDWR | O_CREAT | O_EXCL);
+			if (fdesc < 0)
+			{
+				if (errno == EEXIST)
+					base_is_sanity = gstoreFdwValidateBaseFile(frel, gs_sstate, true);
+				else
+					elog(ERROR, "failed on open('%s'): %m", gs_sstate->base_file);
+			}
+			else
+			{
+				base_create = true;
+				gstoreFdwCreateBaseFile(frel, gs_sstate, fdesc);
+				FileClose(fdesc);
+			}
+		}
+		else
+		{
+			base_is_sanity = gstoreFdwValidateBaseFile(frel, gs_sstate, false);
+		}
 
-		/* Create or validate base file */
-		gstoreFdwCreateOrValidateBaseFile(frel, gs_sstate,
-										  &basefile_is_sanity);
-		/* Create redo-log file on demand */
-		gstoreFdwCreateRedoLog(frel, gs_sstate);
-		/* Apply Redo-Log, if needed */
-		gstoreFdwApplyRedoHostBuffer(frel, gs_sstate, basefile_is_sanity);
+		/*
+		 * Try to allocate a new redo-log file, or only expand the size
+		 */
+		fdesc = PathNameOpenFile(gs_sstate->redo_log_file, O_RDWR);
+		if (fdesc < 0)
+		{
+			if (errno != ENOENT || !may_create_files)
+				elog(ERROR, "failed on open('%s'): %m", gs_sstate->redo_log_file);
+			fdesc = PathNameOpenFile(gs_sstate->redo_log_file,
+									 O_RDWR | O_CREAT | O_EXCL);
+			if (fdesc < 0)
+				elog(ERROR, "failed on open('%s'): %m", gs_sstate->redo_log_file);
+		}
+		sz = PAGE_ALIGN(gs_sstate->redo_log_limit);
+		if (posix_fallocate(FileGetRawDesc(fdesc), 0, sz) != 0)
+			elog(ERROR, "failed on posix_fallocate('%s',%zu): %m",
+				 gs_sstate->redo_log_file, sz);
+		FileClose(fdesc);
+
+		/*
+		 * Apply redo-log onto the base file, if needed
+		 */
+        gstoreFdwApplyRedoHostBuffer(frel, gs_sstate, base_is_sanity);
 	}
 	PG_CATCH();
 	{
+		if (base_create)
+			unlink(gs_sstate->base_file);
+		if (redo_create)
+			unlink(gs_sstate->redo_log_file);
 		pfree(gs_sstate);
 		PG_RE_THROW();
 	}
@@ -3827,6 +3829,58 @@ gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc, bool abort_on_error)
 	gs_desc->base_mmap_revision = gs_sstate->base_mmap_revision;
 
 	return true;
+}
+
+static GpuStoreSharedState *
+gstoreFdwLookupGpuStoreSharedState(Relation frel, bool may_create_files)
+{
+	GpuStoreSharedState *gs_sstate = NULL;
+	GpuStoreSharedState *temp;
+	Oid			hkey[2];
+	uint32		hash;
+	int			hindex;
+	slock_t	   *lock;
+	dlist_head *slot;
+	dlist_iter	iter;
+
+	hkey[0] = MyDatabaseId;
+	hkey[1] = RelationGetRelid(frel);
+	hash = hash_any((const unsigned char *)hkey, 2 * sizeof(Oid));
+	hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
+	lock = &gstore_shared_head->gstore_sstate_lock[hindex];
+	slot = &gstore_shared_head->gstore_sstate_slot[hindex];
+
+	SpinLockAcquire(lock);
+	PG_TRY();
+	{
+		dlist_foreach(iter, slot)
+		{
+			temp = dlist_container(GpuStoreSharedState,
+								   hash_chain, iter.cur);
+			if (temp->database_oid == MyDatabaseId &&
+				temp->ftable_oid == RelationGetRelid(frel))
+			{
+				gs_sstate = temp;
+				break;
+			}
+		}
+		if (!gs_sstate)
+		{
+			gs_sstate = gstoreFdwCreateSharedState(frel, may_create_files);
+			dlist_push_tail(slot, &gs_sstate->hash_chain);
+			gstoreFdwInvokeInitialLoad(frel, true);
+			Assert(gs_sstate->hash == hash);
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(lock);
+
+	return gs_sstate;
 }
 
 static void
@@ -3912,51 +3966,20 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 										   &found);
 	if (!found)
 	{
-		GpuStoreSharedState *gs_sstate = NULL;
-		uint32		hash;
-		int			hindex;
-		dlist_iter	iter;
-
-		hash = hash_any((const unsigned char *)&hkey, 2 * sizeof(Oid));
-		hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
-		SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
 		PG_TRY();
-		{
-			dlist_foreach(iter, &gstore_shared_head->gstore_sstate_slot[hindex])
-			{
-				GpuStoreSharedState *temp;
-
-				temp = dlist_container(GpuStoreSharedState,
-									   hash_chain, iter.cur);
-				if (temp->database_oid == MyDatabaseId &&
-					temp->ftable_oid == RelationGetRelid(frel))
-				{
-					gs_sstate = temp;
-					break;
-				}
-			}
-
-			if (!gs_sstate)
-			{
-				gs_sstate = gstoreFdwCreateSharedState(frel);
-				dlist_push_tail(&gstore_shared_head->gstore_sstate_slot[hindex],
-								&gs_sstate->hash_chain);
-				gstoreFdwInvokeInitialLoad(frel, true);
-				gs_desc->gs_sstate = gs_sstate;
-				Assert(gs_sstate->hash == hash);
-			}
+        {
+			GpuStoreSharedState *gs_sstate
+				= gstoreFdwLookupGpuStoreSharedState(frel, false);
 			gstoreFdwInitGpuStoreDesc(gs_desc, gs_sstate);
 		}
 		PG_CATCH();
 		{
-			SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
 			hash_search(gstore_desc_htab, &hkey, HASH_REMOVE, NULL);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-		SpinLockRelease(&gstore_shared_head->gstore_sstate_lock[hindex]);
 	}
-	/* ensure the file mapping is latest */
+	/* ensure base file mapping is latest revision */
 	gstoreFdwSetupGpuStoreDesc(gs_desc, true);
 	return gs_desc;
 }
@@ -4337,9 +4360,27 @@ pgstrom_gstore_fdw_post_deletion(ObjectAccessType access,
 	if (memcmp(routine, &pgstrom_gstore_fdw_routine,
 			   sizeof(FdwRoutine)) == 0)
 	{
-		GpuStoreDesc *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+		MemoryContext	orig_memcxt = CurrentMemoryContext;
+		GpuStoreDesc   *gs_desc;
 
-		gs_desc->is_dropped = true;
+		PG_TRY();
+		{
+			gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+			gs_desc->is_dropped = true;
+		}
+		PG_CATCH();
+		{
+			ErrorData	   *errdata;
+
+			MemoryContextSwitchTo(orig_memcxt);
+			errdata = CopyErrorData();
+			elog(WARNING, "%s:%d %s",
+				 errdata->filename,
+				 errdata->lineno,
+				 errdata->message);
+			FlushErrorState();
+		}
+		PG_END_TRY();
 	}
 	table_close(frel, NoLock);
 }
@@ -4371,13 +4412,7 @@ pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 			PG_RETURN_NULL();
 		elog(INFO, "table [%s]", RelationGetRelationName(frel));
 		if (RelationIsGstoreFdw(frel))
-		{
-			/*
-			 * Ensure the supplied FDW options are reasonable,
-			 * and create base/redo files preliminary.
-			 */
-			gstoreFdwLookupGpuStoreDesc(frel);
-		}
+			gstoreFdwCreateSharedState(frel, true);
 		relation_close(frel, AccessShareLock);
 	}
 	PG_RETURN_NULL();
@@ -5528,7 +5563,6 @@ next_database:
 	{
 		Form_pg_foreign_table ftable;
 		Relation	frel;
-		FdwRoutine *routine;
 
 		srel = table_open(ForeignTableRelationId, AccessShareLock);
 		sscan = systable_beginscan(srel, InvalidOid, false, NULL, 0, NULL);
@@ -5536,14 +5570,31 @@ next_database:
 		{
 			ftable = (Form_pg_foreign_table)GETSTRUCT(tuple);
 			frel = heap_open(ftable->ftrelid, AccessShareLock);
-			routine = GetFdwRoutineForRelation(frel, false);
-
-			if (memcmp(routine, &pgstrom_gstore_fdw_routine,
-					   sizeof(FdwRoutine)) == 0)
+			if (RelationIsGstoreFdw(frel))
 			{
-				gstoreFdwLookupGpuStoreDesc(frel);
-				elog(LOG, "GstoreFdw preload '%s' in database '%s'",
-					 RelationGetRelationName(frel), database_name);
+				MemoryContext	orig_memcxt = CurrentMemoryContext;
+
+				PG_TRY();
+				{
+					gstoreFdwLookupGpuStoreDesc(frel);
+					elog(LOG, "GstoreFdw: foreign-table '%s' in database '%s' preloaded",
+						 RelationGetRelationName(frel), database_name);
+				}
+				PG_CATCH();
+				{
+					ErrorData	   *errdata;
+
+					MemoryContextSwitchTo(orig_memcxt);
+					errdata = CopyErrorData();
+					elog(WARNING, "GstoreFdw: failed on preloading foreign-table '%s' in database '%s' due to the ERROR: %s (%s:%d)",
+						 RelationGetRelationName(frel),
+						 database_name,
+						 errdata->message,
+						 errdata->filename,
+						 errdata->lineno);
+					FlushErrorState();
+				}
+				PG_END_TRY();
 			}
 			heap_close(frel, AccessShareLock);
 		}
