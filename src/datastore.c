@@ -246,6 +246,10 @@ __KDS_store_datum_column(kern_data_store *kds,
 	}	
 }
 
+/*
+ * NOTE: caller must ensure this KDS has no concurrent updates by lock or
+ * other way.
+ */
 void
 KDS_store_datum_column(kern_data_store *kds,
 					   kern_colmeta *cmeta,
@@ -255,13 +259,17 @@ KDS_store_datum_column(kern_data_store *kds,
 	/* allocation of extra buffer, and copy the varlena datum */
 	if (cmeta->attlen == -1)
 	{
+		kern_data_extra *extra = (kern_data_extra *)
+			((char *)kds + kds->extra_hoffset);
 		size_t		sz = VARSIZE_ANY(datum);
-		char	   *extra = (char *)kds + kds->extra_hoffset;
+		char	   *pos;
 
-		extra += __kds_unpack(kds->usage);
-		kds->usage += __kds_packed(MAXALIGN(sz));
-		memcpy(extra, DatumGetPointer(datum), sz);
-		datum = PointerGetDatum(extra);
+		Assert(extra->usage + sz <= extra->length);
+		pos = (char *)extra + extra->usage;
+		memcpy(pos, DatumGetPointer(datum), sz);
+		extra->usage += MAXALIGN(sz);
+
+		datum = PointerGetDatum(pos);
 	}
 	__KDS_store_datum_column(kds, cmeta, row_index, datum, isnull);
 }

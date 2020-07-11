@@ -2598,8 +2598,9 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 						 cl_bool *p_has_unused_rowids)
 {
 	cl_ulong   *next = NULL;
-	int			k, start = (lbound >> 30);
-	cl_ulong	mask = (1UL << ((lbound >> 24) & 0x3fU)) - 1;
+	cl_uint		lbound_curr = (lbound >> 24);
+	int			k, start = (lbound_curr >> 6);
+	cl_ulong	mask = (1UL << (lbound_curr & 0x3fU)) - 1;
 	cl_uint		rowid = UINT_MAX;
 	cl_uint		upper = (offset << 8);
 
@@ -2638,10 +2639,15 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 	retry:
 		if (map != ~0UL)
 		{
+			cl_uint		lbound_next = 0;
+
 			/* lookup the first zero position */
 			rowid = (__builtin_ffsl(~map) - 1);
 			bit = (1UL << rowid);
-			rowid |= upper | (k << 6);	/* add offset */
+			rowid |= (k << 6);
+			if (lbound_curr == rowid)
+				lbound_next = (lbound << 8);
+			rowid |= upper;		/* add offset */
 
 			if (!next)
 			{
@@ -2654,9 +2660,8 @@ __gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
 			{
 				cl_bool		has_unused_rowids;
 
-
 				rowid = __gstoreFdwAllocateRowId(next, nrooms,
-												 (lbound >> 24) == rowid ? lbound << 8 : 0,
+												 lbound_next,
 												 depth+1, rowid,
 												 &has_unused_rowids);
 				if (!has_unused_rowids)
@@ -3163,6 +3168,7 @@ gstoreFdwValidateBaseFile(Relation frel,
 	size_t		mmap_sz;
 	int			mmap_is_pmem;
 	size_t		main_sz, sz;
+	size_t		file_pos;
 	int			j, unitsz;
 	bool		retval = false;
 	GpuStoreBaseFileHead *base_mmap;
@@ -3286,6 +3292,7 @@ gstoreFdwValidateBaseFile(Relation frel,
 			main_sz >  mmap_sz)
 			elog(ERROR, "Base file '%s' is too small then required",
 				 gs_sstate->base_file);
+		file_pos = PAGE_ALIGN(offsetof(GpuStoreBaseFileHead, schema) + main_sz);
 
 		/*
 		 * validate GpuStoreRowIdMapHead section
@@ -3296,12 +3303,14 @@ gstoreFdwValidateBaseFile(Relation frel,
 				 gs_sstate->base_file);
 		rowid_map = (GpuStoreRowIdMapHead *)
 			((char *)base_mmap + base_mmap->rowid_map_offset);
-		if (memcmp(rowid_map->signature,
+		if (base_mmap->rowid_map_offset != file_pos ||
+			memcmp(rowid_map->signature,
 				   GPUSTORE_ROWIDMAP_SIGNATURE, 8) != 0 ||
 			rowid_map->length != sz ||
 			rowid_map->nrooms != nrooms)
 			elog(ERROR, "Base file '%s' has corrupted RowID-map",
 				 gs_sstate->base_file);
+		file_pos += PAGE_ALIGN(sz);
 
 		/*
 		 * validate GpuStoreHashIndexHead section, if any
@@ -3318,18 +3327,20 @@ gstoreFdwValidateBaseFile(Relation frel,
 				elog(ERROR, "Base file '%s' has no PK Index, but foreign-table '%s' has primary key definition",
 					 gs_sstate->base_file,
 					 RelationGetRelationName(frel));
-		sz = offsetof(GpuStoreHashIndexHead, slots[nslots + nrooms]);
-		if (base_mmap->hash_index_offset + sz > mmap_sz)
-			elog(ERROR, "Base file '%s' is smaller then the estimation",
-				 gs_sstate->base_file);
-		hash_index = (GpuStoreHashIndexHead *)
-			((char *)base_mmap + base_mmap->hash_index_offset);
-		if (memcmp(hash_index->signature,
-				   GPUSTORE_HASHINDEX_SIGNATURE, 8) != 0 ||
-			hash_index->nrooms != nrooms ||
-			hash_index->nslots != nslots)
-			elog(ERROR, "Base file '%s' has corrupted Hash-index",
-				 gs_sstate->base_file);
+			sz = offsetof(GpuStoreHashIndexHead, slots[nslots + nrooms]);
+			if (base_mmap->hash_index_offset + sz > mmap_sz)
+				elog(ERROR, "Base file '%s' is smaller then the estimation",
+					 gs_sstate->base_file);
+			hash_index = (GpuStoreHashIndexHead *)
+				((char *)base_mmap + base_mmap->hash_index_offset);
+			if (base_mmap->hash_index_offset != file_pos ||
+				memcmp(hash_index->signature,
+					   GPUSTORE_HASHINDEX_SIGNATURE, 8) != 0 ||
+				hash_index->nrooms != nrooms ||
+				hash_index->nslots != nslots)
+				elog(ERROR, "Base file '%s' has corrupted Hash-index",
+					 gs_sstate->base_file);
+			file_pos += PAGE_ALIGN(sz);
 		}
 
 		/*
@@ -3350,6 +3361,14 @@ gstoreFdwValidateBaseFile(Relation frel,
 			if (schema->extra_hoffset == 0)
 				elog(ERROR, "Base file '%s' has no extra buffer, but foreign-table '%s' has variable-length fields",
 					 gs_sstate->base_file, RelationGetRelationName(frel));
+			if ((char *)extra - (char *)base_mmap != file_pos ||
+				memcmp(extra->signature, GPUSTORE_EXTRABUF_SIGNATURE, 8) != 0)
+				elog(ERROR, "Base file '%s' has corrupted extra-buffer %zu %zu",
+					 gs_sstate->base_file,
+					 (char *)extra - (char *)base_mmap,
+					 file_pos
+
+					);
 			if (offsetof(GpuStoreBaseFileHead, schema) +
 				schema->extra_hoffset + extra->length > mmap_sz)
 				elog(ERROR, "Base file '%s' is smaller then the required",
@@ -3357,7 +3376,6 @@ gstoreFdwValidateBaseFile(Relation frel,
 			if (extra->usage > extra->length)
 				elog(ERROR, "Extra buffer of base file '%s' has larger usage (%lu) than length (%lu)", gs_sstate->base_file, extra->usage, extra->length);
 		}
-
 		/* Ok, base-file is sanity */
 		retval = true;
 	}
@@ -4915,7 +4933,7 @@ __gstoreFdwBackgroundCompationNoLock(GpuStoreDesc *gs_desc)
 	rc = cuMemFree(m_new_extra);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-	
+
 	/* main portion of the compaction */
 	rc = cuMemAlloc(&m_new_extra, h_extra.length);
 	if (rc != CUDA_SUCCESS)
@@ -5235,16 +5253,20 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 */
 	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
 	rc = __gstoreFdwCallKernelApplyRedo(gs_desc, h_redo);
-	if (rc == CUDA_SUCCESS)
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on GPU Apply Redo: %s", errorText(rc));
+	}
+	else
 	{
 		SpinLockAcquire(&gs_sstate->redo_pos_lock);
 		gs_sstate->redo_read_pos = curr_pos;
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
+			
+		elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu",
+			 h_redo->nitems, h_redo->length,
+			 head_pos, curr_pos);
 	}
-	elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu: %s",
-		 h_redo->nitems, h_redo->length,
-		 head_pos, curr_pos,
-		 errorText(rc));
 	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
 
 	rc = cuMemFree(m_redo);
