@@ -389,7 +389,7 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	/* for gstore_fdw file scan */
+	/* for gstore_fdw file scan (currently not used) */
 	pg_atomic_uint64 gstore_read_pos;
 	/* for block-based regular table scan */
 	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */

@@ -117,7 +117,11 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 {
 	cl_uint		owner_id;
 	cl_uint		rowid;
-	
+
+	/* bailout if any errors */
+	if (__syncthreads_count(redo->kerror.errcode) > 0)
+		return;
+
 	for (owner_id = get_global_id();
 		 owner_id < redo->nitems;
 		 owner_id += get_global_size())
@@ -352,7 +356,11 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 {
 	kern_context kcxt;
 	cl_uint		owner_id;
-	
+
+	/* bailout if any errors */
+	if (__syncthreads_count(redo->kerror.errcode) > 0)
+		goto skip;
+
 	INIT_KERNEL_CONTEXT(&kcxt, NULL);	/* no kparams */
 	for (owner_id = get_global_id();
 		 owner_id < redo->nitems;
@@ -407,6 +415,7 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 		if (kcxt.errcode != 0)
 			break;
 	}
+skip:
 	kern_writeback_error_status(&redo->kerror, &kcxt);
 }
 
@@ -464,9 +473,7 @@ kern_gpustore_compaction(kern_data_store *kds,
 			}
 			__syncthreads();
 			if (get_local_id() == 0)
-			{
 				extra_base = atomicAdd(&new_extra->usage, required);
-			}
 			__syncthreads();
 			dest = (char *)new_extra + extra_base + l_off;
 			if (isnull)
@@ -474,11 +481,14 @@ kern_gpustore_compaction(kern_data_store *kds,
 				if (rowid < kds->nitems)
 					values[rowid] = 0;
 			}
-			else
+			else if (dest + sz <= (char *)new_extra + new_extra->length)
 			{
-				assert(dest + sz <= (char *)new_extra + new_extra->length);
 				memcpy(dest, orig, sz);
 				values[rowid] = __kds_packed((char *)dest - (char *)new_extra);
+			}
+			else
+			{
+				assert(new_extra->length == 0);
 			}
 		}
 	}

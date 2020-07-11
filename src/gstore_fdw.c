@@ -3357,6 +3357,9 @@ gstoreFdwValidateBaseFile(Relation frel,
 			if (extra->usage > extra->length)
 				elog(ERROR, "Extra buffer of base file '%s' has larger usage (%lu) than length (%lu)", gs_sstate->base_file, extra->usage, extra->length);
 		}
+
+		/* Ok, base-file is sanity */
+		retval = true;
 	}
 	PG_CATCH();
 	{
@@ -4283,6 +4286,9 @@ gstoreFdwOnExitCallback(int code, Datum arg)
 			if (write(fdesc, signature, 8) != 8)
 				elog(LOG, "failed on write('%s'): %m", gs_sstate->base_file);
 			close(fdesc);
+			elog(LOG, "unmap base file '%s' of foreign table %u",
+				 gs_sstate->base_file,
+				 gs_sstate->ftable_oid);
 		}
 		SpinLockRelease(lock);
 	}
@@ -4715,13 +4721,283 @@ __gstoreFdwGetCudaModule(CUmodule *p_cuda_module, cl_int cuda_dindex)
 	return CUDA_SUCCESS;
 }
 
+static CUresult	__gstoreFdwBackgroundCompationNoLock(GpuStoreDesc *gs_desc);
+static CUresult	__gstoreFdwBackgroundInitialLoadNoLock(GpuStoreDesc *gs_desc);
+
+/*
+ * GstoreFdwBackgrondInitialLoad
+ */
+static CUresult
+__gstoreFdwBackgroundInitialLoadNoLock(GpuStoreDesc *gs_desc)
+{
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	GpuStoreBaseFileHead *base_mmap = gs_desc->base_mmap;
+	kern_data_store *schema = &base_mmap->schema;
+	const char *ftable_name = base_mmap->ftable_name;
+	CUresult	rc;
+
+	/* main portion of the device buffer */
+	rc = cuMemAlloc(&gs_desc->gpu_main_devptr, schema->length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
+		goto error_0;
+	}
+	rc = cuMemcpyHtoD(gs_desc->gpu_main_devptr, schema, schema->length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		goto error_1;
+	}
+	rc = cuIpcGetMemHandle(&gs_sstate->gpu_main_mhandle,
+						   gs_desc->gpu_main_devptr);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+		goto error_1;
+	}
+	gs_sstate->gpu_main_size = schema->length;
+	/*
+	 * extra portion of the device buffer (if needed).
+	 */
+	if (schema->has_varlena)
+	{
+		kern_data_extra *extra = (kern_data_extra *)
+			((char *)schema + schema->extra_hoffset);
+
+		rc = cuMemAllocManaged(&gs_desc->gpu_extra_devptr,
+							   extra->usage,
+							   CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+		{
+			elog(WARNING, "failed on cuMemAllocManaged: %s", errorText(rc));
+			goto error_1;
+		}
+		memcpy((void *)gs_desc->gpu_extra_devptr, extra, extra->usage);
+
+		/* compaction, and swap device extra buffer */
+		rc = __gstoreFdwBackgroundCompationNoLock(gs_desc);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+	}
+	elog(LOG, "gstore_fdw: initial load [%s] - main %zu bytes, extra %zu bytes",
+		 ftable_name,
+		 gs_sstate->gpu_main_size,
+		 gs_sstate->gpu_extra_size);
+
+	return CUDA_SUCCESS;
+
+error_2:
+	cuMemFree(gs_desc->gpu_extra_devptr);
+error_1:
+	cuMemFree(gs_desc->gpu_main_devptr);
+error_0:
+	gs_desc->gpu_extra_devptr = 0UL;
+	gs_desc->gpu_main_devptr = 0UL;
+	memset(&gs_sstate->gpu_main_mhandle, 0, sizeof(CUipcMemHandle));
+	memset(&gs_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
+
+	return rc;
+}
+
+static CUresult
+GstoreFdwBackgroundInitialLoad(GpuStoreDesc *gs_desc)
+{
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	CUresult    rc;
+
+	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
+	rc = __gstoreFdwBackgroundInitialLoadNoLock(gs_desc);
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+
+	return rc;
+}
+
+/*
+ * GSTORE_BACKGROUND_CMD__COMPACTION command
+ */
+static CUresult
+__gstoreFdwBackgroundCompationNoLock(GpuStoreDesc *gs_desc)
+{
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	kern_data_extra	h_extra;
+	CUdeviceptr		m_new_extra;
+	CUdeviceptr		m_temp;
+	CUipcMemHandle	new_extra_mhandle;
+	CUmodule		cuda_module;
+	CUfunction		kfunc_compaction;
+	CUresult		rc;
+	size_t			curr_usage;
+	int				grid_sz, block_sz;
+	void		   *kern_args[4];
+
+	memset(&h_extra, 0, offsetof(kern_data_extra, data));
+	memcpy(h_extra.signature, GPUSTORE_EXTRABUF_SIGNATURE, 8);
+	h_extra.usage  = offsetof(kern_data_extra, data);
+
+	/* device memory must be allocated first of all */
+	if (gs_desc->gpu_main_devptr == 0UL)
+	{
+		rc = GstoreFdwBackgroundInitialLoad(gs_desc);
+		if (rc != CUDA_SUCCESS)
+			return rc;
+	}
+
+	/*
+	 * Lookup kern_gpustore_compaction device function
+	 */
+	rc = __gstoreFdwGetCudaModule(&cuda_module, gs_sstate->cuda_dindex);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on __gstoreFdwGetCudaModule: %s", errorText(rc));
+		return rc;
+	}
+
+	rc = cuModuleGetFunction(&kfunc_compaction, cuda_module,
+							 "kern_gpustore_compaction");
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "GPU kernel function 'kern_gpustore_compaction' not found: %s",
+			 errorText(rc));
+		return rc;
+	}
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
+							   kfunc_compaction,
+							   gs_sstate->cuda_dindex, 0, 0);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	grid_sz = Min(grid_sz, (gs_sstate->max_num_rows +
+							block_sz - 1) / block_sz);
+	/*
+	 * estimation of the required device memory. this dummy extra buffer
+	 * is initialized usage > length, so compaction kernel never copy
+	 * the varlena values.
+	 */
+	rc = cuMemAllocManaged(&m_new_extra, sizeof(kern_data_extra),
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemAllocManaged: %s", errorText(rc));
+		return rc;
+	}
+	memcpy((void *)m_new_extra, &h_extra, sizeof(kern_data_extra));
+
+	/* 1st invocation for new extra buffer size estimation */
+	kern_args[0] = &gs_desc->gpu_main_devptr;
+	kern_args[1] = &gs_desc->gpu_extra_devptr;
+	kern_args[2] = &m_new_extra;
+	rc = cuLaunchKernel(kfunc_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto bailout;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		goto bailout;
+	curr_usage = ((kern_data_extra *)m_new_extra)->usage;
+
+	/*
+	 * calculation of the new extra buffer length.
+	 *
+	 * TODO: logic must be revised for more graceful allocation
+	 */
+	h_extra.length = Max(curr_usage + (64UL << 20),		/* 64MB margin */
+						 (double)curr_usage * 1.15);	/* 15% margin */
+	rc = cuMemFree(m_new_extra);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
+	
+	/* main portion of the compaction */
+	rc = cuMemAlloc(&m_new_extra, h_extra.length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemAlloc(%zu): %s",
+			 h_extra.length, errorText(rc));
+		return rc;
+	}
+	rc = cuIpcGetMemHandle(&new_extra_mhandle, m_new_extra);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+		goto bailout;
+	}
+	rc = cuMemcpyHtoD(m_new_extra, &h_extra, offsetof(kern_data_extra, data));
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		goto bailout;
+	}
+	/* kick the compaction kernel */
+	kern_args[0] = &gs_desc->gpu_main_devptr;
+	kern_args[1] = &gs_desc->gpu_extra_devptr;
+	kern_args[2] = &m_new_extra;
+	rc = cuLaunchKernel(kfunc_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		goto bailout;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		goto bailout;
+	rc = cuMemcpyDtoH(&h_extra, m_new_extra, offsetof(kern_data_extra, data));
+	if (rc != CUDA_SUCCESS)
+		goto bailout;
+
+	elog(LOG, "gstore_fdw: extra compaction {length=%zu->%zu, usage=%zu}",
+		 gs_sstate->gpu_extra_size, h_extra.length, h_extra.usage);
+	/* All Ok, swap old and new */
+	m_temp = gs_desc->gpu_extra_devptr;
+	gs_desc->gpu_extra_devptr = m_new_extra;
+	m_new_extra = m_temp;
+	gs_sstate->gpu_extra_size = h_extra.length;
+	memcpy(&gs_sstate->gpu_extra_mhandle,
+		   &new_extra_mhandle, sizeof(CUipcMemHandle));
+bailout:
+	cuMemFree(m_new_extra);
+	return rc;
+}
+
+/*
+ * GSTORE_BACKGROUND_CMD__COMPACTION command
+ */
+static CUresult
+GstoreFdwBackgroundCompation(GpuStoreDesc *gs_desc)
+{
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	CUresult	rc;
+
+	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
+	rc = __gstoreFdwBackgroundCompationNoLock(gs_desc);
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
+
+	return rc;
+}
+
 /*
  * __gstoreFdwCallKernelApplyRedo
  */
 static CUresult
-__gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
+__gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc,
+							   kern_gpustore_redolog *h_redo)
 {
-	size_t		nitems = ((kern_gpustore_redolog *)m_redo)->nitems;
+	size_t		nitems = h_redo->nitems;
 	int			cuda_dindex = gs_desc->gs_sstate->cuda_dindex;
 	CUmodule	cuda_module;
 	CUfunction	kfunc_setup_owner;
@@ -4762,8 +5038,9 @@ __gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
 	/*
 	 * setup-owner (phase-0) - clear the owner-id field
 	 */
+retry:
 	phase = 0;
-	kern_args[0] = &m_redo;
+	kern_args[0] = &h_redo;
 	kern_args[1] = &gs_desc->gpu_main_devptr;
 	kern_args[2] = &gs_desc->gpu_extra_devptr;
 	kern_args[3] = &phase;
@@ -4852,74 +5129,19 @@ __gstoreFdwCallKernelApplyRedo(GpuStoreDesc *gs_desc, CUdeviceptr m_redo)
 	if (rc != CUDA_SUCCESS)
 		return rc;
 
-	//if out of memory, do compaction and retry.
+	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
+	{
+		rc = __gstoreFdwBackgroundCompationNoLock(gs_desc);
+		if (rc == CUDA_SUCCESS)
+		{
+			memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
+			goto retry;
+		}
+	}
 	return CUDA_SUCCESS;
 
 out_error:
 	cuStreamSynchronize(CU_STREAM_PER_THREAD);
-	return rc;
-}
-
-/*
- * GstoreFdwBackgrondInitialLoad
- */
-static CUresult
-GstoreFdwBackgroundInitialLoad(GpuStoreDesc *gs_desc)
-{
-	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	GpuStoreBaseFileHead *base_mmap = gs_desc->base_mmap;
-	kern_data_store *schema = &base_mmap->schema;
-	const char *ftable_name = base_mmap->ftable_name;
-	CUresult	rc;
-
-	/* main portion of the device buffer */
-	rc = cuMemAlloc(&gs_desc->gpu_main_devptr, schema->length);
-	if (rc != CUDA_SUCCESS)
-		goto error_0;
-	rc = cuMemcpyHtoD(gs_desc->gpu_main_devptr, schema, schema->length);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	rc = cuIpcGetMemHandle(&gs_sstate->gpu_main_mhandle,
-						   gs_desc->gpu_main_devptr);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	gs_sstate->gpu_main_size = schema->length;
-	elog(LOG, "GstoreFdw: %s main buffer (sz: %lu) allocated",
-		 ftable_name, schema->length);
-
-	/* extra portion of the device buffer (if needed) */
-	if (schema->has_varlena)
-	{
-		kern_data_extra *extra = (kern_data_extra *)
-			((char *)schema + schema->extra_hoffset);
-
-		rc = cuMemAlloc(&gs_desc->gpu_extra_devptr, extra->length);
-		if (rc != CUDA_SUCCESS)
-			goto error_1;
-		rc = cuMemcpyHtoD(gs_desc->gpu_extra_devptr, extra, extra->length);
-		if (rc != CUDA_SUCCESS)
-			goto error_2;
-		rc = cuIpcGetMemHandle(&gs_sstate->gpu_extra_mhandle,
-							   gs_desc->gpu_extra_devptr);
-		if (rc != CUDA_SUCCESS)
-			goto error_2;
-		gs_sstate->gpu_extra_size = extra->length;
-
-		elog(LOG, "GstoreFdw: %s extra buffer (sz: %lu) allocated",
-			 ftable_name, extra->length);
-	}
-	return CUDA_SUCCESS;
-
-error_2:
-	cuMemFree(gs_desc->gpu_extra_devptr);
-error_1:
-	cuMemFree(gs_desc->gpu_main_devptr);
-error_0:
-	gs_desc->gpu_extra_devptr = 0UL;
-	gs_desc->gpu_main_devptr = 0UL;
-	memset(&gs_sstate->gpu_main_mhandle, 0, sizeof(CUipcMemHandle));
-	memset(&gs_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
-
 	return rc;
 }
 
@@ -5012,15 +5234,17 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 * Kick the kernel to apply REDO log
 	 */
 	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
-	if (__gstoreFdwCallKernelApplyRedo(gs_desc, m_redo) == CUDA_SUCCESS)
+	rc = __gstoreFdwCallKernelApplyRedo(gs_desc, h_redo);
+	if (rc == CUDA_SUCCESS)
 	{
 		SpinLockAcquire(&gs_sstate->redo_pos_lock);
 		gs_sstate->redo_read_pos = curr_pos;
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
 	}
-	elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu",
+	elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu: %s",
 		 h_redo->nitems, h_redo->length,
-		 head_pos, curr_pos);
+		 head_pos, curr_pos,
+		 errorText(rc));
 	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
 
 	rc = cuMemFree(m_redo);
@@ -5096,125 +5320,16 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 }
 
 /*
- * GSTORE_BACKGROUND_CMD__COMPACTION command
- */
-static CUresult
-GstoreFdwBackgroundCompation(GpuStoreDesc *gs_desc)
-{
-	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
-	kern_data_extra	h_extra;
-	CUdeviceptr		m_new_extra;
-	CUdeviceptr		m_temp;
-	CUipcMemHandle	new_extra_mhandle;
-	CUmodule		cuda_module;
-	CUfunction		kfunc_compaction;
-	CUresult		rc;
-	int				grid_sz, block_sz;
-	void		   *kern_args[4];
-
-	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
-
-	memset(&h_extra, 0, offsetof(kern_data_extra, data));
-	memcpy(h_extra.signature, GPUSTORE_EXTRABUF_SIGNATURE, 8);
-	h_extra.length = gs_sstate->gpu_extra_size;
-	h_extra.usage  = offsetof(kern_data_extra, data);
-	
-	/* device memory must be allocated */
-	if (gs_desc->gpu_main_devptr == 0UL)
-	{
-		rc = GstoreFdwBackgroundInitialLoad(gs_desc);
-		if (rc != CUDA_SUCCESS)
-			goto error_0;
-	}
-
-	/* main portion of the compaction */
-	rc = cuMemAlloc(&m_new_extra, h_extra.length);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuMemAlloc(%zu): %s",
-			 h_extra.length, errorText(rc));
-		goto error_0;
-	}
-	rc = cuIpcGetMemHandle(&new_extra_mhandle, m_new_extra);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
-		goto error_1;
-	}
-	rc = cuMemcpyHtoD(m_new_extra, &h_extra, offsetof(kern_data_extra, data));
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
-		goto error_1;
-	}
-	/* kick the compaction kernel */
-	rc = __gstoreFdwGetCudaModule(&cuda_module, gs_sstate->cuda_dindex);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on __gstoreFdwGetCudaModule: %s", errorText(rc));
-		goto error_1;
-	}
-	rc = cuModuleGetFunction(&kfunc_compaction, cuda_module,
-							 "kern_gpustore_compaction");
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "GPU kernel function 'kern_gpustore_compaction' not found: %s",
-			 errorText(rc));
-		goto error_1;
-	}
-	rc = __gpuOptimalBlockSize(&grid_sz,
-							   &block_sz,
-							   kfunc_compaction,
-							   gs_sstate->cuda_dindex, 0, 0);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	kern_args[0] = &gs_desc->gpu_main_devptr;
-	kern_args[1] = &gs_desc->gpu_extra_devptr;
-	kern_args[2] = &m_new_extra;
-	rc = cuLaunchKernel(kfunc_compaction,
-						grid_sz, 1, 1,
-						block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
-		goto error_1;
-	}
-	/* check status of the kernel execution status */
-	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	rc = cuMemcpyDtoH(&h_extra, m_new_extra, offsetof(kern_data_extra, data));
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	/* All Ok, swap old and new */
-	m_temp = gs_desc->gpu_extra_devptr;
-	gs_desc->gpu_extra_devptr = m_new_extra;
-	m_new_extra = m_temp;
-	memcpy(&gs_sstate->gpu_extra_mhandle,
-		   &new_extra_mhandle, sizeof(CUipcMemHandle));
-
-	elog(LOG, "Gstore_Fdw compaction: extra {length=%zu, usage=%zu}", h_extra.length, h_extra.usage);
-	
-error_1:
-	cuMemFree(m_new_extra);
-error_0:
-	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);	
-	return rc;
-}
-
-/*
  * GSTORE_BACKGROUND_CMD__DROP_UNLOAD command
  */
 static CUresult
 GstoreFdwBackgroundDropUnload(GpuStoreDesc *gs_desc)
 {
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	CUresult	rc;
 	
 	elog(LOG, "run GSTORE_BACKGROUND_CMD__DROP_UNLOAD");
+	pthreadRWLockWriteLock(&gs_sstate->gpu_bufer_lock);
 	if (gs_desc->gpu_main_devptr != 0UL)
 	{
 		rc = cuMemFree(gs_desc->gpu_main_devptr);
@@ -5242,6 +5357,7 @@ GstoreFdwBackgroundDropUnload(GpuStoreDesc *gs_desc)
 			elog(LOG, "Gstore_Fdw drop unload: failed on pmem_unmap(3): %m");
 	}
 	hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
+	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
 
 	return CUDA_SUCCESS;
 }
