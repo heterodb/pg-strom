@@ -853,7 +853,8 @@ codegen_gpuscan_projection(StringInfo kern,
 			if (!referenced)
 				appendStringInfo(
 					&cbody,
-					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,index);\n", j);
+					"  addr = kern_get_datum_column(kds_src,kds_extra,%d,index);\n",
+					attr->attnum-1);
 			if (attr->attbyval)
 			{
 				appendStringInfo(
