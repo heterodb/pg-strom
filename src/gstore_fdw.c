@@ -154,8 +154,6 @@ typedef struct
 	const char	   *base_file;
 	const char	   *redo_log_file;
 	size_t			redo_log_limit;
-	const char	   *redo_log_backup_dir;
-	size_t			redo_log_backup_limit;
 	cl_long			gpu_update_interval;
 	size_t			gpu_update_threshold;
 
@@ -206,7 +204,6 @@ typedef struct
 	size_t			redo_mmap_sz;
 	int				redo_mmap_is_pmem;
 	/* fields below are valid only GpuStore Maintainer */
-	int				redo_backup_fdesc;
 	CUdeviceptr		gpu_main_devptr;
 	CUdeviceptr		gpu_extra_devptr;
 } GpuStoreDesc;
@@ -269,6 +266,9 @@ Datum pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_sysattr_in(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_sysattr_out(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS);
 void  GstoreFdwStartupKicker(Datum arg);
 void  GstoreFdwMaintainerMain(Datum arg);
 
@@ -2110,9 +2110,6 @@ ExplainGstoreFdw(GpuStoreFdwState *fdw_state,
 	{
 		ExplainPropertyText("Base file", gs_sstate->base_file, es);
 		ExplainPropertyText("Redo log", gs_sstate->redo_log_file, es);
-		if (gs_sstate->redo_log_backup_dir)
-			ExplainPropertyText("Backup directory",
-								gs_sstate->redo_log_backup_dir, es);
 	}
 	pfree(buf.data);
 }
@@ -2189,8 +2186,7 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 				elog(ERROR, "max_num_rows = '%s' is not valid", token);
 		}
 		else if (strcmp(def->defname, "base_file") == 0 ||
-				 strcmp(def->defname, "redo_log_file") == 0 ||
-				 strcmp(def->defname, "redo_log_backup_dir") == 0)
+				 strcmp(def->defname, "redo_log_file") == 0)
 		{
 			/* file pathname shall be checked at post-creation steps */
 		}
@@ -2239,7 +2235,6 @@ gstoreFdwExtractOptions(Relation frel,
 						ssize_t *p_max_num_rows,
 						const char **p_base_file,
 						const char **p_redo_log_file,
-						const char **p_redo_log_backup_dir,
 						size_t *p_redo_log_limit,
 						cl_long *p_gpu_update_interval,
 						size_t *p_gpu_update_threshold,
@@ -2252,7 +2247,6 @@ gstoreFdwExtractOptions(Relation frel,
 	ssize_t		max_num_rows = -1;
 	const char *base_file = NULL;
 	const char *redo_log_file = NULL;
-	const char *redo_log_backup_dir = NULL;
 	ssize_t		redo_log_limit = (512U << 20);	/* default: 512MB */
 	cl_long		gpu_update_interval = 15;		/* default: 15s */
 	ssize_t		gpu_update_threshold = -1;		/* default: 20% of redo_log_limit */
@@ -2324,16 +2318,6 @@ gstoreFdwExtractOptions(Relation frel,
 						 path);
 			}
 			redo_log_file = path;
-		}
-		else if (strcmp(def->defname, "redo_log_backup_dir") == 0)
-		{
-			redo_log_backup_dir = defGetString(def);
-
-			if (access(redo_log_backup_dir, R_OK | W_OK | X_OK) != 0)
-			{
-				elog(ERROR, "redo_log_backup_dir '%s' is not accessible: %m",
-					 redo_log_backup_dir);
-			}
 		}
 		else if (strcmp(def->defname, "redo_log_limit") == 0)
 		{
@@ -2425,7 +2409,6 @@ gstoreFdwExtractOptions(Relation frel,
 	*p_max_num_rows         = max_num_rows;
 	*p_base_file            = base_file;
 	*p_redo_log_file        = redo_log_file;
-	*p_redo_log_backup_dir  = redo_log_backup_dir;
 	*p_redo_log_limit       = redo_log_limit;
 	*p_gpu_update_interval  = gpu_update_interval;
 	*p_gpu_update_threshold = gpu_update_threshold;
@@ -2472,7 +2455,6 @@ gstoreFdwAllocSharedState(Relation frel)
 	ssize_t		num_hash_slots = -1;
 	const char *base_file;
 	const char *redo_log_file;
-	const char *redo_log_backup_dir;
 	size_t		redo_log_limit;
 	cl_long		gpu_update_interval;
 	size_t		gpu_update_threshold;
@@ -2487,7 +2469,6 @@ gstoreFdwAllocSharedState(Relation frel)
 							&max_num_rows,
 							&base_file,
 							&redo_log_file,
-							&redo_log_backup_dir,
 							&redo_log_limit,
 							&gpu_update_interval,
 							&gpu_update_threshold,
@@ -2498,8 +2479,6 @@ gstoreFdwAllocSharedState(Relation frel)
 		len += MAXALIGN(strlen(base_file) + 1);
 	if (redo_log_file)
 		len += MAXALIGN(strlen(redo_log_file) + 1);
-	if (redo_log_backup_dir)
-		len += MAXALIGN(strlen(redo_log_backup_dir) + 1);
 	if (primary_key >= 0)
 	{
 		/* num_hash_slots >= (2^32) does not make sense because hash_any
@@ -2522,12 +2501,6 @@ gstoreFdwAllocSharedState(Relation frel)
 		gs_sstate->redo_log_file = pos;
 		pos += MAXALIGN(strlen(redo_log_file) + 1);
 	}
-	if (redo_log_backup_dir)
-	{
-		strcpy(pos, redo_log_backup_dir);
-		gs_sstate->redo_log_backup_dir = pos;
-		pos += MAXALIGN(strlen(redo_log_backup_dir) + 1);
-	}
 	Assert(pos - (char *)gs_sstate == len);
 
 	gs_sstate->database_oid = MyDatabaseId;
@@ -2539,7 +2512,6 @@ gstoreFdwAllocSharedState(Relation frel)
 	gs_sstate->num_hash_slots = num_hash_slots;
 	gs_sstate->primary_key = primary_key;
 	gs_sstate->redo_log_limit = redo_log_limit;
-	gs_sstate->redo_log_backup_limit = 5 * redo_log_limit;
 	gs_sstate->gpu_update_interval = gpu_update_interval;
 	gs_sstate->gpu_update_threshold = gpu_update_threshold;
 
@@ -3876,7 +3848,6 @@ gstoreFdwInitGpuStoreDesc(GpuStoreDesc *gs_desc, GpuStoreSharedState *gs_sstate)
 	gs_desc->redo_mmap_sz = 0;
 	gs_desc->redo_mmap_is_pmem = 0;
 	/* background-worker only fields */
-	gs_desc->redo_backup_fdesc = -1;
 	gs_desc->gpu_main_devptr = 0UL;
 	gs_desc->gpu_extra_devptr = 0UL;
 }
@@ -4639,41 +4610,6 @@ gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async)
 }
 
 /*
- * GstoreFdwOpenLogBackupFile
- */
-static int
-GstoreFdwOpenLogBackupFile(GpuStoreSharedState *gs_sstate)
-{
-	time_t		t = time(NULL);
-	char	   *temp;
-	char	   *path;
-	struct tm	tm;
-	int			rawfd;
-
-	if (!gs_sstate->redo_log_backup_dir)
-		return -1;
-	
-	temp = alloca(strlen(gs_sstate->redo_log_file) + 1);
-	path = alloca(strlen(gs_sstate->redo_log_backup_dir) +
-				  strlen(gs_sstate->redo_log_file) + 100);
-	localtime_r(&t, &tm);
-	strcpy(temp, gs_sstate->redo_log_file);
-	sprintf(path, "%s/%s_%04d-%02d-%02d_%02d:%02d:%02d",
-			gs_sstate->redo_log_backup_dir,
-			basename(temp),
-			tm.tm_year + 1900,
-			tm.tm_mon,
-			tm.tm_mday,
-			tm.tm_hour,
-			tm.tm_min,
-			tm.tm_sec);
-	rawfd = open(path, O_RDWR | O_CREAT | O_APPEND);
-	if (rawfd < 0)
-		elog(LOG, "failed to open('%s') for Redo-Log backup: %m", path);
-	return rawfd;
-}
-
-/*
  * __gstoreFdwGetCudaModule
  */
 static CUresult
@@ -5176,7 +5112,6 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	int			index;
 	uint64		head_pos;
 	uint64		curr_pos;
-	uint64		tail_pos = ULONG_MAX;
 	kern_gpustore_redolog *h_redo;
 	CUdeviceptr	m_redo = 0UL;
 	CUresult	rc;
@@ -5229,13 +5164,11 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 
 		if (file_pos + offsetof(GstoreTxLogCommon, data) > gs_sstate->redo_log_limit)
 		{
-			tail_pos = curr_pos;
 			curr_pos += (gs_sstate->redo_log_limit - file_pos);
 			continue;
 		}
 		if ((tx_log->type & 0xffffff00U) != GSTORE_TX_LOG__MAGIC)
 		{
-			tail_pos = curr_pos;
 			curr_pos += (gs_sstate->redo_log_limit - file_pos);
 			continue;
 		}
@@ -5273,71 +5206,6 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 
-	/*
-	 * Write out REDO-Log to the backup file, if any
-	 */
-	if (gs_desc->redo_backup_fdesc >= 0)
-	{
-		uint64		file_pos = (head_pos % gs_sstate->redo_log_limit);
-		ssize_t		rv, nbytes;
-
-		if (tail_pos == ULONG_MAX)
-		{
-			nbytes = curr_pos - head_pos;
-			rv = __writeFileSignal(gs_desc->redo_backup_fdesc,
-								   gs_desc->redo_mmap + file_pos,
-								   nbytes, false);
-			if (rv != nbytes)
-			{
-				elog(LOG, "failed on writes of Redo-Log backup");
-				close(gs_desc->redo_backup_fdesc);
-				gs_desc->redo_backup_fdesc = -1;
-			}
-		}
-		else
-		{
-			nbytes = tail_pos - head_pos;
-			rv = __writeFileSignal(gs_desc->redo_backup_fdesc,
-								   gs_desc->redo_mmap + file_pos,
-								   nbytes, false);
-			if (rv != nbytes)
-			{
-				elog(LOG, "failed on writes of Redo-Log backup");
-				close(gs_desc->redo_backup_fdesc);
-				gs_desc->redo_backup_fdesc = -1;
-			}
-			else
-			{
-				nbytes = curr_pos % gs_sstate->redo_log_limit;
-				rv = __writeFileSignal(gs_desc->redo_backup_fdesc,
-									   gs_desc->redo_mmap,
-									   nbytes, false);
-				if (rv != nbytes)
-				{
-					elog(LOG, "failed on writes of Redo-Log backup");
-					close(gs_desc->redo_backup_fdesc);
-					gs_desc->redo_backup_fdesc = -1;
-				}
-			}
-		}
-	}
-	/*
-	 * Switch Log Backup File if size exceeds the limit
-	 */
-	if (gs_desc->redo_backup_fdesc >= 0)
-	{
-		struct stat	stat_buf;
-
-		if (fstat(gs_desc->redo_backup_fdesc, &stat_buf) != 0)
-		{
-			elog(WARNING, "failed on fstat(2): %m");
-		}
-		else if (stat_buf.st_size > gs_sstate->redo_log_backup_limit)
-		{
-			close(gs_desc->redo_backup_fdesc);
-			gs_desc->redo_backup_fdesc = GstoreFdwOpenLogBackupFile(gs_sstate);
-		}
-	}
 	return CUDA_SUCCESS;
 }
 
@@ -5843,3 +5711,27 @@ pgstrom_init_gstore_fdw(void)
 	/* cleanup on postmaster exit */
 	before_shmem_exit(gstoreFdwOnExitCallback, 0);
 }
+
+/*
+ * Gstore_fdw replication support
+ */
+Datum
+pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_base);
+
+Datum
+pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_redo);
+
+Datum
+pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_client);

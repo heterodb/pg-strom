@@ -53,3 +53,18 @@ CREATE TYPE pgstrom.gstore_fdw_sysattr
   INTERNALLENGTH = 12,
   ALIGNMENT = int4
 );
+
+CREATE FUNCTION pgstrom.gstore_fdw_replication_base(regclass,int)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_base'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.gstore_fdw_replication_redo(regclass,bigint,float=0.8)
+  RETURNS bytes
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_redo'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.gstore_fdw_replication_client(regclass,text)
+  RETURNS void
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_client'
+  LANGUAGE C STRICT;
+
+
