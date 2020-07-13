@@ -32,7 +32,7 @@ CREATE FUNCTION public.gstore_fdw_apply_redo(regclass)
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_apply_redo'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION public.gstore_fdw_compaction(regclass)
+CREATE FUNCTION public.gstore_fdw_compaction(regclass, bool = false)
   RETURNS int
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_compaction'
   LANGUAGE C STRICT;

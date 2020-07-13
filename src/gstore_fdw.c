@@ -287,6 +287,9 @@ static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
 static void		gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
 									  GpuStoreRowIdMapHead *rowid_map,
 									  cl_uint rowid);
+static bool		gstoreFdwCheckRowId(GpuStoreSharedState *gs_sstate,
+									GpuStoreRowIdMapHead *rowid_map,
+									cl_uint rowid);
 static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
 											  GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
@@ -2760,6 +2763,33 @@ gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
 	SpinLockRelease(&gs_sstate->rowid_map_lock);
 }
 
+static bool
+gstoreFdwCheckRowId(GpuStoreSharedState *gs_sstate,
+					GpuStoreRowIdMapHead *rowid_map,
+					cl_uint rowid)
+{
+	cl_ulong   *base;
+	bool		retval = false;
+
+	if (rowid < rowid_map->nrooms)
+	{
+		if (rowid_map->nrooms <= (1U << 8))
+			base = rowid_map->base;				/* single level */
+		else if (rowid_map->nrooms <= (1U << 16))
+			base = rowid_map->base + 4;			/* double level */
+		else if (rowid_map->nrooms <= (1U << 24))
+			base = rowid_map->base + 4 + 1024;	/* triple level */
+		else
+			base = rowid_map->base + 4 + 1024 + 262144; /* full level */
+
+		SpinLockAcquire(&gs_sstate->rowid_map_lock);
+		if ((base[rowid>>6] & (1UL << (rowid & 0x3f))) != 0)
+			retval = true;
+		SpinLockRelease(&gs_sstate->rowid_map_lock);
+	}
+	return retval;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines for hash-base primary key index
@@ -4392,24 +4422,140 @@ pgstrom_gstore_fdw_apply_redo(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_apply_redo);
 
+/*
+ * __gstoreFdwHostBufferCompaction
+ *
+ * note; caller must have AccessExclusiveLock
+ */
+static void
+__gstoreFdwHostBufferCompaction(Relation frel)
+{
+	GpuStoreDesc	*gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	kern_data_store *kds = &gs_desc->base_mmap->schema;
+	kern_data_extra	*old_extra;
+	kern_data_extra *new_extra;
+	uint32			old_revision = gs_sstate->base_mmap_revision;
+	size_t			new_length;
+	size_t			file_sz;
+	cl_uint			i, j;
+	int				rawfd;
+
+	if (!kds->has_varlena)
+		return;		/* nothing to do */
+
+	old_extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
+	new_length = PAGE_ALIGN(old_extra->usage);
+	new_extra = MemoryContextAllocHuge(CurrentMemoryContext, new_length);
+	memcpy(new_extra->signature, GPUSTORE_EXTRABUF_SIGNATURE, 8);
+	new_extra->length = new_length;		/* tentative */
+	new_extra->usage  = offsetof(kern_data_extra, data);
+
+	Assert(kds->format == KDS_FORMAT_COLUMN);
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		bits8		   *nullmap = NULL;
+		cl_uint		   *values;
+
+		if (cmeta->attlen != -1)
+			continue;
+		Assert(!cmeta->attbyval);
+
+		if (cmeta->nullmap_offset != 0)
+			nullmap = (bits8 *)((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+		values = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+		for (i=0; i < kds->nitems; i++)
+		{
+			char	   *vl;
+			cl_uint		sz;
+
+			if (!gstoreFdwCheckRowId(gs_desc->gs_sstate,
+									 gs_desc->rowid_map, i) ||
+				(nullmap && att_isnull(i, nullmap)))
+			{
+				values[i] = 0;
+				continue;
+			}
+			vl = (char *)old_extra + __kds_unpack(values[i]);
+			if (vl < old_extra->data || vl >= (char *)old_extra + old_extra->usage)
+				elog(ERROR, "gstore_fdw: varlena datum row=%u column=%u looks corrupted. varlena %p points out of the extra buffer %p-%p",
+					 i, j, vl,
+					 old_extra->data,
+					 (char *)old_extra + old_extra->usage);
+			sz = VARSIZE_ANY(vl);
+			memcpy((char *)new_extra + new_extra->usage, vl, sz);
+			values[i] = __kds_packed(new_extra->usage);
+			new_extra->usage += MAXALIGN(sz);
+		}
+	}
+	new_length = Max3(new_extra->usage + (128UL << 20),		/* 128MB margin */
+					  (double)new_extra->usage  * 1.15,		/* 15% margin */
+					  (double)old_extra->length * 0.80);	/* 80% of old size */
+	new_length = PAGE_ALIGN(new_length);
+
+	file_sz = (offsetof(GpuStoreBaseFileHead, schema) +
+			   kds->extra_hoffset + new_length);
+	rawfd = open(gs_sstate->base_file, O_RDWR);
+	if (rawfd < 0)
+	{
+		elog(WARNING, "failed on open('%s'): %m", gs_sstate->base_file);
+		new_length = old_extra->length;
+	}
+	else
+	{
+		if (new_length > old_extra->length)
+		{
+			if (posix_fallocate(rawfd, 0, file_sz) != 0)
+			{
+				elog(WARNING, "failed on posix_fallocate('%s',%zu): %m",
+					 gs_sstate->base_file, file_sz);
+				new_length = old_extra->length;
+			}
+		}
+		else if (new_length < old_extra->length)
+		{
+			if (ftruncate(rawfd, file_sz) != 0)
+			{
+				elog(WARNING, "failed on ftruncate('%s',%zu): %m",
+					 gs_sstate->base_file, file_sz);
+				new_length = old_extra->length;
+			}
+		}
+		close(rawfd);
+	}
+	elog(NOTICE, "gstore_fdw: host extra compaction: usage %zu->%zu, length %zu->%zu",
+		 old_extra->usage,  new_extra->usage,
+		 old_extra->length, new_extra->length);
+	new_extra->length = new_length;
+	memcpy(old_extra, new_extra, new_extra->usage);
+
+	/* refresh base-file mapping */
+	do {
+		gs_desc->base_mmap_revision = random();
+	} while (old_revision == gs_desc->base_mmap_revision);
+	gstoreFdwRemapBaseFile(gs_desc, true);
+}
+
 Datum
 pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS)
 {
 	Oid			ftable_oid = PG_GETARG_OID(0);
-	bool		with_host_buffer = PG_GETARG_BOOL(1);
+	bool		only_device_compaction = PG_GETARG_BOOL(1);
+	LOCKMODE	lockmode;
 	Relation	frel;
 	CUresult	rc;
 
-	frel = table_open(ftable_oid, (with_host_buffer 
-								   ? AccessExclusiveLock
-								   : AccessShareLock));
-#if 0
-	if (with_host_buffer)
-		do host buffer compaction...;
-#endif
-	rc = gstoreFdwInvokeCompaction(frel, false);
+	if (only_device_compaction)
+		lockmode = AccessShareLock;
+	else
+		lockmode = AccessExclusiveLock;
 
-	table_close(frel, NoLock);
+	frel = table_open(ftable_oid, lockmode);
+	if (!only_device_compaction)
+		__gstoreFdwHostBufferCompaction(frel);
+	rc = gstoreFdwInvokeCompaction(frel, false);
+	table_close(frel, lockmode);
 
 	PG_RETURN_INT32((int)rc);
 }
