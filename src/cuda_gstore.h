@@ -232,4 +232,15 @@ typedef struct
 	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
 } kern_gpustore_redolog;
 
+/*
+ * replication_gpustore_redolog
+ */
+typedef struct
+{
+	cl_uint			__vl_head;
+	cl_uint			nitems;
+	cl_ulong		next_pos;
+	char			data[FLEXIBLE_ARRAY_MEMBER];
+} replication_gpustore_redolog;
+
 #endif /* CUDA_GSTORE_H */

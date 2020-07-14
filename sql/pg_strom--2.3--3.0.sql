@@ -58,11 +58,18 @@ CREATE FUNCTION pgstrom.gstore_fdw_replication_base(regclass,int)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_base'
   LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.gstore_fdw_replication_redo(regclass,bigint,float=0.8)
+CREATE FUNCTION pgstrom.gstore_fdw_replication_extra(regclass,int)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_extra'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.gstore_fdw_replication_redo(regclass,bigint,
+                                                    int=65536,		/* 64kB */
+													int=134217728,	/* 128MB */
+													int=5000)		/* 5.0sec */
   RETURNS bytes
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_redo'
   LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.gstore_fdw_replication_client(regclass,text)
+CREATE FUNCTION pgstrom.gstore_fdw_replication_client(regclass,text,text)
   RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_client'
   LANGUAGE C STRICT;
