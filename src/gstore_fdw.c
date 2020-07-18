@@ -1546,7 +1546,7 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 			}
 			else
 			{
-				size_t		curr_pos = gs_sstate->redo_read_pos;
+				size_t		curr_pos = gs_sstate->redo_write_pos;
 				cl_uint		nitems = (gs_sstate->redo_write_nitems -
 									  gs_sstate->redo_read_nitems);
 				gs_sstate->redo_last_timestamp = curr_timestamp;
@@ -1568,7 +1568,7 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 				 * logs not applied yet exceeds the threshold to kick the baclground
 				 * worker, but to be asynchronous.
 				 */
-				size_t		curr_pos = gs_sstate->redo_read_pos;
+				size_t		curr_pos = gs_sstate->redo_write_pos;
 				cl_uint		nitems = (gs_sstate->redo_write_nitems -
 									  gs_sstate->redo_read_nitems);
 				gs_sstate->redo_last_timestamp = curr_timestamp;
@@ -4698,6 +4698,8 @@ __gstoreFdwInvokeBackgroundCommand(GpuStoreBackgroundCommand *__lcmd, bool is_as
 			SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
 		}
 		retval = cmd->retval;
+		dlist_push_tail(&gstore_shared_head->background_free_cmds,
+						&cmd->chain);
 		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
 	}
 	return retval;
