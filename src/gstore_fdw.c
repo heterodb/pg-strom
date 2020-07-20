@@ -35,9 +35,7 @@ typedef struct
 	Latch	   *backend;		/* MyLatch of the backend, if any */
 	int			command;		/* one of GSTORE_MAINTAIN_CMD__* */
 	CUresult	retval;
-	/* for APPLY_REDO */
-	uint64		end_pos;
-	uint32		nitems;
+	uint64		end_pos;		/* for APPLY_REDO */
 } GpuStoreBackgroundCommand;
 
 /*
@@ -280,7 +278,7 @@ static bool		gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc,
 static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
 static CUresult	gstoreFdwInvokeInitialLoad(Relation frel, bool is_async);
 static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
-										 uint64 end_pos, uint32 nitems);
+										 uint64 end_pos);
 static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
 static CUresult gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async);
 static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
@@ -1004,18 +1002,14 @@ GstoreGetForeignPlan(PlannerInfo *root,
 static CUresult
 gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 {
-	cl_uint		nitems;
-	size_t		curr_pos;
+	size_t		end_pos;
 
 	/* see  __gstoreFdwAppendRedoLog */
 	SpinLockAcquire(&gs_sstate->redo_pos_lock);
-	curr_pos = gs_sstate->redo_write_pos;
-	nitems = (gs_sstate->redo_write_nitems -
-			  gs_sstate->redo_read_nitems);
+	end_pos = gs_sstate->redo_write_pos;
 	SpinLockRelease(&gs_sstate->redo_pos_lock);
 
-	return gstoreFdwInvokeApplyRedo(RelationGetRelid(frel), false,
-									curr_pos, nitems);
+	return gstoreFdwInvokeApplyRedo(RelationGetRelid(frel), false, end_pos);
 }
 
 static GpuStoreFdwState *
@@ -1497,6 +1491,8 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 		dest_pos = gs_sstate->redo_write_pos % gs_sstate->redo_log_limit;
 		if (dest_pos + required > gs_sstate->redo_log_limit)
 		{
+			struct timeval	tv1, tv2;
+
 			if (!has_base_mmap_lock)
 			{
 				SpinLockRelease(&gs_sstate->redo_pos_lock);
@@ -1512,6 +1508,7 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 			gs_sstate->redo_write_pos += len;
 
 			/* checkpoint of the base file */
+			gettimeofday(&tv1, NULL);
 			if (gs_desc->base_mmap_is_pmem)
 				pmem_persist(gs_desc->base_mmap,
 							 gs_desc->base_mmap_sz);
@@ -1520,8 +1517,10 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 			{
 				elog(WARNING, "failed on pmem_msync('%s'): %m", gs_sstate->base_file);
 			}
-			//CheckPointWarning
-			elog(LOG, "gstore_fdw: checkpoint applied on '%s'", gs_sstate->base_file);
+			gettimeofday(&tv2, NULL);
+
+			elog(LOG, "gstore_fdw: checkpoint applied on '%s' [%.2fms]",
+				 gs_sstate->base_file, TV_DIFF(tv2,tv1));
 			dest_pos = 0;
 		}
 
@@ -1546,12 +1545,10 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 			}
 			else
 			{
-				size_t		curr_pos = gs_sstate->redo_write_pos;
-				cl_uint		nitems = (gs_sstate->redo_write_nitems -
-									  gs_sstate->redo_read_nitems);
+				uint64		end_pos = gs_sstate->redo_write_pos;
 				gs_sstate->redo_last_timestamp = curr_timestamp;
 				SpinLockRelease(&gs_sstate->redo_pos_lock);
-				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, false, curr_pos, nitems);
+				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, false, end_pos);
 			}
 			continue;
 		}
@@ -1568,11 +1565,9 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 				 * logs not applied yet exceeds the threshold to kick the baclground
 				 * worker, but to be asynchronous.
 				 */
-				size_t		curr_pos = gs_sstate->redo_write_pos;
-				cl_uint		nitems = (gs_sstate->redo_write_nitems -
-									  gs_sstate->redo_read_nitems);
+				uint64		end_pos = gs_sstate->redo_write_pos;
 				gs_sstate->redo_last_timestamp = curr_timestamp;
-				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, true, curr_pos, nitems);
+				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, true, end_pos);
 			}
 		}
 		dest_ptr = gs_desc->redo_mmap + dest_pos;
@@ -4720,8 +4715,7 @@ gstoreFdwInvokeInitialLoad(Relation frel, bool is_async)
 }
 
 static CUresult
-gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
-						 uint64 end_pos, uint32 nitems)
+gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async, uint64 end_pos)
 {
 	GpuStoreBackgroundCommand lcmd;
 
@@ -4731,7 +4725,6 @@ gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 	lcmd.backend = (is_async ? NULL : MyLatch);
 	lcmd.command = GSTORE_BACKGROUND_CMD__APPLY_REDO;
 	lcmd.end_pos = end_pos;
-	lcmd.nitems  = nitems;
 
 	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
 }
@@ -5258,14 +5251,15 @@ out_error:
  * GSTORE_BACKGROUND_CMD__APPLY_REDO command
  */
 static CUresult
-GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
-								uint64 end_pos, uint32 nitems)
+GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc, uint64 end_pos)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	size_t		length;
 	size_t		offset;
 	int			index;
+	uint64		nitems;
 	uint64		head_pos;
+	uint64		tail_pos;
 	uint64		curr_pos;
 	kern_gpustore_redolog *h_redo;
 	CUdeviceptr	m_redo = 0UL;
@@ -5286,7 +5280,9 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
 		return CUDA_SUCCESS;
 	}
-	head_pos = curr_pos = gs_sstate->redo_read_pos;
+	nitems = gs_sstate->redo_write_nitems - gs_sstate->redo_read_nitems;
+	head_pos = gs_sstate->redo_read_pos;
+	tail_pos = gs_sstate->redo_write_pos;
 	Assert(end_pos <= gs_sstate->redo_write_pos);
 	SpinLockRelease(&gs_sstate->redo_pos_lock);
 
@@ -5296,7 +5292,7 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	 */
 	length = (MAXALIGN(offsetof(kern_gpustore_redolog,
 								log_index[nitems])) +
-			  MAXALIGN(end_pos - head_pos));
+			  MAXALIGN(tail_pos - head_pos));
 	rc = cuMemAllocManaged(&m_redo, length, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -5311,7 +5307,8 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	offset = MAXALIGN(offsetof(kern_gpustore_redolog,
 							   log_index[nitems]));
 	index = 0;
-	while (curr_pos < end_pos && index < nitems)
+	curr_pos = head_pos;
+	while (curr_pos < tail_pos && index < nitems)
 	{
 		uint64		file_pos = (curr_pos % gs_sstate->redo_log_limit);
 		GstoreTxLogCommon *tx_log
@@ -5343,7 +5340,7 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 	rc = __gstoreFdwCallKernelApplyRedo(gs_desc, h_redo);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on GPU Apply Redo: %s", errorText(rc));
+		elog(WARNING, "failed on GPU Apply Redo Logs: %s", errorText(rc));
 	}
 	else
 	{
@@ -5364,9 +5361,10 @@ GstoreFdwBackgroundApplyRedoLog(GpuStoreDesc *gs_desc,
 		}
 		gs_sstate->redo_read_pos = curr_pos;
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
-			
-		elog(LOG, "GPU Apply Redo (nitems=%u, length=%zu) pos %zu => %zu",
-			 h_redo->nitems, h_redo->length,
+
+		elog(LOG, "gstore_fdw: Log applied (nitems=%u, length=%zu, pos %zu => %zu)",
+			 h_redo->nitems,
+			 h_redo->length,
 			 head_pos, curr_pos);
 	}
 	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
@@ -5393,27 +5391,27 @@ GstoreFdwBackgroundDropUnload(GpuStoreDesc *gs_desc)
 	{
 		rc = cuMemFree(gs_desc->gpu_main_devptr);
 		if (rc != CUDA_SUCCESS)
-			elog(LOG, "Gstore_Fdw drop unload: failed on cuMemFree: %s",
+			elog(LOG, "gstore_fdw drop unload: failed on cuMemFree: %s",
 				 errorText(rc));
 	}
 	if (gs_desc->gpu_extra_devptr != 0UL)
 	{
 		rc = cuMemFree(gs_desc->gpu_extra_devptr);
 		if (rc != CUDA_SUCCESS)
-			elog(LOG, "Gstore_Fdw drop unload: failed on cuMemFree: %s",
+			elog(LOG, "gstore_fdw drop unload: failed on cuMemFree: %s",
 				 errorText(rc));
 	}
 	if (gs_desc->base_mmap)
 	{
 		if (pmem_unmap(gs_desc->base_mmap,
 					   gs_desc->base_mmap_sz) != 0)
-			elog(LOG, "Gstore_Fdw drop unload: failed on pmem_unmap(3): %m");
+			elog(LOG, "gstore_fdw drop unload: failed on pmem_unmap(3): %m");
 	}
 	if (gs_desc->redo_mmap)
 	{
 		if (pmem_unmap(gs_desc->redo_mmap,
 					   gs_desc->redo_mmap_sz) != 0)
-			elog(LOG, "Gstore_Fdw drop unload: failed on pmem_unmap(3): %m");
+			elog(LOG, "gstore_fdw drop unload: failed on pmem_unmap(3): %m");
 	}
 	hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
 	pthreadRWLockUnlock(&gs_sstate->gpu_bufer_lock);
@@ -5509,7 +5507,7 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			rc = GstoreFdwBackgroundInitialLoad(gs_desc);
 			break;
 		case GSTORE_BACKGROUND_CMD__APPLY_REDO:
-			rc = GstoreFdwBackgroundApplyRedoLog(gs_desc, cmd->end_pos, cmd->nitems);
+			rc = GstoreFdwBackgroundApplyRedoLog(gs_desc, cmd->end_pos);
 			break;
 		case GSTORE_BACKGROUND_CMD__COMPACTION:
 			rc = GstoreFdwBackgroundCompation(gs_desc);
@@ -5611,8 +5609,6 @@ gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
 					cmd->ftable_oid   = gs_sstate->ftable_oid;
 					cmd->command      = GSTORE_BACKGROUND_CMD__APPLY_REDO;
 					cmd->end_pos      = gs_sstate->redo_write_pos;
-					cmd->nitems       = (gs_sstate->redo_write_nitems -
-										 gs_sstate->redo_read_nitems);
 					cmd->retval = (CUresult) UINT_MAX;
 					dlist_push_tail(&gstore_shared_head->background_cmd_queue,
 									&cmd->chain);
@@ -5707,7 +5703,7 @@ next_database:
 				PG_TRY();
 				{
 					gstoreFdwLookupGpuStoreDesc(frel);
-					elog(LOG, "GstoreFdw: foreign-table '%s' in database '%s' preloaded",
+					elog(LOG, "gstore_fdw: foreign-table '%s' in database '%s' preload",
 						 RelationGetRelationName(frel), database_name);
 				}
 				PG_CATCH();
@@ -5716,7 +5712,7 @@ next_database:
 
 					MemoryContextSwitchTo(orig_memcxt);
 					errdata = CopyErrorData();
-					elog(WARNING, "GstoreFdw: failed on preloading foreign-table '%s' in database '%s' due to the ERROR: %s (%s:%d)",
+					elog(WARNING, "gstore_fdw: failed on preloading foreign-table '%s' in database '%s' due to the ERROR: %s (%s:%d)",
 						 RelationGetRelationName(frel),
 						 database_name,
 						 errdata->message,
@@ -5855,7 +5851,7 @@ pgstrom_init_gstore_fdw(void)
 	{
 		memset(&worker, 0, sizeof(BackgroundWorker));
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-				 "GstoreFdw Starup Kicker");
+				 "Gstore_Fdw Starup Kicker");
 		worker.bgw_flags = (BGWORKER_SHMEM_ACCESS |
 							BGWORKER_BACKEND_DATABASE_CONNECTION);
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
@@ -6181,6 +6177,7 @@ PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_redo);
 Datum
 pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
 {
+#if 0
 	Oid			ftable_oid = PG_GETARG_OID(0);
 	char	   *conninfo = TextDatumGetCString(PG_GETARG_DATUM(1));
 	char	   *remote_table = TextDatumGetCString(PG_GETARG_DATUM(2));
@@ -6195,7 +6192,6 @@ pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
 	if (!RelationIsGstoreFdw(frel))
 		elog(ERROR, "relation '%s' is not a foreign table with gstore_fdw",
 			 RelationGetRelationName(frel));
-#if 0
 	conn = PQconnectdb(conninfo);
 	if (PQstatus(conn) != CONNECTION_OK)
 		elog(ERROR, "failed to connect master database using '%s'", conninfo);
@@ -6208,10 +6204,6 @@ pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
 		//4. unload Gpu buffer
 		//5. 
 
-
-
-
-
 	}
 	PG_CATCH();
 	{
@@ -6220,9 +6212,10 @@ pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
 	}
 	PG_END_TRY();
 	PQfinish(conn);
-#endif
 	table_close(frel, ExclusiveLock);
-	
+#else
+	elog(ERROR, "%s not implemented yet", __FUNCTION__);
+#endif
 	PG_RETURN_NULL();
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_client);
