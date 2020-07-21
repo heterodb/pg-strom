@@ -1071,7 +1071,6 @@ __ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr,
 	fdw_state->referenced = referenced;
 	if (indexExpr != NULL)
 		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
-
 	/* synchronize device buffer prior to the kernel call */
 	if (apply_redo_log)
 		gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
@@ -2068,8 +2067,13 @@ ExplainGstoreFdw(GpuStoreFdwState *fdw_state,
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	GpuStoreDesc   *gs_desc = fdw_state->gs_desc;
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	List		   *dcontext;
 	int				j = -1;
 	StringInfoData	buf;
+
+	/* deparse context */
+	dcontext = deparse_context_for(RelationGetRelationName(frel),
+								   RelationGetRelid(frel));
 
 	/* shows referenced columns */
 	initStringInfo(&buf);
@@ -2102,7 +2106,7 @@ ExplainGstoreFdw(GpuStoreFdwState *fdw_state,
 		attr = tupleDescAttr(tupdesc, gs_sstate->primary_key - 1);
 		appendStringInfo(&buf, "%s = %s",
 						 quote_identifier(NameStr(attr->attname)),
-						 deparse_expression(indexExpr, NIL, false, false));
+						 deparse_expression(indexExpr, dcontext, false, false));
 		ExplainPropertyText("Index Cond", buf.data, es);
 	}
 
