@@ -60,6 +60,18 @@ typedef struct
 	/* Hash slot for GpuStoreSharedState */
 	slock_t		gstore_sstate_lock[GPUSTORE_SHARED_DESC_NSLOTS];
 	dlist_head	gstore_sstate_slot[GPUSTORE_SHARED_DESC_NSLOTS];
+
+	/* debug counter */
+	pg_atomic_uint64 debug_count0;
+	pg_atomic_uint64 debug_count1;
+	pg_atomic_uint64 debug_count2;
+	pg_atomic_uint64 debug_count3;
+	pg_atomic_uint64 debug_count4;
+	pg_atomic_uint64 debug_count5;
+	pg_atomic_uint64 debug_count6;
+	pg_atomic_uint64 debug_count7;
+	pg_atomic_uint64 debug_count8;
+	pg_atomic_uint64 debug_count9;
 } GpuStoreSharedHead;
 
 /*
@@ -125,7 +137,8 @@ typedef struct
 	char		signature[8];
 	size_t		length;
 	cl_uint		nrooms;
-	cl_ulong	base[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint 	first_free_rowid;	/* first free rowid, or UINT_MAX if nothing */
+	cl_uint		rowid_chain[FLEXIBLE_ARRAY_MEMBER];
 } GpuStoreRowIdMapHead;
 
 /*
@@ -156,12 +169,13 @@ typedef struct
 	cl_long			gpu_update_interval;
 	size_t			gpu_update_threshold;
 
-#define GSTORE_NUM_BASE_ROW_LOCKS		4000
-#define GSTORE_NUM_HASH_SLOT_LOCKS		5000
+#define GSTORE_NUM_BASE_ROW_LOCKS		1000
+#define GSTORE_NUM_HASH_SLOT_LOCKS		1200
 	/* Runtime state */
 	LWLock			base_mmap_lock;
 	uint32			base_mmap_revision;
 	slock_t			rowid_map_lock;		/* lock for RowID-map */
+
 	/* NOTE: hash_slot_lock must be acquired outside of the base_row_lock */
 	slock_t			base_row_lock[GSTORE_NUM_BASE_ROW_LOCKS];
 	slock_t			hash_slot_lock[GSTORE_NUM_HASH_SLOT_LOCKS];
@@ -269,6 +283,7 @@ Datum pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_replication_extra(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_read_debug(PG_FUNCTION_ARGS);
 void  GstoreFdwStartupKicker(Datum arg);
 void  GstoreFdwMaintainerMain(Datum arg);
 
@@ -280,13 +295,14 @@ static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
 										 uint64 end_pos);
 static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
 static CUresult gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async);
-static size_t	gstoreFdwRowIdMapSize(cl_uint nrooms);
 static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
-									   GpuStoreRowIdMapHead *rowid_map,
-									   cl_uint min_rowid);
+									   GpuStoreRowIdMapHead *rowid_map);
 static void		gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
 									  GpuStoreRowIdMapHead *rowid_map,
 									  cl_uint rowid);
+static void		gstoreFdwReleaseRowIdMulti(GpuStoreSharedState *gs_sstate,
+										   GpuStoreRowIdMapHead *rowid_map,
+										   cl_uint rowid, List *unused_rowids);
 static bool		gstoreFdwCheckRowId(GpuStoreSharedState *gs_sstate,
 									GpuStoreRowIdMapHead *rowid_map,
 									cl_uint rowid);
@@ -296,6 +312,19 @@ static void		gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
 static void		gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc,
 											  GpuStoreUndoLogs *gs_undo,
 											  cl_uint rowid);
+
+#define __SpinLockAcquire(NUM,LOCK)										\
+	do {																\
+		struct timespec tp1, tp2;										\
+		uint64		diff;												\
+																		\
+		clock_gettime(CLOCK_MONOTONIC, &tp1);							\
+		SpinLockAcquire(LOCK);											\
+		clock_gettime(CLOCK_MONOTONIC, &tp2);							\
+		diff = ((tp2.tv_sec - tp1.tv_sec) * 1000000000UL +				\
+				(tp2.tv_nsec - tp1.tv_nsec));							\
+		pg_atomic_add_fetch_u64(&gstore_shared_head->debug_count##NUM, diff); \
+	} while(0)
 
 /* ---- Atomic operations ---- */
 static inline cl_ulong atomicRead64(volatile cl_ulong *ptr)
@@ -1266,7 +1295,8 @@ __gstoreFillupTupleTableSlot(TupleTableSlot *slot,
 static TupleTableSlot *
 __gstoreIterateForeignIndexScan(ForeignScanState *node)
 {
-	Relation		frel = node->ss.ss_currentRelation;
+	Relation		frel __attribute__((unused))
+		= node->ss.ss_currentRelation;
 	EState		   *estate = node->ss.ps.state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	GpuStoreFdwState *fdw_state = node->fdw_state;
@@ -1363,24 +1393,23 @@ __gstoreIterateForeignIndexScan(ForeignScanState *node)
 static TupleTableSlot *
 __gstoreIterateForeignSeqScan(ForeignScanState *node)
 {
-	Relation		frel = node->ss.ss_currentRelation;
-	TupleDesc		tupdesc = RelationGetDescr(frel);
+	Relation		frel __attribute__((unused))
+		= node->ss.ss_currentRelation;
 	EState		   *estate = node->ss.ps.state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	GpuStoreFdwState *fdw_state = node->fdw_state;
 	GpuStoreDesc   *gs_desc = fdw_state->gs_desc;
-	kern_data_store *kds = &gs_desc->base_mmap->schema;
+	kern_data_store *kds __attribute__((unused)) = &gs_desc->base_mmap->schema;
 	cl_uint			rowid;
 	bool			visible;
 	GstoreFdwSysattr sysattr;
 
-	Assert(tupdesc->natts + 1 == kds->ncols);
+	Assert(RelationGetNumberOfAttributes(frel) + 1 == kds->ncols);
 	do {
 		rowid = pg_atomic_fetch_add_u64(fdw_state->read_pos, 1);
 		if (rowid >= fdw_state->nitems)
 			return NULL;
 		gstoreFdwSpinLockBaseRow(gs_desc, rowid);
-		//
 		visible = gstoreCheckVisibilityForRead(gs_desc, rowid,
 											   estate->es_snapshot,
 											   &sysattr);
@@ -1467,7 +1496,6 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	size_t		required = tx_log->length + sizeof(uint32);
-	uint32		terminator = GSTORE_TX_LOG__TERMINATOR;
 	bool		has_base_mmap_lock = false;
 
 	Assert(tx_log->length == MAXALIGN(tx_log->length));
@@ -1569,13 +1597,10 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 			}
 		}
 		dest_ptr = gs_desc->redo_mmap + dest_pos;
-
-		memcpy(dest_ptr, tx_log, tx_log->length);
-		memcpy(dest_ptr + tx_log->length, &terminator, sizeof(uint32));
 		gs_sstate->redo_write_pos += tx_log->length;
 		gs_sstate->redo_write_nitems++;
+		memcpy(dest_ptr, tx_log, tx_log->length);
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
-
 		break;
 	}
 	if (has_base_mmap_lock)
@@ -1905,9 +1930,9 @@ __gstoreExecForeignModify(EState *estate,
 		Bitmapset  *updatedCols = gs_mstate->updatedCols;
 		size_t		extra_sz = 0;
 		char	   *extra_buf = NULL;
+		List	   *unused_rowids = NIL;
 
 		slot_getallattrs(slot);
-
 		/* calculation of required extra buffer size */
 		if (kds->has_varlena)
 		{
@@ -1923,30 +1948,26 @@ __gstoreExecForeignModify(EState *estate,
 			}
 		}
 
-		/* new RowId allocation */
-		for (;;)
-		{
-			rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
-										   gs_desc->rowid_map,
-										   gs_mstate->next_rowid);
-			if (rowid >= kds->nrooms)
-				elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows",
-					 RelationGetRelationName(frel));
-			gs_mstate->next_rowid = rowid + 1;
-			gstoreFdwSpinLockBaseRow(gs_desc, rowid);
-			if (gstoreCheckVisibilityForInsert(gs_desc, rowid,
-											   gs_mstate->oldestXmin))
-				break;
-			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-			gstoreFdwReleaseRowId(gs_desc->gs_sstate,
-								  gs_desc->rowid_map, rowid);
-		}
-		/* set up user defined attributes under the row-lock */
 		PG_TRY();
 		{
 			GstoreFdwSysattr sysattr;
 			HeapTuple		tuple;
 
+			/* new RowId allocation */
+			for (;;)
+			{
+				rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
+											   gs_desc->rowid_map);
+				if (rowid >= kds->nrooms)
+					elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows %u",
+						 RelationGetRelationName(frel), rowid);
+				gstoreFdwSpinLockBaseRow(gs_desc, rowid);
+				if (gstoreCheckVisibilityForInsert(gs_desc, rowid,
+												   gs_mstate->oldestXmin))
+					break;
+				gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+				unused_rowids = lappend_int(unused_rowids, rowid);
+			}
 			/* Put INSERT Log */
 			tuple = ExecFetchSlotHeapTuple(slot, false, false);
 			gstoreFdwAppendInsertLog(frel, gs_desc, rowid, oldid, curr_xid, tuple);
@@ -1984,8 +2005,8 @@ __gstoreExecForeignModify(EState *estate,
 						 * of the unchanged value. It also saves consumption of
 						 * GPU device memory.
 						 */
-						kern_data_extra *extra = (kern_data_extra *)
-							((char *)kds + kds->extra_hoffset);
+						kern_data_extra *extra __attribute__((unused))
+							= (kern_data_extra *)((char *)kds + kds->extra_hoffset);
 						datum = KDS_fetch_datum_column(kds, cmeta, oldid, &isnull);
 						if (isnull)
 							elog(ERROR, "Bug? unchanged column has different value");
@@ -2006,12 +2027,16 @@ __gstoreExecForeignModify(EState *estate,
 		PG_CATCH();
 		{
 			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-			gstoreFdwReleaseRowId(gs_desc->gs_sstate,
-								  gs_desc->rowid_map, rowid);
+			gstoreFdwReleaseRowIdMulti(gs_desc->gs_sstate,
+									   gs_desc->rowid_map,
+									   rowid, unused_rowids);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
 		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+		gstoreFdwReleaseRowIdMulti(gs_desc->gs_sstate,
+								   gs_desc->rowid_map,
+								   UINT_MAX, unused_rowids);
 	}
 	/* UPDATE or DELETE */
 	if (oldid != UINT_MAX)
@@ -2536,221 +2561,35 @@ gstoreFdwAllocSharedState(Relation frel)
 	return gs_sstate;
 }
 
-
-
-
-
-
-
-
-
-
 /* ----------------------------------------------------------------
  *
  * Routines to allocate/release RowIDs
  *
  * ----------------------------------------------------------------
  */
-static size_t
+static inline size_t
 gstoreFdwRowIdMapSize(cl_uint nrooms)
 {
-	size_t		n;
-
-	if (nrooms <= (1U << 8))		/* single level */
-		n = 4;
-	else if (nrooms <= (1U << 16))	/* double level */
-		n = 4 + TYPEALIGN(256, nrooms) / 64;
-	else if (nrooms <= (1U << 24))	/* triple level */
-		n = 4 + 1024 + TYPEALIGN(256, nrooms) / 64;
-	else
-		n = 4 + 1024 + 262144 + TYPEALIGN(256, nrooms) / 64;
-
-	return offsetof(GpuStoreRowIdMapHead, base[n]);
-}
-
-static cl_uint
-__gstoreFdwAllocateRowId(cl_ulong *base, cl_uint nrooms,
-						 cl_uint lbound, int depth, cl_uint offset,
-						 cl_bool *p_has_unused_rowids)
-{
-	cl_ulong   *next = NULL;
-	cl_uint		lbound_curr = (lbound >> 24);
-	int			k, start = (lbound_curr >> 6);
-	cl_ulong	mask = (1UL << (lbound_curr & 0x3fU)) - 1;
-	cl_uint		rowid = UINT_MAX;
-	cl_uint		upper = (offset << 8);
-
-	if (upper >= nrooms)
-	{
-		*p_has_unused_rowids = false;
-		return UINT_MAX;	/* obviously, out of range */
-	}
-
-	switch (depth)
-	{
-		case 0:
-			if (nrooms > 256)
-				next = base + 4;
-			break;
-		case 1:
-			if (nrooms > 65536)
-				next = base + 1024;
-			break;
-		case 2:
-			if (nrooms > 16777216)
-				next = base + 262144;
-			break;
-		case 3:
-			next = NULL;
-			break;
-		default:
-			return UINT_MAX;	/* Bug? */
-	}
-	base += (offset << 2);
-
-	for (k=start; k < 4; k++, mask=0)
-	{
-		cl_ulong	map = base[k] | mask;
-		cl_ulong	bit;
-	retry:
-		if (map != ~0UL)
-		{
-			cl_uint		lbound_next = 0;
-
-			/* lookup the first zero position */
-			rowid = (__builtin_ffsl(~map) - 1);
-			bit = (1UL << rowid);
-			rowid |= (k << 6);
-			if (lbound_curr == rowid)
-				lbound_next = (lbound << 8);
-			rowid |= upper;		/* add offset */
-
-			if (!next)
-			{
-				if (rowid < nrooms)
-					base[k] |= bit;
-				else
-					rowid = UINT_MAX;	/* not a valid RowID */
-			}
-			else
-			{
-				cl_bool		has_unused_rowids;
-
-				rowid = __gstoreFdwAllocateRowId(next, nrooms,
-												 lbound_next,
-												 depth+1, rowid,
-												 &has_unused_rowids);
-				if (!has_unused_rowids)
-				{
-					base[k] |= bit;
-				}
-				if (rowid == UINT_MAX)
-				{
-					map |= bit;
-					lbound = 0;
-					goto retry;
-				}
-			}
-			break;
-		}
-	}
-
-	if ((base[0] & base[1] & base[2] & base[3]) == ~0UL)
-		*p_has_unused_rowids = false;
-	else
-		*p_has_unused_rowids = true;
-	
-	return rowid;
+	return MAXALIGN(offsetof(GpuStoreRowIdMapHead, rowid_chain[nrooms]));
 }
 
 static cl_uint
 gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
-					   GpuStoreRowIdMapHead *rowid_map,
-					   cl_uint min_rowid)
+                       GpuStoreRowIdMapHead *rowid_map)
 {
-	cl_uint		lbound;
 	cl_uint		rowid;
-	cl_bool		has_unused_rowids;
-	
-	if (min_rowid < rowid_map->nrooms)
-	{
-		if (rowid_map->nrooms <= (1U << 8))
-			lbound = (min_rowid << 24);		/* single level */
-		else if (rowid_map->nrooms <= (1U << 16))
-			lbound = (min_rowid << 16);		/* dual level */
-		else if (rowid_map->nrooms <= (1U << 24))
-			lbound = (min_rowid << 8);		/* triple level */
-		else
-			lbound = min_rowid;				/* full level */
 
-		SpinLockAcquire(&gs_sstate->rowid_map_lock);
-		rowid = __gstoreFdwAllocateRowId(rowid_map->base,
-										 rowid_map->nrooms,
-										 lbound, 0, 0,
-										 &has_unused_rowids);
-		SpinLockRelease(&gs_sstate->rowid_map_lock);
-		return rowid;
-	}
-	return UINT_MAX;
-}
-
-static bool
-__gstoreFdwReleaseRowId(cl_ulong *base, cl_uint nrooms, cl_uint rowid)
-{
-	cl_ulong   *bottom;
-	
-	if (rowid < nrooms)
+	SpinLockAcquire(&gs_sstate->rowid_map_lock);
+	rowid = rowid_map->first_free_rowid;
+	if (rowid != UINT_MAX)
 	{
-		if (nrooms <= (1U << 8))
-		{
-			/* single level */
-			Assert((rowid & 0xffffff00) == 0);
-			bottom = base;
-			if ((bottom[rowid >> 6] & (1UL << (rowid & 0x3f))) == 0)
-				return false;	/* RowID is not allocated yet */
-			base[rowid >> 6] &= ~(1UL << (rowid & 0x3f));
-		}
-		else if (nrooms <= (1U << 16))
-		{
-			/* double level */
-			Assert((rowid & 0xffff0000) == 0);
-			bottom = base + 4;
-			if ((bottom[rowid >> 6] & (1UL << (rowid & 0x3f))) == 0)
-				return false;	/* RowID is not allocated yet */
-			base[(rowid >> 14)] &= ~(1UL << ((rowid >> 8) & 0x3f));
-			base += 4;
-			base[(rowid >>  6)] &= ~(1UL << (rowid & 0x3f));
-		}
-		else if (nrooms <= (1U << 24))
-		{
-			/* triple level */
-			Assert((rowid & 0xff000000) == 0);
-			bottom = base + 4 + 1024;
-			if ((bottom[rowid >> 6] & (1UL << (rowid & 0x3f))) == 0)
-				return false;	/* RowID is not allocated yet */
-			base[(rowid >> 22)] &= ~(1UL << ((rowid >> 16) & 0x3f));
-			base += 4;
-			base[(rowid >> 14)] &= ~(1UL << ((rowid >>  8) & 0x3f));
-			base += 1024;
-			base[(rowid >>  6)] &= ~(1UL << (rowid & 0x3f));
-		}
-		else
-		{
-			/* full level */
-			bottom = base + 4 + 1024 + 262144;
-			if ((bottom[rowid >> 6] & (1UL << (rowid & 0x3f))) == 0)
-				return false;	/* RowID is not allocated yet */
-			base[(rowid >> 30)] &= ~(1UL << ((rowid >> 24) & 0x3f));
-			base += 4;
-			base[(rowid >> 22)] &= ~(1UL << ((rowid >> 16) & 0x3f));
-			base += 1024;
-			base[(rowid >> 14)] &= ~(1UL << ((rowid >>  8) & 0x3f));
-			base += 262144;
-			base[(rowid >>  6)] &= ~(1UL << (rowid & 0x3f));
-		}
-		return true;
+		Assert(rowid < rowid_map->nrooms);
+		rowid_map->first_free_rowid = rowid_map->rowid_chain[rowid];
+		rowid_map->rowid_chain[rowid] = UINT_MAX;	/* currently in-use */
 	}
-	return false;
+	SpinLockRelease(&gs_sstate->rowid_map_lock);
+
+	return rowid;
 }
 
 static void
@@ -2759,8 +2598,38 @@ gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
 					  cl_uint rowid)
 {
 	SpinLockAcquire(&gs_sstate->rowid_map_lock);
-	__gstoreFdwReleaseRowId(rowid_map->base,
-							rowid_map->nrooms, rowid);
+	Assert(rowid < rowid_map->nrooms);
+	Assert(rowid_map->rowid_chain[rowid] == UINT_MAX);
+	rowid_map->rowid_chain[rowid] = rowid_map->first_free_rowid;
+	rowid_map->first_free_rowid = rowid;
+	SpinLockRelease(&gs_sstate->rowid_map_lock);
+}
+
+static void
+gstoreFdwReleaseRowIdMulti(GpuStoreSharedState *gs_sstate,
+						   GpuStoreRowIdMapHead *rowid_map,
+						   cl_uint rowid, List *unused_rowids)
+{
+	ListCell   *lc;
+
+    SpinLockAcquire(&gs_sstate->rowid_map_lock);
+	if (rowid != UINT_MAX)
+	{
+		Assert(rowid < rowid_map->nrooms);
+		Assert(rowid_map->rowid_chain[rowid] == UINT_MAX);
+		rowid_map->rowid_chain[rowid] = rowid_map->first_free_rowid;
+		rowid_map->first_free_rowid = rowid;
+	}
+
+	foreach (lc, unused_rowids)
+	{
+		rowid = lfirst_int(lc);
+
+		Assert(rowid < rowid_map->nrooms);
+		Assert(rowid_map->rowid_chain[rowid] == UINT_MAX);
+		rowid_map->rowid_chain[rowid] = rowid_map->first_free_rowid;
+		rowid_map->first_free_rowid = rowid;
+	}
 	SpinLockRelease(&gs_sstate->rowid_map_lock);
 }
 
@@ -2769,22 +2638,12 @@ gstoreFdwCheckRowId(GpuStoreSharedState *gs_sstate,
 					GpuStoreRowIdMapHead *rowid_map,
 					cl_uint rowid)
 {
-	cl_ulong   *base;
-	bool		retval = false;
+	bool	retval = false;
 
 	if (rowid < rowid_map->nrooms)
 	{
-		if (rowid_map->nrooms <= (1U << 8))
-			base = rowid_map->base;				/* single level */
-		else if (rowid_map->nrooms <= (1U << 16))
-			base = rowid_map->base + 4;			/* double level */
-		else if (rowid_map->nrooms <= (1U << 24))
-			base = rowid_map->base + 4 + 1024;	/* triple level */
-		else
-			base = rowid_map->base + 4 + 1024 + 262144; /* full level */
-
 		SpinLockAcquire(&gs_sstate->rowid_map_lock);
-		if ((base[rowid>>6] & (1UL << (rowid & 0x3f))) != 0)
+		if (rowid_map->rowid_chain[rowid] == UINT_MAX)
 			retval = true;
 		SpinLockRelease(&gs_sstate->rowid_map_lock);
 	}
@@ -3090,19 +2949,23 @@ gstoreFdwCreateBaseFile(Relation frel,
 			 base_file, file_sz);
 	/* Write out GpuStoreRowIdMapHead section */
 	{
-		GpuStoreRowIdMapHead rowmap_buf;
+		GpuStoreRowIdMapHead *rowid_map = palloc(rowmap_sz);
+		cl_uint		i;
 
-		memset(&rowmap_buf, 0, sizeof(GpuStoreRowIdMapHead));
-		memcpy(rowmap_buf.signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
-		rowmap_buf.length = rowmap_sz;
-		rowmap_buf.nrooms = gs_sstate->max_num_rows;
+		memcpy(rowid_map->signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
+		rowid_map->length = rowmap_sz;
+		rowid_map->nrooms = gs_sstate->max_num_rows;
+		rowid_map->first_free_rowid = 0;
+		for (i=0; i < gs_sstate->max_num_rows; i++)
+			rowid_map->rowid_chain[i] = i+1;
+		rowid_map->rowid_chain[gs_sstate->max_num_rows - 1] = UINT_MAX;
 
 		if (lseek(rawfd, hbuf->rowid_map_offset, SEEK_SET) < 0)
 			elog(ERROR, "failed on lseek('%s',%zu): %m",
 				 base_file, hbuf->rowid_map_offset);
-		sz = offsetof(GpuStoreRowIdMapHead, base);
-		if (__writeFile(rawfd, &rowmap_buf, sz) != sz)
+		if (__writeFile(rawfd, rowid_map, rowmap_sz) != rowmap_sz)
 			elog(ERROR, "failed on __writeFile('%s'): %m", base_file);
+		pfree(rowid_map);
 	}
 	/* Write out GpuStoreHashHead section (if PK is configured) */
 	if (gs_sstate->primary_key >= 0)
@@ -3531,7 +3394,7 @@ __rebuildRowIdMapAndHashIndex(Relation frel,
 	size_t		nrooms = gs_sstate->max_num_rows;
 	size_t		nslots = gs_sstate->num_hash_slots;
 	size_t		rowid_map_sz;
-	cl_uint		rowid, newid;
+	cl_uint		i, rowid;
 
 	/* clean-up rowid-map */
 	rowid_map_sz = gstoreFdwRowIdMapSize(kds->nrooms);
@@ -3541,6 +3404,7 @@ __rebuildRowIdMapAndHashIndex(Relation frel,
 	memcpy(rowid_map->signature, GPUSTORE_ROWIDMAP_SIGNATURE, 8);
 	rowid_map->length = rowid_map_sz;
 	rowid_map->nrooms = kds->nrooms;
+	rowid_map->first_free_rowid = UINT_MAX;
 
 	/* clean-up hash-index */
 	if (base_mmap->hash_index_offset != 0)
@@ -3571,12 +3435,28 @@ __rebuildRowIdMapAndHashIndex(Relation frel,
 			(sysattr->xmax != FrozenTransactionId &&
 			 !TransactionIdDidCommit(sysattr->xmax)))
 		{
-			newid = gstoreFdwAllocateRowId(gs_sstate, rowid_map, rowid);
-			Assert(newid == rowid);
+			rowid_map->rowid_chain[rowid] = UINT_MAX;
 			if (hash_index)
 				__rebuildHashIndexEntry(gs_sstate, kds, hash_index, rowid);
 		}
 	}
+
+	for (i=rowid_map->nrooms; i > 0; i--)
+	{
+		rowid = i - 1;
+
+		if (rowid_map->rowid_chain[rowid] == UINT_MAX)
+			continue;
+
+		
+
+		
+		if (rowid_map->rowid_chain[rowid-1] == 0)
+			continue;
+		rowid_map->rowid_chain[rowid-1] = rowid_map->first_free_rowid;
+		rowid_map->first_free_rowid = rowid-1;
+	}
+	elog(INFO, "rebuild done");
 }
 
 static void
@@ -4871,7 +4751,7 @@ __gstoreFdwBackgroundInitialLoadNoLock(GpuStoreDesc *gs_desc)
 			((char *)schema + schema->extra_hoffset);
 
 		rc = cuMemAllocManaged(&gs_desc->gpu_extra_devptr,
-							   extra->usage,
+							   extra->length,
 							   CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -5767,6 +5647,17 @@ pgstrom_startup_gstore_fdw(void)
 		dlist_init(&gstore_shared_head->gstore_sstate_slot[i]);
 	}
 	ConditionVariableInit(&gstore_shared_head->row_lock_cond);
+
+	pg_atomic_init_u64(&gstore_shared_head->debug_count0, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count1, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count2, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count3, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count4, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count5, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count6, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count7, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count8, 0);
+	pg_atomic_init_u64(&gstore_shared_head->debug_count9, 0);
 }
 
 /*
@@ -6217,3 +6108,63 @@ pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_client);
+
+Datum
+pgstrom_gstore_fdw_read_debug(PG_FUNCTION_ARGS)
+{
+	static uint64	__debug_count0 = 0;
+	static uint64	__debug_count1 = 0;
+	static uint64	__debug_count2 = 0;
+	static uint64	__debug_count3 = 0;
+	static uint64	__debug_count4 = 0;
+	static uint64	__debug_count5 = 0;
+	static uint64	__debug_count6 = 0;
+	static uint64	__debug_count7 = 0;
+	static uint64	__debug_count8 = 0;
+	static uint64	__debug_count9 = 0;
+	uint64		debug_count0 = pg_atomic_read_u64(&gstore_shared_head->debug_count0);
+	uint64		debug_count1 = pg_atomic_read_u64(&gstore_shared_head->debug_count1);
+	uint64		debug_count2 = pg_atomic_read_u64(&gstore_shared_head->debug_count2);
+	uint64		debug_count3 = pg_atomic_read_u64(&gstore_shared_head->debug_count3);
+	uint64		debug_count4 = pg_atomic_read_u64(&gstore_shared_head->debug_count4);
+	uint64		debug_count5 = pg_atomic_read_u64(&gstore_shared_head->debug_count5);
+	uint64		debug_count6 = pg_atomic_read_u64(&gstore_shared_head->debug_count6);
+	uint64		debug_count7 = pg_atomic_read_u64(&gstore_shared_head->debug_count7);
+	uint64		debug_count8 = pg_atomic_read_u64(&gstore_shared_head->debug_count8);
+	uint64		debug_count9 = pg_atomic_read_u64(&gstore_shared_head->debug_count9);
+	char	   *s;
+
+	s = psprintf("debug0 = %12.9f\n"
+				 "debug1 = %12.9f\n"
+				 "debug2 = %12.9f\n"
+				 "debug3 = %12.9f\n"
+				 "debug4 = %12.9f\n"
+				 "debug5 = %12.9f\n"
+				 "debug6 = %12.9f\n"
+				 "debug7 = %12.9f\n"
+				 "debug8 = %12.9f\n"
+				 "debug9 = %12.9f\n",
+				 (double)(debug_count0 - __debug_count0) / 1000000000.0,
+				 (double)(debug_count1 - __debug_count1) / 1000000000.0,
+				 (double)(debug_count2 - __debug_count2) / 1000000000.0,
+				 (double)(debug_count3 - __debug_count3) / 1000000000.0,
+				 (double)(debug_count4 - __debug_count4) / 1000000000.0,
+				 (double)(debug_count5 - __debug_count5) / 1000000000.0,
+				 (double)(debug_count6 - __debug_count6) / 1000000000.0,
+				 (double)(debug_count7 - __debug_count7) / 1000000000.0,
+				 (double)(debug_count8 - __debug_count8) / 1000000000.0,
+				 (double)(debug_count9 - __debug_count9) / 1000000000.0);
+	__debug_count0 = debug_count0;
+	__debug_count1 = debug_count1;
+	__debug_count2 = debug_count2;
+	__debug_count3 = debug_count3;
+	__debug_count4 = debug_count4;
+	__debug_count5 = debug_count5;
+	__debug_count6 = debug_count6;
+	__debug_count7 = debug_count7;
+	__debug_count8 = debug_count8;
+	__debug_count9 = debug_count9;
+
+	PG_RETURN_TEXT_P(cstring_to_text(s));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_read_debug);

@@ -1973,6 +1973,8 @@ pthreadCondSignal(pthread_cond_t *cond)
 #define TV_DIFF(tv2,tv1)								\
 	(((double)(tv2.tv_sec  - tv1.tv_sec) * 1000000.0 +	\
 	  (double)(tv2.tv_usec - tv1.tv_usec)) / 1000.0)
+#define TP_DIFF(tp2,tp1)						\
+	((tp2.tv_sec - tp1.tv_sec) * 1000000000UL +	(tp2.tv_nsec - tp1.tv_nsec))
 
 /*
  * simple wrapper for permission checks

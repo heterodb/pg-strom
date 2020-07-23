@@ -186,14 +186,23 @@ __KDS_store_datum_column(kern_data_store *kds,
 		   row_index < kds->nrooms);
 	if (cmeta->nullmap_offset != 0)
 	{
-		bits8  *nullmap = (bits8 *)
+		uint32 *nullmap = (uint32 *)
 			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
 
+		/*
+		 * Row-level lock prevents concurrent access per row basis.
+		 * So, null-bitmap must be set/cleared by atomic operations,
+		 * because other bits are not locked at this moment.
+		 */
 		if (!isnull)
-			nullmap[row_index>>3] |=  (1 << (row_index & 7));
+			__atomic_fetch_or(nullmap + (row_index >> 5),
+							  (1U << (row_index & 0x1f)),
+							  __ATOMIC_SEQ_CST);
 		else
 		{
-			nullmap[row_index>>3] &= ~(1 << (row_index & 7));
+			__atomic_fetch_and(nullmap + (row_index >> 5),
+							   ~(1U << (row_index & 0x1f)),
+							   __ATOMIC_SEQ_CST);
 			return;
 		}
 	}
@@ -233,11 +242,10 @@ __KDS_store_datum_column(kern_data_store *kds,
 	else if (cmeta->attlen == -1)
 	{
 		kern_data_extra *extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
-		size_t		sz = VARSIZE_ANY(datum);
 
 		Assert(kds->extra_hoffset > 0);
 		Assert((char *)datum >= (char *)extra &&
-			   (char *)datum + sz <= (char *)extra + extra->length);
+			   (char *)datum + VARSIZE_ANY(datum) <= (char *)extra + extra->length);
 		((cl_uint *)addr)[row_index] = __kds_packed((char *)datum - (char *)extra);
 	}
 	else
