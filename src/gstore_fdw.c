@@ -185,7 +185,7 @@ typedef struct
 	uint64			redo_write_pos;
 	uint64			redo_read_nitems;
 	uint64			redo_read_pos;
-	uint64			redo_sync_pos;
+	volatile uint64	redo_sync_pos;
 	uint64			redo_repl_pos[4];		/* under the replication */
 	uint64			redo_last_timestamp;	/* time when last command sent.
 											 * not a timestamp redo-logs are
@@ -257,7 +257,6 @@ typedef struct
 {
 	GpuStoreDesc   *gs_desc;
 	Bitmapset	   *updatedCols;
-	cl_uint			next_rowid;
 	TransactionId	oldestXmin;
 	AttrNumber		ctid_attno;
 	GpuStoreUndoLogs *gs_undo;
@@ -1490,12 +1489,13 @@ ExecShutdownGstoreFdw(GpuStoreFdwState *fdw_state)
 }
 #endif
 
-static void
+static uint64
 __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 						 GstoreTxLogCommon *tx_log)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	size_t		required = tx_log->length + sizeof(uint32);
+	uint64		written_pos = 0;
 	bool		has_base_mmap_lock = false;
 
 	Assert(tx_log->length == MAXALIGN(tx_log->length));
@@ -1600,11 +1600,13 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 		gs_sstate->redo_write_pos += tx_log->length;
 		gs_sstate->redo_write_nitems++;
 		memcpy(dest_ptr, tx_log, tx_log->length);
+		written_pos = gs_sstate->redo_write_pos;
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
 		break;
 	}
 	if (has_base_mmap_lock)
 		LWLockRelease(&gs_sstate->base_mmap_lock);
+	return written_pos;
 }
 
 static void
@@ -1760,7 +1762,6 @@ GstoreBeginForeignModify(ModifyTableState *mtstate,
 	}
 	gs_mstate->gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
 	gs_mstate->updatedCols = updatedCols;
-	gs_mstate->next_rowid = 0;
 	gs_mstate->oldestXmin = GetOldestXmin(frel, PROCARRAY_FLAGS_VACUUM);
 	gs_mstate->ctid_attno = ctid_attno;
 	gs_mstate->gs_undo = gstoreFdwLookupUndoLogs(gs_mstate->gs_desc);
@@ -3447,16 +3448,9 @@ __rebuildRowIdMapAndHashIndex(Relation frel,
 
 		if (rowid_map->rowid_chain[rowid] == UINT_MAX)
 			continue;
-
-		
-
-		
-		if (rowid_map->rowid_chain[rowid-1] == 0)
-			continue;
-		rowid_map->rowid_chain[rowid-1] = rowid_map->first_free_rowid;
-		rowid_map->first_free_rowid = rowid-1;
+		rowid_map->rowid_chain[rowid] = rowid_map->first_free_rowid;
+		rowid_map->first_free_rowid = rowid;
 	}
-	elog(INFO, "rebuild done");
 }
 
 static void
@@ -3845,11 +3839,13 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
  * __gstoreFdwXactOnPreCommit
  */
 static void
-__gstoreFdwXactOnPreCommit(GpuStoreDesc *gs_desc, GpuStoreUndoLogs *gs_undo)
+__gstoreFdwXactOnPreCommit(GpuStoreDesc *gs_desc, GpuStoreUndoLogs *gs_undo,
+						   uint64 *p_written_pos)
 {
 	GstoreTxLogCommit *c_log = alloca(GSTORE_TX_LOG_COMMIT_ALLOCSZ);
 	char		   *pos = gs_undo->buf.data;
 	cl_uint			count = 1;
+	uint64			written_pos = 0;
 
 	/* setup commit log buffer */
 	c_log->type = GSTORE_TX_LOG__COMMIT;
@@ -3898,13 +3894,73 @@ __gstoreFdwXactOnPreCommit(GpuStoreDesc *gs_desc, GpuStoreUndoLogs *gs_undo)
 				memset((char *)c_log + c_log->length, 0, diff);
 				c_log->length += diff;
 			}
-			__gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)c_log);
+			written_pos = __gstoreFdwAppendRedoLog(gs_desc, (GstoreTxLogCommon *)c_log);
 			/* rewind */
 			c_log->length = offsetof(GstoreTxLogCommit, data);
 			c_log->nitems = 0;
 		}
 	}
 	Assert(pos <= gs_undo->buf.data + gs_undo->buf.len);
+	if (p_written_pos)
+		*p_written_pos = Max(*p_written_pos, written_pos);
+}
+
+/*
+ * __gstoreFdwXactSyncRedoLog
+ */
+static void
+__gstoreFdwXactSyncRedoLog(GpuStoreDesc *gs_desc, uint64 written_pos)
+{
+	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
+	uint64		sync_pos = gs_sstate->redo_sync_pos;
+	uint64		__sync_pos = sync_pos % gs_sstate->redo_log_limit;
+	uint64		__written_pos = written_pos % gs_sstate->redo_log_limit;
+
+	if (written_pos <= sync_pos)
+		return;
+	if (written_pos >= sync_pos + gs_sstate->redo_log_limit)
+	{
+		/* corner case - entire redo log buffer must be sync */
+		if (gs_desc->redo_mmap_is_pmem)
+			pmem_persist(gs_desc->redo_mmap,
+						 gs_desc->redo_mmap_sz);
+		else if (pmem_msync(gs_desc->redo_mmap,
+							gs_desc->redo_mmap_sz) != 0)
+			elog(WARNING, "failed on pmem_msync('%s'): %m",
+				 gs_sstate->redo_log_file);
+	}
+	else if (__written_pos > __sync_pos)
+	{
+		char   *ptr = gs_desc->redo_mmap + __sync_pos;
+		size_t	sz = __written_pos - __sync_pos;
+
+		if (gs_desc->redo_mmap_is_pmem)
+			pmem_persist(ptr, sz);
+		else if (pmem_msync(ptr, sz) != 0)
+			elog(WARNING, "failed on pmem_msync('%s'): %m",
+				 gs_sstate->redo_log_file);
+	}
+	else
+	{
+		char   *ptr = gs_desc->redo_mmap + __sync_pos;
+		size_t	sz = gs_sstate->redo_log_limit - __sync_pos;
+
+		if (gs_desc->redo_mmap_is_pmem)
+		{
+			pmem_persist(ptr, sz);
+			pmem_persist(gs_desc->redo_mmap, __written_pos);
+		}
+		else
+		{
+			if (pmem_msync(ptr, sz) != 0)
+				elog(WARNING, "failed on pmem_msync('%s'): %m",
+					 gs_sstate->redo_log_file);
+			if (pmem_msync(gs_desc->redo_mmap, __written_pos) != 0)
+				elog(WARNING, "failed on pmem_msync('%s'): %m",
+					 gs_sstate->redo_log_file);
+		}
+	}
+	atomicMax64(&gs_sstate->redo_sync_pos, written_pos);
 }
 
 /*
@@ -4065,13 +4121,16 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		hash_seq_init(&hseq, gstore_desc_htab);
 		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
+			uint64	written_pos = 0;
+
 			dlist_foreach (iter, &gs_desc->gs_undo_logs)
 			{
 				gs_undo = dlist_container(GpuStoreUndoLogs,
 										  chain, iter.cur);
 				if (gs_undo->curr_xid == curr_xid)
-					__gstoreFdwXactOnPreCommit(gs_desc, gs_undo);
+					__gstoreFdwXactOnPreCommit(gs_desc, gs_undo, &written_pos);
 			}
+			__gstoreFdwXactSyncRedoLog(gs_desc, written_pos);
 		}
 	}
 	else if (event == XACT_EVENT_COMMIT ||
