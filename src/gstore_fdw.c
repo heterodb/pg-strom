@@ -3036,12 +3036,14 @@ gstoreFdwValidateBaseFile(Relation frel,
 	int			mmap_is_pmem;
 	size_t		main_sz, sz;
 	size_t		file_pos;
+	cl_uint		rowid;
 	int			j, unitsz;
 	bool		retval = false;
 	GpuStoreBaseFileHead *base_mmap;
 	GpuStoreRowIdMapHead *rowid_map = NULL;
 	GpuStoreHashIndexHead *hash_index = NULL;
 	kern_data_store *schema;
+	kern_colmeta *cmeta;
 
 	base_mmap = pmem_map_file(gs_sstate->base_file, 0,
 							  0, 0600,
@@ -3078,6 +3080,13 @@ gstoreFdwValidateBaseFile(Relation frel,
 			elog(ERROR, "Base file '%s' has incompatible schema definition",
 				 gs_sstate->base_file);
 		}
+
+		if (schema->nitems > schema->nrooms)
+		{
+			elog(ERROR, "Base file '%s' has larger nitems (%u) than nrooms (%u)",
+				 gs_sstate->base_file, schema->nitems, schema->nrooms);
+		}
+
 		if (schema->table_oid != RelationGetRelid(frel))
 		{
 			if (!validation_by_reuse)
@@ -3160,6 +3169,42 @@ gstoreFdwValidateBaseFile(Relation frel,
 			elog(ERROR, "Base file '%s' is too small then required",
 				 gs_sstate->base_file);
 		file_pos = PAGE_ALIGN(offsetof(GpuStoreBaseFileHead, schema) + main_sz);
+
+		/*
+		 * fixup system attributes for committed rows
+		 */
+		cmeta = &schema->colmeta[schema->ncols - 1];
+		for (rowid=0; rowid < schema->nitems; rowid++)
+		{
+			GstoreFdwSysattr *sysattr;
+			Datum		datum;
+			bool		isnull;
+
+			datum = KDS_fetch_datum_column(schema, cmeta, rowid, &isnull);
+			if (isnull)
+				elog(ERROR, "Base file '%s' rowid=%u has NULL for system attribute",
+					 gs_sstate->base_file, rowid);
+			sysattr = (GstoreFdwSysattr *)DatumGetPointer(datum);
+			if (sysattr->xmin == InvalidTransactionId)
+				continue;
+			if (sysattr->xmin != FrozenTransactionId)
+			{
+				if (TransactionIdDidCommit(sysattr->xmin))
+					sysattr->xmin = FrozenTransactionId;
+				else
+				{
+					sysattr->xmin = InvalidTransactionId;
+					continue;
+				}
+			}
+			if (TransactionIdIsNormal(sysattr->xmax))
+			{
+				if (TransactionIdDidCommit(sysattr->xmax))
+					sysattr->xmax = FrozenTransactionId;
+				else
+					sysattr->xmax = InvalidTransactionId;
+			}
+		}
 
 		/*
 		 * validate GpuStoreRowIdMapHead section
