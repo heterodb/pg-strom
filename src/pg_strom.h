@@ -1169,6 +1169,8 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 #define PDS_clone(a)							\
 	__PDS_clone((a),__FILE__,__LINE__)
 
+extern void KDS_dump_schema(kern_data_store *kds);
+
 //XXX - to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);

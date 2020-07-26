@@ -880,14 +880,15 @@ __PDS_create_slot(GpuContext *gcontext,
 	CUresult	rc;
 	size_t		kds_head_sz;
 	size_t		unitsz;
-	size_t		nrooms;
+	size_t		nrooms = UINT_MAX;
 
 	bytesize = STROMALIGN_DOWN(bytesize);
 	kds_head_sz = KDS_calculateHeadSize(tupdesc);
 	if (kds_head_sz > bytesize)
 		elog(ERROR, "Required length for KDS-Slot is too short");
 	unitsz = MAXALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
-	nrooms = (bytesize - kds_head_sz) / unitsz;
+	if (unitsz > 0)
+		nrooms = (bytesize - kds_head_sz) / unitsz;
 
 	rc = __gpuMemAllocManaged(gcontext,
 							  &m_deviceptr,
@@ -947,6 +948,41 @@ __PDS_create_block(GpuContext *gcontext,
 	pds->filedesc = -1;
 
 	return pds;
+}
+
+/*
+ * debug support
+ */
+void
+KDS_dump_schema(kern_data_store *kds)
+{
+	int		j;
+
+	elog(INFO, "KDS { length=%zu, nitems=%u, usage=%u, nrooms=%u, ncols=%d, format=%d, has_varlena=%s }",
+		 kds->length,
+		 kds->nitems,
+		 kds->usage,
+		 kds->nrooms,
+		 kds->ncols,
+		 kds->format,
+		 kds->has_varlena ? "true" : "false");
+	for (j=0; j < kds->nr_colmeta; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+
+		elog(INFO, "cmeta%c%d%c { attbyval=%d, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%d }",
+			 j < kds->ncols ? '[' : '(',
+			 j,
+			 j < kds->ncols ? ']' : ')',
+			 cmeta->attbyval,
+			 cmeta->attalign,
+			 cmeta->attlen,
+			 cmeta->attnum,
+			 cmeta->attcacheoff,
+			 cmeta->atttypid,
+			 cmeta->atttypmod,
+			 cmeta->atttypkind);
+	}
 }
 
 /*

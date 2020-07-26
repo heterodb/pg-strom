@@ -2489,7 +2489,6 @@ __gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	cl_int			block_sz;
 	size_t			nitems_in;
 	size_t			nitems_out;
-	size_t			extra_size;
 	CUresult		rc;
 	int				retval = 100001;
 
@@ -2666,7 +2665,6 @@ resume_kernel:
 	retval = 0;
 	nitems_in  = gscan->kern.nitems_in;
 	nitems_out = gscan->kern.nitems_out;
-	extra_size = gscan->kern.extra_size;
 
 	memcpy(&gscan->task.kerror,
 		   &((kern_gpuscan *)m_gpuscan)->kerror, sizeof(kern_errorbuf));
@@ -2682,7 +2680,8 @@ resume_kernel:
 								nitems_in - nitems_out);
 		if (!pds_dst)
 		{
-			Assert(extra_size == 0);
+			/* may not use this code path no longer */
+			Assert(gscan->kern.extra_size == 0);
 
 			rc = cuMemPrefetchAsync((CUdeviceptr)
 									KERN_GPUSCAN_RESULT_INDEX(&gscan->kern),
