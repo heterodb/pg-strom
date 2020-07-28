@@ -5313,7 +5313,7 @@ fast_geom_contains_polygon_point(kern_context *kcxt,
 				status = __geom_point_in_polygon(geom1, &pt, kcxt);
 			else
 				status = __geom_point_in_multipolygon(geom1, &pt, kcxt);
-			printf("PT(%d,%d) %d\n", (int)pt.x, (int)pt.y, status);
+//			printf("PT(%d,%d) %d\n", (int)pt.x, (int)pt.y, status);
 			if (status == PT_ERROR)
 				goto error;
 			else if (status == PT_INSIDE)
@@ -5321,7 +5321,7 @@ fast_geom_contains_polygon_point(kern_context *kcxt,
 			else if (status == PT_OUTSIDE)
 				break;
 		}
-		printf("meet_inside = %d status = %d\n", (int)meet_inside, status);
+//		printf("meet_inside = %d status = %d\n", (int)meet_inside, status);
 		result.value = (meet_inside && status != PT_OUTSIDE);
 	}
 	return result;
