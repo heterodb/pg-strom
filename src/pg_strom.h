@@ -218,11 +218,6 @@
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif
-#if MAXIMUM_ALIGNOF != 8
-#error MAXALIGN() expects 64bit alignment
-#else
-#define MAXIMUM_ALIGNOF_SHIFT 3
-#endif
 #ifndef USE_FLOAT4_BYVAL
 #error PG-Strom expects float32 is referenced by value, not reference
 #endif

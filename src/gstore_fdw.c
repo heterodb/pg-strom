@@ -17,8 +17,8 @@
  */
 #include "pg_strom.h"
 #include "cuda_gstore.h"
+#include "gstore_fdw.h"
 #include <libpmem.h>
-//#include <libpq-fe.h>
 
 /*
  * GpuStoreBackgroundCommand
@@ -73,84 +73,6 @@ typedef struct
 	pg_atomic_uint64 debug_count8;
 	pg_atomic_uint64 debug_count9;
 } GpuStoreSharedHead;
-
-/*
- * GstoreFdw Base file structure
- *
- * +------------------------+
- * | GpuStoreBaseFileHead   |
- * |  * rowid_map_offset   --------+
- * |  * hash_index_offset  ------+ |
- * | +----------------------+    | |
- * | | schema definition    |    | |
- * | | (kern_data_store)    |    | |
- * | | * extra_hoffset   ------------+
- * | =                      =    | | |
- * | | fixed length portion |    | | |
- * | | (nullmap + values)   |    | | |
- * +-+----------------------+ <--+ | |
- * | GpuStoreRowIdMap       |      | |
- * |                        |      | |
- * +------------------------+ <----+ |
- * | GpuStoreHashHead       |        |
- * | (optional, if PK)      |        |
- * +------------------------+ <------+
- * | Extra Buffer           |
- * | (optional, if varlena) |
- * =                        =
- * | buffer size shall be   |
- * | expanded on demand     |
- * +------------------------+
- *
- * The base file contains four sections internally.
- * The 1st section contains schema definition in device side (thus, it
- * additionally has xmin,xmax,cid columns after the user defined columns).
- * The 2nd section contains row-id map for fast row-id allocation.
- * The 3rd section is hash-based PK index.
- * The above three sections are all fixed-length, thus, its size shall not
- * be changed unless 'max_num_rows' is not reconfigured.
- * The 4th section (extra buffer) is used to store the variable length
- * values, and can be expanded on the demand.
- */
-
-#define GPUSTORE_BASEFILE_SIGNATURE		"@BASE-1@"
-#define GPUSTORE_BASEFILE_MAPPED_SIGNATURE "%Base-1%"
-#define GPUSTORE_ROWIDMAP_SIGNATURE		"@ROW-ID@"
-#define GPUSTORE_HASHINDEX_SIGNATURE	"@HINDEX@"
-#define GPUSTORE_EXTRABUF_SIGNATURE		"@EXTRA1@"
-
-typedef struct
-{
-	char		signature[8];
-	uint64		rowid_map_offset;
-	uint64		hash_index_offset;	/* optionsl (if primary key exist)  */
-	char		ftable_name[NAMEDATALEN];
-	kern_data_store schema;
-} GpuStoreBaseFileHead;
-
-/*
- * RowID map - it shall locate next to the base area (schema + fixed-length
- * array of base file), and prior to the extra buffer.
- */
-typedef struct
-{
-	char		signature[8];
-	size_t		length;
-	cl_uint		nrooms;
-	cl_uint 	first_free_rowid;	/* first free rowid, or UINT_MAX if nothing */
-	cl_uint		rowid_chain[FLEXIBLE_ARRAY_MEMBER];
-} GpuStoreRowIdMapHead;
-
-/*
- * GpuStoreHashIndexHead - section for optional hash-based PK index
- */
-typedef struct
-{
-	char		signature[8];
-	uint64		nrooms;
-	uint64		nslots;
-	uint32		slots[FLEXIBLE_ARRAY_MEMBER];
-} GpuStoreHashIndexHead;
 
 typedef struct
 {
@@ -279,9 +201,7 @@ Datum pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_sysattr_in(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_sysattr_out(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS);
-Datum pgstrom_gstore_fdw_replication_extra(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS);
-Datum pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS);
 Datum pgstrom_gstore_fdw_read_debug(PG_FUNCTION_ARGS);
 void  GstoreFdwStartupKicker(Datum arg);
 void  GstoreFdwMaintainerMain(Datum arg);
@@ -5871,80 +5791,25 @@ pgstrom_init_gstore_fdw(void)
 }
 
 /*
- * pgstrom.gstore_fdw_replication_base/extra
+ * pgstrom.gstore_fdw_replication_base(regclass,int)
+ *
+ * Get base backup under ShareRowExclusiveLock; to prevent any writes.
  */
-static bytea *
-__gstoreFdwReplicationBaseOrExtra(Relation frel, int32 index, bool is_extra)
-{
-	GpuStoreSharedState *gs_sstate;
-	GpuStoreBaseFileHead *base_mmap;
-	size_t		base_mmap_sz;
-	int			base_mmap_is_pmem;
-	bytea	   *retval = NULL;
-
-	gs_sstate = gstoreFdwLookupGpuStoreSharedState(frel, false);
-	LWLockAcquire(&gs_sstate->base_mmap_lock, LW_SHARED);
-	base_mmap = pmem_map_file(gs_sstate->base_file, 0,
-							  0, 0600,
-							  &base_mmap_sz,
-							  &base_mmap_is_pmem);
-	if (!base_mmap)
-		elog(ERROR, "failed on pmem_map_file('%s'): %m", gs_sstate->base_file);
-	PG_TRY();
-	{
-		kern_data_store *kds = &base_mmap->schema;
-		kern_data_extra *extra = NULL;
-		size_t		chunk_sz = (128UL << 20);	/* 128MB chunk */
-		size_t		off, sz;
-
-		if (kds->extra_hoffset)
-			extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
-		if (!is_extra)
-		{
-			off = index * chunk_sz;
-			if (off < kds->length)
-			{
-				sz = Min(kds->length - off, chunk_sz);
-				retval = palloc(VARHDRSZ + sz);
-				memcpy(retval + VARHDRSZ, (char *)kds + off, sz);
-				SET_VARSIZE(retval, VARHDRSZ + sz);
-			}
-		}
-		else
-		{
-			off = index * chunk_sz;
-			if (extra && off < extra->usage)
-			{
-				sz = Min(extra->usage - off, chunk_sz);
-				retval = palloc(VARHDRSZ + sz);
-				memcpy(retval + VARHDRSZ, (char *)extra + off, sz);
-				SET_VARSIZE(retval, VARHDRSZ + sz);
-			}
-		}
-	}
-	PG_CATCH();
-	{
-		if (pmem_unmap(base_mmap,
-					   base_mmap_sz) != 0)
-			elog(WARNING, "failed on pmem_unmap('%s'): %m", gs_sstate->base_file);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	if (pmem_unmap(base_mmap,
-				   base_mmap_sz) != 0)
-		elog(WARNING, "failed on pmem_unmap('%s'): %m", gs_sstate->base_file);
-	LWLockRelease(&gs_sstate->base_mmap_lock);
-
-	return retval;
-}
-
 Datum
 pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS)
 {
 	Oid			ftable_oid = PG_GETARG_OID(0);
 	int32		index = PG_GETARG_INT32(1);
 	Relation	frel;
-	bytea	   *retval;
+	GpuStoreDesc *gs_desc;
+	GpuStoreSharedState *gs_sstate;
+	kern_data_store *kds;
+	kern_data_extra *extra;
+	size_t		length;
+	size_t		offset;
+	size_t		chunk_sz = (64UL << 20);	/* up to 64MB */
+	uint64		rep_lpos;
+	bytea	   *retval = NULL;
 
 	if (pg_class_aclcheck(ftable_oid, GetUserId(),
 						  ACL_SELECT) != ACLCHECK_OK)
@@ -5952,84 +5817,125 @@ pgstrom_gstore_fdw_replication_base(PG_FUNCTION_ARGS)
 					   OBJECT_FOREIGN_TABLE,
 					   get_rel_name(ftable_oid));
 
-	frel = table_open(ftable_oid, NoLock);
+	frel = table_open(ftable_oid, ShareRowExclusiveLock);
 	if (!RelationIsGstoreFdw(frel))
 		elog(ERROR, "relation '%s' is not a foreign table with gstore_fdw",
 			 RelationGetRelationName(frel));
-	if (!CheckRelationLockedByMe(frel, ExclusiveLock, true))
-		elog(ERROR, "caller must have ExclusiveLock on the target relation");
-	retval = __gstoreFdwReplicationBaseOrExtra(frel, index, false);
-	table_close(frel, NoLock);
+	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+
+	/* redo_write_pos shall not be updated under the ShareRowExclusiveLock */
+	gs_sstate = gs_desc->gs_sstate;
+	SpinLockAcquire(&gs_sstate->redo_pos_lock);
+	rep_lpos = gs_sstate->redo_write_pos;
+	SpinLockRelease(&gs_sstate->redo_pos_lock);
+
+	/* try to fetch base chunk */
+	kds = &gs_desc->base_mmap->schema;
+	length = offsetof(GpuStoreBaseFileHead, schema) + kds->length;
+	offset = chunk_sz * index;
+	if (offset < length)
+	{
+		GpuStoreReplicationChunk *repl;
+
+		if (offset + chunk_sz > length)
+			chunk_sz = length - offset;
+		retval = palloc(VARHDRSZ + offsetof(GpuStoreReplicationChunk,
+											data) + chunk_sz);
+		repl = (GpuStoreReplicationChunk *)retval->vl_dat;
+		repl->rep_kind = 'b';
+		repl->rep_dindex = 1234;	/* now multi-device is not supported */
+		repl->rep_nitems = -1;
+		repl->rep_lpos = rep_lpos;
+		memcpy(repl->data, (char *)gs_desc->base_mmap + offset, chunk_sz);
+		SET_VARSIZE(retval, VARHDRSZ + offsetof(GpuStoreReplicationChunk,
+												data) + chunk_sz);
+	}
+	else if (kds->extra_hoffset)
+	{
+		index -= (length + chunk_sz - 1) / chunk_sz;
+
+		extra = (kern_data_extra *)((char *)kds + kds->extra_hoffset);
+		offset = chunk_sz * index;
+		if (offset < extra->usage)
+		{
+			GpuStoreReplicationChunk *repl;
+
+			if (offset + chunk_sz > extra->usage)
+				chunk_sz = extra->usage - offset;
+			retval = palloc(VARHDRSZ + offsetof(GpuStoreReplicationChunk,
+												data) + chunk_sz);
+			repl = (GpuStoreReplicationChunk *)retval->vl_dat;
+			repl->rep_kind = 'e';
+			repl->rep_dindex = 0;	/* now multi-device is not supported */
+			repl->rep_nitems = -1;
+			repl->rep_lpos = rep_lpos;
+			memcpy(repl->data, (char *)extra + offset, chunk_sz);
+			SET_VARSIZE(retval, VARHDRSZ + offsetof(GpuStoreReplicationChunk,
+													data) + chunk_sz);
+		}
+	}
+	table_close(frel, NoLock);	/* table lock must be kept */
 	if (!retval)
 		PG_RETURN_NULL();
+	//TODO: pglz_compress() makes sense?
 	PG_RETURN_BYTEA_P(retval);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_base);
 
 Datum
-pgstrom_gstore_fdw_replication_extra(PG_FUNCTION_ARGS)
+pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS)
 {
-	Oid			ftable_oid = PG_GETARG_OID(0);
-	int32		index = PG_GETARG_INT32(1);
-	Relation	frel;
-	bytea	   *retval;
+	Oid				ftable_oid = PG_GETARG_OID(0);
+	uint64			base_pos = PG_GETARG_INT64(1);
+	float8			duration = PG_GETARG_FLOAT8(2);
+	int64			min_length = PG_GETARG_INT64(3);
+	int64			max_length = PG_GETARG_INT64(4);
+	Relation		frel;
+	GpuStoreDesc   *gs_desc;
+	GpuStoreSharedState *gs_sstate;
+	GpuStoreReplicationChunk *repl;
+	StringInfoData	buf;
+	cl_uint			nitems = 0;
+	uint64			tail_pos;
+	struct timeval	tv1, tv2;
 
+	if (base_pos != MAXALIGN(base_pos))
+		elog(ERROR, "base logical position (%lu) is not aligned", base_pos);
+	
 	if (pg_class_aclcheck(ftable_oid, GetUserId(),
 						  ACL_SELECT) != ACLCHECK_OK)
 		aclcheck_error(ACLCHECK_NO_PRIV,
 					   OBJECT_FOREIGN_TABLE,
 					   get_rel_name(ftable_oid));
 
-	frel = table_open(ftable_oid, NoLock);
-	if (!RelationIsGstoreFdw(frel))
-		elog(ERROR, "relation '%s' is not a foreign table with gstore_fdw",
-			 RelationGetRelationName(frel));
-	if (!CheckRelationLockedByMe(frel, ExclusiveLock, true))
-		elog(ERROR, "caller must have ExclusiveLock on the target relation");
-	retval = __gstoreFdwReplicationBaseOrExtra(frel, index, true);
-	table_close(frel, NoLock);
-	if (!retval)
-		PG_RETURN_NULL();
-	PG_RETURN_BYTEA_P(retval);
-}
-PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_extra);
-
-static bytea *
-__gstoreFdwReplicationRedo(GpuStoreSharedState *gs_sstate,
-						   char *redo_mmap, uint64 base_pos,
-						   int32 min_length, int32 max_length, int32 duration)
-{
-	StringInfoData buf;
-	replication_gpustore_redolog *repl;
-	cl_uint		nitems = 0;
-	cl_ulong	tail_pos;
-	int			slot_index;
-	struct timeval tv1, tv2;
+	frel = table_open(ftable_oid, AccessShareLock);
+	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	gs_sstate = gs_desc->gs_sstate;
 
 	/* result buffer */
 	initStringInfo(&buf);
-	enlargeStringInfo(&buf, offsetof(replication_gpustore_redolog, data));
-	buf.len = offsetof(replication_gpustore_redolog, data);
+	enlargeStringInfo(&buf, offsetof(GpuStoreReplicationChunk, data));
+	buf.len = offsetof(GpuStoreReplicationChunk, data);
 
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
-		GstoreTxLogCommon  *tx_log;
+		int		slot_index;
 
-		/* Check position and ensure not to be overwritten */
+		/* check logical position to start replication is not overwritten yet */
 		SpinLockAcquire(&gs_sstate->redo_pos_lock);
 		if (base_pos + gs_sstate->redo_log_limit < gs_sstate->redo_write_pos)
 		{
 			SpinLockRelease(&gs_sstate->redo_pos_lock);
-			elog(ERROR, "pgstrom.gstore_fdw_replication_redo missed REDO log at %p",
-				 (void *)base_pos);
+			elog(ERROR, "gstore_fdw: REDO log of '%s' at %p is already overwritten",
+				 RelationGetRelationName(frel), (void *)base_pos);
 		}
+		/* wait until any of redo_repl_pos slot become ready */
 		for (slot_index=0; slot_index < 4; slot_index++)
 		{
 			if (gs_sstate->redo_repl_pos[slot_index] == ULONG_MAX)
 				break;
 		}
-		/* Wait until any redo_repl_pos slot becomes ready. */
 		if (slot_index >= 4)
 		{
 			SpinLockRelease(&gs_sstate->redo_pos_lock);
@@ -6041,12 +5947,12 @@ __gstoreFdwReplicationRedo(GpuStoreSharedState *gs_sstate,
 		SpinLockRelease(&gs_sstate->redo_pos_lock);
 
 		/* copy Insert/Delete/Commit log */
-		while (base_pos < tail_pos &&
-			   buf.len < max_length)
+		while (base_pos < tail_pos && buf.len < max_length)
 		{
+			GstoreTxLogCommon  *tx_log;
 			size_t		offset = base_pos % gs_sstate->redo_log_limit;
 
-			tx_log = (GstoreTxLogCommon *)(redo_mmap + offset);
+			tx_log = (GstoreTxLogCommon *)(gs_desc->redo_mmap + offset);
 			if (tx_log->type == GSTORE_TX_LOG__INSERT ||
 				tx_log->type == GSTORE_TX_LOG__DELETE ||
 				tx_log->type == GSTORE_TX_LOG__COMMIT)
@@ -6085,133 +5991,18 @@ __gstoreFdwReplicationRedo(GpuStoreSharedState *gs_sstate,
 
 		pg_usleep(50000L);
 	}
-	repl = (replication_gpustore_redolog *)buf.data;
-	repl->nitems = nitems;
-	repl->next_pos = base_pos;
+	repl = (GpuStoreReplicationChunk *)buf.data;
+	repl->rep_kind = 'r';
+	repl->rep_dindex = 0;
+	repl->rep_nitems = nitems;
+	repl->rep_lpos = base_pos;
 	SET_VARSIZE(repl, buf.len);
 
-	return (bytea *)buf.data;
-}
-
-Datum
-pgstrom_gstore_fdw_replication_redo(PG_FUNCTION_ARGS)
-{
-	Oid			ftable_oid = PG_GETARG_OID(0);
-	int64		base_pos = PG_GETARG_INT64(1);
-	int32		min_length = PG_GETARG_INT32(2);
-	int32		max_length = PG_GETARG_INT32(3);
-	int32		duration = PG_GETARG_INT32(4);
-	Relation	frel;
-	GpuStoreSharedState *gs_sstate;
-	char	   *redo_mmap;
-	size_t		redo_mmap_sz;
-	int			redo_mmap_is_pmem;
-	bytea	   *retval;
-
-	if (pg_class_aclcheck(ftable_oid, GetUserId(),
-						  ACL_SELECT) != ACLCHECK_OK)
-		aclcheck_error(ACLCHECK_NO_PRIV,
-					   OBJECT_FOREIGN_TABLE,
-					   get_rel_name(ftable_oid));
-
-	frel = table_open(ftable_oid, AccessShareLock);
-	gs_sstate = gstoreFdwLookupGpuStoreSharedState(frel, false);
-	/*
-	 * special case: if base_pos < 0 (negative), an empty redo log with
-	 * current write position shall be returned to the called.
-	 * We expect this special case shall happen within the ExclusiveLock;
-	 * that is used to call the above pgstrom_gstore_fdw_replication_main().
-	 * This position shall be the baseline for the following redo-log
-	 * replication.
-	 */
-	if (base_pos < 0)
-	{
-		retval = palloc0(offsetof(replication_gpustore_redolog, data));
-
-		SpinLockAcquire(&gs_sstate->redo_pos_lock);
-		((replication_gpustore_redolog *)retval)->next_pos = gs_sstate->redo_write_pos;
-		SpinLockRelease(&gs_sstate->redo_pos_lock);
-		SET_VARSIZE(retval, offsetof(replication_gpustore_redolog, data));
-		goto skip;
-	}
-	redo_mmap = pmem_map_file(gs_sstate->redo_log_file, 0,
-							  0, 0600,
-							  &redo_mmap_sz,
-							  &redo_mmap_is_pmem);
-	PG_TRY();
-	{
-		if (redo_mmap_sz < gs_sstate->redo_log_limit)
-			elog(ERROR, "something wrong? '%s' is shorter than redo_log_limit (%zu)",
-				 gs_sstate->redo_log_file,
-				 gs_sstate->redo_log_limit);
-		retval = __gstoreFdwReplicationRedo(gs_sstate, redo_mmap, base_pos,
-											min_length, max_length, duration);
-	}
-	PG_CATCH();
-	{
-		if (pmem_unmap(redo_mmap, redo_mmap_sz) != 0)
-			elog(WARNING, "failed on pmem_unmap('%s'): %m",
-				 gs_sstate->redo_log_file);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	if (pmem_unmap(redo_mmap, redo_mmap_sz) != 0)
-		elog(WARNING, "failed on pmem_unmap('%s'): %m",
-			 gs_sstate->redo_log_file);
-skip:
 	table_close(frel, AccessShareLock);
 
-	if (!retval)
-		PG_RETURN_NULL();
-	PG_RETURN_BYTEA_P(retval);
+	PG_RETURN_BYTEA_P(repl);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_redo);
-
-Datum
-pgstrom_gstore_fdw_replication_client(PG_FUNCTION_ARGS)
-{
-#if 0
-	Oid			ftable_oid = PG_GETARG_OID(0);
-	char	   *conninfo = TextDatumGetCString(PG_GETARG_DATUM(1));
-	char	   *remote_table = TextDatumGetCString(PG_GETARG_DATUM(2));
-	Relation	frel;
-//	PGconn	   *conn;
-
-	if (!pg_class_ownercheck(ftable_oid, GetUserId()))
-		aclcheck_error(ACLCHECK_NOT_OWNER,
-					   OBJECT_FOREIGN_TABLE,
-					   get_rel_name(ftable_oid));
-	frel = table_open(ftable_oid, ExclusiveLock);
-	if (!RelationIsGstoreFdw(frel))
-		elog(ERROR, "relation '%s' is not a foreign table with gstore_fdw",
-			 RelationGetRelationName(frel));
-	conn = PQconnectdb(conninfo);
-	if (PQstatus(conn) != CONNECTION_OK)
-		elog(ERROR, "failed to connect master database using '%s'", conninfo);
-	PG_TRY();
-	{
-		//1. replicate the base / extra portion
-		//   compatibility checks also
-		//2. build rowid/hash-index if any
-		//3. make a temporary file
-		//4. unload Gpu buffer
-		//5. 
-
-	}
-	PG_CATCH();
-	{
-		PQfinish(conn);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	PQfinish(conn);
-	table_close(frel, ExclusiveLock);
-#else
-	elog(ERROR, "%s not implemented yet", __FUNCTION__);
-#endif
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_replication_client);
 
 Datum
 pgstrom_gstore_fdw_read_debug(PG_FUNCTION_ARGS)

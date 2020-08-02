@@ -28,6 +28,13 @@
 #include <pg_config_manual.h>
 #endif	/* __CUDACC__ */
 
+/* check MAXIMUM_ALIGNOF */
+#if MAXIMUM_ALIGNOF == 8
+#define MAXIMUM_ALIGNOF_SHIFT	3
+#else
+#error Unexpected MAXIMUM_ALIGNOF definition
+#endif
+
 /*
  * Basic type definition - because of historical reason, we use "cl_"
  * prefix for the definition of data types below. It might imply
@@ -66,7 +73,7 @@ typedef cl_ulong			uintptr_t;
 #define CL_LONG_NBITS		(sizeof(cl_long) * BITS_PER_BYTE)
 
 /* PG's utility macros */
-#ifndef PG_STROM_H
+#ifdef __CUDACC__
 #ifdef offsetof
 #undef offsetof
 #endif /* offsetof */
@@ -93,18 +100,12 @@ typedef cl_ulong			uintptr_t;
 #define container_of(TYPE,FIELD,PTR)			\
 	((TYPE *)((char *) (PTR) - offsetof(TYPE, FIELD)))
 
+#ifndef true
 #define true			((cl_bool) 1)
+#endif
+#ifndef false
 #define false			((cl_bool) 0)
-#if MAXIMUM_ALIGNOF == 16
-#define MAXIMUM_ALIGNOF_SHIFT	4
-#elif MAXIMUM_ALIGNOF == 8
-#define MAXIMUM_ALIGNOF_SHIFT	3
-#elif MAXIMUM_ALIGNOF == 4
-#define MAXIMUM_ALIGNOF_SHIFT	2
-#else
-#error Unexpected MAXIMUM_ALIGNOF definition
-#endif	/* MAXIMUM_ALIGNOF */
-
+#endif
 #ifdef __CUDACC__
 #undef FLEXIBLE_ARRAY_MEMBER
 #define FLEXIBLE_ARRAY_MEMBER	1
@@ -242,7 +243,7 @@ typedef struct nameData
 #define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
 #define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
 #define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
-#endif		/* PG_STROM_H */
+#endif	/* __CUDACC__ */
 
 /* wider alignment */
 #define STROMALIGN_LEN			16
@@ -549,7 +550,7 @@ kern_writeback_error_status(kern_errorbuf *result, kern_context *kcxt)
 #define STROM_CPU_FALLBACK(a,b,c)	STROM_EREPORT((a),(b),(c))
 #endif	/* !__CUDA_ARCH__ && !__CUDACC__ */
 
-#ifndef PG_STROM_H
+#ifdef __CUDACC__
 /* definitions at storage/block.h */
 typedef cl_uint		BlockNumber;
 #define InvalidBlockNumber		((BlockNumber) 0xFFFFFFFF)
@@ -635,8 +636,9 @@ typedef cl_uint		TransactionId;
 #define InvalidTransactionId		((TransactionId) 0)
 #define FrozenTransactionId			((TransactionId) 2)
 #define InvalidCommandId			(~0U)
-
-#endif		/* !PG_STROM_H */
+#else
+#include "access/htup_details.h"
+#endif	/* __CUDACC__ */
 
 typedef struct
 {
@@ -649,7 +651,7 @@ typedef struct
 	TransactionId values[FLEXIBLE_ARRAY_MEMBER];
 } xidvector;
 
-#ifndef PG_STROM_H
+#ifdef __CUDACC__
 /* definitions at storage/itemid.h */
 typedef struct ItemIdData
 {
@@ -730,7 +732,7 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 			(pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData));
 }
 
-#endif	/* PG_STROM_H */
+#endif	/* __CUDACC__ */
 
 /*
  * kern_data_store
