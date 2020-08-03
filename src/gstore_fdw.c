@@ -4260,7 +4260,7 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
 			bool	drop_this = false;
-			
+
 			dlist_foreach_modify(iter, &gs_desc->gs_undo_logs)
 			{
 				gs_undo = dlist_container(GpuStoreUndoLogs,
@@ -4282,7 +4282,7 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 				else
 					gs_desc->xmin_ftable = FrozenTransactionId;
 			}
-			
+
 			if (TransactionIdIsNormal(curr_xid) &&
 				gs_desc->xmax_ftable == curr_xid)
 			{
