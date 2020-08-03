@@ -85,6 +85,7 @@ typedef struct
 	ssize_t			max_num_rows;
 	ssize_t			num_hash_slots;
 	AttrNumber		primary_key;
+	bool			preserve_files;
 	const char	   *base_file;
 	const char	   *redo_log_file;
 	size_t			redo_log_limit;
@@ -124,7 +125,8 @@ typedef struct
 {
 	Oid				database_oid;
 	Oid				ftable_oid;
-	TransactionId	xid_dropped;
+	TransactionId	xmin_ftable;		/* xid that defines the foreign table */
+	TransactionId	xmax_ftable;
 	GpuStoreSharedState *gs_sstate;
 	dlist_head		gs_undo_logs;		/* list of GpuStoreUndoLogs */
 	/* base file mapping */
@@ -190,6 +192,8 @@ static GpuStoreSharedHead  *gstore_shared_head = NULL;
 static HTAB		   *gstore_desc_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static bool			gstore_fdw_enabled;		/* GUC */
+static char		   *gstore_fdw_default_base_dir;	/* GUC */
+static char		   *gstore_fdw_default_redo_dir;	/* GUC */
 static object_access_hook_type object_access_next = NULL;
 
 /* ---- Forward declarations ---- */
@@ -2168,6 +2172,11 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 		{
 			/* column name shall be validated later */
 		}
+		else if (strcmp(def->defname, "preserve_files") == 0)
+		{
+			/* boolean values */
+			defGetBoolean(def);
+		}
 		else
 		{
 			ereport(ERROR,
@@ -2188,7 +2197,8 @@ gstoreFdwExtractOptions(Relation frel,
 						size_t *p_redo_log_limit,
 						cl_long *p_gpu_update_interval,
 						size_t *p_gpu_update_threshold,
-						AttrNumber *p_primary_key)
+						AttrNumber *p_primary_key,
+						bool *p_preserve_files)
 {
 	ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
 	TupleDesc	tupdesc = RelationGetDescr(frel);
@@ -2201,7 +2211,8 @@ gstoreFdwExtractOptions(Relation frel,
 	cl_long		gpu_update_interval = 15;		/* default: 15s */
 	ssize_t		gpu_update_threshold = -1;		/* default: 20% of redo_log_limit */
 	AttrNumber	primary_key = -1;
-	
+	bool		preserve_files = false;
+
 	/*
 	 * check foreign relation's option
 	 */
@@ -2335,6 +2346,10 @@ gstoreFdwExtractOptions(Relation frel,
 				elog(ERROR, "'%s' specified by 'primary_key' option not found",
 					 pk_name);
 		}
+		else if (strcmp(def->defname, "preserve_files") == 0)
+		{
+            preserve_files = defGetBoolean(def);
+		}
 		else
 			elog(ERROR, "gstore_fdw: unknown option: %s", def->defname);
 	}
@@ -2363,6 +2378,124 @@ gstoreFdwExtractOptions(Relation frel,
 	*p_gpu_update_interval  = gpu_update_interval;
 	*p_gpu_update_threshold = gpu_update_threshold;
 	*p_primary_key          = primary_key;
+	*p_preserve_files       = preserve_files;
+}
+
+/*
+ * gstoreFdwAssignDefaultFiles
+ *
+ * assign default name for base/redo files if not specified the options.
+ * the supplied 'frel' must have AccessExclusiveLock
+ */
+static void
+gstoreFdwAssignDefaultFiles(Relation frel)
+{
+	Oid			ftable_oid = RelationGetRelid(frel);
+	ForeignTable *ft = GetForeignTable(ftable_oid);
+	DefElem	   *base_file = NULL;
+	DefElem	   *redo_file = NULL;
+	ListCell   *lc;
+	List	   *ftoptions;
+	char	   *dir_name;
+	char	   *filename;
+	StringInfoData buf;
+	ArrayType  *ap;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	Relation	crel;
+	Datum		values[Natts_pg_foreign_table];
+	bool		isnull[Natts_pg_foreign_table];
+	bool		update[Natts_pg_foreign_table];
+	HeapTuple	tuple;
+
+	foreach (lc, ft->options)
+	{
+		DefElem	   *def = lfirst(lc);
+
+		if (strcmp(def->defname, "base_file") == 0)
+			base_file = def;
+		else if (strcmp(def->defname, "redo_log_file") == 0)
+			redo_file = def;
+	}
+	if (base_file && redo_file)
+		return;		/* nothing to do */
+
+	ftoptions = list_copy(ft->options);
+	if (!base_file)
+	{
+		if (gstore_fdw_default_base_dir && *gstore_fdw_default_base_dir != '\0')
+			dir_name = gstore_fdw_default_base_dir;
+		else
+			dir_name = GetDatabasePath(MyDatabaseId, MyDatabaseTableSpace);
+		filename = psprintf("%s/gstore_fdw_%u.base", dir_name, ftable_oid);
+		base_file = makeDefElem("base_file",
+								(Node *)makeString(filename), -1);
+		ftoptions = lappend(ftoptions, base_file);
+	}
+
+	if (!redo_file)
+	{
+		if (gstore_fdw_default_redo_dir && *gstore_fdw_default_redo_dir != '\0')
+			dir_name = gstore_fdw_default_redo_dir;
+		else
+			dir_name = GetDatabasePath(MyDatabaseId, MyDatabaseTableSpace);
+		filename = psprintf("%s/gstore_fdw_%u.redo", dir_name, ftable_oid);
+		redo_file = makeDefElem("redo_log_file",
+								(Node *)makeString(filename), -1);
+		ftoptions = lappend(ftoptions, redo_file);
+	}
+
+	/* setup pg_foreign_table.ftoptions */
+	get_typlenbyvalalign(TEXTOID, &typlen, &typbyval, &typalign);
+	Assert(typlen == -1 && !typbyval);
+	initStringInfo(&buf);
+	enlargeStringInfo(&buf, ARR_OVERHEAD_NONULLS(1));
+	ap = (ArrayType *)buf.data;
+	ap->ndim = 1;
+	ap->dataoffset = 0;
+	ap->elemtype = TEXTOID;
+	ARR_DIMS(ap)[0] = list_length(ftoptions);
+	ARR_LBOUND(ap)[0] = 1;
+	buf.len += ARR_OVERHEAD_NONULLS(1);
+
+	foreach (lc, ftoptions)
+	{
+		DefElem    *def = lfirst(lc);
+		uint32		vl_off = att_align_nominal(buf.len, typalign);
+
+		while (buf.len < vl_off)
+			appendStringInfoChar(&buf, '\0');
+		appendStringInfoSpaces(&buf, sizeof(uint32));	/* varlena head */
+		appendStringInfo(&buf, "%s=%s", def->defname, defGetString(def));
+		SET_VARSIZE(buf.data + vl_off, buf.len - vl_off);
+	}
+	SET_VARSIZE(buf.data, buf.len);
+
+	/* update pg_foreign_table */
+	crel = table_open(ForeignTableRelationId, RowExclusiveLock);
+	tuple = SearchSysCacheCopy1(FOREIGNTABLEREL, ftable_oid);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for foreign table \"%s\"",
+			 RelationGetRelationName(frel));
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
+	memset(update, 0, sizeof(update));
+
+	values[Anum_pg_foreign_table_ftoptions - 1] = PointerGetDatum(buf.data);
+	update[Anum_pg_foreign_table_ftoptions - 1] = true;
+	tuple = heap_modify_tuple(tuple, RelationGetDescr(crel),
+							  values, isnull, update);
+	CatalogTupleUpdate(crel, &tuple->t_self, tuple);
+
+	CacheInvalidateRelcache(crel);
+
+	table_close(crel, RowExclusiveLock);
+
+	CommandCounterIncrement();
+
+	heap_freetuple(tuple);
+	pfree(buf.data);
 }
 
 /*
@@ -2409,6 +2542,7 @@ gstoreFdwAllocSharedState(Relation frel)
 	cl_long		gpu_update_interval;
 	size_t		gpu_update_threshold;
 	AttrNumber	primary_key;
+	bool		preserve_files;
 	size_t		len;
 	char	   *pos;
 	cl_int		i;
@@ -2422,7 +2556,8 @@ gstoreFdwAllocSharedState(Relation frel)
 							&redo_log_limit,
 							&gpu_update_interval,
 							&gpu_update_threshold,
-							&primary_key);
+							&primary_key,
+							&preserve_files);
 	/* allocation of GpuStoreSharedState */
 	len = MAXALIGN(sizeof(GpuStoreSharedState));
 	if (base_file)
@@ -2461,6 +2596,7 @@ gstoreFdwAllocSharedState(Relation frel)
 	gs_sstate->max_num_rows = max_num_rows;
 	gs_sstate->num_hash_slots = num_hash_slots;
 	gs_sstate->primary_key = primary_key;
+	gs_sstate->preserve_files = preserve_files;
 	gs_sstate->redo_log_limit = redo_log_limit;
 	gs_sstate->gpu_update_interval = gpu_update_interval;
 	gs_sstate->gpu_update_threshold = gpu_update_threshold;
@@ -3708,7 +3844,8 @@ gstoreFdwLookupGpuStoreSharedState(Relation frel, bool may_create_files)
 static void
 gstoreFdwInitGpuStoreDesc(GpuStoreDesc *gs_desc, GpuStoreSharedState *gs_sstate)
 {
-	gs_desc->xid_dropped = FrozenTransactionId;
+	gs_desc->xmin_ftable = FrozenTransactionId;
+	gs_desc->xmax_ftable = InvalidTransactionId;
 	gs_desc->gs_sstate  = gs_sstate;
 	dlist_init(&gs_desc->gs_undo_logs);
 	/* base file mapping */
@@ -3764,7 +3901,7 @@ gstoreFdwSetupGpuStoreDesc(GpuStoreDesc *gs_desc, bool abort_on_error)
 }
 
 static GpuStoreDesc *
-gstoreFdwLookupGpuStoreDesc(Relation frel)
+__gstoreFdwLookupGpuStoreDesc(Relation frel, bool may_create_files)
 {
 	GpuStoreDesc *gs_desc;
 	Oid			hkey[2];
@@ -3785,7 +3922,7 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 		PG_TRY();
         {
 			GpuStoreSharedState *gs_sstate
-				= gstoreFdwLookupGpuStoreSharedState(frel, false);
+				= gstoreFdwLookupGpuStoreSharedState(frel, may_create_files);
 			gstoreFdwInitGpuStoreDesc(gs_desc, gs_sstate);
 		}
 		PG_CATCH();
@@ -3798,6 +3935,12 @@ gstoreFdwLookupGpuStoreDesc(Relation frel)
 	/* ensure base file mapping is latest revision */
 	gstoreFdwSetupGpuStoreDesc(gs_desc, true);
 	return gs_desc;
+}
+
+static GpuStoreDesc *
+gstoreFdwLookupGpuStoreDesc(Relation frel)
+{
+	return __gstoreFdwLookupGpuStoreDesc(frel, false);
 }
 
 /*
@@ -4054,6 +4197,16 @@ __gstoreFdwXactDropResources(GpuStoreDesc *gs_desc)
 		gs_desc->redo_mmap = NULL;
 	}
 	hash_search(gstore_desc_htab, gs_desc, HASH_REMOVE, NULL);
+
+	/* cleanup base/redo files */
+	if (!gs_sstate->preserve_files)
+	{
+		if (unlink(gs_sstate->base_file) != 0)
+			elog(WARNING, "failed on unlink('%s'): %m", gs_sstate->base_file);
+		if (unlink(gs_sstate->redo_log_file) != 0)
+			elog(WARNING, "failed on unlink('%s'): %m", gs_sstate->redo_log_file);
+	}
+	pfree(gs_sstate);
 }
 
 /*
@@ -4106,6 +4259,8 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 		hash_seq_init(&hseq, gstore_desc_htab);
 		while ((gs_desc = hash_seq_search(&hseq)) != NULL)
 		{
+			bool	drop_this = false;
+			
 			dlist_foreach_modify(iter, &gs_desc->gs_undo_logs)
 			{
 				gs_undo = dlist_container(GpuStoreUndoLogs,
@@ -4119,13 +4274,26 @@ gstoreFdwXactCallback(XactEvent event, void *arg)
 					pfree(gs_undo);
 				}
 			}
-			if (gs_desc->xid_dropped == curr_xid)
+			if (TransactionIdIsNormal(curr_xid) &&
+				gs_desc->xmin_ftable == curr_xid)
+			{
+				if (event == XACT_EVENT_ABORT)
+					drop_this = true;
+				else
+					gs_desc->xmin_ftable = FrozenTransactionId;
+			}
+			
+			if (TransactionIdIsNormal(curr_xid) &&
+				gs_desc->xmax_ftable == curr_xid)
 			{
 				if (event == XACT_EVENT_COMMIT)
-					__gstoreFdwXactDropResources(gs_desc);
+					drop_this = true;
 				else
-					gs_desc->xid_dropped = FrozenTransactionId;
+					gs_desc->xmax_ftable = InvalidTransactionId;
 			}
+
+			if (drop_this)
+				__gstoreFdwXactDropResources(gs_desc);
 		}
 		/* Wake up other backends blocked by row-level lock */
 		ConditionVariableBroadcast(&gstore_shared_head->row_lock_cond);
@@ -4255,7 +4423,7 @@ pgstrom_gstore_fdw_post_deletion(ObjectAccessType access,
 		PG_TRY();
 		{
 			gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
-			gs_desc->xid_dropped = GetCurrentTransactionId();
+			gs_desc->xmax_ftable = GetCurrentTransactionId();
 		}
 		PG_CATCH();
 		{
@@ -4290,19 +4458,25 @@ pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 	trigdata = (EventTriggerData *) fcinfo->context;
 	if (strcmp(trigdata->event, "ddl_command_end") != 0)
 		elog(ERROR, "%s must be called at ddl_command_end", __FUNCTION__);
-	elog(INFO, "tag [%s]", trigdata->tag);
+	//elog(INFO, "tag [%s]", trigdata->tag);
 	if (strcmp(trigdata->tag, "CREATE FOREIGN TABLE") == 0)
 	{
 		CreateStmt *stmt = (CreateStmt *)trigdata->parsetree;
 		Relation	frel;
 
-		frel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
+		frel = relation_openrv_extended(stmt->relation, AccessExclusiveLock, true);
 		if (!frel)
 			PG_RETURN_NULL();
-		elog(INFO, "table [%s]", RelationGetRelationName(frel));
+		//elog(INFO, "table [%s]", RelationGetRelationName(frel));
 		if (RelationIsGstoreFdw(frel))
-			gstoreFdwCreateSharedState(frel, true);
-		relation_close(frel, AccessShareLock);
+		{
+			GpuStoreDesc *gs_desc;
+
+			gstoreFdwAssignDefaultFiles(frel);
+			gs_desc = __gstoreFdwLookupGpuStoreDesc(frel, true);
+			gs_desc->xmin_ftable = GetCurrentTransactionId();
+		}
+		relation_close(frel, NoLock);
 	}
 	PG_RETURN_NULL();
 }
@@ -5757,6 +5931,26 @@ pgstrom_init_gstore_fdw(void)
 							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+	/* GUC: gstore_fdw.default_base_dir */
+	DefineCustomStringVariable("gstore_fdw.default_base_dir",
+							   "default directory if no 'base_file' is given",
+							   NULL,
+							   &gstore_fdw_default_base_dir,
+							   NULL,
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
+	/* GUC: gstore_fdw.default_redo_dir */
+	DefineCustomStringVariable("gstore_fdw.default_redo_dir",
+							   "default directory if no 'redo_log_file' is given",
+							   NULL,
+							   &gstore_fdw_default_redo_dir,
+							   NULL,
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 	/*
 	 * Background worker to load GPU store on startup
 	 */
