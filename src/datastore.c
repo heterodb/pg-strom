@@ -554,7 +554,24 @@ __init_kernel_column_metadata(kern_data_store *kds,
 		kds->has_varlena = true;
 	cmeta->attnum   = attnum;
 	if (p_attcacheoff && *p_attcacheoff > 0)
-		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);
+	{
+		/*
+		 * Special case handling - varlena can use attcacheoff only if offset
+		 * is aligned, thus we can reference the value regardless of the format
+		 * and padding.
+		 */
+		if (typ->typlen == -1)
+		{
+			int		__off = att_align_nominal(*p_attcacheoff, typ->typalign);
+
+			if (*p_attcacheoff == __off)
+				cmeta->attcacheoff = __off;
+			else
+				cmeta->attcacheoff = -1;
+		}
+		else
+			cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);
+	}
 	else
 		cmeta->attcacheoff = -1;
 	cmeta->atttypid = atttypid;
