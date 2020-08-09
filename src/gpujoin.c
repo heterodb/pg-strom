@@ -44,6 +44,10 @@ typedef struct
 		Path	   *scan_path;		/* outer scan path */
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
+		IndexOptInfo *gist_index;	/* GiST index IndexOptInfo */
+		AttrNumber	gist_colidx;	/* GiST column index (0-origin) */
+		Expr	   *gist_clause;	/* GiST index clause */
+		Selectivity	gist_selectivity; /* GiST index selectivity */
 		Size		ichunk_size;	/* expected inner chunk size */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
@@ -83,6 +87,9 @@ typedef struct
 	List	   *other_quals;
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
+	List	   *gist_index_reloid;	/* if gist-index */
+	List	   *gist_index_colidx;	/* if gist-index */
+	List	   *gist_index_clause;	/* if gist-index */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -123,6 +130,9 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->other_quals);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
+	privs = lappend(privs, gj_info->gist_index_reloid);
+	privs = lappend(privs, gj_info->gist_index_colidx);
+	exprs = lappend(exprs, gj_info->gist_index_clause);
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
@@ -168,7 +178,10 @@ deform_gpujoin_info(CustomScan *cscan)
     gj_info->join_quals = list_nth(exprs, eindex++);
 	gj_info->other_quals = list_nth(exprs, eindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
-    gj_info->hash_outer_keys = list_nth(exprs, eindex++);
+	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
+	gj_info->gist_index_reloid = list_nth(privs, pindex++);
+	gj_info->gist_index_colidx = list_nth(privs, pindex++);
+	gj_info->gist_index_clause = list_nth(exprs, eindex++);
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
@@ -577,7 +590,6 @@ cost_gpujoin(PlannerInfo *root,
 	Cost		inner_cost = 0.0;
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
-	Cost		run_cost_per_chunk = 0.0;
 	Cost		startup_delay;
 	Size		inner_buffer_sz = 0;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
@@ -639,6 +651,7 @@ cost_gpujoin(PlannerInfo *root,
 		Path	   *scan_path = gpath->inners[i].scan_path;
 		List	   *hash_quals = gpath->inners[i].hash_quals;
 		List	   *join_quals = gpath->inners[i].join_quals;
+		IndexOptInfo *gist_index = gpath->inners[i].gist_index;
 		double		join_nrows = gpath->inners[i].join_nrows;
 		Size		ichunk_size = gpath->inners[i].ichunk_size;
 		Cost		inner_run_cost;
@@ -717,6 +730,28 @@ cost_gpujoin(PlannerInfo *root,
 						 Max(hash_nsteps, 1.0) *
 						 outer_ntuples);
 		}
+		else if (gist_index != NULL)
+		{
+			Expr	   *gist_clause = gpath->inners[i].gist_clause;
+			Selectivity	gist_selectivity = gpath->inners[i].gist_selectivity;
+			double		inner_ntuples = scan_path->rows;
+			QualCost	gist_clause_cost;
+
+			/* cost to preload inner heap tuples by CPU */
+			inner_cost += cpu_tuple_cost * inner_ntuples;
+
+			/* cost to preload the entire index pages once */
+			inner_cost += seq_page_cost * (double)gist_index->pages;
+
+			/* cost to evaluate GiST index by GPU */
+			cost_qual_eval(&gist_clause_cost, list_make1(gist_clause), root);
+			run_cost += (gist_clause_cost.per_tuple * gpu_ratio * outer_ntuples);
+
+			/* cost to evaluate join qualifiers by GPU */
+			run_cost += (join_quals_cost.per_tuple * gpu_ratio *
+						 outer_ntuples *
+						 gist_selectivity * inner_ntuples);
+		}
 		else
 		{
 			/*
@@ -729,10 +764,10 @@ cost_gpujoin(PlannerInfo *root,
 			/* cost to preload inner heap tuples by CPU */
 			inner_cost += cpu_tuple_cost * inner_ntuples;
 
-			/* cost to evaluate join qualifiers */
-			run_cost_per_chunk += (join_quals_cost.per_tuple *
-								   outer_ntuples *
-								   inner_ntuples);
+			/* cost to evaluate join qualifiers by GPU */
+			run_cost += (join_quals_cost.per_tuple * gpu_ratio *
+						 outer_ntuples *
+						 inner_ntuples);
 		}
 		/* number of outer items on the next depth */
 		outer_ntuples = join_nrows / parallel_divisor;
@@ -815,6 +850,10 @@ typedef struct
 	Path	   *inner_path;
 	List	   *join_quals;
 	List	   *hash_quals;
+	IndexOptInfo *gist_index;
+	AttrNumber	gist_colidx;
+	Expr	   *gist_clause;
+	Selectivity	gist_selectivity;
 	double		join_nrows;
 } inner_path_item;
 
@@ -886,6 +925,10 @@ create_gpujoin_path(PlannerInfo *root,
 		gjpath->inners[i].scan_path = ip_item->inner_path;
 		gjpath->inners[i].hash_quals = hash_quals;
 		gjpath->inners[i].join_quals = ip_item->join_quals;
+		gjpath->inners[i].gist_index = ip_item->gist_index;
+		gjpath->inners[i].gist_colidx = ip_item->gist_colidx;
+		gjpath->inners[i].gist_clause = ip_item->gist_clause;
+		gjpath->inners[i].gist_selectivity = ip_item->gist_selectivity;
 		gjpath->inners[i].ichunk_size = 0;		/* to be set later */
 		i++;
 	}
@@ -981,6 +1024,247 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
 		}
 	}
 	return hash_quals;
+}
+
+/*
+ * GiST Index support
+ */
+static Expr *
+get_index_clause_from_support(PlannerInfo *root,
+							  RestrictInfo *rinfo,
+							  Oid funcid,
+							  int indexarg,
+							  int indexcol,
+							  IndexOptInfo *index)
+{
+	Oid		prosupport = get_func_support(funcid);
+
+	if (OidIsValid(prosupport))
+	{
+		SupportRequestIndexCondition req;
+		List   *sresult;
+
+		memset(&req, 0, sizeof(SupportRequestIndexCondition));
+		req.type = T_SupportRequestIndexCondition;
+		req.root = root;
+		req.funcid = funcid;
+		req.node = (Node *) rinfo->clause;
+		req.indexarg = indexarg;
+		req.index = index;
+		req.indexcol = indexcol;
+		req.opfamily = index->opfamily[indexcol];
+		req.indexcollation = index->indexcollations[indexcol];
+		req.lossy = true;		/* default assumption */
+
+		sresult = (List *)OidFunctionCall1(prosupport, PointerGetDatum(&req));
+		if (list_length(sresult) == 1)
+			return linitial(sresult);
+		else if (list_length(sresult) > 1)
+			return make_ands_explicit(sresult);
+	}
+	return NULL;
+}
+
+static Expr *
+match_opclause_to_indexcol(PlannerInfo *root,
+						   RestrictInfo *rinfo,
+						   IndexOptInfo *index,
+						   int indexcol)
+{
+	OpExpr	   *op = (OpExpr *) rinfo->clause;
+	Node	   *leftop;
+	Node	   *rightop;
+	Index		index_relid = index->rel->relid;
+	Oid			index_collid;
+	Oid			opfamily;
+
+	/* only binary operators */
+	if (list_length(op->args) != 2)
+		return NULL;
+
+	leftop = (Node *)linitial(op->args);
+	rightop = (Node *)lsecond(op->args);
+	opfamily = index->opfamily[indexcol];
+	index_collid = index->indexcollations[indexcol];
+
+	if (match_index_to_operand(leftop, indexcol, index) &&
+		!bms_is_member(index_relid, rinfo->right_relids) &&
+		!contain_volatile_functions(rightop))
+	{
+		if ((!OidIsValid(index_collid) || index_collid == op->inputcollid) &&
+			op_in_opfamily(op->opno, opfamily))
+		{
+			return (Expr *)op;
+		}
+		set_opfuncid(op);
+		return get_index_clause_from_support(root,
+											 rinfo,
+											 op->opfuncid,
+											 0,		/* indexarg on left */
+											 indexcol,
+											 index);
+	}
+
+	if (match_index_to_operand(rightop, indexcol, index) &&
+		!bms_is_member(index_relid, rinfo->left_relids) &&
+		!contain_volatile_functions(leftop))
+	{
+		Oid		comm_op = get_commutator(op->opno);
+
+		if ((!OidIsValid(index_collid) || index_collid == op->inputcollid) &&
+			op_in_opfamily(comm_op, opfamily))
+		{
+			return make_opclause(comm_op,
+								 op->opresulttype,
+								 op->opretset,
+								 (Expr *)rightop,
+								 (Expr *)leftop,
+								 op->opcollid,
+								 op->inputcollid);
+		}
+		set_opfuncid(op);
+		return get_index_clause_from_support(root,
+											 rinfo,
+											 op->opfuncid,
+											 1,	/* indexarg on right */
+											 indexcol,
+											 index);
+	}
+	return NULL;
+}
+
+static Expr *
+match_funcclause_to_indexcol(PlannerInfo *root,
+							 RestrictInfo *rinfo,
+							 IndexOptInfo *index,
+							 int indexcol)
+{
+	FuncExpr   *func = (FuncExpr *) rinfo->clause;
+	int			indexarg = 0;
+	ListCell   *lc;
+
+	foreach (lc, func->args)
+	{
+		Node   *node = lfirst(lc);
+
+		if (match_index_to_operand(node, indexcol, index))
+		{
+			return get_index_clause_from_support(root,
+												 rinfo,
+												 func->funcid,
+												 indexarg,
+												 indexcol,
+												 index);
+		}
+		indexarg++;
+	}
+	return NULL;
+}
+
+static Expr *
+match_clause_to_index(PlannerInfo *root,
+					  RestrictInfo *rinfo,
+					  IndexOptInfo *index,
+					  AttrNumber *p_indexcol)
+{
+	int		indexcol;
+	Expr   *clause;
+
+	if (rinfo->pseudoconstant ||
+		!restriction_is_securely_promotable(rinfo, index->rel))
+		return NULL;
+
+	for (indexcol = 0; indexcol < index->nkeycolumns; indexcol++)
+	{
+		if (!rinfo->clause)
+			continue;
+		if (IsA(rinfo->clause, OpExpr))
+			clause = match_opclause_to_indexcol(root, rinfo, index, indexcol);
+		else if (IsA(rinfo->clause, FuncExpr))
+			clause = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
+		else
+			clause = NULL;
+
+		if (clause)
+		{
+			*p_indexcol = indexcol;
+			return clause;
+		}
+	}
+	return NULL;
+}
+
+static void
+extract_gpugistindex_clause(inner_path_item *ip_item,
+							PlannerInfo *root,
+							RelOptInfo *inner_rel,
+							JoinType jointype,
+							List *restrict_clauses)
+{
+	IndexOptInfo   *gist_index = NULL;
+	AttrNumber		gist_colidx = 0;
+	Expr		   *gist_clause = NULL;
+	Selectivity		gist_selectivity = 1.0;
+	ListCell	   *lc1, *lc2;
+
+	/* GPU GiST Index is used only when GpuHashJoin is not available */
+	Assert(ip_item->hash_quals == NIL);
+	
+	/* see logic in create_index_paths */
+	foreach (lc1, inner_rel->indexlist)
+	{
+		IndexOptInfo   *curr_index = (IndexOptInfo *) lfirst(lc1);
+
+		Assert(curr_index->rel == inner_rel);
+
+		/* currently, only GiST index is supported */
+		if (curr_index->relam != GIST_AM_OID)
+			continue;
+
+		/* ignore partial indexes that do not match the query. */
+		if (curr_index->indpred != NIL && !curr_index->predOK)
+			continue;
+
+		/* identify the restriction clauses that can match the index. */
+		/* see, match_join_clauses_to_index */
+		foreach (lc2, restrict_clauses)
+		{
+			RestrictInfo   *rinfo = lfirst(lc2);
+			AttrNumber		curr_colidx;
+			Expr		   *curr_clause;
+			Selectivity		curr_selectivity;
+
+			if (!join_clause_is_movable_to(rinfo, inner_rel))
+				continue;
+
+			curr_clause = match_clause_to_index(root, rinfo,
+												curr_index,
+												&curr_colidx);
+			if (curr_clause)
+			{
+				curr_selectivity = clauselist_selectivity(root,
+														  list_make1(curr_clause),
+														  inner_rel->relid,
+														  JOIN_INNER,
+														  NULL);
+				if (!gist_index || gist_selectivity > curr_selectivity)
+				{
+					gist_index  = curr_index;
+					gist_colidx = curr_colidx;
+					gist_clause = curr_clause;
+					gist_selectivity = curr_selectivity;
+				}
+			}
+		}
+	}
+
+	if (gist_index)
+	{
+		ip_item->gist_index  = gist_index;
+		ip_item->gist_colidx = gist_colidx;
+		ip_item->gist_clause = gist_clause;
+		ip_item->gist_selectivity = gist_selectivity;
+	}
 }
 
 #if PG_VERSION_NUM >= 110000
@@ -1188,6 +1472,12 @@ buildInnerPathItems(PlannerInfo *root,
 														inner_rel->relids,
 														join_type,
 														join_quals);
+		if (ip_item->hash_quals == NIL)
+			extract_gpugistindex_clause(ip_item,
+										root,
+										inner_rel,
+										join_type,
+										join_quals);
 		ip_item->join_nrows = join_nrows_curr = join_nrows;
 		results = lappend(results, ip_item);
 
@@ -1855,6 +2145,12 @@ try_add_gpujoin_paths(PlannerInfo *root,
 								  inner_path->parent->relids,
 								  join_type,
 								  restrict_clauses);
+	if (ip_item->hash_quals == NIL)
+		extract_gpugistindex_clause(ip_item,
+									root,
+									inner_path->parent,
+									join_type,
+									restrict_clauses);
 	ip_item->join_nrows = joinrel->rows;
 	ip_items_list = list_make1(ip_item);
 
@@ -2451,7 +2747,11 @@ PlanGpuJoinPath(PlannerInfo *root,
 		List	   *hash_outer_keys = NIL;
 		List	   *join_quals = NIL;
 		List	   *other_quals = NIL;
+		Oid			gist_index_reloid = InvalidOid;
+		int			gist_index_colidx = -1;
+		Expr	   *gist_index_clause = NULL;
 
+		/* GpuHashJoin properties */
 		foreach (lc, gjpath->inners[i].hash_quals)
 		{
 			Path		   *scan_path = gjpath->inners[i].scan_path;
@@ -2485,6 +2785,15 @@ PlanGpuJoinPath(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? hash-clause reference bogus varnos");
 		}
+		/* GpuGistIndex properties */
+		if (gjpath->inners[i].gist_index != NULL)
+		{
+			IndexOptInfo   *gist_index = gjpath->inners[i].gist_index;
+
+			gist_index_reloid = gist_index->indexoid;
+			gist_index_colidx = gjpath->inners[i].gist_colidx;
+			gist_index_clause = gjpath->inners[i].gist_clause;
+		}
 
 		/*
 		 * Add properties of GpuJoinInfo
@@ -2516,6 +2825,12 @@ PlanGpuJoinPath(PlannerInfo *root,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
+		gj_info.gist_index_reloid = lappend_oid(gj_info.gist_index_reloid,
+												gist_index_reloid);
+		gj_info.gist_index_colidx = lappend_int(gj_info.gist_index_colidx,
+												gist_index_colidx);
+		gj_info.gist_index_clause = lappend(gj_info.gist_index_clause,
+											gist_index_clause);
 		outer_nrows = gjpath->inners[i].join_nrows;
 	}
 
@@ -3143,6 +3458,8 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *lc2;
 	ListCell	   *lc3;
 	ListCell	   *lc4;
+	ListCell	   *lc5;
+	ListCell	   *lc6;
 	char		   *temp;
 	char			qlabel[128];
 	int				depth;
@@ -3209,15 +3526,19 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	/* join-qualifiers */
 	depth = 1;
-	forfour (lc1, gj_info->join_types,
-			 lc2, gj_info->join_quals,
-			 lc3, gj_info->other_quals,
-			 lc4, gj_info->hash_outer_keys)
+	forsix (lc1, gj_info->join_types,
+			lc2, gj_info->join_quals,
+			lc3, gj_info->other_quals,
+			lc4, gj_info->hash_outer_keys,
+			lc5, gj_info->gist_index_reloid,
+			lc6, gj_info->gist_index_clause)
 	{
 		JoinType	join_type = (JoinType) lfirst_int(lc1);
 		Expr	   *join_quals = lfirst(lc2);
 		Expr	   *other_quals = lfirst(lc3);
 		Expr	   *hash_outer_key = lfirst(lc4);
+		Oid			gist_index_reloid = lfirst_oid(lc5);
+		Expr	   *gist_index_clause = lfirst(lc6);
 		innerState *istate = &gjs->inners[depth-1];
 		kern_data_store *kds_in = NULL;
 		int			indent_width;
@@ -3248,6 +3569,13 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (hash_outer_key != NULL)
 		{
 			appendStringInfo(&str, "GpuHash%sJoin",
+							 join_type == JOIN_FULL ? "Full" :
+							 join_type == JOIN_LEFT ? "Left" :
+							 join_type == JOIN_RIGHT ? "Right" : "");
+		}
+		else if (gist_index_clause != NULL)
+		{
+			appendStringInfo(&str, "GpuNestLoop%s with GiST",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
@@ -3366,7 +3694,41 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				ExplainPropertyText(qlabel, temp, es);
 			}
 		}
+		/*
+		 * GiST Index, if any
+		 */
+		if (OidIsValid(gist_index_reloid) && gist_index_clause != NULL)
+		{
+			HeapTuple	tup;
+			Form_pg_class relForm;
+			const char *iname;
+			size_t		isize;
 
+			temp = deparse_expression((Node *)gist_index_clause,
+									  dcontext, true, false);
+			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(gist_index_reloid));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for relation %u", gist_index_reloid);
+			relForm = (Form_pg_class) GETSTRUCT(tup);
+			iname = NameStr(relForm->relname);
+			isize = relForm->relpages * BLCKSZ;
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, indent_width);
+				appendStringInfo(es->str, "IndexFilter: %s on %s (index-size: %s)\n",
+								 temp, iname, format_bytesz(isize));
+			}
+			else
+			{
+				snprintf(qlabel, sizeof(qlabel),
+						 "Depth% 2d GiST Index", depth);
+				ExplainPropertyText(qlabel, iname, es);
+				snprintf(qlabel, sizeof(qlabel),
+						 "Depth% 2d GiST Filter", depth);
+				ExplainPropertyText(qlabel, temp, es);
+			}
+			ReleaseSysCache(tup);
+		}
 		/*
 		 * JoinQuals, if any
 		 */

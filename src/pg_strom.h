@@ -99,6 +99,7 @@
 #if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
 #endif
+#include "nodes/supportnodes.h"
 #if PG_VERSION_NUM >= 120000
 #include "optimizer/appendinfo.h"
 #endif
@@ -1717,6 +1718,28 @@ typealign_get_width(char type_align)
 		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),\
 		 (lc4) = lnext(lc4))
 #endif
+#ifndef forfive
+#define forfive(lc1, list1, lc2, list2, lc3, list3, lc4, list4, lc5, list5)	\
+	for ((lc1) = list_head(list1), (lc2) = list_head(list2),		\
+		 (lc3) = list_head(list3), (lc4) = list_head(list4),		\
+		 (lc5) = list_head(list5);									\
+		 (lc1) != NULL && (lc2) != NULL &&							\
+		 (lc3) != NULL && (lc4) != NULL && (lc5) != NULL;			\
+		 (lc1) = lnext(lc1), (lc2) = lnext(lc2),					\
+		 (lc3) = lnext(lc3), (lc4) = lnext(lc4), (lc5) = lnext(lc5))
+#endif
+#ifndef forsix
+#define forsix(lc1, list1, lc2, list2, lc3, list3,						\
+			   lc4, list4, lc5, list5, lc6, list6)						\
+	for ((lc1) = list_head(list1), (lc2) = list_head(list2),			\
+		 (lc3) = list_head(list3), (lc4) = list_head(list4),			\
+		 (lc5) = list_head(list5), (lc6) = list_head(list6);			\
+         (lc1) != NULL && (lc2) != NULL && (lc3) != NULL &&				\
+		 (lc4) != NULL && (lc5) != NULL && (lc6) != NULL;				\
+		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),	\
+		 (lc4) = lnext(lc4), (lc5) = lnext(lc5), (lc6) = lnext(lc6))
+#endif
+
 /* XXX - PG10 added lfirst_node() and related */
 #ifndef lfirst_node
 #define lfirst_node(T,x)		((T *)lfirst(x))
