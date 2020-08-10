@@ -2246,6 +2246,7 @@ pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum)
 	GSERIALIZED	   *gs = (GSERIALIZED *)dest;
 	char		   *rawdata = gs->body.data;
 	cl_uchar		gflags = G1FLAG_READONLY;
+	cl_uint			sz;
 
 	/* extract SRID */
 	gs->body.srid[0] = (geom->srid & 0x001f0000) >> 16;
@@ -2264,7 +2265,7 @@ pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum)
 	if ((geom->flags & GEOM_FLAG__SOLID) != 0)
 		gflags |= G1FLAG_SOLID;
 	gs->body.gflags = gflags;
-
+	
 	if ((gflags & G1FLAG_BBOX) != 0)
 	{
 		cl_uint		sz = geometry_bbox_size(geom->flags);
@@ -2272,16 +2273,17 @@ pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum)
 		memcpy(rawdata, geom->bbox, sz);
 		rawdata += sz;
 	}
-
 	/* type and nitems */
-	memcpy(rawdata, &geom->type, sizeof(cl_int));
-	rawdata += sizeof(cl_int);
-	memcpy(rawdata, &geom->nitems, sizeof(cl_uint));
-	rawdata += sizeof(cl_uint);
+	((cl_uint *)rawdata)[0] = geom->type;
+	((cl_uint *)rawdata)[1] = geom->nitems;
+	rawdata += 2 * sizeof(cl_uint);
 
 	/* other payload */
 	memcpy(rawdata, geom->rawdata, geom->rawsize);
 	rawdata += geom->rawsize;
 
-	return (rawdata - dest);
+	sz = (rawdata - dest);
+	SET_VARSIZE(gs, sz);
+
+	return sz;
 }

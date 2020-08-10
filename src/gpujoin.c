@@ -1240,7 +1240,8 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 			curr_clause = match_clause_to_index(root, rinfo,
 												curr_index,
 												&curr_colidx);
-			if (curr_clause)
+			if (curr_clause &&
+				pgstrom_device_expression(root, NULL, curr_clause))
 			{
 				curr_selectivity = clauselist_selectivity(root,
 														  list_make1(curr_clause),

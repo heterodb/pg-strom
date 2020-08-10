@@ -867,6 +867,7 @@ vlbuf_estimate_jsonb(codegen_context *context,
 					 devfunc_info *dfunc,
 					 Expr **args, int *vl_width)
 {
+	context->varlena_bufsz += MAXALIGN(TOAST_TUPLE_THRESHOLD);
 	/*
 	 * We usually have no information about jsonb object length preliminary,
 	 * however, plain varlena must be less than the threshold of toasting.
@@ -883,7 +884,9 @@ vlbuf_estimate__st_makepoint(codegen_context *context,
 {
 	int		nargs = list_length(dfunc->func_args);
 
-	return sizeof(cl_double) * nargs;
+	context->varlena_bufsz += MAXALIGN(sizeof(double) * 2 * nargs);
+
+	return -1;
 }
 
 static int
@@ -891,7 +894,20 @@ vlbuf_estimate__st_relate(codegen_context *context,
 						  devfunc_info *dfunc,
 						  Expr **args, int *vl_width)
 {
+	context->varlena_bufsz += MAXALIGN(VARHDRSZ + 9);
+
 	return VARHDRSZ + 9;
+}
+
+static int
+vlbuf_estimate__st_expand(codegen_context *context,
+						  devfunc_info *dfunc,
+						  Expr **args, int *vl_width)
+{
+	context->varlena_bufsz += MAXALIGN(4 * sizeof(cl_float) +	/* bounding-box */
+									   2 * sizeof(cl_uint) +	/* nitems + padding */
+									   10 * sizeof(double));	/* polygon rawdata */
+	return -1;		/* not a normal varlena */
 }
 
 /*
@@ -1967,11 +1983,14 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ POSTGIS3, "geometry st_setsrid(geometry,int4)",
 	  1, "g/f:st_setsrid" },
 	{ POSTGIS3, "geometry st_makepoint(float8,float8)",
-	  10, "g/f:st_makepoint2", vlbuf_estimate__st_makepoint },
+	  10, "gC/f:st_makepoint2",
+	  vlbuf_estimate__st_makepoint },
 	{ POSTGIS3, "geometry st_makepoint(float8,float8,float8)",
-	  10, "g/f:st_makepoint3", vlbuf_estimate__st_makepoint },
+	  10, "gC/f:st_makepoint3",
+	  vlbuf_estimate__st_makepoint },
 	{ POSTGIS3, "geometry st_makepoint(float8,float8,float8,float8)",
-	  10, "g/f:st_makepoint4", vlbuf_estimate__st_makepoint },
+	  10, "gC/f:st_makepoint4",
+	  vlbuf_estimate__st_makepoint },
 	{ POSTGIS3, "float8 st_distance(geometry,geometry)",
 	  50, "g/f:st_distance" },
 	{ POSTGIS3, "bool st_dwithin(geometry,geometry,float8)",
@@ -1979,11 +1998,21 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ POSTGIS3, "int4 st_linecrossingdirection(geometry,geometry)",
 	  50, "g/f:st_linecrossingdirection" },
 	{ POSTGIS3, "text st_relate(geometry,geometry)",
-	  999, "g/f:st_relate", vlbuf_estimate__st_relate },
+	  999, "g/f:st_relate",
+	  vlbuf_estimate__st_relate },
 	{ POSTGIS3, "bool st_contains(geometry,geometry)",
 	  999, "g/f:st_contains" },
 	{ POSTGIS3, "bool st_crosses(geometry,geometry)",
 	  999, "g/f:st_crosses" },
+	{ POSTGIS3, "bool geometry_overlaps(geometry,geometry)",
+	  10, "g/f:geometry_overlaps" },
+	{ POSTGIS3, "bool geometry_contains(geometry,geometry)",
+	  10, "g/f:geometry_contains" },
+	{ POSTGIS3, "bool geometry_within(geometry,geometry)",
+	  10, "g/f:geometry_within" },
+	{ POSTGIS3, "geometry st_expand(geometry,float8)",
+	  20, "gC/f:st_expand",
+	  vlbuf_estimate__st_expand },
 };
 #undef PGSTROM
 #undef POSTGIS3

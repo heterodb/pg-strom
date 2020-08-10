@@ -674,6 +674,283 @@ __geom_pt_within_seg(const POINT2D *P,
 
 /* ================================================================
  *
+ * Basic Operators related to boundary-box
+ *
+ * ================================================================
+ */
+DEVICE_INLINE(cl_bool)
+__geom_bbox_2d_is_empty(const geom_bbox_2d *bbox)
+{
+	return isnan(bbox->xmin);
+}
+
+/* see, gserialized_datum_get_box2df_p() */
+STATIC_FUNCTION(cl_bool)
+__geometry_get_bbox2d(kern_context *kcxt,
+					  const pg_geometry_t *geom, geom_bbox_2d *bbox)
+{
+	POINT2D			pt;
+	cl_uint			unitsz;
+	const char	   *rawdata;
+	pg_geometry_t	temp;
+	const char	   *pos;
+
+	/* geometry already has bounding-box? */
+	if (geom->bbox)
+	{
+		memcpy(bbox, &geom->bbox, sizeof(geom_bbox_2d));
+		return true;
+	}
+	if ((geom->flags & GEOM_FLAG__GEODETIC) != 0)
+		return false;
+	if (geom->type == GEOM_POINTTYPE)
+	{
+		__loadPoint2d(&pt, geom->rawdata, 0);
+		bbox->xmax = bbox->xmin = pt.x;
+		bbox->ymax = bbox->ymin = pt.y;
+		return true;
+	}
+	else if (geom->type == GEOM_LINETYPE)
+	{
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
+
+		rawdata = __loadPoint2d(&pt, geom->rawdata, unitsz);
+		bbox->xmax = bbox->xmin = pt.x;
+        bbox->ymax = bbox->ymin = pt.y;
+		for (int i = 1; i < geom->nitems; i++)
+		{
+			rawdata = __loadPoint2d(&pt, rawdata, unitsz);
+			if (bbox->xmax < pt.x)
+				bbox->xmax = pt.x;
+			if (bbox->xmin > pt.x)
+				bbox->xmin = pt.x;
+			if (bbox->ymax < pt.y)
+				bbox->ymax = pt.y;
+			if (bbox->ymin > pt.y)
+				bbox->ymin = pt.y;
+		}
+		return true;
+	}
+	else if (geom->type == GEOM_MULTIPOINTTYPE)
+	{
+		pos = geometry_load_subitem(&temp, geom, NULL, 0, kcxt);
+		if (!pos)
+			return false;
+		__loadPoint2d(&pt, temp.rawdata, 0);
+		bbox->xmax = bbox->xmin = pt.x;
+		bbox->ymax = bbox->ymin = pt.y;
+		for (int i=1; i < geom->nitems; i++)
+		{
+			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
+			if (!pos)
+				return false;
+			__loadPoint2d(&pt, temp.rawdata, 0);
+			if (bbox->xmax < pt.x)
+				bbox->xmax = pt.x;
+			if (bbox->xmin > pt.x)
+				bbox->xmin = pt.x;
+			if (bbox->ymax < pt.y)
+				bbox->ymax = pt.y;
+			if (bbox->ymin > pt.y)
+				bbox->ymin = pt.y;
+		}
+		return true;
+	}
+	else if (geom->type == GEOM_MULTILINETYPE)
+	{
+		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
+
+		pos = geometry_load_subitem(&temp, geom, NULL, 0, kcxt);
+		if (!pos)
+			return false;
+		__loadPoint2d(&pt, temp.rawdata, 0);
+		bbox->xmax = bbox->xmin = pt.x;
+		bbox->ymax = bbox->ymin = pt.y;
+		for (int i=1; i < geom->nitems; i++)
+		{
+			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
+			if (!pos)
+				return false;
+			rawdata = temp.rawdata;
+			for (int j=0; j < temp.nitems; j++)
+			{
+				rawdata = __loadPoint2d(&pt, rawdata, unitsz);
+				if (bbox->xmax < pt.x)
+					bbox->xmax = pt.x;
+				if (bbox->xmin > pt.x)
+					bbox->xmin = pt.x;
+				if (bbox->ymax < pt.y)
+					bbox->ymax = pt.y;
+				if (bbox->ymin > pt.y)
+					bbox->ymin = pt.y;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+/* see, gserialized_overlaps_2d() */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_overlaps(kern_context *kcxt,
+					   const pg_geometry_t &arg1,
+					   const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox1;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+	{
+		/* see box2df_overlaps() */
+		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
+			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = false;
+		else if (__geom_bbox_2d_is_empty(&bbox1) ||
+				 __geom_bbox_2d_is_empty(&bbox2) ||
+				 bbox1.xmin > bbox2.xmax ||
+				 bbox1.xmax < bbox2.xmin ||
+				 bbox1.ymin > bbox2.ymax ||
+				 bbox1.ymax < bbox2.ymin)
+			result.value = false;
+		else
+			result.value = true;
+	}
+	return result;
+}
+
+/* see, gserialized_contains_2d() */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_contains(kern_context *kcxt,
+					   const pg_geometry_t &arg1,
+					   const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox1;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+	{
+		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
+			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = false;
+		else if (__geom_bbox_2d_is_empty(&bbox2) &&
+				 !__geom_bbox_2d_is_empty(&bbox1))
+			result.value = true;
+		else if (bbox1.xmin > bbox2.xmin ||
+				 bbox1.xmax < bbox2.xmax ||
+				 bbox1.ymin > bbox2.ymin ||
+				 bbox1.ymax < bbox2.ymax)
+			result.value = false;
+		else
+			result.value = true;
+	}
+	return result;
+}
+
+/* see, gserialized_within_2d() */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_within(kern_context *kcxt,
+					 const pg_geometry_t &arg1,
+					 const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox1;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+	{
+		/* see box2df_within() */
+		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
+			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = false;
+		else if (__geom_bbox_2d_is_empty(&bbox1) &&
+				 !__geom_bbox_2d_is_empty(&bbox2))
+			result.value = true;
+		else if (bbox1.xmin < bbox2.xmin ||
+				 bbox1.xmax > bbox2.xmax ||
+				 bbox2.ymin < bbox2.ymin ||
+				 bbox2.ymax > bbox2.ymax)
+			result.value = false;
+		else
+			result.value = true;
+	}
+	return result;
+}
+
+/* see, LWGEOM_expand() */
+DEVICE_FUNCTION(pg_geometry_t)
+pgfn_st_expand(kern_context *kcxt,
+			   const pg_geometry_t &arg1, pg_float8_t arg2)
+{
+	pg_geometry_t	geom;
+	geom_bbox_2d	bbox;
+	char		   *pos;
+
+	memset(&geom, 0, sizeof(pg_geometry_t));
+	if (arg1.isnull || arg2.isnull)
+	{
+		geom.isnull = true;
+		return geom;
+	}
+
+	/* cannot expand an empty */
+	if (arg1.nitems == 0)
+		return arg1;
+	/* cannot expand something with no boundary-box */
+	if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox))
+		return arg1;
+	/* expand bbox */
+	bbox.xmin -= arg2.value;
+	bbox.xmax += arg2.value;
+	bbox.ymin -= arg2.value;
+	bbox.ymax += arg2.value;
+
+	pos = (char *)
+		kern_context_alloc(kcxt, (sizeof(geom_bbox_2d) +	/* bounding box */
+								  2 * sizeof(cl_uint) +		/* nitems + padding */
+								  10 * sizeof(double)));	/* 5 x Points */
+	if (!pos)
+	{
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+					  "out of memory");
+		geom.isnull = true;
+		return geom;
+	}
+	geom.type = GEOM_POLYGONTYPE;
+	geom.flags = GEOM_FLAG__BBOX;
+	geom.srid = SRID_UNKNOWN;
+	geom.nitems = 1;
+	geom.rawsize = (2 * sizeof(cl_uint) + 10 * sizeof(double));
+	geom.bbox = (geom_bbox *)pos;
+	memcpy(geom.bbox, &bbox, sizeof(geom_bbox_2d));
+	pos += sizeof(geom_bbox_2d);
+
+	geom.rawdata = pos;
+	((cl_uint *)pos)[0] = 5;		/* # of Points */
+	((cl_uint *)pos)[1] = 0;		/* padding */
+	pos += 2 * sizeof(cl_uint);
+
+	((double *)pos)[0] = bbox.xmin;
+	((double *)pos)[1] = bbox.ymin;
+	((double *)pos)[2] = bbox.xmin;
+	((double *)pos)[3] = bbox.ymax;
+	((double *)pos)[4] = bbox.xmax;
+	((double *)pos)[5] = bbox.ymax;
+	((double *)pos)[6] = bbox.xmax;
+	((double *)pos)[7] = bbox.ymin;
+	((double *)pos)[8] = bbox.xmin;
+	((double *)pos)[9] = bbox.ymin;
+	pos += 10 * sizeof(double);
+
+	return geom;
+}
+
+/* ================================================================
+ *
  * St_Distance(geometry,geometry)
  *
  * ================================================================

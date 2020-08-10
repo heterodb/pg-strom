@@ -187,15 +187,32 @@ typedef struct
 	double	x, y, z, m;
 } POINT4D;
 
-
-
-
 #ifdef __CUDACC__
 /* for DATUM_CLASS__GEOMETRY */
 DEVICE_FUNCTION(cl_uint)
 pg_geometry_datum_length(kern_context *kcxt, Datum datum);
 DEVICE_FUNCTION(cl_uint)
 pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum);
+
+/*
+ * box2df operators & functions
+ */
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_overlaps(kern_context *kcxt,
+					   const pg_geometry_t &arg1,
+					   const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_contains(kern_context *kcxt,
+					   const pg_geometry_t &arg1,
+					   const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_within(kern_context *kcxt,
+					 const pg_geometry_t &arg1,
+					 const pg_geometry_t &arg2);
+
+DEVICE_FUNCTION(pg_geometry_t)
+pgfn_st_expand(kern_context *kcxt,
+			   const pg_geometry_t &arg1, pg_float8_t arg2);
 
 /*
  * PostGIS functions
