@@ -32,10 +32,11 @@ typedef struct
 	{
 		cl_ulong	chunk_offset;	/* offset to KDS or Hash */
 		cl_ulong	ojmap_offset;	/* offset to outer-join map, if any */
+		cl_ulong	gist_offset;	/* offset to GiST-index pages, if any */
+		cl_uint		gist_nblocks;	/* number of GiST-index blocks, if any */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
-		cl_char		__padding__[5];
 	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 

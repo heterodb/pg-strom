@@ -22,6 +22,7 @@
 
 #include "access/brin.h"
 #include "access/brin_revmap.h"
+#include "access/gist.h"
 #include "access/hash.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"

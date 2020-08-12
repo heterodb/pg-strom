@@ -46,6 +46,7 @@ typedef struct
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		IndexOptInfo *gist_index;	/* GiST index IndexOptInfo */
 		AttrNumber	gist_colidx;	/* GiST column index (0-origin) */
+		AttrNumber	gist_ctid_resno;/* CTID resno on the targetlist */
 		Expr	   *gist_clause;	/* GiST index clause */
 		Selectivity	gist_selectivity; /* GiST index selectivity */
 		Size		ichunk_size;	/* expected inner chunk size */
@@ -87,9 +88,10 @@ typedef struct
 	List	   *other_quals;
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
-	List	   *gist_index_reloid;	/* if gist-index */
-	List	   *gist_index_colidx;	/* if gist-index */
-	List	   *gist_index_clause;	/* if gist-index */
+	List	   *gist_index_reloid;	/* if GiST-index */
+	List	   *gist_index_colidx;	/* if GiST-index */
+	List	   *gist_index_ctid_resno; /* if GiST-index */
+	List	   *gist_index_clause;	/* if GiST-index */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -132,6 +134,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->gist_index_reloid);
 	privs = lappend(privs, gj_info->gist_index_colidx);
+	privs = lappend(privs, gj_info->gist_index_ctid_resno);
 	exprs = lappend(exprs, gj_info->gist_index_clause);
 
 	privs = lappend(privs, gj_info->ps_src_depth);
@@ -181,6 +184,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->gist_index_reloid = list_nth(privs, pindex++);
 	gj_info->gist_index_colidx = list_nth(privs, pindex++);
+	gj_info->gist_index_ctid_resno = list_nth(privs, pindex++);
 	gj_info->gist_index_clause = list_nth(exprs, eindex++);
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
@@ -210,7 +214,7 @@ typedef struct
 	Bitmapset		   *preload_flatten_attrs;
 
 	/*
-	 * Join properties; both nest-loop and hash-join
+	 * Join properties; common
 	 */
 	int					depth;
 	JoinType			join_type;
@@ -224,6 +228,13 @@ typedef struct
 	 */
 	List			   *hash_outer_keys;
 	List			   *hash_inner_keys;
+
+	/*
+	 * Join properties; GiST index
+	 */
+	Relation			gist_irel;
+	AttrNumber			gist_colidx;
+	AttrNumber			gist_ctid_resno;
 
 	/* CPU Fallback related */
 	AttrNumber		   *inner_dst_resno;
@@ -852,6 +863,7 @@ typedef struct
 	List	   *hash_quals;
 	IndexOptInfo *gist_index;
 	AttrNumber	gist_colidx;
+	AttrNumber	gist_ctid_resno;
 	Expr	   *gist_clause;
 	Selectivity	gist_selectivity;
 	double		join_nrows;
@@ -927,6 +939,7 @@ create_gpujoin_path(PlannerInfo *root,
 		gjpath->inners[i].join_quals = ip_item->join_quals;
 		gjpath->inners[i].gist_index = ip_item->gist_index;
 		gjpath->inners[i].gist_colidx = ip_item->gist_colidx;
+		gjpath->inners[i].gist_ctid_resno = ip_item->gist_ctid_resno;
 		gjpath->inners[i].gist_clause = ip_item->gist_clause;
 		gjpath->inners[i].gist_selectivity = ip_item->gist_selectivity;
 		gjpath->inners[i].ichunk_size = 0;		/* to be set later */
@@ -1197,19 +1210,25 @@ match_clause_to_index(PlannerInfo *root,
 static void
 extract_gpugistindex_clause(inner_path_item *ip_item,
 							PlannerInfo *root,
-							RelOptInfo *inner_rel,
 							JoinType jointype,
 							List *restrict_clauses)
 {
+	Path		   *inner_path = ip_item->inner_path;
+	RelOptInfo	   *inner_rel = inner_path->parent;
 	IndexOptInfo   *gist_index = NULL;
 	AttrNumber		gist_colidx = 0;
+	AttrNumber		gist_ctid_resno = SelfItemPointerAttributeNumber;
 	Expr		   *gist_clause = NULL;
 	Selectivity		gist_selectivity = 1.0;
 	ListCell	   *lc1, *lc2;
 
 	/* GPU GiST Index is used only when GpuHashJoin is not available */
 	Assert(ip_item->hash_quals == NIL);
-	
+
+	/* FIXME: IndexOnlyScan may not contain CTID, so not supported */
+	if (inner_path->pathtype == T_IndexOnlyScan)
+		return;
+
 	/* see logic in create_index_paths */
 	foreach (lc1, inner_rel->indexlist)
 	{
@@ -1261,11 +1280,48 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 
 	if (gist_index)
 	{
-		ip_item->gist_index  = gist_index;
-		ip_item->gist_colidx = gist_colidx;
-		ip_item->gist_clause = gist_clause;
-		ip_item->gist_selectivity = gist_selectivity;
+		AttrNumber		resno = 1;
+
+		foreach (lc1, inner_path->pathtarget->exprs)
+		{
+			Var	   *var = (Var *) lfirst(lc1);
+
+			if (IsA(var, Var) &&
+				var->varno == inner_rel->relid &&
+				var->varattno == SelfItemPointerAttributeNumber)
+			{
+				Assert(var->vartype == TIDOID &&
+					   var->vartypmod == -1 &&
+					   var->varcollid == InvalidOid);
+				gist_ctid_resno = resno;
+				break;
+			}
+			resno++;
+		}
+		/* add projection for ctid (but junk attribute) */
+		if (!lc1)
+		{
+			PathTarget *target = copy_pathtarget(inner_path->pathtarget);
+			Var		   *var;
+
+			var = makeVar(inner_rel->relid,
+						  SelfItemPointerAttributeNumber,
+						  TIDOID, -1, InvalidOid, 0);
+			target->exprs = lappend(target->exprs, var);
+			gist_ctid_resno = list_length(target->exprs);
+
+			ip_item->inner_path = (Path *)
+				create_projection_path(root,
+									   inner_rel,
+									   inner_path,
+									   target);
+		}
 	}
+	ip_item->gist_index  = gist_index;
+	ip_item->gist_colidx = gist_colidx;
+	ip_item->gist_ctid_resno = gist_ctid_resno;
+	ip_item->gist_clause = gist_clause;
+	ip_item->gist_selectivity = gist_selectivity;
 }
 
 #if PG_VERSION_NUM >= 110000
@@ -1476,7 +1532,6 @@ buildInnerPathItems(PlannerInfo *root,
 		if (ip_item->hash_quals == NIL)
 			extract_gpugistindex_clause(ip_item,
 										root,
-										inner_rel,
 										join_type,
 										join_quals);
 		ip_item->join_nrows = join_nrows_curr = join_nrows;
@@ -2149,7 +2204,6 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	if (ip_item->hash_quals == NIL)
 		extract_gpugistindex_clause(ip_item,
 									root,
-									inner_path->parent,
 									join_type,
 									restrict_clauses);
 	ip_item->join_nrows = joinrel->rows;
@@ -2710,6 +2764,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpujoin_plan_methods;
 	cscan->custom_plans = list_copy_tail(custom_plans, 1);
+	Assert(list_length(cscan->custom_plans) == gjpath->num_rels);
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.outer_ratio = 1.0;
@@ -2750,6 +2805,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 		List	   *other_quals = NIL;
 		Oid			gist_index_reloid = InvalidOid;
 		int			gist_index_colidx = -1;
+		int			gist_index_ctid_resno = -1;
 		Expr	   *gist_index_clause = NULL;
 
 		/* GpuHashJoin properties */
@@ -2793,6 +2849,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 
 			gist_index_reloid = gist_index->indexoid;
 			gist_index_colidx = gjpath->inners[i].gist_colidx;
+			gist_index_ctid_resno = gjpath->inners[i].gist_ctid_resno;
 			gist_index_clause = gjpath->inners[i].gist_clause;
 		}
 
@@ -2830,6 +2887,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 												gist_index_reloid);
 		gj_info.gist_index_colidx = lappend_int(gj_info.gist_index_colidx,
 												gist_index_colidx);
+		gj_info.gist_index_ctid_resno = lappend_int(gj_info.gist_index_ctid_resno,
+													gist_index_ctid_resno);
 		gj_info.gist_index_clause = lappend(gj_info.gist_index_clause,
 											gist_index_clause);
 		outer_nrows = gjpath->inners[i].join_nrows;
@@ -3222,6 +3281,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		List	   *other_quals = list_nth(gj_info->other_quals, i);
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
+		Oid			gist_index_reloid;
+		AttrNumber	gist_index_ctid_resno;
 		TupleDesc	inner_tupdesc;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
@@ -3285,6 +3346,26 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				istate->hash_outer_keys =
 					lappend(istate->hash_outer_keys, o_expr_state);
 			}
+		}
+
+		gist_index_reloid = list_nth_oid(gj_info->gist_index_reloid, i);
+		gist_index_ctid_resno = list_nth_int(gj_info->gist_index_ctid_resno, i);
+		if (OidIsValid(gist_index_reloid))
+		{
+			TargetEntry	*tle;
+			Var		   *var;
+
+			istate->gist_irel = index_open(gist_index_reloid, AccessShareLock);
+			if (gist_index_ctid_resno < 1 ||
+				gist_index_ctid_resno > list_length(inner_plan->targetlist))
+				elog(ERROR, "GPU-GiST: inner ctid is out of range");
+			tle = list_nth(inner_plan->targetlist, gist_index_ctid_resno - 1);
+			var = (Var *)tle->expr;
+			if (!IsA(tle->expr, Var) ||
+				var->varattno != SelfItemPointerAttributeNumber ||
+				var->vartype != TIDOID)
+				elog(ERROR, "GPU-GiST: wrong Var-definition for inner ctid");
+			istate->gist_ctid_resno = gist_index_ctid_resno;
 		}
 
 		/*
@@ -3405,7 +3486,13 @@ ExecEndGpuJoin(CustomScanState *node)
 	/* shutdown inner/outer subtree */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
-		ExecEndNode(gjs->inners[i].state);
+	{
+		innerState	   *istate = &gjs->inners[i];
+
+		if (istate->gist_irel)
+			index_close(istate->gist_irel, NoLock);
+		ExecEndNode(istate->state);
+	}
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts, false);
 	/* shutdown the common portion */
@@ -6850,10 +6937,11 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 	{
 		HeapTuple	htup;
 		tupleEntry *entry;
-		cl_uint		hash;
+		cl_uint		hash = 0;
 		int			j, k;
-		bool		is_null_keys;
 		size_t		usage;
+		Datum		datum;
+		bool		isnull;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -6885,36 +6973,51 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 			}
 		}
 
-		if (istate->hash_inner_keys == NIL)
-			hash = 0;
-		else
+		/* Save the inner tuple temporaray */
+		htup = ExecFetchSlotHeapTuple(slot, false, false);
+		if (istate->hash_inner_keys != NIL)
 		{
-			hash = get_tuple_hashvalue(istate, true, slot, &is_null_keys);
 			/*
 			 * If join-keys are NULL, it is obvious that this inner tuple
 			 * shall not have any matching outer tuples.
 			 */
-			if (is_null_keys && (istate->join_type == JOIN_INNER ||
-								 istate->join_type == JOIN_LEFT))
+			hash = get_tuple_hashvalue(istate, true, slot, &isnull);
+			if (isnull && (istate->join_type == JOIN_INNER ||
+						   istate->join_type == JOIN_LEFT))
 				continue;
 		}
-		/*
-		 * Temporary, save the inner tuple
-		 */
-		htup = ExecFetchSlotHeapTuple(slot, false, false);
+		else if (istate->gist_irel)
+		{
+			/*
+			 * GiST index tries to walk down by index-key, then look up
+			 * the entry by CTID.
+			 */
+			datum = slot_getattr(slot, istate->gist_ctid_resno, &isnull);
+			if (isnull)
+				elog(ERROR, "GPU GiST: Bug? inner ctid is missing");
+
+			hash = 0xffffffffU;
+			hash ^= hash_any((unsigned char *)datum,
+							 sizeof(ItemPointerData));
+			hash ^= 0xffffffffU;
+
+			memcpy(&htup->t_self, DatumGetPointer(datum), sizeof(ItemPointerData));
+		}
 		entry = MemoryContextAlloc(leader->preload_memcxt,
 								   offsetof(tupleEntry,
 											titem.htup) + htup->t_len);
 		memset(entry, 0, offsetof(tupleEntry, titem.htup));
 		entry->hash = hash;
 		//FIXME: t_len is 16bit. It's sufficient for most cases, but...
+		Assert(htup->t_len < 65536);
 		entry->titem.t_len = htup->t_len;
 		memcpy(&entry->titem.t_self, &htup->t_self, sizeof(ItemPointerData));
 		memcpy(&entry->titem.htup, htup->t_data, htup->t_len);
-		if (istate->hash_inner_keys == NIL)
-			usage = offsetof(kern_tupitem, htup) + htup->t_len;
-		else
+		if (istate->hash_inner_keys != NIL ||
+			istate->gist_irel != NULL)
 			usage = offsetof(kern_hashitem, t.htup) + htup->t_len;
+		else
+			usage = offsetof(kern_tupitem, htup) + htup->t_len;
 
 		istate->preload_nitems++;
 		istate->preload_usage += MAXALIGN(usage);
@@ -6980,6 +7083,26 @@ restart:
 									   KDS_FORMAT_HASH, nrooms);
 				kds->nslots = __KDS_NSLOTS(nrooms);
 			}
+		}
+		else if (istate->gist_irel != NULL)
+		{
+			BlockNumber		nblocks = RelationGetNumberOfBlocks(istate->gist_irel);
+
+			nbytes += (STROMALIGN(sizeof(cl_uint) * nrooms) +
+					   STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nrooms)) +
+					   STROMALIGN(usage));
+			if (h_kmrels)
+			{
+				init_kernel_data_store(kds, tupdesc, nbytes,
+									   KDS_FORMAT_HASH, nrooms);
+				kds->nslots = __KDS_NSLOTS(nrooms);
+
+				h_kmrels->chunks[i].gist_offset = (kmrels_ofs + nbytes);
+				h_kmrels->chunks[i].gist_nblocks = nblocks;
+			}
+			elog(INFO, "nbytes = %zu block=%zu", nbytes, (size_t)(BLCKSZ * nblocks));
+			/* index blocks */
+			nbytes += BLCKSZ * nblocks;
 		}
 		else
 		{
@@ -7124,6 +7247,72 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 	}
 	Assert(istate->preload_nitems == (rowid - base_nitems));
 	Assert(istate->preload_usage == (tail_pos - curr_pos));
+}
+
+static void
+__innerPreloadSetupGiSTIndexWalker(char *base,
+								   BlockNumber blkno,
+								   BlockNumber nblocks,
+								   BlockNumber parent_blkno,
+								   OffsetNumber parent_offno)
+{
+	Page			page = (Page)(base + BLCKSZ * blkno);
+	PageHeader		hpage = (PageHeader) page;
+	GISTPageOpaque	op = GistPageGetOpaque(page);
+	OffsetNumber	i, maxoff;
+
+	Assert(hpage->pd_lsn.xlogid == InvalidBlockNumber &&
+		   hpage->pd_lsn.xrecoff == InvalidOffsetNumber);
+	hpage->pd_lsn.xlogid = parent_blkno;
+	hpage->pd_lsn.xrecoff = parent_offno;
+	if ((op->flags & F_LEAF) != 0)
+		return;
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (i=FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
+	{
+		ItemId		iid = PageGetItemId(page, i);
+        IndexTuple	it;
+		BlockNumber	child;
+
+		if (ItemIdIsDead(iid))
+			continue;
+		it = (IndexTuple) PageGetItem(page, iid);
+		child = BlockIdGetBlockNumber(&it->t_tid.ip_blkid);
+		if (child < nblocks)
+			__innerPreloadSetupGiSTIndexWalker(base, child, nblocks, blkno, i);
+	}
+}
+
+static void
+__innerPreloadSetupGiSTIndexBuffer(innerState *istate,
+								   char *base, BlockNumber nblocks)
+{
+	Relation	irel = istate->gist_irel;
+	BlockNumber	i;
+
+	if (irel->rd_amhandler != F_GISTHANDLER)
+		elog(ERROR, "Bug? index '%s' is not GiST index",
+			 RelationGetRelationName(irel));
+	for (i=0; i < nblocks; i++)
+	{
+		Buffer		buffer;
+		Page		page;
+		PageHeader	hpage;
+
+		buffer = ReadBuffer(irel, i);
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		page = BufferGetPage(buffer);
+		hpage = (PageHeader)(base + BLCKSZ * i);
+
+		memcpy(hpage, page, BLCKSZ);
+		hpage->pd_lsn.xlogid = InvalidBlockNumber;
+		hpage->pd_lsn.xrecoff = InvalidOffsetNumber;
+
+		UnlockReleaseBuffer(buffer);
+	}
+	__innerPreloadSetupGiSTIndexWalker(base, 0, nblocks,
+									   InvalidBlockNumber,
+									   InvalidOffsetNumber);
 }
 
 static kern_multirels *
@@ -7410,6 +7599,19 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 				gj_sstate->nr_workers_setup == 0)
 			{
 				Assert(gj_sstate->phase == INNER_PHASE__SETUP_BUFFERS);
+				/* preload GiST index buffer, if any */
+				for (i=0; i < leader->num_rels; i++)
+				{
+					innerState *istate = &leader->inners[i];
+					char	   *base;
+					BlockNumber	nblocks;
+
+					if (!istate->gist_irel)
+						continue;
+					base = (char *)h_kmrels + h_kmrels->chunks[i].gist_offset;
+					nblocks = h_kmrels->chunks[i].gist_nblocks;
+					__innerPreloadSetupGiSTIndexBuffer(istate, base, nblocks);
+				}
 				gj_sstate->phase = INNER_PHASE__GPUJOIN_EXEC;
 				ConditionVariableBroadcast(&gj_sstate->cond);
 			}
