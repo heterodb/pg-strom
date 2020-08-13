@@ -260,7 +260,7 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID,(cl_long))
 	}
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_isempty(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
@@ -272,7 +272,7 @@ __generic_range_isempty(kern_context *kcxt, const R &arg1)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_lower_inc(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
@@ -284,7 +284,7 @@ __generic_range_lower_inc(kern_context *kcxt, const R &arg1)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_upper_inc(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
@@ -296,7 +296,7 @@ __generic_range_upper_inc(kern_context *kcxt, const R &arg1)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_lower_inf(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
@@ -308,7 +308,7 @@ __generic_range_lower_inf(kern_context *kcxt, const R &arg1)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_upper_inf(kern_context *kcxt, const R &arg1)
 {
 	pg_bool_t	result;
@@ -383,7 +383,7 @@ __range_cmp(const RangeType *r1, const RangeType *r2)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_eq(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -407,7 +407,7 @@ __generic_range_eq(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_ne(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -431,7 +431,7 @@ __generic_range_ne(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_gt(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -444,7 +444,7 @@ __generic_range_gt(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_ge(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -457,7 +457,7 @@ __generic_range_ge(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_lt(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -470,7 +470,7 @@ __generic_range_lt(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_le(kern_context *kcxt,
 				   const R &arg1, const R &arg2)
 {
@@ -483,7 +483,7 @@ __generic_range_le(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_int4_t)
+STATIC_FUNCTION(pg_int4_t)
 __generic_range_cmp(kern_context *kcxt,
 					const R &arg1, const R &arg2)
 {
@@ -511,7 +511,7 @@ __range_overlaps_internal(RangeType *r1, RangeType *r2)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_overlaps(kern_context *kcxt,
 						 const R &arg1, const R &arg2)
 {
@@ -553,7 +553,7 @@ __range_contains_elem_internal(RangeType *r, ElementType *val)
 }
 
 template <typename R, typename E>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_contains_elem(kern_context *kcxt,
 							  const R &arg1, const E &arg2)
 {
@@ -567,7 +567,7 @@ __generic_range_contains_elem(kern_context *kcxt,
 }
 
 template <typename RangeType>
-STATIC_INLINE(cl_bool)
+STATIC_FUNCTION(cl_bool)
 __range_contains_internal(RangeType *r1, RangeType *r2)
 {
 	if (r2->empty)
@@ -584,7 +584,7 @@ __range_contains_internal(RangeType *r1, RangeType *r2)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_contains(kern_context *kcxt,
 						 const R &arg1, const R &arg2)
 {
@@ -598,7 +598,7 @@ __generic_range_contains(kern_context *kcxt,
 }
 
 template <typename R, typename E>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_elem_contained_by_range(kern_context *kcxt,
 								  const E &arg1, const R &arg2)
 {
@@ -612,7 +612,7 @@ __generic_elem_contained_by_range(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_contained_by(kern_context *kcxt,
 							 const R &arg1, const R &arg2)
 {
@@ -660,7 +660,7 @@ __range_adjacent_internal(RangeType *r1, RangeType *r2)
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_adjacent(kern_context *kcxt,
 						 const R &arg1, const R &arg2)
 {
@@ -674,7 +674,7 @@ __generic_range_adjacent(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_before(kern_context *kcxt,
 					   const R &arg1, const R &arg2)
 {
@@ -693,7 +693,7 @@ __generic_range_before(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_after(kern_context *kcxt,
 					  const R &arg1, const R &arg2)
 {
@@ -712,7 +712,7 @@ __generic_range_after(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_overright(kern_context *kcxt,
 						  const R &arg1, const R &arg2)
 {
@@ -731,7 +731,7 @@ __generic_range_overright(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(pg_bool_t)
+STATIC_FUNCTION(pg_bool_t)
 __generic_range_overleft(kern_context *kcxt,
 						 const R &arg1, const R &arg2)
 {
@@ -791,7 +791,7 @@ __generic_range_union(kern_context *kcxt,
 }
 
 template <typename R>
-STATIC_INLINE(R)
+STATIC_FUNCTION(R)
 __generic_range_intersect(kern_context *kcxt, const R &arg1, const R &arg2)
 {
 	R	result;
@@ -825,7 +825,7 @@ __generic_range_intersect(kern_context *kcxt, const R &arg1, const R &arg2)
 }
 
 template <typename R>
-STATIC_INLINE(R)
+STATIC_FUNCTION(R)
 __generic_range_minus(kern_context *kcxt, const R &arg1, const R &arg2)
 {
 	R	result;
