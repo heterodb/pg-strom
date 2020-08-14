@@ -2823,7 +2823,7 @@ pgfn_now(kern_context *kcxt)
  * preliminary break down combination with type-cast.
  */
 #define OVERLAPS(type,cmp_gt_ops,cmp_lt_ops)				\
-	STATIC_INLINE(pg_bool_t)								\
+	STATIC_FUNCTION(pg_bool_t)								\
 	overlaps_##type(kern_context *kcxt,						\
 					type ts1, bool ts1_isnull,				\
 					type te1, bool te1_isnull,				\
