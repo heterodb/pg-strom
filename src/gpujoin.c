@@ -5730,7 +5730,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 									   kds_in,
-									   &khitem->t.t_self,
+									   &khitem->t.htup.t_ctid,
 									   &khitem->t.htup,
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
@@ -5740,7 +5740,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 
 	/* update outer join map */
 	if (ojmaps)
-		ojmaps[khitem->rowid] = 1;
+		ojmaps[khitem->t.rowid] = 1;
 	/* rewind the next depth */
 	if (depth < gjs->num_rels)
 	{
@@ -5797,7 +5797,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 									   kds_in,
-									   &tupitem->t_self,
+									   &tupitem->htup.t_ctid,
 									   &tupitem->htup,
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
@@ -5866,7 +5866,7 @@ gpujoinFallbackLoadOuter(int depth, GpuJoinState *gjs)
 
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 										   kds_in,
-										   &tupitem->t_self,
+										   &tupitem->htup.t_ctid,
 										   &tupitem->htup,
 										   istate->inner_dst_resno,
 										   istate->inner_src_anum_min,
@@ -5906,7 +5906,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, index);
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 										   kds_src,
-										   &tupitem->t_self,
+										   &tupitem->htup.t_ctid,
 										   &tupitem->htup,
 										   gjs->outer_dst_resno,
 										   gjs->outer_src_anum_min,
@@ -5951,6 +5951,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
+		//TODO: add KDS_FORMAT_COLUMN here
 		retval = ExecQual(gjs->outer_quals, econtext);
 	} while (!retval);
 
@@ -7008,11 +7009,10 @@ innerPreloadExecOneDepth(GpuJoinState *leader, innerState *istate)
 											titem.htup) + htup->t_len);
 		memset(entry, 0, offsetof(tupleEntry, titem.htup));
 		entry->hash = hash;
-		//FIXME: t_len is 16bit. It's sufficient for most cases, but...
-		Assert(htup->t_len < 65536);
 		entry->titem.t_len = htup->t_len;
-		memcpy(&entry->titem.t_self, &htup->t_self, sizeof(ItemPointerData));
 		memcpy(&entry->titem.htup, htup->t_data, htup->t_len);
+		memcpy(&entry->titem.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
+
 		if (istate->hash_inner_keys != NIL ||
 			istate->gist_irel != NULL)
 			usage = offsetof(kern_hashitem, t.htup) + htup->t_len;
@@ -7184,8 +7184,8 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 							  cl_uint base_usage)
 {
 	slist_iter	iter;
-	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds) + base_nitems;
-	size_t		count = 0;
+	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+	size_t		rowid = base_nitems;
 	char	   *tail_pos;
 	char	   *curr_pos;
 
@@ -7201,10 +7201,11 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		Assert(entry->hash == 0);
 		memcpy(titem, &entry->titem, entry->titem.t_len);
 
-		row_index[count++] = __kds_packed((char *)titem - (char *)kds);
+		titem->rowid = rowid;
+		row_index[rowid++] = __kds_packed((char *)titem - (char *)kds);
 		curr_pos -= sz;
 	}
-	Assert(istate->preload_nitems == count);
+	Assert(istate->preload_nitems == (rowid - base_nitems));
 	Assert(istate->preload_usage == (tail_pos - curr_pos));
 }
 
@@ -7235,14 +7236,13 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		self = __kds_packed((char *)hitem - (char *)kds);
 		__atomic_exchange(&hash_slot[hindex], &self, &next,
 						  __ATOMIC_SEQ_CST);
-		memset(hitem, 0, offsetof(kern_hashitem, t.htup));
 		hitem->hash = entry->hash;
 		hitem->next = next;
-		hitem->rowid = rowid;
 		memcpy(&hitem->t, &entry->titem,
-			   offsetof(kern_tupitem,
-						htup) + entry->titem.t_len);
+			   offsetof(kern_tupitem, htup) + entry->titem.t_len);
+		hitem->t.rowid = rowid;
 		row_index[rowid++] = __kds_packed((char *)&hitem->t - (char *)kds);
+
 		curr_pos -= sz;
 	}
 	Assert(istate->preload_nitems == (rowid - base_nitems));

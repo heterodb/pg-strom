@@ -193,7 +193,7 @@ gpujoin_load_source(kern_context *kcxt,
 									(char *)kds_src);
 			visible = gpujoin_quals_eval(kcxt,
 										 kds_src,
-										 &tupitem->t_self,
+										 &tupitem->htup.t_ctid,
 										 &tupitem->htup);
 		}
 		assert(wip_count[0] == 0);
@@ -570,15 +570,14 @@ gpujoin_projection_row(kern_context *kcxt,
 		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 		kern_tupitem *tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - dest_offset);
-
-		row_index[dest_index] = __kds_packed(kds_dst->length - dest_offset);
 		form_kern_heaptuple(kcxt,
 							tupitem,
 							kds_dst,
 							NULL,		/* ItemPointerData */
-							NULL,		/* HeapTupleHeaderData */
 							tup_dclass,
 							tup_values);
+		tupitem->rowid = dest_index;
+		row_index[dest_index] = __kds_packed(kds_dst->length - dest_offset);
 	}
 	if (__syncthreads_count(kcxt->errcode) > 0)
 		return -1;	/* bailout */
@@ -1038,9 +1037,9 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 			/* No LEFT/FULL JOIN are needed */
 			matched[depth] = true;
 			/* No RIGHT/FULL JOIN are needed */
-			assert(khitem->rowid < kds_hash->nitems);
-			if (oj_map && !oj_map[khitem->rowid])
-				oj_map[khitem->rowid] = true;
+			assert(khitem->t.rowid < kds_hash->nitems);
+			if (oj_map && !oj_map[khitem->t.rowid])
+				oj_map[khitem->t.rowid] = true;
 		}
 		t_offset = __kds_packed((char *)&khitem->t.htup -
 								(char *)kds_hash);

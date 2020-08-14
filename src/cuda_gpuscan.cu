@@ -76,7 +76,7 @@ gpuscan_main_row(kern_context *kcxt,
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
 			rc = gpuscan_quals_eval(kcxt, kds_src,
-									&tupitem->t_self,
+									&tupitem->htup.t_ctid,
 									&tupitem->htup);
 		}
 		/* bailout if any error */
@@ -105,7 +105,7 @@ gpuscan_main_row(kern_context *kcxt,
 					gpuscan_projection_tuple(kcxt,
 											 kds_src,
 											 &tupitem->htup,
-											 &tupitem->t_self,
+											 &tupitem->htup.t_ctid,
 											 tup_dclass,
 											 tup_values);
 					required = kds_slot_compute_extra(kcxt,

@@ -802,8 +802,8 @@ typedef struct {
  */
 typedef struct
 {
-	cl_ushort			t_len;	/* length of tuple */
-	ItemPointerData		t_self;	/* SelfItemPointer */
+	cl_uint			t_len;		/* length of tuple */
+	cl_uint			rowid;		/* unique Id of this item */
 	HeapTupleHeaderData	htup;
 } kern_tupitem;
 
@@ -814,8 +814,6 @@ typedef struct
 {
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next (PACKED) */
-	cl_uint				rowid;	/* unique identifier of this hash entry */
-	cl_uint				__padding__; /* for alignment */
 	kern_tupitem		t;		/* HeapTuple of this entry */
 } kern_hashitem;
 
@@ -988,7 +986,7 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 							   + __kds_unpack(tup_offset)
 							   - offsetof(kern_tupitem, htup));
 	if (p_self)
-		*p_self = tupitem->t_self;
+		*p_self = tupitem->htup.t_ctid;
 	if (p_len)
 		*p_len = tupitem->t_len;
 	return &tupitem->htup;
@@ -1633,10 +1631,9 @@ __form_kern_heaptuple(kern_context *kcxt,
 					  void	   *buffer,			/* out */
 					  cl_int	ncols,			/* in */
 					  kern_colmeta *colmeta,	/* in */
-					  HeapTupleHeaderData *htup_orig, /* in: if heap-tuple */
-					  cl_int	comp_typmod,	/* in: if composite type */
-					  cl_uint	comp_typeid,	/* in: if composite type */
-					  cl_uint	htuple_oid,		/* in */
+					  cl_uint	comp_typeid,	/* in */
+					  cl_int	comp_typmod,	/* in */
+					  ItemPointerData *tup_self,/* in */
 					  cl_char  *tup_dclass,		/* in */
 					  Datum	   *tup_values);	/* in */
 /*

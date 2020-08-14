@@ -388,7 +388,7 @@ gpupreagg_setup_row(kern_context *kcxt,
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
 			rc = gpupreagg_quals_eval(kcxt, kds_src,
-									  &tupitem->t_self,
+									  &tupitem->htup.t_ctid,
 									  &tupitem->htup);
 			kcxt->vlpos = vlbuf_base;	/* rewind */
 		}

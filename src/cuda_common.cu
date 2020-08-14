@@ -190,10 +190,9 @@ __form_kern_heaptuple(kern_context *kcxt,
 					  void	   *buffer,			/* out */
 					  cl_int	ncols,			/* in */
 					  kern_colmeta *colmeta,	/* in */
-					  HeapTupleHeaderData *htup_orig, /* in: if heap-tuple */
-					  cl_int	comp_typmod,	/* in: if composite type */
-					  cl_uint	comp_typeid,	/* in: if composite type */
-					  cl_uint	htuple_oid,		/* in */
+					  cl_uint	comp_typeid,	/* in */
+					  cl_int	comp_typmod,	/* in */
+					  ItemPointerData *tup_self,/* in: optional */
 					  cl_char  *tup_dclass,		/* in */
 					  Datum	   *tup_values)		/* in */
 {
@@ -220,15 +219,13 @@ __form_kern_heaptuple(kern_context *kcxt,
 	}
 	t_infomask = (tup_hasnull ? HEAP_HASNULL : 0);
 
-	/* preserve HeapTupleHeaderData, if any */
-	if (htup_orig)
-		memcpy(htup, htup_orig, offsetof(HeapTupleHeaderData,
-										 t_ctid) + sizeof(ItemPointerData));
+	/* set up header */
+	htup->t_choice.t_datum.datum_typmod = comp_typmod;
+	htup->t_choice.t_datum.datum_typeid = comp_typeid;
+	if (tup_self)
+		memcpy(&htup->t_ctid, tup_self, sizeof(ItemPointerData));
 	else
 	{
-		/* datum_len_ shall be set on the tail  */
-		htup->t_choice.t_datum.datum_typmod = comp_typmod;
-		htup->t_choice.t_datum.datum_typeid = comp_typeid;
 		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
 		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
@@ -239,19 +236,11 @@ __form_kern_heaptuple(kern_context *kcxt,
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (tup_hasnull)
 		t_hoff += BITMAPLEN(ncols);
-	if (htuple_oid != 0)
-	{
-		t_infomask |= HEAP_HASOID;
-		t_hoff += sizeof(cl_uint);
-	}
 	t_hoff = MAXALIGN(t_hoff);
-	if (htuple_oid != 0)
-		*((cl_uint *)((char *)htup + t_hoff - sizeof(cl_uint))) = htuple_oid;
 
 	/* walk on the regular columns */
 	htup->t_hoff = t_hoff;
 	curr = t_hoff;
-
 	for (i=0; i < ncols; i++)
 	{
 		kern_colmeta *cmeta = &colmeta[i];
@@ -340,8 +329,7 @@ __form_kern_heaptuple(kern_context *kcxt,
 		}
 	}
 	htup->t_infomask = t_infomask;
-	if (!htup_orig)
-		SET_VARSIZE(&htup->t_choice.t_datum, curr);
+	SET_VARSIZE(&htup->t_choice.t_datum, curr);
 	return curr;
 }
 

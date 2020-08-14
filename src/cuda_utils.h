@@ -472,40 +472,20 @@ form_kern_heaptuple(kern_context    *kcxt,
 					kern_tupitem    *tupitem,		/* out */
 					kern_data_store	*kds_dst,		/* in */
 					ItemPointerData *tup_self,		/* in, optional */
-					HeapTupleHeaderData *htup,		/* in, optional */
 					cl_char         *tup_dclass,	/* in */
 					Datum           *tup_values)	/* in */
 {
-	cl_uint		htuple_oid = 0;
-
 	assert((uintptr_t)tupitem == MAXALIGN(tupitem));
 	assert((char *)tupitem >= (char *)kds_dst &&
 		   (char *)tupitem <  (char *)kds_dst + kds_dst->length);
-	/* setup kern_tupitem */
-	if (tup_self)
-		tupitem->t_self = *tup_self;
-	else
-	{
-		tupitem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		tupitem->t_self.ip_blkid.bi_lo = 0xffff;
-		tupitem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
-	}
-	/* OID of tuple; deprecated at PG12 */
-	if (kds_dst->tdhasoid &&
-		htup && (htup->t_infomask & HEAP_HASOID) != 0)
-	{
-		htuple_oid = *((cl_uint *)((char *)htup
-								   + htup->t_hoff
-								   - sizeof(cl_uint)));
-	}
+	tupitem->rowid = UINT_MAX;		/* caller should set */
 	tupitem->t_len = __form_kern_heaptuple(kcxt,
 										   &tupitem->htup,
 										   kds_dst->ncols,
 										   kds_dst->colmeta,
-										   htup,
-										   0,	/* not a composite type */
-										   0,	/* not a composite type */
-										   htuple_oid,
+										   kds_dst->tdtypeid,
+										   kds_dst->tdtypmod,
+										   tup_self,
 										   tup_dclass,
 										   tup_values);
 	return tupitem->t_len;
@@ -541,10 +521,9 @@ form_kern_composite_type(kern_context *kcxt,
 								 buffer,
 								 nfields,
 								 colmeta,
-								 NULL,
-								 comp_typmod,
 								 comp_typeid,
-								 0,	/* composite type never have OID */
+								 comp_typmod,
+								 NULL,
 								 tup_dclass,
 								 tup_values);
 }

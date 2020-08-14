@@ -70,7 +70,7 @@ KDS_fetch_tuple_row(TupleTableSlot *slot,
 
 		ExecClearTuple(slot);
 		tupleData.t_len  = tup_item->t_len;
-		tupleData.t_self = tup_item->t_self;
+		tupleData.t_self = tup_item->htup.t_ctid;
 		tupleData.t_tableOid = kds->table_oid;
 		tupleData.t_data = &tup_item->htup;
 
@@ -1428,13 +1428,13 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 		curr_usage = (__kds_unpack(kds->usage) +
 					  MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len));
 		tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
-		tup_index[ntup] = __kds_packed((uintptr_t)tup_item - (uintptr_t)kds);
+		tup_item->rowid = kds->nitems + ntup;
 		tup_item->t_len = tup.t_len;
-		tup_item->t_self = tup.t_self;
 		memcpy(&tup_item->htup, tup.t_data, tup.t_len);
-		kds->usage = __kds_packed(curr_usage);
+		memcpy(&tup_item->htup.t_ctid, &tup.t_self, sizeof(ItemPointerData));
 
-		ntup++;
+		tup_index[ntup++] = __kds_packed((uintptr_t)tup_item - (uintptr_t)kds);
+		kds->usage = __kds_packed(curr_usage);
 	}
 	UnlockReleaseBuffer(buffer);
 	Assert(ntup <= MaxHeapTuplesPerPage);
@@ -1507,9 +1507,10 @@ KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 		return false;
 
 	tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
+	tup_item->rowid = kds->nitems;
 	tup_item->t_len = tuple->t_len;
-	tup_item->t_self = tuple->t_self;
 	memcpy(&tup_item->htup, tuple->t_data, tuple->t_len);
+	memcpy(&tup_item->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
 	tup_index[kds->nitems++] = __kds_packed((uintptr_t)tup_item -
 											(uintptr_t)kds);
 	kds->usage = __kds_packed(curr_usage);
@@ -1557,12 +1558,12 @@ KDS_insert_hashitem(kern_data_store *kds,
 	khitem = (kern_hashitem *)((char *)kds + kds->length - curr_usage);
 	khitem->hash = hash_value;
 	khitem->next = 0x7f7f7f7f;	/* to be set later */
-	khitem->rowid = kds->nitems++;
+	khitem->t.rowid = kds->nitems;
 	khitem->t.t_len = tuple->t_len;
-	khitem->t.t_self = tuple->t_self;
 	memcpy(&khitem->t.htup, tuple->t_data, tuple->t_len);
+	memcpy(&khitem->t.htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
 
-	row_index[khitem->rowid] = __kds_packed((char *)&khitem->t.t_len -
+	row_index[kds->nitems++] = __kds_packed((char *)&khitem->t.t_len -
 											(char *)kds);
 	kds->usage = __kds_packed(curr_usage);
 
