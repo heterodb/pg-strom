@@ -7,6 +7,7 @@ DROP SCHEMA IF EXISTS regtest_arrow_write_temp CASCADE;
 CREATE SCHEMA regtest_arrow_write_temp;
 RESET client_min_messages;
 
+SET extra_float_digits = 1;		-- PG12 defaults
 SET search_path = regtest_arrow_write_temp,public;
 
 CREATE TYPE comp AS (

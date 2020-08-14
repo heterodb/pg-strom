@@ -6,6 +6,7 @@ SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_python_temp CASCADE;
 CREATE SCHEMA regtest_arrow_python_temp;
 RESET client_min_messages;
+SET extra_float_digits = 1;		-- PG12 defaults
 SET search_path = regtest_arrow_python_temp,public;
 CREATE TABLE tt (
   id    int,
@@ -107,36 +108,36 @@ X = 0	# unmap GPU memory
 
 return Y / nitems
 $$ LANGUAGE 'plpython3u';
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
-                  custom_average                   
----------------------------------------------------
- {1001.8783743125,1999.14057025,-1.39595367626953}
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]))::numeric(12,8)[];
+              custom_average               
+-------------------------------------------
+ {1001.87837431,1999.14057025,-1.39595368}
 (1 row)
 
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
-                  custom_average                   
----------------------------------------------------
- {1001.8783743125,1999.14057025,-1.39595367626953}
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]))::numeric(12,8)[];
+              custom_average               
+-------------------------------------------
+ {1001.87837431,1999.14057025,-1.39595368}
 (1 row)
 
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y}'::text[]));
-         custom_average          
----------------------------------
- {1001.8783743125,1999.14057025}
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y}'::text[]))::numeric(12,8)[];
+        custom_average         
+-------------------------------
+ {1001.87837431,1999.14057025}
 (1 row)
 
 --
 -- calculation of average using SQL function
 --
-SELECT avg(x), avg(y), avg(z) FROM tt;
-       avg        |       avg        |        avg        
-------------------+------------------+-------------------
- 1001.87837374091 | 1999.14057233126 | -1.39595374186167
+SELECT avg(x)::numeric(12,8), avg(y)::numeric(12,8), avg(z)::numeric(12,8) FROM tt;
+      avg      |      avg      |     avg     
+---------------+---------------+-------------
+ 1001.87837374 | 1999.14057233 | -1.39595374
 (1 row)
 
-SELECT avg(x), avg(y), avg(z) FROM ft;
-       avg        |       avg        |        avg        
-------------------+------------------+-------------------
- 1001.87837374091 | 1999.14057233126 | -1.39595374186167
+SELECT avg(x)::numeric(12,8), avg(y)::numeric(12,8), avg(z)::numeric(12,8) FROM ft;
+      avg      |      avg      |     avg     
+---------------+---------------+-------------
+ 1001.87837374 | 1999.14057233 | -1.39595374
 (1 row)
 

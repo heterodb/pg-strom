@@ -142,8 +142,9 @@ SELECT id, x+y+z v, memo
             JoinQuals: (d.aid = s.aid)
    ->  Custom Scan (GpuScan) on pgstrom_regress.fallback_data d
          Output: d.id, d.x, d.y, d.memo, d.aid
+         GPU Projection: d.id, d.x, d.y, d.memo, d.aid
          GPU Filter: (d.memo ~~ '%abc%'::text)
-(10 rows)
+(11 rows)
 
 SELECT id, x+y+z v, memo
   INTO test10g
@@ -188,8 +189,9 @@ SELECT * INTO test11g
             JoinQuals: (d.aid = l.aid)
    ->  Custom Scan (GpuScan) on pgstrom_regress.fallback_enlarge l
          Output: l.z, l.md5, l.aid
+         GPU Projection: l.z, l.md5, l.aid
          GPU Filter: (l.aid < 1000)
-(10 rows)
+(11 rows)
 
 SELECT * INTO test11g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
@@ -226,8 +228,9 @@ SELECT *
             JoinQuals: (d.aid = l.aid)
    ->  Custom Scan (GpuScan) on pgstrom_regress.fallback_enlarge l
          Output: l.z, l.md5, l.aid
+         GPU Projection: l.z, l.md5, l.aid
          GPU Filter: (l.aid < 2500)
-(11 rows)
+(12 rows)
 
 SELECT *
   FROM fallback_data d NATURAL JOIN fallback_enlarge l

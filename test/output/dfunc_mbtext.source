@@ -28,8 +28,9 @@ SELECT id, line
 ---------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
    Output: id, line
+   GPU Projection: rt_mbtext.id, rt_mbtext.line
    GPU Filter: (rt_mbtext.line ~~ '%メロス%セリヌンティウス%'::text)
-(3 rows)
+(4 rows)
 
 SELECT id, line
   INTO test01g

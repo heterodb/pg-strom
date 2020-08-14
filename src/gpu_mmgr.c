@@ -1120,7 +1120,7 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 	i = crc % GPUMEM_PRESERVED_HASH_NSLOTS;
 	dlist_push_tail(&gmemp_head->gmemp_active_list[i],
 					&gmemp->chain);
-
+#if 0
 	elog(LOG, "alloc: preserved memory %zu bytes (%lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx)",
 		 gmemp_req->bytesize,
 		 ((cl_ulong *)&m_handle)[0],
@@ -1131,7 +1131,7 @@ gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 		 ((cl_ulong *)&m_handle)[5],
 		 ((cl_ulong *)&m_handle)[6],
 		 ((cl_ulong *)&m_handle)[7]);
-
+#endif
 	/* successfully done */
 	memcpy(&gmemp_req->m_handle, &m_handle, sizeof(CUipcMemHandle));
 

@@ -1757,7 +1757,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->proj_extra_sz = gs_info->proj_extra_sz;
 	/* initialize resource for CPU fallback */
 	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel),
-											  &TTSOpsHeapTuple);
+											  &TTSOpsVirtual);
 	gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
 											 gss->gts.css.ss.ps.ps_ExprContext,
 											 gss->gts.css.ss.ss_ScanTupleSlot,

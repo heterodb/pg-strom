@@ -3231,7 +3231,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	if (fallback_needs_projection)
 	{
 		gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc,
-													  &TTSOpsHeapTuple);
+													  &TTSOpsVirtual);
 		gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
 													 ss->ps.ps_ExprContext,
 													 ss->ss_ScanTupleSlot,

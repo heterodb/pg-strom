@@ -7,6 +7,7 @@ DROP SCHEMA IF EXISTS regtest_arrow_python_temp CASCADE;
 CREATE SCHEMA regtest_arrow_python_temp;
 RESET client_min_messages;
 
+SET extra_float_digits = 1;		-- PG12 defaults
 SET search_path = regtest_arrow_python_temp,public;
 
 CREATE TABLE tt (
@@ -105,16 +106,16 @@ X = 0	# unmap GPU memory
 return Y / nitems
 $$ LANGUAGE 'plpython3u';
 
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]))::numeric(12,8)[];
 
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]))::numeric(12,8)[];
 
-SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y}'::text[]));
+SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y}'::text[]))::numeric(12,8)[];
 
 --
 -- calculation of average using SQL function
 --
-SELECT avg(x), avg(y), avg(z) FROM tt;
-SELECT avg(x), avg(y), avg(z) FROM ft;
+SELECT avg(x)::numeric(12,8), avg(y)::numeric(12,8), avg(z)::numeric(12,8) FROM tt;
+SELECT avg(x)::numeric(12,8), avg(y)::numeric(12,8), avg(z)::numeric(12,8) FROM ft;
 
 
