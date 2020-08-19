@@ -33,10 +33,10 @@ typedef struct
 		cl_ulong	chunk_offset;	/* offset to KDS or Hash */
 		cl_ulong	ojmap_offset;	/* offset to outer-join map, if any */
 		cl_ulong	gist_offset;	/* offset to GiST-index pages, if any */
-		cl_uint		gist_nblocks;	/* number of GiST-index blocks, if any */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+		cl_char		__padding__[5];
 	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 
@@ -51,11 +51,17 @@ typedef struct
 					(size_t)(kmrels)->chunks[(depth)-1].ojmap_offset)	\
 				 : NULL))
 
+#define KERN_MULTIRELS_GIST_INDEX(kmrels, depth)						\
+	((kern_data_store *)												\
+	 ((kmrels)->chunks[(depth)-1].gist_offset == 0						\
+	  ? NULL															\
+	  : (char *)(kmrels) + (kmrels)->chunks[(depth)-1].gist_offset))
+
 #define KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth)	\
-	__ldg(&((kmrels)->chunks[(depth)-1].left_outer))
+	((kmrels)->chunks[(depth)-1].left_outer)
 
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
-	__ldg(&((kmrels)->chunks[(depth)-1].right_outer))
+	((kmrels)->chunks[(depth)-1].right_outer)
 
 /*
  * kern_gpujoin - control object of GpuJoin
@@ -224,6 +230,31 @@ gpujoin_hash_value(kern_context *kcxt,
 				   cl_int depth,
 				   cl_uint *x_buffer,
 				   cl_bool *is_null_keys);
+
+/*
+ * gpujoin_gist_load_keys
+ *
+ * It references GiST-index key value from the outer side
+ */
+DEVICE_FUNCTION(cl_bool)
+gpujoin_gist_load_keys(kern_context *kcxt,
+					   kern_multirels *kmrels,
+					   kern_data_store *kds_src,
+					   kern_data_extra *kds_extra,
+					   cl_int depth,
+					   cl_uint *x_buffer,
+					   Datum *key_values,
+					   cl_bool *key_isnull);
+
+/*
+ * gpujoin_gist_check_quals
+ */
+DEVICE_FUNCTION(cl_bool)
+gpujoin_gist_check_quals(kern_context *kcxt,
+						 cl_int depth,
+						 IndexTupleData *itup,
+						 Datum *key_values,
+						 cl_bool *key_isnull);
 
 /*
  * gpujoin_projection

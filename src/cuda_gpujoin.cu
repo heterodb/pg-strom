@@ -1093,6 +1093,324 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	return depth+1;
 }
 
+/*
+ * GiST index specific structures and labels
+ */
+#define F_LEAF				(1 << 0)	/* leaf page */
+#define F_DELETED			(1 << 1)	/* the page has been deleted */
+#define F_TUPLES_DELETED	(1 << 2)	/* some tuples on the page were deleted */
+#define F_FOLLOW_RIGHT		(1 << 3)	/* page to the right has no downlink */
+#define F_HAS_GARBAGE		(1 << 4)	/* some tuples on the page are dead */
+
+#define GIST_PAGE_ID		0xFF81
+
+typedef struct GISTPageOpaqueData
+{
+	struct {
+		cl_uint		xlogid;
+		cl_uint		xrecoff;
+	} nsn;
+	BlockNumber	rightlink;		/* next page if any */
+	cl_ushort		flags;			/* see bit definitions above */
+	cl_ushort		gist_page_id;	/* for identification of GiST indexes */
+} GISTPageOpaqueData;
+
+STATIC_INLINE(GISTPageOpaqueData *)
+GistPageGetOpaque(PageHeaderData *page)
+{
+	return (GISTPageOpaqueData *)((char *)page + page->pd_special);
+}
+
+STATIC_INLINE(cl_bool)
+GistPageIsLeaf(PageHeaderData *page)
+{
+	return (GistPageGetOpaque(page)->flags & F_LEAF) != 0;
+}
+
+STATIC_INLINE(cl_bool)
+GistFollowRight(PageHeaderData *page)
+{
+	return (GistPageGetOpaque(page)->flags & F_FOLLOW_RIGHT) != 0;
+}
+
+/* root page of a gist index */
+#define GIST_ROOT_BLKNO			0
+
+/*
+ * gpujoin_gist_getnext
+ */
+STATIC_FUNCTION(ItemPointerData *)
+gpujoin_gist_getnext(kern_context *kcxt,
+					 kern_multirels *kmrels,
+					 kern_data_store *kds_src,
+					 kern_data_extra *kds_extra,
+					 cl_int depth,
+					 cl_uint *x_buffer,
+					 cl_uint *p_item_offset)
+{
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
+	PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
+	PageHeaderData *gist_page;
+	OffsetNumber	start;
+	OffsetNumber	i, maxoff;
+	Datum			key_values[INDEX_MAX_KEYS];
+	cl_bool			key_isnull[INDEX_MAX_KEYS];
+
+	assert(kds_gist->format == KDS_FORMAT_BLOCK);
+
+	/* Load the GiST-index search key from the outer relations */
+	if (!gpujoin_gist_load_keys(kcxt,
+								kmrels,
+								kds_src,
+								kds_extra,
+								depth,
+								x_buffer,
+								key_values,
+								key_isnull))
+		return NULL;
+
+	/*
+	 * Setup starting point of GiST-index lookup
+	 */
+	if (*p_item_offset == 0)
+	{
+		/* walk on GiST index from the root page */
+		start = FirstOffsetNumber;
+		gist_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, GIST_ROOT_BLKNO);
+		assert(gist_page->pd_parent_blkno == InvalidBlockNumber &&
+			   gist_page->pd_parent_item  == InvalidOffsetNumber);
+	}
+	else
+	{
+		/* walk on GiST index from the next item */
+		PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
+		ItemIdData	   *lpp = (ItemIdData *)((char *)kds_gist + *p_item_offset);
+		size_t			off = (((char *)lpp - (char *)gist_base) & (BLCKSZ - 1));
+
+		gist_page = (PageHeaderData *)((char *)lpp - off);
+		start = OffsetNumberNext(lpp - gist_page->pd_linp);
+	}
+
+restart:
+	assert((((char *)gist_page - (char *)gist_base) & (BLCKSZ - 1)) == 0);
+	maxoff = PageGetMaxOffsetNumber(gist_page);
+	for (i=start; i <= maxoff; i = OffsetNumberNext(i))
+	{
+		ItemIdData	   *lpp = PageGetItemId(gist_page, i);
+		IndexTupleData *itup;
+
+		if (ItemIdIsDead(lpp))
+			continue;
+		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
+		if (gpujoin_gist_check_quals(kcxt, depth, itup,
+									 key_values,
+									 key_isnull))
+		{
+			if (GistPageIsLeaf(gist_page))
+			{
+				/* found the next candidate */
+				*p_item_offset = ((char *)itup - (char *)kds_gist);
+				return &itup->t_tid;
+			}
+			else
+			{
+				/* dive into deeper node/leaf */
+				BlockNumber		blkno_curr;
+				BlockNumber		blkno_next;
+				PageHeaderData *gist_next;
+
+				blkno_curr = ((char *)gist_page - (char *)gist_base) / BLCKSZ;
+				blkno_next = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
+							  (BlockNumber)itup->t_tid.ip_blkid.bi_lo);
+				assert(blkno_next < kds_gist->nrooms);
+				gist_next = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, blkno_next);
+				assert(gist_next->pd_parent_blkno == blkno_curr &&
+					   gist_next->pd_parent_item  == i);
+
+				gist_page = gist_next;
+				start = FirstOffsetNumber;
+				goto restart;
+			}
+		}
+	}
+
+	/*
+	 * No more matched entries in this page. Move to the parent page again,
+	 * or returns NULL if root page.
+	 */
+	if (gist_page != gist_base)
+	{
+		BlockNumber		blkno_next = gist_page->pd_parent_blkno;
+
+		assert(blkno_next < kds_gist->nrooms);
+		start = OffsetNumberNext(gist_page->pd_parent_item);
+		gist_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, blkno_next);
+		goto restart;
+	}
+	/* cannot pop up from the root page */
+	assert(gist_page->pd_parent_blkno == InvalidBlockNumber &&
+		   gist_page->pd_parent_item  == InvalidOffsetNumber);
+	*p_item_offset = UINT_MAX;
+
+	return NULL;
+}
+
+/*
+ * gpujoin_exec_gistindex
+ */
+STATIC_FUNCTION(cl_int)
+gpujoin_exec_gistindex(kern_context *kcxt,
+					   kern_gpujoin *kgjoin,
+					   kern_multirels *kmrels,
+					   kern_data_store *kds_src,
+					   kern_data_extra *kds_extra,
+					   cl_int depth,
+					   cl_uint *rd_stack,
+					   cl_uint *wr_stack,
+					   cl_uint *l_state,
+					   cl_bool *matched)
+{
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
+	cl_uint			rd_index;
+	cl_uint			wr_index;
+	cl_uint			t_offset = UINT_MAX;
+	cl_uint			count;
+
+	assert(kds_hash->format == KDS_FORMAT_HASH);
+	assert(depth >= 1 && depth <= kgjoin->num_rels);
+
+	if (__syncthreads_count(l_state[depth] != UINT_MAX) == 0)
+	{
+		/*
+		 * Ok, all the threads reached to the end of GiST-Index chain.
+		 * Move to the next outer window.
+		 */
+		if (get_local_id() == 0)
+			read_pos[depth-1] += get_local_size();
+		l_state[depth] = 0;
+		matched[depth] = false;
+		return depth;
+	}
+	else if (read_pos[depth-1] >= write_pos[depth-1])
+	{
+		assert(wip_count[depth] == 0);
+		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		{
+			cl_int	__depth = gpujoin_rewind_stack(kgjoin, depth-1,
+												   l_state, matched);
+			if (__depth >= base_depth)
+				return __depth;
+		}
+		/* elsewhere, dive into the deeper depth or projection */
+		return depth + 1;
+	}
+	rd_index = read_pos[depth-1] + get_local_id();
+	rd_stack += (rd_index * depth);
+
+	while (l_state[depth] != UINT_MAX)
+	{
+		ItemPointerData *t_ctid;
+		kern_hashitem	*khitem;
+		cl_uint		hash_value;
+
+		/* outer side is out of range */
+		if (rd_index >= write_pos[depth-1])
+		{
+			l_state[depth] = UINT_MAX;
+			break;
+		}
+
+		/*
+		 * walk on the GiST index. If l_state[depth]==0, find a matched entry
+		 * from the root page. Elsewhere, suspend the scan from the next item.
+		 */
+		t_ctid = gpujoin_gist_getnext(kcxt,
+									  kmrels,
+									  kds_src,
+									  kds_extra,
+									  depth,
+									  rd_stack,
+									  &l_state[depth]);
+		if (!t_ctid)
+		{
+			l_state[depth] = UINT_MAX;
+			/*
+			 * Even if this outer-row has no matched inner-row, we may need to
+			 * construct LEFT/FULL OUTER JOIN result.
+			 */
+			if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) && !matched[depth])
+				t_offset = 0;
+			break;
+		}
+
+		/*
+		 * Look up hash-table by CTID.
+		 */
+		hash_value = pg_hash_any((cl_uchar *)t_ctid, sizeof(ItemPointerData));
+		for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
+			 khitem != NULL;
+			 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
+		{
+			if (ItemPointerEquals(&khitem->t.htup.t_ctid, t_ctid))
+				break;
+		}
+
+		if (khitem)
+		{
+			cl_bool		joinquals_matched;
+
+			if (gpujoin_join_quals(kcxt,
+								   kds_src,
+								   kds_extra,
+								   kmrels,
+								   depth,
+								   rd_stack,
+								   &khitem->t.htup,
+								   &joinquals_matched))
+			{
+				assert(joinquals_matched);
+				/* No LEFT/FULL JOIN are needed */
+				matched[depth] = true;
+				/* No RIGHT/FULL JOIN are needed */
+				assert(khitem->t.rowid < kds_hash->nitems);
+				if (oj_map && !oj_map[khitem->t.rowid])
+					oj_map[khitem->t.rowid] = true;
+				/* tuple offset should be valid */
+				t_offset = __kds_packed((char *)&khitem->t.htup -
+										(char *)kds_hash);
+				break;
+			}
+		}
+	}
+
+	/* write out the result */
+	wr_index = write_pos[depth];
+	wr_index += pgstromStairlikeBinaryCount(t_offset != UINT_MAX, &count);
+	if (get_local_id() == 0)
+	{
+		write_pos[depth] += count;
+		stat_nitems[depth] += count;
+	}
+	wr_stack += wr_index * (depth + 1);
+	if (t_offset != UINT_MAX)
+	{
+		memcpy(wr_stack, rd_stack, sizeof(cl_uint) * depth);
+		wr_stack[depth] = t_offset;
+	}
+	/* count number of threads still in-progress */
+	count = __syncthreads_count(l_state[depth] != UINT_MAX);
+	if (get_local_id() == 0)
+		wip_count[depth] = count;
+
+	/* see comment in gpujoin_exec_hashjoin */
+	wr_index = write_pos[depth];
+	__syncthreads();
+	if (wr_index + get_local_size() <= kgjoin->pstack_nrooms)
+		return depth;
+	return depth+1;	
+}
+
 #define PSTACK_DEPTH(d)							\
 	((d) >= 0 && (d) <= kgjoin->num_rels		\
 	 ? (pstack_base + pstack_nrooms * ((d) * ((d) + 1)) / 2) : NULL)
@@ -1208,6 +1526,20 @@ gpujoin_main(kern_context *kcxt,
 										  PSTACK_DEPTH(depth),
 										  l_state,
 										  matched);
+		}
+		else if (kmrels->chunks[depth-1].gist_offset != 0)
+		{
+			/* GiST-INDEX */
+			depth = gpujoin_exec_gistindex(kcxt,
+										   kgjoin,
+										   kmrels,
+										   kds_src,
+										   kds_extra,
+										   depth,
+										   PSTACK_DEPTH(depth-1),
+										   PSTACK_DEPTH(depth),
+										   l_state,
+										   matched);
 		}
 		else
 		{
@@ -1382,6 +1714,20 @@ gpujoin_right_outer(kern_context *kcxt,
 										  PSTACK_DEPTH(depth),
 										  l_state,
 										  matched);
+		}
+		else if (kmrels->chunks[depth-1].gist_offset)
+		{
+			/* GiST-INDEX */
+			depth = gpujoin_exec_gistindex(kcxt,
+										   kgjoin,
+										   kmrels,
+										   NULL,
+										   NULL,
+										   depth,
+										   PSTACK_DEPTH(depth-1),
+										   PSTACK_DEPTH(depth),
+										   l_state,
+										   matched);
 		}
 		else
 		{

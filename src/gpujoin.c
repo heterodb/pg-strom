@@ -7086,23 +7086,37 @@ restart:
 		}
 		else if (istate->gist_irel != NULL)
 		{
-			BlockNumber		nblocks = RelationGetNumberOfBlocks(istate->gist_irel);
+			TupleDesc	itupdesc = RelationGetDescr(istate->gist_irel);
+			BlockNumber	nblocks = RelationGetNumberOfBlocks(istate->gist_irel);
+			size_t		gist_length;
 
 			nbytes += (STROMALIGN(sizeof(cl_uint) * nrooms) +
 					   STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nrooms)) +
 					   STROMALIGN(usage));
+			/* portion of GiST-index (KDS_FORMAT_BLOCK) */
+			gist_length = (KDS_calculateHeadSize(itupdesc) +
+						   STROMALIGN(sizeof(BlockNumber) * nblocks) +
+						   BLCKSZ * nblocks);
+			if (gist_length >= (size_t)UINT_MAX)
+				elog(ERROR, "GiST-index (%s) is too large to load GPU memory",
+					 RelationGetRelationName(istate->gist_irel));
 			if (h_kmrels)
 			{
+				kern_data_store	   *kds_gist;
+
+				/* KDS-Hash portion */
 				init_kernel_data_store(kds, tupdesc, nbytes,
 									   KDS_FORMAT_HASH, nrooms);
 				kds->nslots = __KDS_NSLOTS(nrooms);
 
+				/* GiST-index portion */
 				h_kmrels->chunks[i].gist_offset = (kmrels_ofs + nbytes);
-				h_kmrels->chunks[i].gist_nblocks = nblocks;
+				kds_gist = (kern_data_store *)
+					((char *)h_kmrels + h_kmrels->chunks[i].gist_offset);
+				init_kernel_data_store(kds_gist, itupdesc, gist_length,
+									   KDS_FORMAT_BLOCK, nblocks);
 			}
-			elog(INFO, "nbytes = %zu block=%zu", nbytes, (size_t)(BLCKSZ * nblocks));
-			/* index blocks */
-			nbytes += BLCKSZ * nblocks;
+			nbytes += gist_length;
 		}
 		else
 		{
@@ -7285,15 +7299,17 @@ __innerPreloadSetupGiSTIndexWalker(char *base,
 
 static void
 __innerPreloadSetupGiSTIndexBuffer(innerState *istate,
-								   char *base, BlockNumber nblocks)
+								   kern_data_store *kds_gist)
 {
 	Relation	irel = istate->gist_irel;
+	char	   *base = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
+	BlockNumber *block_nr = (BlockNumber *)KERN_DATA_STORE_BODY(kds_gist);
 	BlockNumber	i;
 
 	if (irel->rd_amhandler != F_GISTHANDLER)
 		elog(ERROR, "Bug? index '%s' is not GiST index",
 			 RelationGetRelationName(irel));
-	for (i=0; i < nblocks; i++)
+	for (i=0; i < kds_gist->nrooms; i++)
 	{
 		Buffer		buffer;
 		Page		page;
@@ -7307,10 +7323,11 @@ __innerPreloadSetupGiSTIndexBuffer(innerState *istate,
 		memcpy(hpage, page, BLCKSZ);
 		hpage->pd_lsn.xlogid = InvalidBlockNumber;
 		hpage->pd_lsn.xrecoff = InvalidOffsetNumber;
+		block_nr[i] = i;
 
 		UnlockReleaseBuffer(buffer);
 	}
-	__innerPreloadSetupGiSTIndexWalker(base, 0, nblocks,
+	__innerPreloadSetupGiSTIndexWalker(base, 0, kds_gist->nrooms,
 									   InvalidBlockNumber,
 									   InvalidOffsetNumber);
 }
@@ -7603,14 +7620,13 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 				for (i=0; i < leader->num_rels; i++)
 				{
 					innerState *istate = &leader->inners[i];
-					char	   *base;
-					BlockNumber	nblocks;
+					kern_data_store *kds_gist;
 
 					if (!istate->gist_irel)
 						continue;
-					base = (char *)h_kmrels + h_kmrels->chunks[i].gist_offset;
-					nblocks = h_kmrels->chunks[i].gist_nblocks;
-					__innerPreloadSetupGiSTIndexBuffer(istate, base, nblocks);
+					kds_gist = (kern_data_store *)
+						((char *)h_kmrels + h_kmrels->chunks[i].gist_offset);
+					__innerPreloadSetupGiSTIndexBuffer(istate, kds_gist);
 				}
 				gj_sstate->phase = INNER_PHASE__GPUJOIN_EXEC;
 				ConditionVariableBroadcast(&gj_sstate->cond);

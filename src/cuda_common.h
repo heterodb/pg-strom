@@ -568,6 +568,14 @@ typedef struct {
 	cl_ushort		ip_posid;
 } ItemPointerData;
 
+STATIC_FUNCTION(cl_bool)
+ItemPointerEquals(ItemPointerData *ip1, ItemPointerData *ip2)
+{
+	return (ip1->ip_blkid.bi_hi == ip2->ip_blkid.bi_hi &&
+			ip1->ip_blkid.bi_lo == ip2->ip_blkid.bi_lo &&
+			ip1->ip_posid       == ip2->ip_posid);
+}
+
 typedef struct HeapTupleFields
 {
 	cl_uint			t_xmin;		/* inserting xact ID */
@@ -625,6 +633,40 @@ typedef struct {
 #define HEAP_HOT_UPDATED		0x4000	/* tuple was HOT-updated */
 #define HEAP_ONLY_TUPLE			0x8000	/* this is heap-only tuple */
 #define HEAP2_XACT_MASK			0xE000	/* visibility-related bits */
+
+/*
+ * Index tuple header structure
+ *
+ * All index tuples start with IndexTupleData.  If the HasNulls bit is set,
+ * this is followed by an IndexAttributeBitMapData.  The index attribute
+ * values follow, beginning at a MAXALIGN boundary.
+ */
+typedef struct IndexTupleData
+{
+	ItemPointerData		t_tid;		/* reference TID to heap tuple */
+
+	/* ---------------
+	 * t_info is laid out in the following fashion:
+	 *
+	 * 15th (high) bit: has nulls
+	 * 14th bit: has var-width attributes
+	 * 13th bit: AM-defined meaning
+	 * 12-0 bit: size of tuple
+	 * ---------------
+	 */
+	unsigned short		t_info;
+
+	char				data[1];	/* data or IndexAttributeBitMapData */
+} IndexTupleData;
+
+typedef struct IndexAttributeBitMapData
+{
+	cl_uchar			bits[(INDEX_MAX_KEYS + 8 - 1) / 8];
+} IndexAttributeBitMapData;
+
+#define INDEX_SIZE_MASK		0x1fff
+#define INDEX_VAR_MASK		0x4000
+#define INDEX_NULL_MASK		0x8000
 
 /*
  * Below is routines to support KDS_FORMAT_BLOCKS - This KDS format is used
@@ -687,20 +729,26 @@ typedef cl_ushort		OffsetNumber;
 #define MaxOffsetNumber			((OffsetNumber) (BLCKSZ / sizeof(ItemIdData)))
 #define OffsetNumberMask		(0xffff)	/* valid uint16 bits */
 
-/* definitions at storage/bufpage.h */
-typedef struct
-{
-	cl_uint			xlogid;			/* high bits */
-	cl_uint			xrecoff;		/* low bits */
-} PageXLogRecPtr;
+#define OffsetNumberNext(offsetNumber)			\
+	((OffsetNumber) (1 + (offsetNumber)))
 
+/* definitions at storage/bufpage.h */
 typedef cl_ushort	LocationIndex;
 
 typedef struct PageHeaderData
 {
-	/* XXX LSN is member of *any* block, not only page-organized ones */
+#if 0
+	/*
+	 * NOTE: device code (ab-)uses this field to track parent block/item
+	 * when GiST index is loaded. Without this hack, hard to implement
+	 * depth-first search at GpuJoin.
+	 */
 	PageXLogRecPtr	pd_lsn;			/* LSN: next byte after last byte of xlog
 									 * record for last change to this page */
+#else
+	cl_uint			pd_parent_blkno;
+	cl_uint			pd_parent_item;	
+#endif
 	cl_ushort		pd_checksum;	/* checksum */
 	cl_ushort		pd_flags;		/* flag bits, see below */
 	LocationIndex	pd_lower;		/* offset to start of free space */
