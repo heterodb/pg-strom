@@ -113,6 +113,14 @@ DEV_ATTR(VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED, BOOL, 0, "Device supports virtual
 DEV_ATTR(HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED, BOOL, 0, "Device supports exporting memory to a posix file descriptor")
 DEV_ATTR(HANDLE_TYPE_WIN32_HANDLE_SUPPORTED, BOOL, 0, "Device supports exporting memory to a Win32 NT handle")
 DEV_ATTR(HANDLE_TYPE_WIN32_KMT_HANDLE_SUPPORTED, BOOL, 0, "Device supports exporting memory to a Win32 KMT handle")
+#if CUDA_VERSION >= 11000
+DEV_ATTR(MAX_BLOCKS_PER_MULTIPROCESSOR, INT, 0, "Maximum number of blocks per multiprocessor")
+DEV_ATTR(GENERIC_COMPRESSION_SUPPORTED, BOOL, 0, "Device supports compression of memory")
+DEV_ATTR(MAX_PERSISTING_L2_CACHE_SIZE, INT, 0, "Device's maximum L2 persisting lines capacity setting in bytes")
+DEV_ATTR(MAX_ACCESS_POLICY_WINDOW_SIZE, INT, 0, "The maximum value of CUaccessPolicyWindow::num_bytes")
+DEV_ATTR(GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, BOOL, 1, "Device supports specifying the GPUDirect RDMA flag with ::cuMemCreate")
+DEV_ATTR(RESERVED_SHARED_MEMORY_PER_BLOCK, INT, 0, "Shared memory reserved by CUDA driver per block in bytes")
+#endif	/* CUDA 11.0 */
 #endif	/* CUDA 10.2 */
 #endif	/* CUDA 9.2 */
 #endif	/* CUDA 9.0 */
