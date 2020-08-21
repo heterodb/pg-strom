@@ -1153,21 +1153,8 @@ gpujoin_gist_getnext(kern_context *kcxt,
 	PageHeaderData *gist_page;
 	OffsetNumber	start;
 	OffsetNumber	i, maxoff;
-	Datum			key_values[INDEX_MAX_KEYS];
-	cl_bool			key_isnull[INDEX_MAX_KEYS];
 
 	assert(kds_gist->format == KDS_FORMAT_BLOCK);
-
-	/* Load the GiST-index search key from the outer relations */
-	if (!gpujoin_gist_load_keys(kcxt,
-								kmrels,
-								kds_src,
-								kds_extra,
-								depth,
-								x_buffer,
-								key_values,
-								key_isnull))
-		return NULL;
 
 	/*
 	 * Setup starting point of GiST-index lookup
@@ -1202,9 +1189,13 @@ restart:
 		if (ItemIdIsDead(lpp))
 			continue;
 		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
-		if (gpujoin_gist_check_quals(kcxt, depth, itup,
-									 key_values,
-									 key_isnull))
+		if (gpujoin_gist_index_quals(kcxt,
+									 kds_src,
+									 kds_extra,
+									 kmrels,
+									 depth,
+									 x_buffer,
+									 itup))
 		{
 			if (GistPageIsLeaf(gist_page))
 			{

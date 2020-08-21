@@ -45,9 +45,8 @@ typedef struct
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		IndexOptInfo *gist_index;	/* GiST index IndexOptInfo */
-		AttrNumber	gist_colidx;	/* GiST column index (0-origin) */
 		AttrNumber	gist_ctid_resno;/* CTID resno on the targetlist */
-		Expr	   *gist_clause;	/* GiST index clause */
+		List	   *gist_clauses;	/* GiST index clause */
 		Selectivity	gist_selectivity; /* GiST index selectivity */
 		Size		ichunk_size;	/* expected inner chunk size */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
@@ -89,9 +88,8 @@ typedef struct
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
 	List	   *gist_index_reloid;	/* if GiST-index */
-	List	   *gist_index_colidx;	/* if GiST-index */
 	List	   *gist_index_ctid_resno; /* if GiST-index */
-	List	   *gist_index_clause;	/* if GiST-index */
+	List	   *gist_index_clauses;	/* if GiST-index */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -133,9 +131,8 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 	privs = lappend(privs, gj_info->gist_index_reloid);
-	privs = lappend(privs, gj_info->gist_index_colidx);
 	privs = lappend(privs, gj_info->gist_index_ctid_resno);
-	exprs = lappend(exprs, gj_info->gist_index_clause);
+	exprs = lappend(exprs, gj_info->gist_index_clauses);
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
@@ -183,9 +180,8 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
 	gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 	gj_info->gist_index_reloid = list_nth(privs, pindex++);
-	gj_info->gist_index_colidx = list_nth(privs, pindex++);
 	gj_info->gist_index_ctid_resno = list_nth(privs, pindex++);
-	gj_info->gist_index_clause = list_nth(exprs, eindex++);
+	gj_info->gist_index_clauses = list_nth(exprs, eindex++);
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
@@ -233,7 +229,6 @@ typedef struct
 	 * Join properties; GiST index
 	 */
 	Relation			gist_irel;
-	AttrNumber			gist_colidx;
 	AttrNumber			gist_ctid_resno;
 
 	/* CPU Fallback related */
@@ -394,6 +389,7 @@ static cl_uint get_tuple_hashvalue(innerState *istate,
 
 static char *gpujoin_codegen(PlannerInfo *root,
 							 CustomScan *cscan,
+							 GpuJoinPath *gj_path,
 							 GpuJoinInfo *gj_info,
 							 List *tlist,
 							 codegen_context *context);
@@ -743,7 +739,7 @@ cost_gpujoin(PlannerInfo *root,
 		}
 		else if (gist_index != NULL)
 		{
-			Expr	   *gist_clause = gpath->inners[i].gist_clause;
+			List	   *gist_clauses = gpath->inners[i].gist_clauses;
 			Selectivity	gist_selectivity = gpath->inners[i].gist_selectivity;
 			double		inner_ntuples = scan_path->rows;
 			QualCost	gist_clause_cost;
@@ -755,7 +751,7 @@ cost_gpujoin(PlannerInfo *root,
 			inner_cost += seq_page_cost * (double)gist_index->pages;
 
 			/* cost to evaluate GiST index by GPU */
-			cost_qual_eval(&gist_clause_cost, list_make1(gist_clause), root);
+			cost_qual_eval(&gist_clause_cost, gist_clauses, root);
 			run_cost += (gist_clause_cost.per_tuple * gpu_ratio * outer_ntuples);
 
 			/* cost to evaluate join qualifiers by GPU */
@@ -862,9 +858,8 @@ typedef struct
 	List	   *join_quals;
 	List	   *hash_quals;
 	IndexOptInfo *gist_index;
-	AttrNumber	gist_colidx;
 	AttrNumber	gist_ctid_resno;
-	Expr	   *gist_clause;
+	List	   *gist_clauses;
 	Selectivity	gist_selectivity;
 	double		join_nrows;
 } inner_path_item;
@@ -938,9 +933,8 @@ create_gpujoin_path(PlannerInfo *root,
 		gjpath->inners[i].hash_quals = hash_quals;
 		gjpath->inners[i].join_quals = ip_item->join_quals;
 		gjpath->inners[i].gist_index = ip_item->gist_index;
-		gjpath->inners[i].gist_colidx = ip_item->gist_colidx;
 		gjpath->inners[i].gist_ctid_resno = ip_item->gist_ctid_resno;
-		gjpath->inners[i].gist_clause = ip_item->gist_clause;
+		gjpath->inners[i].gist_clauses = ip_item->gist_clauses;
 		gjpath->inners[i].gist_selectivity = ip_item->gist_selectivity;
 		gjpath->inners[i].ichunk_size = 0;		/* to be set later */
 		i++;
@@ -1055,8 +1049,8 @@ get_index_clause_from_support(PlannerInfo *root,
 	if (OidIsValid(prosupport))
 	{
 		SupportRequestIndexCondition req;
-		List   *sresult;
-
+		List	   *sresult;
+		
 		memset(&req, 0, sizeof(SupportRequestIndexCondition));
 		req.type = T_SupportRequestIndexCondition;
 		req.root = root;
@@ -1072,8 +1066,8 @@ get_index_clause_from_support(PlannerInfo *root,
 		sresult = (List *)OidFunctionCall1(prosupport, PointerGetDatum(&req));
 		if (list_length(sresult) == 1)
 			return linitial(sresult);
-		else if (list_length(sresult) > 1)
-			return make_ands_explicit(sresult);
+		else
+			return (Expr *)make_andclause(sresult);
 	}
 	return NULL;
 }
@@ -1174,37 +1168,313 @@ match_funcclause_to_indexcol(PlannerInfo *root,
 	return NULL;
 }
 
+typedef struct
+{
+	PlannerInfo	   *root;
+	IndexOptInfo   *index;
+	AttrNumber		indexcol;
+	bool			is_valid;
+} fixup_gist_clause_for_device_context;
+
+/*
+ * Replace the functions / operators if argument types are mismatch
+ * for index references.
+ * In case when GiST-index reference, index relation can have different
+ * data type from the indexed column on the heap, FuncExpr / OpExpr in
+ * the expression tree generates wrong device code.
+ * For example, '&&' operator of geometry type also references box2df
+ * type on the IndexTuple. So, we have to inject another function that
+ * takes box2df and geometry arguments.
+ *
+ * TODO: it should be at a separated file from gpujoin.c?
+ */
+typedef struct altfunc_catalog_t {
+	const char *func_library;	/* NULL, if internal functions */
+	const char *func_signature;
+	const char *altfunc_library;
+	const char *altfunc_name;
+	const char *altfunc_args;
+} altfunc_catalog_t;
+
+#define PGSTROM		"$libdir/pg_strom"
+#define POSTGIS3	"$libdir/postgis-3"
+static altfunc_catalog_t	altfunc_common_catalog[] = {
+	{ POSTGIS3, "geometry_overlaps(geometry,geometry)",
+	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
+	{ POSTGIS3, "geometry_overlaps(geometry,geometry)",
+	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
+	{ NULL, NULL, NULL },
+};
+#undef POSTGIS3
+#undef PGSTROM
+
+static Node *
+__fixup_gist_device_funcion_if_mismatch(Oid func_oid,
+										Oid func_rettype,
+										List *func_args,
+										Oid func_collid,
+										Oid input_collid)
+{
+	StringInfoData	sig;
+	StringInfoData	arg;
+	HeapTuple		tup;
+	Form_pg_proc	proc;
+	const char	   *proc_lib = NULL;
+	oidvector	   *alt_argtypes;
+	size_t			sz;
+	ListCell	   *lc;
+	int				i, j;
+	Node		   *retval = NULL;
+
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	proc = (Form_pg_proc) GETSTRUCT(tup);
+	Assert(proc->pronargs == proc->proargtypes.dim1);
+	proc_lib = get_proc_library(tup);
+	if (proc_lib == (void *)(~0UL))
+		goto out;
+
+	/*
+	 * If function's argument list is fully compatible, no need to
+	 * replace the function call.
+	 */
+	if (list_length(func_args) == proc->pronargs)
+	{
+		i = 0;
+		foreach (lc, func_args)
+		{
+			Oid		__typeid = exprType(lfirst(lc));
+
+			if (!IsBinaryCoercible(__typeid, proc->proargtypes.values[i]))
+				break;
+			i++;
+		}
+		if (!lc)
+			goto out;
+	}
+
+	/*
+	 * construct a function signature string based on the system catalog
+	 */
+	initStringInfo(&sig);
+	appendStringInfo(&sig, "%s(", NameStr(proc->proname));
+	for (i=0; i < proc->pronargs; i++)
+	{
+		appendStringInfo(&sig, "%s%s", i==0 ? "" : ",",
+						 get_type_name(proc->proargtypes.values[i], false));
+	}
+	appendStringInfoChar(&sig, ')');
+
+	/* Also, signature of actual data types */
+	sz = offsetof(oidvector, values[list_length(func_args)]);
+	alt_argtypes = alloca(sz);
+	memset(alt_argtypes, 0, sz);
+	alt_argtypes->ndim = 1;
+	alt_argtypes->dataoffset = 0;
+	alt_argtypes->elemtype = OIDOID;
+	alt_argtypes->dim1 = list_length(func_args);
+	alt_argtypes->lbound1 = 0;
+
+	initStringInfo(&arg);
+	appendStringInfoChar(&arg, '(');
+	i = 0;
+	foreach (lc, func_args)
+	{
+		Oid			__typeid = exprType(lfirst(lc));
+
+		appendStringInfo(&arg, "%s%s", i==0 ? "" : ",",
+						 get_type_name(__typeid, false));
+		alt_argtypes->values[i++] = __typeid;
+	}
+	appendStringInfoChar(&arg, ')');
+
+	/*
+	 * Lookup alternative function, if any
+	 */
+	for (i=0; altfunc_common_catalog[i].func_signature != NULL; i++)
+	{
+		const char *func_lib = altfunc_common_catalog[i].func_library;
+		const char *func_sig = altfunc_common_catalog[i].func_signature;
+		const char *alt_lib  = altfunc_common_catalog[i].altfunc_library;
+		const char *alt_name = altfunc_common_catalog[i].altfunc_name;
+		const char *alt_args = altfunc_common_catalog[i].altfunc_args;
+		
+		if ((!proc_lib ? !func_lib : strcmp(proc_lib, func_lib) == 0) &&
+			strcmp(func_sig, sig.data) == 0 &&
+			strcmp(alt_args, arg.data) == 0)
+		{
+			CatCList   *catlist;
+
+			catlist = SearchSysCacheList2(PROCNAMEARGSNSP,
+										  CStringGetDatum(alt_name),
+										  PointerGetDatum(alt_argtypes));
+			for (j=0; j < catlist->n_members; i++)
+			{
+				HeapTuple	__tup = &catlist->members[j]->tuple;
+				Form_pg_proc __proc = (Form_pg_proc) GETSTRUCT(__tup);
+				char	   *__lib_name;
+
+				/*
+				 * note: proname and proargtypes should be already matched,
+				 * so all we need to check here is library name.
+				 */
+				__lib_name = get_proc_library(__tup);
+				if (__lib_name == (void *)(~0UL))
+					continue;
+				if (!alt_lib ? !__lib_name : strcmp(alt_lib, __lib_name) == 0)
+				{
+					/* Ok, it is the alternative function we are looking for */
+					retval = (Node *)makeFuncExpr(PgProcTupleGetOid(__tup),
+												  __proc->prorettype,
+												  func_args,
+												  func_collid,
+												  input_collid,
+												  COERCE_EXPLICIT_CALL);
+					ReleaseSysCacheList(catlist);
+					goto out;
+				}
+			}
+			ReleaseSysCacheList(catlist);
+		}
+	}
+out:
+	ReleaseSysCache(tup);
+	return retval;
+}
+
+static Node *
+__fixup_gist_clause_for_device_walker(Node *node, void *__context)
+{
+	fixup_gist_clause_for_device_context *con = __context;
+	Node	   *newnode;
+
+	if (!node)
+		return NULL;
+	if (match_index_to_operand(node, con->indexcol, con->index))
+	{
+		IndexOptInfo   *index = con->index;
+		AttrNumber		indexcol = con->indexcol;
+		Oid				raw_typid;
+		int32			raw_typmod;
+		Oid				raw_collid;
+
+		get_atttypetypmodcoll(index->indexoid,
+							  indexcol+1,
+							  &raw_typid,
+							  &raw_typmod,
+							  &raw_collid);
+		return (Node *)makeVar(INDEX_VAR,
+							   indexcol+1,
+							   raw_typid,
+							   raw_typmod,
+							   raw_collid,
+							   0);
+	}
+	newnode = expression_tree_mutator(node,
+									  __fixup_gist_clause_for_device_walker,
+									  __context);
+	if (IsA(newnode, FuncExpr))
+	{
+		FuncExpr   *fn = (FuncExpr *)newnode;
+		Node	   *altnode;
+
+		altnode = __fixup_gist_device_funcion_if_mismatch(fn->funcid,
+														  fn->funcresulttype,
+														  fn->args,
+														  fn->funccollid,
+														  fn->inputcollid);
+		if (altnode)
+			return altnode;
+	}
+	else if (IsA(newnode, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *)newnode;
+		Node	   *altnode;
+
+		set_opfuncid(op);
+		altnode = __fixup_gist_device_funcion_if_mismatch(op->opfuncid,
+														  op->opresulttype,
+														  op->args,
+														  op->opcollid,
+														  op->inputcollid);
+		if (altnode)
+			return altnode;
+	}
+	return newnode;
+}
+
+static Expr *
+fixup_gist_clause_for_device(PlannerInfo *root,
+							 IndexOptInfo *index,
+							 AttrNumber indexcol,
+							 Expr *clause)
+{
+	fixup_gist_clause_for_device_context con;
+	Node	   *result;
+
+	if (clause)
+	{
+		memset(&con, 0, sizeof(con));
+		con.root = root;
+		con.index = index;
+		con.indexcol = indexcol;
+		con.is_valid = true;
+
+		result = __fixup_gist_clause_for_device_walker((Node *)clause, &con);
+		if (con.is_valid)
+			return (Expr *)result;
+	}
+	return NULL;
+}
+
 static Expr *
 match_clause_to_index(PlannerInfo *root,
-					  RestrictInfo *rinfo,
 					  IndexOptInfo *index,
-					  AttrNumber *p_indexcol)
+					  AttrNumber indexcol,
+					  List *restrict_clauses)
 {
-	int		indexcol;
-	Expr   *clause;
+	RelOptInfo *heap_rel = index->rel;
+	ListCell   *lc;
+	Expr	   *clause = NULL;
+	Selectivity	selectivity = 1.0;
 
-	if (rinfo->pseudoconstant ||
-		!restriction_is_securely_promotable(rinfo, index->rel))
-		return NULL;
-
-	for (indexcol = 0; indexcol < index->nkeycolumns; indexcol++)
+	/* identify the restriction clauses that can match the index. */
+	/* see, match_join_clauses_to_index */
+	foreach(lc, restrict_clauses)
 	{
+		RestrictInfo *rinfo = lfirst(lc);
+		Expr	   *expr = NULL;
+		Expr	   *dev_expr;
+		Selectivity	__selectivity;
+
+		if (rinfo->pseudoconstant ||
+			!restriction_is_securely_promotable(rinfo, heap_rel))
+			continue;
 		if (!rinfo->clause)
 			continue;
 		if (IsA(rinfo->clause, OpExpr))
-			clause = match_opclause_to_indexcol(root, rinfo, index, indexcol);
+			expr = match_opclause_to_indexcol(root, rinfo, index, indexcol);
 		else if (IsA(rinfo->clause, FuncExpr))
-			clause = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
-		else
-			clause = NULL;
+			expr = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
 
-		if (clause)
+		dev_expr = fixup_gist_clause_for_device(root, index, indexcol, expr);
+		elog(INFO, "dev_expr = %s", nodeToString(dev_expr));
+		if (dev_expr && pgstrom_device_expression(root, NULL, dev_expr))
 		{
-			*p_indexcol = indexcol;
-			return clause;
+			__selectivity = clauselist_selectivity(root,
+												   list_make1(expr),
+												   heap_rel->relid,
+												   JOIN_INNER,
+												   NULL);
+			if (!clause || selectivity > __selectivity)
+			{
+				clause = expr;
+				selectivity = __selectivity;
+			}
 		}
 	}
-	return NULL;
+	return clause;
 }
 
 static void
@@ -1215,12 +1485,11 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 {
 	Path		   *inner_path = ip_item->inner_path;
 	RelOptInfo	   *inner_rel = inner_path->parent;
-	IndexOptInfo   *gist_index = NULL;
-	AttrNumber		gist_colidx = 0;
 	AttrNumber		gist_ctid_resno = SelfItemPointerAttributeNumber;
-	Expr		   *gist_clause = NULL;
+	IndexOptInfo   *gist_index = NULL;
+	List		   *gist_clauses = NIL;
 	Selectivity		gist_selectivity = 1.0;
-	ListCell	   *lc1, *lc2;
+	ListCell	   *lc;
 
 	/* GPU GiST Index is used only when GpuHashJoin is not available */
 	Assert(ip_item->hash_quals == NIL);
@@ -1230,9 +1499,11 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 		return;
 
 	/* see logic in create_index_paths */
-	foreach (lc1, inner_rel->indexlist)
+	foreach (lc, inner_rel->indexlist)
 	{
-		IndexOptInfo   *curr_index = (IndexOptInfo *) lfirst(lc1);
+		IndexOptInfo   *curr_index = (IndexOptInfo *) lfirst(lc);
+		List		   *curr_clauses = NIL;
+		int				indexcol;
 
 		Assert(curr_index->rel == inner_rel);
 
@@ -1244,36 +1515,35 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 		if (curr_index->indpred != NIL && !curr_index->predOK)
 			continue;
 
-		/* identify the restriction clauses that can match the index. */
-		/* see, match_join_clauses_to_index */
-		foreach (lc2, restrict_clauses)
+		for (indexcol = 0; indexcol < curr_index->nkeycolumns; indexcol++)
 		{
-			RestrictInfo   *rinfo = lfirst(lc2);
-			AttrNumber		curr_colidx;
-			Expr		   *curr_clause;
-			Selectivity		curr_selectivity;
-
-			if (!join_clause_is_movable_to(rinfo, inner_rel))
-				continue;
-
-			curr_clause = match_clause_to_index(root, rinfo,
-												curr_index,
-												&curr_colidx);
-			if (curr_clause &&
-				pgstrom_device_expression(root, NULL, curr_clause))
+			Expr   *clause = match_clause_to_index(root,
+												   curr_index,
+												   indexcol,
+												   restrict_clauses);
+			if (clause)
+				curr_clauses = lappend(curr_clauses, clause);
+			else
 			{
-				curr_selectivity = clauselist_selectivity(root,
-														  list_make1(curr_clause),
-														  inner_rel->relid,
-														  JOIN_INNER,
-														  NULL);
-				if (!gist_index || gist_selectivity > curr_selectivity)
-				{
-					gist_index  = curr_index;
-					gist_colidx = curr_colidx;
-					gist_clause = curr_clause;
-					gist_selectivity = curr_selectivity;
-				}
+				curr_clauses = NIL;
+				break;
+			}
+		}
+
+		if (curr_clauses)
+		{
+			Selectivity	curr_selectivity;
+
+			curr_selectivity = clauselist_selectivity(root,
+													  curr_clauses,
+													  inner_rel->relid,
+													  JOIN_INNER,
+													  NULL);
+			if (!gist_index || gist_selectivity > curr_selectivity)
+			{
+				gist_index = curr_index;
+				gist_clauses = curr_clauses;
+				gist_selectivity = curr_selectivity;
 			}
 		}
 	}
@@ -1282,9 +1552,9 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 	{
 		AttrNumber		resno = 1;
 
-		foreach (lc1, inner_path->pathtarget->exprs)
+		foreach (lc, inner_path->pathtarget->exprs)
 		{
-			Var	   *var = (Var *) lfirst(lc1);
+			Var	   *var = (Var *) lfirst(lc);
 
 			if (IsA(var, Var) &&
 				var->varno == inner_rel->relid &&
@@ -1299,7 +1569,7 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 			resno++;
 		}
 		/* add projection for ctid (but junk attribute) */
-		if (!lc1)
+		if (!lc)
 		{
 			PathTarget *target = copy_pathtarget(inner_path->pathtarget);
 			Var		   *var;
@@ -1318,9 +1588,8 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 		}
 	}
 	ip_item->gist_index  = gist_index;
-	ip_item->gist_colidx = gist_colidx;
 	ip_item->gist_ctid_resno = gist_ctid_resno;
-	ip_item->gist_clause = gist_clause;
+	ip_item->gist_clauses = gist_clauses;
 	ip_item->gist_selectivity = gist_selectivity;
 }
 
@@ -2804,9 +3073,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 		List	   *join_quals = NIL;
 		List	   *other_quals = NIL;
 		Oid			gist_index_reloid = InvalidOid;
-		int			gist_index_colidx = -1;
 		int			gist_index_ctid_resno = -1;
-		Expr	   *gist_index_clause = NULL;
+		List	   *gist_index_clauses = NULL;
 
 		/* GpuHashJoin properties */
 		foreach (lc, gjpath->inners[i].hash_quals)
@@ -2848,9 +3116,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 			IndexOptInfo   *gist_index = gjpath->inners[i].gist_index;
 
 			gist_index_reloid = gist_index->indexoid;
-			gist_index_colidx = gjpath->inners[i].gist_colidx;
 			gist_index_ctid_resno = gjpath->inners[i].gist_ctid_resno;
-			gist_index_clause = gjpath->inners[i].gist_clause;
+			gist_index_clauses = gjpath->inners[i].gist_clauses;
 		}
 
 		/*
@@ -2885,12 +3152,10 @@ PlanGpuJoinPath(PlannerInfo *root,
 										  hash_outer_keys);
 		gj_info.gist_index_reloid = lappend_oid(gj_info.gist_index_reloid,
 												gist_index_reloid);
-		gj_info.gist_index_colidx = lappend_int(gj_info.gist_index_colidx,
-												gist_index_colidx);
 		gj_info.gist_index_ctid_resno = lappend_int(gj_info.gist_index_ctid_resno,
 													gist_index_ctid_resno);
-		gj_info.gist_index_clause = lappend(gj_info.gist_index_clause,
-											gist_index_clause);
+		gj_info.gist_index_clauses = lappend(gj_info.gist_index_clauses,
+											 gist_index_clauses);
 		outer_nrows = gjpath->inners[i].join_nrows;
 	}
 
@@ -2953,6 +3218,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.optimal_gpu = gjpath->optimal_gpu;
 	gj_info.kern_source = gpujoin_codegen(root,
 										  cscan,
+										  gjpath,
 										  &gj_info,
 										  tlist,
 										  &context);
@@ -3619,14 +3885,14 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			lc3, gj_info->other_quals,
 			lc4, gj_info->hash_outer_keys,
 			lc5, gj_info->gist_index_reloid,
-			lc6, gj_info->gist_index_clause)
+			lc6, gj_info->gist_index_clauses)
 	{
 		JoinType	join_type = (JoinType) lfirst_int(lc1);
 		Expr	   *join_quals = lfirst(lc2);
 		Expr	   *other_quals = lfirst(lc3);
 		Expr	   *hash_outer_key = lfirst(lc4);
 		Oid			gist_index_reloid = lfirst_oid(lc5);
-		Expr	   *gist_index_clause = lfirst(lc6);
+		List	   *gist_index_clauses = lfirst(lc6);
 		innerState *istate = &gjs->inners[depth-1];
 		kern_data_store *kds_in = NULL;
 		int			indent_width;
@@ -3661,9 +3927,9 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
 		}
-		else if (gist_index_clause != NULL)
+		else if (gist_index_clauses != NULL)
 		{
-			appendStringInfo(&str, "GpuNestLoop%s with GiST",
+			appendStringInfo(&str, "GpuHash%sJoin with GistIndex",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
@@ -3785,15 +4051,20 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		/*
 		 * GiST Index, if any
 		 */
-		if (OidIsValid(gist_index_reloid) && gist_index_clause != NULL)
+		if (OidIsValid(gist_index_reloid) && gist_index_clauses != NIL)
 		{
 			HeapTuple	tup;
 			Form_pg_class relForm;
 			const char *iname;
 			size_t		isize;
+			Node	   *clause;
 
-			temp = deparse_expression((Node *)gist_index_clause,
-									  dcontext, true, false);
+			if (list_length(gist_index_clauses) > 1)
+				clause = (Node *)gist_index_clauses;
+			else
+				clause = linitial(gist_index_clauses);
+
+			temp = deparse_expression(clause, dcontext, true, false);
 			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(gist_index_reloid));
 			if (!HeapTupleIsValid(tup))
 				elog(ERROR, "cache lookup failed for relation %u", gist_index_reloid);
@@ -4487,6 +4758,49 @@ gpujoin_codegen_hash_value(StringInfo source,
 }
 
 /*
+ * gpujoin_codegen_gist_index_quals
+ *
+ * code generator for:
+ * DEVICE_FUNCTION(cl_bool)
+ * gpujoin_gist_index_quals_depthXX(kern_context *kcxt,
+ *                                  kern_data_store *kds,
+ *                                  kern_data_extra *extra,
+ *                                  kern_multirels *kmrels,
+ *                                  cl_uint *x_buffer,
+ *                                  IndexTupleData *itup)
+ */
+static void
+gpujoin_codegen_gist_index_quals(StringInfo source,
+								 GpuJoinInfo *gj_info,
+								 GpuJoinPath *gj_path,
+								 int depth,
+								 codegen_context *context)
+{
+	IndexOptInfo *gist_index = gj_path->inners[depth-1].gist_index;
+	List	   *gist_clauses = gj_path->inners[depth-1].gist_clauses;
+	ListCell   *lc;
+
+
+
+
+
+
+
+	appendStringInfo(
+		source,
+		"DEVICE_FUNCTION(cl_bool)\n"
+		"gpujoin_gist_index_quals_depth%d(kern_context *kcxt,\n"
+		"                                kern_multirels *kmrels,\n"
+		"                                kern_data_store *kds,\n"
+		"                                kern_data_extra *extra,\n"
+		"                                cl_uint *x_buffer,\n"
+		"                                IndexTupleData *itup)\n"
+		"{\n"
+		"  return false;\n"
+		"}\n\n", depth);
+}
+
+/*
  * gpujoin_codegen_projection
  *
  * It makes a device function for device projection.
@@ -5018,6 +5332,7 @@ gpujoin_codegen_projection(StringInfo source,
 static char *
 gpujoin_codegen(PlannerInfo *root,
 				CustomScan *cscan,
+				GpuJoinPath *gj_path,
 				GpuJoinInfo *gj_info,
 				List *tlist,
 				codegen_context *context)
@@ -5085,7 +5400,9 @@ gpujoin_codegen(PlannerInfo *root,
 		"  return false;\n"
 		"}\n\n");
 
-
+	/*
+	 * gpujoin_hash_value
+	 */
 	depth = 1;
 	foreach (cell, gj_info->hash_outer_keys)
 	{
@@ -5098,9 +5415,6 @@ gpujoin_codegen(PlannerInfo *root,
 		depth++;
 	}
 
-	/*
-	 * gpujoin_hash_value
-	 */
 	appendStringInfo(
 		&source,
 		"DEVICE_FUNCTION(cl_uint)\n"
@@ -5138,6 +5452,58 @@ gpujoin_codegen(PlannerInfo *root,
 		"  return (cl_uint)(-1);\n"
 		"}\n"
 		"\n");
+
+	/*
+	 * gpujoin_gist_load_keys / gpujoin_gist_check_quals
+	 */
+	for (depth=0; depth < gj_path->num_rels; depth++)
+	{
+		if (!gj_path->inners[depth].gist_index)
+			continue;
+		context->varlena_bufsz = 0;
+		gpujoin_codegen_gist_index_quals(&source,
+										 gj_info,
+										 gj_path,
+										 depth+1,
+										 context);
+		varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+	}
+
+	appendStringInfoString(
+		 &source,
+		 "DEVICE_FUNCTION(cl_bool)\n"
+		 "gpujoin_gist_index_quals(kern_context *kcxt,\n"
+		 "                         kern_multirels *kmrels,\n"
+		 "                         kern_data_store *kds,\n"
+		 "                         kern_data_extra *extra,\n"
+		 "                         cl_int depth,\n"
+		 "                         cl_uint *x_buffer,\n"
+		 "                         IndexTupleData *itup)\n"
+		 "{\n"
+		 "  switch (depth)\n"
+		 "  {\n");
+	for (depth=0; depth < gj_path->num_rels; depth++)
+	{
+		if (!gj_path->inners[depth].gist_index)
+			continue;
+		appendStringInfo(
+			&source,
+			"  case %u:\n"
+			"    return gpujoin_gist_index_quals_depth%u(kcxt,kmrels,\n"
+			"                                           kds,extra,\n"
+			"                                           o_buffer,\n"
+			"                                           itup);\n",
+			depth+1, depth+1);
+	}
+	appendStringInfoString(
+		&source,
+		"  default:\n"
+		"    STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+		"                  \"GpuJoin: wrong code generation\");\n"
+		"    break;\n"
+		"  }\n"
+		"  return false;\n"
+		"}\n\n");
 
 	/*
 	 * gpujoin_projection

@@ -2014,6 +2014,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  20, "gC/f:st_expand",
 	  vlbuf_estimate__st_expand },
 };
+
 #undef PGSTROM
 #undef POSTGIS3
 #undef POSTGIS2
@@ -2244,19 +2245,8 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	int				fuzzy_index_tail = -1;
 	int				i;
 
-	if (proc->prolang == ClanguageId)
-	{
-		Datum		datum;
-		bool		isnull;
-
-		datum = SysCacheGetAttr(PROCOID, protup,
-								Anum_pg_proc_probin,
-								&isnull);
-		if (isnull)
-			return NULL;
-		lib_name = TextDatumGetCString(datum);
-	}
-	else if (proc->prolang != INTERNALlanguageId)
+	lib_name = get_proc_library(protup);
+	if (lib_name == (void *)(~0UL))
 		return NULL;
 	
 	/* make a signature string */
@@ -2437,7 +2427,7 @@ retry:
 	return dfunc;
 }
 
-static devfunc_info *
+devfunc_info *
 pgstrom_devfunc_lookup(Oid func_oid,
 					   Oid func_rettype,
 					   List *func_args,	/* list of expressions */

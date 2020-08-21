@@ -232,29 +232,18 @@ gpujoin_hash_value(kern_context *kcxt,
 				   cl_bool *is_null_keys);
 
 /*
- * gpujoin_gist_load_keys
+ * gpujoin_gist_index_quals
  *
- * It references GiST-index key value from the outer side
+ * It checks GiST-index key qualifiers
  */
 DEVICE_FUNCTION(cl_bool)
-gpujoin_gist_load_keys(kern_context *kcxt,
-					   kern_multirels *kmrels,
-					   kern_data_store *kds_src,
-					   kern_data_extra *kds_extra,
-					   cl_int depth,
-					   cl_uint *x_buffer,
-					   Datum *key_values,
-					   cl_bool *key_isnull);
-
-/*
- * gpujoin_gist_check_quals
- */
-DEVICE_FUNCTION(cl_bool)
-gpujoin_gist_check_quals(kern_context *kcxt,
+gpujoin_gist_index_quals(kern_context *kcxt,
+						 kern_data_store *kds,
+						 kern_data_extra *extra,
+						 kern_multirels *kmrels,
 						 cl_int depth,
-						 IndexTupleData *itup,
-						 Datum *key_values,
-						 cl_bool *key_isnull);
+						 cl_uint *x_buffer,
+						 IndexTupleData *itup);
 
 /*
  * gpujoin_projection

@@ -266,6 +266,55 @@ get_type_oid(const char *type_name,
 }
 
 /*
+ * get_type_name
+ */
+char *
+get_type_name(Oid type_oid, bool missing_ok)
+{
+	HeapTuple	tup;
+	char	   *retval;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for type %u", type_oid);
+		return NULL;
+	}
+	retval = pstrdup(NameStr(((Form_pg_type) GETSTRUCT(tup))->typname));
+	ReleaseSysCache(tup);
+
+	return retval;
+}
+
+/*
+ * get_proc_library
+ */
+char *
+get_proc_library(HeapTuple protup)
+{
+	Form_pg_proc	proc = (Form_pg_proc)GETSTRUCT(protup);
+
+	if (proc->prolang == ClanguageId)
+	{
+		Datum		datum;
+		bool		isnull;
+
+		datum = SysCacheGetAttr(PROCOID, protup,
+								Anum_pg_proc_probin,
+								&isnull);
+		if (!isnull)
+			return TextDatumGetCString(datum);
+	}
+	else if (proc->prolang != INTERNALlanguageId &&
+			 proc->prolang != SQLlanguageId)
+	{
+		return (void *)(~0UL);
+	}
+	return NULL;
+}
+
+/*
  * bms_to_cstring - human readable Bitmapset
  */
 char *

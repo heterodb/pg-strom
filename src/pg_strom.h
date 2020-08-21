@@ -120,6 +120,7 @@
 #if PG_VERSION_NUM < 120000
 #include "optimizer/var.h"
 #endif
+#include "parser/parse_coerce.h"
 #include "parser/parsetree.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -149,6 +150,7 @@
 #include "utils/builtins.h"
 #include "utils/bytea.h"
 #include "utils/cash.h"
+#include "utils/catcache.h"
 #include "utils/date.h"
 #if PG_VERSION_NUM >= 120000
 #include "utils/float.h"
@@ -1053,6 +1055,10 @@ extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
+extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
+											Oid func_rettype,
+											List *func_args,
+											Oid func_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
 													   Oid type_collid);
 extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
@@ -1417,6 +1423,8 @@ extern Oid	get_function_oid(const char *func_name,
 extern Oid	get_type_oid(const char *type_name,
 						 Oid namespace_oid,
 						 bool missing_ok);
+extern char *get_type_name(Oid type_oid, bool missing_ok);
+extern char *get_proc_library(HeapTuple protup);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);
