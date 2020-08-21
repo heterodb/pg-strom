@@ -458,6 +458,91 @@ pg_datum_store(kern_context *kcxt,
 
 /* ================================================================
  *
+ * box2df (bounding-box) input/output functions
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(pg_box2df_t)
+pg_box2df_datum_ref(kern_context *kcxt, void *addr)
+{
+	pg_box2df_t   result;
+
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		memcpy(&result.value, (geom_bbox_2d *)addr, sizeof(geom_bbox_2d));
+	}
+	return result;                                              
+}                                                               
+
+DEVICE_FUNCTION(void)
+pg_datum_ref(kern_context *kcxt, pg_box2df_t &result, void *addr)
+{
+	result = pg_box2df_datum_ref(kcxt, addr);
+}
+
+DEVICE_FUNCTION(void)                                             
+pg_datum_ref_slot(kern_context *kcxt,
+				  pg_box2df_t &result,
+				  cl_char dclass, Datum datum)
+{
+	if (dclass == DATUM_CLASS__NULL)
+		result = pg_box2df_datum_ref(kcxt, NULL);             
+	else
+	{
+		assert(dclass == DATUM_CLASS__NORMAL);
+		result = pg_box2df_datum_ref(kcxt, (char *)datum);
+	}                                                           
+}
+
+DEVICE_FUNCTION(pg_box2df_t)
+pg_box2df_param(kern_context *kcxt,cl_uint param_id)
+{
+	kern_parambuf *kparams = kcxt->kparams;                     
+	pg_box2df_t result;                                       
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)                         
+	{
+		void   *addr = ((char *)kparams +                       
+						kparams->poffset[param_id]);            
+		result = pg_box2df_datum_ref(kcxt, addr);             
+	}                                                           
+	else                                                        
+		result.isnull = true;                                   
+	return result;                                              
+}                                                               
+
+DEVICE_FUNCTION(cl_int)                                           
+pg_datum_store(kern_context *kcxt,                              
+			   pg_box2df_t datum,                             
+			   cl_char &dclass,                                 
+			   Datum &value)                                    
+{
+	void	   *res;
+
+	if (datum.isnull)
+	{
+		dclass = DATUM_CLASS__NULL;
+		return 0;
+	}
+	res = kern_context_alloc(kcxt, sizeof(geom_bbox_2d));
+	if (!res)
+	{
+		dclass = DATUM_CLASS__NULL;
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+		return 0;                                               
+	}
+	memcpy(res, &datum.value, sizeof(geom_bbox_2d));
+	dclass = DATUM_CLASS__NORMAL;
+	value = PointerGetDatum(res);
+	return sizeof(geom_bbox_2d);
+}
+
+/* ================================================================
+ *
  * Basic geometry constructor and related
  *
  * ================================================================
@@ -790,6 +875,20 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	return false;
 }
 
+DEVICE_INLINE(cl_bool)
+__geom_overlaps_bbox2d(const geom_bbox_2d *bbox1,
+					 const geom_bbox_2d *bbox2)
+{
+	if (!__geom_bbox_2d_is_empty(bbox1) &&
+		!__geom_bbox_2d_is_empty(bbox2) &&
+		bbox1->xmin <= bbox2->xmax &&
+		bbox1->xmax >= bbox2->xmin &&
+		bbox1->ymin <= bbox2->ymax &&
+		bbox1->ymax >= bbox2->ymin)
+		return true;
+	return false;
+}
+
 /* see, gserialized_overlaps_2d() */
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_geometry_overlaps(kern_context *kcxt,
@@ -804,20 +903,48 @@ pgfn_geometry_overlaps(kern_context *kcxt,
 	if (!result.isnull)
 	{
 		/* see box2df_overlaps() */
-		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
-			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
-			result.value = false;
-		else if (__geom_bbox_2d_is_empty(&bbox1) ||
-				 __geom_bbox_2d_is_empty(&bbox2) ||
-				 bbox1.xmin > bbox2.xmax ||
-				 bbox1.xmax < bbox2.xmin ||
-				 bbox1.ymin > bbox2.ymax ||
-				 bbox1.ymax < bbox2.ymin)
-			result.value = false;
+		if (__geometry_get_bbox2d(kcxt, &arg1, &bbox1) &&
+			__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = __geom_overlaps_bbox2d(&bbox1, &bbox2);
 		else
-			result.value = true;
+			result.value = false;
 	}
 	return result;
+}
+
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_box2df_geometry_overlaps(kern_context *kcxt,
+							  const pg_box2df_t &arg1,
+							  const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+	if (!result.isnull)
+	{
+		if (__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = __geom_overlaps_bbox2d(&arg1.value, &bbox2);
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+DEVICE_INLINE(cl_bool)
+__geom_contains_bbox2d(const geom_bbox_2d *bbox1,
+					   const geom_bbox_2d *bbox2)
+{
+	if (!__geom_bbox_2d_is_empty(bbox1) &&
+		__geom_bbox_2d_is_empty(bbox2))
+		return true;
+	if (bbox1->xmin <= bbox2->xmin &&
+		bbox1->xmax >= bbox2->xmax &&
+		bbox1->ymin <= bbox2->ymin &&
+		bbox1->ymax >= bbox2->ymax)
+		return true;
+
+	return false;
 }
 
 /* see, gserialized_contains_2d() */
@@ -836,18 +963,44 @@ pgfn_geometry_contains(kern_context *kcxt,
 		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
 			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
 			result.value = false;
-		else if (__geom_bbox_2d_is_empty(&bbox2) &&
-				 !__geom_bbox_2d_is_empty(&bbox1))
-			result.value = true;
-		else if (bbox1.xmin > bbox2.xmin ||
-				 bbox1.xmax < bbox2.xmax ||
-				 bbox1.ymin > bbox2.ymin ||
-				 bbox1.ymax < bbox2.ymax)
-			result.value = false;
 		else
-			result.value = true;
+			result.value = __geom_contains_bbox2d(&bbox1, &bbox2);
 	}
 	return result;
+}
+
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_box2df_geometry_contains(kern_context *kcxt,
+                              const pg_box2df_t &arg1,
+                              const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+    if (!result.isnull)
+	{
+		if (!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
+			result.value = false;
+		else
+			result.value = __geom_contains_bbox2d(&arg1.value, &bbox2);
+	}
+	return result;
+}
+
+DEVICE_INLINE(cl_bool)
+__geom_within_bbox2d(const geom_bbox_2d *bbox1,
+					 const geom_bbox_2d *bbox2)
+{
+	if (__geom_bbox_2d_is_empty(bbox1) &&
+		!__geom_bbox_2d_is_empty(bbox2))
+		return true;
+	if (bbox1->xmin >= bbox2->xmin &&
+		bbox1->xmax <= bbox2->xmax &&
+		bbox1->ymin >= bbox2->ymin &&
+		bbox1->ymax <= bbox2->ymax)
+		return true;
+	return false;
 }
 
 /* see, gserialized_within_2d() */
@@ -867,16 +1020,27 @@ pgfn_geometry_within(kern_context *kcxt,
 		if (!__geometry_get_bbox2d(kcxt, &arg1, &bbox1) ||
 			!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
 			result.value = false;
-		else if (__geom_bbox_2d_is_empty(&bbox1) &&
-				 !__geom_bbox_2d_is_empty(&bbox2))
-			result.value = true;
-		else if (bbox1.xmin < bbox2.xmin ||
-				 bbox1.xmax > bbox2.xmax ||
-				 bbox2.ymin < bbox2.ymin ||
-				 bbox2.ymax > bbox2.ymax)
+		else
+			result.value = __geom_within_bbox2d(&bbox1, &bbox2);
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_geometry_box2df_within(kern_context *kcxt,
+							const pg_box2df_t &arg1,
+							const pg_geometry_t &arg2)
+{
+	pg_bool_t	result;
+	geom_bbox_2d bbox2;
+
+	result.isnull = (arg1.isnull | arg2.isnull);
+    if (!result.isnull)
+    {
+		if (!__geometry_get_bbox2d(kcxt, &arg2, &bbox2))
 			result.value = false;
 		else
-			result.value = true;
+			result.value = __geom_within_bbox2d(&arg1.value, &bbox2);
 	}
 	return result;
 }

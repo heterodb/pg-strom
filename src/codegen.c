@@ -38,6 +38,7 @@ static cl_uint pg_inet_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_jsonb_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_geometry_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_box2df_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
 /* callback to handle special cases of device cast */
 static int	devcast_text2numeric_callback(codegen_context *context,
@@ -260,6 +261,12 @@ static struct {
 	  sizeof(pg_geometry_t),
 	  pg_geometry_devtype_hashfunc
 	},
+	{ "@postgis", "box2df", InvalidOid, "BOX2DFOID",
+	  NULL, NULL, NULL,
+	  DEVKERNEL_NEEDS_POSTGIS,
+	  sizeof(pg_box2df_t),
+	  pg_box2df_devtype_hashfunc
+	}
 };
 
 static Oid
@@ -817,6 +824,12 @@ pg_range_devtype_hashfunc(devtype_info *dtype, Datum datum)
 
 static cl_uint
 pg_geometry_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	return 0; //TODO
+}
+
+static cl_uint
+pg_box2df_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
 	return 0; //TODO
 }
@@ -2006,10 +2019,16 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  999, "g/f:st_crosses" },
 	{ POSTGIS3, "bool geometry_overlaps(geometry,geometry)",
 	  10, "g/f:geometry_overlaps" },
+	{ POSTGIS3, "bool overlaps_2d(box2df,geometry)",
+	  10, "g/f:box2df_geometry_overlaps" },
 	{ POSTGIS3, "bool geometry_contains(geometry,geometry)",
 	  10, "g/f:geometry_contains" },
+	{ POSTGIS3, "bool contains_2d(box2df,geometry)",
+	  10, "g/f:box2df_geometry_contains" },
 	{ POSTGIS3, "bool geometry_within(geometry,geometry)",
 	  10, "g/f:geometry_within" },
+	{ POSTGIS3, "bool is_contained_2d(box2df,geometry)",
+	  10, "g/f:box2df_geometry_within" },
 	{ POSTGIS3, "geometry st_expand(geometry,float8)",
 	  20, "gC/f:st_expand",
 	  vlbuf_estimate__st_expand },

@@ -159,6 +159,13 @@ STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(geometry);
 STROMCL_UNSUPPORTED_ARROW_TEMPLATE(geometry);
 #endif /* PG_GEOMETRY_TYPE_DEFINED */
 
+#ifndef PG_BOX2DF_TYPE_DEFINED
+#define PG_BOX2DF_TYPE_DEFINED
+STROMCL_SIMPLE_DATATYPE_TEMPLATE(box2df, geom_bbox_2d)
+STROMCL_EXTERNAL_VARREF_TEMPLATE(box2df)
+STROMCL_UNSUPPORTED_ARROW_TEMPLATE(box2df)
+#endif	/* PG_BOX2DF_TYPE_DEFINED */
+
 /*
  * POINT2D, POINT3D, POINT3DM, POINT4D
  */
@@ -202,13 +209,25 @@ pgfn_geometry_overlaps(kern_context *kcxt,
 					   const pg_geometry_t &arg1,
 					   const pg_geometry_t &arg2);
 DEVICE_FUNCTION(pg_bool_t)
+pgfn_box2df_geometry_overlaps(kern_context *kcxt,
+							  const pg_box2df_t &arg1,
+							  const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_geometry_contains(kern_context *kcxt,
 					   const pg_geometry_t &arg1,
 					   const pg_geometry_t &arg2);
 DEVICE_FUNCTION(pg_bool_t)
+pgfn_box2df_geometry_contains(kern_context *kcxt,
+							  const pg_box2df_t &arg1,
+							  const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
 pgfn_geometry_within(kern_context *kcxt,
 					 const pg_geometry_t &arg1,
 					 const pg_geometry_t &arg2);
+DEVICE_FUNCTION(pg_bool_t)
+pgfn_box2df_geometry_within(kern_context *kcxt,
+							const pg_box2df_t &arg1,
+							const pg_geometry_t &arg2);
 
 DEVICE_FUNCTION(pg_geometry_t)
 pgfn_st_expand(kern_context *kcxt,

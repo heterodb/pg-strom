@@ -1203,6 +1203,10 @@ static altfunc_catalog_t	altfunc_common_catalog[] = {
 	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
 	{ POSTGIS3, "geometry_overlaps(geometry,geometry)",
 	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
+	{ POSTGIS3, "geometry_contains(geometry,geometry)",
+	  POSTGIS3, "contains_2d", "(box2df,geometry)" },
+	{ POSTGIS3, "geometry_within(geometry,geometry)",
+	  POSTGIS3, "is_contained_2d", "(box2df,geometry)" },
 	{ NULL, NULL, NULL },
 };
 #undef POSTGIS3
@@ -1299,7 +1303,7 @@ __fixup_gist_device_funcion_if_mismatch(Oid func_oid,
 		const char *alt_lib  = altfunc_common_catalog[i].altfunc_library;
 		const char *alt_name = altfunc_common_catalog[i].altfunc_name;
 		const char *alt_args = altfunc_common_catalog[i].altfunc_args;
-		
+
 		if ((!proc_lib ? !func_lib : strcmp(proc_lib, func_lib) == 0) &&
 			strcmp(func_sig, sig.data) == 0 &&
 			strcmp(alt_args, arg.data) == 0)
