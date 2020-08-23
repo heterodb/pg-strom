@@ -1189,6 +1189,8 @@ restart:
 		if (ItemIdIsDead(lpp))
 			continue;
 		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
+		/* rewind the varlena buffer */
+		kcxt->vlpos = kcxt->vlbuf;
 		if (gpujoin_gist_index_quals(kcxt,
 									 kds_src,
 									 kds_extra,

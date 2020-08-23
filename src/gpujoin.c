@@ -1463,7 +1463,6 @@ match_clause_to_index(PlannerInfo *root,
 			expr = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
 
 		dev_expr = fixup_gist_clause_for_device(root, index, indexcol, expr);
-		elog(INFO, "dev_expr = %s", nodeToString(dev_expr));
 		if (dev_expr && pgstrom_device_expression(root, NULL, dev_expr))
 		{
 			__selectivity = clauselist_selectivity(root,
@@ -1572,23 +1571,22 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 			}
 			resno++;
 		}
-		/* add projection for ctid (but junk attribute) */
+		/*
+		 * Add projection for ctid
+		 */
 		if (!lc)
 		{
-			PathTarget *target = copy_pathtarget(inner_path->pathtarget);
+			Path	   *new_path = pgstrom_copy_pathnode(inner_path);
+			PathTarget *new_target = copy_pathtarget(inner_path->pathtarget);
 			Var		   *var;
 
 			var = makeVar(inner_rel->relid,
 						  SelfItemPointerAttributeNumber,
 						  TIDOID, -1, InvalidOid, 0);
-			target->exprs = lappend(target->exprs, var);
-			gist_ctid_resno = list_length(target->exprs);
-
-			ip_item->inner_path = (Path *)
-				create_projection_path(root,
-									   inner_rel,
-									   inner_path,
-									   target);
+			new_target->exprs = lappend(new_target->exprs, var);
+			gist_ctid_resno = list_length(new_target->exprs);
+			new_path->pathtarget = new_target;
+			ip_item->inner_path = new_path;
 		}
 	}
 	ip_item->gist_index  = gist_index;
@@ -3631,9 +3629,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				elog(ERROR, "GPU-GiST: inner ctid is out of range");
 			tle = list_nth(inner_plan->targetlist, gist_index_ctid_resno - 1);
 			var = (Var *)tle->expr;
-			if (!IsA(tle->expr, Var) ||
-				var->varattno != SelfItemPointerAttributeNumber ||
-				var->vartype != TIDOID)
+			if (!IsA(tle->expr, Var) || var->vartype != TIDOID)
 				elog(ERROR, "GPU-GiST: wrong Var-definition for inner ctid");
 			istate->gist_ctid_resno = gist_index_ctid_resno;
 		}
@@ -4287,12 +4283,13 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 							   int cur_depth,
 							   codegen_context *context)
 {
-	List	   *kern_vars = NIL;
-	ListCell   *cell;
-	int			depth;
-	StringInfoData row;
-	StringInfoData arrow;
-	StringInfoData column;
+	List		   *kern_vars = NIL;
+	ListCell	   *cell;
+	int				depth;
+	devtype_info   *dtype;
+	StringInfoData	row;
+	StringInfoData	arrow;
+	StringInfoData	column;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	initStringInfo(&row);
@@ -4312,6 +4309,10 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		ListCell   *lc3;
 
 		Assert(IsA(varnode, Var));
+		/* GiST-index references shall be handled by the caller */
+		if (varnode->varno == INDEX_VAR)
+			continue;
+
 		forthree (lc1, context->pseudo_tlist,
 				  lc2, gj_info->ps_src_depth,
 				  lc3, gj_info->ps_src_resno)
@@ -4381,19 +4382,17 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 
 	foreach (cell, kern_vars)
 	{
-		Var			   *kernode = lfirst(cell);
-		devtype_info   *dtype;
+		Var	   *kvar = lfirst(cell);
 
-		dtype = pgstrom_devtype_lookup(kernode->vartype);
+		dtype = pgstrom_devtype_lookup(kvar->vartype);
 		if (!dtype)
 			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(kernode->vartype));
-
+				 format_type_be(kvar->vartype));
 		appendStringInfo(
 			source,
 			"  pg_%s_t KVAR_%u;\n",
 			dtype->type_name,
-			kernode->varoattno);
+			kvar->varoattno);
 	}
 	appendStringInfoChar(source, '\n');
 
@@ -4473,7 +4472,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  /* variable load in depth-%u (inner KDS) */\n"
 					"  {\n"
 					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"    assert(kds_in->format == %s);\n"
 					"    if (!o_buffer)\n"
 					"      htup = NULL;\n"
 					"    else\n"
@@ -4481,10 +4479,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"                              NULL, NULL);\n",
 					depth,
 					depth,
-					list_nth(gj_info->hash_outer_keys,
-							 keynode->varno - 1) == NIL
-					? "KDS_FORMAT_ROW"
-					: "KDS_FORMAT_HASH",
 					depth);
 			}
 			else if (depth == cur_depth)
@@ -4494,14 +4488,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"  /* variable load in depth-%u (inner KDS) */\n"
 					"  {\n"
 					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"    assert(__ldg(&kds_in->format) == %s);\n"
 					"    htup = i_htup;\n",
 					depth,
-					depth,
-					list_nth(gj_info->hash_outer_keys,
-							 keynode->varno - 1) == NIL
-					? "KDS_FORMAT_ROW"
-					: "KDS_FORMAT_HASH");
+					depth);
 			}
 			else
 				elog(ERROR, "Bug? variables reference too deep");
@@ -4572,7 +4561,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	pfree(row.data);
 	pfree(arrow.data);
 	pfree(column.data);
-
+	
 	appendStringInfo(source, "\n");
 }
 
@@ -4775,33 +4764,139 @@ gpujoin_codegen_hash_value(StringInfo source,
  */
 static void
 gpujoin_codegen_gist_index_quals(StringInfo source,
+								 PlannerInfo *root,
 								 GpuJoinInfo *gj_info,
 								 GpuJoinPath *gj_path,
 								 int depth,
 								 codegen_context *context)
 {
-	IndexOptInfo *gist_index = gj_path->inners[depth-1].gist_index;
-	List	   *gist_clauses = gj_path->inners[depth-1].gist_clauses;
-	ListCell   *lc;
+	IndexOptInfo   *gist_index = gj_path->inners[depth-1].gist_index;
+	List		   *gist_clauses = gj_path->inners[depth-1].gist_clauses;
+	List		   *pseudo_tlist_saved = context->pseudo_tlist;
+	List		   *device_clauses;
+	List		   *vars_list;
+	AttrNumber		indexcol = 0;
+	AttrNumber		max_column = -1;
+	devtype_info   *dtype;
+	StringInfoData body;
+	StringInfoData decl;
+	StringInfoData	temp;
+	ListCell	   *lc;
 
+	initStringInfo(&body);
+	initStringInfo(&decl);
+	initStringInfo(&temp);
 
+	context->used_vars = NIL;
+	context->param_refs = NULL;
+	resetStringInfo(&context->decl_temp);
 
+	appendStringInfo(
+		&decl,
+		"  kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels,%d);\n",
+		depth);
+	
+	device_clauses = (List *)
+		fixup_gist_clause_for_device(root,
+									 gist_index,
+									 indexcol,
+									 (Expr *)gist_clauses);
+	/* adjust pseudo_tlist for temporary Vars for index columns */
+	context->pseudo_tlist = list_copy(context->pseudo_tlist);
+	vars_list = pull_vars_of_level((Node *)device_clauses, 0);
+	foreach (lc, vars_list)
+	{
+		Var		   *ivar = lfirst(lc);
+		AttrNumber	resno;
 
+		if (ivar->varno != INDEX_VAR)
+			continue;
+		max_column = Max(max_column, ivar->varattno);
+		resno = list_length(context->pseudo_tlist) + 1;
+		dtype = pgstrom_devtype_lookup(ivar->vartype);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(ivar->vartype));
+		appendStringInfo(&decl,
+						 "  pg_%s_t KVAR_%u;\n",
+						 dtype->type_name,
+						 resno);
+		ivar->varoattno = resno;
+		context->pseudo_tlist = lappend(context->pseudo_tlist,
+										makeTargetEntry((Expr *)ivar,
+														resno,
+														NULL,
+														false));
+	}
 
+	/* make device clauses for each index-column */
+	foreach (lc, device_clauses)
+	{
+		char   *temp = pgstrom_codegen_expression(lfirst(lc), context);
 
+		appendStringInfo(
+			&body,
+			"  /* indexcol-%d */\n"
+			"  if (!EVAL(%s))\n"
+			"    return false;\n",
+			indexcol, temp);
+		pfree(temp);
+		indexcol++;
+	}
+	/* Var/Param declaration */
+	gpujoin_codegen_var_param_decl(&decl,
+								   gj_info,
+								   depth,
+								   context);
+	/* Load values from the IndexTuple */
+	appendStringInfoString(
+		&decl,
+		"  EXTRACT_INDEX_TUPLE_BEGIN(datum, kds_gist, itup);\n");
+	for (indexcol=1; indexcol <= max_column; indexcol++)
+	{
+		foreach (lc, vars_list)
+		{
+			Var	   *ivar = lfirst(lc);
+
+			if (ivar->varno != INDEX_VAR ||
+				ivar->varattno != indexcol)
+				continue;
+
+			dtype = pgstrom_devtype_lookup(ivar->vartype);
+			if (!dtype)
+				elog(ERROR, "device type \"%s\" not found",
+					 format_type_be(ivar->vartype));
+			appendStringInfo(
+				&decl,
+				"  pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
+				ivar->varoattno, dtype->type_name);
+		}
+	}
+	appendStringInfoString(
+		&decl,
+		"  EXTRACT_INDEX_TUPLE_END();\n");
 
 	appendStringInfo(
 		source,
-		"DEVICE_FUNCTION(cl_bool)\n"
+		"STATIC_FUNCTION(cl_bool)\n"
 		"gpujoin_gist_index_quals_depth%d(kern_context *kcxt,\n"
-		"                                kern_multirels *kmrels,\n"
 		"                                kern_data_store *kds,\n"
 		"                                kern_data_extra *extra,\n"
-		"                                cl_uint *x_buffer,\n"
+		"                                kern_multirels *kmrels,\n"
+		"                                cl_uint *o_buffer,\n"
 		"                                IndexTupleData *itup)\n"
 		"{\n"
-		"  return false;\n"
-		"}\n\n", depth);
+		"%s\n%s"
+		"  return true;\n"
+		"}\n\n",
+		depth,
+		decl.data,
+		body.data);
+	/* cleanup */
+	pfree(decl.data);
+	pfree(body.data);
+	pfree(temp.data);
+	context->pseudo_tlist = pseudo_tlist_saved;
 }
 
 /*
@@ -5466,6 +5561,7 @@ gpujoin_codegen(PlannerInfo *root,
 			continue;
 		context->varlena_bufsz = 0;
 		gpujoin_codegen_gist_index_quals(&source,
+										 root,
 										 gj_info,
 										 gj_path,
 										 depth+1,
@@ -5477,11 +5573,11 @@ gpujoin_codegen(PlannerInfo *root,
 		 &source,
 		 "DEVICE_FUNCTION(cl_bool)\n"
 		 "gpujoin_gist_index_quals(kern_context *kcxt,\n"
-		 "                         kern_multirels *kmrels,\n"
 		 "                         kern_data_store *kds,\n"
 		 "                         kern_data_extra *extra,\n"
+		 "                         kern_multirels *kmrels,\n"
 		 "                         cl_int depth,\n"
-		 "                         cl_uint *x_buffer,\n"
+		 "                         cl_uint *o_buffer,\n"
 		 "                         IndexTupleData *itup)\n"
 		 "{\n"
 		 "  switch (depth)\n"
@@ -5493,8 +5589,9 @@ gpujoin_codegen(PlannerInfo *root,
 		appendStringInfo(
 			&source,
 			"  case %u:\n"
-			"    return gpujoin_gist_index_quals_depth%u(kcxt,kmrels,\n"
+			"    return gpujoin_gist_index_quals_depth%u(kcxt,\n"
 			"                                           kds,extra,\n"
+			"                                           kmrels,\n"
 			"                                           o_buffer,\n"
 			"                                           itup);\n",
 			depth+1, depth+1);
