@@ -1175,7 +1175,7 @@ gpujoin_gist_getnext(kern_context *kcxt,
 		size_t			off = (((char *)lpp - (char *)gist_base) & (BLCKSZ - 1));
 
 		gist_page = (PageHeaderData *)((char *)lpp - off);
-		start = OffsetNumberNext(lpp - gist_page->pd_linp);
+		start = OffsetNumberNext(lpp - gist_page->pd_linp + 1);
 	}
 
 restart:
@@ -1202,7 +1202,7 @@ restart:
 			if (GistPageIsLeaf(gist_page))
 			{
 				/* found the next candidate */
-				*p_item_offset = ((char *)itup - (char *)kds_gist);
+				*p_item_offset = ((char *)lpp - (char *)kds_gist);
 				return &itup->t_tid;
 			}
 			else

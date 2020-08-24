@@ -783,9 +783,10 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	/* geometry already has bounding-box? */
 	if (geom->bbox)
 	{
-		memcpy(bbox, &geom->bbox, sizeof(geom_bbox_2d));
+		memcpy(bbox, &geom->bbox->d2, sizeof(geom_bbox_2d));
 		return true;
 	}
+
 	if ((geom->flags & GEOM_FLAG__GEODETIC) != 0)
 		return false;
 	if (geom->type == GEOM_POINTTYPE)
@@ -877,7 +878,7 @@ __geometry_get_bbox2d(kern_context *kcxt,
 
 DEVICE_INLINE(cl_bool)
 __geom_overlaps_bbox2d(const geom_bbox_2d *bbox1,
-					 const geom_bbox_2d *bbox2)
+					   const geom_bbox_2d *bbox2)
 {
 	if (!__geom_bbox_2d_is_empty(bbox1) &&
 		!__geom_bbox_2d_is_empty(bbox2) &&
@@ -1090,7 +1091,7 @@ pgfn_st_expand(kern_context *kcxt,
 	geom.nitems = 1;
 	geom.rawsize = (2 * sizeof(cl_uint) + 10 * sizeof(double));
 	geom.bbox = (geom_bbox *)pos;
-	memcpy(geom.bbox, &bbox, sizeof(geom_bbox_2d));
+	memcpy(&geom.bbox->d2, &bbox, sizeof(geom_bbox_2d));
 	pos += sizeof(geom_bbox_2d);
 
 	geom.rawdata = pos;
