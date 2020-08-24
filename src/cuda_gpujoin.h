@@ -106,6 +106,11 @@ struct kern_gpujoin
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			grid_sz;			/* grid-size on invocation */
 	cl_uint			block_sz;			/* block-size on invocation */
+	/* debug counters */
+	cl_ulong		debug_counter0;
+	cl_ulong		debug_counter1;
+	cl_ulong		debug_counter2;
+	cl_ulong		debug_counter3;
 	/* suspend/resume related */
 	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			suspend_size;		/* length of the suspend buffer */

@@ -375,6 +375,10 @@ struct GpuTaskState
 
 	/* misc fields */
 	cl_long			num_cpu_fallbacks;	/* # of CPU fallback chunks */
+	uint64			debug_counter0;
+	uint64			debug_counter1;
+	uint64			debug_counter2;
+	uint64			debug_counter3;
 
 	/* co-operation with CPU parallel */
 	GpuTaskSharedState *gtss;		/* DSM segment of GTS if any */
@@ -412,6 +416,11 @@ typedef struct
 	pg_atomic_uint64	nvme_count;
 	pg_atomic_uint64	brin_count;
 	pg_atomic_uint64	fallback_count;
+	/* debug counter */
+	pg_atomic_uint64	debug_counter0;
+	pg_atomic_uint64	debug_counter1;
+	pg_atomic_uint64	debug_counter2;
+	pg_atomic_uint64	debug_counter3;
 } GpuTaskRuntimeStat;
 
 static inline void
@@ -429,6 +438,15 @@ mergeGpuTaskRuntimeStatParallelWorker(GpuTaskState *gts,
 	pg_atomic_add_fetch_u64(&gt_rtstat->brin_count, gts->outer_brin_count);
 	pg_atomic_add_fetch_u64(&gt_rtstat->fallback_count,
 							gts->num_cpu_fallbacks);
+	/* debug counter */
+	if (gts->debug_counter0 != 0)
+		pg_atomic_add_fetch_u64(&gt_rtstat->debug_counter0, gts->debug_counter0);
+	if (gts->debug_counter1 != 0)
+		pg_atomic_add_fetch_u64(&gt_rtstat->debug_counter1, gts->debug_counter1);
+	if (gts->debug_counter2 != 0)
+		pg_atomic_add_fetch_u64(&gt_rtstat->debug_counter2, gts->debug_counter2);
+	if (gts->debug_counter3 != 0)
+		pg_atomic_add_fetch_u64(&gt_rtstat->debug_counter3, gts->debug_counter3);
 }
 
 static inline void
@@ -444,6 +462,11 @@ mergeGpuTaskRuntimeStat(GpuTaskState *gts,
 	gts->nvme_count += pg_atomic_read_u64(&gt_rtstat->nvme_count);
 	gts->outer_brin_count += pg_atomic_read_u64(&gt_rtstat->brin_count);
 	gts->num_cpu_fallbacks += pg_atomic_read_u64(&gt_rtstat->fallback_count);
+
+	gts->debug_counter0 += pg_atomic_read_u64(&gt_rtstat->debug_counter0);
+	gts->debug_counter1 += pg_atomic_read_u64(&gt_rtstat->debug_counter1);
+	gts->debug_counter2 += pg_atomic_read_u64(&gt_rtstat->debug_counter2);
+	gts->debug_counter3 += pg_atomic_read_u64(&gt_rtstat->debug_counter3);
 
 	if (gts->css.ss.ps.instrument)
 		memcpy(&gts->css.ss.ps.instrument->bufusage,

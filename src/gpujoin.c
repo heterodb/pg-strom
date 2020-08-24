@@ -6838,6 +6838,23 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
 								kgjoin->stat_nitems[i]);
 	}
+	/* debug counters if any */
+	fprintf(stderr,
+			"GpuJoin %ld %ld %ld %ld\n",
+			kgjoin->debug_counter0,
+			kgjoin->debug_counter1,
+			kgjoin->debug_counter2,
+			kgjoin->debug_counter3);
+
+	if (kgjoin->debug_counter0 != 0)
+		pg_atomic_fetch_add_u64(&gj_rtstat->c.debug_counter0, kgjoin->debug_counter0);
+	if (kgjoin->debug_counter1 != 0)
+		pg_atomic_fetch_add_u64(&gj_rtstat->c.debug_counter1, kgjoin->debug_counter1);
+	if (kgjoin->debug_counter2 != 0)
+		pg_atomic_fetch_add_u64(&gj_rtstat->c.debug_counter2, kgjoin->debug_counter2);
+	if (kgjoin->debug_counter3 != 0)
+		pg_atomic_fetch_add_u64(&gj_rtstat->c.debug_counter3, kgjoin->debug_counter3);
+	
 	/* reset counters (may be reused by the resumed kernel) */
 	kgjoin->source_nitems = 0;
 	kgjoin->outer_nitems  = 0;

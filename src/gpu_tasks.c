@@ -670,6 +670,18 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		ExplainArrowFdw(gts->af_state, rel, es);
 	if (gts->gs_state)
 		ExplainGstoreFdw(gts->gs_state, rel, es);
+	/* Debug counter, if any */
+	if (es->analyze && (gts->debug_counter0 != 0 ||
+						gts->debug_counter1 != 0 ||
+						gts->debug_counter2 != 0 ||
+						gts->debug_counter3 != 0))
+	{
+		ExplainPropertyInteger("Debug Counter 0", NULL, gts->debug_counter0, es);
+		ExplainPropertyInteger("Debug Counter 1", NULL, gts->debug_counter1, es);
+		ExplainPropertyInteger("Debug Counter 2", NULL, gts->debug_counter2, es);
+		ExplainPropertyInteger("Debug Counter 3", NULL, gts->debug_counter3, es);
+	}
+
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
