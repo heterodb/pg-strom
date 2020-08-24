@@ -944,10 +944,10 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 	/* shortcut if tuple contains no NULL values */
 	if (!heap_hasnull)
 	{
-		kern_colmeta	cmeta = colmeta[colidx];
+		kern_colmeta   *cmeta = &colmeta[colidx];
 
-		if (cmeta.attcacheoff >= 0)
-			return (char *)htup + cmeta.attcacheoff;
+		if (cmeta->attcacheoff >= 0)
+			return (char *)htup + cmeta->attcacheoff;
 	}
 	/* regular path that walks on heap-tuple from the head */
 	for (i=0; i < ncols; i++)
@@ -959,20 +959,20 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 		}
 		else
 		{
-			kern_colmeta	cmeta = colmeta[i];
+			kern_colmeta   *cmeta = &colmeta[i];
 			char		   *addr;
 
-			if (cmeta.attlen > 0)
-				offset = TYPEALIGN(cmeta.attalign, offset);
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-				offset = TYPEALIGN(cmeta.attalign, offset);
+				offset = TYPEALIGN(cmeta->attalign, offset);
 
 			/* TODO: overrun checks here */
 			addr = ((char *) htup + offset);
 			if (i == colidx)
 				return addr;
-			if (cmeta.attlen > 0)
-				offset += cmeta.attlen;
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
 			else
 				offset += VARSIZE_ANY(addr);
 		}

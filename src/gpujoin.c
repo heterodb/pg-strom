@@ -3929,7 +3929,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		}
 		else if (gist_index_clauses != NULL)
 		{
-			appendStringInfo(&str, "GpuHash%sJoin with GistIndex",
+			appendStringInfo(&str, "GpuHash%sJoin+GiST Index",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
@@ -5104,7 +5104,7 @@ gpujoin_codegen_projection(StringInfo source,
 		if (nattrs > 0)
 			appendStringInfo(
 				&row,
-				"    EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
+				"    EXTRACT_HEAP_TUPLE_BEGIN(addr,%s,htup);\n",
 				kds_label);
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
@@ -5276,9 +5276,9 @@ gpujoin_codegen_projection(StringInfo source,
 				appendStringInfoString(&row, temp.data);
 				resetStringInfo(&temp);
 			}
-			appendStringInfoString(
+			appendStringInfo(
 				&temp,
-				"    EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+				"    EXTRACT_HEAP_TUPLE_NEXT(addr,%s);\n", kds_label);
 		}
 		if (nattrs > 0)
 			appendStringInfoString(

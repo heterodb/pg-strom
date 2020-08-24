@@ -3161,7 +3161,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		appendStringInfoString(
 			&tbody,
 			"  /* extract the given htup and load variables */\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds_src,htup);\n");
 		for (i=1; i <= nattrs; i++)
 		{
 			bool	referenced = false;
@@ -3319,7 +3319,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			}
 			appendStringInfoString(
 				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds_src);\n");
 		}
 		appendStringInfoString(
 			&tbody,

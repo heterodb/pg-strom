@@ -1519,52 +1519,51 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
  * EXTRACT_HEAP_READ_XXXX()
  *  -> load raw values to dclass[]/values[], and update extras[]
  */
-#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)						\
+#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR,kds,htup)							\
 	do {																\
-		const HeapTupleHeaderData * __restrict__ __htup = (htup);		\
-		const kern_colmeta * __restrict__ __kds_colmeta = (kds)->colmeta; \
-		kern_colmeta	__cmeta;										\
+		kern_colmeta   *__cmeta;										\
 		cl_uint			__colidx = 0;									\
 		cl_uint			__ncols;										\
-		cl_bool			__heap_hasnull;									\
+		cl_uchar	   *__nullmap = NULL;								\
 		char		   *__pos;											\
 																		\
-		if (!__htup)													\
+		if (!(htup))													\
 			__ncols = 0;	/* to be considered as NULL */				\
 		else															\
 		{																\
-			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
+			if (((htup)->t_infomask & HEAP_HASNULL) != 0)				\
+				__nullmap = (htup)->t_bits;								\
 			__ncols = Min((kds)->ncols,									\
-						  __htup->t_infomask2 & HEAP_NATTS_MASK);		\
-			__cmeta = __kds_colmeta[__colidx];							\
-			__pos = (char *)(__htup) + __htup->t_hoff;					\
+						  (htup)->t_infomask2 & HEAP_NATTS_MASK);		\
+			__pos = (char *)(htup) + (htup)->t_hoff;					\
 			assert(__pos == (char *)MAXALIGN(__pos));					\
 		}																\
 		if (__colidx < __ncols &&										\
-			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
+			(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
 		{																\
+			__cmeta = &((kds)->colmeta[__colidx]);						\
 			(ADDR) = __pos;												\
-			__pos += (__cmeta.attlen > 0 ?								\
-					  __cmeta.attlen :									\
+			__pos += (__cmeta->attlen > 0 ?								\
+					  __cmeta->attlen :									\
 					  VARSIZE_ANY(__pos));								\
 		}																\
 		else															\
 			(ADDR) = NULL
 
-#define EXTRACT_HEAP_TUPLE_NEXT(ADDR)									\
+#define EXTRACT_HEAP_TUPLE_NEXT(ADDR,kds)								\
 		__colidx++;														\
 		if (__colidx < __ncols &&										\
-			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
+			(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
 		{																\
-			__cmeta = __kds_colmeta[__colidx];							\
+			__cmeta = &((kds)->colmeta[__colidx]);						\
 																		\
-			if (__cmeta.attlen > 0)										\
-				__pos = (char *)TYPEALIGN(__cmeta.attalign, __pos);		\
+			if (__cmeta->attlen > 0)									\
+				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
 			else if (!VARATT_NOT_PAD_BYTE(__pos))						\
-				__pos = (char *)TYPEALIGN(__cmeta.attalign, __pos);		\
+				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
 			(ADDR) = __pos;												\
-			__pos += (__cmeta.attlen > 0 ?								\
-					  __cmeta.attlen :									\
+			__pos += (__cmeta->attlen > 0 ?								\
+					  __cmeta->attlen :									\
 					  VARSIZE_ANY(__pos));								\
 		}																\
 		else															\

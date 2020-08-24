@@ -553,7 +553,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		appendStringInfoString(
 			&tfunc,
 			"  assert(htup != NULL);\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds, htup);\n");
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds,htup);\n");
 		for (anum=1; anum <= varattno_max; anum++)
 		{
 			foreach (lc, context->used_vars)
@@ -588,7 +588,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			if (anum < varattno_max)
 				appendStringInfoString(
 					&tfunc,
-					"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+					"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds);\n");
 		}
 		appendStringInfoString(
 			&tfunc,
@@ -792,7 +792,7 @@ codegen_gpuscan_projection(StringInfo kern,
 	resetStringInfo(&temp);
 	appendStringInfoString(
 		&temp,
-		"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
+		"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds_src,htup);\n");
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
@@ -929,7 +929,7 @@ codegen_gpuscan_projection(StringInfo kern,
 		}
 		appendStringInfoString(
 			&temp,
-			"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+			"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds_src);\n");
 	}
 	if (num_referenced)
 		appendStringInfoString(
