@@ -1630,70 +1630,55 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
 /*
  * Similar macro to extract IndexTuple
  */
-#define EXTRACT_INDEX_TUPLE_BEGIN(ADDR,kds,itup)					\
+#define EXTRACT_INDEX_TUPLE_BEGIN(ADDR,KDS,itup)					\
 	do {															\
-	const kern_colmeta *__cmeta = (kds)->colmeta;					\
-	cl_uint		__ncols = (kds)->ncols;								\
-	cl_uint		__colidx = 0;										\
-	cl_uchar   *__nullmap = NULL;									\
-	char	   *__pos;												\
+		const kern_colmeta *__cmeta = (KDS)->colmeta;				\
+		cl_uint		__ncols = (KDS)->ncols;							\
+		cl_uint		__colidx = 0;									\
+		cl_uchar   *__nullmap = NULL;								\
+		char	   *__pos;											\
 																	\
-	if (!(itup))													\
-		__ncols = 0;												\
-	else if (((itup)->t_info & INDEX_NULL_MASK) == 0)				\
-		__pos = itup->data;											\
-	else															\
-	{																\
-		__nullmap = (cl_uchar *)(itup)->data;						\
-		__pos = (itup)->data + MAXALIGN(BITMAPLEN((kds)->ncols));	\
-	}																\
-	if (__colidx < __ncols &&										\
-		(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
-	{																\
-		(ADDR) = __pos;												\
-		__pos += (__cmeta->attlen > 0 ?								\
-				  __cmeta->attlen :									\
-				  VARSIZE_ANY(__pos));								\
-	}																\
-	else															\
-		(ADDR) = NULL;
+		if (!(itup))												\
+			__ncols = 0;											\
+		else if (((itup)->t_info & INDEX_NULL_MASK) == 0)			\
+			__pos = itup->data;										\
+		else														\
+		{															\
+			__nullmap = (cl_uchar *)(itup)->data;					\
+			__pos = (itup)->data + MAXALIGN(BITMAPLEN(__ncols));	\
+		}															\
+		if (__colidx < __ncols &&									\
+			(!__nullmap || !att_isnull(__colidx, __nullmap)))		\
+		{															\
+			(ADDR) = __pos;											\
+			__pos += (__cmeta->attlen > 0 ?							\
+					  __cmeta->attlen :								\
+					  VARSIZE_ANY(__pos));							\
+		}															\
+		else														\
+			(ADDR) = NULL
 
-#define EXTRACT_INDEX_TUPLE_NEXY(ADDR)								\
-	__colidx++;														\
-	if (__colidx < __ncols &&										\
-		(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
-	{																\
-		__cmeta = &(kds)->colmeta[__colidx];						\
+#define EXTRACT_INDEX_TUPLE_NEXT(ADDR,KDS)							\
+		__colidx++;													\
+		if (__colidx < __ncols &&									\
+			(!__nullmap || !att_isnull(__colidx, __nullmap)))		\
+		{															\
+			__cmeta = &(KDS)->colmeta[__colidx];					\
 																	\
-		if (__cmeta->attlen > 0)									\
-			__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
-		else if (!VARATT_NOT_PAD_BYTE(__pos))						\
-			__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
-		(ADDR) = __pos;												\
-		__pos += (__cmeta->attlen > 0 ?								\
-				  __cmeta->attlen :									\
-				  VARSIZE_ANY(__pos));								\
-	}																\
-	else															\
-		(ADDR) = NULL;
+			if (__cmeta->attlen > 0)								\
+				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos); \
+			else if (!VARATT_NOT_PAD_BYTE(__pos))					 \
+				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos); \
+			(ADDR) = __pos;											\
+			__pos += (__cmeta->attlen > 0 ?							\
+					  __cmeta->attlen :								\
+					  VARSIZE_ANY(__pos));							\
+		}															\
+		else														\
+			(ADDR) = NULL
 		
-#define EXTRACT_INDEX_TUPLE_END(ADDR)								\
+#define EXTRACT_INDEX_TUPLE_END()									\
 	} while(0)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #ifdef __CUDACC__
 /*

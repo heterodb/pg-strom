@@ -1173,6 +1173,8 @@ typedef struct
 	PlannerInfo	   *root;
 	IndexOptInfo   *index;
 	AttrNumber		indexcol;
+	List		   *pseudo_tlist;
+	bool			build_pseudo_tlist;
 	bool			is_valid;
 } fixup_gist_clause_for_device_context;
 
@@ -1352,28 +1354,74 @@ __fixup_gist_clause_for_device_walker(Node *node, void *__context)
 {
 	fixup_gist_clause_for_device_context *con = __context;
 	Node	   *newnode;
+	TargetEntry	*tle;
 
 	if (!node)
 		return NULL;
 	if (match_index_to_operand(node, con->indexcol, con->index))
 	{
-		IndexOptInfo   *index = con->index;
-		AttrNumber		indexcol = con->indexcol;
-		Oid				raw_typid;
-		int32			raw_typmod;
-		Oid				raw_collid;
+		IndexOptInfo *index = con->index;
+		AttrNumber	indexcol = con->indexcol;
+		Oid			raw_typid;
+		int32		raw_typmod;
+		Oid			raw_collid;
+		Var		   *ivar;
 
 		get_atttypetypmodcoll(index->indexoid,
 							  indexcol+1,
 							  &raw_typid,
 							  &raw_typmod,
 							  &raw_collid);
-		return (Node *)makeVar(INDEX_VAR,
-							   indexcol+1,
-							   raw_typid,
-							   raw_typmod,
-							   raw_collid,
-							   0);
+		ivar = makeVar(INDEX_VAR,
+					   indexcol+1,
+					   raw_typid,
+					   raw_typmod,
+					   raw_collid, 0);
+		if (con->build_pseudo_tlist)
+		{
+			tle = makeTargetEntry((Expr *)ivar,
+								  list_length(con->pseudo_tlist) + 1,
+								  NULL,
+								  false);
+			con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
+		}
+		return (Node *)ivar;
+	}
+
+	if (con->build_pseudo_tlist)
+	{
+		RelOptInfo *rel = con->index->rel;
+		Relids		varnos = pull_varnos_of_level(node, 0);
+
+		if (!bms_overlap(varnos, rel->relids))
+		{
+			if (!IsA(node, Var))
+			{
+				List	   *subvars = pull_vars_of_level(node, 0);
+				ListCell   *lc;
+
+				foreach (lc, subvars)
+				{
+					Var	   *svar = lfirst(lc);
+
+					tle = makeTargetEntry((Expr *)copyObject(svar),
+										  list_length(con->pseudo_tlist) + 1,
+										  NULL,
+										  true);
+					con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
+				}
+			}
+			tle = makeTargetEntry((Expr *)copyObject(node),
+								  list_length(con->pseudo_tlist) + 1,
+								  NULL,
+								  false);
+			con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
+			return (Node *)makeVar(OUTER_VAR,
+								   tle->resno,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node), 0);
+		}
 	}
 	newnode = expression_tree_mutator(node,
 									  __fixup_gist_clause_for_device_walker,
@@ -1412,7 +1460,8 @@ static Expr *
 fixup_gist_clause_for_device(PlannerInfo *root,
 							 IndexOptInfo *index,
 							 AttrNumber indexcol,
-							 Expr *clause)
+							 Expr *clause,
+							 List **p_pseudo_tlist)
 {
 	fixup_gist_clause_for_device_context con;
 	Node	   *result;
@@ -1423,12 +1472,21 @@ fixup_gist_clause_for_device(PlannerInfo *root,
 		con.root = root;
 		con.index = index;
 		con.indexcol = indexcol;
+		con.pseudo_tlist = NIL;
+		con.build_pseudo_tlist = (p_pseudo_tlist != NULL);
 		con.is_valid = true;
 
 		result = __fixup_gist_clause_for_device_walker((Node *)clause, &con);
 		if (con.is_valid)
+		{
+			if (p_pseudo_tlist)
+				*p_pseudo_tlist = con.pseudo_tlist;
 			return (Expr *)result;
+		}
 	}
+
+	if (p_pseudo_tlist)
+		*p_pseudo_tlist = con.pseudo_tlist;
 	return NULL;
 }
 
@@ -1462,7 +1520,7 @@ match_clause_to_index(PlannerInfo *root,
 		else if (IsA(rinfo->clause, FuncExpr))
 			expr = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
 
-		dev_expr = fixup_gist_clause_for_device(root, index, indexcol, expr);
+		dev_expr = fixup_gist_clause_for_device(root, index, indexcol, expr, NULL);
 		if (dev_expr && pgstrom_device_expression(root, NULL, dev_expr))
 		{
 			__selectivity = clauselist_selectivity(root,
@@ -4273,6 +4331,196 @@ ExecShutdownGpuJoin(CustomScanState *node)
 }
 
 /*
+ * pgstrom_codegen_var_declarations
+ *
+ * declaration of the variables
+ */
+static void
+pgstrom_codegen_var_declarations(StringInfo source,
+								 int curr_depth,
+								 List *kvars_list)								 
+{
+	StringInfoData	   *inners = alloca(sizeof(StringInfoData) * curr_depth);
+	StringInfoData		base;
+	StringInfoData		row;
+	StringInfoData		arrow;
+	StringInfoData		column;
+	ListCell		   *lc;
+	int					i;
+
+	/* init */
+	initStringInfo(&base);
+	initStringInfo(&row);
+	initStringInfo(&arrow);
+	initStringInfo(&column);
+	for (i=0; i < curr_depth; i++)
+		initStringInfo(&inners[i]);
+
+	/* code to init variables */
+	foreach (lc, kvars_list)
+	{
+		Var		   *kvar = lfirst(lc);
+		int			depth = kvar->varno;
+		devtype_info *dtype;
+
+		dtype = pgstrom_devtype_lookup(kvar->vartype);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(kvar->vartype));
+		if (depth == 0)
+		{
+			/* RIGHT OUTER may have kds==NULL */
+			if (base.len == 0)
+				appendStringInfoString(
+					&base,
+					"  /* variable load in depth-0 (outer KDS) */\n"
+					"  offset = (!o_buffer ? 0 : o_buffer[0]);\n"
+					"  if (!kds)\n"
+					"  {\n");
+			appendStringInfo(
+				&base,
+				"    pg_datum_ref(kcxt,KVAR_%u,NULL); //pg_%s_t\n",
+				kvar->varoattno,
+				dtype->type_name);
+
+			/* KDS_FORMAT_ARROW only if depth == 0 */
+			if (arrow.len == 0)
+				appendStringInfoString(
+					&arrow,
+					"  else if (kds->format == KDS_FORMAT_ARROW)\n"
+					"  {\n");
+			appendStringInfo(
+				&arrow,
+				"    if (offset > 0)\n"
+				"      pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,offset-1);\n"
+				"    else\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n",
+				kvar->varoattno,
+				kvar->varattno - 1,
+				kvar->varoattno);
+
+			/* KDS_FORMAT_COLUMN only if depth == 0 */
+			if (column.len == 0)
+				appendStringInfoString(
+					&column,
+					"  else if (kds->format == KDS_FORMAT_COLUMN)\n"
+					"  {\n");
+			appendStringInfo(
+				&column,
+				"    if (offset == 0)\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n"
+				"    else\n"
+				"    {\n"
+				"      datum = kern_get_datum_column(kds,extra,%u,offset-1);\n"
+				"      pg_datum_ref(kcxt,KVAR_%u,datum);\n"
+				"    }\n",
+				kvar->varoattno,
+				kvar->varattno-1, kvar->varoattno);
+
+			/* KDS_FORMAT_ROW or KDS_FORMAT_BLOCK */
+			if (row.len == 0)
+				appendStringInfoString(
+					&row,
+					"  else\n"
+					"  {\n"
+					"    /* KDS_FORMAT_ROW or KDS_FORMAT_BLOCK */\n"
+					"    if (offset == 0)\n"
+					"      htup = NULL;\n"
+					"    else if (kds->format == KDS_FORMAT_ROW)\n"
+					"      htup = KDS_ROW_REF_HTUP(kds,offset,NULL,NULL);\n"
+					"    else if (kds->format == KDS_FORMAT_BLOCK)\n"
+					"      htup = KDS_BLOCK_REF_HTUP(kds,offset,NULL,NULL);\n"
+					"    else\n"
+					"      htup = NULL; /* bug */\n");
+			appendStringInfo(
+				&row,
+				"    datum = GPUJOIN_REF_DATUM(kds->colmeta,htup,%u);\n"
+				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
+				kvar->varattno-1,
+				kvar->varoattno, dtype->type_name);
+		}
+		else if (depth < curr_depth)
+		{
+			StringInfo	decl = &inners[depth-1];
+
+			if (decl->len == 0)
+			{
+				appendStringInfo(
+					decl,
+					"  /* variable load in depth-%u (inner KDS) */\n"
+					"  {\n"
+					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
+					"    if (!o_buffer)\n"
+					"      htup = NULL;\n"
+					"    else\n"
+					"      htup = KDS_ROW_REF_HTUP(kds_in,o_buffer[%d],\n"
+					"                              NULL, NULL);\n",
+					depth,
+					depth,
+					depth);
+			}
+			appendStringInfo(
+				decl,
+				"    datum = GPUJOIN_REF_DATUM(kds_in->colmeta,htup,%u);\n"
+				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
+				kvar->varattno - 1,
+				kvar->varoattno,
+				dtype->type_name);
+		}
+		else if (depth == curr_depth)
+		{
+			StringInfo	decl = &inners[depth-1];
+
+			if (decl->len == 0)
+			{
+				appendStringInfo(
+					decl,
+					"  /* variable load in depth-%u (inner KDS) */\n"
+					"  {\n"
+					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n",
+					depth,
+					depth);
+			}
+			appendStringInfo(
+				decl,
+				"    datum = GPUJOIN_REF_DATUM(kds_in->colmeta,i_htup,%u);\n"
+				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
+				kvar->varattno - 1,
+				kvar->varoattno,
+				dtype->type_name);
+		}
+		else
+		{
+			elog(ERROR, "Bug? kernel Var-node is out of range: %s",
+				 nodeToString(kvar));
+		}
+	}
+
+	/* close the block */
+	if (base.len > 0)
+		appendStringInfo(source, "%s  }\n", base.data);
+	if (arrow.len > 0)
+		appendStringInfo(source, "%s  }\n", arrow.data);
+	if (column.len > 0)
+		appendStringInfo(source, "%s  }\n", column.data);
+	if (row.len > 0)
+		appendStringInfo(source, "%s  }\n", row.data);
+	for (i=0; i < curr_depth; i++)
+	{
+		StringInfo	decl = &inners[i];
+		if (decl->len > 0)
+			appendStringInfo(source, "%s  }\n", decl->data);
+		pfree(decl->data);
+	}
+	pfree(base.data);
+	pfree(row.data);
+	pfree(arrow.data);
+	pfree(column.data);
+
+	appendStringInfoChar(source, '\n');
+}
+
+/*
  * gpujoin_codegen_var_decl
  *
  * declaration of the variables in 'used_var' list
@@ -4285,21 +4533,13 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 {
 	List		   *kern_vars = NIL;
 	ListCell	   *cell;
-	int				depth;
 	devtype_info   *dtype;
-	StringInfoData	row;
-	StringInfoData	arrow;
-	StringInfoData	column;
-
-	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
-	initStringInfo(&row);
-	initStringInfo(&arrow);
-	initStringInfo(&column);
 
 	/*
 	 * Pick up variables in-use and append its properties in the order
 	 * corresponding to depth/resno.
 	 */
+	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	foreach (cell, context->used_vars)
 	{
 		Var		   *varnode = lfirst(cell);
@@ -4333,36 +4573,9 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			}
 		}
 		if (!kernode)
-			elog(ERROR, "Bug? device varnode was not is ps_tlist: %s",
+			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
 				 nodeToString(varnode));
-
-		/*
-		 * attach 'kernode' in the order corresponding to depth/resno.
-		 */
-		if (kern_vars == NIL)
-			kern_vars = list_make1(kernode);
-		else
-		{
-			lc2 = NULL;
-			foreach (lc1, kern_vars)
-			{
-				Var	   *varnode = lfirst(lc1);
-
-				if (varnode->varno > kernode->varno ||
-					(varnode->varno == kernode->varno &&
-					 varnode->varattno > kernode->varattno))
-				{
-					if (lc2 != NULL)
-						lappend_cell(kern_vars, lc2, kernode);
-					else
-						kern_vars = lcons(kernode, kern_vars);
-					break;
-				}
-				lc2 = lc1;
-			}
-			if (lc1 == NULL)
-				kern_vars = lappend(kern_vars, kernode);
-		}
+		kern_vars = lappend(kern_vars, kernode);
 	}
 
 	/*
@@ -4395,174 +4608,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			kvar->varoattno);
 	}
 	appendStringInfoChar(source, '\n');
-
-	/*
-	 * variable initialization
-	 */
-	depth = -1;
-	foreach (cell, kern_vars)
-	{
-		Var			   *keynode = lfirst(cell);
-		devtype_info   *dtype;
-
-		dtype = pgstrom_devtype_lookup(keynode->vartype);
-		if (!dtype)
-			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(keynode->vartype));
-		if (depth != keynode->varno)
-		{
-			/* close the previous block */
-			if (depth == 0)
-			{
-				appendStringInfo(
-					source,
-					"  }\n"
-					"%s  }\n"
-					"%s  }\n"
-					"%s  }\n",
-					arrow.data,
-					column.data,
-					row.data);
-			}
-			else if (depth > 0)
-			{
-				appendStringInfo(
-					source,
-					"%s  }\n", row.data);
-			}
-			resetStringInfo(&row);
-			resetStringInfo(&arrow);
-			resetStringInfo(&column);
-
-			depth = keynode->varno;
-			if (depth == 0)
-			{
-				appendStringInfoString(
-					source,
-					"  /* variable load in depth-0 (outer KDS) */\n"
-					"  offset = (!o_buffer ? 0 : o_buffer[0]);\n"
-					"  if (!kds)\n"
-					"  {\n");
-				appendStringInfoString(
-					&row,
-					"  else\n"
-					"  {\n"
-					"    /* KDS_FORMAT_ROW or KDS_FORMAT_BLOCK */\n"
-					"    if (offset == 0)\n"
-					"      htup = NULL;\n"
-					"    else if (kds->format == KDS_FORMAT_ROW)\n"
-					"      htup = KDS_ROW_REF_HTUP(kds,offset,NULL,NULL);\n"
-					"    else if (kds->format == KDS_FORMAT_BLOCK)\n"
-					"      htup = KDS_BLOCK_REF_HTUP(kds,offset,NULL,NULL);\n"
-					"    else\n"
-					"      htup = NULL; /* bug */\n");
-				appendStringInfoString(
-					&arrow,
-					"  else if (kds->format == KDS_FORMAT_ARROW)\n"
-					"  {\n");
-				appendStringInfoString(
-					&column,
-					"  else if (kds->format == KDS_FORMAT_COLUMN)\n"
-					"  {\n");
-			}
-			else if (depth < cur_depth)
-			{
-				appendStringInfo(
-					&row,
-					"  /* variable load in depth-%u (inner KDS) */\n"
-					"  {\n"
-					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"    if (!o_buffer)\n"
-					"      htup = NULL;\n"
-					"    else\n"
-					"      htup = KDS_ROW_REF_HTUP(kds_in,o_buffer[%d],\n"
-					"                              NULL, NULL);\n",
-					depth,
-					depth,
-					depth);
-			}
-			else if (depth == cur_depth)
-			{
-				appendStringInfo(
-					&row,
-					"  /* variable load in depth-%u (inner KDS) */\n"
-					"  {\n"
-					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"    htup = i_htup;\n",
-					depth,
-					depth);
-			}
-			else
-				elog(ERROR, "Bug? variables reference too deep");
-		}
-		/* RIGHT OUTER may have kds==NULL */
-		if (depth == 0)
-			appendStringInfo(
-				source,
-				"    pg_datum_ref(kcxt,KVAR_%u,NULL); //pg_%s_t\n",
-				keynode->varoattno,
-				dtype->type_name);
-
-		appendStringInfo(
-			&row,
-			"    datum = GPUJOIN_REF_DATUM(%s->colmeta,htup,%u);\n"
-			"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
-			(depth == 0 ? "kds" : "kds_in"),
-			keynode->varattno - 1,
-			keynode->varoattno, dtype->type_name);
-
-		/* KDS_FORMAT_ARROW only if depth == 0 */
-		if (depth == 0)
-			appendStringInfo(
-				&arrow,
-				"    if (offset > 0)\n"
-				"      pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,offset-1);\n"
-				"    else\n"
-				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n",
-				keynode->varoattno, keynode->varattno - 1,
-				keynode->varoattno);
-		/* KDS_FORMAT_COLUMN only if depth == 0 */
-		if (depth == 0)
-			appendStringInfo(
-				&column,
-				"    if (offset == 0)\n"
-				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n"
-				"    else\n"
-				"    {\n"
-				"      datum = kern_get_datum_column(kds,extra,%u,offset-1);\n"
-				"      pg_datum_ref(kcxt,KVAR_%u,datum);\n"
-				"    }\n",
-				keynode->varoattno,
-				keynode->varattno-1, keynode->varoattno);
-	}
-
-	/* close the previous block */
-	if (depth >= 0)
-	{
-		if (depth == 0)
-		{
-			appendStringInfo(
-				source,
-				"  }\n"
-				"%s  }\n"
-				"%s  }\n"
-				"%s  }\n",
-				arrow.data,
-				column.data,
-				row.data);
-		}
-		else
-		{
-			appendStringInfo(
-				source,
-				"%s  }\n", row.data);
-		}
-	}
-	pfree(row.data);
-	pfree(arrow.data);
-	pfree(column.data);
-	
-	appendStringInfo(source, "\n");
+	pgstrom_codegen_var_declarations(source, cur_depth, kern_vars);
 }
 
 /*
@@ -4752,15 +4798,6 @@ gpujoin_codegen_hash_value(StringInfo source,
 
 /*
  * gpujoin_codegen_gist_index_quals
- *
- * code generator for:
- * DEVICE_FUNCTION(cl_bool)
- * gpujoin_gist_index_quals_depthXX(kern_context *kcxt,
- *                                  kern_data_store *kds,
- *                                  kern_data_extra *extra,
- *                                  kern_multirels *kmrels,
- *                                  cl_uint *x_buffer,
- *                                  IndexTupleData *itup)
  */
 static void
 gpujoin_codegen_gist_index_quals(StringInfo source,
@@ -4773,129 +4810,296 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	IndexOptInfo   *gist_index = gj_path->inners[depth-1].gist_index;
 	List		   *gist_clauses = gj_path->inners[depth-1].gist_clauses;
 	List		   *pseudo_tlist_saved = context->pseudo_tlist;
+	List		   *pseudo_tlist = NIL;
 	List		   *device_clauses;
-	List		   *vars_list;
+	List		   *kvars_list = NIL;
 	AttrNumber		indexcol = 0;
-	AttrNumber		max_column = -1;
 	devtype_info   *dtype;
-	StringInfoData body;
-	StringInfoData decl;
+	StringInfoData	body;
+	StringInfoData	decl;
 	StringInfoData	temp;
-	ListCell	   *lc;
+	StringInfoData	alias;
+	StringInfoData	unalias;
+	ListCell	   *cell;
 
 	initStringInfo(&body);
 	initStringInfo(&decl);
 	initStringInfo(&temp);
+	initStringInfo(&alias);
+	initStringInfo(&unalias);
 
-	context->used_vars = NIL;
-	context->param_refs = NULL;
-	resetStringInfo(&context->decl_temp);
-
-	appendStringInfo(
-		&decl,
-		"  kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels,%d);\n",
-		depth);
-	
 	device_clauses = (List *)
 		fixup_gist_clause_for_device(root,
 									 gist_index,
 									 indexcol,
-									 (Expr *)gist_clauses);
-	/* adjust pseudo_tlist for temporary Vars for index columns */
-	context->pseudo_tlist = list_copy(context->pseudo_tlist);
-	vars_list = pull_vars_of_level((Node *)device_clauses, 0);
-	foreach (lc, vars_list)
-	{
-		Var		   *ivar = lfirst(lc);
-		AttrNumber	resno;
+									 (Expr *)gist_clauses,
+									 &pseudo_tlist);
+	context->pseudo_tlist = pseudo_tlist;
 
-		if (ivar->varno != INDEX_VAR)
+	/*
+	 * Build up the GpuJoinGiSTKeysDepth%u structure, and
+	 * GiST key variables to be loaded.
+	 */
+	appendStringInfo(
+		source,
+		"/* ------------------------------------------------\n"
+		" *\n"
+		" * GiST-Index support routines (depth=%u)\n"
+		" *\n"
+		" * ------------------------------------------------ */\n"
+		"typedef struct GpuJoinGiSTKeysDepth%u_s {\n",
+		depth, depth);
+	foreach (cell, pseudo_tlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		Oid			type_oid;
+
+		if (IsA(tle->expr, Var) && ((Var *)tle->expr)->varno == INDEX_VAR)
+			continue;		/* skip references to index tuple */
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(type_oid));
+		if (!tle->resjunk)
+		{
+			appendStringInfo(
+				source,
+				"  pg_%s_t  __KVAR_%u;\n",
+				dtype->type_name, tle->resno);
+			appendStringInfo(
+				&alias,
+				"#define KVAR_%u ((keys)->__KVAR_%u)\n", tle->resno, tle->resno);
+			appendStringInfo(
+				&unalias,
+				"#undef  KVAR_%u\n", tle->resno);
+		}
+		else
+		{
+			/* temporary variable for expression calculation */
+			Assert(IsA(tle->expr, Var));
+			appendStringInfo(
+				&decl,
+				"  pg_%s_t  KVAR_%u;\n",
+				dtype->type_name, tle->resno);
+		}
+
+		if (IsA(tle->expr, Var))
+		{
+			Var		   *kvar = (Var *)tle->expr;
+			Var		   *keynode = NULL;
+			ListCell   *lc1, *lc2, *lc3;
+
+			forthree (lc1, pseudo_tlist_saved,
+					  lc2, gj_info->ps_src_depth,
+					  lc3, gj_info->ps_src_resno)
+			{
+				TargetEntry *__tle = lfirst(lc1);
+				int			src_depth = lfirst_int(lc2);
+				int			src_resno = lfirst_int(lc3);
+
+				if (equal(__tle->expr, kvar))
+				{
+					keynode = copyObject(kvar);
+					keynode->varno = src_depth;
+					keynode->varattno = src_resno;
+					keynode->varoattno = tle->resno;
+					if (src_depth < 0 || src_depth >= depth)
+						elog(ERROR, "Bug? device varnode out of range");
+					kvars_list = list_append_unique(kvars_list, keynode);
+					break;
+				}
+			}
+			if (!keynode)
+				elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
+					 nodeToString(kvar));
+		}
+	}
+	appendStringInfo(
+		source,
+		"} GpuJoinGiSTKeysDepth%u_t;\n"
+		"%s\n",
+		depth, alias.data);
+
+	/*
+	 * Function to load GiST key variables
+	 */
+	context->used_vars = NIL;
+	context->param_refs = NULL;
+	resetStringInfo(&context->decl_temp);
+
+	/* load the primitive values of GiST index keys */
+	appendStringInfo(
+		&body,
+		"  keys = (GpuJoinGiSTKeysDepth%u_t *)\n"
+		"             kern_context_alloc(kcxt, sizeof(*keys));\n"
+		"  if (!keys)\n"
+		"  {\n"
+		"    STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,\n"
+		"                  \"out of memory\");\n"
+		"    return NULL;\n"
+		"  }\n", depth);
+	pgstrom_codegen_var_declarations(&body, depth, kvars_list);
+	/* expressions if any */
+	foreach (cell, pseudo_tlist)
+	{
+		TargetEntry	*tle = lfirst(cell);
+		char	   *code;
+
+		if (tle->resjunk)
 			continue;
-		max_column = Max(max_column, ivar->varattno);
-		resno = list_length(context->pseudo_tlist) + 1;
+		if (IsA(tle->expr, Var))
+			continue;
+		code = pgstrom_codegen_expression((Node *)tle->expr, context);
+		appendStringInfo(
+			&body,
+			"  KVAR_%u = %s;\n",
+			tle->resno, code);
+	}
+	pgstrom_codegen_param_declarations(&decl, context);
+
+	appendStringInfo(
+		source,
+		"STATIC_FUNCTION(void *)\n"
+        "gpujoin_gist_load_keys_depth%d(kern_context *kcxt,\n"
+        "                              kern_multirels *kmrels,\n"
+        "                              kern_data_store *kds,\n"
+        "                              kern_data_extra *extra,\n"
+        "                              cl_uint *o_buffer)\n"
+        "{\n"
+        "  GpuJoinGiSTKeysDepth%u_t *keys;\n"
+        "  HeapTupleHeaderData *htup  __attribute__((unused));\n"
+        "  kern_data_store *kds_in    __attribute__((unused));\n"
+        "  void *datum                __attribute__((unused));\n"
+        "  cl_uint offset             __attribute__((unused));\n"
+		"%s\n%s"
+		"  return keys;\n"
+		"}\n\n",
+		depth,
+		depth,
+		decl.data,
+		body.data);
+
+	/*
+	 * Function to check GiST index quals
+	 */
+	resetStringInfo(&decl);
+	resetStringInfo(&body);
+	context->used_vars = NIL;
+    context->param_refs = NULL;
+    resetStringInfo(&context->decl_temp);
+
+	foreach (cell, pseudo_tlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		Var			*ivar = (Var *)tle->expr;
+
+		if (tle->resjunk || !IsA(ivar, Var) || ivar->varno != INDEX_VAR)
+			continue;
 		dtype = pgstrom_devtype_lookup(ivar->vartype);
 		if (!dtype)
 			elog(ERROR, "device type \"%s\" not found",
 				 format_type_be(ivar->vartype));
-		appendStringInfo(&decl,
-						 "  pg_%s_t KVAR_%u;\n",
-						 dtype->type_name,
-						 resno);
-		ivar->varoattno = resno;
-		context->pseudo_tlist = lappend(context->pseudo_tlist,
-										makeTargetEntry((Expr *)ivar,
-														resno,
-														NULL,
-														false));
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t KVAR_%u;\n",
+			dtype->type_name, tle->resno);
 	}
 
-	/* make device clauses for each index-column */
-	foreach (lc, device_clauses)
+	appendStringInfoString(
+		&body,
+		"  EXTRACT_INDEX_TUPLE_BEGIN(addr, kds_gist, itup);\n");
+	for (indexcol=0; indexcol < gist_index->ncolumns; indexcol++)
 	{
-		char   *temp = pgstrom_codegen_expression(lfirst(lc), context);
+		foreach (cell, pseudo_tlist)
+		{
+			TargetEntry *tle = lfirst(cell);
+			Var			*ivar = (Var *)tle->expr;
+
+			if (!tle->resjunk &&
+				IsA(ivar, Var) &&
+				ivar->varno == INDEX_VAR &&
+				ivar->varattno == indexcol+1)
+			{
+				appendStringInfo(
+					&body,
+					"%s"
+					"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
+					temp.data,
+					tle->resno);
+				resetStringInfo(&temp);
+				break;
+			}
+		}
+		appendStringInfoString(
+			&temp,
+			"  EXTRACT_INDEX_TUPLE_NEXT(addr, kds_gist);\n");
+	}
+	appendStringInfoString(
+		&body,
+		"  EXTRACT_INDEX_TUPLE_END();\n\n");
+
+	/* fixup pseudo_tlist for expression */
+	context->pseudo_tlist = NIL;
+	foreach (cell, pseudo_tlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+		Var			*pvar = (Var *)tle->expr;
+
+		if (!tle->resjunk &&
+			(!IsA(pvar, Var) || pvar->varno != INDEX_VAR))
+		{
+			Var	   *var = makeVar(OUTER_VAR,
+								  tle->resno,
+								  exprType((Node *)tle->expr),
+								  exprTypmod((Node *)tle->expr),
+								  exprCollation((Node *)tle->expr), 0);
+			tle = makeTargetEntry((Expr *)var, tle->resno, NULL, false);
+		}
+		context->pseudo_tlist = lappend(context->pseudo_tlist, tle);
+	}
+
+	foreach (cell, device_clauses)
+	{
+		Expr   *clause = lfirst(cell);
 
 		appendStringInfo(
 			&body,
-			"  /* indexcol-%d */\n"
 			"  if (!EVAL(%s))\n"
 			"    return false;\n",
-			indexcol, temp);
-		pfree(temp);
-		indexcol++;
+			pgstrom_codegen_expression((Node *)clause, context));
 	}
-	/* Var/Param declaration */
-	gpujoin_codegen_var_param_decl(&decl,
-								   gj_info,
-								   depth,
-								   context);
-	/* Load values from the IndexTuple */
-	appendStringInfoString(
-		&decl,
-		"  EXTRACT_INDEX_TUPLE_BEGIN(datum, kds_gist, itup);\n");
-	for (indexcol=1; indexcol <= max_column; indexcol++)
-	{
-		foreach (lc, vars_list)
-		{
-			Var	   *ivar = lfirst(lc);
-
-			if (ivar->varno != INDEX_VAR ||
-				ivar->varattno != indexcol)
-				continue;
-
-			dtype = pgstrom_devtype_lookup(ivar->vartype);
-			if (!dtype)
-				elog(ERROR, "device type \"%s\" not found",
-					 format_type_be(ivar->vartype));
-			appendStringInfo(
-				&decl,
-				"  pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
-				ivar->varoattno, dtype->type_name);
-		}
-	}
-	appendStringInfoString(
-		&decl,
-		"  EXTRACT_INDEX_TUPLE_END();\n");
-
+	pgstrom_codegen_param_declarations(&decl, context);
+	
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_gist_index_quals_depth%d(kern_context *kcxt,\n"
-		"                                kern_data_store *kds,\n"
-		"                                kern_data_extra *extra,\n"
-		"                                kern_multirels *kmrels,\n"
-		"                                cl_uint *o_buffer,\n"
+		"gpujoin_gist_index_quals_depth%u(kern_context *kcxt,\n"
+		"                                kern_data_store *kds_gist,\n"
+		"                                void *__gist_keys,\n"
 		"                                IndexTupleData *itup)\n"
 		"{\n"
-		"%s\n%s"
+		"  GpuJoinGiSTKeysDepth%u_t *keys\n"
+		"        = (GpuJoinGiSTKeysDepth%u_t *)__gist_keys;\n"
+		"  char *addr;\n"
+		"%s\n"
+		"%s\n"
 		"  return true;\n"
-		"}\n\n",
+		"}\n",
+		depth,
+		depth,
 		depth,
 		decl.data,
 		body.data);
+	appendStringInfo(source, "%s\n", unalias.data);
+
 	/* cleanup */
 	pfree(decl.data);
 	pfree(body.data);
 	pfree(temp.data);
+	pfree(alias.data);
+	pfree(unalias.data);
 	context->pseudo_tlist = pseudo_tlist_saved;
 }
 
@@ -5571,38 +5775,60 @@ gpujoin_codegen(PlannerInfo *root,
 
 	appendStringInfoString(
 		 &source,
-		 "DEVICE_FUNCTION(cl_bool)\n"
-		 "gpujoin_gist_index_quals(kern_context *kcxt,\n"
-		 "                         kern_data_store *kds,\n"
-		 "                         kern_data_extra *extra,\n"
-		 "                         kern_multirels *kmrels,\n"
-		 "                         cl_int depth,\n"
-		 "                         cl_uint *o_buffer,\n"
-		 "                         IndexTupleData *itup)\n"
-		 "{\n"
-		 "  switch (depth)\n"
-		 "  {\n");
+		 "DEVICE_FUNCTION(void *)\n"
+		 "gpujoin_gist_load_keys(kern_context *kcxt,\n"
+		 "                       kern_multirels *kmrels,\n"
+		 "                       kern_data_store *kds,\n"
+		 "                       kern_data_extra *extra,\n"
+		 "                       cl_int depth,\n"
+		 "                       cl_uint *x_buffer)\n"
+		 "{\n");
 	for (depth=0; depth < gj_path->num_rels; depth++)
 	{
 		if (!gj_path->inners[depth].gist_index)
 			continue;
 		appendStringInfo(
 			&source,
-			"  case %u:\n"
-			"    return gpujoin_gist_index_quals_depth%u(kcxt,\n"
-			"                                           kds,extra,\n"
-			"                                           kmrels,\n"
-			"                                           o_buffer,\n"
-			"                                           itup);\n",
+			"  if (depth == %u)\n"
+			"    return gpujoin_gist_load_keys_depth%u(kcxt,\n"
+			"                                         kmrels,\n"
+			"                                         kds, extra,\n"
+			"                                         x_buffer);\n",
 			depth+1, depth+1);
 	}
 	appendStringInfoString(
 		&source,
-		"  default:\n"
-		"    STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
-		"                  \"GpuJoin: wrong code generation\");\n"
-		"    break;\n"
-		"  }\n"
+		"  STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+		"                \"GpuJoin: wrong code generation\");\n"
+		"  return NULL;\n"
+		"}\n\n");
+
+	appendStringInfoString(
+		&source,
+		"DEVICE_FUNCTION(cl_bool)\n"
+		"gpujoin_gist_index_quals(kern_context *kcxt,\n"
+		"                         cl_int depth,\n"
+		"                         kern_data_store *kds_gist,\n"
+		"                         void *gist_keys,\n"
+		"                         IndexTupleData *itup)\n"
+		"{\n");
+	for (depth=0; depth < gj_path->num_rels; depth++)
+	{
+		if (!gj_path->inners[depth].gist_index)
+			continue;
+		appendStringInfo(
+			&source,
+			"  if (depth == %u)\n"
+			"    return gpujoin_gist_index_quals_depth%u(kcxt,\n"
+			"                                          kds_gist,\n"
+			"                                          gist_keys,\n"
+			"                                          itup);\n",
+			depth+1, depth+1);
+	}
+	appendStringInfoString(
+		&source,
+		"  STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
+		"                \"GpuJoin: wrong code generation\");\n"
 		"  return false;\n"
 		"}\n\n");
 
@@ -6839,13 +7065,6 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 								kgjoin->stat_nitems[i]);
 	}
 	/* debug counters if any */
-	fprintf(stderr,
-			"GpuJoin %ld %ld %ld %ld\n",
-			kgjoin->debug_counter0,
-			kgjoin->debug_counter1,
-			kgjoin->debug_counter2,
-			kgjoin->debug_counter3);
-
 	if (kgjoin->debug_counter0 != 0)
 		pg_atomic_fetch_add_u64(&gj_rtstat->c.debug_counter0, kgjoin->debug_counter0);
 	if (kgjoin->debug_counter1 != 0)

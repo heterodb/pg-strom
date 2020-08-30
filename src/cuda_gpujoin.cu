@@ -1128,6 +1128,12 @@ GistPageIsLeaf(PageHeaderData *page)
 }
 
 STATIC_INLINE(cl_bool)
+GistPageIsDeleted(PageHeaderData *page)
+{
+	return (GistPageGetOpaque(page)->flags & F_DELETED) != 0;
+}
+
+STATIC_INLINE(cl_bool)
 GistFollowRight(PageHeaderData *page)
 {
 	return (GistPageGetOpaque(page)->flags & F_FOLLOW_RIGHT) != 0;
@@ -1136,21 +1142,20 @@ GistFollowRight(PageHeaderData *page)
 /* root page of a gist index */
 #define GIST_ROOT_BLKNO			0
 
+#include "cuda_postgis.h"
 /*
  * gpujoin_gist_getnext
  */
 STATIC_FUNCTION(ItemPointerData *)
 gpujoin_gist_getnext(kern_context *kcxt,
-					 kern_multirels *kmrels,
-					 kern_data_store *kds_src,
-					 kern_data_extra *kds_extra,
 					 cl_int depth,
-					 cl_uint *x_buffer,
+					 kern_data_store *kds_gist,
+					 void *gist_keys,
 					 cl_uint *p_item_offset)
 {
-	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
 	PageHeaderData *gist_page;
+	cl_char		   *vlpos_saved = kcxt->vlpos;
 	OffsetNumber	start;
 	OffsetNumber	i, maxoff;
 
@@ -1177,10 +1182,13 @@ gpujoin_gist_getnext(kern_context *kcxt,
 		gist_page = (PageHeaderData *)((char *)lpp - off);
 		start = OffsetNumberNext(lpp - gist_page->pd_linp + 1);
 	}
-
 restart:
 	assert((((char *)gist_page - (char *)gist_base) & (BLCKSZ - 1)) == 0);
-	maxoff = PageGetMaxOffsetNumber(gist_page);
+	if (!GistPageIsDeleted(gist_page))
+		maxoff = PageGetMaxOffsetNumber(gist_page);
+	else
+		maxoff = InvalidOffsetNumber;	/* skip loop if page is already deleted */
+
 	for (i=start; i <= maxoff; i = OffsetNumberNext(i))
 	{
 		ItemIdData	   *lpp = PageGetItemId(gist_page, i);
@@ -1189,14 +1197,12 @@ restart:
 		if (ItemIdIsDead(lpp))
 			continue;
 		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
-		/* rewind the varlena buffer */
-		kcxt->vlpos = kcxt->vlbuf;
+
+		kcxt->vlpos = vlpos_saved;	/* rewind the varlena buffer */
 		if (gpujoin_gist_index_quals(kcxt,
-									 kds_src,
-									 kds_extra,
-									 kmrels,
 									 depth,
-									 x_buffer,
+									 kds_gist,
+									 gist_keys,
 									 itup))
 		{
 			if (GistPageIsLeaf(gist_page))
@@ -1264,7 +1270,9 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 					   cl_bool *matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
+	void		   *gist_keys = NULL;
 	cl_uint			rd_index;
 	cl_uint			wr_index;
 	cl_uint			t_offset = UINT_MAX;
@@ -1307,11 +1315,27 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		kern_hashitem	*khitem;
 		cl_uint		hash_value;
 
-		/* outer side is out of range */
 		if (rd_index >= write_pos[depth-1])
 		{
+			/* outer side is out of range */
 			l_state[depth] = UINT_MAX;
 			break;
+		}
+		else if (!gist_keys)
+		{
+			/* load the key from outer relations */
+			gist_keys = gpujoin_gist_load_keys(kcxt,
+											   kmrels,
+											   kds_src,
+											   kds_extra,
+											   depth,
+											   rd_stack);
+			if (!gist_keys)
+			{
+				/* likely, out of memory */
+				l_state[depth] = UINT_MAX;
+				break;
+			}
 		}
 
 		/*
@@ -1319,11 +1343,9 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		 * from the root page. Elsewhere, suspend the scan from the next item.
 		 */
 		t_ctid = gpujoin_gist_getnext(kcxt,
-									  kmrels,
-									  kds_src,
-									  kds_extra,
 									  depth,
-									  rd_stack,
+									  kds_gist,
+									  gist_keys,
 									  &l_state[depth]);
 		if (!t_ctid)
 		{
