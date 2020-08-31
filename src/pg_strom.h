@@ -187,7 +187,9 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <nvrtc.h>
-
+#ifdef WITH_CUFILE
+#include <cufile.h>
+#endif
 #include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -1468,6 +1470,12 @@ extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
  * nvrtc.c
  */
 extern void		pgstrom_init_nvrtc(void);
+
+/*
+ * cufile.c
+ */
+extern bool		pgstrom_cufile_enabled;
+extern void		pgstrom_init_cufile(void);
 
 /*
  * float2.c

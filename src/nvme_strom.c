@@ -55,7 +55,7 @@ typedef struct PCIDevEntry	PCIDevEntry;
 
 /* static variables/functions */
 static HTAB		   *nvmeHash = NULL;
-static bool			nvme_strom_enabled;			/* GUC */
+static bool			nvme_strom_enabled = false;	/* GUC (optional) */
 static int			nvme_strom_threshold_kb;	/* GUC */
 static char		   *nvme_manual_distance_map;	/* GUC */
 static void			apply_nvme_manual_distance_map(void);
@@ -723,20 +723,165 @@ apply_nvme_manual_distance_map(void)
 typedef struct
 {
 	Oid		tablespace_oid;
-	int		nvme_optimal_gpu;
-} vfs_nvme_status;
+	int		optimal_gpu;
+} tablespace_optimal_gpu_hentry;
 
-static HTAB	   *vfs_nvme_htable = NULL;
+typedef struct
+{
+	int		major;
+	int		minor;
+	int		optimal_gpu;
+} filesystem_optimal_gpu_hentry;
+
+static HTAB	   *tablespace_optimal_gpu_htable = NULL;
+static HTAB	   *filesystem_optimal_gpu_htable = NULL;
 
 static void
-vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
+tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 {
 	/* invalidate all the cached status */
-	if (vfs_nvme_htable)
+	if (tablespace_optimal_gpu_htable)
 	{
-		hash_destroy(vfs_nvme_htable);
-		vfs_nvme_htable = NULL;
+		hash_destroy(tablespace_optimal_gpu_htable);
+		tablespace_optimal_gpu_htable = NULL;
 	}
+}
+
+/*
+ * __GetOptimalGpuForBlockDevice
+ */
+static int
+__GetOptimalGpuForBlockDevice(const char *sysfs_base)
+{
+	char		namebuf[MAXPGPATH];
+	char		tempbuf[MAXPGPATH];
+	const char *value;
+
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/device/subsystem", sysfs_base);
+	if (readlink(namebuf, tempbuf, sizeof(tempbuf)) > 0)
+	{
+		size_t	sz = strlen(tempbuf);
+
+		if (sz >= 11 && strcmp(tempbuf + sz - 11, "/class/nvme") == 0)
+		{
+			/* Ok, it's NVME device */
+			NvmeAttributes	key;
+			NvmeAttributes *nvme;
+
+			snprintf(namebuf, sizeof(namebuf),
+					 "%s/device/dev", sysfs_base);
+			value = sysfs_read_line(namebuf, true);
+			if (sscanf(value, "%d:%d",
+					   &key.nvme_major,
+					   &key.nvme_minor) != 2)
+				elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
+			if (!nvmeHash)
+				return -1;	/* why? */
+			nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
+			if (!nvme)
+				return -1;
+			return nvme->nvme_optimal_gpu;
+		}
+	}
+	else if (errno != ENOENT)
+		elog(ERROR, "failed on readlink('%s'): %m", namebuf);
+	return -1;
+}
+
+/*
+ * __GetOptimalGpuForRaidVolume
+ */
+static int
+__GetOptimalGpuForRaidVolume(const char *sysfs_base)
+{
+	char		namebuf[MAXPGPATH];
+	const char *value;
+	int			optimal_gpu = -1;
+	ssize_t		sz;
+	DIR		   *dir;
+	struct dirent *dent;
+
+	snprintf(namebuf, sizeof(namebuf), "%s/level", sysfs_base);
+	value = sysfs_read_line(namebuf, true);
+	if (strcmp(value, "raid0") != 0)
+		return -1;		/* unsupported md-raid level */
+
+	snprintf(namebuf, sizeof(namebuf), "%s/layout", sysfs_base);
+	value = sysfs_read_line(namebuf, true);
+	if (strcmp(value, "0") != 0)
+		return -1;		/* unsupported md-raid layout */
+
+	snprintf(namebuf, sizeof(namebuf), "%s/chunk_size", sysfs_base);
+	sz = atol(sysfs_read_line(namebuf, true));
+	if (sz < PAGE_SIZE || (sz & (PAGE_SIZE - 1)) != 0)
+		return -1;		/* unsupported md-raid chunk-size */
+
+	dir = opendir(sysfs_base);
+	if (!dir)
+		elog(ERROR, "failed on opendir('%s'): %m", sysfs_base);
+	PG_TRY();
+	{
+		while ((dent = readdir(dir)) != NULL)
+		{
+			if (dent->d_name[0] == 'r' &&
+				dent->d_name[1] == 'd' &&
+				isdigit(dent->d_name[2]))
+			{
+				int		__major;
+				int		__minor;
+				int		__dindex;
+
+				snprintf(namebuf, sizeof(namebuf),
+						 "%s/%s/block/dev",
+						 sysfs_base, dent->d_name);
+				value = sysfs_read_line(namebuf, true);
+				if (sscanf(value, "%d:%d", &__major, &__minor) != 2)
+					elog(ERROR, "failed on parse '%s' [%s]",
+						 namebuf, value);
+
+				snprintf(namebuf, sizeof(namebuf),
+						 "%s/%s/block/partition",
+						 sysfs_base, dent->d_name);
+				value = sysfs_read_line(namebuf, false);
+				if (value && atoi(value) != 0)
+				{
+					/* a partitioned volume */
+					snprintf(namebuf, sizeof(namebuf),
+							 "/sys/dev/block/%d:%d/../dev",
+							 __major, __minor);
+					value = sysfs_read_line(namebuf, true);
+					if (sscanf(value, "%d:%d", &__major, &__minor) != 2)
+						elog(ERROR, "failed on parse '%s' [%s]",
+							 namebuf, value);
+				}
+				snprintf(namebuf, sizeof(namebuf),
+						 "/sys/dev/block/%d:%d", __major, __minor);
+				__dindex = __GetOptimalGpuForBlockDevice(namebuf);
+				if (__dindex < 0)
+				{
+					optimal_gpu = -1;
+					break;		/* no optimal GPU */
+				}
+				else if (optimal_gpu < 0)
+					optimal_gpu = __dindex;
+				else if (optimal_gpu != __dindex)
+				{
+					optimal_gpu = -1;
+					break;		/* no optimal GPU */
+				}
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		closedir(dir);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	closedir(dir);
+
+	return optimal_gpu;
 }
 
 /*
@@ -745,111 +890,146 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 int
 GetOptimalGpuForFile(File fdesc)
 {
-	StromCmd__CheckFile *uarg
-		= alloca(offsetof(StromCmd__CheckFile, rawdisks[100]));
-	int		nrooms = 100;
-	int		optimal_gpu = -1;
-	int		i, curr_gpu;
+	filesystem_optimal_gpu_hentry *hentry;
+	struct stat	stat_buf;
+	bool		found;
 
-retry:
-	memset(uarg, 0, offsetof(StromCmd__CheckFile, rawdisks[nrooms]));
-	uarg->fdesc = FileGetRawDesc(fdesc);
-	uarg->nrooms = nrooms;
-	if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, uarg) != 0)
+	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
+	if (!filesystem_optimal_gpu_htable)
 	{
-		ereport(DEBUG1,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("nvme_strom does not support file '%s'",
-						FilePathName(fdesc))));
-		return -1;
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(HASHCTL));
+		ctl.keysize = sizeof(dev_t);
+		ctl.entrysize = sizeof(filesystem_optimal_gpu_hentry);
+		filesystem_optimal_gpu_htable
+			= hash_create("FileSystem:OptimalGPU", 64,
+						  &ctl, HASH_ELEM | HASH_BLOBS);
 	}
-	else if (uarg->ndisks > nrooms)
+	hentry = hash_search(filesystem_optimal_gpu_htable,
+						 &stat_buf.st_dev,
+						 HASH_ENTER,
+						 &found);
+	if (!found)
 	{
-		nrooms = uarg->ndisks;
-		uarg = alloca(offsetof(StromCmd__CheckFile, rawdisks[nrooms]));
-		goto retry;
+		int			optimal_gpu = -1;
+		int			major = major(stat_buf.st_dev);
+		int			minor = minor(stat_buf.st_dev);
+		char		namebuf[MAXPGPATH];
+		const char *value;
+
+		PG_TRY();
+		{
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/dev/block/%d:%d/partition", major, minor);
+			value = sysfs_read_line(namebuf, false);
+			if (value && atoi(value) != 0)
+			{
+				/* lookup the mother block device */
+				snprintf(namebuf, sizeof(namebuf),
+						 "/sys/dev/block/%d:%d/../dev", major, minor);
+				value = sysfs_read_line(namebuf, true);
+				if (sscanf(value, "%d:%d", &major, &minor) != 2)
+					elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
+			}
+			/* check whether the file is on md-raid volumn, or not */
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/dev/block/%d:%d/md", major, minor);
+			if (stat(namebuf, &stat_buf) == 0)
+			{
+				if ((stat_buf.st_mode & S_IFMT) != S_IFDIR)
+					elog(ERROR, "sysfs entry '%s' is not a directory", namebuf);
+				optimal_gpu = __GetOptimalGpuForRaidVolume(namebuf);
+			}
+			else if (errno == ENOENT)
+			{
+				/* not a md-raid drive */
+				optimal_gpu = __GetOptimalGpuForBlockDevice(namebuf);
+			}
+			else
+			{
+				elog(ERROR, "failed on stat('%s'): %m", namebuf);
+			}
+			hentry->optimal_gpu = optimal_gpu;
+		}
+		PG_CATCH();
+		{
+			hash_search(filesystem_optimal_gpu_htable,
+						&stat_buf.st_dev,
+						HASH_REMOVE,
+						NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
-	Assert(uarg->ndisks > 0);
-
-	/*
-	 * If file is built on md-raid0 volume, all the underlying
-	 * NVME devices must have same optimal GPU.
-	 */
-	for (i=0; i < uarg->ndisks; i++)
-	{
-		NvmeAttributes	key;
-		NvmeAttributes *nvme;
-
-		if (!nvmeHash)
-			return -1;
-		key.nvme_major = uarg->rawdisks[i].major;
-		key.nvme_minor = uarg->rawdisks[i].minor;
-		nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
-		if (!nvme)
-			return -1;
-
-		curr_gpu = nvme->nvme_optimal_gpu;
-		if (curr_gpu < 0)
-			return -1;
-		if (optimal_gpu < 0)
-			optimal_gpu = curr_gpu;
-		else if (optimal_gpu != curr_gpu)
-			return -1;
-	}
-	return optimal_gpu;
+	return hentry->optimal_gpu;
 }
 
 static cl_int
 GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
-	vfs_nvme_status *entry;
+	tablespace_optimal_gpu_hentry *entry;
 	char   *pathname;
 	File	fdesc;
 	bool	found;
 
-	if (!nvme_strom_enabled)
-		return -1;		/* nvme_strom is not configured or disabled */
+	if (!pgstrom_cufile_enabled && !nvme_strom_enabled)
+		return -1;
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
 
-	if (!vfs_nvme_htable)
+	if (!tablespace_optimal_gpu_htable)
 	{
 		HASHCTL		ctl;
 
 		memset(&ctl, 0, sizeof(HASHCTL));
 		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(vfs_nvme_status);
-		vfs_nvme_htable = hash_create("VFS:NVMe-Strom status", 64,
-									  &ctl, HASH_ELEM | HASH_BLOBS);
+		ctl.entrysize = sizeof(tablespace_optimal_gpu_hentry);
+		tablespace_optimal_gpu_htable
+			= hash_create("Tablespace:OptimalGpu", 64,
+						  &ctl, HASH_ELEM | HASH_BLOBS);
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
-									  vfs_nvme_cache_callback, (Datum) 0);
+									  tablespace_optimal_gpu_cache_callback, 0);
 	}
-	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
-											&tablespace_oid,
-											HASH_ENTER,
-											&found);
+	entry = (tablespace_optimal_gpu_hentry *)
+		hash_search(tablespace_optimal_gpu_htable,
+					&tablespace_oid,
+					HASH_ENTER,
+					&found);
 	if (!found)
 	{
-		/* check whether the tablespace is supported */
-		entry->tablespace_oid = tablespace_oid;
-		entry->nvme_optimal_gpu = -1;
+		PG_TRY();
+		{
+			entry->tablespace_oid = tablespace_oid;
+			entry->optimal_gpu = -1;
 
-		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-		fdesc = PathNameOpenFile(pathname, O_RDONLY | O_DIRECTORY);
-		if (fdesc < 0)
-		{
-			elog(WARNING, "failed on open('%s') of tablespace %u: %m",
-				 pathname, tablespace_oid);
-			entry->nvme_optimal_gpu = -1;
+			pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+			fdesc = PathNameOpenFile(pathname, O_RDONLY | O_DIRECTORY);
+			if (fdesc < 0)
+			{
+				elog(WARNING, "failed on open('%s') of tablespace %u: %m",
+					 pathname, tablespace_oid);
+				entry->optimal_gpu = -1;
+			}
+			else
+			{
+				entry->optimal_gpu = GetOptimalGpuForFile(fdesc);
+				FileClose(fdesc);
+			}
 		}
-		else
+		PG_CATCH();
 		{
-			entry->nvme_optimal_gpu = GetOptimalGpuForFile(fdesc);
-			FileClose(fdesc);
+			hash_search(tablespace_optimal_gpu_htable,
+						&tablespace_oid,
+						HASH_REMOVE,
+						NULL);
+			PG_RE_THROW();
 		}
+		PG_END_TRY();
 	}
-	return entry->nvme_optimal_gpu;
+	return entry->optimal_gpu;
 }
 
 cl_int
@@ -903,7 +1083,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	size_t		num_scan_pages = 0;
 
-	if (!nvme_strom_enabled)
+	if (!pgstrom_cufile_enabled && !nvme_strom_enabled)
 		return false;
 
 	/*
@@ -974,27 +1154,31 @@ pgstrom_init_nvme_strom(void)
 	bool		has_tesla_gpu = false;
 	int			i;
 
-	/* pg_strom.nvme_strom_enabled */
-	for (i=0; i < numDevAttrs; i++)
+	/* pg_strom.nvme_strom_enabled (optional, if cuFile is not configured) */
+	if (GetConfigOption("pg_strom.cufile_enabled", true, false) != NULL)
 	{
-		const char *dev_name = devAttrs[i].DEV_NAME;
-
-		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
-			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
-			strncasecmp(dev_name, "Tesla V100", 10) == 0)
+		for (i=0; i < numDevAttrs; i++)
 		{
-			has_tesla_gpu = true;
-			break;
+			const char *dev_name = devAttrs[i].DEV_NAME;
+
+			if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
+				strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
+				strncasecmp(dev_name, "Tesla V100", 10) == 0)
+			{
+				has_tesla_gpu = true;
+				break;
+			}
 		}
+		DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
+								 "Turn on/off SSD-to-GPU P2P DMA",
+								 NULL,
+								 &nvme_strom_enabled,
+								 has_tesla_gpu,
+								 PGC_SUSET,
+								 GUC_NOT_IN_SAMPLE,
+								 NULL, NULL, NULL);
 	}
-	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
-							 "Turn on/off SSD-to-GPU P2P DMA",
-							 NULL,
-							 &nvme_strom_enabled,
-							 has_tesla_gpu,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+
 	/*
 	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
 	 *   ((System RAM size) -
