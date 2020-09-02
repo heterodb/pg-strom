@@ -18,10 +18,16 @@
 #include "pg_strom.h"
 #include <dlfcn.h>
 
-bool			pgstrom_cufile_enabled = false;		/* GUC */
-static void	   *cufile_handle = NULL;
-
 #ifdef WITH_CUFILE
+/*
+ * cuFileError - note that it is not a cuFile API
+ */
+const char *
+cuFileError(CUfileError_t rv)
+{
+	return cufileop_status_error(rv.err);
+}
+
 /*
  * cuFileDriverOpen
  */
@@ -30,7 +36,7 @@ static CUfileError_t (*p_cuFileDriverOpen)(void) = NULL;
 CUfileError_t
 cuFileDriverOpen(void)
 {
-	p_cuFileDriverOpen();
+	return p_cuFileDriverOpen();
 }
 
 /*
@@ -41,7 +47,7 @@ static CUfileError_t (*p_cuFileDriverClose)(void) = NULL;
 CUfileError_t
 cuFileDriverClose(void)
 {
-	p_cuFileDriverClose();
+	return p_cuFileDriverClose();
 }
 
 /*
@@ -198,9 +204,9 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
  * lookup_cufile_function
  */
 static void *
-lookup_cufile_function(const char *func_name)
+lookup_cufile_function(void *handle, const char *func_name)
 {
-	void   *func_addr = dlsym(cufile_handle, func_name);
+	void   *func_addr = dlsym(handle, func_name);
 
 	if (!func_addr)
 		elog(ERROR, "could not find cuFile symbol \"%s\" - %s",
@@ -210,7 +216,7 @@ lookup_cufile_function(const char *func_name)
 #endif
 
 #define LOOKUP_CUFILE_FUNCTION(func_name)		\
-	p_##func_name = lookup_cufile_function(#func_name)
+	p_##func_name = lookup_cufile_function(handle, #func_name)
 
 /*
  * pgstrom_init_cufile
@@ -219,14 +225,14 @@ void
 pgstrom_init_cufile(void)
 {
 #ifdef WITH_CUFILE
-	CUfileError_t rv;
 	char		namebuf[MAXPGPATH];
+	void	   *handle;
 
 	/* version attached on the production release? */
 	snprintf(namebuf, sizeof(namebuf),
 			 "/usr/local/gds/lib/libcufile.so");
-	cufile_handle = dlopen(namebuf, RTLD_NOW | RTLD_LOCAL);
-	if (!cufile_handle)
+	handle = dlopen(namebuf, RTLD_NOW | RTLD_LOCAL);
+	if (!handle)
 	{
 		elog(LOG, "unable to open '%s', cuFile is disabled: %m", namebuf);
 		return;
@@ -248,24 +254,10 @@ pgstrom_init_cufile(void)
 		LOOKUP_CUFILE_FUNCTION(cuFileBufDeregister);
 		LOOKUP_CUFILE_FUNCTION(cuFileRead);
 		LOOKUP_CUFILE_FUNCTION(cuFileWrite);
-
-		/*
-		 * TODO: Which is the best way to default 'false' for the system
-		 * that has no Tesla/Quadro devices.
-		 */
-		DefineCustomBoolVariable("pgstrom.cufile_enabled",
-								 "Enabled NVIDIA GPUDirect Storage (cuFile)",
-								 NULL,
-								 &pgstrom_cufile_enabled,
-								 true,
-								 PGC_SUSET,
-								 GUC_NOT_IN_SAMPLE,
-								 NULL, NULL, NULL);
 	}
 	PG_CATCH();
 	{
-		dlclose(cufile_handle);
-		cufile_handle = NULL;
+		dlclose(handle);
 
 		p_cuFileDriverOpen = NULL;
 		p_cuFileDriverClose = NULL;
@@ -280,8 +272,6 @@ pgstrom_init_cufile(void)
 		p_cuFileBufDeregister = NULL;
 		p_cuFileRead = NULL;
 		p_cuFileWrite = NULL;
-
-		pgstrom_cufile_enabled = false;
 
 		elog(LOG, "failed on lookup cuFile symbols, cuFile is disabled.");
 		FlushErrorState();

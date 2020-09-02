@@ -54,9 +54,12 @@ struct PCIDevEntry
 typedef struct PCIDevEntry	PCIDevEntry;
 
 /* static variables/functions */
-static HTAB		   *nvmeHash = NULL;
-static bool			nvme_strom_enabled = false;	/* GUC (optional) */
-static int			nvme_strom_threshold_kb;	/* GUC */
+static HTAB	   *nvmeHash = NULL;
+static char	   *pgstrom_gpudirect_driver;	/* GUC */
+static bool		pgstrom_gpudirect_enabled;	/* GUC */
+static int		pgstrom_gpudirect_threshold_kb;	/* GUC */
+
+
 static char		   *nvme_manual_distance_map;	/* GUC */
 static void			apply_nvme_manual_distance_map(void);
 static bool			sysfs_read_pcie_root_complex(const char *dirname,
@@ -68,7 +71,7 @@ static bool			sysfs_read_pcie_root_complex(const char *dirname,
 Size
 nvme_strom_threshold(void)
 {
-	return (Size)nvme_strom_threshold_kb << 10;
+	return (Size)pgstrom_gpudirect_threshold_kb << 10;
 }
 
 /*
@@ -974,7 +977,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	File	fdesc;
 	bool	found;
 
-	if (!pgstrom_cufile_enabled && !nvme_strom_enabled)
+	if (!pgstrom_gpudirect_enabled)
 		return -1;
 
 	if (!OidIsValid(tablespace_oid))
@@ -1083,7 +1086,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	size_t		num_scan_pages = 0;
 
-	if (!pgstrom_cufile_enabled && !nvme_strom_enabled)
+	if (!pgstrom_gpudirect_enabled)
 		return false;
 
 	/*
@@ -1154,31 +1157,42 @@ pgstrom_init_nvme_strom(void)
 	bool		has_tesla_gpu = false;
 	int			i;
 
-	/* pg_strom.nvme_strom_enabled (optional, if cuFile is not configured) */
-	if (GetConfigOption("pg_strom.cufile_enabled", true, false) != NULL)
+	/*
+	 * pg_strom.gpudirect_driver
+	 */
+	DefineCustomStringVariable("pg_strom.gpudirect_driver",
+							   "Driver of SSD-to-GPU Direct SQL",
+							   NULL,
+							   &pgstrom_gpudirect_driver,
+#ifdef WITH_CUFILE
+							   "nvidia cufile",
+#else
+							   "heterodb nvme-strom",
+#endif
+							   PGC_INTERNAL,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	
+	for (i=0; i < numDevAttrs; i++)
 	{
-		for (i=0; i < numDevAttrs; i++)
+		const char *dev_name = devAttrs[i].DEV_NAME;
+
+		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
+			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
+			strncasecmp(dev_name, "Tesla V100", 10) == 0)
 		{
-			const char *dev_name = devAttrs[i].DEV_NAME;
-
-			if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
-				strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
-				strncasecmp(dev_name, "Tesla V100", 10) == 0)
-			{
-				has_tesla_gpu = true;
-				break;
-			}
+			has_tesla_gpu = true;
+			break;
 		}
-		DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
-								 "Turn on/off SSD-to-GPU P2P DMA",
-								 NULL,
-								 &nvme_strom_enabled,
-								 has_tesla_gpu,
-								 PGC_SUSET,
-								 GUC_NOT_IN_SAMPLE,
-								 NULL, NULL, NULL);
 	}
-
+	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
+							 "Enables SSD-to-GPU Direct SQL",
+							 NULL,
+							 &pgstrom_gpudirect_enabled,
+							 has_tesla_gpu,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/*
 	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
 	 *   ((System RAM size) -
@@ -1191,10 +1205,10 @@ pgstrom_init_nvme_strom(void)
 		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
 	default_threshold = ((PAGE_SIZE * PHYS_PAGES - shared_buffer_size) / 2
 						 + shared_buffer_size);
-	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
+	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
 							"Tablesize threshold to use SSD-to-GPU P2P DMA",
 							NULL,
-							&nvme_strom_threshold_kb,
+							&pgstrom_gpudirect_threshold_kb,
 							default_threshold >> 10,
 							262144,	/* 256MB */
 							INT_MAX,

@@ -1569,6 +1569,7 @@ pgstrom_init_gpu_mmgr(void)
  *
  * ---------------------------------------------------------------- */
 
+#ifndef WITH_CUFILE
 /*
  * gpuMemCopyFromSSDWaitRaw
  */
@@ -1589,17 +1590,18 @@ retry:
 		goto retry;
 	}
 }
+#endif	/* !WITH_CUFILE */
 
 /*
  * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
  */
-static unsigned long
+static void
 __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 						  GpuMemSegment *gm_seg,
 						  CUdeviceptr m_kds,
 						  pgstrom_data_store *pds)
 {
-	StromCmd__MemCopySsdToGpuBlocks cmd;
+	StromCmd__MemCopySsdToGpuBlocks cmd __attribute__((unused));
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
@@ -1616,7 +1618,7 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		return 0UL;
+		return;
 	}
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
 	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
@@ -1625,12 +1627,14 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	offset += length;
 	/* userspace pointers */
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
-
+#ifdef WITH_CUFILE
+	//TODO: cuFileRead() here
+#else
 	/* setup ioctl(2) command */
 	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuBlocks));
 	cmd.handle		= gm_seg->iomap_handle;
 	cmd.offset		= offset;
-	cmd.file_desc	= pds->filedesc;
+	cmd.file_desc	= pds->filedesc.rawfd;
 	cmd.nr_chunks	= pds->nblocks_uncached;
 	cmd.chunk_sz	= BLCKSZ;
 	cmd.relseg_sz	= RELSEG_SIZE;
@@ -1639,24 +1643,23 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	/* (1) kick SSD2GPU P2P DMA */
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS, &cmd) != 0)
 		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS: %m");
-
+#endif
 	/* (2) kick RAM2GPU DMA (earlier half) */
 	rc = cuMemcpyHtoDAsync(m_kds,
 						   &pds->kds,
 						   length,
 						   CU_STREAM_PER_THREAD);
+#ifndef WITH_CUFILE
+	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
+#endif
 	if (rc != CUDA_SUCCESS)
-	{
-		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	}
-	return cmd.dma_task_id;
 }
 
 /*
  * __gpuMemCopyFromSSD_Arrow - for KDS_FORMAT_ARROW
  */
-static unsigned long
+static void
 __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 						  GpuMemSegment *gm_seg,
 						  CUdeviceptr m_kds,
@@ -1679,22 +1682,25 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	/* (2) SSD2GPU P2P DMA */
 	if (pds->iovec)
 	{
+#ifdef WITH_CUFILE
+		//TODO: cuFileRead() here
+#else
 		StromCmd__MemCopySsdToGpuRaw cmd;
 		strom_io_vector	   *iovec = pds->iovec;
 
 		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
 		cmd.handle    = gm_seg->iomap_handle;
 		cmd.offset    = m_kds - gm_seg->m_segment;
-		cmd.file_desc = pds->filedesc;
+		cmd.file_desc = pds->filedesc.rawfd;
 		cmd.nr_chunks = iovec->nr_chunks;
 		cmd.page_sz   = PAGE_SIZE;
 		cmd.io_chunks = iovec->ioc;
 
 		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
 			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW: %m");
-		return cmd.dma_task_id;
+		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
+#endif
 	}
-	return 0UL;
 }
 
 /*
@@ -1705,7 +1711,6 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	GpuMemSegment  *gm_seg;
-	unsigned long	dma_task_id;
 
 	/* ensure the @m_kds is exactly i/o mapped buffer */
 	Assert(gcontext != NULL);
@@ -1719,19 +1724,14 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	switch (pds->kds.format)
 	{
 		case KDS_FORMAT_BLOCK:
-			dma_task_id = __gpuMemCopyFromSSD_Block(gcontext,
-													gm_seg, m_kds, pds);
+			__gpuMemCopyFromSSD_Block(gcontext, gm_seg, m_kds, pds);
 			break;
 		case KDS_FORMAT_ARROW:
-			dma_task_id = __gpuMemCopyFromSSD_Arrow(gcontext,
-													gm_seg, m_kds, pds);
+			__gpuMemCopyFromSSD_Arrow(gcontext, gm_seg, m_kds, pds);
 			break;
 		default:
 			werror("nvme-strom: unsupported KDS format: %d",
 				   pds->kds.format);
 			break;
 	}
-	/* Wait for completion of SSD2GPU P2P DMA */
-	if (dma_task_id)
-		gpuMemCopyFromSSDWaitRaw(gcontext, dma_task_id);
 }

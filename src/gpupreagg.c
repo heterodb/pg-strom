@@ -4684,7 +4684,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 				: gpas->gts.nvme_sstate;
 
 			Assert(nvme_sstate != NULL);
-			Assert(pds_src->filedesc >= 0 || pds_src->nblocks_uncached == 0);
+			Assert(pds_src->filedesc.rawfd >= 0 || pds_src->nblocks_uncached == 0);
 			with_nvme_strom = (pds_src->nblocks_uncached > 0);
 			nrows_per_block = nvme_sstate->nrows_per_block;
 			/*

@@ -594,6 +594,27 @@ typedef struct devcast_info {
 } devcast_info;
 
 /*
+ * State structure of NVMe-Strom per GpuTaskState
+ */
+typedef struct GPUDirectFileDesc
+{
+	int				rawfd;
+#ifdef WITH_CUFILE
+	CUfileHandle_t	fhandle;
+#endif
+} GPUDirectFileDesc;
+
+typedef struct NVMEScanState
+{
+	cl_uint			nrows_per_block;
+	cl_uint			nblocks_per_chunk;
+	BlockNumber		curr_segno;
+	Buffer			curr_vmbuffer;
+	BlockNumber		nr_segs;
+	GPUDirectFileDesc files[FLEXIBLE_ARRAY_MEMBER];
+} NVMEScanState;
+
+/*
  * pgstrom_data_store - a data structure with various format to exchange
  * a data chunk between the host and CUDA server.
  */
@@ -625,7 +646,7 @@ typedef struct pgstrom_data_store
 	 * valid under the read lock.
 	 */
 	cl_uint				nblocks_uncached;	/* for KDS_FORMAT_BLOCK */
-	cl_int				filedesc;
+	GPUDirectFileDesc	filedesc;
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 	/* for KDS_FORMAT_COLUMN */
 	void			   *gs_sstate;
@@ -634,19 +655,6 @@ typedef struct pgstrom_data_store
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
 } pgstrom_data_store;
-
-/*
- * State structure of NVMe-Strom per GpuTaskState
- */
-typedef struct NVMEScanState
-{
-	cl_uint			nrows_per_block;
-	cl_uint			nblocks_per_chunk;
-	BlockNumber		curr_segno;
-	Buffer			curr_vmbuffer;
-	BlockNumber		nr_segs;
-	int				fdesc[FLEXIBLE_ARRAY_MEMBER];
-} NVMEScanState;
 
 /*
  * --------------------------------------------------------------------
@@ -873,9 +881,9 @@ extern bool trackGpuMemIPC(GpuContext *gcontext,
 						   CUdeviceptr devptr, void *extra,
 						   const char *filename, int lineno);
 extern void *untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr);
-extern bool trackRawFileDesc(GpuContext *gcontext, int filedesc,
+extern bool trackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *fdesc,
 							 const char *filename, int lineno);
-extern void untrackRawFileDesc(GpuContext *gcontext, int filedesc);
+extern void untrackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *fdesc);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -1474,7 +1482,9 @@ extern void		pgstrom_init_nvrtc(void);
 /*
  * cufile.c
  */
-extern bool		pgstrom_cufile_enabled;
+#ifdef WITH_CUFILE
+extern const char *cuFileError(CUfileError_t rv);
+#endif
 extern void		pgstrom_init_cufile(void);
 
 /*

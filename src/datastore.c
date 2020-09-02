@@ -430,10 +430,11 @@ __PDS_clone(pgstrom_data_store *pds_old,
 	pds_new = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(pds_new, 0, offsetof(pgstrom_data_store, kds));
 	pds_new->gcontext = pds_old->gcontext;
 	pg_atomic_init_u32(&pds_new->refcnt, 1);
 	pds_new->nblocks_uncached = 0;
-	pds_new->filedesc = -1;
+	pds_new->filedesc.rawfd = -1;
 	memcpy(&pds_new->kds,
 		   &pds_old->kds,
 		   KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds));
@@ -841,12 +842,13 @@ __PDS_create_row(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_ROW, INT_MAX);
 	pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
+	pds->filedesc.rawfd = -1;
 
 	return pds;
 }
@@ -876,12 +878,13 @@ __PDS_create_hash(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_HASH, INT_MAX);
 	pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
+	pds->filedesc.rawfd = -1;
 
 	return pds;
 }
@@ -918,13 +921,14 @@ __PDS_create_slot(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc,
 						   bytesize - offsetof(pgstrom_data_store, kds),
 						   KDS_FORMAT_SLOT, nrooms);
 	pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
+	pds->filedesc.rawfd = -1;
 
 	return pds;
 }
@@ -956,13 +960,14 @@ __PDS_create_block(GpuContext *gcontext,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
+	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_BLOCK, nrooms);
     pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
     pds->nblocks_uncached = 0;
-	pds->filedesc = -1;
+	pds->filedesc.rawfd = -1;
 
 	return pds;
 }
@@ -1017,31 +1022,6 @@ typedef struct _MdfdVec
 	BlockNumber		mdfd_segno;		/* segment number, from 0 */
 } MdfdVec;
 
-static int
-nvme_sstate_open_segment(SMgrRelation rd_smgr, int seg_nr)
-{
-	/* see _mdfd_openseg() and _mdfd_segpath() */
-	char	   *temp;
-	char	   *path;
-	int			fdesc;
-
-	temp = relpath(rd_smgr->smgr_rnode, MAIN_FORKNUM);
-	if (seg_nr > 0)
-	{
-		path = psprintf("%s.%u", temp, seg_nr);
-		pfree(temp);
-	}
-	else
-		path = temp;
-
-	fdesc = open(path, O_RDWR | PG_BINARY, 0600);
-	if (fdesc < 0)
-		elog(ERROR, "failed on open('%s'): %m", path);
-	pfree(path);
-
-	return fdesc;
-}
-
 static void
 nvme_sstate_open_files(GpuContext *gcontext,
 					   NVMEScanState *nvme_sstate,
@@ -1049,46 +1029,100 @@ nvme_sstate_open_files(GpuContext *gcontext,
 {
 	SMgrRelation rd_smgr = relation->rd_smgr;
 	MdfdVec	   *vec;
-	int			i, nr_segs;
-	int			fdesc;
+	int			i, nr_open_segs;
 
-	nr_segs = Min(rd_smgr->md_num_open_segs[MAIN_FORKNUM],
-				  nvme_sstate->nr_segs);
-	for (i=0; i < nr_segs; i++)
+	nr_open_segs = rd_smgr->md_num_open_segs[MAIN_FORKNUM];
+	for (i=0; i < nvme_sstate->nr_segs; i++)
 	{
-		vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
-		if (vec->mdfd_segno != i)
-			elog(ERROR, "Bug? mdfd_segno is not consistent");
-		if (vec->mdfd_vfd < 0)
-			elog(ERROR, "Bug? seg=%d of relation %s is not opened",
-				 i, RelationGetRelationName(relation));
-		fdesc = FileGetRawDesc(vec->mdfd_vfd);
-		if (fdesc < 0)
-			fdesc = nvme_sstate_open_segment(rd_smgr, i);
+		GPUDirectFileDesc *dfile = &nvme_sstate->files[i];
+		const char *pathname;
+		int			rawfd = -1;
+
+		if (i < nr_open_segs)
+		{
+			vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
+			if (vec->mdfd_segno != i)
+				elog(ERROR, "Bug? mdfd_segno is not consistent");
+			if (vec->mdfd_vfd < 0)
+				elog(ERROR, "Bug? seg=%d of relation %s is not opened",
+					 i, RelationGetRelationName(relation));
+#ifdef WITH_CUFILE
+			/*
+			 * NVIDIA GPUDirect Storage (cuFile) requires to open the
+			 * source file with O_DIRECT, and it ignores the flags
+			 * changed by dup3(). So, we always tried to open a new
+			 * file descriptor with O_DIRECT flag.
+			 */
+			pathname = FilePathName(vec->mdfd_vfd);
+			rawfd = open(pathname, O_RDONLY | PG_BINARY | PG_O_DIRECT);
+			if (rawfd < 0)
+				elog(ERROR, "failed on open('%s'): %m", pathname);
+#else
+			rawfd = FileGetRawDesc(vec->mdfd_vfd);
+			if (rawfd < 0)
+			{
+				pathname = FilePathName(vec->mdfd_vfd);
+				rawfd = open(pathname, O_RDONLY | PG_BINARY);
+				if (rawfd < 0)
+					elog(ERROR, "failed on open('%s'): %m", pathname);
+			}
+			else
+			{
+				rawfd = dup(fdesc);
+				if (rawfd < 0)
+					elog(ERROR, "failed on dup(2): %m");
+			}
+#endif /* WITH_CUFILE */
+		}
 		else
 		{
-			fdesc = dup(fdesc);
-			if (fdesc < 0)
-				elog(ERROR, "failed on dup(2): %m");
+			/* see _mdfd_openseg() and _mdfd_segpath() */
+			char	   *temp;
+			char	   *path;
+#ifdef WITH_CUFILE
+			int         flags = O_RDONLY | PG_BINARY | PG_O_DIRECT;
+#else
+			int         flags = O_RDONLY | PG_BINARY;
+#endif
+			temp = relpath(rd_smgr->smgr_rnode, MAIN_FORKNUM);
+			if (i == 0)
+				path = temp;
+			else
+			{
+				path = psprintf("%s.%u", temp, i);
+				pfree(temp);
+			}
+			rawfd = open(path, flags, 0600);
+			if (rawfd < 0)
+				elog(ERROR, "failed on open('%s'): %m", path);
+			pfree(path);
 		}
-
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
+#ifdef WITH_CUFILE
 		{
-			close(fdesc);
+			CUfileDescr_t	desc;
+			CUfileError_t	rv;
+
+			memset(&desc, 0, sizeof(CUfileDescr_t));
+			desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+			desc.handle.fd = rawfd;
+			rv = cuFileHandleRegister(&dfile->fhandle, &desc);
+			if (rv.err != CU_FILE_SUCCESS)
+			{
+				close(rawfd);
+				elog(ERROR, "failed on cuFileHandleRegister(): %s", cuFileError(rv));
+			}
+		}
+#endif /* WITH_CUFILE */
+		dfile->rawfd = rawfd;
+
+		if (!trackRawFileDesc(gcontext, dfile, __FILE__, __LINE__))
+		{
+#ifdef WITH_CUFILE
+			cuFileHandleDeregister(dfile->fhandle);
+#endif
+			close(dfile->rawfd);
 			elog(ERROR, "out of memory");
 		}
-		nvme_sstate->fdesc[i] = fdesc;
-	}
-
-	while (i < nvme_sstate->nr_segs)
-	{
-		fdesc = nvme_sstate_open_segment(rd_smgr, i);
-		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
-		{
-			close(fdesc);
-			elog(ERROR, "out of memory");
-		}
-		nvme_sstate->fdesc[i] = fdesc;
 	}
 }
 
@@ -1149,7 +1183,7 @@ PDS_init_heapscan_state(GpuTaskState *gts)
 	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
 	nvme_sstate = MemoryContextAllocZero(estate->es_query_cxt,
 										 offsetof(NVMEScanState,
-												  fdesc[nr_segs]));
+												  files[nr_segs]));
 	nvme_sstate->nrows_per_block = nrows_per_block;
 	nvme_sstate->nblocks_per_chunk = nblocks_per_chunk;
 	nvme_sstate->curr_segno = InvalidBlockNumber;
@@ -1168,7 +1202,7 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
 	NVMEScanState  *nvme_sstate = gts->nvme_sstate;
-	int		i, fdesc;
+	int				i, rawfd;
 
 	if (nvme_sstate)
 	{
@@ -1181,10 +1215,13 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 		/* close file descriptors, if any */
 		for (i=0; i < nvme_sstate->nr_segs; i++)
 		{
-			fdesc = nvme_sstate->fdesc[i];
-			untrackRawFileDesc(gcontext, fdesc);
-			if (close(fdesc))
-				elog(NOTICE, "failed on close(%d): %m", fdesc);
+			untrackRawFileDesc(gcontext, &nvme_sstate->files[i]);
+#ifdef WITH_CUFILE
+			cuFileHandleDeregister(nvme_sstate->files[i].fhandle);
+#endif
+			rawfd = nvme_sstate->files[i].rawfd;
+			if (close(rawfd))
+				elog(NOTICE, "failed on close(%d): %m", rawfd);
 		}
 		pfree(nvme_sstate);
 		gts->nvme_sstate = NULL;
@@ -1245,7 +1282,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 		if (buf_id < 0)
 		{
 			BlockNumber	segno = blknum / RELSEG_SIZE;
-			int			filedesc;
+			GPUDirectFileDesc *dfile;
 
 			Assert(segno < nvme_sstate->nr_segs);
 			/*
@@ -1253,13 +1290,14 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 			 * If heapscan_block comes across segment boundary, rest of the
 			 * blocks must be read on the next PDS chunk.
 			 */
-			filedesc = nvme_sstate->fdesc[segno];
-			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
+			dfile = &nvme_sstate->files[segno];
+			if (pds->filedesc.rawfd >= 0 &&
+				pds->filedesc.rawfd != dfile->rawfd)
 				retval = false;
 			else
 			{
-				if (pds->filedesc < 0)
-					pds->filedesc = filedesc;
+				if (pds->filedesc.rawfd < 0)
+					memcpy(&pds->filedesc, dfile, sizeof(GPUDirectFileDesc));
 				/* add uncached block for direct load */
 				pds->nblocks_uncached++;
 				pds->kds.nitems++;
@@ -1578,7 +1616,7 @@ KDS_insert_hashitem(kern_data_store *kds,
 void
 PDS_fillup_blocks(pgstrom_data_store *pds)
 {
-	cl_int			filedesc = pds->filedesc;
+	cl_int			filedesc = pds->filedesc.rawfd;
 	cl_int			i, nr_loaded;
 	ssize_t			nbytes;
 	char		   *dest_addr;
@@ -1658,7 +1696,7 @@ __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
 	pds_dst->gcontext = gcontext;
 	pg_atomic_init_u32(&pds_dst->refcnt, 1);
 	pds_dst->nblocks_uncached = 0;
-	pds_dst->filedesc = -1;
+	pds_dst->filedesc.rawfd = -1;
 	pds_dst->iovec = NULL;
 	memcpy(&pds_dst->kds, kds_head, head_sz);
 
@@ -1735,7 +1773,7 @@ PDS_fillup_arrow(pgstrom_data_store *pds_src)
 	__PDS_fillup_arrow(pds_dst,
 					   pds_dst->gcontext,
 					   &pds_src->kds,
-					   pds_src->filedesc,
+					   pds_src->filedesc.rawfd,
 					   pds_src->iovec);
 	return pds_dst;
 }
@@ -1763,7 +1801,7 @@ PDS_writeback_arrow(pgstrom_data_store *pds_src,
 	memset(pds_dst, 0, offsetof(pgstrom_data_store, kds));
 	pds_dst->gcontext = pds_src->gcontext;
 	pg_atomic_init_u32(&pds_dst->refcnt, 1);
-	pds_dst->filedesc = -1;
+	pds_dst->filedesc.rawfd = -1;
 	rc = cuMemcpyDtoH(&pds_dst->kds,
 					  m_kds_src,
 					  pds_src->kds.length);
