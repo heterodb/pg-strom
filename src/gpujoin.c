@@ -4929,17 +4929,6 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	context->param_refs = NULL;
 	resetStringInfo(&context->decl_temp);
 
-	/* load the primitive values of GiST index keys */
-	appendStringInfo(
-		&body,
-		"  keys = (GpuJoinGiSTKeysDepth%u_t *)\n"
-		"             kern_context_alloc(kcxt, sizeof(*keys));\n"
-		"  if (!keys)\n"
-		"  {\n"
-		"    STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,\n"
-		"                  \"out of memory\");\n"
-		"    return NULL;\n"
-		"  }\n", depth);
 	pgstrom_codegen_var_declarations(&body, depth, kvars_list);
 	/* expressions if any */
 	foreach (cell, pseudo_tlist)
@@ -4961,20 +4950,20 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 
 	appendStringInfo(
 		source,
-		"STATIC_FUNCTION(void *)\n"
+		"STATIC_FUNCTION(cl_bool)\n"
         "gpujoin_gist_load_keys_depth%d(kern_context *kcxt,\n"
         "                              kern_multirels *kmrels,\n"
         "                              kern_data_store *kds,\n"
         "                              kern_data_extra *extra,\n"
-        "                              cl_uint *o_buffer)\n"
+        "                              cl_uint *o_buffer,\n"
+		"                              GpuJoinGiSTKeysDepth%u_t *keys)\n"
         "{\n"
-        "  GpuJoinGiSTKeysDepth%u_t *keys;\n"
         "  HeapTupleHeaderData *htup  __attribute__((unused));\n"
         "  kern_data_store *kds_in    __attribute__((unused));\n"
         "  void *datum                __attribute__((unused));\n"
         "  cl_uint offset             __attribute__((unused));\n"
 		"%s\n%s"
-		"  return keys;\n"
+		"  return (kcxt->errcode == ERRCODE_STROM_SUCCESS);\n"
 		"}\n\n",
 		depth,
 		depth,
@@ -5077,17 +5066,14 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 		"STATIC_FUNCTION(cl_bool)\n"
 		"gpujoin_gist_index_quals_depth%u(kern_context *kcxt,\n"
 		"                                kern_data_store *kds_gist,\n"
-		"                                void *__gist_keys,\n"
+		"                                GpuJoinGiSTKeysDepth%u_t *keys,\n"
 		"                                IndexTupleData *itup)\n"
 		"{\n"
-		"  GpuJoinGiSTKeysDepth%u_t *keys\n"
-		"        = (GpuJoinGiSTKeysDepth%u_t *)__gist_keys;\n"
 		"  char *addr;\n"
 		"%s\n"
 		"%s\n"
 		"  return true;\n"
 		"}\n",
-		depth,
 		depth,
 		depth,
 		decl.data,
@@ -5641,11 +5627,13 @@ gpujoin_codegen(PlannerInfo *root,
 				codegen_context *context)
 {
 	StringInfoData source;
+	StringInfoData temp;
 	int			depth;
 	size_t		varlena_bufsz;
 	ListCell   *cell;
 
 	initStringInfo(&source);
+	initStringInfo(&temp);
 
 	/*
 	 * gpuscan_quals_eval
@@ -5773,16 +5761,34 @@ gpujoin_codegen(PlannerInfo *root,
 		varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 	}
 
+	resetStringInfo(&temp);
+	for (depth=0; depth < gj_path->num_rels; depth++)
+	{
+		if (!gj_path->inners[depth].gist_index)
+			continue;
+		appendStringInfo(
+			&temp, 
+			"  GpuJoinGiSTKeysDepth%u_t gist_keys%u;\n",
+			depth+1, depth+1);
+	}
+	if (temp.len > 0)
+		appendStringInfo(
+			&source,
+			"__shared__ union {\n"
+			"%s"
+			"} gist_keys_buffer;\n\n", temp.data);
+	
 	appendStringInfoString(
 		 &source,
-		 "DEVICE_FUNCTION(void *)\n"
+		 "DEVICE_FUNCTION(cl_bool)\n"
 		 "gpujoin_gist_load_keys(kern_context *kcxt,\n"
 		 "                       kern_multirels *kmrels,\n"
 		 "                       kern_data_store *kds,\n"
 		 "                       kern_data_extra *extra,\n"
 		 "                       cl_int depth,\n"
-		 "                       cl_uint *x_buffer)\n"
-		 "{\n");
+		 "                       cl_uint *o_buffer)\n"
+		 "{\n"
+		 "  assert(get_local_id() == 0);\n");
 	for (depth=0; depth < gj_path->num_rels; depth++)
 	{
 		if (!gj_path->inners[depth].gist_index)
@@ -5793,8 +5799,9 @@ gpujoin_codegen(PlannerInfo *root,
 			"    return gpujoin_gist_load_keys_depth%u(kcxt,\n"
 			"                                         kmrels,\n"
 			"                                         kds, extra,\n"
-			"                                         x_buffer);\n",
-			depth+1, depth+1);
+			"                                         o_buffer,\n"
+			"                                         &gist_keys_buffer.gist_keys%u);\n",
+			depth+1, depth+1, depth+1);
 	}
 	appendStringInfoString(
 		&source,
@@ -5809,7 +5816,6 @@ gpujoin_codegen(PlannerInfo *root,
 		"gpujoin_gist_index_quals(kern_context *kcxt,\n"
 		"                         cl_int depth,\n"
 		"                         kern_data_store *kds_gist,\n"
-		"                         void *gist_keys,\n"
 		"                         IndexTupleData *itup)\n"
 		"{\n");
 	for (depth=0; depth < gj_path->num_rels; depth++)
@@ -5821,9 +5827,9 @@ gpujoin_codegen(PlannerInfo *root,
 			"  if (depth == %u)\n"
 			"    return gpujoin_gist_index_quals_depth%u(kcxt,\n"
 			"                                          kds_gist,\n"
-			"                                          gist_keys,\n"
+			"                                          &gist_keys_buffer.gist_keys%u,\n"
 			"                                          itup);\n",
-			depth+1, depth+1);
+			depth+1, depth+1, depth+1);
 	}
 	appendStringInfoString(
 		&source,

@@ -1148,17 +1148,23 @@ GistFollowRight(PageHeaderData *page)
  */
 STATIC_FUNCTION(ItemPointerData *)
 gpujoin_gist_getnext(kern_context *kcxt,
+					 kern_gpujoin *kgjoin,
 					 cl_int depth,
 					 kern_data_store *kds_gist,
-					 void *gist_keys,
 					 cl_uint *p_item_offset)
 {
 	PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
 	PageHeaderData *gist_page;
 	cl_char		   *vlpos_saved = kcxt->vlpos;
 	OffsetNumber	start;
-	OffsetNumber	i, maxoff;
-
+	OffsetNumber	index;
+	OffsetNumber	maxoff;
+	ItemIdData	   *lpp = NULL;
+	IndexTupleData *itup = NULL;
+	cl_bool			rv = false;
+	__shared__ PageHeaderData *gist_curr __attribute__((unused));
+	__shared__ cl_uint least_index;
+	
 	assert(kds_gist->format == KDS_FORMAT_BLOCK);
 
 	/*
@@ -1167,7 +1173,7 @@ gpujoin_gist_getnext(kern_context *kcxt,
 	if (*p_item_offset == 0)
 	{
 		/* walk on GiST index from the root page */
-		start = FirstOffsetNumber;
+		start = FirstOffsetNumber + get_local_id();
 		gist_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, GIST_ROOT_BLKNO);
 		assert(gist_page->pd_parent_blkno == InvalidBlockNumber &&
 			   gist_page->pd_parent_item  == InvalidOffsetNumber);
@@ -1176,74 +1182,108 @@ gpujoin_gist_getnext(kern_context *kcxt,
 	{
 		/* walk on GiST index from the next item */
 		PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
-		ItemIdData	   *lpp = (ItemIdData *)((char *)kds_gist + *p_item_offset);
-		size_t			off = (((char *)lpp - (char *)gist_base) & (BLCKSZ - 1));
+		size_t		off;
 
+		assert(*p_item_offset < kds_gist->length);
+		lpp = (ItemIdData *)((char *)kds_gist + *p_item_offset);
+		off = (((char *)lpp - (char *)gist_base) & (BLCKSZ - 1));
 		gist_page = (PageHeaderData *)((char *)lpp - off);
-		start = OffsetNumberNext(lpp - gist_page->pd_linp + 1);
+		start = (lpp - gist_page->pd_linp) + 1 + get_local_size();
 	}
 restart:
 	assert((((char *)gist_page - (char *)gist_base) & (BLCKSZ - 1)) == 0);
-	if (!GistPageIsDeleted(gist_page))
-		maxoff = PageGetMaxOffsetNumber(gist_page);
-	else
-		maxoff = InvalidOffsetNumber;	/* skip loop if page is already deleted */
-
-	for (i=start; i <= maxoff; i = OffsetNumberNext(i))
+	/* all the threads must look at same gist_page */
+	if (get_local_id() == 0)
 	{
-		ItemIdData	   *lpp = PageGetItemId(gist_page, i);
-		IndexTupleData *itup;
+		gist_curr = gist_page;
+		least_index = UINT_MAX;
+	}
+	__syncthreads();
+	assert(gist_curr == gist_page);
 
+	if (GistPageIsDeleted(gist_page))
+		maxoff = InvalidOffsetNumber;	/* skip any entries */
+	else
+		maxoff = PageGetMaxOffsetNumber(gist_page);
+
+	rv = false;
+	for (index=start; index <= maxoff; index += get_local_size())
+	{
+		lpp = PageGetItemId(gist_page, index);
 		if (ItemIdIsDead(lpp))
 			continue;
 		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
 
-		kcxt->vlpos = vlpos_saved;	/* rewind the varlena buffer */
-		if (gpujoin_gist_index_quals(kcxt,
-									 depth,
-									 kds_gist,
-									 gist_keys,
-									 itup))
+		kcxt->vlpos = vlpos_saved;		/* rewind */
+		rv = gpujoin_gist_index_quals(kcxt, depth, kds_gist, itup);
+		atomicAdd(&kgjoin->debug_counter1, 1);
+		if (rv)
 		{
-			if (GistPageIsLeaf(gist_page))
-			{
-				/* found the next candidate */
-				*p_item_offset = ((char *)lpp - (char *)kds_gist);
-				return &itup->t_tid;
-			}
-			else
-			{
-				/* dive into deeper node/leaf */
-				BlockNumber		blkno_curr;
-				BlockNumber		blkno_next;
-				PageHeaderData *gist_next;
-
-				blkno_curr = ((char *)gist_page - (char *)gist_base) / BLCKSZ;
-				blkno_next = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
-							  (BlockNumber)itup->t_tid.ip_blkid.bi_lo);
-				assert(blkno_next < kds_gist->nrooms);
-				gist_next = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, blkno_next);
-				assert(gist_next->pd_parent_blkno == blkno_curr &&
-					   gist_next->pd_parent_item  == i);
-
-				gist_page = gist_next;
-				start = FirstOffsetNumber;
-				goto restart;
-			}
+			atomicMin(&least_index, index);
+			break;
 		}
+	}
+	kcxt->vlpos = vlpos_saved;		/* rewind */
+
+	if (__syncthreads_count(rv) > 0)
+	{
+		/*
+		 * By here, one or more threads meet the matched entry.
+		 */
+		if (!GistPageIsLeaf(gist_page))
+		{
+			/* dive into deeper tree node */
+			BlockNumber		blkno_curr;
+			BlockNumber		blkno_next;
+			PageHeaderData *gist_next;
+
+			lpp = PageGetItemId(gist_page, least_index);
+			itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
+			blkno_curr = ((char *)gist_page - (char *)gist_base) / BLCKSZ;
+			blkno_next = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
+						  (BlockNumber)itup->t_tid.ip_blkid.bi_lo);
+			assert(blkno_next < kds_gist->nrooms);
+			gist_next = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, blkno_next);
+			assert(gist_next->pd_parent_blkno == blkno_curr &&
+				   gist_next->pd_parent_item  == least_index);
+			gist_page = gist_next;
+			start = FirstOffsetNumber + get_local_id();
+			__syncthreads();
+			goto restart;
+		}
+
+		/* this is matched */
+		if (rv)
+		{
+			assert((char *)lpp >= (char *)gist_page &&
+				   (char *)lpp <  (char *)gist_page + BLCKSZ);
+			*p_item_offset = (cl_uint)((char *)lpp - (char *)kds_gist);
+
+			return &itup->t_tid;
+		}
+
+		/*
+		 * this is not matched - ensure the next call skips the main loop
+		 * above, we set next offset of the 'maxoff' onto the p_item_offset.
+		 */
+		lpp = PageGetItemId(gist_page, maxoff+1);
+		*p_item_offset = (cl_uint)((char *)lpp - (char *)kds_gist);
+
+		return NULL;
 	}
 
 	/*
-	 * No more matched entries in this page. Move to the parent page again,
-	 * or returns NULL if root page.
+	 * By here, nobody meet any entries in this page
 	 */
 	if (gist_page != gist_base)
 	{
+		/* pop up to the parent */
 		BlockNumber		blkno_next = gist_page->pd_parent_blkno;
 
 		assert(blkno_next < kds_gist->nrooms);
-		start = OffsetNumberNext(gist_page->pd_parent_item);
+		start = gist_page->pd_parent_item + 1 + get_local_id();
 		gist_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, blkno_next);
+		__syncthreads();
 		goto restart;
 	}
 	/* cannot pop up from the root page */
@@ -1272,11 +1312,11 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
-	void		   *gist_keys = NULL;
 	cl_uint			rd_index;
 	cl_uint			wr_index;
 	cl_uint			t_offset = UINT_MAX;
-	cl_uint			count;
+	cl_uint			count = 0;
+	cl_bool			rv = false;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
 	assert(depth >= 1 && depth <= kgjoin->num_rels);
@@ -1288,12 +1328,14 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		 * Move to the next outer window.
 		 */
 		if (get_local_id() == 0)
-			read_pos[depth-1] += get_local_size();
+			read_pos[depth-1]++;
 		l_state[depth] = 0;
 		matched[depth] = false;
 		return depth;
 	}
-	else if (read_pos[depth-1] >= write_pos[depth-1])
+	rd_index = read_pos[depth-1];
+	rd_stack += (rd_index *depth);
+	if (rd_index >= write_pos[depth-1])
 	{
 		assert(wip_count[depth] == 0);
 		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
@@ -1306,99 +1348,104 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
-	rd_index = read_pos[depth-1] + get_local_id();
-	rd_stack += (rd_index * depth);
 
-	while (l_state[depth] != UINT_MAX)
+	/*
+	 * Load the GiST index key onto the private buffer on the shared-
+	 * memory segment
+	 */
+	if (get_local_id() == 0)
 	{
+		rv = gpujoin_gist_load_keys(kcxt,
+									kmrels,
+									kds_src,
+									kds_extra,
+									depth,
+									rd_stack);
+		atomicAdd(&kgjoin->debug_counter0, 1);
+	}
+	if (__syncthreads_count(rv != false) == 0)
+		return -1;		/* unable to load GiST keys */
+
+	/*
+	 * Try to walk on the GiST(R-tree) index until any of local thread
+	 * found the matched tuple.
+	 */
+	do {
 		ItemPointerData *t_ctid;
-		kern_hashitem	*khitem;
-		cl_uint		hash_value;
-
-		if (rd_index >= write_pos[depth-1])
-		{
-			/* outer side is out of range */
-			l_state[depth] = UINT_MAX;
-			break;
-		}
-		else if (!gist_keys)
-		{
-			/* load the key from outer relations */
-			gist_keys = gpujoin_gist_load_keys(kcxt,
-											   kmrels,
-											   kds_src,
-											   kds_extra,
-											   depth,
-											   rd_stack);
-			if (!gist_keys)
-			{
-				/* likely, out of memory */
-				l_state[depth] = UINT_MAX;
-				break;
-			}
-		}
-
+		kern_hashitem  *khitem;
+		cl_uint			hash_value;
+		cl_bool			joinquals_matched = false;
+		
 		/*
 		 * walk on the GiST index. If l_state[depth]==0, find a matched entry
 		 * from the root page. Elsewhere, suspend the scan from the next item.
 		 */
 		t_ctid = gpujoin_gist_getnext(kcxt,
+									  kgjoin,
 									  depth,
 									  kds_gist,
-									  gist_keys,
 									  &l_state[depth]);
-		if (!t_ctid)
+		if (t_ctid)
 		{
-			l_state[depth] = UINT_MAX;
-			/*
-			 * Even if this outer-row has no matched inner-row, we may need to
-			 * construct LEFT/FULL OUTER JOIN result.
-			 */
-			if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) && !matched[depth])
-				t_offset = 0;
-			break;
-		}
-
-		/*
-		 * Look up hash-table by CTID.
-		 */
-		hash_value = pg_hash_any((cl_uchar *)t_ctid, sizeof(ItemPointerData));
-		for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
-			 khitem != NULL;
-			 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
-		{
-			if (ItemPointerEquals(&khitem->t.htup.t_ctid, t_ctid))
-				break;
-		}
-
-		if (khitem)
-		{
-			cl_bool		joinquals_matched;
-
-			if (gpujoin_join_quals(kcxt,
-								   kds_src,
-								   kds_extra,
-								   kmrels,
-								   depth,
-								   rd_stack,
-								   &khitem->t.htup,
-								   &joinquals_matched))
+			/* Lookup hash-table by CTID */
+			hash_value = pg_hash_any((cl_uchar *)t_ctid, sizeof(ItemPointerData));
+			for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
+				 khitem != NULL;
+				 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
 			{
-				assert(joinquals_matched);
-				/* No LEFT/FULL JOIN are needed */
-				matched[depth] = true;
-				/* No RIGHT/FULL JOIN are needed */
-				assert(khitem->t.rowid < kds_hash->nitems);
-				if (oj_map && !oj_map[khitem->t.rowid])
-					oj_map[khitem->t.rowid] = true;
-				/* tuple offset should be valid */
-				t_offset = __kds_packed((char *)&khitem->t.htup -
-										(char *)kds_hash);
-				break;
+				if (ItemPointerEquals(&khitem->t.htup.t_ctid, t_ctid))
+					break;
+			}
+			atomicAdd(&kgjoin->debug_counter2, 1);
+
+			/* Check JOIN Quals */
+			if (khitem)
+			{
+				atomicAdd(&kgjoin->debug_counter3, 1);
+#if 1
+				if (gpujoin_join_quals(kcxt,
+									   kds_src,
+									   kds_extra,
+									   kmrels,
+									   depth,
+									   rd_stack,
+									   &khitem->t.htup,
+									   &joinquals_matched))
+#endif
+				{
+				   	assert(joinquals_matched);
+					/* No LEFT/FULL JOIN are needed */
+					matched[depth] = true;
+					/* No RIGHT/FULL JOIN are needed */
+					assert(khitem->t.rowid < kds_hash->nitems);
+					if (oj_map && !oj_map[khitem->t.rowid])
+						oj_map[khitem->t.rowid] = true;
+					/* tuple offset should be valid */
+					t_offset = __kds_packed((char *)&khitem->t.htup -
+											(char *)kds_hash);
+				}
 			}
 		}
+		/*
+		 * Any tuples matched by the JOIN Quals?
+		 */
+		count = __syncthreads_count(t_offset != UINT_MAX);
+	} while (count == 0 &&
+			 __syncthreads_count(l_state[depth] == UINT_MAX) == 0);
+	/*
+	 * If count==0, it means all the threads reached end of the GiST-index.
+	 * And, if nobody met any matched inner-rows, we might need to generate
+	 * LEFT/FULL OUTER JOIN row.
+	 */
+	if (count == 0 && KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
+	{
+		assert(l_state[depth] == UINT_MAX);
+		if (__syncthreads_count(matched[depth]) == 0)
+		{
+			if (get_local_id() == 0)
+				t_offset = 0;
+		}
 	}
-
 	/* write out the result */
 	wr_index = write_pos[depth];
 	wr_index += pgstromStairlikeBinaryCount(t_offset != UINT_MAX, &count);
@@ -1417,7 +1464,6 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	count = __syncthreads_count(l_state[depth] != UINT_MAX);
 	if (get_local_id() == 0)
 		wip_count[depth] = count;
-
 	/* see comment in gpujoin_exec_hashjoin */
 	wr_index = write_pos[depth];
 	__syncthreads();
@@ -1481,7 +1527,7 @@ gpujoin_main(kern_context *kcxt,
 	else
 		depth = 0;
 	__syncthreads();
-
+	
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
