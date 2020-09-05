@@ -572,9 +572,20 @@ retry:
 
 		case GpuMemKind__IOMapMemory:
 			rc = cuMemAlloc(&m_segment, gm_segment_sz);
-#ifndef WITH_CUFILE
 			if (rc == CUDA_SUCCESS)
 			{
+#ifdef WITH_CUFILE
+				CUfileError_t	rv;
+
+				rv = cuFileBufRegister((void *)m_segment, gm_segment_sz, 0);
+				if (rv.err != CU_FILE_SUCCESS)
+				{
+					wnotice("failed on cuFileBufRegister: %s",
+							cuFileError(rv));
+					cuMemFree(m_segment);
+					rc = CUDA_ERROR_MAP_FAILED;
+				}
+#else
 				StromCmd__MapGpuMemory cmd;
 
 				memset(&cmd, 0, sizeof(StromCmd__MapGpuMemory));
@@ -588,8 +599,8 @@ retry:
 					cuMemFree(m_segment);
 					rc = CUDA_ERROR_MAP_FAILED;
 				}
-			}
 #endif
+			}
 			//wnotice("iomap m_segment = %p - %p", (void *)m_segment, (void *)(m_segment - gm_segment_sz));
 			break;
 
@@ -944,6 +955,13 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 			Assert(gm_seg->gm_kind == GpuMemKind__IOMapMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
             {
+#ifdef WITH_CUFILE
+				CUfileError_t	rv;
+
+				rv = cuFileBufDeregister((void *)gm_seg->m_segment);
+				if (rv.err != CU_FILE_SUCCESS)
+					wnotice("failed on cuFileBufDeregister: %s", cuFileError(rv));
+#endif
 				rc = cuMemFree(gm_seg->m_segment);
 				if (rc != CUDA_SUCCESS)
 				{
@@ -1054,6 +1072,15 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_iomap_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+#ifdef WITH_CUFILE
+		{
+			CUfileError_t	rv;
+
+			rv = cuFileBufDeregister((void *)gm_seg->m_segment);
+			if (rv.err != CU_FILE_SUCCESS)
+				elog(WARNING, "failed on cuFileBufDeregister: %s", cuFileError(rv));
+		}
+#endif
 		rc = cuMemFree(gm_seg->m_segment);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuMemFree(io-map): %s", errorText(rc));
