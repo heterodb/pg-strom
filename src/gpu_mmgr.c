@@ -1805,8 +1805,10 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	gm_seg = lookupGpuMem(gcontext, m_kds);
 	if (!gm_seg || gm_seg->gm_kind != GpuMemKind__IOMapMemory)
 		werror("nvme-strom: invalid device pointer");
-#ifndef WITH_CUFILE
+#ifdef WITH_CUFILE
 	Assert(gm_seg->iomap_handle == 0UL);
+#else
+	Assert(gm_seg->iomap_handle != 0UL);
 #endif
 	Assert(m_kds >= gm_seg->m_segment &&
 		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);

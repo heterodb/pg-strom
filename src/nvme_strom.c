@@ -809,12 +809,13 @@ __GetOptimalGpuForRaidVolume(const char *sysfs_base)
 	value = sysfs_read_line(namebuf, true);
 	if (strcmp(value, "raid0") != 0)
 		return -1;		/* unsupported md-raid level */
-
+#if 0
+	// We don't need to look at RAID-0 layout
 	snprintf(namebuf, sizeof(namebuf), "%s/layout", sysfs_base);
 	value = sysfs_read_line(namebuf, true);
 	if (strcmp(value, "0") != 0)
 		return -1;		/* unsupported md-raid layout */
-
+#endif
 	snprintf(namebuf, sizeof(namebuf), "%s/chunk_size", sysfs_base);
 	sz = atol(sysfs_read_line(namebuf, true));
 	if (sz < PAGE_SIZE || (sz & (PAGE_SIZE - 1)) != 0)
