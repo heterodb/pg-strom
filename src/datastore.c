@@ -1035,9 +1035,15 @@ nvme_sstate_open_files(GpuContext *gcontext,
 	for (i=0; i < nvme_sstate->nr_segs; i++)
 	{
 		GPUDirectFileDesc *dfile = &nvme_sstate->files[i];
-		const char *pathname;
-		int			rawfd = -1;
-
+		const char	   *pathname;
+		int				rawfd = -1;
+#ifdef WITH_CUFILE
+		CUfileDescr_t	desc;
+		CUfileError_t	rv;
+		int				flags = O_RDONLY | PG_BINARY | PG_O_DIRECT;
+#else
+		int				flags = O_RDONLY | PG_BINARY;
+#endif
 		if (i < nr_open_segs)
 		{
 			vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
@@ -1054,7 +1060,7 @@ nvme_sstate_open_files(GpuContext *gcontext,
 			 * file descriptor with O_DIRECT flag.
 			 */
 			pathname = FilePathName(vec->mdfd_vfd);
-			rawfd = open(pathname, O_RDONLY | PG_BINARY | PG_O_DIRECT);
+			rawfd = open(pathname, flags);
 			if (rawfd < 0)
 				elog(ERROR, "failed on open('%s'): %m", pathname);
 #else
@@ -1062,7 +1068,7 @@ nvme_sstate_open_files(GpuContext *gcontext,
 			if (rawfd < 0)
 			{
 				pathname = FilePathName(vec->mdfd_vfd);
-				rawfd = open(pathname, O_RDONLY | PG_BINARY);
+				rawfd = open(pathname, flags);
 				if (rawfd < 0)
 					elog(ERROR, "failed on open('%s'): %m", pathname);
 			}
@@ -1078,39 +1084,29 @@ nvme_sstate_open_files(GpuContext *gcontext,
 		{
 			/* see _mdfd_openseg() and _mdfd_segpath() */
 			char	   *temp;
-			char	   *path;
-#ifdef WITH_CUFILE
-			int         flags = O_RDONLY | PG_BINARY | PG_O_DIRECT;
-#else
-			int         flags = O_RDONLY | PG_BINARY;
-#endif
+
 			temp = relpath(rd_smgr->smgr_rnode, MAIN_FORKNUM);
 			if (i == 0)
-				path = temp;
+				pathname = temp;
 			else
 			{
-				path = psprintf("%s.%u", temp, i);
+				pathname = psprintf("%s.%u", temp, i);
 				pfree(temp);
 			}
-			rawfd = open(path, flags, 0600);
+			rawfd = open(pathname, flags, 0600);
 			if (rawfd < 0)
-				elog(ERROR, "failed on open('%s'): %m", path);
-			pfree(path);
+				elog(ERROR, "failed on open('%s'): %m", pathname);
 		}
 #ifdef WITH_CUFILE
+		memset(&desc, 0, sizeof(CUfileDescr_t));
+		desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+		desc.handle.fd = rawfd;
+		rv = cuFileHandleRegister(&dfile->fhandle, &desc);
+		if (rv.err != CU_FILE_SUCCESS)
 		{
-			CUfileDescr_t	desc;
-			CUfileError_t	rv;
-
-			memset(&desc, 0, sizeof(CUfileDescr_t));
-			desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-			desc.handle.fd = rawfd;
-			rv = cuFileHandleRegister(&dfile->fhandle, &desc);
-			if (rv.err != CU_FILE_SUCCESS)
-			{
-				close(rawfd);
-				elog(ERROR, "failed on cuFileHandleRegister(): %s", cuFileError(rv));
-			}
+			close(rawfd);
+			elog(ERROR, "failed on cuFileHandleRegister('%s'): %s",
+				 pathname, cuFileError(rv));
 		}
 #endif /* WITH_CUFILE */
 		dfile->rawfd = rawfd;

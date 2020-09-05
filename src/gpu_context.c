@@ -834,6 +834,22 @@ gpuInit(unsigned int flags)
 		if (rc == CUDA_SUCCESS)
 			cuda_driver_initialized = true;
 	}
+#ifdef WITH_CUFILE
+	if (rc == CUDA_SUCCESS)
+	{
+		static bool cufile_driver_initialized = false;
+		CUfileError_t	rv;
+
+		if (!cufile_driver_initialized)
+		{
+			rv = cuFileDriverOpen();
+			if (rv.err == CU_FILE_SUCCESS)
+				cufile_driver_initialized = true;
+			else
+				rc = CUDA_ERROR_NOT_INITIALIZED;
+		}
+	}
+#endif
 	return rc;
 }
 

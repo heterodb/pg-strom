@@ -572,6 +572,7 @@ retry:
 
 		case GpuMemKind__IOMapMemory:
 			rc = cuMemAlloc(&m_segment, gm_segment_sz);
+#ifndef WITH_CUFILE
 			if (rc == CUDA_SUCCESS)
 			{
 				StromCmd__MapGpuMemory cmd;
@@ -588,6 +589,7 @@ retry:
 					rc = CUDA_ERROR_MAP_FAILED;
 				}
 			}
+#endif
 			//wnotice("iomap m_segment = %p - %p", (void *)m_segment, (void *)(m_segment - gm_segment_sz));
 			break;
 
@@ -1592,6 +1594,8 @@ retry:
 }
 #endif	/* !WITH_CUFILE */
 
+#define CUFILE_IO_UNITSZ		(1UL << 20)		/* 1MB */
+
 /*
  * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
  */
@@ -1628,7 +1632,39 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	/* userspace pointers */
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 #ifdef WITH_CUFILE
-	//TODO: cuFileRead() here
+	Assert(gm_seg->iomap_handle == 0);
+	{
+		BlockNumber	blkno_base = block_nums[pds->nblocks_uncached-1];
+		BlockNumber	blkno_curr = blkno_base;
+		ssize_t		sz, nbytes;
+		off_t		fpos;
+		cl_int		i;
+
+		for (i=pds->nblocks_uncached-1; i >= 0; i--, blkno_curr++)
+		{
+			if (blkno_curr != block_nums[i] ||
+				(blkno_curr - blkno_base) >= CUFILE_IO_UNITSZ / BLCKSZ)
+			{
+				sz = (blkno_curr - blkno_base) * BLCKSZ;
+				fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
+				nbytes = cuFileRead(pds->filedesc.fhandle,
+									(void *)gm_seg->m_segment,
+									sz, fpos, offset);
+				if (nbytes != sz)
+					werror("Failed on cuFileRead (returned %ld of %ld) %m", nbytes, sz);
+				offset += sz;
+				blkno_base = blkno_curr = block_nums[i];
+			}
+		}
+		sz = (blkno_curr - blkno_base) * BLCKSZ;
+		fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
+		nbytes = cuFileRead(pds->filedesc.fhandle,
+							(void *)gm_seg->m_segment,
+							sz, fpos, offset);
+		if (nbytes != sz)
+			werror("failed on cuFileRead (returned %ld of %ld): %m", nbytes, sz);
+		offset += sz;
+	}
 #else
 	/* setup ioctl(2) command */
 	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuBlocks));
@@ -1683,7 +1719,32 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	if (pds->iovec)
 	{
 #ifdef WITH_CUFILE
-		//TODO: cuFileRead() here
+		strom_io_vector *iovec = pds->iovec;
+		cl_uint		i;
+
+		for (i=0; i < iovec->nr_chunks; i++)
+		{
+			strom_io_chunk *io_chunk = &iovec->ioc[i];
+			off_t		moffset = io_chunk->m_offset;
+			off_t		foffset = io_chunk->fchunk_id * PAGE_SIZE;
+			size_t		length = io_chunk->nr_pages * PAGE_SIZE;
+			ssize_t		nbytes = 0;
+
+			while (nbytes < length)
+			{
+				ssize_t	sz, rv;
+
+				sz = Min(length - nbytes, CUFILE_IO_UNITSZ);
+				rv = cuFileRead(pds->filedesc.fhandle,
+								(void *)m_kds,
+								sz,
+								foffset + nbytes,
+								moffset + nbytes);
+				if (rv != sz)
+					werror("failed on cuFileRead(): %m");
+				nbytes += sz;
+			}
+		}
 #else
 		StromCmd__MemCopySsdToGpuRaw cmd;
 		strom_io_vector	   *iovec = pds->iovec;
@@ -1715,10 +1776,11 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	/* ensure the @m_kds is exactly i/o mapped buffer */
 	Assert(gcontext != NULL);
 	gm_seg = lookupGpuMem(gcontext, m_kds);
-	if (!gm_seg ||
-		gm_seg->gm_kind != GpuMemKind__IOMapMemory ||
-		gm_seg->iomap_handle == 0UL)
+	if (!gm_seg || gm_seg->gm_kind != GpuMemKind__IOMapMemory)
 		werror("nvme-strom: invalid device pointer");
+#ifndef WITH_CUFILE
+	Assert(gm_seg->iomap_handle == 0UL);
+#endif
 	Assert(m_kds >= gm_seg->m_segment &&
 		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);
 	switch (pds->kds.format)

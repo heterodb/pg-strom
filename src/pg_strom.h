@@ -1385,7 +1385,8 @@ extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
 
-extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
+extern ArrowFdwState *ExecInitArrowFdw(GpuContext *gcontext,
+									   Relation relation,
 									   Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
