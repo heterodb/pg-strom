@@ -1074,7 +1074,7 @@ nvme_sstate_open_files(GpuContext *gcontext,
 			}
 			else
 			{
-				rawfd = dup(fdesc);
+				rawfd = dup(rawfd);
 				if (rawfd < 0)
 					elog(ERROR, "failed on dup(2): %m");
 			}
