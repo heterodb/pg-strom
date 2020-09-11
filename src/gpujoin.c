@@ -7531,11 +7531,11 @@ resume_kernel:
 int
 gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
-	GpuJoinTask *pgjoin = (GpuJoinTask *) gtask;
+	GpuJoinTask	   *pgjoin = (GpuJoinTask *) gtask;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
-	bool		gstore_loaded = false;
-	int			retval;
-	CUresult	rc;
+	volatile bool	gstore_mapped = false;
+	int				retval;
+	CUresult		rc;
 
 	STROM_TRY();
 	{
@@ -7546,7 +7546,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 				rc = gstoreFdwMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 				if (rc != CUDA_SUCCESS)
 					werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
-				gstore_loaded = true;
+				gstore_mapped = true;
 			}
 			retval = gpujoin_process_inner_join(pgjoin, cuda_module);
 		}
@@ -7557,12 +7557,12 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 	STROM_CATCH();
 	{
-		if (gstore_loaded)
+		if (gstore_mapped)
 			gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
-	if (gstore_loaded)
+	if (gstore_mapped)
 		gstoreFdwUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 	return retval;
 }
