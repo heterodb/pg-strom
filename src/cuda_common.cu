@@ -1030,7 +1030,6 @@ kern_check_visibility_column(kern_context *kcxt,
 
 	assert(xvec != NULL);
 	assert(sysattr != NULL);
-	assert(xvec != NULL && sysattr != NULL);
 	if (p_sysattr != NULL)
 		memcpy(p_sysattr, sysattr, sizeof(GstoreFdwSysattr));
 	if (sysattr->xmin == InvalidTransactionId)
