@@ -90,6 +90,7 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 	Size		offset;
 	int			index = 0;
 	int			nparams = list_length(used_params);
+	cl_uint		xid_vec_offset;
 
 	/* seek to the head of variable length field */
 	offset = MAXALIGN(offsetof(kern_parambuf,
@@ -256,12 +257,14 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 								   MAXALIGN(str.len) - str.len);
 		index++;
 	}
+	xid_vec_offset = __appendXactIdVector(&str);
+
 	/* array of current transaction id */
 	Assert(MAXALIGN(str.len) == str.len);
 	kparams = (kern_parambuf *)str.data;
 	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	kparams->xactIdVector = nparams;
-	kparams->poffset[nparams++] = __appendXactIdVector(&str);
+	kparams->poffset[nparams++] = xid_vec_offset;
 	kparams->length = str.len;
 	kparams->nparams = nparams;
 

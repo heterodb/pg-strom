@@ -1995,6 +1995,9 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	 */
 	{ POSTGIS3, "geometry st_setsrid(geometry,int4)",
 	  1, "g/f:st_setsrid" },
+	{ POSTGIS3, "geometry st_point(float8,float8)",
+	  10, "gC/f:st_makepoint2",
+	  vlbuf_estimate__st_makepoint },
 	{ POSTGIS3, "geometry st_makepoint(float8,float8)",
 	  10, "gC/f:st_makepoint2",
 	  vlbuf_estimate__st_makepoint },

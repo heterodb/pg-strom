@@ -659,8 +659,7 @@ GpuContextWorkerReportError(int elevel,
 		/* unlock error information */
 		pg_atomic_fetch_and_u32(&gcontext->error_level, 0xfffffffeU);
 	}
-	if (GpuWorkerExceptionStack)
-		siglongjmp(*GpuWorkerExceptionStack, 1);
+	siglongjmp(*GpuWorkerExceptionStack, 1);
 }
 
 /*
