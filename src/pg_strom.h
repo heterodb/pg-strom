@@ -236,7 +236,6 @@
 #include "cuda_common.h"
 #include "pg_compat.h"
 
-#define CUDA_MODULES_HASHSIZE	25
 #define RESTRACK_HASHSIZE		53
 typedef struct GpuContext
 {
@@ -250,8 +249,6 @@ typedef struct GpuContext
 	CUcontext		cuda_context;
 	CUevent		   *cuda_events0; /* per-worker general purpose event */
 	CUevent		   *cuda_events1; /* per-worker general purpose event */
-	pthread_mutex_t	cuda_modules_lock;
-	dlist_head		cuda_modules_slot[CUDA_MODULES_HASHSIZE];
 	/* resource management */
 	slock_t			restrack_lock;
 	dlist_head		restrack[RESTRACK_HASHSIZE];
@@ -853,8 +850,6 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 	}
 	CHECK_FOR_INTERRUPTS();
 }
-extern CUmodule GpuContextLookupModule(GpuContext *gcontext,
-									   ProgramId program_id);
 extern CUresult gpuInit(unsigned int flags);
 extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool never_use_mps,

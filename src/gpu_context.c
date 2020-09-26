@@ -54,6 +54,7 @@ static dlist_head	activeGpuContextList;
 #define RESTRACK_CLASS__GPUPROGRAM		3
 #define RESTRACK_CLASS__GPUMEMORY_IPC	4
 #define RESTRACK_CLASS__FILEDESC		5
+#define RESTRACK_CLASS__GPUMODULE		6
 
 typedef struct ResourceTracker
 {
@@ -72,6 +73,10 @@ typedef struct ResourceTracker
 			CUipcMemHandle handle;
 			cl_uint		mapcount;
 		} ipcmem;
+		struct {				/* RESTRACK_CLASS__GPUMODULE */
+			ProgramId	program_id;
+			CUmodule	cuda_module;
+		} module;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 		GPUDirectFileDesc filedesc;	/* RESTRACK_CLASS__FILEDESC */
 	} u;
@@ -426,53 +431,57 @@ gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
 /*
  * GpuContextLookupModule
  */
-typedef struct
+static CUmodule
+GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id,
+					   const char *filename, int lineno)
 {
-	dlist_node	chain;
-	ProgramId	program_id;
-	CUmodule	cuda_module;
-} GpuContextModuleEntry;
-
-CUmodule
-GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
-{
-	GpuContextModuleEntry *entry;
+	ResourceTracker *tracker;
+	dlist_head *restrack_list;
 	dlist_iter	iter;
-	cl_int		index = program_id % CUDA_MODULES_HASHSIZE;
-	CUmodule	cuda_module;
+	pg_crc32	crc;
+	CUmodule	cuda_module = NULL;
 
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMODULE,
+								   &program_id, sizeof(ProgramId));
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
 	STROM_TRY();
 	{
-		while (!pthreadMutexLockTimeout(&gcontext->cuda_modules_lock, 500))
+		SpinLockAcquire(&gcontext->restrack_lock);
+		dlist_foreach(iter, restrack_list)
 		{
-			if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
-				werror("worker termination is required");
-		}
-
-		dlist_foreach(iter, &gcontext->cuda_modules_slot[index])
-		{
-			entry = dlist_container(GpuContextModuleEntry, chain, iter.cur);
-			if (entry->program_id == program_id)
+			tracker = dlist_container(ResourceTracker, chain, iter.cur);
+			if (tracker->crc == crc &&
+				tracker->resclass == RESTRACK_CLASS__GPUMODULE &&
+				tracker->u.module.program_id == program_id)
 			{
-				cuda_module = entry->cuda_module;
-				goto found;
+				cuda_module = tracker->u.module.cuda_module;
+				break;
 			}
 		}
-		entry = calloc(1, sizeof(GpuContextModuleEntry));
-		if (!entry)
-			werror("out of memory");
-		cuda_module = pgstrom_load_cuda_program(program_id);
 
-		entry->cuda_module = cuda_module;
-		entry->program_id = program_id;
-		dlist_push_head(&gcontext->cuda_modules_slot[index],
-						&entry->chain);
-	found:
-		pthreadMutexUnlock(&gcontext->cuda_modules_lock);
+		if (!cuda_module)
+		{
+			cuda_module = pgstrom_load_cuda_program(program_id);
+			tracker = calloc(1, sizeof(ResourceTracker));
+            if (!tracker)
+			{
+				cuModuleUnload(cuda_module);
+				werror("out of memory");
+			}
+			tracker->crc = crc;
+			tracker->resclass = RESTRACK_CLASS__GPUMODULE;
+			tracker->filename = filename;
+			tracker->lineno = lineno;
+			tracker->u.module.program_id = program_id;
+			tracker->u.module.cuda_module = cuda_module;
+
+			dlist_push_tail(restrack_list, &tracker->chain);
+		}
+		SpinLockRelease(&gcontext->restrack_lock);
 	}
 	STROM_CATCH();
 	{
-		pthreadMutexUnlock(&gcontext->cuda_modules_lock);
+		SpinLockRelease(&gcontext->restrack_lock);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
@@ -572,6 +581,11 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					if (close(tracker->u.filedesc.rawfd))
 						wnotice("failed on close(2): %m");
 					break;
+				case RESTRACK_CLASS__GPUMODULE:
+					rc = cuModuleUnload(tracker->u.module.cuda_module);
+					if (rc != CUDA_SUCCESS)
+						wnotice("failed on cuModuleUnload: %s", errorText(rc));
+					break;
 				default:
 					wnotice("Bug? unknown resource tracker class: %d",
 							(int)tracker->resclass);
@@ -582,20 +596,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	}
 	/* unmap GPU device memory segment */
 	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
-
-	/* unload CUDA modules */
-	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
-	{
-		GpuContextModuleEntry *entry;
-		dlist_node	   *dnode;
-
-		while (!dlist_is_empty(&gcontext->cuda_modules_slot[i]))
-		{
-			dnode = dlist_pop_head_node(&gcontext->cuda_modules_slot[i]);
-			entry = dlist_container(GpuContextModuleEntry, chain, dnode);
-			free(entry);
-		}
-	}
 
 	/* destroy the CUDA context */
 	if (gcontext->cuda_context)
@@ -723,7 +723,8 @@ GpuContextWorkerMain(void *arg)
 
 				gts = gtask->gts;
 				cuda_module = GpuContextLookupModule(gcontext,
-													 gtask->program_id);
+													 gtask->program_id,
+													 __FILE__, __LINE__);
 			retry_gputask:
 				/*
 				 * pgstromProcessGpuTask() returns the following status:
@@ -1023,9 +1024,6 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	gcontext->resowner		= CurrentResourceOwner;
 	gcontext->never_use_mps	= never_use_mps;
 	gcontext->cuda_dindex	= cuda_dindex;
-	pthreadMutexInit(&gcontext->cuda_modules_lock, 0);
-	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
-		dlist_init(&gcontext->cuda_modules_slot[i]);
 	/* resource management */
 	SpinLockInit(&gcontext->restrack_lock);
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
