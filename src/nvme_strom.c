@@ -758,14 +758,14 @@ __GetOptimalGpuForBlockDevice(const char *sysfs_base)
 {
 	char		namebuf[MAXPGPATH];
 	char		tempbuf[MAXPGPATH];
+	ssize_t		sz;
 	const char *value;
 
 	snprintf(namebuf, sizeof(namebuf),
 			 "%s/device/subsystem", sysfs_base);
-	if (readlink(namebuf, tempbuf, sizeof(tempbuf)) > 0)
+	if ((sz = readlink(namebuf, tempbuf, sizeof(tempbuf))) > 0)
 	{
-		size_t	sz = strlen(tempbuf);
-
+		tempbuf[sz] = '\0';
 		if (sz >= 11 && strcmp(tempbuf + sz - 11, "/class/nvme") == 0)
 		{
 			/* Ok, it's NVME device */
@@ -920,6 +920,7 @@ GetOptimalGpuForFile(File fdesc)
 		int			optimal_gpu = -1;
 		int			major = major(stat_buf.st_dev);
 		int			minor = minor(stat_buf.st_dev);
+		int			sz;
 		char		namebuf[MAXPGPATH];
 		const char *value;
 
@@ -938,8 +939,8 @@ GetOptimalGpuForFile(File fdesc)
 					elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
 			}
 			/* check whether the file is on md-raid volumn, or not */
-			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/dev/block/%d:%d/md", major, minor);
+			sz = snprintf(namebuf, sizeof(namebuf),
+						  "/sys/dev/block/%d:%d/md", major, minor);
 			if (stat(namebuf, &stat_buf) == 0)
 			{
 				if ((stat_buf.st_mode & S_IFMT) != S_IFDIR)
@@ -949,6 +950,7 @@ GetOptimalGpuForFile(File fdesc)
 			else if (errno == ENOENT)
 			{
 				/* not a md-raid drive */
+				namebuf[sz-3] = '\0';
 				optimal_gpu = __GetOptimalGpuForBlockDevice(namebuf);
 			}
 			else
