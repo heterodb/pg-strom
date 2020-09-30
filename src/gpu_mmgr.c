@@ -1621,7 +1621,7 @@ retry:
 }
 #endif	/* !WITH_CUFILE */
 
-#define CUFILE_IO_UNITSZ		(1UL << 20)		/* 1MB */
+#define CUFILE_IO_UNITSZ		(2UL << 20)		/* 2MB */
 
 /*
  * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
@@ -1637,6 +1637,7 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	size_t			length;
 	cl_uint			nr_loaded;
 	BlockNumber	   *block_nums;
+	void		   *async_io_state __attribute__((unused)) = NULL;
 	CUresult		rc;
 
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
@@ -1663,9 +1664,10 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	{
 		BlockNumber	blkno_base = block_nums[pds->nblocks_uncached-1];
 		BlockNumber	blkno_curr = blkno_base;
-		ssize_t		sz, nbytes;
+		ssize_t		sz;
 		off_t		fpos;
 		cl_int		i;
+		void	   *temp;
 
 		for (i=pds->nblocks_uncached-1; i >= 0; i--, blkno_curr++)
 		{
@@ -1674,22 +1676,32 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 			{
 				sz = (blkno_curr - blkno_base) * BLCKSZ;
 				fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
-				nbytes = cuFileRead(pds->filedesc.fhandle,
-									(void *)gm_seg->m_segment,
-									sz, fpos, offset);
-				if (nbytes != sz)
-					werror("Failed on cuFileRead (returned %ld of %ld) %m", nbytes, sz);
+				temp = __cuFileReadAsync(pds->filedesc.fhandle,
+										 gm_seg->m_segment,
+										 sz, fpos, offset,
+										 async_io_state);
+				if (!temp)
+				{
+					__cuFileReadWait(async_io_state);
+					werror("failed on __cuFileReadAsync");
+				}
+				async_io_state = temp;
 				offset += sz;
 				blkno_base = blkno_curr = block_nums[i];
 			}
 		}
 		sz = (blkno_curr - blkno_base) * BLCKSZ;
 		fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
-		nbytes = cuFileRead(pds->filedesc.fhandle,
-							(void *)gm_seg->m_segment,
-							sz, fpos, offset);
-		if (nbytes != sz)
-			werror("failed on cuFileRead (returned %ld of %ld): %m", nbytes, sz);
+		temp = __cuFileReadAsync(pds->filedesc.fhandle,
+								 gm_seg->m_segment,
+								 sz, fpos, offset,
+								 async_io_state);
+		if (!temp)
+		{
+			__cuFileReadWait(async_io_state);
+			werror("failed on __cuFileReadAsync");
+		}
+		async_io_state = temp;
 		offset += sz;
 	}
 #else
@@ -1712,7 +1724,9 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 						   &pds->kds,
 						   length,
 						   CU_STREAM_PER_THREAD);
-#ifndef WITH_CUFILE
+#ifdef WITH_CUFILE
+	__cuFileReadWait(async_io_state);
+#else
 	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 #endif
 	if (rc != CUDA_SUCCESS)
@@ -1747,6 +1761,7 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	{
 #ifdef WITH_CUFILE
 		strom_io_vector *iovec = pds->iovec;
+		void	   *async_io_state = NULL;
 		cl_uint		i;
 
 		for (i=0; i < iovec->nr_chunks; i++)
@@ -1755,23 +1770,27 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 			off_t		moffset = io_chunk->m_offset;
 			off_t		foffset = io_chunk->fchunk_id * PAGE_SIZE;
 			size_t		length = io_chunk->nr_pages * PAGE_SIZE;
-			ssize_t		nbytes = 0;
+			ssize_t		sz, nbytes = 0;
+			void	   *temp;
 
 			while (nbytes < length)
 			{
-				ssize_t	sz, rv;
-
 				sz = Min(length - nbytes, CUFILE_IO_UNITSZ);
-				rv = cuFileRead(pds->filedesc.fhandle,
-								(void *)m_kds,
-								sz,
-								foffset + nbytes,
-								moffset + nbytes);
-				if (rv != sz)
-					werror("failed on cuFileRead(): %m");
+				temp = __cuFileReadAsync(pds->filedesc.fhandle,
+										 m_kds, sz,
+										 foffset + nbytes,
+										 moffset + nbytes,
+										 async_io_state);
+				if (!temp)
+				{
+					__cuFileReadWait(async_io_state);
+					werror("failed on __cuFileReadAsync");
+				}
+				async_io_state = temp;
 				nbytes += sz;
 			}
 		}
+		__cuFileReadWait(async_io_state);
 #else
 		StromCmd__MemCopySsdToGpuRaw cmd;
 		strom_io_vector	   *iovec = pds->iovec;

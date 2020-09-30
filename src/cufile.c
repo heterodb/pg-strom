@@ -201,6 +201,227 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
 }
 
 /*
+ * __cuFileReadAsync - an alternative implementation unless the official
+ * distribution does not provide cuFileReadAsync API
+ */
+#define CUFILE_NUM_ASYNC_IO_THREADS		8
+static pthread_mutex_t	cufile_async_io_mutex;
+static pthread_cond_t	cufile_async_io_cond;
+static bool				cufile_async_io_threads[CUFILE_NUM_ASYNC_IO_THREADS];
+static dlist_head		cufile_async_io_queue;
+
+typedef struct
+{
+	CUcontext		cuda_context;
+	pthread_mutex_t	lock;
+	pthread_cond_t	cond;
+	int				refcnt;
+	int				errcode;
+	char			errmsg[160];
+} cufile_async_io_state;
+
+typedef struct
+{
+	dlist_node		chain;
+	CUfileHandle_t	fhandle;
+	off_t			file_offset;
+	size_t			bytesize;
+	CUdeviceptr		devptr_base;
+	off_t			devptr_offset;
+	cufile_async_io_state *async_io_state;
+} cufile_async_io_request;
+
+static void *
+__cuFileAsyncIOThread(void *__arg)
+{
+	bool   *p_async_io_thread_is_running = __arg;
+
+	pthreadMutexLock(&cufile_async_io_mutex);
+	for (;;)
+	{
+		cufile_async_io_state *async_io_state;
+		cufile_async_io_request *req;
+		dlist_node *dnode;
+		ssize_t		nbytes;
+		CUresult	rc;
+
+		if (!dlist_is_empty(&cufile_async_io_queue))
+		{
+			dnode = dlist_pop_head_node(&cufile_async_io_queue);
+			req = dlist_container(cufile_async_io_request, chain, dnode);
+			pthreadMutexUnlock(&cufile_async_io_mutex);
+
+			async_io_state = req->async_io_state;
+			rc = cuCtxSetCurrent(async_io_state->cuda_context);
+
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadMutexLock(&async_io_state->lock);
+				if (async_io_state->errcode == 0)
+				{
+					async_io_state->errcode = EINVAL;
+					snprintf(async_io_state->errmsg, 160,
+							 "failed on cuCtxSetCurrent: %s", errorText(rc));
+				}
+			}
+			else
+			{
+				nbytes = cuFileRead(req->fhandle,
+									(void *)req->devptr_base,
+									req->bytesize,
+									req->file_offset,
+									req->devptr_offset);
+				pthreadMutexLock(&async_io_state->lock);
+				if (nbytes != req->bytesize)
+				{
+					if (async_io_state->errcode == 0)
+					{
+						async_io_state->errcode = EIO;
+						if (nbytes < 0)
+						{
+							snprintf(async_io_state->errmsg, 160,
+									 "failed on cuFileRead: %s",
+									 cufileop_status_error(-nbytes));
+						}
+						else
+						{
+							snprintf(async_io_state->errmsg, 160,
+									 "cuFileRead returned %zu for %zu bytes",
+									 nbytes, req->bytesize);
+						}
+					}
+				}
+			}
+			Assert(async_io_state->refcnt > 0);
+			async_io_state->refcnt--;
+			if (async_io_state->refcnt == 0)
+				pthreadCondBroadcast(&async_io_state->cond);
+			pthreadMutexUnlock(&async_io_state->lock);
+			/* unbind the CUDA context */
+			cuCtxSetCurrent(NULL);
+
+			free(req);
+
+			pthreadMutexLock(&cufile_async_io_mutex);
+		}
+		else if (!pthreadCondWaitTimeout(&cufile_async_io_cond,
+										 &cufile_async_io_mutex,
+										 10000L))
+		{
+			if (dlist_is_empty(&cufile_async_io_queue))
+			{
+				*p_async_io_thread_is_running = false;
+				break;
+			}
+		}
+	}
+	pthreadMutexUnlock(&cufile_async_io_mutex);
+	return NULL;
+}
+
+void *
+__cuFileReadAsync(CUfileHandle_t fhandle,
+				  CUdeviceptr devptr_base,
+				  size_t bytesize,
+				  off_t file_offset,
+				  off_t devptr_offset,
+				  void *__async_io_state)
+{
+	cufile_async_io_state   *async_io_state = __async_io_state;
+	cufile_async_io_request *req;
+	pthread_t	thread;
+	int			i;
+
+	/* setup a state object at the first call */
+	if (!async_io_state)
+	{
+		async_io_state = calloc(1, sizeof(cufile_async_io_state));
+		if (!async_io_state)
+			return NULL;	/* out of memory */
+		async_io_state->cuda_context = CU_CONTEXT_PER_THREAD;
+		pthreadMutexInit(&async_io_state->lock, 0);
+		pthreadCondInit(&async_io_state->cond, 0);
+		async_io_state->refcnt = 0;
+	}
+	else
+	{
+		Assert(async_io_state->cuda_context == CU_CONTEXT_PER_THREAD);
+	}
+
+	/* setup individual i/o request */
+	req = calloc(1, sizeof(cufile_async_io_request));
+	if (!req)
+	{
+		if (!__async_io_state)
+			free(async_io_state);
+		return NULL;		/* out of memory */
+	}
+	req->fhandle = fhandle;
+	req->file_offset = file_offset;
+	req->bytesize = bytesize;
+	req->devptr_base = devptr_base;
+	req->devptr_offset = devptr_offset;
+	req->async_io_state = async_io_state;
+
+	/* launch worker threads on demand */
+	pthreadMutexLock(&cufile_async_io_mutex);
+	for (i=0; i < CUFILE_NUM_ASYNC_IO_THREADS; i++)
+	{
+		if (!cufile_async_io_threads[i])
+		{
+			errno = pthread_create(&thread, NULL,
+								   __cuFileAsyncIOThread,
+								   &cufile_async_io_threads[i]);
+			if (errno != 0)
+			{
+				pthreadMutexUnlock(&cufile_async_io_mutex);
+				if (!__async_io_state)
+					free(async_io_state);
+				free(req);
+				return (void *)(-1L);
+			}
+			cufile_async_io_threads[i] = true;
+		}
+	}
+	/* wake up a thread to invoke cuFileRead */
+	pthreadMutexLock(&async_io_state->lock);
+	async_io_state->refcnt++;
+	pthreadMutexUnlock(&async_io_state->lock);
+
+	dlist_push_tail(&cufile_async_io_queue, &req->chain);
+	pthreadCondSignal(&cufile_async_io_cond);
+	pthreadMutexUnlock(&cufile_async_io_mutex);
+
+	return async_io_state;
+}
+
+void
+__cuFileReadWait(void *__async_io_state)
+{
+	cufile_async_io_state  *async_io_state = __async_io_state;
+	cufile_async_io_state	temp;
+
+	if (!async_io_state)
+		return;
+
+	pthreadMutexLock(&async_io_state->lock);
+	while (async_io_state->refcnt > 0)
+	{
+		pthreadCondWait(&async_io_state->cond,
+						&async_io_state->lock);
+	}
+	pthreadMutexUnlock(&async_io_state->lock);
+
+	if (async_io_state->errcode != 0)
+	{
+		memcpy(&temp, async_io_state, sizeof(cufile_async_io_state));
+		free(async_io_state);
+		werror("failed on __cuFileReadAsync[%s]", temp.errmsg);
+	}
+	free(async_io_state);
+}
+
+/*
  * lookup_cufile_function
  */
 static void *
@@ -277,6 +498,12 @@ pgstrom_init_cufile(void)
 		FlushErrorState();
 	}
 	PG_END_TRY();
+
+	/* init for __cuFileReadAsync */
+	pthreadMutexInit(&cufile_async_io_mutex, 0);
+	pthreadCondInit(&cufile_async_io_cond, 0);
+	memset(cufile_async_io_threads, 0, sizeof(cufile_async_io_threads));
+	dlist_init(&cufile_async_io_queue);
 #endif /* WITH_CUFILE */
 }
 

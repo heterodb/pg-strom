@@ -1040,7 +1040,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	gcontext->global_num_running_tasks
 		= &global_num_running_tasks[cuda_dindex];
 	pthreadMutexInit(&gcontext->worker_mutex, 1);
-	pthreadCondInit(&gcontext->worker_cond);
+	pthreadCondInit(&gcontext->worker_cond, 1);
 	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
 	dlist_init(&gcontext->pending_tasks);
 	gcontext->num_workers = num_workers;

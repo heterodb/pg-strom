@@ -1480,6 +1480,14 @@ extern void		pgstrom_init_nvrtc(void);
  */
 #ifdef WITH_CUFILE
 extern const char *cuFileError(CUfileError_t rv);
+
+extern void *__cuFileReadAsync(CUfileHandle_t fhandle,
+							   CUdeviceptr devptr_base,
+							   size_t size,
+							   off_t file_offset,
+							   off_t devptr_offset,
+							   void *async_io_state);
+extern void  __cuFileReadWait(void *async_io_state);
 #endif
 extern void		pgstrom_init_cufile(void);
 
@@ -1975,13 +1983,13 @@ pthreadRWLockUnlock(pthread_rwlock_t *rwlock)
 }
 
 static inline void
-pthreadCondInit(pthread_cond_t *cond)
+pthreadCondInit(pthread_cond_t *cond, int pshared)
 {
 	pthread_condattr_t condattr;
 
 	if ((errno = pthread_condattr_init(&condattr)) != 0)
 		wfatal("failed on pthread_condattr_init: %m");
-	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
+	if ((errno = pthread_condattr_setpshared(&condattr, pshared)) != 0)
 		wfatal("failed on pthread_condattr_setpshared: %m");
 	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
 		wfatal("failed on pthread_cond_init: %m");
