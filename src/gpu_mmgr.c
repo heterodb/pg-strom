@@ -1636,7 +1636,6 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
-	BlockNumber	   *block_nums;
 	void		   *async_io_state __attribute__((unused)) = NULL;
 	CUresult		rc;
 
@@ -1657,29 +1656,28 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded) -
 			  (char *)(&pds->kds));
 	offset += length;
-	/* userspace pointers */
-	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 
 	/* (1) kick SSD2GPU P2P DMA, if any */
 	if (pds->iovec)
 	{
 		strom_io_vector *iovec = pds->iovec;
 #ifdef WITH_CUFILE
-		Assert(gm_seg->iomap_handle == 0);
-		BlockNumber	blkno_base = block_nums[pds->nblocks_uncached-1];
-		BlockNumber	blkno_curr = blkno_base;
+		cl_uint		units = CUFILE_IO_UNITSZ / PAGE_SIZE;
 		ssize_t		sz;
 		off_t		fpos;
-		cl_int		i;
+		cl_int		i, j;
 		void	   *temp;
 
-		for (i=pds->nblocks_uncached-1; i >= 0; i--, blkno_curr++)
+		Assert(gm_seg->iomap_handle == 0);
+		for (i=0; i < iovec->nr_chunks; i++)
 		{
-			if (blkno_curr != block_nums[i] ||
-				(blkno_curr - blkno_base) >= CUFILE_IO_UNITSZ / BLCKSZ)
+			strom_io_chunk *iochunk = &iovec->ioc[i];
+
+			fpos = PAGE_SIZE * iochunk->fchunk_id;
+			for (j=0; j < iochunk->nr_pages; j += units)
 			{
-				sz = (blkno_curr - blkno_base) * BLCKSZ;
-				fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
+				sz = Min(iochunk->nr_pages - j, units) * PAGE_SIZE;
+
 				temp = __cuFileReadAsync(pds->filedesc.fhandle,
 										 gm_seg->m_segment,
 										 sz, fpos, offset,
@@ -1691,22 +1689,9 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 				}
 				async_io_state = temp;
 				offset += sz;
-				blkno_base = blkno_curr = block_nums[i];
+				fpos += sz;
 			}
 		}
-		sz = (blkno_curr - blkno_base) * BLCKSZ;
-		fpos = (blkno_base % RELSEG_SIZE) * BLCKSZ;
-		temp = __cuFileReadAsync(pds->filedesc.fhandle,
-								 gm_seg->m_segment,
-								 sz, fpos, offset,
-								 async_io_state);
-		if (!temp)
-		{
-			__cuFileReadWait(async_io_state);
-			werror("failed on __cuFileReadAsync");
-		}
-		async_io_state = temp;
-		offset += sz;
 #else
 		Assert(gm_seg->iomap_handle != 0);
 		/* setup ioctl(2) command */

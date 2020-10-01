@@ -1153,7 +1153,7 @@ PDS_exec_heapscan_block(GpuTaskState *gts,
 		if (buf_id < 0)
 		{
 			BlockNumber	segno = blknum / RELSEG_SIZE;
-			int			filedesc;
+			GPUDirectFileDesc *dfile;
 
 			Assert(segno < nvme_sstate->nr_segs);
 			/*
@@ -1161,13 +1161,14 @@ PDS_exec_heapscan_block(GpuTaskState *gts,
 			 * If heapscan_block comes across segment boundary, rest of the
 			 * blocks must be read on the next PDS chunk.
 			 */
-			filedesc = nvme_sstate->fdesc[segno];
-			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
+			dfile = &nvme_sstate->files[segno];
+			if (pds->filedesc.rawfd >= 0 &&
+				pds->filedesc.rawfd != dfile->rawfd)
 				retval = false;
 			else
 			{
-				if (pds->filedesc < 0)
-					pds->filedesc = filedesc;
+				if (pds->filedesc.rawfd < 0)
+					memcpy(&pds->filedesc, dfile, sizeof(GPUDirectFileDesc));
 				updatePDSHeapScanBlockState(pds, bstate, blknum);
 				pds->kds.nitems++;
 				retval = true;
