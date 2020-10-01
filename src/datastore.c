@@ -474,20 +474,24 @@ PDS_release(pgstrom_data_store *pds)
 	Assert(refcnt >= 0);
 	if (refcnt == 0)
 	{
-
-
-		
-		if (!pds->gcontext)
+		if (pds->iovec)
 		{
-			Assert(pds->kds.format == KDS_FORMAT_ARROW ||
-				   pds->kds.format == KDS_FORMAT_COLUMN);
-			pfree(pds);
+			Assert(pds->kds.format == KDS_FORMAT_BLOCK ||
+				   pds->kds.format == KDS_FORMAT_ARROW);
+			pfree(pds->iovec);
 		}
-		else
+
+		if (pds->gcontext)
 		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuMemFree: %s", errorText(rc));
+		}
+		else
+		{
+			Assert(pds->kds.format == KDS_FORMAT_ARROW ||
+				   pds->kds.format == KDS_FORMAT_COLUMN);
+			pfree(pds);
 		}
 	}
 }
@@ -1222,286 +1226,6 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 		pfree(nvme_sstate);
 		gts->nvme_sstate = NULL;
 	}
-}
-
-/*
- * PDS_exec_heapscan_block - PDS scan for KDS_FORMAT_BLOCK format
- */
-static bool
-PDS_exec_heapscan_block(pgstrom_data_store *pds,
-						Relation relation,
-						HeapScanDesc hscan,
-						NVMEScanState *nvme_sstate)
-{
-	BlockNumber		blknum = hscan->rs_cblock;
-	BlockNumber	   *block_nums;
-	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
-	BufferAccessStrategy strategy = hscan->rs_strategy;
-	SMgrRelation	smgr = relation->rd_smgr;
-	Buffer			buffer;
-	Page			spage;
-	Page			dpage;
-	cl_uint			nr_loaded;
-	bool			all_visible;
-
-	/* PDS cannot eat any blocks more, obviously */
-	if (pds->kds.nitems >= pds->kds.nrooms)
-		return false;
-
-	/* array of block numbers */
-	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
-
-	/*
-	 * NVMe-Strom can be applied only when filesystem supports the feature,
-	 * and the current source block is all-visible.
-	 * Elsewhere, we will go fallback with synchronized buffer scan.
-	 */
-	if (RelationCanUseNvmeStrom(relation) &&
-		VM_ALL_VISIBLE(relation, blknum,
-					   &nvme_sstate->curr_vmbuffer))
-	{
-		BufferTag	newTag;
-		uint32		newHash;
-		LWLock	   *newPartitionLock = NULL;
-		bool		retval;
-		int			buf_id;
-
-		/* create a tag so we can lookup the buffer */
-		INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, MAIN_FORKNUM, blknum);
-		/* determine its hash code and partition lock ID */
-		newHash = BufTableHashCode(&newTag);
-		newPartitionLock = BufMappingPartitionLock(newHash);
-
-		/* check whether the block exists on the shared buffer? */
-		LWLockAcquire(newPartitionLock, LW_SHARED);
-		buf_id = BufTableLookup(&newTag, newHash);
-		if (buf_id < 0)
-		{
-			BlockNumber	segno = blknum / RELSEG_SIZE;
-			GPUDirectFileDesc *dfile;
-
-			Assert(segno < nvme_sstate->nr_segs);
-			/*
-			 * We cannot mix up multiple source files in a single PDS chunk.
-			 * If heapscan_block comes across segment boundary, rest of the
-			 * blocks must be read on the next PDS chunk.
-			 */
-			dfile = &nvme_sstate->files[segno];
-			if (pds->filedesc.rawfd >= 0 &&
-				pds->filedesc.rawfd != dfile->rawfd)
-				retval = false;
-			else
-			{
-				if (pds->filedesc.rawfd < 0)
-					memcpy(&pds->filedesc, dfile, sizeof(GPUDirectFileDesc));
-				/* add uncached block for direct load */
-				pds->nblocks_uncached++;
-				pds->kds.nitems++;
-				block_nums[pds->kds.nrooms - pds->nblocks_uncached] = blknum;
-
-				retval = true;
-			}
-			LWLockRelease(newPartitionLock);
-			return retval;
-		}
-		LWLockRelease(newPartitionLock);
-	}
-	/*
-	 * Load the source buffer with synchronous read
-	 */
-	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
-								RBM_NORMAL, strategy);
-#if 1
-	/* Just like heapgetpage(), however, jobs we focus on is OLAP
-	 * workload, so it's uncertain whether we should vacuum the page
-	 * here.
-	 */
-	heap_page_prune_opt(relation, buffer);
-#endif
-	/* we will check tuple's visibility under the shared lock */
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
-	spage = (Page) BufferGetPage(buffer);
-	dpage = (Page) KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
-	memcpy(dpage, spage, BLCKSZ);
-	block_nums[nr_loaded] = blknum;
-
-	/*
-	 * Logic is almost same as heapgetpage() doing. We have to invalidate
-	 * invisible tuples prior to GPU kernel execution, if not all-visible.
-	 */
-	all_visible = PageIsAllVisible(dpage) && !snapshot->takenDuringRecovery;
-	if (!all_visible)
-	{
-		int				lines = PageGetMaxOffsetNumber(dpage);
-		OffsetNumber	lineoff;
-		ItemId			lpp;
-
-		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dpage, lineoff);
-			 lineoff <= lines;
-			 lineoff++, lpp++)
-		{
-			HeapTupleData	tup;
-			bool			valid;
-
-			if (!ItemIdIsNormal(lpp))
-				continue;
-
-			tup.t_tableOid = RelationGetRelid(relation);
-			tup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
-			tup.t_len = ItemIdGetLength(lpp);
-			ItemPointerSet(&tup.t_self, blknum, lineoff);
-
-			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
-			CheckForSerializableConflictOut(valid, relation, &tup,
-											buffer, snapshot);
-			if (!valid)
-				ItemIdSetUnused(lpp);
-		}
-	}
-	UnlockReleaseBuffer(buffer);
-	/* dpage became all-visible also */
-	PageSetAllVisible(dpage);
-	pds->kds.nitems++;
-
-	return true;
-}
-
-/*
- * PDS_exec_heapscan_row - PDS scan for KDS_FORMAT_ROW format
- */
-static bool
-PDS_exec_heapscan_row(pgstrom_data_store *pds,
-					  Relation relation,
-					  HeapScanDesc hscan)
-{
-	BlockNumber		blknum = hscan->rs_cblock;
-	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
-	BufferAccessStrategy strategy = hscan->rs_strategy;
-	kern_data_store	*kds = &pds->kds;
-	Buffer			buffer;
-	Page			page;
-	int				lines;
-	int				ntup;
-	OffsetNumber	lineoff;
-	ItemId			lpp;
-	uint		   *tup_index;
-	kern_tupitem   *tup_item;
-	bool			all_visible;
-	Size			max_consume;
-
-	/* Load the target buffer */
-	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
-								RBM_NORMAL, strategy);
-#if 1
-	/* Just like heapgetpage(), however, jobs we focus on is OLAP
-	 * workload, so it's uncertain whether we should vacuum the page
-	 * here.
-	 */
-	heap_page_prune_opt(relation, buffer);
-#endif
-	/* we will check tuple's visibility under the shared lock */
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	page = (Page) BufferGetPage(buffer);
-	lines = PageGetMaxOffsetNumber(page);
-	ntup = 0;
-
-	/*
-	 * Check whether we have enough rooms to store expected number of
-	 * tuples on the remaining space. If it is hopeless to load all
-	 * the items in a block, we inform the caller this block shall be
-	 * loaded on the next data store.
-	 */
-	max_consume = KERN_DATA_STORE_HEAD_LENGTH(kds) +
-		STROMALIGN(sizeof(cl_uint) * (kds->nitems + lines)) +
-		offsetof(kern_tupitem, htup) * lines + BLCKSZ +
-		__kds_unpack(kds->usage);
-	if (max_consume > kds->length)
-	{
-		UnlockReleaseBuffer(buffer);
-		return false;
-	}
-
-	/*
-	 * Logic is almost same as heapgetpage() doing.
-	 */
-	all_visible = PageIsAllVisible(page) && !snapshot->takenDuringRecovery;
-
-	/* TODO: make SerializationNeededForRead() an external function
-	 * on the core side. It kills necessity of setting up HeapTupleData
-	 * when all_visible and non-serialized transaction.
-	 */
-	tup_index = KERN_DATA_STORE_ROWINDEX(kds) + kds->nitems;
-	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
-		 lineoff <= lines;
-		 lineoff++, lpp++)
-	{
-		HeapTupleData	tup;
-		size_t			curr_usage;
-		bool			valid;
-
-		if (!ItemIdIsNormal(lpp))
-			continue;
-
-		tup.t_tableOid = RelationGetRelid(relation);
-		tup.t_data = (HeapTupleHeader) PageGetItem((Page) page, lpp);
-		tup.t_len = ItemIdGetLength(lpp);
-		ItemPointerSet(&tup.t_self, blknum, lineoff);
-
-		if (all_visible)
-			valid = true;
-		else
-			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
-
-		CheckForSerializableConflictOut(valid, relation,
-										&tup, buffer, snapshot);
-		if (!valid)
-			continue;
-
-		/* put tuple */
-		curr_usage = (__kds_unpack(kds->usage) +
-					  MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len));
-		tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
-		tup_item->rowid = kds->nitems + ntup;
-		tup_item->t_len = tup.t_len;
-		memcpy(&tup_item->htup, tup.t_data, tup.t_len);
-		memcpy(&tup_item->htup.t_ctid, &tup.t_self, sizeof(ItemPointerData));
-
-		tup_index[ntup++] = __kds_packed((uintptr_t)tup_item - (uintptr_t)kds);
-		kds->usage = __kds_packed(curr_usage);
-	}
-	UnlockReleaseBuffer(buffer);
-	Assert(ntup <= MaxHeapTuplesPerPage);
-	Assert(kds->nitems + ntup <= kds->nrooms);
-	kds->nitems += ntup;
-
-	return true;
-}
-
-/*
- * PDS_exec_heapscan - PDS scan entrypoint
- */
-bool
-PDS_exec_heapscan(GpuTaskState *gts, pgstrom_data_store *pds)
-{
-	Relation		relation = gts->css.ss.ss_currentRelation;
-	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
-	bool			retval;
-
-	CHECK_FOR_INTERRUPTS();
-
-	if (pds->kds.format == KDS_FORMAT_ROW)
-		retval = PDS_exec_heapscan_row(pds, relation, hscan);
-	else if (pds->kds.format == KDS_FORMAT_BLOCK)
-	{
-		Assert(gts->nvme_sstate);
-		retval = PDS_exec_heapscan_block(pds, relation, hscan,
-										 gts->nvme_sstate);
-	}
-	else
-		elog(ERROR, "Bug? unexpected PDS format: %d", pds->kds.format);
-
-	return retval;
 }
 
 /*

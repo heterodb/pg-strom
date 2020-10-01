@@ -1034,6 +1034,322 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 }
 
 /*
+ * PDS_exec_heapscan_block - PDS scan for KDS_FORMAT_BLOCK format
+ */
+typedef struct {
+	strom_io_vector	*iovec;
+	BlockNumber	   *blknum;
+} PDSHeapScanBlockState;
+
+#define initPDSHeapScanBlockState(pds, bstate)							\
+	do{																	\
+		(bstate).iovec = alloca(offsetof(strom_io_vector,				\
+										 ioc[(pds)->kds.nrooms]));		\
+		(bstate).iovec->nr_chunks = 0;									\
+		(bstate).blknum = alloca(sizeof(BlockNumber) * (pds)->kds.nrooms); \
+	}while(0)
+
+static inline void
+updatePDSHeapScanBlockState(pgstrom_data_store *pds,
+							PDSHeapScanBlockState *bstate,
+							BlockNumber blknum)
+{
+	strom_io_vector *iovec = bstate->iovec;
+	strom_io_chunk	*iochunk;
+	cl_uint		pages_per_block = (BLCKSZ / PAGE_SIZE);
+	cl_uint		fchunk_id = (blknum % RELSEG_SIZE) * pages_per_block;
+
+	if (iovec->nr_chunks > 0)
+	{
+		iochunk = &iovec->ioc[iovec->nr_chunks - 1];
+		if (iochunk->fchunk_id + iochunk->nr_pages == fchunk_id)
+		{
+			/* continuous region - expand the last chunk */
+			iochunk->nr_pages += pages_per_block;
+			goto out;
+		}
+	}
+	/* discontinuous region - add a new chunk */
+	iochunk = &iovec->ioc[iovec->nr_chunks++];
+	iochunk->m_offset = BLCKSZ * pds->nblocks_uncached;
+	iochunk->fchunk_id = fchunk_id;
+	iochunk->nr_pages = pages_per_block;
+out:
+	bstate->blknum[pds->nblocks_uncached++] = blknum;
+}
+
+static void
+mergePDSHeapScanBlockState(pgstrom_data_store *pds,
+						   PDSHeapScanBlockState *bstate)
+{
+	strom_io_vector *iovec = bstate->iovec;
+	cl_uint			nr_uncached = pds->nblocks_uncached;
+	cl_uint			nr_loaded = pds->kds.nitems - nr_uncached;
+	BlockNumber	   *block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
+	size_t			sz;
+
+	Assert(pds->nblocks_uncached > 0);
+	Assert(iovec != NULL);
+
+	/* copy BlockNumber array */
+	memcpy(block_nums + nr_loaded, bstate->blknum,
+		   sizeof(BlockNumber) * nr_uncached);
+	/* copy iovec */
+	sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
+	pds->iovec = palloc(sz);
+	memcpy(pds->iovec, iovec, sz);
+}
+
+static bool
+PDS_exec_heapscan_block(GpuTaskState *gts,
+						pgstrom_data_store *pds,
+						PDSHeapScanBlockState *bstate)
+{
+	Relation		relation = gts->css.ss.ss_currentRelation;
+	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
+	NVMEScanState  *nvme_sstate = gts->nvme_sstate;
+	BlockNumber		blknum = hscan->rs_cblock;
+	BlockNumber	   *block_nums;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
+	BufferAccessStrategy strategy = hscan->rs_strategy;
+	SMgrRelation	smgr = relation->rd_smgr;
+	Buffer			buffer;
+	Page			spage;
+	Page			dpage;
+	cl_uint			nr_loaded;
+	bool			all_visible;
+
+	/* PDS cannot eat any blocks more, obviously */
+	if (pds->kds.nitems >= pds->kds.nrooms)
+		return false;
+
+	/* array of block numbers */
+	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
+
+	/*
+	 * NVMe-Strom can be applied only when filesystem supports the feature,
+	 * and the current source block is all-visible.
+	 * Elsewhere, we will go fallback with synchronized buffer scan.
+	 */
+	if (RelationCanUseNvmeStrom(relation) &&
+		VM_ALL_VISIBLE(relation, blknum,
+					   &nvme_sstate->curr_vmbuffer))
+	{
+		BufferTag	newTag;
+		uint32		newHash;
+		LWLock	   *newPartitionLock = NULL;
+		bool		retval;
+		int			buf_id;
+
+		/* create a tag so we can lookup the buffer */
+		INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, MAIN_FORKNUM, blknum);
+		/* determine its hash code and partition lock ID */
+		newHash = BufTableHashCode(&newTag);
+		newPartitionLock = BufMappingPartitionLock(newHash);
+
+		/* check whether the block exists on the shared buffer? */
+		LWLockAcquire(newPartitionLock, LW_SHARED);
+		buf_id = BufTableLookup(&newTag, newHash);
+		if (buf_id < 0)
+		{
+			BlockNumber	segno = blknum / RELSEG_SIZE;
+			int			filedesc;
+
+			Assert(segno < nvme_sstate->nr_segs);
+			/*
+			 * We cannot mix up multiple source files in a single PDS chunk.
+			 * If heapscan_block comes across segment boundary, rest of the
+			 * blocks must be read on the next PDS chunk.
+			 */
+			filedesc = nvme_sstate->fdesc[segno];
+			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
+				retval = false;
+			else
+			{
+				if (pds->filedesc < 0)
+					pds->filedesc = filedesc;
+				updatePDSHeapScanBlockState(pds, bstate, blknum);
+				pds->kds.nitems++;
+				retval = true;
+			}
+			LWLockRelease(newPartitionLock);
+			return retval;
+		}
+		LWLockRelease(newPartitionLock);
+	}
+	/*
+	 * Load the source buffer with synchronous read
+	 */
+	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
+								RBM_NORMAL, strategy);
+#if 1
+	/* Just like heapgetpage(), however, jobs we focus on is OLAP
+	 * workload, so it's uncertain whether we should vacuum the page
+	 * here.
+	 */
+	heap_page_prune_opt(relation, buffer);
+#endif
+	/* we will check tuple's visibility under the shared lock */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
+	spage = (Page) BufferGetPage(buffer);
+	dpage = (Page) KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
+	memcpy(dpage, spage, BLCKSZ);
+	block_nums[nr_loaded] = blknum;
+
+	/*
+	 * Logic is almost same as heapgetpage() doing. We have to invalidate
+	 * invisible tuples prior to GPU kernel execution, if not all-visible.
+	 */
+	all_visible = PageIsAllVisible(dpage) && !snapshot->takenDuringRecovery;
+	if (!all_visible)
+	{
+		int				lines = PageGetMaxOffsetNumber(dpage);
+		OffsetNumber	lineoff;
+		ItemId			lpp;
+
+		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dpage, lineoff);
+			 lineoff <= lines;
+			 lineoff++, lpp++)
+		{
+			HeapTupleData	tup;
+			bool			valid;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			tup.t_tableOid = RelationGetRelid(relation);
+			tup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
+			tup.t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&tup.t_self, blknum, lineoff);
+
+			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
+			CheckForSerializableConflictOut(valid, relation, &tup,
+											buffer, snapshot);
+			if (!valid)
+				ItemIdSetUnused(lpp);
+		}
+	}
+	UnlockReleaseBuffer(buffer);
+	/* dpage became all-visible also */
+	PageSetAllVisible(dpage);
+	pds->kds.nitems++;
+
+	return true;
+}
+
+/*
+ * PDS_exec_heapscan_row - PDS scan for KDS_FORMAT_ROW format
+ */
+static bool
+PDS_exec_heapscan_row(GpuTaskState *gts, pgstrom_data_store *pds)
+{
+	Relation		relation = gts->css.ss.ss_currentRelation;
+	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
+	BlockNumber		blknum = hscan->rs_cblock;
+	Snapshot		snapshot = ((TableScanDesc)hscan)->rs_snapshot;
+	BufferAccessStrategy strategy = hscan->rs_strategy;
+	kern_data_store	*kds = &pds->kds;
+	Buffer			buffer;
+	Page			page;
+	int				lines;
+	int				ntup;
+	OffsetNumber	lineoff;
+	ItemId			lpp;
+	uint		   *tup_index;
+	kern_tupitem   *tup_item;
+	bool			all_visible;
+	Size			max_consume;
+
+	/* Load the target buffer */
+	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blknum,
+								RBM_NORMAL, strategy);
+#if 1
+	/* Just like heapgetpage(), however, jobs we focus on is OLAP
+	 * workload, so it's uncertain whether we should vacuum the page
+	 * here.
+	 */
+	heap_page_prune_opt(relation, buffer);
+#endif
+	/* we will check tuple's visibility under the shared lock */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = (Page) BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+	ntup = 0;
+
+	/*
+	 * Check whether we have enough rooms to store expected number of
+	 * tuples on the remaining space. If it is hopeless to load all
+	 * the items in a block, we inform the caller this block shall be
+	 * loaded on the next data store.
+	 */
+	max_consume = KERN_DATA_STORE_HEAD_LENGTH(kds) +
+		STROMALIGN(sizeof(cl_uint) * (kds->nitems + lines)) +
+		offsetof(kern_tupitem, htup) * lines + BLCKSZ +
+		__kds_unpack(kds->usage);
+	if (max_consume > kds->length)
+	{
+		UnlockReleaseBuffer(buffer);
+		return false;
+	}
+
+	/*
+	 * Logic is almost same as heapgetpage() doing.
+	 */
+	all_visible = PageIsAllVisible(page) && !snapshot->takenDuringRecovery;
+
+	/* TODO: make SerializationNeededForRead() an external function
+	 * on the core side. It kills necessity of setting up HeapTupleData
+	 * when all_visible and non-serialized transaction.
+	 */
+	tup_index = KERN_DATA_STORE_ROWINDEX(kds) + kds->nitems;
+	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+		 lineoff <= lines;
+		 lineoff++, lpp++)
+	{
+		HeapTupleData	tup;
+		size_t			curr_usage;
+		bool			valid;
+
+		if (!ItemIdIsNormal(lpp))
+			continue;
+
+		tup.t_tableOid = RelationGetRelid(relation);
+		tup.t_data = (HeapTupleHeader) PageGetItem((Page) page, lpp);
+		tup.t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&tup.t_self, blknum, lineoff);
+
+		if (all_visible)
+			valid = true;
+		else
+			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
+
+		CheckForSerializableConflictOut(valid, relation,
+										&tup, buffer, snapshot);
+		if (!valid)
+			continue;
+
+		/* put tuple */
+		curr_usage = (__kds_unpack(kds->usage) +
+					  MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len));
+		tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
+		tup_item->rowid = kds->nitems + ntup;
+		tup_item->t_len = tup.t_len;
+		memcpy(&tup_item->htup, tup.t_data, tup.t_len);
+		memcpy(&tup_item->htup.t_ctid, &tup.t_self, sizeof(ItemPointerData));
+
+		tup_index[ntup++] = __kds_packed((uintptr_t)tup_item - (uintptr_t)kds);
+		kds->usage = __kds_packed(curr_usage);
+	}
+	UnlockReleaseBuffer(buffer);
+	Assert(ntup <= MaxHeapTuplesPerPage);
+	Assert(kds->nitems + ntup <= kds->nrooms);
+	kds->nitems += ntup;
+
+	return true;
+}
+
+/*
  * heapscan_report_location
  */
 static inline void
@@ -1060,10 +1376,14 @@ pgstromExecHeapScanChunkParallel(GpuTaskState *gts,
 	Relation			relation = gts->css.ss.ss_currentRelation;
 	HeapScanDesc		hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
 	pgstrom_data_store *pds = NULL;
+	PDSHeapScanBlockState bstate;
 
 	Assert(gts->css.ss.ss_currentScanDesc->rs_parallel);
+	memset(&bstate, 0, sizeof(PDSHeapScanBlockState));
 	for (;;)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		if (!hscan->rs_inited)
 		{
 			if (hscan->rs_nblocks == 0)
@@ -1223,22 +1543,34 @@ pgstromExecHeapScanChunkParallel(GpuTaskState *gts,
 			hscan->rs_numblocks = nr_blocks;
 			continue;
 		}
-		/* allocation of row-based PDS on demand */
-		if (!pds)
+		/* scan next block */
+		if (gts->nvme_sstate)
 		{
-			if (gts->nvme_sstate)
+			/* KDS_FORMAT_BLOCK */
+			if (!pds)
+			{
 				pds = PDS_create_block(gts->gcontext,
 									   RelationGetDescr(relation),
 									   gts->nvme_sstate);
-			else
+				pds->kds.table_oid = RelationGetRelid(relation);
+				initPDSHeapScanBlockState(pds, bstate);
+			}
+			if (!PDS_exec_heapscan_block(gts, pds, &bstate))
+				break;
+		}
+		else
+		{
+			/* KDS_FORMAT_ROW */
+			if (!pds)
+			{
 				pds = PDS_create_row(gts->gcontext,
 									 RelationGetDescr(relation),
 									 pgstrom_chunk_size());
-			pds->kds.table_oid = RelationGetRelid(relation);
+				pds->kds.table_oid = RelationGetRelid(relation);
+			}
+			if (!PDS_exec_heapscan_row(gts, pds))
+				break;
 		}
-		/* scan next block */
-		if (!PDS_exec_heapscan(gts, pds))
-			break;
 		/* move to the next block */
 		hscan->rs_numblocks--;
 		hscan->rs_cblock++;
@@ -1249,6 +1581,10 @@ pgstromExecHeapScanChunkParallel(GpuTaskState *gts,
 		if (hscan->rs_cblock == hscan->rs_startblock)
 			hscan->rs_cblock = InvalidBlockNumber;
 	}
+	/* merge strom_io_vector to the PDS, if KDS_FORMAT_BLOCK */
+	if (pds && pds->nblocks_uncached > 0)
+		mergePDSHeapScanBlockState(pds, &bstate);
+
 	return pds;
 }
 
@@ -1262,10 +1598,14 @@ pgstromExecHeapScanChunk(GpuTaskState *gts,
 	Relation		rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	hscan = (HeapScanDesc)gts->css.ss.ss_currentScanDesc;
 	pgstrom_data_store *pds = NULL;
+	PDSHeapScanBlockState bstate;
 
+	memset(&bstate, 0, sizeof(PDSHeapScanBlockState));
 	for (;;)
 	{
 		cl_long		page;
+
+		CHECK_FOR_INTERRUPTS();
 
 		if (!hscan->rs_inited)
 		{
@@ -1304,23 +1644,32 @@ pgstromExecHeapScanChunk(GpuTaskState *gts,
 				goto skip;
 			}
 		}
-
-		/* allocation of row-based PDS on demand */
-		if (!pds)
+		/* scan the next block */
+		if (gts->nvme_sstate)
 		{
-			if (gts->nvme_sstate)
+			if (!pds)
+			{
 				pds =  PDS_create_block(gts->gcontext,
 										RelationGetDescr(rel),
 										gts->nvme_sstate);
-			else
+				pds->kds.table_oid = RelationGetRelid(rel);
+				initPDSHeapScanBlockState(pds, bstate);
+			}
+			if (!PDS_exec_heapscan_block(gts, pds, &bstate))
+				break;
+		}
+		else
+		{
+			if (!pds)
+			{
 				pds = PDS_create_row(gts->gcontext,
 									 RelationGetDescr(rel),
 									 pgstrom_chunk_size());
-			pds->kds.table_oid = RelationGetRelid(rel);
+				pds->kds.table_oid = RelationGetRelid(rel);
+			}
+			if (!PDS_exec_heapscan_row(gts, pds))
+				break;
 		}
-		/* scan the next block */
-		if (!PDS_exec_heapscan(gts, pds))
-			break;		/* no more tuples we can store now! */
 		/* move to the next block */
 		hscan->rs_cblock++;
 	skip:
@@ -1332,6 +1681,10 @@ pgstromExecHeapScanChunk(GpuTaskState *gts,
 		if (hscan->rs_cblock == hscan->rs_startblock)
 			hscan->rs_cblock = InvalidBlockNumber;
 	}
+	/* merge strom_io_vector to the PDS, if any */
+	if (pds && pds->nblocks_uncached > 0)
+		mergePDSHeapScanBlockState(pds, &bstate);
+
 	/* PDS is valid, or end of the relation */
 	Assert(pds || !BlockNumberIsValid(hscan->rs_cblock));
 
