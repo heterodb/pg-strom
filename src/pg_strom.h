@@ -1195,14 +1195,6 @@ extern void KDS_dump_schema(kern_data_store *kds);
 //XXX - to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);
-extern bool PDS_exec_heapscan(GpuTaskState *gts,
-							  pgstrom_data_store *pds);
-extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
-
-#define PGSTROM_DATA_STORE_BLOCK_FILEPOS(pds)							\
-	((loff_t *)((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&(pds)->kds,		\
-													 (pds)->kds.nrooms) - \
-				(sizeof(loff_t) * (pds)->nblocks_uncached)))
 extern void PDS_fillup_blocks(pgstrom_data_store *pds);
 extern void __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
 							   GpuContext *gcontext,

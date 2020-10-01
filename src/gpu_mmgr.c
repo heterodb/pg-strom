@@ -1599,7 +1599,7 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 						  CUdeviceptr m_kds,
 						  pgstrom_data_store *pds)
 {
-	StromCmd__MemCopySsdToGpuBlocks cmd;
+	StromCmd__MemCopySsdToGpuRaw cmd;
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
@@ -1626,20 +1626,21 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	/* userspace pointers */
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 
-	/* setup ioctl(2) command */
-	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuBlocks));
-	cmd.handle		= gm_seg->iomap_handle;
-	cmd.offset		= offset;
-	cmd.file_desc	= pds->filedesc;
-	cmd.nr_chunks	= pds->nblocks_uncached;
-	cmd.chunk_sz	= BLCKSZ;
-	cmd.relseg_sz	= RELSEG_SIZE;
-	cmd.chunk_ids	= block_nums;
+	/* (1) kick SSD2GPU P2P DMA, if any */
+	if (pds->iovec)
+	{
+		strom_io_vector *iovec = pds->iovec;
 
-	/* (1) kick SSD2GPU P2P DMA */
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS, &cmd) != 0)
-		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_BLOCKS: %m");
-
+		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
+		cmd.handle      = gm_seg->iomap_handle;
+		cmd.offset      = offset;
+		cmd.file_desc   = pds->filedesc;
+		cmd.nr_chunks   = iovec->nr_chunks;
+		cmd.page_sz     = PAGE_SIZE;
+		cmd.io_chunks   = iovec->ioc;
+		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
+			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW");
+	}
 	/* (2) kick RAM2GPU DMA (earlier half) */
 	rc = cuMemcpyHtoDAsync(m_kds,
 						   &pds->kds,
