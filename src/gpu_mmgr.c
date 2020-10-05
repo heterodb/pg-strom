@@ -1621,8 +1621,6 @@ retry:
 }
 #endif	/* !WITH_CUFILE */
 
-#define CUFILE_IO_UNITSZ		(2UL << 20)		/* 2MB */
-
 /*
  * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
  */
@@ -1636,7 +1634,6 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
-	void		   *async_io_state __attribute__((unused)) = NULL;
 	CUresult		rc;
 
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
@@ -1657,41 +1654,39 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 			  (char *)(&pds->kds));
 	offset += length;
 
-	/* (1) kick SSD2GPU P2P DMA, if any */
+	/* (1) kick RAM2GPU DMA (earlier half) */
+	rc = cuMemcpyHtoDAsync(m_kds,
+						   &pds->kds,
+						   length,
+						   CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+	/* (2) kick SSD2GPU P2P DMA, if any */
 	if (pds->iovec)
 	{
 		strom_io_vector *iovec = pds->iovec;
 #ifdef WITH_CUFILE
-		cl_uint		units = CUFILE_IO_UNITSZ / PAGE_SIZE;
-		ssize_t		sz;
-		off_t		fpos;
-		cl_int		i, j;
+		void	   *async_io_state = NULL;
 		void	   *temp;
+		int			i;
 
 		Assert(gm_seg->iomap_handle == 0);
 		for (i=0; i < iovec->nr_chunks; i++)
 		{
-			strom_io_chunk *iochunk = &iovec->ioc[i];
-
-			fpos = PAGE_SIZE * iochunk->fchunk_id;
-			for (j=0; j < iochunk->nr_pages; j += units)
+			temp = __cuFileReadAsync(pds->filedesc.fhandle,
+									 gm_seg->m_segment,
+									 offset,
+									 &iovec->ioc[i],
+									 async_io_state);
+			if (!temp)
 			{
-				sz = Min(iochunk->nr_pages - j, units) * PAGE_SIZE;
-
-				temp = __cuFileReadAsync(pds->filedesc.fhandle,
-										 gm_seg->m_segment,
-										 sz, fpos, offset,
-										 async_io_state);
-				if (!temp)
-				{
-					__cuFileReadWait(async_io_state);
-					werror("failed on __cuFileReadAsync");
-				}
-				async_io_state = temp;
-				offset += sz;
-				fpos += sz;
+				__cuFileReadWait(async_io_state);
+				werror("failed on __cuFileReadAsync");
 			}
+			async_io_state = temp;
 		}
+		__cuFileReadWait(async_io_state);
 #else
 		Assert(gm_seg->iomap_handle != 0);
 		/* setup ioctl(2) command */
@@ -1704,20 +1699,9 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 		cmd.io_chunks   = iovec->ioc;
 		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
 			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW");
+		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 #endif
 	}
-	/* (2) kick RAM2GPU DMA (earlier half) */
-	rc = cuMemcpyHtoDAsync(m_kds,
-						   &pds->kds,
-						   length,
-						   CU_STREAM_PER_THREAD);
-#ifdef WITH_CUFILE
-	__cuFileReadWait(async_io_state);
-#else
-	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
-#endif
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 }
 
 /*
@@ -1746,41 +1730,29 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	/* (2) SSD2GPU P2P DMA */
 	if (pds->iovec)
 	{
-#ifdef WITH_CUFILE
 		strom_io_vector *iovec = pds->iovec;
+#ifdef WITH_CUFILE
 		void	   *async_io_state = NULL;
-		cl_uint		i;
+		void	   *temp;
+		int			i;
 
 		for (i=0; i < iovec->nr_chunks; i++)
 		{
-			strom_io_chunk *io_chunk = &iovec->ioc[i];
-			off_t		moffset = io_chunk->m_offset;
-			off_t		foffset = io_chunk->fchunk_id * PAGE_SIZE;
-			size_t		length = io_chunk->nr_pages * PAGE_SIZE;
-			ssize_t		sz, nbytes = 0;
-			void	   *temp;
-
-			while (nbytes < length)
+			temp = __cuFileReadAsync(pds->filedesc.fhandle,
+									 gm_seg->m_segment,
+									 m_kds - gm_seg->m_segment,
+									 &iovec->ioc[i],
+									 async_io_state);
+			if (!temp)
 			{
-				sz = Min(length - nbytes, CUFILE_IO_UNITSZ);
-				temp = __cuFileReadAsync(pds->filedesc.fhandle,
-										 m_kds, sz,
-										 foffset + nbytes,
-										 moffset + nbytes,
-										 async_io_state);
-				if (!temp)
-				{
-					__cuFileReadWait(async_io_state);
-					werror("failed on __cuFileReadAsync");
-				}
-				async_io_state = temp;
-				nbytes += sz;
+				__cuFileReadWait(async_io_state);
+				werror("failed on __cuFileReadAsync");
 			}
+			async_io_state = temp;
 		}
 		__cuFileReadWait(async_io_state);
 #else
 		StromCmd__MemCopySsdToGpuRaw cmd;
-		strom_io_vector	   *iovec = pds->iovec;
 
 		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
 		cmd.handle    = gm_seg->iomap_handle;

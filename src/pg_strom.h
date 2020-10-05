@@ -1475,9 +1475,8 @@ extern const char *cuFileError(CUfileError_t rv);
 
 extern void *__cuFileReadAsync(CUfileHandle_t fhandle,
 							   CUdeviceptr devptr_base,
-							   size_t size,
-							   off_t file_offset,
 							   off_t devptr_offset,
+							   strom_io_chunk *io_chunk,
 							   void *async_io_state);
 extern void  __cuFileReadWait(void *async_io_state);
 #endif
