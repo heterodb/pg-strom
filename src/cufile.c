@@ -205,9 +205,10 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
  * distribution does not provide cuFileReadAsync API
  */
 #define CUFILE_NUM_ASYNC_IO_THREADS		8
+#define CUFILE_ASYNC_IO_THREADS_MASK	((1UL << CUFILE_NUM_ASYNC_IO_THREADS) - 1)
 static pthread_mutex_t	cufile_async_io_mutex;
 static pthread_cond_t	cufile_async_io_cond;
-static bool				cufile_async_io_threads[CUFILE_NUM_ASYNC_IO_THREADS];
+static Datum			cufile_async_io_threads;
 static dlist_head		cufile_async_io_queue;
 
 typedef struct
@@ -234,7 +235,7 @@ typedef struct
 static void *
 __cuFileAsyncIOThread(void *__arg)
 {
-	bool   *p_async_io_thread_is_running = __arg;
+	cl_int		thread_id = PointerGetDatum(__arg);
 
 	pthreadMutexLock(&cufile_async_io_mutex);
 	for (;;)
@@ -310,7 +311,7 @@ __cuFileAsyncIOThread(void *__arg)
 		{
 			if (dlist_is_empty(&cufile_async_io_queue))
 			{
-				*p_async_io_thread_is_running = false;
+				cufile_async_io_threads &= ~(1UL << thread_id);
 				break;
 			}
 		}
@@ -330,7 +331,7 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 	cufile_async_io_state   *async_io_state = __async_io_state;
 	cufile_async_io_request *req;
 	pthread_t	thread;
-	int			i;
+	Datum		i, mask;
 
 	/* setup a state object at the first call */
 	if (!async_io_state)
@@ -365,22 +366,25 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 
 	/* launch worker threads on demand */
 	pthreadMutexLock(&cufile_async_io_mutex);
-	for (i=0; i < CUFILE_NUM_ASYNC_IO_THREADS; i++)
+	if (cufile_async_io_threads != CUFILE_ASYNC_IO_THREADS_MASK)
 	{
-		if (!cufile_async_io_threads[i])
+		for (i=0, mask=1; i < CUFILE_NUM_ASYNC_IO_THREADS; i++, mask *= 2)
 		{
-			errno = pthread_create(&thread, NULL,
-								   __cuFileAsyncIOThread,
-								   &cufile_async_io_threads[i]);
-			if (errno != 0)
+			if ((cufile_async_io_threads & mask) == 0)
 			{
-				pthreadMutexUnlock(&cufile_async_io_mutex);
-				if (!__async_io_state)
-					free(async_io_state);
-				free(req);
-				return (void *)(-1L);
+				errno = pthread_create(&thread, NULL,
+									   __cuFileAsyncIOThread,
+									   (void *)i);
+				if (errno != 0)
+				{
+					pthreadMutexUnlock(&cufile_async_io_mutex);
+					if (!__async_io_state)
+						free(async_io_state);
+					free(req);
+					return (void *)(-1L);
+				}
+				cufile_async_io_threads |= mask;
 			}
-			cufile_async_io_threads[i] = true;
 		}
 	}
 	/* wake up a thread to invoke cuFileRead */
@@ -502,7 +506,7 @@ pgstrom_init_cufile(void)
 	/* init for __cuFileReadAsync */
 	pthreadMutexInit(&cufile_async_io_mutex, 0);
 	pthreadCondInit(&cufile_async_io_cond, 0);
-	memset(cufile_async_io_threads, 0, sizeof(cufile_async_io_threads));
+	cufile_async_io_threads = 0;
 	dlist_init(&cufile_async_io_queue);
 #endif /* WITH_CUFILE */
 }
