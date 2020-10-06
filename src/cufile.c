@@ -336,6 +336,8 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 	size_t		sz;
 	off_t		file_offset;
 	int			errcode = 0;
+	int			nr_reqs = 0;
+	dlist_head	req_list;
 
 	/* setup a state object at the first call */
 	if (!async_io_state)
@@ -356,6 +358,7 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 	/* setup individual i/o request */
 	file_offset = PAGE_SIZE * io_chunk->fchunk_id;
 	devptr_offset += io_chunk->m_offset;
+	dlist_init(&req_list);
 	for (i=0; i < io_chunk->nr_pages; i += units)
 	{
 		req = calloc(1, sizeof(cufile_async_io_request));
@@ -374,34 +377,40 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 
 		file_offset += sz;
 		devptr_offset += sz;
+		nr_reqs++;
 
-		/* enqueue the request message */
-		pthreadMutexLock(&cufile_async_io_mutex);
-		pthreadMutexLock(&async_io_state->lock);
-		async_io_state->refcnt++;
-		pthreadMutexUnlock(&async_io_state->lock);
-		dlist_push_tail(&cufile_async_io_queue, &req->chain);
+		dlist_push_tail(&req_list, &req->chain);
+	}
+	/* enqueue the request message */
+	pthreadMutexLock(&cufile_async_io_mutex);
+	dlist_append_tail(&cufile_async_io_queue, &req_list);
+	pthreadMutexLock(&async_io_state->lock);
+	async_io_state->refcnt += nr_reqs;
+	pthreadMutexUnlock(&async_io_state->lock);
 
-		/* launch worker threads if not active */
-		if (cufile_async_io_threads != CUFILE_ASYNC_IO_THREADS_MASK)
+	/* launch worker threads if not active */
+	if (cufile_async_io_threads != CUFILE_ASYNC_IO_THREADS_MASK)
+	{
+		for (j=0, mask=1; j < CUFILE_NUM_ASYNC_IO_THREADS; j++, mask *= 2)
 		{
-			for (j=0, mask=1; j < CUFILE_NUM_ASYNC_IO_THREADS; j++, mask *= 2)
+			if ((cufile_async_io_threads & mask) == 0)
 			{
-				if ((cufile_async_io_threads & mask) == 0)
-				{
-					errcode = pthread_create(&thread, NULL,
-											 __cuFileAsyncIOThread,
-											 (void *)Int32GetDatum(j));
-					if (errcode != 0)
-						goto error_locked;
-					cufile_async_io_threads |= mask;
-				}
+				errcode = pthread_create(&thread, NULL,
+										 __cuFileAsyncIOThread,
+										 (void *)Int32GetDatum(j));
+				if (errcode != 0)
+					goto error_locked;
+				cufile_async_io_threads |= mask;
 			}
 		}
-		/* wake up a worker thread to invoke cuFileRead */
-		pthreadCondSignal(&cufile_async_io_cond);
-		pthreadMutexUnlock(&cufile_async_io_mutex);
 	}
+	/* wake up a worker thread to invoke cuFileRead */
+	if (nr_reqs > 1)
+		pthreadCondBroadcast(&cufile_async_io_cond);
+	else
+		pthreadCondSignal(&cufile_async_io_cond);
+	pthreadMutexUnlock(&cufile_async_io_mutex);
+
 	return async_io_state;
 
 error:
@@ -431,7 +440,9 @@ error_locked:
 		free(req);
 	}
 	pthreadMutexUnlock(&cufile_async_io_mutex);
-
+	/* Is a first call? */
+	if (!__async_io_state)
+		free(async_io_state);
 	return NULL;
 }
 

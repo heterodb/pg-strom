@@ -1861,6 +1861,20 @@ __basename(const char *filename)
 }
 
 /*
+ * merge two dlist_head
+ */
+static inline void
+dlist_append_tail(dlist_head *base, dlist_head *items)
+{
+	if (dlist_is_empty(items))
+		return;
+	items->head.next->prev = base->head.prev;
+	items->head.prev->next = &base->head;
+	base->head.prev->next = items->head.next;
+	base->head.prev = items->head.prev;
+}
+
+/*
  * Some usuful memory allocation wrapper
  */
 #define palloc_huge(sz)		MemoryContextAllocHuge(CurrentMemoryContext,(sz))
