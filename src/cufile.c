@@ -210,6 +210,18 @@ static pthread_mutex_t	cufile_async_io_mutex;
 static pthread_cond_t	cufile_async_io_cond;
 static Datum			cufile_async_io_threads;
 static dlist_head		cufile_async_io_queue;
+static int				cufile_async_io_unitsz;		/* I/O size in kB */
+
+/* GUC checker */
+static bool
+cufile_async_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
+{
+	int		newval = *p_newval;
+
+	if ((newval & (newval - 1)) != 0)
+		elog(ERROR, "pg_strom.cufile_io_unitsz must be power of 2");
+	return true;
+}
 
 typedef struct
 {
@@ -331,7 +343,7 @@ __cuFileReadAsync(CUfileHandle_t fhandle,
 	cufile_async_io_request *req;
 	pthread_t	thread;
 	Datum		mask;
-	int			units = (1UL << 20) / PAGE_SIZE;	/* I/O Size = 1MB */
+	int			units = ((Datum)cufile_async_io_unitsz << 10) / PAGE_SIZE;
 	int			i, j;
 	size_t		sz;
 	off_t		file_offset;
@@ -550,6 +562,17 @@ pgstrom_init_cufile(void)
 	}
 	PG_END_TRY();
 
+	DefineCustomIntVariable("pg_strom.cufile_io_unitsz",
+							"I/O size on cuFileRead invocations",
+							"Note that this parameter may be removed in the future version without notifications",
+							&cufile_async_io_unitsz,
+							2048,		/* 2MB */
+							128,		/* 128kB */
+							16384,		/* 16MB */
+							PGC_SUSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							cufile_async_io_unitsz_checker, NULL, NULL);
+	
 	/* init for __cuFileReadAsync */
 	pthreadMutexInit(&cufile_async_io_mutex, 0);
 	pthreadCondInit(&cufile_async_io_cond, 0);
