@@ -102,27 +102,27 @@ struct kern_gpujoin
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			pstack_offset;		/* offset to the pseudo-stack */
-	cl_uint			pstack_nrooms;		/* size of pseudo-stack */
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			grid_sz;			/* grid-size on invocation */
 	cl_uint			block_sz;			/* block-size on invocation */
-	/* debug counters */
-	cl_ulong		debug_counter0;
-	cl_ulong		debug_counter1;
-	cl_ulong		debug_counter2;
-	cl_ulong		debug_counter3;
 	/* suspend/resume related */
 	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			suspend_size;		/* length of the suspend buffer */
 	cl_uint			suspend_count;		/* number of suspended blocks */
 	cl_bool			resume_context;		/* resume context from suspend */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
+	/* debug counters */
+	cl_ulong		debug_counter0;
+	cl_ulong		debug_counter1;
+	cl_ulong		debug_counter2;
+	cl_ulong		debug_counter3;
 	/* error status to be backed (OUT) */
 	cl_uint			source_nitems;		/* out: # of source rows */
 	cl_uint			outer_nitems;		/* out: # of filtered source rows */
 	cl_uint			stat_nitems[FLEXIBLE_ARRAY_MEMBER]; /* out: stat nitems */
-	/*-- pseudo-stack and suspend/resume context --*/
 	/*-- kernel param/const buffer --*/
+	/*-- pseudo stack buffer --*/
+	/*-- suspend / resume context */
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
@@ -138,6 +138,18 @@ gpujoin_reset_kernel_task(kern_gpujoin *kgjoin, bool resume_context)
 	kgjoin->resume_context	= resume_context;
 }
 #endif
+/*
+ * pseudo stack
+ */
+struct gpujoinPseudoStack
+{
+	cl_uint			__vl_len;		/* varlena header */
+	cl_uint			ps_unitsz;		/* unit-size of pseudo-stack per SM */
+	cl_uint			ps_offset[FLEXIBLE_ARRAY_MEMBER];	/* for each depth */
+};
+typedef struct gpujoinPseudoStack		gpujoinPseudoStack;
+
+#define GPUJOIN_PSEUDO_STACK_NROOMS		2048
 
 /*
  * suspend/resume context

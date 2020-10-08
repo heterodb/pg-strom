@@ -5629,12 +5629,41 @@ gpujoin_codegen(PlannerInfo *root,
 	StringInfoData source;
 	StringInfoData temp;
 	int			depth;
+	size_t		sz, off;
 	size_t		varlena_bufsz;
 	ListCell   *cell;
+	gpujoinPseudoStack *pstack;
 
 	initStringInfo(&source);
 	initStringInfo(&temp);
 
+	/*
+	 * System constants of GpuJoin
+	 * KPARAM_0 is gpujoinPseudoStack, to indicate pseudo-stack offset
+	 * for each depth, per SM.
+	 */
+	sz = offsetof(gpujoinPseudoStack,
+				  ps_offset[gj_path->num_rels + 1]);
+	pstack = palloc0(sz);
+	SET_VARSIZE(pstack, sz);
+	for (depth=0, off=0; depth <= gj_path->num_rels; depth++)
+	{
+		sz = sizeof(cl_uint) * (depth+1) * GPUJOIN_PSEUDO_STACK_NROOMS;
+		pstack->ps_offset[depth] = off;
+		off += sz;
+		/* GiST-index support needs extra pseudo-stack */
+		if (depth < gj_path->num_rels && gj_path->inners[depth].gist_clauses)
+			off += sz;
+	}
+	pstack->ps_unitsz = off;
+
+	context->used_params = list_make1(makeConst(BYTEAOID,
+												-1,
+												InvalidOid,
+												-1,
+												PointerGetDatum(pstack),
+												false,
+												false));
 	/*
 	 * gpuscan_quals_eval
 	 */
@@ -5863,31 +5892,26 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	cl_int		nrels = gjs->num_rels;
 	size_t		head_sz;
 	size_t		param_sz;
-	size_t		pstack_sz;
-	size_t		pstack_nrooms;
 	size_t		suspend_sz;
 	int			mp_count;
+	gpujoinPseudoStack *pstack;
 
 	mp_count = (GPUKERNEL_MAX_SM_MULTIPLICITY *
 				devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT);
 	head_sz = STROMALIGN(offsetof(kern_gpujoin,
 								  stat_nitems[gjs->num_rels + 1]));
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
-	pstack_nrooms = 2048;
-	pstack_sz = MAXALIGN(sizeof(cl_uint) *
-						 pstack_nrooms * ((nrels+1) * (nrels+2)) / 2);
-	suspend_sz = STROMALIGN(offsetof(gpujoinSuspendContext,
-									 pd[nrels + 1]));
+	pstack = (gpujoinPseudoStack *)kparam_get_value(gjs->gts.kern_params, 0);
+	suspend_sz = MAXALIGN(offsetof(gpujoinSuspendContext, pd[nrels + 1]));
 	if (kgjoin)
 	{
 		memset(kgjoin, 0, head_sz);
-		kgjoin->kparams_offset = head_sz;
-		kgjoin->pstack_offset = head_sz + param_sz;
-		kgjoin->pstack_nrooms = pstack_nrooms;
-		kgjoin->suspend_offset = head_sz + param_sz + mp_count * pstack_sz;
-		kgjoin->suspend_size = mp_count * suspend_sz;
-		kgjoin->num_rels = gjs->num_rels;
-		kgjoin->src_read_pos = 0;
+		kgjoin->kparams_offset	= head_sz;
+		kgjoin->pstack_offset	= head_sz + param_sz;
+		kgjoin->suspend_offset	= head_sz + param_sz + mp_count * pstack->ps_unitsz;
+		kgjoin->suspend_size	= mp_count * suspend_sz;
+		kgjoin->num_rels		= gjs->num_rels;
+		kgjoin->src_read_pos	= 0;
 
 		/* kern_parambuf */
 		memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
@@ -5895,7 +5919,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 			   gjs->gts.kern_params->length);
 	}
 	return (head_sz + param_sz +
-			mp_count * pstack_sz +
+			mp_count * pstack->ps_unitsz +
 			mp_count * suspend_sz);
 }
 
@@ -6679,11 +6703,11 @@ gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
 	cl_uint		global_id;
 	cl_uint		group_id;
 	cl_uint		local_id;
-	cl_uint		nrooms = kgjoin->pstack_nrooms;
 	cl_uint		write_pos;
 	cl_uint		read_pos;
 	cl_uint		row_index;
-	cl_uint	   *pstack;
+	gpujoinPseudoStack *pstack;
+	cl_uint	   *pstack_base;
 	cl_int		j;
 	gpujoinSuspendContext *sb;
 	HeapTupleHeaderData *htup;
@@ -6708,10 +6732,10 @@ lnext:
 	gjs->fallback_resume_depth = depth;
 
 	/* suspend context and pseudo stack */
-	pstack = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ group_id * nrooms * ((num_rels + 1) * 
-							   (num_rels + 2) / 2)
-		+ nrooms * (depth * (depth + 1)) / 2;
+	pstack = (gpujoinPseudoStack *)kparam_get_value(gjs->gts.kern_params, 0);
+	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset +
+							  group_id * pstack->ps_unitsz +
+							  pstack->ps_offset[depth]);
 	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, group_id);
 	if (sb->depth < 0)
 	{
@@ -6747,7 +6771,7 @@ lnext:
 	gjs->fallback_thread_count++;
 
 	/* extract partially joined tuples */
-	pstack += row_index * (depth + 1);
+	pstack_base += row_index * (depth + 1);
 	for (j=outer_depth; j <= depth; j++)
 	{
 		if (j == 0)
@@ -6756,7 +6780,7 @@ lnext:
 			if (pds_src->kds.format == KDS_FORMAT_ROW)
 			{
 				htup = KDS_ROW_REF_HTUP(&pds_src->kds,
-										pstack[0],
+										pstack_base[0],
 										&t_self, NULL);
 				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 											   &pds_src->kds,
@@ -6772,7 +6796,7 @@ lnext:
 				ItemPointerData	t_self;
 
 				htup = KDS_BLOCK_REF_HTUP(&pds_src->kds,
-										  pstack[0],
+										  pstack_base[0],
 										  &t_self, NULL);
 				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 											   &pds_src->kds,
@@ -6793,7 +6817,7 @@ lnext:
 			innerState	   *istate = &gjs->inners[j-1];
 			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, j);
 
-			htup = KDS_ROW_REF_HTUP(kds_in,pstack[j],&t_self,NULL);
+			htup = KDS_ROW_REF_HTUP(kds_in,pstack_base[j],&t_self,NULL);
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 										   kds_in,
 										   &t_self,

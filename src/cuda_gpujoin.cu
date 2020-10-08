@@ -324,14 +324,14 @@ gpujoin_load_source(kern_context *kcxt,
 		 * at once, thus, we try to dive into deeper depth prior
 		 * to the next outer tuples.
 		 */
-		if (write_pos[0] + get_local_size() > kgjoin->pstack_nrooms)
+		if (write_pos[0] + get_local_size() > GPUJOIN_PSEUDO_STACK_NROOMS)
 			return 1;
 		__syncthreads();
 	}
 	else
 	{
 		/* no tuples we could fetch */
-		assert(write_pos[0] + get_local_size() <= kgjoin->pstack_nrooms);
+		assert(write_pos[0] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS);
 		l_state[0] = 0;
 		__syncthreads();
 	}
@@ -802,7 +802,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 		 * It is mostly valuable to run many combinations on the next depth.
 		 */
 		assert(wip_count[depth] == 0);
-		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		if (write_pos[depth] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		{
 			cl_int	__depth = gpujoin_rewind_stack(kgjoin, depth-1,
 												   l_state, matched);
@@ -904,7 +904,7 @@ left_outer:
 	 * If we have enough room to store the combinations more, execute this
 	 * depth one more. Elsewhere, dive into a deeper level to flush results.
 	 */
-	if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+	if (write_pos[depth] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		return depth;
 	return depth + 1;
 }
@@ -960,7 +960,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		 * It is mostly valuable to run many combinations on the next depth.
 		 */
 		assert(wip_count[depth] == 0);
-		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		if (write_pos[depth] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		{
 			cl_int	__depth = gpujoin_rewind_stack(kgjoin, depth-1,
 												   l_state, matched);
@@ -1088,7 +1088,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	 */
 	wr_index = write_pos[depth];
 	__syncthreads();
-	if (wr_index + get_local_size() <= kgjoin->pstack_nrooms)
+	if (wr_index + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		return depth;
 	return depth+1;
 }
@@ -1338,7 +1338,7 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	if (rd_index >= write_pos[depth-1])
 	{
 		assert(wip_count[depth] == 0);
-		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		if (write_pos[depth] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		{
 			cl_int	__depth = gpujoin_rewind_stack(kgjoin, depth-1,
 												   l_state, matched);
@@ -1467,14 +1467,14 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	/* see comment in gpujoin_exec_hashjoin */
 	wr_index = write_pos[depth];
 	__syncthreads();
-	if (wr_index + get_local_size() <= kgjoin->pstack_nrooms)
+	if (wr_index + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		return depth;
 	return depth+1;	
 }
 
-#define PSTACK_DEPTH(d)							\
-	((d) >= 0 && (d) <= kgjoin->num_rels		\
-	 ? (pstack_base + pstack_nrooms * ((d) * ((d) + 1)) / 2) : NULL)
+#define PSTACK_DEPTH(d)											\
+	((d) >= 0 && (d) <= kgjoin->num_rels ?						\
+	 (cl_uint *)(pstack_base + pstack->ps_offset[(d)]): NULL)
 
 /*
  * gpujoin_main
@@ -1493,8 +1493,8 @@ gpujoin_main(kern_context *kcxt,
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
 	cl_int			index;
-	cl_uint			pstack_nrooms;
-	cl_uint		   *pstack_base;
+	gpujoinPseudoStack *pstack;
+	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW ||
@@ -1505,10 +1505,10 @@ gpujoin_main(kern_context *kcxt,
 		   (kds_dst->format == KDS_FORMAT_SLOT && kparams_gpreagg != NULL));
 
 	/* setup private variables */
-	pstack_nrooms = kgjoin->pstack_nrooms;
-	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_group_id() * pstack_nrooms * ((max_depth+1) *
-											(max_depth+2)) / 2;
+	pstack = (gpujoinPseudoStack *)kparam_get_value(kcxt->kparams, 0);
+	pstack_base = ((char *)kgjoin + kgjoin->pstack_offset +
+				   get_group_id() * pstack->ps_unitsz);
+
 	/* init per-depth context */
 	if (get_local_id() == 0)
 	{
@@ -1683,18 +1683,18 @@ gpujoin_right_outer(kern_context *kcxt,
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
 	cl_int			index;
-	cl_uint			pstack_nrooms;
-	cl_uint		   *pstack_base;
+	gpujoinPseudoStack *pstack;
+	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
 	assert((kds_dst->format == KDS_FORMAT_ROW  && kparams_gpreagg == NULL) ||
 		   (kds_dst->format == KDS_FORMAT_SLOT && kparams_gpreagg != NULL));
 	/* setup private variables */
-	pstack_nrooms = kgjoin->pstack_nrooms;
-	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_group_id() * pstack_nrooms * ((max_depth+1) *
-											(max_depth+2)) / 2;
+	pstack = (gpujoinPseudoStack *)kparam_get_value(kcxt->kparams, 0);
+	pstack_base = ((char *)kgjoin + kgjoin->pstack_offset +
+				   get_group_id() * pstack->ps_unitsz);
+
 	/* setup per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
