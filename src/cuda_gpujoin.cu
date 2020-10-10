@@ -1143,6 +1143,72 @@ GistFollowRight(PageHeaderData *page)
 #define GIST_ROOT_BLKNO			0
 
 #include "cuda_postgis.h"
+
+/*
+ * gpujoin_prep_gistindex
+ *
+ * MEMO: We must load the entire GiST-index, but part of the leaf items indicate
+ * invalid items because a part of inner rows can be filtered out already.
+ * So, this kernel function preliminary invalidates these items on the inner
+ * preload timing.
+ */
+KERNEL_FUNCTION(void)
+gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
+{
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
+	BlockNumber		block_nr;
+	OffsetNumber	i, maxoff;
+
+	assert(kds_hash->format == KDS_FORMAT_HASH &&
+		   kds_gist->format == KDS_FORMAT_BLOCK);
+	assert(depth >= 1 && depth <= kmrels->nrels);
+
+	for (block_nr = get_group_id();
+		 block_nr < kds_gist->nrooms;
+		 block_nr += get_num_groups())
+	{
+		PageHeaderData *gist_page;
+		ItemIdData	   *lpp;
+		IndexTupleData *itup;
+		kern_hashitem  *khitem;
+		cl_uint			hash, t_off;
+
+		gist_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, block_nr);
+		if (!GistPageIsLeaf(gist_page))
+			continue;
+		maxoff = PageGetMaxOffsetNumber(gist_page);
+		for (i = get_local_id(); i < maxoff; i += get_local_size())
+		{
+			lpp = PageGetItemId(gist_page, i+1);
+			if (ItemIdIsDead(lpp))
+				continue;
+			itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
+
+			/* lookup kds_hash */
+			hash = pg_hash_any((cl_uchar *)&itup->t_tid,
+							   sizeof(ItemPointerData));
+			for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash);
+				 khitem != NULL;
+				 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
+			{
+				if (ItemPointerEquals(&khitem->t.htup.t_ctid, &itup->t_tid))
+				{
+					t_off = __kds_packed((char *)&khitem->t -
+										 (char *)kds_hash);
+					itup->t_tid.ip_blkid.bi_hi = (t_off >> 16);
+					itup->t_tid.ip_blkid.bi_lo = (t_off & 0x0000ffffU);
+					itup->t_tid.ip_posid = USHRT_MAX;
+					break;
+				}
+			}
+			/* invalidate this leaf item, if not exist on kds_hash */
+			if (!khitem)
+				lpp->lp_flags = LP_DEAD;
+		}
+	}
+}
+
 /*
  * gpujoin_gist_getnext
  */
@@ -1217,7 +1283,6 @@ restart:
 
 		kcxt->vlpos = vlpos_saved;		/* rewind */
 		rv = gpujoin_gist_index_quals(kcxt, depth, kds_gist, itup, gist_keys);
-		atomicAdd(&kgjoin->debug_counter1, 1);
 		if (rv)
 		{
 			atomicMin(&least_index, index);
@@ -1319,7 +1384,6 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	cl_uint			count = 0;
 	void		   *gist_keys;
 	cl_char		   *vlpos_saved;
-	cl_bool			rv = false;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
 	assert(depth >= 1 && depth <= kgjoin->num_rels);
@@ -1372,8 +1436,8 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	vlpos_saved = kcxt->vlpos;
 	do {
 		ItemPointerData *t_ctid;
-		kern_hashitem  *khitem;
-		cl_uint			hash_value;
+		kern_tupitem   *titem;
+		cl_uint			t_off;
 		cl_bool			joinquals_matched = false;
 		
 		/*
@@ -1388,43 +1452,34 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 									  &l_state[depth]);
 		if (t_ctid)
 		{
-			/* Lookup hash-table by CTID */
-			hash_value = pg_hash_any((cl_uchar *)t_ctid, sizeof(ItemPointerData));
-			for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
-				 khitem != NULL;
-				 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
-			{
-				if (ItemPointerEquals(&khitem->t.htup.t_ctid, t_ctid))
-					break;
-			}
-			atomicAdd(&kgjoin->debug_counter2, 1);
+			atomicAdd(&kgjoin->debug_counter1, 1);
 
+			assert(t_ctid->ip_posid == USHRT_MAX);
+			t_off = (((cl_uint)t_ctid->ip_blkid.bi_hi << 16) |
+					 ((cl_uint)t_ctid->ip_blkid.bi_lo));
+			titem = (kern_tupitem *)((char *)kds_hash + __kds_unpack(t_off));
 			/* Check JOIN Quals */
-			if (khitem)
+			if (gpujoin_join_quals(kcxt,
+								   kds_src,
+								   kds_extra,
+								   kmrels,
+								   depth,
+								   rd_stack,
+								   &titem->htup,
+								   &joinquals_matched))
 			{
-				atomicAdd(&kgjoin->debug_counter3, 1);
-#if 1
-				if (gpujoin_join_quals(kcxt,
-									   kds_src,
-									   kds_extra,
-									   kmrels,
-									   depth,
-									   rd_stack,
-									   &khitem->t.htup,
-									   &joinquals_matched))
-#endif
-				{
-				   	assert(joinquals_matched);
-					/* No LEFT/FULL JOIN are needed */
-					matched[depth] = true;
-					/* No RIGHT/FULL JOIN are needed */
-					assert(khitem->t.rowid < kds_hash->nitems);
-					if (oj_map && !oj_map[khitem->t.rowid])
-						oj_map[khitem->t.rowid] = true;
-					/* tuple offset should be valid */
-					t_offset = __kds_packed((char *)&khitem->t.htup -
-											(char *)kds_hash);
-				}
+				atomicAdd(&kgjoin->debug_counter2, 1);
+
+				assert(joinquals_matched);
+				/* No LEFT/FULL JOIN are needed */
+				matched[depth] = true;
+				/* No RIGHT/FULL JOIN are needed */
+				assert(titem->rowid < kds_hash->nitems);
+				if (oj_map && !oj_map[titem->rowid])
+					oj_map[titem->rowid] = true;
+				/* tuple offset should be valid */
+				t_offset = __kds_packed((char *)&titem->htup -
+										(char *)kds_hash);
 			}
 		}
 		kcxt->vlpos = vlpos_saved;		/* rewind */

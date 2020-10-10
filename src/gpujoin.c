@@ -8112,6 +8112,63 @@ innerPreloadMmapHostBuffer(GpuJoinState *leader, GpuJoinState *gjs)
 }
 
 static void
+__innerPreloadInitGiSTIndex(GpuJoinState *gjs, CUdeviceptr m_kmrels)
+{
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	CUmodule		cuda_module = NULL;
+	CUfunction		f_prep_gistindex = NULL;
+	CUresult		rc;
+	void		   *kern_args[2];
+	cl_int			grid_sz;
+	cl_int			block_sz;
+	cl_int			depth;
+
+	for (depth=1; depth <= gjs->num_rels; depth++)
+	{
+		if (!gjs->inners[depth-1].gist_irel)
+			continue;
+		/* load the CUDA module and function */
+		if (!cuda_module)
+		{
+			cuda_module = GpuContextLookupModule(gcontext,
+												 gjs->gts.program_id);
+           rc = cuModuleGetFunction(&f_prep_gistindex,
+                                    cuda_module,
+                                    "gpujoin_prep_gistindex");
+           if (rc != CUDA_SUCCESS)
+               elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+           rc = gpuOptimalBlockSize(&grid_sz,
+                                    &block_sz,
+                                    f_prep_gistindex,
+                                    gcontext->cuda_device,
+                                    0, 0);
+          if (rc != CUDA_SUCCESS)
+               elog(ERROR, "failed on gpuOptimalBlockSize: %s", errorText(rc));
+       }
+       /* launch kern_gpujoin_prep_gistindex */
+       kern_args[0] = &m_kmrels;
+       kern_args[1] = &depth;
+
+       rc = cuLaunchKernel(f_prep_gistindex,
+                           grid_sz, 1, 1,
+                           block_sz, 1, 1,
+                           0,
+                           CU_STREAM_PER_THREAD,
+                           kern_args,
+                           NULL);
+       if (rc != CUDA_SUCCESS)
+           elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+   }
+
+   if (cuda_module)
+   {
+       rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+       if (rc != CUDA_SUCCESS)
+           elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
+   }
+}
+
+static void
 innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 							 GpuJoinState *gjs)
 {
@@ -8157,6 +8214,7 @@ innerPreloadLoadDeviceBuffer(GpuJoinState *leader,
 		rc = cuMemcpyHtoD(m_kmrels, h_kmrels, bytesize);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		__innerPreloadInitGiSTIndex(gjs, m_kmrels);
 		GPUCONTEXT_POP(gcontext);
 
 		gjs->m_kmrels = m_kmrels;

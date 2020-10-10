@@ -869,6 +869,11 @@ extern void *untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr);
 extern bool trackRawFileDesc(GpuContext *gcontext, int filedesc,
 							 const char *filename, int lineno);
 extern void untrackRawFileDesc(GpuContext *gcontext, int filedesc);
+extern CUmodule __GpuContextLookupModule(GpuContext *gcontext,
+										 ProgramId program_id,
+										 const char *filename, int lineno);
+#define GpuContextLookupModule(a,b)			\
+	__GpuContextLookupModule((a),(b),__FILE__,__LINE__)
 extern void pgstrom_init_gpu_context(void);
 
 /*

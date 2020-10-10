@@ -429,11 +429,11 @@ gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
 }
 
 /*
- * GpuContextLookupModule
+ * __GpuContextLookupModule
  */
-static CUmodule
-GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id,
-					   const char *filename, int lineno)
+CUmodule
+__GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id,
+						 const char *filename, int lineno)
 {
 	ResourceTracker *tracker;
 	dlist_head *restrack_list;
@@ -720,8 +720,7 @@ GpuContextWorkerMain(void *arg)
 
 				gts = gtask->gts;
 				cuda_module = GpuContextLookupModule(gcontext,
-													 gtask->program_id,
-													 __FILE__, __LINE__);
+													 gtask->program_id);
 			retry_gputask:
 				/*
 				 * pgstromProcessGpuTask() returns the following status:
