@@ -1151,6 +1151,7 @@ gpujoin_gist_getnext(kern_context *kcxt,
 					 kern_gpujoin *kgjoin,
 					 cl_int depth,
 					 kern_data_store *kds_gist,
+					 void *gist_keys,
 					 cl_uint *p_item_offset)
 {
 	PageHeaderData *gist_base = KERN_DATA_STORE_BLOCK_PGPAGE(kds_gist, 0);
@@ -1215,7 +1216,7 @@ restart:
 		itup = (IndexTupleData *) PageGetItem(gist_page, lpp);
 
 		kcxt->vlpos = vlpos_saved;		/* rewind */
-		rv = gpujoin_gist_index_quals(kcxt, depth, kds_gist, itup);
+		rv = gpujoin_gist_index_quals(kcxt, depth, kds_gist, itup, gist_keys);
 		atomicAdd(&kgjoin->debug_counter1, 1);
 		if (rv)
 		{
@@ -1316,6 +1317,8 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	cl_uint			wr_index;
 	cl_uint			t_offset = UINT_MAX;
 	cl_uint			count = 0;
+	void		   *gist_keys;
+	cl_char		   *vlpos_saved;
 	cl_bool			rv = false;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
@@ -1353,23 +1356,20 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	 * Load the GiST index key onto the private buffer on the shared-
 	 * memory segment
 	 */
-	if (get_local_id() == 0)
-	{
-		rv = gpujoin_gist_load_keys(kcxt,
-									kmrels,
-									kds_src,
-									kds_extra,
-									depth,
-									rd_stack);
-		atomicAdd(&kgjoin->debug_counter0, 1);
-	}
-	if (__syncthreads_count(rv != false) == 0)
+	gist_keys = gpujoin_gist_load_keys(kcxt,
+									   kmrels,
+									   kds_src,
+									   kds_extra,
+									   depth,
+									   rd_stack);
+	if (__syncthreads_count(gist_keys == NULL) != 0)
 		return -1;		/* unable to load GiST keys */
 
 	/*
 	 * Try to walk on the GiST(R-tree) index until any of local thread
 	 * found the matched tuple.
 	 */
+	vlpos_saved = kcxt->vlpos;
 	do {
 		ItemPointerData *t_ctid;
 		kern_hashitem  *khitem;
@@ -1384,6 +1384,7 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 									  kgjoin,
 									  depth,
 									  kds_gist,
+									  gist_keys,
 									  &l_state[depth]);
 		if (t_ctid)
 		{
@@ -1426,6 +1427,8 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 				}
 			}
 		}
+		kcxt->vlpos = vlpos_saved;		/* rewind */
+
 		/*
 		 * Any tuples matched by the JOIN Quals?
 		 */

@@ -253,7 +253,7 @@ gpujoin_hash_value(kern_context *kcxt,
  * It preloads GiST index keys from the outer relations, then returns
  * private datum on kcxt->vlbuf
  */
-DEVICE_FUNCTION(cl_bool)
+DEVICE_FUNCTION(void *)
 gpujoin_gist_load_keys(kern_context *kcxt,
 					   kern_multirels *kmrels,
 					   kern_data_store *kds,
@@ -270,7 +270,8 @@ DEVICE_FUNCTION(cl_bool)
 gpujoin_gist_index_quals(kern_context *kcxt,
 						 cl_int depth,
 						 kern_data_store *kds_gist,
-						 IndexTupleData *itup);
+						 IndexTupleData *itup,
+						 void *gist_keys);
 
 /*
  * gpujoin_projection
