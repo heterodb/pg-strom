@@ -1258,7 +1258,7 @@ gpujoin_gist_getnext(kern_context *kcxt,
 		lpp = (ItemIdData *)((char *)kds_gist + *p_item_offset);
 		off = (((char *)lpp - (char *)gist_base) & (BLCKSZ - 1));
 		gist_page = (PageHeaderData *)((char *)lpp - off);
-		start = (lpp - gist_page->pd_linp) + 1 + WARP_SIZE;
+		start = (lpp - gist_page->pd_linp) + 1 + warpSize;
 	}
 restart:
 	assert((((char *)gist_page - (char *)gist_base) & (BLCKSZ - 1)) == 0);
@@ -1269,7 +1269,7 @@ restart:
 		maxoff = PageGetMaxOffsetNumber(gist_page);
 
 	rv = false;
-	for (index=start; index <= maxoff; index += WARP_SIZE)
+	for (index=start; index <= maxoff; index += warpSize)
 	{
 		lpp = PageGetItemId(gist_page, index);
 		if (ItemIdIsDead(lpp))
@@ -1392,7 +1392,7 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		 * Move to the next outer window.
 		 */
 		if (get_local_id() == 0)
-			read_pos[depth-1] += get_local_size() / WARP_SIZE;
+			read_pos[depth-1] += get_local_size() / warpSize;
 		l_state[depth] = 0;
 		matched[depth] = false;
 		return depth;
@@ -1409,20 +1409,28 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 		/* elsewhere, dive into the deeper depth or projection */
         return depth + 1;
 	}
-	rd_index = read_pos[depth-1] + (get_local_id() / WARP_SIZE);
+	rd_index = read_pos[depth-1] + (get_local_id() / warpSize);
 	rd_stack += (rd_index * depth);
 
 	/*
 	 * Load the GiST index key onto the private buffer on the shared-
 	 * memory segment
 	 */
-	gist_keys = gpujoin_gist_load_keys(kcxt,
-									   kmrels,
-									   kds_src,
-									   kds_extra,
-									   depth,
-									   rd_stack);
-	if (__syncthreads_count(gist_keys == NULL) != 0)
+	if (rd_index < write_pos[depth-1])
+	{
+		gist_keys = gpujoin_gist_load_keys(kcxt,
+										   kmrels,
+										   kds_src,
+										   kds_extra,
+										   depth,
+										   rd_stack);
+	}
+	else
+	{
+		gist_keys = NULL;
+		l_state[depth] = UINT_MAX;
+	}
+	if (__syncthreads_count(gist_keys == (void *)(~0UL)) != 0)
 		return -1;		/* unable to load GiST keys */
 
 	/*
@@ -1431,49 +1439,52 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	 */
 	vlpos_saved = kcxt->vlpos;
 	do {
-		ItemPointerData *t_ctid;
+		ItemPointerData *t_ctid = NULL;
 		kern_tupitem   *titem;
 		cl_uint			t_off;
 		cl_bool			joinquals_matched = false;
-		
+
 		/*
 		 * walk on the GiST index. If l_state[depth]==0, find a matched entry
 		 * from the root page. Elsewhere, suspend the scan from the next item.
 		 */
-		t_ctid = gpujoin_gist_getnext(kcxt,
-									  kgjoin,
-									  depth,
-									  kds_gist,
-									  gist_keys,
-									  &l_state[depth]);
-		if (t_ctid)
+		if (gist_keys)
 		{
-			assert(t_ctid->ip_posid == USHRT_MAX);
-			t_off = (((cl_uint)t_ctid->ip_blkid.bi_hi << 16) |
-					 ((cl_uint)t_ctid->ip_blkid.bi_lo));
-			titem = (kern_tupitem *)((char *)kds_hash + __kds_unpack(t_off));
-			/* Check JOIN Quals */
-			if (gpujoin_join_quals(kcxt,
-								   kds_src,
-								   kds_extra,
-								   kmrels,
-								   depth,
-								   rd_stack,
-								   &titem->htup,
-								   &joinquals_matched))
+			t_ctid = gpujoin_gist_getnext(kcxt,
+										  kgjoin,
+										  depth,
+										  kds_gist,
+										  gist_keys,
+										  &l_state[depth]);
+			if (t_ctid)
 			{
-				assert(joinquals_matched);
-				/* No LEFT/FULL JOIN are needed */
-				matched[depth] = true;
-				/* No RIGHT/FULL JOIN are needed */
-				assert(titem->rowid < kds_hash->nitems);
-				if (oj_map && !oj_map[titem->rowid])
-					oj_map[titem->rowid] = true;
-				/* tuple offset should be valid */
-				t_offset = __kds_packed((char *)&titem->htup -
-										(char *)kds_hash);
-				//TODO: Put t_offset + rd_stack onto the temporary buffer
-				//instead of the gpujoin_join_quals at this point
+				assert(t_ctid->ip_posid == USHRT_MAX);
+				t_off = (((cl_uint)t_ctid->ip_blkid.bi_hi << 16) |
+						 ((cl_uint)t_ctid->ip_blkid.bi_lo));
+				titem = (kern_tupitem *)((char *)kds_hash + __kds_unpack(t_off));
+				/* Check JOIN Quals */
+				if (gpujoin_join_quals(kcxt,
+									   kds_src,
+									   kds_extra,
+									   kmrels,
+									   depth,
+									   rd_stack,
+									   &titem->htup,
+									   &joinquals_matched))
+				{
+					assert(joinquals_matched);
+					/* No LEFT/FULL JOIN are needed */
+					matched[depth] = true;
+					/* No RIGHT/FULL JOIN are needed */
+					assert(titem->rowid < kds_hash->nitems);
+					if (oj_map && !oj_map[titem->rowid])
+						oj_map[titem->rowid] = true;
+					/* tuple offset should be valid */
+					t_offset = __kds_packed((char *)&titem->htup -
+											(char *)kds_hash);
+					//TODO: Put t_offset + rd_stack onto the temporary buffer
+					//instead of the gpujoin_join_quals at this point
+				}
 			}
 		}
 		kcxt->vlpos = vlpos_saved;		/* rewind */

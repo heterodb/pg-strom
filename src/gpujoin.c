@@ -5656,7 +5656,7 @@ gpujoin_codegen(PlannerInfo *root,
 		pstack->ps_offset[depth] = off;
 		off += sz;
 		/* GiST-index support needs extra pseudo-stack */
-		if (depth < gj_path->num_rels && gj_path->inners[depth].gist_clauses)
+		if (depth > 0 && gj_path->inners[depth-1].gist_clauses)
 			off += sz;
 	}
 	pstack->ps_unitsz = off;
@@ -5822,7 +5822,7 @@ gpujoin_codegen(PlannerInfo *root,
 			"                                         o_buffer,\n"
 			"                                         __gist_keys))\n"
 			"      return __gist_keys;\n"
-			"    return NULL;\n"
+			"    return (void *)(~0UL);\n"
 			"  }\n",
 			depth+1, depth+1, depth+1);
 	}
@@ -5830,7 +5830,7 @@ gpujoin_codegen(PlannerInfo *root,
 		&source,
 		"  STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,\n"
 		"                \"GpuJoin: wrong code generation\");\n"
-		"  return NULL;\n"
+		"  return (void *)(~0UL);\n"
 		"}\n\n");
 
 	appendStringInfoString(
