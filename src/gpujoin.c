@@ -3987,7 +3987,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		}
 		else if (gist_index_clauses != NULL)
 		{
-			appendStringInfo(&str, "GpuHash%sJoin+GiST Index",
+			appendStringInfo(&str, "GpuGiST%sJoin",
 							 join_type == JOIN_FULL ? "Full" :
 							 join_type == JOIN_LEFT ? "Left" :
 							 join_type == JOIN_RIGHT ? "Right" : "");
