@@ -31,6 +31,7 @@ extern __shared__ cl_uint	wip_count[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 extern __shared__ cl_uint	read_pos[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 extern __shared__ cl_uint	write_pos[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 extern __shared__ cl_uint	temp_pos[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
+extern __shared__ cl_uint	gist_pos[0];	/* [(GPUJOIN_MAX_DEPTH+1)*32] items */
 static __shared__ cl_uint	stat_source_nitems;
 extern __shared__ cl_uint	stat_nitems[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 
@@ -59,6 +60,8 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		sb->pd[i].read_pos = read_pos[i];
 		sb->pd[i].write_pos = write_pos[i];
 		sb->pd[i].temp_pos = temp_pos[i];
+		memcpy(sb->pd[i].gist_pos, gist_pos + i * MAXWARPS_PER_BLOCK,
+			   sizeof(cl_uint) * MAXWARPS_PER_BLOCK);
 		sb->pd[i].stat_nitems = stat_nitems[i];
 	}
 
@@ -97,6 +100,8 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 		read_pos[i] = sb->pd[i].read_pos;
 		write_pos[i] = sb->pd[i].write_pos;
 		temp_pos[i] = sb->pd[i].temp_pos;
+		memcpy(gist_pos + i * MAXWARPS_PER_BLOCK, sb->pd[i].gist_pos,
+			   sizeof(cl_uint) * MAXWARPS_PER_BLOCK);
 		stat_nitems[i] = sb->pd[i].stat_nitems;
 	}
 
@@ -1217,7 +1222,7 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 /*
  * gpujoin_gist_getnext
  */
-STATIC_FUNCTION(ItemPointerData *)
+STATIC_INLINE(ItemPointerData *)
 gpujoin_gist_getnext(kern_context *kcxt,
 					 kern_gpujoin *kgjoin,
 					 cl_int depth,
@@ -1234,7 +1239,7 @@ gpujoin_gist_getnext(kern_context *kcxt,
 	ItemIdData	   *lpp = NULL;
 	IndexTupleData *itup = NULL;
 	cl_bool			rv = false;
-	
+
 	assert(kds_gist->format == KDS_FORMAT_BLOCK);
 
 	/*
@@ -1380,37 +1385,23 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
-	cl_uint		   *rd_stack;
 	cl_uint		   *wr_stack;
 	cl_uint		   *temp_stack;
 	cl_uint			rd_index;
 	cl_uint			wr_index;
 	cl_uint			temp_index;
-	cl_uint			i, count;
+	cl_uint			count;
 	void		   *gist_keys;
 	cl_char		   *vlpos_saved_1 = kcxt->vlpos;
-	cl_char		   *vlpos_saved_2;
+
+	cl_ulong		tv;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
 	assert(depth >= 1 && depth <= kgjoin->num_rels);
 
-	count = __syncthreads_count(l_state[depth] != UINT_MAX);
-restart:
-	kcxt->vlpos = vlpos_saved_1;	/* rewind */
-	if (count == 0)
-	{
-		/*
-		 * Ok, all the threads reached to the end of GiST-Index chain.
-		 * Move to the next outer window.
-		 */
-		if (get_local_id() == 0)
-			read_pos[depth-1] += get_local_size() / warpSize;
-		l_state[depth] = 0;
-		matched[depth] = false;
-		__syncthreads();
-	}
-
-	if (read_pos[depth-1] >= write_pos[depth-1])
+	if (__syncthreads_count(l_state[depth] != UINT_MAX &&
+							l_state[depth] != 0) == 0 &&
+		read_pos[depth-1] >= write_pos[depth-1])
 	{
 		if (write_pos[depth] + get_local_size() <= GPUJOIN_PSEUDO_STACK_NROOMS)
 		{
@@ -1420,172 +1411,198 @@ restart:
 				return __depth;
 		}
 		/* flush if temporary index search results still remain */
-		if (temp_pos[depth] > 0)
-		{
-			l_state[depth] = UINT_MAX;
-			goto skip_index_search;
-		}
+		if (scan_done && temp_pos[depth] > 0)
+			goto bailout;
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
-	rd_index = read_pos[depth-1] + (get_local_id() / warpSize);
-	rd_stack = __rd_stack_base + (rd_index * depth);
+	__syncthreads();
 
-	/*
-	 * Load the GiST index key onto the private buffer on the shared-
-	 * memory segment
-	 */
+reload:
+	kcxt->vlpos = vlpos_saved_1;	/* rewind */
+	if (__all_sync(__activemask(), l_state[depth] == UINT_MAX) ||
+		__all_sync(__activemask(), l_state[depth] == 0))
+	{
+		/*
+		 * all the threads in warp reached in the tail of GiST-index tree, so move to
+		 * the next index key.
+		 */
+		if (LaneId() == 0)
+		{
+			rd_index = atomicAdd(&read_pos[depth-1], 1);
+			gist_pos[depth * MAXWARPS_PER_BLOCK + get_local_id() / warpSize] = rd_index;
+		}
+		rd_index = __shfl_sync(__activemask(), rd_index, 0);
+		l_state[depth] = 0;
+	}
+	else
+	{
+		/* resume the index-key */
+		rd_index = gist_pos[depth * MAXWARPS_PER_BLOCK + get_local_id() / warpSize];
+	}
+	/* threads in a warp must load exactly same index-key */
+	assert(rd_index == __shfl_sync(__activemask(), rd_index, 0));
+
 	if (rd_index < write_pos[depth-1])
 	{
+		cl_uint	   *rd_stack = __rd_stack_base + (rd_index * depth);
+		cl_char	   *vlpos_saved_2;
+
 		gist_keys = gpujoin_gist_load_keys(kcxt,
 										   kmrels,
 										   kds_src,
 										   kds_extra,
 										   depth,
 										   rd_stack);
-	}
-	else
-	{
-		gist_keys = NULL;
-		l_state[depth] = UINT_MAX;
-	}
-	if (__syncthreads_count(gist_keys == (void *)(~0UL)) != 0)
-		return -1;		/* unable to load GiST keys */
-
-	/*
-	 * 1st-step: Walk on the GiST(R-tree) index using the keys above.
-	 *
-	 * The temporary results fetched from the index shall be kept in
-	 * the temp_stack[] (later half of wr_stack[]) once, for more
-	 * efficient GPU core usage to run gpujoin_join_quals().
-	 */
-	vlpos_saved_2 = kcxt->vlpos;
-	count = get_local_size();
-
-	while (temp_pos[depth] + count <= GPUJOIN_PSEUDO_STACK_NROOMS)
-	{
-		ItemPointerData *t_ctid = NULL;
-		cl_uint			t_off;
+		if (__any_sync(__activemask(), kcxt->errcode != 0))
+			goto bailout;	/* error */
+		assert(gist_keys != NULL);
 
 		/*
-		 * walk on the GiST index. If l_state[depth]==0, find a matched entry
-		 * from the root page. Elsewhere, suspend the scan from the next item.
+		 * MEMO: Cost to run gpujoin_gist_getnext highly depends on the key value.
+		 * If key never matches any bounding-box, gpujoin_gist_getnext() returns
+		 * immediately. If key matches some entries, thus walks down into the leaf
+		 * of R-tree, it takes longer time than the above misshit cases.
+		 * In case when individual warps have various execution time, in general,
+		 * we should not put __syncthreads() because the warps that returned
+		 * immediately from the gpujoin_gist_getnext() are blocked until completion
+		 * of someone's R-tree index search.
+		 * So, we don't put any __syncthreads() in the loop below. If a warp finished
+		 * gpujoin_gist_getnext() very early, it can reload another index-key for
+		 * the next search during the GiST-index search by the other warps/threads.
+		 * If usage of temp_stack[] exceeds get_local_size(), all the warps move to
+		 * the second phase to run gpujoin_join_quals(), because it means we can
+		 * utilize all the core to evaluate Join quals in parallel; that is the most
+		 * efficient way to run.
 		 */
-		if (gist_keys)
-		{
+		vlpos_saved_2 = kcxt->vlpos;
+		do {
+			ItemPointerData *t_ctid;
+			cl_uint		mask;
+			cl_uint		t_off;
+			cl_uint		l_next = l_state[depth];
+
 			t_ctid = gpujoin_gist_getnext(kcxt,
 										  kgjoin,
 										  depth,
 										  kds_gist,
 										  gist_keys,
-										  &l_state[depth]);
-		}
-		temp_index = temp_pos[depth];
-		temp_index += pgstromStairlikeBinaryCount(t_ctid != NULL, &count);
-		if (get_local_id() == 0)
-			temp_pos[depth] += count;
-		if (t_ctid)
-		{
-			assert(t_ctid->ip_posid == USHRT_MAX);
-			t_off = (((cl_uint)t_ctid->ip_blkid.bi_hi << 16) |
-					 ((cl_uint)t_ctid->ip_blkid.bi_lo));
-			assert(temp_index < GPUJOIN_PSEUDO_STACK_NROOMS);
-			temp_stack = __wr_stack_base +
-				(depth+1) * (GPUJOIN_PSEUDO_STACK_NROOMS + temp_index);
-			memcpy(temp_stack, rd_stack, sizeof(cl_uint) * depth);
-			temp_stack[depth] = t_off;
-			assert(__kds_unpack(t_off) < kds_hash->length);
-		}
-		kcxt->vlpos = vlpos_saved_2;	/* rewind */
+										  &l_next);
+			if (__any_sync(__activemask(), kcxt->errcode != 0))
+				goto bailout;	/* error */
+			
+			mask = __ballot_sync(__activemask(), t_ctid != NULL);
+			count = __popc(mask);
+			if (LaneId() == 0)
+				temp_index = atomicAdd(&temp_pos[depth], count);
+			temp_index = __shfl_sync(__activemask(), temp_index, 0);
 
-		count = __syncthreads_count(l_state[depth] != UINT_MAX);
-		if (count == 0)
-		{
-			if (temp_pos[depth] >= get_local_size())
-				break;	/* do the 2nd step */
-			goto restart;
-		}
-	}
+			if (temp_index + count > GPUJOIN_PSEUDO_STACK_NROOMS)
+				goto bailout;	/* urgent flush; cannot write out all the results */
+			temp_index += __popc(mask & ((1U << LaneId()) - 1));
 
-	/*
-	 * 2nd-STEP: validation of the candidate rows fetched from the index.
-	 *
-	 * This design intends to utilize the full capability of GPU cores
-	 * to run gpujoin_join_quals in parallel.
-	 */
-skip_index_search:
-	if (get_local_id() < temp_pos[depth])
-	{
-		kern_tupitem   *tupitem;
-		cl_bool			joinquals_matched = false;
-
-		temp_stack = __wr_stack_base +
-			(depth+1) * (GPUJOIN_PSEUDO_STACK_NROOMS + get_local_id());
-		tupitem = (kern_tupitem *)((char *)kds_hash
-								   + __kds_unpack(temp_stack[depth])
-								   - offsetof(kern_tupitem, htup));
-		assert((char *)tupitem < (char *)kds_hash + kds_hash->length);
-		/* check join quals */
-		if (gpujoin_join_quals(kcxt,
-							   kds_src,
-							   kds_extra,
-							   kmrels,
-							   depth,
-							   temp_stack,
-							   &tupitem->htup,
-							   &joinquals_matched))
-		{
-			assert(joinquals_matched);
-			/* No RIGHT JOIN are needed */
-			assert(tupitem->rowid < kds_hash->nitems);
-			if (oj_map && !oj_map[tupitem->rowid])
-				oj_map[tupitem->rowid] = true;
-		}
-		else
-		{
-			temp_stack = NULL;
-		}
+			if (t_ctid)
+			{
+				assert(t_ctid->ip_posid == USHRT_MAX);
+				t_off = (((cl_uint)t_ctid->ip_blkid.bi_hi << 16) |
+						 ((cl_uint)t_ctid->ip_blkid.bi_lo));
+				assert(temp_index < GPUJOIN_PSEUDO_STACK_NROOMS);
+				temp_stack = __wr_stack_base +
+					(depth+1) * (GPUJOIN_PSEUDO_STACK_NROOMS + temp_index);
+				memcpy(temp_stack, rd_stack, sizeof(cl_uint) * depth);
+				temp_stack[depth] = t_off;
+				assert(__kds_unpack(t_off) < kds_hash->length);
+			}
+			l_state[depth] = l_next;
+			kcxt->vlpos = vlpos_saved_2;	/* rewind */
+		} while (__any_sync(__activemask(), l_state[depth] != UINT_MAX));
+		/* try to reload the next index-key, if temp_stack[] still has space. */
+		if (__shfl_sync(__activemask(), temp_pos[depth], 0) < get_local_size())
+			goto reload;
 	}
 	else
 	{
+		l_state[depth] = UINT_MAX;
+	}
+bailout:
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != 0) > 0)
+		return -1;
+
+	if (temp_pos[depth] >= (scan_done ? 1 : get_local_size()))
+	{
 		temp_stack = NULL;
-	}
-
-	/* write out the result */
-	wr_index = write_pos[depth];
-	wr_index += pgstromStairlikeBinaryCount(temp_stack != NULL, &count);
-	if (get_local_id() == 0)
-	{
-		write_pos[depth] += count;
-		stat_nitems[depth] += count;
-	}
-	wr_stack = __wr_stack_base + (depth+1) * wr_index;
-	if (temp_stack)
-		memcpy(wr_stack, temp_stack, sizeof(cl_uint) * (depth+1));
-	__syncthreads();
-
-	/* rewind the temp stack */
-	if (get_local_id() == 0)
-	{
-		if (get_local_size() < temp_pos[depth])
+		if (get_local_id() < temp_pos[depth])
 		{
-			cl_uint		remain = temp_pos[depth] - get_local_size();
+			kern_tupitem   *tupitem;
+			cl_bool			joinquals_matched = false;
 
-			temp_stack = __wr_stack_base + (depth+1) * GPUJOIN_PSEUDO_STACK_NROOMS;
-			memcpy(temp_stack,
-				   temp_stack + (depth+1) * get_local_size(),
-				   sizeof(cl_uint) * (depth+1) * remain);
-			temp_pos[depth] -= get_local_size();
+			temp_stack = __wr_stack_base +
+				(depth+1) * (GPUJOIN_PSEUDO_STACK_NROOMS + get_local_id());
+			tupitem = (kern_tupitem *)((char *)kds_hash
+									   + __kds_unpack(temp_stack[depth])
+									   - offsetof(kern_tupitem, htup));
+			assert((char *)tupitem < (char *)kds_hash + kds_hash->length);
+			/* check join quals */
+			if (gpujoin_join_quals(kcxt,
+								   kds_src,
+								   kds_extra,
+								   kmrels,
+								   depth,
+								   temp_stack,
+								   &tupitem->htup,
+								   &joinquals_matched))
+			{
+				assert(joinquals_matched);
+				/* No RIGHT JOIN are needed */
+				assert(tupitem->rowid < kds_hash->nitems);
+				if (oj_map && !oj_map[tupitem->rowid])
+					oj_map[tupitem->rowid] = true;
+			}
+			else
+			{
+				temp_stack = NULL;
+			}
 		}
-		else
+
+		/* write out the result */
+		wr_index = write_pos[depth];
+		wr_index += pgstromStairlikeBinaryCount(temp_stack != NULL, &count);
+		if (get_local_id() == 0)
 		{
-			temp_pos[depth] = 0;
+			write_pos[depth] += count;
+			stat_nitems[depth] += count;
+		}
+		wr_stack = __wr_stack_base + (depth+1) * wr_index;
+		if (temp_stack)
+			memcpy(wr_stack, temp_stack, sizeof(cl_uint) * (depth+1));
+		__syncthreads();
+
+		/* rewind the temp stack */
+		if (get_local_id() == 0)
+		{
+			if (get_local_size() < temp_pos[depth])
+			{
+				cl_uint		remain = temp_pos[depth] - get_local_size();
+				
+				temp_stack = __wr_stack_base + (depth+1) * GPUJOIN_PSEUDO_STACK_NROOMS;
+				memcpy(temp_stack,
+					   temp_stack + (depth+1) * get_local_size(),
+					   sizeof(cl_uint) * (depth+1) * remain);
+				temp_pos[depth] -= get_local_size();
+			}
+			else
+			{
+				temp_pos[depth] = 0;
+			}
 		}
 	}
 	/* count number of threads still in-progress */
-	count = __syncthreads_count(l_state[depth] != UINT_MAX);
+	count = __syncthreads_count(l_state[depth] != UINT_MAX &&
+								l_state[depth] != 0);
 	if (get_local_id() == 0)
 		wip_count[depth] = count;
+
 	/* see comment in gpujoin_exec_hashjoin */
 	wr_index = write_pos[depth];
 	__syncthreads();
@@ -1641,6 +1658,7 @@ gpujoin_main(kern_context *kcxt,
 		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(temp_pos, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(gist_pos, 0, sizeof(cl_uint) * (max_depth+1) * MAXWARPS_PER_BLOCK);
 		scan_done = false;
 		base_depth = 0;
 	}
@@ -1829,6 +1847,7 @@ gpujoin_right_outer(kern_context *kcxt,
 		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(temp_pos, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(gist_pos, 0, sizeof(cl_uint) * (max_depth+1) * MAXWARPS_PER_BLOCK);
 		scan_done = false;
 		base_depth = outer_depth;
 	}
@@ -1933,6 +1952,7 @@ gpujoin_right_outer(kern_context *kcxt,
 			return;
 		assert(depth == depth_thread0);
 	}
+
 	/* write out statistics */
 	if (get_local_id() == 0)
 	{

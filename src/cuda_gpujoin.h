@@ -165,6 +165,7 @@ struct gpujoinSuspendContext
 		cl_uint		read_pos;
 		cl_uint		write_pos;
 		cl_uint		temp_pos;
+		cl_uint		gist_pos[MAXWARPS_PER_BLOCK];
 		cl_uint		stat_nitems;
 		cl_uint		l_state[MAXTHREADS_PER_BLOCK];	/* private variables */
 		cl_bool		matched[MAXTHREADS_PER_BLOCK];	/* private variables */
@@ -325,6 +326,7 @@ __shared__ cl_uint   wip_count[GPUJOIN_MAX_DEPTH+1];
 __shared__ cl_uint   read_pos[GPUJOIN_MAX_DEPTH+1];
 __shared__ cl_uint   write_pos[GPUJOIN_MAX_DEPTH+1];
 __shared__ cl_uint   temp_pos[GPUJOIN_MAX_DEPTH+1];
+__shared__ cl_uint   gist_pos[(GPUJOIN_MAX_DEPTH+1) * MAXWARPS_PER_BLOCK];
 __shared__ cl_uint   stat_nitems[GPUJOIN_MAX_DEPTH+1];
 
 KERNEL_FUNCTION(void)
