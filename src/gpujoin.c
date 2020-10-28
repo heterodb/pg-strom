@@ -323,6 +323,7 @@ struct GpuJoinRuntimeStat
 		pg_atomic_uint64	inner_nrooms;
 		pg_atomic_uint64	inner_usage;
 		pg_atomic_uint64	inner_nitems;
+		pg_atomic_uint64	inner_nitems2;
 		pg_atomic_uint64	right_nitems;
 	} jstat[FLEXIBLE_ARRAY_MEMBER];
 };
@@ -3953,15 +3954,20 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		List	   *gist_index_clauses = lfirst(lc6);
 		innerState *istate = &gjs->inners[depth-1];
 		kern_data_store *kds_in = NULL;
+		kern_data_store *kds_gist = NULL;
 		int			indent_width;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
 		double		exec_nrows_in = 0.0;
 		double		exec_nrows_out1 = 0.0;	/* by INNER JOIN */
 		double		exec_nrows_out2 = 0.0;	/* by OUTER JOIN */
+		uint64		exec_nrows_gist = 0.0;	/* by GiST Index */
 
 		if (gjs->h_kmrels)
+		{
 			kds_in = KERN_MULTIRELS_INNER_KDS(gjs->h_kmrels, depth);
+			kds_gist = KERN_MULTIRELS_GIST_INDEX(gjs->h_kmrels, depth);
+		}
 
 		/* fetch number of rows */
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, depth-1));
@@ -3975,6 +3981,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				pg_atomic_read_u64(&gj_rtstat->jstat[depth].inner_nitems);
 			exec_nrows_out2 = (double)
 				pg_atomic_read_u64(&gj_rtstat->jstat[depth].right_nitems);
+			exec_nrows_gist = pg_atomic_read_u64(&gj_rtstat->jstat[depth].inner_nitems2);
 		}
 
 		resetStringInfo(&str);
@@ -4006,28 +4013,12 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		{
 			if (es->costs)
 			{
-				if (!es->analyze)
-				{
-					appendStringInfo(&str, "  (%s-size: %s",
-									 hash_outer_key ? "hash" : "heap",
-									 format_bytesz(istate->ichunk_size));
-				}
-				else
-				{
-					Size	exec_sz = (kds_in ? kds_in->length : 0);
-
-					appendStringInfo(&str, "  (%s-size: %s actual-size: %s",
-									 hash_outer_key ? "hash" : "heap",
-									 format_bytesz(istate->ichunk_size),
-									 format_bytesz(exec_sz));
-				}
-
 				if (!gj_rtstat)
-					appendStringInfo(&str, ", nrows %.0f...%.0f)",
+					appendStringInfo(&str, "(nrows %.0f...%.0f)",
 									 plan_nrows_in,
 									 plan_nrows_out);
 				else if (exec_nrows_out2 > 0.0)
-					appendStringInfo(&str, ", plan nrows: %.0f...%.0f,"
+					appendStringInfo(&str, "(plan nrows: %.0f...%.0f,"
 									 " actual nrows: %.0f...%.0f+%.0f)",
 									 plan_nrows_in,
 									 plan_nrows_out,
@@ -4035,7 +4026,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 									 exec_nrows_out1,
 									 exec_nrows_out2);
 				else
-					appendStringInfo(&str, ", plan nrows: %.0f...%.0f,"
+					appendStringInfo(&str, "(plan nrows: %.0f...%.0f,"
 									 " actual nrows: %.0f...%.0f)",
 									 plan_nrows_in,
 									 plan_nrows_out,
@@ -4043,6 +4034,27 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 									 exec_nrows_out1);
 			}
 			ExplainPropertyText(qlabel, str.data, es);
+
+			appendStringInfoSpaces(es->str, indent_width);
+			if (!kds_in)
+			{
+				appendStringInfo(es->str, "%sSize: %s",
+								 hash_outer_key ? "Hash" : "Heap",
+								 format_bytesz(istate->ichunk_size));
+			}
+			else
+			{
+				appendStringInfo(es->str, "%sSize: %s (estimated: %s)",
+								 hash_outer_key ? "Hash" : "Heap",
+								 format_bytesz(kds_in->length),
+								 format_bytesz(istate->ichunk_size));
+			}
+			if (kds_gist)
+			{
+				appendStringInfo(es->str, ", IndexSize: %s",
+								 format_bytesz(kds_gist->length));
+			}
+			appendStringInfoChar(es->str, '\n');
 		}
 		else
 		{
@@ -4050,18 +4062,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 			if (es->costs)
 			{
-				snprintf(qlabel, sizeof(qlabel),
-						 "Depth % 2d KDS Plan Size", depth);
-				ExplainPropertyInteger(qlabel, NULL, istate->ichunk_size, es);
-				if (es->analyze)
-				{
-					Size	len = (kds_in ? kds_in->length : 0);
-
-					snprintf(qlabel, sizeof(qlabel),
-							 "Depth % 2d KDS Exec Size", depth);
-					ExplainPropertyInteger(qlabel, NULL, len, es);
-				}
-
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Plan Rows-in", depth);
 				ExplainPropertyFloat(qlabel, NULL, plan_nrows_in, 0, es);
@@ -4085,6 +4085,19 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 					ExplainPropertyFloat(qlabel, NULL, exec_nrows_out2, 0, es);
 				}
 			}
+
+			snprintf(qlabel, sizeof(qlabel), "Depth % 2d KDS Plan Size", depth);
+			ExplainPropertyInteger(qlabel, NULL, istate->ichunk_size, es);
+			if (kds_in)
+			{
+				snprintf(qlabel, sizeof(qlabel), "Depth % 2d KDS Exec Size", depth);
+				ExplainPropertyInteger(qlabel, NULL, kds_in->length, es);
+			}
+			if (kds_gist)
+			{
+				snprintf(qlabel, sizeof(qlabel), "Depth% 2d Index Size", depth);
+				ExplainPropertyInteger(qlabel, NULL, kds_gist->length, es);
+			}			
 		}
 
 		/*
@@ -4111,10 +4124,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		 */
 		if (OidIsValid(gist_index_reloid) && gist_index_clauses != NIL)
 		{
-			HeapTuple	tup;
-			Form_pg_class relForm;
 			const char *iname;
-			size_t		isize;
 			Node	   *clause;
 
 			if (list_length(gist_index_clauses) > 1)
@@ -4123,17 +4133,12 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				clause = linitial(gist_index_clauses);
 
 			temp = deparse_expression(clause, dcontext, true, false);
-			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(gist_index_reloid));
-			if (!HeapTupleIsValid(tup))
-				elog(ERROR, "cache lookup failed for relation %u", gist_index_reloid);
-			relForm = (Form_pg_class) GETSTRUCT(tup);
-			iname = NameStr(relForm->relname);
-			isize = relForm->relpages * BLCKSZ;
+			iname = get_rel_name(gist_index_reloid);
 			if (es->format == EXPLAIN_FORMAT_TEXT)
 			{
 				appendStringInfoSpaces(es->str, indent_width);
-				appendStringInfo(es->str, "IndexFilter: %s on %s (index-size: %s)\n",
-								 temp, iname, format_bytesz(isize));
+				appendStringInfo(es->str, "IndexFilter: %s on %s\n",
+								 temp, iname);
 			}
 			else
 			{
@@ -4144,7 +4149,21 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 						 "Depth% 2d GiST Filter", depth);
 				ExplainPropertyText(qlabel, temp, es);
 			}
-			ReleaseSysCache(tup);
+
+			if (es->analyze)
+			{
+				if (es->format == EXPLAIN_FORMAT_TEXT)
+				{
+					appendStringInfoSpaces(es->str, indent_width);
+					appendStringInfo(es->str, "Rows Fetched by Index: %lu\n",
+									 exec_nrows_gist);
+				}
+				else
+				{
+					ExplainPropertyInteger("Rows Fetched by Index", NULL,
+										   exec_nrows_gist, es);
+				}
+			}
 		}
 		/*
 		 * JoinQuals, if any
@@ -5893,8 +5912,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 
 	mp_count = (GPUKERNEL_MAX_SM_MULTIPLICITY *
 				devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT);
-	head_sz = STROMALIGN(offsetof(kern_gpujoin,
-								  stat_nitems[gjs->num_rels + 1]));
+	head_sz = STROMALIGN(offsetof(kern_gpujoin, stat[gjs->num_rels+1]));
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
 	pstack = (gpujoinPseudoStack *)kparam_get_value(gjs->gts.kern_params, 0);
 	suspend_sz = MAXALIGN(offsetof(gpujoinSuspendContext, pd[nrels + 1]));
@@ -7089,7 +7107,9 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 	for (i=0; i < gjs->num_rels; i++)
 	{
 		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
-								kgjoin->stat_nitems[i]);
+								kgjoin->stat[i].nitems);
+		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems2,
+								kgjoin->stat[i].nitems2);
 	}
 	/* debug counters if any */
 	if (kgjoin->debug_counter0 != 0)
@@ -7105,7 +7125,10 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 	kgjoin->source_nitems = 0;
 	kgjoin->outer_nitems  = 0;
 	for (i=0; i < gjs->num_rels; i++)
-		kgjoin->stat_nitems[i] = 0;
+	{
+		kgjoin->stat[i].nitems = 0;
+		kgjoin->stat[i].nitems2 = 0;
+	}
 }
 
 /*
@@ -7134,8 +7157,7 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 
 	/* setup responder task with supplied @kds_dst */
 	head_sz = STROMALIGN(offsetof(GpuJoinTask, kern) +
-						 offsetof(kern_gpujoin,
-								  stat_nitems[num_rels + 1]));
+						 offsetof(kern_gpujoin, stat[num_rels+1]));
 	param_sz = KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin->kern);
 	/* pstack/suspend buffer is not necessary */
 	rc = gpuMemAllocManaged(gcontext,

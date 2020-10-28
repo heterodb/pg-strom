@@ -34,6 +34,7 @@ extern __shared__ cl_uint	temp_pos[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
 extern __shared__ cl_uint	gist_pos[0];	/* [(GPUJOIN_MAX_DEPTH+1)*32] items */
 static __shared__ cl_uint	stat_source_nitems;
 extern __shared__ cl_uint	stat_nitems[0];	/* [GPUJOIN_MAX_DEPTH+1] items */
+extern __shared__ cl_uint	stat_nitems2[0]; /* [GPUJOIN_MAX_DEPTH+1] items */
 
 /*
  * gpujoin_suspend_context
@@ -63,6 +64,7 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		memcpy(sb->pd[i].gist_pos, gist_pos + i * MAXWARPS_PER_BLOCK,
 			   sizeof(cl_uint) * MAXWARPS_PER_BLOCK);
 		sb->pd[i].stat_nitems = stat_nitems[i];
+		sb->pd[i].stat_nitems2 = stat_nitems2[i];
 	}
 
 	for (i=0; i <= max_depth; i++)
@@ -103,6 +105,7 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 		memcpy(gist_pos + i * MAXWARPS_PER_BLOCK, sb->pd[i].gist_pos,
 			   sizeof(cl_uint) * MAXWARPS_PER_BLOCK);
 		stat_nitems[i] = sb->pd[i].stat_nitems;
+		stat_nitems2[i] = sb->pd[i].stat_nitems2;
 	}
 
 	for (i=0; i <= max_depth; i++)
@@ -1394,8 +1397,6 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 	void		   *gist_keys;
 	cl_char		   *vlpos_saved_1 = kcxt->vlpos;
 
-	cl_ulong		tv;
-
 	assert(kds_hash->format == KDS_FORMAT_HASH);
 	assert(depth >= 1 && depth <= kgjoin->num_rels);
 
@@ -1513,6 +1514,9 @@ reload:
 				temp_stack[depth] = t_off;
 				assert(__kds_unpack(t_off) < kds_hash->length);
 			}
+
+			if (LaneId() == 0)
+				atomicAdd(&stat_nitems2[depth], count);
 			l_state[depth] = l_next;
 			kcxt->vlpos = vlpos_saved_2;	/* rewind */
 		} while (__any_sync(__activemask(), l_state[depth] != UINT_MAX));
@@ -1631,7 +1635,6 @@ gpujoin_main(kern_context *kcxt,
 {
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	cl_int			index;
 	gpujoinPseudoStack *pstack;
 	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
@@ -1654,6 +1657,7 @@ gpujoin_main(kern_context *kcxt,
 		src_read_pos = UINT_MAX;
 		stat_source_nitems = 0;
 		memset(stat_nitems, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(stat_nitems2, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(wip_count, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
@@ -1773,9 +1777,11 @@ gpujoin_main(kern_context *kcxt,
 
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
 		atomicAdd(&kgjoin->outer_nitems, stat_nitems[0]);
-		for (index=0; index <= max_depth; index++)
-			atomicAdd(&kgjoin->stat_nitems[index],
-					  stat_nitems[index+1]);
+		for (int i=0; i <= max_depth; i++)
+		{
+			atomicAdd(&kgjoin->stat[i].nitems, stat_nitems[i+1]);
+			atomicAdd(&kgjoin->stat[i].nitems2, stat_nitems2[i+1]);
+		}
 	}
 }
 
@@ -1822,7 +1828,6 @@ gpujoin_right_outer(kern_context *kcxt,
 {
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	cl_int			index;
 	gpujoinPseudoStack *pstack;
 	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
@@ -1843,6 +1848,7 @@ gpujoin_right_outer(kern_context *kcxt,
 		src_read_pos = UINT_MAX;
 		stat_source_nitems = 0;
 		memset(stat_nitems, 0, sizeof(cl_uint) * (max_depth+1));
+		memset(stat_nitems2, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(wip_count, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(read_pos, 0, sizeof(cl_uint) * (max_depth+1));
 		memset(write_pos, 0, sizeof(cl_uint) * (max_depth+1));
@@ -1962,10 +1968,10 @@ gpujoin_right_outer(kern_context *kcxt,
 
 		assert(stat_source_nitems == 0);
 		assert(stat_nitems[0] == 0);
-		for (index = outer_depth; index <= max_depth; index++)
+		for (int i=outer_depth; i <= max_depth; i++)
 		{
-			atomicAdd(&kgjoin->stat_nitems[index-1],
-					  stat_nitems[index]);
+			atomicAdd(&kgjoin->stat[i-1].nitems,  stat_nitems[i]);
+			atomicAdd(&kgjoin->stat[i-1].nitems2, stat_nitems2[i]);
 		}
 	}
 	__syncthreads();
