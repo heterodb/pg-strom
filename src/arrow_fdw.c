@@ -3499,7 +3499,8 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		}
 		relation_close(rel, AccessShareLock);
 	}
-	else if (strcmp(trigdata->tag, "ALTER FOREIGN TABLE") == 0)
+	else if (strcmp(trigdata->tag, "ALTER FOREIGN TABLE") == 0 &&
+			 IsA(trigdata->parsetree, AlterTableStmt))
 	{
 		AlterTableStmt *stmt = (AlterTableStmt *)trigdata->parsetree;
 		Relation		rel;
@@ -3528,11 +3529,6 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 				arrow_fdw_precheck_schema(rel);
 		}
 		relation_close(rel, AccessShareLock);
-	}
-	else
-	{
-		elog(NOTICE, "%s was called on %s, ignored",
-			 __FUNCTION__, trigdata->tag);
 	}
 	PG_RETURN_NULL();
 }

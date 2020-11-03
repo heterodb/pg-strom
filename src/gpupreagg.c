@@ -5613,6 +5613,11 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		else
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+	{
+		m_kds_src = pds_src->m_kds_base;
+		m_kds_extra = pds_src->m_kds_extra;
+	}
 	else
 	{
 		m_kds_src = (CUdeviceptr)&pds_src->kds;
@@ -5653,7 +5658,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
-		else
+		else if (pds_src->kds.format != KDS_FORMAT_COLUMN)
 		{
 			rc = cuMemPrefetchAsync(m_kds_src,
 									pds_src->kds.length,

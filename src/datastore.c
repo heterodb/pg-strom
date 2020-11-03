@@ -435,6 +435,7 @@ __PDS_clone(pgstrom_data_store *pds_old,
 	pg_atomic_init_u32(&pds_new->refcnt, 1);
 	pds_new->nblocks_uncached = 0;
 	pds_new->filedesc.rawfd = -1;
+	pds_new->iovec = NULL;
 	memcpy(&pds_new->kds,
 		   &pds_old->kds,
 		   KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds));
@@ -853,6 +854,7 @@ __PDS_create_row(GpuContext *gcontext,
 						   KDS_FORMAT_ROW, INT_MAX);
 	pds->nblocks_uncached = 0;
 	pds->filedesc.rawfd = -1;
+	pds->iovec = NULL;
 
 	return pds;
 }
@@ -889,6 +891,7 @@ __PDS_create_hash(GpuContext *gcontext,
 						   KDS_FORMAT_HASH, INT_MAX);
 	pds->nblocks_uncached = 0;
 	pds->filedesc.rawfd = -1;
+	pds->iovec = NULL;
 
 	return pds;
 }
@@ -933,6 +936,7 @@ __PDS_create_slot(GpuContext *gcontext,
 						   KDS_FORMAT_SLOT, nrooms);
 	pds->nblocks_uncached = 0;
 	pds->filedesc.rawfd = -1;
+	pds->iovec = NULL;
 
 	return pds;
 }
@@ -972,6 +976,7 @@ __PDS_create_block(GpuContext *gcontext,
     pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
     pds->nblocks_uncached = 0;
 	pds->filedesc.rawfd = -1;
+	pds->iovec = NULL;
 
 	return pds;
 }

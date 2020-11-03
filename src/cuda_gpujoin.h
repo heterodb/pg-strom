@@ -102,27 +102,30 @@ struct kern_gpujoin
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			pstack_offset;		/* offset to the pseudo-stack */
-	cl_uint			pstack_nrooms;		/* size of pseudo-stack */
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			grid_sz;			/* grid-size on invocation */
 	cl_uint			block_sz;			/* block-size on invocation */
-	/* debug counters */
-	cl_ulong		debug_counter0;
-	cl_ulong		debug_counter1;
-	cl_ulong		debug_counter2;
-	cl_ulong		debug_counter3;
 	/* suspend/resume related */
 	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			suspend_size;		/* length of the suspend buffer */
 	cl_uint			suspend_count;		/* number of suspended blocks */
 	cl_bool			resume_context;		/* resume context from suspend */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
+	/* debug counters */
+	cl_ulong		debug_counter0;
+	cl_ulong		debug_counter1;
+	cl_ulong		debug_counter2;
+	cl_ulong		debug_counter3;
 	/* error status to be backed (OUT) */
 	cl_uint			source_nitems;		/* out: # of source rows */
 	cl_uint			outer_nitems;		/* out: # of filtered source rows */
-	cl_uint			stat_nitems[FLEXIBLE_ARRAY_MEMBER]; /* out: stat nitems */
-	/*-- pseudo-stack and suspend/resume context --*/
+	struct {
+		cl_uint		nitems;
+		cl_uint		nitems2;
+	}				stat[FLEXIBLE_ARRAY_MEMBER];	/* out: stat per depth */
 	/*-- kernel param/const buffer --*/
+	/*-- pseudo stack buffer --*/
+	/*-- suspend / resume context */
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
@@ -138,6 +141,18 @@ gpujoin_reset_kernel_task(kern_gpujoin *kgjoin, bool resume_context)
 	kgjoin->resume_context	= resume_context;
 }
 #endif
+/*
+ * pseudo stack
+ */
+struct gpujoinPseudoStack
+{
+	cl_uint			__vl_len;		/* varlena header */
+	cl_uint			ps_unitsz;		/* unit-size of pseudo-stack per SM */
+	cl_uint			ps_offset[FLEXIBLE_ARRAY_MEMBER];	/* for each depth */
+};
+typedef struct gpujoinPseudoStack		gpujoinPseudoStack;
+
+#define GPUJOIN_PSEUDO_STACK_NROOMS		2048
 
 /*
  * suspend/resume context
@@ -152,7 +167,10 @@ struct gpujoinSuspendContext
 		cl_uint		wip_count;
 		cl_uint		read_pos;
 		cl_uint		write_pos;
+		cl_uint		temp_pos;
+		cl_uint		gist_pos[MAXWARPS_PER_BLOCK];
 		cl_uint		stat_nitems;
+		cl_uint		stat_nitems2;
 		cl_uint		l_state[MAXTHREADS_PER_BLOCK];	/* private variables */
 		cl_bool		matched[MAXTHREADS_PER_BLOCK];	/* private variables */
 	} pd[FLEXIBLE_ARRAY_MEMBER];	/* per-depth */
@@ -241,7 +259,7 @@ gpujoin_hash_value(kern_context *kcxt,
  * It preloads GiST index keys from the outer relations, then returns
  * private datum on kcxt->vlbuf
  */
-DEVICE_FUNCTION(cl_bool)
+DEVICE_FUNCTION(void *)
 gpujoin_gist_load_keys(kern_context *kcxt,
 					   kern_multirels *kmrels,
 					   kern_data_store *kds,
@@ -258,7 +276,8 @@ DEVICE_FUNCTION(cl_bool)
 gpujoin_gist_index_quals(kern_context *kcxt,
 						 cl_int depth,
 						 kern_data_store *kds_gist,
-						 IndexTupleData *itup);
+						 IndexTupleData *itup,
+						 void *gist_keys);
 
 /*
  * gpujoin_projection
@@ -310,7 +329,10 @@ gpujoin_right_outer(kern_context *kcxt,
 __shared__ cl_uint   wip_count[GPUJOIN_MAX_DEPTH+1];
 __shared__ cl_uint   read_pos[GPUJOIN_MAX_DEPTH+1];
 __shared__ cl_uint   write_pos[GPUJOIN_MAX_DEPTH+1];
+__shared__ cl_uint   temp_pos[GPUJOIN_MAX_DEPTH+1];
+__shared__ cl_uint   gist_pos[(GPUJOIN_MAX_DEPTH+1) * MAXWARPS_PER_BLOCK];
 __shared__ cl_uint   stat_nitems[GPUJOIN_MAX_DEPTH+1];
+__shared__ cl_uint   stat_nitems2[GPUJOIN_MAX_DEPTH+1];
 
 KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_gpujoin *kgjoin,

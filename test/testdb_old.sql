@@ -119,7 +119,7 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                        pgstrom.random_int(0.5, 1, 400000),
                        pgstrom.random_int(0.5, 1, 400000),
                        pgstrom.random_int(0.5, 1, 400000)
-                  FROM generate_series(1,200000000) x);
+                  FROM generate_series(1,20000000) x);
 
 INSERT INTO pt (SELECT id, pgstrom.random_date(0.0, '2010-01-01'::date,
                                                     '2020-01-01'::date),

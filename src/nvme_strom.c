@@ -139,29 +139,27 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 {
 	NvmeAttributes *nvmeAttr;
 	char		path[MAXPGPATH];
-	char		linebuf[2048];
 	const char *temp;
-	char	   *pos;
 	int			i;
-	bool		pcie_nvme;
 
 	nvmeAttr = palloc0(offsetof(NvmeAttributes,
 								nvme_distances[numDevAttrs]));
 	strncpy(nvmeAttr->nvme_name, nvme_name, sizeof(nvmeAttr->nvme_name));
 
 	snprintf(path, sizeof(path),
-			 "%s/%s/device/numa_node", dirname, nvme_name);
+			 "%s/%s/device/address",
+			 dirname, nvme_name);
 	temp = sysfs_read_line(path, false);
-	if (temp)
+	if (!temp || sscanf(temp, "%x:%02x:%02x.%d",
+						&nvmeAttr->nvme_pcie_domain,
+						&nvmeAttr->nvme_pcie_bus_id,
+						&nvmeAttr->nvme_pcie_dev_id,
+						&nvmeAttr->nvme_pcie_func_id) != 4)
 	{
-		if (sscanf(temp, "%d", &nvmeAttr->numa_node_id) != 1)
-			elog(ERROR, "Sysfs '%s' has unexpected value", path);
-		pcie_nvme = true;
-	}
-	else
-	{
-		nvmeAttr->numa_node_id = -1;
-		pcie_nvme = false;
+		nvmeAttr->nvme_pcie_domain = -1;
+		nvmeAttr->nvme_pcie_bus_id = -1;
+		nvmeAttr->nvme_pcie_dev_id = -1;
+		nvmeAttr->nvme_pcie_func_id = -1;
 	}
 
 	snprintf(path, sizeof(path), "%s/%s/dev", dirname, nvme_name);
@@ -182,33 +180,6 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 	if (!temp)
 		temp = "NVME model unknown";
 	strncpy(nvmeAttr->nvme_model, temp, sizeof(nvmeAttr->nvme_model));
-
-	if (pcie_nvme)
-	{
-		snprintf(path, sizeof(path), "%s/%s/device", dirname, nvme_name);
-		if (readlink(path, linebuf, sizeof(linebuf)) < 0)
-			elog(ERROR, "failed on readlink('%s'): %m", path);
-		pos = strrchr(linebuf, '/');
-		if (pos)
-			pos++;
-		else
-			pos = linebuf;
-		if (sscanf(pos, "%x:%02x:%02x.%d",
-				   &nvmeAttr->nvme_pcie_domain,
-				   &nvmeAttr->nvme_pcie_bus_id,
-				   &nvmeAttr->nvme_pcie_dev_id,
-				   &nvmeAttr->nvme_pcie_func_id) != 4)
-		{
-			elog(ERROR, "'%s' has unexpected property: %s", path, linebuf);
-		}
-	}
-	else
-	{
-		nvmeAttr->nvme_pcie_domain = -1;
-		nvmeAttr->nvme_pcie_bus_id = -1;
-		nvmeAttr->nvme_pcie_dev_id = -1;
-		nvmeAttr->nvme_pcie_func_id = -1;
-	}
 
 	for (i=0; i < numDevAttrs; i++)
 		nvmeAttr->nvme_distances[i] = -1;
@@ -500,7 +471,6 @@ setup_nvme_distance_map(void)
 {
 	NvmeAttributes *nvme;
 	NvmeAttributes *temp;
-	List	   *nvmeAttrList = NIL;
 	const char *dirname;
 	DIR		   *dir;
 	struct dirent *dent;
@@ -513,7 +483,7 @@ setup_nvme_distance_map(void)
 	/*
 	 * collect individual nvme device's attributes
 	 */
-	dirname = "/sys/class/nvme";
+	dirname = "/sys/class/block";
 	dir = opendir(dirname);
 	if (!dir)
 	{
@@ -522,8 +492,21 @@ setup_nvme_distance_map(void)
 	}
 	while ((dent = readdir(dir)) != NULL)
 	{
-		if (strncmp("nvme", dent->d_name, 4) != 0)
+		char		namebuf[MAXPGPATH];
+
+		if (strncmp("nvme", dent->d_name, 4) == 0)
+		{
+			snprintf(namebuf, sizeof(namebuf),
+					 "%s/%s/nsid",
+					 dirname, dent->d_name);
+			if (access(namebuf, F_OK) != 0)
+				continue;
+		}
+		else
+		{
 			continue;
+		}
+
 		temp = sysfs_read_nvme_attrs(dirname, dent->d_name);
 		if (!nvmeHash)
 		{
@@ -545,12 +528,10 @@ setup_nvme_distance_map(void)
 			   nvme->nvme_minor == temp->nvme_minor);
 		memcpy(nvme, temp, offsetof(NvmeAttributes,
 									nvme_distances[numDevAttrs]));
-		nvmeAttrList = lappend(nvmeAttrList, nvme);
-
 		pfree(temp);
 	}
 	closedir(dir);
-	if (nvmeAttrList == NIL)
+	if (!nvmeHash)
 		return;
 
 	/*

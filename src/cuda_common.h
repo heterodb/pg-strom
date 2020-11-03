@@ -300,6 +300,7 @@ typedef cl_ulong		hostptr_t;
  * assigned on host/device functions
  */
 #define MAXTHREADS_PER_BLOCK		1024
+#define MAXWARPS_PER_BLOCK			(MAXTHREADS_PER_BLOCK / 32)
 #ifdef __CUDACC__
 #define STATIC_INLINE(RET_TYPE)					\
 	__device__ __host__ __forceinline__			\
