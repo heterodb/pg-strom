@@ -1603,7 +1603,6 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
-	BlockNumber	   *block_nums;
 	CUresult		rc;
 
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
@@ -1623,8 +1622,6 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded) -
 			  (char *)(&pds->kds));
 	offset += length;
-	/* userspace pointers */
-	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 
 	/* (1) kick SSD2GPU P2P DMA, if any */
 	if (pds->iovec)
