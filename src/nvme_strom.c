@@ -150,7 +150,7 @@ sysfs_read_nvme_attrs(const char *class_name,
 
 	snprintf(path, sizeof(path),
 			 "/sys/bus/pci/devices/%s/numa_node", pci_bus_id);
-	temp = sysfs_read_line(path, false);
+	temp = sysfs_read_line(path, true);
 	if (temp && sscanf(pci_bus_id, "%x:%02x:%02x.%d",
 					   &nvmeAttr->nvme_pcie_domain,
                        &nvmeAttr->nvme_pcie_bus_id,
@@ -233,6 +233,29 @@ sysfs_read_drive_attrs(const char *class_name)
 										 dent->d_name,
 										 pstrdup(bus_id));
 		}
+#ifdef WITH_CUFILE
+		else if (strncmp("sfxv", dent->d_name, 4) == 0)
+		{
+			char	link[MAXPGPATH];
+			char   *pos;
+			ssize_t	sz;
+
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/class/%s/%s/device",
+					 class_name, dent->d_name);
+			sz = readlink(namebuf, link, sizeof(link));
+			if (sz < 0)
+			{
+				elog(LOG, "failed on readlink('%s'): %m", namebuf);
+				continue;
+			}
+			link[sz] = '\0';
+			pos = strrchr(link, '/');
+			temp = sysfs_read_nvme_attrs(class_name,
+                                         dent->d_name,
+										 pos ? pos + 1 : link);
+		}
+#endif
 		else
 		{
 			continue;
@@ -555,6 +578,9 @@ setup_nvme_distance_map(void)
 	HASH_SEQ_STATUS hseq;
 
 	sysfs_read_drive_attrs("nvme");
+#ifdef WITH_CUFILE
+	sysfs_read_drive_attrs("misc");
+#endif
 	if (!nvmeHash)
 		return;		/* No NVME Drives found */
 
