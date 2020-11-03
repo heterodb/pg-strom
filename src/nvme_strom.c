@@ -135,7 +135,9 @@ retry:
  * sysfs_read_nvme_attrs
  */
 static NvmeAttributes *
-sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
+sysfs_read_nvme_attrs(const char *class_name,
+					  const char *nvme_name,
+					  const char *pci_bus_id)
 {
 	NvmeAttributes *nvmeAttr;
 	char		path[MAXPGPATH];
@@ -147,35 +149,44 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 	strncpy(nvmeAttr->nvme_name, nvme_name, sizeof(nvmeAttr->nvme_name));
 
 	snprintf(path, sizeof(path),
-			 "%s/%s/device/address",
-			 dirname, nvme_name);
+			 "/sys/bus/pci/devices/%s/numa_node", pci_bus_id);
 	temp = sysfs_read_line(path, false);
-	if (!temp || sscanf(temp, "%x:%02x:%02x.%d",
-						&nvmeAttr->nvme_pcie_domain,
-						&nvmeAttr->nvme_pcie_bus_id,
-						&nvmeAttr->nvme_pcie_dev_id,
-						&nvmeAttr->nvme_pcie_func_id) != 4)
+	if (temp && sscanf(pci_bus_id, "%x:%02x:%02x.%d",
+					   &nvmeAttr->nvme_pcie_domain,
+                       &nvmeAttr->nvme_pcie_bus_id,
+                       &nvmeAttr->nvme_pcie_dev_id,
+                       &nvmeAttr->nvme_pcie_func_id) == 4)
+	{
+		nvmeAttr->numa_node_id = atoi(temp);
+	}
+	else
 	{
 		nvmeAttr->nvme_pcie_domain = -1;
 		nvmeAttr->nvme_pcie_bus_id = -1;
 		nvmeAttr->nvme_pcie_dev_id = -1;
 		nvmeAttr->nvme_pcie_func_id = -1;
+		nvmeAttr->numa_node_id = -1;
 	}
-
-	snprintf(path, sizeof(path), "%s/%s/dev", dirname, nvme_name);
+	snprintf(path, sizeof(path),
+			 "/sys/class/%s/%s/dev",
+			 class_name, nvme_name);
 	temp = sysfs_read_line(path, true);
 	if (sscanf(temp, "%d:%d",
 			   &nvmeAttr->nvme_major,
 			   &nvmeAttr->nvme_minor) != 2)
 		elog(ERROR, "Sysfs '%s' has unexpected value", path);
 
-	snprintf(path, sizeof(path), "%s/%s/serial", dirname, nvme_name);
+	snprintf(path, sizeof(path),
+			 "/sys/class/%s/%s/serial",
+			 class_name, nvme_name);
 	temp = sysfs_read_line(path, false);
 	if (!temp)
 		temp = "NVME serial unknown";
 	strncpy(nvmeAttr->nvme_serial, temp, sizeof(nvmeAttr->nvme_serial));
 
-	snprintf(path, sizeof(path), "%s/%s/model", dirname, nvme_name);
+	snprintf(path, sizeof(path),
+			 "/sys/class/%s/%s/model",
+			 class_name, nvme_name);
 	temp = sysfs_read_line(path, false);
 	if (!temp)
 		temp = "NVME model unknown";
@@ -185,6 +196,71 @@ sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 		nvmeAttr->nvme_distances[i] = -1;
 
 	return nvmeAttr;
+}
+
+/*
+ * sysfs_read_drive_attrs
+ */
+static void
+sysfs_read_drive_attrs(const char *class_name)
+{
+	NvmeAttributes *nvme;
+	NvmeAttributes *temp;
+	DIR		   *dir;
+	struct dirent *dent;
+	char		namebuf[MAXPGPATH];
+	const char *bus_id;
+	bool		found;
+
+	snprintf(namebuf, sizeof(namebuf),
+			 "/sys/class/%s",
+			 class_name);
+	dir = AllocateDir(namebuf);
+	if (!dir)
+		return;
+
+	while ((dent = ReadDir(dir, class_name)) != NULL)
+	{
+		if (strncmp("nvme", dent->d_name, 4) == 0)
+		{
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/class/%s/%s/address",
+					 class_name, dent->d_name);
+			bus_id = sysfs_read_line(namebuf, false);
+			if (!bus_id)
+				continue;
+			temp = sysfs_read_nvme_attrs(class_name,
+										 dent->d_name,
+										 pstrdup(bus_id));
+		}
+		else
+		{
+			continue;
+		}
+
+		if (!nvmeHash)
+		{
+			HASHCTL		hctl;
+
+			memset(&hctl, 0, sizeof(HASHCTL));
+			hctl.keysize = offsetof(NvmeAttributes, nvme_name);
+			hctl.entrysize = offsetof(NvmeAttributes,
+									  nvme_distances[numDevAttrs]);
+			hctl.hcxt = TopMemoryContext;
+			nvmeHash = hash_create("NVME Drives", 256, &hctl,
+								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		}
+		nvme = hash_search(nvmeHash, temp, HASH_ENTER, &found);
+		if (found)
+			elog(ERROR, "Bug? detects duplicate NVMe SSD (%d,%d)",
+				 nvme->nvme_major, nvme->nvme_minor);
+		Assert(nvme->nvme_major == temp->nvme_major &&
+			   nvme->nvme_minor == temp->nvme_minor);
+		memcpy(nvme, temp, offsetof(NvmeAttributes,
+									nvme_distances[numDevAttrs]));
+		pfree(temp);
+	}
+	FreeDir(dir);
 }
 
 /*
@@ -470,81 +546,30 @@ static void
 setup_nvme_distance_map(void)
 {
 	NvmeAttributes *nvme;
-	NvmeAttributes *temp;
 	const char *dirname;
 	DIR		   *dir;
 	struct dirent *dent;
 	List	   *pcie_root = NIL;
 	ListCell   *lc;
 	int			i, dist;
-	bool		found;
 	HASH_SEQ_STATUS hseq;
 
-	/*
-	 * collect individual nvme device's attributes
-	 */
-	dirname = "/sys/class/block";
-	dir = opendir(dirname);
-	if (!dir)
-	{
-		elog(LOG, "no nvme devices are installed");
-		return;
-	}
-	while ((dent = readdir(dir)) != NULL)
-	{
-		char		namebuf[MAXPGPATH];
-
-		if (strncmp("nvme", dent->d_name, 4) == 0)
-		{
-			snprintf(namebuf, sizeof(namebuf),
-					 "%s/%s/nsid",
-					 dirname, dent->d_name);
-			if (access(namebuf, F_OK) != 0)
-				continue;
-		}
-		else
-		{
-			continue;
-		}
-
-		temp = sysfs_read_nvme_attrs(dirname, dent->d_name);
-		if (!nvmeHash)
-		{
-			HASHCTL		hctl;
-
-			memset(&hctl, 0, sizeof(HASHCTL));
-			hctl.keysize = offsetof(NvmeAttributes, nvme_name);
-			hctl.entrysize = offsetof(NvmeAttributes,
-									  nvme_distances[numDevAttrs]);
-			hctl.hcxt = TopMemoryContext;
-			nvmeHash = hash_create("NVMe SSDs", 256, &hctl,
-								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-		}
-		nvme = hash_search(nvmeHash, temp, HASH_ENTER, &found);
-		if (found)
-			elog(ERROR, "Bug? detects duplicate NVMe SSD (%d,%d)",
-				 nvme->nvme_major, nvme->nvme_minor);
-		Assert(nvme->nvme_major == temp->nvme_major &&
-			   nvme->nvme_minor == temp->nvme_minor);
-		memcpy(nvme, temp, offsetof(NvmeAttributes,
-									nvme_distances[numDevAttrs]));
-		pfree(temp);
-	}
-	closedir(dir);
+	sysfs_read_drive_attrs("nvme");
 	if (!nvmeHash)
-		return;
+		return;		/* No NVME Drives found */
 
 	/*
 	 * Walk on the PCIe bus tree
 	 */
 	dirname = "/sys/devices";
-	dir = opendir(dirname);
+	dir = AllocateDir(dirname);
 	if (!dir)
 		elog(ERROR, "failed on opendir('%s'): %m", dirname);
-	while ((dent = readdir(dir)) != NULL)
+	while ((dent = ReadDir(dir, dirname)) != NULL)
 	{
 		sysfs_read_pcie_root_complex(dirname, dent->d_name, &pcie_root);
 	}
+	FreeDir(dir);
 
 	/*
 	 * calculation of SSD<->GPU distance map
@@ -561,6 +586,7 @@ setup_nvme_distance_map(void)
 			bool	gpu_found = false;
 			bool	nvme_found = false;
 
+			elog(LOG, "gpu %d nvme %d", gpu->NUMA_NODE_ID, nvme->numa_node_id);
 			if (gpu->NUMA_NODE_ID != nvme->numa_node_id)
 			{
 				nvme->nvme_distances[i] = -1;
