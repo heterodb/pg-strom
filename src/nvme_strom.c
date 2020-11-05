@@ -135,23 +135,27 @@ retry:
  * sysfs_read_nvme_attrs
  */
 static NvmeAttributes *
-sysfs_read_nvme_attrs(const char *class_name,
+sysfs_read_nvme_attrs(const char *drive_base,
 					  const char *nvme_name,
-					  const char *pci_bus_id)
+					  const char *__bus_id)
 {
 	NvmeAttributes *nvmeAttr;
 	char		path[MAXPGPATH];
+	char	   *bus_id;
 	const char *temp;
 	int			i;
+
+	bus_id = alloca(strlen(__bus_id) + 1);
+	strcpy(bus_id, __bus_id);
 
 	nvmeAttr = palloc0(offsetof(NvmeAttributes,
 								nvme_distances[numDevAttrs]));
 	strncpy(nvmeAttr->nvme_name, nvme_name, sizeof(nvmeAttr->nvme_name));
 
 	snprintf(path, sizeof(path),
-			 "/sys/bus/pci/devices/%s/numa_node", pci_bus_id);
+			 "/sys/bus/pci/devices/%s/numa_node", bus_id);
 	temp = sysfs_read_line(path, true);
-	if (temp && sscanf(pci_bus_id, "%x:%02x:%02x.%d",
+	if (temp && sscanf(bus_id, "%x:%02x:%02x.%d",
 					   &nvmeAttr->nvme_pcie_domain,
                        &nvmeAttr->nvme_pcie_bus_id,
                        &nvmeAttr->nvme_pcie_dev_id,
@@ -168,8 +172,8 @@ sysfs_read_nvme_attrs(const char *class_name,
 		nvmeAttr->numa_node_id = -1;
 	}
 	snprintf(path, sizeof(path),
-			 "/sys/class/%s/%s/dev",
-			 class_name, nvme_name);
+			 "/sys/class/block/%s/dev",
+			 nvme_name);
 	temp = sysfs_read_line(path, true);
 	if (sscanf(temp, "%d:%d",
 			   &nvmeAttr->nvme_major,
@@ -177,16 +181,16 @@ sysfs_read_nvme_attrs(const char *class_name,
 		elog(ERROR, "Sysfs '%s' has unexpected value", path);
 
 	snprintf(path, sizeof(path),
-			 "/sys/class/%s/%s/serial",
-			 class_name, nvme_name);
+			 "%s/serial",
+			 drive_base);
 	temp = sysfs_read_line(path, false);
 	if (!temp)
 		temp = "NVME serial unknown";
 	strncpy(nvmeAttr->nvme_serial, temp, sizeof(nvmeAttr->nvme_serial));
 
 	snprintf(path, sizeof(path),
-			 "/sys/class/%s/%s/model",
-			 class_name, nvme_name);
+			 "%s/model",
+			 drive_base);
 	temp = sysfs_read_line(path, false);
 	if (!temp)
 		temp = "NVME model unknown";
@@ -201,59 +205,55 @@ sysfs_read_nvme_attrs(const char *class_name,
 /*
  * sysfs_read_drive_attrs
  */
-static void
-sysfs_read_drive_attrs(const char *class_name)
+static bool
+sysfs_read_drive_attrs(void)
 {
 	NvmeAttributes *nvme;
 	NvmeAttributes *temp;
+	const char *dirname;
 	DIR		   *dir;
 	struct dirent *dent;
 	char		namebuf[MAXPGPATH];
 	const char *bus_id;
 	bool		found;
 
-	snprintf(namebuf, sizeof(namebuf),
-			 "/sys/class/%s",
-			 class_name);
-	dir = AllocateDir(namebuf);
+	dirname = "/sys/class/block";
+	dir = AllocateDir(dirname);
 	if (!dir)
-		return;
+		return false;
 
-	while ((dent = ReadDir(dir, class_name)) != NULL)
+	while ((dent = ReadDir(dir, dirname)) != NULL)
 	{
 		if (strncmp("nvme", dent->d_name, 4) == 0)
 		{
 			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/class/%s/%s/address",
-					 class_name, dent->d_name);
+					 "%s/%s/device/address",
+					 dirname, dent->d_name);
 			bus_id = sysfs_read_line(namebuf, false);
 			if (!bus_id)
 				continue;
-			temp = sysfs_read_nvme_attrs(class_name,
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/class/block/%s/device",
+					 dent->d_name);
+			temp = sysfs_read_nvme_attrs(namebuf,
 										 dent->d_name,
-										 pstrdup(bus_id));
+										 bus_id);
 		}
 #ifdef WITH_CUFILE
-		else if (strncmp("sfxv", dent->d_name, 4) == 0)
+		else if (strncmp("sfdv", dent->d_name, 4) == 0)
 		{
-			char	link[MAXPGPATH];
-			char   *pos;
-			ssize_t	sz;
-
 			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/class/%s/%s/device",
-					 class_name, dent->d_name);
-			sz = readlink(namebuf, link, sizeof(link));
-			if (sz < 0)
-			{
-				elog(LOG, "failed on readlink('%s'): %m", namebuf);
+					 "%s/%s/bus_info",
+					 dirname, dent->d_name);
+			bus_id = sysfs_read_line(namebuf, false);
+			if (!bus_id)
 				continue;
-			}
-			link[sz] = '\0';
-			pos = strrchr(link, '/');
-			temp = sysfs_read_nvme_attrs(class_name,
-                                         dent->d_name,
-										 pos ? pos + 1 : link);
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/class/block/%s",
+					 dent->d_name);
+			temp = sysfs_read_nvme_attrs(namebuf,
+										 dent->d_name,
+										 bus_id);
 		}
 #endif
 		else
@@ -284,6 +284,8 @@ sysfs_read_drive_attrs(const char *class_name)
 		pfree(temp);
 	}
 	FreeDir(dir);
+
+	return (nvmeHash != NULL);
 }
 
 /*
@@ -577,12 +579,8 @@ setup_nvme_distance_map(void)
 	int			i, dist;
 	HASH_SEQ_STATUS hseq;
 
-	sysfs_read_drive_attrs("nvme");
-#ifdef WITH_CUFILE
-	sysfs_read_drive_attrs("misc");
-#endif
-	if (!nvmeHash)
-		return;		/* No NVME Drives found */
+	if (!sysfs_read_drive_attrs())
+		return;		/* No NVME drives found */
 
 	/*
 	 * Walk on the PCIe bus tree
@@ -787,42 +785,21 @@ tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
  * __GetOptimalGpuForBlockDevice
  */
 static int
-__GetOptimalGpuForBlockDevice(const char *sysfs_base)
+__GetOptimalGpuForBlockDevice(int major, int minor)
 {
-	char		namebuf[MAXPGPATH];
-	char		tempbuf[MAXPGPATH];
-	ssize_t		sz;
-	const char *value;
+	NvmeAttributes	key;
+	NvmeAttributes *nvme;
 
-	snprintf(namebuf, sizeof(namebuf),
-			 "%s/device/subsystem", sysfs_base);
-	if ((sz = readlink(namebuf, tempbuf, sizeof(tempbuf))) > 0)
-	{
-		tempbuf[sz] = '\0';
-		if (sz >= 11 && strcmp(tempbuf + sz - 11, "/class/nvme") == 0)
-		{
-			/* Ok, it's NVME device */
-			NvmeAttributes	key;
-			NvmeAttributes *nvme;
+	memset(&key, 0, sizeof(NvmeAttributes));
+	key.nvme_major = major;
+	key.nvme_minor = minor;
 
-			snprintf(namebuf, sizeof(namebuf),
-					 "%s/device/dev", sysfs_base);
-			value = sysfs_read_line(namebuf, true);
-			if (sscanf(value, "%d:%d",
-					   &key.nvme_major,
-					   &key.nvme_minor) != 2)
-				elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
-			if (!nvmeHash)
-				return -1;	/* why? */
-			nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
-			if (!nvme)
-				return -1;
-			return nvme->nvme_optimal_gpu;
-		}
-	}
-	else if (errno != ENOENT)
-		elog(ERROR, "failed on readlink('%s'): %m", namebuf);
-	return -1;
+	if (!nvmeHash)
+		return -1;
+	nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
+	if (!nvme)
+		return -1;
+	return nvme->nvme_optimal_gpu;
 }
 
 /*
@@ -892,9 +869,7 @@ __GetOptimalGpuForRaidVolume(const char *sysfs_base)
 						elog(ERROR, "failed on parse '%s' [%s]",
 							 namebuf, value);
 				}
-				snprintf(namebuf, sizeof(namebuf),
-						 "/sys/dev/block/%d:%d", __major, __minor);
-				__dindex = __GetOptimalGpuForBlockDevice(namebuf);
+				__dindex = __GetOptimalGpuForBlockDevice(__major, __minor);
 				if (__dindex < 0)
 				{
 					optimal_gpu = -1;
@@ -953,7 +928,6 @@ GetOptimalGpuForFile(File fdesc)
 		int			optimal_gpu = -1;
 		int			major = major(stat_buf.st_dev);
 		int			minor = minor(stat_buf.st_dev);
-		int			sz;
 		char		namebuf[MAXPGPATH];
 		const char *value;
 
@@ -972,8 +946,8 @@ GetOptimalGpuForFile(File fdesc)
 					elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
 			}
 			/* check whether the file is on md-raid volumn, or not */
-			sz = snprintf(namebuf, sizeof(namebuf),
-						  "/sys/dev/block/%d:%d/md", major, minor);
+			snprintf(namebuf, sizeof(namebuf),
+					 "/sys/dev/block/%d:%d/md", major, minor);
 			if (stat(namebuf, &stat_buf) == 0)
 			{
 				if ((stat_buf.st_mode & S_IFMT) != S_IFDIR)
@@ -983,8 +957,7 @@ GetOptimalGpuForFile(File fdesc)
 			else if (errno == ENOENT)
 			{
 				/* not a md-raid drive */
-				namebuf[sz-3] = '\0';
-				optimal_gpu = __GetOptimalGpuForBlockDevice(namebuf);
+				optimal_gpu = __GetOptimalGpuForBlockDevice(major, minor);
 			}
 			else
 			{
