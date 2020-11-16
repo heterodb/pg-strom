@@ -138,10 +138,9 @@ sysfs_read_nvme_attrs(NvmeAttributes *nvme,
 {
 	char		namebuf[MAXPGPATH];
 	const char *value;
-	int			i;
 
-	memset(nvme, 0, offsetof(NvmeAttributes, nvme_distances));
-
+	memset(nvme, 0, offsetof(NvmeAttributes,
+							 nvme_distances));
 	/* fetch major:minor */
 	snprintf(namebuf, sizeof(namebuf),
 			 "%s/%s/dev",
@@ -197,11 +196,6 @@ sysfs_read_nvme_attrs(NvmeAttributes *nvme,
 						 &nvme->nvme_pcie_func_id) != 4)
 		goto bailout;
 
-	/* initialize values to be set later */
-	nvme->nvme_optimal_gpu = -1;
-	for (i=0; i < numDevAttrs; i++)
-		nvme->nvme_distances[i] = -1;
-
 	return true;
 
 bailout:
@@ -210,10 +204,6 @@ bailout:
 	nvme->nvme_pcie_dev_id = -1;
 	nvme->nvme_pcie_func_id = -1;
 	nvme->numa_node_id = -1;
-	nvme->nvme_optimal_gpu = -1;
-	for (i=0; i < numDevAttrs; i++)
-		nvme->nvme_distances[i] = -1;
-
 	return true;
 }
 
@@ -282,6 +272,7 @@ sysfs_read_block_attrs(void)
 			   nvme->nvme_minor == temp.nvme_minor);
 		memcpy(nvme, &temp, offsetof(NvmeAttributes,
 									 nvme_distances));
+		nvme->nvme_optimal_gpu = -1;
 		for (i=0; i < numDevAttrs; i++)
 			nvme->nvme_distances[i] = -1;
 	}
