@@ -142,8 +142,8 @@ sysfs_read_nvme_attrs(NvmeAttributes *nvme,
 	char		namebuf[MAXPGPATH];
 	const char *value;
 
-	memset(nvme, 0, offsetof(NvmeAttributes, nvme_distances));
-
+	memset(nvme, 0, offsetof(NvmeAttributes,
+							 nvme_distances));
 	/* fetch major:minor */
 	snprintf(namebuf, sizeof(namebuf),
 			 "%s/%s/dev",
@@ -257,7 +257,6 @@ sysfs_read_sfdv_attrs(NvmeAttributes *nvme,
 			 "%s/%s/bus_info",
 			 sysfs_base, sysfs_sfdv);
 	value = sysfs_read_line(namebuf, false);
-	elog(LOG, "[%s] bus_info: <%s>", sysfs_sfdv, value);
 	if (!value || sscanf(value, "%x:%02x:%02x.%d",
 						 &nvme->nvme_pcie_domain,
 						 &nvme->nvme_pcie_bus_id,
@@ -284,8 +283,6 @@ bailout:
 	nvme->nvme_pcie_dev_id = -1;
 	nvme->nvme_pcie_func_id = -1;
 	nvme->numa_node_id = -1;
-	nvme->nvme_optimal_gpu = -1;
-
 	return true;
 }
 #endif	/* WITH_CUFILE */
