@@ -206,8 +206,7 @@ endif
 # support of NVIDIA GPUDirect Storage (BETA)
 WITH_CUFILE := 1
 ifeq ($(WITH_CUFILE),1)
-PGSTROM_FLAGS += -DWITH_CUFILE=1
-PGSTROM_FLAGS += -I/usr/local/gds/lib
+PGSTROM_FLAGS += -DWITH_CUFILE=1 -I $(LPATH)
 endif
 PGSTROM_FLAGS += -DCPU_ARCH=\"$(shell uname -m)\"
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"

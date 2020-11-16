@@ -513,13 +513,15 @@ pgstrom_init_cufile(void)
 	void	   *handle;
 
 	/* version attached on the production release? */
-	snprintf(namebuf, sizeof(namebuf),
-			 "/usr/local/gds/lib/libcufile.so");
+	snprintf(namebuf, sizeof(namebuf), "libcufile.so");
 	handle = dlopen(namebuf, RTLD_NOW | RTLD_LOCAL);
 	if (!handle)
 	{
-		elog(LOG, "unable to open '%s', cuFile is disabled: %m", namebuf);
-		return;
+		snprintf(namebuf, sizeof(namebuf),
+				 CUDA_LIBRARY_PATH "/libcufile.so");
+		handle = dlopen(namebuf, RTLD_NOW | RTLD_LOCAL);
+		if (!handle)
+			elog(ERROR, "failed on dlopen('libcufile.so'): %m");
 	}
 
 	PG_TRY();
@@ -580,4 +582,3 @@ pgstrom_init_cufile(void)
 	dlist_init(&cufile_async_io_queue);
 #endif /* WITH_CUFILE */
 }
-
