@@ -134,130 +134,223 @@ retry:
 /*
  * sysfs_read_nvme_attrs
  */
-static NvmeAttributes *
-sysfs_read_nvme_attrs(const char *drive_base,
-					  const char *nvme_name,
-					  const char *__bus_id)
+static bool
+sysfs_read_nvme_attrs(NvmeAttributes *nvme,
+					  const char *sysfs_base,
+					  const char *sysfs_nvme)
 {
-	NvmeAttributes *nvmeAttr;
-	char		path[MAXPGPATH];
-	char	   *bus_id;
-	const char *temp;
-	int			i;
+	char		namebuf[MAXPGPATH];
+	const char *value;
 
-	bus_id = alloca(strlen(__bus_id) + 1);
-	strcpy(bus_id, __bus_id);
+	memset(nvme, 0, offsetof(NvmeAttributes, nvme_distances));
 
-	nvmeAttr = palloc0(offsetof(NvmeAttributes,
-								nvme_distances[numDevAttrs]));
-	strncpy(nvmeAttr->nvme_name, nvme_name, sizeof(nvmeAttr->nvme_name));
+	/* fetch major:minor */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/dev",
+			 sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || sscanf(value, "%u:%u",
+						 &nvme->nvme_major,
+						 &nvme->nvme_minor) != 2)
+		return false;
 
-	snprintf(path, sizeof(path),
-			 "/sys/bus/pci/devices/%s/numa_node", bus_id);
-	temp = sysfs_read_line(path, true);
-	if (temp && sscanf(bus_id, "%x:%02x:%02x.%d",
-					   &nvmeAttr->nvme_pcie_domain,
-                       &nvmeAttr->nvme_pcie_bus_id,
-                       &nvmeAttr->nvme_pcie_dev_id,
-                       &nvmeAttr->nvme_pcie_func_id) == 4)
-	{
-		nvmeAttr->numa_node_id = atoi(temp);
-	}
-	else
-	{
-		nvmeAttr->nvme_pcie_domain = -1;
-		nvmeAttr->nvme_pcie_bus_id = -1;
-		nvmeAttr->nvme_pcie_dev_id = -1;
-		nvmeAttr->nvme_pcie_func_id = -1;
-		nvmeAttr->numa_node_id = -1;
-	}
-	snprintf(path, sizeof(path),
-			 "/sys/class/block/%s/dev",
-			 nvme_name);
-	temp = sysfs_read_line(path, true);
-	if (sscanf(temp, "%d:%d",
-			   &nvmeAttr->nvme_major,
-			   &nvmeAttr->nvme_minor) != 2)
-		elog(ERROR, "Sysfs '%s' has unexpected value", path);
+	/* fetch device (namespace) name */
+	strncpy(nvme->nvme_name, sysfs_nvme, 64);
 
-	snprintf(path, sizeof(path),
-			 "%s/serial",
-			 drive_base);
-	temp = sysfs_read_line(path, false);
-	if (!temp)
-		temp = "NVME serial unknown";
-	strncpy(nvmeAttr->nvme_serial, temp, sizeof(nvmeAttr->nvme_serial));
+	/* fetch serial */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/device/serial",
+			 sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_serial, value ? value : "Unknown", 128);
 
-	snprintf(path, sizeof(path),
-			 "%s/model",
-			 drive_base);
-	temp = sysfs_read_line(path, false);
-	if (!temp)
-		temp = "NVME model unknown";
-	strncpy(nvmeAttr->nvme_model, temp, sizeof(nvmeAttr->nvme_model));
+	/* fetch model */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/device/model",
+			 sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_model, value ? value : "Unknown", 256);
 
-	for (i=0; i < numDevAttrs; i++)
-		nvmeAttr->nvme_distances[i] = -1;
+	/* check whether it is PCIE or not */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/device/transport",
+			 sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || strcmp(value, "pcie") != 0)
+		goto bailout;
 
-	return nvmeAttr;
+	/* fetch numa_node_id */
+	snprintf(namebuf, sizeof(namebuf),
+             "%s/%s/device/numa_node",
+             sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || (nvme->numa_node_id = atoi(value)) < 0)
+		goto bailout;
+
+	/* fetch PCI-E Bus ID */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/device/address",
+			 sysfs_base, sysfs_nvme);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || sscanf(value, "%x:%02x:%02x.%d",
+						 &nvme->nvme_pcie_domain,
+						 &nvme->nvme_pcie_bus_id,
+						 &nvme->nvme_pcie_dev_id,
+						 &nvme->nvme_pcie_func_id) != 4)
+		goto bailout;
+
+	return true;
+
+bailout:
+	nvme->nvme_pcie_domain = -1;
+	nvme->nvme_pcie_bus_id = -1;
+	nvme->nvme_pcie_dev_id = -1;
+	nvme->nvme_pcie_func_id = -1;
+	nvme->numa_node_id = -1;
+
+	return true;
 }
 
+#ifdef WITH_CUFILE
 /*
- * sysfs_read_drive_attrs
+ * sysfs_read_sfdv_attrs
  */
 static bool
-sysfs_read_drive_attrs(void)
+sysfs_read_sfdv_attrs(NvmeAttributes *nvme,
+					  const char *sysfs_base,
+					  const char *sysfs_sfdv)
+{
+	char		namebuf[MAXPGPATH];
+	const char *value;
+
+	memset(nvme, 0, offsetof(NvmeAttributes, nvme_distances));
+
+	/* fetch major:minor */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/dev",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || sscanf(value, "%u:%u",
+						 &nvme->nvme_major,
+						 &nvme->nvme_minor) != 2)
+		return false;
+
+	/* fetch device (namespace) name */
+	strncpy(nvme->nvme_name, sysfs_sfdv, 64);
+
+	/* fetch serial */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/serial",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_serial, value ? value : "Unknown", 128);
+
+	/* fetch model */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/model",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_model, value ? value : "Unknown", 256);
+
+	/* fetch PCI-E Bus ID */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/bus_info",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	elog(LOG, "[%s] bus_info: <%s>", sysfs_sfdv, value);
+	if (!value || sscanf(value, "%x:%02x:%02x.%d",
+						 &nvme->nvme_pcie_domain,
+						 &nvme->nvme_pcie_bus_id,
+						 &nvme->nvme_pcie_dev_id,
+						 &nvme->nvme_pcie_func_id) != 4)
+		goto bailout;
+
+	/* fetch numa_node_id */
+	snprintf(namebuf, sizeof(namebuf),
+			 "/sys/bus/pci/devices/%04x:%02x:%02x.%d/numa_node",
+			 nvme->nvme_pcie_domain,
+			 nvme->nvme_pcie_bus_id,
+			 nvme->nvme_pcie_dev_id,
+			 nvme->nvme_pcie_func_id);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || (nvme->numa_node_id = atoi(value)) < 0)
+		goto bailout;
+
+	return true;
+
+bailout:
+	nvme->nvme_pcie_domain = -1;
+	nvme->nvme_pcie_bus_id = -1;
+	nvme->nvme_pcie_dev_id = -1;
+	nvme->nvme_pcie_func_id = -1;
+	nvme->numa_node_id = -1;
+	nvme->nvme_optimal_gpu = -1;
+
+	return true;
+}
+#endif	/* WITH_CUFILE */
+
+/*
+ * sysfs_read_block_attrs
+ */
+static void
+sysfs_read_block_attrs(void)
 {
 	NvmeAttributes *nvme;
-	NvmeAttributes *temp;
-	const char *dirname;
+	NvmeAttributes	temp;
+	const char *dirname = "/sys/class/block";
 	DIR		   *dir;
 	struct dirent *dent;
-	char		namebuf[MAXPGPATH];
-	const char *bus_id;
-	bool		found;
-
-	dirname = "/sys/class/block";
+	
 	dir = AllocateDir(dirname);
 	if (!dir)
-		return false;
+		elog(ERROR, "failed on AllocateDir('%s'): %m", dirname);
 
 	while ((dent = ReadDir(dir, dirname)) != NULL)
 	{
+		const char *start, *pos;
+		bool		found;
+		int			i;
+
 		if (strncmp("nvme", dent->d_name, 4) == 0)
 		{
-			snprintf(namebuf, sizeof(namebuf),
-					 "%s/%s/device/address",
-					 dirname, dent->d_name);
-			bus_id = sysfs_read_line(namebuf, false);
-			if (!bus_id)
+			/* only nvme[0-9]+n[0-9]+ devices */
+			pos = start = dent->d_name + 4;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != 'n')
 				continue;
-			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/class/block/%s/device",
-					 dent->d_name);
-			temp = sysfs_read_nvme_attrs(namebuf,
-										 dent->d_name,
-										 bus_id);
+			start = ++pos;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != '\0')
+				continue;
+
+			if (!sysfs_read_nvme_attrs(&temp, dirname, dent->d_name))
+				continue;
 		}
 #ifdef WITH_CUFILE
 		else if (strncmp("sfdv", dent->d_name, 4) == 0)
 		{
-			snprintf(namebuf, sizeof(namebuf),
-					 "%s/%s/bus_info",
-					 dirname, dent->d_name);
-			bus_id = sysfs_read_line(namebuf, false);
-			if (!bus_id)
+			/* only sfdv[0-9]+n[0-9]+ devices */
+			pos = start = dent->d_name + 4;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != 'n')
 				continue;
-			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/class/block/%s",
-					 dent->d_name);
-			temp = sysfs_read_nvme_attrs(namebuf,
-										 dent->d_name,
-										 bus_id);
+			start = ++pos;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != '\0')
+				continue;
+
+			if (!sysfs_read_sfdv_attrs(&temp, dirname, dent->d_name))
+				continue;
 		}
 #endif
 		else
 		{
+			/* not a supported device type */
 			continue;
 		}
 
@@ -273,19 +366,19 @@ sysfs_read_drive_attrs(void)
 			nvmeHash = hash_create("NVME Drives", 256, &hctl,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 		}
-		nvme = hash_search(nvmeHash, temp, HASH_ENTER, &found);
+		nvme = hash_search(nvmeHash, &temp, HASH_ENTER, &found);
 		if (found)
 			elog(ERROR, "Bug? detects duplicate NVMe SSD (%d,%d)",
 				 nvme->nvme_major, nvme->nvme_minor);
-		Assert(nvme->nvme_major == temp->nvme_major &&
-			   nvme->nvme_minor == temp->nvme_minor);
-		memcpy(nvme, temp, offsetof(NvmeAttributes,
-									nvme_distances[numDevAttrs]));
-		pfree(temp);
+		Assert(nvme->nvme_major == temp.nvme_major &&
+			   nvme->nvme_minor == temp.nvme_minor);
+		memcpy(nvme, &temp, offsetof(NvmeAttributes,
+									 nvme_distances));
+		nvme->nvme_optimal_gpu = -1;
+		for (i=0; i < numDevAttrs; i++)
+			nvme->nvme_distances[i] = -1;
 	}
 	FreeDir(dir);
-
-	return (nvmeHash != NULL);
 }
 
 /*
@@ -579,8 +672,9 @@ setup_nvme_distance_map(void)
 	int			i, dist;
 	HASH_SEQ_STATUS hseq;
 
-	if (!sysfs_read_drive_attrs())
-		return;		/* No NVME drives found */
+	sysfs_read_block_attrs();
+	if (!nvmeHash)
+		return;		/* No NVME Drives found */
 
 	/*
 	 * Walk on the PCIe bus tree
@@ -610,7 +704,6 @@ setup_nvme_distance_map(void)
 			bool	gpu_found = false;
 			bool	nvme_found = false;
 
-			elog(LOG, "gpu %d nvme %d", gpu->NUMA_NODE_ID, nvme->numa_node_id);
 			if (gpu->NUMA_NODE_ID != nvme->numa_node_id)
 			{
 				nvme->nvme_distances[i] = -1;
@@ -699,56 +792,68 @@ apply_nvme_manual_distance_map(void)
 	char	   *token = NULL;
 	char	   *dev1, *dev2;
 	char	   *pos1, *pos2;
+	char	   *c;
 
-	token = strtok_r(config, ",", &pos1);
-	while (token)
+	for (token = strtok_r(config, ",", &pos1);
+		 token != NULL;
+		 token = strtok_r(NULL, ",", &pos1))
 	{
-		NvmeAttributes *nvme = 0;
 		int		cuda_dindex;
-		char   *c;
+		bool	found = false;
 
 		token = __trim(token);
 
 		if ((dev1 = strtok_r(token, ":", &pos2)) == NULL ||
 			(dev2 = strtok_r(NULL, ":", &pos2)) == NULL ||
 			strtok_r(NULL, ":", &pos2) != NULL)
-			elog(ERROR, "wrong configuration at %ld character of '%s'",
-				 token - config, nvme_manual_distance_map);
+			goto syntax_error;
 		dev1 = __trim(dev1);
 		dev2 = __trim(dev2);
-		if (strncasecmp(dev1, "nvme", 4) != 0 ||
-			strncasecmp(dev2, "gpu", 3) != 0)
-			elog(ERROR, "wrong configuration at %ld character of '%s'",
-				 token - config, nvme_manual_distance_map);
+
+		/* nvme device index */
+		if (strncasecmp(dev1, "nvme", 4) != 0)
+			goto syntax_error;
+		for (c = dev1+4; isdigit(*c); c++);
+		if (c == dev1+4 || *c != '\0')
+			goto syntax_error;
+
+		/* GPU device index */
+		if (strncasecmp(dev2, "gpu", 3) != 0)
+			goto syntax_error;
+		for (c = dev2+3; isdigit(*c); c++);
+		if (c == dev2+3 || *c != '\0')
+			goto syntax_error;
+		cuda_dindex = atoi(dev2+3);
+		if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+			elog(ERROR, "GPU device '%s' was not found", dev2);
+
 		if (nvmeHash)
 		{
+			NvmeAttributes *nvme;
 			HASH_SEQ_STATUS	hseq;
-
+			char		temp[128];
+			size_t		sz;
+			
+			sz = snprintf(temp, sizeof(temp), "%sn", dev1);
+			
 			hash_seq_init(&hseq, nvmeHash);
 			while ((nvme = hash_seq_search(&hseq)) != NULL)
 			{
-				if (strcasecmp(dev1, nvme->nvme_name) == 0)
+				if (strncasecmp(temp, nvme->nvme_name, sz) == 0)
 				{
-					hash_seq_term(&hseq);
-					break;
+					nvme->nvme_optimal_gpu = cuda_dindex;
+					found = true;
 				}
 			}
 		}
-		if (!nvme)
+		if (!found)
 			elog(ERROR, "NVME device '%s' was not found", dev1);
-
-		cuda_dindex = atoi(dev2 + 3);
-		c = dev2 + 3;
-		while (isdigit(*c))
-			c++;
-		if (*c != '\0' || cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
-			elog(ERROR, "GPU device '%s' was not found", dev2);
-
-		/* over-write default configuration */
-		nvme->nvme_optimal_gpu = cuda_dindex;
-
-		token = strtok_r(NULL, ",", &pos1);
 	}
+	return;
+
+syntax_error:
+	elog(ERROR, "wrong configuration at %ld character of '%s'",
+		 token - config, nvme_manual_distance_map);
 }
 
 /*
@@ -762,8 +867,7 @@ typedef struct
 
 typedef struct
 {
-	int		major;
-	int		minor;
+	dev_t	st_dev;		/* may be a partition device */
 	int		optimal_gpu;
 } filesystem_optimal_gpu_hentry;
 
@@ -819,79 +923,65 @@ __GetOptimalGpuForRaidVolume(const char *sysfs_base)
 	value = sysfs_read_line(namebuf, true);
 	if (strcmp(value, "raid0") != 0)
 		return -1;		/* unsupported md-raid level */
-#if 0
-	// We don't need to look at RAID-0 layout
-	snprintf(namebuf, sizeof(namebuf), "%s/layout", sysfs_base);
-	value = sysfs_read_line(namebuf, true);
-	if (strcmp(value, "0") != 0)
-		return -1;		/* unsupported md-raid layout */
-#endif
+
 	snprintf(namebuf, sizeof(namebuf), "%s/chunk_size", sysfs_base);
 	sz = atol(sysfs_read_line(namebuf, true));
 	if (sz < PAGE_SIZE || (sz & (PAGE_SIZE - 1)) != 0)
 		return -1;		/* unsupported md-raid chunk-size */
 
-	dir = opendir(sysfs_base);
+	dir = AllocateDir(sysfs_base);
 	if (!dir)
-		elog(ERROR, "failed on opendir('%s'): %m", sysfs_base);
-	PG_TRY();
+		elog(ERROR, "failed on AllocateDir('%s'): %m", sysfs_base);
+	
+	while ((dent = ReadDir(dir, sysfs_base)) != NULL)
 	{
-		while ((dent = readdir(dir)) != NULL)
+		if (dent->d_name[0] == 'r' &&
+			dent->d_name[1] == 'd' &&
+			isdigit(dent->d_name[2]))
 		{
-			if (dent->d_name[0] == 'r' &&
-				dent->d_name[1] == 'd' &&
-				isdigit(dent->d_name[2]))
-			{
-				int		__major;
-				int		__minor;
-				int		__dindex;
+			int		__major;
+			int		__minor;
+			int		__dindex;
 
+			snprintf(namebuf, sizeof(namebuf),
+					 "%s/%s/block/dev",
+					 sysfs_base, dent->d_name);
+			value = sysfs_read_line(namebuf, true);
+			if (sscanf(value, "%d:%d", &__major, &__minor) != 2)
+				elog(ERROR, "failed on parse '%s' [%s]",
+					 namebuf, value);
+
+			snprintf(namebuf, sizeof(namebuf),
+					 "%s/%s/block/partition",
+					 sysfs_base, dent->d_name);
+			value = sysfs_read_line(namebuf, false);
+			if (value && atoi(value) != 0)
+			{
+				/* a partitioned volume */
 				snprintf(namebuf, sizeof(namebuf),
-						 "%s/%s/block/dev",
-						 sysfs_base, dent->d_name);
+						 "/sys/dev/block/%d:%d/../dev",
+						 __major, __minor);
 				value = sysfs_read_line(namebuf, true);
 				if (sscanf(value, "%d:%d", &__major, &__minor) != 2)
 					elog(ERROR, "failed on parse '%s' [%s]",
 						 namebuf, value);
-
-				snprintf(namebuf, sizeof(namebuf),
-						 "%s/%s/block/partition",
-						 sysfs_base, dent->d_name);
-				value = sysfs_read_line(namebuf, false);
-				if (value && atoi(value) != 0)
-				{
-					/* a partitioned volume */
-					snprintf(namebuf, sizeof(namebuf),
-							 "/sys/dev/block/%d:%d/../dev",
-							 __major, __minor);
-					value = sysfs_read_line(namebuf, true);
-					if (sscanf(value, "%d:%d", &__major, &__minor) != 2)
-						elog(ERROR, "failed on parse '%s' [%s]",
-							 namebuf, value);
-				}
-				__dindex = __GetOptimalGpuForBlockDevice(__major, __minor);
-				if (__dindex < 0)
-				{
-					optimal_gpu = -1;
-					break;		/* no optimal GPU */
-				}
-				else if (optimal_gpu < 0)
-					optimal_gpu = __dindex;
-				else if (optimal_gpu != __dindex)
-				{
-					optimal_gpu = -1;
-					break;		/* no optimal GPU */
-				}
+			}
+			__dindex = __GetOptimalGpuForBlockDevice(__major, __minor);
+			if (__dindex < 0)
+			{
+				optimal_gpu = -1;
+				break;		/* no optimal GPU */
+			}
+			else if (optimal_gpu < 0)
+				optimal_gpu = __dindex;
+			else if (optimal_gpu != __dindex)
+			{
+				optimal_gpu = -1;
+				break;		/* no optimal GPU */
 			}
 		}
 	}
-	PG_CATCH();
-	{
-		closedir(dir);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	closedir(dir);
+	FreeDir(dir);
 
 	return optimal_gpu;
 }
@@ -916,7 +1006,7 @@ GetOptimalGpuForFile(File fdesc)
 		ctl.keysize = sizeof(dev_t);
 		ctl.entrysize = sizeof(filesystem_optimal_gpu_hentry);
 		filesystem_optimal_gpu_htable
-			= hash_create("FileSystem:OptimalGPU", 64,
+			= hash_create("FileSystemOptimalGPU", 128,
 						  &ctl, HASH_ELEM | HASH_BLOBS);
 	}
 	hentry = hash_search(filesystem_optimal_gpu_htable,
@@ -925,27 +1015,31 @@ GetOptimalGpuForFile(File fdesc)
 						 &found);
 	if (!found)
 	{
-		int			optimal_gpu = -1;
-		int			major = major(stat_buf.st_dev);
-		int			minor = minor(stat_buf.st_dev);
-		char		namebuf[MAXPGPATH];
+		int		optimal_gpu = -1;
+		int		major = major(stat_buf.st_dev);
+		int		minor = minor(stat_buf.st_dev);
+		char	namebuf[MAXPGPATH];
 		const char *value;
 
 		PG_TRY();
 		{
+			/* check whether the file is on partition volume */
 			snprintf(namebuf, sizeof(namebuf),
-					 "/sys/dev/block/%d:%d/partition", major, minor);
+					 "/sys/dev/block/%d:%d/partition",
+					 major, minor);
 			value = sysfs_read_line(namebuf, false);
 			if (value && atoi(value) != 0)
 			{
 				/* lookup the mother block device */
 				snprintf(namebuf, sizeof(namebuf),
-						 "/sys/dev/block/%d:%d/../dev", major, minor);
+						 "/sys/dev/block/%d:%d/../dev",
+						 major, minor);
 				value = sysfs_read_line(namebuf, true);
 				if (sscanf(value, "%d:%d", &major, &minor) != 2)
-					elog(ERROR, "failed on parse '%s' [%s]", namebuf, value);
+					elog(ERROR, "failed on parse '%s' [%s]",
+						 namebuf, value);
 			}
-			/* check whether the file is on md-raid volumn, or not */
+			/* check whether the file is on md-raid volumn */
 			snprintf(namebuf, sizeof(namebuf),
 					 "/sys/dev/block/%d:%d/md", major, minor);
 			if (stat(namebuf, &stat_buf) == 0)
@@ -956,7 +1050,7 @@ GetOptimalGpuForFile(File fdesc)
 			}
 			else if (errno == ENOENT)
 			{
-				/* not a md-raid drive */
+				/* not a md-RAID device */
 				optimal_gpu = __GetOptimalGpuForBlockDevice(major, minor);
 			}
 			else
@@ -981,7 +1075,7 @@ GetOptimalGpuForFile(File fdesc)
 static cl_int
 GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
-	tablespace_optimal_gpu_hentry *entry;
+	tablespace_optimal_gpu_hentry *hentry;
 	char   *pathname;
 	File	fdesc;
 	bool	found;
@@ -1000,12 +1094,13 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(tablespace_optimal_gpu_hentry);
 		tablespace_optimal_gpu_htable
-			= hash_create("Tablespace:OptimalGpu", 64,
+			= hash_create("TablespaceOptimalGpu", 128,
 						  &ctl, HASH_ELEM | HASH_BLOBS);
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
-									  tablespace_optimal_gpu_cache_callback, 0);
+									  tablespace_optimal_gpu_cache_callback,
+									  (Datum) 0);
 	}
-	entry = (tablespace_optimal_gpu_hentry *)
+	hentry = (tablespace_optimal_gpu_hentry *)
 		hash_search(tablespace_optimal_gpu_htable,
 					&tablespace_oid,
 					HASH_ENTER,
@@ -1014,8 +1109,8 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	{
 		PG_TRY();
 		{
-			entry->tablespace_oid = tablespace_oid;
-			entry->optimal_gpu = -1;
+			Assert(hentry->tablespace_oid == tablespace_oid);
+			hentry->optimal_gpu = -1;
 
 			pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
 			fdesc = PathNameOpenFile(pathname, O_RDONLY | O_DIRECTORY);
@@ -1023,11 +1118,10 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 			{
 				elog(WARNING, "failed on open('%s') of tablespace %u: %m",
 					 pathname, tablespace_oid);
-				entry->optimal_gpu = -1;
 			}
 			else
 			{
-				entry->optimal_gpu = GetOptimalGpuForFile(fdesc);
+				hentry->optimal_gpu = GetOptimalGpuForFile(fdesc);
 				FileClose(fdesc);
 			}
 		}
@@ -1041,7 +1135,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 		}
 		PG_END_TRY();
 	}
-	return entry->optimal_gpu;
+	return hentry->optimal_gpu;
 }
 
 cl_int
