@@ -265,6 +265,11 @@ typedef struct GpuContext
 	int				error_lineno;
 	const char	   *error_funcname;
 	char			error_message[200];
+	/* debug counter */
+	pg_atomic_uint64 debug_count1;
+	pg_atomic_uint64 debug_count2;
+	pg_atomic_uint64 debug_count3;
+	pg_atomic_uint64 debug_count4;
 	/* management of the work-queue */
 	bool			worker_is_running;
 	pg_atomic_uint32 *global_num_running_tasks;		/* shared statistics */

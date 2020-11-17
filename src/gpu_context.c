@@ -616,6 +616,20 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			memset(cuda_resource, 0, sizeof(CudaResource));
 		}
 	}
+
+	/* print debug counter, if any */
+	{
+		uint64	debug_count1 = pg_atomic_read_u64(&gcontext->debug_count1);
+		uint64	debug_count2 = pg_atomic_read_u64(&gcontext->debug_count2);
+		uint64	debug_count3 = pg_atomic_read_u64(&gcontext->debug_count3);
+		uint64	debug_count4 = pg_atomic_read_u64(&gcontext->debug_count4);
+
+		if (debug_count1 || debug_count2 || debug_count3 || debug_count4)
+		{
+			elog(NOTICE, "GpuContext %p { debug1: %lu, debug2: %lu, debug3: %lu, debug4: %lu }",
+				 gcontext, debug_count1, debug_count2, debug_count3, debug_count4);
+		}
+	}
 	free(gcontext);
 }
 
