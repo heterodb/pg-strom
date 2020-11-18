@@ -270,7 +270,6 @@ typedef struct GpuContext
 	pg_atomic_uint64 debug_count4;
 	/* management of the work-queue */
 	bool			worker_is_running;
-	pg_atomic_uint32 *global_num_running_tasks;		/* shared statistics */
 	pthread_mutex_t	worker_mutex;
 	pthread_cond_t	worker_cond;
 	pg_atomic_uint32 terminate_workers;
@@ -795,7 +794,6 @@ extern void pgstrom_init_gpu_mmgr(void);
 /*
  * gpu_context.c
  */
-extern int		global_max_async_tasks;		/* GUC */
 extern int		local_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;

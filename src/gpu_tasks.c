@@ -359,7 +359,6 @@ fetch_next_gputask(GpuTaskState *gts)
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
 	cl_int			local_num_running_tasks;
-	cl_int			global_num_running_tasks;
 	cl_int			ev;
 
 	/* force activate GpuContext on demand */
@@ -372,12 +371,8 @@ fetch_next_gputask(GpuTaskState *gts)
 		ResetLatch(MyLatch);
 		local_num_running_tasks = (gts->num_ready_tasks +
 								   gts->num_running_tasks);
-		global_num_running_tasks =
-			pg_atomic_read_u32(gcontext->global_num_running_tasks);
-		if ((local_num_running_tasks < local_max_async_tasks &&
-			 global_num_running_tasks < global_max_async_tasks) ||
-			(dlist_is_empty(&gts->ready_tasks) &&
-			 gts->num_running_tasks == 0))
+		if (local_num_running_tasks < local_max_async_tasks ||
+			(dlist_is_empty(&gts->ready_tasks) && gts->num_running_tasks == 0))
 		{
 			pthreadMutexUnlock(&gcontext->worker_mutex);
 			gtask = gts->cb_next_task(gts);
@@ -389,7 +384,6 @@ fetch_next_gputask(GpuTaskState *gts)
 			}
 			dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
 			gts->num_running_tasks++;
-			pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
 			pthreadCondSignal(&gcontext->worker_cond);
 		}
 		else if (!dlist_is_empty(&gts->ready_tasks))
@@ -474,7 +468,6 @@ retry:
 						dlist_push_tail(&gcontext->pending_tasks,
 										&gtask->chain);
 						gts->num_running_tasks++;
-						pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
 						pthreadCondSignal(&gcontext->worker_cond);
 					}
 					goto retry;
