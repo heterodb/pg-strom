@@ -35,8 +35,7 @@ typedef struct CudaResource
 } CudaResource;
 
 /* variables */
-int					global_max_async_tasks;		/* GUC */
-int					local_max_async_tasks;		/* GUC */
+int					pgstrom_max_async_tasks;		/* GUC */
 bool				pgstrom_reuse_cuda_context;	/* GUC */
 static CudaResource *cuda_resources_array = NULL;
 static slock_t		activeGpuContextLock;
@@ -986,7 +985,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	GpuContext	   *gcontext = NULL;
 	dlist_iter		iter;
 	CUresult		rc;
-	int				i, num_workers = local_max_async_tasks;
+	int				i, num_workers = pgstrom_max_async_tasks;
 
 	/* per-process driver initialization */
 	rc = gpuInit(0);
@@ -1273,7 +1272,7 @@ pgstrom_init_gpu_context(void)
 	DefineCustomIntVariable("pg_strom.max_async_tasks",
 							"Soft limit for CUDA worker threads per backend",
 							NULL,
-							&local_max_async_tasks,
+							&pgstrom_max_async_tasks,
 							5,
 							1,
 							64,

@@ -1667,26 +1667,12 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	{
 		strom_io_vector *iovec = pds->iovec;
 #ifdef WITH_CUFILE
-		void	   *async_io_state = NULL;
-		void	   *temp;
-		int			i;
-
-		Assert(gm_seg->iomap_handle == 0);
-		for (i=0; i < iovec->nr_chunks; i++)
-		{
-			temp = __cuFileReadAsync(pds->filedesc.fhandle,
-									 gm_seg->m_segment,
-									 offset,
-									 &iovec->ioc[i],
-									 async_io_state);
-			if (!temp)
-			{
-				__cuFileReadWait(async_io_state);
-				werror("failed on __cuFileReadAsync");
-			}
-			async_io_state = temp;
-		}
-		__cuFileReadWait(async_io_state);
+		rc = __cuFileReadIOVec(pds->filedesc.fhandle,
+							   gm_seg->m_segment,
+							   offset,
+							   iovec);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on __cuFileReadIOVec: %s", errorText(rc));
 #else
 		Assert(gm_seg->iomap_handle != 0);
 		/* setup ioctl(2) command */
@@ -1732,25 +1718,12 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	{
 		strom_io_vector *iovec = pds->iovec;
 #ifdef WITH_CUFILE
-		void	   *async_io_state = NULL;
-		void	   *temp;
-		int			i;
-
-		for (i=0; i < iovec->nr_chunks; i++)
-		{
-			temp = __cuFileReadAsync(pds->filedesc.fhandle,
-									 gm_seg->m_segment,
-									 m_kds - gm_seg->m_segment,
-									 &iovec->ioc[i],
-									 async_io_state);
-			if (!temp)
-			{
-				__cuFileReadWait(async_io_state);
-				werror("failed on __cuFileReadAsync");
-			}
-			async_io_state = temp;
-		}
-		__cuFileReadWait(async_io_state);
+		rc = __cuFileReadIOVec(pds->filedesc.fhandle,
+							   gm_seg->m_segment,
+							   m_kds - gm_seg->m_segment,
+							   iovec);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on __cuFileReadIOVec: %s", errorText(rc));
 #else
 		StromCmd__MemCopySsdToGpuRaw cmd;
 

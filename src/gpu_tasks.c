@@ -359,7 +359,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	GpuContext	   *gcontext = gts->gcontext;
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
-	cl_int			local_num_running_tasks;
+	cl_int			num_async_tasks;
 	cl_int			ev;
 
 	/* force activate GpuContext on demand */
@@ -370,10 +370,10 @@ fetch_next_gputask(GpuTaskState *gts)
 	while (!gts->scan_done)
 	{
 		ResetLatch(MyLatch);
-		local_num_running_tasks = (gts->num_ready_tasks +
-								   gts->num_running_tasks);
-		if (local_num_running_tasks < local_max_async_tasks ||
-			(dlist_is_empty(&gts->ready_tasks) && gts->num_running_tasks == 0))
+		num_async_tasks = (gts->num_ready_tasks +
+						   gts->num_running_tasks);
+		if (num_async_tasks < pgstrom_max_async_tasks &&
+			(dlist_is_empty(&gts->ready_tasks) || gts->num_running_tasks == 0))
 		{
 			pthreadMutexUnlock(&gcontext->worker_mutex);
 			gtask = gts->cb_next_task(gts);

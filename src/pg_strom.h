@@ -804,7 +804,7 @@ extern void pgstrom_init_gpu_mmgr(void);
 /*
  * gpu_context.c
  */
-extern int		local_max_async_tasks;		/* GUC */
+extern int		pgstrom_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
 extern __thread int				GpuWorkerIndex;
@@ -1481,13 +1481,10 @@ extern void		pgstrom_init_nvrtc(void);
  */
 #ifdef WITH_CUFILE
 extern const char *cuFileError(CUfileError_t rv);
-
-extern void *__cuFileReadAsync(CUfileHandle_t fhandle,
-							   CUdeviceptr devptr_base,
-							   off_t devptr_offset,
-							   strom_io_chunk *io_chunk,
-							   void *async_io_state);
-extern void  __cuFileReadWait(void *async_io_state);
+extern CUresult	__cuFileReadIOVec(CUfileHandle_t fhandle,
+								  CUdeviceptr devptr_base,
+								  off_t devptr_offset,
+								  strom_io_vector *iovec);
 #endif
 extern void		pgstrom_init_cufile(void);
 

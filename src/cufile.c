@@ -19,12 +19,27 @@
 #include <dlfcn.h>
 
 #ifdef WITH_CUFILE
+static int		cufile_async_io_unitsz;		/* I/O size in kB */
+
+/* GUC checker */
+static bool
+cufile_async_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
+{
+	int		newval = *p_newval;
+
+	if ((newval & (newval - 1)) != 0)
+		elog(ERROR, "pg_strom.cufile_io_unitsz must be power of 2");
+	return true;
+}
+
 /*
  * cuFileError - note that it is not a cuFile API
  */
 const char *
 cuFileError(CUfileError_t rv)
 {
+	if (rv.cu_err)
+		return errorText(rv.cu_err);
 	return cufileop_status_error(rv.err);
 }
 
@@ -200,288 +215,45 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
 	return p_cuFileWrite(fh,devPtr_base,size,file_offset,devPtr_offset);
 }
 
-/*
- * __cuFileReadAsync - an alternative implementation unless the official
- * distribution does not provide cuFileReadAsync API
- */
-#define CUFILE_NUM_ASYNC_IO_THREADS		12
-#define CUFILE_ASYNC_IO_THREADS_MASK	((1UL << CUFILE_NUM_ASYNC_IO_THREADS) - 1)
-static pthread_mutex_t	cufile_async_io_mutex;
-static pthread_cond_t	cufile_async_io_cond;
-static Datum			cufile_async_io_threads;
-static dlist_head		cufile_async_io_queue;
-static int				cufile_async_io_unitsz;		/* I/O size in kB */
-
-/* GUC checker */
-static bool
-cufile_async_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
-{
-	int		newval = *p_newval;
-
-	if ((newval & (newval - 1)) != 0)
-		elog(ERROR, "pg_strom.cufile_io_unitsz must be power of 2");
-	return true;
-}
-
-typedef struct
-{
-	CUcontext		cuda_context;
-	pthread_mutex_t	lock;
-	pthread_cond_t	cond;
-	int				refcnt;
-	int				errcode;
-	char			errmsg[160];
-} cufile_async_io_state;
-
-typedef struct
-{
-	dlist_node		chain;
-	CUfileHandle_t	fhandle;
-	off_t			file_offset;
-	size_t			bytesize;
-	CUdeviceptr		devptr_base;
-	off_t			devptr_offset;
-	cufile_async_io_state *async_io_state;
-} cufile_async_io_request;
-
-static void *
-__cuFileAsyncIOThread(void *__arg)
-{
-	cl_int		thread_id = PointerGetDatum(__arg);
-
-	pthreadMutexLock(&cufile_async_io_mutex);
-	for (;;)
-	{
-		cufile_async_io_state *async_io_state;
-		cufile_async_io_request *req;
-		dlist_node *dnode;
-		ssize_t		nbytes;
-		CUresult	rc;
-
-		if (!dlist_is_empty(&cufile_async_io_queue))
-		{
-			dnode = dlist_pop_head_node(&cufile_async_io_queue);
-			req = dlist_container(cufile_async_io_request, chain, dnode);
-			pthreadMutexUnlock(&cufile_async_io_mutex);
-
-			async_io_state = req->async_io_state;
-			rc = cuCtxSetCurrent(async_io_state->cuda_context);
-
-			if (rc != CUDA_SUCCESS)
-			{
-				pthreadMutexLock(&async_io_state->lock);
-				if (async_io_state->errcode == 0)
-				{
-					async_io_state->errcode = EINVAL;
-					snprintf(async_io_state->errmsg, 160,
-							 "failed on cuCtxSetCurrent: %s", errorText(rc));
-				}
-			}
-			else
-			{
-				nbytes = cuFileRead(req->fhandle,
-									(void *)req->devptr_base,
-									req->bytesize,
-									req->file_offset,
-									req->devptr_offset);
-				pthreadMutexLock(&async_io_state->lock);
-				if (nbytes != req->bytesize)
-				{
-					if (async_io_state->errcode == 0)
-					{
-						async_io_state->errcode = EIO;
-						if (nbytes < 0)
-						{
-							snprintf(async_io_state->errmsg, 160,
-									 "failed on cuFileRead: %s",
-									 cufileop_status_error(-nbytes));
-						}
-						else
-						{
-							snprintf(async_io_state->errmsg, 160,
-									 "cuFileRead returned %zu for %zu bytes",
-									 nbytes, req->bytesize);
-						}
-					}
-				}
-			}
-			Assert(async_io_state->refcnt > 0);
-			async_io_state->refcnt--;
-			if (async_io_state->refcnt == 0)
-				pthreadCondBroadcast(&async_io_state->cond);
-			pthreadMutexUnlock(&async_io_state->lock);
-			/* unbind the CUDA context */
-			cuCtxSetCurrent(NULL);
-
-			free(req);
-
-			pthreadMutexLock(&cufile_async_io_mutex);
-		}
-		else if (!pthreadCondWaitTimeout(&cufile_async_io_cond,
-										 &cufile_async_io_mutex,
-										 10000L))
-		{
-			if (dlist_is_empty(&cufile_async_io_queue))
-			{
-				cufile_async_io_threads &= ~(1UL << thread_id);
-				break;
-			}
-		}
-	}
-	pthreadMutexUnlock(&cufile_async_io_mutex);
-	return NULL;
-}
-
-void *
-__cuFileReadAsync(CUfileHandle_t fhandle,
+CUresult
+__cuFileReadIOVec(CUfileHandle_t fhandle,
 				  CUdeviceptr devptr_base,
 				  off_t devptr_offset,
-				  strom_io_chunk *io_chunk,
-				  void *__async_io_state)
+				  strom_io_vector *io_vec)
 {
-	cufile_async_io_state   *async_io_state = __async_io_state;
-	cufile_async_io_request *req;
-	pthread_t	thread;
-	Datum		mask;
-	int			units = ((Datum)cufile_async_io_unitsz << 10) / PAGE_SIZE;
-	int			i, j;
-	size_t		sz;
-	off_t		file_offset;
-	int			errcode = 0;
-	int			nr_reqs = 0;
-	dlist_head	req_list;
+	size_t		unitsz = ((size_t)cufile_async_io_unitsz << 10);
+	CUresult	rc = CUDA_SUCCESS;
+	int			i;
 
-	/* setup a state object at the first call */
-	if (!async_io_state)
+	for (i=0; i < io_vec->nr_chunks; i++)
 	{
-		async_io_state = calloc(1, sizeof(cufile_async_io_state));
-		if (!async_io_state)
-			return NULL;	/* out of memory */
-		async_io_state->cuda_context = CU_CONTEXT_PER_THREAD;
-		pthreadMutexInit(&async_io_state->lock, 0);
-		pthreadCondInit(&async_io_state->cond, 0);
-		async_io_state->refcnt = 0;
-	}
-	else
-	{
-		Assert(async_io_state->cuda_context == CU_CONTEXT_PER_THREAD);
-	}
+		strom_io_chunk *ioc = &io_vec->ioc[i];
+		size_t		remained = ioc->nr_pages * PAGE_SIZE;
+		off_t		file_pos = ioc->fchunk_id * PAGE_SIZE;
 
-	/* setup individual i/o request */
-	file_offset = PAGE_SIZE * io_chunk->fchunk_id;
-	devptr_offset += io_chunk->m_offset;
-	dlist_init(&req_list);
-	for (i=0; i < io_chunk->nr_pages; i += units)
-	{
-		req = calloc(1, sizeof(cufile_async_io_request));
-		if (!req)
+		while (remained > 0)
 		{
-			errcode = errno;
-			goto error;
-		}
-		sz = Min(io_chunk->nr_pages - i, units) * PAGE_SIZE;
-		req->fhandle = fhandle;
-		req->file_offset = file_offset;
-		req->bytesize = sz;
-		req->devptr_base = devptr_base;
-		req->devptr_offset = devptr_offset;
-		req->async_io_state = async_io_state;
+			ssize_t		sz, nbytes;
 
-		file_offset += sz;
-		devptr_offset += sz;
-		nr_reqs++;
-
-		dlist_push_tail(&req_list, &req->chain);
-	}
-	/* enqueue the request message */
-	pthreadMutexLock(&cufile_async_io_mutex);
-	dlist_append_tail(&cufile_async_io_queue, &req_list);
-	pthreadMutexLock(&async_io_state->lock);
-	async_io_state->refcnt += nr_reqs;
-	pthreadMutexUnlock(&async_io_state->lock);
-
-	/* launch worker threads if not active */
-	if (cufile_async_io_threads != CUFILE_ASYNC_IO_THREADS_MASK)
-	{
-		for (j=0, mask=1; j < CUFILE_NUM_ASYNC_IO_THREADS; j++, mask *= 2)
-		{
-			if ((cufile_async_io_threads & mask) == 0)
+			sz = Min(remained, unitsz);
+			nbytes = cuFileRead(fhandle,
+								(void *)devptr_base,
+								sz,
+								file_pos,
+								devptr_offset);
+			if (nbytes != sz)
 			{
-				errcode = pthread_create(&thread, NULL,
-										 __cuFileAsyncIOThread,
-										 (void *)Int32GetDatum(j));
-				if (errcode != 0)
-					goto error_locked;
-				cufile_async_io_threads |= mask;
+				if (IS_CUFILE_ERR(nbytes))
+					return -nbytes;
+				fprintf(stderr, "file_pos=%lu sz=%lu nbytes=%ld\n", file_pos, sz, nbytes);
+				return CUDA_ERROR_UNKNOWN;
 			}
+			file_pos += sz;
+			devptr_offset += sz;
+			remained -= sz;
 		}
 	}
-	/* wake up a worker thread to invoke cuFileRead */
-	if (nr_reqs > 1)
-		pthreadCondBroadcast(&cufile_async_io_cond);
-	else
-		pthreadCondSignal(&cufile_async_io_cond);
-	pthreadMutexUnlock(&cufile_async_io_mutex);
-
-	return async_io_state;
-
-error:
-	pthreadMutexLock(&cufile_async_io_mutex);
-error_locked:
-	/* Remove pending request and set error status */
-	while (!dlist_is_empty(&cufile_async_io_queue))
-	{
-		cufile_async_io_state  *io_state;
-		dlist_node	   *dnode = dlist_pop_head_node(&cufile_async_io_queue);
-
-		req = dlist_container(cufile_async_io_request, chain, dnode);
-		io_state = req->async_io_state;
-		pthreadMutexLock(&io_state->lock);
-		if (io_state->errcode == 0)
-		{
-			io_state->errcode = errcode;
-			snprintf(io_state->errmsg, 160,
-					 "failed on __cuFileReadAsync: %s", strerror(errcode));
-		}
-		Assert(io_state->refcnt > 0);
-		io_state->refcnt--;
-		if (io_state->refcnt == 0)
-			pthreadCondBroadcast(&io_state->cond);
-		pthreadMutexUnlock(&io_state->lock);
-
-		free(req);
-	}
-	pthreadMutexUnlock(&cufile_async_io_mutex);
-	/* Is a first call? */
-	if (!__async_io_state)
-		free(async_io_state);
-	return NULL;
-}
-
-void
-__cuFileReadWait(void *__async_io_state)
-{
-	cufile_async_io_state  *async_io_state = __async_io_state;
-	cufile_async_io_state	temp;
-
-	if (!async_io_state)
-		return;
-
-	pthreadMutexLock(&async_io_state->lock);
-	while (async_io_state->refcnt > 0)
-	{
-		pthreadCondWait(&async_io_state->cond,
-						&async_io_state->lock);
-	}
-	pthreadMutexUnlock(&async_io_state->lock);
-
-	if (async_io_state->errcode != 0)
-	{
-		memcpy(&temp, async_io_state, sizeof(cufile_async_io_state));
-		free(async_io_state);
-		werror("failed on __cuFileReadAsync[%s]", temp.errmsg);
-	}
-	free(async_io_state);
+	return rc;
 }
 
 /*
@@ -568,17 +340,11 @@ pgstrom_init_cufile(void)
 							"I/O size on cuFileRead invocations",
 							"Note that this parameter may be removed in the future version without notifications",
 							&cufile_async_io_unitsz,
-							2048,		/* 2MB */
-							128,		/* 128kB */
 							16384,		/* 16MB */
+							256,		/* 2565kB */
+							INT_MAX,
 							PGC_SUSET,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							cufile_async_io_unitsz_checker, NULL, NULL);
-	
-	/* init for __cuFileReadAsync */
-	pthreadMutexInit(&cufile_async_io_mutex, 0);
-	pthreadCondInit(&cufile_async_io_cond, 0);
-	cufile_async_io_threads = 0;
-	dlist_init(&cufile_async_io_queue);
 #endif /* WITH_CUFILE */
 }
