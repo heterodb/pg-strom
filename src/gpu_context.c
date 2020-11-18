@@ -35,8 +35,6 @@ typedef struct CudaResource
 } CudaResource;
 
 /* variables */
-static shmem_startup_hook_type shmem_startup_next = NULL;
-static pg_atomic_uint32 *global_num_running_tasks;	/* shared */
 int					global_max_async_tasks;		/* GUC */
 int					local_max_async_tasks;		/* GUC */
 bool				pgstrom_reuse_cuda_context;	/* GUC */
@@ -1050,8 +1048,6 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	memset(gcontext->error_message, 0, sizeof(gcontext->error_message));
 	/* management of work-queue */
 	gcontext->worker_is_running = false;
-	gcontext->global_num_running_tasks
-		= &global_num_running_tasks[cuda_dindex];
 	pthreadMutexInit(&gcontext->worker_mutex, 1);
 	pthreadCondInit(&gcontext->worker_cond, 1);
 	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
@@ -1269,48 +1265,16 @@ gpucontext_shmem_exit_cleanup(int code, Datum arg)
 }
 
 /*
- * pgstrom_startup_gpu_context
- */
-static void
-pgstrom_startup_gpu_context(void)
-{
-	bool	found;
-	int		i;
-
-	if (shmem_startup_next)
-		(*shmem_startup_next)();
-
-	global_num_running_tasks =
-		ShmemInitStruct("Global number of running tasks counter",
-						sizeof(pg_atomic_uint32) * numDevAttrs,
-						&found);
-	if (found)
-		elog(ERROR, "Bug? Global number of running tasks counter exists");
-	for (i=0; i < numDevAttrs; i++)
-		pg_atomic_init_u32(&global_num_running_tasks[i], 0);
-}
-
-/*
  * pgstrom_init_gpu_context
  */
 void
 pgstrom_init_gpu_context(void)
 {
-	DefineCustomIntVariable("pg_strom.global_max_async_tasks",
-			"Soft limit for the number of concurrent GpuTasks in system-wide",
-							NULL,
-							&global_max_async_tasks,
-							160,
-							8,
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE,
-                            NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.local_max_async_tasks",
-			"Soft limit for the number of concurrent GpuTasks per backend",
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
+							"Soft limit for CUDA worker threads per backend",
 							NULL,
 							&local_max_async_tasks,
-							8,
+							5,
 							1,
 							64,
 							PGC_SUSET,
@@ -1332,11 +1296,6 @@ pgstrom_init_gpu_context(void)
 
 	SpinLockInit(&activeGpuContextLock);
 	dlist_init(&activeGpuContextList);
-
-	/* shared memory */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) * numDevAttrs));
-	shmem_startup_next = shmem_startup_hook;
-    shmem_startup_hook = pgstrom_startup_gpu_context;
 
 	/* register the callback to clean up resources */
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
