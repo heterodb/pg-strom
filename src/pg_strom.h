@@ -794,7 +794,7 @@ extern void pgstrom_init_gpu_mmgr(void);
 /*
  * gpu_context.c
  */
-extern int		local_max_async_tasks;		/* GUC */
+extern int		pgstrom_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
 extern __thread int				GpuWorkerIndex;
