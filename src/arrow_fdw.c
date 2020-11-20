@@ -1959,12 +1959,17 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 /*
  * ArrowEstimateDSMForeignScan 
  */
+Size
+ExecEstimateDSMArrowFdw(ArrowFdwState *af_state)
+{
+	return MAXALIGN(sizeof(pg_atomic_uint32));
+}
+
 static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	//elog(INFO, "pid=%u ArrowEstimateDSMForeignScan", getpid());
-	return MAXALIGN(sizeof(pg_atomic_uint32));
+	return ExecEstimateDSMArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 
 /*
