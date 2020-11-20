@@ -701,7 +701,15 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 {
 	Relation	relation = gts->css.ss.ss_currentRelation;
 
-	if (relation)
+	if (gts->af_state)
+	{
+		return ExecEstimateDSMArrowFdw(gts->af_state);
+	}
+	else if (gts->gs_state)
+	{
+		return ExecEstimateDSMGstoreFdw(gts->gs_state);
+	}
+	else if (relation)
 	{
 		EState	   *estate = gts->css.ss.ps.state;
 		Snapshot	snapshot = estate->es_snapshot;

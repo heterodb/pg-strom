@@ -1380,11 +1380,16 @@ GstoreEndForeignScan(ForeignScanState *node)
 	ExecEndGstoreFdw((GpuStoreFdwState *)node->fdw_state);
 }
 
-#if 1
 /*
  * NOTE: Right now, gstore_fdw does not support CPU parallel because
  *       it makes little sense. So, routines below are just dummy.
  */
+Size
+ExecEstimateDSMGstoreFdw(GpuStoreFdwState *fdw_state)
+{
+	return MAXALIGN(sizeof(pg_atomic_uint64));
+}
+
 void
 ExecInitDSMGstoreFdw(GpuStoreFdwState *fdw_state,
 					 pg_atomic_uint64 *gstore_read_pos)
@@ -1411,7 +1416,6 @@ ExecShutdownGstoreFdw(GpuStoreFdwState *fdw_state)
 {
 	/* nothing to do */
 }
-#endif
 
 static uint64
 __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,

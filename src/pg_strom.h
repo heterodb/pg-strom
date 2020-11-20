@@ -1375,6 +1375,7 @@ extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
 extern void ExecEndArrowFdw(ArrowFdwState *af_state);
+extern Size ExecEstimateDSMArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
 								pg_atomic_uint32 *rbatch_index);
 extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
@@ -1397,6 +1398,7 @@ extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss, int eflags,
 extern pgstrom_data_store *ExecScanChunkGstoreFdw(GpuTaskState *gts);
 extern void ExecReScanGstoreFdw(GpuStoreFdwState *gstore_state);
 extern void ExecEndGstoreFdw(GpuStoreFdwState *gstore_state);
+extern Size ExecEstimateDSMGstoreFdw(GpuStoreFdwState *gstore_state);
 extern void ExecInitDSMGstoreFdw(GpuStoreFdwState *gstore_state,
 								 pg_atomic_uint64 *gstore_read_pos);
 extern void ExecReInitDSMGstoreFdw(GpuStoreFdwState *gstore_state);
