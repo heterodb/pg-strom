@@ -230,6 +230,7 @@ __cuFileReadIOVec(CUfileHandle_t fhandle,
 		strom_io_chunk *ioc = &io_vec->ioc[i];
 		size_t		remained = ioc->nr_pages * PAGE_SIZE;
 		off_t		file_pos = ioc->fchunk_id * PAGE_SIZE;
+		off_t		m_offset = devptr_offset + ioc->m_offset;
 
 		while (remained > 0)
 		{
@@ -240,7 +241,7 @@ __cuFileReadIOVec(CUfileHandle_t fhandle,
 								(void *)devptr_base,
 								sz,
 								file_pos,
-								devptr_offset);
+								m_offset);
 			if (nbytes != sz)
 			{
 				if (IS_CUFILE_ERR(nbytes))
@@ -249,7 +250,7 @@ __cuFileReadIOVec(CUfileHandle_t fhandle,
 				return CUDA_ERROR_UNKNOWN;
 			}
 			file_pos += sz;
-			devptr_offset += sz;
+			m_offset += sz;
 			remained -= sz;
 		}
 	}
