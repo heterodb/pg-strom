@@ -393,7 +393,6 @@ fetch_next_gputask(GpuTaskState *gts)
 			 * the number of concurrent tasks, GTS already has ready tasks,
 			 * so pick them up instead of wait.
 			 */
-			pthreadMutexUnlock(&gcontext->worker_mutex);
 			goto pickup_gputask;
 		}
 		else if (gts->num_running_tasks > 0)
@@ -494,13 +493,13 @@ retry:
 		pthreadMutexLock(&gcontext->worker_mutex);
 		ResetLatch(MyLatch);
 	}
-	pthreadMutexUnlock(&gcontext->worker_mutex);
 pickup_gputask:
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
 	dnode = dlist_pop_head_node(&gts->ready_tasks);
 	gtask = dlist_container(GpuTask, chain, dnode);
 	gts->num_ready_tasks--;
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 
 	return gtask;
 }
