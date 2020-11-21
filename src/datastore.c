@@ -475,13 +475,6 @@ PDS_release(pgstrom_data_store *pds)
 	Assert(refcnt >= 0);
 	if (refcnt == 0)
 	{
-		if (pds->iovec)
-		{
-			Assert(pds->kds.format == KDS_FORMAT_BLOCK ||
-				   pds->kds.format == KDS_FORMAT_ARROW);
-			pfree(pds->iovec);
-		}
-
 		if (pds->gcontext)
 		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
@@ -949,16 +942,20 @@ __PDS_create_block(GpuContext *gcontext,
 {
 	pgstrom_data_store *pds = NULL;
 	cl_uint		nrooms = nvme_sstate->nblocks_per_chunk;
-	size_t		bytesize;
+	size_t		length;
+	size_t		iovec_sz;
 	CUresult	rc;
 
-	bytesize = KDS_calculateHeadSize(tupdesc)
+	length = KDS_calculateHeadSize(tupdesc)
 		+ STROMALIGN(sizeof(BlockNumber) * nrooms)
 		+ BLCKSZ * nrooms;
-	if (offsetof(pgstrom_data_store, kds) + bytesize > pgstrom_chunk_size())
+	iovec_sz = MAXALIGN(offsetof(strom_io_vector, ioc[nrooms]));
+
+	if (offsetof(pgstrom_data_store,
+				 kds) + length + iovec_sz > pgstrom_chunk_size())
 		elog(ERROR,
 			 "Bug? PDS length (%zu) is larger than pg_strom.chunk_size(%zu)",
-			 offsetof(pgstrom_data_store, kds) + bytesize,
+			 offsetof(pgstrom_data_store, kds) + length + iovec_sz,
 			 pgstrom_chunk_size());
 
 	rc = __gpuMemAllocHost(gcontext,
@@ -971,12 +968,13 @@ __PDS_create_block(GpuContext *gcontext,
 	memset(pds, 0, offsetof(pgstrom_data_store, kds));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
-	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
+	init_kernel_data_store(&pds->kds, tupdesc, length,
 						   KDS_FORMAT_BLOCK, nrooms);
-    pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
-    pds->nblocks_uncached = 0;
+	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
+	pds->nblocks_uncached = 0;
 	pds->filedesc.rawfd = -1;
-	pds->iovec = NULL;
+	pds->iovec = (strom_io_vector *)((char *)&pds->kds + length);
+	pds->iovec->nr_chunks = 0;
 
 	return pds;
 }
@@ -1172,11 +1170,17 @@ PDS_init_heapscan_state(GpuTaskState *gts)
 	 * around the relation scan.
 	 */
 	kds_head_sz = KDS_calculateHeadSize(tupdesc);
-	nrooms_max = (pgstrom_chunk_size() - kds_head_sz)
-		/ (sizeof(BlockNumber) + BLCKSZ);
-	while (kds_head_sz +
+	nrooms_max = (pgstrom_chunk_size() -
+				  offsetof(pgstrom_data_store, kds) -
+				  kds_head_sz -
+				  offsetof(strom_io_vector, ioc))
+		/ (sizeof(BlockNumber) + BLCKSZ + sizeof(strom_io_chunk));
+	while (offsetof(pgstrom_data_store,
+					kds) + kds_head_sz +
 		   STROMALIGN(sizeof(BlockNumber) * nrooms_max) +
-		   BLCKSZ * nrooms_max > pgstrom_chunk_size())
+		   BLCKSZ * nrooms_max +
+		   MAXALIGN(offsetof(strom_io_vector,
+							 ioc[nrooms_max])) > pgstrom_chunk_size())
 		nrooms_max--;
 	if (nrooms_max < 1)
 		return;

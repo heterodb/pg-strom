@@ -1086,7 +1086,6 @@ mergePDSHeapScanBlockState(pgstrom_data_store *pds,
 	cl_uint			nr_uncached = pds->nblocks_uncached;
 	cl_uint			nr_loaded = pds->kds.nitems - nr_uncached;
 	BlockNumber	   *block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
-	size_t			sz;
 
 	Assert(pds->nblocks_uncached > 0);
 	Assert(iovec != NULL);
@@ -1095,9 +1094,8 @@ mergePDSHeapScanBlockState(pgstrom_data_store *pds,
 	memcpy(block_nums + nr_loaded, bstate->blknum,
 		   sizeof(BlockNumber) * nr_uncached);
 	/* copy iovec */
-	sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
-	pds->iovec = palloc(sz);
-	memcpy(pds->iovec, iovec, sz);
+	memcpy(pds->iovec, iovec, offsetof(strom_io_vector,
+									   ioc[iovec->nr_chunks]));
 }
 
 static bool

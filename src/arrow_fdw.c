@@ -1025,7 +1025,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 
 			dfile = palloc0(sizeof(GPUDirectFileDesc));
 			dfile->rawfd = open(FilePathName(fdesc),
-		   						O_RDONLY | PG_BINARY | PG_O_DIRECT);
+								O_RDONLY | PG_BINARY | PG_O_DIRECT);
 			if (dfile->rawfd < 0)
 				elog(ERROR, "failed on open('%s'): %m", FilePathName(fdesc));
 
@@ -1381,7 +1381,7 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	{
 		/* Elsewhere, load RecordBatch by filesystem */
 		int		fdesc = FileGetRawDesc(rb_state->fdesc);
-		
+
 		if (gcontext)
 		{
 			rc = gpuMemAllocManaged(gcontext,
