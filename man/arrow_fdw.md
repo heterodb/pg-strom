@@ -54,7 +54,7 @@ Apache Arrow format file internally contains Schema portion to define data struc
 Apache Arrow形式におけるデータ表現は、必ずしも全ての場合でPostgreSQLのデータ表現と一致している訳ではありません。例えば、Arrow形式ではタイムスタンプ型のエポックは`1970-01-01`で複数の精度を持つ事ができますが、PostgreSQLのエポックは`2001-01-01`でマイクロ秒の精度を持ちます。
 }
 @en{
-Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is `1970-01-01` and it supports multiple precision. On the other hands, epoch of timestamp in PostgreSQL is `2001-01-01` and it has microseconds accuracy.
+Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is `1970-01-01` and it supports multiple precision. In contrast, epoch of timestamp in PostgreSQL is `2001-01-01` and it has microseconds accuracy.
 }
 
 @ja{
