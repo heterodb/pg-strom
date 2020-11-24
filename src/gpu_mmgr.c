@@ -1679,7 +1679,7 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
 		cmd.handle      = gm_seg->iomap_handle;
 		cmd.offset      = offset;
-		cmd.file_desc   = pds->filedesc;
+		cmd.file_desc   = pds->filedesc.rawfd;
 		cmd.nr_chunks   = iovec->nr_chunks;
 		cmd.page_sz     = PAGE_SIZE;
 		cmd.io_chunks   = iovec->ioc;
