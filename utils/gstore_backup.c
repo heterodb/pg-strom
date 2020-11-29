@@ -16,7 +16,12 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#if PG_VERSION_NUM < 110000
+#include "catalog/pg_type_fn.h"
+#else
 #include "catalog/pg_type_d.h"
+#endif
 #include <assert.h>
 #include <getopt.h>
 #include <limits.h>

@@ -1045,6 +1045,14 @@ get_index_clause_from_support(PlannerInfo *root,
 							  int indexcol,
 							  IndexOptInfo *index)
 {
+#if PG_VERSION_NUM >= 120000
+	/*
+	 * PostgreSQL v12 added the feature of planner support function.
+	 * It allows to use simplified and qualifier-specific index condition,
+	 * instead of the original one.
+	 * E.g) st_dwithin(geom[polygon], geom[point], 0.05) is equivalent to
+	 *      geom[polygon] && st_expand(geom[point], 0.05) for index-search.
+	 */
 	Oid		prosupport = get_func_support(funcid);
 
 	if (OidIsValid(prosupport))
@@ -1070,6 +1078,7 @@ get_index_clause_from_support(PlannerInfo *root,
 		else
 			return (Expr *)make_andclause(sresult);
 	}
+#endif
 	return NULL;
 }
 
@@ -1565,6 +1574,11 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 	{
 		IndexOptInfo   *curr_index = (IndexOptInfo *) lfirst(lc);
 		List		   *curr_clauses = NIL;
+#if PG_VERSION_NUM < 110000
+		int				nkeycolumns = curr_index->ncolumns;
+#else
+		int				nkeycolumns = curr_index->nkeycolumns;
+#endif
 		int				indexcol;
 
 		Assert(curr_index->rel == inner_rel);
@@ -1577,7 +1591,7 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 		if (curr_index->indpred != NIL && !curr_index->predOK)
 			continue;
 
-		for (indexcol = 0; indexcol < curr_index->nkeycolumns; indexcol++)
+		for (indexcol = 0; indexcol < nkeycolumns; indexcol++)
 		{
 			Expr   *clause = match_clause_to_index(root,
 												   curr_index,

@@ -100,7 +100,9 @@
 #if PG_VERSION_NUM < 120000
 #include "nodes/relation.h"
 #endif
+#if PG_VERSION_NUM >= 120000
 #include "nodes/supportnodes.h"
+#endif
 #if PG_VERSION_NUM >= 120000
 #include "optimizer/appendinfo.h"
 #endif

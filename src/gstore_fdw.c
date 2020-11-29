@@ -2514,8 +2514,9 @@ gstoreFdwDeviceTupleDesc(Relation frel)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	TupleDesc	__tupdesc = CreateTemplateTupleDesc(tupdesc->natts + 1);
+	int			j;
 
-	for (int j=0; j < tupdesc->natts; j++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
 		memcpy(tupleDescAttr(__tupdesc, j),
 			   tupleDescAttr(tupdesc, j),
@@ -4416,7 +4417,6 @@ pgstrom_gstore_fdw_post_deletion(ObjectAccessType access,
 		subId != InvalidAttrNumber)
 		return;		/* not a foreign table */
 	frel = table_open(objectId, NoLock);
-	Assert(CheckRelationLockedByMe(frel, AccessExclusiveLock, false));
 	routine = GetFdwRoutineForRelation(frel, false);
 	if (memcmp(routine, &pgstrom_gstore_fdw_routine,
 			   sizeof(FdwRoutine)) == 0)
