@@ -667,7 +667,7 @@ typedef struct DevAttributes
 	char		DEV_NAME[256];
 	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
-	cl_int		CORES_PER_MPU;
+	size_t		DEV_BAR1_MEMSZ;
 #define DEV_ATTR(LABEL,a,b,c)		\
 	cl_int		LABEL;
 #include "device_attrs.h"
