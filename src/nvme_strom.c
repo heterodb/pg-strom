@@ -1278,12 +1278,7 @@ pgstrom_init_nvme_strom(void)
 	
 	for (i=0; i < numDevAttrs; i++)
 	{
-		const char *dev_name = devAttrs[i].DEV_NAME;
-
-		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
-			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
-			strncasecmp(dev_name, "Tesla V100", 10) == 0 ||
-			strncasecmp(dev_name, "A100", 4) == 0)
+		if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
 		{
 			has_tesla_gpu = true;
 			break;

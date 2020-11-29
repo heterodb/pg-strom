@@ -65,3 +65,18 @@ CREATE FUNCTION pgstrom.gstore_fdw_replication_redo(regclass, bigint,
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_replication_redo'
   LANGUAGE C STRICT;
+
+---
+--- Deprecated functions
+---
+DROP FUNCTION IF EXISTS public.gpu_device_name(int);
+DROP FUNCTION IF EXISTS public.gpu_global_memsize(int);
+DROP FUNCTION IF EXISTS public.gpu_max_blocksize(int);
+DROP FUNCTION IF EXISTS public.gpu_warp_size(int);
+DROP FUNCTION IF EXISTS public.gpu_max_shared_memory_perblock(int);
+DROP FUNCTION IF EXISTS public.gpu_num_registers_perblock(int);
+DROP FUNCTION IF EXISTS public.gpu_num_multiptocessors(int);
+DROP FUNCTION IF EXISTS public.gpu_num_cuda_cores(int);
+DROP FUNCTION IF EXISTS public.gpu_cc_major(int);
+DROP FUNCTION IF EXISTS public.gpu_cc_minor(int);
+DROP FUNCTION IF EXISTS public.gpu_pci_id(int);
