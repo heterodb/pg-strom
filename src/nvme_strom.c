@@ -176,14 +176,6 @@ sysfs_read_nvme_attrs(NvmeAttributes *nvme,
 	if (!value || strcmp(value, "pcie") != 0)
 		goto bailout;
 
-	/* fetch numa_node_id */
-	snprintf(namebuf, sizeof(namebuf),
-             "%s/%s/device/numa_node",
-             sysfs_base, sysfs_nvme);
-	value = sysfs_read_line(namebuf, false);
-	if (!value || (nvme->numa_node_id = atoi(value)) < 0)
-		goto bailout;
-
 	/* fetch PCI-E Bus ID */
 	snprintf(namebuf, sizeof(namebuf),
 			 "%s/%s/device/address",
@@ -194,6 +186,17 @@ sysfs_read_nvme_attrs(NvmeAttributes *nvme,
 						 &nvme->nvme_pcie_bus_id,
 						 &nvme->nvme_pcie_dev_id,
 						 &nvme->nvme_pcie_func_id) != 4)
+		goto bailout;
+
+	/* fetch numa_node_id */
+	snprintf(namebuf, sizeof(namebuf),
+			 "/sys/bus/pci/devices/%04x:%02x:%02x.%d/numa_node",
+			 nvme->nvme_pcie_domain,
+			 nvme->nvme_pcie_bus_id,
+			 nvme->nvme_pcie_dev_id,
+			 nvme->nvme_pcie_func_id);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || (nvme->numa_node_id = atoi(value)) < 0)
 		goto bailout;
 
 	return true;
@@ -1165,7 +1168,8 @@ pgstrom_init_nvme_strom(void)
 
 		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
 			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
-			strncasecmp(dev_name, "Tesla V100", 10) == 0)
+			strncasecmp(dev_name, "Tesla V100", 10) == 0 ||
+			strncasecmp(dev_name, "A100", 4) == 0)
 		{
 			has_tesla_gpu = true;
 			break;
