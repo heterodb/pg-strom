@@ -44,8 +44,9 @@ typedef struct
 #define GPUSTORE_SHARED_DESC_NSLOTS		107
 typedef struct
 {
-	/* Database name to connect next */
-	char		kicker_next_database[NAMEDATALEN];
+	/* database name for kicker process */
+	int			kicker_database_status;
+	char		kicker_database_name[NAMEDATALEN];
 
 	/* IPC to GpuStore Background Worker */
 	Latch	   *background_latch;
@@ -5719,53 +5720,66 @@ void
 GstoreFdwStartupKicker(Datum arg)
 {
 	char	   *database_name;
-	bool		first_launch = false;
 	Relation	srel;
 	SysScanDesc	sscan;
 	ScanKeyData	skey;
+	int			nkeys = 0;
 	HeapTuple	tuple;
+	bool		exec_gstore_preload = false;
 	int			exit_code = 1;
 
 	BackgroundWorkerUnblockSignals();
-	database_name = pstrdup(gstore_shared_head->kicker_next_database);
-	if (*database_name == '\0')
+	if (gstore_shared_head->kicker_database_status == 0)
 	{
+		/* first invocation case */
 		database_name = "template1";
-		first_launch = true;
 	}
+	else if (gstore_shared_head->kicker_database_status == 1)
+	{
+		/* last invocation is successfully done */
+		database_name = pnstrdup(gstore_shared_head->kicker_database_name,
+								 NAMEDATALEN);
+		ScanKeyInit(&skey,
+					Anum_pg_database_datname,
+					BTGreaterStrategyNumber, F_NAMEGT,
+					CStringGetDatum(database_name));
+		nkeys = 1;
+		exec_gstore_preload = true;
+	}
+	else
+	{
+		/* last invocation is failed, so stop preloading */
+		elog(LOG, "Gstore_Fdw Starup Kicker Stopped Preloading");
+		proc_exit(0);
+	}
+	gstore_shared_head->kicker_database_status = -1;
 	BackgroundWorkerInitializeConnection(database_name, NULL, 0);
 
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
 	srel = table_open(DatabaseRelationId, AccessShareLock);
-	ScanKeyInit(&skey,
-				Anum_pg_database_datname,
-				BTGreaterStrategyNumber, F_NAMEGT,
-				CStringGetDatum(database_name));
-	sscan = systable_beginscan(srel, DatabaseNameIndexId,
+	sscan = systable_beginscan(srel,
+							   DatabaseNameIndexId,
 							   true,
 							   NULL,
-							   first_launch ? 0 : 1, &skey);
-next_database:
-	tuple = systable_getnext(sscan);
-	if (HeapTupleIsValid(tuple))
+							   nkeys, &skey);
+	while (HeapTupleIsValid((tuple = systable_getnext(sscan))))
 	{
 		Form_pg_database dat = (Form_pg_database) GETSTRUCT(tuple);
+
 		if (!dat->datallowconn)
-			goto next_database;
-		strncpy(gstore_shared_head->kicker_next_database,
+			continue;
+		strncpy(gstore_shared_head->kicker_database_name,
 				NameStr(dat->datname),
 				NAMEDATALEN);
+		break;
 	}
-	else
-	{
-		/* current database is the last one */
-		exit_code = 0;
-	}
+	if (!HeapTupleIsValid(tuple))
+		exit_code = 0;		/* no more databases */
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 
-	if (!first_launch)
+	if (exec_gstore_preload)
 	{
 		Form_pg_foreign_table ftable;
 		Relation	frel;
@@ -5807,9 +5821,9 @@ next_database:
 		systable_endscan(sscan);
 		table_close(srel, AccessShareLock);
 	}
-	
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+	gstore_shared_head->kicker_database_status = 1;		/* successfully done */
 	proc_exit(exit_code);
 }
 
