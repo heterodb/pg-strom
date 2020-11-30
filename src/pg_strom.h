@@ -1032,15 +1032,31 @@ extern void pgstrom_init_gputasks(void);
 /*
  * nvme_strom.c
  */
-extern Size	nvme_strom_threshold(void);
-extern int	nvme_strom_ioctl(int cmd, void *arg);
+extern Size	pgstrom_gpudirect_threshold(void);
 extern int	GetOptimalGpuForFile(File fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
 									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
-extern void	pgstrom_init_nvme_strom(void);
+
+extern CUresult	gpuDirectDriverOpen(void);
+extern void	gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc);
+extern void	gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
+										const char *pathname);
+extern void	gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
+extern CUresult gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+									  size_t m_segment_sz,
+									  unsigned long *p_iomap_handle);
+extern CUresult gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+										unsigned long iomap_handle);
+
+extern void gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+								 CUdeviceptr m_segment,
+								 unsigned long iomap_handle,
+								 off_t m_offset,
+								 strom_io_vector *iovec);
+extern void	pgstrom_init_gpu_direct(void);
 
 /*
  * cuda_program.c
@@ -1483,13 +1499,6 @@ extern void		pgstrom_init_nvrtc(void);
 /*
  * cufile.c
  */
-#ifdef WITH_CUFILE
-extern const char *cuFileError(CUfileError_t rv);
-extern CUresult	__cuFileReadIOVec(CUfileHandle_t fhandle,
-								  CUdeviceptr devptr_base,
-								  off_t devptr_offset,
-								  strom_io_vector *iovec);
-#endif
 extern void		pgstrom_init_cufile(void);
 
 /*

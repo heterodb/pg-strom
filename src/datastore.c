@@ -1042,15 +1042,7 @@ nvme_sstate_open_files(GpuContext *gcontext,
 	for (i=0; i < nvme_sstate->nr_segs; i++)
 	{
 		GPUDirectFileDesc *dfile = &nvme_sstate->files[i];
-		const char	   *pathname;
-		int				rawfd = -1;
-#ifdef WITH_CUFILE
-		CUfileDescr_t	desc;
-		CUfileError_t	rv;
-		int				flags = O_RDONLY | PG_BINARY | PG_O_DIRECT;
-#else
-		int				flags = O_RDONLY | PG_BINARY;
-#endif
+
 		if (i < nr_open_segs)
 		{
 			vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
@@ -1059,37 +1051,12 @@ nvme_sstate_open_files(GpuContext *gcontext,
 			if (vec->mdfd_vfd < 0)
 				elog(ERROR, "Bug? seg=%d of relation %s is not opened",
 					 i, RelationGetRelationName(relation));
-#ifdef WITH_CUFILE
-			/*
-			 * NVIDIA GPUDirect Storage (cuFile) requires to open the
-			 * source file with O_DIRECT, and it ignores the flags
-			 * changed by dup3(). So, we always tried to open a new
-			 * file descriptor with O_DIRECT flag.
-			 */
-			pathname = FilePathName(vec->mdfd_vfd);
-			rawfd = open(pathname, flags);
-			if (rawfd < 0)
-				elog(ERROR, "failed on open('%s'): %m", pathname);
-#else
-			rawfd = FileGetRawDesc(vec->mdfd_vfd);
-			if (rawfd < 0)
-			{
-				pathname = FilePathName(vec->mdfd_vfd);
-				rawfd = open(pathname, flags);
-				if (rawfd < 0)
-					elog(ERROR, "failed on open('%s'): %m", pathname);
-			}
-			else
-			{
-				rawfd = dup(rawfd);
-				if (rawfd < 0)
-					elog(ERROR, "failed on dup(2): %m");
-			}
-#endif /* WITH_CUFILE */
+			gpuDirectFileDescOpen(dfile, vec->mdfd_vfd);
 		}
 		else
 		{
 			/* see _mdfd_openseg() and _mdfd_segpath() */
+			const char *pathname;
 			char	   *temp;
 
 			temp = relpath(rd_smgr->smgr_rnode, MAIN_FORKNUM);
@@ -1100,30 +1067,12 @@ nvme_sstate_open_files(GpuContext *gcontext,
 				pathname = psprintf("%s.%u", temp, i);
 				pfree(temp);
 			}
-			rawfd = open(pathname, flags, 0600);
-			if (rawfd < 0)
-				elog(ERROR, "failed on open('%s'): %m", pathname);
+			gpuDirectFileDescOpenByPath(dfile, pathname);
 		}
-#ifdef WITH_CUFILE
-		memset(&desc, 0, sizeof(CUfileDescr_t));
-		desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-		desc.handle.fd = rawfd;
-		rv = cuFileHandleRegister(&dfile->fhandle, &desc);
-		if (rv.err != CU_FILE_SUCCESS)
-		{
-			close(rawfd);
-			elog(ERROR, "failed on cuFileHandleRegister('%s'): %s",
-				 pathname, cuFileError(rv));
-		}
-#endif /* WITH_CUFILE */
-		dfile->rawfd = rawfd;
 
 		if (!trackRawFileDesc(gcontext, dfile, __FILE__, __LINE__))
 		{
-#ifdef WITH_CUFILE
-			cuFileHandleDeregister(dfile->fhandle);
-#endif
-			close(dfile->rawfd);
+			gpuDirectFileDescClose(dfile);
 			elog(ERROR, "out of memory");
 		}
 	}
@@ -1211,7 +1160,7 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
 	NVMEScanState  *nvme_sstate = gts->nvme_sstate;
-	int				i, rawfd;
+	int				i;
 
 	if (nvme_sstate)
 	{
@@ -1225,12 +1174,7 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 		for (i=0; i < nvme_sstate->nr_segs; i++)
 		{
 			untrackRawFileDesc(gcontext, &nvme_sstate->files[i]);
-#ifdef WITH_CUFILE
-			cuFileHandleDeregister(nvme_sstate->files[i].fhandle);
-#endif
-			rawfd = nvme_sstate->files[i].rawfd;
-			if (close(rawfd))
-				elog(NOTICE, "failed on close(%d): %m", rawfd);
+			gpuDirectFileDescClose(&nvme_sstate->files[i]);
 		}
 		pfree(nvme_sstate);
 		gts->nvme_sstate = NULL;

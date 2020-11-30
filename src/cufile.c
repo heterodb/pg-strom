@@ -19,30 +19,6 @@
 #include <dlfcn.h>
 
 #ifdef WITH_CUFILE
-static int		cufile_async_io_unitsz;		/* I/O size in kB */
-
-/* GUC checker */
-static bool
-cufile_async_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
-{
-	int		newval = *p_newval;
-
-	if ((newval & (newval - 1)) != 0)
-		elog(ERROR, "pg_strom.cufile_io_unitsz must be power of 2");
-	return true;
-}
-
-/*
- * cuFileError - note that it is not a cuFile API
- */
-const char *
-cuFileError(CUfileError_t rv)
-{
-	if (rv.cu_err)
-		return errorText(rv.cu_err);
-	return cufileop_status_error(rv.err);
-}
-
 /*
  * cuFileDriverOpen
  */
@@ -215,48 +191,6 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
 	return p_cuFileWrite(fh,devPtr_base,size,file_offset,devPtr_offset);
 }
 
-CUresult
-__cuFileReadIOVec(CUfileHandle_t fhandle,
-				  CUdeviceptr devptr_base,
-				  off_t devptr_offset,
-				  strom_io_vector *io_vec)
-{
-	size_t		unitsz = ((size_t)cufile_async_io_unitsz << 10);
-	CUresult	rc = CUDA_SUCCESS;
-	int			i;
-
-	for (i=0; i < io_vec->nr_chunks; i++)
-	{
-		strom_io_chunk *ioc = &io_vec->ioc[i];
-		size_t		remained = ioc->nr_pages * PAGE_SIZE;
-		off_t		file_pos = ioc->fchunk_id * PAGE_SIZE;
-		off_t		m_offset = devptr_offset + ioc->m_offset;
-
-		while (remained > 0)
-		{
-			ssize_t		sz, nbytes;
-
-			sz = Min(remained, unitsz);
-			nbytes = cuFileRead(fhandle,
-								(void *)devptr_base,
-								sz,
-								file_pos,
-								m_offset);
-			if (nbytes != sz)
-			{
-				if (IS_CUFILE_ERR(nbytes))
-					return -nbytes;
-				fprintf(stderr, "file_pos=%lu sz=%lu nbytes=%ld\n", file_pos, sz, nbytes);
-				return CUDA_ERROR_UNKNOWN;
-			}
-			file_pos += sz;
-			m_offset += sz;
-			remained -= sz;
-		}
-	}
-	return rc;
-}
-
 /*
  * lookup_cufile_function
  */
@@ -336,16 +270,5 @@ pgstrom_init_cufile(void)
 		FlushErrorState();
 	}
 	PG_END_TRY();
-
-	DefineCustomIntVariable("pg_strom.cufile_io_unitsz",
-							"I/O size on cuFileRead invocations",
-							"Note that this parameter may be removed in the future version without notifications",
-							&cufile_async_io_unitsz,
-							16384,		/* 16MB */
-							256,		/* 2565kB */
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							cufile_async_io_unitsz_checker, NULL, NULL);
 #endif /* WITH_CUFILE */
 }

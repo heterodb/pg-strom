@@ -485,7 +485,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	if (optimal_gpu < 0 || optimal_gpu >= numDevAttrs)
 		optimal_gpu = -1;
-	else if (filesSizeTotal < nvme_strom_threshold())
+	else if (filesSizeTotal < pgstrom_gpudirect_threshold())
 		optimal_gpu = -1;
 
 	baserel->rel_parallel_workers = parallel_nworkers;
@@ -1019,38 +1019,12 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 		 */
 		if (gcontext)
 		{
-#ifdef WITH_CUFILE
-			CUfileDescr_t	desc;
-			CUfileError_t	rv;
-
 			dfile = palloc0(sizeof(GPUDirectFileDesc));
-			dfile->rawfd = open(FilePathName(fdesc),
-								O_RDONLY | PG_BINARY | PG_O_DIRECT);
-			if (dfile->rawfd < 0)
-				elog(ERROR, "failed on open('%s'): %m", FilePathName(fdesc));
 
-			memset(&desc, 0, sizeof(CUfileDescr_t));
-			desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-			desc.handle.fd = dfile->rawfd;
-			rv = cuFileHandleRegister(&dfile->fhandle, &desc);
-			if (rv.err != CU_FILE_SUCCESS)
-			{
-				close(dfile->rawfd);
-				elog(ERROR, "failed on cuFileHandleRegister(): %s",
-					 cuFileError(rv));
-			}
-#else
-			dfile = palloc0(sizeof(GPUDirectFileDesc));
-			dfile->rawfd = dup(FileGetRawDesc(fdesc));
-			if (dfile->rawfd < 0)
-				elog(ERROR, "failed on dup(2): %m");
-#endif
+			gpuDirectFileDescOpen(dfile, fdesc);
 			if (!trackRawFileDesc(gcontext, dfile, __FILE__, __LINE__))
 			{
-#ifdef WITH_CUFILE
-				cuFileHandleDeregister(dfile->fhandle);
-#endif
-				close(dfile->rawfd);
+				gpuDirectFileDescClose(dfile);
 				elog(ERROR, "out of memory");
 			}
 			gpuDirectFileDescList = lappend(gpuDirectFileDescList, dfile);
@@ -1513,11 +1487,7 @@ ExecEndArrowFdw(ArrowFdwState *af_state)
 		GPUDirectFileDesc *dfile = lfirst(lc);
 
 		untrackRawFileDesc(af_state->gcontext, dfile);
-#ifdef WITH_CUFILE
-		cuFileHandleDeregister(dfile->fhandle);
-#endif
-		if (close(dfile->rawfd))
-			elog(NOTICE, "failed on close(%d): %m", dfile->rawfd);
+		gpuDirectFileDescClose(dfile);
 	}
 }
 

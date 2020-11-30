@@ -572,11 +572,7 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 								tracker->u.filedesc.rawfd,
 								__basename(tracker->filename),
 								tracker->lineno);
-#ifdef WITH_CUFILE
-					cuFileHandleDeregister(tracker->u.filedesc.fhandle);
-#endif
-					if (close(tracker->u.filedesc.rawfd))
-						wnotice("failed on close(2): %m");
+					gpuDirectFileDescClose(&tracker->u.filedesc);
 					break;
 				case RESTRACK_CLASS__GPUMODULE:
 					rc = cuModuleUnload(tracker->u.module.cuda_module);
@@ -836,31 +832,24 @@ CUresult
 gpuInit(unsigned int flags)
 {
 	static bool	cuda_driver_initialized = false;
-	CUresult	rc = CUDA_SUCCESS;
+	static bool	gpudirect_driver_initialized = false;
+	CUresult	rc;
 
 	if (!cuda_driver_initialized)
 	{
 		rc = cuInit(0);
-		if (rc == CUDA_SUCCESS)
-			cuda_driver_initialized = true;
+		if (rc != CUDA_SUCCESS)
+			return rc;
+		cuda_driver_initialized = true;
 	}
-#ifdef WITH_CUFILE
-	if (rc == CUDA_SUCCESS)
+	if (!gpudirect_driver_initialized)
 	{
-		static bool cufile_driver_initialized = false;
-		CUfileError_t	rv;
-
-		if (!cufile_driver_initialized)
-		{
-			rv = cuFileDriverOpen();
-			if (rv.err == CU_FILE_SUCCESS)
-				cufile_driver_initialized = true;
-			else
-				rc = CUDA_ERROR_NOT_INITIALIZED;
-		}
+		rc = gpuDirectDriverOpen();
+		if (rc != CUDA_SUCCESS)
+			return rc;
+		gpudirect_driver_initialized = true;
 	}
-#endif
-	return rc;
+	return CUDA_SUCCESS;
 }
 
 /*

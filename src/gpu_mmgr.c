@@ -574,32 +574,14 @@ retry:
 			rc = cuMemAlloc(&m_segment, gm_segment_sz);
 			if (rc == CUDA_SUCCESS)
 			{
-#ifdef WITH_CUFILE
-				CUfileError_t	rv;
-
-				rv = cuFileBufRegister((void *)m_segment, gm_segment_sz, 0);
-				if (rv.err != CU_FILE_SUCCESS)
+				rc = gpuDirectMapGpuMemory(m_segment,
+										   gm_segment_sz,
+										   &gm_seg->iomap_handle);
+				if (rc != CUDA_SUCCESS)
 				{
-					wnotice("failed on cuFileBufRegister: %s",
-							cuFileError(rv));
+					wnotice("failed on gpuDirectMapGpuMemory: %s", errorText(rc));
 					cuMemFree(m_segment);
-					rc = CUDA_ERROR_MAP_FAILED;
 				}
-#else
-				StromCmd__MapGpuMemory cmd;
-
-				memset(&cmd, 0, sizeof(StromCmd__MapGpuMemory));
-				cmd.vaddress = m_segment;
-				cmd.length = gm_segment_sz;
-				if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) == 0)
-					gm_seg->iomap_handle = cmd.handle;
-				else
-				{
-					wnotice("failed on STROM_IOCTL__MAP_GPU_MEMORY: %m");
-					cuMemFree(m_segment);
-					rc = CUDA_ERROR_MAP_FAILED;
-				}
-#endif
 			}
 			//wnotice("iomap m_segment = %p - %p", (void *)m_segment, (void *)(m_segment - gm_segment_sz));
 			break;
@@ -955,13 +937,11 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 			Assert(gm_seg->gm_kind == GpuMemKind__IOMapMemory);
 			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
             {
-#ifdef WITH_CUFILE
-				CUfileError_t	rv;
+				rc = gpuDirectUnmapGpuMemory(gm_seg->m_segment,
+											 gm_seg->iomap_handle);
+				if (rc != CUDA_SUCCESS)
+					wnotice("failed on gpuDirectUnmapGpuMemory: %s", errorText(rc));
 
-				rv = cuFileBufDeregister((void *)gm_seg->m_segment);
-				if (rv.err != CU_FILE_SUCCESS)
-					wnotice("failed on cuFileBufDeregister: %s", cuFileError(rv));
-#endif
 				rc = cuMemFree(gm_seg->m_segment);
 				if (rc != CUDA_SUCCESS)
 				{
@@ -1072,15 +1052,12 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	{
 		dnode = dlist_pop_head_node(&gcontext->gm_iomap_list);
 		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
-#ifdef WITH_CUFILE
-		{
-			CUfileError_t	rv;
 
-			rv = cuFileBufDeregister((void *)gm_seg->m_segment);
-			if (rv.err != CU_FILE_SUCCESS)
-				elog(WARNING, "failed on cuFileBufDeregister: %s", cuFileError(rv));
-		}
-#endif
+		rc = gpuDirectUnmapGpuMemory(gm_seg->m_segment,
+									 gm_seg->iomap_handle);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuDirectUnmapGpuMemory: %s", errorText(rc));
+
 		rc = cuMemFree(gm_seg->m_segment);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuMemFree(io-map): %s", errorText(rc));
@@ -1596,30 +1573,8 @@ pgstrom_init_gpu_mmgr(void)
  *
  * APIs for SSD-to-GPU Direct DMA
  *
- * ---------------------------------------------------------------- */
-
-#ifndef WITH_CUFILE
-/*
- * gpuMemCopyFromSSDWaitRaw
+ * ---------------------------------------------------------------- 
  */
-static void
-gpuMemCopyFromSSDWaitRaw(GpuContext *gcontext, unsigned long dma_task_id)
-{
-	StromCmd__MemCopyWait cmd;
-
-	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
-	cmd.dma_task_id = dma_task_id;
-retry:
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0)
-	{
-		if (errno != EINTR)
-			werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
-		if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
-			werror("termination of GpuContext worker");
-		goto retry;
-	}
-}
-#endif	/* !WITH_CUFILE */
 
 /*
  * __gpuMemCopyFromSSD_Block - for KDS_FORMAT_BLOCK
@@ -1665,28 +1620,11 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 	/* (2) kick SSD2GPU P2P DMA, if any */
 	if (pds->iovec)
 	{
-		strom_io_vector *iovec = pds->iovec;
-#ifdef WITH_CUFILE
-		rc = __cuFileReadIOVec(pds->filedesc.fhandle,
-							   gm_seg->m_segment,
-							   offset,
-							   iovec);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on __cuFileReadIOVec: %s", errorText(rc));
-#else
-		Assert(gm_seg->iomap_handle != 0);
-		/* setup ioctl(2) command */
-		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
-		cmd.handle      = gm_seg->iomap_handle;
-		cmd.offset      = offset;
-		cmd.file_desc   = pds->filedesc.rawfd;
-		cmd.nr_chunks   = iovec->nr_chunks;
-		cmd.page_sz     = PAGE_SIZE;
-		cmd.io_chunks   = iovec->ioc;
-		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
-			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW");
-		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
-#endif
+		gpuDirectFileReadIOV(&pds->filedesc,
+							 gm_seg->m_segment,
+							 gm_seg->iomap_handle,
+							 offset,
+							 pds->iovec);
 	}
 }
 
@@ -1716,29 +1654,11 @@ __gpuMemCopyFromSSD_Arrow(GpuContext *gcontext,
 	/* (2) SSD2GPU P2P DMA */
 	if (pds->iovec)
 	{
-		strom_io_vector *iovec = pds->iovec;
-#ifdef WITH_CUFILE
-		rc = __cuFileReadIOVec(pds->filedesc.fhandle,
-							   gm_seg->m_segment,
-							   m_kds - gm_seg->m_segment,
-							   iovec);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on __cuFileReadIOVec: %s", errorText(rc));
-#else
-		StromCmd__MemCopySsdToGpuRaw cmd;
-
-		memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
-		cmd.handle    = gm_seg->iomap_handle;
-		cmd.offset    = m_kds - gm_seg->m_segment;
-		cmd.file_desc = pds->filedesc.rawfd;
-		cmd.nr_chunks = iovec->nr_chunks;
-		cmd.page_sz   = PAGE_SIZE;
-		cmd.io_chunks = iovec->ioc;
-
-		if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
-			werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW: %m");
-		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
-#endif
+		gpuDirectFileReadIOV(&pds->filedesc,
+							 gm_seg->m_segment,
+							 gm_seg->iomap_handle,
+							 m_kds - gm_seg->m_segment,
+							 pds->iovec);
 	}
 }
 
@@ -1756,11 +1676,6 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	gm_seg = lookupGpuMem(gcontext, m_kds);
 	if (!gm_seg || gm_seg->gm_kind != GpuMemKind__IOMapMemory)
 		werror("nvme-strom: invalid device pointer");
-#ifdef WITH_CUFILE
-	Assert(gm_seg->iomap_handle == 0UL);
-#else
-	Assert(gm_seg->iomap_handle != 0UL);
-#endif
 	Assert(m_kds >= gm_seg->m_segment &&
 		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);
 	switch (pds->kds.format)
