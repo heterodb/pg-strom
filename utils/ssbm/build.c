@@ -254,14 +254,15 @@ mk_order(long index, order_t *o, long upd_num)
 		RANDOM(o->lineorders[lcnt].discount, L_DCNT_MIN, L_DCNT_MAX, L_DCNT_SD);
 		RANDOM(o->lineorders[lcnt].tax, L_TAX_MIN, L_TAX_MAX, L_TAX_SD);
 
-		strcpy(o->lineorders[lcnt].orderdate,o->odate);
+		strncpy(o->lineorders[lcnt].orderdate,o->odate,DATE_LEN);
 
-		strcpy(o->lineorders[lcnt].opriority,o->opriority);
+		strncpy(o->lineorders[lcnt].opriority,o->opriority,MAXAGG_LEN+1);
 		o->lineorders[lcnt].ship_priority = o->spriority;
 
 		RANDOM(c_date, L_CDTE_MIN, L_CDTE_MAX, L_CDTE_SD);
 		c_date += tmp_date;        
-		strcpy(o->lineorders[lcnt].commit_date, asc_date[c_date - STARTDATE]);
+		strncpy(o->lineorders[lcnt].commit_date,
+				asc_date[c_date - STARTDATE], DATE_LEN);
 
 		pick_str(&l_smode_set, L_SMODE_SD, o->lineorders[lcnt].shipmode);
 		

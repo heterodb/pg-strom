@@ -54,38 +54,91 @@ struct PCIDevEntry
 typedef struct PCIDevEntry	PCIDevEntry;
 
 /* static variables/functions */
-static HTAB		   *nvmeHash = NULL;
-static bool			nvme_strom_enabled;			/* GUC */
-static int			nvme_strom_threshold_kb;	/* GUC */
-static char		   *nvme_manual_distance_map;	/* GUC */
-static void			apply_nvme_manual_distance_map(void);
-static bool			sysfs_read_pcie_root_complex(const char *dirname,
-												 const char *my_name,
-												 List **p_pcie_root);
-/*
- * nvme_strom_threshold
- */
-Size
-nvme_strom_threshold(void)
-{
-	return (Size)nvme_strom_threshold_kb << 10;
-}
+static HTAB	   *nvmeHash = NULL;
+static char	   *pgstrom_gpudirect_driver;	/* GUC */
+static bool		pgstrom_gpudirect_enabled;	/* GUC */
+static int		pgstrom_gpudirect_threshold_kb;	/* GUC */
+
+static char	   *nvme_manual_distance_map;	/* GUC */
+static void		apply_nvme_manual_distance_map(void);
+static bool		sysfs_read_pcie_root_complex(const char *dirname,
+											 const char *my_name,
+											 List **p_pcie_root);
 
 /*
- * nvme_strom_ioctl
+ * pgstrom_gpudirect_threshold
  */
-int
-nvme_strom_ioctl(int cmd, void *arg)
+Size
+pgstrom_gpudirect_threshold(void)
+{
+	return (Size)pgstrom_gpudirect_threshold_kb << 10;
+}
+
+#ifndef WITH_CUFILE
+/*
+ * nvme_strom_open
+ */
+static int
+nvme_strom_open(void)
 {
 	static int	fdesc_nvme_strom = -1;
 
 	if (fdesc_nvme_strom < 0)
 	{
+		/* tried to open once, but failed */
+		if (fdesc_nvme_strom == INT_MIN)
+		{
+			errno = ENOENT;
+			return -1;
+		}
 		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 		if (fdesc_nvme_strom < 0)
+		{
+			fdesc_nvme_strom = INT_MIN;
 			return -1;
+		}
 	}
-	return ioctl(fdesc_nvme_strom, cmd, arg);
+	return fdesc_nvme_strom;
+}
+
+/*
+ * nvme_strom_ioctl
+ */
+static int
+nvme_strom_ioctl(int cmd, void *arg)
+{
+	int		fdesc = nvme_strom_open();
+
+	if (fdesc < 0)
+		return -1;
+	return ioctl(fdesc, cmd, arg);
+}
+#endif
+
+/*
+ * gpuDirectDriverLoaded
+ */
+static bool
+gpuDirectDriverLoaded(void)
+{
+#ifdef WITH_CUFILE
+	return cuFileDriverLoaded();
+#else
+	return (nvme_strom_open() >= 0);
+#endif
+}
+
+/*
+ * pgstrom_gpudirect_enabled_checker
+ */
+static bool
+pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
+{
+	bool	newval = *p_newval;
+
+	if (newval && !gpuDirectDriverLoaded())
+		elog(ERROR, "cannot enable GPUDirect SQL without driver module loaded");
+	return true;
 }
 
 /*
@@ -207,8 +260,88 @@ bailout:
 	nvme->nvme_pcie_dev_id = -1;
 	nvme->nvme_pcie_func_id = -1;
 	nvme->numa_node_id = -1;
+
 	return true;
 }
+
+#ifdef WITH_CUFILE
+/*
+ * sysfs_read_sfdv_attrs
+ *
+ * Support of ScaleFlux CSDxxxx Drives. GPUDirect SQL is only available
+ * with NVIDIA GPUDirect Storage software stack.
+ */
+static bool
+sysfs_read_sfdv_attrs(NvmeAttributes *nvme,
+					  const char *sysfs_base,
+					  const char *sysfs_sfdv)
+{
+	char		namebuf[MAXPGPATH];
+	const char *value;
+
+	memset(nvme, 0, offsetof(NvmeAttributes, nvme_distances));
+
+	/* fetch major:minor */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/dev",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || sscanf(value, "%u:%u",
+						 &nvme->nvme_major,
+						 &nvme->nvme_minor) != 2)
+		return false;
+
+	/* fetch device (namespace) name */
+	strncpy(nvme->nvme_name, sysfs_sfdv, 64);
+
+	/* fetch serial */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/serial",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_serial, value ? value : "Unknown", 128);
+
+	/* fetch model */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/model",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	strncpy(nvme->nvme_model, value ? value : "Unknown", 256);
+
+	/* fetch PCI-E Bus ID */
+	snprintf(namebuf, sizeof(namebuf),
+			 "%s/%s/bus_info",
+			 sysfs_base, sysfs_sfdv);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || sscanf(value, "%x:%02x:%02x.%d",
+						 &nvme->nvme_pcie_domain,
+						 &nvme->nvme_pcie_bus_id,
+						 &nvme->nvme_pcie_dev_id,
+						 &nvme->nvme_pcie_func_id) != 4)
+		goto bailout;
+
+	/* fetch numa_node_id */
+	snprintf(namebuf, sizeof(namebuf),
+			 "/sys/bus/pci/devices/%04x:%02x:%02x.%d/numa_node",
+			 nvme->nvme_pcie_domain,
+			 nvme->nvme_pcie_bus_id,
+			 nvme->nvme_pcie_dev_id,
+			 nvme->nvme_pcie_func_id);
+	value = sysfs_read_line(namebuf, false);
+	if (!value || (nvme->numa_node_id = atoi(value)) < 0)
+		goto bailout;
+
+	return true;
+
+bailout:
+	nvme->nvme_pcie_domain = -1;
+	nvme->nvme_pcie_bus_id = -1;
+	nvme->nvme_pcie_dev_id = -1;
+	nvme->nvme_pcie_func_id = -1;
+	nvme->numa_node_id = -1;
+	return true;
+}
+#endif	/* WITH_CUFILE */
 
 /*
  * sysfs_read_block_attrs
@@ -249,6 +382,25 @@ sysfs_read_block_attrs(void)
 			if (!sysfs_read_nvme_attrs(&temp, dirname, dent->d_name))
 				continue;
 		}
+#ifdef WITH_CUFILE
+		else if (strncmp("sfdv", dent->d_name, 4) == 0)
+		{
+			/* only sfdv[0-9]+n[0-9]+ devices */
+			pos = start = dent->d_name + 4;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != 'n')
+				continue;
+			start = ++pos;
+			while (isdigit(*pos))
+				pos++;
+			if (start == pos || *pos != '\0')
+				continue;
+
+			if (!sysfs_read_sfdv_attrs(&temp, dirname, dent->d_name))
+				continue;
+		}
+#endif
 		else
 		{
 			/* not a supported device type */
@@ -981,8 +1133,8 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	File	fdesc;
 	bool	found;
 
-	if (!nvme_strom_enabled)
-		return -1;		/* nvme_strom is not configured or disabled */
+	if (!pgstrom_gpudirect_enabled)
+		return -1;
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
@@ -1090,7 +1242,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	size_t		num_scan_pages = 0;
 
-	if (!nvme_strom_enabled)
+	if (!pgstrom_gpudirect_enabled)
 		return false;
 
 	/*
@@ -1144,40 +1296,311 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 		elog(ERROR, "Bug? unexpected reloptkind of base relation: %d",
 			 (int)baserel->reloptkind);
 
-	if (num_scan_pages < nvme_strom_threshold() / BLCKSZ)
+	if (num_scan_pages < pgstrom_gpudirect_threshold() / BLCKSZ)
 		return false;
 	/* ok, this table scan can use nvme-strom */
 	return true;
 }
 
+#ifdef WITH_CUFILE
+static int		pgstrom_cufile_io_unitsz;	/* GUC */
+
+/* GUC checker */
+static bool
+cufile_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
+{
+	int		newval = *p_newval;
+
+	if ((newval & (newval - 1)) != 0)
+		elog(ERROR, "pg_strom.cufile_io_unitsz must be power of 2");
+	return true;
+}
+#endif
+
 /*
- * pgstrom_init_nvme_strom
+ * gpuDirectDriverOpen
+ */
+CUresult
+gpuDirectDriverOpen(void)
+{
+#ifdef WITH_CUFILE
+	CUfileError_t	rv;
+
+	rv = cuFileDriverOpen();
+	if (rv.cu_err != CUDA_SUCCESS)
+		return rv.cu_err;
+	if (rv.err != CU_FILE_SUCCESS)
+		return rv.err;
+#endif
+	return CUDA_SUCCESS;
+}
+
+/*
+ * gpuDirectFileDescOpen
  */
 void
-pgstrom_init_nvme_strom(void)
+gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc, const char *pathname)
+{
+	int				rawfd;
+#ifdef WITH_CUFILE
+	CUfileDescr_t	desc;
+	CUfileError_t	rv;
+
+	rawfd = open(pathname, O_RDONLY | PG_BINARY | PG_O_DIRECT, 0600);
+	if (rawfd < 0)
+		elog(ERROR, "failed on open('%s'): %m", pathname);
+
+	memset(&desc, 0, sizeof(CUfileDescr_t));
+	desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+	desc.handle.fd = rawfd;
+	rv = cuFileHandleRegister(&gds_fdesc->fhandle, &desc);
+	if (rv.cu_err != CUDA_SUCCESS || rv.err != CU_FILE_SUCCESS)
+	{
+		int		errcode = (rv.cu_err != CUDA_SUCCESS ? rv.cu_err : rv.err);
+
+		close(rawfd);
+		elog(ERROR, "failed on cuFileHandleRegister('%s'): %s",
+			 pathname, errorText(errcode));
+	}
+#else
+	rawfd = open(pathname, O_RDONLY | PG_BINARY, 0600);
+	if (rawfd < 0)
+		elog(ERROR, "failed on open('%s'): %m", pathname);
+#endif
+	gds_fdesc->rawfd = rawfd;
+}
+
+/*
+ * gpuDirectFileDescOpen
+ */
+void
+gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc)
+{
+#ifdef WITH_CUFILE
+	/*
+	 * NVIDIA GPUDirect Storage (cuFile) requires to open the
+	 * source file with O_DIRECT, and it ignores the flags
+	 * changed by dup3(). So, we always tried to open a new
+	 * file descriptor with O_DIRECT flag.
+	 */
+	gpuDirectFileDescOpenByPath(gds_fdesc, FilePathName(pg_fdesc));
+#else
+	int		rawfd = FileGetRawDesc(pg_fdesc);
+
+	if (rawfd < 0)
+	{
+		const char *pathname = FilePathName(pg_fdesc);
+
+		rawfd = open(pathname, O_RDONLY | PG_BINARY);
+		if (rawfd < 0)
+			elog(ERROR, "failed on open('%s'): %m", pathname);
+	}
+	else
+	{
+		rawfd = dup(rawfd);
+		if (rawfd < 0)
+			elog(ERROR, "failed on dup(2): %m");
+	}
+	gds_fdesc->rawfd = rawfd;
+#endif
+}
+
+/*
+ * gpuDirectFileDescClose
+ */
+void
+gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc)
+{
+#ifdef WITH_CUFILE
+	cuFileHandleDeregister(gds_fdesc->fhandle);
+#endif
+	if (close(gds_fdesc->rawfd))
+		wnotice("failed on close(2): %m");
+}
+
+/*
+ * gpuDirectMapGpuMemory
+ */
+CUresult
+gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+					  size_t m_segment_sz,
+					  unsigned long *p_iomap_handle)
+{
+#ifdef WITH_CUFILE
+	CUfileError_t	rv;
+
+	rv = cuFileBufRegister((void *)m_segment, m_segment_sz, 0);
+	if (rv.err != CU_FILE_SUCCESS)
+		return CUDA_ERROR_MAP_FAILED;
+	if (rv.cu_err != CUDA_SUCCESS)
+		return rv.cu_err;
+	*p_iomap_handle = 0UL;		/* unused, in cuFile configuration */
+#else
+	StromCmd__MapGpuMemory cmd;
+
+	memset(&cmd, 0, sizeof(StromCmd__MapGpuMemory));
+	cmd.vaddress = m_segment;
+	cmd.length = m_segment_sz;
+	if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) != 0)
+		return CUDA_ERROR_MAP_FAILED;
+	*p_iomap_handle = cmd.handle;
+#endif
+	return CUDA_SUCCESS;
+}
+
+/*
+ * gpuDirectUnmapGpuMemory
+ */
+CUresult
+gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+						unsigned long iomap_handle)
+{
+#ifdef WITH_CUFILE
+	CUfileError_t	rv;
+
+	Assert(iomap_handle == 0);
+	rv = cuFileBufDeregister((void *)m_segment);
+	if (rv.err)
+		return rv.err;
+	return rv.cu_err;
+#else
+	/* cuMemFree() invokes callback to unmap device memory in the kernel side */
+	return CUDA_SUCCESS;
+#endif
+}
+
+/*
+ * gpuDirectFileReadIOV
+ */
+void
+gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+					 CUdeviceptr m_segment,
+					 unsigned long iomap_handle,
+					 off_t m_offset,
+					 strom_io_vector *iovec)
+{
+#ifdef WITH_CUFILE
+	size_t		unitsz = ((size_t)pgstrom_cufile_io_unitsz << 10);
+	int			i;
+
+	for (i=0; i < iovec->nr_chunks; i++)
+	{
+		strom_io_chunk *ioc = &iovec->ioc[i];
+		size_t		remained = ioc->nr_pages * PAGE_SIZE;
+		off_t		file_pos = ioc->fchunk_id * PAGE_SIZE;
+		off_t		dest_pos = m_offset + ioc->m_offset;
+
+		while (remained > 0)
+		{
+			ssize_t		sz, nbytes;
+
+			sz = Min(remained, unitsz);
+			nbytes = cuFileRead(gds_fdesc->fhandle,
+								(void *)m_segment,
+								sz,
+								file_pos,
+								dest_pos);
+			if (nbytes != sz)
+			{
+				if (IS_CUFILE_ERR(nbytes))
+					werror("failed on cuFileRead: %s", errorText(-nbytes));
+				werror("cuFileRead read shorter than the required (%lu of %lu, at %lu)",
+					   nbytes, sz, file_pos);
+			}
+			file_pos += sz;
+			dest_pos += sz;
+			remained -= sz;
+		}
+	}
+#else
+	StromCmd__MemCopySsdToGpuRaw cmd;
+
+	Assert(iomap_handle != 0UL);
+	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpuRaw));
+	cmd.handle    = iomap_handle;
+	cmd.offset    = m_offset;
+	cmd.file_desc = gds_fdesc->rawfd;
+	cmd.nr_chunks = iovec->nr_chunks;
+	cmd.page_sz   = PAGE_SIZE;
+	cmd.io_chunks = iovec->ioc;
+
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_RAW, &cmd) != 0)
+		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU_RAW: %m");
+	else
+	{
+		StromCmd__MemCopyWait __cmd;
+
+		memset(&__cmd, 0, sizeof(StromCmd__MemCopyWait));
+		__cmd.dma_task_id = cmd.dma_task_id;
+		//TODO: stat
+		while (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &__cmd) != 0)
+		{
+			if (errno != EINTR)
+				werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
+		}
+	}
+#endif
+}
+
+/*
+ * pgstrom_init_gpu_direct
+ */
+void
+pgstrom_init_gpu_direct(void)
 {
 	long		default_threshold;
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
-	bool		has_tesla_gpu = false;
+	bool		gpudirect_enabled = false;
 	int			i;
 
-	/* pg_strom.nvme_strom_enabled */
-	for (i=0; i < numDevAttrs; i++)
+	/*
+	 * pg_strom.gpudirect_driver
+	 */
+	DefineCustomStringVariable("pg_strom.gpudirect_driver",
+							   "Name of GPUDirect SQL Driver",
+							   NULL,
+							   &pgstrom_gpudirect_driver,
+#ifdef WITH_CUFILE
+							   "nvidia cufile",
+#else
+							   "heterodb nvme-strom",
+#endif
+							   PGC_INTERNAL,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
+	if (gpuDirectDriverLoaded())
 	{
-		if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
+		for (i=0; i < numDevAttrs; i++)
 		{
-			has_tesla_gpu = true;
-			break;
+			if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
+			{
+				gpudirect_enabled = true;
+				break;
+			}
 		}
 	}
-	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
-							 "Turn on/off SSD-to-GPU P2P DMA",
+	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
+							 "Enables SSD-to-GPU Direct SQL",
 							 NULL,
-							 &nvme_strom_enabled,
-							 has_tesla_gpu,
+							 &pgstrom_gpudirect_enabled,
+							 gpudirect_enabled,
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
+#ifdef WITH_CUFILE
+	DefineCustomIntVariable("pg_strom.cufile_io_unitsz",
+							"i/o size of cuFileRead invocation",
+							NULL,
+							&pgstrom_cufile_io_unitsz,
+							16384,		/* 16MB */
+							256,		/* 256kB */
+							INT_MAX,	/* Your own risk */
+							PGC_SUSET,
+                            GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+                            cufile_io_unitsz_checker, NULL, NULL);
+#endif /* WITH_CUFILE */
+
 	/*
 	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
 	 *   ((System RAM size) -
@@ -1190,10 +1613,10 @@ pgstrom_init_nvme_strom(void)
 		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
 	default_threshold = ((PAGE_SIZE * PHYS_PAGES - shared_buffer_size) / 2
 						 + shared_buffer_size);
-	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
+	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
 							"Tablesize threshold to use SSD-to-GPU P2P DMA",
 							NULL,
-							&nvme_strom_threshold_kb,
+							&pgstrom_gpudirect_threshold_kb,
 							default_threshold >> 10,
 							262144,	/* 256MB */
 							INT_MAX,

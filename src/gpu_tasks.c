@@ -324,7 +324,8 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 			}
 		}
 		if (RelationIsArrowFdw(relation))
-			gts->af_state = ExecInitArrowFdw(relation, outer_refs);
+			gts->af_state = ExecInitArrowFdw(optimal_gpu < 0 ? NULL : gcontext,
+											 relation, outer_refs);
 		if (RelationIsGstoreFdw(relation))
 			gts->gs_state = ExecInitGstoreFdw(&gts->css.ss, eflags, outer_refs);
 	}

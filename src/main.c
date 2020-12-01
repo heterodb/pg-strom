@@ -700,8 +700,9 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* link nvrtc library according to the current CUDA version */
+	/* link CUDA related libraries that match to the current CUDA version */
 	pgstrom_init_nvrtc();
+	pgstrom_init_cufile();
 
 	/* dump version number */
 #ifdef PGSTROM_VERSION
@@ -723,7 +724,7 @@ _PG_init(void)
 	pgstrom_init_gpu_mmgr();
 	pgstrom_init_gpu_context();
 	pgstrom_init_cuda_program();
-	pgstrom_init_nvme_strom();
+	pgstrom_init_gpu_direct();
 	pgstrom_init_codegen();
 
 	/* init custom-scan providers/FDWs */

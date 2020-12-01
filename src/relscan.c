@@ -1086,7 +1086,6 @@ mergePDSHeapScanBlockState(pgstrom_data_store *pds,
 	cl_uint			nr_uncached = pds->nblocks_uncached;
 	cl_uint			nr_loaded = pds->kds.nitems - nr_uncached;
 	BlockNumber	   *block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
-	size_t			sz;
 
 	Assert(pds->nblocks_uncached > 0);
 	Assert(iovec != NULL);
@@ -1095,9 +1094,8 @@ mergePDSHeapScanBlockState(pgstrom_data_store *pds,
 	memcpy(block_nums + nr_loaded, bstate->blknum,
 		   sizeof(BlockNumber) * nr_uncached);
 	/* copy iovec */
-	sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
-	pds->iovec = palloc(sz);
-	memcpy(pds->iovec, iovec, sz);
+	memcpy(pds->iovec, iovec, offsetof(strom_io_vector,
+									   ioc[iovec->nr_chunks]));
 }
 
 static bool
@@ -1153,7 +1151,7 @@ PDS_exec_heapscan_block(GpuTaskState *gts,
 		if (buf_id < 0)
 		{
 			BlockNumber	segno = blknum / RELSEG_SIZE;
-			int			filedesc;
+			GPUDirectFileDesc *dfile;
 
 			Assert(segno < nvme_sstate->nr_segs);
 			/*
@@ -1161,13 +1159,14 @@ PDS_exec_heapscan_block(GpuTaskState *gts,
 			 * If heapscan_block comes across segment boundary, rest of the
 			 * blocks must be read on the next PDS chunk.
 			 */
-			filedesc = nvme_sstate->fdesc[segno];
-			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
+			dfile = &nvme_sstate->files[segno];
+			if (pds->filedesc.rawfd >= 0 &&
+				pds->filedesc.rawfd != dfile->rawfd)
 				retval = false;
 			else
 			{
-				if (pds->filedesc < 0)
-					pds->filedesc = filedesc;
+				if (pds->filedesc.rawfd < 0)
+					memcpy(&pds->filedesc, dfile, sizeof(GPUDirectFileDesc));
 				updatePDSHeapScanBlockState(pds, bstate, blknum);
 				pds->kds.nitems++;
 				retval = true;

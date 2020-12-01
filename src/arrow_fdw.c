@@ -43,6 +43,7 @@ typedef struct RecordBatchFieldState
 typedef struct RecordBatchState
 {
 	File		fdesc;
+	GPUDirectFileDesc *dfile;
 	struct stat	stat_buf;
 	int			rb_index;	/* index number in a file */
 	off_t		rb_offset;	/* offset from the head */
@@ -147,7 +148,9 @@ typedef struct
  */
 struct ArrowFdwState
 {
-	List	   *fdescList;
+	GpuContext *gcontext;			/* valid if owned by GpuXXX plan */
+	List	   *gpuDirectFileDescList;	/* list of GPUDirectFileDesc */
+	List	   *fdescList;				/* list of File (buffered i/o) */
 	Bitmapset  *referenced;
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
@@ -448,7 +451,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			optimal_gpu = k;
 		else if (optimal_gpu != k)
 			optimal_gpu = -1;
-
 		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		foreach (cell, rb_cached)
 		{
@@ -483,7 +485,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	if (optimal_gpu < 0 || optimal_gpu >= numDevAttrs)
 		optimal_gpu = -1;
-	else if (filesSizeTotal < nvme_strom_threshold())
+	else if (filesSizeTotal < pgstrom_gpudirect_threshold())
 		optimal_gpu = -1;
 
 	baserel->rel_parallel_workers = parallel_nworkers;
@@ -959,12 +961,13 @@ makeRecordBatchState(ArrowSchema *schema,
  * ExecInitArrowFdw
  */
 ArrowFdwState *
-ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
+ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = NIL;
 	List		   *fdescList = NIL;
+	List		   *gpuDirectFileDescList = NIL;
 	Bitmapset	   *referenced = NULL;
 	bool			whole_row_ref = false;
 	ArrowFdwState  *af_state;
@@ -999,6 +1002,7 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 		File		fdesc;
 		List	   *rb_cached = NIL;
 		ListCell   *cell;
+		GPUDirectFileDesc *dfile = NULL;
 
 		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
 		if (fdesc < 0)
@@ -1010,6 +1014,22 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 		}
 		fdescList = lappend_int(fdescList, fdesc);
 
+		/*
+		 * Open file for GPUDirect I/O
+		 */
+		if (gcontext)
+		{
+			dfile = palloc0(sizeof(GPUDirectFileDesc));
+
+			gpuDirectFileDescOpen(dfile, fdesc);
+			if (!trackRawFileDesc(gcontext, dfile, __FILE__, __LINE__))
+			{
+				gpuDirectFileDescClose(dfile);
+				elog(ERROR, "out of memory");
+			}
+			gpuDirectFileDescList = lappend(gpuDirectFileDescList, dfile);
+		}
+
 		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
@@ -1019,11 +1039,15 @@ ExecInitArrowFdw(Relation relation, Bitmapset *outer_refs)
 			if (!arrowSchemaCompatibilityCheck(tupdesc, rb_state))
 				elog(ERROR, "arrow file '%s' on behalf of foreign table '%s' has incompatible schema definition",
 					 fname, RelationGetRelationName(relation));
+			/* GPUDirect I/O state, if any */
+			rb_state->dfile = dfile;
 		}
 		rb_state_list = list_concat(rb_state_list, rb_cached);
 	}
 	num_rbatches = list_length(rb_state_list);
 	af_state = palloc0(offsetof(ArrowFdwState, rbatches[num_rbatches]));
+	af_state->gcontext = gcontext;
+	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
@@ -1055,7 +1079,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 			referenced = bms_add_member(referenced, j -
 										FirstLowInvalidHeapAttributeNumber);
 	}
-	node->fdw_state = ExecInitArrowFdw(relation, referenced);
+	node->fdw_state = ExecInitArrowFdw(NULL, relation, referenced);
 }
 
 typedef struct
@@ -1285,7 +1309,7 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	kern_data_store	   *kds;
 	strom_io_vector	   *iovec;
 	size_t				head_sz;
-	int					j, fdesc;
+	int					j;
 	CUresult			rc;
 
 	/* setup KDS and I/O-vector */
@@ -1301,7 +1325,6 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
 	__dump_kds_and_iovec(kds, iovec);
 
-	fdesc = FileGetRawDesc(rb_state->fdesc);
 	/*
 	 * If SSD-to-GPU Direct SQL is available on the arrow file, setup a small
 	 * PDS on host-pinned memory, with strom_io_vector.
@@ -1309,7 +1332,8 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	if (gcontext &&
 		gcontext->cuda_dindex == optimal_gpu &&
 		iovec->nr_chunks > 0 &&
-		kds->length <= gpuMemAllocIOMapMaxLength())
+		kds->length <= gpuMemAllocIOMapMaxLength() &&
+		rb_state->dfile != NULL)
 	{
 		size_t	iovec_sz = offsetof(strom_io_vector, ioc[iovec->nr_chunks]);
 
@@ -1322,7 +1346,7 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 		pds->gcontext = gcontext;
 		pg_atomic_init_u32(&pds->refcnt, 1);
 		pds->nblocks_uncached = 0;
-		pds->filedesc = fdesc;
+		memcpy(&pds->filedesc, rb_state->dfile, sizeof(GPUDirectFileDesc));
 		pds->iovec = (strom_io_vector *)((char *)&pds->kds + head_sz);
 		memcpy(&pds->kds, kds, head_sz);
 		memcpy(pds->iovec, iovec, iovec_sz);
@@ -1330,6 +1354,8 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	else
 	{
 		/* Elsewhere, load RecordBatch by filesystem */
+		int		fdesc = FileGetRawDesc(rb_state->fdesc);
+
 		if (gcontext)
 		{
 			rc = gpuMemAllocManaged(gcontext,
@@ -1456,6 +1482,13 @@ ExecEndArrowFdw(ArrowFdwState *af_state)
 
 	foreach (lc, af_state->fdescList)
 		FileClose((File)lfirst_int(lc));
+	foreach (lc, af_state->gpuDirectFileDescList)
+	{
+		GPUDirectFileDesc *dfile = lfirst(lc);
+
+		untrackRawFileDesc(af_state->gcontext, dfile);
+		gpuDirectFileDescClose(dfile);
+	}
 }
 
 static void

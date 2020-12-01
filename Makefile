@@ -28,7 +28,7 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 #
 # Source file of CPU portion
 #
-__STROM_OBJS = main.o nvrtc.o shmbuf.o codegen.o datastore.o \
+__STROM_OBJS = main.o nvrtc.o cufile.o shmbuf.o codegen.o datastore.o \
         cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o gpupreagg.o \
@@ -199,8 +199,14 @@ PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 endif
+# build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0
+endif
+# support of NVIDIA GPUDirect Storage (BETA)
+WITH_CUFILE := $(shell test -e $(LPATH)/cufile.h && echo 1 || echo 0)
+ifeq ($(WITH_CUFILE),1)
+PGSTROM_FLAGS += -DWITH_CUFILE=1 -I $(LPATH)
 endif
 PGSTROM_FLAGS += -DCPU_ARCH=\"$(shell uname -m)\"
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"

@@ -769,16 +769,24 @@ errorText(int errcode)
 	const char *error_name;
 	const char *error_desc;
 
-	if (cuGetErrorName(errcode, &error_name) == CUDA_SUCCESS &&
-		cuGetErrorString(errcode, &error_desc) == CUDA_SUCCESS)
+	if (errcode >= 0 && errcode <= CUDA_ERROR_UNKNOWN)
 	{
-		snprintf(buffer, sizeof(buffer), "%s - %s",
-				 error_name, error_desc);
+		if (cuGetErrorName(errcode, &error_name) == CUDA_SUCCESS &&
+			cuGetErrorString(errcode, &error_desc) == CUDA_SUCCESS)
+		{
+			snprintf(buffer, sizeof(buffer), "%s - %s",
+					 error_name, error_desc);
+			return buffer;
+		}
 	}
-	else
+#ifdef WITH_CUFILE
+	else if (errcode > CUFILEOP_BASE_ERR)
 	{
-		snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+		return cufileop_status_error((CUfileOpError)errcode);
 	}
+#endif
+	snprintf(buffer, sizeof(buffer),
+			 "%d - unknown", errcode);
 	return buffer;
 }
 

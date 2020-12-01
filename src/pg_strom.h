@@ -189,7 +189,9 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <nvrtc.h>
-
+#ifdef WITH_CUFILE
+#include <cufile.h>
+#endif
 #include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -595,6 +597,27 @@ typedef struct devcast_info {
 } devcast_info;
 
 /*
+ * State structure of NVMe-Strom per GpuTaskState
+ */
+typedef struct GPUDirectFileDesc
+{
+	int				rawfd;
+#ifdef WITH_CUFILE
+	CUfileHandle_t	fhandle;
+#endif
+} GPUDirectFileDesc;
+
+typedef struct NVMEScanState
+{
+	cl_uint			nrows_per_block;
+	cl_uint			nblocks_per_chunk;
+	BlockNumber		curr_segno;
+	Buffer			curr_vmbuffer;
+	BlockNumber		nr_segs;
+	GPUDirectFileDesc files[FLEXIBLE_ARRAY_MEMBER];
+} NVMEScanState;
+
+/*
  * pgstrom_data_store - a data structure with various format to exchange
  * a data chunk between the host and CUDA server.
  */
@@ -626,7 +649,7 @@ typedef struct pgstrom_data_store
 	 * valid under the read lock.
 	 */
 	cl_uint				nblocks_uncached;	/* for KDS_FORMAT_BLOCK */
-	cl_int				filedesc;
+	GPUDirectFileDesc	filedesc;
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 	/* for KDS_FORMAT_COLUMN */
 	void			   *gs_sstate;
@@ -635,19 +658,6 @@ typedef struct pgstrom_data_store
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
 } pgstrom_data_store;
-
-/*
- * State structure of NVMe-Strom per GpuTaskState
- */
-typedef struct NVMEScanState
-{
-	cl_uint			nrows_per_block;
-	cl_uint			nblocks_per_chunk;
-	BlockNumber		curr_segno;
-	Buffer			curr_vmbuffer;
-	BlockNumber		nr_segs;
-	int				fdesc[FLEXIBLE_ARRAY_MEMBER];
-} NVMEScanState;
 
 /*
  * --------------------------------------------------------------------
@@ -871,14 +881,15 @@ extern bool trackGpuMemIPC(GpuContext *gcontext,
 						   CUdeviceptr devptr, void *extra,
 						   const char *filename, int lineno);
 extern void *untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr);
-extern bool trackRawFileDesc(GpuContext *gcontext, int filedesc,
+extern bool trackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *fdesc,
 							 const char *filename, int lineno);
-extern void untrackRawFileDesc(GpuContext *gcontext, int filedesc);
+extern void untrackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *fdesc);
 extern CUmodule __GpuContextLookupModule(GpuContext *gcontext,
 										 ProgramId program_id,
 										 const char *filename, int lineno);
 #define GpuContextLookupModule(a,b)			\
 	__GpuContextLookupModule((a),(b),__FILE__,__LINE__)
+
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -1021,15 +1032,31 @@ extern void pgstrom_init_gputasks(void);
 /*
  * nvme_strom.c
  */
-extern Size	nvme_strom_threshold(void);
-extern int	nvme_strom_ioctl(int cmd, void *arg);
+extern Size	pgstrom_gpudirect_threshold(void);
 extern int	GetOptimalGpuForFile(File fdesc);
 extern int	GetOptimalGpuForRelation(PlannerInfo *root,
 									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
-extern void	pgstrom_init_nvme_strom(void);
+
+extern CUresult	gpuDirectDriverOpen(void);
+extern void	gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc);
+extern void	gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
+										const char *pathname);
+extern void	gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
+extern CUresult gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+									  size_t m_segment_sz,
+									  unsigned long *p_iomap_handle);
+extern CUresult gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+										unsigned long iomap_handle);
+
+extern void gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+								 CUdeviceptr m_segment,
+								 unsigned long iomap_handle,
+								 off_t m_offset,
+								 strom_io_vector *iovec);
+extern void	pgstrom_init_gpu_direct(void);
 
 /*
  * cuda_program.c
@@ -1372,7 +1399,8 @@ extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
 
-extern ArrowFdwState *ExecInitArrowFdw(Relation relation,
+extern ArrowFdwState *ExecInitArrowFdw(GpuContext *gcontext,
+									   Relation relation,
 									   Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
@@ -1467,6 +1495,12 @@ extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
  * nvrtc.c
  */
 extern void		pgstrom_init_nvrtc(void);
+
+/*
+ * cufile.c
+ */
+extern bool		cuFileDriverLoaded(void);
+extern void		pgstrom_init_cufile(void);
 
 /*
  * float2.c
@@ -1847,6 +1881,20 @@ __basename(const char *filename)
 }
 
 /*
+ * merge two dlist_head
+ */
+static inline void
+dlist_append_tail(dlist_head *base, dlist_head *items)
+{
+	if (dlist_is_empty(items))
+		return;
+	items->head.next->prev = base->head.prev;
+	items->head.prev->next = &base->head;
+	base->head.prev->next = items->head.next;
+	base->head.prev = items->head.prev;
+}
+
+/*
  * Some usuful memory allocation wrapper
  */
 #define palloc_huge(sz)		MemoryContextAllocHuge(CurrentMemoryContext,(sz))
@@ -1960,13 +2008,13 @@ pthreadRWLockUnlock(pthread_rwlock_t *rwlock)
 }
 
 static inline void
-pthreadCondInit(pthread_cond_t *cond)
+pthreadCondInit(pthread_cond_t *cond, int pshared)
 {
 	pthread_condattr_t condattr;
 
 	if ((errno = pthread_condattr_init(&condattr)) != 0)
 		wfatal("failed on pthread_condattr_init: %m");
-	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
+	if ((errno = pthread_condattr_setpshared(&condattr, pshared)) != 0)
 		wfatal("failed on pthread_condattr_setpshared: %m");
 	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
 		wfatal("failed on pthread_cond_init: %m");

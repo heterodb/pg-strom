@@ -75,7 +75,7 @@ typedef struct ResourceTracker
 			CUmodule	cuda_module;
 		} module;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
-		int			filedesc;	/* RESTRACK_CLASS__FILEDESC */
+		GPUDirectFileDesc filedesc;	/* RESTRACK_CLASS__FILEDESC */
 	} u;
 } ResourceTracker;
 
@@ -244,7 +244,7 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
  * trackRawFileDesc - tracker of raw file descriptors
  */
 bool
-trackRawFileDesc(GpuContext *gcontext, int filedesc,
+trackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *filedesc,
 				 const char *filename, int lineno)
 {
 	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
@@ -254,12 +254,12 @@ trackRawFileDesc(GpuContext *gcontext, int filedesc,
 		return false;	/* out of memory */
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__FILEDESC,
-								   &filedesc, sizeof(int));
+								   &filedesc->rawfd, sizeof(int));
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__FILEDESC;
 	tracker->filename = filename;
 	tracker->lineno = lineno;
-	tracker->u.filedesc = filedesc;
+	memcpy(&tracker->u.filedesc, filedesc, sizeof(GPUDirectFileDesc));
 	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
@@ -271,14 +271,14 @@ trackRawFileDesc(GpuContext *gcontext, int filedesc,
  * untrackRawFileDesc - untracker of raw file descriptors
  */
 void
-untrackRawFileDesc(GpuContext *gcontext, int filedesc)
+untrackRawFileDesc(GpuContext *gcontext, GPUDirectFileDesc *filedesc)
 {
 	dlist_head *restrack_list;
 	dlist_iter	iter;
 	pg_crc32	crc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__FILEDESC,
-								   &filedesc, sizeof(int));
+								   &filedesc->rawfd, sizeof(int));
 	SpinLockAcquire(&gcontext->restrack_lock);
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
 	dlist_foreach(iter, restrack_list)
@@ -288,8 +288,8 @@ untrackRawFileDesc(GpuContext *gcontext, int filedesc)
 
 		if (tracker->crc == crc &&
 			tracker->resclass == RESTRACK_CLASS__FILEDESC &&
-			tracker->u.filedesc == filedesc)
-        {
+			tracker->u.filedesc.rawfd == filedesc->rawfd)
+		{
 			dlist_delete(&tracker->chain);
 			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
@@ -297,7 +297,7 @@ untrackRawFileDesc(GpuContext *gcontext, int filedesc)
 		}
 	}
 	SpinLockRelease(&gcontext->restrack_lock);
-	wnotice("Bug? File Descriptor %d was not tracked", filedesc);
+	wnotice("Bug? File Descriptor %d was not tracked", filedesc->rawfd);
 }
 
 /*
@@ -569,11 +569,10 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 				case RESTRACK_CLASS__FILEDESC:
 					if (normal_exit)
 						wnotice("File desc %d by (%s:%d) is likely leaked",
-								tracker->u.filedesc,
+								tracker->u.filedesc.rawfd,
 								__basename(tracker->filename),
 								tracker->lineno);
-					if (close(tracker->u.filedesc))
-						wnotice("failed on close(2): %m");
+					gpuDirectFileDescClose(&tracker->u.filedesc);
 					break;
 				case RESTRACK_CLASS__GPUMODULE:
 					rc = cuModuleUnload(tracker->u.module.cuda_module);
@@ -833,15 +832,24 @@ CUresult
 gpuInit(unsigned int flags)
 {
 	static bool	cuda_driver_initialized = false;
-	CUresult	rc = CUDA_SUCCESS;
+	static bool	gpudirect_driver_initialized = false;
+	CUresult	rc;
 
 	if (!cuda_driver_initialized)
 	{
 		rc = cuInit(0);
-		if (rc == CUDA_SUCCESS)
-			cuda_driver_initialized = true;
+		if (rc != CUDA_SUCCESS)
+			return rc;
+		cuda_driver_initialized = true;
 	}
-	return rc;
+	if (!gpudirect_driver_initialized)
+	{
+		rc = gpuDirectDriverOpen();
+		if (rc != CUDA_SUCCESS)
+			return rc;
+		gpudirect_driver_initialized = true;
+	}
+	return CUDA_SUCCESS;
 }
 
 /*
@@ -1029,7 +1037,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	/* management of work-queue */
 	gcontext->worker_is_running = false;
 	pthreadMutexInit(&gcontext->worker_mutex, 1);
-	pthreadCondInit(&gcontext->worker_cond);
+	pthreadCondInit(&gcontext->worker_cond, 1);
 	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
 	dlist_init(&gcontext->pending_tasks);
 	gcontext->num_workers = num_workers;
