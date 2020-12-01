@@ -204,7 +204,7 @@ ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0
 endif
 # support of NVIDIA GPUDirect Storage (BETA)
-WITH_CUFILE := 1
+WITH_CUFILE := $(shell test -e $(LPATH)/cufile.h && echo 1 || echo 0)
 ifeq ($(WITH_CUFILE),1)
 PGSTROM_FLAGS += -DWITH_CUFILE=1 -I $(LPATH)
 endif

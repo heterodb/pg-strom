@@ -267,6 +267,9 @@ bailout:
 #ifdef WITH_CUFILE
 /*
  * sysfs_read_sfdv_attrs
+ *
+ * Support of ScaleFlux CSDxxxx Drives. GPUDirect SQL is only available
+ * with NVIDIA GPUDirect Storage software stack.
  */
 static bool
 sysfs_read_sfdv_attrs(NvmeAttributes *nvme,
