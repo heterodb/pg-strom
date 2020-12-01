@@ -1753,14 +1753,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	if (!pgstrom_enabled || !enable_gpupreagg)
 		return;
 
+	/* CREATE EXTENSION pg_strom; was not executed */
 	if (get_namespace_oid("pgstrom", true) == InvalidOid)
-	{
-		ereport(WARNING,
-				(errcode(ERRCODE_UNDEFINED_SCHEMA),
-				 errmsg("schema \"pgstrom\" was not found"),
-				 errhint("Run: CREATE EXTENSION pg_strom")));
 		return;
-	}
 
 	/* traditional GpuPreAgg + Agg path consideration */
 	input_path = input_rel->cheapest_total_path;
