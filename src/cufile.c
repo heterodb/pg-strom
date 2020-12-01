@@ -210,6 +210,23 @@ lookup_cufile_function(void *handle, const char *func_name)
 	p_##func_name = lookup_cufile_function(handle, #func_name)
 
 /*
+ * cuFileDriverLoaded
+ */
+bool
+cuFileDriverLoaded(void)
+{
+	/* check libcufile.so availability */
+	if (!p_cuFileDriverOpen)
+		return false;
+
+	/* check nvidia_fs kernel module */
+	if (access("/proc/driver/nvidia-fs/version", F_OK) != 0)
+		return false;
+
+	return true;
+}
+
+/*
  * pgstrom_init_cufile
  */
 void

@@ -1499,6 +1499,7 @@ extern void		pgstrom_init_nvrtc(void);
 /*
  * cufile.c
  */
+extern bool		cuFileDriverLoaded(void);
 extern void		pgstrom_init_cufile(void);
 
 /*

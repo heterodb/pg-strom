@@ -59,11 +59,12 @@ static char	   *pgstrom_gpudirect_driver;	/* GUC */
 static bool		pgstrom_gpudirect_enabled;	/* GUC */
 static int		pgstrom_gpudirect_threshold_kb;	/* GUC */
 
-static char		   *nvme_manual_distance_map;	/* GUC */
-static void			apply_nvme_manual_distance_map(void);
-static bool			sysfs_read_pcie_root_complex(const char *dirname,
-												 const char *my_name,
-												 List **p_pcie_root);
+static char	   *nvme_manual_distance_map;	/* GUC */
+static void		apply_nvme_manual_distance_map(void);
+static bool		sysfs_read_pcie_root_complex(const char *dirname,
+											 const char *my_name,
+											 List **p_pcie_root);
+
 /*
  * pgstrom_gpudirect_threshold
  */
@@ -75,22 +76,70 @@ pgstrom_gpudirect_threshold(void)
 
 #ifndef WITH_CUFILE
 /*
- * nvme_strom_ioctl
+ * nvme_strom_open
  */
 static int
-nvme_strom_ioctl(int cmd, void *arg)
+nvme_strom_open(void)
 {
 	static int	fdesc_nvme_strom = -1;
 
 	if (fdesc_nvme_strom < 0)
 	{
+		/* tried to open once, but failed */
+		if (fdesc_nvme_strom == INT_MIN)
+		{
+			errno = ENOENT;
+			return -1;
+		}
 		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 		if (fdesc_nvme_strom < 0)
+		{
+			fdesc_nvme_strom = INT_MIN;
 			return -1;
+		}
 	}
-	return ioctl(fdesc_nvme_strom, cmd, arg);
+	return fdesc_nvme_strom;
+}
+
+/*
+ * nvme_strom_ioctl
+ */
+static int
+nvme_strom_ioctl(int cmd, void *arg)
+{
+	int		fdesc = nvme_strom_open();
+
+	if (fdesc < 0)
+		return -1;
+	return ioctl(fdesc, cmd, arg);
 }
 #endif
+
+/*
+ * gpuDirectDriverLoaded
+ */
+static bool
+gpuDirectDriverLoaded(void)
+{
+#ifdef WITH_CUFILE
+	return cuFileDriverLoaded();
+#else
+	return (nvme_strom_open() >= 0);
+#endif
+}
+
+/*
+ * pgstrom_gpudirect_enabled_checker
+ */
+static bool
+pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
+{
+	bool	newval = *p_newval;
+
+	if (newval && !gpuDirectDriverLoaded())
+		elog(ERROR, "cannot enable GPUDirect SQL without driver module loaded");
+	return true;
+}
 
 /*
  * sysfs_read_line
@@ -1497,7 +1546,7 @@ pgstrom_init_gpu_direct(void)
 {
 	long		default_threshold;
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
-	bool		has_tesla_gpu = false;
+	bool		gpudirect_enabled = false;
 	int			i;
 
 	/*
@@ -1515,23 +1564,26 @@ pgstrom_init_gpu_direct(void)
 							   PGC_INTERNAL,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
-	
-	for (i=0; i < numDevAttrs; i++)
+
+	if (gpuDirectDriverLoaded())
 	{
-		if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
+		for (i=0; i < numDevAttrs; i++)
 		{
-			has_tesla_gpu = true;
-			break;
+			if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
+			{
+				gpudirect_enabled = true;
+				break;
+			}
 		}
 	}
 	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
 							 "Enables SSD-to-GPU Direct SQL",
 							 NULL,
 							 &pgstrom_gpudirect_enabled,
-							 has_tesla_gpu,
+							 gpudirect_enabled,
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
 #ifdef WITH_CUFILE
 	DefineCustomIntVariable("pg_strom.cufile_io_unitsz",
 							"i/o size of cuFileRead invocation",
