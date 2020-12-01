@@ -1443,6 +1443,7 @@ gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 	cmd.length = m_segment_sz;
 	if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) != 0)
 		return CUDA_ERROR_MAP_FAILED;
+	*p_iomap_handle = cmd.handle;
 #endif
 	return CUDA_SUCCESS;
 }

@@ -215,15 +215,12 @@ lookup_cufile_function(void *handle, const char *func_name)
 bool
 cuFileDriverLoaded(void)
 {
-	/* check libcufile.so availability */
-	if (!p_cuFileDriverOpen)
-		return false;
-
-	/* check nvidia_fs kernel module */
-	if (access("/proc/driver/nvidia-fs/version", F_OK) != 0)
-		return false;
-
-	return true;
+#ifdef WITH_CUFILE
+	if (p_cuFileDriverOpen != NULL &&		/* libcufile.so */
+		access("/proc/driver/nvidia-fs/version", F_OK) != 0)	/* nvidia_fs */
+		return true;
+#endif
+	return false;
 }
 
 /*
