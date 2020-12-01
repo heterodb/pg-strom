@@ -733,7 +733,27 @@ build_cuda_program(program_cache_entry *src_entry)
 
 	STROM_TRY();
 	{
+		static int	nvrtc_version = -1;
+		int		target_cc = src_entry->target_cc;
 		char	gpu_arch_option[256];
+
+		if (nvrtc_version < 0)
+		{
+			int		major, minor;
+
+			if (nvrtcVersion(&major, &minor) != NVRTC_SUCCESS)
+				nvrtc_version = 0;	/* force baseline if NVRTC version is unknown */
+			else
+				nvrtc_version = major * 1000 + minor * 10;
+		}
+		if (nvrtc_version >= 11010)
+			target_cc = Min(80, target_cc);
+		else if (nvrtc_version >= 10010)
+			target_cc = Min(75, target_cc);
+		else if (nvrtc_version >=  9020)
+			target_cc = Min(72, target_cc);
+		else
+			target_cc = Min(53, target_cc);	/* should not happen */
 
 		rc = nvrtcCreateProgram(&program,
 								source,
