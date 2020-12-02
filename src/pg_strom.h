@@ -244,7 +244,6 @@ typedef struct GpuContext
 	dlist_node		chain;
 	pg_atomic_uint32 refcnt;
 	ResourceOwner	resowner;
-	cl_bool			never_use_mps;
 	/* cuda resources per GpuContext */
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
@@ -857,7 +856,6 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 }
 extern CUresult gpuInit(unsigned int flags);
 extern GpuContext *AllocGpuContext(int cuda_dindex,
-								   bool never_use_mps,
 								   bool activate_context,
 								   bool activate_workers);
 extern void ActivateGpuContext(GpuContext *gcontext);

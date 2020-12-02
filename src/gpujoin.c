@@ -3414,8 +3414,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ProgramId		program_id;
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu,
-										false, false, false);
+	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu, false, false);
+
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
 	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of

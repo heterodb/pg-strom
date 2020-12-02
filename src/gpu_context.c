@@ -881,26 +881,9 @@ activate_cuda_context(GpuContext *gcontext)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuDeviceGet: %s", errorText(rc));
 
-	if (!gcontext->never_use_mps)
-	{
-		rc = cuCtxCreate(&cuda_context,
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-	}
-	else
-	{
-		char   *environ_saved = getenv("CUDA_MPS_PIPE_DIRECTORY");
-
-		if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
-			werror("failed on setenv: %m");
-		rc = cuCtxCreate(&cuda_context,
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-		if (!environ_saved)
-			unsetenv("CUDA_MPS_PIPE_DIRECTORY");
-		else
-			setenv("CUDA_MPS_PIPE_DIRECTORY", environ_saved, 1);
-	}
+	rc = cuCtxCreate(&cuda_context,
+					 CU_CTX_SCHED_AUTO,
+					 cuda_device);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuCtxCreate: %s", errorText(rc));
 	gcontext->cuda_device  = cuda_device;
@@ -967,7 +950,7 @@ activate_cuda_workers(GpuContext *gcontext)
  * GetGpuContext - acquire a free GpuContext
  */
 GpuContext *
-AllocGpuContext(int cuda_dindex, bool never_use_mps,
+AllocGpuContext(int cuda_dindex,
 				bool activate_context,
 				bool activate_workers)
 {
@@ -990,7 +973,6 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 		gcontext = dlist_container(GpuContext, chain, iter.cur);
 
 		if (gcontext->resowner == CurrentResourceOwner &&
-			(!never_use_mps || gcontext->never_use_mps) &&
 			(cuda_dindex < 0 || gcontext->cuda_dindex == cuda_dindex))
 		{
 			pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
@@ -1021,7 +1003,6 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps,
 	/* setup fields */
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
 	gcontext->resowner		= CurrentResourceOwner;
-	gcontext->never_use_mps	= never_use_mps;
 	gcontext->cuda_dindex	= cuda_dindex;
 	/* resource management */
 	SpinLockInit(&gcontext->restrack_lock);
@@ -1276,6 +1257,10 @@ pgstrom_init_gpu_context(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+	/* force to disable MPS to avoid troubles */
+	if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
+		elog(ERROR, "failed on setenv: %m");
 
 	/* initialization of GpuContext List */
 	cuda_resources_array = calloc(numDevAttrs, sizeof(CudaResource));

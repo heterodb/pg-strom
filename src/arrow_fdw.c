@@ -4821,7 +4821,7 @@ BuildArrowGpuBufferCupy(Relation frel,
 		/*
 		 * Open GPU device memory, and load the array from apache arrow files
 		 */
-		gcontext = AllocGpuContext(cuda_dindex, true, true, false);
+		gcontext = AllocGpuContext(cuda_dindex, true, false);
 		rc = gpuIpcOpenMemHandle(gcontext,
 								 &gmem_ptr,
 								 gpubuf->ipc_mhandle,

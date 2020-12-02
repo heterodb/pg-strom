@@ -4140,8 +4140,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu,
-										 false, false, false);
+	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu, false, false);
+
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,
