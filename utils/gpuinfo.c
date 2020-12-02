@@ -52,29 +52,21 @@ static int	detailed_output = 0;
 
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
 
-#define cuda_elog(errcode,fmt,...)							\
-	do {													\
-		const char *__cmd_name = strrchr(__FILE__, '/');	\
-		const char *__err_name;								\
-															\
-		if (!__cmd_name)									\
-			__cmd_name = __FILE__;							\
-		cuGetErrorName(errcode, &__err_name);				\
-		fprintf(stderr, "%s:%d [%s]  " fmt "\n",			\
-				__cmd_name, __LINE__, __err_name,			\
-				##__VA_ARGS__);								\
-		exit(1);											\
-	} while(0)
+static const char *
+cuErrorName(CUresult error_code)
+{
+	const char *error_name;
 
-#define sys_elog(fmt,...)									\
-	do {													\
-		const char *__cmd_name = strrchr(__FILE__, '/');	\
-															\
-		if (!__cmd_name)									\
-			__cmd_name = __FILE__;							\
-		fprintf(stderr, "%s:%d  " fmt "\n",					\
-				__cmd_name, __LINE__, ##__VA_ARGS__);			\
-		exit(1);											\
+	if (cuGetErrorName(error_code, &error_name) != CUDA_SUCCESS)
+		error_name = "unknown error";
+	return error_name;
+}
+
+#define elog(fmt,...)								\
+	do {											\
+		fprintf(stderr, "gpuinfo:%d  " fmt "\n",	\
+				__LINE__, ##__VA_ARGS__);			\
+		exit(1);									\
 	} while(0)
 
 /*
@@ -97,7 +89,7 @@ commercial_license_validation(const char *license_filename)
 	/* Read the license file */
 	cmd = calloc(1, sizeof(StromCmd__LicenseInfo) + buffer_sz);
 	if (!cmd)
-		sys_elog("out of memory");
+		elog("out of memory: %m");
 	cmd->buffer_sz = buffer_sz;
 
 	nbytes = read_heterodb_license_file(license_filename,
@@ -126,7 +118,7 @@ retry_open:
 			fprintf(stderr, "nvme_strom kernel module is not installed.\n");
 			return NULL;
 		}
-		sys_elog("failed on open('%s'): %m\n", NVME_STROM_IOCTL_PATHNAME);
+		elog("failed on open('%s'): %m\n", NVME_STROM_IOCTL_PATHNAME);
 	}
 
 	if (ioctl(fdesc, STROM_IOCTL__LICENSE_LOAD, cmd) != 0)
@@ -237,7 +229,7 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 
 	rc = cuDeviceGetUuid(&dev_uuid, device);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetUuid");
+		elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
 
 	for (i=0; i < li->nr_gpus; i++)
 	{
@@ -277,7 +269,7 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 	/* device name */
 	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetName");
+		elog("failed on cuDeviceGetName: %s", cuErrorName(rc));
 	if (!machine_format)
 		printf("Device Name: %s\n", dev_name);
 	else
@@ -286,7 +278,7 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 	/* device uuid */
 	rc = cuDeviceGetUuid(&dev_uuid, device);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetUuid");
+		elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
 	snprintf(uuid, sizeof(uuid),
 			 "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
 			 (unsigned char)dev_uuid.bytes[0],
@@ -313,7 +305,7 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 	/* device RAM size */
 	rc = cuDeviceTotalMem(&dev_memsz, device);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceTotalMem");
+		elog("failed on cuDeviceTotalMem: %s", cuErrorName(rc));
 	if (!machine_format)
 		printf("Global memory size: %zuMB\n", dev_memsz >> 20);
 	else
@@ -336,7 +328,7 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 		{
 			if (rc == CUDA_ERROR_INVALID_VALUE)
 				continue;	/* likely, not supported at this runtime */
-			cuda_elog(rc, "failed on cuDeviceGetAttribute");
+			elog("failed on cuDeviceGetAttribute: %s", cuErrorName(rc));
 		}
 
 		if (machine_format)
@@ -465,11 +457,11 @@ int main(int argc, char *argv[])
 	 */
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuInit");
+		elog("failed on cuInit: %s", cuErrorName(rc));
 
 	rc = cuDriverGetVersion(&version);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDriverGetVersion");
+		elog("failed on cuDriverGetVersion: %s", cuErrorName(rc));
 	if (!machine_format)
 		printf("CUDA Runtime version: %d.%d.%d\n",
 			   (version / 1000),
@@ -514,7 +506,7 @@ int main(int argc, char *argv[])
 	 */
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
-		cuda_elog(rc, "failed on cuDeviceGetCount");
+		elog("cuDeviceGetCount: %s", cuErrorName(rc));
 	if (!li)
 		nr_gpus = 1;
 	else
@@ -523,7 +515,7 @@ int main(int argc, char *argv[])
 		{
 			rc = cuDeviceGet(&device, i);
 			if (rc != CUDA_SUCCESS)
-				cuda_elog(rc, "failed on cuDeviceGet");
+				elog("failed on cuDeviceGet: %s", cuErrorName(rc));
 			if (check_device(device, li))
 				nr_gpus++;
 		}
@@ -537,7 +529,7 @@ int main(int argc, char *argv[])
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)
-			cuda_elog(rc, "failed on cuDeviceGet");
+			elog("failed on cuDeviceGet: %s", cuErrorName(rc));
 		if (!li || check_device(device, li))
 			output_device(device, j++, i);
 		if (!li)
