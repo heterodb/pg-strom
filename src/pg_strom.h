@@ -248,8 +248,6 @@ typedef struct GpuContext
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
-	CUevent		   *cuda_events0; /* per-worker general purpose event */
-	CUevent		   *cuda_events1; /* per-worker general purpose event */
 	/* resource management */
 	slock_t			restrack_lock;
 	dlist_head		restrack[RESTRACK_HASHSIZE];
@@ -815,10 +813,8 @@ extern __thread int				GpuWorkerIndex;
 	(GpuWorkerCurrentContext->cuda_device)
 #define CU_DINDEX_PER_THREAD					\
 	(GpuWorkerCurrentContext->cuda_dindex)
-#define CU_EVENT0_PER_THREAD					\
-	(GpuWorkerCurrentContext->cuda_events0[GpuWorkerIndex])
-#define CU_EVENT1_PER_THREAD					\
-	(GpuWorkerCurrentContext->cuda_events1[GpuWorkerIndex])
+
+extern __thread CUevent			CU_EVENT_PER_THREAD;
 
 extern void GpuContextWorkerReportError(int elevel,
 										int errcode,

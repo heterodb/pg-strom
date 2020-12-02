@@ -672,12 +672,15 @@ GpuContextWorkerReportError(int elevel,
 /*
  * GpuContextWorkerMain
  */
+__thread CUevent		CU_EVENT_PER_THREAD = NULL;
+
 static void *
 GpuContextWorkerMain(void *arg)
 {
 	GpuContext	   *gcontext = arg;
 	dlist_node	   *dnode;
 	GpuTask		   *gtask;
+	CUevent		   *cuda_events;
 	CUresult		rc;
 	bool			is_wakeup;
 
@@ -694,6 +697,15 @@ GpuContextWorkerMain(void *arg)
 		return NULL;
 	}
 	GpuWorkerCurrentContext = gcontext;
+
+	/* setup CU_EVENT_PER_THREAD variable */
+	cuda_events = alloca(sizeof(CUevent) * numDevAttrs);
+	memset(cuda_events, 0, sizeof(CUevent) * numDevAttrs);
+	rc = cuEventCreate(&cuda_events[gcontext->cuda_dindex],
+					   CU_EVENT_BLOCKING_SYNC);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventCreate: %s", errorText(rc));
+	CU_EVENT_PER_THREAD = cuda_events[gcontext->cuda_dindex];
 
 	STROM_TRY();
 	{
@@ -903,47 +915,31 @@ activate_cuda_context(GpuContext *gcontext)
 static void
 activate_cuda_workers(GpuContext *gcontext)
 {
-	CUresult	rc;
 	cl_int		i;
 
 	if (gcontext->worker_is_running)
 		return;
-
-	Assert(gcontext->cuda_context != NULL);
-	GPUCONTEXT_PUSH(gcontext);
-	for (i=0; i < gcontext->num_workers; i++)
-	{
-		if (!gcontext->cuda_events0[i])
-		{
-			rc = cuEventCreate(&gcontext->cuda_events0[i],
-							   CU_EVENT_BLOCKING_SYNC);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		}
-
-		if (!gcontext->cuda_events1[i])
-		{
-			rc = cuEventCreate(&gcontext->cuda_events1[i],
-							   CU_EVENT_BLOCKING_SYNC);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		}
-	}
-	GPUCONTEXT_POP(gcontext);
-
 	/* creation of worker threads */
+	Assert(gcontext->cuda_context != NULL);
+
 	for (i=0; i < gcontext->num_workers; i++)
 	{
 		pthread_t	thread;
 
-		if ((errno = pthread_create(&thread, NULL,
-									GpuContextWorkerMain,
-									gcontext)) != 0)
+		errno = pthread_create(&thread, NULL,
+							   GpuContextWorkerMain,
+							   gcontext);
+		if (errno != 0)
 			elog(ERROR, "failed on pthread_create: %m");
-
 		gcontext->worker_threads[i] = thread;
+
+		/*
+		 * NOTE: Even if pthread_create() failed to launch worker threads
+		 * later, SynchronizeGpuContext() may terminate the worker threads
+		 * already launched if worker_is_running.
+		 */
+		gcontext->worker_is_running = true;
 	}
-	gcontext->worker_is_running = true;
 }
 
 /*
@@ -984,13 +980,9 @@ AllocGpuContext(int cuda_dindex,
 	/*
 	 * Not found, so allocate a new one
 	 */
-	gcontext = calloc(1, offsetof(GpuContext, worker_threads[num_workers]) +
-					  2 * sizeof(CUevent) * num_workers);
+	gcontext = calloc(1, offsetof(GpuContext, worker_threads[num_workers]));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
-	gcontext->cuda_events0 = (CUevent *)
-		((char *)gcontext + offsetof(GpuContext, worker_threads[num_workers]));
-	gcontext->cuda_events1 = gcontext->cuda_events0 + num_workers;
 
 	/* choose a device to use, if no preference */
 	if (cuda_dindex < 0)
@@ -1101,7 +1093,6 @@ PutGpuContext(GpuContext *gcontext)
 void
 SynchronizeGpuContext(GpuContext *gcontext)
 {
-	CUresult	rc;
 	int			i;
 
 	if (!gcontext->worker_is_running)
@@ -1110,26 +1101,16 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	/* signal to terminate all workers */
 	pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 	pthreadCondBroadcast(&gcontext->worker_cond);
-	/* interrupt cuEventSynchronize() */
-	GPUCONTEXT_PUSH(gcontext);
-	for (i=0; i < gcontext->num_workers; i++)
-	{
-		if ((rc = cuEventRecord(gcontext->cuda_events0[i],
-								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
-		if ((rc = cuEventRecord(gcontext->cuda_events1[i],
-								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
-	}
-	GPUCONTEXT_POP(gcontext);
 
 	/* wait for completion of the worker threads */
 	for (i=0; i < gcontext->num_workers; i++)
 	{
 		pthread_t	thread = gcontext->worker_threads[i];
 
-		if ((errno = pthread_join(thread, NULL)) != 0)
+		if (pthread_equal(pthread_self(), thread) == 0 &&
+			(errno = pthread_join(thread, NULL)) != 0)
 			elog(PANIC, "failed on pthread_join: %m");
+		gcontext->worker_threads[i] = pthread_self();
 	}
 	memset(gcontext->worker_threads, 0,
 		   sizeof(pthread_t) * gcontext->num_workers);
