@@ -680,7 +680,6 @@ GpuContextWorkerMain(void *arg)
 	GpuContext	   *gcontext = arg;
 	dlist_node	   *dnode;
 	GpuTask		   *gtask;
-	CUevent		   *cuda_events;
 	CUresult		rc;
 	bool			is_wakeup;
 
@@ -698,17 +697,14 @@ GpuContextWorkerMain(void *arg)
 	}
 	GpuWorkerCurrentContext = gcontext;
 
-	/* setup CU_EVENT_PER_THREAD variable */
-	cuda_events = alloca(sizeof(CUevent) * numDevAttrs);
-	memset(cuda_events, 0, sizeof(CUevent) * numDevAttrs);
-	rc = cuEventCreate(&cuda_events[gcontext->cuda_dindex],
-					   CU_EVENT_BLOCKING_SYNC);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuEventCreate: %s", errorText(rc));
-	CU_EVENT_PER_THREAD = cuda_events[gcontext->cuda_dindex];
-
 	STROM_TRY();
 	{
+		/* setup CU_EVENT_PER_THREAD variable */
+		rc = cuEventCreate(&CU_EVENT_PER_THREAD,
+						   CU_EVENT_BLOCKING_SYNC);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuEventCreate: %s", errorText(rc));
+
 		while (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
 		{
 			GpuTaskState *gts;
