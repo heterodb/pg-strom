@@ -672,6 +672,7 @@ typedef struct DevAttributes
 	cl_int		NUMA_NODE_ID;
 	cl_int		DEV_ID;
 	char		DEV_NAME[256];
+	char		DEV_BRAND[16];
 	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;

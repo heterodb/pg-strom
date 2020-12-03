@@ -153,6 +153,11 @@ pgstrom_collect_gpu_device(void)
 				strncpy(devAttrs[dindex].DEV_NAME, tok_val,
 						sizeof(devAttrs[dindex].DEV_NAME));
 			}
+			else if (strcmp(tok_attr, "DEVICE_BRAND") == 0)
+			{
+				strncpy(devAttrs[dindex].DEV_BRAND, tok_val,
+						sizeof(devAttrs[dindex].DEV_BRAND));
+			}
 			else if (strcmp(tok_attr, "DEVICE_UUID") == 0)
 			{
 				strncpy(devAttrs[dindex].DEV_UUID, tok_val,
@@ -160,6 +165,8 @@ pgstrom_collect_gpu_device(void)
 			}
 			else if (strcmp(tok_attr, "GLOBAL_MEMORY_SIZE") == 0)
 				devAttrs[dindex].DEV_TOTAL_MEMSZ = atol(tok_val);
+			else if (strcmp(tok_attr, "PCI_BAR1_MEMORY_SIZE") == 0)
+				devAttrs[dindex].DEV_BAR1_MEMSZ = atol(tok_val);
 #include "device_attrs.h"
 			else
 				elog(ERROR, "incorrect gpuinfo -md format");
@@ -177,7 +184,6 @@ pgstrom_collect_gpu_device(void)
 		char			path[MAXPGPATH];
 		char			linebuf[2048];
 		FILE		   *filp;
-		struct stat		stat_buf;
 
 		/* Recommend to use Pascal or later */
 		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
@@ -221,17 +227,6 @@ pgstrom_collect_gpu_device(void)
 				dattrs->NUMA_NODE_ID = atoi(linebuf);
 			fclose(filp);
 		}
-
-		/* Get PCI-E BAR1 resource size */
-		snprintf(path, sizeof(path),
-				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/resource1",
-				 dattrs->PCI_DOMAIN_ID,
-				 dattrs->PCI_BUS_ID,
-				 dattrs->PCI_DEVICE_ID);
-		if (stat(path, &stat_buf) != 0)
-			dattrs->DEV_BAR1_MEMSZ = 0;
-		else
-			dattrs->DEV_BAR1_MEMSZ = stat_buf.st_size;
 		
 		/* Log brief CUDA device properties */
 		resetStringInfo(&str);
@@ -489,8 +484,8 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	fncxt = SRF_PERCALL_SETUP();
 
-	dindex = fncxt->call_cntr / (lengthof(DevAttrCatalog) + 4);
-	aindex = fncxt->call_cntr % (lengthof(DevAttrCatalog) + 4);
+	dindex = fncxt->call_cntr / (lengthof(DevAttrCatalog) + 5);
+	aindex = fncxt->call_cntr % (lengthof(DevAttrCatalog) + 5);
 
 	if (dindex >= numDevAttrs)
 		SRF_RETURN_DONE(fncxt);
@@ -503,22 +498,27 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	else if (aindex == 1)
 	{
+		att_name = "GPU Device Brand";
+		att_value = dattrs->DEV_BRAND;
+	}
+	else if (aindex == 2)
+	{
 		att_name = "GPU Device UUID";
 		att_value = dattrs->DEV_UUID;
 	}
-	else if (aindex == 2)
+	else if (aindex == 3)
 	{
 		att_name = "GPU Total RAM Size";
 		att_value = format_bytesz(dattrs->DEV_TOTAL_MEMSZ);
 	}
-	else if (aindex == 3)
+	else if (aindex == 4)
 	{
-		att_name = "GPU PCI-E Bar1 Size";
+		att_name = "GPU PCI Bar1 Size";
 		att_value = format_bytesz(dattrs->DEV_BAR1_MEMSZ);
 	}
 	else
 	{
-		int		i = aindex - 4;
+		int		i = aindex - 5;
 		int		value = *((int *)((char *)dattrs +
 								  DevAttrCatalog[i].attr_offset));
 

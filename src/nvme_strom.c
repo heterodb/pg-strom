@@ -1573,7 +1573,10 @@ pgstrom_init_gpu_direct(void)
 	{
 		for (i=0; i < numDevAttrs; i++)
 		{
-			if (devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
+			/* TESLA or QUADRO with PCI-BAR1 > 256MB */
+			if ((strcmp(devAttrs[i].DEV_BRAND, "TESLA") == 0 ||
+				 strcmp(devAttrs[i].DEV_BRAND, "QUADRO") == 0) &&
+				devAttrs[i].DEV_BAR1_MEMSZ > (256UL << 20))
 			{
 				gpudirect_enabled = true;
 				break;

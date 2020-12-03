@@ -339,7 +339,7 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 #
 $(GPUINFO): $(GPUINFO_DEPEND)
 	$(CC) $(GPUINFO_CFLAGS) \
-              $(GPUINFO_SOURCE)  -o $@ -lcuda
+              $(GPUINFO_SOURCE)  -o $@ -lcuda -lnvidia-ml
 
 $(PG2ARROW): $(PG2ARROW_DEPEND)
 	$(CC) $(PG2ARROW_CFLAGS) \

@@ -41,6 +41,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cuda.h>
+#include <nvml.h>
 #include "../src/nvme_strom.h"
 
 /*
@@ -250,24 +251,24 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 	return 0;
 }
 
-static void output_device(CUdevice device, int dindex, int dev_id)
+static void output_device(CUdevice cuda_device,
+						  nvmlDevice_t nvml_device,
+						  int dindex)
 {
 	char		dev_name[1024];
 	CUuuid		dev_uuid;
 	size_t		dev_memsz;
 	int			dev_prop;
 	char		uuid[80];
+	const char *label;
+	nvmlBrandType_t nvml_brand;
+	nvmlBAR1Memory_t nvml_bar1;
 	int			i;
 	CUresult	rc;
-
-	/* device identifier */
-	if (!machine_format)
-		printf("--------\nDevice Identifier: %d\n", dev_id);
-	else
-		printf("DEVICE%d:DEVICE_ID=%d\n", dindex, dev_id);
+	nvmlReturn_t rv;
 
 	/* device name */
-	rc = cuDeviceGetName(dev_name, sizeof(dev_name), device);
+	rc = cuDeviceGetName(dev_name, sizeof(dev_name), cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog("failed on cuDeviceGetName: %s", cuErrorName(rc));
 	if (!machine_format)
@@ -275,8 +276,27 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 	else
 		printf("DEVICE%d:DEVICE_NAME=%s\n", dindex, dev_name);
 
+	/* device Brand (by NVML) */
+	rv = nvmlDeviceGetBrand(nvml_device, &nvml_brand);
+	if (rv != NVML_SUCCESS)
+		elog("failed on nvmlDeviceGetBrand: %s", nvmlErrorString(rv));
+	switch (nvml_brand)
+	{
+		case NVML_BRAND_QUADRO:  label = "QUADRO";  break;
+		case NVML_BRAND_TESLA:   label = "TESLA";   break;
+		case NVML_BRAND_NVS:     label = "NVS";     break;
+		case NVML_BRAND_GRID:    label = "GRID";    break;
+		case NVML_BRAND_GEFORCE: label = "GEFORCE"; break;
+		case NVML_BRAND_TITAN:   label = "TITAN";   break;
+		default:                 label = "UNKNOWN"; break;
+	}
+	if (!machine_format)
+		printf("Device Brand: %s\n", label);
+    else
+		printf("DEVICE%d:DEVICE_BRAND=%s\n", dindex, label);
+
 	/* device uuid */
-	rc = cuDeviceGetUuid(&dev_uuid, device);
+	rc = cuDeviceGetUuid(&dev_uuid, cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
 	snprintf(uuid, sizeof(uuid),
@@ -303,13 +323,23 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 		printf("DEVICE%d:DEVICE_UUID=%s\n", dindex, uuid);
 
 	/* device RAM size */
-	rc = cuDeviceTotalMem(&dev_memsz, device);
+	rc = cuDeviceTotalMem(&dev_memsz, cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog("failed on cuDeviceTotalMem: %s", cuErrorName(rc));
 	if (!machine_format)
 		printf("Global memory size: %zuMB\n", dev_memsz >> 20);
 	else
 		printf("DEVICE%d:GLOBAL_MEMORY_SIZE=%zu\n", dindex, dev_memsz);
+
+	/* device BAR1 size (by NVML) */
+	rv = nvmlDeviceGetBAR1MemoryInfo(nvml_device, &nvml_bar1);
+	if (rv != NVML_SUCCESS)
+		elog("failed on nvmlDeviceGetBAR1MemoryInfo: %s",
+			 nvmlErrorString(rv));
+	if (!machine_format)
+		printf("PCI Bar1 memory size: %lluMB\n", nvml_bar1.bar1Total >> 20);
+	else
+		printf("DEVICE%d:PCI_BAR1_MEMORY_SIZE=%llu\n", dindex, nvml_bar1.bar1Total);
 
 	for (i=0; i < lengthof(attribute_catalog); i++)
 	{
@@ -323,7 +353,7 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 		if (attisminor && !detailed_output)
 			continue;
 
-		rc = cuDeviceGetAttribute(&dev_prop, attcode, device);
+		rc = cuDeviceGetAttribute(&dev_prop, attcode, cuda_device);
 		if (rc != CUDA_SUCCESS)
 		{
 			if (rc == CUDA_ERROR_INVALID_VALUE)
@@ -415,11 +445,14 @@ static void output_device(CUdevice device, int dindex, int dev_id)
 int main(int argc, char *argv[])
 {
 	StromCmd__LicenseInfo *li;
-	CUdevice	device;
+	int		   *gpu_id = NULL;
+	CUdevice   *cuda_devices = NULL;
+	nvmlDevice_t *nvml_devices = NULL;
 	CUresult	rc;
+	nvmlReturn_t rv;
 	int			version;
 	int			i, j, count;
-	int			nr_gpus = 1;
+	int			nr_gpus = 0;
 	int			opt;
 	FILE	   *filp;
 
@@ -455,6 +488,10 @@ int main(int argc, char *argv[])
 	/*
 	 * CUDA Runtime version
 	 */
+	rv = nvmlInit();
+	if (rv != NVML_SUCCESS)
+		elog("failed on nvmlInit: %s", nvmlErrorString(rv));
+
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog("failed on cuInit: %s", cuErrorName(rc));
@@ -501,23 +538,35 @@ int main(int argc, char *argv[])
 	 */
 	li = commercial_license_validation(HETERODB_LICENSE_PATHNAME);
 
-	/*
-	 * Number of devices available
-	 */
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
 		elog("cuDeviceGetCount: %s", cuErrorName(rc));
-	if (!li)
-		nr_gpus = 1;
-	else
+	if (count > 0)
 	{
-		for (i=0, nr_gpus=0; i < count; i++)
+		gpu_id = alloca(sizeof(int) * count);
+		cuda_devices = alloca(sizeof(CUdevice) * count);
+		nvml_devices = alloca(sizeof(nvmlDevice_t) * count);
+		for (i=0; i < count; i++)
 		{
-			rc = cuDeviceGet(&device, i);
+			CUdevice		__cuda_device;
+			nvmlDevice_t	__nvml_device;
+
+			rc = cuDeviceGet(&__cuda_device, i);
 			if (rc != CUDA_SUCCESS)
 				elog("failed on cuDeviceGet: %s", cuErrorName(rc));
-			if (check_device(device, li))
+			rv = nvmlDeviceGetHandleByIndex(i, &__nvml_device);
+			if (rv != NVML_SUCCESS)
+				elog("failed on nvmlDeviceGetHandleByIndex: %s",
+					 nvmlErrorString(rv));
+			if (!li || check_device(__cuda_device, li))
+			{
+				gpu_id[nr_gpus] = i;
+				cuda_devices[nr_gpus] = __cuda_device;
+				nvml_devices[nr_gpus] = __nvml_device;
 				nr_gpus++;
+				if (!li)
+					break;
+			}
 		}
 	}
 	if (!machine_format)
@@ -525,16 +574,16 @@ int main(int argc, char *argv[])
 	else
 		printf("PLATFORM:NUMBER_OF_DEVICES=%d\n", nr_gpus);
 
-	for (i=0, j=0; i < count; i++)
+	for (i=0; i < nr_gpus; i++)
 	{
-		rc = cuDeviceGet(&device, i);
-		if (rc != CUDA_SUCCESS)
-			elog("failed on cuDeviceGet: %s", cuErrorName(rc));
-		if (!li || check_device(device, li))
-			output_device(device, j++, i);
-		if (!li)
-			break;
+		/* device identifier */
+		if (!machine_format)
+			printf("--------\nDevice Identifier: %d\n", gpu_id[i]);
+		else
+			printf("DEVICE%d:DEVICE_ID=%d\n", i, gpu_id[i]);
+
+		output_device(cuda_devices[i],
+					  nvml_devices[i], i);
 	}
-	assert(j <= nr_gpus);
 	return 0;
 }
