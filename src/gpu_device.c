@@ -20,7 +20,6 @@
 /* variable declarations */
 DevAttributes	   *devAttrs = NULL;
 cl_int				numDevAttrs = 0;
-cl_ulong			devComputeCapability = UINT_MAX;
 cl_uint				devBaselineMaxThreadsPerBlock = UINT_MAX;
 
 /* catalog of device attributes */
@@ -180,7 +179,6 @@ pgstrom_collect_gpu_device(void)
 	for (i=0, j=0; i < num_devices; i++)
 	{
 		DevAttributes  *dattrs = &devAttrs[i];
-		int				compute_capability;
 		char			path[MAXPGPATH];
 		char			linebuf[2048];
 		FILE		   *filp;
@@ -197,12 +195,20 @@ pgstrom_collect_gpu_device(void)
 		}
 
 		/* Update the baseline device capability */
-		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
-							  dattrs->COMPUTE_CAPABILITY_MINOR);
-		devComputeCapability = Min(devComputeCapability,
-								   compute_capability);
 		devBaselineMaxThreadsPerBlock = Min(devBaselineMaxThreadsPerBlock,
 											dattrs->MAX_THREADS_PER_BLOCK);
+
+		/*
+		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB supports
+		 * GPUDirect SQL
+		 */
+		if ((strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
+			 strcmp(dattrs->DEV_BRAND, "QUADRO") == 0) &&
+			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
+			dattrs->DEV_SUPPORT_GPUDIRECT = true;
+		else
+			dattrs->DEV_SUPPORT_GPUDIRECT = false;
+
 		/*
 		 * read the numa node-id from the sysfs entry
 		 *

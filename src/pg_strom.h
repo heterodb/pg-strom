@@ -676,6 +676,7 @@ typedef struct DevAttributes
 	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
+	bool		DEV_SUPPORT_GPUDIRECT;
 #define DEV_ATTR(LABEL,a,b,c)		\
 	cl_int		LABEL;
 #include "device_attrs.h"
@@ -684,7 +685,6 @@ typedef struct DevAttributes
 
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
-extern cl_ulong			devComputeCapability;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);
