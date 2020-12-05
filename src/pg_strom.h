@@ -1438,10 +1438,10 @@ extern void gstoreFdwUnmapDeviceMemory(GpuContext *gcontext,
 									   pgstrom_data_store *pds);
 
 #define GSTORE_FDW_SYSATTR_OID		6116
-extern void gstoreFdwBgWorkerBegin(void);
-extern bool gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array);
-extern bool gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array);
-extern void gstoreFdwBgWorkerEnd(void);
+extern void gstoreFdwBgWorkerBegin(int cuda_dindex);
+extern bool gstoreFdwBgWorkerDispatch(int cuda_dindex);
+extern bool gstoreFdwBgWorkerIdleTask(int cuda_dindex);
+extern void gstoreFdwBgWorkerEnd(int cuda_dindex);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

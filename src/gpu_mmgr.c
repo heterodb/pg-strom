@@ -78,11 +78,10 @@ typedef struct
  */
 typedef struct
 {
-	dlist_node		chain;
+	CUipcMemHandle	m_handle;
 	cl_int			cuda_dindex;
 	size_t			bytesize;
    	CUdeviceptr		m_devptr;	/* valid only keeper */
-	CUipcMemHandle	m_handle;
 	Oid				owner;		/* owner of the preserved memory */
 	TimestampTz		ctime;		/* time of creation */
 } GpuMemPreserved;
@@ -104,20 +103,15 @@ typedef struct
 /*
  * GpuMemPreservedHead
  */
-#define GPUMEM_PRESERVED_HASH_NSLOTS		500
-
 typedef struct
 {
-	Latch		   *gmemp_keeper;
+	GpuMemPreservedRequest __gmemp_req_items[120];
 	slock_t			lock;
-	/* list of GpuMemPreservedRequest */
-	dlist_head		gmemp_req_pending_list;
 	dlist_head		gmemp_req_free_list;
-	/* list of GpuMemPreserved */
-	dlist_head		gmemp_free_list;
-	dlist_head		gmemp_active_list[GPUMEM_PRESERVED_HASH_NSLOTS];
-	GpuMemPreservedRequest gmemp_req_array[100];	
-	GpuMemPreserved	gmemp_array[FLEXIBLE_ARRAY_MEMBER];
+	struct {
+		Latch	   *gmemp_req_latch;
+		dlist_head	gmemp_req_pending;
+	} bgworkers[FLEXIBLE_ARRAY_MEMBER];
 } GpuMemPreservedHead;
 
 /* functions */
@@ -129,11 +123,9 @@ static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static size_t		gm_segment_sz;	/* bytesize */
 
-static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
-
-Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
+static HTAB		   *gmemp_htab = NULL;	/* for GpuMemPreserved */
 
 /*
  * gpuMemFreeChunk
@@ -779,7 +771,7 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 	SpinLockAcquire(&gmemp_head->lock);
 	for (;;)
 	{
-		if (!gmemp_head->gmemp_keeper)
+		if (!gmemp_head->bgworkers[cuda_dindex].gmemp_req_latch)
 		{
 			SpinLockRelease(&gmemp_head->lock);
 			return CUDA_ERROR_NOT_READY;
@@ -788,7 +780,7 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 			break;
 		SpinLockRelease(&gmemp_head->lock);
 		CHECK_FOR_INTERRUPTS();
-		pg_usleep(100000L);		/* 100msec */
+		pg_usleep(5000L);		/* 5msec */
 		SpinLockAcquire(&gmemp_head->lock);
 	}
 	dnode = dlist_pop_head_node(&gmemp_head->gmemp_req_free_list);
@@ -804,9 +796,9 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 	gmemp_req->cuda_dindex = cuda_dindex;
 	gmemp_req->bytesize = bytesize;
 
-	dlist_push_tail(&gmemp_head->gmemp_req_pending_list,
+	dlist_push_tail(&gmemp_head->bgworkers[cuda_dindex].gmemp_req_pending,
 					&gmemp_req->chain);
-	SetLatch(gmemp_head->gmemp_keeper);
+	SetLatch(gmemp_head->bgworkers[cuda_dindex].gmemp_req_latch);
 	while (gmemp_req->result == (CUresult) UINT_MAX)
 	{
 		SpinLockRelease(&gmemp_head->lock);
@@ -828,9 +820,33 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 		{
 			SpinLockAcquire(&gmemp_head->lock);
 			if (gmemp_req->chain.next && gmemp_req->chain.prev)
+			{
+				/* not fetched yet */
 				dlist_delete(&gmemp_req->chain);
-			dlist_push_tail(&gmemp_head->gmemp_req_free_list,
-							&gmemp_req->chain);
+				dlist_push_tail(&gmemp_head->gmemp_req_free_list,
+								&gmemp_req->chain);
+			}
+			else if (gmemp_req->result == (CUresult) UINT_MAX)
+			{
+				/* under the process */
+				gmemp_req->backend = NULL;
+			}
+			else if (gmemp_req->bytesize > 0)
+			{
+				/* already allocated; revert allocation */
+				gmemp_req->backend = NULL;
+				gmemp_req->result = (CUresult) UINT_MAX;
+				gmemp_req->bytesize = 0;
+				dlist_push_tail(&gmemp_head->bgworkers[cuda_dindex].gmemp_req_pending,
+								&gmemp_req->chain);
+				SetLatch(gmemp_head->bgworkers[cuda_dindex].gmemp_req_latch);
+			}
+			else
+			{
+				/* already released; it's ok */
+				dlist_push_tail(&gmemp_head->gmemp_req_free_list,
+								&gmemp_req->chain);
+			}
 			SpinLockRelease(&gmemp_head->lock);
 			PG_RE_THROW();
 		}
@@ -1082,71 +1098,55 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 static CUresult
 gpummgrHandleAllocPreserved(GpuMemPreservedRequest *gmemp_req)
 {
+	MemoryContext	memcxt = CurrentMemoryContext;
 	GpuMemPreserved *gmemp;
 	CUresult		rc = CUDA_SUCCESS;
 	CUdeviceptr		m_devptr;
 	CUipcMemHandle	m_handle;
-	dlist_node	   *dnode;
-	pg_crc32		crc;
-	int				i;
-
-	if (dlist_is_empty(&gmemp_head->gmemp_free_list))
-		return CUDA_ERROR_OUT_OF_MEMORY;
-
-	dnode = dlist_pop_head_node(&gmemp_head->gmemp_free_list);
-	gmemp = dlist_container(GpuMemPreserved, chain, dnode);
-	memset(&gmemp->chain, 0, sizeof(dlist_node));
+	bool			found;
 
 	rc = cuMemAlloc(&m_devptr, gmemp_req->bytesize);
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
-		goto error_1;
+		return rc;
 	}
 
 	rc = cuIpcGetMemHandle(&m_handle, m_devptr);
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
-		goto error_2;
+		cuMemFree(m_devptr);
+		return rc;
 	}
-	INIT_LEGACY_CRC32(crc);
-
-	gmemp->cuda_dindex = gmemp_req->cuda_dindex;
-	gmemp->bytesize	= gmemp_req->bytesize;
-	gmemp->m_devptr	= m_devptr;
-	memcpy(&gmemp->m_handle, &m_handle, sizeof(CUipcMemHandle));
-	gmemp->owner = gmemp_req->owner;
-	gmemp->ctime = GetCurrentTimestamp();
-
-	INIT_LEGACY_CRC32(crc);
-	COMP_LEGACY_CRC32(crc, &gmemp_req->cuda_dindex, sizeof(cl_int));
-	COMP_LEGACY_CRC32(crc, &m_handle, sizeof(CUipcMemHandle));
-	FIN_LEGACY_CRC32(crc);
-	i = crc % GPUMEM_PRESERVED_HASH_NSLOTS;
-	dlist_push_tail(&gmemp_head->gmemp_active_list[i],
-					&gmemp->chain);
-#if 0
-	elog(LOG, "alloc: preserved memory %zu bytes (%lx,%lx,%lx,%lx,%lx,%lx,%lx,%lx)",
-		 gmemp_req->bytesize,
-		 ((cl_ulong *)&m_handle)[0],
-		 ((cl_ulong *)&m_handle)[1],
-		 ((cl_ulong *)&m_handle)[2],
-		 ((cl_ulong *)&m_handle)[3],
-		 ((cl_ulong *)&m_handle)[4],
-		 ((cl_ulong *)&m_handle)[5],
-		 ((cl_ulong *)&m_handle)[6],
-		 ((cl_ulong *)&m_handle)[7]);
-#endif
-	/* successfully done */
 	memcpy(&gmemp_req->m_handle, &m_handle, sizeof(CUipcMemHandle));
 
-	return CUDA_SUCCESS;
+	PG_TRY();
+	{
+		gmemp = hash_search(gmemp_htab, &m_handle, HASH_ENTER, &found);
+		if (found)
+			elog(ERROR, "Bug? duplicated GPU preserved memory handle");
+		gmemp->cuda_dindex = gmemp_req->cuda_dindex;
+		gmemp->bytesize = gmemp_req->bytesize;
+		gmemp->m_devptr = m_devptr;
+		gmemp->owner = gmemp_req->owner;
+		gmemp->ctime = GetCurrentTimestamp();
+	}
+	PG_CATCH();
+	{
+		ErrorData  *errdata;
 
-error_2:
-	cuMemFree(m_devptr);
-error_1:
-	dlist_push_head(&gmemp_head->gmemp_free_list, &gmemp->chain);
+		MemoryContextSwitchTo(memcxt);
+		errdata = CopyErrorData();
+		elog(WARNING, "%s:%d) %s",
+			 errdata->filename,
+			 errdata->lineno,
+			 errdata->message);
+		FlushErrorState();
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+	}
+	PG_END_TRY();
+
 	return rc;
 }
 
@@ -1157,113 +1157,98 @@ static CUresult
 gpummgrHandleFreePreserved(GpuMemPreservedRequest *gmemp_req)
 {
 	GpuMemPreserved *gmemp = NULL;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	int			i;
-	CUresult	rc, result = CUDA_SUCCESS;
+	CUresult	rc;
 
-	INIT_LEGACY_CRC32(crc);
-	COMP_LEGACY_CRC32(crc, &gmemp_req->cuda_dindex, sizeof(cl_int));
-	COMP_LEGACY_CRC32(crc, &gmemp_req->m_handle, sizeof(CUipcMemHandle));
-	FIN_LEGACY_CRC32(crc);
-
-	i = crc % GPUMEM_PRESERVED_HASH_NSLOTS;
-	dlist_foreach(iter, &gmemp_head->gmemp_active_list[i])
-	{
-		GpuMemPreserved *temp = dlist_container(GpuMemPreserved,
-												chain, iter.cur);
-		if (temp->cuda_dindex == gmemp_req->cuda_dindex &&
-			memcmp(&temp->m_handle, &gmemp_req->m_handle,
-				   sizeof(CUipcMemHandle)) == 0)
-		{
-			gmemp = temp;
-			break;
-		}
-	}
+	gmemp = hash_search(gmemp_htab, &gmemp_req->m_handle, HASH_FIND, NULL);
 	if (!gmemp)
 		return CUDA_ERROR_NOT_FOUND;
 
 	rc = cuMemFree(gmemp->m_devptr);
 	if (rc != CUDA_SUCCESS)
-	{
 		elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-		result = rc;
-	}
-	elog(DEBUG1, "free: preserved memory at %p", (void *)gmemp->m_devptr);
 
-	dlist_delete(&gmemp->chain);
-	memset(gmemp, 0, sizeof(GpuMemPreserved));
-	dlist_push_head(&gmemp_head->gmemp_free_list,
-					&gmemp->chain);
-	return result;
+	hash_search(gmemp_htab, &gmemp_req->m_handle, HASH_REMOVE, NULL);
+
+	return rc;
 }
 
 /*
  * gpummgrBgWorker(Begin|Dispatch|End)
  */
 static void
-gpummgrBgWorkerBegin(void)
+gpummgrBgWorkerBegin(int cuda_dindex)
 {
+	HASHCTL		hctl;
+
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(CUipcMemHandle);
+	hctl.entrysize = sizeof(GpuMemPreserved);
+	hctl.hcxt = TopMemoryContext;
+
+	gmemp_htab = hash_create("Preserved GPU Memory", 256, &hctl,
+							 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	SpinLockAcquire(&gmemp_head->lock);
-    gmemp_head->gmemp_keeper = MyLatch;
+	gmemp_head->bgworkers[cuda_dindex].gmemp_req_latch = MyLatch;
 	SpinLockRelease(&gmemp_head->lock);
 }
 
 static bool
-gpummgrBgWorkerDispatch(CUcontext *cuda_context_array)
+gpummgrBgWorkerDispatch(int cuda_dindex)
 {
 	GpuMemPreservedRequest *gmemp_req;
-	dlist_node *dnode;
-	CUcontext	cuda_context;
+	dlist_head *plist;
 	CUresult	rc;
 
 	SpinLockAcquire(&gmemp_head->lock);
-	if (dlist_is_empty(&gmemp_head->gmemp_req_pending_list))
+	plist = &gmemp_head->bgworkers[cuda_dindex].gmemp_req_pending;
+	if (dlist_is_empty(plist))
 	{
 		SpinLockRelease(&gmemp_head->lock);
-		return true;	/* gpummgr can go to sleep */
+		return true;	/* bgworker can go to sleep */
 	}
-	dnode = dlist_pop_head_node(&gmemp_head->gmemp_req_pending_list);
-	gmemp_req = dlist_container(GpuMemPreservedRequest, chain, dnode);
+	gmemp_req = dlist_container(GpuMemPreservedRequest, chain,
+								dlist_pop_head_node(plist));
 	memset(&gmemp_req->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gmemp_head->lock);
 
-	Assert(gmemp_req->cuda_dindex >= 0 &&
-		   gmemp_req->cuda_dindex < numDevAttrs);
-	cuda_context = cuda_context_array[gmemp_req->cuda_dindex];
+	if (gmemp_req->cuda_dindex != cuda_dindex)
+		rc = CUDA_ERROR_INVALID_VALUE;
+	else if (gmemp_req->bytesize > 0)
+		rc = gpummgrHandleAllocPreserved(gmemp_req);
+	else if (gmemp_req->bytesize == 0)
+		rc = gpummgrHandleFreePreserved(gmemp_req);
+	else
+		rc = CUDA_ERROR_INVALID_VALUE;
 
-	rc = cuCtxPushCurrent(cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
+	SpinLockAcquire(&gmemp_head->lock);
+	if (gmemp_req->backend)
+	{
+		gmemp_req->result = rc;
+		SetLatch(gmemp_req->backend);
+	}
 	else
 	{
-		if (gmemp_req->bytesize > 0)
-			rc = gpummgrHandleAllocPreserved(gmemp_req);
-		else if (gmemp_req->bytesize == 0)
-			rc = gpummgrHandleFreePreserved(gmemp_req);
-		else
-			rc = CUDA_ERROR_INVALID_VALUE;
-
-		if (cuCtxPopCurrent(NULL) != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent(NULL)");
+		memset(gmemp_req, 0, sizeof(GpuMemPreservedRequest));
+		dlist_push_tail(&gmemp_head->gmemp_req_free_list,
+						&gmemp_req->chain);
 	}
-	gmemp_req->result = rc;
-	SetLatch(gmemp_req->backend);
+	SpinLockRelease(&gmemp_head->lock);
 
 	return false;
 }
 
 static bool
-gpummgrBgWorkerIdleTask(CUcontext *cuda_context_array)
+gpummgrBgWorkerIdleTask(int cuda_dindex)
 {
 	return true;
 }
 
 static void
-gpummgrBgWorkerEnd(void)
+gpummgrBgWorkerEnd(int cuda_dindex)
 {
 	SpinLockAcquire(&gmemp_head->lock);
-	gmemp_head->gmemp_keeper = NULL;
+	gmemp_head->bgworkers[cuda_dindex].gmemp_req_latch = NULL;
 	SpinLockRelease(&gmemp_head->lock);
 }
 
@@ -1290,51 +1275,45 @@ gpummgrBgWorkerSigTerm(SIGNAL_ARGS)
 void
 gpummgrBgWorkerMain(Datum arg)
 {
+	int			cuda_dindex = DatumGetInt32(arg);
 	CUdevice	cuda_device;
-	CUcontext  *cuda_context_array;
+	CUcontext	cuda_context;
 	CUresult	rc;
-	int			i;
 
 	pqsignal(SIGTERM, gpummgrBgWorkerSigTerm);
 	BackgroundWorkerUnblockSignals();
 
-	/* avoid to use MPS */
+	/* never use MPS */
 	if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
 		elog(ERROR, "failed on setenv: %m");
+
 	/* init CUDA context */
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", errorText(rc));
+	rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
+	rc = cuCtxCreate(&cuda_context,
+					 CU_CTX_SCHED_AUTO,
+					 cuda_device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
 
-	cuda_context_array = calloc(numDevAttrs, sizeof(CUcontext));
-	if (!cuda_context_array)
-		elog(ERROR, "out of memory");
-
-	for (i=0; i < numDevAttrs; i++)
-	{
-		rc = cuDeviceGet(&cuda_device, devAttrs[i].DEV_ID);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-
-		rc = cuCtxCreate(&cuda_context_array[i],
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-	}
 	/* initial setup */
-	gpummgrBgWorkerBegin();
-	gstoreFdwBgWorkerBegin();
+	gpummgrBgWorkerBegin(cuda_dindex);
+	gstoreFdwBgWorkerBegin(cuda_dindex);
 	/*
 	 * Event loop
 	 */
 	while (!gpummgr_bgworker_got_signal)
 	{
-		if (gpummgrBgWorkerDispatch(cuda_context_array) &
-			gstoreFdwBgWorkerDispatch(cuda_context_array))
+		if (gpummgrBgWorkerDispatch(cuda_dindex) &
+			gstoreFdwBgWorkerDispatch(cuda_dindex))
 		{
-			if (gpummgrBgWorkerIdleTask(cuda_context_array) &
-				gstoreFdwBgWorkerIdleTask(cuda_context_array))
+			if (gpummgrBgWorkerIdleTask(cuda_dindex) &
+				gstoreFdwBgWorkerIdleTask(cuda_dindex))
 			{
 				int		ev = WaitLatch(MyLatch,
 									   WL_LATCH_SET |
@@ -1349,104 +1328,20 @@ gpummgrBgWorkerMain(Datum arg)
 		}
 	}
 	/* Exit */
-	gpummgrBgWorkerEnd();
-	gstoreFdwBgWorkerEnd();
+	gpummgrBgWorkerEnd(cuda_dindex);
+	gstoreFdwBgWorkerEnd(cuda_dindex);
 }
 
 /*
- * pgstrom_device_preserved_meminfo
+ * pgstrom_device_preserved_meminfo (deprecated)
  */
+Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
+
 Datum
 pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 {
-	FuncCallContext *fncxt;
-	Datum		values[5];
-	bool		isnull[5];
-	HeapTuple	tuple;
-	GpuMemPreserved *gmemp, *lcopy;
-	List	   *gmemp_list = NIL;
-	char	   *temp;
-
-	if (SRF_IS_FIRSTCALL())
-	{
-		TupleDesc		tupdesc;
-		MemoryContext	oldcxt;
-		dlist_iter		iter;
-		int				i;
-
-		fncxt = SRF_FIRSTCALL_INIT();
-		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
-
-		tupdesc = CreateTemplateTupleDesc(5);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "device_nr",
-						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "handle",
-						   BYTEAOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "owner",
-						   REGROLEOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "length",
-						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "ctime",
-						   TIMESTAMPTZOID, -1, 0);
-		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
-
-		/* collect current preserved GPU memory information */
-		PG_TRY();
-		{
-			SpinLockAcquire(&gmemp_head->lock);
-			for (i=0; i < GPUMEM_PRESERVED_HASH_NSLOTS; i++)
-			{
-				dlist_foreach(iter, &gmemp_head->gmemp_active_list[i])
-				{
-					gmemp = dlist_container(GpuMemPreserved, chain, iter.cur);
-					lcopy = palloc(sizeof(GpuMemPreserved));
-					memcpy(lcopy, gmemp, sizeof(GpuMemPreserved));
-
-					gmemp_list = lappend(gmemp_list, lcopy);
-				}
-			}
-		}
-		PG_CATCH();
-		{
-			SpinLockRelease(&gmemp_head->lock);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		SpinLockRelease(&gmemp_head->lock);
-
-		fncxt->user_fctx = gmemp_list;
-		MemoryContextSwitchTo(oldcxt);
-	}
-	fncxt = SRF_PERCALL_SETUP();
-	gmemp_list = (List *)fncxt->user_fctx;
-
-	if (gmemp_list == NIL)
-		SRF_RETURN_DONE(fncxt);
-	gmemp = linitial(gmemp_list);
-	fncxt->user_fctx = list_delete_first(gmemp_list);
-
-	memset(isnull, 0, sizeof(isnull));
-	Assert(gmemp->cuda_dindex >= 0 &&
-		   gmemp->cuda_dindex < numDevAttrs);
-	values[0] = Int32GetDatum(devAttrs[gmemp->cuda_dindex].DEV_ID);
-	if (superuser() || has_privs_of_role(GetUserId(), gmemp->owner))
-	{
-		temp = palloc(sizeof(CUipcMemHandle) + VARHDRSZ);
-		memcpy(temp + VARHDRSZ, &gmemp->m_handle, sizeof(CUipcMemHandle));
-		SET_VARSIZE(temp, sizeof(CUipcMemHandle) + VARHDRSZ);
-		values[1] = PointerGetDatum(temp);
-	}
-	else
-	{
-		isnull[1] = true;
-		values[1] = 0;
-	}
-	values[2] = ObjectIdGetDatum(gmemp->owner);
-	values[3] = Int64GetDatum(gmemp->bytesize);
-	values[4] = TimestampTzGetDatum(gmemp->ctime);
-
-	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
-	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+	elog(ERROR, "pgstrom_device_preserved_meminfo() is deprecated");
+	PG_RETURN_NULL();
 }
 PG_FUNCTION_INFO_V1(pgstrom_device_preserved_meminfo);
 
@@ -1479,27 +1374,23 @@ pgstrom_startup_gpu_mmgr(void)
 	 * GpuMemPreservedHead
 	 */
 	required = STROMALIGN(offsetof(GpuMemPreservedHead,
-							gmemp_array[num_preserved_gpu_memory_regions]));
+								   bgworkers[numDevAttrs]));
 	gmemp_head = ShmemInitStruct("GPU Device Memory for Multi-Processes",
-								   required, &found);
+								 required, &found);
 	if (found)
 		elog(ERROR, "Bug? GPU Device Memory for Multi-Processes exists");
 	memset(gmemp_head, 0, required);
 	SpinLockInit(&gmemp_head->lock);
-	dlist_init(&gmemp_head->gmemp_req_pending_list);
 	dlist_init(&gmemp_head->gmemp_req_free_list);
-	for (i=0; i < lengthof(gmemp_head->gmemp_req_array); i++)
+	for (i=0; i < lengthof(gmemp_head->__gmemp_req_items); i++)
 	{
 		dlist_push_tail(&gmemp_head->gmemp_req_free_list,
-						&gmemp_head->gmemp_req_array[i].chain);
+						&gmemp_head->__gmemp_req_items[i].chain);
 	}
-	dlist_init(&gmemp_head->gmemp_free_list);
-	for (i=0; i < GPUMEM_PRESERVED_HASH_NSLOTS; i++)
-		dlist_init(&gmemp_head->gmemp_active_list[i]);
-	for (i=0; i < num_preserved_gpu_memory_regions; i++)
+	for (i=0; i < numDevAttrs; i++)
 	{
-		dlist_push_tail(&gmemp_head->gmemp_free_list,
-						&gmemp_head->gmemp_array[i].chain);
+		gmemp_head->bgworkers[i].gmemp_req_latch = NULL;
+		dlist_init(&gmemp_head->bgworkers[i].gmemp_req_pending);
 	}
 }
 
@@ -1511,7 +1402,7 @@ pgstrom_init_gpu_mmgr(void)
 {
 	Size		segment_sz;
 	Size		required;
-	BackgroundWorker worker;
+	int			dindex;
 
 	/*
 	 * segment size of the device memory in kB
@@ -1533,37 +1424,30 @@ pgstrom_init_gpu_mmgr(void)
 			 (int)(pgstrom_chunk_size() >> 10));
 	gm_segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
 
-	/* pg_strom.max_nchunks_for_multi_processes */
-	DefineCustomIntVariable("pg_strom.max_num_preserved_gpu_memory",
-							"max number of preserved GPU device memory for multi-process sharing",
-							NULL,
-							&num_preserved_gpu_memory_regions,
-							2048,
-							100,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
 	/*
 	 * Background workers per device, to keep device memory for multi-process
 	 */
-	memset(&worker, 0, sizeof(BackgroundWorker));
-	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-			 "PG-Strom GPU memory keeper");
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
-	worker.bgw_restart_time = 1;
-	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_strom");
-	snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpummgrBgWorkerMain");
-	worker.bgw_main_arg = 0;
-	RegisterBackgroundWorker(&worker);
+	for (dindex=0; dindex < numDevAttrs; dindex++)
+	{
+		BackgroundWorker worker;
+
+		memset(&worker, 0, sizeof(BackgroundWorker));
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "GPU%u memory keeper", dindex);
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_start_time = BgWorkerStart_PostmasterStart;
+		worker.bgw_restart_time = 1;
+		snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_strom");
+		snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpummgrBgWorkerMain");
+		worker.bgw_main_arg = Int32GetDatum(dindex);
+		RegisterBackgroundWorker(&worker);
+	}
 
 	/*
 	 * request for the static shared memory
 	 */
 	required = STROMALIGN(sizeof(GpuMemStatistics) * numDevAttrs) +
-		STROMALIGN(offsetof(GpuMemPreservedHead,
-							gmemp_array[num_preserved_gpu_memory_regions]));
+		STROMALIGN(offsetof(GpuMemPreservedHead, bgworkers[numDevAttrs]));
 	RequestAddinShmemSpace(required);
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_mmgr;

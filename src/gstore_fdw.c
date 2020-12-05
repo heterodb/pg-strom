@@ -44,17 +44,6 @@ typedef struct
 #define GPUSTORE_SHARED_DESC_NSLOTS		107
 typedef struct
 {
-	/* database name for kicker process */
-	int			kicker_database_status;
-	char		kicker_database_name[NAMEDATALEN];
-
-	/* IPC to GpuStore Background Worker */
-	Latch	   *background_latch;
-	slock_t		background_cmd_lock;
-	dlist_head	background_cmd_queue;
-	dlist_head	background_free_cmds;
-	GpuStoreBackgroundCommand __background_cmds[200];
-
 	/* Sync object for Row-level Locks */
 	ConditionVariable row_lock_cond;
 	
@@ -73,6 +62,19 @@ typedef struct
 	pg_atomic_uint64 debug_count7;
 	pg_atomic_uint64 debug_count8;
 	pg_atomic_uint64 debug_count9;
+
+	/* database name for process */
+	int			kicker_database_status;
+	char		kicker_database_name[NAMEDATALEN];
+
+	/* IPC to GstoreFdw background worker */
+	slock_t		bgworker_cmd_lock;
+	dlist_head	bgworker_free_cmds;
+	GpuStoreBackgroundCommand __bgworker_cmds[300];
+	struct {
+		Latch	   *latch;
+		dlist_head	cmd_queue;
+	} bgworkers[FLEXIBLE_ARRAY_MEMBER];
 } GpuStoreSharedHead;
 
 typedef struct
@@ -214,11 +216,14 @@ void  GstoreFdwMaintainerMain(Datum arg);
 static bool		gstoreFdwRemapBaseFile(GpuStoreDesc *gs_desc,
 									   bool abort_on_error);
 static GpuStoreDesc *gstoreFdwLookupGpuStoreDesc(Relation frel);
-static CUresult	gstoreFdwInvokeInitialLoad(Relation frel, bool is_async);
-static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async,
-										 uint64 end_pos);
-static CUresult gstoreFdwInvokeCompaction(Relation frel, bool is_async);
-static CUresult gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async);
+static CUresult	gstoreFdwInvokeInitialLoad(Oid ftable_oid,
+										   int cuda_dindex, bool is_async);
+static CUresult gstoreFdwInvokeApplyRedo(Oid ftable_oid, uint64 end_pos,
+										 int cuda_dindex, bool is_async);
+static CUresult gstoreFdwInvokeCompaction(Oid ftable_oid,
+										  int cuda_dindex, bool is_async);
+static CUresult gstoreFdwInvokeDropUnload(Oid ftable_oid,
+										  int cuda_dindex, bool is_async);
 static cl_uint	gstoreFdwAllocateRowId(GpuStoreSharedState *gs_sstate,
 									   GpuStoreRowIdMapHead *rowid_map);
 static void		gstoreFdwReleaseRowId(GpuStoreSharedState *gs_sstate,
@@ -952,7 +957,7 @@ GstoreGetForeignPlan(PlannerInfo *root,
 }
 
 static CUresult
-gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
+gstoreFdwApplyRedoDeviceBuffer(GpuStoreSharedState *gs_sstate)
 {
 	size_t		end_pos;
 
@@ -961,7 +966,8 @@ gstoreFdwApplyRedoDeviceBuffer(Relation frel, GpuStoreSharedState *gs_sstate)
 	end_pos = gs_sstate->redo_write_pos;
 	SpinLockRelease(&gs_sstate->redo_pos_lock);
 
-	return gstoreFdwInvokeApplyRedo(RelationGetRelid(frel), false, end_pos);
+	return gstoreFdwInvokeApplyRedo(gs_sstate->ftable_oid, end_pos,
+									gs_sstate->cuda_dindex, false);
 }
 
 static GpuStoreFdwState *
@@ -1025,7 +1031,7 @@ __ExecInitGstoreFdw(ScanState *ss, Bitmapset *outer_refs, Expr *indexExpr,
 		fdw_state->indexExprState = ExecInitExpr(indexExpr, &ss->ps);
 	/* synchronize device buffer prior to the kernel call */
 	if (apply_redo_log)
-		gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
+		gstoreFdwApplyRedoDeviceBuffer(gs_desc->gs_sstate);
 
 	return fdw_state;
 }
@@ -1503,7 +1509,8 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 				uint64		end_pos = gs_sstate->redo_write_pos;
 				gs_sstate->redo_last_timestamp = curr_timestamp;
 				SpinLockRelease(&gs_sstate->redo_pos_lock);
-				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, false, end_pos);
+				gstoreFdwInvokeApplyRedo(gs_sstate->ftable_oid, end_pos,
+										 gs_sstate->cuda_dindex, false);
 			}
 			continue;
 		}
@@ -1522,7 +1529,8 @@ __gstoreFdwAppendRedoLog(GpuStoreDesc *gs_desc,
 				 */
 				uint64		end_pos = gs_sstate->redo_write_pos;
 				gs_sstate->redo_last_timestamp = curr_timestamp;
-				gstoreFdwInvokeApplyRedo(gs_desc->ftable_oid, true, end_pos);
+				gstoreFdwInvokeApplyRedo(gs_sstate->ftable_oid, end_pos,
+										 gs_sstate->cuda_dindex, true);
 			}
 		}
 		dest_ptr = gs_desc->redo_mmap + dest_pos;
@@ -3832,7 +3840,8 @@ gstoreFdwLookupGpuStoreSharedState(Relation frel, bool may_create_files)
 		{
 			gs_sstate = gstoreFdwCreateSharedState(frel, may_create_files);
 			dlist_push_tail(slot, &gs_sstate->hash_chain);
-			gstoreFdwInvokeInitialLoad(frel, true);
+			gstoreFdwInvokeInitialLoad(gs_sstate->ftable_oid,
+									   gs_sstate->cuda_dindex, true);
 			Assert(gs_sstate->hash == hash);
 		}
 	}
@@ -4180,7 +4189,8 @@ __gstoreFdwXactDropResources(GpuStoreDesc *gs_desc)
 	uint32		hindex = gs_sstate->hash % GPUSTORE_SHARED_DESC_NSLOTS;
 	CUresult	rc;
 
-	rc = gstoreFdwInvokeDropUnload(gs_desc->ftable_oid, false);
+	rc = gstoreFdwInvokeDropUnload(gs_sstate->ftable_oid,
+								   gs_sstate->cuda_dindex, false);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on gstoreFdwInvokeDropUnload: %s", errorText(rc));
 	SpinLockAcquire(&gstore_shared_head->gstore_sstate_lock[hindex]);
@@ -4502,7 +4512,7 @@ pgstrom_gstore_fdw_apply_redo(PG_FUNCTION_ARGS)
 	GpuStoreDesc   *gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
 	CUresult		rc;
 	
-	rc = gstoreFdwApplyRedoDeviceBuffer(frel, gs_desc->gs_sstate);
+	rc = gstoreFdwApplyRedoDeviceBuffer(gs_desc->gs_sstate);
 
 	table_close(frel, NoLock);
 
@@ -4630,6 +4640,8 @@ pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS)
 {
 	Oid			ftable_oid = PG_GETARG_OID(0);
 	bool		only_device_compaction = PG_GETARG_BOOL(1);
+	GpuStoreDesc *gs_desc;
+	GpuStoreSharedState *gs_sstate;
 	LOCKMODE	lockmode;
 	Relation	frel;
 	CUresult	rc;
@@ -4640,9 +4652,12 @@ pgstrom_gstore_fdw_compaction(PG_FUNCTION_ARGS)
 		lockmode = AccessExclusiveLock;
 
 	frel = table_open(ftable_oid, lockmode);
+	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	gs_sstate = gs_desc->gs_sstate;
 	if (!only_device_compaction)
 		__gstoreFdwHostBufferCompaction(frel);
-	rc = gstoreFdwInvokeCompaction(frel, false);
+	rc = gstoreFdwInvokeCompaction(gs_sstate->ftable_oid,
+								   gs_sstate->cuda_dindex, false);
 	table_close(frel, lockmode);
 
 	PG_RETURN_INT32((int)rc);
@@ -4711,42 +4726,52 @@ PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_sysattr_out);
  * __gstoreFdwInvokeBackgroundCommand
  */
 static CUresult
-__gstoreFdwInvokeBackgroundCommand(GpuStoreBackgroundCommand *__lcmd, bool is_async)
+__gstoreFdwInvokeBackgroundCommand(Oid database_oid,
+								   Oid ftable_oid,
+								   int cuda_dindex,
+								   bool is_async,
+								   int command,
+								   uint64 end_pos)	/* for APPLY_REDO */
 {
 	GpuStoreBackgroundCommand *cmd;
 	dlist_node	   *dnode;
 	CUresult		retval = CUDA_SUCCESS;
 
-	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+	SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 	for (;;)
 	{
-		if (!gstore_shared_head->background_latch)
+		if (!gstore_shared_head->bgworkers[cuda_dindex].latch)
 		{
-			SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+			SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 			return CUDA_ERROR_NOT_READY;
 		}
-		if (!dlist_is_empty(&gstore_shared_head->background_free_cmds))
+		if (!dlist_is_empty(&gstore_shared_head->bgworker_free_cmds))
 			break;
-		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+		SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 		CHECK_FOR_INTERRUPTS();
-		pg_usleep(20000L);		/* 20msec */
-		SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+		pg_usleep(5000L);		/* 5msec */
+		SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 	}
-	dnode = dlist_pop_head_node(&gstore_shared_head->background_free_cmds);
+	dnode = dlist_pop_head_node(&gstore_shared_head->bgworker_free_cmds);
 	cmd = dlist_container(GpuStoreBackgroundCommand, chain, dnode);
-	memcpy(cmd, __lcmd, sizeof(GpuStoreBackgroundCommand));
+	memset(cmd, 0, sizeof(GpuStoreBackgroundCommand));
+	cmd->database_oid = database_oid;
+	cmd->ftable_oid = ftable_oid;
 	cmd->backend = (is_async ? NULL : MyLatch);
-	cmd->retval = (CUresult) UINT_MAX;
-	dlist_push_tail(&gstore_shared_head->background_cmd_queue,
+	cmd->command = command;
+	cmd->retval  = (CUresult) UINT_MAX;
+	cmd->end_pos = end_pos;
+	dlist_push_tail(&gstore_shared_head->bgworkers[cuda_dindex].cmd_queue,
 					&cmd->chain);
-	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
-	SetLatch(gstore_shared_head->background_latch);
+	SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
+	SetLatch(gstore_shared_head->bgworkers[cuda_dindex].latch);
 	if (!is_async)
 	{
-		SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+		SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 		while (cmd->retval == (CUresult) UINT_MAX)
 		{
-			SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+			SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 			PG_TRY();
 			{
 				int		ev = WaitLatch(MyLatch,
@@ -4766,81 +4791,69 @@ __gstoreFdwInvokeBackgroundCommand(GpuStoreBackgroundCommand *__lcmd, bool is_as
 				 * switch the request to async mode - because nobody can
 				 * return the GpuStoreBackgroundCommand to free-list.
 				 */
-				SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+				SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 				if (cmd->retval == (CUresult) UINT_MAX)
 					cmd->backend = NULL;
 				else
-					dlist_push_tail(&gstore_shared_head->background_free_cmds,
+					dlist_push_tail(&gstore_shared_head->bgworker_free_cmds,
 									&cmd->chain);
-				SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+				SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+			SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 		}
 		retval = cmd->retval;
-		dlist_push_tail(&gstore_shared_head->background_free_cmds,
+		dlist_push_tail(&gstore_shared_head->bgworker_free_cmds,
 						&cmd->chain);
-		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+		SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 	}
 	return retval;
 }
 
 static CUresult
-gstoreFdwInvokeInitialLoad(Relation frel, bool is_async)
+gstoreFdwInvokeInitialLoad(Oid ftable_oid, int cuda_dindex, bool is_async)
 {
-	GpuStoreBackgroundCommand lcmd;
-
-	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
-	lcmd.database_oid = MyDatabaseId;
-	lcmd.ftable_oid = RelationGetRelid(frel);
-	lcmd.backend = (is_async ? NULL : MyLatch);
-	lcmd.command = GSTORE_BACKGROUND_CMD__INITIAL_LOAD;
-
-	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+	return __gstoreFdwInvokeBackgroundCommand(MyDatabaseId,
+											  ftable_oid,
+											  cuda_dindex,
+											  is_async,
+											  GSTORE_BACKGROUND_CMD__INITIAL_LOAD,
+											  0UL);
 }
 
 static CUresult
-gstoreFdwInvokeApplyRedo(Oid ftable_oid, bool is_async, uint64 end_pos)
+gstoreFdwInvokeApplyRedo(Oid ftable_oid, uint64 end_pos,
+						 int cuda_dindex, bool is_async)
 {
-	GpuStoreBackgroundCommand lcmd;
-
-	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
-	lcmd.database_oid = MyDatabaseId;
-	lcmd.ftable_oid = ftable_oid;
-	lcmd.backend = (is_async ? NULL : MyLatch);
-	lcmd.command = GSTORE_BACKGROUND_CMD__APPLY_REDO;
-	lcmd.end_pos = end_pos;
-
-	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+	return __gstoreFdwInvokeBackgroundCommand(MyDatabaseId,
+											  ftable_oid,
+											  cuda_dindex,
+											  is_async,
+											  GSTORE_BACKGROUND_CMD__APPLY_REDO,
+											  end_pos);
 }
 
 static CUresult
-gstoreFdwInvokeCompaction(Relation frel, bool is_async)
+gstoreFdwInvokeCompaction(Oid ftable_oid, int cuda_dindex, bool is_async)
 {
-	GpuStoreBackgroundCommand lcmd;
-
-	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
-	lcmd.database_oid = MyDatabaseId;
-	lcmd.ftable_oid = RelationGetRelid(frel);
-	lcmd.backend = (is_async ? NULL : MyLatch);
-	lcmd.command = GSTORE_BACKGROUND_CMD__COMPACTION;
-
-	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+	return __gstoreFdwInvokeBackgroundCommand(MyDatabaseId,
+											  ftable_oid,
+											  cuda_dindex,
+											  is_async,
+											  GSTORE_BACKGROUND_CMD__COMPACTION,
+											  0UL);
 }
 
 static CUresult
-gstoreFdwInvokeDropUnload(Oid ftable_oid, bool is_async)
+gstoreFdwInvokeDropUnload(Oid ftable_oid, int cuda_dindex, bool is_async)
 {
-	GpuStoreBackgroundCommand lcmd;
-
-	memset(&lcmd, 0, sizeof(GpuStoreBackgroundCommand));
-	lcmd.database_oid = MyDatabaseId;
-	lcmd.ftable_oid = ftable_oid;
-	lcmd.backend = (is_async ? NULL : MyLatch);
-	lcmd.command = GSTORE_BACKGROUND_CMD__DROP_UNLOAD;
-
-	return __gstoreFdwInvokeBackgroundCommand(&lcmd, is_async);
+	return __gstoreFdwInvokeBackgroundCommand(MyDatabaseId,
+											  ftable_oid,
+											  cuda_dindex,
+											  is_async,
+											  GSTORE_BACKGROUND_CMD__DROP_UNLOAD,
+											  0UL);
 }
 
 /*
@@ -5509,21 +5522,20 @@ GstoreFdwBackgroundDropUnload(GpuStoreDesc *gs_desc)
  * gstoreFdwBgWorkerXXXX
  */
 void
-gstoreFdwBgWorkerBegin(void)
+gstoreFdwBgWorkerBegin(int cuda_dindex)
 {
-	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
-	gstore_shared_head->background_latch = MyLatch;
-	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+	SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
+	gstore_shared_head->bgworkers[cuda_dindex].latch = MyLatch;
+	SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 }
 
 static CUresult
-__gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
-								   CUcontext *cuda_context_array)
+__gstoreFdwBgWorkerDispatchCommand(int cuda_dindex, GpuStoreBackgroundCommand *cmd)
 {
 	GpuStoreDesc *gs_desc;
 	Oid			hkey[2];
 	bool		found;
-	int			cuda_dindex;
 	CUresult	rc;
 	
 	/*
@@ -5551,7 +5563,8 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			GpuStoreSharedState *temp = dlist_container(GpuStoreSharedState,
 														hash_chain, iter.cur);
 			if (temp->database_oid == cmd->database_oid &&
-				temp->ftable_oid   == cmd->ftable_oid)
+				temp->ftable_oid   == cmd->ftable_oid &&
+				temp->cuda_dindex  == cuda_dindex)
 			{
 				gs_sstate = temp;
 				break;
@@ -5570,16 +5583,6 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 	}
 	if (!gstoreFdwSetupGpuStoreDesc(gs_desc, false))
 		return CUDA_ERROR_MAP_FAILED;
-
-	/* Switch CUDA Context to the target device */
-	cuda_dindex = gs_desc->gs_sstate->cuda_dindex;
-	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
-	rc = cuCtxSetCurrent(cuda_context_array[cuda_dindex]);
-	if (rc != CUDA_SUCCESS)
-	{
-		elog(LOG, "failed on cuCtxSetCurrent: %s", errorText(rc));
-		return rc;
-	}
 
 	/* handle the command for each */
 	switch (cmd->command)
@@ -5601,31 +5604,29 @@ __gstoreFdwBgWorkerDispatchCommand(GpuStoreBackgroundCommand *cmd,
 			rc = CUDA_ERROR_INVALID_VALUE;
 			break;
 	}
-	cuCtxSetCurrent(NULL);
-
 	return rc;
 }
 
 bool
-gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array)
+gstoreFdwBgWorkerDispatch(int cuda_dindex)
 {
 	GpuStoreBackgroundCommand *cmd;
 	dlist_node	   *dnode;
 
-	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
-	if (dlist_is_empty(&gstore_shared_head->background_cmd_queue))
+	SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
+	if (dlist_is_empty(&gstore_shared_head->bgworkers[cuda_dindex].cmd_queue))
 	{
-		SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+		SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 		return true;	/* gstoreFdw allows bgworker to sleep */
 	}
-	dnode = dlist_pop_head_node(&gstore_shared_head->background_cmd_queue);
+	dnode = dlist_pop_head_node(&gstore_shared_head->bgworkers[cuda_dindex].cmd_queue);
 	cmd = dlist_container(GpuStoreBackgroundCommand, chain, dnode);
 	memset(&cmd->chain, 0, sizeof(dlist_node));
-	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 
-	cmd->retval = __gstoreFdwBgWorkerDispatchCommand(cmd, cuda_context_array);
+	cmd->retval = __gstoreFdwBgWorkerDispatchCommand(cuda_dindex, cmd);
 
-	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
+	SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
 	if (cmd->backend)
 	{
 		/*
@@ -5642,15 +5643,15 @@ gstoreFdwBgWorkerDispatch(CUcontext *cuda_context_array)
 		 * waiting for the response, thus, GpuStoreBackgroundCommand
 		 * must be backed to the free list again.
 		 */
-		dlist_push_head(&gstore_shared_head->background_free_cmds,
+		dlist_push_head(&gstore_shared_head->bgworker_free_cmds,
 						&cmd->chain);
 	}
-	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 	return false;
 }
 
 bool
-gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
+gstoreFdwBgWorkerIdleTask(int cuda_dindex)
 {
 	int			hindex;
 	bool		retval = true;
@@ -5669,14 +5670,18 @@ gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
 
 			gs_sstate = dlist_container(GpuStoreSharedState,
 										hash_chain, iter.cur);
+			if (gs_sstate->cuda_dindex != cuda_dindex)
+				continue;
 			SpinLockAcquire(&gs_sstate->redo_pos_lock);
 			threshold = (gs_sstate->gpu_update_interval * 1000000L +
 						 gs_sstate->redo_last_timestamp);
 			if (GetCurrentTimestamp () > threshold &&
 				gs_sstate->redo_write_nitems > gs_sstate->redo_read_nitems)
 			{
-				dlist_head *cmd_flist = &gstore_shared_head->background_free_cmds;
-				slock_t	   *cmd_lock  = &gstore_shared_head->background_cmd_lock;
+				slock_t	   *cmd_lock = &gstore_shared_head->bgworker_cmd_lock;
+				dlist_head *cmd_flist = &gstore_shared_head->bgworker_free_cmds;
+				dlist_head *cmd_queue =
+					&gstore_shared_head->bgworkers[gs_sstate->cuda_dindex].cmd_queue;
 
 				SpinLockAcquire(cmd_lock);
 				if (!dlist_is_empty(cmd_flist))
@@ -5688,15 +5693,18 @@ gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
 					memset(cmd, 0, sizeof(GpuStoreBackgroundCommand));
 					cmd->database_oid = gs_sstate->database_oid;
 					cmd->ftable_oid   = gs_sstate->ftable_oid;
+					cmd->backend      = NULL;
 					cmd->command      = GSTORE_BACKGROUND_CMD__APPLY_REDO;
 					cmd->end_pos      = gs_sstate->redo_write_pos;
-					cmd->retval = (CUresult) UINT_MAX;
-					dlist_push_tail(&gstore_shared_head->background_cmd_queue,
-									&cmd->chain);
+					cmd->retval       = (CUresult) UINT_MAX;
+
+					dlist_push_tail(cmd_queue, &cmd->chain);
+
 					retval = true;
+
+					gs_sstate->redo_last_timestamp = GetCurrentTimestamp();
 				}
 				SpinLockRelease(cmd_lock);
-				gs_sstate->redo_last_timestamp = GetCurrentTimestamp();
 			}
 			SpinLockRelease(&gs_sstate->redo_pos_lock);
 		}
@@ -5706,11 +5714,12 @@ gstoreFdwBgWorkerIdleTask(CUcontext *cuda_context_array)
 }
 
 void
-gstoreFdwBgWorkerEnd(void)
+gstoreFdwBgWorkerEnd(int cuda_dindex)
 {
-	SpinLockAcquire(&gstore_shared_head->background_cmd_lock);
-	gstore_shared_head->background_latch = NULL;
-	SpinLockRelease(&gstore_shared_head->background_cmd_lock);
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+	SpinLockAcquire(&gstore_shared_head->bgworker_cmd_lock);
+	gstore_shared_head->bgworkers[cuda_dindex].latch = NULL;
+	SpinLockRelease(&gstore_shared_head->bgworker_cmd_lock);
 }
 
 /*
@@ -5840,30 +5849,22 @@ pgstrom_startup_gstore_fdw(void)
 		(*shmem_startup_next)();
 
 	gstore_shared_head = ShmemInitStruct("GpuStore Shared Head",
-										 sizeof(GpuStoreSharedHead),
+										 offsetof(GpuStoreSharedHead,
+												  bgworkers[numDevAttrs]),
 										 &found);
 	if (found)
 		elog(ERROR, "Bug? GpuStoreSharedHead already exists");
-	memset(gstore_shared_head, 0, sizeof(GpuStoreSharedHead));
-	SpinLockInit(&gstore_shared_head->background_cmd_lock);
-	dlist_init(&gstore_shared_head->background_cmd_queue);
-	dlist_init(&gstore_shared_head->background_free_cmds);
-	for (i=0; i < lengthof(gstore_shared_head->__background_cmds); i++)
-	{
-		GpuStoreBackgroundCommand *cmd;
-
-		cmd = &gstore_shared_head->__background_cmds[i];
-		dlist_push_tail(&gstore_shared_head->background_free_cmds,
-						&cmd->chain);
-	}
-
+	memset(gstore_shared_head, 0, offsetof(GpuStoreSharedHead,
+										   bgworkers[numDevAttrs]));
+	/* Sync object for Row-level Locks */
+	ConditionVariableInit(&gstore_shared_head->row_lock_cond);
+	/* Hash slot for GpuStoreSharedState */
 	for (i=0; i < GPUSTORE_SHARED_DESC_NSLOTS; i++)
 	{
 		SpinLockInit(&gstore_shared_head->gstore_sstate_lock[i]);
 		dlist_init(&gstore_shared_head->gstore_sstate_slot[i]);
 	}
-	ConditionVariableInit(&gstore_shared_head->row_lock_cond);
-
+	/* Debug counter */
 	pg_atomic_init_u64(&gstore_shared_head->debug_count0, 0);
 	pg_atomic_init_u64(&gstore_shared_head->debug_count1, 0);
 	pg_atomic_init_u64(&gstore_shared_head->debug_count2, 0);
@@ -5874,6 +5875,22 @@ pgstrom_startup_gstore_fdw(void)
 	pg_atomic_init_u64(&gstore_shared_head->debug_count7, 0);
 	pg_atomic_init_u64(&gstore_shared_head->debug_count8, 0);
 	pg_atomic_init_u64(&gstore_shared_head->debug_count9, 0);
+
+	/* IPC to GstoreFdw background worker */
+	SpinLockInit(&gstore_shared_head->bgworker_cmd_lock);
+	dlist_init(&gstore_shared_head->bgworker_free_cmds);
+	for (i=0; i < lengthof(gstore_shared_head->__bgworker_cmds); i++)
+	{
+		GpuStoreBackgroundCommand *cmd;
+
+		cmd = &gstore_shared_head->__bgworker_cmds[i];
+		dlist_push_tail(&gstore_shared_head->bgworker_free_cmds,
+						&cmd->chain);
+	}
+	for (i=0; i < numDevAttrs; i++)
+	{
+		dlist_init(&gstore_shared_head->bgworkers[i].cmd_queue);
+	}
 }
 
 /*
@@ -5989,7 +6006,8 @@ pgstrom_init_gstore_fdw(void)
 		RegisterBackgroundWorker(&worker);
 	}
 	/* request for the static shared memory */
-	RequestAddinShmemSpace(STROMALIGN(sizeof(GpuStoreSharedHead)));
+	RequestAddinShmemSpace(STROMALIGN(offsetof(GpuStoreSharedHead,
+											   bgworkers[numDevAttrs])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
 	/* callback for DROP FOREIGN TABLE support */

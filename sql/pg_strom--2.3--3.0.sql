@@ -80,3 +80,5 @@ DROP FUNCTION IF EXISTS public.gpu_num_cuda_cores(int);
 DROP FUNCTION IF EXISTS public.gpu_cc_major(int);
 DROP FUNCTION IF EXISTS public.gpu_cc_minor(int);
 DROP FUNCTION IF EXISTS public.gpu_pci_id(int);
+
+DROP TYPE IF EXISTS pgstrom.__pgstrom_device_preserved_meminfo CASCADE;
