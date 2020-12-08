@@ -33,6 +33,8 @@ enum {
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
 /* default license location */
 #define HETERODB_LICENSE_PATHNAME		"/etc/heterodb.license"
+/* pathname for the extra package */
+#define HETERODB_EXTRA_LIBNAME			"/usr/lib64/heterodb_extra.so"
 /* fixed length of the license key (2048bits) */
 #define HETERODB_LICENSE_KEYLEN			256
 #define HETERODB_LICENSE_KEYBITS		(8 * HETERODB_LICENSE_KEYLEN)

@@ -1521,7 +1521,6 @@ extern long		PAGE_MASK;
 extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
 #define PAGE_ALIGN(sz)		TYPEALIGN(PAGE_SIZE,(sz))
-extern TimestampTz commercial_license_expired_at(void);
 
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,

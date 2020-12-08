@@ -31,6 +31,7 @@
  */
 #include <assert.h>
 #include <ctype.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -51,7 +52,8 @@ static int	machine_format = 0;
 static int	print_license = 0;
 static int	detailed_output = 0;
 
-#define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
+#define lengthof(array)			(sizeof (array) / sizeof ((array)[0]))
+#define offsetof(type, field)	((long) &((type *)0)->field)
 
 static const char *
 cuErrorName(CUresult error_code)
@@ -73,115 +75,106 @@ cuErrorName(CUresult error_code)
 /*
  * commercial license validation if any
  */
-static StromCmd__LicenseInfo *
+typedef struct
+{
+	uint32_t	version;
+#if 0
+	const char *serial_nr;
+	uint32_t	issued_at;
+	uint32_t	expired_at;
+	const char *licensee_org;
+	const char *licensee_name;
+	const char *licensee_mail;
+	const char *description;
+#endif
+	uint32_t	nr_gpus;
+	struct {
+		const char *uuid;
+	} gpus[1];
+} licenseInfoV2;
+
+static char *
+commercial_license_reload(void)
+{
+	char *(*license_reload)(void) = NULL;
+	void   *handle;
+	char   *result = NULL;
+
+	handle = dlopen("/usr/lib64/heterodb_extra.so", RTLD_NOW | RTLD_LOCAL);
+	if (!handle)
+		return NULL;
+	license_reload = dlsym(handle, "heterodb_license_reload");
+	if (license_reload)
+		result = license_reload();
+	dlclose(handle);
+
+	return result;
+}
+
+static licenseInfoV2 *
 commercial_license_validation(const char *license_filename)
 {
-	StromCmd__LicenseInfo *cmd;
-	size_t		buffer_sz = 10000;
-	int			nbytes;
-	int			fdesc;
-	int			retry_done = 0;
-	int			i_year, i_mon, i_day;
-	int			e_year, e_mon, e_day;
-	static const char *months[] =
-		{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-		 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+	char	   *license = commercial_license_reload();
+	char	   *key, *val, *saveptr;
+	licenseInfoV2 *result;
+	int			count = 0;
+	int			limit = 16;
+	int			i, nr_gpus = -1;
+	char	  **gpu_uuid = alloca(sizeof(char *) * limit);
 
-	/* Read the license file */
-	cmd = calloc(1, sizeof(StromCmd__LicenseInfo) + buffer_sz);
-	if (!cmd)
-		elog("out of memory: %m");
-	cmd->buffer_sz = buffer_sz;
-
-	nbytes = read_heterodb_license_file(license_filename,
-										cmd->u.buffer, buffer_sz,
-										stderr);
-	if (nbytes < 0)
-		exit(1);
-	if (nbytes == 0)
-		return NULL;
-
-	/* Load the license */
-retry_open:
-	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
-	if (fdesc < 0)
+	for (key = strtok_r(license, "\n", &saveptr);
+		 key != NULL;
+		 key = strtok_r(NULL, "\n", &saveptr))
 	{
-		int		errcode = errno;
-
-		if (errno == ENOENT)
+		val = strchr(key, '=');
+		if (!val)
+			return NULL;	/* invalid format */
+		*val++ = '\0';
+		if (strcmp(key, "VERSION") == 0)
 		{
-			if (retry_done == 0 &&
-				system("/usr/bin/nvme_strom-modprobe") == 0)
-			{
-				retry_done = 1;
-				goto retry_open;
-			}
-			fprintf(stderr, "nvme_strom kernel module is not installed.\n");
-			return NULL;
+			if (atoi(val) != 2)
+				return NULL;	/* unsupported version */
 		}
-		elog("failed on open('%s'): %m\n", NVME_STROM_IOCTL_PATHNAME);
-	}
-
-	if (ioctl(fdesc, STROM_IOCTL__LICENSE_LOAD, cmd) != 0)
-	{
-		fprintf(stderr, "failed on ioctl(STROM_IOCTL__LICENSE_LOAD): %m\n");
-		close(fdesc);
-		return NULL;
-	}
-	close(fdesc);
-
-	/* Print License Info */
-	i_year = (cmd->issued_at / 10000);
-	i_mon  = (cmd->issued_at / 100) % 100;
-	i_day  = (cmd->issued_at % 100);
-	e_year = (cmd->expired_at / 10000);
-	e_mon  = (cmd->expired_at / 100) % 100;
-	e_day  = (cmd->expired_at % 100);
-
-	if (print_license)
-	{
-		int		i;
-
-		if (machine_format)
+		else if (strcmp(key, "SERIAL_NR") == 0 ||
+				 strcmp(key, "ISSUED_AT") == 0 ||
+				 strcmp(key, "EXPIRED_AT") == 0 ||
+				 strcmp(key, "LICENSEE_ORG") == 0 ||
+				 strcmp(key, "LICENSEE_NAME") == 0 ||
+				 strcmp(key, "LICENSEE_MAIL") == 0 ||
+				 strcmp(key, "DESCRIPTION") == 0)
 		{
-			printf("LICENSE_VERSION: %u\n", cmd->version);
-			if (cmd->serial_nr)
-				printf("LICENSE_SERIAL_NR: %s\n", cmd->serial_nr);
-			printf("LICENSE_ISSUED_AT: %d-%s-%d\n"
-				   "LICENSE_EXPIRED_AT: %d-%s-%d\n",
-				   i_day, months[i_mon-1], i_year,
-                   e_day, months[e_mon-1], e_year);
-			if (cmd->licensee_org)
-				printf("LICENSEE_ORG: %s\n", cmd->licensee_org);
-			if (cmd->licensee_name)
-				printf("LICENSEE_NAME: %s\n", cmd->licensee_name);
-			if (cmd->licensee_mail)
-				printf("LICENSEE_MAIL: %s\n", cmd->licensee_mail);
-			if (cmd->description)
-				printf("LICENSE_DESC: %s\n", cmd->description);
-			printf("LICENSE_NR_GPUS: %d\n", cmd->nr_gpus);
+			/* valid field, but is not interested in */
+		}
+		else if (strcmp(key, "NR_GPUS") == 0)
+		{
+			nr_gpus = atoi(val);
+		}
+		else if (strcmp(key, "GPU_UUID") == 0)
+		{
+			if (count == limit)
+			{
+				char  **tmp_uuid = alloca(sizeof(char *) * 2 * limit);
+
+				memcpy(tmp_uuid, gpu_uuid, sizeof(char *) * limit);
+				gpu_uuid = tmp_uuid;
+				limit *= 2;
+			}
+			gpu_uuid[count++] = val;
 		}
 		else
 		{
-			printf("License Version: %u\n", cmd->version);
-			if (cmd->serial_nr)
-				printf("License Serial Number: %s\n", cmd->serial_nr);
-			printf("License Issued at: %d-%s-%d\n"
-				   "License Expired at: %d-%s-%d\n",
-				   i_day, months[i_mon-1], i_year,
-				   e_day, months[e_mon-1], e_year);
-			if (cmd->licensee_org)
-				printf("Licensee Organization: %s\n", cmd->licensee_org);
-			if (cmd->licensee_name)
-				printf("Licensee Name: %s\n", cmd->licensee_name);
-			if (cmd->licensee_mail)
-				printf("Licensee Mail: %s\n", cmd->licensee_mail);
-			if (cmd->description)
-				printf("License Description: %s\n", cmd->description);
-			printf("License Num of GPUs: %d\n", cmd->nr_gpus);
+			return NULL;	/* unsupported key */
 		}
 	}
-	return cmd;
+	if (nr_gpus != count)
+		return NULL;
+
+	result = calloc(1, offsetof(licenseInfoV2, gpus[nr_gpus]));
+	result->nr_gpus = nr_gpus;
+	for (i=0; i < nr_gpus; i++)
+		result->gpus[i].uuid = gpu_uuid[i];
+
+	return result;
 }
 
 /*
@@ -222,7 +215,7 @@ static inline int HEX2DIG(char c)
 	return -1;
 }
 
-static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
+static int check_device(CUdevice device, licenseInfoV2 *li)
 {
 	CUresult	rc;
 	CUuuid		dev_uuid;
@@ -237,7 +230,7 @@ static int check_device(CUdevice device, StromCmd__LicenseInfo *li)
 		const char *c;
 		char		uuid[16];
 
-		for (c = li->u.gpus[i].uuid, j=0; *c != '\0' && j < 16; c++)
+		for (c = li->gpus[i].uuid, j=0; *c != '\0' && j < 16; c++)
 		{
 			if (isxdigit(c[0]) && isxdigit(c[1]))
 			{
@@ -444,7 +437,7 @@ static void output_device(CUdevice cuda_device,
 
 int main(int argc, char *argv[])
 {
-	StromCmd__LicenseInfo *li;
+	licenseInfoV2 *li;
 	int		   *gpu_id = NULL;
 	CUdevice   *cuda_devices = NULL;
 	nvmlDevice_t *nvml_devices = NULL;
