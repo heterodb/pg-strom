@@ -840,8 +840,7 @@ CUresult
 gpuInit(unsigned int flags)
 {
 	static bool	cuda_driver_initialized = false;
-	static bool	gpudirect_driver_initialized = false;
-	CUresult	rc;
+	CUresult	rc = CUDA_SUCCESS;
 
 	if (!cuda_driver_initialized)
 	{
@@ -850,14 +849,7 @@ gpuInit(unsigned int flags)
 			return rc;
 		cuda_driver_initialized = true;
 	}
-	if (!gpudirect_driver_initialized)
-	{
-		rc = gpuDirectDriverOpen();
-		if (rc != CUDA_SUCCESS)
-			return rc;
-		gpudirect_driver_initialized = true;
-	}
-	return CUDA_SUCCESS;
+	return rc;
 }
 
 /*

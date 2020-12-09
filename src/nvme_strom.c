@@ -1318,24 +1318,6 @@ cufile_io_unitsz_checker(int *p_newval, void **extra, GucSource source)
 #endif
 
 /*
- * gpuDirectDriverOpen
- */
-CUresult
-gpuDirectDriverOpen(void)
-{
-#ifdef WITH_CUFILE
-	CUfileError_t	rv;
-
-	rv = cuFileDriverOpen();
-	if (rv.cu_err != CUDA_SUCCESS)
-		return rv.cu_err;
-	if (rv.err != CU_FILE_SUCCESS)
-		return rv.err;
-#endif
-	return CUDA_SUCCESS;
-}
-
-/*
  * gpuDirectFileDescOpen
  */
 void
@@ -1345,6 +1327,19 @@ gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc, const char *pathname)
 #ifdef WITH_CUFILE
 	CUfileDescr_t	desc;
 	CUfileError_t	rv;
+	static bool		cufile_driver_initialized = false;
+
+	/* initialize cuFile driver only once */
+	if (!cufile_driver_initialized)
+	{
+		rv = cuFileDriverOpen();
+		if (rv.cu_err != CUDA_SUCCESS || rv.err != CU_FILE_SUCCESS)
+		{
+			elog(ERROR, "failed on cuFileDriverOpen: %s",
+				 errorText(rv.cu_err != CUDA_SUCCESS ? rv.cu_err : rv.err));
+		}
+		cufile_driver_initialized = true;
+	}
 
 	rawfd = open(pathname, O_RDONLY | O_DIRECT, 0600);
 	if (rawfd < 0)
@@ -1356,12 +1351,10 @@ gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc, const char *pathname)
 	rv = cuFileHandleRegister(&gds_fdesc->fhandle, &desc);
 	if (rv.cu_err != CUDA_SUCCESS || rv.err != CU_FILE_SUCCESS)
 	{
-		int		errcode = (rv.cu_err != CUDA_SUCCESS ? rv.cu_err : rv.err);
-
 		close(rawfd);
-		abort();
 		elog(ERROR, "failed on cuFileHandleRegister('%s'): %s",
-			 pathname, errorText(errcode));
+			 pathname,
+			 errorText(rv.cu_err != CUDA_SUCCESS ? rv.cu_err : rv.err));
 	}
 #else
 	rawfd = open(pathname, O_RDONLY, 0600);

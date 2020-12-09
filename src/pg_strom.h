@@ -1035,7 +1035,6 @@ extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
 
-extern CUresult	gpuDirectDriverOpen(void);
 extern void	gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc);
 extern void	gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
 										const char *pathname);
