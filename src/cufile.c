@@ -217,8 +217,10 @@ cuFileDriverLoaded(void)
 {
 #ifdef WITH_CUFILE
 	if (p_cuFileDriverOpen != NULL &&		/* libcufile.so */
-		access("/proc/driver/nvidia-fs/version", F_OK) != 0)	/* nvidia_fs */
+		access("/proc/driver/nvidia-fs/version", F_OK) == 0)	/* nvidia_fs */
+	{
 		return true;
+	}
 #endif
 	return false;
 }

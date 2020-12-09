@@ -1346,7 +1346,7 @@ gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc, const char *pathname)
 	CUfileDescr_t	desc;
 	CUfileError_t	rv;
 
-	rawfd = open(pathname, O_RDONLY | PG_BINARY | PG_O_DIRECT, 0600);
+	rawfd = open(pathname, O_RDONLY | O_DIRECT, 0600);
 	if (rawfd < 0)
 		elog(ERROR, "failed on open('%s'): %m", pathname);
 
@@ -1359,11 +1359,12 @@ gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc, const char *pathname)
 		int		errcode = (rv.cu_err != CUDA_SUCCESS ? rv.cu_err : rv.err);
 
 		close(rawfd);
+		abort();
 		elog(ERROR, "failed on cuFileHandleRegister('%s'): %s",
 			 pathname, errorText(errcode));
 	}
 #else
-	rawfd = open(pathname, O_RDONLY | PG_BINARY, 0600);
+	rawfd = open(pathname, O_RDONLY, 0600);
 	if (rawfd < 0)
 		elog(ERROR, "failed on open('%s'): %m", pathname);
 #endif
