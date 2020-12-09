@@ -19,6 +19,9 @@
 #include <dlfcn.h>
 
 #ifdef WITH_CUFILE
+#define CUFILE_ERROR__DRIVER_NOT_INITIALIZED	\
+	((CUfileError_t){CU_FILE_DRIVER_NOT_INITIALIZED,CUDA_SUCCESS})
+
 /*
  * cuFileDriverOpen
  */
@@ -27,6 +30,8 @@ static CUfileError_t (*p_cuFileDriverOpen)(void) = NULL;
 CUfileError_t
 cuFileDriverOpen(void)
 {
+	if (!p_cuFileDriverOpen)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverOpen();
 }
 
@@ -38,6 +43,8 @@ static CUfileError_t (*p_cuFileDriverClose)(void) = NULL;
 CUfileError_t
 cuFileDriverClose(void)
 {
+	if (!p_cuFileDriverClose)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverClose();
 }
 
@@ -50,6 +57,8 @@ static CUfileError_t (*p_cuFileDriverGetProperties)(
 CUfileError_t
 cuFileDriverGetProperties(CUfileDrvProps_t *props)
 {
+	if (!p_cuFileDriverGetProperties)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverGetProperties(props);
 }
 
@@ -63,6 +72,8 @@ static CUfileError_t (*p_cuFileDriverSetPollMode)(
 CUfileError_t
 cuFileDriverSetPollMode(bool poll, size_t poll_threshold_size)
 {
+	if (!p_cuFileDriverSetPollMode)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverSetPollMode(poll, poll_threshold_size);
 }
 
@@ -75,6 +86,8 @@ static CUfileError_t (*p_cuFileDriverSetMaxDirectIOSize)(
 CUfileError_t
 cuFileDriverSetMaxDirectIOSize(size_t max_direct_io_size)
 {
+	if (!p_cuFileDriverSetMaxDirectIOSize)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverSetMaxDirectIOSize(max_direct_io_size);
 }
 
@@ -87,6 +100,8 @@ static CUfileError_t (*p_cuFileDriverSetMaxCacheSize)(
 CUfileError_t
 cuFileDriverSetMaxCacheSize(size_t max_cache_size)
 {
+	if (!p_cuFileDriverSetMaxCacheSize)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverSetMaxCacheSize(max_cache_size);
 }
 
@@ -99,6 +114,8 @@ static CUfileError_t (*p_cuFileDriverSetMaxPinnedMemSize)(
 CUfileError_t
 cuFileDriverSetMaxPinnedMemSize(size_t max_pinned_size)
 {
+	if (!p_cuFileDriverSetMaxPinnedMemSize)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileDriverSetMaxPinnedMemSize(max_pinned_size);
 }
 
@@ -112,6 +129,8 @@ static CUfileError_t (*p_cuFileHandleRegister)(
 CUfileError_t
 cuFileHandleRegister(CUfileHandle_t *fh, CUfileDescr_t *descr)
 {
+	if (!p_cuFileHandleRegister)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileHandleRegister(fh, descr);
 }
 
@@ -124,7 +143,8 @@ static void (*p_cuFileHandleDeregister)(
 void
 cuFileHandleDeregister(CUfileHandle_t fh)
 {
-	return p_cuFileHandleDeregister(fh);
+	if (p_cuFileHandleDeregister)
+		return p_cuFileHandleDeregister(fh);
 }
 
 /*
@@ -138,6 +158,8 @@ static CUfileError_t (*p_cuFileBufRegister)(
 CUfileError_t
 cuFileBufRegister(const void *devPtr_base, size_t length, int flags)
 {
+	if (!p_cuFileBufRegister)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileBufRegister(devPtr_base, length, flags);
 }
 
@@ -149,6 +171,8 @@ static CUfileError_t (*p_cuFileBufDeregister)(
 
 CUfileError_t cuFileBufDeregister(const void *devPtr_base)
 {
+	if (!p_cuFileBufDeregister)
+		return CUFILE_ERROR__DRIVER_NOT_INITIALIZED;
 	return p_cuFileBufDeregister(devPtr_base);
 }
 
@@ -169,6 +193,8 @@ cuFileRead(CUfileHandle_t fh,
 		   off_t file_offset,
 		   off_t devPtr_offset)
 {
+	if (!p_cuFileRead)
+		return -CU_FILE_DRIVER_NOT_INITIALIZED;
 	return p_cuFileRead(fh, devPtr_base, size, file_offset, devPtr_offset);
 }
 
@@ -188,6 +214,8 @@ ssize_t cuFileWrite(CUfileHandle_t fh,
 					off_t file_offset,
 					off_t devPtr_offset)
 {
+	if (!p_cuFileWrite)
+		return -CU_FILE_DRIVER_NOT_INITIALIZED;
 	return p_cuFileWrite(fh,devPtr_base,size,file_offset,devPtr_offset);
 }
 
