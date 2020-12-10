@@ -11,7 +11,7 @@
  * within this package.
  */
 #ifndef HETERODB_EXTRA_H
-#include <dlfcn.h>
+#include <stdint.h>
 
 #ifndef offsetof
 #define offsetof(type, field)   ((long) &((type *)0)->field)
@@ -20,7 +20,8 @@
 /* commercial license validation */
 typedef struct
 {
-	uint32_t	version;
+	uint32_t	version;		/* =2 */
+	time_t		timestamp;
 	const char *serial_nr;
 	uint32_t	issued_at;		/* YYYYMMDD */
 	uint32_t	expired_at;		/* YYYYMMDD */
@@ -29,7 +30,7 @@ typedef struct
 	const char *licensee_mail;
 	const char *description;
 	uint32_t	nr_gpus;
-	const char *gpu_uuid[1];
+	const char *gpu_uuid[1];	/* variable length */
 } heterodb_license_info_v2;
 
 typedef union
@@ -38,209 +39,53 @@ typedef union
 	heterodb_license_info_v2 v2;
 } heterodb_license_info;
 
-static inline heterodb_license_info *
-heterodb_license_parse_version2(char *license)
+/* license query */
+extern heterodb_license_info *heterodb_license_reload(FILE *out);
+
+#ifndef HETERODB_EXTRA_VERSION
+#include <dlfcn.h>
+
+static void	   *heterodb_extra_handle = NULL;
+
+heterodb_license_info *(*p__heterodb_license_reload)(FILE *out) = NULL;
+static inline const heterodb_license_info *
+heterodbLicenseReload(FILE *out)
 {
-	heterodb_license_info_v2 linfo;
-	char   *key, *val, *pos;
-	int		year, mon, day;
-	int		__mdays[] = {31,29,30,30,31,30,31,31,30,31,30,31};
-	int		count = 0;
-	int		limit = 16;
-	char  **gpu_uuid = alloca(sizeof(char *) * limit);
-	int		i, extra = 0;
-	heterodb_license_info *res;
-
-	memset(&linfo, 0, sizeof(heterodb_license_info_v2));
-	for (key = strtok_r(license, "\n", &pos);
-		 key != NULL;
-		 key = strtok_r(NULL, "\n", &pos))
-	{
-		val = strchr(key, '=');
-		if (!val)
-			return NULL;
-		*val++ = '\0';
-
-		if (strcmp(key, "VERSION") == 0)
-		{
-			if (linfo.version != 0)
-				return NULL;
-			linfo.version = atoi(val);
-		}
-		else if (strcmp(key, "SERIAL_NR") == 0)
-		{
-			if (linfo.serial_nr)
-				return NULL;
-			linfo.serial_nr = val;
-			extra += strlen(val) + 1;
-		}
-		else if (strcmp(key, "ISSUED_AT") == 0)
-		{
-			if (linfo.issued_at != 0)
-				return NULL;
-			if (sscanf(val, "%d-%d-%d", &year, &mon, &day) != 3)
-				return NULL;
-			if (year < 2000 || year >= 3000 ||
-				mon  < 1    || mon  >  12 ||
-				day  < 1    || day  >  __mdays[mon-1])
-				return NULL;	/* invalid YYYY-MM-DD */
-			linfo.issued_at = 10000 * year + 100 * mon + day;
-		}
-		else if (strcmp(key, "EXPIRED_AT") == 0)
-		{
-			if (linfo.expired_at != 0)
-				return NULL;
-			if (sscanf(val, "%d-%d-%d", &year, &mon, &day) != 3)
-				return NULL;
-			if (year < 2000 || year >= 3000 ||
-				mon  < 1    || mon  >  12 ||
-				day  < 1    || day  >  __mdays[mon-1])
-				return NULL;	/* invalid YYYY-MM-DD */
-            linfo.expired_at = 10000 * year + 100 * mon + day;
-		}
-		else if (strcmp(key, "LICENSEE_ORG") == 0)
-		{
-			if (linfo.licensee_org)
-				return NULL;
-			linfo.licensee_org = val;
-			extra += strlen(val) + 1;
-		}
-		else if (strcmp(key, "LICENSEE_NAME") == 0)
-		{
-			if (linfo.licensee_name)
-				return NULL;
-			linfo.licensee_name = val;
-			extra += strlen(val) + 1;
-		}
-		else if (strcmp(key, "LICENSEE_MAIL") == 0)
-		{
-			if (linfo.licensee_mail)
-				return NULL;
-			linfo.licensee_mail = val;
-			extra += strlen(val) + 1;
-		}
-		else if (strcmp(key, "DESCRIPTION") == 0)
-		{
-			if (linfo.description)
-				return NULL;
-			linfo.description = val;
-			extra += strlen(val) + 1;
-		}
-		else if (strcmp(key, "NR_GPUS") == 0)
-		{
-			if (linfo.nr_gpus != 0)
-				return NULL;
-			linfo.nr_gpus = atoi(val);
-		}
-		else if (strcmp(key, "GPU_UUID") == 0)
-		{
-			if (count == limit)
-			{
-				char  **tmp_uuid = alloca(sizeof(char *) * 2 * limit);
-
-				memcpy(tmp_uuid, gpu_uuid, sizeof(char *) * count);
-				gpu_uuid = tmp_uuid;
-				limit *= 2;
-			}
-			gpu_uuid[count++] = val;
-			extra += strlen(val) + 1;
-		}
-		else
-		{
-			return NULL;	/* unknown KEY=VAL */
-		}
-	}
-
-	if (linfo.version != 2 ||
-		linfo.serial_nr == NULL ||
-		linfo.issued_at == 0 ||
-		linfo.expired_at == 0 ||
-		linfo.nr_gpus != count)
-		return NULL;		/* not a valid license info v2 */
-
-	res = calloc(1, offsetof(heterodb_license_info_v2,
-							 gpu_uuid[count]) + extra);
-	if (!res)
-		return NULL;		/* out of memory */
-	pos = (char *)&res->v2.gpu_uuid[count];
-
-	res->v2.version = linfo.version;
-
-	res->v2.serial_nr = pos;
-	strcpy(pos, linfo.serial_nr);
-	pos += strlen(pos) + 1;
-
-	res->v2.issued_at = linfo.issued_at;
-	res->v2.expired_at = linfo.expired_at;
-
-	if (linfo.licensee_org)
-	{
-		res->v2.licensee_org = pos;
-		strcpy(pos, linfo.licensee_org);
-		pos += strlen(pos) + 1;
-	}
-
-	if (linfo.licensee_name)
-	{
-		res->v2.licensee_name = pos;
-		strcpy(pos, linfo.licensee_name);
-		pos += strlen(pos) + 1;
-	}
-
-	if (linfo.licensee_mail)
-	{
-		res->v2.licensee_mail = pos;
-		strcpy(pos, linfo.licensee_mail);
-		pos += strlen(pos) + 1;
-	}
-
-	if (linfo.description)
-	{
-		res->v2.description = pos;
-		strcpy(pos, linfo.description);
-		pos += strlen(pos) + 1;
-	}
-
-	res->v2.nr_gpus = linfo.nr_gpus;
-	for (i=0; i < count; i++)
-	{
-		res->v2.gpu_uuid[i] = pos;
-		strcpy(pos, gpu_uuid[i]);
-		pos += strlen(pos) + 1;
-	}
-	fprintf(stderr, "base = %p, extra = %u, pos = %p %p\n",
-			(char *)&res->v2.gpu_uuid[count], extra, pos, (char *)&res->v2.gpu_uuid[count] + extra);
-	assert((char *)&res->v2.gpu_uuid[count] + extra == pos);
-
-	return res;
+	if (!p__heterodb_license_reload)
+		return NULL;
+	return p__heterodb_license_reload(out);
 }
 
-static inline heterodb_license_info *
-heterodb_license_reload(void)
+static inline int
+heterodbExtraInit(void)
 {
-	char	 *(*license_reload)(void) = NULL;
-	void	   *handle;
-	char	   *license = NULL;
-	heterodb_license_info *result;
+	int		__errno;
 
-	/* fetch the latest license info */
-	handle = dlopen(HETERODB_EXTRA_LIBNAME, RTLD_NOW | RTLD_LOCAL);
-	if (!handle)
-		return NULL;
-    license_reload = dlsym(handle, "heterodb_license_reload");
-	if (license_reload)
-		license = license_reload();
-	dlclose(handle);
-	if (!license)
-		return NULL;
-	/* parse the plain license text */
-	if (strncmp(license, "VERSION=2\n", 10) == 0)
-		result = heterodb_license_parse_version2(license);
-	else
-		result = NULL;
-	free(license);
+	if (heterodb_extra_handle)
+		return 0;		/* already loaded */
 
-	return result;
+	heterodb_extra_handle = dlopen("heterodb_extra.so",
+								   RTLD_NOW | RTLD_LOCAL);
+	if (!heterodb_extra_handle)
+	{
+		heterodb_extra_handle = dlopen("/usr/lib64/heterodb_extra.so",
+									   RTLD_NOW | RTLD_LOCAL);
+		if (!heterodb_extra_handle)
+			return ENOENT;
+	}
+	p__heterodb_license_reload = dlsym(heterodb_extra_handle,
+									   "heterodb_license_reload");
+	if (!p__heterodb_license_reload)
+		goto error;
+	return 0;
+
+error:
+	__errno = (errno ? errno : -1);
+
+	p__heterodb_license_reload = NULL;
+	dlclose(heterodb_extra_handle);
+	heterodb_extra_handle = NULL;
+	return __errno;
 }
-
+#endif	/* HETERODB_EXTRA_VERSION */
 #endif	/* HETERODB_EXTRA_H */

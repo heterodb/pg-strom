@@ -28,8 +28,9 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 #
 # Source file of CPU portion
 #
-__STROM_OBJS = main.o nvrtc.o cufile.o shmbuf.o codegen.o datastore.o \
-        cuda_program.o gpu_device.o gpu_context.o gpu_mmgr.o \
+__STROM_OBJS = main.o nvrtc.o cufile.o extra.o \
+        shmbuf.o codegen.o datastore.o cuda_program.o \
+        gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o gpupreagg.o \
 		arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
@@ -79,6 +80,8 @@ GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
 GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
                   $(STROM_BUILD_ROOT)/src/nvme_strom.h
 GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) \
+                 -I $(STROM_BUILD_ROOT)/src \
+                 -I $(STROM_BUILD_ROOT)/utils \
                  $(shell $(PG_CONFIG) --ldflags)
 
 PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow

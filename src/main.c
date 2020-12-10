@@ -16,7 +16,6 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
-#include "heterodb_extra.h"
 
 PG_MODULE_MAGIC;
 
@@ -44,9 +43,6 @@ long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
-
-/* SQL function declarations */
-Datum pgstrom_license_query(PG_FUNCTION_ARGS);
 
 /* pg_strom.chunk_size */
 Size
@@ -518,112 +514,6 @@ pgstrom_post_planner(Query *parse,
 }
 
 /*
- * heterodb_license_query
- */
-static void
-heterodb_license_query_ver2(StringInfo str, heterodb_license_info *linfo)
-{
-	appendStringInfo(str, "{ \"version\" : %d",
-					 linfo->v2.version);
-	if (linfo->v2.serial_nr)
-		appendStringInfo(str, ", \"serial_nr\" : \"%s\"",
-						 linfo->v2.serial_nr);
-	appendStringInfo(str, ", \"issued_at\" : \"%04d-%02d-%02d\"",
-					 (linfo->v2.issued_at / 10000),
-					 (linfo->v2.issued_at / 100) % 100,
-					 (linfo->v2.issued_at % 100));
-	appendStringInfo(str, ", \"expired_at\" : \"%04d-%02d-%02d\"",
-					 (linfo->v2.expired_at / 10000),
-					 (linfo->v2.expired_at / 100) % 100,
-					 (linfo->v2.expired_at % 100));
-	if (linfo->v2.licensee_org)
-		appendStringInfo(str, ", \"licensee_org\" : \"%s\"",
-						 linfo->v2.licensee_org);
-	if (linfo->v2.licensee_name)
-		appendStringInfo(str, ", \"licensee_name\" : \"%s\"",
-						 linfo->v2.licensee_name);
-	if (linfo->v2.licensee_mail)
-		appendStringInfo(str, ", \"licensee_mail\" : \"%s\"",
-						 linfo->v2.licensee_mail);
-	if (linfo->v2.description)
-		appendStringInfo(str, ", \"description\" : \"%s\"",
-						 linfo->v2.description);
-	if (linfo->v2.nr_gpus > 0)
-	{
-		int		i;
-
-		appendStringInfo(str, ", \"gpus\" : [");
-		for (i=0; i < linfo->v2.nr_gpus; i++)
-		{
-			appendStringInfo(str, "%s{ \"uuid\" : \"%s\" }",
-							 i > 0 ? ", " : " ",
-							 linfo->v2.gpu_uuid[i]);
-		}
-		appendStringInfo(str, " ]");
-	}
-	appendStringInfo(str, "}");
-}
-
-static char *
-heterodb_license_query(void)
-{
-	heterodb_license_info *linfo = heterodb_license_reload();
-	StringInfoData str;
-
-	if (!linfo)
-		return NULL;
-	PG_TRY();
-	{
-		initStringInfo(&str);
-
-		if (linfo->version == 2)
-			heterodb_license_query_ver2(&str, linfo);
-		else
-			elog(ERROR, "unknown license version: %d", linfo->version);
-	}
-	PG_CATCH();
-	{
-		free(linfo);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	free(linfo);
-
-	return str.data;
-}
-
-Datum
-pgstrom_license_query(PG_FUNCTION_ARGS)
-{
-	char   *license;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("only superuser can query commercial license"))));
-	license = heterodb_license_query();
-	if (!license)
-		PG_RETURN_NULL();
-	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(license)));
-}
-PG_FUNCTION_INFO_V1(pgstrom_license_query);
-
-/*
- * check_heterodb_license
- */
-static void
-check_heterodb_license(void)
-{
-	char   *license = heterodb_license_query();
-
-	if (license)
-	{
-		elog(LOG, "HeteroDB License: %s", license);
-		pfree(license);
-	}
-}
-
-/*
  * _PG_init
  *
  * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
@@ -641,9 +531,10 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* load CUDA/HeteroDB related libraries */
+	/* load NVIDIA/HeteroDB related stuff, if any */
 	pgstrom_init_nvrtc();
 	pgstrom_init_cufile();
+	pgstrom_init_extra();
 
 	/* dump version number */
 #ifdef PGSTROM_VERSION
@@ -676,9 +567,6 @@ _PG_init(void)
 	pgstrom_init_relscan();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_gstore_fdw();
-
-	/* check commercial license, if any */
-	check_heterodb_license();
 
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));

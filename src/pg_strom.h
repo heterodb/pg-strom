@@ -1497,6 +1497,11 @@ extern bool		cuFileDriverLoaded(void);
 extern void		pgstrom_init_cufile(void);
 
 /*
+ * extra.c
+ */
+extern void		pgstrom_init_extra(void);
+
+/*
  * float2.c
  */
 #ifndef FLOAT2OID
