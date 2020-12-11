@@ -25,11 +25,16 @@
 #include "access/gist.h"
 #include "access/hash.h"
 #include "access/heapam.h"
+#if PG_VERSION_NUM >= 130000
+#include "access/heaptoast.h"
+#endif
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
 #include "access/sysattr.h"
+#if PG_VERSION_NUM < 130000
 #include "access/tuptoaster.h"
+#endif
 #include "access/twophase.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -226,9 +231,16 @@
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif
+#if PG_VERSION_NUM < 130000
+/*
+ * At PG13, 2e4db241bfd3206bad8286f8ffc2db6bbdaefcdf removed
+ * '--disable-float4-byval' configure flag, thus, float32 should be
+ * always passed by value.
+ */
 #ifndef USE_FLOAT4_BYVAL
 #error PG-Strom expects float32 is referenced by value, not reference
 #endif
+#endif /* VER < PG13*/
 #ifndef USE_FLOAT8_BYVAL
 #error PG-Strom expexts float64 is referenced by value, not reference
 #endif
@@ -840,12 +852,12 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 			error_level = pg_atomic_read_u32(&gcontext->error_level);
 		}
 		ereport(error_level / 2,
-				errcode(gcontext->error_code),
-				errmsg("%s", gcontext->error_message),
-				errdetail("GPU kernel location: %s:%d [%s]",
-						  gcontext->error_filename,
-						  gcontext->error_lineno,
-						  gcontext->error_funcname));
+				(errcode(gcontext->error_code),
+				 errmsg("%s", gcontext->error_message),
+				 errdetail("GPU kernel location: %s:%d [%s]",
+						   gcontext->error_filename,
+						   gcontext->error_lineno,
+						   gcontext->error_funcname)));
 	}
 	CHECK_FOR_INTERRUPTS();
 }

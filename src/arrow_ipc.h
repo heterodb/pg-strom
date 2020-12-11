@@ -335,6 +335,6 @@ sql_buffer_write(int fdesc, SQLbuffer *buf)
 /*
  * Misc functions
  */
-extern Datum hash_any(const unsigned char *k, int keylen);
+//extern Datum hash_any(const unsigned char *k, int keylen);
 
 #endif	/* ARROW_IPC_H */

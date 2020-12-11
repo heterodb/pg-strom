@@ -1833,10 +1833,13 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			break;
 		case FDW_IMPORT_SCHEMA_LIMIT_TO:
 			elog(ERROR, "arrow_fdw does not support LIMIT TO clause");
+			break;
 		case FDW_IMPORT_SCHEMA_EXCEPT:
 			elog(ERROR, "arrow_fdw does not support EXCEPT clause");
+			break;
 		default:
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
+			break;
 	}
 	filesList = arrowFdwExtractFilesList(stmt->options);
 	if (filesList == NIL)
@@ -3459,7 +3462,8 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	if (strcmp(trigdata->event, "ddl_command_end") != 0)
 		elog(ERROR, "%s: must be called on ddl_command_end event",
 			 __FUNCTION__);
-	if (strcmp(trigdata->tag, "CREATE FOREIGN TABLE") == 0)
+	if (strcmp(GetCommandTagName(trigdata->tag),
+			   "CREATE FOREIGN TABLE") == 0)
 	{
 		CreateStmt	   *stmt = (CreateStmt *)trigdata->parsetree;
 		Relation		rel;
@@ -3474,7 +3478,8 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		}
 		relation_close(rel, AccessShareLock);
 	}
-	else if (strcmp(trigdata->tag, "ALTER FOREIGN TABLE") == 0 &&
+	else if (strcmp(GetCommandTagName(trigdata->tag),
+					"ALTER FOREIGN TABLE") == 0 &&
 			 IsA(trigdata->parsetree, AlterTableStmt))
 	{
 		AlterTableStmt *stmt = (AlterTableStmt *)trigdata->parsetree;

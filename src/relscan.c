@@ -1223,8 +1223,8 @@ PDS_exec_heapscan_block(GpuTaskState *gts,
 			ItemPointerSet(&tup.t_self, blknum, lineoff);
 
 			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
-			CheckForSerializableConflictOut(valid, relation, &tup,
-											buffer, snapshot);
+			HeapCheckForSerializableConflictOut(valid, relation, &tup,
+												buffer, snapshot);
 			if (!valid)
 				ItemIdSetUnused(lpp);
 		}
@@ -1323,8 +1323,8 @@ PDS_exec_heapscan_row(GpuTaskState *gts, pgstrom_data_store *pds)
 		else
 			valid = HeapTupleSatisfiesVisibility(&tup, snapshot, buffer);
 
-		CheckForSerializableConflictOut(valid, relation,
-										&tup, buffer, snapshot);
+		HeapCheckForSerializableConflictOut(valid, relation,
+											&tup, buffer, snapshot);
 		if (!valid)
 			continue;
 

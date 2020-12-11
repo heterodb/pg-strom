@@ -34,7 +34,7 @@ double		pgstrom_gpu_operator_cost;
 
 /* misc static variables */
 static HTAB				   *gpu_path_htable = NULL;
-static planner_hook_type	planner_hook_next;
+static planner_hook_type	planner_hook_next = NULL;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
 
@@ -464,6 +464,9 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
 
 static PlannedStmt *
 pgstrom_post_planner(Query *parse,
+#if PG_VERSION_NUM >= 130000
+					 const char *query_string,
+#endif
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
@@ -491,10 +494,12 @@ pgstrom_post_planner(Query *parse,
 									  HASH_FUNCTION |
 									  HASH_COMPARE |
 									  HASH_KEYCOPY);
-		if (planner_hook_next)
-			pstmt = planner_hook_next(parse, cursorOptions, boundParams);
-		else
-			pstmt = standard_planner(parse, cursorOptions, boundParams);
+		pstmt = planner_hook_next(parse,
+#if PG_VERSION_NUM >= 130000
+								  query_string,
+#endif
+								  cursorOptions,
+								  boundParams);
 	}
 	PG_CATCH();
 	{
@@ -580,6 +585,6 @@ _PG_init(void)
 		= pgstrom_dummy_create_scan_state;
 
 	/* planner hook registration */
-	planner_hook_next = planner_hook;
+	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;
 }

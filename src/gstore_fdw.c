@@ -4473,8 +4473,8 @@ pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 	trigdata = (EventTriggerData *) fcinfo->context;
 	if (strcmp(trigdata->event, "ddl_command_end") != 0)
 		elog(ERROR, "%s must be called at ddl_command_end", __FUNCTION__);
-	//elog(INFO, "tag [%s]", trigdata->tag);
-	if (strcmp(trigdata->tag, "CREATE FOREIGN TABLE") == 0)
+	if (strcmp(GetCommandTagName(trigdata->tag),
+			   "CREATE FOREIGN TABLE") == 0)
 	{
 		CreateStmt *stmt = (CreateStmt *)trigdata->parsetree;
 		Relation	frel;
@@ -4482,7 +4482,6 @@ pgstrom_gstore_fdw_post_creation(PG_FUNCTION_ARGS)
 		frel = relation_openrv_extended(stmt->relation, AccessExclusiveLock, true);
 		if (!frel)
 			PG_RETURN_NULL();
-		//elog(INFO, "table [%s]", RelationGetRelationName(frel));
 		if (RelationIsGstoreFdw(frel))
 		{
 			GpuStoreDesc *gs_desc;

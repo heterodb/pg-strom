@@ -126,31 +126,48 @@
  * PG11: 1b55acb2cf48341822261bf9c36785be5ee275db
  * PG10: 2d83863ea2739dc559ed490c284f5c1817db4752
  * PG96: d431dff1af8c220490b84dd978aa3a508f71d415
+ *
+ * then, PG13 also changed API of GenerateTypeDependencies
  */
 #if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 12) || \
 	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 7)  ||	\
 	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 2))
-#define GenerateTypeDependencies(a,b,c,d,e,f,g,h)						\
-	GenerateTypeDependencies((b)->typnamespace,	/* typeNamespace */		\
-							 (a),				/* typeObjectId */		\
-							 (b)->typrelid,		/* relationOid */		\
-							 (e),				/* relationKind */		\
-							 (b)->typowner,		/* owner */				\
-							 (b)->typinput,		/* inputProcedure  */	\
-							 (b)->typoutput,	/* outputProcedure */	\
-							 (b)->typreceive,	/* receiveProcedure */	\
-							 (b)->typsend,		/* sendProcedure */		\
-							 (b)->typmodin,		/* typmodinProcedure */	\
-							 (b)->typmodout,	/* typmodoutProcedure */ \
-							 (b)->typanalyze,	/* analyzeProcedure */	\
-							 (b)->typelem,		/* elementType */		\
-							 (f),				/* isImplicitArray */	\
-							 (b)->typbasetype,	/* baseType */			\
-							 (b)->typcollation,	/* typeCollation */		\
-							 (c),				/* defaultExpr */		\
-							 (h))				/* rebuild */
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)					\
+	do {																\
+		Form_pg_type __type = (Form_pg_type)GETSTRUCT(tup);				\
+																		\
+		GenerateTypeDependencies(__type->typnamespace,	/* typeNamespace */	\
+								 HeapTupleGetOid(tup),	/* typeObjectId */ \
+								 __type->typrelid,		/* relationOid */ \
+								 (c),					/* relationKind */ \
+								 __type->typowner,		/* owner */		\
+								 __type->typinput,		/* inputProcedure  */ \
+								 __type->typoutput,		/* outputProcedure */ \
+								 __type->typreceive,	/* receiveProcedure */ \
+								 __type->typsend,		/* sendProcedure */	\
+								 __type->typmodin,		/* typmodinProcedure */	\
+								 __type->typmodout,		/* typmodoutProcedure */ \
+								 __type->typanalyze,	/* analyzeProcedure */ \
+								 __type->typelem,		/* elementType */ \
+								 (d),					/* isImplicitArray */ \
+								 __type->typbasetype,	/* baseType */ \
+								 __type->typcollation,	/* typeCollation */	\
+								 (a),					/* defaultExpr */ \
+								 (f));					/* rebuild */ \
+	} while(0)
+#elif PG_VERSION_NUM < 120000
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)		\
+	GenerateTypeDependencies(HeapTupleGetOid(tup),			\
+							 (Form_pg_type)GETSTRUCT(tup),	\
+							 (a),(b),(c),(d),(e),(f))
+#elif PG_VERSION_NUM < 130000
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)					\
+	GenerateTypeDependencies(((Form_pg_type)GETSTRUCT(tup))->oid,		\
+							 ((Form_pg_type)GETSTRUCT(tup)),			\
+							 (a), (b), (c), (d), (e), (f))
 #endif
 
+#if 0
 /*
  * MEMO: PG9.6 does not define macros below
  */
@@ -180,6 +197,7 @@ CatalogTupleInsert(Relation heapRel, HeapTuple tup)
 
 	return oid;
 }
+#endif
 #endif
 
 /*
@@ -252,6 +270,16 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #endif	/* < PG12 */
 
 /*
+ * At PG13, 6f38d4dac381b5b8bead302a0b4f81761042cd25 changed
+ * declaration of CheckForSerializableConflictOut(), and its role
+ * was inherited to HeapCheckForSerializableConflictOut().
+ */
+#if PG_VERSION_NUM < 130000
+#define HeapCheckForSerializableConflictOut(a,b,c,d,e)	\
+	CheckForSerializableConflictOut(a,b,c,d,e)
+#endif
+
+/*
  * PG12 (commit: 1ef6bd2954c4ec63ff8a2c9c4ebc38251d7ef5c5) don't
  * require return slots for nodes without projection.
  * Instead of the ps_ResultTupleSlot->tts_tupleDescriptor,
@@ -281,6 +309,42 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #if PG_VERSION_NUM < 110000
 #define BackgroundWorkerInitializeConnection(dbname,username,flags)	\
 	BackgroundWorkerInitializeConnection((dbname),(username))
+#endif
+
+/*
+ * PG13 changed varnoold/varoattno field names of Var-node,
+ * to varnosyn/varattnosyn. Be careful to use these names.
+ * 9ce77d75c5ab094637cc4a446296dc3be6e3c221
+ */
+#if PG_VERSION_NUM < 130000
+#define varnosyn		varnoold
+#define varattnosyn		varoattno
+#endif
+
+/*
+ * MEMO: EventTriggerData->tag was declared as 'const char *' in PG12 or older.
+ * Then, PG13 re-defined this field as CommandTag enum.
+ * This field is used to check which context call the event-trigger function,
+ * and usually not performance intensive. So, we continue to use cstring
+ * comparion for the tag identification, like:
+ *
+ * if (strcmp(GetCommandTagName(trigdata->tag), "CREATE FOREIGN TABLE") == 0)
+ *            :
+ */
+#if PG_VERSION_NUM < 130000
+#define GetCommandTagName(tag)		(tag)
+#endif
+
+/*
+ * PG13 replaced set_deparse_context_planstate by set_deparse_context_plan.
+ * As literal, it allows to construct a deparse context by Plan-node,
+ * however, we have no way to reference PlanState from Plan of course.
+ * So, exceptionally, we continue to use the old API here, because PlanState
+ * has its Plan node.
+ */
+#if PG_VERSION_NUM >= 130000
+#define set_deparse_context_planstate(deparse_cxt,planstate,ancestors)	\
+	set_deparse_context_plan((deparse_cxt),((PlanState *)(planstate))->plan,ancestors)
 #endif
 
 #endif	/* PG_COMPAT_H */

@@ -1529,8 +1529,8 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 	CatalogTupleInsert(type_rel, tup);
 
 	/* create dependencies */
-	GenerateTypeDependencies(type_oid,
-							 (Form_pg_type) GETSTRUCT(tup),
+	GenerateTypeDependencies(tup,
+							 type_rel,
 							 NULL,
 							 NULL,
 							 0,

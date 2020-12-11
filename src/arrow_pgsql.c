@@ -16,7 +16,13 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#if PG_VERSION_NUM < 130000
+#include "access/hash.h"
+#endif
 #include "access/htup_details.h"
+#if PG_VERSION_NUM >= 130000
+#include "common/hashfn.h"
+#endif
 #include "port/pg_bswap.h"
 #include "utils/array.h"
 #include "utils/date.h"
@@ -556,6 +562,7 @@ put_time_value(SQLfield *column, const char *addr, int sz)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ns]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_ns_value;
+			break;
 		default:
 			Elog("ArrowTypeTime has unknown unit (%d)",
 				 column->arrow_type.Time.unit);

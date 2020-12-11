@@ -3574,8 +3574,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			{
 				tle = copyObject(tle);
 				var = (Var *) tle->expr;
-				var->varnoold	= var->varno;
-				var->varoattno	= var->varattno;
+				var->varnosyn	= var->varno;
+				var->varattnosyn = var->varattno;
 				var->varno		= INDEX_VAR;
 				var->varattno	= tle->resno;
 			}
@@ -4410,7 +4410,7 @@ pgstrom_codegen_var_declarations(StringInfo source,
 			appendStringInfo(
 				&base,
 				"    pg_datum_ref(kcxt,KVAR_%u,NULL); //pg_%s_t\n",
-				kvar->varoattno,
+				kvar->varattnosyn,
 				dtype->type_name);
 
 			/* KDS_FORMAT_ARROW only if depth == 0 */
@@ -4425,9 +4425,9 @@ pgstrom_codegen_var_declarations(StringInfo source,
 				"      pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,offset-1);\n"
 				"    else\n"
 				"      pg_datum_ref(kcxt,KVAR_%u,NULL);\n",
-				kvar->varoattno,
+				kvar->varattnosyn,
 				kvar->varattno - 1,
-				kvar->varoattno);
+				kvar->varattnosyn);
 
 			/* KDS_FORMAT_COLUMN only if depth == 0 */
 			if (column.len == 0)
@@ -4444,8 +4444,8 @@ pgstrom_codegen_var_declarations(StringInfo source,
 				"      datum = kern_get_datum_column(kds,extra,%u,offset-1);\n"
 				"      pg_datum_ref(kcxt,KVAR_%u,datum);\n"
 				"    }\n",
-				kvar->varoattno,
-				kvar->varattno-1, kvar->varoattno);
+				kvar->varattnosyn,
+				kvar->varattno-1, kvar->varattnosyn);
 
 			/* KDS_FORMAT_ROW or KDS_FORMAT_BLOCK */
 			if (row.len == 0)
@@ -4467,7 +4467,7 @@ pgstrom_codegen_var_declarations(StringInfo source,
 				"    datum = GPUJOIN_REF_DATUM(kds->colmeta,htup,%u);\n"
 				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
 				kvar->varattno-1,
-				kvar->varoattno, dtype->type_name);
+				kvar->varattnosyn, dtype->type_name);
 		}
 		else if (depth < curr_depth)
 		{
@@ -4494,7 +4494,7 @@ pgstrom_codegen_var_declarations(StringInfo source,
 				"    datum = GPUJOIN_REF_DATUM(kds_in->colmeta,htup,%u);\n"
 				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
 				kvar->varattno - 1,
-				kvar->varoattno,
+				kvar->varattnosyn,
 				dtype->type_name);
 		}
 		else if (depth == curr_depth)
@@ -4516,7 +4516,7 @@ pgstrom_codegen_var_declarations(StringInfo source,
 				"    datum = GPUJOIN_REF_DATUM(kds_in->colmeta,i_htup,%u);\n"
 				"    pg_datum_ref(kcxt,KVAR_%u,datum); //pg_%s_t\n",
 				kvar->varattno - 1,
-				kvar->varoattno,
+				kvar->varattnosyn,
 				dtype->type_name);
 		}
 		else
@@ -4596,7 +4596,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				kernode = copyObject(varnode);
 				kernode->varno = src_depth;			/* save the source depth */
 				kernode->varattno = src_resno;		/* save the source resno */
-				kernode->varoattno = tle->resno;	/* resno on the ps_tlist */
+				kernode->varattnosyn = tle->resno;	/* resno on the ps_tlist */
 				if (src_depth < 0 || src_depth > cur_depth)
 					elog(ERROR, "Bug? device varnode out of range");
 				break;
@@ -4635,7 +4635,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			source,
 			"  pg_%s_t KVAR_%u;\n",
 			dtype->type_name,
-			kvar->varoattno);
+			kvar->varattnosyn);
 	}
 	appendStringInfoChar(source, '\n');
 	pgstrom_codegen_var_declarations(source, cur_depth, kern_vars);
@@ -4931,7 +4931,7 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 					keynode = copyObject(kvar);
 					keynode->varno = src_depth;
 					keynode->varattno = src_resno;
-					keynode->varoattno = tle->resno;
+					keynode->varattnosyn = tle->resno;
 					if (src_depth < 0 || src_depth >= depth)
 						elog(ERROR, "Bug? device varnode out of range");
 					kvars_list = list_append_unique(kvars_list, keynode);
@@ -8353,6 +8353,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 				if (--gj_sstate->nr_workers_scanning == 0)
 					ConditionVariableBroadcast(&gj_sstate->cond);
 			}
+			/* Falls through. */
 		case INNER_PHASE__SETUP_BUFFERS:
 			/*
 			 * Wait for completion of other workers that still scan
@@ -8462,6 +8463,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 				}
 				ConditionVariableCancelSleep();
 			}
+			/* Falls through. */
 
 		case INNER_PHASE__GPUJOIN_EXEC:
 			(void)innerPreloadMmapHostBuffer(leader, gjs);

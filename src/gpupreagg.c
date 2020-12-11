@@ -1805,8 +1805,8 @@ replace_expression_by_outerref(Node *node, PathTarget *target_input)
 			{
 				Var	   *varnode = (Var *) node;
 
-				newnode->varnoold  = varnode->varno;
-				newnode->varoattno = varnode->varattno;
+				newnode->varnosyn  = varnode->varno;
+				newnode->varattnosyn = varnode->varattno;
 			}
 			return (Node *) newnode;
 		}
@@ -2835,8 +2835,8 @@ __make_tlist_device_projection(Node *node, void *__con)
 							  varnode->vartypmod,
 							  varnode->varcollid,
 							  varnode->varlevelsup);
-			newnode->varnoold  = varnode->varno;
-			newnode->varoattno = varnode->varattno;
+			newnode->varnosyn  = varnode->varno;
+			newnode->varattnosyn = varnode->varattno;
 			return (Node *) newnode;
 		}
 	}
@@ -2866,8 +2866,8 @@ __make_tlist_device_projection(Node *node, void *__con)
 				{
 					Var	   *varnode = (Var *) node;
 
-					newnode->varnoold = varnode->varno;
-					newnode->varoattno = varnode->varattno;
+					newnode->varnosyn = varnode->varno;
+					newnode->varattnosyn = varnode->varattno;
 				}
 				return (Node *)newnode;
 			}
