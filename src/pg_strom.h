@@ -839,15 +839,13 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 			pg_usleep(1000L);
 			error_level = pg_atomic_read_u32(&gcontext->error_level);
 		}
-		if (errstart(error_level / 2,
-					 gcontext->error_filename,
-					 gcontext->error_lineno,
-					 gcontext->error_funcname, NULL))
-		{
-			errcode(gcontext->error_code);
-			errmsg("%s", gcontext->error_message);
-			errfinish(0);
-		}
+		ereport(error_level / 2,
+				errcode(gcontext->error_code),
+				errmsg("%s", gcontext->error_message),
+				errdetail("GPU kernel location: %s:%d [%s]",
+						  gcontext->error_filename,
+						  gcontext->error_lineno,
+						  gcontext->error_funcname));
 	}
 	CHECK_FOR_INTERRUPTS();
 }
@@ -1773,6 +1771,7 @@ typealign_get_width(char type_align)
 }
 
 #ifndef forfour
+/* XXX - PG12 added forfour() macro */
 #define forfour(lc1, list1, lc2, list2, lc3, list3, lc4, list4)		\
 	for ((lc1) = list_head(list1), (lc2) = list_head(list2),		\
 		 (lc3) = list_head(list3), (lc4) = list_head(list4);		\
@@ -1780,27 +1779,6 @@ typealign_get_width(char type_align)
 		 (lc4) != NULL;												\
 		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),\
 		 (lc4) = lnext(lc4))
-#endif
-#ifndef forfive
-#define forfive(lc1, list1, lc2, list2, lc3, list3, lc4, list4, lc5, list5)	\
-	for ((lc1) = list_head(list1), (lc2) = list_head(list2),		\
-		 (lc3) = list_head(list3), (lc4) = list_head(list4),		\
-		 (lc5) = list_head(list5);									\
-		 (lc1) != NULL && (lc2) != NULL &&							\
-		 (lc3) != NULL && (lc4) != NULL && (lc5) != NULL;			\
-		 (lc1) = lnext(lc1), (lc2) = lnext(lc2),					\
-		 (lc3) = lnext(lc3), (lc4) = lnext(lc4), (lc5) = lnext(lc5))
-#endif
-#ifndef forsix
-#define forsix(lc1, list1, lc2, list2, lc3, list3,						\
-			   lc4, list4, lc5, list5, lc6, list6)						\
-	for ((lc1) = list_head(list1), (lc2) = list_head(list2),			\
-		 (lc3) = list_head(list3), (lc4) = list_head(list4),			\
-		 (lc5) = list_head(list5), (lc6) = list_head(list6);			\
-         (lc1) != NULL && (lc2) != NULL && (lc3) != NULL &&				\
-		 (lc4) != NULL && (lc5) != NULL && (lc6) != NULL;				\
-		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),	\
-		 (lc4) = lnext(lc4), (lc5) = lnext(lc5), (lc6) = lnext(lc6))
 #endif
 
 /* XXX - PG10 added lfirst_node() and related */

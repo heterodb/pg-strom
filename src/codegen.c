@@ -278,7 +278,7 @@ get_extension_schema_by_name(const char *extname)
 	HeapTuple	tuple;
 	Oid			namespace_oid = InvalidOid;
 
-	rel = heap_open(ExtensionRelationId, AccessShareLock);
+	rel = table_open(ExtensionRelationId, AccessShareLock);
 	ScanKeyInit(&skey,
 				Anum_pg_extension_extname,
 				BTEqualStrategyNumber, F_NAMEEQ,
@@ -289,7 +289,7 @@ get_extension_schema_by_name(const char *extname)
 	if (HeapTupleIsValid(tuple))
 		namespace_oid = ((Form_pg_extension)GETSTRUCT(tuple))->extnamespace;
 	systable_endscan(scan);
-	heap_close(rel, AccessShareLock);
+	table_close(rel, AccessShareLock);
 
 	return namespace_oid;
 }

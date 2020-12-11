@@ -399,9 +399,9 @@ GstoreGetForeignRelSize(PlannerInfo *root,
 	Relation	frel;
 	GpuStoreDesc *gs_desc;
 
-	frel = heap_open(foreigntableid, AccessShareLock);
+	frel = table_open(foreigntableid, AccessShareLock);
 	gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
-	heap_close(frel, AccessShareLock);
+	table_close(frel, AccessShareLock);
 
 	baserel->tuples = (double) gs_desc->base_mmap->schema.nitems;
 	baserel->rows = baserel->tuples *
@@ -5798,7 +5798,7 @@ GstoreFdwStartupKicker(Datum arg)
 		while ((tuple = systable_getnext(sscan)) != NULL)
 		{
 			ftable = (Form_pg_foreign_table)GETSTRUCT(tuple);
-			frel = heap_open(ftable->ftrelid, AccessShareLock);
+			frel = table_open(ftable->ftrelid, AccessShareLock);
 			if (RelationIsGstoreFdw(frel))
 			{
 				MemoryContext	orig_memcxt = CurrentMemoryContext;
@@ -5825,7 +5825,7 @@ GstoreFdwStartupKicker(Datum arg)
 				}
 				PG_END_TRY();
 			}
-			heap_close(frel, AccessShareLock);
+			table_close(frel, AccessShareLock);
 		}
 		systable_endscan(sscan);
 		table_close(srel, AccessShareLock);
