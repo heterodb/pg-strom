@@ -3163,7 +3163,7 @@ codegen_coalesce_expression(codegen_context *context,
 			__ELog("device type mismatch in COALESCE: %s / %s",
 				   format_type_be(dtype->type_oid),
 				   format_type_be(type_oid));
-		if (llast(coalesce->args) != lc)
+		if (list_tail(coalesce->args) != lc)
 		{
 			__appendStringInfo(&context->str, "((__temp%d = ", temp_nr);
 			codegen_expression_walker(context, expr, &width);
