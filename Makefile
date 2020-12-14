@@ -271,8 +271,8 @@ REGRESS_INIT_SQL := $(STROM_BUILD_ROOT)/test/sql/init_regress.sql
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
 REGRESS_REVISION := 20200306
 REGRESS_REVISION_QUERY := 'SELECT pgstrom.regression_testdb_revision() = $(REGRESS_REVISION)'
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test \
-               --outputdir=$(STROM_BUILD_ROOT)/test \
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test/$(MAJORVERSION) \
+               --outputdir=$(STROM_BUILD_ROOT)/test/$(MAJORVERSION) \
                --encoding=UTF-8 \
                --load-extension=pg_strom \
                --load-extension=plpython3u \

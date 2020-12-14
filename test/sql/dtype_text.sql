@@ -22,8 +22,8 @@ CREATE TABLE rt_text (
   vc2   varchar(80) COLLATE "C",
   tc1   text        COLLATE "C",
   tc2   text        COLLATE "C",
-  tj1   text        COLLATE "ja_JP",
-  tj2   text        COLLATE "ja_JP"
+  tj1   text        COLLATE "en_US",
+  tj2   text        COLLATE "en_US"
 );
 SELECT pgstrom.random_setseed(20190616);
 INSERT INTO rt_text (
