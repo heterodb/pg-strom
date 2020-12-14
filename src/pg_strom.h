@@ -668,13 +668,31 @@ typedef struct pgstrom_data_store
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
 } pgstrom_data_store;
 
-/*
- * --------------------------------------------------------------------
+/* --------------------------------------------------------------------
+ *
+ * PG-Strom GUC variables
+ *
+ * -------------------------------------------------------------------- */
+extern bool		pgstrom_enabled;
+extern bool		pgstrom_bulkexec_enabled;
+extern bool		pgstrom_cpu_fallback_enabled;
+extern bool		pgstrom_regression_test_mode;
+extern int		pgstrom_max_async_tasks;
+extern double	pgstrom_gpu_setup_cost;
+extern double	pgstrom_gpu_dma_cost;
+extern double	pgstrom_gpu_operator_cost;
+extern Size		pgstrom_chunk_size(void);
+extern long		PAGE_SIZE;
+extern long		PAGE_MASK;
+extern int		PAGE_SHIFT;
+extern long		PHYS_PAGES;
+#define PAGE_ALIGN(sz)		TYPEALIGN(PAGE_SIZE,(sz))
+
+/* --------------------------------------------------------------------
  *
  * Function Declarations
  *
- * --------------------------------------------------------------------
- */
+ * -------------------------------------------------------------------- */
 
 /*
  * gpu_device.c
@@ -854,10 +872,11 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 		ereport(error_level / 2,
 				(errcode(gcontext->error_code),
 				 errmsg("%s", gcontext->error_message),
-				 errdetail("GPU kernel location: %s:%d [%s]",
-						   gcontext->error_filename,
-						   gcontext->error_lineno,
-						   gcontext->error_funcname)));
+				 (pgstrom_regression_test_mode ? 0 :
+				  errdetail("GPU kernel location: %s:%d [%s]",
+							gcontext->error_filename,
+							gcontext->error_lineno,
+							gcontext->error_funcname))));
 	}
 	CHECK_FOR_INTERRUPTS();
 }
@@ -1521,21 +1540,6 @@ extern void		pgstrom_init_extra(void);
 /*
  * main.c
  */
-extern bool		pgstrom_enabled;
-extern bool		pgstrom_bulkexec_enabled;
-extern bool		pgstrom_cpu_fallback_enabled;
-extern bool		pgstrom_regression_test_mode;
-extern int		pgstrom_max_async_tasks;
-extern double	pgstrom_gpu_setup_cost;
-extern double	pgstrom_gpu_dma_cost;
-extern double	pgstrom_gpu_operator_cost;
-extern Size		pgstrom_chunk_size(void);
-extern long		PAGE_SIZE;
-extern long		PAGE_MASK;
-extern int		PAGE_SHIFT;
-extern long		PHYS_PAGES;
-#define PAGE_ALIGN(sz)		TYPEALIGN(PAGE_SIZE,(sz))
-
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,
 										  bool outer_parallel,
