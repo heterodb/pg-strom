@@ -18,7 +18,7 @@
 #include "pg_strom.h"
 #include "cuda_gstore.h"
 #include "gstore_fdw.h"
-#include <libpmem.h>
+#include <libpmem.h>		/* requires libpmem-devel package */
 
 /*
  * GpuStoreBackgroundCommand
@@ -2020,7 +2020,37 @@ GstoreExecForeignDelete(EState *estate,
 
 static void
 GstoreEndForeignModify(EState *estate, ResultRelInfo *rinfo)
-{}
+{
+	/* do nothing */
+}
+
+#if PG_VERSION_NUM >= 110000
+/*
+ * MEMO: executor begin/end routine, if gstore_fdw is partitioned-leaf
+ * relations. In this case, GstoreBeginForeignModify shall not be called.
+ */
+static void
+GstoreBeginForeignInsert(ModifyTableState *mtstate,
+						 ResultRelInfo *rinfo)
+{
+	GpuStoreFdwModify *gs_mstate = palloc0(sizeof(GpuStoreFdwModify));
+	Relation		frel = rinfo->ri_RelationDesc;
+
+	gs_mstate->gs_desc = gstoreFdwLookupGpuStoreDesc(frel);
+	gs_mstate->updatedCols = NULL;
+	gs_mstate->oldestXmin = GetOldestXmin(frel, PROCARRAY_FLAGS_VACUUM);
+	gs_mstate->ctid_attno = InvalidAttrNumber;
+	gs_mstate->gs_undo = gstoreFdwLookupUndoLogs(gs_mstate->gs_desc);
+
+	rinfo->ri_FdwState = gs_mstate;
+}
+
+static void
+GstoreEndForeignInsert(EState *estate, ResultRelInfo *rinfo)
+{
+	/* do nothing */
+}
+#endif
 
 void
 ExplainGstoreFdw(GpuStoreFdwState *fdw_state,
@@ -5913,15 +5943,6 @@ pgstrom_init_gstore_fdw(void)
     r->IterateForeignScan			= GstoreIterateForeignScan;
     r->ReScanForeignScan			= GstoreReScanForeignScan;
     r->EndForeignScan				= GstoreEndForeignScan;
-#if 0
-	/* Parallel support */
-	r->IsForeignScanParallelSafe	= GstoreIsForeignScanParallelSafe;
-    r->EstimateDSMForeignScan		= GstoreEstimateDSMForeignScan;
-    r->InitializeDSMForeignScan		= GstoreInitializeDSMForeignScan;
-    r->ReInitializeDSMForeignScan	= GstoreReInitializeDSMForeignScan;
-    r->InitializeWorkerForeignScan	= GstoreInitializeWorkerForeignScan;
-    r->ShutdownForeignScan			= GstoreShutdownForeignScan;
-#endif
 	/* UPDATE/INSERT/DELETE */
     r->AddForeignUpdateTargets		= GstoreAddForeignUpdateTargets;
     r->PlanForeignModify			= GstorePlanForeignModify;
@@ -5930,7 +5951,10 @@ pgstrom_init_gstore_fdw(void)
     r->ExecForeignUpdate			= GstoreExecForeignUpdate;
     r->ExecForeignDelete			= GstoreExecForeignDelete;
     r->EndForeignModify				= GstoreEndForeignModify;
-
+#if PG_VERSION_NUM >= 110000
+	r->BeginForeignInsert			= GstoreBeginForeignInsert;
+	r->EndForeignInsert				= GstoreEndForeignInsert;
+#endif
 	/* EXPLAIN/ANALYZE */
 	r->ExplainForeignScan			= GstoreExplainForeignScan;
     r->ExplainForeignModify			= GstoreExplainForeignModify;
