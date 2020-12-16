@@ -2262,11 +2262,12 @@ gstoreFdwExtractOptions(Relation frel,
 		if (strcmp(def->defname, "gpu_device_id") == 0)
 		{
 			long	device_id = strtol(defGetString(def), &endp, 10);
-			int		i, cuda_dindex = -1;
+			int		i;
 
 			if (device_id < 0 || device_id > INT_MAX || *endp != '\0')
 				elog(ERROR, "unexpected input for gpu_device_id: %s",
 					 defGetString(def));
+			cuda_dindex = -1;
 			for (i=0; i < numDevAttrs; i++)
 			{
 				if (devAttrs[i].DEV_ID == device_id)
