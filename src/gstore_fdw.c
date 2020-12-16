@@ -927,17 +927,13 @@ GstoreGetForeignPlan(PlannerInfo *root,
 {
 	Bitmapset  *referenced = NULL;
 	List	   *outer_refs = NIL;
-	int			i, j, k;
+	List	   *scan_tlist = baserel->reltarget->exprs;
+	int			j, k;
 
+	/* pick up referenced columns */
 	scan_clauses = extract_actual_clauses(scan_clauses, false);
+	pull_varattnos((Node *)scan_tlist, baserel->relid, &referenced);
 	pull_varattnos((Node *)scan_clauses, baserel->relid, &referenced);
-	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
-	{
-		k = i - FirstLowInvalidHeapAttributeNumber;
-		if (!bms_is_empty(baserel->attr_needed[j]))
-			referenced = bms_add_member(referenced, k);
-	}
-
 	for (j = bms_next_member(referenced, -1);
 		 j >= 0;
 		 j = bms_next_member(referenced, j))
@@ -945,7 +941,6 @@ GstoreGetForeignPlan(PlannerInfo *root,
 		k = j + FirstLowInvalidHeapAttributeNumber;
 		outer_refs = lappend_int(outer_refs, k);
 	}
-
 	return make_foreignscan(tlist,
 							scan_clauses,
 							baserel->relid,
