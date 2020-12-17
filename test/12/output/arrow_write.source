@@ -285,3 +285,122 @@ SELECT * FROM ft ORDER by id LIMIT 8;
 ----+---+---+---+---+---+---
 (0 rows)
 
+--
+-- Arrow_Fdw and table partition
+--
+CREATE TABLE ptable (
+  dev_id int,
+  val    text
+) PARTITION BY HASH (dev_id);
+CREATE FOREIGN TABLE ftable_p0
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 0)
+  SERVER arrow_fdw
+  OPTIONS (file '@abs_builddir@/test_arrow_write_ftable_p0.arrow', writable 'true');
+CREATE FOREIGN TABLE ftable_p1
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 1)
+  SERVER arrow_fdw
+  OPTIONS (file '@abs_builddir@/test_arrow_write_ftable_p1.arrow', writable 'true');
+CREATE FOREIGN TABLE ftable_p2
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 2)
+  SERVER arrow_fdw
+  OPTIONS (file '@abs_builddir@/test_arrow_write_ftable_p2.arrow', writable 'true');
+INSERT INTO ptable (SELECT x,md5(x::text) FROM generate_series(0,200,2) x);
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+ tableoid  | count 
+-----------+-------
+ ftable_p0 |    34
+ ftable_p1 |    32
+ ftable_p2 |    35
+(3 rows)
+
+BEGIN;
+INSERT INTO ptable (SELECT x,md5(x::text) FROM generate_series(1,200,2) x);
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+ tableoid  | count 
+-----------+-------
+ ftable_p0 |    61
+ ftable_p1 |    62
+ ftable_p2 |    78
+(3 rows)
+
+SELECT * FROM ftable_p0 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+      2 | c81e728d9d4c2f636f067f89cc14862c
+      4 | a87ff679a2f3e71d9181a67b7542122c
+      6 | 1679091c5a880faf6fb5e6087eb1b2dc
+      8 | c9f0f895fb98ab9159f51fd0297e236d
+     15 | 9bf31c7ff062936a96d3c8bd1f8f2ff3
+(5 rows)
+
+SELECT * FROM ftable_p1 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+      3 | eccbc87e4b5ce2fe28308fd9f2a7baf3
+      7 | 8f14e45fceea167a5a36dedd4bea2543
+     10 | d3d9446802a44259755d38e6d163e820
+     13 | c51ce410c124a10e0db5e4b97fc2af39
+     14 | aab3238922bcc25a6f606eb525ffdc56
+(5 rows)
+
+SELECT * FROM ftable_p2 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+      0 | cfcd208495d565ef66e7dff9f98764da
+      1 | c4ca4238a0b923820dcc509a6f75849b
+      5 | e4da3b7fbbce2345d7772b0674a318d5
+      9 | 45c48cce2e2d7fbdea1afc51c7c6ad26
+     11 | 6512bd43d9caa6e02c990b0a82652dca
+(5 rows)
+
+ABORT;
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+ tableoid  | count 
+-----------+-------
+ ftable_p0 |    34
+ ftable_p1 |    32
+ ftable_p2 |    35
+(3 rows)
+
+SELECT * FROM ftable_p0 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+      2 | c81e728d9d4c2f636f067f89cc14862c
+      4 | a87ff679a2f3e71d9181a67b7542122c
+      6 | 1679091c5a880faf6fb5e6087eb1b2dc
+      8 | c9f0f895fb98ab9159f51fd0297e236d
+     16 | c74d97b01eae257e44aa9d5bade97baf
+(5 rows)
+
+SELECT * FROM ftable_p1 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+     10 | d3d9446802a44259755d38e6d163e820
+     14 | aab3238922bcc25a6f606eb525ffdc56
+     26 | 4e732ced3463d06de0ca9a15b6153677
+     36 | 19ca14e7ea6328a42e0eb13d585e4c22
+     40 | d645920e395fedad7bbbed0eca3fe2e0
+(5 rows)
+
+SELECT * FROM ftable_p2 ORDER BY dev_id LIMIT 5;
+ dev_id |               val                
+--------+----------------------------------
+      0 | cfcd208495d565ef66e7dff9f98764da
+     12 | c20ad4d76fe97759aa27a0c99bff6710
+     22 | b6d767d2f8ed5d21a44b0e5886680cb9
+     24 | 1ff1de774005f8da13f42943881c655f
+     28 | 33e75ff09dd601bbe69f351039152189
+(5 rows)
+

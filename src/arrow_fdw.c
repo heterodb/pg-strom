@@ -237,8 +237,8 @@ static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   Datum *p_datum,
 								   bool *p_isnull);
 /* routines for writable arrow_fdw foreign tables */
-static arrowWriteState *createArrowWriteState(Relation frel, File file,
-											  bool redo_log_written);
+static void	setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc);
+static void setupArrowSQLbufferBatches(SQLtable *table);
 static void createArrowWriteRedoLog(File filp, bool is_newfile);
 static void writeOutArrowRecordBatch(arrowWriteState *aw_state,
 									 bool with_footer);
@@ -2060,17 +2060,18 @@ ArrowPlanForeignModify(PlannerInfo *root,
  * ArrowBeginForeignModify
  */
 static void
-ArrowBeginForeignModify(ModifyTableState *mtstate,
-						ResultRelInfo *rrinfo,
-						List *fdw_private,
-						int subplan_index,
-						int eflags)
+__ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 {
 	Relation		frel = rrinfo->ri_RelationDesc;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	List		   *filesList = arrowFdwExtractFilesList(ft->options);
 	const char	   *fname;
 	File			filp;
+	struct stat		stat_buf;
+	arrowWriteState *aw_state;
+	SQLtable	   *table;
+	MetadataCacheKey key;
 	bool			redo_log_written = false;
 
 	Assert(list_length(filesList) == 1);
@@ -2103,8 +2104,35 @@ ArrowBeginForeignModify(ModifyTableState *mtstate,
 		}
 		PG_END_TRY();
 	}
-	rrinfo->ri_FdwState = createArrowWriteState(frel, filp,
-												redo_log_written);
+	if (fstat(FileGetRawDesc(filp), &stat_buf) != 0)
+		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(filp));
+	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+
+	aw_state = palloc0(offsetof(arrowWriteState,
+								sql_table.columns[tupdesc->natts]));
+	aw_state->memcxt = CurrentMemoryContext;
+	aw_state->file = filp;
+	aw_state->key = key;
+	aw_state->hash = key.hash;
+	aw_state->redo_log_written = redo_log_written;
+	table = &aw_state->sql_table;
+	table->filename = FilePathName(filp);
+	table->fdesc = FileGetRawDesc(filp);
+	setupArrowSQLbufferSchema(table, tupdesc);
+	if (!redo_log_written)
+		setupArrowSQLbufferBatches(table);
+
+	rrinfo->ri_FdwState = aw_state;
+}
+
+static void
+ArrowBeginForeignModify(ModifyTableState *mtstate,
+						ResultRelInfo *rrinfo,
+						List *fdw_private,
+						int subplan_index,
+						int eflags)
+{
+	__ArrowBeginForeignModify(rrinfo, eflags);
 }
 
 /*
@@ -2179,6 +2207,27 @@ ArrowEndForeignModify(EState *estate,
 
 	writeOutArrowRecordBatch(aw_state, true);
 }
+
+#if PG_VERSION_NUM >= 110000
+/*
+ * MEMO: executor begin/end routine, if gstore_fdw is partitioned-leaf
+ * relations. In this case, ArrowBeginForeignModify shall not be called.
+ */
+static void
+ArrowBeginForeignInsert(ModifyTableState *mtstate,
+						ResultRelInfo *rrinfo)
+{
+	__ArrowBeginForeignModify(rrinfo, 0);
+}
+
+static void
+ArrowEndForeignInsert(EState *estate, ResultRelInfo *rrinfo)
+{
+	arrowWriteState *aw_state = rrinfo->ri_FdwState;
+
+	writeOutArrowRecordBatch(aw_state, true);
+}
+#endif
 
 /*
  * ArrowExplainForeignModify
@@ -4113,39 +4162,6 @@ setupArrowSQLbufferBatches(SQLtable *table)
 }
 
 /*
- * createArrowWriteState
- */
-static arrowWriteState *
-createArrowWriteState(Relation frel, File file, bool redo_log_written)
-{
-	TupleDesc		tupdesc = RelationGetDescr(frel);
-	arrowWriteState *aw_state;
-	SQLtable	   *table;
-	struct stat		stat_buf;
-	MetadataCacheKey key;
-
-	if (fstat(FileGetRawDesc(file), &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(file));
-	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
-
-	aw_state = palloc0(offsetof(arrowWriteState,
-								sql_table.columns[tupdesc->natts]));
-	aw_state->memcxt = CurrentMemoryContext;
-	aw_state->file = file;
-	aw_state->key = key;
-	aw_state->hash = key.hash;
-	aw_state->redo_log_written = redo_log_written;
-	table = &aw_state->sql_table;
-	table->filename = FilePathName(file);
-	table->fdesc = FileGetRawDesc(file);
-	setupArrowSQLbufferSchema(table, tupdesc);
-	if (!redo_log_written)
-		setupArrowSQLbufferBatches(table);
-
-	return aw_state;
-}
-
-/*
  * createArrowWriteRedoLog
  */
 static void
@@ -5520,6 +5536,10 @@ pgstrom_init_arrow_fdw(void)
 	r->BeginForeignModify			= ArrowBeginForeignModify;
 	r->ExecForeignInsert			= ArrowExecForeignInsert;
 	r->EndForeignModify				= ArrowEndForeignModify;
+#if PG_VERSION_NUM >= 110000
+	r->BeginForeignInsert			= ArrowBeginForeignInsert;
+	r->EndForeignInsert				= ArrowEndForeignInsert;
+#endif
 	r->ExplainForeignModify			= ArrowExplainForeignModify;
 
 	/*
