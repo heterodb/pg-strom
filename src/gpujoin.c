@@ -7973,8 +7973,8 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		kern_tupitem *titem = (kern_tupitem *)(curr_pos - sz);
 
 		Assert(entry->hash == 0);
-		memcpy(titem, &entry->titem, entry->titem.t_len);
-
+		memcpy(titem, &entry->titem,
+			   offsetof(kern_tupitem, htup) + entry->titem.t_len);
 		titem->rowid = rowid;
 		row_index[rowid++] = __kds_packed((char *)titem - (char *)kds);
 		curr_pos -= sz;
