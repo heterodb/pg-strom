@@ -1777,213 +1777,219 @@ retry:
 	}
 }
 
-static TupleTableSlot *
-__gstoreExecForeignModify(EState *estate,
-						  ResultRelInfo *rinfo,
-						  CmdType operation,
-						  TupleTableSlot *slot,		/* INSERT or UPDATE */
-						  TupleTableSlot *planSlot)	/* UPDATE or DELETE */
+/*
+ * __gstoreExecForeignInsert
+ */
+static void
+__gstoreExecForeignInsert(Relation frel,
+						  GpuStoreFdwModify *gs_mstate,
+						  TupleTableSlot *slot,		/* NEW tuple */
+						  cl_uint oldid)			/* if UPDATE */
 {
-	GpuStoreFdwModify *gs_mstate = rinfo->ri_FdwState;
 	GpuStoreDesc   *gs_desc = gs_mstate->gs_desc;
 	GpuStoreUndoLogs *gs_undo = gs_mstate->gs_undo;
 	kern_data_store *kds = &gs_desc->base_mmap->schema;
-	Relation		frel = rinfo->ri_RelationDesc;
+	Bitmapset	   *updatedCols = gs_mstate->updatedCols;
 	TransactionId	curr_xid = GetCurrentTransactionId();
 	cl_uint			rowid = UINT_MAX;
-	cl_uint			oldid = UINT_MAX;
+	size_t			extra_sz = 0;
+	char		   *extra_buf = NULL;
+	List		   *unused_rowids = NIL;
 	int				j, natts = RelationGetNumberOfAttributes(frel);
+	bool			locked = false;
 	char			temp[10];
 
-	enlargeStringInfo(&gs_undo->buf, 2 * (sizeof(char) + sizeof(cl_uint)));
-	/*
-	 * UPDATE or DELETE marks 'removed' on the old row; it shall work as
-	 * low-level lock for other concurrent transactions.
-	 */
-	if (operation == CMD_UPDATE || operation == CMD_DELETE)
+	/* calculation of required extra buffer size */
+	slot_getallattrs(slot);
+	if (kds->has_varlena)
 	{
-		GstoreFdwSysattr sysattr;
-		ItemPointer	ctid;
-		Datum		datum;
-		bool		isnull;
-		bool		locked = false;
-
-		datum = ExecGetJunkAttribute(planSlot, gs_mstate->ctid_attno, &isnull);
-		if (isnull)
-			elog(ERROR, "ctid is NULL");
-		ctid = (ItemPointer)DatumGetPointer(datum);
-		oldid = (((cl_uint)ctid->ip_blkid.bi_hi << 16) |
-				 ((cl_uint)ctid->ip_blkid.bi_lo));
-
-		ConditionVariablePrepareToSleep(&gstore_shared_head->row_lock_cond);
-		PG_TRY();
+		for (j=0; j < kds->ncols; j++)
 		{
-			int		visible;
-		wakeup_retry:
-			locked = gstoreFdwSpinLockBaseRow(gs_desc, oldid);
-			visible = gstoreCheckVisibilityTryDelete(gs_desc, oldid, curr_xid,
-													 &sysattr);
-			locked = gstoreFdwSpinUnlockBaseRow(gs_desc, oldid);
-			if (visible < 0)
-			{
-				ConditionVariableSleep(&gstore_shared_head->row_lock_cond,
-									   PG_WAIT_LOCK);
-				goto wakeup_retry;
-			}
-			if (visible == 0)
-				elog(ERROR, "concurrent update/delete of foreign table '%s' at rowid=%u",
-					 RelationGetRelationName(frel), oldid);
-		}
-		PG_CATCH();
-		{
-			if (locked)
-				gstoreFdwSpinUnlockBaseRow(gs_desc, oldid);
-			ConditionVariableCancelSleep();
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		ConditionVariableCancelSleep();
-
-		/* Put DELETE log */
-		gstoreFdwAppendDeleteLog(frel, gs_desc, oldid,
-								 sysattr.xmin,
-								 sysattr.xmax);
-		/* UNDO Log also */
-		temp[0] = 'D';
-		*((uint32 *)(temp + 1)) = oldid;
-        appendBinaryStringInfo(&gs_undo->buf, temp, 5);
-        gs_undo->nitems++;
-	}
-
-	/*
-	 * INSERT or UPDATE adds a new row
-	 */
-	if (operation == CMD_INSERT || operation == CMD_UPDATE)
-	{
-		Bitmapset  *updatedCols = gs_mstate->updatedCols;
-		size_t		extra_sz = 0;
-		char	   *extra_buf = NULL;
-		List	   *unused_rowids = NIL;
-
-		slot_getallattrs(slot);
-		/* calculation of required extra buffer size */
-		if (kds->has_varlena)
-		{
-			for (j=0; j < natts; j++)
-			{
-				kern_colmeta   *cmeta = &kds->colmeta[j];
-				Datum			datum = slot->tts_values[j];
-				bool			isnull = slot->tts_isnull[j];
+			kern_colmeta *cmeta = &kds->colmeta[j];
+			Datum		datum = slot->tts_values[j];
+			bool		isnull = slot->tts_isnull[j];
 
 			if (cmeta->attlen == -1 && !isnull &&
 				(!updatedCols || bms_is_member(cmeta->attnum, updatedCols)))
 				extra_sz += MAXALIGN(VARSIZE_ANY(datum));
-			}
 		}
+	}
 
-		PG_TRY();
+	/* new RowId allocation */
+	PG_TRY();
+	{
+		GstoreFdwSysattr sysattr;
+		HeapTuple		tuple;
+
+		for (;;)
 		{
-			GstoreFdwSysattr sysattr;
-			HeapTuple		tuple;
+			rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
+										   gs_desc->rowid_map);
+			if (rowid >= kds->nrooms)
+				elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows %u",
+					 RelationGetRelationName(frel), rowid);
+			locked = gstoreFdwSpinLockBaseRow(gs_desc, rowid);
+			if (gstoreCheckVisibilityForInsert(gs_desc, rowid,
+											   gs_mstate->oldestXmin))
+				break;
+			locked = gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+			unused_rowids = lappend_int(unused_rowids, rowid);
+		}
+		/* Put INSERT Log */
+		tuple = ExecFetchSlotHeapTuple(slot, false, false);
+		gstoreFdwAppendInsertLog(frel, gs_desc, rowid, oldid, curr_xid, tuple);
+		/* UNDO Log also */
+		temp[0] = 'I';
+		*((uint32 *)(temp + 1)) = rowid;
+		appendBinaryStringInfo(&gs_undo->buf, temp, 5);
+		gs_undo->nitems++;
 
-			/* new RowId allocation */
-			for (;;)
+		if (extra_sz > 0)
+			extra_buf = __gstoreAllocExtraBuffer(gs_desc, extra_sz);
+		kds = &gs_desc->base_mmap->schema;
+		for (j=0; j < natts; j++)
+		{
+			kern_colmeta *cmeta = &kds->colmeta[j];
+			Datum		datum = slot->tts_values[j];
+			bool		isnull = slot->tts_isnull[j];
+
+			if (cmeta->attlen == -1 && !isnull)
 			{
-				rowid = gstoreFdwAllocateRowId(gs_desc->gs_sstate,
-											   gs_desc->rowid_map);
-				if (rowid >= kds->nrooms)
-					elog(ERROR, "gstore_fdw: '%s' has no room to INSERT any rows %u",
-						 RelationGetRelationName(frel), rowid);
-				gstoreFdwSpinLockBaseRow(gs_desc, rowid);
-				if (gstoreCheckVisibilityForInsert(gs_desc, rowid,
-												   gs_mstate->oldestXmin))
-					break;
-				gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-				unused_rowids = lappend_int(unused_rowids, rowid);
-			}
-			/* Put INSERT Log */
-			tuple = ExecFetchSlotHeapTuple(slot, false, false);
-			gstoreFdwAppendInsertLog(frel, gs_desc, rowid, oldid, curr_xid, tuple);
-			/* UNDO Log also */
-			temp[0] = 'I';
-			*((uint32 *)(temp + 1)) = rowid;
-			appendBinaryStringInfo(&gs_undo->buf, temp, 5);
-			gs_undo->nitems++;
+				size_t		sz = VARSIZE_ANY(datum);
 
-			if (extra_sz > 0)
-				extra_buf = __gstoreAllocExtraBuffer(gs_desc, extra_sz);
-			kds = &gs_desc->base_mmap->schema;
-			for (j=0; j < natts; j++)
-			{
-				kern_colmeta   *cmeta = &kds->colmeta[j];
-				Datum			datum = slot->tts_values[j];
-				bool			isnull = slot->tts_isnull[j];
-
-				if (cmeta->attlen == -1 && !isnull)
+				if (!updatedCols || bms_is_member(cmeta->attnum, updatedCols))
 				{
-					size_t		sz = VARSIZE_ANY(datum);
-
-					if (!updatedCols || bms_is_member(cmeta->attnum, updatedCols))
-					{
-						memcpy(extra_buf, DatumGetPointer(datum), sz);
-						datum = PointerGetDatum(extra_buf);
-						extra_buf += MAXALIGN(sz);
-					}
-					else
-					{
-						/*
-						 * If UPDATE does not change this varlena column,
-						 * we don't need to consume redundant extra buffer for
-						 * identicalsame value. So, we reuse the older version
-						 * of the unchanged value. It also saves consumption of
-						 * GPU device memory.
-						 */
-						kern_data_extra *extra __attribute__((unused))
-							= (kern_data_extra *)((char *)kds + kds->extra_hoffset);
-						datum = KDS_fetch_datum_column(kds, cmeta, oldid, &isnull);
-						if (isnull)
-							elog(ERROR, "Bug? unchanged column has different value");
-						Assert((char *)datum >= (char *)extra &&
-							   (char *)datum <  (char *)extra + extra->length);
-					}
+					memcpy(extra_buf, DatumGetPointer(datum), sz);
+					datum = PointerGetDatum(extra_buf);
+					extra_buf += MAXALIGN(sz);
 				}
-				__KDS_store_datum_column(kds, cmeta, rowid, datum, isnull);
+				else
+				{
+					/*
+					 * If UPDATE does not change this varlena column,
+					 * we don't need to consume redundant extra buffer for
+					 * identicalsame value. So, we reuse the older version
+					 * of the unchanged value. It also saves consumption of
+					 * GPU device memory.
+					 */
+					kern_data_extra *extra __attribute__((unused))
+						= (kern_data_extra *)((char *)kds + kds->extra_hoffset);
+					datum = KDS_fetch_datum_column(kds, cmeta, oldid, &isnull);
+					if (isnull)
+						elog(ERROR, "Bug? unchanged column has different value");
+					Assert((char *)datum >= (char *)extra &&
+						   (char *)datum <  (char *)extra + extra->length);
+				}
 			}
-			sysattr.xmin = curr_xid;
-			sysattr.xmax = InvalidTransactionId;
-			sysattr.cid  = GetCurrentCommandId(true);
-			KDS_store_datum_column(kds, &kds->colmeta[natts], rowid,
-								   PointerGetDatum(&sysattr),
-								   false);
-			atomicMax32(&kds->nitems, rowid + 1);
+			__KDS_store_datum_column(kds, cmeta, rowid, datum, isnull);
 		}
-		PG_CATCH();
-		{
+		sysattr.xmin = curr_xid;
+		sysattr.xmax = InvalidTransactionId;
+		sysattr.cid  = GetCurrentCommandId(true);
+		KDS_store_datum_column(kds, &kds->colmeta[natts], rowid,
+							   PointerGetDatum(&sysattr),
+							   false);
+		atomicMax32(&kds->nitems, rowid + 1);
+	}
+	PG_CATCH();
+	{
+		if (locked)
 			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
-			gstoreFdwReleaseRowIdMulti(gs_desc->gs_sstate,
-									   gs_desc->rowid_map,
-									   rowid, unused_rowids);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
 		gstoreFdwReleaseRowIdMulti(gs_desc->gs_sstate,
 								   gs_desc->rowid_map,
-								   UINT_MAX, unused_rowids);
+								   rowid, unused_rowids);
+		PG_RE_THROW();
 	}
-	/* UPDATE or DELETE */
-	if (oldid != UINT_MAX)
+	PG_END_TRY();
+	if (locked)
+		gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+	gstoreFdwReleaseRowIdMulti(gs_desc->gs_sstate,
+							   gs_desc->rowid_map,
+							   UINT_MAX, unused_rowids);
+	/* Add PK entry, if any */
+	Assert(rowid != UINT_MAX);
+	gstoreFdwInsertIntoPrimaryKey(gs_desc, gs_undo, rowid);
+}
+
+/*
+ * __gstoreExecForeignDelete
+ *
+ * It marks 'removed' on the old tuples; it also works as row-level lock
+ * for other concurrent transactions.
+ * If Gstore_Fdw has PK, its entry deletion ('R' log) must be added prior to
+ * deletion of the base row ('D' log) onto the undo log.
+ */
+static cl_uint
+__gstoreExecForeignDelete(Relation frel,
+						  GpuStoreFdwModify *gs_mstate,
+						  TupleTableSlot *slot)		/* OLD tuple */
+{
+	GpuStoreDesc   *gs_desc = gs_mstate->gs_desc;
+	GpuStoreUndoLogs *gs_undo = gs_mstate->gs_undo;
+	GstoreFdwSysattr sysattr;
+	Datum			datum;
+	bool			isnull;
+	bool			locked;
+	ItemPointer		ctid;
+	cl_uint			rowid;
+	char			temp[10];
+
+	/* fetch row-id to be removed */
+	datum = ExecGetJunkAttribute(slot, gs_mstate->ctid_attno, &isnull);
+	if (isnull)
+		elog(ERROR, "Bug? ctid is NULL");
+	ctid = (ItemPointer)DatumGetPointer(datum);
+	rowid = (((cl_uint)ctid->ip_blkid.bi_hi << 16) |
+			 ((cl_uint)ctid->ip_blkid.bi_lo));
+
+	/* ensure rowid exists on the hash-index, if any */
+	gstoreFdwRemoveFromPrimaryKey(gs_desc, gs_undo, rowid);
+
+	/* do deletion */
+	ConditionVariablePrepareToSleep(&gstore_shared_head->row_lock_cond);
+	PG_TRY();
 	{
-		Assert(operation == CMD_UPDATE || operation == CMD_DELETE);
-		gstoreFdwRemoveFromPrimaryKey(gs_desc, gs_undo, oldid);
+		int		visible;
+
+		for (;;)
+		{
+			locked = gstoreFdwSpinLockBaseRow(gs_desc, rowid);
+			visible = gstoreCheckVisibilityTryDelete(gs_desc,
+													 rowid,
+													 GetCurrentTransactionId(),
+													 &sysattr);
+			locked = gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+			if (visible > 0)
+				break;
+			if (visible == 0)
+				elog(ERROR, "concurrent update of foreign table '%s' at rowid=%u",
+					 RelationGetRelationName(frel), rowid);
+
+			ConditionVariableSleep(&gstore_shared_head->row_lock_cond,
+								   PG_WAIT_LOCK);
+		}
 	}
-	/* INSERT or UPDATE */
-	if (rowid != UINT_MAX)
+	PG_CATCH();
 	{
-		Assert(operation == CMD_INSERT || operation == CMD_UPDATE);
-		gstoreFdwInsertIntoPrimaryKey(gs_desc, gs_undo, rowid);
+		if (locked)
+			gstoreFdwSpinUnlockBaseRow(gs_desc, rowid);
+		ConditionVariableCancelSleep();
+		PG_RE_THROW();
 	}
-	return slot;
+	PG_END_TRY();
+	ConditionVariableCancelSleep();
+
+	/* Put DELETE log */
+	gstoreFdwAppendDeleteLog(frel, gs_desc, rowid,
+							 sysattr.xmin,
+							 sysattr.xmax);
+	/* UNDO Log also */
+	temp[0] = 'D';
+	*((uint32 *)(temp + 1)) = rowid;
+	appendBinaryStringInfo(&gs_undo->buf, temp, 5);
+	gs_undo->nitems++;
+
+	return rowid;
 }
 
 static TupleTableSlot *
@@ -1992,7 +1998,9 @@ GstoreExecForeignInsert(EState *estate,
 						TupleTableSlot *slot,
 						TupleTableSlot *planSlot)
 {
-	return __gstoreExecForeignModify(estate, rinfo, CMD_INSERT, slot, planSlot);
+	__gstoreExecForeignInsert(rinfo->ri_RelationDesc,
+							  rinfo->ri_FdwState, slot, UINT_MAX);
+	return slot;
 }
 
 static TupleTableSlot *
@@ -2001,7 +2009,13 @@ GstoreExecForeignUpdate(EState *estate,
 						TupleTableSlot *slot,
 						TupleTableSlot *planSlot)
 {
-	return __gstoreExecForeignModify(estate, rinfo, CMD_UPDATE, slot, planSlot);
+	cl_uint		oldid;
+
+	oldid = __gstoreExecForeignDelete(rinfo->ri_RelationDesc,
+									  rinfo->ri_FdwState, planSlot);
+	__gstoreExecForeignInsert(rinfo->ri_RelationDesc,
+							  rinfo->ri_FdwState, slot, oldid);
+    return slot;
 }
 
 static TupleTableSlot *
@@ -2010,7 +2024,9 @@ GstoreExecForeignDelete(EState *estate,
 						TupleTableSlot *slot,
 						TupleTableSlot *planSlot)
 {
-	return __gstoreExecForeignModify(estate, rinfo, CMD_DELETE, slot, planSlot);
+	__gstoreExecForeignDelete(rinfo->ri_RelationDesc,
+							  rinfo->ri_FdwState, planSlot);
+	return slot;
 }
 
 static void
@@ -2868,8 +2884,9 @@ gstoreFdwInsertIntoPrimaryKey(GpuStoreDesc *gs_desc,
 }
 
 static void
-gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
-							  GpuStoreUndoLogs *gs_undo, cl_uint rowid)
+gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc *gs_desc,
+							  GpuStoreUndoLogs *gs_undo,
+							  cl_uint rowid)
 {
 	GpuStoreSharedState *gs_sstate = gs_desc->gs_sstate;
 	GpuStoreHashIndexHead *hash_index = gs_desc->hash_index;
@@ -2881,7 +2898,7 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
 	bool			isnull;
 
 	if (gs_sstate->primary_key < 1 ||
-		gs_sstate->primary_key >= kds->ncols)
+		gs_sstate->primary_key > kds->ncols)
 		return;		/* no primary key is configured */
 	Assert(hash_index != NULL);
 	if (rowid >= hash_index->nrooms)
@@ -2897,16 +2914,13 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
 			 NameStr(cmeta->attname), get_rel_name(kds->table_oid));
 	hash = FunctionCall1(&tcache->hash_proc_finfo, datum);
 
-	enlargeStringInfo(&gs_undo->buf, sizeof(char) + 2*sizeof(cl_uint));
+	/* ensure PK is on the hash-index */
 	gstoreFdwSpinLockHashSlot(gs_desc, hash);
-	/*
-	 * Ensure rowid exists on the hash-index.
-	 */
+	PG_TRY();
 	{
 		cl_uint	   *rowmap = &hash_index->slots[hash_index->nslots];
 		cl_uint		curr_id;
 		char		temp[10];
-		bool		found = false;
 
 		for (curr_id = hash_index->slots[hash % hash_index->nslots];
 			 curr_id < hash_index->nrooms;
@@ -2914,28 +2928,28 @@ gstoreFdwRemoveFromPrimaryKey(GpuStoreDesc    *gs_desc,
 		{
 			if (curr_id == rowid)
 			{
-				found = true;
-				break;
+				/* PK removal from the hash-index */
+				temp[0] = 'R';
+				*((cl_uint *)(temp + 1)) = hash;
+				*((cl_uint *)(temp + 5)) = rowid;
+				appendBinaryStringInfo(&gs_undo->buf, temp, 9);
+				gs_undo->nitems++;
+
+				goto out;
 			}
 		}
-
-		if (found)
-		{
-			/* Remove from PK with hash(u32) + rowid(u32) */
-			temp[0] = 'R';
-			*((cl_uint *)(temp + 1)) = hash;
-			*((cl_uint *)(temp + 5)) = rowid;
-			appendBinaryStringInfo(&gs_undo->buf, temp,
-								   sizeof(char) + 2 * sizeof(cl_uint));
-			gs_undo->nitems++;
-		}
-		else
-		{
-			elog(WARNING, "primary key '%s' for rowid='%u' not found",
-				 NameStr(cmeta->attname), rowid);
-		}
+		elog(WARNING, "primary key '%s' for rowid='%u' not found",
+			 NameStr(cmeta->attname), rowid);
+	out:
+		gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
 	}
-	gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+	PG_CATCH();
+	{
+		gstoreFdwSpinUnlockHashSlot(gs_desc, hash);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
 //	elog(INFO, "Remove PK of rowid=%u, hash=%08lx", rowid, hash);
 }
 
