@@ -1517,6 +1517,7 @@ extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
 /*
  * nvrtc.c
  */
+extern int		pgstrom_nvrtc_version(void);
 extern void		pgstrom_init_nvrtc(void);
 
 /*

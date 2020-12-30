@@ -733,27 +733,7 @@ build_cuda_program(program_cache_entry *src_entry)
 
 	STROM_TRY();
 	{
-		static int	nvrtc_version = -1;
-		int		target_cc = src_entry->target_cc;
 		char	gpu_arch_option[256];
-
-		if (nvrtc_version < 0)
-		{
-			int		major, minor;
-
-			if (nvrtcVersion(&major, &minor) != NVRTC_SUCCESS)
-				nvrtc_version = 0;	/* force baseline if NVRTC version is unknown */
-			else
-				nvrtc_version = major * 1000 + minor * 10;
-		}
-		if (nvrtc_version >= 11010)
-			target_cc = Min(80, target_cc);
-		else if (nvrtc_version >= 10010)
-			target_cc = Min(75, target_cc);
-		else if (nvrtc_version >=  9020)
-			target_cc = Min(72, target_cc);
-		else
-			target_cc = Min(53, target_cc);	/* should not happen */
 
 		rc = nvrtcCreateProgram(&program,
 								source,
@@ -976,16 +956,54 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	int			dindex = gcontext->cuda_dindex;
 	int			hindex;
 	cl_int		target_cc;
+	cl_int		nvrtc_version;
 	dlist_iter	iter;
 	pg_crc32	crc;
 
 	/* build with debug option? */
 	if (pgstrom_debug_jit_compile_options)
 		extra_flags |= DEVKERNEL_BUILD_DEBUG_INFO;
-	/* target binary to build */
+
+	/* Target binary to build
+	 *
+	 * The target binary version shall be determined by CUDA_VERSION
+	 * when PG-Strom was built for, NVRTC_VERSION when PG-Strom loaded it
+	 * at the runtime, and device's computing-capability version.
+	 */
 	Assert(dindex >= 0 && dindex < numDevAttrs);
 	target_cc = (devAttrs[dindex].COMPUTE_CAPABILITY_MAJOR * 10 +
 				 devAttrs[dindex].COMPUTE_CAPABILITY_MINOR);
+
+	nvrtc_version = pgstrom_nvrtc_version();
+#if CUDA_VERSION >= 10010
+#if CUDA_VERSION >= 11010
+	if (nvrtc_version >= 11010 && target_cc >= 80)
+	{
+		/* CUDA 11.1 added CC8.0 (Ampere) support */
+		target_cc = 80;
+	}
+	else
+#endif
+	if (nvrtc_version >= 10010 && target_cc >= 75)
+	{
+		/* CUDA 10.1 added CC7.5 (Turing) support */
+		target_cc = 75;
+	}
+	else
+#endif
+	{
+		/*
+		 * CUDA 9.0 added CC6.0/6.1 (Pascal) and CC7.0 (Volta) support.
+		 * And, PG-Strom does not support older CUDA Toolkit any more.
+		 */
+		if (target_cc >= 70)
+			target_cc = 70;		/* any Volta */
+		else if (target_cc >= 61)
+			target_cc = 61;		/* Pascal except for GP100 */
+		else
+			target_cc = 60;
+	}
+
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, &target_cc, sizeof(cl_int));

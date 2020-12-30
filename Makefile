@@ -229,16 +229,13 @@ NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
               --maxrregcount=$(MAXREGCOUNT) \
               --gpu-architecture=compute_60
 # supported device depends on CUDA version
+# don't forget to update the logic of target_cc in cuda_program.c 
 ifeq ($(shell test $(CUDA_VERSION) -ge 11010; echo $$?), 0)
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86
-else ifeq ($(shell test $(CUDA_VERSION) -ge 11000; echo $$?), 0)
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80
-else ifeq ($(shell test $(CUDA_VERSION) -ge 10000; echo $$?), 0)
+else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75
-else ifeq ($(shell test $(CUDA_VERSION) -ge 9000; echo $$?), 0)
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
 else
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61
+  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
 endif
 NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
 

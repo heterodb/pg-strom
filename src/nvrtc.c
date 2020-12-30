@@ -194,16 +194,35 @@ lookup_nvrtc_function(void *handle, const char *func_name)
 	p_##func_name = lookup_nvrtc_function(handle, #func_name)
 
 /*
+ * pgstrom_nvrtc_version - free from errors once loaded
+ */
+int
+pgstrom_nvrtc_version(void)
+{
+	static int		nvrtc_version = -1;
+
+	if (nvrtc_version < 0)
+	{
+		int			major, minor;
+		nvrtcResult	rv;
+
+		rv = nvrtcVersion(&major, &minor);
+		if (rv != NVRTC_SUCCESS)
+			elog(ERROR, "failed on nvrtcVersion: %d", (int)rv);
+		nvrtc_version = major * 1000 + minor * 10;
+	}
+	return nvrtc_version;
+}
+
+/*
  * pgstrom_init_nvrtc
  */
 void
 pgstrom_init_nvrtc(void)
 {
 	CUresult	rc;
-	nvrtcResult	rv;
 	int			cuda_version;
 	int			nvrtc_version;
-	int			major, minor;
 	char		namebuf[MAXPGPATH];
 	void	   *handle;
 
@@ -223,10 +242,7 @@ pgstrom_init_nvrtc(void)
 			elog(ERROR, "failed on open '%s' and 'libnvrtc.so': %m", namebuf);
 	}
 	LOOKUP_NVRTC_FUNCTION(nvrtcVersion);
-	rv = nvrtcVersion(&major, &minor);
-	if (rv != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcVersion: %d", (int)rv);
-	nvrtc_version = major * 1000 + minor * 10;
+	nvrtc_version = pgstrom_nvrtc_version();
 
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetErrorString);
 	LOOKUP_NVRTC_FUNCTION(nvrtcCreateProgram);
@@ -236,17 +252,20 @@ pgstrom_init_nvrtc(void)
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetPTX);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLogSize);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLog);
-	if (major >= 10)		/* CUDA10.0 */
+	if (nvrtc_version >= 10000)		/* CUDA10.0 */
 	{
 		LOOKUP_NVRTC_FUNCTION(nvrtcAddNameExpression);
 		LOOKUP_NVRTC_FUNCTION(nvrtcGetLoweredName);
 	}
 
 	if (cuda_version == nvrtc_version)
-		elog(LOG, "NVRTC %d.%d is successfully loaded.", major, minor);
+		elog(LOG, "NVRTC %d.%d is successfully loaded.",
+			 (nvrtc_version / 1000),
+			 (nvrtc_version % 1000) / 10);
 	else
 		elog(LOG, "NVRTC %d.%d is successfully loaded, but CUDA driver expects %d.%d. Check /etc/ld.so.conf or LD_LIBRARY_PATH configuration.",
-			 major, minor,
+			 (nvrtc_version / 1000),
+			 (nvrtc_version % 1000) / 10,
 			 (cuda_version / 1000),
 			 (cuda_version % 1000) / 10);
 }
