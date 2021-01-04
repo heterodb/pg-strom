@@ -502,6 +502,22 @@ pathtree_has_gpupath(Path *node)
 	return __pathtree_has_gpupath(node, NULL);
 }
 
+static bool
+__pathtree_has_parallel_aware(Path *path, void *context)
+{
+	bool	rv = path->parallel_aware;
+
+	if (!rv)
+		rv = pathnode_tree_walker(path, __pathtree_has_parallel_aware, context);
+	return rv;
+}
+
+bool
+pathtree_has_parallel_aware(Path *node)
+{
+	return __pathtree_has_parallel_aware(node, NULL);
+}
+
 /*
  * pgstrom_copy_pathnode
  *

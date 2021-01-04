@@ -2026,11 +2026,9 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 		double		nrows_ratio
 			= (join_nrows > 0.0 ? leaf_rel->rows / join_nrows : 0.0);
 
+		/* adjust inner_path_item for this leaf */
 		appinfos = find_appinfos_by_relids_nofail(root, leaf_rel->relids,
 												  &nappinfos);
-		/*
-		 * adjust inner_path_item for this leaf
-		 */
 		inner_items_leaf = adjustInnerPathItems(inner_items_base,
 												root,
 												append_rel,
@@ -2345,8 +2343,32 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 	}
 	else if (IsA(outer_path, GatherPath))
 	{
-		Path   *subpath = ((GatherPath *) outer_path)->subpath;
+		Path	   *subpath = NULL;
 
+		if (try_outer_parallel)
+			subpath = ((GatherPath *) outer_path)->subpath;
+		else
+		{
+			/*
+			 * NOTE: sub-paths under GatherPath have 'parallel_aware' attribute
+			 * but it is not suitable for non-parallel path construction. Thus,
+			 * we try to fetch the second best path except for GatherPath.
+			 */
+			RelOptInfo *outer_rel = outer_path->parent;
+
+			foreach (lc, outer_rel->pathlist)
+			{
+				Path   *__path = lfirst(lc);
+
+				if (!IsA(__path, GatherPath))
+				{
+					subpath = __path;
+					break;
+				}
+			}
+			if (!subpath)
+				return NIL;
+		}
 		result = __extract_partitionwise_pathlist(root,
 												  parent_joinrel,
 												  subpath,

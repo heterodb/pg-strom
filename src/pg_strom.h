@@ -1500,6 +1500,7 @@ extern char *get_type_name(Oid type_oid, bool missing_ok);
 extern char *get_proc_library(HeapTuple protup);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
+extern bool pathtree_has_parallel_aware(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);
 extern const char *errorText(int errcode);
 
