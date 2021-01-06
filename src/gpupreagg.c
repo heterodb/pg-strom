@@ -967,6 +967,7 @@ cost_gpupreagg(PlannerInfo *root,
 		Cost	outer_startup = input_path->startup_cost;
 		Cost	outer_total   = input_path->total_cost;
 		List   *outer_tlist   = input_path->pathtarget->exprs;
+		Cost	discount = 0.0;
 
 		/*
 		 * Discount cost for DMA-receive if GpuPreAgg can pull-up
@@ -976,16 +977,16 @@ cost_gpupreagg(PlannerInfo *root,
 			pgstrom_path_is_gpujoin(input_path) &&
 			pgstrom_device_expression(root, outer_rel, (Expr *)outer_tlist))
 		{
-			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
-			outer_total -= cpu_tuple_cost * input_path->rows;
+			discount = (cost_for_dma_receive(input_path->parent, -1.0) +
+						cpu_tuple_cost * input_path->rows);
 		}
 		else if (pathtree_has_gpupath(input_path))
 			outer_total += pgstrom_gpu_setup_cost / 2;
 		else
 			outer_total += pgstrom_gpu_setup_cost;
 
-		gpa_info->outer_startup_cost = outer_startup;
-		gpa_info->outer_total_cost   = outer_total;
+		gpa_info->outer_startup_cost = Max(outer_startup - discount, 0.0);
+		gpa_info->outer_total_cost   = Max(outer_total - discount, 0.0);
 
 		startup_cost = outer_total;
 		run_cost = 0.0;
@@ -1010,6 +1011,8 @@ cost_gpupreagg(PlannerInfo *root,
 									&startup_cost,
 									&run_cost);
 		run_cost -= cpu_tuple_cost * ntuples;
+		if (run_cost < 0.0)
+			run_cost = 0.0;
 		gpa_info->outer_startup_cost = startup_cost;
 		gpa_info->outer_total_cost	= startup_cost + run_cost;
 
@@ -4537,7 +4540,6 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 	GpuPreAggRuntimeStat *gpa_rtstat;
 	size_t		ss_length = MAXALIGN(sizeof(GpuPreAggSharedState));
 
-	Assert(!IsParallelWorker());
 	if (dsm_addr)
 		gpa_sstate = dsm_addr;
 	else

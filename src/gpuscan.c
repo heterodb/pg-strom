@@ -195,8 +195,7 @@ create_gpuscan_path(PlannerInfo *root,
 	/* cost for disk i/o + GPU qualifiers */
 	scan_mode = pgstrom_common_relscan_cost(root,
 											baserel,
-											extract_actual_clauses(dev_quals,
-																   false),
+											extract_actual_clauses(dev_quals, false),
 											parallel_nworkers,
 											indexOpt,
 											indexQuals,
@@ -232,7 +231,8 @@ create_gpuscan_path(PlannerInfo *root,
 						: baserel->rows) / parallel_divisor;
 
 	/* cost for DMA receive (GPU-->host) */
-	run_cost += cost_for_dma_receive(baserel, scan_ntuples);
+	if ((scan_mode & PGSTROM_RELSCAN_GSTORE_FDW) == 0)
+		run_cost += cost_for_dma_receive(baserel, scan_ntuples);
 
 	/* cost for CPU qualifiers */
 	cost_qual_eval(&qcost, host_quals, root);
@@ -310,7 +310,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		return;
 	/*
 	 * GpuScan can run on only base relations or foreign table managed
-	 * by arrow_fdw.
+	 * by arrow_fdw/gstore_fdw.
 	 */
 	if (rte->relkind == RELKIND_FOREIGN_TABLE)
 	{

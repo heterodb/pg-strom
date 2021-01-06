@@ -1280,9 +1280,10 @@ extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 											   List **p_indexConds,
 											   List **p_indexQuals,
 											   cl_long *p_indexNBlocks);
-#define PGSTROM_RELSCAN_NORMAL			0x0000
 #define PGSTROM_RELSCAN_SSD2GPU			0x0001
 #define PGSTROM_RELSCAN_BRIN_INDEX		0x0002
+#define PGSTROM_RELSCAN_ARROW_FDW		0x0004
+#define PGSTROM_RELSCAN_GSTORE_FDW		0x0008
 extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   RelOptInfo *scan_rel,
 									   List *scan_quals,

@@ -1963,6 +1963,12 @@ adjustInnerPathItems(List *inner_items_base,
 		ip_item_dst->hash_quals = (List *)
 			adjust_appendrel_attrs(root, (Node *)ip_item_src->hash_quals,
 								   nappinfos, appinfos);
+		ip_item_dst->gist_index = ip_item_src->gist_index;
+		ip_item_dst->gist_ctid_resno = ip_item_src->gist_ctid_resno;
+		ip_item_dst->gist_clauses = (List *)
+			adjust_appendrel_attrs(root, (Node *)ip_item_src->gist_clauses,
+								   nappinfos, appinfos);
+		ip_item_dst->gist_selectivity = ip_item_src->gist_selectivity;
 		ip_item_dst->join_nrows = ip_item_src->join_nrows * nrows_ratio;
 
 		results = lappend(results, ip_item_dst);
@@ -2060,6 +2066,10 @@ buildPartitionedGpuJoinPaths(PlannerInfo *root,
 					ip_temp->inner_path = gjtemp->inners[i].scan_path;
 					ip_temp->join_quals = gjtemp->inners[i].join_quals;
 					ip_temp->hash_quals = gjtemp->inners[i].hash_quals;
+					ip_temp->gist_index = gjtemp->inners[i].gist_index;
+					ip_temp->gist_ctid_resno = gjtemp->inners[i].gist_ctid_resno;
+					ip_temp->gist_clauses = gjtemp->inners[i].gist_clauses;
+					ip_temp->gist_selectivity = gjtemp->inners[i].gist_selectivity;
 					ip_temp->join_nrows = gjtemp->inners[i].join_nrows;
 
 					inner_items_leaf = lcons(ip_temp, inner_items_leaf);
@@ -2644,6 +2654,10 @@ try_add_gpujoin_paths(PlannerInfo *root,
 				ip_temp->inner_path = gjtemp->inners[i].scan_path;
 				ip_temp->join_quals = gjtemp->inners[i].join_quals;
 				ip_temp->hash_quals = gjtemp->inners[i].hash_quals;
+				ip_temp->gist_index = gjtemp->inners[i].gist_index;
+				ip_temp->gist_ctid_resno = gjtemp->inners[i].gist_ctid_resno;
+				ip_temp->gist_clauses = gjtemp->inners[i].gist_clauses;
+				ip_temp->gist_selectivity = gjtemp->inners[i].gist_selectivity;
 				ip_temp->join_nrows = gjtemp->inners[i].join_nrows;
 
 				ip_items_list = lcons(ip_temp, ip_items_list);

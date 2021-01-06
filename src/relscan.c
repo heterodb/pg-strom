@@ -438,11 +438,11 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 							Cost *p_startup_cost,
 							Cost *p_run_cost)
 {
-	int			scan_mode = PGSTROM_RELSCAN_NORMAL;
+	int			scan_mode = 0;
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
 	Cost		index_scan_cost = 0.0;
-	Cost		disk_scan_cost;
+	Cost		disk_scan_cost = 0.0;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		parallel_divisor;
 	double		ntuples = scan_rel->tuples;
@@ -461,6 +461,11 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 			scan_rel->reloptkind == RELOPT_OTHER_MEMBER_REL) &&
 		   scan_rel->relid > 0 &&
 		   scan_rel->relid < root->simple_rel_array_size);
+	/* mark if special storage layer */
+	if (baseRelIsArrowFdw(scan_rel))
+		scan_mode |= PGSTROM_RELSCAN_ARROW_FDW;
+	if (baseRelIsGstoreFdw(scan_rel))
+		scan_mode |= PGSTROM_RELSCAN_GSTORE_FDW;
 
 	/* selectivity of device executable qualifiers */
 	selectivity = clauselist_selectivity(root,
@@ -468,11 +473,14 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 										 scan_rel->relid,
 										 JOIN_INNER,
 										 NULL);
-	/* cost of full-table scan, if no index */
-	get_tablespace_page_costs(scan_rel->reltablespace,
-							  &spc_rand_page_cost,
-							  &spc_seq_page_cost);
-	disk_scan_cost = spc_seq_page_cost * nblocks;
+	/* cost of full-table scan, if not gpu memory store */
+	if ((scan_mode & PGSTROM_RELSCAN_GSTORE_FDW) == 0)
+	{
+		get_tablespace_page_costs(scan_rel->reltablespace,
+								  &spc_rand_page_cost,
+								  &spc_seq_page_cost);
+		disk_scan_cost = spc_seq_page_cost * nblocks;
+	}
 
 	/* consideration for BRIN-index, if any */
 	if (indexOpt)

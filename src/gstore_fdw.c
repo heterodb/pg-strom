@@ -413,6 +413,14 @@ GstoreGetForeignRelSize(PlannerInfo *root,
 	baserel->fdw_private = gs_desc;
 }
 
+static bool
+GstoreIsForeignScanParallelSafe(PlannerInfo *root,
+								RelOptInfo *rel,
+								RangeTblEntry *rte)
+{
+	return true;
+}
+
 static Node *
 match_clause_to_primary_key(PlannerInfo *root,
 							RelOptInfo *baserel,
@@ -5946,28 +5954,29 @@ pgstrom_init_gstore_fdw(void)
 	memset(r, 0, sizeof(FdwRoutine));
 	NodeSetTag(r, T_FdwRoutine);
 	/* SCAN support */
-    r->GetForeignRelSize			= GstoreGetForeignRelSize;
-    r->GetForeignPaths				= GstoreGetForeignPaths;
-    r->GetForeignPlan				= GstoreGetForeignPlan;
+	r->GetForeignRelSize			= GstoreGetForeignRelSize;
+	r->IsForeignScanParallelSafe	= GstoreIsForeignScanParallelSafe;
+	r->GetForeignPaths				= GstoreGetForeignPaths;
+	r->GetForeignPlan				= GstoreGetForeignPlan;
 	r->BeginForeignScan				= GstoreBeginForeignScan;
-    r->IterateForeignScan			= GstoreIterateForeignScan;
-    r->ReScanForeignScan			= GstoreReScanForeignScan;
-    r->EndForeignScan				= GstoreEndForeignScan;
+	r->IterateForeignScan			= GstoreIterateForeignScan;
+	r->ReScanForeignScan			= GstoreReScanForeignScan;
+	r->EndForeignScan				= GstoreEndForeignScan;
 	/* UPDATE/INSERT/DELETE */
-    r->AddForeignUpdateTargets		= GstoreAddForeignUpdateTargets;
-    r->PlanForeignModify			= GstorePlanForeignModify;
-    r->BeginForeignModify			= GstoreBeginForeignModify;
-    r->ExecForeignInsert			= GstoreExecForeignInsert;
-    r->ExecForeignUpdate			= GstoreExecForeignUpdate;
-    r->ExecForeignDelete			= GstoreExecForeignDelete;
-    r->EndForeignModify				= GstoreEndForeignModify;
+	r->AddForeignUpdateTargets		= GstoreAddForeignUpdateTargets;
+	r->PlanForeignModify			= GstorePlanForeignModify;
+	r->BeginForeignModify			= GstoreBeginForeignModify;
+	r->ExecForeignInsert			= GstoreExecForeignInsert;
+	r->ExecForeignUpdate			= GstoreExecForeignUpdate;
+	r->ExecForeignDelete			= GstoreExecForeignDelete;
+	r->EndForeignModify				= GstoreEndForeignModify;
 #if PG_VERSION_NUM >= 110000
 	r->BeginForeignInsert			= GstoreBeginForeignInsert;
 	r->EndForeignInsert				= GstoreEndForeignInsert;
 #endif
 	/* EXPLAIN/ANALYZE */
 	r->ExplainForeignScan			= GstoreExplainForeignScan;
-    r->ExplainForeignModify			= GstoreExplainForeignModify;
+	r->ExplainForeignModify			= GstoreExplainForeignModify;
 	r->AnalyzeForeignTable			= GstoreAnalyzeForeignTable;
 
 	/*
