@@ -624,7 +624,7 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 
 			snprintf(temp, sizeof(temp), "GPU%d (%s)%s",
 					 dattr->DEV_ID, dattr->DEV_NAME,
-					 gts->af_state ? " with NVMe-Strom" : "");
+					 gts->af_state ? " with GPUDirect SQL" : "");
 		}
 		if (!pgstrom_regression_test_mode)
 			ExplainPropertyText("GPU Preference", temp, es);
@@ -636,21 +636,21 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 				: gts->nvme_sstate != NULL))
 	{
 		if (!gts->nvme_sstate)
-			ExplainPropertyText("NVMe-Strom", "enabled", es);
+			ExplainPropertyText("GPUDirect SQL", "enabled", es);
 		else if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			if (gts->nvme_count == 0)
-				ExplainPropertyText("NVMe-Strom", "enabled", es);
+				ExplainPropertyText("GPUDirect SQL", "enabled", es);
 			else
 			{
 				snprintf(temp, sizeof(temp), "load=%ld", gts->nvme_count);
-				ExplainPropertyText("NVMe-Strom", temp, es);
+				ExplainPropertyText("GPUDirect SQL", temp, es);
 			}
 		}
 		else
 		{
-			ExplainPropertyText("NVMe-Strom", "enabled", es);
-			ExplainPropertyInteger("NVMe-Strom Load Blocks",
+			ExplainPropertyText("GPUDirect SQL", "enabled", es);
+			ExplainPropertyInteger("GPUDirect SQL Load Blocks",
 								   NULL, gts->nvme_count, es);
 		}
 	}
