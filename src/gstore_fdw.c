@@ -1937,7 +1937,7 @@ __gstoreExecForeignDelete(Relation frel,
 	GstoreFdwSysattr sysattr;
 	Datum			datum;
 	bool			isnull;
-	bool			locked;
+	bool			locked = false;
 	ItemPointer		ctid;
 	cl_uint			rowid;
 	char			temp[10];
