@@ -154,6 +154,10 @@
                 </li>
                 <li class="">
                     
+    <a class="" href="../gstore_fdw.md">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
     <a class="" href="../python/">In-database Analytics</a>
                 </li>
     </ul>
@@ -234,7 +238,7 @@
 <p>Apache Arrow is a data format of structured data to save in columnar-form and to exchange other applications. Some applications for big-data processing support the format, and it is easy for self-developed applications to use Apache Arrow format since they provides libraries for major programming languages like C,C++ or Python.</p>
 <p><img alt="Row/Column data structure" src="../img/arrow_shared_memory.png" /></p>
 <p>Apache Arrow format file internally contains Schema portion to define data structure, and one or more RecordBatch to save columnar-data based on the schema definition. For data types, it supports integers, strint (variable-length), date/time types and so on. Indivisual columnar data has its internal representation according to the data types.</p>
-<p>Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is <code>1970-01-01</code> and it supports multiple precision. On the other hands, epoch of timestamp in PostgreSQL is <code>2001-01-01</code> and it has microseconds accuracy.</p>
+<p>Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is <code>1970-01-01</code> and it supports multiple precision. In contrast, epoch of timestamp in PostgreSQL is <code>2001-01-01</code> and it has microseconds accuracy.</p>
 <p>Arrow_Fdw allows to read Apache Arrow files on PostgreSQL using foreign table mechanism. If an Arrow file contains 8 of record batches that has million items for each column data, for example, we can access 8 million rows on the Arrow files through the foreign table.</p>
 <h1 id="operations">Operations</h1>
 <h2 id="creation-of-foreign-tables">Creation of foreign tables</h2>
