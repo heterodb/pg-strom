@@ -76,11 +76,15 @@
                 </li>
                 <li class="">
                     
-    <a class="" href="../brin/">インデックス対応</a>
+    <a class="" href="../brin/">BRINインデックス</a>
                 </li>
                 <li class="">
                     
     <a class="" href="../partition/">パーティション</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../postgis/">PostGIS対応</a>
                 </li>
                 <li class="">
                     
@@ -95,15 +99,19 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL</a>
+    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
                 </li>
                 <li class="">
                     
-    <a class="" href="../arrow_fdw/">Arrow_fdw</a>
+    <a class="" href="../arrow_fdw/">Apache Arrow</a>
                 </li>
                 <li class="">
                     
-    <a class="" href="../python/">In-database Analytics</a>
+    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../python/">Python連携</a>
                 </li>
     </ul>
 	    </li>
@@ -138,10 +146,13 @@
     <li class="toctree-l3"><a href="#_3">エグゼキュータに関する設定</a></li>
     
 
-    <li class="toctree-l3"><a href="#ssd-to-gpu">SSD-to-GPUダイレクト関連の設定</a></li>
+    <li class="toctree-l3"><a href="#gpusql">GPUダイレクトSQL関連の設定</a></li>
     
 
     <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連の設定</a></li>
+    
+
+    <li class="toctree-l3"><a href="#gstore_fdw">Gstore_Fdw関連の設定</a></li>
     
 
     <li class="toctree-l3"><a href="#gpu">GPUプログラムの生成とビルドに関連する設定</a></li>
@@ -342,26 +353,20 @@
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pg_strom.global_max_async_tasks</code></td>
+<td align="left"><code>pg_strom.max_async_tasks</code></td>
 <td align="center"><code>int</code></td>
-<td align="center">160</td>
-<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのシステム全体での最大値。</td>
+<td align="center"><code>5</code></td>
+<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.local_max_async_tasks</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">8</td>
-<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.local_max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.max_number_of_gpucontext</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">自動</td>
-<td align="left">GPUデバイスを抽象化した内部データ構造 GpuContext の数を指定します。通常、初期値を変更する必要はありません。</td>
+<td align="left"><code>pg_strom.reuse_cuda_context</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。<br>また、CPUパラレルを利用する場合には効果はありません。</td>
 </tr>
 </tbody>
 </table>
-<h1 id="ssd-to-gpu">SSD-to-GPUダイレクト関連の設定</h1>
+<h1 id="gpusql">GPUダイレクトSQL関連の設定</h1>
 <table>
 <thead>
 <tr>
@@ -373,22 +378,34 @@
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>on</code></td>
-<td align="left">SSD-to-GPUダイレクトSQL機能を有効化/無効化する。</td>
+<td align="left"><code>pg_strom.gpudirect_driver</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">自動</td>
+<td align="left">GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
+<td align="left"><code>pg_strom.gpudirect_enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>on</code></td>
+<td align="left">GPUダイレクトSQL機能を有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpudirect_threshold</code></td>
 <td align="center"><code>int</code></td>
 <td align="left">自動</td>
-<td align="left">SSD-to-GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</td>
+<td align="left">GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.cufile_io_unitsz</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>16MB</code></td>
+<td align="left">cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。</td>
 </tr>
 <tr>
 <td align="left"><code>pg_strom.nvme_distance_map</code></td>
 <td align="center"><code>string</code></td>
 <td align="left"><code>NULL</code></td>
-<td align="left">NVME-SSDに近いGPUを手動で設定します。通常はsysfsから取得したPCIeバストポロジ情報による自動設定で問題ありません。</td>
+<td align="left">NVME-SSDに最も近いGPUを手動で設定します。書式は<code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：<code>nvme0:gpu0,nvme1:gpu0</code>）<br>ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。</td>
 </tr>
 </tbody>
 </table>
@@ -413,13 +430,50 @@
 <td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
 <td align="center"><code>int</code></td>
 <td align="left">128MB</td>
-<td align="left">Arrowファイルのメタ情報をキャッシュする共有メモリ領域のサイズを指定します。<br>パラメータの更新には再起動が必要です。</td>
+<td align="left">Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。</td>
 </tr>
 <tr>
 <td align="left"><code>arrow_fdw.record_batch_size</code></td>
 <td align="center"><code>int</code></td>
 <td align="left">256MB</td>
 <td align="left">Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。<code>INSERT</code>コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="gstore_fdw">Gstore_Fdw関連の設定</h1>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gstore_fdw.enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>on</code></td>
+<td align="left">推定コスト値を調整し、Gstore_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Gstore_FdwによるForeign ScanだけがGPUメモリストアをスキャンできるという事に留意してください。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw.auto_preload</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>on</code></td>
+<td align="left">PostgreSQLの起動後、Base fileに保存されたGPUメモリストアの内容をGPUに自動的にロードするかどうかを制御します。自動ロードを行わない場合、最初にGPUメモリストアを参照したタイミングでGPUへのロードが行われ、結果としてクエリ応答速度が低下する可能性があります。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw.default_base_dir</code></td>
+<td align="center"><code>text</code></td>
+<td align="left"><code>NULL</code></td>
+<td align="left"><code>base_file</code>が明示的に指定されなかった場合に、Baseファイルを自動生成するディレクトリを指定します。指定のない場合、現在のデータベースのデフォルトテーブルスペース上に作成されます。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw.default_redo_dir</code></td>
+<td align="center"><code>text</code></td>
+<td align="left"><code>NULL</code></td>
+<td align="left"><code>redo_log_file</code>が明示的に指定されなかった場合に、RedoLogファイルを自動生成するディレクトリを指定します。指定のない場合、現在のデータベースのデフォルトテーブルスペース上に作成されます。</td>
 </tr>
 </tbody>
 </table>
@@ -453,10 +507,10 @@
 <td align="left">GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</td>
 </tr>
 <tr>
-<td align="left"><code>pg_strom.debug_kernel_source</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>off</code></td>
-<td align="left">このオプションが<code>on</code>の場合、<code>EXPLAIN VERBOSE</code>コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。</td>
+<td align="left"><code>pg_strom.extra_kernel_stack_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>0</code></td>
+<td align="left">GPUカーネルの実行時にスレッド毎に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更するの必要はありません。</td>
 </tr>
 </tbody>
 </table>
@@ -482,12 +536,6 @@
 <td align="center"><code>int</code></td>
 <td align="left"><code>512MB</code></td>
 <td align="left">PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.max_num_preserved_gpu_memory</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">2048</td>
-<td align="left">確保済みGPUデバイスメモリのセグメント数の上限を指定します。通常は初期値を変更する必要はありません。</td>
 </tr>
 </tbody>
 </table>

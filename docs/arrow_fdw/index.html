@@ -8,7 +8,7 @@
   
   <meta name="author" content="PG-Strom Development Team">
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>Arrow_fdw - PG-Strom Manual</title>
+  <title>Apache Arrow - PG-Strom Manual</title>
   <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
@@ -20,7 +20,7 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "Arrow_fdw";
+    var mkdocs_page_name = "Apache Arrow";
     var mkdocs_page_input_path = "arrow_fdw.md";
     var mkdocs_page_url = null;
   </script>
@@ -76,11 +76,15 @@
                 </li>
                 <li class="">
                     
-    <a class="" href="../brin/">Index Support</a>
+    <a class="" href="../brin/">BRIN Index</a>
                 </li>
                 <li class="">
                     
     <a class="" href="../partition/">Partitioning</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../postgis/">PostGIS</a>
                 </li>
                 <li class="">
                     
@@ -95,11 +99,11 @@
     <ul class="subnav">
                 <li class="">
                     
-    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL</a>
+    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
                 </li>
                 <li class=" current">
                     
-    <a class="current" href="./">Arrow_fdw</a>
+    <a class="current" href="./">Apache Arrow</a>
     <ul class="subnav">
             
     <li class="toctree-l3"><a href="#overview">Overview</a></li>
@@ -154,7 +158,11 @@
                 </li>
                 <li class="">
                     
-    <a class="" href="../python/">In-database Analytics</a>
+    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../python/">Python cooperation</a>
                 </li>
     </ul>
 	    </li>
@@ -213,7 +221,7 @@
         
       
     
-    <li>Arrow_fdw</li>
+    <li>Apache Arrow</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -234,7 +242,7 @@
 <p>Apache Arrow is a data format of structured data to save in columnar-form and to exchange other applications. Some applications for big-data processing support the format, and it is easy for self-developed applications to use Apache Arrow format since they provides libraries for major programming languages like C,C++ or Python.</p>
 <p><img alt="Row/Column data structure" src="../img/arrow_shared_memory.png" /></p>
 <p>Apache Arrow format file internally contains Schema portion to define data structure, and one or more RecordBatch to save columnar-data based on the schema definition. For data types, it supports integers, strint (variable-length), date/time types and so on. Indivisual columnar data has its internal representation according to the data types.</p>
-<p>Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is <code>1970-01-01</code> and it supports multiple precision. On the other hands, epoch of timestamp in PostgreSQL is <code>2001-01-01</code> and it has microseconds accuracy.</p>
+<p>Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is <code>1970-01-01</code> and it supports multiple precision. In contrast, epoch of timestamp in PostgreSQL is <code>2001-01-01</code> and it has microseconds accuracy.</p>
 <p>Arrow_Fdw allows to read Apache Arrow files on PostgreSQL using foreign table mechanism. If an Arrow file contains 8 of record batches that has million items for each column data, for example, we can access 8 million rows on the Arrow files through the foreign table.</p>
 <h1 id="operations">Operations</h1>
 <h2 id="creation-of-foreign-tables">Creation of foreign tables</h2>
@@ -724,10 +732,10 @@ COMMIT;
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../python/" class="btn btn-neutral float-right" title="In-database Analytics">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../gstore_fdw/" class="btn btn-neutral float-right" title="GPU Memory Store">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../ssd2gpu/" class="btn btn-neutral" title="SSD2GPU Direct SQL"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../ssd2gpu/" class="btn btn-neutral" title="GPUDirect SQL"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -756,7 +764,7 @@ COMMIT;
         <span><a href="../ssd2gpu/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../python/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../gstore_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

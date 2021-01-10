@@ -149,8 +149,8 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
 # Markdown (document) files
 #
 __DOC_FILES = index.md install.md partition.md \
-              operations.md sys_admin.md brin.md partition.md troubles.md \
-	      ssd2gpu.md arrow_fdw.md python.md \
+              operations.md sys_admin.md brin.md postgis.md troubles.md \
+	      ssd2gpu.md arrow_fdw.md gstore_fdw.md python.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
 	      release_note.md
 

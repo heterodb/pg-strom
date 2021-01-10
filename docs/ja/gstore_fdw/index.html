@@ -8,7 +8,7 @@
   
   <meta name="author" content="PG-Strom Development Team">
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>システム管理 - PG-Strom Manual</title>
+  <title>GPUメモリストア - PG-Strom Manual</title>
   <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
@@ -20,8 +20,8 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "\u30b7\u30b9\u30c6\u30e0\u7ba1\u7406";
-    var mkdocs_page_input_path = "sys_admin.md";
+    var mkdocs_page_name = "GPU\u30e1\u30e2\u30ea\u30b9\u30c8\u30a2";
+    var mkdocs_page_input_path = "gstore_fdw.md";
     var mkdocs_page_url = null;
   </script>
   
@@ -44,7 +44,7 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-  [<strong>Japanese</strong> | <a href="../../sys_admin/"    style="color: #cccccc">English</a>]
+  [<strong>Japanese</strong> | <a href="../../gstore_fdw/"    style="color: #cccccc">English</a>]
 </div>
       </div>
 
@@ -70,21 +70,9 @@
                     
     <a class="" href="../operations/">基本的な操作</a>
                 </li>
-                <li class=" current">
+                <li class="">
                     
-    <a class="current" href="./">システム管理</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">システム管理</a></li>
-    
-
-    <li class="toctree-l3"><a href="#mps">MPSデーモンの利用</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">ナレッジベース</a></li>
-    
-
-    </ul>
+    <a class="" href="../sys_admin/">システム管理</a>
                 </li>
                 <li class="">
                     
@@ -117,9 +105,21 @@
                     
     <a class="" href="../arrow_fdw/">Apache Arrow</a>
                 </li>
-                <li class="">
+                <li class=" current">
                     
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
+    <a class="current" href="./">GPUメモリストア</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#_1">概要</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">運用</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">保守</a></li>
+    
+
+    </ul>
                 </li>
                 <li class="">
                     
@@ -178,11 +178,11 @@
     
       
         
-          <li>利用ガイド &raquo;</li>
+          <li>先進機能 &raquo;</li>
         
       
     
-    <li>システム管理</li>
+    <li>GPUメモリストア</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -192,49 +192,45 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="_1"><h1>システム管理</h1></h1>
-<!-- リソース設定などの記述を加えるべき -->
+                <h1>GPUメモリストア (Gstore_Fdw)</h1>
 
-<h1 id="mps">MPSデーモンの利用</h1>
-<p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
-<p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
-<p>PG-StromにおいてもMPSの利用を推奨していますが、下記の制限事項に対して注意が必要です。</p>
-<p>1個のMPSデーモンがサービスを提供可能なクライアントの数は最大48個（Pascal世代以前は16個）に制限されています。
-そのため、GPUを使用するPostgreSQLプロセス（CPU並列処理におけるバックグラウンドワーカを含む）の数が常に48個以下（Pascal世代以前は16個以下）である事を、運用上担保する必要があります。</p>
-<p>MPSはDynamic Parallelismを利用するGPUプログラムに対応していません。
-SQLから自動生成されたGPUプログラムが当該機能を利用する事はありませんが、PL/CUDAユーザ定義関数がCUDAデバイスランタイムをリンクし、サブカーネルを呼び出すなどDynamic Parallelismの機能を利用する場合には当該制限に抵触します。
-そのため、PL/CUDA関数の呼び出しにおいてはMPSを利用しません。</p>
-<p>MPSのドキュメントにはGPUの動作モードを<code>EXCLUSIVE_PROCESS</code>に変更する事が推奨されていますが、PG-Stromを実行する場合は<code>DEFAULT</code>動作モードで動作させてください。
-上記のPL/CUDAを含む、いくつかの処理では明示的にMPSの利用を無効化してCUDA APIを呼び出しているため、MPSデーモン以外のプロセスがGPUデバイスを利用可能である必要があります。</p>
-<p>MPSデーモンを起動するには以下の手順でコマンドを実行します。<code>&lt;UID&gt;</code>はPostgreSQLプロセスのユーザIDに置き換えてください。</p>
-<pre><code>$ nvidia-cuda-mps-control -d
-$ echo start_server -uid &lt;UID&gt; | nvidia-cuda-mps-control
-</code></pre>
+<h1 id="_1">概要</h1>
+<!--
 
-<p><code>nvidia-smi</code>コマンドによって、MPSデーモンがGPUデバイスを使用している事が分かります。</p>
-<pre><code>$ nvidia-smi
-Sat Nov  3 12:22:26 2018
-+-----------------------------------------------------------------------------+
-| NVIDIA-SMI 410.48                 Driver Version: 410.48                    |
-|-------------------------------+----------------------+----------------------+
-| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
-|===============================+======================+======================|
-|   0  Tesla V100-PCIE...  Off  | 00000000:02:00.0 Off |                    0 |
-| N/A   45C    P0    38W / 250W |     40MiB / 16130MiB |      0%      Default |
-+-------------------------------+----------------------+----------------------+
+GPUにはホストシステムのRAMとは独立なデバイスメモリが搭載されており、GPUで計算するにはPCI-Eバスなどを通じて、一旦、ホストシステムやストレージデバイスからデータをGPUデバイスメモリ側へ転送する必要があります。
+PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部的には、PostgreSQLテーブルから読み出したレコードをGPUへと転送し、その上でGPUでSQLの各種処理を実行します。
+しかしこれらの処理には、多かれ少なかれテーブルの読み出しやデータの転送に時間を要します（多くの場合、GPUでの処理よりも遥かに長い時間の！）。
 
-+-----------------------------------------------------------------------------+
-| Processes:                                                       GPU Memory |
-|  GPU       PID   Type   Process name                             Usage      |
-|=============================================================================|
-|    0     11080      C   nvidia-cuda-mps-server                        29MiB |
-+-----------------------------------------------------------------------------+
-</code></pre>
 
-<h1 id="_2">ナレッジベース</h1>
-<p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
-<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
+
+
+GPUメモリストア（Gstore_Fdw）とは、GPUデバイスメモリ上に予め確保した領域を外部テーブル（Foreign Table）を介して読み書きする機能です。
+主に検索・分析を目的としたSQLクエリを実行する際には、既にGPU上にデータがロードされているため、改めてテーブルからレコードを読み出したり、PCI-Eバスを介してデータを転送したりする必要がありません。
+
+
+
+
+
+-->
+
+<p>under construction</p>
+<h1 id="_2">運用</h1>
+<!--
+テーブル定義、オプション、チューニングのヒント（PMEMとかreuse
+-->
+
+<p>under construction</p>
+<h1 id="_3">保守</h1>
+<p>under construction</p>
+<!--
+
+![Architecture of Gstore_Fdw](./img/gstore_fdw-overview.png)
+
+![Replication/Backup of Gstore_Fdw](./img/gstore_fdw-replication.png)
+
+![Internal Layout of Gstore_Fdw](./img/gstore_fdw-layout.png)
+
+-->
               
             </div>
           </div>
@@ -242,10 +238,10 @@ Sat Nov  3 12:22:26 2018
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../brin/" class="btn btn-neutral float-right" title="BRINインデックス">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../python/" class="btn btn-neutral float-right" title="Python連携">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../operations/" class="btn btn-neutral" title="基本的な操作"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../arrow_fdw/" class="btn btn-neutral" title="Apache Arrow"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -271,10 +267,10 @@ Sat Nov  3 12:22:26 2018
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../operations/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../arrow_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../brin/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../python/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
