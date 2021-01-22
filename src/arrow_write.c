@@ -1251,7 +1251,7 @@ setupArrowBuffer(ArrowBuffer *bnode, SQLfield *column, size_t *p_offset)
 
 			default:
 				Elog("Bug? Arrow Type %s is not supported right now",
-					 column->arrow_typename);
+					 arrowNodeName(&column->arrow_type.node));
 				break;
 		}
 	}
@@ -1332,7 +1332,7 @@ estimateArrowBufferLength(SQLfield *column, size_t nitems)
 
 			default:
 				Elog("Bug? Arrow Type %s is not supported right now",
-					 column->arrow_typename);
+					 arrowNodeName(&column->arrow_type.node));
 				break;
 		}
 	}
@@ -1403,7 +1403,7 @@ writeArrowBuffer(SQLtable *table, SQLfield *column)
 
 			default:
 				Elog("Bug? Arrow Type %s is not supported right now",
-					 column->arrow_typename);
+					 arrowNodeName(&column->arrow_type.node));
 				break;
 		}
 	}

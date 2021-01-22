@@ -72,7 +72,7 @@ __put_int8_value(SQLfield *column, const char *addr, int sz)
 			? (value < SCHAR_MIN || value > SCHAR_MAX)
 			: (value < 0 || value > UCHAR_MAX))
 			Elog("value '%s' is out of range for %s",
-				 addr, column->arrow_typename);
+				 addr, arrowNodeName(&column->arrow_type.node))
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(uint8));
 	}
@@ -94,7 +94,7 @@ __put_int16_value(SQLfield *column, const char *addr, int sz)
 			? (value < SHRT_MIN || value > SHRT_MAX)
 			: (value < 0 || value > USHRT_MAX))
 			Elog("value '%s' is out of range for %s",
-				 addr, column->arrow_typename);
+				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(uint16));
 	}
@@ -116,7 +116,7 @@ __put_int32_value(SQLfield *column, const char *addr, int sz)
 			? (value < INT_MIN || value > INT_MAX)
 			: (value < 0 || value > UINT_MAX))
 			Elog("value '%s' is out of range for %s",
-				 addr, column->arrow_typename);
+				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(uint32));
 	}
@@ -676,13 +676,9 @@ mysql_setup_attribute(MYSQL *conn,
 					bitWidth = arrow_type->Int.bitWidth;
 				is_signed = arrow_type->Int.is_signed;
 			}
-			snprintf(temp, sizeof(temp), "%s%d",
-					 is_signed ? "Int" : "Uint", bitWidth);
-
 			initArrowNode(&column->arrow_type, Int);
 			column->arrow_type.Int.is_signed = is_signed;
 			column->arrow_type.Int.bitWidth = bitWidth;
-			column->arrow_typename = pstrdup(temp);
 			column->put_value = put_int_value;
 			return 2;		/* nullmap + values */
 		/*
@@ -704,20 +700,6 @@ mysql_setup_attribute(MYSQL *conn,
 			}
 			initArrowNode(&column->arrow_type, FloatingPoint);
 			column->arrow_type.FloatingPoint.precision = precision;
-			switch (precision)
-			{
-				case ArrowPrecision__Half:
-					column->arrow_typename = "Float16";
-					break;
-				case ArrowPrecision__Single:
-					column->arrow_typename = "Float32";
-					break;
-				case ArrowPrecision__Double:
-					column->arrow_typename = "Float64";
-					break;
-				default:
-					Elog("unexpected FloatingPoint precision (%d)", precision);
-			}
 			column->put_value = put_float_value;
 			return 2;		/* nullmap + values */
 		/*
@@ -740,8 +722,7 @@ mysql_setup_attribute(MYSQL *conn,
 			initArrowNode(&column->arrow_type, Decimal);
 			column->arrow_type.Decimal.precision = precision;
 			column->arrow_type.Decimal.scale = dscale;
-			column->arrow_typename  = "Decimal";
-			column->put_value       = put_decimal_value;
+			column->put_value = put_decimal_value;
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeDate
@@ -760,8 +741,7 @@ mysql_setup_attribute(MYSQL *conn,
 			}
 			initArrowNode(&column->arrow_type, Date);
 			column->arrow_type.Date.unit = unit;
-			column->arrow_typename  = "Date";
-			column->put_value       = put_date_value;
+			column->put_value = put_date_value;
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeTime
@@ -810,7 +790,6 @@ mysql_setup_attribute(MYSQL *conn,
 			initArrowNode(&column->arrow_type, Time);
 			column->arrow_type.Time.unit = unit;
 			column->arrow_type.Time.bitWidth = bitWidth;
-			column->arrow_typename  = "Time";
 			column->put_value = put_time_value;
 			return 2;		/* nullmap + values */
 
@@ -847,8 +826,7 @@ mysql_setup_attribute(MYSQL *conn,
 				column->arrow_type.Timestamp.timezone = pstrdup(tz_name);
 				column->arrow_type.Timestamp._timezone_len = strlen(tz_name);
 			}
-			column->arrow_typename  = "Timestamp";
-			column->put_value       = put_timestamp_value;
+			column->put_value = put_timestamp_value;
 			return 2;		/* nullmap + values */
 
 		case MYSQL_TYPE_STRING:
@@ -864,8 +842,7 @@ mysql_setup_attribute(MYSQL *conn,
 				 * ArrowTypeUtf8
 				 */
 				initArrowNode(&column->arrow_type, Utf8);
-				column->arrow_typename  = "Utf8";
-				column->put_value       = put_variable_value;
+				column->put_value = put_variable_value;
 			}
 			else
 			{
@@ -873,8 +850,7 @@ mysql_setup_attribute(MYSQL *conn,
 				 * ArrowTypeBinary
 				 */
 				initArrowNode(&column->arrow_type, Binary);
-				column->arrow_typename  = "Binary";
-				column->put_value       = put_variable_value;
+				column->put_value = put_variable_value;
 			}
 			return 3;	/* nullmap + index + extra */
 

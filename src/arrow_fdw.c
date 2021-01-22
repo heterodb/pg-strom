@@ -2364,8 +2364,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				case 64:
 					return INT8OID;
 				default:
-					elog(ERROR, "Arrow.%s is not supported",
-						 arrowTypeName(field));
+					elog(ERROR, "%s is not supported",
+						 arrowNodeName(&t->node));
 					break;
 			}
 			break;
@@ -2379,8 +2379,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				case ArrowPrecision__Double:
 					return FLOAT8OID;
 				default:
-					elog(ERROR, "Arrow.%s is not supported",
-						 arrowTypeName(field));
+					elog(ERROR, "%s is not supported",
+						 arrowNodeName(&t->node));
 			}
 			break;
 		case ArrowNodeTag__Utf8:
@@ -2414,8 +2414,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 				elem_oid = arrowTypeToPGTypeOid(child, &elem_mod);
 				type_oid = get_array_type(elem_oid);
 				if (!OidIsValid(type_oid))
-					elog(ERROR, "array of arrow::%s type is not defined",
-						 arrowTypeName(field));
+					elog(ERROR, "array of %s type is not defined",
+						 arrowNodeName(&t->node));
 				return type_oid;
 			}
 			break;
@@ -2485,7 +2485,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 
 				if (!OidIsValid(type_oid))
 					elog(ERROR, "arrow::%s is not supported",
-						 arrowTypeName(field));
+						 arrowNodeName(&t->node));
 				return type_oid;
 			}
 			break;

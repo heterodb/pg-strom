@@ -102,7 +102,6 @@ struct SQLfield
 	SQLdictionary *enumdict;	/* valid, if enum type */
 
 	ArrowType	arrow_type;		/* type in apache arrow */
-	const char *arrow_typename;	/* typename in apache arrow */
 	/* data save as Apache Arrow datum */
 	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
 	/* data buffers of the field */
@@ -116,6 +115,7 @@ struct SQLfield
 	ArrowKeyValue *customMetadata;
 	int			numCustomMetadata;
 };
+
 static inline size_t
 sql_field_put_value(SQLfield *column, const char *addr, int sz)
 {
@@ -185,7 +185,7 @@ extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 extern char	   *dumpArrowNode(ArrowNode *node);
 extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
-extern char	   *arrowTypeName(ArrowField *field);
+extern const char *arrowNodeName(ArrowNode *node);
 
 /* arrow_pgsql.c */
 extern int		assignArrowTypePgSQL(SQLfield *column,
@@ -278,9 +278,24 @@ sql_buffer_append(SQLbuffer *buf, const void *src, size_t len)
 static inline void
 sql_buffer_append_zero(SQLbuffer *buf, size_t len)
 {
-	sql_buffer_expand(buf, buf->usage + len);
-	memset(buf->data + buf->usage, 0, len);
-	buf->usage += len;
+	if (len > 0)
+	{
+		sql_buffer_expand(buf, buf->usage + len);
+		memset(buf->data + buf->usage, 0, len);
+		buf->usage += len;
+	}
+	assert(buf->usage <= buf->length);
+}
+
+static inline void
+sql_buffer_append_char(SQLbuffer *buf, int c, size_t len)
+{
+	if (len > 0)
+	{
+		sql_buffer_expand(buf, buf->usage + len);
+		memset(buf->data + buf->usage, c, len);
+		buf->usage += len;
+	}
 	assert(buf->usage <= buf->length);
 }
 
