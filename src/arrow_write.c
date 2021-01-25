@@ -809,14 +809,13 @@ createArrowFooter(ArrowFooter *node)
 /* ----------------------------------------------------------------
  * Routines for File I/O
  * ---------------------------------------------------------------- */
-#if 1
 void
 arrowFileWrite(SQLtable *table, const char *buffer, ssize_t length)
 {
 	ssize_t		offset = 0;
 	ssize_t		nbytes;
 
-	assert(lseek(table->fdesc, SEEK_CUR, 0) == table->f_pos);
+	assert(lseek(table->fdesc, 0, SEEK_CUR) == table->f_pos);
 	while (offset < length)
 	{
 		nbytes = write(table->fdesc, buffer + offset, length - offset);
@@ -830,7 +829,6 @@ arrowFileWrite(SQLtable *table, const char *buffer, ssize_t length)
 	}
 	table->f_pos += length;
 }
-#endif
 
 /*
  * sql_buffer_write - A wrapper of arrowFileWrite for SQLbuffer
@@ -1409,27 +1407,6 @@ writeArrowBuffer(SQLtable *table, SQLfield *column)
 	}
 }
 
-static void
-sql_field_clear(SQLfield *column)
-{
-	int		j;
-	
-	column->nitems = 0;
-	column->nullcount = 0;
-	sql_buffer_clear(&column->nullmap);
-	sql_buffer_clear(&column->values);
-	sql_buffer_clear(&column->extra);
-	column->__curr_usage__ = 0;
-
-	if (column->element)
-		sql_field_clear(column->element);
-	if (column->nfields > 0)
-	{
-		for (j=0; j < column->nfields; j++)
-			sql_field_clear(&column->subfields[j]);
-	}
-}
-
 int
 writeArrowRecordBatch(SQLtable *table)
 {
@@ -1441,7 +1418,6 @@ writeArrowRecordBatch(SQLtable *table)
 	int				i, j;
 	int				index;
 	off_t			curr_pos;
-	volatile off_t hoge;
 	size_t			metaLength;
 	size_t			bodyLength = 0;
 
@@ -1454,9 +1430,7 @@ writeArrowRecordBatch(SQLtable *table)
 
 		arrowFileWrite(table, (const char *)&zero, gap);
 	}
-	hoge = lseek(table->fdesc, 0, SEEK_CUR);
-	assert(hoge == table->f_pos);
-//	assert(lseek(table->fdesc, 0, SEEK_CUR) == table->f_pos);
+	assert(lseek(table->fdesc, 0, SEEK_CUR) == table->f_pos);
 	curr_pos = table->f_pos;
 	
 	/* fill up [nodes] vector */

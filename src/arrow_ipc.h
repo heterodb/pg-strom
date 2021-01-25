@@ -341,4 +341,26 @@ sql_buffer_copy(SQLbuffer *dest, const SQLbuffer *orig)
 		dest->usage = orig->usage;
 	}
 }
+
+static inline void
+sql_field_clear(SQLfield *column)
+{
+	int		j;
+
+	column->nitems = 0;
+	column->nullcount = 0;
+	sql_buffer_clear(&column->nullmap);
+	sql_buffer_clear(&column->values);
+	sql_buffer_clear(&column->extra);
+	column->__curr_usage__ = 0;
+
+	if (column->element)
+		sql_field_clear(column->element);
+	if (column->nfields > 0)
+	{
+		for (j=0; j < column->nfields; j++)
+			sql_field_clear(&column->subfields[j]);
+	}
+}
+
 #endif	/* ARROW_IPC_H */
