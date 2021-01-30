@@ -809,12 +809,37 @@ createArrowFooter(ArrowFooter *node)
 /* ----------------------------------------------------------------
  * Routines for File I/O
  * ---------------------------------------------------------------- */
+static inline void
+__setupFileWriteIOV(SQLtable *table, const char *buffer, ssize_t length)
+{
+	struct iovec *iov;
+
+	/* expand on demand */
+	if (table->iov_cnt >= table->iov_len)
+	{
+		table->iov_len = 2 * table->iov_len + 32;
+		if (!table->iov)
+			table->iov = palloc(sizeof(struct iovec) * table->iov_len);
+		else
+			table->iov = repalloc(table->iov,
+								  sizeof(struct iovec) * table->iov_len);
+	}
+	iov = &table->iov[table->iov_cnt++];
+	iov->iov_base = (void *)buffer;
+	iov->iov_len  = length;
+}
+
 void
 arrowFileWrite(SQLtable *table, const char *buffer, ssize_t length)
 {
 	ssize_t		offset = 0;
 	ssize_t		nbytes;
 
+	if (table->fdesc < 0)
+	{
+		__setupFileWriteIOV(table, buffer, length);
+		return;
+	}
 	assert(lseek(table->fdesc, 0, SEEK_CUR) == table->f_pos);
 	while (offset < length)
 	{
@@ -836,16 +861,12 @@ arrowFileWrite(SQLtable *table, const char *buffer, ssize_t length)
 static inline void
 sql_buffer_write(SQLtable *table, SQLbuffer *buf)
 {
-	ssize_t		length = buf->usage;
-	ssize_t		gap = ARROWALIGN(length) - length;
-	char		zero[64];
+	ssize_t		length = ARROWALIGN(buf->usage);
+	ssize_t		gap = length - buf->usage;
 
+	if (gap > 0)
+		memset(buf->data + buf->usage, 0, gap);
 	arrowFileWrite(table, buf->data, length);
-	if (gap)
-	{
-		memset(zero, 0, gap);
-		arrowFileWrite(table, zero, gap);
-	}
 }
 
 /*
@@ -873,8 +894,7 @@ writeFlatBufferMessage(SQLtable *table, ArrowMessage *message)
 	gap = offset - payload->vtable.vlen;
 	length = LONGALIGN(offsetof(FBMessageFileImage,
 								data[gap + payload->length]));
-	image = alloca(length);
-	memset(image, 0, length);
+	image = palloc0(length);
 	image->continuation = 0xffffffff;
 	image->metaLength = length - offsetof(FBMessageFileImage, rootOffset);
 	image->rootOffset = sizeof(int32_t) + offset;
@@ -917,19 +937,15 @@ writeFlatBufferFooter(SQLtable *table, ArrowFooter *footer)
 	nbytes = INTALIGN(offset + payload->length);
 	length = (offsetof(FBFooterFileImage, data[nbytes]) +
 			  offsetof(FBFooterTailImage, signature[6]));
-	buffer = alloca(sizeof(uint64_t) + length + 1);
+	buffer = palloc0(sizeof(uint64_t) + length + 1);
 
 	/* put EOS mark */
 	memcpy(buffer, &eos, sizeof(uint64_t));
 	/* put headers */
 	image = (FBFooterFileImage *)(buffer + sizeof(uint64_t));
 	image->rootOffset = sizeof(int32_t) + INTALIGN(payload->vtable.vlen);
-	if (offset > 0)
-		memset(image->data, 0, offset);
     memcpy(image->data + offset, &payload->vtable, payload->length);
     offset += payload->length;
-	if (offset < nbytes)
-		memset(image->data + offset, 0, nbytes - offset);
 	tail = (FBFooterTailImage *)(image->data + nbytes);
 	tail->metaOffset = nbytes + sizeof(int32_t);
 	strcpy(tail->signature, "ARROW1");
@@ -1422,15 +1438,8 @@ writeArrowRecordBatch(SQLtable *table)
 	size_t			bodyLength = 0;
 
 	assert(table->nitems > 0);
-	/* align current file position, if needed */
-	if (table->f_pos != LONGALIGN(table->f_pos))
-	{
-		uint64_t	zero = 0;
-		size_t		gap = LONGALIGN(table->f_pos) - table->f_pos;
-
-		arrowFileWrite(table, (const char *)&zero, gap);
-	}
-	assert(lseek(table->fdesc, 0, SEEK_CUR) == table->f_pos);
+	assert(table->f_pos == LONGALIGN(table->f_pos));
+//	assert(table->f_pos == lseek(table->fdesc, 0, SEEK_CUR));
 	curr_pos = table->f_pos;
 	
 	/* fill up [nodes] vector */
@@ -1470,7 +1479,7 @@ writeArrowRecordBatch(SQLtable *table)
 
 	/* save the offset/length at ArrowBlock */
 	index = table->numRecordBatches++;
-	if (index == 0)
+	if (!table->recordBatches)
 		table->recordBatches = palloc(sizeof(ArrowBlock) * 32);
 	else
 		table->recordBatches = repalloc(table->recordBatches,
@@ -1480,11 +1489,6 @@ writeArrowRecordBatch(SQLtable *table)
 	block->offset = curr_pos;
 	block->metaDataLength = metaLength;
 	block->bodyLength = bodyLength;
-
-	/* make the local buffer empty again */
-	for (j=0; j < table->nfields; j++)
-		sql_field_clear(&table->columns[j]);
-	table->nitems = 0;
 
 	return index;
 }

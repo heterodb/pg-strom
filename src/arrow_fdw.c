@@ -4298,6 +4298,7 @@ writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 		if (table->nitems > 0)
 		{
 			mvcc->record_batch = writeArrowRecordBatch(table);
+			sql_table_clear(table);
 			dlist_push_tail(&arrow_metadata_state->mvcc_slots[index],
 							&mvcc->chain);
 			elog(DEBUG2,

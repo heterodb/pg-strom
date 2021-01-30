@@ -31,6 +31,7 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -131,6 +132,10 @@ struct SQLtable
 	const char *filename;		/* output filename */
 	int			fdesc;			/* output file descriptor */
 	off_t		f_pos;			/* current file position */
+	int			iov_len;		/* MEMO: arrowFileWrite() with fdesc < 0 */
+	int			iov_cnt;		/*       shall setup iovec array for pwritev(2) */
+	struct iovec *iov;			/*       to support multi-threading */
+
 	ArrowBlock *recordBatches;	/* recordBatches written in the past */
 	int			numRecordBatches;
 	ArrowBlock *dictionaries;	/* dictionaryBatches written in the past */
@@ -361,6 +366,16 @@ sql_field_clear(SQLfield *column)
 		for (j=0; j < column->nfields; j++)
 			sql_field_clear(&column->subfields[j]);
 	}
+}
+
+static inline void
+sql_table_clear(SQLtable *table)
+{
+	int		j;
+
+	for (j=0; j < table->nfields; j++)
+		sql_field_clear(&table->columns[j]);
+	table->nitems = 0;
 }
 
 #endif	/* ARROW_IPC_H */

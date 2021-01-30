@@ -691,18 +691,16 @@ int main(int argc, char * const argv[])
 	{
 		if (usage > batch_segment_sz)
 		{
-			size_t		nitems = table->nitems;
-
 			writeArrowRecordBatch(table);
-			shows_record_batch_progress(table, nitems);
+			shows_record_batch_progress(table, table->nitems);
+			sql_table_clear(table);
 		}
 	}
 	if (table->nitems > 0)
 	{
-		size_t		nitems = table->nitems;
-
 		writeArrowRecordBatch(table);
-		shows_record_batch_progress(table, nitems);
+		shows_record_batch_progress(table, table->nitems);
+		sql_table_clear(table);
 	}
 	/* write out footer portion */
 	writeArrowFooter(table);
