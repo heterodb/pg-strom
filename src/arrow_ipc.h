@@ -132,9 +132,9 @@ struct SQLtable
 	const char *filename;		/* output filename */
 	int			fdesc;			/* output file descriptor */
 	off_t		f_pos;			/* current file position */
-	int			iov_len;		/* MEMO: arrowFileWrite() with fdesc < 0 */
-	int			iov_cnt;		/*       shall setup iovec array for pwritev(2) */
-	struct iovec *iov;			/*       to support multi-threading */
+	int			__iov_len;		/* for internal use of pwritev support */
+	int			__iov_cnt;
+	struct iovec *__iov;
 
 	ArrowBlock *recordBatches;	/* recordBatches written in the past */
 	int			numRecordBatches;
@@ -146,6 +146,7 @@ struct SQLtable
 	int			numCustomMetadata;
 	SQLdictionary *sql_dict_list; /* list of SQLdictionary */
 	size_t		segment_sz;		/* threshold of the memory usage */
+	size_t		usage;			/* current buffer usage */
 	size_t		nitems;			/* number of items */
 	int			nfields;		/* number of attributes */
 	SQLfield columns[FLEXIBLE_ARRAY_MEMBER];
@@ -177,11 +178,17 @@ struct SQLdictionary
 extern void		arrowFileWrite(SQLtable *table,
 							   const char *buffer,
 							   ssize_t length);
-extern ssize_t	writeArrowSchema(SQLtable *table);
+extern void		arrowFileWriteIOV(SQLtable *table);
+extern void		writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
 extern int		writeArrowRecordBatch(SQLtable *table);
 extern void		writeArrowFooter(SQLtable *table);
-extern size_t	estimateArrowBufferLength(SQLfield *column, size_t nitems);
+
+extern size_t	setupArrowRecordBatchIOV(SQLtable *table);
+
+
+
+
 
 /* arrow_nodes.c */
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
@@ -228,6 +235,7 @@ extern void	   *palloc(size_t sz);
 extern void	   *palloc0(size_t sz);
 extern char	   *pstrdup(const char *orig);
 extern void	   *repalloc(void *ptr, size_t sz);
+extern void		pfree(void *ptr);
 
 static inline void
 sql_buffer_init(SQLbuffer *buf)
@@ -376,6 +384,23 @@ sql_table_clear(SQLtable *table)
 	for (j=0; j < table->nfields; j++)
 		sql_field_clear(&table->columns[j]);
 	table->nitems = 0;
+	table->usage = 0;
 }
 
+static inline int
+sql_table_append_record_batch(SQLtable *table, ArrowBlock *block)
+{
+	int			index = table->numRecordBatches++;
+
+	if (!table->recordBatches)
+		table->recordBatches = palloc(sizeof(ArrowBlock) * 32);
+	else
+	{
+		size_t	sz = sizeof(ArrowBlock) * (index + 1);
+		table->recordBatches = repalloc(table->recordBatches, sz);
+	}
+	memcpy(&table->recordBatches[index], block, sizeof(ArrowBlock));
+
+	return index;
+}
 #endif	/* ARROW_IPC_H */

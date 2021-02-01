@@ -655,7 +655,6 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 		index = pgstate->index++;
 	}
 
-	table->nitems++;
 	for (j=0; j < table->nfields; j++)
 	{
 		SQLfield   *column = &table->columns[j];
@@ -674,9 +673,12 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 			addr = PQgetvalue(res, index, j);
 			sz = PQgetlength(res, index, j);
 		}
-		usage += sql_field_put_value(column, addr, sz);
 		assert(table->nitems == column->nitems);
+		usage += sql_field_put_value(column, addr, sz);
 	}
+	table->usage = usage;
+	table->nitems++;
+
 	return usage;
 }
 

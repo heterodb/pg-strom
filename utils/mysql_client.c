@@ -1041,15 +1041,17 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 		ssize_t		usage = 0;
 		int			j;
 
-		table->nitems++;
 		for (j=0; j < table->nfields; j++)
 		{
 			SQLfield   *column = &table->columns[j];
 			size_t		sz = (row[j] != NULL ? row_sz[j] : 0);
 
-			usage += sql_field_put_value(column, row[j], sz);
 			assert(table->nitems == column->nitems);
+			usage += sql_field_put_value(column, row[j], sz);
 		}
+		table->usage = usage;
+		table->nitems++;
+
 		return usage;
 	}
 	return -1;
@@ -1106,6 +1108,12 @@ repalloc(void *old, size_t sz)
 	if (!ptr)
 		Elog("out of memory");
 	return ptr;
+}
+
+void
+pfree(void *ptr)
+{
+	free(ptr);
 }
 
 /*

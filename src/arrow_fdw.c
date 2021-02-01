@@ -2187,6 +2187,7 @@ ArrowExecForeignInsert(EState *estate,
 			elog(ERROR, "Bug? unsupported type format");
 		}
 	}
+	table->usage = usage;
 	table->nitems++;
 	MemoryContextSwitchTo(oldcxt);
 
