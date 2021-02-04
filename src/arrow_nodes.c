@@ -430,7 +430,8 @@ __dumpArrowFooter(SQLbuffer *buf, ArrowNode *node)
 		f->version == ArrowMetadataVersion__V1 ? "V1" :
 		f->version == ArrowMetadataVersion__V2 ? "V2" :
 		f->version == ArrowMetadataVersion__V3 ? "V3" :
-		f->version == ArrowMetadataVersion__V4 ? "V4" : "???");
+		f->version == ArrowMetadataVersion__V4 ? "V4" :
+		f->version == ArrowMetadataVersion__V5 ? "V5" : "???");
 	__dumpArrowNode(buf, (ArrowNode *)&f->schema);
 	sql_buffer_printf(buf, ", dictionaries=[");
 	for (i=0; i < f->_num_dictionaries; i++)
@@ -1599,7 +1600,8 @@ readArrowMessage(ArrowMessage *message, const char *pos)
 	next				= fetchOffset(&t, 2);
 	message->bodyLength	= fetchLong(&t, 3);
 
-	if (message->version != ArrowMetadataVersion__V4)
+	if (message->version < ArrowMetadataVersion__V4 ||
+		message->version > ArrowMetadataVersion__V5)
 		Elog("metadata version %d is not supported", message->version);
 
 	switch (mtype)
