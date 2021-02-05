@@ -67,6 +67,16 @@ CREATE FUNCTION pgstrom.gstore_fdw_replication_redo(regclass, bigint,
   LANGUAGE C STRICT;
 
 ---
+--- arrow_fdw special import function
+---
+CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,         -- relname
+                                              text,	        -- filename
+                                              text = null)  -- schema
+  RETURNS void
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_import_file'
+  LANGUAGE C;
+
+---
 --- Deprecated functions
 ---
 DROP FUNCTION IF EXISTS public.gpu_device_name(int);
