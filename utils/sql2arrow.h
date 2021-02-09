@@ -1,6 +1,5 @@
 #ifndef SQL2ARROW_H
 #define SQL2ARROW_H
-//#include "postgres.h"
 #include "arrow_ipc.h"
 
 typedef struct userConfigOption     userConfigOption;

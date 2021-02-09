@@ -480,8 +480,10 @@ usage(void)
 		  "  -c, --command=COMMAND SQL command to run\n"
 		  "  -t, --table=TABLENAME Table name to be dumped\n"
 		  "      (-c and -t are exclusive, either of them must be given)\n"
+#ifdef __PG2ARROW__
 		  "      --inner-join=SUB_COMMAND\n"
 		  "      --outer-join=SUB_COMMAND\n"
+#endif
 		  "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		  "      --append=FILENAME result Apache Arrow file to be appended\n"
 		  "      (--output and --append are exclusive. If neither of them\n"

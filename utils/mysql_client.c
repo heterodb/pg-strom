@@ -8,6 +8,7 @@
  */
 #include <mysql.h>
 #include "sql2arrow.h"
+#include <ctype.h>
 #include <limits.h>
 
 /* static variables */
@@ -63,7 +64,7 @@ __put_int8_value(SQLfield *column, const char *addr, int sz)
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint16));
+		__put_inline_null_value(column, row_index, sizeof(uint8_t));
 	else
 	{
 		int		value = atoi(addr);
@@ -72,9 +73,9 @@ __put_int8_value(SQLfield *column, const char *addr, int sz)
 			? (value < SCHAR_MIN || value > SCHAR_MAX)
 			: (value < 0 || value > UCHAR_MAX))
 			Elog("value '%s' is out of range for %s",
-				 addr, arrowNodeName(&column->arrow_type.node))
+				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint8));
+		sql_buffer_append(&column->values, &value, sizeof(uint8_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -85,7 +86,7 @@ __put_int16_value(SQLfield *column, const char *addr, int sz)
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint16));
+		__put_inline_null_value(column, row_index, sizeof(uint16_t));
 	else
 	{
 		int		value = atoi(addr);
@@ -96,7 +97,7 @@ __put_int16_value(SQLfield *column, const char *addr, int sz)
 			Elog("value '%s' is out of range for %s",
 				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint16));
+		sql_buffer_append(&column->values, &value, sizeof(uint16_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -107,7 +108,7 @@ __put_int32_value(SQLfield *column, const char *addr, int sz)
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint32));
+		__put_inline_null_value(column, row_index, sizeof(uint32_t));
 	else
 	{
 		long	value = atol(addr);
@@ -118,7 +119,7 @@ __put_int32_value(SQLfield *column, const char *addr, int sz)
 			Elog("value '%s' is out of range for %s",
 				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint32));
+		sql_buffer_append(&column->values, &value, sizeof(uint32_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -129,20 +130,20 @@ __put_int64_value(SQLfield *column, const char *addr, int sz)
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint64));
+		__put_inline_null_value(column, row_index, sizeof(uint64_t));
 	else if (column->arrow_type.Int.is_signed)
 	{
-		int64	value = strtol(addr, NULL, 10);
+		int64_t		value = strtol(addr, NULL, 10);
 
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint64));
+		sql_buffer_append(&column->values, &value, sizeof(uint64_t));
 	}
 	else
 	{
-		uint64	value = strtoul(addr, NULL, 10);
+		uint64_t	value = strtoul(addr, NULL, 10);
 
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint64));
+		sql_buffer_append(&column->values, &value, sizeof(uint64_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -229,14 +230,14 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 	size_t	row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(int128));
+		__put_inline_null_value(column, row_index, sizeof(__int128));
 	else
 	{
-		char   *pos = (char *)addr;
-		char   *end;
-		int		dscale = column->arrow_type.Decimal.scale;
-		bool	negative = false;
-		int128	value;
+		char	   *pos = (char *)addr;
+		char	   *end;
+		int			dscale = column->arrow_type.Decimal.scale;
+		bool		negative = false;
+		__int128	value;
 
 		if (*pos == '-')
 		{
@@ -280,7 +281,7 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 		if (negative)
 			value = -value;		
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(int128));
+		sql_buffer_append(&column->values, &value, sizeof(__int128));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -323,8 +324,8 @@ __put_date_value_generic(SQLfield *column, const char *addr, int length,
 		__put_inline_null_value(column, row_index, arrow_sz);
 	else
 	{
-		int		y, m, d;
-		int64	value;
+		int			y, m, d;
+		int64_t		value;
 
 		if (sscanf(addr, "%d-%d-%d", &y, &m, &d) != 3)
 			Elog("invalid Date value: [%s]", addr);
@@ -341,13 +342,13 @@ __put_date_value_generic(SQLfield *column, const char *addr, int length,
 static size_t
 put_date_day_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_date_value_generic(column, addr, sz, 0, sizeof(int32));
+	return __put_date_value_generic(column, addr, sz, 0, sizeof(int32_t));
 }
 
 static size_t
 put_date_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_date_value_generic(column, addr, sz, 1000000, sizeof(int64));
+	return __put_date_value_generic(column, addr, sz, 1000000, sizeof(int64_t));
 }
 
 static size_t
@@ -380,9 +381,9 @@ __put_time_value_generic(SQLfield *column, const char *addr, int sz,
 		__put_inline_null_value(column, row_index, arrow_sz);
 	else
 	{
-		int		h, m, s, frac = 0;
-		int64	value;
-		char   *pos = strchr(addr, '.');
+		int			h, m, s, frac = 0;
+		int64_t		value;
+		char	   *pos = strchr(addr, '.');
 
 		if (pos)
 		{
@@ -415,25 +416,25 @@ __put_time_value_generic(SQLfield *column, const char *addr, int sz,
 static size_t
 __put_time_sec_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_time_value_generic(column, addr, sz, 0, sizeof(int32));
+	return __put_time_value_generic(column, addr, sz, 0, sizeof(int32_t));
 }
 
 static size_t
 __put_time_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_time_value_generic(column, addr, sz, 3, sizeof(int32));
+	return __put_time_value_generic(column, addr, sz, 3, sizeof(int32_t));
 }
 
 static size_t
 __put_time_us_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_time_value_generic(column, addr, sz, 6, sizeof(int64));
+	return __put_time_value_generic(column, addr, sz, 6, sizeof(int64_t));
 }
 
 static size_t
 __put_time_ns_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_time_value_generic(column, addr, sz, 9, sizeof(int64));
+	return __put_time_value_generic(column, addr, sz, 9, sizeof(int64_t));
 }
 
 static size_t
@@ -473,9 +474,9 @@ __put_timestamp_value_generic(SQLfield *column, const char *addr, int sz,
 		__put_inline_null_value(column, row_index, arrow_sz);
 	else
 	{
-		int		year, mon, day, hour, min, sec, frac = 0;
-		int64	value;
-		char   *pos = strchr(addr, '.');
+		int			year, mon, day, hour, min, sec, frac = 0;
+		int64_t		value;
+		char	   *pos = strchr(addr, '.');
 
 		if (pos != NULL)
 		{
@@ -511,25 +512,25 @@ __put_timestamp_value_generic(SQLfield *column, const char *addr, int sz,
 static size_t
 __put_timestamp_sec_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz, 0, sizeof(int64));
+	return __put_timestamp_value_generic(column, addr, sz, 0, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz, 3, sizeof(int64));
+	return __put_timestamp_value_generic(column, addr, sz, 3, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_us_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz, 6, sizeof(int64));
+	return __put_timestamp_value_generic(column, addr, sz, 6, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_ns_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz, 9, sizeof(int64));
+	return __put_timestamp_value_generic(column, addr, sz, 9, sizeof(int64_t));
 }
 
 static size_t
@@ -562,20 +563,20 @@ put_variable_value(SQLfield *column, const char *addr, int sz)
 	size_t		row_index = column->nitems++;
 
 	if (row_index == 0)
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
+		sql_buffer_append_zero(&column->values, sizeof(uint32_t));
 	if (!addr)
 	{
 		column->nullcount++;
 		sql_buffer_clrbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	else
 	{
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->extra, addr, sz);
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	return __buffer_usage_variable_type(column);
 }
@@ -641,7 +642,6 @@ mysql_setup_attribute(MYSQL *conn,
 	int			precision = -1;
 	int			dscale;
 	int			unit;
-	char		temp[120];
 	const char *tz_name = NULL;
 	
 	memset(column, 0, sizeof(SQLfield));
@@ -891,7 +891,8 @@ sqldb_server_connect(const char *sqldb_hostname,
 					 const char *sqldb_username,
 					 const char *sqldb_password,
 					 const char *sqldb_database,
-					 userConfigOption *sqldb_session_configs)
+					 userConfigOption *sqldb_session_configs,
+					 nestLoopOption *nestloop_option_list)
 {
 	MYSTATE	   *mystate = palloc0(sizeof(MYSTATE));
 	MYSQL	   *conn;
@@ -901,6 +902,9 @@ sqldb_server_connect(const char *sqldb_hostname,
 	userConfigOption *conf;
 	const char *query;
 
+	if (nestloop_option_list != NULL)
+		Elog("Bug? mysql2arrow does not support --inner-join/--outer-join");
+	
 	conn = mysql_init(NULL);
 	if (!conn)
 		Elog("failed on mysql_init");
@@ -1029,32 +1033,32 @@ sqldb_begin_query(void *sqldb_state,
 	return table;
 }
 
-ssize_t
+bool
 sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 {
 	MYSTATE	   *mystate = (MYSTATE *)sqldb_state;
 	MYSQL_ROW	row;
+	unsigned long *row_sz;
+	size_t		usage = 0;
+	int			j;
 
-	if ((row = mysql_fetch_row(mystate->res)) != NULL)
+	row = mysql_fetch_row(mystate->res);
+	if (!row)
+		return false;
+
+	row_sz = mysql_fetch_lengths(mystate->res);
+	for (j=0; j < table->nfields; j++)
 	{
-		unsigned long *row_sz = mysql_fetch_lengths(mystate->res);
-		ssize_t		usage = 0;
-		int			j;
+		SQLfield   *column = &table->columns[j];
+		size_t		sz = (row[j] != NULL ? row_sz[j] : 0);
 
-		for (j=0; j < table->nfields; j++)
-		{
-			SQLfield   *column = &table->columns[j];
-			size_t		sz = (row[j] != NULL ? row_sz[j] : 0);
-
-			assert(table->nitems == column->nitems);
-			usage += sql_field_put_value(column, row[j], sz);
-		}
-		table->usage = usage;
-		table->nitems++;
-
-		return usage;
+		assert(table->nitems == column->nitems);
+		usage += sql_field_put_value(column, row[j], sz);
 	}
-	return -1;
+	table->usage = usage;
+	table->nitems++;
+
+	return true;
 }
 
 void
