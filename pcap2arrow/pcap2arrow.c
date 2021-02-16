@@ -771,7 +771,7 @@ static int arrow_cindex__tcp_checksum		= -1;
 static int arrow_cindex__urgent_ptr			= -1;
 static int arrow_cindex__tcp_options		= -1;
 /* UDP headers */
-static int arrow_cindex__segment_sz			= -1;
+static int arrow_cindex__udp_length			= -1;
 static int arrow_cindex__udp_checksum		= -1;
 /* ICMP headers */
 static int arrow_cindex__icmp_type			= -1;
@@ -849,7 +849,7 @@ arrowPcapSchemaInit(SQLtable *table)
 	/* UDP */
 	if ((protocol_mask & __PCAP_PROTO__UDP) == __PCAP_PROTO__UDP)
 	{
-		__ARROW_FIELD_INIT(segment_sz,   Uint16Bswap);
+		__ARROW_FIELD_INIT(udp_length,   Uint16Bswap);
 		__ARROW_FIELD_INIT(udp_checksum, Uint16Bswap);
 	}
 	/* ICMP */
@@ -1168,7 +1168,7 @@ handlePacketUdpHeader(SQLtable *chunk,
 	struct __udp_head {
 		uint16_t	src_port;
 		uint16_t	dst_port;
-		uint16_t	segment_sz;
+		uint16_t	udp_length;
 		uint16_t	udp_checksum;
 	}		   *udp = (struct __udp_head *) buf;
 
@@ -1176,13 +1176,13 @@ handlePacketUdpHeader(SQLtable *chunk,
 		goto fillup_by_null;
 	*p_src_port = __ntoh16(udp->src_port);
 	*p_dst_port = __ntoh16(udp->dst_port);
-	__FIELD_PUT_VALUE(segment_sz,   &udp->segment_sz,   sizeof(uint16_t));
+	__FIELD_PUT_VALUE(udp_length,   &udp->udp_length,   sizeof(uint16_t));
 	__FIELD_PUT_VALUE(udp_checksum, &udp->udp_checksum, sizeof(uint16_t));
 	chunk->usage += usage;
 	return buf + sizeof(struct __udp_head);
 
 fillup_by_null:
-	__FIELD_PUT_VALUE(segment_sz, NULL, 0);
+	__FIELD_PUT_VALUE(udp_length,   NULL, 0);
 	__FIELD_PUT_VALUE(udp_checksum, NULL, 0);
 	chunk->usage += usage;
 	return NULL;
