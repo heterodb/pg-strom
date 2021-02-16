@@ -2167,7 +2167,7 @@ usage(int status)
 		  "  -p|--protocol=PROTO\n"
 		  "       PROTO is a comma separated string contains\n"
 		  "       the following tokens:\n"
-		  "         tcp4, udp4, icmp4, ipv4, tcp6, udp6, icmp6, ipv66\n"
+		  "         tcp4, udp4, icmp4, ipv4, tcp6, udp6, icmp6, ipv6\n"
 		  "       (default: 'tcp4,udp4,icmp4')\n"
 		  "     --composite-options:\n"
 		  "        write out IPv4,IPv6 and TCP options as an array of composite values\n"
