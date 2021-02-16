@@ -64,6 +64,7 @@ static size_t			record_batch_threshold = (128UL << 20);		/* 128MB */
 static bool				force_overwrite = false;
 static bool				enable_direct_io = false;
 static bool				only_headers = false;
+static bool				composite_options = false;
 static int				print_stat_interval = -1;
 
 /*
@@ -444,12 +445,12 @@ typedef struct
 	uint8_t		option_type;
 	int			option_sz;
 	const void *option_addr;
-} ipv6_option_item;
+} option_item;
 
 static size_t
-put_composite_ipv6_options(SQLfield *column, const char *addr, int sz)
+put_composite_option_items(SQLfield *column, const char *addr, int sz)
 {
-	const ipv6_option_item *ipv6_option = (const ipv6_option_item *) addr;
+	const option_item *ipv6_option = (const option_item *) addr;
 	SQLfield   *subfields = column->subfields;
 	size_t		row_index = column->nitems++;
 
@@ -462,7 +463,7 @@ put_composite_ipv6_options(SQLfield *column, const char *addr, int sz)
 	}
 	else
 	{
-		Assert(sz == sizeof(ipv6_option_item));
+		Assert(sz == sizeof(option_item));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_field_put_value(&subfields[0],
 							(const char *)&ipv6_option->option_type,
@@ -477,7 +478,7 @@ put_composite_ipv6_options(SQLfield *column, const char *addr, int sz)
 }
 
 static size_t
-put_array_ipv6_options(SQLfield *column, const char *addr, int sz)
+put_array_option_items(SQLfield *column, const char *addr, int sz)
 {
 	SQLfield   *element = column->element;
 	size_t		row_index = column->nitems++;
@@ -492,15 +493,15 @@ put_array_ipv6_options(SQLfield *column, const char *addr, int sz)
 	}
 	else
 	{
-		const ipv6_option_item *ipv6_options = (const ipv6_option_item *) addr;
-		int		i, nitems = sz / sizeof(ipv6_option_item);
+		const option_item *ipv6_options = (const option_item *) addr;
+		int		i, nitems = sz / sizeof(option_item);
 
-		Assert(sz == sizeof(ipv6_option_item) * nitems);
+		Assert(sz == sizeof(option_item) * nitems);
 		for (i=0; i < nitems; i++)
 		{
 			sql_field_put_value(element,
 								(const char *)&ipv6_options[i],
-								sizeof(ipv6_option_item));
+								sizeof(option_item));
 		}
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &element->nitems, sizeof(int32_t));
@@ -696,10 +697,10 @@ arrowFieldInitAsBinary(SQLtable *table, int cindex, const char *field_name)
 }
 
 /*
- * IP6Options is List::<Uint8,Binary>; array of composite type
+ * OptionItems is List::<Uint8,Binary>; array of composite type
  */
 static void
-arrowFieldInitAsIP6Options(SQLtable *table, int cindex, const char *field_name)
+arrowFieldInitAsOptionItems(SQLtable *table, int cindex, const char *field_name)
 {
 	SQLfield   *column = &table->columns[cindex];
 	SQLfield   *element = palloc0(sizeof(SQLfield));
@@ -720,7 +721,7 @@ arrowFieldInitAsIP6Options(SQLtable *table, int cindex, const char *field_name)
 	/* the composite type */
 	snprintf(namebuf, sizeof(namebuf), "__%s", field_name);
 	initArrowNode(&element->arrow_type, Struct);
-	element->put_value = put_composite_ipv6_options;
+	element->put_value = put_composite_option_items;
 	element->field_name = pstrdup(namebuf);
 	element->nfields = 2;
 	element->subfields = subfields;
@@ -728,7 +729,7 @@ arrowFieldInitAsIP6Options(SQLtable *table, int cindex, const char *field_name)
 	/* list of the composite type */
 	memset(column, 0, sizeof(SQLfield));
 	initArrowNode(&column->arrow_type, List);
-	column->put_value = put_array_ipv6_options;
+	column->put_value = put_array_option_items;
 	column->field_name = pstrdup(field_name);
 	column->element = element;
 
@@ -785,12 +786,14 @@ arrowPcapSchemaInit(SQLtable *table)
 {
 	int		j = 0;
 
-#define __ARROW_FIELD_INIT(__NAME, __TYPE)				\
-	if (arrow_cindex__##__NAME < 0)						\
-		arrow_cindex__##__NAME = j;						\
-	else												\
-		Assert(arrow_cindex__##__NAME == j);			\
-	arrowFieldInitAs##__TYPE(table, j++, (#__NAME))
+#define __ARROW_FIELD_INIT(__NAME, __TYPE)					\
+	do {													\
+		if (arrow_cindex__##__NAME < 0)						\
+			arrow_cindex__##__NAME = j;						\
+		else												\
+			Assert(arrow_cindex__##__NAME == j);			\
+		arrowFieldInitAs##__TYPE(table, j++, (#__NAME));	\
+	} while(0)
 
 	/* timestamp and mac-address */
     __ARROW_FIELD_INIT(timestamp,	TimestampUs);
@@ -809,7 +812,10 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(ip_checksum,	Uint16Bswap);
 		__ARROW_FIELD_INIT(src_addr,	IP4Addr);
 		__ARROW_FIELD_INIT(dst_addr,	IP4Addr);
-		__ARROW_FIELD_INIT(ip_options,	Binary);
+		if (composite_options)
+			__ARROW_FIELD_INIT(ip_options, OptionItems);
+		else
+			__ARROW_FIELD_INIT(ip_options, Binary);
 	}
 	/* IPv6 */
 	if ((protocol_mask & __PCAP_PROTO__IPv6) != 0)
@@ -819,7 +825,10 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(hop_limit,   Uint8);
 		__ARROW_FIELD_INIT(src_addr6,	IP6Addr);
 		__ARROW_FIELD_INIT(dst_addr6,	IP6Addr);
-		__ARROW_FIELD_INIT(ip6_options, IP6Options);
+		if (composite_options)
+			__ARROW_FIELD_INIT(ip6_options, OptionItems);
+		else
+			__ARROW_FIELD_INIT(ip6_options, Binary);
 	}
 	/* IPv4 or IPv6 */
 	if ((protocol_mask & (__PCAP_PROTO__IPv4 |
@@ -844,7 +853,10 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(window_sz,	Uint16Bswap);
 		__ARROW_FIELD_INIT(tcp_checksum,Uint16Bswap);
 		__ARROW_FIELD_INIT(urgent_ptr,	Uint16Bswap);
-		__ARROW_FIELD_INIT(tcp_options,	Binary);
+		if (composite_options)
+			__ARROW_FIELD_INIT(tcp_options, OptionItems);
+		else
+			__ARROW_FIELD_INIT(tcp_options,	Binary);
 	}
 	/* UDP */
 	if ((protocol_mask & __PCAP_PROTO__UDP) == __PCAP_PROTO__UDP)
@@ -861,9 +873,7 @@ arrowPcapSchemaInit(SQLtable *table)
 	}
 	/* remained data - payload */
 	if (!only_headers)
-	{
 		__ARROW_FIELD_INIT(payload,		  Binary);
-	}
 #undef __ARROW_FIELD_INIT
 	table->nfields = j;
 
@@ -930,7 +940,7 @@ handlePacketIPv4Header(SQLtable *chunk,
 		uint16_t	ip_checksum;
 		uint32_t	src_addr;
 		uint32_t	dst_addr;
-		char		ip_options[0];
+		u_char		ip_options[0];
 	}		   *ipv4 = (struct __ipv4_head *)buf;
 	uint16_t	head_sz;
 
@@ -952,14 +962,51 @@ handlePacketIPv4Header(SQLtable *chunk,
 	__FIELD_PUT_VALUE(ip_checksum, &ipv4->ip_checksum, sizeof(uint16_t));
 	__FIELD_PUT_VALUE(src_addr,    &ipv4->src_addr,    sizeof(uint32_t));
 	__FIELD_PUT_VALUE(dst_addr,    &ipv4->dst_addr,    sizeof(uint32_t));
-	if (head_sz > offsetof(struct __ipv4_head, ip_options))
+	if (head_sz <= offsetof(struct __ipv4_head, ip_options))
 	{
-		__FIELD_PUT_VALUE(ip_options, ipv4->ip_options,
-						  head_sz - offsetof(struct __ipv4_head, ip_options));
+		__FIELD_PUT_VALUE(ip_options, NULL, 0);
+	}
+	else if (composite_options)
+	{
+		option_item 	ipv4_options[40];
+		int				nitems = 0;
+		const u_char   *pos = ipv4->ip_options;
+		const u_char   *end = buf + head_sz;
+
+		/* https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml */
+		while (pos < end)
+		{
+			int			code = *pos++;
+
+			if (code == 0)	/* End of Options List */
+				break;
+			if (code == 1)	/* No Operation */
+				continue;
+			/* Other options have length field in the 2nd octet */
+			if (pos < end)
+			{
+				option_item	   *item = &ipv4_options[nitems++];
+				item->option_type = code;
+				item->option_sz = (*pos++) - 2;
+				item->option_addr = pos;
+				pos += item->option_sz;
+			}
+		}
+
+		if (nitems == 0)
+		{
+			__FIELD_PUT_VALUE(ip_options, NULL, 0);
+		}
+		else
+		{
+			__FIELD_PUT_VALUE(ip_options, ipv4_options,
+							  sizeof(option_item) * nitems);
+		}
 	}
 	else
 	{
-		__FIELD_PUT_VALUE(ip_options, NULL, 0);
+		__FIELD_PUT_VALUE(ip_options, ipv4->ip_options,
+						  head_sz - offsetof(struct __ipv4_head, ip_options));
 	}
 	chunk->usage += usage;
 
@@ -981,49 +1028,23 @@ fillup_by_null:
 }
 
 /*
- * handlePacketIPv6Header
+ * handlePacketIPv6Options
  */
 static const u_char *
-handlePacketIPv6Header(SQLtable *chunk,
-					   const u_char *buf, size_t sz, int *p_proto)
+handlePacketIPv6Options(SQLtable *chunk,
+						uint8_t next,
+						const u_char *pos,
+						const u_char *end,
+						int *p_proto)
 {
 	__FIELD_PUT_VALUE_DECL;
-	struct __ipv6_head {
-		uint8_t		v0;
-		uint8_t		v1;
-		uint8_t		v2;
-		uint8_t		v3;
-		uint16_t	length;
-		uint8_t		next;
-		uint8_t		hop_limit;
-		uint8_t		src_addr6[IP6ADDR_LEN];
-		uint8_t		dst_addr6[IP6ADDR_LEN];
-		uint8_t		data[1];
-	}  *ipv6 = (struct __ipv6_head *) buf;
-	uint8_t			traffic_class;
-	uint32_t		flow_label;
-	ipv6_option_item ipv6_options[256];
-	int				nitems = 0;
-	const u_char   *pos, *end;
-	uint8_t			next;
+	option_item ipv6_options[256];
+	int		sz, nitems = 0;
 
-	if (!buf || sz < 40)
-		goto fillup_by_null;
-
-	if ((ipv6->v0 & 0xf0) != 0x60)
-		goto fillup_by_null;
-	traffic_class = ((ipv6->v0 & 0x0f) << 4) | ((ipv6->v1 & 0xf0) >> 4);
-	flow_label = (((uint32_t)(ipv6->v1 & 0x0f) << 16) |
-				  ((uint32_t)(ipv6->v2 << 8)) |
-				  ((uint32_t)(ipv6->v3)));
-	/* walk on the IPv6 header options */
-	next = ipv6->next;
-	pos = ipv6->data;
-	end = buf + sz;
+	/* walk on the IPv6 options headers */
 	while (pos < end)
 	{
-		ipv6_option_item *item;
-		int				sz;
+		option_item *item;
 
 		switch (next)
 		{
@@ -1077,14 +1098,63 @@ handlePacketIPv6Header(SQLtable *chunk,
 		}
 	}
 out:
-	*p_proto = next;
+	if (pos == end)
+	{
+		__FIELD_PUT_VALUE(ip6_options, NULL, 0);
+	}
+	else if (composite_options)
+	{
+		__FIELD_PUT_VALUE(ip6_options, ipv6_options,
+						  sizeof(ipv6_options) * nitems);
+	}
+	else
+	{
+		__FIELD_PUT_VALUE(ip6_options, pos, end - pos);
+	}
+	chunk->usage += usage;
+	return pos;
+}
+
+/*
+ * handlePacketIPv6Header
+ */
+static const u_char *
+handlePacketIPv6Header(SQLtable *chunk,
+					   const u_char *buf, size_t sz, int *p_proto)
+{
+	__FIELD_PUT_VALUE_DECL;
+	struct __ipv6_head {
+		uint8_t		v0;
+		uint8_t		v1;
+		uint8_t		v2;
+		uint8_t		v3;
+		uint16_t	length;
+		uint8_t		next;
+		uint8_t		hop_limit;
+		uint8_t		src_addr6[IP6ADDR_LEN];
+		uint8_t		dst_addr6[IP6ADDR_LEN];
+		u_char		data[1];
+	}  *ipv6 = (struct __ipv6_head *) buf;
+	uint8_t			traffic_class;
+	uint32_t		flow_label;
+	const u_char   *end = buf + sz;
+
+	if (!buf || sz < 40)
+		goto fillup_by_null;
+
+	if ((ipv6->v0 & 0xf0) != 0x60)
+		goto fillup_by_null;
+	traffic_class = ((ipv6->v0 & 0x0f) << 4) | ((ipv6->v1 & 0xf0) >> 4);
+	flow_label = (((uint32_t)(ipv6->v1 & 0x0f) << 16) |
+				  ((uint32_t)(ipv6->v2 << 8)) |
+				  ((uint32_t)(ipv6->v3)));
+
 	__FIELD_PUT_VALUE(traffic_class, &traffic_class, sizeof(uint8_t));
     __FIELD_PUT_VALUE(flow_label,  &flow_label, sizeof(uint32_t));
     __FIELD_PUT_VALUE(hop_limit,   &ipv6->hop_limit, sizeof(uint8_t));
     __FIELD_PUT_VALUE(src_addr6,   &ipv6->src_addr6, IP6ADDR_LEN);
     __FIELD_PUT_VALUE(dst_addr6,   &ipv6->dst_addr6, IP6ADDR_LEN);
-    __FIELD_PUT_VALUE(ip6_options, ipv6_options, sizeof(ipv6_option_item) * nitems);
-	return pos;
+	return handlePacketIPv6Options(chunk, ipv6->next, ipv6->data, end, p_proto);
 
 fillup_by_null:
 	__FIELD_PUT_VALUE(traffic_class, NULL, 0);
@@ -1114,7 +1184,7 @@ handlePacketTcpHeader(SQLtable *chunk,
 		uint16_t	window_sz;
 		uint16_t	tcp_checksum;
 		uint16_t	urgent_ptr;
-		char		tcp_options[0];
+		u_char		tcp_options[0];
 	}		   *tcp = (struct __tcp_head *)buf;
 	uint16_t	head_sz;
 
@@ -1132,14 +1202,51 @@ handlePacketTcpHeader(SQLtable *chunk,
 	__FIELD_PUT_VALUE(window_sz,    &tcp->window_sz,    sizeof(uint16_t));
 	__FIELD_PUT_VALUE(tcp_checksum, &tcp->tcp_checksum, sizeof(uint16_t));
 	__FIELD_PUT_VALUE(urgent_ptr,   &tcp->urgent_ptr,   sizeof(uint16_t));
-	if (head_sz > offsetof(struct __tcp_head, tcp_options))
+	if (head_sz <= offsetof(struct __tcp_head, tcp_options))
 	{
-		__FIELD_PUT_VALUE(tcp_options, tcp->tcp_options,
-						  head_sz - offsetof(struct __tcp_head, tcp_options));
+		__FIELD_PUT_VALUE(tcp_options, NULL, 0);
+	}
+	else if (composite_options)
+	{
+		option_item		tcp_options[40];
+		int				nitems = 0;
+		const u_char   *pos = tcp->tcp_options;
+		const u_char   *end = buf + head_sz;
+
+		/* https://www.iana.org/assignments/tcp-parameters/tcp-parameters.xhtml */
+		while (pos < end)
+		{
+			int			code = *pos++;
+
+			if (code == 0)	/* End of Options List */
+				break;
+			if (code == 1)	/* No Operations */
+				continue;
+			/* Other options have length field in the 2nd octet */
+			if (pos < end)
+			{
+				option_item	   *item = &tcp_options[nitems++];
+				item->option_type = code;
+				item->option_sz = (*pos++) - 2;
+				item->option_addr = pos;
+				pos += item->option_sz;
+			}
+		}
+
+		if (nitems == 0)
+		{
+			__FIELD_PUT_VALUE(tcp_options, NULL, 0);
+		}
+		else
+		{
+			__FIELD_PUT_VALUE(tcp_options, tcp_options,
+							  sizeof(option_item) * nitems);
+		}
 	}
 	else
 	{
-		__FIELD_PUT_VALUE(tcp_options, NULL, 0);
+		__FIELD_PUT_VALUE(tcp_options, tcp->tcp_options,
+						  head_sz - offsetof(struct __tcp_head, tcp_options));
 	}
 	chunk->usage += usage;
 	return buf + head_sz;
@@ -1595,6 +1702,37 @@ arrowChunkWriteOut(SQLtable *chunk)
 /*
  * arrowMergeChunkWriteOut
  */
+static inline int
+__arrowMergeChunkOneOptions(option_item *__option_items,
+							SQLfield *element,
+							uint32_t start, uint32_t end)
+{
+	uint32_t	index;
+	int			nitems = 0;
+	SQLfield   *sopt_type = &element->subfields[0];
+	SQLfield   *sopt_data = &element->subfields[1];
+
+	Assert(element->nitems == sopt_type->nitems &&
+		   element->nitems == sopt_data->nitems);
+	
+	if (element->nullcount != 0 ||
+		sopt_type->nullcount != 0 ||
+		sopt_data->nullcount != 0)
+		Elog("Data corruption? IPv4/IPv6/Tcp options should contains not NULLs");
+	
+	for (index=start; index < end; index++)
+	{
+		option_item *item = &__option_items[nitems++];
+		uint32_t	off;
+
+		item->option_type = ((uint8_t *)sopt_type->values.data)[index];
+		off = ((uint32_t *)sopt_data->values.data)[index];
+		item->option_sz = ((uint32_t *)sopt_data->values.data)[index+1] - off;
+		item->option_addr = (sopt_data->extra.data + off);
+	}
+	return nitems;
+}
+
 static inline void
 __arrowMergeChunkOneRow(SQLtable *dchunk,
 						SQLtable *schunk, size_t index)
@@ -1605,11 +1743,14 @@ __arrowMergeChunkOneRow(SQLtable *dchunk,
 	Assert(dchunk->nfields == schunk->nfields);
 	for (j=0; j < schunk->nfields; j++)
 	{
+		option_item	__option_items[256];
 		SQLfield   *dcolumn = &dchunk->columns[j];
 		SQLfield   *scolumn = &schunk->columns[j];
 		void	   *addr;
 		size_t		sz, off;
 		uint64_t	val;
+		uint32_t	start, end;
+		int			nitems;
 		struct timeval ts_buf;
 
 		Assert(schunk->nitems == scolumn->nitems);
@@ -1648,10 +1789,30 @@ __arrowMergeChunkOneRow(SQLtable *dchunk,
 				break;
 
 			case ArrowNodeTag__FixedSizeBinary:
+				Assert(scolumn->arrow_type.FixedSizeBinary.byteWidth ==
+					   dcolumn->arrow_type.FixedSizeBinary.byteWidth);
 				sz = scolumn->arrow_type.FixedSizeBinary.byteWidth;
 				addr = scolumn->values.data + sz * index;
 				break;
 
+			case ArrowNodeTag__List:
+				/* List::Struct<Uint8,Binary> */
+				start = ((uint32_t *)scolumn->values.data)[index];
+				end = ((uint32_t *)scolumn->values.data)[index+1];
+				nitems = __arrowMergeChunkOneOptions(__option_items,
+													 scolumn->element,
+													 start, end);
+				if (nitems == 0)
+				{
+					sz = 0;
+					addr = NULL;
+				}						
+				else
+				{
+					sz = sizeof(option_item) * nitems;
+					addr = __option_items;
+				}
+				break;
 			default:
 				Elog("Bug? unexpected ArrowType (tag: %d)",
 					 scolumn->arrow_type.node.tag);
@@ -1983,7 +2144,7 @@ usage(int status)
 		  "OPTIONS:\n"
 		  "  -i|--input=DEVICE\n"
 		  "       specifies a network device to capture packet.\n"
-		  "     --num-queues=<N_QUEUE> : num of PF-RING queues.\n"
+		  "     --num-queues=N_QUEUE : num of PF-RING queues.\n"
 		  "  -o|--output=<output file; with format>\n"
 		  "       filename format can contains:"
 		  "         %i : interface name\n"
@@ -2000,20 +2161,22 @@ usage(int status)
 		  "     --only-headers: disables capture of payload\n"
 		  "     --parallel-write=N_FILES\n"
 		  "       opens multiple output files simultaneously (default: 1)\n"
-		  "     --chunk-size=<SIZE> : size of record batch (default: 128MB)\n"
+		  "     --chunk-size=SIZE : size of record batch (default: 128MB)\n"
 		  "     --direct-io : enables O_DIRECT for write-i/o\n"
-		  "  -l|--limit=<LIMIT> : (default: no limit)\n"
-		  "  -p|--protocol=<PROTO>\n"
-		  "       <PROTO> is a comma separated string contains\n"
+		  "  -l|--limit=LIMIT : (default: no limit)\n"
+		  "  -p|--protocol=PROTO\n"
+		  "       PROTO is a comma separated string contains\n"
 		  "       the following tokens:\n"
 		  "         tcp4, udp4, icmp4, ipv4, tcp6, udp6, icmp6, ipv66\n"
 		  "       (default: 'tcp4,udp4,icmp4')\n"
-		  "  -r|--rule=<RULE> : packet filtering rules\n"
+		  "     --composite-options:\n"
+		  "        write out IPv4,IPv6 and TCP options as an array of composite values\n"
+		  "  -r|--rule=RULE : packet filtering rules\n"
 		  "       (default: none; valid only capturing mode)\n"
-		  "  -s|--stat[=INTERVAL]\n"
+		  "  -s|--stat=INTERVAL\n"
 		  "       enables to print statistics per INTERVAL\n"
-		  "  -t|--threads=<NUM of threads>\n"
-		  "     --pcap-threads=<NUM of threads>\n"
+		  "  -t|--threads=N_THREADS\n"
+		  "     --pcap-threads=N_THREADS\n"
 		  "  -h|--help    : shows this message\n"
 		  "\n"
 		  "  Copyright (C) 2020-2021 HeteroDB,Inc <contact@heterodb.com>\n"
@@ -2040,6 +2203,7 @@ parse_options(int argc, char *argv[])
 		{"only-headers",   no_argument,       NULL, 1003},
 		{"num-queues",     required_argument, NULL, 1004},
 		{"parallel-write", required_argument, NULL, 1005},
+		{"composite-options", no_argument,    NULL, 1006},
 		{"help",           no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
@@ -2171,7 +2335,11 @@ parse_options(int argc, char *argv[])
 				if (*pos != '\0' || arrow_file_desc_nums < 1)
 					Elog("invalid --parallel-write argument: %s", optarg);
 				break;
-				
+
+			case 1006:	/* --composite-options */
+				composite_options = true;
+				break;
+
 			default:
 				usage(code == 'h' ? 0 : 1);
 				break;
