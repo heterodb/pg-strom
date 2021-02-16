@@ -1220,10 +1220,10 @@ fillup_by_null:
 }
 
 /*
- * handlePacketTransportCommon
+ * handlePacketMiscFields
  */
 static void
-handlePacketTransportCommon(SQLtable *chunk, int proto, int src_port, int dst_port)
+handlePacketMiscFields(SQLtable *chunk, int proto, int src_port, int dst_port)
 {
 	__FIELD_PUT_VALUE_DECL;
 
@@ -1732,50 +1732,59 @@ __execCaptureOnePacket(SQLtable *chunk,
 	}
 
 	/* TCP */
-	if (proto == 0x06 && (protocol_mask & __PCAP_PROTO__TCP) != 0)
+	if ((protocol_mask & __PCAP_PROTO__TCP) != 0)
 	{
-		if (print_stat_interval > 0)
-			atomicAdd64(&stat_tcp_packet_count, 1);
-		next = handlePacketTcpHeader(chunk, pos, end - pos, proto,
-									 &src_port, &dst_port);
-		if (next)
-			pos = next;
-	}
-	else
-	{
-		handlePacketTcpHeader(chunk, NULL, 0, proto, NULL, NULL);
+		if (proto == 0x06)
+		{
+			if (print_stat_interval > 0)
+				atomicAdd64(&stat_tcp_packet_count, 1);
+			next = handlePacketTcpHeader(chunk, pos, end - pos, proto,
+										 &src_port, &dst_port);
+			if (next)
+				pos = next;
+		}
+		else
+		{
+			handlePacketTcpHeader(chunk, NULL, 0, proto, NULL, NULL);
+		}
 	}
 	
 	/* UDP */
-	if (proto == 0x11 && (protocol_mask & __PCAP_PROTO__UDP) != 0)
+	if ((protocol_mask & __PCAP_PROTO__UDP) != 0)
 	{
-		if (print_stat_interval > 0)
-			atomicAdd64(&stat_udp_packet_count, 1);
-		next = handlePacketUdpHeader(chunk, pos, end - pos, proto,
-									 &src_port, &dst_port);
-		if (next)
-			pos = next;
-	}
-	else
-	{
-		handlePacketUdpHeader(chunk, NULL, 0, proto, NULL, NULL);
+		if (proto == 0x11)
+		{
+			if (print_stat_interval > 0)
+				atomicAdd64(&stat_udp_packet_count, 1);
+			next = handlePacketUdpHeader(chunk, pos, end - pos, proto,
+										 &src_port, &dst_port);
+			if (next)
+				pos = next;
+		}
+		else
+		{
+			handlePacketUdpHeader(chunk, NULL, 0, proto, NULL, NULL);
+		}
 	}
 
 	/* ICMP */
-	if (proto == 0x01 && (protocol_mask & __PCAP_PROTO__ICMP) != 0)
+	if ((protocol_mask & __PCAP_PROTO__ICMP) != 0)
 	{
-		if (print_stat_interval > 0)
-			atomicAdd64(&stat_icmp_packet_count, 1);
-		next = handlePacketIcmpHeader(chunk, pos, end - pos, proto);
-		if (next)
-			pos = next;
+		if (proto == 0x01)
+		{
+			if (print_stat_interval > 0)
+				atomicAdd64(&stat_icmp_packet_count, 1);
+			next = handlePacketIcmpHeader(chunk, pos, end - pos, proto);
+			if (next)
+				pos = next;
+		}
+		else
+		{
+			handlePacketIcmpHeader(chunk, NULL, 0, proto);
+		}
 	}
-	else
-	{
-		handlePacketIcmpHeader(chunk, NULL, 0, proto);
-	}
-	/* Transport common */
-	handlePacketTransportCommon(chunk, proto, src_port, dst_port);
+	/* other fields */
+	handlePacketMiscFields(chunk, proto, src_port, dst_port);
 
 	/* Payload */
 	if (!only_headers)
@@ -1794,7 +1803,7 @@ fillup_by_null:
 		handlePacketUdpHeader(chunk, NULL, 0, -1, NULL, NULL);
 	if ((protocol_mask & __PCAP_PROTO__ICMP) != 0)
 		handlePacketIcmpHeader(chunk, NULL, 0, -1);
-	handlePacketTransportCommon(chunk, -1, -1, -1);
+	handlePacketMiscFields(chunk, -1, -1, -1);
 	if (!only_headers && pos != NULL)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
