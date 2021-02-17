@@ -849,7 +849,7 @@ arrowPcapSchemaInit(SQLtable *table)
 	{
 		__ARROW_FIELD_INIT(seq_nr,		Uint32Bswap);
 		__ARROW_FIELD_INIT(ack_nr,		Uint32Bswap);
-		__ARROW_FIELD_INIT(tcp_flags,	Uint16Bswap);
+		__ARROW_FIELD_INIT(tcp_flags,	Uint16);	/* byte swap by caller */
 		__ARROW_FIELD_INIT(window_sz,	Uint16Bswap);
 		__ARROW_FIELD_INIT(tcp_checksum,Uint16Bswap);
 		__ARROW_FIELD_INIT(urgent_ptr,	Uint16Bswap);
@@ -1186,19 +1186,23 @@ handlePacketTcpHeader(SQLtable *chunk,
 		uint16_t	urgent_ptr;
 		u_char		tcp_options[0];
 	}		   *tcp = (struct __tcp_head *)buf;
+	uint16_t	tcp_flags;
 	uint16_t	head_sz;
 
 	if (!buf || sz < offsetof(struct __tcp_head, tcp_options))
 		goto fillup_by_null;
-	head_sz = sizeof(uint32_t) * (__ntoh16(tcp->tcp_flags) & 0x000f);
+	tcp_flags = __ntoh16(tcp->tcp_flags);
+	head_sz = sizeof(uint32_t) * ((tcp_flags & 0xf000) >> 12);
 	if (head_sz > sz)
 		goto fillup_by_null;
+	tcp_flags &= 0x0fff;
 
 	*p_src_port = __ntoh16(tcp->src_port);
 	*p_dst_port = __ntoh16(tcp->dst_port);
+
 	__FIELD_PUT_VALUE(seq_nr,       &tcp->seq_nr,       sizeof(uint32_t));
 	__FIELD_PUT_VALUE(ack_nr,       &tcp->ack_nr,       sizeof(uint32_t));
-	__FIELD_PUT_VALUE(tcp_flags,    &tcp->tcp_flags,    sizeof(uint16_t));
+	__FIELD_PUT_VALUE(tcp_flags,    &tcp_flags,         sizeof(uint16_t));
 	__FIELD_PUT_VALUE(window_sz,    &tcp->window_sz,    sizeof(uint16_t));
 	__FIELD_PUT_VALUE(tcp_checksum, &tcp->tcp_checksum, sizeof(uint16_t));
 	__FIELD_PUT_VALUE(urgent_ptr,   &tcp->urgent_ptr,   sizeof(uint16_t));
@@ -1249,6 +1253,7 @@ handlePacketTcpHeader(SQLtable *chunk,
 						  head_sz - offsetof(struct __tcp_head, tcp_options));
 	}
 	chunk->usage += usage;
+
 	return buf + head_sz;
 
 fillup_by_null:
