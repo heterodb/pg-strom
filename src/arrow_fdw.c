@@ -2059,7 +2059,11 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 			attr.attinhcount = 0;
 			attr.attcollation = InvalidOid;
 
-			InsertPgAttributeTuple(a_rel, &attr, a_index);
+#if PG_VERSION_NUM >= 13000
+			InsertPgAttributeTuple(a_rel, &attr,(Datum) 0, a_index);
+#else
+			InsertPgAttributeTuple(a_rel, &attr,a_index);
+#endif
 
 			/* add dependency */
 			myself.classId = RelationRelationId;
