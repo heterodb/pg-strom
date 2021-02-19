@@ -1,0 +1,75 @@
+--
+-- validation of the default GUC paremeter setting
+--
+SHOW pg_strom.enabled;
+ pg_strom.enabled 
+------------------
+ on
+(1 row)
+
+SHOW pg_strom.enable_gpuscan;
+ pg_strom.enable_gpuscan 
+-------------------------
+ on
+(1 row)
+
+SHOW pg_strom.enable_gpuhashjoin;
+ pg_strom.enable_gpuhashjoin 
+-----------------------------
+ on
+(1 row)
+
+SHOW pg_strom.enable_gpunestloop;
+ pg_strom.enable_gpunestloop 
+-----------------------------
+ on
+(1 row)
+
+SHOW pg_strom.enable_gpupreagg;
+ pg_strom.enable_gpupreagg 
+---------------------------
+ on
+(1 row)
+
+SHOW pg_strom.enable_numeric_aggfuncs;
+ pg_strom.enable_numeric_aggfuncs 
+----------------------------------
+ on
+(1 row)
+
+SHOW pg_strom.cpu_fallback;
+ pg_strom.cpu_fallback 
+-----------------------
+ off
+(1 row)
+
+SHOW pg_strom.gpu_setup_cost;
+ pg_strom.gpu_setup_cost 
+-------------------------
+ 4000
+(1 row)
+
+SHOW pg_strom.gpu_operator_cost;
+ pg_strom.gpu_operator_cost 
+----------------------------
+ 0.00015625
+(1 row)
+
+SHOW pg_strom.gpu_dma_cost;
+ pg_strom.gpu_dma_cost 
+-----------------------
+ 10
+(1 row)
+
+SHOW pg_strom.pullup_outer_scan;
+ pg_strom.pullup_outer_scan 
+----------------------------
+ on
+(1 row)
+
+SHOW pg_strom.pullup_outer_join;
+ pg_strom.pullup_outer_join 
+----------------------------
+ on
+(1 row)
+

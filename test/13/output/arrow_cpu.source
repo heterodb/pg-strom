@@ -1,0 +1,228 @@
+---
+--- Test for arrow_fdw with CPU
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_cpu_temp CASCADE;
+CREATE SCHEMA regtest_arrow_cpu_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_cpu_temp,public;
+CREATE TYPE regtest_comp AS (
+  a   int,
+  b   float,
+  c   text,
+  d   numeric(9,3),
+  e   timestamp
+);
+CREATE TABLE regtest_data (
+  id     int,
+  i2     int2,
+  i4     int4,
+  i8     int8,
+  f2     float2,
+  f4     float4,
+  f8     float8,
+  n1     numeric(9,3),
+  n2     numeric(9,3),
+  comp   regtest_comp,
+  t1     text,
+  t2     text,
+  dt     date,
+  tm     time,
+  ts     timestamp,
+  tz     timestamptz
+);
+SELECT pgstrom.random_setseed(20190711);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO regtest_data (
+  SELECT x, pgstrom.random_int(2, -32000, 32000),
+            pgstrom.random_int(2, -16777216, 16777216),
+            pgstrom.random_int(2, -16777216, 16777216),
+            pgstrom.random_float(2, -10000.0, 10000.0),
+            pgstrom.random_float(2, -100000.0, 100000.0),
+            pgstrom.random_float(2, -100000.0, 100000.0),
+            pgstrom.random_float(2, -100000.0, 100000.0),
+            pgstrom.random_float(2, -100000.0, 100000.0),
+            NULL,
+            pgstrom.random_text_len(2, 64),
+            pgstrom.random_text_len(2, 64),
+            pgstrom.random_date(2),
+            pgstrom.random_time(2),
+            pgstrom.random_timestamp(2),
+            pgstrom.random_timestamp(2)
+    FROM generate_series(1,10000) x);
+UPDATE regtest_data
+   SET comp.a = pgstrom.random_int(2, -32000, 32000),
+       comp.b = pgstrom.random_float(2, -100000.0, 100000.0),
+       comp.c = pgstrom.random_text_len(2, 64),
+       comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
+       comp.e = pgstrom.random_timestamp(2);
+\! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o @abs_builddir@/test_arrow_cpu_1.data
+RecordBatch[0]: offset=1624 length=2383480 (meta=1144, body=2382336) nitems=10000
+IMPORT FOREIGN SCHEMA regtest_arrow
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_cpu_temp
+OPTIONS (file '@abs_builddir@/test_arrow_cpu_1.data');
+SELECT attnum, attname, atttypid::regtype
+  FROM pg_attribute
+ WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0
+ ORDER BY attnum;
+ attnum | attname |          atttypid           
+--------+---------+-----------------------------
+      1 | id      | integer
+      2 | i2      | smallint
+      3 | i4      | integer
+      4 | i8      | bigint
+      5 | f2      | float2
+      6 | f4      | real
+      7 | f8      | double precision
+      8 | n1      | numeric
+      9 | n2      | numeric
+     10 | comp    | regtest_comp
+     11 | t1      | text
+     12 | t2      | text
+     13 | dt      | date
+     14 | tm      | time without time zone
+     15 | ts      | timestamp without time zone
+     16 | tz      | timestamp with time zone
+(16 rows)
+
+CREATE TABLE timezone_data (
+  id     int,
+  ts     timestamp,
+  tz     timestamptz
+);
+INSERT INTO timezone_data (
+  SELECT x, pgstrom.random_timestamp(1, '2020-02-11 12:00:00',
+                                        '2020-02-13 12:00:00'),
+            pgstrom.random_timestamp(1, '2020-02-11 12:00:00',
+                                        '2020-02-13 12:00:00')
+    FROM generate_series(1,1500) x);
+\! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o @abs_builddir@/test_arrow_cpu_2.data
+RecordBatch[0]: offset=400 length=30712 (meta=248, body=30464) nitems=1500
+IMPORT FOREIGN SCHEMA timezone_arrow
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_cpu_temp
+OPTIONS (file '@abs_builddir@/test_arrow_cpu_2.data');
+SET pg_strom.enabled = off;
+-- should be empty results
+SELECT d.id, d.i2, d.i4, d.i8, a.i2, a.i4, a.i8
+  FROM regtest_data d FULL OUTER JOIN regtest_arrow a ON d.id = a.id
+ WHERE (d.i2 IS NOT NULL) != (a.i2 IS NOT NULL) OR (d.i2 != a.i2)
+    OR (d.i4 IS NOT NULL) != (a.i4 IS NOT NULL) OR (d.i4 != a.i4)
+    OR (d.i8 IS NOT NULL) != (a.i8 IS NOT NULL) OR (d.i8 != a.i8);
+ id | i2 | i4 | i8 | i2 | i4 | i8 
+----+----+----+----+----+----+----
+(0 rows)
+
+SELECT d.id, d.f2, d.f4, d.f8, a.f2, a.f4, a.f8
+  FROM regtest_data d FULL OUTER JOIN regtest_arrow a ON d.id = a.id
+ WHERE (d.f2 IS NOT NULL) != (a.f2 IS NOT NULL) OR (d.f2 != a.f2)
+    OR (d.f4 IS NOT NULL) != (a.f4 IS NOT NULL) OR (d.f4 != a.f4)
+    OR (d.f8 IS NOT NULL) != (a.f8 IS NOT NULL) OR (d.f8 != a.f8);
+ id | f2 | f4 | f8 | f2 | f4 | f8 
+----+----+----+----+----+----+----
+(0 rows)
+
+SELECT d.id, d.n1, d.n2, a.n1, a.n2
+  FROM regtest_data d FULL OUTER JOIN regtest_arrow a ON d.id = a.id
+ WHERE (d.n1 IS NOT NULL) != (d.n1 IS NOT NULL) OR (d.n1 != d.n1)
+    OR (d.n2 IS NOT NULL) != (d.n2 IS NOT NULL) OR (d.n2 != d.n2);
+ id | n1 | n2 | n1 | n2 
+----+----+----+----+----
+(0 rows)
+
+SELECT d.id, d.comp, a.comp
+  FROM regtest_data d FULL OUTER JOIN regtest_arrow a ON d.id = a.id
+ WHERE (d.comp IS NOT NULL) != (a.comp IS NOT NULL) OR d.comp != a.comp;
+ id | comp | comp 
+----+------+------
+(0 rows)
+
+SELECT d.id, d.dt, d.tm, d.ts, d.tz, a.dt, a.tm, a.ts, a.tz
+  FROM regtest_data d FULL OUTER JOIN regtest_arrow a ON d.id = a.id
+ WHERE (d.dt IS NOT NULL) != (a.dt IS NOT NULL) OR d.dt != a.dt
+    OR (d.tm IS NOT NULL) != (a.tm IS NOT NULL) OR d.tm != a.tm
+    OR (d.ts IS NOT NULL) != (a.ts IS NOT NULL) OR d.ts != a.ts
+    OR (d.tz IS NOT NULL) != (a.tz IS NOT NULL) OR d.tz != a.tz;
+ id | dt | tm | ts | tz | dt | tm | ts | tz 
+----+----+----+----+----+----+----+----+----
+(0 rows)
+
+--
+-- Timestamp and timezone
+--
+RESET pg_strom.enabled;
+SET timezone = 'Europe/Berlin';
+-- by CPU
+RESET arrow_fdw.enabled;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
+-- by GPU
+SET arrow_fdw.enabled = off;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
+SET timezone = 'America/New_York';
+-- by CPU
+RESET arrow_fdw.enabled;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
+-- by GPU
+SET arrow_fdw.enabled = off;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
+SET timezone = 'Asia/Tokyo';
+-- by CPU
+RESET arrow_fdw.enabled;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
+-- by GPU
+SET arrow_fdw.enabled = off;
+WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
+     a AS (SELECT * FROM timezone_arrow WHERE ts < tz)
+(SELECT * FROM d EXCEPT SELECT * FROM a)
+UNION ALL
+(SELECT * FROM a EXCEPT SELECT * FROM d);
+ id | ts | tz 
+----+----+----
+(0 rows)
+
