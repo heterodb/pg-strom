@@ -135,6 +135,9 @@ typedef union		ArrowTypeOptions
 	struct {
 		ArrowIntervalUnit	unit;
 	} interval;
+	struct {
+		int					byteWidth;
+	} fixed_size_binary;
 } ArrowTypeOptions;
 
 #ifndef __CUDACC__

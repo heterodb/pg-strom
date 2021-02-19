@@ -765,6 +765,9 @@ assignArrowTypeOptions(ArrowTypeOptions *attopts, const ArrowType *atype)
 			else
 				elog(ERROR, "unknown unit of Interval");
 			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			attopts->fixed_size_binary.byteWidth = atype->FixedSizeBinary.byteWidth;
+			break;
 		default:
 			/* no extra attributes */
 			break;
@@ -2504,9 +2507,107 @@ arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 }
 
 static Oid
+arrowFieldGetPGTypeHint(ArrowField *field)
+{
+	Oid		hint_oid = InvalidOid;
+	int		i, j;
+
+	for (i=0; i < field->_num_custom_metadata; i++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[i];
+		char	   *namebuf, *pos;
+		Oid			namespace_oid;
+		HeapTuple	tup;
+
+		if (kv->_key_len != 7 || strncmp(kv->key, "pg_type", 7) != 0)
+			continue;
+		namebuf = alloca(kv->_value_len + 10);
+		/* namespace name */
+		pos = namebuf;
+		for (j=0; j < kv->_value_len; j++)
+		{
+			int		c = kv->value[j];
+
+			if (c == '.')
+				break;
+			else if (c == '\\' && ++j < kv->_value_len)
+				c = kv->value[j];
+			*pos++ = c;
+		}
+		*pos++ = '\0';
+
+		namespace_oid = get_namespace_oid(namebuf, true);
+		if (!OidIsValid(namespace_oid))
+			continue;
+
+		/* type name */
+		pos = namebuf;
+		for (j++; j < kv->_value_len; j++)
+		{
+			int		c = kv->value[j];
+
+			if (c == '\\' && ++j < kv->_value_len)
+				c = kv->value[j];
+			*pos++ = c;
+		}
+		*pos++ = '\0';
+
+		tup = SearchSysCache2(TYPENAMENSP,
+							  PointerGetDatum(namebuf),
+							  ObjectIdGetDatum(namespace_oid));
+		if (!HeapTupleIsValid(tup))
+			continue;
+		hint_oid = PgTypeTupleGetOid(tup);
+
+		ReleaseSysCache(tup);
+
+		return hint_oid;
+	}
+	return InvalidOid;
+}
+
+static bool
+__arrowStructTypeIsCompatible(ArrowField *field, Oid comp_oid)
+{
+	TupleDesc	tupdesc;
+	int			j;
+	bool		compatible = false;
+
+	if (pg_type_aclcheck(comp_oid,
+						 GetUserId(),
+						 ACL_USAGE) != ACLCHECK_OK)
+		return false;
+
+	tupdesc = lookup_rowtype_tupdesc_noerror(comp_oid, -1, true);
+	if (tupdesc && tupdesc->natts == field->_num_children)
+	{
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+			ArrowField *child = &field->children[j];
+			Oid			typoid;
+			int			typmod;
+
+			typoid = arrowTypeToPGTypeOid(child, &typmod);
+			if (typoid != attr->atttypid)
+				break;
+		}
+		if (j >= tupdesc->natts)
+			compatible = true;
+	}
+	if (tupdesc)
+		ReleaseTupleDesc(tupdesc);
+
+	return compatible;
+}
+
+static Oid
 arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 {
 	ArrowType  *t = &field->type;
+	Oid			hint_oid;
+
+	hint_oid = arrowFieldGetPGTypeHint(field);
 
 	*typmod = -1;
 	switch (t->node.tag)
@@ -2522,7 +2623,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 					return INT8OID;
 				default:
 					elog(ERROR, "%s is not supported",
-						 arrowNodeName(&t->node));
+						 dumpArrowNode(&t->node));
+						 //arrowNodeName(&t->node));
 					break;
 			}
 			break;
@@ -2578,12 +2680,13 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 			break;
 
 		case ArrowNodeTag__Struct:
+			if (!OidIsValid(hint_oid) ||
+				!__arrowStructTypeIsCompatible(field, hint_oid))
 			{
 				Relation	rel;
 				ScanKeyData	skey[2];
 				SysScanDesc	sscan;
 				HeapTuple	tup;
-				Oid			type_oid = InvalidOid;
 
 				/*
 				 * lookup composite type definition from pg_class
@@ -2601,57 +2704,41 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 
 				sscan = systable_beginscan(rel, InvalidOid, false,
 										   NULL, 2, skey);
-				while (!OidIsValid(type_oid) &&
+				hint_oid = InvalidOid;
+				while (!OidIsValid(hint_oid) &&
 					   HeapTupleIsValid(tup = systable_getnext(sscan)))
 				{
-					Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tup);
-					TupleDesc	tupdesc;
-					int			j;
-					bool		compatible = true;
+					Oid		reltype = ((Form_pg_class) GETSTRUCT(tup))->reltype;
 
-					if (pg_namespace_aclcheck(relForm->relnamespace,
-											  GetUserId(),
-											  ACL_USAGE) != ACLCHECK_OK)
-						continue;
-
-					if (pg_type_aclcheck(relForm->reltype,
-										 GetUserId(),
-										 ACL_USAGE) != ACLCHECK_OK)
-						continue;
-
-					tupdesc = lookup_rowtype_tupdesc(relForm->reltype, -1);
-					Assert(tupdesc->natts == field->_num_children);
-					for (j=0; compatible && j < tupdesc->natts; j++)
-					{
-						Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-						ArrowField  *child = &field->children[j];
-						Oid			typoid;
-						int			typmod;
-
-						typoid = arrowTypeToPGTypeOid(child, &typmod);
-						if (typoid != attr->atttypid)
-							compatible = false;
-					}
-					ReleaseTupleDesc(tupdesc);
-
-					if (compatible)
-						type_oid = relForm->reltype;
+					if (__arrowStructTypeIsCompatible(field, reltype))
+						hint_oid = reltype;
 				}
 				systable_endscan(sscan);
 				table_close(rel, AccessShareLock);
 
-				if (!OidIsValid(type_oid))
+				if (!OidIsValid(hint_oid))
 					elog(ERROR, "arrow::%s is not supported",
 						 arrowNodeName(&t->node));
-				return type_oid;
 			}
-			break;
+			return hint_oid;
+
 		case ArrowNodeTag__FixedSizeBinary:
 			if (t->FixedSizeBinary.byteWidth < 1 ||
 				t->FixedSizeBinary.byteWidth > BLCKSZ)
 				elog(ERROR, "arrow_fdw: %s with byteWidth=%d is not supported",
 					 t->node.tagName,
 					 t->FixedSizeBinary.byteWidth);
+			if (hint_oid == MACADDROID &&
+				t->FixedSizeBinary.byteWidth == sizeof(macaddr))
+			{
+				return MACADDROID;
+			}
+			else if (hint_oid == INETOID &&
+					 (t->FixedSizeBinary.byteWidth == 4 ||
+					  t->FixedSizeBinary.byteWidth == 16))
+			{
+				return INETOID;
+			}
 			*typmod = t->FixedSizeBinary.byteWidth;
 			return BPCHAROID;
 		default:
@@ -3163,6 +3250,46 @@ pg_interval_arrow_ref(kern_data_store *kds,
 }
 
 static Datum
+pg_macaddr_arrow_ref(kern_data_store *kds,
+					 kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+
+	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
+		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
+			 cmeta->attopts.fixed_size_binary.byteWidth);
+
+	return PointerGetDatum(base + sizeof(macaddr) * index);
+}
+
+static Datum
+pg_inet_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	inet	   *ip = palloc(sizeof(inet));
+
+	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
+	{
+		ip->inet_data.family = PGSQL_AF_INET;
+		ip->inet_data.bits = 32;
+		memcpy(ip->inet_data.ipaddr, base + 4 * index, 4);
+	}
+	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
+	{
+		ip->inet_data.family = PGSQL_AF_INET6;
+		ip->inet_data.bits = 128;
+		memcpy(ip->inet_data.ipaddr, base + 16 * index, 16);
+	}
+	else
+		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for inet",
+			 cmeta->attopts.fixed_size_binary.byteWidth);
+
+	SET_INET_VARSIZE(ip);
+	return PointerGetDatum(ip);
+}
+
+static Datum
 pg_array_arrow_ref(kern_data_store *kds,
 				   kern_colmeta *smeta,
 				   cl_uint start, cl_uint end)
@@ -3366,6 +3493,12 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				break;
 			case INTERVALOID:
 				datum = pg_interval_arrow_ref(kds, cmeta, index);
+				break;
+			case MACADDROID:
+				datum = pg_macaddr_arrow_ref(kds, cmeta, index);
+				break;
+			case INETOID:
+				datum = pg_inet_arrow_ref(kds, cmeta, index);
 				break;
 			default:
 				elog(ERROR, "Bug? unexpected datum type: %u",

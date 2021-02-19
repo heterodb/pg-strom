@@ -784,7 +784,7 @@ arrowNodeName(ArrowNode *node)
 		case ArrowNodeTag__Int:
 			snprintf(buf, sizeof(buf), "Arrow::%s%d",
 					 ((ArrowTypeInt *)node)->is_signed ? "Int" : "Uint",
-					 ((ArrowTypeInt *)node)->bitWidth * 8);
+					 ((ArrowTypeInt *)node)->bitWidth);
 			return buf;
 
 		case ArrowNodeTag__FloatingPoint:

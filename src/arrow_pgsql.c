@@ -1361,6 +1361,50 @@ assignArrowTypeDictionary(SQLfield *column, ArrowField *arrow_field)
 }
 
 /*
+ * __assignArrowTypeHint
+ */
+static void
+__assignArrowTypeHint(SQLfield *column,
+					  const char *typname,
+					  const char *typnamespace)
+{
+	int			index = column->numCustomMetadata++;
+	ArrowKeyValue *kv;
+	const char *pos;
+	char		buf[200];
+	int			sz = 0;
+
+	if (!column->customMetadata)
+		column->customMetadata = palloc(sizeof(ArrowKeyValue) * (index+1));
+	else
+		column->customMetadata = repalloc(column->customMetadata,
+										  sizeof(ArrowKeyValue) * (index+1));
+	kv = &column->customMetadata[index];
+	__initArrowNode(&kv->node, ArrowNodeTag__KeyValue);
+	kv->key = pstrdup("pg_type");
+	kv->_key_len = 7;
+
+	/* '.' must be escaped */
+	for (pos = typnamespace; *pos != '\0'; pos++)
+	{
+		if (*pos == '.')
+			buf[sz++] = '\\';
+		buf[sz++] = *pos;
+	}
+	buf[sz++] = '.';
+	for (pos = typname; *pos != '\0'; pos++)
+	{
+		if (*pos == '.')
+			buf[sz++] = '\\';
+		buf[sz++] = *pos;
+	}
+	buf[sz] = '\0';
+
+	kv->value = pstrdup(buf);
+	kv->_value_len = sz;
+}
+
+/*
  * assignArrowTypePgSQL
  */
 int
@@ -1409,11 +1453,13 @@ assignArrowTypePgSQL(SQLfield *column,
 	else if (typrelid != 0)
 	{
 		/* composite type */
+		__assignArrowTypeHint(column, typname, typnamespace);
 		return assignArrowTypeStruct(column, arrow_field);
 	}
 	else if (typtype == 'e')
 	{
 		/* enum type */
+		__assignArrowTypeHint(column, typname, typnamespace);
 		return assignArrowTypeDictionary(column, arrow_field);
 	}
 	else if (strcmp(typnamespace, "pg_catalog") == 0)
@@ -1476,7 +1522,10 @@ assignArrowTypePgSQL(SQLfield *column,
 			typlen == sizeof(short) ||
 			typlen == sizeof(int) ||
 			typlen == sizeof(double))
+		{
+			__assignArrowTypeHint(column, typname, typnamespace);
 			return assignArrowTypeInt(column, false, arrow_field);
+		}
 		/*
 		 * MEMO: Unfortunately, we have no portable way to pack user defined
 		 * fixed-length binary data types, because their 'send' handler often
@@ -1488,6 +1537,7 @@ assignArrowTypePgSQL(SQLfield *column,
 	}
 	else if (typlen == -1)
 	{
+		__assignArrowTypeHint(column, typname, typnamespace);
 		return assignArrowTypeBinary(column, arrow_field);
 	}
 	Elog("PostgreSQL type: '%s' is not supported", typname);
