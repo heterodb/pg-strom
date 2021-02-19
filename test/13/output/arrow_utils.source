@@ -1,0 +1,123 @@
+--
+-- arrow_utils - test for pg2arrow
+--
+SET pg_strom.regression_test_mode=on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_utils_temp CASCADE;
+CREATE SCHEMA regtest_arrow_utils_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_utils_temp,public;
+CREATE TYPE comp AS (
+  a     int,
+  b     numeric(12,4),
+  c     text,
+  d     timestamp
+);
+CREATE TYPE city AS ENUM ('Tokyo','Osaka','Kyoto','Yokohama','Nagoya');
+CREATE TABLE tt_1 (
+  id    int,
+  i2    smallint,
+  i4    int,
+  i8    bigint,
+  f2    float2,
+  f4    float4,
+  f8    float8,
+  c     comp,
+  num   numeric(16,4)
+);
+CREATE TABLE tt_2 (
+  id    int,
+  v1    text,
+  v2    bytea,
+  dt    date,
+  tm    time,
+  ts    timestamp,
+  tz    timestamp with time zone  
+);
+--
+-- Test of basic feature 1
+--
+SELECT pgstrom.random_setseed(20200211);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO tt_1 (
+  SELECT x, pgstrom.random_int(1,   -32000,    32000),
+            pgstrom.random_int(1, -3200000,  3200000),
+            pgstrom.random_int(1, -3200000,  3200000),
+            pgstrom.random_float(1,   -10000.0,    10000.0),
+            pgstrom.random_float(1,  -100000.0,   100000.0),
+            pgstrom.random_float(1, -1000000.0,  1000000.0),
+            null,
+           pgstrom.random_float(1, -1000000.0,  1000000.0)
+    FROM generate_series(1,2500) x);
+UPDATE tt_1 SET c.a = pgstrom.random_int(2, -3200000,  3200000),
+                c.b = pgstrom.random_float(2, -100000.0, 100000.0),
+                c.c = pgstrom.random_text_len(2, 40),
+                c.d = pgstrom.random_timestamp(2);
+\! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o @abs_builddir@/test_pg2arrow_tt1.arrow
+RecordBatch[0]: offset=1056 length=255256 (meta=728, body=254528) nitems=2500
+IMPORT FOREIGN SCHEMA ft_1
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_utils_temp
+OPTIONS (file '@abs_builddir@/test_pg2arrow_tt1.arrow');
+SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1;
+ id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
+----+----+----+----+----+----+----+---+-----
+(0 rows)
+
+SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1;
+ id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
+----+----+----+----+----+----+----+---+-----
+(0 rows)
+
+--
+-- Test of basic feature 2
+--
+INSERT INTO tt_2 (
+  SELECT x, pgstrom.random_text_len(1,60),
+            pgstrom.random_text_len(1,60)::bytea,
+	    pgstrom.random_date(1),
+	    pgstrom.random_time(1),
+            pgstrom.random_timestamp(1),
+            pgstrom.random_timestamp(1)
+    FROM generate_series(1,25) x);
+\! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_utils_temp.tt_2' -o @abs_builddir@/test_pg2arrow_tt2.arrow
+RecordBatch[0]: offset=648 length=3544 (meta=472, body=3072) nitems=25
+IMPORT FOREIGN SCHEMA ft_2
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_utils_temp
+OPTIONS (file '@abs_builddir@/test_pg2arrow_tt2.arrow');
+SELECT * FROM tt_2 EXCEPT SELECT * FROM ft_2 ORDER BY id;
+ id | v1 | v2 | dt | tm | ts | tz 
+----+----+----+----+----+----+----
+(0 rows)
+
+SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
+ id | v1 | v2 | dt | tm | ts | tz 
+----+----+----+----+----+----+----
+(0 rows)
+
+--
+-- Append mode
+--
+\! pg2arrow --progress -c 'SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM regtest_arrow_utils_temp.tt_1' --append @abs_builddir@/test_pg2arrow_tt1.arrow
+RecordBatch[1]: offset=256320 length=255256 (meta=728, body=254528) nitems=2500
+INSERT INTO tt_1 (
+  SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
+);
+SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1 ORDER BY id;
+ id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
+----+----+----+----+----+----+----+---+-----
+(0 rows)
+
+SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1 ORDER BY id;
+ id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
+----+----+----+----+----+----+----+---+-----
+(0 rows)
+
+--
+-- TODO: Dictionary Batch
+--
