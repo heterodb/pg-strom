@@ -2615,6 +2615,8 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 		case ArrowNodeTag__Int:
 			switch (t->Int.bitWidth)
 			{
+				case 8:
+					return TINYINTOID;
 				case 16:
 					return INT2OID;
 				case 32:
@@ -2858,14 +2860,17 @@ arrowFieldLength(ArrowField *field, int64 nitems)
 		case ArrowNodeTag__Int:
 			switch (type->Int.bitWidth)
 			{
-				case sizeof(cl_short) * BITS_PER_BYTE:
-					length = sizeof(cl_short) * nitems;
+				case 8:
+					length = nitems;
 					break;
-				case sizeof(cl_int) * BITS_PER_BYTE:
-					length = sizeof(cl_int) * nitems;
+				case 16:
+					length = 2 * nitems;
 					break;
-				case sizeof(cl_long) * BITS_PER_BYTE:
-					length = sizeof(cl_long) * nitems;
+				case 32:
+					length = 4 * nitems;
+					break;
+				case 64:
+					length = 8 * nitems;
 					break;
 				default:
 					elog(ERROR, "Not a supported Int width: %d",
@@ -3095,6 +3100,15 @@ pg_bool_arrow_ref(kern_data_store *kds,
 	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
 
 	return BoolGetDatum(att_isnull(index, bitmap));
+}
+
+static Datum
+pg_int1_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_char	   *values = (cl_char *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	return values[index];
 }
 
 static Datum
@@ -3456,6 +3470,9 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
+			case TINYINTOID:
+				datum = pg_int1_arrow_ref(kds, cmeta, index);
+				break;
 			case INT2OID:
 			case FLOAT2OID:
 				datum = pg_int2_arrow_ref(kds, cmeta, index);

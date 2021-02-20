@@ -52,12 +52,14 @@ Datum pgstrom_float2_recv(PG_FUNCTION_ARGS);
 /* type cast functions */
 Datum pgstrom_float2_to_float4(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_to_float8(PG_FUNCTION_ARGS);
+Datum pgstrom_float2_to_tinyint(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_to_int2(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_to_int4(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_to_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_to_numeric(PG_FUNCTION_ARGS);
 Datum pgstrom_float4_to_float2(PG_FUNCTION_ARGS);
 Datum pgstrom_float8_to_float2(PG_FUNCTION_ARGS);
+Datum pgstrom_tinyint_to_float2(PG_FUNCTION_ARGS);
 Datum pgstrom_int2_to_float2(PG_FUNCTION_ARGS);
 Datum pgstrom_int4_to_float2(PG_FUNCTION_ARGS);
 Datum pgstrom_int8_to_float2(PG_FUNCTION_ARGS);
@@ -425,6 +427,24 @@ pgstrom_float2_to_float8(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_float2_to_float8);
 
 /*
+ * pgstrom_float2_to_tinyint
+ */
+Datum
+pgstrom_float2_to_tinyint(PG_FUNCTION_ARGS)
+{
+	float	fval = fp16_to_fp32(PG_GETARG_FLOAT2(0));
+	Datum	ival = DirectFunctionCall1(ftoi4, Float4GetDatum(fval));
+
+	if (DatumGetInt32(ival) < SCHAR_MIN ||
+		DatumGetInt32(ival) > SCHAR_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("tinyint out of range")));
+	return ival;
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_to_tinyint);
+
+/*
  * pgstrom_float2_to_int2
  */
 Datum
@@ -495,6 +515,18 @@ pgstrom_float8_to_float2(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT2(fp64_to_fp16(fval));
 }
 PG_FUNCTION_INFO_V1(pgstrom_float8_to_float2);
+
+/*
+ * pgstrom_tinyint_to_float2
+ */
+Datum
+pgstrom_tinyint_to_float2(PG_FUNCTION_ARGS)
+{
+	float	fval = (float)((int32)PG_GETARG_DATUM(0));
+
+	PG_RETURN_FLOAT2(fp32_to_fp16(fval));
+}
+PG_FUNCTION_INFO_V1(pgstrom_tinyint_to_float2);
 
 /*
  * pgstrom_int2_to_float2

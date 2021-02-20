@@ -166,6 +166,15 @@ typedef struct nameData
 /*
  * Limitation of types
  */
+#ifndef SCHAR_MAX
+#define SCHAR_MAX		127
+#endif
+#ifndef SCHAR_MIN
+#define SCHAR_MIN		(-128)
+#endif
+#ifndef UCHAR_MAX
+#define UCHAR_MAX		255
+#endif
 #ifndef SHRT_MAX
 #define SHRT_MAX		32767
 #endif

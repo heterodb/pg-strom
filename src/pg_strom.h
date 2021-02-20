@@ -79,6 +79,7 @@
 #include "commands/typecmds.h"
 #include "commands/variable.h"
 #include "common/base64.h"
+#include "common/int.h"
 #include "common/md5.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -93,6 +94,7 @@
 #include "lib/stringinfo.h"
 #include "libpq/be-fsstubs.h"
 #include "libpq/libpq-fs.h"
+#include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
@@ -1541,6 +1543,13 @@ extern void		pgstrom_init_extra(void);
  */
 #ifndef FLOAT2OID
 #define FLOAT2OID		421
+#endif
+
+/*
+ * tinyint.c
+ */
+#ifndef TINYINTOID
+#define TINYINTOID		606
 #endif
 
 /*
