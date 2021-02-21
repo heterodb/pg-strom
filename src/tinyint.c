@@ -143,12 +143,12 @@ Datum pgstrom_int81_mul(PG_FUNCTION_ARGS);
 Datum pgstrom_int81_div(PG_FUNCTION_ARGS);
 
 /* bit operations */
-Datum pgstrom_tinyint_and(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_or(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_xor(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_not(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_shl(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_shr(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_and(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_or(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_xor(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_not(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_shl(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_shr(PG_FUNCTION_ARGS);
 
 /* misc functions */
 Datum pgstrom_cash_mul_int1(PG_FUNCTION_ARGS);
@@ -156,11 +156,11 @@ Datum pgstrom_int1_mul_cash(PG_FUNCTION_ARGS);
 Datum pgstrom_cash_div_int1(PG_FUNCTION_ARGS);
 
 /* aggregate functions */
-Datum pgstrom_tinyint_avg_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_avg_accum_inv(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_var_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_var_accum_inv(PG_FUNCTION_ARGS);
-Datum pgstrom_tinyint_sum(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_sum(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_avg_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_avg_accum_inv(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_var_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS);
 
 /*
  * Type input / output functions
@@ -1409,63 +1409,63 @@ PG_FUNCTION_INFO_V1(pgstrom_int81_div);
  * Bit operations
  */
 Datum
-pgstrom_tinyint_and(PG_FUNCTION_ARGS)
+pgstrom_int1_and(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 	int8	arg2 = PG_GETARG_INT8(1);
 
 	PG_RETURN_INT8(arg1 & arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_and);
+PG_FUNCTION_INFO_V1(pgstrom_int1_and);
 
 Datum
-pgstrom_tinyint_or(PG_FUNCTION_ARGS)
+pgstrom_int1_or(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 	int8	arg2 = PG_GETARG_INT8(1);
 
 	PG_RETURN_INT8(arg1 | arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_or);
+PG_FUNCTION_INFO_V1(pgstrom_int1_or);
 
 Datum
-pgstrom_tinyint_xor(PG_FUNCTION_ARGS)
+pgstrom_int1_xor(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 	int8	arg2 = PG_GETARG_INT8(1);
 
 	PG_RETURN_INT8(arg1 ^ arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_xor);
+PG_FUNCTION_INFO_V1(pgstrom_int1_xor);
 
 Datum
-pgstrom_tinyint_not(PG_FUNCTION_ARGS)
+pgstrom_int1_not(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT8(~arg1);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_not);
+PG_FUNCTION_INFO_V1(pgstrom_int1_not);
 
 Datum
-pgstrom_tinyint_shl(PG_FUNCTION_ARGS)
+pgstrom_int1_shl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 	int32	arg2 = PG_GETARG_INT32(1);
 
 	PG_RETURN_INT8(arg1 << arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_shl);
+PG_FUNCTION_INFO_V1(pgstrom_int1_shl);
 
 Datum
-pgstrom_tinyint_shr(PG_FUNCTION_ARGS)
+pgstrom_int1_shr(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 	int32	arg2 = PG_GETARG_INT32(1);
 
 	PG_RETURN_INT8(arg1 >> arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_shr);
+PG_FUNCTION_INFO_V1(pgstrom_int1_shr);
 
 /*
  * misc functions
@@ -1529,7 +1529,7 @@ PG_FUNCTION_INFO_V1(pgstrom_cash_div_int1);
 
 /* aggregate functions */
 Datum
-pgstrom_tinyint_sum(PG_FUNCTION_ARGS)
+pgstrom_int1_sum(PG_FUNCTION_ARGS)
 {
 	int64	newval;
 
@@ -1547,10 +1547,10 @@ pgstrom_tinyint_sum(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT64(newval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_sum);
+PG_FUNCTION_INFO_V1(pgstrom_int1_sum);
 
 Datum
-pgstrom_tinyint_avg_accum(PG_FUNCTION_ARGS)
+pgstrom_int1_avg_accum(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
 	int32		ival = (int32)PG_GETARG_INT8(1);
@@ -1589,10 +1589,10 @@ pgstrom_tinyint_avg_accum(PG_FUNCTION_ARGS)
 		PG_RETURN_ARRAYTYPE_P(result);
 	}
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_avg_accum);
+PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum);
 
 Datum
-pgstrom_tinyint_avg_accum_inv(PG_FUNCTION_ARGS)
+pgstrom_int1_avg_accum_inv(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray;
 	int32		ival = (int32)PG_GETARG_INT8(1);
@@ -1619,10 +1619,10 @@ pgstrom_tinyint_avg_accum_inv(PG_FUNCTION_ARGS)
 	transvalues[1] -= ival;
 	PG_RETURN_ARRAYTYPE_P(transarray);
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_avg_accum_inv);
+PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum_inv);
 
 Datum
-pgstrom_tinyint_var_accum(PG_FUNCTION_ARGS)
+pgstrom_int1_var_accum(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
 
@@ -1630,10 +1630,10 @@ pgstrom_tinyint_var_accum(PG_FUNCTION_ARGS)
 							   PG_GETARG_DATUM(0),
 							   Int32GetDatum(ival));
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_var_accum);
+PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum);
 
 Datum
-pgstrom_tinyint_var_accum_inv(PG_FUNCTION_ARGS)
+pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
 
@@ -1641,4 +1641,4 @@ pgstrom_tinyint_var_accum_inv(PG_FUNCTION_ARGS)
 							   PG_GETARG_DATUM(0),
 							   Int32GetDatum(ival));
 }
-PG_FUNCTION_INFO_V1(pgstrom_tinyint_var_accum_inv);
+PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum_inv);
