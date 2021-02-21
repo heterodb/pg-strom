@@ -1311,6 +1311,42 @@ __dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
 /*
  * arrowFdwLoadRecordBatch
  */
+static void
+__arrowFdwAssignTypeOptions(kern_data_store *kds,
+							int base, int ncols,
+							RecordBatchFieldState *rb_fstate)
+{
+	int		i;
+
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[base+i];
+
+		cmeta->attopts = rb_fstate[i].attopts;
+		if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+		{
+			Assert(cmeta->idx_subattrs >= kds->ncols &&
+				   cmeta->num_subattrs == 1 &&
+				   cmeta->idx_subattrs + cmeta->num_subattrs <= kds->nr_colmeta);
+			Assert(rb_fstate[i].num_children == 1);
+			__arrowFdwAssignTypeOptions(kds,
+										cmeta->idx_subattrs,
+										cmeta->num_subattrs,
+										rb_fstate[i].children);
+		}
+		else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
+		{
+			Assert(cmeta->idx_subattrs >= kds->ncols &&
+				   cmeta->idx_subattrs + cmeta->num_subattrs <= kds->nr_colmeta);
+			Assert(rb_fstate[i].num_children == cmeta->num_subattrs);
+			__arrowFdwAssignTypeOptions(kds,
+										cmeta->idx_subattrs,
+										cmeta->num_subattrs,
+										rb_fstate[i].children);
+		}
+	}
+}
+
 static pgstrom_data_store *
 __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 						  Relation relation,
@@ -1324,7 +1360,6 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	kern_data_store	   *kds;
 	strom_io_vector	   *iovec;
 	size_t				head_sz;
-	int					j;
 	CUresult			rc;
 
 	/* setup KDS and I/O-vector */
@@ -1335,8 +1370,8 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	kds->nrooms = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
 	Assert(head_sz == KERN_DATA_STORE_HEAD_LENGTH(kds));
-	for (j=0; j < kds->nr_colmeta; j++)
-		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
+	Assert(kds->ncols == rb_state->ncols);
+	__arrowFdwAssignTypeOptions(kds, 0, kds->ncols, rb_state->columns);
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
 	__dump_kds_and_iovec(kds, iovec);
 

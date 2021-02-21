@@ -365,6 +365,25 @@ pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
  * ---------------------------------------------------------------- */
 
 /* pg_macaddr_t */
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_macaddr_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	void   *addr;
+
+	assert(cmeta->attopts.fixed_size_binary.byteWidth == sizeof(macaddr));
+	addr = kern_fetch_simple_datum_arrow(cmeta, base, rowidx, sizeof(macaddr));
+	if (!addr)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		memcpy(&result.value, addr, sizeof(macaddr));
+	}	
+}
+
 DEVICE_FUNCTION(pg_macaddr_t)
 pgfn_macaddr_trunc(kern_context *kcxt, pg_macaddr_t arg1)
 {
@@ -656,6 +675,28 @@ pg_comp_hash(kern_context *kcxt, pg_inet_t datum)
 	STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
 				  "unknown inet family");
 	return 0;
+}
+
+DEVICE_FUNCTION(void)
+pg_datum_fetch_arrow(kern_context *kcxt,
+					 pg_inet_t &result,
+					 kern_colmeta *cmeta,
+					 char *base, cl_uint rowidx)
+{
+	int		byteWidth = cmeta->attopts.fixed_size_binary.byteWidth;
+	void   *ipaddr;
+
+	assert(byteWidth == 4 || byteWidth == 16);
+	ipaddr = kern_fetch_simple_datum_arrow(cmeta, base, rowidx, byteWidth);
+	if (!ipaddr)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value.family = (byteWidth == 4 ? PGSQL_AF_INET : PGSQL_AF_INET6);
+		result.value.bits = 8 * byteWidth;
+		memcpy(result.value.ipaddr, ipaddr, byteWidth);
+	}
 }
 
 /*
