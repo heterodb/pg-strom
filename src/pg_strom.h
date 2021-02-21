@@ -1548,8 +1548,8 @@ extern void		pgstrom_init_extra(void);
 /*
  * tinyint.c
  */
-#ifndef TINYINTOID
-#define TINYINTOID		606
+#ifndef INT1OID
+#define INT1OID			606
 #endif
 
 /*

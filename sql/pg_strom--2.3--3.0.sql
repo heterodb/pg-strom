@@ -82,32 +82,32 @@ CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,         -- relname
 SELECT pgstrom.define_shell_type('tinyint',606,'pg_catalog');
 --CREATE TYPE pg_catalog.float2;
 
-CREATE FUNCTION pgstrom.tinyint_in(cstring)
-  RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_in'
+CREATE FUNCTION pgstrom.int1in(cstring)
+  RETURNS pg_catalog.tinyint
+  AS 'MODULE_PATHNAME','pgstrom_int1in'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_out(tinyint)
+CREATE FUNCTION pgstrom.int1out(pg_catalog.tinyint)
   RETURNS cstring
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_out'
+  AS 'MODULE_PATHNAME','pgstrom_int1out'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_recv(internal)
-  RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_recv'
+CREATE FUNCTION pgstrom.int1recv(internal)
+  RETURNS pg_catalog.tinyint
+  AS 'MODULE_PATHNAME','pgstrom_int1recv'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_send(tinyint)
+CREATE FUNCTION pgstrom.int1send(pg_catalog.tinyint)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_send'
+  AS 'MODULE_PATHNAME','pgstrom_int1send'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE TYPE pg_catalog.tinyint
 (
-  input = pgstrom.tinyint_in,
-  output = pgstrom.tinyint_out,
-  receive = pgstrom.tinyint_recv,
-  send = pgstrom.tinyint_send,
+  input = pgstrom.int1in,
+  output = pgstrom.int1out,
+  receive = pgstrom.int1recv,
+  send = pgstrom.int1send,
   like = pg_catalog.bool,
   category = 'N'
 );
@@ -117,72 +117,72 @@ CREATE TYPE pg_catalog.tinyint
 --
 CREATE FUNCTION pgstrom.int2(tinyint)
   RETURNS int2
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_int2'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_int2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int4(tinyint)
   RETURNS int4
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_int4'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_int4'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int8(tinyint)
   RETURNS int8
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_int8'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_int8'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float2(tinyint)
   RETURNS float2
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_float2'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float4(tinyint)
   RETURNS float4
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_float4'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_float4'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float8(tinyint)
   RETURNS float8
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_float8'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_float8'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.numeric(tinyint)
   RETURNS numeric
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_to_numeric'
+  AS 'MODULE_PATHNAME','pgstrom_int1_to_numeric'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(int2)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_int2_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_int2_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(int4)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_int4_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_int4_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(int8)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_int8_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_int8_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(float2)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_float2_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_float2_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(float4)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_float4_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_float4_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(float8)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_float8_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_float8_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.tinyint(numeric)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_numeric_to_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_numeric_to_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE CAST (tinyint AS int2)
@@ -226,84 +226,54 @@ CREATE CAST (float8 AS tinyint)
 ---
 --- Comparison functions
 ---
-CREATE FUNCTION pgstrom.tinyint_eq(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_eq(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int1_eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_ne(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_ne(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int1_ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_lt(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_lt(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int1_lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_le(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_le(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_le'
+  AS 'MODULE_PATHNAME','pgstrom_int1_le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_gt(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_gt(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int1_gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_ge(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_ge(tinyint,tinyint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int1_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_larger(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_cmp(tinyint,tinyint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int1_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.int1_larger(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_larger'
+  AS 'MODULE_PATHNAME','pgstrom_int1_larger'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_smaller(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_smaller(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_smaller'
+  AS 'MODULE_PATHNAME','pgstrom_int1_smaller'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_hash(tinyint)
+CREATE FUNCTION pgstrom.int1_hash(tinyint)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_hash'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.tinyint_cmp(tinyint,tinyint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint12_cmp(tinyint,smallint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint12_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint14_cmp(tinyint,int)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint14_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint18_cmp(tinyint,bigint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint18_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint21_cmp(smallint,tinyint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint21_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint41_cmp(int,tinyint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint41_cmp'
-  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.btint81_cmp(bigint,tinyint)
-  RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_btint81_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_int1_hash'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
@@ -337,6 +307,11 @@ CREATE FUNCTION pgstrom.int12_ge(tinyint,smallint)
   AS 'MODULE_PATHNAME','pgstrom_int12_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.int12_cmp(tinyint,smallint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int12_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 
 CREATE FUNCTION pgstrom.int14_eq(tinyint,int)
   RETURNS bool
@@ -366,6 +341,11 @@ CREATE FUNCTION pgstrom.int14_gt(tinyint,int)
 CREATE FUNCTION pgstrom.int14_ge(tinyint,int)
   RETURNS bool
   AS 'MODULE_PATHNAME','pgstrom_int14_ge'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.int14_cmp(tinyint,int)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int14_cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
@@ -399,6 +379,11 @@ CREATE FUNCTION pgstrom.int18_ge(tinyint,bigint)
   AS 'MODULE_PATHNAME','pgstrom_int18_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.int18_cmp(tinyint,bigint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int18_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 
 CREATE FUNCTION pgstrom.int21_eq(smallint,tinyint)
   RETURNS bool
@@ -428,6 +413,11 @@ CREATE FUNCTION pgstrom.int21_gt(smallint,tinyint)
 CREATE FUNCTION pgstrom.int21_ge(smallint,tinyint)
   RETURNS bool
   AS 'MODULE_PATHNAME','pgstrom_int21_ge'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.int21_cmp(smallint,tinyint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int21_cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
@@ -461,6 +451,11 @@ CREATE FUNCTION pgstrom.int41_ge(int,tinyint)
   AS 'MODULE_PATHNAME','pgstrom_int41_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.int41_cmp(int,tinyint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int41_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 
 CREATE FUNCTION pgstrom.int81_eq(bigint,tinyint)
   RETURNS bool
@@ -492,39 +487,44 @@ CREATE FUNCTION pgstrom.int81_ge(bigint,tinyint)
   AS 'MODULE_PATHNAME','pgstrom_int81_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.int81_cmp(bigint,tinyint)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_int81_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 -- <tinyint> OPER <tinyint>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.tinyint_eq,
+  PROCEDURE = pgstrom.int1_eq,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.tinyint_ne,
+  PROCEDURE = pgstrom.int1_ne,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.tinyint_lt,
+  PROCEDURE = pgstrom.int1_lt,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.tinyint_le,
+  PROCEDURE = pgstrom.int1_le,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.tinyint_gt,
+  PROCEDURE = pgstrom.int1_gt,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.tinyint_ge,
+  PROCEDURE = pgstrom.int1_ge,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint,
   COMMUTATOR = <=, NEGATOR = <
@@ -761,52 +761,52 @@ CREATE OPERATOR pg_catalog.>= (
 --
 -- unary operators
 --
-CREATE FUNCTION pgstrom.tinyint_up(tinyint)
+CREATE FUNCTION pgstrom.int1_up(tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_up'
+  AS 'MODULE_PATHNAME','pgstrom_int1_up'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_um(tinyint)
+CREATE FUNCTION pgstrom.int1_um(tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_um'
+  AS 'MODULE_PATHNAME','pgstrom_int1_um'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.tinyint_abs(tinyint)
+CREATE FUNCTION pgstrom.int1_abs(tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_abs'
+  AS 'MODULE_PATHNAME','pgstrom_int1_abs'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.tinyint_up,
+  PROCEDURE = pgstrom.int1_up,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.tinyint_um,
+  PROCEDURE = pgstrom.int1_um,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog.@ (
-  PROCEDURE = pgstrom.tinyint_abs,
+  PROCEDURE = pgstrom.int1_abs,
   RIGHTARG = pg_catalog.tinyint
 );
 
 ---
 --- Arithmetic operators
 ---
-CREATE FUNCTION pgstrom.tinyint_pl(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_pl(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int1_pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.tinyint_mi(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_mi(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int1_mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.tinyint_mul(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_mul(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int1_mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.tinyint_div(tinyint,tinyint)
+CREATE FUNCTION pgstrom.int1_div(tinyint,tinyint)
   RETURNS tinyint
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_div'
+  AS 'MODULE_PATHNAME','pgstrom_int1_div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int12_pl(tinyint,smallint)
@@ -912,22 +912,22 @@ CREATE FUNCTION pgstrom.int81_div(bigint,tinyint)
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.tinyint_pl,
+  PROCEDURE = pgstrom.int1_pl,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.tinyint_mi,
+  PROCEDURE = pgstrom.int1_mi,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.tinyint_mul,
+  PROCEDURE = pgstrom.int1_mul,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.tinyint_div,
+  PROCEDURE = pgstrom.int1_div,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.tinyint
 );
@@ -1119,31 +1119,31 @@ CREATE OPERATOR pg_catalog.>> (
 ---
 --- Misc functions
 ---
-CREATE FUNCTION pgstrom.cash_mul_tinyint(money,tinyint)
+CREATE FUNCTION pgstrom.cash_mul_int1(money,tinyint)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_cash_mul_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_cash_mul_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.tinyint_mul_cash(tinyint,money)
+CREATE FUNCTION pgstrom.int1_mul_cash(tinyint,money)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_tinyint_mul_cash'
+  AS 'MODULE_PATHNAME','pgstrom_int1_mul_cash'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.cash_div_tinyint(money,tinyint)
+CREATE FUNCTION pgstrom.cash_div_int1(money,tinyint)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_cash_div_tinyint'
+  AS 'MODULE_PATHNAME','pgstrom_cash_div_int1'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.cash_mul_tinyint,
+  PROCEDURE = pgstrom.cash_mul_int1,
   LEFTARG = pg_catalog.money,
   RIGHTARG = pg_catalog.tinyint
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.tinyint_mul_cash,
+  PROCEDURE = pgstrom.int1_mul_cash,
   LEFTARG = pg_catalog.tinyint,
   RIGHTARG = pg_catalog.money
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.cash_div_tinyint,
+  PROCEDURE = pgstrom.cash_div_int1,
   LEFTARG = pg_catalog.money,
   RIGHTARG = pg_catalog.tinyint
 );
@@ -1184,13 +1184,13 @@ CREATE AGGREGATE pg_catalog.sum(tinyint)
 
 CREATE AGGREGATE pg_catalog.max(tinyint)
 (
- sfunc = pgstrom.tinyint_larger,
+ sfunc = pgstrom.int1_larger,
  stype = tinyint
 );
 
 CREATE AGGREGATE pg_catalog.min(tinyint)
 (
- sfunc = pgstrom.tinyint_smaller,
+ sfunc = pgstrom.int1_smaller,
  stype = tinyint
 );
 
@@ -1315,79 +1315,19 @@ CREATE AGGREGATE pg_catalog.stddev_pop(tinyint)
 --- Index Support
 ---
 CREATE OPERATOR CLASS pg_catalog.tinyint_ops
-  for type pg_catalog.tinyint
+  default for type pg_catalog.tinyint
   using btree family pg_catalog.integer_ops as
   operator 1 <  (tinyint,tinyint) for search,
   operator 2 <= (tinyint,tinyint) for search,
   operator 3 =  (tinyint,tinyint) for search,
   operator 4 >= (tinyint,tinyint) for search,
   operator 5 >  (tinyint,tinyint) for search,
-  function 1 (tinyint,tinyint) pgstrom.tinyint_cmp(tinyint,tinyint);
-
-CREATE OPERATOR CLASS pg_catalog.btint12_ops
-  for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (tinyint,smallint) for search,
-  operator 2 <= (tinyint,smallint) for search,
-  operator 3 =  (tinyint,smallint) for search,
-  operator 4 >= (tinyint,smallint) for search,
-  operator 5 >  (tinyint,smallint) for search,
-  function 1 (tinyint,smallint) pgstrom.btint12_cmp(tinyint,smallint);
-
-CREATE OPERATOR CLASS pg_catalog.btint14_ops
-  default for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (tinyint,integer) for search,
-  operator 2 <= (tinyint,integer) for search,
-  operator 3 =  (tinyint,integer) for search,
-  operator 4 >= (tinyint,integer) for search,
-  operator 5 >  (tinyint,integer) for search,
-  function 1 (tinyint,integer) pgstrom.btint14_cmp(tinyint,integer);
-
-CREATE OPERATOR CLASS pg_catalog.btint18_ops
-  for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (tinyint,bigint) for search,
-  operator 2 <= (tinyint,bigint) for search,
-  operator 3 =  (tinyint,bigint) for search,
-  operator 4 >= (tinyint,bigint) for search,
-  operator 5 >  (tinyint,bigint) for search,
-  function 1 (tinyint,bigint) pgstrom.btint18_cmp(tinyint,bigint);
-
-CREATE OPERATOR CLASS pg_catalog.btint21_ops
-  for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (smallint,tinyint) for search,
-  operator 2 <= (smallint,tinyint) for search,
-  operator 3 =  (smallint,tinyint) for search,
-  operator 4 >= (smallint,tinyint) for search,
-  operator 5 >  (smallint,tinyint) for search,
-  function 1 (smallint,tinyint) pgstrom.btint21_cmp(smallint,tinyint);
-
-CREATE OPERATOR CLASS pg_catalog.btint41_ops
-  for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (integer,tinyint) for search,
-  operator 2 <= (integer,tinyint) for search,
-  operator 3 =  (integer,tinyint) for search,
-  operator 4 >= (integer,tinyint) for search,
-  operator 5 >  (integer,tinyint) for search,
-  function 1 (integer,tinyint) pgstrom.btint41_cmp(integer,tinyint);
-
-CREATE OPERATOR CLASS pg_catalog.btint81_ops
-  for type pg_catalog.tinyint
-  using btree family pg_catalog.integer_ops as
-  operator 1 <  (bigint,tinyint) for search,
-  operator 2 <= (bigint,tinyint) for search,
-  operator 3 =  (bigint,tinyint) for search,
-  operator 4 >= (bigint,tinyint) for search,
-  operator 5 >  (bigint,tinyint) for search,
-  function 1 (bigint,tinyint) pgstrom.btint81_cmp(bigint,tinyint);
+  function 1 (tinyint,tinyint) pgstrom.int1_cmp(tinyint,tinyint);
 
 CREATE OPERATOR CLASS pg_catalog.tinyint_ops
   default for type pg_catalog.tinyint
   using hash family pg_catalog.integer_ops as
-  function 1 (tinyint) pgstrom.tinyint_hash(tinyint);
+  function 1 (tinyint) pgstrom.int1_hash(tinyint);
 
 ---
 --- Deprecated functions

@@ -2616,7 +2616,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 			switch (t->Int.bitWidth)
 			{
 				case 8:
-					return TINYINTOID;
+					return INT1OID;
 				case 16:
 					return INT2OID;
 				case 32:
@@ -2625,8 +2625,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 					return INT8OID;
 				default:
 					elog(ERROR, "%s is not supported",
-						 dumpArrowNode(&t->node));
-						 //arrowNodeName(&t->node));
+						 arrowNodeName(&t->node));
 					break;
 			}
 			break;
@@ -3470,7 +3469,7 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
-			case TINYINTOID:
+			case INT1OID:
 				datum = pg_int1_arrow_ref(kds, cmeta, index);
 				break;
 			case INT2OID:
