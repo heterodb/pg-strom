@@ -452,17 +452,7 @@ parseNestLoopOption(const char *command, bool outer_join)
 
 	nlopt->sub_command = sub_command;
 	nlopt->outer_join = outer_join;
-#if 1
-	{
-		int		i;
 
-		printf("sub_command = [%s]\n", nlopt->sub_command);
-		for (i=0; i < nlopt->n_params; i++)
-		{
-			printf("pnames[%d] = (%s)\n", i, nlopt->pnames[i]);
-		}
-	}
-#endif
 	return nlopt;
 }
 
@@ -699,6 +689,7 @@ parse_options(int argc, char * const argv[])
 						last_nest_loop->next = nlopt;
 					else
 						sqldb_nestloop_options = nlopt;
+					last_nest_loop = nlopt;
 				}
 				break;
 
