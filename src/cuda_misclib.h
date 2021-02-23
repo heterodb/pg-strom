@@ -46,6 +46,8 @@ pgfn_cash_mi(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2);
 DEVICE_FUNCTION(pg_float8_t)
 pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2);
 DEVICE_FUNCTION(pg_money_t)
+pgfn_cash_mul_int2(kern_context *kcxt, pg_money_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_mul_int2(kern_context *kcxt, pg_money_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_mul_int4(kern_context *kcxt, pg_money_t arg1, pg_int4_t arg2);
@@ -56,6 +58,8 @@ pgfn_cash_mul_flt4(kern_context *kcxt, pg_money_t arg1, pg_float4_t arg2);
 DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_mul_flt8(kern_context *kcxt, pg_money_t arg1, pg_float8_t arg2);
 DEVICE_FUNCTION(pg_money_t)
+pgfn_int2_mul_cash(kern_context *kcxt, pg_int1_t arg1, pg_money_t arg2);
+DEVICE_FUNCTION(pg_money_t)
 pgfn_int2_mul_cash(kern_context *kcxt, pg_int2_t arg1, pg_money_t arg2);
 DEVICE_FUNCTION(pg_money_t)
 pgfn_int4_mul_cash(kern_context *kcxt, pg_int4_t arg1, pg_money_t arg2);
@@ -65,6 +69,8 @@ DEVICE_FUNCTION(pg_money_t)
 pgfn_flt4_mul_cash(kern_context *kcxt, pg_float4_t arg1, pg_money_t arg2);
 DEVICE_FUNCTION(pg_money_t)
 pgfn_flt8_mul_cash(kern_context *kcxt, pg_float8_t arg1, pg_money_t arg2);
+DEVICE_FUNCTION(pg_money_t)
+pgfn_cash_div_int1(kern_context *kcxt, pg_money_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_money_t)
 pgfn_cash_div_int2(kern_context *kcxt, pg_money_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_money_t)

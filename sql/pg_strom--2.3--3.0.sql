@@ -226,305 +226,305 @@ CREATE CAST (float8 AS int1)
 ---
 --- Comparison functions
 ---
-CREATE FUNCTION pgstrom.int1_eq(int1,int1)
+CREATE FUNCTION pgstrom.int1eq(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int1eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_ne(int1,int1)
+CREATE FUNCTION pgstrom.int1ne(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int1ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_lt(int1,int1)
+CREATE FUNCTION pgstrom.int1lt(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int1lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_le(int1,int1)
+CREATE FUNCTION pgstrom.int1le(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_le'
+  AS 'MODULE_PATHNAME','pgstrom_int1le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_gt(int1,int1)
+CREATE FUNCTION pgstrom.int1gt(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int1gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_ge(int1,int1)
+CREATE FUNCTION pgstrom.int1ge(int1,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int1_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int1ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_cmp(int1,int1)
+CREATE FUNCTION pgstrom.btint1cmp(int1,int1)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int1_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint1cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_larger(int1,int1)
+CREATE FUNCTION pgstrom.int1larger(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_larger'
+  AS 'MODULE_PATHNAME','pgstrom_int1larger'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_smaller(int1,int1)
+CREATE FUNCTION pgstrom.int1smaller(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_smaller'
+  AS 'MODULE_PATHNAME','pgstrom_int1smaller'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_hash(int1)
+CREATE FUNCTION pgstrom.int1hash(int1)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int1_hash'
+  AS 'MODULE_PATHNAME','pgstrom_int1hash'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int12_eq(int1,smallint)
+CREATE FUNCTION pgstrom.int12eq(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int12eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_ne(int1,smallint)
+CREATE FUNCTION pgstrom.int12ne(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int12ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_lt(int1,smallint)
+CREATE FUNCTION pgstrom.int12lt(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int12lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_le(int1,smallint)
+CREATE FUNCTION pgstrom.int12le(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_le'
+  AS 'MODULE_PATHNAME','pgstrom_int12le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_gt(int1,smallint)
+CREATE FUNCTION pgstrom.int12gt(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int12gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_ge(int1,smallint)
+CREATE FUNCTION pgstrom.int12ge(int1,smallint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int12_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int12ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_cmp(int1,smallint)
+CREATE FUNCTION pgstrom.btint12cmp(int1,smallint)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int12_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint12cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int14_eq(int1,int4)
+CREATE FUNCTION pgstrom.int14eq(int1,int4)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int14eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_ne(int1,int4)
+CREATE FUNCTION pgstrom.int14ne(int1,int4)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int14ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_lt(int1,int4)
+CREATE FUNCTION pgstrom.int14lt(int1,int4)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int14lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_le(int1,int)
+CREATE FUNCTION pgstrom.int14le(int1,int)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_le'
+  AS 'MODULE_PATHNAME','pgstrom_int14le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_gt(int1,int)
+CREATE FUNCTION pgstrom.int14gt(int1,int)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int14gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_ge(int1,int)
+CREATE FUNCTION pgstrom.int14ge(int1,int)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int14_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int14ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_cmp(int1,int)
+CREATE FUNCTION pgstrom.btint14cmp(int1,int)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int14_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint14cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int18_eq(int1,bigint)
+CREATE FUNCTION pgstrom.int18eq(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int18eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_ne(int1,bigint)
+CREATE FUNCTION pgstrom.int18ne(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int18ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_lt(int1,bigint)
+CREATE FUNCTION pgstrom.int18lt(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int18lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_le(int1,bigint)
+CREATE FUNCTION pgstrom.int18le(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_le'
+  AS 'MODULE_PATHNAME','pgstrom_int18le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_gt(int1,bigint)
+CREATE FUNCTION pgstrom.int18gt(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int18gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_ge(int1,bigint)
+CREATE FUNCTION pgstrom.int18ge(int1,bigint)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int18_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int18ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_cmp(int1,bigint)
+CREATE FUNCTION pgstrom.btint18cmp(int1,bigint)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int18_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint18cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int21_eq(smallint,int1)
+CREATE FUNCTION pgstrom.int21eq(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int21eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_ne(smallint,int1)
+CREATE FUNCTION pgstrom.int21ne(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int21ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_lt(smallint,int1)
+CREATE FUNCTION pgstrom.int21lt(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int21lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_le(smallint,int1)
+CREATE FUNCTION pgstrom.int21le(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_le'
+  AS 'MODULE_PATHNAME','pgstrom_int21le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_gt(smallint,int1)
+CREATE FUNCTION pgstrom.int21gt(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int21gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_ge(smallint,int1)
+CREATE FUNCTION pgstrom.int21ge(smallint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int21_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int21ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_cmp(smallint,int1)
+CREATE FUNCTION pgstrom.btint21cmp(smallint,int1)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int21_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint21cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int41_eq(int,int1)
+CREATE FUNCTION pgstrom.int41eq(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int41eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_ne(int,int1)
+CREATE FUNCTION pgstrom.int41ne(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int41ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_lt(int,int1)
+CREATE FUNCTION pgstrom.int41lt(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int41lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_le(int,int1)
+CREATE FUNCTION pgstrom.int41le(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_le'
+  AS 'MODULE_PATHNAME','pgstrom_int41le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_gt(int,int1)
+CREATE FUNCTION pgstrom.int41gt(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int41gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_ge(int,int1)
+CREATE FUNCTION pgstrom.int41ge(int,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int41_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int41ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_cmp(int,int1)
+CREATE FUNCTION pgstrom.btint41cmp(int,int1)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int41_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint41cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
-CREATE FUNCTION pgstrom.int81_eq(bigint,int1)
+CREATE FUNCTION pgstrom.int81eq(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_eq'
+  AS 'MODULE_PATHNAME','pgstrom_int81eq'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_ne(bigint,int1)
+CREATE FUNCTION pgstrom.int81ne(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_ne'
+  AS 'MODULE_PATHNAME','pgstrom_int81ne'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_lt(bigint,int1)
+CREATE FUNCTION pgstrom.int81lt(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_lt'
+  AS 'MODULE_PATHNAME','pgstrom_int81lt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_le(bigint,int1)
+CREATE FUNCTION pgstrom.int81le(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_le'
+  AS 'MODULE_PATHNAME','pgstrom_int81le'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_gt(bigint,int1)
+CREATE FUNCTION pgstrom.int81gt(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_gt'
+  AS 'MODULE_PATHNAME','pgstrom_int81gt'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_ge(bigint,int1)
+CREATE FUNCTION pgstrom.int81ge(bigint,int1)
   RETURNS bool
-  AS 'MODULE_PATHNAME','pgstrom_int81_ge'
+  AS 'MODULE_PATHNAME','pgstrom_int81ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_cmp(bigint,int1)
+CREATE FUNCTION pgstrom.btint81cmp(bigint,int1)
   RETURNS int
-  AS 'MODULE_PATHNAME','pgstrom_int81_cmp'
+  AS 'MODULE_PATHNAME','pgstrom_btint81cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 -- <int1> OPER <int1>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int1_eq,
+  PROCEDURE = pgstrom.int1eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int1_ne,
+  PROCEDURE = pgstrom.int1ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int1_lt,
+  PROCEDURE = pgstrom.int1lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int1_le,
+  PROCEDURE = pgstrom.int1le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int1_gt,
+  PROCEDURE = pgstrom.int1gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int1_ge,
+  PROCEDURE = pgstrom.int1ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <=, NEGATOR = <
@@ -532,37 +532,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <int1> OPER <smallint>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int12_eq,
+  PROCEDURE = pgstrom.int12eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int12_ne,
+  PROCEDURE = pgstrom.int12ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int12_lt,
+  PROCEDURE = pgstrom.int12lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int12_le,
+  PROCEDURE = pgstrom.int12le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int12_gt,
+  PROCEDURE = pgstrom.int12gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int12_ge,
+  PROCEDURE = pgstrom.int12ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
   COMMUTATOR = <=, NEGATOR = <
@@ -570,37 +570,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <int1> OPER <int>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int14_eq,
+  PROCEDURE = pgstrom.int14eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int14_ne,
+  PROCEDURE = pgstrom.int14ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int14_lt,
+  PROCEDURE = pgstrom.int14lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int14_le,
+  PROCEDURE = pgstrom.int14le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int14_gt,
+  PROCEDURE = pgstrom.int14gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int14_ge,
+  PROCEDURE = pgstrom.int14ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
   COMMUTATOR = <=, NEGATOR = <
@@ -608,37 +608,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <int1> OPER <bigint>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int18_eq,
+  PROCEDURE = pgstrom.int18eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int18_ne,
+  PROCEDURE = pgstrom.int18ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int18_lt,
+  PROCEDURE = pgstrom.int18lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int18_le,
+  PROCEDURE = pgstrom.int18le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int18_gt,
+  PROCEDURE = pgstrom.int18gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int18_ge,
+  PROCEDURE = pgstrom.int18ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
   COMMUTATOR = <=, NEGATOR = <
@@ -646,37 +646,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <smallint> OPER <int1>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int21_eq,
+  PROCEDURE = pgstrom.int21eq,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int21_ne,
+  PROCEDURE = pgstrom.int21ne,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int21_lt,
+  PROCEDURE = pgstrom.int21lt,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int21_le,
+  PROCEDURE = pgstrom.int21le,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int21_gt,
+  PROCEDURE = pgstrom.int21gt,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int21_ge,
+  PROCEDURE = pgstrom.int21ge,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <=, NEGATOR = <
@@ -684,37 +684,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <int> OPER <int1>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int41_eq,
+  PROCEDURE = pgstrom.int41eq,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int41_ne,
+  PROCEDURE = pgstrom.int41ne,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int41_lt,
+  PROCEDURE = pgstrom.int41lt,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int41_le,
+  PROCEDURE = pgstrom.int41le,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int41_gt,
+  PROCEDURE = pgstrom.int41gt,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int41_ge,
+  PROCEDURE = pgstrom.int41ge,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <=, NEGATOR = <
@@ -722,37 +722,37 @@ CREATE OPERATOR pg_catalog.>= (
 
 -- <bigint> OPER <int1>
 CREATE OPERATOR pg_catalog.= (
-  PROCEDURE = pgstrom.int81_eq,
+  PROCEDURE = pgstrom.int81eq,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = =, NEGATOR = <>
 );
 CREATE OPERATOR pg_catalog.<> (
-  PROCEDURE = pgstrom.int81_ne,
+  PROCEDURE = pgstrom.int81ne,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <>, NEGATOR = =
 );
 CREATE OPERATOR pg_catalog.< (
-  PROCEDURE = pgstrom.int81_lt,
+  PROCEDURE = pgstrom.int81lt,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >, NEGATOR = >=
 );
 CREATE OPERATOR pg_catalog.<= (
-  PROCEDURE = pgstrom.int81_le,
+  PROCEDURE = pgstrom.int81le,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = >=, NEGATOR = >
 );
 CREATE OPERATOR pg_catalog.> (
-  PROCEDURE = pgstrom.int81_gt,
+  PROCEDURE = pgstrom.int81gt,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <, NEGATOR = <=
 );
 CREATE OPERATOR pg_catalog.>= (
-  PROCEDURE = pgstrom.int81_ge,
+  PROCEDURE = pgstrom.int81ge,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
   COMMUTATOR = <=, NEGATOR = <
@@ -761,299 +761,313 @@ CREATE OPERATOR pg_catalog.>= (
 --
 -- unary operators
 --
-CREATE FUNCTION pgstrom.int1_up(int1)
+CREATE FUNCTION pgstrom.int1up(int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_up'
+  AS 'MODULE_PATHNAME','pgstrom_int1up'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int1_um(int1)
+CREATE FUNCTION pgstrom.int1um(int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_um'
+  AS 'MODULE_PATHNAME','pgstrom_int1um'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.int1abs(int1)
+  RETURNS int1
+  AS 'MODULE_PATHNAME','pgstrom_int1abs'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.abs(int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_abs'
+  AS 'MODULE_PATHNAME','pgstrom_int1abs'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int1_up,
+  PROCEDURE = pgstrom.int1up,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int1_um,
+  PROCEDURE = pgstrom.int1um,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.@ (
-  PROCEDURE = pgstrom.abs,
+  PROCEDURE = pgstrom.int1abs,
   RIGHTARG = pg_catalog.int1
 );
 
 ---
 --- Arithmetic operators
 ---
-CREATE FUNCTION pgstrom.int1_pl(int1,int1)
+CREATE FUNCTION pgstrom.int1pl(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int1pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_mi(int1,int1)
+CREATE FUNCTION pgstrom.int1mi(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int1mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_mul(int1,int1)
+CREATE FUNCTION pgstrom.int1mul(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int1mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_div(int1,int1)
+CREATE FUNCTION pgstrom.int1div(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_div'
+  AS 'MODULE_PATHNAME','pgstrom_int1div'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+CREATE FUNCTION pgstrom.int1mod(int1,int1)
+  RETURNS int1
+  AS 'MODULE_PATHNAME','pgstrom_int1mod'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int12_pl(int1,smallint)
+CREATE FUNCTION pgstrom.int12pl(int1,smallint)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int12_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int12pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int12_mi(int1,smallint)
+CREATE FUNCTION pgstrom.int12mi(int1,smallint)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int12_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int12mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int12_mul(int1,smallint)
+CREATE FUNCTION pgstrom.int12mul(int1,smallint)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int12_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int12mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int12_div(int1,smallint)
+CREATE FUNCTION pgstrom.int12div(int1,smallint)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int12_div'
+  AS 'MODULE_PATHNAME','pgstrom_int12div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int14_pl(int1,integer)
+CREATE FUNCTION pgstrom.int14pl(int1,integer)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int14_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int14pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int14_mi(int1,integer)
+CREATE FUNCTION pgstrom.int14mi(int1,integer)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int14_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int14mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int14_mul(int1,integer)
+CREATE FUNCTION pgstrom.int14mul(int1,integer)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int14_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int14mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int14_div(int1,integer)
+CREATE FUNCTION pgstrom.int14div(int1,integer)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int14_div'
+  AS 'MODULE_PATHNAME','pgstrom_int14div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int18_pl(int1,bigint)
+CREATE FUNCTION pgstrom.int18pl(int1,bigint)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int18_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int18pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int18_mi(int1,bigint)
+CREATE FUNCTION pgstrom.int18mi(int1,bigint)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int18_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int18mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int18_mul(int1,bigint)
+CREATE FUNCTION pgstrom.int18mul(int1,bigint)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int18_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int18mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int18_div(int1,bigint)
+CREATE FUNCTION pgstrom.int18div(int1,bigint)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int18_div'
+  AS 'MODULE_PATHNAME','pgstrom_int18div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int21_pl(smallint,int1)
+CREATE FUNCTION pgstrom.int21pl(smallint,int1)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int21_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int21pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int21_mi(smallint,int1)
+CREATE FUNCTION pgstrom.int21mi(smallint,int1)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int21_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int21mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int21_mul(smallint,int1)
+CREATE FUNCTION pgstrom.int21mul(smallint,int1)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int21_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int21mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int21_div(smallint,int1)
+CREATE FUNCTION pgstrom.int21div(smallint,int1)
   RETURNS smallint
-  AS 'MODULE_PATHNAME','pgstrom_int21_div'
+  AS 'MODULE_PATHNAME','pgstrom_int21div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int41_pl(integer,int1)
+CREATE FUNCTION pgstrom.int41pl(integer,int1)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int41_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int41pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int41_mi(integer,int1)
+CREATE FUNCTION pgstrom.int41mi(integer,int1)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int41_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int41mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int41_mul(integer,int1)
+CREATE FUNCTION pgstrom.int41mul(integer,int1)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int41_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int41mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int41_div(integer,int1)
+CREATE FUNCTION pgstrom.int41div(integer,int1)
   RETURNS integer
-  AS 'MODULE_PATHNAME','pgstrom_int41_div'
+  AS 'MODULE_PATHNAME','pgstrom_int41div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int81_pl(bigint,int1)
+CREATE FUNCTION pgstrom.int81pl(bigint,int1)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int81_pl'
+  AS 'MODULE_PATHNAME','pgstrom_int81pl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int81_mi(bigint,int1)
+CREATE FUNCTION pgstrom.int81mi(bigint,int1)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int81_mi'
+  AS 'MODULE_PATHNAME','pgstrom_int81mi'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int81_mul(bigint,int1)
+CREATE FUNCTION pgstrom.int81mul(bigint,int1)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int81_mul'
+  AS 'MODULE_PATHNAME','pgstrom_int81mul'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int81_div(bigint,int1)
+CREATE FUNCTION pgstrom.int81div(bigint,int1)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_int81_div'
+  AS 'MODULE_PATHNAME','pgstrom_int81div'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int1_pl,
+  PROCEDURE = pgstrom.int1pl,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int1_mi,
+  PROCEDURE = pgstrom.int1mi,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int1_mul,
+  PROCEDURE = pgstrom.int1mul,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int1_div,
+  PROCEDURE = pgstrom.int1div,
+  LEFTARG = pg_catalog.int1,
+  RIGHTARG = pg_catalog.int1
+);
+CREATE OPERATOR pg_catalog.% (
+  PROCEDURE = pgstrom.int1mod,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int12_pl,
+  PROCEDURE = pgstrom.int12pl,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int12_mi,
+  PROCEDURE = pgstrom.int12mi,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int12_mul,
+  PROCEDURE = pgstrom.int12mul,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int12_div,
+  PROCEDURE = pgstrom.int12div,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int14_pl,
+  PROCEDURE = pgstrom.int14pl,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int14_mi,
+  PROCEDURE = pgstrom.int14mi,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int14_mul,
+  PROCEDURE = pgstrom.int14mul,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int14_div,
+  PROCEDURE = pgstrom.int14div,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int18_pl,
+  PROCEDURE = pgstrom.int18pl,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int18_mi,
+  PROCEDURE = pgstrom.int18mi,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int18_mul,
+  PROCEDURE = pgstrom.int18mul,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int18_div,
+  PROCEDURE = pgstrom.int18div,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int21_pl,
+  PROCEDURE = pgstrom.int21pl,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int21_mi,
+  PROCEDURE = pgstrom.int21mi,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int21_mul,
+  PROCEDURE = pgstrom.int21mul,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int21_div,
+  PROCEDURE = pgstrom.int21div,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int41_pl,
+  PROCEDURE = pgstrom.int41pl,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int41_mi,
+  PROCEDURE = pgstrom.int41mi,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int41_mul,
+  PROCEDURE = pgstrom.int41mul,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int41_div,
+  PROCEDURE = pgstrom.int41div,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1
 );
 
 CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.int81_pl,
+  PROCEDURE = pgstrom.int81pl,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.int81_mi,
+  PROCEDURE = pgstrom.int81mi,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.int81_mul,
+  PROCEDURE = pgstrom.int81mul,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.int81_div,
+  PROCEDURE = pgstrom.int81div,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1
 );
@@ -1061,57 +1075,57 @@ CREATE OPERATOR pg_catalog./ (
 ---
 --- Bit operations
 ---
-CREATE FUNCTION pgstrom.int1_and(int1,int1)
+CREATE FUNCTION pgstrom.int1and(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_and'
+  AS 'MODULE_PATHNAME','pgstrom_int1and'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_or(int1,int1)
+CREATE FUNCTION pgstrom.int1or(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_or'
+  AS 'MODULE_PATHNAME','pgstrom_int1or'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_xor(int1,int1)
+CREATE FUNCTION pgstrom.int1xor(int1,int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_xor'
+  AS 'MODULE_PATHNAME','pgstrom_int1xor'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_not(int1)
+CREATE FUNCTION pgstrom.int1not(int1)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_not'
+  AS 'MODULE_PATHNAME','pgstrom_int1not'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_shl(int1,integer)
+CREATE FUNCTION pgstrom.int1shl(int1,integer)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_shl'
+  AS 'MODULE_PATHNAME','pgstrom_int1shl'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.int1_shr(int1,integer)
+CREATE FUNCTION pgstrom.int1shr(int1,integer)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_int1_shr'
+  AS 'MODULE_PATHNAME','pgstrom_int1shr'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.& (
-  PROCEDURE = pgstrom.int1_and,
+  PROCEDURE = pgstrom.int1and,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.| (
-  PROCEDURE = pgstrom.int1_or,
+  PROCEDURE = pgstrom.int1or,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.# (
-  PROCEDURE = pgstrom.int1_xor,
+  PROCEDURE = pgstrom.int1xor,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.~ (
-  PROCEDURE = pgstrom.int1_not,
+  PROCEDURE = pgstrom.int1not,
   LEFTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.<< (
-  PROCEDURE = pgstrom.int1_shl,
+  PROCEDURE = pgstrom.int1shl,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
 CREATE OPERATOR pg_catalog.>> (
-  PROCEDURE = pgstrom.int1_shr,
+  PROCEDURE = pgstrom.int1shr,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer
 );
@@ -1184,13 +1198,13 @@ CREATE AGGREGATE pg_catalog.sum(int1)
 
 CREATE AGGREGATE pg_catalog.max(int1)
 (
- sfunc = pgstrom.int1_larger,
+ sfunc = pgstrom.int1larger,
  stype = int1
 );
 
 CREATE AGGREGATE pg_catalog.min(int1)
 (
- sfunc = pgstrom.int1_smaller,
+ sfunc = pgstrom.int1smaller,
  stype = int1
 );
 
@@ -1322,12 +1336,12 @@ CREATE OPERATOR CLASS pg_catalog.int1_ops
   operator 3 =  (int1,int1) for search,
   operator 4 >= (int1,int1) for search,
   operator 5 >  (int1,int1) for search,
-  function 1 (int1,int1) pgstrom.int1_cmp(int1,int1);
+  function 1 (int1,int1) pgstrom.btint1cmp(int1,int1);
 
 CREATE OPERATOR CLASS pg_catalog.int1_ops
   default for type pg_catalog.int1
   using hash family pg_catalog.integer_ops as
-  function 1 (int1) pgstrom.int1_hash(int1);
+  function 1 (int1) pgstrom.int1hash(int1);
 
 ---
 --- Deprecated functions

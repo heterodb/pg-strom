@@ -146,6 +146,7 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 		return result;												\
 	}
 
+PGFN_MONEY_MULFUNC_TEMPLATE(int1, int1, cl_long)
 PGFN_MONEY_MULFUNC_TEMPLATE(int2, int2, cl_long)
 PGFN_MONEY_MULFUNC_TEMPLATE(int4, int4, cl_long)
 //PGFN_MONEY_MULFUNC_TEMPLATE(int8, int8)
@@ -181,6 +182,7 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8, cl_double)
 		return result;												\
 	}
 
+PGFN_MONEY_DIVFUNC_TEMPLATE(int1, int1, 0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int2, int2, 0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int4, int4, 0)
 //PGFN_MONEY_DIVFUNC_TEMPLATE(int8, int8, 0)
@@ -188,6 +190,12 @@ PGFN_MONEY_DIVFUNC_TEMPLATE(flt2, float2, (__half)0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt4, float4, 0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt8, float8, 0.0)
 #undef PGFN_MONEY_DIVFUNC_TEMPLATE
+
+DEVICE_FUNCTION(pg_money_t)
+pgfn_int1_mul_cash(kern_context *kcxt, pg_int1_t arg1, pg_money_t arg2)
+{
+	return pgfn_cash_mul_int1(kcxt, arg2, arg1);
+}
 
 DEVICE_FUNCTION(pg_money_t)
 pgfn_int2_mul_cash(kern_context *kcxt, pg_int2_t arg1, pg_money_t arg2)

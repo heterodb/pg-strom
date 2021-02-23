@@ -604,6 +604,20 @@ numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 									(ival & FP64_FRAC_MASK));
 }
 
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_numeric_int1(kern_context *kcxt, pg_numeric_t arg)
+{
+	pg_int1_t	result;
+
+	result.isnull = arg.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_char)
+			numeric_to_integer(kcxt, arg, SCHAR_MAX, &result.isnull);
+	}
+	return result;
+}
+
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_numeric_int2(kern_context *kcxt, pg_numeric_t arg)
 {
@@ -779,6 +793,18 @@ float_to_numeric(kern_context *kcxt, cl_double fval, cl_long max_fraction)
 	if (sign)
 		result.value = __Int128_inverse(result.value);
 	return pg_numeric_normalize(result);
+}
+
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_int1_numeric(kern_context *kcxt, pg_int1_t arg)
+{
+	pg_numeric_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+		result = integer_to_numeric(kcxt, arg.value);
+	return result;
 }
 
 DEVICE_FUNCTION(pg_numeric_t)

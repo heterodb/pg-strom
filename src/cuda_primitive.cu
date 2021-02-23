@@ -83,15 +83,22 @@
 		}                                                           \
 		return result;												\
 	}
+BASIC_INT_ADDFUNC_TEMPLATE(int1pl, int1,int1,int1)
+BASIC_INT_ADDFUNC_TEMPLATE(int12pl,int2,int1,int2)
+BASIC_INT_ADDFUNC_TEMPLATE(int14pl,int4,int1,int4)
+BASIC_INT_ADDFUNC_TEMPLATE(int18pl,int8,int1,int8)
 
+BASIC_INT_ADDFUNC_TEMPLATE(int21pl,int2,int2,int1)
 BASIC_INT_ADDFUNC_TEMPLATE(int2pl, int2,int2,int2)
 BASIC_INT_ADDFUNC_TEMPLATE(int24pl,int4,int2,int4)
 BASIC_INT_ADDFUNC_TEMPLATE(int28pl,int8,int2,int8)
 
+BASIC_INT_ADDFUNC_TEMPLATE(int41pl,int4,int4,int1)
 BASIC_INT_ADDFUNC_TEMPLATE(int42pl,int4,int4,int2)
 BASIC_INT_ADDFUNC_TEMPLATE(int4pl, int4,int4,int4)
 BASIC_INT_ADDFUNC_TEMPLATE(int48pl,int8,int4,int8)
 
+BASIC_INT_ADDFUNC_TEMPLATE(int81pl,int8,int8,int1)
 BASIC_INT_ADDFUNC_TEMPLATE(int82pl,int8,int8,int2)
 BASIC_INT_ADDFUNC_TEMPLATE(int84pl,int8,int8,int4)
 BASIC_INT_ADDFUNC_TEMPLATE(int8pl, int8,int8,int8)
@@ -152,15 +159,22 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8, cl_double)
 		}                                                           \
 		return result;												\
 	}
+BASIC_INT_SUBFUNC_TEMPLATE(int1mi,  int1, int1, int1)
+BASIC_INT_SUBFUNC_TEMPLATE(int12mi, int2, int1, int2)
+BASIC_INT_SUBFUNC_TEMPLATE(int14mi, int4, int1, int4)
+BASIC_INT_SUBFUNC_TEMPLATE(int18mi, int8, int1, int8)
 
+BASIC_INT_SUBFUNC_TEMPLATE(int21mi, int2, int2, int1)
 BASIC_INT_SUBFUNC_TEMPLATE(int2mi,  int2, int2, int2)
 BASIC_INT_SUBFUNC_TEMPLATE(int24mi, int4, int2, int4)
 BASIC_INT_SUBFUNC_TEMPLATE(int28mi, int8, int2, int8)
 
+BASIC_INT_SUBFUNC_TEMPLATE(int41mi, int4, int4, int1)
 BASIC_INT_SUBFUNC_TEMPLATE(int42mi, int4, int4, int2)
 BASIC_INT_SUBFUNC_TEMPLATE(int4mi,  int4, int4, int4)
 BASIC_INT_SUBFUNC_TEMPLATE(int48mi, int8, int4, int8)
 
+BASIC_INT_SUBFUNC_TEMPLATE(int81mi, int8, int8, int1)
 BASIC_INT_SUBFUNC_TEMPLATE(int82mi, int8, int8, int2)
 BASIC_INT_SUBFUNC_TEMPLATE(int84mi, int8, int8, int4)
 BASIC_INT_SUBFUNC_TEMPLATE(int8mi,  int8, int8, int8)
@@ -178,28 +192,149 @@ BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8, cl_double)
 #undef BASIC_INT_SUBFUNC_TEMPLATE
 #undef BASIC_FLOAT_SUBFUNC_TEMPLATE
 
-
 /*
  * Functions for multiplication operator on basic data types
  */
+DEVICE_INLINE(cl_bool)
+__mul_s8_overflow(cl_char a, cl_char b, cl_char *p_result)
+{
+	cl_int		r = (cl_int) a * (cl_int) b;
+
+	if (r > SCHAR_MAX || r < SCHAR_MIN)
+		return true;
+	*p_result = r;
+	return false;
+}
+
+DEVICE_INLINE(cl_bool)
+__mul_s16_overflow(cl_short a, cl_short b, cl_short *p_result)
+{
+	cl_int		r = (cl_int) a * (cl_int) b;
+
+	if (r > SHRT_MAX || r < SHRT_MIN)
+		return true;
+	*p_result = r;
+	return false;
+}
+
+DEVICE_INLINE(cl_bool)
+__mul_s32_overflow(cl_int a, cl_int b, cl_int *p_result)
+{
+	cl_long		r = (cl_long) a * (cl_long) b;
+
+	if (r > INT_MAX || r < INT_MIN)
+		return true;
+	*p_result = r;
+	return false;
+}
+
+DEVICE_INLINE(cl_bool)
+__mul_s64_overflow(cl_long a, cl_long b, cl_long *p_result)
+{
+	cl_long		hi, lo;
+
+	asm volatile("mul.lo.s64 %0, %2, %3;\n"
+				 "mul.lo.s64 %1, %2, %3;"
+				 : "=l"(lo), "=l"(hi)
+				 : "l"(a), "l"(b));
+	if (hi != 0UL && hi != ~0UL)
+		return true;	/* overflow */
+	*p_result = lo;
+	return false;
+}
+
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1mul(kern_context *kcxt, pg_int1_t arg1, pg_int1_t arg2)
+{
+	pg_int1_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s8_overflow(arg1.value, arg2.value,
+											&result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "tinyint out of range");
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12mul(kern_context *kcxt, pg_int1_t arg1, pg_int2_t arg2)
+{
+	pg_int2_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s16_overflow(arg1.value, arg2.value,
+											 &result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "smallint out of range");
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14mul(kern_context *kcxt, pg_int1_t arg1, pg_int4_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s32_overflow(arg1.value, arg2.value,
+											 &result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18mul(kern_context *kcxt, pg_int1_t arg1, pg_int8_t arg2)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21mul(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
+{
+	pg_int2_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s16_overflow(arg1.value, arg2.value,
+											 &result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "smallint out of range");
+	}
+	return result;
+}
+
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2mul(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 {
 	pg_int2_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s16_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		cl_int	temp = (cl_int)arg1.value * (cl_int)arg2.value;
-
-		if (temp < SHRT_MIN || temp > SHRT_MAX)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "smallint out of range");
-		}
-		else
-			result.value = (cl_short) temp;
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "smallint out of range");
 	}
 	return result;
 }
@@ -210,18 +345,12 @@ pgfn_int24mul(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2)
 	pg_int4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s32_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = (cl_int)arg1.value * arg2.value;
-		/* logic copied from int24mul() */
-		if (!(arg2.value >= (cl_int) SHRT_MIN &&
-			  arg2.value <= (cl_int) SHRT_MAX) &&
-			result.value / arg2.value != arg1.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "integer out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
 	}
 	return result;
 }
@@ -232,17 +361,28 @@ pgfn_int28mul(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2)
 	pg_int8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = (cl_long)arg1.value * arg2.value;
-		/* logic copied from int28mul() */
-		if (arg2.value != (cl_long)((cl_int) arg2.value) &&
-			result.value / arg2.value != arg1.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "bigint out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41mul(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull && __mul_s32_overflow(arg1.value, arg2.value,
+											 &result.value))
+	{
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
 	}
 	return result;
 }
@@ -253,18 +393,12 @@ pgfn_int42mul(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 	pg_int4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s32_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * (cl_int)arg2.value;
-		/* logic copied from int42mul() */
-		if (!(arg1.value >= (cl_int)SHRT_MIN &&
-			  arg1.value <= (cl_int) SHRT_MAX) &&
-			result.value / arg1.value != arg2.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "integer out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
 	}
 	return result;
 }
@@ -275,22 +409,12 @@ pgfn_int4mul(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2)
 	pg_int4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s32_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * arg2.value;
-		/* logic copied from int4mul() */
-		if (!(arg1.value >= (cl_int) SHRT_MIN &&
-			  arg1.value <= (cl_int) SHRT_MAX &&
-			  arg2.value >= (cl_int) SHRT_MIN &&
-			  arg2.value <= (cl_int) SHRT_MAX) &&
-			arg2.value != 0 &&
-			((arg2.value == -1 && arg1.value < 0 && result.value < 0) ||
-			 result.value / arg2.value != arg1.value))
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "integer out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "integer out of range");
 	}
 	return result;
 }
@@ -301,17 +425,12 @@ pgfn_int48mul(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2)
 	pg_int8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * arg2.value;
-		/* logic copied from int48mul() */
-		if (arg2.value != (cl_long) ((cl_int) arg2.value) &&
-			result.value / arg2.value != arg1.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "bigint out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
 	}
 	return result;
 }
@@ -322,17 +441,12 @@ pgfn_int82mul(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 	pg_int8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * (cl_long) arg2.value;
-		/* logic copied from int82mul() */
-		if (arg1.value != (cl_long) ((cl_int) arg1.value) &&
-			result.value / arg1.value != arg2.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "bigint out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
 	}
 	return result;
 }
@@ -343,17 +457,12 @@ pgfn_int84mul(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2)
 	pg_int8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * (cl_long) arg2.value;
-		/* logic copied from int84mul() */
-		if (arg1.value != (cl_long) ((cl_int) arg1.value) &&
-			result.value / arg1.value != arg2.value)
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "bigint out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
 	}
 	return result;
 }
@@ -364,20 +473,12 @@ pgfn_int8mul(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 	pg_int8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
-	if (!result.isnull)
+	if (!result.isnull && __mul_s64_overflow(arg1.value, arg2.value,
+											 &result.value))
 	{
-		result.value = arg1.value * arg2.value;
-		/* logic copied from int8mul() */
-		if ((arg1.value != (cl_long) ((cl_int) arg1.value) ||
-			 arg2.value != (cl_long) ((cl_int) arg2.value)) &&
-			(arg2.value != 0 &&
-			 ((arg2.value == -1 && arg1.value < 0 && result.value < 0) ||
-			  result.value / arg2.value != arg1.value)))
-		{
-			result.isnull = true;
-			STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-						  "bigint out of range");
-		}
+		result.isnull = true;
+		STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+					  "bigint out of range");
 	}
 	return result;
 }
@@ -538,6 +639,130 @@ pgfn_float8mul(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
  */
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1div(kern_context *kcxt, pg_int1_t arg1, pg_int1_t arg2)
+{
+	pg_int1_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		else if (arg2.value == -1)
+		{
+			if (arg1.value != SCHAR_MIN)
+				result.value = -arg1.value;
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+                              "tinyint out of range");
+			}
+		}
+		else
+		{
+			result.value = arg1.value / arg2.value;
+		}
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12div(kern_context *kcxt, pg_int1_t arg1, pg_int2_t arg2)
+{
+	pg_int2_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		/* no overflow is possible */
+		result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14div(kern_context *kcxt, pg_int1_t arg1, pg_int4_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		/* no overflow is possible */
+		result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18div(kern_context *kcxt, pg_int1_t arg1, pg_int8_t arg2)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		/* no overflow is possible */
+		result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21div(kern_context *kcxt, pg_int2_t arg1, pg_int1_t arg2)
+{
+	pg_int2_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		else if (arg2.value == -1)
+		{
+			if (arg1.value != SHRT_MIN)
+				result.value = -arg1.value;
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "smallint out of range");
+			}
+		}
+		else
+			result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 {
@@ -554,8 +779,9 @@ pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != SHRT_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -609,6 +835,37 @@ pgfn_int28div(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2)
 }
 
 DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41div(kern_context *kcxt, pg_int4_t arg1, pg_int1_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		else if (arg2.value == -1)
+		{
+			if (arg1.value != INT_MIN)
+				result.value = -arg1.value;
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "integer out of range");
+			}
+		}
+		else
+			result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 {
 	pg_int4_t	result;
@@ -624,8 +881,9 @@ pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != INT_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -654,8 +912,9 @@ pgfn_int4div(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != INT_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -689,6 +948,37 @@ pgfn_int48div(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2)
 }
 
 DEVICE_FUNCTION(pg_int8_t)
+pgfn_int81div(kern_context *kcxt, pg_int8_t arg1, pg_int1_t arg2)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg2.value == 0)
+		{
+			result.isnull = true;
+			STROM_EREPORT(kcxt, ERRCODE_DIVISION_BY_ZERO,
+						  "division by zero");
+		}
+		else if (arg2.value == -1)
+		{
+			if (arg1.value != LONG_MIN)
+				result.value = -arg1.value;
+			else
+			{
+				result.isnull = true;
+				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+							  "bigint out of range");
+			}
+		}
+		else
+			result.value = arg1.value / arg2.value;
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
 pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 {
 	pg_int8_t	result;
@@ -704,8 +994,9 @@ pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != LONG_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -734,8 +1025,9 @@ pgfn_int84div(kern_context *kcxt, pg_int8_t arg1, pg_int4_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != LONG_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -764,8 +1056,9 @@ pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 		}
 		else if (arg2.value == -1)
 		{
-			result.value = -arg1.value;
-			if (arg1.value != 0 && SAMESIGN(result.value, arg1.value))
+			if (arg1.value != LONG_MIN)
+				result.value = -arg1.value;
+			else
 			{
 				result.isnull = true;
 				STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,

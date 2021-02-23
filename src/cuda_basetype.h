@@ -559,6 +559,14 @@ STROMCL_EXTERNAL_ARROW_TEMPLATE(bool)
 STROMCL_SIMPLE_COMP_HASH_TEMPLATE(bool, cl_bool)
 #endif	/* PG_BOOL_TYPE_DEFINED */
 
+/* pg_int1_t */
+#ifndef PG_INT1_TYPE_DEFINED
+#define PG_INT1_TYPE_DEFINED
+STROMCL_SIMPLE_TYPE_TEMPLATE(int1, cl_char, )
+STROMCL_EXTERNAL_COMP_HASH_TEMPLATE(int1)
+STROMCL_SIMPLE_ARROW_TEMPLATE(int1, cl_char)
+#endif	/* PG_INT1_TYPE_DEFINED */
+
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
@@ -631,36 +639,49 @@ pgfn_to_bool(kern_context *kcxt, pg_int4_t arg)
 		result.value = (arg.value == 0 ? false : true);
 	return result;
 }
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,int2,(cl_char))
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,int4,(cl_char))
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,int8,(cl_char))
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,float2,lrintf)
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,float4,lrintf)
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,float8,llrint)
+
+PG_SIMPLE_TYPECAST_TEMPLATE(int2,int1,(cl_short))
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,int4,(cl_short))
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,int8,(cl_short))
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,float2,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,float4,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,float8,llrint)
 
+PG_SIMPLE_TYPECAST_TEMPLATE(int4,int1,(cl_int))
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,int2,(cl_int))
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,int8,(cl_int))
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,float2,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,float4,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,float8,llrint)
 
+PG_SIMPLE_TYPECAST_TEMPLATE(int8,int1,(cl_long))
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,int2,(cl_long))
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,int4,(cl_long))
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,float2,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,float4,lrintf)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,float8,llrint)
 
+PG_SIMPLE_TYPECAST_TEMPLATE(float2,int1,(cl_half))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int2,(cl_half))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int4,(cl_half))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int8,(cl_half))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,float4,(cl_half))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,float8,(cl_half))
 
+PG_SIMPLE_TYPECAST_TEMPLATE(float4,int1,(cl_float))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int2,(cl_float))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int4,(cl_float))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int8,(cl_float))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,float2,(cl_float))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,float8,(cl_float))
 
+PG_SIMPLE_TYPECAST_TEMPLATE(float8,int1,(cl_double))
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,int2,(cl_double))
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,int4,(cl_double))
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,int8,(cl_double))
@@ -673,12 +694,19 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(cl_double))
  * Simple comparison operators between intX/floatX
  */
 __STROMCL_SIMPLE_COMPARE_TEMPLATE(bool,  bool,   bool,   cl_char, ==, eq)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int1,    int1,   int1,   cl_char)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int12,   int1,   int1,   cl_short)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int14,   int1,   int1,   cl_int)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int18,   int1,   int1,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int21,   int2,   int1,   cl_short)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int2,    int2,   int2,   cl_short)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int24,   int2,   int4,   cl_int)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int28,   int2,   int8,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int41,   int4,   int1,   cl_int)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int42,   int4,   int2,   cl_int)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int4,    int4,   int4,   cl_int)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int48,   int4,   int8,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int81,   int8,   int1,   cl_long)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int82,   int8,   int2,   cl_long)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int84,   int8,   int4,   cl_long)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int8,    int8,   int8,   cl_long)
