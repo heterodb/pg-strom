@@ -701,8 +701,12 @@ pgsql_create_buffer(PGSTATE *pgstate,
 	for (i=0; i < pgstate->n_depth; i++)
 	{
 		PGSTATE_NL *nl = &pgstate->nestloop[i];
+		int		count;
 
-		nfields += PQnfields(nl->res);
+		count = PQnfields(nl->res);
+		if (count == 0)
+			Elog("sub-command contains no fields: %s", nl->command);
+		nfields += count;
 	}
 	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->nitems = 0;
@@ -935,12 +939,13 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 		size_t		sz;
 
 		/* switch to the next depth, if any */
-		if (j == ncols)
+		while (j == ncols)
 		{
 			PGSTATE_NL *nl = &pgstate->nestloop[depth++];
 
 			assert(depth <= pgstate->n_depth);
 			res = nl->res;
+			ncols = PQnfields(res);
 			index = rows_index[depth];
 			j = 0;
 		}
