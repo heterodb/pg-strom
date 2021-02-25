@@ -34,7 +34,6 @@ typedef struct
 	const char	   *command;
 	bool			prepared;
 	bool			outer_join;
-	bool			has_matched;
 	PGresult	   *res;
 	uint32_t		nitems;
 	uint32_t		index;
@@ -159,7 +158,6 @@ pgsql_exec_nestloop(PGSTATE *pgstate, int depth)
 		for (i = 0; i < nl->n_params; i++)
 		{
 			const char *pname = nl->p_names[i];
-			bool		found = false;
 
 			for (k = 0; k <= depth; k++)
 			{
@@ -172,15 +170,14 @@ pgsql_exec_nestloop(PGSTATE *pgstate, int depth)
 				j = PQfnumber(res, pname);
 				if (j >= 0)
 				{
-					found = true;
+					param_types[i] = PQftype(res, j);
 					nl->p_depth[i] = k;
 					nl->p_resno[i] = j;
 					break;
 				}
 			}
-			if (!found)
+			if (k > depth)
 				Elog("could not find nestloop parameter: $(%s)", pname);
-			param_types[i] = PQftype(res, j);
 		}
 		res = PQprepare(pgstate->conn,
 						nl->pstmt,
@@ -204,8 +201,7 @@ pgsql_exec_nestloop(PGSTATE *pgstate, int depth)
 		if (k == 0)
 		{
 			if (pgstate->index >= pgstate->nitems ||
-				PQgetisnull(pgstate->res,
-							pgstate->index, j))
+				PQgetisnull(pgstate->res, pgstate->index, j))
 				continue;
 			param_values[i] = PQgetvalue(pgstate->res,
 										 pgstate->index, j);
@@ -257,7 +253,6 @@ __pgsql_rewind_nestloop(PGSTATE *pgstate, int depth)
 		nl->res = NULL;
 		nl->nitems = 0;
 		nl->index = 0;
-		nl->has_matched = false;
 	}
 }
 
@@ -275,7 +270,6 @@ pgsql_move_nestloop_next(PGSTATE *pgstate, int depth, uint32_t *rows_index)
 		nl->res = pgsql_exec_nestloop(pgstate, depth);
 		nl->nitems = PQntuples(nl->res);
 		nl->index = 0;
-		nl->has_matched = false;
 	}
 
 	if (pgstate->n_depth == depth)
@@ -284,14 +278,15 @@ pgsql_move_nestloop_next(PGSTATE *pgstate, int depth, uint32_t *rows_index)
 		{
 			if (rows_index)
 				rows_index[depth] = nl->index++;
-			nl->has_matched = true;
 			return 1;		/* ok, a valid tuple */
 		}
-		else if (nl->outer_join && !nl->has_matched)
+		else if (nl->outer_join &&
+				 nl->nitems == 0 &&
+				 nl->index == 0)
 		{
 			if (rows_index)
 				rows_index[depth] = UINT_MAX;
-			nl->has_matched = true;
+			nl->index++;
 			return 0;		/* ok, null-tuple by OUTER-JOIN */
 		}
 	}
@@ -308,7 +303,9 @@ pgsql_move_nestloop_next(PGSTATE *pgstate, int depth, uint32_t *rows_index)
 			nl->index++;
 			__pgsql_rewind_nestloop(pgstate, depth);
 		}
-		if (nl->outer_join && !nl->has_matched)
+		if (nl->outer_join &&
+			nl->nitems == 0 &&
+			nl->index == 0)
 		{
 			if (pgsql_move_nestloop_next(pgstate, depth+1, rows_index) >= 0)
 			{
@@ -316,7 +313,7 @@ pgsql_move_nestloop_next(PGSTATE *pgstate, int depth, uint32_t *rows_index)
 					rows_index[depth] = UINT_MAX;
 				return 0;	/* ok, null-tuple by OUTER-JOIN */
 			}
-			nl->has_matched = true;
+			nl->index++;
 		}
 	}
 	/* no more tuples */
