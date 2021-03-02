@@ -299,6 +299,26 @@ get_extension_schema_by_name(const char *extname)
 	return namespace_oid;
 }
 
+static inline devtype_info *
+__build_extra_devtype_info(TypeCacheEntry *tcache)
+{
+	devtype_info *dtype;
+	int		i;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+
+		if (ex_desc->lookup_extra_devtype)
+		{
+			dtype = ex_desc->lookup_extra_devtype(devinfo_memcxt, tcache);
+			if (dtype)
+				return dtype;
+		}
+	}
+	return NULL;
+}
+
 static devtype_info *
 build_basic_devtype_info(TypeCacheEntry *tcache)
 {
@@ -321,7 +341,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 		typ_oid = get_type_oid(typ_name, nsp_oid, true);
 		if (typ_oid == tcache->type_id)
 		{
-			devtype_info   *entry
+			devtype_info *entry
 				= MemoryContextAllocZero(devinfo_memcxt,
 										 offsetof(devtype_info,
 												  comp_subtypes[0]));
@@ -344,7 +364,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			return entry;
 		}
 	}
-	return NULL;
+	return __build_extra_devtype_info(tcache);
 }
 
 static devtype_info *
@@ -438,6 +458,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	TypeCacheEntry *tcache;
 	devtype_info   *dtype;
 	int				hindex;
+	size_t			sz;
 	dlist_iter		iter;
 
 	/* lookup dtype that is already built */
@@ -456,24 +477,40 @@ pgstrom_devtype_lookup(Oid type_oid)
 	/* try to build devtype_info entry */
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
-							   TYPECACHE_CMP_PROC);
+							   TYPECACHE_CMP_PROC |
+							   TYPECACHE_DOMAIN_BASE_INFO);
 	if (OidIsValid(tcache->typrelid))
+	{
+		/* composite type */
 		dtype = build_composite_devtype_info(tcache);
+	}
+	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type */
+		dtype = build_array_devtype_info(tcache);
+	}
+	else if (OidIsValid(tcache->domainBaseType))
+	{
+		/* domain type */
+		devtype_info *dbase = pgstrom_devtype_lookup(tcache->domainBaseType);
+
+		sz = offsetof(devtype_info, comp_subtypes[dbase->comp_nfields]);
+		dtype = MemoryContextAllocZero(devinfo_memcxt, sz);
+		memcpy(dtype, dbase, sz);
+
+		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
+		dtype->type_oid = type_oid;
+	}
 	else
 	{
-		Oid		typelem = get_element_type(tcache->type_id);
-
-		if (OidIsValid(typelem) && tcache->typlen == -1)
-			dtype = build_array_devtype_info(tcache);
-		else
-			dtype = build_basic_devtype_info(tcache);
+		dtype = build_basic_devtype_info(tcache);
 	}
+	
 	/* makes a negative entry, if not in the catalog */
 	if (!dtype)
 	{
-		dtype = MemoryContextAllocZero(devinfo_memcxt,
-									   offsetof(devtype_info,
-												comp_subtypes[0]));
+		sz = offsetof(devtype_info, comp_subtypes[0]);
+		dtype = MemoryContextAllocZero(devinfo_memcxt, sz);
 		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
 		dtype->type_oid = type_oid;
 		dtype->type_is_negative = true;
@@ -510,30 +547,129 @@ pgstrom_devtype_lookup_by_name(const char *type_name)
 	return NULL;
 }
 
-/* dump all the type_oid declaration */
-void
-pgstrom_codegen_typeoid_declarations(StringInfo source)
+/* code for extra device types */
+size_t
+pgstrom_codegen_extra_devtypes(char *buf, size_t bufsz, uint32 extra_flags)
 {
-	int		i;
+	size_t		off = 0;
+	int			i;
 
-	for (i=0; i < lengthof(devtype_catalog); i++)
+	/* only extra device types */
+	extra_flags &= DEVKERNEL_USERS_EXTRA_MASK;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
-		const char *nsp_name = devtype_catalog[i].type_schema;
-		const char *typ_name = devtype_catalog[i].type_name;
-		const char *oid_label = devtype_catalog[i].type_oid_label;
-		Oid			nsp_oid;
-		Oid			typ_oid;
+		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
 
-		nsp_oid = get_namespace_oid(nsp_name, true);
-		if (!OidIsValid(nsp_oid))
-			continue;
-
-		typ_oid = get_type_oid(typ_name, nsp_oid, true);
-		if (!OidIsValid(typ_oid))
-			continue;
-
-		appendStringInfo(source, "#define PG_%s %u\n", oid_label, typ_oid);
+		if ((ex_desc->extra_flags & extra_flags) == ex_desc->extra_flags)
+		{
+			off += snprintf(buf + off, bufsz - off,
+							"#include \"%s.h\"\n",
+							ex_desc->extra_name);
+		}
 	}
+	/* array type support */
+	off += snprintf(
+		buf + off, bufsz - off,
+		"\n"
+		"DEVICE_FUNCTION(cl_uint)\n"
+		"pg_extras_array_from_arrow(kern_context *kcxt,\n"
+		"                           char *dest,\n"
+		"                           kern_colmeta *smeta,\n"
+		"                           char *base,\n"
+		"                           cl_uint start,\n"
+		"                           cl_uint end)\n"
+		"{\n");
+	if (pgstrom_num_users_extra > 0)
+	{
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  switch (smeta->atttypid)\n"
+			"  {\n");
+		for (i=0; i < lengthof(devtype_info_slot); i++)
+		{
+			dlist_iter		iter;
+			devtype_info   *dtype;
+
+			dlist_foreach(iter, &devtype_info_slot[i])
+			{
+				dtype = dlist_container(devtype_info, chain, iter.cur);
+				if ((dtype->type_flags & extra_flags) == 0)
+					continue;
+				off += snprintf(
+					buf + off, bufsz - off,
+					"  case %u:\n"
+					"    return pg_%s_array_from_arrow(kcxt, dest,\n"
+					"                                  smeta, base,\n"
+					"                                  start, end);\n",
+					dtype->type_oid,
+					dtype->type_name);
+			}
+		}
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  default:\n"
+			"    break;\n"
+			"  }\n");
+	}
+	off += snprintf(
+		buf + off, bufsz - off,
+		"  return 0;\n"
+		"}\n");
+
+	/* composite type support */
+	off += snprintf(
+		buf + off, bufsz - off,
+		"\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
+		"pg_extras_composite_from_arrow(kern_context *kcxt,\n"
+		"                               kern_colmeta *smeta,\n"
+		"                               char *base,\n"
+		"                               cl_uint rowidx,\n"
+		"                               cl_char *p_dclass,\n"
+		"                               Datum *p_datum)\n"
+		"{\n");
+
+	if (pgstrom_num_users_extra > 0)
+	{
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  switch (smeta->atttypid)\n"
+			"  {\n");
+		for (i=0; i < lengthof(devtype_info_slot); i++)
+		{
+			dlist_iter		iter;
+			devtype_info   *dtype;
+
+			dlist_foreach(iter, &devtype_info_slot[i])
+			{
+				dtype = dlist_container(devtype_info, chain, iter.cur);
+				if ((dtype->type_flags & extra_flags) == 0)
+					continue;
+
+				off += snprintf(
+					buf + off, bufsz - off,
+					"  case %u: {\n"
+					"    pg_%s_t temp;\n"
+					"    pg_datum_fetch_arrow(kcxt, temp, smeta, base, rowidx);\n"
+					"    pg_datum_store(kcxt, temp, p_dclass, p_datum);\n"
+					"    return true;\n"
+					"  }\n",
+					dtype->type_oid,
+					dtype->type_name);
+			}
+		}
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  default:\n"
+			"    break;\n"
+			"  }\n");
+	}
+	off += snprintf(
+		buf + off, bufsz - off,
+		"  return false;\n"
+		"}\n");
+	return off;
 }
 
 /*
@@ -2358,6 +2494,33 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 	return NULL;
 }
 
+static inline devfunc_info *
+__build_extra_devfunc_info(Oid func_oid,
+						   Oid func_rettype,
+						   oidvector *func_argtypes,
+						   Oid func_collid)
+{
+	devfunc_info *dfunc;
+	int		i;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+
+		if (ex_desc->lookup_extra_devfunc)
+		{
+			dfunc = ex_desc->lookup_extra_devfunc(devinfo_memcxt,
+												  func_oid,
+												  func_rettype,
+												  func_argtypes,
+												  func_collid);
+			if (dfunc)
+				return dfunc;
+		}
+	}
+	return NULL;
+}
+
 static devfunc_info *
 pgstrom_devfunc_construct(HeapTuple protup,
 						  Oid func_rettype,
@@ -2454,6 +2617,12 @@ not_found:
 												fuzzy_index_head,
 												fuzzy_index_tail);
 	}
+	/* extra device function, if any */
+	if (!dfunc)
+		dfunc = __build_extra_devfunc_info(PgProcTupleGetOid(protup),
+										   func_rettype,
+										   func_argtypes,
+										   func_collid);
 	if (lib_name)
 		pfree(lib_name);
 	pfree(sig.data);
@@ -2761,16 +2930,38 @@ static struct {
 	{ TEXTOID,    NUMERICOID, devcast_text2numeric_callback },
 };
 
+static inline devcast_info *
+__build_extra_devcast_info(Oid src_type_oid, Oid dst_type_oid)
+{
+	int		i;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+		devcast_info   *dcast;
+
+		if (ex_desc->lookup_extra_devcast)
+		{
+			dcast = ex_desc->lookup_extra_devcast(devinfo_memcxt,
+												  src_type_oid,
+												  dst_type_oid);
+			if (dcast)
+				return dcast;
+		}
+	}
+	return NULL;
+}
+
 static devcast_info *
 build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 {
-	int			i;
+	int		i;
 
 	for (i=0; i < lengthof(devcast_catalog); i++)
 	{
 		devcast_coerceviaio_callback_f dcast_callback;
-		devtype_info   *dtype;
 		devcast_info   *dcast;
+		devtype_info   *dtype;
 		HeapTuple		tup;
 		char			method;
 
@@ -2828,7 +3019,7 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 
 		return dcast;
 	}
-	return NULL;
+	return __build_extra_devcast_info(src_type_oid, dst_type_oid);
 }
 
 devcast_info *

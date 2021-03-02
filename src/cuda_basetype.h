@@ -21,6 +21,7 @@
 
 /* Type OID of PostgreSQL for base types */
 #define PG_BOOLOID			16
+#define PG_INT1OID			606
 #define PG_INT2OID			21
 #define PG_INT4OID			23
 #define PG_INT8OID			20
@@ -501,6 +502,186 @@ pg_datum_ref_arrow(kern_context *kcxt,
 	pg_datum_fetch_arrow(kcxt, result, cmeta,
 						 (char *)kds, rowidx);
 }
+
+/*
+ * Special support routine to convert Arrow::List<element> to
+ * PostgreSQL's ArrayType.
+ */
+
+/* Template to generate pg_array_t from Apache Arrow */
+#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_simple_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
+
+#define STROMCL_VARLENA_PGARRAY_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+								 cl_uint end)				\
+	{														\
+		return pg_varlena_array_from_arrow<pg_##NAME##_t>	\
+					(kcxt, dest, cmeta, base, start, end);	\
+	}
+
+#define STROMCL_EXTERNAL_PGARRAY_TEMPLATE(NAME)				\
+	DEVICE_FUNCTION(cl_uint)								\
+	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
+								 char *dest,				\
+								 kern_colmeta *cmeta,		\
+								 char *base,				\
+								 cl_uint start,				\
+                                 cl_uint end);
+
+template <typename T>
+STATIC_FUNCTION(cl_uint)
+pg_simple_array_from_arrow(kern_context *kcxt,
+						   char *dest,
+						   kern_colmeta *cmeta,
+						   char *base,
+						   cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (dest)
+				memcpy(dest+sz, &temp.value, sizeof(temp.value));
+			sz += sizeof(temp.value);
+		}
+	}
+	return sz;
+}
+
+template <typename T>
+STATIC_INLINE(cl_uint)
+pg_varlena_array_from_arrow(kern_context *kcxt,
+							char *dest,
+							kern_colmeta *cmeta,
+							char *base,
+							cl_uint start, cl_uint end)
+{
+	ArrayType  *res = (ArrayType *)dest;
+	cl_uint		nitems = end - start;
+	cl_uint		i, sz;
+	char	   *nullmap = NULL;
+	T			temp;
+
+	Assert((cl_ulong)res == MAXALIGN(res));
+	Assert(start <= end);
+	if (cmeta->nullmap_offset == 0)
+		sz = ARR_OVERHEAD_NONULLS(1);
+	else
+		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
+
+	if (res)
+	{
+		res->ndim = 1;
+		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
+		res->elemtype = cmeta->atttypid;
+		ARR_DIMS(res)[0] = nitems;
+		ARR_LBOUND(res)[0] = 1;
+
+		nullmap = ARR_NULLBITMAP(res);
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
+		if (temp.isnull)
+		{
+			if (nullmap)
+				nullmap[i>>3] &= ~(1<<(i&7));
+			else
+				Assert(!dest);
+		}
+		else
+		{
+			if (nullmap)
+				nullmap[i>>3] |= (1<<(i&7));
+
+			sz = TYPEALIGN(cmeta->attalign, sz);
+			if (temp.length < 0)
+			{
+				cl_uint		vl_len = VARSIZE_ANY(temp.value);
+
+				if (dest)
+					memcpy(dest + sz, DatumGetPointer(temp.value), vl_len);
+				sz += vl_len;
+			}
+			else
+			{
+				if (dest)
+				{
+					memcpy(dest + sz + VARHDRSZ, temp.value, temp.length);
+					SET_VARSIZE(dest + sz, VARHDRSZ + temp.length);
+				}
+				sz += VARHDRSZ + temp.length;
+			}
+		}
+	}
+	return sz;
+}
+
+/*
+ * array / composite handler for extra device types
+ */
+DEVICE_FUNCTION(cl_uint)
+pg_extras_array_from_arrow(kern_context *kcxt, char *dest,
+						   kern_colmeta *smeta, char *base,
+						   cl_uint start, cl_uint end);
+DEVICE_FUNCTION(cl_bool)
+pg_extras_composite_from_arrow(kern_context *kcxt,
+							   kern_colmeta *smeta,
+							   char *base, cl_uint rowidx,
+							   cl_char *p_dclass,
+							   Datum *p_datum);
 #else  /* __CUDACC__ */
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE,AS_DATUM)
 #define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)

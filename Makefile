@@ -35,8 +35,6 @@ __STROM_OBJS = main.o nvrtc.o cufile.o extra.o \
         gpuscan.o gpujoin.o gpupreagg.o \
 	arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
 	gstore_fdw.o aggfuncs.o float2.o tinyint.o misc.o
-__STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
-		device_attrs.h cuda_filelist
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #
@@ -246,7 +244,8 @@ MODULE_big = pg_strom
 MODULEDIR = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA = $(GPU_HEADERS) $(PGSTROM_SQL)
+DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
+       $(STROM_BUILD_ROOT)/src/cuda_codegen.h
 DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GSTORE_FDW_FATBIN)
 
 # Support utilities

@@ -1635,169 +1635,6 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 	result.smeta  = smeta;
 }
 
-/*
- * Template to generate pg_array_t from Apache Arrow store
- */
-#define STROMCL_SIMPLE_PGARRAY_TEMPLATE(NAME)				\
-	STATIC_INLINE(cl_uint)									\
-	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
-								 char *dest,				\
-								 kern_colmeta *cmeta,		\
-								 char *base,				\
-								 cl_uint start,				\
-								 cl_uint end)				\
-	{														\
-		return pg_simple_array_from_arrow<pg_##NAME##_t>	\
-					(kcxt, dest, cmeta, base, start, end);	\
-	}
-
-#define STROMCL_VARLENA_PGARRAY_TEMPLATE(NAME)				\
-	STATIC_INLINE(cl_uint)									\
-	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
-								 char *dest,				\
-								 kern_colmeta *cmeta,		\
-								 char *base,				\
-								 cl_uint start,				\
-								 cl_uint end)				\
-	{														\
-		return pg_varlena_array_from_arrow<pg_##NAME##_t>	\
-					(kcxt, dest, cmeta, base, start, end);	\
-	}
-
-#define STROMCL_EXTERNAL_PGARRAY_TEMPLATE(NAME)				\
-	DEVICE_FUNCTION(cl_uint)								\
-	pg_##NAME##_array_from_arrow(kern_context *kcxt,		\
-								 char *dest,				\
-								 kern_colmeta *cmeta,		\
-								 char *base,				\
-								 cl_uint start,				\
-                                 cl_uint end);
-
-template <typename T>
-STATIC_FUNCTION(cl_uint)
-pg_simple_array_from_arrow(kern_context *kcxt,
-						   char *dest,
-						   kern_colmeta *cmeta,
-						   char *base,
-						   cl_uint start, cl_uint end)
-{
-	ArrayType  *res = (ArrayType *)dest;
-	cl_uint		nitems = end - start;
-	cl_uint		i, sz;
-	char	   *nullmap = NULL;
-	T			temp;
-
-	Assert((cl_ulong)res == MAXALIGN(res));
-	Assert(start <= end);
-	if (cmeta->nullmap_offset == 0)
-		sz = ARR_OVERHEAD_NONULLS(1);
-	else
-		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
-
-	if (res)
-	{
-		res->ndim = 1;
-		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
-		res->elemtype = cmeta->atttypid;
-		ARR_DIMS(res)[0] = nitems;
-		ARR_LBOUND(res)[0] = 1;
-
-		nullmap = ARR_NULLBITMAP(res);
-	}
-
-	for (i=0; i < nitems; i++)
-	{
-		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
-		if (temp.isnull)
-		{
-			if (nullmap)
-				nullmap[i>>3] &= ~(1<<(i&7));
-			else
-				Assert(!dest);
-		}
-		else
-		{
-			if (nullmap)
-				nullmap[i>>3] |= (1<<(i&7));
-			sz = TYPEALIGN(cmeta->attalign, sz);
-			if (dest)
-				memcpy(dest+sz, &temp.value, sizeof(temp.value));
-			sz += sizeof(temp.value);
-		}
-	}
-	return sz;
-}
-
-template <typename T>
-STATIC_INLINE(cl_uint)
-pg_varlena_array_from_arrow(kern_context *kcxt,
-							char *dest,
-							kern_colmeta *cmeta,
-							char *base,
-							cl_uint start, cl_uint end)
-{
-	ArrayType  *res = (ArrayType *)dest;
-	cl_uint		nitems = end - start;
-	cl_uint		i, sz;
-	char	   *nullmap = NULL;
-	T			temp;
-
-	Assert((cl_ulong)res == MAXALIGN(res));
-	Assert(start <= end);
-	if (cmeta->nullmap_offset == 0)
-		sz = ARR_OVERHEAD_NONULLS(1);
-	else
-		sz = ARR_OVERHEAD_WITHNULLS(1, nitems);
-
-	if (res)
-	{
-		res->ndim = 1;
-		res->dataoffset = (cmeta->nullmap_offset == 0 ? 0 : sz);
-		res->elemtype = cmeta->atttypid;
-		ARR_DIMS(res)[0] = nitems;
-		ARR_LBOUND(res)[0] = 1;
-
-		nullmap = ARR_NULLBITMAP(res);
-	}
-
-	for (i=0; i < nitems; i++)
-	{
-		pg_datum_fetch_arrow(kcxt, temp, cmeta, base, start+i);
-		if (temp.isnull)
-		{
-			if (nullmap)
-				nullmap[i>>3] &= ~(1<<(i&7));
-			else
-				Assert(!dest);
-		}
-		else
-		{
-			if (nullmap)
-				nullmap[i>>3] |= (1<<(i&7));
-
-			sz = TYPEALIGN(cmeta->attalign, sz);
-			if (temp.length < 0)
-			{
-				cl_uint		vl_len = VARSIZE_ANY(temp.value);
-
-				if (dest)
-					memcpy(dest + sz, DatumGetPointer(temp.value), vl_len);
-				sz += vl_len;
-			}
-			else
-			{
-				if (dest)
-				{
-					memcpy(dest + sz + VARHDRSZ, temp.value, temp.length);
-					SET_VARSIZE(dest + sz, VARHDRSZ + temp.length);
-				}
-				sz += VARHDRSZ + temp.length;
-			}
-		}
-	}
-	return sz;
-}
-
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(bool)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(int2)
 STROMCL_SIMPLE_PGARRAY_TEMPLATE(int4)
@@ -1884,9 +1721,11 @@ __pg_array_from_arrow(kern_context *kcxt, char *dest, Datum datum)
 			sz = pg_bytea_array_from_arrow(kcxt,dest,smeta,base,start,end);
 			break;
 		default:
-			STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,
-						  "wrong code generation");
-			return 0;
+			sz = pg_extras_array_from_arrow(kcxt,dest,smeta,base,start,end);
+			if (sz == 0)
+				STROM_EREPORT(kcxt, ERRCODE_STROM_WRONG_CODE_GENERATION,
+							  "unsupported array element-type");
+			break;
 	}
 	return sz;
 }
@@ -2110,6 +1949,7 @@ __pg_composite_from_arrow(kern_context *kcxt,
 			switch (smeta->atttypid)
 			{
 				ELEMENT_ENTRY(bool,PG_BOOLOID);
+				ELEMENT_ENTRY(int1,PG_INT1OID);
 				ELEMENT_ENTRY(int2,PG_INT2OID);
 				ELEMENT_ENTRY(int4,PG_INT4OID);
 				ELEMENT_ENTRY(int8,PG_INT8OID);
@@ -2127,9 +1967,17 @@ __pg_composite_from_arrow(kern_context *kcxt,
 				ELEMENT_ENTRY(varchar, PG_VARCHAROID);
 				ELEMENT_ENTRY(bytea, PG_BYTEAOID);
 				default:
-					STROM_EREPORT(kcxt, ERRCODE_INVALID_COLUMN_DEFINITION,
-								  "unsupported type of sub-field");
-					tup_dclass[j] = DATUM_CLASS__NULL;
+					/* try extra sub-field */
+					if (!pg_extras_composite_from_arrow(kcxt, smeta,
+														base, rowidx,
+														&tup_dclass[j],
+														&tup_values[j]))
+					{
+						STROM_EREPORT(kcxt, ERRCODE_INVALID_COLUMN_DEFINITION,
+									  "unsupported device type in composite sub-field");
+						tup_dclass[j] = DATUM_CLASS__NULL;
+					}
+					break;
 			}
 		}
 	}

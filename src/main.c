@@ -43,6 +43,8 @@ long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
+int			pgstrom_num_users_extra = 0;
+pgstromUsersExtraDescriptor pgstrom_users_extra_desc[8];
 
 /* pg_strom.chunk_size */
 Size
@@ -516,6 +518,42 @@ pgstrom_post_planner(Query *parse,
 		pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 
 	return pstmt;
+}
+
+/*
+ * Routines to support user's extra GPU logic
+ */
+uint32
+pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *__desc)
+{
+	pgstromUsersExtraDescriptor *desc;
+	const char *extra_name;
+	uint32		extra_flags;
+
+	if (pgstrom_num_users_extra >= 7)
+		elog(ERROR, "too much PG-Strom users' extra module is registered");
+	if (__desc->magic != PGSTROM_USERS_EXTRA_MAGIC_V1)
+		elog(ERROR, "magic number of pgstromUsersExtraDescriptor mismatch");
+	if (__desc->pg_version / 100 != PG_MAJOR_VERSION)
+		elog(ERROR, "PG-Strom Users Extra is built for %u", __desc->pg_version);
+
+	extra_name = strdup(__desc->extra_name);
+	if (!extra_name)
+		elog(ERROR, "out of memory");
+	extra_flags = (1U << (pgstrom_num_users_extra + 24));
+
+	desc = &pgstrom_users_extra_desc[pgstrom_num_users_extra++];
+	desc->magic			= __desc->magic;
+	desc->pg_version	= __desc->pg_version;
+	desc->extra_flags	= extra_flags;
+	desc->extra_name	= extra_name;
+	desc->lookup_extra_devtype = __desc->lookup_extra_devtype;
+	desc->lookup_extra_devfunc = __desc->lookup_extra_devfunc;
+	desc->lookup_extra_devcast = __desc->lookup_extra_devcast;
+
+	elog(LOG, "PG-Strom users's extra [%s] registered", extra_name);
+	
+	return extra_flags;
 }
 
 /*
