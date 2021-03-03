@@ -170,12 +170,15 @@ typedef struct
 	devtype_info *(*lookup_extra_devtype)(MemoryContext memcxt,
 										  TypeCacheEntry *tcache);
 	devfunc_info *(*lookup_extra_devfunc)(MemoryContext memcxt,
-										  Oid func_oid,
-										  Oid func_rettype,
-										  oidvector *func_argtypes,
+										  Oid proc_oid,
+										  Form_pg_proc proc_form,
+										  devtype_info *dfunc_rettype,
+										  int dfunc_nargs,
+										  devtype_info **dfunc_argtypes,
 										  Oid func_collid);
 	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
-										  Oid src_type_oid, Oid dst_type_oid);
+										  Oid src_type_oid,
+										  Oid dst_type_oid);
 } pgstromUsersExtraDescriptor;
 
 extern uint32	pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *desc);

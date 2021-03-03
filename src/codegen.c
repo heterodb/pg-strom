@@ -307,13 +307,18 @@ __build_extra_devtype_info(TypeCacheEntry *tcache)
 
 	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
-		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
-		if (ex_desc->lookup_extra_devtype)
+		if (extra->lookup_extra_devtype)
 		{
-			dtype = ex_desc->lookup_extra_devtype(devinfo_memcxt, tcache);
+			dtype = extra->lookup_extra_devtype(devinfo_memcxt, tcache);
 			if (dtype)
+			{
+				dtype->hashvalue = GetSysCacheHashValue(TYPEOID,
+														dtype->type_oid, 0, 0, 0);
+				dtype->type_flags |= extra->extra_flags;
 				return dtype;
+			}
 		}
 	}
 	return NULL;
@@ -477,8 +482,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	/* try to build devtype_info entry */
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
-							   TYPECACHE_CMP_PROC |
-							   TYPECACHE_DOMAIN_BASE_INFO);
+							   TYPECACHE_CMP_PROC);
 	if (OidIsValid(tcache->typrelid))
 	{
 		/* composite type */
@@ -489,20 +493,9 @@ pgstrom_devtype_lookup(Oid type_oid)
 		/* array type */
 		dtype = build_array_devtype_info(tcache);
 	}
-	else if (OidIsValid(tcache->domainBaseType))
-	{
-		/* domain type */
-		devtype_info *dbase = pgstrom_devtype_lookup(tcache->domainBaseType);
-
-		sz = offsetof(devtype_info, comp_subtypes[dbase->comp_nfields]);
-		dtype = MemoryContextAllocZero(devinfo_memcxt, sz);
-		memcpy(dtype, dbase, sz);
-
-		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
-		dtype->type_oid = type_oid;
-	}
 	else
 	{
+		/* base or extra type */
 		dtype = build_basic_devtype_info(tcache);
 	}
 	
@@ -2301,9 +2294,10 @@ devfunc_generic_result_sz(codegen_context *context,
 
 static devfunc_info *
 __construct_devfunc_info(HeapTuple protup,
-						 Oid func_collid,
-						 Oid func_rettype,
-						 int func_nargs, Oid *func_argtypes,
+						 devtype_info *dfunc_rettype,
+						 int dfunc_nargs,
+						 devtype_info **dfunc_argtypes,
+						 Oid dfunc_collid,
 						 int func_devcost,
 						 const char *func_template,
 						 devfunc_result_sz_type devfunc_result_sz)
@@ -2311,7 +2305,6 @@ __construct_devfunc_info(HeapTuple protup,
 	Form_pg_proc    proc = (Form_pg_proc) GETSTRUCT(protup);
 	MemoryContext	oldcxt;
 	devfunc_info   *dfunc = NULL;
-	devtype_info   *dtype;
 	List		   *dfunc_args = NIL;
 	const char	   *pos;
 	const char	   *end;
@@ -2371,29 +2364,21 @@ __construct_devfunc_info(HeapTuple protup,
 		return NULL;
 	}
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	for (j=0; j < func_nargs; j++)
-	{
-		dtype = pgstrom_devtype_lookup(func_argtypes[j]);
-		if (!dtype)
-			goto negative;
-		dfunc_args = lappend(dfunc_args, dtype);
-	}
-	dtype = pgstrom_devtype_lookup(func_rettype);
-	if (!dtype)
-		goto negative;
+	for (j=0; j < dfunc_nargs; j++)
+		dfunc_args = lappend(dfunc_args, dfunc_argtypes[j]);
 
 	dfunc = palloc0(sizeof(devfunc_info));
 	dfunc->func_oid = PgProcTupleGetOid(protup);
 	if (has_collation)
 	{
-		if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
+		if (OidIsValid(dfunc_collid) && !lc_collate_is_c(dfunc_collid))
 			dfunc->func_is_negative = true;
-		dfunc->func_collid = func_collid;
+		dfunc->func_collid = dfunc_collid;
 	}
 	dfunc->func_is_strict = proc->proisstrict;
 	dfunc->func_flags = flags;
 	dfunc->func_args = dfunc_args;
-	dfunc->func_rettype = dtype;
+	dfunc->func_rettype = dfunc_rettype;
 	dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
 	dfunc->func_devname = func_template + 2;	/* const cstring */
 	dfunc->func_devcost = func_devcost;
@@ -2401,23 +2386,22 @@ __construct_devfunc_info(HeapTuple protup,
 								? devfunc_result_sz
 								: devfunc_generic_result_sz);
 	/* other fields shall be assigned on the caller side */
-negative:
 	MemoryContextSwitchTo(oldcxt);
 
 	return dfunc;
 }
 
 static devfunc_info *
-pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
-								const char *lib_name,
-								Oid func_rettype,
-								oidvector *func_argtypes,
-								Oid func_collid,
+pgstrom_devfunc_construct_fuzzy(const char *lib_name,
+								HeapTuple protup,
+								devtype_info *dfunc_rettype,
+								int dfunc_nargs,
+								devtype_info **dfunc_argtypes,
+								Oid dfunc_collid,
 								int fuzzy_index_head,
 								int fuzzy_index_tail)
 {
 	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
-	Oid	   *real_argtypes = alloca(sizeof(Oid) * func_argtypes->dim1);
 	char	buffer[512];
 	int		i, j;
 
@@ -2453,10 +2437,10 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 			continue;
 
 		/* check the argument types */
-		for (j=0; j < func_argtypes->dim1; j++)
+		for (j=0; j < dfunc_nargs; j++)
 		{
 			tok = pos;
-			pos = strchr(pos, (j < func_argtypes->dim1 - 1 ? ',' : ')'));
+			pos = strchr(pos, (j < dfunc_nargs - 1 ? ',' : ')'));
 			if (!pos)
 				break;		/* not match */
 			*pos++ = '\0';
@@ -2464,28 +2448,28 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 			dtype = pgstrom_devtype_lookup_by_name(tok);
 			if (!dtype)
 				break;		/* not match */
-			if (dtype->type_oid != func_argtypes->values[j] &&
-				!pgstrom_devtype_can_relabel(func_argtypes->values[j],
+			if (dtype->type_oid != dfunc_argtypes[j]->type_oid &&
+				!pgstrom_devtype_can_relabel(dfunc_argtypes[j]->type_oid,
 											 dtype->type_oid))
 				break;		/* not match */
-			real_argtypes[j] = dtype->type_oid;
 		}
-		if (j < func_argtypes->dim1)
+		if (j < dfunc_nargs)
 			continue;
 		/* check the result type */
 		dtype = pgstrom_devtype_lookup_by_name(buffer);
 		if (!dtype)
 			continue;
-		if (dtype->type_oid != func_rettype &&
-			!pgstrom_devtype_can_relabel(dtype->type_oid, func_rettype))
+		if (dtype->type_oid != dfunc_rettype->type_oid &&
+			!pgstrom_devtype_can_relabel(dtype->type_oid,
+										 dfunc_rettype->type_oid))
 			continue;
 
-		/* Ok, found the entry */
+		/* Ok, found the fuzzy entry */
 		return __construct_devfunc_info(protup,
-										func_collid,
-										dtype->type_oid,
-										func_argtypes->dim1,
-										real_argtypes,
+										dfunc_rettype,
+										dfunc_nargs,
+										dfunc_argtypes,
+										dfunc_collid,
 										procat->func_devcost,
 										procat->func_template,
 										procat->devfunc_result_sz);
@@ -2495,25 +2479,30 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 }
 
 static inline devfunc_info *
-__build_extra_devfunc_info(Oid func_oid,
-						   Oid func_rettype,
-						   oidvector *func_argtypes,
-						   Oid func_collid)
+__build_extra_devfunc_info(HeapTuple protup,
+						   devtype_info *dfunc_rettype,
+						   int dfunc_nargs,
+						   devtype_info **dfunc_argtypes,
+						   Oid dfunc_collid)
 {
+	Oid		proc_oid = PgProcTupleGetOid(protup);
+	Form_pg_proc proc_form = (Form_pg_proc) GETSTRUCT(protup);
 	devfunc_info *dfunc;
 	int		i;
 
 	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
-		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
-		if (ex_desc->lookup_extra_devfunc)
+		if (extra->lookup_extra_devfunc)
 		{
-			dfunc = ex_desc->lookup_extra_devfunc(devinfo_memcxt,
-												  func_oid,
-												  func_rettype,
-												  func_argtypes,
-												  func_collid);
+			dfunc = extra->lookup_extra_devfunc(devinfo_memcxt,
+												proc_oid,
+												proc_form,
+												dfunc_rettype,
+												dfunc_nargs,
+												dfunc_argtypes,
+												dfunc_collid);
 			if (dfunc)
 				return dfunc;
 		}
@@ -2531,6 +2520,8 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	const char	   *proc_name = NameStr(proc->proname);
 	StringInfoData	sig;
 	devtype_info   *dtype;
+	devtype_info   *dfunc_rettype;
+	devtype_info  **dfunc_argtypes;
 	devfunc_info   *dfunc = NULL;
 	char		   *lib_name = NULL;
 	int				fuzzy_index_head = -1;
@@ -2543,12 +2534,13 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	
 	/* make a signature string */
 	initStringInfo(&sig);
-    dtype = pgstrom_devtype_lookup(func_rettype);
-	if (!dtype)
+	dfunc_rettype = pgstrom_devtype_lookup(func_rettype);
+	if (!dfunc_rettype)
 		goto not_found;
-	appendStringInfo(&sig, "%s ", dtype->type_name);
-
-	appendStringInfo(&sig, "%s(", quote_identifier(proc_name));
+	appendStringInfo(&sig, "%s %s(",
+					 dfunc_rettype->type_name,
+					 quote_identifier(proc_name));
+	dfunc_argtypes = alloca(sizeof(devtype_info *) * func_argtypes->dim1);
 	for (i=0; i < func_argtypes->dim1; i++)
 	{
 		dtype = pgstrom_devtype_lookup(func_argtypes->values[i]);
@@ -2557,9 +2549,10 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		if (i > 0)
 			appendStringInfoChar(&sig, ',');
 		appendStringInfo(&sig, "%s", dtype->type_name);
+		dfunc_argtypes[i] = dtype;
 	}
 	appendStringInfoChar(&sig, ')');
-	
+
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
@@ -2573,10 +2566,10 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		if (strcmp(procat->func_signature, sig.data) == 0)
 		{
 			dfunc = __construct_devfunc_info(protup,
-											 func_collid,
-											 func_rettype,
+											 dfunc_rettype,
 											 func_argtypes->dim1,
-											 func_argtypes->values,
+											 dfunc_argtypes,
+											 func_collid,
 											 procat->func_devcost,
 											 procat->func_template,
 											 procat->devfunc_result_sz);
@@ -2606,23 +2599,28 @@ pgstrom_devfunc_construct(HeapTuple protup,
 			}
 		}
 	}
-not_found:
+	/* try invocation with implicit type relabel */
 	if (!dfunc && fuzzy_index_head >= 0)
 	{
-		dfunc = pgstrom_devfunc_construct_fuzzy(protup,
-												lib_name,
-												func_rettype,
-												func_argtypes,
+		dfunc = pgstrom_devfunc_construct_fuzzy(lib_name,
+												protup,
+												dfunc_rettype,
+												func_argtypes->dim1,
+												dfunc_argtypes,
 												func_collid,
 												fuzzy_index_head,
 												fuzzy_index_tail);
 	}
 	/* extra device function, if any */
 	if (!dfunc)
-		dfunc = __build_extra_devfunc_info(PgProcTupleGetOid(protup),
-										   func_rettype,
-										   func_argtypes,
+	{
+		dfunc = __build_extra_devfunc_info(protup,
+										   dfunc_rettype,
+										   func_argtypes->dim1,
+										   dfunc_argtypes,
 										   func_collid);
+	}
+not_found:
 	if (lib_name)
 		pfree(lib_name);
 	pfree(sig.data);
@@ -2713,7 +2711,6 @@ retry:
 		dtype = palloc0(sizeof(devtype_info));
 		dtype->type_oid = func_rettype;
 		dfunc->func_rettype = dtype;
-
 		dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
 
 		MemoryContextSwitchTo(oldcxt);
