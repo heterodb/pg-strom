@@ -2504,7 +2504,12 @@ __build_extra_devfunc_info(HeapTuple protup,
 												dfunc_argtypes,
 												dfunc_collid);
 			if (dfunc)
+			{
+				dfunc->func_flags |= extra->extra_flags;
+				if (!dfunc->devfunc_result_sz)
+					dfunc->devfunc_result_sz = devfunc_generic_result_sz;
 				return dfunc;
+			}
 		}
 	}
 	return NULL;
@@ -2908,167 +2913,147 @@ pgstrom_devfunc_track(codegen_context *context, devfunc_info *dfunc)
 static struct {
 	Oid			src_type_oid;
 	Oid			dst_type_oid;
+	bool		has_domain_checks;
 	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
 } devcast_catalog[] = {
 	/* text, varchar, bpchar */
-	{ TEXTOID,    BPCHAROID,  NULL },
-	{ TEXTOID,    VARCHAROID, NULL },
-	{ VARCHAROID, TEXTOID,    NULL },
-	{ VARCHAROID, BPCHAROID,  NULL },
+	{ TEXTOID,    BPCHAROID,  false, NULL },
+	{ TEXTOID,    VARCHAROID, false, NULL },
+	{ VARCHAROID, TEXTOID,    false, NULL },
+	{ VARCHAROID, BPCHAROID,  false, NULL },
 	/* cidr -> inet, but no reverse type cast */
-	{ CIDROID,    INETOID,    NULL },
+	{ CIDROID,    INETOID,    false, NULL },
 	/* text -> (intX/floatX/numeric), including (jsonb->>'key') reference */
-	{ TEXTOID,    BOOLOID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT2OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT4OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT8OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    FLOAT4OID,  devcast_text2numeric_callback },
-	{ TEXTOID,    FLOAT8OID,  devcast_text2numeric_callback },
-	{ TEXTOID,    NUMERICOID, devcast_text2numeric_callback },
+	{ TEXTOID,    BOOLOID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT2OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT4OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT8OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT4OID,  false, devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT8OID,  false, devcast_text2numeric_callback },
+	{ TEXTOID,    NUMERICOID, false, devcast_text2numeric_callback },
 };
-
-static inline devcast_info *
-__build_extra_devcast_info(Oid src_type_oid, Oid dst_type_oid)
-{
-	int		i;
-
-	for (i=0; i < pgstrom_num_users_extra; i++)
-	{
-		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
-		devcast_info   *dcast;
-
-		if (ex_desc->lookup_extra_devcast)
-		{
-			dcast = ex_desc->lookup_extra_devcast(devinfo_memcxt,
-												  src_type_oid,
-												  dst_type_oid);
-			if (dcast)
-				return dcast;
-		}
-	}
-	return NULL;
-}
 
 static devcast_info *
 build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 {
+	devcast_info *dcast = NULL;
+	devtype_info *dtype_s = NULL;
+	devtype_info *dtype_d = NULL;
 	int		i;
+
+	dtype_s = pgstrom_devtype_lookup(src_type_oid);
+	if (!dtype_s)
+		goto not_found;
+	dtype_d = pgstrom_devtype_lookup(dst_type_oid);
+	if (!dtype_d)
+		goto not_found;
 
 	for (i=0; i < lengthof(devcast_catalog); i++)
 	{
-		devcast_coerceviaio_callback_f dcast_callback;
-		devcast_info   *dcast;
-		devtype_info   *dtype;
-		HeapTuple		tup;
-		char			method;
-
-		if (src_type_oid != devcast_catalog[i].src_type_oid ||
-			dst_type_oid != devcast_catalog[i].dst_type_oid)
-			continue;
-		dcast_callback = devcast_catalog[i].dcast_coerceviaio_callback;
-
-		tup = SearchSysCache2(CASTSOURCETARGET,
-							  ObjectIdGetDatum(src_type_oid),
-							  ObjectIdGetDatum(dst_type_oid));
-		if (!HeapTupleIsValid(tup))
+		if (dtype_s->type_oid == devcast_catalog[i].src_type_oid &&
+			dtype_d->type_oid == devcast_catalog[i].dst_type_oid)
 		{
-			if (!dcast_callback)
-				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
-					 format_type_be(src_type_oid),
-					 format_type_be(dst_type_oid));
-			/*
-			 * No pg_cast entry, so we assume this conversion is processed by
-			 * the cstring in/out function.
-			 */
-			method = COERCION_METHOD_INOUT;
+			dcast = MemoryContextAllocZero(devinfo_memcxt,
+										   sizeof(devcast_info));
+			dcast->src_type = dtype_s;
+			dcast->dst_type = dtype_d;
+			dcast->has_domain_checks = devcast_catalog[i].has_domain_checks;
+			dcast->dcast_coerceviaio_callback
+				= devcast_catalog[i].dcast_coerceviaio_callback;
+			break;
 		}
-		else
-		{
-			method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
-			ReleaseSysCache(tup);
-
-			if (!((method == COERCION_METHOD_BINARY && !dcast_callback) ||
-				  (method == COERCION_METHOD_INOUT && dcast_callback)))
-				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
-					 format_type_be(src_type_oid),
-					 format_type_be(dst_type_oid));
-		}
-		dcast = MemoryContextAllocZero(devinfo_memcxt,
-									   sizeof(devcast_info));
-		dcast->hashvalue = GetSysCacheHashValue(CASTSOURCETARGET,
-												src_type_oid,
-												dst_type_oid, 0, 0);
-		/* source */
-		dtype = pgstrom_devtype_lookup(src_type_oid);
-		if (!dtype)
-			__ELog("Bug? type '%s' is not supported on device",
-				   format_type_be(src_type_oid));
-		dcast->src_type = dtype;
-		/* destination */
-		dtype = pgstrom_devtype_lookup(dst_type_oid);
-		if (!dtype)
-			__ELog("Bug? type '%s' is not supported on device",
-				   format_type_be(dst_type_oid));
-		dcast->dst_type = dtype;
-		/* method && callback */
-		dcast->castmethod = method;
-		dcast->dcast_coerceviaio_callback = dcast_callback;
-
-		return dcast;
 	}
-	return __build_extra_devcast_info(src_type_oid, dst_type_oid);
+	/* extra type cast */
+	if (!dcast)
+	{
+		for (i=0; i < pgstrom_num_users_extra; i++)
+		{
+			pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+			if (extra->lookup_extra_devcast)
+			{
+				dcast = extra->lookup_extra_devcast(devinfo_memcxt,
+													dtype_s,
+													dtype_d);
+				if (dcast)
+					break;
+			}
+		}
+	}
+not_found:
+	/* negative entry */
+	if (!dcast)
+	{
+		MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+
+		if (!dtype_s)
+		{
+			dtype_s = palloc0(sizeof(devtype_info));
+            dtype_s->type_oid = src_type_oid;
+		}
+		if (!dtype_d)
+		{
+			dtype_d = palloc0(sizeof(devtype_info));
+			dtype_d->type_oid = dst_type_oid;
+		}
+		dcast = palloc0(sizeof(devcast_info));
+		dcast->src_type = dtype_s;
+		dcast->dst_type = dtype_d;
+		dcast->cast_is_negative = true;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	/* sanity checks */
+	if (dcast->has_domain_checks &&
+		dcast->dcast_coerceviaio_callback != NULL)
+		__ELog("Bug? type cast %s -> %s with domain checks must be binary compatible",
+			   format_type_be(dcast->src_type->type_oid),
+			   format_type_be(dcast->dst_type->type_oid));
+	return dcast;
 }
 
 devcast_info *
-pgstrom_devcast_lookup(Oid src_type_oid,
-					   Oid dst_type_oid,
-					   char castmethod)
+pgstrom_devcast_lookup(Oid src_type_oid, Oid dst_type_oid)
 {
-
+	uint32		hashvalue;
 	int			hindex;
 	devcast_info *dcast;
 	dlist_iter	iter;
 
-	hindex = GetSysCacheHashValue(CASTSOURCETARGET,
-								  src_type_oid,
-								  dst_type_oid,
-								  0, 0) % lengthof(devcast_info_slot);
+	hashvalue = GetSysCacheHashValue(CASTSOURCETARGET,
+									 src_type_oid,
+									 dst_type_oid,
+									 0, 0);
+	hindex = hashvalue % lengthof(devcast_info_slot);
 	dlist_foreach (iter, &devcast_info_slot[hindex])
 	{
 		dcast = dlist_container(devcast_info, chain, iter.cur);
 		if (dcast->src_type->type_oid == src_type_oid &&
-            dcast->dst_type->type_oid == dst_type_oid)
+			dcast->dst_type->type_oid == dst_type_oid)
 		{
-			if (dcast->castmethod == castmethod)
-				return dcast;
-			return NULL;
+			if (dcast->cast_is_negative)
+				return NULL;
+			return dcast;
 		}
 	}
-
+	/* create a new one */
 	dcast = build_devcast_info(src_type_oid, dst_type_oid);
-	if (dcast)
-	{
-		hindex = dcast->hashvalue % lengthof(devcast_info_slot);
-		dlist_push_head(&devcast_info_slot[hindex], &dcast->chain);
-
-		if (dcast->castmethod == castmethod)
-			return dcast;
-	}
-	return NULL;
+	dcast->hashvalue = hashvalue;
+	dlist_push_head(&devcast_info_slot[hindex], &dcast->chain);
+	if (dcast->cast_is_negative)
+		return NULL;
+	return dcast;
 }
 
 bool
 pgstrom_devtype_can_relabel(Oid src_type_oid,
 							Oid dst_type_oid)
 {
-	devcast_info *dcast = pgstrom_devcast_lookup(src_type_oid,
-												 dst_type_oid,
-												 COERCION_METHOD_BINARY);
-	if (dcast)
-	{
-		Assert(!dcast->dcast_coerceviaio_callback);
+	devcast_info *dcast;
+
+	dcast = pgstrom_devcast_lookup(src_type_oid, dst_type_oid);
+	if (dcast && dcast->dcast_coerceviaio_callback == NULL)
 		return true;
-	}
+
 	return false;
 }
 
@@ -3574,21 +3559,40 @@ codegen_coerceviaio_expression(codegen_context *context,
 	Oid		stype_oid = exprType((Node *)coerce->arg);
 	Oid		dtype_oid = coerce->resulttype;
 
-	dcast = pgstrom_devcast_lookup(stype_oid,
-								   dtype_oid,
-								   COERCION_METHOD_INOUT);
-	if (!dcast)
-		__ELog("type cast (%s -> %s) is not device supported",
+	dcast = pgstrom_devcast_lookup(stype_oid, dtype_oid);
+	if (!dcast || dcast->dcast_coerceviaio_callback == NULL)
+		__ELog("no device support of coerceviaio (%s -> %s)",
 			   format_type_be(stype_oid),
 			   format_type_be(dtype_oid));
-
-	if (!dcast->dcast_coerceviaio_callback)
-		__ELog("no device cast support on %s -> %s",
-			   format_type_be(dcast->src_type->type_oid),
-			   format_type_be(dcast->dst_type->type_oid));
 	context->devcost += 8;		/* just a rough estimation */
 
 	return dcast->dcast_coerceviaio_callback(context, dcast, coerce);
+}
+
+static int
+codegen_coercetodomain_expression(codegen_context *context,
+								  CoerceToDomain *coerce_d)
+{
+	devcast_info *dcast;
+	Oid		stype_oid = exprType((Node *)coerce_d->arg);
+	Oid		dtype_oid = coerce_d->resulttype;
+	int		width;
+
+	dcast = pgstrom_devcast_lookup(stype_oid, dtype_oid);
+	if (!dcast || dcast->dcast_coerceviaio_callback != NULL)
+		__ELog("type cast (%s -> %s) is not binary compatible",
+			   format_type_be(stype_oid),
+			   format_type_be(dtype_oid));
+	if (!dcast->has_domain_checks)
+		__ELog("type cast (%s -> %s) has no domain constraint",
+			   format_type_be(stype_oid),
+			   format_type_be(dtype_oid));
+	__appendStringInfo(&context->str, "to_%s_domain(kcxt,",
+					   dcast->dst_type->type_name);
+	codegen_expression_walker(context, (Node *)coerce_d->arg, &width);
+	__appendStringInfoChar(&context->str, ')');
+
+	return width;
 }
 
 static int
@@ -3916,6 +3920,11 @@ codegen_expression_walker(codegen_context *context,
 		case T_CoerceViaIO:
 			width = codegen_coerceviaio_expression(context,
 												   (CoerceViaIO *) node);
+			break;
+
+		case T_CoerceToDomain:
+			width = codegen_coercetodomain_expression(context,
+													  (CoerceToDomain *) node);
 			break;
 
 		case T_CaseExpr:

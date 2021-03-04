@@ -1031,8 +1031,7 @@ extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
 extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
 extern devcast_info *pgstrom_devcast_lookup(Oid src_type_oid,
-											Oid dst_type_oid,
-											char castmethod);
+											Oid dst_type_oid);
 extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 										Oid dst_type_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);

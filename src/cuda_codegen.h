@@ -126,7 +126,12 @@ typedef struct devcast_info {
 	uint32			hashvalue;
 	devtype_info   *src_type;
 	devtype_info   *dst_type;
-	char			castmethod;	/* one of COERCION_METHOD_* */
+	bool			cast_is_negative;
+	bool			has_domain_checks;
+	/*
+	 * COERCION_METHOD_INOUT -> callback is not null
+	 * COERCION_METHOD_BINARY -> callback is null
+	 */
 	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
 } devcast_info;
 
@@ -177,8 +182,8 @@ typedef struct
 										  devtype_info **dfunc_argtypes,
 										  Oid func_collid);
 	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
-										  Oid src_type_oid,
-										  Oid dst_type_oid);
+										  devtype_info *dtype_src,
+										  devtype_info *dtype_dst);
 } pgstromUsersExtraDescriptor;
 
 extern uint32	pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *desc);
