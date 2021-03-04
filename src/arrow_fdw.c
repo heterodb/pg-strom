@@ -2828,6 +2828,7 @@ arrowTypeIsConvertible(Oid type_oid, int typemod)
 
 	switch (type_oid)
 	{
+		case INT1OID:		/* Int8 */
 		case INT2OID:		/* Int16 */
 		case INT4OID:		/* Int32 */
 		case INT8OID:		/* Int64 */
