@@ -62,7 +62,7 @@ UPDATE regtest_data
        comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
        comp.e = pgstrom.random_timestamp(2);
 \! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o @abs_builddir@/test_arrow_cpu_1.data
-RecordBatch[0]: offset=1624 length=2383480 (meta=1144, body=2382336) nitems=10000
+RecordBatch[0]: offset=1712 length=2383480 (meta=1144, body=2382336) nitems=10000
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
