@@ -58,7 +58,7 @@ UPDATE tt_1 SET c.a = pgstrom.random_int(2, -3200000,  3200000),
                 c.c = pgstrom.random_text_len(2, 40),
                 c.d = pgstrom.random_timestamp(2);
 \! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o @abs_builddir@/test_pg2arrow_tt1.arrow
-RecordBatch[0]: offset=1056 length=255256 (meta=728, body=254528) nitems=2500
+RecordBatch[0]: offset=1136 length=255256 (meta=728, body=254528) nitems=2500
 IMPORT FOREIGN SCHEMA ft_1
   FROM SERVER arrow_fdw
   INTO regtest_arrow_utils_temp
@@ -85,7 +85,7 @@ INSERT INTO tt_2 (
             pgstrom.random_timestamp(1)
     FROM generate_series(1,25) x);
 \! pg2arrow --progress -c 'SELECT * FROM regtest_arrow_utils_temp.tt_2' -o @abs_builddir@/test_pg2arrow_tt2.arrow
-RecordBatch[0]: offset=648 length=3544 (meta=472, body=3072) nitems=25
+RecordBatch[0]: offset=720 length=3544 (meta=472, body=3072) nitems=25
 IMPORT FOREIGN SCHEMA ft_2
   FROM SERVER arrow_fdw
   INTO regtest_arrow_utils_temp
@@ -104,7 +104,7 @@ SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
 -- Append mode
 --
 \! pg2arrow --progress -c 'SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM regtest_arrow_utils_temp.tt_1' --append @abs_builddir@/test_pg2arrow_tt1.arrow
-RecordBatch[1]: offset=256320 length=255256 (meta=728, body=254528) nitems=2500
+RecordBatch[1]: offset=256400 length=255256 (meta=728, body=254528) nitems=2500
 INSERT INTO tt_1 (
   SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
 );
