@@ -1354,7 +1354,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ PGSTROM, "bool float42_ne(float4,float2)", 1, "f:float42ne" },
 	{ NULL,    "bool float4ne(float4,float4)",   1, "f:float4ne" },
 	{ NULL,    "bool float48ne(float4,float8)",  1, "f:float48ne" },
-	{ PGSTROM, "bool float82ne(float8,float2)",  1, "f:float82ne" },
+	{ PGSTROM, "bool float82_ne(float8,float2)",  1, "f:float82ne" },
 	{ NULL,    "bool float84ne(float8,float4)",  1, "f:float84ne" },
 	{ NULL,    "bool float8ne(float8,float8)",   1, "f:float8ne" },
 
@@ -1435,7 +1435,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ PGSTROM, "bool float42_ge(float4,float2)", 1, "f:float42ge" },
 	{ NULL,    "bool float4ge(float4,float4)",   1, "f:float4ge" },
 	{ NULL,    "bool float48ge(float4,float8)",  1, "f:float48ge" },
-	{ PGSTROM, "bool float82ge(float8,float2)",  1, "f:float82ge" },
+	{ PGSTROM, "bool float82_ge(float8,float2)", 1, "f:float82ge" },
 	{ NULL,    "bool float84ge(float8,float4)",  1, "f:float84ge" },
 	{ NULL,    "bool float8ge(float8,float8)",   1, "f:float8ge" },
 
@@ -1457,10 +1457,12 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "bool int84le(int8,int4)", 1, "f:int84le" },
 	{ NULL,    "bool int8le(int8,int8)",  1, "f:int8le" },
 	{ PGSTROM, "bool float2_le(float2,float2)", 1, "f:float2le" },
+	{ PGSTROM, "bool float24_le(float2,float4)", 1, "f:float24le" },
+	{ PGSTROM, "bool float28_le(float2,float8)", 1, "f:float28le" },
 	{ PGSTROM, "bool float42_le(float4,float2)", 2, "f:float42le" },
 	{ NULL,    "bool float4le(float4,float4)",  1, "f:float4le" },
 	{ NULL,    "bool float48le(float4,float8)", 1, "f:float48le" },
-	{ PGSTROM, "bool float82le(float8,float2)", 1, "f:float82le" },
+	{ PGSTROM, "bool float82_le(float8,float2)", 1, "f:float82le" },
 	{ NULL,    "bool float84le(float8,float4)", 1, "f:float84le" },
 	{ NULL,    "bool float8le(float8,float8)",  1, "f:float8le" },
 

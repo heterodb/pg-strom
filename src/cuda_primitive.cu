@@ -234,11 +234,25 @@ __mul_s64_overflow(cl_long a, cl_long b, cl_long *p_result)
 	cl_long		hi, lo;
 
 	asm volatile("mul.lo.s64 %0, %2, %3;\n"
-				 "mul.lo.s64 %1, %2, %3;"
+				 "mul.hi.s64 %1, %2, %3;"
 				 : "=l"(lo), "=l"(hi)
 				 : "l"(a), "l"(b));
-	if (hi != 0UL && hi != ~0UL)
-		return true;	/* overflow */
+	if (((a ^ b) >> 63) == 0)
+	{
+		if (hi != 0UL)
+		{
+			printf("gid=%u a=%ld b=%ld hi=%lx lo=%lx\n", get_global_id(), a, b, hi, lo);
+			return true;	/* must be positive */
+		}
+	}
+	else
+	{
+		if (hi != ~0UL)
+		{
+			printf("GID=%u a=%ld b=%ld hi=%lx lo=%lx\n", get_global_id(), a, b, hi, lo);
+			return true;	/* must be negative */
+		}
+	}
 	*p_result = lo;
 	return false;
 }
