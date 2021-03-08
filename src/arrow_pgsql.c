@@ -1058,6 +1058,48 @@ put_dictionary_value(SQLfield *column,
 	return __buffer_usage_inline_type(column);
 }
 
+/*
+ * put_value handler for contrib/cube module
+ */
+static size_t
+put_extra_cube_value(SQLfield *column,
+					 const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+
+	if (row_index == 0)
+		sql_buffer_append_zero(&column->values, sizeof(uint32));
+	if (!addr)
+	{
+		column->nullcount++;
+		sql_buffer_clrbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values,
+						  &column->extra.usage, sizeof(uint32));
+	}
+	else
+	{
+		uint32	header = __ntoh32(*((const uint32 *)addr));
+		uint32	i, nitems = (header & 0x7fffffffU);
+		uint64	value;
+
+		if ((header & 0x80000000U) == 0)
+			nitems += nitems;
+		if (sz != sizeof(uint32) + sizeof(uint64) * nitems)
+			Elog("cube binary data looks broken");
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->extra, &header, sizeof(uint32));
+		addr += sizeof(uint32);
+		for (i=0; i < nitems; i++)
+		{
+			value = __ntoh64(((const uint64 *)addr)[i]);
+			sql_buffer_append(&column->extra, &value, sizeof(uint64));
+		}
+		sql_buffer_append(&column->values,
+						  &column->extra.usage, sizeof(uint32));
+	}
+	return __buffer_usage_varlena_type(column);
+}
+
 /* ----------------------------------------------------------------
  *
  * setup handler for each data types
@@ -1360,6 +1402,18 @@ assignArrowTypeDictionary(SQLfield *column, ArrowField *arrow_field)
 	return 2;	/* nullmap + values */
 }
 
+static int
+assignArrowTypeExtraCube(SQLfield *column, ArrowField *arrow_field)
+{
+	if (arrow_field &&
+		arrow_field->type.node.tag != ArrowNodeTag__Binary)
+		Elog("attribute %s is not compatible", column->field_name);
+
+	initArrowNode(&column->arrow_type, Binary);
+	column->put_value = put_extra_cube_value;
+	return 3;		/* nullmap + index + extra */
+}
+
 /*
  * __assignArrowTypeHint
  */
@@ -1421,6 +1475,8 @@ assignArrowTypePgSQL(SQLfield *column,
 					 Oid typrelid,
 					 Oid typelemid,
 					 const char *tz_name,
+					 const char *extname,
+					 const char *extschema,
 					 ArrowField *arrow_field)
 {
 	SQLtype__pgsql	   *pgtype = &column->sql_type.pgsql;
@@ -1443,26 +1499,42 @@ assignArrowTypePgSQL(SQLfield *column,
 	else if (typalign == 'd')
 		pgtype->typalign = sizeof(double);
 
+	/* array type */
 	if (typelemid != 0)
 	{
-		/* array type */
 		if (typlen != -1)
 			Elog("Bug? array type is not varlena (typlen != -1)");
 		return assignArrowTypeList(column, arrow_field);
 	}
-	else if (typrelid != 0)
+
+	/* composite type */
+	if (typrelid != 0)
 	{
-		/* composite type */
 		__assignArrowTypeHint(column, typname, typnamespace);
 		return assignArrowTypeStruct(column, arrow_field);
 	}
-	else if (typtype == 'e')
+
+	/* enum type */
+	if (typtype == 'e')
 	{
-		/* enum type */
 		__assignArrowTypeHint(column, typname, typnamespace);
 		return assignArrowTypeDictionary(column, arrow_field);
 	}
-	else if (strcmp(typnamespace, "pg_catalog") == 0)
+
+	/* several known types provided by extension */
+	if (extname != NULL)
+	{
+		/* contrib/cube (relocatable) */
+		if (strcmp(extname, "cube") == 0 &&
+			strcmp(extschema, typnamespace) == 0)
+		{
+			__assignArrowTypeHint(column, typname, typnamespace);
+			return assignArrowTypeExtraCube(column, arrow_field);
+		}
+	}
+
+	/* other built-in types */
+	if (strcmp(typnamespace, "pg_catalog") == 0)
 	{
 		/* well known built-in data types? */
 		if (strcmp(typname, "bool") == 0)

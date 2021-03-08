@@ -51,6 +51,7 @@
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
@@ -1385,6 +1386,10 @@ extern Oid	get_type_oid(const char *type_name,
 						 bool missing_ok);
 extern char *get_type_name(Oid type_oid, bool missing_ok);
 extern char *get_proc_library(HeapTuple protup);
+extern Oid	get_object_extension_oid(Oid class_id,
+									 Oid object_id,
+									 int32 objsub_id,
+									 bool missing_ok);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
 extern bool pathtree_has_parallel_aware(Path *node);

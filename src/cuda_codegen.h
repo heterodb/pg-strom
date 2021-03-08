@@ -20,6 +20,7 @@
 #include "nodes/pathnodes.h"
 #include "nodes/primnodes.h"
 #include "utils/typcache.h"
+#include "arrow_defs.h"
 
 /*
  * Type declarations for code generator
@@ -166,6 +167,9 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
  */
 #define PGSTROM_USERS_EXTRA_MAGIC_V1	(0x20210227U)
 
+struct kern_data_store;
+struct kern_colmeta;
+
 typedef struct
 {
 	uint32		magic;			/* PGSTROM_USERS_EXTRA_MAGIC_V1 */
@@ -184,6 +188,14 @@ typedef struct
 	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
 										  devtype_info *dtype_src,
 										  devtype_info *dtype_dst);
+	Oid		  (*arrow_lookup_pgtype)(ArrowField *field,
+									 Oid hint_oid,	/* pg_type metadata */
+									 int32 *p_type_mod);
+	bool	  (*arrow_datum_ref)(struct kern_data_store *kds,
+								 struct kern_colmeta *cmeta,
+								 size_t index,
+								 Datum *p_value,
+								 bool *p_isnull);
 } pgstromUsersExtraDescriptor;
 
 extern uint32	pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *desc);
