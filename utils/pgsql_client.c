@@ -881,7 +881,7 @@ pgsql_create_buffer(PGSTATE *pgstate,
 
 		if (af_info)
 			arrow_field = &af_info->footer.schema.fields[j];
-		
+
 		pgsql_setup_attribute(conn,
 							  table,
 							  &table->columns[i],
