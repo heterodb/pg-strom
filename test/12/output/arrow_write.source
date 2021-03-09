@@ -82,7 +82,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
 (5 rows)
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:6678
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6838
 BEGIN;
 INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 7 ORDER BY id LIMIT 7);
 SELECT count(*) FROM ft;
@@ -102,7 +102,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
 (5 rows)
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:8254
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:8462
 ABORT;
 SELECT count(*) FROM ft;
  count 
@@ -121,7 +121,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
 (5 rows)
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:6678
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6838
 BEGIN;
 INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 3 ORDER BY id LIMIT 10);
 SELECT count(*) FROM ft;
