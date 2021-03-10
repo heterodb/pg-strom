@@ -362,6 +362,46 @@ dumpArrowFile(const char *filename)
 	return 0;
 }
 
+static char *
+read_sql_command_from_file(const char *filename)
+{
+	struct stat stat_buf;
+	int			fdesc;
+	loff_t		off;
+	ssize_t		nbytes;
+	char	   *buffer;
+
+	fdesc = open(filename, O_RDONLY);
+	if (fdesc < 0)
+		Elog("failed on open('%s'): %m", filename);
+	if (fstat(fdesc, &stat_buf) != 0)
+		Elog("failed on fstat('%s'): %m", filename);
+	buffer = malloc(stat_buf.st_size + 1);
+	if (!buffer)
+		Elog("out of memory");
+
+	off = 0;
+	while (off < stat_buf.st_size)
+	{
+		nbytes = read(fdesc, buffer + off, stat_buf.st_size - off);
+		if (nbytes < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			Elog("failed on read('%s'): %m", filename);
+		}
+		else if (nbytes == 0)
+		{
+			Elog("unexpected EOF at '%s'", filename);
+		}
+		off += nbytes;
+	}
+	buffer[stat_buf.st_size] = '\0';
+	close(fdesc);
+
+	return buffer;
+}
+
 static nestLoopOption *
 parseNestLoopOption(const char *command, bool outer_join)
 {
@@ -372,42 +412,8 @@ parseNestLoopOption(const char *command, bool outer_join)
 	char	   *dest;
 
 	if (strncmp(command, "file://", 7) == 0)
-	{
-		const char *filename = command + 7;
-		struct stat stat_buf;
-		int			fdesc;
-		loff_t		off;
-		ssize_t		nbytes;
-		char	   *buffer;
+		command = read_sql_command_from_file(command + 7);
 
-		fdesc = open(filename, O_RDONLY);
-		if (fdesc < 0)
-			Elog("failed on open('%s'): %m", filename);
-		if (fstat(fdesc, &stat_buf) != 0)
-			Elog("failed on fstat('%s'): %m", filename);
-		buffer = alloca(stat_buf.st_size + 1);
-
-		off = 0;
-		while (off < stat_buf.st_size)
-		{
-			nbytes = read(fdesc, buffer + off, stat_buf.st_size - off);
-			if (nbytes < 0)
-			{
-				if (errno == EINTR)
-					continue;
-				Elog("failed on read('%s'): %m", filename);
-			}
-			else if (nbytes == 0)
-			{
-				Elog("unexpected EOF at '%s'", filename);
-			}
-			off += nbytes;
-		}
-		buffer[stat_buf.st_size] = '\0';
-		close(fdesc);
-
-		command = (const char *)buffer;
-	}
 	sub_command = dest = palloc0(strlen(command) + 100);
 
 	for (pos = command; *pos != '\0'; pos++)
@@ -468,7 +474,7 @@ usage(void)
 		  "General options:\n"
 		  "  -d, --dbname=DBNAME   Database name to connect to\n"
 		  "  -c, --command=COMMAND SQL command to run\n"
-		  "  -t, --table=TABLENAME Table name to be dumped\n"
+		  "  -t, --table=TABLENAME Equivalent to '-c SELECT * FROM TABLENAME'\n"
 		  "      (-c and -t are exclusive, either of them must be given)\n"
 #ifdef __PG2ARROW__
 		  "      --inner-join=SUB_COMMAND\n"
@@ -557,7 +563,10 @@ parse_options(int argc, char * const argv[])
 					Elog("-c option was supplied twice");
 				if (meet_table)
 					Elog("-c and -t options are exclusive");
-				sqldb_command = optarg;
+				if (strncmp(optarg, "file://", 7) == 0)
+					sqldb_command = read_sql_command_from_file(optarg + 7);
+				else
+					sqldb_command = optarg;
 				break;
 
 			case 't':
