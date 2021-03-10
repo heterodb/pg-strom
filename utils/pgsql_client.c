@@ -486,6 +486,8 @@ pgsql_setup_attribute(PGconn *conn,
 					  Oid typelemid,    /* valid, if array type */
 					  const char *nspname,
 					  const char *typname,
+					  const char *extname,	/* extension name, if any */
+					  const char *extschema,/* extension schema, if relocatable */
 					  ArrowField *arrow_field,
 					  int *p_numFieldNodes,
 					  int *p_numBuffers)
@@ -504,6 +506,8 @@ pgsql_setup_attribute(PGconn *conn,
 										  typrelid,
 										  typelemid,
 										  server_timezone,
+										  extname,
+										  extschema,
 										  arrow_field);
 	if (typrelid != InvalidOid)
 	{
@@ -529,6 +533,27 @@ pgsql_setup_attribute(PGconn *conn,
 	}
 }
 
+#define WITH_RECURSIVE_PG_BASE_TYPE								\
+	"WITH RECURSIVE pg_base_type AS ("							\
+	"  SELECT 0 depth, oid type_id, oid base_id,"				\
+	"         typname, typnamespace,"							\
+	"         typlen, typbyval, typalign, typtype,"				\
+	"         typrelid, typelem, NULL::int typtypmod"			\
+	"    FROM pg_catalog.pg_type t"								\
+	"   WHERE t.typbasetype = 0"								\
+	"UNION ALL"													\
+	"  SELECT b.depth+1, t.oid type_id, b.base_id,"				\
+	"         b.typname, b.typnamespace,"						\
+	"         b.typlen, b.typbyval, b.typalign, b.typtype,"		\
+	"         b.typrelid, b.typelem,"							\
+	"         CASE WHEN b.typtypmod IS NULL"					\
+	"              THEN t.typtypmod"							\
+	"              ELSE b.typtypmod"							\
+	"         END typtypmod"									\
+	"    FROM pg_catalog.pg_type t, pg_base_type b"				\
+	"   WHERE t.typbasetype = b.type_id"						\
+	")\n"
+
 /*
  * pgsql_setup_composite_type
  */
@@ -547,14 +572,41 @@ pgsql_setup_composite_type(PGconn *conn,
 	int			j, nfields;
 
 	snprintf(query, sizeof(query),
-			 "SELECT attname, attnum, atttypid, atttypmod, attlen,"
-			 "       attbyval, attalign, typtype, typrelid, typelem,"
-			 "       nspname, typname"
+			 WITH_RECURSIVE_PG_BASE_TYPE
+			 "SELECT a.attname,"
+			 "       a.attnum,"
+			 "       b.base_id atttypid,"
+			 "       CASE WHEN b.typtypmod IS NULL"
+			 "            THEN a.atttypmod"
+			 "            ELSE b.typtypmod"
+			 "       END atttypmod,"
+			 "       b.typlen,"
+			 "       b.typbyval,"
+			 "       b.typalign,"
+			 "       b.typtype,"
+			 "       b.typrelid,"
+			 "       b.typelem,"
+			 "       n.nspname,"
+			 "       b.typname,"
+			 "       e.extname,"
+			 "       CASE WHEN e.extrelocatable"
+			 "            THEN e.extnamespace::regnamespace::text"
+			 "            ELSE NULL::text"
+			 "       END extnamespace"
 			 "  FROM pg_catalog.pg_attribute a,"
-			 "       pg_catalog.pg_type t,"
-			 "       pg_catalog.pg_namespace n"
-			 " WHERE t.typnamespace = n.oid"
-			 "   AND a.atttypid = t.oid"
+			 "       pg_catalog.pg_namespace n,"
+			 "       pg_base_type b"
+			 "  LEFT OUTER JOIN"
+			 "      (pg_catalog.pg_depend d JOIN"
+			 "       pg_catalog.pg_extension e ON"
+			 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+			 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+			 "       d.refobjid = e.oid AND"
+			 "       d.deptype = 'e')"
+			 "    ON b.base_id = d.objid"
+			 " WHERE b.typnamespace = n.oid"
+			 "   AND b.type_id = a.atttypid"
+			 "   AND a.attnum > 0"
 			 "   AND a.attrelid = %u", comptype_relid);
 	res = PQexec(conn, query);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -580,6 +632,8 @@ pgsql_setup_composite_type(PGconn *conn,
 		const char *typelem   = PQgetvalue(res, j, 9);
 		const char *nspname   = PQgetvalue(res, j, 10);
 		const char *typname   = PQgetvalue(res, j, 11);
+		const char *extname   = PQgetvalue(res, j, 12);
+		const char *extschema = PQgetvalue(res, j, 13);
 		ArrowField *sub_field = NULL;
 		int			index     = atoi(attnum);
 
@@ -601,6 +655,8 @@ pgsql_setup_composite_type(PGconn *conn,
 							  atooid(typelem),
 							  nspname,
 							  typname,
+							  extname,
+							  extschema,
 							  sub_field,
 							  p_numFieldNodes,
 							  p_numBuffers);
@@ -623,22 +679,48 @@ pgsql_setup_array_element(PGconn *conn,
 	char			query[4096];
 	const char     *nspname;
 	const char	   *typname;
+	const char	   *typemod;
 	const char	   *typlen;
 	const char	   *typbyval;
 	const char	   *typalign;
 	const char	   *typtype;
 	const char	   *typrelid;
 	const char	   *typelem;
+	const char	   *extname;
+	const char	   *extschema;
 	ArrowField	   *elem_field = NULL;
 
 	snprintf(query, sizeof(query),
-			 "SELECT nspname, typname,"
-			 "       typlen, typbyval, typalign, typtype,"
-			 "       typrelid, typelem"
-			 "  FROM pg_catalog.pg_type t,"
-			 "       pg_catalog.pg_namespace n"
-			 " WHERE t.typnamespace = n.oid"
-			 "   AND t.oid = %u", typelemid);
+			 WITH_RECURSIVE_PG_BASE_TYPE
+			 "SELECT n.nspname,"
+			 "       b.typname,"
+			 "       CASE WHEN b.typtypmod IS NULL"
+			 "            THEN -1::int"
+			 "            ELSE b.typtypmod"
+			 "       END typtypmod,"
+			 "       b.typlen,"
+			 "       b.typbyval,"
+			 "       b.typalign,"
+			 "       b.typtype,"
+			 "       b.typrelid,"
+			 "       b.typelem,"
+			 "       e.extname,"
+			 "       CASE WHEN e.extrelocatable"
+			 "            THEN e.extnamespace::regnamespace::text"
+			 "            ELSE NULL::text"
+			 "       END extnamespace"
+			 "  FROM pg_catalog.pg_namespace n,"
+			 "       pg_base_type b"
+			 "  LEFT OUTER JOIN"
+			 "      (pg_catalog.pg_depend d JOIN"
+			 "       pg_catalog.pg_extension e ON"
+			 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+			 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+			 "       d.refobjid = e.oid AND"
+			 "       d.deptype = 'e')"
+			 "    ON b.base_id = d.objid"
+			 " WHERE b.typnamespace = n.oid"
+			 "   AND b.type_id = %u", typelemid);
 	res = PQexec(conn, query);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		Elog("failed on pg_type system catalog query: %s",
@@ -647,12 +729,15 @@ pgsql_setup_array_element(PGconn *conn,
 		Elog("unexpected number of result rows: %d", PQntuples(res));
 	nspname  = PQgetvalue(res, 0, 0);
 	typname  = PQgetvalue(res, 0, 1);
-	typlen   = PQgetvalue(res, 0, 2);
-	typbyval = PQgetvalue(res, 0, 3);
-	typalign = PQgetvalue(res, 0, 4);
-	typtype  = PQgetvalue(res, 0, 5);
-	typrelid = PQgetvalue(res, 0, 6);
-	typelem  = PQgetvalue(res, 0, 7);
+	typemod  = PQgetvalue(res, 0, 2);
+	typlen   = PQgetvalue(res, 0, 3);
+	typbyval = PQgetvalue(res, 0, 4);
+	typalign = PQgetvalue(res, 0, 5);
+	typtype  = PQgetvalue(res, 0, 6);
+	typrelid = PQgetvalue(res, 0, 7);
+	typelem  = PQgetvalue(res, 0, 8);
+	extname  = PQgetvalue(res, 0, 9);
+	extschema = PQgetvalue(res, 0, 10);
 
 	if (arrow_field)
 	{
@@ -665,7 +750,7 @@ pgsql_setup_array_element(PGconn *conn,
 						  element,
 						  typname,
 						  typelemid,
-						  -1,
+						  atoi(typemod),
 						  atoi(typlen),
 						  pg_strtobool(typbyval),
 						  pg_strtochar(typalign),
@@ -674,6 +759,8 @@ pgsql_setup_array_element(PGconn *conn,
 						  atooid(typelem),
 						  nspname,
 						  typname,
+						  extname,
+						  extschema,
 						  elem_field,
 						  p_numFieldNode,
 						  p_numBuffers);
@@ -729,6 +816,9 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		const char *typelem;
 		const char *nspname;
 		const char *typname;
+		const char *typemod;
+		const char *extname;
+		const char *extschema;
 		ArrowField *arrow_field = NULL;
 
 		if (j == PQnfields(res))
@@ -740,32 +830,58 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		attname = PQfname(res, j);
 		atttypid = PQftype(res, j);
 		atttypmod = PQfmod(res, j);
-		
+
 		snprintf(query, sizeof(query),
-				 "SELECT typlen, typbyval, typalign, typtype,"
-				 "       typrelid, typelem, nspname, typname"
-				 "  FROM pg_catalog.pg_type t,"
-				 "       pg_catalog.pg_namespace n"
-				 " WHERE t.typnamespace = n.oid"
-				 "   AND t.oid = %u", atttypid);
+				 WITH_RECURSIVE_PG_BASE_TYPE
+				 "SELECT n.nspname,"
+				 "       b.typname,"
+				 "       b.typtypmod,"
+				 "       b.typlen,"
+				 "       b.typbyval,"
+				 "       b.typalign,"
+				 "       b.typtype,"
+				 "       b.typrelid,"
+				 "       b.typelem,"
+				 "       e.extname,"
+				 "       CASE WHEN e.extrelocatable"
+				 "            THEN e.extnamespace::regnamespace::text"
+				 "            ELSE NULL::text"
+				 "       END extnamespace"
+				 "  FROM pg_catalog.pg_namespace n,"
+				 "       pg_base_type b"
+				 "  LEFT OUTER JOIN"
+				 "      (pg_catalog.pg_depend d JOIN"
+				 "       pg_catalog.pg_extension e ON"
+				 "       d.classid = 'pg_catalog.pg_type'::regclass AND"
+				 "       d.refclassid = 'pg_catalog.pg_extension'::regclass AND"
+				 "       d.refobjid = e.oid AND"
+				 "       d.deptype = 'e')"
+				 "    ON b.base_id = d.objid"
+				 " WHERE b.typnamespace = n.oid"
+				 "   AND b.type_id = %u", atttypid);
 		__res = PQexec(conn, query);
 		if (PQresultStatus(__res) != PGRES_TUPLES_OK)
 			Elog("failed on pg_type system catalog query: %s",
 				 PQresultErrorMessage(res));
 		if (PQntuples(__res) != 1)
 			Elog("unexpected number of result rows: %d", PQntuples(__res));
-		typlen   = PQgetvalue(__res, 0, 0);
-		typbyval = PQgetvalue(__res, 0, 1);
-		typalign = PQgetvalue(__res, 0, 2);
-		typtype  = PQgetvalue(__res, 0, 3);
-		typrelid = PQgetvalue(__res, 0, 4);
-		typelem  = PQgetvalue(__res, 0, 5);
-		nspname  = PQgetvalue(__res, 0, 6);
-		typname  = PQgetvalue(__res, 0, 7);
+		nspname  = PQgetvalue(__res, 0, 0);
+		typname  = PQgetvalue(__res, 0, 1);
+		typemod  = PQgetvalue(__res, 0, 2);
+		if (typemod)
+			atttypmod = atoi(typemod);
+		typlen   = PQgetvalue(__res, 0, 3);
+		typbyval = PQgetvalue(__res, 0, 4);
+		typalign = PQgetvalue(__res, 0, 5);
+		typtype  = PQgetvalue(__res, 0, 6);
+		typrelid = PQgetvalue(__res, 0, 7);
+		typelem  = PQgetvalue(__res, 0, 8);
+		extname  = PQgetvalue(__res, 0, 9);
+		extschema = PQgetvalue(__res, 0, 10);
 
 		if (af_info)
 			arrow_field = &af_info->footer.schema.fields[j];
-		
+
 		pgsql_setup_attribute(conn,
 							  table,
 							  &table->columns[i],
@@ -780,6 +896,8 @@ pgsql_create_buffer(PGSTATE *pgstate,
 							  atoi(typelem),
 							  nspname,
 							  typname,
+							  extname,
+							  extschema,
 							  arrow_field,
 							  &table->numFieldNodes,
 							  &table->numBuffers);

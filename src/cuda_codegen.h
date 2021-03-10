@@ -20,6 +20,7 @@
 #include "nodes/pathnodes.h"
 #include "nodes/primnodes.h"
 #include "utils/typcache.h"
+#include "arrow_defs.h"
 
 /*
  * Type declarations for code generator
@@ -166,14 +167,40 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
  */
 #define PGSTROM_USERS_EXTRA_MAGIC_V1	(0x20210227U)
 
+struct kern_data_store;
+struct kern_colmeta;
+
+/*
+ * pgstromUsersExtraDescriptor
+ */
 typedef struct
 {
 	uint32		magic;			/* PGSTROM_USERS_EXTRA_MAGIC_V1 */
 	uint32		pg_version;		/* PG_VERSION built for */
 	uint32		extra_flags;
+	/*
+	 * extra_name is an identifier of the user's extra module.
+	 * - "<extra_name>.h" shall be included by the code generator.
+	 * - "<extra_name>.fatbin" shall be linked by the JIT linker.
+	 */
 	const char *extra_name;
+
+	/*
+	 * lookup_extra_devtype() can tell PG-Strom whether the supplied data type
+	 * is device-supported by the user's extra module.
+	 * If no supported type by the extra module, return NULL.
+	 */
 	devtype_info *(*lookup_extra_devtype)(MemoryContext memcxt,
 										  TypeCacheEntry *tcache);
+	/*
+	 * lookup_extra_devfunc() can tell PG-Strom whether the supplied function
+	 * is device-supported by the user's extra module.
+	 * Note that data type of the arguments are not always identical to the
+	 * definition of functions, if argument type has binary compatible types.
+	 * The devfunc_info should be built to satisfy dfunc_rettype and
+	 * dfunc_argtypes, not function's declaration at proc_form.
+	 * If no supported function by the extra module, return NULL.
+	 */
 	devfunc_info *(*lookup_extra_devfunc)(MemoryContext memcxt,
 										  Oid proc_oid,
 										  Form_pg_proc proc_form,
@@ -181,9 +208,37 @@ typedef struct
 										  int dfunc_nargs,
 										  devtype_info **dfunc_argtypes,
 										  Oid func_collid);
+
+	/*
+	 * lookup_extra_devcast() can tell PG-Strom whether the supplied cast
+	 * from the source to the destination is device-supported by the user's
+	 * extra module.
+	 * If no supported cast by the extra module, return NULL.
+	 */
 	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
 										  devtype_info *dtype_src,
 										  devtype_info *dtype_dst);
+	/*
+	 * arrow_lookup_pgtype() can tell PG-Strom a PostgreSQL type that shall
+	 * assign on the supplied ArrowField. It can reference 'hint_oid' that
+	 * is the 'pg_type' field metadata.
+	 * If no relevant type by the extra module, return InvalidOid.
+	 */
+	Oid		  (*arrow_lookup_pgtype)(ArrowField *field,
+									 Oid hint_oid,	/* pg_type metadata */
+									 int32 *p_type_mod);
+
+	/*
+	 * arrow_datum_ref() shall reference an arrow value in the data type
+	 * that is mapped to a particular PG type by the arrow_lookup_pgtype().
+	 * This is CPU part, thus, its device code also needs to have own
+	 * handlers to support device types. (Typically, declared at "EXTRA_NAME.h")
+	 */
+	bool	  (*arrow_datum_ref)(struct kern_data_store *kds,
+								 struct kern_colmeta *cmeta,
+								 size_t index,
+								 Datum *p_value,
+								 bool *p_isnull);
 } pgstromUsersExtraDescriptor;
 
 extern uint32	pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *desc);
