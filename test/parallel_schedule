@@ -23,6 +23,11 @@ test: pgstrom_guc
 test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb dtype_range
 
 # ----------
+# Test for additional data types
+# ----------
+test: additional_dtype
+
+# ----------
 # Test for various functions / expressions
 # ----------
 test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
