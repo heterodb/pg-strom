@@ -97,6 +97,7 @@ PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                   -I $(shell $(PG_CONFIG) --includedir) \
                   -I $(shell $(PG_CONFIG) --includedir-server) \
                   -L $(shell $(PG_CONFIG) --libdir) \
+                  -L $(shell $(PG_CONFIG) --pkglibdir) \
                   $(shell $(PG_CONFIG) --ldflags)
 
 MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
@@ -124,6 +125,7 @@ GSTORE_BACKUP_CFLAGS = -D_GNU_SOURCE -g -Wall \
                        -I $(shell $(PG_CONFIG) --includedir) \
                        -I $(shell $(PG_CONFIG) --includedir-server) \
                        -L $(shell $(PG_CONFIG) --libdir) \
+                       -L $(shell $(PG_CONFIG) --pkglibdir) \
                        $(shell $(PG_CONFIG) --ldflags)
 GSTORE_BACKUP_DEPEND = $(GSTORE_BACKUP_SOURCE) \
                        $(STROM_BUILD_ROOT)/src/gstore_fdw.h

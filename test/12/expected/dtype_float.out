@@ -278,7 +278,7 @@ SELECT id, a/b v1, a/d v2, a/f v3,
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
    Output: id, ((a / b)), ((a / d)), ((a / f)), ((c / b)), ((c / d)), ((c / f)), ((e / b)), ((e / d)), ((e / f))
    GPU Projection: rt_float.id, (rt_float.a / rt_float.b), (rt_float.a / rt_float.d), (rt_float.a / rt_float.f), (rt_float.c / rt_float.b), (rt_float.c / rt_float.d), (rt_float.c / rt_float.f), (rt_float.e / rt_float.b), (rt_float.e / rt_float.d), (rt_float.e / rt_float.f)
-   GPU Filter: ((rt_float.z >= '-16000'::integer) AND (rt_float.z <= 16000) AND (rt_float.d <> '0'::double precision) AND (rt_float.f <> '0'::double precision) AND (rt_float.b <> '0'::double precision))
+   GPU Filter: ((rt_float.z >= '-16000'::integer) AND (rt_float.z <= 16000) AND (rt_float.b <> '0'::double precision) AND (rt_float.d <> '0'::double precision) AND (rt_float.f <> '0'::double precision))
 (4 rows)
 
 SELECT id, a/b v1, a/d v2, a/f v3,

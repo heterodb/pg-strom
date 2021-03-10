@@ -543,14 +543,9 @@ pgstrom_register_users_extra(const pgstromUsersExtraDescriptor *__desc)
 	extra_flags = (1U << (pgstrom_num_users_extra + 24));
 
 	desc = &pgstrom_users_extra_desc[pgstrom_num_users_extra++];
-	desc->magic			= __desc->magic;
-	desc->pg_version	= __desc->pg_version;
-	desc->extra_flags	= extra_flags;
-	desc->extra_name	= extra_name;
-	desc->lookup_extra_devtype = __desc->lookup_extra_devtype;
-	desc->lookup_extra_devfunc = __desc->lookup_extra_devfunc;
-	desc->lookup_extra_devcast = __desc->lookup_extra_devcast;
-
+	memcpy(desc, __desc, sizeof(pgstromUsersExtraDescriptor));
+	desc->extra_flags = extra_flags;
+	desc->extra_name  = extra_name;
 	elog(LOG, "PG-Strom users's extra [%s] registered", extra_name);
 	
 	return extra_flags;

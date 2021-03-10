@@ -802,7 +802,7 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 #define TYPE_KIND__PSEUDO		'p'
 #define TYPE_KIND__RANGE		'r'
 
-typedef struct {
+struct kern_colmeta {
 	/* true, if column is held by value. Elsewhere, a reference */
 	cl_char			attbyval;
 	/* alignment; 1,2,4 or 8, not characters in pg_attribute */
@@ -850,27 +850,30 @@ typedef struct {
 	cl_uint			values_length;
 	cl_uint			extra_offset;
 	cl_uint			extra_length;
-} kern_colmeta;
+};
+typedef struct kern_colmeta		kern_colmeta;
 
 /*
  * kern_tupitem - individual items for KDS_FORMAT_ROW
  */
-typedef struct
+struct kern_tupitem
 {
 	cl_uint			t_len;		/* length of tuple */
 	cl_uint			rowid;		/* unique Id of this item */
 	HeapTupleHeaderData	htup;
-} kern_tupitem;
+};
+typedef struct kern_tupitem		kern_tupitem;
 
 /*
  * kern_hashitem - individual items for KDS_FORMAT_HASH
  */
-typedef struct
+struct kern_hashitem
 {
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next (PACKED) */
 	kern_tupitem		t;		/* HeapTuple of this entry */
-} kern_hashitem;
+};
+typedef struct kern_hashitem	kern_hashitem;
 
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_SLOT			2
@@ -879,7 +882,7 @@ typedef struct
 #define KDS_FORMAT_COLUMN		5	/* columnar based storage format */
 #define KDS_FORMAT_ARROW		6	/* apache arrow format */
 
-typedef struct {
+struct kern_data_store {
 	size_t			length;		/* length of this data-store */
 	/*
 	 * NOTE: {nitems + usage} must be aligned to 64bit because these pair of
@@ -910,18 +913,20 @@ typedef struct {
 	cl_uint			nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
-} kern_data_store;
+};
+typedef struct kern_data_store		kern_data_store;
 
 /*
  * kern_data_extra - extra buffer of KDS_FORMAT_COLUMN
  */
-typedef struct
+struct kern_data_extra
 {
 	char		signature[8];	/* signature on the base file */
 	cl_ulong	length;
 	cl_ulong	usage;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
-} kern_data_extra;
+};
+typedef struct kern_data_extra		kern_data_extra;
 
 /* attribute number of system columns */
 #ifndef SYSATTR_H

@@ -2637,14 +2637,29 @@ __arrowStructTypeIsCompatible(ArrowField *field, Oid comp_oid)
 }
 
 static Oid
-arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
+arrowTypeToPGTypeOid(ArrowField *field, int *p_type_mod)
 {
 	ArrowType  *t = &field->type;
 	Oid			hint_oid;
+	int			i;
 
 	hint_oid = arrowFieldGetPGTypeHint(field);
 
-	*typmod = -1;
+	/* extra module may provide own mapping */
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+		Oid		type_oid;
+
+		if (extra->arrow_lookup_pgtype)
+		{
+			type_oid = extra->arrow_lookup_pgtype(field, hint_oid, p_type_mod);
+			if (OidIsValid(type_oid))
+				return type_oid;
+		}
+	}
+
+	*p_type_mod = -1;
 	switch (t->node.tag)
 	{
 		case ArrowNodeTag__Int:
@@ -2775,7 +2790,7 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 			{
 				return INETOID;
 			}
-			*typmod = t->FixedSizeBinary.byteWidth;
+			*p_type_mod = t->FixedSizeBinary.byteWidth;
 			return BPCHAROID;
 		default:
 			elog(ERROR, "arrow_fdw: type '%s' is not supported",
@@ -2815,6 +2830,9 @@ arrowTypeToPGTypeName(ArrowField *field)
 
 	return result;
 }
+
+#if 0
+//no longer needed?
 
 /*
  * arrowTypeIsConvertible
@@ -2880,6 +2898,7 @@ arrowTypeIsConvertible(Oid type_oid, int typemod)
 	}
 	return retval;
 }
+#endif
 
 /*
  * arrowFieldLength
@@ -3502,6 +3521,8 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	}
 	else
 	{
+		int		i;
+
 		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
@@ -3553,8 +3574,17 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				datum = pg_inet_arrow_ref(kds, cmeta, index);
 				break;
 			default:
-				elog(ERROR, "Bug? unexpected datum type: %u",
-					 cmeta->atttypid);
+				for (i=0; i < pgstrom_num_users_extra; i++)
+				{
+					pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+					if (extra->arrow_datum_ref &&
+						extra->arrow_datum_ref(kds, cmeta, index, &datum, &isnull))
+					{
+						goto out;
+					}
+				}
+				elog(ERROR, "Bug? unexpected datum type: %u", cmeta->atttypid);
 				break;
 		}
 		isnull = false;
@@ -3810,6 +3840,7 @@ arrow_fdw_precheck_schema(Relation rel)
 	List		   *filesList;
 	ListCell	   *lc;
 	bool			writable;
+#if 0
 	int				j;
 
 	/* check schema definition is supported by Apache Arrow */
@@ -3824,7 +3855,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 RelationGetRelationName(rel),
 				 format_type_be(attr->atttypid));
 	}
-
+#endif
 	filesList = __arrowFdwExtractFilesList(ft->options,
 										   NULL,
 										   &writable);
@@ -4350,6 +4381,50 @@ retry:
 }
 
 /*
+ * lookup_type_extension_info
+ */
+static void
+lookup_type_extension_info(Oid type_oid,
+						   const char **p_extname,
+						   const char **p_extschema)
+{
+	Oid		ext_oid;
+	char   *extname = NULL;
+	char   *extschema = NULL;
+
+	ext_oid = get_object_extension_oid(TypeRelationId,
+									   type_oid, 0, true);
+	if (OidIsValid(ext_oid))
+	{
+		Relation	rel;
+		SysScanDesc	sscan;
+		ScanKeyData	skey;
+		HeapTuple	tup;
+
+		rel = table_open(ExtensionRelationId, AccessShareLock);
+		ScanKeyInit(&skey,
+					Anum_pg_extension_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(ext_oid));
+		sscan = systable_beginscan(rel, ExtensionOidIndexId,
+								   true, NULL, 1, &skey);
+		tup = systable_getnext(sscan);
+		if (HeapTupleIsValid(tup))
+		{
+			Form_pg_extension __ext = (Form_pg_extension) GETSTRUCT(tup);
+
+			extname = pstrdup(NameStr(__ext->extname));
+			if (__ext->extrelocatable)
+				extschema = get_namespace_name(__ext->extnamespace);
+		}
+		systable_endscan(sscan);
+		table_close(rel, AccessShareLock);
+	}
+	*p_extname = extname;
+	*p_extschema = extschema;
+}
+
+/*
  * setupArrowSQLbufferSchema
  */
 static void
@@ -4357,36 +4432,53 @@ __setupArrowSQLbufferField(SQLtable *table,
 						   SQLfield *column,
 						   const char *attname,
 						   Oid atttypid,
-						   int atttypmod)
+						   int32 atttypmod)
 {
 	HeapTuple		tup;
-	Form_pg_type	typ;
+	Form_pg_type	__type;
+	const char	   *typname;
 	const char	   *typnamespace;
 	const char	   *timezone = show_timezone();
+	const char	   *extname;
+	const char	   *extschema;
 
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type: %u", atttypid);
-	typ = (Form_pg_type) GETSTRUCT(tup);
-	typnamespace = get_namespace_name(typ->typnamespace);
-
+	/* walk down to the base type, if domain */
+	for (;;)
+	{
+		tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for type: %u", atttypid);
+		__type = (Form_pg_type) GETSTRUCT(tup);
+		if (__type->typtype != TYPTYPE_DOMAIN)
+			break;
+		atttypid = __type->typbasetype;
+		atttypmod = __type->typtypmod;
+		ReleaseSysCache(tup);
+	}
+	typname = NameStr(__type->typname);
+	typnamespace = get_namespace_name(__type->typnamespace);
+	lookup_type_extension_info(atttypid,
+							   &extname,
+							   &extschema);
 	table->numFieldNodes++;
     table->numBuffers +=
 		assignArrowTypePgSQL(column,
 							 attname,
 							 atttypid,
 							 atttypmod,
-							 NameStr(typ->typname),
+							 typname,
 							 typnamespace,
-							 typ->typlen,
-							 typ->typbyval,
-							 typ->typtype,
-							 typ->typalign,
-							 typ->typrelid,
-							 typ->typelem,
+							 __type->typlen,
+							 __type->typbyval,
+							 __type->typtype,
+							 __type->typalign,
+							 __type->typrelid,
+							 __type->typelem,
 							 timezone,
+							 extname,
+							 extschema,
 							 NULL);
-	if (OidIsValid(typ->typelem))
+	if (OidIsValid(__type->typelem))
 	{
 		/* array type */
 		char		elem_name[NAMEDATALEN+10];
@@ -4396,10 +4488,10 @@ __setupArrowSQLbufferField(SQLtable *table,
 		__setupArrowSQLbufferField(table,
 								   column->element,
 								   elem_name,
-								   typ->typelem,
+								   __type->typelem,
 								   -1);
 	}
-	else if (OidIsValid(typ->typrelid))
+	else if (OidIsValid(__type->typrelid))
 	{
 		/* composite type */
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
@@ -4418,7 +4510,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 		}
 		ReleaseTupleDesc(tupdesc);
 	}
-	else if (typ->typtype == 'e')
+	else if (__type->typtype == 'e')
 	{
 		elog(ERROR, "Enum type is not supported right now");
 	}

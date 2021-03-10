@@ -315,6 +315,60 @@ get_proc_library(HeapTuple protup)
 }
 
 /*
+ * get_object_extension_oid
+ */
+Oid
+get_object_extension_oid(Oid class_id,
+						 Oid object_id,
+						 int32 objsub_id,
+						 bool missing_ok)
+{
+	Relation	drel;
+	ScanKeyData	skeys[3];
+	SysScanDesc	sscan;
+	HeapTuple	tup;
+	Oid			ext_oid = InvalidOid;
+
+	drel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&skeys[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(class_id));
+	ScanKeyInit(&skeys[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(object_id));
+	ScanKeyInit(&skeys[2],
+				Anum_pg_depend_objsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(objsub_id));
+	sscan = systable_beginscan(drel, DependDependerIndexId, true,
+							   NULL, 3, skeys);
+	while (HeapTupleIsValid(tup = systable_getnext(sscan)))
+	{
+		Form_pg_depend	dep = (Form_pg_depend) GETSTRUCT(tup);
+
+		if (dep->refclassid == ExtensionRelationId &&
+			dep->refobjsubid == 0 &&
+			(dep->deptype == DEPENDENCY_EXTENSION ||
+			 dep->deptype == DEPENDENCY_AUTO_EXTENSION))
+		{
+			ext_oid = dep->refobjid;
+			break;
+		}
+	}
+	systable_endscan(sscan);
+	table_close(drel, AccessShareLock);
+
+	if (!missing_ok && !OidIsValid(ext_oid))
+		elog(ERROR, "couldn't find out references (class:%u, objid:%u, subid:%d) by pg_extension at pg_depend",
+			 class_id, object_id, objsub_id);
+
+	return ext_oid;
+}
+
+/*
  * bms_to_cstring - human readable Bitmapset
  */
 char *
