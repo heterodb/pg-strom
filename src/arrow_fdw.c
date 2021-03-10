@@ -765,6 +765,9 @@ assignArrowTypeOptions(ArrowTypeOptions *attopts, const ArrowType *atype)
 			else
 				elog(ERROR, "unknown unit of Interval");
 			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			attopts->fixed_size_binary.byteWidth = atype->FixedSizeBinary.byteWidth;
+			break;
 		default:
 			/* no extra attributes */
 			break;
@@ -1308,6 +1311,42 @@ __dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
 /*
  * arrowFdwLoadRecordBatch
  */
+static void
+__arrowFdwAssignTypeOptions(kern_data_store *kds,
+							int base, int ncols,
+							RecordBatchFieldState *rb_fstate)
+{
+	int		i;
+
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[base+i];
+
+		cmeta->attopts = rb_fstate[i].attopts;
+		if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+		{
+			Assert(cmeta->idx_subattrs >= kds->ncols &&
+				   cmeta->num_subattrs == 1 &&
+				   cmeta->idx_subattrs + cmeta->num_subattrs <= kds->nr_colmeta);
+			Assert(rb_fstate[i].num_children == 1);
+			__arrowFdwAssignTypeOptions(kds,
+										cmeta->idx_subattrs,
+										cmeta->num_subattrs,
+										rb_fstate[i].children);
+		}
+		else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
+		{
+			Assert(cmeta->idx_subattrs >= kds->ncols &&
+				   cmeta->idx_subattrs + cmeta->num_subattrs <= kds->nr_colmeta);
+			Assert(rb_fstate[i].num_children == cmeta->num_subattrs);
+			__arrowFdwAssignTypeOptions(kds,
+										cmeta->idx_subattrs,
+										cmeta->num_subattrs,
+										rb_fstate[i].children);
+		}
+	}
+}
+
 static pgstrom_data_store *
 __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 						  Relation relation,
@@ -1321,7 +1360,6 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	kern_data_store	   *kds;
 	strom_io_vector	   *iovec;
 	size_t				head_sz;
-	int					j;
 	CUresult			rc;
 
 	/* setup KDS and I/O-vector */
@@ -1332,8 +1370,8 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	kds->nrooms = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
 	Assert(head_sz == KERN_DATA_STORE_HEAD_LENGTH(kds));
-	for (j=0; j < kds->nr_colmeta; j++)
-		kds->colmeta[j].attopts = rb_state->columns[j].attopts;
+	Assert(kds->ncols == rb_state->ncols);
+	__arrowFdwAssignTypeOptions(kds, 0, kds->ncols, rb_state->columns);
 	iovec = arrowFdwSetupIOvector(kds, rb_state, referenced);
 	__dump_kds_and_iovec(kds, iovec);
 
@@ -2504,16 +2542,131 @@ arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 }
 
 static Oid
-arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
+arrowFieldGetPGTypeHint(ArrowField *field)
+{
+	Oid		hint_oid = InvalidOid;
+	int		i, j;
+
+	for (i=0; i < field->_num_custom_metadata; i++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[i];
+		char	   *namebuf, *pos;
+		Oid			namespace_oid;
+		HeapTuple	tup;
+
+		if (kv->_key_len != 7 || strncmp(kv->key, "pg_type", 7) != 0)
+			continue;
+		namebuf = alloca(kv->_value_len + 10);
+		/* namespace name */
+		pos = namebuf;
+		for (j=0; j < kv->_value_len; j++)
+		{
+			int		c = kv->value[j];
+
+			if (c == '.')
+				break;
+			else if (c == '\\' && ++j < kv->_value_len)
+				c = kv->value[j];
+			*pos++ = c;
+		}
+		*pos++ = '\0';
+
+		namespace_oid = get_namespace_oid(namebuf, true);
+		if (!OidIsValid(namespace_oid))
+			continue;
+
+		/* type name */
+		pos = namebuf;
+		for (j++; j < kv->_value_len; j++)
+		{
+			int		c = kv->value[j];
+
+			if (c == '\\' && ++j < kv->_value_len)
+				c = kv->value[j];
+			*pos++ = c;
+		}
+		*pos++ = '\0';
+
+		tup = SearchSysCache2(TYPENAMENSP,
+							  PointerGetDatum(namebuf),
+							  ObjectIdGetDatum(namespace_oid));
+		if (!HeapTupleIsValid(tup))
+			continue;
+		hint_oid = PgTypeTupleGetOid(tup);
+
+		ReleaseSysCache(tup);
+
+		return hint_oid;
+	}
+	return InvalidOid;
+}
+
+static bool
+__arrowStructTypeIsCompatible(ArrowField *field, Oid comp_oid)
+{
+	TupleDesc	tupdesc;
+	int			j;
+	bool		compatible = false;
+
+	if (pg_type_aclcheck(comp_oid,
+						 GetUserId(),
+						 ACL_USAGE) != ACLCHECK_OK)
+		return false;
+
+	tupdesc = lookup_rowtype_tupdesc_noerror(comp_oid, -1, true);
+	if (tupdesc && tupdesc->natts == field->_num_children)
+	{
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+			ArrowField *child = &field->children[j];
+			Oid			typoid;
+			int			typmod;
+
+			typoid = arrowTypeToPGTypeOid(child, &typmod);
+			if (typoid != attr->atttypid)
+				break;
+		}
+		if (j >= tupdesc->natts)
+			compatible = true;
+	}
+	if (tupdesc)
+		ReleaseTupleDesc(tupdesc);
+
+	return compatible;
+}
+
+static Oid
+arrowTypeToPGTypeOid(ArrowField *field, int *p_type_mod)
 {
 	ArrowType  *t = &field->type;
+	Oid			hint_oid;
+	int			i;
 
-	*typmod = -1;
+	hint_oid = arrowFieldGetPGTypeHint(field);
+
+	/* extra module may provide own mapping */
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+		Oid		type_oid;
+
+		if (extra->arrow_lookup_pgtype)
+		{
+			type_oid = extra->arrow_lookup_pgtype(field, hint_oid, p_type_mod);
+			if (OidIsValid(type_oid))
+				return type_oid;
+		}
+	}
+
+	*p_type_mod = -1;
 	switch (t->node.tag)
 	{
 		case ArrowNodeTag__Int:
 			switch (t->Int.bitWidth)
 			{
+				case 8:
+					return INT1OID;
 				case 16:
 					return INT2OID;
 				case 32:
@@ -2578,12 +2731,13 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 			break;
 
 		case ArrowNodeTag__Struct:
+			if (!OidIsValid(hint_oid) ||
+				!__arrowStructTypeIsCompatible(field, hint_oid))
 			{
 				Relation	rel;
 				ScanKeyData	skey[2];
 				SysScanDesc	sscan;
 				HeapTuple	tup;
-				Oid			type_oid = InvalidOid;
 
 				/*
 				 * lookup composite type definition from pg_class
@@ -2601,58 +2755,42 @@ arrowTypeToPGTypeOid(ArrowField *field, int *typmod)
 
 				sscan = systable_beginscan(rel, InvalidOid, false,
 										   NULL, 2, skey);
-				while (!OidIsValid(type_oid) &&
+				hint_oid = InvalidOid;
+				while (!OidIsValid(hint_oid) &&
 					   HeapTupleIsValid(tup = systable_getnext(sscan)))
 				{
-					Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tup);
-					TupleDesc	tupdesc;
-					int			j;
-					bool		compatible = true;
+					Oid		reltype = ((Form_pg_class) GETSTRUCT(tup))->reltype;
 
-					if (pg_namespace_aclcheck(relForm->relnamespace,
-											  GetUserId(),
-											  ACL_USAGE) != ACLCHECK_OK)
-						continue;
-
-					if (pg_type_aclcheck(relForm->reltype,
-										 GetUserId(),
-										 ACL_USAGE) != ACLCHECK_OK)
-						continue;
-
-					tupdesc = lookup_rowtype_tupdesc(relForm->reltype, -1);
-					Assert(tupdesc->natts == field->_num_children);
-					for (j=0; compatible && j < tupdesc->natts; j++)
-					{
-						Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-						ArrowField  *child = &field->children[j];
-						Oid			typoid;
-						int			typmod;
-
-						typoid = arrowTypeToPGTypeOid(child, &typmod);
-						if (typoid != attr->atttypid)
-							compatible = false;
-					}
-					ReleaseTupleDesc(tupdesc);
-
-					if (compatible)
-						type_oid = relForm->reltype;
+					if (__arrowStructTypeIsCompatible(field, reltype))
+						hint_oid = reltype;
 				}
 				systable_endscan(sscan);
 				table_close(rel, AccessShareLock);
 
-				if (!OidIsValid(type_oid))
+				if (!OidIsValid(hint_oid))
 					elog(ERROR, "arrow::%s is not supported",
 						 arrowNodeName(&t->node));
-				return type_oid;
 			}
-			break;
+			return hint_oid;
+
 		case ArrowNodeTag__FixedSizeBinary:
 			if (t->FixedSizeBinary.byteWidth < 1 ||
 				t->FixedSizeBinary.byteWidth > BLCKSZ)
 				elog(ERROR, "arrow_fdw: %s with byteWidth=%d is not supported",
 					 t->node.tagName,
 					 t->FixedSizeBinary.byteWidth);
-			*typmod = t->FixedSizeBinary.byteWidth;
+			if (hint_oid == MACADDROID &&
+				t->FixedSizeBinary.byteWidth == sizeof(macaddr))
+			{
+				return MACADDROID;
+			}
+			else if (hint_oid == INETOID &&
+					 (t->FixedSizeBinary.byteWidth == 4 ||
+					  t->FixedSizeBinary.byteWidth == 16))
+			{
+				return INETOID;
+			}
+			*p_type_mod = t->FixedSizeBinary.byteWidth;
 			return BPCHAROID;
 		default:
 			elog(ERROR, "arrow_fdw: type '%s' is not supported",
@@ -2693,6 +2831,9 @@ arrowTypeToPGTypeName(ArrowField *field)
 	return result;
 }
 
+#if 0
+//no longer needed?
+
 /*
  * arrowTypeIsConvertible
  */
@@ -2705,6 +2846,7 @@ arrowTypeIsConvertible(Oid type_oid, int typemod)
 
 	switch (type_oid)
 	{
+		case INT1OID:		/* Int8 */
 		case INT2OID:		/* Int16 */
 		case INT4OID:		/* Int32 */
 		case INT8OID:		/* Int64 */
@@ -2756,6 +2898,7 @@ arrowTypeIsConvertible(Oid type_oid, int typemod)
 	}
 	return retval;
 }
+#endif
 
 /*
  * arrowFieldLength
@@ -2771,14 +2914,17 @@ arrowFieldLength(ArrowField *field, int64 nitems)
 		case ArrowNodeTag__Int:
 			switch (type->Int.bitWidth)
 			{
-				case sizeof(cl_short) * BITS_PER_BYTE:
-					length = sizeof(cl_short) * nitems;
+				case 8:
+					length = nitems;
 					break;
-				case sizeof(cl_int) * BITS_PER_BYTE:
-					length = sizeof(cl_int) * nitems;
+				case 16:
+					length = 2 * nitems;
 					break;
-				case sizeof(cl_long) * BITS_PER_BYTE:
-					length = sizeof(cl_long) * nitems;
+				case 32:
+					length = 4 * nitems;
+					break;
+				case 64:
+					length = 8 * nitems;
 					break;
 				default:
 					elog(ERROR, "Not a supported Int width: %d",
@@ -3011,6 +3157,15 @@ pg_bool_arrow_ref(kern_data_store *kds,
 }
 
 static Datum
+pg_int1_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	cl_char	   *values = (cl_char *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	return values[index];
+}
+
+static Datum
 pg_int2_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
@@ -3160,6 +3315,46 @@ pg_interval_arrow_ref(kern_data_store *kds,
 			elog(ERROR, "Bug? unexpected unit of Interval type");
 	}
 	return PointerGetDatum(iv);
+}
+
+static Datum
+pg_macaddr_arrow_ref(kern_data_store *kds,
+					 kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+
+	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
+		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
+			 cmeta->attopts.fixed_size_binary.byteWidth);
+
+	return PointerGetDatum(base + sizeof(macaddr) * index);
+}
+
+static Datum
+pg_inet_arrow_ref(kern_data_store *kds,
+				  kern_colmeta *cmeta, size_t index)
+{
+	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	inet	   *ip = palloc(sizeof(inet));
+
+	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
+	{
+		ip->inet_data.family = PGSQL_AF_INET;
+		ip->inet_data.bits = 32;
+		memcpy(ip->inet_data.ipaddr, base + 4 * index, 4);
+	}
+	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
+	{
+		ip->inet_data.family = PGSQL_AF_INET6;
+		ip->inet_data.bits = 128;
+		memcpy(ip->inet_data.ipaddr, base + 16 * index, 16);
+	}
+	else
+		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for inet",
+			 cmeta->attopts.fixed_size_binary.byteWidth);
+
+	SET_INET_VARSIZE(ip);
+	return PointerGetDatum(ip);
 }
 
 static Datum
@@ -3326,9 +3521,14 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	}
 	else
 	{
+		int		i;
+
 		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
+			case INT1OID:
+				datum = pg_int1_arrow_ref(kds, cmeta, index);
+				break;
 			case INT2OID:
 			case FLOAT2OID:
 				datum = pg_int2_arrow_ref(kds, cmeta, index);
@@ -3367,9 +3567,24 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			case INTERVALOID:
 				datum = pg_interval_arrow_ref(kds, cmeta, index);
 				break;
+			case MACADDROID:
+				datum = pg_macaddr_arrow_ref(kds, cmeta, index);
+				break;
+			case INETOID:
+				datum = pg_inet_arrow_ref(kds, cmeta, index);
+				break;
 			default:
-				elog(ERROR, "Bug? unexpected datum type: %u",
-					 cmeta->atttypid);
+				for (i=0; i < pgstrom_num_users_extra; i++)
+				{
+					pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+					if (extra->arrow_datum_ref &&
+						extra->arrow_datum_ref(kds, cmeta, index, &datum, &isnull))
+					{
+						goto out;
+					}
+				}
+				elog(ERROR, "Bug? unexpected datum type: %u", cmeta->atttypid);
 				break;
 		}
 		isnull = false;
@@ -3625,6 +3840,7 @@ arrow_fdw_precheck_schema(Relation rel)
 	List		   *filesList;
 	ListCell	   *lc;
 	bool			writable;
+#if 0
 	int				j;
 
 	/* check schema definition is supported by Apache Arrow */
@@ -3639,7 +3855,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 RelationGetRelationName(rel),
 				 format_type_be(attr->atttypid));
 	}
-
+#endif
 	filesList = __arrowFdwExtractFilesList(ft->options,
 										   NULL,
 										   &writable);
@@ -4165,6 +4381,50 @@ retry:
 }
 
 /*
+ * lookup_type_extension_info
+ */
+static void
+lookup_type_extension_info(Oid type_oid,
+						   const char **p_extname,
+						   const char **p_extschema)
+{
+	Oid		ext_oid;
+	char   *extname = NULL;
+	char   *extschema = NULL;
+
+	ext_oid = get_object_extension_oid(TypeRelationId,
+									   type_oid, 0, true);
+	if (OidIsValid(ext_oid))
+	{
+		Relation	rel;
+		SysScanDesc	sscan;
+		ScanKeyData	skey;
+		HeapTuple	tup;
+
+		rel = table_open(ExtensionRelationId, AccessShareLock);
+		ScanKeyInit(&skey,
+					Anum_pg_extension_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(ext_oid));
+		sscan = systable_beginscan(rel, ExtensionOidIndexId,
+								   true, NULL, 1, &skey);
+		tup = systable_getnext(sscan);
+		if (HeapTupleIsValid(tup))
+		{
+			Form_pg_extension __ext = (Form_pg_extension) GETSTRUCT(tup);
+
+			extname = pstrdup(NameStr(__ext->extname));
+			if (__ext->extrelocatable)
+				extschema = get_namespace_name(__ext->extnamespace);
+		}
+		systable_endscan(sscan);
+		table_close(rel, AccessShareLock);
+	}
+	*p_extname = extname;
+	*p_extschema = extschema;
+}
+
+/*
  * setupArrowSQLbufferSchema
  */
 static void
@@ -4172,36 +4432,53 @@ __setupArrowSQLbufferField(SQLtable *table,
 						   SQLfield *column,
 						   const char *attname,
 						   Oid atttypid,
-						   int atttypmod)
+						   int32 atttypmod)
 {
 	HeapTuple		tup;
-	Form_pg_type	typ;
+	Form_pg_type	__type;
+	const char	   *typname;
 	const char	   *typnamespace;
 	const char	   *timezone = show_timezone();
+	const char	   *extname;
+	const char	   *extschema;
 
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type: %u", atttypid);
-	typ = (Form_pg_type) GETSTRUCT(tup);
-	typnamespace = get_namespace_name(typ->typnamespace);
-
+	/* walk down to the base type, if domain */
+	for (;;)
+	{
+		tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for type: %u", atttypid);
+		__type = (Form_pg_type) GETSTRUCT(tup);
+		if (__type->typtype != TYPTYPE_DOMAIN)
+			break;
+		atttypid = __type->typbasetype;
+		atttypmod = __type->typtypmod;
+		ReleaseSysCache(tup);
+	}
+	typname = NameStr(__type->typname);
+	typnamespace = get_namespace_name(__type->typnamespace);
+	lookup_type_extension_info(atttypid,
+							   &extname,
+							   &extschema);
 	table->numFieldNodes++;
     table->numBuffers +=
 		assignArrowTypePgSQL(column,
 							 attname,
 							 atttypid,
 							 atttypmod,
-							 NameStr(typ->typname),
+							 typname,
 							 typnamespace,
-							 typ->typlen,
-							 typ->typbyval,
-							 typ->typtype,
-							 typ->typalign,
-							 typ->typrelid,
-							 typ->typelem,
+							 __type->typlen,
+							 __type->typbyval,
+							 __type->typtype,
+							 __type->typalign,
+							 __type->typrelid,
+							 __type->typelem,
 							 timezone,
+							 extname,
+							 extschema,
 							 NULL);
-	if (OidIsValid(typ->typelem))
+	if (OidIsValid(__type->typelem))
 	{
 		/* array type */
 		char		elem_name[NAMEDATALEN+10];
@@ -4211,10 +4488,10 @@ __setupArrowSQLbufferField(SQLtable *table,
 		__setupArrowSQLbufferField(table,
 								   column->element,
 								   elem_name,
-								   typ->typelem,
+								   __type->typelem,
 								   -1);
 	}
-	else if (OidIsValid(typ->typrelid))
+	else if (OidIsValid(__type->typrelid))
 	{
 		/* composite type */
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
@@ -4233,7 +4510,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 		}
 		ReleaseTupleDesc(tupdesc);
 	}
-	else if (typ->typtype == 'e')
+	else if (__type->typtype == 'e')
 	{
 		elog(ERROR, "Enum type is not supported right now");
 	}

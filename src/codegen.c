@@ -25,6 +25,7 @@ static dlist_head	devfunc_info_slot[1024];
 static dlist_head	devcast_info_slot[48];
 
 static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
+static cl_uint pg_int1_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_int2_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_int4_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_int8_devtype_hashfunc(devtype_info *dtype, Datum datum);
@@ -91,6 +92,10 @@ static struct {
 	{ "pg_catalog", "bool", BOOLOID, "BOOLOID",
 	  NULL, NULL, "false", 0, 0,
 	  generic_devtype_hashfunc
+	},
+	{ "pg_catalog", "int1", INT1OID, "INT1OID",
+	  "SCHAR_MAX", "SCHAR_MIN", "0",
+	  0, 0, pg_int1_devtype_hashfunc
 	},
 	{ "pg_catalog", "int2", INT2OID, "INT2OID",
 	  "SHRT_MAX", "SHRT_MIN", "0",
@@ -294,6 +299,31 @@ get_extension_schema_by_name(const char *extname)
 	return namespace_oid;
 }
 
+static inline devtype_info *
+__build_extra_devtype_info(TypeCacheEntry *tcache)
+{
+	devtype_info *dtype;
+	int		i;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+		if (extra->lookup_extra_devtype)
+		{
+			dtype = extra->lookup_extra_devtype(devinfo_memcxt, tcache);
+			if (dtype)
+			{
+				dtype->hashvalue = GetSysCacheHashValue(TYPEOID,
+														dtype->type_oid, 0, 0, 0);
+				dtype->type_flags |= extra->extra_flags;
+				return dtype;
+			}
+		}
+	}
+	return NULL;
+}
+
 static devtype_info *
 build_basic_devtype_info(TypeCacheEntry *tcache)
 {
@@ -316,7 +346,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 		typ_oid = get_type_oid(typ_name, nsp_oid, true);
 		if (typ_oid == tcache->type_id)
 		{
-			devtype_info   *entry
+			devtype_info *entry
 				= MemoryContextAllocZero(devinfo_memcxt,
 										 offsetof(devtype_info,
 												  comp_subtypes[0]));
@@ -339,7 +369,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			return entry;
 		}
 	}
-	return NULL;
+	return __build_extra_devtype_info(tcache);
 }
 
 static devtype_info *
@@ -433,6 +463,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	TypeCacheEntry *tcache;
 	devtype_info   *dtype;
 	int				hindex;
+	size_t			sz;
 	dlist_iter		iter;
 
 	/* lookup dtype that is already built */
@@ -453,22 +484,26 @@ pgstrom_devtype_lookup(Oid type_oid)
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
 	if (OidIsValid(tcache->typrelid))
+	{
+		/* composite type */
 		dtype = build_composite_devtype_info(tcache);
+	}
+	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type */
+		dtype = build_array_devtype_info(tcache);
+	}
 	else
 	{
-		Oid		typelem = get_element_type(tcache->type_id);
-
-		if (OidIsValid(typelem) && tcache->typlen == -1)
-			dtype = build_array_devtype_info(tcache);
-		else
-			dtype = build_basic_devtype_info(tcache);
+		/* base or extra type */
+		dtype = build_basic_devtype_info(tcache);
 	}
+	
 	/* makes a negative entry, if not in the catalog */
 	if (!dtype)
 	{
-		dtype = MemoryContextAllocZero(devinfo_memcxt,
-									   offsetof(devtype_info,
-												comp_subtypes[0]));
+		sz = offsetof(devtype_info, comp_subtypes[0]);
+		dtype = MemoryContextAllocZero(devinfo_memcxt, sz);
 		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
 		dtype->type_oid = type_oid;
 		dtype->type_is_negative = true;
@@ -505,30 +540,129 @@ pgstrom_devtype_lookup_by_name(const char *type_name)
 	return NULL;
 }
 
-/* dump all the type_oid declaration */
-void
-pgstrom_codegen_typeoid_declarations(StringInfo source)
+/* code for extra device types */
+size_t
+pgstrom_codegen_extra_devtypes(char *buf, size_t bufsz, uint32 extra_flags)
 {
-	int		i;
+	size_t		off = 0;
+	int			i;
 
-	for (i=0; i < lengthof(devtype_catalog); i++)
+	/* only extra device types */
+	extra_flags &= DEVKERNEL_USERS_EXTRA_MASK;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
-		const char *nsp_name = devtype_catalog[i].type_schema;
-		const char *typ_name = devtype_catalog[i].type_name;
-		const char *oid_label = devtype_catalog[i].type_oid_label;
-		Oid			nsp_oid;
-		Oid			typ_oid;
+		pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
 
-		nsp_oid = get_namespace_oid(nsp_name, true);
-		if (!OidIsValid(nsp_oid))
-			continue;
-
-		typ_oid = get_type_oid(typ_name, nsp_oid, true);
-		if (!OidIsValid(typ_oid))
-			continue;
-
-		appendStringInfo(source, "#define PG_%s %u\n", oid_label, typ_oid);
+		if ((ex_desc->extra_flags & extra_flags) == ex_desc->extra_flags)
+		{
+			off += snprintf(buf + off, bufsz - off,
+							"#include \"%s.h\"\n",
+							ex_desc->extra_name);
+		}
 	}
+	/* array type support */
+	off += snprintf(
+		buf + off, bufsz - off,
+		"\n"
+		"DEVICE_FUNCTION(cl_uint)\n"
+		"pg_extras_array_from_arrow(kern_context *kcxt,\n"
+		"                           char *dest,\n"
+		"                           kern_colmeta *smeta,\n"
+		"                           char *base,\n"
+		"                           cl_uint start,\n"
+		"                           cl_uint end)\n"
+		"{\n");
+	if (pgstrom_num_users_extra > 0)
+	{
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  switch (smeta->atttypid)\n"
+			"  {\n");
+		for (i=0; i < lengthof(devtype_info_slot); i++)
+		{
+			dlist_iter		iter;
+			devtype_info   *dtype;
+
+			dlist_foreach(iter, &devtype_info_slot[i])
+			{
+				dtype = dlist_container(devtype_info, chain, iter.cur);
+				if ((dtype->type_flags & extra_flags) == 0)
+					continue;
+				off += snprintf(
+					buf + off, bufsz - off,
+					"  case %u:\n"
+					"    return pg_%s_array_from_arrow(kcxt, dest,\n"
+					"                                  smeta, base,\n"
+					"                                  start, end);\n",
+					dtype->type_oid,
+					dtype->type_name);
+			}
+		}
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  default:\n"
+			"    break;\n"
+			"  }\n");
+	}
+	off += snprintf(
+		buf + off, bufsz - off,
+		"  return 0;\n"
+		"}\n");
+
+	/* composite type support */
+	off += snprintf(
+		buf + off, bufsz - off,
+		"\n"
+		"DEVICE_FUNCTION(cl_bool)\n"
+		"pg_extras_composite_from_arrow(kern_context *kcxt,\n"
+		"                               kern_colmeta *smeta,\n"
+		"                               char *base,\n"
+		"                               cl_uint rowidx,\n"
+		"                               cl_char *p_dclass,\n"
+		"                               Datum *p_datum)\n"
+		"{\n");
+
+	if (pgstrom_num_users_extra > 0)
+	{
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  switch (smeta->atttypid)\n"
+			"  {\n");
+		for (i=0; i < lengthof(devtype_info_slot); i++)
+		{
+			dlist_iter		iter;
+			devtype_info   *dtype;
+
+			dlist_foreach(iter, &devtype_info_slot[i])
+			{
+				dtype = dlist_container(devtype_info, chain, iter.cur);
+				if ((dtype->type_flags & extra_flags) == 0)
+					continue;
+
+				off += snprintf(
+					buf + off, bufsz - off,
+					"  case %u: {\n"
+					"    pg_%s_t temp;\n"
+					"    pg_datum_fetch_arrow(kcxt, temp, smeta, base, rowidx);\n"
+					"    pg_datum_store(kcxt, temp, p_dclass, p_datum);\n"
+					"    return true;\n"
+					"  }\n",
+					dtype->type_oid,
+					dtype->type_name);
+			}
+		}
+		off += snprintf(
+			buf + off, bufsz - off,
+			"  default:\n"
+			"    break;\n"
+			"  }\n");
+	}
+	off += snprintf(
+		buf + off, bufsz - off,
+		"  return false;\n"
+		"}\n");
+	return off;
 }
 
 /*
@@ -551,11 +685,19 @@ generic_devtype_hashfunc(devtype_info *dtype, Datum datum)
 }
 
 static cl_uint
+pg_int1_devtype_hashfunc(devtype_info *dtype, Datum datum)
+{
+	cl_int		ival = DatumGetChar(datum);
+
+	return hash_any((cl_uchar *)&ival, sizeof(cl_char));
+}
+
+static cl_uint
 pg_int2_devtype_hashfunc(devtype_info *dtype, Datum datum)
 {
 	cl_int		ival = DatumGetInt16(datum);
 
-	return hash_any((cl_uchar *)&ival, sizeof(cl_int));
+	return hash_any((cl_uchar *)&ival, sizeof(cl_short));
 }
 
 static cl_uint
@@ -969,93 +1111,165 @@ typedef struct devfunc_catalog_t {
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
-	{ NULL, "bool bool(int4)",       1, "f:to_bool" },
+	{ NULL,    "bool bool(int4)",    1, "f:to_bool" },
 
-	{ NULL, "int2 int2(int4)",       1, "f:to_int2" },
-	{ NULL, "int2 int2(int8)",       1, "f:to_int2" },
-	{ NULL, "int2 int2(float4)",     1, "f:to_int2" },
-	{ NULL, "int2 int2(float8)",     1, "f:to_int2" },
+	{ PGSTROM, "int1 int1(int2)",    1, "f:to_int1" },
+	{ PGSTROM, "int1 int1(int4)",    1, "f:to_int1" },
+	{ PGSTROM, "int1 int1(int8)",    1, "f:to_int1" },
+	{ PGSTROM, "int1 int1(float2)",  1, "f:to_int1" },
+	{ PGSTROM, "int1 int1(float4)",  1, "f:to_int1" },
+	{ PGSTROM, "int1 int1(float8)",  1, "f:to_int1" },
+	
+	{ PGSTROM, "int2 int2(int1)",    1, "f:to_int2" },
+	{ NULL,    "int2 int2(int4)",    1, "f:to_int2" },
+	{ NULL,    "int2 int2(int8)",    1, "f:to_int2" },
+	{ PGSTROM, "int2 int2(float2)",  1, "f:to_int2" },
+	{ NULL,    "int2 int2(float4)",  1, "f:to_int2" },
+	{ NULL,    "int2 int2(float8)",  1, "f:to_int2" },
 
-	{ NULL, "int4 int4(bool)",       1, "f:to_int4" },
-	{ NULL, "int4 int4(int2)",       1, "f:to_int4" },
-	{ NULL, "int4 int4(int8)",       1, "f:to_int4" },
-	{ NULL, "int4 int4(float4)",     1, "f:to_int4" },
-	{ NULL, "int4 int4(float8)",     1, "f:to_int4" },
+	{ PGSTROM, "int4 int4(bool)",    1, "f:to_int4" },
+	{ NULL,    "int4 int4(int1)",    1, "f:to_int4" },
+	{ NULL,    "int4 int4(int2)",    1, "f:to_int4" },
+	{ NULL,    "int4 int4(int8)",    1, "f:to_int4" },
+	{ PGSTROM, "int4 int4(float2)",  1, "f:to_int4" },
+	{ NULL,    "int4 int4(float4)",  1, "f:to_int4" },
+	{ NULL,    "int4 int4(float8)",  1, "f:to_int4" },
 
-	{ NULL, "int8 int8(int2)",       1, "f:to_int8" },
-	{ NULL, "int8 int8(int4)",       1, "f:to_int8" },
-	{ NULL, "int8 int8(float4)",     1, "f:to_int8" },
-	{ NULL, "int8 int8(float8)",     1, "f:to_int8" },
+	{ PGSTROM, "int8 int8(int1)",    1, "f:to_int8" },
+	{ NULL,    "int8 int8(int2)",    1, "f:to_int8" },
+	{ NULL,    "int8 int8(int4)",    1, "f:to_int8" },
+	{ PGSTROM, "int8 int8(float2)",  1, "f:to_int8" },
+	{ NULL,    "int8 int8(float4)",  1, "f:to_int8" },
+	{ NULL,    "int8 int8(float8)",  1, "f:to_int8" },
 
-	{ NULL, "float4 float4(int2)",   1, "f:to_float4" },
-	{ NULL, "float4 float4(int4)",   1, "f:to_float4" },
-	{ NULL, "float4 float4(int8)",   1, "f:to_float4" },
-	{ NULL, "float4 float4(float8)", 1, "f:to_float4" },
+	{ PGSTROM, "float2 float2(int1)",   1, "f:to_float2" },
+	{ PGSTROM, "float2 float2(int2)",   1, "f:to_float2" },
+	{ PGSTROM, "float2 float2(int4)",   1, "f:to_float2" },
+	{ PGSTROM, "float2 float2(int8)",   1, "f:to_float2" },
+	{ PGSTROM, "float2 float2(float4)", 1, "f:to_float2" },
+	{ PGSTROM, "float2 float2(float8)", 1, "f:to_float2" },
+	
+	{ PGSTROM, "float4 float4(int1)",   1, "f:to_float4" },
+	{ NULL,    "float4 float4(int2)",   1, "f:to_float4" },
+	{ NULL,    "float4 float4(int4)",   1, "f:to_float4" },
+	{ NULL,    "float4 float4(int8)",   1, "f:to_float4" },
+	{ PGSTROM, "float4 float4(float2)", 1, "f:to_float4" },
+	{ NULL,    "float4 float4(float8)", 1, "f:to_float4" },
 
-	{ NULL, "float8 float8(int2)",   1, "f:to_float8" },
-	{ NULL, "float8 float8(int4)",   1, "f:to_float8" },
-	{ NULL, "float8 float8(int8)",   1, "f:to_float8" },
-	{ NULL, "float8 float8(float4)", 1, "f:to_float8" },
+	{ PGSTROM, "float8 float8(int1)",   1, "f:to_float8" },
+	{ NULL,    "float8 float8(int2)",   1, "f:to_float8" },
+	{ NULL,    "float8 float8(int4)",   1, "f:to_float8" },
+	{ NULL,    "float8 float8(int8)",   1, "f:to_float8" },
+	{ PGSTROM, "float8 float8(float2)", 1, "f:to_float8" },
+	{ NULL,    "float8 float8(float4)", 1, "f:to_float8" },
 
 	/* '+' : add operators */
-	{ NULL, "int2 int2pl(int2,int2)",  1, "p/f:int2pl" },
-	{ NULL, "int4 int24pl(int2,int4)", 1, "p/f:int24pl" },
-	{ NULL, "int8 int28pl(int2,int8)", 1, "p/f:int28pl" },
-	{ NULL, "int4 int42pl(int4,int2)", 1, "p/f:int42pl" },
-	{ NULL, "int4 int4pl(int4,int4)",  1, "p/f:int4pl" },
-	{ NULL, "int8 int48pl(int4,int8)", 1, "p/f:int48pl" },
-	{ NULL, "int8 int82pl(int8,int2)", 1, "p/f:int82pl" },
-	{ NULL, "int8 int84pl(int8,int4)", 1, "p/f:int84pl" },
-	{ NULL, "int8 int8pl(int8,int8)",  1, "p/f:int8pl" },
-	{ NULL, "float4 float4pl(float4,float4)",  1, "p/f:float4pl" },
-	{ NULL, "float8 float48pl(float4,float8)", 1, "p/f:float48pl" },
-	{ NULL, "float8 float84pl(float8,float4)", 1, "p/f:float84pl" },
-	{ NULL, "float8 float8pl(float8,float8)",  1, "p/f:float8pl" },
+	{ PGSTROM, "int1 int1pl(int1,int1)",  1, "p/f:int1pl" },
+	{ PGSTROM, "int2 int12pl(int1,int2)", 1, "p/f:int12pl" },
+	{ PGSTROM, "int4 int14pl(int1,int4)", 1, "p/f:int14pl" },
+	{ PGSTROM, "int8 int18pl(int1,int8)", 1, "p/f:int18pl" },
+	{ PGSTROM, "int2 int21pl(int2,int1)", 1, "p/f:int21pl" },
+	{ NULL,    "int2 int2pl(int2,int2)",  1, "p/f:int2pl" },
+	{ NULL,    "int4 int24pl(int2,int4)", 1, "p/f:int24pl" },
+	{ NULL,    "int8 int28pl(int2,int8)", 1, "p/f:int28pl" },
+	{ PGSTROM, "int4 int41pl(int4,int1)", 1, "p/f:int41pl" },
+	{ NULL,    "int4 int42pl(int4,int2)", 1, "p/f:int42pl" },
+	{ NULL,    "int4 int4pl(int4,int4)",  1, "p/f:int4pl" },
+	{ NULL,    "int8 int48pl(int4,int8)", 1, "p/f:int48pl" },
+	{ PGSTROM, "int8 int81pl(int8,int1)", 1, "p/f:int81pl" },
+	{ NULL,    "int8 int82pl(int8,int2)", 1, "p/f:int82pl" },
+	{ NULL,    "int8 int84pl(int8,int4)", 1, "p/f:int84pl" },
+	{ NULL,    "int8 int8pl(int8,int8)",  1, "p/f:int8pl" },
+	{ PGSTROM, "float4 float2_pl(float2,float2)",  1, "p/f:float2pl" },
+	{ PGSTROM, "float4 float24_pl(float2,float4)", 1, "p/f:float24pl" },
+	{ PGSTROM, "float8 float28_pl(float2,float8)", 1, "p/f:float28pl" },
+	{ PGSTROM, "float4 float42_pl(float4,float2)", 1, "p/f:float42pl" },
+	{ NULL,    "float4 float4pl(float4,float4)",   1, "p/f:float4pl" },
+	{ NULL,    "float8 float48pl(float4,float8)",  1, "p/f:float48pl" },
+	{ PGSTROM, "float8 float82_pl(float8,float2)", 1, "p/f:float82pl" },
+	{ NULL,    "float8 float84pl(float8,float4)",  1, "p/f:float84pl" },
+	{ NULL,    "float8 float8pl(float8,float8)",   1, "p/f:float8pl" },
 
 	/* '-' : subtract operators */
-	{ NULL, "int2 int2mi(int2,int2)",  1, "p/f:int2mi" },
-	{ NULL, "int4 int24mi(int2,int4)", 1, "p/f:int24mi" },
-	{ NULL, "int8 int28mi(int2,int8)", 1, "p/f:int28mi" },
-	{ NULL, "int4 int42mi(int4,int2)", 1, "p/f:int42mi" },
-	{ NULL, "int4 int4mi(int4,int4)",  1, "p/f:int4mi" },
-	{ NULL, "int8 int48mi(int4,int8)", 1, "p/f:int48mi" },
-	{ NULL, "int8 int82mi(int8,int2)", 1, "p/f:int82mi" },
-	{ NULL, "int8 int84mi(int8,int4)", 1, "p/f:int84mi" },
-	{ NULL, "int8 int8mi(int8,int8)",  1, "p/f:int8mi" },
-	{ NULL, "float4 float4mi(float4,float4)",  1, "p/f:float4mi" },
-	{ NULL, "float8 float48mi(float4,float8)", 1, "p/f:float48mi" },
-	{ NULL, "float8 float84mi(float8,float4)", 1, "p/f:float84mi" },
-	{ NULL, "float8 float8mi(float8,float8)",  1, "p/f:float8mi" },
+	{ PGSTROM, "int1 int1pl(int1,int1)",  1, "p/f:int1mi" },
+	{ PGSTROM, "int2 int12pl(int1,int2)", 1, "p/f:int12mi" },
+	{ PGSTROM, "int4 int14pl(int1,int4)", 1, "p/f:int14mi" },
+	{ PGSTROM, "int8 int18pl(int1,int8)", 1, "p/f:int18mi" },
+	{ PGSTROM, "int2 int21pl(int2,int1)", 1, "p/f:int21mi" },
+	{ NULL,    "int2 int2mi(int2,int2)",  1, "p/f:int2mi" },
+	{ NULL,    "int4 int24mi(int2,int4)", 1, "p/f:int24mi" },
+	{ NULL,    "int8 int28mi(int2,int8)", 1, "p/f:int28mi" },
+	{ PGSTROM, "int4 int41mi(int4,int1)", 1, "p/f:int41mi" },
+	{ NULL,    "int4 int42mi(int4,int2)", 1, "p/f:int42mi" },
+	{ NULL,    "int4 int4mi(int4,int4)",  1, "p/f:int4mi" },
+	{ NULL,    "int8 int48mi(int4,int8)", 1, "p/f:int48mi" },
+	{ PGSTROM, "int8 int81mi(int8,int1)", 1, "p/f:int81mi" },
+	{ NULL,    "int8 int82mi(int8,int2)", 1, "p/f:int82mi" },
+	{ NULL,    "int8 int84mi(int8,int4)", 1, "p/f:int84mi" },
+	{ NULL,    "int8 int8mi(int8,int8)",  1, "p/f:int8mi" },
+	{ PGSTROM, "float4 float2_mi(float2,float2)",  1, "p/f:float2mi" },
+	{ PGSTROM, "float4 float24_mi(float2,float4)", 1, "p/f:float24mi" },
+	{ PGSTROM, "float8 float28_mi(float2,float8)", 1, "p/f:float28mi" },
+	{ PGSTROM, "float4 float42_mi(float4,float2)", 1, "p/f:float42mi" },
+	{ NULL,    "float4 float4mi(float4,float4)",   1, "p/f:float4mi" },
+	{ NULL,    "float8 float48mi(float4,float8)",  1, "p/f:float48mi" },
+	{ PGSTROM, "float8 float82_mi(float8,float2)", 1, "p/f:float82mi" },
+	{ NULL,    "float8 float84mi(float8,float4)",  1, "p/f:float84mi" },
+	{ NULL,    "float8 float8mi(float8,float8)",   1, "p/f:float8mi" },
 
 	/* '*' : mutiply operators */
-	{ NULL, "int2 int2mul(int2,int2)",  2, "p/f:int2mul" },
-	{ NULL, "int4 int24mul(int2,int4)", 2, "p/f:int24mul" },
-	{ NULL, "int8 int28mul(int2,int8)", 2, "p/f:int28mul" },
-	{ NULL, "int4 int42mul(int4,int2)", 2, "p/f:int42mul" },
-	{ NULL, "int4 int4mul(int4,int4)",  2, "p/f:int4mul" },
-	{ NULL, "int8 int48mul(int4,int8)", 2, "p/f:int48mul" },
-	{ NULL, "int8 int82mul(int8,int2)", 2, "p/f:int82mul" },
-	{ NULL, "int8 int84mul(int8,int4)", 2, "p/f:int84mul" },
-	{ NULL, "int8 int8mul(int8,int8)",  2, "p/f:int8mul" },
-	{ NULL, "float4 float4mul(float4,float4)",  2, "p/f:float4mul" },
-	{ NULL, "float8 float48mul(float4,float8)", 2, "p/f:float48mul" },
-	{ NULL, "float8 float84mul(float8,float4)", 2, "p/f:float84mul" },
-	{ NULL, "float8 float8mul(float8,float8)",  2, "p/f:float8mul" },
+	{ PGSTROM, "int1 int1mul(int1,int1)",  2, "p/f:int1mul" },
+	{ PGSTROM, "int2 int12mul(int1,int2)", 2, "p/f:int12mul" },
+	{ PGSTROM, "int4 int14mul(int1,int4)", 2, "p/f:int14mul" },
+	{ PGSTROM, "int8 int18mul(int1,int8)", 2, "p/f:int18mul" },
+	{ PGSTROM, "int2 int21mul(int2,int1)", 2, "p/f:int21mul" },
+	{ NULL,    "int2 int2mul(int2,int2)",  2, "p/f:int2mul" },
+	{ NULL,    "int4 int24mul(int2,int4)", 2, "p/f:int24mul" },
+	{ NULL,    "int8 int28mul(int2,int8)", 2, "p/f:int28mul" },
+	{ PGSTROM, "int4 int41mul(int4,int1)", 2, "p/f:int41mul" },
+	{ NULL,    "int4 int42mul(int4,int2)", 2, "p/f:int42mul" },
+	{ NULL,    "int4 int4mul(int4,int4)",  2, "p/f:int4mul" },
+	{ NULL,    "int8 int48mul(int4,int8)", 2, "p/f:int48mul" },
+	{ PGSTROM, "int8 int81mul(int8,int1)", 2, "p/f:int81mul" },
+	{ NULL,    "int8 int82mul(int8,int2)", 2, "p/f:int82mul" },
+	{ NULL,    "int8 int84mul(int8,int4)", 2, "p/f:int84mul" },
+	{ NULL,    "int8 int8mul(int8,int8)",  2, "p/f:int8mul" },
+	{ PGSTROM, "float4 float2_mul(float2,float2)",  2, "p/f:float2mul" },
+	{ PGSTROM, "float4 float24_mul(float2,float4)", 2, "p/f:float24mul" },
+	{ PGSTROM, "float8 float28_mul(float2,float8)", 2, "p/f:float28mul" },
+	{ PGSTROM, "float4 float42_mul(float4,float2)", 2, "p/f:float42mul" },
+	{ NULL,    "float4 float4mul(float4,float4)",   2, "p/f:float4mul" },
+	{ NULL,    "float8 float48mul(float4,float8)",  2, "p/f:float48mul" },
+	{ PGSTROM, "float8 float82_mul(float8,float2)", 2, "p/f:float82mul" },
+	{ NULL,    "float8 float84mul(float8,float4)",  2, "p/f:float84mul" },
+	{ NULL,    "float8 float8mul(float8,float8)",   2, "p/f:float8mul" },
 
 	/* '/' : divide operators */
-	{ NULL, "int2 int2div(int2,int2)",  2, "p/f:int2div" },
-	{ NULL, "int4 int24div(int2,int4)", 2, "p/f:int24div" },
-	{ NULL, "int8 int28div(int2,int8)", 2, "p/f:int28div" },
-	{ NULL, "int4 int42div(int4,int2)", 2, "p/f:int42div" },
-	{ NULL, "int4 int4div(int4,int4)",  2, "p/f:int4div" },
-	{ NULL, "int8 int48div(int4,int8)", 2, "p/f:int48div" },
-	{ NULL, "int8 int82div(int8,int2)", 2, "p/f:int82div" },
-	{ NULL, "int8 int84div(int8,int4)", 2, "p/f:int84div" },
-	{ NULL, "int8 int8div(int8,int8)",  2, "p/f:int8div" },
-	{ NULL, "float4 float4div(float4,float4)",  2, "p/f:float4div" },
-	{ NULL, "float8 float48div(float4,float8)", 2, "p/f:float48div" },
-	{ NULL, "float8 float84div(float8,float4)", 2, "p/f:float84div" },
-	{ NULL, "float8 float8div(float8,float8)",  2, "p/f:float8div" },
+	{ PGSTROM, "int1 int1div(int1,int1)",  2, "p/f:int1div" },
+	{ PGSTROM, "int2 int12div(int1,int2)", 2, "p/f:int12div" },
+	{ PGSTROM, "int4 int14div(int1,int4)", 2, "p/f:int14div" },
+	{ PGSTROM, "int8 int18div(int1,int8)", 2, "p/f:int18div" },
+	{ PGSTROM, "int2 int21div(int2,int1)", 2, "p/f:int21div" },
+	{ NULL,    "int2 int2div(int2,int2)",  2, "p/f:int2div" },
+	{ NULL,    "int4 int24div(int2,int4)", 2, "p/f:int24div" },
+	{ NULL,    "int8 int28div(int2,int8)", 2, "p/f:int28div" },
+	{ PGSTROM, "int4 int41div(int4,int1)", 2, "p/f:int41div" },
+	{ NULL,    "int4 int42div(int4,int2)", 2, "p/f:int42div" },
+	{ NULL,    "int4 int4div(int4,int4)",  2, "p/f:int4div" },
+	{ NULL,    "int8 int48div(int4,int8)", 2, "p/f:int48div" },
+	{ PGSTROM, "int2 int81div(int8,int1)", 2, "p/f:int81div" },
+	{ NULL,    "int8 int82div(int8,int2)", 2, "p/f:int82div" },
+	{ NULL,    "int8 int84div(int8,int4)", 2, "p/f:int84div" },
+	{ NULL,    "int8 int8div(int8,int8)",  2, "p/f:int8div" },
+	{ PGSTROM, "float4 float2_div(float2,float2)",  2, "p/f:float2div" },
+	{ PGSTROM, "float4 float24_div(float2,float4)", 2, "p/f:float24div" },
+	{ PGSTROM, "float8 float28_div(float2,float8)", 2, "p/f:float28div" },
+	{ PGSTROM, "float4 float42_div(float4,float2)", 2, "p/f:float42div" },
+	{ NULL,    "float4 float4div(float4,float4)",   2, "p/f:float4div" },
+	{ NULL,    "float8 float48div(float4,float8)",  2, "p/f:float48div" },
+	{ PGSTROM, "float8 float82_div(float8,float2)", 2, "p/f:float82div" },
+	{ NULL,    "float8 float84div(float8,float4)",  2, "p/f:float84div" },
+	{ NULL,    "float8 float8div(float8,float8)",   2, "p/f:float8div" },
 
 	/* '%' : reminder operators */
 	{ NULL, "int2 int2mod(int2,int2)", 2, "p/f:int2mod" },
@@ -1063,267 +1277,285 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL, "int8 int8mod(int8,int8)", 2, "p/f:int8mod" },
 
 	/* '+' : unary plus operators */
-	{ NULL, "int2 int2up(int2)",       1, "p/f:int2up" },
-	{ NULL, "int4 int4up(int4)",       1, "p/f:int4up" },
-	{ NULL, "int8 int8up(int8)",       1, "p/f:int8up" },
-	{ NULL, "float4 float4up(float4)", 1, "p/f:float4up" },
-	{ NULL, "float8 float8up(float8)", 1, "p/f:float8up" },
+	{ PGSTROM, "int1 int1up(int1)",       1, "p/f:int1up" },
+	{ NULL,    "int2 int2up(int2)",       1, "p/f:int2up" },
+	{ NULL,    "int4 int4up(int4)",       1, "p/f:int4up" },
+	{ NULL,    "int8 int8up(int8)",       1, "p/f:int8up" },
+	{ PGSTROM, "float2 float2_up(float2)",1, "p/f:float2up" },
+	{ NULL,    "float4 float4up(float4)", 1, "p/f:float4up" },
+	{ NULL,    "float8 float8up(float8)", 1, "p/f:float8up" },
 
 	/* '-' : unary minus operators */
-	{ NULL, "int2 int2um(int2)",       1, "p/f:int2um" },
-	{ NULL, "int4 int4um(int4)",       1, "p/f:int4um" },
-	{ NULL, "int8 int8um(int8)",       1, "p/f:int8um" },
-	{ NULL, "float4 float4um(float4)", 1, "p/f:float4um" },
-	{ NULL, "float8 float8um(float8)", 1, "p/f:float8um" },
-
+	{ PGSTROM, "int1 int1um(int1)",       1, "p/f:int1um" },
+	{ NULL,    "int2 int2um(int2)",       1, "p/f:int2um" },
+	{ NULL,    "int4 int4um(int4)",       1, "p/f:int4um" },
+	{ NULL,    "int8 int8um(int8)",       1, "p/f:int8um" },
+	{ PGSTROM, "float2 float2_um(float2)",1, "p/f:float2um" },
+	{ NULL,    "float4 float4um(float4)", 1, "p/f:float4um" },
+	{ NULL,    "float8 float8um(float8)", 1, "p/f:float8um" },
+	
 	/* '@' : absolute value operators */
-	{ NULL, "int2 int2abs(int2)", 1, "p/f:int2abs" },
-	{ NULL, "int4 int4abs(int4)", 1, "p/f:int4abs" },
-	{ NULL, "int8 int8abs(int8)", 1, "p/f:int8abs" },
-	{ NULL, "float4 float4abs(float4)", 1, "p/f:float4abs" },
-	{ NULL, "float8 float8abs(float8)", 1, "p/f:float8abs" },
+	{ PGSTROM, "int1 int1abs(int1)", 1, "p/f:int1abs" },
+	{ NULL,    "int2 int2abs(int2)", 1, "p/f:int2abs" },
+	{ NULL,    "int4 int4abs(int4)", 1, "p/f:int4abs" },
+	{ NULL,    "int8 int8abs(int8)", 1, "p/f:int8abs" },
+	{ PGSTROM, "float2 float2abs(float2)", 1, "p/f:float2abs" },
+	{ NULL,    "float4 float4abs(float4)", 1, "p/f:float4abs" },
+	{ NULL,    "float8 float8abs(float8)", 1, "p/f:float8abs" },
 
 	/* '=' : equal operators */
-	{ NULL, "bool booleq(bool,bool)",  1, "f:booleq" },
-	{ NULL, "bool int2eq(int2,int2)",  1, "f:int2eq" },
-	{ NULL, "bool int24eq(int2,int4)", 1, "f:int24eq" },
-	{ NULL, "bool int28eq(int2,int8)", 1, "f:int28eq" },
-	{ NULL, "bool int42eq(int4,int2)", 1, "f:int42eq" },
-	{ NULL, "bool int4eq(int4,int4)",  1, "f:int4eq" },
-	{ NULL, "bool int48eq(int4,int8)", 1, "f:int48eq" },
-	{ NULL, "bool int82eq(int8,int2)", 1, "f:int82eq" },
-	{ NULL, "bool int84eq(int8,int4)", 1, "f:int84eq" },
-	{ NULL, "bool int8eq(int8,int8)",  1, "f:int8eq" },
-	{ NULL, "bool float4eq(float4,float4)",  1, "f:float4eq" },
-	{ NULL, "bool float48eq(float4,float8)", 1, "f:float48eq" },
-	{ NULL, "bool float84eq(float8,float4)", 1, "f:float84eq" },
-	{ NULL, "bool float8eq(float8,float8)",  1, "f:float8eq" },
+	{ NULL,    "bool booleq(bool,bool)",  1, "f:booleq" },
+	{ PGSTROM, "bool int1eq(int1,int1)",  1, "f:int1eq" },
+	{ PGSTROM, "bool int12eq(int1,int2)", 1, "f:int12eq" },
+	{ PGSTROM, "bool int14eq(int1,int4)", 1, "f:int14eq" },
+	{ PGSTROM, "bool int18eq(int1,int8)", 1, "f:int18eq" },
+	{ PGSTROM, "bool int21eq(int2,int1)", 1, "f:int21eq" },
+	{ NULL,    "bool int2eq(int2,int2)",  1, "f:int2eq" },
+	{ NULL,    "bool int24eq(int2,int4)", 1, "f:int24eq" },
+	{ NULL,    "bool int28eq(int2,int8)", 1, "f:int28eq" },
+	{ PGSTROM, "bool int41eq(int4,int1)", 1, "f:int41eq" },
+	{ NULL,    "bool int42eq(int4,int2)", 1, "f:int42eq" },
+	{ NULL,    "bool int4eq(int4,int4)",  1, "f:int4eq" },
+	{ NULL,    "bool int48eq(int4,int8)", 1, "f:int48eq" },
+	{ PGSTROM, "bool int81eq(int8,int1)", 1, "f:int81eq" },
+	{ NULL,    "bool int82eq(int8,int2)", 1, "f:int82eq" },
+	{ NULL,    "bool int84eq(int8,int4)", 1, "f:int84eq" },
+	{ NULL,    "bool int8eq(int8,int8)",  1, "f:int8eq" },
+	{ PGSTROM, "bool float2_eq(float2,float2)",  1, "f:float2eq" },
+	{ PGSTROM, "bool float24_eq(float2,float4)", 1, "f:float24eq" },
+	{ PGSTROM, "bool float28_eq(float2,float8)", 1, "f:float28eq" },
+	{ PGSTROM, "bool float42_eq(float4,float2)", 1, "f:float42eq" },
+	{ NULL,    "bool float4eq(float4,float4)",   1, "f:float4eq" },
+	{ NULL,    "bool float48eq(float4,float8)",  1, "f:float48eq" },
+	{ PGSTROM, "bool float82_eq(float8,float2)", 1, "f:float82eq" },
+	{ NULL,    "bool float84eq(float8,float4)",  1, "f:float84eq" },
+	{ NULL,    "bool float8eq(float8,float8)",   1, "f:float8eq" },
 
 	/* '<>' : not equal operators */
-	{ NULL, "bool int2ne(int2,int2)",  1, "f:int2ne" },
-	{ NULL, "bool int24ne(int2,int4)", 1, "f:int24ne" },
-	{ NULL, "bool int28ne(int2,int8)", 1, "f:int28ne" },
-	{ NULL, "bool int42ne(int4,int2)", 1, "f:int42ne" },
-	{ NULL, "bool int4ne(int4,int4)",  1, "f:int4ne" },
-	{ NULL, "bool int48ne(int4,int8)", 1, "f:int48ne" },
-	{ NULL, "bool int82ne(int8,int2)", 1, "f:int82ne" },
-	{ NULL, "bool int84ne(int8,int4)", 1, "f:int84ne" },
-	{ NULL, "bool int8ne(int8,int8)",  1, "f:int8ne" },
-	{ NULL, "bool float4ne(float4,float4)",  1, "f:float4ne" },
-	{ NULL, "bool float48ne(float4,float8)", 1, "f:float48ne" },
-	{ NULL, "bool float84ne(float8,float4)", 1, "f:float84ne" },
-	{ NULL, "bool float8ne(float8,float8)",  1, "f:float8ne" },
+	{ PGSTROM, "bool int1ne(int1,int1)",  1, "f:int1ne" },
+	{ PGSTROM, "bool int12ne(int1,int2)", 1, "f:int12ne" },
+	{ PGSTROM, "bool int14ne(int1,int4)", 1, "f:int14ne" },
+	{ PGSTROM, "bool int18ne(int1,int8)", 1, "f:int18ne" },
+	{ PGSTROM, "bool int21ne(int2,int1)", 1, "f:int21ne" },
+	{ NULL,    "bool int2ne(int2,int2)",  1, "f:int2ne" },
+	{ NULL,    "bool int24ne(int2,int4)", 1, "f:int24ne" },
+	{ NULL,    "bool int28ne(int2,int8)", 1, "f:int28ne" },
+	{ PGSTROM, "bool int41ne(int4,int1)", 1, "f:int41ne" },
+	{ NULL,    "bool int42ne(int4,int2)", 1, "f:int42ne" },
+	{ NULL,    "bool int4ne(int4,int4)",  1, "f:int4ne" },
+	{ NULL,    "bool int48ne(int4,int8)", 1, "f:int48ne" },
+	{ PGSTROM, "bool int81ne(int8,int1)", 1, "f:int81ne" },
+	{ NULL,    "bool int82ne(int8,int2)", 1, "f:int82ne" },
+	{ NULL,    "bool int84ne(int8,int4)", 1, "f:int84ne" },
+	{ NULL,    "bool int8ne(int8,int8)",  1, "f:int8ne" },
+	{ PGSTROM, "bool float2_ne(float2,float2)",  1, "f:float2ne" },
+	{ PGSTROM, "bool float24_ne(float2,float4)", 1, "f:float24ne" },
+	{ PGSTROM, "bool float28_ne(float2,float8)", 1, "f:float28ne" },
+	{ PGSTROM, "bool float42_ne(float4,float2)", 1, "f:float42ne" },
+	{ NULL,    "bool float4ne(float4,float4)",   1, "f:float4ne" },
+	{ NULL,    "bool float48ne(float4,float8)",  1, "f:float48ne" },
+	{ PGSTROM, "bool float82_ne(float8,float2)",  1, "f:float82ne" },
+	{ NULL,    "bool float84ne(float8,float4)",  1, "f:float84ne" },
+	{ NULL,    "bool float8ne(float8,float8)",   1, "f:float8ne" },
 
 	/* '>' : greater than operators */
-	{ NULL, "bool int2gt(int2,int2)",  1, "f:int2gt" },
-	{ NULL, "bool int24gt(int2,int4)", 1, "f:int24gt" },
-	{ NULL, "bool int28gt(int2,int8)", 1, "f:int28gt" },
-	{ NULL, "bool int42gt(int4,int2)", 1, "f:int42gt" },
-	{ NULL, "bool int4gt(int4,int4)",  1, "f:int4gt" },
-	{ NULL, "bool int48gt(int4,int8)", 1, "f:int48gt" },
-	{ NULL, "bool int82gt(int8,int2)", 1, "f:int82gt" },
-	{ NULL, "bool int84gt(int8,int4)", 1, "f:int84gt" },
-	{ NULL, "bool int8gt(int8,int8)",  1, "f:int8gt" },
-	{ NULL, "bool float4gt(float4,float4)",  1, "f:float4gt" },
-	{ NULL, "bool float48gt(float4,float8)", 1, "f:float48gt" },
-	{ NULL, "bool float84gt(float8,float4)", 1, "f:float84gt" },
-	{ NULL, "bool float8gt(float8,float8)",  1, "f:float8gt" },
+	{ PGSTROM, "bool int1gt(int1,int1)",  1, "f:int1gt" },
+	{ PGSTROM, "bool int12gt(int1,int2)", 1, "f:int12gt" },
+	{ PGSTROM, "bool int14gt(int1,int4)", 1, "f:int14gt" },
+	{ PGSTROM, "bool int18gt(int1,int8)", 1, "f:int18gt" },
+	{ PGSTROM, "bool int21gt(int2,int1)", 1, "f:int21gt" },
+	{ NULL,    "bool int2gt(int2,int2)",  1, "f:int2gt" },
+	{ NULL,    "bool int24gt(int2,int4)", 1, "f:int24gt" },
+	{ NULL,    "bool int28gt(int2,int8)", 1, "f:int28gt" },
+	{ PGSTROM, "bool int41gt(int4,int1)", 1, "f:int41gt" },
+	{ NULL,    "bool int42gt(int4,int2)", 1, "f:int42gt" },
+	{ NULL,    "bool int4gt(int4,int4)",  1, "f:int4gt" },
+	{ NULL,    "bool int48gt(int4,int8)", 1, "f:int48gt" },
+	{ PGSTROM, "bool int81gt(int8,int1)", 1, "f:int81gt" },
+	{ NULL,    "bool int82gt(int8,int2)", 1, "f:int82gt" },
+	{ NULL,    "bool int84gt(int8,int4)", 1, "f:int84gt" },
+	{ NULL,    "bool int8gt(int8,int8)",  1, "f:int8gt" },
+	{ PGSTROM, "bool float2_gt(float2,float2)",  1, "f:float2gt" },
+	{ PGSTROM, "bool float24_gt(float2,float4)", 1, "f:float24gt" },
+	{ PGSTROM, "bool float28_gt(float2,float8)", 1, "f:float28gt" },
+	{ PGSTROM, "bool float42_gt(float4,float2)", 1, "f:float42gt" },
+	{ NULL,    "bool float4gt(float4,float4)",   1, "f:float4gt" },
+	{ NULL,    "bool float48gt(float4,float8)",  1, "f:float48gt" },
+	{ PGSTROM, "bool float82_gt(float8,float2)", 1, "f:float82gt" },
+	{ NULL,    "bool float84gt(float8,float4)",  1, "f:float84gt" },
+	{ NULL,    "bool float8gt(float8,float8)",   1, "f:float8gt" },
 
 	/* '<' : less than operators */
-	{ NULL, "bool int2lt(int2,int2)",  1, "f:int2lt" },
-	{ NULL, "bool int24lt(int2,int4)", 1, "f:int24lt" },
-	{ NULL, "bool int28lt(int2,int8)", 1, "f:int28lt" },
-	{ NULL, "bool int42lt(int4,int2)", 1, "f:int42lt" },
-	{ NULL, "bool int4lt(int4,int4)",  1, "f:int4lt" },
-	{ NULL, "bool int48lt(int4,int8)", 1, "f:int48lt" },
-	{ NULL, "bool int82lt(int8,int2)", 1, "f:int82lt" },
-	{ NULL, "bool int84lt(int8,int4)", 1, "f:int84lt" },
-	{ NULL, "bool int8lt(int8,int8)",  1, "f:int8lt" },
-	{ NULL, "bool float4lt(float4,float4)",  1, "f:float4lt" },
-	{ NULL, "bool float48lt(float4,float8)", 1, "f:float48lt" },
-	{ NULL, "bool float84lt(float8,float4)", 1, "f:float84lt" },
-	{ NULL, "bool float8lt(float8,float8)",  1, "f:float8lt" },
+	{ PGSTROM, "bool int1lt(int1,int1)",  1, "f:int1lt" },
+	{ PGSTROM, "bool int12lt(int1,int2)", 1, "f:int12lt" },
+	{ PGSTROM, "bool int14lt(int1,int4)", 1, "f:int14lt" },
+	{ PGSTROM, "bool int18lt(int1,int8)", 1, "f:int18lt" },
+	{ PGSTROM, "bool int21lt(int2,int1)", 1, "f:int21lt" },
+	{ NULL,    "bool int2lt(int2,int2)",  1, "f:int2lt" },
+	{ NULL,    "bool int24lt(int2,int4)", 1, "f:int24lt" },
+	{ NULL,    "bool int28lt(int2,int8)", 1, "f:int28lt" },
+	{ PGSTROM, "bool int41lt(int4,int1)", 1, "f:int41lt" },
+	{ NULL,    "bool int42lt(int4,int2)", 1, "f:int42lt" },
+	{ NULL,    "bool int4lt(int4,int4)",  1, "f:int4lt" },
+	{ NULL,    "bool int48lt(int4,int8)", 1, "f:int48lt" },
+	{ PGSTROM, "bool int81lt(int8,int1)", 1, "f:int81lt" },
+	{ NULL,    "bool int82lt(int8,int2)", 1, "f:int82lt" },
+	{ NULL,    "bool int84lt(int8,int4)", 1, "f:int84lt" },
+	{ NULL,    "bool int8lt(int8,int8)",  1, "f:int8lt" },
+	{ PGSTROM, "bool float2_lt(float2,float2)",  1, "f:float2lt" },
+	{ PGSTROM, "bool float24_lt(float2,float4)", 1, "f:float24lt" },
+	{ PGSTROM, "bool float28_lt(float2,float8)", 1, "f:float28lt" },
+	{ PGSTROM, "bool float42_lt(float4,float2)", 1, "f:float42lt" },
+	{ NULL,    "bool float4lt(float4,float4)",   1, "f:float4lt" },
+	{ NULL,    "bool float48lt(float4,float8)",  1, "f:float48lt" },
+	{ PGSTROM, "bool float82_lt(float8,float2)", 1, "f:float82lt" },
+	{ NULL,    "bool float84lt(float8,float4)",  1, "f:float84lt" },
+	{ NULL,    "bool float8lt(float8,float8)",   1, "f:float8lt" },
 
 	/* '>=' : relational greater-than or equal-to */
-	{ NULL, "bool int2ge(int2,int2)",  1, "f:int2ge" },
-	{ NULL, "bool int24ge(int2,int4)", 1, "f:int24ge" },
-	{ NULL, "bool int28ge(int2,int8)", 1, "f:int28ge" },
-	{ NULL, "bool int42ge(int4,int2)", 1, "f:int42ge" },
-	{ NULL, "bool int4ge(int4,int4)",  1, "f:int4ge" },
-	{ NULL, "bool int48ge(int4,int8)", 1, "f:int48ge" },
-	{ NULL, "bool int82ge(int8,int2)", 1, "f:int82ge" },
-	{ NULL, "bool int84ge(int8,int4)", 1, "f:int84ge" },
-	{ NULL, "bool int8ge(int8,int8)",  1, "f:int8ge" },
-	{ NULL, "bool float4ge(float4,float4)",  1, "f:float4ge" },
-	{ NULL, "bool float48ge(float4,float8)", 1, "f:float48ge" },
-	{ NULL, "bool float84ge(float8,float4)", 1, "f:float84ge" },
-	{ NULL, "bool float8ge(float8,float8)",  1, "f:float8ge" },
+	{ PGSTROM, "bool int1ge(int1,int1)",  1, "f:int1ge" },
+	{ PGSTROM, "bool int12ge(int1,int2)", 1, "f:int12ge" },
+	{ PGSTROM, "bool int14ge(int1,int4)", 1, "f:int14ge" },
+	{ PGSTROM, "bool int18ge(int1,int8)", 1, "f:int18ge" },
+	{ PGSTROM, "bool int21ge(int2,int1)", 1, "f:int21ge" },
+	{ NULL,    "bool int2ge(int2,int2)",  1, "f:int2ge" },
+	{ NULL,    "bool int24ge(int2,int4)", 1, "f:int24ge" },
+	{ NULL,    "bool int28ge(int2,int8)", 1, "f:int28ge" },
+	{ PGSTROM, "bool int41ge(int4,int1)", 1, "f:int41ge" },
+	{ NULL,    "bool int42ge(int4,int2)", 1, "f:int42ge" },
+	{ NULL,    "bool int4ge(int4,int4)",  1, "f:int4ge" },
+	{ NULL,    "bool int48ge(int4,int8)", 1, "f:int48ge" },
+	{ PGSTROM, "bool int81ge(int8,int1)", 1, "f:int81ge" },
+	{ NULL,    "bool int82ge(int8,int2)", 1, "f:int82ge" },
+	{ NULL,    "bool int84ge(int8,int4)", 1, "f:int84ge" },
+	{ NULL,    "bool int8ge(int8,int8)",  1, "f:int8ge" },
+	{ PGSTROM, "bool float2_ge(float2,float2)",  1, "f:float2ge" },
+	{ PGSTROM, "bool float24_ge(float2,float4)", 1, "f:float24ge" },
+	{ PGSTROM, "bool float28_ge(float2,float8)", 1, "f:float28ge" },
+	{ PGSTROM, "bool float42_ge(float4,float2)", 1, "f:float42ge" },
+	{ NULL,    "bool float4ge(float4,float4)",   1, "f:float4ge" },
+	{ NULL,    "bool float48ge(float4,float8)",  1, "f:float48ge" },
+	{ PGSTROM, "bool float82_ge(float8,float2)", 1, "f:float82ge" },
+	{ NULL,    "bool float84ge(float8,float4)",  1, "f:float84ge" },
+	{ NULL,    "bool float8ge(float8,float8)",   1, "f:float8ge" },
 
 	/* '<=' : relational greater-than or equal-to */
-	{ NULL, "bool int2le(int2,int2)",  1, "f:int2le" },
-	{ NULL, "bool int24le(int2,int4)", 1, "f:int24le" },
-	{ NULL, "bool int28le(int2,int8)", 1, "f:int28le" },
-	{ NULL, "bool int42le(int4,int2)", 1, "f:int42le" },
-	{ NULL, "bool int4le(int4,int4)",  1, "f:int4le" },
-	{ NULL, "bool int48le(int4,int8)", 1, "f:int48le" },
-	{ NULL, "bool int82le(int8,int2)", 1, "f:int82le" },
-	{ NULL, "bool int84le(int8,int4)", 1, "f:int84le" },
-	{ NULL, "bool int8le(int8,int8)",  1, "f:int8le" },
-	{ NULL, "bool float4le(float4,float4)",  1, "f:float4le" },
-	{ NULL, "bool float48le(float4,float8)", 1, "f:float48le" },
-	{ NULL, "bool float84le(float8,float4)", 1, "f:float84le" },
-	{ NULL, "bool float8le(float8,float8)",  1, "f:float8le" },
+	{ PGSTROM, "bool int1le(int1,int1)",  1, "f:int1le" },
+	{ PGSTROM, "bool int12le(int1,int2)", 1, "f:int12le" },
+	{ PGSTROM, "bool int14le(int1,int4)", 1, "f:int14le" },
+	{ PGSTROM, "bool int18le(int1,int8)", 1, "f:int18le" },
+	{ PGSTROM, "bool int21le(int2,int1)", 1, "f:int21le" },
+	{ NULL,    "bool int2le(int2,int2)",  1, "f:int2le" },
+	{ NULL,    "bool int24le(int2,int4)", 1, "f:int24le" },
+	{ NULL,    "bool int28le(int2,int8)", 1, "f:int28le" },
+	{ PGSTROM, "bool int41le(int4,int1)", 1, "f:int41le" },
+	{ NULL,    "bool int42le(int4,int2)", 1, "f:int42le" },
+	{ NULL,    "bool int4le(int4,int4)",  1, "f:int4le" },
+	{ NULL,    "bool int48le(int4,int8)", 1, "f:int48le" },
+	{ PGSTROM, "bool int81le(int8,int1)", 1, "f:int81le" },
+	{ NULL,    "bool int82le(int8,int2)", 1, "f:int82le" },
+	{ NULL,    "bool int84le(int8,int4)", 1, "f:int84le" },
+	{ NULL,    "bool int8le(int8,int8)",  1, "f:int8le" },
+	{ PGSTROM, "bool float2_le(float2,float2)", 1, "f:float2le" },
+	{ PGSTROM, "bool float24_le(float2,float4)", 1, "f:float24le" },
+	{ PGSTROM, "bool float28_le(float2,float8)", 1, "f:float28le" },
+	{ PGSTROM, "bool float42_le(float4,float2)", 2, "f:float42le" },
+	{ NULL,    "bool float4le(float4,float4)",  1, "f:float4le" },
+	{ NULL,    "bool float48le(float4,float8)", 1, "f:float48le" },
+	{ PGSTROM, "bool float82_le(float8,float2)", 1, "f:float82le" },
+	{ NULL,    "bool float84le(float8,float4)", 1, "f:float84le" },
+	{ NULL,    "bool float8le(float8,float8)",  1, "f:float8le" },
 
 	/* '&' : bitwise and */
-	{ NULL, "int2 int2and(int2,int2)", 1, "p/f:int2and" },
-	{ NULL, "int4 int4and(int4,int4)", 1, "p/f:int4and" },
-	{ NULL, "int8 int8and(int8,int8)", 1, "p/f:int8and" },
+	{ PGSTROM, "int1 int1and(int1,int1)", 1, "p/f:int1and" },
+	{ NULL,    "int2 int2and(int2,int2)", 1, "p/f:int2and" },
+	{ NULL,    "int4 int4and(int4,int4)", 1, "p/f:int4and" },
+	{ NULL,    "int8 int8and(int8,int8)", 1, "p/f:int8and" },
 
 	/* '|'  : bitwise or */
-	{ NULL, "int2 int2or(int2,int2)",  1, "p/f:int2or" },
-	{ NULL, "int4 int4or(int4,int4)",  1, "p/f:int4or" },
-	{ NULL, "int8 int8or(int8,int8)",  1, "p/f:int8or" },
+	{ PGSTROM, "int1 int1or(int1,int1)",  1, "p/f:int1or" },
+	{ NULL,    "int2 int2or(int2,int2)",  1, "p/f:int2or" },
+	{ NULL,    "int4 int4or(int4,int4)",  1, "p/f:int4or" },
+	{ NULL,    "int8 int8or(int8,int8)",  1, "p/f:int8or" },
 
 	/* '#'  : bitwise xor */
-	{ NULL, "int2 int2xor(int2,int2)", 1, "p/f:int2xor" },
-	{ NULL, "int4 int4xor(int4,int4)", 1, "p/f:int4xor" },
-	{ NULL, "int8 int8xor(int8,int8)", 1, "p/f:int8xor" },
+	{ PGSTROM, "int1 int1xor(int1,int1)", 1, "p/f:int1xor" },
+	{ NULL,    "int2 int2xor(int2,int2)", 1, "p/f:int2xor" },
+	{ NULL,    "int4 int4xor(int4,int4)", 1, "p/f:int4xor" },
+	{ NULL,    "int8 int8xor(int8,int8)", 1, "p/f:int8xor" },
 
 	/* '~'  : bitwise not operators */
-	{ NULL, "int2 int2not(int2)", 1, "p/f:int2not" },
-	{ NULL, "int4 int4not(int4)", 1, "p/f:int4not" },
-	{ NULL, "int8 int8not(int8)", 1, "p/f:int8not" },
+	{ PGSTROM, "int1 int1not(int1)", 1, "p/f:int1not" },
+	{ NULL,    "int2 int2not(int2)", 1, "p/f:int2not" },
+	{ NULL,    "int4 int4not(int4)", 1, "p/f:int4not" },
+	{ NULL,    "int8 int8not(int8)", 1, "p/f:int8not" },
 
 	/* '>>' : right shift */
-	{ NULL, "int2 int2shr(int2,int4)", 1, "p/f:int2shr" },
-	{ NULL, "int4 int4shr(int4,int4)", 1, "p/f:int4shr" },
-	{ NULL, "int8 int8shr(int8,int4)", 1, "p/f:int8shr" },
+	{ PGSTROM, "int1 int1shr(int1,int4)", 1, "p/f:int1shr" },
+	{ NULL,    "int2 int2shr(int2,int4)", 1, "p/f:int2shr" },
+	{ NULL,    "int4 int4shr(int4,int4)", 1, "p/f:int4shr" },
+	{ NULL,    "int8 int8shr(int8,int4)", 1, "p/f:int8shr" },
 
 	/* '<<' : left shift */
-	{ NULL, "int2 int2shl(int2,int4)", 1, "p/f:int2shl" },
-	{ NULL, "int4 int4shl(int4,int4)", 1, "p/f:int4shl" },
-	{ NULL, "int8 int8shl(int8,int4)", 1, "p/f:int8shl" },
-
-	/* float2 - type cast functions */
-	{ PGSTROM, "float4 float4(float2)",  2, "f:to_float4" },
-	{ PGSTROM, "float8 float8(float2)",  2, "f:to_float8" },
-	{ PGSTROM, "int2 int2(float2)",      2, "f:to_int2" },
-	{ PGSTROM, "int4 int4(float2)",      2, "f:to_int4" },
-	{ PGSTROM, "int8 int8(float2)",      2, "f:to_int8" },
-	{ PGSTROM, "numeric numeric(float2)",2, "f:float2_numeric" },
-	{ PGSTROM, "float2 float2(float4)",  2, "f:to_float2" },
-	{ PGSTROM, "float2 float2(float8)",  2, "f:to_float2" },
-	{ PGSTROM, "float2 float2(int2)",    2, "f:to_float2" },
-	{ PGSTROM, "float2 float2(int4)",    2, "f:to_float2" },
-	{ PGSTROM, "float2 float2(int8)",    2, "f:to_float2" },
-	{ PGSTROM, "float2 float2(numeric)", 2, "f:numeric_float2" },
-	/* float2 - type comparison functions */
-	{ PGSTROM, "bool float2_eq(float2,float2)",  2, "f:float2eq" },
-	{ PGSTROM, "bool float2_ne(float2,float2)",  2, "f:float2ne" },
-	{ PGSTROM, "bool float2_lt(float2,float2)",  2, "f:float2lt" },
-	{ PGSTROM, "bool float2_le(float2,float2)",  2, "f:float2le" },
-	{ PGSTROM, "bool float2_gt(float2,float2)",  2, "f:float2gt" },
-	{ PGSTROM, "bool float2_ge(float2,float2)",  2, "f:float2ge" },
-	{ PGSTROM, "int4 float2_cmp(float2,float2)", 2, "f:type_compare" },
-
-	{ PGSTROM, "bool float42_eq(float4,float2)", 2, "f:float42eq" },
-	{ PGSTROM, "bool float42_ne(float4,float2)", 2, "f:float42ne" },
-	{ PGSTROM, "bool float42_lt(float4,float2)", 2, "f:float42lt" },
-	{ PGSTROM, "bool float42_le(float4,float2)", 2, "f:float42le" },
-	{ PGSTROM, "bool float42_gt(float4,float2)", 2, "f:float42gt" },
-	{ PGSTROM, "bool float42_ge(float4,float2)", 2, "f:float42ge" },
-	{ PGSTROM, "int4 float42_cmp(float4,float2)",2, "f:type_compare" },
-
-	{ PGSTROM, "bool float82_eq(float8,float2)", 2, "f:float82eq" },
-	{ PGSTROM, "bool float82_ne(float8,float2)", 2, "f:float82ne" },
-	{ PGSTROM, "bool float82_lt(float8,float2)", 2, "f:float82lt" },
-	{ PGSTROM, "bool float82_le(float8,float2)", 2, "f:float82le" },
-	{ PGSTROM, "bool float82_gt(float8,float2)", 2, "f:float82gt" },
-	{ PGSTROM, "bool float82_ge(float8,float2)", 2, "f:float82ge" },
-	{ PGSTROM, "int4 float82_cmp(float8,float2)",2, "f:type_compare" },
-
-	{ PGSTROM, "bool float24_eq(float2,float4)", 2, "f:float24eq" },
-	{ PGSTROM, "bool float24_ne(float2,float4)", 2, "f:float24ne" },
-	{ PGSTROM, "bool float24_lt(float2,float4)", 2, "f:float24lt" },
-	{ PGSTROM, "bool float24_le(float2,float4)", 2, "f:float24le" },
-	{ PGSTROM, "bool float24_gt(float2,float4)", 2, "f:float24gt" },
-	{ PGSTROM, "bool float24_ge(float2,float4)", 2, "f:float24ge" },
-	{ PGSTROM, "int4 float24_cmp(float2,float4)",2, "f:type_compare" },
-
-	{ PGSTROM, "bool float28_eq(float2,float8)", 2, "f:float28eq" },
-	{ PGSTROM, "bool float28_ne(float2,float8)", 2, "f:float28ne" },
-	{ PGSTROM, "bool float28_lt(float2,float8)", 2, "f:float28lt" },
-	{ PGSTROM, "bool float28_le(float2,float8)", 2, "f:float28le" },
-	{ PGSTROM, "bool float28_gt(float2,float8)", 2, "f:float28gt" },
-	{ PGSTROM, "bool float28_ge(float2,float8)", 2, "f:float28ge" },
-	{ PGSTROM, "int4 float28_cmp(float2,float8)",2, "f:type_compare" },
-
-	/* float2 - unary operator */
-	{ PGSTROM, "float2 float2_up(float2)", 2, "p/f:float2up" },
-	{ PGSTROM, "float2 float2_um(float2)", 2, "p/f:float2um" },
-	{ PGSTROM, "float2 abs(float2)",       2, "p/f:float2abs" },
-
-	/* float2 - arithmetic operators */
-	{ PGSTROM, "float4 float2_pl(float2,float2)",   2, "p/f:float2pl" },
-	{ PGSTROM, "float4 float2_mi(float2,float2)",   2, "p/f:float2mi" },
-	{ PGSTROM, "float4 float2_mul(float2,float2)",  3, "p/f:float2mul" },
-	{ PGSTROM, "float4 float2_div(float2,float2)",  3, "p/f:float2div" },
-	{ PGSTROM, "float4 float24_pl(float2,float4)",  2, "p/f:float24pl" },
-	{ PGSTROM, "float4 float24_mi(float2,float4)",  2, "p/f:float24mi" },
-	{ PGSTROM, "float4 float24_mul(float2,float4)", 3, "p/f:float24mul" },
-	{ PGSTROM, "float4 float24_div(float2,float4)", 3, "p/f:float24div" },
-	{ PGSTROM, "float8 float28_pl(float2,float8)",  2, "p/f:float28pl" },
-	{ PGSTROM, "float8 float28_mi(float2,float8)",  2, "p/f:float28mi" },
-	{ PGSTROM, "float8 float28_mul(float2,float8)", 3, "p/f:float28mul" },
-	{ PGSTROM, "float8 float28_div(float2,float8)", 3, "p/f:float28div" },
-	{ PGSTROM, "float4 float42_pl(float4,float2)",  2, "p/f:float42pl" },
-	{ PGSTROM, "float4 float42_mi(float4,float2)",  2, "p/f:float42mi" },
-	{ PGSTROM, "float4 float42_mul(float4,float2)", 3, "p/f:float42mul" },
-	{ PGSTROM, "float4 float42_div(float4,float2)", 3, "p/f:float42div" },
-	{ PGSTROM, "float8 float82_pl(float8,float2)",  2, "p/f:float82pl" },
-	{ PGSTROM, "float8 float82_mi(float8,float2)",  2, "p/f:float82mi" },
-	{ PGSTROM, "float8 float82_mul(float8,float2)", 3, "p/f:float82mul" },
-	{ PGSTROM, "float8 float82_div(float8,float2)", 3, "p/f:float82div" },
+	{ PGSTROM, "int1 int1shl(int1,int4)", 1, "p/f:int1shl" },
+	{ NULL,    "int2 int2shl(int2,int4)", 1, "p/f:int2shl" },
+	{ NULL,    "int4 int4shl(int4,int4)", 1, "p/f:int4shl" },
+	{ NULL,    "int8 int8shl(int8,int4)", 1, "p/f:int8shl" },
 
 	/* comparison functions */
-	{ NULL, "int4 btboolcmp(bool,bool)",  1, "p/f:type_compare" },
-	{ NULL, "int4 btint2cmp(int2,int2)",  1, "p/f:type_compare" },
-	{ NULL, "int4 btint24cmp(int2,int4)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint28cmp(int2,int8)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint42cmp(int4,int2)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint4cmp(int4,int4)",  1, "p/f:type_compare" },
-	{ NULL, "int4 btint48cmp(int4,int8)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint82cmp(int8,int2)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint84cmp(int8,int4)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btint8cmp(int8,int8)",  1, "p/f:type_compare" },
-	{ NULL, "int4 btfloat4cmp(float4,float4)",  1, "p/f:type_compare" },
-	{ NULL, "int4 btfloat48cmp(float4,float8)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btfloat84cmp(float8,float4)", 1, "p/f:type_compare" },
-	{ NULL, "int4 btfloat8cmp(float8,float8)",  1, "p/f:type_compare" },
+	{ NULL,    "int4 btboolcmp(bool,bool)",  1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint1cmp(int1,int1)",  1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint12cmp(int1,int2)", 1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint14cmp(int1,int4)", 1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint18cmp(int1,int8)", 1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint21cmp(int2,int1)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint2cmp(int2,int2)",  1, "p/f:type_compare" },
+	{ NULL,    "int4 btint24cmp(int2,int4)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint28cmp(int2,int8)", 1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint41cmp(int4,int1)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint42cmp(int4,int2)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint4cmp(int4,int4)",  1, "p/f:type_compare" },
+	{ NULL,    "int4 btint48cmp(int4,int8)", 1, "p/f:type_compare" },
+	{ PGSTROM, "int4 btint81cmp(int8,int1)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint82cmp(int8,int2)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint84cmp(int8,int4)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btint8cmp(int8,int8)",  1, "p/f:type_compare" },
+	{ PGSTROM, "int4 float2_cmp(float2,float2)",   1, "f:type_compare" },
+	{ PGSTROM, "int4 float24_cmp(float2,float4)",  1, "f:type_compare" },
+	{ PGSTROM, "int4 float28_cmp(float2,float8)",  1, "f:type_compare" },
+	{ PGSTROM, "int4 float42_cmp(float4,float2)",  1, "f:type_compare" },
+	{ NULL,    "int4 btfloat4cmp(float4,float4)",  1, "p/f:type_compare" },
+	{ NULL,    "int4 btfloat48cmp(float4,float8)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btfloat84cmp(float8,float4)", 1, "p/f:type_compare" },
+	{ NULL,    "int4 btfloat8cmp(float8,float8)",  1, "p/f:type_compare" },
+	{ PGSTROM, "int4 float82_cmp(float8,float2)",  1, "f:type_compare" },
 
 	/* currency cast */
 	{ NULL, "money money(numeric)", 1, "m/f:numeric_cash" },
 	{ NULL, "money money(int4)",    1, "m/f:int4_cash" },
 	{ NULL, "money money(int8)",    1, "m/f:int8_cash" },
 	/* currency operators */
-	{ NULL, "money cash_pl(money,money)",	 1, "m/f:cash_pl" },
-	{ NULL, "money cash_mi(money,money)",  1, "m/f:cash_mi" },
-	{ NULL, "float8 cash_div_cash(money,money)", 2, "m/f:cash_div_cash" },
-	{ NULL, "money cash_mul_int2(money,int2)",   2, "m/f:cash_mul_int2" },
-	{ NULL, "money cash_mul_int4(money,int4)",   2, "m/f:cash_mul_int4" },
-	{ PGSTROM, "money cash_mul_flt2(money,float2)", 3, "m/f:cash_mul_flt2" },
-	{ NULL, "money cash_mul_flt4(money,float4)", 2, "m/f:cash_mul_flt4" },
-	{ NULL, "money cash_mul_flt8(money,float8)", 2, "m/f:cash_mul_flt8" },
-	{ NULL, "money cash_div_int2(money,int2)",   2, "m/f:cash_div_int2" },
-	{ NULL, "money cash_div_int4(money,int4)",   2, "m/f:cash_div_int4" },
-	{ PGSTROM, "money cash_div_flt2(money,float2)", 3, "m/f:cash_div_flt2" },
-	{ NULL, "money cash_div_flt4(money,float4)", 2, "m/f:cash_div_flt4" },
-	{ NULL, "money cash_div_flt8(money,float8)", 2, "m/f:cash_div_flt8" },
-	{ NULL, "money int2_mul_cash(int2,money)",   2, "m/f:int2_mul_cash" },
-	{ NULL, "money int4_mul_cash(int4,money)",   2, "m/f:int4_mul_cash" },
-	{ PGSTROM, "money flt2_mul_cash(float2,money)", 3, "m/f:flt2_mul_cash" },
-	{ NULL, "money flt4_mul_cash(float4,money)", 2, "m/f:flt4_mul_cash" },
-	{ NULL, "money flt8_mul_cash(float8,money)", 2, "m/f:flt8_mul_cash" },
+	{ NULL, "money cash_pl(money,money)",	        1, "m/f:cash_pl" },
+	{ NULL, "money cash_mi(money,money)",           1, "m/f:cash_mi" },
+	{ NULL, "float8 cash_div_cash(money,money)",    2, "m/f:cash_div_cash" },
+	{ PGSTROM, "money cash_mul_int1(money,int1)",   2, "m/f:cash_mul_int1" },
+	{ NULL,    "money cash_mul_int2(money,int2)",   2, "m/f:cash_mul_int2" },
+	{ NULL,    "money cash_mul_int4(money,int4)",   2, "m/f:cash_mul_int4" },
+	{ PGSTROM, "money cash_mul_flt2(money,float2)", 2, "m/f:cash_mul_flt2" },
+	{ NULL,    "money cash_mul_flt4(money,float4)", 2, "m/f:cash_mul_flt4" },
+	{ NULL,    "money cash_mul_flt8(money,float8)", 2, "m/f:cash_mul_flt8" },
+	{ PGSTROM, "money cash_div_int1(money,int1)",   2, "m/f:cash_div_int1" },
+	{ NULL,    "money cash_div_int2(money,int2)",   2, "m/f:cash_div_int2" },
+	{ NULL,    "money cash_div_int4(money,int4)",   2, "m/f:cash_div_int4" },
+	{ PGSTROM, "money cash_div_flt2(money,float2)", 2, "m/f:cash_div_flt2" },
+	{ NULL,    "money cash_div_flt4(money,float4)", 2, "m/f:cash_div_flt4" },
+	{ NULL,    "money cash_div_flt8(money,float8)", 2, "m/f:cash_div_flt8" },
+	{ PGSTROM, "money int1_mul_cash(int1,money)",   2, "m/f:int1_mul_cash" },
+	{ NULL,    "money int2_mul_cash(int2,money)",   2, "m/f:int2_mul_cash" },
+	{ NULL,    "money int4_mul_cash(int4,money)",   2, "m/f:int4_mul_cash" },
+	{ PGSTROM, "money flt2_mul_cash(float2,money)", 2, "m/f:flt2_mul_cash" },
+	{ NULL,    "money flt4_mul_cash(float4,money)", 2, "m/f:flt4_mul_cash" },
+	{ NULL,    "money flt8_mul_cash(float8,money)", 2, "m/f:flt8_mul_cash" },
 	/* currency comparison */
 	{ NULL, "int4 cash_cmp(money,money)", 1, "m/f:type_compare" },
 	{ NULL, "bool cash_eq(money,money)",  1, "m/f:cash_eq" },
@@ -1367,33 +1599,35 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Mathmatical functions
      */
-	{ NULL, "int2 abs(int2)",         1, "p/f:int2abs" },
-	{ NULL, "int4 abs(int4)",         1, "p/f:int4abs" },
-	{ NULL, "int8 abs(int8)",         1, "p/f:int8abs" },
-	{ NULL, "float4 abs(float4)",     1, "p/f:float4abs" },
-	{ NULL, "float8 abs(float8)",     1, "p/f:float8abs" },
-	{ NULL, "float8 cbrt(float8)",    1, "m/f:cbrt" },
-	{ NULL, "float8 dcbrt(float8)",   1, "m/f:cbrt" },
-	{ NULL, "float8 ceil(float8)",    1, "m/f:ceil" },
-	{ NULL, "float8 ceiling(float8)", 1, "m/f:ceil" },
-	{ NULL, "float8 exp(float8)",     5, "m/f:exp" },
-	{ NULL, "float8 dexp(float8)",    5, "m/f:exp" },
-	{ NULL, "float8 floor(float8)",   1, "m/f:floor" },
-	{ NULL, "float8 ln(float8)",      5, "m/f:ln" },
-	{ NULL, "float8 dlog1(float8)",   5, "m/f:ln" },
-	{ NULL, "float8 log(float8)",     5, "m/f:log10" },
-	{ NULL, "float8 dlog10(float8)",  5, "m/f:log10" },
-	{ NULL, "float8 pi()",            0, "m/f:dpi" },
-	{ NULL, "float8 power(float8,float8)", 5, "m/f:dpow" },
-	{ NULL, "float8 pow(float8,float8)",   5, "m/f:dpow" },
-	{ NULL, "float8 dpow(float8,float8)",  5, "m/f:dpow" },
-	{ NULL, "float8 round(float8)",   5, "m/f:round" },
-	{ NULL, "float8 dround(float8)",  5, "m/f:round" },
-	{ NULL, "float8 sign(float8)",    1, "m/f:sign" },
-	{ NULL, "float8 sqrt(float8)",    5, "m/f:dsqrt" },
-	{ NULL, "float8 dsqrt(float8)",   5, "m/f:dsqrt" },
-	{ NULL, "float8 trunc(float8)",   1, "m/f:trunc" },
-	{ NULL, "float8 dtrunc(float8)",  1, "m/f:trunc" },
+	{ PGSTROM, "int1 abs(int1)",         1, "p/f:int1abs" },
+	{ NULL,    "int2 abs(int2)",         1, "p/f:int2abs" },
+	{ NULL,    "int4 abs(int4)",         1, "p/f:int4abs" },
+	{ NULL,    "int8 abs(int8)",         1, "p/f:int8abs" },
+	{ PGSTROM, "float2 abs(float2)",     1, "p/f:float2abs" },
+	{ NULL,    "float4 abs(float4)",     1, "p/f:float4abs" },
+	{ NULL,    "float8 abs(float8)",     1, "p/f:float8abs" },
+	{ NULL,    "float8 cbrt(float8)",    1, "m/f:cbrt" },
+	{ NULL,    "float8 dcbrt(float8)",   1, "m/f:cbrt" },
+	{ NULL,    "float8 ceil(float8)",    1, "m/f:ceil" },
+	{ NULL,    "float8 ceiling(float8)", 1, "m/f:ceil" },
+	{ NULL,    "float8 exp(float8)",     5, "m/f:exp" },
+	{ NULL,    "float8 dexp(float8)",    5, "m/f:exp" },
+	{ NULL,    "float8 floor(float8)",   1, "m/f:floor" },
+	{ NULL,    "float8 ln(float8)",      5, "m/f:ln" },
+	{ NULL,    "float8 dlog1(float8)",   5, "m/f:ln" },
+	{ NULL,    "float8 log(float8)",     5, "m/f:log10" },
+	{ NULL,    "float8 dlog10(float8)",  5, "m/f:log10" },
+	{ NULL,    "float8 pi()",            0, "m/f:dpi" },
+	{ NULL,    "float8 power(float8,float8)", 5, "m/f:dpow" },
+	{ NULL,    "float8 pow(float8,float8)",   5, "m/f:dpow" },
+	{ NULL,    "float8 dpow(float8,float8)",  5, "m/f:dpow" },
+	{ NULL,    "float8 round(float8)",   5, "m/f:round" },
+	{ NULL,    "float8 dround(float8)",  5, "m/f:round" },
+	{ NULL,    "float8 sign(float8)",    1, "m/f:sign" },
+	{ NULL,    "float8 sqrt(float8)",    5, "m/f:dsqrt" },
+	{ NULL,    "float8 dsqrt(float8)",   5, "m/f:dsqrt" },
+	{ NULL,    "float8 trunc(float8)",   1, "m/f:trunc" },
+	{ NULL,    "float8 dtrunc(float8)",  1, "m/f:trunc" },
 
 	/*
 	 * Trigonometric function
@@ -1413,16 +1647,20 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	 * Numeric functions
 	 * ------------------------- */
 	/* Numeric type cast functions */
-	{ NULL, "int2 int2(numeric)",      8, "f:numeric_int2" },
-	{ NULL, "int4 int4(numeric)",      8, "f:numeric_int4" },
-	{ NULL, "int8 int8(numeric)",      8, "f:numeric_int8" },
-	{ NULL, "float4 float4(numeric)",  8, "f:numeric_float4" },
-	{ NULL, "float8 float8(numeric)",  8, "f:numeric_float8" },
-	{ NULL, "numeric numeric(int2)",   5, "f:int2_numeric" },
-	{ NULL, "numeric numeric(int4)",   5, "f:int4_numeric" },
-	{ NULL, "numeric numeric(int8)",   5, "f:int8_numeric" },
-	{ NULL, "numeric numeric(float4)", 5, "f:float4_numeric" },
-	{ NULL, "numeric numeric(float8)", 5, "f:float8_numeric" },
+	{ PGSTROM, "int1 int1(numeric)",         8, "f:numeric_int1" },
+	{ NULL,    "int2 int2(numeric)",         8, "f:numeric_int2" },
+	{ NULL,    "int4 int4(numeric)",         8, "f:numeric_int4" },
+	{ NULL,    "int8 int8(numeric)",         8, "f:numeric_int8" },
+	{ PGSTROM, "float2 float2(numeric)",     8, "f:numeric_float2" },
+	{ NULL,    "float4 float4(numeric)",     8, "f:numeric_float4" },
+	{ NULL,    "float8 float8(numeric)",     8, "f:numeric_float8" },
+	{ PGSTROM, "numeric numeric(int1)",      5, "f:int1_numeric" },
+	{ NULL,    "numeric numeric(int2)",      5, "f:int2_numeric" },
+	{ NULL,    "numeric numeric(int4)",      5, "f:int4_numeric" },
+	{ NULL,    "numeric numeric(int8)",      5, "f:int8_numeric" },
+	{ PGSTROM, "numeric numeric(float2)",    5, "f:float2_numeric" },
+	{ NULL,    "numeric numeric(float4)",    5, "f:float4_numeric" },
+	{ NULL,    "numeric numeric(float8)",    5, "f:float8_numeric" },
 	/* Numeric operators */
 	{ NULL, "numeric numeric_add(numeric,numeric)", 10, "f:numeric_add" },
 	{ NULL, "numeric numeric_sub(numeric,numeric)", 10, "f:numeric_sub" },
@@ -2058,9 +2296,10 @@ devfunc_generic_result_sz(codegen_context *context,
 
 static devfunc_info *
 __construct_devfunc_info(HeapTuple protup,
-						 Oid func_collid,
-						 Oid func_rettype,
-						 int func_nargs, Oid *func_argtypes,
+						 devtype_info *dfunc_rettype,
+						 int dfunc_nargs,
+						 devtype_info **dfunc_argtypes,
+						 Oid dfunc_collid,
 						 int func_devcost,
 						 const char *func_template,
 						 devfunc_result_sz_type devfunc_result_sz)
@@ -2068,7 +2307,6 @@ __construct_devfunc_info(HeapTuple protup,
 	Form_pg_proc    proc = (Form_pg_proc) GETSTRUCT(protup);
 	MemoryContext	oldcxt;
 	devfunc_info   *dfunc = NULL;
-	devtype_info   *dtype;
 	List		   *dfunc_args = NIL;
 	const char	   *pos;
 	const char	   *end;
@@ -2128,29 +2366,21 @@ __construct_devfunc_info(HeapTuple protup,
 		return NULL;
 	}
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	for (j=0; j < func_nargs; j++)
-	{
-		dtype = pgstrom_devtype_lookup(func_argtypes[j]);
-		if (!dtype)
-			goto negative;
-		dfunc_args = lappend(dfunc_args, dtype);
-	}
-	dtype = pgstrom_devtype_lookup(func_rettype);
-	if (!dtype)
-		goto negative;
+	for (j=0; j < dfunc_nargs; j++)
+		dfunc_args = lappend(dfunc_args, dfunc_argtypes[j]);
 
 	dfunc = palloc0(sizeof(devfunc_info));
 	dfunc->func_oid = PgProcTupleGetOid(protup);
 	if (has_collation)
 	{
-		if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
+		if (OidIsValid(dfunc_collid) && !lc_collate_is_c(dfunc_collid))
 			dfunc->func_is_negative = true;
-		dfunc->func_collid = func_collid;
+		dfunc->func_collid = dfunc_collid;
 	}
 	dfunc->func_is_strict = proc->proisstrict;
 	dfunc->func_flags = flags;
 	dfunc->func_args = dfunc_args;
-	dfunc->func_rettype = dtype;
+	dfunc->func_rettype = dfunc_rettype;
 	dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
 	dfunc->func_devname = func_template + 2;	/* const cstring */
 	dfunc->func_devcost = func_devcost;
@@ -2158,23 +2388,22 @@ __construct_devfunc_info(HeapTuple protup,
 								? devfunc_result_sz
 								: devfunc_generic_result_sz);
 	/* other fields shall be assigned on the caller side */
-negative:
 	MemoryContextSwitchTo(oldcxt);
 
 	return dfunc;
 }
 
 static devfunc_info *
-pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
-								const char *lib_name,
-								Oid func_rettype,
-								oidvector *func_argtypes,
-								Oid func_collid,
+pgstrom_devfunc_construct_fuzzy(const char *lib_name,
+								HeapTuple protup,
+								devtype_info *dfunc_rettype,
+								int dfunc_nargs,
+								devtype_info **dfunc_argtypes,
+								Oid dfunc_collid,
 								int fuzzy_index_head,
 								int fuzzy_index_tail)
 {
 	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
-	Oid	   *real_argtypes = alloca(sizeof(Oid) * func_argtypes->dim1);
 	char	buffer[512];
 	int		i, j;
 
@@ -2210,10 +2439,10 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 			continue;
 
 		/* check the argument types */
-		for (j=0; j < func_argtypes->dim1; j++)
+		for (j=0; j < dfunc_nargs; j++)
 		{
 			tok = pos;
-			pos = strchr(pos, (j < func_argtypes->dim1 - 1 ? ',' : ')'));
+			pos = strchr(pos, (j < dfunc_nargs - 1 ? ',' : ')'));
 			if (!pos)
 				break;		/* not match */
 			*pos++ = '\0';
@@ -2221,33 +2450,70 @@ pgstrom_devfunc_construct_fuzzy(HeapTuple protup,
 			dtype = pgstrom_devtype_lookup_by_name(tok);
 			if (!dtype)
 				break;		/* not match */
-			if (dtype->type_oid != func_argtypes->values[j] &&
-				!pgstrom_devtype_can_relabel(func_argtypes->values[j],
+			if (dtype->type_oid != dfunc_argtypes[j]->type_oid &&
+				!pgstrom_devtype_can_relabel(dfunc_argtypes[j]->type_oid,
 											 dtype->type_oid))
 				break;		/* not match */
-			real_argtypes[j] = dtype->type_oid;
 		}
-		if (j < func_argtypes->dim1)
+		if (j < dfunc_nargs)
 			continue;
 		/* check the result type */
 		dtype = pgstrom_devtype_lookup_by_name(buffer);
 		if (!dtype)
 			continue;
-		if (dtype->type_oid != func_rettype &&
-			!pgstrom_devtype_can_relabel(dtype->type_oid, func_rettype))
+		if (dtype->type_oid != dfunc_rettype->type_oid &&
+			!pgstrom_devtype_can_relabel(dtype->type_oid,
+										 dfunc_rettype->type_oid))
 			continue;
 
-		/* Ok, found the entry */
+		/* Ok, found the fuzzy entry */
 		return __construct_devfunc_info(protup,
-										func_collid,
-										dtype->type_oid,
-										func_argtypes->dim1,
-										real_argtypes,
+										dfunc_rettype,
+										dfunc_nargs,
+										dfunc_argtypes,
+										dfunc_collid,
 										procat->func_devcost,
 										procat->func_template,
 										procat->devfunc_result_sz);
 	}
 	/* not found */
+	return NULL;
+}
+
+static inline devfunc_info *
+__build_extra_devfunc_info(HeapTuple protup,
+						   devtype_info *dfunc_rettype,
+						   int dfunc_nargs,
+						   devtype_info **dfunc_argtypes,
+						   Oid dfunc_collid)
+{
+	Oid		proc_oid = PgProcTupleGetOid(protup);
+	Form_pg_proc proc_form = (Form_pg_proc) GETSTRUCT(protup);
+	devfunc_info *dfunc;
+	int		i;
+
+	for (i=0; i < pgstrom_num_users_extra; i++)
+	{
+		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+		if (extra->lookup_extra_devfunc)
+		{
+			dfunc = extra->lookup_extra_devfunc(devinfo_memcxt,
+												proc_oid,
+												proc_form,
+												dfunc_rettype,
+												dfunc_nargs,
+												dfunc_argtypes,
+												dfunc_collid);
+			if (dfunc)
+			{
+				dfunc->func_flags |= extra->extra_flags;
+				if (!dfunc->devfunc_result_sz)
+					dfunc->devfunc_result_sz = devfunc_generic_result_sz;
+				return dfunc;
+			}
+		}
+	}
 	return NULL;
 }
 
@@ -2261,6 +2527,8 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	const char	   *proc_name = NameStr(proc->proname);
 	StringInfoData	sig;
 	devtype_info   *dtype;
+	devtype_info   *dfunc_rettype;
+	devtype_info  **dfunc_argtypes;
 	devfunc_info   *dfunc = NULL;
 	char		   *lib_name = NULL;
 	int				fuzzy_index_head = -1;
@@ -2273,12 +2541,13 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	
 	/* make a signature string */
 	initStringInfo(&sig);
-    dtype = pgstrom_devtype_lookup(func_rettype);
-	if (!dtype)
+	dfunc_rettype = pgstrom_devtype_lookup(func_rettype);
+	if (!dfunc_rettype)
 		goto not_found;
-	appendStringInfo(&sig, "%s ", dtype->type_name);
-
-	appendStringInfo(&sig, "%s(", quote_identifier(proc_name));
+	appendStringInfo(&sig, "%s %s(",
+					 dfunc_rettype->type_name,
+					 quote_identifier(proc_name));
+	dfunc_argtypes = alloca(sizeof(devtype_info *) * func_argtypes->dim1);
 	for (i=0; i < func_argtypes->dim1; i++)
 	{
 		dtype = pgstrom_devtype_lookup(func_argtypes->values[i]);
@@ -2287,9 +2556,10 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		if (i > 0)
 			appendStringInfoChar(&sig, ',');
 		appendStringInfo(&sig, "%s", dtype->type_name);
+		dfunc_argtypes[i] = dtype;
 	}
 	appendStringInfoChar(&sig, ')');
-	
+
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
@@ -2303,10 +2573,10 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		if (strcmp(procat->func_signature, sig.data) == 0)
 		{
 			dfunc = __construct_devfunc_info(protup,
-											 func_collid,
-											 func_rettype,
+											 dfunc_rettype,
 											 func_argtypes->dim1,
-											 func_argtypes->values,
+											 dfunc_argtypes,
+											 func_collid,
 											 procat->func_devcost,
 											 procat->func_template,
 											 procat->devfunc_result_sz);
@@ -2336,17 +2606,28 @@ pgstrom_devfunc_construct(HeapTuple protup,
 			}
 		}
 	}
-not_found:
+	/* try invocation with implicit type relabel */
 	if (!dfunc && fuzzy_index_head >= 0)
 	{
-		dfunc = pgstrom_devfunc_construct_fuzzy(protup,
-												lib_name,
-												func_rettype,
-												func_argtypes,
+		dfunc = pgstrom_devfunc_construct_fuzzy(lib_name,
+												protup,
+												dfunc_rettype,
+												func_argtypes->dim1,
+												dfunc_argtypes,
 												func_collid,
 												fuzzy_index_head,
 												fuzzy_index_tail);
 	}
+	/* extra device function, if any */
+	if (!dfunc)
+	{
+		dfunc = __build_extra_devfunc_info(protup,
+										   dfunc_rettype,
+										   func_argtypes->dim1,
+										   dfunc_argtypes,
+										   func_collid);
+	}
+not_found:
 	if (lib_name)
 		pfree(lib_name);
 	pfree(sig.data);
@@ -2437,7 +2718,6 @@ retry:
 		dtype = palloc0(sizeof(devtype_info));
 		dtype->type_oid = func_rettype;
 		dfunc->func_rettype = dtype;
-
 		dfunc->func_sqlname = pstrdup(NameStr(proc->proname));
 
 		MemoryContextSwitchTo(oldcxt);
@@ -2635,145 +2915,147 @@ pgstrom_devfunc_track(codegen_context *context, devfunc_info *dfunc)
 static struct {
 	Oid			src_type_oid;
 	Oid			dst_type_oid;
+	bool		has_domain_checks;
 	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
 } devcast_catalog[] = {
 	/* text, varchar, bpchar */
-	{ TEXTOID,    BPCHAROID,  NULL },
-	{ TEXTOID,    VARCHAROID, NULL },
-	{ VARCHAROID, TEXTOID,    NULL },
-	{ VARCHAROID, BPCHAROID,  NULL },
+	{ TEXTOID,    BPCHAROID,  false, NULL },
+	{ TEXTOID,    VARCHAROID, false, NULL },
+	{ VARCHAROID, TEXTOID,    false, NULL },
+	{ VARCHAROID, BPCHAROID,  false, NULL },
 	/* cidr -> inet, but no reverse type cast */
-	{ CIDROID,    INETOID,    NULL },
+	{ CIDROID,    INETOID,    false, NULL },
 	/* text -> (intX/floatX/numeric), including (jsonb->>'key') reference */
-	{ TEXTOID,    BOOLOID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT2OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT4OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    INT8OID,    devcast_text2numeric_callback },
-	{ TEXTOID,    FLOAT4OID,  devcast_text2numeric_callback },
-	{ TEXTOID,    FLOAT8OID,  devcast_text2numeric_callback },
-	{ TEXTOID,    NUMERICOID, devcast_text2numeric_callback },
+	{ TEXTOID,    BOOLOID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT2OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT4OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    INT8OID,    false, devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT4OID,  false, devcast_text2numeric_callback },
+	{ TEXTOID,    FLOAT8OID,  false, devcast_text2numeric_callback },
+	{ TEXTOID,    NUMERICOID, false, devcast_text2numeric_callback },
 };
 
 static devcast_info *
 build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 {
-	int			i;
+	devcast_info *dcast = NULL;
+	devtype_info *dtype_s = NULL;
+	devtype_info *dtype_d = NULL;
+	int		i;
+
+	dtype_s = pgstrom_devtype_lookup(src_type_oid);
+	if (!dtype_s)
+		goto not_found;
+	dtype_d = pgstrom_devtype_lookup(dst_type_oid);
+	if (!dtype_d)
+		goto not_found;
 
 	for (i=0; i < lengthof(devcast_catalog); i++)
 	{
-		devcast_coerceviaio_callback_f dcast_callback;
-		devtype_info   *dtype;
-		devcast_info   *dcast;
-		HeapTuple		tup;
-		char			method;
-
-		if (src_type_oid != devcast_catalog[i].src_type_oid ||
-			dst_type_oid != devcast_catalog[i].dst_type_oid)
-			continue;
-		dcast_callback = devcast_catalog[i].dcast_coerceviaio_callback;
-
-		tup = SearchSysCache2(CASTSOURCETARGET,
-							  ObjectIdGetDatum(src_type_oid),
-							  ObjectIdGetDatum(dst_type_oid));
-		if (!HeapTupleIsValid(tup))
+		if (dtype_s->type_oid == devcast_catalog[i].src_type_oid &&
+			dtype_d->type_oid == devcast_catalog[i].dst_type_oid)
 		{
-			if (!dcast_callback)
-				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
-					 format_type_be(src_type_oid),
-					 format_type_be(dst_type_oid));
-			/*
-			 * No pg_cast entry, so we assume this conversion is processed by
-			 * the cstring in/out function.
-			 */
-			method = COERCION_METHOD_INOUT;
+			dcast = MemoryContextAllocZero(devinfo_memcxt,
+										   sizeof(devcast_info));
+			dcast->src_type = dtype_s;
+			dcast->dst_type = dtype_d;
+			dcast->has_domain_checks = devcast_catalog[i].has_domain_checks;
+			dcast->dcast_coerceviaio_callback
+				= devcast_catalog[i].dcast_coerceviaio_callback;
+			break;
 		}
-		else
-		{
-			method = ((Form_pg_cast) GETSTRUCT(tup))->castmethod;
-			ReleaseSysCache(tup);
-
-			if (!((method == COERCION_METHOD_BINARY && !dcast_callback) ||
-				  (method == COERCION_METHOD_INOUT && dcast_callback)))
-				elog(ERROR, "Bug? type cast (%s -> %s) has wrong catalog item",
-					 format_type_be(src_type_oid),
-					 format_type_be(dst_type_oid));
-		}
-		dcast = MemoryContextAllocZero(devinfo_memcxt,
-									   sizeof(devcast_info));
-		dcast->hashvalue = GetSysCacheHashValue(CASTSOURCETARGET,
-												src_type_oid,
-												dst_type_oid, 0, 0);
-		/* source */
-		dtype = pgstrom_devtype_lookup(src_type_oid);
-		if (!dtype)
-			__ELog("Bug? type '%s' is not supported on device",
-				   format_type_be(src_type_oid));
-		dcast->src_type = dtype;
-		/* destination */
-		dtype = pgstrom_devtype_lookup(dst_type_oid);
-		if (!dtype)
-			__ELog("Bug? type '%s' is not supported on device",
-				   format_type_be(dst_type_oid));
-		dcast->dst_type = dtype;
-		/* method && callback */
-		dcast->castmethod = method;
-		dcast->dcast_coerceviaio_callback = dcast_callback;
-
-		return dcast;
 	}
-	return NULL;
+	/* extra type cast */
+	if (!dcast)
+	{
+		for (i=0; i < pgstrom_num_users_extra; i++)
+		{
+			pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
+
+			if (extra->lookup_extra_devcast)
+			{
+				dcast = extra->lookup_extra_devcast(devinfo_memcxt,
+													dtype_s,
+													dtype_d);
+				if (dcast)
+					break;
+			}
+		}
+	}
+not_found:
+	/* negative entry */
+	if (!dcast)
+	{
+		MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+
+		if (!dtype_s)
+		{
+			dtype_s = palloc0(sizeof(devtype_info));
+            dtype_s->type_oid = src_type_oid;
+		}
+		if (!dtype_d)
+		{
+			dtype_d = palloc0(sizeof(devtype_info));
+			dtype_d->type_oid = dst_type_oid;
+		}
+		dcast = palloc0(sizeof(devcast_info));
+		dcast->src_type = dtype_s;
+		dcast->dst_type = dtype_d;
+		dcast->cast_is_negative = true;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	/* sanity checks */
+	if (dcast->has_domain_checks &&
+		dcast->dcast_coerceviaio_callback != NULL)
+		__ELog("Bug? type cast %s -> %s with domain checks must be binary compatible",
+			   format_type_be(dcast->src_type->type_oid),
+			   format_type_be(dcast->dst_type->type_oid));
+	return dcast;
 }
 
 devcast_info *
-pgstrom_devcast_lookup(Oid src_type_oid,
-					   Oid dst_type_oid,
-					   char castmethod)
+pgstrom_devcast_lookup(Oid src_type_oid, Oid dst_type_oid)
 {
-
+	uint32		hashvalue;
 	int			hindex;
 	devcast_info *dcast;
 	dlist_iter	iter;
 
-	hindex = GetSysCacheHashValue(CASTSOURCETARGET,
-								  src_type_oid,
-								  dst_type_oid,
-								  0, 0) % lengthof(devcast_info_slot);
+	hashvalue = GetSysCacheHashValue(CASTSOURCETARGET,
+									 src_type_oid,
+									 dst_type_oid,
+									 0, 0);
+	hindex = hashvalue % lengthof(devcast_info_slot);
 	dlist_foreach (iter, &devcast_info_slot[hindex])
 	{
 		dcast = dlist_container(devcast_info, chain, iter.cur);
 		if (dcast->src_type->type_oid == src_type_oid &&
-            dcast->dst_type->type_oid == dst_type_oid)
+			dcast->dst_type->type_oid == dst_type_oid)
 		{
-			if (dcast->castmethod == castmethod)
-				return dcast;
-			return NULL;
+			if (dcast->cast_is_negative)
+				return NULL;
+			return dcast;
 		}
 	}
-
+	/* create a new one */
 	dcast = build_devcast_info(src_type_oid, dst_type_oid);
-	if (dcast)
-	{
-		hindex = dcast->hashvalue % lengthof(devcast_info_slot);
-		dlist_push_head(&devcast_info_slot[hindex], &dcast->chain);
-
-		if (dcast->castmethod == castmethod)
-			return dcast;
-	}
-	return NULL;
+	dcast->hashvalue = hashvalue;
+	dlist_push_head(&devcast_info_slot[hindex], &dcast->chain);
+	if (dcast->cast_is_negative)
+		return NULL;
+	return dcast;
 }
 
 bool
 pgstrom_devtype_can_relabel(Oid src_type_oid,
 							Oid dst_type_oid)
 {
-	devcast_info *dcast = pgstrom_devcast_lookup(src_type_oid,
-												 dst_type_oid,
-												 COERCION_METHOD_BINARY);
-	if (dcast)
-	{
-		Assert(!dcast->dcast_coerceviaio_callback);
+	devcast_info *dcast;
+
+	dcast = pgstrom_devcast_lookup(src_type_oid, dst_type_oid);
+	if (dcast && dcast->dcast_coerceviaio_callback == NULL)
 		return true;
-	}
+
 	return false;
 }
 
@@ -3279,21 +3561,40 @@ codegen_coerceviaio_expression(codegen_context *context,
 	Oid		stype_oid = exprType((Node *)coerce->arg);
 	Oid		dtype_oid = coerce->resulttype;
 
-	dcast = pgstrom_devcast_lookup(stype_oid,
-								   dtype_oid,
-								   COERCION_METHOD_INOUT);
-	if (!dcast)
-		__ELog("type cast (%s -> %s) is not device supported",
+	dcast = pgstrom_devcast_lookup(stype_oid, dtype_oid);
+	if (!dcast || dcast->dcast_coerceviaio_callback == NULL)
+		__ELog("no device support of coerceviaio (%s -> %s)",
 			   format_type_be(stype_oid),
 			   format_type_be(dtype_oid));
-
-	if (!dcast->dcast_coerceviaio_callback)
-		__ELog("no device cast support on %s -> %s",
-			   format_type_be(dcast->src_type->type_oid),
-			   format_type_be(dcast->dst_type->type_oid));
 	context->devcost += 8;		/* just a rough estimation */
 
 	return dcast->dcast_coerceviaio_callback(context, dcast, coerce);
+}
+
+static int
+codegen_coercetodomain_expression(codegen_context *context,
+								  CoerceToDomain *coerce_d)
+{
+	devcast_info *dcast;
+	Oid		stype_oid = exprType((Node *)coerce_d->arg);
+	Oid		dtype_oid = coerce_d->resulttype;
+	int		width;
+
+	dcast = pgstrom_devcast_lookup(stype_oid, dtype_oid);
+	if (!dcast || dcast->dcast_coerceviaio_callback != NULL)
+		__ELog("type cast (%s -> %s) is not binary compatible",
+			   format_type_be(stype_oid),
+			   format_type_be(dtype_oid));
+	if (!dcast->has_domain_checks)
+		__ELog("type cast (%s -> %s) has no domain constraint",
+			   format_type_be(stype_oid),
+			   format_type_be(dtype_oid));
+	__appendStringInfo(&context->str, "to_%s_domain(kcxt,",
+					   dcast->dst_type->type_name);
+	codegen_expression_walker(context, (Node *)coerce_d->arg, &width);
+	__appendStringInfoChar(&context->str, ')');
+
+	return width;
 }
 
 static int
@@ -3621,6 +3922,11 @@ codegen_expression_walker(codegen_context *context,
 		case T_CoerceViaIO:
 			width = codegen_coerceviaio_expression(context,
 												   (CoerceViaIO *) node);
+			break;
+
+		case T_CoerceToDomain:
+			width = codegen_coercetodomain_expression(context,
+													  (CoerceToDomain *) node);
 			break;
 
 		case T_CaseExpr:

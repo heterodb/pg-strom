@@ -413,6 +413,9 @@ construct_flat_cuda_source(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_gpusort.h\"\n");
+	/* User's extra module, if any */
+	ofs += pgstrom_codegen_extra_devtypes(source + ofs, len - ofs,
+										  extra_flags);
 	/* Generated from SQL */
 	ofs += snprintf(source + ofs, len - ofs, "\n%s\n", kern_source);
 
@@ -533,6 +536,24 @@ link_cuda_libraries(char *ptx_image,
 				snprintf(pathname, sizeof(pathname),
 						 PGSHAREDIR "/pg_strom/%s.%s",
 						 catalog[i].libname, lib_suffix);
+				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
+								   pathname, 0, NULL, NULL);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuLinkAddFile(\"%s\"): %s",
+						   pathname, errorText(rc));
+			}
+		}
+
+		/* user's extra device code if any */
+		for (i=0; i < pgstrom_num_users_extra; i++)
+		{
+			pgstromUsersExtraDescriptor *ex_desc = &pgstrom_users_extra_desc[i];
+
+			if ((extra_flags & ex_desc->extra_flags) == ex_desc->extra_flags)
+			{
+				snprintf(pathname, sizeof(pathname),
+						 PGSHAREDIR "/pg_strom/%s.%s",
+						 ex_desc->extra_name, lib_suffix);
 				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 								   pathname, 0, NULL, NULL);
 				if (rc != CUDA_SUCCESS)

@@ -334,6 +334,8 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_datum);
 
 #ifdef __CUDACC__
 /* numeric cast functions */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_numeric_int1(kern_context *kcxt, pg_numeric_t arg);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_numeric_int2(kern_context *kcxt, pg_numeric_t arg);
 DEVICE_FUNCTION(pg_int4_t)
@@ -350,6 +352,8 @@ DEVICE_FUNCTION(pg_numeric_t)
 integer_to_numeric(kern_context *kcxt, cl_long ival);
 DEVICE_FUNCTION(pg_numeric_t)
 float_to_numeric(kern_context *kcxt, cl_double fval);
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_int1_numeric(kern_context *kcxt, pg_int1_t arg);
 DEVICE_FUNCTION(pg_numeric_t)
 pgfn_int2_numeric(kern_context *kcxt, pg_int2_t arg);
 DEVICE_FUNCTION(pg_numeric_t)

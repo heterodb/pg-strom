@@ -34,9 +34,7 @@ __STROM_OBJS = main.o nvrtc.o cufile.o extra.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o gpupreagg.o \
 	arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-	gpu_store.o aggfuncs.o float2.o misc.o
-__STROM_HEADERS = pg_strom.h nvme_strom.h arrow_defs.h \
-		device_attrs.h cuda_filelist
+	gpu_store.o aggfuncs.o float2.o tinyint.o misc.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #
@@ -99,6 +97,7 @@ PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                   -I $(shell $(PG_CONFIG) --includedir) \
                   -I $(shell $(PG_CONFIG) --includedir-server) \
                   -L $(shell $(PG_CONFIG) --libdir) \
+                  -L $(shell $(PG_CONFIG) --pkglibdir) \
                   $(shell $(PG_CONFIG) --ldflags)
 
 MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
@@ -117,7 +116,6 @@ MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                      $(shell $(MYSQL_CONFIG) --cflags) \
                      $(shell $(MYSQL_CONFIG) --libs) \
                      -Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
-
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -234,7 +232,8 @@ MODULE_big = pg_strom
 MODULEDIR = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA = $(GPU_HEADERS) $(PGSTROM_SQL)
+DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
+       $(STROM_BUILD_ROOT)/src/cuda_codegen.h
 DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GSTORE_FDW_FATBIN)
 
 # Support utilities

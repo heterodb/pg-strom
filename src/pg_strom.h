@@ -52,6 +52,7 @@
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
@@ -80,6 +81,7 @@
 #include "commands/typecmds.h"
 #include "commands/variable.h"
 #include "common/base64.h"
+#include "common/int.h"
 #include "common/md5.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -94,6 +96,7 @@
 #include "lib/stringinfo.h"
 #include "libpq/be-fsstubs.h"
 #include "libpq/libpq-fs.h"
+#include "libpq/pqformat.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
@@ -506,107 +509,6 @@ struct GpuTask
 	GpuTaskState   *gts;			/* GTS reference in the backend */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 };
-
-/*
- * Type declarations for code generator
- */
-#define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan */
-#define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin */
-#define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg */
-#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort */
-
-#define DEVKERNEL_NEEDS_PRIMITIVE		0x00000100
-#define DEVKERNEL_NEEDS_TIMELIB			0x00000200
-#define DEVKERNEL_NEEDS_TEXTLIB			0x00000400
-#define DEVKERNEL_NEEDS_JSONLIB			0x00000800
-#define DEVKERNEL_NEEDS_MISCLIB			0x00001000
-#define DEVKERNEL_NEEDS_RANGETYPE		0x00002000
-#define DEVKERNEL_NEEDS_POSTGIS			0x00004000
-
-#define DEVKERNEL_BUILD_DEBUG_INFO		0x80000000
-
-struct devtype_info;
-struct devfunc_info;
-struct devcast_info;
-struct codegen_context;
-
-typedef cl_uint (*devtype_hashfunc_type)(struct devtype_info *dtype,
-										 Datum datum);
-
-typedef struct devtype_info {
-	dlist_node	chain;
-	cl_uint		hashvalue;
-	Oid			type_oid;
-	uint32		type_flags;
-	int16		type_length;
-	int16		type_align;
-	bool		type_byval;
-	bool		type_is_negative;
-	const char *type_name;	/* name of device type; same of SQL's type */
-	/* oid of type related functions */
-	Oid			type_eqfunc;	/* function to check equality */
-	Oid			type_cmpfunc;	/* function to compare two values */
-	/* constant initializer cstring, if any */
-	const char *max_const;
-	const char *min_const;
-	const char *zero_const;
-	/*
-	 * required size for extra buffer, if device type has special
-	 * internal representation, or device type needs working buffer
-	 * on device-side projection.
-	 */
-	int			extra_sz;
-	/* type specific hash-function; to be compatible to device code */
-	devtype_hashfunc_type hash_func;
-	/* element type of array, if type is array */
-	struct devtype_info *type_element;
-	/* properties of sub-fields, if type is composite */
-	int			comp_nfields;
-	struct devtype_info *comp_subtypes[FLEXIBLE_ARRAY_MEMBER];
-} devtype_info;
-
-/*
- * Per-function callback to estimate maximum expected length of
- * the function result. -1, if cannot estimate it.
- * If device function may consume per-thread varlena buffer, it
- * should expand context->varlena_bufsz.
- */
-typedef int (*devfunc_result_sz_type)(struct codegen_context *context,
-									  struct devfunc_info *dfunc,
-									  Expr **args, int *args_width);
-typedef struct devfunc_info {
-	dlist_node	chain;
-	cl_uint		hashvalue;
-	Oid			func_oid;		/* OID of the SQL function */
-	Oid			func_collid;	/* OID of collation, if collation aware */
-	bool		func_is_negative;	/* True, if not supported by GPU */
-	bool		func_is_strict;		/* True, if NULL strict function */
-	/* fields below are valid only if func_is_negative is false */
-	int32		func_flags;		/* Extra flags of this function */
-	List	   *func_args;		/* argument types by devtype_info */
-	devtype_info *func_rettype;	/* result type by devtype_info */
-	const char *func_sqlname;	/* name of the function in SQL side */
-	const char *func_devname;	/* name of the function in device side */
-	Cost		func_devcost;	/* relative cost to run function on GPU */
-	devfunc_result_sz_type devfunc_result_sz; /* result width estimator */
-} devfunc_info;
-
-/*
- * Callback on CoerceViaIO (type cast using in/out handler).
- * In some special cases, device code can handle this class of type cast.
- */
-typedef int (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
-											  struct devcast_info *dcast,
-											  CoerceViaIO *node);
-
-typedef struct devcast_info {
-	dlist_node		chain;
-	cl_uint			hashvalue;
-	devtype_info   *src_type;
-	devtype_info   *dst_type;
-	char			castmethod;	/* one of COERCION_METHOD_* */
-	devcast_coerceviaio_callback_f dcast_coerceviaio_callback;
-} devcast_info;
 
 /*
  * State structure of NVMe-Strom per GpuTaskState
@@ -1114,25 +1016,10 @@ extern void pgstrom_init_cuda_program(void);
 /*
  * codegen.c
  */
-struct codegen_context {
-	StringInfoData	str;
-	StringInfoData	decl_temp;	/* declarations of temporary variables */
-	int				decl_count;	/* # of temporary variabes in decl */
-	PlannerInfo *root;		//not necessary?
-	RelOptInfo	*baserel;	/* scope of Var-node, if any */
-	List	   *used_params;/* list of Const/Param in use */
-	List	   *used_vars;	/* list of Var in use */
-	Bitmapset  *param_refs;	/* referenced parameters */
-	const char *var_label;	/* prefix of var reference, if exist */
-	const char *kds_label;	/* label to reference kds, if exist */
-	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
-	int			extra_flags;	/* external libraries to be included */
-	int			varlena_bufsz;	/* required size of temporary varlena buffer */
-	int			devcost;	/* relative device cost */
-};
-typedef struct codegen_context	codegen_context;
+#include "cuda_codegen.h"
 
-extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
+extern size_t pgstrom_codegen_extra_devtypes(char *buf, size_t bufsz,
+											 uint32 extra_flags);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
@@ -1147,8 +1034,7 @@ extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
 extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
 extern devcast_info *pgstrom_devcast_lookup(Oid src_type_oid,
-											Oid dst_type_oid,
-											char castmethod);
+											Oid dst_type_oid);
 extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 										Oid dst_type_oid);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
@@ -1485,6 +1371,10 @@ extern Oid	get_type_oid(const char *type_name,
 						 bool missing_ok);
 extern char *get_type_name(Oid type_oid, bool missing_ok);
 extern char *get_proc_library(HeapTuple protup);
+extern Oid	get_object_extension_oid(Oid class_id,
+									 Oid object_id,
+									 int32 objsub_id,
+									 bool missing_ok);
 extern char *bms_to_cstring(Bitmapset *x);
 extern bool pathtree_has_gpupath(Path *node);
 extern bool pathtree_has_parallel_aware(Path *node);
@@ -1529,8 +1419,18 @@ extern void		pgstrom_init_extra(void);
 #endif
 
 /*
+ * tinyint.c
+ */
+#ifndef INT1OID
+#define INT1OID			606
+#endif
+
+/*
  * main.c
  */
+extern int		pgstrom_num_users_extra;
+extern pgstromUsersExtraDescriptor pgstrom_users_extra_desc[];
+
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,
 										  bool outer_parallel,

@@ -28,6 +28,7 @@
 	{											\
 		return arg;								\
 	}
+PG_UNARY_PLUS_TEMPLATE(int1)
 PG_UNARY_PLUS_TEMPLATE(int2)
 PG_UNARY_PLUS_TEMPLATE(int4)
 PG_UNARY_PLUS_TEMPLATE(int8)
@@ -45,6 +46,7 @@ PG_UNARY_PLUS_TEMPLATE(float8)
 			arg.value = -arg.value;				\
 		return arg;								\
 	}
+PG_UNARY_MINUS_TEMPLATE(int1)
 PG_UNARY_MINUS_TEMPLATE(int2)
 PG_UNARY_MINUS_TEMPLATE(int4)
 PG_UNARY_MINUS_TEMPLATE(int8)
@@ -75,7 +77,8 @@ PG_UNARY_NOT_TEMPLATE(int8)
 			arg.value = abs((CAST)arg.value);	\
 		return arg;								\
 	}
-PG_UNARY_ABS_TEMPLATE(int2, cl_int)
+PG_UNARY_ABS_TEMPLATE(int1, cl_char)
+PG_UNARY_ABS_TEMPLATE(int2, cl_short)
 PG_UNARY_ABS_TEMPLATE(int4, cl_int)
 PG_UNARY_ABS_TEMPLATE(int8, cl_long)
 PG_UNARY_ABS_TEMPLATE(float2, cl_float)
@@ -140,12 +143,19 @@ PG_UNARY_ABS_TEMPLATE(float8, cl_double)
 	}
 
 PG_SIMPLE_INT_COMPARE_TEMPLATE(bool, bool, cl_int)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int1, int1, cl_int)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int1, int2, cl_int)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int1, int4, cl_int)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int1, int8, cl_long)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int2, int1, cl_int)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int2, int2, cl_int)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int2, int4, cl_int)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int2, int8, cl_long)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int4, int1, cl_int)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int4, int2, cl_int)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int4, int4, cl_int)
-PG_SIMPLE_INT_COMPARE_TEMPLATE(int4, int8, cl_int)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int4, int8, cl_long)
+PG_SIMPLE_INT_COMPARE_TEMPLATE(int8, int1, cl_long)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int8, int2, cl_long)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int8, int4, cl_long)
 PG_SIMPLE_INT_COMPARE_TEMPLATE(int8, int8, cl_long)
@@ -214,12 +224,15 @@ PG_SIMPLE_LARGER_SMALLER_TEMPLATE(float8)
 			result.value = (arg1.value OPER arg2.value);	\
 		return result;										\
 	}
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int1,&,and)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,&,and)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,&,and)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,&,and)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int1,|,or)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,|,or)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,|,or)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,|,or)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int1,^,xor)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,^,xor)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,^,xor)
 PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,^,xor)
@@ -240,6 +253,8 @@ PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,^,xor)
 			result.value = (arg1.value OPER arg2.value);	\
 		return result;										\
 	}
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int1,<<,shl)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int1,>>,shr)
 PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,<<,shl)
 PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,>>,shr)
 PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int4,<<,shl)
@@ -272,6 +287,16 @@ PG_TYPE_REINTERPRETE_TEMPLATE(float2,int2,__short_as_half)
 /*
  * Pre-built functions ('+' operators)
  */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1pl(kern_context *kcxt,  pg_int1_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12pl(kern_context *kcxt,  pg_int1_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14pl(kern_context *kcxt,  pg_int1_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18pl(kern_context *kcxt,  pg_int1_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21pl(kern_context *kcxt,  pg_int2_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2pl(kern_context *kcxt,  pg_int2_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
@@ -279,11 +304,15 @@ pgfn_int24pl(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int28pl(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41pl(kern_context *kcxt, pg_int4_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_int42pl(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
 pgfn_int4pl(kern_context *kcxt,  pg_int4_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int48pl(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int81pl(kern_context *kcxt, pg_int8_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int82pl(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
@@ -313,6 +342,16 @@ pgfn_float8pl(kern_context *kcxt,  pg_float8_t arg1, pg_float8_t arg2);
 /*
  * Pre-built functions ('-' operators)
  */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1mi(kern_context *kcxt,  pg_int1_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12mi(kern_context *kcxt,  pg_int1_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14mi(kern_context *kcxt,  pg_int1_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18mi(kern_context *kcxt,  pg_int1_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21mi(kern_context *kcxt,  pg_int2_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2mi(kern_context *kcxt,  pg_int2_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
@@ -320,11 +359,15 @@ pgfn_int24mi(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int28mi(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41mi(kern_context *kcxt, pg_int4_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_int42mi(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
 pgfn_int4mi(kern_context *kcxt,  pg_int4_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int48mi(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int81mi(kern_context *kcxt, pg_int8_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int82mi(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
@@ -354,6 +397,16 @@ pgfn_float8mi(kern_context *kcxt,  pg_float8_t arg1, pg_float8_t arg2);
 /*
  * Pre-built functions ('*' operators)
  */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1mul(kern_context *kcxt, pg_int1_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12mul(kern_context *kcxt, pg_int1_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14mul(kern_context *kcxt, pg_int1_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18mul(kern_context *kcxt, pg_int1_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21mul(kern_context *kcxt, pg_int2_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2mul(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
@@ -361,11 +414,15 @@ pgfn_int24mul(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int28mul(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41mul(kern_context *kcxt, pg_int4_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_int42mul(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
 pgfn_int4mul(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int48mul(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int81mul(kern_context *kcxt, pg_int8_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int82mul(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
@@ -394,6 +451,16 @@ pgfn_float8mul(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
 /*
  * Pre-built functions ('/' operators)
  */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1div(kern_context *kcxt, pg_int1_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int12div(kern_context *kcxt, pg_int1_t arg1, pg_int2_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
+pgfn_int14div(kern_context *kcxt, pg_int1_t arg1, pg_int4_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int18div(kern_context *kcxt, pg_int1_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int2_t)
+pgfn_int21div(kern_context *kcxt, pg_int2_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2div(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
@@ -401,11 +468,15 @@ pgfn_int24div(kern_context *kcxt, pg_int2_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int28div(kern_context *kcxt, pg_int2_t arg1, pg_int8_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
+pgfn_int41div(kern_context *kcxt, pg_int4_t arg1, pg_int1_t arg2);
+DEVICE_FUNCTION(pg_int4_t)
 pgfn_int42div(kern_context *kcxt, pg_int4_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)
 pgfn_int4div(kern_context *kcxt, pg_int4_t arg1, pg_int4_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int48div(kern_context *kcxt, pg_int4_t arg1, pg_int8_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_int81div(kern_context *kcxt, pg_int8_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
 pgfn_int82div(kern_context *kcxt, pg_int8_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int8_t)
@@ -434,6 +505,8 @@ pgfn_float8div(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2);
 /*
  * Pre-built functions ('%' operators)
  */
+DEVICE_FUNCTION(pg_int1_t)
+pgfn_int1mod(kern_context *kcxt, pg_int1_t arg1, pg_int1_t arg2);
 DEVICE_FUNCTION(pg_int2_t)
 pgfn_int2mod(kern_context *kcxt, pg_int2_t arg1, pg_int2_t arg2);
 DEVICE_FUNCTION(pg_int4_t)

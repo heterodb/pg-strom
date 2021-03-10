@@ -9,6 +9,7 @@
 #ifdef __PGSTROM_MODULE__
 #include "postgres.h"
 #endif
+#include <limits.h>
 #include "arrow_ipc.h"
 
 /* alignment macros, if not */
@@ -840,9 +841,11 @@ arrowFileWriteIOV(SQLtable *table)
 
 	while (index < table->__iov_cnt)
 	{
+		int		__iov_cnt = table->__iov_cnt - index;
+
 		nbytes = pwritev(table->fdesc,
-						 table->__iov,
-						 table->__iov_cnt - index,
+						 table->__iov + index,
+						 __iov_cnt < IOV_MAX ? __iov_cnt : IOV_MAX,
 						 table->f_pos);
 		if (nbytes < 0)
 		{

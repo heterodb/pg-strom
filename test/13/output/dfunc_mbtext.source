@@ -1,0 +1,93 @@
+--
+-- test for multibyte text (LIKE operator)
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dfunc_mbtext_temp CASCADE;
+CREATE SCHEMA regtest_dfunc_mbtext_temp;
+RESET client_min_messages;
+SET search_path = regtest_dfunc_mbtext_temp,public;
+CREATE TABLE rt_mbtext (
+  id    int,
+  line  text
+);
+ALTER TABLE rt_mbtext ALTER line SET STORAGE plain;
+COPY rt_mbtext FROM '@abs_srcdir@/input/mbtext_1.data';
+-- force to use GpuScan, instead of SeqScan
+SET enable_seqscan = off;
+-- not to print kernel source code
+SET pg_strom.debug_kernel_source = off;
+-- LIKE operator on mbtext
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, line
+  INTO test01g
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
+   Output: id, line
+   GPU Projection: rt_mbtext.id, rt_mbtext.line
+   GPU Filter: (rt_mbtext.line ~~ '%メロス%セリヌンティウス%'::text)
+(4 rows)
+
+SELECT id, line
+  INTO test01g
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+SET pg_strom.enabled = off;
+SELECT id, line
+  INTO test01p
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+(SELECT id FROM test01g EXCEPT ALL SELECT id FROM test01p) order by id;
+ id 
+----
+(0 rows)
+
+(SELECT id FROM test01p EXCEPT ALL SELECT id FROM test01g) order by id;
+ id 
+----
+(0 rows)
+
+-- text length and substring
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02g
+  FROM rt_mbtext
+ WHERE id > 0;
+                                                                                                             QUERY PLAN                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
+   Output: id, ("substring"(line, (id % 20), ((id % 10) + 5))), (("substring"(line, (id % 30), 10) || "substring"(line, ((id % 20) + 30), 10)))
+   GPU Projection: rt_mbtext.id, "substring"(rt_mbtext.line, (rt_mbtext.id % 20), ((rt_mbtext.id % 10) + 5)), ("substring"(rt_mbtext.line, (rt_mbtext.id % 30), 10) || "substring"(rt_mbtext.line, ((rt_mbtext.id % 20) + 30), 10))
+   GPU Filter: (rt_mbtext.id > 0)
+(4 rows)
+
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02g
+  FROM rt_mbtext
+ WHERE id > 0;
+SET pg_strom.enabled = off;
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02p
+  FROM rt_mbtext
+ WHERE id > 0;
+(SELECT id FROM test02g EXCEPT ALL SELECT id FROM test02p) order by id;
+ id 
+----
+(0 rows)
+
+(SELECT id FROM test02p EXCEPT ALL SELECT id FROM test02g) order by id;
+ id 
+----
+(0 rows)
+
+-- cleanup temporary resource
+SET client_min_messages = error;
+DROP SCHEMA regtest_dfunc_mbtext_temp CASCADE;
