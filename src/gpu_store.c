@@ -177,8 +177,9 @@ static CUresult gpuStoreInvokeApplyRedo(GpuStoreSharedDesc *gs_sdesc,
 										bool is_async);
 static CUresult gpuStoreInvokeCompaction(GpuStoreSharedDesc *gs_sdesc,
 										 bool is_async);
-Datum	pgstrom_gpustore_sync_trigger(PG_FUNCTION_ARGS);
 void	GpuStoreStartupPreloader(Datum arg);
+PG_FUNCTION_INFO_V1(pgstrom_gpustore_sync_trigger);
+PG_FUNCTION_INFO_V1(pgstrom_gpustore_precheck_trigger);
 
 /*
  * parseSyncTriggerOptions
@@ -288,7 +289,7 @@ relationHasSyncTrigger(Relation rel, GpuStoreOptions *gs_options)
 	TriggerDesc *trigdesc = rel->trigdesc;
 	Oid		namespace_oid;
 	Oid		synchronizer_oid;
-	oidvector *argtypes;
+	oidvector argtypes;
 	int		i;
 
 	if (!trigdesc)
@@ -302,19 +303,19 @@ relationHasSyncTrigger(Relation rel, GpuStoreOptions *gs_options)
 	namespace_oid = get_namespace_oid("pgstrom", true);
 	if (!OidIsValid(namespace_oid))
 		return false;
-	argtypes = palloc0(offsetof(oidvector, values[1]));
-	SET_VARSIZE(argtypes, offsetof(oidvector, values[1]));
-	argtypes->ndim = 1;
-	argtypes->dataoffset = 0;
-	argtypes->elemtype = OIDOID;
-	argtypes->dim1 = 1;
-	argtypes->lbound1 = 0;
-	argtypes->values[0] = OIDOID;
+
+	memset(&argtypes, 0, sizeof(oidvector));
+	SET_VARSIZE(&argtypes, offsetof(oidvector, values[0]));
+	argtypes.ndim = 1;
+	argtypes.dataoffset = 0;
+	argtypes.elemtype = OIDOID;
+	argtypes.dim1 = 0;
+	argtypes.lbound1 = 0;
 
 	synchronizer_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
 									   Anum_pg_proc_oid,
 									   CStringGetDatum("gpustore_sync_trigger"),
-									   PointerGetDatum(argtypes),
+									   PointerGetDatum(&argtypes),
 									   ObjectIdGetDatum(namespace_oid));
 	if (!OidIsValid(synchronizer_oid))
 		return false;
@@ -328,17 +329,24 @@ relationHasSyncTrigger(Relation rel, GpuStoreOptions *gs_options)
 			trig->tgtype == (TRIGGER_TYPE_ROW |
 							 TRIGGER_TYPE_INSERT |
 							 TRIGGER_TYPE_DELETE |
-							 TRIGGER_TYPE_UPDATE) &&
-			trig->tgnargs == 1 &&
-			trig->tgargs[0] != NULL)
+							 TRIGGER_TYPE_UPDATE))
 		{
-			/* Ok, check argument (must be int8) */
-			Const	   *con = (Const *)stringToNode(trig->tgargs[0]);
-			char	   *config;
-
-			if (con->consttype == TEXTOID)
+			if (trig->tgnargs == 0)
 			{
-				if (!con->constisnull)
+				parseSyncTriggerOptions(NULL, gs_options);
+			}
+			else if (trig->tgnargs == 1)
+			{
+				Const  *con = (Const *)stringToNode(trig->tgargs[0]);
+				char   *config;
+
+				if (!IsA(con, Const))
+					elog(ERROR, "trigger argument must be const value");
+				if (con->constisnull)
+				{
+					parseSyncTriggerOptions(NULL, gs_options);
+				}
+				else if (con->consttype == TEXTOID)
 				{
 					config = TextDatumGetCString(con->constvalue);
 					parseSyncTriggerOptions(config, gs_options);
@@ -346,10 +354,14 @@ relationHasSyncTrigger(Relation rel, GpuStoreOptions *gs_options)
 				}
 				else
 				{
-					parseSyncTriggerOptions(NULL, gs_options);
+					elog(ERROR, "trigger argument must be text options");
 				}
-				return true;
 			}
+			else
+			{
+				elog(ERROR, "too large number of trigger arguments");
+			}
+			return true;
 		}
 	}
 	return false;
@@ -501,6 +513,7 @@ __gpuStoreCreateKernelBuffer(Relation rel, int64 nrooms,
 {
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	kern_data_store *kds_head;
+	kern_colmeta *cmeta;
 	size_t		main_sz;
 	size_t		unitsz, sz;
 	int			j;
@@ -520,8 +533,8 @@ __gpuStoreCreateKernelBuffer(Relation rel, int64 nrooms,
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-		kern_colmeta   *cmeta = &kds_head->colmeta[j];
 
+		cmeta = &kds_head->colmeta[j];
 		if (!attr->attnotnull)
 		{
 			sz = MAXALIGN(BITMAPLEN(nrooms));
@@ -558,6 +571,13 @@ __gpuStoreCreateKernelBuffer(Relation rel, int64 nrooms,
 				 NameStr(attr->attname));
 		}
 	}
+	/* system attributes */
+	cmeta = &kds_head->colmeta[kds_head->nr_colmeta - 1];
+	sz = cmeta->attlen * nrooms;
+	cmeta->values_offset = __kds_packed(main_sz);
+	cmeta->values_length = __kds_packed(sz);
+	main_sz += sz;
+	/* total length */
 	kds_head->length = main_sz;
 
 	return kds_head;
@@ -677,7 +697,8 @@ __GpuStoreExecInitialLoad(Relation rel,
 	CUdeviceptr		m_main = 0UL;
 	CUdeviceptr		m_extra = 0UL;
 	CUresult		rc;
-	kern_gpustore_baserel *kgs_base;
+	kern_gpustore_baserel *kgs_base = NULL;
+	kern_data_store *kds_base;
 	kern_data_store *kds_main;
 	kern_data_extra kds_extra;
 	int64			nrooms = gs_sdesc->max_num_rows;
@@ -694,14 +715,15 @@ __GpuStoreExecInitialLoad(Relation rel,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemAllocManaged: %s", errorText(rc));
 	memset(kgs_base, 0, offsetof(kern_gpustore_baserel, kds_row));
-	init_kernel_data_store(&kgs_base->kds_row,
-						   tupdesc, sz, KDS_FORMAT_ROW, nrooms);
+	kds_base = &kgs_base->kds_row;
+	init_kernel_data_store(kds_base, tupdesc, sz, KDS_FORMAT_ROW, nrooms);
 	/* allocation of DSM for rowid hash/map and redo-buffer */
 	__gpuStoreAllocateDSM(gs_desc, nrooms, nslots);
 	/* load the entire relation */
 	kds_main = __gpuStoreCreateKernelBuffer(rel, nrooms, &kds_extra);
-	__gpuStoreLoadRelation(rel, kds_main, gs_desc->rowhash, gs_desc->rowmap);
-
+	__gpuStoreLoadRelation(rel, kds_base,
+						   gs_desc->rowhash,
+						   gs_desc->rowmap);
 	/* GPU kernel invocation for initial loading */
 	PG_TRY();
 	{
@@ -720,7 +742,7 @@ __GpuStoreExecInitialLoad(Relation rel,
 								   gs_sdesc->cuda_dindex, 0, 0);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on __gpuOptimalBlockSize: %s", errorText(rc));
-		grid_sz = Min(grid_sz, (kds_main->nitems +
+		grid_sz = Min(grid_sz, (kds_base->nitems +
 								block_sz - 1) / block_sz);
 
 		/* preserve the main store */
@@ -764,9 +786,10 @@ __GpuStoreExecInitialLoad(Relation rel,
 		}
 
 		/* kick GPU kernel */
-		kfunc_args[0] = &m_main;
-		kfunc_args[1] = &m_extra;
-		kfunc_args[2] = &kgs_base;
+		kfunc_args[0] = &kgs_base;
+		kfunc_args[1] = &m_main;
+		kfunc_args[2] = &m_extra;
+
 		rc = cuLaunchKernel(kfunc_init_load,
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
@@ -849,6 +872,7 @@ __GpuStoreExecInitialLoad(Relation rel,
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on gpuMemFreePreserved: %s", errorText(rc));
 		}
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	/* unmap device memory */
@@ -1382,9 +1406,40 @@ pgstrom_gpustore_sync_trigger(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: must be called for INSERT, DELETE or UPDATE",
 			 __FUNCTION__);
 	}
+	PG_RETURN_POINTER(trigdata->tg_trigtuple);
+}
+
+/*
+ * pgstrom_gpustore_precheck_trigger
+ */
+Datum
+pgstrom_gpustore_precheck_trigger(PG_FUNCTION_ARGS)
+{
+	EventTriggerData *trigdata;
+	const char	   *command_tag;
+
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "%s: must be called as EventTrigger", __FUNCTION__);
+	trigdata = (EventTriggerData *) fcinfo->context;
+	if (strcmp(trigdata->event, "ddl_command_end") != 0)
+		elog(ERROR, "%s: must be called on ddl_command_end event", __FUNCTION__);
+
+	command_tag = GetCommandTagName(trigdata->tag);
+	if (strcmp(command_tag, "CREATE TRIGGER") == 0)
+	{
+		CreateTrigStmt *stmt = (CreateTrigStmt *)trigdata->parsetree;
+		Relation		rel;
+
+		rel = relation_openrv_extended(stmt->relation,
+									   AccessShareLock, true);
+		if (rel)
+			GpuStoreLookupDesc(rel);
+		relation_close(rel, AccessShareLock);
+	}
+	else if (strcmp(command_tag, "ALTER TABLE") == 0)
+	{}
 	PG_RETURN_NULL();
 }
-PG_FUNCTION_INFO_V1(pgstrom_gpustore_sync_trigger);
 
 /* ---------------------------------------------------------------- *
  *

@@ -87,15 +87,202 @@ null_return:
 STATIC_INLINE(GstoreFdwSysattr *)
 kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
 {
-	kern_colmeta   *cmeta = &kds->colmeta[kds->ncols-1];
+	kern_colmeta   *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
 	char		   *addr;
 
-	assert(cmeta->attlen == sizeof(GstoreFdwSysattr) &&
+	assert(cmeta->attbyval &&
+		   cmeta->attalign == sizeof(cl_uint) &&
+		   cmeta->attlen == sizeof(GstoreFdwSysattr) &&
 		   cmeta->nullmap_offset == 0);
 	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
 	if (rowid < kds->nrooms)
 		return ((GstoreFdwSysattr *)addr) + rowid;
 	return NULL;
+}
+
+STATIC_FUNCTION(cl_bool)
+gpustore_apply_insert(kern_context *kcxt,
+					  kern_data_store *kds,
+					  kern_data_extra *extra,
+					  GstoreFdwSysattr *sysattr,
+					  cl_uint rowid,
+					  HeapTupleHeaderData *htup)
+{
+	char	   *pos = (char *)htup + htup->t_hoff;
+	cl_uint		oldid;
+	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	cl_int		j, natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
+
+	assert(pos == (char *)MAXALIGN(pos));
+	oldid = (((cl_uint)htup->t_ctid.ip_blkid.bi_hi << 16) |
+			 ((cl_uint)htup->t_ctid.ip_blkid.bi_lo));
+	sysattr->xmin = InvalidTransactionId;
+	sysattr->xmax = InvalidTransactionId;
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		char		   *dest = ((char *)kds + __kds_unpack(cmeta->values_offset));
+		cl_uint		   *nullmap;
+
+		if (j >= natts || (tup_hasnull && att_isnull(j, htup->t_bits)))
+		{
+			assert(cmeta->nullmap_offset != 0);
+			nullmap = (cl_uint *)((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+			atomicAnd(&nullmap[rowid>>5], ~(1U << (rowid & 0x1f)));
+			continue;
+		}
+		else if (cmeta->nullmap_offset != 0)
+		{
+			nullmap = (cl_uint *)((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+			atomicOr(&nullmap[rowid>>5], (1U << (rowid & 0x1f)));
+		}
+
+		if (cmeta->attlen > 0)
+		{
+			pos = (char *)TYPEALIGN(cmeta->attalign, pos);
+			dest += TYPEALIGN(cmeta->attalign,
+							  cmeta->attlen) * rowid;
+			memcpy(dest, pos, cmeta->attlen);
+			pos += cmeta->attlen;
+		}
+		else
+		{
+			cl_uint		sz;
+			char	   *var;
+			cl_ulong	offset;
+
+			assert(cmeta->attlen == -1);
+			if (!VARATT_NOT_PAD_BYTE(pos))
+				pos = (char *)TYPEALIGN(cmeta->attalign, pos);
+			sz = VARSIZE_ANY(pos);
+			var = pos;
+			pos += sz;
+
+			/* try to check whether it is actually updated */
+			if (oldid != UINT_MAX)
+			{
+				Datum		datum;
+				cl_bool		isnull;
+
+				datum = kern_datum_get_column(kds, extra, j, oldid, &isnull);
+				if (!isnull)
+				{
+					cl_uint		sz1 = VARSIZE_ANY_EXHDR(var);
+					cl_uint		sz2 = VARSIZE_ANY_EXHDR(datum);
+
+					if ((char *)datum >= (char *)extra &&
+						(char *)datum <= (char *)extra + extra->length &&
+						sz1 == sz2 &&
+						__memcmp(VARDATA_ANY(var),
+								 VARDATA_ANY(datum), sz1) == 0)
+					{
+						/* ok, this attribute is not updated */
+						offset = (char *)datum - (char *)extra;
+						goto reuse_extra;
+					}
+				}
+			}
+			/* allocation of extra buffer on demand */
+			offset = atomicAdd(&extra->usage, MAXALIGN(sz));
+			if (offset + MAXALIGN(sz) > extra->length)
+			{
+				STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+							  "out of extra buffer");
+				return false;
+			}
+			memcpy((char *)extra + offset, var, sz);
+		reuse_extra:
+			((cl_uint *)dest)[rowid] = __kds_packed(offset);
+		}
+	}
+	/* and, system attributes */
+	sysattr->xmin = htup->t_choice.t_heap.t_xmin;
+	sysattr->xmax = htup->t_choice.t_heap.t_xmax;
+	atomicMax(&kds->nitems, rowid+1);
+
+	return true;
+}
+
+STATIC_FUNCTION(void)
+gpustore_apply_delete(kern_context *kcxt,
+					  GstoreTxLogDelete *d_log,
+					  GstoreFdwSysattr *sysattr)
+{
+//	sysattr->xmin = d_log->xmin;
+	sysattr->xmax = d_log->xid;
+}
+
+STATIC_FUNCTION(void)
+gpustore_apply_commit(kern_context *kcxt,
+					  kern_data_store *kds,
+					  cl_uint owner_id,
+					  GstoreTxLogCommit *c_log)
+{
+	GstoreFdwSysattr *sysattr;
+	char	   *pos = c_log->data;
+
+	for (int i=0; i < c_log->nitems; i++)
+	{
+		cl_uint		rowid;
+
+		if (*pos == 'I')
+		{
+			memcpy(&rowid, pos+1, sizeof(cl_uint));
+			sysattr = kds_get_column_sysattr(kds, rowid);
+			if (sysattr && sysattr->owner_id == owner_id)
+			{
+				sysattr->xmin = FrozenTransactionId;
+				sysattr->xmax = InvalidTransactionId;
+			}
+			pos += 5;
+		}
+		else if (*pos == 'D')
+		{
+			memcpy(&rowid, pos+1, sizeof(cl_uint));
+			sysattr = kds_get_column_sysattr(kds, rowid);
+			if (sysattr && sysattr->owner_id == owner_id)
+			{
+				sysattr->xmin = InvalidTransactionId;
+				sysattr->xmax = InvalidTransactionId;
+			}
+			pos += 5;
+		}
+		else
+		{
+			printf("unknown commit log entry '%c'\n", *pos);
+			break;
+		}
+	}
+}
+
+/*
+ * kern_gpustore_initial_load
+ */
+KERNEL_FUNCTION(void)
+kern_gpustore_initial_load(kern_gpustore_baserel *baserel,
+						   kern_data_store *kds_dst,	/* KDS_FORMAT_COLUMN */
+						   kern_data_extra *kds_extra)
+{
+	kern_data_store *kds_row = &baserel->kds_row;
+	kern_context	kcxt;
+	cl_uint			i;
+
+	INIT_KERNEL_CONTEXT(&kcxt, NULL);	/* no kparams */
+	for (i=get_global_id(); i < kds_row->nitems; i+=get_global_size())
+	{
+		kern_tupitem	   *tupitem = KERN_DATA_STORE_TUPITEM(kds_row, i);
+		GstoreFdwSysattr   *sysattr;
+
+		sysattr = kds_get_column_sysattr(kds_dst, tupitem->rowid);
+		if (!gpustore_apply_insert(&kcxt,
+								   kds_dst,
+								   kds_extra,
+								   sysattr,
+								   tupitem->rowid,
+								   &tupitem->htup))
+			break;
+	}
+	kern_writeback_error_status(&baserel->kerror, &kcxt);
 }
 
 /*
@@ -187,165 +374,6 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 	}
 }
 
-STATIC_FUNCTION(cl_bool)
-__gpustore_apply_insert(kern_context *kcxt,
-						kern_data_store *kds,
-						kern_data_extra *extra,
-						GstoreTxLogInsert *i_log,
-						GstoreFdwSysattr *sysattr)
-{
-	HeapTupleHeaderData *htup = &i_log->htup;
-	char	   *pos = (char *)htup + htup->t_hoff;
-	cl_uint		rowid = i_log->rowid;
-	cl_uint		oldid;
-	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-	cl_int		j, natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
-
-	oldid = (((cl_uint)i_log->htup.t_ctid.ip_blkid.bi_hi << 16) |
-			 ((cl_uint)i_log->htup.t_ctid.ip_blkid.bi_lo));
-	assert(pos == (char *)MAXALIGN(pos));
-	sysattr->xmin = InvalidTransactionId;
-	sysattr->xmax = InvalidTransactionId;
-
-	for (j=0; j < kds->ncols-1; j++)
-	{
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-		char		   *dest = ((char *)kds + __kds_unpack(cmeta->values_offset));
-		cl_uint		   *nullmap;
-
-		if (j >= natts || (tup_hasnull && att_isnull(j, htup->t_bits)))
-		{
-			assert(cmeta->nullmap_offset != 0);
-			nullmap = (cl_uint *)((char *)kds + __kds_unpack(cmeta->nullmap_offset));
-			atomicAnd(&nullmap[rowid>>5], ~(1U << (rowid & 0x1f)));
-			continue;
-		}
-		else if (cmeta->nullmap_offset != 0)
-		{
-			nullmap = (cl_uint *)((char *)kds + __kds_unpack(cmeta->nullmap_offset));
-			atomicOr(&nullmap[rowid>>5], (1U << (rowid & 0x1f)));
-		}
-
-		if (cmeta->attlen > 0)
-		{
-			pos = (char *)TYPEALIGN(cmeta->attalign, pos);
-			dest += TYPEALIGN(cmeta->attalign,
-							  cmeta->attlen) * rowid;
-			memcpy(dest, pos, cmeta->attlen);
-			pos += cmeta->attlen;
-		}
-		else
-		{
-			cl_uint		sz;
-			char	   *var;
-			cl_ulong	offset;
-
-			assert(cmeta->attlen == -1);
-			if (!VARATT_NOT_PAD_BYTE(pos))
-				pos = (char *)TYPEALIGN(cmeta->attalign, pos);
-			sz = VARSIZE_ANY(pos);
-			var = pos;
-			pos += sz;
-
-			/* try to check whether it is actually updated */
-			if (oldid != UINT_MAX)
-			{
-				Datum	datum;
-				cl_bool	isnull;
-
-				datum = kern_datum_get_column(kds, extra, j, oldid, &isnull);
-				if (!isnull)
-				{
-					cl_uint		sz1 = VARSIZE_ANY_EXHDR(var);
-					cl_uint		sz2 = VARSIZE_ANY_EXHDR(datum);
-
-					if ((char *)datum >= (char *)extra &&
-						(char *)datum <= (char *)extra + extra->length)
-					{
-					
-					if (sz1 == sz2 && __memcmp(VARDATA_ANY(var),
-											   VARDATA_ANY(datum), sz1) == 0)
-					{
-						/* Ok, this attribute is not updated */
-						offset = (char *)datum - (char *)extra;
-						goto reuse_extra;
-					}
-
-					}
-				}
-			}
-			/* allocation of extra buffer on demand */
-			offset = atomicAdd(&extra->usage, MAXALIGN(sz));
-			if (offset + MAXALIGN(sz) > extra->length)
-			{
-				STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of extra buffer");
-				return false;
-			}
-			memcpy((char *)extra + offset, var, sz);
-		reuse_extra:
-			((cl_uint *)dest)[rowid] = __kds_packed(offset);
-		}
-	}
-	/* and, system attributes */
-	sysattr->xmin = htup->t_choice.t_heap.t_xmin;
-	sysattr->xmax = htup->t_choice.t_heap.t_xmax;
-	atomicMax(&kds->nitems, rowid+1);
-
-	return true;
-}
-
-STATIC_FUNCTION(void)
-__gpustore_apply_delete(kern_context *kcxt,
-						GstoreTxLogDelete *d_log,
-						GstoreFdwSysattr *sysattr)
-{
-//	sysattr->xmin = d_log->xmin;
-	sysattr->xmax = d_log->xid;
-}
-
-STATIC_FUNCTION(void)
-__gpustore_apply_commit(kern_context *kcxt,
-						kern_data_store *kds,
-						cl_uint owner_id,
-						GstoreTxLogCommit *c_log)
-{
-	GstoreFdwSysattr *sysattr;
-	char	   *pos = c_log->data;
-
-	for (int i=0; i < c_log->nitems; i++)
-	{
-		cl_uint		rowid;
-
-		if (*pos == 'I')
-		{
-			memcpy(&rowid, pos+1, sizeof(cl_uint));
-			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (sysattr && sysattr->owner_id == owner_id)
-			{
-				sysattr->xmin = FrozenTransactionId;
-				sysattr->xmax = InvalidTransactionId;
-			}
-			pos += 5;
-		}
-		else if (*pos == 'D')
-		{
-			memcpy(&rowid, pos+1, sizeof(cl_uint));
-			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (sysattr && sysattr->owner_id == owner_id)
-			{
-				sysattr->xmin = InvalidTransactionId;
-				sysattr->xmax = InvalidTransactionId;
-			}
-			pos += 5;
-		}
-		else
-		{
-			printf("unknown commit log entry '%c'\n", *pos);
-			break;
-		}
-	}
-}
-
 KERNEL_FUNCTION(void)
 kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 						 kern_data_store *kds,
@@ -384,7 +412,8 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 			sysattr = kds_get_column_sysattr(kds, i_log->rowid);
 			if (sysattr->owner_id == owner_id && phase == 2)
 			{
-				if (__gpustore_apply_insert(&kcxt, kds, extra, i_log, sysattr))
+				if (gpustore_apply_insert(&kcxt, kds, extra, sysattr,
+										  i_log->rowid, &i_log->htup))
 					redo->log_index[owner_id] = UINT_MAX;
 			}
 		}
@@ -395,7 +424,7 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 			sysattr = kds_get_column_sysattr(kds, d_log->rowid);
 			if (sysattr->owner_id == owner_id && phase == 2)
 			{
-				__gpustore_apply_delete(&kcxt, d_log, sysattr);
+				gpustore_apply_delete(&kcxt, d_log, sysattr);
 				redo->log_index[owner_id] = UINT_MAX;
 			}
 		}
@@ -404,7 +433,7 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 			GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)tx_log;
 
 			if (phase == 4)
-				__gpustore_apply_commit(&kcxt, kds, owner_id, c_log);
+				gpustore_apply_commit(&kcxt, kds, owner_id, c_log);
 		}
 		else
 		{

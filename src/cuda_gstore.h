@@ -216,15 +216,6 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
 #endif
 
 /*
- * kern_gpustore_init_load
- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	kern_data_store	kds_row;
-} kern_gpustore_initial_load;
-
-/*
  * kern_gpustore_baserel
  */
 typedef struct
