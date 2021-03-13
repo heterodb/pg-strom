@@ -550,10 +550,12 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		appendStringInfoString(&afunc, temp.data);
 		appendStringInfoString(&cfunc, temp.data);
 
-		appendStringInfoString(
+		appendStringInfo(
 			&tfunc,
 			"  assert(htup != NULL);\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds,htup);\n");
+			"  EXTRACT_HEAP_TUPLE_BEGIN(kds,htup,%u);\n"
+			"  switch (__colidx)\n"
+			"  {\n", varattno_max);
 		for (anum=1; anum <= varattno_max; anum++)
 		{
 			foreach (lc, context->used_vars)
@@ -566,7 +568,10 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 
 					appendStringInfo(
 						&tfunc,
-						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
+						"  case %u:\n"
+						"    pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n"
+						"    break;\n",
+						anum - 1,
 						context->var_label, var->varattno,
 						dtype->type_name);
 					appendStringInfo(
@@ -584,14 +589,12 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 					break;	/* no need to read same value twice */
 				}
 			}
-
-			if (anum < varattno_max)
-				appendStringInfoString(
-					&tfunc,
-					"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds);\n");
 		}
 		appendStringInfoString(
 			&tfunc,
+			"  default:\n"
+			"    break;"
+			"  }\n"
 			"  EXTRACT_HEAP_TUPLE_END();\n");
 	}
 output:
@@ -661,7 +664,7 @@ codegen_gpuscan_projection(StringInfo kern,
 	int				prev;
 	int				i, j, k;
 	int				nfields;
-	int				num_referenced = 0;
+	int				varattno_max = -1;
 	devtype_info   *dtype;
 	StringInfoData	decl;
 	StringInfoData	tbody;
@@ -790,9 +793,6 @@ codegen_gpuscan_projection(StringInfo kern,
 	 * step.4 - reference attributes for each
 	 */
 	resetStringInfo(&temp);
-	appendStringInfoString(
-		&temp,
-		"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds_src,htup);\n");
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
@@ -808,18 +808,30 @@ codegen_gpuscan_projection(StringInfo kern,
 				continue;
 
 			/* tuple */
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"  case %d:\n",
+					attr->attnum - 1);
+				if (varattno_max < attr->attnum)
+					varattno_max = attr->attnum;
+			}
+
 			if (attr->attbyval)
 			{
 				appendStringInfo(
 					&temp,
-					"  EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],tup_values[%d]);\n",
+					"    EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],\n"
+					"                                 tup_values[%d]);\n",
 					8 * attr->attlen, j, j);
 			}
 			else
 			{
 				appendStringInfo(
 					&temp,
-					"  EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],tup_values[%d]);\n",
+					"    EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],\n"
+					"                                   tup_values[%d]);\n",
 					j, j);
 			}
 
@@ -887,6 +899,16 @@ codegen_gpuscan_projection(StringInfo kern,
 		{
 			Assert(dtype != NULL);
 			/* tuple */
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"  case %d:\n",
+					attr->attnum - 1);
+				if (varattno_max < attr->attnum)
+					varattno_max = attr->attnum;
+			}
+
 			appendStringInfo(
 				&temp,
 				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
@@ -920,22 +942,23 @@ codegen_gpuscan_projection(StringInfo kern,
 												   dtype->type_oid);
 			referenced = true;
 		}
-
-		if (referenced)
-		{
-			appendStringInfoString(&tbody, temp.data);
-			resetStringInfo(&temp);
-			num_referenced++;
-		}
-		appendStringInfoString(
-			&temp,
-			"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds_src);\n");
 	}
-	if (num_referenced)
-		appendStringInfoString(
+
+	if (temp.len > 0)
+	{
+		appendStringInfo(
 			&tbody,
-			"  EXTRACT_HEAP_TUPLE_END();\n"
-			"\n");
+			"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
+			"  switch (__colidx)\n"
+			"  {\n"
+			"%s"
+			"  default:\n"
+			"    break;\n"
+			"  }\n"
+			"  EXTRACT_HEAP_TUPLE_END();\n\n",
+			varattno_max, temp.data);
+	}
+
 	/*
 	 * step.5 - execution of expression node, then store the result.
 	 */
