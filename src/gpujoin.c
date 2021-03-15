@@ -5359,8 +5359,10 @@ gpujoin_codegen_projection(StringInfo source,
 		if (nattrs > 0)
 			appendStringInfo(
 				&row,
-				"    EXTRACT_HEAP_TUPLE_BEGIN(addr,%s,htup);\n",
-				kds_label);
+				"    EXTRACT_HEAP_TUPLE_BEGIN(%s,htup,%d);\n"
+				"    switch (__colidx)\n"
+				"    {\n",
+				kds_label, nattrs);
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
@@ -5387,16 +5389,30 @@ gpujoin_codegen_projection(StringInfo source,
 					type_oid_list = list_append_unique_oid(type_oid_list,
 														   dtype->type_oid);
 				/* row */
-				appendStringInfo(
-					&temp,
-					"  EXTRACT_HEAP_%s(addr,tup_dclass[%d],tup_values[%d]);\n",
-					(!typebyval   ? "READ_POINTER" :
-					 typelen == 1 ? "READ_8BIT"    :
-					 typelen == 2 ? "READ_16BIT"   :
-					 typelen == 4 ? "READ_32BIT"   :
-					 typelen == 8 ? "READ_64BIT"   : "__invalid_typlen__"),
-					tle->resno - 1,
-					tle->resno - 1);
+				if (!referenced)
+					appendStringInfo(
+						&row,
+						"    case %d:\n", i - 1);
+				if (typebyval)
+				{
+					appendStringInfo(
+						&row,
+						"      EXTRACT_HEAP_READ_%dBIT(addr,tup_dclass[%d],\n"
+						"                                   tup_values[%d]);\n",
+						8 * typelen,
+						tle->resno - 1,
+						tle->resno - 1);
+				}
+				else
+				{
+					appendStringInfo(
+						&row,
+						"      EXTRACT_HEAP_READ_POINTER(addr,tup_dclass[%d],\n"
+						"                                     tup_values[%d]);\n",
+						tle->resno - 1,
+						tle->resno - 1);
+				}
+
 				/* arrow */
 				if (!dtype)
 				{
@@ -5492,9 +5508,13 @@ gpujoin_codegen_projection(StringInfo source,
 					"  pg_%s_t KVAR_%u;\n",
 					dtype->type_name,
 					dst_num);
+				if (!referenced)
+					appendStringInfo(
+						&row,
+						"    case %d:\n", i - 1);
 				appendStringInfo(
-					&temp,
-					"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
+					&row,
+					"      pg_datum_ref(kcxt, KVAR_%u, addr);\n", dst_num);
 				/* arrow */
 				if (!referenced)
 					appendStringInfo(
@@ -5525,19 +5545,19 @@ gpujoin_codegen_projection(StringInfo source,
 				referenced = true;
 			}
 
-			/* flush to the main buffer */
 			if (referenced)
 			{
-				appendStringInfoString(&row, temp.data);
-				resetStringInfo(&temp);
+				appendStringInfoString(
+					&row,
+					"      break;\n");
 			}
-			appendStringInfo(
-				&temp,
-				"    EXTRACT_HEAP_TUPLE_NEXT(addr,%s);\n", kds_label);
 		}
 		if (nattrs > 0)
 			appendStringInfoString(
 				&row,
+				"    default:\n"
+				"      break;\n"
+				"    }\n"
 				"    EXTRACT_HEAP_TUPLE_END();\n");
 
 		if (depth == 0)
