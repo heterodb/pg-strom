@@ -3115,6 +3115,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	List		   *type_oid_list = NIL;
 	ListCell	   *lc;
 	int				i, k, nattrs;
+	int				outer_refno_max = -1;
 
 	initStringInfo(&decl);
 	initStringInfo(&tbody);
@@ -3156,10 +3157,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				elog(ERROR, "Bug? system column or whole-row is referenced");
 		}
 
-		appendStringInfoString(
-			&tbody,
-			"  /* extract the given htup and load variables */\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr,kds_src,htup);\n");
+		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
 			bool	referenced = false;
@@ -3212,12 +3210,20 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						continue;
 
 					/* row */
+					if (!referenced)
+					{
+						appendStringInfo(
+							&temp,
+							"  case %d:\n", i - 1);
+						outer_refno_max = i;
+					}
+
 					appendStringInfo(
 						&temp,
-						"  pg_datum_ref(kcxt, temp.%s_v, addr);\n"
-						"  pg_datum_store(kcxt, temp.%s_v,\n"
-						"                 dst_dclass[%d],\n"
-						"                 dst_values[%d]);\n",
+						"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+						"    pg_datum_store(kcxt, temp.%s_v,\n"
+						"                   dst_dclass[%d],\n"
+						"                   dst_values[%d]);\n",
 						dtype->type_name,
 						dtype->type_name,
 						tle->resno - 1,
@@ -3274,9 +3280,16 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						"  pg_%s_t KVAR_%u;\n",
 						dtype->type_name, i);
 					/* row */
+					if (!referenced)
+					{
+						appendStringInfo(
+							&temp,
+							"  case %d:\n", i - 1);
+						outer_refno_max = i;
+					}
 					appendStringInfo(
 						&temp,
-						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+						"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
 					/* slot */
 					appendStringInfo(
 						&sbody,
@@ -3308,20 +3321,33 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					appendStringInfo(
 						&cbody,
 						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+					referenced = true;
 				}
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 				type_oid_list = list_append_unique_oid(type_oid_list,
 													   dtype->type_oid);
-				appendStringInfoString(&tbody, temp.data);
-                resetStringInfo(&temp);
+				if (referenced)
+					appendStringInfoString(
+						&temp,
+						"    break;\n");
 			}
-			appendStringInfoString(
-				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr,kds_src);\n");
 		}
-		appendStringInfoString(
-			&tbody,
-			"  EXTRACT_HEAP_TUPLE_END();\n");
+
+		if (temp.len > 0)
+		{
+			appendStringInfo(
+				&tbody,
+				"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
+				"  switch (__colidx)\n"
+				"  {\n"
+				"%s"
+				"  default:\n"
+				"    break;\n"
+				"  }\n"
+				"  EXTRACT_HEAP_TUPLE_END();\n",
+				outer_refno_max,
+				temp.data);
+		}
 	}
 
 	/*

@@ -1531,57 +1531,47 @@ pg_hash_any(const cl_uchar *k, cl_int keylen);
  * EXTRACT_HEAP_READ_XXXX()
  *  -> load raw values to dclass[]/values[], and update extras[]
  */
-#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR,kds,htup)							\
+#define EXTRACT_HEAP_TUPLE_BEGIN(KDS,HTUP,NATTRS)						\
 	do {																\
 		kern_colmeta   *__cmeta;										\
-		cl_uint			__colidx = 0;									\
-		cl_uint			__ncols;										\
+		cl_int			__colidx;										\
+		cl_int			__ncols;										\
 		cl_uchar	   *__nullmap = NULL;								\
 		char		   *__pos;											\
+		void		   *addr;											\
 																		\
-		if (!(htup))													\
+		if (!(HTUP))													\
 			__ncols = 0;	/* to be considered as NULL */				\
 		else															\
 		{																\
-			if (((htup)->t_infomask & HEAP_HASNULL) != 0)				\
-				__nullmap = (htup)->t_bits;								\
-			__ncols = Min((kds)->ncols,									\
-						  (htup)->t_infomask2 & HEAP_NATTS_MASK);		\
-			__pos = (char *)(htup) + (htup)->t_hoff;					\
+			if (((HTUP)->t_infomask & HEAP_HASNULL) != 0)				\
+				__nullmap = (HTUP)->t_bits;								\
+			__ncols = ((HTUP)->t_infomask2 & HEAP_NATTS_MASK);			\
+			__ncols = Min((KDS)->ncols, __ncols);						\
+			__pos = (char *)(HTUP) + (HTUP)->t_hoff;					\
 			assert(__pos == (char *)MAXALIGN(__pos));					\
 		}																\
-		if (__colidx < __ncols &&										\
-			(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
-		{																\
-			__cmeta = &((kds)->colmeta[__colidx]);						\
-			(ADDR) = __pos;												\
-			__pos += (__cmeta->attlen > 0 ?								\
-					  __cmeta->attlen :									\
-					  VARSIZE_ANY(__pos));								\
-		}																\
-		else															\
-			(ADDR) = NULL
-
-#define EXTRACT_HEAP_TUPLE_NEXT(ADDR,kds)								\
-		__colidx++;														\
-		if (__colidx < __ncols &&										\
-			(!__nullmap || !att_isnull(__colidx, __nullmap)))			\
-		{																\
-			__cmeta = &((kds)->colmeta[__colidx]);						\
 																		\
-			if (__cmeta->attlen > 0)									\
-				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
-			else if (!VARATT_NOT_PAD_BYTE(__pos))						\
-				__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos);	\
-			(ADDR) = __pos;												\
-			__pos += (__cmeta->attlen > 0 ?								\
-					  __cmeta->attlen :									\
-					  VARSIZE_ANY(__pos));								\
-		}																\
-		else															\
-			(ADDR) = NULL
+		for (__colidx=0; __colidx < (NATTRS); __colidx++)				\
+		{																\
+			if (__colidx < __ncols &&									\
+				(!__nullmap || !att_isnull(__colidx, __nullmap)))		\
+			{															\
+				__cmeta = &((KDS)->colmeta[__colidx]);					\
+				if (__cmeta->attlen > 0)								\
+					__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos); \
+				else if (!VARATT_NOT_PAD_BYTE(__pos))					\
+					__pos = (char *)TYPEALIGN(__cmeta->attalign, __pos); \
+				addr = __pos;											\
+				__pos += (__cmeta->attlen > 0 ?							\
+						  __cmeta->attlen :								\
+						  VARSIZE_ANY(__pos));							\
+			}															\
+			else														\
+				addr = NULL
 
 #define EXTRACT_HEAP_TUPLE_END()										\
+		}																\
 	} while(0)
 
 #define EXTRACT_HEAP_READ_8BIT(ADDR,ATT_DCLASS,ATT_VALUES)	 \
