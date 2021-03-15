@@ -27,6 +27,39 @@ INSERT INTO int1_table values (2,127);   -- upper limit
 INSERT INTO int1_table values (3,-129);  -- lower error
 INSERT INTO int1_table values (4,128);   -- upper error
 
+-- cast
+--- int1 -> int2
+--- int1 -> int4
+--- int1 -> int8
+--- int1 -> float2
+--- int1 -> float4
+--- int1 -> float8
+--- int1 -> numeric
+
+---- comarison
+-- eq,ne,lt,le,gt,ge
+-- int1,int2,int4,int8
+
+---- unary operators
+--- +, - , @
+
+---- arthmetic operators
+--- +,-,*,/,%
+
+---- bit operations
+---- &,|,#,~,<<,>>
+
+---- misc functions
+-- money
+
+
+---- aggregate function
+-- sum,max,min,avg(larger,smaller)
+-- variance,var_samp,var_pop,stddev, stddevv_samp,stddev_pop
+
+---- index support
+-- cmp,hash
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA custom_dtype_temp CASCADE;
