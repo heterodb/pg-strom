@@ -43,21 +43,17 @@ CREATE TABLE various_dtypes(
 INSERT INTO various_dtypes VALUES (11,12,14,18,21.1,22.2,24.4,33.33,'123');
 
 -- memo: sql generating two liner
-<<<<<<< HEAD
 -- declare -A d=(["i2"]="int2" ["i4"]="int4" [i8]="int8" ["f2"]="float2" ["f4"]="float4" ["f8"]="float8" ["nm"]="numeric" ["ch"]="char(3)");
-=======
--- declare -A dn=(["i2"]="int2" ["i4"]="int4" [i8]="int8" ["f2"]="float2" ["f4"]="float4" ["f8"]="float8" ["nm"]="numeric" ["ch"]="char(3)");
->>>>>>> d69a2277528a7bb25d7ccc268c07ad51b526a9ff
 -- echo "SELECT " ; for cn in ${!d[@]}; do echo "cast($cn AS int1) \"${cn}_i1\", cast(i1 AS ${d[$cn]}) \"i1_$cn\"," ; done | awk '{if (NR==eof)print $0; else print $0","}' ; echo "FROM various_dtypes;"
 SELECT 
 cast(f2 AS int1) "f2_i1", cast(i1 AS float2) "i1_f2",
 cast(f4 AS int1) "f4_i1", cast(i1 AS float4) "i1_f4",
 cast(f8 AS int1) "f8_i1", cast(i1 AS float8) "i1_f8",
 cast(ch AS int1) "ch_i1", cast(i1 AS char(3)) "i1_ch",
--- cast(nm AS int1) "nm_i1", cast(i1 AS numeric) "i1_nm",
+cast(nm AS int1) "nm_i1", cast(i1 AS numeric) "i1_nm",
 cast(i8 AS int1) "i8_i1", cast(i1 AS int8) "i1_i8",
 cast(i2 AS int1) "i2_i1", cast(i1 AS int2) "i1_i2",
-cast(i4 AS int1) "i4_i1", cast(i1 AS int4) "i1_i4",
+cast(i4 AS int1) "i4_i1", cast(i1 AS int4) "i1_i4"
 FROM various_dtypes;
 
 ---- comarison
@@ -72,10 +68,9 @@ i1 >= i1 as i1_ge_i1,
 i1 <> i1 as i1_ne_i1,
 i1 > i1 as i1_gt_i1,
 i1 <= i1 as i1_le_i1,
-i1 < i1 as i1_lt_i1,
+i1 < i1 as i1_lt_i1
 FROM various_dtypes;
 
-<<<<<<< HEAD
 -- unset d; declare -A d=(["i2"]="int2" ["i4"]="int4" [i8]="int8");
 -- echo "SELECT "; for c in ${!cs[@]}; do for cn in ${!d[@]}; do echo "i1 ${cs[$c]} $cn \"i1_${c}_$cn\" , $cn ${cs[$c]} i1 \"${cn}_${c}_i1\"" ; done ; done | awk 'NR==1{print $0} NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 SELECT 
@@ -99,11 +94,10 @@ i1 = i8 "i1_eq_i8" , i8 = i1 "i8_eq_i1"
 ,i1 < i4 "i1_lt_i4" , i4 < i1 "i4_lt_i1"
 FROM various_dtypes;
 
-=======
->>>>>>> d69a2277528a7bb25d7ccc268c07ad51b526a9ff
-
 ---- unary operators
 --- +, - , @
+
+SELECT +i1,-i1,@i1 FROM various_dtypes;
 
 ---- arthmetic operators
 --- +,-,*,/,%
