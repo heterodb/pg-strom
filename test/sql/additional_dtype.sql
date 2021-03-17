@@ -61,37 +61,38 @@ FROM various_dtypes;
 -- int1,int2,int4,int8
 
 -- declare -A cs=(["eq"]="=" ["ne"]="<>" ["lt"]="<" ["le"]="<=" ["gt"]=">" ["ge"]=">=");
--- echo "SELECT " ; for c in ${!cs[@]}; do echo "i1 ${cs[$c]} i1 as i1_${c}_i1" ; done | awk -F, '{if (NR==eof)print $0; else print $0","}' ; echo "FROM various_dtypes;"
+-- declare -A it=(["eq"]="TRUE" ["ne"]="TRUE" ["lt"]="FALSE" ["le"]="TRUE" ["gt"]="FALSE" ["ge"]="TRUE");
+-- echo "SELECT " ; for c in ${!cs[@]}; do echo "(i1 ${cs[$c]} i1) is ${it[$c]} as i1_${c}_i1" ; done | awk -F, 'NR==1{print $0}NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 SELECT 
-i1 = i1 as i1_eq_i1,
-i1 >= i1 as i1_ge_i1,
-i1 <> i1 as i1_ne_i1,
-i1 > i1 as i1_gt_i1,
-i1 <= i1 as i1_le_i1,
-i1 < i1 as i1_lt_i1
+(i1 = i1) is TRUE as i1_eq_i1
+,(i1 >= i1) is TRUE as i1_ge_i1
+,(i1 <> i1) is TRUE as i1_ne_i1
+,(i1 > i1) is FALSE as i1_gt_i1
+,(i1 <= i1) is TRUE as i1_le_i1
+,(i1 < i1) is FALSE as i1_lt_i1
 FROM various_dtypes;
 
--- unset d; declare -A d=(["i2"]="int2" ["i4"]="int4" [i8]="int8");
--- echo "SELECT "; for c in ${!cs[@]}; do for cn in ${!d[@]}; do echo "i1 ${cs[$c]} $cn \"i1_${c}_$cn\" , $cn ${cs[$c]} i1 \"${cn}_${c}_i1\"" ; done ; done | awk 'NR==1{print $0} NR>1{print ","$0}' ; echo "FROM various_dtypes;"
+-- unset d; declare -A d=(["i2"]="12" ["i4"]="14" ["i8"]="18");
+-- echo "SELECT "; for c in ${!cs[@]}; do for cn in ${!d[@]}; do echo "(i1 ${cs[$c]} $cn) is $(test 11 -${c} ${d[$cn]} && echo TRUE || echo FALSE) \"11_${c}_${d[$cn]}\" , ($cn ${cs[$c]} i1) is $(test ${d[$cn]} -${c} 11 && echo TRUE || echo FALSE) \"${d[$cn]}_${c}_11\"" ; done ; done | awk 'NR==1{print $0} NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 SELECT 
-i1 = i8 "i1_eq_i8" , i8 = i1 "i8_eq_i1"
-,i1 = i2 "i1_eq_i2" , i2 = i1 "i2_eq_i1"
-,i1 = i4 "i1_eq_i4" , i4 = i1 "i4_eq_i1"
-,i1 >= i8 "i1_ge_i8" , i8 >= i1 "i8_ge_i1"
-,i1 >= i2 "i1_ge_i2" , i2 >= i1 "i2_ge_i1"
-,i1 >= i4 "i1_ge_i4" , i4 >= i1 "i4_ge_i1"
-,i1 <> i8 "i1_ne_i8" , i8 <> i1 "i8_ne_i1"
-,i1 <> i2 "i1_ne_i2" , i2 <> i1 "i2_ne_i1"
-,i1 <> i4 "i1_ne_i4" , i4 <> i1 "i4_ne_i1"
-,i1 > i8 "i1_gt_i8" , i8 > i1 "i8_gt_i1"
-,i1 > i2 "i1_gt_i2" , i2 > i1 "i2_gt_i1"
-,i1 > i4 "i1_gt_i4" , i4 > i1 "i4_gt_i1"
-,i1 <= i8 "i1_le_i8" , i8 <= i1 "i8_le_i1"
-,i1 <= i2 "i1_le_i2" , i2 <= i1 "i2_le_i1"
-,i1 <= i4 "i1_le_i4" , i4 <= i1 "i4_le_i1"
-,i1 < i8 "i1_lt_i8" , i8 < i1 "i8_lt_i1"
-,i1 < i2 "i1_lt_i2" , i2 < i1 "i2_lt_i1"
-,i1 < i4 "i1_lt_i4" , i4 < i1 "i4_lt_i1"
+(i1 = i8) is FALSE "11_eq_18" , (i8 = i1) is FALSE "18_eq_11"
+,(i1 = i2) is FALSE "11_eq_12" , (i2 = i1) is FALSE "12_eq_11"
+,(i1 = i4) is FALSE "11_eq_14" , (i4 = i1) is FALSE "14_eq_11"
+,(i1 >= i8) is FALSE "11_ge_18" , (i8 >= i1) is TRUE "18_ge_11"
+,(i1 >= i2) is FALSE "11_ge_12" , (i2 >= i1) is TRUE "12_ge_11"
+,(i1 >= i4) is FALSE "11_ge_14" , (i4 >= i1) is TRUE "14_ge_11"
+,(i1 <> i8) is TRUE "11_ne_18" , (i8 <> i1) is TRUE "18_ne_11"
+,(i1 <> i2) is TRUE "11_ne_12" , (i2 <> i1) is TRUE "12_ne_11"
+,(i1 <> i4) is TRUE "11_ne_14" , (i4 <> i1) is TRUE "14_ne_11"
+,(i1 > i8) is FALSE "11_gt_18" , (i8 > i1) is TRUE "18_gt_11"
+,(i1 > i2) is FALSE "11_gt_12" , (i2 > i1) is TRUE "12_gt_11"
+,(i1 > i4) is FALSE "11_gt_14" , (i4 > i1) is TRUE "14_gt_11"
+,(i1 <= i8) is TRUE "11_le_18" , (i8 <= i1) is FALSE "18_le_11"
+,(i1 <= i2) is TRUE "11_le_12" , (i2 <= i1) is FALSE "12_le_11"
+,(i1 <= i4) is TRUE "11_le_14" , (i4 <= i1) is FALSE "14_le_11"
+,(i1 < i8) is TRUE "11_lt_18" , (i8 < i1) is FALSE "18_lt_11"
+,(i1 < i2) is TRUE "11_lt_12" , (i2 < i1) is FALSE "12_lt_11"
+,(i1 < i4) is TRUE "11_lt_14" , (i4 < i1) is FALSE "14_lt_11"
 FROM various_dtypes;
 
 ---- unary operators
