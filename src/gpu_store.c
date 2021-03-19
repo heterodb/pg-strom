@@ -98,18 +98,18 @@ __gpuStoreRowIdMap(dsm_segment *shbuf_seg)
  */
 typedef struct
 {
-	dlist_node	chain;
-	Oid			database_oid;
-	Oid			table_oid;
+	dlist_node		chain;
+	Oid				database_oid;
+	Oid				table_oid;
 	/* GPU memory store resources */
-	bool		initial_load_in_progress;
-	dsm_handle	shbuf_handle;
-	/* GPU memory store parameter */
-	int64		max_num_rows;
-	int32		cuda_dindex;
-	size_t		redo_buffer_size;
-	size_t		redo_apply_threshold;
-	int32		redo_apply_interval;
+	bool			initial_load_in_progress;
+	dsm_handle		shbuf_handle;
+	/* GPU memory store parameters */
+	int64			max_num_rows;
+	int32			cuda_dindex;
+	size_t			redo_buffer_size;
+	size_t			gpu_sync_threshold;
+	int32			gpu_sync_interval;
 
 	/* Device resources */
 	pthread_rwlock_t gpu_buffer_lock;
@@ -119,14 +119,14 @@ typedef struct
 	size_t			gpu_extra_size;
 
 	/* REDO buffer properties */
-	slock_t		redo_lock;
-	uint64		redo_timestamp;
-	uint64		redo_write_nitems;
-	uint64		redo_write_pos;
-	uint64		redo_read_nitems;
-	uint64		redo_read_pos;
-	uint64		redo_sync_pos;
-	char		redo_buffer[FLEXIBLE_ARRAY_MEMBER];
+	slock_t			redo_lock;
+	uint64			redo_timestamp;
+	uint64			redo_write_nitems;
+	uint64			redo_write_pos;
+	uint64			redo_read_nitems;
+	uint64			redo_read_pos;
+	uint64			redo_sync_pos;
+	char			redo_buffer[FLEXIBLE_ARRAY_MEMBER];
 } GpuStoreSharedDesc;
 
 /*
@@ -1065,8 +1065,8 @@ retry:
 		gs_sdesc->max_num_rows = gs_options->max_num_rows;
 		gs_sdesc->cuda_dindex = gs_options->cuda_dindex;
 		gs_sdesc->redo_buffer_size = gs_options->redo_buffer_size;
-		gs_sdesc->redo_apply_threshold = gs_options->gpu_sync_threshold;
-		gs_sdesc->redo_apply_interval = gs_options->gpu_sync_interval;
+		gs_sdesc->gpu_sync_threshold = gs_options->gpu_sync_threshold;
+		gs_sdesc->gpu_sync_interval = gs_options->gpu_sync_interval;
 		pthreadRWLockInit(&gs_sdesc->gpu_buffer_lock);
 		SpinLockInit(&gs_sdesc->redo_lock);
 
@@ -1282,7 +1282,7 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 	skip:
 		/* 25% of REDO buffer is in-use. Async kick of GPU kernel */
 		if (gs_sdesc->redo_write_pos > (gs_sdesc->redo_read_pos +
-										gs_sdesc->redo_apply_threshold))
+										gs_sdesc->gpu_sync_threshold))
 		{
 			sync_pos = gs_sdesc->redo_sync_pos = gs_sdesc->redo_write_pos;
 			SpinLockRelease(&gs_sdesc->redo_lock);
@@ -1859,7 +1859,7 @@ gpuStoreBgWorkerIdleTask(int cuda_dindex)
 			SpinLockAcquire(&gs_sdesc->redo_lock);
 			timestamp = GetCurrentTimestamp();
 			if (gs_sdesc->redo_write_nitems > gs_sdesc->redo_read_nitems &&
-				timestamp > (gs_sdesc->redo_apply_interval * 1000000L +
+				timestamp > (gs_sdesc->gpu_sync_interval * 1000000L +
 							 gs_sdesc->redo_timestamp))
 			{
 				SpinLockAcquire(cmd_lock);
