@@ -107,7 +107,7 @@ typedef struct
 	/* GPU memory store parameter */
 	int64		max_num_rows;
 	int32		cuda_dindex;
-	size_t		redo_length;
+	size_t		redo_buffer_size;
 	size_t		redo_apply_threshold;
 	int32		redo_apply_interval;
 
@@ -118,7 +118,6 @@ typedef struct
 	size_t			gpu_main_size;
 	size_t			gpu_extra_size;
 
-#define GPUSTORE_REDO_BUFFER_SIZE		((128UL << 20) - 1024)
 	/* REDO buffer properties */
 	slock_t		redo_lock;
 	uint64		redo_timestamp;
@@ -187,8 +186,10 @@ PG_FUNCTION_INFO_V1(pgstrom_gpustore_precheck_trigger);
 typedef struct
 {
 	int			cuda_dindex;
-	int			gpu_sync_interval;
+	int32		gpu_sync_interval;
+	size_t		gpu_sync_threshold;
 	int64		max_num_rows;
+	size_t		redo_buffer_size;
 } GpuStoreOptions;
 
 static void
@@ -196,7 +197,9 @@ parseSyncTriggerOptions(char *config, GpuStoreOptions *gs_options)
 {
 	int			cuda_dindex = 0;				/* default: GPU0 */
 	int			gpu_sync_interval = 8;			/* default: 8sec */
+	ssize_t		gpu_sync_threshold = -1;		/* default: auto */
 	int64		max_num_rows = (10UL << 20);	/* default: 10M rows */
+	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
 	char	   *key, *value;
 	char	   *saved;
 
@@ -265,6 +268,37 @@ parseSyncTriggerOptions(char *config, GpuStoreOptions *gs_options)
 			if (*end != '\0')
 				elog(ERROR, "gpustore: invalid option [%s]=[%s]", key, value);
 		}
+		else if (strcmp(key, "gpu_sync_threshold") == 0)
+		{
+			char   *end;
+
+			gpu_sync_threshold = strtol(value, &end, 10);
+			if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
+				gpu_sync_threshold = (gpu_sync_threshold << 30);
+			else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
+				gpu_sync_threshold = (gpu_sync_threshold << 20);
+			else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
+				gpu_sync_threshold = (gpu_sync_threshold << 10);
+			else if (*end != '\0')
+				elog(ERROR, "gpustore: invalid option [%s]=[%s]", key, value);
+		}
+		else if (strcmp(key, "redo_buffer_size") == 0)
+		{
+			char   *end;
+
+			redo_buffer_size = strtol(value, &end, 10);
+			if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
+				redo_buffer_size = (redo_buffer_size << 30);
+			else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
+				redo_buffer_size = (redo_buffer_size << 20);
+			else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
+				redo_buffer_size = (redo_buffer_size << 10);
+			else if (*end != '\0')
+				elog(ERROR, "gpustore: invalid option [%s]=[%s]", key, value);
+			if (redo_buffer_size < (16UL << 20))
+				elog(ERROR, "gpustore: 'redo_buffer_size' too small (%zu)",
+					 redo_buffer_size);
+		}
 		else
 		{
 			elog(ERROR, "gpustore: unknown option [%s]=[%s]", key, value);
@@ -273,10 +307,17 @@ parseSyncTriggerOptions(char *config, GpuStoreOptions *gs_options)
 out:
 	if (gs_options)
 	{
+		if (gpu_sync_threshold < 0)
+			gpu_sync_threshold = redo_buffer_size / 4;
+		if (gpu_sync_threshold > redo_buffer_size / 2)
+			elog(ERROR, "gpustore: gpu_sync_threshold is too small");
+
 		memset(gs_options, 0, sizeof(GpuStoreOptions));
 		gs_options->cuda_dindex       = cuda_dindex;
 		gs_options->gpu_sync_interval = gpu_sync_interval;
+		gs_options->gpu_sync_threshold = gpu_sync_threshold;
 		gs_options->max_num_rows      = max_num_rows;
+		gs_options->redo_buffer_size  = redo_buffer_size;
 	}
 }
 
@@ -1016,16 +1057,16 @@ retry:
 		/* Allocation of GpuStoreSharedDesc */
 		gs_sdesc = MemoryContextAlloc(TopSharedMemoryContext,
 									  offsetof(GpuStoreSharedDesc, redo_buffer) +
-									  GPUSTORE_REDO_BUFFER_SIZE);
+									  gs_options->redo_buffer_size);	//FIXME
 		memset(gs_sdesc, 0, offsetof(GpuStoreSharedDesc, redo_buffer));
 		gs_sdesc->database_oid = MyDatabaseId;
 		gs_sdesc->table_oid = RelationGetRelid(rel);
 		gs_sdesc->initial_load_in_progress = true;		/* !!! blocker !!! */
 		gs_sdesc->max_num_rows = gs_options->max_num_rows;
 		gs_sdesc->cuda_dindex = gs_options->cuda_dindex;
-		gs_sdesc->redo_length = GPUSTORE_REDO_BUFFER_SIZE;
-		gs_sdesc->redo_apply_threshold = GPUSTORE_REDO_BUFFER_SIZE / 4;
-		gs_sdesc->redo_apply_interval = 5;		/* 5s from last update */
+		gs_sdesc->redo_buffer_size = gs_options->redo_buffer_size;
+		gs_sdesc->redo_apply_threshold = gs_options->gpu_sync_threshold;
+		gs_sdesc->redo_apply_interval = gs_options->gpu_sync_interval;
 		pthreadRWLockInit(&gs_sdesc->gpu_buffer_lock);
 		SpinLockInit(&gs_sdesc->redo_lock);
 
@@ -1201,7 +1242,7 @@ static void
 __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 {
 	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
-	size_t		redo_length = gs_sdesc->redo_length;
+	size_t		buffer_sz = gs_sdesc->redo_buffer_size;
 	uint64		offset;
 	uint64		sync_pos;
 	bool		append_done = false;
@@ -1211,17 +1252,17 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 	{
 		SpinLockAcquire(&gs_sdesc->redo_lock);
 		Assert(gs_sdesc->redo_write_pos >= gs_sdesc->redo_read_pos &&
-			   gs_sdesc->redo_write_pos <= gs_sdesc->redo_read_pos + redo_length &&
+			   gs_sdesc->redo_write_pos <= gs_sdesc->redo_read_pos + buffer_sz &&
 			   gs_sdesc->redo_sync_pos >= gs_sdesc->redo_read_pos &&
 			   gs_sdesc->redo_sync_pos <= gs_sdesc->redo_write_pos);
-		offset = gs_sdesc->redo_write_pos % redo_length;
+		offset = gs_sdesc->redo_write_pos % buffer_sz;
 		/* rewind to the head */
-		if (offset + tx_log->length > redo_length)
+		if (offset + tx_log->length > buffer_sz)
 		{
-			size_t	sz = redo_length - offset;
+			size_t	sz = buffer_sz - offset;
 
 			/* oops, it looks overwrites... */
-			if (gs_sdesc->redo_write_pos + sz > gs_sdesc->redo_read_pos + redo_length)
+			if (gs_sdesc->redo_write_pos + sz > gs_sdesc->redo_read_pos + buffer_sz)
 				goto skip;
 			/* fill-up by zero */
 			memset(gs_sdesc->redo_buffer + offset, 0, sz);
@@ -1230,7 +1271,7 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 		}
 		/* check overwrites */
 		if ((gs_sdesc->redo_write_pos +
-			 tx_log->length) > gs_sdesc->redo_read_pos + redo_length)
+			 tx_log->length) > gs_sdesc->redo_read_pos + buffer_sz)
 			goto skip;
 
 		/* Ok, append the log item */
