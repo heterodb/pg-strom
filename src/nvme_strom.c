@@ -1200,7 +1200,11 @@ GetOptimalGpuForRelation(PlannerInfo *root, RelOptInfo *rel)
 	cl_int		cuda_dindex;
 
 	if (baseRelIsArrowFdw(rel))
-		return GetOptimalGpuForArrowFdw(root, rel);
+	{
+		if (pgstrom_gpudirect_enabled)
+			return GetOptimalGpuForArrowFdw(root, rel);
+		return -1;
+	}
 
 	cuda_dindex = GetOptimalGpuForTablespace(rel->reltablespace);
 	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
