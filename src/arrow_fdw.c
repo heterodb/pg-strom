@@ -3159,11 +3159,14 @@ static Datum
 pg_bool_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
+	uint8  *bitmap = (uint8 *)kds + __kds_unpack(cmeta->values_offset);
+	size_t	length = __kds_unpack(cmeta->values_length);
+	uint8	mask = (1 << (index & 7));
 
-	if ((index >> 3) + 1 > __kds_unpack(cmeta->values_length))
+	index >>= 3;
+	if (sizeof(uint8) * (index+1) > length)
 		elog(ERROR, "corruption? bool points out of range");
-	return BoolGetDatum(att_isnull(index, bitmap));
+	return BoolGetDatum((bitmap[index] & mask) != 0 ? true : false);
 }
 
 static Datum
@@ -3539,19 +3542,24 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			goto out;
 	}
 
-	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+	if (cmeta->values_length == 0)
+	{
+		/* unreferenced column, so NULL */
+		goto out;
+	}
+	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
 		kern_colmeta   *smeta;
-		cl_uint		   *offset;
+		uint32		   *offset;
 
 		if (cmeta->num_subattrs != 1 ||
 			cmeta->idx_subattrs < kds->ncols ||
 			cmeta->idx_subattrs >= kds->nr_colmeta)
 			elog(ERROR, "Bug? corrupted kernel column metadata");
-		if (sizeof(cl_uint) * (index+2) > cmeta->values_length)
+		if (sizeof(uint32) * (index+2) > __kds_unpack(cmeta->values_length))
 			elog(ERROR, "Bug? array index is out of range");
 		smeta = &kds->colmeta[cmeta->idx_subattrs];
-		offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+		offset = (uint32 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 		datum = pg_array_arrow_ref(kds, smeta,
 								   offset[index],
 								   offset[index+1]);
@@ -3669,8 +3677,6 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 					  kern_data_store *kds,
 					  size_t index)
 {
-	Datum  *values = slot->tts_values;
-	bool   *isnull = slot->tts_isnull;
 	int		j;
 
 	if (index >= kds->nitems)
@@ -3682,8 +3688,8 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 
 		pg_datum_arrow_ref(kds, cmeta,
 						   index,
-						   values + j,
-						   isnull + j);
+						   slot->tts_values + j,
+						   slot->tts_isnull + j);
 	}
 	return true;
 }
