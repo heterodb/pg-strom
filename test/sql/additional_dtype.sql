@@ -38,9 +38,10 @@ CREATE TABLE various_dtypes(
     f4       float4,
     f8       float8,
     nm       numeric,
-    ch       char(3)
+    ch       char(3),
+    i1_1     int1
 );
-INSERT INTO various_dtypes VALUES (11,12,14,18,21.1,22.2,24.4,33.33,'123');
+INSERT INTO various_dtypes VALUES (11,12,14,18,21.1,22.2,24.4,33.33,'123',3);
 
 -- memo: sql generating two liner
 -- declare -A d=(["i2"]="int2" ["i4"]="int4" [i8]="int8" ["f2"]="float2" ["f4"]="float4" ["f8"]="float8" ["nm"]="numeric" ["ch"]="char(3)");
@@ -61,12 +62,12 @@ FROM various_dtypes;
 -- int1,int2,int4,int8
 
 -- declare -A cs=(["eq"]="=" ["ne"]="<>" ["lt"]="<" ["le"]="<=" ["gt"]=">" ["ge"]=">=");
--- declare -A it=(["eq"]="TRUE" ["ne"]="TRUE" ["lt"]="FALSE" ["le"]="TRUE" ["gt"]="FALSE" ["ge"]="TRUE");
+-- declare -A it=(["eq"]="TRUE" ["ne"]="FALSE" ["lt"]="FALSE" ["le"]="TRUE" ["gt"]="FALSE" ["ge"]="TRUE");
 -- echo "SELECT " ; for c in ${!cs[@]}; do echo "(i1 ${cs[$c]} i1) is ${it[$c]} as i1_${c}_i1" ; done | awk -F, 'NR==1{print $0}NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 SELECT 
 (i1 = i1) is TRUE as i1_eq_i1
 ,(i1 >= i1) is TRUE as i1_ge_i1
-,(i1 <> i1) is TRUE as i1_ne_i1
+,(i1 <> i1) is FALSE as i1_ne_i1
 ,(i1 > i1) is FALSE as i1_gt_i1
 ,(i1 <= i1) is TRUE as i1_le_i1
 ,(i1 < i1) is FALSE as i1_lt_i1
@@ -98,13 +99,58 @@ FROM various_dtypes;
 ---- unary operators
 --- +, - , @
 
-SELECT +i1,-i1,@i1 FROM various_dtypes;
+SELECT +i1>0 as u1,-i1<0 as u2,@(-i1) >0 as u3 FROM various_dtypes;
 
 ---- arthmetic operators
 --- +,-,*,/,%
 
+-- int1 and int1
+-- declare -A v=(["i1_1"]=3)
+-- declare -A ops=(["plus"]="+" ["minus"]="-" ["mul"]="*" ["div"]="/" ["mod"]="%")
+-- echo "SELECT "; for i in ${!v[@]};do for o in "${!ops[@]}"; do val=$(("11 ${ops[$o]} ${v[$i]}"))  ; echo "(i1 ${ops[$o]} ${i}) = ${val} as \"i1_${o}_${i}\"" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
+SELECT 
+(i1 % i1_1) = 2 as "i1_mod_i1_1"
+,(i1 / i1_1) = 3 as "i1_div_i1_1"
+,(i1 * i1_1) = 33 as "i1_mul_i1_1"
+,(i1 + i1_1) = 14 as "i1_plus_i1_1"
+,(i1 - i1_1) = 8 as "i1_minus_i1_1"
+FROM various_dtypes;
+
+-- int1 and (int2,int4,int8)
+-- % is not supported here.
+-- unset ops["mod"]
+-- echo "SELECT "; for i in ${!v[@]};do for o in "${!ops[@]}"; do val=$(("${v[$i]} ${ops[$o]} 3"))  ; echo "(${i} ${ops[$o]} i1_1) = ${val} as \"i1_${o}_${i}\" -- ${v[$i]} ${ops[$o]} 3" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
+SELECT 
+(i8 / i1_1) = 6 as "i1_div_i8" -- 18 / 3
+,(i8 * i1_1) = 54 as "i1_mul_i8" -- 18 * 3
+,(i8 + i1_1) = 21 as "i1_plus_i8" -- 18 + 3
+,(i8 - i1_1) = 15 as "i1_minus_i8" -- 18 - 3
+,(i2 / i1_1) = 4 as "i1_div_i2" -- 12 / 3
+,(i2 * i1_1) = 36 as "i1_mul_i2" -- 12 * 3
+,(i2 + i1_1) = 15 as "i1_plus_i2" -- 12 + 3
+,(i2 - i1_1) = 9 as "i1_minus_i2" -- 12 - 3
+,(i4 / i1_1) = 4 as "i1_div_i4" -- 14 / 3
+,(i4 * i1_1) = 42 as "i1_mul_i4" -- 14 * 3
+,(i4 + i1_1) = 17 as "i1_plus_i4" -- 14 + 3
+,(i4 - i1_1) = 11 as "i1_minus_i4" -- 14 - 3
+FROM various_dtypes;
+
 ---- bit operations
 ---- &,|,#,~,<<,>>
+
+-- unset v;declare -A v=( ["i1_1"]=3 )
+-- declare -A pbo=(["and"]="&" ["or"]="|" ["xor"]="#" ["lshift"]="<<" ["rshigt"]=">>")  # for postgres
+-- declare -A bbo=(["and"]="&" ["or"]="|" ["xor"]="^" ["lshift"]="<<" ["rshigt"]=">>")  # for bash
+-- echo "SELECT "; for i in ${!v[@]};do for o in "${!pbo[@]}"; do val=$(("11 ${bbo[$o]} ${v[$i]}"))  ; echo "(i1 ${pbo[$o]} ${i}) = ${val} as \"i1_${o}_${i}\" -- 11 ${pbo[$o]} ${v[$i]}" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
+
+-- unset pbo; declare -A pbo=(["not"]="~")  # for postgres
+-- unset bbo; declare -A bbo=(["not"]="~")  # for bash
+-- echo "SELECT "; for i in ${!v[@]};do for o in "${!pbo[@]}"; do val=$(("${bbo[$o]}${v[${i}]}"))  ; echo "(${pbo[$o]} ${i}) = ${val} as \"${o}_${i}\" -- ${pbo[$o]}_${v[$i]}" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
+
+-- TODO: FIX NOT operator position!
+-- SELECT 
+-- (~ i1_1) = -4 as "not_i1_1" -- ~_3
+--FROM various_dtypes;
 
 ---- misc functions
 -- money
