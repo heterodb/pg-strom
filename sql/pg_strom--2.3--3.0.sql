@@ -1123,7 +1123,7 @@ CREATE OPERATOR pg_catalog.# (
 );
 CREATE OPERATOR pg_catalog.~ (
   PROCEDURE = pgstrom.int1not,
-  LEFTARG = pg_catalog.int1
+  RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.<< (
   PROCEDURE = pgstrom.int1shl,
