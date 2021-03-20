@@ -39,23 +39,23 @@ CREATE TABLE various_dtypes(
     f8       float8,
     nm       numeric,
     ch       char(3),
-    i1_1     int1
+    i1_1     int1,
+    mny      money,
+    m1       int1,
+    mx1      int1,
+    mn1      int1,
+    mx2      int2,
+    mn2      int2,
+    mx4      int4,
+    mn4      int4,
+    mx8      int8,
+    mn8      int8
 );
-INSERT INTO various_dtypes VALUES (11,12,14,18,21.1,22.2,24.4,33.33,'123',3);
+INSERT INTO various_dtypes VALUES (11,12,14,18,21.1,22.2,24.4,33.33,'123',3,7.13,-1,127,-128,32767,-32768,2147483647,-2147483648,9223372036854775807,-9223372036854775808);
 
--- memo: sql generating two liner
+-- declare -A v=(["i2"]=12 ["i4"]=14 [i8]=18 ["f2"]=21.1 ["f4"]=22.2 ["f8"]=24.4 ["nm"]=33.33 ["ch"]="123");
 -- declare -A d=(["i2"]="int2" ["i4"]="int4" [i8]="int8" ["f2"]="float2" ["f4"]="float4" ["f8"]="float8" ["nm"]="numeric" ["ch"]="char(3)");
--- echo "SELECT " ; for cn in ${!d[@]}; do echo "cast($cn AS int1) \"${cn}_i1\", cast(i1 AS ${d[$cn]}) \"i1_$cn\"," ; done | awk '{if (NR==eof)print $0; else print $0","}' ; echo "FROM various_dtypes;"
-SELECT 
-cast(f2 AS int1) "f2_i1", cast(i1 AS float2) "i1_f2",
-cast(f4 AS int1) "f4_i1", cast(i1 AS float4) "i1_f4",
-cast(f8 AS int1) "f8_i1", cast(i1 AS float8) "i1_f8",
-cast(ch AS int1) "ch_i1", cast(i1 AS char(3)) "i1_ch",
-cast(nm AS int1) "nm_i1", cast(i1 AS numeric) "i1_nm",
-cast(i8 AS int1) "i8_i1", cast(i1 AS int8) "i1_i8",
-cast(i2 AS int1) "i2_i1", cast(i1 AS int2) "i1_i2",
-cast(i4 AS int1) "i4_i1", cast(i1 AS int4) "i1_i4"
-FROM various_dtypes;
+-- echo "SELECT " ; for cn in ${!d[@]}; do echo "cast($cn AS int1) = cast(${v[$cn]} AS integer) \"${cn}_i1\", cast(i1 AS ${d[$cn]}) = cast(11 AS ${d[$cn]}) \"i1_$cn\"" ; done | awk 'NR==1{print $0}NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 
 ---- comarison
 -- eq,ne,lt,le,gt,ge
@@ -63,14 +63,16 @@ FROM various_dtypes;
 
 -- declare -A cs=(["eq"]="=" ["ne"]="<>" ["lt"]="<" ["le"]="<=" ["gt"]=">" ["ge"]=">=");
 -- declare -A it=(["eq"]="TRUE" ["ne"]="FALSE" ["lt"]="FALSE" ["le"]="TRUE" ["gt"]="FALSE" ["ge"]="TRUE");
--- echo "SELECT " ; for c in ${!cs[@]}; do echo "(i1 ${cs[$c]} i1) is ${it[$c]} as i1_${c}_i1" ; done | awk -F, 'NR==1{print $0}NR>1{print ","$0}' ; echo "FROM various_dtypes;"
+-- echo "SELECT " ; for cn in ${!d[@]}; do echo "cast($cn AS int1) = cast(${v[$cn]} AS integer) \"${cn}_i1\", cast(i1 AS ${d[$cn]}) = cast(11 AS ${d[$cn]}) \"i1_$cn\"" ; done | awk 'NR==1{print $0}NR>1{print ","$0}' ; echo "FROM various_dtypes;"
 SELECT 
-(i1 = i1) is TRUE as i1_eq_i1
-,(i1 >= i1) is TRUE as i1_ge_i1
-,(i1 <> i1) is FALSE as i1_ne_i1
-,(i1 > i1) is FALSE as i1_gt_i1
-,(i1 <= i1) is TRUE as i1_le_i1
-,(i1 < i1) is FALSE as i1_lt_i1
+cast(f2 AS int1) = cast(21.1 AS integer) "f2_i1", cast(i1 AS float2) = cast(11 AS float2) "i1_f2"
+,cast(f4 AS int1) = cast(22.2 AS integer) "f4_i1", cast(i1 AS float4) = cast(11 AS float4) "i1_f4"
+,cast(f8 AS int1) = cast(24.4 AS integer) "f8_i1", cast(i1 AS float8) = cast(11 AS float8) "i1_f8"
+,cast(ch AS int1) = cast(123 AS integer) "ch_i1", cast(i1 AS char(3)) = cast(11 AS char(3)) "i1_ch"
+,cast(nm AS int1) = cast(33.33 AS integer) "nm_i1", cast(i1 AS numeric) = cast(11 AS numeric) "i1_nm"
+,cast(i8 AS int1) = cast(18 AS integer) "i8_i1", cast(i1 AS int8) = cast(11 AS int8) "i1_i8"
+,cast(i2 AS int1) = cast(12 AS integer) "i2_i1", cast(i1 AS int2) = cast(11 AS int2) "i1_i2"
+,cast(i4 AS int1) = cast(14 AS integer) "i4_i1", cast(i1 AS int4) = cast(11 AS int4) "i1_i4"
 FROM various_dtypes;
 
 -- unset d; declare -A d=(["i2"]="12" ["i4"]="14" ["i8"]="18");
@@ -135,6 +137,85 @@ SELECT
 ,(i4 - i1_1) = 11 as "i1_minus_i4" -- 14 - 3
 FROM various_dtypes;
 
+
+-- error_case: range check
+-- int1 , int1
+SELECT mx1 + i1 as upper_over FROM various_dtypes;
+SELECT mn1 + m1 as lower_over FROM various_dtypes;
+SELECT mn1 - i1 as lower_over FROM various_dtypes;
+SELECT mx1 - m1 as upper_over FROM various_dtypes;
+SELECT mn1 * m1 as upper_over FROM various_dtypes;
+SELECT mn1 * i1_1 as lower_over FROM various_dtypes;
+SELECT mn1 / m1 as lower_over FROM various_dtypes;
+-- int1, int2
+SELECT mx2 + i1 as upper_over FROM various_dtypes;
+SELECT mn2 + m1 as lower_over FROM various_dtypes;
+SELECT mn2 - i1 as lower_over FROM various_dtypes;
+SELECT mx2 - m1 as upper_over FROM various_dtypes;
+SELECT mn2 * m1 as upper_over FROM various_dtypes;
+SELECT mn2 * i1 as lower_over FROM various_dtypes;
+SELECT mn2 / m1 as lower_over FROM various_dtypes;
+
+SELECT i1 + mx2 as upper_over FROM various_dtypes;
+SELECT m1 + mn2 as lower_over FROM various_dtypes;
+SELECT mn1 - mx2 as lower_over FROM various_dtypes;
+SELECT mx1 - mn2 as upper_over FROM various_dtypes;
+SELECT mx1 * mx2 as upper_over FROM various_dtypes;
+SELECT mx1 * mn2 as lower_over FROM various_dtypes;
+
+-- int1, int4
+SELECT mx4 + i1 as upper_over FROM various_dtypes;
+SELECT mn4 + m1 as lower_over FROM various_dtypes;
+SELECT mn4 - i1 as lower_over FROM various_dtypes;
+SELECT mx4 - m1 as upper_over FROM various_dtypes;
+SELECT mn4 * m1 as upper_over FROM various_dtypes;
+SELECT mn4 * i1 as lower_over FROM various_dtypes;
+SELECT mn4 / m1 as lower_over FROM various_dtypes;
+
+SELECT i1 + mx4 as upper_over FROM various_dtypes;
+SELECT m1 + mn4 as lower_over FROM various_dtypes;
+SELECT mn1 - mx4 as lower_over FROM various_dtypes;
+SELECT mx1 - mn4 as upper_over FROM various_dtypes;
+SELECT mx1 * mx4 as upper_over FROM various_dtypes;
+SELECT mx1 * mn4 as lower_over FROM various_dtypes;
+
+-- int1, int8
+SELECT mx8 + i1 as upper_over FROM various_dtypes;
+SELECT mn8 + m1 as lower_over FROM various_dtypes;
+SELECT mn8 - i1 as lower_over FROM various_dtypes;
+SELECT mx8 - m1 as upper_over FROM various_dtypes;
+SELECT mn8 * m1 as upper_over FROM various_dtypes;
+SELECT mn8 * i1 as lower_over FROM various_dtypes;
+SELECT mn8 / m1 as lower_over FROM various_dtypes;
+
+SELECT i1 + mx8 as upper_over FROM various_dtypes;
+SELECT m1 + mn8 as lower_over FROM various_dtypes;
+SELECT mn1 - mx8 as lower_over FROM various_dtypes;
+SELECT mx1 - mn8 as upper_over FROM various_dtypes;
+SELECT mx1 * mx8 as upper_over FROM various_dtypes;
+SELECT mx1 * mn8 as lower_over FROM various_dtypes;
+
+-- error_case: div by 0
+SELECT i1 / 0::int1 FROM various_dtypes;
+SELECT i2 / 0::int1 FROM various_dtypes;
+SELECT i4 / 0::int1 FROM various_dtypes;
+SELECT i8 / 0::int1 FROM various_dtypes;
+SELECT i1 % 0::int1 FROM various_dtypes;
+
+-- ok_case: div by -1
+-- div functions use if when -1, thus checked the flow
+SELECT 
+(i1 / m1) = -i1 as i1_div_m1,
+(i2 / m1) = -i2 as i2_div_m1,
+(i4 / m1) = -i4 as i4_div_m1,
+(i8 / m1) = -i8 as i8_div_m1,
+(i1 % m1) = 0 as i1_mod_m1 --,
+-- (i2 % m1) = 0 as i2_mod_m1,
+-- (i4 % m1) = 01 as i4_mod_m1,
+-- (i8 % m1) = -i8 as i8_mod_m1
+FROM various_dtypes;
+
+
 ---- bit operations
 ---- &,|,#,~,<<,>>
 
@@ -160,7 +241,22 @@ FROM various_dtypes;
 
 ---- misc functions
 -- money
+SELECT 
+(i1_1 * mny) = 21.39::money as "int1_mul_money",
+(mny * i1_1) = 21.39::money as "money_mul_int1",
+(mny / i1_1) = 2.37::money as "money_div_int1",
+(mny / m1) = (-7.13)::money as "money_div_m1"
+FROM various_dtypes;
 
+-- error_case: money overflow
+-- big_int_max=9223372036854775807
+UPDATE various_dtypes SET mny=92233720368547758.07;
+SELECT mny * i1 FROM various_dtypes;
+SELECT i1 * mny FROM various_dtypes;
+SELECT mny / m1 FROM various_dtypes;
+
+-- error_case: money div 0
+SELECT mny / 0::int1 from various_dtypes;
 
 ---- aggregate function
 -- sum,max,min,avg(larger,smaller)
