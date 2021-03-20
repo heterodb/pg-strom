@@ -156,13 +156,29 @@ FROM various_dtypes;
 -- declare -A pbo=(["and"]="&" ["or"]="|" ["xor"]="#" ["lshift"]="<<" ["rshigt"]=">>")  # for postgres
 -- declare -A bbo=(["and"]="&" ["or"]="|" ["xor"]="^" ["lshift"]="<<" ["rshigt"]=">>")  # for bash
 -- echo "SELECT "; for i in ${!v[@]};do for o in "${!pbo[@]}"; do val=$(("11 ${bbo[$o]} ${v[$i]}"))  ; echo "(i1 ${pbo[$o]} ${i}) = ${val} as \"i1_${o}_${i}\" -- 11 ${pbo[$o]} ${v[$i]}" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
+SELECT 
+(i1 & i1_1) = 3 as "i1_and_i1_1" -- 11 & 3
+,(i1 | i1_1) = 11 as "i1_or_i1_1" -- 11 | 3
+,(i1 << i1_1) = 88 as "i1_lshift_i1_1" -- 11 << 3
+,(i1 >> i1_1) = 1 as "i1_rshigt_i1_1" -- 11 >> 3
+,(i1 # i1_1) = 8 as "i1_xor_i1_1" -- 11 # 3
+FROM various_dtypes;
+ i1_and_i1_1 | i1_or_i1_1 | i1_lshift_i1_1 | i1_rshigt_i1_1 | i1_xor_i1_1 
+-------------+------------+----------------+----------------+-------------
+ t           | t          | t              | t              | t
+(1 row)
+
 -- unset pbo; declare -A pbo=(["not"]="~")  # for postgres
 -- unset bbo; declare -A bbo=(["not"]="~")  # for bash
 -- echo "SELECT "; for i in ${!v[@]};do for o in "${!pbo[@]}"; do val=$(("${bbo[$o]}${v[${i}]}"))  ; echo "(${pbo[$o]} ${i}) = ${val} as \"${o}_${i}\" -- ${pbo[$o]}_${v[$i]}" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
--- TODO: FIX NOT operator position!
--- SELECT 
--- (~ i1_1) = -4 as "not_i1_1" -- ~_3
---FROM various_dtypes;
+SELECT 
+(~ i1_1) = -4 as "not_i1_1" -- ~_3
+FROM various_dtypes;
+ not_i1_1 
+----------
+ t
+(1 row)
+
 ---- misc functions
 -- money
 ---- aggregate function
