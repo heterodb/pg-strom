@@ -203,6 +203,10 @@ CREATE CAST (int1 AS float4)
 CREATE CAST (int1 AS float8)
   WITH FUNCTION pgstrom.float8(int1)
   AS IMPLICIT;
+CREATE CAST (int1 AS numeric)
+  WITH FUNCTION pgstrom.numeric(int1)
+  AS IMPLICIT;
+
 
 CREATE CAST (int2 AS int1)
   WITH FUNCTION pgstrom.int1(int2)
@@ -222,7 +226,9 @@ CREATE CAST (float4 AS int1)
 CREATE CAST (float8 AS int1)
   WITH FUNCTION pgstrom.int1(float8)
   AS IMPLICIT;
-
+CREATE CAST (numeric AS int1)
+  WITH FUNCTION pgstrom.int1(numeric)
+  AS IMPLICIT;
 ---
 --- Comparison functions
 ---
