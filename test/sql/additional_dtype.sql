@@ -267,16 +267,17 @@ CREATE TABLE aggregate_data(
     i1  int1
     ,i2 int2
 );
-INSERT INTO aggregate_data VALUES 
-(1,1)
-,(NULL,NULL)
-,(3,3)
-,(NULL,NULL)
-,(-1,-1)
-,(NULL,NULL)
-,(NULL,NULL)
-,(5,5)
+INSERT INTO aggregate_data(i1) VALUES 
+(1)
+,(NULL)
+,(3)
+,(NULL)
+,(-1)
+,(NULL)
+,(NULL)
+,(5)
 ;
+UPDATE aggregate_data set i2=i1;
 -- sum
 SELECT sum(i1) = sum(i2) as "sum_check" from aggregate_data;
 
