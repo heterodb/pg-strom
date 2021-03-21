@@ -262,6 +262,39 @@ SELECT mny / 0::int1 from various_dtypes;
 -- sum,max,min,avg(larger,smaller)
 -- variance,var_samp,var_pop,stddev, stddevv_samp,stddev_pop
 
+
+CREATE TABLE aggregate_data(
+    i1  int1
+    ,i2 int2
+);
+INSERT INTO aggregate_data VALUES 
+(1,1)
+,(NULL,NULL)
+,(3,3)
+,(NULL,NULL)
+,(-1,-1)
+,(NULL,NULL)
+,(NULL,NULL)
+,(5,5)
+;
+-- sum
+SELECT sum(i1) = sum(i2) as "sum_check" from aggregate_data;
+
+-- max
+SELECT max(i1) = max(i2) as "max_check" from aggregate_data;
+
+-- min
+SELECT min(i1) = min(i2) as "min_check" from aggregate_data;
+
+-- avg
+-- TODO: fix this to get TRUE
+SELECT avg(i1) = avg(i2) as "avg_check" from aggregate_data;
+
+-- variance
+-- TODO: fix this to get TRUE 
+SELECT variance(i1) = variance(i2) as "variance_check" from aggregate_data;
+
+
 ---- index support
 -- cmp,hash
 
