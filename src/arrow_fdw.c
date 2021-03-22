@@ -336,16 +336,12 @@ RecordBatchFieldCount(RecordBatchState *rbstate)
 static size_t
 RecordBatchFieldLength(RecordBatchFieldState *fstate)
 {
-	size_t	len = 0;
+	size_t	len;
 	int		j;
 
-	if (fstate->nullmap_offset > 0)
-		len += fstate->nullmap_length;
-	if (fstate->values_offset > 0)
-		len += fstate->values_length;
-	if (fstate->extra_offset > 0)
-		len += fstate->extra_length;
-	len = BLCKALIGN(len);
+	len = BLCKALIGN(fstate->nullmap_length +
+					fstate->values_length +
+					fstate->extra_length);
 	for (j=0; j < fstate->num_children; j++)
 		len += RecordBatchFieldLength(&fstate->children[j]);
 	return len;
@@ -1586,41 +1582,20 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		File		fdesc = (File)lfirst_int(lc);
 		const char *fname = FilePathName(fdesc);
 		int			rbcount = 0;
+		size_t		read_sz = 0;
 		char	   *pos = label;
 		struct stat	st_buf;
 
 		pos += snprintf(label, sizeof(label), "files%d", fcount++);
 		if (fstat(FileGetRawDesc(fdesc), &st_buf) != 0)
 			memset(&st_buf, 0, sizeof(struct stat));
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			resetStringInfo(&buf);
-			if (st_buf.st_size == 0)
-				appendStringInfoString(&buf, fname);
-			else
-				appendStringInfo(&buf, "%s (size: %s)",
-								 fname,
-								 format_bytesz(st_buf.st_size));
-			ExplainPropertyText(label, buf.data, es);
-		}
-		else
-		{
-			ExplainPropertyText(label, fname, es);
 
-			if (st_buf.st_size > 0)
-			{
-				sprintf(pos, "-size");
-				ExplainPropertyText(label, format_bytesz(st_buf.st_size), es);
-			}
-		}
-		if (!es->verbose)
-			continue;
-
-		/* below only verbose mode */
+		/* size count per chunk */
 		memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
 		for (i=0; i < af_state->num_rbatches; i++)
 		{
 			RecordBatchState *rb_state = af_state->rbatches[i];
+			size_t		sz;
 
 			if (rb_state->fdesc != fdesc)
 				continue;
@@ -1632,12 +1607,39 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 				j = k + FirstLowInvalidHeapAttributeNumber - 1;
 				if (j < 0 || j >= tupdesc->natts)
 					continue;
-				chunk_sz[j] += RecordBatchFieldLength(&rb_state->columns[j]);
+				sz = RecordBatchFieldLength(&rb_state->columns[j]);
+				read_sz += sz;
+				chunk_sz[j] += sz;
 			}
 			rbcount++;
 		}
 
-		if (rbcount >= 0)
+		/* file size and read size */
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			resetStringInfo(&buf);
+			if (st_buf.st_size == 0)
+				appendStringInfoString(&buf, fname);
+			else
+				appendStringInfo(&buf, "%s (read: %s, size: %s)",
+								 fname,
+								 format_bytesz(read_sz),
+								 format_bytesz(st_buf.st_size));
+			ExplainPropertyText(label, buf.data, es);
+		}
+		else
+		{
+			ExplainPropertyText(label, fname, es);
+
+			sprintf(pos, "-size");
+			ExplainPropertyText(label, format_bytesz(st_buf.st_size), es);
+
+			sprintf(pos, "-read");
+			ExplainPropertyText(label, format_bytesz(read_sz), es);
+		}
+
+		/* read-size per column (verbose mode only)  */
+		if (es->verbose && rbcount >= 0)
 		{
 			for (k = bms_next_member(af_state->referenced, -1);
                  k >= 0;
@@ -3116,12 +3118,15 @@ pg_varlena_arrow_ref(kern_data_store *kds,
 	cl_uint	   *offset = (cl_uint *)
 		((char *)kds + __kds_unpack(cmeta->values_offset));
 	char	   *extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
-	size_t		extra_len = __kds_unpack(cmeta->extra_length);
-	cl_uint		len = offset[index+1] - offset[index];
+	cl_uint		len;
 	struct varlena *res;
 
-	if (offset[index] > offset[index + 1] || offset[index+1] > extra_len)
-		elog(ERROR, "corrupted arrow file? offset points out of extra buffer");
+	if (sizeof(uint32) * (index+2) > __kds_unpack(cmeta->values_length))
+		elog(ERROR, "corruption? varlena index out of range");
+	len = offset[index+1] - offset[index];
+	if (offset[index] > offset[index+1] ||
+		offset[index+1] > __kds_unpack(cmeta->extra_length))
+		elog(ERROR, "corruption? varlena points out of extra buffer");
 
 	res = palloc(VARHDRSZ + len);
 	SET_VARSIZE(res, VARHDRSZ + len);
@@ -3135,11 +3140,14 @@ pg_bpchar_arrow_ref(kern_data_store *kds,
 					kern_colmeta *cmeta, size_t index)
 {
 	cl_char	   *values = ((char *)kds + __kds_unpack(cmeta->values_offset));
+	size_t		length = __kds_unpack(cmeta->values_length);
 	cl_int		unitsz = cmeta->atttypmod - VARHDRSZ;
 	struct varlena *res;
 
 	if (unitsz <= 0)
 		elog(ERROR, "CHAR(%d) is not expected", unitsz);
+	if (unitsz * (index+1) > length)
+		elog(ERROR, "corruption? bpchar points out of range");
 	res = palloc(VARHDRSZ + unitsz);
 	memcpy((char *)res + VARHDRSZ, values + unitsz * index, unitsz);
 	SET_VARSIZE(res, VARHDRSZ + unitsz);
@@ -3151,17 +3159,25 @@ static Datum
 pg_bool_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char   *bitmap = (char *)kds + __kds_unpack(cmeta->values_offset);
+	uint8  *bitmap = (uint8 *)kds + __kds_unpack(cmeta->values_offset);
+	size_t	length = __kds_unpack(cmeta->values_length);
+	uint8	mask = (1 << (index & 7));
 
-	return BoolGetDatum(att_isnull(index, bitmap));
+	index >>= 3;
+	if (sizeof(uint8) * (index+1) > length)
+		elog(ERROR, "corruption? bool points out of range");
+	return BoolGetDatum((bitmap[index] & mask) != 0 ? true : false);
 }
 
 static Datum
 pg_int1_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	cl_char	   *values = (cl_char *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+	int8   *values = (int8 *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	size_t	length = __kds_unpack(cmeta->values_length);
+
+	if (sizeof(int8) * (index+1) > length)
+		elog(ERROR, "corruption? int8 points out of range");
 	return values[index];
 }
 
@@ -3169,8 +3185,11 @@ static Datum
 pg_int2_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	cl_short   *values = (cl_short *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+	int16  *values = (int16 *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	size_t	length = __kds_unpack(cmeta->values_length);
+
+	if (sizeof(int16) * (index+1) > length)
+		elog(ERROR, "corruption? int16 points out of range");
 	return values[index];
 }
 
@@ -3178,8 +3197,11 @@ static Datum
 pg_int4_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	cl_int	   *values = (cl_int *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+	int32  *values = (int32 *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	size_t  length = __kds_unpack(cmeta->values_length);
+
+	if (sizeof(int32) * (index+1) > length)
+		elog(ERROR, "corruption? int32 points out of range");
 	return values[index];
 }
 
@@ -3187,8 +3209,11 @@ static Datum
 pg_int8_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	cl_long	   *values = (cl_long *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+	int64  *values = (int64 *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	size_t	length = __kds_unpack(cmeta->values_length);
+
+	if (sizeof(int64) * (index+1) > length)
+		elog(ERROR, "corruption? int64 points out of range");
 	return values[index];
 }
 
@@ -3198,9 +3223,12 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 {
 	char	   *result = palloc0(sizeof(struct NumericData));
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t		length = __kds_unpack(cmeta->values_length);
 	int			dscale = cmeta->attopts.decimal.scale;
 	Int128_t	decimal;
 
+	if (sizeof(int128) * (index+1) > length)
+		elog(ERROR, "corruption? numeric points out of range");
 	decimal.ival = ((int128 *)base)[index];
 
 	while (dscale > 0 && decimal.ival % 10 == 0)
@@ -3218,15 +3246,20 @@ pg_date_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t		length = __kds_unpack(cmeta->values_length);
 	DateADT		dt;
 
 	switch (cmeta->attopts.date.unit)
 	{
 		case ArrowDateUnit__Day:
-			dt = ((cl_uint *)base)[index];
+			if (sizeof(uint32) * (index+1) > length)
+				elog(ERROR, "corruption? Date[day] points out of range");
+			dt = ((uint32 *)base)[index];
 			break;
 		case ArrowDateUnit__MilliSecond:
-			dt = ((cl_ulong *)base)[index] / 1000;
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Date[ms] points out of range");
+			dt = ((uint64 *)base)[index] / 1000;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Date type");
@@ -3241,24 +3274,34 @@ pg_time_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t		length = __kds_unpack(cmeta->values_length);
 	TimeADT		tm;
 
 	switch (cmeta->attopts.time.unit)
 	{
 		case ArrowTimeUnit__Second:
-			tm = ((cl_long)((cl_int *)base)[index]) * 1000000L;
+			if (sizeof(uint32) * (index+1) > length)
+				elog(ERROR, "corruption? Time[sec] points out of range");
+			tm = ((uint32 *)base)[index] * 1000000L;
 			break;
 		case ArrowTimeUnit__MilliSecond:
-			tm = ((cl_long)((cl_int *)base)[index]) * 1000L;
+			if (sizeof(uint32) * (index+1) > length)
+				elog(ERROR, "corruption? Time[ms] points out of range");
+			tm = ((uint32 *)base)[index] * 1000L;
 			break;
 		case ArrowTimeUnit__MicroSecond:
-			tm = ((cl_long *)base)[index];
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Time[us] points out of range");
+			tm = ((uint64 *)base)[index];
 			break;
 		case ArrowTimeUnit__NanoSecond:
-			tm = ((cl_ulong *)base)[index] / 1000L;
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Time[ns] points out of range");
+			tm = ((uint64 *)base)[index] / 1000L;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Time type");
+			break;
 	}
 	return TimeADTGetDatum(tm);
 }
@@ -3268,24 +3311,34 @@ pg_timestamp_arrow_ref(kern_data_store *kds,
 					   kern_colmeta *cmeta, size_t index)
 {
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t		length = __kds_unpack(cmeta->values_length);
 	Timestamp	ts;
 
 	switch (cmeta->attopts.timestamp.unit)
 	{
 		case ArrowTimeUnit__Second:
-			ts = ((cl_ulong *)base)[index] * 1000000UL;
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Timestamp[sec] points out of range");
+			ts = ((uint64 *)base)[index] * 1000000UL;
 			break;
 		case ArrowTimeUnit__MilliSecond:
-			ts = ((cl_ulong *)base)[index] * 1000UL;
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Timestamp[ms] points out of range");
+			ts = ((uint64 *)base)[index] * 1000UL;
 			break;
 		case ArrowTimeUnit__MicroSecond:
-			ts = ((cl_ulong *)base)[index];
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Timestamp[us] points out of range");
+			ts = ((uint64 *)base)[index];
 			break;
 		case ArrowTimeUnit__NanoSecond:
-			ts = ((cl_ulong *)base)[index] / 1000UL;
+			if (sizeof(uint64) * (index+1) > length)
+				elog(ERROR, "corruption? Timestamp[ns] points out of range");
+			ts = ((uint64 *)base)[index] / 1000UL;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Timestamp type");
+			break;
 	}
 	/* convert UNIX epoch to PostgreSQL epoch */
 	ts -= (POSTGRES_EPOCH_JDATE -
@@ -3298,18 +3351,23 @@ pg_interval_arrow_ref(kern_data_store *kds,
 					  kern_colmeta *cmeta, size_t index)
 {
 	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t		length = __kds_unpack(cmeta->values_length);
 	Interval   *iv = palloc0(sizeof(Interval));
 
 	switch (cmeta->attopts.interval.unit)
 	{
 		case ArrowIntervalUnit__Year_Month:
 			/* 32bit: number of months */
-			iv->month = ((cl_uint *)base)[index];
+			if (sizeof(uint32) * (index+1) > length)
+				elog(ERROR, "corruption? Interval[Year/Month] points out of range");
+			iv->month = ((uint32 *)base)[index];
 			break;
 		case ArrowIntervalUnit__Day_Time:
 			/* 32bit+32bit: number of days and milliseconds */
-			iv->day = (int32)(((cl_uint *)base)[2 * index]);
-			iv->time = (TimeOffset)(((cl_uint *)base)[2 * index + 1]) * 1000;
+			if (2 * sizeof(uint32) * (index+1) > length)
+				elog(ERROR, "corruption? Interval[Day/Time] points out of range");
+			iv->day  = ((int32 *)base)[2 * index];
+			iv->time = ((int32 *)base)[2 * index + 1] * 1000;
 			break;
 		default:
 			elog(ERROR, "Bug? unexpected unit of Interval type");
@@ -3321,11 +3379,14 @@ static Datum
 pg_macaddr_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t	length = __kds_unpack(cmeta->values_length);
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
 		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
 			 cmeta->attopts.fixed_size_binary.byteWidth);
+	if (sizeof(macaddr) * (index+1) > length)
+		elog(ERROR, "corruption? Binary[macaddr] points out of range");
 
 	return PointerGetDatum(base + sizeof(macaddr) * index);
 }
@@ -3334,17 +3395,22 @@ static Datum
 pg_inet_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	inet	   *ip = palloc(sizeof(inet));
+	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	size_t	length = __kds_unpack(cmeta->values_length);
+	inet   *ip = palloc(sizeof(inet));
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
 	{
+		if (4 * (index+1) > length)
+			elog(ERROR, "corruption? Binary[inet4] points out of range");
 		ip->inet_data.family = PGSQL_AF_INET;
 		ip->inet_data.bits = 32;
 		memcpy(ip->inet_data.ipaddr, base + 4 * index, 4);
 	}
 	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
 	{
+		if (16 * (index+1) > length)
+			elog(ERROR, "corruption? Binary[inet6] points out of range");
 		ip->inet_data.family = PGSQL_AF_INET6;
 		ip->inet_data.bits = 128;
 		memcpy(ip->inet_data.ipaddr, base + 16 * index, 16);
@@ -3365,10 +3431,12 @@ pg_array_arrow_ref(kern_data_store *kds,
 	ArrayType  *res;
 	size_t		sz;
 	cl_uint		i, nitems = end - start;
-	cl_uint	   *offset;
 	bits8	   *nullmap = NULL;
-	char	   *base;
-	size_t		usage;
+	size_t		usage, __usage;
+
+	/* sanity checks */
+	if (start > end)
+		elog(ERROR, "Bug? array index has reversed order [%u..%u]", start, end);
 
 	/* allocation of the result buffer */
 	if (smeta->nullmap_offset != 0)
@@ -3383,12 +3451,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 	}
 	else if (smeta->attlen == -1)
 	{
-		if (smeta->values_offset == 0)
-			elog(ERROR, "Bug? corrupted kernel column metadata");
-		offset = (cl_uint *)((char *)kds + __kds_unpack(smeta->values_offset));
-		sz += (MAXALIGN(VARHDRSZ * nitems) +		/* space for varlena */
-			   MAXALIGN(sizeof(cl_uint) * nitems) +	/* space for alignment */
-			   offset[end] - offset[start]);
+		sz += 400;		/* tentative allocation */
 	}
 	else
 		elog(ERROR, "Bug? corrupted kernel column metadata");
@@ -3403,9 +3466,7 @@ pg_array_arrow_ref(kern_data_store *kds,
 	res->elemtype = smeta->atttypid;
 	ARR_DIMS(res)[0] = nitems;
 	ARR_LBOUND(res)[0] = 1;
-
-	base = ARR_DATA_PTR(res);
-	usage = 0;
+	usage = ARR_DATA_OFFSET(res);
 	for (i=0; i < nitems; i++)
 	{
 		Datum	datum;
@@ -3421,9 +3482,16 @@ pg_array_arrow_ref(kern_data_store *kds,
 		{
 			if (nullmap)
 				nullmap[i>>3] |= (1<<(i&7));
-			usage = TYPEALIGN(smeta->attalign, usage);
-			memcpy(base + usage, &datum, smeta->attlen);
-			usage += smeta->attlen;
+			__usage = TYPEALIGN(smeta->attalign, usage);
+			while (__usage + smeta->attlen > sz)
+			{
+				sz += sz;
+				res = repalloc(res, sz);
+			}
+			if (__usage > usage)
+				memset((char *)res + usage, 0, __usage - usage);
+			memcpy((char *)res + __usage, &datum, smeta->attlen);
+			usage = __usage + smeta->attlen;
 		}
 		else if (smeta->attlen == -1)
 		{
@@ -3431,16 +3499,23 @@ pg_array_arrow_ref(kern_data_store *kds,
 
 			if (nullmap)
 				nullmap[i>>3] |= (1<<(i&7));
-			usage = TYPEALIGN(smeta->attalign, usage);
-			memcpy(base + usage, DatumGetPointer(datum), vl_len);
-			usage += vl_len;
+			__usage = TYPEALIGN(smeta->attalign, usage);
+			while (__usage + vl_len > sz)
+			{
+				sz += sz;
+				res = repalloc(res, sz);
+			}
+			if (__usage > usage)
+				memset((char *)res + usage, 0, __usage - usage);
+			memcpy((char *)res + __usage, DatumGetPointer(datum), vl_len);
+			usage = __usage + vl_len;
 
 			pfree(DatumGetPointer(datum));
 		}
 		else
 			elog(ERROR, "Bug? corrupted kernel column metadata");
 	}
-	SET_VARSIZE(res, (base + usage) - (char *)res);
+	SET_VARSIZE(res, usage);
 
 	return PointerGetDatum(res);
 }
@@ -3467,19 +3542,24 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			goto out;
 	}
 
-	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+	if (cmeta->values_length == 0)
+	{
+		/* unreferenced column, so NULL */
+		goto out;
+	}
+	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
 		kern_colmeta   *smeta;
-		cl_uint		   *offset;
+		uint32		   *offset;
 
 		if (cmeta->num_subattrs != 1 ||
 			cmeta->idx_subattrs < kds->ncols ||
 			cmeta->idx_subattrs >= kds->nr_colmeta)
 			elog(ERROR, "Bug? corrupted kernel column metadata");
+		if (sizeof(uint32) * (index+2) > __kds_unpack(cmeta->values_length))
+			elog(ERROR, "Bug? array index is out of range");
 		smeta = &kds->colmeta[cmeta->idx_subattrs];
-		if (cmeta->values_offset == 0)
-			goto out;		/* not loaded? always NULL */
-		offset = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+		offset = (uint32 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 		datum = pg_array_arrow_ref(kds, smeta,
 								   offset[index],
 								   offset[index+1]);
@@ -3513,11 +3593,6 @@ pg_datum_arrow_ref(kern_data_store *kds,
 
 		datum = PointerGetDatum(htup->t_data);
 		isnull = false;
-	}
-	else if (cmeta->values_offset == 0)
-	{
-		/* not loaded, always null */
-		goto out;
 	}
 	else
 	{
@@ -3602,8 +3677,6 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 					  kern_data_store *kds,
 					  size_t index)
 {
-	Datum  *values = slot->tts_values;
-	bool   *isnull = slot->tts_isnull;
 	int		j;
 
 	if (index >= kds->nitems)
@@ -3615,8 +3688,8 @@ KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 
 		pg_datum_arrow_ref(kds, cmeta,
 						   index,
-						   values + j,
-						   isnull + j);
+						   slot->tts_values + j,
+						   slot->tts_isnull + j);
 	}
 	return true;
 }

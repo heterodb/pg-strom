@@ -1466,10 +1466,10 @@ CREATE CAST (float2 AS numeric)
 
 CREATE CAST (float4 AS float2)
   WITH FUNCTION pgstrom.float2(float4)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float8 AS float2)
   WITH FUNCTION pgstrom.float2(float8)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (int2 AS float2)
   WITH FUNCTION pgstrom.float2(int2)
   AS ASSIGNMENT;
