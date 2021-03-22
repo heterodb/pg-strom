@@ -209,10 +209,10 @@ SELECT
 (i2 / m1) = -i2 as i2_div_m1,
 (i4 / m1) = -i4 as i4_div_m1,
 (i8 / m1) = -i8 as i8_div_m1,
-(i1 % m1) = 0 as i1_mod_m1 --,
--- (i2 % m1) = 0 as i2_mod_m1,
--- (i4 % m1) = 01 as i4_mod_m1,
--- (i8 % m1) = -i8 as i8_mod_m1
+(i1 % m1) = 0 as i1_mod_m1,
+(i2 % m1) = 0 as i2_mod_m1,
+(i4 % m1) = 0 as i4_mod_m1,
+(i8 % m1) = 0 as i8_mod_m1
 FROM various_dtypes;
 
 
@@ -256,7 +256,7 @@ SELECT i1 * mny FROM various_dtypes;
 SELECT mny / m1 FROM various_dtypes;
 
 -- error_case: money div 0
-SELECT mny / 0::int1 from various_dtypes;
+SELECT mny / 0::int1 FROM various_dtypes;
 
 ---- aggregate function
 -- sum,max,min,avg(larger,smaller)
@@ -273,28 +273,51 @@ INSERT INTO aggregate_data(i1) VALUES
 ,(3)
 ,(NULL)
 ,(-1)
+,(0)
 ,(NULL)
 ,(NULL)
 ,(5)
 ;
 UPDATE aggregate_data set i2=i1;
 -- sum
-SELECT sum(i1) = sum(i2) as "sum_check" from aggregate_data;
+SELECT sum(i1) = sum(i2) as "sum_check" FROM aggregate_data;
 
 -- max
-SELECT max(i1) = max(i2) as "max_check" from aggregate_data;
+SELECT max(i1) = max(i2) as "max_check" FROM aggregate_data;
 
 -- min
-SELECT min(i1) = min(i2) as "min_check" from aggregate_data;
+SELECT min(i1) = min(i2) as "min_check" FROM aggregate_data;
 
 -- avg
 -- TODO: fix this to get TRUE
-SELECT avg(i1) = avg(i2) as "avg_check" from aggregate_data;
+SELECT avg(i1) = avg(i2) as "avg_check" FROM aggregate_data;
 
--- variance
+-- variance.var_samp
 -- TODO: fix this to get TRUE 
-SELECT variance(i1) = variance(i2) as "variance_check" from aggregate_data;
+SELECT
+variance(i1) = variance(i2) as "variance_check"
+,var_samp(i1) = var_samp(i2) as "var_samp_check"
+FROM aggregate_data;
 
+-- var_pop
+-- TODO: fix this to get TRUE 
+SELECT
+var_pop(i1) = var_pop(i2) as "var_pop_check"
+FROM aggregate_data;
+
+-- stddev, stddev_samp
+-- TODO: fix this to get TRUE 
+SELECT
+stddev(i1) = stddev(i2) as "stddev_check"
+,stddev_samp(i1) = stddev_samp(i2) as "stddev_samp_check"
+FROM aggregate_data;
+
+
+-- stddev_pop
+-- TODO: fix this to get TRUE 
+SELECT
+stddev_pop(i1) = stddev_pop(i2) as "stddev_pop_check"
+FROM aggregate_data;
 
 ---- index support
 -- cmp,hash
