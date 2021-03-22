@@ -161,25 +161,25 @@ CREATE CAST (int1 AS numeric)
 
 CREATE CAST (int2 AS int1)
   WITH FUNCTION pgstrom.int1(int2)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (int4 AS int1)
   WITH FUNCTION pgstrom.int1(int4)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (int8 AS int1)
   WITH FUNCTION pgstrom.int1(int8)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float2 AS int1)
   WITH FUNCTION pgstrom.int1(float2)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float4 AS int1)
   WITH FUNCTION pgstrom.int1(float4)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float8 AS int1)
   WITH FUNCTION pgstrom.int1(float8)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (numeric AS int1)
   WITH FUNCTION pgstrom.int1(numeric)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 ---
 --- Comparison functions
 ---
@@ -1074,7 +1074,7 @@ CREATE OPERATOR pg_catalog.# (
 );
 CREATE OPERATOR pg_catalog.~ (
   PROCEDURE = pgstrom.int1not,
-  LEFTARG = pg_catalog.int1
+  RIGHTARG = pg_catalog.int1
 );
 CREATE OPERATOR pg_catalog.<< (
   PROCEDURE = pgstrom.int1shl,
