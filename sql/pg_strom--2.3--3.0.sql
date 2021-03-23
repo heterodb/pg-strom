@@ -1179,12 +1179,12 @@ CREATE FUNCTION pgstrom.int1_sum(bigint, pg_catalog.int1)
 CREATE FUNCTION pgstrom.int1_avg_accum(bigint[], pg_catalog.int1)
   RETURNS bigint[]
   AS 'MODULE_PATHNAME','pgstrom_int1_avg_accum'
-  LANGUAGE C CALLED ON NULL INPUT IMMUTABLE PARALLEL SAFE;
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int1_avg_accum_inv(bigint[], pg_catalog.int1)
   RETURNS bigint[]
   AS 'MODULE_PATHNAME','pgstrom_int1_avg_accum_inv'
-  LANGUAGE C CALLED ON NULL INPUT IMMUTABLE PARALLEL SAFE;
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int1_var_accum(internal, pg_catalog.int1)
   RETURNS internal
