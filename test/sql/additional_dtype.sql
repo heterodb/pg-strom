@@ -119,18 +119,20 @@ SELECT
 FROM various_dtypes;
 
 -- int1 and (int2,int4,int8)
--- % is not supported here.
--- unset ops["mod"]
+-- unset v;declare -A v=(["i2"]=12 ["i4"]=14 ["i8"]=18)
 -- echo "SELECT "; for i in ${!v[@]};do for o in "${!ops[@]}"; do val=$(("${v[$i]} ${ops[$o]} 3"))  ; echo "(${i} ${ops[$o]} i1_1) = ${val} as \"i1_${o}_${i}\" -- ${v[$i]} ${ops[$o]} 3" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
 SELECT 
-(i8 / i1_1) = 6 as "i1_div_i8" -- 18 / 3
+(i8 % i1_1) = 0 as "i1_mod_i8" -- 18 % 3
+,(i8 / i1_1) = 6 as "i1_div_i8" -- 18 / 3
 ,(i8 * i1_1) = 54 as "i1_mul_i8" -- 18 * 3
 ,(i8 + i1_1) = 21 as "i1_plus_i8" -- 18 + 3
 ,(i8 - i1_1) = 15 as "i1_minus_i8" -- 18 - 3
+,(i2 % i1_1) = 0 as "i1_mod_i2" -- 12 % 3
 ,(i2 / i1_1) = 4 as "i1_div_i2" -- 12 / 3
 ,(i2 * i1_1) = 36 as "i1_mul_i2" -- 12 * 3
 ,(i2 + i1_1) = 15 as "i1_plus_i2" -- 12 + 3
 ,(i2 - i1_1) = 9 as "i1_minus_i2" -- 12 - 3
+,(i4 % i1_1) = 2 as "i1_mod_i4" -- 14 % 3
 ,(i4 / i1_1) = 4 as "i1_div_i4" -- 14 / 3
 ,(i4 * i1_1) = 42 as "i1_mul_i4" -- 14 * 3
 ,(i4 + i1_1) = 17 as "i1_plus_i4" -- 14 + 3
@@ -265,7 +267,6 @@ SELECT mny / 0::int1 FROM various_dtypes;
 
 CREATE TABLE aggregate_data(
     i1  int1
-    ,i2 int2
 );
 INSERT INTO aggregate_data(i1) VALUES 
 (1)
@@ -278,45 +279,44 @@ INSERT INTO aggregate_data(i1) VALUES
 ,(NULL)
 ,(5)
 ;
-UPDATE aggregate_data set i2=i1;
 -- sum
-SELECT sum(i1) = sum(i2) as "sum_check" FROM aggregate_data;
+SELECT sum(i1) = sum(cast(i1 AS int2)) as "sum_check" FROM aggregate_data;
 
 -- max
-SELECT max(i1) = max(i2) as "max_check" FROM aggregate_data;
+SELECT max(i1) = max(cast(i1 AS int2)) as "max_check" FROM aggregate_data;
 
 -- min
-SELECT min(i1) = min(i2) as "min_check" FROM aggregate_data;
+SELECT min(i1) = min(cast(i1 AS int2)) as "min_check" FROM aggregate_data;
 
 -- avg
 -- TODO: fix this to get TRUE
-SELECT avg(i1) = avg(i2) as "avg_check" FROM aggregate_data;
+SELECT avg(i1) = avg(cast(i1 AS int2)) as "avg_check" FROM aggregate_data;
 
 -- variance.var_samp
 -- TODO: fix this to get TRUE 
 SELECT
-variance(i1) = variance(i2) as "variance_check"
-,var_samp(i1) = var_samp(i2) as "var_samp_check"
+variance(i1) = variance(cast(i1 AS int2)) as "variance_check"
+,var_samp(i1) = var_samp(cast(i1 AS int2)) as "var_samp_check"
 FROM aggregate_data;
 
 -- var_pop
 -- TODO: fix this to get TRUE 
 SELECT
-var_pop(i1) = var_pop(i2) as "var_pop_check"
+var_pop(i1) = var_pop(cast(i1 AS int2)) as "var_pop_check"
 FROM aggregate_data;
 
 -- stddev, stddev_samp
 -- TODO: fix this to get TRUE 
 SELECT
-stddev(i1) = stddev(i2) as "stddev_check"
-,stddev_samp(i1) = stddev_samp(i2) as "stddev_samp_check"
+stddev(i1) = stddev(cast(i1 AS int2)) as "stddev_check"
+,stddev_samp(i1) = stddev_samp(cast(i1 AS int2)) as "stddev_samp_check"
 FROM aggregate_data;
 
 
 -- stddev_pop
 -- TODO: fix this to get TRUE 
 SELECT
-stddev_pop(i1) = stddev_pop(i2) as "stddev_pop_check"
+stddev_pop(i1) = stddev_pop(cast(i1 AS int2)) as "stddev_pop_check"
 FROM aggregate_data;
 
 ---- index support
