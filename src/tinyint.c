@@ -1643,9 +1643,8 @@ pgstrom_int1_var_accum(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
 
-	return DirectFunctionCall2(int4_accum,
-							   PG_GETARG_DATUM(0),
-							   Int32GetDatum(ival));
+	PG_GETARG_DATUM(1) = Int32GetDatum(ival);
+	return int4_accum(fcinfo);
 }
 PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum);
 
@@ -1654,8 +1653,7 @@ pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
 
-	return DirectFunctionCall2(int4_accum_inv,
-							   PG_GETARG_DATUM(0),
-							   Int32GetDatum(ival));
+	PG_GETARG_DATUM(1) = Int32GetDatum(ival);
+	return int4_accum_inv(fcinfo);
 }
 PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum_inv);
