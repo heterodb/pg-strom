@@ -43,7 +43,7 @@ typedef struct
 typedef struct
 {
 	/* hash slot for GpuStoreSharedDesc */
-	slock_t		gstore_sdesc_lock[GPUSTORE_SHARED_DESC_NSLOTS];
+	LWLock		gstore_sdesc_lock;
 	dlist_head	gstore_sdesc_slot[GPUSTORE_SHARED_DESC_NSLOTS];
 	/* database name for preloading */
 	int			preload_database_status;
@@ -77,22 +77,6 @@ typedef struct
 	ItemPointerData	ctid;
 } GpuStoreRowId;
 
-static inline GpuStoreRowIdHash *
-__gpuStoreRowIdHash(dsm_segment *shbuf_seg)
-{
-	return (GpuStoreRowIdHash *)dsm_segment_address(shbuf_seg);
-}
-
-static inline GpuStoreRowId *
-__gpuStoreRowIdMap(dsm_segment *shbuf_seg)
-{
-	GpuStoreRowIdHash  *rowhash = __gpuStoreRowIdHash(shbuf_seg);
-
-	return (GpuStoreRowId *)
-		((char *)rowhash + STROMALIGN(offsetof(GpuStoreRowIdHash,
-											   hash_slot[rowhash->nslots])));
-}
-
 /*
  * GpuStoreSharedDesc (shared structure; dynamic portable)
  */
@@ -101,9 +85,12 @@ typedef struct
 	dlist_node		chain;
 	Oid				database_oid;
 	Oid				table_oid;
+	pg_atomic_uint32 refcnt;
+	TransactionId	gs_xmin;
+	TransactionId	gs_xmax;
 	/* GPU memory store resources */
 	bool			initial_load_in_progress;
-	dsm_handle		shbuf_handle;
+	dsm_handle		dsm_handle;
 	/* GPU memory store parameters */
 	int64			max_num_rows;
 	int32			cuda_dindex;
@@ -126,11 +113,24 @@ typedef struct
 	uint64			redo_read_nitems;
 	uint64			redo_read_pos;
 	uint64			redo_sync_pos;
-	char			redo_buffer[FLEXIBLE_ARRAY_MEMBER];
 } GpuStoreSharedDesc;
 
 /*
- * PendingRowIdArray / PendingRowIdItem
+ * GpuStoreDesc (per-backend local mapping)
+ */
+#define GPUSTORE_DESC_NSLOTS		31
+typedef struct
+{
+	Oid					table_oid;
+	int					refcnt;
+	GpuStoreSharedDesc *gs_sdesc;	/* NULL, if no GpuStore is available */
+	dsm_segment		   *gs_seg;		/* dsm_segment_address() == Redo buffer */
+	GpuStoreRowIdHash  *rowhash;	/* DSM */
+	GpuStoreRowId	   *rowmap;		/* DSM */
+} GpuStoreDesc;
+
+/*
+ * GpuStoreHandle
  */
 typedef struct
 {
@@ -141,34 +141,28 @@ typedef struct
 
 typedef struct
 {
-	dlist_node	chain;
-	TransactionId xid;
-	cl_uint		nitems;
-	StringInfoData buf;
-} PendingRowIdArray;
+	Oid				table_oid;
+	TransactionId	xid;
+} GpuStoreHandleHashKey;
 
-/*
- * GpuStoreDesc (per-backend local structure)
- */
 typedef struct
 {
-	Oid					database_oid;
-	Oid					table_oid;
-	GpuStoreSharedDesc *gs_sdesc; /* NULL, if no GPU Store */
-	dsm_segment		   *shbuf_seg;
-	GpuStoreRowIdHash  *rowhash;	/* DSM */
-	GpuStoreRowId	   *rowmap;		/* DSM */
-	PendingRowIdArray  *pending_rowid_last;
-	dlist_head			pending_rowid_list;
-} GpuStoreDesc;
+	Oid				table_oid;
+	TransactionId	xid;
+	GpuStoreDesc   *gs_desc;
+	/* array of PendingRowIdItem */
+	uint32			nitems;
+	StringInfoData	buf;
+} GpuStoreHandle;
 
 /* --- static variables --- */
 static GpuStoreSharedHead *gstore_shared_head = NULL;
-static HTAB	   *gstore_desc_htab = NULL;
+static HTAB		   *gstore_desc_htab = NULL;
+static HTAB		   *gstore_handle_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
-static void	  (*gstore_xact_redo_next)(XLogReaderState *record) = NULL;
-static void	  (*gstore_heap_redo_next)(XLogReaderState *record) = NULL;
+static void		  (*gstore_xact_redo_next)(XLogReaderState *record) = NULL;
+static void		  (*gstore_heap_redo_next)(XLogReaderState *record) = NULL;
 
 /* --- function declarations --- */
 static CUresult gpuStoreInvokeApplyRedo(GpuStoreSharedDesc *gs_sdesc,
@@ -422,37 +416,17 @@ baseRelHasGpuStore(PlannerInfo *root, RelOptInfo *baserel)
 		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
 	{
 		GpuStoreDesc *gs_desc;
+		Oid			table_oid = rte->relid;
 		Relation	rel;
-		Oid			hkey[2];
-		bool		found;
 
-		hkey[0] = MyDatabaseId;
-		hkey[1] = rte->relid;
-		gs_desc = (GpuStoreDesc *)
-			hash_search(gstore_desc_htab,
-						hkey,
-						HASH_FIND,
-						NULL);
+		gs_desc = hash_search(gstore_desc_htab,
+							  &table_oid, HASH_FIND, NULL);
 		if (gs_desc)
-			retval = (gs_desc->gs_sdesc != NULL ? true : false);
+			retval = (gs_desc->gs_sdesc != NULL);
 		else
 		{
-			rel = relation_open(rte->relid, NoLock);
-
+			rel = relation_open(table_oid, NoLock);
 			retval = relationHasSyncTrigger(rel, NULL);
-			if (!retval)
-			{
-				/* Add negative entry for relations w/o GPU Store */
-				gs_desc = (GpuStoreDesc *)
-					hash_search(gstore_desc_htab,
-								hkey,
-								HASH_ENTER,
-								&found);
-				Assert(!found);
-				memset(&gs_desc->gs_sdesc, 0,
-					   sizeof(GpuStoreDesc) - offsetof(GpuStoreDesc, gs_sdesc));
-				dlist_init(&gs_desc->pending_rowid_list);
-			}
 			relation_close(rel, NoLock);
 		}
 	}
@@ -513,36 +487,48 @@ error_0:
  * __gpuStoreAllocateDSM
  */
 static void
-__gpuStoreAllocateDSM(GpuStoreDesc *gs_desc, int64 nrooms, int64 nslots)
+__gpuStoreAllocateDSM(GpuStoreDesc *gs_desc)
 {
-	GpuStoreRowIdHash  *rowhash;
-	GpuStoreRowId	   *rowmap;
-	dsm_segment		   *shbuf_seg;
-	size_t				sz;
-	int64				i;
+	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
+	GpuStoreRowIdHash *rowhash;
+	GpuStoreRowId *rowmap;
+	dsm_segment *gs_seg;
+	int64		i, nrooms = gs_sdesc->max_num_rows;
+	int64		nslots = (1.5 * (double)nrooms);
+	size_t		sz;
+	char	   *addr;
 
-	sz = (STROMALIGN(offsetof(GpuStoreRowIdHash, hash_slot[nslots])) +
-		  STROMALIGN(sizeof(GpuStoreRowId) * nrooms));
-	shbuf_seg = dsm_create(sz, 0);
-	if (!shbuf_seg)
+	nslots = Max(Min(nslots, UINT_MAX), 40000);
+	sz = (PAGE_ALIGN(gs_sdesc->redo_buffer_size) +
+		  PAGE_ALIGN(sizeof(GpuStoreRowId) * nrooms) +
+		  PAGE_ALIGN(offsetof(GpuStoreRowIdHash, hash_slot[nslots])));
+	gs_seg = dsm_create(sz, 0);
+	if (!gs_seg)
 		elog(ERROR, "failed on dsm_create(%zu, 0)", sz);
 
-	rowhash = __gpuStoreRowIdHash(shbuf_seg);
+	addr = dsm_segment_address(gs_seg);
+	/* REDO buffer */
+	addr += PAGE_ALIGN(gs_sdesc->redo_buffer_size);
+	/* GpuStoreRowId */
+	rowmap = (GpuStoreRowId *)addr;
+	for (i=1; i <= nrooms; i++)
+	{
+		rowmap[i-1].next = (i < nrooms ? i : UINT_MAX);
+	}
+	addr += PAGE_ALIGN(sizeof(GpuStoreRowId) * nrooms);
+	/* GpuStoreRowIdHash */
+	rowhash = (GpuStoreRowIdHash *)addr;
 	SpinLockInit(&rowhash->lock);
 	rowhash->nslots = nslots;
 	rowhash->nrooms = nrooms;
 	rowhash->free_list = 0;
 	memset(rowhash->hash_slot, -1, sizeof(cl_uint) * nslots);
 
-	rowmap = __gpuStoreRowIdMap(shbuf_seg);
-	memset(rowmap, 0, sizeof(GpuStoreRowId) * nrooms);
-	for (i=1; i <= nrooms; i++)
-	{
-		rowmap[i-1].next = (i < nrooms ? i : UINT_MAX);
-	}
-	gs_desc->shbuf_seg = shbuf_seg;
-	gs_desc->rowhash   = rowhash;
-	gs_desc->rowmap    = rowmap;
+	gs_desc->gs_seg  = gs_seg;
+	gs_desc->rowhash = rowhash;
+	gs_desc->rowmap  = rowmap;
+
+	gs_sdesc->dsm_handle = dsm_segment_handle(gs_seg);
 }
 
 /*
@@ -743,10 +729,9 @@ __GpuStoreExecInitialLoad(Relation rel,
 	kern_data_store *kds_main;
 	kern_data_extra kds_extra;
 	int64			nrooms = gs_sdesc->max_num_rows;
-	int64			nslots = Min((double)nrooms * 1.25, UINT_MAX);
 	size_t			sz;
 
-	/* allocation of managed memory for KDS_FORMAT_ROW */
+	/* preload of the source relation (KDS_FORMAT_ROW) */
 	sz = (KDS_calculateHeadSize(tupdesc) +
 		  STROMALIGN(sizeof(cl_uint) * nrooms) +
 		  table_relation_size(rel, MAIN_FORKNUM));
@@ -758,13 +743,12 @@ __GpuStoreExecInitialLoad(Relation rel,
 	memset(kgs_base, 0, offsetof(kern_gpustore_baserel, kds_row));
 	kds_base = &kgs_base->kds_row;
 	init_kernel_data_store(kds_base, tupdesc, sz, KDS_FORMAT_ROW, nrooms);
-	/* allocation of DSM for rowid hash/map and redo-buffer */
-	__gpuStoreAllocateDSM(gs_desc, nrooms, nslots);
-	/* load the entire relation */
-	kds_main = __gpuStoreCreateKernelBuffer(rel, nrooms, &kds_extra);
 	__gpuStoreLoadRelation(rel, kds_base,
 						   gs_desc->rowhash,
 						   gs_desc->rowmap);
+
+	/* load the entire relation */
+	kds_main = __gpuStoreCreateKernelBuffer(rel, nrooms, &kds_extra);
 	/* GPU kernel invocation for initial loading */
 	PG_TRY();
 	{
@@ -929,10 +913,6 @@ __GpuStoreExecInitialLoad(Relation rel,
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
 	}
-	/* all Ok, so pin DSM mapping */
-	gs_sdesc->shbuf_handle = dsm_segment_handle(gs_desc->shbuf_seg);
-	dsm_pin_mapping(gs_desc->shbuf_seg);
-	dsm_pin_segment(gs_desc->shbuf_seg);
 }
 
 static void
@@ -944,6 +924,9 @@ GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
 	CUcontext	cuda_context = NULL;
 	CUmodule	cuda_module = NULL;
 	CUresult	rc;
+
+	/* DSM allocation */
+	__gpuStoreAllocateDSM(gs_desc);
 	
 	/* setup one-time cuda context, then load full-relation */
 	PG_TRY();
@@ -987,40 +970,110 @@ GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
 	rc = cuCtxDestroy(cuda_context);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+	/* all Ok, so pin the DSM mapping */
+	dsm_pin_mapping(gs_desc->gs_seg);
+	dsm_pin_segment(gs_desc->gs_seg);
 }
 
 /*
- * GpuStoreLookupOrCreateSharedState
+ * GetGpuStoreSharedDesc
  */
+static inline bool
+__gpuStoreSharedDescIsVisible(Relation rel, GpuStoreSharedDesc *gs_sdesc)
+{
+	if (gs_sdesc->database_oid != MyDatabaseId ||
+		gs_sdesc->table_oid != RelationGetRelid(rel))
+		return false;
+	if (gs_sdesc->gs_xmin != FrozenTransactionId)
+	{
+		if (TransactionIdIsCurrentTransactionId(gs_sdesc->gs_xmin))
+		{
+			if (gs_sdesc->gs_xmax == InvalidTransactionId)
+				return true;	/* not deleted yet */
+			if (gs_sdesc->gs_xmax == FrozenTransactionId)
+				return true;	/* deleted, and committed */
+			if (!TransactionIdIsCurrentTransactionId(gs_sdesc->gs_xmax))
+				return true;	/* deleted by others, but not committed */
+		}
+		else if (TransactionIdDidCommit(gs_sdesc->gs_xmin))
+		{
+			/* inserted, and already committed */
+			gs_sdesc->gs_xmin = FrozenTransactionId;
+		}
+		else if (TransactionIdIsInProgress(gs_sdesc->gs_xmin))
+		{
+			/* inserted by other session, and not committed */
+			return false;
+		}
+		else
+		{
+			/* it must be aborted, or crashed */
+			gs_sdesc->gs_xmin = InvalidTransactionId;
+			return false;
+		}
+	}
+	/* by here, the inserting transaction has committed */
+	if (gs_sdesc->gs_xmax == InvalidTransactionId)
+		return true;		/* not deleted yet */
+	if (gs_sdesc->gs_xmax != FrozenTransactionId)
+	{
+		if (TransactionIdIsCurrentTransactionId(gs_sdesc->gs_xmax))
+		{
+			/* already deleted by myself */
+			return false;
+		}
+		else if (TransactionIdIsInProgress(gs_sdesc->gs_xmax))
+		{
+			/* removed by other transaction in-progress */
+			return true;
+		}
+		else if (TransactionIdDidCommit(gs_sdesc->gs_xmax))
+		{
+			/* deleted by other session, and committed */
+			gs_sdesc->gs_xmax = FrozenTransactionId;
+		}
+		else
+		{
+			/* deleter is aborted or crashed */
+			gs_sdesc->gs_xmax = InvalidTransactionId;
+		}
+	}
+	/* deleted, and transaction committed */
+	return false;
+}
+
 static void
-GpuStoreLookupOrCreateSharedState(Relation rel,
-								  GpuStoreDesc *gs_desc,
-								  GpuStoreOptions *gs_options)
+GetGpuStoreSharedDesc(Relation rel,
+					  GpuStoreDesc *gs_desc,
+					  GpuStoreOptions *gs_options)
 {
 	GpuStoreSharedDesc *gs_sdesc = NULL;
-	dsm_segment *shbuf_seg;
+	dsm_segment *gs_seg;
 	Oid			hkey[2];
-	uint32		hash, hindex;
-	slock_t	   *lock;
+	Datum		hvalue;
+	int			hindex;
 	dlist_head *slot;
 	dlist_iter	iter;
+	char	   *addr;
+	LWLock	   *lock = &gstore_shared_head->gstore_sdesc_lock;
+	LWLockMode	lockmode = LW_SHARED;
 
 	hkey[0] = MyDatabaseId;
 	hkey[1] = RelationGetRelid(rel);
-	hash = hash_any((const unsigned char *)hkey, sizeof(hkey));
-	hindex = hash % GPUSTORE_SHARED_DESC_NSLOTS;
-	lock = &gstore_shared_head->gstore_sdesc_lock[hindex];
+	hvalue = hash_any((const unsigned char *)hkey, sizeof(hkey));
+	hindex = hvalue % GPUSTORE_SHARED_DESC_NSLOTS;
 	slot = &gstore_shared_head->gstore_sdesc_slot[hindex];
+
 retry:
+	LWLockAcquire(lock, lockmode);
 	CHECK_FOR_INTERRUPTS();
 
-	SpinLockAcquire(lock);
 	dlist_foreach(iter, slot)
 	{
 		gs_sdesc = dlist_container(GpuStoreSharedDesc, chain, iter.cur);
-		if (gs_sdesc->database_oid == MyDatabaseId &&
-			gs_sdesc->table_oid == RelationGetRelid(rel))
+		if (__gpuStoreSharedDescIsVisible(rel, gs_sdesc))
 		{
+			Assert(pg_atomic_read_u32(&gs_sdesc->refcnt) > 0);
 			if (gs_sdesc->initial_load_in_progress)
 			{
 				/*
@@ -1028,116 +1081,149 @@ retry:
 				 * however, initial loading is still in-progress.
 				 * So, we need to wait for completion of the initial task.
 				 */
-				SpinLockRelease(lock);
+				LWLockRelease(lock);
 
 				pg_usleep(10000L);  /* 10ms */
 				goto retry;
 			}
-			SpinLockRelease(lock);
-			/* Ok, GpuStoreSharedDesc is already available */
-			shbuf_seg = dsm_attach(gs_sdesc->shbuf_handle);
-			if (!shbuf_seg)
-				elog(ERROR, "GPU Store: failed on dsm_attach: %m");
-			gs_desc->gs_sdesc = gs_sdesc;
-			gs_desc->shbuf_seg = shbuf_seg;
-			gs_desc->rowhash   = __gpuStoreRowIdHash(shbuf_seg);
-			gs_desc->rowmap    = __gpuStoreRowIdMap(shbuf_seg);
+			/* Map DSM segment */
+			gs_seg = dsm_attach(gs_sdesc->dsm_handle);
+			if (!gs_seg)
+				elog(ERROR, "gpustore: could not attach DSM segment");
 
+			addr = dsm_segment_address(gs_seg);
+			gs_desc->gs_seg = gs_seg;
+			addr += PAGE_ALIGN(gs_sdesc->redo_buffer_size);
+			gs_desc->rowmap = (GpuStoreRowId *)addr;
+			addr += PAGE_ALIGN(sizeof(GpuStoreRowId) * gs_sdesc->max_num_rows);
+			gs_desc->rowhash = (GpuStoreRowIdHash *)addr;
+			/* All green, GpuStoreSharedDesc was got */
+			pg_atomic_fetch_add_u32(&gs_sdesc->refcnt, 1);
+			gs_desc->gs_sdesc = gs_sdesc;
+
+			LWLockRelease(lock);
 			return;
 		}
 	}
-	gs_sdesc = NULL;
 
 	/*
 	 * Hmm, there is no GpuStoreSharedDesc, so create a new one
 	 * then load relation's contents to GPU Store. A tough work.
 	 */
+	if (lockmode == LW_SHARED)
+	{
+		LWLockRelease(lock);
+		lockmode = LW_EXCLUSIVE;
+		goto retry;
+	}
+
+	/* allocation of GpuStoreSharedDesc */
+	gs_sdesc = MemoryContextAllocZero(TopSharedMemoryContext,
+									  sizeof(GpuStoreSharedDesc));
+	gs_sdesc->database_oid = MyDatabaseId;
+	gs_sdesc->table_oid = gs_desc->table_oid;
+	pg_atomic_init_u32(&gs_sdesc->refcnt, 2);
+	gs_sdesc->initial_load_in_progress = true;      /* !!! blocker !!! */
+	gs_sdesc->max_num_rows = gs_options->max_num_rows;
+	gs_sdesc->cuda_dindex = gs_options->cuda_dindex;
+	gs_sdesc->redo_buffer_size = gs_options->redo_buffer_size;
+	gs_sdesc->gpu_sync_threshold = gs_options->gpu_sync_threshold;
+	gs_sdesc->gpu_sync_interval = gs_options->gpu_sync_interval;
+	pthreadRWLockInit(&gs_sdesc->gpu_buffer_lock);
+	SpinLockInit(&gs_sdesc->redo_lock);
+
+	dlist_push_tail(slot, &gs_sdesc->chain);
+	LWLockRelease(lock);
+
+	/* initial loading from the relation */
+	gs_desc->gs_sdesc = gs_sdesc;
 	PG_TRY();
 	{
-		/* Allocation of GpuStoreSharedDesc */
-		gs_sdesc = MemoryContextAlloc(TopSharedMemoryContext,
-									  offsetof(GpuStoreSharedDesc, redo_buffer) +
-									  gs_options->redo_buffer_size);	//FIXME
-		memset(gs_sdesc, 0, offsetof(GpuStoreSharedDesc, redo_buffer));
-		gs_sdesc->database_oid = MyDatabaseId;
-		gs_sdesc->table_oid = RelationGetRelid(rel);
-		gs_sdesc->initial_load_in_progress = true;		/* !!! blocker !!! */
-		gs_sdesc->max_num_rows = gs_options->max_num_rows;
-		gs_sdesc->cuda_dindex = gs_options->cuda_dindex;
-		gs_sdesc->redo_buffer_size = gs_options->redo_buffer_size;
-		gs_sdesc->gpu_sync_threshold = gs_options->gpu_sync_threshold;
-		gs_sdesc->gpu_sync_interval = gs_options->gpu_sync_interval;
-		pthreadRWLockInit(&gs_sdesc->gpu_buffer_lock);
-		SpinLockInit(&gs_sdesc->redo_lock);
-
-		dlist_push_tail(slot, &gs_sdesc->chain);
-		SpinLockRelease(lock);
-
-		PG_TRY();
-		{
-			/* initial loading from the relation */
-			gs_desc->gs_sdesc = gs_sdesc;
-			GpuStoreExecInitialLoad(rel, gs_desc);
-		}
-		PG_CATCH();
-		{
-			SpinLockAcquire(lock);
-			dlist_delete(&gs_sdesc->chain);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		
-		SpinLockAcquire(lock);
-		gs_sdesc->initial_load_in_progress = false;
+		GpuStoreExecInitialLoad(rel, gs_desc);
 	}
 	PG_CATCH();
 	{
-		if (gs_sdesc)
-			pfree(gs_sdesc);
-		SpinLockRelease(lock);
+		LWLockAcquire(lock, LW_EXCLUSIVE);
+		dlist_delete(&gs_sdesc->chain);
+		pfree(gs_sdesc);
+		LWLockRelease(lock);
+
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	SpinLockRelease(lock);
+	/* allows concurrent jobs to use this GpuStore */
+	LWLockAcquire(lock, LW_EXCLUSIVE);
+	gs_sdesc->initial_load_in_progress = false;
+	LWLockRelease(lock);
 }
-		
+
 /*
- * GpuStoreLookupDesc
+ * PutGpuStoreSharedDesc
+ */
+static void
+PutGpuStoreSharedDesc(GpuStoreSharedDesc *gs_sdesc)
+{
+
+
+}
+
+/*
+ * GpuStoreGetDesc
  */
 static GpuStoreDesc *
-GpuStoreLookupDesc(Relation rel)
+GetGpuStoreDesc(Relation rel)
 {
+	Oid			table_oid = RelationGetRelid(rel);
 	GpuStoreDesc *gs_desc;
-	Oid		hkey[2];
-	bool	found;
+	bool		found;
 
-	hkey[0] = MyDatabaseId;
-	hkey[1] = RelationGetRelid(rel);
-	gs_desc = (GpuStoreDesc *) hash_search(gstore_desc_htab,
-										   hkey,
-										   HASH_ENTER,
-										   &found);
+	gs_desc = hash_search(gstore_desc_htab,
+						  &table_oid, HASH_ENTER, &found);
 	if (!found)
 	{
+		GpuStoreOptions gs_options;
+
+		gs_desc->table_oid = table_oid;
+		gs_desc->refcnt = 1;
 		PG_TRY();
 		{
-			GpuStoreOptions gs_options;
-
-			memset(&gs_desc->gs_sdesc, 0,
-				   sizeof(GpuStoreDesc) - offsetof(GpuStoreDesc, gs_sdesc));
 			if (relationHasSyncTrigger(rel, &gs_options))
-				GpuStoreLookupOrCreateSharedState(rel, gs_desc,
-												  &gs_options);
-			dlist_init(&gs_desc->pending_rowid_list);
+				GetGpuStoreSharedDesc(rel, gs_desc, &gs_options);
 		}
 		PG_CATCH();
 		{
-			hash_search(gstore_desc_htab, hkey, HASH_REMOVE, NULL);
+			hash_search(gstore_desc_htab, &table_oid, HASH_REMOVE, NULL);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
 	}
-	return (gs_desc->gs_sdesc != NULL ? gs_desc : NULL);
+	return (gs_desc->gs_sdesc ? gs_desc : NULL);
+}
+
+/*
+ * PutGpuStoreDesc
+ */
+static void
+PutGpuStoreDesc(GpuStoreDesc *gs_desc)
+{
+	Assert(gs_desc->refcnt > 0);
+	if (--gs_desc->refcnt == 0)
+	{
+		if (gs_desc->gs_sdesc)
+		{
+			dsm_detach(gs_desc->gs_seg);
+			PutGpuStoreSharedDesc(gs_desc->gs_sdesc);
+		}
+		else
+		{
+			Assert(!gs_desc->gs_seg &&
+				   !gs_desc->rowhash &&
+				   !gs_desc->rowmap);
+		}
+		/* cleanup */
+		hash_search(gstore_desc_htab,
+					&gs_desc->table_oid, HASH_REMOVE, NULL);
+	}
 }
 
 /*
@@ -1180,8 +1266,9 @@ __gpuStoreAllocateRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
 /*
  * __gpuStoreLookupRowId / __gpuStoreReleaseRowId
  */
-static cl_uint
-__gpuStoreLookupOrReleaseRowId(GpuStoreDesc *gs_desc, ItemPointer ctid,
+static uint32
+__gpuStoreLookupOrReleaseRowId(GpuStoreDesc *gs_desc,
+							   ItemPointer ctid,
 							   bool release_rowid)
 {
 	GpuStoreRowIdHash *rowhash = gs_desc->rowhash;
@@ -1223,16 +1310,105 @@ __gpuStoreLookupOrReleaseRowId(GpuStoreDesc *gs_desc, ItemPointer ctid,
 	return UINT_MAX;
 }
 
-static inline cl_uint
+static uint32
 __gpuStoreLookupRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
 {
 	return __gpuStoreLookupOrReleaseRowId(gs_desc, ctid, false);
 }
 
-static inline cl_uint
-__gpuStoreReleaseRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
+static inline void
+__gpuStoreReleaseRowId(GpuStoreDesc *gs_desc, PendingRowIdItem *pitem)
 {
-	return __gpuStoreLookupOrReleaseRowId(gs_desc, ctid, true);
+	uint32	__rowid;
+
+	__rowid = __gpuStoreLookupOrReleaseRowId(gs_desc, &pitem->ctid, true);
+	Assert(__rowid == pitem->rowid);
+}
+
+/*
+ * AllocGpuStoreHandle
+ */
+static GpuStoreHandle *
+AllocGpuStoreHandle(Relation rel)
+{
+	GpuStoreHandleHashKey hkey;
+	GpuStoreHandle *gs_handle;
+	bool		found;
+
+	hkey.table_oid = RelationGetRelid(rel);
+	hkey.xid = GetCurrentTransactionIdIfAny();
+	if (hkey.xid == InvalidTransactionId)
+		return NULL;
+	gs_handle = hash_search(gstore_handle_htab,
+							&hkey, HASH_ENTER, &found);
+	if (!found)
+	{
+		PG_TRY();
+		{
+			gs_handle->gs_desc = GetGpuStoreDesc(rel);
+			gs_handle->nitems = 0;
+			if (gs_handle->gs_desc)
+			{
+				MemoryContext	oldcxt;
+
+				oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+				initStringInfo(&gs_handle->buf);
+				MemoryContextSwitchTo(oldcxt);
+			}
+			else
+			{
+				memset(&gs_handle->buf, 0, sizeof(StringInfoData));
+			}
+		}
+		PG_CATCH();
+		{
+			hash_search(gstore_handle_htab, &hkey, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	return (gs_handle->gs_desc ? gs_handle : NULL);
+}
+
+/*
+ * ReleaseGpuStoreHandle
+ */
+static void
+ReleaseGpuStoreHandle(GpuStoreHandle *gs_handle, bool normal_commit)
+{
+	GpuStoreDesc *gs_desc = gs_handle->gs_desc;
+	char	   *pos = gs_handle->buf.data;
+	uint32		count;
+
+	for (count=0; count < gs_handle->nitems; count++)
+	{
+		PendingRowIdItem *pitem = (PendingRowIdItem *)pos;
+
+		switch (pitem->tag)
+		{
+			case 'I':	/* INSERT */
+				if (!normal_commit)
+					__gpuStoreReleaseRowId(gs_desc, pitem);
+				pos += sizeof(PendingRowIdItem);
+				break;
+
+			case 'D':	/* DELETE */
+				if (normal_commit)
+					__gpuStoreReleaseRowId(gs_desc, pitem);
+				pos += sizeof(PendingRowIdItem);
+				break;
+
+			default:
+				elog(FATAL, "Bug? GpuStoreHandle has corruption");
+		}
+	}
+	Assert(pos <= gs_handle->buf.data + gs_handle->buf.len);
+	if (gs_handle->gs_desc)
+		PutGpuStoreDesc(gs_handle->gs_desc);
+	/* cleanup */
+	if (gs_handle->buf.data)
+		pfree(gs_handle->buf.data);
+	hash_search(gstore_handle_htab, &gs_handle, HASH_REMOVE, NULL);
 }
 
 /*
@@ -1242,6 +1418,7 @@ static void
 __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 {
 	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
+	char	   *redo_buffer = dsm_segment_address(gs_desc->gs_seg);
 	size_t		buffer_sz = gs_sdesc->redo_buffer_size;
 	uint64		offset;
 	uint64		sync_pos;
@@ -1265,7 +1442,7 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 			if (gs_sdesc->redo_write_pos + sz > gs_sdesc->redo_read_pos + buffer_sz)
 				goto skip;
 			/* fill-up by zero */
-			memset(gs_sdesc->redo_buffer + offset, 0, sz);
+			memset(redo_buffer + offset, 0, sz);
 			gs_sdesc->redo_write_pos += sz;
 			offset = 0;
 		}
@@ -1275,7 +1452,7 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 			goto skip;
 
 		/* Ok, append the log item */
-		memcpy(gs_sdesc->redo_buffer + offset, tx_log, tx_log->length);
+		memcpy(redo_buffer + offset, tx_log, tx_log->length);
 		gs_sdesc->redo_write_pos += tx_log->length;
 		gs_sdesc->redo_timestamp = GetCurrentTimestamp();
 		append_done = true;
@@ -1299,63 +1476,26 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 }
 
 /*
- * __gpuStoreGetPendingRowIdBuffer
- */
-static PendingRowIdArray *
-__gpuStoreGetPendingRowIdArray(GpuStoreDesc *gs_desc)
-{
-	PendingRowIdArray *result = gs_desc->pending_rowid_last;
-	TransactionId	xid = GetCurrentTransactionId();
-
-	if (!result || result->xid != xid)
-	{
-		dlist_iter		iter;
-		MemoryContext	oldcxt;
-
-		dlist_foreach (iter, &gs_desc->pending_rowid_list)
-		{
-			result = dlist_container(PendingRowIdArray,
-									 chain, iter.cur);
-			if (result->xid == xid)
-				goto out;
-		}
-		/* allocate a new one */
-		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
-		result = palloc0(sizeof(PendingRowIdArray));
-		result->xid = xid;
-		result->nitems = 0;
-		initStringInfo(&result->buf);
-		dlist_push_head(&gs_desc->pending_rowid_list, &result->chain);
-		MemoryContextSwitchTo(oldcxt);
-	out:
-		gs_desc->pending_rowid_last = result;
-	}
-	return result;
-}
-
-/*
  * __gpuStoreInsertLog
  */
 static void
-__gpuStoreInsertLog(HeapTuple tuple,
-					GpuStoreDesc *gs_desc,
-					PendingRowIdArray *pending)
+__gpuStoreInsertLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 {
+	GpuStoreDesc   *gs_desc = gs_handle->gs_desc;
 	GstoreTxLogInsert *item;
 	PendingRowIdItem rlog;
 	cl_uint		rowid;
 	size_t		sz;
 
 	/* Track RowId allocation */
-	enlargeStringInfo(&pending->buf, sizeof(PendingRowIdItem));
+	enlargeStringInfo(&gs_handle->buf, sizeof(PendingRowIdItem));
 	rowid = __gpuStoreAllocateRowId(gs_desc, &tuple->t_self);
 	rlog.tag = 'I';
 	rlog.ctid = tuple->t_self;
 	rlog.rowid = rowid;
-	appendBinaryStringInfo(&pending->buf,
+	appendBinaryStringInfo(&gs_handle->buf,
 						   (char *)&rlog,
 						   sizeof(PendingRowIdItem));
-
 	/* INSERT Log */
 	sz = MAXALIGN(offsetof(GstoreTxLogInsert, htup) + tuple->t_len);
 	item = alloca(sz);
@@ -1375,21 +1515,20 @@ __gpuStoreInsertLog(HeapTuple tuple,
  * __gpuStoreDeleteLog
  */
 static void
-__gpuStoreDeleteLog(HeapTuple tuple,
-					GpuStoreDesc *gs_desc,
-					PendingRowIdArray *pending)
+__gpuStoreDeleteLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 {
+	GpuStoreDesc   *gs_desc = gs_handle->gs_desc;
 	GstoreTxLogDelete item;
 	PendingRowIdItem rlog;
 	cl_uint		rowid;
 
-	/* Track RowId Release */
-	enlargeStringInfo(&pending->buf, sizeof(PendingRowIdItem));
+	/* Track RowId release */
+	enlargeStringInfo(&gs_handle->buf, sizeof(PendingRowIdItem));
 	rowid = __gpuStoreLookupRowId(gs_desc, &tuple->t_self);
 	rlog.tag = 'D';
 	rlog.ctid = tuple->t_self;
 	rlog.rowid = rowid;
-	appendBinaryStringInfo(&pending->buf,
+	appendBinaryStringInfo(&gs_handle->buf,
 						   (char *)&rlog,
 						   sizeof(PendingRowIdItem));
 	/* DELETE Log */
@@ -1411,8 +1550,7 @@ pgstrom_gpustore_sync_trigger(PG_FUNCTION_ARGS)
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
 	TriggerEvent	tg_event = trigdata->tg_event;
 	Relation		rel = trigdata->tg_relation;
-	GpuStoreDesc   *gs_desc;
-	PendingRowIdArray *pending;
+	GpuStoreHandle *gs_handle;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
@@ -1422,25 +1560,23 @@ pgstrom_gpustore_sync_trigger(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: must be called as ROW-AFTER trigger",
 			 __FUNCTION__);
 
-	gs_desc = GpuStoreLookupDesc(rel);
-	if (!gs_desc)
-		elog(ERROR, "%s: GPU Store is not configured at %s",
+	gs_handle = AllocGpuStoreHandle(rel);
+	if (!gs_handle)
+		elog(ERROR, "%s: GPU Store is not configured for %s",
 			 __FUNCTION__, RelationGetRelationName(rel));
-
-	pending = __gpuStoreGetPendingRowIdArray(gs_desc);
 
 	if (TRIGGER_FIRED_BY_INSERT(tg_event))
 	{
-		__gpuStoreInsertLog(trigdata->tg_trigtuple, gs_desc, pending);
+		__gpuStoreInsertLog(trigdata->tg_trigtuple, gs_handle);
 	}
 	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 	{
-		__gpuStoreDeleteLog(trigdata->tg_trigtuple, gs_desc, pending);
-		__gpuStoreInsertLog(trigdata->tg_newtuple, gs_desc, pending);
+		__gpuStoreDeleteLog(trigdata->tg_trigtuple, gs_handle);
+		__gpuStoreInsertLog(trigdata->tg_newtuple, gs_handle);
 	}
 	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
 	{
-		__gpuStoreDeleteLog(trigdata->tg_trigtuple, gs_desc, pending);
+		__gpuStoreDeleteLog(trigdata->tg_trigtuple, gs_handle);
 	}
 	else
 	{
@@ -1470,15 +1606,18 @@ pgstrom_gpustore_precheck_trigger(PG_FUNCTION_ARGS)
 	{
 		CreateTrigStmt *stmt = (CreateTrigStmt *)trigdata->parsetree;
 		Relation		rel;
+		GpuStoreDesc   *gs_desc;
 
 		rel = relation_openrv_extended(stmt->relation,
 									   AccessShareLock, true);
 		if (rel)
-			GpuStoreLookupDesc(rel);
+		{
+			gs_desc = GetGpuStoreDesc(rel);
+			if (gs_desc)
+				PutGpuStoreDesc(gs_desc);
+		}
 		relation_close(rel, AccessShareLock);
 	}
-	else if (strcmp(command_tag, "ALTER TABLE") == 0)
-	{}
 	PG_RETURN_NULL();
 }
 
@@ -1585,13 +1724,121 @@ gpuStorePostDeletion(ObjectAccessType access,
 	
 }
 
+static void
+gpuStoreInvalidateBuffers(Datum arg, Oid relid)
+{
+	/* unmap local buffers */
+}
+
+
+/*
+ * gpuStoreAddCommitLog
+ */
+static void
+gpuStoreAddCommitLog(GpuStoreHandle *gs_handle)
+{
+	GstoreTxLogCommit *c_log = alloca(GSTORE_TX_LOG_COMMIT_ALLOCSZ);
+	PendingRowIdItem *pitem;
+	char	   *pos = gs_handle->buf.data;
+	uint32		count = 1;
+
+	/* commit log buffer */
+	c_log->type = GSTORE_TX_LOG__COMMIT;
+	c_log->length = offsetof(GstoreTxLogCommit, data);
+	c_log->xid = gs_handle->xid;
+	c_log->timestamp = GetCurrentTimestamp();
+	c_log->nitems = 0;
+
+	while (count <= gs_handle->nitems)
+	{
+		bool	flush_commit_log = (count == gs_handle->nitems);
+		char   *temp;
+
+		pitem = (PendingRowIdItem *)pos;
+		switch (pitem->tag)
+		{
+			case 'I':	/* INSERT with rowid(u32) */
+			case 'D':	/* DELETE with rowid(u32) */
+				if (c_log->length + 5 > GSTORE_TX_LOG_COMMIT_ALLOCSZ)
+				{
+					flush_commit_log = true;
+					break;
+				}
+				temp = c_log->data + c_log->length;
+				*temp++ = pitem->tag;
+				*((uint32 *)temp) = pitem->rowid;
+				c_log->nitems++;
+				c_log->length += (sizeof(char) + sizeof(uint32));
+				count++;
+				pos += sizeof(PendingRowIdItem);
+				break;
+
+			default:
+				elog(FATAL, "broken internal PendingRowIdItem");
+		}
+
+		if (flush_commit_log)
+		{
+			int		diff = MAXALIGN(c_log->length) - c_log->length;
+
+			if (diff > 0)
+			{
+				memset((char *)c_log + c_log->length, 0, diff);
+				c_log->length += diff;
+			}
+			__gpuStoreAppendLog(gs_handle->gs_desc,
+								(GstoreTxLogCommon *)c_log);
+			/* rewind */
+			c_log->length = offsetof(GstoreTxLogCommit, data);
+			c_log->nitems = 0;
+		}
+	}
+}
+
 /*
  * gpuStoreXactCallback
  */
 static void
 gpuStoreXactCallback(XactEvent event, void *arg)
 {
+#if 1
+	elog(INFO, "XactCallback: ev=%s xid=%u top-xid=%u",
+		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
+		 event == XACT_EVENT_ABORT   ? "XACT_EVENT_ABORT"  :
+		 event == XACT_EVENT_PREPARE ? "XACT_EVENT_PREPARE" :
+		 event == XACT_EVENT_PRE_COMMIT ? "XACT_EVENT_PRE_COMMIT" :
+		 event == XACT_EVENT_PRE_PREPARE ? "XACT_EVENT_PRE_PREPARE" : "????",
+		 GetCurrentTransactionIdIfAny(),
+		 GetTopTransactionIdIfAny());
+#endif
+	if (hash_get_num_entries(gstore_handle_htab) > 0)
+	{
+		TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
+		HASH_SEQ_STATUS	hseq;
+		GpuStoreHandle *gs_handle;
 
+		if (event == XACT_EVENT_PRE_COMMIT)
+		{
+			hash_seq_init(&hseq, gstore_handle_htab);
+			while ((gs_handle = hash_seq_search(&hseq)) != NULL)
+			{
+				if (gs_handle->xid == curr_xid)
+					gpuStoreAddCommitLog(gs_handle);
+			}
+		}
+		else if (event == XACT_EVENT_COMMIT ||
+				 event == XACT_EVENT_ABORT)
+		{
+			bool	normal_commit = (event == XACT_EVENT_COMMIT);
+
+			hash_seq_init(&hseq, gstore_handle_htab);
+			while ((gs_handle = hash_seq_search(&hseq)) != NULL)
+			{
+				if (gs_handle->xid == curr_xid)
+					ReleaseGpuStoreHandle(gs_handle, normal_commit);
+			}
+		}
+	}
 }
 
 /*
@@ -1599,11 +1846,34 @@ gpuStoreXactCallback(XactEvent event, void *arg)
  */
 static void
 gpuStoreSubXactCallback(SubXactEvent event,
-                         SubTransactionId mySubid,
-                         SubTransactionId parentSubid, void *arg)
+						SubTransactionId mySubid,
+						SubTransactionId parentSubid, void *arg)
 {
+#if 1
+	elog(INFO, "SubXactCallback: ev=%s xid=%u top-xid=%u",
+		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
+		 event == SUBXACT_EVENT_COMMIT_SUB ? "SUBXACT_EVENT_COMMIT_SUB" :
+		 event == SUBXACT_EVENT_ABORT_SUB ? "SUBXACT_EVENT_ABORT_SUB" :
+		 event == SUBXACT_EVENT_PRE_COMMIT_SUB ? "SUBXACT_EVENT_PRE_COMMIT_SUB" : "???",
+		 GetCurrentTransactionIdIfAny(),
+		 GetTopTransactionIdIfAny());
+#endif
+	if (hash_get_num_entries(gstore_handle_htab) == 0)
+		return;
 
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
+		HASH_SEQ_STATUS	hseq;
+		GpuStoreHandle *gs_handle;
 
+		hash_seq_init(&hseq, gstore_handle_htab);
+		while ((gs_handle = hash_seq_search(&hseq)) != NULL)
+		{
+			if (gs_handle->xid == curr_xid)
+				ReleaseGpuStoreHandle(gs_handle, false);
+		}
+	}
 }
 
 /*
@@ -1840,6 +2110,13 @@ gpuStoreBgWorkerIdleTask(int cuda_dindex)
 	int			hindex;
 	bool		retval = false;
 
+	//1. fetch command
+	//2. map DSM of the GpuStore (if not yet)
+	//3. run command
+	//3-1. Apply Redo
+	//3-2. Unmap DSM
+	
+#if 0
 	for (hindex = 0; hindex < GPUSTORE_SHARED_DESC_NSLOTS; hindex++)
 	{
 		slock_t    *lock = &gstore_shared_head->gstore_sdesc_lock[hindex];
@@ -1890,6 +2167,7 @@ gpuStoreBgWorkerIdleTask(int cuda_dindex)
 		}
 		SpinLockRelease(lock);
 	}
+#endif
 	return retval;
 }
 
@@ -1923,9 +2201,9 @@ pgstrom_startup_gpu_store(void)
 	if (found)
 		elog(ERROR, "Bug? GpuStoreSharedHead already exists");
 	memset(gstore_shared_head, 0, sz);
+	LWLockInitialize(&gstore_shared_head->gstore_sdesc_lock, -1);
 	for (i=0; i < GPUSTORE_SHARED_DESC_NSLOTS; i++)
 	{
-		SpinLockInit(&gstore_shared_head->gstore_sdesc_lock[i]);
 		dlist_init(&gstore_shared_head->gstore_sdesc_slot[i]);
 	}
 	/* IPC to GPU memory keeper background worker */
@@ -1953,8 +2231,9 @@ pgstrom_init_gpu_store(void)
 {
 	static bool gpustore_auto_preload;
 	static bool gpustore_with_replication;
-	HASHCTL		hctl;
 	BackgroundWorker worker;
+	HASHCTL		hctl;
+	int			i;
 
 	/* GUC: pg_strom.gpustore_auto_preload */
 	DefineCustomBoolVariable("pg_strom.gpustore_auto_preload",
@@ -1974,16 +2253,21 @@ pgstrom_init_gpu_store(void)
 							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/*
-	 * Local hash table for GpuStoreDesc
-	 */
+	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize    = 2 * sizeof(Oid);
-	hctl.entrysize  = sizeof(GpuStoreDesc);
-	hctl.hcxt       = CacheMemoryContext;
-	gstore_desc_htab = hash_create("GpuStoreDesc Hash-table", 32,
-								   &hctl,
+	hctl.keysize = sizeof(Oid);
+	hctl.entrysize = sizeof(GpuStoreDesc);
+	hctl.hcxt = CacheMemoryContext;
+	gstore_desc_htab = hash_create("GpuStore Descriptor", 48, &hctl,
 								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(GpuStoreHandleHashKey);
+	hctl.entrysize = sizeof(GpuStoreHandle);
+	hctl.hcxt = CacheMemoryContext;
+	gstore_handle_htab = hash_create("GpuStore Handles", 48, &hctl,
+									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	/*
 	 * Background worke to load GPU Store on startup
 	 */
@@ -2011,7 +2295,6 @@ pgstrom_init_gpu_store(void)
 	{
 		uintptr_t	start = TYPEALIGN_DOWN(PAGE_SIZE, &RmgrTable[0]);
 		uintptr_t	end = TYPEALIGN(PAGE_SIZE, &RmgrTable[RM_MAX_ID+1]);
-		int			i;
 
 		if (mprotect((void *)start, end - start,
 					 PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
@@ -2047,7 +2330,8 @@ pgstrom_init_gpu_store(void)
 	/* callback when trigger is dropped */
 	object_access_next = object_access_hook;
 	object_access_hook = gpuStorePostDeletion;
-
+	/* callbacks to unmap shared buffers */
+	CacheRegisterRelcacheCallback(gpuStoreInvalidateBuffers, 0);
 	/* transaction callbacks */
 	RegisterXactCallback(gpuStoreXactCallback, NULL);
 	RegisterSubXactCallback(gpuStoreSubXactCallback, NULL);
