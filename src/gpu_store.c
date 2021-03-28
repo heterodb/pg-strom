@@ -122,7 +122,7 @@ typedef struct
 {
 	Oid				database_oid;
 	Oid				table_oid;
-} GpuStoreDescHashKey;
+} GpuStoreMappingHashKey;
 
 typedef struct
 {
@@ -133,10 +133,10 @@ typedef struct
 	dsm_segment		   *gs_seg;		/* dsm_segment_address() == Redo buffer */
 	GpuStoreRowIdHash  *rowhash;	/* DSM */
 	GpuStoreRowId	   *rowmap;		/* DSM */
-} GpuStoreDesc;
+} GpuStoreMapping;
 
 /*
- * GpuStoreHandle
+ * GpuStoreHandle (per-transaction state)
  */
 typedef struct
 {
@@ -155,7 +155,7 @@ typedef struct
 {
 	Oid				table_oid;
 	TransactionId	xid;
-	GpuStoreDesc   *gs_desc;
+	GpuStoreMapping   *gs_map;
 	/* array of PendingRowIdItem */
 	uint32			nitems;
 	StringInfoData	buf;
@@ -421,15 +421,15 @@ baseRelHasGpuStore(PlannerInfo *root, RelOptInfo *baserel)
 		(baserel->reloptkind == RELOPT_BASEREL ||
 		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
 	{
-		GpuStoreDescHashKey hkey;
-		GpuStoreDesc *gs_desc;
+		GpuStoreMappingHashKey hkey;
+		GpuStoreMapping *gs_map;
 		Relation	rel;
 
 		hkey.database_oid = MyDatabaseId;
 		hkey.table_oid = rte->relid;
-		gs_desc = hash_search(gstore_mapping_htab, &hkey, HASH_FIND, NULL);
-		if (gs_desc)
-			retval = (gs_desc->gs_sdesc != NULL);
+		gs_map = hash_search(gstore_mapping_htab, &hkey, HASH_FIND, NULL);
+		if (gs_map)
+			retval = (gs_map->gs_sdesc != NULL);
 		else
 		{
 			rel = relation_open(hkey.table_oid, NoLock);
@@ -494,9 +494,9 @@ error_0:
  * __gpuStoreAllocateDSM
  */
 static void
-__gpuStoreAllocateDSM(GpuStoreDesc *gs_desc)
+__gpuStoreAllocateDSM(GpuStoreMapping *gs_map)
 {
-	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
+	GpuStoreSharedDesc *gs_sdesc = gs_map->gs_sdesc;
 	GpuStoreRowIdHash *rowhash;
 	GpuStoreRowId *rowmap;
 	dsm_segment *gs_seg;
@@ -531,9 +531,9 @@ __gpuStoreAllocateDSM(GpuStoreDesc *gs_desc)
 	rowhash->free_list = 0;
 	memset(rowhash->hash_slot, -1, sizeof(cl_uint) * nslots);
 
-	gs_desc->gs_seg  = gs_seg;
-	gs_desc->rowhash = rowhash;
-	gs_desc->rowmap  = rowmap;
+	gs_map->gs_seg  = gs_seg;
+	gs_map->rowhash = rowhash;
+	gs_map->rowmap  = rowmap;
 
 	gs_sdesc->dsm_handle = dsm_segment_handle(gs_seg);
 }
@@ -722,10 +722,10 @@ __gpuStoreLoadRelation(Relation rel,
  */
 static void
 __GpuStoreExecInitialLoad(Relation rel,
-						  GpuStoreDesc *gs_desc,
+						  GpuStoreMapping *gs_map,
 						  CUmodule cuda_module)
 {
-	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
+	GpuStoreSharedDesc *gs_sdesc = gs_map->gs_sdesc;
 	TupleDesc		tupdesc = RelationGetDescr(rel);
 	CUfunction		kfunc_init_load;
 	CUdeviceptr		m_main = 0UL;
@@ -751,8 +751,8 @@ __GpuStoreExecInitialLoad(Relation rel,
 	kds_base = &kgs_base->kds_row;
 	init_kernel_data_store(kds_base, tupdesc, sz, KDS_FORMAT_ROW, nrooms);
 	__gpuStoreLoadRelation(rel, kds_base,
-						   gs_desc->rowhash,
-						   gs_desc->rowmap);
+						   gs_map->rowhash,
+						   gs_map->rowmap);
 
 	/* load the entire relation */
 	kds_main = __gpuStoreCreateKernelBuffer(rel, nrooms, &kds_extra);
@@ -923,9 +923,9 @@ __GpuStoreExecInitialLoad(Relation rel,
 }
 
 static void
-GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
+GpuStoreExecInitialLoad(Relation rel, GpuStoreMapping *gs_map)
 {
-	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
+	GpuStoreSharedDesc *gs_sdesc = gs_map->gs_sdesc;
 	int			cuda_dindex = gs_sdesc->cuda_dindex;
 	CUdevice	cuda_device;
 	CUcontext	cuda_context = NULL;
@@ -933,7 +933,7 @@ GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
 	CUresult	rc;
 
 	/* DSM allocation */
-	__gpuStoreAllocateDSM(gs_desc);
+	__gpuStoreAllocateDSM(gs_map);
 	
 	/* setup one-time cuda context, then load full-relation */
 	PG_TRY();
@@ -960,7 +960,7 @@ GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on __gpuStoreLoadCudaModule: %s", errorText(rc));
 
-		__GpuStoreExecInitialLoad(rel, gs_desc, cuda_module);
+		__GpuStoreExecInitialLoad(rel, gs_map, cuda_module);
 	}
 	PG_CATCH();
 	{
@@ -978,8 +978,8 @@ GpuStoreExecInitialLoad(Relation rel, GpuStoreDesc *gs_desc)
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 	/* all Ok, so pin the DSM mapping */
-	dsm_pin_mapping(gs_desc->gs_seg);
-	dsm_pin_segment(gs_desc->gs_seg);
+	dsm_pin_mapping(gs_map->gs_seg);
+	dsm_pin_segment(gs_map->gs_seg);
 }
 
 /*
@@ -1051,7 +1051,7 @@ __gpuStoreSharedDescIsVisible(Relation rel, GpuStoreSharedDesc *gs_sdesc)
 
 static void
 GetGpuStoreSharedDesc(Relation rel,
-					  GpuStoreDesc *gs_desc,
+					  GpuStoreMapping *gs_map,
 					  GpuStoreOptions *gs_options)
 {
 	GpuStoreSharedDesc *gs_sdesc = NULL;
@@ -1099,14 +1099,14 @@ retry:
 				elog(ERROR, "gpustore: could not attach DSM segment");
 
 			addr = dsm_segment_address(gs_seg);
-			gs_desc->gs_seg = gs_seg;
+			gs_map->gs_seg = gs_seg;
 			addr += PAGE_ALIGN(gs_sdesc->redo_buffer_size);
-			gs_desc->rowmap = (GpuStoreRowId *)addr;
+			gs_map->rowmap = (GpuStoreRowId *)addr;
 			addr += PAGE_ALIGN(sizeof(GpuStoreRowId) * gs_sdesc->max_num_rows);
-			gs_desc->rowhash = (GpuStoreRowIdHash *)addr;
+			gs_map->rowhash = (GpuStoreRowIdHash *)addr;
 			/* All green, GpuStoreSharedDesc was got */
 			pg_atomic_fetch_add_u32(&gs_sdesc->refcnt, 1);
-			gs_desc->gs_sdesc = gs_sdesc;
+			gs_map->gs_sdesc = gs_sdesc;
 
 			LWLockRelease(lock);
 			return;
@@ -1128,7 +1128,7 @@ retry:
 	gs_sdesc = MemoryContextAllocZero(TopSharedMemoryContext,
 									  sizeof(GpuStoreSharedDesc));
 	gs_sdesc->database_oid = MyDatabaseId;
-	gs_sdesc->table_oid = gs_desc->table_oid;
+	gs_sdesc->table_oid = gs_map->table_oid;
 	pg_atomic_init_u32(&gs_sdesc->refcnt, 2);
 	gs_sdesc->initial_load_in_progress = true;      /* !!! blocker !!! */
 	gs_sdesc->max_num_rows = gs_options->max_num_rows;
@@ -1143,10 +1143,10 @@ retry:
 	LWLockRelease(lock);
 
 	/* initial loading from the relation */
-	gs_desc->gs_sdesc = gs_sdesc;
+	gs_map->gs_sdesc = gs_sdesc;
 	PG_TRY();
 	{
-		GpuStoreExecInitialLoad(rel, gs_desc);
+		GpuStoreExecInitialLoad(rel, gs_map);
 	}
 	PG_CATCH();
 	{
@@ -1177,27 +1177,27 @@ PutGpuStoreSharedDesc(GpuStoreSharedDesc *gs_sdesc)
 /*
  * GpuStoreGetDesc
  */
-static GpuStoreDesc *
-GetGpuStoreDesc(Relation rel)
+static GpuStoreMapping *
+GetGpuStoreMapping(Relation rel)
 {
-	GpuStoreDescHashKey hkey;
-	GpuStoreDesc *gs_desc;
+	GpuStoreMappingHashKey hkey;
+	GpuStoreMapping *gs_map;
 	bool		found;
 
 	hkey.database_oid = MyDatabaseId;
 	hkey.table_oid = RelationGetRelid(rel);
-	gs_desc = hash_search(gstore_mapping_htab, &hkey, HASH_ENTER, &found);
+	gs_map = hash_search(gstore_mapping_htab, &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
 		GpuStoreOptions gs_options;
 
-		Assert(gs_desc->database_oid == hkey.database_oid &&
-			   gs_desc->table_oid    == hkey.table_oid);
-		gs_desc->refcnt = 1;
+		Assert(gs_map->database_oid == hkey.database_oid &&
+			   gs_map->table_oid    == hkey.table_oid);
+		gs_map->refcnt = 1;
 		PG_TRY();
 		{
 			if (relationHasSyncTrigger(rel, &gs_options))
-				GetGpuStoreSharedDesc(rel, gs_desc, &gs_options);
+				GetGpuStoreSharedDesc(rel, gs_map, &gs_options);
 		}
 		PG_CATCH();
 		{
@@ -1206,31 +1206,31 @@ GetGpuStoreDesc(Relation rel)
 		}
 		PG_END_TRY();
 	}
-	return (gs_desc->gs_sdesc ? gs_desc : NULL);
+	return (gs_map->gs_sdesc ? gs_map : NULL);
 }
 
 /*
- * PutGpuStoreDesc
+ * PutGpuStoreMapping
  */
 static void
-PutGpuStoreDesc(GpuStoreDesc *gs_desc)
+PutGpuStoreMapping(GpuStoreMapping *gs_map)
 {
-	Assert(gs_desc->refcnt > 0);
-	if (--gs_desc->refcnt == 0)
+	Assert(gs_map->refcnt > 0);
+	if (--gs_map->refcnt == 0)
 	{
-		if (gs_desc->gs_sdesc)
+		if (gs_map->gs_sdesc)
 		{
-			dsm_detach(gs_desc->gs_seg);
-			PutGpuStoreSharedDesc(gs_desc->gs_sdesc);
+			dsm_detach(gs_map->gs_seg);
+			PutGpuStoreSharedDesc(gs_map->gs_sdesc);
 		}
 		else
 		{
-			Assert(!gs_desc->gs_seg &&
-				   !gs_desc->rowhash &&
-				   !gs_desc->rowmap);
+			Assert(!gs_map->gs_seg &&
+				   !gs_map->rowhash &&
+				   !gs_map->rowmap);
 		}
 		/* cleanup */
-		hash_search(gstore_mapping_htab, gs_desc, HASH_REMOVE, NULL);
+		hash_search(gstore_mapping_htab, gs_map, HASH_REMOVE, NULL);
 	}
 }
 
@@ -1238,10 +1238,10 @@ PutGpuStoreDesc(GpuStoreDesc *gs_desc)
  * __gpuStoreAllocateRowId
  */
 static cl_uint
-__gpuStoreAllocateRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
+__gpuStoreAllocateRowId(GpuStoreMapping *gs_map, ItemPointer ctid)
 {
-	GpuStoreRowIdHash *rowhash = gs_desc->rowhash;
-	GpuStoreRowId *rowmap = gs_desc->rowmap;
+	GpuStoreRowIdHash *rowhash = gs_map->rowhash;
+	GpuStoreRowId *rowmap = gs_map->rowmap;
 	GpuStoreRowId *r_item;
 	cl_uint		hash;
 	cl_uint		index;
@@ -1275,12 +1275,12 @@ __gpuStoreAllocateRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
  * __gpuStoreLookupRowId / __gpuStoreReleaseRowId
  */
 static uint32
-__gpuStoreLookupOrReleaseRowId(GpuStoreDesc *gs_desc,
+__gpuStoreLookupOrReleaseRowId(GpuStoreMapping *gs_map,
 							   ItemPointer ctid,
 							   bool release_rowid)
 {
-	GpuStoreRowIdHash *rowhash = gs_desc->rowhash;
-	GpuStoreRowId *rowmap = gs_desc->rowmap;
+	GpuStoreRowIdHash *rowhash = gs_map->rowhash;
+	GpuStoreRowId *rowmap = gs_map->rowmap;
 	GpuStoreRowId *r_item;
 	GpuStoreRowId *r_prev;
 	cl_uint		hash;
@@ -1319,17 +1319,17 @@ __gpuStoreLookupOrReleaseRowId(GpuStoreDesc *gs_desc,
 }
 
 static uint32
-__gpuStoreLookupRowId(GpuStoreDesc *gs_desc, ItemPointer ctid)
+__gpuStoreLookupRowId(GpuStoreMapping *gs_map, ItemPointer ctid)
 {
-	return __gpuStoreLookupOrReleaseRowId(gs_desc, ctid, false);
+	return __gpuStoreLookupOrReleaseRowId(gs_map, ctid, false);
 }
 
 static inline void
-__gpuStoreReleaseRowId(GpuStoreDesc *gs_desc, PendingRowIdItem *pitem)
+__gpuStoreReleaseRowId(GpuStoreMapping *gs_map, PendingRowIdItem *pitem)
 {
 	uint32	__rowid;
 
-	__rowid = __gpuStoreLookupOrReleaseRowId(gs_desc, &pitem->ctid, true);
+	__rowid = __gpuStoreLookupOrReleaseRowId(gs_map, &pitem->ctid, true);
 	Assert(__rowid == pitem->rowid);
 }
 
@@ -1353,9 +1353,9 @@ AllocGpuStoreHandle(Relation rel)
 	{
 		PG_TRY();
 		{
-			gs_handle->gs_desc = GetGpuStoreDesc(rel);
+			gs_handle->gs_map = GetGpuStoreMapping(rel);
 			gs_handle->nitems = 0;
-			if (gs_handle->gs_desc)
+			if (gs_handle->gs_map)
 			{
 				MemoryContext	oldcxt;
 
@@ -1375,7 +1375,7 @@ AllocGpuStoreHandle(Relation rel)
 		}
 		PG_END_TRY();
 	}
-	return (gs_handle->gs_desc ? gs_handle : NULL);
+	return (gs_handle->gs_map ? gs_handle : NULL);
 }
 
 /*
@@ -1384,7 +1384,7 @@ AllocGpuStoreHandle(Relation rel)
 static void
 ReleaseGpuStoreHandle(GpuStoreHandle *gs_handle, bool normal_commit)
 {
-	GpuStoreDesc *gs_desc = gs_handle->gs_desc;
+	GpuStoreMapping *gs_map = gs_handle->gs_map;
 	char	   *pos = gs_handle->buf.data;
 	uint32		count;
 
@@ -1396,13 +1396,13 @@ ReleaseGpuStoreHandle(GpuStoreHandle *gs_handle, bool normal_commit)
 		{
 			case 'I':	/* INSERT */
 				if (!normal_commit)
-					__gpuStoreReleaseRowId(gs_desc, pitem);
+					__gpuStoreReleaseRowId(gs_map, pitem);
 				pos += sizeof(PendingRowIdItem);
 				break;
 
 			case 'D':	/* DELETE */
 				if (normal_commit)
-					__gpuStoreReleaseRowId(gs_desc, pitem);
+					__gpuStoreReleaseRowId(gs_map, pitem);
 				pos += sizeof(PendingRowIdItem);
 				break;
 
@@ -1411,8 +1411,8 @@ ReleaseGpuStoreHandle(GpuStoreHandle *gs_handle, bool normal_commit)
 		}
 	}
 	Assert(pos <= gs_handle->buf.data + gs_handle->buf.len);
-	if (gs_handle->gs_desc)
-		PutGpuStoreDesc(gs_handle->gs_desc);
+	if (gs_handle->gs_map)
+		PutGpuStoreMapping(gs_handle->gs_map);
 	/* cleanup */
 	if (gs_handle->buf.data)
 		pfree(gs_handle->buf.data);
@@ -1423,10 +1423,10 @@ ReleaseGpuStoreHandle(GpuStoreHandle *gs_handle, bool normal_commit)
  * __gpuStoreAppendLog
  */
 static void
-__gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
+__gpuStoreAppendLog(GpuStoreMapping *gs_map, GstoreTxLogCommon *tx_log)
 {
-	GpuStoreSharedDesc *gs_sdesc = gs_desc->gs_sdesc;
-	char	   *redo_buffer = dsm_segment_address(gs_desc->gs_seg);
+	GpuStoreSharedDesc *gs_sdesc = gs_map->gs_sdesc;
+	char	   *redo_buffer = dsm_segment_address(gs_map->gs_seg);
 	size_t		buffer_sz = gs_sdesc->redo_buffer_size;
 	uint64		offset;
 	uint64		sync_pos;
@@ -1489,7 +1489,7 @@ __gpuStoreAppendLog(GpuStoreDesc *gs_desc, GstoreTxLogCommon *tx_log)
 static void
 __gpuStoreInsertLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 {
-	GpuStoreDesc   *gs_desc = gs_handle->gs_desc;
+	GpuStoreMapping   *gs_map = gs_handle->gs_map;
 	GstoreTxLogInsert *item;
 	PendingRowIdItem rlog;
 	cl_uint		rowid;
@@ -1497,7 +1497,7 @@ __gpuStoreInsertLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 
 	/* Track RowId allocation */
 	enlargeStringInfo(&gs_handle->buf, sizeof(PendingRowIdItem));
-	rowid = __gpuStoreAllocateRowId(gs_desc, &tuple->t_self);
+	rowid = __gpuStoreAllocateRowId(gs_map, &tuple->t_self);
 	rlog.tag = 'I';
 	rlog.ctid = tuple->t_self;
 	rlog.rowid = rowid;
@@ -1516,7 +1516,7 @@ __gpuStoreInsertLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 	HeapTupleHeaderSetXmax(&item->htup, InvalidTransactionId);
 	HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
 
-	__gpuStoreAppendLog(gs_desc, (GstoreTxLogCommon *)item);
+	__gpuStoreAppendLog(gs_map, (GstoreTxLogCommon *)item);
 }
 
 /*
@@ -1525,14 +1525,14 @@ __gpuStoreInsertLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 static void
 __gpuStoreDeleteLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 {
-	GpuStoreDesc   *gs_desc = gs_handle->gs_desc;
+	GpuStoreMapping   *gs_map = gs_handle->gs_map;
 	GstoreTxLogDelete item;
 	PendingRowIdItem rlog;
 	cl_uint		rowid;
 
 	/* Track RowId release */
 	enlargeStringInfo(&gs_handle->buf, sizeof(PendingRowIdItem));
-	rowid = __gpuStoreLookupRowId(gs_desc, &tuple->t_self);
+	rowid = __gpuStoreLookupRowId(gs_map, &tuple->t_self);
 	rlog.tag = 'D';
 	rlog.ctid = tuple->t_self;
 	rlog.rowid = rowid;
@@ -1546,7 +1546,7 @@ __gpuStoreDeleteLog(HeapTuple tuple, GpuStoreHandle *gs_handle)
 	item.rowid = rowid;
 	item.xid = GetCurrentTransactionId();
 
-	__gpuStoreAppendLog(gs_desc, (GstoreTxLogCommon *)&item);
+	__gpuStoreAppendLog(gs_map, (GstoreTxLogCommon *)&item);
 }
 
 /*
@@ -1614,15 +1614,15 @@ pgstrom_gpustore_precheck_trigger(PG_FUNCTION_ARGS)
 	{
 		CreateTrigStmt *stmt = (CreateTrigStmt *)trigdata->parsetree;
 		Relation		rel;
-		GpuStoreDesc   *gs_desc;
+		GpuStoreMapping   *gs_map;
 
 		rel = relation_openrv_extended(stmt->relation,
 									   AccessShareLock, true);
 		if (rel)
 		{
-			gs_desc = GetGpuStoreDesc(rel);
-			if (gs_desc)
-				PutGpuStoreDesc(gs_desc);
+			gs_map = GetGpuStoreMapping(rel);
+			if (gs_map)
+				PutGpuStoreMapping(gs_map);
 		}
 		relation_close(rel, AccessShareLock);
 	}
@@ -1794,7 +1794,7 @@ gpuStoreAddCommitLog(GpuStoreHandle *gs_handle)
 				memset((char *)c_log + c_log->length, 0, diff);
 				c_log->length += diff;
 			}
-			__gpuStoreAppendLog(gs_handle->gs_desc,
+			__gpuStoreAppendLog(gs_handle->gs_map,
 								(GstoreTxLogCommon *)c_log);
 			/* rewind */
 			c_log->length = offsetof(GstoreTxLogCommit, data);
@@ -2263,8 +2263,8 @@ pgstrom_init_gpu_store(void)
 							 NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(GpuStoreDescHashKey);
-	hctl.entrysize = sizeof(GpuStoreDesc);
+	hctl.keysize = sizeof(GpuStoreMappingHashKey);
+	hctl.entrysize = sizeof(GpuStoreMapping);
 	hctl.hcxt = CacheMemoryContext;
 	gstore_mapping_htab = hash_create("GpuStore Descriptor", 48, &hctl,
 									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
