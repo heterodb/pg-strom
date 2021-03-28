@@ -116,11 +116,17 @@ typedef struct
 } GpuStoreSharedDesc;
 
 /*
- * GpuStoreDesc (per-backend local mapping)
+ * GpuStoreMapping (per-backend local mapping)
  */
-#define GPUSTORE_DESC_NSLOTS		31
 typedef struct
 {
+	Oid				database_oid;
+	Oid				table_oid;
+} GpuStoreDescHashKey;
+
+typedef struct
+{
+	Oid					database_oid;
 	Oid					table_oid;
 	int					refcnt;
 	GpuStoreSharedDesc *gs_sdesc;	/* NULL, if no GpuStore is available */
@@ -157,7 +163,7 @@ typedef struct
 
 /* --- static variables --- */
 static GpuStoreSharedHead *gstore_shared_head = NULL;
-static HTAB		   *gstore_desc_htab = NULL;
+static HTAB		   *gstore_mapping_htab = NULL;
 static HTAB		   *gstore_handle_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
@@ -415,17 +421,18 @@ baseRelHasGpuStore(PlannerInfo *root, RelOptInfo *baserel)
 		(baserel->reloptkind == RELOPT_BASEREL ||
 		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
 	{
+		GpuStoreDescHashKey hkey;
 		GpuStoreDesc *gs_desc;
-		Oid			table_oid = rte->relid;
 		Relation	rel;
 
-		gs_desc = hash_search(gstore_desc_htab,
-							  &table_oid, HASH_FIND, NULL);
+		hkey.database_oid = MyDatabaseId;
+		hkey.table_oid = rte->relid;
+		gs_desc = hash_search(gstore_mapping_htab, &hkey, HASH_FIND, NULL);
 		if (gs_desc)
 			retval = (gs_desc->gs_sdesc != NULL);
 		else
 		{
-			rel = relation_open(table_oid, NoLock);
+			rel = relation_open(hkey.table_oid, NoLock);
 			retval = relationHasSyncTrigger(rel, NULL);
 			relation_close(rel, NoLock);
 		}
@@ -1173,17 +1180,19 @@ PutGpuStoreSharedDesc(GpuStoreSharedDesc *gs_sdesc)
 static GpuStoreDesc *
 GetGpuStoreDesc(Relation rel)
 {
-	Oid			table_oid = RelationGetRelid(rel);
+	GpuStoreDescHashKey hkey;
 	GpuStoreDesc *gs_desc;
 	bool		found;
 
-	gs_desc = hash_search(gstore_desc_htab,
-						  &table_oid, HASH_ENTER, &found);
+	hkey.database_oid = MyDatabaseId;
+	hkey.table_oid = RelationGetRelid(rel);
+	gs_desc = hash_search(gstore_mapping_htab, &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
 		GpuStoreOptions gs_options;
 
-		gs_desc->table_oid = table_oid;
+		Assert(gs_desc->database_oid == hkey.database_oid &&
+			   gs_desc->table_oid    == hkey.table_oid);
 		gs_desc->refcnt = 1;
 		PG_TRY();
 		{
@@ -1192,7 +1201,7 @@ GetGpuStoreDesc(Relation rel)
 		}
 		PG_CATCH();
 		{
-			hash_search(gstore_desc_htab, &table_oid, HASH_REMOVE, NULL);
+			hash_search(gstore_mapping_htab, &hkey, HASH_REMOVE, NULL);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1221,8 +1230,7 @@ PutGpuStoreDesc(GpuStoreDesc *gs_desc)
 				   !gs_desc->rowmap);
 		}
 		/* cleanup */
-		hash_search(gstore_desc_htab,
-					&gs_desc->table_oid, HASH_REMOVE, NULL);
+		hash_search(gstore_mapping_htab, gs_desc, HASH_REMOVE, NULL);
 	}
 }
 
@@ -2255,11 +2263,11 @@ pgstrom_init_gpu_store(void)
 							 NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(Oid);
+	hctl.keysize = sizeof(GpuStoreDescHashKey);
 	hctl.entrysize = sizeof(GpuStoreDesc);
 	hctl.hcxt = CacheMemoryContext;
-	gstore_desc_htab = hash_create("GpuStore Descriptor", 48, &hctl,
-								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	gstore_mapping_htab = hash_create("GpuStore Descriptor", 48, &hctl,
+									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = sizeof(GpuStoreHandleHashKey);
