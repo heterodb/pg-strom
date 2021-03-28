@@ -322,6 +322,35 @@ FROM aggregate_data;
 ---- index support
 -- cmp,hash
 
+CREATE TABLE indextest(
+    i1 int1,
+    i2 int2,
+    i4 int4,
+    i8 int8
+);
+INSERT INTO indextest (select 128-x from generate_series(1,256) x);
+UPDATE indextest SET i2=i1, i4=i1,i8=i1;
+
+CREATE INDEX int1bt ON indextest USING btree (i1);
+CREATE INDEX int2bt ON indextest USING btree (i2);
+CREATE INDEX int4bt ON indextest USING btree (i4);
+CREATE INDEX int8bt ON indextest USING btree (i8);
+
+SET enable_seqscan=off;
+SET pg_strom.enabled=off;
+SELECT COUNT(i8) = 1 AS btint1cmp FROM indextest where i1 = CAST(0 AS int1);
+SELECT COUNT(i8) = 1 AS btint12cmp FROM indextest where i1 = CAST(0 AS int2);
+SELECT COUNT(i8) = 1 AS btint14cmp FROM indextest where i1 = CAST(0 AS int4);
+SELECT COUNT(i8) = 1 AS btint18cmp FROM indextest where i1 = CAST(0 AS int8);
+
+SELECT COUNT(i1) = 1 AS btint21cmp FROM indextest where i2 = CAST(0 AS int2);
+SELECT COUNT(i1) = 1 AS btint41cmp FROM indextest where i4 = CAST(0 AS int4);
+SELECT COUNT(i1) = 1 AS btint81cmp FROM indextest where i8 = CAST(0 AS int8);
+
+DROP INDEX int1bt,int2bt,int4bt,int8bt;
+
+CREATE INDEX int1hash ON indextest USING hash (i1);
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA custom_dtype_temp CASCADE;

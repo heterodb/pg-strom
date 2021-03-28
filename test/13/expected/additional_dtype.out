@@ -125,26 +125,28 @@ FROM various_dtypes;
 (1 row)
 
 -- int1 and (int2,int4,int8)
--- % is not supported here.
--- unset ops["mod"]
+-- unset v;declare -A v=(["i2"]=12 ["i4"]=14 ["i8"]=18)
 -- echo "SELECT "; for i in ${!v[@]};do for o in "${!ops[@]}"; do val=$(("${v[$i]} ${ops[$o]} 3"))  ; echo "(${i} ${ops[$o]} i1_1) = ${val} as \"i1_${o}_${i}\" -- ${v[$i]} ${ops[$o]} 3" ; done ; done | awk 'NR==1{print $0}NR>1{print ","$0}' && echo "FROM various_dtypes;"
 SELECT 
-(i8 / i1_1) = 6 as "i1_div_i8" -- 18 / 3
+(i8 % i1_1) = 0 as "i1_mod_i8" -- 18 % 3
+,(i8 / i1_1) = 6 as "i1_div_i8" -- 18 / 3
 ,(i8 * i1_1) = 54 as "i1_mul_i8" -- 18 * 3
 ,(i8 + i1_1) = 21 as "i1_plus_i8" -- 18 + 3
 ,(i8 - i1_1) = 15 as "i1_minus_i8" -- 18 - 3
+,(i2 % i1_1) = 0 as "i1_mod_i2" -- 12 % 3
 ,(i2 / i1_1) = 4 as "i1_div_i2" -- 12 / 3
 ,(i2 * i1_1) = 36 as "i1_mul_i2" -- 12 * 3
 ,(i2 + i1_1) = 15 as "i1_plus_i2" -- 12 + 3
 ,(i2 - i1_1) = 9 as "i1_minus_i2" -- 12 - 3
+,(i4 % i1_1) = 2 as "i1_mod_i4" -- 14 % 3
 ,(i4 / i1_1) = 4 as "i1_div_i4" -- 14 / 3
 ,(i4 * i1_1) = 42 as "i1_mul_i4" -- 14 * 3
 ,(i4 + i1_1) = 17 as "i1_plus_i4" -- 14 + 3
 ,(i4 - i1_1) = 11 as "i1_minus_i4" -- 14 - 3
 FROM various_dtypes;
- i1_div_i8 | i1_mul_i8 | i1_plus_i8 | i1_minus_i8 | i1_div_i2 | i1_mul_i2 | i1_plus_i2 | i1_minus_i2 | i1_div_i4 | i1_mul_i4 | i1_plus_i4 | i1_minus_i4 
------------+-----------+------------+-------------+-----------+-----------+------------+-------------+-----------+-----------+------------+-------------
- t         | t         | t          | t           | t         | t         | t          | t           | t         | t         | t          | t
+ i1_mod_i8 | i1_div_i8 | i1_mul_i8 | i1_plus_i8 | i1_minus_i8 | i1_mod_i2 | i1_div_i2 | i1_mul_i2 | i1_plus_i2 | i1_minus_i2 | i1_mod_i4 | i1_div_i4 | i1_mul_i4 | i1_plus_i4 | i1_minus_i4 
+-----------+-----------+-----------+------------+-------------+-----------+-----------+-----------+------------+-------------+-----------+-----------+-----------+------------+-------------
+ t         | t         | t         | t          | t           | t         | t         | t         | t          | t           | t         | t         | t         | t          | t
 (1 row)
 
 -- error_case: range check
@@ -262,14 +264,14 @@ SELECT
 (i2 / m1) = -i2 as i2_div_m1,
 (i4 / m1) = -i4 as i4_div_m1,
 (i8 / m1) = -i8 as i8_div_m1,
-(i1 % m1) = 0 as i1_mod_m1 --,
--- (i2 % m1) = 0 as i2_mod_m1,
--- (i4 % m1) = 01 as i4_mod_m1,
--- (i8 % m1) = -i8 as i8_mod_m1
+(i1 % m1) = 0 as i1_mod_m1,
+(i2 % m1) = 0 as i2_mod_m1,
+(i4 % m1) = 0 as i4_mod_m1,
+(i8 % m1) = 0 as i8_mod_m1
 FROM various_dtypes;
- i1_div_m1 | i2_div_m1 | i4_div_m1 | i8_div_m1 | i1_mod_m1 
------------+-----------+-----------+-----------+-----------
- t         | t         | t         | t         | t
+ i1_div_m1 | i2_div_m1 | i4_div_m1 | i8_div_m1 | i1_mod_m1 | i2_mod_m1 | i4_mod_m1 | i8_mod_m1 
+-----------+-----------+-----------+-----------+-----------+-----------+-----------+-----------
+ t         | t         | t         | t         | t         | t         | t         | t
 (1 row)
 
 ---- bit operations
@@ -324,13 +326,156 @@ ERROR:  money out of range
 SELECT mny / m1 FROM various_dtypes;
 ERROR:  money out of range
 -- error_case: money div 0
-SELECT mny / 0::int1 from various_dtypes;
+SELECT mny / 0::int1 FROM various_dtypes;
 ERROR:  division by zero
 ---- aggregate function
 -- sum,max,min,avg(larger,smaller)
 -- variance,var_samp,var_pop,stddev, stddevv_samp,stddev_pop
+CREATE TABLE aggregate_data(
+    i1  int1
+);
+INSERT INTO aggregate_data(i1) VALUES 
+(1)
+,(NULL)
+,(3)
+,(NULL)
+,(-1)
+,(0)
+,(NULL)
+,(NULL)
+,(5)
+;
+-- sum
+SELECT sum(i1) = sum(cast(i1 AS int2)) as "sum_check" FROM aggregate_data;
+ sum_check 
+-----------
+ t
+(1 row)
+
+-- max
+SELECT max(i1) = max(cast(i1 AS int2)) as "max_check" FROM aggregate_data;
+ max_check 
+-----------
+ t
+(1 row)
+
+-- min
+SELECT min(i1) = min(cast(i1 AS int2)) as "min_check" FROM aggregate_data;
+ min_check 
+-----------
+ t
+(1 row)
+
+-- avg
+-- TODO: fix this to get TRUE
+SELECT avg(i1) = avg(cast(i1 AS int2)) as "avg_check" FROM aggregate_data;
+ avg_check 
+-----------
+ t
+(1 row)
+
+-- variance.var_samp
+-- TODO: fix this to get TRUE 
+SELECT
+variance(i1) = variance(cast(i1 AS int2)) as "variance_check"
+,var_samp(i1) = var_samp(cast(i1 AS int2)) as "var_samp_check"
+FROM aggregate_data;
+ variance_check | var_samp_check 
+----------------+----------------
+ t              | t
+(1 row)
+
+-- var_pop
+-- TODO: fix this to get TRUE 
+SELECT
+var_pop(i1) = var_pop(cast(i1 AS int2)) as "var_pop_check"
+FROM aggregate_data;
+ var_pop_check 
+---------------
+ t
+(1 row)
+
+-- stddev, stddev_samp
+-- TODO: fix this to get TRUE 
+SELECT
+stddev(i1) = stddev(cast(i1 AS int2)) as "stddev_check"
+,stddev_samp(i1) = stddev_samp(cast(i1 AS int2)) as "stddev_samp_check"
+FROM aggregate_data;
+ stddev_check | stddev_samp_check 
+--------------+-------------------
+ t            | t
+(1 row)
+
+-- stddev_pop
+-- TODO: fix this to get TRUE 
+SELECT
+stddev_pop(i1) = stddev_pop(cast(i1 AS int2)) as "stddev_pop_check"
+FROM aggregate_data;
+ stddev_pop_check 
+------------------
+ t
+(1 row)
+
 ---- index support
 -- cmp,hash
+CREATE TABLE indextest(
+    i1 int1,
+    i2 int2,
+    i4 int4,
+    i8 int8
+);
+INSERT INTO indextest (select 128-x from generate_series(1,256) x);
+UPDATE indextest SET i2=i1, i4=i1,i8=i1;
+CREATE INDEX int1bt ON indextest USING btree (i1);
+CREATE INDEX int2bt ON indextest USING btree (i2);
+CREATE INDEX int4bt ON indextest USING btree (i4);
+CREATE INDEX int8bt ON indextest USING btree (i8);
+SET enable_seqscan=off;
+SET pg_strom.enabled=off;
+SELECT COUNT(i8) = 1 AS btint1cmp FROM indextest where i1 = CAST(0 AS int1);
+ btint1cmp 
+-----------
+ t
+(1 row)
+
+SELECT COUNT(i8) = 1 AS btint12cmp FROM indextest where i1 = CAST(0 AS int2);
+ btint12cmp 
+------------
+ t
+(1 row)
+
+SELECT COUNT(i8) = 1 AS btint14cmp FROM indextest where i1 = CAST(0 AS int4);
+ btint14cmp 
+------------
+ t
+(1 row)
+
+SELECT COUNT(i8) = 1 AS btint18cmp FROM indextest where i1 = CAST(0 AS int8);
+ btint18cmp 
+------------
+ t
+(1 row)
+
+SELECT COUNT(i1) = 1 AS btint21cmp FROM indextest where i2 = CAST(0 AS int2);
+ btint21cmp 
+------------
+ t
+(1 row)
+
+SELECT COUNT(i1) = 1 AS btint41cmp FROM indextest where i4 = CAST(0 AS int4);
+ btint41cmp 
+------------
+ t
+(1 row)
+
+SELECT COUNT(i1) = 1 AS btint81cmp FROM indextest where i8 = CAST(0 AS int8);
+ btint81cmp 
+------------
+ t
+(1 row)
+
+DROP INDEX int1bt,int2bt,int4bt,int8bt;
+CREATE INDEX int1hash ON indextest USING hash (i1);
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA custom_dtype_temp CASCADE;
