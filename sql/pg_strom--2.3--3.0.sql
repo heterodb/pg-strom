@@ -210,25 +210,25 @@ CREATE CAST (int1 AS numeric)
 
 CREATE CAST (int2 AS int1)
   WITH FUNCTION pgstrom.int1(int2)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (int4 AS int1)
   WITH FUNCTION pgstrom.int1(int4)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (int8 AS int1)
   WITH FUNCTION pgstrom.int1(int8)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float2 AS int1)
   WITH FUNCTION pgstrom.int1(float2)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float4 AS int1)
   WITH FUNCTION pgstrom.int1(float4)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (float8 AS int1)
   WITH FUNCTION pgstrom.int1(float8)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 CREATE CAST (numeric AS int1)
   WITH FUNCTION pgstrom.int1(numeric)
-  AS IMPLICIT;
+  AS ASSIGNMENT;
 ---
 --- Comparison functions
 ---
@@ -1179,12 +1179,12 @@ CREATE FUNCTION pgstrom.int1_sum(bigint, pg_catalog.int1)
 CREATE FUNCTION pgstrom.int1_avg_accum(bigint[], pg_catalog.int1)
   RETURNS bigint[]
   AS 'MODULE_PATHNAME','pgstrom_int1_avg_accum'
-  LANGUAGE C CALLED ON NULL INPUT IMMUTABLE PARALLEL SAFE;
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int1_avg_accum_inv(bigint[], pg_catalog.int1)
   RETURNS bigint[]
   AS 'MODULE_PATHNAME','pgstrom_int1_avg_accum_inv'
-  LANGUAGE C CALLED ON NULL INPUT IMMUTABLE PARALLEL SAFE;
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.int1_var_accum(internal, pg_catalog.int1)
   RETURNS internal
