@@ -941,6 +941,10 @@ codegen_gpuscan_projection(StringInfo kern,
 												   dtype->type_oid);
 			referenced = true;
 		}
+		if (referenced)
+			appendStringInfo(
+				&temp,
+				"    break;\n");
 	}
 
 	if (temp.len > 0)
