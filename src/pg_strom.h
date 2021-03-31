@@ -1157,7 +1157,7 @@ extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 #define PGSTROM_RELSCAN_SSD2GPU			0x0001
 #define PGSTROM_RELSCAN_BRIN_INDEX		0x0002
 #define PGSTROM_RELSCAN_ARROW_FDW		0x0004
-#define PGSTROM_RELSCAN_GPU_STORE		0x0008
+#define PGSTROM_RELSCAN_GPU_CACHE		0x0008
 extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   RelOptInfo *scan_rel,
 									   List *scan_quals,
@@ -1317,10 +1317,9 @@ extern void pgstrom_init_arrow_fdw(void);
 /*
  * gpu_store.c
  */
-extern bool baseRelHasGpuStore(PlannerInfo *root,
+extern bool baseRelHasGpuCache(PlannerInfo *root,
 							   RelOptInfo *baserel);
-
-extern bool RelationHasGpuStore(Relation rel);
+extern bool RelationHasGpuCache(Relation rel);
 extern GpuStoreState *ExecInitGpuStore(ScanState *ss, int eflags,
 									   Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkGpuStore(GpuTaskState *gts);
@@ -1339,11 +1338,11 @@ extern CUresult gpuStoreMapDeviceMemory(GpuContext *gcontext,
 										pgstrom_data_store *pds);
 extern void gpuStoreUnmapDeviceMemory(GpuContext *gcontext,
 									  pgstrom_data_store *pds);
-extern void gpuStoreBgWorkerBegin(int cuda_dindex);
-extern bool gpuStoreBgWorkerDispatch(int cuda_dindex);
-extern bool gpuStoreBgWorkerIdleTask(int cuda_dindex);
-extern void gpuStoreBgWorkerEnd(int cuda_dindex);
-extern void pgstrom_init_gpu_store(void);
+extern void gpuCacheBgWorkerBegin(int cuda_dindex);
+extern bool gpuCacheBgWorkerDispatch(int cuda_dindex);
+extern bool gpuCacheBgWorkerIdleTask(int cuda_dindex);
+extern void gpuCacheBgWorkerEnd(int cuda_dindex);
+extern void pgstrom_init_gpu_cache(void);
 
 /*
  * misc.c

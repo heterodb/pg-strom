@@ -231,7 +231,7 @@ create_gpuscan_path(PlannerInfo *root,
 						: baserel->rows) / parallel_divisor;
 
 	/* cost for DMA receive (GPU-->host) */
-	if ((scan_mode & PGSTROM_RELSCAN_GPU_STORE) == 0)
+	if ((scan_mode & PGSTROM_RELSCAN_GPU_CACHE) == 0)
 		run_cost += cost_for_dma_receive(baserel, scan_ntuples);
 
 	/* cost for CPU qualifiers */
