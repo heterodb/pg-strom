@@ -43,7 +43,7 @@ typedef struct
 typedef struct
 {
 	/* hash slot for GpuCacheSharedState */
-	LWLock		gcache_sstate_lock;
+	slock_t		gcache_sstate_lock;
 	dlist_head	gcache_sstate_slot[GPUCACHE_SHARED_DESC_NSLOTS];
 	/* database name for preloading */
 	int			preload_database_status;
@@ -99,8 +99,6 @@ typedef struct
 	Oid				table_oid;
 	Oid				trigger_oid;
 	pg_atomic_uint32 refcnt;
-	TransactionId	gs_xmin;
-	TransactionId	gs_xmax;
 	/* GPU memory store resources */
 	bool			initial_load_in_progress;
 	dsm_handle		dsm_handle;
@@ -126,6 +124,10 @@ typedef struct
 	uint64			redo_read_nitems;
 	uint64			redo_read_pos;
 	uint64			redo_sync_pos;
+
+	/* schema definitions (KDS_FORMAT_COLUMN) */
+	kern_data_extra	kds_extra;
+	kern_data_store	kds_head;
 } GpuCacheSharedState;
 
 /*
@@ -141,6 +143,7 @@ typedef struct
 {
 	Oid					database_oid;
 	Oid					table_oid;
+	Oid					trigger_oid;
 	int					refcnt;
 	GpuCacheSharedState *gc_sstate;	/* NULL, if no GpuCache is available */
 	dsm_segment		   *dsm_seg;		/* dsm_segment_address() == Redo buffer */
@@ -153,31 +156,36 @@ typedef struct
  */
 typedef struct
 {
-	char		tag;
+	char			tag;
 	ItemPointerData ctid;
-	cl_uint		rowid;
+	cl_uint			rowid;
 } PendingRowIdItem;
 
 typedef struct
 {
 	Oid				table_oid;
+	Oid				trigger_oid;
 	TransactionId	xid;
-} GpuCacheHandleHashKey;
-
-typedef struct
-{
-	Oid				table_oid;
-	TransactionId	xid;
-	GpuCacheDSMMap   *gc_dmap;
+	GpuCacheDSMMap *gc_dmap;
 	/* array of PendingRowIdItem */
 	uint32			nitems;
 	StringInfoData	buf;
 } GpuCacheHandle;
 
+/*
+ * GpuCacheSyncTrigger
+ */
+typedef struct
+{
+	Oid			table_oid;
+	Oid			trigger_oid;
+} GpuCacheSyncTrigger;
+
 /* --- static variables --- */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_dsmmap_htab = NULL;
 static HTAB		   *gcache_handle_htab = NULL;
+static HTAB		   *gcache_sync_trigger_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
 static void		  (*gpucache_xact_redo_next)(XLogReaderState *record) = NULL;
@@ -191,7 +199,7 @@ static CUresult gpuCacheInvokeCompaction(GpuCacheSharedState *gc_sstate,
 										 bool is_async);
 void	GpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_precheck_event_trigger);
+//PG_FUNCTION_INFO_V1(pgstrom_gpucache_precheck_event_trigger);
 
 /*
  * parseSyncTriggerOptions
@@ -206,18 +214,36 @@ typedef struct
 } GpuCacheOptions;
 
 static void
-parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
+parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
 {
 	int			cuda_dindex = 0;				/* default: GPU0 */
 	int			gpu_sync_interval = 8;			/* default: 8sec */
 	ssize_t		gpu_sync_threshold = -1;		/* default: auto */
 	int64		max_num_rows = (10UL << 20);	/* default: 10M rows */
 	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
+	char	   *config;
 	char	   *key, *value;
 	char	   *saved;
 
-	if (!config)
-		goto out;
+	/* extract trigger argument option string, if any */
+	if (trig->tgnargs == 0)
+		goto out;	/* all default */
+	else if (trig->tgnargs == 1)
+	{
+		Const  *con = (Const *)stringToNode(trig->tgargs[0]);
+
+		if (!IsA(con, Const))
+			elog(ERROR, "trigger argument must be const value");
+		if (con->constisnull)
+			goto out;	/* all default */
+		if (con->consttype != TEXTOID)
+			elog(ERROR, "trigger argument must be text value");
+		config = TextDatumGetCString(con->constvalue);
+	}
+	else
+	{
+		elog(ERROR, "too much trigger arguments");
+	}
 
 	for (key = strtok_r(config, ",", &saved);
 		 key != NULL;
@@ -317,6 +343,7 @@ parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
 			elog(ERROR, "gpucache: unknown option [%s]=[%s]", key, value);
 		}
 	}
+	pfree(config);
 out:
 	if (gc_options)
 	{
@@ -335,90 +362,73 @@ out:
 }
 
 /*
- * relationHasSyncTrigger
+ * lookup_gpucache_sync_trigger_oid
  */
-static bool
-relationHasSyncTrigger(Relation rel, GpuCacheOptions *gc_options)
+static Oid
+lookup_gpucache_sync_trigger_oid(void)
+{
+	static Oid	__gpucache_sync_trigger_oid = InvalidOid;
+
+	if (!OidIsValid(__gpucache_sync_trigger_oid))
+	{
+		Oid		namespace_oid;
+		oidvector argtypes;
+
+		namespace_oid = get_namespace_oid("pgstrom", true);
+		if (!OidIsValid(namespace_oid))
+			return InvalidOid;
+
+		memset(&argtypes, 0, sizeof(oidvector));
+		SET_VARSIZE(&argtypes, offsetof(oidvector, values[0]));
+		argtypes.ndim = 1;
+		argtypes.dataoffset = 0;
+		argtypes.elemtype = OIDOID;
+		argtypes.dim1 = 0;
+		argtypes.lbound1 = 0;
+
+		__gpucache_sync_trigger_oid
+			= GetSysCacheOid3(PROCNAMEARGSNSP,
+							  Anum_pg_proc_oid,
+							  CStringGetDatum("gpucache_sync_trigger"),
+							  PointerGetDatum(&argtypes),
+							  ObjectIdGetDatum(namespace_oid));
+	}
+	return __gpucache_sync_trigger_oid;
+}
+
+/*
+ * relationLookupSyncTrigger
+ */
+static Oid
+relationLookupSyncTrigger(Relation rel, GpuCacheOptions *gc_options)
 {
 	TriggerDesc *trigdesc = rel->trigdesc;
-	Oid		namespace_oid;
-	Oid		synchronizer_oid;
-	oidvector argtypes;
+	Oid		function_oid;
 	int		i;
 
-	if (!trigdesc)
-		return false;	/* no trigger */
-	if (!trigdesc->trig_insert_after_row ||
+	if (!trigdesc ||
+		!trigdesc->trig_insert_after_row ||
 		!trigdesc->trig_update_after_row ||
 		!trigdesc->trig_delete_after_row)
-		return false;	/* quick bailout */
+		return InvalidOid;	/* quick bailout */
 
-	/* lookup OID of pgstrom.gpucache_synchronizer */
-	namespace_oid = get_namespace_oid("pgstrom", true);
-	if (!OidIsValid(namespace_oid))
-		return false;
-
-	memset(&argtypes, 0, sizeof(oidvector));
-	SET_VARSIZE(&argtypes, offsetof(oidvector, values[0]));
-	argtypes.ndim = 1;
-	argtypes.dataoffset = 0;
-	argtypes.elemtype = OIDOID;
-	argtypes.dim1 = 0;
-	argtypes.lbound1 = 0;
-
-	synchronizer_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-									   Anum_pg_proc_oid,
-									   CStringGetDatum("gpucache_sync_trigger"),
-									   PointerGetDatum(&argtypes),
-									   ObjectIdGetDatum(namespace_oid));
-	if (!OidIsValid(synchronizer_oid))
-		return false;
-
+	function_oid = lookup_gpucache_sync_trigger_oid();
 	for (i=0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger	   *trig = &trigdesc->triggers[i];
-
-		if (trig->tgfoid == synchronizer_oid &&
+		
+		if (trig->tgfoid == function_oid &&
 			trig->tgenabled &&
 			trig->tgtype == (TRIGGER_TYPE_ROW |
 							 TRIGGER_TYPE_INSERT |
 							 TRIGGER_TYPE_DELETE |
 							 TRIGGER_TYPE_UPDATE))
 		{
-			if (trig->tgnargs == 0)
-			{
-				parseSyncTriggerOptions(NULL, gc_options);
-			}
-			else if (trig->tgnargs == 1)
-			{
-				Const  *con = (Const *)stringToNode(trig->tgargs[0]);
-				char   *config;
-
-				if (!IsA(con, Const))
-					elog(ERROR, "trigger argument must be const value");
-				if (con->constisnull)
-				{
-					parseSyncTriggerOptions(NULL, gc_options);
-				}
-				else if (con->consttype == TEXTOID)
-				{
-					config = TextDatumGetCString(con->constvalue);
-					parseSyncTriggerOptions(config, gc_options);
-					pfree(config);
-				}
-				else
-				{
-					elog(ERROR, "trigger argument must be text options");
-				}
-			}
-			else
-			{
-				elog(ERROR, "too large number of trigger arguments");
-			}
-			return true;
+			parseSyncTriggerOptions(trig, gc_options);
+			return trig->tgoid;
 		}
 	}
-	return false;
+	return InvalidOid;
 }
 
 /*
@@ -434,21 +444,29 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 		(baserel->reloptkind == RELOPT_BASEREL ||
 		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
 	{
-		GpuCacheDSMMapHashKey hkey;
-		GpuCacheDSMMap *gc_dmap;
+		GpuCacheSyncTrigger *gc_trig;
 		Relation	rel;
+		bool		found;
 
-		hkey.database_oid = MyDatabaseId;
-		hkey.table_oid = rte->relid;
-		gc_dmap = hash_search(gcache_dsmmap_htab, &hkey, HASH_FIND, NULL);
-		if (gc_dmap)
-			retval = (gc_dmap->gc_sstate != NULL);
-		else
+		gc_trig = hash_search(gcache_sync_trigger_htab,
+							  &rte->relid, HASH_ENTER, &found);
+		if (!found)
 		{
-			rel = relation_open(hkey.table_oid, NoLock);
-			retval = relationHasSyncTrigger(rel, NULL);
-			relation_close(rel, NoLock);
+			PG_TRY();
+			{
+				rel = relation_open(rte->relid, NoLock);
+				gc_trig->trigger_oid = relationLookupSyncTrigger(rel, NULL);
+				relation_close(rel, NoLock);
+			}
+			PG_CATCH();
+			{
+				hash_search(gcache_sync_trigger_htab,
+							&rte->relid, HASH_REMOVE, NULL);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
 		}
+		retval = OidIsValid(gc_trig->trigger_oid);
 	}
 	return retval;
 }
@@ -459,7 +477,9 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 bool
 RelationHasGpuCache(Relation rel)
 {
-	return relationHasSyncTrigger(rel, NULL);
+	bool	trigger_oid = relationLookupSyncTrigger(rel, NULL);
+
+	return OidIsValid(trigger_oid);
 }
 
 /*
@@ -1003,117 +1023,139 @@ GpuCacheExecInitialLoad(Relation rel, GpuCacheDSMMap *gc_dmap)
 }
 
 /*
- * GetGpuCacheSharedState
+ * init_kernel_data_store_column
  */
-static inline bool
-__gpuStoreSharedDescIsVisible(Relation rel, GpuCacheSharedState *gc_sstate)
+static void
+init_kernel_data_store_column(GpuCacheSharedState *gc_sstate,
+							  Relation rel, uint32 nrooms)
 {
-	if (gc_sstate->database_oid != MyDatabaseId ||
-		gc_sstate->table_oid != RelationGetRelid(rel))
-		return false;
-	if (gc_sstate->gs_xmin != FrozenTransactionId)
+	kern_data_extra *kds_extra = &gc_sstate->kds_extra;
+	kern_data_store *kds_head  = &gc_sstate->kds_head;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	size_t		extra_sz = 0;
+	size_t		sz, off;
+	int			j, unitsz;
+
+	init_kernel_data_store(kds_head,
+						   tupdesc,
+						   0,	/* to be set later */
+						   KDS_FORMAT_COLUMN,
+						   nrooms);
+	kds_head->table_oid = RelationGetRelid(rel);
+	Assert(kds_head->ncols == tupdesc->natts);
+	off = KDS_calculateHeadSize(tupdesc);
+	for (j=0; j < tupdesc->natts; j++)
 	{
-		if (TransactionIdIsCurrentTransactionId(gc_sstate->gs_xmin))
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+		kern_colmeta	   *cmeta = &kds_head->colmeta[j];
+
+		if (!attr->attnotnull)
 		{
-			if (gc_sstate->gs_xmax == InvalidTransactionId)
-				return true;	/* not deleted yet */
-			if (gc_sstate->gs_xmax == FrozenTransactionId)
-				return true;	/* deleted, and committed */
-			if (!TransactionIdIsCurrentTransactionId(gc_sstate->gs_xmax))
-				return true;	/* deleted by others, but not committed */
+			sz = MAXALIGN(BITMAPLEN(nrooms));
+			cmeta->nullmap_offset = __kds_packed(off);
+			cmeta->nullmap_length = __kds_packed(sz);
+			off += sz;
 		}
-		else if (TransactionIdDidCommit(gc_sstate->gs_xmin))
+
+		if (attr->attlen > 0)
 		{
-			/* inserted, and already committed */
-			gc_sstate->gs_xmin = FrozenTransactionId;
+			unitsz = att_align_nominal(attr->attlen,
+									   attr->attalign);
+			sz = MAXALIGN(unitsz * nrooms);
+			cmeta->values_offset = __kds_packed(off);
+			cmeta->values_length = __kds_packed(sz);
+			off += sz;
 		}
-		else if (TransactionIdIsInProgress(gc_sstate->gs_xmin))
+		else if (attr->attlen == -1)
 		{
-			/* inserted by other session, and not committed */
-			return false;
+			sz = MAXALIGN(sizeof(uint32) * nrooms);
+			cmeta->values_offset = __kds_packed(off);
+			cmeta->values_length = __kds_packed(sz);
+            off += sz;
+			unitsz = get_typavgwidth(attr->atttypid,
+									 attr->atttypmod);
+			extra_sz += MAXALIGN(unitsz) * nrooms;
 		}
 		else
 		{
-			/* it must be aborted, or crashed */
-			gc_sstate->gs_xmin = InvalidTransactionId;
-			return false;
+			elog(ERROR, "unexpected type length (%d) at %s.%s",
+				 attr->attlen,
+				 RelationGetRelationName(rel),
+				 NameStr(attr->attname));
 		}
 	}
-	/* by here, the inserting transaction has committed */
-	if (gc_sstate->gs_xmax == InvalidTransactionId)
-		return true;		/* not deleted yet */
-	if (gc_sstate->gs_xmax != FrozenTransactionId)
+	kds_head->length = off;
+
+	if (extra_sz > 0)
 	{
-		if (TransactionIdIsCurrentTransactionId(gc_sstate->gs_xmax))
-		{
-			/* already deleted by myself */
-			return false;
-		}
-		else if (TransactionIdIsInProgress(gc_sstate->gs_xmax))
-		{
-			/* removed by other transaction in-progress */
-			return true;
-		}
-		else if (TransactionIdDidCommit(gc_sstate->gs_xmax))
-		{
-			/* deleted by other session, and committed */
-			gc_sstate->gs_xmax = FrozenTransactionId;
-		}
-		else
-		{
-			/* deleter is aborted or crashed */
-			gc_sstate->gs_xmax = InvalidTransactionId;
-		}
+		/* 20% margin */
+		extra_sz += extra_sz / 5;
+		extra_sz += offsetof(kern_data_extra, data);
 	}
-	/* deleted, and transaction committed */
-	return false;
+	kds_extra->length = extra_sz;
+	kds_extra->usage = 0;
 }
 
+/*
+ * PutGpuCacheSharedState
+ */
+static void
+PutGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
+{
+}
+
+/*
+ * GetGpuCacheSharedState
+ */
 static void
 GetGpuCacheSharedState(Relation rel,
-					  GpuCacheDSMMap *gc_dmap,
-					  GpuCacheOptions *gc_options)
+					   GpuCacheDSMMap *gc_dmap,
+					   GpuCacheOptions *gc_options)
 {
 	GpuCacheSharedState *gc_sstate = NULL;
-	dsm_segment *dsm_seg;
-	Oid			hkey[2];
-	Datum		hvalue;
-	int			hindex;
-	dlist_head *slot;
-	dlist_iter	iter;
-	char	   *addr;
-	LWLock	   *lock = &gcache_shared_head->gcache_sstate_lock;
-	LWLockMode	lockmode = LW_SHARED;
+	dsm_segment	   *dsm_seg;
+	Oid				hkey[3];
+	Datum			hvalue;
+	int				hindex;
+	dlist_head	   *slot;
+	dlist_iter		iter;
+	char		   *addr;
+	slock_t		   *lock;
 
 	hkey[0] = MyDatabaseId;
-	hkey[1] = RelationGetRelid(rel);
+	hkey[1] = gc_dmap->table_oid;
+	hkey[2] = gc_dmap->trigger_oid;
 	hvalue = hash_any((const unsigned char *)hkey, sizeof(hkey));
 	hindex = hvalue % GPUCACHE_SHARED_DESC_NSLOTS;
 	slot = &gcache_shared_head->gcache_sstate_slot[hindex];
-
+	lock = &gcache_shared_head->gcache_sstate_lock;
 retry:
-	LWLockAcquire(lock, lockmode);
 	CHECK_FOR_INTERRUPTS();
-
+	SpinLockAcquire(lock);
 	dlist_foreach(iter, slot)
 	{
 		gc_sstate = dlist_container(GpuCacheSharedState, chain, iter.cur);
-		if (__gpuStoreSharedDescIsVisible(rel, gc_sstate))
+		if (gc_sstate->database_oid == MyDatabaseId &&
+			gc_sstate->table_oid    == gc_dmap->table_oid &&
+			gc_sstate->trigger_oid  == gc_dmap->trigger_oid)
 		{
 			Assert(pg_atomic_read_u32(&gc_sstate->refcnt) > 0);
 			if (gc_sstate->initial_load_in_progress)
 			{
 				/*
 				 * It means someone already allocated GpuCacheSharedState,
-				 * however, initial loading is still in-progress.
-				 * So, we need to wait for completion of the initial task.
+				 * then initial-load is still in progress.
+				 * So, we will wait for completion of the initial task.
 				 */
-				LWLockRelease(lock);
+				SpinLockRelease(lock);
 
-				pg_usleep(10000L);  /* 10ms */
+				pg_usleep(10000L);	/* 10ms */
 				goto retry;
 			}
-			/* Map DSM segment */
+			/*
+			 * Ok, GpuCacheSharedState is now available. Map its DSM
+			 * segment on the process's virtual address space.
+			 */
 			dsm_seg = dsm_attach(gc_sstate->dsm_handle);
 			if (!dsm_seg)
 				elog(ERROR, "gpustore: could not attach DSM segment");
@@ -1131,41 +1173,45 @@ retry:
 			pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 1);
 			gc_dmap->gc_sstate = gc_sstate;
 
-			LWLockRelease(lock);
+			SpinLockRelease(lock);
 			return;
 		}
 	}
 
-	/*
-	 * Hmm, there is no GpuCacheSharedState, so create a new one
-	 * then load relation's contents to GPU Store. A tough work.
-	 */
-	if (lockmode == LW_SHARED)
-	{
-		LWLockRelease(lock);
-		lockmode = LW_EXCLUSIVE;
-		goto retry;
-	}
-
 	/* allocation of GpuCacheSharedState */
-	gc_sstate = MemoryContextAllocZero(TopSharedMemoryContext,
-									  sizeof(GpuCacheSharedState));
-	gc_sstate->database_oid = MyDatabaseId;
-	gc_sstate->table_oid = gc_dmap->table_oid;
-	pg_atomic_init_u32(&gc_sstate->refcnt, 2);
-	gc_sstate->initial_load_in_progress = true;      /* !!! blocker !!! */
-	gc_sstate->max_num_rows = gc_options->max_num_rows;
-	gc_sstate->cuda_dindex = gc_options->cuda_dindex;
-	gc_sstate->redo_buffer_size = gc_options->redo_buffer_size;
-	gc_sstate->gpu_sync_threshold = gc_options->gpu_sync_threshold;
-	gc_sstate->gpu_sync_interval = gc_options->gpu_sync_interval;
-	pthreadRWLockInit(&gc_sstate->gpu_buffer_lock);
-	SpinLockInit(&gc_sstate->redo_lock);
+	gc_sstate = NULL;
+	PG_TRY();
+	{
+		size_t	sz;
 
+		sz = (offsetof(GpuCacheSharedState, kds_head) +
+			  KDS_calculateHeadSize(RelationGetDescr(rel)));
+		gc_sstate = MemoryContextAllocZero(TopSharedMemoryContext, sz);
+		gc_sstate->database_oid = MyDatabaseId;
+		gc_sstate->table_oid = gc_dmap->table_oid;
+		pg_atomic_init_u32(&gc_sstate->refcnt, 2);
+		gc_sstate->initial_load_in_progress = true;      /* !!! blocker !!! */
+		gc_sstate->max_num_rows = gc_options->max_num_rows;
+		gc_sstate->cuda_dindex = gc_options->cuda_dindex;
+		gc_sstate->redo_buffer_size = gc_options->redo_buffer_size;
+		gc_sstate->gpu_sync_threshold = gc_options->gpu_sync_threshold;
+		gc_sstate->gpu_sync_interval = gc_options->gpu_sync_interval;
+		pthreadRWLockInit(&gc_sstate->gpu_buffer_lock);
+		SpinLockInit(&gc_sstate->redo_lock);
+		init_kernel_data_store_column(gc_sstate, rel, gc_options->max_num_rows);
+	}
+	PG_CATCH();
+	{
+		if (gc_sstate)
+			pfree(gc_sstate);
+		SpinLockRelease(lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	dlist_push_tail(slot, &gc_sstate->chain);
-	LWLockRelease(lock);
+	SpinLockRelease(lock);
 
-	/* initial loading from the relation */
+	/* run, initial load */
 	gc_dmap->gc_sstate = gc_sstate;
 	PG_TRY();
 	{
@@ -1173,58 +1219,51 @@ retry:
 	}
 	PG_CATCH();
 	{
-		LWLockAcquire(lock, LW_EXCLUSIVE);
+		SpinLockAcquire(lock);
 		dlist_delete(&gc_sstate->chain);
+		SpinLockRelease(lock);
 		pfree(gc_sstate);
-		LWLockRelease(lock);
 
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	/* allows concurrent jobs to use this GpuStore */
-	LWLockAcquire(lock, LW_EXCLUSIVE);
-	gc_sstate->initial_load_in_progress = false;
-	LWLockRelease(lock);
-}
-
-/*
- * PutGpuCacheSharedState
- */
-static void
-PutGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
-{
-
-
+	SpinLockAcquire(lock);
+	gc_sstate->initial_load_in_progress = false;	/* !!! unblock !!! */
+	SpinLockRelease(lock);
 }
 
 /*
  * GpuStoreGetDesc
  */
 static GpuCacheDSMMap *
-GetGpuCacheDSMMap(Relation rel)
+GetGpuCacheDSMMap(Relation rel, Trigger *trig)
 {
-	GpuCacheDSMMapHashKey hkey;
 	GpuCacheDSMMap *gc_dmap;
+	Oid			hkey[3];
 	bool		found;
 
-	hkey.database_oid = MyDatabaseId;
-	hkey.table_oid = RelationGetRelid(rel);
-	gc_dmap = hash_search(gcache_dsmmap_htab, &hkey, HASH_ENTER, &found);
+	hkey[0] = MyDatabaseId;
+	hkey[1] = RelationGetRelid(rel);
+	hkey[2] = trig->tgoid;
+	gc_dmap = hash_search(gcache_dsmmap_htab,
+						  hkey, HASH_ENTER, &found);
 	if (!found)
 	{
 		GpuCacheOptions gc_options;
 
-		Assert(gc_dmap->database_oid == hkey.database_oid &&
-			   gc_dmap->table_oid    == hkey.table_oid);
+		Assert(gc_dmap->database_oid == MyDatabaseId &&
+			   gc_dmap->table_oid == RelationGetRelid(rel) &&
+			   gc_dmap->trigger_oid == trig->tgoid);
 		gc_dmap->refcnt = 1;
 		PG_TRY();
 		{
-			if (relationHasSyncTrigger(rel, &gc_options))
-				GetGpuCacheSharedState(rel, gc_dmap, &gc_options);
+			parseSyncTriggerOptions(trig, &gc_options);
+			GetGpuCacheSharedState(rel, gc_dmap, &gc_options);
 		}
 		PG_CATCH();
 		{
-			hash_search(gcache_dsmmap_htab, &hkey, HASH_REMOVE, NULL);
+			hash_search(gcache_dsmmap_htab, hkey, HASH_REMOVE, NULL);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1360,13 +1399,14 @@ __gpuStoreReleaseRowId(GpuCacheDSMMap *gc_dmap, PendingRowIdItem *pitem)
  * AllocGpuCacheHandle
  */
 static GpuCacheHandle *
-AllocGpuCacheHandle(Relation rel)
+AllocGpuCacheHandle(Relation rel, Trigger *trig)
 {
-	GpuCacheHandleHashKey hkey;
+	GpuCacheHandle	hkey;
 	GpuCacheHandle *gc_handle;
-	bool		found;
+	bool			found;
 
 	hkey.table_oid = RelationGetRelid(rel);
+	hkey.trigger_oid = trig->tgoid;
 	hkey.xid = GetCurrentTransactionIdIfAny();
 	if (hkey.xid == InvalidTransactionId)
 		return NULL;
@@ -1376,7 +1416,7 @@ AllocGpuCacheHandle(Relation rel)
 	{
 		PG_TRY();
 		{
-			gc_handle->gc_dmap = GetGpuCacheDSMMap(rel);
+			gc_handle->gc_dmap = GetGpuCacheDSMMap(rel, trig);
 			gc_handle->nitems = 0;
 			if (gc_handle->gc_dmap)
 			{
@@ -1592,7 +1632,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: must be called as ROW-AFTER trigger",
 			 __FUNCTION__);
 
-	gc_handle = AllocGpuCacheHandle(rel);
+	gc_handle = AllocGpuCacheHandle(rel, trigdata->tg_trigger);
 	if (!gc_handle)
 		elog(ERROR, "%s: GPU Store is not configured for %s",
 			 __FUNCTION__, RelationGetRelationName(rel));
@@ -1618,6 +1658,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(trigdata->tg_trigtuple);
 }
 
+#if 0
 /*
  * pgstrom_gpucache_precheck_event_trigger
  */
@@ -1652,6 +1693,7 @@ pgstrom_gpucache_precheck_event_trigger(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_NULL();
 }
+#endif
 
 /* ---------------------------------------------------------------- *
  *
@@ -2233,7 +2275,7 @@ pgstrom_startup_gpu_cache(void)
 	if (found)
 		elog(ERROR, "Bug? GpuCacheSharedHead already exists");
 	memset(gcache_shared_head, 0, sz);
-	LWLockInitialize(&gcache_shared_head->gcache_sstate_lock, -1);
+	SpinLockInit(&gcache_shared_head->gcache_sstate_lock);
 	for (i=0; i < GPUCACHE_SHARED_DESC_NSLOTS; i++)
 	{
 		dlist_init(&gcache_shared_head->gcache_sstate_slot[i]);
@@ -2287,18 +2329,25 @@ pgstrom_init_gpu_cache(void)
 							 NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(GpuCacheDSMMapHashKey);
+	hctl.keysize = 3 * sizeof(Oid);
 	hctl.entrysize = sizeof(GpuCacheDSMMap);
 	hctl.hcxt = CacheMemoryContext;
 	gcache_dsmmap_htab = hash_create("GpuCache DSM Mappings", 48, &hctl,
 									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(GpuCacheHandleHashKey);
+	hctl.keysize = offsetof(GpuCacheHandle, xid) + sizeof(TransactionId);
 	hctl.entrysize = sizeof(GpuCacheHandle);
 	hctl.hcxt = CacheMemoryContext;
 	gcache_handle_htab = hash_create("GpuCache Handles", 48, &hctl,
 									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(Oid);
+	hctl.entrysize = sizeof(GpuCacheSyncTrigger);
+	hctl.hcxt = CacheMemoryContext;
+	gcache_sync_trigger_htab = hash_create("GpuCache Sync Triggers", 256, &hctl,
+										   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	/*
 	 * Background worke to load GPU Store on startup
