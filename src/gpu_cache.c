@@ -98,7 +98,7 @@ typedef struct
 	Oid				database_oid;
 	Oid				table_oid;
 	Oid				trigger_oid;
-	pg_atomic_uint32 refcnt;
+	int				refcnt;
 	/* GPU memory store resources */
 	bool			initial_load_in_progress;
 	dsm_handle		dsm_handle;
@@ -778,6 +778,22 @@ init_kernel_data_store_column(GpuCacheSharedState *gc_sstate,
 static void
 PutGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
 {
+	slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+	SpinLockAcquire(lock);
+	Assert(gc_sstate->refcnt > 0);
+	if (--gc_sstate->refcnt == 0)
+	{
+		//device memory should be already released
+
+		
+
+		Assert(gc_sstate->chain.prev != NULL &&
+			   gc_sstate->chain.next != NULL);
+		dlist_delete(&gc_sstate->chain);
+		pfree(gc_sstate);
+	}
+	SpinLockRelease(lock);
 }
 
 /*
@@ -815,7 +831,7 @@ retry:
 			gc_sstate->table_oid    == gc_dmap->table_oid &&
 			gc_sstate->trigger_oid  == gc_dmap->trigger_oid)
 		{
-			Assert(pg_atomic_read_u32(&gc_sstate->refcnt) > 0);
+			Assert(gc_sstate->refcnt > 0);
 			if (gc_sstate->initial_load_in_progress)
 			{
 				/*
@@ -846,7 +862,7 @@ retry:
 			gc_dmap->rowhash = (GpuCacheRowIdHash *)addr;
 			Assert(gc_dmap->rowhash->magic == GPUCACHE_DSM_ROWIDHASH_MAGIC);
 			/* All green, GpuCacheSharedState was got */
-			pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 1);
+			gc_sstate->refcnt++;
 			gc_dmap->gc_sstate = gc_sstate;
 
 			SpinLockRelease(lock);
@@ -865,7 +881,8 @@ retry:
 		gc_sstate = MemoryContextAllocZero(TopSharedMemoryContext, sz);
 		gc_sstate->database_oid = MyDatabaseId;
 		gc_sstate->table_oid = gc_dmap->table_oid;
-		pg_atomic_init_u32(&gc_sstate->refcnt, 2);
+		gc_sstate->trigger_oid = gc_dmap->trigger_oid;
+		gc_sstate->refcnt = 2;
 		gc_sstate->initial_load_in_progress = true;      /* !!! blocker !!! */
 		gc_sstate->max_num_rows = gc_options->max_num_rows;
 		gc_sstate->cuda_dindex = gc_options->cuda_dindex;
