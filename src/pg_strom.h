@@ -1382,10 +1382,6 @@ extern const char *errorText(int errcode);
 
 extern ssize_t	__readFile(int fdesc, void *buffer, size_t nbytes);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
-extern ssize_t	__readFileSignal(int fdesc, void *buffer, size_t nbytes,
-								 bool interruptible);
-extern ssize_t	__writeFileSignal(int fdesc, const void *buffer, size_t nbytes,
-								  bool interruptible);
 extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 extern void	   *__mmapFile(void *addr, size_t length,
