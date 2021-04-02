@@ -192,6 +192,11 @@ static void		  (*gpucache_xact_redo_next)(XLogReaderState *record) = NULL;
 static void		  (*gpucache_heap_redo_next)(XLogReaderState *record) = NULL;
 
 /* --- function declarations --- */
+static uint32	__gpuCacheAllocateRowId(GpuCacheDSMMap *gc_dmap,
+										ItemPointer ctid);
+static void		__gpuCacheAppendLog(GpuCacheDSMMap *gc_dmap,
+									GstoreTxLogCommon *tx_log);
+
 static CUresult gpuCacheInvokeApplyRedo(GpuCacheSharedState *gc_sstate,
 										uint64 end_pos,
 										bool is_async);
@@ -654,372 +659,43 @@ __gpuCacheCreateKernelBuffer(Relation rel, int64 nrooms,
 }
 
 /*
- * __gpuCacheLoadRelation
+ * __gpuCacheExecInitialLoad
  */
 static void
-__gpuCacheLoadRelation(Relation rel,
-					   kern_data_store *kds,
-					   GpuCacheRowIdHash *rowhash,
-					   GpuCacheRowIdMap  *rowmap)
+__gpuCacheExecInitialLoad(GpuCacheDSMMap *gc_dmap, Relation rel)
 {
 	TableScanDesc	scandesc;
 	Snapshot		snapshot;
 	HeapTuple		tuple;
-	cl_uint			hash, hindex;
-	cl_uint			rowid;
-	cl_uint		   *tup_index = KERN_DATA_STORE_ROWINDEX(kds);
-	cl_int			j, ncols = RelationGetNumberOfAttributes(rel);
-	TupleDesc		tupdesc = RelationGetDescr(rel);
-	Datum		   *values = alloca(sizeof(Datum) * ncols);
-	bool		   *isnull = alloca(sizeof(bool) * ncols);
+	size_t			item_sz = 2048;
+	GstoreTxLogInsert *item = palloc(item_sz);
 
-	Assert(kds->ncols == RelationGetNumberOfAttributes(rel));
-	Assert(kds->nrooms == rowhash->nrooms);
-	Assert(rowhash->nslots > rowhash->nrooms);
-	
 	snapshot = RegisterSnapshot(GetLatestSnapshot());
 	scandesc = table_beginscan(rel, snapshot, 0, NULL);
 	while ((tuple = heap_getnext(scandesc, ForwardScanDirection)) != NULL)
 	{
-		GpuCacheRowId *r_item;
-		kern_tupitem *tup_item;
-		size_t		usage;
-		bool		tuple_pfree = false;
+		size_t		sz = MAXALIGN(offsetof(GstoreTxLogInsert,
+										   htup) + tuple->t_len);
+		if (sz > item_sz)
+		{
+			item_sz = 2 * sz;
+			item = repalloc(item, item_sz);
+		}
+		item = alloca(sz);
+		item->type = GSTORE_TX_LOG__INSERT;
+		item->length = sz;
+		item->timestamp = GetCurrentTimestamp();
+		item->rowid = __gpuCacheAllocateRowId(gc_dmap, &tuple->t_self);
+		memcpy(&item->htup, tuple->t_data, tuple->t_len);
+		HeapTupleHeaderSetXmin(&item->htup, GetCurrentTransactionId());
+		HeapTupleHeaderSetXmax(&item->htup, InvalidTransactionId);
+		HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
+
+		__gpuCacheAppendLog(gc_dmap, (GstoreTxLogCommon *)item);
 
 		CHECK_FOR_INTERRUPTS();
-
-		rowid = kds->nitems++;
-		if (rowid >= kds->nrooms)
-			elog(ERROR, "gpu_store: no more row-id available");
-		/* expand external values, if any */
-		if (HeapTupleHeaderHasExternal(tuple->t_data))
-		{
-			heap_deform_tuple(tuple, tupdesc, values, isnull);
-			for (j=0; j < ncols; j++)
-			{
-				Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-				if (attr->attisdropped)
-					isnull[j] = true;
-				else if (attr->attlen == -1 && !isnull[j])
-					values[j] = (Datum)PG_DETOAST_DATUM_PACKED(values[j]);
-			}
-			tuple = heap_form_tuple(tupdesc, values, isnull);
-			tuple_pfree = true;
-		}
-		/* add tuple to KDS */
-		usage = (__kds_unpack(kds->usage) +
-				 MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
-		if (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-			STROMALIGN(sizeof(cl_uint) * kds->nitems) +
-			STROMALIGN(usage) > kds->length)
-			elog(ERROR, "gpu_store: buffer full! at initial loading");
-
-		tup_item = (kern_tupitem *)((char *)kds + kds->length - usage);
-		tup_item->rowid = rowid;
-		tup_item->t_len = tuple->t_len;
-		memcpy(&tup_item->htup, tuple->t_data, tuple->t_len);
-		memcpy(&tup_item->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
-		tup_index[rowid] = __kds_packed((uintptr_t)tup_item -
-										(uintptr_t)kds);
-		kds->usage = __kds_packed(usage);
-		if (tuple_pfree)
-			pfree(tuple);
-
-		/* add ctid and rowid to hash */
-		hash = hash_any((unsigned char *)&tuple->t_self,
-						sizeof(ItemPointerData));
-		hindex = hash % rowhash->nslots;
-
-		r_item = &rowmap->r_items[rowid];
-		r_item->ctid = tuple->t_self;
-		r_item->next = rowhash->hash_slot[hindex];
-		rowhash->hash_slot[hindex] = rowid;
 	}
-	table_endscan(scandesc);
-	UnregisterSnapshot(snapshot);
-
-	/* add unused rowid to free-list */
-	if (kds->nitems < kds->nrooms)
-	{
-		for (rowid=kds->nitems; rowid < kds->nrooms; rowid++)
-		{
-			GpuCacheRowId *r_item = &rowmap->r_items[rowid];
-			
-			Assert(!ItemPointerIsValid(&r_item->ctid));
-			r_item->next = (rowid+1 < kds->nrooms ? rowid+1 : UINT_MAX);
-		}
-		rowhash->free_list = kds->nitems;
-	}
-	else
-	{
-		rowhash->free_list = UINT_MAX;
-	}
-}
-
-/*
- * GpuCacheExecInitialLoad
- */
-static void
-__GpuCacheExecInitialLoad(Relation rel,
-						  GpuCacheDSMMap *gc_dmap,
-						  CUmodule cuda_module)
-{
-	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
-	TupleDesc		tupdesc = RelationGetDescr(rel);
-	CUfunction		kfunc_init_load;
-	CUdeviceptr		m_main = 0UL;
-	CUdeviceptr		m_extra = 0UL;
-	CUresult		rc;
-	kern_gpustore_baserel *kgs_base = NULL;
-	kern_data_store *kds_base;
-	kern_data_store *kds_main;
-	kern_data_extra kds_extra;
-	int64			nrooms = gc_sstate->max_num_rows;
-	size_t			sz;
-
-	/* preload of the source relation (KDS_FORMAT_ROW) */
-	sz = (KDS_calculateHeadSize(tupdesc) +
-		  STROMALIGN(sizeof(cl_uint) * nrooms) +
-		  table_relation_size(rel, MAIN_FORKNUM));
-	rc = cuMemAllocManaged((CUdeviceptr *)&kgs_base,
-						   offsetof(kern_gpustore_baserel, kds_row) + sz,
-						   CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemAllocManaged: %s", errorText(rc));
-	memset(kgs_base, 0, offsetof(kern_gpustore_baserel, kds_row));
-	kds_base = &kgs_base->kds_row;
-	init_kernel_data_store(kds_base, tupdesc, sz, KDS_FORMAT_ROW, nrooms);
-	__gpuCacheLoadRelation(rel, kds_base,
-						   gc_dmap->rowhash,
-						   gc_dmap->rowmap);
-
-	/* load the entire relation */
-	kds_main = __gpuCacheCreateKernelBuffer(rel, nrooms, &kds_extra);
-	/* GPU kernel invocation for initial loading */
-	PG_TRY();
-	{
-		int			grid_sz;
-		int			block_sz;
-		void	   *kfunc_args[5];
-
-		rc = cuModuleGetFunction(&kfunc_init_load, cuda_module,
-								 "kern_gpustore_initial_load");
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-		rc = __gpuOptimalBlockSize(&grid_sz,
-								   &block_sz,
-								   kfunc_init_load,
-								   gc_sstate->cuda_dindex, 0, 0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on __gpuOptimalBlockSize: %s", errorText(rc));
-		grid_sz = Min(grid_sz, (kds_base->nitems +
-								block_sz - 1) / block_sz);
-
-		/* preserve the main store */
-		rc = gpuMemAllocPreserved(gc_sstate->cuda_dindex,
-								  &gc_sstate->gpu_main_mhandle,
-								  kds_main->length);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-		gc_sstate->gpu_main_size = kds_main->length;
-
-		rc = cuIpcOpenMemHandle(&m_main, gc_sstate->gpu_main_mhandle,
-								CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuIpcOpenMemHandle: %s", errorText(rc));
-
-		rc = cuMemcpyHtoD(m_main, kds_main,
-						  KERN_DATA_STORE_HEAD_LENGTH(kds_main));
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	retry:
-		/* preserve the extra store, if any */
-		if (kds_extra.length > 0)
-		{
-			rc = gpuMemAllocPreserved(gc_sstate->cuda_dindex,
-									  &gc_sstate->gpu_extra_mhandle,
-									  kds_extra.length);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-			gc_sstate->gpu_extra_size = kds_extra.length;
-
-			rc = cuIpcOpenMemHandle(&m_extra, gc_sstate->gpu_extra_mhandle,
-									CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuIpcOpenMemHandle: %s", errorText(rc));
-
-			rc = cuMemcpyHtoD(m_extra, &kds_extra,
-							  offsetof(kern_data_extra, data));
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-		}
-
-		/* kick GPU kernel */
-		kfunc_args[0] = &kgs_base;
-		kfunc_args[1] = &m_main;
-		kfunc_args[2] = &m_extra;
-
-		rc = cuLaunchKernel(kfunc_init_load,
-							grid_sz, 1, 1,
-							block_sz, 1, 1,
-							0,
-							CU_STREAM_PER_THREAD,
-							kfunc_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-
-		/* check status of the kernel execution */
-		rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuStreamSynchronize: %s", errorText(rc));
-
-		if (kgs_base->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
-		{
-			Assert(m_extra != 0UL);
-			/* how much extra buffer is actually required? */
-			rc = cuMemcpyDtoH(&kds_extra, m_extra,
-							  offsetof(kern_data_extra, data));
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
-			kds_extra.length = kds_extra.usage + (64UL << 20);	/* 64MB margin */
-			kds_extra.usage = 0;
-			
-			/* once release the extra buffer */
-			rc = cuIpcCloseMemHandle(m_extra);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-			m_extra = 0UL;
-
-			rc = gpuMemFreePreserved(gc_sstate->cuda_dindex,
-									 gc_sstate->gpu_extra_mhandle);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuMemFreePreserved: %s", errorText(rc));
-			gc_sstate->gpu_extra_size = 0;
-			goto retry;
-		}
-		else if (kgs_base->kerror.errcode != 0)
-		{
-			ereport(ERROR,
-					(errcode(kgs_base->kerror.errcode),
-					 errmsg("failed on GpuStore Initial Loading: %s",
-							kgs_base->kerror.message),
-					 errdetail("GPU kernel location: %s:%d [%s]",
-							   kgs_base->kerror.filename,
-							   kgs_base->kerror.lineno,
-							   kgs_base->kerror.funcname)));
-		}
-	}
-	PG_CATCH();
-	{
-		if (m_main != 0UL)
-		{
-			rc = cuIpcCloseMemHandle(m_main);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-		}
-
-		if (gc_sstate->gpu_main_size > 0)
-		{
-			rc = gpuMemFreePreserved(gc_sstate->cuda_dindex,
-									 gc_sstate->gpu_main_mhandle);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on gpuMemFreePreserved: %s", errorText(rc));
-		}
-
-		if (m_extra != 0UL)
-		{
-			rc = cuIpcCloseMemHandle(m_extra);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-		}
-
-		if (gc_sstate->gpu_extra_size > 0)
-		{
-			rc = gpuMemFreePreserved(gc_sstate->cuda_dindex,
-									 gc_sstate->gpu_extra_mhandle);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on gpuMemFreePreserved: %s", errorText(rc));
-		}
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	/* unmap device memory */
-	if (m_main != 0UL)
-	{
-		rc = cuIpcCloseMemHandle(m_main);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-	}
-	if (m_extra != 0UL)
-	{
-		rc = cuIpcCloseMemHandle(m_extra);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-	}
-}
-
-static void
-GpuCacheExecInitialLoad(Relation rel, GpuCacheDSMMap *gc_dmap)
-{
-	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
-	int			cuda_dindex = gc_sstate->cuda_dindex;
-	CUdevice	cuda_device;
-	CUcontext	cuda_context = NULL;
-	CUmodule	cuda_module = NULL;
-	CUresult	rc;
-
-	/* DSM allocation */
-	__gpuCacheAllocateDSM(gc_dmap);
-	
-	/* setup one-time cuda context, then load full-relation */
-	PG_TRY();
-	{
-		rc = gpuInit(0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuInit: %s", errorText(rc));
-
-		rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-
-		rc = cuCtxCreate(&cuda_context,
-						 CU_CTX_SCHED_AUTO,
-						 cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-
-		rc = cuCtxPushCurrent(cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-		rc = __gpuCacheLoadCudaModule(&cuda_module);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on __gpuCacheLoadCudaModule: %s", errorText(rc));
-
-		__GpuCacheExecInitialLoad(rel, gc_dmap, cuda_module);
-	}
-	PG_CATCH();
-	{
-		if (cuda_context)
-		{
-			rc = cuCtxDestroy(cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
-		}
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	rc = cuCtxDestroy(cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
-	/* all Ok, so pin the DSM mapping */
-	dsm_pin_mapping(gc_dmap->dsm_seg);
-	dsm_pin_segment(gc_dmap->dsm_seg);
+	pfree(item);
 }
 
 /*
@@ -1215,7 +891,10 @@ retry:
 	gc_dmap->gc_sstate = gc_sstate;
 	PG_TRY();
 	{
-		GpuCacheExecInitialLoad(rel, gc_dmap);
+		__gpuCacheAllocateDSM(gc_dmap);
+		__gpuCacheExecInitialLoad(gc_dmap, rel);
+		dsm_pin_mapping(gc_dmap->dsm_seg);
+		dsm_pin_segment(gc_dmap->dsm_seg);
 	}
 	PG_CATCH();
 	{
@@ -1297,10 +976,10 @@ PutGpuCacheDSMMap(GpuCacheDSMMap *gc_dmap)
 }
 
 /*
- * __gpuStoreAllocateRowId
+ * __gpuCacheAllocateRowId
  */
-static cl_uint
-__gpuStoreAllocateRowId(GpuCacheDSMMap *gc_dmap, ItemPointer ctid)
+static uint32
+__gpuCacheAllocateRowId(GpuCacheDSMMap *gc_dmap, ItemPointer ctid)
 {
 	GpuCacheRowIdHash *rowhash = gc_dmap->rowhash;
 	GpuCacheRowIdMap *rowmap = gc_dmap->rowmap;
@@ -1484,10 +1163,10 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 }
 
 /*
- * __gpuStoreAppendLog
+ * __gpuCacheAppendLog
  */
 static void
-__gpuStoreAppendLog(GpuCacheDSMMap *gc_dmap, GstoreTxLogCommon *tx_log)
+__gpuCacheAppendLog(GpuCacheDSMMap *gc_dmap, GstoreTxLogCommon *tx_log)
 {
 	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
 	char	   *redo_buffer = dsm_segment_address(gc_dmap->dsm_seg);
@@ -1561,7 +1240,7 @@ __gpuStoreInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 
 	/* Track RowId allocation */
 	enlargeStringInfo(&gc_handle->buf, sizeof(PendingRowIdItem));
-	rowid = __gpuStoreAllocateRowId(gc_dmap, &tuple->t_self);
+	rowid = __gpuCacheAllocateRowId(gc_dmap, &tuple->t_self);
 	rlog.tag = 'I';
 	rlog.ctid = tuple->t_self;
 	rlog.rowid = rowid;
@@ -1580,7 +1259,7 @@ __gpuStoreInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	HeapTupleHeaderSetXmax(&item->htup, InvalidTransactionId);
 	HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
 
-	__gpuStoreAppendLog(gc_dmap, (GstoreTxLogCommon *)item);
+	__gpuCacheAppendLog(gc_dmap, (GstoreTxLogCommon *)item);
 }
 
 /*
@@ -1610,7 +1289,7 @@ __gpuStoreDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	item.rowid = rowid;
 	item.xid = GetCurrentTransactionId();
 
-	__gpuStoreAppendLog(gc_dmap, (GstoreTxLogCommon *)&item);
+	__gpuCacheAppendLog(gc_dmap, (GstoreTxLogCommon *)&item);
 }
 
 /*
@@ -1860,7 +1539,7 @@ gpuStoreAddCommitLog(GpuCacheHandle *gc_handle)
 				memset((char *)c_log + c_log->length, 0, diff);
 				c_log->length += diff;
 			}
-			__gpuStoreAppendLog(gc_handle->gc_dmap,
+			__gpuCacheAppendLog(gc_handle->gc_dmap,
 								(GstoreTxLogCommon *)c_log);
 			/* rewind */
 			c_log->length = offsetof(GstoreTxLogCommit, data);
