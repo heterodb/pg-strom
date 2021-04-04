@@ -116,9 +116,10 @@ typedef struct
 	size_t			gpu_main_size;
 	size_t			gpu_extra_size;
 
+
 	/* REDO buffer properties */
 	slock_t			redo_lock;
-	uint64			redo_timestamp;
+	uint64			redo_write_timestamp;
 	uint64			redo_write_nitems;
 	uint64			redo_write_pos;
 	uint64			redo_read_nitems;
@@ -149,6 +150,9 @@ typedef struct
 	dsm_segment		   *dsm_seg;		/* dsm_segment_address() == Redo buffer */
 	GpuCacheRowIdHash  *rowhash;	/* DSM */
 	GpuCacheRowIdMap   *rowmap;		/* DSM */
+	/* device memory (valid only bgworker) */
+	CUdeviceptr			gpu_main_devptr;
+	CUdeviceptr			gpu_extra_devptr;
 } GpuCacheDSMMap;
 
 /*
@@ -191,6 +195,9 @@ static object_access_hook_type object_access_next = NULL;
 static void		  (*gpucache_xact_redo_next)(XLogReaderState *record) = NULL;
 static void		  (*gpucache_heap_redo_next)(XLogReaderState *record) = NULL;
 static CUmodule		gcache_cuda_module = NULL;
+static CUfunction	gcache_kfunc_setup_owner = NULL;
+static CUfunction	gcache_kfunc_apply_redo = NULL;
+static CUfunction	gcache_kfunc_compaction = NULL;
 
 /* --- function declarations --- */
 static uint32	__gpuCacheAllocateRowId(GpuCacheDSMMap *gc_dmap,
@@ -223,7 +230,7 @@ static void
 parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
 {
 	int			cuda_dindex = 0;				/* default: GPU0 */
-	int			gpu_sync_interval = 8;			/* default: 8sec */
+	int			gpu_sync_interval = 5000000L;	/* default: 5sec = 5000000us */
 	ssize_t		gpu_sync_threshold = -1;		/* default: auto */
 	int64		max_num_rows = (10UL << 20);	/* default: 10M rows */
 	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
@@ -312,6 +319,7 @@ parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
 			gpu_sync_interval = strtol(value, &end, 10);
 			if (*end != '\0')
 				elog(ERROR, "gpucache: invalid option [%s]=[%s]", key, value);
+			gpu_sync_interval *= 1000000L;	/* [sec -> us] */
 		}
 		else if (strcmp(key, "gpu_sync_threshold") == 0)
 		{
@@ -1151,7 +1159,8 @@ __gpuCacheAppendLog(GpuCacheDSMMap *gc_dmap, GstoreTxLogCommon *tx_log)
 		/* Ok, append the log item */
 		memcpy(redo_buffer + offset, tx_log, tx_log->length);
 		gc_sstate->redo_write_pos += tx_log->length;
-		gc_sstate->redo_timestamp = GetCurrentTimestamp();
+		gc_sstate->redo_write_nitems++;
+		gc_sstate->redo_write_timestamp = GetCurrentTimestamp();
 		append_done = true;
 	skip:
 		/* 25% of REDO buffer is in-use. Async kick of GPU kernel */
@@ -1744,72 +1753,433 @@ gstore_heap_redo_hook(XLogReaderState *record)
 /*
  * __gpuCacheLoadCudaModule
  */
-static void
+static CUresult
 __gpuCacheLoadCudaModule(void)
 {
-	const char *path = PGSHAREDIR "/pg_strom/cuda_gstore.fatbin";
-	int			rawfd;
+	const char	   *path = PGSHAREDIR "/pg_strom/cuda_gstore.fatbin";
+	int				rawfd = -1;
+	struct stat		stat_buf;
+	ssize_t			nbytes;
+	char		   *image;
+	CUresult		rc = CUDA_ERROR_SYSTEM_NOT_READY;
+	CUmodule		cuda_module = NULL;
 
 	rawfd = open(path, O_RDONLY);
 	if (rawfd < 0)
-		elog(ERROR, "failed to open('%s'): %m", path);
-	PG_TRY();
 	{
-		struct stat	stat_buf;
-		CUmodule	cuda_module;
-		CUresult	rc;
-		ssize_t		nbytes;
-		char	   *image;
-
-		if (fstat(rawfd, &stat_buf) != 0)
-			elog(ERROR, "failed on fstat('%s'): %m", path);
-		image = alloca(stat_buf.st_size + 1);
-		nbytes = __readFile(rawfd, image, stat_buf.st_size);
-		if (nbytes != stat_buf.st_size)
-			elog(ERROR, "failed on __readFile('%s'): %m", path);
-		image[nbytes] = '\0';
-
-		rc = cuModuleLoadFatBinary(&cuda_module, image);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleLoadFatBinary('%s'): %s",
-				 path, errorText(rc));
-		gcache_cuda_module = cuda_module;
+		elog(LOG, "gpucache: failed on open('%s'): %m", path);
+		goto bailout;
 	}
-	PG_CATCH();
+	if (fstat(rawfd, &stat_buf) != 0)
 	{
+		elog(LOG, "gpucache: failed on fstat('%s'): %m", path);
+		goto bailout;
+	}
+	image = alloca(stat_buf.st_size + 1);
+	nbytes = __readFile(rawfd, image, stat_buf.st_size);
+	if (nbytes != stat_buf.st_size)
+	{
+		elog(LOG, "gpucache: failed on __readFile('%s'): %m", path);
+		goto bailout;
+	}
+	image[nbytes] = '\0';
+
+	rc = cuModuleLoadFatBinary(&cuda_module, image);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "gpucache: failed on cuModuleLoadFatBinary: %s", errorText(rc));
+		goto bailout;
+	}
+
+	rc = cuModuleGetFunction(&gcache_kfunc_setup_owner,
+							 cuda_module,
+							 "kern_gpustore_setup_owner");
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		goto bailout;
+	}
+
+	rc = cuModuleGetFunction(&gcache_kfunc_apply_redo,
+							 cuda_module,
+							 "kern_gpustore_apply_redo");
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		goto bailout;
+	}
+
+	rc = cuModuleGetFunction(&gcache_kfunc_compaction,
+							 cuda_module,
+							 "kern_gpustore_compaction");
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		goto bailout;
+	}
+
+	/* ok, all green */
+	gcache_cuda_module = cuda_module;
+
+	return CUDA_SUCCESS;
+
+bailout:
+	if (cuda_module)
+		cuModuleUnload(cuda_module);
+	if (rawfd >= 0)
 		close(rawfd);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	close(rawfd);
+	return rc;
+}
+
+static inline CUresult
+gpuCacheLoadCudaModule(void)
+{
+	if (gcache_cuda_module)
+		return CUDA_SUCCESS;
+	return __gpuCacheLoadCudaModule();
 }
 
 /*
- * gpuCacheBgWorkerApplyRedoLog
+ * gpuCacheAllcDeviceMemory
  */
 static CUresult
-gpuCacheBgWorkerApplyRedoLog()
+__gpuCacheAllcDeviceMemory(GpuCacheDSMMap *gc_dmap)
 {
+	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+	CUdeviceptr		m_main = 0;
+	CUdeviceptr		m_extra = 0;
+	CUresult		rc;
 
+	/* main portion of the device buffer */
+	rc = cuMemAlloc(&m_main, gc_sstate->kds_head.length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
+		goto error_0;
+	}
 
+	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head,
+					  KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head));
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		goto error_1;
+	}
+
+	rc = cuIpcGetMemHandle(&gc_sstate->gpu_main_mhandle, m_main);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+		goto error_1;
+	}
+
+	/* extra buffer, if any */
+	if (gc_sstate->kds_extra.length > 0)
+	{
+		rc = cuMemAlloc(&m_extra, gc_sstate->kds_extra.length);
+		if (rc != CUDA_SUCCESS)
+		{
+			elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
+			goto error_1;
+		}
+
+		rc = cuMemcpyHtoD(m_extra, &gc_sstate->kds_extra,
+						  offsetof(kern_data_extra, data));
+		if (rc != CUDA_SUCCESS)
+		{
+			elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+			goto error_2;
+		}
+
+		rc = cuIpcGetMemHandle(&gc_sstate->gpu_extra_mhandle, m_extra);
+		if (rc != CUDA_SUCCESS)
+		{
+			elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+			goto error_2;
+		}
+	}
+	gc_sstate->gpu_main_size = gc_sstate->kds_head.length;
+	gc_sstate->gpu_extra_size = gc_sstate->kds_extra.length;
+	gc_dmap->gpu_main_devptr = m_main;
+	gc_dmap->gpu_extra_devptr = m_extra;
+	return CUDA_SUCCESS;
+
+error_2:
+	cuMemFree(m_extra);
+error_1:
+	cuMemFree(m_main);
+error_0:
+	return rc;
+}
+
+static CUresult
+gpuCacheAllcDeviceMemory(GpuCacheDSMMap *gc_dmap)
+{
+	if (gc_dmap->gpu_main_devptr != 0UL)
+		return CUDA_SUCCESS;
+	return __gpuCacheAllcDeviceMemory(gc_dmap);
+}
+
+/*
+ * GCACHE_BGWORKER_CMD__APPLY_REDO command
+ */
+static CUresult
+__gpuCacheSetupRedoLogBuffer(GpuCacheDSMMap *gc_dmap, uint64 end_pos,
+							 CUdeviceptr *p_m_redo)
+{
+	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+	kern_gpustore_redolog *h_redo = NULL;
+	char		   *base = dsm_segment_address(gc_dmap->dsm_seg);
+	size_t			length;
+	size_t			offset;
+	uint64			index, nitems;
+	uint64			head_pos, tail_pos, curr_pos;
+	CUdeviceptr		m_redo = 0UL;
+	CUresult		rc;
+
+	SpinLockAcquire(&gc_sstate->redo_lock);
+	if (end_pos <= gc_sstate->redo_read_pos)
+	{
+		SpinLockRelease(&gc_sstate->redo_lock);
+		*p_m_redo = 0UL;		/* nothing to do */
+		return CUDA_SUCCESS;
+	}
+	nitems = (gc_sstate->redo_write_nitems -
+			  gc_sstate->redo_read_nitems);
+	head_pos = gc_sstate->redo_read_pos;
+	tail_pos = gc_sstate->redo_write_pos;
+	Assert(head_pos <= tail_pos);
+	Assert(end_pos <= gc_sstate->redo_write_pos);
+	SpinLockRelease(&gc_sstate->redo_lock);
+
+	/*
+	 * allocation of managed memory for kern_gpustore_redolog
+	 * (index to log and redo-log itself)
+	 */
+	length = (MAXALIGN(offsetof(kern_gpustore_redolog,
+								log_index[nitems])) +
+			  MAXALIGN(tail_pos - head_pos));
+	rc = cuMemAllocManaged(&m_redo, length, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(LOG, "gpucache: failed on cuMemAllocManaged(%zu): %s",
+			 length, errorText(rc));
+		*p_m_redo = 0UL;
+		return rc;
+	}
+	h_redo = (kern_gpustore_redolog *)m_redo;
+	memset(h_redo, 0, offsetof(kern_gpustore_redolog, log_index));
+	h_redo->nrooms = nitems;
+	h_redo->length = length;
+
+	offset = MAXALIGN(offsetof(kern_gpustore_redolog,
+							   log_index[nitems]));
+	index = 0;
+	curr_pos = head_pos;
+	while (curr_pos < tail_pos && index < nitems)
+	{
+		GstoreTxLogCommon *tx_log;
+		uint64		__curr_pos = (curr_pos % gc_sstate->redo_buffer_size);
+
+		tx_log = (GstoreTxLogCommon *)(base + __curr_pos);
+		if (__curr_pos + offsetof(GstoreTxLogCommon,
+								  data) > gc_sstate->redo_buffer_size ||
+			(tx_log->type & 0xffffff00U) != GSTORE_TX_LOG__MAGIC)
+		{
+			curr_pos += (gc_sstate->redo_buffer_size - __curr_pos);
+			continue;
+		}
+		Assert(__curr_pos + tx_log->length <= gc_sstate->redo_buffer_size);
+		Assert(tx_log->length == MAXALIGN(tx_log->length));
+		memcpy((char *)h_redo + offset, tx_log, tx_log->length);
+		h_redo->log_index[index++] = __kds_packed(offset);
+		offset += tx_log->length;
+		curr_pos += tx_log->length;
+	}
+	/* update redo_read_xxxx */
+	SpinLockAcquire(&gc_sstate->redo_lock);
+	gc_sstate->redo_read_nitems += nitems;
+	gc_sstate->redo_read_pos = tail_pos;
+	SpinLockRelease(&gc_sstate->redo_lock);
+
+	if (index == 0)
+	{
+		cuMemFree(m_redo);
+		m_redo = 0UL;	/* nothing to do */
+	}
+	else
+	{
+		h_redo->nitems = index;
+		h_redo->length = offset;
+	}
+	*p_m_redo = m_redo;
 	return CUDA_SUCCESS;
 }
 
+static CUresult
+__gpuCacheLaunchApplyRedoKernel(GpuCacheDSMMap *gc_dmap, CUdeviceptr m_redo)
+{
+	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+	kern_gpustore_redolog *h_redo = (kern_gpustore_redolog *)m_redo;
+	int			cuda_dindex = gc_sstate->cuda_dindex;
+	int			o_grid_sz, o_block_sz;
+	int			r_grid_sz, r_block_sz;
+	int			phase;
+	void	   *kern_args[4];
+	CUresult	rc;
 
+	rc = __gpuOptimalBlockSize(&o_grid_sz,
+							   &o_block_sz,
+							   gcache_kfunc_setup_owner,
+							   cuda_dindex, 0, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on __gpuOptimalBlockSize: %s", errorText(rc));
+		return rc;
+	}
+	o_grid_sz = Min(o_grid_sz, (h_redo->nitems + o_block_sz - 1) / o_block_sz);
 
+	rc = __gpuOptimalBlockSize(&r_grid_sz,
+							   &r_block_sz,
+							   gcache_kfunc_apply_redo,
+							   cuda_dindex, 0, 0);
+	r_grid_sz = Min(r_grid_sz, (h_redo->nitems + r_block_sz - 1) / r_block_sz);
+	
+retry:
+	phase = 0;
+	kern_args[0] = &m_redo;
+	kern_args[1] = &gc_dmap->gpu_main_devptr;
+	kern_args[2] = &gc_dmap->gpu_extra_devptr;
+	kern_args[3] = &phase;
 
+	/*
+	 * setup-owner (phase-0) - clear the owner-id field
+	 */
+	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
+						o_grid_sz, 1, 1,
+						o_block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		return rc;
+	}
 
+	/*
+     * setup-owner (phase-1) - assign largest owner-id for each rows modified
+     */
+	phase = 1;
+	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
+						o_grid_sz, 1, 1,
+						o_block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		return rc;
+	}
 
+	/*
+	 * apply redo logs (phase-2) - apply INSERT/DELETE logs
+	 */
+	phase = 2;
+	rc = cuLaunchKernel(gcache_kfunc_apply_redo,
+						r_grid_sz, 1, 1,
+						r_block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		return rc;
+	}
 
+	/*
+	 * setup-owner (phase-3) - assign largest owner-id of commit-logs
+	 */
+	phase = 3;
+	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
+						o_grid_sz, 1, 1,
+						o_block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		return rc;
+	}
 
+	/*
+	 * apply redo logs (phase-4) - apply COMMIT logs
+	 */
+	phase = 4;
+	rc = cuLaunchKernel(gcache_kfunc_apply_redo,
+						r_grid_sz, 1, 1,
+						r_block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		return rc;
+	}
 
+	/* check status of the above kernel execution */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		return rc;
 
+	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
+	{
+		//kick compaction
+		if (rc == CUDA_SUCCESS)
+		{
+			memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
+			goto retry;
+		}
+	}
+	return CUDA_SUCCESS;
+}
 
+static CUresult
+gpuCacheBgWorkerApplyRedoLog(GpuCacheDSMMap *gc_dmap, uint64 end_pos)
+{
+	CUdeviceptr	m_redo = 0UL;
+	CUresult	rc, __rc;
 
+	rc = gpuCacheLoadCudaModule();
+	if (rc != CUDA_SUCCESS)
+		return rc;
 
+	rc = gpuCacheAllcDeviceMemory(gc_dmap);
+	if (rc != CUDA_SUCCESS)
+		return rc;
 
+	rc = __gpuCacheSetupRedoLogBuffer(gc_dmap, end_pos, &m_redo);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	if (m_redo != 0UL)
+	{
+		rc = __gpuCacheLaunchApplyRedoKernel(gc_dmap, m_redo);
 
-
+		__rc = cuMemFree(m_redo);
+		if (__rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuMemFree: %s", errorText(__rc));
+	}
+	return rc;
+}
 
 /*
  * gpuCacheBgWorkerBegin
@@ -1817,8 +2187,6 @@ gpuCacheBgWorkerApplyRedoLog()
 void
 gpuCacheBgWorkerBegin(int cuda_dindex)
 {
-	__gpuCacheLoadCudaModule();
-	
 	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
 	SpinLockAcquire(&gcache_shared_head->bgworker_cmd_lock);
 	gcache_shared_head->bgworkers[cuda_dindex].latch = MyLatch;
@@ -1855,13 +2223,28 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 										cmd->table_oid,
 										cmd->trigger_oid);
 	if (!gc_dmap)
-		cmd->retval = CUDA_ERROR_NOT_FOUND;
+	{
+		elog(LOG, "gpucache: (db:%u, table:%u, trigger:%u) was not found",
+			 cmd->database_oid,
+			 cmd->table_oid,
+			 cmd->trigger_oid);
+		rc = CUDA_ERROR_NOT_FOUND;
+	}
+	else if (gc_dmap->gc_sstate->cuda_dindex != cuda_dindex)
+	{
+		elog(LOG, "gpucache: (db:%u, table:%u, trigger:%u) was not on GPU-%d",
+			 cmd->database_oid,
+			 cmd->table_oid,
+			 cmd->trigger_oid,
+			 gc_dmap->gc_sstate->cuda_dindex);
+		rc = CUDA_ERROR_INVALID_VALUE;
+	}
 	else
 	{
 		switch (cmd->command)
 		{
 			case GCACHE_BGWORKER_CMD__APPLY_REDO:
-				rc = gpuCacheBgWorkerApplyRedoLog();
+				rc = gpuCacheBgWorkerApplyRedoLog(gc_dmap, cmd->end_pos);
 				break;
 			case GCACHE_BGWORKER_CMD__COMPACTION:
 			case GCACHE_BGWORKER_CMD__DROP_UNLOAD:
@@ -1872,6 +2255,7 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 				break;
 		}
 	}
+	cmd->retval = rc;
 
 	SpinLockAcquire(cmd_lock);
 	if (cmd->backend)
@@ -1909,65 +2293,57 @@ gpuCacheBgWorkerIdleTask(int cuda_dindex)
 	int			hindex;
 	bool		retval = false;
 
-	//1. fetch command
-	//2. map DSM of the GpuStore (if not yet)
-	//3. run command
-	//3-1. Apply Redo
-	//3-2. Unmap DSM
-	
-#if 0
 	for (hindex = 0; hindex < GPUCACHE_SHARED_DESC_NSLOTS; hindex++)
 	{
-		slock_t    *lock = &gcache_shared_head->gcache_sstate_lock[hindex];
 		dlist_head *slot = &gcache_shared_head->gcache_sstate_slot[hindex];
 		dlist_iter	iter;
 
-		SpinLockAcquire(lock);
+		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
 		dlist_foreach(iter, slot)
 		{
 			GpuCacheSharedState *gc_sstate;
 			uint64		timestamp;
 
 			gc_sstate = dlist_container(GpuCacheSharedState,
-									   chain, iter.cur);
+										chain, iter.cur);
 			if (gc_sstate->cuda_dindex != cuda_dindex)
 				continue;
+
 			SpinLockAcquire(&gc_sstate->redo_lock);
 			timestamp = GetCurrentTimestamp();
-			if (gc_sstate->redo_write_nitems > gc_sstate->redo_read_nitems &&
-				timestamp > (gc_sstate->gpu_sync_interval * 1000000L +
-							 gc_sstate->redo_timestamp))
+			if ((gc_sstate->redo_write_pos > gc_sstate->redo_sync_pos &&
+				 timestamp > (gc_sstate->redo_write_timestamp +
+							  gc_sstate->gpu_sync_interval)) ||
+				(gc_sstate->redo_write_pos > (gc_sstate->redo_sync_pos +
+											  gc_sstate->gpu_sync_threshold)))
 			{
 				SpinLockAcquire(cmd_lock);
 				if (!dlist_is_empty(free_cmds))
 				{
-					GpuCacheBackgroundCommand *cmd;
+					GpuCacheBackgroundCommand *cmd
+						= dlist_container(GpuCacheBackgroundCommand, chain,
+										  dlist_pop_head_node(free_cmds));
 
-					cmd = dlist_container(GpuCacheBackgroundCommand, chain,
-                                          dlist_pop_head_node(free_cmds));
 					memset(cmd, 0, sizeof(GpuCacheBackgroundCommand));
 					cmd->database_oid = gc_sstate->database_oid;
-                    cmd->table_oid    = gc_sstate->table_oid;
+					cmd->table_oid    = gc_sstate->table_oid;
 					cmd->trigger_oid  = gc_sstate->trigger_oid;
-                    cmd->backend      = NULL;
-                    cmd->command      = GCACHE_BGWORKER_CMD__APPLY_REDO;
-                    cmd->end_pos      = gc_sstate->redo_write_pos;
-                    cmd->retval       = (CUresult) UINT_MAX;
+					cmd->backend      = NULL;
+					cmd->command      = GCACHE_BGWORKER_CMD__APPLY_REDO;
+					cmd->end_pos      = gc_sstate->redo_write_pos;
+					cmd->retval       = (CUresult) UINT_MAX;
 
 					dlist_push_tail(cmd_queue, &cmd->chain);
 
 					gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
-					gc_sstate->redo_timestamp = timestamp;
 				}
 				SpinLockRelease(cmd_lock);
-
 				retval = true;
 			}
 			SpinLockRelease(&gc_sstate->redo_lock);
 		}
-		SpinLockRelease(lock);
+		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
 	}
-#endif
 	return retval;
 }
 
