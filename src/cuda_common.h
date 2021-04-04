@@ -1692,8 +1692,6 @@ DEVICE_FUNCTION(void *)
 kern_get_datum_tuple(kern_colmeta *colmeta,
 					 HeapTupleHeaderData *htup,
 					 cl_uint colidx);
-
-struct GstoreFdwSysattr;	/* not to include cuda_gstore.h here */
 DEVICE_FUNCTION(void *)
 kern_get_datum_column(kern_data_store *kds,
 					  kern_data_extra *extra,
@@ -1701,8 +1699,7 @@ kern_get_datum_column(kern_data_store *kds,
 DEVICE_FUNCTION(cl_bool)
 kern_check_visibility_column(kern_context *kcxt,
 							 kern_data_store *kds,
-							 cl_uint rowidx,
-							 struct GstoreFdwSysattr *p_sysattr);
+							 cl_uint rowidx);
 /*
  * device functions to form/deform HeapTuple
  */

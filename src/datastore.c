@@ -18,7 +18,7 @@
  */
 #include "pg_strom.h"
 #include "cuda_numeric.h"
-#include "cuda_gstore.h"
+#include "cuda_gcache.h"
 #include "nvme_strom.h"
 
 /*
@@ -523,7 +523,7 @@ init_kernel_data_store(kern_data_store *kds,
 		cmeta->atttypid = InvalidOid;	/* internal type */
 		cmeta->atttypmod = -1;
 		cmeta->atttypkind = TYPE_KIND__BASE;
-		strcpy(cmeta->attname.data, "__gstore_sysattr__");
+		strcpy(cmeta->attname.data, "__gcache_sysattr__");
 	}
 	Assert(kds->nr_colmeta == nr_colmeta);
 }

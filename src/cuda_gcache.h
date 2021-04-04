@@ -1,7 +1,7 @@
 /*
- * cuda_gstore.h
+ * cuda_gcache.h
  *
- * CUDA device code specific to GstoreFdw in-memory data store
+ * CUDA device code specific to GPU Cache
  * --
  * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2020 (C) The PG-Strom Development Team
@@ -15,21 +15,20 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_GSTORE_H
-#define CUDA_GSTORE_H
+#ifndef CUDA_GCACHE_H
+#define CUDA_GCACHE_H
 
-#define GSTORE_TX_LOG__MAGIC		0xEBAD7C00
-#define GSTORE_TX_LOG__INSERT		(GSTORE_TX_LOG__MAGIC | 'I')
-#define GSTORE_TX_LOG__DELETE		(GSTORE_TX_LOG__MAGIC | 'D')
-#define GSTORE_TX_LOG__COMMIT		(GSTORE_TX_LOG__MAGIC | 'C')
-#define GSTORE_TX_LOG__TERMINATOR	0xFBADBEEF
+#define GCACHE_TX_LOG__MAGIC		0xEBAD7C00
+#define GCACHE_TX_LOG__INSERT		(GCACHE_TX_LOG__MAGIC | 'I')
+#define GCACHE_TX_LOG__DELETE		(GCACHE_TX_LOG__MAGIC | 'D')
+#define GCACHE_TX_LOG__COMMIT		(GCACHE_TX_LOG__MAGIC | 'C')
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
 	cl_ulong	timestamp;
 	char		data[1];		/* variable length */
-} GstoreTxLogCommon;
+} GCacheTxLogCommon;
 
 typedef struct {
 	cl_uint		type;
@@ -37,8 +36,7 @@ typedef struct {
 	cl_ulong	timestamp;
 	cl_uint		rowid;
 	HeapTupleHeaderData htup __attribute__((aligned(8)));
-	/* + GSTORE_TX_LOG__TERMINATOR */
-} GstoreTxLogInsert;
+} GCacheTxLogInsert;
 
 typedef struct {
 	cl_uint		type;
@@ -46,12 +44,12 @@ typedef struct {
 	cl_ulong	timestamp;
 	cl_uint		rowid;
 	cl_uint		xid;
-} GstoreTxLogDelete;
+} GCacheTxLogDelete;
 
 /*
  * COMMIT/ABORT
  */
-#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	96
+#define GCACHE_TX_LOG_COMMIT_ALLOCSZ	96
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
@@ -59,21 +57,21 @@ typedef struct {
 	cl_uint		xid;
 	cl_ushort	nitems;
 	char		data[1];		/* variable length */
-} GstoreTxLogCommit;
+} GCacheTxLogCommit;
 
 /*
- * GstoreFdwSysattr
+ * GpuCacheSysattr
  *
  * A fixed-length system attribute for each row.
  */
-struct GstoreFdwSysattr
+struct GpuCacheSysattr
 {
 	cl_uint		xmin;
 	cl_uint		xmax;
 	/* get_global_id() of the thread who tries to update the row */
 	cl_uint		owner_id;
 };
-typedef struct GstoreFdwSysattr	GstoreFdwSysattr;
+typedef struct GpuCacheSysattr	GpuCacheSysattr;
 
 #ifdef __CUDACC_RTC__
 DEVICE_INLINE(cl_int)
@@ -128,8 +126,8 @@ pg_sysattr_xmin_fetch_column(kern_context *kcxt,
 {
 	if (kds)
 	{
-		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
-			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
+		GpuCacheSysattr *sysattr = (GpuCacheSysattr *)
+			kern_get_datum_column(kds, NULL, kds->nr_colmeta-1, rowid);
 		if (sysattr)
 		{
 			dclass = DATUM_CLASS__NORMAL;
@@ -150,8 +148,8 @@ pg_sysattr_xmax_fetch_column(kern_context *kcxt,
 {
 	if (kds)
 	{
-		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
-			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
+		GpuCacheSysattr *sysattr = (GpuCacheSysattr *)
+			kern_get_datum_column(kds, NULL, kds->nr_colmeta-1, rowid);
 		if (sysattr)
 		{
 			dclass = DATUM_CLASS__NORMAL;
@@ -216,16 +214,7 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
 #endif
 
 /*
- * kern_gpustore_baserel
- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	kern_data_store	kds_row;
-} kern_gpustore_baserel;
-
-/*
- * kern_gpustore_redolog
+ * kern_gpucache_redolog
  */
 typedef struct
 {
@@ -234,6 +223,6 @@ typedef struct
 	cl_uint			nrooms;
 	cl_uint			nitems;
 	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpustore_redolog;
+} kern_gpucache_redolog;
 
-#endif /* CUDA_GSTORE_H */
+#endif /* CUDA_GCACHE_H */

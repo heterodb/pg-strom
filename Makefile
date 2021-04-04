@@ -44,13 +44,13 @@ __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib \
                 cuda_jsonlib cuda_rangetype cuda_postgis \
                 cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort
-__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype cuda_gstore arrow_defs
+__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype cuda_gcache arrow_defs
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
                $(addsuffix .h, $(__GPU_HEADERS)))
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
-GSTORE_FDW_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gstore.fatbin
+GPU_CACHE_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.fatbin
 
 # 32k / 128 = 256 threads per SM
 MAXREGCOUNT := 128
@@ -234,7 +234,7 @@ OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
        $(STROM_BUILD_ROOT)/src/cuda_codegen.h
-DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GSTORE_FDW_FATBIN)
+DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GPU_CACHE_FATBIN)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -278,7 +278,7 @@ endif
 #
 # GPU Libraries
 #
-$(GSTORE_FDW_FATBIN): $(GSTORE_FDW_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
+$(GPU_CACHE_FATBIN): $(GPU_CACHE_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
 
 %.fatbin:  %.cu $(GPU_HEADERS)

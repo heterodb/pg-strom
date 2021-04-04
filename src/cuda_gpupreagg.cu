@@ -18,7 +18,6 @@
  */
 #include "cuda_common.h"
 #include "cuda_gpupreagg.h"
-#include "cuda_gstore.h"
 #include "cuda_postgis.h"
 /*
  * gpupreagg_final_data_move
@@ -763,8 +762,7 @@ gpupreagg_setup_column(kern_context *kcxt,
 		{
 			visible = kern_check_visibility_column(kcxt,
 												   kds_src,
-												   src_index,
-												   NULL);
+												   src_index);
 			if (visible)
 			{
 				rc = gpupreagg_quals_eval_column(kcxt,

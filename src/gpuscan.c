@@ -309,8 +309,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (rte->inh)
 		return;
 	/*
-	 * GpuScan can run on only base relations or foreign table managed
-	 * by arrow_fdw/gstore_fdw.
+	 * GpuScan can run on only base relations or foreign table (arrow_fdw)
 	 */
 	if (rte->relkind == RELKIND_FOREIGN_TABLE)
 	{
@@ -1517,7 +1516,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 			break;	/* OK, only if GpuScan */
 		if (outer_path->pathtype == T_ForeignScan &&
 			baseRelIsArrowFdw(outer_path->parent))
-			break;	/* OK, only if ArrowFdw or GstoreFdw */
+			break;	/* OK, only if ArrowFdw */
 		if (IsA(outer_path, ProjectionPath))
 		{
 			ProjectionPath *ppath = (ProjectionPath *) outer_path;
@@ -2196,8 +2195,8 @@ gpuscan_next_task(GpuTaskState *gts)
 
 	if (gss->gts.af_state)
 		pds = ExecScanChunkArrowFdw(gts);
-	else if (gss->gts.gs_state)
-		pds = ExecScanChunkGpuStore(gts);
+	else if (gss->gts.gc_state)
+		pds = ExecScanChunkGpuCache(gts);
 	else
 		pds = pgstromExecScanChunk(gts);
 	if (!pds)
@@ -2816,41 +2815,41 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
-	volatile bool	gstore_mapped = false;
+	volatile bool	gcache_mapped = false;
 	int				retval;
 	CUresult		rc;
 
 	/*
 	 * NOTE (2020-09-11):
-	 * The 'gstore_mapped' has 'volatile' qualifier.
+	 * The 'gcache_mapped' has 'volatile' qualifier.
 	 * From the compiler point of view, it looks here is no code path
-	 * that set gstore_mapped in the exception block, however, we may
+	 * that set gcache_mapped in the exception block, however, we may
 	 * run the STROM_CATCH() block, if __gpuscan_process_task() raises
 	 * an exception.
 	 * Compiler optimization by GCC8.3.1 eliminated invocation of
-	 * gstoreFdwUnmapDeviceMemory even if gstore_mapped is set.
+	 * gpuCacheUnmapDeviceMemory even if gcache_mapped is set.
 	 * So, we explicitly disabled the optimization by the volatile.
 	 */
 	STROM_TRY();
 	{
 		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
 		{
-			rc = gpuStoreMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+			rc = gpuCacheMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on gstoreFdwMapDeviceMemory: %s", errorText(rc));
-			gstore_mapped = true;
+				werror("failed on gpuCacheMapDeviceMemory: %s", errorText(rc));
+			gcache_mapped = true;
 		}
 		retval = __gpuscan_process_task(gtask, cuda_module);
 	}
 	STROM_CATCH();
     {
-		if (gstore_mapped)
-			gpuStoreUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+		if (gcache_mapped)
+			gpuCacheUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
         STROM_RE_THROW();
     }
     STROM_END_TRY();
-	if (gstore_mapped)
-		gpuStoreUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
+	if (gcache_mapped)
+		gpuCacheUnmapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 
 	return retval;
 }

@@ -16,7 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "cuda_common.h"
-#include "cuda_gstore.h"
+#include "cuda_gcache.h"
 #include "cuda_postgis.h"
 
 /*
@@ -1019,19 +1019,16 @@ kern_get_datum_column(kern_data_store *kds,
 DEVICE_FUNCTION(cl_bool)
 kern_check_visibility_column(kern_context *kcxt,
 							 kern_data_store *kds,
-							 cl_uint rowidx,
-							 GstoreFdwSysattr *p_sysattr)
+							 cl_uint rowidx)
 {
 	kern_parambuf  *kparams = kcxt->kparams;
 	xidvector	   *xvec = (xidvector *)
 		kparam_get_value(kparams, kparams->xactIdVector);
-	GstoreFdwSysattr *sysattr = (GstoreFdwSysattr *)
-		kern_get_datum_column(kds, NULL, kds->ncols-1, rowidx);
+	GpuCacheSysattr *sysattr = (GpuCacheSysattr *)
+		kern_get_datum_column(kds, NULL, kds->nr_colmeta-1, rowidx);
 
 	assert(xvec != NULL);
 	assert(sysattr != NULL);
-	if (p_sysattr != NULL)
-		memcpy(p_sysattr, sysattr, sizeof(GstoreFdwSysattr));
 	if (sysattr->xmin == InvalidTransactionId)
 		return false;
 	if (sysattr->xmin != FrozenTransactionId)

@@ -316,8 +316,7 @@ typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
 typedef struct GpuTaskSharedState	GpuTaskSharedState;
 typedef struct ArrowFdwState		ArrowFdwState;
-//typedef struct GpuStoreFdwState		GpuStoreFdwState;
-typedef struct GpuStoreState		GpuStoreState;
+typedef struct GpuCacheState		GpuCacheState;
 
 /*
  * GpuTaskState
@@ -354,7 +353,7 @@ struct GpuTaskState
 	long			outer_brin_count;	/* # of blocks skipped by index */
 
 	ArrowFdwState  *af_state;			/* for GpuTask on Arrow_Fdw */
-	GpuStoreState  *gs_state;			/* for GpuTask on GpuStore */
+	GpuCacheState  *gc_state;			/* for GpuTask on GpuCache */
 
 	/*
 	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
@@ -412,8 +411,8 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	/* for gstore_fdw file scan (currently not used) */
-	pg_atomic_uint64 gstore_read_pos;
+	/* for gpu_cache file scan (currently not used) */
+	pg_atomic_uint64 gcache_read_pos;
 	/* for block-based regular table scan */
 	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
 	slock_t			pbs_mutex;		/* lock of the fields below */
@@ -558,7 +557,7 @@ typedef struct pgstrom_data_store
 	 * need to kick DMA operations explicitly.
 	 *
 	 * NOTE: Extra information for KDS_FORMAT_COLUMN
-	 * @gs_sstate points the GpuStoreShareState for reference IPC handle
+	 * @gc_sstate points the GpuCacheShareState for reference IPC handle
 	 * of the main/extra buffer on the device. This IPC handle is only
 	 * valid under the read lock.
 	 */
@@ -566,7 +565,7 @@ typedef struct pgstrom_data_store
 	GPUDirectFileDesc	filedesc;
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 	/* for KDS_FORMAT_COLUMN */
-	void			   *gs_sstate;
+	void			   *gc_sstate;
 	CUdeviceptr			m_kds_base;
 	CUdeviceptr			m_kds_extra;
 	/* data chunk in kernel portion */
@@ -1315,28 +1314,28 @@ extern void ExplainArrowFdw(ArrowFdwState *af_state,
 extern void pgstrom_init_arrow_fdw(void);
 
 /*
- * gpu_store.c
+ * gpu_cache.c
  */
 extern bool baseRelHasGpuCache(PlannerInfo *root,
 							   RelOptInfo *baserel);
 extern bool RelationHasGpuCache(Relation rel);
-extern GpuStoreState *ExecInitGpuStore(ScanState *ss, int eflags,
+extern GpuCacheState *ExecInitGpuCache(ScanState *ss, int eflags,
 									   Bitmapset *outer_refs);
-extern pgstrom_data_store *ExecScanChunkGpuStore(GpuTaskState *gts);
-extern void ExecReScanGpuStore(GpuStoreState *gstore_state);
-extern void ExecEndGpuStore(GpuStoreState *gstore_state);
-extern Size ExecEstimateDSMGpuStore(GpuStoreState *gstore_state);
-extern void ExecInitDSMGpuStore(GpuStoreState *gstore_state,
-								pg_atomic_uint64 *gstore_read_pos);
-extern void ExecReInitDSMGpuStore(GpuStoreState *gstore_state);
-extern void ExecInitWorkerGpuStore(GpuStoreState *gstore_state,
-								   pg_atomic_uint64 *gstore_read_pos);
-extern void ExecShutdownGpuStore(GpuStoreState *gstore_state);
-extern void ExplainGpuStore(GpuStoreState *gstore_state,
+extern pgstrom_data_store *ExecScanChunkGpuCache(GpuTaskState *gts);
+extern void ExecReScanGpuCache(GpuCacheState *gcache_state);
+extern void ExecEndGpuCache(GpuCacheState *gcache_state);
+extern Size ExecEstimateDSMGpuCache(GpuCacheState *gcache_state);
+extern void ExecInitDSMGpuCache(GpuCacheState *gcache_state,
+								pg_atomic_uint64 *gcache_read_pos);
+extern void ExecReInitDSMGpuCache(GpuCacheState *gcache_state);
+extern void ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
+								   pg_atomic_uint64 *gcache_read_pos);
+extern void ExecShutdownGpuCache(GpuCacheState *gcache_state);
+extern void ExplainGpuCache(GpuCacheState *gcache_state,
 							Relation frel, ExplainState *es);
-extern CUresult gpuStoreMapDeviceMemory(GpuContext *gcontext,
+extern CUresult gpuCacheMapDeviceMemory(GpuContext *gcontext,
 										pgstrom_data_store *pds);
-extern void gpuStoreUnmapDeviceMemory(GpuContext *gcontext,
+extern void gpuCacheUnmapDeviceMemory(GpuContext *gcontext,
 									  pgstrom_data_store *pds);
 extern void gpuCacheBgWorkerBegin(int cuda_dindex);
 extern bool gpuCacheBgWorkerDispatch(int cuda_dindex);

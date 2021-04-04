@@ -2411,7 +2411,7 @@ ArrowEndForeignModify(EState *estate,
 
 #if PG_VERSION_NUM >= 110000
 /*
- * MEMO: executor begin/end routine, if gstore_fdw is partitioned-leaf
+ * MEMO: executor begin/end routine, if arrow_fdw is partitioned-leaf
  * relations. In this case, ArrowBeginForeignModify shall not be called.
  */
 static void

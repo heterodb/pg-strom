@@ -1,7 +1,7 @@
 /*
- * cuda_gstore.cu
+ * cuda_gcache.cu
  *
- * GPU device code to manage GPU Store (Gstore_Fdw)
+ * GPU device code to manage GPU Cache
  * ----
  * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2020 (C) The PG-Strom Development Team
@@ -16,11 +16,10 @@
  * GNU General Public License for more details.
  */
 #include "cuda_common.h"
-#include "cuda_gstore.h"
+#include "cuda_gcache.h"
 
 #define KERN_CONTEXT_VARLENA_BUFSZ		0
 #define KERN_CONTEXT_STACK_LIMIT		0
-
 
 STATIC_FUNCTION(Datum)
 kern_datum_get_column(kern_data_store *kds,
@@ -84,7 +83,7 @@ null_return:
 /*
  * kds_get_column_sysattr
  */
-STATIC_INLINE(GstoreFdwSysattr *)
+STATIC_INLINE(GpuCacheSysattr *)
 kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
@@ -92,19 +91,19 @@ kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
 
 	assert(cmeta->attbyval &&
 		   cmeta->attalign == sizeof(cl_uint) &&
-		   cmeta->attlen == sizeof(GstoreFdwSysattr) &&
+		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
 		   cmeta->nullmap_offset == 0);
 	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
 	if (rowid < kds->nrooms)
-		return ((GstoreFdwSysattr *)addr) + rowid;
+		return ((GpuCacheSysattr *)addr) + rowid;
 	return NULL;
 }
 
 STATIC_FUNCTION(cl_bool)
-gpustore_apply_insert(kern_context *kcxt,
+gpucache_apply_insert(kern_context *kcxt,
 					  kern_data_store *kds,
 					  kern_data_extra *extra,
-					  GstoreFdwSysattr *sysattr,
+					  GpuCacheSysattr *sysattr,
 					  cl_uint rowid,
 					  HeapTupleHeaderData *htup)
 {
@@ -204,21 +203,21 @@ gpustore_apply_insert(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(void)
-gpustore_apply_delete(kern_context *kcxt,
-					  GstoreTxLogDelete *d_log,
-					  GstoreFdwSysattr *sysattr)
+gpucache_apply_delete(kern_context *kcxt,
+					  GCacheTxLogDelete *d_log,
+					  GpuCacheSysattr *sysattr)
 {
 //	sysattr->xmin = d_log->xmin;
 	sysattr->xmax = d_log->xid;
 }
 
 STATIC_FUNCTION(void)
-gpustore_apply_commit(kern_context *kcxt,
+gpucache_apply_commit(kern_context *kcxt,
 					  kern_data_store *kds,
 					  cl_uint owner_id,
-					  GstoreTxLogCommit *c_log)
+					  GCacheTxLogCommit *c_log)
 {
-	GstoreFdwSysattr *sysattr;
+	GpuCacheSysattr *sysattr;
 	char	   *pos = c_log->data;
 
 	for (int i=0; i < c_log->nitems; i++)
@@ -256,37 +255,7 @@ gpustore_apply_commit(kern_context *kcxt,
 }
 
 /*
- * kern_gpustore_initial_load
- */
-KERNEL_FUNCTION(void)
-kern_gpustore_initial_load(kern_gpustore_baserel *baserel,
-						   kern_data_store *kds_dst,	/* KDS_FORMAT_COLUMN */
-						   kern_data_extra *kds_extra)
-{
-	kern_data_store *kds_row = &baserel->kds_row;
-	kern_context	kcxt;
-	cl_uint			i;
-
-	INIT_KERNEL_CONTEXT(&kcxt, NULL);	/* no kparams */
-	for (i=get_global_id(); i < kds_row->nitems; i+=get_global_size())
-	{
-		kern_tupitem	   *tupitem = KERN_DATA_STORE_TUPITEM(kds_row, i);
-		GstoreFdwSysattr   *sysattr;
-
-		sysattr = kds_get_column_sysattr(kds_dst, tupitem->rowid);
-		if (!gpustore_apply_insert(&kcxt,
-								   kds_dst,
-								   kds_extra,
-								   sysattr,
-								   tupitem->rowid,
-								   &tupitem->htup))
-			break;
-	}
-	kern_writeback_error_status(&baserel->kerror, &kcxt);
-}
-
-/*
- * kern_gpustore_setup_owner
+ * kern_gpucache_setup_owner
  *
  * This function setup sysattr->owner_id; that indicates which threads are
  * responsible to assign the target row.
@@ -297,7 +266,7 @@ kern_gpustore_initial_load(kern_gpustore_baserel *baserel,
  * phase = 3 : assign max of get_global_id() who tries to apply commit log
  */
 KERNEL_FUNCTION(void)
-kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
+kern_gpucache_setup_owner(kern_gpucache_redolog *redo,
 						  kern_data_store *kds,
 						  kern_data_extra *extra,
 						  int phase)
@@ -313,17 +282,17 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 		 owner_id < redo->nitems;
 		 owner_id += get_global_size())
 	{
-		GstoreFdwSysattr *sysattr;
-		GstoreTxLogCommon *tx_log;
+		GpuCacheSysattr *sysattr;
+		GCacheTxLogCommon *tx_log;
 		cl_uint		offset = redo->log_index[owner_id];
 
 		/* this log entry is successfully applied, and can be ignored */
 		if (offset == UINT_MAX)
 			continue;
-		tx_log = (GstoreTxLogCommon *)((char *)redo + __kds_unpack(offset));
-		if (tx_log->type == GSTORE_TX_LOG__INSERT)
+		tx_log = (GCacheTxLogCommon *)((char *)redo + __kds_unpack(offset));
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
-			rowid = ((GstoreTxLogInsert *)tx_log)->rowid;
+			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
 
 			sysattr = kds_get_column_sysattr(kds, rowid);
 			if (phase == 0)
@@ -331,9 +300,9 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 			else if (phase == 1)
 				atomicMax(&sysattr->owner_id, owner_id);
 		}
-		else if (tx_log->type == GSTORE_TX_LOG__DELETE)
+		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
 		{
-			rowid = ((GstoreTxLogDelete *)tx_log)->rowid;
+			rowid = ((GCacheTxLogDelete *)tx_log)->rowid;
 
 			sysattr = kds_get_column_sysattr(kds, rowid);
 			if (phase == 0)
@@ -341,9 +310,9 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 			else if (phase == 1)
 				atomicMax(&sysattr->owner_id, owner_id);
 		}
-		else if (tx_log->type == GSTORE_TX_LOG__COMMIT)
+		else if (tx_log->type == GCACHE_TX_LOG__COMMIT)
 		{
-			GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)tx_log;
+			GCacheTxLogCommit *c_log = (GCacheTxLogCommit *)tx_log;
 			char   *pos = c_log->data;
 			int		i;
 
@@ -375,7 +344,7 @@ kern_gpustore_setup_owner(kern_gpustore_redolog *redo,
 }
 
 KERNEL_FUNCTION(void)
-kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
+kern_gpucache_apply_redo(kern_gpucache_redolog *redo,
 						 kern_data_store *kds,
 						 kern_data_extra *extra,
 						 int phase)
@@ -392,8 +361,8 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 		 owner_id < redo->nitems;
 		 owner_id += get_global_size())
 	{
-		GstoreTxLogCommon *tx_log;
-		GstoreFdwSysattr *sysattr;
+		GCacheTxLogCommon *tx_log;
+		GpuCacheSysattr *sysattr;
 		cl_uint		offset = redo->log_index[owner_id];
 
 		/*
@@ -404,36 +373,36 @@ kern_gpustore_apply_redo(kern_gpustore_redolog *redo,
 		if (offset == UINT_MAX)
 			continue;
 
-		tx_log = (GstoreTxLogCommon *)((char *)redo + __kds_unpack(offset));
-		if (tx_log->type == GSTORE_TX_LOG__INSERT)
+		tx_log = (GCacheTxLogCommon *)((char *)redo + __kds_unpack(offset));
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
-			GstoreTxLogInsert *i_log = (GstoreTxLogInsert *)tx_log;
+			GCacheTxLogInsert *i_log = (GCacheTxLogInsert *)tx_log;
 
 			sysattr = kds_get_column_sysattr(kds, i_log->rowid);
 			if (sysattr->owner_id == owner_id && phase == 2)
 			{
-				if (gpustore_apply_insert(&kcxt, kds, extra, sysattr,
+				if (gpucache_apply_insert(&kcxt, kds, extra, sysattr,
 										  i_log->rowid, &i_log->htup))
 					redo->log_index[owner_id] = UINT_MAX;
 			}
 		}
-		else if (tx_log->type == GSTORE_TX_LOG__DELETE)
+		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
 		{
-			GstoreTxLogDelete *d_log = (GstoreTxLogDelete *)tx_log;
+			GCacheTxLogDelete *d_log = (GCacheTxLogDelete *)tx_log;
 
 			sysattr = kds_get_column_sysattr(kds, d_log->rowid);
 			if (sysattr->owner_id == owner_id && phase == 2)
 			{
-				gpustore_apply_delete(&kcxt, d_log, sysattr);
+				gpucache_apply_delete(&kcxt, d_log, sysattr);
 				redo->log_index[owner_id] = UINT_MAX;
 			}
 		}
-		else if (tx_log->type == GSTORE_TX_LOG__COMMIT)
+		else if (tx_log->type == GCACHE_TX_LOG__COMMIT)
 		{
-			GstoreTxLogCommit *c_log = (GstoreTxLogCommit *)tx_log;
+			GCacheTxLogCommit *c_log = (GCacheTxLogCommit *)tx_log;
 
 			if (phase == 4)
-				gpustore_apply_commit(&kcxt, kds, owner_id, c_log);
+				gpucache_apply_commit(&kcxt, kds, owner_id, c_log);
 		}
 		else
 		{
@@ -447,7 +416,7 @@ skip:
 }
 
 KERNEL_FUNCTION(void)
-kern_gpustore_compaction(kern_data_store *kds,
+kern_gpucache_compaction(kern_data_store *kds,
 						 kern_data_extra *old_extra,
 						 kern_data_extra *new_extra)
 {
@@ -459,7 +428,7 @@ kern_gpustore_compaction(kern_data_store *kds,
 	for (int loop=0; loop < nloops; loop++)
 	{
 		cl_uint		rowid = get_global_id() + loop * get_global_size();
-		GstoreFdwSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+		GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
 
 		for (int j=0; j < kds->ncols-1; j++)
 		{
