@@ -228,36 +228,15 @@ typedef struct
 } GpuCacheOptions;
 
 static void
-parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
+__parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
 {
 	int			cuda_dindex = 0;				/* default: GPU0 */
 	int			gpu_sync_interval = 5000000L;	/* default: 5sec = 5000000us */
 	ssize_t		gpu_sync_threshold = -1;		/* default: auto */
 	int64		max_num_rows = (10UL << 20);	/* default: 10M rows */
 	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
-	char	   *config;
 	char	   *key, *value;
 	char	   *saved;
-
-	/* extract trigger argument option string, if any */
-	if (trig->tgnargs == 0)
-		goto out;	/* all default */
-	else if (trig->tgnargs == 1)
-	{
-		Const  *con = (Const *)stringToNode(trig->tgargs[0]);
-
-		if (!IsA(con, Const))
-			elog(ERROR, "trigger argument must be const value");
-		if (con->constisnull)
-			goto out;	/* all default */
-		if (con->consttype != TEXTOID)
-			elog(ERROR, "trigger argument must be text value");
-		config = TextDatumGetCString(con->constvalue);
-	}
-	else
-	{
-		elog(ERROR, "too much trigger arguments");
-	}
 
 	for (key = strtok_r(config, ",", &saved);
 		 key != NULL;
@@ -359,7 +338,7 @@ parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
 		}
 	}
 	pfree(config);
-out:
+
 	if (gc_options)
 	{
 		if (gpu_sync_threshold < 0)
@@ -376,15 +355,40 @@ out:
 	}
 }
 
+static inline void
+parseSyncTriggerOptions(Trigger *trig, GpuCacheOptions *gc_options)
+{
+	char	   *config = NULL;
+
+	if (trig->tgnargs == 1)
+	{
+		Const  *con = (Const *)stringToNode(trig->tgargs[0]);
+
+		if (!IsA(con, Const))
+			elog(ERROR, "trigger argument must be const value");
+		if (!con->constisnull)
+		{
+			if (con->consttype != TEXTOID)
+				elog(ERROR, "trigger argument must be text value");
+			config = TextDatumGetCString(con->constvalue);
+		}
+	}
+	else
+	{
+		elog(ERROR, "too much trigger arguments");
+	}
+	__parseSyncTriggerOptions(config, gc_options);
+}
+
 /*
  * gpucache_sync_trigger_function_oid
  */
+static Oid	__gpucache_sync_trigger_function_oid = InvalidOid;
+
 static Oid
 gpucache_sync_trigger_function_oid(void)
 {
-	static Oid	__gpucache_sync_trigger_oid = InvalidOid;
-
-	if (!OidIsValid(__gpucache_sync_trigger_oid))
+	if (!OidIsValid(__gpucache_sync_trigger_function_oid))
 	{
 		Oid		namespace_oid;
 		oidvector argtypes;
@@ -401,14 +405,14 @@ gpucache_sync_trigger_function_oid(void)
 		argtypes.dim1 = 0;
 		argtypes.lbound1 = 0;
 
-		__gpucache_sync_trigger_oid
-			= GetSysCacheOid3(PROCNAMEARGSNSP,
-							  Anum_pg_proc_oid,
-							  CStringGetDatum("gpucache_sync_trigger"),
-							  PointerGetDatum(&argtypes),
-							  ObjectIdGetDatum(namespace_oid));
+		__gpucache_sync_trigger_function_oid =
+			GetSysCacheOid3(PROCNAMEARGSNSP,
+							Anum_pg_proc_oid,
+							CStringGetDatum("gpucache_sync_trigger"),
+							PointerGetDatum(&argtypes),
+							ObjectIdGetDatum(namespace_oid));
 	}
-	return __gpucache_sync_trigger_oid;
+	return __gpucache_sync_trigger_function_oid;
 }
 
 /*
@@ -1463,32 +1467,113 @@ gpuCacheUnmapDeviceMemory(GpuContext *gcontext,
 
 
 
+static void
+__gpuCacheObjectAccessCreateTrigger(Oid trigger_oid)
+{
+	Relation	rel;
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	HeapTuple	tuple;
+	Form_pg_trigger pg_trig;
 
+	rel = table_open(TriggerRelationId, AccessShareLock);
+	ScanKeyInit(&skey,
+				Anum_pg_trigger_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(trigger_oid));
+	sscan = systable_beginscan(rel, TriggerOidIndexId, true,
+							   SnapshotSelf, 1, &skey);
+	tuple = systable_getnext(sscan);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "could not find tuple for trigger %u", trigger_oid);
+	pg_trig = (Form_pg_trigger)GETSTRUCT(tuple);
 
+	if (pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
+	{
+		char   *config = NULL;
 
+		if (pg_trig->tgtype != (TRIGGER_TYPE_ROW |
+								TRIGGER_TYPE_INSERT |
+								TRIGGER_TYPE_DELETE |
+								TRIGGER_TYPE_UPDATE))
+			elog(ERROR, "trigger invoking pgstrom.gpucache_sync_trigger must be AFTER INSERT OR UPDATE OR DELETE FOR EACH ROW");
+		if (pg_trig->tgnargs == 1)
+		{
+			Datum	datum;
+			bool	isnull;
 
+			datum = fastgetattr(tuple, Anum_pg_trigger_tgargs,
+								RelationGetDescr(rel), &isnull);
+			if (!isnull)
+				config = text_to_cstring((text *)datum);
+		}
+		else if (pg_trig->tgnargs > 1)
+			elog(ERROR, "trigger has too much arguments");
+
+		/* validation of GpuCacheOptions */
+		__parseSyncTriggerOptions(config, NULL);
+	}
+	systable_endscan(sscan);
+	table_close(rel, AccessShareLock);
+}
 
 static void
-gpuCachePostDeletion(ObjectAccessType access,
+gpuCacheObjectAccess(ObjectAccessType access,
 					 Oid classId,
 					 Oid objectId,
 					 int subId,
 					 void *arg)
 {
+	elog(LOG, "gpuCacheObjectAccess (access=%d, classId=%u, objectId=%u, subId=%d)",
+		 access, classId, objectId, subId);
 	if (object_access_next)
 		object_access_next(access, classId, objectId, subId, arg);
 
+	if (access == OAT_POST_CREATE &&
+		classId == TriggerRelationId)
+	{
+		/* CREATE OR REPLACE TRIGGER */
+		Assert(subId == 0);
+		__gpuCacheObjectAccessCreateTrigger(objectId);
+	}
+	else if (access == OAT_POST_ALTER &&
+			 classId == RelationRelationId)
+	{
+		/*
+		 * ALTER TABLE, but not ALTER TRIGGER because it changes only name
+		 * of the triggers; should not affect to the GpuCache.
+		 */
 
+		//invalidate GpuCache
+	}
+	else if (access == OAT_DROP &&
+			 classId == TriggerRelationId)
+	{
+		/* DROP TRIGGER */
 
-	
+		//invalidate GpuCache
+	}
 }
 
 static void
-gpuCacheInvalidateBuffers(Datum arg, Oid relid)
+gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-	/* unmap local buffers */
+	elog(LOG, "gpuCacheRelcacheCallback (relid=%u)", relid);
+
+
+
+
+
+
+
 }
 
+static void
+gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	elog(LOG, "gpuCacheSyscacheCallback (cacheid=%u)", cacheid);
+	__gpucache_sync_trigger_function_oid = InvalidOid;
+}
 
 /*
  * gpuCacheAddCommitLog
@@ -2719,11 +2804,12 @@ pgstrom_init_gpu_cache(void)
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_cache;
 
-	/* callback when trigger is dropped */
+	/* callback when trigger is changed */
 	object_access_next = object_access_hook;
-	object_access_hook = gpuCachePostDeletion;
-	/* callbacks to unmap shared buffers */
-	CacheRegisterRelcacheCallback(gpuCacheInvalidateBuffers, 0);
+	object_access_hook = gpuCacheObjectAccess;
+	/* callbacks for invalidation messages */
+	CacheRegisterRelcacheCallback(gpuCacheRelcacheCallback, 0);
+	CacheRegisterSyscacheCallback(PROCOID, gpuCacheSyscacheCallback, 0);
 	/* transaction callbacks */
 	RegisterXactCallback(gpuCacheXactCallback, NULL);
 	RegisterSubXactCallback(gpuCacheSubXactCallback, NULL);
