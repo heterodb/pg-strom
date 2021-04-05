@@ -81,21 +81,6 @@ pg_sysattr_ctid_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
-	{
-		ItemPointerData *t_self = (ItemPointerData *)
-			kern_context_alloc(kcxt, sizeof(ItemPointerData));
-		if (t_self)
-		{
-			t_self->ip_blkid.bi_hi = (rowid >> 16);
-			t_self->ip_blkid.bi_lo = (rowid & 0xffffU);
-			t_self->ip_posid       = 0;
-			dclass = DATUM_CLASS__NORMAL;
-			value  = PointerGetDatum(t_self);
-			return sizeof(ItemPointerData);
-		}
-		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
-	}
 	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
@@ -107,13 +92,7 @@ pg_sysattr_oid_fetch_column(kern_context *kcxt,
 							cl_char &dclass,
 							Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = 0;
-	}
+	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -124,17 +103,6 @@ pg_sysattr_xmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
-	{
-		GpuCacheSysattr *sysattr = (GpuCacheSysattr *)
-			kern_get_datum_column(kds, NULL, kds->nr_colmeta-1, rowid);
-		if (sysattr)
-		{
-			dclass = DATUM_CLASS__NORMAL;
-			value  = sysattr->xmin;
-			return 0;
-		}
-	}
 	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
@@ -146,17 +114,6 @@ pg_sysattr_xmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
-	{
-		GpuCacheSysattr *sysattr = (GpuCacheSysattr *)
-			kern_get_datum_column(kds, NULL, kds->nr_colmeta-1, rowid);
-		if (sysattr)
-		{
-			dclass = DATUM_CLASS__NORMAL;
-			value  = sysattr->xmax;
-			return 0;
-		}
-	}
 	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
@@ -168,13 +125,7 @@ pg_sysattr_cmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = (Datum)InvalidCommandId;
-	}
+	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -185,13 +136,7 @@ pg_sysattr_cmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = (Datum)InvalidCommandId;
-	}
+	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 

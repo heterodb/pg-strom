@@ -1840,10 +1840,10 @@ gpuCacheLoadCudaModule(void)
 }
 
 /*
- * gpuCacheAllcDeviceMemory
+ * gpuCacheAllocDeviceMemory
  */
 static CUresult
-__gpuCacheAllcDeviceMemory(GpuCacheDSMMap *gc_dmap)
+__gpuCacheAllocDeviceMemory(GpuCacheDSMMap *gc_dmap)
 {
 	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
 	CUdeviceptr		m_main = 0;
@@ -1913,11 +1913,166 @@ error_0:
 }
 
 static CUresult
-gpuCacheAllcDeviceMemory(GpuCacheDSMMap *gc_dmap)
+gpuCacheAllocDeviceMemory(GpuCacheDSMMap *gc_dmap)
 {
 	if (gc_dmap->gpu_main_devptr != 0UL)
 		return CUDA_SUCCESS;
-	return __gpuCacheAllcDeviceMemory(gc_dmap);
+	return __gpuCacheAllocDeviceMemory(gc_dmap);
+}
+
+/*
+ * GCACHE_BGWORKER_CMD__COMPACTION command
+ */
+static CUresult
+gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDSMMap *gc_dmap)
+{
+	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+	kern_data_extra	h_extra;
+	int				grid_sz, block_sz;
+	size_t			curr_usage;
+	CUdeviceptr		m_try_extra = 0UL;
+	CUdeviceptr		m_new_extra = 0UL;
+	CUdeviceptr		m_temp;
+	CUipcMemHandle	new_mhandle;
+	CUresult		rc;
+	void		   *kern_args[3];
+
+	if (gc_dmap->gpu_extra_devptr == 0UL)
+		return CUDA_SUCCESS;	/* nothing to do, if no extra buffer */
+
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
+							   gcache_kfunc_compaction,
+							   gc_sstate->cuda_dindex,
+							   0, 0);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+
+	/*
+	 * phase-1: Estimation of the required device memory. This dummy
+	 * extra buffer is initialized to usage > length, so compaction
+	 * kernel never copy the varlena values.
+	 */
+	rc = cuMemAllocManaged(&m_try_extra, sizeof(kern_data_extra),
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuMemAllocManaged: %s", errorText(rc));
+		return rc;
+	}
+	memset(&h_extra, 0, offsetof(kern_data_extra, data));
+	h_extra.usage  = offsetof(kern_data_extra, data);
+	memcpy((void *)m_try_extra, &h_extra, offsetof(kern_data_extra, data));
+
+	kern_args[0] = &gc_dmap->gpu_main_devptr;
+	kern_args[1] = &gc_dmap->gpu_extra_devptr;
+	kern_args[2] = &m_try_extra;
+	rc = cuLaunchKernel(gcache_kfunc_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuLaunchKernel: %s", errorText(rc));
+		goto bailout;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuStreamSynchronize: %s", errorText(rc));
+		goto bailout;
+	}
+	curr_usage = ((kern_data_extra *)m_try_extra)->usage;
+
+	/*
+	 * phase-2: Main portion of the compaction. 
+	 * allocation of the new buffer, then, runs the compaction kernel.
+	 */
+	h_extra.length = Max(curr_usage + (64UL << 20),		/* 64MB margin */
+						 (double)curr_usage * 1.15);	/* 15% margin */
+	h_extra.usage = offsetof(kern_data_extra, data);
+	rc = cuMemAlloc(&m_new_extra, h_extra.length);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuMemAlloc(%zu): %s",
+			 h_extra.length, errorText(rc));
+		goto bailout;
+	}
+	rc = cuIpcGetMemHandle(&new_mhandle, m_new_extra);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuIpcGetMemHandle: %s",
+			 errorText(rc));
+		goto bailout;
+	}
+	rc = cuMemcpyHtoD(m_new_extra, &h_extra, offsetof(kern_data_extra, data));
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		goto bailout;
+	}
+
+	/* kick the compaction kernel */
+	kern_args[0] = &gc_dmap->gpu_main_devptr;
+	kern_args[1] = &gc_dmap->gpu_extra_devptr;
+	kern_args[2] = &m_new_extra;
+	rc = cuLaunchKernel(gcache_kfunc_compaction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		elog(WARNING, "gpucache: failed on cuLaunchKernel: %s", errorText(rc));
+		goto bailout;
+	}
+	/* check status of the kernel execution status */
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		goto bailout;
+	rc = cuMemcpyDtoH(&h_extra, m_new_extra, offsetof(kern_data_extra, data));
+	if (rc != CUDA_SUCCESS)
+		goto bailout;
+
+	elog(LOG, "gpucache: extra compaction (%u:%u:%u) {length=%zu->%zu, usage=%zu}",
+		 gc_sstate->database_oid,
+		 gc_sstate->table_oid,
+		 gc_sstate->trigger_oid,
+		 gc_sstate->gpu_extra_size, h_extra.length, h_extra.usage);
+
+	/* swap buffer */
+	m_temp = gc_dmap->gpu_extra_devptr;
+	gc_dmap->gpu_extra_devptr = m_new_extra;
+	m_new_extra = m_temp;
+	memcpy(&gc_sstate->gpu_extra_mhandle, &new_mhandle, sizeof(CUipcMemHandle));
+	gc_sstate->gpu_extra_size = h_extra.length;
+
+	/* ok, release old/temporary buffers */
+bailout:
+	if (m_new_extra != 0UL)
+		cuMemFree(m_new_extra);
+	if (m_try_extra != 0UL)
+		cuMemFree(m_try_extra);
+	return rc;
+}
+
+static inline CUresult
+gpuCacheBgWorkerExecCompaction(GpuCacheDSMMap *gc_dmap)
+{
+	GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+	CUresult	rc;
+
+	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
+	rc = gpuCacheBgWorkerExecCompactionNoLock(gc_dmap);
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+
+	return rc;
 }
 
 /*
@@ -2143,7 +2298,7 @@ retry:
 
 	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
 	{
-		//kick compaction
+		rc = gpuCacheBgWorkerExecCompactionNoLock(gc_dmap);
 		if (rc == CUDA_SUCCESS)
 		{
 			memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
@@ -2163,7 +2318,7 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheDSMMap *gc_dmap, uint64 end_pos)
 	if (rc != CUDA_SUCCESS)
 		return rc;
 
-	rc = gpuCacheAllcDeviceMemory(gc_dmap);
+	rc = gpuCacheAllocDeviceMemory(gc_dmap);
 	if (rc != CUDA_SUCCESS)
 		return rc;
 
@@ -2247,6 +2402,9 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 				rc = gpuCacheBgWorkerApplyRedoLog(gc_dmap, cmd->end_pos);
 				break;
 			case GCACHE_BGWORKER_CMD__COMPACTION:
+				rc = gpuCacheBgWorkerExecCompaction(gc_dmap);
+				break;
+				
 			case GCACHE_BGWORKER_CMD__DROP_UNLOAD:
 			default:
 				rc = CUDA_ERROR_INVALID_VALUE;
