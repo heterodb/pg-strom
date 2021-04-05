@@ -2,20 +2,20 @@
 --- GPU memory store
 ---
 
-CREATE FUNCTION pgstrom.gpustore_sync_trigger()
+CREATE FUNCTION pgstrom.gpucache_sync_trigger()
   RETURNS trigger
-  AS 'MODULE_PATHNAME','pgstrom_gpustore_sync_trigger'
+  AS 'MODULE_PATHNAME','pgstrom_gpucache_sync_trigger'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.gpustore_precheck_trigger()
-  RETURNS event_trigger
-  AS 'MODULE_PATHNAME','pgstrom_gpustore_precheck_trigger'
-  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.gpucache_apply_redo(regclass)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gpucache_apply_redo'
+  LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE EVENT TRIGGER pgstrom_gpustore_precheck_trigger
-    ON ddl_command_end
-  WHEN tag in ('CREATE TRIGGER','ALTER TABLE')
-EXECUTE PROCEDURE pgstrom.gpustore_precheck_trigger();
+CREATE FUNCTION pgstrom.gpucache_compaction(regclass)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gpucache_compaction'
+  LANGUAGE C CALLED ON NULL INPUT;
 
 ---
 --- arrow_fdw special import function

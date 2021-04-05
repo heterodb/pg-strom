@@ -212,7 +212,8 @@ static CUresult gpuCacheInvokeCompaction(GpuCacheSharedState *gc_sstate,
 										 bool is_async);
 void	GpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
-//PG_FUNCTION_INFO_V1(pgstrom_gpucache_precheck_event_trigger);
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
 
 /*
  * parseSyncTriggerOptions
@@ -376,10 +377,10 @@ out:
 }
 
 /*
- * lookup_gpucache_sync_trigger_oid
+ * gpucache_sync_trigger_function_oid
  */
 static Oid
-lookup_gpucache_sync_trigger_oid(void)
+gpucache_sync_trigger_function_oid(void)
 {
 	static Oid	__gpucache_sync_trigger_oid = InvalidOid;
 
@@ -413,7 +414,7 @@ lookup_gpucache_sync_trigger_oid(void)
 /*
  * relationLookupSyncTrigger
  */
-static Oid
+static Trigger *
 relationLookupSyncTrigger(Relation rel, GpuCacheOptions *gc_options)
 {
 	TriggerDesc *trigdesc = rel->trigdesc;
@@ -426,7 +427,7 @@ relationLookupSyncTrigger(Relation rel, GpuCacheOptions *gc_options)
 		!trigdesc->trig_delete_after_row)
 		return InvalidOid;	/* quick bailout */
 
-	function_oid = lookup_gpucache_sync_trigger_oid();
+	function_oid = gpucache_sync_trigger_function_oid();
 	for (i=0; i < trigdesc->numtriggers; i++)
 	{
 		Trigger	   *trig = &trigdesc->triggers[i];
@@ -439,10 +440,10 @@ relationLookupSyncTrigger(Relation rel, GpuCacheOptions *gc_options)
 							 TRIGGER_TYPE_UPDATE))
 		{
 			parseSyncTriggerOptions(trig, gc_options);
-			return trig->tgoid;
+			return trig;
 		}
 	}
-	return InvalidOid;
+	return NULL;
 }
 
 /*
@@ -460,6 +461,7 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 	{
 		GpuCacheSyncTrigger *gc_trig;
 		Relation	rel;
+		Trigger	   *trig;
 		bool		found;
 
 		gc_trig = hash_search(gcache_sync_trigger_htab,
@@ -469,8 +471,10 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 			PG_TRY();
 			{
 				rel = relation_open(rte->relid, NoLock);
-				gc_trig->trigger_oid = relationLookupSyncTrigger(rel, NULL);
+				trig = relationLookupSyncTrigger(rel, NULL);
 				relation_close(rel, NoLock);
+
+				gc_trig->trigger_oid = (trig ? trig->tgoid : InvalidOid);
 			}
 			PG_CATCH();
 			{
@@ -491,9 +495,7 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 bool
 RelationHasGpuCache(Relation rel)
 {
-	bool	trigger_oid = relationLookupSyncTrigger(rel, NULL);
-
-	return OidIsValid(trigger_oid);
+	return (relationLookupSyncTrigger(rel, NULL) != NULL);
 }
 
 /*
@@ -1292,42 +1294,91 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(trigdata->tg_trigtuple);
 }
 
-#if 0
 /*
- * pgstrom_gpucache_precheck_event_trigger
+ * pgstrom_gpucache_apply_redo
  */
 Datum
-pgstrom_gpucache_precheck_event_trigger(PG_FUNCTION_ARGS)
+pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
-	EventTriggerData *trigdata;
-	const char	   *command_tag;
+	Oid			table_oid = PG_GETARG_OID(0);
+	Relation	rel;
+	Trigger	   *trig;
+	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
 
-	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
-		elog(ERROR, "%s: must be called as EventTrigger", __FUNCTION__);
-	trigdata = (EventTriggerData *) fcinfo->context;
-	if (strcmp(trigdata->event, "ddl_command_end") != 0)
-		elog(ERROR, "%s: must be called on ddl_command_end event", __FUNCTION__);
-
-	command_tag = GetCommandTagName(trigdata->tag);
-	if (strcmp(command_tag, "CREATE TRIGGER") == 0)
+	rel = relation_open(table_oid, AccessShareLock);
+	trig = relationLookupSyncTrigger(rel, NULL);
+	if (trig)
 	{
-		CreateTrigStmt *stmt = (CreateTrigStmt *)trigdata->parsetree;
-		Relation		rel;
-		GpuCacheDSMMap *gc_dmap;
+		GpuCacheDSMMap *gc_dmap = GetGpuCacheDSMMap(rel, trig);
 
-		rel = relation_openrv_extended(stmt->relation,
-									   AccessShareLock, true);
-		if (rel)
+		if (gc_dmap)
 		{
-			gc_dmap = GetGpuCacheDSMMap(rel);
-			if (gc_dmap)
+			GpuCacheSharedState *gc_sstate = gc_dmap->gc_sstate;
+			uint64		sync_pos;
+
+			PG_TRY();
+			{
+				SpinLockAcquire(&gc_sstate->redo_lock);
+				sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
+				SpinLockRelease(&gc_sstate->redo_lock);
+
+				rc = gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
+			}
+			PG_CATCH();
+			{
 				PutGpuCacheDSMMap(gc_dmap);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			PutGpuCacheDSMMap(gc_dmap);
 		}
-		relation_close(rel, AccessShareLock);
 	}
-	PG_RETURN_NULL();
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_INT32(rc);
 }
-#endif
+
+/*
+ * pgstrom_gpucache_compaction
+ */
+Datum
+pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	Relation	rel;
+	Trigger	   *trig;
+	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
+
+	rel = relation_open(table_oid, AccessShareLock);
+	trig = relationLookupSyncTrigger(rel, NULL);
+	if (trig)
+	{
+		GpuCacheDSMMap *gc_dmap = GetGpuCacheDSMMap(rel, trig);
+
+		if (gc_dmap)
+		{
+			PG_TRY();
+			{
+				rc = gpuCacheInvokeCompaction(gc_dmap->gc_sstate, false);
+			}
+			PG_CATCH();
+			{
+				PutGpuCacheDSMMap(gc_dmap);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			PutGpuCacheDSMMap(gc_dmap);
+		}
+	}
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_INT32(rc);
+
+
+
+
+
+}
 
 /* ---------------------------------------------------------------- *
  *
