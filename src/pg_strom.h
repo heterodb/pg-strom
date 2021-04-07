@@ -1726,6 +1726,14 @@ lappend_cxt(MemoryContext memcxt, List *list, void *datum)
 	return r;
 }
 
+/* initStringInfo on a particular memory context */
+static inline void
+initStringInfoContext(StringInfo str, MemoryContext memcxt)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	initStringInfo(str);
+	MemoryContextSwitchTo(oldcxt);
+}
 
 static inline char *
 format_numeric(cl_long value)

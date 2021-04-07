@@ -45,6 +45,7 @@
 #define tupleDescHasOid(tdesc)		((tdesc)->tdhasoid)
 #define PgProcTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define PgTypeTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define PgTriggerTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define CreateTemplateTupleDesc(a)	CreateTemplateTupleDesc((a), false)
 #define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
 #define SystemAttributeDefinition(a)			\
@@ -53,6 +54,7 @@
 #define tupleDescHasOid(tdesc)		(false)
 #define PgProcTupleGetOid(tuple)	(((Form_pg_proc)GETSTRUCT(tuple))->oid)
 #define PgTypeTupleGetOid(tuple)	(((Form_pg_type)GETSTRUCT(tuple))->oid)
+#define PgTriggerTupleGetOid(tuple)	(((Form_pg_trigger)GETSTRUCT(tuple))->oid)
 #endif
 
 /*
