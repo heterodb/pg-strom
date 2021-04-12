@@ -702,6 +702,7 @@ shmemContextAlloc(MemoryContext __context, Size required)
 	if (!chunk)
 		return NULL;
 	Assert(chunk->memcxt == __context);
+	
 	return chunk->data;
 }
 

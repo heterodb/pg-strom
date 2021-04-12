@@ -23,7 +23,6 @@
  */
 #define GCACHE_BGWORKER_CMD__APPLY_REDO		'A'
 #define GCACHE_BGWORKER_CMD__COMPACTION		'C'
-#define GCACHE_BGWORKER_CMD__TRUNCATE		'T'
 #define GCACHE_BGWORKER_CMD__DROP_UNLOAD	'D'
 typedef struct
 {
@@ -113,9 +112,10 @@ typedef struct
 	pthread_rwlock_t gpu_buffer_lock;
 	CUipcMemHandle	gpu_main_mhandle;
 	CUipcMemHandle	gpu_extra_mhandle;
-	size_t			gpu_main_size;
-	size_t			gpu_extra_size;
-
+	ssize_t			gpu_main_size;
+	ssize_t			gpu_extra_size;
+	CUdeviceptr		gpu_main_devptr;	/* valid only bgworker */
+	CUdeviceptr		gpu_extra_devptr;	/* valid only bgworker */
 
 	/* REDO buffer properties */
 	slock_t			redo_lock;
@@ -144,9 +144,6 @@ typedef struct
 	dsm_segment		   *dsm_seg;	/* DSM */
 	GpuCacheRowIdHash  *rowhash;	/* DSM */
 	GpuCacheRowIdMap   *rowmap;		/* DSM */
-	/* device memory (valid only bgworker) */
-	CUdeviceptr			gpu_main_devptr;
-	CUdeviceptr			gpu_extra_devptr;
 } GpuCacheDesc;
 
 /*
@@ -165,19 +162,13 @@ typedef struct
 	Datum			signature;
 	TransactionId	xid;
 	GpuCacheDesc   *gc_desc;
+	/* additional operations at COMMIT/ABORT */
+	bool			drop_on_rollback;	/* newly configured */
+	bool			drop_on_commit;		/* DROP or TRUNCATE */
 	/* array of PendingRowIdItem */
 	uint32			nitems;
 	StringInfoData	buf;
 } GpuCacheHandle;
-
-/*
- * GpuCacheSyncTrigger
- */
-typedef struct
-{
-	Oid			table_oid;
-	Oid			trigger_oid;
-} GpuCacheSyncTrigger;
 
 /* --- static variables --- */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
@@ -204,6 +195,8 @@ static CUresult gpuCacheInvokeApplyRedo(GpuCacheSharedState *gc_sstate,
 										bool is_async);
 static CUresult gpuCacheInvokeCompaction(GpuCacheSharedState *gc_sstate,
 										 bool is_async);
+static CUresult gpuCacheInvokeDropUnload(GpuCacheSharedState *gc_sstate,
+										 bool is_async);
 void	GpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
@@ -212,54 +205,36 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
 /*
  * gpucache_sync_trigger_function_oid
  */
-static Oid	__gpucache_sync_row_trigger_function_oid = InvalidOid;
-static Oid	__gpucache_sync_stmt_trigger_function_oid = InvalidOid;
+static Oid	__gpucache_sync_trigger_function_oid = InvalidOid;
 
 static Oid
-__gpucache_sync_trigger_function_oid(const char *function_name)
+gpucache_sync_trigger_function_oid(void)
 {
-	Oid		namespace_oid;
-	oidvector argtypes;
-
-	namespace_oid = get_namespace_oid("pgstrom", true);
-	if (!OidIsValid(namespace_oid))
-		return InvalidOid;
-
-	memset(&argtypes, 0, sizeof(oidvector));
-	SET_VARSIZE(&argtypes, offsetof(oidvector, values[0]));
-	argtypes.ndim = 1;
-	argtypes.dataoffset = 0;
-	argtypes.elemtype = OIDOID;
-	argtypes.dim1 = 0;
-	argtypes.lbound1 = 0;
-
-	return GetSysCacheOid3(PROCNAMEARGSNSP,
-						   Anum_pg_proc_oid,
-						   CStringGetDatum(function_name),
-						   PointerGetDatum(&argtypes),
-						   ObjectIdGetDatum(namespace_oid));
-}
-
-static inline Oid
-gpucache_sync_row_trigger_function_oid(void)
-{
-	if (!OidIsValid(__gpucache_sync_row_trigger_function_oid))
+	if (!OidIsValid(__gpucache_sync_trigger_function_oid))
 	{
-		__gpucache_sync_row_trigger_function_oid
-			= __gpucache_sync_trigger_function_oid("gpucache_sync_row_trigger");
-	}
-	return __gpucache_sync_row_trigger_function_oid;
-}
+		Oid		namespace_oid;
+		oidvector argtypes;
 
-static inline Oid
-gpucache_sync_stmt_trigger_function_oid(void)
-{
-	if (!OidIsValid(__gpucache_sync_stmt_trigger_function_oid))
-	{
-		__gpucache_sync_stmt_trigger_function_oid
-			= __gpucache_sync_trigger_function_oid("gpucache_sync_stmt_trigger");
+		namespace_oid = get_namespace_oid("pgstrom", true);
+		if (!OidIsValid(namespace_oid))
+			return InvalidOid;
+
+		memset(&argtypes, 0, sizeof(oidvector));
+		SET_VARSIZE(&argtypes, offsetof(oidvector, values[0]));
+		argtypes.ndim = 1;
+		argtypes.dataoffset = 0;
+		argtypes.elemtype = OIDOID;
+		argtypes.dim1 = 0;
+		argtypes.lbound1 = 0;
+
+		__gpucache_sync_trigger_function_oid
+			= GetSysCacheOid3(PROCNAMEARGSNSP,
+							  Anum_pg_proc_oid,
+							  CStringGetDatum("gpucache_sync_trigger"),
+							  PointerGetDatum(&argtypes),
+							  ObjectIdGetDatum(namespace_oid));
 	}
-	return __gpucache_sync_stmt_trigger_function_oid;
+	return __gpucache_sync_trigger_function_oid;
 }
 
 /*
@@ -284,6 +259,9 @@ __parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
 	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
 	char	   *key, *value;
 	char	   *saved;
+
+	if (!config)
+		goto out;
 
 	for (key = strtok_r(config, ",", &saved);
 		 key != NULL;
@@ -384,8 +362,7 @@ __parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
 			elog(ERROR, "gpucache: unknown option [%s]=[%s]", key, value);
 		}
 	}
-	pfree(config);
-
+out:
 	if (gc_options)
 	{
 		if (gpu_sync_threshold < 0)
@@ -422,7 +399,7 @@ parseSyncTriggerOptions(Relation rel, GpuCacheOptions *gc_options)
 								 TRIGGER_TYPE_INSERT |
 								 TRIGGER_TYPE_DELETE |
 								 TRIGGER_TYPE_UPDATE) &&
-				trig->tgfoid == gpucache_sync_row_trigger_function_oid())
+				trig->tgfoid == gpucache_sync_trigger_function_oid())
 			{
 				if (trig->tgnargs == 1)
 				{
@@ -436,7 +413,7 @@ parseSyncTriggerOptions(Relation rel, GpuCacheOptions *gc_options)
 			}
 			else if (trig->tgenabled &&
 					 trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
-					 trig->tgfoid == gpucache_sync_stmt_trigger_function_oid())
+					 trig->tgfoid == gpucache_sync_trigger_function_oid())
 			{
 				if (trig->tgnargs != 0)
 					elog(ERROR, "gpucache: Too much trigger arguments");
@@ -444,6 +421,9 @@ parseSyncTriggerOptions(Relation rel, GpuCacheOptions *gc_options)
 		}
 	}
 	__parseSyncTriggerOptions(config, gc_options);
+
+	if (config)
+		pfree(config);
 }
 
 /*
@@ -473,7 +453,7 @@ typedef struct
 } GpuCacheTableSignatureCache;
 
 static Datum
-__gpuCacheTableSignature(Relation rel)
+__gpuCacheTableSignature(Relation rel, Oid trigger_oid_dropping)
 {
 	GpuCacheTableSignatureBuffer *sig;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -501,13 +481,22 @@ __gpuCacheTableSignature(Relation rel)
 	{
 		Trigger *trig = &trigdesc->triggers[j];
 
-		if (trig->tgenabled &&
-			trig->tgtype == (TRIGGER_TYPE_ROW |
-							 TRIGGER_TYPE_AFTER |
-							 TRIGGER_TYPE_INSERT |
-							 TRIGGER_TYPE_DELETE |
-							 TRIGGER_TYPE_UPDATE) &&
-			trig->tgfoid == gpucache_sync_row_trigger_function_oid())
+		if (OidIsValid(trigger_oid_dropping) &&
+			trig->tgoid == trigger_oid_dropping)
+		{
+			/*
+			 * On DROP TRIGGER, we check whether it affects to GpuCache
+			 * by the signature as if it does not exist.
+			 */
+			continue;
+		}
+		else if (trig->tgenabled &&
+				 trig->tgtype == (TRIGGER_TYPE_ROW |
+								  TRIGGER_TYPE_AFTER |
+								  TRIGGER_TYPE_INSERT |
+								  TRIGGER_TYPE_DELETE |
+								  TRIGGER_TYPE_UPDATE) &&
+			trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_row_trigger)
 				return 0UL;	/* misconfiguration */
@@ -516,7 +505,7 @@ __gpuCacheTableSignature(Relation rel)
 		}
 		else if (trig->tgenabled &&
 				 trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
-				 trig->tgfoid == gpucache_sync_stmt_trigger_function_oid())
+				 trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_stmt_trigger)
 				return 0UL;	/* misconfiguration */
@@ -552,7 +541,17 @@ gpuCacheTableSignature(Relation rel)
 	if (!found)
 	{
 		Assert(entry->table_oid == table_oid);
-		entry->signature = __gpuCacheTableSignature(rel);
+		PG_TRY();
+		{
+			entry->signature = __gpuCacheTableSignature(rel, InvalidOid);
+		}
+		PG_CATCH();
+		{
+			hash_search(gcache_signatures_htab,
+						&table_oid, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 	return entry->signature;
 }
@@ -612,7 +611,7 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot)
 								TRIGGER_TYPE_INSERT |
 								TRIGGER_TYPE_DELETE |
 								TRIGGER_TYPE_UPDATE) &&
-			pg_trig->tgfoid == gpucache_sync_row_trigger_function_oid())
+			pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_row_trigger)
 				goto no_gpu_cache;
@@ -621,7 +620,7 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot)
 		}
 		else if (pg_trig->tgenabled &&
 				 pg_trig->tgtype == TRIGGER_TYPE_TRUNCATE &&
-				 pg_trig->tgfoid == gpucache_sync_stmt_trigger_function_oid())
+				 pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_stmt_trigger)
 				goto no_gpu_cache;
@@ -692,7 +691,7 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 			PG_TRY();
 			{
 				rel = relation_open(rte->relid, NoLock);
-				entry->signature = __gpuCacheTableSignature(rel);
+				entry->signature = __gpuCacheTableSignature(rel, InvalidOid);
 				relation_close(rel, NoLock);
 			}
 			PG_CATCH();
@@ -742,7 +741,6 @@ __execGpuCacheInitLoad(GpuCacheDesc *gc_desc, Relation rel)
 			item_sz = 2 * sz;
 			item = repalloc(item, item_sz);
 		}
-		item = alloca(sz);
 		item->type = GCACHE_TX_LOG__INSERT;
 		item->length = sz;
 		item->timestamp = GetCurrentTimestamp();
@@ -771,10 +769,9 @@ PutGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
 	Assert(gc_sstate->refcnt > 0);
 	if (--gc_sstate->refcnt == 0)
 	{
-		//device memory should be already released
-
-		
-
+		/* device memory should be already released */
+		Assert(gc_sstate->gpu_main_devptr == 0UL &&
+			   gc_sstate->gpu_extra_devptr == 0UL);
 		Assert(gc_sstate->chain.prev != NULL &&
 			   gc_sstate->chain.next != NULL);
 		dlist_delete(&gc_sstate->chain);
@@ -1039,7 +1036,6 @@ retry:
 	/* ok, now DSM is managed with GpuCacheSharedState */
 	dsm_pin_mapping(gc_desc->dsm_seg);
 	dsm_pin_segment(gc_desc->dsm_seg);
-	gc_desc->refcnt = 1;
 }
 
 /*
@@ -1052,6 +1048,7 @@ GetGpuCacheDesc(Relation rel, Datum signature)
 	GpuCacheDesc   *gc_desc;
 	bool			found;
 
+	Assert(signature != 0);
 	hkey.database_oid = MyDatabaseId;
 	hkey.table_oid = RelationGetRelid(rel);
 	hkey.signature = signature;
@@ -1060,11 +1057,12 @@ GetGpuCacheDesc(Relation rel, Datum signature)
 	if (!found)
 	{
 		GpuCacheOptions gc_options;
+		size_t		sz;
 
 		PG_TRY();
 		{
-			memset(&gc_desc->gc_sstate, 0, (sizeof(GpuCacheDesc) -
-											offsetof(GpuCacheDesc, gc_sstate)));
+			sz = sizeof(GpuCacheDesc) - offsetof(GpuCacheDesc, gc_sstate);
+			memset(&gc_desc->gc_sstate, 0, sz);
 			parseSyncTriggerOptions(rel, &gc_options);
 			GetGpuCacheSharedState(gc_desc, rel, &gc_options);
 		}
@@ -1079,6 +1077,11 @@ GetGpuCacheDesc(Relation rel, Datum signature)
 	if (!gc_desc->gc_sstate)
 		return NULL;
 	gc_desc->refcnt++;
+	elog(LOG, "pid=%u (%u:%u:%09lx) refcnt++=%d", getpid(),
+		 gc_desc->database_oid,
+		 gc_desc->table_oid,
+		 gc_desc->signature,
+		 gc_desc->refcnt);
 	return gc_desc;
 }
 
@@ -1117,6 +1120,12 @@ PutGpuCacheDesc(GpuCacheDesc *gc_desc)
 	Assert(gc_desc->refcnt > 0);
 	if (--gc_desc->refcnt == 0)
 	{
+		elog(LOG, "pid=%u (%u:%u:%09lx) refcnt--=%d", getpid(),
+			 gc_desc->database_oid,
+			 gc_desc->table_oid,
+			 gc_desc->signature,
+			 gc_desc->refcnt);
+
 		/* unmap DSM */
 		if (gc_desc->dsm_seg)
 			dsm_detach(gc_desc->dsm_seg);
@@ -1131,39 +1140,49 @@ PutGpuCacheDesc(GpuCacheDesc *gc_desc)
 /*
  * gpuCacheAttachDSM
  */
-static void
+static bool
+__gpuCacheAttachDSM(GpuCacheDesc *gc_desc, bool abort_on_error)
+{
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+	GpuCacheRowIdHash *rowhash;
+	GpuCacheRowIdMap *rowmap;
+	dsm_segment	*dsm_seg;
+	char		*addr;
+
+	dsm_seg = dsm_attach(gc_sstate->dsm_handle);
+	if (!dsm_seg)
+	{
+		if (abort_on_error)
+			elog(ERROR, "gpucache: failed on dsm_attach");
+		return false;
+	}
+	addr = dsm_segment_address(dsm_seg);
+	/* redo log buffer */
+	addr += PAGE_ALIGN(gc_sstate->redo_buffer_size);
+	/* GpuCacheRowIdMap */
+	rowmap = (GpuCacheRowIdMap *)addr;
+	Assert(rowmap->magic == GPUCACHE_DSM_MAGIC &&
+		   rowmap->nrooms == gc_sstate->max_num_rows);
+	addr += PAGE_ALIGN(offsetof(GpuCacheRowIdMap,
+								r_items[rowmap->nrooms]));
+	/* GpuCacheRowIdHash */
+	rowhash = (GpuCacheRowIdHash *)addr;
+	Assert(rowhash->magic == GPUCACHE_DSM_MAGIC);
+	addr += PAGE_ALIGN(offsetof(GpuCacheRowIdHash,
+								hash_slot[rowhash->nslots]));
+
+	gc_desc->dsm_seg = dsm_seg;
+	gc_desc->rowhash = rowhash;
+	gc_desc->rowmap  = rowmap;
+
+	return true;
+}
+
+static inline void
 gpuCacheAttachDSM(GpuCacheDesc *gc_desc)
 {
 	if (!gc_desc->dsm_seg)
-	{
-		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
-		GpuCacheRowIdHash *rowhash;
-		GpuCacheRowIdMap *rowmap;
-		dsm_segment	*dsm_seg;
-		char		*addr;
-
-		dsm_seg = dsm_attach(gc_sstate->dsm_handle);
-		if (!dsm_seg)
-			elog(ERROR, "gpucache: failed on dsm_attach");
-		addr = dsm_segment_address(dsm_seg);
-		/* redo log buffer */
-		addr += PAGE_ALIGN(gc_sstate->redo_buffer_size);
-		/* GpuCacheRowIdMap */
-		rowmap = (GpuCacheRowIdMap *)addr;
-		Assert(rowmap->magic == GPUCACHE_DSM_MAGIC &&
-			   rowmap->nrooms == gc_sstate->max_num_rows);
-		addr += PAGE_ALIGN(offsetof(GpuCacheRowIdMap,
-									r_items[rowmap->nrooms]));
-		/* GpuCacheRowIdHash */
-		rowhash = (GpuCacheRowIdHash *)addr;
-		Assert(rowhash->magic == GPUCACHE_DSM_MAGIC);
-		addr += PAGE_ALIGN(offsetof(GpuCacheRowIdHash,
-									hash_slot[rowhash->nslots]));
-
-		gc_desc->dsm_seg = dsm_seg;
-		gc_desc->rowhash = rowhash;
-		gc_desc->rowmap  = rowmap;
-	}
+		__gpuCacheAttachDSM(gc_desc, true);
 }
 
 /*
@@ -1277,6 +1296,8 @@ GetGpuCacheHandle(Relation rel)
 
 	hkey.table_oid = RelationGetRelid(rel);
 	hkey.signature = gpuCacheTableSignature(rel);
+	if (hkey.signature == 0UL)
+		return NULL;
 	hkey.xid       = GetCurrentTransactionIdIfAny();
 	if (hkey.xid == InvalidTransactionId)
 		return NULL;
@@ -1286,15 +1307,15 @@ GetGpuCacheHandle(Relation rel)
 	if (!found)
 	{
 		GpuCacheDesc *gc_desc;
+		size_t		sz;
 
-		memset(&gc_handle->gc_desc, 0, (sizeof(GpuCacheHandle) -
-										offsetof(GpuCacheHandle, gc_desc)));
+		sz = sizeof(GpuCacheHandle) - offsetof(GpuCacheHandle, gc_desc);
+		memset(&gc_handle->gc_desc, 0, sz);
 		PG_TRY();
 		{
 			gc_desc = GetGpuCacheDesc(rel, hkey.signature);
 			if (gc_desc)
 			{
-				gc_desc->refcnt++;
 				gc_handle->gc_desc = gc_desc;
 				gc_handle->nitems = 0;
 				initStringInfoContext(&gc_handle->buf, CacheMemoryContext);
@@ -1318,34 +1339,43 @@ static void
 ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 {
 	GpuCacheDesc *gc_desc = gc_handle->gc_desc;
-	char	   *pos = gc_handle->buf.data;
-	uint32		count;
 
-	for (count=0; count < gc_handle->nitems; count++)
+	if ((gc_handle->drop_on_rollback && !normal_commit) ||
+		(gc_handle->drop_on_commit   &&  normal_commit))
 	{
-		PendingRowIdItem *pitem = (PendingRowIdItem *)pos;
-
-		switch (pitem->tag)
-		{
-			case 'I':	/* INSERT */
-				if (!normal_commit)
-					__gpuCacheReleaseRowId(gc_desc, pitem);
-				pos += sizeof(PendingRowIdItem);
-				break;
-
-			case 'D':	/* DELETE */
-				if (normal_commit)
-					__gpuCacheReleaseRowId(gc_desc, pitem);
-				pos += sizeof(PendingRowIdItem);
-				break;
-
-			default:
-				elog(FATAL, "Bug? GpuCacheHandle has corruption");
-		}
+		gpuCacheInvokeDropUnload(gc_desc->gc_sstate, true);
 	}
-	Assert(pos <= gc_handle->buf.data + gc_handle->buf.len);
-	if (gc_handle->gc_desc)
-		PutGpuCacheDesc(gc_handle->gc_desc);
+	else
+	{
+		char   *pos = gc_handle->buf.data;
+		uint32	count;
+
+		for (count=0; count < gc_handle->nitems; count++)
+		{
+			PendingRowIdItem *pitem = (PendingRowIdItem *)pos;
+
+			switch (pitem->tag)
+			{
+				case 'I':	/* INSERT */
+					if (!normal_commit)
+						__gpuCacheReleaseRowId(gc_desc, pitem);
+					pos += sizeof(PendingRowIdItem);
+					break;
+
+				case 'D':	/* DELETE */
+					if (normal_commit)
+						__gpuCacheReleaseRowId(gc_desc, pitem);
+					pos += sizeof(PendingRowIdItem);
+					break;
+
+				default:
+					elog(FATAL, "Bug? GpuCacheHandle has corruption");
+			}
+		}
+		Assert(pos <= gc_handle->buf.data + gc_handle->buf.len);
+	}
+	/* release local mapping */
+	PutGpuCacheDesc(gc_desc);
 	/* cleanup */
 	if (gc_handle->buf.data)
 		pfree(gc_handle->buf.data);
@@ -1490,45 +1520,72 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 }
 
 /*
+ * __gpuCacheTruncateLog
+ */
+static void
+__gpuCacheTruncateLog(GpuCacheHandle *gc_handle)
+{
+	Assert(!gc_handle->drop_on_commit);
+
+	gc_handle->drop_on_commit = true;
+}
+
+/*
  * pgstrom_gpucache_sync_trigger
  */
 Datum
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
-	TriggerEvent	tg_event = trigdata->tg_event;
+	TriggerEvent	tg_event;
 	GpuCacheHandle *gc_handle;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
-			 __FUNCTION__);
-	if (!TRIGGER_FIRED_FOR_ROW(tg_event) ||
-		!TRIGGER_FIRED_AFTER(tg_event))
-		elog(ERROR, "%s: must be called as ROW-AFTER trigger",
-			 __FUNCTION__);
+			 get_func_name(fcinfo->flinfo->fn_oid));
+
+	tg_event = trigdata->tg_event;
+	if (!TRIGGER_FIRED_AFTER(tg_event))
+		elog(ERROR, "%s: must be called as AFTER ROW/STATEMENT",
+			 get_func_name(fcinfo->flinfo->fn_oid));
 
 	gc_handle = GetGpuCacheHandle(trigdata->tg_relation);
 	if (!gc_handle)
-		elog(ERROR, "%s: GPU Store is not configured for %s",
-			 __FUNCTION__, RelationGetRelationName(trigdata->tg_relation));
+		elog(ERROR, "gpucache is not configured for %s",
+			 RelationGetRelationName(trigdata->tg_relation));
 
-	if (TRIGGER_FIRED_BY_INSERT(tg_event))
+	if (TRIGGER_FIRED_FOR_ROW(tg_event))
 	{
-		__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_handle);
-	}
-	else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-	{
-		__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
-		__gpuCacheInsertLog(trigdata->tg_newtuple, gc_handle);
-	}
-	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
-	{
-		__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
+		/* FOR EACH ROW */
+		if (TRIGGER_FIRED_BY_INSERT(tg_event))
+		{
+			__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_handle);
+		}
+		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
+			__gpuCacheInsertLog(trigdata->tg_newtuple, gc_handle);
+		}
+		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		{
+			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
+		}
+		else
+		{
+			elog(ERROR, "gpucache: unexpected trigger event type (%u)", tg_event);
+		}
 	}
 	else
 	{
-		elog(ERROR, "%s: must be called for INSERT, DELETE or UPDATE",
-			 __FUNCTION__);
+		/* FOR EACH STATEMENT */
+		if (TRIGGER_FIRED_BY_TRUNCATE(tg_event))
+		{
+			__gpuCacheTruncateLog(gc_handle);
+		}
+		else
+		{
+			elog(ERROR, "gpucache: unexpected trigger event type (%u)", tg_event);
+		}
 	}
 	PG_RETURN_POINTER(trigdata->tg_trigtuple);
 }
@@ -1741,7 +1798,7 @@ __gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
 		elog(ERROR, "could not find tuple for trigger %u", trigger_oid);
 	pg_trig = (Form_pg_trigger)GETSTRUCT(tuple);
 
-	if (pg_trig->tgfoid == gpucache_sync_row_trigger_function_oid())
+	if (pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 	{
 		char   *config = NULL;
 
@@ -1769,7 +1826,7 @@ __gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
 		/* invalidation of GpuCacheDesc, if needed */
 		__gpuCacheCallbackOnAlterTable(pg_trig->tgrelid);
 	}
-	else if (pg_trig->tgfoid == gpucache_sync_stmt_trigger_function_oid())
+	else if (pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 	{
 		if (pg_trig->tgtype != (TRIGGER_TYPE_TRUNCATE))
 			elog(ERROR, "trigger %s on %s must be AFTER TRUNCATE FOR EACH STATEMENT",
@@ -1785,62 +1842,151 @@ __gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
 }
 
 static void
+__gpuCacheOnDropRelation(Oid table_oid)
+{
+	char		relkind;
+	Relation	rel;
+	GpuCacheHandle *gc_handle;
+
+	relkind = get_rel_relkind(table_oid);
+	if (relkind != RELKIND_RELATION &&
+		relkind != RELKIND_PARTITIONED_TABLE)
+		return;
+		
+	rel = table_open(table_oid, NoLock);
+	gc_handle = GetGpuCacheHandle(rel);
+	if (gc_handle)
+	{
+		gc_handle->drop_on_commit = true;
+		elog(LOG, "__gpuCacheOnDropRelation: marks %s as drop_on_commit",
+			 RelationGetRelationName(rel));
+	}
+	table_close(rel, NoLock);
+}
+
+static void
+__gpuCacheOnDropTrigger(Oid trigger_oid)
+{
+	Relation	srel;
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	HeapTuple	tuple;
+
+	srel = table_open(TriggerRelationId, AccessShareLock);
+	ScanKeyInit(&skey, Anum_pg_trigger_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(trigger_oid));
+	sscan = systable_beginscan(srel, TriggerOidIndexId,
+							   true, NULL, 1, &skey);
+	tuple = systable_getnext(sscan);
+	if (HeapTupleIsValid(tuple))
+	{
+		Relation	urel;
+		Oid			table_oid = ((Form_pg_trigger) GETSTRUCT(tuple))->tgrelid;
+		Datum		signature_old;
+		Datum		signature_new;
+		GpuCacheHandle *gc_handle;
+
+		urel = table_open(table_oid, NoLock);
+		signature_old = gpuCacheTableSignature(urel);
+		signature_new = __gpuCacheTableSignature(urel, trigger_oid);
+		if (signature_old != 0UL &&
+			signature_old != signature_new)
+		{
+			gc_handle = GetGpuCacheHandle(urel);
+			if (gc_handle)
+			{
+				gc_handle->drop_on_commit = true;
+				elog(LOG, "__gpuCacheOnDropTrigger: mark %s as drop_on_commit",
+					 RelationGetRelationName(urel));
+			}
+		}
+		table_close(urel, NoLock);
+	}
+	systable_endscan(sscan);
+	table_close(srel, AccessShareLock);
+}
+
+static void
 gpuCacheObjectAccess(ObjectAccessType access,
 					 Oid classId,
 					 Oid objectId,
 					 int subId,
 					 void *arg)
 {
-	elog(LOG, "gpuCacheObjectAccess (access=%d, classId=%u, objectId=%u, subId=%d)",
-		 access, classId, objectId, subId);
 	if (object_access_next)
 		object_access_next(access, classId, objectId, subId, arg);
 
-	if (access == OAT_POST_CREATE &&
-		classId == TriggerRelationId)
+	if (access == OAT_POST_CREATE)
 	{
-		/* CREATE OR REPLACE TRIGGER */
-		Assert(subId == 0);
-		__gpuCacheCallbackOnCreateTrigger(objectId);
+		if (classId == RelationRelationId && subId > 0)
+		{
+			/* ALTER TABLE ... ADD COLUMN */
+			elog(LOG, "pid=%u OAT_POST_CREATE (pg_class, objectId=%u, subId=%d)",
+				 getpid(), objectId, subId);
+		}
+		else if (classId == TriggerRelationId)
+		{
+			/* CREATE OR REPLACE TRIGGER */
+			elog(LOG, "pid=%u OAT_POST_CREATE (pg_trigger, objectId=%u)",
+				 getpid(), objectId);
+			__gpuCacheCallbackOnCreateTrigger(objectId);
+		}
 	}
-	else if (access == OAT_POST_ALTER &&
-			 classId == RelationRelationId)
+	else if (access == OAT_POST_ALTER)
 	{
-		/*
-		 * ALTER TABLE, but not ALTER TRIGGER because it changes only name
-		 * of the triggers; should not affect to the GpuCache.
-		 */
-
-		//invalidate GpuCache
+		if (classId == RelationRelationId)
+		{
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)",
+				 getpid(), objectId, subId);
+		}
+		else if (classId == TriggerRelationId)
+		{
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)",
+				 getpid(), objectId);
+		}
 	}
-	else if (access == OAT_DROP &&
-			 classId == TriggerRelationId)
+	else if (access == OAT_DROP)
 	{
-		/* DROP TRIGGER */
-
-		//invalidate GpuCache
+		if (classId == RelationRelationId)
+		{
+			elog(LOG, "pid=%u OAT_DROP (pg_class, objectId=%u, subId=%d)",
+				 getpid(), objectId, subId);
+			__gpuCacheOnDropRelation(objectId);
+		}
+		else if (classId == TriggerRelationId)
+		{
+			elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)",
+				 getpid(), objectId);
+			__gpuCacheOnDropTrigger(objectId);
+		}
 	}
 }
 
 static void
 gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-	elog(LOG, "gpuCacheRelcacheCallback (relid=%u)", relid);
+	HASH_SEQ_STATUS	hseq;
+	GpuCacheDesc   *gc_desc;
 
+	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (relid=%u)", getpid(), relid);
+	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
+		return;
 
-
-
-
-
-
+	hash_seq_init(&hseq, gcache_descriptors_htab);
+	while ((gc_desc = hash_seq_search(&hseq)) != NULL)
+	{
+		Assert(gc_desc->database_oid == MyDatabaseId);
+		if (gc_desc->table_oid == relid)
+			PutGpuCacheDesc(gc_desc);
+	}
 }
 
 static void
 gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 {
-	elog(LOG, "gpuCacheSyscacheCallback (cacheid=%u)", cacheid);
-	__gpucache_sync_row_trigger_function_oid = InvalidOid;
-	__gpucache_sync_stmt_trigger_function_oid = InvalidOid;	
+	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
+	__gpucache_sync_trigger_function_oid = InvalidOid;
 }
 
 /*
@@ -2125,6 +2271,20 @@ gpuCacheInvokeCompaction(GpuCacheSharedState *gc_sstate, bool is_async)
 											 0);
 }
 
+/*
+ * GCACHE_BGWORKER_CMD__DROP_UNLOAD
+ */
+static CUresult
+gpuCacheInvokeDropUnload(GpuCacheSharedState *gc_sstate, bool is_async)
+{
+	return __gpuCacheInvokeBackgroundCommand(gc_sstate->database_oid,
+											 gc_sstate->table_oid,
+											 gc_sstate->signature,
+											 gc_sstate->cuda_dindex,
+											 is_async,
+											 GCACHE_BGWORKER_CMD__DROP_UNLOAD,
+											 0);
+}
 
 /*
  * gcache_xact_redo_hook
@@ -2247,13 +2407,17 @@ gpuCacheLoadCudaModule(void)
  * gpuCacheAllocDeviceMemory
  */
 static CUresult
-__gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
+gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 {
 	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUdeviceptr		m_main = 0;
 	CUdeviceptr		m_extra = 0;
 	CUresult		rc;
+	size_t			sz;
 
+	if (gc_sstate->gpu_main_devptr != 0UL)
+		return CUDA_SUCCESS;
+	
 	/* main portion of the device buffer */
 	rc = cuMemAlloc(&m_main, gc_sstate->kds_head.length);
 	if (rc != CUDA_SUCCESS)
@@ -2262,8 +2426,8 @@ __gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 		goto error_0;
 	}
 
-	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head,
-					  KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head));
+	sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
+	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head, sz);
 	if (rc != CUDA_SUCCESS)
 	{
 		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -2304,8 +2468,8 @@ __gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 	}
 	gc_sstate->gpu_main_size = gc_sstate->kds_head.length;
 	gc_sstate->gpu_extra_size = gc_sstate->kds_extra.length;
-	gc_desc->gpu_main_devptr = m_main;
-	gc_desc->gpu_extra_devptr = m_extra;
+	gc_sstate->gpu_main_devptr = m_main;
+	gc_sstate->gpu_extra_devptr = m_extra;
 	return CUDA_SUCCESS;
 
 error_2:
@@ -2316,16 +2480,10 @@ error_0:
 	return rc;
 }
 
-static CUresult
-gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
-{
-	if (gc_desc->gpu_main_devptr != 0UL)
-		return CUDA_SUCCESS;
-	return __gpuCacheAllocDeviceMemory(gc_desc);
-}
-
 /*
  * GCACHE_BGWORKER_CMD__COMPACTION command
+ *
+ * caller must hold exclusive lock on gc_sstate->gpu_buffer_lock
  */
 static CUresult
 gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
@@ -2341,7 +2499,7 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 	CUresult		rc;
 	void		   *kern_args[3];
 
-	if (gc_desc->gpu_extra_devptr == 0UL)
+	if (gc_sstate->gpu_extra_devptr == 0UL)
 		return CUDA_SUCCESS;	/* nothing to do, if no extra buffer */
 
 	rc = __gpuOptimalBlockSize(&grid_sz,
@@ -2368,8 +2526,8 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 	h_extra.usage  = offsetof(kern_data_extra, data);
 	memcpy((void *)m_try_extra, &h_extra, offsetof(kern_data_extra, data));
 
-	kern_args[0] = &gc_desc->gpu_main_devptr;
-	kern_args[1] = &gc_desc->gpu_extra_devptr;
+	kern_args[0] = &gc_sstate->gpu_main_devptr;
+	kern_args[1] = &gc_sstate->gpu_extra_devptr;
 	kern_args[2] = &m_try_extra;
 	rc = cuLaunchKernel(gcache_kfunc_compaction,
 						grid_sz, 1, 1,
@@ -2421,8 +2579,8 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 	}
 
 	/* kick the compaction kernel */
-	kern_args[0] = &gc_desc->gpu_main_devptr;
-	kern_args[1] = &gc_desc->gpu_extra_devptr;
+	kern_args[0] = &gc_sstate->gpu_main_devptr;
+	kern_args[1] = &gc_sstate->gpu_extra_devptr;
 	kern_args[2] = &m_new_extra;
 	rc = cuLaunchKernel(gcache_kfunc_compaction,
 						grid_sz, 1, 1,
@@ -2451,11 +2609,11 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 		 gc_sstate->gpu_extra_size, h_extra.length, h_extra.usage);
 
 	/* swap buffer */
-	m_temp = gc_desc->gpu_extra_devptr;
-	gc_desc->gpu_extra_devptr = m_new_extra;
-	m_new_extra = m_temp;
+	m_temp = gc_sstate->gpu_extra_devptr;
+	gc_sstate->gpu_extra_devptr = m_new_extra;
 	memcpy(&gc_sstate->gpu_extra_mhandle, &new_mhandle, sizeof(CUipcMemHandle));
 	gc_sstate->gpu_extra_size = h_extra.length;
+	m_new_extra = m_temp;
 
 	/* ok, release old/temporary buffers */
 bailout:
@@ -2607,8 +2765,8 @@ __gpuCacheLaunchApplyRedoKernel(GpuCacheDesc *gc_desc, CUdeviceptr m_redo)
 retry:
 	phase = 0;
 	kern_args[0] = &m_redo;
-	kern_args[1] = &gc_desc->gpu_main_devptr;
-	kern_args[2] = &gc_desc->gpu_extra_devptr;
+	kern_args[1] = &gc_sstate->gpu_main_devptr;
+	kern_args[2] = &gc_sstate->gpu_extra_devptr;
 	kern_args[3] = &phase;
 
 	/*
@@ -2715,6 +2873,7 @@ retry:
 static CUresult
 gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
 {
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUdeviceptr	m_redo = 0UL;
 	CUresult	rc, __rc;
 
@@ -2722,13 +2881,18 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
 	if (rc != CUDA_SUCCESS)
 		return rc;
 
+	if (!gc_desc->dsm_seg && !__gpuCacheAttachDSM(gc_desc, false))
+		return CUDA_ERROR_MAP_FAILED;		
+
+	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
+	
 	rc = gpuCacheAllocDeviceMemory(gc_desc);
 	if (rc != CUDA_SUCCESS)
-		return rc;
+		goto out_unlock;
 
 	rc = __gpuCacheSetupRedoLogBuffer(gc_desc, end_pos, &m_redo);
 	if (rc != CUDA_SUCCESS)
-		return rc;
+		goto out_unlock;
 	if (m_redo != 0UL)
 	{
 		rc = __gpuCacheLaunchApplyRedoKernel(gc_desc, m_redo);
@@ -2737,7 +2901,41 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
 		if (__rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuMemFree: %s", errorText(__rc));
 	}
+out_unlock:
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 	return rc;
+}
+
+static CUresult
+gpuCacheBgWorkerDropUnload(GpuCacheDesc *gc_desc)
+{
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+	CUresult	rc;
+
+	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
+	if (gc_sstate->gpu_main_devptr != 0UL)
+	{
+		rc = cuMemFree(gc_sstate->gpu_main_devptr);
+		if (rc != CUDA_SUCCESS)
+			elog(LOG, "gpucache: failed on cuMemFree: %s", errorText(rc));
+		gc_sstate->gpu_main_devptr = 0;
+		gc_sstate->gpu_main_size = 0;
+		memset(&gc_sstate->gpu_main_mhandle, 0, sizeof(CUipcMemHandle));
+	}
+	if (gc_sstate->gpu_extra_devptr != 0UL)
+	{
+		rc = cuMemFree(gc_sstate->gpu_extra_devptr);
+		if (rc != CUDA_SUCCESS)
+			elog(LOG, "gpucache: failed on cuMemFree: %s", errorText(rc));
+		gc_sstate->gpu_extra_devptr = 0;
+		gc_sstate->gpu_extra_size = 0;
+		memset(&gc_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
+	}
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+
+	PutGpuCacheDesc(gc_desc);
+	
+	return CUDA_SUCCESS;
 }
 
 /*
@@ -2779,8 +2977,8 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 	SpinLockRelease(cmd_lock);
 
 	gc_desc = GetGpuCacheDescBgWorker(cmd->database_oid,
-										cmd->table_oid,
-										cmd->signature);
+									  cmd->table_oid,
+									  cmd->signature);
 	if (!gc_desc)
 	{
 		elog(LOG, "gpucache: (key=%u:%u:%lx) was not found",
@@ -2808,8 +3006,9 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 			case GCACHE_BGWORKER_CMD__COMPACTION:
 				rc = gpuCacheBgWorkerExecCompaction(gc_desc);
 				break;
-				
 			case GCACHE_BGWORKER_CMD__DROP_UNLOAD:
+				rc = gpuCacheBgWorkerDropUnload(gc_desc);
+				break;
 			default:
 				rc = CUDA_ERROR_INVALID_VALUE;
 				elog(LOG, "Unexpected GpuCache background command: %d",
