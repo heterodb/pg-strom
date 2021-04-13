@@ -468,6 +468,9 @@ __gpuCacheTableSignature(Relation rel, Oid trigger_oid_dropping)
 	memset(sig, 0, len);
 
 	/* pg_class related */
+	if (rd_rel->relkind != RELKIND_RELATION &&
+		rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+		return 0UL;
 	if (rd_rel->relfilenode == 0)
 		return 0UL;
 	sig->reltablespace	= rd_rel->reltablespace;
@@ -579,8 +582,11 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot)
 							   true, snapshot, 1, skey);
 	tuple = systable_getnext(sscan);
 	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "could not find tuple for relation: %u", table_oid);
+		goto no_gpu_cache;
 	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
+	if (rd_rel->relkind != RELKIND_RELATION &&
+		rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
+		goto no_gpu_cache;
 	len = offsetof(GpuCacheTableSignatureBuffer, attrs[rd_rel->relnatts]);
 	sig = alloca(len);
 	memset(sig, 0, len);
@@ -1284,6 +1290,16 @@ __gpuCacheReleaseRowId(GpuCacheDesc *gc_desc, PendingRowIdItem *pitem)
 	Assert(__rowid == pitem->rowid);
 }
 
+static inline void
+__initGpuCacheHandle(GpuCacheHandle *gc_handle)
+{
+	gc_handle->gc_desc = NULL;
+	gc_handle->drop_on_rollback = false;
+	gc_handle->drop_on_commit = false;
+	gc_handle->nitems = 0;
+	memset(&gc_handle->buf, 0, sizeof(StringInfoData));
+}
+
 /*
  * GetGpuCacheHandle
  */
@@ -1296,30 +1312,18 @@ GetGpuCacheHandle(Relation rel)
 
 	hkey.table_oid = RelationGetRelid(rel);
 	hkey.signature = gpuCacheTableSignature(rel);
-	if (hkey.signature == 0UL)
-		return NULL;
 	hkey.xid       = GetCurrentTransactionIdIfAny();
-	if (hkey.xid == InvalidTransactionId)
+	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
 		return NULL;
 
 	gc_handle = hash_search(gcache_handle_htab,
 							&hkey, HASH_ENTER, &found);
 	if (!found)
 	{
-		GpuCacheDesc *gc_desc;
-		size_t		sz;
-
-		sz = sizeof(GpuCacheHandle) - offsetof(GpuCacheHandle, gc_desc);
-		memset(&gc_handle->gc_desc, 0, sz);
+		__initGpuCacheHandle(gc_handle);
 		PG_TRY();
 		{
-			gc_desc = GetGpuCacheDesc(rel, hkey.signature);
-			if (gc_desc)
-			{
-				gc_handle->gc_desc = gc_desc;
-				gc_handle->nitems = 0;
-				initStringInfoContext(&gc_handle->buf, CacheMemoryContext);
-			}
+			gc_handle->gc_desc = GetGpuCacheDesc(rel, hkey.signature);
 		}
 		PG_CATCH();
 		{
@@ -1343,6 +1347,9 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 	if ((gc_handle->drop_on_rollback && !normal_commit) ||
 		(gc_handle->drop_on_commit   &&  normal_commit))
 	{
+		//TODO: detach DSM
+		//TODO: makes gc_sstate->refcnt a even number
+		
 		gpuCacheInvokeDropUnload(gc_desc->gc_sstate, true);
 	}
 	else
@@ -1756,6 +1763,8 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 	Datum		signature_new;
 	HASH_SEQ_STATUS	hseq;
 	GpuCacheDesc *gc_desc;
+	GpuCacheHandle *gc_handle;
+	bool		found;
 
 	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
 		return;
@@ -1772,19 +1781,26 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 		if (gc_desc->table_oid == table_oid &&
 			gc_desc->signature == signature_old)
 		{
-			PutGpuCacheDesc(gc_desc);
+			gc_handle = hash_search(gcache_handle_htab,
+									gc_desc, HASH_ENTER, &found);
+			if (!found)
+			{
+				__initGpuCacheHandle(gc_handle);
+				gc_desc->refcnt++;
+				gc_handle->gc_desc = gc_desc;
+			}
+			gc_handle->drop_on_commit = true;
 		}
 	}
 }
 
 static void
-__gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
+__gpuCacheCallbackOnAlterTrigger(Oid trigger_oid)
 {
 	Relation	rel;
 	ScanKeyData	skey;
 	SysScanDesc	sscan;
 	HeapTuple	tuple;
-	Form_pg_trigger pg_trig;
 
 	rel = table_open(TriggerRelationId, AccessShareLock);
 	ScanKeyInit(&skey,
@@ -1793,49 +1809,11 @@ __gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
 				ObjectIdGetDatum(trigger_oid));
 	sscan = systable_beginscan(rel, TriggerOidIndexId, true,
 							   SnapshotSelf, 1, &skey);
-	tuple = systable_getnext(sscan);
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "could not find tuple for trigger %u", trigger_oid);
-	pg_trig = (Form_pg_trigger)GETSTRUCT(tuple);
-
-	if (pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
+	while ((tuple = systable_getnext(sscan)) != NULL)
 	{
-		char   *config = NULL;
+		Oid		table_oid = ((Form_pg_trigger)GETSTRUCT(tuple))->tgrelid;
 
-		if (pg_trig->tgtype != (TRIGGER_TYPE_ROW |
-								TRIGGER_TYPE_INSERT |
-								TRIGGER_TYPE_DELETE |
-								TRIGGER_TYPE_UPDATE))
-			elog(ERROR, "trigger %s on %s must be AFTER INSERT OT UPDATE OR DELETE FOR EACH ROW",
-				 NameStr(pg_trig->tgname), get_rel_name(pg_trig->tgrelid));
-		if (pg_trig->tgnargs == 1)
-		{
-			Datum	datum;
-			bool	isnull;
-
-			datum = fastgetattr(tuple, Anum_pg_trigger_tgargs,
-								RelationGetDescr(rel), &isnull);
-			if (!isnull)
-				config = text_to_cstring((text *)datum);
-		}
-		else if (pg_trig->tgnargs > 1)
-			elog(ERROR, "trigger has too much arguments");
-
-		/* validation of GpuCacheOptions */
-		__parseSyncTriggerOptions(config, NULL);
-		/* invalidation of GpuCacheDesc, if needed */
-		__gpuCacheCallbackOnAlterTable(pg_trig->tgrelid);
-	}
-	else if (pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
-	{
-		if (pg_trig->tgtype != (TRIGGER_TYPE_TRUNCATE))
-			elog(ERROR, "trigger %s on %s must be AFTER TRUNCATE FOR EACH STATEMENT",
-				 NameStr(pg_trig->tgname), get_rel_name(pg_trig->tgrelid));
-		if (pg_trig->tgnargs != 0)
-			elog(ERROR, "trigger %s on %s cannot have argument",
-				 NameStr(pg_trig->tgname), get_rel_name(pg_trig->tgrelid));
-		/* invalidation of GpuCacheDesc, if needed */
-		__gpuCacheCallbackOnAlterTable(pg_trig->tgrelid);
+		__gpuCacheCallbackOnAlterTable(table_oid);
 	}
 	systable_endscan(sscan);
 	table_close(rel, AccessShareLock);
@@ -1844,24 +1822,36 @@ __gpuCacheCallbackOnCreateTrigger(Oid trigger_oid)
 static void
 __gpuCacheOnDropRelation(Oid table_oid)
 {
-	char		relkind;
-	Relation	rel;
+	Datum		signature;
+	HASH_SEQ_STATUS hseq;
+	GpuCacheDesc *gc_desc;
 	GpuCacheHandle *gc_handle;
+	bool		found;
 
-	relkind = get_rel_relkind(table_oid);
-	if (relkind != RELKIND_RELATION &&
-		relkind != RELKIND_PARTITIONED_TABLE)
+	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
 		return;
-		
-	rel = table_open(table_oid, NoLock);
-	gc_handle = GetGpuCacheHandle(rel);
-	if (gc_handle)
+	signature = gpuCacheTableSignatureSnapshot(table_oid, NULL);
+	if (signature == 0)
+		return;
+
+	hash_seq_init(&hseq, gcache_descriptors_htab);
+	while ((gc_desc = hash_seq_search(&hseq)) != NULL)
 	{
-		gc_handle->drop_on_commit = true;
-		elog(LOG, "__gpuCacheOnDropRelation: marks %s as drop_on_commit",
-			 RelationGetRelationName(rel));
+		Assert(gc_desc->database_oid == MyDatabaseId);
+		if (gc_desc->table_oid == table_oid &&
+			gc_desc->signature == signature)
+		{
+			gc_handle = hash_search(gcache_handle_htab,
+									gc_desc, HASH_ENTER, &found);
+			if (!found)
+			{
+				__initGpuCacheHandle(gc_handle);
+				gc_desc->refcnt++;
+				gc_handle->gc_desc = gc_desc;
+			}
+			gc_handle->drop_on_commit = true;
+		}
 	}
-	table_close(rel, NoLock);
 }
 
 static void
@@ -1878,30 +1868,11 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 				ObjectIdGetDatum(trigger_oid));
 	sscan = systable_beginscan(srel, TriggerOidIndexId,
 							   true, NULL, 1, &skey);
-	tuple = systable_getnext(sscan);
-	if (HeapTupleIsValid(tuple))
+	while ((tuple = systable_getnext(sscan)) != NULL)
 	{
-		Relation	urel;
-		Oid			table_oid = ((Form_pg_trigger) GETSTRUCT(tuple))->tgrelid;
-		Datum		signature_old;
-		Datum		signature_new;
-		GpuCacheHandle *gc_handle;
+		Oid		table_oid = ((Form_pg_trigger) GETSTRUCT(tuple))->tgrelid;
 
-		urel = table_open(table_oid, NoLock);
-		signature_old = gpuCacheTableSignature(urel);
-		signature_new = __gpuCacheTableSignature(urel, trigger_oid);
-		if (signature_old != 0UL &&
-			signature_old != signature_new)
-		{
-			gc_handle = GetGpuCacheHandle(urel);
-			if (gc_handle)
-			{
-				gc_handle->drop_on_commit = true;
-				elog(LOG, "__gpuCacheOnDropTrigger: mark %s as drop_on_commit",
-					 RelationGetRelationName(urel));
-			}
-		}
-		table_close(urel, NoLock);
+		__gpuCacheCallbackOnAlterTable(table_oid);
 	}
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
@@ -1924,13 +1895,14 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			/* ALTER TABLE ... ADD COLUMN */
 			elog(LOG, "pid=%u OAT_POST_CREATE (pg_class, objectId=%u, subId=%d)",
 				 getpid(), objectId, subId);
+			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
 			/* CREATE OR REPLACE TRIGGER */
 			elog(LOG, "pid=%u OAT_POST_CREATE (pg_trigger, objectId=%u)",
 				 getpid(), objectId);
-			__gpuCacheCallbackOnCreateTrigger(objectId);
+			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
 	else if (access == OAT_POST_ALTER)
@@ -1939,11 +1911,13 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		{
 			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)",
 				 getpid(), objectId, subId);
+			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
 			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)",
 				 getpid(), objectId);
+			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
 	else if (access == OAT_DROP)
