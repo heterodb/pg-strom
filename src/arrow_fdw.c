@@ -1242,6 +1242,8 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 
 		if (referenced && bms_is_member(attidx, referenced))
 			arrowFdwSetupIOvectorField(con, fstate, kds, cmeta);
+		else
+			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
 	}
 	if (con->io_index >= 0)
 	{
@@ -3542,15 +3544,13 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			goto out;
 	}
 
-	if (cmeta->values_length == 0)
-	{
-		/* unreferenced column, so NULL */
-		goto out;
-	}
-	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
+	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
 		kern_colmeta   *smeta;
 		uint32		   *offset;
+
+		if (cmeta->values_length == 0)
+			goto out;		/* unreferenced column, so NULL instead */
 
 		if (cmeta->num_subattrs != 1 ||
 			cmeta->idx_subattrs < kds->ncols ||
@@ -3594,11 +3594,13 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		datum = PointerGetDatum(htup->t_data);
 		isnull = false;
 	}
-	else
+	else if (cmeta->atttypkind == TYPE_KIND__BASE)
 	{
 		int		i;
 
-		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
+		if (cmeta->values_length == 0)
+			goto out;		/* unreferenced column, so NULL instead */
+
 		switch (cmeta->atttypid)
 		{
 			case INT1OID:
@@ -3663,6 +3665,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				break;
 		}
 		isnull = false;
+	}
+	else
+	{
+		Assert(cmeta->atttypkind == TYPE_KIND__NULL);
 	}
 out:
 	*p_datum  = datum;

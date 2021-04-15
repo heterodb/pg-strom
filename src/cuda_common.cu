@@ -1912,7 +1912,12 @@ __pg_composite_from_arrow(kern_context *kcxt,
 	{
 		kern_colmeta   *smeta = comp->smeta + j;
 
-		if (smeta->atttypkind == TYPE_KIND__COMPOSITE)
+		if (smeta->atttypkind == TYPE_KIND__NULL)
+		{
+			tup_dclass[j] = DATUM_CLASS__NULL;
+			tup_values[j] = 0;
+		}
+		else if (smeta->atttypkind == TYPE_KIND__COMPOSITE)
 		{
 			pg_composite_t	temp;
 
