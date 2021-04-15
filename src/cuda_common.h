@@ -794,6 +794,7 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
  */
 #include "arrow_defs.h"
 
+#define TYPE_KIND__NULL			'n'		/* unreferenced column */
 #define TYPE_KIND__BASE			'b'
 #define TYPE_KIND__ARRAY		'a'
 #define TYPE_KIND__COMPOSITE	'c'

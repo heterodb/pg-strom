@@ -1242,6 +1242,8 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 
 		if (referenced && bms_is_member(attidx, referenced))
 			arrowFdwSetupIOvectorField(con, fstate, kds, cmeta);
+		else
+			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
 	}
 	if (con->io_index >= 0)
 	{
@@ -3542,13 +3544,9 @@ pg_datum_arrow_ref(kern_data_store *kds,
 			goto out;
 	}
 
-	if (cmeta->values_length == 0)
+	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
-		/* unreferenced column, so NULL */
-		goto out;
-	}
-	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
-	{
+		/* array type */
 		kern_colmeta   *smeta;
 		uint32		   *offset;
 
@@ -3567,6 +3565,7 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	}
 	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
 	{
+		/* composite type */
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(cmeta->atttypid, -1);
 		Datum	   *sub_values = alloca(sizeof(Datum) * tupdesc->natts);
 		bool	   *sub_isnull = alloca(sizeof(bool)  * tupdesc->natts);
@@ -3594,11 +3593,11 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		datum = PointerGetDatum(htup->t_data);
 		isnull = false;
 	}
-	else
+	else if (cmeta->atttypkind != TYPE_KIND__NULL)
 	{
+		/* anything else, except for unreferenced column */
 		int		i;
 
-		Assert(cmeta->atttypkind == TYPE_KIND__BASE);
 		switch (cmeta->atttypid)
 		{
 			case INT1OID:
