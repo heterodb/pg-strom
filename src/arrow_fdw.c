@@ -3546,11 +3546,9 @@ pg_datum_arrow_ref(kern_data_store *kds,
 
 	if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
+		/* array type */
 		kern_colmeta   *smeta;
 		uint32		   *offset;
-
-		if (cmeta->values_length == 0)
-			goto out;		/* unreferenced column, so NULL instead */
 
 		if (cmeta->num_subattrs != 1 ||
 			cmeta->idx_subattrs < kds->ncols ||
@@ -3567,6 +3565,7 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	}
 	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
 	{
+		/* composite type */
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(cmeta->atttypid, -1);
 		Datum	   *sub_values = alloca(sizeof(Datum) * tupdesc->natts);
 		bool	   *sub_isnull = alloca(sizeof(bool)  * tupdesc->natts);
@@ -3594,12 +3593,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 		datum = PointerGetDatum(htup->t_data);
 		isnull = false;
 	}
-	else if (cmeta->atttypkind == TYPE_KIND__BASE)
+	else if (cmeta->atttypkind != TYPE_KIND__NULL)
 	{
+		/* anything else, except for unreferenced column */
 		int		i;
-
-		if (cmeta->values_length == 0)
-			goto out;		/* unreferenced column, so NULL instead */
 
 		switch (cmeta->atttypid)
 		{
@@ -3665,10 +3662,6 @@ pg_datum_arrow_ref(kern_data_store *kds,
 				break;
 		}
 		isnull = false;
-	}
-	else
-	{
-		Assert(cmeta->atttypkind == TYPE_KIND__NULL);
 	}
 out:
 	*p_datum  = datum;
