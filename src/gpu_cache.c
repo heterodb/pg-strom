@@ -98,7 +98,7 @@ typedef struct
 	Oid				table_oid;
 	Datum			signature;
 	char			table_name[NAMEDATALEN];	/* for debugging */
-	int				refcnt;
+	pg_atomic_uint32 refcnt;
 	/* GPU memory store resources */
 	int				initial_loading;
 	dsm_handle		dsm_handle;
@@ -776,9 +776,8 @@ __OnDetachGpuCacheDSMSegment(dsm_segment *dsm_seg, Datum __gc_sstate)
 	GpuCacheSharedState *gc_sstate = (GpuCacheSharedState *)__gc_sstate;
 
 	SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
-	Assert(gc_sstate->refcnt >= 2);
-	gc_sstate->refcnt -= 2;
-	if (gc_sstate->refcnt == 0)
+	Assert(pg_atomic_read_u32(&gc_sstate->refcnt) >= 2);
+	if (pg_atomic_sub_fetch_u32(&gc_sstate->refcnt, 2) == 0)
 	{
 		elog(LOG, "pid=%u: Drop GpuCacheSharedState (%s:%lx)",
 			 getpid(),
@@ -875,7 +874,7 @@ __createGpuCacheSharedState(GpuCacheDesc *gc_desc,
 	gc_sstate->table_oid = gc_desc->table_oid;
 	gc_sstate->signature = gc_desc->signature;
 	strncpy(gc_sstate->table_name, table_name, NAMEDATALEN);
-	gc_sstate->refcnt = 2;
+	pg_atomic_init_u32(&gc_sstate->refcnt, 2);
 	gc_sstate->initial_loading = -1;	/* not yet */
 	gc_sstate->dsm_handle = DSM_HANDLE_INVALID;	/* to be set later */
 
@@ -1006,8 +1005,9 @@ __attachGpuCacheSharedState(GpuCacheDesc *gc_desc,
 	}
 	on_dsm_detach(dsm_seg, __OnDetachGpuCacheDSMSegment,
 				  PointerGetDatum(gc_sstate));
+	dsm_pin_mapping(dsm_seg);
 	/* ok, all green */
-	gc_sstate->refcnt += 2;
+	pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 2);
 	gc_desc->gc_sstate = gc_sstate;
 	gc_desc->dsm_seg = dsm_seg;
 	gc_desc->rowhash = rowhash;
@@ -1052,7 +1052,7 @@ retry:
 			gc_sstate->table_oid    == gc_desc->table_oid &&
 			gc_sstate->signature    == gc_desc->signature)
 		{
-			if ((gc_sstate->refcnt & 1) == 0)
+			if ((pg_atomic_read_u32(&gc_sstate->refcnt) & 1) == 0)
 			{
 				/*
 				 * If refcnt is even number, GpuCacheSharedState is already
@@ -1078,7 +1078,7 @@ retry:
 				 * negative initial_loading means someone has never
 				 * tried initial-loading, or failed once.
 				 */
-				gc_sstate->refcnt += 2;
+				pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 2);
 				goto found_uninitialized;
 			}
 			/* ok, all green */
@@ -1154,7 +1154,7 @@ found_uninitialized:
 	/* ok, all done */
 	SpinLockAcquire(lock);
 	gc_sstate->initial_loading = 0;		/* ready now */
-	gc_sstate->refcnt |= 1;			/* odd number - a valid entry */
+	pg_atomic_fetch_or_u32(&gc_sstate->refcnt, 1);	/* odd number - a valid entry */
 	SpinLockRelease(lock);
 }
 
@@ -1191,6 +1191,7 @@ GetGpuCacheDesc(Relation rel, Datum signature)
 		}
 		PG_END_TRY();
 	}
+	elog(LOG, "GetGpuCacheDesc: %s", RelationGetRelationName(rel));
 	return (gc_desc->gc_sstate ? gc_desc : NULL);
 }
 
@@ -1231,19 +1232,14 @@ static void
 ReleaseGpuCacheDescIfUnused(GpuCacheDesc *gc_desc)
 {
 	GpuCacheSharedState *gc_sstate;
-	bool		dropped;
-	
+
 	if (!dlist_is_empty(&gc_desc->gc_handles))
 		return;
 
 	gc_sstate = gc_desc->gc_sstate;
 	if (gc_sstate)
 	{
-		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
-		dropped = ((gc_sstate->refcnt & 1) == 0);
-		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
-
-		if (dropped)
+		if ((pg_atomic_read_u32(&gc_sstate->refcnt) & 1) == 0)
 		{
 			dsm_detach(gc_desc->dsm_seg);
 			hash_search(gcache_descriptors_htab, gc_desc, HASH_REMOVE, NULL);
@@ -1284,7 +1280,7 @@ __gpuCacheAllocateRowId(GpuCacheDesc *gc_desc, ItemPointer ctid)
 	Assert(!ItemPointerIsValid(&r_item->ctid));
 	rowhash->free_list = r_item->next;
 
-	ItemPointerCopy(&r_item->ctid, ctid);
+	ItemPointerCopy(ctid, &r_item->ctid);
 	r_item->next = rowhash->hash_slot[index];
 	rowhash->hash_slot[index] = rowid;
 
@@ -1418,10 +1414,11 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 	if ((gc_handle->drop_on_rollback && !normal_commit) ||
 		(gc_handle->drop_on_commit   &&  normal_commit))
 	{
-		//TODO: detach DSM
-		//TODO: makes gc_sstate->refcnt a even number
-		
-		gpuCacheInvokeDropUnload(gc_desc->gc_sstate, true);
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
+		dsm_unpin_segment(gc_sstate->dsm_handle);
+		pg_atomic_fetch_and_u32(&gc_sstate->refcnt, 0xfffffffeU);
+		gpuCacheInvokeDropUnload(gc_sstate, true);
 	}
 	else
 	{
@@ -1452,6 +1449,11 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 		}
 		Assert(pos <= gc_handle->buf.data + gc_handle->buf.len);
 	}
+	elog(LOG, "ReleaseGpuCacheHandle: %s:%lx xid=%u",
+		 gc_desc->gc_sstate->table_name,
+		 gc_desc->gc_sstate->signature,
+		 gc_handle->xid);
+
 	/* detach GpuCacheDesc */
 	dlist_delete(&gc_handle->chain);
 	ReleaseGpuCacheDescIfUnused(gc_desc);
@@ -1532,14 +1534,13 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 static void
 __gpuCacheInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 {
-	GpuCacheDesc   *gc_desc = gc_handle->gc_desc;
+	GpuCacheDesc *gc_desc = gc_handle->gc_desc;
 	GCacheTxLogInsert *item;
 	PendingRowIdItem rlog;
 	cl_uint		rowid;
 	size_t		sz;
-	
+
 	/* Track RowId allocation */
-	enlargeStringInfo(&gc_handle->buf, sizeof(PendingRowIdItem));
 	rowid = __gpuCacheAllocateRowId(gc_desc, &tuple->t_self);
 	rlog.tag = 'I';
 	rlog.ctid = tuple->t_self;
@@ -1547,6 +1548,8 @@ __gpuCacheInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	appendBinaryStringInfo(&gc_handle->buf,
 						   (char *)&rlog,
 						   sizeof(PendingRowIdItem));
+	gc_handle->nitems++;
+
 	/* INSERT Log */
 	sz = MAXALIGN(offsetof(GCacheTxLogInsert, htup) + tuple->t_len);
 	item = alloca(sz);
@@ -1574,7 +1577,6 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	cl_uint		rowid;
 
 	/* Track RowId release */
-	enlargeStringInfo(&gc_handle->buf, sizeof(PendingRowIdItem));
 	rowid = __gpuCacheLookupRowId(gc_desc, &tuple->t_self);
 	rlog.tag = 'D';
 	rlog.ctid = tuple->t_self;
@@ -1582,6 +1584,8 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	appendBinaryStringInfo(&gc_handle->buf,
 						   (char *)&rlog,
 						   sizeof(PendingRowIdItem));
+	gc_handle->nitems++;
+
 	/* DELETE Log */
 	item.type = GCACHE_TX_LOG__DELETE;
 	item.length = MAXALIGN(sizeof(GCacheTxLogDelete));
@@ -2031,7 +2035,7 @@ gpuCacheAddCommitLog(GpuCacheHandle *gc_handle)
 					flush_commit_log = true;
 					break;
 				}
-				temp = c_log->data + c_log->length;
+				temp = (char *)c_log + c_log->length;
 				*temp++ = pitem->tag;
 				*((uint32 *)temp) = pitem->rowid;
 				c_log->nitems++;
@@ -2060,6 +2064,11 @@ gpuCacheAddCommitLog(GpuCacheHandle *gc_handle)
 			c_log->nitems = 0;
 		}
 	}
+	elog(LOG, "AddCommitLog: %s:%lx xid=%u nitems=%u",
+		 gc_handle->gc_desc->gc_sstate->table_name,
+		 gc_handle->gc_desc->gc_sstate->signature,
+		 gc_handle->xid,
+		 gc_handle->nitems);
 }
 
 /*
@@ -2068,7 +2077,7 @@ gpuCacheAddCommitLog(GpuCacheHandle *gc_handle)
 static void
 gpuCacheXactCallback(XactEvent event, void *arg)
 {
-#if 1
+#if 0
 	elog(INFO, "XactCallback: ev=%s xid=%u top-xid=%u",
 		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
 		 event == XACT_EVENT_ABORT   ? "XACT_EVENT_ABORT"  :
@@ -2116,7 +2125,7 @@ gpuCacheSubXactCallback(SubXactEvent event,
 						SubTransactionId mySubid,
 						SubTransactionId parentSubid, void *arg)
 {
-#if 1
+#if 0
 	elog(INFO, "SubXactCallback: ev=%s xid=%u top-xid=%u",
 		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
 		 event == SUBXACT_EVENT_COMMIT_SUB ? "SUBXACT_EVENT_COMMIT_SUB" :
@@ -2426,7 +2435,7 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 
 	if (gc_sstate->gpu_main_devptr != 0UL)
 		return CUDA_SUCCESS;
-	
+
 	/* main portion of the device buffer */
 	rc = cuMemAlloc(&m_main, gc_sstate->kds_head.length);
 	if (rc != CUDA_SUCCESS)
@@ -2475,6 +2484,12 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 			goto error_2;
 		}
 	}
+	elog(LOG, "gpucache: AllocMemory %s:%lx (main_sz=%zu, extra_sz=%zu)",
+		 gc_sstate->table_name,
+		 gc_sstate->signature,
+		 gc_sstate->kds_head.length,
+		 gc_sstate->kds_extra.length);
+
 	gc_sstate->gpu_main_size = gc_sstate->kds_head.length;
 	gc_sstate->gpu_extra_size = gc_sstate->kds_extra.length;
 	gc_sstate->gpu_main_devptr = m_main;
@@ -2918,6 +2933,11 @@ gpuCacheBgWorkerDropUnload(GpuCacheDesc *gc_desc)
 	CUresult	rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
+	elog(LOG, "gpucache: DropUnload at %s:%lx main_sz=%zu extra_sz=%zu",
+		 gc_sstate->table_name,
+		 gc_sstate->signature,
+		 gc_sstate->gpu_main_size,
+		 gc_sstate->gpu_extra_size);
 	if (gc_sstate->gpu_main_devptr != 0UL)
 	{
 		rc = cuMemFree(gc_sstate->gpu_main_devptr);
