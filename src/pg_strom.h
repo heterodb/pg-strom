@@ -411,8 +411,8 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	/* for gpu_cache file scan (currently not used) */
-	pg_atomic_uint64 gcache_read_pos;
+	/* for gpu_cache file scan  */
+	pg_atomic_uint32 gc_fetch_count;
 	/* for block-based regular table scan */
 	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
 	slock_t			pbs_mutex;		/* lock of the fields below */
@@ -1302,12 +1302,12 @@ extern ArrowFdwState *ExecInitArrowFdw(GpuContext *gcontext,
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
 extern void ExecEndArrowFdw(ArrowFdwState *af_state);
-extern Size ExecEstimateDSMArrowFdw(ArrowFdwState *af_state);
+
 extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
-								pg_atomic_uint32 *rbatch_index);
+								GpuTaskSharedState *gtss);
 extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-								   pg_atomic_uint32 *rbatch_index);
+								   GpuTaskSharedState *gtss);
 extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
 extern void ExplainArrowFdw(ArrowFdwState *af_state,
 							Relation frel, ExplainState *es);
@@ -1324,12 +1324,12 @@ extern GpuCacheState *ExecInitGpuCache(ScanState *ss, int eflags,
 extern pgstrom_data_store *ExecScanChunkGpuCache(GpuTaskState *gts);
 extern void ExecReScanGpuCache(GpuCacheState *gcache_state);
 extern void ExecEndGpuCache(GpuCacheState *gcache_state);
-extern Size ExecEstimateDSMGpuCache(GpuCacheState *gcache_state);
+
 extern void ExecInitDSMGpuCache(GpuCacheState *gcache_state,
-								pg_atomic_uint64 *gcache_read_pos);
+								GpuTaskSharedState *gtss);
 extern void ExecReInitDSMGpuCache(GpuCacheState *gcache_state);
 extern void ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
-								   pg_atomic_uint64 *gcache_read_pos);
+								   GpuTaskSharedState *gtss);
 extern void ExecShutdownGpuCache(GpuCacheState *gcache_state);
 extern void ExplainGpuCache(GpuCacheState *gcache_state,
 							Relation frel, ExplainState *es);

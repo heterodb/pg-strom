@@ -700,24 +700,14 @@ Size
 pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 {
 	Relation	relation = gts->css.ss.ss_currentRelation;
+	EState	   *estate = gts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
 
-	if (gts->af_state)
-	{
-		return ExecEstimateDSMArrowFdw(gts->af_state);
-	}
-	else if (gts->gc_state)
-	{
-		return ExecEstimateDSMGpuCache(gts->gc_state);
-	}
-	else if (relation)
-	{
-		EState	   *estate = gts->css.ss.ps.state;
-		Snapshot	snapshot = estate->es_snapshot;
+	if (!relation)
+		return 0;
 
-		return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
-						table_parallelscan_estimate(relation, snapshot));
-	}
-	return 0;
+	return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
+					table_parallelscan_estimate(relation, snapshot));
 }
 
 /*
@@ -733,15 +723,12 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	Snapshot	snapshot = estate->es_snapshot;
 	GpuTaskSharedState *gtss = coordinate;
 
+	memset(gtss, 0, offsetof(GpuTaskSharedState, phscan));
 	if (gts->af_state)
-	{
-		ExecInitDSMArrowFdw(gts->af_state, &gtss->af_rbatch_index);
-	}
-	else if (gts->gc_state)
-	{
-		ExecInitDSMGpuCache(gts->gc_state, &gtss->gcache_read_pos);
-	}
-	else if (relation)
+		ExecInitDSMArrowFdw(gts->af_state, gtss);
+	if (gts->gc_state)
+		ExecInitDSMGpuCache(gts->gc_state, gtss);
+	if (relation)
 	{
 		/* init state of block based table scan */
 		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
@@ -767,14 +754,10 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 	GpuTaskSharedState *gtss = coordinate;
 
 	if (gts->af_state)
-	{
-		ExecInitWorkerArrowFdw(gts->af_state, &gtss->af_rbatch_index);
-	}
-	else if (gts->gc_state)
-	{
-		ExecInitWorkerGpuCache(gts->gc_state, &gtss->gcache_read_pos);
-	}
-	else if (relation)
+		ExecInitWorkerArrowFdw(gts->af_state, gtss);
+	if (gts->gc_state)
+		ExecInitWorkerGpuCache(gts->gc_state, gtss);
+	if (relation)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
@@ -802,9 +785,9 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	else if (gts->gc_state)
+	if (gts->gc_state)
 		ExecReInitDSMGpuCache(gts->gc_state);
-	else if (relation)
+	if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 

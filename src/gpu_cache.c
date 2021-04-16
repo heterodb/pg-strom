@@ -171,6 +171,16 @@ typedef struct
 	StringInfoData	buf;
 } GpuCacheHandle;
 
+/*
+ * GpuCacheState - executor state object
+ */
+struct GpuCacheState
+{
+	pg_atomic_uint32	__gc_fetch_count;
+	pg_atomic_uint32   *gc_fetch_count;
+	GpuCacheDesc	   *gc_desc;
+};
+
 /* --- static variables --- */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
@@ -1731,51 +1741,142 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 GpuCacheState *
 ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 {
-	return NULL;
+	Relation		relation = ss->ss_currentRelation;
+	Datum			signature;
+	GpuCacheDesc   *gc_desc;
+	GpuCacheState  *gcache_state;
+	uint64			sync_pos;
+
+	if (!relation)
+		return NULL;
+
+	signature = gpuCacheTableSignature(relation);
+	if (signature == 0UL)
+		return NULL;
+
+	gc_desc = GetGpuCacheDesc(relation, signature);
+	if (!gc_desc)
+		return NULL;
+
+	gcache_state = palloc0(sizeof(GpuCacheState));
+	gcache_state->gc_fetch_count = &gcache_state->__gc_fetch_count;
+	gcache_state->gc_desc = gc_desc;
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+	{
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
+		SpinLockAcquire(&gc_sstate->redo_lock);
+		sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
+		SpinLockRelease(&gc_sstate->redo_lock);
+
+		gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
+	}
+	return gcache_state;
+}
+
+static inline pgstrom_data_store *
+__ExecScanChunkGpuCache(GpuTaskState *gts, GpuCacheDesc *gc_desc)
+{
+	EState		   *estate = gts->css.ss.ps.state;
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+	pgstrom_data_store *pds;
+	size_t			head_sz;
+
+	head_sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
+	pds = MemoryContextAllocZero(estate->es_query_cxt,
+								 offsetof(pgstrom_data_store, kds) + head_sz);
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	pds->gc_sstate = gc_sstate;
+	memcpy(&pds->kds, &gc_sstate->kds_head, head_sz);
+
+	return pds;
 }
 
 pgstrom_data_store *
 ExecScanChunkGpuCache(GpuTaskState *gts)
 {
-	return NULL;
+	GpuCacheState  *gcache_state = gts->gc_state;
+
+	if (pg_atomic_fetch_add_u32(gcache_state->gc_fetch_count, 1) != 0)
+		return NULL;
+	return __ExecScanChunkGpuCache(gts, gcache_state->gc_desc);
 }
 
 void
 ExecReScanGpuCache(GpuCacheState *gcache_state)
-{}
+{
+	pg_atomic_write_u32(gcache_state->gc_fetch_count, 0);
+}
 
 void
 ExecEndGpuCache(GpuCacheState *gcache_state)
-{}
-
-Size
-ExecEstimateDSMGpuCache(GpuCacheState *gcache_state)
 {
-	return 0;
+	ReleaseGpuCacheDescIfUnused(gcache_state->gc_desc);
 }
 
 void
 ExecInitDSMGpuCache(GpuCacheState *gcache_state,
-					pg_atomic_uint64 *gcache_read_pos)
-{}
+					GpuTaskSharedState *gtss)
+{
+	pg_atomic_init_u32(&gtss->gc_fetch_count, 0);
+	gcache_state->gc_fetch_count = &gtss->gc_fetch_count;
+}
 
 void
 ExecReInitDSMGpuCache(GpuCacheState *gcache_state)
-{}
+{
+	pg_atomic_write_u32(gcache_state->gc_fetch_count, 0);
+}
 
 void
 ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
-					   pg_atomic_uint64 *gcache_read_pos)
-{}
+					    GpuTaskSharedState *gtss)
+{
+	gcache_state->gc_fetch_count = &gtss->gc_fetch_count;
+}
 
 void
 ExecShutdownGpuCache(GpuCacheState *gcache_state)
-{}
+{
+	/* do nothing */
+}
 
 void
 ExplainGpuCache(GpuCacheState *gcache_state,
 				Relation frel, ExplainState *es)
-{}
+{
+	GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
+	GpuCacheSharedState *gc_sstate = gc_desc;
+	int				cuda_dindex = gc_sstate->cuda_dindex;
+	size_t			gpu_main_size = 0UL;
+	size_t			gpu_extra_size = 0UL;
+
+	if (cuda_dindex >= 0 && cuda_dindex < numDevAttrs)
+		ExplainPropertyText("GPU Cache", devAttrs[cuda_dindex].DEV_NAME, es);
+
+	pthreadRWLockReadLock(&gc_sstate->gpu_buffer_lock);
+	if (gc_sstate->gpu_main_devptr != 0UL)
+		gpu_main_size = gc_sstate->gpu_main_size;
+	if (gc_sstate->gpu_extra_devptr != 0UL)
+		gpu_extra_size = gc_sstate->gpu_extra_size;
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		char	temp[300];
+
+		snprintf(temp, sizeof(temp),
+				 "main: %s, extra: %s",
+				 format_numeric(gpu_main_size),
+				 format_numeric(gpu_extra_size));
+		ExplainPropertyText("GPU Cache Size", temp, es);
+	}
+	else
+	{
+		ExplainPropertyInteger("GPU Cache Main Size", NULL, gpu_main_size, es);
+		ExplainPropertyInteger("GPU Cache Extra Size", NULL, gpu_extra_size, es);
+	}
+}
 
 CUresult
 gpuCacheMapDeviceMemory(GpuContext *gcontext,
@@ -2262,7 +2363,7 @@ __gpuCacheInvokeBackgroundCommand(Oid database_oid,
  */
 static CUresult
 gpuCacheInvokeApplyRedo(GpuCacheSharedState *gc_sstate,
-						uint64 end_pos,
+						uint64 sync_pos,
 						bool is_async)
 {
 	return __gpuCacheInvokeBackgroundCommand(gc_sstate->database_oid,
@@ -2271,7 +2372,7 @@ gpuCacheInvokeApplyRedo(GpuCacheSharedState *gc_sstate,
 											 gc_sstate->cuda_dindex,
 											 is_async,
 											 GCACHE_BGWORKER_CMD__APPLY_REDO,
-											 end_pos);
+											 sync_pos);
 }
 
 /*
