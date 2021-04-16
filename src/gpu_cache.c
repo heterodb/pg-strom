@@ -1846,7 +1846,7 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 				Relation frel, ExplainState *es)
 {
 	GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
-	GpuCacheSharedState *gc_sstate = gc_desc;
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	int				cuda_dindex = gc_sstate->cuda_dindex;
 	size_t			gpu_main_size = 0UL;
 	size_t			gpu_extra_size = 0UL;
@@ -1882,23 +1882,63 @@ CUresult
 gpuCacheMapDeviceMemory(GpuContext *gcontext,
 						pgstrom_data_store *pds)
 {
-	return CUDA_ERROR_OUT_OF_MEMORY;
+	GpuCacheSharedState *gc_sstate = pds->gc_sstate;
+	CUdeviceptr	m_kds_main = 0UL;
+	CUdeviceptr	m_kds_extra = 0UL;
+	CUresult	rc;
+
+	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
+	pthreadRWLockReadLock(&gc_sstate->gpu_buffer_lock);
+	if (gc_sstate->gpu_main_devptr != 0UL)
+	{
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kds_main,
+								 gc_sstate->gpu_main_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			goto error_1;
+	}
+
+	if (gc_sstate->gpu_extra_devptr != 0UL)
+	{
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_kds_extra,
+								 gc_sstate->gpu_extra_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+	}
+	pds->m_kds_base = m_kds_main;
+	pds->m_kds_extra = m_kds_extra;
+
+	return CUDA_SUCCESS;
+
+error_2:
+	gpuIpcCloseMemHandle(gcontext, m_kds_main);
+error_1:
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+	return rc;
 }
 
 void
 gpuCacheUnmapDeviceMemory(GpuContext *gcontext,
 						  pgstrom_data_store *pds)
 {
+	GpuCacheSharedState *gc_sstate = pds->gc_sstate;
 
+	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
+	if (pds->m_kds_base != 0UL)
+	{
+		gpuIpcCloseMemHandle(gcontext, pds->m_kds_base);
+		pds->m_kds_base = 0UL;
+	}
+	if (pds->m_kds_extra != 0UL)
+	{
+		gpuIpcCloseMemHandle(gcontext, pds->m_kds_extra);
+		pds->m_kds_extra = 0UL;
+	}
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);	
 }
-
-
-
-
-
-
-
-
 
 
 
@@ -1940,6 +1980,9 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 	}
 }
 
+/*
+ * gpuCacheObjectAccess, and related...
+ */
 static void
 __gpuCacheCallbackOnAlterTrigger(Oid trigger_oid)
 {
