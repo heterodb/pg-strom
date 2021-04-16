@@ -97,6 +97,7 @@ DEV_ATTR(PAGEABLE_MEMORY_ACCESS, BOOL, 0, "Device supports coherently accessing 
 DEV_ATTR(CONCURRENT_MANAGED_ACCESS, BOOL, 0, "Device can coherently access managed memory concurrently with the CPU")
 DEV_ATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL, 0, "Device supports compute preemption")
 DEV_ATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL, 0, "Device can access host registered memory at the same virtual address as the CPU")
+#endif	/* CUDA 8.0 */
 #if CUDA_VERSION >= 9000
 DEV_ATTR(CAN_USE_STREAM_MEM_OPS, BOOL, 0, "cuStreamBatchMemOp and related APIs are supported")
 DEV_ATTR(CAN_USE_64_BIT_STREAM_MEM_OPS, BOOL, 1, "64-bit operations are supported in ::cuStreamBatchMemOp and related APIs")
@@ -104,15 +105,18 @@ DEV_ATTR(CAN_USE_STREAM_WAIT_VALUE_NOR, BOOL, 1, "CU_STREAM_WAIT_VALUE_NOR is su
 DEV_ATTR(COOPERATIVE_LAUNCH, BOOL, 1, "Device supports launching cooperative kernels via cuLaunchCooperativeKernel")
 DEV_ATTR(COOPERATIVE_MULTI_DEVICE_LAUNCH, BOOL, 1, "Device can participate in cooperative kernels launched via cuLaunchCooperativeKernelMultiDevice")
 DEV_ATTR(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, INT, 1, "Maximum optin shared memory per block")
+#endif	/* CUDA 9.0 */
 #if CUDA_VERSION >= 9020
 DEV_ATTR(HOST_REGISTER_SUPPORTED, BOOL, 1, "Device supports host memory registration")
 DEV_ATTR(PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES, BOOL, 1, "Device accesses pageable memory via the host's page tables")
 DEV_ATTR(DIRECT_MANAGED_MEM_ACCESS_FROM_HOST, BOOL, 0, "The host can directly access managed memory on the device without migration")
+#endif	/* CUDA 9.2 */
 #if CUDA_VERSION >= 10020
 DEV_ATTR(VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED, BOOL, 0, "Device supports virtual address management APIs")
 DEV_ATTR(HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED, BOOL, 0, "Device supports exporting memory to a posix file descriptor")
 DEV_ATTR(HANDLE_TYPE_WIN32_HANDLE_SUPPORTED, BOOL, 1, "Device supports exporting memory to a Win32 NT handle")
 DEV_ATTR(HANDLE_TYPE_WIN32_KMT_HANDLE_SUPPORTED, BOOL, 1, "Device supports exporting memory to a Win32 KMT handle")
+#endif	/* CUDA 10.2 */
 #if CUDA_VERSION >= 11000
 DEV_ATTR(MAX_BLOCKS_PER_MULTIPROCESSOR, INT, 0, "Maximum number of blocks per multiprocessor")
 DEV_ATTR(GENERIC_COMPRESSION_SUPPORTED, BOOL, 1, "Device supports compression of memory")
@@ -120,16 +124,18 @@ DEV_ATTR(MAX_PERSISTING_L2_CACHE_SIZE, INT, 0, "Device's maximum L2 persisting l
 DEV_ATTR(MAX_ACCESS_POLICY_WINDOW_SIZE, INT, 1, "The maximum value of CUaccessPolicyWindow::num_bytes")
 DEV_ATTR(GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, BOOL, 0, "Device supports specifying the GPUDirect RDMA flag with ::cuMemCreate")
 DEV_ATTR(RESERVED_SHARED_MEMORY_PER_BLOCK, INT, 0, "Shared memory reserved by CUDA driver per block in bytes")
+#endif	/* CUDA 11.0 */
 #if CUDA_VERSION >= 11010
 DEV_ATTR(SPARSE_CUDA_ARRAY_SUPPORTED, BOOL, 1, "Device supports sparse CUDA arrays and sparse CUDA mipmapped arrays")
 DEV_ATTR(READ_ONLY_HOST_REGISTER_SUPPORTED, BOOL, 1, "Device supports using the ::cuMemHostRegister flag CU_MEMHOSTERGISTER_READ_ONLY to register memory that must be mapped as read-only to the GPU")
+#endif	/* CUDA 11.1 */
 #if CUDA_VERSION >= 11020
 DEV_ATTR(TIMELINE_SEMAPHORE_INTEROP_SUPPORTED, BOOL, 1, "External timeline semaphore interop is supported on the device")
 DEV_ATTR(MEMORY_POOLS_SUPPORTED, BOOL, 0, "Device supports using the ::cuMemAllocAsync and ::cuMemPool family of APIs")
 #endif	/* CUDA 11.2 */
-#endif	/* CUDA 11.1 */
-#endif	/* CUDA 11.0 */
-#endif	/* CUDA 10.2 */
-#endif	/* CUDA 9.2 */
-#endif	/* CUDA 9.0 */
-#endif	/* CUDA 8.0 */
+#if CUDA_VERSION >= 11030
+DEV_ATTR(GPU_DIRECT_RDMA_SUPPORTED, BOOL, 1, "Device supports GPUDirect RDMA APIs, like nvidia_p2p_get_pages")
+DEV_ATTR(GPU_DIRECT_RDMA_FLUSH_WRITES_OPTIONS, INT, 0, "Bitmask of :CUflushGPUDirectRDMAWritesOptions enum")
+DEV_ATTR(GPU_DIRECT_RDMA_WRITES_ORDERING, BOOL, 0, "GPUDirect RDMA writes to the device do not need to be flushed for consumers within the scope indicated")
+DEV_ATTR(MEMPOOL_SUPPORTED_HANDLE_TYPES, INT, 0, "Handle types supported with mempool based IPC")
+#endif	/* CUDA 11.3 */
