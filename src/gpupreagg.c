@@ -5283,7 +5283,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	}
 	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
 	{
-		m_kds_src = pds_src->m_kds_base;
+		m_kds_src = pds_src->m_kds_main;
 		m_kds_extra = pds_src->m_kds_extra;
 	}
 	else
@@ -5638,7 +5638,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	}
 	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
 	{
-		m_kds_src = pds_src->m_kds_base;
+		m_kds_src = pds_src->m_kds_main;
 		m_kds_extra = pds_src->m_kds_extra;
 	}
 	else

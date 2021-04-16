@@ -566,7 +566,7 @@ typedef struct pgstrom_data_store
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 	/* for KDS_FORMAT_COLUMN */
 	void			   *gc_sstate;
-	CUdeviceptr			m_kds_base;
+	CUdeviceptr			m_kds_main;
 	CUdeviceptr			m_kds_extra;
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));

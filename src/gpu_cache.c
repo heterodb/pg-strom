@@ -1908,7 +1908,7 @@ gpuCacheMapDeviceMemory(GpuContext *gcontext,
 		if (rc != CUDA_SUCCESS)
 			goto error_2;
 	}
-	pds->m_kds_base = m_kds_main;
+	pds->m_kds_main  = m_kds_main;
 	pds->m_kds_extra = m_kds_extra;
 
 	return CUDA_SUCCESS;
@@ -1927,10 +1927,10 @@ gpuCacheUnmapDeviceMemory(GpuContext *gcontext,
 	GpuCacheSharedState *gc_sstate = pds->gc_sstate;
 
 	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
-	if (pds->m_kds_base != 0UL)
+	if (pds->m_kds_main != 0UL)
 	{
-		gpuIpcCloseMemHandle(gcontext, pds->m_kds_base);
-		pds->m_kds_base = 0UL;
+		gpuIpcCloseMemHandle(gcontext, pds->m_kds_main);
+		pds->m_kds_main = 0UL;
 	}
 	if (pds->m_kds_extra != 0UL)
 	{
