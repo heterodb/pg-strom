@@ -736,23 +736,209 @@ RelationHasGpuCache(Relation rel)
 }
 
 /*
+ * __gpuCacheInitLoadVisibilityCheck
+ */
+static bool
+__gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
+								  HeapTuple tuple,
+								  TransactionId *gcache_xmin,
+								  TransactionId *gcache_xmax)
+{
+	HeapTupleHeader		htup = tuple->t_data;
+	TransactionId		xmin;
+	TransactionId		xmax;
+
+	if (!HeapTupleHeaderXminCommitted(htup))
+	{
+		if (HeapTupleHeaderXminInvalid(htup))
+			return false;
+		xmin = HeapTupleHeaderGetRawXmin(htup);
+		if (TransactionIdIsCurrentTransactionId(xmin))
+		{
+			*gcache_xmin = xmin;
+			if (htup->t_infomask & HEAP_XMAX_INVALID)
+			{
+				/* xid invalid */
+				*gcache_xmax = InvalidTransactionId;
+				return true;
+			}
+			if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
+			{
+				/* not deleter */
+				*gcache_xmax = InvalidTransactionId;
+				return true;
+			}
+
+			if (htup->t_infomask & HEAP_XMAX_IS_MULTI)
+			{
+				xmax = HeapTupleGetUpdateXid(htup);
+				/* not LOCKED_ONLY, so it has to have an xmax */
+				Assert(TransactionIdIsValid(xmax));
+
+				/* updating subtransaction must have aborted */
+				if (TransactionIdIsCurrentTransactionId(xmax))
+				{
+					*gcache_xmax = xmax;
+					return true;
+				}
+				elog(WARNING, "gpucache: initial load on '%s' met a tuple deleted by others, but not committed yet, at ctid=(%u,%u)",
+					 get_rel_name(gc_desc->table_oid),
+					 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
+					 tuple->t_self.ip_posid);
+				return false;
+			}
+
+			xmax = HeapTupleHeaderGetRawXmax(htup);
+			if (!TransactionIdIsCurrentTransactionId(xmax))
+			{
+				/* deleting subtransaction must have aborted */
+				*gcache_xmax = InvalidTransactionId;
+				return true;
+			}
+			return false;
+		}
+		else if (TransactionIdIsInProgress(HeapTupleHeaderGetRawXmin(htup)))
+		{
+			elog(WARNING, "gpucache: initial load on '%s' met a tuple inserted by others, but not committed yet, at ctid=(%u,%u)",
+				 get_rel_name(gc_desc->table_oid),
+				 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
+				 tuple->t_self.ip_posid);
+			return false;
+		}
+		else if (!TransactionIdDidCommit(HeapTupleHeaderGetRawXmin(htup)))
+		{
+			/* aborted or crashed */
+			return false;
+		}
+	}
+	/* by here, the inserting transaction has committed */
+	*gcache_xmin = FrozenTransactionId;
+
+	if (htup->t_infomask & HEAP_XMAX_INVALID)
+	{
+		/* xid invalid or aborted */
+		*gcache_xmax = InvalidTransactionId;
+		return true;
+	}
+	if (htup->t_infomask & HEAP_XMAX_COMMITTED)
+	{
+		if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
+		{
+			*gcache_xmax = InvalidTransactionId;
+			return true;
+		}
+		return false;	/* updated by other */
+	}
+
+	xmax = HeapTupleHeaderGetRawXmax(htup);
+	if (TransactionIdIsCurrentTransactionId(xmax))
+	{
+		if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
+			*gcache_xmax = InvalidTransactionId;
+		else
+			*gcache_xmax = xmax;
+		return true;
+	}
+
+	if (TransactionIdIsInProgress(xmax))
+	{
+		elog(WARNING, "gpucache: initial load on '%s' met a tuple deleted by others, but not committed yet, at ctid=(%u,%u)",
+			 get_rel_name(gc_desc->table_oid),
+			 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
+			 tuple->t_self.ip_posid);
+		return false;
+	}
+
+	if (!TransactionIdDidCommit(xmax))
+	{
+		/* it must have aborted or crashed */
+		*gcache_xmax = InvalidTransactionId;
+		return true;
+	}
+
+	/* xmax transaction committed */
+	if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
+	{
+		*gcache_xmax = InvalidTransactionId;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * __gpuCacheInitLoadTrackRowId
+ */
+static void
+__gpuCacheInitLoadTrackRowId(GpuCacheDesc *gc_desc, TransactionId xid,
+							 char tag, ItemPointer ctid, uint32 rowid)
+{
+	GpuCacheHandle	hkey;
+	GpuCacheHandle *gc_handle;
+	PendingRowIdItem pitem;
+	bool			found;
+
+	hkey.table_oid = gc_desc->table_oid;
+	hkey.signature = gc_desc->signature;
+	hkey.xid       = xid;
+	Assert(hkey.signature != 0UL && TransactionIdIsCurrentTransactionId(xid));
+
+	gc_handle = hash_search(gcache_handle_htab,
+							&hkey, HASH_ENTER, &found);
+	if (!found)
+	{
+		PG_TRY();
+		{
+			gc_handle->gc_desc = gc_desc;
+			gc_handle->drop_on_rollback = false;
+			gc_handle->drop_on_commit = false;
+			gc_handle->nitems = 0;
+			memset(&gc_handle->buf, 0, sizeof(StringInfoData));
+			dlist_push_tail(&gc_desc->gc_handles, &gc_handle->chain);
+		}
+		PG_CATCH();
+		{
+			hash_search(gcache_handle_htab,
+						&hkey, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	if (!gc_handle->buf.data)
+		initStringInfo(&gc_handle->buf);
+
+	Assert(tag == 'I' || tag == 'D');
+	pitem.tag = tag;
+	pitem.ctid = *ctid;
+	pitem.rowid = rowid;
+	appendBinaryStringInfo(&gc_handle->buf, (char *)&pitem, sizeof(PendingRowIdItem));
+
+	gc_handle->nitems++;
+}
+
+/*
  * __execGpuCacheInitLoad
  */
 static void
 __execGpuCacheInitLoad(GpuCacheDesc *gc_desc, Relation rel)
 {
 	TableScanDesc	scandesc;
-	Snapshot		snapshot;
 	HeapTuple		tuple;
 	size_t			item_sz = 2048;
 	GCacheTxLogInsert *item = palloc(item_sz);
 
-	snapshot = RegisterSnapshot(GetLatestSnapshot());
-	scandesc = table_beginscan(rel, snapshot, 0, NULL);
+	scandesc = table_beginscan(rel, SnapshotAny, 0, NULL);
 	while ((tuple = heap_getnext(scandesc, ForwardScanDirection)) != NULL)
 	{
-		size_t		sz = MAXALIGN(offsetof(GCacheTxLogInsert,
-										   htup) + tuple->t_len);
+		TransactionId	gcache_xmin;
+		TransactionId	gcache_xmax;
+		size_t			sz;
+
+		if (!__gpuCacheInitLoadVisibilityCheck(gc_desc, tuple,
+											   &gcache_xmin,
+											   &gcache_xmax))
+			continue;
+
+		sz = MAXALIGN(offsetof(GCacheTxLogInsert, htup) + tuple->t_len);
 		if (sz > item_sz)
 		{
 			item_sz = 2 * sz;
@@ -763,16 +949,20 @@ __execGpuCacheInitLoad(GpuCacheDesc *gc_desc, Relation rel)
 		item->timestamp = GetCurrentTimestamp();
 		item->rowid = __gpuCacheAllocateRowId(gc_desc, &tuple->t_self);
 		memcpy(&item->htup, tuple->t_data, tuple->t_len);
-		HeapTupleHeaderSetXmin(&item->htup, GetCurrentTransactionId());
-		HeapTupleHeaderSetXmax(&item->htup, InvalidTransactionId);
+		HeapTupleHeaderSetXmin(&item->htup, gcache_xmin);
+		HeapTupleHeaderSetXmax(&item->htup, gcache_xmax);
 		HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
-
 		__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item);
 
+		if (TransactionIdIsNormal(gcache_xmin))
+			__gpuCacheInitLoadTrackRowId(gc_desc, gcache_xmin,
+										 'I', &tuple->t_self, item->rowid);
+		if (TransactionIdIsNormal(gcache_xmax))
+			__gpuCacheInitLoadTrackRowId(gc_desc, gcache_xmax,
+										 'D', &tuple->t_self, item->rowid);
 		CHECK_FOR_INTERRUPTS();
 	}
 	table_endscan(scandesc);
-	UnregisterSnapshot(snapshot);
 
 	pfree(item);
 }
@@ -965,7 +1155,7 @@ __createGpuCacheSharedState(GpuCacheDesc *gc_desc,
 		extra_sz += offsetof(kern_data_extra, data);
 	}
 	gc_sstate->kds_extra.length = extra_sz;
-	gc_sstate->kds_extra.usage  = 0;
+	gc_sstate->kds_extra.usage  = offsetof(kern_data_extra, data);
 
 	gc_desc->gc_sstate = gc_sstate;
 }
@@ -1745,7 +1935,7 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 	Datum			signature;
 	GpuCacheDesc   *gc_desc;
 	GpuCacheState  *gcache_state;
-	uint64			sync_pos;
+	uint64			sync_pos = ULONG_MAX;
 
 	if (!relation)
 		return NULL;
@@ -1766,10 +1956,11 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 
 		SpinLockAcquire(&gc_sstate->redo_lock);
-		sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
+		if (gc_sstate->redo_sync_pos < gc_sstate->redo_write_pos)
+			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 		SpinLockRelease(&gc_sstate->redo_lock);
-
-		gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
+		if (sync_pos != ULONG_MAX)
+			gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
 	}
 	return gcache_state;
 }
@@ -2476,6 +2667,10 @@ gcache_heap_redo_hook(XLogReaderState *record)
 	}
 }
 
+/* log message by GPU memory keeper */
+#define __WLog(fmt,...)			\
+	elog(WARNING, "%s(%d): " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
+
 /*
  * __gpuCacheLoadCudaModule
  */
@@ -2493,19 +2688,19 @@ __gpuCacheLoadCudaModule(void)
 	rawfd = open(path, O_RDONLY);
 	if (rawfd < 0)
 	{
-		elog(LOG, "gpucache: failed on open('%s'): %m", path);
+		__WLog("failed on open('%s'): %m", path);
 		goto bailout;
 	}
 	if (fstat(rawfd, &stat_buf) != 0)
 	{
-		elog(LOG, "gpucache: failed on fstat('%s'): %m", path);
+		__WLog("failed on fstat('%s'): %m", path);
 		goto bailout;
 	}
 	image = alloca(stat_buf.st_size + 1);
 	nbytes = __readFile(rawfd, image, stat_buf.st_size);
 	if (nbytes != stat_buf.st_size)
 	{
-		elog(LOG, "gpucache: failed on __readFile('%s'): %m", path);
+		__WLog("failed on __readFile('%s'): %m", path);
 		goto bailout;
 	}
 	image[nbytes] = '\0';
@@ -2513,7 +2708,7 @@ __gpuCacheLoadCudaModule(void)
 	rc = cuModuleLoadFatBinary(&cuda_module, image);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "gpucache: failed on cuModuleLoadFatBinary: %s", errorText(rc));
+		__WLog("failed on cuModuleLoadFatBinary: %s", errorText(rc));
 		goto bailout;
 	}
 
@@ -2522,7 +2717,7 @@ __gpuCacheLoadCudaModule(void)
 							 "kern_gpucache_setup_owner");
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		__WLog("failed on cuModuleGetFunction: %s", errorText(rc));
 		goto bailout;
 	}
 
@@ -2531,7 +2726,7 @@ __gpuCacheLoadCudaModule(void)
 							 "kern_gpucache_apply_redo");
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		__WLog("failed on cuModuleGetFunction: %s", errorText(rc));
 		goto bailout;
 	}
 
@@ -2540,7 +2735,7 @@ __gpuCacheLoadCudaModule(void)
 							 "kern_gpucache_compaction");
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "gpucache: failed on cuModuleGetFunction: %s", errorText(rc));
+		__WLog("failed on cuModuleGetFunction: %s", errorText(rc));
 		goto bailout;
 	}
 
@@ -2584,7 +2779,7 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 	rc = cuMemAlloc(&m_main, gc_sstate->kds_head.length);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
+		__WLog("failed on cuMemAlloc: %s", errorText(rc));
 		goto error_0;
 	}
 
@@ -2592,14 +2787,14 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head, sz);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		__WLog("failed on cuMemcpyHtoD: %s", errorText(rc));
 		goto error_1;
 	}
 
 	rc = cuIpcGetMemHandle(&gc_sstate->gpu_main_mhandle, m_main);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+		__WLog("failed on cuIpcGetMemHandle: %s", errorText(rc));
 		goto error_1;
 	}
 
@@ -2609,7 +2804,7 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 		rc = cuMemAlloc(&m_extra, gc_sstate->kds_extra.length);
 		if (rc != CUDA_SUCCESS)
 		{
-			elog(WARNING, "failed on cuMemAlloc: %s", errorText(rc));
+			__WLog("failed on cuMemAlloc: %s", errorText(rc));
 			goto error_1;
 		}
 
@@ -2617,14 +2812,14 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 						  offsetof(kern_data_extra, data));
 		if (rc != CUDA_SUCCESS)
 		{
-			elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+			__WLog("failed on cuMemcpyHtoD: %s", errorText(rc));
 			goto error_2;
 		}
 
 		rc = cuIpcGetMemHandle(&gc_sstate->gpu_extra_mhandle, m_extra);
 		if (rc != CUDA_SUCCESS)
 		{
-			elog(WARNING, "failed on cuIpcGetMemHandle: %s", errorText(rc));
+			__WLog("failed on cuIpcGetMemHandle: %s", errorText(rc));
 			goto error_2;
 		}
 	}
@@ -2687,7 +2882,7 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuMemAllocManaged: %s", errorText(rc));
+		__WLog("failed on cuMemAllocManaged: %s", errorText(rc));
 		return rc;
 	}
 	memset(&h_extra, 0, offsetof(kern_data_extra, data));
@@ -2706,14 +2901,14 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		goto bailout;
 	}
 	/* check status of the kernel execution status */
 	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuStreamSynchronize: %s", errorText(rc));
+		__WLog("failed on cuStreamSynchronize: %s", errorText(rc));
 		goto bailout;
 	}
 	curr_usage = ((kern_data_extra *)m_try_extra)->usage;
@@ -2728,21 +2923,19 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 	rc = cuMemAlloc(&m_new_extra, h_extra.length);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuMemAlloc(%zu): %s",
-			 h_extra.length, errorText(rc));
+		__WLog("failed on cuMemAlloc(%zu): %s", h_extra.length, errorText(rc));
 		goto bailout;
 	}
 	rc = cuIpcGetMemHandle(&new_mhandle, m_new_extra);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuIpcGetMemHandle: %s",
-			 errorText(rc));
+		__WLog("failed on cuIpcGetMemHandle: %s", errorText(rc));
 		goto bailout;
 	}
 	rc = cuMemcpyHtoD(m_new_extra, &h_extra, offsetof(kern_data_extra, data));
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		__WLog("failed on cuMemcpyHtoD: %s", errorText(rc));
 		goto bailout;
 	}
 
@@ -2759,7 +2952,7 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "gpucache: failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		goto bailout;
 	}
 	/* check status of the kernel execution status */
@@ -2846,8 +3039,7 @@ __gpuCacheSetupRedoLogBuffer(GpuCacheDesc *gc_desc, uint64 end_pos,
 	rc = cuMemAllocManaged(&m_redo, length, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "gpucache: failed on cuMemAllocManaged(%zu): %s",
-			 length, errorText(rc));
+		__WLog("failed on cuMemAllocManaged(%zu): %s", length, errorText(rc));
 		*p_m_redo = 0UL;
 		return rc;
 	}
@@ -2918,7 +3110,7 @@ __gpuCacheLaunchApplyRedoKernel(GpuCacheDesc *gc_desc, CUdeviceptr m_redo)
 							   cuda_dindex, 0, 0);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on __gpuOptimalBlockSize: %s", errorText(rc));
+		__WLog("failed on __gpuOptimalBlockSize: %s", errorText(rc));
 		return rc;
 	}
 	o_grid_sz = Min(o_grid_sz, (h_redo->nitems + o_block_sz - 1) / o_block_sz);
@@ -2948,13 +3140,13 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		return rc;
 	}
 
 	/*
-     * setup-owner (phase-1) - assign largest owner-id for each rows modified
-     */
+	 * setup-owner (phase-1) - assign largest owner-id for each rows modified
+	 */
 	phase = 1;
 	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
 						o_grid_sz, 1, 1,
@@ -2965,7 +3157,7 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		return rc;
 	}
 
@@ -2982,7 +3174,7 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		return rc;
 	}
 
@@ -2999,7 +3191,7 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		return rc;
 	}
 
@@ -3016,14 +3208,17 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(WARNING, "failed on cuLaunchKernel: %s", errorText(rc));
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
 		return rc;
 	}
 
 	/* check status of the above kernel execution */
 	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
+	{
+		__WLog("failed on cuStreamSynchronize: %s", errorText(rc));
 		return rc;
+	}
 
 	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
 	{
@@ -3063,7 +3258,7 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
 
 		__rc = cuMemFree(m_redo);
 		if (__rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemFree: %s", errorText(__rc));
+			__WLog("failed on cuMemFree: %s", errorText(__rc));
 	}
 out_unlock:
 	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
