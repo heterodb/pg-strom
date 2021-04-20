@@ -21,43 +21,43 @@
 #define GCACHE_TX_LOG__MAGIC		0xEBAD7C00
 #define GCACHE_TX_LOG__INSERT		(GCACHE_TX_LOG__MAGIC | 'I')
 #define GCACHE_TX_LOG__DELETE		(GCACHE_TX_LOG__MAGIC | 'D')
-#define GCACHE_TX_LOG__COMMIT		(GCACHE_TX_LOG__MAGIC | 'C')
+#define GCACHE_TX_LOG__XACT			(GCACHE_TX_LOG__MAGIC | 'X')
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
 	char		data[1];		/* variable length */
 } GCacheTxLogCommon;
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
-	cl_uint		rowid;
+	cl_uint		rowid;			/* set by GPU kernel */
+	cl_bool		rowid_found;	/* set by GPU kernel */
 	HeapTupleHeaderData htup __attribute__((aligned(8)));
 } GCacheTxLogInsert;
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
-	cl_uint		rowid;
 	cl_uint		xid;
+	cl_uint		rowid;
+	cl_bool		rowid_found;
+	ItemPointerData ctid;
 } GCacheTxLogDelete;
 
 /*
  * COMMIT/ABORT
  */
-#define GCACHE_TX_LOG_COMMIT_ALLOCSZ	96
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
 	cl_uint		xid;
-	cl_ushort	nitems;
-	char		data[1];		/* variable length */
-} GCacheTxLogCommit;
+	cl_uint		rowid;
+	cl_bool		rowid_found;
+	cl_char		tag;
+	ItemPointerData ctid;
+} GCacheTxLogXact;
 
 /*
  * GpuCacheSysattr
@@ -70,6 +70,8 @@ struct GpuCacheSysattr
 	cl_uint		xmax;
 	/* get_global_id() of the thread who tries to update the row */
 	cl_uint		owner_id;
+	ItemPointerData ctid;
+	cl_ushort	__padding__;
 };
 typedef struct GpuCacheSysattr	GpuCacheSysattr;
 
@@ -157,6 +159,36 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
 	return 0;
 }
 #endif
+
+/*
+ * kern_gpucache_rowitem
+ */
+typedef struct
+{
+	
+} kern_gpucache_rowitem;
+
+/*
+ * kern_gpucache_rowhash
+ *
+ * CTID-->RowId lookup table
+ */
+#define KERN_GPUCACHE_ROWHASH_MAGIC		0xcafebabeU
+typedef struct
+{
+	cl_uint		magic;		/* =KERN_GPUCACHE_ROWHASH_MAGIC */
+	cl_uint		nslots;
+	cl_uint		nrooms;
+	cl_uint		freelist;	/* first free rowid */
+	struct {
+		cl_uint	lock;
+		cl_uint	rowid;
+	} slots[1];
+	/*
+	 * Note that:
+	 * ((cl_uint *)&rowhash->slots[nslots]) is an array of rowmap
+	 */
+} kern_gpucache_rowhash;
 
 /*
  * kern_gpucache_redolog

@@ -517,7 +517,7 @@ init_kernel_data_store(kern_data_store *kds,
 
 		cmeta->attbyval = true;
 		cmeta->attalign = sizeof(cl_uint);
-		cmeta->attlen = 3 * sizeof(cl_uint);
+		cmeta->attlen = sizeof(GpuCacheSysattr);
 		cmeta->attnum = -1;				/* internal system column */
 		cmeta->attcacheoff = -1;
 		cmeta->atttypid = InvalidOid;	/* internal type */

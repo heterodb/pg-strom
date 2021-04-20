@@ -99,6 +99,172 @@ kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
 	return NULL;
 }
 
+#define DECL_ROWID_HASH_AND_MAP(kds)								\
+	kern_gpucache_rowhash *rowhash =								\
+		(kern_gpucache_rowhash *)((char *)(kds) + (kds)->length);	\
+	cl_uint	   *rowmap = (cl_uint *)(&rowhash->slots[(kds)->nslots])
+
+/*
+ * kern_gpucache_initialize_empty
+ */
+KERNEL_FUNCTION(void)
+kern_gpucache_init_empty(kern_data_store *kds,
+						 kern_data_extra *extra)
+{
+	DECL_ROWID_HASH_AND_MAP(kds);
+	cl_uint		index;
+	cl_uint		nrooms = kds->nrooms;
+	cl_uint		nslots = kds->nslots;
+
+	if (get_global_id() == 0)
+	{
+		kds->nitems = 0;
+
+		extra->usage = offsetof(kern_data_extra, data);
+
+		rowhash->magic  = KERN_GPUCACHE_ROWHASH_MAGIC;
+		rowhash->nslots = nslots;
+		rowhash->nrooms = nrooms;
+		rowhash->freelist = (nrooms > 0 ? 0 : UINT_MAX);
+	}
+	/* setup rowhash */
+	for (index = get_global_id(); index < nslots; index += get_global_size())
+	{
+		rowhash->slots[index].lock = 0;
+		rowhash->slots[index].rowid = UINT_MAX;
+	}
+	/* setup rowmap */
+	for (index = get_global_id(); index < nrooms; index += get_global_size())
+	{
+		if (index < nrooms - 1)
+			rowmap[index] = index + 1;
+		else
+			rowmap[index] = UINT_MAX;	/* terminator */
+	}
+}
+
+/*
+ * gpucache_ctid_hash
+ */
+STATIC_INLINE(cl_uint)
+gpucache_ctid_hash(ItemPointerData *ctid)
+{
+	cl_ulong	prime = 0x9e3779b97f4a7c13UL;
+	cl_ulong	hash = 0;
+
+	hash ^= ((cl_ulong)ctid->ip_blkid.bi_hi + 1) * prime;
+	hash ^= ((cl_ulong)ctid->ip_blkid.bi_lo + 1)* prime;
+	hash ^= ((cl_ulong)ctid->ip_posid + 1) * prime;
+
+	return (cl_uint)(hash & 0xffffffffU);
+}
+
+/*
+ * gpucache_lookup_rowid_nolock
+ */
+STATIC_FUNCTION(cl_uint)
+gpucache_lookup_rowid_nolock(kern_data_store *kds,
+							 ItemPointerData *t_ctid)
+{
+	DECL_ROWID_HASH_AND_MAP(kds);
+	GpuCacheSysattr *sysattr;
+	cl_uint		hindex;
+	cl_uint		rowid;
+
+	hindex = gpucache_ctid_hash(t_ctid) % rowhash->nslots;
+	for (rowid = rowhash->slots[hindex].rowid;
+		 rowid != UINT_MAX;
+		 rowid = rowmap[rowid])
+	{
+		assert(rowid < rowhash->nrooms);
+		sysattr = kds_get_column_sysattr(kds, rowid);
+		if (ItemPointerEquals(&sysattr->ctid, t_ctid))
+			break;
+	}
+	return rowid;
+}
+
+/*
+ * __gcache_alloc_rowid
+ */
+STATIC_FUNCTION(cl_bool)
+__gcache_alloc_rowid(kern_data_store *kds,
+					 ItemPointerData *t_ctid,
+					 cl_uint *p_rowid, cl_bool *found)
+{
+	DECL_ROWID_HASH_AND_MAP(kds);
+	GpuCacheSysattr *sysattr;
+	cl_uint		hindex;
+	cl_uint		rowid;
+	cl_uint		newval;
+	cl_uint		curval;
+
+	/* lookup hash slot */
+	hindex = gpucache_ctid_hash(t_ctid) % rowhash->nslots;
+	if (atomicCAS(&rowhash->slots[hindex].lock, 0, 1) != 1)
+		return false;	/* try again */
+
+	for (rowid = rowhash->slots[hindex].rowid;
+		 rowid != UINT_MAX;
+		 rowid = rowmap[rowid])
+	{
+		assert(rowid < rowhash->nrooms);
+		sysattr = kds_get_column_sysattr(kds, rowid);
+		if (ItemPointerEquals(&sysattr->ctid, t_ctid))
+		{
+			/* already exists */
+			*found = true;
+			goto out_unlock;
+		}
+	}
+
+	/* not found, so try to allocate a new one */
+	do {
+		rowid = rowhash->freelist;
+		if (rowid == UINT_MAX)
+		{
+			/* no more free rowid */
+			*found = false;
+			goto out_unlock;
+		}
+		assert(rowid < rowhash->nrooms);
+		newval = rowmap[rowid];
+		assert(newval == UINT_MAX ||
+			   newval <  rowhash->nrooms);
+		curval = atomicCAS(&rowhash->freelist, rowid, newval);
+	} while (curval != rowid);
+
+	/* ok, rowid (a new row) was successfull allocated */
+	sysattr = kds_get_column_sysattr(kds, rowid);
+	sysattr->xmin = InvalidTransactionId;
+	sysattr->xmax = InvalidTransactionId;
+	sysattr->owner_id = 0;
+	memcpy(&sysattr->ctid, t_ctid, sizeof(ItemPointerData));
+
+	assert(rowhash->slots[hindex].rowid == UINT_MAX ||
+		   rowhash->slots[hindex].rowid <  rowhash->nrooms);
+	rowmap[rowid] = rowhash->slots[hindex].rowid;
+	rowhash->slots[hindex].rowid = rowid;
+
+	printf("gid=%u rowid=%u allocated for ctid=(%u,%u)\n",
+		   get_global_id(),
+		   rowid,
+		   (cl_uint)t_ctid->ip_blkid.bi_hi << 16 |
+		   (cl_uint)t_ctid->ip_blkid.bi_lo,
+		   (cl_uint)t_ctid->ip_posid);
+	
+	*found = false;
+out_unlock:
+	*p_rowid = rowid;
+	curval = atomicExch(&rowhash->slots[hindex].lock, 0);
+	assert(curval == 1);
+
+	return true;
+}
+
+/*
+ * gpucache_apply_insert
+ */
 STATIC_FUNCTION(cl_bool)
 gpucache_apply_insert(kern_context *kcxt,
 					  kern_data_store *kds,
@@ -108,15 +274,16 @@ gpucache_apply_insert(kern_context *kcxt,
 					  HeapTupleHeaderData *htup)
 {
 	char	   *pos = (char *)htup + htup->t_hoff;
-	cl_uint		oldid;
 	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 	cl_int		j, natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	cl_uint		oldid;
 
 	assert(pos == (char *)MAXALIGN(pos));
-	oldid = (((cl_uint)htup->t_ctid.ip_blkid.bi_hi << 16) |
-			 ((cl_uint)htup->t_ctid.ip_blkid.bi_lo));
-	sysattr->xmin = InvalidTransactionId;
-	sysattr->xmax = InvalidTransactionId;
+	/*
+	 * Note that nobody will modify the row-id hash table in this phase,
+	 * so we can lookup the hash table without lock.
+	 */
+	oldid = gpucache_lookup_rowid_nolock(kds, &htup->t_ctid);
 	for (j=0; j < kds->ncols; j++)
 	{
 		kern_colmeta   *cmeta = &kds->colmeta[j];
@@ -196,87 +363,101 @@ gpucache_apply_insert(kern_context *kcxt,
 	}
 	/* and, system attributes */
 	sysattr->xmin = htup->t_choice.t_heap.t_xmin;
-	sysattr->xmax = htup->t_choice.t_heap.t_xmax;
+	sysattr->xmax = InvalidTransactionId;
 	atomicMax(&kds->nitems, rowid+1);
 
 	return true;
 }
 
+/*
+ * gpucache_alloc_rowid
+ */
 STATIC_FUNCTION(void)
-gpucache_apply_delete(kern_context *kcxt,
-					  GCacheTxLogDelete *d_log,
-					  GpuCacheSysattr *sysattr)
+gpucache_alloc_rowid(kern_context *kcxt,
+					 kern_gpucache_redolog *redo,
+					 kern_data_store *kds,
+					 kern_data_extra *extra)
 {
-//	sysattr->xmin = d_log->xmin;
-	sysattr->xmax = d_log->xid;
-}
+	int		nloops;
 
-STATIC_FUNCTION(void)
-gpucache_apply_commit(kern_context *kcxt,
-					  kern_data_store *kds,
-					  cl_uint owner_id,
-					  GCacheTxLogCommit *c_log)
-{
-	GpuCacheSysattr *sysattr;
-	char	   *pos = c_log->data;
-
-	for (int i=0; i < c_log->nitems; i++)
+	nloops = (redo->nitems + get_global_size() - 1) / get_global_size();
+	for (int loop=0; loop < nloops; loop++)
 	{
-		cl_uint		rowid;
+		cl_uint		owner_id = loop * get_global_size() + get_global_id();
+		cl_bool		try_again = (owner_id < redo->nitems);
 
-		if (*pos == 'I')
-		{
-			memcpy(&rowid, pos+1, sizeof(cl_uint));
-			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (sysattr && sysattr->owner_id == owner_id)
+		do {
+			if (try_again)
 			{
-				sysattr->xmin = FrozenTransactionId;
-				sysattr->xmax = InvalidTransactionId;
+				GCacheTxLogCommon *tx_log;
+				cl_uint		offset = redo->log_index[owner_id];
+
+				tx_log = (GCacheTxLogCommon *)
+					((char *)redo + __kds_unpack(offset));
+				if (tx_log->type == GCACHE_TX_LOG__INSERT)
+				{
+					GCacheTxLogInsert *i_log = (GCacheTxLogInsert *)tx_log;
+
+					if (__gcache_alloc_rowid(kds,
+											 &i_log->htup.t_ctid,
+											 &i_log->rowid,
+											 &i_log->rowid_found))
+					{
+						if (i_log->rowid == UINT_MAX)
+							STROM_EREPORT(kcxt, ERRCODE_INVALID_NAME,
+										  "no more rowid allocatable");
+						try_again = false;
+					}
+				}
+				else if (tx_log->type == GCACHE_TX_LOG__DELETE)
+				{
+					GCacheTxLogDelete *d_log = (GCacheTxLogDelete *)tx_log;
+
+					if (__gcache_alloc_rowid(kds,
+											 &d_log->ctid,
+											 &d_log->rowid,
+											 &d_log->rowid_found))
+					{
+						if (d_log->rowid == UINT_MAX)
+							STROM_EREPORT(kcxt, ERRCODE_INVALID_NAME,
+										  "no more rowid allocatable");
+						try_again = false;
+					}
+				}
+				else if (tx_log->type == GCACHE_TX_LOG__XACT)
+				{
+					GCacheTxLogXact *x_log = (GCacheTxLogXact *)tx_log;
+				
+					if (__gcache_alloc_rowid(kds,
+											 &x_log->ctid,
+											 &x_log->rowid,
+											 &x_log->rowid_found))
+					{
+						if (x_log->rowid == UINT_MAX)
+							STROM_EREPORT(kcxt, ERRCODE_INVALID_NAME,
+										  "no more rowid allocatable");
+						try_again = false;
+					}
+				}
+				else
+				{
+					/* ignore other log types, if any */
+					try_again = false;
+				}
 			}
-			pos += 5;
-		}
-		else if (*pos == 'D')
-		{
-			memcpy(&rowid, pos+1, sizeof(cl_uint));
-			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (sysattr && sysattr->owner_id == owner_id)
-			{
-				sysattr->xmin = InvalidTransactionId;
-				sysattr->xmax = InvalidTransactionId;
-			}
-			pos += 5;
-		}
-		else
-		{
-			printf("unknown commit log entry '%c'\n", *pos);
-			break;
-		}
+		} while (__syncthreads_count(try_again) != 0);
 	}
 }
 
 /*
- * kern_gpucache_setup_owner
- *
- * This function setup sysattr->owner_id; that indicates which threads are
- * responsible to assign the target row.
- *
- * phase = 0 : zero clear the owner_id field of the sysattr
- * phase = 1 : assign max of get_global_id() who tries to update the row
- *             according to the INSERT/DELETE log
- * phase = 3 : assign max of get_global_id() who tries to apply commit log
+ * gpucache_cleanup_owner
  */
-KERNEL_FUNCTION(void)
-kern_gpucache_setup_owner(kern_gpucache_redolog *redo,
-						  kern_data_store *kds,
-						  kern_data_extra *extra,
-						  int phase)
+STATIC_FUNCTION(void)
+gpucache_cleanup_owner(kern_context *kcxt,
+					   kern_gpucache_redolog *redo,
+					   kern_data_store *kds)
 {
 	cl_uint		owner_id;
-	cl_uint		rowid;
-
-	/* bailout if any errors */
-	if (__syncthreads_count(redo->kerror.errcode) > 0)
-		return;
 
 	for (owner_id = get_global_id();
 		 owner_id < redo->nitems;
@@ -285,62 +466,277 @@ kern_gpucache_setup_owner(kern_gpucache_redolog *redo,
 		GpuCacheSysattr *sysattr;
 		GCacheTxLogCommon *tx_log;
 		cl_uint		offset = redo->log_index[owner_id];
+		cl_uint		rowid;
 
-		/* this log entry is successfully applied, and can be ignored */
-		if (offset == UINT_MAX)
-			continue;
-		tx_log = (GCacheTxLogCommon *)((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogCommon *)
+			((char *)redo + __kds_unpack(offset));
 		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
 			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
-
+			assert(rowid < kds->nrooms);
 			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (phase == 0)
-				sysattr->owner_id = 0;
-			else if (phase == 1)
-				atomicMax(&sysattr->owner_id, owner_id);
+			sysattr->owner_id = 0;
 		}
 		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
 		{
 			rowid = ((GCacheTxLogDelete *)tx_log)->rowid;
-
+			assert(rowid < kds->nrooms);
 			sysattr = kds_get_column_sysattr(kds, rowid);
-			if (phase == 0)
-				sysattr->owner_id = 0;
-			else if (phase == 1)
-				atomicMax(&sysattr->owner_id, owner_id);
+			sysattr->owner_id = 0;
 		}
-		else if (tx_log->type == GCACHE_TX_LOG__COMMIT)
+		else if (tx_log->type == GCACHE_TX_LOG__XACT)
 		{
-			GCacheTxLogCommit *c_log = (GCacheTxLogCommit *)tx_log;
-			char   *pos = c_log->data;
-			int		i;
+			rowid = ((GCacheTxLogXact *)tx_log)->rowid;
+			assert(rowid < kds->nrooms);
+			sysattr = kds_get_column_sysattr(kds, rowid);
+			sysattr->owner_id = 0;
+		}
+		else
+		{
+			printf("unknown GCacheTxLog type '%08x'\n", tx_log->type);
+		}
+	}
+}
 
-			for (i=0; i < c_log->nitems; i++)
+/*
+ * gpucache_setup_owner
+ */
+STATIC_FUNCTION(void)
+gpucache_setup_owner(kern_context *kcxt,
+					 kern_gpucache_redolog *redo,
+					 kern_data_store *kds,
+					 cl_bool skip_xact_log)
+{
+	cl_uint		owner_id;
+
+	for (owner_id = get_global_id();
+		 owner_id < redo->nitems;
+		 owner_id += get_global_size())
+	{
+		GpuCacheSysattr *sysattr;
+		GCacheTxLogCommon *tx_log;
+		cl_uint		offset = redo->log_index[owner_id];
+		cl_uint		rowid;
+
+		tx_log = (GCacheTxLogCommon *)((char *)redo + __kds_unpack(offset));
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
+		{
+			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
+			assert(rowid < kds->nrooms);
+			sysattr = kds_get_column_sysattr(kds, rowid);
+			atomicMax(&sysattr->owner_id, owner_id);
+		}
+		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
+		{
+			rowid = ((GCacheTxLogDelete *)tx_log)->rowid;
+			assert(rowid < kds->nrooms);
+			sysattr = kds_get_column_sysattr(kds, rowid);
+			atomicMax(&sysattr->owner_id, owner_id);
+		}
+		else if (tx_log->type == GCACHE_TX_LOG__XACT)
+		{
+			if (!skip_xact_log)
 			{
-				if (*pos == 'I' || *pos == 'D')
-				{
-					memcpy(&rowid, pos+1, sizeof(cl_uint));
-
-					sysattr = kds_get_column_sysattr(kds, rowid);
-					if (phase == 0)
-						sysattr->owner_id = 0;
-					else if (phase == 3)
-						atomicMax(&sysattr->owner_id, owner_id);
-					pos += 5;
-				}
-				else
-				{
-					printf("unknown commit log entry '%c'\n", *pos);
-					break;
-				}
+				rowid = ((GCacheTxLogXact *)tx_log)->rowid;
+				assert(rowid < kds->nrooms);
+				sysattr = kds_get_column_sysattr(kds, rowid);
+				atomicMax(&sysattr->owner_id, owner_id);
 			}
 		}
 		else
 		{
-			printf("unknown redo-log type %08x, ignored\n", tx_log->type);
+			printf("unknown GCacheTxLog type '%08x'\n", tx_log->type);
 		}
 	}
+}
+
+/*
+ * gpucache_apply_redo
+ */
+STATIC_FUNCTION(void)
+gpucache_apply_redo(kern_context *kcxt,
+					kern_gpucache_redolog *redo,
+					kern_data_store *kds,
+					kern_data_extra *extra)
+{
+	cl_uint		owner_id;
+
+	for (owner_id = get_global_id();
+		 owner_id < redo->nitems;
+		 owner_id += get_global_size())
+	{
+		GCacheTxLogCommon *tx_log;
+		GpuCacheSysattr *sysattr;
+		cl_uint		offset = redo->log_index[owner_id];
+
+		tx_log = (GCacheTxLogCommon *)
+			((char *)redo + __kds_unpack(offset));
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
+		{
+			GCacheTxLogInsert *i_log = (GCacheTxLogInsert *)tx_log;
+
+			assert(i_log->rowid < kds->nrooms);
+			sysattr = kds_get_column_sysattr(kds, i_log->rowid);
+			if (sysattr->owner_id == owner_id)
+			{
+				gpucache_apply_insert(kcxt, kds, extra, sysattr,
+									  i_log->rowid, &i_log->htup);
+			}
+		}
+		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
+		{
+			GCacheTxLogDelete *d_log = (GCacheTxLogDelete *)tx_log;
+
+			assert(d_log->rowid < kds->nrooms);
+			sysattr = kds_get_column_sysattr(kds, d_log->rowid);
+			if (sysattr->owner_id == owner_id)
+			{
+				sysattr->xmax = d_log->xid;
+			}
+		}
+	}
+}
+
+/*
+ * __gpucache_release_rowid
+ */
+STATIC_FUNCTION(cl_bool)
+__gpucache_release_rowid(kern_data_store *kds,
+						 GCacheTxLogXact *x_log)
+{
+	DECL_ROWID_HASH_AND_MAP(kds);
+	GpuCacheSysattr *sysattr;
+	cl_uint		hindex;
+	cl_uint		rowid;
+	cl_uint	   *prev;
+	cl_uint		next;
+
+	/* lock and lookup the hash-slot */
+	hindex = gpucache_ctid_hash(&x_log->ctid) % rowhash->nslots;
+	if (atomicCAS(&rowhash->slots[hindex].lock, 0, 1) != 1)
+		return false;		/* try again */
+
+	for (prev = &rowhash->slots[hindex].rowid, rowid = *prev;
+		 rowid != UINT_MAX;
+		 prev = &rowmap[rowid], rowid = *prev)
+	{
+		assert(rowid < rowhash->nrooms);
+		sysattr = kds_get_column_sysattr(kds, rowid);
+		if (ItemPointerEquals(&sysattr->ctid, &x_log->ctid))
+		{
+			assert(rowid == x_log->rowid);
+			assert(rowmap[rowid] == UINT_MAX ||
+				   rowmap[rowid] < rowhash->nrooms);
+			/* detach rowid from the hash table */
+			*prev = rowmap[rowid];
+			/* attach rowid to the freelist */
+			do {
+				next = rowhash->freelist;
+				rowmap[rowid] = next;
+			} while (atomicCAS(&rowhash->freelist, next, rowid) != rowid);
+
+			printf("__gpucache: rowid=%u ctid=(%u,%u) released\n",
+				   rowid,
+				   (cl_uint)x_log->ctid.ip_blkid.bi_hi << 16 |
+				   (cl_uint)x_log->ctid.ip_blkid.bi_lo,
+				   (cl_uint)x_log->ctid.ip_posid);
+			goto out_unlock;
+		}
+	}
+	printf("__gpucache_release_rowid: rowid=%u ctid=(%u,%u) not found",
+		   x_log->rowid,
+		   (cl_uint)x_log->ctid.ip_blkid.bi_hi << 16 |
+		   (cl_uint)x_log->ctid.ip_blkid.bi_lo,
+		   (cl_uint)x_log->ctid.ip_posid);
+out_unlock:
+	next = atomicExch(&rowhash->slots[hindex].lock, 0);
+	assert(next == 1);
+
+	return true;
+}
+
+/*
+ * gpucache_apply_xact
+ */
+STATIC_FUNCTION(void)
+gpucache_apply_xact(kern_context *kcxt,
+					kern_gpucache_redolog *redo,
+					kern_data_store *kds)
+{
+	cl_uint		nloops;
+
+	nloops = (redo->nitems + get_global_size() - 1) / get_global_size();
+	for (int loop=0; loop < nloops; loop++)
+	{
+		cl_uint		owner_id = loop * get_global_size() + get_global_id();
+		cl_bool		try_again = (owner_id < redo->nitems);
+
+		do {
+			if (try_again)
+			{
+				GCacheTxLogXact *x_log;
+				GpuCacheSysattr *sysattr;
+				cl_uint		offset = redo->log_index[owner_id];
+
+				x_log = (GCacheTxLogXact *)
+					((char *)redo + __kds_unpack(offset));
+				if (x_log->type == GCACHE_TX_LOG__XACT)
+				{
+					assert(x_log->rowid < kds->nrooms);
+					sysattr = kds_get_column_sysattr(kds, x_log->rowid);
+					if (x_log->tag == 'I')			/* COMMIT INSERT */
+					{
+						if (sysattr->owner_id == owner_id)
+							sysattr->xmin = FrozenTransactionId;
+						try_again = false;
+					}
+					else if (x_log->tag == 'D' ||	/* COMMIT DELETE */
+							 x_log->tag == 'i')		/* ROLLBACK INSERT */
+					{
+						if (sysattr->owner_id == owner_id)
+						{
+							if (__gpucache_release_rowid(kds, x_log))
+							{
+								sysattr->xmin = InvalidTransactionId;
+								sysattr->xmax = InvalidTransactionId;
+								try_again = false;
+							}
+						}
+						else
+						{
+							try_again = false;
+						}
+					}
+					else if (x_log->tag == 'd')		/* ROLLBACK DELETE */
+					{
+						if (sysattr->owner_id == owner_id)
+							sysattr->xmax = InvalidTransactionId;
+						try_again = false;
+					}
+					else
+					{
+						try_again = false;
+					}
+				}
+				else
+				{
+					try_again = false;
+				}
+			}
+		} while (__syncthreads_count(try_again) != 0);
+	}
+}
+
+/*
+ * gpucache_fixup_rowid
+ */
+STATIC_FUNCTION(void)
+gpucache_fixup_rowid(kern_context *kcxt,
+					 kern_gpucache_redolog *redo,
+					 kern_data_store *kds)
+{
+
+
 }
 
 KERNEL_FUNCTION(void)
@@ -350,68 +746,36 @@ kern_gpucache_apply_redo(kern_gpucache_redolog *redo,
 						 int phase)
 {
 	kern_context kcxt;
-	cl_uint		owner_id;
 
 	/* bailout if any errors */
 	if (__syncthreads_count(redo->kerror.errcode) > 0)
-		goto skip;
+		return;
 
 	INIT_KERNEL_CONTEXT(&kcxt, NULL);	/* no kparams */
-	for (owner_id = get_global_id();
-		 owner_id < redo->nitems;
-		 owner_id += get_global_size())
+	switch (phase)
 	{
-		GCacheTxLogCommon *tx_log;
-		GpuCacheSysattr *sysattr;
-		cl_uint		offset = redo->log_index[owner_id];
-
-		/*
-		 * In case of suspend & resume, a part of log entries are already
-		 * applied to the kds/extra buffers. To avoid redundant consumption
-		 * of the extra buffer, we skip these records.
-		 */
-		if (offset == UINT_MAX)
-			continue;
-
-		tx_log = (GCacheTxLogCommon *)((char *)redo + __kds_unpack(offset));
-		if (tx_log->type == GCACHE_TX_LOG__INSERT)
-		{
-			GCacheTxLogInsert *i_log = (GCacheTxLogInsert *)tx_log;
-
-			sysattr = kds_get_column_sysattr(kds, i_log->rowid);
-			if (sysattr->owner_id == owner_id && phase == 2)
-			{
-				if (gpucache_apply_insert(&kcxt, kds, extra, sysattr,
-										  i_log->rowid, &i_log->htup))
-					redo->log_index[owner_id] = UINT_MAX;
-			}
-		}
-		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
-		{
-			GCacheTxLogDelete *d_log = (GCacheTxLogDelete *)tx_log;
-
-			sysattr = kds_get_column_sysattr(kds, d_log->rowid);
-			if (sysattr->owner_id == owner_id && phase == 2)
-			{
-				gpucache_apply_delete(&kcxt, d_log, sysattr);
-				redo->log_index[owner_id] = UINT_MAX;
-			}
-		}
-		else if (tx_log->type == GCACHE_TX_LOG__COMMIT)
-		{
-			GCacheTxLogCommit *c_log = (GCacheTxLogCommit *)tx_log;
-
-			if (phase == 4)
-				gpucache_apply_commit(&kcxt, kds, owner_id, c_log);
-		}
-		else
-		{
-			/* ignore other log type in this step */
-		}
-		if (kcxt.errcode != 0)
+		case 0:		/* assign rowid for each log entries */
+			gpucache_alloc_rowid(&kcxt, redo, kds, extra);
+			break;
+		case 1:		/* clear the owner_id field of log entries */
+			gpucache_cleanup_owner(&kcxt, redo, kds);
+			break;
+		case 2:		/* assign the largest owner_id of INS/DEL log entries */
+			gpucache_setup_owner(&kcxt, redo, kds, true);
+			break;
+		case 3:		/* apply INS/DEL log entries */
+			gpucache_apply_redo(&kcxt, redo, kds, extra);
+			break;
+		case 4:		/* assign the largest owner_id of XACT log entries */
+			gpucache_setup_owner(&kcxt, redo, kds, false);
+			break;
+		case 5:		/* apply XACT log entries */
+			gpucache_apply_xact(&kcxt, redo, kds);
+			break;
+		default:	/* release rowid if any errors */
+			gpucache_fixup_rowid(&kcxt, redo, kds);
 			break;
 	}
-skip:
 	kern_writeback_error_status(&redo->kerror, &kcxt);
 }
 
@@ -420,32 +784,34 @@ kern_gpucache_compaction(kern_data_store *kds,
 						 kern_data_extra *old_extra,
 						 kern_data_extra *new_extra)
 {
+	
 	__shared__ cl_uint required;
 	__shared__ cl_ulong extra_base;
 	cl_uint		nloops;
 
 	nloops = (kds->nitems + get_global_size() - 1) / get_global_size();
-	for (int loop=0; loop < nloops; loop++)
+	for (int j=0; j < kds->ncols; j++)
 	{
-		cl_uint		rowid = get_global_id() + loop * get_global_size();
-		GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+		kern_colmeta *cmeta = &kds->colmeta[j];
 
-		for (int j=0; j < kds->ncols-1; j++)
+		if (cmeta->attbyval || cmeta->attlen != -1)
+			continue;		/* not varlena */
+		for (int loop=0; loop < nloops; loop++)
 		{
-			kern_colmeta *cmeta = &kds->colmeta[j];
+			GpuCacheSysattr *sysattr;
+			cl_uint		rowid = loop * get_global_size() + get_global_id();
 			cl_bool		isnull = false;
 			cl_uint	   *values;
 			char	   *orig = NULL;
 			char	   *dest;
 			cl_uint		sz, l_off = 0;
 
-			if (cmeta->attbyval || cmeta->attlen != -1)
-				continue;			/* not varlena */
-
+			sysattr = kds_get_column_sysattr(kds, rowid);
 			if (rowid >= kds->nitems)
 				isnull = true;		/* out of range */
-			else if (sysattr->xmin == InvalidTransactionId)
-				isnull = true;		/* rows already removed */
+			else if (sysattr->xmin == InvalidTransactionId ||
+					 sysattr->xmax == FrozenTransactionId)
+				isnull = true;		/* row is already removed */
 			else if (cmeta->nullmap_offset != 0)
 			{
 				cl_uint	   *nullmap = (cl_uint *)
@@ -454,7 +820,6 @@ kern_gpucache_compaction(kern_data_store *kds,
 					isnull = true;
 			}
 			values = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
-			
 			/* copy the varlena to new extra buffer */
 			if (get_local_id() == 0)
 				required = 0;

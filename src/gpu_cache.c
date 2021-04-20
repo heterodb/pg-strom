@@ -191,7 +191,7 @@ static object_access_hook_type object_access_next = NULL;
 static void		  (*gpucache_xact_redo_next)(XLogReaderState *record) = NULL;
 static void		  (*gpucache_heap_redo_next)(XLogReaderState *record) = NULL;
 static CUmodule		gcache_cuda_module = NULL;
-static CUfunction	gcache_kfunc_setup_owner = NULL;
+static CUfunction	gcache_kfunc_init_empty = NULL;
 static CUfunction	gcache_kfunc_apply_redo = NULL;
 static CUfunction	gcache_kfunc_compaction = NULL;
 
@@ -327,6 +327,8 @@ __parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
 			max_num_rows = strtol(value, &end, 10);
 			if (*end != '\0')
 				elog(ERROR, "gpucache: invalid option [%s]=[%s]", key, value);
+			if (max_num_rows > (UINT_MAX - 100))
+				elog(ERROR, "gpucache: max_num_rows too large (%lu)", max_num_rows);
 		}
 		else if (strcmp(key, "gpu_sync_interval") == 0)
 		{
@@ -904,7 +906,7 @@ __gpuCacheInitLoadTrackRowId(GpuCacheDesc *gc_desc, TransactionId xid,
 		PG_END_TRY();
 	}
 	if (!gc_handle->buf.data)
-		initStringInfo(&gc_handle->buf);
+		initStringInfoContext(&gc_handle->buf, CacheMemoryContext);
 
 	Assert(tag == 'I' || tag == 'D');
 	pitem.tag = tag;
@@ -946,8 +948,8 @@ __execGpuCacheInitLoad(GpuCacheDesc *gc_desc, Relation rel)
 		}
 		item->type = GCACHE_TX_LOG__INSERT;
 		item->length = sz;
-		item->timestamp = GetCurrentTimestamp();
-		item->rowid = __gpuCacheAllocateRowId(gc_desc, &tuple->t_self);
+		item->rowid = UINT_MAX;
+		item->rowid_found = false;
 		memcpy(&item->htup, tuple->t_data, tuple->t_len);
 		HeapTupleHeaderSetXmin(&item->htup, gcache_xmin);
 		HeapTupleHeaderSetXmax(&item->htup, gcache_xmax);
@@ -1096,6 +1098,7 @@ __createGpuCacheSharedState(GpuCacheDesc *gc_desc,
 						   0,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
 						   nrooms);
+	kds_head->nslots = Max(Min(1.5 * (double)nrooms, UINT_MAX), 40000);
 	kds_head->table_oid = RelationGetRelid(rel);
 	Assert(kds_head->nr_colmeta > tupdesc->natts);
 	for (j=0; j < tupdesc->natts; j++)
@@ -1622,6 +1625,7 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 	}
 	else
 	{
+#if 0
 		char   *pos = gc_handle->buf.data;
 		uint32	count;
 
@@ -1648,6 +1652,7 @@ ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
 			}
 		}
 		Assert(pos <= gc_handle->buf.data + gc_handle->buf.len);
+#endif
 	}
 	elog(LOG, "ReleaseGpuCacheHandle: %s:%lx xid=%u",
 		 gc_desc->gc_sstate->table_name,
@@ -1755,8 +1760,8 @@ __gpuCacheInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	item = alloca(sz);
 	item->type = GCACHE_TX_LOG__INSERT;
 	item->length = sz;
-	item->timestamp = GetCurrentTimestamp();
-	item->rowid = rowid;
+	item->rowid = UINT_MAX;		/* to be set by kernel */
+	item->rowid_found = false;	/* to be set by kernel */
 	memcpy(&item->htup, tuple->t_data, tuple->t_len);
 	HeapTupleHeaderSetXmin(&item->htup, GetCurrentTransactionId());
 	HeapTupleHeaderSetXmax(&item->htup, InvalidTransactionId);
@@ -1789,9 +1794,10 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
 	/* DELETE Log */
 	item.type = GCACHE_TX_LOG__DELETE;
 	item.length = MAXALIGN(sizeof(GCacheTxLogDelete));
-	item.timestamp = GetCurrentTimestamp();
-	item.rowid = rowid;
 	item.xid = GetCurrentTransactionId();
+	item.rowid = UINT_MAX;		/* to be set by kernel */
+	item.rowid_found = false;	/* to be set by kernel */
+	memcpy(&item.ctid, &tuple->t_self, sizeof(ItemPointerData));
 
 	__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&item);
 }
@@ -2338,68 +2344,42 @@ gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 /*
- * gpuCacheAddCommitLog
+ * gpuCacheAddXactLog
  */
 static void
-gpuCacheAddCommitLog(GpuCacheHandle *gc_handle)
+gpuCacheAddXactLog(GpuCacheHandle *gc_handle, bool normal_commit)
 {
-	GCacheTxLogCommit *c_log = alloca(GCACHE_TX_LOG_COMMIT_ALLOCSZ);
-	PendingRowIdItem *pitem;
 	char	   *pos = gc_handle->buf.data;
-	uint32		count = 1;
+	uint32		count;
 
-	/* commit log buffer */
-	c_log->type = GCACHE_TX_LOG__COMMIT;
-	c_log->length = offsetof(GCacheTxLogCommit, data);
-	c_log->xid = gc_handle->xid;
-	c_log->timestamp = GetCurrentTimestamp();
-	c_log->nitems = 0;
-
-	while (count <= gc_handle->nitems)
+	for (count=0; count < gc_handle->nitems; count++)
 	{
-		bool	flush_commit_log = (count == gc_handle->nitems);
-		char   *temp;
+		PendingRowIdItem   *pitem = (PendingRowIdItem *)pos;
+		GCacheTxLogXact		x_log;
+		char				tag;
 
-		pitem = (PendingRowIdItem *)pos;
-		switch (pitem->tag)
+		if (pitem->tag == 'I')
+			tag = (normal_commit ? 'I' : 'i');
+		else if (pitem->tag == 'D')
+			tag = (normal_commit ? 'D' : 'd');
+		else
 		{
-			case 'I':	/* INSERT with rowid(u32) */
-			case 'D':	/* DELETE with rowid(u32) */
-				if (c_log->length + 5 > GCACHE_TX_LOG_COMMIT_ALLOCSZ)
-				{
-					flush_commit_log = true;
-					break;
-				}
-				temp = (char *)c_log + c_log->length;
-				*temp++ = pitem->tag;
-				*((uint32 *)temp) = pitem->rowid;
-				c_log->nitems++;
-				c_log->length += (sizeof(char) + sizeof(uint32));
-				count++;
-				pos += sizeof(PendingRowIdItem);
-				break;
-
-			default:
-				elog(FATAL, "broken internal PendingRowIdItem");
+			Assert(false);
+			elog(FATAL, "broken internal PendingRowIdItem");
 		}
 
-		if (flush_commit_log)
-		{
-			int		diff = MAXALIGN(c_log->length) - c_log->length;
+		x_log.type = GCACHE_TX_LOG__XACT;
+		x_log.length = sizeof(GCacheTxLogXact);
+		x_log.rowid = UINT_MAX;
+		x_log.rowid_found = false;
+		x_log.tag = tag;
+		memcpy(&x_log.ctid, &pitem->ctid, sizeof(ItemPointerData));
 
-			if (diff > 0)
-			{
-				memset((char *)c_log + c_log->length, 0, diff);
-				c_log->length += diff;
-			}
-			__gpuCacheAppendLog(gc_handle->gc_desc,
-								(GCacheTxLogCommon *)c_log);
-			/* rewind */
-			c_log->length = offsetof(GCacheTxLogCommit, data);
-			c_log->nitems = 0;
-		}
+		__gpuCacheAppendLog(gc_handle->gc_desc,
+							(GCacheTxLogCommon *)&x_log);
+		pos += sizeof(PendingRowIdItem);
 	}
-	elog(LOG, "AddCommitLog: %s:%lx xid=%u nitems=%u",
+	elog(LOG, "AddXactLog: %s:%lx xid=%u nitems=%u",
 		 gc_handle->gc_desc->gc_sstate->table_name,
 		 gc_handle->gc_desc->gc_sstate->signature,
 		 gc_handle->xid,
@@ -2428,17 +2408,8 @@ gpuCacheXactCallback(XactEvent event, void *arg)
 		HASH_SEQ_STATUS	hseq;
 		GpuCacheHandle *gc_handle;
 
-		if (event == XACT_EVENT_PRE_COMMIT)
-		{
-			hash_seq_init(&hseq, gcache_handle_htab);
-			while ((gc_handle = hash_seq_search(&hseq)) != NULL)
-			{
-				if (gc_handle->xid == curr_xid)
-					gpuCacheAddCommitLog(gc_handle);
-			}
-		}
-		else if (event == XACT_EVENT_COMMIT ||
-				 event == XACT_EVENT_ABORT)
+		if (event == XACT_EVENT_COMMIT ||
+			event == XACT_EVENT_ABORT)
 		{
 			bool	normal_commit = (event == XACT_EVENT_COMMIT);
 
@@ -2446,7 +2417,10 @@ gpuCacheXactCallback(XactEvent event, void *arg)
 			while ((gc_handle = hash_seq_search(&hseq)) != NULL)
 			{
 				if (gc_handle->xid == curr_xid)
+				{
+					gpuCacheAddXactLog(gc_handle, normal_commit);
 					ReleaseGpuCacheHandle(gc_handle, normal_commit);
+				}
 			}
 		}
 	}
@@ -2482,7 +2456,10 @@ gpuCacheSubXactCallback(SubXactEvent event,
 		while ((gc_handle = hash_seq_search(&hseq)) != NULL)
 		{
 			if (gc_handle->xid == curr_xid)
+			{
+				gpuCacheAddXactLog(gc_handle, false);
 				ReleaseGpuCacheHandle(gc_handle, false);
+			}
 		}
 	}
 }
@@ -2712,9 +2689,9 @@ __gpuCacheLoadCudaModule(void)
 		goto bailout;
 	}
 
-	rc = cuModuleGetFunction(&gcache_kfunc_setup_owner,
+	rc = cuModuleGetFunction(&gcache_kfunc_init_empty,
 							 cuda_module,
-							 "kern_gpucache_setup_owner");
+							 "kern_gpucache_init_empty");
 	if (rc != CUDA_SUCCESS)
 	{
 		__WLog("failed on cuModuleGetFunction: %s", errorText(rc));
@@ -2770,21 +2747,31 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 	CUdeviceptr		m_main = 0;
 	CUdeviceptr		m_extra = 0;
 	CUresult		rc;
-	size_t			sz;
+	int				grid_sz, block_sz;
+	void		   *kern_args[2];
+	cl_uint			nrooms = gc_sstate->kds_head.nrooms;
+	cl_uint			nslots = gc_sstate->kds_head.nslots;
+	size_t			main_sz = 0;
+	size_t			extra_sz = 0;
+	size_t			head_sz;
 
 	if (gc_sstate->gpu_main_devptr != 0UL)
 		return CUDA_SUCCESS;
 
 	/* main portion of the device buffer */
-	rc = cuMemAlloc(&m_main, gc_sstate->kds_head.length);
+	main_sz = (PAGE_ALIGN(gc_sstate->kds_head.length) +
+			   PAGE_ALIGN(offsetof(kern_gpucache_rowhash, slots[nslots])) +
+			   PAGE_ALIGN(sizeof(uint32) * nrooms));
+	
+	rc = cuMemAlloc(&m_main, main_sz);
 	if (rc != CUDA_SUCCESS)
 	{
 		__WLog("failed on cuMemAlloc: %s", errorText(rc));
 		goto error_0;
 	}
 
-	sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
-	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head, sz);
+	head_sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
+	rc = cuMemcpyHtoD(m_main, &gc_sstate->kds_head, head_sz);
 	if (rc != CUDA_SUCCESS)
 	{
 		__WLog("failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -2801,7 +2788,8 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 	/* extra buffer, if any */
 	if (gc_sstate->kds_extra.length > 0)
 	{
-		rc = cuMemAlloc(&m_extra, gc_sstate->kds_extra.length);
+		extra_sz = gc_sstate->kds_extra.length;
+		rc = cuMemAlloc(&m_extra, extra_sz);
 		if (rc != CUDA_SUCCESS)
 		{
 			__WLog("failed on cuMemAlloc: %s", errorText(rc));
@@ -2823,14 +2811,49 @@ gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
 			goto error_2;
 		}
 	}
+
+	/* init kds/extra */
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
+							   gcache_kfunc_init_empty,
+							   gc_sstate->cuda_dindex,
+							   0, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		__WLog("failed on __gpuOptimalBlockSize: %s", errorText(rc));
+		goto error_2;
+	}
+
+	kern_args[0] = &m_main;
+	kern_args[1] = &m_extra;
+	rc = cuLaunchKernel(gcache_kfunc_init_empty,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
+		goto error_2;
+	}
+
+	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		__WLog("failed on cuStreamSynchronize: %s", errorText(rc));
+		goto error_2;
+	}
+	
 	elog(LOG, "gpucache: AllocMemory %s:%lx (main_sz=%zu, extra_sz=%zu)",
 		 gc_sstate->table_name,
 		 gc_sstate->signature,
 		 gc_sstate->kds_head.length,
 		 gc_sstate->kds_extra.length);
 
-	gc_sstate->gpu_main_size = gc_sstate->kds_head.length;
-	gc_sstate->gpu_extra_size = gc_sstate->kds_extra.length;
+	gc_sstate->gpu_main_size = main_sz;
+	gc_sstate->gpu_extra_size = extra_sz;
 	gc_sstate->gpu_main_devptr = m_main;
 	gc_sstate->gpu_extra_devptr = m_extra;
 	return CUDA_SUCCESS;
@@ -3098,118 +3121,37 @@ __gpuCacheLaunchApplyRedoKernel(GpuCacheDesc *gc_desc, CUdeviceptr m_redo)
 	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	kern_gpucache_redolog *h_redo = (kern_gpucache_redolog *)m_redo;
 	int			cuda_dindex = gc_sstate->cuda_dindex;
-	int			o_grid_sz, o_block_sz;
-	int			r_grid_sz, r_block_sz;
+	int			grid_sz, block_sz;
 	int			phase;
 	void	   *kern_args[4];
 	CUresult	rc;
 
-	rc = __gpuOptimalBlockSize(&o_grid_sz,
-							   &o_block_sz,
-							   gcache_kfunc_setup_owner,
-							   cuda_dindex, 0, 0);
-	if (rc != CUDA_SUCCESS)
-	{
-		__WLog("failed on __gpuOptimalBlockSize: %s", errorText(rc));
-		return rc;
-	}
-	o_grid_sz = Min(o_grid_sz, (h_redo->nitems + o_block_sz - 1) / o_block_sz);
-
-	rc = __gpuOptimalBlockSize(&r_grid_sz,
-							   &r_block_sz,
+	rc = __gpuOptimalBlockSize(&grid_sz,
+							   &block_sz,
 							   gcache_kfunc_apply_redo,
 							   cuda_dindex, 0, 0);
-	r_grid_sz = Min(r_grid_sz, (h_redo->nitems + r_block_sz - 1) / r_block_sz);
-	
+	grid_sz = Min(grid_sz, (h_redo->nitems + block_sz - 1) / block_sz);
+
 retry:
-	phase = 0;
-	kern_args[0] = &m_redo;
-	kern_args[1] = &gc_sstate->gpu_main_devptr;
-	kern_args[2] = &gc_sstate->gpu_extra_devptr;
-	kern_args[3] = &phase;
-
-	/*
-	 * setup-owner (phase-0) - clear the owner-id field
-	 */
-	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
-						o_grid_sz, 1, 1,
-						o_block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
+	for (phase = 0; phase <= 6; phase++)
 	{
-		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
-		return rc;
-	}
+		kern_args[0] = &m_redo;
+		kern_args[1] = &gc_sstate->gpu_main_devptr;
+		kern_args[2] = &gc_sstate->gpu_extra_devptr;
+		kern_args[3] = &phase;
 
-	/*
-	 * setup-owner (phase-1) - assign largest owner-id for each rows modified
-	 */
-	phase = 1;
-	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
-						o_grid_sz, 1, 1,
-						o_block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
-		return rc;
-	}
-
-	/*
-	 * apply redo logs (phase-2) - apply INSERT/DELETE logs
-	 */
-	phase = 2;
-	rc = cuLaunchKernel(gcache_kfunc_apply_redo,
-						r_grid_sz, 1, 1,
-						r_block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
-		return rc;
-	}
-
-	/*
-	 * setup-owner (phase-3) - assign largest owner-id of commit-logs
-	 */
-	phase = 3;
-	rc = cuLaunchKernel(gcache_kfunc_setup_owner,
-						o_grid_sz, 1, 1,
-						o_block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
-		return rc;
-	}
-
-	/*
-	 * apply redo logs (phase-4) - apply COMMIT logs
-	 */
-	phase = 4;
-	rc = cuLaunchKernel(gcache_kfunc_apply_redo,
-						r_grid_sz, 1, 1,
-						r_block_sz, 1, 1,
-						0,
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-	{
-		__WLog("failed on cuLaunchKernel: %s", errorText(rc));
-		return rc;
+		rc = cuLaunchKernel(gcache_kfunc_apply_redo,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							CU_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			__WLog("failed on cuLaunchKernel: %s", errorText(rc));
+			return rc;
+		}
 	}
 
 	/* check status of the above kernel execution */
