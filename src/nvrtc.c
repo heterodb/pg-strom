@@ -177,6 +177,54 @@ nvrtcGetLoweredName(nvrtcProgram prog,
 }
 
 /*
+ * nvrtcGetCUBIN
+ */
+static nvrtcResult (*p_nvrtcGetCUBIN)(
+	nvrtcProgram prog,
+	char* cubin) = NULL;
+
+nvrtcResult
+nvrtcGetCUBIN(nvrtcProgram prog, char* cubin)
+{
+	return p_nvrtcGetCUBIN(prog, cubin);
+}
+
+/*
+ * nvrtcGetCUBINSize
+ */
+static nvrtcResult (*p_nvrtcGetCUBINSize)(
+	nvrtcProgram prog,
+	size_t *cubinSizeRet) = NULL;
+
+nvrtcResult
+nvrtcGetCUBINSize(nvrtcProgram prog, size_t *cubinSizeRet)
+{
+	return p_nvrtcGetCUBINSize(prog, cubinSizeRet);
+}
+
+/*
+ * nvrtcGetNumSupportedArchs
+ */
+static nvrtcResult (*p_nvrtcGetNumSupportedArchs)(int *numArchs) = NULL;
+
+nvrtcResult
+nvrtcGetNumSupportedArchs(int *numArchs)
+{
+	return p_nvrtcGetNumSupportedArchs(numArchs);
+}
+
+/*
+ * nvrtcGetSupportedArchs
+ */
+static nvrtcResult (*p_nvrtcGetSupportedArchs)(int *supportedArchs) = NULL;
+
+nvrtcResult
+nvrtcGetSupportedArchs(int *supportedArchs)
+{
+	return p_nvrtcGetSupportedArchs(supportedArchs);
+}
+
+/*
  * lookup_nvrtc_function
  */
 static void *
@@ -252,10 +300,20 @@ pgstrom_init_nvrtc(void)
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetPTX);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLogSize);
 	LOOKUP_NVRTC_FUNCTION(nvrtcGetProgramLog);
-	if (nvrtc_version >= 10000)		/* CUDA10.0 */
+	if (nvrtc_version >= 10000)		/* CUDA 10.0 */
 	{
 		LOOKUP_NVRTC_FUNCTION(nvrtcAddNameExpression);
 		LOOKUP_NVRTC_FUNCTION(nvrtcGetLoweredName);
+	}
+	if (nvrtc_version >= 11010)		/* CUDA 11.1 */
+	{
+		LOOKUP_NVRTC_FUNCTION(nvrtcGetCUBIN);
+		LOOKUP_NVRTC_FUNCTION(nvrtcGetCUBINSize);
+	}
+	if (nvrtc_version >= 11020)		/* CUDA 11.2 */
+	{
+		LOOKUP_NVRTC_FUNCTION(nvrtcGetNumSupportedArchs);
+		LOOKUP_NVRTC_FUNCTION(nvrtcGetSupportedArchs);
 	}
 
 	if (cuda_version == nvrtc_version)
