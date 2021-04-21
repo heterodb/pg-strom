@@ -16,7 +16,6 @@ CREATE TABLE rt_int (
   d    int4,
   e    int8,
   f    int8,
-  g    int1,
   x    float2,
   y    float4,
   z    float8
@@ -29,11 +28,13 @@ INSERT INTO rt_int (
             pgstrom.random_int(1, -32000, 32000),
             pgstrom.random_int(1, -32000, 32000),
             pgstrom.random_int(1, -32000, 32000),
-            pgstrom.random_int(1, -100, 100),
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0)
    FROM generate_series(1,2000) x);
+ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8, ADD n int1; 
+UPDATE rt_int SET g = ((id - 1 ) % 256 -128);
+UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g, n = g;
 VACUUM ANALYZE;
 
 -- force to use GpuScan, instead of SeqScan
@@ -44,16 +45,16 @@ SET pg_strom.debug_kernel_source = off;
 -- cast operators
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
@@ -62,16 +63,16 @@ SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
 
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
@@ -80,41 +81,65 @@ SELECT id, a::int, e::int, x::int, y::int, z::int
 
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 (SELECT * FROM test03g EXCEPT ALL SELECT * FROM test03p);
 (SELECT * FROM test03p EXCEPT ALL SELECT * FROM test03g);
 
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test04g EXCEPT ALL SELECT * FROM test04p);
+(SELECT * FROM test04p EXCEPT ALL SELECT * FROM test04g);
+
 -- '+' operators
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a+b v1, a+c v2, b+e v3,
+SELECT id, a+b v1, a+c v2, b+e v3, 
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
 SET pg_strom.enabled = off;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10p
   FROM rt_int
  WHERE x >= 0;
@@ -155,7 +180,7 @@ SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
-SELECT id, a * (b % 10) v1, a*c v2, e*a v3,
+SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
            e*b v7, e*d v8, e*f v9
   INTO test12g

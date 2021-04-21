@@ -36,6 +36,9 @@ INSERT INTO rt_int (
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0)
    FROM generate_series(1,2000) x);
+ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8; 
+UPDATE rt_int SET g = ((id - 1 ) % 256 -128);
+UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g;
 VACUUM ANALYZE;
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
@@ -44,141 +47,177 @@ SET pg_strom.debug_kernel_source = off;
 -- cast operators
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                                           QUERY PLAN                                                                            
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((c)::smallint), ((e)::smallint), ((x)::smallint), ((y)::smallint), ((z)::smallint)
-   GPU Projection: rt_int.id, (rt_int.c)::smallint, (rt_int.e)::smallint, (rt_int.x)::smallint, (rt_int.y)::smallint, (rt_int.z)::smallint
+   Output: id, ((c)::smallint), ((e)::smallint), ((x)::smallint), ((y)::smallint), ((z)::smallint), ((g)::smallint)
+   GPU Projection: rt_int.id, (rt_int.c)::smallint, (rt_int.e)::smallint, (rt_int.x)::smallint, (rt_int.y)::smallint, (rt_int.z)::smallint, (rt_int.g)::smallint
    GPU Filter: ((rt_int.x >= '-15000'::double precision) AND (rt_int.x <= '15000'::double precision))
 (4 rows)
 
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
   INTO test01p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 (SELECT * FROM test01g EXCEPT ALL SELECT * FROM test01p) order by id;
- id | c | e | x | y | z 
-----+---+---+---+---+---
+ id | c | e | x | y | z | g 
+----+---+---+---+---+---+---
 (0 rows)
 
 (SELECT * FROM test01p EXCEPT ALL SELECT * FROM test01g) order by id;
- id | c | e | x | y | z 
-----+---+---+---+---+---
+ id | c | e | x | y | z | g 
+----+---+---+---+---+---+---
 (0 rows)
 
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-                                                              QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((a)::integer), ((e)::integer), ((x)::integer), ((y)::integer), ((z)::integer)
-   GPU Projection: rt_int.id, (rt_int.a)::integer, (rt_int.e)::integer, (rt_int.x)::integer, (rt_int.y)::integer, (rt_int.z)::integer
+   Output: id, ((a)::integer), ((e)::integer), ((x)::integer), ((y)::integer), ((z)::integer), (g)::integer
+   GPU Projection: rt_int.id, (rt_int.a)::integer, (rt_int.e)::integer, (rt_int.x)::integer, (rt_int.y)::integer, (rt_int.z)::integer, rt_int.g
    GPU Filter: ((rt_int.x >= '-15000'::double precision) AND (rt_int.x <= '15000'::double precision))
 (4 rows)
 
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, a::int, e::int, x::int, y::int, z::int
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
   INTO test02p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 (SELECT * FROM test02g EXCEPT ALL SELECT * FROM test02p);
- id | a | e | x | y | z 
-----+---+---+---+---+---
+ id | a | e | x | y | z | g 
+----+---+---+---+---+---+---
 (0 rows)
 
 (SELECT * FROM test02p EXCEPT ALL SELECT * FROM test02g);
- id | a | e | x | y | z 
-----+---+---+---+---+---
+ id | a | e | x | y | z | g 
+----+---+---+---+---+---+---
 (0 rows)
 
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
-                                                           QUERY PLAN                                                            
----------------------------------------------------------------------------------------------------------------------------------
+                                                                     QUERY PLAN                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((a)::bigint), ((c)::bigint), ((x)::bigint), ((y)::bigint), ((z)::bigint)
-   GPU Projection: rt_int.id, (rt_int.a)::bigint, (rt_int.c)::bigint, (rt_int.x)::bigint, (rt_int.y)::bigint, (rt_int.z)::bigint
+   Output: id, ((a)::bigint), ((c)::bigint), ((x)::bigint), ((y)::bigint), ((z)::bigint), ((g)::bigint)
+   GPU Projection: rt_int.id, (rt_int.a)::bigint, (rt_int.c)::bigint, (rt_int.x)::bigint, (rt_int.y)::bigint, (rt_int.z)::bigint, (rt_int.g)::bigint
    GPU Filter: ((rt_int.x >= '-15000'::double precision) AND (rt_int.x <= '15000'::double precision))
 (4 rows)
 
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03g
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 SET pg_strom.enabled = off;
-SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
   INTO test03p
   FROM rt_int
  WHERE x between -15000.0 AND 15000.0;
 (SELECT * FROM test03g EXCEPT ALL SELECT * FROM test03p);
- id | a | c | x | y | z 
-----+---+---+---+---+---
+ id | a | c | x | y | z | g 
+----+---+---+---+---+---+---
 (0 rows)
 
 (SELECT * FROM test03p EXCEPT ALL SELECT * FROM test03g);
- id | a | c | x | y | z 
-----+---+---+---+---+---
+ id | a | c | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((h)::int1), ((i)::int1), ((j)::int1), ((k)::int1), ((l)::int1), ((m)::int1)
+   GPU Projection: rt_int.id, (rt_int.h)::int1, (rt_int.i)::int1, (rt_int.j)::int1, (rt_int.k)::int1, (rt_int.l)::int1, (rt_int.m)::int1
+   GPU Filter: ((rt_int.x >= '-15000'::double precision) AND (rt_int.x <= '15000'::double precision))
+(4 rows)
+
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test04g EXCEPT ALL SELECT * FROM test04p);
+ id | h | i | j | k | l | m 
+----+---+---+---+---+---+---
+(0 rows)
+
+(SELECT * FROM test04p EXCEPT ALL SELECT * FROM test04g);
+ id | h | i | j | k | l | m 
+----+---+---+---+---+---+---
 (0 rows)
 
 -- '+' operators
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, a+b v1, a+c v2, b+e v3,
+SELECT id, a+b v1, a+c v2, b+e v3, 
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12 
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
-                                                                                                                 QUERY PLAN                                                                                                                 
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                   QUERY PLAN                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((a + b)), ((a + c)), ((b + e)), ((c + b)), ((c + d)), ((c + e)), ((e + a)), ((e + d)), ((e + f))
-   GPU Projection: rt_int.id, (rt_int.a + rt_int.b), (rt_int.a + rt_int.c), (rt_int.b + rt_int.e), (rt_int.c + rt_int.b), (rt_int.c + rt_int.d), (rt_int.c + rt_int.e), (rt_int.e + rt_int.a), (rt_int.e + rt_int.d), (rt_int.e + rt_int.f)
+   Output: id, ((a + b)), ((a + c)), ((b + e)), ((c + b)), ((c + d)), ((c + e)), ((e + a)), ((e + d)), ((e + f)), ((a + g)), ((c + g)), ((e + g))
+   GPU Projection: rt_int.id, (rt_int.a + rt_int.b), (rt_int.a + rt_int.c), (rt_int.b + rt_int.e), (rt_int.c + rt_int.b), (rt_int.c + rt_int.d), (rt_int.c + rt_int.e), (rt_int.e + rt_int.a), (rt_int.e + rt_int.d), (rt_int.e + rt_int.f), (rt_int.a + rt_int.g), (rt_int.c + rt_int.g), (rt_int.e + rt_int.g)
    GPU Filter: (rt_int.x >= '0'::double precision)
 (4 rows)
 
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
 SET pg_strom.enabled = off;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
-           e+a v7, e+d v8, e+f v9
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12
   INTO test10p
   FROM rt_int
  WHERE x >= 0;
 (SELECT * FROM test10g EXCEPT ALL SELECT * FROM test10p);
- id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 
-----+----+----+----+----+----+----+----+----+----
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
 (0 rows)
 
 (SELECT * FROM test10p EXCEPT ALL SELECT * FROM test10g);
- id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 
-----+----+----+----+----+----+----+----+----+----
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
 (0 rows)
 
 -- '-' operators
