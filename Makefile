@@ -230,7 +230,10 @@ NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
               --gpu-architecture=compute_60
 # supported device depends on CUDA version
 # don't forget to update the logic of target_cc in cuda_program.c 
-ifeq ($(shell test $(CUDA_VERSION) -ge 11010; echo $$?), 0)
+ifeq ($(shell test $(CUDA_VERSION) -ge 11020; echo $$?), 0)
+  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86
+  NVCC_FLAGS += --threads 6	# CUDA 11.2 supports nvcc --threads option
+else ifeq ($(shell test $(CUDA_VERSION) -ge 11010; echo $$?), 0)
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80
 else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75
