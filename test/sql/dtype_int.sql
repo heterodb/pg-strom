@@ -16,6 +16,7 @@ CREATE TABLE rt_int (
   d    int4,
   e    int8,
   f    int8,
+  g    int1,
   x    float2,
   y    float4,
   z    float8
@@ -28,6 +29,7 @@ INSERT INTO rt_int (
             pgstrom.random_int(1, -32000, 32000),
             pgstrom.random_int(1, -32000, 32000),
             pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_int(1, -100, 100),
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0)
@@ -153,7 +155,7 @@ SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
-SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
+SELECT id, a * (b % 10) v1, a*c v2, e*a v3,
            c*b v4, c*d v5, c*e v6,
            e*b v7, e*d v8, e*f v9
   INTO test12g
