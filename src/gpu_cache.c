@@ -386,53 +386,6 @@ out:
 	return true;
 }
 
-static inline void
-parseSyncTriggerOptions(Relation rel, GpuCacheOptions *gc_options)
-{
-	char	   *config = NULL;
-	TriggerDesc *trigdesc = rel->trigdesc;
-
-	if (trigdesc && trigdesc->numtriggers > 0)
-	{
-		int		i;
-
-		for (i=0; i < trigdesc->numtriggers; i++)
-		{
-			Trigger *trig = &trigdesc->triggers[i];
-
-			if (trig->tgenabled &&
-				trig->tgtype == (TRIGGER_TYPE_ROW |
-								 TRIGGER_TYPE_AFTER |
-								 TRIGGER_TYPE_INSERT |
-								 TRIGGER_TYPE_DELETE |
-								 TRIGGER_TYPE_UPDATE) &&
-				trig->tgfoid == gpucache_sync_trigger_function_oid())
-			{
-				if (trig->tgnargs == 1)
-				{
-					if (trig->tgargs[0] != NULL)
-						config = pstrdup(trig->tgargs[0]);
-				}
-				else if (trig->tgnargs > 1)
-				{
-					elog(ERROR, "gpucache: too much trigger arguments");
-				}
-			}
-			else if (trig->tgenabled &&
-					 trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
-					 trig->tgfoid == gpucache_sync_trigger_function_oid())
-			{
-				if (trig->tgnargs != 0)
-					elog(ERROR, "gpucache: Too much trigger arguments");
-			}
-		}
-	}
-	__parseSyncTriggerOptions(config, gc_options, true);
-
-	if (config)
-		pfree(config);
-}
-
 /*
  * GpuCacheTableSignature - A base structure to calculate table signature
  */
@@ -493,8 +446,11 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 	{
 		Trigger *trig = &trigdesc->triggers[j];
 
-		if (trig->tgenabled &&
-			trig->tgtype == (TRIGGER_TYPE_ROW |
+		if (trig->tgenabled != TRIGGER_FIRES_ON_ORIGIN &&
+			trig->tgenabled != TRIGGER_FIRES_ALWAYS)
+			continue;
+
+		if (trig->tgtype == (TRIGGER_TYPE_ROW |
 							 TRIGGER_TYPE_AFTER |
 							 TRIGGER_TYPE_INSERT |
 							 TRIGGER_TYPE_DELETE |
@@ -518,8 +474,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 				goto no_gpu_cache;
 			}
 		}
-		else if (trig->tgenabled &&
-				 trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
+		else if (trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
 				 trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_stmt_trigger)
@@ -634,8 +589,11 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
 	{
 		Form_pg_trigger pg_trig = (Form_pg_trigger) GETSTRUCT(tuple);
 
-		if (pg_trig->tgenabled &&
-			pg_trig->tgtype == (TRIGGER_TYPE_ROW |
+		if (pg_trig->tgenabled != TRIGGER_FIRES_ON_ORIGIN &&
+			pg_trig->tgenabled != TRIGGER_FIRES_ALWAYS)
+			continue;
+		
+		if (pg_trig->tgtype == (TRIGGER_TYPE_ROW |
 								TRIGGER_TYPE_INSERT |
 								TRIGGER_TYPE_DELETE |
 								TRIGGER_TYPE_UPDATE) &&
@@ -669,8 +627,7 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
 			sig->tg_sync_row = PgTriggerTupleGetOid(tuple);
 			has_row_trigger = true;
 		}
-		else if (pg_trig->tgenabled &&
-				 pg_trig->tgtype == TRIGGER_TYPE_TRUNCATE &&
+		else if (pg_trig->tgtype == TRIGGER_TYPE_TRUNCATE &&
 				 pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (has_stmt_trigger)
@@ -718,6 +675,16 @@ no_gpu_cache:
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 	return 0UL;
+}
+
+/*
+ * gpuCacheTableSignatureInvalidation
+ */
+static void
+gpuCacheTableSignatureInvalidation(Oid table_oid)
+{
+	hash_search(gcache_signatures_htab,
+				&table_oid, HASH_REMOVE, NULL);
 }
 
 /*
@@ -1898,6 +1865,9 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 												   &options_old);
 	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf,
 												   &options_new);
+	elog(LOG, "__gpuCacheCallbackOnAlterTable: signature %lx -> %lx",
+		 signature_old, signature_new);
+
 	if (signature_old != 0UL &&
 		signature_old != signature_new)
 	{
@@ -2022,12 +1992,12 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
 			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
 			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
@@ -2044,6 +2014,13 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			__gpuCacheOnDropTrigger(objectId);
 		}
 	}
+}
+
+static void
+gpuCacheRelcacheCallback(Datum arg, Oid relid)
+{
+	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
+	gpuCacheTableSignatureInvalidation(relid);
 }
 
 static void
@@ -3275,6 +3252,7 @@ pgstrom_init_gpu_cache(void)
 	object_access_next = object_access_hook;
 	object_access_hook = gpuCacheObjectAccess;
 	/* callbacks for invalidation messages */
+	CacheRegisterRelcacheCallback(gpuCacheRelcacheCallback, 0);
 	CacheRegisterSyscacheCallback(PROCOID, gpuCacheSyscacheCallback, 0);
 	/* transaction callbacks */
 	RegisterXactCallback(gpuCacheXactCallback, NULL);
