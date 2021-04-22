@@ -98,7 +98,7 @@ typedef struct
 	Oid				table_oid;
 	Datum			signature;
 	char			table_name[NAMEDATALEN];	/* for debugging */
-	pg_atomic_uint32 refcnt;
+	int32			refcnt;
 	/* GPU memory store resources */
 	int				initial_loading;
 	dsm_handle		dsm_handle;
@@ -126,6 +126,7 @@ typedef struct
 	uint64			redo_read_nitems;
 	uint64			redo_read_pos;
 	uint64			redo_sync_pos;
+	char		   *redo_buffer;
 
 	/* schema definitions (KDS_FORMAT_COLUMN) */
 	kern_data_extra	kds_extra;
@@ -145,7 +146,7 @@ typedef struct
 	bool			drop_on_rollback;
 	bool			drop_on_commit;
 	uint32			nitems;
-	StringInfoData	buf;
+	StringInfoData	buf;		/* array of PendingCtidItem */
 
 	//below deprecated
 	dlist_head			gc_handles;	/* list of GpuCacheHandle */
@@ -153,6 +154,16 @@ typedef struct
 	GpuCacheRowIdHash  *rowhash;	/* DSM */
 	GpuCacheRowIdMap   *rowmap;		/* DSM */
 } GpuCacheDesc;
+
+typedef struct
+{
+	char			tag;
+	ItemPointerData	ctid;
+} PendingCtidItem;
+
+
+
+
 
 /*
  * GpuCacheHandle (per-transaction state)
@@ -191,7 +202,6 @@ struct GpuCacheState
 /* --- static variables --- */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
-static HTAB		   *gcache_handle_htab = NULL;
 static HTAB		   *gcache_signatures_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
@@ -203,8 +213,6 @@ static CUfunction	gcache_kfunc_apply_redo = NULL;
 static CUfunction	gcache_kfunc_compaction = NULL;
 
 /* --- function declarations --- */
-static uint32	__gpuCacheAllocateRowId(GpuCacheDesc *gc_desc,
-										ItemPointer ctid);
 static void		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 									GCacheTxLogCommon *tx_log);
 
@@ -610,7 +618,7 @@ no_gpu_cache:
 }
 
 static inline Datum
-gpuCacheTableSignature(Relation rel)
+gpuCacheTableSignature(Relation rel, GpuCacheOptions *gc_options)
 {
 	GpuCacheTableSignatureCache *entry;
 	Oid			table_oid = RelationGetRelid(rel);
@@ -633,11 +641,14 @@ gpuCacheTableSignature(Relation rel)
 		}
 		PG_END_TRY();
 	}
+	if (gc_options)
+		memcpy(gc_options, &entry->gc_options, sizeof(GpuCacheOptions));
 	return entry->signature;
 }
 
 static Datum
-gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot)
+gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
+							   GpuCacheOptions *gc_options)
 {
 	GpuCacheTableSignatureBuffer *sig;
 	Relation	srel;
@@ -765,6 +776,8 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot)
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 
+	if (gc_options)
+		memcpy(gc_options, &sig->gc_options, sizeof(GpuCacheOptions));
 	return hash_any((unsigned char *)sig, len) | 0x100000000UL;
 
 no_gpu_cache:
@@ -821,7 +834,93 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 bool
 RelationHasGpuCache(Relation rel)
 {
-	return (gpuCacheTableSignature(rel) != 0UL);
+	return (gpuCacheTableSignature(rel,NULL) != 0UL);
+}
+
+/*
+ * __hashSlotGpuCacheSharedState
+ */
+static inline dlist_head *
+__hashSlotGpuCacheSharedState(Oid database_oid,
+							  Oid table_oid,
+							  Datum signature)
+{
+	struct {
+		Oid		database_oid;
+		Oid		table_oid;
+		Datum	signature;
+	} hkey;
+	uint32		hvalue;
+	uint32		hindex;
+
+	hkey.database_oid = database_oid;
+	hkey.table_oid    = table_oid;
+	hkey.signature    = signature;
+	hvalue = hash_any((unsigned char *)&hkey, sizeof(hkey));
+	hindex = hvalue % GPUCACHE_SHARED_DESC_NSLOTS;
+
+	return &gcache_shared_head->gcache_sstate_slot[hindex];
+}
+
+/*
+ * lookupGpuCacheSharedState
+ *
+ * Note that caller must hold gcache_sstate_lock
+ */
+static GpuCacheSharedState *
+lookupGpuCacheSharedState(Oid database_oid,
+						  Oid table_oid,
+						  Datum signature)
+{
+	GpuCacheSharedState *gc_sstate;
+	dlist_head	   *slot;
+	dlist_iter		iter;
+
+	slot = __hashSlotGpuCacheSharedState(database_oid,
+										 table_oid,
+										 signature);
+	dlist_foreach(iter, slot)
+	{
+		gc_sstate = dlist_container(GpuCacheSharedState,
+									chain, iter.cur);
+		if (gc_sstate->database_oid == database_oid &&
+			gc_sstate->table_oid    == table_oid &&
+			gc_sstate->signature    == signature)
+		{
+			return gc_sstate;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * putGpuCacheSharedState
+ */
+static void
+putGpuCacheSharedState(GpuCacheSharedState *gc_sstate, bool drop_shared_state)
+{
+	slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+	SpinLockAcquire(lock);
+	if (drop_shared_state)
+		gc_sstate->refcnt &= 0xfffffffeU;
+	Assert(gc_sstate->refcnt >= 2);
+	gc_sstate->refcnt -= 2;
+	if (gc_sstate->refcnt == 0)
+	{
+		dlist_delete(&gc_sstate->chain);
+		if (gc_sstate->gpu_main_devptr != 0UL ||
+			gc_sstate->gpu_extra_devptr != 0UL)
+		{
+			elog(WARNING, "gpucache: Bug? device memory for %s:%lx still remain (main: %zu, extra: %zu)",
+				 gc_sstate->table_name,
+				 gc_sstate->signature,
+				 gc_sstate->gpu_main_size,
+				 gc_sstate->gpu_extra_size);
+		}
+		pfree(gc_sstate);
+	}
+	SpinLockRelease(lock);
 }
 
 /*
@@ -955,15 +1054,33 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 }
 
 /*
- * __gpuCacheInitLoadTrackRowId
+ * __gpuCacheInitLoadTrackCtid
  */
 static void
-__gpuCacheInitLoadTrackRowId(GpuCacheDesc *gc_desc, TransactionId xid,
-							 char tag, ItemPointer ctid, uint32 rowid)
+__gpuCacheInitLoadTrackCtid(GpuCacheDesc *gc_desc,
+							TransactionId xid,
+							char tag, ItemPointer ctid)
 {
+	PendingCtidItem	pitem;
+
+	if (gc_desc->xid != xid)
+	{
+		//lookup gcache_desc_htab
+		//add refcount to gc_sstate
+	}
+	if (!gc_desc->buf.data)
+		initStringInfoContext(&gc_desc->buf, CacheMemoryContext);
+	Assert(tag == 'I' || tag == 'D');
+	pitem.tag = tag;
+	pitem.ctid = *ctid;
+	appendBinaryStringInfo(&gc_desc->buf, (char *)&pitem,
+						   sizeof(PendingCtidItem));
+	gc_desc->nitems++;
+
+#if 0
 	GpuCacheHandle	hkey;
 	GpuCacheHandle *gc_handle;
-	PendingRowIdItem pitem;
+	PendingRowIdItem	pitem;
 	bool			found;
 
 	hkey.table_oid = gc_desc->table_oid;
@@ -1002,6 +1119,7 @@ __gpuCacheInitLoadTrackRowId(GpuCacheDesc *gc_desc, TransactionId xid,
 	appendBinaryStringInfo(&gc_handle->buf, (char *)&pitem, sizeof(PendingRowIdItem));
 
 	gc_handle->nitems++;
+#endif
 }
 
 /*
@@ -1044,43 +1162,14 @@ __execGpuCacheInitLoad(GpuCacheDesc *gc_desc, Relation rel)
 		__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item);
 
 		if (TransactionIdIsNormal(gcache_xmin))
-			__gpuCacheInitLoadTrackRowId(gc_desc, gcache_xmin,
-										 'I', &tuple->t_self, item->rowid);
+			__gpuCacheInitLoadTrackCtid(gc_desc, gcache_xmin, 'I', &tuple->t_self);
 		if (TransactionIdIsNormal(gcache_xmax))
-			__gpuCacheInitLoadTrackRowId(gc_desc, gcache_xmax,
-										 'D', &tuple->t_self, item->rowid);
+			__gpuCacheInitLoadTrackCtid(gc_desc, gcache_xmax, 'D', &tuple->t_self);
 		CHECK_FOR_INTERRUPTS();
 	}
 	table_endscan(scandesc);
 
 	pfree(item);
-}
-
-/*
- * __OnDetachGpuCacheDSMSegment
- */
-static void
-__OnDetachGpuCacheDSMSegment(dsm_segment *dsm_seg, Datum __gc_sstate)
-{
-	GpuCacheSharedState *gc_sstate = (GpuCacheSharedState *)__gc_sstate;
-
-	SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
-	Assert(pg_atomic_read_u32(&gc_sstate->refcnt) >= 2);
-	if (pg_atomic_sub_fetch_u32(&gc_sstate->refcnt, 2) == 0)
-	{
-		elog(LOG, "pid=%u: Drop GpuCacheSharedState (%s:%lx)",
-			 getpid(),
-			 gc_sstate->table_name,
-			 gc_sstate->signature);
-		
-		Assert(gc_sstate->gpu_main_devptr == 0UL &&
-			   gc_sstate->gpu_extra_devptr == 0UL);
-		Assert(gc_sstate->chain.prev != NULL &&
-			   gc_sstate->chain.next != NULL);
-		dlist_delete(&gc_sstate->chain);
-		pfree(gc_sstate);
-	}
-	SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
 }
 
 /*
@@ -1130,8 +1219,7 @@ __createGpuCacheDSMSegment(GpuCacheDesc *gc_desc)
 	gc_desc->rowhash = rowhash;
 	gc_desc->rowmap  = rowmap;
 
-	on_dsm_detach(dsm_seg, __OnDetachGpuCacheDSMSegment,
-				  PointerGetDatum(gc_sstate));
+
 	gc_sstate->dsm_handle = dsm_segment_handle(dsm_seg);
 	dsm_pin_mapping(dsm_seg);
 	dsm_pin_segment(dsm_seg);
@@ -1163,7 +1251,7 @@ __createGpuCacheSharedState(GpuCacheDesc *gc_desc,
 	gc_sstate->table_oid = gc_desc->table_oid;
 	gc_sstate->signature = gc_desc->signature;
 	strncpy(gc_sstate->table_name, table_name, NAMEDATALEN);
-	pg_atomic_init_u32(&gc_sstate->refcnt, 2);
+	gc_sstate->refcnt = 3;
 	gc_sstate->initial_loading = -1;	/* not yet */
 	gc_sstate->dsm_handle = DSM_HANDLE_INVALID;	/* to be set later */
 
@@ -1293,11 +1381,9 @@ __attachGpuCacheSharedState(GpuCacheDesc *gc_desc,
 			 "gpucache: DSM segment is smaller than the required");
 		return;
 	}
-	on_dsm_detach(dsm_seg, __OnDetachGpuCacheDSMSegment,
-				  PointerGetDatum(gc_sstate));
 	dsm_pin_mapping(dsm_seg);
 	/* ok, all green */
-	pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 2);
+	gc_sstate->refcnt += 2; //right?
 	gc_desc->gc_sstate = gc_sstate;
 	gc_desc->dsm_seg = dsm_seg;
 	gc_desc->rowhash = rowhash;
@@ -1342,11 +1428,11 @@ retry:
 			gc_sstate->table_oid    == gc_desc->table_oid &&
 			gc_sstate->signature    == gc_desc->signature)
 		{
-			if ((pg_atomic_read_u32(&gc_sstate->refcnt) & 1) == 0)
+			if ((gc_sstate->refcnt & 1) == 0)
 			{
 				/*
 				 * If refcnt is even number, GpuCacheSharedState is already
-				 * dropped, thus, no longer available.
+				 * dropped, thus, should not be available longer.
 				 */
 				SpinLockRelease(lock);
 				return;
@@ -1368,7 +1454,7 @@ retry:
 				 * negative initial_loading means someone has never
 				 * tried initial-loading, or failed once.
 				 */
-				pg_atomic_fetch_add_u32(&gc_sstate->refcnt, 2);
+				gc_sstate->refcnt += 2;
 				goto found_uninitialized;
 			}
 			/* ok, all green */
@@ -1444,7 +1530,6 @@ found_uninitialized:
 	/* ok, all done */
 	SpinLockAcquire(lock);
 	gc_sstate->initial_loading = 0;		/* ready now */
-	pg_atomic_fetch_or_u32(&gc_sstate->refcnt, 1);	/* odd number - a valid entry */
 	SpinLockRelease(lock);
 }
 
@@ -1452,25 +1537,25 @@ found_uninitialized:
  * GetGpuCacheDesc
  */
 static GpuCacheDesc *
-GetGpuCacheDesc(Relation rel, Datum signature)
+GetGpuCacheDesc(Relation rel)
 {
+	GpuCacheOptions	gc_options;
 	GpuCacheDesc	hkey;
 	GpuCacheDesc   *gc_desc;
 	bool			found;
 
-	Assert(signature != 0);
 	hkey.database_oid = MyDatabaseId;
 	hkey.table_oid = RelationGetRelid(rel);
-	hkey.signature = signature;
+	hkey.signature = gpuCacheTableSignature(rel, &gc_options);
+	hkey.xid = GetCurrentTransactionIdIfAny();
+	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
+		return NULL;
 	gc_desc = hash_search(gcache_descriptors_htab,
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
-		GpuCacheOptions gc_options;
-
 		PG_TRY();
 		{
-			parseSyncTriggerOptions(rel, &gc_options);
 			__setupGpuCacheDesc(gc_desc, rel, &gc_options);
 		}
 		PG_CATCH();
@@ -1489,9 +1574,10 @@ GetGpuCacheDesc(Relation rel, Datum signature)
  * GetGpuCacheDescBgWorker - never create GpuCacheSharedState
  */
 static GpuCacheDesc *
-GetGpuCacheDescBgWorker(Oid database_oid,
-						Oid table_oid,
-						Datum signature)
+GetGpuCacheDescNoLoad(Oid database_oid,
+					  Oid table_oid,
+					  Datum signature,
+					  GpuCacheOptions *gc_options)
 {
 	GpuCacheDesc	hkey;
 	GpuCacheDesc   *gc_desc;
@@ -1500,83 +1586,50 @@ GetGpuCacheDescBgWorker(Oid database_oid,
 	hkey.database_oid = database_oid;
 	hkey.table_oid = table_oid;
 	hkey.signature = signature;
+	hkey.xid = GetCurrentTransactionIdIfAny();
+	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
+		return NULL;
 	gc_desc = hash_search(gcache_descriptors_htab,
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
-		__setupGpuCacheDesc(gc_desc, NULL, NULL);
-		if (!gc_desc->gc_sstate)
+		PG_TRY();
+		{
+			__setupGpuCacheDesc(gc_desc, NULL, gc_options);
+		}
+		PG_CATCH();
 		{
 			hash_search(gcache_descriptors_htab,
 						&hkey, HASH_REMOVE, NULL);
-			return NULL;
+			PG_RE_THROW();
 		}
+		PG_END_TRY();
 	}
-	return gc_desc;
+	return (gc_desc->gc_sstate ? gc_desc : NULL);
 }
 
 /*
- * ReleaseGpuCacheDescIfUnused
+ * releaseGpuCacheDesc
  */
 static void
-ReleaseGpuCacheDescIfUnused(GpuCacheDesc *gc_desc)
+releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool is_normal_commit)
 {
-	GpuCacheSharedState *gc_sstate;
+	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+	bool		drop_shared_state = false;
 
-	if (!dlist_is_empty(&gc_desc->gc_handles))
-		return;
-
-	gc_sstate = gc_desc->gc_sstate;
 	if (gc_sstate)
 	{
-		if ((pg_atomic_read_u32(&gc_sstate->refcnt) & 1) == 0)
+		if (( is_normal_commit && gc_desc->drop_on_commit) ||
+			(!is_normal_commit && gc_desc->drop_on_rollback))
 		{
-			dsm_detach(gc_desc->dsm_seg);
-			hash_search(gcache_descriptors_htab, gc_desc, HASH_REMOVE, NULL);
+			drop_shared_state = true;
+			gpuCacheInvokeDropUnload(gc_sstate, true);
 		}
+		putGpuCacheSharedState(gc_sstate, drop_shared_state);
 	}
-	else
-	{
-		Assert(!gc_desc->dsm_seg);
-		hash_search(gcache_descriptors_htab, gc_desc, HASH_REMOVE, NULL);
-	}
-}
-
-/*
- * __gpuCacheAllocateRowId
- */
-static uint32
-__gpuCacheAllocateRowId(GpuCacheDesc *gc_desc, ItemPointer ctid)
-{
-	GpuCacheRowIdHash *rowhash = gc_desc->rowhash;
-	GpuCacheRowIdMap *rowmap = gc_desc->rowmap;
-	GpuCacheRowId *r_item;
-	cl_uint		hash;
-	cl_uint		index;
-	cl_uint		rowid;
-
-	hash = hash_any((unsigned char *)ctid, sizeof(ItemPointerData));
-	index = hash % rowhash->nslots;
-
-	SpinLockAcquire(&rowhash->lock);
-	if (rowhash->free_list >= rowhash->nrooms)
-	{
-		SpinLockRelease(&rowhash->lock);
-		elog(ERROR, "No more rooms in the GPU Store");
-	}
-	rowid = rowhash->free_list;
-	r_item = &rowmap->r_items[rowid];
-	
-	Assert(!ItemPointerIsValid(&r_item->ctid));
-	rowhash->free_list = r_item->next;
-
-	ItemPointerCopy(ctid, &r_item->ctid);
-	r_item->next = rowhash->hash_slot[index];
-	rowhash->hash_slot[index] = rowid;
-
-	SpinLockRelease(&rowhash->lock);
-
-	return rowid;
+	if (gc_desc->buf.data)
+		pfree(gc_desc->buf.data);
+	hash_search(gcache_descriptors_htab, gc_desc, HASH_REMOVE, NULL);
 }
 
 /*
@@ -1626,12 +1679,6 @@ __gpuCacheLookupOrReleaseRowId(GpuCacheDesc *gc_desc,
 	return UINT_MAX;
 }
 
-static uint32
-__gpuCacheLookupRowId(GpuCacheDesc *gc_desc, ItemPointer ctid)
-{
-	return __gpuCacheLookupOrReleaseRowId(gc_desc, ctid, false);
-}
-
 static inline void
 __gpuCacheReleaseRowId(GpuCacheDesc *gc_desc, PendingRowIdItem *pitem)
 {
@@ -1639,120 +1686,6 @@ __gpuCacheReleaseRowId(GpuCacheDesc *gc_desc, PendingRowIdItem *pitem)
 
 	__rowid = __gpuCacheLookupOrReleaseRowId(gc_desc, &pitem->ctid, true);
 	Assert(__rowid == pitem->rowid);
-}
-
-static inline void
-__initGpuCacheHandle(GpuCacheHandle *gc_handle)
-{
-	gc_handle->gc_desc = NULL;
-	gc_handle->drop_on_rollback = false;
-	gc_handle->drop_on_commit = false;
-	gc_handle->nitems = 0;
-	memset(&gc_handle->buf, 0, sizeof(StringInfoData));
-}
-
-/*
- * GetGpuCacheHandle
- */
-static GpuCacheHandle *
-GetGpuCacheHandle(Relation rel)
-{
-	GpuCacheHandle	hkey;
-	GpuCacheHandle *gc_handle;
-	bool			found;
-
-	hkey.table_oid = RelationGetRelid(rel);
-	hkey.signature = gpuCacheTableSignature(rel);
-	hkey.xid       = GetCurrentTransactionIdIfAny();
-	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
-		return NULL;
-
-	gc_handle = hash_search(gcache_handle_htab,
-							&hkey, HASH_ENTER, &found);
-	if (!found)
-	{
-		__initGpuCacheHandle(gc_handle);
-		PG_TRY();
-		{
-			GpuCacheDesc   *gc_desc = GetGpuCacheDesc(rel, hkey.signature);
-
-			if (gc_desc)
-			{
-				gc_handle->gc_desc = gc_desc;
-				dlist_push_tail(&gc_desc->gc_handles, &gc_handle->chain);
-			}
-		}
-		PG_CATCH();
-		{
-			hash_search(gcache_handle_htab,
-						&hkey, HASH_REMOVE, NULL);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-	return (gc_handle->gc_desc ? gc_handle : NULL);
-}
-
-/*
- * ReleaseGpuCacheHandle
- */
-static void
-ReleaseGpuCacheHandle(GpuCacheHandle *gc_handle, bool normal_commit)
-{
-	GpuCacheDesc *gc_desc = gc_handle->gc_desc;
-
-	if ((gc_handle->drop_on_rollback && !normal_commit) ||
-		(gc_handle->drop_on_commit   &&  normal_commit))
-	{
-		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
-
-		dsm_unpin_segment(gc_sstate->dsm_handle);
-		pg_atomic_fetch_and_u32(&gc_sstate->refcnt, 0xfffffffeU);
-		gpuCacheInvokeDropUnload(gc_sstate, true);
-	}
-	else
-	{
-#if 0
-		char   *pos = gc_handle->buf.data;
-		uint32	count;
-
-		for (count=0; count < gc_handle->nitems; count++)
-		{
-			PendingRowIdItem *pitem = (PendingRowIdItem *)pos;
-
-			switch (pitem->tag)
-			{
-				case 'I':	/* INSERT */
-					if (!normal_commit)
-						__gpuCacheReleaseRowId(gc_desc, pitem);
-					pos += sizeof(PendingRowIdItem);
-					break;
-
-				case 'D':	/* DELETE */
-					if (normal_commit)
-						__gpuCacheReleaseRowId(gc_desc, pitem);
-					pos += sizeof(PendingRowIdItem);
-					break;
-
-				default:
-					elog(FATAL, "Bug? GpuCacheHandle has corruption");
-			}
-		}
-		Assert(pos <= gc_handle->buf.data + gc_handle->buf.len);
-#endif
-	}
-	elog(LOG, "ReleaseGpuCacheHandle: %s:%lx xid=%u",
-		 gc_desc->gc_sstate->table_name,
-		 gc_desc->gc_sstate->signature,
-		 gc_handle->xid);
-
-	/* detach GpuCacheDesc */
-	dlist_delete(&gc_handle->chain);
-	ReleaseGpuCacheDescIfUnused(gc_desc);
-	/* cleanup */
-	if (gc_handle->buf.data)
-		pfree(gc_handle->buf.data);
-	hash_search(gcache_handle_htab, &gc_handle, HASH_REMOVE, NULL);
 }
 
 /*
@@ -1824,23 +1757,19 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
  * __gpuCacheInsertLog
  */
 static void
-__gpuCacheInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
+__gpuCacheInsertLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
 {
-	GpuCacheDesc *gc_desc = gc_handle->gc_desc;
 	GCacheTxLogInsert *item;
-	PendingRowIdItem rlog;
-	cl_uint		rowid;
+	PendingCtidItem pitem;
 	size_t		sz;
 
-	/* Track RowId allocation */
-	rowid = __gpuCacheAllocateRowId(gc_desc, &tuple->t_self);
-	rlog.tag = 'I';
-	rlog.ctid = tuple->t_self;
-	rlog.rowid = rowid;
-	appendBinaryStringInfo(&gc_handle->buf,
-						   (char *)&rlog,
-						   sizeof(PendingRowIdItem));
-	gc_handle->nitems++;
+	/* track ctid not committed yet */
+	pitem.tag = 'I';
+	pitem.ctid = tuple->t_self;
+	appendBinaryStringInfo(&gc_desc->buf,
+						   (char *)&pitem,
+						   sizeof(PendingCtidItem));
+	gc_desc->nitems++;
 
 	/* INSERT Log */
 	sz = MAXALIGN(offsetof(GCacheTxLogInsert, htup) + tuple->t_len);
@@ -1861,22 +1790,18 @@ __gpuCacheInsertLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
  * __gpuCacheDeleteLog
  */
 static void
-__gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
+__gpuCacheDeleteLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
 {
-	GpuCacheDesc   *gc_desc = gc_handle->gc_desc;
 	GCacheTxLogDelete item;
-	PendingRowIdItem rlog;
-	cl_uint		rowid;
+	PendingCtidItem	pitem;
 
-	/* Track RowId release */
-	rowid = __gpuCacheLookupRowId(gc_desc, &tuple->t_self);
-	rlog.tag = 'D';
-	rlog.ctid = tuple->t_self;
-	rlog.rowid = rowid;
-	appendBinaryStringInfo(&gc_handle->buf,
-						   (char *)&rlog,
-						   sizeof(PendingRowIdItem));
-	gc_handle->nitems++;
+	/* track ctid to be released */
+	pitem.tag = 'D';
+	pitem.ctid = tuple->t_self;
+	appendBinaryStringInfo(&gc_desc->buf,
+						   (char *)&pitem,
+						   sizeof(PendingCtidItem));
+	gc_desc->nitems++;
 
 	/* DELETE Log */
 	item.type = GCACHE_TX_LOG__DELETE;
@@ -1893,11 +1818,11 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheHandle *gc_handle)
  * __gpuCacheTruncateLog
  */
 static void
-__gpuCacheTruncateLog(GpuCacheHandle *gc_handle)
+__gpuCacheTruncateLog(GpuCacheDesc *gc_desc)
 {
-	Assert(!gc_handle->drop_on_commit);
+	Assert(!gc_desc->drop_on_commit);
 
-	gc_handle->drop_on_commit = true;
+	gc_desc->drop_on_commit = true;
 }
 
 /*
@@ -1908,7 +1833,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
 	TriggerEvent	tg_event;
-	GpuCacheHandle *gc_handle;
+	GpuCacheDesc   *gc_desc;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
@@ -1919,28 +1844,28 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		elog(ERROR, "%s: must be called as AFTER ROW/STATEMENT",
 			 get_func_name(fcinfo->flinfo->fn_oid));
 
-	gc_handle = GetGpuCacheHandle(trigdata->tg_relation);
-	if (!gc_handle)
+	gc_desc = GetGpuCacheDesc(trigdata->tg_relation);
+	if (!gc_desc)
 		elog(ERROR, "gpucache is not configured for %s",
 			 RelationGetRelationName(trigdata->tg_relation));
-	if (gc_handle->buf.data == NULL)
-		initStringInfoContext(&gc_handle->buf, CacheMemoryContext);
+	if (gc_desc->buf.data == NULL)
+		initStringInfoContext(&gc_desc->buf, CacheMemoryContext);
 
 	if (TRIGGER_FIRED_FOR_ROW(tg_event))
 	{
 		/* FOR EACH ROW */
 		if (TRIGGER_FIRED_BY_INSERT(tg_event))
 		{
-			__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_handle);
+			__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_desc);
 		}
 		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 		{
-			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
-			__gpuCacheInsertLog(trigdata->tg_newtuple, gc_handle);
+			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_desc);
+			__gpuCacheInsertLog(trigdata->tg_newtuple, gc_desc);
 		}
 		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
 		{
-			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_handle);
+			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_desc);
 		}
 		else
 		{
@@ -1952,7 +1877,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		/* FOR EACH STATEMENT */
 		if (TRIGGER_FIRED_BY_TRUNCATE(tg_event))
 		{
-			__gpuCacheTruncateLog(gc_handle);
+			__gpuCacheTruncateLog(gc_desc);
 		}
 		else
 		{
@@ -1970,14 +1895,13 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
-	Datum		signature;
+	GpuCacheDesc *gc_desc;
 	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
 
 	rel = table_open(table_oid, RowExclusiveLock);
-	signature = gpuCacheTableSignature(rel);
-	if (signature != 0UL)
+	gc_desc = GetGpuCacheDesc(rel);
+	if (gc_desc)
 	{
-		GpuCacheDesc *gc_desc = GetGpuCacheDesc(rel, signature);
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 		uint64		sync_pos;
 
@@ -2000,15 +1924,13 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
-	Datum		signature;
+	GpuCacheDesc *gc_desc;
 	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
 
 	rel = table_open(table_oid, RowExclusiveLock);
-	signature = gpuCacheTableSignature(rel);
-	if (signature != 0UL)
+	gc_desc = GetGpuCacheDesc(rel);
+	if (gc_desc)
 	{
-		GpuCacheDesc *gc_desc = GetGpuCacheDesc(rel, signature);
-
 		rc = gpuCacheInvokeCompaction(gc_desc->gc_sstate, false);
 	}
 	table_close(rel, AccessShareLock);
@@ -2025,7 +1947,6 @@ GpuCacheState *
 ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 {
 	Relation		relation = ss->ss_currentRelation;
-	Datum			signature;
 	GpuCacheDesc   *gc_desc;
 	GpuCacheState  *gcache_state;
 	uint64			sync_pos = ULONG_MAX;
@@ -2033,11 +1954,7 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 	if (!relation)
 		return NULL;
 
-	signature = gpuCacheTableSignature(relation);
-	if (signature == 0UL)
-		return NULL;
-
-	gc_desc = GetGpuCacheDesc(relation, signature);
+	gc_desc = GetGpuCacheDesc(relation);
 	if (!gc_desc)
 		return NULL;
 
@@ -2095,7 +2012,7 @@ ExecReScanGpuCache(GpuCacheState *gcache_state)
 void
 ExecEndGpuCache(GpuCacheState *gcache_state)
 {
-	ReleaseGpuCacheDescIfUnused(gcache_state->gc_desc);
+	/* nothing to do */
 }
 
 void
@@ -2231,36 +2148,34 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 {
 	Datum		signature_old;
 	Datum		signature_new;
-	HASH_SEQ_STATUS	hseq;
+	GpuCacheOptions options_old;
+	GpuCacheOptions options_new;
 	GpuCacheDesc *gc_desc;
-	GpuCacheHandle *gc_handle;
-	bool		found;
 
-	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
-		return;
-
-	signature_old = gpuCacheTableSignatureSnapshot(table_oid, NULL);
-	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf);
-	if (signature_old == signature_new)
-		return;
-
-	hash_seq_init(&hseq, gcache_descriptors_htab);
-	while ((gc_desc = hash_seq_search(&hseq)) != NULL)
+	signature_old = gpuCacheTableSignatureSnapshot(table_oid, NULL,
+												   &options_old);
+	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf,
+												   &options_new);
+	if (signature_old != 0UL &&
+		signature_old != signature_new)
 	{
-		Assert(gc_desc->database_oid == MyDatabaseId);
-		if (gc_desc->table_oid == table_oid &&
-			gc_desc->signature == signature_old)
-		{
-			gc_handle = hash_search(gcache_handle_htab,
-									gc_desc, HASH_ENTER, &found);
-			if (!found)
-			{
-				__initGpuCacheHandle(gc_handle);
-				gc_handle->gc_desc = gc_desc;
-				dlist_push_tail(&gc_desc->gc_handles, &gc_handle->chain);
-			}
-			gc_handle->drop_on_commit = true;
-		}
+		gc_desc = GetGpuCacheDescNoLoad(MyDatabaseId,
+										table_oid,
+										signature_old,
+										&options_old);
+		if (gc_desc)
+			gc_desc->drop_on_commit = true;
+	}
+
+	if (signature_new != 0UL &&
+		signature_new != signature_old)
+	{
+		gc_desc = GetGpuCacheDescNoLoad(MyDatabaseId,
+										table_oid,
+										signature_new,
+										&options_new);
+		if (gc_desc)
+			gc_desc->drop_on_rollback = true;
 	}
 }
 
@@ -2296,34 +2211,19 @@ static void
 __gpuCacheOnDropRelation(Oid table_oid)
 {
 	Datum		signature;
-	HASH_SEQ_STATUS hseq;
+	GpuCacheOptions gc_options;
 	GpuCacheDesc *gc_desc;
-	GpuCacheHandle *gc_handle;
-	bool		found;
 
-	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
-		return;
-	signature = gpuCacheTableSignatureSnapshot(table_oid, NULL);
-	if (signature == 0)
-		return;
-
-	hash_seq_init(&hseq, gcache_descriptors_htab);
-	while ((gc_desc = hash_seq_search(&hseq)) != NULL)
+	signature = gpuCacheTableSignatureSnapshot(table_oid, NULL,
+											   &gc_options);
+	if (signature != 0UL)
 	{
-		Assert(gc_desc->database_oid == MyDatabaseId);
-		if (gc_desc->table_oid == table_oid &&
-			gc_desc->signature == signature)
-		{
-			gc_handle = hash_search(gcache_handle_htab,
-									gc_desc, HASH_ENTER, &found);
-			if (!found)
-			{
-				__initGpuCacheHandle(gc_handle);
-				gc_handle->gc_desc = gc_desc;
-				dlist_push_tail(&gc_desc->gc_handles, &gc_handle->chain);
-			}
-			gc_handle->drop_on_commit = true;
-		}
+		gc_desc = GetGpuCacheDescNoLoad(MyDatabaseId,
+										table_oid,
+										signature,
+										&gc_options);
+		if (gc_desc)
+			gc_desc->drop_on_commit = true;
 	}
 }
 
@@ -2405,25 +2305,6 @@ gpuCacheObjectAccess(ObjectAccessType access,
 }
 
 static void
-gpuCacheRelcacheCallback(Datum arg, Oid relid)
-{
-	HASH_SEQ_STATUS	hseq;
-	GpuCacheDesc   *gc_desc;
-
-	//elog(LOG, "pid=%u: gpuCacheRelcacheCallback (relid=%u)", getpid(), relid);
-	if (hash_get_num_entries(gcache_descriptors_htab) == 0)
-		return;
-
-	hash_seq_init(&hseq, gcache_descriptors_htab);
-	while ((gc_desc = hash_seq_search(&hseq)) != NULL)
-	{
-		Assert(gc_desc->database_oid == MyDatabaseId);
-		if (gc_desc->table_oid == relid)
-			ReleaseGpuCacheDescIfUnused(gc_desc);
-	}
-}
-
-static void
 gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 {
 	//elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
@@ -2434,43 +2315,31 @@ gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
  * gpuCacheAddXactLog
  */
 static void
-gpuCacheAddXactLog(GpuCacheHandle *gc_handle, bool normal_commit)
+gpuCacheAddXactLog(GpuCacheDesc *gc_desc, bool normal_commit)
 {
-	char	   *pos = gc_handle->buf.data;
+	char	   *pos = gc_desc->buf.data;
 	uint32		count;
 
-	for (count=0; count < gc_handle->nitems; count++)
+	for (count=0; count < gc_desc->nitems; count++)
 	{
-		PendingRowIdItem   *pitem = (PendingRowIdItem *)pos;
+		PendingCtidItem	   *pitem = (PendingCtidItem *)pos;
 		GCacheTxLogXact		x_log;
-		char				tag;
-
-		if (pitem->tag == 'I')
-			tag = (normal_commit ? 'I' : 'i');
-		else if (pitem->tag == 'D')
-			tag = (normal_commit ? 'D' : 'd');
-		else
-		{
-			Assert(false);
-			elog(FATAL, "broken internal PendingRowIdItem");
-		}
 
 		x_log.type = GCACHE_TX_LOG__XACT;
 		x_log.length = sizeof(GCacheTxLogXact);
 		x_log.rowid = UINT_MAX;
 		x_log.rowid_found = false;
-		x_log.tag = tag;
+		x_log.tag = (normal_commit ? toupper(pitem->tag) : tolower(pitem->tag));
 		memcpy(&x_log.ctid, &pitem->ctid, sizeof(ItemPointerData));
 
-		__gpuCacheAppendLog(gc_handle->gc_desc,
-							(GCacheTxLogCommon *)&x_log);
-		pos += sizeof(PendingRowIdItem);
+		__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&x_log);
+		pos += sizeof(PendingCtidItem);
 	}
 	elog(LOG, "AddXactLog: %s:%lx xid=%u nitems=%u",
-		 gc_handle->gc_desc->gc_sstate->table_name,
-		 gc_handle->gc_desc->gc_sstate->signature,
-		 gc_handle->xid,
-		 gc_handle->nitems);
+		 gc_desc->gc_sstate->table_name,
+		 gc_desc->gc_sstate->signature,
+		 gc_desc->xid,
+		 gc_desc->nitems);
 }
 
 /*
@@ -2489,25 +2358,21 @@ gpuCacheXactCallback(XactEvent event, void *arg)
 		 GetCurrentTransactionIdIfAny(),
 		 GetTopTransactionIdIfAny());
 #endif
-	if (hash_get_num_entries(gcache_handle_htab) > 0)
+	if (hash_get_num_entries(gcache_descriptors_htab) > 0 &&
+		(event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT))
 	{
 		TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
 		HASH_SEQ_STATUS	hseq;
-		GpuCacheHandle *gc_handle;
+		GpuCacheDesc   *gc_desc;
+		bool			normal_commit = (event == XACT_EVENT_COMMIT);
 
-		if (event == XACT_EVENT_COMMIT ||
-			event == XACT_EVENT_ABORT)
+		hash_seq_init(&hseq, gcache_descriptors_htab);
+		while ((gc_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			bool	normal_commit = (event == XACT_EVENT_COMMIT);
-
-			hash_seq_init(&hseq, gcache_handle_htab);
-			while ((gc_handle = hash_seq_search(&hseq)) != NULL)
+			if (gc_desc->xid == curr_xid)
 			{
-				if (gc_handle->xid == curr_xid)
-				{
-					gpuCacheAddXactLog(gc_handle, normal_commit);
-					ReleaseGpuCacheHandle(gc_handle, normal_commit);
-				}
+				gpuCacheAddXactLog(gc_desc, normal_commit);
+				releaseGpuCacheDesc(gc_desc, normal_commit);
 			}
 		}
 	}
@@ -2530,22 +2395,20 @@ gpuCacheSubXactCallback(SubXactEvent event,
 		 GetCurrentTransactionIdIfAny(),
 		 GetTopTransactionIdIfAny());
 #endif
-	if (hash_get_num_entries(gcache_handle_htab) == 0)
-		return;
-
-	if (event == SUBXACT_EVENT_ABORT_SUB)
+	if (hash_get_num_entries(gcache_descriptors_htab) > 0 &&
+		event == SUBXACT_EVENT_ABORT_SUB)
 	{
 		TransactionId	curr_xid = GetCurrentTransactionIdIfAny();
 		HASH_SEQ_STATUS	hseq;
-		GpuCacheHandle *gc_handle;
+		GpuCacheDesc   *gc_desc;
 
-		hash_seq_init(&hseq, gcache_handle_htab);
-		while ((gc_handle = hash_seq_search(&hseq)) != NULL)
+		hash_seq_init(&hseq, gcache_descriptors_htab);
+		while ((gc_desc = hash_seq_search(&hseq)) != NULL)
 		{
-			if (gc_handle->xid == curr_xid)
+			if (gc_desc->xid == curr_xid)
 			{
-				gpuCacheAddXactLog(gc_handle, false);
-				ReleaseGpuCacheHandle(gc_handle, false);
+				gpuCacheAddXactLog(gc_desc, false);
+				releaseGpuCacheDesc(gc_desc, false);
 			}
 		}
 	}
@@ -2828,9 +2691,8 @@ gpuCacheLoadCudaModule(void)
  * gpuCacheAllocDeviceMemory
  */
 static CUresult
-gpuCacheAllocDeviceMemory(GpuCacheDesc *gc_desc)
+gpuCacheAllocDeviceMemory(GpuCacheSharedState *gc_sstate)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUdeviceptr		m_main = 0;
 	CUdeviceptr		m_extra = 0;
 	CUresult		rc;
@@ -2959,9 +2821,8 @@ error_0:
  * caller must hold exclusive lock on gc_sstate->gpu_buffer_lock
  */
 static CUresult
-gpuCacheBgWorkerExecCompactionNoLock(GpuCacheDesc *gc_desc)
+gpuCacheBgWorkerExecCompactionNoLock(GpuCacheSharedState *gc_sstate)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	kern_data_extra	h_extra;
 	int				grid_sz, block_sz;
 	size_t			curr_usage;
@@ -3095,13 +2956,12 @@ bailout:
 }
 
 static inline CUresult
-gpuCacheBgWorkerExecCompaction(GpuCacheDesc *gc_desc)
+gpuCacheBgWorkerExecCompaction(GpuCacheSharedState *gc_sstate)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUresult	rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
-	rc = gpuCacheBgWorkerExecCompactionNoLock(gc_desc);
+	rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
 	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 
 	return rc;
@@ -3111,12 +2971,11 @@ gpuCacheBgWorkerExecCompaction(GpuCacheDesc *gc_desc)
  * GCACHE_BGWORKER_CMD__APPLY_REDO command
  */
 static CUresult
-__gpuCacheSetupRedoLogBuffer(GpuCacheDesc *gc_desc, uint64 end_pos,
+__gpuCacheSetupRedoLogBuffer(GpuCacheSharedState *gc_sstate, uint64 end_pos,
 							 CUdeviceptr *p_m_redo)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	kern_gpucache_redolog *h_redo = NULL;
-	char		   *base = dsm_segment_address(gc_desc->dsm_seg);
+	char		   *base = gc_sstate->redo_buffer;
 	size_t			length;
 	size_t			offset;
 	uint64			index, nitems;
@@ -3203,9 +3062,8 @@ __gpuCacheSetupRedoLogBuffer(GpuCacheDesc *gc_desc, uint64 end_pos,
 }
 
 static CUresult
-__gpuCacheLaunchApplyRedoKernel(GpuCacheDesc *gc_desc, CUdeviceptr m_redo)
+__gpuCacheLaunchApplyRedoKernel(GpuCacheSharedState *gc_sstate, CUdeviceptr m_redo)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	kern_gpucache_redolog *h_redo = (kern_gpucache_redolog *)m_redo;
 	int			cuda_dindex = gc_sstate->cuda_dindex;
 	int			grid_sz, block_sz;
@@ -3251,7 +3109,7 @@ retry:
 
 	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
 	{
-		rc = gpuCacheBgWorkerExecCompactionNoLock(gc_desc);
+		rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
 		if (rc == CUDA_SUCCESS)
 		{
 			memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
@@ -3262,9 +3120,8 @@ retry:
 }
 
 static CUresult
-gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
+gpuCacheBgWorkerApplyRedoLog(GpuCacheSharedState *gc_sstate, uint64 end_pos)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUdeviceptr	m_redo = 0UL;
 	CUresult	rc, __rc;
 
@@ -3274,16 +3131,16 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheDesc *gc_desc, uint64 end_pos)
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
 	
-	rc = gpuCacheAllocDeviceMemory(gc_desc);
+	rc = gpuCacheAllocDeviceMemory(gc_sstate);
 	if (rc != CUDA_SUCCESS)
 		goto out_unlock;
 
-	rc = __gpuCacheSetupRedoLogBuffer(gc_desc, end_pos, &m_redo);
+	rc = __gpuCacheSetupRedoLogBuffer(gc_sstate, end_pos, &m_redo);
 	if (rc != CUDA_SUCCESS)
 		goto out_unlock;
 	if (m_redo != 0UL)
 	{
-		rc = __gpuCacheLaunchApplyRedoKernel(gc_desc, m_redo);
+		rc = __gpuCacheLaunchApplyRedoKernel(gc_sstate, m_redo);
 
 		__rc = cuMemFree(m_redo);
 		if (__rc != CUDA_SUCCESS)
@@ -3295,9 +3152,8 @@ out_unlock:
 }
 
 static CUresult
-gpuCacheBgWorkerDropUnload(GpuCacheDesc *gc_desc)
+gpuCacheBgWorkerDropUnload(GpuCacheSharedState *gc_sstate)
 {
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 	CUresult	rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
@@ -3349,10 +3205,10 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 {
 	GpuCacheBackgroundCommand *cmd;
 	slock_t		   *cmd_lock = &gcache_shared_head->bgworker_cmd_lock;
+	slock_t		   *sstate_lock = &gcache_shared_head->gcache_sstate_lock;
 	dlist_head	   *free_cmds = &gcache_shared_head->bgworker_free_cmds;
 	dlist_head	   *cmd_queue = &gcache_shared_head->bgworkers[cuda_dindex].cmd_queue;
 	dlist_node	   *dnode;
-	GpuCacheDesc   *gc_desc;
 	GpuCacheSharedState *gc_sstate;
 	CUresult		rc;
 	bool			retval;
@@ -3368,59 +3224,78 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 	memset(&cmd->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(cmd_lock);
 
-	gc_desc = GetGpuCacheDescBgWorker(cmd->database_oid,
-									  cmd->table_oid,
-									  cmd->signature);
-	if (!gc_desc)
+	SpinLockAcquire(sstate_lock);
+	gc_sstate = lookupGpuCacheSharedState(cmd->database_oid,
+										  cmd->table_oid,
+										  cmd->signature);
+	if (!gc_sstate)
 	{
+		SpinLockRelease(sstate_lock);
 		elog(LOG, "gpucache: (cmd=%c, key=%u:%u:%lx) was not found",
 			 cmd->command,
 			 cmd->database_oid,
 			 cmd->table_oid,
 			 cmd->signature);
 		rc = CUDA_ERROR_NOT_FOUND;
-		goto out;
 	}
-	gc_sstate = gc_desc->gc_sstate;
-	
-	if (gc_sstate->cuda_dindex != cuda_dindex)
+	else if (gc_sstate->cuda_dindex != cuda_dindex)
 	{
+		SpinLockRelease(sstate_lock);
 		elog(LOG, "gpucache: (cmd=%c, rel=%s:%lx) was not on GPU-%d",
 			 cmd->command,
 			 gc_sstate->table_name,
 			 gc_sstate->signature,
 			 gc_sstate->cuda_dindex);
-		rc = CUDA_ERROR_INVALID_VALUE;
-		ReleaseGpuCacheDescIfUnused(gc_desc);
-		goto out;
+        rc = CUDA_ERROR_INVALID_VALUE;
 	}
-
-	switch (cmd->command)
+	else
 	{
-		case GCACHE_BGWORKER_CMD__APPLY_REDO:
-			rc = gpuCacheBgWorkerApplyRedoLog(gc_desc, cmd->end_pos);
-			break;
-		case GCACHE_BGWORKER_CMD__COMPACTION:
-			rc = gpuCacheBgWorkerExecCompaction(gc_desc);
-			break;
-		case GCACHE_BGWORKER_CMD__DROP_UNLOAD:
-			rc = gpuCacheBgWorkerDropUnload(gc_desc);
-			break;
-		default:
-			rc = CUDA_ERROR_INVALID_VALUE;
-			elog(LOG, "Unexpected GpuCache background command: %d",
-				 cmd->command);
-			break;
-	}
-	elog(LOG, "gpucache: (cmd=%c, key=%s:%lx) rc=%d",
-		 cmd->command,
-		 gc_sstate->table_name,
-		 gc_sstate->signature,
-		 (int)rc);
-	ReleaseGpuCacheDescIfUnused(gc_desc);
-out:
-	cmd->retval = rc;
+		gc_sstate->refcnt += 2;
+		SpinLockRelease(sstate_lock);
 
+		PG_TRY();
+		{
+			switch (cmd->command)
+			{
+				case GCACHE_BGWORKER_CMD__APPLY_REDO:
+					rc = gpuCacheBgWorkerApplyRedoLog(gc_sstate, cmd->end_pos);
+					break;
+				case GCACHE_BGWORKER_CMD__COMPACTION:
+					rc = gpuCacheBgWorkerExecCompaction(gc_sstate);
+					break;
+				case GCACHE_BGWORKER_CMD__DROP_UNLOAD:
+					rc = gpuCacheBgWorkerDropUnload(gc_sstate);
+					break;
+				default:
+					rc = CUDA_ERROR_INVALID_VALUE;
+					elog(LOG, "Unexpected GpuCache background command: %d",
+						 cmd->command);
+					break;
+			}
+		}
+		PG_CATCH();
+		{
+			/* emergency return the result */
+			cmd->retval = CUDA_ERROR_UNKNOWN;
+			SpinLockAcquire(cmd_lock);
+			if (cmd->backend)
+				SetLatch(cmd->backend);
+			else
+				dlist_push_head(free_cmds, &cmd->chain);
+			SpinLockRelease(cmd_lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		
+		elog(LOG, "gpucache: (cmd=%c, key=%s:%lx) rc=%d",
+			 cmd->command,
+			 gc_sstate->table_name,
+			 gc_sstate->signature,
+			 (int)rc);
+		//putGpuCacheSharedState
+	}
+	/* return the result */
+	cmd->retval = rc;
 	SpinLockAcquire(cmd_lock);
 	if (cmd->backend)
 	{
@@ -3602,13 +3477,6 @@ pgstrom_init_gpu_cache(void)
 										  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = offsetof(GpuCacheHandle, xid) + sizeof(TransactionId);
-	hctl.entrysize = sizeof(GpuCacheHandle);
-	hctl.hcxt = CacheMemoryContext;
-	gcache_handle_htab = hash_create("GpuCache Handles", 48, &hctl,
-									 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-	memset(&hctl, 0, sizeof(HASHCTL));
     hctl.keysize = sizeof(Oid);
 	hctl.entrysize = sizeof(GpuCacheTableSignatureCache);
 	hctl.hcxt = CacheMemoryContext;
@@ -3678,7 +3546,6 @@ pgstrom_init_gpu_cache(void)
 	object_access_next = object_access_hook;
 	object_access_hook = gpuCacheObjectAccess;
 	/* callbacks for invalidation messages */
-	CacheRegisterRelcacheCallback(gpuCacheRelcacheCallback, 0);
 	CacheRegisterSyscacheCallback(PROCOID, gpuCacheSyscacheCallback, 0);
 	/* transaction callbacks */
 	RegisterXactCallback(gpuCacheXactCallback, NULL);
