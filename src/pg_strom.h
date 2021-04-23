@@ -26,6 +26,7 @@
 #include "access/gist.h"
 #include "access/hash.h"
 #include "access/heapam.h"
+#include "access/heapam_xlog.h"
 #if PG_VERSION_NUM >= 130000
 #include "access/heaptoast.h"
 #endif
