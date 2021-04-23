@@ -552,27 +552,32 @@ __init_kernel_column_metadata(kern_data_store *kds,
 	else if (cmeta->attlen == -1)
 		kds->has_varlena = true;
 	cmeta->attnum   = attnum;
-	if (p_attcacheoff && *p_attcacheoff > 0)
-	{
-		/*
-		 * Special case handling - varlena can use attcacheoff only if offset
-		 * is aligned, thus we can reference the value regardless of the format
-		 * and padding.
-		 */
-		if (typ->typlen == -1)
-		{
-			int		__off = att_align_nominal(*p_attcacheoff, typ->typalign);
 
-			if (*p_attcacheoff == __off)
-				cmeta->attcacheoff = __off;
-			else
-				cmeta->attcacheoff = -1;
-		}
+	if (!p_attcacheoff || *p_attcacheoff < 0)
+		cmeta->attcacheoff = -1;
+	else if (typ->typlen > 0)
+	{
+		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);
+		*p_attcacheoff = cmeta->attcacheoff + typ->typlen;
+	}
+	else if (typ->typlen == -1)
+	{
+		/* Note that attcacheoff is also available on varlena datum
+		 * only if it appeared at the first, and its offset is aligned.
+		 * Elsewhere, we cannot utilize the attcacheoff for varlena
+		 */
+		uint32		__off = att_align_nominal(*p_attcacheoff, typ->typalign);
+
+		if (*p_attcacheoff == __off)
+			cmeta->attcacheoff = __off;
 		else
-			cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);
+			cmeta->attcacheoff = -1;
+		*p_attcacheoff = -1;
 	}
 	else
-		cmeta->attcacheoff = -1;
+	{
+		cmeta->attcacheoff = *p_attcacheoff = -1;
+	}
 	cmeta->atttypid = atttypid;
 	cmeta->atttypmod = atttypmod;
 	strncpy(cmeta->attname.data, attname, NAMEDATALEN);
@@ -654,13 +659,6 @@ __init_kernel_column_metadata(kern_data_store *kds,
 				elog(ERROR, "Unexpected typtype ('%c')", typ->typtype);
 				break;
 		}
-	}
-	if (p_attcacheoff)
-	{
-		if (*p_attcacheoff > 0 && typ->typlen > 0)
-			*p_attcacheoff += typ->typlen;
-		else
-			*p_attcacheoff = -1;
 	}
 	ReleaseSysCache(tup);
 }
