@@ -36,9 +36,9 @@ INSERT INTO rt_int (
             pgstrom.random_float(0.5, -32000.0, 32000.0),
             pgstrom.random_float(0.5, -32000.0, 32000.0)
    FROM generate_series(1,2000) x);
-ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8; 
+ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8, ADD n int1; 
 UPDATE rt_int SET g = ((id - 1 ) % 256 -128);
-UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g;
+UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g, n = g;
 VACUUM ANALYZE;
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
@@ -183,7 +183,8 @@ EXPLAIN (costs off, verbose)
 SELECT id, a+b v1, a+c v2, b+e v3, 
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12 
+           a+g v10, c+g v11, e+g v12 --,
+           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
@@ -198,7 +199,8 @@ SELECT id, a+b v1, a+c v2, b+e v3,
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12
+           a+g v10, c+g v11, e+g v12 --,
+           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
@@ -206,7 +208,8 @@ SET pg_strom.enabled = off;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12
+           a+g v10, c+g v11, e+g v12 --,
+           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10p
   FROM rt_int
  WHERE x >= 0;
@@ -225,39 +228,42 @@ SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, a-b v1, a-c v2, b-e v3,
            c-b v4, c-d v5, c-e v6,
-           e-a v7, e-d v8, e-f v9
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
   INTO test11g
   FROM rt_int
  WHERE x <= 0.0;
-                                                                                                                 QUERY PLAN                                                                                                                 
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                       QUERY PLAN                                                                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((a - b)), ((a - c)), ((b - e)), ((c - b)), ((c - d)), ((c - e)), ((e - a)), ((e - d)), ((e - f))
-   GPU Projection: rt_int.id, (rt_int.a - rt_int.b), (rt_int.a - rt_int.c), (rt_int.b - rt_int.e), (rt_int.c - rt_int.b), (rt_int.c - rt_int.d), (rt_int.c - rt_int.e), (rt_int.e - rt_int.a), (rt_int.e - rt_int.d), (rt_int.e - rt_int.f)
+   Output: id, ((a - b)), ((a - c)), ((b - e)), ((c - b)), ((c - d)), ((c - e)), ((e - a)), ((e - d)), ((e - f)), (a - g), ((c - g)), ((e - g)), (g - n)
+   GPU Projection: rt_int.id, (rt_int.a - rt_int.b), (rt_int.a - rt_int.c), (rt_int.b - rt_int.e), (rt_int.c - rt_int.b), (rt_int.c - rt_int.d), (rt_int.c - rt_int.e), (rt_int.e - rt_int.a), (rt_int.e - rt_int.d), (rt_int.e - rt_int.f), rt_int.a, rt_int.g, (rt_int.c - rt_int.g), (rt_int.e - rt_int.g), rt_int.n
    GPU Filter: (rt_int.x <= '0'::double precision)
 (4 rows)
 
 SELECT id, a-b v1, a-c v2, b-e v3,
            c-b v4, c-d v5, c-e v6,
-           e-a v7, e-d v8, e-f v9
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
   INTO test11g
   FROM rt_int
  WHERE x <= 0.0;
 SET pg_strom.enabled = off;
 SELECT id, a-b v1, a-c v2, b-e v3,
            c-b v4, c-d v5, c-e v6,
-           e-a v7, e-d v8, e-f v9
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
   INTO test11p
   FROM rt_int
  WHERE x <= 0.0;
 (SELECT * FROM test11g EXCEPT ALL SELECT * FROM test11p);
- id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 
-----+----+----+----+----+----+----+----+----+----
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
 (0 rows)
 
 (SELECT * FROM test11p EXCEPT ALL SELECT * FROM test11g);
- id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 
-----+----+----+----+----+----+----+----+----+----
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
 (0 rows)
 
 -- '*' operators
