@@ -42,6 +42,9 @@ typedef struct
 #define GPUCACHE_SHARED_DESC_NSLOTS		37
 typedef struct
 {
+	/* pg_strom.gpucache_auto_preload related */
+	int32		gcache_auto_preload_count;
+	NameData	gcache_auto_preload_dbname;
 	/* hash slot for GpuCacheSharedState */
 	slock_t		gcache_sstate_lock;
 	dlist_head	gcache_sstate_slot[GPUCACHE_SHARED_DESC_NSLOTS];
@@ -134,13 +137,12 @@ struct GpuCacheState
 };
 
 /* --- static variables --- */
+static char		   *pgstrom_gpucache_auto_preload;	/* GUC */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
 static HTAB		   *gcache_signatures_htab = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
-static void		  (*gpucache_xact_redo_next)(XLogReaderState *record) = NULL;
-static void		  (*gpucache_heap_redo_next)(XLogReaderState *record) = NULL;
 static CUmodule		gcache_cuda_module = NULL;
 static CUfunction	gcache_kfunc_init_empty = NULL;
 static CUfunction	gcache_kfunc_apply_redo = NULL;
@@ -157,7 +159,7 @@ static CUresult gpuCacheInvokeCompaction(GpuCacheSharedState *gc_sstate,
 										 bool is_async);
 static CUresult gpuCacheInvokeDropUnload(GpuCacheSharedState *gc_sstate,
 										 bool is_async);
-void	GpuCacheStartupPreloader(Datum arg);
+void	gpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
@@ -530,10 +532,13 @@ gpuCacheTableSignature(Relation rel, GpuCacheOptions *gc_options)
 }
 
 static Datum
-gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
-							   GpuCacheOptions *gc_options)
+__gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
+								 Snapshot snapshot,
+								 GpuCacheOptions *gc_options)
 {
 	GpuCacheTableSignatureBuffer *sig;
+	Form_pg_class pg_class = (Form_pg_class) GETSTRUCT(pg_class_tuple);
+	Oid			table_oid = PgClassTupleGetOid(pg_class_tuple);
 	Relation	srel;
 	ScanKeyData	skey[2];
 	SysScanDesc	sscan;
@@ -541,35 +546,23 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
 	bool		has_row_trigger = false;
 	bool		has_stmt_trigger = false;
 	int			j, len;
-	Form_pg_class rd_rel;
 
-	/* pg_class */
-	srel = table_open(RelationRelationId, AccessShareLock);
-	ScanKeyInit(&skey[0],
-				Anum_pg_class_oid,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(table_oid));
-	sscan = systable_beginscan(srel, ClassOidIndexId,
-							   true, snapshot, 1, skey);
-	tuple = systable_getnext(sscan);
-	if (!HeapTupleIsValid(tuple))
-		goto no_gpu_cache;
-	rd_rel = (Form_pg_class) GETSTRUCT(tuple);
-	if (rd_rel->relkind != RELKIND_RELATION &&
-		rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
-		goto no_gpu_cache;
-	len = offsetof(GpuCacheTableSignatureBuffer, attrs[rd_rel->relnatts]);
+	/* pg_class validation */
+	if (pg_class->relkind != RELKIND_RELATION &&
+		pg_class->relkind != RELKIND_PARTITIONED_TABLE)
+		return 0UL;
+	if (pg_class->relfilenode == 0)
+		return 0UL;
+	if (!pg_class->relhastriggers)
+		return 0UL;
+	len = offsetof(GpuCacheTableSignatureBuffer,
+				   attrs[pg_class->relnatts]);
 	sig = alloca(len);
 	memset(sig, 0, len);
 
-	if (rd_rel->relfilenode == 0)
-		goto no_gpu_cache;
-	sig->reltablespace  = rd_rel->reltablespace;
-	sig->relfilenode    = rd_rel->relfilenode;
-	sig->relnatts       = rd_rel->relnatts;
-
-	systable_endscan(sscan);
-	table_close(srel, AccessShareLock);
+	sig->reltablespace  = pg_class->reltablespace;
+	sig->relfilenode    = pg_class->relfilenode;
+	sig->relnatts       = pg_class->relnatts;
 
 	/* pg_trigger */
 	srel = table_open(TriggerRelationId, AccessShareLock);
@@ -586,7 +579,7 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot,
 		if (pg_trig->tgenabled != TRIGGER_FIRES_ON_ORIGIN &&
 			pg_trig->tgenabled != TRIGGER_FIRES_ALWAYS)
 			continue;
-		
+
 		if (pg_trig->tgtype == (TRIGGER_TYPE_ROW |
 								TRIGGER_TYPE_INSERT |
 								TRIGGER_TYPE_DELETE |
@@ -668,6 +661,38 @@ no_gpu_cache:
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 	return 0UL;
+}
+
+static Datum
+gpuCacheTableSignatureSnapshot(Oid table_oid,
+							   Snapshot snapshot,
+							   GpuCacheOptions *gc_options)
+{
+	Relation	srel;
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	HeapTuple	tuple;
+	Datum		signature = 0UL;
+
+	/* pg_class */
+	srel = table_open(RelationRelationId, AccessShareLock);
+	ScanKeyInit(&skey,
+				Anum_pg_class_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(table_oid));
+	sscan = systable_beginscan(srel, ClassOidIndexId,
+							   true, snapshot, 1, &skey);
+	tuple = systable_getnext(sscan);
+	if (HeapTupleIsValid(tuple))
+	{
+		signature = __gpuCacheTableSignatureSnapshot(tuple,
+													 snapshot,
+													 gc_options);
+	}
+	systable_endscan(sscan);
+	table_close(srel, AccessShareLock);
+
+	return signature;
 }
 
 /*
@@ -1333,7 +1358,6 @@ lookupGpuCacheDesc(Relation rel)
 		}
 		PG_END_TRY();
 	}
-	elog(LOG, "lookupGpuCacheDesc: %s", RelationGetRelationName(rel));
 	return (gc_desc->gc_sstate ? gc_desc : NULL);
 }
 
@@ -2285,65 +2309,6 @@ gpuCacheInvokeDropUnload(GpuCacheSharedState *gc_sstate, bool is_async)
 }
 
 /*
- * gcache_xact_redo_hook
- */
-static void
-gcache_xact_redo_hook(XLogReaderState *record)
-{
-	/* see xact_redo */
-	gpucache_xact_redo_next(record);
-	if (InRecovery)
-	{
-		uint8	info = XLogRecGetInfo(record) & XLOG_XACT_OPMASK;
-
-		switch (info)
-		{
-			case XLOG_XACT_COMMIT:
-			case XLOG_XACT_ABORT:
-			default:
-				/* do nothing */
-				break;
-		}
-		
-		//add transaction logs
-
-	}
-}
-
-/*
- * gcache_heap_redo_hook
- */
-static void
-gcache_heap_redo_hook(XLogReaderState *record)
-{
-	/* see heap_redo() */
-	gpucache_heap_redo_next(record);
-	if (InRecovery)
-	{
-		uint8	info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
-
-		switch (info & XLOG_HEAP_OPMASK)
-		{
-			case XLOG_HEAP_INSERT:
-			case XLOG_HEAP_DELETE:
-			case XLOG_HEAP_UPDATE:
-			
-			default:
-				/* do nothing */
-				break;
-		}
-		
-		//get gc_desc
-		//add ins/del log
-		//track ctid
-
-		
-		//add redo logs
-		
-	}
-}
-
-/*
  * __gpuCacheLoadCudaModule
  */
 static CUresult
@@ -3098,6 +3063,309 @@ gpuCacheBgWorkerIdleTask(int cuda_dindex)
 }
 
 /*
+ * pg_strom.gpucache_auto_preload configuration
+ */
+typedef struct
+{
+	char   *database_name;
+	char   *schema_name;
+	char   *table_name;
+} GpuCacheAutoPreloadEntry;
+
+static GpuCacheAutoPreloadEntry *gpucache_auto_preload_entries = NULL;
+static int		gpucache_auto_preload_num_entries = 0;
+
+/*
+ * __gpuCacheAutoPreloadEntryComp
+ */
+static int
+__gpuCacheAutoPreloadEntryComp(const void *__x, const void *__y)
+{
+	const GpuCacheAutoPreloadEntry *x = __x;
+	const GpuCacheAutoPreloadEntry *y = __y;
+	int		comp;
+
+	comp = strcmp(x->database_name, y->database_name);
+	if (comp == 0)
+	{
+		comp = strcmp(x->schema_name, y->schema_name);
+		if (comp == 0)
+			comp = strcmp(x->table_name, y->table_name);
+	}
+	return comp;
+}
+
+/*
+ * __parseGpuCacheAutoPreload
+ */
+static void
+__parseGpuCacheAutoPreload(void)
+{
+	char	   *config;
+	char	   *token;
+	int			nitems = 0;
+	int			nrooms = 0;
+
+	config = alloca(strlen(pgstrom_gpucache_auto_preload) + 1);
+	strcpy(config, pgstrom_gpucache_auto_preload);
+	config = trim_cstring(config);
+
+	/* special case - auto preloading */
+	if (strcmp(config, "*") == 0)
+		return;
+
+	for (token = strtok(config, ",");
+		 token != NULL;
+		 token = strtok(NULL,   ","))
+	{
+		GpuCacheAutoPreloadEntry *entry;
+		char   *database_name = trim_cstring(token);
+		char   *schema_name;
+		char   *table_name;
+		char   *pos;
+
+		pos = strchr(database_name, '.');
+		if (!pos)
+			elog(ERROR, "pgstrom.gpucache_auto_preload syntax error [%s]",
+				 pgstrom_gpucache_auto_preload);
+		*pos++ = '\0';
+		schema_name = trim_cstring(pos);
+
+		pos = strchr(schema_name, '.');
+		if (!pos)
+			elog(ERROR, "pgstrom.gpucache_auto_preload syntax error [%s]",
+				 pgstrom_gpucache_auto_preload);
+		*pos++ = '\0';
+		table_name = trim_cstring(pos);
+
+		if (nitems >= nrooms)
+		{
+			nrooms = 2 * nrooms + 20;
+			gpucache_auto_preload_entries
+				= realloc(gpucache_auto_preload_entries,
+						  sizeof(GpuCacheAutoPreloadEntry) * nrooms);
+			if (!gpucache_auto_preload_entries)
+				elog(ERROR, "out of memory");
+		}
+		entry = &gpucache_auto_preload_entries[nitems++];
+		entry->database_name = strdup(database_name);
+		entry->schema_name = strdup(schema_name);
+		entry->table_name = strdup(table_name);
+		if (!entry->database_name ||
+			!entry->schema_name ||
+			!entry->table_name)
+			elog(ERROR, "out of memory");
+	}
+	gpucache_auto_preload_num_entries = nitems;
+
+	/* sort by database_name */
+	if (gpucache_auto_preload_num_entries > 0)
+	{
+		qsort(gpucache_auto_preload_entries,
+			  gpucache_auto_preload_num_entries,
+			  sizeof(GpuCacheAutoPreloadEntry),
+			  __gpuCacheAutoPreloadEntryComp);
+	}
+}
+
+/*
+ * __gpuCacheAutoPreloadConnectDatabaseAny
+ */
+static int
+__gpuCacheAutoPreloadConnectDatabaseAny(int32 *p_start, int32 *p_end)
+{
+	char	   *database_name;
+	Relation	srel;
+	SysScanDesc	sscan;
+    ScanKeyData	skey;
+	int			nkeys;
+	HeapTuple	tuple;
+	int			nitems = 0;
+	int			nrooms = 0;
+	int			exit_code = 1;	/* restart again */
+
+	if (gcache_shared_head->gcache_auto_preload_count++ == 0)
+	{
+		database_name = "template1";
+		nkeys = 0;
+	}
+	else
+	{
+		database_name = NameStr(gcache_shared_head->gcache_auto_preload_dbname);
+
+		ScanKeyInit(&skey,
+					Anum_pg_database_datname,
+					BTGreaterStrategyNumber, F_NAMEGT,
+					CStringGetDatum(database_name));
+		nkeys = 1;
+	}
+
+	PG_TRY();
+	{
+		BackgroundWorkerInitializeConnection(database_name, NULL, 0);
+	}
+	PG_CATCH();
+	{
+		ErrorData	   *edata;
+
+		MemoryContextSwitchTo(TopMemoryContext);
+		edata = CopyErrorData();
+
+		elog(LOG, "failed to connect database [%s], stop preloading - %s (%s:%d)",
+			 database_name,
+			 edata->message,
+			 edata->filename,
+			 edata->lineno);
+		proc_exit(0);	/* stop to restart bgworker any more */
+	}
+	PG_END_TRY();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	srel = table_open(DatabaseRelationId, AccessShareLock);
+	sscan = systable_beginscan(srel,
+							   DatabaseNameIndexId,
+							   true,
+							   NULL,
+							   nkeys, &skey);
+	while ((tuple = systable_getnext(sscan)) != NULL)
+	{
+		Form_pg_database dat = (Form_pg_database) GETSTRUCT(tuple);
+
+		if (!dat->datistemplate && dat->datallowconn)
+		{
+			/* save the next database */
+			memcpy(&gcache_shared_head->gcache_auto_preload_dbname,
+				   &dat->datname,
+				   sizeof(NameData));
+			break;
+		}
+	}
+	if (!HeapTupleIsValid(tuple))
+		exit_code = 0;	/* stop preloading */
+	systable_endscan(sscan);
+	table_close(srel, AccessShareLock);
+
+	/* build gpucache_auto_preload_entries on this database */
+	database_name = get_database_name(MyDatabaseId);
+	srel = table_open(RelationRelationId, AccessShareLock);
+	sscan = systable_beginscan(srel, InvalidOid, false, NULL, 0, NULL);
+	while ((tuple = systable_getnext(sscan)) != NULL)
+	{
+		GpuCacheAutoPreloadEntry *entry;
+		Form_pg_class	pg_class = (Form_pg_class) GETSTRUCT(tuple);
+		Oid				namespace_oid = pg_class->relnamespace;
+
+		if (namespace_oid == PG_CATALOG_NAMESPACE)
+			continue;
+		if (__gpuCacheTableSignatureSnapshot(tuple, NULL, NULL) == 0)
+			continue;
+
+		while (nitems >= nrooms)
+		{
+			nrooms = 2 * nrooms + 20;
+			gpucache_auto_preload_entries
+				= realloc(gpucache_auto_preload_entries,
+						  sizeof(GpuCacheAutoPreloadEntry) * nrooms);
+			if (!gpucache_auto_preload_entries)
+				elog(ERROR, "out of memory");
+		}
+		entry = &gpucache_auto_preload_entries[nitems++];
+        entry->database_name = strdup(database_name);
+		entry->schema_name = strdup(get_namespace_name(namespace_oid));
+		entry->table_name = strdup(NameStr(pg_class->relname));
+	}
+	gpucache_auto_preload_num_entries = nitems;
+
+	systable_endscan(sscan);
+	table_close(srel, AccessShareLock);
+
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	
+	*p_start = 0;
+	*p_end   = nitems;
+
+	return exit_code;
+}
+
+/*
+ * gpuCacheAutoPreloadDatabaseName
+ */
+static int
+gpuCacheAutoPreloadConnectDatabase(int32 *p_start, int32 *p_end)
+{
+	GpuCacheAutoPreloadEntry *entry;
+	const char *database_name;
+	int32		start;
+	int32		curr;
+
+	if (!gpucache_auto_preload_entries)
+		return __gpuCacheAutoPreloadConnectDatabaseAny(p_start, p_end);
+
+	start = curr = gcache_shared_head->gcache_auto_preload_count;
+	if (start >= gpucache_auto_preload_num_entries)
+		proc_exit(0);	/* no more preloading */
+
+	database_name = gpucache_auto_preload_entries[start].database_name;
+	while (curr < gpucache_auto_preload_num_entries)
+	{
+		entry = &gpucache_auto_preload_entries[curr];
+
+		if (strcmp(database_name, entry->database_name) != 0)
+			break;
+	}
+	gcache_shared_head->gcache_auto_preload_count = curr;
+
+	BackgroundWorkerInitializeConnection(database_name, NULL, 0);
+
+	*p_start = start;
+	*p_end   = curr;
+
+	return (curr >= gpucache_auto_preload_num_entries ? 0 : 1);
+}
+
+/*
+ * gpuCacheStartupPreloader
+ */
+void
+gpuCacheStartupPreloader(Datum arg)
+{
+	int32		start;
+	int32		end;
+	int32		index;
+	int			exit_code;
+
+	BackgroundWorkerUnblockSignals();
+
+	exit_code = gpuCacheAutoPreloadConnectDatabase(&start, &end);
+	StartTransactionCommand();
+	GetCurrentTransactionId();
+	for (index=start; index < end; index++)
+	{
+		GpuCacheAutoPreloadEntry *entry = &gpucache_auto_preload_entries[index];
+		RangeVar		rvar;
+		Relation		rel;
+
+		memset(&rvar, 0, sizeof(RangeVar));
+		rvar.type = T_RangeVar;
+		rvar.schemaname = entry->schema_name;
+		rvar.relname = entry->table_name;
+
+		rel = table_openrv(&rvar, AccessShareLock);
+		(void)lookupGpuCacheDesc(rel);
+		table_close(rel, NoLock);
+
+		elog(LOG, "gpucache: auto preload '%s.%s' (DB: %s)",
+			 entry->schema_name,
+			 entry->table_name,
+			 entry->database_name);
+	}
+	CommitTransactionCommand();
+
+	proc_exit(exit_code);
+}
+
+/*
  * gpuCacheBgWorkerEnd
  */
 void
@@ -3155,30 +3423,19 @@ pgstrom_startup_gpu_cache(void)
 void
 pgstrom_init_gpu_cache(void)
 {
-	static bool gpucache_auto_preload;
-	static bool gpucache_with_replication;
 	BackgroundWorker worker;
 	HASHCTL		hctl;
-	int			i;
 
 	/* GUC: pg_strom.gpucache_auto_preload */
-	DefineCustomBoolVariable("pg_strom.gpucache_auto_preload",
-							 "Enables auto preload of GPU memory store",
-							 NULL,
-							 &gpucache_auto_preload,
-							 false,
-							 PGC_POSTMASTER,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* GPU: pg_strom.gpucache_with_replication */
-	DefineCustomBoolVariable("pg_strom.gpucache_with_replication",
-							 "Enables to synchronize GPU Store on replication slave",
-							 NULL,
-							 &gpucache_with_replication,
-							 true,
-							 PGC_POSTMASTER,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.gpucache_auto_preload",
+							   "list of tables or '*' for GpuCache preloading",
+							   NULL,
+							   &pgstrom_gpucache_auto_preload,
+							   NULL,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = offsetof(GpuCacheDesc, signature) + sizeof(Datum);
@@ -3197,8 +3454,10 @@ pgstrom_init_gpu_cache(void)
 	/*
 	 * Background worke to load GPU Store on startup
 	 */
-	if (gpucache_auto_preload)
+	if (pgstrom_gpucache_auto_preload)
 	{
+		__parseGpuCacheAutoPreload();
+
 		memset(&worker, 0, sizeof(BackgroundWorker));
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
 				 "GPUCache Startup Preloader");
@@ -3209,44 +3468,11 @@ pgstrom_init_gpu_cache(void)
 		snprintf(worker.bgw_library_name, BGW_MAXLEN,
 				 "$libdir/pg_strom");
 		snprintf(worker.bgw_function_name, BGW_MAXLEN,
-				 "GpuCacheStartupPreloader");
+				 "gpuCacheStartupPreloader");
 		worker.bgw_main_arg = 0;
 		RegisterBackgroundWorker(&worker);
 	}
 
-	/*
-	 * Add hook for WAL replaying
-	 */	
-	if (gpucache_with_replication)
-	{
-		uintptr_t	start = TYPEALIGN_DOWN(PAGE_SIZE, &RmgrTable[0]);
-		uintptr_t	end = TYPEALIGN(PAGE_SIZE, &RmgrTable[RM_MAX_ID+1]);
-
-		if (mprotect((void *)start, end - start,
-					 PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-		{
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not enable GPU store on replication slave: %m"),
-					 errhint("try to turn off pg_strom.gpucache_with_replication")));
-		}
-
-		for (i=0; i <= RM_MAX_ID; i++)
-		{
-			if (strcmp(RmgrTable[i].rm_name, "Transaction") == 0)
-			{
-				gpucache_xact_redo_next = RmgrTable[i].rm_redo;
-				*((void **)&RmgrTable[i].rm_redo) = gcache_xact_redo_hook;
-			}
-			else if (strcmp(RmgrTable[i].rm_name, "Heap") == 0)
-			{
-				gpucache_heap_redo_next = RmgrTable[i].rm_redo;
-				*((void **)&RmgrTable[i].rm_redo) = gcache_heap_redo_hook;
-			}
-		}
-		Assert(gpucache_xact_redo_next != NULL &&
-			   gpucache_heap_redo_next != NULL);
-	}
 	/* request for the static shared memory */
 	RequestAddinShmemSpace(STROMALIGN(offsetof(GpuCacheSharedHead,
 											   bgworkers[numDevAttrs])));
