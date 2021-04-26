@@ -64,6 +64,7 @@ PG_UNARY_MINUS_TEMPLATE(float8)
 			arg.value = ~arg.value;				\
 		return arg;								\
 	}
+PG_UNARY_NOT_TEMPLATE(int1)
 PG_UNARY_NOT_TEMPLATE(int2)
 PG_UNARY_NOT_TEMPLATE(int4)
 PG_UNARY_NOT_TEMPLATE(int8)

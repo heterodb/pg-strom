@@ -1127,8 +1127,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "int2 int2(float4)",  1, "f:to_int2" },
 	{ NULL,    "int2 int2(float8)",  1, "f:to_int2" },
 
-	{ PGSTROM, "int4 int4(bool)",    1, "f:to_int4" },
-	{ NULL,    "int4 int4(int1)",    1, "f:to_int4" },
+	{ NULL,	   "int4 int4(bool)",    1, "f:to_int4" },
+	{ PGSTROM, "int4 int4(int1)",    1, "f:to_int4" },
 	{ NULL,    "int4 int4(int2)",    1, "f:to_int4" },
 	{ NULL,    "int4 int4(int8)",    1, "f:to_int4" },
 	{ PGSTROM, "int4 int4(float2)",  1, "f:to_int4" },
@@ -1272,9 +1272,10 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "float8 float8div(float8,float8)",   2, "p/f:float8div" },
 
 	/* '%' : reminder operators */
-	{ NULL, "int2 int2mod(int2,int2)", 2, "p/f:int2mod" },
-	{ NULL, "int4 int4mod(int4,int4)", 2, "p/f:int4mod" },
-	{ NULL, "int8 int8mod(int8,int8)", 2, "p/f:int8mod" },
+	{ PGSTROM,	"int1 int1mod(int1,int1)", 2, "p/f:int1mod" },
+	{ NULL,		"int2 int2mod(int2,int2)", 2, "p/f:int2mod" },
+	{ NULL,		"int4 int4mod(int4,int4)", 2, "p/f:int4mod" },
+	{ NULL,		"int8 int8mod(int8,int8)", 2, "p/f:int8mod" },
 
 	/* '+' : unary plus operators */
 	{ PGSTROM, "int1 int1up(int1)",       1, "p/f:int1up" },
