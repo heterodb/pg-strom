@@ -32,6 +32,8 @@ INSERT INTO rt_float (
             pgstrom.random_int(0, -32000, 32000),
             pgstrom.random_int(0, -32000, 32000)
     FROM generate_series(1,2000) x);
+ALTER TABLE rt_float ADD p int1;
+ UPDATE rt_float SET p=((id-1)%256-128);
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
 -- not to print kernel source code
@@ -41,18 +43,18 @@ SET pg_strom.debug_kernel_source = off;
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
 SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
-       x::float2, y::float2, z::float2
+       x::float2, y::float2, z::float2, p::float2
   INTO test01g
   FROM rt_float
  WHERE x BETWEEN -1800 AND 1800;
 SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
-           x::float2, y::float2, z::float2
+       x::float2, y::float2, z::float2, p::float2
   INTO test01g
   FROM rt_float
  WHERE x BETWEEN -1800 AND 1800;
 SET pg_strom.enabled = off;
 SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
-           x::float2, y::float2, z::float2
+       x::float2, y::float2, z::float2, p::float2
   INTO test01p
   FROM rt_float
  WHERE x BETWEEN -1800 AND 1800;
@@ -61,16 +63,16 @@ SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
 
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
-SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4
+SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
   INTO test02g
   FROM rt_float
  WHERE x < 0;
-SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4
+SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
   INTO test02g
   FROM rt_float
  WHERE x < 0;
 SET pg_strom.enabled = off;
-SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4
+SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
   INTO test02p
   FROM rt_float
  WHERE x < 0;
@@ -79,16 +81,16 @@ SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4
 
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
-SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8
+SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
   INTO test03g
   FROM rt_float
  WHERE x > 0;
-SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8
+SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
   INTO test03g
   FROM rt_float
  WHERE x > 0;
 SET pg_strom.enabled = off;
-SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8
+SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
   INTO test03p
   FROM rt_float
  WHERE x > 0;
