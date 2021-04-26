@@ -116,22 +116,21 @@ SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
 (SELECT * FROM test04p EXCEPT ALL SELECT * FROM test04g);
 
 -- '+' operators
--- TODO: enable CASE
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, a+b v1, a+c v2, b+e v3, 
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12--,
-           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12 --,
-           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10g
   FROM rt_int
  WHERE x >= 0;
@@ -139,8 +138,8 @@ SET pg_strom.enabled = off;
 SELECT id, a+b v1, a+c v2, b+e v3,
            c+b v4, c+d v5, c+e v6,
            e+a v7, e+d v8, e+f v9,
-           a+g v10, c+g v11, e+g v12 --,
-           --CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
   INTO test10p
   FROM rt_int
  WHERE x >= 0;
@@ -180,23 +179,26 @@ SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
-           e*b v7, e*d v8, e*f v9 --,
-           --a*g v10, c*g v11, e*g v12
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
 SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
-           e*b v7, e*d v8, e*f v9 --,
-           -- a*g v10, c*g v11, e*g v12
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
 SET pg_strom.enabled = off;
 SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
-           e*b v7, e*d v8, e*f v9 --,
-           --a*g v10, c*g v11, e*g v12
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
   INTO test12p
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
@@ -287,14 +289,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a=b v1, a=d v2, a=f v3,
            c=b v4, c=d v5, c=f v6,
            e=b v7, e=d v8, e=f v9,
-           g=b v10, g=d v11, g=f v12
+           g=b v10, g=d v11, g=f v12, g=n v13
   INTO test20g
   FROM rt_int
  WHERE id % 6 = 0;
 SELECT id, a=b v1, a=d v2, a=f v3,
            c=b v4, c=d v5, c=f v6,
            e=b v7, e=d v8, e=f v9,
-           g=b v10, g=d v11, g=f v12
+           g=b v10, g=d v11, g=f v12, g=n v13
   INTO test20g
   FROM rt_int
  WHERE id % 6 = 0;
@@ -302,7 +304,7 @@ SET pg_strom.enabled = off;
 SELECT id, a=b v1, a=d v2, a=f v3,
            c=b v4, c=d v5, c=f v6,
            e=b v7, e=d v8, e=f v9,
-           g=b v10, g=d v11, g=f v12
+           g=b v10, g=d v11, g=f v12, g=n v13
   INTO test20p
   FROM rt_int
  WHERE id % 6 = 0;
@@ -315,14 +317,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a<>b v1, a<>d v2, a<>f v3,
            c<>b v4, c<>d v5, c<>f v6,
            e<>b v7, e<>d v8, e<>f v9,
-           g<>b v10, g<>d v11, g<>f v12
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
   INTO test21g
   FROM rt_int
  WHERE id % 6 = 1;
 SELECT id, a<>b v1, a<>d v2, a<>f v3,
            c<>b v4, c<>d v5, c<>f v6,
            e<>b v7, e<>d v8, e<>f v9,
-           g<>b v10, g<>d v11, g<>f v12
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
   INTO test21g
   FROM rt_int
  WHERE id % 6 = 1;
@@ -330,7 +332,7 @@ SET pg_strom.enabled = off;
 SELECT id, a<>b v1, a<>d v2, a<>f v3,
            c<>b v4, c<>d v5, c<>f v6,
            e<>b v7, e<>d v8, e<>f v9,
-           g<>b v10, g<>d v11, g<>f v12
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
   INTO test21p
   FROM rt_int
  WHERE id % 6 = 1;
@@ -343,14 +345,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a>b v1, a>d v2, a>f v3,
            c>b v4, c>d v5, c>f v6,
            e>b v7, e>d v8, e>f v9,
-           g>b v10, g>d v11, g>f v12
+           g>b v10, g>d v11, g>f v12, g>n v13
   INTO test22g
   FROM rt_int
  WHERE id % 6 = 2;
 SELECT id, a>b v1, a>d v2, a>f v3,
            c>b v4, c>d v5, c>f v6,
            e>b v7, e>d v8, e>f v9,
-           g>b v10, g>d v11, g>f v12
+           g>b v10, g>d v11, g>f v12, g>n v13
   INTO test22g
   FROM rt_int
  WHERE id % 6 = 2;
@@ -358,7 +360,7 @@ SET pg_strom.enabled = off;
 SELECT id, a>b v1, a>d v2, a>f v3,
            c>b v4, c>d v5, c>f v6,
            e>b v7, e>d v8, e>f v9,
-           g>b v10, g>d v11, g>f v12
+           g>b v10, g>d v11, g>f v12, g>n v13
   INTO test22p
   FROM rt_int
  WHERE id % 6 = 2;
@@ -371,14 +373,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a<b v1, a<d v2, a<f v3,
            c<b v4, c<d v5, c<f v6,
            e<b v7, e<d v8, e<f v9,
-           g<b v10, g<d v11, g<f v12
+           g<b v10, g<d v11, g<f v12, g<n v13
   INTO test23g
   FROM rt_int
  WHERE id % 6 = 3;
 SELECT id, a<b v1, a<d v2, a<f v3,
            c<b v4, c<d v5, c<f v6,
            e<b v7, e<d v8, e<f v9,
-           g<b v10, g<d v11, g<f v12
+           g<b v10, g<d v11, g<f v12, g<n v13
   INTO test23g
   FROM rt_int
  WHERE id % 6 = 3;
@@ -386,7 +388,7 @@ SET pg_strom.enabled = off;
 SELECT id, a<b v1, a<d v2, a<f v3,
            c<b v4, c<d v5, c<f v6,
            e<b v7, e<d v8, e<f v9,
-           g<b v10, g<d v11, g<f v12
+           g<b v10, g<d v11, g<f v12, g<n v13
   INTO test23p
   FROM rt_int
  WHERE id % 6 = 3;
@@ -399,14 +401,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a>=b v1, a>=d v2, a>=f v3,
            c>=b v4, c>=d v5, c>=f v6,
            e>=b v7, e>=d v8, e>=f v9,
-           g>=b v10, g>=d v11, g>=f v12
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
   INTO test24g
   FROM rt_int
  WHERE id % 6 = 4;
 SELECT id, a>=b v1, a>=d v2, a>=f v3,
            c>=b v4, c>=d v5, c>=f v6,
            e>=b v7, e>=d v8, e>=f v9,
-           g>=b v10, g>=d v11, g>=f v12
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
   INTO test24g
   FROM rt_int
  WHERE id % 6 = 4;
@@ -414,7 +416,7 @@ SET pg_strom.enabled = off;
 SELECT id, a>=b v1, a>=d v2, a>=f v3,
            c>=b v4, c>=d v5, c>=f v6,
            e>=b v7, e>=d v8, e>=f v9,
-           g>=b v10, g>=d v11, g>=f v12
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
   INTO test24p
   FROM rt_int
  WHERE id % 6 = 4;
@@ -427,14 +429,14 @@ EXPLAIN (costs off, verbose)
 SELECT id, a<=b v1, a<=d v2, a<=f v3,
            c<=b v4, c<=d v5, c<=f v6,
            e<=b v7, e<=d v8, e<=f v9,
-           g<=b v10, g<=d v11, g<=f v12
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
   INTO test25g
   FROM rt_int
  WHERE id % 6 = 5;
 SELECT id, a<=b v1, a<=d v2, a<=f v3,
            c<=b v4, c<=d v5, c<=f v6,
            e<=b v7, e<=d v8, e<=f v9,
-           g<=b v10, g<=d v11, g<=f v12
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
   INTO test25g
   FROM rt_int
  WHERE id % 6 = 5;
@@ -442,7 +444,7 @@ SET pg_strom.enabled = off;
 SELECT id, a<=b v1, a<=d v2, a<=f v3,
            c<=b v4, c<=d v5, c<=f v6,
            e<=b v7, e<=d v8, e<=f v9,
-           g<=b v10, g<=d v11, g<=f v12
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
   INTO test25p
   FROM rt_int
  WHERE id % 6 = 5;
