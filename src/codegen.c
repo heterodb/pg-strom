@@ -1127,8 +1127,8 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "int2 int2(float4)",  1, "f:to_int2" },
 	{ NULL,    "int2 int2(float8)",  1, "f:to_int2" },
 
-	{ PGSTROM, "int4 int4(bool)",    1, "f:to_int4" },
-	{ NULL,    "int4 int4(int1)",    1, "f:to_int4" },
+	{ NULL,	   "int4 int4(bool)",    1, "f:to_int4" },
+	{ PGSTROM, "int4 int4(int1)",    1, "f:to_int4" },
 	{ NULL,    "int4 int4(int2)",    1, "f:to_int4" },
 	{ NULL,    "int4 int4(int8)",    1, "f:to_int4" },
 	{ PGSTROM, "int4 int4(float2)",  1, "f:to_int4" },
