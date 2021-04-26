@@ -1159,6 +1159,21 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		context->extra_sz += MAXALIGN(extra_sz);
 		return false;
 	}
+	else if (IsA(node, BoolExpr) ||
+			 IsA(node, CoalesceExpr) ||
+			 IsA(node, MinMaxExpr) ||
+			 IsA(node, CaseExpr) ||
+			 IsA(node, ScalarArrayOpExpr))
+	{
+		/*
+		 * The above expressions are often used to avoid run-time errors,
+		 * like division-by-zero or result-out-of-range. Thus, if we try
+		 * to calculate a part of expression on the device preliminary,
+		 * it can lead undesired behavior.
+		 * We stop walking down into the expression above any more.
+		 */
+		return true;
+	}
 	/* walks down if expression is host-only */
 	return expression_tree_walker(node, build_gpuscan_projection_walker,
 								  context);
