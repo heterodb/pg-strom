@@ -1369,6 +1369,7 @@ pgfn_float8div(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 		return result;												\
 	}
 
+BASIC_INT_MODFUNC_TEMPLATE(int1mod, int1)
 BASIC_INT_MODFUNC_TEMPLATE(int2mod, int2)
 BASIC_INT_MODFUNC_TEMPLATE(int4mod, int4)
 BASIC_INT_MODFUNC_TEMPLATE(int8mod, int8)
