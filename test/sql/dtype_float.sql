@@ -33,7 +33,7 @@ INSERT INTO rt_float (
             pgstrom.random_int(0, -32000, 32000)
     FROM generate_series(1,2000) x);
 ALTER TABLE rt_float ADD p int1;
- UPDATE rt_float SET p=((id-1)%256-128);
+UPDATE rt_float SET p=(id%256-128);
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
 -- not to print kernel source code
