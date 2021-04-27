@@ -120,7 +120,8 @@ kern_gpucache_init_empty(kern_data_store *kds,
 	{
 		kds->nitems = 0;
 
-		extra->usage = offsetof(kern_data_extra, data);
+		if (extra)
+			extra->usage = offsetof(kern_data_extra, data);
 
 		rowhash->magic  = KERN_GPUCACHE_ROWHASH_MAGIC;
 		rowhash->nslots = nslots;
