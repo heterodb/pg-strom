@@ -51,6 +51,7 @@ GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
 GPU_CACHE_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.fatbin
+GPU_CACHE_DEBUG_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.gfatbin
 
 # 32k / 128 = 256 threads per SM
 MAXREGCOUNT := 128
@@ -190,7 +191,7 @@ PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 endif
 # build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
-PGSTROM_FLAGS += -g -O0
+PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
 endif
 # support of NVIDIA GPUDirect Storage (BETA)
 WITH_CUFILE := $(shell test -e $(LPATH)/cufile.h && echo 1 || echo 0)
@@ -226,7 +227,8 @@ else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
 else
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
 endif
-NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
+NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug \
+                    -DPGSTROM_DEBUG_BUILD=1
 
 #
 # Definition of PG-Strom Extension
@@ -237,7 +239,8 @@ OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
        $(STROM_BUILD_ROOT)/src/cuda_codegen.h
-DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GPU_CACHE_FATBIN)
+DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) \
+             $(GPU_CACHE_FATBIN) $(GPU_CACHE_DEBUG_FATBIN)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -282,11 +285,11 @@ endif
 # GPU Libraries
 #
 $(GPU_CACHE_FATBIN): $(GPU_CACHE_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
+	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
+$(GPU_CACHE_DEBUG_FATBIN): $(GPU_CACHE_DEBUG_FATBIN:.gfatbin=.cu) $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
-
 %.fatbin:  %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=true -o $@ $<
-
 %.gfatbin: %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=true -o $@ $<
 

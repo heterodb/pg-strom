@@ -137,7 +137,8 @@ struct GpuCacheState
 };
 
 /* --- static variables --- */
-static char		   *pgstrom_gpucache_auto_preload;	/* GUC */
+static char		   *pgstrom_gpucache_auto_preload;		/* GUC */
+static bool			pgstrom_gpucache_use_debug_kernel;	/* GUC */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
 static HTAB		   *gcache_signatures_htab = NULL;
@@ -2314,13 +2315,18 @@ gpuCacheInvokeDropUnload(GpuCacheSharedState *gc_sstate, bool is_async)
 static CUresult
 __gpuCacheLoadCudaModule(void)
 {
-	const char	   *path = PGSHAREDIR "/pg_strom/cuda_gcache.fatbin";
+	const char	   *path;
 	int				rawfd = -1;
 	struct stat		stat_buf;
 	ssize_t			nbytes;
 	char		   *image;
 	CUresult		rc = CUDA_ERROR_SYSTEM_NOT_READY;
 	CUmodule		cuda_module = NULL;
+
+	if (!pgstrom_gpucache_use_debug_kernel)
+		path = PGSHAREDIR "/pg_strom/cuda_gcache.fatbin";
+	else
+		path = PGSHAREDIR "/pg_strom/cuda_gcache.gfatbin";
 
 	rawfd = open(path, O_RDONLY);
 	if (rawfd < 0)
@@ -2636,6 +2642,10 @@ static inline CUresult
 gpuCacheBgWorkerExecCompaction(GpuCacheSharedState *gc_sstate)
 {
 	CUresult	rc;
+
+	rc = gpuCacheLoadCudaModule();
+	if (rc != CUDA_SUCCESS)
+		return rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
 	rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
@@ -3435,7 +3445,15 @@ pgstrom_init_gpu_cache(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
-
+	/* GUC: pg_strom.gpucache_use_debug_kernel */
+	DefineCustomBoolVariable("pg_strom.gpucache_use_debug_kernel",
+							 "Use gpucache kernel built with debug options",
+							 NULL,
+							 &pgstrom_gpucache_use_debug_kernel,
+							 false,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = offsetof(GpuCacheDesc, signature) + sizeof(Datum);

@@ -248,14 +248,14 @@ __gcache_alloc_rowid(kern_data_store *kds,
 		   rowhash->slots[hindex].rowid <  rowhash->nrooms);
 	rowmap[rowid] = rowhash->slots[hindex].rowid;
 	rowhash->slots[hindex].rowid = rowid;
-
+#ifdef PGSTROM_DEBUG_BUILD
 	printf("gid=%u rowid=%u allocated for ctid=(%u,%u)\n",
 		   get_global_id(),
 		   rowid,
 		   (cl_uint)t_ctid->ip_blkid.bi_hi << 16 |
 		   (cl_uint)t_ctid->ip_blkid.bi_lo,
 		   (cl_uint)t_ctid->ip_posid);
-	
+#endif
 	*found = false;
 out_unlock:
 	*p_rowid = rowid;
@@ -614,9 +614,6 @@ __gpucache_release_rowid(kern_data_store *kds,
 	cl_uint	   *prev;
 	cl_uint		curval;
 
-	cl_uint		next;
-	cl_uint		lval __attribute__((unused));
-
 	/* lock and lookup the hash-slot */
 	hindex = gpucache_ctid_hash(&x_log->ctid) % rowhash->nslots;
 	if (atomicCAS(&rowhash->slots[hindex].lock,
@@ -644,12 +641,13 @@ __gpucache_release_rowid(kern_data_store *kds,
 			} while (atomicCAS(&rowhash->freelist,
 							   curval,
 							   rowid) != rowid);
-
+#ifdef PGSTROM_DEBUG_BUILD
 			printf("__gpucache: rowid=%u ctid=(%u,%u) released\n",
 				   rowid,
 				   (cl_uint)x_log->ctid.ip_blkid.bi_hi << 16 |
 				   (cl_uint)x_log->ctid.ip_blkid.bi_lo,
 				   (cl_uint)x_log->ctid.ip_posid);
+#endif
 			goto out_unlock;
 		}
 	}
