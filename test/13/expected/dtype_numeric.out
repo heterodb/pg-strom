@@ -38,6 +38,8 @@ INSERT INTO rt_numeric (
             pgstrom.random_int(1, -2000000000,
                                    2000000000)::numeric / 1000::numeric
     FROM generate_series(1,3000) x);
+ALTER TABLE rt_numeric ADD p int1;
+UPDATE rt_numeric SET p=((id-1)%256-128);
 VACUUM ANALYZE;
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
@@ -47,26 +49,26 @@ SET pg_strom.debug_kernel_source = off;
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01g
   FROM rt_numeric
  WHERE id > 0;
-                                                                                      QUERY PLAN                                                                                       
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                   QUERY PLAN                                                                                                   
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_numeric_temp.rt_numeric
-   Output: id, ((a)::numeric), ((b)::numeric), ((c)::numeric), ((d)::numeric), ((e)::numeric), ((f)::numeric)
-   GPU Projection: rt_numeric.id, (rt_numeric.a)::numeric, (rt_numeric.b)::numeric, (rt_numeric.c)::numeric, (rt_numeric.d)::numeric, (rt_numeric.e)::numeric, (rt_numeric.f)::numeric
+   Output: id, ((a)::numeric), ((b)::numeric), ((c)::numeric), ((d)::numeric), ((e)::numeric), ((f)::numeric), ((p)::numeric)
+   GPU Projection: rt_numeric.id, (rt_numeric.a)::numeric, (rt_numeric.b)::numeric, (rt_numeric.c)::numeric, (rt_numeric.d)::numeric, (rt_numeric.e)::numeric, (rt_numeric.f)::numeric, (rt_numeric.p)::numeric
    GPU Filter: (rt_numeric.id > 0)
 (4 rows)
 
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01g
   FROM rt_numeric
  WHERE id > 0;
 SET pg_strom.enabled = off;
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01p
   FROM rt_numeric
  WHERE id > 0;
@@ -78,33 +80,36 @@ SELECT g.*, p.*
     OR @(g.d - p.d) > 0.5
     OR @(g.e - p.e) > 0.1
     OR @(g.f - p.f) > 0.01;
- id | a | b | c | d | e | f | id | a | b | c | d | e | f 
-----+---+---+---+---+---+---+----+---+---+---+---+---+---
+ id | a | b | c | d | e | f | p | id | a | b | c | d | e | f | p 
+----+---+---+---+---+---+---+---+----+---+---+---+---+---+---+---
 (0 rows)
 
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02g
   FROM rt_numeric
  WHERE id > 0;
-                                                                                         QUERY PLAN                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                           QUERY PLAN                                                                                                                                                           
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_numeric_temp.rt_numeric
-   Output: id, ((x)::smallint), ((y)::integer), ((z)::bigint), ((x)::float2), ((y)::real), ((z)::double precision)
-   GPU Projection: rt_numeric.id, (rt_numeric.x)::smallint, (rt_numeric.y)::integer, (rt_numeric.z)::bigint, (rt_numeric.x)::float2, (rt_numeric.y)::real, (rt_numeric.z)::double precision
+   Output: id, ((x)::smallint), ((y)::integer), ((z)::bigint), ((x)::float2), ((y)::real), ((z)::double precision), (CASE WHEN ((x >= '-128'::numeric) AND (x <= '127'::numeric)) THEN ((x)::int1)::integer ELSE 0 END)
+   GPU Projection: rt_numeric.id, (rt_numeric.x)::smallint, (rt_numeric.y)::integer, (rt_numeric.z)::bigint, (rt_numeric.x)::float2, (rt_numeric.y)::real, (rt_numeric.z)::double precision, CASE WHEN ((rt_numeric.x >= '-128'::numeric) AND (rt_numeric.x <= '127'::numeric)) THEN ((rt_numeric.x)::int1)::integer ELSE 0 END
    GPU Filter: (rt_numeric.id > 0)
 (4 rows)
 
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02g
   FROM rt_numeric
  WHERE id > 0;
 SET pg_strom.enabled = off;
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02p
   FROM rt_numeric
  WHERE id > 0;
@@ -116,9 +121,9 @@ SELECT g.*, p.*
     OR @(g.f2 - p.f2) > 0.01
     OR @(g.f4 - p.f4) > 0.01
     OR @(g.f8 - p.f8) > 0.01;
-  id  |  i2   |   i4    |   i8    |  f2   |      f4       |        f8         |  id  |  i2   |   i4    |   i8    |  f2   |      f4       |     f8      
-------+-------+---------+---------+-------+---------------+-------------------+------+-------+---------+---------+-------+---------------+-------------
- 2752 | -9076 | 1301522 | -697650 | -9080 | 1.3015225e+06 | -697649.757999999 | 2752 | -9076 | 1301522 | -697650 | -9072 | 1.3015225e+06 | -697649.758
+  id  |  i2   |   i4    |   i8    |  f2   |      f4       |        f8         | i1 |  id  |  i2   |   i4    |   i8    |  f2   |      f4       |     f8      | i1 
+------+-------+---------+---------+-------+---------------+-------------------+----+------+-------+---------+---------+-------+---------------+-------------+----
+ 2752 | -9076 | 1301522 | -697650 | -9080 | 1.3015225e+06 | -697649.757999999 |  0 | 2752 | -9076 | 1301522 | -697650 | -9072 | 1.3015225e+06 | -697649.758 |  0
 (1 row)
 
 -- numeric operators
