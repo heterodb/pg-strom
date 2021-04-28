@@ -131,7 +131,7 @@ kern_gpucache_init_empty(kern_data_store *kds,
 	/* setup rowhash */
 	for (index = get_global_id(); index < nslots; index += get_global_size())
 	{
-		rowhash->slots[index].lock = 0;
+		rowhash->slots[index].lock  = UINT_MAX;	/* unlocked */
 		rowhash->slots[index].rowid = UINT_MAX;
 	}
 	/* setup rowmap */
@@ -202,7 +202,9 @@ __gcache_alloc_rowid(kern_data_store *kds,
 
 	/* lookup hash slot */
 	hindex = gpucache_ctid_hash(t_ctid) % rowhash->nslots;
-	if (atomicCAS(&rowhash->slots[hindex].lock, 0, 1) != 1)
+	if (atomicCAS(&rowhash->slots[hindex].lock,
+				  UINT_MAX,
+				  get_global_id()) != UINT_MAX)
 		return false;	/* try again */
 
 	for (rowid = rowhash->slots[hindex].rowid;
@@ -257,8 +259,8 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	*found = false;
 out_unlock:
 	*p_rowid = rowid;
-	curval = atomicExch(&rowhash->slots[hindex].lock, 0);
-	assert(curval == 1);
+	curval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
+	assert(curval == get_global_id());
 
 	return true;
 }
@@ -610,11 +612,16 @@ __gpucache_release_rowid(kern_data_store *kds,
 	cl_uint		hindex;
 	cl_uint		rowid;
 	cl_uint	   *prev;
+	cl_uint		curval;
+
 	cl_uint		next;
+	cl_uint		lval __attribute__((unused));
 
 	/* lock and lookup the hash-slot */
 	hindex = gpucache_ctid_hash(&x_log->ctid) % rowhash->nslots;
-	if (atomicCAS(&rowhash->slots[hindex].lock, 0, 1) != 1)
+	if (atomicCAS(&rowhash->slots[hindex].lock,
+				  UINT_MAX,
+				  get_global_id()) != UINT_MAX)
 		return false;		/* try again */
 
 	for (prev = &rowhash->slots[hindex].rowid, rowid = *prev;
@@ -632,9 +639,11 @@ __gpucache_release_rowid(kern_data_store *kds,
 			*prev = rowmap[rowid];
 			/* attach rowid to the freelist */
 			do {
-				next = rowhash->freelist;
-				rowmap[rowid] = next;
-			} while (atomicCAS(&rowhash->freelist, next, rowid) != rowid);
+				curval = rowhash->freelist;
+				rowmap[rowid] = curval;
+			} while (atomicCAS(&rowhash->freelist,
+							   curval,
+							   rowid) != rowid);
 
 			printf("__gpucache: rowid=%u ctid=(%u,%u) released\n",
 				   rowid,
@@ -650,8 +659,8 @@ __gpucache_release_rowid(kern_data_store *kds,
 		   (cl_uint)x_log->ctid.ip_blkid.bi_lo,
 		   (cl_uint)x_log->ctid.ip_posid);
 out_unlock:
-	next = atomicExch(&rowhash->slots[hindex].lock, 0);
-	assert(next == 1);
+	curval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
+	assert(curval == get_global_id());
 
 	return true;
 }
