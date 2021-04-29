@@ -213,18 +213,21 @@ typedef struct
 } GpuCacheOptions;
 
 static bool
-__parseSyncTriggerOptions(char *config, GpuCacheOptions *gc_options)
+__parseSyncTriggerOptions(const char *__config, GpuCacheOptions *gc_options)
 {
 	int			cuda_dindex = 0;				/* default: GPU0 */
 	int			gpu_sync_interval = 5000000L;	/* default: 5sec = 5000000us */
 	ssize_t		gpu_sync_threshold = -1;		/* default: auto */
 	int64		max_num_rows = (10UL << 20);	/* default: 10M rows */
 	ssize_t		redo_buffer_size = (160UL << 20);	/* default: 160MB */
+	char	   *config;
 	char	   *key, *value;
 	char	   *saved;
 
-	if (!config)
+	if (!__config)
 		goto out;
+	config = alloca(strlen(__config) + 1);
+	strcpy(config, __config);
 
 	for (key = strtok_r(config, ",", &saved);
 		 key != NULL;
