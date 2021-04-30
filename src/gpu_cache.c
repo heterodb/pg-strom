@@ -1343,9 +1343,11 @@ lookupGpuCacheDesc(Relation rel)
 	hkey.database_oid = MyDatabaseId;
 	hkey.table_oid = RelationGetRelid(rel);
 	hkey.signature = gpuCacheTableSignature(rel, &gc_options);
-	hkey.xid = GetCurrentTransactionIdIfAny();
-	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
+	if (hkey.signature == 0UL)
 		return NULL;
+	hkey.xid = GetCurrentTransactionId();
+	Assert(TransactionIdIsValid(hkey.xid));
+
 	gc_desc = hash_search(gcache_descriptors_htab,
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
@@ -1384,9 +1386,11 @@ lookupGpuCacheDescNoLoad(Oid database_oid,
 	hkey.database_oid = database_oid;
 	hkey.table_oid = table_oid;
 	hkey.signature = signature;
-	hkey.xid = GetCurrentTransactionIdIfAny();
-	if (hkey.signature == 0UL || hkey.xid == InvalidTransactionId)
+	if (hkey.signature == 0UL)
 		return NULL;
+	hkey.xid = GetCurrentTransactionIdIfAny();
+	Assert(TransactionIdIsValid(hkey.xid));
+
 	gc_desc = hash_search(gcache_descriptors_htab,
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
@@ -1718,6 +1722,7 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 	Relation		relation = ss->ss_currentRelation;
 	GpuCacheDesc   *gc_desc;
 	GpuCacheState  *gcache_state;
+	bool			gcache_is_empty = false;
 	uint64			sync_pos = ULONG_MAX;
 
 	if (!relation)
@@ -1735,11 +1740,25 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
 
 		SpinLockAcquire(&gc_sstate->redo_lock);
-		if (gc_sstate->redo_sync_pos < gc_sstate->redo_write_pos)
+		if (gc_sstate->redo_write_pos == 0)
+			gcache_is_empty = true;
+		else if (gc_sstate->redo_sync_pos < gc_sstate->redo_write_pos)
 			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 		SpinLockRelease(&gc_sstate->redo_lock);
-		if (sync_pos != ULONG_MAX)
+		if (gcache_is_empty)
+		{
+			/*
+			 * redo_write_pos == 0 meand the target table is empty, thus
+			 * initial-loading didn't load any records to GPU memory.
+			 * So, we can skip it.
+			 */
+			pfree(gcache_state);
+			gcache_state = NULL;
+		}
+		else if (sync_pos != ULONG_MAX)
+		{
 			gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
+		}
 	}
 	return gcache_state;
 }
@@ -1855,7 +1874,7 @@ gpuCacheMapDeviceMemory(GpuContext *gcontext,
 	GpuCacheSharedState *gc_sstate = pds->gc_sstate;
 	CUdeviceptr	m_kds_main = 0UL;
 	CUdeviceptr	m_kds_extra = 0UL;
-	CUresult	rc;
+	CUresult	rc = CUDA_ERROR_NOT_MAPPED;
 
 	Assert(pds->kds.format == KDS_FORMAT_COLUMN);
 	pthreadRWLockReadLock(&gc_sstate->gpu_buffer_lock);
@@ -1866,26 +1885,26 @@ gpuCacheMapDeviceMemory(GpuContext *gcontext,
 								 gc_sstate->gpu_main_mhandle,
 								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
 		if (rc != CUDA_SUCCESS)
-			goto error_1;
+			goto out_unlock;
+
+		if (gc_sstate->gpu_extra_devptr != 0UL)
+		{
+			rc = gpuIpcOpenMemHandle(gcontext,
+									 &m_kds_extra,
+									 gc_sstate->gpu_extra_mhandle,
+									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuIpcCloseMemHandle(gcontext, m_kds_main);
+				goto out_unlock;
+			}
+		}
+		pds->m_kds_main  = m_kds_main;
+		pds->m_kds_extra = m_kds_extra;
+
+		return CUDA_SUCCESS;
 	}
-
-	if (gc_sstate->gpu_extra_devptr != 0UL)
-	{
-		rc = gpuIpcOpenMemHandle(gcontext,
-								 &m_kds_extra,
-								 gc_sstate->gpu_extra_mhandle,
-								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			goto error_2;
-	}
-	pds->m_kds_main  = m_kds_main;
-	pds->m_kds_extra = m_kds_extra;
-
-	return CUDA_SUCCESS;
-
-error_2:
-	gpuIpcCloseMemHandle(gcontext, m_kds_main);
-error_1:
+out_unlock:
 	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 	return rc;
 }
