@@ -681,7 +681,6 @@ GpuContextWorkerMain(void *arg)
 	dlist_node	   *dnode;
 	GpuTask		   *gtask;
 	CUresult		rc;
-	bool			is_wakeup;
 
 	/* setup worker index */
 	GpuWorkerIndex = pg_atomic_fetch_add_u32(&gcontext->worker_index, 1);
@@ -705,127 +704,139 @@ GpuContextWorkerMain(void *arg)
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuEventCreate: %s", errorText(rc));
 
-		while (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
+		for (;;)
 		{
 			GpuTaskState *gts;
 			CUmodule	cuda_module;
 			cl_int		retval;
+			bool		is_wakeup;
 
 			pthreadMutexLock(&gcontext->worker_mutex);
+			/* workers are required to terminate, so exit */
+			if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
+			{
+				pthreadMutexUnlock(&gcontext->worker_mutex);
+				break;
+			}
+
+			/* here is no pending GpuTask, so sleep for a while */
 			if (dlist_is_empty(&gcontext->pending_tasks))
 			{
 				is_wakeup = pthreadCondWaitTimeout(&gcontext->worker_cond,
 												   &gcontext->worker_mutex,
-												   3000);
+												   3000L);
 				pthreadMutexUnlock(&gcontext->worker_mutex);
 				if (!is_wakeup)
 				{
 					/*
 					 * Once GPU related tasks get idle for a certain duration
-					 * (4s), we assume GPU device memory can be released
+					 * (3s), we assume GPU device memory can be released
 					 * prior to query execution end. Likely, workloads are
 					 * moved to CPU or I/O intensive portion.
 					 */
 					pthreadCondSignal(&gcontext->worker_cond);
 					gpuMemReclaimSegment(gcontext);
 				}
+				continue;
+			}
+
+			/* ok, dispatch a GpuTask in the head of pending-queue */
+			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
+			gtask = dlist_container(GpuTask, chain, dnode);
+			pthreadMutexUnlock(&gcontext->worker_mutex);
+
+			gts = gtask->gts;
+			cuda_module = GpuContextLookupModule(gcontext,
+												 gtask->program_id);
+		retry_gputask:
+			/*
+			 * gts->cb_process_task shall return the following status:
+			 *
+			 *  0 : GpuTask gets completed successfully, then task
+			 *      object shall be backed to the backend.
+			 * >0 : Unable to launch GpuTask due to lack of GPU's
+			 *      resource. It shall be retried after a short wait.
+			 * <0 : GpuTask gets completed successfully, and the
+			 *      handler wants to release GpuTask immediately.
+			 */
+			retval = gts->cb_process_task(gtask, cuda_module);
+			if (retval > 0)
+			{
+				pg_usleep(20000L);		/* 20ms */
+				pthreadMutexLock(&gcontext->worker_mutex);
+				if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
+				{
+					/* urgent bailout if GpuContext is shutting down. */
+					dlist_push_tail(&gcontext->pending_tasks,
+									&gtask->chain);
+					gts->num_running_tasks--;
+					pthreadMutexUnlock(&gcontext->worker_mutex);
+					break;
+				}
+				/* elsewhere, try again */
+				pthreadMutexUnlock(&gcontext->worker_mutex);
+				goto retry_gputask;
+			}
+			else if (gtask->kerror.errcode != ERRCODE_STROM_SUCCESS)
+			{
+				/* GPU kernel completed with error status */
+				GpuContextWorkerReportError(
+					ERROR,
+					gtask->kerror.errcode & ~ERRCODE_FLAGS_CPU_FALLBACK,
+					gtask->kerror.filename,
+					gtask->kerror.lineno,
+					gtask->kerror.funcname,
+					"GPU kernel: %s",
+					gtask->kerror.message);
+			}
+			else if (retval == 0)
+			{
+				/* Back GpuTask to GTS */
+				pthreadMutexLock(&gcontext->worker_mutex);
+				dlist_push_tail(&gts->ready_tasks,
+								&gtask->chain);
+				gts->num_running_tasks--;
+				gts->num_ready_tasks++;
+				pthreadMutexUnlock(&gcontext->worker_mutex);
+
+				SetLatch(MyLatch);
 			}
 			else
 			{
-				dnode = dlist_pop_head_node(&gcontext->pending_tasks);
-				gtask = dlist_container(GpuTask, chain, dnode);
-				pthreadMutexUnlock(&gcontext->worker_mutex);
-
-				gts = gtask->gts;
-				cuda_module = GpuContextLookupModule(gcontext,
-													 gtask->program_id);
-			retry_gputask:
 				/*
-				 * pgstromProcessGpuTask() returns the following status:
+				 * XXX - Anyone still use this logic for cleanup?
 				 *
-				 *  0 : GpuTask gets completed successfully, then task
-				 *      object shall be backed to the backend.
-				 * >0 : Unable to launch GpuTask due to lack of GPU's
-				 *      resource. It shall be retried after a short wait.
-				 * <0 : GpuTask gets completed successfully, and the
-				 *      handler wants to release GpuTask immediately.
+				 * Release GpuTask immediately, expect for the case
+				 * when GpuTask returned -2 and it is the last one,
+				 * to give the chance to release resources.
 				 */
-				retval = gts->cb_process_task(gtask, cuda_module);
-				if (retval > 0)
+				pthreadMutexLock(&gcontext->worker_mutex);
+				if (--gts->num_running_tasks == 0 &&
+					retval == -2 &&
+					gts->scan_done)
 				{
-					/* wait for 40ms */
-					pg_usleep(40000L);
-					if (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
-						goto retry_gputask;
-					else
-					{
-						/*
-						 * urgent bailout if GpuContext is shutting down.
-						 */
-						pthreadMutexLock(&gcontext->worker_mutex);
-						dlist_push_tail(&gcontext->pending_tasks,
-										&gtask->chain);
-						gts->num_running_tasks--;
-						pthreadMutexUnlock(&gcontext->worker_mutex);
-					}
-				}
-				else if (gtask->kerror.errcode != ERRCODE_STROM_SUCCESS)
-				{
-					/* GPU kernel completed with error status */
-					GpuContextWorkerReportError(
-						ERROR,
-						gtask->kerror.errcode & ~ERRCODE_FLAGS_CPU_FALLBACK,
-						gtask->kerror.filename,
-						gtask->kerror.lineno,
-						gtask->kerror.funcname,
-						"GPU kernel: %s",
-						gtask->kerror.message);
-				}
-				else if (retval == 0)
-				{
-					/* Back GpuTask to GTS */
-					pthreadMutexLock(&gcontext->worker_mutex);
 					dlist_push_tail(&gts->ready_tasks,
 									&gtask->chain);
-					gts->num_running_tasks--;
 					gts->num_ready_tasks++;
 					pthreadMutexUnlock(&gcontext->worker_mutex);
-
-					SetLatch(MyLatch);
 				}
 				else
 				{
-					/*
-					 * Release GpuTask immediately, expect for the last
-					 * GpuTask when retval==-2.
-					 */
-					pthreadMutexLock(&gcontext->worker_mutex);
-					if (--gts->num_running_tasks == 0 &&
-						retval == -2 &&
-						gts->scan_done)
-					{
-						wnotice("last one task");
-						dlist_push_tail(&gts->ready_tasks,
-										&gtask->chain);
-						gts->num_ready_tasks++;
-						pthreadMutexUnlock(&gcontext->worker_mutex);
-					}
-					else
-					{
-						pthreadMutexUnlock(&gcontext->worker_mutex);
+					pthreadMutexUnlock(&gcontext->worker_mutex);
 
-						gts->cb_release_task(gtask);
-					}
-					SetLatch(MyLatch);
+					gts->cb_release_task(gtask);
 				}
+				SetLatch(MyLatch);
 			}
 		}
 	}
 	STROM_CATCH();
 	{
 		/* Wake up and terminate other workers also */
+		pthreadMutexLock(&gcontext->worker_mutex);
 		pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 		pthreadCondBroadcast(&gcontext->worker_cond);
+		pthreadMutexUnlock(&gcontext->worker_mutex);
 		SetLatch(MyLatch);
 	}
 	STROM_END_TRY();
@@ -1087,8 +1098,10 @@ SynchronizeGpuContext(GpuContext *gcontext)
 		return;
 
 	/* signal to terminate all workers */
+	pthreadMutexLock(&gcontext->worker_mutex);
 	pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 	pthreadCondBroadcast(&gcontext->worker_cond);
+	pthreadMutexUnlock(&gcontext->worker_mutex);
 
 	/* wait for completion of the worker threads */
 	for (i=0; i < gcontext->num_workers; i++)
