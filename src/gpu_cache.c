@@ -1509,7 +1509,7 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		append_done = true;
 	skip:
 		/* 25% of REDO buffer is in-use. Async kick of GPU kernel */
-		if (gc_sstate->redo_write_pos > (gc_sstate->redo_read_pos +
+		if (gc_sstate->redo_write_pos > (gc_sstate->redo_sync_pos +
 										 gc_sstate->gpu_sync_threshold))
 		{
 			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
@@ -1748,7 +1748,7 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 		if (gcache_is_empty)
 		{
 			/*
-			 * redo_write_pos == 0 meand the target table is empty, thus
+			 * redo_write_pos == 0 means the target table is empty, thus
 			 * initial-loading didn't load any records to GPU memory.
 			 * So, we can skip it.
 			 */
@@ -2102,7 +2102,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 static void
 gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
+	//elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
 	gpuCacheTableSignatureInvalidation(relid);
 }
 
@@ -2752,6 +2752,8 @@ __gpuCacheSetupRedoLogBuffer(GpuCacheSharedState *gc_sstate, uint64 end_pos,
 	SpinLockAcquire(&gc_sstate->redo_lock);
 	gc_sstate->redo_read_nitems += nitems;
 	gc_sstate->redo_read_pos = tail_pos;
+	if (gc_sstate->redo_sync_pos < tail_pos)
+		gc_sstate->redo_sync_pos = tail_pos;
 	SpinLockRelease(&gc_sstate->redo_lock);
 
 	if (index == 0)
@@ -2994,12 +2996,13 @@ gpuCacheBgWorkerDispatch(int cuda_dindex)
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-		
+#ifdef PGSTROM_DEBUG_BUILD
 		elog(LOG, "gpucache: (cmd=%c, key=%s:%lx) rc=%d",
 			 cmd->command,
 			 gc_sstate->table_name,
 			 gc_sstate->signature,
 			 (int)rc);
+#endif
 		putGpuCacheSharedState(gc_sstate, false);
 	}
 	/* return the result */

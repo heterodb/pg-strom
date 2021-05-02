@@ -356,6 +356,22 @@ __Fetch(const T *ptr)
 #define __Fetch(PTR)			(*(PTR))
 #endif	/* !__CUDA_ARCH__ */
 
+#ifdef __CUDA_ARCH__
+template <typename T>
+DEVICE_INLINE(T)
+__volatileRead(const volatile T *ptr)
+{
+	return *ptr;
+}
+
+template <typename T>
+DEVICE_INLINE(void)
+__volatileWrite(volatile T *ptr, T val)
+{
+	*ptr = val;
+}
+#endif
+
 /*
  * Error code definition
  *
@@ -575,7 +591,7 @@ typedef struct {
 	cl_ushort		ip_posid;
 } ItemPointerData;
 
-STATIC_FUNCTION(cl_bool)
+DEVICE_INLINE(cl_bool)
 ItemPointerEquals(ItemPointerData *ip1, ItemPointerData *ip2)
 {
 	return (ip1->ip_blkid.bi_hi == ip2->ip_blkid.bi_hi &&

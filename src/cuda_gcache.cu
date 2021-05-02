@@ -99,10 +99,10 @@ kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
 	return NULL;
 }
 
-#define DECL_ROWID_HASH_AND_MAP(kds)								\
+#define DECL_ROWID_HASH_AND_MAP(KDS)								\
 	kern_gpucache_rowhash *rowhash =								\
-		(kern_gpucache_rowhash *)((char *)(kds) + (kds)->length);	\
-	cl_uint	   *rowmap = (cl_uint *)(&rowhash->slots[(kds)->nslots])
+		(kern_gpucache_rowhash *)((char *)(KDS) + (KDS)->length);	\
+	cl_uint *rowmap = (cl_uint *)(&rowhash->slots[(KDS)->nslots])
 
 /*
  * kern_gpucache_initialize_empty
@@ -187,6 +187,15 @@ gpucache_lookup_rowid_nolock(kern_data_store *kds,
 
 /*
  * __gcache_alloc_rowid
+ *
+ * NOTE: See the chapter of "Volatile Qualifier" in the CUDA C++ Programming Guide.
+ * It says that the compiler is free to optimize reads and writes to global or
+ * shared memory, thus, memory access without volatile qualifier might not be
+ * visible to other threads. Thus, we explicitly puts volatile access macros to
+ * reference or modify the rowid hash-list to ensure the changes are visible to
+ * any other concurrent threads.
+ * Also, __threadfence() prior to the unlock makes any changes (including writes
+ * without volatile qualifier) visible to other concurrent threads.
  */
 STATIC_FUNCTION(cl_bool)
 __gcache_alloc_rowid(kern_data_store *kds,
@@ -197,8 +206,8 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	GpuCacheSysattr *sysattr;
 	cl_uint		hindex;
 	cl_uint		rowid;
-	cl_uint		newval;
-	cl_uint		curval;
+	cl_uint		next;
+	cl_uint		lval __attribute__((unused));
 
 	/* lookup hash slot */
 	hindex = gpucache_ctid_hash(t_ctid) % rowhash->nslots;
@@ -207,9 +216,9 @@ __gcache_alloc_rowid(kern_data_store *kds,
 				  get_global_id()) != UINT_MAX)
 		return false;	/* try again */
 
-	for (rowid = rowhash->slots[hindex].rowid;
+	for (rowid = __volatileRead(&rowhash->slots[hindex].rowid);
 		 rowid != UINT_MAX;
-		 rowid = rowmap[rowid])
+		 rowid = __volatileRead(&rowmap[rowid]))
 	{
 		assert(rowid < rowhash->nrooms);
 		sysattr = kds_get_column_sysattr(kds, rowid);
@@ -223,7 +232,7 @@ __gcache_alloc_rowid(kern_data_store *kds,
 
 	/* not found, so try to allocate a new one */
 	do {
-		rowid = rowhash->freelist;
+		rowid = __volatileRead(&rowhash->freelist);
 		if (rowid == UINT_MAX)
 		{
 			/* no more free rowid */
@@ -231,11 +240,11 @@ __gcache_alloc_rowid(kern_data_store *kds,
 			goto out_unlock;
 		}
 		assert(rowid < rowhash->nrooms);
-		newval = rowmap[rowid];
-		assert(newval == UINT_MAX ||
-			   newval <  rowhash->nrooms);
-		curval = atomicCAS(&rowhash->freelist, rowid, newval);
-	} while (curval != rowid);
+		next = __volatileRead(&rowmap[rowid]);
+		assert(next == UINT_MAX || next <  rowhash->nrooms);
+	} while (atomicCAS(&rowhash->freelist,
+					   rowid,
+					   next) != rowid);
 
 	/* ok, rowid (a new row) was successfull allocated */
 	sysattr = kds_get_column_sysattr(kds, rowid);
@@ -244,10 +253,10 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	sysattr->owner_id = 0;
 	memcpy(&sysattr->ctid, t_ctid, sizeof(ItemPointerData));
 
-	assert(rowhash->slots[hindex].rowid == UINT_MAX ||
-		   rowhash->slots[hindex].rowid <  rowhash->nrooms);
-	rowmap[rowid] = rowhash->slots[hindex].rowid;
-	rowhash->slots[hindex].rowid = rowid;
+	next = __volatileRead(&rowhash->slots[hindex].rowid);
+	assert(next == UINT_MAX || next < rowhash->nrooms);
+	__volatileWrite(&rowmap[rowid], next);
+	__volatileWrite(&rowhash->slots[hindex].rowid, rowid);
 #ifdef PGSTROM_DEBUG_BUILD
 	printf("gid=%u rowid=%u allocated for ctid=(%u,%u)\n",
 		   get_global_id(),
@@ -259,8 +268,9 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	*found = false;
 out_unlock:
 	*p_rowid = rowid;
-	curval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
-	assert(curval == get_global_id());
+	__threadfence();
+	lval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
+	assert(lval == get_global_id());
 
 	return true;
 }
@@ -611,8 +621,9 @@ __gpucache_release_rowid(kern_data_store *kds,
 	GpuCacheSysattr *sysattr;
 	cl_uint		hindex;
 	cl_uint		rowid;
-	cl_uint	   *prev;
-	cl_uint		curval;
+	cl_uint		next;
+	cl_uint		lval __attribute__((unused));
+	volatile cl_uint *prev;
 
 	/* lock and lookup the hash-slot */
 	hindex = gpucache_ctid_hash(&x_log->ctid) % rowhash->nslots;
@@ -630,17 +641,18 @@ __gpucache_release_rowid(kern_data_store *kds,
 		if (ItemPointerEquals(&sysattr->ctid, &x_log->ctid))
 		{
 			assert(rowid == x_log->rowid);
-			assert(rowmap[rowid] == UINT_MAX ||
-				   rowmap[rowid] < rowhash->nrooms);
 			/* detach rowid from the hash table */
-			*prev = rowmap[rowid];
+			next = __volatileRead(&rowmap[rowid]);
+			assert(next == UINT_MAX || next < rowhash->nrooms);
+			*prev = next;
+
 			/* attach rowid to the freelist */
 			do {
-				curval = rowhash->freelist;
-				rowmap[rowid] = curval;
+				next = __volatileRead(&rowhash->freelist);
+				__volatileWrite(&rowmap[rowid], next);
 			} while (atomicCAS(&rowhash->freelist,
-							   curval,
-							   rowid) != rowid);
+							   next,
+							   rowid) != next);
 #ifdef PGSTROM_DEBUG_BUILD
 			printf("__gpucache: rowid=%u ctid=(%u,%u) released\n",
 				   rowid,
@@ -651,14 +663,15 @@ __gpucache_release_rowid(kern_data_store *kds,
 			goto out_unlock;
 		}
 	}
-	printf("__gpucache_release_rowid: rowid=%u ctid=(%u,%u) not found",
+	printf("__gpucache_release_rowid: rowid=%u ctid=(%u,%u) not found\n",
 		   x_log->rowid,
 		   (cl_uint)x_log->ctid.ip_blkid.bi_hi << 16 |
 		   (cl_uint)x_log->ctid.ip_blkid.bi_lo,
 		   (cl_uint)x_log->ctid.ip_posid);
 out_unlock:
-	curval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
-	assert(curval == get_global_id());
+	__threadfence();
+	lval = atomicExch(&rowhash->slots[hindex].lock, UINT_MAX);
+	assert(lval == get_global_id());
 
 	return true;
 }
@@ -677,7 +690,7 @@ gpucache_apply_xact(kern_context *kcxt,
 	for (int loop=0; loop < nloops; loop++)
 	{
 		cl_uint		owner_id = loop * get_global_size() + get_global_id();
-		cl_bool		try_again = (owner_id < redo->nitems);
+		int			try_again = (owner_id < redo->nitems);
 
 		do {
 			if (try_again)
