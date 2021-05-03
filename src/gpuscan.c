@@ -1080,7 +1080,7 @@ add_unique_expression(List *tlist, Node *node, bool resjunk)
 		tle = (TargetEntry *) lfirst(lc);
 		if (equal(node, tle->expr))
 		{
-			if (tle->resjunk && !resjunk)
+			if (!resjunk)
 				tle->resjunk = false;
 			return tlist;
 		}
@@ -1122,7 +1122,6 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 	{
 		RelOptInfo *baserel = context->baserel;
 		Var		   *varnode = (Var *) node;
-		bool		resjunk;
 
 		/*
 		 * Is it a reference to other relation to be replaced by
@@ -1136,9 +1135,9 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		/* GPU projection cannot contain whole-row var */
 		if (varnode->varattno == InvalidAttrNumber)
 			return true;
-		resjunk = (varnode->varattno < 0 || context->resjunk);
 		context->tlist_temp = add_unique_expression(context->tlist_temp,
-													node, resjunk);
+													node,
+													context->resjunk);
 		return false;
 	}
 	else if (IsA(node, Const) || IsA(node, Param))
