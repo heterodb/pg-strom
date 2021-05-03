@@ -75,6 +75,25 @@ struct GpuCacheSysattr
 };
 typedef struct GpuCacheSysattr	GpuCacheSysattr;
 
+/*
+ * kds_get_column_sysattr
+ */
+STATIC_INLINE(GpuCacheSysattr *)
+kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
+	char		   *addr;
+
+	assert(cmeta->attbyval &&
+		   cmeta->attalign == sizeof(cl_uint) &&
+		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
+		   cmeta->nullmap_offset == 0);
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
+	if (rowid < kds->nrooms)
+		return ((GpuCacheSysattr *)addr) + rowid;
+	return NULL;
+}
+
 #ifdef __CUDACC_RTC__
 DEVICE_INLINE(cl_int)
 pg_sysattr_ctid_fetch_column(kern_context *kcxt,
@@ -83,7 +102,27 @@ pg_sysattr_ctid_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	dclass = DATUM_CLASS__NULL;
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+	void	   *temp;
+
+	if (!sysattr)
+	{
+		dclass = DATUM_CLASS__NULL;
+	}
+	else
+	{
+		temp = kern_context_alloc(kcxt, sizeof(ItemPointerData));
+		if (temp)
+		{
+			memcpy(temp, &sysattr->ctid, sizeof(ItemPointerData));
+			dclass = DATUM_CLASS__NORMAL;
+			value = PointerGetDatum(temp);
+
+			return sizeof(ItemPointerData);
+		}
+		dclass = DATUM_CLASS__NULL;
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+	}
 	return 0;
 }
 
@@ -105,7 +144,15 @@ pg_sysattr_xmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	dclass = DATUM_CLASS__NULL;
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+
+	if (!sysattr)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = sysattr->xmin;
+	}
 	return 0;
 }
 
@@ -116,7 +163,15 @@ pg_sysattr_xmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	dclass = DATUM_CLASS__NULL;
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+
+	if (!sysattr)
+		dclass = DATUM_CLASS__NULL;
+	else
+	{
+		dclass = DATUM_CLASS__NORMAL;
+		value  = sysattr->xmax;
+	}
 	return 0;
 }
 
@@ -127,7 +182,8 @@ pg_sysattr_cmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	dclass = DATUM_CLASS__NULL;
+	dclass = DATUM_CLASS__NORMAL;
+	value  = rowid;
 	return 0;
 }
 
@@ -138,7 +194,8 @@ pg_sysattr_cmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	dclass = DATUM_CLASS__NULL;
+	dclass = DATUM_CLASS__NORMAL;
+	value  = rowid;
 	return 0;
 }
 
@@ -159,14 +216,6 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
 	return 0;
 }
 #endif
-
-/*
- * kern_gpucache_rowitem
- */
-typedef struct
-{
-	
-} kern_gpucache_rowitem;
 
 /*
  * kern_gpucache_rowhash

@@ -81,24 +81,29 @@ null_return:
 }
 
 /*
- * kds_get_column_sysattr
+ * MEMO: The base chunk of GpuCache contains the following three portions
+ * 1. KDS (column-format), 2. Hash-slot of RowId, 3. RowId link list.
+ *
+ * +----------------------------------------------+  ----+
+ * | 1. KDS (column)                              |      |
+ * | +--------------------------------------------+      |
+ * | | KDS header + columns metadata array        |  kds->lentrh
+ * | | Last colmeta (kds->colmeta[nr_colmeta-1])  |      |
+ * | | points the system attribute array          |      v
+ * +-+--------------------------------------------+  ---------
+ * | 2. Hash-slot of RowId                        |      ^
+ * | kern_gpucache_rowhash allows to lookup       |      |
+ * | rowid by CTID in the GPU kernel.             | offsetof(kern_gpucache_rowhash,
+ * | rowhash->slots[].rowid points the first item |          slots[nslots])
+ * | of the rowid in use. Also, freelist points   |      |
+ * | the first item of the rowid                  |      v
+ * +----------------------------------------------+  ----------
+ * | 3. RowId link list                           |   ^
+ * | This rowid array points the next item in     |   | sizeof(cl_uint) * nrooms
+ * | either of the hash-slot or freelist.         |   |
+ * | Elsewhere, if it the list tail if UINT_MAX   |   v
+ * +----------------------------------------------+  ----------
  */
-STATIC_INLINE(GpuCacheSysattr *)
-kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
-{
-	kern_colmeta   *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
-	char		   *addr;
-
-	assert(cmeta->attbyval &&
-		   cmeta->attalign == sizeof(cl_uint) &&
-		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
-		   cmeta->nullmap_offset == 0);
-	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
-	if (rowid < kds->nrooms)
-		return ((GpuCacheSysattr *)addr) + rowid;
-	return NULL;
-}
-
 #define DECL_ROWID_HASH_AND_MAP(KDS)								\
 	kern_gpucache_rowhash *rowhash =								\
 		(kern_gpucache_rowhash *)((char *)(KDS) + (KDS)->length);	\

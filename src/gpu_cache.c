@@ -126,16 +126,6 @@ typedef struct
 	ItemPointerData	ctid;
 } PendingCtidItem;
 
-/*
- * GpuCacheState - executor state object
- */
-struct GpuCacheState
-{
-	pg_atomic_uint32	__gc_fetch_count;
-	pg_atomic_uint32   *gc_fetch_count;
-	GpuCacheDesc	   *gc_desc;
-};
-
 /* --- static variables --- */
 static char		   *pgstrom_gpucache_auto_preload;		/* GUC */
 static bool			pgstrom_gpucache_use_debug_kernel;	/* GUC */
@@ -1716,50 +1706,38 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
  * Executor callbacks
  *
  * ---------------------------------------------------------------- */
+
+/* GpuCacheState - executor state object */
+struct GpuCacheState
+{
+	pg_atomic_uint32	__gc_fetch_count;
+	pg_atomic_uint32   *gc_fetch_count;
+	GpuCacheDesc	   *gc_desc;
+	Datum				signature;
+	GpuCacheOptions		gc_options;
+};
+
 GpuCacheState *
 ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 {
 	Relation		relation = ss->ss_currentRelation;
-	GpuCacheDesc   *gc_desc;
+	Datum			signature;
+	GpuCacheOptions	gc_options;
 	GpuCacheState  *gcache_state;
-	bool			gcache_is_empty = false;
-	uint64			sync_pos = ULONG_MAX;
 
 	if (!relation)
 		return NULL;
 
-	gc_desc = lookupGpuCacheDesc(relation);
-	if (!gc_desc)
+	signature = gpuCacheTableSignature(relation, &gc_options);
+	if (signature == 0UL)
 		return NULL;
-
+	
 	gcache_state = palloc0(sizeof(GpuCacheState));
 	gcache_state->gc_fetch_count = &gcache_state->__gc_fetch_count;
-	gcache_state->gc_desc = gc_desc;
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-	{
-		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+	gcache_state->gc_desc = NULL;
+	gcache_state->signature = signature;
+	memcpy(&gcache_state->gc_options, &gc_options, sizeof(GpuCacheOptions));
 
-		SpinLockAcquire(&gc_sstate->redo_lock);
-		if (gc_sstate->redo_write_pos == 0)
-			gcache_is_empty = true;
-		else if (gc_sstate->redo_sync_pos < gc_sstate->redo_write_pos)
-			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
-		SpinLockRelease(&gc_sstate->redo_lock);
-		if (gcache_is_empty)
-		{
-			/*
-			 * redo_write_pos == 0 means the target table is empty, thus
-			 * initial-loading didn't load any records to GPU memory.
-			 * So, we can skip it.
-			 */
-			pfree(gcache_state);
-			gcache_state = NULL;
-		}
-		else if (sync_pos != ULONG_MAX)
-		{
-			gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
-		}
-	}
 	return gcache_state;
 }
 
@@ -1784,11 +1762,42 @@ __ExecScanChunkGpuCache(GpuTaskState *gts, GpuCacheDesc *gc_desc)
 pgstrom_data_store *
 ExecScanChunkGpuCache(GpuTaskState *gts)
 {
-	GpuCacheState  *gcache_state = gts->gc_state;
+	GpuCacheState	   *gcache_state = gts->gc_state;
+	Relation			relation = gts->css.ss.ss_currentRelation;
+	pgstrom_data_store *pds = NULL;
 
-	if (pg_atomic_fetch_add_u32(gcache_state->gc_fetch_count, 1) != 0)
-		return NULL;
-	return __ExecScanChunkGpuCache(gts, gcache_state->gc_desc);
+	if (pg_atomic_fetch_add_u32(gcache_state->gc_fetch_count, 1) == 0)
+	{
+		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
+		GpuCacheSharedState *gc_sstate;
+		uint64			write_pos;
+		uint64			sync_pos = ULONG_MAX;
+
+		if (!gc_desc)
+		{
+			gc_desc = lookupGpuCacheDesc(relation);
+			if (!gc_desc)
+				elog(ERROR, "GpuCache on relation '%s' is not available",
+					 RelationGetRelationName(relation));
+			gcache_state->gc_desc = gc_desc;
+		}
+		gc_sstate = gc_desc->gc_sstate;
+
+		SpinLockAcquire(&gc_sstate->redo_lock);
+		write_pos = gc_sstate->redo_write_pos;
+		if (gc_sstate->redo_sync_pos < gc_sstate->redo_write_pos)
+			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
+		SpinLockRelease(&gc_sstate->redo_lock);
+
+		/* redo_write_pos == 0 means that the table is empty */
+		if (write_pos != 0)
+		{
+			if (sync_pos != ULONG_MAX)
+				gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
+			pds = __ExecScanChunkGpuCache(gts, gc_desc);
+		}
+	}
+	return pds;
 }
 
 void
@@ -1832,28 +1841,102 @@ ExecShutdownGpuCache(GpuCacheState *gcache_state)
 
 void
 ExplainGpuCache(GpuCacheState *gcache_state,
-				Relation frel, ExplainState *es)
+				Relation rel, ExplainState *es)
 {
-	GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
-	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
-	int				cuda_dindex = gc_sstate->cuda_dindex;
-	size_t			gpu_main_size = 0UL;
-	size_t			gpu_extra_size = 0UL;
+	GpuCacheOptions *gc_options = &gcache_state->gc_options;
+	char		temp[1024];
+	size_t		gpu_main_size = 0UL;
+	size_t		gpu_extra_size = 0UL;
 
-	if (cuda_dindex >= 0 && cuda_dindex < numDevAttrs)
-		ExplainPropertyText("GPU Cache", devAttrs[cuda_dindex].DEV_NAME, es);
+	/* config options */
+	if (gc_options->cuda_dindex >= 0 &&
+		gc_options->cuda_dindex < numDevAttrs)
+	{
+		if (!pgstrom_regression_test_mode)
+		{
+			sprintf(temp, "%s [max_num_rows: %ld]",
+					devAttrs[gc_options->cuda_dindex].DEV_NAME,
+					gc_options->max_num_rows);
+		}
+		else
+		{
+			sprintf(temp, "GPU%d [max_num_rows: %ld]",
+					gc_options->cuda_dindex,
+					gc_options->max_num_rows);
+		}
+		ExplainPropertyText("GPU Cache", temp, es);
+	}
+	else
+	{
+		ExplainPropertyText("GPU Cache", "invalid device", es);
+	}
 
-	pthreadRWLockReadLock(&gc_sstate->gpu_buffer_lock);
-	if (gc_sstate->gpu_main_devptr != 0UL)
+	if (es->verbose)
+	{
+		int		gpu_device_id = -1;
+
+		if (gc_options->cuda_dindex >= 0 &&
+			gc_options->cuda_dindex < numDevAttrs)
+			gpu_device_id = devAttrs[gc_options->cuda_dindex].DEV_ID;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			snprintf(temp, sizeof(temp),
+					 "gpu_device_id=%d,"
+					 "max_num_rows=%ld,"
+					 "redo_buffer_size=%zu,"
+					 "gpu_sync_interval=%d,"
+					 "gpu_sync_threshold=%zu",
+					 gpu_device_id,
+					 gc_options->max_num_rows,
+					 gc_options->redo_buffer_size,
+					 gc_options->gpu_sync_interval,
+					 gc_options->gpu_sync_threshold);
+			ExplainPropertyText("GPU Cache Options", temp, es);
+		}
+		else
+		{
+			ExplainPropertyInteger("GPU Cache Options:gpu_device_id", NULL,
+								   gpu_device_id, es);
+			ExplainPropertyInteger("GPU Cache Options:max_num_rows", NULL,
+								   gc_options->max_num_rows, es);
+			ExplainPropertyInteger("GPU Cache Options:redo_buffer_size", NULL,
+								   gc_options->redo_buffer_size, es);
+			ExplainPropertyInteger("GPU Cache Options:gpu_sync_threshold", NULL,
+								   gc_options->gpu_sync_threshold, es);
+			ExplainPropertyInteger("GPU Cache Options:gpu_sync_interval", "s",
+								   gc_options->gpu_sync_interval, es);
+		}
+	}
+
+	/* GPU memory usage */
+	if (gcache_state->gc_desc)
+	{
+		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
 		gpu_main_size = gc_sstate->gpu_main_size;
-	if (gc_sstate->gpu_extra_devptr != 0UL)
 		gpu_extra_size = gc_sstate->gpu_extra_size;
-	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+	}
+	else
+	{
+		GpuCacheSharedState *gc_sstate;
+		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+		SpinLockAcquire(lock);
+		gc_sstate = lookupGpuCacheSharedState(MyDatabaseId,
+											  RelationGetRelid(rel),
+											  gcache_state->signature);
+		if (gc_sstate)
+		{
+			gpu_main_size = gc_sstate->gpu_main_size;
+			gpu_extra_size = gc_sstate->gpu_extra_size;
+		}
+		SpinLockRelease(lock);
+	}
 
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 	{
-		char	temp[300];
-
 		snprintf(temp, sizeof(temp),
 				 "main: %s, extra: %s",
 				 format_numeric(gpu_main_size),
