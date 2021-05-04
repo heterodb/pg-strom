@@ -1745,11 +1745,26 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 
 	if (!relation)
 		return NULL;
-
+	/* GpuCache is not workable on hot-standby server */
+	if (RecoveryInProgress())
+	{
+		elog(DEBUG2, "gpucache: not valid in hot-standby slave server");
+		return NULL;
+	}
+	/* only READ COMMITTED transaction can use GpuCache */
+	if (XactIsoLevel > XACT_READ_COMMITTED)
+	{
+		elog(DEBUG2, "gpucache: not valid in serializable/repeatable-read transaction");
+		return NULL;
+	}
+	/* table must be configured for GpuCache */
 	signature = gpuCacheTableSignature(relation, &gc_options);
 	if (signature == 0UL)
+	{
+		elog(DEBUG2, "gpucache: table '%s' is not configured - check row/statement triggers with pgstrom.gpucache_sync_trigger()",
+			 RelationGetRelationName(relation));
 		return NULL;
-	
+	}
 	gcache_state = palloc0(sizeof(GpuCacheState));
 	gcache_state->gc_fetch_count = &gcache_state->__gc_fetch_count;
 	gcache_state->gc_desc = NULL;
