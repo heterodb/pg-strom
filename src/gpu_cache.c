@@ -860,10 +860,11 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 			*gcache_xmin = xmin;
 			if (htup->t_infomask & HEAP_XMAX_INVALID)
 			{
-				/* xid invalid */
+				/* xmax invalid */
 				*gcache_xmax = InvalidTransactionId;
 				return true;
 			}
+
 			if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
 			{
 				/* not deleter */
@@ -883,7 +884,7 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 					*gcache_xmax = xmax;
 					return true;
 				}
-				elog(WARNING, "gpucache: initial load on '%s' met a tuple deleted by others, but not committed yet, at ctid=(%u,%u)",
+				elog(WARNING, "gpucache: initial load on '%s' met a tuple inserted (not committed yet), but deleted by other concurrent transaction. Why? ctid=(%u,%u)",
 					 get_rel_name(gc_desc->table_oid),
 					 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
 					 tuple->t_self.ip_posid);
@@ -891,23 +892,32 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 			}
 
 			xmax = HeapTupleHeaderGetRawXmax(htup);
-			if (!TransactionIdIsCurrentTransactionId(xmax))
+			if (TransactionIdIsCurrentTransactionId(xmax))
 			{
-				/* deleting subtransaction must have aborted */
-				*gcache_xmax = InvalidTransactionId;
-				return true;
+				/* tuple is already deleted by the current transaction */
+				*gcache_xmax = xmax;
 			}
-			return false;
+			else
+			{
+				/* elsewhere, deleting subtransaction should have aborted */
+				*gcache_xmax = InvalidTransactionId;
+			}
+			return true;
 		}
-		else if (TransactionIdIsInProgress(HeapTupleHeaderGetRawXmin(htup)))
+		else if (TransactionIdIsInProgress(xmin))
 		{
-			elog(WARNING, "gpucache: initial load on '%s' met a tuple inserted by others, but not committed yet, at ctid=(%u,%u)",
-				 get_rel_name(gc_desc->table_oid),
-				 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
-				 tuple->t_self.ip_posid);
+			/*
+			 * Because GpuCache is built on after row / statement triggers,
+			 * we may meet a tuple on the shared buffer inserted by the other
+			 * concurrent transactions, during the initial-loading process.
+			 * In this case, the inserter should be waiting for the completion
+			 * of the current initial-loading process, then it adds REDO log
+			 * entry of the new tuple.
+			 * So, initial-loading can ignore the tuples not responsible.
+			 */
 			return false;
 		}
-		else if (!TransactionIdDidCommit(HeapTupleHeaderGetRawXmin(htup)))
+		else if (!TransactionIdDidCommit(xmin))
 		{
 			/* aborted or crashed */
 			return false;
@@ -929,7 +939,7 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 			*gcache_xmax = InvalidTransactionId;
 			return true;
 		}
-		return false;	/* updated by other */
+		return false;	/* updated by other, and committed  */
 	}
 
 	xmax = HeapTupleHeaderGetRawXmax(htup);
@@ -944,11 +954,19 @@ __gpuCacheInitLoadVisibilityCheck(GpuCacheDesc *gc_desc,
 
 	if (TransactionIdIsInProgress(xmax))
 	{
-		elog(WARNING, "gpucache: initial load on '%s' met a tuple deleted by others, but not committed yet, at ctid=(%u,%u)",
-			 get_rel_name(gc_desc->table_oid),
-			 BlockIdGetBlockNumber(&tuple->t_self.ip_blkid),
-			 tuple->t_self.ip_posid);
-		return false;
+		/*
+		 * Because GpuCache is built on after row / statement triggers,
+		 * we may meet a tuple on the shared buffer deleted by the other
+		 * concurrent transactions, during the initial-loading process. 
+		 * In this case, the deleter should be waiting for the completion
+		 * of the current initial-loading process, then it adds REDO log
+		 * entry for deletion (regardless of COMMIT or ABORT).
+		 * So, initial-loading must load the body of tuple to be deleted
+		 * once. If deletion is actually committed, its XACT log will
+		 * invalidate the entry.
+		 */
+		*gcache_xmax = InvalidTransactionId;
+		return true;
 	}
 
 	if (!TransactionIdDidCommit(xmax))
