@@ -289,7 +289,7 @@ gpujoin_load_source(kern_context *kcxt,
 
 		row_index = src_read_pos + get_local_id();
 		if (row_index < kds_src->nitems &&
-			kern_check_visibility_column(kcxt, kds_src, row_index, NULL))
+			kern_check_visibility_column(kcxt, kds_src, row_index))
 		{
 			t_offset = row_index + 1;
 			visible = gpujoin_quals_eval_column(kcxt,

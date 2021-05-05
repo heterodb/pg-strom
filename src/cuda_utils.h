@@ -435,7 +435,7 @@ pg_sysattr_tableoid_fetch_arrow(kern_context *kcxt,
 /*
  * System attribute reference for GPU memory Store
  */
-#include "cuda_gstore.h"
+#include "cuda_gcache.h"
 
 /*
  * inline functions to form/deform HeapTuple

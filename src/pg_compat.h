@@ -43,16 +43,20 @@
  */
 #if PG_VERSION_NUM < 120000
 #define tupleDescHasOid(tdesc)		((tdesc)->tdhasoid)
+#define PgClassTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define PgProcTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define PgTypeTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define PgTriggerTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define CreateTemplateTupleDesc(a)	CreateTemplateTupleDesc((a), false)
 #define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
 #define SystemAttributeDefinition(a)			\
 	SystemAttributeDefinition((a),true)
 #else
 #define tupleDescHasOid(tdesc)		(false)
+#define PgClassTupleGetOid(tuple)	(((Form_pg_class)GETSTRUCT(tuple))->oid)
 #define PgProcTupleGetOid(tuple)	(((Form_pg_proc)GETSTRUCT(tuple))->oid)
 #define PgTypeTupleGetOid(tuple)	(((Form_pg_type)GETSTRUCT(tuple))->oid)
+#define PgTriggerTupleGetOid(tuple)	(((Form_pg_trigger)GETSTRUCT(tuple))->oid)
 #endif
 
 /*

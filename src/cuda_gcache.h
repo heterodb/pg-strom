@@ -1,7 +1,7 @@
 /*
- * cuda_gstore.h
+ * cuda_gcache.h
  *
- * CUDA device code specific to GstoreFdw in-memory data store
+ * CUDA device code specific to GPU Cache
  * --
  * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2020 (C) The PG-Strom Development Team
@@ -15,70 +15,84 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_GSTORE_H
-#define CUDA_GSTORE_H
+#ifndef CUDA_GCACHE_H
+#define CUDA_GCACHE_H
 
-#define GSTORE_TX_LOG__MAGIC		0xEBAD7C00
-#define GSTORE_TX_LOG__INSERT		(GSTORE_TX_LOG__MAGIC | 'I')
-#define GSTORE_TX_LOG__DELETE		(GSTORE_TX_LOG__MAGIC | 'D')
-#define GSTORE_TX_LOG__COMMIT		(GSTORE_TX_LOG__MAGIC | 'C')
-#define GSTORE_TX_LOG__TERMINATOR	0xFBADBEEF
+#define GCACHE_TX_LOG__MAGIC		0xEBAD7C00
+#define GCACHE_TX_LOG__INSERT		(GCACHE_TX_LOG__MAGIC | 'I')
+#define GCACHE_TX_LOG__DELETE		(GCACHE_TX_LOG__MAGIC | 'D')
+#define GCACHE_TX_LOG__XACT			(GCACHE_TX_LOG__MAGIC | 'X')
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
 	char		data[1];		/* variable length */
-} GstoreTxLogCommon;
+} GCacheTxLogCommon;
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
-	cl_uint		rowid;
+	cl_uint		rowid;			/* set by GPU kernel */
+	cl_bool		rowid_found;	/* set by GPU kernel */
 	HeapTupleHeaderData htup __attribute__((aligned(8)));
-	/* + GSTORE_TX_LOG__TERMINATOR */
-} GstoreTxLogInsert;
+} GCacheTxLogInsert;
 
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
+	cl_uint		xid;
 	cl_uint		rowid;
-	cl_uint		xmin;
-	cl_uint		xmax;
-} GstoreTxLogDelete;
+	cl_bool		rowid_found;
+	ItemPointerData ctid;
+} GCacheTxLogDelete;
 
 /*
  * COMMIT/ABORT
  */
-#define GSTORE_TX_LOG_COMMIT_ALLOCSZ	96
 typedef struct {
 	cl_uint		type;
 	cl_uint		length;
-	cl_ulong	timestamp;
 	cl_uint		xid;
-	cl_ushort	nitems;
-	char		data[1];		/* variable length */
-} GstoreTxLogCommit;
+	cl_uint		rowid;
+	cl_bool		rowid_found;
+	cl_char		tag;
+	ItemPointerData ctid;
+} GCacheTxLogXact;
 
 /*
- * GstoreFdwSysattr
+ * GpuCacheSysattr
  *
  * A fixed-length system attribute for each row.
  */
-struct GstoreFdwSysattr
+struct GpuCacheSysattr
 {
 	cl_uint		xmin;
 	cl_uint		xmax;
-#ifndef __CUDACC__
-	cl_uint		cid;
-#else
-	/* get_global_id() of the thread who tries to update the row. */
+	/* get_global_id() of the thread who tries to update the row */
 	cl_uint		owner_id;
-#endif
+	ItemPointerData ctid;
+	cl_ushort	__padding__;
 };
-typedef struct GstoreFdwSysattr	GstoreFdwSysattr;
+typedef struct GpuCacheSysattr	GpuCacheSysattr;
+
+/*
+ * kds_get_column_sysattr
+ */
+STATIC_INLINE(GpuCacheSysattr *)
+kds_get_column_sysattr(kern_data_store *kds, cl_uint rowid)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
+	char		   *addr;
+
+	assert(cmeta->attbyval &&
+		   cmeta->attalign == sizeof(cl_uint) &&
+		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
+		   cmeta->nullmap_offset == 0);
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
+	if (rowid < kds->nrooms)
+		return ((GpuCacheSysattr *)addr) + rowid;
+	return NULL;
+}
 
 #ifdef __CUDACC_RTC__
 DEVICE_INLINE(cl_int)
@@ -88,22 +102,27 @@ pg_sysattr_ctid_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+	void	   *temp;
+
+	if (!sysattr)
 	{
-		ItemPointerData *t_self = (ItemPointerData *)
-			kern_context_alloc(kcxt, sizeof(ItemPointerData));
-		if (t_self)
+		dclass = DATUM_CLASS__NULL;
+	}
+	else
+	{
+		temp = kern_context_alloc(kcxt, sizeof(ItemPointerData));
+		if (temp)
 		{
-			t_self->ip_blkid.bi_hi = (rowid >> 16);
-			t_self->ip_blkid.bi_lo = (rowid & 0xffffU);
-			t_self->ip_posid       = 0;
+			memcpy(temp, &sysattr->ctid, sizeof(ItemPointerData));
 			dclass = DATUM_CLASS__NORMAL;
-			value  = PointerGetDatum(t_self);
+			value = PointerGetDatum(temp);
+
 			return sizeof(ItemPointerData);
 		}
+		dclass = DATUM_CLASS__NULL;
 		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
 	}
-	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -114,13 +133,7 @@ pg_sysattr_oid_fetch_column(kern_context *kcxt,
 							cl_char &dclass,
 							Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = 0;
-	}
+	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -131,18 +144,15 @@ pg_sysattr_xmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+
+	if (!sysattr)
+		dclass = DATUM_CLASS__NULL;
+	else
 	{
-		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
-			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
-		if (sysattr)
-		{
-			dclass = DATUM_CLASS__NORMAL;
-			value  = sysattr->xmin;
-			return 0;
-		}
+		dclass = DATUM_CLASS__NORMAL;
+		value  = sysattr->xmin;
 	}
-	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -153,18 +163,15 @@ pg_sysattr_xmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (kds)
+	GpuCacheSysattr *sysattr = kds_get_column_sysattr(kds, rowid);
+
+	if (!sysattr)
+		dclass = DATUM_CLASS__NULL;
+	else
 	{
-		GstoreFdwSysattr   *sysattr = (GstoreFdwSysattr *)
-			kern_get_datum_column(kds, NULL, kds->ncols-1, rowid);
-		if (sysattr)
-		{
-			dclass = DATUM_CLASS__NORMAL;
-			value  = sysattr->xmax;
-			return 0;
-		}
+		dclass = DATUM_CLASS__NORMAL;
+		value  = sysattr->xmax;
 	}
-	dclass = DATUM_CLASS__NULL;
 	return 0;
 }
 
@@ -175,13 +182,8 @@ pg_sysattr_cmin_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = (Datum)InvalidCommandId;
-	}
+	dclass = DATUM_CLASS__NORMAL;
+	value  = rowid;
 	return 0;
 }
 
@@ -192,13 +194,8 @@ pg_sysattr_cmax_fetch_column(kern_context *kcxt,
 							 cl_char &dclass,
 							 Datum   &value)
 {
-	if (!kds)
-		dclass = DATUM_CLASS__NULL;
-	else
-	{
-		dclass = DATUM_CLASS__NORMAL;
-		value  = (Datum)InvalidCommandId;
-	}
+	dclass = DATUM_CLASS__NORMAL;
+	value  = rowid;
 	return 0;
 }
 
@@ -221,7 +218,29 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
 #endif
 
 /*
- * kern_gpustore_redolog
+ * kern_gpucache_rowhash
+ *
+ * CTID-->RowId lookup table
+ */
+#define KERN_GPUCACHE_ROWHASH_MAGIC		0xcafebabeU
+typedef struct
+{
+	cl_uint		magic;		/* =KERN_GPUCACHE_ROWHASH_MAGIC */
+	cl_uint		nslots;
+	cl_uint		nrooms;
+	cl_uint		freelist;	/* first free rowid */
+	struct {
+		cl_uint	lock;
+		cl_uint	rowid;
+	} slots[1];
+	/*
+	 * Note that:
+	 * ((cl_uint *)&rowhash->slots[nslots]) is an array of rowmap
+	 */
+} kern_gpucache_rowhash;
+
+/*
+ * kern_gpucache_redolog
  */
 typedef struct
 {
@@ -230,6 +249,6 @@ typedef struct
 	cl_uint			nrooms;
 	cl_uint			nitems;
 	cl_uint			log_index[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpustore_redolog;
+} kern_gpucache_redolog;
 
-#endif /* CUDA_GSTORE_H */
+#endif /* CUDA_GCACHE_H */

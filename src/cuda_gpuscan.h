@@ -70,7 +70,6 @@ typedef struct
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan))
 
 #ifdef __CUDACC__
-#include "cuda_gstore.h"
 
 /* to be generated from SQL */
 DEVICE_FUNCTION(cl_bool)
