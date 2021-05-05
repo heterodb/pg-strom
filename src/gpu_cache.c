@@ -100,7 +100,7 @@ typedef struct
 	char		   *redo_buffer;
 
 	/* schema definitions (KDS_FORMAT_COLUMN) */
-	kern_data_extra	kds_extra;
+	size_t			kds_extra_sz;
 	kern_data_store	kds_head;
 } GpuCacheSharedState;
 
@@ -1191,8 +1191,7 @@ __createGpuCacheSharedState(Relation rel,
 		extra_sz += extra_sz / 4;
 		extra_sz += offsetof(kern_data_extra, data);
 	}
-	gc_sstate->kds_extra.length = extra_sz;
-	gc_sstate->kds_extra.usage  = offsetof(kern_data_extra, data);
+	gc_sstate->kds_extra_sz = extra_sz;
 
 	return gc_sstate;
 }
@@ -2527,7 +2526,6 @@ gpuCacheAllocDeviceMemory(GpuCacheSharedState *gc_sstate)
 	cl_uint			nrooms = gc_sstate->kds_head.nrooms;
 	cl_uint			nslots = gc_sstate->kds_head.nslots;
 	size_t			main_sz = 0;
-	size_t			extra_sz = 0;
 	size_t			head_sz;
 
 	if (gc_sstate->gpu_main_devptr != 0UL)
@@ -2562,18 +2560,23 @@ gpuCacheAllocDeviceMemory(GpuCacheSharedState *gc_sstate)
 	}
 
 	/* extra buffer, if any */
-	if (gc_sstate->kds_extra.length > 0)
+	if (gc_sstate->kds_extra_sz > 0)
 	{
-		extra_sz = gc_sstate->kds_extra.length;
-		rc = cuMemAlloc(&m_extra, extra_sz);
+		kern_data_extra	kds_extra;
+
+		memset(&kds_extra, 0, offsetof(kern_data_extra, data));
+		kds_extra.length = gc_sstate->kds_extra_sz;
+		kds_extra.usage = offsetof(kern_data_extra, data);
+
+		rc = cuMemAlloc(&m_extra, kds_extra.length);
 		if (rc != CUDA_SUCCESS)
 		{
 			elog(LOG, "gpucache: failed on cuMemAlloc(%zu): %s",
-				 extra_sz, errorText(rc));
+				 kds_extra.length, errorText(rc));
 			goto error_1;
 		}
 
-		rc = cuMemcpyHtoD(m_extra, &gc_sstate->kds_extra,
+		rc = cuMemcpyHtoD(m_extra, &kds_extra,
 						  offsetof(kern_data_extra, data));
 		if (rc != CUDA_SUCCESS)
 		{
@@ -2626,11 +2629,11 @@ gpuCacheAllocDeviceMemory(GpuCacheSharedState *gc_sstate)
 	elog(LOG, "gpucache: AllocMemory %s:%lx (main_sz=%zu, extra_sz=%zu)",
 		 gc_sstate->table_name,
 		 gc_sstate->signature,
-		 gc_sstate->kds_head.length,
-		 gc_sstate->kds_extra.length);
+		 main_sz,
+		 gc_sstate->kds_extra_sz);
 
 	gc_sstate->gpu_main_size = main_sz;
-	gc_sstate->gpu_extra_size = extra_sz;
+	gc_sstate->gpu_extra_size = gc_sstate->kds_extra_sz;
 	gc_sstate->gpu_main_devptr = m_main;
 	gc_sstate->gpu_extra_devptr = m_extra;
 
