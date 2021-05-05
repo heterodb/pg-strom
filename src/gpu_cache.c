@@ -3589,7 +3589,7 @@ pgstrom_init_gpu_cache(void)
 							   NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = offsetof(GpuCacheDesc, signature) + sizeof(Datum);
+	hctl.keysize = offsetof(GpuCacheDesc, xid) + sizeof(TransactionId);
 	hctl.entrysize = sizeof(GpuCacheDesc);
 	hctl.hcxt = CacheMemoryContext;
 	gcache_descriptors_htab = hash_create("GpuCache Descriptors", 48, &hctl,
