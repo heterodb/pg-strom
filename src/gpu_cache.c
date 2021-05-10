@@ -128,6 +128,7 @@ typedef struct
 
 /* --- static variables --- */
 static char		   *pgstrom_gpucache_auto_preload;		/* GUC */
+static bool			enable_gpucache;					/* GUC */
 static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
 static HTAB		   *gcache_signatures_htab = NULL;
@@ -737,7 +738,7 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 
 		retval = (entry->signature != 0UL);
 	}
-	return retval;
+	return (enable_gpucache ? retval : false);
 }
 
 /*
@@ -746,7 +747,9 @@ baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
 bool
 RelationHasGpuCache(Relation rel)
 {
-	return (gpuCacheTableSignature(rel,NULL) != 0UL);
+	if (enable_gpucache)
+		return (gpuCacheTableSignature(rel,NULL) != 0UL);
+	return false;
 }
 
 /*
@@ -1454,7 +1457,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool is_normal_commit)
 				__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&x_log);
 				pos += sizeof(PendingCtidItem);
 			}
-			elog(LOG, "AddXactLog: %s:%lx xid=%u nitems=%u",
+			elog(DEBUG2, "AddXactLog: %s:%lx xid=%u nitems=%u",
 				 gc_sstate->table_name,
 				 gc_sstate->signature,
 				 gc_desc->xid,
@@ -3587,6 +3590,15 @@ pgstrom_init_gpu_cache(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
+	/* GUC: pg_strom.enable_gpucache */
+	DefineCustomBoolVariable("pg_strom.enable_gpucache",
+							 "Enables GpuCache as a data source for scan",
+							 NULL,
+							 &enable_gpucache,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* setup local hash tables */
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = offsetof(GpuCacheDesc, xid) + sizeof(TransactionId);
