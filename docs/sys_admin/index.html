@@ -135,25 +135,25 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="system-administration">System Administration</h1>
+                <h1 id="_1">システム管理</h1>
 <!-- リソース設定などの記述を加えるべき -->
 
-<h2 id="usage-of-mps-daemon">Usage of MPS daemon</h2>
-<p>In case when multi-process application like PostgreSQL uses GPU device, it is a well known solution to use MPS (Multi-Process Service) to reduce context switch on GPU side and resource consumption for device management.</p>
+<h2 id="mps">MPSデーモンの利用</h2>
+<p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
 <p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
-<p>It is also recommended for PG-Strom to apply MPS, however, you need to pay attention for several limitations below.</p>
-<p>One MPS daemon can provide its service for up to 48 clients (16 clients if Pascal or older).
-So, DB administration must ensure number of PostgreSQL processes using GPU (including background workers in CPU parallelism) is less than 48 (or 16 if Pascal).</p>
-<p>MPS does not support dynamic parallelism, and load GPU programs using the feature.
-GPU programs automatically generated from SQL will never use dynamic parallelism, however, PL/CUDA user defined function may use dynamic parallelism if it links CUDA device runtime to invoke sub-kernels.
-So, we don't use MPS for invocation of PL/CUDA functions.</p>
-<p>MPS document recommends to set compute-mode <code>EXCLUSIVE_PROCESS</code>, however, PG-Strom requires <code>DEFAULT</code> mode.
-Several operations, including PL/CUDA above, call CUDA APIs with MPS disabled explicitly, so other processes than MPS daemon must be able to use GPU devices.</p>
-<p>The following commands start MPS daemon. Replace <code>&lt;UID&gt;</code> with user-id of PostgreSQL process.</p>
+<p>PG-StromにおいてもMPSの利用を推奨していますが、下記の制限事項に対して注意が必要です。</p>
+<p>1個のMPSデーモンがサービスを提供可能なクライアントの数は最大48個（Pascal世代以前は16個）に制限されています。
+そのため、GPUを使用するPostgreSQLプロセス（CPU並列処理におけるバックグラウンドワーカを含む）の数が常に48個以下（Pascal世代以前は16個以下）である事を、運用上担保する必要があります。</p>
+<p>MPSはDynamic Parallelismを利用するGPUプログラムに対応していません。
+SQLから自動生成されたGPUプログラムが当該機能を利用する事はありませんが、PL/CUDAユーザ定義関数がCUDAデバイスランタイムをリンクし、サブカーネルを呼び出すなどDynamic Parallelismの機能を利用する場合には当該制限に抵触します。
+そのため、PL/CUDA関数の呼び出しにおいてはMPSを利用しません。</p>
+<p>MPSのドキュメントにはGPUの動作モードを<code>EXCLUSIVE_PROCESS</code>に変更する事が推奨されていますが、PG-Stromを実行する場合は<code>DEFAULT</code>動作モードで動作させてください。
+上記のPL/CUDAを含む、いくつかの処理では明示的にMPSの利用を無効化してCUDA APIを呼び出しているため、MPSデーモン以外のプロセスがGPUデバイスを利用可能である必要があります。</p>
+<p>MPSデーモンを起動するには以下の手順でコマンドを実行します。<code>&lt;UID&gt;</code>はPostgreSQLプロセスのユーザIDに置き換えてください。</p>
 <pre><code>$ nvidia-cuda-mps-control -d
 $ echo start_server -uid &lt;UID&gt; | nvidia-cuda-mps-control
 </code></pre>
-<p><code>nvidia-smi</code> command shows MPS daemon is using GPU device.</p>
+<p><code>nvidia-smi</code>コマンドによって、MPSデーモンがGPUデバイスを使用している事が分かります。</p>
 <pre><code>$ nvidia-smi
 Sat Nov  3 12:22:26 2018
 +-----------------------------------------------------------------------------+
@@ -173,8 +173,8 @@ Sat Nov  3 12:22:26 2018
 |    0     11080      C   nvidia-cuda-mps-server                        29MiB |
 +-----------------------------------------------------------------------------+
 </code></pre>
-<h1 id="knowledge-base">Knowledge base</h1>
-<p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
+<h1 id="_2">ナレッジベース</h1>
+<p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
               
             </div>
