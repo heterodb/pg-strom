@@ -7,27 +7,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>System Administration - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <title>Sys admin - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
-    var mkdocs_page_name = "System Administration";
+    var mkdocs_page_name = "Sys admin";
     var mkdocs_page_input_path = "sys_admin.md";
     var mkdocs_page_url = null;
   </script>
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,116 +51,53 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">System Administration</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#system-administration">System Administration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#usage-of-mps-daemon">Usage of MPS daemon</a></li>
-    
-
-    <li class="toctree-l3"><a href="#knowledge-base">Knowledge base</a></li>
-    
-
-    </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -177,25 +116,22 @@
     <li><a href="..">Docs</a> &raquo;</li>
     
       
-        
-          <li>Tutorial &raquo;</li>
-        
-      
     
-    <li>System Administration</li>
+    <li>Sys admin</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1 id="system-administration"><h1>System Administration</h1></h1>
+                <h1 id="system-administration">System Administration</h1>
 <!-- リソース設定などの記述を加えるべき -->
 
-<h1 id="usage-of-mps-daemon">Usage of MPS daemon</h1>
+<h2 id="usage-of-mps-daemon">Usage of MPS daemon</h2>
 <p>In case when multi-process application like PostgreSQL uses GPU device, it is a well known solution to use MPS (Multi-Process Service) to reduce context switch on GPU side and resource consumption for device management.</p>
 <p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
 <p>It is also recommended for PG-Strom to apply MPS, however, you need to pay attention for several limitations below.</p>
@@ -210,7 +146,6 @@ Several operations, including PL/CUDA above, call CUDA APIs with MPS disabled ex
 <pre><code>$ nvidia-cuda-mps-control -d
 $ echo start_server -uid &lt;UID&gt; | nvidia-cuda-mps-control
 </code></pre>
-
 <p><code>nvidia-smi</code> command shows MPS daemon is using GPU device.</p>
 <pre><code>$ nvidia-smi
 Sat Nov  3 12:22:26 2018
@@ -231,7 +166,6 @@ Sat Nov  3 12:22:26 2018
 |    0     11080      C   nvidia-cuda-mps-server                        29MiB |
 +-----------------------------------------------------------------------------+
 </code></pre>
-
 <h1 id="knowledge-base">Knowledge base</h1>
 <p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
@@ -239,15 +173,6 @@ Sat Nov  3 12:22:26 2018
             </div>
           </div>
           <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-        <a href="../brin/" class="btn btn-neutral float-right" title="BRIN Index">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../operations/" class="btn btn-neutral" title="Basic Operations"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
-    </div>
   
 
   <hr/>
@@ -257,7 +182,7 @@ Sat Nov  3 12:22:26 2018
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -267,20 +192,21 @@ Sat Nov  3 12:22:26 2018
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../operations/" style="color: #fcfcfc;">&laquo; Previous</a></span>
-      
-      
-        <span style="margin-left: 15px"><a href="../brin/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

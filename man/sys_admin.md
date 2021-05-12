@@ -1,10 +1,10 @@
-@ja:#<h1>システム管理</h1>
-@en:#<h1>System Administration</h1>
+@ja:#システム管理
+@en:#System Administration
 
 <!-- リソース設定などの記述を加えるべき -->
 
-@ja:# MPSデーモンの利用
-@en:# Usage of MPS daemon
+@ja:##MPSデーモンの利用
+@en:##Usage of MPS daemon
 
 @ja{
 PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。

@@ -1,8 +1,8 @@
-@ja:<h1>基本的な操作</h1>
-@en:<h1>Basic operations</h1>
+@ja:#基本的な操作
+@en:#Basic operations
 
-@ja:# GPUオフロードの確認
-@en:# Confirmation of GPU off-loading
+@ja:## GPUオフロードの確認
+@en:## Confirmation of GPU off-loading
 
 @ja{
 クエリがGPUで実行されるかどうかを確認するには`EXPLAIN`コマンドを使用します。
@@ -76,8 +76,8 @@ It supports numeric types like `int` or `float`, date and time types like `date`
 See [References](ref_devfuncs.md) for the detailed list.
 }
 
-@ja:#CPU+GPUハイブリッド並列
-@en:#CPU+GPU Hybrid Parallel
+@ja:##CPU+GPUハイブリッド並列
+@en:##CPU+GPU Hybrid Parallel
 
 @ja{
 PG-StromはPostgreSQLのCPU並列実行に対応しています。
@@ -129,8 +129,8 @@ Execution plan tree under the Gather is executable on background worker process.
 (18 rows)
 ```
 
-@ja:#下位プランの引き上げ
-@en:#Pullup underlying plans
+@ja:##下位プランの引き上げ
+@en:##Pullup underlying plans
 
 @ja{
 PG-StromはSCAN、JOIN、GROUP BYの各処理をGPUで実行する事が可能ですが、これに対応するPostgreSQL標準の処理を単純に置き換えただけでは困った事態が発生します。
@@ -263,3 +263,27 @@ SCAN処理の引き上げは`pg_strom.pullup_outer_scan`パラメータによっ
 The `pg_strom.pullup_outer_scan` parameter controls whether SCAN is pulled up, and the `pg_strom.pullup_outer_join` parameter also controls whether JOIN is pulled up.
 Both parameters are configured to `on`. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.
 }
+
+@ja:##ナレッジベース
+@en:##Knowledge base
+
+@ja{
+PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。
+}
+@en{
+We publish several articles, just called "notes", on the project wiki-site of PG-Strom.
+}
+[https://github.com/heterodb/pg-strom/wiki](https://github.com/heterodb/pg-strom/wiki)
+
+
+
+
+
+
+
+
+
+
+
+
+

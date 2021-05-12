@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>GPUDirect SQL - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,134 +51,77 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class=" current">
-                    
-    <a class="current" href="./">GPUDirect SQL</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#overview">Overview</a></li>
-    
-
-    <li class="toctree-l3"><a href="#system-setup">System Setup</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GPUDirect SQL</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#system-setup">System Setup</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#driver-installation">Driver Installation</a></li>
-        
-            <li><a class="toctree-l4" href="#designing-tablespace">Designing Tablespace</a></li>
-        
-            <li><a class="toctree-l4" href="#distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#driver-installation">Driver Installation</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#designing-tablespace">Designing Tablespace</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#operations">Operations</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#controls-using-guc-parameters">Controls using GUC parameters</a></li>
-        
-            <li><a class="toctree-l4" href="#attension-for-visibility-map">Attension for visibility map</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#controls-using-guc-parameters">Controls using GUC parameters</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#ensure-usage-of-ssd-to-gpu-direct-sql-execution">Ensure usage of SSD-to-GPU Direct SQL Execution</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#attension-for-visibility-map">Attension for visibility map</a>
+    </li>
         </ul>
-    
-
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -205,14 +150,14 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>SSD-to-GPU Direct SQL Execution</h1>
-
-<h1 id="overview">Overview</h1>
+                <h1 id="gpu-direct-sql-execution">GPU Direct SQL Execution</h1>
+<h2 id="overview">Overview</h2>
 <p>For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.</p>
 <p>SSD-to-GPU Direct SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.</p>
 <p>Usually, PostgreSQL data blocks on the storage shall be once loaded to CPU/RAM through the PCIe bus, then, PostgreSQL runs WHERE-clause for filtering or JOIN/GROUP BY according to the query execution plan. Due to the characteristics of analytic workloads, the amount of result data set is much smaller than the source data set. For example, it is not rare case to read billions rows but output just hundreds rows after the aggregation operations with GROUP BY.</p>
@@ -223,9 +168,9 @@
 So, this feature requires NVMe-Strom driver which is a Linux kernel module in addition to PG-Strom which is a PostgreSQL extension module.</p>
 <p>Also note that this feature supports only NVMe-SSD. It does not support SAS or SATA SSD.
 We have tested several NVMe-SSD models. You can refer <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> for your information.</p>
-<h1 id="system-setup">System Setup</h1>
-<h2 id="driver-installation">Driver Installation</h2>
-<p><code>nvme_strom</code> package is required to activate SSD-to-GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.</p>
+<h2 id="system-setup">System Setup</h2>
+<h3 id="driver-installation">Driver Installation</h3>
+<p><code>nvme_strom</code> package is required to activate GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.</p>
 <p>If <code>heterodb-swdc</code> package is already installed, you can install the package by <code>yum</code> command.</p>
 <pre><code>$ sudo yum install nvme_strom
             :
@@ -247,16 +192,14 @@ Installed:
 
 Complete!
 </code></pre>
-
 <p>Once <code>nvme_strom</code> package gets installed, you can see <code>nvme_strom</code> module using <code>lsmod</code> command below.</p>
 <pre><code>$ lsmod | grep nvme
 nvme_strom             12625  0
 nvme                   27722  4
 nvme_core              52964  9 nvme
 </code></pre>
-
-<h2 id="designing-tablespace">Designing Tablespace</h2>
-<p>SSD-to-GPU Direct SQL Execution shall be invoked in the following case.</p>
+<h3 id="designing-tablespace">Designing Tablespace</h3>
+<p>GPU Direct SQL Execution shall be invoked in the following case.</p>
 <ul>
 <li>The target table to be scanned locates on the partition being consist of NVMe-SSD.<ul>
 <li><code>/dev/nvmeXXXX</code> block device, or md-raid0 volume which consists of NVMe-SSDs only.</li>
@@ -275,17 +218,15 @@ nvme_core              52964  9 nvme
 <p>For example, you can create a new tablespace below, if NVMe-SSD is mounted at <code>/opt/nvme</code>.</p>
 <pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 </code></pre>
-
 <p>In order to create a new table on the tablespace, specify the <code>TABLESPACE</code> option at the <code>CREATE TABLE</code> command below.</p>
 <pre><code>CREATE TABLE my_table (...) TABLESPACE my_nvme;
 </code></pre>
-
 <p>Or, use <code>ALTER DATABASE</code> command as follows, to change the default tablespace of the database.
 Note that tablespace of the existing tables are not changed in thie case.</p>
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
 </code></pre>
-
-<h2 id="distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</h2>
+<h2 id="operations">Operations</h2>
+<h3 id="distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</h3>
 <p>On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.</p>
 <p><a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>, basis of the SSD-to-GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.</p>
 <p>From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.</p>
@@ -306,17 +247,14 @@ LOG:      nvme1  (   3)      7       7
 LOG:      nvme3      7   (   3)      7
      :
 </code></pre>
-
 <p>Usually automatic configuration works well.
 In case when NVME-over-Fabric(RDMA) is used, unable to identify the location of nvme device on the PCIe-bus, so you need to configure the logical distance between NVME-SSD and GPU manually.</p>
 <p>The example below shows the configuration of <code>gpu2</code> for <code>nvme1</code>, and <code>gpu1</code> for <code>nvme2</code> and <code>nvme3</code>.
 It shall be added to <code>postgresql.conf</code>. Please note than manual configuration takes priority than the automatic configuration.</p>
 <pre><code>pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
 </code></pre>
-
-<h1 id="operations">Operations</h1>
-<h2 id="controls-using-guc-parameters">Controls using GUC parameters</h2>
-<p>There are two GPU parameters related to SSD-to-GPU Direct SQL Execution.</p>
+<h3 id="controls-using-guc-parameters">Controls using GUC parameters</h3>
+<p>There are two GPU parameters related to GPU Direct SQL Execution.</p>
 <p>The first is <code>pg_strom.nvme_strom_enabled</code> that simply turn on/off the function of SSD-to-GPU Direct SQL Execution.
 If <code>off</code>, SSD-to-GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is <code>on</code>.</p>
 <p>The other one is <code>pg_strom.nvme_strom_threshold</code> which specifies the least table size to invoke SSD-to-GPU Direct SQL Execution.</p>
@@ -372,8 +310,7 @@ and s_region = 'AMERICA'
                      -&gt;  Seq Scan on date1
 (31 rows)
 </code></pre>
-
-<h2 id="attension-for-visibility-map">Attension for visibility map</h2>
+<h3 id="attension-for-visibility-map">Attension for visibility map</h3>
 <p>Right now, GPU routines of PG-Strom cannot run MVCC visibility checks per row, because only host code has a special data structure for visibility checks. It also leads a problem.</p>
 <p>We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.</p>
 <p>To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.</p>
@@ -403,7 +340,7 @@ and s_region = 'AMERICA'
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -413,7 +350,7 @@ and s_region = 'AMERICA'
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -427,6 +364,11 @@ and s_region = 'AMERICA'
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

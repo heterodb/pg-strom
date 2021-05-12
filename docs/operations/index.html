@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Basic Operations - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,116 +51,63 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class=" current">
-                    
-    <a class="current" href="./">Basic Operations</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a></li>
-    
-
-    <li class="toctree-l3"><a href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
-    
-
-    <li class="toctree-l3"><a href="#pullup-underlying-plans">Pullup underlying plans</a></li>
-    
-
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Basic Operations</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pullup-underlying-plans">Pullup underlying plans</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#knowledge-base">Knowledge base</a>
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -187,14 +136,14 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>Basic operations</h1>
-
-<h1 id="confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</h1>
+                <h1 id="basic-operations">Basic operations</h1>
+<h2 id="confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</h2>
 <p>You can use <code>EXPLAIN</code> command to check whether query is executed on GPU device or not.
 A query is internally split into multiple elements and executed, and PG-Strom is capable to run SCAN, JOIN and GROUP BY in parallel on GPU device. If you can find out GpuScan, GpuJoin or GpuPreAgg was displayed instead of the standard operations by PostgreSQL, it means the query is partially executed on GPU device.</p>
 <p>Below is an example of <code>EXPLAIN</code> command output.</p>
@@ -226,7 +175,6 @@ A query is internally split into multiple elements and executed, and PG-Strom is
                      -&gt;  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
 (21 rows)
 </code></pre>
-
 <p>You can notice some unusual query execution plans.
 GpuJoin and GpuPreAgg are implemented on the CustomScan mechanism. In this example, GpuJoin runs JOIN operation on <code>t0</code>, <code>t1</code> and <code>t1</code>, then GpuPreAgg which receives the result of GpuJoin runs GROUP BY operation by the <code>cat</code> column on GPU device.</p>
 <p>PG-Strom interacts with the query optimizer during PostgreSQL is building a query execution plan, and it offers alternative query execution plan with estimated cost for PostgreSQL's optimizer, if any of SCAN, JOIN, or GROUP BY are executable on GPU device.
@@ -234,7 +182,7 @@ This estimated cost is better than other query execution plans that run on CPU, 
 <p>For GPU execution, it requires operators, functions and data types in use must be supported by PG-Strom.
 It supports numeric types like <code>int</code> or <code>float</code>, date and time types like <code>date</code> or <code>timestamp</code>, variable length string like <code>text</code> and so on. It also supports arithmetic operations, comparison operators and many built-in operators.
 See <a href="../ref_devfuncs/">References</a> for the detailed list.</p>
-<h1 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h1>
+<h2 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h2>
 <p>PG-Strom also supports PostgreSQL's CPU parallel execution.</p>
 <p>In the CPU parallel execution mode, Gather node launches several background worker processes, then it gathers the result of "partial" execution by individual background workers.
 CustomScan execution plan provided by PG-Strom, like GpuJoin or GpuPreAgg, support execution at the background workers. They process their partial task using GPU individually. A CPU core usually needs much more time to set up buffer to supply data for GPU than execution of SQL workloads on GPU, so hybrid usage of CPU and GPU parallel can expect higher performance.
@@ -266,8 +214,7 @@ Execution plan tree under the Gather is executable on background worker process.
                            -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
 (18 rows)
 </code></pre>
-
-<h1 id="pullup-underlying-plans">Pullup underlying plans</h1>
+<h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
 <p>PG-Strom can run SCAN, JOIN and GROUP BY workloads on GPU, however, it does not work with best performance if these custom execution plan simply replace the standard operations at PostgreSQL.
 An example of problematic scenario is that SCAN once writes back its result data set to the host buffer then send the same data into GPU again to execute JOIN. Once again, JOIN results are written back and send to GPU to execute GROUP BY. It causes data ping-pong between CPU and GPU.</p>
 <p>To avoid such inefficient jobs, PG-Strom has a special mode which pulls up its sub-plan to execute a bunch of jobs in a single GPU kernel invocation. Combination of the operations blow can cause pull-up of sub-plans.</p>
@@ -305,7 +252,6 @@ An example of problematic scenario is that SCAN once writes back its result data
                      -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
 (18 rows)
 </code></pre>
-
 <p>This example causes data ping-pong between GPU and host buffers for each execution stage, so not efficient and less performance.</p>
 <p>On the other hands, the query execution plan below pulls up sub-plans.</p>
 <pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
@@ -343,13 +289,15 @@ An example of problematic scenario is that SCAN once writes back its result data
  Execution time: 8495.391 ms
 (21 rows)
 </code></pre>
-
 <p>You may notice that SCAN on the table <code>t0</code> is embedded into GpuJoin, and GpuScan gets vanished.
 It means GpuJoin pulls up the underlying GpuScan, then combined GPU kernel function is also responsible for evaluation of the supplied WHERE-clause.</p>
 <p>In addition, here is a strange output in <code>EXPLAIN ANALYZE</code> result - it displays <em>(never executed)</em> for GpuJoin.
 It means GpuJoin is never executed during the query execution, and it is right. GpuPreAgg pulls up the underlying GpuJoin, then its combined GPU kernel function runs JOIN and GROUP BY.</p>
 <p>The <code>pg_strom.pullup_outer_scan</code> parameter controls whether SCAN is pulled up, and the <code>pg_strom.pullup_outer_join</code> parameter also controls whether JOIN is pulled up.
 Both parameters are configured to <code>on</code>. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.</p>
+<h2 id="knowledge-base">Knowledge base</h2>
+<p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
+<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
               
             </div>
           </div>
@@ -357,7 +305,7 @@ Both parameters are configured to <code>on</code>. Usually, no need to disable t
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../sys_admin/" class="btn btn-neutral float-right" title="System Administration">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../brin/" class="btn btn-neutral float-right" title="BRIN Index">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href="../install/" class="btn btn-neutral" title="Install"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -372,7 +320,7 @@ Both parameters are configured to <code>on</code>. Usually, no need to disable t
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -382,20 +330,25 @@ Both parameters are configured to <code>on</code>. Usually, no need to disable t
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
         <span><a href="../install/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../sys_admin/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../brin/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

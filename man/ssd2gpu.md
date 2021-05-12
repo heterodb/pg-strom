@@ -1,8 +1,8 @@
-@ja:<h1>SSD-to-GPUダイレクトSQL実行</h1>
-@en:<h1>SSD-to-GPU Direct SQL Execution</h1>
+@ja:#GPUダイレクトSQL実行
+@en:#GPU Direct SQL Execution
 
-@ja:#概要
-@en:#Overview
+@ja:##概要
+@en:##Overview
 
 @ja{
 SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。
@@ -50,19 +50,19 @@ Also note that this feature supports only NVMe-SSD. It does not support SAS or S
 We have tested several NVMe-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
 }
 
-@ja:#初期設定
-@en:#System Setup
+@ja:##初期設定
+@en:##System Setup
 
-@ja:##ドライバのインストール
-@en:##Driver Installation
+@ja:###ドライバのインストール
+@en:###Driver Installation
 
 @ja{
-SSD-to-GPUダイレクトSQL実行機能を利用するには`nvme_strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
+GPUダイレクトSQL実行機能を利用するには`nvme_strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
 
 既に`heterodb-swdc`パッケージをインストールしている場合、`yum`コマンドによるインストールも可能です。
 }
 @en{
-`nvme_strom` package is required to activate SSD-to-GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+`nvme_strom` package is required to activate GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
 
 If `heterodb-swdc` package is already installed, you can install the package by `yum` command.
 }
@@ -103,11 +103,11 @@ nvme                   27722  4
 nvme_core              52964  9 nvme
 ```
 
-@ja:##テーブルスペースの設計
-@en:##Designing Tablespace
+@ja:###テーブルスペースの設計
+@en:###Designing Tablespace
 
 @ja{
-SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。
+GPUダイレクトSQL実行は以下の条件で発動します。
 
 - スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。
     - `/dev/nvmeXXXX`ブロックデバイス、または`/dev/nvmeXXXX`ブロックデバイスのみから構成されたmd-raid0区画が対象です。
@@ -115,7 +115,7 @@ SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。
     - この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに`shared_buffers`の設定値の1/3を加えた大きさです。
 }
 @en{
-SSD-to-GPU Direct SQL Execution shall be invoked in the following case.
+GPU Direct SQL Execution shall be invoked in the following case.
 
 - The target table to be scanned locates on the partition being consist of NVMe-SSD.
     - `/dev/nvmeXXXX` block device, or md-raid0 volume which consists of NVMe-SSDs only.
@@ -172,8 +172,11 @@ Note that tablespace of the existing tables are not changed in thie case.
 ALTER DATABASE my_database SET TABLESPACE my_nvme;
 ```
 
-@ja:##GPUとNVME-SSD間の距離
-@en:##Distance between GPU and NVME-SSD
+@ja:##運用
+@en:##Operations
+
+@ja:###GPUとNVME-SSD間の距離
+@en:###Distance between GPU and NVME-SSD
 
 @ja{
 サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。
@@ -243,18 +246,14 @@ It shall be added to `postgresql.conf`. Please note than manual configuration ta
 pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
 ```
 
-
-@ja:#運用
-@en:#Operations
-
-@ja:##GUCパラメータによる制御
-@en:##Controls using GUC parameters
+@ja:###GUCパラメータによる制御
+@en:###Controls using GUC parameters
 
 @ja{
-SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。
+GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。
 }
 @en{
-There are two GPU parameters related to SSD-to-GPU Direct SQL Execution.
+There are two GPU parameters related to GPU Direct SQL Execution.
 }
 @ja{
 一つは`pg_strom.nvme_strom_enabled`で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
@@ -347,8 +346,8 @@ and s_region = 'AMERICA'
 ```
 
 
-@ja:##Visibility Mapに関する注意事項
-@en:##Attension for visibility map
+@ja:###Visibility Mapに関する注意事項
+@en:###Attension for visibility map
 
 @ja{
 現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。

@@ -1,16 +1,16 @@
 @ja{
-<h1>GUCパラメータ</h1>
+#GUCパラメータ
 
 本節ではPG-Stromの提供する設定パラメータについて説明します。
 }
 @en{
-<h1>GUC Parameters</h1>
+#GUC Parameters
 
 This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-# 特定機能の有効化/無効化
+## 特定機能の有効化/無効化
 
 |パラメータ名                   |型    |初期値|説明       |
 |:------------------------------|:----:|:----:|:----------|
@@ -30,7 +30,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @en{
-# Enables/disables a particular feature
+## Enables/disables a particular feature
 
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:----:|:----------|
@@ -50,7 +50,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#オプティマイザに関する設定
+## オプティマイザに関する設定
 
 |パラメータ名                   |型    |初期値|説明       |
 |:------------------------------|:----:|:----:|:----------|
@@ -60,7 +60,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.gpu_operator_cost`   |`real`|0.00015|GPUの演算式あたりの処理コストとして使用する値。`cpu_operator_cost`よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。|
 }
 @en{
-#Optimizer Configuration
+## Optimizer Configuration
 
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:----:|:----------|
@@ -71,7 +71,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#エグゼキュータに関する設定
+## エグゼキュータに関する設定
 
 |パラメータ名                 |型    |初期値|説明       |
 |:----------------------------|:----:|:----:|:----------|
@@ -79,7 +79,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.reuse_cuda_context`|`bool`|`off` |クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。<br>また、CPUパラレルを利用する場合には効果はありません。|
 }
 @en{
-#Executor Configuration
+##Executor Configuration
 
 |Parameter                    |Type  |Default|Description|
 |:----------------------------|:----:|:-----:|:----------|
@@ -88,7 +88,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#GPUダイレクトSQL関連の設定
+##GPUダイレクトSQL関連の設定
 |パラメータ名                   |型      |初期値|説明       |
 |:------------------------------|:------:|:-----|:----------|
 |`pg_strom.gpudirect_driver`    |`text`  |自動  |GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。|
@@ -98,7 +98,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.nvme_distance_map`   |`string`|`NULL`|NVME-SSDに最も近いGPUを手動で設定します。書式は`<nvmeX>:<gpuX>[,...]`で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：`nvme0:gpu0,nvme1:gpu0`）<br>ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。|
 }
 @en{
-#GPUDirect SQL Configuration
+##GPUDirect SQL Configuration
 |Parameter                     |Type    |Default|Description|
 |:-----------------------------|:------:|:-----:|:----------|
 |`pg_strom.gpudirect_driver`   |`text`  |auto   |It shows the driver software name of GPUDirect SQL (read-only).|
@@ -109,7 +109,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#Arrow_Fdw関連の設定
+##Arrow_Fdw関連の設定
 |パラメータ名                    |型      |初期値    |説明       |
 |:-------------------------------|:------:|:---------|:----------|
 |`arrow_fdw.enabled`             |`bool`  |`on`      |推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。|
@@ -117,7 +117,7 @@ This session introduces PG-Strom's configuration parameters.
 |`arrow_fdw.record_batch_size`   |`int`   |256MB     |Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。`INSERT`コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。|
 }
 @en{
-#Arrow_Fdw Configuration
+##Arrow_Fdw Configuration
 |Parameter                       |Type  |Default|Description|
 |:-------------------------------|:----:|:-----:|:----------|
 |`arrow_fdw.enabled`             |`bool`|`on`   |By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.|
@@ -126,7 +126,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#Gstore_Fdw関連の設定
+##Gstore_Fdw関連の設定
 |パラメータ名                 |型    |初期値|説明       |
 |:----------------------------|:----:|:-----|:----------|
 |`gstore_fdw.enabled`         |`bool`|`on`  |推定コスト値を調整し、Gstore_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Gstore_FdwによるForeign ScanだけがGPUメモリストアをスキャンできるという事に留意してください。|
@@ -135,7 +135,7 @@ This session introduces PG-Strom's configuration parameters.
 |`gstore_fdw.default_redo_dir`|`text`|`NULL`|`redo_log_file`が明示的に指定されなかった場合に、RedoLogファイルを自動生成するディレクトリを指定します。指定のない場合、現在のデータベースのデフォルトテーブルスペース上に作成されます。|
 }
 @en{
-#Gstore_Fdw Configuration
+##Gstore_Fdw Configuration
 |Parameter                    |Type  |Default|Description|
 |:----------------------------|:----:|:-----:|:----------|
 |`gstore_fdw.enabled`         |`bool`|`on`   |By adjustment of estimated cost value, it turns on/off Gstore_Fdw. Note that only Foreign Scan (Gstore_Fdw) can scan on GPU memory store, if GpuScan is not capable to run on.|
@@ -145,7 +145,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#GPUプログラムの生成とビルドに関連する設定
+##GPUプログラムの生成とビルドに関連する設定
 
 |パラメータ名                   |型      |初期値  |説明       |
 |:------------------------------|:------:|:-------|:----------|
@@ -155,7 +155,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.extra_kernel_stack_size`|`int`|`0`|GPUカーネルの実行時にスレッド毎に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更するの必要はありません。|
 }
 @en{
-#Configuration of GPU code generation and build
+##Configuration of GPU code generation and build
 
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:----:|:----------|
@@ -166,7 +166,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#GPUデバイスに関連する設定
+##GPUデバイスに関連する設定
 
 |パラメータ名                   |型      |初期値 |説明       |
 |:------------------------------|:------:|:------|:----------|
@@ -174,7 +174,7 @@ This session introduces PG-Strom's configuration parameters.
 |`pg_strom.gpu_memory_segment_size`|`int`|`512MB`|PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。
 }
 @en{
-#GPU Device Configuration
+##GPU Device Configuration
 
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:-----:|:----------|
@@ -183,7 +183,7 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-#システム共有メモリに関連する設定
+##システム共有メモリに関連する設定
 |パラメータ名                   |型    |初期値 |説明       |
 |:------------------------------|:----:|:------|:----------|
 |shmbuf.segment_size            |`int` |`256MB`|           |
@@ -191,7 +191,7 @@ This session introduces PG-Strom's configuration parameters.
 
 }
 @en{
-#System Shared Memory Configuration
+##System Shared Memory Configuration
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:-----:|:----------|
 |shmbuf.segment_size            |`int` |`256MB`|

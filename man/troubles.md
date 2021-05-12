@@ -1,8 +1,8 @@
-@ja:<h1>トラブルシューティング</h1>
-@en:<h1>Trouble Shooting</h1>
+@ja:#トラブルシューティング
+@en:#Trouble Shooting
 
-@ja:# 問題の切り分け
-@en:# Identify the problem
+@ja:##問題の切り分け
+@en:##Identify the problem
 
 @ja{
 特定のワークロードを実行した際に何がしかの問題が発生する場合には、それが何に起因するものであるのかを特定するのはトラブルシューティングの第一歩です。
@@ -38,8 +38,8 @@ In addition, we provide parameters to disable particular execution plan like Gpu
 See [references/GUC Parameters](ref_params.md) for more details.
 }
 
-@ja:# クラッシュダンプの採取
-@en:# Collecting crash dump
+@ja:##クラッシュダンプの採取
+@en:##Collecting crash dump
 
 @ja{
 システムのクラッシュを引き起こすような重大なトラブルの解析にはクラッシュダンプの採取が欠かせません。
@@ -50,8 +50,8 @@ Crash dump is very helpful for analysis of serious problems which lead system cr
 This session introduces the way to collect crash dump of the PostgreSQL and PG-Strom process (CPU side) and PG-Strom's GPU kernel, and show the back trace on the serious problems.
 }
 
-@ja:## PostgreSQL起動時設定の追加
-@en:## Add configuration on PostgreSQL startup
+@ja:###PostgreSQL起動時設定の追加
+@en:###Add configuration on PostgreSQL startup
 
 @ja{
 プロセスのクラッシュ時にクラッシュダンプ(CPU側)を生成するには、PostgreSQLサーバプロセスが生成する事のできる core ファイルのサイズを無制限に変更する必要があります。これはPostgreSQLサーバプロセスを起動するシェル上で`ulimit -c`コマンドを実行して変更する事ができます。
@@ -109,8 +109,8 @@ Max core file size        unlimited            unlimited            bytes
     :                         :                    :                  :
 ```
 
-@ja:## debuginfoパッケージのインストール
-@en:## Installation of debuginfo package
+@ja:###debuginfoパッケージのインストール
+@en:###Installation of debuginfo package
 
 @ja{
 クラッシュダンプから意味のある情報を読み取るにはシンボル情報が必要です。
@@ -139,8 +139,8 @@ Installed:
 Complete!
 ```
 
-@ja:## CPU側バックトレースの確認
-@en:## Checking the back-trace on CPU side
+@ja:###CPU側バックトレースの確認
+@en:###Checking the back-trace on CPU side
 
 @ja{
 クラッシュダンプの作成されるパスは、カーネルパラメータ`kernel.core_pattern`および`kernel.core_uses_pid`の値によって決まります。
@@ -198,8 +198,8 @@ In this case, I sent `SIGSEGV` signal to the PostgreSQL backend which is waiting
 }
 
 
-@ja:## GPU側バックトレースの確認
-@en:## Checking the backtrace on GPU
+@ja:###GPU側バックトレースの確認
+@en:###Checking the backtrace on GPU
 
 @ja{
 GPUカーネルのクラッシュダンプは、（`CUDA_COREDUMP_FILE`環境変数を用いて明示的に指定しなければ）PostgreSQLサーバプロセスのカレントディレクトリに生成されます。

@@ -1,20 +1,21 @@
+@ja:#パーティション
+@en:#Partitioning
+
 @ja{
-<h1>パーティショニング</h1>
 本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。
 なお、本章の内容は**PostgreSQL v11以降**でPG-Stromを使用する場合にのみ有効です。
 
 PostgreSQLのパーティション機能について、詳しくは[PostgreSQL文書：テーブルのパーティショニング](https://www.postgresql.jp/document/current/html/ddl-partitioning.html)を参照してください。
 }
 @en{
-<h1>Partitioning</h1>
 This chapter introduces the way to use PG-Strom and the partitioning feature of PostgreSQL.
 Note that this chapter is only valid when PG-Strom works on **PostgreSQL v11 or later**.
 
 Also see [PostgreSQL Document: Table Partitioning](https://www.postgresql.org/docs/current/static/ddl-partitioning.html) for more details of the partitioning feature of PostgreSQL.
 }
 
-@ja:#概要
-@en:#Brief overview
+@ja:##概要
+@en:##Overview
 
 @ja{
 PostgreSQL v10においてパーティショニング機能がサポートされました。
@@ -142,8 +143,8 @@ Due to the scan qualification, it omits scan on the partition child tables for 2
 (38 rows)
 ```
 
-@ja:#設定と運用
-@en:#Configuration and Operation
+@ja:##設定と運用
+@en:##Configuration and Operation
 
 @ja{
 以下のGUCパラメータにより、PG-StromはJOINやGROUP BYのパーティション子テーブルへのプッシュダウンを制御します。
@@ -207,8 +208,8 @@ postgres=# EXPLAIN SELECT cat,count(*),avg(ax) FROM pt NATURAL JOIN t1 WHERE ymd
 (21 rows)
 ```
 
-@ja:##SSDとGPUの配置に関する考慮
-@en:##Consideration for SSD/GPU location
+@ja:###SSDとGPUの配置に関する考慮
+@en:###Consideration for SSD/GPU location
 
 @ja{
 PostgreSQLのパーティショニングとSSD-to-GPUダイレクトSQL実行を併用する場合、各パーティション子テーブルがデータブロックを保存するNVMe-SSDストレージの物理的な配置には特に注意が必要です。
@@ -219,8 +220,8 @@ PostgreSQLのパーティショニングとSSD-to-GPUダイレクトSQL実行を
 }
 
 
-@ja:#制限事項
-@en:#Limitations
+@ja:##制限事項
+@en:##Limitations
 
 @ja{
 **実験的機能**

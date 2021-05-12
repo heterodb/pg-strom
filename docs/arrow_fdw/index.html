@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Apache Arrow - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,155 +51,89 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">Apache Arrow</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#overview">Overview</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Apache Arrow</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#what-is-apache-arrow">What is Apache Arrow?</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#what-is-apache-arrow">What is Apache Arrow?</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#creation-of-foreign-tables">Creation of foreign tables</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#foreign-table-options">Foreign table options</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#data-type-mapping">Data type mapping</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#how-to-read-explain">How to read EXPLAIN</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#operations">Operations</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#how-to-make-arrow-files">How to make Arrow files</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#creation-of-foreign-tables">Creation of foreign tables</a></li>
-        
-            <li><a class="toctree-l4" href="#foreign-table-options">Foreign table options</a></li>
-        
-            <li><a class="toctree-l4" href="#data-type-mapping">Data type mapping</a></li>
-        
-            <li><a class="toctree-l4" href="#how-to-read-explain">How to read EXPLAIN</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#using-pyarrowpandas">Using PyArrow+Pandas</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#using-pg2arrow">Using Pg2Arrow</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#writable-arrow_fdw">Writable Arrow_Fdw</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#how-to-make-arrow-files">How to make Arrow files</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#advanced-usage">Advanced Usage</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#using-pyarrowpandas">Using PyArrow+Pandas</a></li>
-        
-            <li><a class="toctree-l4" href="#using-pg2arrow">Using Pg2Arrow</a></li>
-        
-            <li><a class="toctree-l4" href="#writable-arrow_fdw">Writable Arrow_Fdw</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#ssdtogpu-direct-sql">SSDtoGPU Direct SQL</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#partition-configuration">Partition configuration</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#advanced-usage">Advanced Usage</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l4" href="#ssdtogpu-direct-sql">SSDtoGPU Direct SQL</a></li>
-        
-            <li><a class="toctree-l4" href="#partition-configuration">Partition configuration</a></li>
-        
-        </ul>
-    
-
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -226,14 +162,14 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>Columnar data store (Arrow_Fdw)</h1>
-
-<h1 id="overview">Overview</h1>
+                <h1 id="apache-arrow-columnar-store">Apache Arrow (Columnar Store)</h1>
+<h2 id="overview">Overview</h2>
 <p>PostgreSQL tables internally consist of 8KB blocks<sup id="fnref:1"><a class="footnote-ref" href="#fn:1">1</a></sup>, and block contains tuples which is a data structure of all the attributes and metadata per row. It collocates date of a row closely, so it works effectively for INSERT/UPDATE-major workloads, but not suitable for summarizing or analytics of mass-data.</p>
 <p>It is not usual to reference all the columns in a table on mass-data processing, and we tend to reference a part of columns in most cases. In this case, the storage I/O bandwidth consumed by unreferenced columns are waste, however, we have no easy way to fetch only particular columns referenced from the row-oriented data structure.</p>
 <p>In case of column oriented data structure, in an opposite manner, it has extreme disadvantage on INSERT/UPDATE-major workloads, however, it can pull out maximum performance of storage I/O on mass-data processing workloads because it can loads only referenced columns. From the standpoint of processor efficiency also, column-oriented data structure looks like a flat array that pulls out maximum bandwidth of memory subsystem for GPU, by special memory access pattern called Coalesced Memory Access.</p>
@@ -244,8 +180,8 @@
 <p>Apache Arrow format file internally contains Schema portion to define data structure, and one or more RecordBatch to save columnar-data based on the schema definition. For data types, it supports integers, strint (variable-length), date/time types and so on. Indivisual columnar data has its internal representation according to the data types.</p>
 <p>Data representation in Apache Arrow is not identical with the representation in PostgreSQL. For example, epoch of timestamp in Arrow is <code>1970-01-01</code> and it supports multiple precision. In contrast, epoch of timestamp in PostgreSQL is <code>2001-01-01</code> and it has microseconds accuracy.</p>
 <p>Arrow_Fdw allows to read Apache Arrow files on PostgreSQL using foreign table mechanism. If an Arrow file contains 8 of record batches that has million items for each column data, for example, we can access 8 million rows on the Arrow files through the foreign table.</p>
-<h1 id="operations">Operations</h1>
-<h2 id="creation-of-foreign-tables">Creation of foreign tables</h2>
+<h2 id="operations">Operations</h2>
+<h3 id="creation-of-foreign-tables">Creation of foreign tables</h3>
 <p>Usually it takes the 3 steps below to create a foreign table.</p>
 <ul>
 <li>Define a foreign-data-wrapper using <code>CREATE FOREIGN DATA WRAPPER</code> command</li>
@@ -263,7 +199,6 @@
 ) SERVER arrow_fdw
   OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
-
 <p>Data type of columns specified by the <code>CREATE FOREIGN TABLE</code> command must be matched to schema definition of the Arrow files to be mapped.</p>
 <p>Arrow_Fdw also supports a useful manner using <code>IMPORT FOREIGN SCHEMA</code> statement. It automatically generates a foreign table definition using schema definition of the Arrow files. It specifies the foreign table name, schema name to import, and path name of the Arrow files using OPTION-clause. Schema definition of Arrow files contains data types and optional column name for each column. It declares a new foreign table using these information.</p>
 <pre><code>IMPORT FOREIGN SCHEMA flogdata
@@ -271,8 +206,7 @@
   INTO public
 OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
-
-<h2 id="foreign-table-options">Foreign table options</h2>
+<h3 id="foreign-table-options">Foreign table options</h3>
 <p>Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.</p>
 <table>
 <thead>
@@ -315,7 +249,7 @@ OPTIONS (file '/path/to/logdata.arrow');
 </tr>
 </tbody>
 </table>
-<h2 id="data-type-mapping">Data type mapping</h2>
+<h3 id="data-type-mapping">Data type mapping</h3>
 <p>Arrow data types are mapped on PostgreSQL data types as follows.</p>
 <table>
 <thead>
@@ -403,7 +337,7 @@ OPTIONS (file '/path/to/logdata.arrow');
 </tr>
 </tbody>
 </table>
-<h2 id="how-to-read-explain">How to read EXPLAIN</h2>
+<h3 id="how-to-read-explain">How to read EXPLAIN</h3>
 <p><code>EXPLAIN</code> command show us information about Arrow files reading.</p>
 <p>The example below is an output of query execution plan that includes flineorder foreign table that mapps an Arrow file of 309GB.</p>
 <pre><code>=# EXPLAIN
@@ -435,7 +369,6 @@ OPTIONS (file '/path/to/logdata.arrow');
                      Filter: (d_year = 1993)
 (18 rows)
 </code></pre>
-
 <p>According to the <code>EXPLAIN</code> output, we can see Custom Scan (GpuJoin) scans <code>flineorder</code> foreign table. <code>file0</code> item shows the filename (<code>/opt/nvme/lineorder_s401.arrow</code>) on behalf of the foreign table and its size. If multiple files are mapped, any files are individually shown, like <code>file1</code>, <code>file2</code>, ... The <code>referenced</code> item shows the list of referenced columns. We can see this query touches <code>lo_orderdate</code>, <code>lo_quantity</code>, <code>lo_extendedprice</code> and <code>lo_discount</code> columns.</p>
 <p>In addition, <code>GPU Preference: GPU0 (Tesla V100-PCIE-16GB)</code> and <code>NVMe-Strom: enabled</code> shows us the scan on <code>flineorder</code> uses SSD-to-GPU Direct SQL mechanism.</p>
 <p>VERBOSE option outputs more detailed information.</p>
@@ -478,11 +411,10 @@ OPTIONS (file '/path/to/logdata.arrow');
                      Filter: (date1.d_year = 1993)
 (28 rows)
 </code></pre>
-
 <p>The verbose output additionally displays amount of column-data to be loaded on reference of columns. The load of <code>lo_orderdate</code>, <code>lo_quantity</code>, <code>lo_extendedprice</code> and <code>lo_discount</code> columns needs to read 87.4GB in total. It is 28.3% towards the filesize (309.2GB).</p>
-<h1 id="how-to-make-arrow-files">How to make Arrow files</h1>
+<h2 id="how-to-make-arrow-files">How to make Arrow files</h2>
 <p>This section introduces the way to transform dataset already stored in PostgreSQL database system into Apache Arrow file.</p>
-<h2 id="using-pyarrowpandas">Using PyArrow+Pandas</h2>
+<h3 id="using-pyarrowpandas">Using PyArrow+Pandas</h3>
 <p>A pair of PyArrow module, developed by Arrow developers community, and Pandas data frame can dump PostgreSQL database into an Arrow file.</p>
 <p>The example below reads all the data in table <code>t0</code>, then write out them into <code>/tmp/t0.arrow</code>.</p>
 <pre><code>import pyarrow as pa
@@ -494,9 +426,8 @@ f = pa.RecordBatchFileWriter('/tmp/t0.arrow', Y.schema)
 f.write_table(Y,1000000)      # RecordBatch for each million rows
 f.close()
 </code></pre>
-
 <p>Please note that the above operation once keeps query result of the SQL on memory, so should pay attention on memory consumption if you want to transfer massive rows at once.</p>
-<h2 id="using-pg2arrow">Using Pg2Arrow</h2>
+<h3 id="using-pg2arrow">Using Pg2Arrow</h3>
 <p>On the other hand, <code>pg2arrow</code> command, developed by PG-Strom Development Team, enables us to write out query result into Arrow file. This tool is designed to write out massive amount of data into storage device like NVME-SSD. It fetch query results from PostgreSQL database system, and write out Record Batches of Arrow format for each data size specified by the <code>-s|--segment-size</code> option. Thus, its memory consumption is relatively reasonable.</p>
 <p><code>pg2arrow</code> command is distributed with PG-Strom. It shall be installed on the <code>bin</code> directory of PostgreSQL related utilities.</p>
 <pre><code>$ ./pg2arrow --help
@@ -532,16 +463,14 @@ Other options:
 
 Report bugs to &lt;pgstrom@heterodbcom&gt;.
 </code></pre>
-
 <p>The <code>-h</code> or <code>-U</code> option specifies the connection parameters of PostgreSQL, like <code>psql</code> or <code>pg_dump</code>. The simplest usage of this command is running a SQL command specified by <code>-c|--command</code> option on PostgreSQL server, then write out results into the file specified by <code>-o|--output</code> option in Arrow format.</p>
 <p><code>--append</code> option is available, instead of <code>-o|--output</code> option. It means appending data to existing Apache Arrow file. In this case, the target Apache Arrow file must have fully identical schema definition towards the specified SQL command.</p>
 <p>The example below reads all the data in table <code>t0</code>, then write out them into the file <code>/tmp/t0.arrow</code>.</p>
 <pre><code>$ pg2arrow -U kaigai -d postgres -c &quot;SELECT * FROM t0&quot; -o /tmp/t0.arrow
 </code></pre>
-
 <p>Although it is an option for developers, <code>--dump &lt;filename&gt;</code> prints schema definition and record-batch location and size of Arrow file in human readable form.</p>
 <p><code>--progress</code> option enables to show progress of the task. It is useful when a huge table is transformed to Apache Arrow format.</p>
-<h2 id="writable-arrow_fdw">Writable Arrow_Fdw</h2>
+<h3 id="writable-arrow_fdw">Writable Arrow_Fdw</h3>
 <p>Arrow_Fdw foreign tables that have <code>writable</code> option allow to append data using <code>INSERT</code> command, and to erase entire contents of the foreign table (that is Apache Arrow file on behalf of the foreign table) using <code>pgstrom.arrow_fdw_truncate()</code> function. On the other hand, <code>UPDATE</code> and <code>DELETE</code> commands are not supported.</p>
 <p>In case of <code>writable</code> option was enabled on Arrow_Fdw foreign tables, it accepts only one pathname specified by the <code>file</code> or <code>files</code> option. You cannot specify multiple pathnames, and exclusive to the <code>dir</code> option.
 It does not require that the Apache Arrow file actually exists on the specified path at the foreign table declaration time, on the other hands, PostgreSQL server needs to have permission to create a new file on the path.</p>
@@ -579,7 +508,6 @@ postgres=# SELECT count(*) FROM ftest;
    100
 (1 row)
 </code></pre>
-
 <p>Right now, PostgreSQL does not support <code>TRUNCATE</code> statement on foreign tables.
 As an alternative, Arrow_Fdw provide <code>pgstrom.arrow_fdw_truncate(regclass)</code> function that eliminates all the contents of Apache Arrow file on behalf of the foreign table.</p>
 <pre><code>postgres=# SELECT count(*) FROM ftest;
@@ -600,16 +528,15 @@ postgres=# SELECT count(*) FROM ftest;
      0
 (1 row)
 </code></pre>
-
-<h1 id="advanced-usage">Advanced Usage</h1>
-<h2 id="ssdtogpu-direct-sql">SSDtoGPU Direct SQL</h2>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<h3 id="ssdtogpu-direct-sql">SSDtoGPU Direct SQL</h3>
 <p>In case when all the Arrow files mapped on the Arrow_Fdw foreign table satisfies the terms below, PG-Strom enables SSD-to-GPU Direct SQL to load columnar data.</p>
 <ul>
 <li>Arrow files are on NVME-SSD volume.</li>
 <li>NVME-SSD volume is managed by Ext4 filesystem.</li>
 <li>Total size of Arrow files exceeds the <code>pg_strom.nvme_strom_threshold</code> configuration.</li>
 </ul>
-<h2 id="partition-configuration">Partition configuration</h2>
+<h3 id="partition-configuration">Partition configuration</h3>
 <p>Arrow_Fdw foreign tables can be used as a part of partition leafs. Usual PostgreSQL tables can be mixtured with Arrow_Fdw foreign tables. So, pay attention Arrow_Fdw foreign table does not support any writer operations. And, make boundary condition of the partition consistent to the contents of the mapped Arrow file. It is a responsibility of the database administrators.</p>
 <p><img alt="Example of partition configuration" src="../img/partition-logdata.png" /></p>
 <p>A typical usage scenario is processing of long-standing accumulated log-data.</p>
@@ -654,7 +581,6 @@ CREATE FOREIGN TABLE lineorder__1996 PARTITION OF lineorder
    FOR VALUES FROM (19960101) TO (19970101)
 SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1996.arrow');
 </code></pre>
-
 <p>Below is the query execution plan towards the table. By the query condition <code>lo_orderdate between 19950701 and 19960630</code> that touches boundary condition of the partition, the partition leaf <code>lineorder__1993</code> and <code>lineorder__1994</code> are pruned, so it makes a query execution plan to read other (foreign) tables only.</p>
 <pre><code>=# EXPLAIN
     SELECT sum(lo_extendedprice*lo_discount) as revenue
@@ -691,12 +617,10 @@ SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1996.arrow');
 (16 rows)
 
 </code></pre>
-
 <p>The operation below extracts the data in <code>1997</code> from <code>lineorder__now</code> table, then move to a new Arrow_Fdw foreign table.</p>
 <pre><code>$ pg2arrow -d sample  -o /opt/tmp/lineorder_1997.arrow \
            -c &quot;SELECT * FROM lineorder WHERE lo_orderdate between 19970101 and 19971231&quot;
 </code></pre>
-
 <p><code>pg2arrow</code> command extracts the data in 1997 from the <code>lineorder</code> table into a new Arrow file.</p>
 <pre><code>BEGIN;
 --
@@ -712,7 +636,6 @@ SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1997.arrow');
 
 COMMIT;
 </code></pre>
-
 <p>A series of operations above delete the data in 1997 from <code>lineorder__new</code> that is a PostgreSQL table, then maps an Arrow file (<code>/opt/tmp/lineorder_1997.arrow</code>) which contains an identical contents as a foreign table <code>lineorder__1997</code>.</p>
 <div class="footnote">
 <hr />
@@ -747,7 +670,7 @@ COMMIT;
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -757,7 +680,7 @@ COMMIT;
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -771,6 +694,11 @@ COMMIT;
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

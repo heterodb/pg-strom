@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>GUC Parameters - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,134 +51,73 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GUC Parameters</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#enablesdisables-a-particular-feature">Enables/disables a particular feature</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#optimizer-configuration">Optimizer Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#executor-configuration">Executor Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpudirect-sql-configuration">GPUDirect SQL Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gstore_fdw-configuration">Gstore_Fdw Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-device-configuration">GPU Device Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#system-shared-memory-configuration">System Shared Memory Configuration</a>
+    </li>
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">GUC Parameters</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#enablesdisables-a-particular-feature">Enables/disables a particular feature</a></li>
-    
-
-    <li class="toctree-l3"><a href="#optimizer-configuration">Optimizer Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#executor-configuration">Executor Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpudirect-sql-configuration">GPUDirect SQL Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gstore_fdw-configuration">Gstore_Fdw Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpu-device-configuration">GPU Device Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#system-shared-memory-configuration">System Shared Memory Configuration</a></li>
-    
-
-    </ul>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -205,15 +146,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>GUC Parameters</h1>
-
+                <h1 id="guc-parameters">GUC Parameters</h1>
 <p>This session introduces PG-Strom's configuration parameters.</p>
-<h1 id="enablesdisables-a-particular-feature">Enables/disables a particular feature</h1>
+<h2 id="enablesdisables-a-particular-feature">Enables/disables a particular feature</h2>
 <table>
 <thead>
 <tr>
@@ -304,7 +245,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="optimizer-configuration">Optimizer Configuration</h1>
+<h2 id="optimizer-configuration">Optimizer Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -341,7 +282,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="executor-configuration">Executor Configuration</h1>
+<h2 id="executor-configuration">Executor Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -366,7 +307,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpudirect-sql-configuration">GPUDirect SQL Configuration</h1>
+<h2 id="gpudirect-sql-configuration">GPUDirect SQL Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -409,7 +350,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h1>
+<h2 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -440,7 +381,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gstore_fdw-configuration">Gstore_Fdw Configuration</h1>
+<h2 id="gstore_fdw-configuration">Gstore_Fdw Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -477,7 +418,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h1>
+<h2 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h2>
 <table>
 <thead>
 <tr>
@@ -514,7 +455,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpu-device-configuration">GPU Device Configuration</h1>
+<h2 id="gpu-device-configuration">GPU Device Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -539,7 +480,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="system-shared-memory-configuration">System Shared Memory Configuration</h1>
+<h2 id="system-shared-memory-configuration">System Shared Memory Configuration</h2>
 <table>
 <thead>
 <tr>
@@ -586,7 +527,7 @@
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -596,7 +537,7 @@
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -610,6 +551,11 @@
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

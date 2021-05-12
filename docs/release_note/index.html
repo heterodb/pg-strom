@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Release Note - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,156 +51,95 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1 current">
-		
-    <a class="current" href="./">Release Note</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l2"><a href="#pg-strom-v23-release">PG-Strom v2.3 Release</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Release Note</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v23-release">PG-Strom v2.3 Release</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#overview">Overview</a></li>
-        
-            <li><a class="toctree-l3" href="#prerequisites">Prerequisites</a></li>
-        
-            <li><a class="toctree-l3" href="#new-features">New Features</a></li>
-        
-            <li><a class="toctree-l3" href="#significant-bug-fixes">Significant bug fixes</a></li>
-        
-            <li><a class="toctree-l3" href="#deprecated-features">Deprecated Features</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#new-features">New Features</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#significant-bug-fixes">Significant bug fixes</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#deprecated-features">Deprecated Features</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l2"><a href="#pg-strom-v22-release">PG-Strom v2.2 Release</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v22-release">PG-Strom v2.2 Release</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#overview_1">Overview</a></li>
-        
-            <li><a class="toctree-l3" href="#prerequisites_1">Prerequisites</a></li>
-        
-            <li><a class="toctree-l3" href="#new-features_1">New Features</a></li>
-        
-            <li><a class="toctree-l3" href="#features-to-be-deprecated">Features to be deprecated</a></li>
-        
-            <li><a class="toctree-l3" href="#dropped-features">Dropped Features</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#overview_1">Overview</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#prerequisites_1">Prerequisites</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#new-features_1">New Features</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#features-to-be-deprecated">Features to be deprecated</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#dropped-features">Dropped Features</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l2"><a href="#pg-strom-v20-release">PG-Strom v2.0 Release</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v20-release">PG-Strom v2.0 Release</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#overview_2">Overview</a></li>
-        
-            <li><a class="toctree-l3" href="#prerequisites_2">Prerequisites</a></li>
-        
-            <li><a class="toctree-l3" href="#new-features_2">New Features</a></li>
-        
-            <li><a class="toctree-l3" href="#dropped-features_1">Dropped features</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#overview_2">Overview</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#prerequisites_2">Prerequisites</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#new-features_2">New Features</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#dropped-features_1">Dropped features</a>
+    </li>
         </ul>
-    
-
+    </li>
     </ul>
-	    </li>
-          
-        </ul>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -223,21 +164,23 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1 id="pg-strom-v23-release">PG-Strom v2.3 Release</h1>
+                <h1 id="release-notes">Release Notes</h1>
+<h2 id="pg-strom-v23-release">PG-Strom v2.3 Release</h2>
 <div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
-<h2 id="overview">Overview</h2>
+<h3 id="overview">Overview</h3>
 <p>Major changes in PG-Strom v2.3 includes:
 - GpuJoin supports parallel construction of inner buffer
 - Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.
 - pg2arrow command supports 'append' mode.
 - mysql2arrow command was added.</p>
-<h2 id="prerequisites">Prerequisites</h2>
+<h3 id="prerequisites">Prerequisites</h3>
 <ul>
 <li>PostgreSQL v10, v11, v12</li>
 <li>CUDA Toolkit 10.1 or later</li>
@@ -245,7 +188,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features">New Features</h2>
+<h3 id="new-features">New Features</h3>
 <ul>
 <li>GpuJoin supports parallel construction of inner buffer<ul>
 <li>The older version construct inner buffer of GpuJoin by the backend process only. This restriction leads a problem; parallel scan of partitioned table delays extremely.</li>
@@ -275,7 +218,7 @@
 </ul>
 </li>
 </ul>
-<h2 id="significant-bug-fixes">Significant bug fixes</h2>
+<h3 id="significant-bug-fixes">Significant bug fixes</h3>
 <ul>
 <li>Revised cache invalidation logic for GPU device functions / types<ul>
 <li>The older version had invalidated all the metadata cache entries of GPU device functions / type on execution of ALTER command. It was revised to invalidate the entries that are actually updated.</li>
@@ -294,7 +237,7 @@
 </ul>
 </li>
 </ul>
-<h2 id="deprecated-features">Deprecated Features</h2>
+<h3 id="deprecated-features">Deprecated Features</h3>
 <ul>
 <li>PostgreSQL v9.6 Support<ul>
 <li>CustomScan API in PostgreSQL v9.6 lacks a few APIs to handle dynamic shared memory (DSM). It has been a problem to handle a common code for v10 or later. To avoid the problem, we dropped PostgreSQL v9.6 support in this version.</li>
@@ -314,10 +257,10 @@
 </ul>
 </li>
 </ul>
-<h1 id="pg-strom-v22-release">PG-Strom v2.2 Release</h1>
+<h2 id="pg-strom-v22-release">PG-Strom v2.2 Release</h2>
 <div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
 
-<h2 id="overview_1">Overview</h2>
+<h3 id="overview_1">Overview</h3>
 <p>Major enhancement in PG-Strom v2.2 includes:</p>
 <ul>
 <li>Table partitioning support</li>
@@ -327,7 +270,7 @@
 <li>GpuSort support on GPU memory store (Gstore_Fdw)</li>
 <li>NVME-oF support (Experimental)</li>
 </ul>
-<h2 id="prerequisites_1">Prerequisites</h2>
+<h3 id="prerequisites_1">Prerequisites</h3>
 <ul>
 <li>PostgreSQL v9.6, v10, v11</li>
 <li>CUDA Toolkit 10.1</li>
@@ -335,7 +278,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features_1">New Features</h2>
+<h3 id="new-features_1">New Features</h3>
 <ul>
 <li>Table partitioning support<ul>
 <li>If multi-GPUs configuration, an optimal GPU shall be chosen according to the physical distance between GPU and child tables that construct a partition. If PG-Strom cannot identify the distance from PCIe-bus topology, like NVME-oF configuration, DBA can configure the relation of GPU and NVME-SSD using <code>pg_strom.nvme_distance_map</code>.</li>
@@ -373,7 +316,7 @@
 </ul>
 </li>
 </ul>
-<h2 id="features-to-be-deprecated">Features to be deprecated</h2>
+<h3 id="features-to-be-deprecated">Features to be deprecated</h3>
 <ul>
 <li>
 <p>PostgreSQL v9.6 support</p>
@@ -392,17 +335,17 @@
 </ul>
 </li>
 </ul>
-<h2 id="dropped-features">Dropped Features</h2>
+<h3 id="dropped-features">Dropped Features</h3>
 <ul>
 <li>In-memory columnar cache<ul>
 <li>As results of use-case analysis, we concluded Arrow_Fdw can replace this feature in most cases. Due to feature duplication, we dropped the in-memory columnar cache.</li>
 </ul>
 </li>
 </ul>
-<h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
+<h2 id="pg-strom-v20-release">PG-Strom v2.0 Release</h2>
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-<h2 id="overview_2">Overview</h2>
+<h3 id="overview_2">Overview</h3>
 <p>Major enhancement in PG-Strom v2.0 includes:</p>
 <ul>
 <li>Overall redesign of the internal infrastructure to manage GPU and stabilization</li>
@@ -414,7 +357,7 @@
 <li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
 </ul>
 <p>You can download the summary of new features from: <a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
-<h2 id="prerequisites_2">Prerequisites</h2>
+<h3 id="prerequisites_2">Prerequisites</h3>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
 <li>CUDA Toolkit 9.1</li>
@@ -422,7 +365,7 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="new-features_2">New Features</h2>
+<h3 id="new-features_2">New Features</h3>
 <ul>
 <li>
 <p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
@@ -510,7 +453,7 @@
 </ul>
 </li>
 </ul>
-<h2 id="dropped-features_1">Dropped features</h2>
+<h3 id="dropped-features_1">Dropped features</h3>
 <ul>
 <li>
 <p>PostgreSQL v9.5 Support</p>
@@ -550,7 +493,7 @@
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -560,7 +503,7 @@
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -572,6 +515,11 @@
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

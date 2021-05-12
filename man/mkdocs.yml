@@ -15,7 +15,6 @@ nav:
 - 'Install' : 'install.md'
 - 'Tutorial' :
     - 'Basic Operations' : 'operations.md'
-    - 'System Administration' : 'sys_admin.md'
     - 'BRIN Index' : 'brin.md'
     - 'Partitioning' : 'partition.md'
     - 'PostGIS' : 'postgis.md'
@@ -24,7 +23,7 @@ nav:
     - 'GPUDirect SQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
     - 'GPU Memory Store' : 'gstore_fdw.md'
-    - 'Python cooperation' : python.md
+#    - 'Python cooperation' : python.md
 - 'References' :
     - 'Data Types' : 'ref_types.md'
     - 'Functions and Operators' : 'ref_devfuncs.md'
@@ -37,16 +36,15 @@ nav:
 - 'インストール' : 'install.md'
 - '利用ガイド' :
     - '基本的な操作' : 'operations.md'
-    - 'システム管理' : 'sys_admin.md'
     - 'BRINインデックス' : 'brin.md'
     - 'パーティション' : 'partition.md'
-    - 'PostGIS対応' : 'postgis.md'
+    - 'GPU版PostGIS' : 'postgis.md'
     - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
     - 'GPUダイレクトSQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
     - 'GPUメモリストア' : 'gstore_fdw.md'
-    - 'Python連携' : python.md
+#    - 'Python連携' : python.md
 - 'リファレンス' :
     - 'データ型' : 'ref_types.md'
     - '関数と演算子' : 'ref_devfuncs.md'

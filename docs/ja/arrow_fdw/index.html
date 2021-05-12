@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Apache Arrow - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,155 +51,89 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRINインデックス</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">Apache Arrow</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">概要</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Apache Arrow</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#apache-arrow_1">Apache Arrowとは</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">運用</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#apache-arrow">Apache Arrowとは</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#_3">外部テーブルの定義</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">外部テーブルオプション</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_5">データ型の対応</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#explain">EXPLAIN出力の読み方</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#_2">運用</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow">Arrowファイルの作成方法</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#_3">外部テーブルの定義</a></li>
-        
-            <li><a class="toctree-l4" href="#_4">外部テーブルオプション</a></li>
-        
-            <li><a class="toctree-l4" href="#_5">データ型の対応</a></li>
-        
-            <li><a class="toctree-l4" href="#explain">EXPLAIN出力の読み方</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#pyarrowpandas">PyArrow+Pandas</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#pg2arrow">Pg2Arrow</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#arrow_fdw">書き込み可能Arrow_Fdw</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#arrow">Arrowファイルの作成方法</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_6">先進的な使い方</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#pyarrowpandas">PyArrow+Pandas</a></li>
-        
-            <li><a class="toctree-l4" href="#pg2arrow">Pg2Arrow</a></li>
-        
-            <li><a class="toctree-l4" href="#arrow_fdw">書き込み可能Arrow_Fdw</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#ssdtogpusql">SSDtoGPUダイレクトSQL</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_7">パーティション設定</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#_6">先進的な使い方</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l4" href="#ssdtogpusql">SSDtoGPUダイレクトSQL</a></li>
-        
-            <li><a class="toctree-l4" href="#_7">パーティション設定</a></li>
-        
-        </ul>
-    
-
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">データ型</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUCパラメータ</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">リリースノート</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -226,26 +162,26 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>列指向データストア (Arrow_Fdw)</h1>
-
-<h1 id="_1">概要</h1>
+                <h1 id="apache-arrow">Apache Arrow (列指向データストア)</h1>
+<h2 id="_1">概要</h2>
 <p>PostgreSQLのテーブルは内部的に8KBのブロック<sup id="fnref:1"><a class="footnote-ref" href="#fn:1">1</a></sup>と呼ばれる単位で編成され、ブロックは全ての属性及びメタデータを含むタプルと呼ばれるデータ構造を行単位で格納します。行を構成するデータが近傍に存在するため、これはINSERTやUPDATEの多いワークロードに有効ですが、一方で大量データの集計・解析ワークロードには不向きであるとされています。</p>
 <p>通常、大量データの集計においてはテーブル内の全ての列を参照する事は珍しく、多くの場合には一部の列だけを参照するといった処理になりがちです。この場合、実際には参照されない列のデータをストレージからロードするために消費されるI/Oの帯域は全く無駄ですが、行単位で編成されたデータに対して特定の列だけを取り出すという操作は困難です。</p>
 <p>逆に列単位でデータを編成した場合、INSERTやUPDATEの多いワークロードに対しては極端に不利ですが、大量データの集計・解析を行う際には被参照列だけをストレージからロードする事が可能になるため、I/Oの帯域を最大限に活用する事が可能です。 またプロセッサの処理効率の観点からも、列単位に編成されたデータは単純な配列であるかのように見えるため、GPUにとってはCoalesced Memory Accessというメモリバスの性能を最大限に引き出すアクセスパターンとなる事が期待できます。</p>
 <p><img alt="Row/Column data structure" src="../img/row_column_structure.png" /></p>
-<h2 id="apache-arrow">Apache Arrowとは</h2>
+<h2 id="apache-arrow_1">Apache Arrowとは</h2>
 <p>Apache Arrowとは、構造化データを列形式で記録、交換するためのデータフォーマットです。 主にビッグデータ処理のためのアプリケーションソフトウェアが対応しているほか、CやC++、Pythonなどプログラミング言語向けのライブラリが整備されているため、自作のアプリケーションからApache Arrow形式を扱うよう設計する事も容易です。</p>
 <p><img alt="Row/Column data structure" src="../img/arrow_shared_memory.png" /></p>
 <p>Apache Arrow形式ファイルの内部には、データ構造を定義するスキーマ（Schema）部分と、スキーマに基づいて列データを記録する1個以上のレコードバッチ（RecordBatch）部分が存在します。データ型としては、整数や文字列（可変長）、日付時刻型などに対応しており、個々の列データはこれらデータ型に応じた内部表現を持っています。</p>
 <p>Apache Arrow形式におけるデータ表現は、必ずしも全ての場合でPostgreSQLのデータ表現と一致している訳ではありません。例えば、Arrow形式ではタイムスタンプ型のエポックは<code>1970-01-01</code>で複数の精度を持つ事ができますが、PostgreSQLのエポックは<code>2001-01-01</code>でマイクロ秒の精度を持ちます。</p>
 <p>Arrow_Fdwは外部テーブルを用いてApache Arrow形式ファイルをPostgreSQL上で読み出す事を可能にします。例えば、列ごとに100万件の列データが存在するレコードバッチを8個内包するArrow形式ファイルをArrow_Fdwを用いてマップした場合、この外部テーブルを介してArrowファイル上の800万件のデータへアクセスする事ができるようになります。</p>
-<h1 id="_2">運用</h1>
-<h2 id="_3">外部テーブルの定義</h2>
+<h2 id="_2">運用</h2>
+<h3 id="_3">外部テーブルの定義</h3>
 <p>通常、外部テーブルを作成するには以下の3ステップが必要です。</p>
 <ul>
 <li><code>CREATE FOREIGN DATA WRAPPER</code>コマンドにより外部データラッパを定義する</li>
@@ -263,7 +199,6 @@
 ) SERVER arrow_fdw
   OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
-
 <p><code>CREATE FOREIGN TABLE</code>構文で指定した列のデータ型は、マップするArrow形式ファイルのスキーマ定義と厳密に一致している必要があります。</p>
 <p>これ以外にも、Arrow_Fdwは<code>IMPORT FOREIGN SCHEMA</code>構文を用いた便利な方法に対応しています。これは、Arrow形式ファイルの持つスキーマ情報を利用して、自動的にテーブル定義を生成するというものです。 以下のように、外部テーブル名とインポート先のスキーマ、およびOPTION句でArrow形式ファイルのパスを指定します。 Arrowファイルのスキーマ定義には、列ごとのデータ型と列名（オプション）が含まれており、これを用いて外部テーブルの定義を行います。</p>
 <pre><code>IMPORT FOREIGN SCHEMA flogdata
@@ -271,8 +206,7 @@
   INTO public
 OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
-
-<h2 id="_4">外部テーブルオプション</h2>
+<h3 id="_4">外部テーブルオプション</h3>
 <p>Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。</p>
 <table>
 <thead>
@@ -315,7 +249,7 @@ OPTIONS (file '/path/to/logdata.arrow');
 </tr>
 </tbody>
 </table>
-<h2 id="_5">データ型の対応</h2>
+<h3 id="_5">データ型の対応</h3>
 <p>Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。</p>
 <table>
 <thead>
@@ -403,7 +337,7 @@ OPTIONS (file '/path/to/logdata.arrow');
 </tr>
 </tbody>
 </table>
-<h2 id="explain">EXPLAIN出力の読み方</h2>
+<h3 id="explain">EXPLAIN出力の読み方</h3>
 <p><code>EXPLAIN</code>コマンドを用いて、Arrow形式ファイルの読み出しに関する情報を出力する事ができます。</p>
 <p>以下の例は、約309GBの大きさを持つArrow形式ファイルをマップしたflineorder外部テーブルを含むクエリ実行計画の出力です。</p>
 <pre><code>=# EXPLAIN
@@ -435,7 +369,6 @@ OPTIONS (file '/path/to/logdata.arrow');
                      Filter: (d_year = 1993)
 (18 rows)
 </code></pre>
-
 <p>これを見るとCustom Scan (GpuJoin)が<code>flineorder</code>外部テーブルをスキャンしている事がわかります。 <code>file0</code>には外部テーブルの背後にあるファイル名<code>/opt/nvme/lineorder_s401.arrow</code>とそのサイズが表示されます。複数のファイルがマップされている場合には、<code>file1</code>、<code>file2</code>、... と各ファイル毎に表示されます。 <code>referenced</code>には実際に参照されている列の一覧が列挙されており、このクエリにおいては<code>lo_orderdate</code>、<code>lo_quantity</code>、<code>lo_extendedprice</code>および<code>lo_discount</code>列が参照されている事がわかります。</p>
 <p>また、<code>GPU Preference: GPU0 (Tesla V100-PCIE-16GB)</code>および<code>NVMe-Strom: enabled</code>の表示がある事から、<code>flineorder</code>のスキャンにはSSD-to-GPUダイレクトSQL機構が用いられることが分かります。</p>
 <p>VERBOSEオプションを付与する事で、より詳細な情報が出力されます。</p>
@@ -478,11 +411,10 @@ OPTIONS (file '/path/to/logdata.arrow');
                      Filter: (date1.d_year = 1993)
 (28 rows)
 </code></pre>
-
 <p>被参照列をロードする際に読み出すべき列データの大きさを、列ごとに表示しています。 <code>lo_orderdate</code>、<code>lo_quantity</code>、<code>lo_extendedprice</code>および<code>lo_discount</code>列のロードには合計で87.4GBの読み出しが必要で、これはファイルサイズ309.2GBの28.3%に相当します。</p>
-<h1 id="arrow">Arrowファイルの作成方法</h1>
+<h2 id="arrow">Arrowファイルの作成方法</h2>
 <p>本節では、既にPostgreSQLデータベースに格納されているデータをApache Arrow形式に変換する方法を説明します。</p>
-<h2 id="pyarrowpandas">PyArrow+Pandas</h2>
+<h3 id="pyarrowpandas">PyArrow+Pandas</h3>
 <p>Arrow開発者コミュニティが開発を行っている PyArrow モジュールとPandasデータフレームの組合せを用いて、PostgreSQLデータベースの内容をArrow形式ファイルへと書き出す事ができます。</p>
 <p>以下の例は、テーブルt0に格納されたデータを全て読込み、ファイル/tmp/t0.arrowへと書き出すというものです。</p>
 <pre><code>import pyarrow as pa
@@ -494,9 +426,8 @@ f = pa.RecordBatchFileWriter('/tmp/t0.arrow', Y.schema)
 f.write_table(Y,1000000)      # RecordBatch for each million rows
 f.close()
 </code></pre>
-
 <p>ただし上記の方法は、SQLを介してPostgreSQLから読み出したデータベースの内容を一度メモリに保持するため、大量の行を一度に変換する場合には注意が必要です。</p>
-<h2 id="pg2arrow">Pg2Arrow</h2>
+<h3 id="pg2arrow">Pg2Arrow</h3>
 <p>一方、PG-Strom Development Teamが開発を行っている <code>pg2arrow</code> コマンドを使用して、PostgreSQLデータベースの内容をArrow形式ファイルへと書き出す事ができます。 このツールは比較的大量のデータをNVME-SSDなどストレージに書き出す事を念頭に設計されており、PostgreSQLデータベースから<code>-s|--segment-size</code>オプションで指定したサイズのデータを読み出すたびに、Arrow形式のレコードバッチ（Record Batch）としてファイルに書き出します。そのため、メモリ消費量は比較的リーズナブルな値となります。</p>
 <p><code>pg2arrow</code>コマンドはPG-Stromに同梱されており、PostgreSQL関連コマンドのインストール先ディレクトリに格納されます。</p>
 <pre><code>$ ./pg2arrow --help
@@ -532,16 +463,14 @@ Other options:
 
 Report bugs to &lt;pgstrom@heterodbcom&gt;.
 </code></pre>
-
 <p>PostgreSQLへの接続パラメータはpsqlやpg_dumpと同様に、<code>-h</code>や<code>-U</code>などのオプションで指定します。 基本的なコマンドの使用方法は、<code>-c|--command</code>オプションで指定したSQLをPostgreSQL上で実行し、その結果を<code>-o|--output</code>で指定したファイルへArrow形式で書き出します。</p>
 <p><code>-o|--output</code>オプションの代わりに<code>--append</code>オプションを使用する事ができ、これは既存のApache Arrowファイルへの追記を意味します。この場合、追記されるApache Arrowファイルは指定したSQLの実行結果と完全に一致するスキーマ構造を持たねばなりません。</p>
 <p>以下の例は、テーブル<code>t0</code>に格納されたデータを全て読込み、ファイル<code>/tmp/t0.arrow</code>へと書き出すというものです。</p>
 <pre><code>$ pg2arrow -U kaigai -d postgres -c &quot;SELECT * FROM t0&quot; -o /tmp/t0.arrow
 </code></pre>
-
 <p>開発者向けオプションですが、<code>--dump &lt;filename&gt;</code>でArrow形式ファイルのスキーマ定義やレコードバッチの位置とサイズを可読な形式で出力する事もできます。</p>
 <p><code>--progress</code>オプションを指定すると、処理の途中経過を表示する事が可能です。これは巨大なテーブルをApache Arrow形式に変換する際に有用です。</p>
-<h2 id="arrow_fdw">書き込み可能Arrow_Fdw</h2>
+<h3 id="arrow_fdw">書き込み可能Arrow_Fdw</h3>
 <p><code>writable</code>オプションを付加したArrow_Fdw外部テーブルに対しては、<code>INSERT</code>構文によりデータを追記する事が可能です。また、<code>pgstrom.arrow_fdw_truncate()</code>関数を用いて外部テーブル全体、すなわちその背後にあるApache Arrowファイルの内容を消去する事が可能です。一方、<code>UPDATE</code>および<code>DELETE</code>構文に関してはサポートされていません。</p>
 <p>Arrow_Fdw外部テーブルに<code>writable</code>オプションを付与する場合、<code>file</code>または<code>files</code>オプションで指定するパス名は1個だけが許容されます。複数個のパス名を指定することはできません。また、<code>dir</code>オプションと併用する事もできません。
 外部テーブルを定義した時点で、指定したパスに実際にApache Arrowファイルが存在している必要はありませんが、その場合、PostgreSQLは当該パスにファイルを新規作成する権限が必要です。</p>
@@ -579,7 +508,6 @@ postgres=# SELECT count(*) FROM ftest;
    100
 (1 row)
 </code></pre>
-
 <p>現在のところ、PostgreSQLは外部テーブルに対する<code>TRUNCATE</code>文の実行をサポートしていません。
 その代替としてArrow_Fdwには<code>pgstrom.arrow_fdw_truncate(regclass)</code>関数が用意されており、これを用いてArrow_Fdwの背後に存在するApache Arrowファイルの内容を消去する事ができます。</p>
 <pre><code>postgres=# SELECT count(*) FROM ftest;
@@ -600,16 +528,15 @@ postgres=# SELECT count(*) FROM ftest;
      0
 (1 row)
 </code></pre>
-
-<h1 id="_6">先進的な使い方</h1>
-<h2 id="ssdtogpusql">SSDtoGPUダイレクトSQL</h2>
+<h2 id="_6">先進的な使い方</h2>
+<h3 id="ssdtogpusql">SSDtoGPUダイレクトSQL</h3>
 <p>Arrow_Fdw外部テーブルにマップされた全てのArrow形式ファイルが以下の条件を満たす場合には、列データの読み出しにSSD-to-GPUダイレクトSQLを使用する事ができます。</p>
 <ul>
 <li>Arrow形式ファイルがNVME-SSD区画上に置かれている。</li>
 <li>NVME-SSD区画はExt4ファイルシステムで構築されている。</li>
 <li>Arrow形式ファイルの総計が<code>pg_strom.nvme_strom_threshold</code>設定を上回っている。</li>
 </ul>
-<h2 id="_7">パーティション設定</h2>
+<h3 id="_7">パーティション設定</h3>
 <p>Arrow_Fdw外部テーブルを、パーティションの一部として利用する事ができます。 通常のPostgreSQLテーブルと混在する事も可能ですが、Arrow_Fdw外部テーブルは書き込みに対応していない事に注意してください。 また、マップされたArrow形式ファイルに含まれるデータは、パーティションの境界条件と矛盾しないように設定してください。これはデータベース管理者の責任です。</p>
 <p><img alt="Example of partition configuration" src="../img/partition-logdata.png" /></p>
 <p>典型的な利用シーンは、長期間にわたり蓄積したログデータの処理です。</p>
@@ -654,7 +581,6 @@ CREATE FOREIGN TABLE lineorder__1996 PARTITION OF lineorder
    FOR VALUES FROM (19960101) TO (19970101)
 SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1996.arrow');
 </code></pre>
-
 <p>このテーブルに対する問い合わせの実行計画は以下のようになります。 検索条件<code>lo_orderdate between 19950701 and 19960630</code>がパーティションの境界条件を含んでいる事から、子テーブル<code>lineorder__1993</code>と<code>lineorder__1994</code>は検索対象から排除され、他のテーブルだけを読み出すよう実行計画が作られています。</p>
 <pre><code>=# EXPLAIN
     SELECT sum(lo_extendedprice*lo_discount) as revenue
@@ -691,12 +617,10 @@ SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1996.arrow');
 (16 rows)
 
 </code></pre>
-
 <p>この後、<code>lineorder__now</code>テーブルから1997年のデータを抜き出し、これをArrow_Fdw外部テーブル側に移すには以下の操作を行います</p>
 <pre><code>$ pg2arrow -d sample  -o /opt/tmp/lineorder_1997.arrow \
            -c &quot;SELECT * FROM lineorder WHERE lo_orderdate between 19970101 and 19971231&quot;
 </code></pre>
-
 <p><code>pg2arrow</code>コマンドにより、<code>lineorder</code>テーブルから1997年のデータだけを抜き出して、新しいArrow形式ファイルへ書き出します。</p>
 <pre><code>BEGIN;
 --
@@ -712,7 +636,6 @@ SERVER arrow_fdw OPTIONS (file '/opt/tmp/lineorder_1997.arrow');
 
 COMMIT;
 </code></pre>
-
 <p>この操作により、PostgreSQLテーブルである<code>lineorder__now</code>から1997年のデータを削除し、代わりに同一内容のArrow形式ファイル<code>/opt/tmp/lineorder_1997.arrow</code>を外部テーブル<code>lineorder__1997</code>としてマップしました。</p>
 <div class="footnote">
 <hr />
@@ -747,7 +670,7 @@ COMMIT;
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -757,7 +680,7 @@ COMMIT;
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -771,6 +694,11 @@ COMMIT;
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

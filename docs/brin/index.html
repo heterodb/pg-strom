@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>BRIN Index - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,116 +51,61 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">BRIN Index</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#overview">Overview</a></li>
-    
-
-    <li class="toctree-l3"><a href="#configuration">Configuration</a></li>
-    
-
-    <li class="toctree-l3"><a href="#operations">Operations</a></li>
-    
-
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">BRIN Index</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -187,21 +134,21 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>Index Support</h1>
-
-<h1 id="overview">Overview</h1>
+                <h1 id="index-support">Index Support</h1>
+<h2 id="overview">Overview</h2>
 <p>PostgreSQL supports several index strategies. The default is B-tree that can rapidly fetch records with a particular value. Elsewhere, it also supports Hash, BRIN, GiST, GIN and others that have own characteristics for each.
 PG-Strom supports only BRIN-index right now.</p>
 <p>BRIN-index works efficiently on the dataset we can expect physically neighbor records have similar key values, like timestamp values of time-series data.
 It allows to skip blocks-range if any records in the range obviously don't match to the scan qualifiers, then, also enables to reduce the amount of I/O due to full table scan.</p>
 <p>PG-Strom also utilizes the feature of BRIN-index, to skip obviously unnecessary blocks from the ones to be loaded to GPU.</p>
 <p><img alt="BRIN-index Ovewview" src="../img/brin-index-overview.png" /></p>
-<h1 id="configuration">Configuration</h1>
+<h2 id="configuration">Configuration</h2>
 <p>No special configurations are needed to use BRIN-index.</p>
 <p>PG-Strom automatically applies BRIN-index based scan if BRIN-index is configured on the referenced columns and scan qualifiers are suitable to the index.</p>
 <p>Also see the <a href="https://www.postgresql.org/docs/current/static/brin.html">PostgreSQL Documentation</a> for the BRIN-index feature.</p>
@@ -224,7 +171,7 @@ It allows to skip blocks-range if any records in the range obviously don't match
 </tr>
 </tbody>
 </table>
-<h1 id="operations">Operations</h1>
+<h2 id="operations">Operations</h2>
 <p>By <code>EXPLAIN</code>, we can check whether BRIN-index is in use.</p>
 <pre><code>postgres=# EXPLAIN ANALYZE
            SELECT * FROM dt
@@ -242,7 +189,6 @@ It allows to skip blocks-range if any records in the range obviously don't match
  Execution time: 2323.063 ms
 (7 rows)
 </code></pre>
-
 <p>In the example above, BRIN-index is configured on the <code>ymd</code> column. <code>BRIN cond</code> shows the qualifier of BRIN-index for concentration. <code>BRIN skipped</code> shows the number of skipped blocks actually.</p>
 <p>In this case, 424704 blocks are skipped, then, it filters out 4385491 rows in the loaded blocks by the scan qualifiers.</p>
 <p>GpuJoin and GpuPreAgg often pulls up its underlying table scan and runs the scan by itself, to reduce inefficient data transfer. In this case, it also uses the BRIN-index to concentrate the scan.</p>
@@ -283,7 +229,7 @@ It allows to skip blocks-range if any records in the range obviously don't match
         <a href="../partition/" class="btn btn-neutral float-right" title="Partitioning">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../sys_admin/" class="btn btn-neutral" title="System Administration"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../operations/" class="btn btn-neutral" title="Basic Operations"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -295,7 +241,7 @@ It allows to skip blocks-range if any records in the range obviously don't match
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -305,11 +251,11 @@ It allows to skip blocks-range if any records in the range obviously don't match
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../sys_admin/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../operations/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
         <span style="margin-left: 15px"><a href="../partition/" style="color: #fcfcfc">Next &raquo;</a></span>
@@ -319,6 +265,11 @@ It allows to skip blocks-range if any records in the range obviously don't match
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

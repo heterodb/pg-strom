@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Trouble Shooting - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,125 +51,69 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">Trouble Shooting</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#identify-the-problem">Identify the problem</a></li>
-    
-
-    <li class="toctree-l3"><a href="#collecting-crash-dump">Collecting crash dump</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Trouble Shooting</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#identify-the-problem">Identify the problem</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#collecting-crash-dump">Collecting crash dump</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</a></li>
-        
-            <li><a class="toctree-l4" href="#installation-of-debuginfo-package">Installation of debuginfo package</a></li>
-        
-            <li><a class="toctree-l4" href="#checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</a></li>
-        
-            <li><a class="toctree-l4" href="#checking-the-backtrace-on-gpu">Checking the backtrace on GPU</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#installation-of-debuginfo-package">Installation of debuginfo package</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#checking-the-backtrace-on-gpu">Checking the backtrace on GPU</a>
+    </li>
         </ul>
-    
-
+    </li>
     </ul>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">Release Note</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -196,27 +142,26 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>Trouble Shooting</h1>
-
-<h1 id="identify-the-problem">Identify the problem</h1>
+                <h1 id="trouble-shooting">Trouble Shooting</h1>
+<h2 id="identify-the-problem">Identify the problem</h2>
 <p>In case when a particular workloads produce problems, it is the first step to identify which stuff may cause the problem.</p>
 <p>Unfortunately, much smaller number of developer supports the PG-Strom development community than PostgreSQL developer's community, thus, due to the standpoint of software quality and history, it is a reasonable estimation to suspect PG-Strom first.</p>
 <p>The <code>pg_strom.enabled</code> parameter allows to turn on/off all the functionality of PG-Strom at once.
 The configuration below disables PG-Strom, thus identically performs with the standard PostgreSQL.</p>
 <pre><code># SET pg_strom.enabled = off;
 </code></pre>
-
 <p>In addition, we provide parameters to disable particular execution plan like GpuScan, GpuJoin and GpuPreAgg.</p>
 <p>See <a href="../ref_params/">references/GUC Parameters</a> for more details.</p>
-<h1 id="collecting-crash-dump">Collecting crash dump</h1>
+<h2 id="collecting-crash-dump">Collecting crash dump</h2>
 <p>Crash dump is very helpful for analysis of serious problems which lead system crash for example.
 This session introduces the way to collect crash dump of the PostgreSQL and PG-Strom process (CPU side) and PG-Strom's GPU kernel, and show the back trace on the serious problems.</p>
-<h2 id="add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</h2>
+<h3 id="add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</h3>
 <p>For generation of crash dump (CPU-side) on process crash, you need to change the resource limitation of the operating system for size of core file  PostgreSQL server process can generate.</p>
 <p>For generation of crash dump (GPU-size) on errors of GPU kernel, PostgreSQL server process has <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>environment variable, and its value has <code>1</code>.</p>
 <p>You can put a configuration file at <code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code> when PostgreSQL is kicked by systemd.</p>
@@ -226,7 +171,6 @@ LimitNOFILE=65536
 LimitCORE=infinity
 #Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 </code></pre>
-
 <p>In CUDA 9.1, it usually takes more than several minutes to generate crash dump of GPU kernel, and it entirely stops response of the PostgreSQL session which causes an error.
 So, we recommend to set <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable only if you investigate errors of GPU kernels which happen on a certain query.
 The default configuration on RPM installation comments out the line of <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable.</p>
@@ -238,8 +182,7 @@ Limit                     Soft Limit           Hard Limit           Units
 Max core file size        unlimited            unlimited            bytes
     :                         :                    :                  :
 </code></pre>
-
-<h2 id="installation-of-debuginfo-package">Installation of debuginfo package</h2>
+<h3 id="installation-of-debuginfo-package">Installation of debuginfo package</h3>
 <pre><code># yum install postgresql10-debuginfo pg_strom-PG10-debuginfo
             :
 ================================================================================
@@ -259,8 +202,7 @@ Installed:
 
 Complete!
 </code></pre>
-
-<h2 id="checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</h2>
+<h3 id="checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</h3>
 <p>The kernel parameter <code>kernel.core_pattern</code> and <code>kernel.core_uses_pid</code> determine the path where crash dump is written out.
 It is usually created on the current working directory of the process, check <code>/var/lib/pgdata</code> where the database cluster is deployed, if you start PostgreSQL server using systemd.</p>
 <p>Once <code>core.&lt;PID&gt;</code> file gets generated, you can check its back-trace to reach system crash using <code>gdb</code>.</p>
@@ -293,10 +235,9 @@ GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
     argv=argv@entry0x2831280) at postmaster.c:1363
 #13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
 </code></pre>
-
 <p><code>bt</code> command of <code>gdb</code> displays the backtrace.
 In this case, I sent <code>SIGSEGV</code> signal to the PostgreSQL backend which is waiting for queries from the client for intentional crash, the process got crashed at <code>__epoll_wait_nocancel</code> invoked by <code>WaitEventSetWait</code>.</p>
-<h2 id="checking-the-backtrace-on-gpu">Checking the backtrace on GPU</h2>
+<h3 id="checking-the-backtrace-on-gpu">Checking the backtrace on GPU</h3>
 <p>Crash dump of GPU kernel is generated on the current working directory of PostgreSQL server process, unless you don't specify the path using <code>CUDA_COREDUMP_FILE</code> environment variable explicitly.
 Check <code>/var/lib/pgdata</code> where the database cluster is deployed, if systemd started PostgreSQL. Dump file will have the following naming convension.</p>
 <p><code>core_&lt;timestamp&gt;_&lt;hostname&gt;_&lt;PID&gt;.nvcudmp</code></p>
@@ -307,7 +248,6 @@ Turn on only when you investigate the troubles.</p>
 <pre><code>nvme=# set pg_strom.debug_jit_compile_options = on;
 SET
 </code></pre>
-
 <p>You can check crash dump of the GPU kernel using <code>cuda-gdb</code> command.</p>
 <pre><code># /usr/local/cuda/bin/cuda-gdb
 NVIDIA (R) CUDA Debugger
@@ -318,7 +258,6 @@ For help, type &quot;help&quot;.
 Type &quot;apropos word&quot; to search for commands related to &quot;word&quot;.
 (cuda-gdb)
 </code></pre>
-
 <p>Run <code>cuda-gdb</code> command, then load the crash dump file above using <code>target</code> command on the prompt.</p>
 <pre><code>(cuda-gdb) target cudacore /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
 Opening GPU coredump: /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
@@ -332,7 +271,6 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
     matched=0x7ff4f7fffc7c &quot;&quot;) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
 1159            while (khitem &amp;&amp; khitem-&gt;hash != hash_value)
 </code></pre>
-
 <p>You can check backtrace where the error happened on GPU kernel using <code>bt</code> command.</p>
 <pre><code>(cuda-gdb) bt
 #0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
@@ -341,7 +279,6 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
 #1  0x00007ff4dc9428f0 in gpujoin_main&lt;&lt;&lt;(30,1,1),(256,1,1)&gt;&gt;&gt; (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
     kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
 </code></pre>
-
 <p>Please check <a href="http://docs.nvidia.com/cuda/cuda-gdb/">CUDA Toolkit Documentation - CUDA-GDB</a> for more detailed usage of <code>cuda-gdb</code> command.</p>
               
             </div>
@@ -365,7 +302,7 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -375,7 +312,7 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -389,6 +326,11 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

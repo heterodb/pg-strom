@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>データ型 - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,128 +51,69 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRINインデックス</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">データ型</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_2">数値データ型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">標準の日付時刻型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">標準の可変長データ型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">標準の非構造データ型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_6">標準の雑多なデータ型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_7">標準の範囲型</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#postgis">PostGISデータ型</a>
+    </li>
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class=" current">
-                    
-    <a class="current" href="./">データ型</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">数値データ型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">標準の日付時刻型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_3">標準の可変長データ型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_4">標準の非構造データ型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_5">標準の雑多なデータ型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_6">標準の範囲型</a></li>
-    
-
-    <li class="toctree-l3"><a href="#postgis">PostGISデータ型</a></li>
-    
-
-    </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUCパラメータ</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_note/">リリースノート</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -199,15 +142,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>データ型</h1>
-
+                <h1 id="_1">データ型</h1>
 <p>PG-Stromは以下のデータ型をGPUで利用する事ができます。</p>
-<h1 id="_1">数値データ型</h1>
+<h2 id="_2">数値データ型</h2>
 <table>
 <thead>
 <tr>
@@ -264,7 +207,7 @@
 <p class="admonition-title">Note</p>
 <p>GPUでは半精度浮動小数点型がハードウェアでサポートされていますが、CPU(x86_64プロセッサ)では未対応です。そのため、<code>float2</code>データ型をCPUで処理する場合には、これを一度<code>float</code>や<code>double</code>型に変換した上で演算を行います。そのため、GPUのように<code>float2</code>の方が演算速度で有利という事はありません。機械学習や統計解析用途にデータ量を抑制するための機能です。</p>
 </div>
-<h1 id="_2">標準の日付時刻型</h1>
+<h2 id="_3">標準の日付時刻型</h2>
 <table>
 <thead>
 <tr>
@@ -306,7 +249,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_3">標準の可変長データ型</h1>
+<h2 id="_4">標準の可変長データ型</h2>
 <table>
 <thead>
 <tr>
@@ -338,7 +281,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_4">標準の非構造データ型</h1>
+<h2 id="_5">標準の非構造データ型</h2>
 <table>
 <thead>
 <tr>
@@ -361,7 +304,7 @@
 実際に参照されない属性もストレージから読み出し、GPUに転送する必要があるため、I/Oバスの利用効率は必ずしも良くないデータ型である事。データ長が<a href="https://www.postgresql.jp/document/current/html/storage-toast.html">TOAST化</a>の閾値（通常は2kB弱）を越えてしまった場合、<code>jsonb</code>データ全体がTOASTテーブルへ書き出されるため、GPU側では処理できず非効率なCPU-fallback処理を呼び出してしまう事。
 後者の問題に対しては、テーブルのストレージオプション<code>toast_tuple_target</code>を拡大し、TOAST化の閾値を引き上げる事である程度は回避する事も可能です。</p>
 </div>
-<h1 id="_5">標準の雑多なデータ型</h1>
+<h2 id="_6">標準の雑多なデータ型</h2>
 <table>
 <thead>
 <tr>
@@ -403,7 +346,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_6">標準の範囲型</h1>
+<h2 id="_7">標準の範囲型</h2>
 <table>
 <thead>
 <tr>
@@ -440,7 +383,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="postgis">PostGISデータ型</h1>
+<h2 id="postgis">PostGISデータ型</h2>
 <table>
 <thead>
 <tr>
@@ -467,7 +410,7 @@
         <a href="../ref_devfuncs/" class="btn btn-neutral float-right" title="関数と演算子">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../python/" class="btn btn-neutral" title="Python連携"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../gstore_fdw/" class="btn btn-neutral" title="GPUメモリストア"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -479,7 +422,7 @@
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -489,11 +432,11 @@
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../python/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../gstore_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
         <span style="margin-left: 15px"><a href="../ref_devfuncs/" style="color: #fcfcfc">Next &raquo;</a></span>
@@ -503,6 +446,11 @@
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

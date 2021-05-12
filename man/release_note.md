@@ -1,10 +1,14 @@
-@ja:#PG-Strom v2.3リリース
-@en:#PG-Strom v2.3 Release
+@ja:#リリースノート
+@en:#Release Notes
+
+
+@ja:##PG-Strom v2.3リリース
+@en:##PG-Strom v2.3 Release
 
 <div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
-@ja:##概要
-@en:##Overview
+@ja:###概要
+@en:###Overview
 
 @ja{
 PG-Strom v2.3における主要な機能強化は以下の通りです。
@@ -22,8 +26,8 @@ Major changes in PG-Strom v2.3 includes:
 - mysql2arrow command was added.
 }
 
-@ja:##動作環境
-@en:##Prerequisites
+@ja:###動作環境
+@en:###Prerequisites
 
 @ja{
 - PostgreSQL v10, v11, v12
@@ -40,8 +44,8 @@ Major changes in PG-Strom v2.3 includes:
 - NVIDIA GPU CC 6.0 or later (Pascal or Volta)
 }
 
-@ja:##新機能
-@en:##New Features
+@ja:###新機能
+@en:###New Features
 
 @ja{
 - GpuJoinのInnerバッファの構築がCPU並列に対応
@@ -80,8 +84,8 @@ Major changes in PG-Strom v2.3 includes:
     - Several test cases were added according to the PostgreSQL regression test framework.
 }
 
-@ja:##修正された主な不具合
-@en:##Significant bug fixes
+@ja:###修正された主な不具合
+@en:###Significant bug fixes
 
 @ja{
 - GPUデバイス関数/型のキャッシュ無効化のロジックを改善
@@ -105,8 +109,8 @@ Major changes in PG-Strom v2.3 includes:
 }
 
 
-@ja:##廃止された機能
-@en:##Deprecated Features
+@ja:###廃止された機能
+@en:###Deprecated Features
 
 @ja{
 - PostgreSQL v9.6サポート
@@ -132,13 +136,13 @@ Major changes in PG-Strom v2.3 includes:
     - According to the usecase analytics, we determined this feature is not needed.
 }
 
-@ja:#PG-Strom v2.2リリース
-@en:#PG-Strom v2.2 Release
+@ja:##PG-Strom v2.2リリース
+@en:##PG-Strom v2.2 Release
 
 <div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
 
-@ja:##概要
-@en:##Overview
+@ja:###概要
+@en:###Overview
 
 @ja{
 PG-Strom v2.2における主要な機能強化は以下の通りです。
@@ -162,8 +166,8 @@ Major enhancement in PG-Strom v2.2 includes:
 - NVME-oF support (Experimental)
 }
 
-@ja:##動作環境
-@en:##Prerequisites
+@ja:###動作環境
+@en:###Prerequisites
 
 @ja{
 - PostgreSQL v9.6, v10, v11
@@ -180,8 +184,8 @@ Major enhancement in PG-Strom v2.2 includes:
 - NVIDIA GPU CC 6.0 or later (Pascal or Volta)
 }
 
-@ja:##新機能
-@en:##New Features
+@ja:###新機能
+@en:###New Features
 
 @ja{
 - テーブルパーティションへの対応
@@ -227,8 +231,8 @@ Major enhancement in PG-Strom v2.2 includes:
     - It supports SSD-to-GPU Direct SQL from remote SSD disks which are mounted using NVME-over-Fabric. Please note that it is an experimental feature, and it needs to replace the `nvme_rdma` kernel module on Red Hat Enterprise Linux 7.x / CentOS 7.x.
 }
 
-@ja:##将来廃止予定の機能
-@en:##Features to be deprecated
+@ja:###将来廃止予定の機能
+@en:###Features to be deprecated
 
 @ja{
 - PostgreSQL v9.6サポート
@@ -256,8 +260,8 @@ Major enhancement in PG-Strom v2.2 includes:
 }
 
 
-@ja:##廃止された機能
-@en:##Dropped Features
+@ja:###廃止された機能
+@en:###Dropped Features
 
 @ja{
 - インメモリ列キャッシュ
@@ -269,13 +273,13 @@ Major enhancement in PG-Strom v2.2 includes:
 }
 
 
-@ja:#PG-Strom v2.0リリース
-@en:#PG-Strom v2.0 Release
+@ja:##PG-Strom v2.0リリース
+@en:##PG-Strom v2.0 Release
 
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-@ja:##概要
-@en:##Overview
+@ja:###概要
+@en:###Overview
 
 @ja{
 PG-Strom v2.0における主要な機能強化は以下の通りです。
@@ -305,8 +309,8 @@ Major enhancement in PG-Strom v2.0 includes:
 You can download the summary of new features from: [PG-Strom v2.0 Technical Brief](./blob/20180417_PGStrom_v2.0_TechBrief.pdf).
 }
 
-@ja:##動作環境
-@en:##Prerequisites
+@ja:###動作環境
+@en:###Prerequisites
 
 @ja{
 - PostgreSQL v9.6, v10
@@ -323,8 +327,8 @@ You can download the summary of new features from: [PG-Strom v2.0 Technical Brie
 - NVIDIA GPU CC 6.0 or later (Pascal or Volta)
 }
 
-@ja:##新機能
-@en:##New Features
+@ja:###新機能
+@en:###New Features
 
 @ja{
 - GPUを管理する内部インフラストラクチャの全体的な再設計と安定化
@@ -469,8 +473,8 @@ You can download the summary of new features from: [PG-Strom v2.0 Technical Brie
     - Regression test for PG-Strom was built on top of the regression test framework of PostgreSQL.
 }
 
-@ja:##廃止された機能
-@en:##Dropped features
+@ja:###廃止された機能
+@en:###Dropped features
 
 @ja{
 - PostgreSQL v9.5サポート
