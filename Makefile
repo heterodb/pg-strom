@@ -139,7 +139,7 @@ __DOC_FILES = index.md install.md partition.md \
               operations.md sys_admin.md brin.md postgis.md troubles.md \
 	      ssd2gpu.md arrow_fdw.md gstore_fdw.md python.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
-	      release_note.md
+	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md
 
 #
 # Files to be packaged

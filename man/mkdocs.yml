@@ -29,7 +29,11 @@ nav:
     - 'Functions and Operators' : 'ref_devfuncs.md'
     - 'SQL Objects' : 'ref_sqlfuncs.md'
     - 'GUC Parameters' : 'ref_params.md'
-- 'Release Note' : 'release_note.md'
+- 'Release Note' :
+    - 'PG-Strom v3.0' : 'release_v3.0.md'
+    - 'PG-Strom v2.3' : 'release_v2.3.md'
+    - 'PG-Strom v2.2' : 'release_v2.2.md'
+    - 'PG-Strom v2.0' : 'release_v2.0.md'
 }
 @ja{
 - 'はじめに' : 'index.md'
@@ -50,7 +54,11 @@ nav:
     - '関数と演算子' : 'ref_devfuncs.md'
     - 'SQLオブジェクト' : 'ref_sqlfuncs.md'
     - 'GUCパラメータ' : 'ref_params.md'
-- 'リリースノート' : 'release_note.md'
+- 'リリースノート' :
+    - 'PG-Strom v3.0' : 'release_v3.0.md'
+    - 'PG-Strom v2.3' : 'release_v2.3.md'
+    - 'PG-Strom v2.2' : 'release_v2.2.md'
+    - 'PG-Strom v2.0' : 'release_v2.0.md'
 }
 extra_css:
     - "//fonts.googleapis.com/earlyaccess/notosansjp.css"

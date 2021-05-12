@@ -9,7 +9,7 @@
   <meta name="author" content="PG-Strom Development Team">
   
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>Release Note - PG-Strom Manual</title>
+  <title>Release note - PG-Strom Manual</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
   <link rel="stylesheet" href="../css/theme.css" />
@@ -21,7 +21,7 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "Release Note";
+    var mkdocs_page_name = "Release note";
     var mkdocs_page_input_path = "release_note.md";
     var mkdocs_page_url = null;
   </script>
@@ -92,50 +92,15 @@
                     <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
                     </li>
                 </ul>
-                <ul class="current">
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Release Note</a>
-    <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v23-release">PG-Strom v2.3 Release</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#prerequisites">Prerequisites</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#new-features">New Features</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#significant-bug-fixes">Significant bug fixes</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#deprecated-features">Deprecated Features</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v22-release">PG-Strom v2.2 Release</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#overview_1">Overview</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#prerequisites_1">Prerequisites</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#new-features_1">New Features</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#features-to-be-deprecated">Features to be deprecated</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#dropped-features">Dropped Features</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-v20-release">PG-Strom v2.0 Release</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#overview_2">Overview</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#prerequisites_2">Prerequisites</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#new-features_2">New Features</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#dropped-features_1">Dropped features</a>
-    </li>
-        </ul>
-    </li>
-    </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
                     </li>
                 </ul>
       </div>
@@ -159,7 +124,7 @@
     
       
     
-    <li>Release Note</li>
+    <li>Release note</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -170,306 +135,342 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="release-notes">Release Notes</h1>
-<h2 id="pg-strom-v23-release">PG-Strom v2.3 Release</h2>
+                <h1 id="_1">リリースノート</h1>
+<h2 id="pg-strom-v23">PG-Strom v2.3リリース</h2>
 <div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
-<h3 id="overview">Overview</h3>
-<p>Major changes in PG-Strom v2.3 includes:
-- GpuJoin supports parallel construction of inner buffer
-- Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.
-- pg2arrow command supports 'append' mode.
-- mysql2arrow command was added.</p>
-<h3 id="prerequisites">Prerequisites</h3>
+<h3 id="_2">概要</h3>
+<p>PG-Strom v2.3における主要な機能強化は以下の通りです。
+- GpuJoinのInnerバッファの構築がCPU並列に対応しました。
+- Arrow_FdwがINSERT/TRUNCATEに対応しました。
+- pg2arrowコマンドが追記モードに対応しました。
+- mysql2arrowコマンドが追加されました。</p>
+<h3 id="_3">動作環境</h3>
 <ul>
 <li>PostgreSQL v10, v11, v12</li>
-<li>CUDA Toolkit 10.1 or later</li>
-<li>Linux distributions supported by CUDA Toolkit</li>
-<li>Intel x86 64bit architecture (x86_64)</li>
-<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+<li>CUDA Toolkit 10.1 以降</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal or Volta)</li>
 </ul>
-<h3 id="new-features">New Features</h3>
+<h3 id="_4">新機能</h3>
 <ul>
-<li>GpuJoin supports parallel construction of inner buffer<ul>
-<li>The older version construct inner buffer of GpuJoin by the backend process only. This restriction leads a problem; parallel scan of partitioned table delays extremely.</li>
-<li>This version allows both of the backend and worker processes to construct inner buffer. In case when we scan a partitioned table, any processes that is assigned to a particular child table can start GpuJoin operations immediately.</li>
+<li>GpuJoinのInnerバッファの構築がCPU並列に対応<ul>
+<li>従来はGpuJoinのInner側バッファの構築はバックエンドプロセスのみが行っていました。この制約により、パーティション化されたテーブルの並列スキャンが極端に遅延するという問題がありました。</li>
+<li>本バージョンでの機能強化により、バックエンド、ワーカープロセスのどちらでもInner側バッファを構築する事が可能となりました。パーティション化テーブルをスキャンする場合でも、各パーティション子テーブルに割り当てられたプロセスが直ちにGpuJoin処理を開始する事ができるようになります。</li>
 </ul>
 </li>
-<li>Refactoring of the partition-wise asymmetric GpuJoin<ul>
-<li>By the refactoring of the partition-wise asymmetric GpuJoin, optimizer becomes to prefer multi-level GpuJoin in case when it offers cheaper execution cost.</li>
+<li>Partition-wise Asymmetric GpuJoinの再設計<ul>
+<li>全体的なデザインの再設計を行い、適切な局面において多段GpuJoinが選択されやすくなるよう改良を行いました。</li>
 </ul>
 </li>
-<li>Arrow_Fdw becomes writable; INSERT/TRUNCATE supported<ul>
-<li>Arrow_Fdw foreign table allows bulk-loading by <code>INSERT</code> and data elimination by <code>pgstrom.arrow_fdw_truncate</code>.</li>
+<li>Arrow_FdwがINSERT/TRUNCATEに対応しました。<ul>
+<li>Arrow_Fdw外部テーブルに対して、<code>INSERT</code>によるバルクロードと、<code>pgstrom.arrow_fdw_truncate</code>によるTRUNCATE処理を行う事が可能となりました。</li>
 </ul>
 </li>
-<li>pg2arrow command supports 'append' mode.<ul>
-<li>We added <code>--append</code> option for <code>pg2arrow</code> command. As literal, it appends query results on existing Apache Arrow file.</li>
-<li>Also, <code>-t table</code> option was added as an alias of <code>SELECT * FROM table</code>.</li>
+<li>CuPy連携とデータフレームのGPUエクスポート<ul>
+<li>Arrow_Fdw外部テーブルの内容をGPUデバイスメモリ上のデータフレームにロードし、これをCuPyの<code>cupy.ndarray</code>オブジェクトとしてPythonスクリプトから参照する事が可能となりました。</li>
 </ul>
 </li>
-<li>mysql2arrow command was added.<ul>
-<li>We added <code>mysql2arrow</code> command that connects to MySQL server, not PostgreSQL, and write out SQL query results as Apache Arrow files.</li>
-<li>It has equivalent functionality to <code>pg2arrow</code> except for enum data type. <code>mysql2arrow</code> saves enum values as flat Utf8 values without DictionaryBatch chunks.</li>
+<li>pg2arrowコマンドが追記モードに対応しました。<ul>
+<li><code>pg2arrow</code>コマンドに<code>--append</code>オプションが追加され、既存のApache Arrowに対して追記を行う事が可能となりました。</li>
+<li>また同時に、<code>SELECT * FROM table</code>の別名表記として<code>-t table</code>オプションが追加されました。</li>
 </ul>
 </li>
-<li>Regression test was added<ul>
-<li>Several test cases were added according to the PostgreSQL regression test framework.</li>
+<li>mysql2arrowコマンドを追加されました。<ul>
+<li>PostgreSQLではなく、MySQLに接続してクエリを実行し、その結果をApache Arrowファイルとして保存する<code>mysql2arrow</code>コマンドを追加しました。</li>
+<li>列挙型のデータも通常のUtf8型として保存する（DictionaryBatchを使用しない）以外は、<code>pg2arrow</code>と同等の機能を持っています。</li>
+</ul>
+</li>
+<li>リグレッションテストを追加しました<ul>
+<li>PostgreSQLのリグレッションテストフレームワークに合わせて、幾つかの基本的なテストケースを追加しています。</li>
 </ul>
 </li>
 </ul>
-<h3 id="significant-bug-fixes">Significant bug fixes</h3>
+<h3 id="_5">修正された主な不具合</h3>
 <ul>
-<li>Revised cache invalidation logic for GPU device functions / types<ul>
-<li>The older version had invalidated all the metadata cache entries of GPU device functions / type on execution of ALTER command. It was revised to invalidate the entries that are actually updated.</li>
+<li>GPUデバイス関数/型のキャッシュ無効化のロジックを改善<ul>
+<li>ALTERコマンドの実行時、全てのGPUデバイス関数/型のメタ情報キャッシュを無効化していましたが、実際に無効化の必要のあるエントリのみをクリアするよう修正を行いました。</li>
 </ul>
 </li>
-<li>Revised extreme performance degradation if GROUP BY has same grouping key twice or even number times.<ul>
-<li>GpuPreAgg combined hash values of grouping key of GROUP BY using XOR. So, if case when same column appeared even number time, it always leads 0 for hash-index problematically. Now we add a randomization for better hash distribution.</li>
+<li>GROUP BYで同じ列を偶数回指定した際に極端なパフォーマンスの低下を修正<ul>
+<li>GROUP BYのキー値が複数ある時に、GpuPreAggはハッシュ値をXORで結合していました。そのため、同じ列を偶数回指定した場合には常にハッシュインデックスが0になるという問題がありました。適当なランダム化処理を加える事でハッシュ値が分散するよう修正しています。</li>
 </ul>
 </li>
-<li>Potential infinite loop on GpuScan<ul>
-<li>By uninitialized values, GpuScan potentially goes to infinite loop when SSD2GPU Direct SQL is available.</li>
+<li>潜在的なGpuScan無限ループの問題を修正<ul>
+<li>SSD2GPU Direct SQLの使用時、変数の未初期化によりGpuScanが無限ループに陥る可能性がありました。</li>
 </ul>
 </li>
-<li>Potential GPU kernel crash on GpuJoin<ul>
-<li>By uninitialized values, GpuJoin potentially makes GPU kernel crash when 3 or more tables are joined.</li>
+<li>潜在的なGpuJoinのGPUカーネルクラッシュ<ul>
+<li>3個以上のテーブルを結合するGpuJoinで、変数の未初期化によりGPUカーネルのクラッシュを引き起こす可能性がありました。</li>
 </ul>
 </li>
 </ul>
-<h3 id="deprecated-features">Deprecated Features</h3>
+<h3 id="_6">廃止された機能</h3>
 <ul>
-<li>PostgreSQL v9.6 Support<ul>
-<li>CustomScan API in PostgreSQL v9.6 lacks a few APIs to handle dynamic shared memory (DSM). It has been a problem to handle a common code for v10 or later. To avoid the problem, we dropped PostgreSQL v9.6 support in this version.</li>
+<li>PostgreSQL v9.6サポート<ul>
+<li>PostgreSQL v9.6のCustomScan APIには、動的共有メモリ(DSM)の正しいハンドリングに必要な幾つかのAPIが欠けており、v10以降と共通のコードを保守する上で障害となっていました。これらの問題から、本バージョンでは PostgreSQL v9.6 はサポート外となります。</li>
 </ul>
 </li>
 <li>PL/CUDA<ul>
-<li>According to the usecase analytics, users prefer familiar programming language environment like Python, rather than own special environment.</li>
-<li>A combination of Arrow_Fdw's GPU export functionality and CuPy invocation at PL/Python is a successor of PL/CUDA, for in-database machine-learning / statistical analytics.</li>
+<li>ユースケースを分析した結果、独自のプログラミング環境よりも、Python言語などユーザの使い慣れた言語環境の方が望ましい事が分かりました。</li>
+<li>今後は、Arrow_FdwのGPUエクスポート機能とPL/Python経由でのCuPy呼出しを併用する事で、In-database機械学習/統計解析の代替手段となります。</li>
 </ul>
 </li>
 <li>Gstore_Fdw<ul>
-<li>This feature is replaced by the writable Arrow_Fdw and its GPU export functionality.</li>
+<li>本機能は、書き込み可能Arrow_FdwとGPUエクスポート機能により代替されました。</li>
 </ul>
 </li>
-<li>Largeobject export to/import from GPU<ul>
-<li>According to the usecase analytics, we determined this feature is not needed.</li>
+<li>Largeobject～GPU間エクスポート/インポート<ul>
+<li>ユースケースを分析した結果、本機能は不要と判断しました。</li>
 </ul>
 </li>
 </ul>
-<h2 id="pg-strom-v22-release">PG-Strom v2.2 Release</h2>
+<h2 id="pg-strom-v22">PG-Strom v2.2リリース</h2>
 <div style="text-align: right;">PG-Strom Development Team (1-May-2019)</div>
 
-<h3 id="overview_1">Overview</h3>
-<p>Major enhancement in PG-Strom v2.2 includes:</p>
+<h3 id="_7">概要</h3>
+<p>PG-Strom v2.2における主要な機能強化は以下の通りです。</p>
 <ul>
-<li>Table partitioning support</li>
-<li>Columnar store support with Arrow_Fdw</li>
-<li>Pre-built GPU binary support</li>
-<li>Enables to implement GPU functions that returns variable length data</li>
-<li>GpuSort support on GPU memory store (Gstore_Fdw)</li>
-<li>NVME-oF support (Experimental)</li>
+<li>テーブルパーティションへの対応</li>
+<li>Arrow_Fdwによる列指向ストアのサポート</li>
+<li>ビルド済みGPUバイナリへの対応</li>
+<li>Jsonbデータ型の対応</li>
+<li>可変長データ型を返すGPU関数の対応</li>
+<li>GPUメモリストア（Gstore_Fdw）のソート対応</li>
+<li>NVMEoFへの対応（実験的機能）</li>
 </ul>
-<h3 id="prerequisites_1">Prerequisites</h3>
+<h3 id="_8">動作環境</h3>
 <ul>
 <li>PostgreSQL v9.6, v10, v11</li>
 <li>CUDA Toolkit 10.1</li>
-<li>Linux distributions supported by CUDA Toolkit</li>
-<li>Intel x86 64bit architecture (x86_64)</li>
-<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
 </ul>
-<h3 id="new-features_1">New Features</h3>
+<h3 id="_9">新機能</h3>
 <ul>
-<li>Table partitioning support<ul>
-<li>If multi-GPUs configuration, an optimal GPU shall be chosen according to the physical distance between GPU and child tables that construct a partition. If PG-Strom cannot identify the distance from PCIe-bus topology, like NVME-oF configuration, DBA can configure the relation of GPU and NVME-SSD using <code>pg_strom.nvme_distance_map</code>.</li>
-<li>When we join a partitioned table with non-partition tables, this version can produce a query execution plan that preliminary joins the non-partitioned table with partition child tables for each, and gather the results from child tables. This feature is proposed to PostgreSQL v13 core, as Asymmetric Partition-wise JOIN.</li>
+<li>テーブルパーティションへの対応<ul>
+<li>マルチGPU構成の場合、パーティションを構成する子テーブルの物理的なGPUとの距離に応じて最適なGPUを選択するようになりました。NVME-oF環境などPCIeバスの構成だけでは最適距離を判断できない場合は、DB管理者は<code>pg_strom.nvme_distance_map</code>パラメータを用いて対応関係を設定する事ができます。</li>
+<li>非パーティションテーブルとのJOIN時、パーティション子テーブルと非パーティションテーブルとのJOINを行った後、各子テーブルの処理結果を結合するような実行計画を生成できるようになりました。本機能は Asymmetric Partition-wise JOIN という名称でPostgreSQL v13の本体機能へと提案されています。</li>
 </ul>
 </li>
-<li>Columnar store support with Arrow_Fdw<ul>
-<li>It supports to read external Apache Arrow files using foreign table.</li>
-<li>It also supports SSD-to-GPU Direct SQL on Apache Arrow files.</li>
+<li>Arrow_Fdwによる列指向ストアのサポート<ul>
+<li>外部テーブル経由でApache Arrow形式ファイルの読み出しに対応するようになりました。</li>
+<li>SSD-to-GPU Direct SQLを用いたApache Arrowの読み出しとSQL実行にも対応しています。</li>
 </ul>
 </li>
-<li>Pre-built GPU binary support<ul>
-<li>When GPU binary code is generated from SQL, the older version wrote out eitire CUDA C source code, including static portions like libraries, then NVRTC(NVIDIA Run-Time Compiker) built them on the fly. However, a part of complicated function consumed much longer compilation time.</li>
-<li>v2.2 preliminary builds static functions preliminary, and only dynamic portion from SQL are built dynamically. It reduces the time for GPU binary generation.</li>
+<li>ビルド済みGPUバイナリへの対応<ul>
+<li>SQLからGPUバイナリコードを生成する際、従来は動的に変更する要素のない関数群（ライブラリ関数に酷似）も含めてCUDA Cのソースコードを生成し、それをNVRTC(NVIDIA Run-Time Compiler)を用いてビルドしていました。しかし、一部の複雑な関数の影響でビルド時間が極端に長くなるという問題がありました。</li>
+<li>v2.2において、静的な関数群は事前にビルドされ、SQLから動的に生成する部分のみを実行時にコンパイルするように変更されました。これにより、GPUバイナリの生成時間が大幅に減少する事となりました。</li>
 </ul>
 </li>
-<li>JSONB data type support<ul>
-<li>This version allows to reference elements of JSONB object, and to utilize them as <code>numeric</code> or <code>test</code>.</li>
+<li>JSONBデータ型の対応<ul>
+<li>GPU側でJSONBオブジェクトの子要素を参照し、<code>numeric</code>や<code>text</code>値として条件句などで利用できるようになった。</li>
 </ul>
 </li>
-<li>Enables to implement GPU functions that returns variable length data<ul>
-<li>This version allows to implement SQL functions that returns variable-length data, like <code>textcat</code>, on GPU devices.</li>
+<li>可変長データ型を返すGPU関数の対応<ul>
+<li><code>textcat</code>など可変長データ型を返すSQL関数をGPU側で実装する事ができるようになった。</li>
 </ul>
 </li>
-<li>GpuSort support on GPU memory store (Gstore_Fdw)<ul>
-<li>This version allows to read data from GPU memory store for SQL workloads execution, not only PL/CUDA.</li>
+<li>GPUメモリストア（Gstore_Fdw）のソート対応<ul>
+<li>PL/CUDAのデータソースとして利用する以外に、GPUメモリストアからデータを読み出して実行するSQLをGPUで実行する事ができるようになりました。</li>
+<li>対応しているワークロードはGpuScanおよびGpuSortの２種類で、JOINおよびGROUP BYにはまだ対応していません。</li>
 </ul>
 </li>
-<li>Addition of regression test<ul>
-<li>Several simple regression tests are added.</li>
+<li>リグレッションテストの追加<ul>
+<li>簡易なテストのため、リグレッションテストを追加しました。</li>
 </ul>
 </li>
-<li>NVME-oF support (Experimental)<ul>
-<li>It supports SSD-to-GPU Direct SQL from remote SSD disks which are mounted using NVME-over-Fabric. Please note that it is an experimental feature, and it needs to replace the <code>nvme_rdma</code> kernel module on Red Hat Enterprise Linux 7.x / CentOS 7.x.</li>
+<li>NVME-oFへの対応（実験的機能）<ul>
+<li>NVME-over-Fabricを用いてマウントされたリモートのNVMEディスクからのSSD-to-GPU Direct SQLに対応しました。ただし、Red Hat Enterprise Linux 7.x / CentOS 7.xでは<code>nvme_rdma</code>ドライバの入れ替えが必要となり、現在のところ実験的機能という形になっています。</li>
 </ul>
 </li>
 </ul>
-<h3 id="features-to-be-deprecated">Features to be deprecated</h3>
+<h3 id="_10">将来廃止予定の機能</h3>
 <ul>
 <li>
-<p>PostgreSQL v9.6 support</p>
+<p>PostgreSQL v9.6サポート</p>
 <ul>
-<li>CustomScan API in PostgreSQL v9.6 lacks a few APIs to handle dynamic shared memory (DSM), so it is unable to collect run-time statistics.</li>
-<li>It also changes the way to keep expression objects internally, therefore, we had to put <code>#if ... #endif</code> blocks at no little points. It has damaged to code maintainability.</li>
-<li>Due to the problems, this is the last version to support PostgreSQL v9.6. If you applied PG-Strom on PostgreSQL v9.6, let us recommend to move PostgreSQL v11 as soon as possible.</li>
+<li>PostgreSQL v9.6のCustomScan APIには、動的共有メモリ(DSM)の正しいハンドリングに必要な幾つかのAPIが欠けており、実行時統計情報の採取などが不可能でした。</li>
+<li>また、内部的に式表現(Expression)を保持するための方法にも変更が加えられている事から、少なくない箇所で <code>#if ... #endif</code> ブロックが必要となり、コードの保守性を損なっていました。</li>
+<li>これらの問題により、PostgreSQL v9.6サポートは本バージョンが最後となります。PG-StromをPostgreSQL v9.6でお使いの場合は、早期にPostgreSQL v11へと移行される事をお勧めします。</li>
 </ul>
 </li>
 <li>
-<p>The <code>pgstrom</code> format of Gstore_Fdw foreign table</p>
+<p>Gstore_Fdw外部テーブルのpgstromフォーマット</p>
 <ul>
-<li>The internal data format on GPU memory store (Gstore_Fdw) is originally designed for data source of PL/CUDA procedures. It is our own format, and used PostgreSQL's data representations as is, like variable-length data, numeric, and so on.</li>
-<li>After that, NVIDIA released RAPIDS(cuDF), based on Apache Arrow, for data exchange on GPU, then its adoption becomes wider on machine-learning application and Python software stack.</li>
-<li>PG-Strom will switch its internal data format of Gstore_Fdw, to improve interoperability with these machine-learning software, then existing data format shall be deprecated.</li>
+<li>GPUメモリストア上のデータ形式は、元々PL/CUDAのデータソースとして利用するために設計された独自の列形式で、可変長データやnumericデータ型の表現はPostgreSQLのものをそのまま利用していました。</li>
+<li>その後、GPU上でのデータ交換用共通形式として、Apache Arrow形式を元にしたNVIDIA RAPIDS(cuDF)が公開され、多くの機械学習ソフトウェアやPythonでのソフトウェアスタックなど対応が強化されつつあります。</li>
+<li>今後、PG-StromはGstore_Fdwの内部データ形式をcuDFと共通のフォーマットに変更し、これら機械学習ソフトウェアとの相互運用性を改善します。コードの保守性を高くするため、従来の独自データ形式は廃止となります。</li>
 </ul>
 </li>
 </ul>
-<h3 id="dropped-features">Dropped Features</h3>
+<h3 id="_11">廃止された機能</h3>
 <ul>
-<li>In-memory columnar cache<ul>
-<li>As results of use-case analysis, we concluded Arrow_Fdw can replace this feature in most cases. Due to feature duplication, we dropped the in-memory columnar cache.</li>
+<li>インメモリ列キャッシュ<ul>
+<li>ユースケースを分析した結果、多くのケースではArrow_Fdwで十分に代替可能なワークロードである事が分かりました。重複機能であるため、インメモリ列キャッシュは削除されました。</li>
 </ul>
 </li>
 </ul>
-<h2 id="pg-strom-v20-release">PG-Strom v2.0 Release</h2>
+<h2 id="pg-strom-v20">PG-Strom v2.0リリース</h2>
 <div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
-<h3 id="overview_2">Overview</h3>
-<p>Major enhancement in PG-Strom v2.0 includes:</p>
+<h3 id="_12">概要</h3>
+<p>PG-Strom v2.0における主要な機能強化は以下の通りです。</p>
 <ul>
-<li>Overall redesign of the internal infrastructure to manage GPU and stabilization</li>
-<li>CPU+GPU hybrid parallel execution</li>
-<li>SSD-to-GPU Direct SQL Execution</li>
-<li>In-memory columnar cache</li>
-<li>GPU memory store (gstore_fdw)</li>
-<li>Redesign of GpuJoin and GpuPreAgg and speed-up</li>
-<li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
+<li>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</li>
+<li>CPU+GPUハイブリッド並列実行</li>
+<li>SSD-to-GPUダイレクトSQL実行</li>
+<li>インメモリ列指向キャッシュ</li>
+<li>GPUメモリストア(store_fdw)</li>
+<li>GpuJoinとGpuPreAggの再設計に伴う高速化</li>
+<li>GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル</li>
 </ul>
-<p>You can download the summary of new features from: <a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
-<h3 id="prerequisites_2">Prerequisites</h3>
+<p>新機能のサマリはこちらからダウンロードできます：<a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
+<h3 id="_13">動作環境</h3>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
 <li>CUDA Toolkit 9.1</li>
-<li>Linux distributions supported by CUDA Toolkit</li>
-<li>Intel x86 64bit architecture (x86_64)</li>
-<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
 </ul>
-<h3 id="new-features_2">New Features</h3>
+<h3 id="_14">新機能</h3>
 <ul>
 <li>
-<p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
+<p>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</p>
 <ul>
-<li>PostgreSQL backend process simultaneously uses only one GPU at most. In case of multi-GPUs installation, it assumes combination use with CPU parallel execution of PostgreSQL. Usually, it is not a matter because throughput of CPU to provide data to GPU is much narrower than capability of GPU processors. We prioritized simpleness of the software architecture.</li>
-<li>We began to utilize the demand paging feature of GPU device memory supported at the GPU models since Pascal generation. In most of SQL workloads, we cannot know exact size of the required result buffer prior to its execution, therefore, we had allocated more buffer than estimated buffer length, and retried piece of the workloads if estimated buffer size is not sufficient actually. This design restricts available resources of GPU which can be potentially used for other concurrent processes, and complicated error-retry logic was a nightmare for software quality. The demand paging feature allows to eliminate and simplify these stuffs.</li>
-<li>We stop to use CUDA asynchronous interface. Use of the demand paging feature on GPU device memory makes asynchronous APIs for DMA (like <code>cuMemCpyHtoD</code>) perform synchronously, then it reduces concurrency and usage ratio of GPU kernels. Instead of the CUDA asynchronous APIs, PG-Strom manages its own worker threads which call synchronous APIs for each. As a by-product, we also could eliminate asynchronous callbacks (<code>cuStreamAddCallback</code>), it allows to use MPS daemon which has a restriction at this API.</li>
+<li>PostgreSQLバックエンドプロセスは同時に１個のGPUだけを利用するようになりました。マルチGPUを利用する場合はPostgreSQLのCPU並列との併用が前提になりますが、CPUスレッドがGPUへデータを供給するスループットはGPUの処理能力よりもずっと低いため、通常、これは問題とはなりません。ソフトウェア設計のシンプル化を優先しました。</li>
+<li>Pascal世代以降のGPUで採用されたGPUデバイスメモリのデマンドページングをほぼ全面的に採用するようになりました。SQLワークロードの多くは実際に実行してみるまで必要な結果バッファの大きさが分からないため、これまでは必要以上にバッファを獲得し、またメモリ不足時には再実行を行っていましたが、これらは同時実行プロセスの利用可能なリソースを制限し、また複雑な例外ロジックはバグの温床でした。GPUデバイスメモリのデマンドページングを利用する事で、設計のシンプル化を行いました。</li>
+<li>CUDAの非同期インターフェースの利用を止めました。GPUデバイスメモリのデマンドページングを利用すると、DMA転送のための非同期API（<code>cuMemCpyHtoD</code>など）は同期的に振舞うようになるため、GPUカーネルの多重度が低下してしまいます。代わりにPG-Strom自身がワーカースレッドを管理し、これらのワーカースレッドがそれぞれ同期APIを呼び出すよう設計変更を行いました。副産物として、非同期コールバック（<code>cuStreamAddCallback</code>）を利用する必要がなくなったので、MPSを利用する事が可能となりました。</li>
 </ul>
 </li>
 <li>
-<p>CPU+GPU Hybrid Parallel Execution</p>
+<p>CPU+GPUハイブリッド並列実行</p>
 <ul>
-<li>CPU parallel execution at PostgreSQL v9.6 is newly supported.</li>
-<li>CustomScan logic of GpuScan, GpuJoin and GpuPreAgg provided by PG-Strom are executable on multiple background worker processes of PostgreSQL in parallel.</li>
-<li>Limitation: PG-Strom's own statistics displayed at <code>EXPLAIN ANALYZE</code> if CPU parallel execution. Because PostgreSQL v9.6 does not provide <code>ShutdownCustomScan</code> callback of the CustomScan interface, coordinator process has no way to reclaim information of worker processes prior to the release of DSM (Dynamic Shared Memory) segment.</li>
+<li>PostgreSQL v9.6で新たにサポートされたCPU並列実行に対応しました。</li>
+<li>PG-Stromの提供するGpuScan、GpuJoinおよびGpuPreAggの各ロジックは複数のPostgreSQLバックグラウンドワーカープロセスにより並列に実行する事が可能です。</li>
+<li>PostgreSQL v9.6ではCPU並列実行の際に<code>EXPLAIN ANALYZE</code>で取得するPG-Strom独自の統計情報が正しくありません。これは、CustomScanインターフェースAPIで<code>ShutdownCustomScan</code>が提供されていなかったため、DSM（動的共有メモリ）の解放前にコーディネータプロセスがワーカープロセスの情報を回収する手段が無かったためです。</li>
 </ul>
 </li>
 <li>
-<p>SSD-to-GPU Direct SQL Execution</p>
+<p>SSD-to-GPUダイレクトSQL実行</p>
 <ul>
-<li>By cooperation with the <code>nvme_strom</code> Linux kernel module, it enables to load PostgreSQL's data blocks on NVMe-SSD to GPU device memory directly, bypassing the CPU and host buffer. This feature enables to apply PG-Strom on the area which have to process large data set more than system RAM size.</li>
-<li>It allows to pull out pretty high throughput close to the hardware limitation because its data stream skips block-device or filesystem layer. Then, GPU runs SQL workloads that usually reduce the amount of data to be processed by CPU. The chemical reaction of these characteristics enables to redefine GPU's role as accelerator of I/O workloads also, not only computing intensive workloads.</li>
+<li>Linuxカーネルモジュール <code>nvme_strom</code> を用いる事で、NVMe規格に対応したSSD上のPostgreSQLデータブロックを、CPU/RAMを介さずダイレクトにGPUデバイスメモリへ転送する事が可能となりました。システムRAMに載り切らない大きさのデータを処理する場合であっても、本機能によりPG-Stromの適用が現実的な選択肢となる事でしょう。</li>
+<li>ブロックデバイス層やファイルシステムを経由しないためハードウェア限界に近い高スループットを引き出す事が可能で、かつ、GPUでSQLワークロードを処理するためCPUの処理すべきデータ量を減らす事ができます。このような特性の組み合わせにより、一般的には計算ワークロードのアクセラレータとして認識されているGPUを、I/Oワークロードの高速化に適用する事に成功しました。</li>
 </ul>
 </li>
 <li>
-<p>In-memory Columnar Cache</p>
+<p>インメモリ列指向キャッシュ</p>
 <ul>
-<li>For middle size data-set loadable onto the system RAM, it allows to cache data-blocks in column format which is more suitable for GPU computing. If cached data-blocks are found during table scan, PG-Strom prefers to reference the columnar cache more than shared buffer of PostgreSQL.</li>
-<li>In-memory columnar cache can be built synchronously, or asynchronously by the background workers.</li>
-<li>You may remember very early revision of PG-Strom had similar feature. In case when a cached tuple gets updated, the latest in-memory columnar cache which we newly implemented in v2.0 invalidates the cache block which includes the updated tuples. It never updates the columnar cache according to the updates of row-store, so performance degradation is quite limited.</li>
+<li>RAMサイズに載る程度の大きさのデータに対しては、よりGPUでの処理に適した列データ形式に変形してキャッシュする事が可能になりました。テーブルのスキャンに際して、列指向キャッシュが存在する場合にはPostgreSQLの共有バッファよりもこちらを優先して参照します。</li>
+<li>インメモリ列指向キャッシュは同期的、または非同期的にバックグラウンドで構築する事が可能です。</li>
+<li>初期のPG-Stromで似たような機能が存在していた事を覚えておられるかもしれません。v2.0で新たに実装された列指向キャッシュは、キャッシュされた行が更新されると、当該行を含むキャッシュブロックを消去（invalidation）します。行ストアの更新に合わせて列キャッシュ側の更新を行うという事は行わないため、更新ワークロードに対するパフォーマンスの低下は限定的です。</li>
 </ul>
 </li>
 <li>
-<p>GPU Memory Store (gstore_fdw)</p>
+<p>GPUメモリストア(gstore_fdw)</p>
 <ul>
-<li>It enables to write to / read from preserved GPU device memory region by SELECT/INSERT/UPDATE/DELETE in SQL-level, using foreign table interface.</li>
-<li>In v2.0, only <code>pgstrom</code> internal data format is supported. It saves written data using PG-Strom's buffer format of <code>KDS_FORMAT_COLUMN</code>. It can compress variable length data using LZ algorithm.</li>
-<li>In v2.0, GPU memory store can be used as data source of PL/CUDA user defined function.</li>
+<li>GPU上に確保したデバイスメモリ領域に対して、外部テーブル（Foreign Table）のインターフェースを利用してSQLのSELECT/INSERT/UPDATE/DELETEにより読み書きを行う機能です。</li>
+<li>内部データ形式は <code>pgstrom</code> 型のみがサポートされています。これは、PG-Stromのバッファ形式<code>KDS_FORMAT_COLUMN</code>タイプと同一の形式でデータを保持するものです。可変長データを保存する場合、LZ方式によるデータ圧縮を行う事も可能です。</li>
+<li>v2.0の時点では、GPUメモリストアはPL/CUDA関数のデータソースとしてだけ利用する事が可能です。</li>
 </ul>
 </li>
 <li>
-<p>Redesign and performance improvement of GpuJoin and GpuPreAgg</p>
+<p>GpuJoinとGpuPreAggの再設計に伴う高速化</p>
 <ul>
-<li>Stop using Dynamic Parallelism which we internally used in GpuJoin and GpuPreAgg, and revised entire logic of these operations. Old design had a problem of less GPU usage ratio because a GPU kernel which launches GPU sub-kernel and just waits for its completion occupied GPU's execution slot.</li>
-<li>A coproduct of this redesign is suspend/resume of GpuJoin. In principle, JOIN operation of SQL may generate larger number of rows than number of input rows, but preliminary not predictive. The new design allows to suspend GPU kernel once buffer available space gets lacked, then resume with new result buffer. It simplifies size estimation logic of the result buffer, and eliminates GPU kernel retry by lack of buffer on run-time.</li>
+<li>従来、GpuJoinとGpuPreAggで内部的に使用していたDynamic Parallelismの利用をやめ、処理ロジック全体の見直しを行いました。これは、GPUサブカーネルの起動後、その完了を単に待っているだけのGPUカーネルが実行スロットを占有し、GPUの使用率が上がらないという問題があったためです。</li>
+<li>この再設計に伴う副産物として、GpuJoinのサスペンド/レジューム機能が実装されました。原理上、SQLのJOIN処理は入力した行数よりも出力する行数の方が増えてしまう事がありますが、処理結果を書き込むバッファの残りサイズが不足した時点でGpuJoinをサスペンドし、新しい結果バッファを割り当ててレジュームするように修正されました。これにより、結果バッファのサイズ推定が簡略化されたほか、実行時のバッファ不足による再実行の必要がなくなりました。</li>
 </ul>
 </li>
 <li>
-<p>GpuPreAgg+GpuJoin+GpuScan combined GPU kernel</p>
+<p>GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル</p>
 <ul>
-<li>In case when GPU executable SCAN, JOIN and GROUP BY are serially cascaded, a single GPU kernel invocation runs a series of tasks equivalent to the GpuScan, GpuJoin and GpuPreAgg. This is an approach to minimize data exchange between CPU and GPU. For example, result buffer of GpuJoin is used as input buffer of GpuPreAgg.</li>
-<li>This feature is especially valuable if combined with SSD-to-GPU Direct SQL Execution.</li>
+<li>GPUで実行可能なSCAN、JOIN、GROUP BYが連続しているとき、対応するGpuScan、GpuJoin、GpuPreAggに相当する処理を一回のGPUカーネル呼び出しで実行する事が可能になりました。これは、GpuJoinの結果バッファをそのままGpuPreAggの入力バッファとして扱うなど、CPUとGPUの間のデータ交換を最小限に抑えるためのアプローチです。</li>
+<li>この機能は特に、SSD-to-GPUダイレクトSQL実行と組み合わせて使用すると効果的です。</li>
 </ul>
 </li>
 <li>
-<p>PL/CUDA Enhancement</p>
+<p>新しいデータ型の対応</p>
 <ul>
-<li><code>#plcuda_include</code> is enhanced to specify SQL function which returns <code>text</code> type. It can change the code block to inject according to the argument, so it also allows to generate multiple GPU kernel variations, not only inclusion of externally defined functions.</li>
-<li>If PL/CUDA takes <code>reggstore</code> type argument, GPU kernel function receives pointer of the GPU memory store. Note that it does not pass the OID value.</li>
+<li><code>uuid</code>型に対応しました。</li>
+<li>ネットワークアドレス型（<code>inet</code>、<code>cidr</code>、および<code>macaddr</code>）に対応しました。</li>
+<li>範囲型（<code>int4range</code>、<code>int8range</code>、<code>tsrange</code>、<code>tstzrange</code>、<code>daterange</code>）に対応しました。</li>
+<li>半精度浮動小数点型（<code>float2</code>）に対応しました。半精度浮動小数点型に関連するCPU側の実装はPG-Stromの独自実装によるものです。</li>
 </ul>
 </li>
 <li>
-<p>Other Enhancement</p>
+<p>新しい演算子/関数の対応</p>
 <ul>
-<li><code>lo_import_gpu</code> and <code>lo_export_gpu</code> functions allows to import contents of the GPU device memory acquired by external applications directly, or export contents of the largeobject to the GPU device memory.</li>
+<li>日付時刻型に対する<code>EXTRACT(field FROM timestamp)</code>演算子に対応しました。</li>
 </ul>
 </li>
 <li>
-<p>Packaging</p>
+<p>New data type support</p>
 <ul>
-<li>Add RPM packages to follow the PostgreSQL packages distributed by PostgreSQL Global Development Group.</li>
-<li>All the software packages are available at HeteroDB SWDC(Software Distribution Center) and downloadable.</li>
+<li><code>uuid</code> type</li>
+<li>Network address types (<code>inet</code>, <code>cidr</code> and <code>macaddr</code>)</li>
+<li>Range data types (<code>int4range</code>, <code>int8range</code>, <code>tsrange</code>, <code>tstzrange</code>, <code>daterange</code>)</li>
+<li>Half-precision floating point type (<code>float2</code>). Its CPU side are also implemented by PG-Strom itself, not PostgreSQL's built-in feature.</li>
 </ul>
 </li>
 <li>
-<p>Document</p>
+<p>New operators / functions</p>
 <ul>
-<li>PG-Strom documentation was entirely rewritten using markdown and mkdocs. It makes documentation maintenance easier than the previous HTML based approach, so expects timely updates according to the development of new features.</li>
+<li><code>EXTRACT(field FROM timestamp)</code> operator on the date and time types</li>
 </ul>
 </li>
 <li>
-<p>Test</p>
+<p>PL/CUDA関連の強化</p>
 <ul>
-<li>Regression test for PG-Strom was built on top of the regression test framework of PostgreSQL.</li>
-</ul>
-</li>
-</ul>
-<h3 id="dropped-features_1">Dropped features</h3>
-<ul>
-<li>
-<p>PostgreSQL v9.5 Support</p>
-<ul>
-<li>PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called "upper planner path-ification". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.</li>
-<li>It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.</li>
-<li>CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.</li>
+<li><code>#plcuda_include</code>の拡張により、<code>text</code>型を返すSQL関数を指定できるようになりました。引数の値によって挿入するコードを変える事ができるため、単に外部定義関数を読み込むだけでなく、動的にいくつものGPUカーネルのバリエーションを作り出すことも可能です。</li>
+<li>PL/CUDA関数の引数に<code>reggstore</code>型を指定した場合、GPUカーネル関数へは対応するGPUメモリストアのポインタが渡されます。OID値が渡されるわけではない事に留意してください。</li>
 </ul>
 </li>
 <li>
-<p>GpuSort feature</p>
+<p>その他の機能強化</p>
 <ul>
-<li>We dropped GpuSort because we have little advantages in the performance.</li>
-<li>Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.</li>
-<li>Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.</li>
-<li>It is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.</li>
+<li><code>lo_import_gpu</code>および<code>lo_export_gpu</code>関数により、外部アプリケーションの確保したGPUメモリの内容を直接PostgreSQLのラージオブジェクトに記録したり、逆にラージオブジェクトの内容をGPUメモリに書き出す事が可能です。</li>
+</ul>
+</li>
+<li>
+<p>パッケージング</p>
+<ul>
+<li>PostgreSQL Global Development Groupの配布するPostgreSQLパッケージに適合するよう、RPMパッケージ化を行いました。</li>
+<li>全てのソフトウェア物件はHeteroDB SWDC(Software Distribution Center)よりダウンロードが可能です。</li>
+</ul>
+</li>
+<li>
+<p>ドキュメント</p>
+<ul>
+<li>PG-Stromドキュメントをmarkdownとmkdocsを用いて全面的に書き直しました。従来のHTMLを用いたアプローチに比べ、よりメンテナンスが容易で新機能の開発に合わせたドキュメントの拡充が可能となります。</li>
+</ul>
+</li>
+<li>
+<p>テスト</p>
+<ul>
+<li>PostgreSQLのリグレッションテストフレームワークを使用して、PG-Stromのリグレッションテストを作成しました。</li>
+</ul>
+</li>
+</ul>
+<h3 id="_15">廃止された機能</h3>
+<ul>
+<li>
+<p>PostgreSQL v9.5サポート</p>
+<ul>
+<li>PostgreSQL v9.6ではCPU並列クエリの提供に伴い、オプティマイザ/エグゼキュータ共に大きな修正が加えられました。これらと密接に連携する拡張モジュールにとって最もインパクトの大きな変更は『upper planner path-ification』と呼ばれるインターフェースの強化で、集約演算やソートなどの実行計画もコストベースで複数の異なる方法を比較して最適なものを選択できるようになりました。</li>
+<li>これはGpuPreAggを実装するためにフックを利用して実行計画を書き換えていた従来の方法とは根本的に異なり、より合理的かつ信頼できる方法でGPUを用いた集約演算を挿入する事が可能となり、バグの温床であった実行計画の書き換えロジックを捨てる事が可能になりました。</li>
+<li>同時に、CustomScanインターフェースにもCPU並列に対応するためのAPIが拡張され、これらに対応するためにPostgreSQL v9.5サポートは廃止されました。</li>
+</ul>
+</li>
+<li>
+<p>GpuSort機能</p>
+<ul>
+<li>GpuSort機能は性能上のメリットが得られないため廃止されました。</li>
+<li>ソートはGPUの得意とするワークロードの一つです。しかし、GPUデバイスメモリの大きさを越えるサイズのデータをソートする場合、複数のチャンクに分割して部分ソートを行い、後でCPU側でこれを結合して最終結果を出力する必要があります。</li>
+<li>結合フェーズの処理を軽くするには、GPUでソートすべきチャンクのサイズを大きく必要がありますが、一方でチャンクサイズが大きくなるとソート処理を開始するためのリードタイムが長くなり、PG-Stromの特長の一つである非同期処理によるデータ転送レイテンシの隠ぺいが効かなくなるというトレードオフがあります。</li>
+<li>これらの問題に対処するのは困難、少なくとも時期尚早であると判断し、GpuSort機能は廃止されました。</li>
 </ul>
 </li>
 </ul>
@@ -477,13 +478,6 @@
             </div>
           </div>
           <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-      
-        <a href="../ref_params/" class="btn btn-neutral" title="GUC Parameters"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
-    </div>
   
 
   <hr/>
@@ -506,8 +500,6 @@
   <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
-      
-        <span><a href="../ref_params/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
     </span>
