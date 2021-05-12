@@ -80,11 +80,11 @@
                     </li>
                     <li class="toctree-l1 current"><a class="reference internal current" href="./">GPU Memory Store</a>
     <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">運用</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#maintenance">Maintenance</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">保守</a>
     </li>
     </ul>
                     </li>
@@ -147,10 +147,19 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="gpu-cache">GPU Cache</h1>
-<h2 id="overview">Overview</h2>
+                <h1 id="gpu">GPUキャッシュ</h1>
+<h2 id="_1">概要</h2>
 <!--
 
+GPUにはホストシステムのRAMとは独立なデバイスメモリが搭載されており、GPUで計算するにはPCI-Eバスなどを通じて、一旦、ホストシステムやストレージデバイスからデータをGPUデバイスメモリ側へ転送する必要があります。
+PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部的には、PostgreSQLテーブルから読み出したレコードをGPUへと転送し、その上でGPUでSQLの各種処理を実行します。
+しかしこれらの処理には、多かれ少なかれテーブルの読み出しやデータの転送に時間を要します（多くの場合、GPUでの処理よりも遥かに長い時間の！）。
+
+
+
+
+GPUメモリストア（Gstore_Fdw）とは、GPUデバイスメモリ上に予め確保した領域を外部テーブル（Foreign Table）を介して読み書きする機能です。
+主に検索・分析を目的としたSQLクエリを実行する際には、既にGPU上にデータがロードされているため、改めてテーブルからレコードを読み出したり、PCI-Eバスを介してデータを転送したりする必要がありません。
 
 
 
@@ -159,13 +168,13 @@
 -->
 
 <p>under construction</p>
-<h2 id="operations">Operations</h2>
+<h2 id="_2">運用</h2>
 <!--
 テーブル定義、オプション、チューニングのヒント（PMEMとかreuse
 -->
 
 <p>under construction</p>
-<h2 id="maintenance">Maintenance</h2>
+<h2 id="_3">保守</h2>
 <p>under construction</p>
 <!--
 
