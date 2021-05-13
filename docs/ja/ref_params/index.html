@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>GUCパラメータ - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,134 +51,80 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRINインデックス</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GUCパラメータ</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">特定機能の有効化/無効化</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">オプティマイザに関する設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">エグゼキュータに関する設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpusql">GPUダイレクトSQL関連の設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw関連の設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gstore_fdw">Gstore_Fdw関連の設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUプログラムの生成とビルドに関連する設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu_1">GPUデバイスに関連する設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">システム共有メモリに関連する設定</a>
+    </li>
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">データ型</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">GUCパラメータ</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">特定機能の有効化/無効化</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">オプティマイザに関する設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_3">エグゼキュータに関する設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpusql">GPUダイレクトSQL関連の設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連の設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gstore_fdw">Gstore_Fdw関連の設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpu">GPUプログラムの生成とビルドに関連する設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpu_1">GPUデバイスに関連する設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_4">システム共有メモリに関連する設定</a></li>
-    
-
-    </ul>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -205,15 +153,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>GUCパラメータ</h1>
-
+                <h1 id="guc">GUCパラメータ</h1>
 <p>本節ではPG-Stromの提供する設定パラメータについて説明します。</p>
-<h1 id="_1">特定機能の有効化/無効化</h1>
+<h2 id="_1">特定機能の有効化/無効化</h2>
 <table>
 <thead>
 <tr>
@@ -304,7 +252,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_2">オプティマイザに関する設定</h1>
+<h2 id="_2">オプティマイザに関する設定</h2>
 <table>
 <thead>
 <tr>
@@ -341,7 +289,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_3">エグゼキュータに関する設定</h1>
+<h2 id="_3">エグゼキュータに関する設定</h2>
 <table>
 <thead>
 <tr>
@@ -366,7 +314,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpusql">GPUダイレクトSQL関連の設定</h1>
+<h2 id="gpusql">GPUダイレクトSQL関連の設定</h2>
 <table>
 <thead>
 <tr>
@@ -409,7 +357,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="arrow_fdw">Arrow_Fdw関連の設定</h1>
+<h2 id="arrow_fdw">Arrow_Fdw関連の設定</h2>
 <table>
 <thead>
 <tr>
@@ -440,7 +388,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gstore_fdw">Gstore_Fdw関連の設定</h1>
+<h2 id="gstore_fdw">Gstore_Fdw関連の設定</h2>
 <table>
 <thead>
 <tr>
@@ -477,7 +425,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpu">GPUプログラムの生成とビルドに関連する設定</h1>
+<h2 id="gpu">GPUプログラムの生成とビルドに関連する設定</h2>
 <table>
 <thead>
 <tr>
@@ -514,7 +462,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpu_1">GPUデバイスに関連する設定</h1>
+<h2 id="gpu_1">GPUデバイスに関連する設定</h2>
 <table>
 <thead>
 <tr>
@@ -539,7 +487,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_4">システム共有メモリに関連する設定</h1>
+<h2 id="_4">システム共有メモリに関連する設定</h2>
 <table>
 <thead>
 <tr>
@@ -571,7 +519,7 @@
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../release_note/" class="btn btn-neutral float-right" title="リリースノート">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../release_v3.0/" class="btn btn-neutral float-right" title="PG-Strom v3.0">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href="../ref_sqlfuncs/" class="btn btn-neutral" title="SQLオブジェクト"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -586,7 +534,7 @@
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -596,20 +544,25 @@
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
         <span><a href="../ref_sqlfuncs/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../release_note/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../release_v3.0/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

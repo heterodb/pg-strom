@@ -1,8 +1,8 @@
-@ja:<h1>インデックス対応</h1>
-@en:<h1>Index Support</h1>
+@ja:#インデックス対応
+@en:#Index Support
 
-@ja:#概要
-@en:#Overview
+@ja:##概要
+@en:##Overview
 
 @ja{
 PostgreSQLは何種類かのインデックス形式に対応しており、デフォルトで選択されるB-treeインデックスは特定の値を持つレコードを高速に検索する事が可能です。これ以外にも、Hash、BRIN、GiST、GINなど特性の異なるインデックス形式が提供されており、現在のところPG-StromはBRINインデックスにのみ対応しています。
@@ -29,8 +29,8 @@ PG-Strom also utilizes the feature of BRIN-index, to skip obviously unnecessary 
 
 ![BRIN-index Ovewview](./img/brin-index-overview.png)
 
-@ja:#設定
-@en:#Configuration
+@ja:##設定
+@en:##Configuration
 
 @ja{
 BRINインデックスを利用するために特別な設定は必要ありません。
@@ -66,8 +66,8 @@ By the GUC parameters below, PG-Strom enables/disables usage of BRIN-index. It u
 |`pg_strom.enable_brin`|`bool`|`on`   |enables/disables usage of BRIN-index|
 }
 
-@ja:#操作
-@en:#Operations
+@ja:##操作
+@en:##Operations
 
 @ja{
 `EXPLAIN`構文によりBRINインデックスが使用されているかどうかを確認する事ができます。

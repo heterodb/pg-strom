@@ -1,14 +1,14 @@
 @ja{
-<h1>データ型</h1>
+#データ型
 PG-Stromは以下のデータ型をGPUで利用する事ができます。
 }
 @en{
-<h1>Data Types</h1>
+#Data Types
 PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 数値データ型
+## 数値データ型
 
 |SQLデータ型       |データ長|備考|
 |:-----------------|:-------|:---|
@@ -21,7 +21,7 @@ PG-Strom support the following data types for use on GPU device.
 |`numeric`         |可変長  |内部形式は128bit固定少数点型|
 }
 @en{
-# Numeric types
+## Numeric types
 
 |SQL data types    |Length  |Memo                   |
 |:-----------------|:-------|:----------------------|
@@ -57,7 +57,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 標準の日付時刻型
+## 標準の日付時刻型
 
 |SQLデータ型       |データ長|備考        |
 |:-----------------|:-------|:-----------|
@@ -70,7 +70,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @en{
-# Built-in date and time types
+## Built-in date and time types
 
 |SQL data types    |Length  |Memo|
 |:-----------------|:-------|:---|
@@ -83,7 +83,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 標準の可変長データ型
+## 標準の可変長データ型
 
 |SQLデータ型       |データ長|備考            |
 |:-----------------|:-------|:---------------|
@@ -94,7 +94,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @en{
-# Built-in variable length types
+## Built-in variable length types
 
 |SQL data types    |Length  |Memo          |
 |:-----------------|:-------|:-------------|
@@ -105,7 +105,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 標準の非構造データ型
+## 標準の非構造データ型
 
 |SQLデータ型      |データ長|備考|
 |:----------------|:-------|:---|
@@ -117,7 +117,7 @@ PG-Strom support the following data types for use on GPU device.
     後者の問題に対しては、テーブルのストレージオプション`toast_tuple_target`を拡大し、TOAST化の閾値を引き上げる事である程度は回避する事も可能です。
 }
 @en{
-# Built-in unstructured data types
+## Built-in unstructured data types
 
 |SQL data types   |Length  |Memo|
 |:----------------|:-------|:---|
@@ -131,7 +131,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 標準の雑多なデータ型
+## 標準の雑多なデータ型
 
 |SQLデータ型       |データ長|備考          |
 |:-----------------|:-------|:-------------|
@@ -145,7 +145,7 @@ PG-Strom support the following data types for use on GPU device.
 
 }
 @en{
-# Built-in miscellaneous types
+## Built-in miscellaneous types
 
 |SQL data types    |Length  |Memo             |
 |:-----------------|:-------|:----------------|
@@ -158,7 +158,7 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# 標準の範囲型
+## 標準の範囲型
 
 |SQLデータ型       |データ長|備考             |
 |:-----------------|:-------|:----------------|
@@ -169,7 +169,7 @@ PG-Strom support the following data types for use on GPU device.
 |`daterange`       |14 bytes|日付データ範囲型 |
 }
 @en{
-# Built-in range data types
+## Built-in range data types
 
 |SQL data types    |Length  |Memo                       |
 |:-----------------|:-------|:--------------------------|
@@ -181,14 +181,14 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-# PostGISデータ型
+## PostGISデータ型
 
 |SQLデータ型       |データ長|備考                         |
 |:-----------------|:-------|:----------------------------|
 |`geometry`        |可変長  |PostGISジオメトリオブジェクト|
 }
 @en{
-# PostGIS data types
+## PostGIS data types
 
 |SQL data types   |Length  |Memo                      |
 |:----------------|:-------|:-------------------------|

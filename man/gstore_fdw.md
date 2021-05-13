@@ -1,8 +1,8 @@
-@ja:<h1>GPUメモリストア (Gstore_Fdw)</h1>
-@en:<h1>GPU Memory Store (Gstore_Fdw)</h1>
+@ja:#GPUキャッシュ
+@en:#GPU Cache
 
-@ja:#概要
-@en:#Overview
+@ja:##概要
+@en:##Overview
 
 <!--
 @ja{
@@ -25,8 +25,8 @@ GPUメモリストア（Gstore_Fdw）とは、GPUデバイスメモリ上に予�
 under construction
 
 
-@ja:#運用
-@en:#Operations
+@ja:##運用
+@en:##Operations
 
 <!--
 テーブル定義、オプション、チューニングのヒント（PMEMとかreuse
@@ -35,8 +35,8 @@ under construction
 under construction
 
 
-@ja:#保守
-@en:#Maintenance
+@ja:##保守
+@en:##Maintenance
 
 under construction
 

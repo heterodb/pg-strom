@@ -1,3 +1,6 @@
+@ja:#インストール
+@en:#Installation
+
 @ja{
 本章ではPG-Stromのインストール手順について説明します。
 }
@@ -5,8 +8,8 @@
 This chapter introduces the steps to install PG-Strom.
 }
 
-@ja:# チェックリスト
-@en:# Checklist
+@ja:##チェックリスト
+@en:##Checklist
 
 @ja{
 - **ハードウェア**
@@ -42,8 +45,8 @@ This chapter introduces the steps to install PG-Strom.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
 
-@ja:# OSのインストール
-@en:# OS Installation
+@ja:## OSのインストール
+@en:## OS Installation
 
 @ja{
 CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、[NVIDIA DEVELOPER ZONE](https://developer.nvidia.com/)において紹介されています。
@@ -188,8 +191,8 @@ Complete!
 ```
 
 
-@ja:# CUDA Toolkitのインストール
-@en:# CUDA Toolkit Installation
+@ja:## CUDA Toolkitのインストール
+@en:## CUDA Toolkit Installation
 
 @ja{
 本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません
@@ -310,8 +313,8 @@ EOF
 # dracut -f
 ```
 
-@ja:# PostgreSQLのインストール
-@en:# PostgreSQL Installation
+@ja:## PostgreSQLのインストール
+@en:## PostgreSQL Installation
 
 @ja{
 本節ではRPMによるPostgreSQLのインストールについて紹介します。
@@ -435,8 +438,8 @@ Installed:
 Complete!
 ```
 
-@ja:# PG-Stromのインストール
-@en:# PG-Strom Installation
+@ja:## PG-Stromのインストール
+@en:## PG-Strom Installation
 
 @ja{
 本節ではPG-Stromのインストール方法について説明します。
@@ -447,8 +450,8 @@ This section introduces the steps to install PG-Strom.
 We recommend RPM installation, however, also mention about the steps to build PG-Strom from the source code.
 }
 
-@ja:## RPMによるインストール
-@en:## RPM Installation
+@ja:### RPMによるインストール
+@en:### RPM Installation
 
 @ja{
 PG-Stromおよび関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)より配布されています。
@@ -491,8 +494,8 @@ Complete!
 That's all for package installation.
 }
 
-@ja:## ソースからのインストール
-@en:## Installation from the source
+@ja:### ソースからのインストール
+@en:### Installation from the source
 
 @ja{
 開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。
@@ -501,8 +504,8 @@ That's all for package installation.
 For developers, we also introduces the steps to build and install PG-Strom from the source code.
 }
 
-@ja:### ソースコードの入手
-@en:### Getting the source code
+@ja:#### ソースコードの入手
+@en:#### Getting the source code
 @ja{
 RPMパッケージと同様に、ソースコードのtarballを[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手する事ができます。
 
@@ -522,8 +525,8 @@ Receiving objects: 100% (13797/13797), 11.81 MiB | 1.76 MiB/s, done.
 Resolving deltas: 100% (10504/10504), done.
 ```
 
-@ja:### PG-Stromのビルド
-@en:### Building the PG-Strom
+@ja:#### PG-Stromのビルド
+@en:#### Building the PG-Strom
 @ja{
 PG-Stromをビルドする時のコンフィグは、インストール先のPostgreSQLと厳密に一致していなければいけません。例えば、同じ構造体がビルド時のコンフィグによりPostgreSQLとPG-Stromで異なったレイアウトを持ってしまったとすれば、非常に発見の難しいバグを生み出してしまうかもしれません。 したがって、（一貫性のない状態を避けるため）PG-Stromは独自にconfigureスクリプトを走らせたりはせず、`pg_config`を使ってPostgreSQLのビルド時設定を参照します。
 
@@ -544,8 +547,8 @@ $ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 ```
 
-@ja:## インストール後の設定
-@en:## Post Installation Setup
+@ja:### インストール後の設定
+@en:### Post Installation Setup
 
 @ja:### データベースクラスタの作成
 @en:### Creation of database cluster
@@ -767,8 +770,8 @@ That's all for the installation.
 }
 
 
-@ja:# NVME-Stromモジュール
-@en:# NVME-Strom module
+@ja:## NVME-Stromモジュール
+@en:## NVME-Strom module
 
 @ja{
 PG-Stromとは独立した別個のソフトウェアモジュールではありますが、SSD-to-GPUダイレクトSQL実行など、PG-Stromの中核機能と密接に関係しているNVME-Stromカーネルモジュールについても本節で説明します。
@@ -777,8 +780,8 @@ PG-Stromとは独立した別個のソフトウェアモジュールではあり
 This section also introduces NVME-Strom Linux kernel module which is closely cooperating with core features of PG-Strom like SSD-to-GPU Direct SQL Execution, even if it is an independent software module.
 }
 
-@ja:## モジュールの入手とインストール
-@en:## Getting the module and installation
+@ja:### モジュールの入手とインストール
+@en:### Getting the module and installation
 
 @ja{
 他のPG-Strom関連モジュールと同様、NVME-Stromは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。
@@ -840,8 +843,8 @@ Installed:
 Complete!
 ```
 
-@ja:## ライセンスの有効化
-@en:## License activation
+@ja:### ライセンスの有効化
+@en:### License activation
 
 @ja{
 NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。
@@ -896,8 +899,8 @@ LOG:  listening on IPv4 address "127.0.0.1", port 5432
 ```
 
 
-@ja:## カーネルモジュールパラメータ
-@en:## Kernel module parameters
+@ja:### カーネルモジュールパラメータ
+@en:### Kernel module parameters
 
 @ja{
 NVME-Stromカーネルモジュールにはパラメータがあります。
@@ -962,8 +965,8 @@ If turn-around time of the DMA requests are too large, it may be wrongly conside
 `p2p_dma_max_depth` parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.
 }
 
-@ja:#PostGISのインストール
-@en:#PostGIS Installation
+@ja:##PostGISのインストール
+@en:##PostGIS Installation
 
 @ja{
 PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。

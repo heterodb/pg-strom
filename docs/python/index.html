@@ -7,27 +7,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>Python cooperation - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <title>Python - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
-    var mkdocs_page_name = "Python cooperation";
+    var mkdocs_page_name = "Python";
     var mkdocs_page_input_path = "python.md";
     var mkdocs_page_url = null;
   </script>
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,123 +51,60 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">Python cooperation</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#background">Background</a></li>
-    
-
-    <li class="toctree-l3"><a href="#data-exchange-via-cupy">Data exchange via cuPy</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l4" href="#installation-of-cupy_strom">Installation of cupy_strom</a></li>
-        
-            <li><a class="toctree-l4" href="#execution-of-custom-gpu-kernel-using-cupy">Execution of custom GPU kernel using cuPy</a></li>
-        
-            <li><a class="toctree-l4" href="#usage-from-plpython-user-defined-functions">Usage from PL/Python User Defined Functions</a></li>
-        
-        </ul>
-    
-
-    </ul>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -184,16 +123,13 @@
     <li><a href="..">Docs</a> &raquo;</li>
     
       
-        
-          <li>Advanced Features &raquo;</li>
-        
-      
     
-    <li>Python cooperation</li>
+    <li>Python</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
@@ -240,7 +176,6 @@ Below is an example.</p>
   5 | 61.43 | 86.87 | 47.64
 (5 rows)
 </code></pre>
-
 <p><strong>Python-side operations</strong></p>
 <pre><code>import psycopg2
 import cupy
@@ -257,14 +192,12 @@ print(X)
 
 conn.close()
 </code></pre>
-
 <p><strong>Results</strong></p>
 <pre><code>$ python ftest.py
 [[51.61 49.73 61.15 23.76 61.43]
  [73.23 29.75 55.15 40.76 86.87]
  [ 7.53 37.31 36.07 51.74 47.64]]
 </code></pre>
-
 <p>The above example introduces Python script connects to PostgreSQL and calls <code>pgstrom.arrow_fdw_export_cupy</code> to create a GPU buffer that consists of column <code>x</code>, <code>y</code> and <code>z</code> of foreign table <code>ft</code>. Then, identifier returned from the function is passed to <code>cupy_strom.ipc_import</code> function, to build <code>cupy.ndarray</code> object accessible to Python script.</p>
 <p>Once <code>cupy.ndarray</code> object is built, you can control the GPU buffer using usual cuPy APIs. This example shows a small 5rows x 3columns matrix, however, here is no essential differences even if it is billion rows. As above, we can exchange data-frames between PostgreSQL and Python scripts.</p>
 <p>The GPU buffer allocated shall be released when session is closed. If you want to keep the GPU buffer after the session closed, use <code>pgstrom.arrow_fdw_export_cupy_pinned</code> instead for the buffer allocation. Please note that GPU device memory is preserved until invocation of <code>pgstrom.arrow_fdw_unpin_gpu_buffer</code> for explicit unpinning.</p>
@@ -275,7 +208,6 @@ $ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/python
 $ python3 setup.py 
 </code></pre>
-
 <h2 id="execution-of-custom-gpu-kernel-using-cupy">Execution of custom GPU kernel using cuPy</h2>
 <p>cuPy has many APIs for matrix operations to pull out GPU's computing capability without CUDA C programming. On the other hands, it also allows execution of custom GPU kernel functions defined by users.</p>
 <p>Below is an example of custom GPU kernel definition using <code>cupy.RawKernel</code> for calculation of the average for each column of the input values ('X').
@@ -340,7 +272,6 @@ print(Y / nitems)
 
 conn.close()
 </code></pre>
-
 <p><strong>Results</strong></p>
 <pre><code>=# SELECT pgstrom.arrow_fdw_truncate('ft');
 
@@ -355,11 +286,9 @@ conn.close()
  50.0225953391276 | -24.9964806686448 | 100.037490822002
 (1 row)
 </code></pre>
-
 <pre><code>$ python ftest.py
 [ 50.02259536 -24.99648063 100.03749086]
 </code></pre>
-
 <p>Its test data intentionally slides the central of distribution for each column. The execution result, which exchanged the values to cuPy over the GPU buffer and calculated by the custom GPU kernel, fits in the result by SQL.</p>
 <h2 id="usage-from-plpython-user-defined-functions">Usage from PL/Python User Defined Functions</h2>
 <p>PostgreSQL supports to implement user defined functions using Python language, using <a href="https://www.postgresql.jp/document/current/html/plpython.html">PL/Python</a> package as a part of the core distribution.</p>
@@ -423,7 +352,6 @@ X = 0   # unmap GPU memory
 return Y / nitems
 $$ LANGUAGE 'plpython3u';
 </code></pre>
-
 <p>When you run custom GPU kernel on PL/Python user defined function, we take a bit different steps to invoke the Python script.</p>
 <p>Unlike script execution on the shell, we don't need to connect a session to PostgreSQL and to obtain the identifier using SELECT statement, because we can embed Python script as a part of user defined function in SQL execution.</p>
 <pre><code>=# SELECT custom_average(pgstrom.arrow_fdw_export_cupy('ft','{x,y,z}'::text[]));
@@ -432,22 +360,12 @@ $$ LANGUAGE 'plpython3u';
  {50.0225953554688,-24.9964806318359,100.037490859375}
 (1 row)
 </code></pre>
-
 <p>In the above example, the identifier of GPU buffer, the result of <code>pgstrom.arrow_fdw_export_cupy</code>, is directly passed to the user defined function <code>custom_average</code>, then data-frame is exchanged to Python script. The further steps to invoke GPU kernel and return the results are identical.</p>
 <p>Note that the amount of data size to be passeed over the invocation of user defined function is much larger, if your query tries to read the foreign table 'ft' and provides them as argument of <code>ft</code>. The data-exchange mechanism using GPU buffer performs like a "pass-by-pointer" invocation, so invocation of user defined function itself is much lightweight operation than "pass-by-value" style.</p>
               
             </div>
           </div>
           <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-        <a href="../ref_types/" class="btn btn-neutral float-right" title="Data Types">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../gstore_fdw/" class="btn btn-neutral" title="GPU Memory Store"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
-    </div>
   
 
   <hr/>
@@ -457,7 +375,7 @@ $$ LANGUAGE 'plpython3u';
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -467,20 +385,21 @@ $$ LANGUAGE 'plpython3u';
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../gstore_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
-      
-      
-        <span style="margin-left: 15px"><a href="../ref_types/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

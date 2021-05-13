@@ -34,6 +34,8 @@ INSERT INTO rt_data (
             pgstrom.random_int(1, -32000, 32000),		-- int4
             pgstrom.random_int(1, -32000, 32000)		-- int8
     FROM generate_series(1,2000) x);
+ALTER TABLE rt_data ADD p int1;
+UPDATE rt_data SET p=(id%255-127);
 VACUUM ANALYZE;
 
 -- force to use GpuScan, instead of SeqScan
@@ -48,16 +50,16 @@ SET extra_float_digits = 1;
 -- absolute values
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
   INTO test01g
   FROM rt_data
  WHERE c BETWEEN -80.0 AND 80.0;
-SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
   INTO test01g
   FROM rt_data
  WHERE c BETWEEN -80.0 AND 80.0;
 SET pg_strom.enabled = off;
-SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
   INTO test01p
   FROM rt_data
  WHERE c BETWEEN -80.0 AND 80.0;

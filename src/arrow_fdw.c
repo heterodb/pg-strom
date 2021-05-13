@@ -2141,27 +2141,27 @@ ArrowIsForeignScanParallelSafe(PlannerInfo *root,
 /*
  * ArrowEstimateDSMForeignScan 
  */
-Size
-ExecEstimateDSMArrowFdw(ArrowFdwState *af_state)
-{
-	return MAXALIGN(sizeof(pg_atomic_uint32));
-}
-
 static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return ExecEstimateDSMArrowFdw((ArrowFdwState *)node->fdw_state);
+	return MAXALIGN(sizeof(pg_atomic_uint32));
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
-void
-ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
+static inline void
+__ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
 {
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
+}
+
+void
+ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
+{
+	__ExecInitDSMArrowFdw(af_state, &gtss->af_rbatch_index);
 }
 
 static void
@@ -2169,17 +2169,23 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
 {
-	ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
-						(pg_atomic_uint32 *) coordinate);
+	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
+						  (pg_atomic_uint32 *)coordinate);
 }
 
 /*
  * ArrowReInitializeDSMForeignScan
  */
+static void
+__ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
+{
+	pg_atomic_write_u32(af_state->rbatch_index, 0);
+}
+
 void
 ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
 {
-	pg_atomic_write_u32(af_state->rbatch_index, 0);
+	__ExecReInitDSMArrowFdw(af_state);
 }
 
 
@@ -2188,17 +2194,24 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 								ParallelContext *pcxt,
 								void *coordinate)
 {
-	ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
+	__ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 
 /*
  * ArrowInitializeWorkerForeignScan
  */
-void
-ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-					   pg_atomic_uint32 *rbatch_index)
+static inline void
+__ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
+						 pg_atomic_uint32 *rbatch_index)
 {
 	af_state->rbatch_index = rbatch_index;
+}
+
+void
+ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
+					   GpuTaskSharedState *gtss)
+{
+	__ExecInitWorkerArrowFdw(af_state, &gtss->af_rbatch_index);
 }
 
 static void
@@ -2206,23 +2219,29 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
-	ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
-						   (pg_atomic_uint32 *) coordinate);
+	__ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
+							 (pg_atomic_uint32 *) coordinate);
 }
 
 /*
  * ArrowShutdownForeignScan
  */
+static inline void
+__ExecShutdownArrowFdw(ArrowFdwState *af_state)
+{
+	/* nothing to do */
+}
+
 void
 ExecShutdownArrowFdw(ArrowFdwState *af_state)
 {
-	/* nothing to do */
+	__ExecShutdownArrowFdw(af_state);
 }
 
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
-	ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
+	__ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
 }
 
 /*
@@ -2413,7 +2432,7 @@ ArrowEndForeignModify(EState *estate,
 
 #if PG_VERSION_NUM >= 110000
 /*
- * MEMO: executor begin/end routine, if gstore_fdw is partitioned-leaf
+ * MEMO: executor begin/end routine, if arrow_fdw is partitioned-leaf
  * relations. In this case, ArrowBeginForeignModify shall not be called.
  */
 static void

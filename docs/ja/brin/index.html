@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>BRINインデックス - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,116 +51,68 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">BRINインデックス</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">概要</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">設定</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_3">操作</a></li>
-    
-
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">BRINインデックス</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_2">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">操作</a>
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">データ型</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUCパラメータ</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -187,19 +141,19 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>インデックス対応</h1>
-
-<h1 id="_1">概要</h1>
+                <h1 id="_1">インデックス対応</h1>
+<h2 id="_2">概要</h2>
 <p>PostgreSQLは何種類かのインデックス形式に対応しており、デフォルトで選択されるB-treeインデックスは特定の値を持つレコードを高速に検索する事が可能です。これ以外にも、Hash、BRIN、GiST、GINなど特性の異なるインデックス形式が提供されており、現在のところPG-StromはBRINインデックスにのみ対応しています。</p>
 <p>BRINインデックスは、時系列データにおけるタイムスタンプ値など、物理的に近傍に位置するレコード同士が近しい値を持っている事が期待できるデータセットに対して有効に作用します。本来は全件スキャンが必要な操作であっても、明らかに条件句にマッチしない領域を読み飛ばし、全件スキャンに伴うI/O量を削減する事が可能です。</p>
 <p>PG-StromにおいてもBRINインデックスの特性を活用し、GPUにロードすべきデータブロックのうち明らかに不要であるものを読み飛ばす事が可能になっています。</p>
 <p><img alt="BRIN-index Ovewview" src="../img/brin-index-overview.png" /></p>
-<h1 id="_2">設定</h1>
+<h2 id="_3">設定</h2>
 <p>BRINインデックスを利用するために特別な設定は必要ありません。</p>
 <p>CREATE INDEX構文を用いて対象列にインデックスが設定されており、かつ、検索条件がBRINインデックスに適合するものであれば自動的に適用されます。</p>
 <p>BRINインデックス自体の説明は、<a href="https://www.postgresql.jp/document/current/html/brin.html">PostgreSQLのドキュメント</a>を参照してください。</p>
@@ -222,7 +176,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_3">操作</h1>
+<h2 id="_4">操作</h2>
 <p><code>EXPLAIN</code>構文によりBRINインデックスが使用されているかどうかを確認する事ができます。</p>
 <pre><code>postgres=# EXPLAIN ANALYZE
            SELECT * FROM dt
@@ -240,7 +194,6 @@
  Execution time: 2323.063 ms
 (7 rows)
 </code></pre>
-
 <p>上記の例では<code>ymd</code>列にBRINインデックスが設定されており、<code>BRIN cond</code>の表示はBRINインデックスによる絞り込み条件を、<code>BRIN skipped</code>の表示はBRINインデックスにより実際に読み飛ばされたブロックの数を示しています。</p>
 <p>この例では424704ブロックが読み飛ばされ、さらに、読み込んだブロックに含まれているレコードのうち4385491行が条件句によってフィルタされた事が分かります。</p>
 <p>データ転送のロスを減らすため、GpuJoinやGpuPreAggが直下のテーブルスキャンを引き上げ、自らテーブルのスキャン処理を行う事があります。この場合でも、BRINインデックスが利用可能であればインデックスによる絞り込みを行います。
@@ -281,7 +234,7 @@
         <a href="../partition/" class="btn btn-neutral float-right" title="パーティション">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../sys_admin/" class="btn btn-neutral" title="システム管理"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../operations/" class="btn btn-neutral" title="基本的な操作"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -293,7 +246,7 @@
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -303,11 +256,11 @@
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../sys_admin/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../operations/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
         <span style="margin-left: 15px"><a href="../partition/" style="color: #fcfcfc">Next &raquo;</a></span>
@@ -317,6 +270,11 @@
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

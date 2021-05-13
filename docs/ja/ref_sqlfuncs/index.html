@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>SQLオブジェクト - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,125 +51,74 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRINインデックス</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">SQLオブジェクト</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">デバイス情報関数</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw関連</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUデータフレーム関数</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">テストデータ生成関数</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">その他の関数</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">システムビュー</a>
+    </li>
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">データ型</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class=" current">
-                    
-    <a class="current" href="./">SQLオブジェクト</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">デバイス情報関数</a></li>
-    
-
-    <li class="toctree-l3"><a href="#arrow_fdw">Arrow_Fdw関連</a></li>
-    
-
-    <li class="toctree-l3"><a href="#gpu">GPUデータフレーム関数</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">テストデータ生成関数</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_3">その他の関数</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_4">システムビュー</a></li>
-    
-
-    </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUCパラメータ</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -196,15 +147,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>SQLオブジェクト</h1>
-
+                <h1 id="sql">SQLオブジェクト</h1>
 <p>本章ではPG-Stromが独自に提供するSQLオブジェクトについて説明します。</p>
-<h1 id="_1">デバイス情報関数</h1>
+<h2 id="_1">デバイス情報関数</h2>
 <table>
 <thead>
 <tr>
@@ -271,7 +222,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="arrow_fdw">Arrow_Fdw関連</h1>
+<h2 id="arrow_fdw">Arrow_Fdw関連</h2>
 <table>
 <thead>
 <tr>
@@ -288,7 +239,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="gpu">GPUデータフレーム関数</h1>
+<h2 id="gpu">GPUデータフレーム関数</h2>
 <table>
 <thead>
 <tr>
@@ -320,7 +271,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_2">テストデータ生成関数</h1>
+<h2 id="_2">テストデータ生成関数</h2>
 <table>
 <thead>
 <tr>
@@ -412,7 +363,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_3">その他の関数</h1>
+<h2 id="_3">その他の関数</h2>
 <table>
 <thead>
 <tr>
@@ -429,7 +380,7 @@
 </tr>
 </tbody>
 </table>
-<h1 id="_4">システムビュー</h1>
+<h2 id="_4">システムビュー</h2>
 <p>PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。
 これらのシステムビューは将来のバージョンで情報が追加される可能性があります。そのため、アプリケーションから<code>SELECT * FROM ...</code>によってこれらシステムビューを参照する事は避けてください。</p>
 <p><strong>pgstrom.device_info</strong></p>
@@ -527,7 +478,7 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -537,7 +488,7 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -551,6 +502,11 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

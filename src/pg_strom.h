@@ -22,9 +22,11 @@
 
 #include "access/brin.h"
 #include "access/brin_revmap.h"
+#include "access/generic_xlog.h"
 #include "access/gist.h"
 #include "access/hash.h"
 #include "access/heapam.h"
+#include "access/heapam_xlog.h"
 #if PG_VERSION_NUM >= 130000
 #include "access/heaptoast.h"
 #endif
@@ -315,7 +317,7 @@ typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
 typedef struct GpuTaskSharedState	GpuTaskSharedState;
 typedef struct ArrowFdwState		ArrowFdwState;
-typedef struct GpuStoreFdwState		GpuStoreFdwState;
+typedef struct GpuCacheState		GpuCacheState;
 
 /*
  * GpuTaskState
@@ -352,7 +354,7 @@ struct GpuTaskState
 	long			outer_brin_count;	/* # of blocks skipped by index */
 
 	ArrowFdwState  *af_state;			/* for GpuTask on Arrow_Fdw */
-	GpuStoreFdwState *gs_state;			/* for GpuTask on Gstore_Fdw */
+	GpuCacheState  *gc_state;			/* for GpuTask on GpuCache */
 
 	/*
 	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
@@ -410,8 +412,8 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	/* for gstore_fdw file scan (currently not used) */
-	pg_atomic_uint64 gstore_read_pos;
+	/* for gpu_cache file scan  */
+	pg_atomic_uint32 gc_fetch_count;
 	/* for block-based regular table scan */
 	BlockNumber		pbs_nblocks;	/* # blocks in relation at start of scan */
 	slock_t			pbs_mutex;		/* lock of the fields below */
@@ -556,7 +558,7 @@ typedef struct pgstrom_data_store
 	 * need to kick DMA operations explicitly.
 	 *
 	 * NOTE: Extra information for KDS_FORMAT_COLUMN
-	 * @gs_sstate points the GpuStoreShareState for reference IPC handle
+	 * @gc_sstate points the GpuCacheShareState for reference IPC handle
 	 * of the main/extra buffer on the device. This IPC handle is only
 	 * valid under the read lock.
 	 */
@@ -564,8 +566,8 @@ typedef struct pgstrom_data_store
 	GPUDirectFileDesc	filedesc;
 	strom_io_vector	   *iovec;				/* for KDS_FORMAT_ARROW */
 	/* for KDS_FORMAT_COLUMN */
-	void			   *gs_sstate;
-	CUdeviceptr			m_kds_base;
+	void			   *gc_sstate;
+	CUdeviceptr			m_kds_main;
 	CUdeviceptr			m_kds_extra;
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
@@ -1073,21 +1075,6 @@ extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
 extern bool KDS_fetch_tuple_slot(TupleTableSlot *slot,
 								 kern_data_store *kds,
 								 size_t row_index);
-extern Datum KDS_fetch_datum_column(kern_data_store *kds,
-									kern_colmeta *cmeta,
-									size_t row_index,
-									bool *p_isnull);
-extern void __KDS_store_datum_column(kern_data_store *kds,
-									 kern_colmeta *cmeta,
-									 size_t row_index,
-									 Datum datum, bool isnull);
-extern void  KDS_store_datum_column(kern_data_store *kds,
-									kern_colmeta *cmeta,
-									size_t row_index,
-									Datum datum, bool isnull);
-extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
-								   kern_data_store *kds,
-								   size_t row_index);
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
 							GpuTaskState *gts);
@@ -1170,7 +1157,7 @@ extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 #define PGSTROM_RELSCAN_SSD2GPU			0x0001
 #define PGSTROM_RELSCAN_BRIN_INDEX		0x0002
 #define PGSTROM_RELSCAN_ARROW_FDW		0x0004
-#define PGSTROM_RELSCAN_GSTORE_FDW		0x0008
+#define PGSTROM_RELSCAN_GPU_CACHE		0x0008
 extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   RelOptInfo *scan_rel,
 									   List *scan_quals,
@@ -1316,49 +1303,46 @@ extern ArrowFdwState *ExecInitArrowFdw(GpuContext *gcontext,
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
 extern void ExecEndArrowFdw(ArrowFdwState *af_state);
-extern Size ExecEstimateDSMArrowFdw(ArrowFdwState *af_state);
+
 extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
-								pg_atomic_uint32 *rbatch_index);
+								GpuTaskSharedState *gtss);
 extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
 extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-								   pg_atomic_uint32 *rbatch_index);
+								   GpuTaskSharedState *gtss);
 extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
 extern void ExplainArrowFdw(ArrowFdwState *af_state,
 							Relation frel, ExplainState *es);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*
- * gstore_fdw.c
+ * gpu_cache.c
  */
-extern bool	baseRelIsGstoreFdw(RelOptInfo *baserel);
-extern bool RelationIsGstoreFdw(Relation frel);
-extern int	GetOptimalGpuForGstoreFdw(PlannerInfo *root,
-									  RelOptInfo *baserel);
-extern GpuStoreFdwState *ExecInitGstoreFdw(ScanState *ss, int eflags,
-										   Bitmapset *outer_refs);
-extern pgstrom_data_store *ExecScanChunkGstoreFdw(GpuTaskState *gts);
-extern void ExecReScanGstoreFdw(GpuStoreFdwState *gstore_state);
-extern void ExecEndGstoreFdw(GpuStoreFdwState *gstore_state);
-extern Size ExecEstimateDSMGstoreFdw(GpuStoreFdwState *gstore_state);
-extern void ExecInitDSMGstoreFdw(GpuStoreFdwState *gstore_state,
-								 pg_atomic_uint64 *gstore_read_pos);
-extern void ExecReInitDSMGstoreFdw(GpuStoreFdwState *gstore_state);
-extern void ExecInitWorkerGstoreFdw(GpuStoreFdwState *gstore_state,
-									pg_atomic_uint64 *gstore_read_pos);
-extern void ExecShutdownGstoreFdw(GpuStoreFdwState *gstore_state);
-extern void ExplainGstoreFdw(GpuStoreFdwState *af_state,
-							 Relation frel, ExplainState *es);
-extern CUresult gstoreFdwMapDeviceMemory(GpuContext *gcontext,
-										 pgstrom_data_store *pds);
-extern void gstoreFdwUnmapDeviceMemory(GpuContext *gcontext,
-									   pgstrom_data_store *pds);
+extern bool baseRelHasGpuCache(PlannerInfo *root,
+							   RelOptInfo *baserel);
+extern bool RelationHasGpuCache(Relation rel);
+extern GpuCacheState *ExecInitGpuCache(ScanState *ss, int eflags,
+									   Bitmapset *outer_refs);
+extern pgstrom_data_store *ExecScanChunkGpuCache(GpuTaskState *gts);
+extern void ExecReScanGpuCache(GpuCacheState *gcache_state);
+extern void ExecEndGpuCache(GpuCacheState *gcache_state);
 
-#define GSTORE_FDW_SYSATTR_OID		6116
-extern void gstoreFdwBgWorkerBegin(int cuda_dindex);
-extern bool gstoreFdwBgWorkerDispatch(int cuda_dindex);
-extern bool gstoreFdwBgWorkerIdleTask(int cuda_dindex);
-extern void gstoreFdwBgWorkerEnd(int cuda_dindex);
-extern void pgstrom_init_gstore_fdw(void);
+extern void ExecInitDSMGpuCache(GpuCacheState *gcache_state,
+								GpuTaskSharedState *gtss);
+extern void ExecReInitDSMGpuCache(GpuCacheState *gcache_state);
+extern void ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
+								   GpuTaskSharedState *gtss);
+extern void ExecShutdownGpuCache(GpuCacheState *gcache_state);
+extern void ExplainGpuCache(GpuCacheState *gcache_state,
+							Relation frel, ExplainState *es);
+extern CUresult gpuCacheMapDeviceMemory(GpuContext *gcontext,
+										pgstrom_data_store *pds);
+extern void gpuCacheUnmapDeviceMemory(GpuContext *gcontext,
+									  pgstrom_data_store *pds);
+extern void gpuCacheBgWorkerBegin(int cuda_dindex);
+extern bool gpuCacheBgWorkerDispatch(int cuda_dindex);
+extern bool gpuCacheBgWorkerIdleTask(int cuda_dindex);
+extern void gpuCacheBgWorkerEnd(int cuda_dindex);
+extern void pgstrom_init_gpu_cache(void);
 
 /*
  * misc.c
@@ -1398,10 +1382,6 @@ extern const char *errorText(int errcode);
 
 extern ssize_t	__readFile(int fdesc, void *buffer, size_t nbytes);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
-extern ssize_t	__readFileSignal(int fdesc, void *buffer, size_t nbytes,
-								 bool interruptible);
-extern ssize_t	__writeFileSignal(int fdesc, const void *buffer, size_t nbytes,
-								  bool interruptible);
 extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 extern void	   *__mmapFile(void *addr, size_t length,
@@ -1538,6 +1518,23 @@ float_as_int(cl_float fval)
 	} datum;
 	datum.fval = fval;
 	return datum.ival;
+}
+
+/*
+ * trim_cstring - remove spaces from head/tail
+ */
+static inline char *
+trim_cstring(char *str)
+{
+	char   *end;
+
+	while (isspace(*str))
+		str++;
+	end = str + strlen(str) - 1;
+	while (end >= str && isspace(*end))
+		*end-- = '\0';
+
+	return str;
 }
 
 /*
@@ -1730,6 +1727,14 @@ lappend_cxt(MemoryContext memcxt, List *list, void *datum)
 	return r;
 }
 
+/* initStringInfo on a particular memory context */
+static inline void
+initStringInfoContext(StringInfo str, MemoryContext memcxt)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	initStringInfo(str);
+	MemoryContextSwitchTo(oldcxt);
+}
 
 static inline char *
 format_numeric(cl_long value)

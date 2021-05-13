@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>PG-Strom v2.0 - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "PG-Strom v2.0";
+    var mkdocs_page_input_path = "release_v2.0.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/release_v2.0/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v2.0</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#new-features">New Features</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#dropped-features">Dropped features</a>
+    </li>
+    </ul>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>Release Note &raquo;</li>
+        
+      
+    
+    <li>PG-Strom v2.0</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
+
+<h2 id="overview">Overview</h2>
+<p>Major enhancement in PG-Strom v2.0 includes:</p>
+<ul>
+<li>Overall redesign of the internal infrastructure to manage GPU and stabilization</li>
+<li>CPU+GPU hybrid parallel execution</li>
+<li>SSD-to-GPU Direct SQL Execution</li>
+<li>In-memory columnar cache</li>
+<li>GPU memory store (gstore_fdw)</li>
+<li>Redesign of GpuJoin and GpuPreAgg and speed-up</li>
+<li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
+</ul>
+<p>You can download the summary of new features from: <a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v9.6, v10</li>
+<li>CUDA Toolkit 9.1</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
+</ul>
+<h2 id="new-features">New Features</h2>
+<ul>
+<li>
+<p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
+<ul>
+<li>PostgreSQL backend process simultaneously uses only one GPU at most. In case of multi-GPUs installation, it assumes combination use with CPU parallel execution of PostgreSQL. Usually, it is not a matter because throughput of CPU to provide data to GPU is much narrower than capability of GPU processors. We prioritized simpleness of the software architecture.</li>
+<li>We began to utilize the demand paging feature of GPU device memory supported at the GPU models since Pascal generation. In most of SQL workloads, we cannot know exact size of the required result buffer prior to its execution, therefore, we had allocated more buffer than estimated buffer length, and retried piece of the workloads if estimated buffer size is not sufficient actually. This design restricts available resources of GPU which can be potentially used for other concurrent processes, and complicated error-retry logic was a nightmare for software quality. The demand paging feature allows to eliminate and simplify these stuffs.</li>
+<li>We stop to use CUDA asynchronous interface. Use of the demand paging feature on GPU device memory makes asynchronous APIs for DMA (like <code>cuMemCpyHtoD</code>) perform synchronously, then it reduces concurrency and usage ratio of GPU kernels. Instead of the CUDA asynchronous APIs, PG-Strom manages its own worker threads which call synchronous APIs for each. As a by-product, we also could eliminate asynchronous callbacks (<code>cuStreamAddCallback</code>), it allows to use MPS daemon which has a restriction at this API.</li>
+</ul>
+</li>
+<li>
+<p>CPU+GPU Hybrid Parallel Execution</p>
+<ul>
+<li>CPU parallel execution at PostgreSQL v9.6 is newly supported.</li>
+<li>CustomScan logic of GpuScan, GpuJoin and GpuPreAgg provided by PG-Strom are executable on multiple background worker processes of PostgreSQL in parallel.</li>
+<li>Limitation: PG-Strom's own statistics displayed at <code>EXPLAIN ANALYZE</code> if CPU parallel execution. Because PostgreSQL v9.6 does not provide <code>ShutdownCustomScan</code> callback of the CustomScan interface, coordinator process has no way to reclaim information of worker processes prior to the release of DSM (Dynamic Shared Memory) segment.</li>
+</ul>
+</li>
+<li>
+<p>SSD-to-GPU Direct SQL Execution</p>
+<ul>
+<li>By cooperation with the <code>nvme_strom</code> Linux kernel module, it enables to load PostgreSQL's data blocks on NVMe-SSD to GPU device memory directly, bypassing the CPU and host buffer. This feature enables to apply PG-Strom on the area which have to process large data set more than system RAM size.</li>
+<li>It allows to pull out pretty high throughput close to the hardware limitation because its data stream skips block-device or filesystem layer. Then, GPU runs SQL workloads that usually reduce the amount of data to be processed by CPU. The chemical reaction of these characteristics enables to redefine GPU's role as accelerator of I/O workloads also, not only computing intensive workloads.</li>
+</ul>
+</li>
+<li>
+<p>In-memory Columnar Cache</p>
+<ul>
+<li>For middle size data-set loadable onto the system RAM, it allows to cache data-blocks in column format which is more suitable for GPU computing. If cached data-blocks are found during table scan, PG-Strom prefers to reference the columnar cache more than shared buffer of PostgreSQL.</li>
+<li>In-memory columnar cache can be built synchronously, or asynchronously by the background workers.</li>
+<li>You may remember very early revision of PG-Strom had similar feature. In case when a cached tuple gets updated, the latest in-memory columnar cache which we newly implemented in v2.0 invalidates the cache block which includes the updated tuples. It never updates the columnar cache according to the updates of row-store, so performance degradation is quite limited.</li>
+</ul>
+</li>
+<li>
+<p>GPU Memory Store (gstore_fdw)</p>
+<ul>
+<li>It enables to write to / read from preserved GPU device memory region by SELECT/INSERT/UPDATE/DELETE in SQL-level, using foreign table interface.</li>
+<li>In v2.0, only <code>pgstrom</code> internal data format is supported. It saves written data using PG-Strom's buffer format of <code>KDS_FORMAT_COLUMN</code>. It can compress variable length data using LZ algorithm.</li>
+<li>In v2.0, GPU memory store can be used as data source of PL/CUDA user defined function.</li>
+</ul>
+</li>
+<li>
+<p>Redesign and performance improvement of GpuJoin and GpuPreAgg</p>
+<ul>
+<li>Stop using Dynamic Parallelism which we internally used in GpuJoin and GpuPreAgg, and revised entire logic of these operations. Old design had a problem of less GPU usage ratio because a GPU kernel which launches GPU sub-kernel and just waits for its completion occupied GPU's execution slot.</li>
+<li>A coproduct of this redesign is suspend/resume of GpuJoin. In principle, JOIN operation of SQL may generate larger number of rows than number of input rows, but preliminary not predictive. The new design allows to suspend GPU kernel once buffer available space gets lacked, then resume with new result buffer. It simplifies size estimation logic of the result buffer, and eliminates GPU kernel retry by lack of buffer on run-time.</li>
+</ul>
+</li>
+<li>
+<p>GpuPreAgg+GpuJoin+GpuScan combined GPU kernel</p>
+<ul>
+<li>In case when GPU executable SCAN, JOIN and GROUP BY are serially cascaded, a single GPU kernel invocation runs a series of tasks equivalent to the GpuScan, GpuJoin and GpuPreAgg. This is an approach to minimize data exchange between CPU and GPU. For example, result buffer of GpuJoin is used as input buffer of GpuPreAgg.</li>
+<li>This feature is especially valuable if combined with SSD-to-GPU Direct SQL Execution.</li>
+</ul>
+</li>
+<li>
+<p>PL/CUDA Enhancement</p>
+<ul>
+<li><code>#plcuda_include</code> is enhanced to specify SQL function which returns <code>text</code> type. It can change the code block to inject according to the argument, so it also allows to generate multiple GPU kernel variations, not only inclusion of externally defined functions.</li>
+<li>If PL/CUDA takes <code>reggstore</code> type argument, GPU kernel function receives pointer of the GPU memory store. Note that it does not pass the OID value.</li>
+</ul>
+</li>
+<li>
+<p>Other Enhancement</p>
+<ul>
+<li><code>lo_import_gpu</code> and <code>lo_export_gpu</code> functions allows to import contents of the GPU device memory acquired by external applications directly, or export contents of the largeobject to the GPU device memory.</li>
+</ul>
+</li>
+<li>
+<p>Packaging</p>
+<ul>
+<li>Add RPM packages to follow the PostgreSQL packages distributed by PostgreSQL Global Development Group.</li>
+<li>All the software packages are available at HeteroDB SWDC(Software Distribution Center) and downloadable.</li>
+</ul>
+</li>
+<li>
+<p>Document</p>
+<ul>
+<li>PG-Strom documentation was entirely rewritten using markdown and mkdocs. It makes documentation maintenance easier than the previous HTML based approach, so expects timely updates according to the development of new features.</li>
+</ul>
+</li>
+<li>
+<p>Test</p>
+<ul>
+<li>Regression test for PG-Strom was built on top of the regression test framework of PostgreSQL.</li>
+</ul>
+</li>
+</ul>
+<h2 id="dropped-features">Dropped features</h2>
+<ul>
+<li>
+<p>PostgreSQL v9.5 Support</p>
+<ul>
+<li>PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called "upper planner path-ification". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.</li>
+<li>It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.</li>
+<li>CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.</li>
+</ul>
+</li>
+<li>
+<p>GpuSort feature</p>
+<ul>
+<li>We dropped GpuSort because we have little advantages in the performance.</li>
+<li>Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.</li>
+<li>Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.</li>
+<li>It is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.</li>
+</ul>
+</li>
+</ul>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+      
+        <a href="../release_v2.2/" class="btn btn-neutral" title="PG-Strom v2.2"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../release_v2.2/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>

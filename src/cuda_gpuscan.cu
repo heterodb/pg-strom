@@ -17,6 +17,7 @@
  */
 #include "cuda_common.h"
 #include "cuda_gpuscan.h"
+#include "cuda_gcache.h"
 
 /*
  * gpuscan_main_row - GpuScan logic for KDS_FORMAT_ROW
@@ -639,16 +640,13 @@ gpuscan_main_column(kern_context *kcxt,
 		cl_uint		suspend_kernel = 0;
 		cl_char	   *tup_dclass = NULL;
 		Datum	   *tup_values = NULL;
-		GstoreFdwSysattr tup_sysattr;
 
 		/* rewind the varlena buffer */
 		kcxt->vlpos = kcxt->vlbuf;
 		/* evaluation of the row using WHERE-clause */
 		if (src_index < kds_src->nitems)
 		{
-			if (kern_check_visibility_column(kcxt,kds_src,
-											 src_index,
-											 &tup_sysattr))
+			if (kern_check_visibility_column(kcxt, kds_src, src_index))
 			{
 				rc = gpuscan_quals_eval_column(kcxt,
 											   kds_src,

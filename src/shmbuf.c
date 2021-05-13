@@ -253,11 +253,13 @@ shmBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 		SpinLockRelease(&lmap->mutex);
 
 		/* problem solved */
+#ifdef PGSTROM_DEBUG_BUILD
 		fprintf(stderr, "pid=%u: %s on %p (seg_id=%u,rev=%u) - "
 				"[%s] has been locally mapped on demand.\n",
 				MyProcPid, strsignal(signum), fault_addr,
 				segment_id, revision,
 				namebuf);
+#endif
 		errno = errno_saved;
 		return;
 
@@ -702,6 +704,7 @@ shmemContextAlloc(MemoryContext __context, Size required)
 	if (!chunk)
 		return NULL;
 	Assert(chunk->memcxt == __context);
+	
 	return chunk->data;
 }
 

@@ -11,21 +11,8 @@ Source0: @@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
 BuildRequires: postgresql%{PGSQL_PKGVER}
 BuildRequires: postgresql%{PGSQL_PKGVER}-devel
-BuildRequires: cuda >= 9.2
-BuildRequires: libpmem-devel
 BuildRequires: mysql-devel
-Requires: nvidia-kmod
-Requires: cuda >= 9.2
-%if "%{PGSQL_PKGVER}" == "96"
-Requires: postgresql%{PGSQL_PKGVER}-server >= 9.6.9
-%else
-%if "%{PGSQL_PKGVER}" == "10"
-Requires: postgresql%{PGSQL_PKGVER}-server >= 10.4
-%else
 Requires: postgresql%{PGSQL_PKGVER}-server
-%endif
-%endif
-Requires: libpmem
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 Obsoletes: nvme_strom < 2.0
@@ -108,7 +95,6 @@ fi
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/gpuinfo
 %{__pkgbindir}/pg2arrow
-%{__pkgbindir}/gstore_backup
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
@@ -123,6 +109,21 @@ fi
 %{__pkgbindir}/dbgen-ssbm
 
 %changelog
+* Mon May 31 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
+- several PostGIS functions are added for GPU execution
+- GiST-index support was added for GpuJoin
+- GpuCache was added for small data workloads
+- experimental support of NVIDIA GPUDirect Storage
+- support of custom GPU types/functions with 3rd party modules
+- pg2arrow/arrow_fdw support wider Arrow files than PG limit
+- pcap2arrow was added to capture network packets as Arrow files
+- experimental support of 8bit-integer type (int1)
+- add support of Ampere GPUs (A100) and CUDA11.3
+- add support of PostgreSQL 13.x, drop support of PostgreSQL 10.x
+- add support of ScaleFlux CSD drives as source of GPUDirect SQL
+- error reports in GPU kernels were more human readable
+- ...and miscellaneous improvement and fix various bugs
+
 * Tue Mar 24 2020 KaiGai Kohei <kaigai@heterodb.com> - 2.3-1
 - GpuJoin supports parallel execution on inner hash/heap table.
 - Partition-wise GpuJoin was refactored for better query plan.

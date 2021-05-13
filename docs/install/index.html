@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>Install - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,154 +51,116 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">Home</a>
-	    </li>
-          
-            <li class="toctree-l1 current">
-		
-    <a class="current" href="./">Install</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l2"><a href="#checklist">Checklist</a></li>
-    
-
-    <li class="toctree-l2"><a href="#os-installation">OS Installation</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Install</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#checklist">Checklist</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#os-installation">OS Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#post-os-installation-configuration">Post OS Installation Configuration</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#post-os-installation-configuration">Post OS Installation Configuration</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#setup-epel-repository">Setup EPEL Repository</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">HeteroDB-SWDC Installation</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l2"><a href="#cuda-toolkit-installation">CUDA Toolkit Installation</a></li>
-    
-
-    <li class="toctree-l2"><a href="#postgresql-installation">PostgreSQL Installation</a></li>
-    
-
-    <li class="toctree-l2"><a href="#pg-strom-installation">PG-Strom Installation</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit-installation">CUDA Toolkit Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#postgresql-installation">PostgreSQL Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-installation">PG-Strom Installation</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#rpm-installation">RPM Installation</a></li>
-        
-            <li><a class="toctree-l3" href="#installation-from-the-source">Installation from the source</a></li>
-        
-            <li><a class="toctree-l3" href="#post-installation-setup">Post Installation Setup</a></li>
-        
-        </ul>
-    
-
-    <li class="toctree-l2"><a href="#nvme-strom-module">NVME-Strom module</a></li>
-    
+    <li class="toctree-l3"><a class="reference internal" href="#rpm-installation">RPM Installation</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#installation-from-the-source">Installation from the source</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#getting-the-module-and-installation">Getting the module and installation</a></li>
-        
-            <li><a class="toctree-l3" href="#license-activation">License activation</a></li>
-        
-            <li><a class="toctree-l3" href="#kernel-module-parameters">Kernel module parameters</a></li>
-        
+    <li class="toctree-l4"><a class="reference internal" href="#getting-the-source-code">Getting the source code</a>
+    </li>
+    <li class="toctree-l4"><a class="reference internal" href="#building-the-pg-strom">Building the PG-Strom</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l2"><a href="#postgis-installation">PostGIS Installation</a></li>
-    
-
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">Release Note</a>
-	    </li>
-          
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#post-installation-setup">Post Installation Setup</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#creation-of-database-cluster">Creation of database cluster</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#setup-postgresqlconf">Setup postgresql.conf</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#expand-os-resource-limits">Expand OS resource limits</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#start-postgresql">Start PostgreSQL</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#creation-of-pg-strom-related-objects">Creation of PG-Strom related objects</a>
+    </li>
         </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#nvme-strom-module">NVME-Strom module</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#getting-the-module-and-installation">Getting the module and installation</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#license-activation">License activation</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#kernel-module-parameters">Kernel module parameters</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#postgis-installation">PostGIS Installation</a>
+    </li>
+    </ul>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -221,13 +185,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <p>This chapter introduces the steps to install PG-Strom.</p>
-<h1 id="checklist">Checklist</h1>
+                <h1 id="installation">Installation</h1>
+<p>This chapter introduces the steps to install PG-Strom.</p>
+<h2 id="checklist">Checklist</h2>
 <ul>
 <li><strong>Server Hardware</strong><ul>
 <li>It requires generic x86_64 hardware that can run Linux operating system supported by CUDA Toolkit. We have no special requirement for CPU, storage and network devices.</li>
@@ -254,7 +220,7 @@
 </ul>
 </li>
 </ul>
-<h1 id="os-installation">OS Installation</h1>
+<h2 id="os-installation">OS Installation</h2>
 <p>Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. <a href="https://developer.nvidia.com/">NVIDIA DEVELOPER ZONE</a> introduces the list of Linux distributions which are supported by CUDA Toolkit.</p>
 <p>In case of Red Hat Enterprise Linux 7.x or CentOS 7.x series, choose "Minimal installation" as base environment, and also check the following add-ons.</p>
 <ul>
@@ -298,7 +264,6 @@ Installed:
 
 Complete!
 </code></pre>
-
 <h3 id="heterodb-swdc-installation">HeteroDB-SWDC Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.</p>
@@ -323,8 +288,7 @@ Installed:
 
 Complete!
 </code></pre>
-
-<h1 id="cuda-toolkit-installation">CUDA Toolkit Installation</h1>
+<h2 id="cuda-toolkit-installation">CUDA Toolkit Installation</h2>
 <p>This section introduces the installation of CUDA Toolkit. If you already installed the latest CUDA Toolkit, you can skip this section.</p>
 <p>NVIDIA offers two approach to install CUDA Toolkit; one is by self-extracting archive (called runfile), and the other is by RPM packages.
 We recommend RPM installation because it allows simple software updates.</p>
@@ -338,7 +302,6 @@ $ sudo yum install cuda --enablerepo=rhel-7-server-e4s-optional-rpms
  or
 $ sudo yum install cuda 
 </code></pre>
-
 <p>Once installation completed successfully, CUDA Toolkit is deployed at <code>/usr/local/cuda</code>.</p>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
@@ -349,7 +312,6 @@ bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
 extras  lib64    nsightee_plugins  pkgconfig  src
 </code></pre>
-
 <p>Once installation gets completed, ensure the system recognizes the GPU devices correctly.
 <code>nvidia-smi</code> command shows GPU information installed on your system, as follows.</p>
 <pre><code>$ nvidia-smi
@@ -371,7 +333,6 @@ Wed Feb 14 09:43:48 2018
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
 </code></pre>
-
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
@@ -385,8 +346,7 @@ options nouveau modeset=0
 EOF
 # dracut -f
 </code></pre>
-
-<h1 id="postgresql-installation">PostgreSQL Installation</h1>
+<h2 id="postgresql-installation">PostgreSQL Installation</h2>
 <p>This section introduces PostgreSQL installation with RPM.
 We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>
 <p>PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.</p>
@@ -426,7 +386,6 @@ Dependency Installed:
 
 Complete!
 </code></pre>
-
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>On the Red Hat Enterprise Linux 8 and CentOS 8, the package name <code>postgresql</code> conflicts to the default one at the distribution, then unable to install the package from PGDG. Disable the <code>postgresql</code> package by the distribution, using the command below.</p>
@@ -435,7 +394,6 @@ Complete!
    :
 Complete!
 </code></pre>
-
 <p>The RPM packages provided by PostgreSQL Global Development Group installs software under the <code>/usr/pgsql-&lt;version&gt;</code> directory, so you may pay attention whether the PATH environment variable is configured appropriately.</p>
 <p><code>postgresql-alternative</code> package set up symbolic links to the related commands under <code>/usr/local/bin</code>, so allows to simplify the operations. Also, it enables to switch target version using <code>alternatives</code> command even if multiple version of PostgreSQL.</p>
 <pre><code>$ sudo yum install postgresql-alternatives
@@ -461,9 +419,8 @@ Installed:
 
 Complete!
 </code></pre>
-
-<h1 id="pg-strom-installation">PG-Strom Installation</h1>
-<h2 id="rpm-installation">RPM Installation</h2>
+<h2 id="pg-strom-installation">PG-Strom Installation</h2>
+<h3 id="rpm-installation">RPM Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 If you repository definition has been added, not many tasks are needed.</p>
 <p>We provide individual RPM packages of PG-Strom for each base PostgreSQL version. <code>pg_strom-PG96</code> package is built for PostgreSQL 9.6, and <code>pg_strom-PG10</code> is also built for PostgreSQL v10.</p>
@@ -483,11 +440,10 @@ Installed:
 
 Complete!
 </code></pre>
-
 <p>That's all for package installation.</p>
-<h2 id="installation-from-the-source">Installation from the source</h2>
+<h3 id="installation-from-the-source">Installation from the source</h3>
 <p>For developers, we also introduces the steps to build and install PG-Strom from the source code.</p>
-<h3 id="getting-the-source-code">Getting the source code</h3>
+<h4 id="getting-the-source-code">Getting the source code</h4>
 <p>Like RPM packages, you can download tarball of the source code from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 On the other hands, here is a certain time-lags to release the tarball, it may be preferable to checkout the master branch of <a href="https://github.com/heterodb/pg-strom">PG-Strom on GitHub</a> to use the latest development branch.</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
@@ -498,8 +454,7 @@ remote: Total 13797 (delta 208), reused 339 (delta 167), pack-reused 13400
 Receiving objects: 100% (13797/13797), 11.81 MiB | 1.76 MiB/s, done.
 Resolving deltas: 100% (10504/10504), done.
 </code></pre>
-
-<h3 id="building-the-pg-strom">Building the PG-Strom</h3>
+<h4 id="building-the-pg-strom">Building the PG-Strom</h4>
 <p>Configuration to build PG-Strom must match to the target PostgreSQL strictly. For example, if a particular <code>strcut</code> has inconsistent layout by the configuration at build, it may lead problematic bugs; not easy to find out.
 Thus, not to have inconsistency, PG-Strom does not have own configure script, but references the build configuration of PostgreSQL using <code>pg_config</code> command.</p>
 <p>If PATH environment variable is set to the <code>pg_config</code> command of the target PostgreSQL, run <code>make</code> and <code>make install</code>.
@@ -508,8 +463,7 @@ Elsewhere, give <code>PG_CONFIG=...</code> parameter on <code>make</code> comman
 $ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 </code></pre>
-
-<h2 id="post-installation-setup">Post Installation Setup</h2>
+<h3 id="post-installation-setup">Post Installation Setup</h3>
 <h3 id="creation-of-database-cluster">Creation of database cluster</h3>
 <p>Database cluster is not constructed yet, run <code>initdb</code> command to set up initial database of PostgreSQL.</p>
 <p>The default path of the database cluster on RPM installation is <code>/var/lib/pgsql/&lt;version number&gt;/data</code>.
@@ -543,7 +497,6 @@ Success. You can now start the database server using:
 
     pg_ctl -D /var/lib/pgdata/ -l logfile start
 </code></pre>
-
 <h3 id="setup-postgresqlconf">Setup postgresql.conf</h3>
 <p>Next, edit <code>postgresql.conf</code> which is a configuration file of PostgreSQL.
 The parameters below should be edited at least to work PG-Strom.
@@ -585,7 +538,6 @@ LimitNOFILE=65536
 LimitCORE=infinity
 #Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 </code></pre>
-
 <h3 id="start-postgresql">Start PostgreSQL</h3>
 <p>Start PostgreSQL service.</p>
 <p>If PG-Strom is set up appropriately, it writes out log message which shows PG-Strom recognized GPU devices.
@@ -622,7 +574,6 @@ Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST
 Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST [24858] HINT:  Future log output will appear in directory &quot;log&quot;.
 Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database server.
 </code></pre>
-
 <h3 id="creation-of-pg-strom-related-objects">Creation of PG-Strom related objects</h3>
 <p>At the last, create database objects related to PG-Strom, like SQL functions.
 This steps are packaged using EXTENSION feature of PostgreSQL. So, all you needs to run is <code>CREATE EXTENSION</code> on the SQL command line.</p>
@@ -635,11 +586,10 @@ Type &quot;help&quot; for help.
 postgres=# CREATE EXTENSION pg_strom ;
 CREATE EXTENSION
 </code></pre>
-
 <p>That's all for the installation.</p>
-<h1 id="nvme-strom-module">NVME-Strom module</h1>
+<h2 id="nvme-strom-module">NVME-Strom module</h2>
 <p>This section also introduces NVME-Strom Linux kernel module which is closely cooperating with core features of PG-Strom like SSD-to-GPU Direct SQL Execution, even if it is an independent software module.</p>
-<h2 id="getting-the-module-and-installation">Getting the module and installation</h2>
+<h3 id="getting-the-module-and-installation">Getting the module and installation</h3>
 <p>Like other PG-Strom related modules, NVME-Strom is distributed at the (https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center] as a free software. In other words, it is not an open source software.</p>
 <p>If your system already setup <code>heterodb-swdc</code> package, <code>yum install</code> command downloads the RPM file and install the <code>nvme_strom</code> package.</p>
 <pre><code>$ sudo yum install nvme_strom
@@ -689,8 +639,7 @@ Installed:
 
 Complete!
 </code></pre>
-
-<h2 id="license-activation">License activation</h2>
+<h3 id="license-activation">License activation</h3>
 <p>License activation is needed to use all the features of NVME-Strom module, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.
 - Multiple GPUs support
 - Striping support (md-raid0) at SSD-to-GPU Direct SQL</p>
@@ -703,7 +652,6 @@ ISSUED_AT:2019-05-09
 EXPIRED_AT:2019-06-08
 GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
 </code></pre>
-
 <p>Copy the license file to <code>/etc/heterodb.license</code>, then restart PostgreSQL.</p>
 <p>The startup log messages of PostgreSQL dumps the license information, and it tells us the license activation is successfully done.</p>
 <pre><code>$ pg_ctl restart
@@ -716,8 +664,7 @@ LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
 LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
     :
 </code></pre>
-
-<h2 id="kernel-module-parameters">Kernel module parameters</h2>
+<h3 id="kernel-module-parameters">Kernel module parameters</h3>
 <p>NVME-Strom Linux kernel module has some parameters.</p>
 <table>
 <thead>
@@ -765,7 +712,7 @@ If <code>fast_ssd_mode</code> is <code>0</code>, NVME-Strom once writes back pag
 When asynchronous DMA requests are enqueued more than the capacity of NVME devices, latency of individual DMA requests become terrible because NVME-SSD controler processes the DMA requests in order of arrival. (On the other hands, it maximizes the throughput because NVME-SSD controler receives DMA requests continuously.)
 If turn-around time of the DMA requests are too large, it may be wrongly considered as errors, then can lead timeout of I/O request and return an error status. Thus, it makes no sense to enqueue more DMA requests to the I/O-queue more than the reasonable amount of pending requests for full usage of NVME devices.</p>
 <p><code>p2p_dma_max_depth</code> parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.</p>
-<h1 id="postgis-installation">PostGIS Installation</h1>
+<h2 id="postgis-installation">PostGIS Installation</h2>
 <p>PG-Strom supports execution of a part of PostGIS functions on GPU devices.
 This section introduces the steps to install PostGIS module. Skip it on your demand.</p>
 <p>PostGIS module can be installed from the yum repository by PostgreSQL Global Development Group, like PostgreSQL itself.
@@ -787,7 +734,6 @@ Installing dependencies:
    :                                  :                 :                     :                :
 Complete!
 </code></pre>
-
 <p>Start PostgreSQL server after the initial setup of database cluster, then run <code>CREATE EXTENSION</code> command from SQL client to define geometry data type and SQL functions for geoanalytics.</p>
 <pre><code>postgres=# CREATE EXTENSION postgis;
 CREATE EXTENSION
@@ -814,7 +760,7 @@ CREATE EXTENSION
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -824,7 +770,7 @@ CREATE EXTENSION
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -838,6 +784,11 @@ CREATE EXTENSION
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

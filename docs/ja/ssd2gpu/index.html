@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="../img/favicon.ico">
   <title>GPUダイレクトSQL - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="../custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href=".." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,134 +51,84 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="..">はじめに</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../install/">インストール</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">利用ガイド</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../operations/">基本的な操作</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../sys_admin/">システム管理</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../brin/">BRINインデックス</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../partition/">パーティション</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../postgis/">PostGIS対応</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../troubles/">トラブルシューティング</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">先進機能</span>
-    <ul class="subnav">
-                <li class=" current">
-                    
-    <a class="current" href="./">GPUダイレクトSQL</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l3"><a href="#_1">概要</a></li>
-    
-
-    <li class="toctree-l3"><a href="#_2">初期設定</a></li>
-    
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GPUダイレクトSQL</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">初期設定</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#_3">ドライバのインストール</a></li>
-        
-            <li><a class="toctree-l4" href="#_4">テーブルスペースの設計</a></li>
-        
-            <li><a class="toctree-l4" href="#gpunvme-ssd">GPUとNVME-SSD間の距離</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#_3">ドライバのインストール</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">テーブルスペースの設計</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l3"><a href="#_5">運用</a></li>
-    
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">運用</a>
         <ul>
-        
-            <li><a class="toctree-l4" href="#guc">GUCパラメータによる制御</a></li>
-        
-            <li><a class="toctree-l4" href="#visibility-map">Visibility Mapに関する注意事項</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#gpunvme-ssd">GPUとNVME-SSD間の距離</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#guc">GUCパラメータによる制御</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行の利用を確認する</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#visibility-map">Visibility Mapに関する注意事項</a>
+    </li>
         </ul>
-    
-
+    </li>
     </ul>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../gstore_fdw/">GPUメモリストア</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../python/">Python連携</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">リファレンス</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="../ref_types/">データ型</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_devfuncs/">関数と演算子</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="../ref_params/">GUCパラメータ</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="../release_note/">リリースノート</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -205,14 +157,14 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <h1>SSD-to-GPUダイレクトSQL実行</h1>
-
-<h1 id="_1">概要</h1>
+                <h1 id="gpusql">GPUダイレクトSQL実行</h1>
+<h2 id="_1">概要</h2>
 <p>SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。</p>
 <p>SSD-to-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。</p>
 <p>通常、ストレージ上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。</p>
@@ -222,9 +174,9 @@
 <p>本機能は内部的にNVIDIAのGPUDirect RDMAを使用しています。これはカスタムLinux kernel moduleを利用する事で、GPUデバイスメモリと他のPCIeデバイスの間でP2Pのデータ転送を可能にする基盤技術です。
 そのため、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、Linux kernelの拡張モジュールであるNVMe-Stromドライバが必要です。</p>
 <p>また、本機能が対応しているのはNVMe仕様のSSDのみです。SASやSATAといったインターフェースで接続されたSSDはサポートされていません。今までに動作実績のあるNVMe-SSDについては <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> が参考になるでしょう。</p>
-<h1 id="_2">初期設定</h1>
-<h2 id="_3">ドライバのインストール</h2>
-<p>SSD-to-GPUダイレクトSQL実行機能を利用するには<code>nvme_strom</code>パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手可能です。</p>
+<h2 id="_2">初期設定</h2>
+<h3 id="_3">ドライバのインストール</h3>
+<p>GPUダイレクトSQL実行機能を利用するには<code>nvme_strom</code>パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手可能です。</p>
 <p>既に<code>heterodb-swdc</code>パッケージをインストールしている場合、<code>yum</code>コマンドによるインストールも可能です。</p>
 <pre><code>$ sudo yum install nvme_strom
             :
@@ -246,16 +198,14 @@ Installed:
 
 Complete!
 </code></pre>
-
 <p><code>nvme_strom</code>パッケージのインストールが完了すると、以下のように<code>lsmod</code>コマンドで<code>nvme_strom</code>モジュールが出力されます。</p>
 <pre><code>$ lsmod | grep nvme
 nvme_strom             12625  0
 nvme                   27722  4
 nvme_core              52964  9 nvme
 </code></pre>
-
-<h2 id="_4">テーブルスペースの設計</h2>
-<p>SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。</p>
+<h3 id="_4">テーブルスペースの設計</h3>
+<p>GPUダイレクトSQL実行は以下の条件で発動します。</p>
 <ul>
 <li>スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。<ul>
 <li><code>/dev/nvmeXXXX</code>ブロックデバイス、または<code>/dev/nvmeXXXX</code>ブロックデバイスのみから構成されたmd-raid0区画が対象です。</li>
@@ -275,17 +225,15 @@ nvme_core              52964  9 nvme
 PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。</p>
 <pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 </code></pre>
-
 <p>このテーブルスペース上にテーブルを作成するには、<code>CREATE TABLE</code>構文で以下のように指定します。</p>
 <pre><code>CREATE TABLE my_table (...) TABLESPACE my_nvme;
 </code></pre>
-
 <p>あるいは、データベースのデフォルトテーブルスペースを変更するには、<code>ALTER DATABASE</code>構文で以下のように指定します。
 この場合、既存テーブルの配置されたテーブルスペースは変更されない事に留意してください。</p>
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
 </code></pre>
-
-<h2 id="gpunvme-ssd">GPUとNVME-SSD間の距離</h2>
+<h2 id="_5">運用</h2>
+<h3 id="gpunvme-ssd">GPUとNVME-SSD間の距離</h3>
 <p>サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。</p>
 <p>SSD-to-GPUダイレクトSQL機能がその基盤として使用している<a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。</p>
 <p>また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。</p>
@@ -306,16 +254,13 @@ LOG:      nvme1  (   3)      7       7
 LOG:      nvme3      7   (   3)      7
      :
 </code></pre>
-
 <p>通常は自動設定で問題ありません。
 ただ、NVME-over-Fabric(RDMA)を使用する場合はPCIeバス上のnvmeデバイスの位置を取得できないため、手動でNVME-SSDとGPUの位置関係を設定する必要があります。</p>
 <p>例えば<code>nvme1</code>には<code>gpu2</code>を、<code>nvme2</code>と<code>nvme3</code>には<code>gpu1</code>を割り当てる場合、以下の設定を<code>postgresql.conf</code>へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。</p>
 <pre><code>pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
 </code></pre>
-
-<h1 id="_5">運用</h1>
-<h2 id="guc">GUCパラメータによる制御</h2>
-<p>SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
+<h3 id="guc">GUCパラメータによる制御</h3>
+<p>GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
 <p>一つは<code>pg_strom.nvme_strom_enabled</code>で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
 本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
 <p>もう一つのパラメータは<code>pg_strom.nvme_strom_threshold</code>で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
@@ -371,8 +316,7 @@ and s_region = 'AMERICA'
                      -&gt;  Seq Scan on date1
 (31 rows)
 </code></pre>
-
-<h2 id="visibility-map">Visibility Mapに関する注意事項</h2>
+<h3 id="visibility-map">Visibility Mapに関する注意事項</h3>
 <p>現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。</p>
 <p>NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
 <p>これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。</p>
@@ -402,7 +346,7 @@ and s_region = 'AMERICA'
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -412,7 +356,7 @@ and s_region = 'AMERICA'
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -426,6 +370,11 @@ and s_region = 'AMERICA'
     <script>var base_url = '..';</script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>

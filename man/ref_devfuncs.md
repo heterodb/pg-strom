@@ -1,14 +1,14 @@
 @ja{
-<h1>関数と演算子</h1>
+#関数と演算子
 本章ではGPUデバイス上で実行可能な関数と演算子について説明します。
 }
 @en{
-<h1>Functions and operators</h1>
+#Functions and operators
 This chapter introduces the functions and operators executable on GPU devices.
 }
 
-@ja:#型キャスト
-@en:#Type cast
+@ja:##型キャスト
+@en:##Type cast
 
 |destination type|source type|description|
 |:---------------|:----------|:----------|
@@ -28,8 +28,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`timestamp`|`date,timestamptz`||
 |`timestamptz`|`date,timestamp`||
 
-@ja:#数値型演算子
-@en:#Numeric functions/operators
+@ja:##数値型演算子
+@en:##Numeric functions/operators
 
 |function/operator|description|
 |:----------------|:----------|
@@ -51,8 +51,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`- TYPE`     |Unary minus<br>`TYPE` is any of `int2,int4,int8,float2,float4,float8,numeric`|
 |`@ TYPE`     |Absolute value<br>`TYPE` is any of `int2,int4,int8,float2,float4,float8,numeric`|
 
-@ja:#数学関数
-@en:#Mathematical functions
+@ja:##数学関数
+@en:##Mathematical functions
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -79,8 +79,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`trunc(float8)`    |truncate toward zero|
 |`dtrunc(float8)`   |truncate toward zero|
 
-@ja:#三角関数
-@en:#Trigonometric functions
+@ja:##三角関数
+@en:##Trigonometric functions
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -95,8 +95,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`sin(float8)`      |sine|
 |`tan(float8)`      |tangent|
 
-@ja:#日付/時刻型演算子
-@en:#Date and time operators
+@ja:##日付/時刻型演算子
+@en:##Date and time operators
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -129,8 +129,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`interval OP interval`|`OP` is either of `+,-`|
 
 
-@ja:#文字列関数/演算子
-@en:#Text functions/operators
+@ja:##文字列関数/演算子
+@en:##Text functions/operators
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -144,8 +144,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`TYPE ILIKE text`|`TYPE` is either of `text,bpchar`<br>Only available on no-locale or UTF-8|
 |`TYPE NOT ILIKE text`|`TYPE` is either of `text,bpchar`<br>Only available on no-locale or UTF-8|
 
-@ja:#ネットワーク関数/演算子
-@en:#Network functions/operators
+@ja:##ネットワーク関数/演算子
+@en:##Network functions/operators
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -175,8 +175,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 
 
 
-@ja:#通貨型演算子
-@en:#Currency operators
+@ja:##通貨型演算子
+@en:##Currency operators
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -186,15 +186,15 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`TYPE * money`     |`TYPE` is any of `int2,int4,float2,float4,float8`|
 |`money / TYPE`     |`TYPE` is any of `int2,int4,float2,float4,float8`|
 
-@ja:#uuid型演算子
-@en:#UUID operators
+@ja:##uuid型演算子
+@en:##UUID operators
 
 |functions/operators|description|
 |:------------------|:----------|
 |`uuid COMP uuid`   |`COMP` is any of `=,<>,<,<=,>=,>`|
 
-@ja:#JSONB型演算子
-@en:#JSONB operators
+@ja:##JSONB型演算子
+@en:##JSONB operators
 
 |functions/operators    |description|
 |:----------------------|:----------|
@@ -217,8 +217,8 @@ This chapter introduces the functions and operators executable on GPU devices.
     PG-Strom optimizes the GPU code using a special device function to fetch a numerical datum from jsonb object/array, if `jsonb ->> KEY` operator and text-to-numeric case are continuously used.
 }
 
-@ja:#範囲型演算子
-@en:#Range type functions/operators
+@ja:##範囲型演算子
+@en:##Range type functions/operators
 
 |functions/operators|description|
 |:------------------|:----------|
@@ -250,8 +250,8 @@ This chapter introduces the functions and operators executable on GPU devices.
 |`upper_inf(RANGE)` |`RANGE` is any of `int4range,int8range,tsrange,tstzrange,daterange`|
 |`range_merge(RANGE,RANGE)` |`RANGE` is any of `int4range,int8range,tsrange,tstzrange,daterange`|
 
-@ja:#PostGIS関数
-@en:#PostGIS Functions
+@ja:##PostGIS関数
+@en:##PostGIS Functions
 
 @ja{
 |functions/operators|description|

@@ -34,6 +34,8 @@ INSERT INTO rt_numeric (
             pgstrom.random_int(1, -2000000000,
                                    2000000000)::numeric / 1000::numeric
     FROM generate_series(1,3000) x);
+ALTER TABLE rt_numeric ADD p int1;
+UPDATE rt_numeric SET p=((id-1)%256-128);
 VACUUM ANALYZE;
 
 -- force to use GpuScan, instead of SeqScan
@@ -45,18 +47,18 @@ SET pg_strom.debug_kernel_source = off;
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01g
   FROM rt_numeric
  WHERE id > 0;
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01g
   FROM rt_numeric
  WHERE id > 0;
 SET pg_strom.enabled = off;
 SELECT id, a::numeric, b::numeric, c::numeric,
-           d::numeric, e::numeric, f::numeric
+           d::numeric, e::numeric, f::numeric, p::numeric
   INTO test01p
   FROM rt_numeric
  WHERE id > 0;
@@ -73,18 +75,21 @@ SELECT g.*, p.*
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02g
   FROM rt_numeric
  WHERE id > 0;
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02g
   FROM rt_numeric
  WHERE id > 0;
 SET pg_strom.enabled = off;
 SELECT id, x::int2 i2, y::int4 i4, z::int8 i8,
-           x::float2 f2, y::float4 f4, z::float8 f8
+           x::float2 f2, y::float4 f4, z::float8 f8,
+           CASE WHEN x BETWEEN -128 AND 127 THEN x::int1 ELSE 0 END i1
   INTO test02p
   FROM rt_numeric
  WHERE id > 0;

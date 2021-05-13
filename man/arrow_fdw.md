@@ -1,8 +1,8 @@
-@ja:<h1>列指向データストア (Arrow_Fdw)</h1>
-@en:<h1>Columnar data store (Arrow_Fdw)</h1>
+@ja:#Apache Arrow (列指向データストア)
+@en:#Apache Arrow (Columnar Store)
 
-@ja:#概要
-@en:#Overview
+@ja:##概要
+@en:##Overview
 
 @ja{
 PostgreSQLのテーブルは内部的に8KBのブロック[^1]と呼ばれる単位で編成され、ブロックは全ての属性及びメタデータを含むタプルと呼ばれるデータ構造を行単位で格納します。行を構成するデータが近傍に存在するため、これはINSERTやUPDATEの多いワークロードに有効ですが、一方で大量データの集計・解析ワークロードには不向きであるとされています。
@@ -64,11 +64,11 @@ Arrow_Fdwは外部テーブルを用いてApache Arrow形式ファイルをPostg
 Arrow_Fdw allows to read Apache Arrow files on PostgreSQL using foreign table mechanism. If an Arrow file contains 8 of record batches that has million items for each column data, for example, we can access 8 million rows on the Arrow files through the foreign table.
 }
 
-@ja:#運用
-@en:#Operations
+@ja:##運用
+@en:##Operations
 
-@ja:##外部テーブルの定義
-@en:##Creation of foreign tables
+@ja:###外部テーブルの定義
+@en:###Creation of foreign tables
 
 @ja{
 通常、外部テーブルを作成するには以下の3ステップが必要です。
@@ -122,8 +122,8 @@ IMPORT FOREIGN SCHEMA flogdata
 OPTIONS (file '/path/to/logdata.arrow');
 ```
 
-@ja:##外部テーブルオプション
-@en:##Foreign table options
+@ja:###外部テーブルオプション
+@en:###Foreign table options
 
 @ja{
 Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。
@@ -150,8 +150,8 @@ Arrow_Fdw supports the options below. Right now, all the options are for foreign
 |foreign table|`writable`|It allows execution of `INSERT` command on the foreign table. See the section of "Writable Arrow_Fdw"|
 }
 
-@ja:##データ型の対応
-@en:##Data type mapping
+@ja:###データ型の対応
+@en:###Data type mapping
 
 @ja{
 Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。
@@ -196,8 +196,8 @@ Arrow data types are mapped on PostgreSQL data types as follows.
 |`Map`           |--------             ||
 }
 
-@ja:##EXPLAIN出力の読み方
-@en:##How to read EXPLAIN
+@ja:###EXPLAIN出力の読み方
+@en:###How to read EXPLAIN
 
 @ja{
 `EXPLAIN`コマンドを用いて、Arrow形式ファイルの読み出しに関する情報を出力する事ができます。
@@ -310,8 +310,8 @@ VERBOSE option outputs more detailed information.
 The verbose output additionally displays amount of column-data to be loaded on reference of columns. The load of `lo_orderdate`, `lo_quantity`, `lo_extendedprice` and `lo_discount` columns needs to read 87.4GB in total. It is 28.3% towards the filesize (309.2GB).
 }
 
-@ja:#Arrowファイルの作成方法
-@en:#How to make Arrow files
+@ja:##Arrowファイルの作成方法
+@en:##How to make Arrow files
 
 @ja{
 本節では、既にPostgreSQLデータベースに格納されているデータをApache Arrow形式に変換する方法を説明します。
@@ -320,8 +320,8 @@ The verbose output additionally displays amount of column-data to be loaded on r
 This section introduces the way to transform dataset already stored in PostgreSQL database system into Apache Arrow file.
 }
 
-@ja:##PyArrow+Pandas
-@en:##Using PyArrow+Pandas
+@ja:###PyArrow+Pandas
+@en:###Using PyArrow+Pandas
 
 @ja{
 Arrow開発者コミュニティが開発を行っている PyArrow モジュールとPandasデータフレームの組合せを用いて、PostgreSQLデータベースの内容をArrow形式ファイルへと書き出す事ができます。
@@ -350,8 +350,8 @@ f.close()
 Please note that the above operation once keeps query result of the SQL on memory, so should pay attention on memory consumption if you want to transfer massive rows at once.
 }
 
-@ja:##Pg2Arrow
-@en:##Using Pg2Arrow
+@ja:###Pg2Arrow
+@en:###Using Pg2Arrow
 
 @ja{
 一方、PG-Strom Development Teamが開発を行っている `pg2arrow` コマンドを使用して、PostgreSQLデータベースの内容をArrow形式ファイルへと書き出す事ができます。 このツールは比較的大量のデータをNVME-SSDなどストレージに書き出す事を念頭に設計されており、PostgreSQLデータベースから`-s|--segment-size`オプションで指定したサイズのデータを読み出すたびに、Arrow形式のレコードバッチ（Record Batch）としてファイルに書き出します。そのため、メモリ消費量は比較的リーズナブルな値となります。
@@ -435,8 +435,8 @@ Although it is an option for developers, `--dump <filename>` prints schema defin
 `--progress` option enables to show progress of the task. It is useful when a huge table is transformed to Apache Arrow format.
 }
 
-@ja:##書き込み可能Arrow_Fdw
-@en:##Writable Arrow_Fdw
+@ja:###書き込み可能Arrow_Fdw
+@en:###Writable Arrow_Fdw
 @ja{
 `writable`オプションを付加したArrow_Fdw外部テーブルに対しては、`INSERT`構文によりデータを追記する事が可能です。また、`pgstrom.arrow_fdw_truncate()`関数を用いて外部テーブル全体、すなわちその背後にあるApache Arrowファイルの内容を消去する事が可能です。一方、`UPDATE`および`DELETE`構文に関してはサポートされていません。
 }
@@ -542,12 +542,12 @@ postgres=# SELECT count(*) FROM ftest;
 ```
 
 
-@ja:#先進的な使い方
-@en:#Advanced Usage
+@ja:##先進的な使い方
+@en:##Advanced Usage
 
 
-@ja:##SSDtoGPUダイレクトSQL
-@en:##SSDtoGPU Direct SQL
+@ja:###SSDtoGPUダイレクトSQL
+@en:###SSDtoGPU Direct SQL
 
 @ja{
 Arrow_Fdw外部テーブルにマップされた全てのArrow形式ファイルが以下の条件を満たす場合には、列データの読み出しにSSD-to-GPUダイレクトSQLを使用する事ができます。
@@ -564,8 +564,8 @@ In case when all the Arrow files mapped on the Arrow_Fdw foreign table satisfies
 - Total size of Arrow files exceeds the `pg_strom.nvme_strom_threshold` configuration.
 }
 
-@ja:##パーティション設定
-@en:##Partition configuration
+@ja:###パーティション設定
+@en:###Partition configuration
 
 @ja{
 Arrow_Fdw外部テーブルを、パーティションの一部として利用する事ができます。 通常のPostgreSQLテーブルと混在する事も可能ですが、Arrow_Fdw外部テーブルは書き込みに対応していない事に注意してください。 また、マップされたArrow形式ファイルに含まれるデータは、パーティションの境界条件と矛盾しないように設定してください。これはデータベース管理者の責任です。

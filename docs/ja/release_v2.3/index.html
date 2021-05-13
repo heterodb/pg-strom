@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>PG-Strom v2.3 - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "PG-Strom v2.3";
+    var mkdocs_page_input_path = "release_v2.3.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<strong>Japanese</strong> | <a href="../../release_v2.3/"    style="color: #cccccc">English</a>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v2.3</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">動作環境</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">新機能</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">修正された主な不具合</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">廃止された機能</a>
+    </li>
+    </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>リリースノート &raquo;</li>
+        
+      
+    
+    <li>PG-Strom v2.3</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="pg-strom-v23">PG-Strom v2.3リリース</h1>
+<div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
+
+<h2 id="_1">概要</h2>
+<p>PG-Strom v2.3における主要な機能強化は以下の通りです。
+- GpuJoinのInnerバッファの構築がCPU並列に対応しました。
+- Arrow_FdwがINSERT/TRUNCATEに対応しました。
+- pg2arrowコマンドが追記モードに対応しました。
+- mysql2arrowコマンドが追加されました。</p>
+<h2 id="_2">動作環境</h2>
+<ul>
+<li>PostgreSQL v10, v11, v12</li>
+<li>CUDA Toolkit 10.1 以降</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal or Volta)</li>
+</ul>
+<h2 id="_3">新機能</h2>
+<ul>
+<li>GpuJoinのInnerバッファの構築がCPU並列に対応<ul>
+<li>従来はGpuJoinのInner側バッファの構築はバックエンドプロセスのみが行っていました。この制約により、パーティション化されたテーブルの並列スキャンが極端に遅延するという問題がありました。</li>
+<li>本バージョンでの機能強化により、バックエンド、ワーカープロセスのどちらでもInner側バッファを構築する事が可能となりました。パーティション化テーブルをスキャンする場合でも、各パーティション子テーブルに割り当てられたプロセスが直ちにGpuJoin処理を開始する事ができるようになります。</li>
+</ul>
+</li>
+<li>Partition-wise Asymmetric GpuJoinの再設計<ul>
+<li>全体的なデザインの再設計を行い、適切な局面において多段GpuJoinが選択されやすくなるよう改良を行いました。</li>
+</ul>
+</li>
+<li>Arrow_FdwがINSERT/TRUNCATEに対応しました。<ul>
+<li>Arrow_Fdw外部テーブルに対して、<code>INSERT</code>によるバルクロードと、<code>pgstrom.arrow_fdw_truncate</code>によるTRUNCATE処理を行う事が可能となりました。</li>
+</ul>
+</li>
+<li>CuPy連携とデータフレームのGPUエクスポート<ul>
+<li>Arrow_Fdw外部テーブルの内容をGPUデバイスメモリ上のデータフレームにロードし、これをCuPyの<code>cupy.ndarray</code>オブジェクトとしてPythonスクリプトから参照する事が可能となりました。</li>
+</ul>
+</li>
+<li>pg2arrowコマンドが追記モードに対応しました。<ul>
+<li><code>pg2arrow</code>コマンドに<code>--append</code>オプションが追加され、既存のApache Arrowに対して追記を行う事が可能となりました。</li>
+<li>また同時に、<code>SELECT * FROM table</code>の別名表記として<code>-t table</code>オプションが追加されました。</li>
+</ul>
+</li>
+<li>mysql2arrowコマンドを追加されました。<ul>
+<li>PostgreSQLではなく、MySQLに接続してクエリを実行し、その結果をApache Arrowファイルとして保存する<code>mysql2arrow</code>コマンドを追加しました。</li>
+<li>列挙型のデータも通常のUtf8型として保存する（DictionaryBatchを使用しない）以外は、<code>pg2arrow</code>と同等の機能を持っています。</li>
+</ul>
+</li>
+<li>リグレッションテストを追加しました<ul>
+<li>PostgreSQLのリグレッションテストフレームワークに合わせて、幾つかの基本的なテストケースを追加しています。</li>
+</ul>
+</li>
+</ul>
+<h2 id="_4">修正された主な不具合</h2>
+<ul>
+<li>GPUデバイス関数/型のキャッシュ無効化のロジックを改善<ul>
+<li>ALTERコマンドの実行時、全てのGPUデバイス関数/型のメタ情報キャッシュを無効化していましたが、実際に無効化の必要のあるエントリのみをクリアするよう修正を行いました。</li>
+</ul>
+</li>
+<li>GROUP BYで同じ列を偶数回指定した際に極端なパフォーマンスの低下を修正<ul>
+<li>GROUP BYのキー値が複数ある時に、GpuPreAggはハッシュ値をXORで結合していました。そのため、同じ列を偶数回指定した場合には常にハッシュインデックスが0になるという問題がありました。適当なランダム化処理を加える事でハッシュ値が分散するよう修正しています。</li>
+</ul>
+</li>
+<li>潜在的なGpuScan無限ループの問題を修正<ul>
+<li>SSD2GPU Direct SQLの使用時、変数の未初期化によりGpuScanが無限ループに陥る可能性がありました。</li>
+</ul>
+</li>
+<li>潜在的なGpuJoinのGPUカーネルクラッシュ<ul>
+<li>3個以上のテーブルを結合するGpuJoinで、変数の未初期化によりGPUカーネルのクラッシュを引き起こす可能性がありました。</li>
+</ul>
+</li>
+</ul>
+<h2 id="_5">廃止された機能</h2>
+<ul>
+<li>PostgreSQL v9.6サポート<ul>
+<li>PostgreSQL v9.6のCustomScan APIには、動的共有メモリ(DSM)の正しいハンドリングに必要な幾つかのAPIが欠けており、v10以降と共通のコードを保守する上で障害となっていました。これらの問題から、本バージョンでは PostgreSQL v9.6 はサポート外となります。</li>
+</ul>
+</li>
+<li>PL/CUDA<ul>
+<li>ユースケースを分析した結果、独自のプログラミング環境よりも、Python言語などユーザの使い慣れた言語環境の方が望ましい事が分かりました。</li>
+<li>今後は、Arrow_FdwのGPUエクスポート機能とPL/Python経由でのCuPy呼出しを併用する事で、In-database機械学習/統計解析の代替手段となります。</li>
+</ul>
+</li>
+<li>Gstore_Fdw<ul>
+<li>本機能は、書き込み可能Arrow_FdwとGPUエクスポート機能により代替されました。</li>
+</ul>
+</li>
+<li>Largeobject～GPU間エクスポート/インポート<ul>
+<li>ユースケースを分析した結果、本機能は不要と判断しました。</li>
+</ul>
+</li>
+</ul>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../release_v2.2/" class="btn btn-neutral float-right" title="PG-Strom v2.2">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../release_v3.0/" class="btn btn-neutral" title="PG-Strom v3.0"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../release_v3.0/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../release_v2.2/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>

@@ -34,7 +34,7 @@ __STROM_OBJS = main.o nvrtc.o cufile.o extra.o \
         nvme_strom.o relscan.o gpu_tasks.o \
         gpuscan.o gpujoin.o gpupreagg.o \
 	arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-	gstore_fdw.o aggfuncs.o float2.o tinyint.o misc.o
+	gpu_cache.o aggfuncs.o float2.o tinyint.o misc.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #
@@ -44,13 +44,14 @@ __GPU_FATBIN := cuda_common cuda_numeric cuda_primitive \
                 cuda_timelib cuda_textlib cuda_misclib \
                 cuda_jsonlib cuda_rangetype cuda_postgis \
                 cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort
-__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype cuda_gstore arrow_defs
+__GPU_HEADERS := $(__GPU_FATBIN) cuda_utils cuda_basetype cuda_gcache arrow_defs
 GPU_HEADERS := $(addprefix $(STROM_BUILD_ROOT)/src/, \
                $(addsuffix .h, $(__GPU_HEADERS)))
 GPU_FATBIN := $(addprefix $(STROM_BUILD_ROOT)/src/, \
               $(addsuffix .fatbin, $(__GPU_FATBIN)))
 GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
-GSTORE_FDW_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gstore.fatbin
+GPU_CACHE_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.fatbin
+GPU_CACHE_DEBUG_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.gfatbin
 
 # 32k / 128 = 256 threads per SM
 MAXREGCOUNT := 128
@@ -66,7 +67,7 @@ MAXREGCOUNT := 128
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo pg2arrow gstore_backup dbgen-ssbm
+__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
 ifdef WITH_MYSQL2ARROW
 __STROM_UTILS += mysql2arrow
 MYSQL_CONFIG = mysql_config
@@ -116,20 +117,6 @@ MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
                      $(shell $(MYSQL_CONFIG) --cflags) \
                      $(shell $(MYSQL_CONFIG) --libs) \
                      -Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
-
-GSTORE_BACKUP = $(STROM_BUILD_ROOT)/utils/gstore_backup
-GSTORE_BACKUP_SOURCE = $(GSTORE_BACKUP).c
-GSTORE_BACKUP_CFLAGS = -D_GNU_SOURCE -g -Wall \
-                       -I $(STROM_BUILD_ROOT)/src \
-                       -I $(STROM_BUILD_ROOT)/utils \
-                       -I $(shell $(PG_CONFIG) --includedir) \
-                       -I $(shell $(PG_CONFIG) --includedir-server) \
-                       -L $(shell $(PG_CONFIG) --libdir) \
-                       -L $(shell $(PG_CONFIG) --pkglibdir) \
-                       $(shell $(PG_CONFIG) --ldflags)
-GSTORE_BACKUP_DEPEND = $(GSTORE_BACKUP_SOURCE) \
-                       $(STROM_BUILD_ROOT)/src/gstore_fdw.h
-
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -152,7 +139,7 @@ __DOC_FILES = index.md install.md partition.md \
               operations.md sys_admin.md brin.md postgis.md troubles.md \
 	      ssd2gpu.md arrow_fdw.md gstore_fdw.md python.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
-	      release_note.md
+	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md
 
 #
 # Files to be packaged
@@ -204,7 +191,7 @@ PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 endif
 # build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
-PGSTROM_FLAGS += -g -O0
+PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
 endif
 # support of NVIDIA GPUDirect Storage (BETA)
 WITH_CUFILE := $(shell test -e $(LPATH)/cufile.h && echo 1 || echo 0)
@@ -220,7 +207,7 @@ PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
-SHLIB_LINK := -L $(LPATH) -lcuda -lpmem
+SHLIB_LINK := -L $(LPATH) -lcuda
 
 # also, flags to build GPU libraries
 NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
@@ -240,7 +227,8 @@ else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
 else
   NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
 endif
-NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug
+NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug \
+                    -DPGSTROM_DEBUG_BUILD=1
 
 #
 # Definition of PG-Strom Extension
@@ -251,7 +239,8 @@ OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
        $(STROM_BUILD_ROOT)/src/cuda_codegen.h
-DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) $(GSTORE_FDW_FATBIN)
+DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) \
+             $(GPU_CACHE_FATBIN) $(GPU_CACHE_DEBUG_FATBIN)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -295,12 +284,12 @@ endif
 #
 # GPU Libraries
 #
-$(GSTORE_FDW_FATBIN): $(GSTORE_FDW_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
+$(GPU_CACHE_FATBIN): $(GPU_CACHE_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
+	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
+$(GPU_CACHE_DEBUG_FATBIN): $(GPU_CACHE_DEBUG_FATBIN:.gfatbin=.cu) $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
-
 %.fatbin:  %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=true -o $@ $<
-
 %.gfatbin: %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=true -o $@ $<
 
@@ -351,9 +340,6 @@ $(PG2ARROW): $(PG2ARROW_DEPEND)
 
 $(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
 	$(CC) $(MYSQL2ARROW_SOURCE) -o $@ $(MYSQL2ARROW_CFLAGS)
-
-$(GSTORE_BACKUP): $(GSTORE_BACKUP_DEPEND)
-	$(CC) $(GSTORE_BACKUP_SOURCE) -o $@ $(GSTORE_BACKUP_CFLAGS) -lpq -lpgport
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm

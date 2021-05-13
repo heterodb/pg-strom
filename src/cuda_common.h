@@ -356,6 +356,22 @@ __Fetch(const T *ptr)
 #define __Fetch(PTR)			(*(PTR))
 #endif	/* !__CUDA_ARCH__ */
 
+#ifdef __CUDA_ARCH__
+template <typename T>
+DEVICE_INLINE(T)
+__volatileRead(const volatile T *ptr)
+{
+	return *ptr;
+}
+
+template <typename T>
+DEVICE_INLINE(void)
+__volatileWrite(volatile T *ptr, T val)
+{
+	*ptr = val;
+}
+#endif
+
 /*
  * Error code definition
  *
@@ -575,7 +591,7 @@ typedef struct {
 	cl_ushort		ip_posid;
 } ItemPointerData;
 
-STATIC_FUNCTION(cl_bool)
+DEVICE_INLINE(cl_bool)
 ItemPointerEquals(ItemPointerData *ip1, ItemPointerData *ip2)
 {
 	return (ip1->ip_blkid.bi_hi == ip2->ip_blkid.bi_hi &&
@@ -630,6 +646,15 @@ typedef struct {
 #define HEAP_COMBOCID			0x0020	/* t_cid is a combo cid */
 #define HEAP_XMAX_EXCL_LOCK		0x0040	/* xmax is exclusive locker */
 #define HEAP_XMAX_LOCK_ONLY		0x0080	/* xmax, if valid, is only a locker */
+
+#define HEAP_XMIN_COMMITTED		0x0100	/* t_xmin committed */
+#define HEAP_XMIN_INVALID		0x0200	/* t_xmin invalid/aborted */
+#define HEAP_XMAX_COMMITTED		0x0400	/* t_xmax committed */
+#define HEAP_XMAX_INVALID		0x0800	/* t_xmax invalid/aborted */
+#define HEAP_XMAX_IS_MULTI		0x1000	/* t_xmax is a MultiXactId */
+#define HEAP_UPDATED			0x2000	/* this is UPDATEd version of row */
+#define HEAP_MOVED_OFF			0x4000	/* unused in GPU */
+#define HEAP_MOVED_IN			0x8000	/* unused in GPU */
 
 /*
  * information stored in t_infomask2:
@@ -902,15 +927,6 @@ struct kern_data_store {
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
 	cl_uint			nrows_per_block; /* average number of rows per
 									  * PostgreSQL block (only BLOCK format) */
-#ifndef __CUDACC__
-	/*
-	 * Offset to the extra buffer (only COLUMN format, with varlena)
-	 * at the host-side, shall not be refered at the device-side.
-	 */
-	cl_ulong		extra_hoffset;
-#else
-	cl_ulong		__no_such_field__;
-#endif
 	cl_uint			nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
@@ -922,7 +938,6 @@ typedef struct kern_data_store		kern_data_store;
  */
 struct kern_data_extra
 {
-	char		signature[8];	/* signature on the base file */
 	cl_ulong	length;
 	cl_ulong	usage;
 	char		data[FLEXIBLE_ARRAY_MEMBER];
@@ -973,6 +988,7 @@ __kds_unpack(cl_uint offset)
  * The macros below are used for just cost estimation; no need to be strict
  * connect for size estimatino.
  */
+// use KDS_calculateHeadSize() instead
 #define KDS_ESTIMATE_HEAD_LENGTH(ncols)					\
 	STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)]))
 #define KDS_ESTIMATE_ROW_LENGTH(ncols,nitems,htup_sz)					\
@@ -1702,8 +1718,6 @@ DEVICE_FUNCTION(void *)
 kern_get_datum_tuple(kern_colmeta *colmeta,
 					 HeapTupleHeaderData *htup,
 					 cl_uint colidx);
-
-struct GstoreFdwSysattr;	/* not to include cuda_gstore.h here */
 DEVICE_FUNCTION(void *)
 kern_get_datum_column(kern_data_store *kds,
 					  kern_data_extra *extra,
@@ -1711,8 +1725,7 @@ kern_get_datum_column(kern_data_store *kds,
 DEVICE_FUNCTION(cl_bool)
 kern_check_visibility_column(kern_context *kcxt,
 							 kern_data_store *kds,
-							 cl_uint rowidx,
-							 struct GstoreFdwSysattr *p_sysattr);
+							 cl_uint rowidx);
 /*
  * device functions to form/deform HeapTuple
  */

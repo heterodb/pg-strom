@@ -1,16 +1,16 @@
 @ja{
-<h1>SQLオブジェクト</h1>
+#SQLオブジェクト
 
 本章ではPG-Stromが独自に提供するSQLオブジェクトについて説明します。
 }
 @en{
-<h1>SQL Objects</h1>
+#SQL Objects
 
 This chapter introduces SQL objects additionally provided by PG-Strom.
 }
 
-@ja:#デバイス情報関数
-@en:#Device Information
+@ja:##デバイス情報関数
+@en:##Device Information
 
 @ja{
 |関数|戻り値|説明|
@@ -44,8 +44,8 @@ This chapter introduces SQL objects additionally provided by PG-Strom.
 |`gpu_pci_id(int = 0)`|`int`|It tells PCI bus-id of the specified GPU device.|
 }
 
-@ja:#Arrow_Fdw関連
-@en:#Arrow_Fdw Supports
+@ja:##Arrow_Fdw関連
+@en:##Arrow_Fdw Supports
 
 @ja{
 |関数|戻り値|説明|
@@ -58,8 +58,8 @@ This chapter introduces SQL objects additionally provided by PG-Strom.
 |`pgstrom.arrow_fdw_truncate(regclass)`|`bool`|It truncates contents of the specified Arrow_Fdw foreign table. Arrow_Fdw foreign table must be `writable`.|
 }
 
-@ja:#GPUデータフレーム関数
-@en:#GPU Data Frame Functions
+@ja:##GPUデータフレーム関数
+@en:##GPU Data Frame Functions
 
 @ja{
 |関数|戻り値|説明|
@@ -78,8 +78,8 @@ This chapter introduces SQL objects additionally provided by PG-Strom.
 |`pgstrom.arrow_fdw_unpin_gpu_buffer(text)`                   |`bool`|It unpin the GPU buffer that is exported with the above functions.
 }
 
-@ja:#テストデータ生成関数
-@en:#Test Data Generation
+@ja:##テストデータ生成関数
+@en:##Test Data Generation
 
 @ja{
 |関数|戻り値|説明|
@@ -122,8 +122,8 @@ This chapter introduces SQL objects additionally provided by PG-Strom.
 |`pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')`               |`daterange`|It generates random data in `daterange` type within the range.|
 }
 
-@ja:#その他の関数
-@en:#Other Functions
+@ja:##その他の関数
+@en:##Other Functions
 
 @ja{
 |関数|戻り値|説明|
@@ -136,8 +136,8 @@ This chapter introduces SQL objects additionally provided by PG-Strom.
 |`pgstrom.license_query()`|`text`|It shows the active commercial subscription.|
 }
 
-@ja:# システムビュー
-@en:# System View
+@ja:##システムビュー
+@en:##System View
 
 @ja{
 PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。

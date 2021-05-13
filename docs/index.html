@@ -7,16 +7,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="PG-Strom v2.0 Official Documentation">
   <meta name="author" content="PG-Strom Development Team">
+  
   <link rel="shortcut icon" href="img/favicon.ico">
-  <title>Home - PG-Strom Manual</title>
-  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+  <title>PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
-  <link rel="stylesheet" href="css/theme.css" type="text/css" />
-  <link rel="stylesheet" href="css/theme_extra.css" type="text/css" />
-  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css">
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
-  <link href="custom.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="custom.css" rel="stylesheet" />
   
   <script>
     // Current page data
@@ -27,7 +28,7 @@
   
   <script src="js/jquery-2.1.1.min.js" defer></script>
   <script src="js/modernizr-2.8.3.min.js" defer></script>
-  <script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
   
 </head>
@@ -38,6 +39,7 @@
 
     
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
         <a href="." class="icon icon-home"> PG-Strom Manual</a>
         <div role="search">
@@ -49,131 +51,78 @@
       </div>
 
       <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-	<ul class="current">
-	  
-          
-            <li class="toctree-l1 current">
-		
-    <a class="current" href=".">Home</a>
-    <ul class="subnav">
-            
-    <li class="toctree-l2"><a href="#what-is-pg-strom">What is PG-Strom?</a></li>
-    
+                <ul class="current">
+                    <li class="toctree-l1 current"><a class="reference internal current" href=".">Home</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#what-is-pg-strom">What is PG-Strom?</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#license-and-copyright">License and Copyright</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#community">Community</a>
         <ul>
-        
-            <li><a class="toctree-l3" href="#license-and-copyright">License and Copyright</a></li>
-        
+    <li class="toctree-l3"><a class="reference internal" href="#bug-or-troubles-report">Bug or troubles report</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#new-features-proposition">New features proposition</a>
+    </li>
         </ul>
-    
-
-    <li class="toctree-l2"><a href="#community">Community</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l3" href="#bug-or-troubles-report">Bug or troubles report</a></li>
-        
-            <li><a class="toctree-l3" href="#new-features-proposition">New features proposition</a></li>
-        
-            <li><a class="toctree-l3" href="#support-policy">Support Policy</a></li>
-        
-            <li><a class="toctree-l3" href="#versioning-policy">Versioning Policy</a></li>
-        
-        </ul>
-    
-
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#support-policy">Support Policy</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#versioning-policy">Versioning Policy</a>
+    </li>
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="install/">Install</a>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Tutorial</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="operations/">Basic Operations</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="sys_admin/">System Administration</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="brin/">BRIN Index</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="partition/">Partitioning</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="postgis/">PostGIS</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="troubles/">Trouble Shooting</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">Advanced Features</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="ssd2gpu/">GPUDirect SQL</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="arrow_fdw/">Apache Arrow</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="gstore_fdw/">GPU Memory Store</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="python/">Python cooperation</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <span class="caption-text">References</span>
-    <ul class="subnav">
-                <li class="">
-                    
-    <a class="" href="ref_types/">Data Types</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="ref_devfuncs/">Functions and Operators</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="ref_sqlfuncs/">SQL Objects</a>
-                </li>
-                <li class="">
-                    
-    <a class="" href="ref_params/">GUC Parameters</a>
-                </li>
-    </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
-    <a class="" href="release_note/">Release Note</a>
-	    </li>
-          
-        </ul>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="gstore_fdw/">GPU Memory Store</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
       </div>
-      &nbsp;
+    </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
@@ -198,13 +147,15 @@
       
     </li>
   </ul>
+  
   <hr/>
 </div>
           <div role="main">
             <div class="section">
               
-                <p>This chapter introduces the overview of PG-Strom, and developer's community.</p>
-<h1 id="what-is-pg-strom">What is PG-Strom?</h1>
+                <h1 id="home">Home</h1>
+<p>This chapter introduces the overview of PG-Strom, and developer's community.</p>
+<h2 id="what-is-pg-strom">What is PG-Strom?</h2>
 <p>PG-Strom is an extension module of PostgreSQL designed for version 9.6 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
 <p>Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.</p>
 <p>Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.</p>
@@ -215,11 +166,11 @@
 See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE">LICENSE</a> for the license details.</p>
 <p>PG-Strom Development Team reserves the copyright of the software.
 PG-Strom Development Team is an international, unincorporated association of individuals and companies who have contributed to the PG-Strom project, but not a legal entity.</p>
-<h1 id="community">Community</h1>
+<h2 id="community">Community</h2>
 <p>We have a community mailing-list at: <a href="https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom">PG-Strom community ML</a> It is a right place to post questions, requests, troubles and etc, related to PG-Strom project.</p>
 <p>Please pay attention it is a public list for world wide. So, it is your own responsibility not to disclose confidential information.</p>
 <p>The primary language of the mailing-list is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach <code>(JP)</code> prefix on the subject like, for non-Japanese speakers to skip messages.</p>
-<h2 id="bug-or-troubles-report">Bug or troubles report</h2>
+<h3 id="bug-or-troubles-report">Bug or troubles report</h3>
 <p>If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with <strong>bug</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>.</p>
 <p>Please ensure the items below on bug reports.</p>
 <ul>
@@ -245,7 +196,7 @@ PG-Strom Development Team is an international, unincorporated association of ind
 <li>Hardware configuration - GPU model and host RAM size especially.</li>
 </ul>
 <p>If you are not certain whether the strange behavior on your site is bug or not, please report it to the mailing-list prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.</p>
-<h2 id="new-features-proposition">New features proposition</h2>
+<h3 id="new-features-proposition">New features proposition</h3>
 <p>If you have any ideas of new features, please open a new issue with <strong>feature</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>, then have a discussion with other developers.</p>
 <p>A preferable design proposal will contain the items below.</p>
 <ul>
@@ -290,7 +241,7 @@ Its major version shall be incremented in the following situation.</p>
     
   </div>
 
-  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
       
         </div>
@@ -300,7 +251,7 @@ Its major version shall be incremented in the following situation.</p>
 
   </div>
 
-  <div class="rst-versions" role="note" style="cursor: pointer">
+  <div class="rst-versions" role="note" aria-label="versions">
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
@@ -312,11 +263,16 @@ Its major version shall be incremented in the following situation.</p>
     <script>var base_url = '.';</script>
     <script src="js/theme.js" defer></script>
       <script src="search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
 
 </body>
 </html>
 
 <!--
-MkDocs version : 1.0.4
-Build Date UTC : 2021-01-10 03:48:54
+MkDocs version : 1.1.2
+Build Date UTC : 2021-05-12 04:56:57.550197+00:00
 -->
