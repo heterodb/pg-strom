@@ -1882,21 +1882,51 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 	size_t		gpu_main_size = 0UL;
 	size_t		gpu_extra_size = 0UL;
 
+	/* GPU memory usage */
+	if (gcache_state->gc_desc)
+	{
+		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
+		gpu_main_size = gc_sstate->gpu_main_size;
+		gpu_extra_size = gc_sstate->gpu_extra_size;
+	}
+	else
+	{
+		GpuCacheSharedState *gc_sstate;
+		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+		SpinLockAcquire(lock);
+		gc_sstate = lookupGpuCacheSharedState(MyDatabaseId,
+											  RelationGetRelid(rel),
+											  gcache_state->signature);
+		if (gc_sstate)
+		{
+			gpu_main_size = gc_sstate->gpu_main_size;
+			gpu_extra_size = gc_sstate->gpu_extra_size;
+		}
+		SpinLockRelease(lock);
+	}
+
 	/* config options */
 	if (gc_options->cuda_dindex >= 0 &&
 		gc_options->cuda_dindex < numDevAttrs)
 	{
 		if (!pgstrom_regression_test_mode)
 		{
-			sprintf(temp, "%s [max_num_rows: %ld]",
+			sprintf(temp, "%s [max_num_rows: %ld, main: %s, extra: %s]",
 					devAttrs[gc_options->cuda_dindex].DEV_NAME,
-					gc_options->max_num_rows);
+					gc_options->max_num_rows,
+					format_numeric(gpu_main_size),
+					format_numeric(gpu_extra_size));
 		}
 		else
 		{
-			sprintf(temp, "GPU%d [max_num_rows: %ld]",
+			sprintf(temp, "GPU%d [max_num_rows: %ld, main: %s, extra: %s]",
 					gc_options->cuda_dindex,
-					gc_options->max_num_rows);
+					gc_options->max_num_rows,
+					format_numeric(gpu_main_size),
+					format_numeric(gpu_extra_size));
 		}
 		ExplainPropertyText("GPU Cache", temp, es);
 	}
@@ -1941,46 +1971,6 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 			ExplainPropertyInteger("GPU Cache Options:gpu_sync_interval", "s",
 								   gc_options->gpu_sync_interval, es);
 		}
-	}
-
-	/* GPU memory usage */
-	if (gcache_state->gc_desc)
-	{
-		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
-		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
-
-		gpu_main_size = gc_sstate->gpu_main_size;
-		gpu_extra_size = gc_sstate->gpu_extra_size;
-	}
-	else
-	{
-		GpuCacheSharedState *gc_sstate;
-		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
-
-		SpinLockAcquire(lock);
-		gc_sstate = lookupGpuCacheSharedState(MyDatabaseId,
-											  RelationGetRelid(rel),
-											  gcache_state->signature);
-		if (gc_sstate)
-		{
-			gpu_main_size = gc_sstate->gpu_main_size;
-			gpu_extra_size = gc_sstate->gpu_extra_size;
-		}
-		SpinLockRelease(lock);
-	}
-
-	if (es->format == EXPLAIN_FORMAT_TEXT)
-	{
-		snprintf(temp, sizeof(temp),
-				 "main: %s, extra: %s",
-				 format_numeric(gpu_main_size),
-				 format_numeric(gpu_extra_size));
-		ExplainPropertyText("GPU Cache Size", temp, es);
-	}
-	else
-	{
-		ExplainPropertyInteger("GPU Cache Main Size", NULL, gpu_main_size, es);
-		ExplainPropertyInteger("GPU Cache Extra Size", NULL, gpu_extra_size, es);
 	}
 }
 
