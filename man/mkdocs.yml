@@ -22,8 +22,7 @@ nav:
 - 'Advanced Features' :
     - 'GPUDirect SQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
-    - 'GPU Memory Store' : 'gstore_fdw.md'
-#    - 'Python cooperation' : python.md
+    - 'GPU Cache' : 'gpucache.md'
 - 'References' :
     - 'Data Types' : 'ref_types.md'
     - 'Functions and Operators' : 'ref_devfuncs.md'
@@ -47,8 +46,7 @@ nav:
 - '先進機能' :
     - 'GPUダイレクトSQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
-    - 'GPUメモリストア' : 'gstore_fdw.md'
-#    - 'Python連携' : python.md
+    - 'GPUキャッシュ' : 'gpucache.md'
 - 'リファレンス' :
     - 'データ型' : 'ref_types.md'
     - '関数と演算子' : 'ref_devfuncs.md'
