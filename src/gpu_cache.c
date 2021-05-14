@@ -1797,7 +1797,7 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 		TupleDescInitEntry(tupdesc,  7, "gpu_extra_sz",
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc,  8, "redo_write_ts",
-						   TIMESTAMPOID, -1, 0);
+						   TIMESTAMPTZOID, -1, 0);
 		TupleDescInitEntry(tupdesc,  9, "redo_write_nitems",
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc, 10, "redo_write_pos",

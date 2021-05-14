@@ -96,7 +96,7 @@
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#gpu_3">GPUキャッシュの利用を確認する</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu_4">GPUキャッシュの情報を確認する</a>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu_4">GPUキャッシュの状態を確認する</a>
     </li>
         </ul>
     </li>
@@ -277,8 +277,18 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 (16 rows)
 
 </code></pre>
-<h3 id="gpu_4">GPUキャッシュの情報を確認する</h3>
-<p>執筆中</p>
+<h3 id="gpu_4">GPUキャッシュの状態を確認する</h3>
+<p>GPUキャッシュの現在の状態を確認するには<code>pgstrom.gpucache_info</code>ビューを使用します。</p>
+<pre><code>=# select * from pgstrom.gpucache_info ;
+ database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
+  config_options
+--------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+(2 rows)
+</code></pre>
+<p>このビューで表示されるGPUキャッシュの状態は、その時点で初期ロードが終わっており、GPUデバイスメモリ上に領域が確保されているものだけである事に留意してください。
+つまり、トリガ関数が設定されているが初期ロードが終わっていない（まだ誰もアクセスしていない）場合、潜在的に確保されうるGPUキャッシュはまだ<code>pgstrom.gpucache_info</code>には現れません。</p>
               
             </div>
           </div>

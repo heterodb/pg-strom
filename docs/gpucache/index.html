@@ -96,7 +96,7 @@
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#confirm-gpu-cache-usage">Confirm GPU Cache usage</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#check-gpu-cache-properties">Check GPU Cache properties</a>
+    <li class="toctree-l3"><a class="reference internal" href="#check-status-of-gpu-cache">Check status of GPU Cache</a>
     </li>
         </ul>
     </li>
@@ -220,8 +220,15 @@
 (16 rows)
 
 </code></pre>
-<h3 id="check-gpu-cache-properties">Check GPU Cache properties</h3>
-<p>執筆中</p>
+<h3 id="check-status-of-gpu-cache">Check status of GPU Cache</h3>
+<pre><code>=# select * from pgstrom.gpucache_info ;
+ database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
+  config_options
+--------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+(2 rows)
+</code></pre>
               
             </div>
           </div>

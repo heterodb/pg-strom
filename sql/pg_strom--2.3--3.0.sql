@@ -25,7 +25,7 @@ CREATE TYPE pgstrom.__pgstrom_gpucache_info_t AS (
   signature				int8,
   gpu_main_sz			int8,
   gpu_extra_sz			int8,
-  redo_write_ts			timestamp,
+  redo_write_ts			timestamptz,
   redo_write_nitems		int8,
   redo_write_pos		int8,
   redo_read_nitems      int8,
