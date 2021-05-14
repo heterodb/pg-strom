@@ -97,17 +97,15 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#executor-configuration">Executor Configuration</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpudirect-sql-configuration">GPUDirect SQL Configuration</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gstore_fdw-configuration">Gstore_Fdw Configuration</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-cache-configuration">GPU Cache configuration</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-device-configuration">GPU Device Configuration</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#system-shared-memory-configuration">System Shared Memory Configuration</a>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-shared-memory-configuration">PG-Strom shared memory configuration</a>
     </li>
     </ul>
                     </li>
@@ -162,356 +160,127 @@
                 <h1 id="guc-parameters">GUC Parameters</h1>
 <p>This session introduces PG-Strom's configuration parameters.</p>
 <h2 id="enablesdisables-a-particular-feature">Enables/disables a particular feature</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables entire PG-Strom features at once</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpuscan</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables GpuScan</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpuhashjoin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables GpuJoin by HashJoin</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpunestloop</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables GpuJoin by NestLoop</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpupreagg</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables GpuPreAgg</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_brin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables BRIN index support on tables scan</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables whether GpuJoin is pushed down to the partition children. Available only PostgreSQL v10 or later.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_partitionwise_gpupreagg</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables whether GpuPreAgg is pushed down to the partition children. Available only PostgreSQL v10 or later.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.pullup_outer_scan</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.pullup_outer_join</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_numeric_aggfuncs</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables support of aggregate function that takes <code>numeric</code> data type.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.cpu_fallback</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.regression_test_mode</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">It disables some <code>EXPLAIN</code> command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.enabled</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables entire PG-Strom features at once</dd>
+<dt><code>pg_strom.enable_gpuscan</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables GpuScan</dd>
+<dt><code>pg_strom.enable_gpuhashjoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables JOIN by GpuHashJoin</dd>
+<dt><code>pg_strom.enable_gpunestloop</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables JOIN by GpuNestLoop</dd>
+<dt><code>pg_strom.enable_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables GpuPreAgg</dd>
+<dt><code>pg_strom.enable_brin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables BRIN index support on tables scan</dd>
+<dt><code>pg_strom.enable_gpucache</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Controls whether GPU Cache is referenced, instead of PostgreSQL tables, if any</dd>
+<dd>Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.</dd>
+<dt><code>pg_strom.enable_partitionwise_gpujoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables whether GpuJoin is pushed down to the partition children.</dd>
+<dt><code>pg_strom.enable_partitionwise_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables whether GpuPreAgg is pushed down to the partition children.</dd>
+<dt><code>pg_strom.pullup_outer_scan</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.</dd>
+<dt><code>pg_strom.pullup_outer_join</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.</dd>
+<dt><code>pg_strom.enable_numeric_aggfuncs</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables support of aggregate function that takes <code>numeric</code> data type.</dd>
+<dd>Note that aggregated function at GPU mapps <code>numeric</code> data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.</dd>
+<dt><code>pg_strom.cpu_fallback</code> [type: <code>bool</code> / default: <code>off]</code></dt>
+<dd>Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</dd>
+<dt><code>pg_strom.regression_test_mode</code> [type: <code>bool</code> / default: <code>off]</code></dt>
+<dd>It disables some <code>EXPLAIN</code> command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.</dd>
+</dl>
 <h2 id="optimizer-configuration">Optimizer Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.chunk_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">65534kB</td>
-<td align="left">Size of the data blocks processed by a single GPU kernel invocation. It was configurable, but makes less sense, so fixed to about 64MB in the current version.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_setup_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">4000</td>
-<td align="left">Cost value for initialization of GPU device</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_dma_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">10</td>
-<td align="left">Cost value for DMA transfer over PCIe bus per data-chunk (64MB)</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_operator_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">0.00015</td>
-<td align="left">Cost value to process an expression formula on GPU. If larger value than <code>cpu_operator_cost</code> is configured, no chance to choose PG-Strom towards any size of tables</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.chunk_size</code> [type: <code>int</code> / default: <code>65534kB</code>]</dt>
+<dd>Size of the data blocks processed by a single GPU kernel invocation. It was configurable, but makes less sense, so fixed to about 64MB in the current version.</dd>
+<dt><code>pg_strom.gpu_setup_cost</code> [type: <code>real</code> / default: <code>4000</code>]</dt>
+<dd>Cost value for initialization of GPU device</dd>
+<dt><code>pg_strom.gpu_dma_cost</code> [type: <code>real</code> / default: <code>10</code>]</dt>
+<dd>Cost value for DMA transfer over PCIe bus per data-chunk (<code>pg_strom.chunk_size</code> = 64MB)</dd>
+<dt><code>pg_strom.gpu_operator_cost</code> [type: <code>real</code> / default: <code>0.00015</code>]</dt>
+<dd>Cost value to process an expression formula on GPU. If larger value than <code>cpu_operator_cost</code> is configured, no chance to choose PG-Strom towards any size of tables</dd>
+</dl>
 <h2 id="executor-configuration">Executor Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.max_async_tasks</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>5</code></td>
-<td align="left">Number of asynchronous taks PG-Strom can throw into GPU's execution queue per process. If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than <code>pg_strom.max_async_tasks</code> asynchronous tasks are executed in parallel on the entire batch job.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.reuse_cuda_context</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">If <code>on</code>, it tries to reuse CUDA context, constructed according to the previous query execution, on the next query execution. Usually, construction of CUDA context takes 100-200ms, it may improve queries response time, on the other hands, it continue to occupy a part of GPU device memory on the down-side. So, we don't recommend to enable this parameter expect for benchmarking and so on.<br>Also, this configuration makes no sense if query uses CPU parallel execution.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gpudirect-sql-configuration">GPUDirect SQL Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_driver</code></td>
-<td align="center"><code>text</code></td>
-<td align="center">auto</td>
-<td align="left">It shows the driver software name of GPUDirect SQL (read-only).</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Enables/disables GPUDirect SQL feature.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_threshold</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">auto</td>
-<td align="left">Controls the table-size threshold to invoke GPUDirect SQL feature.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.cufile_io_unitsz</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>16MB</code></td>
-<td align="left">Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases. It is available only if PG-Strom was built with <code>WITH_CUFILE=1</code>.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_distance_map</code></td>
-<td align="center"><code>string</code></td>
-<td align="center"><code>NULL</code></td>
-<td align="left">It manually configures the closest GPU for particular NVME devices. Its format string is <code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>; comma separated list of NVME-GPU pairs. (Examle: <code>nvme0:gpu0,nvme1:gpu0</code>)<br>Automatic configuration is often sufficient for local NVME-SSD drives, on the other hands, you need to configure the closest GPU manually, if NVME-oF devices are in use.</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.max_async_tasks</code> [type: <code>int</code> / default: <code>5</code>]</dt>
+<dd>Max number of asynchronous taks PG-Strom can throw into GPU's execution queue per process.</dd>
+<dd>If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than <code>pg_strom.max_async_tasks</code> asynchronous tasks are executed in parallel on the entire batch job.</dd>
+<dt><code>pg_strom.reuse_cuda_context</code> [type: <code>bool</code> / default: <code>off</code>]</dt>
+<dd>If <code>on</code>, it tries to reuse CUDA context on the next query execution, already constructed according to the previous query execution.</dd>
+<dd>Usually, construction of CUDA context takes 100-200ms, it may improve queries response time, on the other hands, it continue to occupy a part of GPU device memory on the down-side. So, we don't recommend to enable this parameter expect for benchmarking and so on.</dd>
+<dd>Also, this configuration makes no sense if query uses CPU parallel execution, because the worker processes shall always construct new CUDA context for each.</dd>
+<dt><code>pg_strom.gpudirect_driver</code> [type: <code>text</code>]</dt>
+<dd>It shows the driver software name of GPUDirect SQL (read-only).</dd>
+<dd>Either <code>nvidia cufile</code> or <code>heterodb nvme-strom</code></dd>
+<dt><code>pg_strom.gpudirect_enabled</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
+<dd>Enables/disables GPUDirect SQL feature.</dd>
+<dt><code>pg_strom.gpudirect_threshold</code> [type: <code>int</code> / default: auto]</dt>
+<dd>Controls the table-size threshold to invoke GPUDirect SQL feature.</dd>
+<dd>The default is auto configuration; a threshold calculated by the system physical memory size and <code>shared_buffers</code> configuration.</dd>
+<dt><code>pg_strom.cufile_io_unitsz</code> [type: <code>int</code> / default: <code>16MB</code>]</dt>
+<dd>Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases.</dd>
+<dd>It is only available when <code>nvidia cufile</code> driver is used.</dd>
+<dt><code>pg_strom.nvme_distance_map</code> [type: <code>text</code> / default: <code>null</code>]</dt>
+<dd>It manually configures the closest GPU for particular NVME devices.</dd>
+<dd>Its format string is <code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>; comma separated list of NVME-GPU pairs. (Examle: <code>nvme0:gpu0,nvme1:gpu0</code>)</dd>
+<dd>Automatic configuration is often sufficient for local NVME-SSD drives, however, you need to configure the closest GPU manually for NVME-oF devices.</dd>
+</dl>
 <h2 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>arrow_fdw.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.</td>
-</tr>
-<tr>
-<td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">128MB</td>
-<td align="left">Size of shared memory to cache metadata of Arrow files.<br>Once consumption of the shared memory exceeds this value, the older metadata shall be released based on LRU.</td>
-</tr>
-<tr>
-<td align="left"><code>arrow_fdw.record_batch_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">256MB</td>
-<td align="left">Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if <code>INSERT</code> command is not completed yet.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gstore_fdw-configuration">Gstore_Fdw Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>gstore_fdw.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">By adjustment of estimated cost value, it turns on/off Gstore_Fdw. Note that only Foreign Scan (Gstore_Fdw) can scan on GPU memory store, if GpuScan is not capable to run on.</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.auto_preload</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">Controls whether the GPU memory store shall be pre-loaded to GPU devices next to the PostgreSQL startup. If not pre-loaded, GPU memory store shall be loaded on the demand by someone's reference. It may lead slow-down of query response time on the first call.</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.default_base_dir</code></td>
-<td align="center"><code>text</code></td>
-<td align="center"><code>NULL</code></td>
-<td align="left">Directory to create base files, if <code>base_file</code> was not specified in the foreign-table options. In the default, it shall be created on the default tablespace of the current database.</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.default_redo_dir</code></td>
-<td align="center"><code>text</code></td>
-<td align="center"><code>NULL</code></td>
-<td align="left">Directory to create redo-log files, if <code>redo_log_file</code> was not specified in the foreign-table options. In the default, it shall be created on the default tablespace of the current database.</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>arrow_fdw.enabled</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
+<dd>By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.</dd>
+<dt><code>arrow_fdw.metadata_cache_size</code> [type: <code>int</code> / default: <code>128MB</code>]</dt>
+<dd>Size of shared memory to cache metadata of Arrow files.</dd>
+<dd>Once consumption of the shared memory exceeds this value, the older metadata shall be released based on LRU.</dd>
+<dt><code>arrow_fdw.record_batch_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
+<dd>Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if <code>INSERT</code> command is not completed yet.</dd>
+</dl>
+<h2 id="gpu-cache-configuration">GPU Cache configuration</h2>
+<dl>
+<dt><code>pg_strom.enable_gpucache</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
+<dd>Controls whether search/analytic query tries to use GPU Cache.</dd>
+<dd>Note that this parameter does not affect to any writes on the REDO Log buffer by the trigger.</dd>
+<dt><code>pg_strom.gpucache_auto_preload</code> [type: <code>text</code> / default: <code>null</code>]</dt>
+<dd>It specifies the table names to be loaded onto GPU Cache just after PostgreSQL startup.</dd>
+<dd>Its format is <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code>, and separated by comma if multiple tables are preloaded.</dd>
+<dd>Initial-loading of GPU Cache usually takes a lot of time. So, preloading enables to avoid delay of response time of search/analytic queries on the first time.</dd>
+<dd>If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.</dd>
+</dl>
 <h2 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.program_cache_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>256MB</code></td>
-<td align="left">Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.num_program_builders</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>2</code></td>
-<td align="left">Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs. It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.extra_kernel_stack_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>0</code></td>
-<td align="left">Extra size of stack, in bytes, for each GPU kernel thread to be allocated on execution. Usually, no need to change from the default value.</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.program_cache_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
+<dd>Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.</dd>
+<dt><code>pg_strom.num_program_builders</code> [type: <code>int</code> / default: <code>2</code>]</dt>
+<dd>Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.</dd>
+<dt><code>pg_strom.debug_jit_compile_options</code> [type: <code>bool</code> / default: <code>off</code>]</dt>
+<dd>Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs.</dd>
+<dd>It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.</dd>
+<dt><code>pg_strom.extra_kernel_stack_size</code> [type: <code>int</code> / default: <code>0</code>]</dt>
+<dd>Extra size of stack, in bytes, for each GPU kernel thread to be allocated on execution. Usually, no need to change from the default value.</dd>
+</dl>
 <h2 id="gpu-device-configuration">GPU Device Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.cuda_visible_devices</code></td>
-<td align="center"><code>string</code></td>
-<td align="center"><code>''</code></td>
-<td align="left">List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup. It is equivalent to the environment variable <code>CUDAVISIBLE_DEVICES</code></td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_memory_segment_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>512MB</code></td>
-<td align="left">Specifies the amount of device memory to be allocated per CUDA API call. Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="system-shared-memory-configuration">System Shared Memory Configuration</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Parameter</th>
-<th align="center">Type</th>
-<th align="center">Default</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">shmbuf.segment_size</td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>256MB</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">shmbuf.num_logical_segments</td>
-<td align="center"><code>int</code></td>
-<td align="center">auto</td>
-<td align="left">Default logical segment size is double size of system physical memory size.</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.cuda_visible_devices</code> [type: <code>text</code> / default: <code>null</code>]</dt>
+<dd>List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup.</dd>
+<dd>It is equivalent to the environment variable <code>CUDAVISIBLE_DEVICES</code></dd>
+<dt><code>pg_strom.gpu_memory_segment_size</code> [type: <code>int</code> / default: <code>512MB</code>]</dt>
+<dd>Specifies the amount of device memory to be allocated per CUDA API call.</dd>
+<dd>Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.</dd>
+</dl>
+<h2 id="pg-strom-shared-memory-configuration">PG-Strom shared memory configuration</h2>
+<dl>
+<dt><code>shmbuf.segment_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
+<dd>It configures the unit length of the shared memory segment that has portable virtual addresses.</dd>
+<dd>Usually, it does not need to change the default value, except for the case when GPU Cache uses REDO Log buffer larger than <code>256MB</code>. In this case, you need to enlarge this parameter also.</dd>
+<dd>This parameter allows only power of 2.</dd>
+<dt><code>shmbuf.num_logical_segments</code> [type: <code>int</code> / default: auto]</dt>
+<dd>It configures the number of the shared memory segment that has portable virtual addresses.</dd>
+<dd>On the system startup, PG-Strom reserves (<code>shmbuf.segment_size</code> x <code>shmbuf.num_logical_segments</code>) bytes of virtual address space using mmap(2) with PROT_NONE, then, signal handler allocates physical memory on the demand.</dd>
+<dd>The default configuration is auto; that is almost twice of the physical memory size installed on the system.</dd>
+</dl>
               
             </div>
           </div>

@@ -91,23 +91,23 @@
                     </li>
                     <li class="toctree-l1 current"><a class="reference internal current" href="./">GUCパラメータ</a>
     <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#_1">特定機能の有効化/無効化</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_1">機能単位の有効化/無効化</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_2">オプティマイザに関する設定</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_3">エグゼキュータに関する設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpusql">GPUダイレクトSQL関連の設定</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpusql">GPUダイレクトSQLの設定</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw関連の設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gstore_fdw">Gstore_Fdw関連の設定</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUキャッシュの設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUプログラムの生成とビルドに関連する設定</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpujit">GPUコードの生成、およびJITコンパイルの設定</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu_1">GPUデバイスに関連する設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_4">システム共有メモリに関連する設定</a>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom">PG-Strom共有メモリに関連する設定</a>
     </li>
     </ul>
                     </li>
@@ -161,357 +161,129 @@
               
                 <h1 id="guc">GUCパラメータ</h1>
 <p>本節ではPG-Stromの提供する設定パラメータについて説明します。</p>
-<h2 id="_1">特定機能の有効化/無効化</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="center">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">PG-Strom機能全体を一括して有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpuscan</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuScanによるスキャンを有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpuhashjoin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">HashJoinによるGpuJoinを有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpunestloop</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">NestLoopによるGpuJoinを有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_gpupreagg</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuPreAggによる集約処理を有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_brin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_partitionwise_gpupreagg</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.pullup_outer_scan</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.pullup_outer_join</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left">GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.enable_numeric_aggfuncs</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>on</code></td>
-<td align="left"><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.cpu_fallback</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.regression_test_mode</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</td>
-</tr>
-</tbody>
-</table>
+<h2 id="_1">機能単位の有効化/無効化</h2>
+<dl>
+<dt><code>pg_strom.enabled</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>PG-Strom機能全体を一括して有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpuscan</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuScanによるスキャンを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpuhashjoin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuHashJoinによるJOINを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpunestloop</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuNestLoopによるJOINを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpupreagg</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuPreAggによる集約処理を有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_brin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpucache</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>PostgreSQLテーブルの代わりにGPUキャッシュを参照するかどうかを制御する。</dd>
+<dd>なお、この設定値を<code>off</code>にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。</dd>
+<dt><code>pg_strom.enable_partitionwise_gpujoin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。</dd>
+<dt><code>pg_strom.enable_partitionwise_gpupreagg</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。</dd>
+<dt><code>pg_strom.pullup_outer_scan</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。</dd>
+<dt><code>pg_strom.pullup_outer_join</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。</dd>
+<dt><code>pg_strom.enable_numeric_aggfuncs</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</dd>
+<dd>GPUでの集約演算において<code>numeric</code>データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を <code>off</code> にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。</dd>
+<dt><code>pg_strom.cpu_fallback</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dd>GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</dd>
+<dt><code>pg_strom.regression_test_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dd>GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</dd>
+</dl>
 <h2 id="_2">オプティマイザに関する設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="center">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.chunk_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="center">65534kB</td>
-<td align="left">PG-Stromが1回のGPUカーネル呼び出しで処理するデータブロックの大きさです。かつては変更可能でしたが、ほとんど意味がないため、現在では約64MBに固定されています。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_setup_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">4000</td>
-<td align="left">GPUデバイスの初期化に要するコストとして使用する値。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_dma_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">10</td>
-<td align="left">チャンク(64MB)あたりのDMA転送に要するコストとして使用する値。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_operator_cost</code></td>
-<td align="center"><code>real</code></td>
-<td align="center">0.00015</td>
-<td align="left">GPUの演算式あたりの処理コストとして使用する値。<code>cpu_operator_cost</code>よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.chunk_size</code> [型: <code>int</code> / 初期値: <code>65534kB</code>]</dt>
+<dd>PG-Stromが1回のGPUカーネル呼び出しで処理するデータブロックの大きさです。かつては変更可能でしたが、ほとんど意味がないため、現在では約64MBに固定されています。</dd>
+<dt><code>pg_strom.gpu_setup_cost</code> [型: <code>real</code> / 初期値: <code>4000</code>]</dt>
+<dd>GPUデバイスの初期化に要するコストとして使用する値。</dd>
+<dt><code>pg_strom.gpu_dma_cost</code> [型: <code>real</code> / 初期値: <code>10</code>]</dt>
+<dd>チャンク(<code>pg_strom.chunk_size</code> = 約64MB)あたりのDMA転送に要するコストとして使用する値。</dd>
+<dt><code>pg_strom.gpu_operator_cost</code> [型: <code>real</code> / 初期値: <code>0.00015</code>]</dt>
+<dd>GPUの演算式あたりの処理コストとして使用する値。<code>cpu_operator_cost</code>よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。</dd>
+</dl>
 <h2 id="_3">エグゼキュータに関する設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="center">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.max_async_tasks</code></td>
-<td align="center"><code>int</code></td>
-<td align="center"><code>5</code></td>
-<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.reuse_cuda_context</code></td>
-<td align="center"><code>bool</code></td>
-<td align="center"><code>off</code></td>
-<td align="left">クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。<br>また、CPUパラレルを利用する場合には効果はありません。</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gpusql">GPUダイレクトSQL関連の設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_driver</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">自動</td>
-<td align="left">GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>on</code></td>
-<td align="left">GPUダイレクトSQL機能を有効化/無効化する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpudirect_threshold</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">自動</td>
-<td align="left">GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.cufile_io_unitsz</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>16MB</code></td>
-<td align="left">cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.nvme_distance_map</code></td>
-<td align="center"><code>string</code></td>
-<td align="left"><code>NULL</code></td>
-<td align="left">NVME-SSDに最も近いGPUを手動で設定します。書式は<code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：<code>nvme0:gpu0,nvme1:gpu0</code>）<br>ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.max_async_tasks</code> [型: <code>int</code> / 初期値: <code>5</code>]</dt>
+<dd>PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。</dd>
+<dd>CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</dd>
+<dt><code>pg_strom.reuse_cuda_context</code> [型: <code>bool</code> / 初期値: <code>off</code>]</dt>
+<dd>クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。</dd>
+<dd>通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。</dd>
+<dd>また、CPUパラレルを利用する場合、ワーカープロセスでは必ずCUDAコンテキストを作成する事になりますので、効果は期待できません。</dd>
+</dl>
+<h2 id="gpusql">GPUダイレクトSQLの設定</h2>
+<dl>
+<dt><code>pg_strom.gpudirect_driver</code> [型: <code>text</code>]</dt>
+<dd>GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。</dd>
+<dd><code>nvidia cufile</code>または<code>heterodb nvme-strom</code>のどちらかです。</dd>
+<dt><code>pg_strom.gpudirect_enabled</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
+<dd>GPUダイレクトSQL機能を有効化/無効化する。</dd>
+<dt><code>pg_strom.gpudirect_threshold</code> [型: <code>int</code> / 初期値: 自動]</dt>
+<dd>GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</dd>
+<dd>初期値は自動設定で、システムの物理メモリと<code>shared_buffers</code>設定値から計算した閾値を設定します。</dd>
+<dt><code>pg_strom.cufile_io_unitsz</code> [型: <code>int</code> / 初期値: <code>16MB</code>]</dt>
+<dd>cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。</dd>
+<dd><code>nvidia cufile</code>ドライバを使用する場合のみ有効です。</dd>
+<dt><code>pg_strom.nvme_distance_map</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
+<dd>NVME-SSDに最も近いGPUを手動で設定します。</dd>
+<dd>書式は<code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：<code>nvme0:gpu0,nvme1:gpu0</code>）</dd>
+<dd>ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。</dd>
+</dl>
 <h2 id="arrow_fdw">Arrow_Fdw関連の設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>arrow_fdw.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>on</code></td>
-<td align="left">推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。</td>
-</tr>
-<tr>
-<td align="left"><code>arrow_fdw.metadata_cache_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">128MB</td>
-<td align="left">Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。</td>
-</tr>
-<tr>
-<td align="left"><code>arrow_fdw.record_batch_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">256MB</td>
-<td align="left">Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。<code>INSERT</code>コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gstore_fdw">Gstore_Fdw関連の設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>gstore_fdw.enabled</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>on</code></td>
-<td align="left">推定コスト値を調整し、Gstore_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Gstore_FdwによるForeign ScanだけがGPUメモリストアをスキャンできるという事に留意してください。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.auto_preload</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>on</code></td>
-<td align="left">PostgreSQLの起動後、Base fileに保存されたGPUメモリストアの内容をGPUに自動的にロードするかどうかを制御します。自動ロードを行わない場合、最初にGPUメモリストアを参照したタイミングでGPUへのロードが行われ、結果としてクエリ応答速度が低下する可能性があります。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.default_base_dir</code></td>
-<td align="center"><code>text</code></td>
-<td align="left"><code>NULL</code></td>
-<td align="left"><code>base_file</code>が明示的に指定されなかった場合に、Baseファイルを自動生成するディレクトリを指定します。指定のない場合、現在のデータベースのデフォルトテーブルスペース上に作成されます。</td>
-</tr>
-<tr>
-<td align="left"><code>gstore_fdw.default_redo_dir</code></td>
-<td align="center"><code>text</code></td>
-<td align="left"><code>NULL</code></td>
-<td align="left"><code>redo_log_file</code>が明示的に指定されなかった場合に、RedoLogファイルを自動生成するディレクトリを指定します。指定のない場合、現在のデータベースのデフォルトテーブルスペース上に作成されます。</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gpu">GPUプログラムの生成とビルドに関連する設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.program_cache_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>256MB</code></td>
-<td align="left">ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.num_program_builders</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>2</code></td>
-<td align="left">GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>off</code></td>
-<td align="left">GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.extra_kernel_stack_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>0</code></td>
-<td align="left">GPUカーネルの実行時にスレッド毎に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更するの必要はありません。</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>arrow_fdw.enabled</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
+<dd>推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。</dd>
+<dt><code>arrow_fdw.metadata_cache_size</code> [型: <code>int</code> / 初期値: <code>128MB</code>]</dt>
+<dd>Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。</dd>
+<dt><code>arrow_fdw.record_batch_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
+<dd>Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。<code>INSERT</code>コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。</dd>
+</dl>
+<h2 id="gpu">GPUキャッシュの設定</h2>
+<dl>
+<dt><code>pg_strom.enable_gpucache</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
+<dd>検索/分析系のクエリでGPUキャッシュを使用するかどうかを制御します。</dd>
+<dd>なお、本設定はトリガによるREDOログバッファへの追記には影響しません。</dd>
+<dt><code>pg_strom.gpucache_auto_preload</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
+<dd>PostgreSQLの起動直後にGPUキャッシュをロードすべきテーブル名を指定します。</dd>
+<dd>書式は <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code> で、複数個のテーブルを指定する場合はこれをカンマ区切りで並べます。</dd>
+<dd>GPUキャッシュの初回ロードは相応に時間のかかる処理ですが、事前に初回ロードを済ませておく事で、検索/分析クエリの初回実行時に応答速度が遅延するのを避けることができます。</dd>
+<dd>なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。</dd>
+</dl>
+<h2 id="gpujit">GPUコードの生成、およびJITコンパイルの設定</h2>
+<dl>
+<dt><code>pg_strom.program_cache_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
+<dd>ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。</dd>
+<dt><code>pg_strom.num_program_builders</code> [型: <code>int</code> / 初期値: <code>2</code>]</dt>
+<dd>GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。</dd>
+<dt><code>pg_strom.debug_jit_compile_options</code> [型: <code>bool</code> / 初期値: <code>off</code>]</dt>
+<dd>GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</dd>
+<dt><code>pg_strom.extra_kernel_stack_size</code> [型: <code>int</code> / 初期値: <code>0</code>]</dt>
+<dd>GPUカーネルの実行時にスレッド毎に追加的に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更する必要はありません。</dd>
+</dl>
 <h2 id="gpu_1">GPUデバイスに関連する設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pg_strom.cuda_visible_devices</code></td>
-<td align="center"><code>string</code></td>
-<td align="left"><code>''</code></td>
-<td align="left">PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。これは環境変数<code>CUDA_VISIBLE_DEVICES</code>を設定するのと同等です。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.gpu_memory_segment_size</code></td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>512MB</code></td>
-<td align="left">PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_4">システム共有メモリに関連する設定</h2>
-<table>
-<thead>
-<tr>
-<th align="left">パラメータ名</th>
-<th align="center">型</th>
-<th align="left">初期値</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">shmbuf.segment_size</td>
-<td align="center"><code>int</code></td>
-<td align="left"><code>256MB</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left">shmbuf.num_logical_segments</td>
-<td align="center"><code>int</code></td>
-<td align="left">自動</td>
-<td align="left">デフォルトの論理セグメントサイズはシステム搭載物理メモリの2倍の大きさです。</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>pg_strom.cuda_visible_devices</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
+<dd>PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。</dd>
+<dd>これは環境変数<code>CUDA_VISIBLE_DEVICES</code>を設定するのと同等です。</dd>
+<dt><code>pg_strom.gpu_memory_segment_size</code> [型: <code>int</code> / 初期値: <code>512MB</code>]</dt>
+<dd>PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。</dd>
+<dd>この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。</dd>
+</dl>
+<h2 id="pg-strom">PG-Strom共有メモリに関連する設定</h2>
+<dl>
+<dt><code>shmbuf.segment_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
+<dd>ポータブルな仮想アドレスを持つ共有メモリセグメントの単位長を指定します。</dd>
+<dd>通常は初期値を変更する必要はありませんが、GPUキャッシュのREDOログバッファに<code>256MB</code>以上の大きさを指定する場合には、本パラメータも併せて拡大する必要があります。</dd>
+<dd>本パラメータの設定値は2のべき乗だけが許されます。</dd>
+<dt><code>shmbuf.num_logical_segments</code> [型: <code>int</code> / 初期値: 自動]</dt>
+<dd>ポータブルな仮想アドレスを持つ共有メモリのセグメント数を指定します。</dd>
+<dd>PG-Stromは起動時に(<code>shmbuf.segment_size</code> x <code>shmbuf.num_logical_segments</code>)バイトの領域をPROT_NONE属性でmmap(2)し、その後、シグナルハンドラを利用してオンデマンドの割当てを行います。</dd>
+<dd>デフォルトの論理セグメントサイズは自動設定で、システム搭載物理メモリの2倍の大きさです。</dd>
+</dl>
               
             </div>
           </div>
