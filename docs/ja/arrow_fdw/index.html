@@ -215,135 +215,52 @@ OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
 <h3 id="_4">外部テーブルオプション</h3>
 <p>Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。</p>
-<table>
-<thead>
-<tr>
-<th align="left">対象</th>
-<th align="left">オプション</th>
-<th align="left">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>file</code></td>
-<td align="left">外部テーブルにマップするArrowファイルを1個指定します。</td>
-</tr>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>files</code></td>
-<td align="left">外部テーブルにマップするArrowファイルをカンマ(,）区切りで複数指定します。</td>
-</tr>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>dir</code></td>
-<td align="left">指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。</td>
-</tr>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>suffix</code></td>
-<td align="left"><code>dir</code>オプションの指定時、例えば<code>.arrow</code>など、特定の接尾句を持つファイルだけをマップします。</td>
-</tr>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>parallel_workers</code></td>
-<td align="left">この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける<code>parallel_workers</code>ストレージパラメータと同等の意味を持ちます。</td>
-</tr>
-<tr>
-<td align="left">外部テーブル</td>
-<td align="left"><code>writable</code></td>
-<td align="left">この外部テーブルに対する<code>INSERT</code>文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>file=PATHNAME</code></dt>
+<dd>外部テーブルにマップするArrowファイルを1個指定します。</dd>
+<dt><code>files=PATHNAME1[,PATHNAME2...]</code></dt>
+<dd>外部テーブルにマップするArrowファイルをカンマ(,）区切りで複数指定します。</dd>
+<dt><code>dir=DIRNAME</code></dt>
+<dd>指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。</dd>
+<dt><code>suffix=SUFFIX</code></dt>
+<dd><code>dir</code>オプションの指定時、例えば<code>.arrow</code>など、特定の接尾句を持つファイルだけをマップします。</dd>
+<dt><code>parallel_workers=N_WORKERS</code></dt>
+<dd>この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける<code>parallel_workers</code>ストレージパラメータと同等の意味を持ちます。</dd>
+<dt><code>writable=(true|false)</code></dt>
+<dd>この外部テーブルに対する<code>INSERT</code>文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。</dd>
+</dl>
 <h3 id="_5">データ型の対応</h3>
 <p>Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。</p>
-<table>
-<thead>
-<tr>
-<th align="left">Arrowデータ型</th>
-<th align="left">PostgreSQLデータ型</th>
-<th align="left">備考</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>Int</code></td>
-<td align="left"><code>int2,int4,int8</code></td>
-<td align="left"><code>is_signed</code>属性は無視。<code>bitWidth</code>属性は16、32または64のみ対応。</td>
-</tr>
-<tr>
-<td align="left"><code>FloatingPoint</code></td>
-<td align="left"><code>float2,float4,float8</code></td>
-<td align="left"><code>float2</code>はPG-Stromによる独自拡張</td>
-</tr>
-<tr>
-<td align="left"><code>Binary</code></td>
-<td align="left"><code>bytea</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Utf8</code></td>
-<td align="left"><code>text</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Decimal</code></td>
-<td align="left"><code>numeric</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Date</code></td>
-<td align="left"><code>date</code></td>
-<td align="left"><code>unitsz=Day</code>相当に補正</td>
-</tr>
-<tr>
-<td align="left"><code>Time</code></td>
-<td align="left"><code>time</code></td>
-<td align="left"><code>unitsz=MicroSecond</code>相当に補正</td>
-</tr>
-<tr>
-<td align="left"><code>Timestamp</code></td>
-<td align="left"><code>timestamp</code></td>
-<td align="left"><code>unitsz=MicroSecond</code>相当に補正</td>
-</tr>
-<tr>
-<td align="left"><code>Interval</code></td>
-<td align="left"><code>interval</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>List</code></td>
-<td align="left">配列型</td>
-<td align="left">1次元配列のみ対応（予定）</td>
-</tr>
-<tr>
-<td align="left"><code>Struct</code></td>
-<td align="left">複合型</td>
-<td align="left">対応する複合型を予め定義しておくこと。</td>
-</tr>
-<tr>
-<td align="left"><code>Union</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>FixedSizeBinary</code></td>
-<td align="left"><code>char(n)</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>FixedSizeList</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Map</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>Int</code></dt>
+<dd><code>bitWidth</code>属性の値に応じて、それぞれ<code>int1</code>、<code>int2</code>、<code>int4</code>、<code>int8</code>のいずれかに対応。</dd>
+<dd><code>is_signed</code>属性の値は無視されます。</dd>
+<dd><code>int1</code>はPG-Stromによる独自拡張</dd>
+<dt><code>FloatingPoint</code></dt>
+<dd><code>precision</code>属性の値に応じて、それぞれ<code>float2</code>、<code>float4</code>、<code>float8</code>のいずれかに対応。</dd>
+<dd><code>float2</code>はPG-Stromによる独自拡張</dd>
+<dt><code>Binary</code></dt>
+<dd><code>bytea</code>型に対応</dd>
+<dt><code>Decimal</code></dt>
+<dd><code>numeric</code>型に対応</dd>
+<dt><code>Date</code></dt>
+<dd><code>date</code>型に対応。<code>unit=Day</code>相当となるように補正される。</dd>
+<dt><code>Time</code></dt>
+<dd><code>time</code>型に対応。<code>unit=MicroSecond</code>相当になるように補正される。</dd>
+<dt><code>Timestamp</code></dt>
+<dd><code>timestamp</code>型に対応。<code>unit=MicroSecond</code>相当になるように補正される。</dd>
+<dt><code>Interval</code></dt>
+<dd><code>interval</code>型に対応</dd>
+<dt><code>List</code></dt>
+<dd>要素型の1次元配列型として表現される。</dd>
+<dt><code>Struct</code></dt>
+<dd>複合型として表現される。対応する複合型は予め定義されていなければならない。</dd>
+<dt><code>FixedSizeBinary</code></dt>
+<dd><code>byteWidth</code>属性の値に応じて <code>char(n)</code> として表現される。</dd>
+<dd>メタデータ <code>pg_type=TYPENAME</code> が指定されている場合、該当するデータ型を割り当てる場合がある。現時点では、<code>inet</code>および<code>macaddr</code>型。</dd>
+<dt><code>Union</code>、<code>Map</code>、<code>Duration</code>、<code>LargeBinary</code>、<code>LargeUtf8</code>、<code>LargeList</code></dt>
+<dd>現時点ではPostgreSQLデータ型への対応はなし。</dd>
+</dl>
 <h3 id="explain">EXPLAIN出力の読み方</h3>
 <p><code>EXPLAIN</code>コマンドを用いて、Arrow形式ファイルの読み出しに関する情報を出力する事ができます。</p>
 <p>以下の例は、約309GBの大きさを持つArrow形式ファイルをマップしたflineorder外部テーブルを含むクエリ実行計画の出力です。</p>

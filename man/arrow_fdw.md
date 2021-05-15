@@ -128,26 +128,44 @@ OPTIONS (file '/path/to/logdata.arrow');
 @ja{
 Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。
 
-|対象|オプション|説明|
-|:---|:---------|:---|
-|外部テーブル|`file`|外部テーブルにマップするArrowファイルを1個指定します。|
-|外部テーブル|`files`|外部テーブルにマップするArrowファイルをカンマ(,）区切りで複数指定します。|
-|外部テーブル|`dir`|指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。|
-|外部テーブル|`suffix`|`dir`オプションの指定時、例えば`.arrow`など、特定の接尾句を持つファイルだけをマップします。|
-|外部テーブル|`parallel_workers`|この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける`parallel_workers`ストレージパラメータと同等の意味を持ちます。|
-|外部テーブル|`writable`|この外部テーブルに対する`INSERT`文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。|
+`file=PATHNAME`
+:   外部テーブルにマップするArrowファイルを1個指定します。
+
+`files=PATHNAME1[,PATHNAME2...]`
+:   外部テーブルにマップするArrowファイルをカンマ(,）区切りで複数指定します。
+
+`dir=DIRNAME`
+:   指定したディレクトリに格納されている全てのファイルを外部テーブルにマップします。
+
+`suffix=SUFFIX`
+:   `dir`オプションの指定時、例えば`.arrow`など、特定の接尾句を持つファイルだけをマップします。
+
+`parallel_workers=N_WORKERS`
+:   この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける`parallel_workers`ストレージパラメータと同等の意味を持ちます。
+
+`writable=(true|false)`
+:   この外部テーブルに対する`INSERT`文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。
 }
 @en{
 Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.
 
-|Target|Option|Description|
-|:-----|:-----|:----------|
-|foreign table|`file`|It maps an Arrow file specified on the foreign table.
-|foreign table|`files`|It maps multiple Arrow files specified by comma (,) separated files list on the foreign table.
-|foreign table|`dir`|It maps all the Arrow files in the directory specified on the foreign table.
-|foreign table|`suffix`|When `dir` option is given, it maps only files with the specified suffix, like `.arrow` for example.
-|foreign table|`parallel_workers`|It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to `parallel_workers` storage parameter at normal tables.|
-|foreign table|`writable`|It allows execution of `INSERT` command on the foreign table. See the section of "Writable Arrow_Fdw"|
+`file=PATHNAME`
+:   It maps an Arrow file specified on the foreign table.
+
+`files=PATHNAME1[,PATHNAME2...]`
+:   It maps multiple Arrow files specified by comma (,) separated files list on the foreign table.
+
+`dir=DIRNAME`
+:   It maps all the Arrow files in the directory specified on the foreign table.
+
+`suffix=SUFFIX`
+:   `When `dir` option is given, it maps only files with the specified suffix, like `.arrow` for example.
+
+`parallel_workers=N_WORKERS`
+:   It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to `parallel_workers` storage parameter at normal tables.
+
+`writable=(true|false)`
+:   It allows execution of `INSERT` command on the foreign table. See the section of "Writable Arrow_Fdw"
 }
 
 @ja:###データ型の対応
@@ -156,44 +174,88 @@ Arrow_Fdw supports the options below. Right now, all the options are for foreign
 @ja{
 Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。
 
-|Arrowデータ型  |PostgreSQLデータ型|備考|
-|:--------------|:-----------------|:---|
-|`Int`          |`int2,int4,int8`  |`is_signed`属性は無視。`bitWidth`属性は16、32または64のみ対応。|
-|`FloatingPoint`|`float2,float4,float8`|`float2`はPG-Stromによる独自拡張|
-|`Binary`       |`bytea`           |    |
-|`Utf8`         |`text`            |    |
-|`Decimal`      |`numeric`         |    |
-|`Date`         |`date`            |`unitsz=Day`相当に補正|
-|`Time`         |`time`            |`unitsz=MicroSecond`相当に補正|
-|`Timestamp`    |`timestamp`       |`unitsz=MicroSecond`相当に補正|
-|`Interval`     |`interval`        |    |
-|`List`         |配列型            |1次元配列のみ対応（予定）|
-|`Struct`       |複合型            |対応する複合型を予め定義しておくこと。|
-|`Union`        |--------          ||
-|`FixedSizeBinary`|`char(n)`       ||
-|`FixedSizeList`|--------          ||
-|`Map`          |--------          ||
+`Int`
+:   `bitWidth`属性の値に応じて、それぞれ`int1`、`int2`、`int4`、`int8`のいずれかに対応。
+:   `is_signed`属性の値は無視されます。
+:   `int1`はPG-Stromによる独自拡張
+
+`FloatingPoint`
+:   `precision`属性の値に応じて、それぞれ`float2`、`float4`、`float8`のいずれかに対応。
+:   `float2`はPG-Stromによる独自拡張
+
+`Binary`
+:   `bytea`型に対応
+
+`Decimal`
+:   `numeric`型に対応
+
+`Date`
+:   `date`型に対応。`unit=Day`相当となるように補正される。
+
+`Time`
+:   `time`型に対応。`unit=MicroSecond`相当になるように補正される。
+
+`Timestamp`
+:   `timestamp`型に対応。`unit=MicroSecond`相当になるように補正される。
+
+`Interval`
+:   `interval`型に対応
+
+`List`
+:   要素型の1次元配列型として表現される。
+
+`Struct`
+:   複合型として表現される。対応する複合型は予め定義されていなければならない。
+
+`FixedSizeBinary`
+:   `byteWidth`属性の値に応じて `char(n)` として表現される。
+:   メタデータ `pg_type=TYPENAME` が指定されている場合、該当するデータ型を割り当てる場合がある。現時点では、`inet`および`macaddr`型。
+
+`Union`、`Map`、`Duration`、`LargeBinary`、`LargeUtf8`、`LargeList`
+:   現時点ではPostgreSQLデータ型への対応はなし。
 }
 @en{
 Arrow data types are mapped on PostgreSQL data types as follows.
 
-|Arrow data types|PostgreSQL data types|Remarks|
-|:---------------|:--------------------|:------|
-|`Int`           |`int2,int4,int8`     |`is_signed` attribute is ignored. `bitWidth` attribute supports only 16,32 or 64.|
-|`FloatingPoint` |`float2,float4,float8`|`float2` is enhanced by PG-Strom.|
-|`Binary`        |`bytea`              ||
-|`Utf8`          |`text`               ||
-|`Decimal`       |`numeric`            ||
-|`Date`          |`date`               |Adjusted as if `unitsz=Day`|
-|`Time`          |`time`               |Adjusted as if `unitsz=MicroSecond`|
-|`Timestamp`     |`timestamp`          |Adjusted as if `unitsz=MicroSecond`|
-|`Interval`      |`interval`           ||
-|`List`          |array of base type   |It supports only 1-dimensional List(WIP).|
-|`Struct`        |composite type       |PG composite type must be preliminary defined.|
-|`Union`         |--------             ||
-|`FixedSizeBinary`|`char(n)`           ||
-|`FixedSizeList` |--------             ||
-|`Map`           |--------             ||
+`Int`
+:   mapped to either of `int1`, `int2`, `int4` or `int8` according to the `bitWidth` attribute.
+:   `is_signed` attribute shall be ignored.
+:   `int1` is an enhanced data type by PG-Strom.
+
+`FloatingPoint`
+:   mapped to either of `float2`, `float4` or `float8` according to the `precision` attribute.
+:   `float2` is an enhanced data type by PG-Strom.
+
+`Binary`
+:   mapped to `bytea` data type
+
+`Decimal`
+:   mapped to `numeric` data type
+
+`Date`
+:   mapped to `date` data type; to be adjusted as if it has `unit=Day` precision.
+
+`Time`
+:   mapped to `time` data type; to be adjusted as if it has `unit=MicroSecond` precision.
+
+`Timestamp`
+:   mapped to `timestamp` data type; to be adjusted as if it has `unit=MicroSecond` precision.
+
+`Interval`
+:   mapped to `interval` data type.
+
+`List`
+:   mapped to 1-dimensional array of the element data type.
+
+`Struct`
+:   mapped to compatible composite data type; that shall be defined preliminary.
+
+`FixedSizeBinary`
+:   mapped to `char(n)` data type according to the `byteWidth` attribute.
+:   If `pg_type=TYPENAME` is configured, PG-Strom may assign the configured data type. Right now, `inet` and `macaddr` are supported.
+
+`Union`, `Map`, `Duration`, `LargeBinary`, `LargeUtf8`, `LargeList`
+:   Right now, PG-Strom cannot map these Arrow data types onto any of PostgreSQL data types.
 }
 
 @ja:###EXPLAIN出力の読み方

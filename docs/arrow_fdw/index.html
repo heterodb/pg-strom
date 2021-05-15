@@ -215,135 +215,52 @@ OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
 <h3 id="foreign-table-options">Foreign table options</h3>
 <p>Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.</p>
-<table>
-<thead>
-<tr>
-<th align="left">Target</th>
-<th align="left">Option</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>file</code></td>
-<td align="left">It maps an Arrow file specified on the foreign table.</td>
-</tr>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>files</code></td>
-<td align="left">It maps multiple Arrow files specified by comma (,) separated files list on the foreign table.</td>
-</tr>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>dir</code></td>
-<td align="left">It maps all the Arrow files in the directory specified on the foreign table.</td>
-</tr>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>suffix</code></td>
-<td align="left">When <code>dir</code> option is given, it maps only files with the specified suffix, like <code>.arrow</code> for example.</td>
-</tr>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>parallel_workers</code></td>
-<td align="left">It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to <code>parallel_workers</code> storage parameter at normal tables.</td>
-</tr>
-<tr>
-<td align="left">foreign table</td>
-<td align="left"><code>writable</code></td>
-<td align="left">It allows execution of <code>INSERT</code> command on the foreign table. See the section of "Writable Arrow_Fdw"</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>file=PATHNAME</code></dt>
+<dd>It maps an Arrow file specified on the foreign table.</dd>
+<dt><code>files=PATHNAME1[,PATHNAME2...]</code></dt>
+<dd>It maps multiple Arrow files specified by comma (,) separated files list on the foreign table.</dd>
+<dt><code>dir=DIRNAME</code></dt>
+<dd>It maps all the Arrow files in the directory specified on the foreign table.</dd>
+<dt><code>suffix=SUFFIX</code></dt>
+<dd><code>When</code>dir<code>option is given, it maps only files with the specified suffix, like</code>.arrow` for example.</dd>
+<dt><code>parallel_workers=N_WORKERS</code></dt>
+<dd>It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to <code>parallel_workers</code> storage parameter at normal tables.</dd>
+<dt><code>writable=(true|false)</code></dt>
+<dd>It allows execution of <code>INSERT</code> command on the foreign table. See the section of "Writable Arrow_Fdw"</dd>
+</dl>
 <h3 id="data-type-mapping">Data type mapping</h3>
 <p>Arrow data types are mapped on PostgreSQL data types as follows.</p>
-<table>
-<thead>
-<tr>
-<th align="left">Arrow data types</th>
-<th align="left">PostgreSQL data types</th>
-<th align="left">Remarks</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>Int</code></td>
-<td align="left"><code>int2,int4,int8</code></td>
-<td align="left"><code>is_signed</code> attribute is ignored. <code>bitWidth</code> attribute supports only 16,32 or 64.</td>
-</tr>
-<tr>
-<td align="left"><code>FloatingPoint</code></td>
-<td align="left"><code>float2,float4,float8</code></td>
-<td align="left"><code>float2</code> is enhanced by PG-Strom.</td>
-</tr>
-<tr>
-<td align="left"><code>Binary</code></td>
-<td align="left"><code>bytea</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Utf8</code></td>
-<td align="left"><code>text</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Decimal</code></td>
-<td align="left"><code>numeric</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Date</code></td>
-<td align="left"><code>date</code></td>
-<td align="left">Adjusted as if <code>unitsz=Day</code></td>
-</tr>
-<tr>
-<td align="left"><code>Time</code></td>
-<td align="left"><code>time</code></td>
-<td align="left">Adjusted as if <code>unitsz=MicroSecond</code></td>
-</tr>
-<tr>
-<td align="left"><code>Timestamp</code></td>
-<td align="left"><code>timestamp</code></td>
-<td align="left">Adjusted as if <code>unitsz=MicroSecond</code></td>
-</tr>
-<tr>
-<td align="left"><code>Interval</code></td>
-<td align="left"><code>interval</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>List</code></td>
-<td align="left">array of base type</td>
-<td align="left">It supports only 1-dimensional List(WIP).</td>
-</tr>
-<tr>
-<td align="left"><code>Struct</code></td>
-<td align="left">composite type</td>
-<td align="left">PG composite type must be preliminary defined.</td>
-</tr>
-<tr>
-<td align="left"><code>Union</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>FixedSizeBinary</code></td>
-<td align="left"><code>char(n)</code></td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>FixedSizeList</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-<tr>
-<td align="left"><code>Map</code></td>
-<td align="left">--------</td>
-<td align="left"></td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>Int</code></dt>
+<dd>mapped to either of <code>int1</code>, <code>int2</code>, <code>int4</code> or <code>int8</code> according to the <code>bitWidth</code> attribute.</dd>
+<dd><code>is_signed</code> attribute shall be ignored.</dd>
+<dd><code>int1</code> is an enhanced data type by PG-Strom.</dd>
+<dt><code>FloatingPoint</code></dt>
+<dd>mapped to either of <code>float2</code>, <code>float4</code> or <code>float8</code> according to the <code>precision</code> attribute.</dd>
+<dd><code>float2</code> is an enhanced data type by PG-Strom.</dd>
+<dt><code>Binary</code></dt>
+<dd>mapped to <code>bytea</code> data type</dd>
+<dt><code>Decimal</code></dt>
+<dd>mapped to <code>numeric</code> data type</dd>
+<dt><code>Date</code></dt>
+<dd>mapped to <code>date</code> data type; to be adjusted as if it has <code>unit=Day</code> precision.</dd>
+<dt><code>Time</code></dt>
+<dd>mapped to <code>time</code> data type; to be adjusted as if it has <code>unit=MicroSecond</code> precision.</dd>
+<dt><code>Timestamp</code></dt>
+<dd>mapped to <code>timestamp</code> data type; to be adjusted as if it has <code>unit=MicroSecond</code> precision.</dd>
+<dt><code>Interval</code></dt>
+<dd>mapped to <code>interval</code> data type.</dd>
+<dt><code>List</code></dt>
+<dd>mapped to 1-dimensional array of the element data type.</dd>
+<dt><code>Struct</code></dt>
+<dd>mapped to compatible composite data type; that shall be defined preliminary.</dd>
+<dt><code>FixedSizeBinary</code></dt>
+<dd>mapped to <code>char(n)</code> data type according to the <code>byteWidth</code> attribute.</dd>
+<dd>If <code>pg_type=TYPENAME</code> is configured, PG-Strom may assign the configured data type. Right now, <code>inet</code> and <code>macaddr</code> are supported.</dd>
+<dt><code>Union</code>, <code>Map</code>, <code>Duration</code>, <code>LargeBinary</code>, <code>LargeUtf8</code>, <code>LargeList</code></dt>
+<dd>Right now, PG-Strom cannot map these Arrow data types onto any of PostgreSQL data types.</dd>
+</dl>
 <h3 id="how-to-read-explain">How to read EXPLAIN</h3>
 <p><code>EXPLAIN</code> command show us information about Arrow files reading.</p>
 <p>The example below is an output of query execution plan that includes flineorder foreign table that mapps an Arrow file of 309GB.</p>

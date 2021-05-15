@@ -132,7 +132,6 @@ PG-Strom support the following data types for use on GPU device.
 @ja{
 ## 可変長データ型
 
-@ja{
 `bpchar` [データ長: 可変長]
 :   可変長テキスト型（空白パディングあり）
 
