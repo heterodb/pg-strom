@@ -123,8 +123,6 @@ ERROR:  target lists can have at most 1664 entries
 (3 rows)
 ```
 
-
-
 @ja:##GPUキャッシュ
 @en:##GPU Cache
 
@@ -172,8 +170,8 @@ Below is an example of `pgstrom.gpucache_info` system view.
 ```
 
 `trigger pgstrom.gpucache_sync_trigger()`
-: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。詳しくは(GPUキャッシュ)[../gpucache/]の章を参照してください。}
-: @en{A trigger function to synchronize GPU Cache on table updates. See (GPU Cache)[../gpucache/] chapter for more details.}
+: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。詳しくは[GPUキャッシュ](../gpucache/)の章を参照してください。}
+: @en{A trigger function to synchronize GPU Cache on table updates. See [GPU Cache](../gpucache/) chapter for more details.}
 
 `bigint pgstrom.gpucache_apply_redo(regclass)`
 : @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、未適用のREDOログを強制的にGPUキャッシュに適用します。}
