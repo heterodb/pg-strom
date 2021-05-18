@@ -9,7 +9,11 @@ GPUにはホストシステムのRAMとは独立なデバイスメモリが搭�
 PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部的には、PostgreSQLテーブルから読み出したレコードをGPUへと転送し、その上でGPUでSQLの各種処理を実行します。
 しかしこれらの処理には、多かれ少なかれテーブルの読み出しやデータの転送に時間を要します（多くの場合、GPUでの処理よりも遥かに長い時間の！）。
 }
-@en{}
+@en{
+GPU has a device memory that is independent of the RAM in the host system, and in order to calculate on the GPU, data must be transferred from the host system or storage device to the GPU device memory once through the PCI-E bus.
+The same is true when PG-Strom processes SQL queries on the GPU. Internally, the records read from the PostgreSQL table are transferred to the GPU, and then various SQL operations are executed on the GPU.
+However, these processes take time to read the tables and transfer the data. (In many cases, much longer than the processing on the GPU!)
+}
 
 @ja{
 GPUキャッシュ（GPU Cache）とは、GPUデバイスメモリ上に予め領域を確保しておき、そこにPostgreSQLテーブルの複製を保持しておく機能です。
@@ -19,7 +23,12 @@ GPUキャッシュ（GPU Cache）とは、GPUデバイスメモリ上に予め�
 後述するログベースの同期メカニズムにより、並列度の高いトランザクショナルなワークロードを妨げることなくGPUキャッシュを最新の状態に保つ事が可能です。
 その一方で、検索/分析系のSQLを実行する際には既にGPU上にデータがロードされているため、改めてテーブルからレコードを読み出したり、PCI-Eバスを介してデータを転送したりする事なく、SQLワークロードを実行する事ができるようになります。
 }
-@en{}
+@en{
+The GPU Cache is a function that reserves an area on the GPU device memory in advance and keeps a copy of the PostgreSQL table there.
+This can be used to execute search/analysis SQL in real time for data that is relatively small(~10GB) and is frequently updated.
+The log-based synchronization mechanism described below allows the GPU cache to be kept up-to-date without interfering with highly parallel and transactional workloads.
+Nevertheless, you can execute search/analytical SQL workloads on data already loaded on the GPU cache without reading the records from the table again or transferring the data over the PCI-E bus.
+}
 
 ![GPU Cache Usage](./img/gpucache_usage.png)
 
@@ -28,7 +37,11 @@ GPUキャッシュの典型的な利用シーンとしては、自動車や携�
 多数のデバイスから送出される位置情報の更新は極めて更新ヘビーなワークロードですが、一方で、最新の位置情報に基づいて検索/分析クエリを実行する必要もあるため、これら更新データを遅滞なくGPU側へ適用する必要があります。
 データサイズには制約がありますが、GPUキャッシュは高頻度の更新と、高性能な検索/分析クエリの実行を両立する一つのオプションです。
 }
-@en{}
+@en{
+A typical use case of GPU caching is to join location data, such as the current position of a mobile device like a car or a cell phone, collected in real time with other data using [GPU-PostGIS](../postgis/).
+The workload of updating location information sent out by a large number of devices is extremely heavy. However, it also needs to be applied on the GPU side without delay in order to perform search/analysis queries based on the latest location information.
+Although data size is limited, GPU caching is one option to achieve both high frequency updates and high performance search/analysis query execution.
+}
 
 @ja:##アーキテクチャ
 @en:##Architecture
@@ -42,7 +55,12 @@ GPUキャッシュでは、並列度の高い更新系ワークロードに対�
 GPUキャッシュを作成すると、GPUデバイスメモリ上にキャッシュ用のメモリ領域を確保するだけでなく、ホスト側共有メモリ上にREDOログバッファを作成します。
 テーブルの更新を伴うSQLコマンド（INSERT、UPDATE、DELETE）を実行すると、AFTER ROWトリガによって更新内容がREDOログバッファにコピーされますが、この処理はGPUへの呼び出しを伴わない、CPUとRAMだけで完結する処理ですので、トランザクション性能への影響はほとんどありません。
 }
-@en{}
+@en{
+GPU caches have two requirements: highly parallel update-based workloads and search/analytical queries on constantly up-to-date data.
+In many systems, the CPU and GPU are connected via the PCI-E bus, and there is a reasonable delay in their communication. Therefore, synchronizing the GPU cache every time a row is updated in the target table will significantly degrade the transaction performance.
+Using the GPU cache allocates a "REDO Log Buffer" on the shared memory on the host side in addition to the area on the memory of the GPU.
+When a SQL command (INSERT, UPDATE, DELETE) is executed to update a table, the updated contents are copied to the Redo Log Buffer by the AFTER ROW trigger. Since this process can be completed by CPU and RAM alone without any GPU call, it has little impact on transaction performance.
+}
 
 ![GPU Cache Architecture](./img/gpucache_arch.png)
 
@@ -51,14 +69,21 @@ REDOログバッファに未適用のREDOログが一定量たまるか、最後
 この時、REDOログはまとめてGPUに転送され、さらにGPUの数千プロセッサコアが並列にREDOログを適用するため、通常は処理遅延が問題となる事はありません。
 }
 
-@en{}
+@en{
+When a certain amount of unapplied REDO Log Entries accumulate in the REDO Log Buffer, or a certain amount of time has passed since the last write, it is loaded by a background worker process (GPU memory keeper) and applied to the GPU cache.
+At this time, REDO Log Entries are transferred to the GPU in batches and processed in parallel by thousands of processor cores on the GPU, so delays caused by this process are rarely a problem.
+}
 
 @ja{
 検索/分析クエリでGPUキャッシュの対象テーブルを参照する際には、テーブルからデータを読み出してGPUにロードするのではなく、既にGPUデバイスメモリ上に割当て済みのGPUキャッシュをマッピングして利用します。これに先立って、クエリの実行開始時点で未適用のREDOログが存在する場合、これらは全て、検索/分析クエリの実行前にGPUキャッシュへ適用されます。
 そのため、検索/分析クエリが対象のGPUキャッシュをスキャンした結果は、直接テーブルを参照した場合と同じ結果を返す事となり、問い合わせの一貫性は常に保持されています。
 }
 
-@en{}
+@en{
+Search/analysis queries against the target table in the GPU cache do not load the table data, but use the data mapped from the GPU cache pre-allocated on the GPU device memory.
+If there are any unapplied redo logs at the start of the search/analysis query, they will all be applied to the GPU cache. 
+This means that the results of a search/analysis query scanning the target GPU cache will return the same results as if it were referring to the table directly, and the query will always be consistent.
+}
 
 
 
@@ -76,7 +101,13 @@ GPUキャッシュを有効にするには、対象となるテーブルに対�
 
 以下の例は、テーブル `dpoints` に対してGPUキャッシュを設定する例です。
 }
-@en{}
+@en{
+To enable GPU cache, set the following trigger function for the target table.
+
+- The `pgstrom.gpucache_sync_trigger()` function must be set as the row trigger for AFTER INSERT OR UPDATE OR DELETE.
+- The `pgstrom.gpucache_sync_trigger()` function must be set as a syntax trigger for AFTER TRUNCATE.
+- The timing of the above triggers must be set to `ALWAYS` (the slave side of replication must also fire the trigger).
+}
 
 ```
 =# create trigger row_sync after insert or update or delete on dpoints_even for row
@@ -96,7 +127,10 @@ GPUキャッシュの行トリガに引数として KEY=VALUE 形式のオプシ
 
 例えば、以下のGPUキャッシュは行数の最大値が250万行、REDOログバッファのサイズを100MBとして作成しています。
 }
-@en{}
+@en{
+You can customize the GPU cache by specifying an optional string in the form of KEY=VALUE as an argument to the GPU cache line trigger. Please note that where you should specify is not to the syntax trigger.
+The following SQL statement is an example of creating a GPU cache whose maximum row count is 2.5 million rows and the size of the redo log buffer is 100MB.
+}
 
 ```
 =# create trigger row_sync after insert or update or delete on dpoints_even for row
@@ -106,7 +140,7 @@ GPUキャッシュの行トリガに引数として KEY=VALUE 形式のオプシ
 @ja{
 行トリガの引数に与える事のできるオプションは以下の通りです。
 
-`max_num_rows=NROWS`　（default: 10485760)
+`max_num_rows=NROWS`  (default: 10485760)
 :   GPUキャッシュ上に確保できる行数を指定します。
 :   PostgreSQLテーブルと同様に、GPUキャッシュでも可視性制御のためにコミット前の更新行を保持する必要があるため、ある程度の余裕を持って`max_num_rows`を指定する必要があります。なお、更新/削除された古いバージョンの行は、トランザクションのコミット後に解放されます。
 
@@ -121,7 +155,23 @@ GPUキャッシュの行トリガに引数として KEY=VALUE 形式のオプシ
 :   単位としてk、m、gを指定できる。
 }
 
-@en{}
+@en{
+The options that can be given to the argument of the line trigger are shown below.
+
+`max_num_rows=NROWS` (default: 10485760)
+:   Specify the number of rows that can be allocated on the GPU cache.
+:   Just as with PostgreSQL tables, the GPU cache needs to retain updated rows prior to commit for visibility control, so `max_num_rows` should be specified with some margin. Note that the old version of the updated/deleted row will be released after the transaction is committed.
+
+`redo_buffer_size=SIZE` (default: 160m)
+:   Specify the size of REDO Log Buffer. You can use k,m and g as the unit.
+
+`gpu_sync_interval=SECONDS` (default: 5)
+:   If the specified time has passed since the last write to the redo log buffer, REDO Log will be applied to the GPU, regardless of the number of rows updated.
+
+`gpu_sync_threshold=SIZE` (default: 25% of `redo_buffer_size`)
+:   When the unapplied REDO Log in the REDO Log Buffer reaches SIZE bytes, it is applied to the GPU side.
+:   You can use k,m and g as the unit.
+}
 
 @ja:###GPUキャッシュのオプション
 @en:###GPU Cache Options
@@ -139,7 +189,12 @@ Below is the GPU Cache related PostgreSQL configuration parameters.
 :   この値が off になっていると、GPUキャッシュが存在していてもこれを無視し、テーブルから都度データを読み出そうとします。
 :   なお、本設定はトリガによるREDOログバッファへの追記には影響しません。
 }
-@en{}
+@en{
+`pg_strom.enable_gpucache` (default: on)
+:   This option controls whether search/analytical queries will use the GPU cache or not.
+:   If this value is off, the data will be read from the table each time, ignoring the GPU cache even if it is available.
+:   Note that this setting has no effect on REDO Log Buffer appending by triggers.
+}
 @ja{
 `pg_strom.gpucache_auto_preload`　（default: NULL）
 :   PostgreSQLの起動時/再起動時に、本設定パラメータで指定されたテーブルのGPUキャッシュを予め構築しておきます。
@@ -148,7 +203,14 @@ Below is the GPU Cache related PostgreSQL configuration parameters.
 :   なお、この設定パラメータに '*' と指定した場合、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。この時、バックグラウンドワーカは全てのデータベースに順にアクセスしていく事となりますが、postmasterに再起動を促すため終了コード 1 を返します。
 :   以下のように、サーバの起動ログに「GPUCache Startup Preloader」が終了コード 1 で終了したと出力されますが、これは異常ではありません
 }
-@en{}
+@en{
+`pg_strom.gpucache_auto_preload` (default: NULL)
+:   When PostgreSQL is started/restarted, the GPU cache for the table specified by this parameter will be built in advance.
+:   The value should be in the format: `DATABASE_NAME.SCHEMA_NAME.TABLE_NAME`. To specify multiple tables, separate them by commas.
+:   If the GPU cache is not built, the PostgreSQL backend process that first attempts to access the GPU cache will scan the entire target table and transfer it to the GPU. This process usually takes a considerable amount of time. However, by specifying the tables that should be loaded in this option, you can avoid waiting too long the first time you run a search/analysis query.
+:   If this parameter is set to '*', it will attempt to load the contents of all tables with GPU cache into the GPU in order. At this time, the background worker will access all the databases in order, and will return exit code 1 to prompt the postmaster to restart.
+:   The server startup log will show that the "GPUCache Startup Preloader" exited with exit code 1 as follows, but this is not abnormal.
+}
 
 ```
  LOG:  database system is ready to accept connections
@@ -176,7 +238,14 @@ GPUキャッシュの参照は透過的に行われます。ユーザはキャ�
 
 なお、`max_num_rows`に表示されているのはGPUキャッシュの保持できる最大の行数、`main`に表示されているのはGPUキャッシュの固定長フィールド用の領域の大きさ、`extra`に表示されているのは可変長データ用の領域の大きさです。
 }
-@en{}
+@en{
+The GPU cache is referred to transparently. The user does not need to be aware of the presence or absence of the GPU cache, and PG-Strom will automatically determine and switch the process.
+
+The following is the query plan for a query that refers to the table "dpoints" which has GPU cache set.
+The 3rd row from the bottom, in the "GPU Cache" field, shows the basic information about the GPU cache of this table. We can see that the query is executed with referring to the GPU cache and not the "dpoints" table.
+
+Note that the meaning of each item is as follows: `max_num_rows` indicates the maximum number of rows that the GPU cache can hold; `main` indicates the size of the area in the GPU cache for fixed-length fields; `extra` indicates the size of the area for variable-length data. 
+}
 
 ```
 =# explain
