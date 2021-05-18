@@ -8,6 +8,7 @@
 
 @ja{
 PG-Strom v2.3における主要な機能強化は以下の通りです。
+
 - GpuJoinのInnerバッファの構築がCPU並列に対応しました。
 - Arrow_FdwがINSERT/TRUNCATEに対応しました。
 - pg2arrowコマンドが追記モードに対応しました。
@@ -16,6 +17,7 @@ PG-Strom v2.3における主要な機能強化は以下の通りです。
 
 @en{
 Major changes in PG-Strom v2.3 includes:
+
 - GpuJoin supports parallel construction of inner buffer
 - Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.
 - pg2arrow command supports 'append' mode.

@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">リファレンス</span></p>
@@ -155,11 +155,13 @@
 <div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
 <h2 id="_1">概要</h2>
-<p>PG-Strom v2.3における主要な機能強化は以下の通りです。
-- GpuJoinのInnerバッファの構築がCPU並列に対応しました。
-- Arrow_FdwがINSERT/TRUNCATEに対応しました。
-- pg2arrowコマンドが追記モードに対応しました。
-- mysql2arrowコマンドが追加されました。</p>
+<p>PG-Strom v2.3における主要な機能強化は以下の通りです。</p>
+<ul>
+<li>GpuJoinのInnerバッファの構築がCPU並列に対応しました。</li>
+<li>Arrow_FdwがINSERT/TRUNCATEに対応しました。</li>
+<li>pg2arrowコマンドが追記モードに対応しました。</li>
+<li>mysql2arrowコマンドが追加されました。</li>
+</ul>
 <h2 id="_2">動作環境</h2>
 <ul>
 <li>PostgreSQL v10, v11, v12</li>

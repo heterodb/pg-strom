@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">References</span></p>
@@ -155,11 +155,13 @@
 <div style="text-align: right;">PG-Strom Development Team (1-Apr-2020)</div>
 
 <h2 id="overview">Overview</h2>
-<p>Major changes in PG-Strom v2.3 includes:
-- GpuJoin supports parallel construction of inner buffer
-- Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.
-- pg2arrow command supports 'append' mode.
-- mysql2arrow command was added.</p>
+<p>Major changes in PG-Strom v2.3 includes:</p>
+<ul>
+<li>GpuJoin supports parallel construction of inner buffer</li>
+<li>Arrow_Fdw now becomes writable; supports INSERT/TRUNCATE.</li>
+<li>pg2arrow command supports 'append' mode.</li>
+<li>mysql2arrow command was added.</li>
+</ul>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v10, v11, v12</li>

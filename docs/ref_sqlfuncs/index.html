@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">References</span></p>
@@ -89,17 +89,15 @@
                     </li>
                     <li class="toctree-l1 current"><a class="reference internal current" href="./">SQL Objects</a>
     <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#device-information">Device Information</a>
+    <li class="toctree-l2"><a class="reference internal" href="#system-information">System Information</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-supports">Arrow_Fdw Supports</a>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpu-data-frame-functions">GPU Data Frame Functions</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-cache">GPU Cache</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#test-data-generation">Test Data Generation</a>
+    <li class="toctree-l2"><a class="reference internal" href="#test-data-generator">Test Data Generator</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#other-functions">Other Functions</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#system-view">System View</a>
     </li>
     </ul>
                     </li>
@@ -155,243 +153,18 @@
               
                 <h1 id="sql-objects">SQL Objects</h1>
 <p>This chapter introduces SQL objects additionally provided by PG-Strom.</p>
-<h2 id="device-information">Device Information</h2>
+<h2 id="system-information">System Information</h2>
+<dl>
+<dt><code>pgstrom.device_info</code>  System View</dt>
+<dd></dd>
+<dd>It shows properties of GPU devices installed for PG-Strom.<br>Below is schema definition of the view.</dd>
+</dl>
 <table>
 <thead>
 <tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>gpu_device_name(int = 0)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It tells name of the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_global_memsize(int = 0)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">It tells amount of the specified GPU device in bytes.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_max_blocksize(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells maximum block-size on the specified GPU device. 1024, in the currently supported GPU models.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_warp_size(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells warp-size on the specified GPU device. 32, in the currently supported GPU models.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_max_shared_memory_perblock(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells maximum shared memory size per block on the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_num_registers_perblock(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells total number of registers per block on the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_num_multiptocessors(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells number of SM(Streaming Multiprocessor) units on the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_num_cuda_cores(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells number of CUDA cores on the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_cc_major(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells major CC(Compute Capability) version of the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_cc_minor(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells minor CC(Compute Capability) version of the specified GPU device.</td>
-</tr>
-<tr>
-<td align="left"><code>gpu_pci_id(int = 0)</code></td>
-<td align="center"><code>int</code></td>
-<td align="left">It tells PCI bus-id of the specified GPU device.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="arrow_fdw-supports">Arrow_Fdw Supports</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pgstrom.arrow_fdw_truncate(regclass)</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left">It truncates contents of the specified Arrow_Fdw foreign table. Arrow_Fdw foreign table must be <code>writable</code>.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="gpu-data-frame-functions">GPU Data Frame Functions</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pgstrom.arrow_fdw_export_cupy(regclass, text[], int)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It exports the specified columns of Arrow_Fdw foreign table as cuPy's data frame(<code>cupy.ndarray</code>). GPU buffer shall be released automatically on session closed.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.arrow_fdw_export_cupy_pinned(regclass, text[], int)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It exports the specified columns of Arrow_Fdw foreign table as cuPy's data frame(<code>cupy.ndarray</code>), as pinned GPU buffer; that is available after the session closed.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.arrow_fdw_put_gpu_buffer(text)</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left">It unreference the GPU buffer that is exported with the above functions.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.arrow_fdw_unpin_gpu_buffer(text)</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left">It unpin the GPU buffer that is exported with the above functions.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="test-data-generation">Test Data Generation</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pgstrom.random_setseed(int)</code></td>
-<td align="center"><code>void</code></td>
-<td align="left">It initializes the random seed.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_int(float=0.0, bigint=0, bigint=INT_MAX)</code></td>
-<td align="center"><code>bigint</code></td>
-<td align="left">It generates random data in <code>bigint</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_float(float=0.0, float=0.0, float=1.0)</code></td>
-<td align="center"><code>float</code></td>
-<td align="left">It generates random data in <code>float</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_date(float=0.0, date='2015-01-01', date='2025-12-31')</code></td>
-<td align="center"><code>date</code></td>
-<td align="left">It generates random data in <code>date</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_time(float=0.0, time='00:00:00', time='23:59:59')</code></td>
-<td align="center"><code>time</code></td>
-<td align="left">It generates random data in <code>time</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_timetz(float=0.0, time='00:00:00', time='23:59:59')</code></td>
-<td align="center"><code>timetz</code></td>
-<td align="left">It generates random data in <code>timetz</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_timestamp(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></td>
-<td align="center"><code>timestamp</code></td>
-<td align="left">It generates random data in <code>timestamp</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_macaddr(float=0.0, macaddr='ab:cd:00:00:00', macaddr='ab:cd:ff:ff:ff:ff')</code></td>
-<td align="center"><code>macaddr</code></td>
-<td align="left">It generates random data in <code>macaddr</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_inet(float=0.0, inet='192.168.0.1/16')</code></td>
-<td align="center"><code>inet</code></td>
-<td align="left">It generates random data in <code>inet</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_text(float=0.0, text='test_**')</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It generates random data in <code>text</code> type. The '*' characters in 2nd argument shall be replaced randomly.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_text_len(float=0.0, int=10)</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It generates random data in <code>text</code> type within the specified length.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_int4range(float=0.0, bigint=0, bigint=INT_MAX)</code></td>
-<td align="center"><code>int4range</code></td>
-<td align="left">It generates random data in <code>int4range</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_int8range(float=0.0, bigint=0, bigint=LONG_MAX)</code></td>
-<td align="center"><code>int8range</code></td>
-<td align="left">It generates random data in <code>int8range</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_tsrange(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></td>
-<td align="center"><code>tsrange</code></td>
-<td align="left">It generates random data in <code>tsrange</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_tstzrange(float=0.0, timestamptz='2015-01-01', timestamptz='2025-01-01')</code></td>
-<td align="center"><code>tstzrange</code></td>
-<td align="left">It generates random data in <code>tstzrange</code> type within the range.</td>
-</tr>
-<tr>
-<td align="left"><code>pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')</code></td>
-<td align="center"><code>daterange</code></td>
-<td align="left">It generates random data in <code>daterange</code> type within the range.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="other-functions">Other Functions</h2>
-<table>
-<thead>
-<tr>
-<th align="left">Function</th>
-<th align="center">Result</th>
-<th align="left">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>pgstrom.license_query()</code></td>
-<td align="center"><code>text</code></td>
-<td align="left">It shows the active commercial subscription.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="system-view">System View</h2>
-<p>PG-Strom provides several system view to export its internal state for users or applications.
-The future version may add extra fields here. So, it is not recommended to reference these information schemas using <code>SELECT * FROM ...</code>.</p>
-<p><strong>pgstrom.device_info</strong></p>
-<p><code>pgstrom.device_into</code> system view exports device attributes of the GPUs recognized by PG-Strom.
-GPU has different specification for each model, like number of cores, capacity of global memory, maximum number of threads and etc, user's software should be optimized according to the information if you try raw GPU programming with PL/CUDA functions.</p>
-<table>
-<thead>
-<tr>
-<th align="left">Name</th>
-<th align="left">Data Type</th>
-<th align="left">Description</th>
+<th align="left">name</th>
+<th align="left">type</th>
+<th align="left">description</th>
 </tr>
 </thead>
 <tbody>
@@ -413,49 +186,252 @@ GPU has different specification for each model, like number of cores, capacity o
 <tr>
 <td align="left">value</td>
 <td align="left"><code>text</code></td>
-<td align="left">Value of the attribute</td>
+<td align="left">Attribute value</td>
 </tr>
 </tbody>
 </table>
-<p><strong>pgstrom.device_preserved_meminfo</strong></p>
-<p><code>pgstrom.device_preserved_meminfo</code> system view exports information of the preserved device memory; which can be shared multiple PostgreSQL backend.
-Right now, only Python collaboration of Arrow_Fdw uses this feature.</p>
+<p>There are various kind of GPU device properties, but depending on the CUDA driver version where system is running.
+So, <code>pgstrom.device_info</code> system view identifies the target property by GPU device number (<code>device_nr</code>) and attribute index (<code>aindex</code>).</p>
+<p>Below is an example of <code>pgstrom.device_info</code> system view.</p>
+<pre><code>postgres=# select * from pgstrom.device_info limit 10;
+ device_nr | aindex |              attribute              |                  value
+-----------+--------+-------------------------------------+------------------------------------------
+         0 |      0 | GPU Device Name                     | NVIDIA Tesla V100-PCIE-16GB
+         0 |      1 | GPU Device Brand                    | TESLA
+         0 |      2 | GPU Device UUID                     | GPU-8ba149db-53d8-c5f3-0f55-97ce8cfadb28
+         0 |      3 | GPU Total RAM Size                  | 15.78GB
+         0 |      4 | GPU PCI Bar1 Size                   | 16.00GB
+         0 |      5 | Maximum number of threads per block | 1024
+         0 |      6 | Maximum block dimension X           | 1024
+         0 |      7 | Maximum block dimension Y           | 1024
+         0 |      8 | Maximum block dimension Z           | 64
+         0 |      9 | Maximum grid dimension X            | 2147483647
+(10 rows)
+</code></pre>
+<h2 id="arrow_fdw">Arrow_Fdw</h2>
+<dl>
+<dt><code>fdw_handler pgstrom.arrow_fdw_handler()</code></dt>
+<dd></dd>
+<dd>FDW handler function of Arrow_Fdw. Usually, users don't need to invoke this function.</dd>
+<dt><code>void pgstrom.arrow_fdw_validator(text[], oid)</code></dt>
+<dd></dd>
+<dd>FDW options validation function of Arrow_Fdw. Usually, users don't need to invoke this function.</dd>
+<dt><code>void pgstrom.arrow_fdw_import_file(text,text,text = null)</code></dt>
+<dd>This function tries to import Apache Arrow file, and defines a new foreign table. Its first argument is name of the new foreign table, the second argument is path of the Apache Arrow file, and the optional third argument is the schema name.</dd>
+<dd>This function is similar to <code>IMPORT FOREIGN SCHEMA</code> statement, but allows to import Apache Arrow files that have wider fields than the limitation of number of columns in PostgreSQL (<code>MaxTupleAttributeNumber</code> = 1664). So, we recommend to use <code>IMPORT FOREIGN SCHEMA</code> statement for most cases.</dd>
+<dd>The example below shows the steps to import an Apache Arrow file with 2000 of Int16 fields by the <code>pgstrom.arrow_fdw_import_file</code>. The result of <code>\d mytest</code> shows this foreign table has 2000 fields.</dd>
+<dd>Due to the internal data format of PostgreSQL, it is not possible to read all the columns at once, but possible to read a part of columns like the last example.</dd>
+</dl>
+<pre><code>=# select pgstrom.arrow_fdw_import_file('mytest', '/tmp/wide2000.arrow');
+ arrow_fdw_import_file
+-----------------------
+
+(1 row)
+
+=# \d
+            List of relations
+ Schema |  Name  |     Type      | Owner
+--------+--------+---------------+--------
+ public | mytest | foreign table | kaigai
+(1 row)
+
+
+=# \d mytest
+                    Foreign table &quot;public.mytest&quot;
+  Column   |   Type   | Collation | Nullable | Default | FDW options
+-----------+----------+-----------+----------+---------+-------------
+ object_id | integer  |           |          |         |
+ c000      | smallint |           |          |         |
+ c001      | smallint |           |          |         |
+ c002      | smallint |           |          |         |
+ c003      | smallint |           |          |         |
+   :             :          :          :          :            :
+ c1997     | smallint |           |          |         |
+ c1998     | smallint |           |          |         |
+ c1999     | smallint |           |          |         |
+Server: arrow_fdw
+FDW options: (file '/tmp/wide2000.arrow')
+
+=# select * from mytest ;
+ERROR:  target lists can have at most 1664 entries
+
+=# select c0010,c1234,c1999 from mytest limit 3;
+ c0010 | c1234 | c1999
+-------+-------+-------
+   232 |   232 |   232
+   537 |   537 |   537
+   219 |   219 |   219
+(3 rows)
+</code></pre>
+<h2 id="gpu-cache">GPU Cache</h2>
+<dl>
+<dt><code>pgstrom.gpucache_info</code> System View</dt>
+<dd>It shows the current status of GPU Cache.<br>Below is schema definition of the view.</dd>
+</dl>
 <table>
 <thead>
 <tr>
-<th align="left">Name</th>
-<th align="left">Data Type</th>
-<th align="left">Description</th>
+<th align="left">name</th>
+<th align="left">type</th>
+<th align="left">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left">device_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">GPU device number</td>
+<td align="left"><code>database_oid</code></td>
+<td align="left"><code>oid</code></td>
+<td align="left">Database OID where the table with GPU Cache belongs to.</td>
 </tr>
 <tr>
-<td align="left">handle</td>
-<td align="left"><code>bytea</code></td>
-<td align="left">IPC handle of the preserved device memory</td>
+<td align="left"><code>database_name</code></td>
+<td align="left"><code>text</code></td>
+<td align="left">Database name where the table with GPU Cache belongs to.</td>
 </tr>
 <tr>
-<td align="left">owner</td>
-<td align="left"><code>regrole</code></td>
-<td align="left">Owner of the preserved device memory</td>
+<td align="left"><code>table_oid</code></td>
+<td align="left"><code>oid</code></td>
+<td align="left">Table OID that has GPU Cache. Note that it may not be in the current database.</td>
 </tr>
 <tr>
-<td align="left">length</td>
-<td align="left"><code>bigint</code></td>
-<td align="left">Length of the preserved device memory in bytes</td>
+<td align="left"><code>table_name</code></td>
+<td align="left"><code>text</code></td>
+<td align="left">Table name that has GPU Cache. Note that it may not be in the current database.</td>
 </tr>
 <tr>
-<td align="left">ctime</td>
-<td align="left"><code>timestamp with time zone</code></td>
-<td align="left">Timestamp when the preserved device memory is created</td>
+<td align="left"><code>signature</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">An identifier hash value of GPU Cache. It may be changed after <code>ALTER TABLE</code> for example.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_main_sz</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Size of the fixed-length values area on the GPU Cache.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_extra_sz</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Size of the variable-length values area on the GPU Cache</td>
+</tr>
+<tr>
+<td align="left"><code>redo_write_ts</code></td>
+<td align="left"><code>timestamptz</code></td>
+<td align="left">Last update timestamp on the REDO Log buffer</td>
+</tr>
+<tr>
+<td align="left"><code>redo_write_nitems</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Total number of REDO Log entries written to the REDO Log buffer.</td>
+</tr>
+<tr>
+<td align="left"><code>redo_write_pos</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Total bytes of REDO Log entries written to the REDO Log buffer.</td>
+</tr>
+<tr>
+<td align="left"><code>redo_read_nitems</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Total number of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+</tr>
+<tr>
+<td align="left"><code>redo_read_pos</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Total bytes of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+</tr>
+<tr>
+<td align="left"><code>redo_sync_pos</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">The latest position on the REDO Log buffer, where it is already required the background worker to synchronize onto the GPU Cache.<br>When free space of REDO Log buffer becomes tight, it is internally used to avoid flood of simultaneous asynchronized requests by many sessions.</td>
+</tr>
+<tr>
+<td align="left"><code>config_options</code></td>
+<td align="left"><code>text</code></td>
+<td align="left">Options string of the GPU Cache</td>
 </tr>
 </tbody>
 </table>
+<p>Below is an example of <code>pgstrom.gpucache_info</code> system view.</p>
+<pre><code>=# select * from pgstrom.gpucache_info ;
+ database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
+  config_options
+--------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+(2 rows)
+</code></pre>
+<dl>
+<dt><code>trigger pgstrom.gpucache_sync_trigger()</code></dt>
+<dd></dd>
+<dd>A trigger function to synchronize GPU Cache on table updates. See (GPU Cache)[../gpucache/] chapter for more details.</dd>
+<dt><code>bigint pgstrom.gpucache_apply_redo(regclass)</code></dt>
+<dd></dd>
+<dd>If the given table has GPU Cache configured, it forcibly applies the REDO log entries onto the GPU Cache.</dd>
+<dt><code>bigint pgstrom.gpucache_compaction(regclass)</code></dt>
+<dd></dd>
+<dd>If the given table has GPU Cache configured, it forcibly run compaction of the variable-length data buffer.</dd>
+</dl>
+<h2 id="test-data-generator">Test Data Generator</h2>
+<dl>
+<dt><code>void pgstrom.random_setseed(int)</code></dt>
+<dd></dd>
+<dd>It initializes the random seed.</dd>
+<dt><code>bigint pgstrom.random_int(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>bigint</code> type within the range.</dd>
+<dt><code>float pgstrom.random_float(float=0.0, float=0.0, float=1.0)</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>float</code> type within the range.</dd>
+<dt><code>date pgstrom.random_date(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>date</code> type within the range.</dd>
+<dt><code>time pgstrom.random_time(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>time</code> type within the range.</dd>
+<dt><code>timetz pgstrom.random_timetz(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>timetz</code> type within the range.</dd>
+<dt><code>timestamp pgstrom.random_timestamp(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>timestamp</code> type within the range.</dd>
+<dt><code>macaddr pgstrom.random_macaddr(float=0.0, macaddr='ab:cd:00:00:00', macaddr='ab:cd:ff:ff:ff:ff')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>macaddr</code> type within the range.</dd>
+<dt><code>inet pgstrom.random_inet(float=0.0, inet='192.168.0.1/16')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>inet</code> type within the range.</dd>
+<dt><code>text pgstrom.random_text(float=0.0, text='test_**')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>text</code> type. The '*' characters in 2nd argument shall be replaced randomly.</dd>
+<dt><code>text pgstrom.random_text_len(float=0.0, int=10)</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>text</code> type within the specified length.</dd>
+<dt><code>int4range pgstrom.random_int4range(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>int4range</code> type within the range.</dd>
+<dt><code>int8range pgstrom.random_int8range(float=0.0, bigint=0, bigint=LONG_MAX)</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>int8range</code> type within the range.</dd>
+<dt><code>tsrange pgstrom.random_tsrange(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>tsrange</code> type within the range.</dd>
+<dt><code>tstzrange pgstrom.random_tstzrange(float=0.0, timestamptz='2015-01-01', timestamptz='2025-01-01')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>tstzrange</code> type within the range.</dd>
+<dt><code>daterange pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
+<dd></dd>
+<dd>It generates random data in <code>daterange</code> type within the range.</dd>
+</dl>
+<h2 id="other-functions">Other Functions</h2>
+<dl>
+<dt><code>pgstrom.license_query</code></dt>
+<dd></dd>
+<dd>It shows the active commercial subscription, if loaded.</dd>
+</dl>
+<pre><code>=# select pgstrom.license_query();
+                                                                               license_query
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { &quot;version&quot; : 2, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;2020-11-24&quot;, &quot;expired_at&quot; : &quot;2025-12-31&quot;, &quot;gpus&quot; : [ { &quot;uuid&quot; : &quot;GPU-8ba149db-53d8-c5f3-0f55-97ce8cfadb28&quot; } ]}
+(1 row)
+</code></pre>
               
             </div>
           </div>

@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">References</span></p>
@@ -87,17 +87,17 @@
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#numeric-types">Numeric types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#built-in-date-and-time-types">Built-in date and time types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#date-and-time-types">Date and time types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#built-in-variable-length-types">Built-in variable length types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#variable-length-types">Variable length types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#built-in-unstructured-data-types">Built-in unstructured data types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#unstructured-data-types">unstructured data types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#built-in-miscellaneous-types">Built-in miscellaneous types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#miscellaneous-types">Miscellaneous types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#built-in-range-data-types">Built-in range data types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#range-data-types">Range data types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#postgis-data-types">PostGIS data types</a>
+    <li class="toctree-l2"><a class="reference internal" href="#geometry-data-types">Geometry data types</a>
     </li>
     </ul>
                     </li>
@@ -158,52 +158,24 @@
                 <h1 id="data-types">Data Types</h1>
 <p>PG-Strom support the following data types for use on GPU device.</p>
 <h2 id="numeric-types">Numeric types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>smallint</code></td>
-<td align="left">2 bytes</td>
-<td align="left">16bit integer data type</td>
-</tr>
-<tr>
-<td align="left"><code>integer</code></td>
-<td align="left">4 bytes</td>
-<td align="left">32bit integer data type</td>
-</tr>
-<tr>
-<td align="left"><code>bigint</code></td>
-<td align="left">8 bytes</td>
-<td align="left">64bit integer data type</td>
-</tr>
-<tr>
-<td align="left"><code>float2</code></td>
-<td align="left">2 bytes</td>
-<td align="left">Half precision data type. An extra data type by PG-Strom</td>
-</tr>
-<tr>
-<td align="left"><code>real</code></td>
-<td align="left">4 bytes</td>
-<td align="left">Single precision floating-point data type</td>
-</tr>
-<tr>
-<td align="left"><code>float</code></td>
-<td align="left">8 bytes</td>
-<td align="left">Double precision floating-point data type</td>
-</tr>
-<tr>
-<td align="left"><code>numeric</code></td>
-<td align="left">variable</td>
-<td align="left">mapped to 128bit fixed-point numerical internal format</td>
-</tr>
-</tbody>
-</table>
+<dl>
+<dt><code>int1</code> [length: 1byte]</dt>
+<dd>8bit integer data type; enhanced data type by PG-Strom</dd>
+<dt><code>int2</code> (alias <code>smallint</code>)  [length: 2bytes]</dt>
+<dd>16bit integer data type</dd>
+<dt><code>int4</code> (alias <code>int</code>)  [length: 4bytes]</dt>
+<dd>32bit integer data type</dd>
+<dt><code>int8</code> (alias <code>bigint</code>)  [length: 8bytes]</dt>
+<dd>64bit integer data type</dd>
+<dt><code>float2</code>  [length: 2bytes]</dt>
+<dd>Half precision data type; enhanced data type by PG-Strom</dd>
+<dt><code>float4</code> (alias <code>real</code>) [length: 4bytes]</dt>
+<dd>Single precision floating-point data type</dd>
+<dt><code>float8</code> (alias <code>double precision</code>) [length: 8bytes]</dt>
+<dd>Double precision floating-point data type</dd>
+<dt><code>numeric</code> [length: variable]</dt>
+<dd>Real number data type; handled as a 128bit fixed-point value in GPU</dd>
+</dl>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>When GPU processes values in <code>numeric</code> data type, it is converted to an internal 128bit fixed-point number because of implementation reason. (This layout is identical to <code>Decimal</code> type in Apache Arrow.)
@@ -214,97 +186,37 @@ To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type
 <p class="admonition-title">Note</p>
 <p>Even though GPU supports half-precision floating-point numbers by hardware, CPU (x86_64 processor) does not support it yet. So, when CPU processes <code>float2</code> data types, it transform them to <code>float</code> or <code>double</code> on calculations. So, CPU has no advantages for calculation performance of <code>float2</code>, unlike GPU. It is a feature to save storage/memory capacity for machine-learning / statistical-analytics. </p>
 </div>
-<h2 id="built-in-date-and-time-types">Built-in date and time types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>date</code></td>
-<td align="left">4 bytes</td>
-<td align="left">Date data type</td>
-</tr>
-<tr>
-<td align="left"><code>time</code></td>
-<td align="left">8 bytes</td>
-<td align="left">Time data type</td>
-</tr>
-<tr>
-<td align="left"><code>timetz</code></td>
-<td align="left">12 bytes</td>
-<td align="left">Time with timezone data type</td>
-</tr>
-<tr>
-<td align="left"><code>timestamp</code></td>
-<td align="left">8 bytes</td>
-<td align="left">Timestamp data type</td>
-</tr>
-<tr>
-<td align="left"><code>timestamptz</code></td>
-<td align="left">8 bytes</td>
-<td align="left">Timestamp with timezone data type</td>
-</tr>
-<tr>
-<td align="left"><code>interval</code></td>
-<td align="left">16 bytes</td>
-<td align="left">Interval data type</td>
-</tr>
-</tbody>
-</table>
-<h2 id="built-in-variable-length-types">Built-in variable length types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>bpchar</code></td>
-<td align="left">variable</td>
-<td align="left">variable length text with whitespace paddings</td>
-</tr>
-<tr>
-<td align="left"><code>varchar</code></td>
-<td align="left">variable</td>
-<td align="left">variable length text type</td>
-</tr>
-<tr>
-<td align="left"><code>text</code></td>
-<td align="left">variable</td>
-<td align="left">variable length text type</td>
-</tr>
-<tr>
-<td align="left"><code>bytea</code></td>
-<td align="left">variable</td>
-<td align="left">variable length binary type</td>
-</tr>
-</tbody>
-</table>
-<h2 id="built-in-unstructured-data-types">Built-in unstructured data types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>jsonb</code></td>
-<td align="left">variable</td>
-<td align="left"></td>
-</tr>
-</tbody>
-</table>
+<h2 id="date-and-time-types">Date and time types</h2>
+<dl>
+<dt><code>date</code> [length: 4bytes]</dt>
+<dd>Date data type</dd>
+<dt><code>time</code> (alias <code>time without time zone</code>) [length: 8bytes]</dt>
+<dd>Time data type</dd>
+<dt><code>timetz</code> (alias <code>time with time zone</code>) [length: 12bytes]</dt>
+<dd>Time with timezone data type</dd>
+<dt><code>timestamp</code> (alias <code>timestamp without time zone</code>) [length: 8bytes]</dt>
+<dd>Timestamp data type</dd>
+<dt><code>timestamptz</code> (alias <code>timestamp with time zone</code>) [length: 8bytes]</dt>
+<dd>Timestamp with timezone data type</dd>
+<dt><code>interval</code> [length: 16bytes]</dt>
+<dd>Interval data type</dd>
+</dl>
+<h2 id="variable-length-types">Variable length types</h2>
+<dl>
+<dt><code>bpchar</code> [length: variable]</dt>
+<dd>variable length text with whitespace paddings</dd>
+<dt><code>varchar</code> [length: variable]</dt>
+<dd>variable length text type</dd>
+<dt><code>text</code> [length: variable]</dt>
+<dd>variable length text type</dd>
+<dt><code>bytea</code> [length: variable]</dt>
+<dd>variable length binary type</dd>
+</dl>
+<h2 id="unstructured-data-types">unstructured data types</h2>
+<dl>
+<dt><code>jsonb</code> [length: variable]</dt>
+<dd>JSON data type with binary indexed keys</dd>
+</dl>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>Pay attention for the two points below, when GPU processes <code>jsonb</code> data types.
@@ -312,102 +224,39 @@ To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type
 In case when <code>jsonb</code> data length exceeds the threshold of <a href="https://www.postgresql.org/docs/current/storage-toast.html">datum TOASTen</a>, entire <code>jsonb</code> value is written out to TOAST table, thus, GPU cannot process these values and invokes inefficient CPU-fallback operations.
 Regarding to the 2nd problem, you can extend table's storage option <code>toast_tuple_target</code> to enlarge the threshold for datum TOASTen.</p>
 </div>
-<h2 id="built-in-miscellaneous-types">Built-in miscellaneous types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>boolean</code></td>
-<td align="left">1 byte</td>
-<td align="left">Boolean data type</td>
-</tr>
-<tr>
-<td align="left"><code>money</code></td>
-<td align="left">8 bytes</td>
-<td align="left">Money data type</td>
-</tr>
-<tr>
-<td align="left"><code>uuid</code></td>
-<td align="left">16 bytes</td>
-<td align="left">UUID data type</td>
-</tr>
-<tr>
-<td align="left"><code>macaddr</code></td>
-<td align="left">6 bytes</td>
-<td align="left">Network MAC address data type</td>
-</tr>
-<tr>
-<td align="left"><code>inet</code></td>
-<td align="left">7 or 19 bytes</td>
-<td align="left">Network address data type</td>
-</tr>
-<tr>
-<td align="left"><code>cidr</code></td>
-<td align="left">7 or 19 bytes</td>
-<td align="left">Network address data type</td>
-</tr>
-</tbody>
-</table>
-<h2 id="built-in-range-data-types">Built-in range data types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>int4range</code></td>
-<td align="left">14 bytes</td>
-<td align="left">Range type of 32bit integer</td>
-</tr>
-<tr>
-<td align="left"><code>int8range</code></td>
-<td align="left">22 bytes</td>
-<td align="left">Range type of 64bit integer</td>
-</tr>
-<tr>
-<td align="left"><code>tsrange</code></td>
-<td align="left">22 bytes</td>
-<td align="left">Range type of timestamp data</td>
-</tr>
-<tr>
-<td align="left"><code>tstzrange</code></td>
-<td align="left">22 bytes</td>
-<td align="left">Range type of timestamp with timezone data</td>
-</tr>
-<tr>
-<td align="left"><code>daterange</code></td>
-<td align="left">14 bytes</td>
-<td align="left">Range type of date type</td>
-</tr>
-</tbody>
-</table>
-<h2 id="postgis-data-types">PostGIS data types</h2>
-<table>
-<thead>
-<tr>
-<th align="left">SQL data types</th>
-<th align="left">Length</th>
-<th align="left">Memo</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="left"><code>geometry</code></td>
-<td align="left">variable</td>
-<td align="left">Geometry object of PostGIS</td>
-</tr>
-</tbody>
-</table>
+<h2 id="miscellaneous-types">Miscellaneous types</h2>
+<dl>
+<dt><code>boolean</code> [length: 1byte]</dt>
+<dd>Boolean data type</dd>
+<dt><code>money</code> [length: 8bytes]</dt>
+<dd>Money data type</dd>
+<dt><code>uuid</code>  [length: 16bytes]</dt>
+<dd>UUID data type</dd>
+<dt><code>macaddr</code> [length: 6bytes]</dt>
+<dd>Network MAC address data type</dd>
+<dt><code>inet</code> [length: 7 or 19bytes]</dt>
+<dd>Network address data type</dd>
+<dt><code>cidr</code> [length: 7 or 19butes]</dt>
+<dd>Network address data type</dd>
+</dl>
+<h2 id="range-data-types">Range data types</h2>
+<dl>
+<dt><code>int4range</code> [length: 14bytes]</dt>
+<dd>Range type of 32bit integer</dd>
+<dt><code>int8range</code> [length: 22bytes]</dt>
+<dd>Range type of 64bit integer</dd>
+<dt><code>tsrange</code> [length: 22bytes]</dt>
+<dd>Range type of timestamp data</dd>
+<dt><code>tstzrange</code> [length: 22bytes]</dt>
+<dd>Range type of timestamp with timezone data</dd>
+<dt><code>daterange</code> [length: 14bytes]</dt>
+<dd>Range type of date type</dd>
+</dl>
+<h2 id="geometry-data-types">Geometry data types</h2>
+<dl>
+<dt><code>geometry</code> [length: variable]</dt>
+<dd>Geometry object of PostGIS</dd>
+</dl>
               
             </div>
           </div>
@@ -418,7 +267,7 @@ Regarding to the 2nd problem, you can extend table's storage option <code>toast_
         <a href="../ref_devfuncs/" class="btn btn-neutral float-right" title="Functions and Operators">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../gstore_fdw/" class="btn btn-neutral" title="GPU Memory Store"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../gpucache/" class="btn btn-neutral" title="GPU Cache"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -444,7 +293,7 @@ Regarding to the 2nd problem, you can extend table's storage option <code>toast_
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../gstore_fdw/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../gpucache/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
         <span style="margin-left: 15px"><a href="../ref_devfuncs/" style="color: #fcfcfc">Next &raquo;</a></span>

@@ -569,9 +569,14 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
+	/* init misc variables */
+	PAGE_SIZE = sysconf(_SC_PAGESIZE);
+	PAGE_MASK = PAGE_SIZE - 1;
+	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
+	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
+
 	/* load NVIDIA/HeteroDB related stuff, if any */
 	pgstrom_init_nvrtc();
-	pgstrom_init_cufile();
 	pgstrom_init_extra();
 
 	/* dump version number */
@@ -581,12 +586,6 @@ _PG_init(void)
 #else
 	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
 #endif
-	/* init misc variables */
-	PAGE_SIZE = sysconf(_SC_PAGESIZE);
-	PAGE_MASK = PAGE_SIZE - 1;
-	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
-	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
-
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_common_guc();
 	pgstrom_init_shmbuf();

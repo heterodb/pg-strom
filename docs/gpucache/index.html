@@ -9,7 +9,7 @@
   <meta name="author" content="PG-Strom Development Team">
   
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>GPU Memory Store - PG-Strom Manual</title>
+  <title>GPU Cache - PG-Strom Manual</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
   <link rel="stylesheet" href="../css/theme.css" />
@@ -21,8 +21,8 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "GPU Memory Store";
-    var mkdocs_page_input_path = "gstore_fdw.md";
+    var mkdocs_page_name = "GPU Cache";
+    var mkdocs_page_input_path = "gpucache.md";
     var mkdocs_page_url = null;
   </script>
   
@@ -46,7 +46,7 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-  [<a href="../ja/gstore_fdw/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+  [<a href="../ja/gpucache/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
 </div>
       </div>
 
@@ -78,13 +78,27 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GPU Memory Store</a>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GPU Cache</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
+    <li class="toctree-l2"><a class="reference internal" href="#architecture">Architecture</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#maintenance">Maintenance</a>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-customize">GPU Cache Customize</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-options">GPU Cache Options</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#operations">Operations</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#confirm-gpu-cache-usage">Confirm GPU Cache usage</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#check-status-of-gpu-cache">Check status of GPU Cache</a>
+    </li>
+        </ul>
     </li>
     </ul>
                     </li>
@@ -136,7 +150,7 @@
         
       
     
-    <li>GPU Memory Store</li>
+    <li>GPU Cache</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -149,33 +163,72 @@
               
                 <h1 id="gpu-cache">GPU Cache</h1>
 <h2 id="overview">Overview</h2>
-<!--
+<p><img alt="GPU Cache Usage" src="../img/gpucache_usage.png" /></p>
+<h2 id="architecture">Architecture</h2>
+<p><img alt="GPU Cache Architecture" src="../img/gpucache_arch.png" /></p>
+<h2 id="configuration">Configuration</h2>
+<pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
+                  execute function pgstrom.gpucache_sync_trigger();
+=# create trigger stmt_sync after truncate on dpoints_even for statement
+                  execute function pgstrom.gpucache_sync_trigger();
+=# alter table dpoints_even enable always trigger row_sync;
+=# alter table dpoints_even enable always trigger stmt_sync;
+</code></pre>
+<h3 id="gpu-cache-customize">GPU Cache Customize</h3>
+<pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
+   execute function pgstrom.gpucache_sync_trigger('max_num_rows=2500000,redo_buffer_size=100m');
+</code></pre>
+<h3 id="gpu-cache-options">GPU Cache Options</h3>
+<p>Below is the GPU Cache related PostgreSQL configuration parameters.</p>
+<pre><code> LOG:  database system is ready to accept connections
+ LOG:  background worker &quot;GPUCache Startup Preloader&quot; (PID 856418) exited with exit code 1
+ LOG:  background worker &quot;GPUCache Startup Preloader&quot; (PID 856427) exited with exit code 1
+ LOG:  create GpuCacheSharedState dpoints:164c95f71
+ LOG:  gpucache: AllocMemory dpoints:164c95f71 (main_sz=772505600, extra_sz=0)
+ LOG:  gpucache: auto preload 'public.dpoints' (DB: postgres)
+ LOG:  create GpuCacheSharedState mytest:1773a589b
+ LOG:  gpucache: auto preload 'public.mytest' (DB: postgres)
+ LOG:  gpucache: AllocMemory mytest:1773a589b (main_sz=675028992, extra_sz=0)
 
-
-
-
-
-
--->
-
-<p>under construction</p>
+</code></pre>
 <h2 id="operations">Operations</h2>
-<!--
-テーブル定義、オプション、チューニングのヒント（PMEMとかreuse
--->
+<h3 id="confirm-gpu-cache-usage">Confirm GPU Cache usage</h3>
+<pre><code>=# explain
+   select pref, city, count(*)
+     from giscity g, dpoints d
+    where pref = 'Tokyo'
+      and st_contains(g.geom,st_makepoint(d.x, d.y))
+    group by pref, city;
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=5638809.75..5638859.99 rows=5024 width=29)
+   Group Key: g.pref, g.city
+   -&gt;  Custom Scan (GpuPreAgg)  (cost=5638696.71..5638759.51 rows=5024 width=29)
+         Reduction: Local
+         Combined GpuJoin: enabled
+         GPU Preference: GPU0 (NVIDIA Tesla V100-PCIE-16GB)
+         -&gt;  Custom Scan (GpuJoin) on dpoints d  (cost=631923.57..5606933.23 rows=50821573 width=21)
+               Outer Scan: dpoints d  (cost=0.00..141628.18 rows=7999618 width=16)
+               Depth 1: GpuGiSTJoin(nrows 7999618...50821573)
+                        HeapSize: 3251.36KB
+                        IndexFilter: (g.geom ~ st_makepoint(d.x, d.y)) on giscity_geom_idx
+                        JoinQuals: st_contains(g.geom, st_makepoint(d.x, d.y))
+               GPU Preference: GPU0 (NVIDIA Tesla V100-PCIE-16GB)
+               GPU Cache: NVIDIA Tesla V100-PCIE-16GB [max_num_rows: 12000000, main: 772.51M, extra: 0]
+               -&gt;  Seq Scan on giscity g  (cost=0.00..8929.24 rows=6353 width=1883)
+                     Filter: ((pref)::text = 'Tokyo'::text)
+(16 rows)
 
-<p>under construction</p>
-<h2 id="maintenance">Maintenance</h2>
-<p>under construction</p>
-<!--
-
-![Architecture of Gstore_Fdw](./img/gstore_fdw-overview.png)
-
-![Replication/Backup of Gstore_Fdw](./img/gstore_fdw-replication.png)
-
-![Internal Layout of Gstore_Fdw](./img/gstore_fdw-layout.png)
-
--->
+</code></pre>
+<h3 id="check-status-of-gpu-cache">Check status of GPU Cache</h3>
+<pre><code>=# select * from pgstrom.gpucache_info ;
+ database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
+  config_options
+--------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+(2 rows)
+</code></pre>
               
             </div>
           </div>

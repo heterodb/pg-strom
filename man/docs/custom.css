@@ -1,0 +1,10 @@
+p.caption {
+	background: #606060;
+	color: #e8e8e8;
+}
+
+.rst-content dl:not(.docutils) dt {
+	width: 100%;
+}
+
+

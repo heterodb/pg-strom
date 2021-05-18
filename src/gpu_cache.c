@@ -154,6 +154,7 @@ void	gpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 
 /*
  * gpucache_sync_trigger_function_oid
@@ -1720,6 +1721,147 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(rc);
 }
 
+/*
+ * pgstrom_gpucache_info
+ */
+static List *
+__pgstrom_gpucache_info(void)
+{
+	slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+	dlist_head *slot;
+	dlist_iter	iter;
+	int			hindex;
+	GpuCacheSharedState *gc_sstate;
+	GpuCacheSharedState *gc_temp;
+	List	   *results = NIL;
+
+	SpinLockAcquire(lock);
+	PG_TRY();
+	{
+		for (hindex = 0; hindex < GPUCACHE_SHARED_DESC_NSLOTS; hindex++)
+		{
+			slot = &gcache_shared_head->gcache_sstate_slot[hindex];
+
+			dlist_foreach (iter, slot)
+			{
+				gc_sstate = dlist_container(GpuCacheSharedState,
+											chain, iter.cur);
+				gc_temp = pmemdup(gc_sstate, sizeof(GpuCacheSharedState));
+				results = lappend(results, gc_temp);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(lock);
+
+	return results;
+}
+
+Datum
+pgstrom_gpucache_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	GpuCacheSharedState *gc_sstate;
+	List	   *info_list;
+	Datum		values[14];
+	bool		isnull[14];
+	HeapTuple	tuple;
+	char	   *database_name;
+	char	   *options;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc	tupdesc;
+		MemoryContext oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+		tupdesc = CreateTemplateTupleDesc(14);
+		TupleDescInitEntry(tupdesc,  1, "database_oid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  2, "database_name",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  3, "table_oid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  4, "table_name",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  5, "signature",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc,  6, "gpu_main_sz",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc,  7, "gpu_extra_sz",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc,  8, "redo_write_ts",
+						   TIMESTAMPTZOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  9, "redo_write_nitems",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 10, "redo_write_pos",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 11, "redo_read_nitems",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 12, "redo_read_pos",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 13, "redo_sync_pos",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 14, "config_options",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		fncxt->user_fctx = __pgstrom_gpucache_info();
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+	info_list = (List *)fncxt->user_fctx;
+	if (info_list == NIL)
+		SRF_RETURN_DONE(fncxt);
+	gc_sstate = linitial(info_list);
+	fncxt->user_fctx = list_delete_first(info_list);
+
+	memset(isnull, 0, sizeof(isnull));
+	database_name = get_database_name(gc_sstate->database_oid);
+
+	values[0] = ObjectIdGetDatum(gc_sstate->database_oid);
+	values[1] = CStringGetTextDatum(database_name);
+	values[2] = ObjectIdGetDatum(gc_sstate->table_oid);
+	values[3] = CStringGetTextDatum(gc_sstate->table_name);
+	values[4] = Int8GetDatum(gc_sstate->signature);
+	values[5] = Int8GetDatum(gc_sstate->gpu_main_size);
+	values[6] = Int8GetDatum(gc_sstate->gpu_extra_size);
+	values[7] = TimestampGetDatum(gc_sstate->redo_write_timestamp);
+	values[8] = Int8GetDatum(gc_sstate->redo_write_nitems);
+	values[9] = Int8GetDatum(gc_sstate->redo_write_pos);
+	values[10] = Int8GetDatum(gc_sstate->redo_read_nitems);
+	values[11] = Int8GetDatum(gc_sstate->redo_read_pos);
+	values[12] = Int8GetDatum(gc_sstate->redo_sync_pos);
+
+	if (gc_sstate->cuda_dindex >= 0 &&
+		gc_sstate->cuda_dindex < numDevAttrs)
+	{
+		options = psprintf("gpu_device_id=%d,"
+						   "max_num_rows=%ld,"
+						   "redo_buffer_size=%zu,"
+						   "gpu_sync_interval=%d,"
+						   "gpu_sync_threshold=%zu",
+						   devAttrs[gc_sstate->cuda_dindex].DEV_ID,
+						   gc_sstate->max_num_rows,
+						   gc_sstate->redo_buffer_size,
+						   gc_sstate->gpu_sync_interval,
+						   gc_sstate->gpu_sync_threshold);
+		values[13] = CStringGetTextDatum(options);
+	}
+	else
+	{
+		isnull[13] = true;
+	}
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+
 /* ---------------------------------------------------------------- *
  *
  * Executor callbacks
@@ -1882,21 +2024,51 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 	size_t		gpu_main_size = 0UL;
 	size_t		gpu_extra_size = 0UL;
 
+	/* GPU memory usage */
+	if (gcache_state->gc_desc)
+	{
+		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
+		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
+
+		gpu_main_size = gc_sstate->gpu_main_size;
+		gpu_extra_size = gc_sstate->gpu_extra_size;
+	}
+	else
+	{
+		GpuCacheSharedState *gc_sstate;
+		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+		SpinLockAcquire(lock);
+		gc_sstate = lookupGpuCacheSharedState(MyDatabaseId,
+											  RelationGetRelid(rel),
+											  gcache_state->signature);
+		if (gc_sstate)
+		{
+			gpu_main_size = gc_sstate->gpu_main_size;
+			gpu_extra_size = gc_sstate->gpu_extra_size;
+		}
+		SpinLockRelease(lock);
+	}
+
 	/* config options */
 	if (gc_options->cuda_dindex >= 0 &&
 		gc_options->cuda_dindex < numDevAttrs)
 	{
 		if (!pgstrom_regression_test_mode)
 		{
-			sprintf(temp, "%s [max_num_rows: %ld]",
+			sprintf(temp, "%s [max_num_rows: %ld, main: %s, extra: %s]",
 					devAttrs[gc_options->cuda_dindex].DEV_NAME,
-					gc_options->max_num_rows);
+					gc_options->max_num_rows,
+					format_numeric(gpu_main_size),
+					format_numeric(gpu_extra_size));
 		}
 		else
 		{
-			sprintf(temp, "GPU%d [max_num_rows: %ld]",
+			sprintf(temp, "GPU%d [max_num_rows: %ld, main: %s, extra: %s]",
 					gc_options->cuda_dindex,
-					gc_options->max_num_rows);
+					gc_options->max_num_rows,
+					format_numeric(gpu_main_size),
+					format_numeric(gpu_extra_size));
 		}
 		ExplainPropertyText("GPU Cache", temp, es);
 	}
@@ -1941,46 +2113,6 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 			ExplainPropertyInteger("GPU Cache Options:gpu_sync_interval", "s",
 								   gc_options->gpu_sync_interval, es);
 		}
-	}
-
-	/* GPU memory usage */
-	if (gcache_state->gc_desc)
-	{
-		GpuCacheDesc   *gc_desc = gcache_state->gc_desc;
-		GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
-
-		gpu_main_size = gc_sstate->gpu_main_size;
-		gpu_extra_size = gc_sstate->gpu_extra_size;
-	}
-	else
-	{
-		GpuCacheSharedState *gc_sstate;
-		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
-
-		SpinLockAcquire(lock);
-		gc_sstate = lookupGpuCacheSharedState(MyDatabaseId,
-											  RelationGetRelid(rel),
-											  gcache_state->signature);
-		if (gc_sstate)
-		{
-			gpu_main_size = gc_sstate->gpu_main_size;
-			gpu_extra_size = gc_sstate->gpu_extra_size;
-		}
-		SpinLockRelease(lock);
-	}
-
-	if (es->format == EXPLAIN_FORMAT_TEXT)
-	{
-		snprintf(temp, sizeof(temp),
-				 "main: %s, extra: %s",
-				 format_numeric(gpu_main_size),
-				 format_numeric(gpu_extra_size));
-		ExplainPropertyText("GPU Cache Size", temp, es);
-	}
-	else
-	{
-		ExplainPropertyInteger("GPU Cache Main Size", NULL, gpu_main_size, es);
-		ExplainPropertyInteger("GPU Cache Extra Size", NULL, gpu_extra_size, es);
 	}
 }
 

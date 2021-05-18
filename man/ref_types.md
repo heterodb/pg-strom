@@ -10,28 +10,57 @@ PG-Strom support the following data types for use on GPU device.
 @ja{
 ## 数値データ型
 
-|SQLデータ型       |データ長|備考|
-|:-----------------|:-------|:---|
-|`smallint`        |2 bytes |16bit 整数型|
-|`integer`         |4 bytes |32bit 整数型|
-|`bigint`          |8 bytes |64bit 整数型|
-|`float2`          |2 bytes |半精度浮動小数点型。PG-Stromによる独自拡張。|
-|`real`            |4 bytes |単精度浮動小数点型|
-|`float`           |8 bytes |倍精度浮動小数点型|
-|`numeric`         |可変長  |内部形式は128bit固定少数点型|
+`int1` [データ長: 1byte]
+:   8bit整数型。PG-Stromによる独自拡張
+
+`int2` (別名 `smallint`)  [データ長: 2bytes]
+:   16bit整数型
+
+`int4` (別名 `int`)  [データ長: 4bytes]
+:   32bit整数型
+
+`int8` (別名 `bigint`)  [データ長: 8bytes]
+:   64bit整数型
+
+`float2`  [データ長: 2bytes]
+:   半精度浮動小数点型。PG-Stromによる独自拡張
+
+`float4` (別名 `real`) [データ長: 4bytes]
+:   単精度浮動小数点型
+
+`float8` (別名 `double precision`) [データ長: 8bytes]
+:   倍精度浮動小数点型
+
+`numeric` [データ長: 可変]
+:   実数型。GPU側では128bit固定小数点として扱われる。
 }
+
 @en{
 ## Numeric types
 
-|SQL data types    |Length  |Memo                   |
-|:-----------------|:-------|:----------------------|
-|`smallint`        |2 bytes |16bit integer data type|
-|`integer`         |4 bytes |32bit integer data type|
-|`bigint`          |8 bytes |64bit integer data type|
-|`float2`          |2 bytes |Half precision data type. An extra data type by PG-Strom|
-|`real`            |4 bytes |Single precision floating-point data type|
-|`float`           |8 bytes |Double precision floating-point data type|
-|`numeric`         |variable|mapped to 128bit fixed-point numerical internal format|
+`int1` [length: 1byte]
+:   8bit integer data type; enhanced data type by PG-Strom
+
+`int2` (alias `smallint`)  [length: 2bytes]
+:   16bit integer data type
+
+`int4` (alias `int`)  [length: 4bytes]
+:   32bit integer data type
+
+`int8` (alias `bigint`)  [length: 8bytes]
+:   64bit integer data type
+
+`float2`  [length: 2bytes]
+:   Half precision data type; enhanced data type by PG-Strom
+
+`float4` (alias `real`) [length: 4bytes]
+:   Single precision floating-point data type
+
+`float8` (alias `double precision`) [length: 8bytes]
+:   Double precision floating-point data type
+
+`numeric` [length: variable]
+:   Real number data type; handled as a 128bit fixed-point value in GPU
 }
 
 @ja{
@@ -57,59 +86,86 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-## 標準の日付時刻型
+## 日付時刻型
 
-|SQLデータ型       |データ長|備考        |
-|:-----------------|:-------|:-----------|
-|`date`            |4 bytes |日付データ型|
-|`time`            |8 bytes |時刻データ型|
-|`timetz`          |12 bytes|タイムゾーン付き時刻データ型|
-|`timestamp`       |8 bytes |タイムスタンプ型|
-|`timestamptz`     |8 bytes |タイムゾーン付きタイムスタンプ型|
-|`interval`        |16 bytes|時間間隔型  |
+`date` [データ長: 4bytes]
+:   日付データ型
+
+`time` (別名 `time without time zone`) [データ長: 8bytes]
+:   時刻データ型
+
+`timetz` (別名 `time with time zone`) [データ長: 12bytes]
+:   時刻データ型（タイムゾーン付き）
+
+`timestamp` (別名 `timestamp without time zone`) [データ長: 8bytes]
+:   タイムスタンプ型
+
+`timestamptz` (別名 `timestamp with time zone`) [データ長: 8bytes]
+:   タイムスタンプ型（タイムゾーン付き）
+
+`interval` [データ長: 16bytes]
+:   時間間隔型
 }
 
 @en{
-## Built-in date and time types
+## Date and time types
 
-|SQL data types    |Length  |Memo|
-|:-----------------|:-------|:---|
-|`date`            |4 bytes |Date data type     |
-|`time`            |8 bytes |Time data type     |
-|`timetz`          |12 bytes|Time with timezone data type|
-|`timestamp`       |8 bytes |Timestamp data type|
-|`timestamptz`     |8 bytes |Timestamp with timezone data type|
-|`interval`        |16 bytes|Interval data type|
+`date` [length: 4bytes]
+:   Date data type
+
+`time` (alias `time without time zone`) [length: 8bytes]
+:   Time data type
+
+`timetz` (alias `time with time zone`) [length: 12bytes]
+:   Time with timezone data type
+
+`timestamp` (alias `timestamp without time zone`) [length: 8bytes]
+:   Timestamp data type
+
+`timestamptz` (alias `timestamp with time zone`) [length: 8bytes]
+:   Timestamp with timezone data type
+
+`interval` [length: 16bytes]
+:   Interval data type
 }
 
 @ja{
-## 標準の可変長データ型
+## 可変長データ型
 
-|SQLデータ型       |データ長|備考            |
-|:-----------------|:-------|:---------------|
-|`bpchar`          |可変長  |可変長テキスト型（空白パディングあり）|
-|`varchar`         |可変長  |可変長テキスト型|
-|`text`            |可変長  |可変長テキスト型|
-|`bytea`           |可変長  |可変長バイナリ型|
+`bpchar` [データ長: 可変長]
+:   可変長テキスト型（空白パディングあり）
+
+`varchar` [データ長: 可変長]
+:   可変長テキスト型
+
+`text` [データ長: 可変長]
+:   可変長テキスト型
+
+`bytea` [データ長: 可変長]
+:   可変長バイナリ型
 }
 
 @en{
-## Built-in variable length types
+## Variable length types
 
-|SQL data types    |Length  |Memo          |
-|:-----------------|:-------|:-------------|
-|`bpchar`          |variable|variable length text with whitespace paddings|
-|`varchar`         |variable|variable length text type|
-|`text`            |variable|variable length text type|
-|`bytea`           |variable|variable length binary type|
+`bpchar` [length: variable]
+:   variable length text with whitespace paddings
+
+`varchar` [length: variable]
+:   variable length text type
+
+`text` [length: variable]
+:   variable length text type
+
+`bytea` [length: variable]
+:   variable length binary type
 }
 
 @ja{
-## 標準の非構造データ型
+## 非構造データ型
 
-|SQLデータ型      |データ長|備考|
-|:----------------|:-------|:---|
-|`jsonb`          |可変長  |    |
+`jsonb` [length: 可変長]
+:   バイナリインデックスを内包するJSONデータ型
 
 !!! Note
     `jsonb`データ型をGPUで処理させる場合には、次の2つの点に留意してください。
@@ -117,11 +173,10 @@ PG-Strom support the following data types for use on GPU device.
     後者の問題に対しては、テーブルのストレージオプション`toast_tuple_target`を拡大し、TOAST化の閾値を引き上げる事である程度は回避する事も可能です。
 }
 @en{
-## Built-in unstructured data types
+## unstructured data types
 
-|SQL data types   |Length  |Memo|
-|:----------------|:-------|:---|
-|`jsonb`          |variable|    |
+`jsonb` [length: variable]
+:   JSON data type with binary indexed keys
 
 !!! Note
     Pay attention for the two points below, when GPU processes `jsonb` data types.
@@ -131,66 +186,95 @@ PG-Strom support the following data types for use on GPU device.
 }
 
 @ja{
-## 標準の雑多なデータ型
+## 雑多なデータ型
 
-|SQLデータ型       |データ長|備考          |
-|:-----------------|:-------|:-------------|
-|`boolean`         |1 byte  |論理値データ型|
-|`money`           |8 bytes |通貨データ型  |
-|`uuid`            |16 bytes|UUIDデータ型  |
-|`macaddr`         |6 bytes |ネットワークMACアドレス型|
-|`inet`            |7 or 19 bytes|ネットワークアドレス型|
-|`cidr`            |7 or 19 bytes|ネットワークアドレス型|
+`boolean` [データ長: 1byte]
+:   論理値データ型
 
+`money` [データ長: 8bytes]
+:   通貨データ型
 
+`uuid`  [データ長: 16bytes]
+:   UUIDデータ型
+
+`macaddr` [データ長: 6bytes]
+:   ネットワークMACアドレス型
+
+`inet` [データ長: 7 or 19bytes]
+:   ネットワークアドレス型
+
+`cidr` [データ長: 7 or 19butes]
+:   ネットワークアドレス型
 }
 @en{
-## Built-in miscellaneous types
+## Miscellaneous types
 
-|SQL data types    |Length  |Memo             |
-|:-----------------|:-------|:----------------|
-|`boolean`         |1 byte  |Boolean data type|
-|`money`           |8 bytes |Money data type  |
-|`uuid`            |16 bytes|UUID data type   |
-|`macaddr`         |6 bytes |Network MAC address data type|
-|`inet`            |7 or 19 bytes|Network address data type|
-|`cidr`            |7 or 19 bytes|Network address data type|
+`boolean` [length: 1byte]
+:   Boolean data type
+
+`money` [length: 8bytes]
+:   Money data type
+
+`uuid`  [length: 16bytes]
+:   UUID data type
+
+`macaddr` [length: 6bytes]
+:   Network MAC address data type
+
+`inet` [length: 7 or 19bytes]
+:   Network address data type
+
+`cidr` [length: 7 or 19butes]
+:   Network address data type
 }
 
 @ja{
-## 標準の範囲型
+## 範囲型
 
-|SQLデータ型       |データ長|備考             |
-|:-----------------|:-------|:----------------|
-|`int4range`       |14 bytes|32bit整数値範囲型|
-|`int8range`       |22 bytes|64bit整数値範囲型|
-|`tsrange`         |22 bytes|タイムスタンプ範囲型|
-|`tstzrange`       |22 bytes|タイムゾーン付きタイムスタンプ範囲型|
-|`daterange`       |14 bytes|日付データ範囲型 |
+`int4range` [データ長: 14bytes]
+:   32bit整数値範囲型
+
+`int8range` [データ長: 22bytes]
+:   64bit整数値範囲型
+
+`tsrange` [データ長: 22bytes]
+:   タイムスタンプ範囲型
+
+`tstzrange` [データ長: 22bytes]
+:   タイムゾーン付きタイムスタンプ範囲型
+
+`daterange` [データ長: 14bytes]
+:   日付データ範囲型
 }
-@en{
-## Built-in range data types
 
-|SQL data types    |Length  |Memo                       |
-|:-----------------|:-------|:--------------------------|
-|`int4range`       |14 bytes|Range type of 32bit integer|
-|`int8range`       |22 bytes|Range type of 64bit integer|
-|`tsrange`         |22 bytes|Range type of timestamp data|
-|`tstzrange`       |22 bytes|Range type of timestamp with timezone data|
-|`daterange`       |14 bytes|Range type of date type|
+@en{
+## Range data types
+
+`int4range` [length: 14bytes]
+:   Range type of 32bit integer
+
+`int8range` [length: 22bytes]
+:   Range type of 64bit integer
+
+`tsrange` [length: 22bytes]
+:   Range type of timestamp data
+
+`tstzrange` [length: 22bytes]
+:   Range type of timestamp with timezone data
+
+`daterange` [length: 14bytes]
+:   Range type of date type
 }
 
 @ja{
-## PostGISデータ型
+## ジオメトリ型
 
-|SQLデータ型       |データ長|備考                         |
-|:-----------------|:-------|:----------------------------|
-|`geometry`        |可変長  |PostGISジオメトリオブジェクト|
+`geometry` [データ長: 可変]
+:   PostGISジオメトリオブジェクト
 }
 @en{
-## PostGIS data types
+## Geometry data types
 
-|SQL data types   |Length  |Memo                      |
-|:----------------|:-------|:-------------------------|
-|`geometry`       |variable|Geometry object of PostGIS|
+`geometry` [length: variable]
+:   Geometry object of PostGIS
 }

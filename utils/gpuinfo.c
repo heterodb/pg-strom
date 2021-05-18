@@ -43,8 +43,7 @@
 #include <unistd.h>
 #include <cuda.h>
 #include <nvml.h>
-#include "nvme_strom.h"
-#include "heterodb_extra.h"
+#include <heterodb_extra.h>
 
 /*
  * command line options
@@ -72,6 +71,31 @@ cuErrorName(CUresult error_code)
 				__LINE__, ##__VA_ARGS__);			\
 		exit(1);									\
 	} while(0)
+
+/*
+ * HeteroDB's license checker
+ */
+static const heterodb_license_info *
+__heterodbLicenseReload(void)
+{
+	const heterodb_license_info *(*p_heterodb_license_reload)(FILE *out) = NULL;
+	void	   *handle;
+
+	handle = dlopen(HETERODB_EXTRA_FILENAME,
+					RTLD_NOW | RTLD_LOCAL);
+	if (!handle)
+	{
+		handle = dlopen(HETERODB_EXTRA_PATHNAME,
+						RTLD_NOW | RTLD_LOCAL);
+		if (!handle)
+			return NULL;
+	}
+	p_heterodb_license_reload = dlsym(handle, "heterodb_license_reload");
+	if (!p_heterodb_license_reload)
+		return NULL;
+
+	return p_heterodb_license_reload(NULL);
+}
 
 /*
  * attribute format class
@@ -425,14 +449,11 @@ int main(int argc, char *argv[])
 	 * Memo: it must be called after cuInit(0), because the first call of
 	 * CUDA driver setups UUID of GPU devices.
 	 */
-	if (heterodbExtraInit() == 0)
+	linfo = __heterodbLicenseReload();
+	if (linfo && linfo->version != 2)
 	{
-		linfo = heterodbLicenseReload(NULL);
-		if (linfo && linfo->version != 2)
-		{
-			fprintf(stderr, "unknown license format version: %u", linfo->version);
-			linfo = NULL;
-		}
+		fprintf(stderr, "unknown license format version: %u", linfo->version);
+		linfo = NULL;
 	}
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)

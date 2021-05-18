@@ -28,7 +28,7 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 #
 # Source file of CPU portion
 #
-__STROM_OBJS = main.o nvrtc.o cufile.o extra.o \
+__STROM_OBJS = main.o nvrtc.o extra.o \
         shmbuf.o codegen.o datastore.o cuda_program.o \
         gpu_device.o gpu_context.o gpu_mmgr.o \
         nvme_strom.o relscan.o gpu_tasks.o \
@@ -76,8 +76,7 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
-GPUINFO_DEPEND := $(GPUINFO_SOURCE) \
-                  $(STROM_BUILD_ROOT)/src/nvme_strom.h
+GPUINFO_DEPEND := $(GPUINFO_SOURCE)
 GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) \
                  -I $(STROM_BUILD_ROOT)/src \
                  -I $(STROM_BUILD_ROOT)/utils \
@@ -137,8 +136,9 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
 #
 __DOC_FILES = index.md install.md partition.md \
               operations.md sys_admin.md brin.md postgis.md troubles.md \
-	      ssd2gpu.md arrow_fdw.md gstore_fdw.md python.md \
+	      ssd2gpu.md arrow_fdw.md gpucache.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
+              ref_utils.md \
 	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md
 
 #
@@ -192,11 +192,6 @@ endif
 # build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
-endif
-# support of NVIDIA GPUDirect Storage (BETA)
-WITH_CUFILE := $(shell test -e $(LPATH)/cufile.h && echo 1 || echo 0)
-ifeq ($(WITH_CUFILE),1)
-PGSTROM_FLAGS += -DWITH_CUFILE=1 -I $(LPATH)
 endif
 PGSTROM_FLAGS += -DCPU_ARCH=\"$(shell uname -m)\"
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"

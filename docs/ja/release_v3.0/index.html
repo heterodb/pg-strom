@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPUメモリストア</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">リファレンス</span></p>
@@ -99,6 +99,24 @@
     <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_2">動作環境</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">新機能</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpupostgis">GPU版PostGIS対応</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gist">GiSTインデックス対応</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu">GPUキャッシュ機能</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#nvidia-gpudirect-storage">NVIDIA GPUDirect Storage (実験的対応)</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu_1">ユーザ定義のGPUデータ型/関数</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">その他の変更</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">廃止された機能</a>
     </li>
     </ul>
                     </li>
@@ -151,9 +169,15 @@
 <h2 id="_1">概要</h2>
 <p>PG-Strom v3.0における主要な機能強化は以下の通りです。</p>
 <ul>
-<li>ほげ</li>
+<li>いくつかのPostGIS関数がGPUで実行可能となりました。</li>
+<li>GiSTインデックスを使用したGpuJoinが可能となりました。</li>
+<li>GPUキャッシュ機能が実装されました。<ul>
+<li>これは過去のバージョンで実装されていた同名の機能とは別物です。</li>
 </ul>
-<p>新機能のサマリはこちらからダウンロードできます：<a href="../blob/20180417_PGStrom_v2.0_TechBrief.pdf">PG-Strom v2.0 Technical Brief</a>.</p>
+</li>
+<li>NVIDIA GPUDirect Storageに対応しました。（実験的）</li>
+<li>ユーザ定義のGPUデータ型/関数/演算子に対応しました。</li>
+</ul>
 <h2 id="_2">動作環境</h2>
 <ul>
 <li>PostgreSQL v11, v12, v13</li>
@@ -161,6 +185,43 @@
 <li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
 <li>Intel x86 64bit アーキテクチャ(x86_64)</li>
 <li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
+</ul>
+<h2 id="_3">新機能</h2>
+<h3 id="gpupostgis">GPU版PostGIS対応</h3>
+<p>いくつかのPostGIS関数にGPU版を実装しました。
+条件句でこれらのPostGIS関数が使用されている場合、PG-StromはGPU側でこれを実行するようGPUプログラムを自動生成します。</p>
+<h3 id="gist">GiSTインデックス対応</h3>
+<p>ジオメトリ型の列にGiSTインデックスが設定されており、かつ結合条件がインデックスによる絞り込みに対応している場合、
+GpuJoinはGPU側へGiSTインデックスをロードし、これを用いてテーブル同士のJOINを実行します。</p>
+<p>GiSTインデックスの探索はGPUで並列に実行されるため、大幅なパフォーマンスの改善が期待できます。</p>
+<h3 id="gpu">GPUキャッシュ機能</h3>
+<p>GPUデバイスメモリ上に予め領域を確保しておき、対象となるテーブルの複製を保持しておく機能です。
+比較的小規模のデータサイズ（～10GB程度）で、更新頻度の高いデータに対して分析/検索系のクエリを効率よく実行するために設計されました。</p>
+<p>分析/検索系クエリの実行時には、GPU上のキャッシュを参照する事で、テーブルからデータを読み出す事なくGPUでSQLワークロードを処理する事が可能です。</p>
+<h3 id="nvidia-gpudirect-storage">NVIDIA GPUDirect Storage (実験的対応)</h3>
+<p><a href="../ssd2gpu">GPUダイレクトSQL</a>用のドライバとして、従来の nvme_strom カーネルモジュールに加えて、
+NVIDIAが開発を進めている<a href="https://developer.nvidia.com/blog/gpudirect-storage/">GPUDirect Storage</a>にも対応しました。</p>
+<p>これにより、従来からのNVME-SSDやNVME-oFストレージに加えて、SDS(Software Defined Storage)デバイスからのGPUダイレクトSQLが可能となります。</p>
+<p>現在、GPUDirect Storage用のドライバはベータ版のため実験的対応となっています。</p>
+<h3 id="gpu_1">ユーザ定義のGPUデータ型/関数</h3>
+<p>ユーザ定義のGPUデータ型/関数を追加するためのAPIを新たに提供します。
+これにより、PG-Strom自体には手を加えることなく、ニッチな用途のデータ型やそれを処理するためのSQL関数をユーザが独自に定義、実装する事が可能となりました。</p>
+<h2 id="_4">その他の変更</h2>
+<ul>
+<li>独自に <code>int1</code> (8bit整数) データ型、および関連する演算子に対応しました。</li>
+<li><code>pg2arrow</code>に<code>--inner-join</code>および<code>--outer-join</code>オプションを追加しました。PostgreSQLの列数制限を越えた数の列を持つApache Arrowファイルを生成できるようになります。</li>
+<li>マルチGPU環境では、GPUごとに専用のGPU Memory Keeperバックグラウンドワーカーが立ち上がるようになりました。</li>
+<li>PostgreSQL v13.x に対応しました。</li>
+<li>CUDA 11.2 および Ampere世代のGPUに対応しました。</li>
+<li>ScaleFlux社のComputational Storage製品CSD2000シリーズに対応しました。<ul>
+<li>NVIDIA GPUDirect Storageの使用時（<code>nvme_strom</code>カーネルモジュールは対応していません）</li>
+</ul>
+</li>
+</ul>
+<h2 id="_5">廃止された機能</h2>
+<ul>
+<li>PostgreSQL v10.x 系列のサポートが廃止されました。</li>
+<li>Pythonスクリプトとのデータ連携機能（PyStrom）が廃止されました。</li>
 </ul>
               
             </div>

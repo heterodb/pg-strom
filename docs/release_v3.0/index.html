@@ -78,7 +78,7 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                     </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gstore_fdw/">GPU Memory Store</a>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">References</span></p>
@@ -99,6 +99,24 @@
     <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#new-features">New Features</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-rev-postgis-support">GPU-rev PostGIS support</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gist-index-support">GiST-index support</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-mechanism">GPU Cache mechanism</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#other-updates">Other updates</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#deprecated-features">Deprecated Features</a>
     </li>
     </ul>
                     </li>
@@ -150,9 +168,6 @@
 
 <h2 id="overview">Overview</h2>
 <p>Major enhancement in PG-Strom v3.0 includes:</p>
-<ul>
-<li>hoge</li>
-</ul>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v11, v12, v13</li>
@@ -161,6 +176,14 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or newer)</li>
 </ul>
+<h2 id="new-features">New Features</h2>
+<h3 id="gpu-rev-postgis-support">GPU-rev PostGIS support</h3>
+<h3 id="gist-index-support">GiST-index support</h3>
+<h3 id="gpu-cache-mechanism">GPU Cache mechanism</h3>
+<h3 id="nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</h3>
+<h3 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h3>
+<h2 id="other-updates">Other updates</h2>
+<h2 id="deprecated-features">Deprecated Features</h2>
               
             </div>
           </div>
