@@ -849,12 +849,6 @@ errorText(int errcode)
 			return buffer;
 		}
 	}
-#ifdef WITH_CUFILE
-	else if (errcode > CUFILEOP_BASE_ERR)
-	{
-		return cufileop_status_error((CUfileOpError)errcode);
-	}
-#endif
 	snprintf(buffer, sizeof(buffer),
 			 "%d - unknown", errcode);
 	return buffer;

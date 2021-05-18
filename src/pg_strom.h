@@ -200,9 +200,6 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <nvrtc.h>
-#ifdef WITH_CUFILE
-#include <cufile.h>
-#endif
 #include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -218,8 +215,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/vfs.h>
+#include <heterodb_extra.h>
 
-#include "nvme_strom.h"
 #include "arrow_defs.h"
 
 /*
@@ -513,14 +510,6 @@ struct GpuTask
 /*
  * State structure of NVMe-Strom per GpuTaskState
  */
-typedef struct GPUDirectFileDesc
-{
-	int				rawfd;
-#ifdef WITH_CUFILE
-	CUfileHandle_t	fhandle;
-#endif
-} GPUDirectFileDesc;
-
 typedef struct NVMEScanState
 {
 	cl_uint			nrows_per_block;
@@ -969,21 +958,6 @@ extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
 
-extern void	gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc);
-extern void	gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
-										const char *pathname);
-extern void	gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
-extern CUresult gpuDirectMapGpuMemory(CUdeviceptr m_segment,
-									  size_t m_segment_sz,
-									  unsigned long *p_iomap_handle);
-extern CUresult gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
-										unsigned long iomap_handle);
-
-extern void gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
-								 CUdeviceptr m_segment,
-								 unsigned long iomap_handle,
-								 off_t m_offset,
-								 strom_io_vector *iovec);
 extern void	pgstrom_init_gpu_direct(void);
 
 /*
@@ -1404,8 +1378,26 @@ extern void		pgstrom_init_cufile(void);
 /*
  * extra.c
  */
+extern bool		pgstrom_gpudirect_enabled(void);
+extern Size		pgstrom_gpudirect_threshold(void);
 extern void		pgstrom_init_extra(void);
+extern bool		heterodbLicenseCheck(void);
+extern void		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
+									  File pg_fdesc);
+extern void		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
+											const char *pathname);
+extern void		gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
+extern CUresult gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+									  size_t m_segment_sz,
+									  unsigned long *p_iomap_handle);
+extern CUresult gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+										unsigned long iomap_handle);
 
+extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+									 CUdeviceptr m_segment,
+									 unsigned long iomap_handle,
+									 off_t m_offset,
+									 strom_io_vector *iovec);
 /*
  * float2.c
  */
