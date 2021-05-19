@@ -282,7 +282,9 @@ Note that the meaning of each item is as follows: `max_num_rows` indicates the m
 @ja{
 GPUキャッシュの現在の状態を確認するには`pgstrom.gpucache_info`ビューを使用します。
 }
-@en{}
+@en{
+Use the `pgstrom.gpucache_info` view to check the current state of the GPU cache.
+}
 
 ```
 =# select * from pgstrom.gpucache_info ;
@@ -298,7 +300,9 @@ GPUキャッシュの現在の状態を確認するには`pgstrom.gpucache_info`
 このビューで表示されるGPUキャッシュの状態は、その時点で初期ロードが終わっており、GPUデバイスメモリ上に領域が確保されているものだけである事に留意してください。
 つまり、トリガ関数が設定されているが初期ロードが終わっていない（まだ誰もアクセスしていない）場合、潜在的に確保されうるGPUキャッシュはまだ`pgstrom.gpucache_info`には現れません。
 }
-@en{}
+@en{
+Note that `pgstrom.gpucache_info` will only show the status of GPU caches that have been initially loaded and have space allocated on the GPU device memory at that time. In other words, if the trigger function is set but not yet initially loaded (no one has accessed it yet), the potentially allocated GPU cache will not be shown yet.
+}
 
 @ja{
 各フィールドの意味は以下の通りです。
@@ -328,11 +332,43 @@ GPUキャッシュの現在の状態を確認するには`pgstrom.gpucache_info`
 - `redo_read_pos`
     - REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。
 - `redo_sync_pos`
-    - REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。
+    - REDOログバッファに書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。
     - REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。
 - `config_options`
     - GPUキャッシュのオプション文字列です。
 }
 
-@en{}
+@en{
+The meaning of each field is as follows:
+
+- `database_oid`
+    - The OID of the database to which the table with GPU cache enabled exists.
+- `database_name`
+    - The name of the database to which the table with GPU cache enabled exists.
+- `table_oid`
+    - The OID of the table with GPU cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.
+- `table_name`
+    - The name of the table with GPU cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.
+- `signature`
+    - A hash value indicating the uniqueness of the GPU cache. This value may change, for example, before and after executing `ALTER TABLE`.
+- `gpu_main_sz`
+    - The size of the area reserved in the GPU cache for fixed-length data.
+- `gpu_extra_sz`
+    - The size of the area reserved in the GPU cache for variable-length data.
+- `redo_write_ts`
+    - The time when the REDO Log Buffer was last updated.
+- `redo_write_nitems`
+    - The total number of REDO Logs in the REDO Log Buffer.
+- `redo_write_pos`
+    - The total size (in bytes) of the REDO Logs in the REDO Log Buffer.
+- `redo_read_nitems`
+    - The total number of REDO Logs read from the REDO Log Buffer and applied to the GPU.
+- `redo_read_pos`
+    - The total size (in bytes) of REDO Logs read from the REDO Log Buffer and applied to the GPU.
+- `redo_sync_pos`
+    - The position of the REDO Log which is scheduled to be applied to the GPU cache by the background worker on the REDO Log Buffer.
+    - This is used internally to avoid a situation where a large number of sessions generate asynchronous requests at the same time when the remaining REDO Log Buffer is running out.
+- `config_options`
+    - The optional string to customize GPU cache.
+}
 
