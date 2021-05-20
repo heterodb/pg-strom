@@ -62,15 +62,29 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#os-installation">OS Installation</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#post-os-installation-configuration">Post OS Installation Configuration</a>
+    <li class="toctree-l2"><a class="reference internal" href="#packages-to-be-installed">Packages to be installed</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#setup-epel-repository">Setup EPEL Repository</a>
+    <li class="toctree-l3"><a class="reference internal" href="#epel-release-installation">epel-release installation</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">HeteroDB-SWDC Installation</a>
+    <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">heterodb-swdc installation</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit-installation">CUDA Toolkit Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#heterodb-extra-module-installation">HeteroDB extra module installation</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#nvme-strom-kernel-module-installation">NVME-Strom kernel module installation</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cufile-installation">cuFile installation</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#mofed">MOFEDドライバ</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gds">GDS</a>
+    </li>
+        </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgresql-installation">PostgreSQL Installation</a>
     </li>
@@ -198,20 +212,22 @@
 <li><strong>Server Hardware</strong><ul>
 <li>It requires generic x86_64 hardware that can run Linux operating system supported by CUDA Toolkit. We have no special requirement for CPU, storage and network devices.</li>
 <li><a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List">note002:HW Validation List</a> may help you to choose the hardware.</li>
-<li>SSD-to-GPU Direct SQL Execution needs SSD devices which support NVMe specification, and to be installed under the same PCIe Root Complex where GPU is located on.</li>
+<li>GPU Direct SQL Execution needs SSD devices which support NVMe specification, and to be installed under the same PCIe Root Complex where GPU is located on.</li>
 </ul>
 </li>
 <li><strong>GPU Device</strong><ul>
 <li>PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;</li>
-<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a> shows more detailed information. Check this list for the support status of SSD-to-GPU Direct SQL Execution.</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a> shows more detailed information. Check this list for the support status of GPU Direct SQL Execution.</li>
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 7.x series.    - SSD-to-GPU Direct SQL Execution needs Red Hat Enterprise Linux or CentOS version 7.3 or later.</li>
+<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 8.x series.</li>
+<li>GPU Direct SQL Execution (w/ HeteroDB driver) needs Red Hat Enterprise Linux or CentOS version 7.3/8.0 or newer.</li>
+<li>GPU Direct SQL Execution (w/ NVIDIA driver; experimental) needs Red Hat Enterprise Linux or CentOS version 8.3 or newer, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.</li>
 </ul>
 </li>
 <li><strong>PostgreSQL</strong><ul>
-<li>PG-Strom requires PostgreSQL version 9.6 or later. PostgreSQL v9.6 renew the custom-scan interface for CPU-parallel execution or <code>GROUP BY</code> planning, thus, it allows cooperation of custom-plans provides by extension modules.</li>
+<li>PG-Strom v3.0 requires PostgreSQL v11 or later, because of internal APIs like CustomScan, CPU parallelism, partitioning and miscellaneous APIs.</li>
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
@@ -222,69 +238,65 @@
 </ul>
 <h2 id="os-installation">OS Installation</h2>
 <p>Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. <a href="https://developer.nvidia.com/">NVIDIA DEVELOPER ZONE</a> introduces the list of Linux distributions which are supported by CUDA Toolkit.</p>
-<p>In case of Red Hat Enterprise Linux 7.x or CentOS 7.x series, choose "Minimal installation" as base environment, and also check the following add-ons.</p>
+<p>In case of Red Hat Enterprise Linux 8.x or CentOS 8.x series, choose "Minimal installation" as base environment, and also check the following add-ons.</p>
 <ul>
-<li>Debugging Tools</li>
 <li>Development Tools</li>
 </ul>
-<h2 id="post-os-installation-configuration">Post OS Installation Configuration</h2>
-<p>Next to the OS installation, a few additionsl configurations are required to install GPU-drivers and NVMe-Strom driver on the later steps.</p>
-<h3 id="setup-epel-repository">Setup EPEL Repository</h3>
+<h2 id="packages-to-be-installed">Packages to be installed</h2>
+<p>Next to OS installation on the server, several packages should be installed manually.</p>
+<h3 id="epel-release-installation"><code>epel-release</code> installation</h3>
 <p>Several software modules required by PG-Strom are distributed as a part of EPEL (Extra Packages for Enterprise Linux).
 You need to add a repository definition of EPEL packages for yum system to obtain these software.</p>
-<p>One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Module Support). It is a framework to build Linux kernel module for the running Linux kernel on demand; used for NVIDIA's GPU driver or NVMe-Strom which is a kernel module to support SSD-to-GPU Direct SQL Execution.</p>
-<p><code>epel-release</code> package provides the repository definition of EPEL.
-You can obtain this package from the public FTP site of Fedora Project. Downloads the <code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>, and install the package.
-Once <code>epel-release</code> package gets installed, yum system configuration is updated to get software from the EPEL repository.</p>
-<ul>
-<li>Fedora Project Public FTP Site<ul>
-<li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
-</ul>
-</li>
-</ul>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>Walk down the directory: <code>Packages</code> --&gt; <code>e</code>, from the above URL.</p>
-</div>
-<p>Install the <code>epel-release</code> package as follows.</p>
-<pre><code>$ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
-          :
-================================================================================
- Package           Arch        Version     Repository                      Size
-================================================================================
+<p>One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Module Support). It is a framework to build Linux kernel module for the running Linux kernel on demand; used for NVIDIA's GPU driver and related.
+Linux kernel module must be rebuilt according to version-up of Linux kernel, so we don't recommend to operate the system without DKMS.</p>
+<p><code>epel-release</code> package provides the repository definition of EPEL. Install this package as follows:</p>
+<pre><code># dnf install epel-release
+Last metadata expiration check: 0:20:12 ago on Sun 16 May 2021 09:55:37 PM JST.
+Dependencies resolved.
+==========================================================================================
+ Package                  Architecture       Version             Repository          Size
+==========================================================================================
 Installing:
- epel-release      noarch      7-11        /epel-release-7-11.noarch       24 k
+ epel-release             noarch             8-8.el8             extras              23 k
 
 Transaction Summary
-================================================================================
+==========================================================================================
 Install  1 Package
-          :
+
+Total download size: 23 k
+Installed size: 32 k
+Is this ok [y/N]: y
+Downloading Packages:
+epel-release-8-8.el8.noarch.rpm                           563 kB/s |  23 kB     00:00
+            :
 Installed:
-  epel-release.noarch 0:7-11
+  epel-release-8-8.el8.noarch
 
 Complete!
 </code></pre>
-<h3 id="heterodb-swdc-installation">HeteroDB-SWDC Installation</h3>
+<h3 id="heterodb-swdc-installation"><code>heterodb-swdc</code> installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.</p>
 <p><code>heterodb-swdc</code> package provides the repository definition of HeteroDB-SWDC.
-Access to the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a> using Web browser, download the <code>heterodb-swdc-1.0-1.el7.noarch.rpm</code> on top of the file list, then install this package.
+Access to the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a> using Web browser, download the <code>heterodb-swdc-1.2-1.el8.noarch.rpm</code> on top of the file list, then install this package.
 Once heterodb-swdc package gets installed, yum system configuration is updated to get software from the HeteroDB-SWDC repository.</p>
 <p>Install the <code>heterodb-swdc</code> package as follows.</p>
-<pre><code>$ sudo yum install https://heterodb.github.io/swdc/yum/rhel7-x86_64/heterodb-swdc-1.0-1.el7.noarch.rpm
-          :
-================================================================================
- Package         Arch     Version       Repository                         Size
-================================================================================
+<pre><code># dnf install https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-1.2-1.el8.noarch.rpm
+Last metadata expiration check: 2:05:11 ago on Sun 16 May 2021 10:20:40 PM JST.
+heterodb-swdc-1.2-1.el8.noarch.rpm                        335 kB/s | 9.0 kB     00:00
+Dependencies resolved.
+==========================================================================================
+ Package                Architecture    Version               Repository             Size
+==========================================================================================
 Installing:
- heterodb-swdc   noarch   1.0-1.el7     /heterodb-swdc-1.0-1.el7.noarch   2.4 k
+ heterodb-swdc          noarch          1.2-1.el8             @commandline         9.0 k
 
 Transaction Summary
-================================================================================
+==========================================================================================
 Install  1 Package
           :
 Installed:
-  heterodb-swdc.noarch 0:1.0-1.el7
+  heterodb-swdc-1.2-1.el8.noarch
 
 Complete!
 </code></pre>
@@ -346,6 +358,16 @@ options nouveau modeset=0
 EOF
 # dracut -f
 </code></pre>
+<h2 id="heterodb-extra-module-installation">HeteroDB extra module installation</h2>
+<p>あとで追記</p>
+<h3 id="nvme-strom-kernel-module-installation">NVME-Strom kernel module installation</h3>
+<p>元の記述を移動する。</p>
+<h2 id="cufile-installation">cuFile installation</h2>
+<p>This section introduces the installation of cuFile module (NVIDIA GPUDirect Storage), provided by NVIDIA.</p>
+<p>If you don't use the GPUDirectSQL with cuFile driver, you can skip this section.</p>
+<p>Also note that cuFile module is still in open beta at 1-Jun-2021, so descriptions in this section are also experimental.</p>
+<h3 id="mofed">MOFEDドライバ</h3>
+<h3 id="gds">GDS</h3>
 <h2 id="postgresql-installation">PostgreSQL Installation</h2>
 <p>This section introduces PostgreSQL installation with RPM.
 We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>

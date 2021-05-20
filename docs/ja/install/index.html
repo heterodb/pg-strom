@@ -62,15 +62,29 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#os">OSのインストール</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#os_1">OSインストール後の設定</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">追加インストールすべきパッケージ</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#epel">EPELリポジトリの設定</a>
+    <li class="toctree-l3"><a class="reference internal" href="#epel-release">epel-releaseのインストール</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc">HeteroDB-SWDCのインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc">heterodb-swdcのインストール</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit">CUDA Toolkitのインストール</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#heterodb">HeteroDB 拡張モジュールのインストール</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#nvme-strom">NVME-Stromカーネルモジュールのインストール</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cufile">cuFileのインストール</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#mofed">MOFEDドライバ</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gds">GDS</a>
+    </li>
+        </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgresql">PostgreSQLのインストール</a>
     </li>
@@ -78,21 +92,21 @@
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#rpm">RPMによるインストール</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_3">ソースからのインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">ソースからのインストール</a>
         <ul>
-    <li class="toctree-l4"><a class="reference internal" href="#_4">ソースコードの入手</a>
+    <li class="toctree-l4"><a class="reference internal" href="#_5">ソースコードの入手</a>
     </li>
     <li class="toctree-l4"><a class="reference internal" href="#pg-strom_1">PG-Stromのビルド</a>
     </li>
         </ul>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_5">インストール後の設定</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_6">インストール後の設定</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_6">データベースクラスタの作成</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_7">データベースクラスタの作成</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#postgresqlconf">postgresql.confの編集</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#os_2">OSのリソース制限の拡張</a>
+    <li class="toctree-l3"><a class="reference internal" href="#os_1">OSのリソース制限の拡張</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#postgresql_1">PostgreSQLの起動</a>
     </li>
@@ -100,13 +114,13 @@
     </li>
         </ul>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#nvme-strom">NVME-Stromモジュール</a>
+    <li class="toctree-l2"><a class="reference internal" href="#nvme-strom_1">NVME-Stromモジュール</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#_7">モジュールの入手とインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_8">モジュールの入手とインストール</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_8">ライセンスの有効化</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_9">ライセンスの有効化</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_9">カーネルモジュールパラメータ</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_10">カーネルモジュールパラメータ</a>
     </li>
         </ul>
     </li>
@@ -198,95 +212,91 @@
 <li><strong>ハードウェア</strong><ul>
 <li>CUDA ToolkitのサポートするLinuxオペレーティングシステムを動作可能な x86_64 アーキテクチャのハードウェアが必要です。 </li>
 <li>CPU、ストレージ、およびネットワークデバイスには特別な要件はありませんが、<a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List">note002:HW Validation List</a>はハードウェア選定の上で参考になるかもしれません。</li>
-<li>SSD-to-GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。</li>
+<li>GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。</li>
 </ul>
 </li>
 <li><strong>GPUデバイス</strong><ul>
 <li>PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。</li>
-<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a>により詳細な情報が記載されています。SSD-to-GPUダイレクトSQL実行の対応状況に関してもこちらを参照してください。</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a>により詳細な情報が記載されています。GPUダイレクトSQL実行の対応状況に関してもこちらを参照してください。</li>
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン7.xシリーズです。</li>
-<li>SSD-to-GPUダイレクトSQL実行を利用するには、Red Hat Enterprise Linux または CentOS のバージョン7.3以降が必要です。</li>
+<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。</li>
+<li>GPUダイレクトSQL実行（HeteroDBドライバ）を利用するには、Red Hat Enterprise Linux または CentOS のバージョン7.3以降または8.0以降が必要です。</li>
+<li>GPUダイレクトSQL実行（NVIDIAドライバ; 実験的）を利用するには Red Hat Enterprise Linux または CentOS のバージョン 8.3 以降と、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバが必要です。</li>
 </ul>
 </li>
 <li><strong>PostgreSQL</strong><ul>
-<li>PG-Stromの実行にはPostgreSQLバージョン9.6以降が必要です。これは、Custom ScanインターフェースがCPU並列実行やGROUP BYに対応するため刷新され、拡張モジュールが提供するカスタム実行計画を自然な形で統合できるようになったためです。</li>
+<li>PG-Strom v3.0の実行にはPostgreSQLバージョン11以降が必要です。これは、CustomScanやCPU並列実行、パーティショニングやその他の雑多な内部APIとの自然な統合が理由です。</li>
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン9.2以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン10.1以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
 </ul>
 </li>
 </ul>
 <h2 id="os">OSのインストール</h2>
 <p>CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、<a href="https://developer.nvidia.com/">NVIDIA DEVELOPER ZONE</a>において紹介されています。</p>
-<p>Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
+<p>Red Hat Enterprise Linux 8.x系列、またはCentOS 8.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
 <ul>
-<li>デバッグツール</li>
 <li>開発ツール</li>
 </ul>
-<h2 id="os_1">OSインストール後の設定</h2>
-<p>システムへのOSのインストール後、後のステップでGPUドライバとNVMe-Stromドライバをインストールするために、いくつかの追加設定が必要です。</p>
-<h3 id="epel">EPELリポジトリの設定</h3>
+<h2 id="_3">追加インストールすべきパッケージ</h2>
+<p>サーバーへのOSインストール後、いくつかのパッケージを手動でインストールする必要があります。</p>
+<h3 id="epel-release"><code>epel-release</code>のインストール</h3>
 <p>PG-Stromの実行に必要なソフトウェアモジュールのいくつかは、EPEL(Extra Packages for Enterprise Linux)の一部として配布されています。
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
-<p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバや、SSD-to-GPUダイレクトSQL実行をサポートするカーネルモジュール(nvme_strom)が使用しています。
+<p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバなど関連するカーネルモジュールが使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
-<p>EPELリポジトリの定義は<code>epel-release</code>パッケージにより提供されます。
-これはFedora ProjectのパブリックFTPサイトから入手する事が可能で、<code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>をダウンロードし、これをインストールしてください。 
-<code>epel-release</code>パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するための設定がyumシステムへ追加されます。</p>
-<ul>
-<li>Fedora Project Public FTP Site<ul>
-<li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
-</ul>
-</li>
-</ul>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>上記URLから<code>Packages</code>→<code>e</code>へとディレクトリ階層を下ります。</p>
-</div>
-<p>以下のようにepel-releaseパッケージをインストールします。</p>
-<pre><code>$ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
-          :
-================================================================================
- Package           Arch        Version     Repository                      Size
-================================================================================
+<p>EPELリポジトリの定義は<code>epel-release</code>パッケージにより提供されます。以下のようにインストールしてください。</p>
+<pre><code># dnf install epel-release
+Last metadata expiration check: 0:20:12 ago on Sun 16 May 2021 09:55:37 PM JST.
+Dependencies resolved.
+==========================================================================================
+ Package                  Architecture       Version             Repository          Size
+==========================================================================================
 Installing:
- epel-release      noarch      7-11        /epel-release-7-11.noarch       24 k
+ epel-release             noarch             8-8.el8             extras              23 k
 
 Transaction Summary
-================================================================================
+==========================================================================================
 Install  1 Package
-          :
+
+Total download size: 23 k
+Installed size: 32 k
+Is this ok [y/N]: y
+Downloading Packages:
+epel-release-8-8.el8.noarch.rpm                           563 kB/s |  23 kB     00:00
+            :
 Installed:
-  epel-release.noarch 0:7-11
+  epel-release-8-8.el8.noarch
 
 Complete!
 </code></pre>
-<h3 id="heterodb-swdc">HeteroDB-SWDCのインストール</h3>
+<h3 id="heterodb-swdc"><code>heterodb-swdc</code>のインストール</h3>
 <p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
 これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。</p>
 <p>HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
-Webブラウザなどで<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>へアクセスし、ページの先頭にリンクの記載されている<code>heterodb-swdc-1.0-1.el7.noarch.rpm</code>をダウンロードしてインストールしてください。
+Webブラウザなどで<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>へアクセスし、ページの先頭にリンクの記載されている<code>heterodb-swdc-1.2-1.el8.noarch.rpm</code>をダウンロードしてインストールしてください。
 heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。</p>
 <p>以下のようにheterodb-swdcパッケージをインストールします。</p>
-<pre><code>$ sudo yum install https://heterodb.github.io/swdc/yum/rhel7-x86_64/heterodb-swdc-1.0-1.el7.noarch.rpm
-          :
-================================================================================
- Package         Arch     Version       Repository                         Size
-================================================================================
+<pre><code># dnf install https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-1.2-1.el8.noarch.rpm
+Last metadata expiration check: 2:05:11 ago on Sun 16 May 2021 10:20:40 PM JST.
+heterodb-swdc-1.2-1.el8.noarch.rpm                        335 kB/s | 9.0 kB     00:00
+Dependencies resolved.
+==========================================================================================
+ Package                Architecture    Version               Repository             Size
+==========================================================================================
 Installing:
- heterodb-swdc   noarch   1.0-1.el7     /heterodb-swdc-1.0-1.el7.noarch   2.4 k
+ heterodb-swdc          noarch          1.2-1.el8             @commandline         9.0 k
 
 Transaction Summary
-================================================================================
+==========================================================================================
 Install  1 Package
           :
 Installed:
-  heterodb-swdc.noarch 0:1.0-1.el7
+  heterodb-swdc-1.2-1.el8.noarch
 
 Complete!
 </code></pre>
@@ -346,6 +356,16 @@ options nouveau modeset=0
 EOF
 # dracut -f
 </code></pre>
+<h2 id="heterodb">HeteroDB 拡張モジュールのインストール</h2>
+<p>あとで追記</p>
+<h3 id="nvme-strom">NVME-Stromカーネルモジュールのインストール</h3>
+<p>元の記述を移動する。</p>
+<h2 id="cufile">cuFileのインストール</h2>
+<p>本節では、NVIDIA社の提供するcuFileモジュール（NVIDIA GPUDirect Storage）のインストールについて説明します。</p>
+<p>なお、cuFileドライバによるGPUダイレクトSQL機能を使用しない場合は、本節の内容は飛ばしていただいて構いません。</p>
+<p>また、2021年6月1日現在、cuFileモジュールはベータ版という位置づけであり、本節の記述はあくまで実験的なものです。</p>
+<h3 id="mofed">MOFEDドライバ</h3>
+<h3 id="gds">GDS</h3>
 <h2 id="postgresql">PostgreSQLのインストール</h2>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
@@ -443,9 +463,9 @@ Installed:
 Complete!
 </code></pre>
 <p>以上でパッケージのインストールは完了です。</p>
-<h3 id="_3">ソースからのインストール</h3>
+<h3 id="_4">ソースからのインストール</h3>
 <p>開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。</p>
-<h4 id="_4">ソースコードの入手</h4>
+<h4 id="_5">ソースコードの入手</h4>
 <p>RPMパッケージと同様に、ソースコードのtarballを<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手する事ができます。</p>
 <p>ただ、tarballのリリースにはある程度のタイムラグが生じてしまうため、最新の開発版を使いたい場合には<a href="https://github.com/heterodb/pg-strom">PG-StromのGitHubリポジトリ</a>の<code>master</code>ブランチをチェックアウトする方法の方が好まれるかもしれません。</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
@@ -464,8 +484,8 @@ Resolving deltas: 100% (10504/10504), done.
 $ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 </code></pre>
-<h3 id="_5">インストール後の設定</h3>
-<h3 id="_6">データベースクラスタの作成</h3>
+<h3 id="_6">インストール後の設定</h3>
+<h3 id="_7">データベースクラスタの作成</h3>
 <p>データベースクラスタの作成が済んでいない場合は、<code>initdb</code>コマンドを実行してPostgreSQLの初期データベースを作成します。</p>
 <p>RPMインストールにおけるデフォルトのデータベースクラスタのパスは<code>/var/lib/pgsql/&lt;version number&gt;/data</code>です。
 <code>postgresql-alternatives</code>パッケージをインストールしている場合は、PostgreSQLのバージョンに拠らず<code>/var/lib/pgdata</code>で参照する事ができます。</p>
@@ -529,7 +549,7 @@ Success. You can now start the database server using:
 </ul>
 </li>
 </ul>
-<h3 id="os_2">OSのリソース制限の拡張</h3>
+<h3 id="os_1">OSのリソース制限の拡張</h3>
 <p>SSD-to-GPUダイレクトSQLを使用する場合は特に、同時に大量のファイルをオープンする事があるため、プロセスあたりファイルディスクリプタ数の上限を拡大しておく必要があります。</p>
 <p>また、PostgreSQLのクラッシュ時に確実にコアダンプを生成できるよう、コアファイルのサイズ上限を制限しないことを推奨します。</p>
 <p>PostgreSQLをsystemd経由で起動する場合、リソース制限に関する設定は<code>/etc/systemd/system/postgresql-XX.service.d/pg_strom.conf</code>に記述します。</p>
@@ -589,9 +609,9 @@ postgres=# CREATE EXTENSION pg_strom ;
 CREATE EXTENSION
 </code></pre>
 <p>以上でインストール作業は完了です。</p>
-<h2 id="nvme-strom">NVME-Stromモジュール</h2>
+<h2 id="nvme-strom_1">NVME-Stromモジュール</h2>
 <p>PG-Stromとは独立した別個のソフトウェアモジュールではありますが、SSD-to-GPUダイレクトSQL実行など、PG-Stromの中核機能と密接に関係しているNVME-Stromカーネルモジュールについても本節で説明します。</p>
-<h3 id="_7">モジュールの入手とインストール</h3>
+<h3 id="_8">モジュールの入手とインストール</h3>
 <p>他のPG-Strom関連モジュールと同様、NVME-Stromは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。</p>
 <p><code>heterodb-swdc</code>パッケージを導入済みであれば、<code>yum install</code>コマンドを用いてRPMパッケージをダウンロード、インストールする事ができます。</p>
 <pre><code>$ sudo yum install nvme_strom
@@ -641,7 +661,7 @@ Installed:
 
 Complete!
 </code></pre>
-<h3 id="_8">ライセンスの有効化</h3>
+<h3 id="_9">ライセンスの有効化</h3>
 <p>NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
 <ul>
 <li>複数個のGPUの利用</li>
@@ -668,7 +688,7 @@ LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
 LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
     :
 </code></pre>
-<h3 id="_9">カーネルモジュールパラメータ</h3>
+<h3 id="_10">カーネルモジュールパラメータ</h3>
 <p>NVME-Stromカーネルモジュールにはパラメータがあります。</p>
 <table>
 <thead>

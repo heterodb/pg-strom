@@ -179,7 +179,7 @@
 これは例えば、GPSから取得したモバイル機器の位置（点）とエリア定義データ（ポリゴン）を突き合わせるといった処理の高速化に寄与します。</p>
 <h2 id="postgis">PostGISの利用</h2>
 <p>GPU版PostGISを利用するために特別な設定は必要ありません。</p>
-<p>PostGISをパッケージ又はソースコードからインストールし、CREATE EXTENSION構文を用いてジオメトリデータ型やPostGIS関数が定義されていれば、PG-Stromはクエリに出現したPostGIS関数がGPUで実行可能かどうかを自動的に判定します。</p>
+<p>PostGISをパッケージ又はソースコードからインストールし、<code>CREATE EXTENSION</code>構文を用いてジオメトリデータ型やPostGIS関数が定義されていれば、PG-Stromはクエリに出現したPostGIS関数がGPUで実行可能かどうかを自動的に判定します。</p>
 <p>PostGIS自体のインストールについては、<a href="http://postgis.net/docs/postgis-ja.html">PostGISのドキュメント</a>を参照してください。</p>
 <p>例えば、以下のクエリにはGPU実行可能なPostGIS関数である<code>st_contains()</code>と<code>st_makepoint()</code>を使用しており、ジオメトリ型の定数<code>'polygon ((10 10,30 10,30 20,10 20,10 10))'</code>の範囲内にテーブルから読み出した二次元の点が含まれるかどうかを判定します。</p>
 <p>これらの関数が GPU Filter: の一部として表示されている事からも分かるように、PG-Stromは対応済みのPostGIS関数を自動的に検出し、可能な限りGPUで実行しようと試みます。</p>
@@ -203,7 +203,7 @@ PG-StromのGpuJoinでは、テーブル同士の結合条件がGiSTインデッ�
 CREATE INDEX
 </code></pre>
 <p>以下の実行計画は、市町村の境界線データ（giscityテーブル）と緯度経度データ（dpointsテーブル）を突き合わせ、ポリゴンとして表現された市町村の領域内に含まれる緯度経度データ（点）の数を市町村ごとに出力するものです。</p>
-<p>オプティマイザによりGpuJoinが選択され、giscityテーブルとdpointsテーブルの結合にはGpuGiSTJoinが選択されている。
+<p>オプティマイザによりGpuJoinが選択され、giscityテーブルとdpointsテーブルの結合にはGpuGiSTJoinが選択されています。
 IndexFilter:の行には、GiSTインデックスによる絞り込み条件が<code>(g.geom ~ st_makepoint(d.x, d.y))</code>であり、使用するインデックスが<code>giscity_geom_idx</code>である事が示されています。</p>
 <p>GiSTインデックスの使用により、GPUであっても比較的「重い」処理であるPostGIS関数を実行する前に、明らかに条件にマッチしない組み合わせを排除する事ができるため、大幅な検索処理の高速化が期待できます。</p>
 <pre><code>=# EXPLAIN

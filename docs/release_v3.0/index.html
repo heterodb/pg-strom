@@ -102,7 +102,7 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#new-features">New Features</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu-rev-postgis-support">GPU-rev PostGIS support</a>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-postgis-support">GPU-PostGIS support</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#gist-index-support">GiST-index support</a>
     </li>
@@ -164,10 +164,20 @@
             <div class="section">
               
                 <h1 id="pg-strom-v30-release">PG-Strom v3.0 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (xx-xxx-2021)</div>
+<div style="text-align: right;">PG-Strom Development Team (12-May-2021)</div>
 
 <h2 id="overview">Overview</h2>
 <p>Major enhancement in PG-Strom v3.0 includes:</p>
+<ul>
+<li>Some PostGIS functions can now be executed on GPUs.</li>
+<li>GpuJoin using GiST index is now possible.</li>
+<li>GPU cache mechanism has been implemented.<ul>
+<li>This is different from the feature of the same name that was implemented in past versions.</li>
+</ul>
+</li>
+<li>NVIDIA GPUDirect Storage is now supported. (Experimental)</li>
+<li>User-defined GPU data types/functions/operators are now supported.</li>
+</ul>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v11, v12, v13</li>
@@ -177,13 +187,39 @@
 <li>NVIDIA GPU CC 6.0 or later (Pascal or newer)</li>
 </ul>
 <h2 id="new-features">New Features</h2>
-<h3 id="gpu-rev-postgis-support">GPU-rev PostGIS support</h3>
+<h3 id="gpu-postgis-support">GPU-PostGIS support</h3>
+<p>We have implemented GPU versions of several PostGIS functions. 
+If any of these PostGIS functions are used in a conditional clause, PG-Strom will automatically generate a GPU program to execute it on the GPU.</p>
 <h3 id="gist-index-support">GiST-index support</h3>
+<p>If a column whose data type is geometry has a GiST index and the table can be filtered using the index, GpuJoin will load the GiST index on the GPU and use it to join the tables.</p>
+<p>Since the GiST index search is executed in parallel on the GPU, significant performance improvements can be expected.</p>
 <h3 id="gpu-cache-mechanism">GPU Cache mechanism</h3>
+<p>The GPU cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
+It was designed for efficient execution of analytical/search queries on frequently updated data with relatively small data size (~10GB).</p>
+<p>The GPU can process SQL workloads by referring to the GPU cache instead of loading data from tables when executing analytical/search queries.</p>
 <h3 id="nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</h3>
+<p><a href="https://developer.nvidia.com/blog/gpudirect-storage/">GPUDirect Storage</a> developed by NVIDIA is now available as a driver for <a href="../ssd2gpu">GPU Direct SQL</a>, in addition to the existing nvme_strom kernel module.</p>
+<p>GPU Direct SQL will now be available on SDS (Software Defined Storage) devices in addition to conventional NVME-SSD and NVME-oF storage.</p>
+<p>Currently, the driver for GPUDirect Storage is a beta version and experimental support is available.</p>
 <h3 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h3>
+<p>A new API is provided to add user-defined GPU data types/functions. This allows users to define and implement their own niche data types and SQL functions to process them, without modifying PG-Strom itself.</p>
 <h2 id="other-updates">Other updates</h2>
+<ul>
+<li>Unique int1 (8-bit integer) data type and related operators are now supported.</li>
+<li><code>--inner-join</code> and <code>--outer-join</code> options are now available for <code>pg2arrow</code>. Apache Arrow files with a number of columns exceeding the PostgreSQL column limit can now be generated.</li>
+<li>In a multi-GPU environment, the GPU Memory Keeper background worker will now be launched for each GPU.</li>
+<li>PostgreSQL v13.x is now supported.</li>
+<li>CUDA 11.2 and Ampere generation GPUs are now supported.</li>
+<li>ScaleFlux's Computational Storage product CSD2000 series is now supported.<ul>
+<li>NVIDIA GPUDirect Storage only (nvme_strom kernel module is not supported)</li>
+</ul>
+</li>
+</ul>
 <h2 id="deprecated-features">Deprecated Features</h2>
+<ul>
+<li>Support for PostgreSQL v10.x has been discontinued.</li>
+<li>The feature to link data with Python scripts (PyStrom) has been discontinued.</li>
+</ul>
               
             </div>
           </div>
