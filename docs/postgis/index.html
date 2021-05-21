@@ -158,25 +158,25 @@ For this reason, PG-Strom has ported only a few relatively frequently used PostG
 <p>For example:</p>
 <ul>
 <li><code>geometry st_point(float8 lon,float8 lat)</code><ul>
-<li>Return a point with the given longitude and latitude as a Point of <code>Geometry</code> type.</li>
+<li>returns a point with the given longitude and latitude as a Point of <code>Geometry</code> type.</li>
 </ul>
 </li>
 <li><code>bool st_contains(geometry a,geometry b)</code><ul>
-<li>Determine if the geometry a contains the geometry b or not. </li>
+<li>determines if the geometry a contains the geometry b or not. </li>
 </ul>
 </li>
 <li><code>bool st_crosses(geometry,geometry)</code><ul>
-<li>Determine if the geometries intersect each other.</li>
+<li>determines if the geometries intersect each other.</li>
 </ul>
 </li>
 <li><code>text st_relate(geometry,geometry)</code><ul>
-<li>Return the relationship between geometries as a matrix representation of <a href="https://en.wikipedia.org/wiki/DE-9IM">DE-9IM(Dimensionally Extended 9-Intersection Model)</a>.</li>
+<li>returns the relationship between geometries as a matrix representation of <a href="https://en.wikipedia.org/wiki/DE-9IM">DE-9IM(Dimensionally Extended 9-Intersection Model)</a>.</li>
 </ul>
 </li>
 </ul>
 <h2 id="postgis-usage">PostGIS Usage</h2>
 <p>You can use GPU-PostGIS without any configurations.</p>
-<p>If you have installed PostGIS from a package or source code, and have defined geometry data types and PostGIS functions using the <code>CREATE EXTENSION</code> command, PG-Strom will automatically determine if the PostGIS functions that appear in the query are executable on the GPU.</p>
+<p>PG-Strom will automatically determine if the PostGIS functions used in the query are executable on the GPU when PostGIS is installed from the package or the source code and the geometry data types and PostGIS functions are defined using the CREATE EXTENSION syntax.</p>
 <p>Please refer to <a href="http://postgis.net/docs/">the PostGIS documentaion</a> for installation.</p>
 <p>For example, the following query uses the GPU-executable PostGIS funtion <code>st_contains()</code> and <code>st_makepoint()</code> to determine if a two-dimensional point read from the table is contained within the range of the geometry type constant <code>'polygon ((10 10,30 10,30 20,10 20,10 10))'</code>.</p>
 <p>As you can see from the fact that these functions are listed as part of the "GPU Filter:", PG-Strom will automatically detect supported PostGIS functions and attempt to run them on the GPU as much as possible.</p>
@@ -190,10 +190,10 @@ For this reason, PG-Strom has ported only a few relatively frequently used PostG
 (3 rows)
 </code></pre>
 <h2 id="gist-index">GiST Index</h2>
-<p>Some of the PostGIS functions that evaluate relationships between geometries, such as <code>st_contains()</code> and <code>st_crosses()</code>, support the GiST index (R-tree), which enables fast refinement of the search using only the CPU. 
+<p>Some of the PostGIS functions that evaluate relationships between geometries, such as <code>st_contains()</code> and <code>st_crosses()</code>, support the GiST index (R-Tree), which enables fast refinement of the search using only the CPU. 
 GpuJoin in PG-Strom sometimes transfers not only the contents of the table but also GiST index (R-Tree) to filter the rows to be joined fast when the join condition between tables can be accelerated.  This process is usually executed at a much higher parallelism level than the CPU, so a significant speedup can be expected.</p>
 <p>On the other hand, GpuScan does not use GiST index to scan a single table. This is because IndexScan filtering by CPU is often faster.</p>
-<p>The following is an example of a SQL statement to create a GiST index on city boundary data (geom column of the giscity table).</p>
+<p>The following is an example of a SQL statement to create a GiST index on city boundary data ("geom" column of "giscity" table).</p>
 <pre><code>=# CREATE INDEX on giscity USING gist (geom);
 CREATE INDEX
 </code></pre>

@@ -22,7 +22,7 @@ Major enhancement in PG-Strom v3.0 includes:
 
 - Some PostGIS functions can now be executed on GPUs.
 - GpuJoin using GiST index is now possible.
-- GPU cache mechanism has been implemented.
+- GPU Cache mechanism has been implemented.
     - This is different from the feature of the same name that was implemented in past versions.
 - NVIDIA GPUDirect Storage is now supported. (Experimental)
 - User-defined GPU data types/functions/operators are now supported.
@@ -87,10 +87,10 @@ GPUデバイスメモリ上に予め領域を確保しておき、対象とな�
 分析/検索系クエリの実行時には、GPU上のキャッシュを参照する事で、テーブルからデータを読み出す事なくGPUでSQLワークロードを処理する事が可能です。
 }
 @en{
-The GPU cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
+GPU Cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
 It was designed for efficient execution of analytical/search queries on frequently updated data with relatively small data size (~10GB).
 
-The GPU can process SQL workloads by referring to the GPU cache instead of loading data from tables when executing analytical/search queries.
+The GPU can process SQL workloads by referring to GPU Cache instead of loading data from tables when executing analytical/search queries.
 }
 
 @ja:###NVIDIA GPUDirect Storage (実験的対応)
@@ -139,7 +139,7 @@ A new API is provided to add user-defined GPU data types/functions. This allows 
 }
 @en{
 - Unique int1 (8-bit integer) data type and related operators are now supported.
-- `--inner-join` and `--outer-join` options are now available for `pg2arrow`. Apache Arrow files with a number of columns exceeding the PostgreSQL column limit can now be generated.
+- `--inner-join` and `--outer-join` options are now available for `pg2arrow`. Apache Arrow files having more columns than the limit of PostgreSQL can now be generated.
 - In a multi-GPU environment, the GPU Memory Keeper background worker will now be launched for each GPU.
 - PostgreSQL v13.x is now supported.
 - CUDA 11.2 and Ampere generation GPUs are now supported.

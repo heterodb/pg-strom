@@ -46,13 +46,13 @@ For this reason, PG-Strom has ported only a few relatively frequently used PostG
 For example:
 
 - <code>geometry st_point(float8 lon,float8 lat)</code>
-    - Return a point with the given longitude and latitude as a Point of <code>Geometry</code> type.
+    - returns a point with the given longitude and latitude as a Point of <code>Geometry</code> type.
 - <code>bool st_contains(geometry a,geometry b)</code>
-    - Determine if the geometry a contains the geometry b or not. 
+    - determines if the geometry a contains the geometry b or not. 
 - <code>bool st_crosses(geometry,geometry)</code>
-    - Determine if the geometries intersect each other.
+    - determines if the geometries intersect each other.
 - <code>text st_relate(geometry,geometry)</code>
-    - Return the relationship between geometries as a matrix representation of [DE-9IM(Dimensionally Extended 9-Intersection Model)](https://en.wikipedia.org/wiki/DE-9IM).
+    - returns the relationship between geometries as a matrix representation of [DE-9IM(Dimensionally Extended 9-Intersection Model)](https://en.wikipedia.org/wiki/DE-9IM).
 }
 
 @ja:##PostGISの利用
@@ -66,7 +66,7 @@ PostGISをパッケージ又はソースコードからインストールし、`
 @en{
 You can use GPU-PostGIS without any configurations.
 
-If you have installed PostGIS from a package or source code, and have defined geometry data types and PostGIS functions using the `CREATE EXTENSION` command, PG-Strom will automatically determine if the PostGIS functions that appear in the query are executable on the GPU.
+PG-Strom will automatically determine if the PostGIS functions used in the query are executable on the GPU when PostGIS is installed from the package or the source code and the geometry data types and PostGIS functions are defined using the CREATE EXTENSION syntax.
 }
 
 @ja{
@@ -110,7 +110,7 @@ PG-StromのGpuJoinでは、テーブル同士の結合条件がGiSTインデッ�
 }
 
 @en{
-Some of the PostGIS functions that evaluate relationships between geometries, such as <code>st_contains()</code> and <code>st_crosses()</code>, support the GiST index (R-tree), which enables fast refinement of the search using only the CPU. 
+Some of the PostGIS functions that evaluate relationships between geometries, such as <code>st_contains()</code> and <code>st_crosses()</code>, support the GiST index (R-Tree), which enables fast refinement of the search using only the CPU. 
 GpuJoin in PG-Strom sometimes transfers not only the contents of the table but also GiST index (R-Tree) to filter the rows to be joined fast when the join condition between tables can be accelerated.  This process is usually executed at a much higher parallelism level than the CPU, so a significant speedup can be expected.
 
 On the other hand, GpuScan does not use GiST index to scan a single table. This is because IndexScan filtering by CPU is often faster.
@@ -122,7 +122,7 @@ On the other hand, GpuScan does not use GiST index to scan a single table. This 
 以下の例は、市町村の境界線データ（giscityテーブルのgeom列）に対してGiSTインデックスを設定するものです。
 }
 @en{
-The following is an example of a SQL statement to create a GiST index on city boundary data (geom column of the giscity table).
+The following is an example of a SQL statement to create a GiST index on city boundary data ("geom" column of "giscity" table).
 }
 
 ```
