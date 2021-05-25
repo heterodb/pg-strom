@@ -34,10 +34,10 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 __STROM_OBJS = main.o nvrtc.o extra.o \
         shmbuf.o codegen.o datastore.o cuda_program.o \
         gpu_device.o gpu_context.o gpu_mmgr.o \
-        nvme_strom.o relscan.o gpu_tasks.o \
+        relscan.o gpu_tasks.o gpu_cache.o \
         gpuscan.o gpujoin.o gpupreagg.o \
-	arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-	gpu_cache.o aggfuncs.o float2.o tinyint.o misc.o
+        arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
+        aggfuncs.o float2.o tinyint.o misc.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #

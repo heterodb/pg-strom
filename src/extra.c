@@ -363,9 +363,7 @@ extraSysfsSetupDistanceMap(const char *manual_config)
 /*
  * extraSysfsLookupOptimalGpu
  */
-static int (*p_sysfs_lookup_optimal_gpu)(
-	int major,
-	int minor) = NULL;
+static int (*p_sysfs_lookup_optimal_gpu)(dev_t st_dev) = NULL;
 
 int
 extraSysfsLookupOptimalGpu(dev_t st_dev)
@@ -374,8 +372,7 @@ extraSysfsLookupOptimalGpu(dev_t st_dev)
 
 	if (!p_sysfs_lookup_optimal_gpu)
 		return -1;
-	optimal_gpu = p_sysfs_lookup_optimal_gpu(major(st_dev),
-											 minor(st_dev));
+	optimal_gpu = p_sysfs_lookup_optimal_gpu(st_dev);
 	if (optimal_gpu < -1)
 		heterodbExtraEreport(ERROR);
 	return optimal_gpu;

@@ -593,7 +593,6 @@ _PG_init(void)
 	pgstrom_init_gpu_mmgr();
 	pgstrom_init_gpu_context();
 	pgstrom_init_cuda_program();
-	pgstrom_init_gpu_direct();
 	pgstrom_init_codegen();
 
 	/* init custom-scan providers/FDWs */

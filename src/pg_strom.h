@@ -948,19 +948,6 @@ extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
 
 /*
- * nvme_strom.c
- */
-extern Size	pgstrom_gpudirect_threshold(void);
-extern int	GetOptimalGpuForFile(File fdesc);
-extern int	GetOptimalGpuForRelation(PlannerInfo *root,
-									 RelOptInfo *rel);
-extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
-									 RelOptInfo *baserel);
-extern bool RelationCanUseNvmeStrom(Relation relation);
-
-extern void	pgstrom_init_gpu_direct(void);
-
-/*
  * cuda_program.c
  */
 extern ProgramId __pgstrom_create_cuda_program(GpuContext *gcontext,
@@ -1148,6 +1135,14 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 extern Bitmapset *pgstrom_pullup_outer_refs(PlannerInfo *root,
 											RelOptInfo *base_rel,
 											Bitmapset *referenced);
+
+extern int	GetOptimalGpuForFile(File fdesc);
+extern int	GetOptimalGpuForRelation(PlannerInfo *root,
+									 RelOptInfo *rel);
+extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
+									 RelOptInfo *baserel);
+extern bool RelationCanUseNvmeStrom(Relation relation);
+
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
 										List *index_conds,
