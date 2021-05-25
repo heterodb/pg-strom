@@ -368,11 +368,33 @@ static int (*p_sysfs_lookup_optimal_gpu)(
 	int minor) = NULL;
 
 int
-extraSysfsLookupOptimalGpu(int major, int minor)
+extraSysfsLookupOptimalGpu(dev_t st_dev)
 {
+	int		optimal_gpu;
+
 	if (!p_sysfs_lookup_optimal_gpu)
 		return -1;
-	return p_sysfs_lookup_optimal_gpu(major, minor);
+	optimal_gpu = p_sysfs_lookup_optimal_gpu(major(st_dev),
+											 minor(st_dev));
+	if (optimal_gpu < -1)
+		heterodbExtraEreport(ERROR);
+	return optimal_gpu;
+}
+
+/*
+ * extraSysfsPrintNvmeInfo
+ */
+static ssize_t (*p_sysfs_print_nvme_info)(
+	int index,
+	char *buffer,
+	ssize_t buffer_sz) = NULL;
+
+ssize_t
+extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz)
+{
+	if (!p_sysfs_print_nvme_info)
+		return -1;
+	return p_sysfs_print_nvme_info(index, buffer, buffer_sz);
 }
 
 /* lookup_heterodb_extra_function */
@@ -487,6 +509,7 @@ pgstrom_init_extra(void)
 		}
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_setup_distance_map);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpu);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_print_nvme_info);
 	}
 	PG_CATCH();
     {
@@ -502,14 +525,15 @@ pgstrom_init_extra(void)
 		p_gpudirect_file_read_iov = NULL;
 		p_sysfs_setup_distance_map = NULL;
 		p_sysfs_lookup_optimal_gpu = NULL;
+		p_sysfs_print_nvme_info = NULL;
 		dlclose(handle);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	elog(LOG, "HeteroDB extra module loaded [API=%u%s]",
+	elog(LOG, "HeteroDB Extra module loaded (API=%u%s)",
 		 api_version,
-		 with_cufile ? "; with NVIDIA cuFile" : "");
+		 with_cufile ? "; NVIDIA cuFile" : "");
 
 	license = heterodb_license_query();
 	if (license)
