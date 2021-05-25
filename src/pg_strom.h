@@ -600,7 +600,7 @@ typedef struct DevAttributes
 	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
-	bool		DEV_SUPPORT_GPUDIRECT;
+	bool		DEV_SUPPORT_GPUDIRECTSQL;
 #define DEV_ATTR(LABEL,a,b,c)		\
 	cl_int		LABEL;
 #include "device_attrs.h"
@@ -1398,6 +1398,9 @@ extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 unsigned long iomap_handle,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
+extern void	extraSysfsSetupDistanceMap(const char *manual_config);
+extern int	extraSysfsLookupOptimalGpu(int major, int minor);
+
 /*
  * float2.c
  */

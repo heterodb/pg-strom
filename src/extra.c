@@ -25,12 +25,23 @@
 #define GPUDIRECT_DRIVER_TYPE__NVME_STROM	3
 #define GPUDIRECT_DRIVER_TYPE__DEFAULT		GPUDIRECT_DRIVER_TYPE__NVME_STROM
 
-static struct config_enum_entry pgstrom_gpudirect_driver_options[] = {
+/* in case of no cufile APIs are not installed */
+static struct config_enum_entry pgstrom_gpudirect_driver_options_1[] = {
 	{"none",       GPUDIRECT_DRIVER_TYPE__NONE,       false },
-	{"cufile",     GPUDIRECT_DRIVER_TYPE__CUFILE,     false },
 	{"nvme_strom", GPUDIRECT_DRIVER_TYPE__NVME_STROM, false },
 	{NULL, 0, false}
 };
+
+/* in case of cufile APIs are installed */
+static struct config_enum_entry pgstrom_gpudirect_driver_options_2[] = {
+	{"none",       GPUDIRECT_DRIVER_TYPE__NONE,       false },
+	{"nvme_strom", GPUDIRECT_DRIVER_TYPE__NVME_STROM, false },
+	{"cufile",     GPUDIRECT_DRIVER_TYPE__CUFILE,     false },
+	{NULL, 0, false}
+};
+
+
+
 static int		__pgstrom_gpudirect_driver;			/* GUC */
 static bool		__pgstrom_gpudirect_enabled;		/* GUC */
 static int		__pgstrom_gpudirect_threshold;		/* GUC */
@@ -71,6 +82,17 @@ pgstrom_gpudirect_threshold(void)
 }
 
 /*
+ * heterodbExtraApiVersion
+ */
+static unsigned int (*p_heterodb_extra_api_version)(void) = NULL;
+
+static unsigned int
+heterodbExtraApiVersion(void)
+{
+	return p_heterodb_extra_api_version();
+}
+
+/*
  * heterodbExtraEreport
  */
 static heterodb_extra_error_info   *p_heterodb_extra_error_data = NULL;
@@ -83,19 +105,6 @@ heterodbExtraEreport(int elevel)
 			   p_heterodb_extra_error_data->lineno,
 			   p_heterodb_extra_error_data->funcname);
 	elog_finish(elevel, "%s", p_heterodb_extra_error_data->message);
-}
-
-/*
- * heterodbLicenseCheck
- */
-static bool (*p_heterodb_license_check)(void) = NULL;
-
-bool
-heterodbLicenseCheck(void)
-{
-	if (!p_heterodb_license_check)
-		return false;
-	return p_heterodb_license_check();
 }
 
 /*
@@ -311,6 +320,61 @@ gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 		werror("failed on gpuDirectFileReadIOV");
 }
 
+/*
+ * extraSysfsSetupDistanceMap
+ */
+static int (*p_sysfs_setup_distance_map)(
+	int gpu_count,
+	GpuPciDevItem *gpu_array,
+	const char *manual_config) = NULL;
+
+void
+extraSysfsSetupDistanceMap(const char *manual_config)
+{
+	GpuPciDevItem *gpu_array;
+	int			i;
+
+	if (!p_sysfs_setup_distance_map)
+		return;		/* nothing to do */
+
+	gpu_array = alloca(numDevAttrs * sizeof(GpuPciDevItem));
+	memset(gpu_array, 0, numDevAttrs * sizeof(GpuPciDevItem));
+	for (i=0; i < numDevAttrs; i++)
+	{
+		DevAttributes  *dattr = &devAttrs[i];
+		GpuPciDevItem  *gpu = &gpu_array[i];
+
+		gpu->device_id = dattr->DEV_ID;
+		strncpy(gpu->device_name, dattr->DEV_NAME,
+				sizeof(gpu->device_name));
+		gpu->numa_node_id = dattr->NUMA_NODE_ID;
+		gpu->pci_domain = dattr->PCI_DOMAIN_ID;
+		gpu->pci_bus_id = dattr->PCI_BUS_ID;
+		gpu->pci_dev_id = dattr->PCI_DEVICE_ID;
+		if (dattr->MULTI_GPU_BOARD)
+			gpu->pci_func_id = dattr->MULTI_GPU_BOARD_GROUP_ID;
+	}
+	if (p_sysfs_setup_distance_map(numDevAttrs,
+								   gpu_array,
+								   manual_config) < 0)
+		heterodbExtraEreport(ERROR);
+}
+
+/*
+ * extraSysfsLookupOptimalGpu
+ */
+static int (*p_sysfs_lookup_optimal_gpu)(
+	int major,
+	int minor) = NULL;
+
+int
+extraSysfsLookupOptimalGpu(int major, int minor)
+{
+	if (!p_sysfs_lookup_optimal_gpu)
+		return -1;
+	return p_sysfs_lookup_optimal_gpu(major, minor);
+}
+
 /* lookup_heterodb_extra_function */
 static void *
 lookup_heterodb_extra_function(void *handle, const char *symbol)
@@ -348,23 +412,12 @@ pgstrom_init_extra(void)
 	const char *prefix = NULL;
 	void	   *handle;
 	char	   *license;
+	uint32		api_version;
+	bool		with_cufile = false;
 	bool		__gpudirect_enabled = false;
 	size_t		default_threshold = 0;
 	size_t		shared_buffer_size = (size_t)NBuffers * (size_t)BLCKSZ;
 
-	DefineCustomEnumVariable("pg_strom.gpudirect_driver",
-							 "type of GPUDirectSQL Driver",
-							 "either 'nvme_strom' or 'cufile' is supported",
-							 &__pgstrom_gpudirect_driver,
-							 GPUDIRECT_DRIVER_TYPE__DEFAULT,
-							 pgstrom_gpudirect_driver_options,
-							 PGC_POSTMASTER,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	if (__pgstrom_gpudirect_driver == GPUDIRECT_DRIVER_TYPE__CUFILE)
-		prefix = "cufile";
-	else if (__pgstrom_gpudirect_driver == GPUDIRECT_DRIVER_TYPE__NVME_STROM)
-		prefix = "nvme_strom";
 	
 	/* load the extra module */
 	handle = dlopen(HETERODB_EXTRA_FILENAME,
@@ -378,9 +431,35 @@ pgstrom_init_extra(void)
 
 	PG_TRY();
 	{
+		struct config_enum_entry *gpudirect_driver_options;
+
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_error_data);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_check);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_api_version);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
+		api_version = heterodbExtraApiVersion();
+		if ((api_version & HETERODB_EXTRA_WITH_CUFILE) != 0)
+			with_cufile = true;
+		api_version /= 100;
+
+		if (!with_cufile)
+			gpudirect_driver_options = pgstrom_gpudirect_driver_options_1;
+		else
+			gpudirect_driver_options = pgstrom_gpudirect_driver_options_2;
+
+		DefineCustomEnumVariable("pg_strom.gpudirect_driver",
+								 "GPUDirectSQL Driver Selection",
+								 "'nvme_strom', 'cufile' or 'none'",
+								 &__pgstrom_gpudirect_driver,
+								 GPUDIRECT_DRIVER_TYPE__DEFAULT,
+								 gpudirect_driver_options,
+								 PGC_POSTMASTER,
+								 GUC_NOT_IN_SAMPLE,
+								 NULL, NULL, NULL);
+		if (__pgstrom_gpudirect_driver == GPUDIRECT_DRIVER_TYPE__CUFILE)
+			prefix = "cufile";
+		else if (__pgstrom_gpudirect_driver == GPUDIRECT_DRIVER_TYPE__NVME_STROM)
+			prefix = "nvme_strom";
+
 		if (prefix)
 		{
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, init_driver);
@@ -392,17 +471,28 @@ pgstrom_init_extra(void)
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_read_iov);
 
 			if (gpuDirectInitDriver() == 0)
+			{
+				int		i;
+
+				for (i=0; i < numDevAttrs; i++)
+				{
+					if (devAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
+					{
+						__gpudirect_enabled = true;
+						break;
+					}
+				}
 				gpudirect_driver_is_initialized = true;
+			}
 		}
-		license = heterodb_license_query();
-		if (license)
-		{
-			elog(LOG, "HeteroDB License: %s", license);
-			pfree(license);
-		}
+		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_setup_distance_map);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpu);
 	}
 	PG_CATCH();
-	{
+    {
+		p_heterodb_extra_error_data = NULL;
+		p_heterodb_extra_api_version = NULL;
+		p_heterodb_license_reload = NULL;
 		p_gpudirect_init_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
@@ -410,26 +500,25 @@ pgstrom_init_extra(void)
 		p_gpudirect_map_gpu_memory = NULL;
 		p_gpudirect_unmap_gpu_memory = NULL;
 		p_gpudirect_file_read_iov = NULL;
-
+		p_sysfs_setup_distance_map = NULL;
+		p_sysfs_lookup_optimal_gpu = NULL;
 		dlclose(handle);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-skip:
-	if (gpudirect_driver_is_initialized)
-	{
-		int		i;
+	elog(LOG, "HeteroDB extra module loaded [API=%u%s]",
+		 api_version,
+		 with_cufile ? "; with NVIDIA cuFile" : "");
 
-		for (i=0; i < numDevAttrs; i++)
-		{
-			if (devAttrs[i].DEV_SUPPORT_GPUDIRECT)
-			{
-				__gpudirect_enabled = true;
-				break;
-			}
-		}
+	license = heterodb_license_query();
+	if (license)
+	{
+		elog(LOG, "HeteroDB License: %s", license);
+		pfree(license);
 	}
+
+skip:
 	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
 							 "Enables GPUDirectSQL",
 							 NULL,

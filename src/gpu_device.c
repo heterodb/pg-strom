@@ -78,7 +78,7 @@ pgstrom_collect_gpu_device(void)
 	char	   *cuda_runtime_version = NULL;
 	char	   *nvidia_driver_version = NULL;
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
-	int			i, j;
+	int			i, cuda_dindex;
 
 	initStringInfo(&str);
 
@@ -176,7 +176,7 @@ pgstrom_collect_gpu_device(void)
 	}
 	ClosePipeStream(filp);
 
-	for (i=0, j=0; i < num_devices; i++)
+	for (i=0, cuda_dindex=0; i < num_devices; i++)
 	{
 		DevAttributes  *dattrs = &devAttrs[i];
 		char			path[MAXPGPATH];
@@ -199,15 +199,14 @@ pgstrom_collect_gpu_device(void)
 											dattrs->MAX_THREADS_PER_BLOCK);
 
 		/*
-		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB supports
-		 * GPUDirect SQL
+		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB
+		 * supports GPUDirectSQL
 		 */
-		if ((strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
-			 strcmp(dattrs->DEV_BRAND, "QUADRO") == 0) &&
+		if (dattrs->GPU_DIRECT_RDMA_SUPPORTED &&
 			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
-			dattrs->DEV_SUPPORT_GPUDIRECT = true;
+			dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
 		else
-			dattrs->DEV_SUPPORT_GPUDIRECT = false;
+			dattrs->DEV_SUPPORT_GPUDIRECTSQL = false;
 
 		/*
 		 * read the numa node-id from the sysfs entry
@@ -224,16 +223,16 @@ pgstrom_collect_gpu_device(void)
 				 dattrs->PCI_DEVICE_ID);
 		filp = fopen(path, "r");
 		if (!filp)
-			dattrs->NUMA_NODE_ID = -1;		/* unknown */
+			dattrs->NUMA_NODE_ID = -1;              /* unknown */
 		else
 		{
 			if (!fgets(linebuf, sizeof(linebuf), filp))
-				dattrs->NUMA_NODE_ID = -1;	/* unknown */
+				dattrs->NUMA_NODE_ID = -1;      /* unknown */
 			else
 				dattrs->NUMA_NODE_ID = atoi(linebuf);
 			fclose(filp);
 		}
-		
+
 		/* Log brief CUDA device properties */
 		resetStringInfo(&str);
 		appendStringInfo(&str, "GPU%d %s (%d SMs; %dMHz, L2 %dkB)",
@@ -270,13 +269,13 @@ pgstrom_collect_gpu_device(void)
 						 dattrs->COMPUTE_CAPABILITY_MINOR);
 		elog(LOG, "PG-Strom: %s", str.data);
 
-		if (i != j)
-			memcpy(&devAttrs[j], &devAttrs[i], sizeof(DevAttributes));
-
-		j++;
+		if (i != cuda_dindex)
+			memcpy(&devAttrs[cuda_dindex],
+				   &devAttrs[i], sizeof(DevAttributes));
+		cuda_dindex++;
 	}
-	Assert(j <= num_devices);
-	numDevAttrs = j;
+	Assert(cuda_dindex <= num_devices);
+	numDevAttrs = cuda_dindex;
 	if (numDevAttrs == 0)
 		elog(ERROR, "PG-Strom: no supported GPU devices found");
 }

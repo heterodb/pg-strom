@@ -323,8 +323,6 @@ typedef cl_ulong		hostptr_t;
 	__device__ __host__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
-#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	extern "C" __global__ RET_TYPE __launch_bounds__(MAXTHREADS_PER_BLOCK)
 #else	/* __CUDACC__ */
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
