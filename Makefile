@@ -329,6 +329,7 @@ rpm: tarball
 	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
 	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"    \
 	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
-	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
+	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec \
+                 --undefine=_debugsource_packages
 
 .PHONY: docs
