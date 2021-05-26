@@ -4,12 +4,11 @@
  * Definitions related to GPU code generator; that can be also used by
  * user's extra module.
  * ---
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2017-2021 (C) HeteroDB,Inc <contact@heterodb.com>
  *
- * This software is an extension of PostgreSQL; You can use, copy,
- * modify or distribute it under the terms of 'LICENSE' included
- * within this package.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef CUDA_CODEGEN_H
 #define CUDA_CODEGEN_H

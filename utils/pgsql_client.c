@@ -1,10 +1,11 @@
 /*
  * pgsql_client.c - PostgreSQL specific portion for pg2arrow command
  *
- * Copyright 2020-2021 (C) KaiGai Kohei <kaigai@heterodb.com>
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2017-2021 (C) HeteroDB,Inc <contact@heterodb.com>
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the PostgreSQL License. See the LICENSE file.
+ * it under the terms of the PostgreSQL License.
  */
 #include "sql2arrow.h"
 #include <limits.h>
