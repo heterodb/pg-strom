@@ -209,7 +209,7 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </code></pre>
 <p>行トリガの引数に与える事のできるオプションは以下の通りです。</p>
 <dl>
-<dt><code>max_num_rows=NROWS</code>　（default: 10485760)</dt>
+<dt><code>max_num_rows=NROWS</code>  (default: 10485760)</dt>
 <dd>GPUキャッシュ上に確保できる行数を指定します。</dd>
 <dd>PostgreSQLテーブルと同様に、GPUキャッシュでも可視性制御のためにコミット前の更新行を保持する必要があるため、ある程度の余裕を持って<code>max_num_rows</code>を指定する必要があります。なお、更新/削除された古いバージョンの行は、トランザクションのコミット後に解放されます。</dd>
 <dt><code>redo_buffer_size=SIZE</code>　（default: 160m）</dt>
@@ -340,7 +340,7 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </ul>
 </li>
 <li><code>redo_sync_pos</code><ul>
-<li>REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。</li>
+<li>REDOログバッファに書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。</li>
 <li>REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</li>
 </ul>
 </li>
