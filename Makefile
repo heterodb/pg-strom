@@ -136,8 +136,8 @@ __DOC_FILES = index.md install.md partition.md \
 #
 # Files to be packaged
 #
-__PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	          src sql utils python test man
+__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
+                  pg_strom.control src sql utils python test man
 ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
