@@ -74,15 +74,15 @@ PG_UNARY_NOT_TEMPLATE(int8)
 	pgfn_##NAME##abs(kern_context *kcxt,		\
 					 pg_##NAME##_t arg)			\
 	{											\
-		if (!arg.isnull)						\
-			arg.value = abs((CAST)arg.value);	\
+		if (!arg.isnull && arg.value < (CAST)0)	\
+			arg.value = -arg.value;				\
 		return arg;								\
 	}
 PG_UNARY_ABS_TEMPLATE(int1, cl_char)
 PG_UNARY_ABS_TEMPLATE(int2, cl_short)
 PG_UNARY_ABS_TEMPLATE(int4, cl_int)
 PG_UNARY_ABS_TEMPLATE(int8, cl_long)
-PG_UNARY_ABS_TEMPLATE(float2, cl_float)
+PG_UNARY_ABS_TEMPLATE(float2, cl_half)
 PG_UNARY_ABS_TEMPLATE(float4, cl_float)
 PG_UNARY_ABS_TEMPLATE(float8, cl_double)
 

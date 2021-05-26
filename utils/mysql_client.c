@@ -10,6 +10,7 @@
 #include "sql2arrow.h"
 #include <ctype.h>
 #include <limits.h>
+#include <stdarg.h>
 
 /* static variables */
 static char	   *mysql_timezone = NULL;
