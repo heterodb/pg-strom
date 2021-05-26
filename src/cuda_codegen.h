@@ -17,7 +17,9 @@
 #include "catalog/pg_proc.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
+#if PG_VERSION_NUM >= 120000
 #include "nodes/pathnodes.h"
+#endif
 #include "nodes/primnodes.h"
 #include "utils/typcache.h"
 #include "arrow_defs.h"

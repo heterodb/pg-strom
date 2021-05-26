@@ -51,6 +51,12 @@
 #define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
 #define SystemAttributeDefinition(a)			\
 	SystemAttributeDefinition((a),true)
+/* also, 'oid' attribute numbers */
+#define Anum_pg_class_oid			ObjectIdAttributeNumber
+#define Anum_pg_proc_oid			ObjectIdAttributeNumber
+#define Anum_pg_type_oid			ObjectIdAttributeNumber
+#define Anum_pg_trigger_oid			ObjectIdAttributeNumber
+#define Anum_pg_extension_oid		ObjectIdAttributeNumber
 #else
 #define tupleDescHasOid(tdesc)		(false)
 #define PgClassTupleGetOid(tuple)	(((Form_pg_class)GETSTRUCT(tuple))->oid)
@@ -234,6 +240,7 @@ typedef ParallelHeapScanDesc			ParallelTableScanDesc;
 typedef ParallelHeapScanDescData		ParallelTableScanDescData;
 
 #define table_open(a,b)					heap_open(a,b)
+#define table_openrv(a,b)				heap_openrv(a,b)
 #define table_close(a,b)				heap_close(a,b)
 #define table_beginscan(a,b,c,d)		heap_beginscan(a,b,c,d)
 #define table_beginscan_parallel(a,b)	heap_beginscan_parallel(a,b)

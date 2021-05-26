@@ -2092,15 +2092,12 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 			attr.attstorage = get_typstorage(type_oid);
 			attr.attalign = type_align;
 			attr.attnotnull = !nullable;
-			attr.atthasdef = false;
-			attr.atthasmissing = false;
-			attr.attidentity = '\0';
-			attr.attgenerated = false;
-			attr.attisdropped = false;
 			attr.attislocal = true;
-			attr.attinhcount = 0;
-			attr.attcollation = InvalidOid;
-
+			/*
+			 * The above setup omits initializations by zero, to simplify 
+			 * multi-versions compilation, even if pg_attribute is extended
+			 * in the future version.
+			 */
 			InsertPgAttributeTuple(a_rel, &attr, (Datum) 0, a_index);
 
 			/* add dependency */

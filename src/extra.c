@@ -100,11 +100,32 @@ static heterodb_extra_error_info   *p_heterodb_extra_error_data = NULL;
 static void
 heterodbExtraEreport(int elevel)
 {
+	/* see ereport_domain definition */
+#if PG_VERSION_NUM >= 130000
 	pg_prevent_errno_in_scope();
-	elog_start(p_heterodb_extra_error_data->filename,
-			   p_heterodb_extra_error_data->lineno,
-			   p_heterodb_extra_error_data->funcname);
-	elog_finish(elevel, "%s", p_heterodb_extra_error_data->message);
+	if (errstart(elevel, TEXTDOMAIN))
+	{
+		errcode(ERRCODE_INTERNAL_ERROR);
+		errmsg("%s", p_heterodb_extra_error_data->message);
+		errfinish(p_heterodb_extra_error_data->filename,
+				  p_heterodb_extra_error_data->lineno,
+				  p_heterodb_extra_error_data->funcname);
+	}
+#else
+#if PG_VERSION_NUM >= 120000
+	pg_prevent_errno_in_scope();
+#endif
+	if (errstart(elevel,
+				 p_heterodb_extra_error_data->filename,
+                 p_heterodb_extra_error_data->lineno,
+                 p_heterodb_extra_error_data->funcname,
+				 TEXTDOMAIN))
+	{
+		errcode(ERRCODE_INTERNAL_ERROR);
+		errmsg("%s", p_heterodb_extra_error_data->message);
+		errfinish(0);
+	}
+#endif
 }
 
 /*

@@ -171,7 +171,7 @@ Datum
 pgstrom_int1in(PG_FUNCTION_ARGS)
 {
 	char   *num = PG_GETARG_CSTRING(0);
-	int32	ival = pg_strtoint32(num);
+	int32	ival = pg_atoi(num, sizeof(int32), '\0');
 
 	if (ival < PG_INT8_MIN || ival > PG_INT8_MAX)
 		ereport(ERROR,

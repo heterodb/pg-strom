@@ -166,8 +166,9 @@ gpucache_sync_trigger_function_oid(void)
 {
 	if (!OidIsValid(__gpucache_sync_trigger_function_oid))
 	{
-		Oid		namespace_oid;
-		oidvector argtypes;
+		Oid			namespace_oid;
+		oidvector	argtypes;
+		HeapTuple	tuple;
 
 		namespace_oid = get_namespace_oid("pgstrom", true);
 		if (!OidIsValid(namespace_oid))
@@ -181,12 +182,15 @@ gpucache_sync_trigger_function_oid(void)
 		argtypes.dim1 = 0;
 		argtypes.lbound1 = 0;
 
-		__gpucache_sync_trigger_function_oid
-			= GetSysCacheOid3(PROCNAMEARGSNSP,
-							  Anum_pg_proc_oid,
-							  CStringGetDatum("gpucache_sync_trigger"),
-							  PointerGetDatum(&argtypes),
-							  ObjectIdGetDatum(namespace_oid));
+		tuple = SearchSysCache3(PROCNAMEARGSNSP,
+								CStringGetDatum("gpucache_sync_trigger"),
+								PointerGetDatum(&argtypes),
+								ObjectIdGetDatum(namespace_oid));
+		if (HeapTupleIsValid(tuple))
+		{
+			__gpucache_sync_trigger_function_oid = PgProcTupleGetOid(tuple);
+			ReleaseSysCache(tuple);
+		}
 	}
 	return __gpucache_sync_trigger_function_oid;
 }
