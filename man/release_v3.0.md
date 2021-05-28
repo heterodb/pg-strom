@@ -38,14 +38,14 @@ And, we switched its software license from GPLv2 to PostgreSQL license.
 
 @ja{
 - PostgreSQL v11, v12, v13
-- CUDA Toolkit 11.2 以降
+- CUDA Toolkit 11.3 以降
 - CUDA ToolkitのサポートするLinuxディストリビューション
 - Intel x86 64bit アーキテクチャ(x86_64)
 - NVIDIA GPU CC 6.0 以降 (Pascal以降)
 }
 @en{
 - PostgreSQL v11, v12, v13
-- CUDA Toolkit 11.2 or later
+- CUDA Toolkit 11.3 or later
 - Linux distributions supported by CUDA Toolkit
 - Intel x86 64bit architecture (x86_64)
 - NVIDIA GPU CC 6.0 or later (Pascal or newer)

@@ -211,7 +211,7 @@
 </li>
 <li><strong>GPUデバイス</strong><ul>
 <li>PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。</li>
-<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a>により詳細な情報が記載されています。GPUダイレクトSQL実行の対応状況に関してもこちらを参照してください。</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models">002: HW Validation List - List of supported GPU models</a>を参考にGPUを選定してください。</li>
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
@@ -236,7 +236,7 @@
 <p><a href="../ssd2gpu/">GPUダイレクトSQL</a>を実行するために必要なLinux kernelドライバには以下の２種類があります。</p>
 <ul>
 <li>HeteroDB NVME-Strom<ul>
-<li>2018年にリリースされた PG-Strom v2.0 よりサポートされている、HeteroDB社製の専用ドライバ。</li>
+<li>2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。</li>
 <li>RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。</li>
 <li>NVME-oFにはRHEL7.9カーネルでのみ対応しています。</li>
 </ul>

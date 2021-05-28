@@ -211,7 +211,7 @@
 </li>
 <li><strong>GPU Device</strong><ul>
 <li>PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;</li>
-<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a> shows more detailed information. Check this list for the support status of GPU Direct SQL Execution.</li>
+<li>Please check at <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models">002: HW Validation List - List of supported GPU models</a> for GPU selection.</li>
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
@@ -533,7 +533,7 @@ If your setup follows the document exactly, the following packages shall be requ
 <li>gcc-gfortran</li>
 </ul>
 <p>Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.</p>
-<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code>.</p>
+<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code> (<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>).</p>
 <pre><code># modinfo nvme-rdma
 filename:       /lib/modules/4.18.0-240.22.1.el8_3.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
 license:        GPL v2

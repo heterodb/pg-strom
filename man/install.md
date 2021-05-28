@@ -18,7 +18,7 @@ This chapter introduces the steps to install PG-Strom.
     - GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。
 - **GPUデバイス**
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
-    - [note001:GPU Availability Matrix](https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix)により詳細な情報が記載されています。GPUダイレクトSQL実行の対応状況に関してもこちらを参照してください。
+    - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
     - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。
     - GPUダイレクトSQL実行（HeteroDBドライバ）を利用するには、Red Hat Enterprise Linux または CentOS のバージョン7.3以降または8.0以降が必要です。
@@ -37,7 +37,7 @@ This chapter introduces the steps to install PG-Strom.
     - GPU Direct SQL Execution needs SSD devices which support NVMe specification, and to be installed under the same PCIe Root Complex where GPU is located on.
 - **GPU Device**
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
-    - [note001:GPU Availability Matrix](https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix) shows more detailed information. Check this list for the support status of GPU Direct SQL Execution.
+    - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
     - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 8.x series.
     - GPU Direct SQL Execution (w/ HeteroDB driver) needs Red Hat Enterprise Linux or CentOS version 7.3/8.0 or newer.
@@ -59,7 +59,7 @@ This chapter introduces the steps to install PG-Strom.
 [GPUダイレクトSQL](../ssd2gpu/)を実行するために必要なLinux kernelドライバには以下の２種類があります。
 
 - HeteroDB NVME-Strom
-    - 2018年にリリースされた PG-Strom v2.0 よりサポートされている、HeteroDB社製の専用ドライバ。
+    - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
     - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
     - NVME-oFにはRHEL7.9カーネルでのみ対応しています。
 - NVIDIA GPUDirect Storage (実験的)
@@ -681,7 +681,7 @@ MOFEDドライバのインストールが完了すると、nvmeドライバな�
 @en{
 Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
 
-For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma`.
+For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
 }
 
 ```

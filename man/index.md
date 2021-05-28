@@ -9,10 +9,10 @@
 @en:##What is PG-Strom?
 
 @ja{
-PG-StromはPostgreSQL v9.6および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。
+PG-StromはPostgreSQL v11および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。
 }
 @en{
-PG-Strom is an extension module of PostgreSQL designed for version 9.6 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.
+PG-Strom is an extension module of PostgreSQL designed for version 11 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.
 }
 @ja{
 PG-Stromの中核となる機能は、SQL命令から自動的にGPUプログラムを生成するコードジェネレータと、SQLワークロードをGPU上で非同期かつ並列に実行する実行エンジンです。現バージョンではSCAN（WHERE句の評価）、JOINおよびGROUP BYのワークロードに対応しており、GPU処理にアドバンテージがある場合にはPostgreSQL標準の実装を置き換える事で、ユーザやアプリケーションからは透過的に動作します。
@@ -21,22 +21,24 @@ PG-Stromの中核となる機能は、SQL命令から自動的にGPUプログラ
 Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.
 }
 @ja{
-また、PG-StromはいくつかのDWH専用システムとは異なり、行形式でデータを保存するPostgreSQLとストレージシステムを共有しています。これは必ずしも集計・解析系ワークロードに最適ではありませんが、一方で、トランザクション系データベースからデータを移動することなく集計処理を実行できるというアドバンテージでもあります。
+PG-Stromは２つのストレージオプションを持っています。一つは行形式でデータを保存するPostgreSQLのheapストレージシステムで、これは必ずしも集計・解析系ワークロードに最適ではありませんが、一方で、トランザクション系データベースからデータを移動する事なく集計処理を実行できるというアドバンテージがあります。もう一つは、列形式の構造化データ形式である Apache Arrow ファイルで、行単位のデータ更新には不向きであるものの、効率的に大量データをインポートする事ができ、外部データラッパ(FDW)を通して効率的なデータの検索・集計が可能です。
 }
 @en{
-Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.
+PG-Strom has two storage options. The first one is the heap storage system of PostgreSQL. It is not always optimal for aggregation / analysis workloads because of its row data format, on the other hands, it has an advantage to run aggregation workloads without data transfer from the transactional database. The other one is Apache Arrow files, that have structured columnar format. Even though it is not suitable for update per row basis, it enables to import large amount of data efficiently, and efficiently search / aggregate the data through foreign data wrapper (FDW).
 }
+
 @ja{
-PG-Strom v2.0ではストレージ読出し能力が強化されました。SSD-to-GPUダイレクトSQL機構はストレージ（NVME-SSD）からGPUへ直接データをロードし、クエリを処理するGPUへ高速にデータを供給する事を可能にします。
+PG-Stromの特徴的な機能の一つが、NVME/NVME-oFデバイスからCPU/RAMをバイパスしてGPUに直接データを読み出し、GPUでSQL処理を実行する事でデバイスの帯域を最大限に引き出すGPUダイレクトSQL機能です。v3.0では新たにNVIDIA GPUDirect Storageにも対応し、ローカルNVME-SSDだけでなく、NVME-oFを介したSDS(Software Defined Storage)デバイスや、共有ファイルシステムからの読み出しにも対応します。
 }
 @en{
-PG-Strom v2.0 enhanced the capability of reading from storage. SSD-to-GPU Direct SQL mechanism allows to load from storage (NVME-SSD) to GPU directly, and supply data to GPU that runs SQL workloads.
+One of the characteristic feature of PG-Strom is GPUDirect SQL that bypasses the CPU/RAM to read the data from NVME / NVME-oF to the GPU directly. SQL processing on the GPU maximizes the bandwidth of these devices. PG-Strom v3.0 newly supports NVIDIA GPUDirect Storage, it allows to support SDS (Software Defined Storage) over the NVME-oF protocol and shared filesystems.
 }
+
 @ja{
-一方、高度な統計解析や機械学習といった極めて計算集約度の高い問題に対しても、PL/CUDAやgstore_fdwといった機能を使用する事で、データベース管理システム上で計算処理を行い、結果だけをユーザへ返すといった使い方をする事が可能です。
+また、v3.0では一部のPostGIS関数と、ジオメトリデータのGiSTインデックス探索をGPU側で実行する事が可能になりました。更新の多いテーブルの内容を予めGPUに複製しておくGPUキャッシュ機能と併せて、リアルタイムな位置情報に基づく検索、分析処理が可能となります。
 }
 @en{
-On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly computing density problems, like advanced statistical analytics or machine learning, on the database management system, and to return only results to users.
+Also, the v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.
 }
 
 @ja:## ライセンスと著作権
@@ -55,20 +57,18 @@ See [LICENSE](https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE
 @en:##Community
 
 @ja{
-開発者コミュニティのMLが[PG-Strom community ML](https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom)に準備されています。
-PG-Stromに関連した質問、要望、障害報告などはこちらにポストしてください。
+PG-Stromに関する質問や要望、障害報告などは、[GitHubのDiscussion](https://github.com/heterodb/pg-strom/discussions)ページに投稿するようお願いします。
 
-本MLは世界中に公開されたパブリックのMLである事に留意してください。つまり、自己責任の下、秘密情報が誤って投稿されないように注意してください。
+本掲示板は、世界中に公開されたパブリックの掲示板である事に留意してください。つまり、自己責任の下、秘密情報が誤って投稿されないように注意してください。
 
-本MLの優先言語は英語です。ただ一方で、歴史的経緯によりPG-Stromユーザの多くの割合が日本人である事は承知しており、ML上で日本語を利用した議論が行われることも可能とします。その場合、Subject(件名)に`(JP)`という接頭句を付ける事を忘れないようにしてください。これは非日本語話者が不要なメッセージを読み飛ばすために有用です。
-
+本掲示板の優先言語は英語です。ただ一方で、歴史的経緯によりPG-Stromユーザの多くの割合が日本人である事は承知しており、Discussion上で日本語を利用した議論が行われることも可能とします。その場合、Subject(件名)に`(JP)`という接頭句を付ける事を忘れないようにしてください。これは非日本語話者が不要なメッセージを読み飛ばすために有用です。
 }
 @en{
-We have a community mailing-list at: [PG-Strom community ML](https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom) It is a right place to post questions, requests, troubles and etc, related to PG-Strom project.
+Please post your questions, requests and trouble reports to the [Discussion of GitHubの](https://github.com/heterodb/pg-strom/discussions).
 
-Please pay attention it is a public list for world wide. So, it is your own responsibility not to disclose confidential information.
+Please pay attention it is a public board for world wide. So, it is your own responsibility not to disclose confidential information.
 
-The primary language of the mailing-list is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach `(JP)` prefix on the subject like, for non-Japanese speakers to skip messages.
+The primary language of the discussion board is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach `(JP)` prefix on the subject like, for non-Japanese speakers to skip messages.
 }
 
 @ja:###バグや障害の報告
@@ -79,6 +79,7 @@ The primary language of the mailing-list is English. On the other hands, we know
 @en{
 If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with **bug** tag at the [PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues).
 }
+
 
 @ja{
 バグレポートの作成に際しては、下記の点に留意してください。
@@ -119,10 +120,10 @@ The information below are helpful for bug-reports.
 - Hardware configuration - GPU model and host RAM size especially.
 }
 @ja{
-あなたの環境で発生した疑わしい動作がバグかどうか定かではない場合、新しいイシューのチケットをオープンする前にメーリングリストへ報告してください。追加的な情報採取の依頼など、開発者は次に取るべきアクションを提案してくれるでしょう。
+あなたの環境で発生した疑わしい動作がバグかどうか定かではない場合、新しいイシューのチケットをオープンする前にDiscussion掲示板へ報告してください。追加的な情報採取の依頼など、開発者は次に取るべきアクションを提案してくれるでしょう。
 }
 @en{
-If you are not certain whether the strange behavior on your site is bug or not, please report it to the mailing-list prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.
+If you are not certain whether the strange behavior on your site is bug or not, please report it to the discussion board prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.
 }
 
 @ja:### 新機能の提案
@@ -182,29 +183,4 @@ The PG-Strom development team will support the latest release which are distribu
 Please note that it is volunteer based community support policy, so our support is best effort and no SLA definition.
 
 If you need commercial support, contact to HeteroDB,Inc (contact@heterodb.com).
-}
-
-@ja:##バージョンポリシー
-@en:##Versioning Policy
-
-@ja{
-PG-Stromのバージョン番号は`<major>.<minor>`という2つの要素から成ります。
-
-マイナーバージョン番号は各リリース毎に増加し、バグ修正と新機能の追加を含みます。
-
-メジャーバージョン番号は以下のような場合に増加します。
-
-- 対応しているPostgreSQLバージョンのうち、いくつかがサポート対象外となった場合。
-- 対応しているGPUデバイスのうち、いくつかがサポート対象外となった場合。
-- エポックメイキングな新機能が追加となった場合。
-}
-@en{
-PG-Strom's version number is consists of two portion; major and minor version. `<major>.<minor>`
-
-Its minor version shall be incremented for each release; including bug fixes and new features.
-Its major version shall be incremented in the following situation.
-
-- Some of supported PostgreSQL version gets deprecated.
-- Some of supported GPU devices gets deprecated.
-- New version adds epoch making features.
 }
