@@ -9,7 +9,7 @@
   <meta name="author" content="PG-Strom Development Team">
   
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>PG-Strom v3.0 - PG-Strom Manual</title>
+  <title>Utilities - PG-Strom Manual</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
 
   <link rel="stylesheet" href="../css/theme.css" />
@@ -21,8 +21,8 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "PG-Strom v3.0";
-    var mkdocs_page_input_path = "release_v3.0.md";
+    var mkdocs_page_name = "Utilities";
+    var mkdocs_page_input_path = "ref_utils.md";
     var mkdocs_page_url = null;
   </script>
   
@@ -46,7 +46,7 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
-  [<a href="../ja/release_v3.0/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+  [<a href="../ja/ref_utils/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
 </div>
       </div>
 
@@ -93,32 +93,8 @@
                     </li>
                 </ul>
                 <p class="caption"><span class="caption-text">Release Note</span></p>
-                <ul class="current">
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v3.0</a>
-    <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#new-features">New Features</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu-postgis-support">GPU-PostGIS support</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gist-index-support">GiST-index support</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-mechanism">GPU Cache mechanism</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#other-updates">Other updates</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#deprecated-features">Deprecated Features</a>
-    </li>
-    </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
                     </li>
@@ -147,12 +123,8 @@
     <li><a href="..">Docs</a> &raquo;</li>
     
       
-        
-          <li>Release Note &raquo;</li>
-        
-      
     
-    <li>PG-Strom v3.0</li>
+    <li>Utilities</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -163,77 +135,46 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="pg-strom-v30-release">PG-Strom v3.0 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (12-May-2021)</div>
-
-<h2 id="overview">Overview</h2>
-<p>Major enhancement in PG-Strom v3.0 includes:</p>
+                <h1 id="utilities">Utilities</h1>
+<p>This chapter introduces the utilities distributed with PG-Strom.</p>
+<h2 id="gpuinfo">gpuinfo</h2>
+<h3 id="overview">Overview</h3>
+<p><code>gpuinfo</code> collects properties of the GPU devices installed on the system, then displays them to the standard output.</p>
+<p>PG-Strom also use <code>gpuinfo</code> internally to collect GPU device's information on PostgreSQL system startup.</p>
+<p>If postmaster process invokes <code>cuInit()</code> that initializes CUDA driver then <code>fork(2)</code> system call to accept connections from users, its child processes goes into broken state where we cannot use CUDA driver APIs. So, we adopted to use separated process for collection of GPU device information.</p>
+<h3 id="usage">Usage</h3>
+<p><code>gpuinfo</code> command without options displays only significant properties of GPU devices in human readable format.</p>
+<p>Other options are as follows:</p>
 <ul>
-<li>Some PostGIS functions can now be executed on GPUs.</li>
-<li>GpuJoin using GiST index is now possible.</li>
-<li>GPU Cache mechanism has been implemented.<ul>
-<li>This is different from the feature of the same name that was implemented in past versions.</li>
+<li><code>-d</code> : detailed output<ul>
+<li>It displays all the GPU device attributes supported on the environment.</li>
 </ul>
 </li>
-<li>NVIDIA GPUDirect Storage is now supported. (Experimental)</li>
-<li>User-defined GPU data types/functions/operators are now supported.</li>
+<li><code>-m</code> : machine readable format<ul>
+<li>It displays the GPU device attribute in the format suitable to parse by software.</li>
 </ul>
-<p>And, we switched its software license from GPLv2 to PostgreSQL license.</p>
-<h2 id="prerequisites">Prerequisites</h2>
-<ul>
-<li>PostgreSQL v11, v12, v13</li>
-<li>CUDA Toolkit 11.2 or later</li>
-<li>Linux distributions supported by CUDA Toolkit</li>
-<li>Intel x86 64bit architecture (x86_64)</li>
-<li>NVIDIA GPU CC 6.0 or later (Pascal or newer)</li>
-</ul>
-<h2 id="new-features">New Features</h2>
-<h3 id="gpu-postgis-support">GPU-PostGIS support</h3>
-<p>We have implemented GPU versions of several PostGIS functions. 
-If any of these PostGIS functions are used in a conditional clause, PG-Strom will automatically generate a GPU program to execute it on the GPU.</p>
-<h3 id="gist-index-support">GiST-index support</h3>
-<p>If a column whose data type is geometry has a GiST index and the table can be filtered using the index, GpuJoin will load the GiST index on the GPU and use it to join the tables.</p>
-<p>Since the GiST index search is executed in parallel on the GPU, significant performance improvements can be expected.</p>
-<h3 id="gpu-cache-mechanism">GPU Cache mechanism</h3>
-<p>GPU Cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
-It was designed for efficient execution of analytical/search queries on frequently updated data with relatively small data size (~10GB).</p>
-<p>The GPU can process SQL workloads by referring to GPU Cache instead of loading data from tables when executing analytical/search queries.</p>
-<h3 id="nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</h3>
-<p><a href="https://developer.nvidia.com/blog/gpudirect-storage/">GPUDirect Storage</a> developed by NVIDIA is now available as a driver for <a href="../ssd2gpu">GPU Direct SQL</a>, in addition to the existing nvme_strom kernel module.</p>
-<p>GPU Direct SQL will now be available on SDS (Software Defined Storage) devices in addition to conventional NVME-SSD and NVME-oF storage.</p>
-<p>Currently, the driver for GPUDirect Storage is a beta version and experimental support is available.</p>
-<h3 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h3>
-<p>A new API is provided to add user-defined GPU data types/functions. This allows users to define and implement their own niche data types and SQL functions to process them, without modifying PG-Strom itself.</p>
-<h2 id="other-updates">Other updates</h2>
-<ul>
-<li>Unique int1 (8-bit integer) data type and related operators are now supported.</li>
-<li><code>--inner-join</code> and <code>--outer-join</code> options are now available for <code>pg2arrow</code>. Apache Arrow files having more columns than the limit of PostgreSQL can now be generated.</li>
-<li>In a multi-GPU environment, the GPU Memory Keeper background worker will now be launched for each GPU.</li>
-<li>PostgreSQL v13.x is now supported.</li>
-<li>CUDA 11.2 and Ampere generation GPUs are now supported.</li>
-<li>ScaleFlux's Computational Storage product CSD2000 series is now supported.<ul>
-<li>NVIDIA GPUDirect Storage only (nvme_strom kernel module is not supported)</li>
+</li>
+<li><code>-h</code> : help message<ul>
+<li><code>gpuinfo</code> shows the command line options, then exit.</li>
 </ul>
 </li>
 </ul>
-<h2 id="deprecated-features">Deprecated Features</h2>
-<ul>
-<li>Support for PostgreSQL v10.x has been discontinued.</li>
-<li>The feature to link data with Python scripts (PyStrom) has been discontinued.</li>
-</ul>
+<pre><code>$ gpuinfo -h
+usage: gpuinfo [-d][-m][-h]
+  -d : detailed output
+  -m : machine readable format
+  -h : shows this message
+</code></pre>
+<h2 id="dbgen-ssbm">dbgen-ssbm</h2>
+<h2 id="pg2arrow">pg2arrow</h2>
+<p>ほげほげ</p>
+<h2 id="mysql2arrow">mysql2arrow</h2>
+<p>ほげほげ</p>
+<h2 id="pcap2arrow">pcap2arrow</h2>
               
             </div>
           </div>
           <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-        <a href="../release_v2.3/" class="btn btn-neutral float-right" title="PG-Strom v2.3">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_params/" class="btn btn-neutral" title="GUC Parameters"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
-    </div>
   
 
   <hr/>
@@ -257,10 +198,6 @@ It was designed for efficient execution of analytical/search queries on frequent
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../ref_params/" style="color: #fcfcfc;">&laquo; Previous</a></span>
-      
-      
-        <span style="margin-left: 15px"><a href="../release_v2.3/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

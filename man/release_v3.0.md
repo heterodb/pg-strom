@@ -15,6 +15,8 @@ PG-Strom v3.0における主要な機能強化は以下の通りです。
     - これは過去のバージョンで実装されていた同名の機能とは別物です。
 - NVIDIA GPUDirect Storageに対応しました。（実験的）
 - ユーザ定義のGPUデータ型/関数/演算子に対応しました。
+
+また、ライセンス体系をGPLv2からPostgreSQLライセンスへと切り替えました。
 }
 
 @en{
@@ -26,6 +28,8 @@ Major enhancement in PG-Strom v3.0 includes:
     - This is different from the feature of the same name that was implemented in past versions.
 - NVIDIA GPUDirect Storage is now supported. (Experimental)
 - User-defined GPU data types/functions/operators are now supported.
+
+And, we switched its software license from GPLv2 to PostgreSQL license.
 }
 
 

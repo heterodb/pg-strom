@@ -1,3 +1,4 @@
+
 @ja:#はじめに
 @en:#Home
 
@@ -42,19 +43,12 @@ On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly c
 @en:## License and Copyright
 
 @ja{
-PG-StromはGPL(GNU Public License)v2に基づいて公開・配布されているオープンソースソフトウェアです。
+PG-StromはPostgreSQLライセンスに基づいて公開・配布されているオープンソースソフトウェアです。
 ライセンスの詳細は[LICENSE](https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE)を参照してください。
 }
 @en{
-PG-Strom is an open source software distributed under the GPL(GNU Public License) v2.
+PG-Strom is an open source software distributed under the PostgreSQL License.
 See [LICENSE](https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE) for the license details.
-}
-@ja{
-PG-Stromの著作権はPG-Strom Development Teamが有しています。PG-Strom Development Teamは法的な主体ではなく、国籍を問わず、PG-Stromプロジェクトに貢献した個々の開発者や企業の総称です。
-}
-@en{
-PG-Strom Development Team reserves the copyright of the software.
-PG-Strom Development Team is an international, unincorporated association of individuals and companies who have contributed to the PG-Strom project, but not a legal entity.
 }
 
 @ja:##コミュニティ
