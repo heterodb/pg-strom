@@ -474,7 +474,7 @@ int main(int argc, char *argv[])
 			rc = cuDeviceGetUuid(&dev_uuid, __cuda_device);
 			if (rc != CUDA_SUCCESS)
 				elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
-			if (__heterodbValidateDevice(i, dev_name, dev_uuid.bytes))
+			if (__heterodbValidateDevice(i, dev_name, dev_uuid.bytes) > 0)
 			{
 				void   *temp;
 				size_t	sz;
