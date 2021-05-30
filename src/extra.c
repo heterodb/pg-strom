@@ -125,93 +125,86 @@ heterodbExtraEreport(int elevel)
 /*
  * heterodbLicenseReload
  */
-static const heterodb_license_info *(*p_heterodb_license_reload)(const char *pathname) = NULL;
-
-static const heterodb_license_info *
-heterodbLicenseReload(const char *pathname)
+static int	(*p_heterodb_license_reload)(void) = NULL;
+static int
+heterodbLicenseReload(void)
 {
 	if (!p_heterodb_license_reload)
-		return NULL;
-	return p_heterodb_license_reload(pathname);
+		return -1;
+	return p_heterodb_license_reload();
 }
 
 /*
- * heterodb_license_query
+ * heterodbLicenseQuery
  */
-static void
-heterodb_license_print_v2(StringInfo str, const heterodb_license_info_v2 *linfo)
-{
-	appendStringInfo(str, "{ \"version\" : %d",
-					 linfo->version);
-	if (linfo->serial_nr)
-		appendStringInfo(str, ", \"serial_nr\" : \"%s\"",
-						 linfo->serial_nr);
-	appendStringInfo(str, ", \"issued_at\" : \"%04d-%02d-%02d\"",
-					 (linfo->issued_at / 10000),
-					 (linfo->issued_at / 100) % 100,
-					 (linfo->issued_at % 100));
-	appendStringInfo(str, ", \"expired_at\" : \"%04d-%02d-%02d\"",
-					 (linfo->expired_at / 10000),
-					 (linfo->expired_at / 100) % 100,
-					 (linfo->expired_at % 100));
-	if (linfo->licensee_org)
-		appendStringInfo(str, ", \"licensee_org\" : \"%s\"",
-						 linfo->licensee_org);
-	if (linfo->licensee_name)
-		appendStringInfo(str, ", \"licensee_name\" : \"%s\"",
-						 linfo->licensee_name);
-	if (linfo->licensee_mail)
-		appendStringInfo(str, ", \"licensee_mail\" : \"%s\"",
-						 linfo->licensee_mail);
-	if (linfo->description)
-		appendStringInfo(str, ", \"description\" : \"%s\"",
-						 linfo->description);
-	if (linfo->nr_gpus > 0)
-	{
-		int		i;
+static ssize_t (*p_heterodb_license_query)(
+	char *buf,
+	size_t bufsz) = NULL;
 
-		appendStringInfo(str, ", \"gpus\" : [");
-		for (i=0; i < linfo->nr_gpus; i++)
-		{
-			appendStringInfo(str, "%s{ \"uuid\" : \"%s\" }",
-							 i > 0 ? ", " : " ",
-							 linfo->gpu_uuid[i]);
-		}
-		appendStringInfo(str, " ]");
-	}
-	appendStringInfo(str, "}");
+static ssize_t
+heterodbLicenseQuery(char *buf, size_t bufsz)
+{
+	if (!p_heterodb_license_query)
+		return -1;
+	return p_heterodb_license_query(buf, bufsz);
 }
 
-static char *
-heterodb_license_query(void)
+#if 0
+/*
+ * heterodbValidateDevice
+ */
+static int	(*p_heterodb_validate_device)(int gpu_device_id,
+										  const char *gpu_device_name,
+										  const char *gpu_device_uuid) = NULL;
+static int
+heterodbValidateDevice(int gpu_device_id,
+					   const char *gpu_device_name,
+					   const char *gpu_device_uuid)
 {
-	const heterodb_license_info *linfo = heterodbLicenseReload(NULL);
-	StringInfoData str;
+	if (!p_heterodb_validate_device)
+		return -1;
+	return p_heterodb_validate_device(gpu_device_id,
+									  gpu_device_name,
+									  gpu_device_uuid);
+}
+#endif
 
-	if (!linfo)
+/*
+ * pgstrom_license_query
+ */
+static char *
+__heterodb_license_query(void)
+{
+	char	   *buf;
+	size_t		bufsz;
+	ssize_t		nbytes;
+
+	if (heterodbLicenseReload() <= 0)
 		return NULL;
 
-	initStringInfo(&str);
-
-	if (linfo->version == 2)
-		heterodb_license_print_v2(&str, &linfo->v2);
-	else
-		elog(ERROR, "unknown license version: %d", linfo->version);
-	return str.data;
+	bufsz = 2048;
+retry:
+	buf = alloca(bufsz);
+	nbytes = heterodbLicenseQuery(buf, bufsz);
+	if (nbytes < 0)
+		return NULL;
+	if (nbytes < bufsz)
+		return pstrdup(buf);
+	bufsz += bufsz;
+	goto retry;
 }
 
 Datum
 pgstrom_license_query(PG_FUNCTION_ARGS)
 {
-	char   *license;
+	char	   *license;
 
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 (errmsg("only superuser can query commercial license"))));
-	license = heterodb_license_query();
-	if (!license)
-		PG_RETURN_NULL();
+	license = __heterodb_license_query();
+
 	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
@@ -470,6 +463,8 @@ pgstrom_init_extra(void)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_error_data);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_api_version);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
+		//LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device);
 		api_version = heterodbExtraApiVersion();
 		if ((api_version & HETERODB_EXTRA_WITH_CUFILE) != 0)
 			with_cufile = true;
@@ -528,6 +523,7 @@ pgstrom_init_extra(void)
 		p_heterodb_extra_error_data = NULL;
 		p_heterodb_extra_api_version = NULL;
 		p_heterodb_license_reload = NULL;
+		p_heterodb_license_query = NULL;
 		p_gpudirect_init_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
@@ -547,7 +543,7 @@ pgstrom_init_extra(void)
 		 api_version,
 		 with_cufile ? "; NVIDIA cuFile" : "");
 
-	license = heterodb_license_query();
+	license = __heterodb_license_query();
 	if (license)
 	{
 		elog(LOG, "HeteroDB License: %s", license);

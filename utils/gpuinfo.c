@@ -69,12 +69,18 @@ cuErrorName(CUresult error_code)
 /*
  * HeteroDB's license checker
  */
-static const heterodb_license_info *
-__heterodbLicenseReload(void)
+static int  (*p_heterodb_license_reload)(void) = NULL;
+static int  (*p_heterodb_validate_device)(int gpu_device_id,
+										  const char *gpu_device_name,
+										  const char *gpu_device_uuid) = NULL;
+static int
+__heterodb_extra_open(void)
 {
-	const heterodb_license_info *(*p_heterodb_license_reload)(FILE *out) = NULL;
-	void	   *handle;
+	static void *heterodb_extra_handle = NULL;
+	void   *handle;
 
+	if (heterodb_extra_handle)
+		return 0;
 	handle = dlopen(HETERODB_EXTRA_FILENAME,
 					RTLD_NOW | RTLD_LOCAL);
 	if (!handle)
@@ -82,13 +88,44 @@ __heterodbLicenseReload(void)
 		handle = dlopen(HETERODB_EXTRA_PATHNAME,
 						RTLD_NOW | RTLD_LOCAL);
 		if (!handle)
-			return NULL;
+			return -1;
 	}
 	p_heterodb_license_reload = dlsym(handle, "heterodb_license_reload");
 	if (!p_heterodb_license_reload)
-		return NULL;
+		goto error;
+	p_heterodb_validate_device = dlsym(handle, "heterodb_validate_device");
+	if (!p_heterodb_validate_device)
+		goto error;
+	heterodb_extra_handle = handle;
+	return 0;
 
-	return p_heterodb_license_reload(NULL);
+error:
+	p_heterodb_license_reload = NULL;
+	p_heterodb_validate_device = NULL;
+	dlclose(handle);
+	return -1;
+}
+
+static int
+__heterodbLicenseReload(void)
+{
+	if (__heterodb_extra_open() != 0)
+		return -1;
+	assert(p_heterodb_license_reload);
+	return p_heterodb_license_reload();
+}
+
+static int
+__heterodbValidateDevice(int gpu_device_id,
+						 const char *gpu_device_name,
+						 const char *gpu_device_uuid)
+{
+	if (__heterodb_extra_open() != 0)
+		return -1;
+	assert(p_heterodb_validate_device);
+	return p_heterodb_validate_device(gpu_device_id,
+									  gpu_device_name,
+									  gpu_device_uuid);
 }
 
 /*
@@ -129,41 +166,12 @@ static inline int HEX2DIG(char c)
 	return -1;
 }
 
-static int check_device(CUdevice device, const heterodb_license_info *linfo)
-{
-	CUresult	rc;
-	CUuuid		dev_uuid;
-	int			i, j=0;
-
-	rc = cuDeviceGetUuid(&dev_uuid, device);
-	if (rc != CUDA_SUCCESS)
-		elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
-
-	for (i=0; i < linfo->v2.nr_gpus; i++)
-	{
-		const char *pos;
-		char		uuid[16];
-
-		for (pos = linfo->v2.gpu_uuid[i], j=0; *pos != '\0' && j < 16; pos++)
-		{
-			if (isxdigit(pos[0]) && isxdigit(pos[1]))
-			{
-				uuid[j++] = (HEX2DIG(pos[0]) << 4) | (HEX2DIG(pos[1]));
-				pos++;
-			}
-		}
-		if (j == 16 && memcmp(dev_uuid.bytes, uuid, 16) == 0)
-			return 1;
-	}
-	return 0;
-}
-
 static void output_device(CUdevice cuda_device,
 						  nvmlDevice_t nvml_device,
+						  const char *dev_name,
+						  CUuuid *dev_uuid,
 						  int dindex)
 {
-	char		dev_name[1024];
-	CUuuid		dev_uuid;
 	size_t		dev_memsz;
 	int			dev_prop;
 	char		uuid[80];
@@ -175,9 +183,6 @@ static void output_device(CUdevice cuda_device,
 	nvmlReturn_t rv;
 
 	/* device name */
-	rc = cuDeviceGetName(dev_name, sizeof(dev_name), cuda_device);
-	if (rc != CUDA_SUCCESS)
-		elog("failed on cuDeviceGetName: %s", cuErrorName(rc));
 	if (!machine_format)
 		printf("Device Name: %s\n", dev_name);
 	else
@@ -203,27 +208,24 @@ static void output_device(CUdevice cuda_device,
 		printf("DEVICE%d:DEVICE_BRAND=%s\n", dindex, label);
 
 	/* device uuid */
-	rc = cuDeviceGetUuid(&dev_uuid, cuda_device);
-	if (rc != CUDA_SUCCESS)
-		elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
 	snprintf(uuid, sizeof(uuid),
 			 "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-			 (unsigned char)dev_uuid.bytes[0],
-			 (unsigned char)dev_uuid.bytes[1],
-			 (unsigned char)dev_uuid.bytes[2],
-			 (unsigned char)dev_uuid.bytes[3],
-			 (unsigned char)dev_uuid.bytes[4],
-			 (unsigned char)dev_uuid.bytes[5],
-			 (unsigned char)dev_uuid.bytes[6],
-			 (unsigned char)dev_uuid.bytes[7],
-			 (unsigned char)dev_uuid.bytes[8],
-			 (unsigned char)dev_uuid.bytes[9],
-			 (unsigned char)dev_uuid.bytes[10],
-			 (unsigned char)dev_uuid.bytes[11],
-			 (unsigned char)dev_uuid.bytes[12],
-			 (unsigned char)dev_uuid.bytes[13],
-			 (unsigned char)dev_uuid.bytes[14],
-			 (unsigned char)dev_uuid.bytes[15]);
+			 (unsigned char)dev_uuid->bytes[0],
+			 (unsigned char)dev_uuid->bytes[1],
+			 (unsigned char)dev_uuid->bytes[2],
+			 (unsigned char)dev_uuid->bytes[3],
+			 (unsigned char)dev_uuid->bytes[4],
+			 (unsigned char)dev_uuid->bytes[5],
+			 (unsigned char)dev_uuid->bytes[6],
+			 (unsigned char)dev_uuid->bytes[7],
+			 (unsigned char)dev_uuid->bytes[8],
+			 (unsigned char)dev_uuid->bytes[9],
+			 (unsigned char)dev_uuid->bytes[10],
+			 (unsigned char)dev_uuid->bytes[11],
+			 (unsigned char)dev_uuid->bytes[12],
+			 (unsigned char)dev_uuid->bytes[13],
+			 (unsigned char)dev_uuid->bytes[14],
+			 (unsigned char)dev_uuid->bytes[15]);
 	if (!machine_format)
 		printf("Device UUID: %s\n", uuid);
 	else
@@ -351,10 +353,11 @@ static void output_device(CUdevice cuda_device,
 
 int main(int argc, char *argv[])
 {
-	const heterodb_license_info *linfo = NULL;
 	int		   *gpu_id = NULL;
 	CUdevice   *cuda_devices = NULL;
 	nvmlDevice_t *nvml_devices = NULL;
+	char	  **cuda_dev_names = NULL;
+	CUuuid	  **cuda_dev_uuids = NULL;
 	CUresult	rc;
 	nvmlReturn_t rv;
 	int			version;
@@ -437,18 +440,10 @@ int main(int argc, char *argv[])
 		fclose(filp);
 	}
 
-	/*
-	 * Commercial License Validation (if any)
-	 *
-	 * Memo: it must be called after cuInit(0), because the first call of
-	 * CUDA driver setups UUID of GPU devices.
-	 */
-	linfo = __heterodbLicenseReload();
-	if (linfo && linfo->version != 2)
-	{
-		fprintf(stderr, "unknown license format version: %u", linfo->version);
-		linfo = NULL;
-	}
+	/* commercial license validation (if any) */
+	if (__heterodbLicenseReload() == 0)
+		fprintf(stderr, "license format is not valid, or expired\n");
+
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
 		elog("cuDeviceGetCount: %s", cuErrorName(rc));
@@ -457,10 +452,14 @@ int main(int argc, char *argv[])
 		gpu_id = alloca(sizeof(int) * count);
 		cuda_devices = alloca(sizeof(CUdevice) * count);
 		nvml_devices = alloca(sizeof(nvmlDevice_t) * count);
+		cuda_dev_names = alloca(sizeof(char *) * count);
+		cuda_dev_uuids = alloca(sizeof(CUuuid *) * count);
 		for (i=0; i < count; i++)
 		{
-			CUdevice		__cuda_device;
 			nvmlDevice_t	__nvml_device;
+			CUdevice		__cuda_device;
+			char			dev_name[1024];
+			CUuuid			dev_uuid;
 
 			rc = cuDeviceGet(&__cuda_device, i);
 			if (rc != CUDA_SUCCESS)
@@ -469,14 +468,31 @@ int main(int argc, char *argv[])
 			if (rv != NVML_SUCCESS)
 				elog("failed on nvmlDeviceGetHandleByIndex: %s",
 					 nvmlErrorString(rv));
-			if (!linfo || check_device(__cuda_device, linfo))
+			rc = cuDeviceGetName(dev_name, sizeof(dev_name), __cuda_device);
+			if (rc != CUDA_SUCCESS)
+				elog("failed on cuDeviceGetName: %s", cuErrorName(rc));
+			rc = cuDeviceGetUuid(&dev_uuid, __cuda_device);
+			if (rc != CUDA_SUCCESS)
+				elog("failed on cuDeviceGetUuid: %s", cuErrorName(rc));
+			if (__heterodbValidateDevice(i, dev_name, dev_uuid.bytes))
 			{
+				void   *temp;
+				size_t	sz;
+
 				gpu_id[nr_gpus] = i;
 				cuda_devices[nr_gpus] = __cuda_device;
 				nvml_devices[nr_gpus] = __nvml_device;
+
+				sz = strlen(dev_name) + 1;
+				temp = alloca(sz);
+				memcpy(temp, dev_name, sz);
+				cuda_dev_names[nr_gpus] = temp;
+
+				temp = alloca(sizeof(CUuuid));
+				memcpy(temp, &dev_uuid, sizeof(CUuuid));
+				cuda_dev_uuids[nr_gpus] = temp;
+
 				nr_gpus++;
-				if (!linfo)
-					break;
 			}
 		}
 	}
@@ -494,7 +510,9 @@ int main(int argc, char *argv[])
 			printf("DEVICE%d:DEVICE_ID=%d\n", i, gpu_id[i]);
 
 		output_device(cuda_devices[i],
-					  nvml_devices[i], i);
+					  nvml_devices[i],
+					  cuda_dev_names[i],
+					  cuda_dev_uuids[i], i);
 	}
 	return 0;
 }
