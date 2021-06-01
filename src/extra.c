@@ -17,25 +17,8 @@
 #define GPUDIRECT_DRIVER_TYPE__NONE			1
 #define GPUDIRECT_DRIVER_TYPE__CUFILE		2
 #define GPUDIRECT_DRIVER_TYPE__NVME_STROM	3
-#define GPUDIRECT_DRIVER_TYPE__DEFAULT		GPUDIRECT_DRIVER_TYPE__NVME_STROM
 
-/* in case of no cufile APIs are not installed */
-static struct config_enum_entry pgstrom_gpudirect_driver_options_1[] = {
-	{"none",       GPUDIRECT_DRIVER_TYPE__NONE,       false },
-	{"nvme_strom", GPUDIRECT_DRIVER_TYPE__NVME_STROM, false },
-	{NULL, 0, false}
-};
-
-/* in case of cufile APIs are installed */
-static struct config_enum_entry pgstrom_gpudirect_driver_options_2[] = {
-	{"none",       GPUDIRECT_DRIVER_TYPE__NONE,       false },
-	{"nvme_strom", GPUDIRECT_DRIVER_TYPE__NVME_STROM, false },
-	{"cufile",     GPUDIRECT_DRIVER_TYPE__CUFILE,     false },
-	{NULL, 0, false}
-};
-
-
-
+static struct config_enum_entry pgstrom_gpudirect_driver_options[4];
 static int		__pgstrom_gpudirect_driver;			/* GUC */
 static bool		__pgstrom_gpudirect_enabled;		/* GUC */
 static int		__pgstrom_gpudirect_threshold;		/* GUC */
@@ -76,14 +59,21 @@ pgstrom_gpudirect_threshold(void)
 }
 
 /*
- * heterodbExtraApiVersion
+ * heterodbExtraModuleInfo
  */
-static unsigned int (*p_heterodb_extra_api_version)(void) = NULL;
+static char *(*p_heterodb_extra_module_info)(void) = NULL;
 
-static unsigned int
-heterodbExtraApiVersion(void)
+static char *
+heterodbExtraModuleInfo(void)
 {
-	return p_heterodb_extra_api_version();
+	char   *res;
+
+	if (!p_heterodb_extra_module_info)
+		elog(ERROR, "HeteroDB Extra module is not loaded yet");
+	res = p_heterodb_extra_module_info();
+	if (!res)
+		elog(ERROR, "out of memory");
+	return res;
 }
 
 /*
@@ -148,26 +138,6 @@ heterodbLicenseQuery(char *buf, size_t bufsz)
 		return -1;
 	return p_heterodb_license_query(buf, bufsz);
 }
-
-#if 0
-/*
- * heterodbValidateDevice
- */
-static int	(*p_heterodb_validate_device)(int gpu_device_id,
-										  const char *gpu_device_name,
-										  const char *gpu_device_uuid) = NULL;
-static int
-heterodbValidateDevice(int gpu_device_id,
-					   const char *gpu_device_name,
-					   const char *gpu_device_uuid)
-{
-	if (!p_heterodb_validate_device)
-		return -1;
-	return p_heterodb_validate_device(gpu_device_id,
-									  gpu_device_name,
-									  gpu_device_uuid);
-}
-#endif
 
 /*
  * pgstrom_license_query
@@ -431,6 +401,87 @@ lookup_gpudirect_function(void *handle, const char *prefix, const char *func_nam
 	p_gpudirect_##func_name = lookup_gpudirect_function(handle, prefix, #func_name)
 
 /*
+ * parse_heterodb_extra_module_info
+ */
+static void
+parse_heterodb_extra_module_info(const char *extra_module_info,
+								 uint32 *p_api_version,
+								 bool *p_has_cufile,
+								 bool *p_has_nvme_strom,
+								 int *p_default_gpudirect_driver)
+{
+	char   *buffer;
+	long	api_version = 0;
+	bool	has_cufile = false;
+	bool	has_nvme_strom = false;
+	int		default_gpudirect_driver = GPUDIRECT_DRIVER_TYPE__NONE;
+	char   *tok, *pos, *end;
+	struct config_enum_entry *entry;
+
+	buffer = alloca(strlen(extra_module_info) + 1);
+	strcpy(buffer, extra_module_info);
+	for (tok = strtok_r(buffer, ",", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, ",", &pos))
+	{
+		if (strncmp(tok, "api_version=", 12) == 0)
+		{
+			api_version = strtol(tok+12, &end, 10);
+			if (api_version < 0 || *end != '\0')
+				elog(ERROR, "invalid extra module token [%s]", tok);
+		}
+		else if (strncmp(tok, "cufile=", 7) == 0)
+		{
+			if (strcmp(tok+7, "on") == 0)
+				has_cufile = true;
+			else if (strcmp(tok+7, "off") == 0)
+				has_cufile = false;
+			else
+				elog(ERROR, "invalid extra module token [%s]", tok);
+		}
+		else if (strncmp(tok, "nvme_strom=", 11) == 0)
+		{
+			if (strcmp(tok+11, "on") == 0)
+				has_nvme_strom = true;
+			else if (strcmp(tok+11, "off") == 0)
+				has_nvme_strom = false;
+			else
+				elog(ERROR, "invalid extra module token [%s]", tok);
+		}
+	}
+	if (api_version == 0 || api_version < 20200101 || api_version > 99991231)
+		elog(ERROR, "HeteroDB extra has invalid API version: %ld", api_version);
+	/* setup pgstrom.gpudirect_driver options */
+	entry = pgstrom_gpudirect_driver_options;
+	entry->name   = "none";
+	entry->val    = GPUDIRECT_DRIVER_TYPE__NONE;
+	entry->hidden = false;
+	entry++;
+	if (has_nvme_strom)
+	{
+		default_gpudirect_driver = GPUDIRECT_DRIVER_TYPE__NVME_STROM;
+		entry->name    = "nvme_strom";
+		entry->val     = GPUDIRECT_DRIVER_TYPE__NVME_STROM;
+		entry->hidden  = false;
+		entry++;
+	}
+	if (has_cufile)
+	{
+		default_gpudirect_driver = GPUDIRECT_DRIVER_TYPE__CUFILE;
+		entry->name   = "cufile";
+		entry->val    = GPUDIRECT_DRIVER_TYPE__CUFILE;
+		entry->hidden = false;
+		entry++;
+	}
+	memset(entry, 0, sizeof(struct config_enum_entry));
+
+	*p_api_version		= api_version;
+	*p_has_cufile		= has_cufile;
+	*p_has_nvme_strom	= has_nvme_strom;
+	*p_default_gpudirect_driver = default_gpudirect_driver;
+}
+
+/*
  * pgstrom_init_extra
  */
 void
@@ -439,13 +490,11 @@ pgstrom_init_extra(void)
 	const char *prefix = NULL;
 	void	   *handle;
 	char	   *license;
-	uint32		api_version;
-	bool		with_cufile = false;
 	bool		__gpudirect_enabled = false;
+	char	   *extra_module_info;
 	size_t		default_threshold = 0;
 	size_t		shared_buffer_size = (size_t)NBuffers * (size_t)BLCKSZ;
 
-	
 	/* load the extra module */
 	handle = dlopen(HETERODB_EXTRA_FILENAME,
 					RTLD_NOW | RTLD_LOCAL);
@@ -458,29 +507,26 @@ pgstrom_init_extra(void)
 
 	PG_TRY();
 	{
-		struct config_enum_entry *gpudirect_driver_options;
+		uint32		api_version = 0;
+		bool		has_cufile = false;
+		bool		has_nvme_strom = false;
+		int			default_gpudirect_driver;
 
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_error_data);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_api_version);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
-		//LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device);
-		api_version = heterodbExtraApiVersion();
-		if ((api_version & HETERODB_EXTRA_WITH_CUFILE) != 0)
-			with_cufile = true;
-		api_version /= 100;
-
-		if (!with_cufile)
-			gpudirect_driver_options = pgstrom_gpudirect_driver_options_1;
-		else
-			gpudirect_driver_options = pgstrom_gpudirect_driver_options_2;
-
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_info);
+		extra_module_info = heterodbExtraModuleInfo();
+		parse_heterodb_extra_module_info(extra_module_info,
+										 &api_version,
+										 &has_cufile,
+										 &has_nvme_strom,
+										 &default_gpudirect_driver);
+		/* pg_strom.gpudirect_driver */
 		DefineCustomEnumVariable("pg_strom.gpudirect_driver",
-								 "GPUDirectSQL Driver Selection",
-								 "'nvme_strom', 'cufile' or 'none'",
+								 "Selection of the GPUDirectSQL Driver",
+								 NULL,
 								 &__pgstrom_gpudirect_driver,
-								 GPUDIRECT_DRIVER_TYPE__DEFAULT,
-								 gpudirect_driver_options,
+								 default_gpudirect_driver,
+								 pgstrom_gpudirect_driver_options,
 								 PGC_POSTMASTER,
 								 GUC_NOT_IN_SAMPLE,
 								 NULL, NULL, NULL);
@@ -517,13 +563,13 @@ pgstrom_init_extra(void)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_setup_distance_map);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpu);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_print_nvme_info);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
 	}
 	PG_CATCH();
     {
 		p_heterodb_extra_error_data = NULL;
-		p_heterodb_extra_api_version = NULL;
-		p_heterodb_license_reload = NULL;
-		p_heterodb_license_query = NULL;
+		p_heterodb_extra_module_info = NULL;
 		p_gpudirect_init_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
@@ -534,14 +580,14 @@ pgstrom_init_extra(void)
 		p_sysfs_setup_distance_map = NULL;
 		p_sysfs_lookup_optimal_gpu = NULL;
 		p_sysfs_print_nvme_info = NULL;
+		p_heterodb_license_reload = NULL;
+		p_heterodb_license_query = NULL;
 		dlclose(handle);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	elog(LOG, "HeteroDB Extra module loaded (API=%u%s)",
-		 api_version,
-		 with_cufile ? "; NVIDIA cuFile" : "");
+	elog(LOG, "HeteroDB Extra module loaded [%s]", extra_module_info);
 
 	license = __heterodb_license_query();
 	if (license)
