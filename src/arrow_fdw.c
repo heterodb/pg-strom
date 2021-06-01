@@ -2884,7 +2884,7 @@ arrowTypeIsConvertible(Oid type_oid, int typemod)
 				elog(ERROR, "cache lookup failed for type %u", type_oid);
 			typeForm = (Form_pg_type) GETSTRUCT(tup);
 
-			if (typeForm->typlen == -1 && OidIsValid(typeForm->typelem))
+			if (OidIsValid(typeForm->typelem) && typeForm->typlen == -1)
 			{
 				retval = arrowTypeIsConvertible(typeForm->typelem, typemod);
 			}
@@ -3061,7 +3061,7 @@ __arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 			if (!HeapTupleIsValid(tup))
 				elog(ERROR, "cache lookup failed for type %u", attr->atttypid);
 			typ = (Form_pg_type) GETSTRUCT(tup);
-			if (typ->typlen == -1 && OidIsValid(typ->typelem) &&
+			if (OidIsValid(typ->typelem) && typ->typlen == -1 &&
 				fstate->num_children == 1)
 			{
 				/* Arrow::List */
@@ -4560,7 +4560,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 							 extname,
 							 extschema,
 							 NULL);
-	if (OidIsValid(__type->typelem))
+	if (OidIsValid(__type->typelem) && __type->typlen == -1)
 	{
 		/* array type */
 		char		elem_name[NAMEDATALEN+10];

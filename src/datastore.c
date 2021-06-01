@@ -283,7 +283,7 @@ count_num_of_subfields(Oid type_oid)
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for type %u", type_oid);
 	typeForm = (Form_pg_type) GETSTRUCT(tup);
-	if (typeForm->typlen == -1 && OidIsValid(typeForm->typelem))
+	if (OidIsValid(typeForm->typelem) && typeForm->typlen == -1)
 	{
 		/* array type */
 		result = 1 + count_num_of_subfields(typeForm->typelem);
@@ -364,11 +364,10 @@ __init_kernel_column_metadata(kern_data_store *kds,
 	cmeta->atttypmod = atttypmod;
 	strncpy(cmeta->attname.data, attname, NAMEDATALEN);
 
-	if (OidIsValid(typ->typelem))
+	if (OidIsValid(typ->typelem) && typ->typlen == -1)
 	{
 		char		elem_name[NAMEDATALEN + 10];
 
-		Assert(typ->typlen == -1);
 		cmeta->atttypkind = TYPE_KIND__ARRAY;
 		cmeta->idx_subattrs = kds->nr_colmeta++;
 		cmeta->num_subattrs = 1;
@@ -562,7 +561,7 @@ __check_kern_colmeta_compatibility(Oid type_oid, int type_mod,
 		(cmeta->attlen != typ->typlen))
 		goto not_compatible;
 
-	if (OidIsValid(typ->typelem))
+	if (OidIsValid(typ->typelem) && typ->typlen == -1)
 	{
 		kern_colmeta   *__cmeta = kds->colmeta + cmeta->idx_subattrs;
 
