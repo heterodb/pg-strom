@@ -801,8 +801,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 				fstate->nullmap_length = buffer_curr->length;
 				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
 			buffer_curr = con->buffer_curr++;
@@ -810,8 +809,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			fstate->values_length = buffer_curr->length;
 			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
 				elog(ERROR, "values array is smaller than expected");
-			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "values array is not aligned well");
 			break;
 
@@ -830,8 +828,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 				fstate->nullmap_length = buffer_curr->length;
 				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
 			/* offset values */
@@ -840,8 +837,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			fstate->values_length = buffer_curr->length;
 			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
 				elog(ERROR, "offset array is smaller than expected");
-			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "offset array is not aligned well");
 			/* setup array element */
 			fstate->children = palloc0(sizeof(RecordBatchFieldState));
@@ -864,8 +860,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 				fstate->nullmap_length = buffer_curr->length;
 				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
 
@@ -874,15 +869,13 @@ setupRecordBatchField(setupRecordBatchContext *con,
 			fstate->values_length = buffer_curr->length;
 			if (fstate->values_length < arrowFieldLength(field,fstate->nitems))
 				elog(ERROR, "offset array is smaller than expected");
-			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(fstate->values_length & (MAXIMUM_ALIGNOF - 1)) != 0)
-				elog(ERROR, "offset array is not aligned well");
+			if ((fstate->values_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
+				elog(ERROR, "offset array is not aligned well (%lu %lu)", fstate->values_offset, fstate->values_length);
 
 			buffer_curr = con->buffer_curr++;
 			fstate->extra_offset = buffer_curr->offset;
 			fstate->extra_length = buffer_curr->length;
-			if ((fstate->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-				(fstate->extra_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+			if ((fstate->extra_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 				elog(ERROR, "extra buffer is not aligned well");
 			break;
 
@@ -899,8 +892,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 				fstate->nullmap_length = buffer_curr->length;
 				if (fstate->nullmap_length < BITMAPLEN(fstate->nitems))
 					elog(ERROR, "nullmap length is smaller than expected");
-				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0 ||
-					(fstate->nullmap_length & (MAXIMUM_ALIGNOF - 1)) != 0)
+				if ((fstate->nullmap_offset & (MAXIMUM_ALIGNOF - 1)) != 0)
 					elog(ERROR, "nullmap is not aligned well");
 			}
 
@@ -1100,7 +1092,7 @@ typedef struct
 /*
  * arrowFdwSetupIOvectorField
  */
-static inline void
+static void
 __setupIOvectorField(arrowFdwSetupIOContext *con,
 					 off_t chunk_offset,
 					 size_t chunk_length,
@@ -1108,19 +1100,48 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 					 cl_uint *p_cmeta_length)
 {
 	off_t		f_pos = con->rb_offset + chunk_offset;
+	size_t		__length = MAXALIGN(chunk_length);
 
-	if (f_pos == con->f_offset &&
-		con->m_offset == MAXALIGN(con->m_offset))
+	Assert((con->m_offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+	if (f_pos == con->f_offset)
 	{
-		/* good, buffer is continuous */
+		/* good, buffer is fully continuous */
 		*p_cmeta_offset = __kds_packed(con->m_offset);
-		*p_cmeta_length = __kds_packed(chunk_length);
+		*p_cmeta_length = __kds_packed(__length);
 
-		con->m_offset += chunk_length;
-		con->f_offset += chunk_length;
+		con->m_offset += __length;
+		con->f_offset += __length;
+	}
+	else if (f_pos > con->f_offset &&
+			 (f_pos & ~PAGE_MASK) == (con->f_offset & ~PAGE_MASK) &&
+			 ((f_pos - con->f_offset) & (MAXIMUM_ALIGNOF-1)) == 0)
+	{
+		/*
+		 * we can also consolidate the i/o of two chunks, if file position
+		 * of the next chunk (f_pos) and the current file tail position
+		 * (con->f_offset) locate within the same file page, and if gap bytes
+		 * on the file does not break alignment.
+		 */
+		size_t	__gap = (f_pos - con->f_offset);
+
+		/* put gap bytes */
+		Assert(__gap < PAGE_SIZE);
+		con->m_offset += __gap;
+		con->f_offset += __gap;
+
+		*p_cmeta_offset = __kds_packed(con->m_offset);
+		*p_cmeta_length = __kds_packed(__length);
+
+		con->m_offset += __length;
+		con->f_offset += __length;
 	}
 	else
 	{
+		/*
+		 * Elsewhere, we have no chance to consolidate this chunk to
+		 * the previous i/o-chunk. So, make a new i/o-chunk.
+		 */
 		off_t		f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
 		off_t		f_tail;
 		off_t		shift = f_pos - f_base;
@@ -1144,10 +1165,10 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 		ioc->fchunk_id  = f_base / PAGE_SIZE;
 
 		*p_cmeta_offset = __kds_packed(con->m_offset + shift);
-		*p_cmeta_length = __kds_packed(chunk_length);
+		*p_cmeta_length = __kds_packed(__length);
 
-		con->m_offset  += shift + chunk_length;
-		con->f_offset   = f_pos + chunk_length;
+		con->m_offset  += shift + __length;
+		con->f_offset   = f_pos + __length;
 	}
 }
 
@@ -3158,7 +3179,7 @@ pg_bpchar_arrow_ref(kern_data_store *kds,
 
 	if (unitsz <= 0)
 		elog(ERROR, "CHAR(%d) is not expected", unitsz);
-	if (unitsz * (index+1) > length)
+	if (unitsz * index >= length)
 		elog(ERROR, "corruption? bpchar points out of range");
 	res = palloc(VARHDRSZ + unitsz);
 	memcpy((char *)res + VARHDRSZ, values + unitsz * index, unitsz);
@@ -3176,7 +3197,7 @@ pg_bool_arrow_ref(kern_data_store *kds,
 	uint8	mask = (1 << (index & 7));
 
 	index >>= 3;
-	if (sizeof(uint8) * (index+1) > length)
+	if (sizeof(uint8) * index >= length)
 		elog(ERROR, "corruption? bool points out of range");
 	return BoolGetDatum((bitmap[index] & mask) != 0 ? true : false);
 }
@@ -3188,7 +3209,7 @@ pg_int1_arrow_ref(kern_data_store *kds,
 	int8   *values = (int8 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 	size_t	length = __kds_unpack(cmeta->values_length);
 
-	if (sizeof(int8) * (index+1) > length)
+	if (sizeof(int8) * index >= length)
 		elog(ERROR, "corruption? int8 points out of range");
 	return values[index];
 }
@@ -3200,7 +3221,7 @@ pg_int2_arrow_ref(kern_data_store *kds,
 	int16  *values = (int16 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 	size_t	length = __kds_unpack(cmeta->values_length);
 
-	if (sizeof(int16) * (index+1) > length)
+	if (sizeof(int16) * index >= length)
 		elog(ERROR, "corruption? int16 points out of range");
 	return values[index];
 }
@@ -3212,7 +3233,7 @@ pg_int4_arrow_ref(kern_data_store *kds,
 	int32  *values = (int32 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 	size_t  length = __kds_unpack(cmeta->values_length);
 
-	if (sizeof(int32) * (index+1) > length)
+	if (sizeof(int32) * index >= length)
 		elog(ERROR, "corruption? int32 points out of range");
 	return values[index];
 }
@@ -3224,7 +3245,7 @@ pg_int8_arrow_ref(kern_data_store *kds,
 	int64  *values = (int64 *)((char *)kds + __kds_unpack(cmeta->values_offset));
 	size_t	length = __kds_unpack(cmeta->values_length);
 
-	if (sizeof(int64) * (index+1) > length)
+	if (sizeof(int64) * index >= length)
 		elog(ERROR, "corruption? int64 points out of range");
 	return values[index];
 }
@@ -3239,7 +3260,7 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 	int			dscale = cmeta->attopts.decimal.scale;
 	Int128_t	decimal;
 
-	if (sizeof(int128) * (index+1) > length)
+	if (sizeof(int128) * index >= length)
 		elog(ERROR, "corruption? numeric points out of range");
 	decimal.ival = ((int128 *)base)[index];
 
@@ -3264,12 +3285,12 @@ pg_date_arrow_ref(kern_data_store *kds,
 	switch (cmeta->attopts.date.unit)
 	{
 		case ArrowDateUnit__Day:
-			if (sizeof(uint32) * (index+1) > length)
+			if (sizeof(uint32) * index >= length)
 				elog(ERROR, "corruption? Date[day] points out of range");
 			dt = ((uint32 *)base)[index];
 			break;
 		case ArrowDateUnit__MilliSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Date[ms] points out of range");
 			dt = ((uint64 *)base)[index] / 1000;
 			break;
@@ -3292,22 +3313,22 @@ pg_time_arrow_ref(kern_data_store *kds,
 	switch (cmeta->attopts.time.unit)
 	{
 		case ArrowTimeUnit__Second:
-			if (sizeof(uint32) * (index+1) > length)
+			if (sizeof(uint32) * index >= length)
 				elog(ERROR, "corruption? Time[sec] points out of range");
 			tm = ((uint32 *)base)[index] * 1000000L;
 			break;
 		case ArrowTimeUnit__MilliSecond:
-			if (sizeof(uint32) * (index+1) > length)
+			if (sizeof(uint32) * index >= length)
 				elog(ERROR, "corruption? Time[ms] points out of range");
 			tm = ((uint32 *)base)[index] * 1000L;
 			break;
 		case ArrowTimeUnit__MicroSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Time[us] points out of range");
 			tm = ((uint64 *)base)[index];
 			break;
 		case ArrowTimeUnit__NanoSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Time[ns] points out of range");
 			tm = ((uint64 *)base)[index] / 1000L;
 			break;
@@ -3329,22 +3350,22 @@ pg_timestamp_arrow_ref(kern_data_store *kds,
 	switch (cmeta->attopts.timestamp.unit)
 	{
 		case ArrowTimeUnit__Second:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Timestamp[sec] points out of range");
 			ts = ((uint64 *)base)[index] * 1000000UL;
 			break;
 		case ArrowTimeUnit__MilliSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Timestamp[ms] points out of range");
 			ts = ((uint64 *)base)[index] * 1000UL;
 			break;
 		case ArrowTimeUnit__MicroSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Timestamp[us] points out of range");
 			ts = ((uint64 *)base)[index];
 			break;
 		case ArrowTimeUnit__NanoSecond:
-			if (sizeof(uint64) * (index+1) > length)
+			if (sizeof(uint64) * index >= length)
 				elog(ERROR, "corruption? Timestamp[ns] points out of range");
 			ts = ((uint64 *)base)[index] / 1000UL;
 			break;
@@ -3370,13 +3391,13 @@ pg_interval_arrow_ref(kern_data_store *kds,
 	{
 		case ArrowIntervalUnit__Year_Month:
 			/* 32bit: number of months */
-			if (sizeof(uint32) * (index+1) > length)
+			if (sizeof(uint32) * index >= length)
 				elog(ERROR, "corruption? Interval[Year/Month] points out of range");
 			iv->month = ((uint32 *)base)[index];
 			break;
 		case ArrowIntervalUnit__Day_Time:
 			/* 32bit+32bit: number of days and milliseconds */
-			if (2 * sizeof(uint32) * (index+1) > length)
+			if (2 * sizeof(uint32) * index >= length)
 				elog(ERROR, "corruption? Interval[Day/Time] points out of range");
 			iv->day  = ((int32 *)base)[2 * index];
 			iv->time = ((int32 *)base)[2 * index + 1] * 1000;
@@ -3397,7 +3418,7 @@ pg_macaddr_arrow_ref(kern_data_store *kds,
 	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
 		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
 			 cmeta->attopts.fixed_size_binary.byteWidth);
-	if (sizeof(macaddr) * (index+1) > length)
+	if (sizeof(macaddr) * index >= length)
 		elog(ERROR, "corruption? Binary[macaddr] points out of range");
 
 	return PointerGetDatum(base + sizeof(macaddr) * index);
@@ -3413,7 +3434,7 @@ pg_inet_arrow_ref(kern_data_store *kds,
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
 	{
-		if (4 * (index+1) > length)
+		if (4 * index >= length)
 			elog(ERROR, "corruption? Binary[inet4] points out of range");
 		ip->inet_data.family = PGSQL_AF_INET;
 		ip->inet_data.bits = 32;
@@ -3421,7 +3442,7 @@ pg_inet_arrow_ref(kern_data_store *kds,
 	}
 	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
 	{
-		if (16 * (index+1) > length)
+		if (16 * index >= length)
 			elog(ERROR, "corruption? Binary[inet6] points out of range");
 		ip->inet_data.family = PGSQL_AF_INET6;
 		ip->inet_data.bits = 128;

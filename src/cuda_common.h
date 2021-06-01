@@ -958,7 +958,8 @@ typedef struct kern_data_extra		kern_data_extra;
 STATIC_INLINE(cl_uint)
 __kds_packed(size_t offset)
 {
-	Assert((offset & (~((size_t)(~0U) << MAXIMUM_ALIGNOF_SHIFT))) == 0);
+
+	Assert((offset & ~(0xffffffffUL << MAXIMUM_ALIGNOF_SHIFT)) == 0);
 	return (cl_uint)(offset >> MAXIMUM_ALIGNOF_SHIFT);
 }
 
