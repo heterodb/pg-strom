@@ -217,12 +217,13 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
  * CTID-->RowId lookup table
  */
 #define KERN_GPUCACHE_ROWHASH_MAGIC		0xcafebabeU
+#define KERN_GPUCACHE_FREE_WIDTH		80
 typedef struct
 {
 	cl_uint		magic;		/* =KERN_GPUCACHE_ROWHASH_MAGIC */
 	cl_uint		nslots;
 	cl_uint		nrooms;
-	cl_uint		freelist;	/* first free rowid */
+	cl_uint		freelist[KERN_GPUCACHE_FREE_WIDTH];
 	struct {
 		cl_uint	lock;
 		cl_uint	rowid;
