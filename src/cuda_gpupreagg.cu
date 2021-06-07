@@ -1016,7 +1016,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	 */
 	if (get_local_id() == 0)
 	{
-		old_lock = f_hash->lock;
+		old_lock = __volatileRead(&f_hash->lock);
 		if ((old_lock & 0x0001) != 0)
 			lock_wait = true;		/* someone has exclusive lock */
 		else
@@ -1063,7 +1063,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	 */
 	if (get_local_id() == 0)
 	{
-		old_lock = f_hash->lock;
+		old_lock = __volatileRead(&f_hash->lock);
 		if ((old_lock & 0x0001) != 0)
 			lock_wait = true;		/* someone already has exclusive lock */
 		else
@@ -1091,7 +1091,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	for (;;)
 	{
 		if (get_local_id() == 0)
-			lock_wait = (f_hash->lock != 0x0001 ? true : false);
+			lock_wait = (__volatileRead(&f_hash->lock) != 0x0001 ? true : false);
 		else
 			lock_wait = false;
 		if (__syncthreads_count(lock_wait) == 0)
