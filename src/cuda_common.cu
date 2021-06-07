@@ -555,8 +555,9 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
 	cl_int		unit_sz;
 	cl_int		i, j;
 
+	assert(__activemask() == ~0U);
 	w_bitmap = __ballot_sync(__activemask(), predicate);
-	if ((get_local_id() & (warpSize-1)) == 0)
+	if (get_lane_id() == 0)
 		items[warp_id] = __popc(w_bitmap);
 	__syncthreads();
 

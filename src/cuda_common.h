@@ -286,7 +286,8 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
-
+#define get_warp_id()			(threadIdx.x / warpSize)
+#define get_lane_id()			(threadIdx.x & (warpSize-1))
 #else	/* __CUDACC__ */
 typedef cl_ulong		hostptr_t;
 #endif	/* !__CUDACC__ */

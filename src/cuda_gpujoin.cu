@@ -1290,6 +1290,7 @@ restart:
 	}
 	kcxt->vlpos = vlpos_saved;		/* rewind */
 
+	assert(__activemask() == ~0U);
 	if (__any_sync(__activemask(), rv))
 	{
 		/* By here, one or more threads meet the matched entry */
@@ -1307,6 +1308,7 @@ restart:
 				buddy_index = __shfl_xor_sync(__activemask(), least_index, mask);
 				least_index = Min(least_index, buddy_index);
 			}
+			__syncwarp(~0U);
 			assert(least_index <= maxoff);
 
 			lpp = PageGetItemId(gist_page, least_index);
@@ -1415,6 +1417,7 @@ gpujoin_exec_gistindex(kern_context *kcxt,
 
 reload:
 	kcxt->vlpos = vlpos_saved_1;	/* rewind */
+	assert(__activemask() == ~0U);
 	if (__all_sync(__activemask(), l_state[depth] == UINT_MAX) ||
 		__all_sync(__activemask(), l_state[depth] == 0))
 	{
@@ -1427,6 +1430,7 @@ reload:
 			rd_index = atomicAdd(&read_pos[depth-1], 1);
 			gist_pos[depth * MAXWARPS_PER_BLOCK + get_local_id() / warpSize] = rd_index;
 		}
+		__syncwarp(~0U);
 		rd_index = __shfl_sync(__activemask(), rd_index, 0);
 		l_state[depth] = 0;
 	}
@@ -1449,6 +1453,7 @@ reload:
 										   kds_extra,
 										   depth,
 										   rd_stack);
+		assert(__activemask() == ~0U);
 		if (__any_sync(__activemask(), kcxt->errcode != 0))
 			goto bailout;	/* error */
 		assert(gist_keys != NULL);
@@ -1483,6 +1488,7 @@ reload:
 										  kds_gist,
 										  gist_keys,
 										  &l_next);
+			assert(__activemask() == ~0U);
 			if (__any_sync(__activemask(), kcxt->errcode != 0))
 				goto bailout;	/* error */
 			
@@ -1490,6 +1496,7 @@ reload:
 			count = __popc(mask);
 			if (LaneId() == 0)
 				temp_index = atomicAdd(&temp_pos[depth], count);
+			__syncwarp(~0U);
 			temp_index = __shfl_sync(__activemask(), temp_index, 0);
 
 			if (temp_index + count > GPUJOIN_PSEUDO_STACK_NROOMS)
@@ -1511,10 +1518,13 @@ reload:
 
 			if (LaneId() == 0)
 				atomicAdd(&stat_nitems2[depth], count);
+			__syncwarp(~0U);
 			l_state[depth] = l_next;
 			kcxt->vlpos = vlpos_saved_2;	/* rewind */
+			assert(__activemask() == ~0U);
 		} while (__any_sync(__activemask(), l_state[depth] != UINT_MAX));
 		/* try to reload the next index-key, if temp_stack[] still has space. */
+		assert(__activemask() == ~0U);
 		if (__shfl_sync(__activemask(), temp_pos[depth], 0) < get_local_size())
 			goto reload;
 	}
