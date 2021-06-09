@@ -81,6 +81,9 @@
 #include "commands/typecmds.h"
 #include "commands/variable.h"
 #include "common/base64.h"
+#if PG_VERSION_NUM >= 130000
+#include "common/hashfn.h"
+#endif
 #include "common/int.h"
 #include "common/md5.h"
 #include "executor/executor.h"
