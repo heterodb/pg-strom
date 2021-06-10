@@ -696,12 +696,12 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	EState	   *estate = gts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
+	Size		sz;
 
-	if (!relation)
-		return 0;
-
-	return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
-					table_parallelscan_estimate(relation, snapshot));
+	sz = sizeof(GpuTaskSharedState);
+	if (relation)
+		sz += table_parallelscan_estimate(relation, snapshot);
+	return MAXALIGN(sz);
 }
 
 /*
