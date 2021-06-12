@@ -196,11 +196,19 @@ pgstrom_collect_gpu_device(void)
 		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB
 		 * supports GPUDirectSQL
 		 */
-		if (dattrs->GPU_DIRECT_RDMA_SUPPORTED &&
-			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
-			dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
-		else
-			dattrs->DEV_SUPPORT_GPUDIRECTSQL = false;
+		dattrs->DEV_SUPPORT_GPUDIRECTSQL = false;
+		if (dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
+		{
+#if CUDA_VERSION < 11030
+			if (strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
+				strcmp(dattrs->DEV_BRAND, "QUADRO") == 0 ||
+				strcmp(dattrs->DEV_BRAND, "NVIDIA") == 0)
+				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
+#else
+			if (dattrs->GPU_DIRECT_RDMA_SUPPORTED)
+				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
+#endif
+		}
 
 		/*
 		 * read the numa node-id from the sysfs entry

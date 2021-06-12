@@ -817,7 +817,7 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		const char *typelem;
 		const char *nspname;
 		const char *typname;
-		const char *typemod;
+		const char *typtypmod;
 		const char *extname;
 		const char *extschema;
 		ArrowField *arrow_field = NULL;
@@ -836,13 +836,13 @@ pgsql_create_buffer(PGSTATE *pgstate,
 				 WITH_RECURSIVE_PG_BASE_TYPE
 				 "SELECT n.nspname,"
 				 "       b.typname,"
-				 "       b.typtypmod,"
 				 "       b.typlen,"
 				 "       b.typbyval,"
 				 "       b.typalign,"
 				 "       b.typtype,"
 				 "       b.typrelid,"
 				 "       b.typelem,"
+				 "       b.typtypmod,"
 				 "       e.extname,"
 				 "       CASE WHEN e.extrelocatable"
 				 "            THEN e.extnamespace::regnamespace::text"
@@ -868,15 +868,20 @@ pgsql_create_buffer(PGSTATE *pgstate,
 			Elog("unexpected number of result rows: %d", PQntuples(__res));
 		nspname  = PQgetvalue(__res, 0, 0);
 		typname  = PQgetvalue(__res, 0, 1);
-		typemod  = PQgetvalue(__res, 0, 2);
-		if (typemod)
-			atttypmod = atoi(typemod);
-		typlen   = PQgetvalue(__res, 0, 3);
-		typbyval = PQgetvalue(__res, 0, 4);
-		typalign = PQgetvalue(__res, 0, 5);
-		typtype  = PQgetvalue(__res, 0, 6);
-		typrelid = PQgetvalue(__res, 0, 7);
-		typelem  = PQgetvalue(__res, 0, 8);
+		typlen   = PQgetvalue(__res, 0, 2);
+		typbyval = PQgetvalue(__res, 0, 3);
+		typalign = PQgetvalue(__res, 0, 4);
+		typtype  = PQgetvalue(__res, 0, 5);
+		typrelid = PQgetvalue(__res, 0, 6);
+		typelem  = PQgetvalue(__res, 0, 7);
+		typtypmod = PQgetvalue(__res, 0, 8);
+		if (typtypmod)
+		{
+			int32_t		__typtypmod = atoi(typtypmod);
+
+			if (atttypmod < 0 && __typtypmod > 0)
+				atttypmod = __typtypmod;
+		}
 		extname  = PQgetvalue(__res, 0, 9);
 		extschema = PQgetvalue(__res, 0, 10);
 

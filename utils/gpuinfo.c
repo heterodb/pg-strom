@@ -194,13 +194,54 @@ static void output_device(CUdevice cuda_device,
 		elog("failed on nvmlDeviceGetBrand: %s", nvmlErrorString(rv));
 	switch (nvml_brand)
 	{
-		case NVML_BRAND_QUADRO:  label = "QUADRO";  break;
-		case NVML_BRAND_TESLA:   label = "TESLA";   break;
-		case NVML_BRAND_NVS:     label = "NVS";     break;
-		case NVML_BRAND_GRID:    label = "GRID";    break;
-		case NVML_BRAND_GEFORCE: label = "GEFORCE"; break;
-		case NVML_BRAND_TITAN:   label = "TITAN";   break;
-		default:                 label = "UNKNOWN"; break;
+		case NVML_BRAND_QUADRO:
+			label = "QUADRO";
+			break;
+		case NVML_BRAND_TESLA:
+			label = "TESLA";
+			break;
+		case NVML_BRAND_NVS:
+			label = "NVS";
+			break;
+		case NVML_BRAND_GRID:
+			label = "GRID";
+			break;
+		case NVML_BRAND_GEFORCE:
+			label = "GEFORCE";
+			break;
+		case NVML_BRAND_TITAN:
+			label = "TITAN";
+			break;
+		case NVML_BRAND_NVIDIA_VAPPS:
+			label = "NVIDIA_VAPPS";
+			break;
+		case NVML_BRAND_NVIDIA_VPC:
+			label = "NVIDIA_VPC";
+			break;
+		case NVML_BRAND_NVIDIA_VWS:
+			label = "NVIDIA_VWS";
+			break;
+		case NVML_BRAND_NVIDIA_VGAMING:
+			label = "NVIDIA_VGAMING";
+			break;
+		case NVML_BRAND_QUADRO_RTX:
+			label = "QUADRO_RTX";
+			break;
+		case NVML_BRAND_NVIDIA_RTX:
+			label = "NVIDIA_RTX";
+			break;
+		case NVML_BRAND_NVIDIA:
+			label = "NVIDIA";
+			break;
+		case NVML_BRAND_GEFORCE_RTX:
+			label = "GEFORCE_RTX";
+			break;
+		case NVML_BRAND_TITAN_RTX:
+			label = "TITAN_RTX";
+			break;
+		default:
+			label = "UNKNOWN";
+			break;
 	}
 	if (!machine_format)
 		printf("Device Brand: %s\n", label);
