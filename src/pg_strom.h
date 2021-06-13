@@ -1379,6 +1379,7 @@ extern bool		pgstrom_gpudirect_enabled(void);
 extern Size		pgstrom_gpudirect_threshold(void);
 extern void		pgstrom_init_extra(void);
 extern bool		heterodbLicenseCheck(void);
+extern int		gpuDirectInitDriver(void);
 extern void		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
 									  File pg_fdesc);
 extern void		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
