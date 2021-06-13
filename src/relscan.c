@@ -732,6 +732,18 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
 
+	if (!tablespace_optimal_gpu_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(tablespace_optimal_gpu_hentry);
+		tablespace_optimal_gpu_htable
+			= hash_create("TablespaceOptimalGpu", 128,
+						  &hctl, HASH_ELEM | HASH_BLOBS);
+	}
+
 	hentry = (tablespace_optimal_gpu_hentry *)
 		hash_search(tablespace_optimal_gpu_htable,
 					&tablespace_oid,
@@ -756,9 +768,6 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 			else
 			{
 				hentry->optimal_gpu = extraSysfsLookupOptimalGpu(stat_buf.st_dev);
-				elog(INFO, "gpu=%d dev=%u:%u", hentry->optimal_gpu,
-					 major(stat_buf.st_dev),
-					 minor(stat_buf.st_dev));
 			}
 		}
 		PG_CATCH();
@@ -2186,7 +2195,6 @@ void
 pgstrom_init_relscan(void)
 {
 	static char	*nvme_manual_distance_map = NULL;
-	HASHCTL		hctl;
 	char		buffer[1280];
 	int			index = 0;
 
@@ -2223,12 +2231,7 @@ pgstrom_init_relscan(void)
 	}
 
 	/* hash table for tablespace <-> optimal GPU */
-	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.keysize = sizeof(Oid);
-	hctl.entrysize = sizeof(tablespace_optimal_gpu_hentry);
-	tablespace_optimal_gpu_htable
-		= hash_create("TablespaceOptimalGpu", 128,
-					  &hctl, HASH_ELEM | HASH_BLOBS);
+	tablespace_optimal_gpu_htable = NULL;
 	CacheRegisterSyscacheCallback(TABLESPACEOID,
 								  tablespace_optimal_gpu_cache_callback,
 								  (Datum) 0);
