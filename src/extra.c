@@ -416,14 +416,18 @@ parse_heterodb_extra_module_info(const char *extra_module_info,
 				elog(ERROR, "invalid extra module token [%s]", tok);
 		}
 	}
-	if (api_version == 0 || api_version < 20200101 || api_version > 99991231)
-		elog(ERROR, "HeteroDB extra has invalid API version: %ld", api_version);
+
+	if (api_version < 20210615)
+		elog(ERROR, "HeteroDB Extra Module has Unsupported API version [%08lu]",
+			 api_version);
+
 	/* setup pgstrom.gpudirect_driver options */
 	entry = pgstrom_gpudirect_driver_options;
 	entry->name   = "none";
 	entry->val    = GPUDIRECT_DRIVER_TYPE__NONE;
 	entry->hidden = false;
 	entry++;
+
 	if (has_nvme_strom)
 	{
 		default_gpudirect_driver = GPUDIRECT_DRIVER_TYPE__NVME_STROM;
@@ -534,11 +538,9 @@ pgstrom_init_extra(void)
 		p_sysfs_print_nvme_info = NULL;
 		p_heterodb_license_reload = NULL;
 		p_heterodb_license_query = NULL;
-		dlclose(handle);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
 	elog(LOG, "HeteroDB Extra module loaded [%s]", extra_module_info);
 
 	license = __heterodb_license_query();
