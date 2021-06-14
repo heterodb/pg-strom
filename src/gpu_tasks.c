@@ -322,6 +322,8 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 											 relation, outer_refs);
 		if (RelationHasGpuCache(relation))
 			gts->gc_state = ExecInitGpuCache(&gts->css.ss, eflags, outer_refs);
+		/* we never use Apache Arrow and GPU Cache simultaneously */
+		Assert(!gts->af_state || !gts->gc_state);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;
@@ -347,7 +349,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 /*
  * fetch_next_gputask
  */
-GpuTask *
+static GpuTask *
 fetch_next_gputask(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
@@ -585,7 +587,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 	InstrEndLoop(&gts->outer_instrument);
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
-		heap_endscan(gts->css.ss.ss_currentScanDesc);
+		table_endscan(gts->css.ss.ss_currentScanDesc);
 	/* shutdown Arrow_Fdw/GpuCache state */
 	if (gts->af_state)
 		ExecEndArrowFdw(gts->af_state);
@@ -699,7 +701,7 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 	Size		sz;
 
 	sz = sizeof(GpuTaskSharedState);
-	if (relation)
+	if (relation && !gts->af_state && !gts->gc_state)
 		sz += table_parallelscan_estimate(relation, snapshot);
 	return MAXALIGN(sz);
 }
@@ -720,9 +722,9 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	memset(gtss, 0, offsetof(GpuTaskSharedState, phscan));
 	if (gts->af_state)
 		ExecInitDSMArrowFdw(gts->af_state, gtss);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecInitDSMGpuCache(gts->gc_state, gtss);
-	if (relation)
+	else if (relation)
 	{
 		/* init state of block based table scan */
 		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
@@ -749,9 +751,9 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 
 	if (gts->af_state)
 		ExecInitWorkerArrowFdw(gts->af_state, gtss);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecInitWorkerGpuCache(gts->gc_state, gtss);
-	if (relation)
+	else if (relation)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
@@ -779,9 +781,9 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecReInitDSMGpuCache(gts->gc_state);
-	if (relation)
+	else if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 

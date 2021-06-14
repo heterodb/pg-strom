@@ -944,8 +944,6 @@ extern void pgstromInitWorkerGpuTaskState(GpuTaskState *gts,
 										  void *coordinate);
 extern void pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts);
 
-extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
-
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
 
