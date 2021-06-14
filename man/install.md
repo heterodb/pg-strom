@@ -167,10 +167,18 @@ In case of Red Hat Enterprise Linux 8.x or CentOS 8.x series, choose "Minimal in
 
 @ja{
 サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。
+
+なお、インストーラで「開発ツール」を選択しなかった場合、以下のコマンドでOSインストール後に追加インストールする事が可能です。
 }
 @en{
 Next to the OS installation on the server, go on the package repository configuration to install the third-party packages.
+
+If you didn't check the "Development Tools" at the installer, we can additionally install the software using the command below after the operating system installation.
 }
+
+```
+# dnf groupinstall 'Development Tools'
+```
 
 @ja{
 !!! Tip
@@ -184,6 +192,33 @@ Next to the OS installation on the server, go on the package repository configur
     In this case, you may avoid the problem by adding `nouveau.modeset=0` onto the kernel boot option, to disable
     the inbox graphic driver.
 }
+
+@ja:### nouveauドライバの無効化
+@en:### Disables nouveau driver
+
+@ja{
+NVIDIA製GPU向けオープンソースの互換ドライバであるnouveauドライバがロードされている場合、nvidiaドライバをロードする事ができません。
+この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
+
+nouveauドライバを無効化するには、以下の設定を`/etc/modprobe.d/disable-nouveau.conf`という名前で保存し、`dracut`コマンドを実行してLinux kernelのブートイメージに反映します。
+その後、システムを一度再起動してください。
+}
+@en{
+When the nouveau driver, that is an open source compatible driver for NVIDIA GPUs, is loaded, it prevent to load the nvidia driver.
+In this case, reboot the operating system after a configuration to disable the nouveau driver.
+
+To disable the nouveau driver, put the following configuration onto `/etc/modprobe.d/disable-nouveau.conf`, and run `dracut` command to apply them on the boot image of Linux kernel.
+Then, restart the system once.
+}
+```
+# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+# shutdown -r now
+```
+
 
 @ja:### epel-releaseのインストール
 @en:### epel-release Installation
@@ -301,9 +336,6 @@ sudo dnf -y install cuda
 Once installation completed successfully, CUDA Toolkit is deployed at `/usr/local/cuda`.
 }
 
-（メモ：RHEL7で足りないパッケージ等あれば追記）
-
-
 ```
 $ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
@@ -346,34 +378,6 @@ Thu May 27 15:05:50 2021
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
 ```
-
-@ja{
-!!! Tip
-    nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
-    この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
-    runfileによるインストールの場合、CUDA Toolkitのインストーラがnouveauドライバの無効化設定も行います。RPMによるインストールの場合は、以下の設定を行ってください。
-}
-@en{
-!!! Tip
-    If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
-    In this case, reboot the operating system after a configuration to disable the nouveau driver.
-    If CUDA Toolkit is installed by the runfile installer, it also disables the nouveau driver. Elsewhere, in case of RPM installation, do the following configuration.
-}
-
-@ja{
-nouveauドライバを無効化するには、以下の設定を`/etc/modprobe.d/disable-nouveau.conf`という名前で保存し、`dracut`コマンドを実行してLinux kernelのブートイメージに反映します。
-}
-@en{
-To disable the nouveau driver, put the following configuration onto `/etc/modprobe.d/disable-nouveau.conf`, then run `dracut` command to apply them on the boot image of Linux kernel.
-}
-```
-# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
-blacklist nouveau
-options nouveau modeset=0
-EOF
-# dracut -f
-```
-
 
 @ja:##HeteroDB 拡張モジュール
 @en:##HeteroDB extra modules
@@ -848,10 +852,12 @@ You can install PostgreSQL as following steps:
 @ja{
 !!! Note
     Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    Red Hat Enterprise Linux 7 および CentOS 7の場合はモジュールの無効化は必要ありません。PGDG提供のパッケージはメジャーバージョンにより識別されます。
 }
 @en{
 !!! Note
     On the Red Hat Enterprise Linux 8 and CentOS 8, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    For the Ret Hat Enterprise Linux 7 and CentOS 7, no need to disable the module because the packages provided by PGDG are identified by the major version.
 }
 
 @ja{

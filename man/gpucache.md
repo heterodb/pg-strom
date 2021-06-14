@@ -140,6 +140,9 @@ The following SQL statement is an example of creating a GPU Cache whose maximum 
 @ja{
 行トリガの引数に与える事のできるオプションは以下の通りです。
 
+`gpu_device_id=GPU_ID` (default: 0)
+:   GPUキャッシュを確保する対象のGPUデバイスIDを指定します。
+
 `max_num_rows=NROWS`  (default: 10485760)
 :   GPUキャッシュ上に確保できる行数を指定します。
 :   PostgreSQLテーブルと同様に、GPUキャッシュでも可視性制御のためにコミット前の更新行を保持する必要があるため、ある程度の余裕を持って`max_num_rows`を指定する必要があります。なお、更新/削除された古いバージョンの行は、トランザクションのコミット後に解放されます。
@@ -157,6 +160,9 @@ The following SQL statement is an example of creating a GPU Cache whose maximum 
 
 @en{
 The options that can be given to the argument of the line trigger are shown below.
+
+`gpu_device_id=GPU_ID` (default: 0)
+:   Specify the target GPU device ID to allocate GPU Cache.
 
 `max_num_rows=NROWS` (default: 10485760)
 :   Specify the number of rows that can be allocated on GPU Cache.

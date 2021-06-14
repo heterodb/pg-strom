@@ -66,6 +66,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#os">OSのインストール</a>
         <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#nouveau">nouveauドライバの無効化</a>
+    </li>
     <li class="toctree-l3"><a class="reference internal" href="#epel-release">epel-releaseのインストール</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc">heterodb-swdcのインストール</a>
@@ -288,12 +290,27 @@
 </ul>
 <p><img alt="RHEL8/CentOS8 Package Selection" src="../img/centos8_package_selection.png" /></p>
 <p>サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。</p>
+<p>なお、インストーラで「開発ツール」を選択しなかった場合、以下のコマンドでOSインストール後に追加インストールする事が可能です。</p>
+<pre><code># dnf groupinstall 'Development Tools'
+</code></pre>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>サーバに搭載されているGPUが新しすぎる場合、OS起動中にクラッシュ等の問題が発生する場合があります。
 その場合、カーネル起動オプションに<code>nouveau.modeset=0</code>を追加して標準のグラフィックスドライバを無効化する事で
 問題を回避できるかもしれません。</p>
 </div>
+<h3 id="nouveau">nouveauドライバの無効化</h3>
+<p>NVIDIA製GPU向けオープンソースの互換ドライバであるnouveauドライバがロードされている場合、nvidiaドライバをロードする事ができません。
+この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。</p>
+<p>nouveauドライバを無効化するには、以下の設定を<code>/etc/modprobe.d/disable-nouveau.conf</code>という名前で保存し、<code>dracut</code>コマンドを実行してLinux kernelのブートイメージに反映します。
+その後、システムを一度再起動してください。</p>
+<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+# shutdown -r now
+</code></pre>
 <h3 id="epel-release">epel-releaseのインストール</h3>
 <p>PG-Stromの実行に必要なソフトウェアモジュールのいくつかは、EPEL(Extra Packages for Enterprise Linux)の一部として配布されています。
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
@@ -326,7 +343,6 @@ sudo dnf -y module install nvidia-driver:latest-dkms
 sudo dnf -y install cuda
 </code></pre>
 <p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
-<p>（メモ：RHEL7で足りないパッケージ等あれば追記）</p>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
@@ -358,19 +374,6 @@ Thu May 27 15:05:50 2021
 |=============================================================================|
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
-</code></pre>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
-この場合は、nouveauドライバの無効化設定を行った上でシステムを一度再起動してください。
-runfileによるインストールの場合、CUDA Toolkitのインストーラがnouveauドライバの無効化設定も行います。RPMによるインストールの場合は、以下の設定を行ってください。</p>
-</div>
-<p>nouveauドライバを無効化するには、以下の設定を<code>/etc/modprobe.d/disable-nouveau.conf</code>という名前で保存し、<code>dracut</code>コマンドを実行してLinux kernelのブートイメージに反映します。</p>
-<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
-blacklist nouveau
-options nouveau modeset=0
-EOF
-# dracut -f
 </code></pre>
 <h2 id="heterodb">HeteroDB 拡張モジュール</h2>
 <p><code>heterodb-extra</code>モジュールは、PG-Stromに以下の機能を追加します。</p>
@@ -623,7 +626,8 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
+<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。
+Red Hat Enterprise Linux 7 および CentOS 7の場合はモジュールの無効化は必要ありません。PGDG提供のパッケージはメジャーバージョンにより識別されます。</p>
 </div>
 <p>PostgreSQL Global Development Groupの提供するRPMパッケージは<code>/usr/pgsql-&lt;version&gt;</code>という少々変則的なディレクトリにソフトウェアをインストールするため、<code>psql</code>等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。</p>
 <p><code>postgresql-alternatives</code>パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを<code>/usr/local/bin</code>以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、<code>alternatives</code>コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。</p>

@@ -66,6 +66,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#os-installation">OS Installation</a>
         <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#disables-nouveau-driver">Disables nouveau driver</a>
+    </li>
     <li class="toctree-l3"><a class="reference internal" href="#epel-release-installation">epel-release Installation</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">heterodb-swdc Installation</a>
@@ -288,12 +290,27 @@ On the other hands, GPUDirect Storage has more variations of the supported stora
 </ul>
 <p><img alt="RHEL8/CentOS8 Package Selection" src="../img/centos8_package_selection.png" /></p>
 <p>Next to the OS installation on the server, go on the package repository configuration to install the third-party packages.</p>
+<p>If you didn't check the "Development Tools" at the installer, we can additionally install the software using the command below after the operating system installation.</p>
+<pre><code># dnf groupinstall 'Development Tools'
+</code></pre>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>If GPU devices installed on the server are too new, it may cause system crash during system boot.
 In this case, you may avoid the problem by adding <code>nouveau.modeset=0</code> onto the kernel boot option, to disable
 the inbox graphic driver.</p>
 </div>
+<h3 id="disables-nouveau-driver">Disables nouveau driver</h3>
+<p>When the nouveau driver, that is an open source compatible driver for NVIDIA GPUs, is loaded, it prevent to load the nvidia driver.
+In this case, reboot the operating system after a configuration to disable the nouveau driver.</p>
+<p>To disable the nouveau driver, put the following configuration onto <code>/etc/modprobe.d/disable-nouveau.conf</code>, and run <code>dracut</code> command to apply them on the boot image of Linux kernel.
+Then, restart the system once.</p>
+<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
+blacklist nouveau
+options nouveau modeset=0
+EOF
+# dracut -f
+# shutdown -r now
+</code></pre>
 <h3 id="epel-release-installation">epel-release Installation</h3>
 <p>Several software modules required by PG-Strom are distributed as a part of EPEL (Extra Packages for Enterprise Linux).
 You need to add a repository definition of EPEL packages for yum system to obtain these software.</p>
@@ -325,7 +342,6 @@ sudo dnf -y module install nvidia-driver:latest-dkms
 sudo dnf -y install cuda
 </code></pre>
 <p>Once installation completed successfully, CUDA Toolkit is deployed at <code>/usr/local/cuda</code>.</p>
-<p>（メモ：RHEL7で足りないパッケージ等あれば追記）</p>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
@@ -358,19 +374,6 @@ Thu May 27 15:05:50 2021
 |=============================================================================|
 |  No running processes found                                                 |
 +-----------------------------------------------------------------------------+
-</code></pre>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
-In this case, reboot the operating system after a configuration to disable the nouveau driver.
-If CUDA Toolkit is installed by the runfile installer, it also disables the nouveau driver. Elsewhere, in case of RPM installation, do the following configuration.</p>
-</div>
-<p>To disable the nouveau driver, put the following configuration onto <code>/etc/modprobe.d/disable-nouveau.conf</code>, then run <code>dracut</code> command to apply them on the boot image of Linux kernel.</p>
-<pre><code># cat &gt; /etc/modprobe.d/disable-nouveau.conf &lt;&lt;EOF
-blacklist nouveau
-options nouveau modeset=0
-EOF
-# dracut -f
 </code></pre>
 <h2 id="heterodb-extra-modules">HeteroDB extra modules</h2>
 <p><code>heterodb-extra</code> module enhances PG-Strom the following features.</p>
@@ -617,7 +620,8 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>On the Red Hat Enterprise Linux 8 and CentOS 8, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
+<p>On the Red Hat Enterprise Linux 8 and CentOS 8, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.
+For the Ret Hat Enterprise Linux 7 and CentOS 7, no need to disable the module because the packages provided by PGDG are identified by the major version.</p>
 </div>
 <p>The RPM packages provided by PostgreSQL Global Development Group installs software under the <code>/usr/pgsql-&lt;version&gt;</code> directory, so you may pay attention whether the PATH environment variable is configured appropriately.</p>
 <p><code>postgresql-alternative</code> package set up symbolic links to the related commands under <code>/usr/local/bin</code>, so allows to simplify the operations. Also, it enables to switch target version using <code>alternatives</code> command even if multiple version of PostgreSQL.</p>

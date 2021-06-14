@@ -209,6 +209,8 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </code></pre>
 <p>行トリガの引数に与える事のできるオプションは以下の通りです。</p>
 <dl>
+<dt><code>gpu_device_id=GPU_ID</code> (default: 0)</dt>
+<dd>GPUキャッシュを確保する対象のGPUデバイスIDを指定します。</dd>
 <dt><code>max_num_rows=NROWS</code>  (default: 10485760)</dt>
 <dd>GPUキャッシュ上に確保できる行数を指定します。</dd>
 <dd>PostgreSQLテーブルと同様に、GPUキャッシュでも可視性制御のためにコミット前の更新行を保持する必要があるため、ある程度の余裕を持って<code>max_num_rows</code>を指定する必要があります。なお、更新/削除された古いバージョンの行は、トランザクションのコミット後に解放されます。</dd>

@@ -207,6 +207,8 @@ The following SQL statement is an example of creating a GPU Cache whose maximum 
 </code></pre>
 <p>The options that can be given to the argument of the line trigger are shown below.</p>
 <dl>
+<dt><code>gpu_device_id=GPU_ID</code> (default: 0)</dt>
+<dd>Specify the target GPU device ID to allocate GPU Cache.</dd>
 <dt><code>max_num_rows=NROWS</code> (default: 10485760)</dt>
 <dd>Specify the number of rows that can be allocated on GPU Cache.</dd>
 <dd>Just as with PostgreSQL tables, GPU Cache needs to retain updated rows prior to commit for visibility control, so <code>max_num_rows</code> should be specified with some margin. Note that the old version of the updated/deleted row will be released after the transaction is committed.</dd>
