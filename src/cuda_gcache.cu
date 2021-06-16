@@ -4,7 +4,7 @@
  * GPU device code to manage GPU Cache
  * ----
  * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2017-2021 (C) HeteroDB,Inc <contact@heterodb.com>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
