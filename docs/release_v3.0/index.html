@@ -100,19 +100,15 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#new-features">New Features</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu-postgis-support">GPU-PostGIS support</a>
+    <li class="toctree-l2"><a class="reference internal" href="#nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gist-index-support">GiST-index support</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-postgis-and-gist-index">GPU-PostGIS and GiST-index</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-mechanism">GPU Cache mechanism</a>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-cache">GPU Cache</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</a>
+    <li class="toctree-l2"><a class="reference internal" href="#user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</a>
-    </li>
-        </ul>
+    <li class="toctree-l2"><a class="reference internal" href="#postgresql-license-adoption">PostgreSQL License Adoption</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#other-updates">Other updates</a>
     </li>
@@ -164,46 +160,61 @@
             <div class="section">
               
                 <h1 id="pg-strom-v30-release">PG-Strom v3.0 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (12-May-2021)</div>
+<div style="text-align: right;">PG-Strom Development Team (16-Jun-2021)</div>
 
 <h2 id="overview">Overview</h2>
-<p>Major enhancement in PG-Strom v3.0 includes:</p>
+<p>Major changes in PG-Strom v3.0 are as follows:</p>
 <ul>
-<li>Some PostGIS functions can now be executed on GPUs.</li>
-<li>GpuJoin using GiST index is now possible.</li>
-<li>GPU Cache mechanism has been implemented.<ul>
-<li>This is different from the feature of the same name that was implemented in past versions.</li>
+<li>NVIDIA GPUDirect Storage (cuFile) is now supported.</li>
+<li>Several PostGIS functions are executable on GPUs.</li>
+<li>GpuJoin using GiST index is now supported.</li>
+<li>GPU Cache mechanism is newly implemented.</li>
+<li>User-defined GPU data types/functions/operators are experimentally supported.</li>
+<li>Software license was switched from GPLv2 to PostgreSQL license.</li>
 </ul>
-</li>
-<li>NVIDIA GPUDirect Storage is now supported. (Experimental)</li>
-<li>User-defined GPU data types/functions/operators are now supported.</li>
-</ul>
-<p>And, we switched its software license from GPLv2 to PostgreSQL license.</p>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v11, v12, v13</li>
-<li>CUDA Toolkit 11.3 or later</li>
+<li>CUDA Toolkit 11.2 or later</li>
 <li>Linux distributions supported by CUDA Toolkit</li>
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or newer)</li>
 </ul>
-<h2 id="new-features">New Features</h2>
-<h3 id="gpu-postgis-support">GPU-PostGIS support</h3>
+<h2 id="nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</h2>
+<p><a href="https://developer.nvidia.com/blog/gpudirect-storage/">GPUDirect Storage</a>, has been developed by NVIDIA, is now supported as a driver for <a href="../ssd2gpu">GPU Direct SQL</a>, in addition to the existing nvme_strom kernel module.</p>
+<p><img alt="GPUDirect Storage" src="../img/release_3_0a.png" /></p>
+<p>Both of drivers have almost equivalent functionalities and performance, but supports of GPUDirect Storage enables P2P direct read from NVME-oF (NVME over Fabrics) devices, SDS (Software Defined Storage) devices and shared filesystem built on these devices. Therefore, it offers larger and more flexible storage configuration.</p>
+<p>We can use GPUDirect SQL to scan PostgreSQL's heap table and Apache Arrow files. It can expect significant performance improvement for the workloads where table scans are the major bottleneck, in either driver cases.</p>
+<p>The performance measurement below is by SSBM (Star Schema Benchmark) using 1xGPU and 4xNVME-SSDs under the GPUDirect Storage driver. It shows number of rows processed per unit time is significantly improved regardless of the storage system; either PostgreSQL heap or Apache Arrow.</p>
+<p><img alt="Star Schema Benchmark Results" src="../img/release_3_0b.png" /></p>
+<p>When we compare the read throughput from the NVME-SSD during execution of the query, we can see both of the GPUDirect Storage driver and the conventional nvme_strom driver could pull out the outstanding performance close to the hardware limitation.</p>
+<h2 id="gpu-postgis-and-gist-index">GPU-PostGIS and GiST-index</h2>
 <p>We have implemented GPU versions of several PostGIS functions. 
-If any of these PostGIS functions are used in a conditional clause, PG-Strom will automatically generate a GPU program to execute it on the GPU.</p>
-<h3 id="gist-index-support">GiST-index support</h3>
-<p>If a column whose data type is geometry has a GiST index and the table can be filtered using the index, GpuJoin will load the GiST index on the GPU and use it to join the tables.</p>
-<p>Since the GiST index search is executed in parallel on the GPU, significant performance improvements can be expected.</p>
-<h3 id="gpu-cache-mechanism">GPU Cache mechanism</h3>
+When these PostGIS functions are used in qualifier clauses (like, WHERE-clause), PG-Strom will automatically generate a GPU program to execute it on the GPU.</p>
+<p>The main target of GPU version of PostGIS is the workload to check the real-time location data of mobile devices, like smartphones or vehicles, against the area definition data like boundary of municipality or school districts.</p>
+<p><img alt="aaa" src="../img/release_3_0c.png" /></p>
+<p>For example, when you want to deliver an advertisement to smartphonws in a particular area, or when you want to deliver traffic jam information to cara in a particular area, it is effective in the process of searching for the corresponding device using the position as a key.</p>
+<p>In the following example, it creates 16 million random points data in a rectangular area that includes the Tokyo region, then count up number of the points contained in the cities in Tokyo for each.
+The vanilla PostGIS and GiST index took more than 160sec, on the other hand, GPU-version of PostGIS and GiST index responded in 0.830 sec.</p>
+<p><img alt="aaa" src="../img/release_3_0d.png" /></p>
+<h2 id="gpu-cache">GPU Cache</h2>
 <p>GPU Cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
 It was designed for efficient execution of analytical/search queries on frequently updated data with relatively small data size (~10GB).</p>
 <p>The GPU can process SQL workloads by referring to GPU Cache instead of loading data from tables when executing analytical/search queries.</p>
-<h3 id="nvidia-gpudirect-storage-experimental">NVIDIA GPUDirect Storage (experimental)</h3>
-<p><a href="https://developer.nvidia.com/blog/gpudirect-storage/">GPUDirect Storage</a> developed by NVIDIA is now available as a driver for <a href="../ssd2gpu">GPU Direct SQL</a>, in addition to the existing nvme_strom kernel module.</p>
-<p>GPU Direct SQL will now be available on SDS (Software Defined Storage) devices in addition to conventional NVME-SSD and NVME-oF storage.</p>
-<p>Currently, the driver for GPUDirect Storage is a beta version and experimental support is available.</p>
-<h3 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h3>
+<p>This is typically a workload that keeps real-time data from millions of devices on the GPU and frequently updates timestamps and location information.</p>
+<p><img alt="aaa" src="../img/release_3_0e.png" /></p>
+<p>When the table with GPU cache is updated, the update history is stored in the on-memory redo log buffer, then applied to the GPU cache at a regular intervals or before executing the analysis / search workload.
+By this mechanism, it achieved both of frequent updates and consistency of GPU cache.</p>
+<h2 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h2>
 <p>A new API is provided to add user-defined GPU data types/functions. This allows users to define and implement their own niche data types and SQL functions to process them, without modifying PG-Strom itself.</p>
+<div class="admonition notice">
+<p class="admonition-title">Notice</p>
+<p>This API is still under the experimental state, so its specifications may be changed without notifications.
+Also note that we assume the users of this API well understand PG-Strom internal, so no documentations are provided right now.</p>
+</div>
+<h2 id="postgresql-license-adoption">PostgreSQL License Adoption</h2>
+<p>PG-Strom v3.0 or later adopt the PostgreSQL License.</p>
+<p>The earlier version of PG-Strom has used GPLv2 due to the historical background, however, we recognized several concerns that license mismatch prevents joint solution development using PG-Strom core features and comprehensive tools.</p>
 <h2 id="other-updates">Other updates</h2>
 <ul>
 <li>Unique int1 (8-bit integer) data type and related operators are now supported.</li>
@@ -211,10 +222,8 @@ It was designed for efficient execution of analytical/search queries on frequent
 <li>In a multi-GPU environment, the GPU Memory Keeper background worker will now be launched for each GPU.</li>
 <li>PostgreSQL v13.x is now supported.</li>
 <li>CUDA 11.2 and Ampere generation GPUs are now supported.</li>
-<li>ScaleFlux's Computational Storage product CSD2000 series is now supported.<ul>
-<li>NVIDIA GPUDirect Storage only (nvme_strom kernel module is not supported)</li>
-</ul>
-</li>
+<li>GPUDirect SQL now supports ScaleFlux's Computational Storage CSD2000 series (only cuFile driver).</li>
+<li>Miscellaneous bug fixes</li>
 </ul>
 <h2 id="deprecated-features">Deprecated Features</h2>
 <ul>
