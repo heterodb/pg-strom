@@ -1,10 +1,11 @@
 /*
  * sql2arrow.c - main logic of xxx2arrow command
  *
- * Copyright 2020 (C) KaiGai Kohei <kaigai@heterodb.com>
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the PostgreSQL License. See the LICENSE file.
+ * it under the terms of the PostgreSQL License.
  */
 #include "sql2arrow.h"
 #include <assert.h>

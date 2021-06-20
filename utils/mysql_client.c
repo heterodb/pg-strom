@@ -1,15 +1,17 @@
 /*
  * mysql_client.c - MySQL specific portion for mysql2arrow command
  *
- * Copyright 2020 (C) KaiGai Kohei <kaigai@heterodb.com>
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the PostgreSQL License. See the LICENSE file.
+ * it under the terms of the PostgreSQL License.
  */
 #include <mysql.h>
 #include "sql2arrow.h"
 #include <ctype.h>
 #include <limits.h>
+#include <stdarg.h>
 
 /* static variables */
 static char	   *mysql_timezone = NULL;

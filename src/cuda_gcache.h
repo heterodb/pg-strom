@@ -3,17 +3,11 @@
  *
  * CUDA device code specific to GPU Cache
  * --
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef CUDA_GCACHE_H
 #define CUDA_GCACHE_H
@@ -223,12 +217,13 @@ pg_sysattr_tableoid_fetch_column(kern_context *kcxt,
  * CTID-->RowId lookup table
  */
 #define KERN_GPUCACHE_ROWHASH_MAGIC		0xcafebabeU
+#define KERN_GPUCACHE_FREE_WIDTH		80
 typedef struct
 {
 	cl_uint		magic;		/* =KERN_GPUCACHE_ROWHASH_MAGIC */
 	cl_uint		nslots;
 	cl_uint		nrooms;
-	cl_uint		freelist;	/* first free rowid */
+	cl_uint		freelist[KERN_GPUCACHE_FREE_WIDTH];
 	struct {
 		cl_uint	lock;
 		cl_uint	rowid;

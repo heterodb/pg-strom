@@ -3,17 +3,11 @@
  *
  * Functions and operators for the primitive data types
  * --
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef CUDA_PRIMITIVE_H
 #define CUDA_PRIMITIVE_H
@@ -74,15 +68,15 @@ PG_UNARY_NOT_TEMPLATE(int8)
 	pgfn_##NAME##abs(kern_context *kcxt,		\
 					 pg_##NAME##_t arg)			\
 	{											\
-		if (!arg.isnull)						\
-			arg.value = abs((CAST)arg.value);	\
+		if (!arg.isnull && arg.value < (CAST)0)	\
+			arg.value = -arg.value;				\
 		return arg;								\
 	}
 PG_UNARY_ABS_TEMPLATE(int1, cl_char)
 PG_UNARY_ABS_TEMPLATE(int2, cl_short)
 PG_UNARY_ABS_TEMPLATE(int4, cl_int)
 PG_UNARY_ABS_TEMPLATE(int8, cl_long)
-PG_UNARY_ABS_TEMPLATE(float2, cl_float)
+PG_UNARY_ABS_TEMPLATE(float2, cl_half)
 PG_UNARY_ABS_TEMPLATE(float4, cl_float)
 PG_UNARY_ABS_TEMPLATE(float8, cl_double)
 

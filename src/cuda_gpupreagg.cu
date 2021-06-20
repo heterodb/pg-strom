@@ -4,17 +4,11 @@
  * Preprocess of aggregate using GPU acceleration, to reduce number of
  * rows to be processed by CPU; including the Sort reduction.
  * --
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #include "cuda_common.h"
 #include "cuda_gpupreagg.h"
@@ -1022,7 +1016,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	 */
 	if (get_local_id() == 0)
 	{
-		old_lock = f_hash->lock;
+		old_lock = __volatileRead(&f_hash->lock);
 		if ((old_lock & 0x0001) != 0)
 			lock_wait = true;		/* someone has exclusive lock */
 		else
@@ -1069,7 +1063,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	 */
 	if (get_local_id() == 0)
 	{
-		old_lock = f_hash->lock;
+		old_lock = __volatileRead(&f_hash->lock);
 		if ((old_lock & 0x0001) != 0)
 			lock_wait = true;		/* someone already has exclusive lock */
 		else
@@ -1097,7 +1091,7 @@ gpupreagg_expand_final_hash(kern_context *kcxt,
 	for (;;)
 	{
 		if (get_local_id() == 0)
-			lock_wait = (f_hash->lock != 0x0001 ? true : false);
+			lock_wait = (__volatileRead(&f_hash->lock) != 0x0001 ? true : false);
 		else
 			lock_wait = false;
 		if (__syncthreads_count(lock_wait) == 0)

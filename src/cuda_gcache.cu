@@ -3,17 +3,11 @@
  *
  * GPU device code to manage GPU Cache
  * ----
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #include "cuda_common.h"
 #include "cuda_gcache.h"
@@ -131,7 +125,11 @@ kern_gpucache_init_empty(kern_data_store *kds,
 		rowhash->magic  = KERN_GPUCACHE_ROWHASH_MAGIC;
 		rowhash->nslots = nslots;
 		rowhash->nrooms = nrooms;
-		rowhash->freelist = (nrooms > 0 ? 0 : UINT_MAX);
+	}
+	if (get_global_id() < KERN_GPUCACHE_FREE_WIDTH)
+	{
+		rowhash->freelist[get_global_id()]
+			= (get_global_id() < nrooms ? get_global_id() : UINT_MAX);
 	}
 	/* setup rowhash */
 	for (index = get_global_id(); index < nslots; index += get_global_size())
@@ -142,8 +140,8 @@ kern_gpucache_init_empty(kern_data_store *kds,
 	/* setup rowmap */
 	for (index = get_global_id(); index < nrooms; index += get_global_size())
 	{
-		if (index < nrooms - 1)
-			rowmap[index] = index + 1;
+		if (index + KERN_GPUCACHE_FREE_WIDTH < nrooms)
+			rowmap[index] = index + KERN_GPUCACHE_FREE_WIDTH;
 		else
 			rowmap[index] = UINT_MAX;	/* terminator */
 	}
@@ -156,13 +154,12 @@ STATIC_INLINE(cl_uint)
 gpucache_ctid_hash(ItemPointerData *ctid)
 {
 	cl_ulong	prime = 0x9e3779b97f4a7c13UL;
-	cl_ulong	hash = 0;
+	cl_ulong	hash;
 
-	hash ^= ((cl_ulong)ctid->ip_blkid.bi_hi + 1) * prime;
-	hash ^= ((cl_ulong)ctid->ip_blkid.bi_lo + 1)* prime;
-	hash ^= ((cl_ulong)ctid->ip_posid + 1) * prime;
-
-	return (cl_uint)(hash & 0xffffffffU);
+	hash = ((cl_ulong)ctid->ip_blkid.bi_hi << 32 |
+			(cl_ulong)ctid->ip_blkid.bi_lo << 16 |
+			(cl_ulong)ctid->ip_posid) * prime;
+	return (cl_uint)((hash >> 20) & 0xffffffffU);
 }
 
 /*
@@ -210,6 +207,7 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	DECL_ROWID_HASH_AND_MAP(kds);
 	GpuCacheSysattr *sysattr;
 	cl_uint		hindex;
+	cl_uint		findex;
 	cl_uint		rowid;
 	cl_uint		next;
 	cl_uint		lval __attribute__((unused));
@@ -236,18 +234,19 @@ __gcache_alloc_rowid(kern_data_store *kds,
 	}
 
 	/* not found, so try to allocate a new one */
+	findex = get_global_id() % KERN_GPUCACHE_FREE_WIDTH;
 	do {
-		rowid = __volatileRead(&rowhash->freelist);
+		rowid = __volatileRead(&rowhash->freelist[findex]);
 		if (rowid == UINT_MAX)
 		{
-			/* no more free rowid */
+			/* no more free rowid? */
 			*found = false;
 			goto out_unlock;
 		}
 		assert(rowid < rowhash->nrooms);
 		next = __volatileRead(&rowmap[rowid]);
 		assert(next == UINT_MAX || next <  rowhash->nrooms);
-	} while (atomicCAS(&rowhash->freelist,
+	} while (atomicCAS(&rowhash->freelist[findex],
 					   rowid,
 					   next) != rowid);
 
@@ -625,6 +624,7 @@ __gpucache_release_rowid(kern_data_store *kds,
 	DECL_ROWID_HASH_AND_MAP(kds);
 	GpuCacheSysattr *sysattr;
 	cl_uint		hindex;
+	cl_uint		findex;
 	cl_uint		rowid;
 	cl_uint		next;
 	cl_uint		lval __attribute__((unused));
@@ -652,10 +652,11 @@ __gpucache_release_rowid(kern_data_store *kds,
 			*prev = next;
 
 			/* attach rowid to the freelist */
+			findex = rowid % KERN_GPUCACHE_FREE_WIDTH;
 			do {
-				next = __volatileRead(&rowhash->freelist);
+				next = __volatileRead(&rowhash->freelist[findex]);
 				__volatileWrite(&rowmap[rowid], next);
-			} while (atomicCAS(&rowhash->freelist,
+			} while (atomicCAS(&rowhash->freelist[findex],
 							   next,
 							   rowid) != next);
 #ifdef PGSTROM_DEBUG_BUILD

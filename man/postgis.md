@@ -4,7 +4,7 @@
 @ja{
 本章ではGPU版PostGISについて説明します。
 }
-@en{}
+@en{This chapter describes GPU-PostGIS}
 
 @ja:##概要
 @en:##Overview
@@ -15,8 +15,11 @@ PostGISとは、地理空間情報を取り扱うためのPostgreSQL向け拡張
 また、一部の演算子についてはPostgreSQLのGiST(Generalized Search Tree)の仕組みを用いてR木による高速な検索も可能になっています。
 2001年に最初のバージョンが公開されて以降、20年以上にわたり開発者コミュニティによって機能強化やメンテナンスが行われています。
 }
-
-@en{}
+@en{
+PostGIS is an extension to PostgreSQL to utilize geographic information. PostGIS provides data type (<code>Geometry</code>) for handling geographic data such as points, lines, and polygons, as well as a large number of functions and operators for evaluating geographic data elements, such as distance calculation, inclusion, and intersection determination.
+In addition, some of the operators can search faster by the R-Tree using GiST(Generalized Search Tree) mechanism included in PostgreSQL.
+Since the first version was released in 2001, it has been enhanced and maintained by the developer community for over 20 years.
+}
 
 @ja{
 これらPostGISの提供する関数や演算子は、総数で500を超える非常に大規模なものです。
@@ -36,7 +39,21 @@ PostGISとは、地理空間情報を取り扱うためのPostgreSQL向け拡張
 また、テーブル同士の結合条件がGiSTインデックス（R木）の利用に適する場合、GpuJoinはGiSTインデックス（R木）をGPU側にロードし、結合すべき行の絞り込みを高速化するために使用する事ができます。
 これは例えば、GPSから取得したモバイル機器の位置（点）とエリア定義データ（ポリゴン）を突き合わせるといった処理の高速化に寄与します。
 }
-@en{}
+@en{
+These functions and operators provided by PostGIS are very large, over 500 in total.
+For this reason, PG-Strom has ported only a few relatively frequently used PostGIS functions to the GPU.
+
+For example:
+
+- <code>geometry st_point(float8 lon,float8 lat)</code>
+    - returns a point with the given longitude and latitude as a Point of <code>Geometry</code> type.
+- <code>bool st_contains(geometry a,geometry b)</code>
+    - determines if the geometry a contains the geometry b or not. 
+- <code>bool st_crosses(geometry,geometry)</code>
+    - determines if the geometries intersect each other.
+- <code>text st_relate(geometry,geometry)</code>
+    - returns the relationship between geometries as a matrix representation of [DE-9IM(Dimensionally Extended 9-Intersection Model)](https://en.wikipedia.org/wiki/DE-9IM).
+}
 
 @ja:##PostGISの利用
 @en:##PostGIS Usage
@@ -44,14 +61,19 @@ PostGISとは、地理空間情報を取り扱うためのPostgreSQL向け拡張
 @ja{
 GPU版PostGISを利用するために特別な設定は必要ありません。
 
-PostGISをパッケージ又はソースコードからインストールし、CREATE EXTENSION構文を用いてジオメトリデータ型やPostGIS関数が定義されていれば、PG-Stromはクエリに出現したPostGIS関数がGPUで実行可能かどうかを自動的に判定します。
+PostGISをパッケージ又はソースコードからインストールし、`CREATE EXTENSION`構文を用いてジオメトリデータ型やPostGIS関数が定義されていれば、PG-Stromはクエリに出現したPostGIS関数がGPUで実行可能かどうかを自動的に判定します。
+}
+@en{
+You can use GPU-PostGIS without any configurations.
+
+PG-Strom will automatically determine if the PostGIS functions used in the query are executable on the GPU when PostGIS is installed from the package or the source code and the geometry data types and PostGIS functions are defined using the CREATE EXTENSION syntax.
 }
 
 @ja{
 PostGIS自体のインストールについては、[PostGISのドキュメント](http://postgis.net/docs/postgis-ja.html)を参照してください。
 }
 @en{
-http://postgis.net/docs/
+Please refer to [the PostGIS documentaion](http://postgis.net/docs/) for installation.
 }
 
 @ja{
@@ -60,7 +82,9 @@ http://postgis.net/docs/
 これらの関数が GPU Filter: の一部として表示されている事からも分かるように、PG-Stromは対応済みのPostGIS関数を自動的に検出し、可能な限りGPUで実行しようと試みます。
 }
 @en{
+For example, the following query uses the GPU-executable PostGIS funtion <code>st_contains()</code> and <code>st_makepoint()</code> to determine if a two-dimensional point read from the table is contained within the range of the geometry type constant <code>'polygon ((10 10,30 10,30 20,10 20,10 10))'</code>.
 
+As you can see from the fact that these functions are listed as part of the "GPU Filter:", PG-Strom will automatically detect supported PostGIS functions and attempt to run them on the GPU as much as possible.
 }
 
 ```
@@ -86,7 +110,10 @@ PG-StromのGpuJoinでは、テーブル同士の結合条件がGiSTインデッ�
 }
 
 @en{
+Some of the PostGIS functions that evaluate relationships between geometries, such as <code>st_contains()</code> and <code>st_crosses()</code>, support the GiST index (R-Tree), which enables fast refinement of the search using only the CPU. 
+GpuJoin in PG-Strom sometimes transfers not only the contents of the table but also GiST index (R-Tree) to filter the rows to be joined fast when the join condition between tables can be accelerated.  This process is usually executed at a much higher parallelism level than the CPU, so a significant speedup can be expected.
 
+On the other hand, GpuScan does not use GiST index to scan a single table. This is because IndexScan filtering by CPU is often faster.
 }
 
 @ja{
@@ -94,7 +121,9 @@ PG-StromのGpuJoinでは、テーブル同士の結合条件がGiSTインデッ�
 
 以下の例は、市町村の境界線データ（giscityテーブルのgeom列）に対してGiSTインデックスを設定するものです。
 }
-@en{}
+@en{
+The following is an example of a SQL statement to create a GiST index on city boundary data ("geom" column of "giscity" table).
+}
 
 ```
 =# CREATE INDEX on giscity USING gist (geom);
@@ -104,12 +133,19 @@ CREATE INDEX
 @ja{
 以下の実行計画は、市町村の境界線データ（giscityテーブル）と緯度経度データ（dpointsテーブル）を突き合わせ、ポリゴンとして表現された市町村の領域内に含まれる緯度経度データ（点）の数を市町村ごとに出力するものです。
 
-オプティマイザによりGpuJoinが選択され、giscityテーブルとdpointsテーブルの結合にはGpuGiSTJoinが選択されている。
+オプティマイザによりGpuJoinが選択され、giscityテーブルとdpointsテーブルの結合にはGpuGiSTJoinが選択されています。
 IndexFilter:の行には、GiSTインデックスによる絞り込み条件が<code>(g.geom ~ st_makepoint(d.x, d.y))</code>であり、使用するインデックスが<code>giscity_geom_idx</code>である事が示されています。
 
 GiSTインデックスの使用により、GPUであっても比較的「重い」処理であるPostGIS関数を実行する前に、明らかに条件にマッチしない組み合わせを排除する事ができるため、大幅な検索処理の高速化が期待できます。
 }
-@en{}
+@en{
+The following is an execution plan of SQL that joins municipal boundary data ("giscity" table) and latitude and longitude data ("dpoints" table) and outputs the number of latitude and longitude data (points) contained in the area expressed as polygons for each municipality.
+
+The optimizer selects GpuJoin, and GpuGiSTJoin to join "giscity" table with "dpoints" table.
+The "IndexFilter:" line shows that the filtering condition on the GiST index is <code>(g.geom ~ st_makepoint(d.x, d.y))</code> and the index <code>giscity_geom_idx</code> will be used.
+The execution of PostGIS functions is a relatively "heavy" process even for GPU.
+By using GiST index, we can eliminate combinations that obviously do not match the condition and speed up the search process significantly.
+}
 
 ```
 =# EXPLAIN

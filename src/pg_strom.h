@@ -3,12 +3,11 @@
  *
  * Header file of pg_strom module
  * --
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
- * This software is an extension of PostgreSQL; You can use, copy,
- * modify or distribute it under the terms of 'LICENSE' included
- * within this package.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
@@ -82,6 +81,9 @@
 #include "commands/typecmds.h"
 #include "commands/variable.h"
 #include "common/base64.h"
+#if PG_VERSION_NUM >= 130000
+#include "common/hashfn.h"
+#endif
 #include "common/int.h"
 #include "common/md5.h"
 #include "executor/executor.h"
@@ -600,7 +602,7 @@ typedef struct DevAttributes
 	char		DEV_UUID[48];
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
-	bool		DEV_SUPPORT_GPUDIRECT;
+	bool		DEV_SUPPORT_GPUDIRECTSQL;
 #define DEV_ATTR(LABEL,a,b,c)		\
 	cl_int		LABEL;
 #include "device_attrs.h"
@@ -942,23 +944,8 @@ extern void pgstromInitWorkerGpuTaskState(GpuTaskState *gts,
 										  void *coordinate);
 extern void pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts);
 
-extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
-
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
-
-/*
- * nvme_strom.c
- */
-extern Size	pgstrom_gpudirect_threshold(void);
-extern int	GetOptimalGpuForFile(File fdesc);
-extern int	GetOptimalGpuForRelation(PlannerInfo *root,
-									 RelOptInfo *rel);
-extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
-									 RelOptInfo *baserel);
-extern bool RelationCanUseNvmeStrom(Relation relation);
-
-extern void	pgstrom_init_gpu_direct(void);
 
 /*
  * cuda_program.c
@@ -1148,6 +1135,14 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 extern Bitmapset *pgstrom_pullup_outer_refs(PlannerInfo *root,
 											RelOptInfo *base_rel,
 											Bitmapset *referenced);
+
+extern int	GetOptimalGpuForFile(File fdesc);
+extern int	GetOptimalGpuForRelation(PlannerInfo *root,
+									 RelOptInfo *rel);
+extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
+									 RelOptInfo *baserel);
+extern bool RelationCanUseNvmeStrom(Relation relation);
+
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
 										List *index_conds,
@@ -1382,6 +1377,7 @@ extern bool		pgstrom_gpudirect_enabled(void);
 extern Size		pgstrom_gpudirect_threshold(void);
 extern void		pgstrom_init_extra(void);
 extern bool		heterodbLicenseCheck(void);
+extern int		gpuDirectInitDriver(void);
 extern void		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
 									  File pg_fdesc);
 extern void		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
@@ -1398,6 +1394,10 @@ extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 unsigned long iomap_handle,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
+extern void	extraSysfsSetupDistanceMap(const char *manual_config);
+extern int	extraSysfsLookupOptimalGpu(dev_t st_dev);
+extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
+
 /*
  * float2.c
  */

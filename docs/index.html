@@ -68,8 +68,6 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#support-policy">Support Policy</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#versioning-policy">Versioning Policy</a>
-    </li>
     </ul>
                     </li>
                 </ul>
@@ -156,20 +154,18 @@
                 <h1 id="home">Home</h1>
 <p>This chapter introduces the overview of PG-Strom, and developer's community.</p>
 <h2 id="what-is-pg-strom">What is PG-Strom?</h2>
-<p>PG-Strom is an extension module of PostgreSQL designed for version 9.6 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
+<p>PG-Strom is an extension module of PostgreSQL designed for version 11 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
 <p>Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.</p>
-<p>Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.</p>
-<p>PG-Strom v2.0 enhanced the capability of reading from storage. SSD-to-GPU Direct SQL mechanism allows to load from storage (NVME-SSD) to GPU directly, and supply data to GPU that runs SQL workloads.</p>
-<p>On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly computing density problems, like advanced statistical analytics or machine learning, on the database management system, and to return only results to users.</p>
+<p>PG-Strom has two storage options. The first one is the heap storage system of PostgreSQL. It is not always optimal for aggregation / analysis workloads because of its row data format, on the other hands, it has an advantage to run aggregation workloads without data transfer from the transactional database. The other one is Apache Arrow files, that have structured columnar format. Even though it is not suitable for update per row basis, it enables to import large amount of data efficiently, and efficiently search / aggregate the data through foreign data wrapper (FDW).</p>
+<p>One of the characteristic feature of PG-Strom is GPUDirect SQL that bypasses the CPU/RAM to read the data from NVME / NVME-oF to the GPU directly. SQL processing on the GPU maximizes the bandwidth of these devices. PG-Strom v3.0 newly supports NVIDIA GPUDirect Storage, it allows to support SDS (Software Defined Storage) over the NVME-oF protocol and shared filesystems.</p>
+<p>Also, the v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.</p>
 <h2 id="license-and-copyright">License and Copyright</h2>
-<p>PG-Strom is an open source software distributed under the GPL(GNU Public License) v2.
+<p>PG-Strom is an open source software distributed under the PostgreSQL License.
 See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE">LICENSE</a> for the license details.</p>
-<p>PG-Strom Development Team reserves the copyright of the software.
-PG-Strom Development Team is an international, unincorporated association of individuals and companies who have contributed to the PG-Strom project, but not a legal entity.</p>
 <h2 id="community">Community</h2>
-<p>We have a community mailing-list at: <a href="https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom">PG-Strom community ML</a> It is a right place to post questions, requests, troubles and etc, related to PG-Strom project.</p>
-<p>Please pay attention it is a public list for world wide. So, it is your own responsibility not to disclose confidential information.</p>
-<p>The primary language of the mailing-list is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach <code>(JP)</code> prefix on the subject like, for non-Japanese speakers to skip messages.</p>
+<p>Please post your questions, requests and trouble reports to the <a href="https://github.com/heterodb/pg-strom/discussions">Discussion of GitHubの</a>.</p>
+<p>Please pay attention it is a public board for world wide. So, it is your own responsibility not to disclose confidential information.</p>
+<p>The primary language of the discussion board is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach <code>(JP)</code> prefix on the subject like, for non-Japanese speakers to skip messages.</p>
 <h3 id="bug-or-troubles-report">Bug or troubles report</h3>
 <p>If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with <strong>bug</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>.</p>
 <p>Please ensure the items below on bug reports.</p>
@@ -195,7 +191,7 @@ PG-Strom Development Team is an international, unincorporated association of ind
 <li>Status of GUC options you modified from the default configurations.</li>
 <li>Hardware configuration - GPU model and host RAM size especially.</li>
 </ul>
-<p>If you are not certain whether the strange behavior on your site is bug or not, please report it to the mailing-list prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.</p>
+<p>If you are not certain whether the strange behavior on your site is bug or not, please report it to the discussion board prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.</p>
 <h3 id="new-features-proposition">New features proposition</h3>
 <p>If you have any ideas of new features, please open a new issue with <strong>feature</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>, then have a discussion with other developers.</p>
 <p>A preferable design proposal will contain the items below.</p>
@@ -212,15 +208,6 @@ PG-Strom Development Team is an international, unincorporated association of ind
 <p>The PG-Strom development team will support the latest release which are distributed from the HeteroDB Software Distribution Center only. So, people who met troubles needs to ensure the problems can be reproduced with the latest release.</p>
 <p>Please note that it is volunteer based community support policy, so our support is best effort and no SLA definition.</p>
 <p>If you need commercial support, contact to HeteroDB,Inc (contact@heterodbcom).</p>
-<h2 id="versioning-policy">Versioning Policy</h2>
-<p>PG-Strom's version number is consists of two portion; major and minor version. <code>&lt;major&gt;.&lt;minor&gt;</code></p>
-<p>Its minor version shall be incremented for each release; including bug fixes and new features.
-Its major version shall be incremented in the following situation.</p>
-<ul>
-<li>Some of supported PostgreSQL version gets deprecated.</li>
-<li>Some of supported GPU devices gets deprecated.</li>
-<li>New version adds epoch making features.</li>
-</ul>
               
             </div>
           </div>
@@ -274,5 +261,5 @@ Its major version shall be incremented in the following situation.</p>
 
 <!--
 MkDocs version : 1.1.2
-Build Date UTC : 2021-05-16 08:31:13.776803+00:00
+Build Date UTC : 2021-06-16 03:22:20.069810+00:00
 -->

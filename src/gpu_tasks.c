@@ -3,17 +3,11 @@
  *
  * Routines to manage GpuTaskState/GpuTask state machine.
  * ----
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
 
@@ -328,6 +322,8 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 											 relation, outer_refs);
 		if (RelationHasGpuCache(relation))
 			gts->gc_state = ExecInitGpuCache(&gts->css.ss, eflags, outer_refs);
+		/* we never use Apache Arrow and GPU Cache simultaneously */
+		Assert(!gts->af_state || !gts->gc_state);
 	}
 	gts->outer_refs = outer_refs;
 	gts->scan_done = false;
@@ -353,7 +349,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 /*
  * fetch_next_gputask
  */
-GpuTask *
+static GpuTask *
 fetch_next_gputask(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
@@ -591,7 +587,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 	InstrEndLoop(&gts->outer_instrument);
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
-		heap_endscan(gts->css.ss.ss_currentScanDesc);
+		table_endscan(gts->css.ss.ss_currentScanDesc);
 	/* shutdown Arrow_Fdw/GpuCache state */
 	if (gts->af_state)
 		ExecEndArrowFdw(gts->af_state);
@@ -702,12 +698,12 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 	Relation	relation = gts->css.ss.ss_currentRelation;
 	EState	   *estate = gts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
+	Size		sz;
 
-	if (!relation)
-		return 0;
-
-	return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
-					table_parallelscan_estimate(relation, snapshot));
+	sz = sizeof(GpuTaskSharedState);
+	if (relation && !gts->af_state && !gts->gc_state)
+		sz += table_parallelscan_estimate(relation, snapshot);
+	return MAXALIGN(sz);
 }
 
 /*
@@ -726,9 +722,9 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	memset(gtss, 0, offsetof(GpuTaskSharedState, phscan));
 	if (gts->af_state)
 		ExecInitDSMArrowFdw(gts->af_state, gtss);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecInitDSMGpuCache(gts->gc_state, gtss);
-	if (relation)
+	else if (relation)
 	{
 		/* init state of block based table scan */
 		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
@@ -755,9 +751,9 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 
 	if (gts->af_state)
 		ExecInitWorkerArrowFdw(gts->af_state, gtss);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecInitWorkerGpuCache(gts->gc_state, gtss);
-	if (relation)
+	else if (relation)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
@@ -785,9 +781,9 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	if (gts->gc_state)
+	else if (gts->gc_state)
 		ExecReInitDSMGpuCache(gts->gc_state);
-	if (relation)
+	else if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 

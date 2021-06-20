@@ -1,8 +1,8 @@
 #
 # Common definitions for PG-Strom Makefile
 #
-PG_CONFIG := pg_config
-PSQL = $(shell dirname $(shell which $(PG_CONFIG)))/psql
+PG_CONFIG ?= pg_config
+PSQL   = $(shell dirname $(shell which $(PG_CONFIG)))/psql
 MKDOCS = mkdocs
 
 ifndef STROM_BUILD_ROOT
@@ -11,6 +11,9 @@ endif
 
 # Custom configurations if any
 -include $(STROM_BUILD_ROOT)/Makefile.custom
+
+# GPU code build configurations
+include $(STROM_BUILD_ROOT)/Makefile.cuda
 
 #
 # PG-Strom version
@@ -31,10 +34,10 @@ PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 __STROM_OBJS = main.o nvrtc.o extra.o \
         shmbuf.o codegen.o datastore.o cuda_program.o \
         gpu_device.o gpu_context.o gpu_mmgr.o \
-        nvme_strom.o relscan.o gpu_tasks.o \
+        relscan.o gpu_tasks.o gpu_cache.o \
         gpuscan.o gpujoin.o gpupreagg.o \
-	arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
-	gpu_cache.o aggfuncs.o float2.o tinyint.o misc.o
+        arrow_fdw.o arrow_nodes.o arrow_write.o arrow_pgsql.o \
+        aggfuncs.o float2.o tinyint.o misc.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 
 #
@@ -53,17 +56,6 @@ GPU_DEBUG_FATBIN := $(GPU_FATBIN:.fatbin=.gfatbin)
 GPU_CACHE_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.fatbin
 GPU_CACHE_DEBUG_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.gfatbin
 
-# 32k / 128 = 256 threads per SM
-MAXREGCOUNT := 128
-
-# MEMO: Some of kernel functions shall be built to launch 1024 threads
-# per block, by KERNEL_FUNCTION_MAXTHREADS(). It saves usage of registers
-# per thread. Right now, NVCC/NVRTC configures 32x1024 = 32k registers per SM.
-# Our logic can be improved in the furture version regardless of the block-
-# size, however, we use 32 registers per thread is a safety configuration for
-# all the run-time build.
-
-
 #
 # Source file of utilities
 #
@@ -77,7 +69,7 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE := $(STROM_BUILD_ROOT)/utils/gpuinfo.c
 GPUINFO_DEPEND := $(GPUINFO_SOURCE)
-GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) \
+GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(CUDA_IPATH) -L $(CUDA_LPATH) \
                  -I $(STROM_BUILD_ROOT)/src \
                  -I $(STROM_BUILD_ROOT)/utils \
                  $(shell $(PG_CONFIG) --ldflags)
@@ -144,8 +136,8 @@ __DOC_FILES = index.md install.md partition.md \
 #
 # Files to be packaged
 #
-__PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	          src sql utils python test man
+__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
+                  pg_strom.control src sql utils python test man
 ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
@@ -163,18 +155,6 @@ __STROM_TGZ_GITHASH = HEAD
 endif
 
 __SPECFILE = pg_strom-PG$(MAJORVERSION)
-
-#
-# Header and Libraries of CUDA
-#
-CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
-CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);    \
-           do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
-IPATH := $(CUDA_PATH)/include
-BPATH := $(CUDA_PATH)/bin
-LPATH := $(CUDA_PATH)/lib64
-NVCC  := $(CUDA_PATH)/bin/nvcc
-CUDA_VERSION := $(shell grep -E '^\#define[ ]+CUDA_VERSION[ ]+[0-9]+$$' $(IPATH)/cuda.h | awk '{print $$3}')
 
 #
 # Flags to build
@@ -196,34 +176,13 @@ endif
 PGSTROM_FLAGS += -DCPU_ARCH=\"$(shell uname -m)\"
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DPGSERV_INCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)\"
-PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
-PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
-PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
+PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(CUDA_IPATH)\"
+PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(CUDA_BPATH)\"
+PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(CUDA_LPATH)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
-PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
-SHLIB_LINK := -L $(LPATH) -lcuda
-
-# also, flags to build GPU libraries
-NVCC_FLAGS := $(NVCC_FLAGS_CUSTOM)
-NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
-              --fatbin \
-              --maxrregcount=$(MAXREGCOUNT) \
-              --gpu-architecture=compute_60
-# supported device depends on CUDA version
-# don't forget to update the logic of target_cc in cuda_program.c 
-ifeq ($(shell test $(CUDA_VERSION) -ge 11020; echo $$?), 0)
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86
-  NVCC_FLAGS += --threads 6	# CUDA 11.2 supports nvcc --threads option
-else ifeq ($(shell test $(CUDA_VERSION) -ge 11010; echo $$?), 0)
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80
-else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75
-else
-  NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
-endif
-NVCC_DEBUG_FLAGS := $(NVCC_FLAGS) --source-in-ptx --device-debug \
-                    -DPGSTROM_DEBUG_BUILD=1
+PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
+SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
 #
 # Definition of PG-Strom Extension
@@ -233,7 +192,8 @@ MODULEDIR = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA = $(GPU_HEADERS) $(PGSTROM_SQL) \
-       $(STROM_BUILD_ROOT)/src/cuda_codegen.h
+       $(STROM_BUILD_ROOT)/src/cuda_codegen.h \
+       $(STROM_BUILD_ROOT)/Makefile.cuda
 DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) \
              $(GPU_CACHE_FATBIN) $(GPU_CACHE_DEBUG_FATBIN)
 
@@ -280,13 +240,13 @@ endif
 # GPU Libraries
 #
 $(GPU_CACHE_FATBIN): $(GPU_CACHE_FATBIN:.fatbin=.cu) $(GPU_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
+	$(NVCC) $(__NVCC_FLAGS) --relocatable-device-code=false -o $@ $<
 $(GPU_CACHE_DEBUG_FATBIN): $(GPU_CACHE_DEBUG_FATBIN:.gfatbin=.cu) $(GPU_HEADERS)
-	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
+	$(NVCC) $(__NVCC_DEBUG_FLAGS) --relocatable-device-code=false -o $@ $<
 %.fatbin:  %.cu $(GPU_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) --relocatable-device-code=true -o $@ $<
+	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 %.gfatbin: %.cu $(GPU_HEADERS)
-	$(NVCC) $(NVCC_DEBUG_FLAGS) --relocatable-device-code=true -o $@ $<
+	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
 
 #
 # Build documentation
@@ -369,6 +329,7 @@ rpm: tarball
 	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
 	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"    \
 	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
-	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
+	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec \
+                 --undefine=_debugsource_packages
 
 .PHONY: docs

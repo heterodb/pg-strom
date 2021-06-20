@@ -3,17 +3,11 @@
  *
  * A common header for CUDA device code
  * --
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef CUDA_COMMON_H
 #define CUDA_COMMON_H
@@ -292,7 +286,8 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
-
+#define get_warp_id()			(threadIdx.x / warpSize)
+#define get_lane_id()			(threadIdx.x & (warpSize-1))
 #else	/* __CUDACC__ */
 typedef cl_ulong		hostptr_t;
 #endif	/* !__CUDACC__ */
@@ -323,8 +318,6 @@ typedef cl_ulong		hostptr_t;
 	__device__ __host__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
-#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	extern "C" __global__ RET_TYPE __launch_bounds__(MAXTHREADS_PER_BLOCK)
 #else	/* __CUDACC__ */
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
@@ -966,7 +959,8 @@ typedef struct kern_data_extra		kern_data_extra;
 STATIC_INLINE(cl_uint)
 __kds_packed(size_t offset)
 {
-	Assert((offset & (~((size_t)(~0U) << MAXIMUM_ALIGNOF_SHIFT))) == 0);
+
+	Assert((offset & ~(0xffffffffUL << MAXIMUM_ALIGNOF_SHIFT)) == 0);
 	return (cl_uint)(offset >> MAXIMUM_ALIGNOF_SHIFT);
 }
 

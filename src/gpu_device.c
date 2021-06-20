@@ -3,17 +3,11 @@
  *
  * Routines to collect GPU device information.
  * ----
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
 
@@ -62,6 +56,42 @@ Datum pgstrom_gpu_cc_major(PG_FUNCTION_ARGS);
 Datum pgstrom_gpu_cc_minor(PG_FUNCTION_ARGS);
 Datum pgstrom_gpu_pci_id(PG_FUNCTION_ARGS);
 
+/* static variables */
+static bool		gpudirect_driver_is_initialized = false;
+static bool		__pgstrom_gpudirect_enabled;	/* GUC */
+static int		__pgstrom_gpudirect_threshold;	/* GUC */
+
+/*
+ * pgstrom_gpudirect_enabled
+ */
+bool
+pgstrom_gpudirect_enabled(void)
+{
+	return __pgstrom_gpudirect_enabled;
+}
+
+/*
+ * pgstrom_gpudirect_enabled_checker
+ */
+static bool
+pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
+{
+	bool	newval = *p_newval;
+
+	if (newval && !gpudirect_driver_is_initialized)
+		elog(ERROR, "cannot enable GPUDirectSQL without driver module loaded");
+	return true;
+}
+
+/*
+ * pgstrom_gpudirect_threshold
+ */
+Size
+pgstrom_gpudirect_threshold(void)
+{
+	return (Size)__pgstrom_gpudirect_threshold << 10;
+}
+
 /*
  * pgstrom_collect_gpu_device
  */
@@ -78,7 +108,7 @@ pgstrom_collect_gpu_device(void)
 	char	   *cuda_runtime_version = NULL;
 	char	   *nvidia_driver_version = NULL;
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
-	int			i, j;
+	int			i, cuda_dindex;
 
 	initStringInfo(&str);
 
@@ -176,7 +206,7 @@ pgstrom_collect_gpu_device(void)
 	}
 	ClosePipeStream(filp);
 
-	for (i=0, j=0; i < num_devices; i++)
+	for (i=0, cuda_dindex=0; i < num_devices; i++)
 	{
 		DevAttributes  *dattrs = &devAttrs[i];
 		char			path[MAXPGPATH];
@@ -199,15 +229,22 @@ pgstrom_collect_gpu_device(void)
 											dattrs->MAX_THREADS_PER_BLOCK);
 
 		/*
-		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB supports
-		 * GPUDirect SQL
+		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB
+		 * supports GPUDirectSQL
 		 */
-		if ((strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
-			 strcmp(dattrs->DEV_BRAND, "QUADRO") == 0) &&
-			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
-			dattrs->DEV_SUPPORT_GPUDIRECT = true;
-		else
-			dattrs->DEV_SUPPORT_GPUDIRECT = false;
+		dattrs->DEV_SUPPORT_GPUDIRECTSQL = false;
+		if (dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
+		{
+#if CUDA_VERSION < 11030
+			if (strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
+				strcmp(dattrs->DEV_BRAND, "QUADRO") == 0 ||
+				strcmp(dattrs->DEV_BRAND, "NVIDIA") == 0)
+				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
+#else
+			if (dattrs->GPU_DIRECT_RDMA_SUPPORTED)
+				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
+#endif
+		}
 
 		/*
 		 * read the numa node-id from the sysfs entry
@@ -224,16 +261,16 @@ pgstrom_collect_gpu_device(void)
 				 dattrs->PCI_DEVICE_ID);
 		filp = fopen(path, "r");
 		if (!filp)
-			dattrs->NUMA_NODE_ID = -1;		/* unknown */
+			dattrs->NUMA_NODE_ID = -1;              /* unknown */
 		else
 		{
 			if (!fgets(linebuf, sizeof(linebuf), filp))
-				dattrs->NUMA_NODE_ID = -1;	/* unknown */
+				dattrs->NUMA_NODE_ID = -1;      /* unknown */
 			else
 				dattrs->NUMA_NODE_ID = atoi(linebuf);
 			fclose(filp);
 		}
-		
+
 		/* Log brief CUDA device properties */
 		resetStringInfo(&str);
 		appendStringInfo(&str, "GPU%d %s (%d SMs; %dMHz, L2 %dkB)",
@@ -270,13 +307,13 @@ pgstrom_collect_gpu_device(void)
 						 dattrs->COMPUTE_CAPABILITY_MINOR);
 		elog(LOG, "PG-Strom: %s", str.data);
 
-		if (i != j)
-			memcpy(&devAttrs[j], &devAttrs[i], sizeof(DevAttributes));
-
-		j++;
+		if (i != cuda_dindex)
+			memcpy(&devAttrs[cuda_dindex],
+				   &devAttrs[i], sizeof(DevAttributes));
+		cuda_dindex++;
 	}
-	Assert(j <= num_devices);
-	numDevAttrs = j;
+	Assert(cuda_dindex <= num_devices);
+	numDevAttrs = cuda_dindex;
 	if (numDevAttrs == 0)
 		elog(ERROR, "PG-Strom: no supported GPU devices found");
 }
@@ -287,7 +324,11 @@ pgstrom_collect_gpu_device(void)
 void
 pgstrom_init_gpu_device(void)
 {
-	static char	   *cuda_visible_devices = NULL;
+	static char	*cuda_visible_devices = NULL;
+	bool		default_gpudirect_enabled = false;
+	size_t		default_threshold = 0;
+	size_t		shared_buffer_size = (size_t)NBuffers * (size_t)BLCKSZ;
+	int			i;
 
 	/*
 	 * Set CUDA_VISIBLE_DEVICES environment variable prior to CUDA
@@ -308,6 +349,49 @@ pgstrom_init_gpu_device(void)
 	}
 	/* collect device properties by gpuinfo command */
 	pgstrom_collect_gpu_device();
+
+	/* pgstrom.gpudirect_enabled */
+	if (gpuDirectInitDriver() == 0)
+	{
+		for (i=0; i < numDevAttrs; i++)
+		{
+			if (devAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
+				default_gpudirect_enabled = true;
+		}
+		gpudirect_driver_is_initialized = true;
+	}
+	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
+							 "enables GPUDirect SQL",
+							 NULL,
+							 &__pgstrom_gpudirect_enabled,
+							 default_gpudirect_enabled,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
+
+	/*
+	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
+	 *   ((System RAM size) -
+	 *    (shared_buffer size)) * 0.5 + (shared_buffer size)
+	 *
+	 * If table size is enough large to issue real i/o, NVMe-Strom will
+	 * make advantage by higher i/o performance.
+	 */
+	if (PAGE_SIZE * PHYS_PAGES > shared_buffer_size / 2)
+		default_threshold = (PAGE_SIZE * PHYS_PAGES - shared_buffer_size / 2);
+	default_threshold += shared_buffer_size;
+
+	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
+							"Tablesize threshold to use GPUDirect SQL",
+							NULL,
+							&__pgstrom_gpudirect_threshold,
+							default_threshold >> 10,
+							262144,	/* 256MB */
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+
 }
 
 /*

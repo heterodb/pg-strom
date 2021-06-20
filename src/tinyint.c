@@ -1,19 +1,13 @@
 /*
- * src/tinyint.c
+ * tinyint.c
  *
  * 8bit-width integer data type support
  * ----
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
 
@@ -171,7 +165,7 @@ Datum
 pgstrom_int1in(PG_FUNCTION_ARGS)
 {
 	char   *num = PG_GETARG_CSTRING(0);
-	int32	ival = pg_strtoint32(num);
+	int32	ival = pg_atoi(num, sizeof(int32), '\0');
 
 	if (ival < PG_INT8_MIN || ival > PG_INT8_MAX)
 		ereport(ERROR,

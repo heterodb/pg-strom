@@ -4,12 +4,11 @@
  * Definitions related to GPU code generator; that can be also used by
  * user's extra module.
  * ---
- * Copyright 2011-2020 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2020 (C) The PG-Strom Development Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
- * This software is an extension of PostgreSQL; You can use, copy,
- * modify or distribute it under the terms of 'LICENSE' included
- * within this package.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the PostgreSQL License.
  */
 #ifndef CUDA_CODEGEN_H
 #define CUDA_CODEGEN_H
@@ -17,7 +16,9 @@
 #include "catalog/pg_proc.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
+#if PG_VERSION_NUM >= 120000
 #include "nodes/pathnodes.h"
+#endif
 #include "nodes/primnodes.h"
 #include "utils/typcache.h"
 #include "arrow_defs.h"

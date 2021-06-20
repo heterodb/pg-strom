@@ -163,10 +163,35 @@
               
                 <h1 id="gpu-cache">GPU Cache</h1>
 <h2 id="overview">Overview</h2>
+<p>GPU has a device memory that is independent of the RAM in the host system, and in order to calculate on the GPU, data must be transferred from the host system or storage device to the GPU device memory once through the PCI-E bus.
+The same is true when PG-Strom processes SQL queries on the GPU. Internally, the records read from the PostgreSQL table are transferred to the GPU, and then various SQL operations are executed on the GPU.
+However, these processes take time to read the tables and transfer the data. (In many cases, much longer than the processing on the GPU!)</p>
+<p>GPU Cache is a function that reserves an area on the GPU device memory in advance and keeps a copy of the PostgreSQL table there.
+This can be used to execute search/analysis SQL in real time for data that is relatively small(~10GB) and is frequently updated.
+The log-based synchronization mechanism described below allows GPU Cache to be kept up-to-date without interfering with highly parallel and transactional workloads.
+Nevertheless, you can process search/analytical SQL workloads on data already loaded on GPU Cache without reading the records from the table again or transferring the data over the PCI-E bus.</p>
 <p><img alt="GPU Cache Usage" src="../img/gpucache_usage.png" /></p>
+<p>A typical use case of GPU Cache is to join location data, such as the current position of a mobile device like a car or a cell phone, collected in real time with other data using <a href="../postgis/">GPU-PostGIS</a>.
+The workload of updating location information sent out by many devices is extremely heavy. However, it also needs to be applied on the GPU side without delay in order to perform search/analysis queries based on the latest location information.
+Although the size is limited, GPU Cache is one option to achieve both high frequency updates and high-performance search/analysis query execution.</p>
 <h2 id="architecture">Architecture</h2>
+<p>GPU Caches needs to satisfy two requirements: highly parallel update-based workloads and search/analytical queries on constantly up-to-date data.
+In many systems, the CPU and GPU are connected via the PCI-E bus, and there is a reasonable delay in their communication. Therefore, synchronizing GPU Cache every time a row is updated in the target table will significantly degrade the transaction performance.
+Using GPU Cache allocates a "REDO Log Buffer" on the shared memory on the host side in addition to the area on the memory of the GPU.
+When a SQL command (INSERT, UPDATE, DELETE) is executed to update a table, the updated contents are copied to the REDO Log Buffer by the AFTER ROW trigger. Since this process can be completed by CPU and RAM alone without any GPU call, it has little impact on transaction performance.</p>
 <p><img alt="GPU Cache Architecture" src="../img/gpucache_arch.png" /></p>
+<p>When a certain amount of unapplied REDO Log Entries accumulate in the REDO Log Buffer, or a certain amount of time has passed since the last write, it is loaded by a background worker process (GPU memory keeper) and applied to GPU Cache.
+At this time, REDO Log Entries are transferred to the GPU in batches and processed in parallel by thousands of processor cores on the GPU, so delays caused by this process are rarely a problem.</p>
+<p>Search/analysis queries against the target table in GPU Cache do not load the table data, but use the data mapped from GPU Cache pre-allocated on the GPU device memory.
+If there are any unapplied REDO Logs at the start of the search/analysis query, they will all be applied to GPU Cache. 
+This means that the results of a search/analysis query scanning the target GPU Cache will return the same results as if it were referring to the table directly, and the query will always be consistent.</p>
 <h2 id="configuration">Configuration</h2>
+<p>To enable GPU Cache, set the following trigger function for the target table.</p>
+<ul>
+<li>The <code>pgstrom.gpucache_sync_trigger()</code> function must be set as the row trigger for AFTER INSERT OR UPDATE OR DELETE.</li>
+<li>The <code>pgstrom.gpucache_sync_trigger()</code> function must be set as a syntax trigger for AFTER TRUNCATE.</li>
+<li>The timing of the above triggers must be set to <code>ALWAYS</code> (the slave side of replication must also fire the trigger).</li>
+</ul>
 <pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
 =# create trigger stmt_sync after truncate on dpoints_even for statement
@@ -175,11 +200,40 @@
 =# alter table dpoints_even enable always trigger stmt_sync;
 </code></pre>
 <h3 id="gpu-cache-customize">GPU Cache Customize</h3>
+<p>You can customize GPU Cache by specifying an optional string in the form of KEY=VALUE as an argument to GPU Cache line trigger. Please note that where you should specify is not to the syntax trigger.
+The following SQL statement is an example of creating a GPU Cache whose maximum row count is 2.5 million rows and the size of the REDO Log Buffer is 100MB.</p>
 <pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
    execute function pgstrom.gpucache_sync_trigger('max_num_rows=2500000,redo_buffer_size=100m');
 </code></pre>
+<p>The options that can be given to the argument of the line trigger are shown below.</p>
+<dl>
+<dt><code>gpu_device_id=GPU_ID</code> (default: 0)</dt>
+<dd>Specify the target GPU device ID to allocate GPU Cache.</dd>
+<dt><code>max_num_rows=NROWS</code> (default: 10485760)</dt>
+<dd>Specify the number of rows that can be allocated on GPU Cache.</dd>
+<dd>Just as with PostgreSQL tables, GPU Cache needs to retain updated rows prior to commit for visibility control, so <code>max_num_rows</code> should be specified with some margin. Note that the old version of the updated/deleted row will be released after the transaction is committed.</dd>
+<dt><code>redo_buffer_size=SIZE</code> (default: 160m)</dt>
+<dd>Specify the size of REDO Log Buffer. You can use k, m and g as the unit.</dd>
+<dt><code>gpu_sync_interval=SECONDS</code> (default: 5)</dt>
+<dd>If the specified time has passed since the last write to the REDO Log Buffer, REDO Log will be applied to the GPU, regardless of the number of rows updated.</dd>
+<dt><code>gpu_sync_threshold=SIZE</code> (default: 25% of <code>redo_buffer_size</code>)</dt>
+<dd>When the unapplied REDO Log in the REDO Log Buffer reaches SIZE bytes, it is applied to the GPU side.</dd>
+<dd>You can use k, m and g as the unit.</dd>
+</dl>
 <h3 id="gpu-cache-options">GPU Cache Options</h3>
-<p>Below is the GPU Cache related PostgreSQL configuration parameters.</p>
+<p>Below are GPU Cache related PostgreSQL configuration parameters.</p>
+<dl>
+<dt><code>pg_strom.enable_gpucache</code> (default: on)</dt>
+<dd>This option controls whether search/analytical queries will use GPU Cache or not.</dd>
+<dd>If this value is off, the data will be read from the table each time, ignoring GPU Cache even if it is available.</dd>
+<dd>Note that this setting has no effect on REDO Log Buffer appending by triggers.</dd>
+<dt><code>pg_strom.gpucache_auto_preload</code> (default: NULL)</dt>
+<dd>When PostgreSQL is started/restarted, GPU Cache for the table specified by this parameter will be built in advance.</dd>
+<dd>The value should be in the format: <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code>. To specify multiple tables, separate them by commas.</dd>
+<dd>If GPU Cache is not built, the PostgreSQL backend process that first attempts to access GPU Cache will scan the entire target table and transfer it to the GPU. This process usually takes a considerable amount of time. However, by specifying the tables that should be loaded in this option, you can avoid waiting too long the first time you run a search/analysis query.</dd>
+<dd>If this parameter is set to '*', it will attempt to load the contents of all tables with GPU Cache into the GPU in order. At this time, the background worker will access all the databases in order, and will return exit code 1 to prompt the postmaster to restart.</dd>
+<dd>The server startup log will show that the "GPUCache Startup Preloader" exited with exit code 1 as follows, but this is not abnormal.</dd>
+</dl>
 <pre><code> LOG:  database system is ready to accept connections
  LOG:  background worker &quot;GPUCache Startup Preloader&quot; (PID 856418) exited with exit code 1
  LOG:  background worker &quot;GPUCache Startup Preloader&quot; (PID 856427) exited with exit code 1
@@ -193,6 +247,10 @@
 </code></pre>
 <h2 id="operations">Operations</h2>
 <h3 id="confirm-gpu-cache-usage">Confirm GPU Cache usage</h3>
+<p>GPU Cache is referred to transparently. The user does not need to be aware of the presence or absence of GPU Cache, and PG-Strom will automatically determine and switch the process.</p>
+<p>The following is the query plan for a query that refers to the table "dpoints" which has GPU Cache set.
+The 3rd row from the bottom, in the "GPU Cache" field, shows the basic information about GPU Cache of this table. We can see that the query is executed with referring to GPU Cache and not the "dpoints" table.</p>
+<p>Note that the meaning of each item is as follows: <code>max_num_rows</code> indicates the maximum number of rows that GPU Cache can hold; <code>main</code> indicates the size of the area in GPU Cache for fixed-length fields; <code>extra</code> indicates the size of the area for variable-length data. </p>
 <pre><code>=# explain
    select pref, city, count(*)
      from giscity g, dpoints d
@@ -221,6 +279,7 @@
 
 </code></pre>
 <h3 id="check-status-of-gpu-cache">Check status of GPU Cache</h3>
+<p>Use the <code>pgstrom.gpucache_info</code> view to check the current state of GPU Cache.</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
  database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
   config_options
@@ -229,6 +288,67 @@
         12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 </code></pre>
+<p>Note that <code>pgstrom.gpucache_info</code> will only show the status of GPU Caches that have been initially loaded and have space allocated on the GPU device memory at that time. In other words, if the trigger function is set but not yet initially loaded (no one has accessed it yet), the potentially allocated GPU Cache will not be shown yet.</p>
+<p>The meaning of each field is as follows:</p>
+<ul>
+<li><code>database_oid</code><ul>
+<li>The OID of the database to which the table with GPU Cache enabled exists.</li>
+</ul>
+</li>
+<li><code>database_name</code><ul>
+<li>The name of the database to which the table with GPU Cache enabled exists.</li>
+</ul>
+</li>
+<li><code>table_oid</code><ul>
+<li>The OID of the table with GPU Cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.</li>
+</ul>
+</li>
+<li><code>table_name</code><ul>
+<li>The name of the table with GPU Cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.</li>
+</ul>
+</li>
+<li><code>signature</code><ul>
+<li>A hash value indicating the uniqueness of GPU Cache. This value may change, for example, before and after executing <code>ALTER TABLE</code>.</li>
+</ul>
+</li>
+<li><code>gpu_main_sz</code><ul>
+<li>The size of the area reserved in GPU Cache for fixed-length data.</li>
+</ul>
+</li>
+<li><code>gpu_extra_sz</code><ul>
+<li>The size of the area reserved in GPU Cache for variable-length data.</li>
+</ul>
+</li>
+<li><code>redo_write_ts</code><ul>
+<li>The time when the REDO Log Buffer was last updated.</li>
+</ul>
+</li>
+<li><code>redo_write_nitems</code><ul>
+<li>The total number of REDO Logs in the REDO Log Buffer.</li>
+</ul>
+</li>
+<li><code>redo_write_pos</code><ul>
+<li>The total size (in bytes) of the REDO Logs in the REDO Log Buffer.</li>
+</ul>
+</li>
+<li><code>redo_read_nitems</code><ul>
+<li>The total number of REDO Logs read from the REDO Log Buffer and applied to the GPU.</li>
+</ul>
+</li>
+<li><code>redo_read_pos</code><ul>
+<li>The total size (in bytes) of REDO Logs read from the REDO Log Buffer and applied to the GPU.</li>
+</ul>
+</li>
+<li><code>redo_sync_pos</code><ul>
+<li>The position of the REDO Log which is scheduled to be applied to GPU Cache by the background worker on the REDO Log Buffer.</li>
+<li>This is used internally to avoid a situation where many sessions generate asynchronous requests at the same time when the remaining REDO Log Buffer is running out.</li>
+</ul>
+</li>
+<li><code>config_options</code><ul>
+<li>The optional string to customize GPU Cache.</li>
+</ul>
+</li>
+</ul>
               
             </div>
           </div>

@@ -1,10 +1,13 @@
 /*
- * arrow_write.c - routines to write out apache arrow format
+ * arrow_write.c
  *
- * Copyright 2018-2020 (C) KaiGai Kohei <kaigai@heterodb.com>
+ * Routines to write out apache arrow format
+ * ----
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the PostgreSQL License. See the LICENSE file.
+ * it under the terms of the PostgreSQL License.
  */
 #ifdef __PGSTROM_MODULE__
 #include "postgres.h"

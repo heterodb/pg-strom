@@ -5,13 +5,14 @@ Version: @@STROM_VERSION@@
 Release: @@STROM_RELEASE@@%{?dist}
 Summary: PG-Strom extension module for PostgreSQL
 Group: Applications/Databases
-License: GPL 2.0
+License: PostgreSQL
 URL: https://github.com/heterodb/pg-strom
 Source0: @@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
 BuildRequires: postgresql%{PGSQL_PKGVER}
 BuildRequires: postgresql%{PGSQL_PKGVER}-devel
 BuildRequires: mysql-devel
+BuildRequires: heterodb-extra
 Requires: postgresql%{PGSQL_PKGVER}-server
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
@@ -109,7 +110,7 @@ fi
 %{__pkgbindir}/dbgen-ssbm
 
 %changelog
-* Mon May 31 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
+* Wed Jun 16 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
 - several PostGIS functions are added for GPU execution
 - GiST-index support was added for GpuJoin
 - GpuCache was added for small data workloads
