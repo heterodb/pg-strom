@@ -37,7 +37,7 @@ INSERT INTO rt_int (
             pgstrom.random_float(0.5, -32000.0, 32000.0)
    FROM generate_series(1,2000) x);
 ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8, ADD n int1; 
-UPDATE rt_int SET g = ((id - 1 ) % 256 -128);
+UPDATE rt_int SET g = (id% 256 -128);
 UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g, n = g;
 VACUUM ANALYZE;
 -- force to use GpuScan, instead of SeqScan
