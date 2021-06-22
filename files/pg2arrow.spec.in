@@ -1,0 +1,31 @@
+Name: pg2arrow
+Version: @@STROM_VERSION@@
+Release: @@STROM_RELEASE@@%{?dist}
+Summary: PostgreSQL query results to Apache Arrow conversion tool
+Group: Applications/Databases
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: @@STROM_TARBALL@@.tar.gz
+BuildRequires: libpq-devel
+Requires: libpq
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%prep
+%setup -q -n @@STROM_TARBALL@@
+
+%build
+%{__make} -C arrow-tools pg2arrow
+
+%install
+rm -rf %{buildroot}
+%{__make} -C arrow-tools DESTDIR=%{buildroot} install-pg2arrow
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%doc LICENSE
+%{__pkgbindir}/pg2arrow
+
+%changelog

@@ -1,0 +1,31 @@
+Name: mysql2arrow
+Version: @@STROM_VERSION@@
+Release: @@STROM_RELEASE@@%{?dist}
+Summary: MySQL query results to Apache Arrow conversion tool
+Group: Applications/Databases
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: @@STROM_TARBALL@@.tar.gz
+BuildRequires: mysql-devel
+Requires: mysql-libs
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%prep
+%setup -q -n @@STROM_TARBALL@@
+
+%build
+%{__make} -C arrow-tools mysql2arrow
+
+%install
+rm -rf %{buildroot}
+%{__make} -C arrow-tools DESTDIR=%{buildroot} install-mysql2arrow
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%doc LICENSE
+%{__pkgbindir}/mysql2arrow
+
+%changelog
