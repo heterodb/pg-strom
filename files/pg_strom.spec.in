@@ -19,11 +19,6 @@ Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
 
-%package mysql2arrow
-Summary: A utility to dump query results from MySQL server as Apache Arrow files
-Group: Applications/Databases
-Requires: mysql-libs
-
 %package test
 Summary: PG-Strom related test tools and scripts
 Group: Applications/Databases
@@ -39,10 +34,6 @@ Group: Applications/Databases
 PG-Strom is an extension for PostgreSQL, to accelerate analytic queries
 towards large data set using the capability of GPU devices.
 
-%description mysql2arrow
-mysql2arrow is a utility to dump a query results from MySQL server
-as Apache Arrow files.
-
 %description test
 This package provides test tools and scripts related to PG-Strom
 
@@ -51,11 +42,11 @@ This package provides test tools and scripts related to PG-Strom
 
 %build
 rm -rf %{buildroot}
-%{__make} -j 8 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} WITH_MYSQL2ARROW=1
+%{__make} -j 8 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config}
 
 %install
 rm -rf %{buildroot}
-%{__make} CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} WITH_MYSQL2ARROW=1 DESTDIR=%{buildroot} install
+%{__make} CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} DESTDIR=%{buildroot} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
 %clean
@@ -90,9 +81,6 @@ fi
 %if "%{PGSQL_PKGVER}" != "96" && "%{PGSQL_PKGVER}" != "10"
 %{__pkglibdir}/bitcode/pg_strom*
 %endif
-
-%files mysql2arrow
-%{__pkgbindir}/mysql2arrow
 
 %files test
 %{__pkgbindir}/dbgen-ssbm
