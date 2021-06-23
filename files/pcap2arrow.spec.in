@@ -27,6 +27,6 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-%{__pkgbindir}/pcap2arrow
+%{_bindir}/pcap2arrow
 
 %changelog

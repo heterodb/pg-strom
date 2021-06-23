@@ -30,6 +30,6 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-%{__pkgbindir}/mysql2arrow
+%{_bindir}/mysql2arrow
 
 %changelog
