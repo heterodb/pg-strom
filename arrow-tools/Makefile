@@ -13,7 +13,7 @@ CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
 CFLAGS += $(shell $(MYSQL_CONFIG) --cflags)
 #CFLAGS += -O0
 
-PREFIX := /usr/local
+PREFIX		?= /usr/local
 
 all: $(PROG)
 

@@ -17,11 +17,11 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 %setup -q -n @@STROM_TARBALL@@
 
 %build
-%{__make} -C arrow-tools pg2arrow
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr pg2arrow
 
 %install
 rm -rf %{buildroot}
-%{__make} -C arrow-tools DESTDIR=%{buildroot} install-pg2arrow
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr install-pg2arrow
 
 %clean
 rm -rf %{buildroot}
