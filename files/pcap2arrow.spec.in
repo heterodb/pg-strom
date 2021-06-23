@@ -16,18 +16,17 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 %setup -q -n @@STROM_TARBALL@@
 
 %build
-%{__make} -C arrow-tools pcap2arrow
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr pcap2arrow
 
 %install
 rm -rf %{buildroot}
-%{__make} -C arrow-tools DESTDIR=%{buildroot} install-pcap2arrow
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr install-pcap2arrow
 
 %clean
 rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-%doc LICENSE
 %{__pkgbindir}/pcap2arrow
 
 %changelog
