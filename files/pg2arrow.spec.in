@@ -28,7 +28,6 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-%doc LICENSE
-%{__pkgbindir}/pg2arrow
+%{_bindir}/pg2arrow
 
 %changelog
