@@ -1,7 +1,14 @@
 ---
+--- GitHash function
+---
+CREATE FUNCTION pgstrom.githash()
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_githash'
+  LANGUAGE C STRICT;
+
+---
 --- GPU memory store
 ---
-
 CREATE FUNCTION pgstrom.gpucache_sync_trigger()
   RETURNS trigger
   AS 'MODULE_PATHNAME','pgstrom_gpucache_sync_trigger'

@@ -109,11 +109,27 @@ endif
 else
 __STROM_TGZ = pg_strom-master
 endif
-STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
+STROM_TAR = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar)
+STROM_TGZ = $(STROM_TAR).gz
+
 ifdef PGSTROM_GITHASH
-__STROM_TGZ_GITHASH = $(PGSTROM_GITHASH)
+# if 'HEAD' is given, replace it by the current githash
+ifeq ($(PGSTROM_GITHASH),HEAD)
+PGSTROM_GITHASH = $(shell git rev-parse HEAD)
+endif
 else
-__STROM_TGZ_GITHASH = HEAD
+ifeq ($(shell test -e $(STROM_BUILD_ROOT)/.git/config && echo -n 1),1)
+PGSTROM_GITHASH = $(shell git rev-parse HEAD)
+ifneq ($(shell git diff | wc -l),0)
+PGSTROM_GITHASH_SUFFIX=::local_changes
+endif
+else
+ifeq ($(shell test -e $(STROM_BUILD_ROOT)/GITHASH && echo -n 1),1)
+PGSTROM_GITHASH = $(shell cat $(STROM_BUILD_ROOT)/GITHASH)
+else
+PGSTROM_GITHASH = HEAD
+endif
+endif
 endif
 
 __SOURCEDIR = $(shell rpmbuild -E %{_sourcedir})
@@ -145,6 +161,7 @@ PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(CUDA_BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(CUDA_LPATH)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)$(PGSTROM_GITHASH_SUFFIX)\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
 SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
@@ -265,28 +282,31 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 #
 # Tarball
 #
-$(STROM_TGZ):
-	(cd $(STROM_BUILD_ROOT);                 \
-	 git archive	--format=tar.gz          \
-			--prefix=$(__STROM_TGZ)/ \
-			-o $(__STROM_TGZ).tar.gz \
-			$(__STROM_TGZ_GITHASH) $(__PACKAGE_FILES))
-
-tarball: $(STROM_TGZ)
+tarball:
+	(cd $(STROM_BUILD_ROOT) && \
+	 git archive --format=tar \
+	             --prefix=$(__STROM_TGZ)/ \
+	             -o $(STROM_TAR) \
+	     $(PGSTROM_GITHASH) $(__PACKAGE_FILES)            && \
+	 mkdir -p $(__STROM_TGZ)                              && \
+	 echo $(PGSTROM_GITHASH) > $(__STROM_TGZ)/GITHASH && \
+	 tar -r -f $(STROM_TAR) $(__STROM_TGZ)/GITHASH        && \
+	 gzip -f $(STROM_TAR) && test -e $(STROM_TGZ)) || exit 1
 
 #
 # RPM Package
 #
 rpm: tarball
 	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
-	git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf \
+	git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf \
 	    > $(__SOURCEDIR)/systemd-pg_strom.conf || exit 1
-	(git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/pg_strom.spec.in; \
-	 git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
-	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g" \
-	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g" \
-	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
-	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"    \
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pg_strom.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+        -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"      \
 	    > $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec
 	rpmbuild -ba $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec \
                  --undefine=_debugsource_packages

@@ -19,10 +19,6 @@ Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
 
-%package test
-Summary: PG-Strom related test tools and scripts
-Group: Applications/Databases
-
 %define __pg_config     /usr/pgsql-@@PGSQL_VERSION@@/bin/pg_config
 %define __pkglibdir     %(%{__pg_config} --pkglibdir)
 %define __pkgbindir     %(%{__pg_config} --bindir)
@@ -31,11 +27,9 @@ Group: Applications/Databases
 %define __systemd_conf  %{_sysconfdir}/systemd/system/postgresql-%{PGSQL_PKGVER}.service.d/pg_strom.conf
 
 %description
-PG-Strom is an extension for PostgreSQL, to accelerate analytic queries
-towards large data set using the capability of GPU devices.
-
-%description test
-This package provides test tools and scripts related to PG-Strom
+PG-Strom is an extension for PostgreSQL, to accelerate large data processing
+queries using the capability of GPU and NVME devices.
+This package is built from @@PGSTROM_GITHASH@@.
 
 %prep
 %setup -q -n @@STROM_TARBALL@@
@@ -54,19 +48,13 @@ rm -rf %{buildroot}
 
 %post
 ldconfig
-%{_sbindir}/update-alternatives --install %{_bindir}/gpuinfo  pgsql-gpuinfo  %{__pkgbindir}/gpuinfo  %{PGSQL_PKGVER}0
+%{_sbindir}/update-alternatives --install %{_bindir}/gpuinfo    pgsql-gpuinfo    %{__pkgbindir}/gpuinfo  %{PGSQL_PKGVER}0
+%{_sbindir}/update-alternatives --install %{_bindir}/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm %{PGSQL_PKGVER}0
 
 %postun
 ldconfig
 if [ "$1" -eq 0 ]; then
-    %{_sbindir}/update-alternatives --remove pgsql-gpuinfo  %{__pkgbindir}/gpuinfo
-fi
-
-%post test
-%{_sbindir}/update-alternatives --install %{_bindir}/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm %{PGSQL_PKGVER}0
-
-%postun test
-if [ "$1" -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove pgsql-gpuinfo    %{__pkgbindir}/gpuinfo
     %{_sbindir}/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm
 fi
 
@@ -75,14 +63,12 @@ fi
 %doc LICENSE README.md
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/gpuinfo
+%{__pkgbindir}/dbgen-ssbm
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
 %if "%{PGSQL_PKGVER}" != "96" && "%{PGSQL_PKGVER}" != "10"
 %{__pkglibdir}/bitcode/pg_strom*
 %endif
-
-%files test
-%{__pkgbindir}/dbgen-ssbm
 
 %changelog
