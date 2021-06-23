@@ -34,12 +34,15 @@ pcap2arrow: $(PCAP2ARROW_OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 install-pg2arrow: pg2arrow
+	mkdir -p $(DESTDIR)/$(PREFIX)/bin && \
 	install -m 0755 pg2arrow $(DESTDIR)/$(PREFIX)/bin
 
 install-mysql2arrow: mysql2arrow
+	mkdir -p $(DESTDIR)/$(PREFIX)/bin && \
 	install -m 0755 mysql2arrow $(DESTDIR)/$(PREFIX)/bin
 
 install-pcap2arrow: pcap2arrow
+	mkdir -p $(DESTDIR)/$(PREFIX)/bin && \
 	install -m 0755 pcap2arrow $(DESTDIR)/$(PREFIX)/bin
 
 install: install-pg2arrow install-mysql2arrow install-pcap2arrow
