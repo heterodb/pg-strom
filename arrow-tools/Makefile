@@ -1,12 +1,12 @@
 #
 # Makefile for pcap2arrow
 #
-PG_CONFIG	?= pg_config
-MYSQL_CONFIG	?= mysql_config
-PROG		= pg2arrow mysql2arrow pcap2arrow
-PG2ARROW_OBJS	= sql2arrow.o pgsql_client.o arrow_nodes.o arrow_write.o arrow_pgsql.o
-MYSQL2ARROW_OBJS= sql2arrow.o mysql_client.o arrow_nodes.o arrow_write.o
-PCAP2ARROW_OBJS	= pcap2arrow.o arrow_nodes.o arrow_write.o
+PG_CONFIG        ?= pg_config
+MYSQL_CONFIG     ?= mysql_config
+PROG		     = pg2arrow mysql2arrow pcap2arrow
+PG2ARROW_OBJS    = sql2arrow.o pgsql_client.o arrow_nodes.o arrow_write.o arrow_pgsql.o
+MYSQL2ARROW_OBJS = sql2arrow.o mysql_client.o arrow_nodes.o arrow_write.o
+PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 
 CFLAGS = -O2 -fPIC -g -Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
@@ -33,8 +33,16 @@ pcap2arrow: $(PCAP2ARROW_OBJS)
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-install: $(PROG)
-	install -m 0755 $(PROG) $(PREFIX)/bin
+install-pg2arrow: pg2arrow
+	install -m 0755 pg2arrow $(DESTDIR)/$(PREFIX)/bin
+
+install-mysql2arrow: mysql2arrow
+	install -m 0755 mysql2arrow $(DESTDIR)/$(PREFIX)/bin
+
+install-pcap2arrow: pcap2arrow
+	install -m 0755 pcap2arrow $(DESTDIR)/$(PREFIX)/bin
+
+install: install-pg2arrow install-mysql2arrow install-pcap2arrow
 
 clean:
-	rm -f $(PROG) $(PG2ARROW_OBJS) $(PCAP2ARROW_OBJS)
+	rm -f $(PROG) $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) $(PCAP2ARROW_OBJS)

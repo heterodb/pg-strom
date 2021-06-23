@@ -29,7 +29,7 @@ AutoReqProv: no
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
 queries using the capability of GPU and NVME devices.
-This package is built from @@PGSTROM_GITHASH@@.
+This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %prep
 %setup -q -n @@STROM_TARBALL@@

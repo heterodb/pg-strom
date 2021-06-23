@@ -99,7 +99,7 @@ __DOC_FILES = index.md install.md partition.md \
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
-                  pg_strom.control src sql utils python test man
+                  pg_strom.control src sql utils arrow-tools test man
 ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
@@ -184,7 +184,8 @@ SCRIPTS_built = $(STROM_UTILS)
 EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
-	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
+	$(shell ls $(STROM_BUILD_ROOT)/pg_strom-*.tar.gz 2>/dev/null) \
+	$(shell dirname $(STROM_BUILD_ROOT)/pg_strom-*/GITHASH) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
 	$(SSBM_DBGEN_DISTS_DSS)
 
@@ -310,5 +311,25 @@ rpm: tarball
 	    > $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec
 	rpmbuild -ba $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec \
                  --undefine=_debugsource_packages
+
+rpm-pg2arrow: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pg2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/pg2arrow.spec
+	rpmbuild -ba $(__SPECDIR)/pg2arrow.spec --undefine=_debugsource_packages
+
+rpm-mysql2arrow: tarball
+
+rpm-pcap2arrow: tarball
+
+
+
+
+
 
 .PHONY: docs
