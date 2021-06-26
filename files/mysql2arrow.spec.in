@@ -1,0 +1,35 @@
+Name: mysql2arrow
+Version: @@STROM_VERSION@@
+Release: @@STROM_RELEASE@@%{?dist}
+Summary: MySQL query results to Apache Arrow conversion tool
+Group: Applications/Databases
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: @@STROM_TARBALL@@.tar.gz
+BuildRequires: mysql-devel
+Requires: mysql-libs
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%description
+mysql2arrow is a command line tool to dump MySQL query results
+as Apache Arrow file.
+This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
+
+%prep
+%setup -q -n @@STROM_TARBALL@@
+
+%build
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr mysql2arrow
+
+%install
+rm -rf %{buildroot}
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr install-mysql2arrow
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%{_bindir}/mysql2arrow
+
+%changelog

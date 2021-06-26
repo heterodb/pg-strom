@@ -9,6 +9,7 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
  */
+#ifdef __PGSTROM_MODULE__
 #include "postgres.h"
 #if PG_VERSION_NUM < 130000
 #include "access/hash.h"
@@ -22,30 +23,56 @@
 #include "utils/date.h"
 #include "utils/timestamp.h"
 
-#include "arrow_ipc.h"
-
 #ifdef WORDS_BIGENDIAN
 #define __ntoh16(x)			(x)
 #define __ntoh32(x)			(x)
 #define __ntoh64(x)			(x)
-#else	/* WORDS_BIGENDIAN */
-#ifdef __PGSTROM_MODULE__
-/* build for server module don't need endian translation */
-#define __ntoh16(x)			(x)
-#define __ntoh32(x)			(x)
-#define __ntoh64(x)			(x)
-#else  /* __PGSTROM_MODULE__ */
-#if PG_VERSION_NUM < 110000
-#define __ntoh16(x)			ntohs(x)
-#define __ntoh32(x)			BSWAP32(x)
-#define __ntoh64(x)			BSWAP64(x)
-#else	/* PG_VERSION */
+#else
 #define __ntoh16(x)			pg_ntoh16(x)
 #define __ntoh32(x)			pg_ntoh32(x)
 #define __ntoh64(x)			pg_ntoh64(x)
-#endif	/* PG_VERSION */
-#endif  /* __PGSTROM_MODULE__ */
-#endif  /* WORDS_BIGENDIAN */
+#endif	/* WORDS_BIGENDIAN */
+
+#ifdef HAVE_INT128
+typedef PG_INT128_TYPE			int128_t;
+typedef unsigned PG_INT128_TYPE	uint128_t;
+#else
+#error "int128 must be enabled to build arrow_pgsql.c"
+#endif	/* HAVE_INT128 */
+
+#else	/* !__PGSTROM_MODULE__! */
+/* if built as a part of standalone software */
+#include "sql2arrow.h"
+#include <arpa/inet.h>
+#include <endian.h>
+
+#define VARHDRSZ			((int32_t) sizeof(int32_t))
+#define Min(x,y)			((x) < (y) ? (x) : (y))
+#define Max(x,y)			((x) > (y) ? (x) : (y))
+
+#define __ntoh16(x)			be16toh(x)
+#define __ntoh32(x)			be32toh(x)
+#define __ntoh64(x)			be64toh(x)
+
+/* PostgreSQL type definitions */
+typedef int32_t				DateADT;
+typedef int64_t				TimeADT;
+typedef int64_t				Timestamp;
+typedef int64_t				TimeOffset;
+
+#define UNIX_EPOCH_JDATE		2440588 /* == date2j(1970, 1, 1) */
+#define POSTGRES_EPOCH_JDATE	2451545 /* == date2j(2000, 1, 1) */
+#define USECS_PER_DAY			86400000000UL
+
+typedef struct
+{
+	TimeOffset	time;
+	int32_t		day;
+	int32_t		month;
+} Interval;
+#endif
+
+#include "arrow_ipc.h"
 
 /* ----------------------------------------------------------------
  *
@@ -80,7 +107,7 @@ static size_t
 put_bool_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	int8		value;
+	int8_t		value;
 
 	if (!addr)
 	{
@@ -90,7 +117,7 @@ put_bool_value(SQLfield *column, const char *addr, int sz)
 	}
 	else
 	{
-		value = *((const int8 *)addr);
+		value = *((const int8_t *)addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		if (value)
 			sql_buffer_setbit(&column->values,  row_index);
@@ -118,20 +145,20 @@ static size_t
 put_int8_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint8		value;
+	uint8_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint8));
+		__put_inline_null_value(column, row_index, sizeof(uint8_t));
 	else
 	{
-		assert(sz == sizeof(uint8));
-		value = *((const uint8 *)addr);
+		assert(sz == sizeof(uint8_t));
+		value = *((const uint8_t *)addr);
 
 		if (!column->arrow_type.Int.is_signed && value > INT8_MAX)
 			Elog("Uint8 cannot store negative values");
 
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint8));
+		sql_buffer_append(&column->values, &value, sizeof(uint8_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -140,14 +167,14 @@ static size_t
 put_int16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint16		value;
+	uint16_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint16));
+		__put_inline_null_value(column, row_index, sizeof(uint16_t));
 	else
 	{
-		assert(sz == sizeof(uint16));
-		value = __ntoh16(*((const uint16 *)addr));
+		assert(sz == sizeof(uint16_t));
+		value = __ntoh16(*((const uint16_t *)addr));
 		if (!column->arrow_type.Int.is_signed && value > INT16_MAX)
 			Elog("Uint16 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -160,14 +187,14 @@ static size_t
 put_int32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32		value;
+	uint32_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint32));
+		__put_inline_null_value(column, row_index, sizeof(uint32_t));
 	else
 	{
-		assert(sz == sizeof(uint32));
-		value = __ntoh32(*((const uint32 *)addr));
+		assert(sz == sizeof(uint32_t));
+		value = __ntoh32(*((const uint32_t *)addr));
 		if (!column->arrow_type.Int.is_signed && value > INT32_MAX)
 			Elog("Uint32 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -180,14 +207,14 @@ static size_t
 put_int64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64		value;
+	uint64_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint64));
+		__put_inline_null_value(column, row_index, sizeof(uint64_t));
 	else
 	{
-		assert(sz == sizeof(uint64));
-		value = __ntoh64(*((const uint64 *)addr));
+		assert(sz == sizeof(uint64_t));
+		value = __ntoh64(*((const uint64_t *)addr));
 		if (!column->arrow_type.Int.is_signed && value > INT64_MAX)
 			Elog("Uint64 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -203,14 +230,14 @@ static size_t
 put_float16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint16		value;
+	uint16_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint16));
+		__put_inline_null_value(column, row_index, sizeof(uint16_t));
 	else
 	{
-		assert(sz == sizeof(uint16));
-		value = __ntoh16(*((const uint16 *)addr));
+		assert(sz == sizeof(uint16_t));
+		value = __ntoh16(*((const uint16_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 	}
@@ -221,14 +248,14 @@ static size_t
 put_float32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32		value;
+	uint32_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint32));
+		__put_inline_null_value(column, row_index, sizeof(uint32_t));
 	else
 	{
-		assert(sz == sizeof(uint32));
-		value = __ntoh32(*((const uint32 *)addr));
+		assert(sz == sizeof(uint32_t));
+		value = __ntoh32(*((const uint32_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 	}
@@ -239,14 +266,14 @@ static size_t
 put_float64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64		value;
+	uint64_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint64));
+		__put_inline_null_value(column, row_index, sizeof(uint64_t));
 	else
 	{
-		assert(sz == sizeof(uint64));
-		value = __ntoh64(*((const uint64 *)addr));
+		assert(sz == sizeof(uint64_t));
+		value = __ntoh64(*((const uint64_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 	}
@@ -256,7 +283,7 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 /*
  * Decimal
  */
-#ifdef PG_INT128_TYPE
+
 /* parameters of Numeric type */
 #define NUMERIC_DSCALE_MASK	0x3FFF
 #define NUMERIC_SIGN_MASK	0xC000
@@ -269,7 +296,7 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 #define DEC_DIGITS			4	/* decimal digits per NBASE digit */
 #define MUL_GUARD_DIGITS    2	/* these are measured in NBASE digits */
 #define DIV_GUARD_DIGITS	4
-typedef int16				NumericDigit;
+typedef int16_t				NumericDigit;
 typedef struct NumericVar
 {
 	int			ndigits;	/* # of digits in digits[] - can be 0! */
@@ -289,14 +316,14 @@ typedef struct NumericVar
 static void
 init_var_from_num(NumericVar *nv, const char *addr, int sz)
 {
-	uint16		n_header = *((uint16 *)addr);
+	uint16_t		n_header = *((uint16_t *)addr);
 
 	/* NUMERIC_HEADER_IS_SHORT */
 	if ((n_header & 0x8000) != 0)
 	{
 		/* short format */
 		const struct {
-			uint16	n_header;
+			uint16_t	n_header;
 			NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];
 		}  *n_short = (const void *)addr;
 		size_t		hoff = ((uintptr_t)n_short->n_data - (uintptr_t)n_short);
@@ -315,8 +342,8 @@ init_var_from_num(NumericVar *nv, const char *addr, int sz)
 	{
 		/* long format */
 		const struct {
-			uint16      n_sign_dscale;  /* Sign + display scale */
-			int16       n_weight;       /* Weight of 1st digit  */
+			uint16_t      n_sign_dscale;  /* Sign + display scale */
+			int16_t       n_weight;       /* Weight of 1st digit  */
 			NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER]; /* Digits */
 		}  *n_long = (const void *)addr;
 		size_t		hoff = ((uintptr_t)n_long->n_data - (uintptr_t)n_long);
@@ -338,27 +365,27 @@ put_decimal_value(SQLfield *column,
 	size_t		row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(int128));
+		__put_inline_null_value(column, row_index, sizeof(int128_t));
 	else
 	{
 		NumericVar		nv;
 		int				scale = column->arrow_type.Decimal.scale;
-		int128			value = 0;
+		int128_t		value = 0;
 		int				d, dig;
 #ifdef __PGSTROM_MODULE__
 		init_var_from_num(&nv, addr, sz);
 #else
 		struct {
-			uint16		ndigits;	/* number of digits */
-			uint16		weight;		/* weight of first digit */
-			uint16		sign;		/* NUMERIC_(POS|NEG|NAN) */
-			uint16		dscale;		/* display scale */
+			uint16_t	ndigits;	/* number of digits */
+			uint16_t	weight;		/* weight of first digit */
+			uint16_t	sign;		/* NUMERIC_(POS|NEG|NAN) */
+			uint16_t	dscale;		/* display scale */
 			NumericDigit digits[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *)addr;
-		nv.ndigits	= (int16)__ntoh16(rawdata->ndigits);
-		nv.weight	= (int16)__ntoh16(rawdata->weight);
-		nv.sign		= (int16)__ntoh16(rawdata->sign);
-		nv.dscale	= (int16)__ntoh16(rawdata->dscale);
+		nv.ndigits	= (int16_t)__ntoh16(rawdata->ndigits);
+		nv.weight	= (int16_t)__ntoh16(rawdata->weight);
+		nv.sign		= (int16_t)__ntoh16(rawdata->sign);
+		nv.dscale	= (int16_t)__ntoh16(rawdata->dscale);
 		nv.digits	= rawdata->digits;
 #endif	/* __PGSTROM_MODULE__ */
 		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
@@ -370,7 +397,7 @@ put_decimal_value(SQLfield *column,
 			dig = (d < nv.ndigits) ? __ntoh16(nv.digits[d]) : 0;
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is out of range: %d", (int)dig);
-			value = NBASE * value + (int128)dig;
+			value = NBASE * value + (int128_t)dig;
 		}
 		/* makes floating point portion if any */
 		while (scale > 0)
@@ -401,17 +428,16 @@ put_decimal_value(SQLfield *column,
 	}
 	return __buffer_usage_inline_type(column);
 }
-#endif	/* PG_INT128_TYPE */
 
 /*
  * Date
  */
 static inline size_t
 __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
-						 int64 adjustment, int arrow_sz)
+						 int64_t adjustment, int arrow_sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64		value;
+	uint64_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, arrow_sz);
@@ -439,14 +465,14 @@ static size_t
 __put_date_day_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_date_value_generic(column, addr, sz,
-									0, sizeof(int32));
+									0, sizeof(int32_t));
 }
 
 static size_t
 __put_date_ms_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_date_value_generic(column, addr, sz,
-									86400000L, sizeof(int64));
+									86400000L, sizeof(int64_t));
 }
 
 static size_t
@@ -474,7 +500,7 @@ put_date_value(SQLfield *column, const char *addr, int sz)
  */
 static inline size_t
 __put_time_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
-						 int64 adjustment, int arrow_sz)
+						 int64_t adjustment, int arrow_sz)
 {
 	size_t		row_index = column->nitems++;
 	TimeADT		value;
@@ -504,28 +530,28 @@ static size_t
 __put_time_sec_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_time_value_generic(column, addr, sz,
-									-1000000L, sizeof(int32));
+									-1000000L, sizeof(int32_t));
 }
 
 static size_t
 __put_time_ms_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_time_value_generic(column, addr, sz,
-									-1000L, sizeof(int32));
+									-1000L, sizeof(int32_t));
 }
 
 static size_t
 __put_time_us_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_time_value_generic(column, addr, sz,
-									0L, sizeof(int64));
+									0L, sizeof(int64_t));
 }
 
 static size_t
 __put_time_ns_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_time_value_generic(column, addr, sz,
-									1000L, sizeof(int64));
+									1000L, sizeof(int64_t));
 }
 
 static size_t
@@ -571,7 +597,7 @@ put_time_value(SQLfield *column, const char *addr, int sz)
 static inline size_t
 __put_timestamp_value_generic(SQLfield *column,
 							  const char *addr, int pgsql_sz,
-							  int64 adjustment, int arrow_sz)
+							  int64_t adjustment, int arrow_sz)
 {
 	size_t		row_index = column->nitems++;
 	Timestamp	value;
@@ -605,28 +631,28 @@ static size_t
 __put_timestamp_sec_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000000L, sizeof(int64));
+										 -1000000L, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_ms_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000L, sizeof(int64));
+										 -1000L, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_us_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_timestamp_value_generic(column, addr, sz,
-										 0L, sizeof(int64));
+										 0L, sizeof(int64_t));
 }
 
 static size_t
 __put_timestamp_ns_value(SQLfield *column, const char *addr, int sz)
 {
 	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000L, sizeof(int64));
+										 -1000L, sizeof(int64_t));
 }
 
 static size_t
@@ -666,14 +692,14 @@ __put_interval_year_month_value(SQLfield *column, const char *addr, int sz)
 	size_t		row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint32));
+		__put_inline_null_value(column, row_index, sizeof(uint32_t));
 	else
 	{
-		uint32	m;
+		uint32_t	m;
 
 		assert(sz == sizeof(Interval));
 		m = __ntoh32(((const Interval *)addr)->month);
-		sql_buffer_append(&column->values, &m, sizeof(uint32));
+		sql_buffer_append(&column->values, &m, sizeof(uint32_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -684,11 +710,11 @@ __put_interval_day_time_value(SQLfield *column, const char *addr, int sz)
 	size_t		row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, 2 * sizeof(uint32));
+		__put_inline_null_value(column, row_index, 2 * sizeof(uint32_t));
 	else
 	{
 		Interval	iv;
-		uint32		value;
+		uint32_t		value;
 
 		assert(sz == sizeof(Interval));
 		iv.time  = __ntoh64(((const Interval *)addr)->time);
@@ -701,9 +727,9 @@ __put_interval_day_time_value(SQLfield *column, const char *addr, int sz)
 		 * to be adjusted.
 		 */
 		value = iv.month + DAYS_PER_MONTH * iv.day;
-		sql_buffer_append(&column->values, &value, sizeof(uint32));
+		sql_buffer_append(&column->values, &value, sizeof(uint32_t));
 		value = iv.time / 1000;
-		sql_buffer_append(&column->values, &value, sizeof(uint32));
+		sql_buffer_append(&column->values, &value, sizeof(uint32_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -738,20 +764,20 @@ put_variable_value(SQLfield *column,
 	size_t		row_index = column->nitems++;
 
 	if (row_index == 0)
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
+		sql_buffer_append_zero(&column->values, sizeof(uint32_t));
 	if (!addr)
 	{
 		column->nullcount++;
 		sql_buffer_clrbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	else
 	{
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->extra, addr, sz);
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	return __buffer_usage_varlena_type(column);
 }
@@ -795,12 +821,12 @@ put_array_value(SQLfield *column,
 	size_t		row_index = column->nitems++;
 
 	if (row_index == 0)
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
+		sql_buffer_append_zero(&column->values, sizeof(uint32_t));
 	if (!addr)
 	{
 		column->nullcount++;
 		sql_buffer_clrbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
+		sql_buffer_append(&column->values, &element->nitems, sizeof(int32_t));
 	}
 	else
 	{
@@ -853,16 +879,16 @@ put_array_value(SQLfield *column,
 		}
 #else  /* __PGSTROM_MODULE__ */
 		struct {
-			int32		ndim;
-			int32		hasnull;
-			int32		element_type;
+			int32_t		ndim;
+			int32_t		hasnull;
+			int32_t		element_type;
 			struct {
-				int32	sz;
-				int32	lb;
+				int32_t	sz;
+				int32_t	lb;
 			} dim[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *) addr;
-		int32		ndim = __ntoh32(rawdata->ndim);
-		//int32		hasnull = __ntoh32(rawdata->hasnull);
+		int32_t		ndim = __ntoh32(rawdata->ndim);
+		//int32_t		hasnull = __ntoh32(rawdata->hasnull);
 		Oid			element_typeid = __ntoh32(rawdata->element_type);
 		size_t		i, nitems = 1;
 		int			item_sz;
@@ -878,10 +904,10 @@ put_array_value(SQLfield *column,
 		pos = (char *)&rawdata->dim[ndim];
 		for (i=0; i < nitems; i++)
 		{
-			if (pos + sizeof(int32) > addr + sz)
+			if (pos + sizeof(int32_t) > addr + sz)
 				Elog("out of range - binary array has corruption");
-			item_sz = __ntoh32(*((int32 *)pos));
-			pos += sizeof(int32);
+			item_sz = __ntoh32(*((int32_t *)pos));
+			pos += sizeof(int32_t);
 			if (item_sz < 0)
 				sql_field_put_value(element, NULL, 0);
 			else
@@ -892,7 +918,7 @@ put_array_value(SQLfield *column,
 		}
 #endif /* __PGSTROM_MODULE__ */
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &element->nitems, sizeof(int32));
+		sql_buffer_append(&column->values, &element->nitems, sizeof(int32_t));
 	}
 	return __buffer_usage_inline_type(column) + element->__curr_usage__;
 }
@@ -972,7 +998,7 @@ put_composite_value(SQLfield *column,
 		const char *pos = addr;
 		int			j, nvalids;
 
-		if (sz < sizeof(uint32))
+		if (sz < sizeof(uint32_t))
 			Elog("binary composite record corruption");
 		nvalids = __ntoh32(*((const int *)pos));
 		pos += sizeof(int);
@@ -980,7 +1006,7 @@ put_composite_value(SQLfield *column,
 		{
 			SQLfield *sub_field = &column->subfields[j];
 			Oid		typeid;
-			int32	len;
+			int32_t	len;
 
 			if (j >= nvalids)
 			{
@@ -994,7 +1020,7 @@ put_composite_value(SQLfield *column,
 			if (sub_field->sql_type.pgsql.typeid != typeid)
 				Elog("composite subtype mismatch");
 			len = __ntoh32(*((int *)pos));
-			pos += sizeof(int32);
+			pos += sizeof(int32_t);
 			if (len == -1)
 			{
 				usage += sql_field_put_value(sub_field, NULL, 0);
@@ -1026,13 +1052,13 @@ put_dictionary_value(SQLfield *column,
 	{
 		column->nullcount++;
 		sql_buffer_clrbit(&column->nullmap, row_index);
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
+		sql_buffer_append_zero(&column->values, sizeof(uint32_t));
 	}
 	else
 	{
 		SQLdictionary *enumdict = column->enumdict;
 		hashItem   *hitem;
-		uint32		hash;
+		uint32_t		hash;
 
 		hash = hash_any((const unsigned char *)addr, sz);
 		for (hitem = enumdict->hslots[hash % enumdict->nslots];
@@ -1047,7 +1073,7 @@ put_dictionary_value(SQLfield *column,
 		if (!hitem)
 			Elog("Enum label was not found in pg_enum result");
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values,  &hitem->index, sizeof(int32));
+		sql_buffer_append(&column->values,  &hitem->index, sizeof(int32_t));
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -1062,34 +1088,34 @@ put_extra_cube_value(SQLfield *column,
 	size_t		row_index = column->nitems++;
 
 	if (row_index == 0)
-		sql_buffer_append_zero(&column->values, sizeof(uint32));
+		sql_buffer_append_zero(&column->values, sizeof(uint32_t));
 	if (!addr)
 	{
 		column->nullcount++;
 		sql_buffer_clrbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	else
 	{
-		uint32	header = __ntoh32(*((const uint32 *)addr));
-		uint32	i, nitems = (header & 0x7fffffffU);
-		uint64	value;
+		uint32_t	header = __ntoh32(*((const uint32_t *)addr));
+		uint32_t	i, nitems = (header & 0x7fffffffU);
+		uint64_t	value;
 
 		if ((header & 0x80000000U) == 0)
 			nitems += nitems;
-		if (sz != sizeof(uint32) + sizeof(uint64) * nitems)
+		if (sz != sizeof(uint32_t) + sizeof(uint64_t) * nitems)
 			Elog("cube binary data looks broken");
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->extra, &header, sizeof(uint32));
-		addr += sizeof(uint32);
+		sql_buffer_append(&column->extra, &header, sizeof(uint32_t));
+		addr += sizeof(uint32_t);
 		for (i=0; i < nitems; i++)
 		{
-			value = __ntoh64(((const uint64 *)addr)[i]);
-			sql_buffer_append(&column->extra, &value, sizeof(uint64));
+			value = __ntoh64(((const uint64_t *)addr)[i]);
+			sql_buffer_append(&column->extra, &value, sizeof(uint64_t));
 		}
 		sql_buffer_append(&column->values,
-						  &column->extra.usage, sizeof(uint32));
+						  &column->extra.usage, sizeof(uint32_t));
 	}
 	return __buffer_usage_varlena_type(column);
 }
@@ -1239,7 +1265,6 @@ assignArrowTypeBool(SQLfield *column, ArrowField *arrow_field)
 static int
 assignArrowTypeDecimal(SQLfield *column, ArrowField *arrow_field)
 {
-#ifdef PG_INT128_TYPE
 	int		typmod			= column->sql_type.pgsql.typmod;
 	int		precision		= 30;	/* default, if typmod == -1 */
 	int		scale			=  8;	/* default, if typmod == -1 */
@@ -1261,9 +1286,7 @@ assignArrowTypeDecimal(SQLfield *column, ArrowField *arrow_field)
 	column->arrow_type.Decimal.precision = precision;
 	column->arrow_type.Decimal.scale = scale;
 	column->put_value = put_decimal_value;
-#else
-#error "Int128 must be enabled for Arrow::Decimal support"
-#endif
+
 	return 2;		/* nullmap + values */
 }
 
@@ -1385,7 +1408,7 @@ assignArrowTypeDictionary(SQLfield *column, ArrowField *arrow_field)
 			Elog("attribute has no dictionary");
 		indexType = &arrow_field->dictionary->indexType;
 		if (indexType->node.tag == ArrowNodeTag__Int &&
-			indexType->bitWidth == sizeof(uint32) &&
+			indexType->bitWidth == sizeof(uint32_t) &&
 			!indexType->is_signed)
 			Elog("IndexType of ArrowDictionaryEncoding must be Int32");
 	}

@@ -1,8 +1,43 @@
-* Sun Apr 14 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1-2
-- hotfixes for various bugs
-- initial revision of arrow_fdw
+* Wed Jun 16 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
+- several PostGIS functions are added for GPU execution
+- GiST-index support was added for GpuJoin
+- GpuCache was added for small data workloads
+- experimental support of NVIDIA GPUDirect Storage
+- support of custom GPU types/functions with 3rd party modules
+- pg2arrow/arrow_fdw support wider Arrow files than PG limit
+- pcap2arrow was added to capture network packets as Arrow files
+- experimental support of 8bit-integer type (int1)
+- add support of Ampere GPUs (A100) and CUDA11.3
+- add support of PostgreSQL 13.x, drop support of PostgreSQL 10.x
+- add support of ScaleFlux CSD drives as source of GPUDirect SQL
+- error reports in GPU kernels were more human readable
+- ...and miscellaneous improvement and fix various bugs
 
-* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1
+* Tue Mar 24 2020 KaiGai Kohei <kaigai@heterodb.com> - 2.3-1
+- GpuJoin supports parallel execution on inner hash/heap table.
+- Partition-wise GpuJoin was refactored for better query plan.
+- Arrow_Fdw now supports INSERT/TRUNCATE commands.
+- mysql2arrow was added, for collaboration with MySQL database.
+- CuPy_Strom enables to share data frame between DB and Python.
+- PL/CUDA was deprecated, CuPy + CuPy_Strom can do same jobs.
+- Gstore_Fdw was deprecated, Arrow_Fdw is successor
+
+* Wed Dec 25 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-2
+- support of RHEL8/CentOS8
+- pg2arrow supports the latest Arrow 0.15 format; upcoming 1.0
+- add support of ANALYZE on arrow_fdw
+- PostgreSQL v9.6 is dropped from the supported list.
+
+* Thu Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-1
+- fixes of various bugs
+- support of Apache Arrow columnar store (Arrow_Fdw)
+- pg2arrow utility command is added
+- support of JSONB data type
+- pre-built GPU binary for quick code compilation/optimization
+- support of nvme_strom v2; enables to handle cached disk pages
+- asymmetric partition-wise JOIN support
+
+* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1-1
 - hotfixes for various bugs
 - Device Numeric is now based on 128bit
 - Various groundwork to support Apache Arrow in the next version

@@ -2,6 +2,10 @@
 #define SQL2ARROW_H
 #include "arrow_ipc.h"
 
+/* int128_t */
+typedef __int128			int128_t;
+typedef unsigned __int128	uint128_t;
+
 typedef struct userConfigOption     userConfigOption;
 struct userConfigOption
 {
@@ -44,6 +48,6 @@ extern void	   *palloc(size_t sz);
 extern void	   *palloc0(size_t sz);
 extern char	   *pstrdup(const char *str);
 extern void	   *repalloc(void *ptr, size_t sz);
-extern uint64_t	hash_any(const unsigned char *k, int keylen);
+extern uint32_t	hash_any(const unsigned char *k, int keylen);
 
 #endif	/* SQL2ARROW_H */

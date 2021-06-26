@@ -1159,8 +1159,10 @@ __writeArrowDictionaryBatch(SQLtable *table, SQLdictionary *dict)
 	if (!table->dictionaries)
 		table->dictionaries = palloc0(sizeof(ArrowBlock) * 40);
 	else
-		table->dictionaries = palloc0(sizeof(ArrowBlock) *
-									  (table->numDictionaries + 1));
+	{
+		size_t	sz = sizeof(ArrowBlock) * (table->numDictionaries + 1);
+		table->dictionaries = repalloc(table->dictionaries, sz);
+	}
 	block = &table->dictionaries[table->numDictionaries++];
 
 	initArrowNode(block, Block);
