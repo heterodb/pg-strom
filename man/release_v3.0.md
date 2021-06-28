@@ -1,7 +1,7 @@
 @ja:#PG-Strom v3.0リリース
 @en:#PG-Strom v3.0 Release
 
-<div style="text-align: right;">PG-Strom Development Team (16-Jun-2021)</div>
+<div style="text-align: right;">PG-Strom Development Team (29-Jun-2021)</div>
 
 @ja:##概要
 @en:##Overview
@@ -78,10 +78,10 @@ The performance measurement below is by SSBM (Star Schema Benchmark) using 1xGPU
 ![Star Schema Benchmark Results](./img/release_3_0b.png)
 
 @ja{
-また、クエリを実行中のNVME-SSDからの読み出しスループットを比較してみると、GPUDirect Storageドライバも、従来からのnvme_stromドライバも、ほぼ同等のハードウェア限界に近い性能値を引き出せている事が分かります。
+また、クエリを実行中のNVME-SSDからの読み出しスループットを比較してみると、ファイルシステムを介した読出し（PostgreSQL Heap Storage）に比べ、GPUDirect Storageを使用した場合にはハードウェア限界に近い性能値を引き出せている事が分かります。
 }
 @en{
-When we compare the read throughput from the NVME-SSD during execution of the query, we can see both of the GPUDirect Storage driver and the conventional nvme_strom driver could pull out the outstanding performance close to the hardware limitation.
+In comparison of the read throughput from NVME-SSD drives during the query execution, it shows the table scan by GPUDirect Storage pulls out almost optimal performance close to the hardware limitation, much faster than the scan by filesystem (PostgreSQL Heap Storage).
 }
 
 @ja:##GPU版PostGISとGiSTインデックス
@@ -100,7 +100,7 @@ When these PostGIS functions are used in qualifier clauses (like, WHERE-clause),
 The main target of GPU version of PostGIS is the workload to check the real-time location data of mobile devices, like smartphones or vehicles, against the area definition data like boundary of municipality or school districts.
 }
 
-![aaa](./img/release_3_0c.png)
+![PostGIS Overview](./img/release_3_0c.png)
 
 @ja{
 例えば、一定のエリア内に存在する携帯電話に広告を配信したい時、一定のエリア内に存在する自動車に渋滞情報を配信したい時など、位置をキーとして該当するデバイスを検索する処理に効果を発揮します。
@@ -115,7 +115,7 @@ In the following example, it creates 16 million random points data in a rectangu
 The vanilla PostGIS and GiST index took more than 160sec, on the other hand, GPU-version of PostGIS and GiST index responded in 0.830 sec.
 }
 
-![aaa](./img/release_3_0d.png)
+![GPU PostGIS and GiST Index](./img/release_3_0d.png)
 
 @ja:##GPUキャッシュ
 @en:##GPU Cache
@@ -136,7 +136,7 @@ The GPU can process SQL workloads by referring to GPU Cache instead of loading d
 This is typically a workload that keeps real-time data from millions of devices on the GPU and frequently updates timestamps and location information.
 }
 
-![aaa](./img/release_3_0e.png)
+![GPU Cache Overview](./img/release_3_0e.png)
 
 @ja{
 GPUキャッシュが設定されたテーブルを更新すると、その更新履歴をオンメモリのREDOログバッファに格納し、それを一定間隔か、または分析/検索系ワークロードの実行前にGPUキャッシュ側に反映します。

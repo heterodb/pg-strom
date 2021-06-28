@@ -783,6 +783,35 @@ The steps shown in the example below may be changed in the future version.
  Platform verification succeeded
 ```
 
+@ja{
+!!! Tips
+    **RAIDを使用する場合の追加設定**
+    
+    GPUDirect Storageを利用してSoftware RAID (md-raid0) 区画からデータを読み出す場合、
+    以下の一行を`/lib/udev/rules.d/63-md-raid-arrays.rules` 設定に追加する必要があります。
+    
+    ```
+    IMPORT{​program}="/usr/sbin/mdadm --detail --export $devnode"
+    ```
+    
+    その後、設定を反映させるためにシステムを再起動してください。
+    詳しくは[NVIDIA GPUDirect Storage Installation and Troubleshooting Guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules)を参照してください。
+}
+
+@en{
+!!! Tips
+    **Additional configuration for RAID volume**
+    
+    For data reading from software RAID (md-raid0) volumes by GPUDirect Storage,
+    the following line must be added to the `/lib/udev/rules.d/63-md-raid-arrays.rules` configuration file.
+    
+    ```
+    IMPORT{​program}="/usr/sbin/mdadm --detail --export $devnode"
+    ```
+    
+    Then reboot the system to ensure the new configuration.
+    See [NVIDIA GPUDirect Storage Installation and Troubleshooting Guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules) for the details.
+}
 
 @ja:## PostgreSQLのインストール
 @en:## PostgreSQL Installation

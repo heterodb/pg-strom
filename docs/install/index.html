@@ -597,6 +597,15 @@ parm:           register_always:Use memory registration even for contiguous memo
  IOMMU : disabled
  Platform verification succeeded
 </code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>Additional configuration for RAID volume</strong></p>
+<p>For data reading from software RAID (md-raid0) volumes by GPUDirect Storage,
+the following line must be added to the <code>/lib/udev/rules.d/63-md-raid-arrays.rules</code> configuration file.</p>
+<p><code>IMPORT{​program}="/usr/sbin/mdadm --detail --export $devnode"</code></p>
+<p>Then reboot the system to ensure the new configuration.
+See <a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a> for the details.</p>
+</div>
 <h2 id="postgresql-installation">PostgreSQL Installation</h2>
 <p>This section introduces PostgreSQL installation with RPM.
 We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>

@@ -601,6 +601,15 @@ parm:           register_always:Use memory registration even for contiguous memo
  IOMMU : disabled
  Platform verification succeeded
 </code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>RAIDを使用する場合の追加設定</strong></p>
+<p>GPUDirect Storageを利用してSoftware RAID (md-raid0) 区画からデータを読み出す場合、
+以下の一行を<code>/lib/udev/rules.d/63-md-raid-arrays.rules</code> 設定に追加する必要があります。</p>
+<p><code>IMPORT{​program}="/usr/sbin/mdadm --detail --export $devnode"</code></p>
+<p>その後、設定を反映させるためにシステムを再起動してください。
+詳しくは<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>を参照してください。</p>
+</div>
 <h2 id="postgresql">PostgreSQLのインストール</h2>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
