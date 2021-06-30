@@ -228,8 +228,9 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Strom requires CUDA Toolkit version 11.3 or later.</li>
+<li>PG-Strom requires CUDA Toolkit version 11.4 or later.</li>
 <li>Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.</li>
+<li>NVIDIA GPUDirect Storage (GDS) has been included in the CUDA Toolkit version 11.4 or later.</li>
 </ul>
 </li>
 </ul>
@@ -240,13 +241,12 @@
 <li>HeteroDB NVME-Strom<ul>
 <li>The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.</li>
 <li>It supports RHEL7.x/RHEL8.x, enables direct read from local NVME-SSDs to GPU using GPUDirect RDMA.</li>
-<li>NVME-oF is only supported at RHEL7.9.</li>
 </ul>
 </li>
-<li>NVIDIA GPUDirect Storage (Experimental)<ul>
+<li>NVIDIA GPUDirect Storage<ul>
 <li>The general purpose driver stack, has been developed by NVIDIA, to support direct read from NVME/NVME-oF devices to GPU. At May-2021, its public beta revision has been published.</li>
-<li>PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3 and Ubuntu 18.04/20.04.</li>
-<li>Some partners, including HeteroDB, expressed to support the feature. It allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.</li>
+<li>PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3/8.4 and Ubuntu 18.04/20.04.</li>
+<li>Some partners, including HeteroDB, expressed to support this feature. It also allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.</li>
 </ul>
 </li>
 </ul>
@@ -504,10 +504,9 @@ If turn-around time of the DMA requests are too large, it may be wrongly conside
 <code>p2p_dma_max_depth</code> parameter controls number of asynchronous P2P DMA requests that can be enqueued at once per NVME device. If application tries to enqueue DMA requests more than the configuration, the caller thread will block until completion of the running DMA. So, it enables to avoid unintentional high-load of NVME devices.</p>
 </div>
 <h2 id="nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</h2>
-<p>As of May 2021, NVIDIA GPUDirect Storage is still in "public beta", has not been officially released yet.
-Therefore, PG-Strom also supports this feature experimentally, and the future updates may change the specifications and so on without notices.</p>
-<p>You can obtain the software stack of GPUDirect Storage from <a href="https://developer.nvidia.com/gpudirect-storage">here</a>.</p>
-<p>You should install the Mellanoc OpenFabrics Enterprise Distribution (MOFED) driver to support NVME-oF devices at the GPUDirect Storage.</p>
+<p>NVIDIA GPUDirect Storage is a new feature of CUDA Toolkit version 11.4 which was released at Jun-2021.</p>
+<p>It also requires installation of OpenFabrics Enterprise Distribution (MOFED) driver by Mellanox, for
+direct read from local NVME-SSD drives or remove NVME-oF devices.</p>
 <p>You can obtain the MOFED driver from <a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">here</a>.</p>
 <p>The descriptions in this section may not reflect the the latest installation instructions exactly, so please check at the <a href="https://docs.nvidia.com/gpudirect-storage/">official documentation by NVIDIA</a> also.</p>
 <h3 id="mofed-driver-installation">MOFED Driver Installation</h3>
@@ -551,31 +550,39 @@ parm:           register_always:Use memory registration even for contiguous memo
 <p>Please don't forget to run <code>dracut -f</code> after completion of the <code>mlnxofedinstall</code> script.</p>
 <h3 id="gpudirect-storage-installation">GPUDirect Storage Installation</h3>
 <p>Next, let's install the GPUDirect Storage software stack.</p>
-<p>As of May 2021, the GPUDirect Storage software stack is still in the public beta status, and is not integrated into the CUDA Toolset.</p>
-<p>The steps shown in the example below may be changed in the future version.</p>
-<pre><code># rpm -ivh gpudirect-storage-local-repo-rhel8-0.95.1-cuda11.3-1.0-1.x86_64.rpm
-# dnf install nvidia-gds
+<pre><code># dnf install nvidia-gds
 </code></pre>
+<p>Once the above installation is completed, <code>gdscheck</code> command allows to check the status of GPUDirect Storage.
+By the above installation process, NVME (local NVME-SSD) and NVME-oF (remove devices) should be <code>Supported</code>.</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
- GDS release version (beta): 0.95.1.12
- nvidia_fs version:  2.6 libcufile version: 2.3
- cuFile CONFIGURATION:
- NVMe           : Supported
- NVMeOF         : Supported
- SCSI           : Unsupported
- SCALEFLUX CSD  : Unsupported
- NVMesh         : Unsupported
- LUSTRE         : Unsupported
- GPFS           : Unsupported
- NFS            : Unsupported
- WEKAFS         : Unsupported
- USERSPACE RDMA : Unsupported
- --MOFED peer direct  : disabled
- --rdma library       : Not Loaded (libcufile_rdma.so)
- --rdma devices       : Not configured
- --rdma_device_status : Up: 0 Down: 0
- properties.use_compat_mode : 1
- properties.use_poll_mode : 0
+ GDS release version: 1.0.0.82
+ nvidia_fs version:  2.7 libcufile version: 2.4
+ ============
+ ENVIRONMENT:
+ ============
+ =====================
+ DRIVER CONFIGURATION:
+ =====================
+ NVMe               : Supported
+ NVMeOF             : Supported
+ SCSI               : Unsupported
+ ScaleFlux CSD      : Unsupported
+ NVMesh             : Unsupported
+ DDN EXAScaler      : Unsupported
+ IBM Spectrum Scale : Unsupported
+ NFS                : Unsupported
+ WekaFS             : Unsupported
+ Userspace RDMA     : Unsupported
+ --Mellanox PeerDirect : Enabled
+ --rdma library        : Not Loaded (libcufile_rdma.so)
+ --rdma devices        : Not configured
+ --rdma_device_status  : Up: 0 Down: 0
+ =====================
+ CUFILE CONFIGURATION:
+ =====================
+ properties.use_compat_mode : true
+ properties.gds_rdma_write_support : true
+ properties.use_poll_mode : false
  properties.poll_mode_max_size_kb : 4
  properties.max_batch_io_timeout_msecs : 5
  properties.max_direct_io_size_kb : 16384
@@ -585,17 +592,23 @@ parm:           register_always:Use memory registration even for contiguous memo
  properties.posix_pool_slab_count : 128 64 32
  properties.rdma_peer_affinity_policy : RoundRobin
  properties.rdma_dynamic_routing : 0
- fs.generic.posix_unaligned_writes : 0
+ fs.generic.posix_unaligned_writes : false
  fs.lustre.posix_gds_min_kb: 0
- fs.weka.rdma_write_support: 0
- profile.nvtx : 0
+ fs.weka.rdma_write_support: false
+ profile.nvtx : false
  profile.cufile_stats : 0
- miscellaneous.api_check_aggressive : 0
+ miscellaneous.api_check_aggressive : false
+ =========
  GPU INFO:
+ =========
  GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
  GPU index 1 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
- IOMMU : disabled
+ ==============
+ PLATFORM INFO:
+ ==============
+ IOMMU: disabled
  Platform verification succeeded
+
 </code></pre>
 <div class="admonition tips">
 <p class="admonition-title">Tips</p>

@@ -27,8 +27,9 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom v3.0の実行にはPostgreSQLバージョン11以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン11.3以降が必要です。
+    - PG-Stromの実行にはCUDA Toolkit バージョン11.4以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
+    - NVIDIA GPUDirect Storage (GDS)はCUDA Toolkit バージョン11.4以降に同梱されています。
 }
 @en{
 - **Server Hardware**
@@ -46,8 +47,9 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom v3.0 requires PostgreSQL v11 or later.
     - Some of PostgreSQL APIs used by PG-Strom internally are not included in the former versions.
 - **CUDA Toolkit**
-    - PG-Strom requires CUDA Toolkit version 11.3 or later.
+    - PG-Strom requires CUDA Toolkit version 11.4 or later.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
+    - NVIDIA GPUDirect Storage (GDS) has been included in the CUDA Toolkit version 11.4 or later.
 }
 
 @ja:### GPUダイレクトSQL実行ドライバの選択
@@ -61,11 +63,10 @@ This chapter introduces the steps to install PG-Strom.
 - HeteroDB NVME-Strom
     - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
     - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
-    - NVME-oFにはRHEL7.9カーネルでのみ対応しています。
-- NVIDIA GPUDirect Storage (実験的)
+- NVIDIA GPUDirect Storage
     - NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。
-    - PG-Strom v3.0で実験的に対応しており、RHEL8.3、およびUbuntu 18.04/20.04に対応しています。
-    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能となる予定です。
+    - PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。
+    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。
 
 どちらのドライバを使用しても、性能面での差異はほとんどありません。
 しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。
@@ -78,11 +79,10 @@ There are two individual Linux kernel driver for [GPUDirect SQL](../ssd2gpu/) ex
 - HeteroDB NVME-Strom
     - The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.
     - It supports RHEL7.x/RHEL8.x, enables direct read from local NVME-SSDs to GPU using GPUDirect RDMA.
-    - NVME-oF is only supported at RHEL7.9.
-- NVIDIA GPUDirect Storage (Experimental)
+- NVIDIA GPUDirect Storage
     - The general purpose driver stack, has been developed by NVIDIA, to support direct read from NVME/NVME-oF devices to GPU. At May-2021, its public beta revision has been published.
-    - PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3 and Ubuntu 18.04/20.04.
-    - Some partners, including HeteroDB, expressed to support the feature. It allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.
+    - PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3/8.4 and Ubuntu 18.04/20.04.
+    - Some partners, including HeteroDB, expressed to support this feature. It also allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.
 
 Here is little performance differences on the above two drivers.
 On the other hands, GPUDirect Storage has more variations of the supported storages and filesystems, and more mature software QA process, expect for the case of PG-Strom on RHEL7/CentOS7, we will recommend to use GPUDirect Storage driver.
@@ -600,12 +600,10 @@ NVME-Strom Linux kernel module has some parameters.
 @en:##NVIDIA GPUDirect Storage
 
 @ja{
-2021年5月現在、NVIDIA GPUDirect Storageは『パブリックベータ』というステータスで、まだ正式リリースには至っていません。
-そのため、PG-Stromにおいてもこれは実験的対応というステータスになっており、将来のアップデートにおいて予告なく仕様等が変更される可能性があります。
+NVIDIA GPUDirect Storageは、2021年6月にリリースされた CUDA Toolkit バージョン11.4 の新機能です。
 
-GPUDirect Storageのソフトウェアスタックは、[こちら](https://developer.nvidia.com/gpudirect-storage)から入手する事ができます。
-
-GPUDirect Storageにおいて、NVME-oFをサポートするには、Mellanox社のOpenFabrics Enterprise Distribution (MOFED) ドライバのインストールが必要です。
+GPUDirect Storageを用いて、ローカルのNVME-SSDやリモートのNVME-oFデバイスからの直接読出しを行うには、
+Mellanox社の提供するOpenFabrics Enterprise Distribution (MOFED) ドライバのインストールが必要です。
 MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed)からダウンロードする事ができます。
 
 また、本節の内容は必ずしも最新のインストール手順を反映していない可能性があります。
@@ -614,12 +612,10 @@ MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-driv
 GPUダイレクトSQLを使用しない場合、本節の内容は読み飛ばして下さい。
 }
 @en{
-As of May 2021, NVIDIA GPUDirect Storage is still in "public beta", has not been officially released yet.
-Therefore, PG-Strom also supports this feature experimentally, and the future updates may change the specifications and so on without notices.
+NVIDIA GPUDirect Storage is a new feature of CUDA Toolkit version 11.4 which was released at Jun-2021.
 
-You can obtain the software stack of GPUDirect Storage from [here](https://developer.nvidia.com/gpudirect-storage).
-
-You should install the Mellanoc OpenFabrics Enterprise Distribution (MOFED) driver to support NVME-oF devices at the GPUDirect Storage.
+It also requires installation of OpenFabrics Enterprise Distribution (MOFED) driver by Mellanox, for
+direct read from local NVME-SSD drives or remove NVME-oF devices.
 
 You can obtain the MOFED driver from [here](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed).
 
@@ -717,21 +713,12 @@ Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall`
 
 @ja{
 続いて、GPUDirect Storageのインストールを行います。
-
-2021年5月現在、GPUDirect Storageのソフトウェアスタックはパブリックベータのステータスで、CUDA Toolkit本体には統合されていません。
-
-以下のインストール例に示す手順は、将来のバージョンにおいて変更される可能性があります。
 }
 @en{
 Next, let's install the GPUDirect Storage software stack.
-
-As of May 2021, the GPUDirect Storage software stack is still in the public beta status, and is not integrated into the CUDA Toolset.
-
-The steps shown in the example below may be changed in the future version.
 }
 
 ```
-# rpm -ivh gpudirect-storage-local-repo-rhel8-0.95.1-cuda11.3-1.0-1.x86_64.rpm
 # dnf install nvidia-gds
 ```
 
@@ -739,28 +726,41 @@ The steps shown in the example below may be changed in the future version.
 インストールが完了すると、`gdscheck`コマンドを用いてGPUDirect Storageの状態を検査する事ができます。
 ここまでの手順で、NVME（ローカルNVME-SSD）とNVME-oF（リモート接続）が`Supported`となっているはずです。
 }
+@en{
+Once the above installation is completed, `gdscheck` command allows to check the status of GPUDirect Storage.
+By the above installation process, NVME (local NVME-SSD) and NVME-oF (remove devices) should be `Supported`.
+}
 
 ```
 # /usr/local/cuda/gds/tools/gdscheck -p
- GDS release version (beta): 0.95.1.12
- nvidia_fs version:  2.6 libcufile version: 2.3
- cuFile CONFIGURATION:
- NVMe           : Supported
- NVMeOF         : Supported
- SCSI           : Unsupported
- SCALEFLUX CSD  : Unsupported
- NVMesh         : Unsupported
- LUSTRE         : Unsupported
- GPFS           : Unsupported
- NFS            : Unsupported
- WEKAFS         : Unsupported
- USERSPACE RDMA : Unsupported
- --MOFED peer direct  : disabled
- --rdma library       : Not Loaded (libcufile_rdma.so)
- --rdma devices       : Not configured
- --rdma_device_status : Up: 0 Down: 0
- properties.use_compat_mode : 1
- properties.use_poll_mode : 0
+ GDS release version: 1.0.0.82
+ nvidia_fs version:  2.7 libcufile version: 2.4
+ ============
+ ENVIRONMENT:
+ ============
+ =====================
+ DRIVER CONFIGURATION:
+ =====================
+ NVMe               : Supported
+ NVMeOF             : Supported
+ SCSI               : Unsupported
+ ScaleFlux CSD      : Unsupported
+ NVMesh             : Unsupported
+ DDN EXAScaler      : Unsupported
+ IBM Spectrum Scale : Unsupported
+ NFS                : Unsupported
+ WekaFS             : Unsupported
+ Userspace RDMA     : Unsupported
+ --Mellanox PeerDirect : Enabled
+ --rdma library        : Not Loaded (libcufile_rdma.so)
+ --rdma devices        : Not configured
+ --rdma_device_status  : Up: 0 Down: 0
+ =====================
+ CUFILE CONFIGURATION:
+ =====================
+ properties.use_compat_mode : true
+ properties.gds_rdma_write_support : true
+ properties.use_poll_mode : false
  properties.poll_mode_max_size_kb : 4
  properties.max_batch_io_timeout_msecs : 5
  properties.max_direct_io_size_kb : 16384
@@ -770,17 +770,23 @@ The steps shown in the example below may be changed in the future version.
  properties.posix_pool_slab_count : 128 64 32
  properties.rdma_peer_affinity_policy : RoundRobin
  properties.rdma_dynamic_routing : 0
- fs.generic.posix_unaligned_writes : 0
+ fs.generic.posix_unaligned_writes : false
  fs.lustre.posix_gds_min_kb: 0
- fs.weka.rdma_write_support: 0
- profile.nvtx : 0
+ fs.weka.rdma_write_support: false
+ profile.nvtx : false
  profile.cufile_stats : 0
- miscellaneous.api_check_aggressive : 0
+ miscellaneous.api_check_aggressive : false
+ =========
  GPU INFO:
+ =========
  GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
  GPU index 1 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
- IOMMU : disabled
+ ==============
+ PLATFORM INFO:
+ ==============
+ IOMMU: disabled
  Platform verification succeeded
+
 ```
 
 @ja{
