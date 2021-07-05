@@ -237,7 +237,7 @@ setup_append_file(SQLtable *table, ArrowFileInfo *af_info)
 	offset = af_info->stat_buf.st_size - nbytes;
 	if (pread(table->fdesc, buffer, nbytes, offset) != nbytes)
 		Elog("failed on pread(2): %m");
-	offset -= *((int32_t *)buffer);
+	offset -= *((uint32_t *)buffer);
 	if (lseek(table->fdesc, offset, SEEK_SET) < 0)
 		Elog("failed on lseek(%d, %zu, SEEK_SET): %m",
 			 table->fdesc, offset);
