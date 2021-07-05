@@ -55,7 +55,7 @@ heterodbExtraEreport(int elevel)
 	if (errstart(elevel, TEXTDOMAIN))
 	{
 		errcode(ERRCODE_INTERNAL_ERROR);
-		errmsg("%s", p_heterodb_extra_error_data->message);
+		errmsg("[extra] %s", p_heterodb_extra_error_data->message);
 		errfinish(p_heterodb_extra_error_data->filename,
 				  p_heterodb_extra_error_data->lineno,
 				  p_heterodb_extra_error_data->funcname);
@@ -308,16 +308,16 @@ extraSysfsSetupDistanceMap(const char *manual_config)
 /*
  * extraSysfsLookupOptimalGpu
  */
-static int (*p_sysfs_lookup_optimal_gpu)(dev_t st_dev) = NULL;
+static int (*p_sysfs_lookup_optimal_gpu)(int fdesc) = NULL;
 
 int
-extraSysfsLookupOptimalGpu(dev_t st_dev)
+extraSysfsLookupOptimalGpu(int fdesc)
 {
 	int		optimal_gpu;
 
 	if (!p_sysfs_lookup_optimal_gpu)
 		return -1;
-	optimal_gpu = p_sysfs_lookup_optimal_gpu(st_dev);
+	optimal_gpu = p_sysfs_lookup_optimal_gpu(fdesc);
 	if (optimal_gpu < -1)
 		heterodbExtraEreport(ERROR);
 	return optimal_gpu;
@@ -417,7 +417,7 @@ parse_heterodb_extra_module_info(const char *extra_module_info,
 		}
 	}
 
-	if (api_version < 20210615)
+	if (api_version < 20210705)
 		elog(ERROR, "HeteroDB Extra Module has Unsupported API version [%08lu]",
 			 api_version);
 

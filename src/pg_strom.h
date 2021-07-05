@@ -1395,7 +1395,7 @@ extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
 extern void	extraSysfsSetupDistanceMap(const char *manual_config);
-extern int	extraSysfsLookupOptimalGpu(dev_t st_dev);
+extern int	extraSysfsLookupOptimalGpu(int fdesc);
 extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
