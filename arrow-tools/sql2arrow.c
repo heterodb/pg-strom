@@ -28,9 +28,25 @@ static char	   *sqldb_username = NULL;
 static char	   *sqldb_password = NULL;
 static char	   *sqldb_database = NULL;
 static char	   *dump_arrow_filename = NULL;
+static char	   *stat_embedded_columns = NULL;
 static int		shows_progress = 0;
 static userConfigOption *sqldb_session_configs = NULL;
 static nestLoopOption *sqldb_nestloop_options = NULL;
+
+/*
+ * __trim
+ */
+static inline char *
+__trim(char *token)
+{
+	char   *tail = token + strlen(token) - 1;
+
+	while (*token == ' ' || *token == '\t')
+		token++;
+	while (tail >= token && (*tail == ' ' || *tail == '\t'))
+		*tail-- = '\0';
+	return token;
+}
 
 /*
  * loadArrowDictionaryBatches
@@ -403,6 +419,7 @@ read_sql_command_from_file(const char *filename)
 	return buffer;
 }
 
+#ifdef __PG2ARROW__
 static nestLoopOption *
 parseNestLoopOption(const char *command, bool outer_join)
 {
@@ -462,6 +479,86 @@ parseNestLoopOption(const char *command, bool outer_join)
 
 	return nlopt;
 }
+#endif	/* __PG2ARROW__ */
+
+static bool
+__enable_field_stats(SQLfield *field)
+{
+	bool	retval = (field->write_stat != NULL);
+	int		j;
+
+	field->stat_enabled = retval;
+	memset(&field->stat_datum, 0, sizeof(SQLstat));
+	field->stat_list = NULL;
+
+	if (field->element)
+	{
+		if (__enable_field_stats(field->element))
+			retval = true;
+	}
+	for (j=0; j < field->nfields; j++)
+	{
+		if (__enable_field_stats(&field->subfields[j]))
+			retval = true;
+	}
+	return retval;
+}
+
+static void
+enable_embedded_stats(SQLtable *table)
+{
+	char	   *buffer;
+	char	   *name, *pos;
+	int			j;
+
+	/* disabled? */
+	if (!stat_embedded_columns)
+		return;
+
+	/* special case - all available columns? */
+	if (strcmp(stat_embedded_columns, "*") == 0)
+	{
+		for (j=0; j < table->nfields; j++)
+		{
+			if (__enable_field_stats(&table->columns[j]))
+				table->has_statistics = true;
+		}
+		return;
+	}
+
+	/* elsewhere, enables stat for each column specified */
+	buffer = alloca(strlen(stat_embedded_columns) + 1);
+	strcpy(buffer, stat_embedded_columns);
+	for (name = strtok_r(buffer, ",", &pos);
+		 name != NULL;
+		 name = strtok_r(NULL, ",", &pos))
+	{
+		bool	found = false;
+
+		name = __trim(name);
+		for (j=0; j < table->nfields; j++)
+		{
+			SQLfield   *field = &table->columns[j];
+
+			if (strcmp(field->field_name, name) == 0)
+			{
+				if (__enable_field_stats(field))
+				{
+					table->has_statistics = found = true;
+				}
+				else
+				{
+					Elog("field [%s; %s] does not support min/max statistics",
+						 name, field->arrow_type.node.tagName);
+				}
+			}
+		}
+
+		if (!found)
+			Elog("field name [%s], specified by --stat option, was not found",
+				 name);
+	}
+}
 
 static void
 usage(void)
@@ -485,6 +582,9 @@ usage(void)
 		  "      --append=FILENAME result Apache Arrow file to be appended\n"
 		  "      (--output and --append are exclusive. If neither of them\n"
 		  "       are given, it creates a temporary file.)\n"
+		  "  -S, --stat[=COLUMNS] embeds min/max statistics for each record batch\n"
+		  "                       COLUMNS is a comma-separated list of the target\n"
+		  "                       columns if partially enabled.\n"
 		  "\n"
 		  "Arrow format options:\n"
 		  "  -s, --segment-size=SIZE size of record batch for each\n"
@@ -537,6 +637,7 @@ parse_options(int argc, char * const argv[])
 		{"set",          required_argument, NULL, 1003},
 		{"inner-join",   required_argument, NULL, 1004},
 		{"outer-join",   required_argument, NULL, 1005},
+		{"stat",         optional_argument, NULL, 'S'},
 		{"help",         no_argument,       NULL, 9999},
 		{NULL, 0, NULL, 0},
 	};
@@ -546,10 +647,17 @@ parse_options(int argc, char * const argv[])
 	int			password_prompt = 0;
 	const char *pos;
 	userConfigOption *last_user_config = NULL;
-	nestLoopOption *last_nest_loop = NULL;
+	nestLoopOption *last_nest_loop __attribute__((unused)) = NULL;
 
-	while ((c = getopt_long(argc, argv, "d:c:t:o:s:h:P:u:p:",
-							long_options, NULL)) >= 0)
+	while ((c = getopt_long(argc, argv,
+							"d:c:t:o:s:h:p:u:"
+#ifdef __PG2ARROW__
+							"wW"
+#endif
+#ifdef __MYSQL2ARROW__
+							"P:"
+#endif
+							"S::", long_options, NULL)) >= 0)
 	{
 		switch (c)
 		{
@@ -689,7 +797,7 @@ parse_options(int argc, char * const argv[])
 					last_user_config = conf;
 				}
 				break;
-
+#ifdef __PG2ARROW__
 			case 1004:		/* --inner-join */
 			case 1005:		/* --outer-join */
 				{
@@ -702,7 +810,17 @@ parse_options(int argc, char * const argv[])
 					last_nest_loop = nlopt;
 				}
 				break;
-
+#endif	/* __PG2ARROW__ */
+			case 'S':		/* --stat */
+				{
+					if (stat_embedded_columns)
+						Elog("--stat option was supplied twice");
+					if (optarg)
+						stat_embedded_columns = optarg;
+					else
+						stat_embedded_columns = "*";
+				}
+				break;
 			case 9999:		/* --help */
 			default:
 				usage();
@@ -789,6 +907,8 @@ int main(int argc, char * const argv[])
 	if (!table)
 		Elog("Empty results by the query: %s", sqldb_command);
 	table->segment_sz = batch_segment_sz;
+	/* enables embedded min/max statistics, if any */
+	enable_embedded_stats(table);
 
 	/* save the SQL command as custom metadata */
 	kv = palloc0(sizeof(ArrowKeyValue));
@@ -811,9 +931,6 @@ int main(int argc, char * const argv[])
 	}
 	/* write out dictionary batch, if any */
 	writeArrowDictionaryBatches(table);
-	/* main loop to fetch and write result */
-
-
 	
 	/* main loop to fetch and write result */
 	while (sqldb_fetch_results(sqldb_state, table))

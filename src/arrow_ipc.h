@@ -49,10 +49,20 @@
 typedef unsigned int	Oid;
 #endif
 
+#ifdef PG_INT128_TYPE
+typedef PG_INT128_TYPE			int128_t;
+typedef unsigned PG_INT128_TYPE	uint128_t;
+#else
+typedef __int128				int128_t;
+typedef unsigned __int128		uint128_t;
+#endif
+
 typedef struct SQLbuffer		SQLbuffer;
 typedef struct SQLtable			SQLtable;
 typedef struct SQLfield			SQLfield;
 typedef struct SQLdictionary	SQLdictionary;
+typedef struct SQLstat			SQLstat;
+typedef union  SQLstat__datum	SQLstat__datum;
 typedef union  SQLtype			SQLtype;
 typedef struct SQLtype__pgsql	SQLtype__pgsql;
 typedef struct SQLtype__mysql	SQLtype__mysql;
@@ -87,6 +97,30 @@ union SQLtype
 	SQLtype__mysql	mysql;
 };
 
+union SQLstat__datum
+{
+	int8_t			i8;
+	int16_t			i16;
+	int32_t			i32;
+	int64_t			i64;
+	int128_t		i128;
+	uint8_t			u8;
+	uint16_t		u16;
+	uint32_t		u32;
+	uint64_t		u64;
+	float			fp32;
+	double			fp64;
+};
+
+struct SQLstat
+{
+	SQLstat		   *next;
+	int				rb_index;	/* record-batch index */
+	bool			is_valid;	/* true, if min/max is not NULL */
+	SQLstat__datum	min;
+	SQLstat__datum	max;
+};
+
 struct SQLfield
 {
 	char	   *field_name;		/* name of the column, element or sub-field */
@@ -99,6 +133,8 @@ struct SQLfield
 	ArrowType	arrow_type;		/* type in apache arrow */
 	/* data save as Apache Arrow datum */
 	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
+	int		(*write_stat)(SQLfield *attr, char *buf, size_t len,
+						  const SQLstat__datum *stat_datum);
 	/* data buffers of the field */
 	long		nitems;			/* number of rows */
 	long		nullcount;		/* number of null values */
@@ -106,6 +142,10 @@ struct SQLfield
 	SQLbuffer	values;			/* main storage of values */
 	SQLbuffer	extra;			/* extra buffer for varlena */
 	size_t		__curr_usage__;	/* current buffer usage */
+	/* min/max statistics */
+	bool		stat_enabled;
+	SQLstat		stat_datum;
+	SQLstat	   *stat_list;
 	/* custom metadata(optional) */
 	ArrowKeyValue *customMetadata;
 	int			numCustomMetadata;
@@ -143,6 +183,7 @@ struct SQLtable
 	size_t		usage;			/* current buffer usage */
 	size_t		nitems;			/* number of items */
 	int			nfields;		/* number of attributes */
+	bool		has_statistics;	/* one or more columns enable min/max statistics */
 	SQLfield columns[FLEXIBLE_ARRAY_MEMBER];
 };
 
@@ -179,10 +220,6 @@ extern int		writeArrowRecordBatch(SQLtable *table);
 extern void		writeArrowFooter(SQLtable *table);
 
 extern size_t	setupArrowRecordBatchIOV(SQLtable *table);
-
-
-
-
 
 /* arrow_nodes.c */
 extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);

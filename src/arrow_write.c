@@ -1025,8 +1025,91 @@ setupArrowDictionaryEncoding(ArrowDictionaryEncoding *dict,
 }
 
 static void
-setupArrowField(ArrowField *field, SQLfield *column)
+__setupArrowFieldStat(ArrowKeyValue *customMetadata,
+					  SQLfield *column, int numRecordBatches)
 {
+	static const char *stat_names[] = {"min_values","max_values"};
+	SQLstat	  **stat_values = alloca(sizeof(SQLstat *) * numRecordBatches);
+	SQLstat	   *curr;
+	int			i, k;
+
+	memset(stat_values, 0, sizeof(SQLstat *) * numRecordBatches);
+	for (curr = column->stat_list; curr; curr = curr->next)
+	{
+		int		rb_index = curr->rb_index;
+
+		if (rb_index < 0 || rb_index >= numRecordBatches)
+			Elog("min/max stat info at [%s] is out of range (%d of %d)",
+				 column->field_name, rb_index, numRecordBatches);
+		if (stat_values[rb_index])
+			Elog("duplicate min/max stat info at [%s] rb_index=%d",
+				 column->field_name, rb_index);
+		stat_values[rb_index] = curr;
+	}
+	/* build a min/max array */
+	for (k=0; k < 2; k++)
+	{
+		ArrowKeyValue *kv = &customMetadata[k];
+		int		len = 1024;
+		int		off = 0;
+		char   *buf = palloc(len);
+
+		for (i=0; i < numRecordBatches; i++)
+		{
+			SQLstat    *curr = stat_values[i];
+			SQLstat__datum *st_datum;
+
+			if (off + 100 >= len)
+			{
+				len += len;
+				buf = repalloc(buf, len);
+			}
+			if (i > 0)
+				buf[off++] = ',';
+			if (!curr || !curr->is_valid)
+			{
+				off += snprintf(buf+off, len-off, "null");
+				continue;
+			}
+
+			if (k == 0)
+				st_datum = &curr->min;
+			else if (k == 1)
+				st_datum = &curr->max;
+			else
+				st_datum = NULL;	/* should not happen */
+
+			for (;;)
+			{
+				int		nbytes;
+
+				nbytes = column->write_stat(column, buf+off, len-off, st_datum);
+				if (nbytes < 0)
+					Elog("failed on write %s statistics of %s (rb_index=%d)",
+						 stat_names[k], column->field_name, i);
+				if (off + nbytes < len)
+				{
+					off += nbytes;
+					break;
+				}
+				len += len;
+				buf = repalloc(buf, len);
+			}
+		}
+		initArrowNode(kv, KeyValue);
+		kv->key = pstrdup(stat_names[k]);
+		kv->_key_len = strlen(kv->key);
+		kv->value = buf;
+		kv->_value_len = off;
+	}
+}
+
+static void
+setupArrowField(ArrowField *field, SQLtable *table, SQLfield *column)
+{
+	ArrowKeyValue *customMetadata = column->customMetadata;
+	int			numCustomMetadata = column->numCustomMetadata;
+
 	initArrowNode(field, Field);
 	field->name = column->field_name;
 	field->_name_len = strlen(column->field_name);
@@ -1043,7 +1126,7 @@ setupArrowField(ArrowField *field, SQLfield *column)
 	{
 		field->children = palloc0(sizeof(ArrowField));
 		field->_num_children = 1;
-		setupArrowField(field->children, column->element);
+		setupArrowField(field->children, table, column->element);
 	}
 	/* composite type */
 	if (column->subfields)
@@ -1053,11 +1136,20 @@ setupArrowField(ArrowField *field, SQLfield *column)
 		field->children = palloc0(sizeof(ArrowField) * column->nfields);
 		field->_num_children = column->nfields;
 		for (j=0; j < column->nfields; j++)
-			setupArrowField(&field->children[j], &column->subfields[j]);
+			setupArrowField(&field->children[j], table, &column->subfields[j]);
+	}
+	/* min/max statistics */
+	if (column->stat_enabled)
+	{
+		customMetadata = repalloc(customMetadata,
+								  sizeof(ArrowKeyValue) * (numCustomMetadata + 2));
+		__setupArrowFieldStat(customMetadata + numCustomMetadata,
+							  column, table->numRecordBatches);
+		numCustomMetadata += 2;
 	}
 	/* custom metadata, if any */
-	field->_num_custom_metadata = column->numCustomMetadata;
-	field->custom_metadata = column->customMetadata;
+	field->_num_custom_metadata = numCustomMetadata;
+	field->custom_metadata = customMetadata;
 }
 
 static size_t
@@ -1076,7 +1168,7 @@ setupArrowSchemaIOV(SQLtable *table)
 	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->columns[i]);
+		setupArrowField(&schema->fields[i], table, &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
 
@@ -1458,12 +1550,31 @@ setupArrowRecordBatchIOV(SQLtable *table)
 	return consumed;
 }
 
+static void
+__saveArrowRecordBatchStats(int rb_index, SQLfield *field)
+{
+	if (field->stat_datum.is_valid)
+	{
+		SQLstat	   *item = palloc(sizeof(SQLstat));
+
+		/* save the SQLstat item for the record-batch */
+		memcpy(item, &field->stat_datum, sizeof(SQLstat));
+		item->rb_index = rb_index;
+		item->next = field->stat_list;
+		field->stat_list = item;
+
+		/* reset statistics */
+		field->stat_datum.is_valid = false;
+	}
+}
+
 int
 writeArrowRecordBatch(SQLtable *table)
 {
 	ArrowBlock	block;
 	size_t		length;
 	size_t		meta_sz;
+	int			j, rb_index;
 
 	table->__iov_cnt = 0;				/* reset iov */
 	length = setupArrowRecordBatchIOV(table);
@@ -1477,8 +1588,18 @@ writeArrowRecordBatch(SQLtable *table)
 	block.bodyLength = length - meta_sz;
 
 	arrowFileWriteIOV(table);
+	rb_index = sql_table_append_record_batch(table, &block);
+	if (table->has_statistics)
+	{
+		for (j=0; j < table->nfields; j++)
+		{
+			SQLfield   *field = &table->columns[j];
 
-	return sql_table_append_record_batch(table, &block);
+			if (field->stat_enabled)
+				__saveArrowRecordBatchStats(rb_index, field);
+		}
+	}
+	return rb_index;
 }
 
 /*
@@ -1502,7 +1623,7 @@ writeArrowFooter(SQLtable *table)
 	schema->fields = alloca(sizeof(ArrowField) * table->nfields);
 	schema->_num_fields = table->nfields;
 	for (i=0; i < table->nfields; i++)
-		setupArrowField(&schema->fields[i], &table->columns[i]);
+		setupArrowField(&schema->fields[i], table, &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
 
