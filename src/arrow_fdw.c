@@ -30,6 +30,11 @@ typedef struct RecordBatchFieldState
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	/* min/max statistics */
+	SQLstat__datum stat_min;
+	SQLstat__datum stat_max;
+	bool		stat_isnull;
+	/* sub-fields if any */
 	int			num_children;
 	struct RecordBatchFieldState *children;
 } RecordBatchFieldState;
@@ -220,9 +225,6 @@ static List	   *__arrowFdwExtractFilesList(List *options_list,
 										   int *p_parallel_nworkers,
 										   bool *p_writable);
 static List	   *arrowFdwExtractFilesList(List *options_list);
-static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
-											  ArrowBlock *block,
-											  ArrowRecordBatch *rbatch);
 static List	   *arrowLookupOrBuildMetadataCache(File fdesc);
 static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   kern_colmeta *cmeta,
@@ -699,6 +701,457 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
+/*
+ * buildArrowStatsBinary
+ *
+ * It reconstruct binary min/max statistics per record-batch
+ * from the custom-metadata of ArrowField.
+ */
+typedef struct arrowFieldStatsBinary
+{
+	uint32	nrooms;		/* number of record-batches */
+	int		unitsz;		/* unit size of min/max statistics */
+	bool   *isnull;
+	char   *min_values;
+	char   *max_values;
+	int		nfields;	/* if List/Struct data type */
+	struct arrowFieldStatsBinary *subfields;
+} arrowFieldStatsBinary;
+
+typedef struct
+{
+	int		nitems;		/* number of record-batches */
+	int		ncols;
+	arrowFieldStatsBinary columns[FLEXIBLE_ARRAY_MEMBER];
+} arrowStatsBinary;
+
+static bool
+__arrow_stat_parse_8bit(char *buf, const char *token)
+{
+	char	   *end;
+	int64_t		ival;
+
+	ival = strtol(token, &end, 10);
+	if (*end != '\0' || ival < SCHAR_MIN || ival > SCHAR_MAX)
+		return false;
+	*((int8_t *)buf) = (int8_t)ival;
+	return true;
+}
+
+static bool
+__arrow_stat_parse_16bit(char *buf, const char *token)
+{
+	char	   *end;
+	int64_t		ival;
+
+	ival = strtol(token, &end, 10);
+	if (*end != '\0' || ival < SHRT_MIN || ival > SHRT_MAX)
+		return false;
+	*((int16_t *)buf) = (int16_t)ival;
+	return true;
+}
+
+static bool
+__arrow_stat_parse_32bit(char *buf, const char *token)
+{
+	char		*end;
+	int64_t		ival;
+
+	ival = strtol(token, &end, 10);
+	if (*end != '\0' || ival < INT_MIN || ival > INT_MAX)
+		return false;
+	*((int32_t *)buf) = (int32_t)ival;
+	return true;
+}
+
+static bool
+__arrow_stat_parse_64bit(char *buf, const char *token)
+{
+	char	   *end;
+	int64_t		ival;
+
+	ival = strtoll(token, &end, 10);
+	if (*end != '\0')
+		return false;
+	*((int64_t *)buf) = (int64_t)ival;
+	return true;
+}
+
+static bool
+__arrow_stat_parse_128bit(char *buf, const char *token)
+{
+	int128_t	ival = 0;
+	bool		is_minus = false;
+
+	if (*token == '-')
+	{
+		is_minus = true;
+		token++;
+	}
+	while (isdigit(*token))
+	{
+		ival = 10 * ival + (*token - '0');
+		token++;
+	}
+	if (*token != '\0')
+		return false;
+	if (is_minus)
+		ival = -ival;
+	*((int128_t *)buf) = ival;
+	return true;
+}
+
+static void
+__releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
+{
+	int			j;
+
+	if (bstats->subfields)
+	{
+		for (j=0; j < bstats->nfields; j++)
+			__releaseArrowFieldStatsBinary(&bstats->subfields[j]);
+		pfree(bstats->subfields);
+	}
+	if (bstats->isnull)
+		pfree(bstats->isnull);
+	if (bstats->min_values)
+		pfree(bstats->min_values);
+	if (bstats->max_values)
+		pfree(bstats->max_values);
+}
+
+static void
+releaseArrowStatsBinary(arrowStatsBinary *arrow_bstats)
+{
+	int			j;
+
+	if (arrow_bstats)
+	{
+		for (j=0; j < arrow_bstats->ncols; j++)
+			__releaseArrowFieldStatsBinary(&arrow_bstats->columns[j]);
+		pfree(arrow_bstats);
+	}
+}
+
+static bool
+__parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 const char *min_tokens,
+							 const char *max_tokens)
+{
+	bool	  (*fn_parse_stat)(char *buf, const char *token) = NULL;
+	int			unitsz = -1;
+	char	   *min_values = NULL;
+	char	   *max_values = NULL;
+	bool	   *isnull = NULL;
+	char	   *buffer;
+	char	   *tok, *pos;
+	uint32		index;
+
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (field->type.Int.bitWidth)
+			{
+				case 8:
+					fn_parse_stat = __arrow_stat_parse_8bit;
+					unitsz = sizeof(uint8_t);
+					break;
+				case 16:
+					fn_parse_stat = __arrow_stat_parse_16bit;
+					unitsz = sizeof(uint16_t);
+					break;
+				case 32:
+					fn_parse_stat = __arrow_stat_parse_32bit;
+					unitsz = sizeof(uint32_t);
+					break;
+				case 64:
+					fn_parse_stat = __arrow_stat_parse_64bit;
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__FloatingPoint:
+			switch (field->type.FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					fn_parse_stat = __arrow_stat_parse_16bit;
+					unitsz = sizeof(uint16_t);
+					break;
+				case ArrowPrecision__Single:
+					fn_parse_stat = __arrow_stat_parse_32bit;
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowPrecision__Double:
+					fn_parse_stat = __arrow_stat_parse_64bit;
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Decimal:
+			fn_parse_stat = __arrow_stat_parse_128bit;
+			unitsz = sizeof(int128_t);
+			break;
+
+		case ArrowNodeTag__Date:
+			switch (field->type.Date.unit)
+			{
+				case ArrowDateUnit__Day:
+					fn_parse_stat = __arrow_stat_parse_32bit;
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowDateUnit__MilliSecond:
+					fn_parse_stat = __arrow_stat_parse_64bit;
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Time:
+			switch (field->type.Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+					fn_parse_stat = __arrow_stat_parse_32bit;
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					fn_parse_stat = __arrow_stat_parse_64bit;
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			switch (field->type.Timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					fn_parse_stat = __arrow_stat_parse_64bit;
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	/* parse the min_tokens/max_tokens */
+	min_values = palloc0(unitsz * bstats->nrooms);
+	max_values = palloc0(unitsz * bstats->nrooms);
+	isnull     = palloc0(sizeof(bool) * bstats->nrooms);
+
+	buffer = alloca(Max(strlen(min_tokens),
+						strlen(max_tokens)) + 1);
+	strcpy(buffer, min_tokens);
+	for (tok = strtok_r(buffer, ",", &pos), index = 0;
+		 tok != NULL && index < bstats->nrooms;
+		 tok = strtok_r(NULL,   ",", &pos), index++)
+	{
+		tok = __trim(tok);
+		if (strcmp(tok, "null") == 0)
+			isnull[index] = true;
+		else if (!fn_parse_stat(min_values + unitsz * index, tok))
+			goto error;
+	}
+	if (tok != NULL || index != bstats->nrooms)
+		goto error;
+
+	strcpy(buffer, max_tokens);
+	for (tok = strtok_r(buffer, ",", &pos), index = 0;
+		 tok != NULL && index < bstats->nrooms;
+		 tok = strtok_r(NULL,   ",", &pos), index++)
+	{
+		tok = __trim(tok);
+		if (strcmp(tok, "null") == 0)
+			isnull[index] = true;
+		else if (!fn_parse_stat(max_values + unitsz * index, tok))
+			goto error;
+	}
+	if (tok != NULL || index != bstats->nrooms)
+		goto error;
+
+	bstats->unitsz = unitsz;
+	bstats->isnull = isnull;
+	bstats->min_values = min_values;
+	bstats->max_values = max_values;
+
+	return true;
+
+error:
+	pfree(min_values);
+	pfree(max_values);
+	pfree(isnull);
+	return false;
+}
+
+static void
+__buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 uint32 nrooms, bool *found)
+{
+	const char *min_tokens = NULL;
+	const char *max_tokens = NULL;
+	int			j, k;
+
+	for (k=0; k < field->_num_custom_metadata; k++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[k];
+
+		if (strcmp(kv->key, "min_values") == 0)
+			min_tokens = kv->value;
+		else if (strcmp(kv->key, "max_values") == 0)
+			max_tokens = kv->value;
+	}
+
+	bstats->nrooms = nrooms;
+	bstats->unitsz = -1;
+	if (min_tokens && max_tokens)
+	{
+		if (__parseArrowFieldStatsBinary(bstats, field,
+										 min_tokens,
+										 max_tokens))
+		{
+			*found = true;
+		}
+		else
+		{
+			/* parse error, ignore the stat */
+			if (bstats->isnull)
+				pfree(bstats->isnull);
+			if (bstats->min_values)
+				pfree(bstats->min_values);
+			if (bstats->max_values)
+				pfree(bstats->max_values);
+			bstats->unitsz     = -1;
+			bstats->isnull     = NULL;
+			bstats->min_values = NULL;
+			bstats->max_values = NULL;
+		}
+	}
+
+	if (field->_num_children > 0)
+	{
+		bstats->nfields = field->_num_children;
+		bstats->subfields = palloc0(sizeof(arrowStatsBinary) * bstats->nfields);
+		for (j=0; j < bstats->nfields; j++)
+			__buildArrowFieldStatsBinary(&bstats->subfields[j],
+										 &field->children[j],
+										 nrooms, found);
+	}
+}
+
+static arrowStatsBinary *
+buildArrowStatsBinary(const ArrowFooter *footer)
+{
+	arrowStatsBinary *arrow_bstats;
+	int		j, ncols = footer->schema._num_fields;
+	bool	found = false;
+
+	arrow_bstats = palloc0(offsetof(arrowStatsBinary,
+									columns[ncols]));
+	arrow_bstats->nitems = footer->_num_recordBatches;
+	arrow_bstats->ncols = ncols;
+	for (j=0; j < ncols; j++)
+	{
+		__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
+									 &footer->schema.fields[j],
+									 footer->_num_recordBatches,
+									 &found);
+	}
+	if (!found)
+	{
+		releaseArrowStatsBinary(arrow_bstats);
+		return NULL;
+	}
+	return arrow_bstats;
+}
+
+#if 0
+typedef struct RecordBatchState
+{
+    File        fdesc;
+    GPUDirectFileDesc *dfile;
+    struct stat stat_buf;
+    int         rb_index;   /* index number in a file */
+    off_t       rb_offset;  /* offset from the head */
+    size_t      rb_length;  /* length of the entire RecordBatch */
+    int64       rb_nitems;  /* number of items */
+    /* per column information */
+    int         ncols;
+    RecordBatchFieldState columns[FLEXIBLE_ARRAY_MEMBER];
+} RecordBatchState;
+#endif
+
+static void
+__applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
+							 arrowFieldStatsBinary *bstats,
+							 int rb_index)
+{
+	int		j;
+
+	if (bstats->unitsz > 0 &&
+		bstats->isnull != NULL &&
+		bstats->min_values != NULL &&
+		bstats->max_values != NULL)
+	{
+		size_t	off = bstats->unitsz * rb_index;
+
+		memcpy(&fstate->stat_min,
+			   bstats->min_values + off, bstats->unitsz);
+		memcpy(&fstate->stat_max,
+			   bstats->max_values + off, bstats->unitsz);
+		fstate->stat_isnull = false;
+	}
+	else
+	{
+		memset(&fstate->stat_min, 0, sizeof(SQLstat__datum));
+		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
+		fstate->stat_isnull = true;
+	}
+	Assert(fstate->num_children == bstats->nfields);
+	for (j=0; j < fstate->num_children; j++)
+	{
+		RecordBatchFieldState  *__fstate = &fstate->children[j];
+		arrowFieldStatsBinary  *__bstats = &bstats->subfields[j];
+
+		__applyArrowFieldStatsBinary(__fstate, __bstats, rb_index);
+	}
+}
+
+static void
+applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats)
+{
+	int		j, ncols = rb_state->ncols;
+
+	Assert(rb_state->ncols == arrow_bstats->ncols &&
+		   rb_state->rb_index < arrow_bstats->nitems);
+	for (j=0; j < ncols; j++)
+	{
+		RecordBatchFieldState  *fstate = &rb_state->columns[j];
+		arrowFieldStatsBinary  *bstats = &arrow_bstats->columns[j];
+
+		__applyArrowFieldStatsBinary(fstate, bstats, rb_state->rb_index);
+	}
+}
+
+/*
+ * Routines to setup record-batches
+ */
 typedef struct
 {
 	ArrowBuffer    *buffer_curr;
@@ -4359,7 +4812,7 @@ arrowLookupOrBuildMetadataCache(File fdesc)
 retry:
 	dlist_foreach(iter1, hash_slot)
 	{
-		arrowMetadataCache *mcache
+	   arrowMetadataCache *mcache
 			= dlist_container(arrowMetadataCache, chain, iter1.cur);
 		if (mcache->stat_buf.st_dev == stat_buf.st_dev &&
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
@@ -4434,6 +4887,7 @@ retry:
 	{
 		ArrowFileInfo	af_info;
 		arrowMetadataCache *mcache;
+		arrowStatsBinary *arrow_bstats;
 		List		   *rb_state_any = NIL;
 
 		readArrowFileDesc(FileGetRawDesc(fdesc), &af_info);
@@ -4444,13 +4898,15 @@ retry:
 		if (af_info.recordBatches == NULL)
 			elog(DEBUG2, "arrow file '%s' contains no RecordBatch",
 				 FilePathName(fdesc));
+
+		arrow_bstats = buildArrowStatsBinary(&af_info.footer);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
 			RecordBatchState *rb_state;
 			ArrowBlock       *block
 				= &af_info.footer.recordBatches[index];
 			ArrowRecordBatch *rbatch
-				= &af_info.recordBatches[index].body.recordBatch;
+			   = &af_info.recordBatches[index].body.recordBatch;
 
 			rb_state = makeRecordBatchState(&af_info.footer.schema,
 											block, rbatch);
@@ -4458,10 +4914,14 @@ retry:
 			memcpy(&rb_state->stat_buf, &stat_buf, sizeof(struct stat));
 			rb_state->rb_index = index;
 
+			if (arrow_bstats)
+				applyArrowStatsBinary(rb_state, arrow_bstats);
+
 			if (checkArrowRecordBatchIsVisible(rb_state, mvcc_slot))
 				results = lappend(results, rb_state);
 			rb_state_any = lappend(rb_state_any, rb_state);
 		}
+		releaseArrowStatsBinary(arrow_bstats);
 		/* try to build a metadata cache for further references */
 		mcache = __arrowBuildMetadataCache(rb_state_any, key.hash);
 		if (mcache)
