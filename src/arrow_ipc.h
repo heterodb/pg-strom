@@ -100,16 +100,14 @@ union SQLtype
 union SQLstat__datum
 {
 	int8_t			i8;
-	int16_t			i16;
-	int32_t			i32;
-	int64_t			i64;
-	int128_t		i128;
 	uint8_t			u8;
+	int16_t			i16;
 	uint16_t		u16;
-	uint32_t		u32;
-	uint64_t		u64;
-	float			fp32;
-	double			fp64;
+	int32_t			i32;
+	int32_t			u32;
+	int64_t			i64;
+	int64_t			u64;
+	int128_t		i128;
 };
 
 struct SQLstat

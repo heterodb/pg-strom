@@ -85,24 +85,10 @@ write_int8_stat(SQLfield *attr, char *buf, size_t len,
 }
 
 static int
-write_uint8_stat(SQLfield *attr, char *buf, size_t len,
-				 const SQLstat__datum *datum)
-{
-	return snprintf(buf, len, "%u", (uint32_t)datum->u8);
-}
-
-static int
 write_int16_stat(SQLfield *attr, char *buf, size_t len,
 				 const SQLstat__datum *datum)
 {
 	return snprintf(buf, len, "%d", (int32_t)datum->i16);
-}
-
-static int
-write_uint16_stat(SQLfield *attr, char *buf, size_t len,
-				  const SQLstat__datum *datum)
-{
-	return snprintf(buf, len, "%u", (uint32_t)datum->u16);
 }
 
 static int
@@ -113,13 +99,6 @@ write_int32_stat(SQLfield *attr, char *buf, size_t len,
 }
 
 static int
-write_uint32_stat(SQLfield *attr, char *buf, size_t len,
-				  const SQLstat__datum *datum)
-{
-	return snprintf(buf, len, "%u", datum->u32);
-}
-
-static int
 write_int64_stat(SQLfield *attr, char *buf, size_t len,
 				 const SQLstat__datum *datum)
 {
@@ -127,26 +106,18 @@ write_int64_stat(SQLfield *attr, char *buf, size_t len,
 }
 
 static int
-write_uint64_stat(SQLfield *attr, char *buf, size_t len,
-				  const SQLstat__datum *datum)
-{
-	return snprintf(buf, len, "%lu", datum->u64);
-}
-
-static int
 write_int128_stat(SQLfield *attr, char *buf, size_t len,
 				  const SQLstat__datum *datum)
 {
 	int128_t	ival = datum->i128;
-	int128_t	zero = 0;
 	char		temp[64];
 	char	   *pos = temp + sizeof(temp) - 1;
 	bool		is_minus = false;
 
 	/* special case handling if INT128 min value */
-	if (ival == ~zero)
+	if (~ival == (int128_t)0)
 		return snprintf(buf, len, "-170141183460469231731687303715884105728");
-	else if (ival < 0)
+	if (ival < 0)
 	{
 		is_minus = true;
 		ival = -ival;
@@ -414,7 +385,7 @@ put_uint64_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 		
-		STAT_UPDATES(column,i64,value);
+		STAT_UPDATES(column,u64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -641,7 +612,7 @@ __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 						 int64_t adjustment, int arrow_sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64_t		value;
+	int64_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, arrow_sz);
@@ -661,6 +632,8 @@ __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 		else if (adjustment < 0)
 			value /= adjustment;
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -687,11 +660,11 @@ put_date_value(SQLfield *column, const char *addr, int sz)
 	{
 		case ArrowDateUnit__Day:
 			column->put_value = __put_date_day_value;
-			column->write_stat = write_uint32_stat;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowDateUnit__MilliSecond:
 			column->put_value = __put_date_ms_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeDate has unknown unit (%d)",
@@ -728,6 +701,8 @@ __put_time_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 			value /= -adjustment;
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -770,28 +745,28 @@ put_time_value(SQLfield *column, const char *addr, int sz)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [sec]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_sec_value;
-			column->write_stat = write_uint32_stat;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowTimeUnit__MilliSecond:
 			if (column->arrow_type.Time.bitWidth != 32)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ms]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_ms_value;
-			column->write_stat = write_uint32_stat;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowTimeUnit__MicroSecond:
 			if (column->arrow_type.Time.bitWidth != 64)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [us]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_us_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__NanoSecond:
 			if (column->arrow_type.Time.bitWidth != 64)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ns]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_ns_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeTime has unknown unit (%d)",
@@ -833,6 +808,8 @@ __put_timestamp_value_generic(SQLfield *column,
 			value /= adjustment;
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -872,19 +849,19 @@ put_timestamp_value(SQLfield *column, const char *addr, int sz)
 	{
 		case ArrowTimeUnit__Second:
 			column->put_value = __put_timestamp_sec_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__MilliSecond:
 			column->put_value = __put_timestamp_ms_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__MicroSecond:
 			column->put_value = __put_timestamp_us_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__NanoSecond:
 			column->put_value = __put_timestamp_ns_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeTimestamp has unknown unit (%d)",
@@ -1346,65 +1323,32 @@ assignArrowTypeInt(SQLfield *column, bool is_signed,
 {
 	initArrowNode(&column->arrow_type, Int);
 	column->arrow_type.Int.is_signed = is_signed;
-	if (is_signed)
+	switch (column->sql_type.pgsql.typlen)
 	{
-		switch (column->sql_type.pgsql.typlen)
-		{
-			case sizeof(char):
-				column->arrow_type.Int.bitWidth = 8;
-				column->put_value = put_int8_value;
-				column->write_stat = write_int8_stat;
-				break;
-			case sizeof(short):
-				column->arrow_type.Int.bitWidth = 16;
-				column->put_value = put_int16_value;
-				column->write_stat = write_int16_stat;
-				break;
-			case sizeof(int):
-				column->arrow_type.Int.bitWidth = 32;
-				column->put_value = put_int32_value;
-				column->write_stat = write_int32_stat;
-				break;
-			case sizeof(long):
-				column->arrow_type.Int.bitWidth = 64;
-				column->put_value = put_int64_value;
-				column->write_stat = write_int64_stat;
-				break;
-			default:
-				Elog("unsupported Int width: %d",
-					 column->sql_type.pgsql.typlen);
-				break;
-		}
-	}
-	else
-	{
-		switch (column->sql_type.pgsql.typlen)
-		{
-			case sizeof(char):
-				column->arrow_type.Int.bitWidth = 8;
-				column->put_value = put_uint8_value;
-				column->write_stat = write_uint8_stat;
-				break;
-			case sizeof(short):
-				column->arrow_type.Int.bitWidth = 16;
-				column->put_value = put_uint16_value;
-				column->write_stat = write_uint16_stat;
-				break;
-			case sizeof(int):
-				column->arrow_type.Int.bitWidth = 32;
-				column->put_value = put_uint32_value;
-				column->write_stat = write_uint64_stat;
-				break;
-			case sizeof(long):
-				column->arrow_type.Int.bitWidth = 64;
-				column->put_value = put_uint64_value;
-				column->write_stat = write_uint64_stat;
-				break;
-			default:
-				Elog("unsupported Int width: %d",
-					 column->sql_type.pgsql.typlen);
-				break;
-		}
+		case sizeof(char):
+			column->arrow_type.Int.bitWidth = 8;
+			column->put_value = (is_signed ? put_int8_value : put_uint8_value);
+			column->write_stat = write_int8_stat;
+			break;
+		case sizeof(short):
+			column->arrow_type.Int.bitWidth = 16;
+			column->put_value = (is_signed ? put_int16_value : put_uint16_value);
+			column->write_stat = write_int16_stat;
+			break;
+		case sizeof(int):
+			column->arrow_type.Int.bitWidth = 32;
+			column->put_value = (is_signed ? put_int32_value : put_uint32_value);
+			column->write_stat = write_int32_stat;
+			break;
+		case sizeof(long):
+			column->arrow_type.Int.bitWidth = 64;
+			column->put_value = (is_signed ? put_int64_value : put_uint64_value);
+			column->write_stat = write_int64_stat;
+			break;
+		default:
+			Elog("unsupported Int width: %d",
+				 column->sql_type.pgsql.typlen);
+			break;
 	}
 
 	if (arrow_field)
@@ -1429,19 +1373,19 @@ assignArrowTypeFloatingPoint(SQLfield *column, ArrowField *arrow_field)
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Half;
 			column->put_value = put_float16_value;
-			column->write_stat = write_uint16_stat;
+			column->write_stat = write_int16_stat;
 			break;
 		case sizeof(float):
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Single;
 			column->put_value = put_float32_value;
-			column->write_stat = write_uint32_stat;
+			column->write_stat = write_int32_stat;
 			break;
 		case sizeof(double):
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Double;
 			column->put_value = put_float64_value;
-			column->write_stat = write_uint64_stat;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("unsupported floating point width: %d",
