@@ -157,6 +157,7 @@ struct ArrowFdwState
 	List	   *gpuDirectFileDescList;	/* list of GPUDirectFileDesc */
 	List	   *fdescList;				/* list of File (buffered i/o) */
 	Bitmapset  *referenced;
+	Bitmapset  *stat_attrs;
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
@@ -188,7 +189,7 @@ static List	   *__arrowFdwExtractFilesList(List *options_list,
 										   int *p_parallel_nworkers,
 										   bool *p_writable);
 static List	   *arrowFdwExtractFilesList(List *options_list);
-static List	   *arrowLookupOrBuildMetadataCache(File fdesc);
+static List	   *arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs);
 static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   kern_colmeta *cmeta,
 								   size_t index,
@@ -414,7 +415,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			optimal_gpu = k;
 		else if (optimal_gpu != k)
 			optimal_gpu = -1;
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
@@ -958,14 +959,15 @@ error:
 	return false;
 }
 
-static void
+static bool
 __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 							 ArrowField *field,
-							 uint32 nrooms, bool *found)
+							 uint32 nrooms)
 {
 	const char *min_tokens = NULL;
 	const char *max_tokens = NULL;
 	int			j, k;
+	bool		retval = false;
 
 	for (k=0; k < field->_num_custom_metadata; k++)
 	{
@@ -985,7 +987,7 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 										 min_tokens,
 										 max_tokens))
 		{
-			*found = true;
+			retval = true;
 		}
 		else
 		{
@@ -1008,14 +1010,18 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		bstats->nfields = field->_num_children;
 		bstats->subfields = palloc0(sizeof(arrowStatsBinary) * bstats->nfields);
 		for (j=0; j < bstats->nfields; j++)
-			__buildArrowFieldStatsBinary(&bstats->subfields[j],
-										 &field->children[j],
-										 nrooms, found);
+		{
+			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
+											 &field->children[j],
+											 nrooms))
+				retval = true;
+		}
 	}
+	return retval;
 }
 
 static arrowStatsBinary *
-buildArrowStatsBinary(const ArrowFooter *footer)
+buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
 {
 	arrowStatsBinary *arrow_bstats;
 	int		j, ncols = footer->schema._num_fields;
@@ -1027,10 +1033,14 @@ buildArrowStatsBinary(const ArrowFooter *footer)
 	arrow_bstats->ncols = ncols;
 	for (j=0; j < ncols; j++)
 	{
-		__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
-									 &footer->schema.fields[j],
-									 footer->_num_recordBatches,
-									 &found);
+		if (__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
+										 &footer->schema.fields[j],
+										 footer->_num_recordBatches))
+		{
+			if (p_stat_attrs)
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+			found = true;
+		}
 	}
 	if (!found)
 	{
@@ -1362,6 +1372,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 	List		   *fdescList = NIL;
 	List		   *gpuDirectFileDescList = NIL;
 	Bitmapset	   *referenced = NULL;
+	Bitmapset	   *stat_attrs = NULL;
 	bool			whole_row_ref = false;
 	ArrowFdwState  *af_state;
 	List		   *rb_state_list = NIL;
@@ -1423,7 +1434,8 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 			gpuDirectFileDescList = lappend(gpuDirectFileDescList, dfile);
 		}
 
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, &stat_attrs);
+		elog(INFO, "file=[%s] stats=[%s]", fname, bms_to_cstring(stat_attrs));
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -1443,6 +1455,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
+	af_state->stat_attrs = stat_attrs;
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
 	i = 0;
 	foreach (lc, rb_state_list)
@@ -2200,7 +2213,7 @@ ArrowAcquireSampleRows(Relation relation,
 		}
 		fdescList = lappend_int(fdescList, fdesc);
 		
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -4374,7 +4387,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 fname, RelationGetRelationName(rel));
 		}
 		/* check schema compatibility */
-		rb_cached = arrowLookupOrBuildMetadataCache(filp);
+		rb_cached = arrowLookupOrBuildMetadataCache(filp, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -4516,7 +4529,8 @@ static int
 copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 					   RecordBatchFieldState *dest_tail,
 					   int nattrs,
-					   RecordBatchFieldState *columns)
+					   RecordBatchFieldState *columns,
+					   Bitmapset **p_stat_attrs)
 {
 	RecordBatchFieldState *dest_next = dest_curr + nattrs;
 	int		j, k, nslots = nattrs;
@@ -4526,21 +4540,27 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 
 	for (j=0; j < nattrs; j++)
 	{
-		dest_curr[j] = columns[j];
-		if (dest_curr[j].num_children == 0)
-			Assert(dest_curr[j].children == NULL);
+		RecordBatchFieldState *__dest = dest_curr + j;
+		RecordBatchFieldState *__orig = columns + j;
+
+		memcpy(__dest, __orig, sizeof(RecordBatchFieldState));
+		if (__dest->num_children == 0)
+			Assert(__dest->children == NULL);
 		else
 		{
-			dest_curr[j].children = dest_next;
+			__dest->children = dest_next;
 			k = copyMetadataFieldCache(dest_next,
 									   dest_tail,
-									   columns[j].num_children,
-									   columns[j].children);
+									   __orig->num_children,
+									   __orig->children,
+									   NULL);
 			if (k < 0)
 				return -1;
 			dest_next += k;
 			nslots += k;
 		}
+		if (p_stat_attrs && !__orig->stat_isnull)
+			*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
 	}
 	return nslots;
 }
@@ -4550,7 +4570,9 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
  *   - setup RecordBatchState from arrowMetadataCache
  */
 static RecordBatchState *
-makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
+makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
+							  File fdesc,
+							  Bitmapset **p_stat_attrs)
 {
 	RecordBatchState   *rbstate;
 
@@ -4566,7 +4588,8 @@ makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
 	copyMetadataFieldCache(rbstate->columns,
 						   rbstate->columns + mcache->nfields,
 						   mcache->ncols,
-						   mcache->fstate);
+						   mcache->fstate,
+						   p_stat_attrs);
 	return rbstate;
 }
 
@@ -4684,7 +4707,8 @@ __arrowBuildMetadataCache(List *rb_state_list, uint32 hash)
 			copyMetadataFieldCache(mtemp->fstate,
 								   mtemp->fstate + nfields,
 								   rbstate->ncols,
-								   rbstate->columns);
+								   rbstate->columns,
+								   NULL);
 		Assert(mtemp->nfields == nfields);
 
 		if (!mcache)
@@ -4731,7 +4755,7 @@ checkArrowRecordBatchIsVisible(RecordBatchState *rbstate,
  * arrowLookupOrBuildMetadataCache
  */
 List *
-arrowLookupOrBuildMetadataCache(File fdesc)
+arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs)
 {
 	MetadataCacheKey key;
 	struct stat	stat_buf;
@@ -4793,15 +4817,20 @@ retry:
 			}
 			/*
 			 * Ok, arrow file metadata cache found and still valid
+			 *
+			 * NOTE: we currently support min/max statistics on the top-
+			 * level variables only, not sub-field of the composite values.
 			 */
-			rbstate = makeRecordBatchStateFromCache(mcache, fdesc);
+			rbstate = makeRecordBatchStateFromCache(mcache, fdesc,
+													p_stat_attrs);
 			if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 				results = list_make1(rbstate);
 			dlist_foreach (iter2, &mcache->siblings)
 			{
 				arrowMetadataCache *__mcache
 					= dlist_container(arrowMetadataCache, chain, iter2.cur);
-				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc);
+				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc,
+														p_stat_attrs);
 				if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 					results = lappend(results, rbstate);
 			}
@@ -4842,7 +4871,7 @@ retry:
 			elog(DEBUG2, "arrow file '%s' contains no RecordBatch",
 				 FilePathName(fdesc));
 
-		arrow_bstats = buildArrowStatsBinary(&af_info.footer);
+		arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
 			RecordBatchState *rb_state;
