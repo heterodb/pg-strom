@@ -707,14 +707,14 @@ tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
  * GetOptimalGpuForFile
  */
 int
-GetOptimalGpuForFile(File fdesc)
+GetOptimalGpuForFile(File filp)
 {
-	struct stat	stat_buf;
+	int		fdesc = FileGetRawDesc(filp);
 
-	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
-
-	return extraSysfsLookupOptimalGpu(stat_buf.st_dev);
+	if (fdesc < 0)
+		elog(ERROR, "file [%s] is not opened now",
+			 FilePathName(filp));
+	return extraSysfsLookupOptimalGpu(fdesc);
 }
 
 /*
@@ -753,21 +753,23 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	{
 		PG_TRY();
 		{
-			char	   *pathname;
-			struct stat	stat_buf;
+			char   *pathname;
+			int		fdesc;
 
 			Assert(hentry->tablespace_oid == tablespace_oid);
 			hentry->optimal_gpu = -1;
 
 			pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-			if (stat(pathname, &stat_buf) != 0)
+			fdesc = open(pathname, O_RDONLY);
+			if (fdesc < 0)
 			{
-				elog(WARNING, "failed on stat('%s') of tablespace %u: %m",
+				elog(WARNING, "failed on open('%s') of tablespace %u: %m",
 					 pathname, tablespace_oid);
 			}
 			else
 			{
-				hentry->optimal_gpu = extraSysfsLookupOptimalGpu(stat_buf.st_dev);
+				hentry->optimal_gpu = extraSysfsLookupOptimalGpu(fdesc);
+				close(fdesc);
 			}
 		}
 		PG_CATCH();

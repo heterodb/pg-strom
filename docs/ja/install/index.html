@@ -228,8 +228,9 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン11.3以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン11.4以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
+<li>NVIDIA GPUDirect Storage (GDS)はCUDA Toolkit バージョン11.4以降に同梱されています。</li>
 </ul>
 </li>
 </ul>
@@ -240,13 +241,12 @@
 <li>HeteroDB NVME-Strom<ul>
 <li>2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。</li>
 <li>RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。</li>
-<li>NVME-oFにはRHEL7.9カーネルでのみ対応しています。</li>
 </ul>
 </li>
-<li>NVIDIA GPUDirect Storage (実験的)<ul>
+<li>NVIDIA GPUDirect Storage<ul>
 <li>NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。</li>
-<li>PG-Strom v3.0で実験的に対応しており、RHEL8.3、およびUbuntu 18.04/20.04に対応しています。</li>
-<li>HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能となる予定です。</li>
+<li>PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。</li>
+<li>HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。</li>
 </ul>
 </li>
 </ul>
@@ -504,10 +504,9 @@ DMA要求の発行から処理結果が返ってくるまでの時間があま�
 <code>p2p_dma_max_depth</code>パラメータは、NVMEデバイス毎に、一度にI/Oキューに投入する事のできる非同期P2P DMA要求の数を制御します。設定値以上のDMA要求を投入しようとすると、スレッドは現在実行中のDMAが完了するまでブロックされ、それによってNVMEデバイスの高負荷を避ける事が可能となります。</p>
 </div>
 <h2 id="nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</h2>
-<p>2021年5月現在、NVIDIA GPUDirect Storageは『パブリックベータ』というステータスで、まだ正式リリースには至っていません。
-そのため、PG-Stromにおいてもこれは実験的対応というステータスになっており、将来のアップデートにおいて予告なく仕様等が変更される可能性があります。</p>
-<p>GPUDirect Storageのソフトウェアスタックは、<a href="https://developer.nvidia.com/gpudirect-storage">こちら</a>から入手する事ができます。</p>
-<p>GPUDirect Storageにおいて、NVME-oFをサポートするには、Mellanox社のOpenFabrics Enterprise Distribution (MOFED) ドライバのインストールが必要です。
+<p>NVIDIA GPUDirect Storageは、2021年6月にリリースされた CUDA Toolkit バージョン11.4 の新機能です。</p>
+<p>GPUDirect Storageを用いて、ローカルのNVME-SSDやリモートのNVME-oFデバイスからの直接読出しを行うには、
+Mellanox社の提供するOpenFabrics Enterprise Distribution (MOFED) ドライバのインストールが必要です。
 MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
 <p>また、本節の内容は必ずしも最新のインストール手順を反映していない可能性があります。
 <a href="https://docs.nvidia.com/gpudirect-storage/">NVIDIA社の公式ドキュメント</a>もあわせて参照してください。</p>
@@ -553,33 +552,39 @@ parm:           register_always:Use memory registration even for contiguous memo
 <p><code>mlnxofedinstall</code>スクリプトの完了後に、<code>dracut -f</code>を実行するのを忘れないでください。</p>
 <h3 id="gpudirect-storage">GPUDirect Storageのインストール</h3>
 <p>続いて、GPUDirect Storageのインストールを行います。</p>
-<p>2021年5月現在、GPUDirect Storageのソフトウェアスタックはパブリックベータのステータスで、CUDA Toolkit本体には統合されていません。</p>
-<p>以下のインストール例に示す手順は、将来のバージョンにおいて変更される可能性があります。</p>
-<pre><code># rpm -ivh gpudirect-storage-local-repo-rhel8-0.95.1-cuda11.3-1.0-1.x86_64.rpm
-# dnf install nvidia-gds
+<pre><code># dnf install nvidia-gds
 </code></pre>
 <p>インストールが完了すると、<code>gdscheck</code>コマンドを用いてGPUDirect Storageの状態を検査する事ができます。
 ここまでの手順で、NVME（ローカルNVME-SSD）とNVME-oF（リモート接続）が<code>Supported</code>となっているはずです。</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
- GDS release version (beta): 0.95.1.12
- nvidia_fs version:  2.6 libcufile version: 2.3
- cuFile CONFIGURATION:
- NVMe           : Supported
- NVMeOF         : Supported
- SCSI           : Unsupported
- SCALEFLUX CSD  : Unsupported
- NVMesh         : Unsupported
- LUSTRE         : Unsupported
- GPFS           : Unsupported
- NFS            : Unsupported
- WEKAFS         : Unsupported
- USERSPACE RDMA : Unsupported
- --MOFED peer direct  : disabled
- --rdma library       : Not Loaded (libcufile_rdma.so)
- --rdma devices       : Not configured
- --rdma_device_status : Up: 0 Down: 0
- properties.use_compat_mode : 1
- properties.use_poll_mode : 0
+ GDS release version: 1.0.0.82
+ nvidia_fs version:  2.7 libcufile version: 2.4
+ ============
+ ENVIRONMENT:
+ ============
+ =====================
+ DRIVER CONFIGURATION:
+ =====================
+ NVMe               : Supported
+ NVMeOF             : Supported
+ SCSI               : Unsupported
+ ScaleFlux CSD      : Unsupported
+ NVMesh             : Unsupported
+ DDN EXAScaler      : Unsupported
+ IBM Spectrum Scale : Unsupported
+ NFS                : Unsupported
+ WekaFS             : Unsupported
+ Userspace RDMA     : Unsupported
+ --Mellanox PeerDirect : Enabled
+ --rdma library        : Not Loaded (libcufile_rdma.so)
+ --rdma devices        : Not configured
+ --rdma_device_status  : Up: 0 Down: 0
+ =====================
+ CUFILE CONFIGURATION:
+ =====================
+ properties.use_compat_mode : true
+ properties.gds_rdma_write_support : true
+ properties.use_poll_mode : false
  properties.poll_mode_max_size_kb : 4
  properties.max_batch_io_timeout_msecs : 5
  properties.max_direct_io_size_kb : 16384
@@ -589,18 +594,33 @@ parm:           register_always:Use memory registration even for contiguous memo
  properties.posix_pool_slab_count : 128 64 32
  properties.rdma_peer_affinity_policy : RoundRobin
  properties.rdma_dynamic_routing : 0
- fs.generic.posix_unaligned_writes : 0
+ fs.generic.posix_unaligned_writes : false
  fs.lustre.posix_gds_min_kb: 0
- fs.weka.rdma_write_support: 0
- profile.nvtx : 0
+ fs.weka.rdma_write_support: false
+ profile.nvtx : false
  profile.cufile_stats : 0
- miscellaneous.api_check_aggressive : 0
+ miscellaneous.api_check_aggressive : false
+ =========
  GPU INFO:
+ =========
  GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
  GPU index 1 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
- IOMMU : disabled
+ ==============
+ PLATFORM INFO:
+ ==============
+ IOMMU: disabled
  Platform verification succeeded
+
 </code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>RAIDを使用する場合の追加設定</strong></p>
+<p>GPUDirect Storageを利用してSoftware RAID (md-raid0) 区画からデータを読み出す場合、
+以下の一行を<code>/lib/udev/rules.d/63-md-raid-arrays.rules</code> 設定に追加する必要があります。</p>
+<p><code>IMPORT{​program}="/usr/sbin/mdadm --detail --export $devnode"</code></p>
+<p>その後、設定を反映させるためにシステムを再起動してください。
+詳しくは<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>を参照してください。</p>
+</div>
 <h2 id="postgresql">PostgreSQLのインストール</h2>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>

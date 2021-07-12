@@ -1,4 +1,7 @@
-* Wed Jun 16 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
+* Wed Jun 30 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-2
+- Built for CUDA11.4
+
+* Tue Jun 29 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
 - several PostGIS functions are added for GPU execution
 - GiST-index support was added for GpuJoin
 - GpuCache was added for small data workloads

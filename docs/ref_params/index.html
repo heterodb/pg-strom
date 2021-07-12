@@ -97,6 +97,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#executor-configuration">Executor Configuration</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpudirect-sql-configuration">GPUDirect SQL Configuration</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-cache-configuration">GPU Cache configuration</a>
@@ -212,6 +214,9 @@
 <dd>If <code>on</code>, it tries to reuse CUDA context on the next query execution, already constructed according to the previous query execution.</dd>
 <dd>Usually, construction of CUDA context takes 100-200ms, it may improve queries response time, on the other hands, it continue to occupy a part of GPU device memory on the down-side. So, we don't recommend to enable this parameter expect for benchmarking and so on.</dd>
 <dd>Also, this configuration makes no sense if query uses CPU parallel execution, because the worker processes shall always construct new CUDA context for each.</dd>
+</dl>
+<h2 id="gpudirect-sql-configuration">GPUDirect SQL Configuration</h2>
+<dl>
 <dt><code>pg_strom.gpudirect_driver</code> [type: <code>text</code>]</dt>
 <dd>It shows the driver software name of GPUDirect SQL (read-only).</dd>
 <dd>Either <code>nvidia cufile</code> or <code>heterodb nvme-strom</code></dd>
@@ -224,9 +229,32 @@
 <dd>Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases.</dd>
 <dd>It is only available when <code>nvidia cufile</code> driver is used.</dd>
 <dt><code>pg_strom.nvme_distance_map</code> [type: <code>text</code> / default: <code>null</code>]</dt>
-<dd>It manually configures the closest GPU for particular NVME devices.</dd>
-<dd>Its format string is <code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>; comma separated list of NVME-GPU pairs. (Examle: <code>nvme0:gpu0,nvme1:gpu0</code>)</dd>
-<dd>Automatic configuration is often sufficient for local NVME-SSD drives, however, you need to configure the closest GPU manually for NVME-oF devices.</dd>
+<dd>It manually configures the closest GPU for the particular storage devices, like NVME devices or NFS volumes.</dd>
+<dd>Its format string is <code>&lt;gpuX&gt;=(&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;)[;&lt;gpuY&gt;=...]</code>; semi-colon separated list of pairs of GPU and storage like NVME devices.</dd>
+<dd>(example: <code>gpu0=nvme1; gpu1=/mnt/nfs_volume</code>)</dd>
+<dd></dd>
+<dd>
+<ul>
+<li><code>&lt;gpuX&gt;</code> means a GPU with device identifier X.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>&lt;nvmeX&gt;</code> means a local NVME-SSD or a remote NVME-oF device.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>&lt;sfdvX&gt;</code> means a special device of CSD drives by ScaleFlux,Inc.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>/path/to/nfsmount</code> means a mount point by NFS volume with NFS-over-RDMA.</li>
+</ul>
+</dd>
+<dd></dd>
+<dd>Automatic configuration is often sufficient for local NVME-SSD drives, however, you should manually configure the closest GPU for NVME-oF or NFS-over-RDMA volumes.</dd>
 </dl>
 <h2 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h2>
 <dl>

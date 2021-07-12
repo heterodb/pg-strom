@@ -229,9 +229,32 @@
 <dd>cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。</dd>
 <dd><code>nvidia cufile</code>ドライバを使用する場合のみ有効です。</dd>
 <dt><code>pg_strom.nvme_distance_map</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
-<dd>NVME-SSDに最も近いGPUを手動で設定します。</dd>
-<dd>書式は<code>&lt;nvmeX&gt;:&lt;gpuX&gt;[,...]</code>で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：<code>nvme0:gpu0,nvme1:gpu0</code>）</dd>
-<dd>ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。</dd>
+<dd>NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。</dd>
+<dd>書式は<code>&lt;gpuX&gt;=(&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;)[;&lt;gpuY&gt;=...]</code>で、NVMEデバイスなどストレージと対応するGPUのペアをセミコロン区切りの文字列で記述します。</dd>
+<dd>（例：<code>gpu0=nvme1; gpu1=/mnt/nfs_volume</code>）</dd>
+<dd></dd>
+<dd>
+<ul>
+<li><code>&lt;gpuX&gt;</code>はデバイス番号Xを持つGPUです。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>&lt;nvmeX&gt;</code>はローカルのNVME-SSDまたはリモートのNVME-oFデバイスを意味します。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>&lt;sfdvX&gt;</code>はScaleFlux社製CSDドライブ用の専用デバイスを意味します。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>/path/to/nfsmount</code>はNFS-over-RDMAを用いてマウントしたNFS区画のマウントポイントです。</li>
+</ul>
+</dd>
+<dd></dd>
+<dd>ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。</dd>
 </dl>
 <h2 id="arrow_fdw">Arrow_Fdw関連の設定</h2>
 <dl>

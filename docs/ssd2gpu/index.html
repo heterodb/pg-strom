@@ -166,45 +166,28 @@
                 <h1 id="gpu-direct-sql-execution">GPU Direct SQL Execution</h1>
 <h2 id="overview">Overview</h2>
 <p>For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.</p>
-<p>SSD-to-GPU Direct SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.</p>
+<p>GPUDirect SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.</p>
 <p>Usually, PostgreSQL data blocks on the storage shall be once loaded to CPU/RAM through the PCIe bus, then, PostgreSQL runs WHERE-clause for filtering or JOIN/GROUP BY according to the query execution plan. Due to the characteristics of analytic workloads, the amount of result data set is much smaller than the source data set. For example, it is not rare case to read billions rows but output just hundreds rows after the aggregation operations with GROUP BY.</p>
 <p>In the other words, we consume bandwidth of the PCIe bus to move junk data, however, we cannot determine whether rows are necessary or not prior to the evaluation by SQL workloads on CPU. So, it is not avoidable restriction in usual implementation.</p>
 <p><img alt="SSD2GPU Direct SQL Execution Overview" src="../img/ssd2gpu-overview.png" /></p>
-<p>SSD-to-GPU Direct SQL Execution changes the flow to read blocks from the storage sequentially. It directly loads data blocks to GPU using peer-to-peer DMA over PCIe bus, then runs SQL workloads on GPU device to reduce number of rows to be processed by CPU. In other words, it utilizes GPU as a pre-processor of SQL which locates in the middle of the storage and CPU/RAM for reduction of CPU's load, then tries to accelerate I/O processing in the results.</p>
-<p>This feature internally uses NVIDIA GPUDirect RDMA. It allows peer-to-peer data transfer over PCIe bus between GPU device memory and third parth device by coordination using a custom Linux kernel module.
-So, this feature requires NVMe-Strom driver which is a Linux kernel module in addition to PG-Strom which is a PostgreSQL extension module.</p>
-<p>Also note that this feature supports only NVMe-SSD. It does not support SAS or SATA SSD.
-We have tested several NVMe-SSD models. You can refer <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> for your information.</p>
+<p>GPU Direct SQL Execution changes the flow to read blocks from the storage sequentially. It directly loads data blocks to GPU using peer-to-peer DMA over PCIe bus, then runs SQL workloads on GPU device to reduce number of rows to be processed by CPU. In other words, it utilizes GPU as a pre-processor of SQL which locates in the middle of the storage and CPU/RAM for reduction of CPU's load, then tries to accelerate I/O processing in the results.</p>
+<p>This feature internally uses either of NVIDIA GPUDirect Storage module or NVME-Strom module (if RHEL7/CentOS7), that is a Linux kernel module originally designed by HeteroDB, to coordinate P2P data transfer from NVME storage to GPU device memory.
+So, this feature requires either of the above Linux kernel modules, in addition to PG-Strom as an extension of PostgreSQL.</p>
+<p>Also note that this feature supports only NVME-SSD or NVME-oF remove devices.
+It does not support legacy storages like SAS or SATA-SSD.
+We have tested several NVMD-SSD models. You can refer <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> for your information.</p>
 <h2 id="system-setup">System Setup</h2>
 <h3 id="driver-installation">Driver Installation</h3>
-<p><code>nvme_strom</code> package is required to activate GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.</p>
-<p>If <code>heterodb-swdc</code> package is already installed, you can install the package by <code>yum</code> command.</p>
-<pre><code>$ sudo yum install nvme_strom
-            :
-================================================================================
- Package             Arch            Version            Repository         Size
-================================================================================
-Installing:
- nvme_strom          x86_64          0.8-1.el7          heterodb          178 k
-
-Transaction Summary
-================================================================================
-Install  1 Package
-            :
-DKMS: install completed.
-  Verifying  : nvme_strom-0.8-1.el7.x86_64                                  1/1
-
-Installed:
-  nvme_strom.x86_64 0:0.8-1.el7
-
-Complete!
-</code></pre>
-<p>Once <code>nvme_strom</code> package gets installed, you can see <code>nvme_strom</code> module using <code>lsmod</code> command below.</p>
-<pre><code>$ lsmod | grep nvme
-nvme_strom             12625  0
-nvme                   27722  4
-nvme_core              52964  9 nvme
-</code></pre>
+<p>When PG-Strom is used on a RHEL7/CentOS7 platform, for existing PG-Strom systems in other words, GPUDirect SQL Execution requires NVME-Strom driver by HeteroDB.</p>
+<p>See the ("Install" -&gt; "heterodb-kmod Installation")[../install/#heterodb-kmod] of this manual for more details.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>GPUDirect SQL by NVME-Strom driver supports only local NVME-SSD drives.
+We <strong>experimentally</strong> provide a driver for NVME-oF devices, but don't recommend to use in commercial systems.</p>
+</div>
+<p>For usage of PG-Strom on the platform other than RHEL7/CentOS7, for newly installed PG-Strom systems in other words, GPUDirect SQL Execution requires NVIDIA GPUDirect Storage.</p>
+<p>It also requires to install the MOFED(Mellanox Open Fabrics Enterprise Distribution) driver with support of GPUDirect Storage, in addition to the GPUDirect Storage module itself.</p>
+<p>See the (「インストール」⇒「NVIDIA GPUDirect Storage」)[../install/#nvidia-gpudirect-storage] of this manual for more details.</p>
 <h3 id="designing-tablespace">Designing Tablespace</h3>
 <p>GPU Direct SQL Execution shall be invoked in the following case.</p>
 <ul>

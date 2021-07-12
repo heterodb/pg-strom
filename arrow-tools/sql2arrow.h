@@ -2,10 +2,6 @@
 #define SQL2ARROW_H
 #include "arrow_ipc.h"
 
-/* int128_t */
-typedef __int128			int128_t;
-typedef unsigned __int128	uint128_t;
-
 typedef struct userConfigOption     userConfigOption;
 struct userConfigOption
 {

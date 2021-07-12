@@ -33,13 +33,6 @@
 #define __ntoh64(x)			pg_ntoh64(x)
 #endif	/* WORDS_BIGENDIAN */
 
-#ifdef HAVE_INT128
-typedef PG_INT128_TYPE			int128_t;
-typedef unsigned PG_INT128_TYPE	uint128_t;
-#else
-#error "int128 must be enabled to build arrow_pgsql.c"
-#endif	/* HAVE_INT128 */
-
 #else	/* !__PGSTROM_MODULE__! */
 /* if built as a part of standalone software */
 #include "sql2arrow.h"
@@ -74,6 +67,73 @@ typedef struct
 
 #include "arrow_ipc.h"
 
+/*
+ * callbacks to write out min/max statistics
+ */
+static int
+write_null_stat(SQLfield *attr, char *buf, size_t len,
+				const SQLstat__datum *datum)
+{
+	return snprintf(buf, len, "null");
+}
+
+static int
+write_int8_stat(SQLfield *attr, char *buf, size_t len,
+				const SQLstat__datum *datum)
+{
+	return snprintf(buf, len, "%d", (int32_t)datum->i8);
+}
+
+static int
+write_int16_stat(SQLfield *attr, char *buf, size_t len,
+				 const SQLstat__datum *datum)
+{
+	return snprintf(buf, len, "%d", (int32_t)datum->i16);
+}
+
+static int
+write_int32_stat(SQLfield *attr, char *buf, size_t len,
+				 const SQLstat__datum *datum)
+{
+	return snprintf(buf, len, "%d", datum->i32);
+}
+
+static int
+write_int64_stat(SQLfield *attr, char *buf, size_t len,
+				 const SQLstat__datum *datum)
+{
+	return snprintf(buf, len, "%ld", datum->i64);
+}
+
+static int
+write_int128_stat(SQLfield *attr, char *buf, size_t len,
+				  const SQLstat__datum *datum)
+{
+	int128_t	ival = datum->i128;
+	char		temp[64];
+	char	   *pos = temp + sizeof(temp) - 1;
+	bool		is_minus = false;
+
+	/* special case handling if INT128 min value */
+	if (~ival == (int128_t)0)
+		return snprintf(buf, len, "-170141183460469231731687303715884105728");
+	if (ival < 0)
+	{
+		is_minus = true;
+		ival = -ival;
+	}
+
+	*pos = '\0';
+	do {
+		int		dig = ival % 10;
+
+		*--pos = ('0' + dig);
+		ival /= 10;
+	} while (ival != 0);
+
+	return snprintf(buf, len, "%s%s", (is_minus ? "-" : ""), pos);
+}
+
 /* ----------------------------------------------------------------
  *
  * Put value handler for each data types
@@ -102,6 +162,26 @@ __buffer_usage_varlena_type(SQLfield *column)
 		usage += ARROWALIGN(column->nullmap.usage);
 	return usage;
 }
+
+#define STAT_UPDATES(COLUMN,FIELD,VALUE)					\
+	do {													\
+		if ((COLUMN)->stat_enabled)							\
+		{													\
+			if (!(COLUMN)->stat_datum.is_valid)				\
+			{												\
+				(COLUMN)->stat_datum.min.FIELD = VALUE;		\
+				(COLUMN)->stat_datum.max.FIELD = VALUE;		\
+				(COLUMN)->stat_datum.is_valid = true;		\
+			}												\
+			else											\
+			{												\
+				if ((COLUMN)->stat_datum.min.FIELD > VALUE)	\
+					(COLUMN)->stat_datum.min.FIELD = VALUE;	\
+				if ((COLUMN)->stat_datum.max.FIELD < VALUE)	\
+					(COLUMN)->stat_datum.max.FIELD = VALUE;	\
+			}												\
+		}													\
+	} while(0)
 
 static size_t
 put_bool_value(SQLfield *column, const char *addr, int sz)
@@ -145,6 +225,27 @@ static size_t
 put_int8_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
+	int8_t		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int8_t));
+	else
+	{
+		assert(sz == sizeof(int8_t));
+		value = *((const int8_t *)addr);
+
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int8_t));
+
+		STAT_UPDATES(column,i8,value);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_uint8_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
 	uint8_t		value;
 
 	if (!addr)
@@ -153,12 +254,12 @@ put_int8_value(SQLfield *column, const char *addr, int sz)
 	{
 		assert(sz == sizeof(uint8_t));
 		value = *((const uint8_t *)addr);
-
-		if (!column->arrow_type.Int.is_signed && value > INT8_MAX)
+		if (value > INT8_MAX)
 			Elog("Uint8 cannot store negative values");
-
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(uint8_t));
+
+		STAT_UPDATES(column,u8,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -167,7 +268,27 @@ static size_t
 put_int16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint16_t		value;
+	int16_t		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int16_t));
+	else
+	{
+		assert(sz == sizeof(int16_t));
+		value = __ntoh16(*((const uint16_t *)addr));
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,i16,value);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_uint16_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+	uint16_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint16_t));
@@ -175,10 +296,12 @@ put_int16_value(SQLfield *column, const char *addr, int sz)
 	{
 		assert(sz == sizeof(uint16_t));
 		value = __ntoh16(*((const uint16_t *)addr));
-		if (!column->arrow_type.Int.is_signed && value > INT16_MAX)
+		if (value > INT16_MAX)
 			Elog("Uint16 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,u16,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -187,7 +310,7 @@ static size_t
 put_int32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32_t		value;
+	uint32_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint32_t));
@@ -195,10 +318,32 @@ put_int32_value(SQLfield *column, const char *addr, int sz)
 	{
 		assert(sz == sizeof(uint32_t));
 		value = __ntoh32(*((const uint32_t *)addr));
-		if (!column->arrow_type.Int.is_signed && value > INT32_MAX)
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,i32,value);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_uint32_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+	uint32_t	value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(uint32_t));
+	else
+	{
+		assert(sz == sizeof(uint32_t));
+		value = __ntoh32(*((const uint32_t *)addr));
+		if (value > INT32_MAX)
 			Elog("Uint32 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,u32,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -207,7 +352,7 @@ static size_t
 put_int64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64_t		value;
+	int64_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint64_t));
@@ -215,10 +360,32 @@ put_int64_value(SQLfield *column, const char *addr, int sz)
 	{
 		assert(sz == sizeof(uint64_t));
 		value = __ntoh64(*((const uint64_t *)addr));
-		if (!column->arrow_type.Int.is_signed && value > INT64_MAX)
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sz);
+		
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_uint64_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+	int64_t		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(uint64_t));
+	else
+	{
+		assert(sz == sizeof(uint64_t));
+		value = __ntoh64(*((const uint64_t *)addr));
+		if (value > INT64_MAX)
 			Elog("Uint64 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+		
+		STAT_UPDATES(column,u64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -240,6 +407,8 @@ put_float16_value(SQLfield *column, const char *addr, int sz)
 		value = __ntoh16(*((const uint16_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,i16,(int16_t)value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -258,6 +427,8 @@ put_float32_value(SQLfield *column, const char *addr, int sz)
 		value = __ntoh32(*((const uint32_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,i32,(int32_t)value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -276,6 +447,8 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 		value = __ntoh64(*((const uint64_t *)addr));
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
+
+		STAT_UPDATES(column,i64,(int64_t)value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -425,6 +598,8 @@ put_decimal_value(SQLfield *column,
 
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(value));
+
+		STAT_UPDATES(column,i128,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -437,7 +612,7 @@ __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 						 int64_t adjustment, int arrow_sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64_t		value;
+	int64_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, arrow_sz);
@@ -457,6 +632,8 @@ __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 		else if (adjustment < 0)
 			value /= adjustment;
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -483,9 +660,11 @@ put_date_value(SQLfield *column, const char *addr, int sz)
 	{
 		case ArrowDateUnit__Day:
 			column->put_value = __put_date_day_value;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowDateUnit__MilliSecond:
 			column->put_value = __put_date_ms_value;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeDate has unknown unit (%d)",
@@ -522,6 +701,8 @@ __put_time_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 			value /= -adjustment;
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -564,24 +745,28 @@ put_time_value(SQLfield *column, const char *addr, int sz)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [sec]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_sec_value;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowTimeUnit__MilliSecond:
 			if (column->arrow_type.Time.bitWidth != 32)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ms]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_ms_value;
+			column->write_stat = write_int32_stat;
 			break;
 		case ArrowTimeUnit__MicroSecond:
 			if (column->arrow_type.Time.bitWidth != 64)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [us]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_us_value;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__NanoSecond:
 			if (column->arrow_type.Time.bitWidth != 64)
 				Elog("ArrowTypeTime has inconsistent bitWidth(%d) for [ns]",
 					 column->arrow_type.Time.bitWidth);
 			column->put_value = __put_time_ns_value;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeTime has unknown unit (%d)",
@@ -623,6 +808,8 @@ __put_timestamp_value_generic(SQLfield *column,
 			value /= adjustment;
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, arrow_sz);
+
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -662,15 +849,19 @@ put_timestamp_value(SQLfield *column, const char *addr, int sz)
 	{
 		case ArrowTimeUnit__Second:
 			column->put_value = __put_timestamp_sec_value;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__MilliSecond:
 			column->put_value = __put_timestamp_ms_value;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__MicroSecond:
 			column->put_value = __put_timestamp_us_value;
+			column->write_stat = write_int64_stat;
 			break;
 		case ArrowTimeUnit__NanoSecond:
 			column->put_value = __put_timestamp_ns_value;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("ArrowTypeTimestamp has unknown unit (%d)",
@@ -1136,19 +1327,23 @@ assignArrowTypeInt(SQLfield *column, bool is_signed,
 	{
 		case sizeof(char):
 			column->arrow_type.Int.bitWidth = 8;
-			column->put_value = put_int8_value;
+			column->put_value = (is_signed ? put_int8_value : put_uint8_value);
+			column->write_stat = write_int8_stat;
 			break;
 		case sizeof(short):
 			column->arrow_type.Int.bitWidth = 16;
-			column->put_value = put_int16_value;
+			column->put_value = (is_signed ? put_int16_value : put_uint16_value);
+			column->write_stat = write_int16_stat;
 			break;
 		case sizeof(int):
 			column->arrow_type.Int.bitWidth = 32;
-			column->put_value = put_int32_value;
+			column->put_value = (is_signed ? put_int32_value : put_uint32_value);
+			column->write_stat = write_int32_stat;
 			break;
 		case sizeof(long):
 			column->arrow_type.Int.bitWidth = 64;
-			column->put_value = put_int64_value;
+			column->put_value = (is_signed ? put_int64_value : put_uint64_value);
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("unsupported Int width: %d",
@@ -1178,16 +1373,19 @@ assignArrowTypeFloatingPoint(SQLfield *column, ArrowField *arrow_field)
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Half;
 			column->put_value = put_float16_value;
+			column->write_stat = write_int16_stat;
 			break;
 		case sizeof(float):
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Single;
 			column->put_value = put_float32_value;
+			column->write_stat = write_int32_stat;
 			break;
 		case sizeof(double):
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Double;
 			column->put_value = put_float64_value;
+			column->write_stat = write_int64_stat;
 			break;
 		default:
 			Elog("unsupported floating point width: %d",
@@ -1286,6 +1484,7 @@ assignArrowTypeDecimal(SQLfield *column, ArrowField *arrow_field)
 	column->arrow_type.Decimal.precision = precision;
 	column->arrow_type.Decimal.scale = scale;
 	column->put_value = put_decimal_value;
+	column->write_stat = write_int128_stat;
 
 	return 2;		/* nullmap + values */
 }
@@ -1304,6 +1503,7 @@ assignArrowTypeDate(SQLfield *column, ArrowField *arrow_field)
 	initArrowNode(&column->arrow_type, Date);
 	column->arrow_type.Date.unit = unit;
 	column->put_value = put_date_value;
+	column->write_stat = write_null_stat;
 
 	return 2;		/* nullmap + values */
 }
@@ -1323,6 +1523,7 @@ assignArrowTypeTime(SQLfield *column, ArrowField *arrow_field)
 	column->arrow_type.Time.unit = unit;
 	column->arrow_type.Time.bitWidth = 64;
 	column->put_value = put_time_value;
+	column->write_stat = write_null_stat;
 
 	return 2;		/* nullmap + values */
 }
@@ -1347,6 +1548,7 @@ assignArrowTypeTimestamp(SQLfield *column, const char *tz_name,
 		column->arrow_type.Timestamp._timezone_len = strlen(tz_name);
 	}
 	column->put_value = put_timestamp_value;
+	column->write_stat = write_null_stat;
 
 	return 2;		/* nullmap + values */
 }
