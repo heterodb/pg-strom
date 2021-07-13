@@ -1748,10 +1748,21 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 						  &TTSOpsVirtual);
 	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
+	/*
+	 * @gss->dev_quals for CPU fallback (and min/max statistics of
+	 * Arrow files) references raw tuples regardless of the device
+	 * projection. So, its Var-node must be initialized to reference
+	 * the raw relation.
+	 */
+	dev_quals_raw = (List *)
+		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
+								cscan->custom_scan_tlist);
+
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
 							GpuTaskKind_GpuScan,
+							dev_quals_raw,
 							gs_info->outer_refs,
 							gs_info->used_params,
 							gs_info->optimal_gpu,
@@ -1763,17 +1774,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
 
-	/*
-	 * initialize device qualifiers/projection stuff, for CPU fallback
-	 *
-	 * @dev_quals for CPU fallback references raw tuples regardless of device
-	 * projection. So, it must be initialized to reference the raw tuples.
-	 */
-	dev_quals_raw = (List *)
-		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
-								cscan->custom_scan_tlist);
+	/* initialize device qualifiers/projection stuff, for CPU fallback */
 	gss->dev_quals = ExecInitQual(dev_quals_raw, &gss->gts.css.ss.ps);
-
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);

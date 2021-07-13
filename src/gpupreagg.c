@@ -4169,6 +4169,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,
 							GpuTaskKind_GpuPreAgg,
+							gpa_info->outer_quals,
 							gpa_info->outer_refs,
 							gpa_info->used_params,
 							gpa_info->optimal_gpu,

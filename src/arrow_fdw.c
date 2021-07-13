@@ -106,6 +106,20 @@ initMetadataCacheKey(MetadataCacheKey *mkey, dev_t st_dev, ino_t st_ino)
 }
 
 /*
+ * executor hint by min/max statistics per record batch
+ */
+typedef struct
+{
+	List		   *orig_quals;
+	List		   *eval_quals;
+	ExprState	   *eval_state;
+	Bitmapset	   *stat_attrs;
+	Bitmapset	   *load_attrs;
+	TupleTableSlot *min_values;
+	TupleTableSlot *max_values;
+} arrowStatsHint;
+
+/*
  * MVCC state for the pending writes
  */
 typedef struct
@@ -157,7 +171,7 @@ struct ArrowFdwState
 	List	   *gpuDirectFileDescList;	/* list of GPUDirectFileDesc */
 	List	   *fdescList;				/* list of File (buffered i/o) */
 	Bitmapset  *referenced;
-	Bitmapset  *stat_attrs;
+	arrowStatsHint *stats_hint;
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
@@ -1102,6 +1116,227 @@ applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats
 	}
 }
 
+static bool
+__buildArrowStatsOper(arrowStatsHint *arange,
+					  ScanState *ss,
+					  OpExpr *op,
+					  bool reverse)
+{
+	Index		scanrelid = ((Scan *)ss->ps.plan)->scanrelid;
+	Oid			opcode;
+	Var		   *var;
+	Node	   *arg;
+	Expr	   *expr;
+	Oid			opfamily = InvalidOid;
+	StrategyNumber strategy = InvalidStrategy;
+	CatCList   *catlist;
+	int			i;
+
+	if (!reverse)
+	{
+		opcode = op->opno;
+		var = linitial(op->args);
+		arg = lsecond(op->args);
+	}
+	else
+	{
+		opcode = get_commutator(op->opno);
+		var = lsecond(op->args);
+		arg = linitial(op->args);
+	}
+	/* Is it VAR <OPER> ARG form? */
+	if (!IsA(var, Var) || var->varno != scanrelid)
+		return false;
+	if (!bms_is_member(var->varattno, arange->stat_attrs))
+		return false;
+	if (contain_var_clause(arg) ||
+		contain_volatile_functions(arg))
+		return false;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opcode));
+	for (i=0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (amop->amopmethod == BRIN_AM_OID)
+		{
+			opfamily = amop->amopfamily;
+			strategy = amop->amopstrategy;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/* (VAR < ARG) --> (Min < ARG) */
+		/* (VAR <= ARG) --> (Min <= ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+		strategy == BTGreaterStrategyNumber)
+	{
+		/* (VAR >= ARG) --> (Max >= ARG) */
+		/* (VAR > ARG) --> (Max > ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/* (VAR = ARG) --> (Max >= ARG && Min <= ARG) */
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTGreaterEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTLessEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else
+	{
+		return false;
+	}
+	arange->load_attrs = bms_add_member(arange->load_attrs,
+										var->varattno);
+	return true;
+}
+
+static arrowStatsHint *
+execInitArrowStatsHint(ScanState *ss,
+					   Bitmapset *stat_attrs,
+					   List *outer_quals)
+{
+	Relation	relation = ss->ss_currentRelation;
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	arrowStatsHint temp;
+	arrowStatsHint *result;
+	Expr	   *eval_expr;
+	ListCell   *lc;
+
+	memset(&temp, 0, sizeof(arrowStatsHint));
+	temp.stat_attrs = stat_attrs;
+	foreach (lc, outer_quals)
+	{
+		OpExpr *op = lfirst(lc);
+
+		if (IsA(op, OpExpr) && list_length(op->args) == 2 &&
+			(__buildArrowStatsOper(&temp, ss, op, false) ||
+			 __buildArrowStatsOper(&temp, ss, op, true)))
+		{
+			temp.orig_quals = lappend(temp.orig_quals, copyObject(op));
+		}
+	}
+	if (!temp.orig_quals)
+		return NULL;
+
+	Assert(list_length(temp.eval_quals) > 0);
+	if (list_length(temp.eval_quals) == 1)
+		eval_expr = linitial(temp.eval_quals);
+	else
+		eval_expr = make_andclause(temp.eval_quals);
+	
+	result = palloc0(sizeof(arrowStatsHint));
+	result->orig_quals = temp.orig_quals;
+	result->eval_quals = temp.eval_quals;
+	result->eval_state = ExecInitExpr(eval_expr, &ss->ps);
+	result->stat_attrs = bms_copy(stat_attrs);
+	result->load_attrs = temp.load_attrs;
+	result->min_values = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	result->max_values = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+
+	return result;
+}
+
+static void
+execEndArrowStatsHint(arrowStatsHint *stats_hint)
+{
+	ExecDropSingleTupleTableSlot(stats_hint->min_values);
+	ExecDropSingleTupleTableSlot(stats_hint->max_values);
+}
+
+static void
+explainArrowStatsHint(arrowStatsHint *stats_hint, Relation frel, ExplainState *es)
+{
+	TupleDesc   tupdesc = RelationGetDescr(frel);
+	int			anum;
+	StringInfoData  buf;
+
+	/* shows columns with stats-hint */
+	initStringInfo(&buf);
+	for (anum = bms_next_member(stats_hint->load_attrs, -1);
+		 anum >= 0;
+		 anum = bms_next_member(stats_hint->load_attrs, anum))
+    {
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
+		const char	   *attName = NameStr(attr->attname);
+
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, quote_identifier(attName));
+	}
+	ExplainPropertyText("stats_hint", buf.data, es);
+	pfree(buf.data);
+}
+
 /*
  * Routines to setup record-batches
  */
@@ -1364,8 +1599,12 @@ makeRecordBatchState(ArrowSchema *schema,
  * ExecInitArrowFdw
  */
 ArrowFdwState *
-ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
+ExecInitArrowFdw(ScanState *ss,
+				 GpuContext *gcontext,
+				 List *outer_quals,
+				 Bitmapset *outer_refs)
 {
+	Relation		relation = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = NIL;
@@ -1435,7 +1674,6 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 		}
 
 		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, &stat_attrs);
-		elog(INFO, "file=[%s] stats=[%s]", fname, bms_to_cstring(stat_attrs));
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -1455,7 +1693,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
-	af_state->stat_attrs = stat_attrs;
+	af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs, outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
 	i = 0;
 	foreach (lc, rb_state_list)
@@ -1485,7 +1723,10 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 			referenced = bms_add_member(referenced, j -
 										FirstLowInvalidHeapAttributeNumber);
 	}
-	node->fdw_state = ExecInitArrowFdw(NULL, relation, referenced);
+	node->fdw_state = ExecInitArrowFdw(&node->ss,
+									   NULL,
+									   fscan->scan.plan.qual,
+									   referenced);
 }
 
 typedef struct
@@ -1961,6 +2202,8 @@ ExecEndArrowFdw(ArrowFdwState *af_state)
 		untrackRawFileDesc(af_state->gcontext, dfile);
 		gpuDirectFileDescClose(dfile);
 	}
+	if (af_state->stats_hint)
+		execEndArrowStatsHint(af_state->stats_hint);
 }
 
 static void
@@ -2001,6 +2244,10 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		}
 	}
 	ExplainPropertyText("referenced", buf.data, es);
+
+	/* shows stats hint if any */
+	if (af_state->stats_hint)
+		explainArrowStatsHint(af_state->stats_hint, frel, es);
 
 	/* shows files on behalf of the foreign table */
 	foreach (lc, af_state->fdescList)

@@ -272,6 +272,7 @@ void
 pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuContext *gcontext,
 						GpuTaskKind task_kind,
+						List *outer_quals,
 						List *outer_refs_list,
 						List *used_params,
 						cl_int optimal_gpu,
@@ -318,8 +319,10 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 			}
 		}
 		if (RelationIsArrowFdw(relation))
-			gts->af_state = ExecInitArrowFdw(optimal_gpu < 0 ? NULL : gcontext,
-											 relation, outer_refs);
+			gts->af_state = ExecInitArrowFdw(&gts->css.ss,
+											 (optimal_gpu < 0 ? NULL : gcontext),
+											 outer_quals,
+											 outer_refs);
 		if (RelationHasGpuCache(relation))
 			gts->gc_state = ExecInitGpuCache(&gts->css.ss, eflags, outer_refs);
 		/* we never use Apache Arrow and GPU Cache simultaneously */

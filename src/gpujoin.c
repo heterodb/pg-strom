@@ -3489,6 +3489,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gjs->gts,
 							gjs->gts.gcontext,
 							GpuTaskKind_GpuJoin,
+							gj_info->outer_quals,
 							gj_info->outer_refs,
 							gj_info->used_params,
 							gj_info->optimal_gpu,

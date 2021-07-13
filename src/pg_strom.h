@@ -48,6 +48,7 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_amop.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
@@ -925,6 +926,7 @@ extern kern_parambuf *construct_kern_parambuf(List *used_params,
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,
+									List *outer_quals,
 									List *outer_refs,
 									List *used_params,
 									cl_int optimal_gpu,
@@ -1266,8 +1268,9 @@ extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
 
-extern ArrowFdwState *ExecInitArrowFdw(GpuContext *gcontext,
-									   Relation relation,
+extern ArrowFdwState *ExecInitArrowFdw(ScanState *ss,
+									   GpuContext *gcontext,
+									   List *outer_quals,
 									   Bitmapset *outer_refs);
 extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
 extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
