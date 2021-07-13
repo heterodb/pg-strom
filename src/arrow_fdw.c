@@ -173,7 +173,9 @@ struct ArrowFdwState
 	Bitmapset  *referenced;
 	arrowStatsHint *stats_hint;
 	pg_atomic_uint32   *rbatch_index;
-	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
+	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nskip;
+	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
 	cl_ulong	curr_index;			/* current index to row on KDS */
 	/* state of RecordBatches */
@@ -1314,24 +1316,46 @@ execEndArrowStatsHint(arrowStatsHint *stats_hint)
 }
 
 static void
-explainArrowStatsHint(arrowStatsHint *stats_hint, Relation frel, ExplainState *es)
+explainArrowStatsHint(arrowStatsHint *stats_hint,
+					  Relation frel,
+					  ExplainState *es, List *dcontext)
 {
 	TupleDesc   tupdesc = RelationGetDescr(frel);
-	int			anum;
 	StringInfoData  buf;
 
 	/* shows columns with stats-hint */
 	initStringInfo(&buf);
-	for (anum = bms_next_member(stats_hint->load_attrs, -1);
-		 anum >= 0;
-		 anum = bms_next_member(stats_hint->load_attrs, anum))
-    {
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
-		const char	   *attName = NameStr(attr->attname);
+	if (dcontext == NIL)
+	{
+		int		anum;
 
-		if (buf.len > 0)
-			appendStringInfoString(&buf, ", ");
-		appendStringInfoString(&buf, quote_identifier(attName));
+		for (anum = bms_next_member(stats_hint->load_attrs, -1);
+			 anum >= 0;
+			 anum = bms_next_member(stats_hint->load_attrs, anum))
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
+			const char	   *attName = NameStr(attr->attname);
+
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, quote_identifier(attName));
+		}
+	}
+	else
+	{
+		ListCell   *lc;
+
+		foreach (lc, stats_hint->orig_quals)
+		{
+			Node   *qual = lfirst(lc);
+			char   *temp;
+
+			temp = deparse_expression(qual, dcontext, es->verbose, false);
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, temp);
+			pfree(temp);
+		}
 	}
 	ExplainPropertyText("stats_hint", buf.data, es);
 	pfree(buf.data);
@@ -1695,6 +1719,7 @@ ExecInitArrowFdw(ScanState *ss,
 	af_state->referenced = referenced;
 	af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs, outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 	i = 0;
 	foreach (lc, rb_state_list)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
@@ -2216,13 +2241,17 @@ ArrowEndForeignScan(ForeignScanState *node)
  * ArrowExplainForeignScan 
  */
 void
-ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
+ExplainArrowFdw(ArrowFdwState *af_state,
+				Relation frel,
+				ExplainState *es,
+				List *dcontext)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	ListCell   *lc;
 	int			fcount = 0;
 	char		label[80];
 	size_t	   *chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
+	uint32		nskip;
 	int			i, j, k;
 	StringInfoData	buf;
 
@@ -2247,7 +2276,10 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 
 	/* shows stats hint if any */
 	if (af_state->stats_hint)
-		explainArrowStatsHint(af_state->stats_hint, frel, es);
+		explainArrowStatsHint(af_state->stats_hint, frel, es, dcontext);
+	nskip = pg_atomic_read_u32(af_state->rbatch_nskip);
+	if (nskip > 0)
+		ExplainPropertyInteger("Skipped Record-Batches", "chunks", nskip, es);
 
 	/* shows files on behalf of the foreign table */
 	foreach (lc, af_state->fdescList)
@@ -2337,7 +2369,7 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
 	Relation	frel = node->ss.ss_currentRelation;
 
-	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es);
+	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es, NIL);
 }
 
 /*
@@ -2813,23 +2845,29 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return MAXALIGN(sizeof(pg_atomic_uint32));
+	return MAXALIGN(sizeof(pg_atomic_uint32) * 2);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
 static inline void
-__ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
+__ExecInitDSMArrowFdw(ArrowFdwState *af_state,
+					  pg_atomic_uint32 *rbatch_index,
+					  pg_atomic_uint32 *rbatch_nskip)
 {
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
+	pg_atomic_init_u32(rbatch_nskip, 0);
+	af_state->rbatch_nskip = rbatch_nskip;
 }
 
 void
 ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
 {
-	__ExecInitDSMArrowFdw(af_state, &gtss->af_rbatch_index);
+	__ExecInitDSMArrowFdw(af_state,
+						  &gtss->af_rbatch_index,
+						  &gtss->af_rbatch_nskip);
 }
 
 static void
@@ -2837,8 +2875,11 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
 {
+	pg_atomic_uint32 *atomic_buffer = coordinate;
+
 	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
-						  (pg_atomic_uint32 *)coordinate);
+						  atomic_buffer,
+						  atomic_buffer + 1);
 }
 
 /*
@@ -2897,7 +2938,15 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 static inline void
 __ExecShutdownArrowFdw(ArrowFdwState *af_state)
 {
-	/* nothing to do */
+	uint32		temp;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_index);
+	pg_atomic_write_u32(&af_state->__rbatch_index_local, temp);
+	af_state->rbatch_index = &af_state->__rbatch_index_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nskip);
+	pg_atomic_write_u32(&af_state->__rbatch_nskip_local, temp);
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 }
 
 void

@@ -412,6 +412,7 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
+	pg_atomic_uint32 af_rbatch_nskip; /* number of skipped record-batches */
 	/* for gpu_cache file scan  */
 	pg_atomic_uint32 gc_fetch_count;
 	/* for block-based regular table scan */
@@ -936,7 +937,9 @@ extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts,
 									   GpuTaskRuntimeStat *gt_rtstat);
-extern void pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es);
+extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
+									   ExplainState *es,
+									   List *dcontext);
 extern Size pgstromEstimateDSMGpuTaskState(GpuTaskState *gts,
 										   ParallelContext *pcxt);
 extern void pgstromInitDSMGpuTaskState(GpuTaskState *gts,
@@ -945,6 +948,7 @@ extern void pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 extern void pgstromInitWorkerGpuTaskState(GpuTaskState *gts,
 										  void *coordinate);
 extern void pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts);
+extern void pgstromShutdownDSMGpuTaskState(GpuTaskState *gts);
 
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
@@ -1283,7 +1287,9 @@ extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 								   GpuTaskSharedState *gtss);
 extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
 extern void ExplainArrowFdw(ArrowFdwState *af_state,
-							Relation frel, ExplainState *es);
+							Relation frel,
+							ExplainState *es,
+							List *dcontext);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

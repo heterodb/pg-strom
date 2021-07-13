@@ -2017,6 +2017,7 @@ ExecShutdownGpuScan(CustomScanState *node)
 			   sizeof(GpuScanRuntimeStat));
 		gss->gs_rtstat = gs_rtstat_new;
 	}
+	pgstromShutdownDSMGpuTaskState(&gss->gts);
 }
 
 /*
@@ -2079,7 +2080,7 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* BRIN-index properties */
 	pgstromExplainBrinIndexMap(&gss->gts, es, dcontext);
 	/* common portion of EXPLAIN */
-	pgstromExplainGpuTaskState(&gss->gts, es);
+	pgstromExplainGpuTaskState(&gss->gts, es, dcontext);
 }
 
 /*
