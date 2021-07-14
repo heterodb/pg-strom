@@ -412,7 +412,8 @@ struct GpuTaskSharedState
 {
 	/* for arrow_fdw file scan  */
 	pg_atomic_uint32 af_rbatch_index;
-	pg_atomic_uint32 af_rbatch_nskip; /* number of skipped record-batches */
+	pg_atomic_uint32 af_rbatch_nload; /* # of loaded record-batches */
+	pg_atomic_uint32 af_rbatch_nskip; /* # of skipped record-batches */
 	/* for gpu_cache file scan  */
 	pg_atomic_uint32 gc_fetch_count;
 	/* for block-based regular table scan */

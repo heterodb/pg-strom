@@ -17,8 +17,6 @@
 /*
  * RecordBatchState
  */
-typedef Datum (*fn_stat_fetch_datum)(SQLstat__datum *stat_val, bool *isnull);
-
 typedef struct RecordBatchFieldState
 {
 	Oid			atttypid;
@@ -33,7 +31,6 @@ typedef struct RecordBatchFieldState
 	off_t		extra_offset;
 	size_t		extra_length;
 	/* min/max statistics */
-	fn_stat_fetch_datum stat_fetch_datum;
 	SQLstat__datum stat_min;
 	SQLstat__datum stat_max;
 	bool		stat_isnull;
@@ -176,6 +173,8 @@ struct ArrowFdwState
 	arrowStatsHint *stats_hint;
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nload;
+	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nskip;
 	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
@@ -704,7 +703,6 @@ typedef struct arrowFieldStatsBinary
 {
 	uint32	nrooms;		/* number of record-batches */
 	int		unitsz;		/* unit size of min/max statistics */
-	fn_stat_fetch_datum stat_fetch_datum;
 	bool   *isnull;
 	char   *min_values;
 	char   *max_values;
@@ -795,132 +793,6 @@ __arrow_stat_parse_128bit(char *buf, const char *token)
 	return true;
 }
 
-static Datum
-__arrow_stat_fetch_8bit(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return Int8GetDatum(stat_val->i8);
-}
-
-static Datum
-__arrow_stat_fetch_16bit(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return Int16GetDatum(stat_val->i16);
-}
-
-static Datum
-__arrow_stat_fetch_32bit(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return Int32GetDatum(stat_val->i32);
-}
-
-static Datum
-__arrow_stat_fetch_64bit(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return Int64GetDatum(stat_val->i64);
-}
-
-static Datum
-__arrow_stat_fetch_decimal(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = true;
-
-	//Do it later
-
-	return 0;
-}
-
-static Datum
-__arrow_stat_fetch_date_day(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return DateADTGetDatum((DateADT)stat_val->i32 -
-						   (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE));
-}
-
-static Datum
-__arrow_stat_fetch_date_ms(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return DateADTGetDatum((DateADT)stat_val->i64 / 1000 -
-						   (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE));
-}
-
-static Datum
-__arrow_stat_fetch_time_sec(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimeADTGetDatum((TimeADT)stat_val->u32 * 1000000L);
-}
-
-static Datum
-__arrow_stat_fetch_time_ms(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimeADTGetDatum((TimeADT)stat_val->u32 * 1000L);
-}
-
-static Datum
-__arrow_stat_fetch_time_us(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimeADTGetDatum((TimeADT)stat_val->u64);
-}
-
-static Datum
-__arrow_stat_fetch_time_ns(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimeADTGetDatum((TimeADT)stat_val->u64 / 1000L);
-}
-
-static Datum
-__arrow_stat_parse_timestamp_sec(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimestampGetDatum((Timestamp)stat_val->i64 * 1000000L -
-							 (POSTGRES_EPOCH_JDATE -
-							  UNIX_EPOCH_JDATE) * USECS_PER_DAY);
-}
-
-static Datum
-__arrow_stat_parse_timestamp_ms(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimestampGetDatum((Timestamp)stat_val->i64 * 1000L -
-							 (POSTGRES_EPOCH_JDATE -
-							  UNIX_EPOCH_JDATE) * USECS_PER_DAY);
-}
-
-static Datum
-__arrow_stat_parse_timestamp_us(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimestampGetDatum((Timestamp)stat_val->i64 -
-							 (POSTGRES_EPOCH_JDATE -
-							  UNIX_EPOCH_JDATE) * USECS_PER_DAY);
-}
-
-static Datum
-__arrow_stat_parse_timestamp_ns(SQLstat__datum *stat_val, bool *isnull)
-{
-	*isnull = false;
-	return TimestampGetDatum((Timestamp)stat_val->i64 / 1000L -
-							 (POSTGRES_EPOCH_JDATE -
-							  UNIX_EPOCH_JDATE) * USECS_PER_DAY);
-}
-
-
-
-
-
-
-
-
-
 static void
 __releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
 {
@@ -960,7 +832,6 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 							 const char *max_tokens)
 {
 	bool	  (*fn_parse_stat)(char *buf, const char *token) = NULL;
-	fn_stat_fetch_datum fn_fetch_stat = NULL;
 	int			unitsz = -1;
 	char	   *min_values = NULL;
 	char	   *max_values = NULL;
@@ -976,22 +847,18 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			{
 				case 8:
 					fn_parse_stat = __arrow_stat_parse_8bit;
-					fn_fetch_stat = __arrow_stat_fetch_8bit;
 					unitsz = sizeof(uint8_t);
 					break;
 				case 16:
 					fn_parse_stat = __arrow_stat_parse_16bit;
-					fn_fetch_stat = __arrow_stat_fetch_16bit;
 					unitsz = sizeof(uint16_t);
 					break;
 				case 32:
 					fn_parse_stat = __arrow_stat_parse_32bit;
-					fn_fetch_stat = __arrow_stat_fetch_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case 64:
 					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_fetch_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -1004,17 +871,14 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			{
 				case ArrowPrecision__Half:
 					fn_parse_stat = __arrow_stat_parse_16bit;
-					fn_fetch_stat = __arrow_stat_fetch_16bit;
 					unitsz = sizeof(uint16_t);
 					break;
 				case ArrowPrecision__Single:
 					fn_parse_stat = __arrow_stat_parse_32bit;
-					fn_fetch_stat = __arrow_stat_fetch_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowPrecision__Double:
 					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_fetch_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -1024,7 +888,6 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 
 		case ArrowNodeTag__Decimal:
 			fn_parse_stat = __arrow_stat_parse_128bit;
-			fn_fetch_stat = __arrow_stat_fetch_decimal;
 			unitsz = sizeof(int128_t);
 			break;
 
@@ -1033,12 +896,10 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			{
 				case ArrowDateUnit__Day:
 					fn_parse_stat = __arrow_stat_parse_32bit;
-					fn_fetch_stat = __arrow_stat_fetch_date_day;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowDateUnit__MilliSecond:
 					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_fetch_date_ms;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -1050,23 +911,13 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			switch (field->type.Time.unit)
 			{
 				case ArrowTimeUnit__Second:
-					fn_parse_stat = __arrow_stat_parse_32bit;
-					fn_fetch_stat = __arrow_stat_fetch_time_sec;
-					unitsz = sizeof(uint32_t);
-					break;
 				case ArrowTimeUnit__MilliSecond:
 					fn_parse_stat = __arrow_stat_parse_32bit;
-					fn_fetch_stat = __arrow_stat_fetch_time_ms;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowTimeUnit__MicroSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_fetch_time_us;
-					unitsz = sizeof(uint64_t);
-					break;
 				case ArrowTimeUnit__NanoSecond:
 					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_fetch_time_ns;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -1078,23 +929,10 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			switch (field->type.Timestamp.unit)
 			{
 				case ArrowTimeUnit__Second:
-					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_parse_timestamp_sec;
-					unitsz = sizeof(uint64_t);
-					break;
 				case ArrowTimeUnit__MilliSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_parse_timestamp_ms;
-					unitsz = sizeof(uint64_t);
-					break;
 				case ArrowTimeUnit__MicroSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_parse_timestamp_us;
-					unitsz = sizeof(uint64_t);
-					break;
 				case ArrowTimeUnit__NanoSecond:
 					fn_parse_stat = __arrow_stat_parse_64bit;
-					fn_fetch_stat = __arrow_stat_parse_timestamp_ns;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -1139,7 +977,6 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 	if (tok != NULL || index != bstats->nrooms)
 		goto error;
 
-	bstats->stat_fetch_datum = fn_fetch_stat;
 	bstats->unitsz = unitsz;
 	bstats->isnull = isnull;
 	bstats->min_values = min_values;
@@ -1276,7 +1113,6 @@ __applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
 		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
 		fstate->stat_isnull = true;
 	}
-	fstate->stat_fetch_datum = bstats->stat_fetch_datum;
 	
 	Assert(fstate->num_children == bstats->nfields);
 	for (j=0; j < fstate->num_children; j++)
@@ -1503,6 +1339,92 @@ execInitArrowStatsHint(ScanState *ss,
 }
 
 static bool
+__fetchArrowStatsDatum(RecordBatchFieldState *fstate,
+					   SQLstat__datum *sval,
+					   Datum *p_datum, bool *p_isnull)
+{
+	Datum		datum;
+	int64		shift;
+
+	switch (fstate->atttypid)
+	{
+		case INT1OID:
+			datum = Int8GetDatum(sval->i8);
+			break;
+		case INT2OID:
+		case FLOAT2OID:
+			datum = Int16GetDatum(sval->i16);
+			break;
+		case INT4OID:
+		case FLOAT4OID:
+			datum = Int32GetDatum(sval->i32);
+			break;
+		case INT8OID:
+		case FLOAT8OID:
+			datum = Int64GetDatum(sval->i64);
+			break;
+		case NUMERICOID:
+			{
+				return 0;
+			}
+		case DATEOID:
+			shift = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
+			switch (fstate->attopts.date.unit)
+			{
+				case ArrowDateUnit__Day:
+					datum = DateADTGetDatum((DateADT)sval->i32 - shift);
+				case ArrowDateUnit__MilliSecond:
+					datum = DateADTGetDatum((DateADT)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+
+		case TIMEOID:
+			switch (fstate->attopts.time.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000000L);
+					break;
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000L);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64);
+					break;
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64 / 1000L);
+					break;
+				default:
+					return false;
+			}
+			break;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			shift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			switch (fstate->attopts.timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000000L - shift);
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000L - shift);
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 - shift);
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	*p_datum = datum;
+	*p_isnull = false;
+	return true;
+}
+
+static bool
 execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 						RecordBatchState *rb_state)
 {
@@ -1527,16 +1449,18 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 		 * In case when min/max statistics are missing, we cannot determine
 		 * whether we can skip the current record-batch.
 		 */
-		if (fstate->stat_isnull || !fstate->stat_fetch_datum)
+		if (fstate->stat_isnull)
 			return false;
 
-		datum = fstate->stat_fetch_datum(&fstate->stat_min, &isnull);
-		min_values->tts_isnull[anum-1] = isnull;
-		min_values->tts_values[anum-1] = datum;
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_min,
+									&min_values->tts_values[anum-1],
+									&min_values->tts_isnull[anum-1]))
+			return false;
 
-		datum = fstate->stat_fetch_datum(&fstate->stat_max, &isnull);
-		max_values->tts_isnull[anum-1] = isnull;
-		max_values->tts_values[anum-1] = datum;
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_max,
+									&max_values->tts_values[anum-1],
+									&max_values->tts_isnull[anum-1]))
+			return false;
 	}
 	datum = ExecEvalExprSwitchContext(stats_hint->eval_state, econtext, &isnull);
 
@@ -1558,52 +1482,6 @@ execEndArrowStatsHint(arrowStatsHint *stats_hint)
 	econtext->ecxt_outertuple = NULL;
 
 	FreeExprContext(econtext, true);
-}
-
-static void
-explainArrowStatsHint(arrowStatsHint *stats_hint,
-					  Relation frel,
-					  ExplainState *es, List *dcontext)
-{
-	TupleDesc   tupdesc = RelationGetDescr(frel);
-	StringInfoData  buf;
-
-	/* shows columns with stats-hint */
-	initStringInfo(&buf);
-	if (dcontext == NIL)
-	{
-		int		anum;
-
-		for (anum = bms_next_member(stats_hint->load_attrs, -1);
-			 anum >= 0;
-			 anum = bms_next_member(stats_hint->load_attrs, anum))
-		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
-			const char	   *attName = NameStr(attr->attname);
-
-			if (buf.len > 0)
-				appendStringInfoString(&buf, ", ");
-			appendStringInfoString(&buf, quote_identifier(attName));
-		}
-	}
-	else
-	{
-		ListCell   *lc;
-
-		foreach (lc, stats_hint->orig_quals)
-		{
-			Node   *qual = lfirst(lc);
-			char   *temp;
-
-			temp = deparse_expression(qual, dcontext, es->verbose, false);
-			if (buf.len > 0)
-				appendStringInfoString(&buf, ", ");
-			appendStringInfoString(&buf, temp);
-			pfree(temp);
-		}
-	}
-	ExplainPropertyText("Stats-Hint", buf.data, es);
-	pfree(buf.data);
 }
 
 /*
@@ -1964,6 +1842,7 @@ ExecInitArrowFdw(ScanState *ss,
 	af_state->referenced = referenced;
 	af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs, outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
 	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 	i = 0;
 	foreach (lc, rb_state_list)
@@ -2378,11 +2257,15 @@ retry:
 		return NULL;	/* no more RecordBatch to read */
 	rb_state = af_state->rbatches[rb_index];
 
-	if (af_state->stats_hint &&
-		!execCheckArrowStatsHint(af_state->stats_hint, rb_state))
+	if (af_state->stats_hint)
 	{
-		pg_atomic_fetch_add_u32(af_state->rbatch_nskip, 1);
-		goto retry;
+		if (execCheckArrowStatsHint(af_state->stats_hint, rb_state))
+			pg_atomic_fetch_add_u32(af_state->rbatch_nload, 1);
+		else
+		{
+			pg_atomic_fetch_add_u32(af_state->rbatch_nskip, 1);
+			goto retry;
+		}
 	}
 	return __arrowFdwLoadRecordBatch(rb_state,
 									 relation,
@@ -2505,7 +2388,6 @@ ExplainArrowFdw(ArrowFdwState *af_state,
 	int			fcount = 0;
 	char		label[80];
 	size_t	   *chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
-	uint32		nskip;
 	int			i, j, k;
 	StringInfoData	buf;
 
@@ -2530,10 +2412,49 @@ ExplainArrowFdw(ArrowFdwState *af_state,
 
 	/* shows stats hint if any */
 	if (af_state->stats_hint)
-		explainArrowStatsHint(af_state->stats_hint, frel, es, dcontext);
-	nskip = pg_atomic_read_u32(af_state->rbatch_nskip);
-	if (nskip > 0)
-		ExplainPropertyInteger("Skipped by Stats-Hint", "chunks", nskip, es);
+	{
+		arrowStatsHint *stats_hint = af_state->stats_hint;
+
+		resetStringInfo(&buf);
+
+		if (dcontext == NIL)
+		{
+			int		anum;
+
+			for (anum = bms_next_member(stats_hint->load_attrs, -1);
+				 anum >= 0;
+				 anum = bms_next_member(stats_hint->load_attrs, anum))
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
+				const char *attName = NameStr(attr->attname);
+
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, quote_identifier(attName));
+			}
+		}
+		else
+		{
+			ListCell   *lc;
+
+			foreach (lc, stats_hint->orig_quals)
+			{
+				Node   *qual = lfirst(lc);
+				char   *temp;
+
+				temp = deparse_expression(qual, dcontext, es->verbose, false);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, temp);
+				pfree(temp);
+			}
+		}
+		if (es->analyze)
+			appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
+							 pg_atomic_read_u32(af_state->rbatch_nload),
+							 pg_atomic_read_u32(af_state->rbatch_nskip));
+		ExplainPropertyText("Stats-Hint", buf.data, es);
+	}
 
 	/* shows files on behalf of the foreign table */
 	foreach (lc, af_state->fdescList)
@@ -2616,6 +2537,7 @@ ExplainArrowFdw(ArrowFdwState *af_state,
 			}
 		}
 	}
+	pfree(buf.data);
 }
 
 static void
@@ -3099,7 +3021,7 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return MAXALIGN(sizeof(pg_atomic_uint32) * 2);
+	return MAXALIGN(sizeof(pg_atomic_uint32) * 3);
 }
 
 /*
@@ -3108,10 +3030,13 @@ ArrowEstimateDSMForeignScan(ForeignScanState *node,
 static inline void
 __ExecInitDSMArrowFdw(ArrowFdwState *af_state,
 					  pg_atomic_uint32 *rbatch_index,
+					  pg_atomic_uint32 *rbatch_nload,
 					  pg_atomic_uint32 *rbatch_nskip)
 {
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
+	pg_atomic_init_u32(rbatch_nload, 0);
+	af_state->rbatch_nload = rbatch_nload;
 	pg_atomic_init_u32(rbatch_nskip, 0);
 	af_state->rbatch_nskip = rbatch_nskip;
 }
@@ -3121,6 +3046,7 @@ ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
 {
 	__ExecInitDSMArrowFdw(af_state,
 						  &gtss->af_rbatch_index,
+						  &gtss->af_rbatch_nload,
 						  &gtss->af_rbatch_nskip);
 }
 
@@ -3133,7 +3059,8 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 
 	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
 						  atomic_buffer,
-						  atomic_buffer + 1);
+						  atomic_buffer + 1,
+						  atomic_buffer + 2);
 }
 
 /*
@@ -3166,9 +3093,11 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
 static inline void
 __ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 						 pg_atomic_uint32 *rbatch_index,
+						 pg_atomic_uint32 *rbatch_nload,
 						 pg_atomic_uint32 *rbatch_nskip)
 {
 	af_state->rbatch_index = rbatch_index;
+	af_state->rbatch_nload = rbatch_nload;
 	af_state->rbatch_nskip = rbatch_nskip;
 }
 
@@ -3178,6 +3107,7 @@ ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 {
 	__ExecInitWorkerArrowFdw(af_state,
 							 &gtss->af_rbatch_index,
+							 &gtss->af_rbatch_nload,
 							 &gtss->af_rbatch_nskip);
 }
 
@@ -3190,7 +3120,8 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 
 	__ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
 							 atomic_buffer,
-							 atomic_buffer + 1);
+							 atomic_buffer + 1,
+							 atomic_buffer + 2);
 }
 
 /*
@@ -3204,6 +3135,10 @@ __ExecShutdownArrowFdw(ArrowFdwState *af_state)
 	temp = pg_atomic_read_u32(af_state->rbatch_index);
 	pg_atomic_write_u32(&af_state->__rbatch_index_local, temp);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nload);
+	pg_atomic_write_u32(&af_state->__rbatch_nload_local, temp);
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
 
 	temp = pg_atomic_read_u32(af_state->rbatch_nskip);
 	pg_atomic_write_u32(&af_state->__rbatch_nskip_local, temp);
