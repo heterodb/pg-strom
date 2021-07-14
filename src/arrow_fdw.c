@@ -190,6 +190,7 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
 static dlist_head		arrow_write_redo_list;
 static bool				arrow_fdw_enabled;				/* GUC */
+static bool				arrow_fdw_stats_hint_enabled;	/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
 static int				arrow_record_batch_size_kb;		/* GUC */
@@ -1778,7 +1779,9 @@ ExecInitArrowFdw(ScanState *ss,
 	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
-	af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs, outer_quals);
+	if (arrow_fdw_stats_hint_enabled)
+		af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs,
+													  outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
 	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
 	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
@@ -6154,7 +6157,17 @@ pgstrom_init_arrow_fdw(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/*
+	 * Turn on/off min/max statistics hint
+	 */
+	DefineCustomBoolVariable("arrow_fdw.stats_hint_enabled",
+							 "Enables min/max statistics hint, if any",
+							 NULL,
+							 &arrow_fdw_stats_hint_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/*
 	 * Configurations for arrow_fdw metadata cache
 	 */
