@@ -192,7 +192,6 @@ static dlist_head		arrow_write_redo_list;
 static bool				arrow_fdw_enabled;				/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
-static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
 
 /* ---------- static functions ---------- */
@@ -321,65 +320,6 @@ RecordBatchFieldLength(RecordBatchFieldState *fstate)
 }
 
 /*
- * apply_debug_row_numbers_hint
- *
- * It is an ad-hoc optimization infrastructure. In case of estimated numbers
- * of row is completely wrong, we can give manual hint for optimizer by the
- * GUC: arrow_fdw.debug_row_numbers_hint.
- */
-static void
-apply_debug_row_numbers_hint(PlannerInfo *root,
-							 RelOptInfo *baserel,
-							 ForeignTable *ft)
-{
-	const char *errmsg = "wrong arrow_fdw.debug_row_numbers_hint config";
-	char	   *config = pstrdup(arrow_debug_row_numbers_hint);
-	char	   *relname = get_rel_name(ft->relid);
-	char	   *token, *pos;
-	double		nrows_others = -1.0;
-
-	token = strtok_r(config, ",", &pos);
-	while (token)
-	{
-		char   *comma = strchr(token, ':');
-		char   *name, *nrows, *c;
-
-		if (!comma)
-			elog(ERROR, "%s - must be comma separated NAME:NROWS pairs",
-				 errmsg);
-
-		nrows = __trim(comma+1);
-		*comma = '\0';
-		name = __trim(token);
-
-		for (c = nrows; *c != '\0'; c++)
-		{
-			if (!isdigit(*c))
-				elog(ERROR, "%s - NROWS token contains non-digit ('%c')",
-					 errmsg, *c);
-		}
-
-		if (strcmp(name, "*") == 0)
-		{
-			/* wildcard */
-			if (nrows_others >= 0.0)
-				elog(ERROR, "%s - wildcard (*) appears twice", errmsg);
-			nrows_others = atof(nrows);
-		}
-		else if (strcmp(name, relname) == 0)
-		{
-			baserel->rows = atof(nrows);
-			pfree(config);
-			return;
-		}
-		token = strtok_r(NULL, ",", &pos);
-	}
-	if (nrows_others >= 0.0)
-		baserel->rows = nrows_others;
-	pfree(config);
-}
-
-/*
  * ArrowGetForeignRelSize
  */
 static void
@@ -479,8 +419,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 							   0,
 							   JOIN_INNER,
 							   NULL);
-	if (arrow_debug_row_numbers_hint)
-		apply_debug_row_numbers_hint(root, baserel, ft);
 }
 
 /*
@@ -6231,18 +6169,6 @@ pgstrom_init_arrow_fdw(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	arrow_metadata_cache_size = (size_t)arrow_metadata_cache_size_kb << 10;
-
-	/*
-	 * Debug option to hint number of rows
-	 */
-	DefineCustomStringVariable("arrow_fdw.debug_row_numbers_hint",
-							   "override number of rows estimation for arrow_fdw foreign tables",
-							   NULL,
-							   &arrow_debug_row_numbers_hint,
-							   NULL,
-							   PGC_USERSET,
-							   GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							   NULL, NULL, NULL);
 
 	/*
 	 * Limit of RecordBatch size for writing
