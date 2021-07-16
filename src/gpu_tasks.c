@@ -272,6 +272,7 @@ void
 pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuContext *gcontext,
 						GpuTaskKind task_kind,
+						List *outer_quals,
 						List *outer_refs_list,
 						List *used_params,
 						cl_int optimal_gpu,
@@ -318,8 +319,10 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 			}
 		}
 		if (RelationIsArrowFdw(relation))
-			gts->af_state = ExecInitArrowFdw(optimal_gpu < 0 ? NULL : gcontext,
-											 relation, outer_refs);
+			gts->af_state = ExecInitArrowFdw(&gts->css.ss,
+											 (optimal_gpu < 0 ? NULL : gcontext),
+											 outer_quals,
+											 outer_refs);
 		if (RelationHasGpuCache(relation))
 			gts->gc_state = ExecInitGpuCache(&gts->css.ss, eflags, outer_refs);
 		/* we never use Apache Arrow and GPU Cache simultaneously */
@@ -604,7 +607,9 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
  * pgstromExplainGpuTaskState
  */
 void
-pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
+pgstromExplainGpuTaskState(GpuTaskState *gts,
+						   ExplainState *es,
+						   List *dcontext)
 {
 	Relation	rel = gts->css.ss.ss_currentRelation;
 	char		temp[320];
@@ -659,7 +664,7 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 							   NULL, gts->num_cpu_fallbacks, es);
 	/* Properties of Arrow_Fdw/GpuCache if any */
 	if (gts->af_state)
-		ExplainArrowFdw(gts->af_state, rel, es);
+		ExplainArrowFdw(gts->af_state, rel, es, dcontext);
 	if (gts->gc_state)
 		ExplainGpuCache(gts->gc_state, rel, es);
 	/* Debug counter, if any */
@@ -785,6 +790,31 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 		ExecReInitDSMGpuCache(gts->gc_state);
 	else if (relation)
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
+}
+
+/*
+ * pgstromShutdownDSMGpuTaskState
+ */
+void
+pgstromShutdownDSMGpuTaskState(GpuTaskState *gts)
+{
+	GpuTaskSharedState *gtss = gts->gtss;
+
+	/*
+	 * In case when GPU-aware plan is located under inner-side of
+	 * Hash-Join or GpuJoin and parallel-hash is disabled, it has
+	 * no chance to initialize and attach DSM, therefore, we may
+	 * not have a valid GpuTaskSharedState here.
+	 */
+	if (!gtss)
+		return;
+
+	//do something in the future
+
+	if (gts->af_state)
+		ExecShutdownArrowFdw(gts->af_state);
+	if (gts->gc_state)
+		ExecShutdownGpuCache(gts->gc_state);
 }
 
 /*

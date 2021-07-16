@@ -4169,6 +4169,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,
 							GpuTaskKind_GpuPreAgg,
+							gpa_info->outer_quals,
 							gpa_info->outer_refs,
 							gpa_info->used_params,
 							gpa_info->optimal_gpu,
@@ -4477,6 +4478,7 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 			   sizeof(GpuPreAggRuntimeStat));
 		gpas->gpa_rtstat = gpa_rtstat_new;
 	}
+	pgstromShutdownDSMGpuTaskState(&gpas->gts);
 }
 
 /*
@@ -4534,7 +4536,7 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Combined GpuJoin", "disabled", es);
 	/* other common fields */
-	pgstromExplainGpuTaskState(&gpas->gts, es);
+	pgstromExplainGpuTaskState(&gpas->gts, es, dcontext);
 	/* other run-time statistics, if any */
 	if (gpa_rtstat)
 	{

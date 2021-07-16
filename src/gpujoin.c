@@ -3489,6 +3489,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gjs->gts,
 							gjs->gts.gcontext,
 							GpuTaskKind_GpuJoin,
+							gj_info->outer_quals,
 							gj_info->outer_refs,
 							gj_info->used_params,
 							gj_info->optimal_gpu,
@@ -4249,7 +4250,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		depth++;
 	}
 	/* other common field */
-	pgstromExplainGpuTaskState(&gjs->gts, es);
+	pgstromExplainGpuTaskState(&gjs->gts, es, dcontext);
 }
 
 /*
@@ -4390,6 +4391,7 @@ ExecShutdownGpuJoin(CustomScanState *node)
 		}
 		gjs->gj_sstate = gj_sstate_new;
 	}
+	pgstromShutdownDSMGpuTaskState(&gjs->gts);
 }
 
 /*

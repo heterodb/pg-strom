@@ -106,6 +106,19 @@ initMetadataCacheKey(MetadataCacheKey *mkey, dev_t st_dev, ino_t st_ino)
 }
 
 /*
+ * executor hint by min/max statistics per record batch
+ */
+typedef struct
+{
+	List		   *orig_quals;
+	List		   *eval_quals;
+	ExprState	   *eval_state;
+	Bitmapset	   *stat_attrs;
+	Bitmapset	   *load_attrs;
+	ExprContext	   *econtext;
+} arrowStatsHint;
+
+/*
  * MVCC state for the pending writes
  */
 typedef struct
@@ -157,8 +170,13 @@ struct ArrowFdwState
 	List	   *gpuDirectFileDescList;	/* list of GPUDirectFileDesc */
 	List	   *fdescList;				/* list of File (buffered i/o) */
 	Bitmapset  *referenced;
+	arrowStatsHint *stats_hint;
 	pg_atomic_uint32   *rbatch_index;
-	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
+	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nload;
+	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nskip;
+	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
 	cl_ulong	curr_index;			/* current index to row on KDS */
 	/* state of RecordBatches */
@@ -172,9 +190,9 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
 static dlist_head		arrow_write_redo_list;
 static bool				arrow_fdw_enabled;				/* GUC */
+static bool				arrow_fdw_stats_hint_enabled;	/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
-static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
 
 /* ---------- static functions ---------- */
@@ -188,7 +206,7 @@ static List	   *__arrowFdwExtractFilesList(List *options_list,
 										   int *p_parallel_nworkers,
 										   bool *p_writable);
 static List	   *arrowFdwExtractFilesList(List *options_list);
-static List	   *arrowLookupOrBuildMetadataCache(File fdesc);
+static List	   *arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs);
 static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   kern_colmeta *cmeta,
 								   size_t index,
@@ -303,65 +321,6 @@ RecordBatchFieldLength(RecordBatchFieldState *fstate)
 }
 
 /*
- * apply_debug_row_numbers_hint
- *
- * It is an ad-hoc optimization infrastructure. In case of estimated numbers
- * of row is completely wrong, we can give manual hint for optimizer by the
- * GUC: arrow_fdw.debug_row_numbers_hint.
- */
-static void
-apply_debug_row_numbers_hint(PlannerInfo *root,
-							 RelOptInfo *baserel,
-							 ForeignTable *ft)
-{
-	const char *errmsg = "wrong arrow_fdw.debug_row_numbers_hint config";
-	char	   *config = pstrdup(arrow_debug_row_numbers_hint);
-	char	   *relname = get_rel_name(ft->relid);
-	char	   *token, *pos;
-	double		nrows_others = -1.0;
-
-	token = strtok_r(config, ",", &pos);
-	while (token)
-	{
-		char   *comma = strchr(token, ':');
-		char   *name, *nrows, *c;
-
-		if (!comma)
-			elog(ERROR, "%s - must be comma separated NAME:NROWS pairs",
-				 errmsg);
-
-		nrows = __trim(comma+1);
-		*comma = '\0';
-		name = __trim(token);
-
-		for (c = nrows; *c != '\0'; c++)
-		{
-			if (!isdigit(*c))
-				elog(ERROR, "%s - NROWS token contains non-digit ('%c')",
-					 errmsg, *c);
-		}
-
-		if (strcmp(name, "*") == 0)
-		{
-			/* wildcard */
-			if (nrows_others >= 0.0)
-				elog(ERROR, "%s - wildcard (*) appears twice", errmsg);
-			nrows_others = atof(nrows);
-		}
-		else if (strcmp(name, relname) == 0)
-		{
-			baserel->rows = atof(nrows);
-			pfree(config);
-			return;
-		}
-		token = strtok_r(NULL, ",", &pos);
-	}
-	if (nrows_others >= 0.0)
-		baserel->rows = nrows_others;
-	pfree(config);
-}
-
-/*
  * ArrowGetForeignRelSize
  */
 static void
@@ -414,7 +373,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			optimal_gpu = k;
 		else if (optimal_gpu != k)
 			optimal_gpu = -1;
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
@@ -461,8 +420,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 							   0,
 							   JOIN_INNER,
 							   NULL);
-	if (arrow_debug_row_numbers_hint)
-		apply_debug_row_numbers_hint(root, baserel, ft);
 }
 
 /*
@@ -659,6 +616,21 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							NIL,	/* no remote quals */
 							outer_plan);
 }
+
+/* ----------------------------------------------------------------
+ *
+ * Routines related to min/max statistics and scan hint
+ *
+ * If mapped Apache Arrow files have custome-metadata of "min_values" and
+ * "max_values" at the Field, arrow_fdw deals with this comma separated
+ * integer values as min/max value for each field, if any.
+ * Once we can know min/max value of the field, we can skip record batches
+ * that shall not match with WHERE-clause.
+ *
+ * This min/max array is expected to have as many integer elements or nulls
+ * as there are record-batches.
+ * ----------------------------------------------------------------
+ */
 
 /*
  * buildArrowStatsBinary
@@ -958,14 +930,15 @@ error:
 	return false;
 }
 
-static void
+static bool
 __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 							 ArrowField *field,
-							 uint32 nrooms, bool *found)
+							 uint32 nrooms)
 {
 	const char *min_tokens = NULL;
 	const char *max_tokens = NULL;
 	int			j, k;
+	bool		retval = false;
 
 	for (k=0; k < field->_num_custom_metadata; k++)
 	{
@@ -985,7 +958,7 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 										 min_tokens,
 										 max_tokens))
 		{
-			*found = true;
+			retval = true;
 		}
 		else
 		{
@@ -1008,14 +981,18 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		bstats->nfields = field->_num_children;
 		bstats->subfields = palloc0(sizeof(arrowStatsBinary) * bstats->nfields);
 		for (j=0; j < bstats->nfields; j++)
-			__buildArrowFieldStatsBinary(&bstats->subfields[j],
-										 &field->children[j],
-										 nrooms, found);
+		{
+			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
+											 &field->children[j],
+											 nrooms))
+				retval = true;
+		}
 	}
+	return retval;
 }
 
 static arrowStatsBinary *
-buildArrowStatsBinary(const ArrowFooter *footer)
+buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
 {
 	arrowStatsBinary *arrow_bstats;
 	int		j, ncols = footer->schema._num_fields;
@@ -1027,10 +1004,14 @@ buildArrowStatsBinary(const ArrowFooter *footer)
 	arrow_bstats->ncols = ncols;
 	for (j=0; j < ncols; j++)
 	{
-		__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
-									 &footer->schema.fields[j],
-									 footer->_num_recordBatches,
-									 &found);
+		if (__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
+										 &footer->schema.fields[j],
+										 footer->_num_recordBatches))
+		{
+			if (p_stat_attrs)
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+			found = true;
+		}
 	}
 	if (!found)
 	{
@@ -1040,6 +1021,11 @@ buildArrowStatsBinary(const ArrowFooter *footer)
 	return arrow_bstats;
 }
 
+/*
+ * applyArrowStatsBinary
+ *
+ * It applies the fetched min/max values on the cached record-batch metadata
+ */
 static void
 __applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
 							 arrowFieldStatsBinary *bstats,
@@ -1066,6 +1052,7 @@ __applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
 		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
 		fstate->stat_isnull = true;
 	}
+	
 	Assert(fstate->num_children == bstats->nfields);
 	for (j=0; j < fstate->num_children; j++)
 	{
@@ -1090,6 +1077,350 @@ applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats
 
 		__applyArrowFieldStatsBinary(fstate, bstats, rb_state->rb_index);
 	}
+}
+
+/*
+ * execInitArrowStatsHint / execCheckArrowStatsHint / execEndArrowStatsHint
+ *
+ * ... are executor routines for min/max statistics.
+ */
+static bool
+__buildArrowStatsOper(arrowStatsHint *arange,
+					  ScanState *ss,
+					  OpExpr *op,
+					  bool reverse)
+{
+	Index		scanrelid = ((Scan *)ss->ps.plan)->scanrelid;
+	Oid			opcode;
+	Var		   *var;
+	Node	   *arg;
+	Expr	   *expr;
+	Oid			opfamily = InvalidOid;
+	StrategyNumber strategy = InvalidStrategy;
+	CatCList   *catlist;
+	int			i;
+
+	if (!reverse)
+	{
+		opcode = op->opno;
+		var = linitial(op->args);
+		arg = lsecond(op->args);
+	}
+	else
+	{
+		opcode = get_commutator(op->opno);
+		var = lsecond(op->args);
+		arg = linitial(op->args);
+	}
+	/* Is it VAR <OPER> ARG form? */
+	if (!IsA(var, Var) || var->varno != scanrelid)
+		return false;
+	if (!bms_is_member(var->varattno, arange->stat_attrs))
+		return false;
+	if (contain_var_clause(arg) ||
+		contain_volatile_functions(arg))
+		return false;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opcode));
+	for (i=0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (amop->amopmethod == BRIN_AM_OID)
+		{
+			opfamily = amop->amopfamily;
+			strategy = amop->amopstrategy;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/* (VAR < ARG) --> (Min < ARG) */
+		/* (VAR <= ARG) --> (Min <= ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+		strategy == BTGreaterStrategyNumber)
+	{
+		/* (VAR >= ARG) --> (Max >= ARG) */
+		/* (VAR > ARG) --> (Max > ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/* (VAR = ARG) --> (Max >= ARG && Min <= ARG) */
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTGreaterEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTLessEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else
+	{
+		return false;
+	}
+	arange->load_attrs = bms_add_member(arange->load_attrs,
+										var->varattno);
+	return true;
+}
+
+static arrowStatsHint *
+execInitArrowStatsHint(ScanState *ss,
+					   Bitmapset *stat_attrs,
+					   List *outer_quals)
+{
+	Relation		relation = ss->ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	ExprContext	   *econtext;
+	arrowStatsHint *result, temp;
+	Expr		   *eval_expr;
+	ListCell	   *lc;
+
+	memset(&temp, 0, sizeof(arrowStatsHint));
+	temp.stat_attrs = stat_attrs;
+	foreach (lc, outer_quals)
+	{
+		OpExpr *op = lfirst(lc);
+
+		if (IsA(op, OpExpr) && list_length(op->args) == 2 &&
+			(__buildArrowStatsOper(&temp, ss, op, false) ||
+			 __buildArrowStatsOper(&temp, ss, op, true)))
+		{
+			temp.orig_quals = lappend(temp.orig_quals, copyObject(op));
+		}
+	}
+	if (!temp.orig_quals)
+		return NULL;
+
+	Assert(list_length(temp.eval_quals) > 0);
+	if (list_length(temp.eval_quals) == 1)
+		eval_expr = linitial(temp.eval_quals);
+	else
+		eval_expr = make_andclause(temp.eval_quals);
+
+	econtext = CreateExprContext(ss->ps.state);
+	econtext->ecxt_innertuple = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	econtext->ecxt_outertuple = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+
+	result = palloc0(sizeof(arrowStatsHint));
+	result->orig_quals = temp.orig_quals;
+	result->eval_quals = temp.eval_quals;
+	result->eval_state = ExecInitExpr(eval_expr, &ss->ps);
+	result->stat_attrs = bms_copy(stat_attrs);
+	result->load_attrs = temp.load_attrs;
+	result->econtext   = econtext;
+
+	return result;
+}
+
+static bool
+__fetchArrowStatsDatum(RecordBatchFieldState *fstate,
+					   SQLstat__datum *sval,
+					   Datum *p_datum, bool *p_isnull)
+{
+	Datum		datum;
+	int64		shift;
+
+	switch (fstate->atttypid)
+	{
+		case INT1OID:
+			datum = Int8GetDatum(sval->i8);
+			break;
+		case INT2OID:
+		case FLOAT2OID:
+			datum = Int16GetDatum(sval->i16);
+			break;
+		case INT4OID:
+		case FLOAT4OID:
+			datum = Int32GetDatum(sval->i32);
+			break;
+		case INT8OID:
+		case FLOAT8OID:
+			datum = Int64GetDatum(sval->i64);
+			break;
+		case NUMERICOID:
+			{
+				return 0;
+			}
+		case DATEOID:
+			shift = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
+			switch (fstate->attopts.date.unit)
+			{
+				case ArrowDateUnit__Day:
+					datum = DateADTGetDatum((DateADT)sval->i32 - shift);
+				case ArrowDateUnit__MilliSecond:
+					datum = DateADTGetDatum((DateADT)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+
+		case TIMEOID:
+			switch (fstate->attopts.time.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000000L);
+					break;
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000L);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64);
+					break;
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64 / 1000L);
+					break;
+				default:
+					return false;
+			}
+			break;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			shift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			switch (fstate->attopts.timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000000L - shift);
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000L - shift);
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 - shift);
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	*p_datum = datum;
+	*p_isnull = false;
+	return true;
+}
+
+static bool
+execCheckArrowStatsHint(arrowStatsHint *stats_hint,
+						RecordBatchState *rb_state)
+{
+	ExprContext	   *econtext = stats_hint->econtext;
+	TupleTableSlot *min_values = econtext->ecxt_innertuple;
+	TupleTableSlot *max_values = econtext->ecxt_outertuple;
+	int				anum;
+	Datum			datum;
+	bool			isnull;
+
+	/* load the min/max statistics */
+	ExecStoreAllNullTuple(min_values);
+	ExecStoreAllNullTuple(max_values);
+	for (anum = bms_next_member(stats_hint->load_attrs, -1);
+		 anum >= 0;
+		 anum = bms_next_member(stats_hint->load_attrs, anum))
+	{
+		RecordBatchFieldState *fstate = &rb_state->columns[anum-1];
+
+		Assert(anum > 0 && anum <= rb_state->ncols);
+		/*
+		 * In case when min/max statistics are missing, we cannot determine
+		 * whether we can skip the current record-batch.
+		 */
+		if (fstate->stat_isnull)
+			return false;
+
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_min,
+									&min_values->tts_values[anum-1],
+									&min_values->tts_isnull[anum-1]))
+			return false;
+
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_max,
+									&max_values->tts_values[anum-1],
+									&max_values->tts_isnull[anum-1]))
+			return false;
+	}
+	datum = ExecEvalExprSwitchContext(stats_hint->eval_state, econtext, &isnull);
+
+//	elog(INFO, "file [%s] rb_index=%u datum=%lu isnull=%d",
+//		 FilePathName(rb_state->fdesc), rb_state->rb_index, datum, (int)isnull);
+	if (!isnull && DatumGetBool(datum))
+		return true;
+	return false;
+}
+
+static void
+execEndArrowStatsHint(arrowStatsHint *stats_hint)
+{
+	ExprContext	   *econtext = stats_hint->econtext;
+
+	ExecDropSingleTupleTableSlot(econtext->ecxt_innertuple);
+	ExecDropSingleTupleTableSlot(econtext->ecxt_outertuple);
+	econtext->ecxt_innertuple = NULL;
+	econtext->ecxt_outertuple = NULL;
+
+	FreeExprContext(econtext, true);
 }
 
 /*
@@ -1354,14 +1685,19 @@ makeRecordBatchState(ArrowSchema *schema,
  * ExecInitArrowFdw
  */
 ArrowFdwState *
-ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
+ExecInitArrowFdw(ScanState *ss,
+				 GpuContext *gcontext,
+				 List *outer_quals,
+				 Bitmapset *outer_refs)
 {
+	Relation		relation = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = NIL;
 	List		   *fdescList = NIL;
 	List		   *gpuDirectFileDescList = NIL;
 	Bitmapset	   *referenced = NULL;
+	Bitmapset	   *stat_attrs = NULL;
 	bool			whole_row_ref = false;
 	ArrowFdwState  *af_state;
 	List		   *rb_state_list = NIL;
@@ -1423,7 +1759,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 			gpuDirectFileDescList = lappend(gpuDirectFileDescList, dfile);
 		}
 
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, &stat_attrs);
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -1443,7 +1779,12 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
+	if (arrow_fdw_stats_hint_enabled)
+		af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs,
+													  outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 	i = 0;
 	foreach (lc, rb_state_list)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
@@ -1472,7 +1813,10 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 			referenced = bms_add_member(referenced, j -
 										FirstLowInvalidHeapAttributeNumber);
 	}
-	node->fdw_state = ExecInitArrowFdw(NULL, relation, referenced);
+	node->fdw_state = ExecInitArrowFdw(&node->ss,
+									   NULL,
+									   fscan->scan.plan.qual,
+									   referenced);
 }
 
 typedef struct
@@ -1844,14 +2188,27 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 						GpuContext *gcontext,
 						int optimal_gpu)
 {
+	RecordBatchState *rb_state;
 	uint32		rb_index;
 
+retry:
 	/* fetch next RecordBatch */
 	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
 	if (rb_index >= af_state->num_rbatches)
 		return NULL;	/* no more RecordBatch to read */
+	rb_state = af_state->rbatches[rb_index];
 
-	return __arrowFdwLoadRecordBatch(af_state->rbatches[rb_index],
+	if (af_state->stats_hint)
+	{
+		if (execCheckArrowStatsHint(af_state->stats_hint, rb_state))
+			pg_atomic_fetch_add_u32(af_state->rbatch_nload, 1);
+		else
+		{
+			pg_atomic_fetch_add_u32(af_state->rbatch_nskip, 1);
+			goto retry;
+		}
+	}
+	return __arrowFdwLoadRecordBatch(rb_state,
 									 relation,
 									 af_state->referenced,
 									 gcontext,
@@ -1948,6 +2305,8 @@ ExecEndArrowFdw(ArrowFdwState *af_state)
 		untrackRawFileDesc(af_state->gcontext, dfile);
 		gpuDirectFileDescClose(dfile);
 	}
+	if (af_state->stats_hint)
+		execEndArrowStatsHint(af_state->stats_hint);
 }
 
 static void
@@ -1960,7 +2319,10 @@ ArrowEndForeignScan(ForeignScanState *node)
  * ArrowExplainForeignScan 
  */
 void
-ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
+ExplainArrowFdw(ArrowFdwState *af_state,
+				Relation frel,
+				ExplainState *es,
+				List *dcontext)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	ListCell   *lc;
@@ -1988,6 +2350,52 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		}
 	}
 	ExplainPropertyText("referenced", buf.data, es);
+
+	/* shows stats hint if any */
+	if (af_state->stats_hint)
+	{
+		arrowStatsHint *stats_hint = af_state->stats_hint;
+
+		resetStringInfo(&buf);
+
+		if (dcontext == NIL)
+		{
+			int		anum;
+
+			for (anum = bms_next_member(stats_hint->load_attrs, -1);
+				 anum >= 0;
+				 anum = bms_next_member(stats_hint->load_attrs, anum))
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
+				const char *attName = NameStr(attr->attname);
+
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, quote_identifier(attName));
+			}
+		}
+		else
+		{
+			ListCell   *lc;
+
+			foreach (lc, stats_hint->orig_quals)
+			{
+				Node   *qual = lfirst(lc);
+				char   *temp;
+
+				temp = deparse_expression(qual, dcontext, es->verbose, false);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, temp);
+				pfree(temp);
+			}
+		}
+		if (es->analyze)
+			appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
+							 pg_atomic_read_u32(af_state->rbatch_nload),
+							 pg_atomic_read_u32(af_state->rbatch_nskip));
+		ExplainPropertyText("Stats-Hint", buf.data, es);
+	}
 
 	/* shows files on behalf of the foreign table */
 	foreach (lc, af_state->fdescList)
@@ -2070,6 +2478,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 			}
 		}
 	}
+	pfree(buf.data);
 }
 
 static void
@@ -2077,7 +2486,7 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
 	Relation	frel = node->ss.ss_currentRelation;
 
-	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es);
+	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es, NIL);
 }
 
 /*
@@ -2200,7 +2609,7 @@ ArrowAcquireSampleRows(Relation relation,
 		}
 		fdescList = lappend_int(fdescList, fdesc);
 		
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -2553,23 +2962,33 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return MAXALIGN(sizeof(pg_atomic_uint32));
+	return MAXALIGN(sizeof(pg_atomic_uint32) * 3);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
 static inline void
-__ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
+__ExecInitDSMArrowFdw(ArrowFdwState *af_state,
+					  pg_atomic_uint32 *rbatch_index,
+					  pg_atomic_uint32 *rbatch_nload,
+					  pg_atomic_uint32 *rbatch_nskip)
 {
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
+	pg_atomic_init_u32(rbatch_nload, 0);
+	af_state->rbatch_nload = rbatch_nload;
+	pg_atomic_init_u32(rbatch_nskip, 0);
+	af_state->rbatch_nskip = rbatch_nskip;
 }
 
 void
 ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
 {
-	__ExecInitDSMArrowFdw(af_state, &gtss->af_rbatch_index);
+	__ExecInitDSMArrowFdw(af_state,
+						  &gtss->af_rbatch_index,
+						  &gtss->af_rbatch_nload,
+						  &gtss->af_rbatch_nskip);
 }
 
 static void
@@ -2577,8 +2996,12 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
 {
+	pg_atomic_uint32 *atomic_buffer = coordinate;
+
 	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
-						  (pg_atomic_uint32 *)coordinate);
+						  atomic_buffer,
+						  atomic_buffer + 1,
+						  atomic_buffer + 2);
 }
 
 /*
@@ -2610,16 +3033,23 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
  */
 static inline void
 __ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-						 pg_atomic_uint32 *rbatch_index)
+						 pg_atomic_uint32 *rbatch_index,
+						 pg_atomic_uint32 *rbatch_nload,
+						 pg_atomic_uint32 *rbatch_nskip)
 {
 	af_state->rbatch_index = rbatch_index;
+	af_state->rbatch_nload = rbatch_nload;
+	af_state->rbatch_nskip = rbatch_nskip;
 }
 
 void
 ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 					   GpuTaskSharedState *gtss)
 {
-	__ExecInitWorkerArrowFdw(af_state, &gtss->af_rbatch_index);
+	__ExecInitWorkerArrowFdw(af_state,
+							 &gtss->af_rbatch_index,
+							 &gtss->af_rbatch_nload,
+							 &gtss->af_rbatch_nskip);
 }
 
 static void
@@ -2627,8 +3057,12 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
+	pg_atomic_uint32 *atomic_buffer = coordinate;
+
 	__ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
-							 (pg_atomic_uint32 *) coordinate);
+							 atomic_buffer,
+							 atomic_buffer + 1,
+							 atomic_buffer + 2);
 }
 
 /*
@@ -2637,7 +3071,19 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 static inline void
 __ExecShutdownArrowFdw(ArrowFdwState *af_state)
 {
-	/* nothing to do */
+	uint32		temp;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_index);
+	pg_atomic_write_u32(&af_state->__rbatch_index_local, temp);
+	af_state->rbatch_index = &af_state->__rbatch_index_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nload);
+	pg_atomic_write_u32(&af_state->__rbatch_nload_local, temp);
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nskip);
+	pg_atomic_write_u32(&af_state->__rbatch_nskip_local, temp);
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 }
 
 void
@@ -4374,7 +4820,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 fname, RelationGetRelationName(rel));
 		}
 		/* check schema compatibility */
-		rb_cached = arrowLookupOrBuildMetadataCache(filp);
+		rb_cached = arrowLookupOrBuildMetadataCache(filp, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -4516,7 +4962,8 @@ static int
 copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 					   RecordBatchFieldState *dest_tail,
 					   int nattrs,
-					   RecordBatchFieldState *columns)
+					   RecordBatchFieldState *columns,
+					   Bitmapset **p_stat_attrs)
 {
 	RecordBatchFieldState *dest_next = dest_curr + nattrs;
 	int		j, k, nslots = nattrs;
@@ -4526,21 +4973,27 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 
 	for (j=0; j < nattrs; j++)
 	{
-		dest_curr[j] = columns[j];
-		if (dest_curr[j].num_children == 0)
-			Assert(dest_curr[j].children == NULL);
+		RecordBatchFieldState *__dest = dest_curr + j;
+		RecordBatchFieldState *__orig = columns + j;
+
+		memcpy(__dest, __orig, sizeof(RecordBatchFieldState));
+		if (__dest->num_children == 0)
+			Assert(__dest->children == NULL);
 		else
 		{
-			dest_curr[j].children = dest_next;
+			__dest->children = dest_next;
 			k = copyMetadataFieldCache(dest_next,
 									   dest_tail,
-									   columns[j].num_children,
-									   columns[j].children);
+									   __orig->num_children,
+									   __orig->children,
+									   NULL);
 			if (k < 0)
 				return -1;
 			dest_next += k;
 			nslots += k;
 		}
+		if (p_stat_attrs && !__orig->stat_isnull)
+			*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
 	}
 	return nslots;
 }
@@ -4550,7 +5003,9 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
  *   - setup RecordBatchState from arrowMetadataCache
  */
 static RecordBatchState *
-makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
+makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
+							  File fdesc,
+							  Bitmapset **p_stat_attrs)
 {
 	RecordBatchState   *rbstate;
 
@@ -4566,7 +5021,8 @@ makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
 	copyMetadataFieldCache(rbstate->columns,
 						   rbstate->columns + mcache->nfields,
 						   mcache->ncols,
-						   mcache->fstate);
+						   mcache->fstate,
+						   p_stat_attrs);
 	return rbstate;
 }
 
@@ -4684,7 +5140,8 @@ __arrowBuildMetadataCache(List *rb_state_list, uint32 hash)
 			copyMetadataFieldCache(mtemp->fstate,
 								   mtemp->fstate + nfields,
 								   rbstate->ncols,
-								   rbstate->columns);
+								   rbstate->columns,
+								   NULL);
 		Assert(mtemp->nfields == nfields);
 
 		if (!mcache)
@@ -4731,7 +5188,7 @@ checkArrowRecordBatchIsVisible(RecordBatchState *rbstate,
  * arrowLookupOrBuildMetadataCache
  */
 List *
-arrowLookupOrBuildMetadataCache(File fdesc)
+arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs)
 {
 	MetadataCacheKey key;
 	struct stat	stat_buf;
@@ -4793,15 +5250,20 @@ retry:
 			}
 			/*
 			 * Ok, arrow file metadata cache found and still valid
+			 *
+			 * NOTE: we currently support min/max statistics on the top-
+			 * level variables only, not sub-field of the composite values.
 			 */
-			rbstate = makeRecordBatchStateFromCache(mcache, fdesc);
+			rbstate = makeRecordBatchStateFromCache(mcache, fdesc,
+													p_stat_attrs);
 			if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 				results = list_make1(rbstate);
 			dlist_foreach (iter2, &mcache->siblings)
 			{
 				arrowMetadataCache *__mcache
 					= dlist_container(arrowMetadataCache, chain, iter2.cur);
-				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc);
+				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc,
+														p_stat_attrs);
 				if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 					results = lappend(results, rbstate);
 			}
@@ -4842,7 +5304,7 @@ retry:
 			elog(DEBUG2, "arrow file '%s' contains no RecordBatch",
 				 FilePathName(fdesc));
 
-		arrow_bstats = buildArrowStatsBinary(&af_info.footer);
+		arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
 			RecordBatchState *rb_state;
@@ -5695,7 +6157,17 @@ pgstrom_init_arrow_fdw(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/*
+	 * Turn on/off min/max statistics hint
+	 */
+	DefineCustomBoolVariable("arrow_fdw.stats_hint_enabled",
+							 "Enables min/max statistics hint, if any",
+							 NULL,
+							 &arrow_fdw_stats_hint_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/*
 	 * Configurations for arrow_fdw metadata cache
 	 */
@@ -5710,18 +6182,6 @@ pgstrom_init_arrow_fdw(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	arrow_metadata_cache_size = (size_t)arrow_metadata_cache_size_kb << 10;
-
-	/*
-	 * Debug option to hint number of rows
-	 */
-	DefineCustomStringVariable("arrow_fdw.debug_row_numbers_hint",
-							   "override number of rows estimation for arrow_fdw foreign tables",
-							   NULL,
-							   &arrow_debug_row_numbers_hint,
-							   NULL,
-							   PGC_USERSET,
-							   GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							   NULL, NULL, NULL);
 
 	/*
 	 * Limit of RecordBatch size for writing

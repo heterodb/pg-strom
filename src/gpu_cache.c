@@ -2066,7 +2066,7 @@ ExecReInitDSMGpuCache(GpuCacheState *gcache_state)
 
 void
 ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
-					    GpuTaskSharedState *gtss)
+					   GpuTaskSharedState *gtss)
 {
 	gcache_state->gc_fetch_count = &gtss->gc_fetch_count;
 }
@@ -2074,7 +2074,11 @@ ExecInitWorkerGpuCache(GpuCacheState *gcache_state,
 void
 ExecShutdownGpuCache(GpuCacheState *gcache_state)
 {
-	/* do nothing */
+	uint32		temp;
+
+	temp = pg_atomic_read_u32(gcache_state->gc_fetch_count);
+	pg_atomic_write_u32(&gcache_state->__gc_fetch_count, temp);
+	gcache_state->gc_fetch_count = &gcache_state->__gc_fetch_count;
 }
 
 void
