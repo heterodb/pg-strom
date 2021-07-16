@@ -37,7 +37,7 @@ CREATE TABLE cache_test_table (
 ---
 
 CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=3000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=30,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 CREATE TRIGGER stmt_sync_test AFTER TRUNCATE ON cache_test_table FOR STATEMENT
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
@@ -74,39 +74,36 @@ SELECT * INTO normal_table FROM cache_test_table;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET 
   a = (a+1) % 127
-WHERE id%100=0;
+WHERE id%97=0;
 
 UPDATE cache_test_table SET 
   a = (a+1) % 127
-WHERE id%100=0;
+WHERE id%97=0;
 
 UPDATE normal_table SET 
   a = (a+1) % 127
-WHERE id%100=0;
+WHERE id%97=0;
 
 ---
 --- DETELE
 ---
 EXPLAIN (costs off, verbose)
-UPDATE cache_test_table SET 
-  a = (a+1) % 127
-WHERE id%100=0;
+DELETE FROM cache_test_table
+WHERE id%101=0;
 
-UPDATE cache_test_table SET 
-  a = (a+1) % 127
-WHERE id%100=0;
+DELETE FROM cache_test_table
+WHERE id%101=0;
 
-UPDATE normal_table SET 
-  a = (a+1) % 127
-WHERE id%100=0;
+DELETE FROM normal_table
+WHERE id%101=0;
 
 ---
 --- SELECT 
 ---
 
 SELECT count(*) FROM normal_table AS n, cache_test_table AS c 
-WHERE n.id = c.id 
-AND (n.a <> c.a);
+WHERE n.id = c.id
+AND (n.a = c.a);
 
 
 ---
