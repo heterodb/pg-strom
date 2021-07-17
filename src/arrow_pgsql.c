@@ -22,17 +22,6 @@
 #include "utils/array.h"
 #include "utils/date.h"
 #include "utils/timestamp.h"
-
-#ifdef WORDS_BIGENDIAN
-#define __ntoh16(x)			(x)
-#define __ntoh32(x)			(x)
-#define __ntoh64(x)			(x)
-#else
-#define __ntoh16(x)			pg_ntoh16(x)
-#define __ntoh32(x)			pg_ntoh32(x)
-#define __ntoh64(x)			pg_ntoh64(x)
-#endif	/* WORDS_BIGENDIAN */
-
 #else	/* !__PGSTROM_MODULE__! */
 /* if built as a part of standalone software */
 #include "sql2arrow.h"
@@ -42,10 +31,6 @@
 #define VARHDRSZ			((int32_t) sizeof(int32_t))
 #define Min(x,y)			((x) < (y) ? (x) : (y))
 #define Max(x,y)			((x) > (y) ? (x) : (y))
-
-#define __ntoh16(x)			be16toh(x)
-#define __ntoh32(x)			be32toh(x)
-#define __ntoh64(x)			be64toh(x)
 
 /* PostgreSQL type definitions */
 typedef int32_t				DateADT;
@@ -140,6 +125,44 @@ write_int128_stat(SQLfield *attr, char *buf, size_t len,
  *
  * ----------------------------------------------------------------
  */
+
+/*
+ * MEMO: __fetch_XXbit() is a wrapper function when put-value handler is
+ * called on pg2arrow that fetches values over the libpq binary protocol.
+ * This byte-swapping is not necessary at the PG-Strom module context.
+ */
+static inline uint8_t __fetch_8bit(const void *addr)
+{
+	return *((uint8_t *)addr);
+}
+
+static inline uint16_t __fetch_16bit(const void *addr)
+{
+#ifdef __PGSTROM_MODULE__
+	return *((uint16_t *)addr);
+#else
+	return be16toh(*((uint16_t *)addr));
+#endif
+}
+
+static inline uint32_t __fetch_32bit(const void *addr)
+{
+#ifdef __PGSTROM_MODULE__
+	return *((uint32_t *)addr);
+#else
+	return be32toh(*((uint32_t *)addr));
+#endif
+}
+
+static inline uint64_t __fetch_64bit(const void *addr)
+{
+#ifdef __PGSTROM_MODULE__
+	return *((uint64_t *)addr);
+#else
+	return be64toh(*((uint64_t *)addr));
+#endif
+}
+
 static inline size_t
 __buffer_usage_inline_type(SQLfield *column)
 {
@@ -275,7 +298,7 @@ put_int16_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(int16_t));
-		value = __ntoh16(*((const uint16_t *)addr));
+		value = (int16_t)__fetch_16bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -295,7 +318,7 @@ put_uint16_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint16_t));
-		value = __ntoh16(*((const uint16_t *)addr));
+		value = __fetch_16bit(addr);
 		if (value > INT16_MAX)
 			Elog("Uint16 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -317,7 +340,7 @@ put_int32_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint32_t));
-		value = __ntoh32(*((const uint32_t *)addr));
+		value = __fetch_32bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -337,7 +360,7 @@ put_uint32_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint32_t));
-		value = __ntoh32(*((const uint32_t *)addr));
+		value = __fetch_32bit(addr);
 		if (value > INT32_MAX)
 			Elog("Uint32 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -359,7 +382,7 @@ put_int64_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint64_t));
-		value = __ntoh64(*((const uint64_t *)addr));
+		value = __fetch_64bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 		
@@ -379,7 +402,7 @@ put_uint64_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(uint64_t));
-		value = __ntoh64(*((const uint64_t *)addr));
+		value = __fetch_64bit(addr);
 		if (value > INT64_MAX)
 			Elog("Uint64 cannot store negative values");
 		sql_buffer_setbit(&column->nullmap, row_index);
@@ -397,14 +420,14 @@ static size_t
 put_float16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint16_t		value;
+	uint16_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint16_t));
 	else
 	{
 		assert(sz == sizeof(uint16_t));
-		value = __ntoh16(*((const uint16_t *)addr));
+		value = __fetch_16bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -417,14 +440,14 @@ static size_t
 put_float32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32_t		value;
+	uint32_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint32_t));
 	else
 	{
 		assert(sz == sizeof(uint32_t));
-		value = __ntoh32(*((const uint32_t *)addr));
+		value = __fetch_32bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -437,14 +460,14 @@ static size_t
 put_float64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64_t		value;
+	uint64_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint64_t));
 	else
 	{
 		assert(sz == sizeof(uint64_t));
-		value = __ntoh64(*((const uint64_t *)addr));
+		value = __fetch_64bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -555,10 +578,10 @@ put_decimal_value(SQLfield *column,
 			uint16_t	dscale;		/* display scale */
 			NumericDigit digits[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *)addr;
-		nv.ndigits	= (int16_t)__ntoh16(rawdata->ndigits);
-		nv.weight	= (int16_t)__ntoh16(rawdata->weight);
-		nv.sign		= (int16_t)__ntoh16(rawdata->sign);
-		nv.dscale	= (int16_t)__ntoh16(rawdata->dscale);
+		nv.ndigits	= __fetch_16bit(&rawdata->ndigits);
+		nv.weight	= __fetch_16bit(&rawdata->weight);
+		nv.sign		= __fetch_16bit(&rawdata->sign);
+		nv.dscale	= __fetch_16bit(&rawdata->dscale);
 		nv.digits	= rawdata->digits;
 #endif	/* __PGSTROM_MODULE__ */
 		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
@@ -567,7 +590,7 @@ put_decimal_value(SQLfield *column,
 		/* makes integer portion first */
 		for (d=0; d <= nv.weight; d++)
 		{
-			dig = (d < nv.ndigits) ? __ntoh16(nv.digits[d]) : 0;
+			dig = (d < nv.ndigits) ? __fetch_16bit(&nv.digits[d]) : 0;
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is out of range: %d", (int)dig);
 			value = NBASE * value + (int128_t)dig;
@@ -575,7 +598,7 @@ put_decimal_value(SQLfield *column,
 		/* makes floating point portion if any */
 		while (scale > 0)
 		{
-			dig = (d >= 0 && d < nv.ndigits) ? __ntoh16(nv.digits[d]) : 0;
+			dig = (d >= 0 && d < nv.ndigits) ? __fetch_16bit(&nv.digits[d]) : 0;
 			if (dig < 0 || dig >= NBASE)
 				Elog("Numeric digit is out of range: %d", (int)dig);
 
@@ -620,7 +643,7 @@ __put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 	{
 		assert(pgsql_sz == sizeof(DateADT));
 		sql_buffer_setbit(&column->nullmap, row_index);
-		value = __ntoh32(*((const DateADT *)addr));
+		value = __fetch_32bit(addr);
 		value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 		/*
 		 * PostgreSQL native is ArrowDateUnit__Day.
@@ -689,7 +712,7 @@ __put_time_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
 	else
 	{
 		assert(pgsql_sz == sizeof(TimeADT));
-		value = __ntoh64(*((const TimeADT *)addr));
+		value = __fetch_64bit(addr);
 		/*
 		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
 		 * Compiler optimization will remove the if-block below by constant
@@ -792,7 +815,7 @@ __put_timestamp_value_generic(SQLfield *column,
 	else
 	{
 		assert(pgsql_sz == sizeof(Timestamp));
-		value = __ntoh64(*((const Timestamp *)addr));
+		value = __fetch_64bit(addr);
 
 		/* convert PostgreSQL epoch to UNIX epoch */
 		value += (POSTGRES_EPOCH_JDATE -
@@ -889,7 +912,7 @@ __put_interval_year_month_value(SQLfield *column, const char *addr, int sz)
 		uint32_t	m;
 
 		assert(sz == sizeof(Interval));
-		m = __ntoh32(((const Interval *)addr)->month);
+		m = __fetch_32bit(&((const Interval *)addr)->month);
 		sql_buffer_append(&column->values, &m, sizeof(uint32_t));
 	}
 	return __buffer_usage_inline_type(column);
@@ -905,12 +928,12 @@ __put_interval_day_time_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		Interval	iv;
-		uint32_t		value;
+		uint32_t	value;
 
 		assert(sz == sizeof(Interval));
-		iv.time  = __ntoh64(((const Interval *)addr)->time);
-		iv.day   = __ntoh32(((const Interval *)addr)->day);
-		iv.month = __ntoh32(((const Interval *)addr)->month);
+		iv.time  = __fetch_64bit(&((const Interval *)addr)->time);
+		iv.day   = __fetch_32bit(&((const Interval *)addr)->day);
+		iv.month = __fetch_32bit(&((const Interval *)addr)->month);
 
 		/*
 		 * Unit of PostgreSQL Interval is micro-seconds. Arrow Interval::time
@@ -1078,9 +1101,9 @@ put_array_value(SQLfield *column,
 				int32_t	lb;
 			} dim[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *) addr;
-		int32_t		ndim = __ntoh32(rawdata->ndim);
-		//int32_t		hasnull = __ntoh32(rawdata->hasnull);
-		Oid			element_typeid = __ntoh32(rawdata->element_type);
+		int32_t		ndim = __fetch_32bit(&rawdata->ndim);
+		//int32_t		hasnull = __fetch_32bit(&rawdata->hasnull);
+		Oid			element_typeid = __fetch_32bit(&rawdata->element_type);
 		size_t		i, nitems = 1;
 		int			item_sz;
 		char	   *pos;
@@ -1090,14 +1113,14 @@ put_array_value(SQLfield *column,
 		if (ndim < 1)
 			Elog("Invalid dimension size of PostgreSQL Array (ndim=%d)", ndim);
 		for (i=0; i < ndim; i++)
-			nitems *= __ntoh32(rawdata->dim[i].sz);
+			nitems *= __fetch_32bit(&rawdata->dim[i].sz);
 
 		pos = (char *)&rawdata->dim[ndim];
 		for (i=0; i < nitems; i++)
 		{
 			if (pos + sizeof(int32_t) > addr + sz)
 				Elog("out of range - binary array has corruption");
-			item_sz = __ntoh32(*((int32_t *)pos));
+			item_sz = __fetch_32bit(pos);
 			pos += sizeof(int32_t);
 			if (item_sz < 0)
 				sql_field_put_value(element, NULL, 0);
@@ -1191,7 +1214,7 @@ put_composite_value(SQLfield *column,
 
 		if (sz < sizeof(uint32_t))
 			Elog("binary composite record corruption");
-		nvalids = __ntoh32(*((const int *)pos));
+		nvalids = __fetch_32bit(pos);
 		pos += sizeof(int);
 		for (j=0; j < column->nfields; j++)
 		{
@@ -1206,11 +1229,11 @@ put_composite_value(SQLfield *column,
 			}
 			if ((pos - addr) + sizeof(Oid) + sizeof(int) > sz)
 				Elog("binary composite record corruption");
-			typeid = __ntoh32(*((Oid *)pos));
+			typeid = __fetch_32bit(pos);
 			pos += sizeof(Oid);
 			if (sub_field->sql_type.pgsql.typeid != typeid)
 				Elog("composite subtype mismatch");
-			len = __ntoh32(*((int *)pos));
+			len = __fetch_32bit(pos);
 			pos += sizeof(int32_t);
 			if (len == -1)
 			{
@@ -1289,7 +1312,7 @@ put_extra_cube_value(SQLfield *column,
 	}
 	else
 	{
-		uint32_t	header = __ntoh32(*((const uint32_t *)addr));
+		uint32_t	header = __fetch_32bit(addr);
 		uint32_t	i, nitems = (header & 0x7fffffffU);
 		uint64_t	value;
 
@@ -1302,7 +1325,7 @@ put_extra_cube_value(SQLfield *column,
 		addr += sizeof(uint32_t);
 		for (i=0; i < nitems; i++)
 		{
-			value = __ntoh64(((const uint64_t *)addr)[i]);
+			value = __fetch_64bit(addr + sizeof(uint64_t) * i);
 			sql_buffer_append(&column->extra, &value, sizeof(uint64_t));
 		}
 		sql_buffer_append(&column->values,
