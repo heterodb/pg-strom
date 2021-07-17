@@ -656,82 +656,6 @@ typedef struct
 	arrowFieldStatsBinary columns[FLEXIBLE_ARRAY_MEMBER];
 } arrowStatsBinary;
 
-static bool
-__arrow_stat_parse_8bit(char *buf, const char *token)
-{
-	char	   *end;
-	int64_t		ival;
-
-	ival = strtol(token, &end, 10);
-	if (*end != '\0' || ival < SCHAR_MIN || ival > SCHAR_MAX)
-		return false;
-	*((int8_t *)buf) = (int8_t)ival;
-	return true;
-}
-
-static bool
-__arrow_stat_parse_16bit(char *buf, const char *token)
-{
-	char	   *end;
-	int64_t		ival;
-
-	ival = strtol(token, &end, 10);
-	if (*end != '\0' || ival < SHRT_MIN || ival > SHRT_MAX)
-		return false;
-	*((int16_t *)buf) = (int16_t)ival;
-	return true;
-}
-
-static bool
-__arrow_stat_parse_32bit(char *buf, const char *token)
-{
-	char		*end;
-	int64_t		ival;
-
-	ival = strtol(token, &end, 10);
-	if (*end != '\0' || ival < INT_MIN || ival > INT_MAX)
-		return false;
-	*((int32_t *)buf) = (int32_t)ival;
-	return true;
-}
-
-static bool
-__arrow_stat_parse_64bit(char *buf, const char *token)
-{
-	char	   *end;
-	int64_t		ival;
-
-	ival = strtoll(token, &end, 10);
-	if (*end != '\0')
-		return false;
-	*((int64_t *)buf) = (int64_t)ival;
-	return true;
-}
-
-static bool
-__arrow_stat_parse_128bit(char *buf, const char *token)
-{
-	int128_t	ival = 0;
-	bool		is_minus = false;
-
-	if (*token == '-')
-	{
-		is_minus = true;
-		token++;
-	}
-	while (isdigit(*token))
-	{
-		ival = 10 * ival + (*token - '0');
-		token++;
-	}
-	if (*token != '\0')
-		return false;
-	if (is_minus)
-		ival = -ival;
-	*((int128_t *)buf) = ival;
-	return true;
-}
-
 static void
 __releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
 {
@@ -764,40 +688,64 @@ releaseArrowStatsBinary(arrowStatsBinary *arrow_bstats)
 	}
 }
 
+static int128_t
+__atoi128(const char *tok, bool *p_isnull)
+{
+	int128_t	ival = 0;
+	bool		is_minus = false;
+
+	if (*tok == '-')
+	{
+		is_minus = true;
+		tok++;
+	}
+	while (isdigit(*tok))
+	{
+		ival = 10 * ival + (*tok - '0');
+		tok++;
+		if (is_minus && ival != 0)
+		{
+			ival = -ival;
+			is_minus = false;
+		}
+	}
+	if (is_minus || *tok != '\0')
+		*p_isnull = true;
+	return ival;
+}
+
 static bool
 __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 							 ArrowField *field,
 							 const char *min_tokens,
 							 const char *max_tokens)
 {
-	bool	  (*fn_parse_stat)(char *buf, const char *token) = NULL;
 	int			unitsz = -1;
+	char	   *min_buffer;
+	char	   *max_buffer;
 	char	   *min_values = NULL;
 	char	   *max_values = NULL;
 	bool	   *isnull = NULL;
-	char	   *buffer;
-	char	   *tok, *pos;
+	char	   *tok1, *pos1;
+	char	   *tok2, *pos2;
 	uint32		index;
 
+	/* determine the unitsz of datum */
 	switch (field->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
 			switch (field->type.Int.bitWidth)
 			{
 				case 8:
-					fn_parse_stat = __arrow_stat_parse_8bit;
 					unitsz = sizeof(uint8_t);
 					break;
 				case 16:
-					fn_parse_stat = __arrow_stat_parse_16bit;
 					unitsz = sizeof(uint16_t);
 					break;
 				case 32:
-					fn_parse_stat = __arrow_stat_parse_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case 64:
-					fn_parse_stat = __arrow_stat_parse_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -809,15 +757,12 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			switch (field->type.FloatingPoint.precision)
 			{
 				case ArrowPrecision__Half:
-					fn_parse_stat = __arrow_stat_parse_16bit;
 					unitsz = sizeof(uint16_t);
 					break;
 				case ArrowPrecision__Single:
-					fn_parse_stat = __arrow_stat_parse_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowPrecision__Double:
-					fn_parse_stat = __arrow_stat_parse_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -826,7 +771,6 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			break;
 
 		case ArrowNodeTag__Decimal:
-			fn_parse_stat = __arrow_stat_parse_128bit;
 			unitsz = sizeof(int128_t);
 			break;
 
@@ -834,11 +778,9 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			switch (field->type.Date.unit)
 			{
 				case ArrowDateUnit__Day:
-					fn_parse_stat = __arrow_stat_parse_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowDateUnit__MilliSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -851,12 +793,10 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			{
 				case ArrowTimeUnit__Second:
 				case ArrowTimeUnit__MilliSecond:
-					fn_parse_stat = __arrow_stat_parse_32bit;
 					unitsz = sizeof(uint32_t);
 					break;
 				case ArrowTimeUnit__MicroSecond:
 				case ArrowTimeUnit__NanoSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -871,7 +811,6 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 				case ArrowTimeUnit__MilliSecond:
 				case ArrowTimeUnit__MicroSecond:
 				case ArrowTimeUnit__NanoSecond:
-					fn_parse_stat = __arrow_stat_parse_64bit;
 					unitsz = sizeof(uint64_t);
 					break;
 				default:
@@ -881,49 +820,44 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		default:
 			return false;
 	}
+	Assert(unitsz > 0);
 	/* parse the min_tokens/max_tokens */
+	min_buffer = alloca(strlen(min_tokens) + 1);
+	max_buffer = alloca(strlen(max_tokens) + 1);
+	strcpy(min_buffer, min_tokens);
+	strcpy(max_buffer, max_tokens);
+
 	min_values = palloc0(unitsz * bstats->nrooms);
 	max_values = palloc0(unitsz * bstats->nrooms);
 	isnull     = palloc0(sizeof(bool) * bstats->nrooms);
-
-	buffer = alloca(Max(strlen(min_tokens),
-						strlen(max_tokens)) + 1);
-	strcpy(buffer, min_tokens);
-	for (tok = strtok_r(buffer, ",", &pos), index = 0;
-		 tok != NULL && index < bstats->nrooms;
-		 tok = strtok_r(NULL,   ",", &pos), index++)
+	for (tok1 = strtok_r(min_buffer, ",", &pos1),
+		 tok2 = strtok_r(max_buffer, ",", &pos2), index = 0;
+		 tok1 != NULL && tok2 != NULL && index < bstats->nrooms;
+		 tok1 = strtok_r(NULL, ",", &pos1),
+		 tok2 = strtok_r(NULL, ",", &pos2), index++)
 	{
-		tok = __trim(tok);
-		if (strcmp(tok, "null") == 0)
-			isnull[index] = true;
-		else if (!fn_parse_stat(min_values + unitsz * index, tok))
-			goto error;
-	}
-	if (tok != NULL || index != bstats->nrooms)
-		goto error;
+		bool		__isnull = false;
+		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
+		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
 
-	strcpy(buffer, max_tokens);
-	for (tok = strtok_r(buffer, ",", &pos), index = 0;
-		 tok != NULL && index < bstats->nrooms;
-		 tok = strtok_r(NULL,   ",", &pos), index++)
+		if (__isnull)
+			isnull[index] = true;
+		else
+		{
+			memcpy(min_values + unitsz * index, &__min, unitsz);
+			memcpy(max_values + unitsz * index, &__max, unitsz);
+		}
+	}
+	/* sanity checks */
+	if (!tok1 && !tok2 && index == bstats->nrooms)
 	{
-		tok = __trim(tok);
-		if (strcmp(tok, "null") == 0)
-			isnull[index] = true;
-		else if (!fn_parse_stat(max_values + unitsz * index, tok))
-			goto error;
+		bstats->unitsz = unitsz;
+		bstats->isnull = isnull;
+		bstats->min_values = min_values;
+		bstats->max_values = max_values;
+		return true;
 	}
-	if (tok != NULL || index != bstats->nrooms)
-		goto error;
-
-	bstats->unitsz = unitsz;
-	bstats->isnull = isnull;
-	bstats->min_values = min_values;
-	bstats->max_values = max_values;
-
-	return true;
-
-error:
+	/* elsewhere, something wrong */
 	pfree(min_values);
 	pfree(max_values);
 	pfree(isnull);
@@ -933,7 +867,7 @@ error:
 static bool
 __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 							 ArrowField *field,
-							 uint32 nrooms)
+							 uint32 numRecordBatches)
 {
 	const char *min_tokens = NULL;
 	const char *max_tokens = NULL;
@@ -950,7 +884,7 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			max_tokens = kv->value;
 	}
 
-	bstats->nrooms = nrooms;
+	bstats->nrooms = numRecordBatches;
 	bstats->unitsz = -1;
 	if (min_tokens && max_tokens)
 	{
@@ -984,7 +918,7 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		{
 			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
 											 &field->children[j],
-											 nrooms))
+											 numRecordBatches))
 				retval = true;
 		}
 	}
