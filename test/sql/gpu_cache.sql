@@ -16,9 +16,9 @@ SET search_path = gpu_cache_temp_test,public;
 
 CREATE TABLE cache_test_table (
   id   int,
-  a    int1 --,
-  /*b    int2,
-  c    int4,
+  a    int1--,
+  --b    int2 --,
+  /*c    int4,
   d    int8,
   e    float2,
   f    float4,
@@ -59,7 +59,9 @@ SET enable_seqscan=off;
 ---
 
 INSERT INTO cache_test_table (
-  SELECT x, pgstrom.random_int(1,-128,127)
+  SELECT x, 
+  pgstrom.random_int(1,-128,127)--,     -- a int1
+  --pgstrom.random_int(1,-32768,32767)  -- b int2
   FROM generate_series(1,2000) x
 );
 
@@ -76,13 +78,9 @@ UPDATE cache_test_table SET
   a = (a+1) % 127
 WHERE id%97=0;
 
-UPDATE cache_test_table SET 
-  a = (a+1) % 127
-WHERE id%97=0;
+UPDATE cache_test_table SET a = (a+1) % 127 WHERE id%97=0;
 
-UPDATE normal_table SET 
-  a = (a+1) % 127
-WHERE id%97=0;
+UPDATE normal_table SET a = (a+1) % 127 WHERE id%97=0;
 
 ---
 --- DETELE
@@ -103,7 +101,7 @@ WHERE id%101=0;
 
 SELECT count(*) FROM normal_table AS n, cache_test_table AS c 
 WHERE n.id = c.id
-AND (n.a = c.a);
+AND n.a = c.a;
 
 
 ---
