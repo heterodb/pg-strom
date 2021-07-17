@@ -95,11 +95,11 @@ typedef struct
 
 /* setup of MetadataCacheKey */
 static inline int
-initMetadataCacheKey(MetadataCacheKey *mkey, dev_t st_dev, ino_t st_ino)
+initMetadataCacheKey(MetadataCacheKey *mkey, struct stat *stat_buf)
 {
 	memset(mkey, 0, sizeof(MetadataCacheKey));
-	mkey->st_dev	= st_dev;
-	mkey->st_ino	= st_ino;
+	mkey->st_dev	= stat_buf->st_dev;
+	mkey->st_ino	= stat_buf->st_ino;
 	mkey->hash		= hash_any((unsigned char *)mkey,
 							   offsetof(MetadataCacheKey, hash));
 	return mkey->hash % ARROW_METADATA_HASH_NSLOTS;
@@ -3181,7 +3181,7 @@ __ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 	}
 	if (fstat(FileGetRawDesc(filp), &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(filp));
-	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	initMetadataCacheKey(&key, &stat_buf);
 
 	aw_state = palloc0(offsetof(arrowWriteState,
 								sql_table.columns[tupdesc->natts]));
@@ -5203,7 +5203,7 @@ arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs)
 	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
 
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	index = initMetadataCacheKey(&key, &stat_buf);
 	lock = &arrow_metadata_state->lock_slots[index];
 	hash_slot = &arrow_metadata_state->hash_slots[index];
 	mvcc_slot = &arrow_metadata_state->mvcc_slots[index];
@@ -5515,7 +5515,7 @@ setupArrowSQLbufferBatches(SQLtable *table)
 
 	if (fstat(table->fdesc, &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", table->filename);
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	index = initMetadataCacheKey(&key, &stat_buf);
 	LWLockAcquire(&arrow_metadata_state->lock_slots[index], LW_SHARED);
 	readArrowFileDesc(table->fdesc, &af_info);
 	LWLockRelease(&arrow_metadata_state->lock_slots[index]);
@@ -5586,7 +5586,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 
 	if (fstat(fdesc, &stat_buf) != 0)
 		elog(ERROR, "failed on fstat(2): %m");
-	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	initMetadataCacheKey(&key, &stat_buf);
 
 	dlist_foreach(iter, &arrow_write_redo_list)
 	{
@@ -5768,7 +5768,7 @@ __arrowExecTruncateRelation(Relation frel)
 	if (stat(path_name, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", path_name);
 	/* metadata cache invalidation */
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	index = initMetadataCacheKey(&key, &stat_buf);
 	LWLockAcquire(&arrow_metadata_state->lock_slots[index], LW_EXCLUSIVE);
 	arrowInvalidateMetadataCache(&key, true);
 	LWLockRelease(&arrow_metadata_state->lock_slots[index]);
@@ -5821,9 +5821,7 @@ __arrowExecTruncateRelation(Relation frel)
 				elog(ERROR, "failed on open('%s'): %m", path_name);
 			if (fstat(fdesc, &stat_buf) != 0)
 				elog(ERROR, "failed on fstat('%s'): %m", path_name);
-			initMetadataCacheKey(&redo->key,
-								 stat_buf.st_dev,
-								 stat_buf.st_ino);
+			initMetadataCacheKey(&redo->key, &stat_buf);
 			table->filename = path_name;
 			table->fdesc = fdesc;
 			arrowFileWrite(table, "ARROW1\0\0", 8);
