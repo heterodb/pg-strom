@@ -3187,7 +3187,7 @@ __ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 								sql_table.columns[tupdesc->natts]));
 	aw_state->memcxt = CurrentMemoryContext;
 	aw_state->file = filp;
-	aw_state->key = key;
+	memcpy(&aw_state->key, &key, sizeof(MetadataCacheKey));
 	aw_state->hash = key.hash;
 	table = &aw_state->sql_table;
 	table->filename = FilePathName(filp);
@@ -5606,7 +5606,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 		main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup));
 		redo = MemoryContextAllocZero(CacheMemoryContext,
 									  main_sz + strlen(fname) + 1);
-		redo->key = key;
+		memcpy(&redo->key, &key, sizeof(MetadataCacheKey));
 		redo->xid = curr_xid;
 		redo->cid = curr_cid;
 		redo->pathname = (char *)redo + main_sz;
@@ -5635,7 +5635,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 									footer_backup[nbytes]));
 		redo = MemoryContextAllocZero(CacheMemoryContext,
 									  main_sz + strlen(fname) + 1);
-		redo->key = key;
+		memcpy(&redo->key, &key, sizeof(MetadataCacheKey));
 		redo->xid = curr_xid;
 		redo->cid = curr_cid;
 		redo->pathname = (char *)redo + main_sz;
@@ -5682,7 +5682,7 @@ writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 	{
 		mvcc = MemoryContextAllocZero(TopSharedMemoryContext,
 									  sizeof(arrowWriteMVCCLog));
-		mvcc->key = aw_state->key;
+		memcpy(&mvcc->key, &aw_state->key, sizeof(MetadataCacheKey));
 		mvcc->xid = GetCurrentTransactionId();
 		mvcc->cid = GetCurrentCommandId(true);
 	}
