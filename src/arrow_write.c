@@ -1141,8 +1141,13 @@ setupArrowField(ArrowField *field, SQLtable *table, SQLfield *column)
 	/* min/max statistics */
 	if (column->stat_enabled)
 	{
-		customMetadata = repalloc(customMetadata,
-								  sizeof(ArrowKeyValue) * (numCustomMetadata + 2));
+		size_t		sz = sizeof(ArrowKeyValue) * (numCustomMetadata + 2);
+
+		if (!customMetadata)
+			customMetadata = palloc0(sz);
+		else
+			customMetadata = repalloc(customMetadata, sz);
+
 		__setupArrowFieldStat(customMetadata + numCustomMetadata,
 							  column, table->numRecordBatches);
 		numCustomMetadata += 2;
