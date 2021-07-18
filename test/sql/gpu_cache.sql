@@ -228,8 +228,6 @@ COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_
 COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
 INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
 
-SET enable_seqscan=on;
-
 SELECT
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
 COUNT(b) AS b_count,SUM(b) AS b_sum,AVG(b) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
