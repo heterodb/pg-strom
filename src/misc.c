@@ -1765,6 +1765,12 @@ PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_types);
 PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_type);
 PG_DEPRECATED_FUNCTION(pgsql_check_attr_of_type);
 
+/* arrow_fdw.c */
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_export_cupy);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_export_cupy_pinned);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_unpin_gpu_buffer);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_put_gpu_buffer);
+
 /* deadcode/matrix.c */
 PG_DEPRECATED_FUNCTION(array_matrix_accum);
 PG_DEPRECATED_FUNCTION(array_matrix_accum_varbit);
