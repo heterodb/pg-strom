@@ -5931,7 +5931,13 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 
 	STROM_TRY();
 	{
-		if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+		/*
+		 * NOTE: In case of combined RIGHT/FULL OUTER JOIN, the last GpuTask
+		 * shall not have a valid pds_src; Its GPU kernel generates all-NULL
+		 * rows according to the outer-join map.
+		 * So, we cannot expect GpuPreAgg always have a valid pds_src also.
+		 */
+		if (pds_src && pds_src->kds.format == KDS_FORMAT_COLUMN)
 		{
 			rc = gpuCacheMapDeviceMemory(GpuWorkerCurrentContext, pds_src);
 			if (rc != CUDA_SUCCESS)
