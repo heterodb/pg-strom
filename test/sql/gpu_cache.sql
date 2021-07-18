@@ -62,9 +62,9 @@ INSERT INTO cache_test_table (
   ,pgstrom.random_int(1,-32768,32767)  -- b int2
   ,pgstrom.random_int(1,-2147483648,2147483647)  -- c int4
   ,pgstrom.random_int(1,-9223372036854775808,9223372036854775807)   -- d int8
-  ,pgstrom.random_float(0.1, -32000, 32000)   -- e float2
-  ,pgstrom.random_float(0.1, -999999, 999999)   -- f float4
-  ,pgstrom.random_float(0.1, -999999, 999999)   -- f float8
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- e float2
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float4
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float8
   ,LEFT(MD5((x%479)::TEXT),(x%32+1)::INTEGER)     -- h text
   ,LEFT(MD5((x%479+1)::TEXT),(x%32+1)::INTEGER)     -- i text
   ,LEFT(MD5((x%479+2)::TEXT),(x%32+1)::INTEGER)     -- j text
@@ -101,19 +101,19 @@ UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 UPDATE normal_table     SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 
 EXPLAIN (costs off, verbose)
-UPDATE cache_test_table SET e = (e+0.1)::numeric % 999999 WHERE a%73=0;
-UPDATE cache_test_table SET e = (e+0.1)::numeric % 999999 WHERE a%73=0;
-UPDATE normal_table     SET e = (e+0.1)::numeric % 999999 WHERE a%73=0;
+UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
+UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
+UPDATE normal_table     SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
 
 EXPLAIN (costs off, verbose)
-UPDATE cache_test_table SET f = (f+0.1)::numeric % 999999 WHERE a%71=0;
-UPDATE cache_test_table SET f = (f+0.1)::numeric % 999999 WHERE a%71=0;
-UPDATE normal_table     SET f = (f+0.1)::numeric % 999999 WHERE a%71=0;
+UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
+UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
+UPDATE normal_table     SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
 
 EXPLAIN (costs off, verbose)
-UPDATE cache_test_table SET g = (g+0.1)::numeric % 999999 WHERE a%67=0;
-UPDATE cache_test_table SET g = (g+0.1)::numeric % 999999 WHERE a%67=0;
-UPDATE normal_table     SET g = (g+0.1)::numeric % 999999 WHERE a%67=0;
+UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
+UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
+UPDATE normal_table     SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
 
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
@@ -187,14 +187,11 @@ DELETE FROM normal_table WHERE j='delete' OR j IS NULL;
 ---
 --- ALTER TABLE 
 ---
-
-EXPLAIN (costs off, verbose) 
-ALTER TABLE cache_test_table ADD COLUMN k int2;
-ALTER TABLE cache_test_table ADD COLUMN k int2;
+/*ALTER TABLE cache_test_table ADD COLUMN k int2;
 ALTER TABLE normal_table ADD COLUMN k int2;
 
 UPDATE cache_test_table SET k=b/2;
-UPDATE normal_table SET k=b/2;
+UPDATE normal_table SET k=b/2;*/
 
 ---
 --- SELECT 
@@ -208,47 +205,83 @@ SELECT * FROM normal_table WHERE a % 3 = 0
 UNION DISTINCT
 SELECT * FROM cache_test_table WHERE a % 3 = 0) AS q;
 
-
---clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC,3) AS ${a}_sum,ROUND(AVG($a)::NUMERIC,3) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
+--clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
 
 EXPLAIN (costs off, verbose)
 SELECT 
-COUNT(a) AS a_count,ROUND(SUM(a)::NUMERIC,3) AS a_sum,ROUND(AVG(a)::NUMERIC,3) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
-COUNT(b) AS b_count,ROUND(SUM(b)::NUMERIC,3) AS b_sum,ROUND(AVG(b)::NUMERIC,3) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
-COUNT(c) AS c_count,ROUND(SUM(c)::NUMERIC,3) AS c_sum,ROUND(AVG(c)::NUMERIC,3) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
-COUNT(d) AS d_count,ROUND(SUM(d)::NUMERIC,3) AS d_sum,ROUND(AVG(d)::NUMERIC,3) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
-COUNT(e) AS e_count,ROUND(SUM(e)::NUMERIC,3) AS e_sum,ROUND(AVG(e)::NUMERIC,3) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
-COUNT(f) AS f_count,ROUND(SUM(f)::NUMERIC,3) AS f_sum,ROUND(AVG(f)::NUMERIC,3) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
-COUNT(g) AS g_count,ROUND(SUM(g)::NUMERIC,3) AS g_sum,ROUND(AVG(g)::NUMERIC,3) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
-INTO TEMPORARY cached_result FROM cache_test_table where id%3=0;
+COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
+COUNT(b) AS b_count,SUM(b) AS b_sum,AVG(b) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
+COUNT(c) AS c_count,SUM(c) AS c_sum,AVG(c) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
+COUNT(d) AS d_count,SUM(d) AS d_sum,AVG(d) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
+COUNT(e) AS e_count,SUM(e) AS e_sum,AVG(e) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
+COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
+COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
+INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
 
 SELECT 
-COUNT(a) AS a_count,ROUND(SUM(a)::NUMERIC,3) AS a_sum,ROUND(AVG(a)::NUMERIC,3) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
-COUNT(b) AS b_count,ROUND(SUM(b)::NUMERIC,3) AS b_sum,ROUND(AVG(b)::NUMERIC,3) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
-COUNT(c) AS c_count,ROUND(SUM(c)::NUMERIC,3) AS c_sum,ROUND(AVG(c)::NUMERIC,3) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
-COUNT(d) AS d_count,ROUND(SUM(d)::NUMERIC,3) AS d_sum,ROUND(AVG(d)::NUMERIC,3) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
-COUNT(e) AS e_count,ROUND(SUM(e)::NUMERIC,3) AS e_sum,ROUND(AVG(e)::NUMERIC,3) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
-COUNT(f) AS f_count,ROUND(SUM(f)::NUMERIC,3) AS f_sum,ROUND(AVG(f)::NUMERIC,3) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
-COUNT(g) AS g_count,ROUND(SUM(g)::NUMERIC,3) AS g_sum,ROUND(AVG(g)::NUMERIC,3) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
-INTO TEMPORARY cached_result FROM cache_test_table where id%3=0;
+COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
+COUNT(b) AS b_count,SUM(b) AS b_sum,AVG(b) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
+COUNT(c) AS c_count,SUM(c) AS c_sum,AVG(c) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
+COUNT(d) AS d_count,SUM(d) AS d_sum,AVG(d) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
+COUNT(e) AS e_count,SUM(e) AS e_sum,AVG(e) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
+COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
+COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
+INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
 
 SET enable_seqscan=on;
 
 SELECT
-COUNT(a) AS a_count,ROUND(SUM(a)::NUMERIC,3) AS a_sum,ROUND(AVG(a)::NUMERIC,3) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
-COUNT(b) AS b_count,ROUND(SUM(b)::NUMERIC,3) AS b_sum,ROUND(AVG(b)::NUMERIC,3) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
-COUNT(c) AS c_count,ROUND(SUM(c)::NUMERIC,3) AS c_sum,ROUND(AVG(c)::NUMERIC,3) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
-COUNT(d) AS d_count,ROUND(SUM(d)::NUMERIC,3) AS d_sum,ROUND(AVG(d)::NUMERIC,3) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
-COUNT(e) AS e_count,ROUND(SUM(e)::NUMERIC,3) AS e_sum,ROUND(AVG(e)::NUMERIC,3) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
-COUNT(f) AS f_count,ROUND(SUM(f)::NUMERIC,3) AS f_sum,ROUND(AVG(f)::NUMERIC,3) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
-COUNT(g) AS g_count,ROUND(SUM(g)::NUMERIC,3) AS g_sum,ROUND(AVG(g)::NUMERIC,3) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
-INTO TEMPORARY normal_result FROM normal_table where id%3=0;
+COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
+COUNT(b) AS b_count,SUM(b) AS b_sum,AVG(b) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
+COUNT(c) AS c_count,SUM(c) AS c_sum,AVG(c) AS c_avg,MAX(c) AS c_max,MIN(c) AS c_min,
+COUNT(d) AS d_count,SUM(d) AS d_sum,AVG(d) AS d_avg,MAX(d) AS d_max,MIN(d) AS d_min,
+COUNT(e) AS e_count,SUM(e) AS e_sum,AVG(e) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_min,
+COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
+COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
+INTO TEMPORARY normal_result FROM normal_table WHERE id%3=0;
 
-select COUNT(*)=1 AS ok FROM (
-  SELECT * FROM cached_result
-  UNION DISTINCT
-  SELECT * FROM normal_result
-) AS m;
+
+--clms=("a" "b" "c" "d" "e" "f" "g") ; mtds=("count" "sum" "avg" "max" "min"); for a in ${clms[@]}; do for m in ${mtds[@]}; do echo ",ABS(c.${a}_${m} - n.${a}_${m}) < 1 AS ${a}_${m}_ok" ; done ; done;
+SELECT 
+ABS(c.a_count - n.a_count) < 1 AS a_count_ok
+,ABS(c.a_sum - n.a_sum) < 1 AS a_sum_ok
+,ABS(c.a_avg - n.a_avg) < 1 AS a_avg_ok
+,ABS(c.a_max - n.a_max) < 1 AS a_max_ok
+,ABS(c.a_min - n.a_min) < 1 AS a_min_ok
+,ABS(c.b_count - n.b_count) < 1 AS b_count_ok
+,ABS(c.b_sum - n.b_sum) < 1 AS b_sum_ok
+,ABS(c.b_avg - n.b_avg) < 1 AS b_avg_ok
+,ABS(c.b_max - n.b_max) < 1 AS b_max_ok
+,ABS(c.b_min - n.b_min) < 1 AS b_min_ok
+,ABS(c.c_count - n.c_count) < 1 AS c_count_ok
+,ABS(c.c_sum - n.c_sum) < 1 AS c_sum_ok
+,ABS(c.c_avg - n.c_avg) < 1 AS c_avg_ok
+,ABS(c.c_max - n.c_max) < 1 AS c_max_ok
+,ABS(c.c_min - n.c_min) < 1 AS c_min_ok
+,ABS(c.d_count - n.d_count) < 1 AS d_count_ok
+,ABS(c.d_sum - n.d_sum) < 1 AS d_sum_ok
+,ABS(c.d_avg - n.d_avg) < 1 AS d_avg_ok
+,ABS(c.d_max - n.d_max) < 1 AS d_max_ok
+,ABS(c.d_min - n.d_min) < 1 AS d_min_ok
+,ABS(c.e_count - n.e_count) < 1 AS e_count_ok
+,ABS(c.e_sum - n.e_sum) < 1 AS e_sum_ok
+,ABS(c.e_avg - n.e_avg) < 1 AS e_avg_ok
+,ABS(c.e_max - n.e_max) < 1 AS e_max_ok
+,ABS(c.e_min - n.e_min) < 1 AS e_min_ok
+,ABS(c.f_count - n.f_count) < 1 AS f_count_ok
+,ABS(c.f_sum - n.f_sum) < 1 AS f_sum_ok
+,ABS(c.f_avg - n.f_avg) < 1 AS f_avg_ok
+,ABS(c.f_max - n.f_max) < 1 AS f_max_ok
+,ABS(c.f_min - n.f_min) < 1 AS f_min_ok
+,ABS(c.g_count - n.g_count) < 1 AS g_count_ok
+,ABS(c.g_sum - n.g_sum) < 1 AS g_sum_ok
+,ABS(c.g_avg - n.g_avg) < 1 AS g_avg_ok
+,ABS(c.g_max - n.g_max) < 1 AS g_max_ok
+,ABS(c.g_min - n.g_min) < 1 AS g_min_ok
+ FROM cached_result AS c,
+normal_result AS n
+WHERE c.a_count = n.a_count;
+
 
 ---
 --- TRUNCATE
