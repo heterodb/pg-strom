@@ -18,14 +18,15 @@ include $(STROM_BUILD_ROOT)/Makefile.cuda
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 3.0
+PGSTROM_VERSION := 3.1
 PGSTROM_RELEASE := devel
 
 #
 # Installation related
 #
-__PGSTROM_SQL = pg_strom--2.2.sql pg_strom--2.2--2.3.sql \
-                                  pg_strom--2.3--3.0.sql
+__PGSTROM_SQL = pg_strom--2.2.sql pg_strom--3.0.sql \
+                pg_strom--2.2--2.3.sql  pg_strom--2.3--3.0.sql \
+                pg_strom--3.0--3.1.sql
 PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 
 #
@@ -59,11 +60,7 @@ GPU_CACHE_DEBUG_FATBIN := $(STROM_BUILD_ROOT)/src/cuda_gcache.gfatbin
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo pg2arrow dbgen-ssbm
-ifdef WITH_MYSQL2ARROW
-__STROM_UTILS += mysql2arrow
-MYSQL_CONFIG = mysql_config
-endif
+__STROM_UTILS = gpuinfo dbgen-ssbm
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO := $(STROM_BUILD_ROOT)/utils/gpuinfo
@@ -74,40 +71,6 @@ GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(CUDA_IPATH) -L $(CUDA_LPATH) \
                  -I $(STROM_BUILD_ROOT)/utils \
                  $(shell $(PG_CONFIG) --ldflags)
 
-PG2ARROW = $(STROM_BUILD_ROOT)/utils/pg2arrow
-PG2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
-                  $(STROM_BUILD_ROOT)/utils/pgsql_client.c \
-                  $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
-                  $(STROM_BUILD_ROOT)/src/arrow_write.c \
-                  $(STROM_BUILD_ROOT)/src/arrow_pgsql.c
-PG2ARROW_DEPEND = $(PG2ARROW_SOURCE) \
-                  $(STROM_BUILD_ROOT)/src/arrow_defs.h \
-                  $(STROM_BUILD_ROOT)/src/arrow_ipc.h
-PG2ARROW_CFLAGS = -D__PG2ARROW__=1 -D_GNU_SOURCE -g -Wall \
-                  -I $(STROM_BUILD_ROOT)/src \
-                  -I $(STROM_BUILD_ROOT)/utils \
-                  -I $(shell $(PG_CONFIG) --includedir) \
-                  -I $(shell $(PG_CONFIG) --includedir-server) \
-                  -L $(shell $(PG_CONFIG) --libdir) \
-                  -L $(shell $(PG_CONFIG) --pkglibdir) \
-                  $(shell $(PG_CONFIG) --ldflags)
-
-MYSQL2ARROW = $(STROM_BUILD_ROOT)/utils/mysql2arrow
-MYSQL2ARROW_SOURCE = $(STROM_BUILD_ROOT)/utils/sql2arrow.c \
-                     $(STROM_BUILD_ROOT)/utils/mysql_client.c \
-                     $(STROM_BUILD_ROOT)/src/arrow_nodes.c \
-                     $(STROM_BUILD_ROOT)/src/arrow_write.c
-MYSQL2ARROW_DEPEND = $(MYSQL2ARROW_SOURCE) \
-                     $(STROM_BUILD_ROOT)/src/arrow_defs.h \
-                     $(STROM_BUILD_ROOT)/src/arrow_ipc.h \
-                     $(STROM_BUILD_ROOT)/utils/sql2arrow.h
-MYSQL2ARROW_CFLAGS = -D__MYSQL2ARROW__=1 -D_GNU_SOURCE -g -Wall \
-                     -I $(STROM_BUILD_ROOT)/src \
-                     -I $(STROM_BUILD_ROOT)/utils \
-                     -I $(shell $(PG_CONFIG) --includedir-server) \
-                     $(shell $(MYSQL_CONFIG) --cflags) \
-                     $(shell $(MYSQL_CONFIG) --libs) \
-                     -Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
 		bm_utils.c driver.c permute.c rnd.c speed_seed.c dists.dss.h
@@ -126,18 +89,17 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
 #
 # Markdown (document) files
 #
-__DOC_FILES = index.md install.md partition.md \
-              operations.md sys_admin.md brin.md postgis.md troubles.md \
+__DOC_FILES = index.md install.md operations.md \
+              partition.md brin.md postgis.md troubles.md \
 	      ssd2gpu.md arrow_fdw.md gpucache.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
-              ref_utils.md \
 	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md
 
 #
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
-                  pg_strom.control src sql utils python test man
+                  pg_strom.control src sql utils arrow-tools test man
 ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
@@ -147,13 +109,31 @@ endif
 else
 __STROM_TGZ = pg_strom-master
 endif
-STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
+STROM_TAR = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar)
+STROM_TGZ = $(STROM_TAR).gz
+
 ifdef PGSTROM_GITHASH
-__STROM_TGZ_GITHASH = $(PGSTROM_GITHASH)
+# if 'HEAD' is given, replace it by the current githash
+ifeq ($(PGSTROM_GITHASH),HEAD)
+PGSTROM_GITHASH = $(shell git rev-parse HEAD)
+endif
 else
-__STROM_TGZ_GITHASH = HEAD
+ifeq ($(shell test -e $(STROM_BUILD_ROOT)/.git/config && echo -n 1),1)
+PGSTROM_GITHASH = $(shell git rev-parse HEAD)
+ifneq ($(shell git diff | wc -l),0)
+PGSTROM_GITHASH_SUFFIX=::local_changes
+endif
+else
+ifeq ($(shell test -e $(STROM_BUILD_ROOT)/GITHASH && echo -n 1),1)
+PGSTROM_GITHASH = $(shell cat $(STROM_BUILD_ROOT)/GITHASH)
+else
+PGSTROM_GITHASH = HEAD
+endif
+endif
 endif
 
+__SOURCEDIR = $(shell rpmbuild -E %{_sourcedir})
+__SPECDIR = $(shell rpmbuild -E %{_specdir})
 __SPECFILE = pg_strom-PG$(MAJORVERSION)
 
 #
@@ -181,6 +161,7 @@ PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(CUDA_BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(CUDA_LPATH)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)$(PGSTROM_GITHASH_SUFFIX)\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
 SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
@@ -200,10 +181,11 @@ DATA_built = $(GPU_FATBIN) $(GPU_DEBUG_FATBIN) \
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(STROM_UTILS) $(MYSQL2ARROW) \
+EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
 	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
-	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
+	$(shell ls $(STROM_BUILD_ROOT)/pg_strom-*.tar.gz 2>/dev/null) \
+	$(shell dirname $(STROM_BUILD_ROOT)/pg_strom-*/GITHASH) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
 	$(SSBM_DBGEN_DISTS_DSS)
 
@@ -289,13 +271,6 @@ $(GPUINFO): $(GPUINFO_DEPEND)
 	$(CC) $(GPUINFO_CFLAGS) \
               $(GPUINFO_SOURCE)  -o $@ -lcuda -lnvidia-ml -ldl
 
-$(PG2ARROW): $(PG2ARROW_DEPEND)
-	$(CC) $(PG2ARROW_CFLAGS) \
-              $(PG2ARROW_SOURCE) -o $@ -lpq -lpgcommon -lpgport
-
-$(MYSQL2ARROW): $(MYSQL2ARROW_DEPEND)
-	$(CC) $(MYSQL2ARROW_SOURCE) -o $@ $(MYSQL2ARROW_CFLAGS)
-
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
 	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm
 
@@ -308,28 +283,68 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 #
 # Tarball
 #
-$(STROM_TGZ):
-	(cd $(STROM_BUILD_ROOT);                 \
-	 git archive	--format=tar.gz          \
-			--prefix=$(__STROM_TGZ)/ \
-			-o $(__STROM_TGZ).tar.gz \
-			$(__STROM_TGZ_GITHASH) $(__PACKAGE_FILES))
-
-tarball: $(STROM_TGZ)
+tarball:
+	(cd $(STROM_BUILD_ROOT) && \
+	 git archive --format=tar \
+	             --prefix=$(__STROM_TGZ)/ \
+	             -o $(STROM_TAR) \
+	     $(PGSTROM_GITHASH) $(__PACKAGE_FILES)            && \
+	 mkdir -p $(__STROM_TGZ)                              && \
+	 echo $(PGSTROM_GITHASH) > $(__STROM_TGZ)/GITHASH && \
+	 tar -r -f $(STROM_TAR) $(__STROM_TGZ)/GITHASH        && \
+	 gzip -f $(STROM_TAR) && test -e $(STROM_TGZ)) || exit 1
 
 #
 # RPM Package
 #
 rpm: tarball
-	cp -f $(STROM_TGZ) `rpmbuild -E %{_sourcedir}` || exit 1
-	git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf > `rpmbuild -E %{_sourcedir}`/systemd-pg_strom.conf || exit 1
-	git show --format=raw $(__STROM_TGZ_GITHASH):$(STROM_BUILD_ROOT)/files/pg_strom.spec.in | \
-	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g" \
-	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g" \
-	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"     \
-	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"    \
-	> `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec
-	rpmbuild -ba `rpmbuild -E %{_specdir}`/pg_strom-PG$(MAJORVERSION).spec \
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/systemd-pg_strom.conf \
+	    > $(__SOURCEDIR)/systemd-pg_strom.conf || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pg_strom.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+        -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    -e "s/@@PGSQL_VERSION@@/$(MAJORVERSION)/g"      \
+	    > $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec
+	rpmbuild -ba $(__SPECDIR)/pg_strom-PG$(MAJORVERSION).spec \
                  --undefine=_debugsource_packages
+
+rpm-pg2arrow: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pg2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/pg2arrow.spec
+	rpmbuild -ba $(__SPECDIR)/pg2arrow.spec --undefine=_debugsource_packages
+
+rpm-mysql2arrow: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/mysql2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/mysql2arrow.spec
+	rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec --undefine=_debugsource_packages
+
+rpm-pcap2arrow: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pcap2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/pcap2arrow.spec
+	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec --undefine=_debugsource_packages
+
+rpm-arrow: rpm-pg2arrow rpm-mysql2arrow rpm-pcap2arrow
 
 .PHONY: docs

@@ -2517,6 +2517,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	ParamPathInfo  *param_info;
 	GpuJoinPath	   *gjpath;
 	const Path	   *pathnode;
+	Path		   *outer_curr;
 	inner_path_item *ip_item;
 	List		   *ip_items_list;
 	List		   *restrict_clauses = extra->restrictlist;
@@ -2609,11 +2610,12 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	ip_item->join_nrows = joinrel->rows;
 	ip_items_list = list_make1(ip_item);
 
+	outer_curr = outer_path;
 	for (;;)
 	{
 		gjpath = create_gpujoin_path(root,
 									 joinrel,
-									 outer_path,
+									 outer_curr,
 									 ip_items_list,
 									 param_info,
 									 required_outer,
@@ -2632,7 +2634,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 
 		/* try to pull-up outer GpuJoin, if any */
 		pathnode = gpu_path_find_cheapest(root,
-										  outer_path->parent,
+										  outer_curr->parent,
 										  try_outer_parallel,
 										  try_inner_parallel);
 		if (pathnode && pgstrom_path_is_gpujoin(pathnode))
@@ -2656,7 +2658,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 
 				ip_items_list = lcons(ip_temp, ip_items_list);
 			}
-			outer_path = linitial(gjtemp->cpath.custom_paths);
+			outer_curr = linitial(gjtemp->cpath.custom_paths);
 		}
 		else
 		{
@@ -3487,6 +3489,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gjs->gts,
 							gjs->gts.gcontext,
 							GpuTaskKind_GpuJoin,
+							gj_info->outer_quals,
 							gj_info->outer_refs,
 							gj_info->used_params,
 							gj_info->optimal_gpu,
@@ -4247,7 +4250,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		depth++;
 	}
 	/* other common field */
-	pgstromExplainGpuTaskState(&gjs->gts, es);
+	pgstromExplainGpuTaskState(&gjs->gts, es, dcontext);
 }
 
 /*
@@ -4388,6 +4391,7 @@ ExecShutdownGpuJoin(CustomScanState *node)
 		}
 		gjs->gj_sstate = gj_sstate_new;
 	}
+	pgstromShutdownDSMGpuTaskState(&gjs->gts);
 }
 
 /*

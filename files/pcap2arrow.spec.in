@@ -1,0 +1,37 @@
+Name: pcap2arrow
+Version: @@STROM_VERSION@@
+Release: @@STROM_RELEASE@@%{?dist}
+Summary: Packet-capture to Apache Arrow conversion tool
+Group: Applications/Networking
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: @@STROM_TARBALL@@.tar.gz
+BuildRequires: libpcap-devel
+BuildRequires: pfring
+Requires: libpcap
+Requires: pfring
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%description
+pcap2arrow is a command line tool to capture network packets
+or read PCAP files, then convert to Apache Arrow file.
+This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
+
+%prep
+%setup -q -n @@STROM_TARBALL@@
+
+%build
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr pcap2arrow
+
+%install
+rm -rf %{buildroot}
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr install-pcap2arrow
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%{_bindir}/pcap2arrow
+
+%changelog

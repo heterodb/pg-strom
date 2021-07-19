@@ -44,6 +44,6 @@ extern void	   *palloc(size_t sz);
 extern void	   *palloc0(size_t sz);
 extern char	   *pstrdup(const char *str);
 extern void	   *repalloc(void *ptr, size_t sz);
-extern uint64_t	hash_any(const unsigned char *k, int keylen);
+extern uint32_t	hash_any(const unsigned char *k, int keylen);
 
 #endif	/* SQL2ARROW_H */

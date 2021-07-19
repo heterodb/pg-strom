@@ -30,6 +30,11 @@ typedef struct RecordBatchFieldState
 	size_t		values_length;
 	off_t		extra_offset;
 	size_t		extra_length;
+	/* min/max statistics */
+	SQLstat__datum stat_min;
+	SQLstat__datum stat_max;
+	bool		stat_isnull;
+	/* sub-fields if any */
 	int			num_children;
 	struct RecordBatchFieldState *children;
 } RecordBatchFieldState;
@@ -77,7 +82,6 @@ typedef struct
 } arrowMetadataCache;
 
 #define ARROW_METADATA_HASH_NSLOTS		2048
-#define ARROW_GPUBUF_HASH_NSLOTS		512
 typedef struct
 {
 	slock_t		lru_lock;
@@ -87,23 +91,32 @@ typedef struct
 	LWLock		lock_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
 	dlist_head	mvcc_slots[ARROW_METADATA_HASH_NSLOTS];
-
-	/* for ArrowGpuBuffer links */
-	LWLock		gpubuf_locks[ARROW_GPUBUF_HASH_NSLOTS];
-	dlist_head	gpubuf_slots[ARROW_GPUBUF_HASH_NSLOTS];
 } arrowMetadataState;
 
 /* setup of MetadataCacheKey */
 static inline int
-initMetadataCacheKey(MetadataCacheKey *mkey, dev_t st_dev, ino_t st_ino)
+initMetadataCacheKey(MetadataCacheKey *mkey, struct stat *stat_buf)
 {
 	memset(mkey, 0, sizeof(MetadataCacheKey));
-	mkey->st_dev	= st_dev;
-	mkey->st_ino	= st_ino;
+	mkey->st_dev	= stat_buf->st_dev;
+	mkey->st_ino	= stat_buf->st_ino;
 	mkey->hash		= hash_any((unsigned char *)mkey,
 							   offsetof(MetadataCacheKey, hash));
 	return mkey->hash % ARROW_METADATA_HASH_NSLOTS;
 }
+
+/*
+ * executor hint by min/max statistics per record batch
+ */
+typedef struct
+{
+	List		   *orig_quals;
+	List		   *eval_quals;
+	ExprState	   *eval_state;
+	Bitmapset	   *stat_attrs;
+	Bitmapset	   *load_attrs;
+	ExprContext	   *econtext;
+} arrowStatsHint;
 
 /*
  * MVCC state for the pending writes
@@ -157,8 +170,13 @@ struct ArrowFdwState
 	List	   *gpuDirectFileDescList;	/* list of GPUDirectFileDesc */
 	List	   *fdescList;				/* list of File (buffered i/o) */
 	Bitmapset  *referenced;
+	arrowStatsHint *stats_hint;
 	pg_atomic_uint32   *rbatch_index;
-	pg_atomic_uint32	__rbatch_index_local;	/* if single process exec */
+	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nload;
+	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
+	pg_atomic_uint32   *rbatch_nskip;
+	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
 	pgstrom_data_store *curr_pds;	/* current focused buffer */
 	cl_ulong	curr_index;			/* current index to row on KDS */
 	/* state of RecordBatches */
@@ -166,48 +184,16 @@ struct ArrowFdwState
 	RecordBatchState *rbatches[FLEXIBLE_ARRAY_MEMBER];
 };
 
-/*
- * ArrowGpuBuffer (shared structure)
- */
-#define ARROW_GPUBUF_FORMAT__CUPY		1
-
-typedef struct 
-{
-	dlist_node	chain;
-	pg_atomic_uint32 refcnt;
-	char	   *ident;
-	bool		pinned;
-	uint32		hash;
-	int			cuda_dindex;
-	CUipcMemHandle ipc_mhandle;
-	struct timespec timestamp;
-	size_t		nbytes;		/* size of device memory */
-	size_t		nrooms;
-	/* below is used for hash */
-	Oid			frel_oid;
-	int			format;		/* one of ARROW_GPUBUF_FORMAT__* */
-	int			nattrs;
-	AttrNumber	attnums[FLEXIBLE_ARRAY_MEMBER];
-} ArrowGpuBuffer;
-
-typedef struct
-{
-	dlist_node	chain;
-	ArrowGpuBuffer *gpubuf;
-	char		ident[FLEXIBLE_ARRAY_MEMBER];
-} ArrowGpuBufferTracker;
-
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
 static dlist_head		arrow_write_redo_list;
 static bool				arrow_fdw_enabled;				/* GUC */
+static bool				arrow_fdw_stats_hint_enabled;	/* GUC */
 static int				arrow_metadata_cache_size_kb;	/* GUC */
 static size_t			arrow_metadata_cache_size;
-static char			   *arrow_debug_row_numbers_hint;	/* GUC */
 static int				arrow_record_batch_size_kb;		/* GUC */
-static dlist_head		arrow_gpu_buffer_tracker_list;
 
 /* ---------- static functions ---------- */
 static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
@@ -220,18 +206,17 @@ static List	   *__arrowFdwExtractFilesList(List *options_list,
 										   int *p_parallel_nworkers,
 										   bool *p_writable);
 static List	   *arrowFdwExtractFilesList(List *options_list);
-static RecordBatchState *makeRecordBatchState(ArrowSchema *schema,
-											  ArrowBlock *block,
-											  ArrowRecordBatch *rbatch);
-static List	   *arrowLookupOrBuildMetadataCache(File fdesc);
+static List	   *arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs);
 static void		pg_datum_arrow_ref(kern_data_store *kds,
 								   kern_colmeta *cmeta,
 								   size_t index,
 								   Datum *p_datum,
 								   bool *p_isnull);
 /* routines for writable arrow_fdw foreign tables */
-static void	setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc);
-static void setupArrowSQLbufferBatches(SQLtable *table);
+static void	setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc,
+									  ArrowFileInfo *af_info);
+static void setupArrowSQLbufferBatches(SQLtable *table,
+									   ArrowFileInfo *af_info);
 static loff_t createArrowWriteRedoLog(File filp, bool is_newfile);
 static void writeOutArrowRecordBatch(arrowWriteState *aw_state,
 									 bool with_footer);
@@ -240,10 +225,6 @@ Datum	pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS);
-Datum	pgstrom_arrow_fdw_export_cupy(PG_FUNCTION_ARGS);
-Datum	pgstrom_arrow_fdw_export_cupy_pinned(PG_FUNCTION_ARGS);
-Datum	pgstrom_arrow_fdw_unpin_gpu_buffer(PG_FUNCTION_ARGS);
-Datum	pgstrom_arrow_fdw_put_gpu_buffer(PG_FUNCTION_ARGS);
 Datum	pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS);
 
 /*
@@ -342,65 +323,6 @@ RecordBatchFieldLength(RecordBatchFieldState *fstate)
 }
 
 /*
- * apply_debug_row_numbers_hint
- *
- * It is an ad-hoc optimization infrastructure. In case of estimated numbers
- * of row is completely wrong, we can give manual hint for optimizer by the
- * GUC: arrow_fdw.debug_row_numbers_hint.
- */
-static void
-apply_debug_row_numbers_hint(PlannerInfo *root,
-							 RelOptInfo *baserel,
-							 ForeignTable *ft)
-{
-	const char *errmsg = "wrong arrow_fdw.debug_row_numbers_hint config";
-	char	   *config = pstrdup(arrow_debug_row_numbers_hint);
-	char	   *relname = get_rel_name(ft->relid);
-	char	   *token, *pos;
-	double		nrows_others = -1.0;
-
-	token = strtok_r(config, ",", &pos);
-	while (token)
-	{
-		char   *comma = strchr(token, ':');
-		char   *name, *nrows, *c;
-
-		if (!comma)
-			elog(ERROR, "%s - must be comma separated NAME:NROWS pairs",
-				 errmsg);
-
-		nrows = __trim(comma+1);
-		*comma = '\0';
-		name = __trim(token);
-
-		for (c = nrows; *c != '\0'; c++)
-		{
-			if (!isdigit(*c))
-				elog(ERROR, "%s - NROWS token contains non-digit ('%c')",
-					 errmsg, *c);
-		}
-
-		if (strcmp(name, "*") == 0)
-		{
-			/* wildcard */
-			if (nrows_others >= 0.0)
-				elog(ERROR, "%s - wildcard (*) appears twice", errmsg);
-			nrows_others = atof(nrows);
-		}
-		else if (strcmp(name, relname) == 0)
-		{
-			baserel->rows = atof(nrows);
-			pfree(config);
-			return;
-		}
-		token = strtok_r(NULL, ",", &pos);
-	}
-	if (nrows_others >= 0.0)
-		baserel->rows = nrows_others;
-	pfree(config);
-}
-
-/*
  * ArrowGetForeignRelSize
  */
 static void
@@ -453,7 +375,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			optimal_gpu = k;
 		else if (optimal_gpu != k)
 			optimal_gpu = -1;
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState   *rb_state = lfirst(cell);
@@ -500,8 +422,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 							   0,
 							   JOIN_INNER,
 							   NULL);
-	if (arrow_debug_row_numbers_hint)
-		apply_debug_row_numbers_hint(root, baserel, ft);
 }
 
 /*
@@ -699,6 +619,813 @@ ArrowGetForeignPlan(PlannerInfo *root,
 							outer_plan);
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Routines related to min/max statistics and scan hint
+ *
+ * If mapped Apache Arrow files have custome-metadata of "min_values" and
+ * "max_values" at the Field, arrow_fdw deals with this comma separated
+ * integer values as min/max value for each field, if any.
+ * Once we can know min/max value of the field, we can skip record batches
+ * that shall not match with WHERE-clause.
+ *
+ * This min/max array is expected to have as many integer elements or nulls
+ * as there are record-batches.
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * buildArrowStatsBinary
+ *
+ * It reconstruct binary min/max statistics per record-batch
+ * from the custom-metadata of ArrowField.
+ */
+typedef struct arrowFieldStatsBinary
+{
+	uint32	nrooms;		/* number of record-batches */
+	int		unitsz;		/* unit size of min/max statistics */
+	bool   *isnull;
+	char   *min_values;
+	char   *max_values;
+	int		nfields;	/* if List/Struct data type */
+	struct arrowFieldStatsBinary *subfields;
+} arrowFieldStatsBinary;
+
+typedef struct
+{
+	int		nitems;		/* number of record-batches */
+	int		ncols;
+	arrowFieldStatsBinary columns[FLEXIBLE_ARRAY_MEMBER];
+} arrowStatsBinary;
+
+static void
+__releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
+{
+	int			j;
+
+	if (bstats->subfields)
+	{
+		for (j=0; j < bstats->nfields; j++)
+			__releaseArrowFieldStatsBinary(&bstats->subfields[j]);
+		pfree(bstats->subfields);
+	}
+	if (bstats->isnull)
+		pfree(bstats->isnull);
+	if (bstats->min_values)
+		pfree(bstats->min_values);
+	if (bstats->max_values)
+		pfree(bstats->max_values);
+}
+
+static void
+releaseArrowStatsBinary(arrowStatsBinary *arrow_bstats)
+{
+	int			j;
+
+	if (arrow_bstats)
+	{
+		for (j=0; j < arrow_bstats->ncols; j++)
+			__releaseArrowFieldStatsBinary(&arrow_bstats->columns[j]);
+		pfree(arrow_bstats);
+	}
+}
+
+static int128_t
+__atoi128(const char *tok, bool *p_isnull)
+{
+	int128_t	ival = 0;
+	bool		is_minus = false;
+
+	if (*tok == '-')
+	{
+		is_minus = true;
+		tok++;
+	}
+	while (isdigit(*tok))
+	{
+		ival = 10 * ival + (*tok - '0');
+		tok++;
+		if (is_minus && ival != 0)
+		{
+			ival = -ival;
+			is_minus = false;
+		}
+	}
+	if (is_minus || *tok != '\0')
+		*p_isnull = true;
+	return ival;
+}
+
+static bool
+__parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 const char *min_tokens,
+							 const char *max_tokens)
+{
+	int			unitsz = -1;
+	char	   *min_buffer;
+	char	   *max_buffer;
+	char	   *min_values = NULL;
+	char	   *max_values = NULL;
+	bool	   *isnull = NULL;
+	char	   *tok1, *pos1;
+	char	   *tok2, *pos2;
+	uint32		index;
+
+	/* determine the unitsz of datum */
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (field->type.Int.bitWidth)
+			{
+				case 8:
+					unitsz = sizeof(uint8_t);
+					break;
+				case 16:
+					unitsz = sizeof(uint16_t);
+					break;
+				case 32:
+					unitsz = sizeof(uint32_t);
+					break;
+				case 64:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__FloatingPoint:
+			switch (field->type.FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					unitsz = sizeof(uint16_t);
+					break;
+				case ArrowPrecision__Single:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowPrecision__Double:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Decimal:
+			unitsz = sizeof(int128_t);
+			break;
+
+		case ArrowNodeTag__Date:
+			switch (field->type.Date.unit)
+			{
+				case ArrowDateUnit__Day:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowDateUnit__MilliSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Time:
+			switch (field->type.Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			switch (field->type.Timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	Assert(unitsz > 0);
+	/* parse the min_tokens/max_tokens */
+	min_buffer = alloca(strlen(min_tokens) + 1);
+	max_buffer = alloca(strlen(max_tokens) + 1);
+	strcpy(min_buffer, min_tokens);
+	strcpy(max_buffer, max_tokens);
+
+	min_values = palloc0(unitsz * bstats->nrooms);
+	max_values = palloc0(unitsz * bstats->nrooms);
+	isnull     = palloc0(sizeof(bool) * bstats->nrooms);
+	for (tok1 = strtok_r(min_buffer, ",", &pos1),
+		 tok2 = strtok_r(max_buffer, ",", &pos2), index = 0;
+		 tok1 != NULL && tok2 != NULL && index < bstats->nrooms;
+		 tok1 = strtok_r(NULL, ",", &pos1),
+		 tok2 = strtok_r(NULL, ",", &pos2), index++)
+	{
+		bool		__isnull = false;
+		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
+		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
+
+		if (__isnull)
+			isnull[index] = true;
+		else
+		{
+			memcpy(min_values + unitsz * index, &__min, unitsz);
+			memcpy(max_values + unitsz * index, &__max, unitsz);
+		}
+	}
+	/* sanity checks */
+	if (!tok1 && !tok2 && index == bstats->nrooms)
+	{
+		bstats->unitsz = unitsz;
+		bstats->isnull = isnull;
+		bstats->min_values = min_values;
+		bstats->max_values = max_values;
+		return true;
+	}
+	/* elsewhere, something wrong */
+	pfree(min_values);
+	pfree(max_values);
+	pfree(isnull);
+	return false;
+}
+
+static bool
+__buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 uint32 numRecordBatches)
+{
+	const char *min_tokens = NULL;
+	const char *max_tokens = NULL;
+	int			j, k;
+	bool		retval = false;
+
+	for (k=0; k < field->_num_custom_metadata; k++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[k];
+
+		if (strcmp(kv->key, "min_values") == 0)
+			min_tokens = kv->value;
+		else if (strcmp(kv->key, "max_values") == 0)
+			max_tokens = kv->value;
+	}
+
+	bstats->nrooms = numRecordBatches;
+	bstats->unitsz = -1;
+	if (min_tokens && max_tokens)
+	{
+		if (__parseArrowFieldStatsBinary(bstats, field,
+										 min_tokens,
+										 max_tokens))
+		{
+			retval = true;
+		}
+		else
+		{
+			/* parse error, ignore the stat */
+			if (bstats->isnull)
+				pfree(bstats->isnull);
+			if (bstats->min_values)
+				pfree(bstats->min_values);
+			if (bstats->max_values)
+				pfree(bstats->max_values);
+			bstats->unitsz     = -1;
+			bstats->isnull     = NULL;
+			bstats->min_values = NULL;
+			bstats->max_values = NULL;
+		}
+	}
+
+	if (field->_num_children > 0)
+	{
+		bstats->nfields = field->_num_children;
+		bstats->subfields = palloc0(sizeof(arrowStatsBinary) * bstats->nfields);
+		for (j=0; j < bstats->nfields; j++)
+		{
+			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
+											 &field->children[j],
+											 numRecordBatches))
+				retval = true;
+		}
+	}
+	return retval;
+}
+
+static arrowStatsBinary *
+buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
+{
+	arrowStatsBinary *arrow_bstats;
+	int		j, ncols = footer->schema._num_fields;
+	bool	found = false;
+
+	arrow_bstats = palloc0(offsetof(arrowStatsBinary,
+									columns[ncols]));
+	arrow_bstats->nitems = footer->_num_recordBatches;
+	arrow_bstats->ncols = ncols;
+	for (j=0; j < ncols; j++)
+	{
+		if (__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
+										 &footer->schema.fields[j],
+										 footer->_num_recordBatches))
+		{
+			if (p_stat_attrs)
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+			found = true;
+		}
+	}
+	if (!found)
+	{
+		releaseArrowStatsBinary(arrow_bstats);
+		return NULL;
+	}
+	return arrow_bstats;
+}
+
+/*
+ * applyArrowStatsBinary
+ *
+ * It applies the fetched min/max values on the cached record-batch metadata
+ */
+static void
+__applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
+							 arrowFieldStatsBinary *bstats,
+							 int rb_index)
+{
+	int		j;
+
+	if (bstats->unitsz > 0 &&
+		bstats->isnull != NULL &&
+		bstats->min_values != NULL &&
+		bstats->max_values != NULL)
+	{
+		size_t	off = bstats->unitsz * rb_index;
+
+		memcpy(&fstate->stat_min,
+			   bstats->min_values + off, bstats->unitsz);
+		memcpy(&fstate->stat_max,
+			   bstats->max_values + off, bstats->unitsz);
+		fstate->stat_isnull = false;
+	}
+	else
+	{
+		memset(&fstate->stat_min, 0, sizeof(SQLstat__datum));
+		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
+		fstate->stat_isnull = true;
+	}
+	
+	Assert(fstate->num_children == bstats->nfields);
+	for (j=0; j < fstate->num_children; j++)
+	{
+		RecordBatchFieldState  *__fstate = &fstate->children[j];
+		arrowFieldStatsBinary  *__bstats = &bstats->subfields[j];
+
+		__applyArrowFieldStatsBinary(__fstate, __bstats, rb_index);
+	}
+}
+
+static void
+applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats)
+{
+	int		j, ncols = rb_state->ncols;
+
+	Assert(rb_state->ncols == arrow_bstats->ncols &&
+		   rb_state->rb_index < arrow_bstats->nitems);
+	for (j=0; j < ncols; j++)
+	{
+		RecordBatchFieldState  *fstate = &rb_state->columns[j];
+		arrowFieldStatsBinary  *bstats = &arrow_bstats->columns[j];
+
+		__applyArrowFieldStatsBinary(fstate, bstats, rb_state->rb_index);
+	}
+}
+
+static SQLstat *
+__buildArrowFieldStatsList(ArrowField *field, uint32 numRecordBatches)
+{
+	const char *min_tokens = NULL;
+	const char *max_tokens = NULL;
+	char	   *min_buffer;
+	char	   *max_buffer;
+	char	   *tok1, *pos1;
+	char	   *tok2, *pos2;
+	SQLstat	   *results = NULL;
+	int			k, index;
+
+	for (k=0; k < field->_num_custom_metadata; k++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[k];
+
+		if (strcmp(kv->key, "min_values") == 0)
+			min_tokens = kv->value;
+		else if (strcmp(kv->key, "max_values") == 0)
+			max_tokens = kv->value;
+	}
+	if (!min_tokens || !max_tokens)
+		return NULL;
+	min_buffer = alloca(strlen(min_tokens) + 1);
+	max_buffer = alloca(strlen(max_tokens) + 1);
+	strcpy(min_buffer, min_tokens);
+	strcpy(max_buffer, max_tokens);
+
+	for (tok1 = strtok_r(min_buffer, ",", &pos1),
+		 tok2 = strtok_r(max_buffer, ",", &pos2), index = 0;
+		 tok1 && tok2;
+		 tok1 = strtok_r(NULL, ",", &pos1),
+		 tok2 = strtok_r(NULL, ",", &pos2), index++)
+	{
+		bool		__isnull = false;
+		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
+		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
+
+		if (!__isnull)
+		{
+			SQLstat *item = palloc0(sizeof(SQLstat));
+
+			item->next = results;
+			item->rb_index = index;
+			item->is_valid = true;
+			item->min.i128 = __min;
+			item->max.i128 = __max;
+			results = item;
+		}
+	}
+	/* sanity checks */
+	if (!tok1 && !tok2 && index == numRecordBatches)
+		return results;
+	/* ah, error... */
+	while (results)
+	{
+		SQLstat *next = results->next;
+
+		pfree(results);
+		results = next;
+	}
+	return NULL;
+}
+
+/*
+ * execInitArrowStatsHint / execCheckArrowStatsHint / execEndArrowStatsHint
+ *
+ * ... are executor routines for min/max statistics.
+ */
+static bool
+__buildArrowStatsOper(arrowStatsHint *arange,
+					  ScanState *ss,
+					  OpExpr *op,
+					  bool reverse)
+{
+	Index		scanrelid = ((Scan *)ss->ps.plan)->scanrelid;
+	Oid			opcode;
+	Var		   *var;
+	Node	   *arg;
+	Expr	   *expr;
+	Oid			opfamily = InvalidOid;
+	StrategyNumber strategy = InvalidStrategy;
+	CatCList   *catlist;
+	int			i;
+
+	if (!reverse)
+	{
+		opcode = op->opno;
+		var = linitial(op->args);
+		arg = lsecond(op->args);
+	}
+	else
+	{
+		opcode = get_commutator(op->opno);
+		var = lsecond(op->args);
+		arg = linitial(op->args);
+	}
+	/* Is it VAR <OPER> ARG form? */
+	if (!IsA(var, Var) || var->varno != scanrelid)
+		return false;
+	if (!bms_is_member(var->varattno, arange->stat_attrs))
+		return false;
+	if (contain_var_clause(arg) ||
+		contain_volatile_functions(arg))
+		return false;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opcode));
+	for (i=0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (amop->amopmethod == BRIN_AM_OID)
+		{
+			opfamily = amop->amopfamily;
+			strategy = amop->amopstrategy;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/* (VAR < ARG) --> (Min < ARG) */
+		/* (VAR <= ARG) --> (Min <= ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+		strategy == BTGreaterStrategyNumber)
+	{
+		/* (VAR >= ARG) --> (Max >= ARG) */
+		/* (VAR > ARG) --> (Max > ARG) */
+		arange->load_attrs = bms_add_member(arange->load_attrs,
+											var->varattno);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/* (VAR = ARG) --> (Max >= ARG && Min <= ARG) */
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTGreaterEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTLessEqualStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		arange->eval_quals = lappend(arange->eval_quals, expr);
+	}
+	else
+	{
+		return false;
+	}
+	arange->load_attrs = bms_add_member(arange->load_attrs,
+										var->varattno);
+	return true;
+}
+
+static arrowStatsHint *
+execInitArrowStatsHint(ScanState *ss,
+					   Bitmapset *stat_attrs,
+					   List *outer_quals)
+{
+	Relation		relation = ss->ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	ExprContext	   *econtext;
+	arrowStatsHint *result, temp;
+	Expr		   *eval_expr;
+	ListCell	   *lc;
+
+	memset(&temp, 0, sizeof(arrowStatsHint));
+	temp.stat_attrs = stat_attrs;
+	foreach (lc, outer_quals)
+	{
+		OpExpr *op = lfirst(lc);
+
+		if (IsA(op, OpExpr) && list_length(op->args) == 2 &&
+			(__buildArrowStatsOper(&temp, ss, op, false) ||
+			 __buildArrowStatsOper(&temp, ss, op, true)))
+		{
+			temp.orig_quals = lappend(temp.orig_quals, copyObject(op));
+		}
+	}
+	if (!temp.orig_quals)
+		return NULL;
+
+	Assert(list_length(temp.eval_quals) > 0);
+	if (list_length(temp.eval_quals) == 1)
+		eval_expr = linitial(temp.eval_quals);
+	else
+		eval_expr = make_andclause(temp.eval_quals);
+
+	econtext = CreateExprContext(ss->ps.state);
+	econtext->ecxt_innertuple = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+	econtext->ecxt_outertuple = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+
+	result = palloc0(sizeof(arrowStatsHint));
+	result->orig_quals = temp.orig_quals;
+	result->eval_quals = temp.eval_quals;
+	result->eval_state = ExecInitExpr(eval_expr, &ss->ps);
+	result->stat_attrs = bms_copy(stat_attrs);
+	result->load_attrs = temp.load_attrs;
+	result->econtext   = econtext;
+
+	return result;
+}
+
+static bool
+__fetchArrowStatsDatum(RecordBatchFieldState *fstate,
+					   SQLstat__datum *sval,
+					   Datum *p_datum, bool *p_isnull)
+{
+	Datum		datum;
+	int64		shift;
+
+	switch (fstate->atttypid)
+	{
+		case INT1OID:
+			datum = Int8GetDatum(sval->i8);
+			break;
+		case INT2OID:
+		case FLOAT2OID:
+			datum = Int16GetDatum(sval->i16);
+			break;
+		case INT4OID:
+		case FLOAT4OID:
+			datum = Int32GetDatum(sval->i32);
+			break;
+		case INT8OID:
+		case FLOAT8OID:
+			datum = Int64GetDatum(sval->i64);
+			break;
+		case NUMERICOID:
+			{
+				return 0;
+			}
+		case DATEOID:
+			shift = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
+			switch (fstate->attopts.date.unit)
+			{
+				case ArrowDateUnit__Day:
+					datum = DateADTGetDatum((DateADT)sval->i32 - shift);
+				case ArrowDateUnit__MilliSecond:
+					datum = DateADTGetDatum((DateADT)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+
+		case TIMEOID:
+			switch (fstate->attopts.time.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000000L);
+					break;
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u32 * 1000L);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64);
+					break;
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimeADTGetDatum((TimeADT)sval->u64 / 1000L);
+					break;
+				default:
+					return false;
+			}
+			break;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			shift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			switch (fstate->attopts.timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000000L - shift);
+				case ArrowTimeUnit__MilliSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000L - shift);
+				case ArrowTimeUnit__MicroSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 - shift);
+				case ArrowTimeUnit__NanoSecond:
+					datum = TimestampGetDatum((Timestamp)sval->i64 / 1000L - shift);
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	*p_datum = datum;
+	*p_isnull = false;
+	return true;
+}
+
+static bool
+execCheckArrowStatsHint(arrowStatsHint *stats_hint,
+						RecordBatchState *rb_state)
+{
+	ExprContext	   *econtext = stats_hint->econtext;
+	TupleTableSlot *min_values = econtext->ecxt_innertuple;
+	TupleTableSlot *max_values = econtext->ecxt_outertuple;
+	int				anum;
+	Datum			datum;
+	bool			isnull;
+
+	/* load the min/max statistics */
+	ExecStoreAllNullTuple(min_values);
+	ExecStoreAllNullTuple(max_values);
+	for (anum = bms_next_member(stats_hint->load_attrs, -1);
+		 anum >= 0;
+		 anum = bms_next_member(stats_hint->load_attrs, anum))
+	{
+		RecordBatchFieldState *fstate = &rb_state->columns[anum-1];
+
+		Assert(anum > 0 && anum <= rb_state->ncols);
+		/*
+		 * In case when min/max statistics are missing, we cannot determine
+		 * whether we can skip the current record-batch.
+		 */
+		if (fstate->stat_isnull)
+			return false;
+
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_min,
+									&min_values->tts_values[anum-1],
+									&min_values->tts_isnull[anum-1]))
+			return false;
+
+		if (!__fetchArrowStatsDatum(fstate, &fstate->stat_max,
+									&max_values->tts_values[anum-1],
+									&max_values->tts_isnull[anum-1]))
+			return false;
+	}
+	datum = ExecEvalExprSwitchContext(stats_hint->eval_state, econtext, &isnull);
+
+//	elog(INFO, "file [%s] rb_index=%u datum=%lu isnull=%d",
+//		 FilePathName(rb_state->fdesc), rb_state->rb_index, datum, (int)isnull);
+	if (!isnull && DatumGetBool(datum))
+		return true;
+	return false;
+}
+
+static void
+execEndArrowStatsHint(arrowStatsHint *stats_hint)
+{
+	ExprContext	   *econtext = stats_hint->econtext;
+
+	ExecDropSingleTupleTableSlot(econtext->ecxt_innertuple);
+	ExecDropSingleTupleTableSlot(econtext->ecxt_outertuple);
+	econtext->ecxt_innertuple = NULL;
+	econtext->ecxt_outertuple = NULL;
+
+	FreeExprContext(econtext, true);
+}
+
+/*
+ * Routines to setup record-batches
+ */
 typedef struct
 {
 	ArrowBuffer    *buffer_curr;
@@ -958,14 +1685,19 @@ makeRecordBatchState(ArrowSchema *schema,
  * ExecInitArrowFdw
  */
 ArrowFdwState *
-ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
+ExecInitArrowFdw(ScanState *ss,
+				 GpuContext *gcontext,
+				 List *outer_quals,
+				 Bitmapset *outer_refs)
 {
+	Relation		relation = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList = NIL;
 	List		   *fdescList = NIL;
 	List		   *gpuDirectFileDescList = NIL;
 	Bitmapset	   *referenced = NULL;
+	Bitmapset	   *stat_attrs = NULL;
 	bool			whole_row_ref = false;
 	ArrowFdwState  *af_state;
 	List		   *rb_state_list = NIL;
@@ -1027,7 +1759,7 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 			gpuDirectFileDescList = lappend(gpuDirectFileDescList, dfile);
 		}
 
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, &stat_attrs);
 		/* check schema compatibility */
 		foreach (cell, rb_cached)
 		{
@@ -1047,7 +1779,12 @@ ExecInitArrowFdw(GpuContext *gcontext, Relation relation, Bitmapset *outer_refs)
 	af_state->gpuDirectFileDescList = gpuDirectFileDescList;
 	af_state->fdescList = fdescList;
 	af_state->referenced = referenced;
+	if (arrow_fdw_stats_hint_enabled)
+		af_state->stats_hint = execInitArrowStatsHint(ss, stat_attrs,
+													  outer_quals);
 	af_state->rbatch_index = &af_state->__rbatch_index_local;
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 	i = 0;
 	foreach (lc, rb_state_list)
 		af_state->rbatches[i++] = (RecordBatchState *)lfirst(lc);
@@ -1076,7 +1813,10 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 			referenced = bms_add_member(referenced, j -
 										FirstLowInvalidHeapAttributeNumber);
 	}
-	node->fdw_state = ExecInitArrowFdw(NULL, relation, referenced);
+	node->fdw_state = ExecInitArrowFdw(&node->ss,
+									   NULL,
+									   fscan->scan.plan.qual,
+									   referenced);
 }
 
 typedef struct
@@ -1448,14 +2188,27 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 						GpuContext *gcontext,
 						int optimal_gpu)
 {
+	RecordBatchState *rb_state;
 	uint32		rb_index;
 
+retry:
 	/* fetch next RecordBatch */
 	rb_index = pg_atomic_fetch_add_u32(af_state->rbatch_index, 1);
 	if (rb_index >= af_state->num_rbatches)
 		return NULL;	/* no more RecordBatch to read */
+	rb_state = af_state->rbatches[rb_index];
 
-	return __arrowFdwLoadRecordBatch(af_state->rbatches[rb_index],
+	if (af_state->stats_hint)
+	{
+		if (execCheckArrowStatsHint(af_state->stats_hint, rb_state))
+			pg_atomic_fetch_add_u32(af_state->rbatch_nload, 1);
+		else
+		{
+			pg_atomic_fetch_add_u32(af_state->rbatch_nskip, 1);
+			goto retry;
+		}
+	}
+	return __arrowFdwLoadRecordBatch(rb_state,
 									 relation,
 									 af_state->referenced,
 									 gcontext,
@@ -1552,6 +2305,8 @@ ExecEndArrowFdw(ArrowFdwState *af_state)
 		untrackRawFileDesc(af_state->gcontext, dfile);
 		gpuDirectFileDescClose(dfile);
 	}
+	if (af_state->stats_hint)
+		execEndArrowStatsHint(af_state->stats_hint);
 }
 
 static void
@@ -1564,7 +2319,10 @@ ArrowEndForeignScan(ForeignScanState *node)
  * ArrowExplainForeignScan 
  */
 void
-ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
+ExplainArrowFdw(ArrowFdwState *af_state,
+				Relation frel,
+				ExplainState *es,
+				List *dcontext)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	ListCell   *lc;
@@ -1592,6 +2350,52 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 		}
 	}
 	ExplainPropertyText("referenced", buf.data, es);
+
+	/* shows stats hint if any */
+	if (af_state->stats_hint)
+	{
+		arrowStatsHint *stats_hint = af_state->stats_hint;
+
+		resetStringInfo(&buf);
+
+		if (dcontext == NIL)
+		{
+			int		anum;
+
+			for (anum = bms_next_member(stats_hint->load_attrs, -1);
+				 anum >= 0;
+				 anum = bms_next_member(stats_hint->load_attrs, anum))
+			{
+				Form_pg_attribute attr = tupleDescAttr(tupdesc, anum-1);
+				const char *attName = NameStr(attr->attname);
+
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, quote_identifier(attName));
+			}
+		}
+		else
+		{
+			ListCell   *lc;
+
+			foreach (lc, stats_hint->orig_quals)
+			{
+				Node   *qual = lfirst(lc);
+				char   *temp;
+
+				temp = deparse_expression(qual, dcontext, es->verbose, false);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, temp);
+				pfree(temp);
+			}
+		}
+		if (es->analyze)
+			appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
+							 pg_atomic_read_u32(af_state->rbatch_nload),
+							 pg_atomic_read_u32(af_state->rbatch_nskip));
+		ExplainPropertyText("Stats-Hint", buf.data, es);
+	}
 
 	/* shows files on behalf of the foreign table */
 	foreach (lc, af_state->fdescList)
@@ -1674,6 +2478,7 @@ ExplainArrowFdw(ArrowFdwState *af_state, Relation frel, ExplainState *es)
 			}
 		}
 	}
+	pfree(buf.data);
 }
 
 static void
@@ -1681,7 +2486,7 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 {
 	Relation	frel = node->ss.ss_currentRelation;
 
-	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es);
+	ExplainArrowFdw((ArrowFdwState *)node->fdw_state, frel, es, NIL);
 }
 
 /*
@@ -1804,7 +2609,7 @@ ArrowAcquireSampleRows(Relation relation,
 		}
 		fdescList = lappend_int(fdescList, fdesc);
 		
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc);
+		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -2157,23 +2962,33 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return MAXALIGN(sizeof(pg_atomic_uint32));
+	return MAXALIGN(sizeof(pg_atomic_uint32) * 3);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
 static inline void
-__ExecInitDSMArrowFdw(ArrowFdwState *af_state, pg_atomic_uint32 *rbatch_index)
+__ExecInitDSMArrowFdw(ArrowFdwState *af_state,
+					  pg_atomic_uint32 *rbatch_index,
+					  pg_atomic_uint32 *rbatch_nload,
+					  pg_atomic_uint32 *rbatch_nskip)
 {
 	pg_atomic_init_u32(rbatch_index, 0);
 	af_state->rbatch_index = rbatch_index;
+	pg_atomic_init_u32(rbatch_nload, 0);
+	af_state->rbatch_nload = rbatch_nload;
+	pg_atomic_init_u32(rbatch_nskip, 0);
+	af_state->rbatch_nskip = rbatch_nskip;
 }
 
 void
 ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
 {
-	__ExecInitDSMArrowFdw(af_state, &gtss->af_rbatch_index);
+	__ExecInitDSMArrowFdw(af_state,
+						  &gtss->af_rbatch_index,
+						  &gtss->af_rbatch_nload,
+						  &gtss->af_rbatch_nskip);
 }
 
 static void
@@ -2181,8 +2996,12 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 							  ParallelContext *pcxt,
 							  void *coordinate)
 {
+	pg_atomic_uint32 *atomic_buffer = coordinate;
+
 	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
-						  (pg_atomic_uint32 *)coordinate);
+						  atomic_buffer,
+						  atomic_buffer + 1,
+						  atomic_buffer + 2);
 }
 
 /*
@@ -2214,16 +3033,23 @@ ArrowReInitializeDSMForeignScan(ForeignScanState *node,
  */
 static inline void
 __ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-						 pg_atomic_uint32 *rbatch_index)
+						 pg_atomic_uint32 *rbatch_index,
+						 pg_atomic_uint32 *rbatch_nload,
+						 pg_atomic_uint32 *rbatch_nskip)
 {
 	af_state->rbatch_index = rbatch_index;
+	af_state->rbatch_nload = rbatch_nload;
+	af_state->rbatch_nskip = rbatch_nskip;
 }
 
 void
 ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
 					   GpuTaskSharedState *gtss)
 {
-	__ExecInitWorkerArrowFdw(af_state, &gtss->af_rbatch_index);
+	__ExecInitWorkerArrowFdw(af_state,
+							 &gtss->af_rbatch_index,
+							 &gtss->af_rbatch_nload,
+							 &gtss->af_rbatch_nskip);
 }
 
 static void
@@ -2231,8 +3057,12 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
 {
+	pg_atomic_uint32 *atomic_buffer = coordinate;
+
 	__ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
-							 (pg_atomic_uint32 *) coordinate);
+							 atomic_buffer,
+							 atomic_buffer + 1,
+							 atomic_buffer + 2);
 }
 
 /*
@@ -2241,7 +3071,19 @@ ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 static inline void
 __ExecShutdownArrowFdw(ArrowFdwState *af_state)
 {
-	/* nothing to do */
+	uint32		temp;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_index);
+	pg_atomic_write_u32(&af_state->__rbatch_index_local, temp);
+	af_state->rbatch_index = &af_state->__rbatch_index_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nload);
+	pg_atomic_write_u32(&af_state->__rbatch_nload_local, temp);
+	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
+
+	temp = pg_atomic_read_u32(af_state->rbatch_nskip);
+	pg_atomic_write_u32(&af_state->__rbatch_nskip_local, temp);
+	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
 }
 
 void
@@ -2297,11 +3139,11 @@ __ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 	const char	   *fname;
 	File			filp;
 	struct stat		stat_buf;
+	ArrowFileInfo  *af_info = NULL;
 	arrowWriteState *aw_state;
 	SQLtable	   *table;
 	MetadataCacheKey key;
 	off_t			f_pos;
-	bool			is_newfile = false;
 
 	Assert(list_length(filesList) == 1);
 	fname = strVal(linitial(filesList));
@@ -2310,22 +3152,17 @@ __ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 	filp = PathNameOpenFile(fname, O_RDWR | PG_BINARY);
 	if (filp >= 0)
 	{
+		af_info = alloca(sizeof(ArrowFileInfo));
+		readArrowFileDesc(FileGetRawDesc(filp), af_info);
 		f_pos = createArrowWriteRedoLog(filp, false);
 	}
-	else if (errno != ENOENT)
-	{
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", fname)));
-	}
-	else
+	else if (errno == ENOENT)
 	{
 		filp = PathNameOpenFile(fname, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
 		if (filp < 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not open file \"%s\": %m", fname)));
-		is_newfile = true;
 		PG_TRY();
 		{
 			f_pos = createArrowWriteRedoLog(filp, true);
@@ -2337,23 +3174,30 @@ __ArrowBeginForeignModify(ResultRelInfo *rrinfo, int eflags)
 		}
 		PG_END_TRY();
 	}
+	else
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", fname)));
+	}
+
 	if (fstat(FileGetRawDesc(filp), &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(filp));
-	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	initMetadataCacheKey(&key, &stat_buf);
 
 	aw_state = palloc0(offsetof(arrowWriteState,
 								sql_table.columns[tupdesc->natts]));
 	aw_state->memcxt = CurrentMemoryContext;
 	aw_state->file = filp;
-	aw_state->key = key;
+	memcpy(&aw_state->key, &key, sizeof(MetadataCacheKey));
 	aw_state->hash = key.hash;
 	table = &aw_state->sql_table;
 	table->filename = FilePathName(filp);
 	table->fdesc = FileGetRawDesc(filp);
 	table->f_pos = f_pos;
-	setupArrowSQLbufferSchema(table, tupdesc);
-	if (!is_newfile)
-		setupArrowSQLbufferBatches(table);
+	if (af_info)
+		setupArrowSQLbufferBatches(table, af_info);
+	setupArrowSQLbufferSchema(table, tupdesc, af_info);
 
 	rrinfo->ri_FdwState = aw_state;
 }
@@ -3978,7 +4822,7 @@ arrow_fdw_precheck_schema(Relation rel)
 				 fname, RelationGetRelationName(rel));
 		}
 		/* check schema compatibility */
-		rb_cached = arrowLookupOrBuildMetadataCache(filp);
+		rb_cached = arrowLookupOrBuildMetadataCache(filp, NULL);
 		foreach (cell, rb_cached)
 		{
 			RecordBatchState *rb_state = lfirst(cell);
@@ -4120,7 +4964,8 @@ static int
 copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 					   RecordBatchFieldState *dest_tail,
 					   int nattrs,
-					   RecordBatchFieldState *columns)
+					   RecordBatchFieldState *columns,
+					   Bitmapset **p_stat_attrs)
 {
 	RecordBatchFieldState *dest_next = dest_curr + nattrs;
 	int		j, k, nslots = nattrs;
@@ -4130,21 +4975,27 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
 
 	for (j=0; j < nattrs; j++)
 	{
-		dest_curr[j] = columns[j];
-		if (dest_curr[j].num_children == 0)
-			Assert(dest_curr[j].children == NULL);
+		RecordBatchFieldState *__dest = dest_curr + j;
+		RecordBatchFieldState *__orig = columns + j;
+
+		memcpy(__dest, __orig, sizeof(RecordBatchFieldState));
+		if (__dest->num_children == 0)
+			Assert(__dest->children == NULL);
 		else
 		{
-			dest_curr[j].children = dest_next;
+			__dest->children = dest_next;
 			k = copyMetadataFieldCache(dest_next,
 									   dest_tail,
-									   columns[j].num_children,
-									   columns[j].children);
+									   __orig->num_children,
+									   __orig->children,
+									   NULL);
 			if (k < 0)
 				return -1;
 			dest_next += k;
 			nslots += k;
 		}
+		if (p_stat_attrs && !__orig->stat_isnull)
+			*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
 	}
 	return nslots;
 }
@@ -4154,7 +5005,9 @@ copyMetadataFieldCache(RecordBatchFieldState *dest_curr,
  *   - setup RecordBatchState from arrowMetadataCache
  */
 static RecordBatchState *
-makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
+makeRecordBatchStateFromCache(arrowMetadataCache *mcache,
+							  File fdesc,
+							  Bitmapset **p_stat_attrs)
 {
 	RecordBatchState   *rbstate;
 
@@ -4170,7 +5023,8 @@ makeRecordBatchStateFromCache(arrowMetadataCache *mcache, File fdesc)
 	copyMetadataFieldCache(rbstate->columns,
 						   rbstate->columns + mcache->nfields,
 						   mcache->ncols,
-						   mcache->fstate);
+						   mcache->fstate,
+						   p_stat_attrs);
 	return rbstate;
 }
 
@@ -4288,7 +5142,8 @@ __arrowBuildMetadataCache(List *rb_state_list, uint32 hash)
 			copyMetadataFieldCache(mtemp->fstate,
 								   mtemp->fstate + nfields,
 								   rbstate->ncols,
-								   rbstate->columns);
+								   rbstate->columns,
+								   NULL);
 		Assert(mtemp->nfields == nfields);
 
 		if (!mcache)
@@ -4335,7 +5190,7 @@ checkArrowRecordBatchIsVisible(RecordBatchState *rbstate,
  * arrowLookupOrBuildMetadataCache
  */
 List *
-arrowLookupOrBuildMetadataCache(File fdesc)
+arrowLookupOrBuildMetadataCache(File fdesc, Bitmapset **p_stat_attrs)
 {
 	MetadataCacheKey key;
 	struct stat	stat_buf;
@@ -4350,7 +5205,7 @@ arrowLookupOrBuildMetadataCache(File fdesc)
 	if (fstat(FileGetRawDesc(fdesc), &stat_buf) != 0)
 		elog(ERROR, "failed on fstat('%s'): %m", FilePathName(fdesc));
 
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	index = initMetadataCacheKey(&key, &stat_buf);
 	lock = &arrow_metadata_state->lock_slots[index];
 	hash_slot = &arrow_metadata_state->hash_slots[index];
 	mvcc_slot = &arrow_metadata_state->mvcc_slots[index];
@@ -4359,7 +5214,7 @@ arrowLookupOrBuildMetadataCache(File fdesc)
 retry:
 	dlist_foreach(iter1, hash_slot)
 	{
-		arrowMetadataCache *mcache
+	   arrowMetadataCache *mcache
 			= dlist_container(arrowMetadataCache, chain, iter1.cur);
 		if (mcache->stat_buf.st_dev == stat_buf.st_dev &&
 			mcache->stat_buf.st_ino == stat_buf.st_ino)
@@ -4397,15 +5252,20 @@ retry:
 			}
 			/*
 			 * Ok, arrow file metadata cache found and still valid
+			 *
+			 * NOTE: we currently support min/max statistics on the top-
+			 * level variables only, not sub-field of the composite values.
 			 */
-			rbstate = makeRecordBatchStateFromCache(mcache, fdesc);
+			rbstate = makeRecordBatchStateFromCache(mcache, fdesc,
+													p_stat_attrs);
 			if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 				results = list_make1(rbstate);
 			dlist_foreach (iter2, &mcache->siblings)
 			{
 				arrowMetadataCache *__mcache
 					= dlist_container(arrowMetadataCache, chain, iter2.cur);
-				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc);
+				rbstate = makeRecordBatchStateFromCache(__mcache, fdesc,
+														p_stat_attrs);
 				if (checkArrowRecordBatchIsVisible(rbstate, mvcc_slot))
 					results = lappend(results, rbstate);
 			}
@@ -4434,6 +5294,7 @@ retry:
 	{
 		ArrowFileInfo	af_info;
 		arrowMetadataCache *mcache;
+		arrowStatsBinary *arrow_bstats;
 		List		   *rb_state_any = NIL;
 
 		readArrowFileDesc(FileGetRawDesc(fdesc), &af_info);
@@ -4444,13 +5305,15 @@ retry:
 		if (af_info.recordBatches == NULL)
 			elog(DEBUG2, "arrow file '%s' contains no RecordBatch",
 				 FilePathName(fdesc));
+
+		arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
 		for (index = 0; index < af_info.footer._num_recordBatches; index++)
 		{
 			RecordBatchState *rb_state;
 			ArrowBlock       *block
 				= &af_info.footer.recordBatches[index];
 			ArrowRecordBatch *rbatch
-				= &af_info.recordBatches[index].body.recordBatch;
+			   = &af_info.recordBatches[index].body.recordBatch;
 
 			rb_state = makeRecordBatchState(&af_info.footer.schema,
 											block, rbatch);
@@ -4458,10 +5321,14 @@ retry:
 			memcpy(&rb_state->stat_buf, &stat_buf, sizeof(struct stat));
 			rb_state->rb_index = index;
 
+			if (arrow_bstats)
+				applyArrowStatsBinary(rb_state, arrow_bstats);
+
 			if (checkArrowRecordBatchIsVisible(rb_state, mvcc_slot))
 				results = lappend(results, rb_state);
 			rb_state_any = lappend(rb_state_any, rb_state);
 		}
+		releaseArrowStatsBinary(arrow_bstats);
 		/* try to build a metadata cache for further references */
 		mcache = __arrowBuildMetadataCache(rb_state_any, key.hash);
 		if (mcache)
@@ -4535,7 +5402,8 @@ __setupArrowSQLbufferField(SQLtable *table,
 						   SQLfield *column,
 						   const char *attname,
 						   Oid atttypid,
-						   int32 atttypmod)
+						   int32 atttypmod,
+						   ArrowField *afield)
 {
 	HeapTuple		tup;
 	Form_pg_type	__type;
@@ -4544,6 +5412,7 @@ __setupArrowSQLbufferField(SQLtable *table,
 	const char	   *timezone = show_timezone();
 	const char	   *extname;
 	const char	   *extschema;
+	SQLstat		   *stat_list;
 
 	/* walk down to the base type, if domain */
 	for (;;)
@@ -4580,19 +5449,39 @@ __setupArrowSQLbufferField(SQLtable *table,
 							 timezone,
 							 extname,
 							 extschema,
-							 NULL);
+							 afield);
+	/* assign existing min/max statistics, if any */
+	if (afield)
+	{
+		stat_list = __buildArrowFieldStatsList(afield, table->numRecordBatches);
+		if (stat_list)
+		{
+			column->stat_list = stat_list;
+			column->stat_enabled = true;
+			table->has_statistics = true;
+		}
+	}
+	
 	if (OidIsValid(__type->typelem) && __type->typlen == -1)
 	{
 		/* array type */
 		char		elem_name[NAMEDATALEN+10];
+		ArrowField *__afield = NULL;
 
 		snprintf(elem_name, sizeof(elem_name), "_%s[]", attname);
 		column->element = palloc0(sizeof(SQLfield));
+		if (afield)
+		{
+			if (afield->_num_children != 1)
+				elog(ERROR, "Arrow::Field (%s) is not compatible", afield->name);
+			__afield = &afield->children[0];
+		}
 		__setupArrowSQLbufferField(table,
 								   column->element,
 								   elem_name,
 								   __type->typelem,
-								   -1);
+								   -1,
+								   __afield);
 	}
 	else if (OidIsValid(__type->typrelid))
 	{
@@ -4600,16 +5489,24 @@ __setupArrowSQLbufferField(SQLtable *table,
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
 		int			j;
 
+		if (afield && afield->_num_children != tupdesc->natts)
+			elog(ERROR, "Arrow::Field (%s) is not compatible", afield->name);
+
 		column->nfields = tupdesc->natts;
 		column->subfields = palloc0(sizeof(SQLfield) * tupdesc->natts);
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute sattr = tupleDescAttr(tupdesc, j);
+			ArrowField	   *__afield = NULL;
+
+			if (afield)
+				__afield = &afield->children[j];
 			__setupArrowSQLbufferField(table,
 									   &column->subfields[j],
 									   NameStr(sattr->attname),
 									   sattr->atttypid,
-									   sattr->atttypmod);
+									   sattr->atttypmod,
+									   __afield);
 		}
 		ReleaseTupleDesc(tupdesc);
 	}
@@ -4621,48 +5518,44 @@ __setupArrowSQLbufferField(SQLtable *table,
 }
 
 static void
-setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc)
+setupArrowSQLbufferSchema(SQLtable *table, TupleDesc tupdesc,
+						  ArrowFileInfo *af_info)
 {
 	int		j;
 
+	Assert(!af_info || af_info->footer.schema._num_fields == tupdesc->natts);
 	table->nfields = tupdesc->natts;
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+		ArrowField	   *afield = NULL;
+
+		if (af_info)
+			afield = &af_info->footer.schema.fields[j];
 		__setupArrowSQLbufferField(table,
 								   &table->columns[j],
 								   NameStr(attr->attname),
 								   attr->atttypid,
-								   attr->atttypmod);
+								   attr->atttypmod,
+								   afield);
 	}
 	table->segment_sz = (size_t)arrow_record_batch_size_kb << 10;
 }
 
 static void
-setupArrowSQLbufferBatches(SQLtable *table)
+setupArrowSQLbufferBatches(SQLtable *table, ArrowFileInfo *af_info)
 {
-	ArrowFileInfo af_info;
-	struct stat	stat_buf;
-	MetadataCacheKey key;
-	uint32		index;
-	int			i, nitems;
 	loff_t		pos = 0;
-
-	if (fstat(table->fdesc, &stat_buf) != 0)
-		elog(ERROR, "failed on fstat('%s'): %m", table->filename);
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
-	LWLockAcquire(&arrow_metadata_state->lock_slots[index], LW_SHARED);
-	readArrowFileDesc(table->fdesc, &af_info);
-	LWLockRelease(&arrow_metadata_state->lock_slots[index]);
+	int			i, nitems;
 
 	/* restore DictionaryBatches already in the file */
-	nitems = af_info.footer._num_dictionaries;
+	nitems = af_info->footer._num_dictionaries;
 	table->numDictionaries = nitems;
 	if (nitems > 0)
 	{
 		table->dictionaries = palloc(sizeof(ArrowBlock) * nitems);
 		memcpy(table->dictionaries,
-			   af_info.footer.dictionaries,
+			   af_info->footer.dictionaries,
 			   sizeof(ArrowBlock) * nitems);
 		for (i=0; i < nitems; i++)
 		{
@@ -4677,13 +5570,13 @@ setupArrowSQLbufferBatches(SQLtable *table)
 		table->dictionaries = NULL;
 
 	/* restore RecordBatches already in the file */
-	nitems = af_info.footer._num_recordBatches;
+	nitems = af_info->footer._num_recordBatches;
 	table->numRecordBatches = nitems;
 	if (nitems > 0)
 	{
 		table->recordBatches = palloc(sizeof(ArrowBlock) * nitems);
 		memcpy(table->recordBatches,
-			   af_info.footer.recordBatches,
+			   af_info->footer.recordBatches,
 			   sizeof(ArrowBlock) * nitems);
 		for (i=0; i < nitems; i++)
 		{
@@ -4721,7 +5614,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 
 	if (fstat(fdesc, &stat_buf) != 0)
 		elog(ERROR, "failed on fstat(2): %m");
-	initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	initMetadataCacheKey(&key, &stat_buf);
 
 	dlist_foreach(iter, &arrow_write_redo_list)
 	{
@@ -4741,7 +5634,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 		main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup));
 		redo = MemoryContextAllocZero(CacheMemoryContext,
 									  main_sz + strlen(fname) + 1);
-		redo->key = key;
+		memcpy(&redo->key, &key, sizeof(MetadataCacheKey));
 		redo->xid = curr_xid;
 		redo->cid = curr_cid;
 		redo->pathname = (char *)redo + main_sz;
@@ -4770,7 +5663,7 @@ createArrowWriteRedoLog(File filp, bool is_newfile)
 									footer_backup[nbytes]));
 		redo = MemoryContextAllocZero(CacheMemoryContext,
 									  main_sz + strlen(fname) + 1);
-		redo->key = key;
+		memcpy(&redo->key, &key, sizeof(MetadataCacheKey));
 		redo->xid = curr_xid;
 		redo->cid = curr_cid;
 		redo->pathname = (char *)redo + main_sz;
@@ -4817,7 +5710,7 @@ writeOutArrowRecordBatch(arrowWriteState *aw_state, bool with_footer)
 	{
 		mvcc = MemoryContextAllocZero(TopSharedMemoryContext,
 									  sizeof(arrowWriteMVCCLog));
-		mvcc->key = aw_state->key;
+		memcpy(&mvcc->key, &aw_state->key, sizeof(MetadataCacheKey));
 		mvcc->xid = GetCurrentTransactionId();
 		mvcc->cid = GetCurrentCommandId(true);
 	}
@@ -4879,6 +5772,7 @@ __arrowExecTruncateRelation(Relation frel)
 	Oid			frel_oid = RelationGetRelid(frel);
 	ForeignTable *ft = GetForeignTable(frel_oid);
 	arrowWriteRedoLog *redo;
+	ArrowFileInfo af_info;
 	struct stat	stat_buf;
 	MetadataCacheKey key;
 	int			index;
@@ -4900,17 +5794,18 @@ __arrowExecTruncateRelation(Relation frel)
 			 RelationGetRelationName(frel));
 	Assert(list_length(filesList) == 1);
 	path_name = strVal(linitial(filesList));
+	readArrowFile(path_name, &af_info, false);
 	if (stat(path_name, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", path_name);
 	/* metadata cache invalidation */
-	index = initMetadataCacheKey(&key, stat_buf.st_dev, stat_buf.st_ino);
+	index = initMetadataCacheKey(&key, &stat_buf);
 	LWLockAcquire(&arrow_metadata_state->lock_slots[index], LW_EXCLUSIVE);
 	arrowInvalidateMetadataCache(&key, true);
 	LWLockRelease(&arrow_metadata_state->lock_slots[index]);
 
 	/* build SQLtable to write out schema */
 	table = palloc0(offsetof(SQLtable, columns[tupdesc->natts]));
-	setupArrowSQLbufferSchema(table, tupdesc);
+	setupArrowSQLbufferSchema(table, tupdesc, &af_info);
 
 	/* create REDO log entry */
 	main_sz = MAXALIGN(offsetof(arrowWriteRedoLog, footer_backup));
@@ -4956,9 +5851,7 @@ __arrowExecTruncateRelation(Relation frel)
 				elog(ERROR, "failed on open('%s'): %m", path_name);
 			if (fstat(fdesc, &stat_buf) != 0)
 				elog(ERROR, "failed on fstat('%s'): %m", path_name);
-			initMetadataCacheKey(&redo->key,
-								 stat_buf.st_dev,
-								 stat_buf.st_ino);
+			initMetadataCacheKey(&redo->key, &stat_buf);
 			table->filename = path_name;
 			table->fdesc = fdesc;
 			arrowFileWrite(table, "ARROW1\0\0", 8);
@@ -5210,786 +6103,6 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 /*
- * putArrowGpuBuffer
- *
- * NOTE: caller must have exclusive lock on gpubuf_locks[]
- */
-static void
-putArrowGpuBuffer(ArrowGpuBuffer *gpubuf)
-{
-	CUresult	rc;
-	uint32 count;
-
-	if ((count = pg_atomic_sub_fetch_u32(&gpubuf->refcnt, 1)) == 0)
-	{
-		rc = gpuMemFreePreserved(gpubuf->cuda_dindex,
-								 gpubuf->ipc_mhandle);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFreePreserved: %s", errorText(rc));
-		dlist_delete(&gpubuf->chain);
-		pfree(gpubuf);
-	}
-}
-
-/*
- * putAllArrowGpuBuffer - callback function when session is closed
- */
-static void
-putAllArrowGpuBuffer(int code, Datum arg)
-{
-	/*
-	 * In case of urgent termination, we shall not touch existing GPU
-	 * buffer any more. It shall be destructed due to process termination
-	 * of GPU memory keeper.
-	 */
-	if (code != 0)
-		return;
-	
-	while (!dlist_is_empty(&arrow_gpu_buffer_tracker_list))
-	{
-		ArrowGpuBufferTracker *tracker;
-		dlist_node *dnode;
-		uint32		index;
-		LWLock	   *lock;
-
-		dnode = dlist_pop_head_node(&arrow_gpu_buffer_tracker_list);
-		tracker = dlist_container(ArrowGpuBufferTracker, chain, dnode);
-		index = tracker->gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
-		lock = &arrow_metadata_state->gpubuf_locks[index];
-
-		LWLockAcquire(lock, LW_EXCLUSIVE);
-		putArrowGpuBuffer(tracker->gpubuf);
-		LWLockRelease(lock);
-
-		elog(DEBUG2, "arrow GPU buffer [%s] was released", tracker->ident);
-		
-		pfree(tracker);
-	}
-}
-
-/*
- * BuildArrowGpuBufferCupy
- */
-static ArrowGpuBuffer *
-BuildArrowGpuBufferCupy(Relation frel,
-						List *attNums,
-						List *rb_state_list,
-						struct timespec timestamp,
-						int cuda_dindex,
-						Oid element_oid,
-						size_t nrooms,
-						bool pinned)
-{
-	GpuContext *gcontext = NULL;
-	ArrowGpuBuffer *gpubuf = NULL;
-	int			min_dindex = (cuda_dindex >= 0 ? cuda_dindex : 0);
-	int			max_dindex = (cuda_dindex >= 0 ? cuda_dindex : numDevAttrs-1);
-	int			nattrs = list_length(attNums);
-	const char *np_typename;
-	size_t		unitsz;
-	size_t		nbytes;
-	char	   *mmap_ptr = NULL;
-	size_t		mmap_len = 0UL;
-	CUdeviceptr	gmem_ptr = 0UL;
-	CUipcMemHandle ipc_mhandle;
-	ListCell   *lc;
-	int			index;
-	CUresult	rc = CUDA_ERROR_NO_DEVICE;
-
-	/* get type name */
-	switch (element_oid)
-	{
-		case INT2OID:
-			unitsz = sizeof(uint16);
-			np_typename = "int16";
-			break;
-		case FLOAT2OID:
-			unitsz = sizeof(uint16);
-			np_typename = "float16";
-			break;
-		case INT4OID:
-			unitsz = sizeof(uint32);
-			np_typename = "int32";
-			break;
-		case FLOAT4OID:
-			unitsz = sizeof(uint32);
-			np_typename = "float32";
-			break;
-		case INT8OID:
-			unitsz = sizeof(uint64);
-			np_typename = "int64";
-			break;
-		case FLOAT8OID:
-			unitsz = sizeof(uint64);
-			np_typename = "float64";
-			break;
-		default:
-			elog(ERROR, "not a supported data type: %s",
-				 format_type_be(element_oid));
-	}
-	
-	/*
-	 * Allocation of the preserved device memory
-	 */
-	nbytes = unitsz * nattrs * nrooms;
-	for (cuda_dindex =  min_dindex; cuda_dindex <= max_dindex; cuda_dindex++)
-	{
-		rc = gpuMemAllocPreserved(cuda_dindex,
-								  &ipc_mhandle,
-								  nbytes);
-		if (rc == CUDA_SUCCESS)
-			break;
-	}
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-
-	PG_TRY();
-	{
-		StringInfoData ident;
-		File		curr_filp = -1;
-		size_t		row_index = 0;
-		int			j = 0;
-
-		/*
-		 * Build identifier string
-		 */
-		initStringInfo(&ident);
-		appendStringInfo(&ident,
-						 "device_id=%d,bytesize=%zu,ipc_handle=",
-						 devAttrs[cuda_dindex].DEV_ID,
-						 nbytes);
-		enlargeStringInfo(&ident, 2 * sizeof(CUipcMemHandle));
-		hex_encode((const char *)&ipc_mhandle,
-				   sizeof(CUipcMemHandle),
-				   ident.data + ident.len);
-		ident.len += 2 * sizeof(CUipcMemHandle);
-		appendStringInfo(&ident,",format=cupy-%s,nitems=%zu,table_oid=%u",
-						 np_typename,
-						 nattrs * nrooms,
-						 RelationGetRelid(frel));
-		appendStringInfoString(&ident, ",attnums=");
-		foreach (lc, attNums)
-		{
-			if (lc != list_head(attNums))
-				appendStringInfoChar(&ident,' ');
-			appendStringInfo(&ident, "%d", lfirst_int(lc));
-		}
-
-		/*
-		 * setup ArrowGpuBuffer
-		 */
-		gpubuf = MemoryContextAllocZero(TopSharedMemoryContext,
-										MAXALIGN(offsetof(ArrowGpuBuffer,
-														  attnums[nattrs])) +
-										MAXALIGN(ident.len + 1));
-		pg_atomic_init_u32(&gpubuf->refcnt, pinned ? 2 : 1);
-		gpubuf->pinned = pinned;
-		gpubuf->cuda_dindex = cuda_dindex;
-		memcpy(&gpubuf->ipc_mhandle, &ipc_mhandle, sizeof(CUipcMemHandle));
-		gpubuf->timestamp = timestamp;
-		gpubuf->nbytes = nbytes;
-		gpubuf->nrooms = nrooms;
-		gpubuf->frel_oid = RelationGetRelid(frel);
-		gpubuf->format = ARROW_GPUBUF_FORMAT__CUPY;
-		gpubuf->nattrs = nattrs;
-		foreach (lc, attNums)
-			gpubuf->attnums[j++] = lfirst_int(lc);
-		gpubuf->hash = hash_any((unsigned char *)&gpubuf->frel_oid,
-								offsetof(ArrowGpuBuffer, attnums[nattrs]) -
-								offsetof(ArrowGpuBuffer, frel_oid));
-		gpubuf->ident = (char *)&gpubuf->attnums[nattrs];
-		strcpy(gpubuf->ident, ident.data);
-
-		/*
-		 * Open GPU device memory, and load the array from apache arrow files
-		 */
-		gcontext = AllocGpuContext(cuda_dindex, true, false);
-		rc = gpuIpcOpenMemHandle(gcontext,
-								 &gmem_ptr,
-								 gpubuf->ipc_mhandle,
-								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
-		foreach (lc, rb_state_list)
-		{
-			RecordBatchState *rb_state = lfirst(lc);
-
-			if (rb_state->fdesc != curr_filp)
-			{
-				if (mmap_ptr)
-				{
-					if (munmap(mmap_ptr, mmap_len) != 0)
-						elog(ERROR, "failed on munmap: %m");
-					mmap_ptr = NULL;
-				}
-				mmap_len = (rb_state->stat_buf.st_size +
-							PAGE_SIZE - 1) & ~PAGE_MASK;
-				mmap_ptr = mmap(NULL, mmap_len,
-								PROT_READ, MAP_SHARED,
-								FileGetRawDesc(rb_state->fdesc), 0);
-				if (mmap_ptr == MAP_FAILED)
-				{
-					mmap_ptr = NULL;
-					elog(ERROR, "failed on mmap: %m");
-				}
-				curr_filp = rb_state->fdesc;
-			}
-			/*
-			 * copy array to device memory
-			 */
-			for (j=0; j < gpubuf->nattrs; j++)
-			{
-				RecordBatchFieldState *column;
-				int			attnum = gpubuf->attnums[j];
-				size_t		hoffset = rb_state->rb_offset;
-				size_t		doffset;
-				size_t		length;
-				size_t		padding = 0;
-
-				Assert(attnum > 0 && attnum <= rb_state->ncols);
-				column = &rb_state->columns[attnum-1];
-				hoffset += column->values_offset;
-				
-				doffset = unitsz * (row_index + j * gpubuf->nrooms);
-				length = unitsz * Min(rb_state->rb_nitems, column->nitems);
-				if (length > column->values_length)
-					length = column->values_length;
-				if (length < unitsz * rb_state->rb_nitems)
-					padding = unitsz * rb_state->rb_nitems - length;
-				rc = cuMemcpyHtoD(gmem_ptr + doffset,
-								  mmap_ptr + hoffset,
-								  length);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-				if (padding > 0)
-				{
-					rc = cuMemsetD8(gmem_ptr + doffset + length, 0, padding);
-					if (rc != CUDA_SUCCESS)
-						elog(ERROR, "failed on cuMemsetD8: %s", errorText(rc));
-				}
-			}
-			row_index += rb_state->rb_nitems;
-		}
-		if (mmap_ptr)
-		{
-			if (munmap(mmap_ptr, mmap_len) != 0)
-				elog(ERROR, "failed on munmap: %m");
-		}
-		rc = gpuIpcCloseMemHandle(gcontext, gmem_ptr);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuIpcCloseMemHandle: %s",
-				 errorText(rc));
-		PutGpuContext(gcontext);
-	}
-	PG_CATCH();
-	{
-		if (mmap_ptr)
-		{
-			if (munmap(mmap_ptr, mmap_len) != 0)
-				elog(WARNING, "failed on munmap: %m");
-		}
-		if (gcontext)
-			PutGpuContext(gcontext);
-		if (gpubuf)
-			pfree(gpubuf);
-		rc = gpuMemFreePreserved(cuda_dindex, ipc_mhandle);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFreePreserved: %s",
-				 errorText(rc));
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	index = gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
-	dlist_push_tail(&arrow_metadata_state->gpubuf_slots[index],
-					&gpubuf->chain);
-	return gpubuf;
-}
-
-static text *
-lookupOrBuildArrowGpuBufferCupy(Relation frel, List *attNums,
-								Oid element_oid, int cuda_dindex, bool pinned)
-{
-	Oid				frel_oid = RelationGetRelid(frel);
-	ForeignTable   *ft = GetForeignTable(frel_oid);
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
-	List		   *fdescList = NIL;
-	List		   *rb_state_list = NIL;
-	ListCell	   *lc;
-	int				j, nattrs;
-	size_t			nrooms = 0;
-	struct timespec	timestamp;
-	int				index;
-	LWLock		   *lock;
-	bool			has_exclusive = false;
-	dlist_mutable_iter iter;
-	ArrowGpuBuffer *gpubuf, *_key;
-	text		   *result = NULL;
-
-	/*
-	 * Estimation of the data size
-	 */
-	memset(&timestamp, 0, sizeof(struct timespec));
-	foreach (lc, filesList)
-	{
-		char	   *fname = strVal(lfirst(lc));
-		File		filp;
-		List	   *rb_temp;
-		ListCell   *cell;
-
-		filp = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
-		if (filp < 0)
-			elog(ERROR, "failed to open '%s' on behalf of foreign table '%s'",
-				 fname, RelationGetRelationName(frel));
-		rb_temp = arrowLookupOrBuildMetadataCache(filp);
-		foreach (cell, rb_temp)
-		{
-			RecordBatchState *rb_state = lfirst(cell);
-
-			nrooms += rb_state->rb_nitems;
-			if (timespec_comp(&rb_state->stat_buf.st_mtim, &timestamp) > 0)
-				timestamp = rb_state->stat_buf.st_mtim;
-			if (timespec_comp(&rb_state->stat_buf.st_ctim, &timestamp) > 0)
-				timestamp = rb_state->stat_buf.st_ctim;
-			rb_state_list = lappend(rb_state_list, rb_state);
-		}
-		fdescList = lappend_int(fdescList, filp);
-	}
-	if (nrooms == 0)
-		elog(ERROR, "arrow_fdw: foreign table '%s' is empty",
-			 RelationGetRelationName(frel));
-	/*
-	 * Lookup preserved GPU device memory, or build it if not found
-	 */
-	nattrs = list_length(attNums);
-	_key = alloca(offsetof(ArrowGpuBuffer, attnums[nattrs]));
-	memset(_key, 0, offsetof(ArrowGpuBuffer, attnums[nattrs]));
-
-	_key->frel_oid = frel_oid;
-	_key->format = ARROW_GPUBUF_FORMAT__CUPY;
-	_key->nattrs = nattrs;
-	j = 0;
-	foreach (lc, attNums)
-		_key->attnums[j++] = lfirst_int(lc);
-	_key->hash = hash_any((unsigned char *)&_key->frel_oid,
-						  offsetof(ArrowGpuBuffer, attnums[nattrs]) -
-						  offsetof(ArrowGpuBuffer, frel_oid));
-	index = _key->hash % ARROW_GPUBUF_HASH_NSLOTS;
-
-	lock = &arrow_metadata_state->gpubuf_locks[index];
-	LWLockAcquire(lock, LW_SHARED);
-retry:
-	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
-	{
-		gpubuf = dlist_container(ArrowGpuBuffer, chain, iter.cur);
-		if (gpubuf->hash == _key->hash &&
-			gpubuf->frel_oid == _key->frel_oid &&
-			gpubuf->format == _key->format &&
-			gpubuf->nattrs == _key->nattrs &&
-            memcmp(gpubuf->attnums, _key->attnums,
-				   sizeof(AttrNumber) * _key->nattrs) == 0 &&
-			(cuda_dindex < 0 || gpubuf->cuda_dindex == cuda_dindex) &&
-			timespec_comp(&gpubuf->timestamp, &timestamp) == 0)
-		{
-			/* Ok, found the latest one */
-			if (pinned)
-			{
-				if (gpubuf->pinned)
-				{
-					/* already pinned */
-					pg_atomic_fetch_add_u32(&gpubuf->refcnt, 1);
-				}
-				else if (!has_exclusive)
-				{
-					LWLockRelease(lock);
-					LWLockAcquire(lock, LW_EXCLUSIVE);
-					has_exclusive = true;
-					goto retry;
-				}
-				else
-				{
-					/* make this GPU buffed pinned */
-					gpubuf->pinned = true;
-					pg_atomic_fetch_add_u32(&gpubuf->refcnt, 2);
-				}
-			}
-			else
-			{
-				pg_atomic_fetch_add_u32(&gpubuf->refcnt, 1);
-			}
-			goto found;
-		}
-	}
-	/* Not found, so create a new Gpu memory buffer */
-	if (!has_exclusive)
-	{
-		LWLockRelease(lock);
-		LWLockAcquire(lock, LW_EXCLUSIVE);
-		has_exclusive = true;
-		goto retry;
-	}
-	gpubuf = BuildArrowGpuBufferCupy(frel,
-									 attNums,
-									 rb_state_list,
-									 timestamp,
-									 cuda_dindex,
-									 element_oid,
-									 nrooms,
-									 pinned);
-	Assert(gpubuf->hash == _key->hash);
-found:
-	/* makes ArrowGpuBufferTracker */
-	PG_TRY();
-	{
-		static bool	on_before_shmem_callback_registered = false;
-		ArrowGpuBufferTracker *tracker;
-		size_t		len = strlen(gpubuf->ident);
-
-		result = cstring_to_text(gpubuf->ident);
-
-		tracker = MemoryContextAllocZero(CacheMemoryContext,
-										 offsetof(ArrowGpuBufferTracker,
-												  ident[len+1]));
-		tracker->gpubuf = gpubuf;
-		strcpy(tracker->ident, gpubuf->ident);
-		dlist_push_head(&arrow_gpu_buffer_tracker_list, &tracker->chain);
-
-		if (!on_before_shmem_callback_registered)
-		{
-			before_shmem_exit(putAllArrowGpuBuffer, 0);
-			on_before_shmem_callback_registered = true;
-		}
-	}
-	PG_CATCH();
-	{
-		putArrowGpuBuffer(gpubuf);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	LWLockRelease(lock);
-	/* cleanups */
-	foreach (lc, fdescList)
-		FileClose((File)lfirst_int(lc));
-	return result;
-}
-
-/*
- * pgstrom_arrow_fdw_export_cupy
- *
- * This SQL function exports a particular arrow_fdw foreign table
- * as a ndarray of cupy; built as like a flat array.
- *
- * pgstrom.arrow_fdw_export_cupy[_pinned](regclass, -- oid of relation
- *                               text[],   -- name of attributes
- *                               int)      -- GPU device-id
- */
-static Datum
-__pgstrom_arrow_fdw_export_cupy(Oid frel_oid,
-								ArrayType *attNames,
-								int device_id,
-								bool pinned)
-{
-	int32			cuda_dindex = -1;
-	List		   *attNums = NIL;
-	Relation		frel;
-	TupleDesc		tupdesc;
-	FdwRoutine	   *routine;
-	Oid				element_oid = InvalidOid;
-	int				j;
-	text		   *result;
-
-	/* sanity checks */
-	if (ARR_NDIM(attNames) != 1 ||
-		ARR_ELEMTYPE(attNames) != TEXTOID)
-		elog(ERROR, "column names must be 1-dimensional text array");
-	if (device_id >= 0)
-	{
-		for (j=0; j < numDevAttrs; j++)
-		{
-			if (devAttrs[j].DEV_ID == device_id)
-			{
-				cuda_dindex = j;
-				break;
-			}
-		}
-		if (j == numDevAttrs)
-			elog(ERROR, "GPU deviceId=%d not found", device_id);
-	}
-
-	/*
-	 * Open foreign table, and sanity checks
-	 */
-	frel = table_open(frel_oid, AccessShareLock);
-	if (frel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not arrow_fdw foreign table",
-						RelationGetRelationName(frel))));
-	routine = GetFdwRoutineForRelation(frel, false);
-	if (memcmp(routine, &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not arrow_fdw foreign table",
-						RelationGetRelationName(frel))));
-	/*
-	 * Pick up attributes to be fetched
-	 */
-	tupdesc = RelationGetDescr(frel);
-	if (!attNames)
-	{
-		for (j=0; j < tupdesc->natts; j++)
-		{
-			Form_pg_attribute attr = tupleDescAttr(tupdesc,j);
-
-			if (attr->attisdropped)
-				continue;
-			if (!OidIsValid(element_oid))
-				element_oid = attr->atttypid;
-			else if (element_oid != attr->atttypid)
-				elog(ERROR, "multiple data types are mixtured in use");
-			attNums = lappend_int(attNums, attr->attnum);
-		}
-	}
-	else
-	{
-		ArrayIterator iter;
-		Datum		datum;
-		bool		isnull;
-		HeapTuple	tup;
-
-		iter = array_create_iterator(attNames, 0, NULL);
-		while (array_iterate(iter, &datum, &isnull))
-		{
-			Form_pg_attribute attr;
-			char   *colname;
-
-			if (isnull)
-				elog(ERROR, "NULL in attribute names");
-			colname = text_to_cstring((text *)datum);
-			tup = SearchSysCache2(ATTNAME,
-								  ObjectIdGetDatum(frel_oid),
-								  PointerGetDatum(colname));
-			if (!HeapTupleIsValid(tup))
-				elog(ERROR, "column \"%s\" of relation \"%s\" does not exist",
-					 colname, RelationGetRelationName(frel));
-			attr = (Form_pg_attribute) GETSTRUCT(tup);
-			if (attr->attnum < 0)
-				elog(ERROR, "cannot export system column: %s", colname);
-			if (!attr->attisdropped)
-			{
-				if (!OidIsValid(element_oid))
-					element_oid = attr->atttypid;
-				else if (element_oid != attr->atttypid)
-					elog(ERROR, "multiple data types are mixtured in use");
-				attNums = lappend_int(attNums, attr->attnum);
-			}
-			ReleaseSysCache(tup);
-			pfree(colname);
-		}
-		array_free_iterator(iter);
-	}
-	if (attNums == NIL)
-		elog(ERROR, "no valid attributes are specified");
-	result = lookupOrBuildArrowGpuBufferCupy(frel, attNums,
-											 element_oid,
-											 cuda_dindex,
-											 pinned);
-	table_close(frel, AccessShareLock);
-
-	PG_RETURN_TEXT_P(result);
-}
-
-Datum
-pgstrom_arrow_fdw_export_cupy(PG_FUNCTION_ARGS)
-{
-	Oid			frel_oid = InvalidOid;
-	ArrayType  *attNames = NULL;
-	int32		device_id = -1;
-
-	if (PG_ARGISNULL(0))
-		elog(ERROR, "no relation oid was specified");
-	frel_oid = PG_GETARG_OID(0);
-	if (!PG_ARGISNULL(1))
-		attNames = PG_GETARG_ARRAYTYPE_P(1);
-	if (!PG_ARGISNULL(2))
-		device_id = PG_GETARG_INT32(2);
-
-	PG_RETURN_TEXT_P(__pgstrom_arrow_fdw_export_cupy(frel_oid,
-													 attNames,
-													 device_id,
-													 false));
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_export_cupy);
-
-Datum
-pgstrom_arrow_fdw_export_cupy_pinned(PG_FUNCTION_ARGS)
-{
-	Oid			frel_oid = InvalidOid;
-	ArrayType  *attNames = NULL;
-	int32		device_id = -1;
-
-	if (PG_ARGISNULL(0))
-		elog(ERROR, "no relation oid was specified");
-	frel_oid = PG_GETARG_OID(0);
-	if (!PG_ARGISNULL(1))
-		attNames = PG_GETARG_ARRAYTYPE_P(1);
-	if (!PG_ARGISNULL(2))
-		device_id = PG_GETARG_INT32(2);
-
-	PG_RETURN_TEXT_P(__pgstrom_arrow_fdw_export_cupy(frel_oid,
-													 attNames,
-													 device_id,
-													 true));
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_export_cupy_pinned);
-
-/*
- * unloadArrowGpuBuffer
- */
-static void
-unloadArrowGpuBuffer(const char *ident,
-					 Oid frel_oid, List *attNums, int format)
-{
-	ArrowGpuBuffer *_key;
-	dlist_mutable_iter iter;
-	ListCell   *lc;
-	int			index;
-	int			j, nattrs = list_length(attNums);
-
-	_key = alloca(offsetof(ArrowGpuBuffer, attnums[nattrs]));
-	_key->frel_oid = frel_oid;
-	_key->format = format;
-	_key->nattrs = nattrs;
-	j = 0;
-	foreach (lc, attNums)
-		_key->attnums[j++] = lfirst_int(lc);
-	_key->hash = hash_any((unsigned char *)&_key->frel_oid,
-						  offsetof(ArrowGpuBuffer, attnums[nattrs]) -
-						  offsetof(ArrowGpuBuffer, frel_oid));
-	index = _key->hash % ARROW_GPUBUF_HASH_NSLOTS;
-	LWLockAcquire(&arrow_metadata_state->gpubuf_locks[index], LW_EXCLUSIVE);
-	dlist_foreach_modify(iter, &arrow_metadata_state->gpubuf_slots[index])
-	{
-		ArrowGpuBuffer *gpubuf = dlist_container(ArrowGpuBuffer,
-												 chain, iter.cur);
-		if (!gpubuf->pinned)
-			continue;		/* ignore */
-		if (gpubuf->hash == _key->hash &&
-			strcmp(gpubuf->ident, ident) == 0)
-		{
-			gpubuf->pinned = false;
-			putArrowGpuBuffer(gpubuf);
-			goto found;
-		}
-	}
-	elog(ERROR, "No ArrowGpuBuffer for the supplied identifier token");
-found:
-	LWLockRelease(&arrow_metadata_state->gpubuf_locks[index]);	
-}
-
-/*
- * pgstrom_arrow_fdw_unpin_gpu_buffer
- *
- * release pinned GPU memory
- */
-Datum
-pgstrom_arrow_fdw_unpin_gpu_buffer(PG_FUNCTION_ARGS)
-{
-	char	   *__ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
-	char	   *ident = pstrdup(__ident);
-	char	   *tok, *save;
-	int			format = -1;
-	Oid			frel_oid = InvalidOid;
-	List	   *attNums = NIL;
-	
-	for (tok = strtok_r(ident, ",", &save);
-		 tok != NULL;
-		 tok = strtok_r(NULL,  ",", &save))
-	{
-		char   *pos = strchr(tok, '=');
-
-		if (!pos)
-			elog(ERROR, "invalid GPU buffer identifier token");
-		*pos++ = '\0';
-
-		if (strcmp(tok, "format") == 0)
-		{
-			if (strcmp(pos, "cupy-int16") == 0 ||
-				strcmp(pos, "cupy-int32") == 0 ||
-				strcmp(pos, "cupy-int64") == 0 ||
-				strcmp(pos, "cupy-float16") == 0 ||
-				strcmp(pos, "cupy-float32") == 0 ||
-				strcmp(pos, "cupy-float64") == 0)
-				format = ARROW_GPUBUF_FORMAT__CUPY;
-			else
-				elog(ERROR, "unknown GPU buffer identifier format [%s]", pos);
-		}
-		else if (strcmp(tok, "table_oid") == 0)
-			frel_oid = atooid(pos);
-		else if (strcmp(tok, "attnums") == 0)
-		{
-			char   *__tok, *__save;
-
-			for (__tok = strtok_r(pos, " ", &__save);
-				 __tok != NULL;
-				 __tok = strtok_r(NULL, " ", &__save))
-			{
-				attNums = lappend_int(attNums, atoi(__tok));
-			}
-		}
-		else if (strcmp(tok, "device_id")  != 0 &&
-				 strcmp(tok, "bytesize")   != 0 &&
-				 strcmp(tok, "ipc_handle") != 0 &&
-				 strcmp(tok, "nitems")     != 0)
-			elog(ERROR, "invalid GPU buffer identifier token [%s]", ident);
-	}
-
-	if (format < 0 || !OidIsValid(frel_oid) || attNums == NIL)
-		elog(ERROR, "GPU buffer identifier is corrupted: [%s]", __ident);
-	
-	unloadArrowGpuBuffer(__ident, frel_oid, attNums, format);
-
-	PG_RETURN_BOOL(true);
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_unpin_gpu_buffer);
-
-/*
- * pgstrom_arrow_fdw_put_gpu_buffer
- *
- * release preserved GPU memory specified by the handle
- */
-Datum
-pgstrom_arrow_fdw_put_gpu_buffer(PG_FUNCTION_ARGS)
-{
-	char	   *ident = TextDatumGetCString(PG_GETARG_TEXT_P(0));
-	dlist_iter	iter;
-
-	dlist_foreach(iter, &arrow_gpu_buffer_tracker_list)
-	{
-		ArrowGpuBufferTracker *tracker =
-			dlist_container(ArrowGpuBufferTracker, chain, iter.cur);
-
-		if (strcmp(tracker->ident, ident) == 0)
-		{
-			ArrowGpuBuffer *gpubuf = tracker->gpubuf;
-			uint32		index = gpubuf->hash % ARROW_GPUBUF_HASH_NSLOTS;
-			LWLock	   *lock = &arrow_metadata_state->gpubuf_locks[index];
-
-			LWLockAcquire(lock, LW_EXCLUSIVE);
-			putArrowGpuBuffer(gpubuf);
-			LWLockRelease(lock);
-
-			dlist_delete(&tracker->chain);
-			pfree(tracker);
-
-			PG_RETURN_BOOL(true);
-		}
-	}
-	elog(ERROR, "Not found GPU buffer with identifier=[%s]", ident);
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_put_gpu_buffer);
-
-/*
  * pgstrom_startup_arrow_fdw
  */
 static void
@@ -6015,12 +6128,6 @@ pgstrom_startup_arrow_fdw(void)
 			LWLockInitialize(&arrow_metadata_state->lock_slots[i], -1);
 			dlist_init(&arrow_metadata_state->hash_slots[i]);
 			dlist_init(&arrow_metadata_state->mvcc_slots[i]);
-		}
-
-		for (i=0; i < ARROW_GPUBUF_HASH_NSLOTS; i++)
-		{
-			LWLockInitialize(&arrow_metadata_state->gpubuf_locks[i], -1);
-			dlist_init(&arrow_metadata_state->gpubuf_slots[i]);
 		}
 	}
 }
@@ -6078,7 +6185,17 @@ pgstrom_init_arrow_fdw(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/*
+	 * Turn on/off min/max statistics hint
+	 */
+	DefineCustomBoolVariable("arrow_fdw.stats_hint_enabled",
+							 "Enables min/max statistics hint, if any",
+							 NULL,
+							 &arrow_fdw_stats_hint_enabled,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/*
 	 * Configurations for arrow_fdw metadata cache
 	 */
@@ -6093,18 +6210,6 @@ pgstrom_init_arrow_fdw(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	arrow_metadata_cache_size = (size_t)arrow_metadata_cache_size_kb << 10;
-
-	/*
-	 * Debug option to hint number of rows
-	 */
-	DefineCustomStringVariable("arrow_fdw.debug_row_numbers_hint",
-							   "override number of rows estimation for arrow_fdw foreign tables",
-							   NULL,
-							   &arrow_debug_row_numbers_hint,
-							   NULL,
-							   PGC_USERSET,
-							   GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							   NULL, NULL, NULL);
 
 	/*
 	 * Limit of RecordBatch size for writing
@@ -6131,5 +6236,4 @@ pgstrom_init_arrow_fdw(void)
 	
 	/* misc init */
 	dlist_init(&arrow_write_redo_list);
-	dlist_init(&arrow_gpu_buffer_tracker_list);
 }

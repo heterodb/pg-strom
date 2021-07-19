@@ -7,12 +7,12 @@
 @ja{
 SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。
 
-SSD-to-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。
+GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。
 }
 @en{
 For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.
 
-SSD-to-GPU Direct SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.
+GPUDirect SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.
 }
 
 @ja{
@@ -30,24 +30,27 @@ In the other words, we consume bandwidth of the PCIe bus to move junk data, howe
 ![SSD2GPU Direct SQL Execution Overview](./img/ssd2gpu-overview.png)
 
 @ja{
-SSD-to-GPUダイレクトSQL実行はデータの流れを変え、ストレージ上のデータブロックをPCIeバス上のP2P DMAを用いてGPUに直接転送し、GPUでSQLワークロードを処理する事でCPUが処理すべきレコード数を減らすための機能です。いわば、ストレージとCPU/RAMの間に位置してSQLを処理するためのプリプロセッサとしてGPUを活用し、結果としてI/O処理を高速化するためのアプローチです。
+GPUダイレクトSQL実行はデータの流れを変え、ストレージ上のデータブロックをPCIeバス上のP2P DMAを用いてGPUに直接転送し、GPUでSQLワークロードを処理する事でCPUが処理すべきレコード数を減らすための機能です。いわば、ストレージとCPU/RAMの間に位置してSQLを処理するためのプリプロセッサとしてGPUを活用し、結果としてI/O処理を高速化するためのアプローチです。
 }
 @en{
-SSD-to-GPU Direct SQL Execution changes the flow to read blocks from the storage sequentially. It directly loads data blocks to GPU using peer-to-peer DMA over PCIe bus, then runs SQL workloads on GPU device to reduce number of rows to be processed by CPU. In other words, it utilizes GPU as a pre-processor of SQL which locates in the middle of the storage and CPU/RAM for reduction of CPU's load, then tries to accelerate I/O processing in the results.
+GPU Direct SQL Execution changes the flow to read blocks from the storage sequentially. It directly loads data blocks to GPU using peer-to-peer DMA over PCIe bus, then runs SQL workloads on GPU device to reduce number of rows to be processed by CPU. In other words, it utilizes GPU as a pre-processor of SQL which locates in the middle of the storage and CPU/RAM for reduction of CPU's load, then tries to accelerate I/O processing in the results.
 }
 
 @ja{
-本機能は内部的にNVIDIAのGPUDirect RDMAを使用しています。これはカスタムLinux kernel moduleを利用する事で、GPUデバイスメモリと他のPCIeデバイスの間でP2Pのデータ転送を可能にする基盤技術です。
-そのため、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、Linux kernelの拡張モジュールであるNVMe-Stromドライバが必要です。
+本機能は、内部的にNVIDIA GPUDirect Storageモジュール、またはHeteroDB社の独自Linux kernelモジュールであるNVME-Stromモジュール（RHEL7/CentOS7）を使用して、GPUデバイスメモリとNVMEストレージとの間でP2Pのデータ転送を行います。
+したがって、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、上記のどちらかのLinux kernel拡張モジュールが必要です。
 
-また、本機能が対応しているのはNVMe仕様のSSDのみです。SASやSATAといったインターフェースで接続されたSSDはサポートされていません。今までに動作実績のあるNVMe-SSDについては [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) が参考になるでしょう。
+また、本機能が対応しているのはNVME仕様のSSDや、NVME-oFで接続されたリモートデバイスのみです。
+SASやSATAといったインターフェースで接続された旧式のストレージには対応していません。
+今までに動作実績のあるNVME-SSDについては [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) が参考になるでしょう。
 }
 @en{
-This feature internally uses NVIDIA GPUDirect RDMA. It allows peer-to-peer data transfer over PCIe bus between GPU device memory and third parth device by coordination using a custom Linux kernel module.
-So, this feature requires NVMe-Strom driver which is a Linux kernel module in addition to PG-Strom which is a PostgreSQL extension module.
+This feature internally uses either of NVIDIA GPUDirect Storage module or NVME-Strom module (if RHEL7/CentOS7), that is a Linux kernel module originally designed by HeteroDB, to coordinate P2P data transfer from NVME storage to GPU device memory.
+So, this feature requires either of the above Linux kernel modules, in addition to PG-Strom as an extension of PostgreSQL.
 
-Also note that this feature supports only NVMe-SSD. It does not support SAS or SATA SSD.
-We have tested several NVMe-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
+Also note that this feature supports only NVME-SSD or NVME-oF remove devices.
+It does not support legacy storages like SAS or SATA-SSD.
+We have tested several NVMD-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
 }
 
 @ja:##初期設定
@@ -57,51 +60,38 @@ We have tested several NVMe-SSD models. You can refer [002: HW Validation List](
 @en:###Driver Installation
 
 @ja{
-GPUダイレクトSQL実行機能を利用するには`nvme_strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
+RHEL7/CentOS7プラットフォームでPG-Stromを利用する場合、つまり既存のPG-Stromシステムでは、GPUダイレクトSQL実行を使用するにはHeteroDB社のNVME-Stromドライバが必要です。
 
-既に`heterodb-swdc`パッケージをインストールしている場合、`yum`コマンドによるインストールも可能です。
+インストールの詳細については、本マニュアルの(「インストール」⇒「heterodb-kmodのインストール」)[../install/#heterodb-kmod]を参照してください。
+
+!!! Note
+    NVME-Stromドライバを使用してGPUDirect SQLを使用する場合、ローカルのNVME-SSDドライブのみに対応しています。
+    実験的にNVME-oFデバイス用のドライバも提供されていますが、本番システムでの利用は非推奨です。
 }
 @en{
-`nvme_strom` package is required to activate GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+When PG-Strom is used on a RHEL7/CentOS7 platform, for existing PG-Strom systems in other words, GPUDirect SQL Execution requires NVME-Strom driver by HeteroDB.
 
-If `heterodb-swdc` package is already installed, you can install the package by `yum` command.
+See the ("Install" -> "heterodb-kmod Installation")[../install/#heterodb-kmod] of this manual for more details.
+
+!!! Note
+    GPUDirect SQL by NVME-Strom driver supports only local NVME-SSD drives.
+    We **experimentally** provide a driver for NVME-oF devices, but don't recommend to use in commercial systems.
 }
-
-```
-$ sudo yum install nvme_strom
-            :
-================================================================================
- Package             Arch            Version            Repository         Size
-================================================================================
-Installing:
- nvme_strom          x86_64          0.8-1.el7          heterodb          178 k
-
-Transaction Summary
-================================================================================
-Install  1 Package
-            :
-DKMS: install completed.
-  Verifying  : nvme_strom-0.8-1.el7.x86_64                                  1/1
-
-Installed:
-  nvme_strom.x86_64 0:0.8-1.el7
-
-Complete!
-```
 
 @ja{
-`nvme_strom`パッケージのインストールが完了すると、以下のように`lsmod`コマンドで`nvme_strom`モジュールが出力されます。
+RHEL7/CentOS7以外のプラットフォームでPG-Stromを利用する場合、つまり新規に構築するシステムの大半では、GPUダイレクトSQL実行を使用するにはNVIDIA GPUDirect Storageを使用します。
+
+これには、GPUDirect Storageモジュールのインストールに加えて、GPUDirect Storageのサポートを有効にしたMOFED（Mellanox Open Fabrics Enterprise Distribution）ドライバのインストールも必要となります。
+
+詳しくは、本マニュアルの(「インストール」⇒「NVIDIA GPUDirect Storage」)[../install/#nvidia-gpudirect-storage]を参照してください。
 }
 @en{
-Once `nvme_strom` package gets installed, you can see `nvme_strom` module using `lsmod` command below.
-}
+For usage of PG-Strom on the platform other than RHEL7/CentOS7, for newly installed PG-Strom systems in other words, GPUDirect SQL Execution requires NVIDIA GPUDirect Storage.
 
-```
-$ lsmod | grep nvme
-nvme_strom             12625  0
-nvme                   27722  4
-nvme_core              52964  9 nvme
-```
+It also requires to install the MOFED(Mellanox Open Fabrics Enterprise Distribution) driver with support of GPUDirect Storage, in addition to the GPUDirect Storage module itself.
+
+See the (「インストール」⇒「NVIDIA GPUDirect Storage」)[../install/#nvidia-gpudirect-storage] of this manual for more details.
+}
 
 @ja:###テーブルスペースの設計
 @en:###Designing Tablespace

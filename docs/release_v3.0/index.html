@@ -160,7 +160,7 @@
             <div class="section">
               
                 <h1 id="pg-strom-v30-release">PG-Strom v3.0 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (16-Jun-2021)</div>
+<div style="text-align: right;">PG-Strom Development Team (29-Jun-2021)</div>
 
 <h2 id="overview">Overview</h2>
 <p>Major changes in PG-Strom v3.0 are as follows:</p>
@@ -187,22 +187,22 @@
 <p>We can use GPUDirect SQL to scan PostgreSQL's heap table and Apache Arrow files. It can expect significant performance improvement for the workloads where table scans are the major bottleneck, in either driver cases.</p>
 <p>The performance measurement below is by SSBM (Star Schema Benchmark) using 1xGPU and 4xNVME-SSDs under the GPUDirect Storage driver. It shows number of rows processed per unit time is significantly improved regardless of the storage system; either PostgreSQL heap or Apache Arrow.</p>
 <p><img alt="Star Schema Benchmark Results" src="../img/release_3_0b.png" /></p>
-<p>When we compare the read throughput from the NVME-SSD during execution of the query, we can see both of the GPUDirect Storage driver and the conventional nvme_strom driver could pull out the outstanding performance close to the hardware limitation.</p>
+<p>In comparison of the read throughput from NVME-SSD drives during the query execution, it shows the table scan by GPUDirect Storage pulls out almost optimal performance close to the hardware limitation, much faster than the scan by filesystem (PostgreSQL Heap Storage).</p>
 <h2 id="gpu-postgis-and-gist-index">GPU-PostGIS and GiST-index</h2>
 <p>We have implemented GPU versions of several PostGIS functions. 
 When these PostGIS functions are used in qualifier clauses (like, WHERE-clause), PG-Strom will automatically generate a GPU program to execute it on the GPU.</p>
 <p>The main target of GPU version of PostGIS is the workload to check the real-time location data of mobile devices, like smartphones or vehicles, against the area definition data like boundary of municipality or school districts.</p>
-<p><img alt="aaa" src="../img/release_3_0c.png" /></p>
+<p><img alt="PostGIS Overview" src="../img/release_3_0c.png" /></p>
 <p>For example, when you want to deliver an advertisement to smartphonws in a particular area, or when you want to deliver traffic jam information to cara in a particular area, it is effective in the process of searching for the corresponding device using the position as a key.</p>
 <p>In the following example, it creates 16 million random points data in a rectangular area that includes the Tokyo region, then count up number of the points contained in the cities in Tokyo for each.
 The vanilla PostGIS and GiST index took more than 160sec, on the other hand, GPU-version of PostGIS and GiST index responded in 0.830 sec.</p>
-<p><img alt="aaa" src="../img/release_3_0d.png" /></p>
+<p><img alt="GPU PostGIS and GiST Index" src="../img/release_3_0d.png" /></p>
 <h2 id="gpu-cache">GPU Cache</h2>
 <p>GPU Cache mechanism can store a copy of the target table in a pre-allocated area on the GPU device memory.
 It was designed for efficient execution of analytical/search queries on frequently updated data with relatively small data size (~10GB).</p>
 <p>The GPU can process SQL workloads by referring to GPU Cache instead of loading data from tables when executing analytical/search queries.</p>
 <p>This is typically a workload that keeps real-time data from millions of devices on the GPU and frequently updates timestamps and location information.</p>
-<p><img alt="aaa" src="../img/release_3_0e.png" /></p>
+<p><img alt="GPU Cache Overview" src="../img/release_3_0e.png" /></p>
 <p>When the table with GPU cache is updated, the update history is stored in the on-memory redo log buffer, then applied to the GPU cache at a regular intervals or before executing the analysis / search workload.
 By this mechanism, it achieved both of frequent updates and consistency of GPU cache.</p>
 <h2 id="user-defined-gpu-datatypefunctions">User-defined GPU datatype/functions</h2>

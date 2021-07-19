@@ -160,7 +160,7 @@
             <div class="section">
               
                 <h1 id="pg-strom-v30">PG-Strom v3.0リリース</h1>
-<div style="text-align: right;">PG-Strom Development Team (16-Jun-2021)</div>
+<div style="text-align: right;">PG-Strom Development Team (29-Jun-2021)</div>
 
 <h2 id="_1">概要</h2>
 <p>PG-Strom v3.0における主要な変更は点は以下の通りです。</p>
@@ -188,22 +188,22 @@ NVIDIAが開発を進めている<a href="https://developer.nvidia.com/blog/gpud
 <p>GPUDirect SQLは、PostgreSQL標準のHeapテーブルとApache Arrowファイルの読み出しに利用する事ができ、いずれの場合においても、テーブルスキャンがボトルネックとなるようなワークロードにおいて顕著な高速化が期待できます。</p>
 <p>以下の測定結果は、GPU 1台とNVME-SSD 4台を用いて、SSBM(Star Schema Benchmark)ワークロードをGPUDirect SQLをGPUDirect Storageドライバの下で実行したものですが、PostgreSQL heapとApache Arrowのいずれのケースにおいても、単位時間あたりのデータ処理件数はPostgreSQLに比べ大幅に改善している事が分かります。</p>
 <p><img alt="Star Schema Benchmark Results" src="../img/release_3_0b.png" /></p>
-<p>また、クエリを実行中のNVME-SSDからの読み出しスループットを比較してみると、GPUDirect Storageドライバも、従来からのnvme_stromドライバも、ほぼ同等のハードウェア限界に近い性能値を引き出せている事が分かります。</p>
+<p>また、クエリを実行中のNVME-SSDからの読み出しスループットを比較してみると、ファイルシステムを介した読出し（PostgreSQL Heap Storage）に比べ、GPUDirect Storageを使用した場合にはハードウェア限界に近い性能値を引き出せている事が分かります。</p>
 <h2 id="gpupostgisgist">GPU版PostGISとGiSTインデックス</h2>
 <p>いくつかのPostGIS関数にGPU版を実装しました。
 条件句でこれらのPostGIS関数が使用されている場合、PG-StromはGPU側でこれを実行するようGPUプログラムを自動生成します。</p>
 <p>GPU版PostGISの主たるターゲットは、携帯電話や自動車といった移動体デバイスの最新の位置情報（Real-time Location Data）と、市区町村や学区の境界といった領域（Area Definition Data）との間で行われる突合処理です。</p>
-<p><img alt="aaa" src="../img/release_3_0c.png" /></p>
+<p><img alt="PostGIS Overview" src="../img/release_3_0c.png" /></p>
 <p>例えば、一定のエリア内に存在する携帯電話に広告を配信したい時、一定のエリア内に存在する自動車に渋滞情報を配信したい時など、位置をキーとして該当するデバイスを検索する処理に効果を発揮します。</p>
 <p>以下の例は、東京近郊エリアを包含する矩形領域内にランダムな1600万個の点データを作成し、市区町村ごとにその領域内に含まれる点の数をカウントするという処理の応答時間を計測したものです。
 通常のPostGISとGiSTインデックスの組み合わせでは160秒以上を要した処理が、GPU版PostGISとGiSTインデックスの組み合わせにおいては、僅か0.830秒で応答しています。</p>
-<p><img alt="aaa" src="../img/release_3_0d.png" /></p>
+<p><img alt="GPU PostGIS and GiST Index" src="../img/release_3_0d.png" /></p>
 <h2 id="gpu">GPUキャッシュ</h2>
 <p>GPUデバイスメモリ上に予め領域を確保しておき、対象となるテーブルの複製を保持しておく機能です。
 比較的小規模のデータサイズ（～10GB程度）で、更新頻度の高いデータに対して分析/検索系のクエリを効率よく実行するために設計されました。
 分析/検索系クエリの実行時には、GPU上のキャッシュを参照する事で、テーブルからデータを読み出す事なくGPUでSQLワークロードを処理します。</p>
 <p>これは典型的には、数百万デバイスのリアルタイムデータをGPU上に保持しておき、タイムスタンプや位置情報の更新が高頻度で発生するといったワークロードです。</p>
-<p><img alt="aaa" src="../img/release_3_0e.png" /></p>
+<p><img alt="GPU Cache Overview" src="../img/release_3_0e.png" /></p>
 <p>GPUキャッシュが設定されたテーブルを更新すると、その更新履歴をオンメモリのREDOログバッファに格納し、それを一定間隔か、または分析/検索系ワークロードの実行前にGPUキャッシュ側に反映します。
 この仕組みにより、高頻度での更新と、GPUキャッシュとの整合性とを両立しています。</p>
 <h2 id="gpu_1">ユーザ定義のGPUデータ型/関数</h2>

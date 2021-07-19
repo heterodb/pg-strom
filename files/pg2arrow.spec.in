@@ -1,0 +1,33 @@
+Name: pg2arrow
+Version: @@STROM_VERSION@@
+Release: @@STROM_RELEASE@@%{?dist}
+Summary: PostgreSQL query results to Apache Arrow conversion tool
+Group: Applications/Databases
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: @@STROM_TARBALL@@.tar.gz
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+
+%description
+pg2arrow is a command line tool to dump PostgreSQL query results
+as Apache Arrow file.
+This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
+
+%prep
+%setup -q -n @@STROM_TARBALL@@
+
+%build
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr pg2arrow
+
+%install
+rm -rf %{buildroot}
+%{__make} -C arrow-tools DESTDIR=%{buildroot} PREFIX=/usr install-pg2arrow
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%{_bindir}/pg2arrow
+
+%changelog

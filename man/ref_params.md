@@ -180,11 +180,20 @@ This session introduces PG-Strom's configuration parameters.
 :   `nvidia cufile`ドライバを使用する場合のみ有効です。
 
 `pg_strom.nvme_distance_map` [型: `text` / 初期値: `null`]
-:   NVME-SSDに最も近いGPUを手動で設定します。
-:   書式は`<nvmeX>:<gpuX>[,...]`で、NVME-SSDとGPUのペアをカンマ区切りの文字列で記述します。（例：`nvme0:gpu0,nvme1:gpu0`）
-:   ローカルNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスを使用する場合は手動で近傍のGPUを指定する必要があります。
+:   NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。
+:   書式は`<gpuX>=(<nvmeX>|<sfdvX>|</path/to/nfsmount>)[;<gpuY>=...]`で、NVMEデバイスなどストレージと対応するGPUのペアをセミコロン区切りの文字列で記述します。
+:   （例：`gpu0=nvme1; gpu1=/mnt/nfs_volume`）
+:   
+:   - `<gpuX>`はデバイス番号Xを持つGPUです。
+:   - `<nvmeX>`はローカルのNVME-SSDまたはリモートのNVME-oFデバイスを意味します。
+:   - `<sfdvX>`はScaleFlux社製CSDドライブ用の専用デバイスを意味します。
+:   - `/path/to/nfsmount`はNFS-over-RDMAを用いてマウントしたNFS区画のマウントポイントです。
+:   
+:   ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。
 }
 @en{
+##GPUDirect SQL Configuration
+
 `pg_strom.gpudirect_driver` [type: `text`]
 :   It shows the driver software name of GPUDirect SQL (read-only).
 :   Either `nvidia cufile` or `heterodb nvme-strom`
@@ -201,9 +210,16 @@ This session introduces PG-Strom's configuration parameters.
 :   It is only available when `nvidia cufile` driver is used.
 
 `pg_strom.nvme_distance_map` [type: `text` / default: `null`]
-:   It manually configures the closest GPU for particular NVME devices.
-:   Its format string is `<nvmeX>:<gpuX>[,...]`; comma separated list of NVME-GPU pairs. (Examle: `nvme0:gpu0,nvme1:gpu0`)
-:   Automatic configuration is often sufficient for local NVME-SSD drives, however, you need to configure the closest GPU manually for NVME-oF devices.
+:   It manually configures the closest GPU for the particular storage devices, like NVME devices or NFS volumes.
+:   Its format string is `<gpuX>=(<nvmeX>|<sfdvX>|</path/to/nfsmount>)[;<gpuY>=...]`; semi-colon separated list of pairs of GPU and storage like NVME devices.
+:   (example: `gpu0=nvme1; gpu1=/mnt/nfs_volume`)
+:   
+:   - `<gpuX>` means a GPU with device identifier X.
+:   - `<nvmeX>` means a local NVME-SSD or a remote NVME-oF device.
+:   - `<sfdvX>` means a special device of CSD drives by ScaleFlux,Inc.
+:   - `/path/to/nfsmount` means a mount point by NFS volume with NFS-over-RDMA.
+:   
+:   Automatic configuration is often sufficient for local NVME-SSD drives, however, you should manually configure the closest GPU for NVME-oF or NFS-over-RDMA volumes.
 }
 
 @ja{
