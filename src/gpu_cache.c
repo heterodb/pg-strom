@@ -195,6 +195,8 @@ gpucache_sync_trigger_function_oid(void)
  */
 typedef struct
 {
+	Oid			tg_sync_row;
+	Oid			tg_sync_stmt;
 	int			cuda_dindex;
 	int32		gpu_sync_interval;
 	size_t		gpu_sync_threshold;
@@ -237,23 +239,10 @@ __parseSyncTriggerOptions(const char *__config, GpuCacheOptions *gc_options)
 		if (strcmp(key, "gpu_device_id") == 0)
 		{
 			int		i, gpu_device_id;
-			char   *host;
+			char   *end;
 
-			gpu_device_id = strtol(value, &host, 10);
-			if (*host == '@')
-			{
-				char	name[512];
-
-				host++;
-				if (gethostname(name, sizeof(name)) != 0)
-				{
-					elog(WARNING, "gpucache: failed on gethostname: %m");
-					return false;
-				}
-				if (strcmp(host, name) != 0)
-					continue;
-			}
-			else if (*host != '\0')
+			gpu_device_id = strtol(value, &end, 10);
+			if (*end != '\0')
 			{
 				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
 					 key, value);
@@ -365,8 +354,6 @@ out:
 			elog(WARNING, "gpucache: gpu_sync_threshold is too small");
 			return false;
 		}
-
-		memset(gc_options, 0, sizeof(GpuCacheOptions));
 		gc_options->cuda_dindex       = cuda_dindex;
 		gc_options->gpu_sync_interval = gpu_sync_interval;
 		gc_options->gpu_sync_threshold = gpu_sync_threshold;
@@ -384,11 +371,7 @@ typedef struct
 	Oid		reltablespace;
 	Oid		relfilenode;	/* if 0, cannot have gpucache */
 	int16	relnatts;
-
-	Oid		tg_sync_row;	/* if InvalidOid, cannot have gpucache */
-	Oid		tg_sync_stmt;	/* if InvalidOid, cannot have gpucache */
 	GpuCacheOptions gc_options;
-
 	struct {
 		Oid		atttypid;
 		int32	atttypmod;
@@ -410,14 +393,9 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 	GpuCacheTableSignatureBuffer *sig;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			j, natts = RelationGetNumberOfAttributes(rel);
-	size_t		len = offsetof(GpuCacheTableSignatureBuffer, attrs[natts]);
+	size_t		len;
 	Form_pg_class rd_rel = RelationGetForm(rel);
 	TriggerDesc *trigdesc = rel->trigdesc;
-	bool		has_row_trigger = false;
-	bool		has_stmt_trigger = false;
-
-	sig = alloca(len);
-	memset(sig, 0, len);
 
 	/* pg_class related */
 	if (rd_rel->relkind != RELKIND_RELATION &&
@@ -425,6 +403,11 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 		goto no_gpu_cache;
 	if (rd_rel->relfilenode == 0)
 		goto no_gpu_cache;
+
+	/* alloc GpuCacheTableSignatureBuffer */
+	len = offsetof(GpuCacheTableSignatureBuffer, attrs[natts]);
+	sig = alloca(len);
+	memset(sig, 0, len);
 	sig->reltablespace	= rd_rel->reltablespace;
 	sig->relfilenode	= rd_rel->relfilenode;
 	sig->relnatts		= rd_rel->relnatts;
@@ -447,7 +430,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 							 TRIGGER_TYPE_UPDATE) &&
 			trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
-			if (has_row_trigger)
+			if (OidIsValid(sig->gc_options.tg_sync_row))
 				goto no_gpu_cache;		/* should not call trigger twice per row */
 			if ((trig->tgnargs == 0 &&
 				 __parseSyncTriggerOptions(NULL,
@@ -456,8 +439,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 				 __parseSyncTriggerOptions(trig->tgargs[0],
 										   &sig->gc_options)))
 			{
-				sig->tg_sync_row = trig->tgoid;
-				has_row_trigger = true;
+				sig->gc_options.tg_sync_row = trig->tgoid;
 			}
 			else
 			{
@@ -467,13 +449,13 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 		else if (trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
 				 trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
-			if (has_stmt_trigger)
+			if (OidIsValid(sig->gc_options.tg_sync_stmt))
 				goto no_gpu_cache;	/* misconfiguration */
-			sig->tg_sync_stmt = trig->tgoid;
-			has_stmt_trigger = true;
+			sig->gc_options.tg_sync_stmt = trig->tgoid;
 		}
 	}
-	if (!has_row_trigger || !has_stmt_trigger)
+	if (!OidIsValid(sig->gc_options.tg_sync_row) ||
+		!OidIsValid(sig->gc_options.tg_sync_stmt))
 		goto no_gpu_cache;			/* no sync triggers */
 
 	/* pg_attribute related */
@@ -537,8 +519,6 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 	ScanKeyData	skey[2];
 	SysScanDesc	sscan;
 	HeapTuple	tuple;
-	bool		has_row_trigger = false;
-	bool		has_stmt_trigger = false;
 	int			j, len;
 
 	/* pg_class validation */
@@ -549,11 +529,11 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 		return 0UL;
 	if (!pg_class->relhastriggers)
 		return 0UL;
+
 	len = offsetof(GpuCacheTableSignatureBuffer,
 				   attrs[pg_class->relnatts]);
 	sig = alloca(len);
 	memset(sig, 0, len);
-
 	sig->reltablespace  = pg_class->reltablespace;
 	sig->relfilenode    = pg_class->relfilenode;
 	sig->relnatts       = pg_class->relnatts;
@@ -580,7 +560,7 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 								TRIGGER_TYPE_UPDATE) &&
 			pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
-			if (has_row_trigger)
+			if (OidIsValid(sig->gc_options.tg_sync_row))
 				goto no_gpu_cache;
 			if (pg_trig->tgnargs == 0)
 			{
@@ -604,19 +584,18 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 			{
 				goto no_gpu_cache;
 			}
-			sig->tg_sync_row = PgTriggerTupleGetOid(tuple);
-			has_row_trigger = true;
+			sig->gc_options.tg_sync_row = PgTriggerTupleGetOid(tuple);
 		}
 		else if (pg_trig->tgtype == TRIGGER_TYPE_TRUNCATE &&
 				 pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
-			if (has_stmt_trigger)
+			if (OidIsValid(sig->gc_options.tg_sync_stmt))
 				goto no_gpu_cache;
-			sig->tg_sync_stmt = PgTriggerTupleGetOid(tuple);
-			has_stmt_trigger = true;
+			sig->gc_options.tg_sync_stmt = PgTriggerTupleGetOid(tuple);
 		}
 	}
-	if (!has_row_trigger || !has_stmt_trigger)
+	if (!OidIsValid(sig->gc_options.tg_sync_row) ||
+		!OidIsValid(sig->gc_options.tg_sync_stmt))
 		goto no_gpu_cache;
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
@@ -1048,7 +1027,7 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 	GCacheTxLogInsert *item = palloc(item_sz);
 	bool			found = false;
 
-	elog(LOG, "run __execGpuCacheInitLoad on %s", RelationGetRelationName(rel));
+	//elog(LOG, "run __execGpuCacheInitLoad on %s", RelationGetRelationName(rel));
 	Assert(gc_sstate->database_oid == MyDatabaseId);
 	/* lookup GpuCacheDesc for initial-loading */
 	memset(&hkey, 0, sizeof(GpuCacheDesc));
@@ -2248,8 +2227,8 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 												   &options_old);
 	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf,
 												   &options_new);
-	elog(LOG, "__gpuCacheCallbackOnAlterTable: signature %lx -> %lx",
-		 signature_old, signature_new);
+	elog(LOG, "__gpuCacheCallbackOnAlterTable(table_oid=%u): signature %lx -> %lx",
+		 table_oid, signature_old, signature_new);
 
 	if (signature_old != 0UL &&
 		signature_old != signature_new)
@@ -2339,8 +2318,24 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 	while ((tuple = systable_getnext(sscan)) != NULL)
 	{
 		Oid		table_oid = ((Form_pg_trigger) GETSTRUCT(tuple))->tgrelid;
+		Datum	signature;
+		GpuCacheOptions gc_options;
+		GpuCacheDesc *gc_desc;
 
-		__gpuCacheCallbackOnAlterTable(table_oid);
+		signature = gpuCacheTableSignatureSnapshot(table_oid, NULL,
+												   &gc_options);
+		if (signature == 0UL)
+			continue;
+
+		gc_desc = lookupGpuCacheDescNoLoad(MyDatabaseId,
+										   table_oid,
+										   signature,
+										   &gc_options);
+		if (gc_desc && (gc_options.tg_sync_row == trigger_oid ||
+						gc_options.tg_sync_stmt == trigger_oid))
+		{
+			gc_desc->drop_on_commit = true;
+		}
 	}
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
@@ -2375,12 +2370,12 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
 			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
+			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
 			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
