@@ -915,7 +915,7 @@ __buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 	if (field->_num_children > 0)
 	{
 		bstats->nfields = field->_num_children;
-		bstats->subfields = palloc0(sizeof(arrowStatsBinary) * bstats->nfields);
+		bstats->subfields = palloc0(sizeof(arrowFieldStatsBinary) * bstats->nfields);
 		for (j=0; j < bstats->nfields; j++)
 		{
 			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
