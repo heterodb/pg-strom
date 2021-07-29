@@ -76,6 +76,7 @@ typedef struct
 
 	/* Device resources */
 	pthread_rwlock_t gpu_buffer_lock;
+	pg_atomic_uint32 gpu_buffer_corrupted;
 	CUipcMemHandle	gpu_main_mhandle;
 	CUipcMemHandle	gpu_extra_mhandle;
 	ssize_t			gpu_main_size;
@@ -135,7 +136,7 @@ static CUfunction	gcache_kfunc_apply_redo = NULL;
 static CUfunction	gcache_kfunc_compaction = NULL;
 
 /* --- function declarations --- */
-static void		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
+static bool		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 									GCacheTxLogCommon *tx_log);
 
 static CUresult gpuCacheInvokeApplyRedo(GpuCacheSharedState *gc_sstate,
@@ -149,6 +150,7 @@ void	gpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 
 /*
@@ -1046,6 +1048,16 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 		memset(&gc_desc->buf, 0, sizeof(StringInfoData));
 	}
 
+	/* rewind the position of REDO log buffer */
+	SpinLockAcquire(&gc_sstate->redo_lock);
+	gc_sstate->redo_write_timestamp = 0;
+	gc_sstate->redo_write_nitems    = 0;
+	gc_sstate->redo_write_pos       = 0;
+	gc_sstate->redo_read_nitems     = 0;
+	gc_sstate->redo_read_pos        = 0;
+	gc_sstate->redo_sync_pos        = 0;
+	SpinLockRelease(&gc_sstate->redo_lock);
+
 	scandesc = table_beginscan(rel, SnapshotAny, 0, NULL);
 	while ((tuple = heap_getnext(scandesc, ForwardScanDirection)) != NULL)
 	{
@@ -1072,7 +1084,8 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 		HeapTupleHeaderSetXmin(&item->htup, gcache_xmin);
 		HeapTupleHeaderSetXmax(&item->htup, gcache_xmax);
 		HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
-		__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item);
+		if (!__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item))
+			break;
 
 		if (TransactionIdIsNormal(gcache_xmin))
 			__gpuCacheInitLoadTrackCtid(gc_desc, gcache_xmin, 'I', &tuple->t_self);
@@ -1124,6 +1137,7 @@ __createGpuCacheSharedState(Relation rel,
 	gc_sstate->gpu_sync_interval  = gc_options->gpu_sync_interval;
 
 	pthreadRWLockInit(&gc_sstate->gpu_buffer_lock);
+	pg_atomic_init_u32(&gc_sstate->gpu_buffer_corrupted, 0);
 	SpinLockInit(&gc_sstate->redo_lock);
 	gc_sstate->redo_buffer = (char *)gc_sstate + MAXALIGN(sz);
 
@@ -1205,7 +1219,8 @@ __createGpuCacheSharedState(Relation rel,
 static GpuCacheSharedState *
 __lookupGpuCacheSharedState(GpuCacheDesc *hkey,
 							Relation rel,	/* NULL, if no initial-loading */
-							GpuCacheOptions *gc_options)
+							GpuCacheOptions *gc_options,
+							bool try_recovery)
 {
 	GpuCacheSharedState *gc_sstate = NULL;
 	Datum			hvalue;
@@ -1253,13 +1268,26 @@ retry:
 			if (rel && gc_sstate->initial_loading < 0)
 			{
 				/*
-				 * negative initial_loading means someone has never
-				 * tried initial-loading, or failed once.
+				 * negative 'initial_loading' means someone has never
+				 * tried initial-loading, or it was once failed.
+				 *
+				 * then, we move to the initial-loading phase as long
+				 * as GPU buffer is sanity (not corrupted by the GPU
+				 * kernel), or 'try_recovery' is set even if GPU buffer
+				 * is corrupted.
 				 */
-				gc_sstate->refcnt += 2;
-				goto found_uninitialized;
+				if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted) == 0 ||
+					try_recovery)
+				{
+					gc_sstate->refcnt += 2;
+					goto found_uninitialized;
+				}
 			}
-			/* ok, all green */
+			/*
+			 * ok, all green.
+			 *
+			 * or, GPU buffer is already corrupted by applying REDO logs. :(
+			 */
 			gc_sstate->refcnt += 2;
 			SpinLockRelease(lock);
 
@@ -1294,6 +1322,11 @@ retry:
 found_uninitialized:
 	gc_sstate->initial_loading = 1;
 	SpinLockRelease(lock);
+
+	/* reset the corruption state */
+	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
+	pg_atomic_write_u32(&gc_sstate->gpu_buffer_corrupted, 0);
+	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 
 	/*
 	 * Note that BgWorker may grab the GpuCacheSharedState that is
@@ -1344,7 +1377,7 @@ __lookupGpuCacheDescCommon(GpuCacheDesc *hkey,
 						  hkey, HASH_FIND, NULL);
 	if (!gc_desc)
 	{
-		gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options);
+		gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options, false);
 		PG_TRY();
 		{
 			gc_desc = hash_search(gcache_descriptors_htab,
@@ -1447,7 +1480,8 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool is_normal_commit)
 				memcpy(&x_log.ctid, &pitem->ctid,
 					   sizeof(ItemPointerData));
 
-				__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&x_log);
+				if (!__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&x_log))
+					break;
 				pos += sizeof(PendingCtidItem);
 			}
 			elog(DEBUG2, "AddXactLog: %s:%lx xid=%u nitems=%u",
@@ -1466,7 +1500,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool is_normal_commit)
 /*
  * __gpuCacheAppendLog
  */
-static void
+static bool
 __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 {
 	GpuCacheSharedState *gc_sstate = gc_desc->gc_sstate;
@@ -1479,6 +1513,13 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 	Assert(tx_log->length == MAXALIGN(tx_log->length));
 	for (;;)
 	{
+		/*
+		 * Once GPU buffer is marked to 'corrupted', any following REDO-logs
+		 * make no sense, until pgstrom.gpucache_recovery() is called.
+		 */
+		if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
+			return false;
+
 		SpinLockAcquire(&gc_sstate->redo_lock);
 		Assert(gc_sstate->redo_write_pos >= gc_sstate->redo_read_pos &&
 			   gc_sstate->redo_write_pos <= gc_sstate->redo_read_pos + buffer_sz &&
@@ -1526,6 +1567,7 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 			break;
 		pg_usleep(1000L);	/* 1ms wait */
 	}
+	return true;
 }
 
 /*
@@ -1711,6 +1753,39 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	table_close(rel, AccessShareLock);
 
 	PG_RETURN_INT32(rc);
+}
+
+/*
+ * pgstrom_gpucache_recovery
+ */
+Datum
+pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	Relation	rel;
+	Datum		signature;
+	GpuCacheDesc hkey;
+	GpuCacheOptions gc_options;
+	GpuCacheSharedState *gc_sstate;
+	int			retval = 0;
+
+	rel = table_open(table_oid, ShareRowExclusiveLock);
+	signature = gpuCacheTableSignature(rel, &gc_options);
+	if (signature != 0UL)
+	{
+		memset(&hkey, 0, sizeof(GpuCacheDesc));
+		hkey.database_oid = MyDatabaseId;
+		hkey.table_oid    = RelationGetRelid(rel);
+		hkey.signature    = signature;
+		gc_sstate = __lookupGpuCacheSharedState(&hkey, rel, &gc_options, true);
+		if (!gc_sstate)
+			retval = -1;
+		else
+			putGpuCacheSharedState(gc_sstate, false);
+	}
+	table_close(rel, ShareRowExclusiveLock);
+
+	PG_RETURN_INT32(retval);
 }
 
 /*
@@ -1937,11 +2012,11 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 	hkey.database_oid = MyDatabaseId;
 	hkey.table_oid    = RelationGetRelid(relation);
 	hkey.signature    = signature;
-	gc_sstate = __lookupGpuCacheSharedState(&hkey, relation, &gc_options);
-	if (!gc_sstate)
+	gc_sstate = __lookupGpuCacheSharedState(&hkey, relation, &gc_options, false);
+	if (!gc_sstate || pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
 	{
-		elog(DEBUG2, "gpucache: table '%s' looks configured, but unable to lookup GpuCacheSharedState.",
-			RelationGetRelationName(relation));
+		if (gc_sstate)
+			putGpuCacheSharedState(gc_sstate, false);
 		return NULL;
 	}
 	/* Setup GpuCacheState */
@@ -1995,8 +2070,20 @@ ExecScanChunkGpuCache(GpuTaskState *gts)
 	if (pg_atomic_fetch_add_u32(gcache_state->gc_fetch_count, 1) == 0)
 	{
 		GpuCacheSharedState *gc_sstate = gcache_state->gc_sstate;
-		uint64			write_pos;
-		uint64			sync_pos = ULONG_MAX;
+		uint64		write_pos;
+		uint64		sync_pos = ULONG_MAX;
+
+		/*
+		 * XXX MEMO:
+		 * We may put special case handling code if gpu_buffer_corrupted != 0,
+		 * because it eventually fails to map PDS on execution phase.
+		 * However, it is not a perfect solution because any of concurrent
+		 * session kicks apply-redo-log asynchronously, then it may set
+		 * gpu_buffer_corrupted.
+		 * So, we have no way to recover the above case, and we consider
+		 * it does not make sense to add recovery code here (right now).
+		 * XXX
+		 */
 
 		SpinLockAcquire(&gc_sstate->redo_lock);
 		write_pos = gc_sstate->redo_write_pos;
@@ -2968,7 +3055,10 @@ gpuCacheBgWorkerExecCompaction(GpuCacheSharedState *gc_sstate)
 		return rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
-	rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
+	if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
+		rc = CUDA_ERROR_NOT_READY;
+	else
+		rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
 	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 
 	return rc;
@@ -3110,10 +3200,53 @@ retry:
 	if (h_redo->kerror.errcode == ERRCODE_OUT_OF_MEMORY)
 	{
 		rc = gpuCacheBgWorkerExecCompactionNoLock(gc_sstate);
-		if (rc == CUDA_SUCCESS)
+		if (rc != CUDA_SUCCESS)
 		{
-			memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
-			goto retry;
+			elog(ERROR, "failed on gpuCacheBgWorkerExecCompactionNoLock: %s",
+				 errorText(rc));
+		}
+		memset(&h_redo->kerror, 0, sizeof(kern_errorbuf));
+		goto retry;
+	}
+
+	/*
+	 * On error of the kern_gpucache_apply_redo(), we cannot determine
+	 * whether the GPU cache is still consistent state, or not.
+	 * (Likely, REDO Log tried to use more rows than the max_num_rows)
+	 * So, we once block the GPU cache until pgstrom.gpucache_apply_redo()
+	 * by manual.
+	 */
+	if (h_redo->kerror.errcode != 0)
+	{
+		/*
+		 * Once gpu_buffer_corruption is set, no logs shall be written.
+		 * It shall be reset by the manual operation (pgstrom.gpucache_apply_redo)
+		 * that takes ShareRowExclusiveLock, so re-initialization process will
+		 * have no concurrent writer.
+		 */
+		pg_atomic_write_u32(&gc_sstate->gpu_buffer_corrupted, 1);
+		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
+		gc_sstate->initial_loading = -1;
+		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
+
+		if (gc_sstate->gpu_main_devptr != 0UL)
+		{
+			rc = cuMemFree(gc_sstate->gpu_main_devptr);
+			if (rc != CUDA_SUCCESS)
+				elog(LOG, "gpucache: failed on cuMemFree: %s", errorText(rc));
+			gc_sstate->gpu_main_devptr = 0;
+			gc_sstate->gpu_main_size = 0;
+			memset(&gc_sstate->gpu_main_mhandle, 0, sizeof(CUipcMemHandle));
+		}
+
+		if (gc_sstate->gpu_extra_devptr != 0UL)
+		{
+			rc = cuMemFree(gc_sstate->gpu_extra_devptr);
+			if (rc != CUDA_SUCCESS)
+				elog(LOG, "gpucache: failed on cuMemFree: %s", errorText(rc));
+			gc_sstate->gpu_extra_devptr = 0;
+			gc_sstate->gpu_extra_size = 0;
+			memset(&gc_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
 		}
 	}
 	return CUDA_SUCCESS;
@@ -3130,7 +3263,12 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheSharedState *gc_sstate, uint64 end_pos)
 		return rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
-	
+	if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
+	{
+		rc = CUDA_ERROR_NOT_READY;
+		goto out_unlock;
+	}
+
 	rc = gpuCacheAllocDeviceMemory(gc_sstate);
 	if (rc != CUDA_SUCCESS)
 		goto out_unlock;
