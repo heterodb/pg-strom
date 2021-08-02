@@ -1041,11 +1041,31 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
+		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+		SpinLockAcquire(lock);
+		gc_sstate->refcnt += 2;
+		SpinLockRelease(lock);
+
 		gc_desc->gc_sstate = gc_sstate;
 		gc_desc->drop_on_rollback = false;
 		gc_desc->drop_on_commit = false;
 		gc_desc->nitems = 0;
 		memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+	}
+	else if (!gc_desc->gc_sstate)
+	{
+		/*
+		 * If this initial-loading is kicked by __lookupGpuCacheDescCommon()
+		 * when GpuCacheDesc is built on the first time, gc_desc itself is
+		 * already allocated but not initialized with gc_sstate, so we setup
+		 * GpuCacheDesc here.
+		 */
+		gc_desc->gc_sstate = gc_sstate;
+	}
+	else
+	{
+		Assert(gc_desc->gc_sstate == gc_sstate);
 	}
 
 	/* rewind the position of REDO log buffer */
@@ -1369,35 +1389,20 @@ __lookupGpuCacheDescCommon(GpuCacheDesc *hkey,
 						   Relation rel,
 						   GpuCacheOptions *gc_options)
 {
-	GpuCacheSharedState *gc_sstate;
 	GpuCacheDesc   *gc_desc;
 	bool			found;
 
 	gc_desc = hash_search(gcache_descriptors_htab,
-						  hkey, HASH_FIND, NULL);
-	if (!gc_desc)
+						  hkey, HASH_ENTER, &found);
+	if (!found)
 	{
-		gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options, false);
-		PG_TRY();
-		{
-			gc_desc = hash_search(gcache_descriptors_htab,
-								  hkey, HASH_ENTER, &found);
-			if (!found)
-			{
-				gc_desc->gc_sstate = gc_sstate;
-				gc_desc->drop_on_rollback = false;
-				gc_desc->drop_on_commit = false;
-				gc_desc->nitems = 0;
-				memset(&gc_desc->buf, 0, sizeof(StringInfoData));
-			}
-		}
-		PG_CATCH();
-		{
-			if (gc_sstate)
-				putGpuCacheSharedState(gc_sstate, false);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		gc_desc->gc_sstate = NULL;
+		gc_desc->drop_on_rollback = false;
+		gc_desc->drop_on_commit = false;
+		gc_desc->nitems = 0;
+		memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+
+		gc_desc->gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options, false);
 	}
 	return (gc_desc->gc_sstate ? gc_desc : NULL);
 }
