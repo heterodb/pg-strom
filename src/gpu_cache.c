@@ -3234,6 +3234,13 @@ retry:
 		gc_sstate->initial_loading = -1;
 		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
 
+		ereport(WARNING,
+				(errmsg("gpucache: table [%s:%lx] of database=%u - unable to apply REDO logs to GPU cache, so marked as corrupted.",
+						gc_sstate->table_name,
+						gc_sstate->signature,
+						gc_sstate->database_oid),
+				 errhint("try pgstrom.gpucache_recovery(regclass) after the fixup of table contents or configuration")));
+
 		if (gc_sstate->gpu_main_devptr != 0UL)
 		{
 			rc = cuMemFree(gc_sstate->gpu_main_devptr);
