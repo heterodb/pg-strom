@@ -312,43 +312,39 @@ __init_kernel_column_metadata(kern_data_store *kds,
 							  int column_index,
 							  const char *attname,
 							  int attnum,
+							  bool attbyval,
+							  char attalign,
+							  int16 attlen,
 							  Oid atttypid,
 							  int atttypmod,
 							  int *p_attcacheoff)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
 	HeapTuple		tup;
-	Form_pg_type	typ;
 
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type %u", atttypid);
-	typ = (Form_pg_type) GETSTRUCT(tup);
-
-	cmeta->attbyval = typ->typbyval;
-	cmeta->attalign = typealign_get_width(typ->typalign);
-	cmeta->attlen   = typ->typlen;
+	cmeta->attbyval = attbyval;
+	cmeta->attalign = typealign_get_width(attalign);
+	cmeta->attlen   = attlen;
 	if (cmeta->attlen == 0 || cmeta->attlen < -1)
-		elog(ERROR, "type %s has unexpected length (%d)",
-			 NameStr(typ->typname), typ->typlen);
+		elog(ERROR, "attribute %s has unexpected length (%d)", attname, attlen);
 	else if (cmeta->attlen == -1)
 		kds->has_varlena = true;
 	cmeta->attnum   = attnum;
 
 	if (!p_attcacheoff || *p_attcacheoff < 0)
 		cmeta->attcacheoff = -1;
-	else if (typ->typlen > 0)
+	else if (attlen > 0)
 	{
-		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, typ->typalign);
-		*p_attcacheoff = cmeta->attcacheoff + typ->typlen;
+		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, attalign);
+		*p_attcacheoff = cmeta->attcacheoff + attlen;
 	}
-	else if (typ->typlen == -1)
+	else if (attlen == -1)
 	{
 		/* Note that attcacheoff is also available on varlena datum
 		 * only if it appeared at the first, and its offset is aligned.
 		 * Elsewhere, we cannot utilize the attcacheoff for varlena
 		 */
-		uint32		__off = att_align_nominal(*p_attcacheoff, typ->typalign);
+		uint32		__off = att_align_nominal(*p_attcacheoff, attalign);
 
 		if (*p_attcacheoff == __off)
 			cmeta->attcacheoff = __off;
@@ -364,84 +360,102 @@ __init_kernel_column_metadata(kern_data_store *kds,
 	cmeta->atttypmod = atttypmod;
 	strncpy(cmeta->attname.data, attname, NAMEDATALEN);
 
-	if (OidIsValid(typ->typelem) && typ->typlen == -1)
+	/* array? or composite type? */
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(atttypid));
+	if (HeapTupleIsValid(tup))
 	{
-		char		elem_name[NAMEDATALEN + 10];
+		Form_pg_type	typ = (Form_pg_type) GETSTRUCT(tup);
 
-		cmeta->atttypkind = TYPE_KIND__ARRAY;
-		cmeta->idx_subattrs = kds->nr_colmeta++;
-		cmeta->num_subattrs = 1;
-
-		snprintf(elem_name, sizeof(elem_name), "__%s", attname);
-		__init_kernel_column_metadata(kds,
-									  cmeta->idx_subattrs,
-									  elem_name,
-									  1,		/* attnum */
-									  typ->typelem,
-									  -1,		/* typmod */
-									  NULL);	/* attcacheoff */
-	}
-	else if (OidIsValid(typ->typrelid))
-	{
-		TupleDesc	rowdesc;
-		int			j, attcacheoff = -1;
-
-		Assert(typ->typtype == TYPTYPE_COMPOSITE);
-		cmeta->atttypkind = TYPE_KIND__COMPOSITE;
-
-		rowdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
-		cmeta->idx_subattrs = kds->nr_colmeta;
-		cmeta->num_subattrs = rowdesc->natts;
-		kds->nr_colmeta += rowdesc->natts;
-
-		if (kds->format == KDS_FORMAT_ROW ||
-			kds->format == KDS_FORMAT_HASH ||
-			kds->format == KDS_FORMAT_BLOCK)
+		if (OidIsValid(typ->typelem) && typ->typlen == -1)
 		{
-			attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
-			if (tupleDescHasOid(rowdesc))
-				attcacheoff += sizeof(Oid);
-			attcacheoff = MAXALIGN(attcacheoff);
-		}
-		
-		for (j=0; j < rowdesc->natts; j++)
-		{
-			Form_pg_attribute	attr = tupleDescAttr(rowdesc, j);
+			char		elem_name[NAMEDATALEN + 10];
+
+			cmeta->atttypkind = TYPE_KIND__ARRAY;
+			cmeta->idx_subattrs = kds->nr_colmeta++;
+			cmeta->num_subattrs = 1;
+
+			snprintf(elem_name, sizeof(elem_name), "__%s", attname);
 			__init_kernel_column_metadata(kds,
-										  cmeta->idx_subattrs + j,
-										  NameStr(attr->attname),
-										  attr->attnum,
-										  attr->atttypid,
-										  attr->atttypmod,
-										  &attcacheoff);
+										  cmeta->idx_subattrs,
+										  elem_name,
+										  1,				/* attnum */
+										  typ->typbyval,	/* attbyval */
+										  typ->typalign,	/* attalign */
+										  typ->typlen,		/* attlen */
+										  typ->typelem,		/* atttypid */
+										  -1,				/* atttypmod */
+										  NULL);			/* attcacheoff */
 		}
-		ReleaseTupleDesc(rowdesc);
+		else if (OidIsValid(typ->typrelid))
+		{
+			TupleDesc	rowdesc;
+			int			j, attcacheoff = -1;
+
+			Assert(typ->typtype == TYPTYPE_COMPOSITE);
+			cmeta->atttypkind = TYPE_KIND__COMPOSITE;
+
+			rowdesc = lookup_rowtype_tupdesc(atttypid, atttypmod);
+			cmeta->idx_subattrs = kds->nr_colmeta;
+			cmeta->num_subattrs = rowdesc->natts;
+			kds->nr_colmeta += rowdesc->natts;
+
+			if (kds->format == KDS_FORMAT_ROW ||
+				kds->format == KDS_FORMAT_HASH ||
+				kds->format == KDS_FORMAT_BLOCK)
+			{
+				attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
+				if (tupleDescHasOid(rowdesc))
+					attcacheoff += sizeof(Oid);
+				attcacheoff = MAXALIGN(attcacheoff);
+			}
+
+			for (j=0; j < rowdesc->natts; j++)
+			{
+				Form_pg_attribute	attr = tupleDescAttr(rowdesc, j);
+				__init_kernel_column_metadata(kds,
+											  cmeta->idx_subattrs + j,
+											  NameStr(attr->attname),
+											  attr->attnum,
+											  attr->attbyval,
+											  attr->attalign,
+											  attr->attlen,
+											  attr->atttypid,
+											  attr->atttypmod,
+											  &attcacheoff);
+			}
+			ReleaseTupleDesc(rowdesc);
+		}
+		else
+		{
+			switch (typ->typtype)
+			{
+				case TYPTYPE_BASE:
+					cmeta->atttypkind = TYPE_KIND__BASE;
+					break;
+				case TYPTYPE_DOMAIN:
+					cmeta->atttypkind = TYPE_KIND__DOMAIN;
+					break;
+				case TYPTYPE_ENUM:
+					cmeta->atttypkind = TYPE_KIND__ENUM;
+					break;
+				case TYPTYPE_PSEUDO:
+					cmeta->atttypkind = TYPE_KIND__PSEUDO;
+					break;
+				case TYPTYPE_RANGE:
+					cmeta->atttypkind = TYPE_KIND__RANGE;
+					break;
+				default:
+					elog(ERROR, "Unexpected typtype ('%c')", typ->typtype);
+					break;
+			}
+		}
+		ReleaseSysCache(tup);
 	}
 	else
 	{
-		switch (typ->typtype)
-		{
-			case TYPTYPE_BASE:
-				cmeta->atttypkind = TYPE_KIND__BASE;
-				break;
-			case TYPTYPE_DOMAIN:
-				cmeta->atttypkind = TYPE_KIND__DOMAIN;
-				break;
-			case TYPTYPE_ENUM:
-				cmeta->atttypkind = TYPE_KIND__ENUM;
-				break;
-			case TYPTYPE_PSEUDO:
-				cmeta->atttypkind = TYPE_KIND__PSEUDO;
-				break;
-			case TYPTYPE_RANGE:
-				cmeta->atttypkind = TYPE_KIND__RANGE;
-				break;
-			default:
-				elog(ERROR, "Unexpected typtype ('%c')", typ->typtype);
-				break;
-		}
+		/* likely, dropped attribute */
+		cmeta->atttypkind = TYPE_KIND__NULL;
 	}
-	ReleaseSysCache(tup);
 }
 
 void
@@ -458,6 +472,8 @@ init_kernel_data_store(kern_data_store *kds,
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
+		if (attr->attisdropped)
+			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
 	if (format == KDS_FORMAT_COLUMN)
@@ -493,9 +509,13 @@ init_kernel_data_store(kern_data_store *kds,
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+
 		__init_kernel_column_metadata(kds, j,
 									  NameStr(attr->attname),
 									  attr->attnum,
+									  attr->attbyval,
+									  attr->attalign,
+									  attr->attlen,
 									  attr->atttypid,
 									  attr->atttypmod,
 									  &attcacheoff);
@@ -530,6 +550,9 @@ KDS_calculateHeadSize(TupleDesc tupdesc)
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+
+		if (attr->attisdropped)
+			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
 	return STROMALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));

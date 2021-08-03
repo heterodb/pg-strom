@@ -30,6 +30,8 @@ CREATE TYPE pgstrom.__pgstrom_gpucache_info_t AS (
   table_oid				oid,
   table_name            text,
   signature				int8,
+  refcnt				int4,
+  corrupted				bool,
   gpu_main_sz			int8,
   gpu_extra_sz			int8,
   redo_write_ts			timestamptz,

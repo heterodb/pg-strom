@@ -1041,11 +1041,31 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 						  &hkey, HASH_ENTER, &found);
 	if (!found)
 	{
+		slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
+
+		SpinLockAcquire(lock);
+		gc_sstate->refcnt += 2;
+		SpinLockRelease(lock);
+
 		gc_desc->gc_sstate = gc_sstate;
 		gc_desc->drop_on_rollback = false;
 		gc_desc->drop_on_commit = false;
 		gc_desc->nitems = 0;
 		memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+	}
+	else if (!gc_desc->gc_sstate)
+	{
+		/*
+		 * If this initial-loading is kicked by __lookupGpuCacheDescCommon()
+		 * when GpuCacheDesc is built on the first time, gc_desc itself is
+		 * already allocated but not initialized with gc_sstate, so we setup
+		 * GpuCacheDesc here.
+		 */
+		gc_desc->gc_sstate = gc_sstate;
+	}
+	else
+	{
+		Assert(gc_desc->gc_sstate == gc_sstate);
 	}
 
 	/* rewind the position of REDO log buffer */
@@ -1369,35 +1389,20 @@ __lookupGpuCacheDescCommon(GpuCacheDesc *hkey,
 						   Relation rel,
 						   GpuCacheOptions *gc_options)
 {
-	GpuCacheSharedState *gc_sstate;
 	GpuCacheDesc   *gc_desc;
 	bool			found;
 
 	gc_desc = hash_search(gcache_descriptors_htab,
-						  hkey, HASH_FIND, NULL);
-	if (!gc_desc)
+						  hkey, HASH_ENTER, &found);
+	if (!found)
 	{
-		gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options, false);
-		PG_TRY();
-		{
-			gc_desc = hash_search(gcache_descriptors_htab,
-								  hkey, HASH_ENTER, &found);
-			if (!found)
-			{
-				gc_desc->gc_sstate = gc_sstate;
-				gc_desc->drop_on_rollback = false;
-				gc_desc->drop_on_commit = false;
-				gc_desc->nitems = 0;
-				memset(&gc_desc->buf, 0, sizeof(StringInfoData));
-			}
-		}
-		PG_CATCH();
-		{
-			if (gc_sstate)
-				putGpuCacheSharedState(gc_sstate, false);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
+		gc_desc->gc_sstate = NULL;
+		gc_desc->drop_on_rollback = false;
+		gc_desc->drop_on_commit = false;
+		gc_desc->nitems = 0;
+		memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+
+		gc_desc->gc_sstate = __lookupGpuCacheSharedState(hkey, rel, gc_options, false);
 	}
 	return (gc_desc->gc_sstate ? gc_desc : NULL);
 }
@@ -1835,8 +1840,8 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	FuncCallContext *fncxt;
 	GpuCacheSharedState *gc_sstate;
 	List	   *info_list;
-	Datum		values[14];
-	bool		isnull[14];
+	Datum		values[16];
+	bool		isnull[16];
 	HeapTuple	tuple;
 	char	   *database_name;
 	char	   *options;
@@ -1848,7 +1853,7 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
-		tupdesc = CreateTemplateTupleDesc(14);
+		tupdesc = CreateTemplateTupleDesc(16);
 		TupleDescInitEntry(tupdesc,  1, "database_oid",
 						   OIDOID, -1, 0);
 		TupleDescInitEntry(tupdesc,  2, "database_name",
@@ -1859,23 +1864,27 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc,  5, "signature",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc,  6, "gpu_main_sz",
+		TupleDescInitEntry(tupdesc,  6, "refcnt",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc,  7, "corrupted",
+						   BOOLOID, -1, 0);
+		TupleDescInitEntry(tupdesc,  8, "gpu_main_sz",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc,  7, "gpu_extra_sz",
+		TupleDescInitEntry(tupdesc,  9, "gpu_extra_sz",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc,  8, "redo_write_ts",
+		TupleDescInitEntry(tupdesc, 10, "redo_write_ts",
 						   TIMESTAMPTZOID, -1, 0);
-		TupleDescInitEntry(tupdesc,  9, "redo_write_nitems",
+		TupleDescInitEntry(tupdesc, 11, "redo_write_nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 10, "redo_write_pos",
+		TupleDescInitEntry(tupdesc, 12, "redo_write_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 11, "redo_read_nitems",
+		TupleDescInitEntry(tupdesc, 13, "redo_read_nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 12, "redo_read_pos",
+		TupleDescInitEntry(tupdesc, 14, "redo_read_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 13, "redo_sync_pos",
+		TupleDescInitEntry(tupdesc, 15, "redo_sync_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 14, "config_options",
+		TupleDescInitEntry(tupdesc, 16, "config_options",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 		fncxt->user_fctx = __pgstrom_gpucache_info();
@@ -1896,15 +1905,17 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	values[1] = CStringGetTextDatum(database_name);
 	values[2] = ObjectIdGetDatum(gc_sstate->table_oid);
 	values[3] = CStringGetTextDatum(gc_sstate->table_name);
-	values[4] = Int8GetDatum(gc_sstate->signature);
-	values[5] = Int8GetDatum(gc_sstate->gpu_main_size);
-	values[6] = Int8GetDatum(gc_sstate->gpu_extra_size);
-	values[7] = TimestampGetDatum(gc_sstate->redo_write_timestamp);
-	values[8] = Int8GetDatum(gc_sstate->redo_write_nitems);
-	values[9] = Int8GetDatum(gc_sstate->redo_write_pos);
-	values[10] = Int8GetDatum(gc_sstate->redo_read_nitems);
-	values[11] = Int8GetDatum(gc_sstate->redo_read_pos);
-	values[12] = Int8GetDatum(gc_sstate->redo_sync_pos);
+	values[4] = Int64GetDatum(gc_sstate->signature);
+	values[5] = Int32GetDatum(gc_sstate->refcnt);
+	values[6] = BoolGetDatum(pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted) != 0);
+	values[7] = Int64GetDatum(gc_sstate->gpu_main_size);
+	values[8] = Int64GetDatum(gc_sstate->gpu_extra_size);
+	values[9] = TimestampGetDatum(gc_sstate->redo_write_timestamp);
+	values[10] = Int64GetDatum(gc_sstate->redo_write_nitems);
+	values[11] = Int64GetDatum(gc_sstate->redo_write_pos);
+	values[12] = Int64GetDatum(gc_sstate->redo_read_nitems);
+	values[13] = Int64GetDatum(gc_sstate->redo_read_pos);
+	values[14] = Int64GetDatum(gc_sstate->redo_sync_pos);
 
 	if (gc_sstate->cuda_dindex >= 0 &&
 		gc_sstate->cuda_dindex < numDevAttrs)
@@ -1919,11 +1930,11 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 						   gc_sstate->redo_buffer_size,
 						   gc_sstate->gpu_sync_interval,
 						   gc_sstate->gpu_sync_threshold);
-		values[13] = CStringGetTextDatum(options);
+		values[15] = CStringGetTextDatum(options);
 	}
 	else
 	{
-		isnull[13] = true;
+		isnull[15] = true;
 	}
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
@@ -3228,6 +3239,13 @@ retry:
 		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
 		gc_sstate->initial_loading = -1;
 		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
+
+		ereport(WARNING,
+				(errmsg("gpucache: table [%s:%lx] of database=%u - unable to apply REDO logs to GPU cache, so marked as corrupted.",
+						gc_sstate->table_name,
+						gc_sstate->signature,
+						gc_sstate->database_oid),
+				 errhint("try pgstrom.gpucache_recovery(regclass) after the fixup of table contents or configuration")));
 
 		if (gc_sstate->gpu_main_devptr != 0UL)
 		{
