@@ -142,6 +142,8 @@ ERROR:  target lists can have at most 1664 entries
 |`table_oid`        |`oid`        |@ja{GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。} @en{Table OID that has GPU Cache. Note that it may not be in the current database.} |
 |`table_name`       |`text`       |@ja{GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。} @en{Table name that has GPU Cache. Note that it may not be in the current database.} |
 |`signature`        |`int8`       |@ja{GPUキャッシュの一意性を示すハッシュ値です。例えば`ALTER TABLE`の前後などでこの値が変わる場合があります。} @en{An identifier hash value of GPU Cache. It may be changed after `ALTER TABLE` for example.} |
+|`refcnt`           |`int4`       |@ja{GPUキャッシュの参照カウンタです。必ずしも最新の状態を反映しているとは限りません。} @en{Reference counter of the GPU cache. It does not always reflect the latest status.}
+|`corrupted`        |`bool`       |@ja{GPUキャッシュが破損（corrupted）状態のときに`true`となります。} @en{It shows whether GPU cache is corrupted, or not.}
 |`gpu_main_sz`      |`int8`       |@ja{GPUキャッシュ上に確保された固定長データ用の領域のサイズです。} @en{Size of the fixed-length values area on the GPU Cache.} |
 |`gpu_extra_sz`     |`int8`       |@ja{GPUキャッシュ上に確保された可変長データ用の領域のサイズです。} @en{Size of the variable-length values area on the GPU Cache} |
 |`redo_write_ts`    |`timestamptz`|@ja{REDOログバッファを最後に更新した時刻です。} @en{Last update timestamp on the REDO Log buffer} |
@@ -180,6 +182,11 @@ Below is an example of `pgstrom.gpucache_info` system view.
 `bigint pgstrom.gpucache_compaction(regclass)`
 : @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、可変長データバッファを強制的にコンパクト化します。}
 : @en{If the given table has GPU Cache configured, it forcibly run compaction of the variable-length data buffer.}
+
+`bigint pgstrom.gpucache_recovery(regclass)`
+: @ja{破損（corrupted）状態となったGPUキャッシュを復元しようと試みます。}
+: @en{It tries to recover the corrupted GPU cache.}
+
 
 @ja:##テストデータ生成
 @en:##Test Data Generator

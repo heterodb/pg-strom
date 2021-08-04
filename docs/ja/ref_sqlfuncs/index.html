@@ -303,6 +303,16 @@ ERROR:  target lists can have at most 1664 entries
 <td align="left">GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
 </tr>
 <tr>
+<td align="left"><code>refcnt</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left">GPUキャッシュの参照カウンタです。必ずしも最新の状態を反映しているとは限りません。</td>
+</tr>
+<tr>
+<td align="left"><code>corrupted</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">GPUキャッシュが破損（corrupted）状態のときに<code>true</code>となります。</td>
+</tr>
+<tr>
 <td align="left"><code>gpu_main_sz</code></td>
 <td align="left"><code>int8</code></td>
 <td align="left">GPUキャッシュ上に確保された固定長データ用の領域のサイズです。</td>
@@ -367,6 +377,9 @@ ERROR:  target lists can have at most 1664 entries
 <dd></dd>
 <dt><code>bigint pgstrom.gpucache_compaction(regclass)</code></dt>
 <dd>引数で指定されたテーブルにGPUキャッシュが設定されている場合、可変長データバッファを強制的にコンパクト化します。</dd>
+<dd></dd>
+<dt><code>bigint pgstrom.gpucache_recovery(regclass)</code></dt>
+<dd>破損（corrupted）状態となったGPUキャッシュを復元しようと試みます。</dd>
 <dd></dd>
 </dl>
 <h2 id="_2">テストデータ生成</h2>
