@@ -793,11 +793,8 @@ lookupGpuCacheSharedState(Oid database_oid,
  * putGpuCacheSharedState
  */
 static void
-putGpuCacheSharedState(GpuCacheSharedState *gc_sstate, bool drop_shared_state)
+putGpuCacheSharedStateNoLock(GpuCacheSharedState *gc_sstate, bool drop_shared_state)
 {
-	slock_t	   *lock = &gcache_shared_head->gcache_sstate_lock;
-
-	SpinLockAcquire(lock);
 	if (drop_shared_state)
 		gc_sstate->refcnt &= 0xfffffffeU;
 	Assert(gc_sstate->refcnt >= 2);
@@ -817,7 +814,14 @@ putGpuCacheSharedState(GpuCacheSharedState *gc_sstate, bool drop_shared_state)
 		elog(LOG, "gpucache: table %s:%lx is dropped", gc_sstate->table_name, gc_sstate->signature);
 		pfree(gc_sstate);
 	}
-	SpinLockRelease(lock);
+}
+
+static void
+putGpuCacheSharedState(GpuCacheSharedState *gc_sstate, bool drop_shared_state)
+{
+	SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
+	putGpuCacheSharedStateNoLock(gc_sstate, drop_shared_state);
+	SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
 }
 
 /*
@@ -2919,6 +2923,18 @@ error_2:
 error_1:
 	cuMemFree(m_main);
 error_0:
+	/* mark as corrupted state */
+	pg_atomic_write_u32(&gc_sstate->gpu_buffer_corrupted, 1);
+	SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
+	gc_sstate->initial_loading = -1;
+	SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
+
+	ereport(WARNING,
+			(errmsg("gpucache: table [%s:%lx] of database=%u - enable to allocate GPU device memory, so marked as corrupted.",
+					gc_sstate->table_name,
+					gc_sstate->signature,
+					gc_sstate->database_oid),
+			 errhint("try pgstrom.gpucache_recovery(regclass) after the fixup of table contents or configuration")));
 	return rc;
 }
 
@@ -2988,6 +3004,8 @@ gpuCacheBgWorkerExecCompactionNoLock(GpuCacheSharedState *gc_sstate)
 	/*
 	 * phase-2: Main portion of the compaction. 
 	 * allocation of the new buffer, then, runs the compaction kernel.
+	 *
+	 * XXX: fail of cuMemAlloc() should mark GPU cache corrupted. TODO.
 	 */
 	h_extra.length = Max(curr_usage + (64UL << 20),		/* 64MB margin */
 						 (double)curr_usage * 1.15);	/* 15% margin */
@@ -3222,15 +3240,12 @@ retry:
 	if (h_redo->kerror.errcode != 0)
 	{
 		/*
-		 * Once gpu_buffer_corruption is set, no logs shall be written.
-		 * It shall be reset by the manual operation (pgstrom.gpucache_apply_redo)
+		 * Once gpu_buffer_corruption is set, no REDO logs shall be written.
+		 * It shall be reset by the manual operation (pgstrom.gpucache_recovery)
 		 * that takes ShareRowExclusiveLock, so re-initialization process will
 		 * have no concurrent writer.
 		 */
 		pg_atomic_write_u32(&gc_sstate->gpu_buffer_corrupted, 1);
-		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
-		gc_sstate->initial_loading = -1;
-		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
 
 		ereport(WARNING,
 				(errmsg("gpucache: table [%s:%lx] of database=%u - unable to apply REDO logs to GPU cache, so marked as corrupted.",
@@ -3258,7 +3273,13 @@ retry:
 			gc_sstate->gpu_extra_size = 0;
 			memset(&gc_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
 		}
-		return CUDA_ERROR_UNKNOWN;
+
+		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
+		gc_sstate->initial_loading = -1;
+		putGpuCacheSharedStateNoLock(gc_sstate, false);
+		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
+
+		return CUDA_ERROR_NOT_READY;
 	}
 	return CUDA_SUCCESS;
 }
