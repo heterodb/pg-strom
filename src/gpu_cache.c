@@ -1328,8 +1328,6 @@ retry:
 		gc_sstate = __createGpuCacheSharedState(rel,
 												hkey->signature,
 												gc_options);
-		elog(LOG, "create GpuCacheSharedState %s:%lx",
-			 gc_sstate->table_name, gc_sstate->signature);
 	}
 	PG_CATCH();
 	{
@@ -2055,27 +2053,11 @@ ExecInitGpuCache(ScanState *ss, int eflags, Bitmapset *outer_refs)
 	return gcache_state;
 }
 
-static inline pgstrom_data_store *
-__ExecScanChunkGpuCache(GpuTaskState *gts, GpuCacheSharedState *gc_sstate)
-{
-	EState		   *estate = gts->css.ss.ps.state;
-	pgstrom_data_store *pds;
-	size_t			head_sz;
-
-	head_sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
-	pds = MemoryContextAllocZero(estate->es_query_cxt,
-								 offsetof(pgstrom_data_store, kds) + head_sz);
-	pg_atomic_init_u32(&pds->refcnt, 1);
-	pds->gc_sstate = gc_sstate;
-	memcpy(&pds->kds, &gc_sstate->kds_head, head_sz);
-
-	return pds;
-}
-
 pgstrom_data_store *
 ExecScanChunkGpuCache(GpuTaskState *gts)
 {
-	GpuCacheState	   *gcache_state = gts->gc_state;
+	EState		   *estate = gts->css.ss.ps.state;
+	GpuCacheState  *gcache_state = gts->gc_state;
 	pgstrom_data_store *pds = NULL;
 
 	if (pg_atomic_fetch_add_u32(gcache_state->gc_fetch_count, 1) == 0)
@@ -2083,18 +2065,7 @@ ExecScanChunkGpuCache(GpuTaskState *gts)
 		GpuCacheSharedState *gc_sstate = gcache_state->gc_sstate;
 		uint64		write_pos;
 		uint64		sync_pos = ULONG_MAX;
-
-		/*
-		 * XXX MEMO:
-		 * We may put special case handling code if gpu_buffer_corrupted != 0,
-		 * because it eventually fails to map PDS on execution phase.
-		 * However, it is not a perfect solution because any of concurrent
-		 * session kicks apply-redo-log asynchronously, then it may set
-		 * gpu_buffer_corrupted.
-		 * So, we have no way to recover the above case, and we consider
-		 * it does not make sense to add recovery code here (right now).
-		 * XXX
-		 */
+		size_t		head_sz;
 
 		SpinLockAcquire(&gc_sstate->redo_lock);
 		write_pos = gc_sstate->redo_write_pos;
@@ -2102,13 +2073,34 @@ ExecScanChunkGpuCache(GpuTaskState *gts)
 			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 		SpinLockRelease(&gc_sstate->redo_lock);
 
-		/* redo_write_pos == 0 means that the table is empty */
-		if (write_pos != 0)
+		/* Is the target table empty? */
+		if (write_pos == 0)
+			return NULL;
+
+		/* Force to apply pending REDO logs, if any */
+		if (sync_pos != ULONG_MAX)
 		{
-			if (sync_pos != ULONG_MAX)
-				gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false);
-			pds = __ExecScanChunkGpuCache(gts, gc_sstate);
+			/*
+			 * If REDO logs could not be applied correctly, we give up mapping
+			 * the GPU cache for execution of this query, because it is likely
+			 * in the 'corrupted' state.
+			 * In this case, we try to build alternative PDS buffers using
+			 * PostgreSQL scan as usual.
+			 */
+			if (gpuCacheInvokeApplyRedo(gc_sstate, sync_pos, false) != CUDA_SUCCESS)
+			{
+				ExecEndGpuCache(gcache_state);
+				gts->gc_state = NULL;
+				return pgstromExecScanChunk(gts);
+			}
 		}
+		/* Ok, build a PDS with KDS_FORMAT_COLUMN */
+		head_sz = KERN_DATA_STORE_HEAD_LENGTH(&gc_sstate->kds_head);
+		pds = MemoryContextAllocZero(estate->es_query_cxt,
+									 offsetof(pgstrom_data_store, kds) + head_sz);
+		pg_atomic_init_u32(&pds->refcnt, 1);
+		pds->gc_sstate = gc_sstate;
+		memcpy(&pds->kds, &gc_sstate->kds_head, head_sz);
 	}
 	return pds;
 }
@@ -3266,6 +3258,7 @@ retry:
 			gc_sstate->gpu_extra_size = 0;
 			memset(&gc_sstate->gpu_extra_mhandle, 0, sizeof(CUipcMemHandle));
 		}
+		return CUDA_ERROR_UNKNOWN;
 	}
 	return CUDA_SUCCESS;
 }
