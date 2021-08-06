@@ -98,6 +98,8 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#gpu_4">GPUキャッシュの状態を確認する</a>
     </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu_5">GPUキャッシュの破損と復元</a>
+    </li>
         </ul>
     </li>
     </ul>
@@ -282,11 +284,10 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 <h3 id="gpu_4">GPUキャッシュの状態を確認する</h3>
 <p>GPUキャッシュの現在の状態を確認するには<code>pgstrom.gpucache_info</code>ビューを使用します。</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+ database_oid | database_name | table_oid | table_name | signature  | refcnt | corrupted | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |  config_options
+--------------+---------------+-----------+------------+------------+--------+-----------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |      3 | f         |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |      3 | f         |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 </code></pre>
 <p>このビューで表示されるGPUキャッシュの状態は、その時点で初期ロードが終わっており、GPUデバイスメモリ上に領域が確保されているものだけである事に留意してください。
@@ -311,6 +312,14 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </li>
 <li><code>signature</code><ul>
 <li>GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</li>
+</ul>
+</li>
+<li><code>refcnt</code><ul>
+<li>GPUキャッシュの参照カウンタです。これは必ずしも最新の値を反映しているとは限りません。</li>
+</ul>
+</li>
+<li><code>corrupted</code><ul>
+<li>GPUキャッシュの内容が破損しているかどうかを示します。</li>
 </ul>
 </li>
 <li><code>gpu_main_sz</code><ul>
@@ -351,6 +360,17 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </ul>
 </li>
 </ul>
+<h3 id="gpu_5">GPUキャッシュの破損と復元</h3>
+<p>GPUキャッシュに<code>max_num_rows</code>で指定した以上の行数を挿入しようとしたり、可変長データのバッファ長が肥大化しすぎたり、
+といった理由でGPUキャッシュにREDOログを適用できなかった場合、GPUキャッシュは破損（corrupted）状態に移行します。</p>
+<p>一度GPUキャッシュが破損すると、これを手動で復旧するまでは、検索/分析系のクエリでGPUキャッシュを参照する事はなくなり、
+また、テーブルの更新に際してもREDOログの記録を行わなくなります。
+（運悪く、検索/分析系のクエリが実行を開始した後にGPUキャッシュが破損した場合、そのクエリはエラーを返す事があります。）</p>
+<p>GPUバッファを破損状態から復元するのは <code>pgstrom.gpucache_recovery(regclass)</code> 関数です。
+REDOログを適用できなかった原因を取り除いた上でこの関数を実行すると、再度、GPUキャッシュの初期ロードを行い、元の状態への
+復旧を試みます。</p>
+<p>例えば、<code>max_num_rows</code> で指定した以上の行数を挿入しようとした場合であれば、トリガの定義を変更して <code>max_num_rows</code> 設定を
+拡大するか、テーブルから一部の行を削除した後で、<code>pgstrom.gpucache_recovery()</code>関数を実行するという事になります。</p>
               
             </div>
           </div>

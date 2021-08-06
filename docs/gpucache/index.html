@@ -98,6 +98,8 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#check-status-of-gpu-cache">Check status of GPU Cache</a>
     </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu-cache-corruption-and-recovery">GPU Cache corruption and recovery</a>
+    </li>
         </ul>
     </li>
     </ul>
@@ -281,11 +283,10 @@ The 3rd row from the bottom, in the "GPU Cache" field, shows the basic informati
 <h3 id="check-status-of-gpu-cache">Check status of GPU Cache</h3>
 <p>Use the <code>pgstrom.gpucache_info</code> view to check the current state of GPU Cache.</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+ database_oid | database_name | table_oid | table_name | signature  | refcnt | corrupted | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |  config_options
+--------------+---------------+-----------+------------+------------+--------+-----------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |      3 | f         |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |      3 | f         |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 </code></pre>
 <p>Note that <code>pgstrom.gpucache_info</code> will only show the status of GPU Caches that have been initially loaded and have space allocated on the GPU device memory at that time. In other words, if the trigger function is set but not yet initially loaded (no one has accessed it yet), the potentially allocated GPU Cache will not be shown yet.</p>
@@ -309,6 +310,14 @@ The 3rd row from the bottom, in the "GPU Cache" field, shows the basic informati
 </li>
 <li><code>signature</code><ul>
 <li>A hash value indicating the uniqueness of GPU Cache. This value may change, for example, before and after executing <code>ALTER TABLE</code>.</li>
+</ul>
+</li>
+<li><code>refcnt</code><ul>
+<li>Reference counter of the GPU Cache. It does not always reflect the latest value.</li>
+</ul>
+</li>
+<li><code>corrupted</code><ul>
+<li>Shows whether the GPU Cache is corrupted.</li>
 </ul>
 </li>
 <li><code>gpu_main_sz</code><ul>
@@ -349,6 +358,13 @@ The 3rd row from the bottom, in the "GPU Cache" field, shows the basic informati
 </ul>
 </li>
 </ul>
+<h3 id="gpu-cache-corruption-and-recovery">GPU Cache corruption and recovery</h3>
+<p>If and when REDO logs could not be applied on the GPU cache by some reasons, like insertion of more rows than the <code>max_num_rows</code> configuration, or too much consumption of variable-length data buffer, GPU cache moves to the "corrupted" state.</p>
+<p>Once GPU cache gets corrupted, search/analysis SQL does not reference the GPU cache, and table updates stops writing REDO log.
+(If GPU cache gets corrupted after beginning of a search/analysis SQL unfortunately, this query may raise an error.)</p>
+<p>The <code>pgstrom.gpucache_recovery(regclass)</code> function recovers the GPU cache from the corrupted state.
+If you run this function after removal of the cause where REDO logs could not be applied, it runs initial-loading of the GPU cache again, then tries to recover the GPU cache.</p>
+<p>For example, if GPU cache gets corrupted because you tried to insert more rows than the <code>max_num_rows</code>, you reconfigure the trigger with expanded <code>max_num_rows</code> configuration or you delete a part of rows from the table, then runs <code>pgstrom.gpucache_recovery()</code> function.</p>
               
             </div>
           </div>

@@ -294,11 +294,10 @@ Use the `pgstrom.gpucache_info` view to check the current state of GPU Cache.
 
 ```
 =# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+ database_oid | database_name | table_oid | table_name | signature  | refcnt | corrupted | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |  config_options
+--------------+---------------+-----------+------------+------------+--------+-----------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |      3 | f         |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |      3 | f         |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 ```
 
@@ -323,6 +322,10 @@ Note that `pgstrom.gpucache_info` will only show the status of GPU Caches that h
     - GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。
 - `signature`
     - GPUキャッシュの一意性を示すハッシュ値です。例えば`ALTER TABLE`の前後などでこの値が変わる場合があります。
+- `refcnt`
+    - GPUキャッシュの参照カウンタです。これは必ずしも最新の値を反映しているとは限りません。
+- `corrupted`
+    - GPUキャッシュの内容が破損しているかどうかを示します。
 - `gpu_main_sz`
     - GPUキャッシュ上に確保された固定長データ用の領域のサイズです。
 - `gpu_extra_sz`
@@ -357,6 +360,10 @@ The meaning of each field is as follows:
     - The name of the table with GPU Cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.
 - `signature`
     - A hash value indicating the uniqueness of GPU Cache. This value may change, for example, before and after executing `ALTER TABLE`.
+- `refcnt`
+    - Reference counter of the GPU Cache. It does not always reflect the latest value.
+- `corrupted`
+    - Shows whether the GPU Cache is corrupted.
 - `gpu_main_sz`
     - The size of the area reserved in GPU Cache for fixed-length data.
 - `gpu_extra_sz`
@@ -378,3 +385,33 @@ The meaning of each field is as follows:
     - The optional string to customize GPU Cache.
 }
 
+
+@ja:###GPUキャッシュの破損と復元
+@en:###GPU Cache corruption and recovery
+
+@ja{
+GPUキャッシュに`max_num_rows`で指定した以上の行数を挿入しようとしたり、可変長データのバッファ長が肥大化しすぎたり、
+といった理由でGPUキャッシュにREDOログを適用できなかった場合、GPUキャッシュは破損（corrupted）状態に移行します。
+
+一度GPUキャッシュが破損すると、これを手動で復旧するまでは、検索/分析系のクエリでGPUキャッシュを参照する事はなくなり、
+また、テーブルの更新に際してもREDOログの記録を行わなくなります。
+（運悪く、検索/分析系のクエリが実行を開始した後にGPUキャッシュが破損した場合、そのクエリはエラーを返す事があります。）
+
+GPUバッファを破損状態から復元するのは `pgstrom.gpucache_recovery(regclass)` 関数です。
+REDOログを適用できなかった原因を取り除いた上でこの関数を実行すると、再度、GPUキャッシュの初期ロードを行い、元の状態への
+復旧を試みます。
+
+例えば、`max_num_rows` で指定した以上の行数を挿入しようとした場合であれば、トリガの定義を変更して `max_num_rows` 設定を
+拡大するか、テーブルから一部の行を削除した後で、`pgstrom.gpucache_recovery()`関数を実行するという事になります。
+}
+@en{
+If and when REDO logs could not be applied on the GPU cache by some reasons, like insertion of more rows than the `max_num_rows` configuration, or too much consumption of variable-length data buffer, GPU cache moves to the "corrupted" state.
+
+Once GPU cache gets corrupted, search/analysis SQL does not reference the GPU cache, and table updates stops writing REDO log.
+(If GPU cache gets corrupted after beginning of a search/analysis SQL unfortunately, this query may raise an error.)
+
+The `pgstrom.gpucache_recovery(regclass)` function recovers the GPU cache from the corrupted state.
+If you run this function after removal of the cause where REDO logs could not be applied, it runs initial-loading of the GPU cache again, then tries to recover the GPU cache.
+
+For example, if GPU cache gets corrupted because you tried to insert more rows than the `max_num_rows`, you reconfigure the trigger with expanded `max_num_rows` configuration or you delete a part of rows from the table, then runs `pgstrom.gpucache_recovery()` function.
+}
