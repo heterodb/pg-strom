@@ -33,7 +33,7 @@ CREATE TABLE cache_test_table (
 ---
 
 CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=5000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 CREATE TRIGGER stmt_sync_test AFTER TRUNCATE ON cache_test_table FOR STATEMENT
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
@@ -183,15 +183,14 @@ DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
 DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
 DELETE FROM normal_table WHERE j='delete' OR j IS NULL;
 
-
 ---
 --- ALTER TABLE 
 ---
-/*ALTER TABLE cache_test_table ADD COLUMN k int2;
+ALTER TABLE cache_test_table ADD COLUMN k int2;
 ALTER TABLE normal_table ADD COLUMN k int2;
-
 UPDATE cache_test_table SET k=b/2;
-UPDATE normal_table SET k=b/2;*/
+UPDATE normal_table SET k=b/2;
+
 
 ---
 --- SELECT 
