@@ -1,0 +1,180 @@
+--
+-- arrow_write - test for writable arrow_fdw
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_write_temp CASCADE;
+CREATE SCHEMA regtest_arrow_write_temp;
+RESET client_min_messages;
+
+SET extra_float_digits = 1;		-- PG12 defaults
+SET search_path = regtest_arrow_write_temp,public;
+
+CREATE TYPE comp AS (
+  x    int,
+  y    text,
+  z    timestamp
+);
+
+CREATE TABLE tt (
+  id   int,
+  a    smallint,
+  b    real,
+  c    numeric(12,4),
+  d    comp,
+  e    date,
+  f    time
+);
+
+SELECT pgstrom.random_setseed(20200213);
+INSERT INTO tt (
+  SELECT x, pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_float(1, -100000.0, 100000.0),
+            pgstrom.random_float(1, -100000.0, 100000.0),
+            null,
+			pgstrom.random_date(1),
+			pgstrom.random_time(1)
+    FROM generate_series(1,1000) x);
+UPDATE tt SET d.x = pgstrom.random_int(1, -320000, 320000),
+              d.y = pgstrom.random_text_len(1, 50),
+			  d.z = pgstrom.random_timestamp(1);
+
+---
+--- DDL test for arrow_fdw
+---
+\! rm -f /home/onishi/pg-strom/./test/13/test_arrow_write_*.arrow
+
+CREATE FOREIGN TABLE ft_1 (id int)
+SERVER arrow_fdw
+OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ft_1.arrow'); -- fail
+
+CREATE FOREIGN TABLE ft_2 (id int)
+SERVER arrow_fdw
+OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ft_2.arrow', writable 'true');
+
+CREATE FOREIGN TABLE ft_3 (id int)
+SERVER arrow_fdw
+OPTIONS (files '/home/onishi/pg-strom/./test/13/test_arrow_write_ft_3a.arrow,/home/onishi/pg-strom/./test/13/test_arrow_write_ft_3b.arrow', writable 'true'); -- fail
+
+CREATE FOREIGN TABLE ft (
+  id   int,
+  a    smallint,
+  b    real,
+  c    numeric(12,4),
+  d    comp,
+  e    date,
+  f    time
+) SERVER arrow_fdw
+  OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ft.arrow', writable 'true');
+
+INSERT INTO ft (SELECT * FROM tt WHERE id % 20 = 6 ORDER BY id);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+\! stat -c "name:%n, size:%s" '/home/onishi/pg-strom/./test/13/test_arrow_write_ft.arrow'
+
+BEGIN;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 7 ORDER BY id LIMIT 7);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+\! stat -c "name:%n, size:%s" '/home/onishi/pg-strom/./test/13/test_arrow_write_ft.arrow'
+
+ABORT;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+\! stat -c "name:%n, size:%s" '/home/onishi/pg-strom/./test/13/test_arrow_write_ft.arrow'
+
+BEGIN;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 3 ORDER BY id LIMIT 10);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+SAVEPOINT s1;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 5 ORDER BY id LIMIT 10);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+SAVEPOINT s2;
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 1 ORDER BY id LIMIT 8);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+ROLLBACK TO SAVEPOINT s1;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 8 ORDER BY id LIMIT 5);
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 5;
+
+COMMIT;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+BEGIN;
+SELECT pgstrom.arrow_fdw_truncate('ft');
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+ABORT;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+SELECT pgstrom.arrow_fdw_truncate('ft');
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+--
+-- Arrow_Fdw and table partition
+--
+CREATE TABLE ptable (
+  dev_id int,
+  val    text
+) PARTITION BY HASH (dev_id);
+
+CREATE FOREIGN TABLE ftable_p0
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 0)
+  SERVER arrow_fdw
+  OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ftable_p0.arrow', writable 'true');
+
+CREATE FOREIGN TABLE ftable_p1
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 1)
+  SERVER arrow_fdw
+  OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ftable_p1.arrow', writable 'true');
+
+CREATE FOREIGN TABLE ftable_p2
+  PARTITION OF ptable
+  FOR VALUES WITH (modulus 3, remainder 2)
+  SERVER arrow_fdw
+  OPTIONS (file '/home/onishi/pg-strom/./test/13/test_arrow_write_ftable_p2.arrow', writable 'true');
+
+INSERT INTO ptable (SELECT x,md5(x::text) FROM generate_series(0,200,2) x);
+
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+
+BEGIN;
+INSERT INTO ptable (SELECT x,md5(x::text) FROM generate_series(1,200,2) x);
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+
+SELECT * FROM ftable_p0 ORDER BY dev_id LIMIT 5;
+SELECT * FROM ftable_p1 ORDER BY dev_id LIMIT 5;
+SELECT * FROM ftable_p2 ORDER BY dev_id LIMIT 5;
+
+ABORT;
+SELECT tableoid::regclass, count(*)
+  FROM ptable
+ GROUP BY tableoid
+ ORDER BY tableoid::regclass;
+
+SELECT * FROM ftable_p0 ORDER BY dev_id LIMIT 5;
+SELECT * FROM ftable_p1 ORDER BY dev_id LIMIT 5;
+SELECT * FROM ftable_p2 ORDER BY dev_id LIMIT 5;
