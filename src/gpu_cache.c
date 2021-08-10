@@ -198,7 +198,9 @@ gpucache_sync_trigger_function_oid(void)
 typedef struct
 {
 	Oid			tg_sync_row;
+#if PG_VERSION_NUM < 130000
 	Oid			tg_sync_stmt;
+#endif
 	int			cuda_dindex;
 	int32		gpu_sync_interval;
 	size_t		gpu_sync_threshold;
@@ -448,6 +450,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 				goto no_gpu_cache;
 			}
 		}
+#if PG_VERSION_NUM < 130000
 		else if (trig->tgtype == (TRIGGER_TYPE_TRUNCATE |
 								  TRIGGER_TYPE_BEFORE) &&
 				 trig->tgfoid == gpucache_sync_trigger_function_oid())
@@ -456,10 +459,14 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 				goto no_gpu_cache;	/* misconfiguration */
 			sig->gc_options.tg_sync_stmt = trig->tgoid;
 		}
+#endif
 	}
-	if (!OidIsValid(sig->gc_options.tg_sync_row) ||
-		!OidIsValid(sig->gc_options.tg_sync_stmt))
-		goto no_gpu_cache;			/* no sync triggers */
+	if (!OidIsValid(sig->gc_options.tg_sync_row))
+		goto no_gpu_cache;		/* no row sync trigger */
+#if PG_VERSION_NUM < 130000
+	if (!OidIsValid(sig->gc_options.tg_sync_stmt))
+		goto no_gpu_cache;		/* no stmt sync trigger */
+#endif
 
 	/* pg_attribute related */
 	for (j=0; j < natts; j++)
@@ -590,6 +597,7 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 			}
 			sig->gc_options.tg_sync_row = PgTriggerTupleGetOid(tuple);
 		}
+#if PG_VERSION_NUM < 130000
 		else if (pg_trig->tgtype == (TRIGGER_TYPE_TRUNCATE |
 									 TRIGGER_TYPE_BEFORE) &&
 				 pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
@@ -598,10 +606,14 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 				goto no_gpu_cache;
 			sig->gc_options.tg_sync_stmt = PgTriggerTupleGetOid(tuple);
 		}
+#endif
 	}
-	if (!OidIsValid(sig->gc_options.tg_sync_row) ||
-		!OidIsValid(sig->gc_options.tg_sync_stmt))
+	if (!OidIsValid(sig->gc_options.tg_sync_row))
 		goto no_gpu_cache;
+#if PG_VERSION_NUM < 130000
+	if (!OidIsValid(sig->gc_options.tg_sync_stmt))
+		goto no_gpu_cache;
+#endif
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 
@@ -1645,11 +1657,29 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
  * __gpuCacheTruncateLog
  */
 static void
-__gpuCacheTruncateLog(GpuCacheDesc *gc_desc)
+__gpuCacheTruncateLog(Oid table_oid)
 {
-	Assert(!gc_desc->drop_on_commit);
+	GpuCacheOptions gc_options;
+	GpuCacheDesc *gc_desc;
+	Datum		signature;
 
-	gc_desc->drop_on_commit = true;
+	signature = gpuCacheTableSignatureSnapshot(table_oid, NULL,
+											   &gc_options);
+	if (!signature)
+		return;
+	/* force to assign a valid transaction-id */
+	(void)GetCurrentTransactionId();
+
+	gc_desc = lookupGpuCacheDescNoLoad(MyDatabaseId,
+									   table_oid,
+									   signature,
+									   &gc_options);
+	if (gc_desc)
+	{
+		Assert(!gc_desc->drop_on_commit);
+
+		gc_desc->drop_on_commit = true;
+	}
 }
 
 /*
@@ -1659,25 +1689,25 @@ Datum
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
-	GpuCacheDesc   *gc_desc;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
 			 get_func_name(fcinfo->flinfo->fn_oid));
 
-	gc_desc = lookupGpuCacheDesc(trigdata->tg_relation);
-	if (!gc_desc)
-		elog(ERROR, "gpucache is not configured for %s",
-			 RelationGetRelationName(trigdata->tg_relation));
-	if (gc_desc->buf.data == NULL)
-		initStringInfoContext(&gc_desc->buf, CacheMemoryContext);
-
 	if (TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
 	{
-		/* FOR EACH ROW */
+		GpuCacheDesc   *gc_desc;
+
 		if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
 			elog(ERROR, "%s: must be declared as AFTER ROW trigger",
 				 trigdata->tg_trigger->tgname);
+
+		gc_desc = lookupGpuCacheDesc(trigdata->tg_relation);
+		if (!gc_desc)
+			elog(ERROR, "gpucache is not configured for %s",
+				 RelationGetRelationName(trigdata->tg_relation));
+		if (gc_desc->buf.data == NULL)
+			initStringInfoContext(&gc_desc->buf, CacheMemoryContext);
 
 		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
 		{
@@ -1700,14 +1730,23 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		/* FOR EACH STATEMENT */
 		if (TRIGGER_FIRED_AFTER(trigdata->tg_event))
 			elog(ERROR, "%s: must be declared as BEFORE STATEMENT trigger",
 				 trigdata->tg_trigger->tgname);
 
 		if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
 		{
-			__gpuCacheTruncateLog(gc_desc);
+#if PG_VERSION_NUM < 130000
+			Oid		table_oid = RelationGetRelid(trigdata->tg_relation);
+
+			__gpuCacheTruncateLog(table_oid);
+#else
+			ereport(NOTICE,
+					(errmsg("gpucache: we no longer require BEFORE TRUNCATE trigger"),
+					 errhint("run DROP TRIGGER %s on %s",
+							 trigdata->tg_trigger->tgname,
+							 RelationGetRelationName(trigdata->tg_relation))));
+#endif
 		}
 		else
 		{
@@ -2435,10 +2474,14 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 										   table_oid,
 										   signature,
 										   &gc_options);
-		if (gc_desc && (gc_options.tg_sync_row == trigger_oid ||
-						gc_options.tg_sync_stmt == trigger_oid))
+		if (gc_desc)
 		{
-			gc_desc->drop_on_commit = true;
+			if (gc_options.tg_sync_row == trigger_oid)
+				gc_desc->drop_on_commit = true;
+#if PG_VERSION_NUM < 130000
+			if (gc_options.tg_sync_stmt == trigger_oid)
+				gc_desc->drop_on_commit = true;
+#endif
 		}
 	}
 	systable_endscan(sscan);
@@ -2496,6 +2539,13 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			__gpuCacheOnDropTrigger(objectId);
 		}
 	}
+#if PG_VERSION_NUM >= 130000
+	else if (access == OAT_TRUNCATE)
+	{
+		//elog(LOG, "pid=%u OAT_TRUNCATE (objectId=%u)", getpid(), objectId);
+		__gpuCacheTruncateLog(objectId);
+	}
+#endif
 }
 
 static void
