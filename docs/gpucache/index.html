@@ -188,12 +188,27 @@ At this time, REDO Log Entries are transferred to the GPU in batches and process
 If there are any unapplied REDO Logs at the start of the search/analysis query, they will all be applied to GPU Cache. 
 This means that the results of a search/analysis query scanning the target GPU Cache will return the same results as if it were referring to the table directly, and the query will always be consistent.</p>
 <h2 id="configuration">Configuration</h2>
-<p>To enable GPU Cache, set the following trigger function for the target table.</p>
-<ul>
-<li>The <code>pgstrom.gpucache_sync_trigger()</code> function must be set as the row trigger for AFTER INSERT OR UPDATE OR DELETE.</li>
-<li>The <code>pgstrom.gpucache_sync_trigger()</code> function must be set as a syntax trigger for AFTER TRUNCATE.</li>
-<li>The timing of the above triggers must be set to <code>ALWAYS</code> (the slave side of replication must also fire the trigger).</li>
-</ul>
+<p>To enable GPU Cache, configure a trigger that executes <code>pgstrom.gpucache_sync_trigger()</code> function
+on AFTER INSERT OR UPDATE OR DELETE for each row.</p>
+<p>If GPU Cache is used on the replication slave, the invocation mode of this trigger must be <code>ALWAYS</code>.</p>
+<p>Below is an example to configure GPU Cache on the <code>dpoints</code> table.</p>
+<pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
+                  execute function pgstrom.gpucache_sync_trigger();
+=# alter table dpoints_even enable always trigger row_sync;
+</code></pre>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Additional configuration at PostgreSQL v12 or prior.</p>
+<p>In case when GPU Cache is used at PostgreSQL v12 or prior, you need to configure
+an additional AFTER TRUNCATE statement trigger that executes <code>pgstrom.gpucache_sync_trigger()</code> function.
+If you want to use the GPU Cache on the replication slave, </p>
+<p>If you use GPU Cache at the PostgreSQL v12 or prior, in a similar way, invocation mode of this trigger must have <code>ALWAYS</code>.</p>
+<p>PostgreSQL v13 enhanced its object-access-hook mechanism, so allows extension modules
+to capture execution of TRUNCATE without triggers configuration.
+On the other hand, the prior version still needs the BEFORE TRUNCATE statement trigger to keep consistency
+of GPU Cache by capture of TRUNCATE.</p>
+</div>
+<p>Below is an example to configure GPU Cache on the <code>dpoints</code> table at PostgreSQL v12 or prior.</p>
 <pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
 =# create trigger stmt_sync after truncate on dpoints_even for statement
