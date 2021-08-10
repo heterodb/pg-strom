@@ -448,7 +448,8 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 				goto no_gpu_cache;
 			}
 		}
-		else if (trig->tgtype == (TRIGGER_TYPE_TRUNCATE) &&
+		else if (trig->tgtype == (TRIGGER_TYPE_TRUNCATE |
+								  TRIGGER_TYPE_BEFORE) &&
 				 trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (OidIsValid(sig->gc_options.tg_sync_stmt))
@@ -557,6 +558,7 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 			continue;
 
 		if (pg_trig->tgtype == (TRIGGER_TYPE_ROW |
+								TRIGGER_TYPE_AFTER |
 								TRIGGER_TYPE_INSERT |
 								TRIGGER_TYPE_DELETE |
 								TRIGGER_TYPE_UPDATE) &&
@@ -588,7 +590,8 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 			}
 			sig->gc_options.tg_sync_row = PgTriggerTupleGetOid(tuple);
 		}
-		else if (pg_trig->tgtype == TRIGGER_TYPE_TRUNCATE &&
+		else if (pg_trig->tgtype == (TRIGGER_TYPE_TRUNCATE |
+									 TRIGGER_TYPE_BEFORE) &&
 				 pg_trig->tgfoid == gpucache_sync_trigger_function_oid())
 		{
 			if (OidIsValid(sig->gc_options.tg_sync_stmt))
@@ -1656,16 +1659,10 @@ Datum
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
-	TriggerEvent	tg_event;
 	GpuCacheDesc   *gc_desc;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
-			 get_func_name(fcinfo->flinfo->fn_oid));
-
-	tg_event = trigdata->tg_event;
-	if (!TRIGGER_FIRED_AFTER(tg_event))
-		elog(ERROR, "%s: must be called as AFTER ROW/STATEMENT",
 			 get_func_name(fcinfo->flinfo->fn_oid));
 
 	gc_desc = lookupGpuCacheDesc(trigdata->tg_relation);
@@ -1675,10 +1672,14 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 	if (gc_desc->buf.data == NULL)
 		initStringInfoContext(&gc_desc->buf, CacheMemoryContext);
 
-	if (TRIGGER_FIRED_FOR_ROW(tg_event))
+	if (TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
 	{
 		/* FOR EACH ROW */
-		if (TRIGGER_FIRED_BY_INSERT(tg_event))
+		if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
+			elog(ERROR, "%s: must be declared as AFTER ROW trigger",
+				 trigdata->tg_trigger->tgname);
+
+		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
 		{
 			__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_desc);
 		}
@@ -1693,19 +1694,25 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		}
 		else
 		{
-			elog(ERROR, "gpucache: unexpected trigger event type (%u)", tg_event);
+			elog(ERROR, "gpucache: unexpected trigger event type (%u)",
+				 trigdata->tg_event);
 		}
 	}
 	else
 	{
 		/* FOR EACH STATEMENT */
-		if (TRIGGER_FIRED_BY_TRUNCATE(tg_event))
+		if (TRIGGER_FIRED_AFTER(trigdata->tg_event))
+			elog(ERROR, "%s: must be declared as BEFORE STATEMENT trigger",
+				 trigdata->tg_trigger->tgname);
+
+		if (TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
 		{
 			__gpuCacheTruncateLog(gc_desc);
 		}
 		else
 		{
-			elog(ERROR, "gpucache: unexpected trigger event type (%u)", tg_event);
+			elog(ERROR, "gpucache: unexpected trigger event type (%u)",
+				 trigdata->tg_event);
 		}
 	}
 	PG_RETURN_POINTER(trigdata->tg_trigtuple);
@@ -2420,6 +2427,9 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 												   &gc_options);
 		if (signature == 0UL)
 			continue;
+
+		/* force to assign a valid transaction-id */
+		(void)GetCurrentTransactionId();
 
 		gc_desc = lookupGpuCacheDescNoLoad(MyDatabaseId,
 										   table_oid,
