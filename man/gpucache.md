@@ -85,30 +85,70 @@ If there are any unapplied REDO Logs at the start of the search/analysis query, 
 This means that the results of a search/analysis query scanning the target GPU Cache will return the same results as if it were referring to the table directly, and the query will always be consistent.
 }
 
-
-
-
-
 @ja:##設定
 @en:##Configuration
 
 @ja{
-GPUキャッシュを有効にするには、対象となるテーブルに対して以下のトリガ関数を設定します。
+GPUキャッシュを有効にするには、対象となるテーブルに対して
+`pgstrom.gpucache_sync_trigger()`関数を実行するAFTER INSERT OR UPDATE OR DELETEの行トリガを設定します。
 
-- AFTER INSERT OR UPDATE OR DELETEの行トリガとして`pgstrom.gpucache_sync_trigger()`関数が設定されている事。
-- AFTER TRUNCATEの構文トリガとして`pgstrom.gpucache_sync_trigger()`関数が設定されている事。
-- これらトリガの呼び出しタイミングが`ALWAYS`（レプリケーションのスレーブ側でもトリガを起動する）として設定されている事。
+レプリケーションのスレーブ側でGPUキャッシュを使用する場合、このトリガの発行モードが`ALWAYS`である事が必要です。
 
 以下の例は、テーブル `dpoints` に対してGPUキャッシュを設定する例です。
 }
 @en{
-To enable GPU Cache, set the following trigger function for the target table.
+To enable GPU Cache, configure a trigger that executes `pgstrom.gpucache_sync_trigger()` function
+on AFTER INSERT OR UPDATE OR DELETE for each row.
 
-- The `pgstrom.gpucache_sync_trigger()` function must be set as the row trigger for AFTER INSERT OR UPDATE OR DELETE.
-- The `pgstrom.gpucache_sync_trigger()` function must be set as a syntax trigger for AFTER TRUNCATE.
-- The timing of the above triggers must be set to `ALWAYS` (the slave side of replication must also fire the trigger).
+If GPU Cache is used on the replication slave, the invocation mode of this trigger must be `ALWAYS`.
+
+Below is an example to configure GPU Cache on the `dpoints` table.
 }
 
+```
+=# create trigger row_sync after insert or update or delete on dpoints_even for row
+                  execute function pgstrom.gpucache_sync_trigger();
+=# alter table dpoints_even enable always trigger row_sync;
+```
+
+@ja{
+!!! Note
+    PostgreSQL v12.x 以前のバージョンにおける追加設定
+    
+    PostgreSQL v12および以前のバージョンでGPUキャッシュを利用する場合、上記のトリガに加えて、
+    `pgstrom.gpucache_sync_trigger()`関数を実行するAFTER TRUNCATEの構文トリガの設定が必要です。
+    
+    レプリケーションのスレーブ側でGPUキャッシュを実行する場合、同様に、このトリガの発行モードが
+    `ALWAYS`である事が必要です。
+    
+    PostgreSQL v13ではObject Access Hookが拡張され、拡張モジュールはトリガ設定なしで
+    TRUNCATEの実行を捕捉できるようになりました。
+    しかしそれ以前のバージョンでは、TRUNCATEを捕捉してGPUキャッシュの一貫性を保つには、
+    BEFORE TRUNCATEの構文トリガが必要です。
+}
+@en{
+!!! Note
+    Additional configuration at PostgreSQL v12 or prior.
+    
+    In case when GPU Cache is used at PostgreSQL v12 or prior, you need to configure
+    an additional AFTER TRUNCATE statement trigger that executes `pgstrom.gpucache_sync_trigger()` function.
+    If you want to use the GPU Cache on the replication slave, 
+
+    If you use GPU Cache at the PostgreSQL v12 or prior, in a similar way, invocation mode of this trigger must have `ALWAYS`.
+    
+    PostgreSQL v13 enhanced its object-access-hook mechanism, so allows extension modules
+    to capture execution of TRUNCATE without triggers configuration.
+    On the other hand, the prior version still needs the BEFORE TRUNCATE statement trigger to keep consistency
+    of GPU Cache by capture of TRUNCATE.
+}
+
+@ja{
+以下は、PostgreSQL v12以前でGPUキャッシュを`dpoints`テーブルに設定する例です。
+}
+@en{
+Below is an example to configure GPU Cache on the `dpoints` table at PostgreSQL v12 or prior.
+}
+    
 ```
 =# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
@@ -117,6 +157,7 @@ To enable GPU Cache, set the following trigger function for the target table.
 =# alter table dpoints_even enable always trigger row_sync;
 =# alter table dpoints_even enable always trigger stmt_sync;
 ```
+
 
 @ja:###GPUキャッシュのカスタマイズ
 @en:###GPU Cache Customize
