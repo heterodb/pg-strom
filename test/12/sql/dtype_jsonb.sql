@@ -1,0 +1,1 @@
+../../sql/dtype_jsonb.sql

@@ -200,7 +200,7 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 <p class="admonition-title">Note</p>
 <p>PostgreSQL v12.x 以前のバージョンにおける追加設定</p>
 <p>PostgreSQL v12および以前のバージョンでGPUキャッシュを利用する場合、上記のトリガに加えて、
-<code>pgstrom.gpucache_sync_trigger()</code>関数を実行するAFTER TRUNCATEの構文トリガの設定が必要です。</p>
+<code>pgstrom.gpucache_sync_trigger()</code>関数を実行するBEFORE TRUNCATEの構文トリガの設定が必要です。</p>
 <p>レプリケーションのスレーブ側でGPUキャッシュを実行する場合、同様に、このトリガの発行モードが
 <code>ALWAYS</code>である事が必要です。</p>
 <p>PostgreSQL v13ではObject Access Hookが拡張され、拡張モジュールはトリガ設定なしで
@@ -211,7 +211,7 @@ BEFORE TRUNCATEの構文トリガが必要です。</p>
 <p>以下は、PostgreSQL v12以前でGPUキャッシュを<code>dpoints</code>テーブルに設定する例です。</p>
 <pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
-=# create trigger stmt_sync after truncate on dpoints_even for statement
+=# create trigger stmt_sync before truncate on dpoints_even for statement
                   execute function pgstrom.gpucache_sync_trigger();
 =# alter table dpoints_even enable always trigger row_sync;
 =# alter table dpoints_even enable always trigger stmt_sync;

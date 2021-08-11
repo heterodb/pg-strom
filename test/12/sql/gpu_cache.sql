@@ -1,15 +1,12 @@
 ---
 --- test cases for GPU Cache
 ---
-
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS gpu_cache_temp_test CASCADE;
 CREATE SCHEMA gpu_cache_temp_test;
 RESET client_min_messages;
-
 SET search_path = gpu_cache_temp_test,public;
-
 ---
 --- Creating a table on GPU cache
 ---
@@ -26,35 +23,31 @@ CREATE TABLE cache_test_table (
   i    varchar(32),
   j    char(32)
 );
-
 ---
 --- GPU Cache configuration
 ---
-
 CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
-CREATE TRIGGER stmt_sync_test AFTER TRUNCATE ON cache_test_table FOR STATEMENT
+CREATE TRIGGER stmt_sync_test BEFORE TRUNCATE ON cache_test_table FOR STATEMENT
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER stmt_sync_test;
-
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
-
 -- Check gpucache_info table.
 SELECT config_options FROM pgstrom.gpucache_info WHERE table_name='cache_test_table'
 ORDER BY redo_write_ts DESC LIMIT 1;
-TRUNCATE TABLE cache_test_table;
 
+TRUNCATE TABLE cache_test_table;
 -- Force to use GPU Cache
 SET enable_seqscan=off;
-
 ---
 --- INSERT 
 ---
-
 EXPLAIN (costs off, verbose)
 INSERT INTO cache_test_table(id) values (1);
+
+
 INSERT INTO cache_test_table (
   SELECT x 
   ,pgstrom.random_int(1,-128,127)     -- a int1
@@ -69,109 +62,118 @@ INSERT INTO cache_test_table (
   ,LEFT(MD5((x%479+2)::TEXT),(x%32+1)::INTEGER)     -- j text
   FROM generate_series(1,4000) x
 );
-
 VACUUM ANALYZE;
-
-
 -- Copy inserted records to normal table(without GPU Cache)
 SELECT * INTO TEMPORARY normal_table FROM cache_test_table; 
-
 ---
 --- UPDATE
 ---
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
+
 UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
 UPDATE normal_table     SET a = (a+1) % 127 WHERE a%97=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
+
+
 UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
 UPDATE normal_table     SET b = (b+1) % 32767 WHERE a%89=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
+
+
 UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
 UPDATE normal_table     SET c = (c+1) % 2147483647 WHERE a%83=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
+
+
 UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 UPDATE normal_table     SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
+
+
 UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
 UPDATE normal_table     SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
+
+
 UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
 UPDATE normal_table     SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
+
+
 UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
 UPDATE normal_table     SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
+
+
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
 UPDATE normal_table     SET h = 'delete' WHERE a%103=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
+
+
 UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
 UPDATE normal_table     SET i = 'delete' WHERE a%107=0;
-
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
+
+
 UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
 UPDATE normal_table     SET j = 'delete' WHERE a%109=0;
-
 ---
 --- DETELE
 ---
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
+
+
 DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
 DELETE FROM normal_table WHERE a%101=0 OR a IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
+
+
 DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
 DELETE FROM normal_table WHERE b%101=0 OR b IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
+
 DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
 DELETE FROM normal_table WHERE c%101=0 OR c IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
+
 DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
 DELETE FROM normal_table WHERE d%101=0 OR d IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
+
+
 DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
 DELETE FROM normal_table WHERE e::int8%101=0 OR e IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
+
 DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
 DELETE FROM normal_table WHERE f::int8%101=0 OR f IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
+
+
 DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
 DELETE FROM normal_table WHERE g::int8%101=0 OR g IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
+
 DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
 DELETE FROM normal_table WHERE h='delete' OR h IS NULL;
-
 EXPLAIN (costs off, verbose) 
 DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
 DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
@@ -181,7 +183,6 @@ EXPLAIN (costs off, verbose)
 DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
 DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
 DELETE FROM normal_table WHERE j='delete' OR j IS NULL;
-
 ---
 --- ALTER TABLE 
 ---
@@ -189,22 +190,13 @@ ALTER TABLE cache_test_table ADD COLUMN k int2;
 ALTER TABLE normal_table ADD COLUMN k int2;
 UPDATE cache_test_table SET k=b/2;
 UPDATE normal_table SET k=b/2;
-
-
 ---
 --- SELECT 
 ---
-
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_test_table WHERE a % 3 = 0;
 
-SELECT COUNT(*) = (SELECT COUNT(*) FROM normal_table WHERE a % 3 = 0) AS ok FROM (
-SELECT * FROM normal_table WHERE a % 3 = 0
-UNION DISTINCT
-SELECT * FROM cache_test_table WHERE a % 3 = 0) AS q;
-
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
-
 EXPLAIN (costs off, verbose)
 SELECT 
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
@@ -225,7 +217,6 @@ COUNT(e) AS e_count,SUM(e) AS e_sum,AVG(e) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_
 COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
 COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
 INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
-
 SELECT
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
 COUNT(b) AS b_count,SUM(b) AS b_sum,AVG(b) AS b_avg,MAX(b) AS b_max,MIN(b) AS b_min,
@@ -235,8 +226,6 @@ COUNT(e) AS e_count,SUM(e) AS e_sum,AVG(e) AS e_avg,MAX(e) AS e_max,MIN(e) AS e_
 COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_min,
 COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
 INTO TEMPORARY normal_result FROM normal_table WHERE id%3=0;
-
-
 --clms=("a" "b" "c" "d" "e" "f" "g") ; mtds=("count" "sum" "avg" "max" "min"); for a in ${clms[@]}; do for m in ${mtds[@]}; do echo ",ABS(c.${a}_${m} - n.${a}_${m}) < 1 AS ${a}_${m}_ok" ; done ; done;
 SELECT 
 ABS(c.a_count - n.a_count) < 1 AS a_count_ok
@@ -278,23 +267,20 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
 normal_result AS n
 WHERE c.a_count = n.a_count;
 
-
 ---
 --- TRUNCATE
 ---
-
 TRUNCATE TABLE cache_test_table;
 TRUNCATE TABLE normal_table;
-
 SELECT COUNT(*) = 0 AS ok FROM cache_test_table;
+
 SELECT COUNT(*) = 0 AS ok FROM normal_table;
+
+SELECT pgstrom.gpucache_apply_redo('cache_test_table') AS apply_redo;
 
 ---
 --- corruption_check
 ---
-SET enable_seqscan=off;
-
-select * from pgstrom.gpucache_info;
 
 CREATE TABLE cache_corruption_test (
   id   int,
@@ -310,12 +296,12 @@ CREATE TABLE cache_corruption_test (
   j    char(32)
 );
 
-CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_corruption_test FOR ROW 
+CREATE TRIGGER row_sync_corruption AFTER INSERT OR UPDATE OR DELETE ON cache_corruption_test FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=5000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
-CREATE TRIGGER stmt_sync_test AFTER TRUNCATE ON cache_corruption_test FOR STATEMENT
+CREATE TRIGGER stmt_sync_corruption BEFORE TRUNCATE ON cache_corruption_test FOR STATEMENT
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
-ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_test;
-ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER stmt_sync_test;
+ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_corruption;
+ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER stmt_sync_corruption;
 
 -- INSERT 4000 rows ( < max: 5000 rows )
 INSERT INTO cache_corruption_test (
@@ -334,7 +320,7 @@ INSERT INTO cache_corruption_test (
 );
 
 -- Apply to GPUCache
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo;
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') = 0 AS apply_redo_result;
 
 -- corrupted must be false
 SELECT corrupted IS false FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
@@ -345,8 +331,8 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
 
 -- update to make the table corrupted
 UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1000);
--- Apply to GPUCache
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test');
+-- Apply to GPUCache (returns error because the table is corrupted)
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') > 0 AS apply_redo_result;
 
 -- corrupted must be true
 SELECT corrupted IS true FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';

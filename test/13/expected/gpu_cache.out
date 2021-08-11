@@ -28,10 +28,7 @@ CREATE TABLE cache_test_table (
 ---
 CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
-CREATE TRIGGER stmt_sync_test AFTER TRUNCATE ON cache_test_table FOR STATEMENT
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
-ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER stmt_sync_test;
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
@@ -86,7 +83,7 @@ UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
          Output: id, ((((a + 1) % 127))::int1), b, c, d, e, f, g, h, i, j, ctid
          GPU Projection: cache_test_table.id, ((cache_test_table.a + 1) % 127), cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 97) = 0)
-         GPU Cache: GPU0 [max_num_rows: 10000, main: 0, extra: 0]
+         GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
 (7 rows)
 
@@ -402,15 +399,6 @@ SELECT * FROM cache_test_table WHERE a % 3 = 0;
    GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
 (6 rows)
 
-SELECT COUNT(*) = (SELECT COUNT(*) FROM normal_table WHERE a % 3 = 0) AS ok FROM (
-SELECT * FROM normal_table WHERE a % 3 = 0
-UNION DISTINCT
-SELECT * FROM cache_test_table WHERE a % 3 = 0) AS q;
- ok 
-----
- t
-(1 row)
-
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
 EXPLAIN (costs off, verbose)
 SELECT 
@@ -430,7 +418,7 @@ INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
          Output: a, b, c, d, e, f, g
          GPU Projection: cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g
          GPU Filter: ((cache_test_table.id % 3) = 0)
-         GPU Cache: GPU0 [max_num_rows: 10000, main: 1052.67K, extra: 3200.02K]
+         GPU Cache: GPU0 [max_num_rows: 10000, main: 0, extra: 0]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
 (8 rows)
 
@@ -513,6 +501,129 @@ SELECT COUNT(*) = 0 AS ok FROM normal_table;
 ----
  t
 (1 row)
+
+SELECT pgstrom.gpucache_apply_redo('cache_test_table') AS apply_redo;
+ apply_redo 
+------------
+          0
+(1 row)
+
+---
+--- corruption_check
+---
+CREATE TABLE cache_corruption_test (
+  id   int,
+  a    int1,
+  b    int2,
+  c    int4,
+  d    int8,
+  e    float2,
+  f    float4,
+  g    float8,
+  h    text,
+  i    varchar(32),
+  j    char(32)
+);
+CREATE TRIGGER row_sync_corruption AFTER INSERT OR UPDATE OR DELETE ON cache_corruption_test FOR ROW 
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=5000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
+ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_corruption;
+-- INSERT 4000 rows ( < max: 5000 rows )
+INSERT INTO cache_corruption_test (
+  SELECT x 
+  ,pgstrom.random_int(1,-128,127)     -- a int1
+  ,pgstrom.random_int(1,-32768,32767)  -- b int2
+  ,pgstrom.random_int(1,-2147483648,2147483647)  -- c int4
+  ,pgstrom.random_int(1,-9223372036854775808,9223372036854775807)   -- d int8
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- e float2
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float4
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float8
+  ,LEFT(MD5((x%479)::TEXT),(x%32+1)::INTEGER)     -- h text
+  ,LEFT(MD5((x%479+1)::TEXT),(x%32+1)::INTEGER)     -- i text
+  ,LEFT(MD5((x%479+2)::TEXT),(x%32+1)::INTEGER)     -- j text
+  FROM generate_series(1,4000) x
+);
+-- Apply to GPUCache
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') = 0 AS apply_redo_result;
+ apply_redo_result 
+-------------------
+ t
+(1 row)
+
+-- corrupted must be false
+SELECT corrupted IS false FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- check GPUCache is still usable.
+EXPLAIN (costs off, verbose)
+SELECT * FROM cache_corruption_test WHERE b%3=0;
+                                                                                                                                              QUERY PLAN                                                                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on gpu_cache_temp_test.cache_corruption_test
+   Output: id, a, b, c, d, e, f, g, h, i, j
+   GPU Projection: cache_corruption_test.id, cache_corruption_test.a, cache_corruption_test.b, cache_corruption_test.c, cache_corruption_test.d, cache_corruption_test.e, cache_corruption_test.f, cache_corruption_test.g, cache_corruption_test.h, cache_corruption_test.i, cache_corruption_test.j
+   GPU Filter: (((cache_corruption_test.b)::integer % 3) = 0)
+   GPU Cache: GPU0 [max_num_rows: 5000, main: 679.94K, extra: 1600.02K]
+   GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
+(6 rows)
+
+-- update to make the table corrupted
+UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1000);
+-- Apply to GPUCache (returns error because the table is corrupted)
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') > 0 AS apply_redo_result;
+ apply_redo_result 
+-------------------
+ t
+(1 row)
+
+-- corrupted must be true
+SELECT corrupted IS true FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+ ?column? 
+----------
+ t
+(1 row)
+
+-- check GPUCache is not usable.
+EXPLAIN (costs off, verbose)
+SELECT * FROM cache_corruption_test WHERE b%3=0;
+                                                                                                                                              QUERY PLAN                                                                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on gpu_cache_temp_test.cache_corruption_test
+   Output: id, a, b, c, d, e, f, g, h, i, j
+   GPU Projection: cache_corruption_test.id, cache_corruption_test.a, cache_corruption_test.b, cache_corruption_test.c, cache_corruption_test.d, cache_corruption_test.e, cache_corruption_test.f, cache_corruption_test.g, cache_corruption_test.h, cache_corruption_test.i, cache_corruption_test.j
+   GPU Filter: (((cache_corruption_test.b)::integer % 3) = 0)
+(4 rows)
+
+-- Recover GPUCache
+SELECT pgstrom.gpucache_recovery('cache_corruption_test') = 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- corrupted must be false
+SELECT corrupted IS false FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+ ?column? 
+----------
+ t
+(1 row)
+
+EXPLAIN (costs off, verbose)
+SELECT count(*) FROM cache_corruption_test;
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: pgstrom.sum((pgstrom.nrows()))
+   ->  Custom Scan (GpuPreAgg) on gpu_cache_temp_test.cache_corruption_test
+         Output: (pgstrom.nrows())
+         Reduction: NoGroup
+         GPU Projection: pgstrom.nrows()
+         Outer Scan: gpu_cache_temp_test.cache_corruption_test
+         GPU Cache: GPU0 [max_num_rows: 5000, main: 0, extra: 0]
+         GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
+(9 rows)
 
 -- cleanup temporary resource
 SET client_min_messages = error;
