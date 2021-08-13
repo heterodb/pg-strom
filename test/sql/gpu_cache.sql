@@ -32,8 +32,7 @@ ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
-SELECT config_options FROM pgstrom.gpucache_info WHERE table_name='cache_test_table'
-ORDER BY redo_write_ts DESC LIMIT 1;
+SELECT config_options FROM pgstrom.gpucache_info WHERE table_name='cache_test_table' AND database_name=current_database();
 
 TRUNCATE TABLE cache_test_table;
 -- Force to use GPU Cache
@@ -270,11 +269,7 @@ WHERE c.a_count = n.a_count;
 TRUNCATE TABLE cache_test_table;
 TRUNCATE TABLE normal_table;
 SELECT COUNT(*) = 0 AS ok FROM cache_test_table;
-
 SELECT COUNT(*) = 0 AS ok FROM normal_table;
-
-SELECT pgstrom.gpucache_apply_redo('cache_test_table') AS apply_redo;
-
 ---
 --- corruption_check
 ---
@@ -347,3 +342,6 @@ SELECT count(*) FROM cache_corruption_test;
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA gpu_cache_temp_test CASCADE;
+
+-- Checking GPUCache is removed correctly.
+SELECT count(*) = 0 AS ok FROM pgstrom.gpucache_info WHERE table_name in ('cache_test_table','cache_corruption_test') AND database_name=current_database();
