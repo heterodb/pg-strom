@@ -49,3 +49,8 @@ test: fallback_pgsql
 #test: ssbm-21 ssbm-22 ssbm-23
 #test: ssbm-31 ssbm-32 ssbm-33 ssbm-34
 #test: ssbm-41 ssbm-42 ssbm-43
+
+# ----------
+# GPU Cache
+# ----------
+test: gpu_cache

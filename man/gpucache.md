@@ -116,7 +116,7 @@ Below is an example to configure GPU Cache on the `dpoints` table.
     PostgreSQL v12.x 以前のバージョンにおける追加設定
     
     PostgreSQL v12および以前のバージョンでGPUキャッシュを利用する場合、上記のトリガに加えて、
-    `pgstrom.gpucache_sync_trigger()`関数を実行するAFTER TRUNCATEの構文トリガの設定が必要です。
+    `pgstrom.gpucache_sync_trigger()`関数を実行するBEFORE TRUNCATEの構文トリガの設定が必要です。
     
     レプリケーションのスレーブ側でGPUキャッシュを実行する場合、同様に、このトリガの発行モードが
     `ALWAYS`である事が必要です。
@@ -131,7 +131,7 @@ Below is an example to configure GPU Cache on the `dpoints` table.
     Additional configuration at PostgreSQL v12 or prior.
     
     In case when GPU Cache is used at PostgreSQL v12 or prior, you need to configure
-    an additional AFTER TRUNCATE statement trigger that executes `pgstrom.gpucache_sync_trigger()` function.
+    an additional BEFORE TRUNCATE statement trigger that executes `pgstrom.gpucache_sync_trigger()` function.
     If you want to use the GPU Cache on the replication slave, 
 
     If you use GPU Cache at the PostgreSQL v12 or prior, in a similar way, invocation mode of this trigger must have `ALWAYS`.
@@ -152,7 +152,7 @@ Below is an example to configure GPU Cache on the `dpoints` table at PostgreSQL 
 ```
 =# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
-=# create trigger stmt_sync after truncate on dpoints_even for statement
+=# create trigger stmt_sync before truncate on dpoints_even for statement
                   execute function pgstrom.gpucache_sync_trigger();
 =# alter table dpoints_even enable always trigger row_sync;
 =# alter table dpoints_even enable always trigger stmt_sync;

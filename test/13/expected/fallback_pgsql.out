@@ -186,7 +186,7 @@ SELECT * INTO test11g
    GPU Projection: d.aid::integer, d.id::integer, d.cat::text, d.x::double precision, d.y::double precision, d.memo::text, l.z::double precision, l.md5::character(200)
    Outer Scan: pgstrom_regress.fallback_data d
    Depth 1: GpuHashJoin
-            HashSize: 1371.11KB
+            HashSize: 1371.09KB
             HashKeys: d.aid
             JoinQuals: (d.aid = l.aid)
    ->  Custom Scan (GpuScan) on pgstrom_regress.fallback_enlarge l
@@ -226,7 +226,7 @@ SELECT *
    Outer Scan: pgstrom_regress.fallback_data d
    Outer Scan Filter: (d.memo ~~ '%ab%'::text)
    Depth 1: GpuHashJoin
-            HashSize: 3429.22KB
+            HashSize: 3429.20KB
             HashKeys: d.aid
             JoinQuals: (d.aid = l.aid)
    ->  Custom Scan (GpuScan) on pgstrom_regress.fallback_enlarge l
