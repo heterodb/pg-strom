@@ -1737,6 +1737,22 @@ __pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
 	}													\
 	PG_FUNCTION_INFO_V1(cfunc_name)
 
+/* deprecated functions */
+/*
+ * SQL functions for GPU attributes (deprecated)
+ */
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_device_name);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_global_memsize);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_max_blocksize);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_warp_size);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_max_shared_memory_perblock);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_registers_perblock);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_multiptocessors);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_cuda_cores);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_cc_major);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_cc_minor);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_pci_id);
+
 /* deadcode/gstore_(fdw|buf).c */
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_in);
 PG_DEPRECATED_FUNCTION(pgstrom_reggstore_out);
