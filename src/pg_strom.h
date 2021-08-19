@@ -1035,6 +1035,8 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
+#define	pgstrom_chunk_size()	((Size)(65534UL << 10))		/* almost 64MB */
+
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
 								kern_data_store *kds,
