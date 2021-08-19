@@ -95,11 +95,11 @@ pgstrom_gpudirect_threshold(void)
 /*
  * pgstrom_collect_gpu_device
  */
-static void
+static bool
 pgstrom_collect_gpu_device(void)
 {
 	StringInfoData str;
-	char	   *cmdline;
+	const char *cmdline = (CMD_GPUINFO_PATH " -md");
 	char		linebuf[2048];
 	FILE	   *filp;
 	char	   *tok_attr;
@@ -110,11 +110,12 @@ pgstrom_collect_gpu_device(void)
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
 	int			i, cuda_dindex;
 
-	initStringInfo(&str);
-
-	cmdline = psprintf("%s -md", CMD_GPUINFO_PATH);
+	Assert(numDevAttrs == 0);
 	filp = OpenPipeStream(cmdline, PG_BINARY_R);
+	if (!filp)
+		return false;
 
+	initStringInfo(&str);
 	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)
 	{
 		/* trim '\n' on the tail */
@@ -312,10 +313,15 @@ pgstrom_collect_gpu_device(void)
 				   &devAttrs[i], sizeof(DevAttributes));
 		cuda_dindex++;
 	}
-	Assert(cuda_dindex <= num_devices);
-	numDevAttrs = cuda_dindex;
-	if (numDevAttrs == 0)
-		elog(ERROR, "PG-Strom: no supported GPU devices found");
+
+	if (num_devices > 0)
+	{
+		if (cuda_dindex == 0)
+			elog(ERROR, "PG-Strom: no supported GPU devices found");
+		numDevAttrs = cuda_dindex;
+		return true;
+	}
+	return false;
 }
 
 /*
@@ -348,7 +354,8 @@ pgstrom_init_gpu_device(void)
 			elog(ERROR, "failed to set CUDA_VISIBLE_DEVICES");
 	}
 	/* collect device properties by gpuinfo command */
-	pgstrom_collect_gpu_device();
+	if (!pgstrom_collect_gpu_device())
+		return;		/* cpu_only_mode */
 
 	/* pgstrom.gpudirect_enabled */
 	if (gpuDirectInitDriver() == 0)

@@ -615,7 +615,7 @@ typedef struct DevAttributes
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
-
+#define cpu_only_mode()		(numDevAttrs == 0)
 extern void pgstrom_init_gpu_device(void);
 
 #define GPUKERNEL_MAX_SM_MULTIPLICITY		4

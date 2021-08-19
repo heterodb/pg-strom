@@ -54,6 +54,19 @@ pgstrom_githash(PG_FUNCTION_ARGS)
 static void
 pgstrom_init_common_guc(void)
 {
+	if (cpu_only_mode())
+	{
+		/* Disables PG-Strom features by GPU */
+		DefineCustomBoolVariable("pg_strom.enabled",
+								 "Enables the planner's use of PG-Strom",
+								 NULL,
+								 &pgstrom_enabled,
+								 false,
+								 PGC_INTERNAL,
+								 GUC_NOT_IN_SAMPLE,
+								 NULL, NULL, NULL);
+		return;
+	}
 	/* turn on/off PG-Strom feature */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
@@ -574,7 +587,6 @@ _PG_init(void)
 	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
 #endif
 	/* init GPU/CUDA infrastracture */
-	pgstrom_init_common_guc();
 	pgstrom_init_shmbuf();
 	pgstrom_init_gpu_device();
 	pgstrom_init_gpu_mmgr();
@@ -583,6 +595,7 @@ _PG_init(void)
 	pgstrom_init_codegen();
 
 	/* init custom-scan providers/FDWs */
+	pgstrom_init_common_guc();
 	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpujoin();
