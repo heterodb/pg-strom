@@ -19,7 +19,6 @@ PG_MODULE_MAGIC;
 bool		pgstrom_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 bool		pgstrom_regression_test_mode;
-static int	pgstrom_chunk_size_kb;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
@@ -52,16 +51,22 @@ pgstrom_githash(PG_FUNCTION_ARGS)
 #endif	
 }
 
-/* pg_strom.chunk_size */
-Size
-pgstrom_chunk_size(void)
-{
-	return ((Size)pgstrom_chunk_size_kb) << 10;
-}
-
 static void
 pgstrom_init_common_guc(void)
 {
+	if (cpu_only_mode())
+	{
+		/* Disables PG-Strom features by GPU */
+		DefineCustomBoolVariable("pg_strom.enabled",
+								 "Enables the planner's use of PG-Strom",
+								 NULL,
+								 &pgstrom_enabled,
+								 false,
+								 PGC_INTERNAL,
+								 GUC_NOT_IN_SAMPLE,
+								 NULL, NULL, NULL);
+		return;
+	}
 	/* turn on/off PG-Strom feature */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
@@ -80,17 +85,6 @@ pgstrom_init_common_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* default length of pgstrom_data_store */
-	DefineCustomIntVariable("pg_strom.chunk_size",
-							"default size of pgstrom_data_store",
-							NULL,
-							&pgstrom_chunk_size_kb,
-							65534,	/* almost 64MB */
-							4096,
-							MAX_KILOBYTES,
-							PGC_INTERNAL,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
 	/* cost factor for Gpu setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
@@ -593,7 +587,6 @@ _PG_init(void)
 	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
 #endif
 	/* init GPU/CUDA infrastracture */
-	pgstrom_init_common_guc();
 	pgstrom_init_shmbuf();
 	pgstrom_init_gpu_device();
 	pgstrom_init_gpu_mmgr();
@@ -602,6 +595,7 @@ _PG_init(void)
 	pgstrom_init_codegen();
 
 	/* init custom-scan providers/FDWs */
+	pgstrom_init_common_guc();
 	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpujoin();

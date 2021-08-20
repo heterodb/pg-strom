@@ -303,6 +303,16 @@ ERROR:  target lists can have at most 1664 entries
 <td align="left">An identifier hash value of GPU Cache. It may be changed after <code>ALTER TABLE</code> for example.</td>
 </tr>
 <tr>
+<td align="left"><code>refcnt</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left">Reference counter of the GPU cache. It does not always reflect the latest status.</td>
+</tr>
+<tr>
+<td align="left"><code>corrupted</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">It shows whether GPU cache is corrupted, or not.</td>
+</tr>
+<tr>
 <td align="left"><code>gpu_main_sz</code></td>
 <td align="left"><code>int8</code></td>
 <td align="left">Size of the fixed-length values area on the GPU Cache.</td>
@@ -368,6 +378,9 @@ ERROR:  target lists can have at most 1664 entries
 <dt><code>bigint pgstrom.gpucache_compaction(regclass)</code></dt>
 <dd></dd>
 <dd>If the given table has GPU Cache configured, it forcibly run compaction of the variable-length data buffer.</dd>
+<dt><code>bigint pgstrom.gpucache_recovery(regclass)</code></dt>
+<dd></dd>
+<dd>It tries to recover the corrupted GPU cache.</dd>
 </dl>
 <h2 id="test-data-generator">Test Data Generator</h2>
 <dl>

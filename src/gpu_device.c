@@ -95,11 +95,11 @@ pgstrom_gpudirect_threshold(void)
 /*
  * pgstrom_collect_gpu_device
  */
-static void
+static bool
 pgstrom_collect_gpu_device(void)
 {
 	StringInfoData str;
-	char	   *cmdline;
+	const char *cmdline = (CMD_GPUINFO_PATH " -md");
 	char		linebuf[2048];
 	FILE	   *filp;
 	char	   *tok_attr;
@@ -110,11 +110,12 @@ pgstrom_collect_gpu_device(void)
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
 	int			i, cuda_dindex;
 
-	initStringInfo(&str);
-
-	cmdline = psprintf("%s -md", CMD_GPUINFO_PATH);
+	Assert(numDevAttrs == 0);
 	filp = OpenPipeStream(cmdline, PG_BINARY_R);
+	if (!filp)
+		return false;
 
+	initStringInfo(&str);
 	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)
 	{
 		/* trim '\n' on the tail */
@@ -312,10 +313,15 @@ pgstrom_collect_gpu_device(void)
 				   &devAttrs[i], sizeof(DevAttributes));
 		cuda_dindex++;
 	}
-	Assert(cuda_dindex <= num_devices);
-	numDevAttrs = cuda_dindex;
-	if (numDevAttrs == 0)
-		elog(ERROR, "PG-Strom: no supported GPU devices found");
+
+	if (num_devices > 0)
+	{
+		if (cuda_dindex == 0)
+			elog(ERROR, "PG-Strom: no supported GPU devices found");
+		numDevAttrs = cuda_dindex;
+		return true;
+	}
+	return false;
 }
 
 /*
@@ -348,7 +354,8 @@ pgstrom_init_gpu_device(void)
 			elog(ERROR, "failed to set CUDA_VISIBLE_DEVICES");
 	}
 	/* collect device properties by gpuinfo command */
-	pgstrom_collect_gpu_device();
+	if (!pgstrom_collect_gpu_device())
+		return;		/* cpu_only_mode */
 
 	/* pgstrom.gpudirect_enabled */
 	if (gpuDirectInitDriver() == 0)
@@ -676,94 +683,3 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_device_info);
-
-/*
- * SQL functions for GPU attributes (deprecated)
- */
-Datum
-pgstrom_gpu_device_name(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_device_name() was deprecated");
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_device_name);
-
-Datum
-pgstrom_gpu_global_memsize(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_global_memsize() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_global_memsize);
-
-Datum
-pgstrom_gpu_max_blocksize(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_max_blocksize() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_max_blocksize);
-
-Datum
-pgstrom_gpu_warp_size(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_warp_size() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_warp_size);
-
-Datum
-pgstrom_gpu_max_shared_memory_perblock(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_max_shared_memory_perblock() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_max_shared_memory_perblock);
-
-Datum
-pgstrom_gpu_num_registers_perblock(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_num_registers_perblock() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_num_registers_perblock);
-
-Datum
-pgstrom_gpu_num_multiptocessors(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_num_multiptocessors() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_num_multiptocessors);
-
-Datum
-pgstrom_gpu_num_cuda_cores(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_num_cuda_cores() was deprecated");
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_num_cuda_cores);
-
-Datum
-pgstrom_gpu_cc_major(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_cc_major() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_cc_major);
-
-Datum
-pgstrom_gpu_cc_minor(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_cc_minor() was deprecated");
-    PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_cc_minor);
-
-Datum
-pgstrom_gpu_pci_id(PG_FUNCTION_ARGS)
-{
-	elog(ERROR, "gpu_pci_id() was deprecated");
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_gpu_pci_id);

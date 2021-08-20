@@ -15,63 +15,58 @@
 #define KERN_CONTEXT_VARLENA_BUFSZ		0
 #define KERN_CONTEXT_STACK_LIMIT		0
 
-STATIC_FUNCTION(Datum)
-kern_datum_get_column(kern_data_store *kds,
-					  kern_data_extra *extra,
-					  cl_uint colidx, cl_uint rowidx,
-					  cl_bool *p_isnull)
+STATIC_FUNCTION(char *)
+kern_datum_get_reusable_varlena(kern_data_store *kds,
+								kern_data_extra *extra,
+								cl_uint colidx,
+								cl_uint rowidx,
+								char *newvar)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	GpuCacheSysattr *sysattr;
+	cl_uint		   *vindex;
+	size_t			offset;
 	char		   *addr;
-	
+	cl_uint			sz;
+
 	assert(colidx < kds->ncols);
 	if (rowidx >= kds->nitems)
-		goto null_return;
-
+		return NULL;
+	if (cmeta->attbyval || cmeta->attlen != -1)
+		return NULL;
 	if (cmeta->nullmap_offset != 0)
 	{
 		cl_uint	   *nullmap = (cl_uint *)
 			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
 		if ((nullmap[rowidx>>5] & (1U<<(rowidx & 0x1f))) == 0)
-			goto null_return;
+			return NULL;
 	}
-	*p_isnull = false;
+	/*
+	 * In case of concurrent apply of REDO log, we cannot avoid
+	 * race condition of the extra buffer. So, as a second best,
+	 * we reuse the varlena datum only if it is committed.
+	 */
+	sysattr = kds_get_column_sysattr(kds, rowidx);
+	if (!sysattr || sysattr->xmin != FrozenTransactionId)
+		return NULL;
+	assert(extra != NULL);
 
-	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
-	if (cmeta->attbyval)
+	vindex = (cl_uint *)((char *)kds + __kds_unpack(cmeta->values_offset));
+	offset = __kds_unpack(vindex[rowidx]);
+	sz = VARSIZE_ANY(newvar);
+	if (offset < offsetof(kern_data_extra, data) &&
+		offset + sz < extra->length)
 	{
-		assert(cmeta->attlen <= sizeof(Datum));
-		addr += TYPEALIGN(cmeta->attalign,
-						  cmeta->attlen) * rowidx;
-		if (cmeta->attlen == sizeof(cl_uchar))
-			return READ_INT8_PTR(addr);
-		if (cmeta->attlen == sizeof(cl_ushort))
-			return READ_INT16_PTR(addr);
-		if (cmeta->attlen == sizeof(cl_uint))
-			return READ_INT32_PTR(addr);
-		if (cmeta->attlen == sizeof(cl_ulong))
-			return READ_INT64_PTR(addr);
-	}
-	else if (cmeta->attlen > 0)
-	{
-		addr += TYPEALIGN(cmeta->attalign,
-						  cmeta->attlen) * rowidx;
-		return PointerGetDatum(addr);
-	}
-	else
-	{
-		cl_uint		offset;
+		addr = (char *)extra + offset;
+		if (VARATT_IS_COMPRESSED(addr) || VARATT_IS_EXTERNAL(addr))
+			return NULL;	/* usually, should not happen */
 
-		assert(cmeta->attlen == -1);
-		assert(extra != NULL);
-		offset = ((cl_uint *)addr)[rowidx];
-
-		assert(__kds_unpack(offset) < extra->length);
-		return PointerGetDatum((char *)extra + __kds_unpack(offset));
+		sz = VARSIZE_ANY_EXHDR(newvar);
+		if (VARSIZE_ANY_EXHDR(addr) == sz &&
+			__memcmp(VARDATA_ANY(newvar), VARDATA_ANY(addr), sz) == 0)
+			return addr;
 	}
-null_return:
-	*p_isnull = true;
-	return 0;
+	return NULL;
 }
 
 /*
@@ -332,11 +327,13 @@ gpucache_apply_insert(kern_context *kcxt,
 		{
 			cl_uint		sz;
 			char	   *var;
+			char	   *datum;
 			cl_ulong	offset;
 
 			assert(cmeta->attlen == -1);
 			if (!VARATT_NOT_PAD_BYTE(pos))
 				pos = (char *)TYPEALIGN(cmeta->attalign, pos);
+			assert(!VARATT_IS_COMPRESSED(pos) && !VARATT_IS_EXTERNAL(pos));
 			sz = VARSIZE_ANY(pos);
 			var = pos;
 			pos += sz;
@@ -344,25 +341,14 @@ gpucache_apply_insert(kern_context *kcxt,
 			/* try to check whether it is actually updated */
 			if (oldid != UINT_MAX)
 			{
-				Datum		datum;
-				cl_bool		isnull;
-
-				datum = kern_datum_get_column(kds, extra, j, oldid, &isnull);
-				if (!isnull)
+				datum = kern_datum_get_reusable_varlena(kds, extra, j, oldid, var);
+				if (datum)
 				{
-					cl_uint		sz1 = VARSIZE_ANY_EXHDR(var);
-					cl_uint		sz2 = VARSIZE_ANY_EXHDR(datum);
-
-					if ((char *)datum >= (char *)extra &&
-						(char *)datum <= (char *)extra + extra->length &&
-						sz1 == sz2 &&
-						__memcmp(VARDATA_ANY(var),
-								 VARDATA_ANY(datum), sz1) == 0)
-					{
-						/* ok, this attribute is not updated */
-						offset = (char *)datum - (char *)extra;
-						goto reuse_extra;
-					}
+					/* ok, this attribute is not updated */
+					offset = (char *)datum - (char *)extra;
+					assert(offset >= offsetof(kern_data_extra, data) &&
+						   offset < extra->length);
+					goto reuse_extra;
 				}
 			}
 			/* allocation of extra buffer on demand */

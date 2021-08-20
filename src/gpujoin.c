@@ -4079,26 +4079,29 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			}
 			ExplainPropertyText(qlabel, str.data, es);
 
-			appendStringInfoSpaces(es->str, indent_width);
-			if (!kds_in)
+			if (!pgstrom_regression_test_mode)
 			{
-				appendStringInfo(es->str, "%sSize: %s",
-								 hash_outer_keys ? "Hash" : "Heap",
-								 format_bytesz(istate->ichunk_size));
+				appendStringInfoSpaces(es->str, indent_width);
+				if (!kds_in)
+				{
+					appendStringInfo(es->str, "%sSize: %s",
+									 hash_outer_keys ? "Hash" : "Heap",
+									 format_bytesz(istate->ichunk_size));
+				}
+				else
+				{
+					appendStringInfo(es->str, "%sSize: %s (estimated: %s)",
+									 hash_outer_keys ? "Hash" : "Heap",
+									 format_bytesz(kds_in->length),
+									 format_bytesz(istate->ichunk_size));
+				}
+				if (kds_gist)
+				{
+					appendStringInfo(es->str, ", IndexSize: %s",
+									 format_bytesz(kds_gist->length));
+				}
+				appendStringInfoChar(es->str, '\n');
 			}
-			else
-			{
-				appendStringInfo(es->str, "%sSize: %s (estimated: %s)",
-								 hash_outer_keys ? "Hash" : "Heap",
-								 format_bytesz(kds_in->length),
-								 format_bytesz(istate->ichunk_size));
-			}
-			if (kds_gist)
-			{
-				appendStringInfo(es->str, ", IndexSize: %s",
-								 format_bytesz(kds_gist->length));
-			}
-			appendStringInfoChar(es->str, '\n');
 		}
 		else
 		{
@@ -4130,18 +4133,24 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				}
 			}
 
-			snprintf(qlabel, sizeof(qlabel), "Depth % 2d KDS Plan Size", depth);
-			ExplainPropertyInteger(qlabel, NULL, istate->ichunk_size, es);
-			if (kds_in)
+			if (!pgstrom_regression_test_mode)
 			{
-				snprintf(qlabel, sizeof(qlabel), "Depth % 2d KDS Exec Size", depth);
-				ExplainPropertyInteger(qlabel, NULL, kds_in->length, es);
+				snprintf(qlabel, sizeof(qlabel),
+						 "Depth % 2d KDS Plan Size", depth);
+				ExplainPropertyInteger(qlabel, NULL, istate->ichunk_size, es);
+				if (kds_in)
+				{
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth % 2d KDS Exec Size", depth);
+					ExplainPropertyInteger(qlabel, NULL, kds_in->length, es);
+				}
+				if (kds_gist)
+				{
+					snprintf(qlabel, sizeof(qlabel),
+							 "Depth% 2d Index Size", depth);
+					ExplainPropertyInteger(qlabel, NULL, kds_gist->length, es);
+				}
 			}
-			if (kds_gist)
-			{
-				snprintf(qlabel, sizeof(qlabel), "Depth% 2d Index Size", depth);
-				ExplainPropertyInteger(qlabel, NULL, kds_gist->length, es);
-			}			
 		}
 
 		/*

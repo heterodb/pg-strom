@@ -98,6 +98,8 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#gpu_4">GPUキャッシュの状態を確認する</a>
     </li>
+    <li class="toctree-l3"><a class="reference internal" href="#gpu_5">GPUキャッシュの破損と復元</a>
+    </li>
         </ul>
     </li>
     </ul>
@@ -186,16 +188,30 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 <p>検索/分析クエリでGPUキャッシュの対象テーブルを参照する際には、テーブルからデータを読み出してGPUにロードするのではなく、既にGPUデバイスメモリ上に割当て済みのGPUキャッシュをマッピングして利用します。これに先立って、クエリの実行開始時点で未適用のREDOログが存在する場合、これらは全て、検索/分析クエリの実行前にGPUキャッシュへ適用されます。
 そのため、検索/分析クエリが対象のGPUキャッシュをスキャンした結果は、直接テーブルを参照した場合と同じ結果を返す事となり、問い合わせの一貫性は常に保持されています。</p>
 <h2 id="_3">設定</h2>
-<p>GPUキャッシュを有効にするには、対象となるテーブルに対して以下のトリガ関数を設定します。</p>
-<ul>
-<li>AFTER INSERT OR UPDATE OR DELETEの行トリガとして<code>pgstrom.gpucache_sync_trigger()</code>関数が設定されている事。</li>
-<li>AFTER TRUNCATEの構文トリガとして<code>pgstrom.gpucache_sync_trigger()</code>関数が設定されている事。</li>
-<li>これらトリガの呼び出しタイミングが<code>ALWAYS</code>（レプリケーションのスレーブ側でもトリガを起動する）として設定されている事。</li>
-</ul>
+<p>GPUキャッシュを有効にするには、対象となるテーブルに対して
+<code>pgstrom.gpucache_sync_trigger()</code>関数を実行するAFTER INSERT OR UPDATE OR DELETEの行トリガを設定します。</p>
+<p>レプリケーションのスレーブ側でGPUキャッシュを使用する場合、このトリガの発行モードが<code>ALWAYS</code>である事が必要です。</p>
 <p>以下の例は、テーブル <code>dpoints</code> に対してGPUキャッシュを設定する例です。</p>
 <pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
-=# create trigger stmt_sync after truncate on dpoints_even for statement
+=# alter table dpoints_even enable always trigger row_sync;
+</code></pre>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>PostgreSQL v12.x 以前のバージョンにおける追加設定</p>
+<p>PostgreSQL v12および以前のバージョンでGPUキャッシュを利用する場合、上記のトリガに加えて、
+<code>pgstrom.gpucache_sync_trigger()</code>関数を実行するBEFORE TRUNCATEの構文トリガの設定が必要です。</p>
+<p>レプリケーションのスレーブ側でGPUキャッシュを実行する場合、同様に、このトリガの発行モードが
+<code>ALWAYS</code>である事が必要です。</p>
+<p>PostgreSQL v13ではObject Access Hookが拡張され、拡張モジュールはトリガ設定なしで
+TRUNCATEの実行を捕捉できるようになりました。
+しかしそれ以前のバージョンでは、TRUNCATEを捕捉してGPUキャッシュの一貫性を保つには、
+BEFORE TRUNCATEの構文トリガが必要です。</p>
+</div>
+<p>以下は、PostgreSQL v12以前でGPUキャッシュを<code>dpoints</code>テーブルに設定する例です。</p>
+<pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
+                  execute function pgstrom.gpucache_sync_trigger();
+=# create trigger stmt_sync before truncate on dpoints_even for statement
                   execute function pgstrom.gpucache_sync_trigger();
 =# alter table dpoints_even enable always trigger row_sync;
 =# alter table dpoints_even enable always trigger stmt_sync;
@@ -282,11 +298,10 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 <h3 id="gpu_4">GPUキャッシュの状態を確認する</h3>
 <p>GPUキャッシュの現在の状態を確認するには<code>pgstrom.gpucache_info</code>ビューを使用します。</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+ database_oid | database_name | table_oid | table_name | signature  | refcnt | corrupted | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |  config_options
+--------------+---------------+-----------+------------+------------+--------+-----------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |      3 | f         |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |      3 | f         |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 </code></pre>
 <p>このビューで表示されるGPUキャッシュの状態は、その時点で初期ロードが終わっており、GPUデバイスメモリ上に領域が確保されているものだけである事に留意してください。
@@ -311,6 +326,14 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </li>
 <li><code>signature</code><ul>
 <li>GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</li>
+</ul>
+</li>
+<li><code>refcnt</code><ul>
+<li>GPUキャッシュの参照カウンタです。これは必ずしも最新の値を反映しているとは限りません。</li>
+</ul>
+</li>
+<li><code>corrupted</code><ul>
+<li>GPUキャッシュの内容が破損しているかどうかを示します。</li>
 </ul>
 </li>
 <li><code>gpu_main_sz</code><ul>
@@ -351,6 +374,17 @@ PG-StromがSQLクエリをGPUで処理する場合も例外ではなく、内部
 </ul>
 </li>
 </ul>
+<h3 id="gpu_5">GPUキャッシュの破損と復元</h3>
+<p>GPUキャッシュに<code>max_num_rows</code>で指定した以上の行数を挿入しようとしたり、可変長データのバッファ長が肥大化しすぎたり、
+といった理由でGPUキャッシュにREDOログを適用できなかった場合、GPUキャッシュは破損（corrupted）状態に移行します。</p>
+<p>一度GPUキャッシュが破損すると、これを手動で復旧するまでは、検索/分析系のクエリでGPUキャッシュを参照する事はなくなり、
+また、テーブルの更新に際してもREDOログの記録を行わなくなります。
+（運悪く、検索/分析系のクエリが実行を開始した後にGPUキャッシュが破損した場合、そのクエリはエラーを返す事があります。）</p>
+<p>GPUバッファを破損状態から復元するのは <code>pgstrom.gpucache_recovery(regclass)</code> 関数です。
+REDOログを適用できなかった原因を取り除いた上でこの関数を実行すると、再度、GPUキャッシュの初期ロードを行い、元の状態への
+復旧を試みます。</p>
+<p>例えば、<code>max_num_rows</code> で指定した以上の行数を挿入しようとした場合であれば、トリガの定義を変更して <code>max_num_rows</code> 設定を
+拡大するか、テーブルから一部の行を削除した後で、<code>pgstrom.gpucache_recovery()</code>関数を実行するという事になります。</p>
               
             </div>
           </div>

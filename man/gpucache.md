@@ -85,38 +85,79 @@ If there are any unapplied REDO Logs at the start of the search/analysis query, 
 This means that the results of a search/analysis query scanning the target GPU Cache will return the same results as if it were referring to the table directly, and the query will always be consistent.
 }
 
-
-
-
-
 @ja:##設定
 @en:##Configuration
 
 @ja{
-GPUキャッシュを有効にするには、対象となるテーブルに対して以下のトリガ関数を設定します。
+GPUキャッシュを有効にするには、対象となるテーブルに対して
+`pgstrom.gpucache_sync_trigger()`関数を実行するAFTER INSERT OR UPDATE OR DELETEの行トリガを設定します。
 
-- AFTER INSERT OR UPDATE OR DELETEの行トリガとして`pgstrom.gpucache_sync_trigger()`関数が設定されている事。
-- AFTER TRUNCATEの構文トリガとして`pgstrom.gpucache_sync_trigger()`関数が設定されている事。
-- これらトリガの呼び出しタイミングが`ALWAYS`（レプリケーションのスレーブ側でもトリガを起動する）として設定されている事。
+レプリケーションのスレーブ側でGPUキャッシュを使用する場合、このトリガの発行モードが`ALWAYS`である事が必要です。
 
 以下の例は、テーブル `dpoints` に対してGPUキャッシュを設定する例です。
 }
 @en{
-To enable GPU Cache, set the following trigger function for the target table.
+To enable GPU Cache, configure a trigger that executes `pgstrom.gpucache_sync_trigger()` function
+on AFTER INSERT OR UPDATE OR DELETE for each row.
 
-- The `pgstrom.gpucache_sync_trigger()` function must be set as the row trigger for AFTER INSERT OR UPDATE OR DELETE.
-- The `pgstrom.gpucache_sync_trigger()` function must be set as a syntax trigger for AFTER TRUNCATE.
-- The timing of the above triggers must be set to `ALWAYS` (the slave side of replication must also fire the trigger).
+If GPU Cache is used on the replication slave, the invocation mode of this trigger must be `ALWAYS`.
+
+Below is an example to configure GPU Cache on the `dpoints` table.
 }
 
 ```
 =# create trigger row_sync after insert or update or delete on dpoints_even for row
                   execute function pgstrom.gpucache_sync_trigger();
-=# create trigger stmt_sync after truncate on dpoints_even for statement
+=# alter table dpoints_even enable always trigger row_sync;
+```
+
+@ja{
+!!! Note
+    PostgreSQL v12.x 以前のバージョンにおける追加設定
+    
+    PostgreSQL v12および以前のバージョンでGPUキャッシュを利用する場合、上記のトリガに加えて、
+    `pgstrom.gpucache_sync_trigger()`関数を実行するBEFORE TRUNCATEの構文トリガの設定が必要です。
+    
+    レプリケーションのスレーブ側でGPUキャッシュを実行する場合、同様に、このトリガの発行モードが
+    `ALWAYS`である事が必要です。
+    
+    PostgreSQL v13ではObject Access Hookが拡張され、拡張モジュールはトリガ設定なしで
+    TRUNCATEの実行を捕捉できるようになりました。
+    しかしそれ以前のバージョンでは、TRUNCATEを捕捉してGPUキャッシュの一貫性を保つには、
+    BEFORE TRUNCATEの構文トリガが必要です。
+}
+@en{
+!!! Note
+    Additional configuration at PostgreSQL v12 or prior.
+    
+    In case when GPU Cache is used at PostgreSQL v12 or prior, you need to configure
+    an additional BEFORE TRUNCATE statement trigger that executes `pgstrom.gpucache_sync_trigger()` function.
+    If you want to use the GPU Cache on the replication slave, 
+
+    If you use GPU Cache at the PostgreSQL v12 or prior, in a similar way, invocation mode of this trigger must have `ALWAYS`.
+    
+    PostgreSQL v13 enhanced its object-access-hook mechanism, so allows extension modules
+    to capture execution of TRUNCATE without triggers configuration.
+    On the other hand, the prior version still needs the BEFORE TRUNCATE statement trigger to keep consistency
+    of GPU Cache by capture of TRUNCATE.
+}
+
+@ja{
+以下は、PostgreSQL v12以前でGPUキャッシュを`dpoints`テーブルに設定する例です。
+}
+@en{
+Below is an example to configure GPU Cache on the `dpoints` table at PostgreSQL v12 or prior.
+}
+    
+```
+=# create trigger row_sync after insert or update or delete on dpoints_even for row
+                  execute function pgstrom.gpucache_sync_trigger();
+=# create trigger stmt_sync before truncate on dpoints_even for statement
                   execute function pgstrom.gpucache_sync_trigger();
 =# alter table dpoints_even enable always trigger row_sync;
 =# alter table dpoints_even enable always trigger stmt_sync;
 ```
+
 
 @ja:###GPUキャッシュのカスタマイズ
 @en:###GPU Cache Customize
@@ -294,11 +335,10 @@ Use the `pgstrom.gpucache_info` view to check the current state of GPU Cache.
 
 ```
 =# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+ database_oid | database_name | table_oid | table_name | signature  | refcnt | corrupted | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |  config_options
+--------------+---------------+-----------+------------+------------+--------+-----------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
+        12728 | postgres      |     25244 | mytest     | 6295279771 |      3 | f         |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
+        12728 | postgres      |     25262 | dpoints    | 5985886065 |      3 | f         |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
 (2 rows)
 ```
 
@@ -323,6 +363,10 @@ Note that `pgstrom.gpucache_info` will only show the status of GPU Caches that h
     - GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。
 - `signature`
     - GPUキャッシュの一意性を示すハッシュ値です。例えば`ALTER TABLE`の前後などでこの値が変わる場合があります。
+- `refcnt`
+    - GPUキャッシュの参照カウンタです。これは必ずしも最新の値を反映しているとは限りません。
+- `corrupted`
+    - GPUキャッシュの内容が破損しているかどうかを示します。
 - `gpu_main_sz`
     - GPUキャッシュ上に確保された固定長データ用の領域のサイズです。
 - `gpu_extra_sz`
@@ -357,6 +401,10 @@ The meaning of each field is as follows:
     - The name of the table with GPU Cache enabled. Note that the database this table exists in is not necessarily the database you are connected to.
 - `signature`
     - A hash value indicating the uniqueness of GPU Cache. This value may change, for example, before and after executing `ALTER TABLE`.
+- `refcnt`
+    - Reference counter of the GPU Cache. It does not always reflect the latest value.
+- `corrupted`
+    - Shows whether the GPU Cache is corrupted.
 - `gpu_main_sz`
     - The size of the area reserved in GPU Cache for fixed-length data.
 - `gpu_extra_sz`
@@ -378,3 +426,33 @@ The meaning of each field is as follows:
     - The optional string to customize GPU Cache.
 }
 
+
+@ja:###GPUキャッシュの破損と復元
+@en:###GPU Cache corruption and recovery
+
+@ja{
+GPUキャッシュに`max_num_rows`で指定した以上の行数を挿入しようとしたり、可変長データのバッファ長が肥大化しすぎたり、
+といった理由でGPUキャッシュにREDOログを適用できなかった場合、GPUキャッシュは破損（corrupted）状態に移行します。
+
+一度GPUキャッシュが破損すると、これを手動で復旧するまでは、検索/分析系のクエリでGPUキャッシュを参照する事はなくなり、
+また、テーブルの更新に際してもREDOログの記録を行わなくなります。
+（運悪く、検索/分析系のクエリが実行を開始した後にGPUキャッシュが破損した場合、そのクエリはエラーを返す事があります。）
+
+GPUバッファを破損状態から復元するのは `pgstrom.gpucache_recovery(regclass)` 関数です。
+REDOログを適用できなかった原因を取り除いた上でこの関数を実行すると、再度、GPUキャッシュの初期ロードを行い、元の状態への
+復旧を試みます。
+
+例えば、`max_num_rows` で指定した以上の行数を挿入しようとした場合であれば、トリガの定義を変更して `max_num_rows` 設定を
+拡大するか、テーブルから一部の行を削除した後で、`pgstrom.gpucache_recovery()`関数を実行するという事になります。
+}
+@en{
+If and when REDO logs could not be applied on the GPU cache by some reasons, like insertion of more rows than the `max_num_rows` configuration, or too much consumption of variable-length data buffer, GPU cache moves to the "corrupted" state.
+
+Once GPU cache gets corrupted, search/analysis SQL does not reference the GPU cache, and table updates stops writing REDO log.
+(If GPU cache gets corrupted after beginning of a search/analysis SQL unfortunately, this query may raise an error.)
+
+The `pgstrom.gpucache_recovery(regclass)` function recovers the GPU cache from the corrupted state.
+If you run this function after removal of the cause where REDO logs could not be applied, it runs initial-loading of the GPU cache again, then tries to recover the GPU cache.
+
+For example, if GPU cache gets corrupted because you tried to insert more rows than the `max_num_rows`, you reconfigure the trigger with expanded `max_num_rows` configuration or you delete a part of rows from the table, then runs `pgstrom.gpucache_recovery()` function.
+}
