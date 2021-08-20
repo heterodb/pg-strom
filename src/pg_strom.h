@@ -218,8 +218,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/vfs.h>
-#include <heterodb_extra.h>
-
+#include "heterodb_extra.h"
 #include "arrow_defs.h"
 
 /*

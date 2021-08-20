@@ -1463,7 +1463,6 @@ __gpuMemCopyFromSSD_Block(GpuContext *gcontext,
 						  CUdeviceptr m_kds,
 						  pgstrom_data_store *pds)
 {
-	StromCmd__MemCopySsdToGpuRaw cmd __attribute__((unused));
 	size_t			offset = m_kds - gm_seg->m_segment;
 	size_t			length;
 	cl_uint			nr_loaded;
