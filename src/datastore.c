@@ -13,7 +13,6 @@
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 #include "cuda_gcache.h"
-#include "nvme_strom.h"
 
 /*
  * estimate_num_chunks

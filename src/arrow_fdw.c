@@ -1312,8 +1312,10 @@ __fetchArrowStatsDatum(RecordBatchFieldState *fstate,
 			{
 				case ArrowDateUnit__Day:
 					datum = DateADTGetDatum((DateADT)sval->i32 - shift);
+					break;
 				case ArrowDateUnit__MilliSecond:
 					datum = DateADTGetDatum((DateADT)sval->i64 / 1000L - shift);
+					break;
 				default:
 					return false;
 			}
@@ -1345,12 +1347,16 @@ __fetchArrowStatsDatum(RecordBatchFieldState *fstate,
 			{
 				case ArrowTimeUnit__Second:
 					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000000L - shift);
+					break;
 				case ArrowTimeUnit__MilliSecond:
 					datum = TimestampGetDatum((Timestamp)sval->i64 * 1000L - shift);
+					break;
 				case ArrowTimeUnit__MicroSecond:
 					datum = TimestampGetDatum((Timestamp)sval->i64 - shift);
+					break;
 				case ArrowTimeUnit__NanoSecond:
 					datum = TimestampGetDatum((Timestamp)sval->i64 / 1000L - shift);
+					break;
 				default:
 					return false;
 			}
