@@ -1,3 +1,10 @@
+* Sat Aug 21 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.1-1
+- Arrow_Fdw supports min/max statistics as like BRIN index
+- GpuCache: BEFORE TRUNCATE trigger is not needed on PG13
+- GpuCache: add corruption state if failed on redo-log-apply
+- Now PG-Strom can be built standalong (w/o heterodb-extra)
+- various bug fixes
+
 * Wed Jun 30 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-2
 - Built for CUDA11.4
 
