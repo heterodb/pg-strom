@@ -100,14 +100,10 @@ __DOC_FILES = index.md install.md operations.md \
 #
 __PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
                   pg_strom.control src sql utils arrow-tools test man
-ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
 else
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)-$(PGSTROM_RELEASE)
-endif
-else
-__STROM_TGZ = pg_strom-master
 endif
 STROM_TAR = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar)
 STROM_TGZ = $(STROM_TAR).gz
@@ -146,9 +142,7 @@ __SPECFILE = pg_strom-PG$(MAJORVERSION)
 #
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
-ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
-endif
 # build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
