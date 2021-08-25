@@ -53,21 +53,25 @@ estimate_num_chunks(Path *pathnode)
 bool
 KDS_fetch_tuple_row(TupleTableSlot *slot,
 					kern_data_store *kds,
-					HeapTuple tuple_buf,
+					HeapTuple __tuple_buf,
 					size_t row_index)
 {
 	if (row_index < kds->nitems)
 	{
-		HeapTupleData	tupleData;
 		kern_tupitem   *tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
 
 		ExecClearTuple(slot);
-		tupleData.t_len  = tup_item->t_len;
-		tupleData.t_self = tup_item->htup.t_ctid;
-		tupleData.t_tableOid = kds->table_oid;
-		tupleData.t_data = &tup_item->htup;
+		/*
+		 * ExecForceStoreHeapTuple may use the given HeapTuple pointer
+		 * as-is, so it must be non-volatile until query execution end.
+		 * Unable to use auto variable on the stack.
+		 */
+		__tuple_buf->t_len = tup_item->t_len;
+		__tuple_buf->t_self = tup_item->htup.t_ctid;
+		__tuple_buf->t_tableOid = kds->table_oid;
+		__tuple_buf->t_data = &tup_item->htup;
 
-		ExecForceStoreHeapTuple(&tupleData, slot, false);
+		ExecForceStoreHeapTuple(__tuple_buf, slot, false);
 
 		return true;
 	}
