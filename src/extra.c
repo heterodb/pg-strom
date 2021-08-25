@@ -11,7 +11,6 @@
  */
 #include <dlfcn.h>
 #include "pg_strom.h"
-#include <heterodb_extra.h>
 
 /* pg_strom.gpudirect_driver */
 #define GPUDIRECT_DRIVER_TYPE__NONE			1

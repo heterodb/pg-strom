@@ -100,16 +100,13 @@ __DOC_FILES = index.md install.md operations.md \
 #
 __PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
                   pg_strom.control src sql utils arrow-tools test man
-ifdef PGSTROM_VERSION
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
 else
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)-$(PGSTROM_RELEASE)
 endif
-else
-__STROM_TGZ = pg_strom-master
-endif
-STROM_TAR = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar)
+__STROM_TAR = $(__STROM_TGZ).tar
+STROM_TAR = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TAR))
 STROM_TGZ = $(STROM_TAR).gz
 
 ifdef PGSTROM_GITHASH
@@ -146,9 +143,7 @@ __SPECFILE = pg_strom-PG$(MAJORVERSION)
 #
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
-ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
-endif
 # build with debug options
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
@@ -284,15 +279,15 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 # Tarball
 #
 tarball:
-	(cd $(STROM_BUILD_ROOT) && \
-	 git archive --format=tar \
-	             --prefix=$(__STROM_TGZ)/ \
-	             -o $(STROM_TAR) \
-	     $(PGSTROM_GITHASH) $(__PACKAGE_FILES)            && \
+	(cd $(STROM_BUILD_ROOT)                               && \
+	 git archive --format=tar                                \
+	             --prefix=$(__STROM_TGZ)/                    \
+	             -o $(__STROM_TAR)                           \
+                 $(PGSTROM_GITHASH) $(__PACKAGE_FILES)    && \
 	 mkdir -p $(__STROM_TGZ)                              && \
-	 echo $(PGSTROM_GITHASH) > $(__STROM_TGZ)/GITHASH && \
-	 tar -r -f $(STROM_TAR) $(__STROM_TGZ)/GITHASH        && \
-	 gzip -f $(STROM_TAR) && test -e $(STROM_TGZ)) || exit 1
+	 echo $(PGSTROM_GITHASH) > $(__STROM_TGZ)/GITHASH     && \
+	 tar -r -f $(__STROM_TAR) $(__STROM_TGZ)/GITHASH      && \
+	 gzip -f $(__STROM_TAR) && test -e $(__STROM_TGZ)) || exit 1
 
 #
 # RPM Package

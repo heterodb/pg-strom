@@ -76,11 +76,16 @@ static int  (*p_heterodb_validate_device)(int gpu_device_id,
 static int
 __heterodb_extra_open(void)
 {
+#define __INVALID_HANDLE	((void *)(~0UL))
 	static void *heterodb_extra_handle = NULL;
 	void   *handle;
 
 	if (heterodb_extra_handle)
+	{
+		if (heterodb_extra_handle == __INVALID_HANDLE)
+			return -1;
 		return 0;
+	}
 	handle = dlopen(HETERODB_EXTRA_FILENAME,
 					RTLD_NOW | RTLD_LOCAL);
 	if (!handle)
@@ -88,21 +93,23 @@ __heterodb_extra_open(void)
 		handle = dlopen(HETERODB_EXTRA_PATHNAME,
 						RTLD_NOW | RTLD_LOCAL);
 		if (!handle)
-			return -1;
+			goto error_0;
 	}
 	p_heterodb_license_reload = dlsym(handle, "heterodb_license_reload");
 	if (!p_heterodb_license_reload)
-		goto error;
+		goto error_1;
 	p_heterodb_validate_device = dlsym(handle, "heterodb_validate_device");
 	if (!p_heterodb_validate_device)
-		goto error;
+		goto error_1;
 	heterodb_extra_handle = handle;
 	return 0;
 
-error:
+error_1:
 	p_heterodb_license_reload = NULL;
 	p_heterodb_validate_device = NULL;
 	dlclose(handle);
+error_0:
+	heterodb_extra_handle = __INVALID_HANDLE;
 	return -1;
 }
 
@@ -120,12 +127,16 @@ __heterodbValidateDevice(int gpu_device_id,
 						 const char *gpu_device_name,
 						 const char *gpu_device_uuid)
 {
-	if (__heterodb_extra_open() != 0)
-		return -1;
-	assert(p_heterodb_validate_device);
-	return p_heterodb_validate_device(gpu_device_id,
-									  gpu_device_name,
-									  gpu_device_uuid);
+	if (gpu_device_id == 0)
+		return 1;
+	if (__heterodb_extra_open() == 0)
+	{
+		assert(p_heterodb_validate_device);
+		return p_heterodb_validate_device(gpu_device_id,
+										  gpu_device_name,
+										  gpu_device_uuid);
+	}
+	return 0;
 }
 
 /*

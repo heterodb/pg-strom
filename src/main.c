@@ -580,12 +580,11 @@ _PG_init(void)
 	pgstrom_init_extra();
 
 	/* dump version number */
-#ifdef PGSTROM_VERSION
-	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",
-		 PGSTROM_VERSION, PG_MAJORVERSION);
-#else
-	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
-#endif
+	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
+		 PGSTROM_VERSION,
+		 PG_MAJORVERSION,
+		 PGSTROM_GITHASH);
+
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_shmbuf();
 	pgstrom_init_gpu_device();
