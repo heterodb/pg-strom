@@ -1,0 +1,32 @@
+---
+--- Test for apache_arrow with index
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
+CREATE SCHEMA regtest_arrow_index_temp;
+RESET client_min_messages;
+
+SET search_path = regtest_arrow_index_temp,public;
+
+CREATE TABLE regtest_data (
+  int_num         int,
+  float_num       float,
+  decimal_num     numeric,
+  date_num        date,
+  time_num        time,
+  timestamp_num   timestamp
+);
+
+INSERT INTO regtest_data (
+    SELECT x,   -- int_num
+        pgstrom.random_float(2,-10000.0,10000.0),   -- float_num
+        pgstrom.random_float(2,-10000.0,10000.0),   -- decimal_num
+        pgstrom.random_date(2),                     -- date_num
+        pgstrom.random_time(2),                     -- time_num
+        pgstrom.random_timestamp(2)                     -- date_num
+    FROM generate_series(1,100000) x);
+
+\! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.regtest_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data
+
+DROP SCHEMA regtest_arrow_index_temp CASCADE;
