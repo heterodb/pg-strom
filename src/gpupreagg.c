@@ -3725,7 +3725,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 static const char *
 gpupreagg_codegen_common_calc(TargetEntry *tle,
 							  codegen_context *context,
-							  bool is_atomic_ops)
+							  const char *aggcalc_mode)
 {
 	FuncExpr	   *f = (FuncExpr *)tle->expr;
 	char		   *func_name;
@@ -3790,7 +3790,7 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 	}
 	snprintf(sbuffer, sizeof(sbuffer),
 			 "aggcalc_%s_%s_%s",
-			 is_atomic_ops ? "atomic" : "normal",
+			 aggcalc_mode,
 			 aggcalc_ops,
 			 aggcalc_type);
 	return sbuffer;
@@ -3826,7 +3826,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
 
-		label = gpupreagg_codegen_common_calc(tle, context, true);
+		label = gpupreagg_codegen_common_calc(tle, context, "atomic");
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
@@ -3870,7 +3870,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
 
-		label = gpupreagg_codegen_common_calc(tle, context, true);
+		label = gpupreagg_codegen_common_calc(tle, context, "atomic");
 		appendStringInfo(
 			kern,
 			"  %s(dst_dclass+%d, dst_values+%d, src_dclass[%d], src_values[%d]);\n",
@@ -3914,7 +3914,7 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		/* only partial aggregate function's arguments */
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
-		label = gpupreagg_codegen_common_calc(tle, context, false);
+		label = gpupreagg_codegen_common_calc(tle, context, "normal");
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
@@ -3929,6 +3929,148 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		"    break;\n"
 		"  }\n"
 		"}\n\n");
+}
+
+/*
+ * code generator for accum-values initialization
+ */
+static void
+gpupreagg_codegen_accum_init(StringInfo kern,
+							 codegen_context *context,
+							 List *tlist_dev)
+{
+	StringInfoData lbuf;
+	StringInfoData gbuf;
+	ListCell   *lc;
+	int			count = 0;
+
+	initStringInfo(&lbuf);
+	initStringInfo(&gbuf);
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		const char	   *label;
+
+		/* only partial aggregate function's arguments */
+		if (tle->resjunk)
+			continue;
+		if (!is_altfunc_expression((Node *)tle->expr))
+		{
+			appendStringInfo(
+				&gbuf,
+				"  aggcalc_init_null(&dest_dclass[%d], &dest_values[%d]);\n",
+				tle->resno - 1,
+				tle->resno - 1);
+			continue;
+		}
+		label = gpupreagg_codegen_common_calc(tle, context, "init");
+		appendStringInfo(
+			&lbuf,
+			"  %s(&dest_dclass[%d], &dest_values[%d]);\n",
+			label, count, count);
+		appendStringInfo(
+			&gbuf,
+			"  %s(&dest_dclass[%d], &dest_values[%d]);\n",
+			label, tle->resno - 1, tle->resno - 1);
+		count++;
+	}
+
+	appendStringInfo(
+		kern,
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_init_local(cl_char *dest_dclass,\n"
+		"                     Datum   *dest_values)\n"
+		"{\n"
+		"%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_init_global(cl_char *dest_dclass,\n"
+		"                      Datum   *dest_values)\n"
+		"{\n"
+		"%s"
+		"}\n\n",
+		lbuf.data,
+		gbuf.data);
+	pfree(lbuf.data);
+	pfree(gbuf.data);
+}
+
+/*
+ * code generator for accum-values merge
+ */
+static void
+gpupreagg_codegen_accum_merge(StringInfo kern,
+							  codegen_context *context,
+							  List *tlist_dev)
+{
+	StringInfoData sbuf;	/* _shuffle */
+	StringInfoData nbuf;	/* _normal */
+	StringInfoData abuf;	/* _atomic */
+	ListCell   *lc;
+	int			count = 0;
+
+	initStringInfo(&sbuf);
+	initStringInfo(&nbuf);
+	initStringInfo(&abuf);
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		const char	   *label;
+
+		/* only partial aggregate function's arguments */
+		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
+			continue;
+		label = gpupreagg_codegen_common_calc(tle, context, "shuffle");
+		appendStringInfo(
+			&sbuf,
+			"  %s(&dst_dclass[%d], &dst_values[%d], src_dclass[%d], src_values[%d], lane_id);\n",
+			label, count, count, count, count);
+
+		label = gpupreagg_codegen_common_calc(tle, context, "normal");
+		appendStringInfo(
+			&nbuf,
+			"  %s(&dst_dclass[%d], &dst_values[%d], src_dclass[%d], src_values[%d]);\n",
+			label, count, count, count, count);
+
+		label = gpupreagg_codegen_common_calc(tle, context, "atomic");
+		appendStringInfo(
+			&abuf,
+			"  %s(&dst_dclass[%d], &dst_values[%d], src_dclass[%d], src_values[%d]);\n",
+			label, tle->resno-1, tle->resno-1, tle->resno-1, tle->resno-1);
+
+		count++;
+    }
+	
+	appendStringInfo(
+		kern,
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_merge_shuffle(cl_char *dst_dclass,\n"
+		"                        Datum   *dst_values,\n"
+		"                        cl_char *src_dclass,\n"
+		"                        Datum   *src_values,\n"
+		"                        int      lane_id)\n"
+		"{\n%s}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_merge_normal(cl_char  *dst_dclass,\n"
+		"                       Datum    *dst_values,\n"
+		"                       cl_char  *src_dclass,\n"
+		"                       Datum    *src_values)\n"
+		"{\n%s}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_merge_atomic(cl_char  *dst_dclass,\n"
+		"                       Datum    *dst_values,\n"
+		"                       cl_char  *src_dclass,\n"
+		"                       Datum    *src_values)\n"
+		"{\n%s}\n\n",
+		sbuf.data,
+		nbuf.data,
+		abuf.data);
+	
+	pfree(sbuf.data);
+	pfree(nbuf.data);
+	pfree(abuf.data);
 }
 
 /*
@@ -4038,6 +4180,10 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
 	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
+	/* gpupreagg_init_* */
+	gpupreagg_codegen_accum_init(&body, context, tlist_dev);
+	/* gpupreagg_merge_* */
+	gpupreagg_codegen_accum_merge(&body, context, tlist_dev);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
@@ -4105,10 +4251,19 @@ void
 assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	CustomScan	   *cscan __attribute__((unused))
-		= (CustomScan *) gpas->gts.css.ss.ps.plan;
+	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
+	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 
-	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
+	Assert(pgstrom_plan_is_gpupreagg(gpas->gts.css.ss.ps.plan));
+
+	/*
+	 * struct __preagg_accum_item is a local buffer to save a cumulative sum
+	 * for accumulation values.
+	 */
+	Assert(gpa_tupdesc->natts >= gpas->num_group_keys);
+	appendStringInfo(buf, "#define GPUPREAGG_NUM_ACCUM_VALUES %u\n",
+					 gpa_tupdesc->natts - gpas->num_group_keys);
+
 	/*
 	 * definition of GPUPREAGG_COMBINED_JOIN disables a dummy definition
 	 * of gpupreagg_projection_slot() in cuda_gpujoin.h, and switch to
