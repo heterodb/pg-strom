@@ -2916,7 +2916,7 @@ make_tlist_device_projection(List *tlist_dev,
 }
 
 /*
- * gpupreagg_codegen_projection_XXXX - code generator for
+ * gpupreagg_codegen_projection - code generator for
  *
  * DEVICE_FUNCTION(void)
  * gpupreagg_projection_row(kern_context *kcxt,
@@ -2949,9 +2949,7 @@ make_tlist_device_projection(List *tlist_dev,
  *                             Datum   *dst_values);
  */
 static Expr *
-codegen_projection_partial_funcion(FuncExpr *f,
-								   codegen_context *context,
-								   const char **p_null_const_value)
+codegen_projection_partial_funcion(FuncExpr *f, codegen_context *context)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc_form;
@@ -2981,7 +2979,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 								 FLOAT8PASSBYVAL);
 		if (f->args)
 			expr = make_expr_conditional(expr, linitial(f->args), true);
-		*p_null_const_value = "0";
 	}
 	else if (strcmp(proc_name, "pmin") == 0 ||
 			 strcmp(proc_name, "pmax") == 0)
@@ -2993,9 +2990,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %s",
 				 format_type_be(exprType((Node *)expr)));
-		*p_null_const_value = (strcmp(proc_name, "pmin") == 0
-							   ? dtype->max_const
-							   : dtype->min_const);
 	}
 	else if (strcmp(proc_name, "psum") == 0 ||
 			 strcmp(proc_name, "psum_x2") == 0)
@@ -3018,7 +3012,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 										InvalidOid,
 										COERCE_EXPLICIT_CALL);
 		}
-		*p_null_const_value = dtype->zero_const;		
 	}
 	else if (strcmp(proc_name, "pcov_x")  == 0 ||
 			 strcmp(proc_name, "pcov_y")  == 0 ||
@@ -3067,16 +3060,7 @@ codegen_projection_partial_funcion(FuncExpr *f,
 			elog(ERROR, "Bug? unexpected code path");
 
 		Assert(exprType((Node *)filter) == BOOLOID);
-		if (IsA(filter, Const) &&
-			DatumGetBool(((Const *)filter)->constvalue) &&
-			!((Const *)filter)->constisnull)
-		{
-			*p_null_const_value = "0.0";
-		}
-		else
-		{
-			expr = make_expr_conditional(expr, filter, true);
-		}
+		expr = make_expr_conditional(expr, filter, true);
 	}
 	else
 	{
@@ -3089,13 +3073,13 @@ codegen_projection_partial_funcion(FuncExpr *f,
 }
 
 static void
-gpupreagg_codegen_projection_row(StringInfo kern,
-								 codegen_context *context,
-								 List *tlist_alt,
-								 Bitmapset *outer_refs_any,
-								 Bitmapset *outer_refs_expr,
-								 Index outer_scanrelid,
-								 List *outer_tlist)
+gpupreagg_codegen_projection(StringInfo kern,
+							 codegen_context *context,
+							 List *tlist_alt,
+							 Bitmapset *outer_refs_any,
+							 Bitmapset *outer_refs_expr,
+							 Index outer_scanrelid,
+							 List *outer_tlist)
 {
 	PlannerInfo	   *root = context->root;
 	StringInfoData	decl;
@@ -3353,7 +3337,6 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		TargetEntry	   *tle = lfirst(lc);
 		Expr		   *expr;
 		devtype_info   *dtype;
-		const char	   *null_const_value = NULL;
 		const char	   *projection_label = NULL;
 
 		if (tle->resjunk)
@@ -3364,15 +3347,12 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		{
 			FuncExpr   *f = (FuncExpr *) tle->expr;
 
-			expr = codegen_projection_partial_funcion(f,
-													  context,
-													  &null_const_value);
+			expr = codegen_projection_partial_funcion(f, context);
 			projection_label = "aggfunc-arg";
 		}
 		else if (tle->ressortgroupref)
 		{
 			expr = tle->expr;
-			null_const_value = "0";
 			projection_label = "grouping-key";
 		}
 		else
@@ -3388,27 +3368,18 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			&temp,
 			"\n"
 			"  /* initial attribute %d (%s) */\n"
-			"  temp.%s_v = %s;\n",
+			"  temp.%s_v = %s;\n"
+			"  if (!temp.%s_v.isnull)\n"
+			"    pg_datum_store(kcxt, temp.%s_v,\n"
+			"                   dst_dclass[%d],\n"
+			"                   dst_values[%d]);\n",
 			tle->resno, projection_label,
 			dtype->type_name,
-			pgstrom_codegen_expression((Node *)expr, context));
-
-		appendStringInfo(
-			&temp,
-			"  pg_datum_store(kcxt, temp.%s_v,\n"
-			"                 dst_dclass[%d],\n"
-			"                 dst_values[%d]);\n",
+			pgstrom_codegen_expression((Node *)expr, context),
+			dtype->type_name,
 			dtype->type_name,
 			tle->resno-1,
-			tle->resno-1);
-		if (null_const_value)
-			appendStringInfo(
-				&temp,
-				"  if (temp.%s_v.isnull)\n"
-				"    dst_values[%d] = %s;\n",
-				dtype->type_name,
-				tle->resno-1,
-				null_const_value);
+            tle->resno-1);
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 		type_oid_list = list_append_unique_oid(type_oid_list,
 											   dtype->type_oid);
@@ -3432,7 +3403,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                         cl_char *dst_dclass,\n"
 		"                         Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"  gpupreagg_init_slot(dst_dclass, dst_values);\n"
+		"%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3442,7 +3415,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                          cl_char *dst_dclass,\n"
 		"                          Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"  gpupreagg_init_slot(dst_dclass, dst_values);\n"
+		"%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3452,7 +3427,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                           cl_char *dst_dclass,\n"
 		"                           Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"  gpupreagg_init_slot(dst_dclass, dst_values);\n"
+		"%s"
 		"}\n\n"
 		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_projection_column(kern_context *kcxt,\n"
@@ -3462,7 +3439,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                            cl_char *dst_dclass,\n"
 		"                            Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"  gpupreagg_init_slot(dst_dclass, dst_values);\n"
+		"%s"
 		"}\n\n",
 		decl.data, context->decl_temp.data,
 		tbody.data,
@@ -3932,12 +3911,12 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 }
 
 /*
- * code generator for accum-values initialization
+ * code generator for initialization of a slot
  */
 static void
-gpupreagg_codegen_accum_init(StringInfo kern,
-							 codegen_context *context,
-							 List *tlist_dev)
+gpupreagg_codegen_init_slot(StringInfo kern,
+							codegen_context *context,
+							List *tlist_dev)
 {
 	ListCell   *lc;
 	int			count = 0;
@@ -4123,13 +4102,13 @@ gpupreagg_codegen(codegen_context *context,
 	Assert(list_length(tlist_alt) == nfields);
 	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
-	gpupreagg_codegen_projection_row(&body,
-									 context,
-									 tlist_alt,
-									 outer_refs_any,
-									 outer_refs_expr,
-									 cscan->scan.scanrelid,
-									 outer_tlist);
+	gpupreagg_codegen_projection(&body,
+								 context,
+								 tlist_alt,
+								 outer_refs_any,
+								 outer_refs_expr,
+								 cscan->scan.scanrelid,
+								 outer_tlist);
 	varlena_bufsz = (context->varlena_bufsz +
 					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
 					 MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
@@ -4160,8 +4139,8 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
 	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
-	/* gpupreagg_init_* */
-	gpupreagg_codegen_accum_init(&body, context, tlist_dev);
+	/* gpupreagg_init_slot */
+	gpupreagg_codegen_init_slot(&body, context, tlist_dev);
 	/* gpupreagg_merge_* */
 	gpupreagg_codegen_accum_merge(&body, context, tlist_dev);
 	/* merge above kernel functions */

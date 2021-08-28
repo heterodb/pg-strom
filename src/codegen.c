@@ -73,9 +73,6 @@ static struct {
 	const char	   *type_name;
 	Oid				type_oid_fixed;	/* can be InvalidOid if not build-in */
 	const char	   *type_oid_label;
-	const char	   *max_const;
-	const char	   *min_const;
-	const char	   *zero_const;
 	cl_uint			type_flags;		/* library to declare this type */
 	cl_uint			extra_sz;		/* required size to store internal form */
 	devtype_hashfunc_type hash_func;
@@ -84,69 +81,50 @@ static struct {
 	 * Primitive datatypes
 	 */
 	{ "pg_catalog", "bool", BOOLOID, "BOOLOID",
-	  NULL, NULL, "false", 0, 0,
-	  generic_devtype_hashfunc
+	  0, 0, generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "int1", INT1OID, "INT1OID",
-	  "SCHAR_MAX", "SCHAR_MIN", "0",
 	  0, 0, pg_int1_devtype_hashfunc
 	},
 	{ "pg_catalog", "int2", INT2OID, "INT2OID",
-	  "SHRT_MAX", "SHRT_MIN", "0",
 	  0, 0, pg_int2_devtype_hashfunc
 	},
 	{ "pg_catalog", "int4", INT4OID, "INT4OID",
-	  "INT_MAX", "INT_MIN", "0",
 	  0, 0, pg_int4_devtype_hashfunc
 	},
 	{ "pg_catalog", "int8", INT8OID, "INT8OID",
-	  "LONG_MAX", "LONG_MIN", "0",
 	  0, 0, pg_int8_devtype_hashfunc
 	},
 	/* XXX - float2 is not a built-in data type */
 	{ "pg_catalog", "float2", FLOAT2OID, "FLOAT2OID",
-	  "__half_as_short(HALF_MAX)",
-	  "__half_as_short(-HALF_MAX)",
-	  "__half_as_short(0.0)",
 	  0, 0, pg_float2_devtype_hashfunc
 	},
 	{ "pg_catalog", "float4", FLOAT4OID, "FLOAT4OID",
-	  "__float_as_int(FLT_MAX)",
-	  "__float_as_int(-FLT_MAX)",
-	  "__float_as_int(0.0)",
 	  0, 0, pg_float4_devtype_hashfunc
 	},
 	{ "pg_catalog", "float8", FLOAT8OID, "FLOAT8OID",
-	  "__double_as_longlong(DBL_MAX)",
-	  "__double_as_longlong(-DBL_MAX)",
-	  "__double_as_longlong(0.0)",
 	  0, 0, pg_float8_devtype_hashfunc
 	},
 	/*
 	 * Misc data types
 	 */
 	{ "pg_catalog", "money", CASHOID, "CASHOID",
-	  "LONG_MAX", "LONG_MIN", "0",
 	  DEVKERNEL_NEEDS_MISCLIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "uuid", UUIDOID, "UUIDOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_MISCLIB, UUID_LEN,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "macaddr", MACADDROID, "MACADDROID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(macaddr),
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "inet", INETOID, "INETOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 	  pg_inet_devtype_hashfunc
 	},
 	{ "pg_catalog", "cidr", CIDROID, "CIDROID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 	  pg_inet_devtype_hashfunc
 	},
@@ -154,32 +132,26 @@ static struct {
 	 * Date and time datatypes
 	 */
 	{ "pg_catalog", "date", DATEOID, "DATEOID",
-	  "INT_MAX", "INT_MIN", "0",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "time", TIMEOID, "TIMEOID",
-	  "LONG_MAX", "LONG_MIN", "0",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "timetz", TIMETZOID, "TIMETZOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TIMELIB, sizeof(TimeTzADT),
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "timestamp", TIMESTAMPOID, "TIMESTAMPOID",
-	  "LONG_MAX", "LONG_MIN", "0",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "timestamptz", TIMESTAMPTZOID, "TIMESTAMPTZOID",
-	  "LONG_MAX", "LONG_MIN", "0",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "interval", INTERVALOID, "INTERVALOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
 	  pg_interval_devtype_hashfunc
 	},
@@ -187,32 +159,26 @@ static struct {
 	 * variable length datatypes
 	 */
 	{ "pg_catalog", "bpchar", BPCHAROID, "BPCHAROID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TEXTLIB, 0,
 	  pg_bpchar_devtype_hashfunc
 	},
 	{ "pg_catalog", "varchar", VARCHAROID, "VARCHAROID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TEXTLIB, 0,
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "numeric", NUMERICOID, "NUMERICOID",
-	  NULL, NULL, NULL,
 	  0, sizeof(struct NumericData),
 	  pg_numeric_devtype_hashfunc
 	},
 	{ "pg_catalog", "bytea", BYTEAOID, "BYTEAOID",
-	  NULL, NULL, NULL,
 	  0, sizeof(pg_varlena_t),
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "text", TEXTOID, "TEXTOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TEXTLIB, sizeof(pg_varlena_t),
 	  generic_devtype_hashfunc
 	},
 	{ "pg_catalog", "jsonb", JSONBOID, "JSONBOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_JSONLIB,
 	  /* see comment at vlbuf_estimate_jsonb() */
 	  TOAST_TUPLE_THRESHOLD,
@@ -222,31 +188,26 @@ static struct {
 	 * range types
 	 */
 	{ "pg_catalog", "int4range", INT4RANGEOID, "INT4RANGEOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(cl_int) + 1,
 	  pg_range_devtype_hashfunc
 	},
 	{ "pg_catalog", "int8range", INT8RANGEOID, "INT8RANGEOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(cl_long) + 1,
 	  pg_range_devtype_hashfunc
 	},
 	{ "pg_catalog", "tsrange", TSRANGEOID, "TSRANGEOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(Timestamp) + 1,
 	  pg_range_devtype_hashfunc
 	},
 	{ "pg_catalog", "tstzrange", TSTZRANGEOID, "TSTZRANGEOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(TimestampTz) + 1,
 	  pg_range_devtype_hashfunc
 	},
 	{ "pg_catalog", "daterange", DATERANGEOID, "DATERANGEOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(DateADT) + 1,
 	  pg_range_devtype_hashfunc
@@ -255,13 +216,11 @@ static struct {
 	 * PostGIS types
 	 */
 	{ "@postgis", "geometry", InvalidOid, "GEOMETRYOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_POSTGIS,
 	  sizeof(pg_geometry_t),
 	  pg_geometry_devtype_hashfunc
 	},
 	{ "@postgis", "box2df", InvalidOid, "BOX2DFOID",
-	  NULL, NULL, NULL,
 	  DEVKERNEL_NEEDS_POSTGIS,
 	  sizeof(pg_box2df_t),
 	  pg_box2df_devtype_hashfunc
@@ -351,9 +310,6 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			entry->type_align = typealign_get_width(tcache->typalign);
 			entry->type_byval = tcache->typbyval;
 			entry->type_name = devtype_catalog[i].type_name; /* const */
-			entry->max_const = devtype_catalog[i].max_const;
-			entry->min_const = devtype_catalog[i].min_const;
-			entry->zero_const = devtype_catalog[i].zero_const;
 			entry->extra_sz = devtype_catalog[i].extra_sz;
 			entry->hash_func = devtype_catalog[i].hash_func;
 			/* type equality functions */
@@ -388,9 +344,6 @@ build_array_devtype_info(TypeCacheEntry *tcache)
 	entry->type_align = typealign_get_width(tcache->typalign);
 	entry->type_byval = tcache->typbyval;
 	entry->type_name = "array";
-	entry->max_const = NULL;
-	entry->min_const = NULL;
-	entry->zero_const = NULL;
 	entry->extra_sz = sizeof(pg_array_t);
 	entry->hash_func = generic_devtype_hashfunc;
 	entry->type_element = element;
