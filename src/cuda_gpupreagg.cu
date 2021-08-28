@@ -821,19 +821,27 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 							kern_gpupreagg *kgpreagg,		/* in/out */
 							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
-							kern_data_store *kds_final,		/* shared out */
-							kern_global_hashslot *f_hash)	/* shared out */
+							kern_data_store *kds_final,		/* global out */
+							cl_char *l_dclass,		/* __shared__ */
+                            Datum   *l_values,  	/* __shared__ */
+                            cl_char *p_dclass,		/* __private__ */
+                            Datum   *p_values)		/* __private__ */
 {
-	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
-	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	cl_uint			nvalids;
-	cl_int			i, j;
+//	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
+//	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
+	cl_uint			ncols = kds_slot->ncols;
+	cl_uint			index;
 	cl_bool			is_last_reduction = false;
 	cl_char		   *row_inval_map;
-#define NOGROUP_BLOCK_SZ		4096	/* 36kB of shared memory consumption */
-	__shared__ cl_bool	l_dclass[NOGROUP_BLOCK_SZ];
-	__shared__ Datum	l_values[NOGROUP_BLOCK_SZ];
 	__shared__ cl_uint	base;
+
+	/* init local/private buffer */
+	assert(MAXWARPS_PER_BLOCK <= get_local_size() &&
+		   MAXWARPS_PER_BLOCK == warpSize);
+	if (get_local_id() < MAXWARPS_PER_BLOCK)
+		gpupreagg_init_slot(l_dclass + get_local_id() * ncols,
+							l_values + get_local_id() * ncols);
+	gpupreagg_init_slot(p_dclass, p_values);
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
@@ -850,113 +858,103 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		kgpreagg->setup_slot_done = true;
 	row_inval_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 
+	/* start private reduction */
 	do {
 		/* fetch next items from the kds_slot */
 		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_slot_pos, NOGROUP_BLOCK_SZ);
+			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
 		__syncthreads();
 
-		if (base + NOGROUP_BLOCK_SZ >= kds_slot->nitems)
+		if (base + get_local_size() >= kds_slot->nitems)
 			is_last_reduction = true;
-		if (base >= kds_slot->nitems)
-			break;
-		nvalids = Min(kds_slot->nitems - base, NOGROUP_BLOCK_SZ);
-		/* reductions for each columns */
-		for (j=0; j < kds_slot->ncols; j++)
+		index = base + get_local_id();
+		/* accumulate to the private buffer */
+		if (index < kds_slot->nitems)
 		{
-			int		dist, buddy;
-
-			/* do nothing, if attribute is not preagg-function */
-			if (!attr_is_preagg[j])
-				continue;
-			/* load the value from kds_slot to local */
-			for (i = get_local_id(); i < nvalids; i += get_local_size())
-			{
-				assert(base + i < kds_slot->nitems);
-				l_dclass[i] = KERN_DATA_STORE_DCLASS(kds_slot, base + i)[j];
-				l_values[i] = KERN_DATA_STORE_VALUES(kds_slot, base + i)[j];
-			}
-			__syncthreads();
-
-			/* do reduction */
-			for (dist=2, buddy=1; dist < 2 * nvalids; buddy=dist, dist *= 2)
-			{
-				for (i = get_local_id(); i < nvalids; i += get_local_size())
-				{
-					if ((i & (dist - 1)) == 0 &&
-						(i + (buddy)) < nvalids)
-					{
-						gpupreagg_nogroup_calc(j,
-											   &l_dclass[i],
-											   &l_values[i],
-											   l_dclass[i + buddy],
-											   l_values[i + buddy]);
-					}
-				}
-				__syncthreads();
-			}
-
-			/* store this value to kds_slot from isnull/values */
-			if (get_local_id() == 0)
-			{
-				KERN_DATA_STORE_DCLASS(kds_slot, base)[j] = l_dclass[0];
-				KERN_DATA_STORE_VALUES(kds_slot, base)[j] = l_values[0];
-			}
-			__syncthreads();
+			gpupreagg_merge_normal(p_dclass,
+								   p_values,
+								   KERN_DATA_STORE_DCLASS(kds_slot, index),
+								   KERN_DATA_STORE_VALUES(kds_slot, index));
+			/*
+			 * XXX - Does it make sense to have row invalidation map
+			 * in the NoGroup reduction mode?
+			 * We shall never cause the buffer over-consumption here.
+			 */
+			row_inval_map[index] = true;
 		}
-		/* update the final reduction buffer */
-		if (get_local_id() == 0)
-		{
-			cl_uint		old_nitems = 0;
-			cl_uint		new_nitems = 0xffffffff;	/* LOCKED */
-			cl_uint		cur_nitems;
-
-		try_again:
-			cur_nitems = atomicCAS(&kds_final->nitems,
-								   old_nitems,
-								   new_nitems);
-			if (cur_nitems == 0)
-			{
-				/* just copy */
-				memcpy(KERN_DATA_STORE_DCLASS(kds_final, 0),
-					   KERN_DATA_STORE_DCLASS(kds_slot, base),
-					   sizeof(cl_char) * kds_slot->ncols);
-				memcpy(KERN_DATA_STORE_VALUES(kds_final, 0),
-					   KERN_DATA_STORE_VALUES(kds_slot, base),
-					   sizeof(Datum) * kds_slot->ncols);
-				atomicAdd(&kgpreagg->num_groups, 1);
-				atomicExch(&kds_final->nitems, 1);	/* UNLOCKED */
-			}
-			else if (cur_nitems == 1)
-			{
-				/*
-				 * NOTE: nogroup reduction has no grouping keys, and
-				 * GpuPreAgg does not support aggregate functions that
-				 * have variable length fields as internal state.
-				 * So, we don't care about copy of grouping keys.
-				 */
-				gpupreagg_global_calc(
-					KERN_DATA_STORE_DCLASS(kds_final, 0),
-					KERN_DATA_STORE_VALUES(kds_final, 0),
-					KERN_DATA_STORE_DCLASS(kds_slot, base),
-					KERN_DATA_STORE_VALUES(kds_slot, base));
-			}
-			else
-			{
-				assert(cur_nitems == 0xffffffff);
-				goto try_again;
-			}
-		}
-		/*
-		 * Mark this row is invalid because its values are already
-		 * accumulated to the final buffer. Once subsequent operations
-		 * reported CpuReCheck error, CPU fallback routine shall ignore
-		 * the rows to avoid duplication in count.
-		 */
-		for (i = get_local_id(); i < nvalids; i += get_local_size())
-			row_inval_map[base + i] = true;
-		__syncthreads();
 	} while (!is_last_reduction);
+
+	/* 1st level local reduction (inside warp) */
+	for (cl_uint mask = 1; mask < warpSize; mask += mask)
+	{
+		cl_uint		buddy = ((get_local_id() ^ mask) & (warpSize-1));
+
+		gpupreagg_merge_shuffle(p_dclass, p_values, buddy);
+	}
+	/* move to the shared memory for inter-warp shuffling */
+	if ((get_local_id() & (warpSize-1)) == 0)
+	{
+		cl_uint		shift = (get_local_id() / warpSize) * ncols;
+
+		memcpy(l_dclass + shift, p_dclass, sizeof(cl_char) * ncols);
+		memcpy(l_values + shift, p_values, sizeof(Datum) *   ncols);
+	}
+	__syncthreads();
+
+	/* 2nd level local reduction (inter warp) */
+	if (get_local_id() < MAXWARPS_PER_BLOCK)
+	{
+		memcpy(p_dclass, l_dclass + get_local_id() * ncols, sizeof(cl_char) * ncols);
+		memcpy(p_values, l_values + get_local_id() * ncols, sizeof(Datum) * ncols);
+
+		for (cl_uint mask = 1; mask < MAXWARPS_PER_BLOCK; mask += mask)
+		{
+			cl_uint		buddy = ((get_local_id() ^ mask) & (MAXWARPS_PER_BLOCK-1));
+
+			gpupreagg_merge_shuffle(p_dclass, p_values, buddy);
+		}
+	}
+
+	/* update the final buffer */
+	if (get_local_id() == 0)
+	{
+		cl_uint		old_nitems = 0;
+		cl_uint		new_nitems = 0xffffffff;	/* LOCKED */
+		cl_uint		cur_nitems;
+
+	try_again:
+		cur_nitems = atomicCAS(&kds_final->nitems,
+							   old_nitems,
+							   new_nitems);
+		if (cur_nitems == 0)
+		{
+			/* just copy */
+			memcpy(KERN_DATA_STORE_DCLASS(kds_final, 0),
+				   p_dclass, sizeof(cl_char) * ncols);
+			memcpy(KERN_DATA_STORE_VALUES(kds_final, 0),
+				   p_values, sizeof(Datum) * ncols);
+			atomicAdd(&kgpreagg->num_groups, 1);
+			atomicExch(&kds_final->nitems, 1);		/* UNLOCKED */
+		}
+		else if (cur_nitems == 1)
+		{
+			/*
+			 * NOTE: nogroup reduction has no grouping keys, and
+			 * GpuPreAgg does not support aggregate functions that
+			 * have variable length fields as internal state.
+			 * So, we don't care about copy of grouping keys.
+			 */
+			gpupreagg_merge_atomic(KERN_DATA_STORE_DCLASS(kds_final, 0),
+								   KERN_DATA_STORE_VALUES(kds_final, 0),
+								   p_dclass,
+								   p_values);
+		}
+		else
+		{
+			assert(cur_nitems == 0xffffffff);
+			goto try_again;
+		}
+	}
 }
 
 /*

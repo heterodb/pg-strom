@@ -3939,13 +3939,15 @@ gpupreagg_codegen_accum_init(StringInfo kern,
 							 codegen_context *context,
 							 List *tlist_dev)
 {
-	StringInfoData lbuf;
-	StringInfoData gbuf;
 	ListCell   *lc;
 	int			count = 0;
 
-	initStringInfo(&lbuf);
-	initStringInfo(&gbuf);
+	appendStringInfoString(
+		kern,
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_init_slot(cl_char *dst_dclass,\n"
+		"                    Datum   *dst_values)\n"
+		"{\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -3958,42 +3960,22 @@ gpupreagg_codegen_accum_init(StringInfo kern,
 		if (!is_altfunc_expression((Node *)tle->expr))
 		{
 			appendStringInfo(
-				&gbuf,
-				"  aggcalc_init_null(&dest_dclass[%d], &dest_values[%d]);\n",
+				kern,
+				"  aggcalc_init_null(&dst_dclass[%d], &dst_values[%d]);\n",
 				tle->resno - 1,
 				tle->resno - 1);
-			continue;
 		}
-		label = gpupreagg_codegen_common_calc(tle, context, "init");
-		appendStringInfo(
-			&lbuf,
-			"  %s(&dest_dclass[%d], &dest_values[%d]);\n",
-			label, count, count);
-		appendStringInfo(
-			&gbuf,
-			"  %s(&dest_dclass[%d], &dest_values[%d]);\n",
-			label, tle->resno - 1, tle->resno - 1);
-		count++;
+		else
+		{
+			label = gpupreagg_codegen_common_calc(tle, context, "init");
+			appendStringInfo(
+				kern,
+				"  %s(&dst_dclass[%d], &dst_values[%d]);\n",
+				label, tle->resno - 1, tle->resno - 1);
+			count++;
+		}
 	}
-
-	appendStringInfo(
-		kern,
-		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_init_local(cl_char *dest_dclass,\n"
-		"                     Datum   *dest_values)\n"
-		"{\n"
-		"%s"
-		"}\n\n"
-		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_init_global(cl_char *dest_dclass,\n"
-		"                      Datum   *dest_values)\n"
-		"{\n"
-		"%s"
-		"}\n\n",
-		lbuf.data,
-		gbuf.data);
-	pfree(lbuf.data);
-	pfree(gbuf.data);
+	appendStringInfoString(kern, "}\n\n");
 }
 
 /*
@@ -4025,14 +4007,14 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 		label = gpupreagg_codegen_common_calc(tle, context, "shuffle");
 		appendStringInfo(
 			&sbuf,
-			"  %s(&dst_dclass[%d], &dst_values[%d], src_dclass[%d], src_values[%d], lane_id);\n",
-			label, count, count, count, count);
+			"  %s(&priv_dclass[%d], &priv_values[%d], lane_id);\n",
+			label, tle->resno-1, tle->resno-1);
 
 		label = gpupreagg_codegen_common_calc(tle, context, "normal");
 		appendStringInfo(
 			&nbuf,
 			"  %s(&dst_dclass[%d], &dst_values[%d], src_dclass[%d], src_values[%d]);\n",
-			label, count, count, count, count);
+			label, tle->resno-1, tle->resno-1, tle->resno-1, tle->resno-1);
 
 		label = gpupreagg_codegen_common_calc(tle, context, "atomic");
 		appendStringInfo(
@@ -4046,10 +4028,8 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_merge_shuffle(cl_char *dst_dclass,\n"
-		"                        Datum   *dst_values,\n"
-		"                        cl_char *src_dclass,\n"
-		"                        Datum   *src_values,\n"
+		"gpupreagg_merge_shuffle(cl_char *priv_dclass,\n"
+		"                        Datum   *priv_values,\n"
 		"                        int      lane_id)\n"
 		"{\n%s}\n\n"
 		"DEVICE_FUNCTION(void)\n"
