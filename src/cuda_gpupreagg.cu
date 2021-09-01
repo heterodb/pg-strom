@@ -13,152 +13,6 @@
 #include "cuda_common.h"
 #include "cuda_gpupreagg.h"
 #include "cuda_postgis.h"
-/*
- * gpupreagg_final_data_move
- *
- * It moves the value from source buffer to destination buffer. If it needs
- * to allocate variable-length buffer, it expands extra area of the final
- * buffer and returns allocated area.
- */
-STATIC_FUNCTION(cl_int)
-gpupreagg_final_data_move(kern_context *kcxt,
-						  kern_data_store *kds_src, cl_uint rowidx_src,
-						  kern_data_store *kds_dst, cl_uint rowidx_dst)
-{
-	Datum	   *src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
-	Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
-	cl_char	   *src_dclass = KERN_DATA_STORE_DCLASS(kds_src, rowidx_src);
-	cl_char	   *dst_dclass = KERN_DATA_STORE_DCLASS(kds_dst, rowidx_dst);
-	cl_uint		i, ncols = kds_src->ncols;
-	cl_int		alloc_size = 0;
-	char	   *curr = NULL;
-	int			len;
-
-	/* Paranoire checks? */
-	assert(kds_src->format == KDS_FORMAT_SLOT &&
-		   kds_dst->format == KDS_FORMAT_SLOT);
-	assert(kds_src->ncols == kds_dst->ncols);
-	assert(rowidx_src < kds_src->nitems);
-	assert(rowidx_dst < kds_dst->nitems);
-
-	/* size for allocation */
-	for (i=0; i < ncols; i++)
-	{
-		kern_colmeta   *cmeta = &kds_src->colmeta[i];
-		cl_char			dclass = src_dclass[i];
-
-		if (dclass == DATUM_CLASS__NULL)
-			continue;
-
-		if (cmeta->attbyval)
-			assert(dclass == DATUM_CLASS__NORMAL);
-		else if (cmeta->attlen > 0)
-		{
-			assert(dclass == DATUM_CLASS__NORMAL);
-			alloc_size += MAXALIGN(cmeta->attlen);
-		}
-		else
-		{
-			assert(cmeta->attlen == -1);
-			switch (dclass)
-			{
-				case DATUM_CLASS__VARLENA:
-					len = pg_varlena_datum_length(kcxt, src_values[i]);
-					break;
-				case DATUM_CLASS__ARRAY:
-					len = pg_array_datum_length(kcxt, src_values[i]);
-					break;
-				case DATUM_CLASS__COMPOSITE:
-					len = pg_composite_datum_length(kcxt, src_values[i]);
-					break;
-				case DATUM_CLASS__GEOMETRY:
-					len = pg_geometry_datum_length(kcxt, src_values[i]);
-					break;
-				default:
-					assert(dclass == DATUM_CLASS__NORMAL);
-					len = VARSIZE_ANY(DatumGetPointer(src_values[i]));
-					break;
-			}
-			alloc_size += MAXALIGN(len);
-		}
-	}
-	/* allocate extra buffer by atomic operation */
-	if (alloc_size > 0)
-	{
-		size_t		usage_prev;
-		size_t		usage_slot;
-
-		usage_slot = KERN_DATA_STORE_SLOT_LENGTH(kds_dst, rowidx_dst + 1);
-		usage_prev = __kds_unpack(atomicAdd(&kds_dst->usage,
-											__kds_packed(alloc_size)));
-		if (usage_slot + usage_prev + alloc_size >= kds_dst->length)
-		{
-			STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
-						  "kds_final has no more space");
-			/*
-			 * NOTE: Uninitialized dst_values[] for NULL values will lead
-			 * a problem around atomic operation, because we designed 
-			 * reduction operation that assumes values are correctly
-			 * initialized even if it is NULL.
-			 */
-			for (i=0; i < ncols; i++)
-			{
-				dst_dclass[i] = DATUM_CLASS__NULL;
-				dst_values[i] = src_values[i];
-			}
-			return -1;
-		}
-		curr = ((char *)kds_dst + kds_dst->length - (usage_prev + alloc_size));
-	}
-	/* move the data */
-	for (i=0; i < ncols; i++)
-	{
-		kern_colmeta   *cmeta = &kds_src->colmeta[i];
-		cl_char			dclass = src_dclass[i];
-
-		if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
-		{
-			dst_dclass[i] = dclass;
-			dst_values[i] = src_values[i];
-		}
-		else if (cmeta->attlen > 0)
-		{
-			assert(dclass == DATUM_CLASS__NORMAL);
-			memcpy(curr, DatumGetPointer(src_values[i]), cmeta->attlen);
-			dst_dclass[i] = DATUM_CLASS__NORMAL;
-			dst_values[i] = PointerGetDatum(curr);
-			curr += MAXALIGN(cmeta->attlen);
-		}
-		else
-		{
-			Datum		datum = src_values[i];
-			assert(cmeta->attlen == -1);
-			switch (dclass)
-			{
-				case DATUM_CLASS__VARLENA:
-					len = pg_varlena_datum_write(kcxt, curr, datum);
-                    break;
-                case DATUM_CLASS__ARRAY:
-					len = pg_array_datum_write(kcxt, curr, datum);
-					break;
-				case DATUM_CLASS__COMPOSITE:
-					len = pg_composite_datum_write(kcxt, curr, datum);
-					break;
-				case DATUM_CLASS__GEOMETRY:
-					len = pg_geometry_datum_write(kcxt, curr, datum);
-					break;
-				default:
-					len = VARSIZE_ANY(datum);
-					memcpy(curr, DatumGetPointer(datum), len);
-					break;
-			}
-			dst_dclass[i] = DATUM_CLASS__NORMAL;
-            dst_values[i] = PointerGetDatum(curr);
-			curr += MAXALIGN(len);
-		}
-	}
-	return alloc_size;
-}
 
 /*
  * common portion for gpupreagg_setup_*
@@ -813,6 +667,24 @@ skip:
 		my_suspend->c.src_base = src_base;
 }
 
+STATIC_INLINE(void)
+gpupreagg_copy_accum(cl_char  *dst_dclass,
+					 Datum    *dst_values,
+					 cl_short *dst_attmap,
+					 cl_char  *src_dclass,
+					 Datum    *src_values,
+					 cl_short *src_attmap)
+{
+	for (int j=0; j < GPUPREAGG_NUM_ACCUM_VALUES; j++)
+	{
+		cl_short	src_index = src_attmap[j];
+		cl_short	dst_index = dst_attmap[j];
+
+		dst_dclass[dst_index] = src_dclass[src_index];
+		dst_values[dst_index] = src_values[src_index];
+	}
+}
+
 /*
  * gpupreagg_nogroup_reduction
  */
@@ -827,21 +699,21 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
                             cl_char *p_dclass,		/* __private__ */
                             Datum   *p_values)		/* __private__ */
 {
-//	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
-//	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	cl_uint			ncols = kds_slot->ncols;
 	cl_uint			index;
 	cl_bool			is_last_reduction = false;
-	cl_char		   *row_inval_map;
 	__shared__ cl_uint	base;
 
 	/* init local/private buffer */
 	assert(MAXWARPS_PER_BLOCK <= get_local_size() &&
 		   MAXWARPS_PER_BLOCK == warpSize);
 	if (get_local_id() < MAXWARPS_PER_BLOCK)
-		gpupreagg_init_slot(l_dclass + get_local_id() * ncols,
-							l_values + get_local_id() * ncols);
-	gpupreagg_init_slot(p_dclass, p_values);
+	{
+		cl_char	   *__dclass = l_dclass + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
+		Datum	   *__values = l_values + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
+
+		gpupreagg_init_local_slot(__dclass, __values);
+	}
+	gpupreagg_init_local_slot(p_dclass, p_values);
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
@@ -856,7 +728,6 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	assert(kds_slot->ncols == kds_final->ncols);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
-	row_inval_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 
 	/* start private reduction */
 	do {
@@ -873,45 +744,50 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		{
 			gpupreagg_merge_normal(p_dclass,
 								   p_values,
+								   GPUPREAGG_ACCUM_MAP_LOCAL,
 								   KERN_DATA_STORE_DCLASS(kds_slot, index),
-								   KERN_DATA_STORE_VALUES(kds_slot, index));
-			/*
-			 * XXX - Does it make sense to have row invalidation map
-			 * in the NoGroup reduction mode?
-			 * We shall never cause the buffer over-consumption here.
-			 */
-			row_inval_map[index] = true;
+								   KERN_DATA_STORE_VALUES(kds_slot, index),
+								   GPUPREAGG_ACCUM_MAP_GLOBAL);
 		}
 	} while (!is_last_reduction);
 
 	/* 1st level local reduction (inside warp) */
 	for (cl_uint mask = 1; mask < warpSize; mask += mask)
 	{
-		cl_uint		buddy = ((get_local_id() ^ mask) & (warpSize-1));
+		cl_uint		buddy_id = ((get_local_id() ^ mask) & (warpSize-1));
 
-		gpupreagg_merge_shuffle(p_dclass, p_values, buddy);
+		gpupreagg_merge_shuffle(p_dclass,
+								p_values,
+								GPUPREAGG_ACCUM_MAP_LOCAL,
+								buddy_id);
 	}
 	/* move to the shared memory for inter-warp shuffling */
 	if ((get_local_id() & (warpSize-1)) == 0)
 	{
-		cl_uint		shift = (get_local_id() / warpSize) * ncols;
+		cl_uint		shift = (get_local_id() / warpSize) * GPUPREAGG_NUM_ACCUM_VALUES;
 
-		memcpy(l_dclass + shift, p_dclass, sizeof(cl_char) * ncols);
-		memcpy(l_values + shift, p_values, sizeof(Datum) *   ncols);
+		memcpy(l_dclass + shift, p_dclass, sizeof(cl_char) * GPUPREAGG_NUM_ACCUM_VALUES);
+		memcpy(l_values + shift, p_values, sizeof(Datum) *   GPUPREAGG_NUM_ACCUM_VALUES);
 	}
 	__syncthreads();
 
 	/* 2nd level local reduction (inter warp) */
 	if (get_local_id() < MAXWARPS_PER_BLOCK)
 	{
-		memcpy(p_dclass, l_dclass + get_local_id() * ncols, sizeof(cl_char) * ncols);
-		memcpy(p_values, l_values + get_local_id() * ncols, sizeof(Datum) * ncols);
+		cl_char	   *__dclass = l_dclass + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
+		Datum	   *__values = l_values + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
+
+		memcpy(p_dclass, __dclass, sizeof(cl_char) * GPUPREAGG_NUM_ACCUM_VALUES);
+		memcpy(p_values, __values, sizeof(Datum)   * GPUPREAGG_NUM_ACCUM_VALUES);
 
 		for (cl_uint mask = 1; mask < MAXWARPS_PER_BLOCK; mask += mask)
 		{
-			cl_uint		buddy = ((get_local_id() ^ mask) & (MAXWARPS_PER_BLOCK-1));
+			cl_uint		buddy_id = ((get_local_id() ^ mask) & (MAXWARPS_PER_BLOCK-1));
 
-			gpupreagg_merge_shuffle(p_dclass, p_values, buddy);
+			gpupreagg_merge_shuffle(p_dclass,
+									p_values,
+									GPUPREAGG_ACCUM_MAP_LOCAL,
+									buddy_id);
 		}
 	}
 
@@ -928,11 +804,12 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 							   new_nitems);
 		if (cur_nitems == 0)
 		{
-			/* just copy */
-			memcpy(KERN_DATA_STORE_DCLASS(kds_final, 0),
-				   p_dclass, sizeof(cl_char) * ncols);
-			memcpy(KERN_DATA_STORE_VALUES(kds_final, 0),
-				   p_values, sizeof(Datum) * ncols);
+			gpupreagg_copy_accum(KERN_DATA_STORE_DCLASS(kds_final, 0),
+								 KERN_DATA_STORE_VALUES(kds_final, 0),
+								 GPUPREAGG_ACCUM_MAP_GLOBAL,
+								 p_dclass,
+								 p_values,
+								 GPUPREAGG_ACCUM_MAP_LOCAL);
 			atomicAdd(&kgpreagg->num_groups, 1);
 			atomicExch(&kds_final->nitems, 1);		/* UNLOCKED */
 		}
@@ -946,8 +823,10 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 			 */
 			gpupreagg_merge_atomic(KERN_DATA_STORE_DCLASS(kds_final, 0),
 								   KERN_DATA_STORE_VALUES(kds_final, 0),
+								   GPUPREAGG_ACCUM_MAP_GLOBAL,
 								   p_dclass,
-								   p_values);
+								   p_values,
+								   GPUPREAGG_ACCUM_MAP_LOCAL);
 		}
 		else
 		{
@@ -957,33 +836,214 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	}
 }
 
+#define HASHITEM_EMPTY		(0xffffffffU)
+#define HASHITEM_LOCKED		(0xfffffffeU)
+
 /*
  * gpupreagg_init_final_hash
- *
- * It initializes the f_hash prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
 gpupreagg_init_final_hash(kern_global_hashslot *f_hash,
-						  size_t f_hashsize,
-						  size_t f_hashlimit)
+						  size_t f_hash_nslots,
+						  size_t f_hash_length)
 {
-	size_t		hash_index;
-
 	if (get_global_id() == 0)
 	{
+		f_hash->length = f_hash_length;
 		f_hash->lock = 0;
-		f_hash->hash_usage = 0;
-		f_hash->hash_size = f_hashsize;
-		f_hash->hash_limit = f_hashlimit;
+		f_hash->usage = 0;
+		f_hash->nslots = f_hash_nslots;
 	}
 
-	for (hash_index = get_global_id();
-		 hash_index < f_hashsize;
-		 hash_index += get_global_size())
+	for (size_t i = get_global_id(); i < f_hash_nslots; i += get_global_size())
+		f_hash->slots[i] = HASHITEM_EMPTY;
+}
+
+/*
+ * gpupreagg_create_final_slot
+ *
+ *
+ */
+STATIC_FUNCTION(cl_uint)
+gpupreagg_create_final_slot(kern_context *kcxt,
+							kern_data_store *kds_final,
+							kern_data_store *kds_src,
+							cl_uint src_index,
+							cl_char *l_dclass,
+							Datum *l_values)
+{
+	cl_char	   *src_dclass = KERN_DATA_STORE_DCLASS(kds_src, src_index);
+	Datum	   *src_values = KERN_DATA_STORE_VALUES(kds_src, src_index);
+	cl_char	   *dst_dclass;
+	Datum	   *dst_values;
+	cl_uint		dst_index;
+	cl_uint		alloc_sz = 0;
+	char	   *extra = NULL;
+	union {
+		struct {
+			cl_uint	nitems;
+			cl_uint	usage;
+		} i;
+		cl_ulong	v64;
+	} oldval, curval, newval;
+
+	/* sanity checks */
+	assert(kds_final->format == KDS_FORMAT_SLOT &&
+		   kds_src->format == KDS_FORMAT_SLOT);
+	assert(kds_final->ncols == kds_src->ncols);
+	assert(src_index < kds_src->nitems);
+
+	/* size for extra allocation */
+	for (int j=0; j < kds_src->ncols; j++)
 	{
-		f_hash->hash_slot[hash_index].s.hash = 0;
-		f_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
+		kern_colmeta   *cmeta = &kds_src->colmeta[j];
+		cl_char			dclass = src_dclass[j];
+		cl_uint			len;
+
+		if (dclass == DATUM_CLASS__NULL)
+			continue;
+		if (cmeta->attbyval)
+			assert(dclass == DATUM_CLASS__NORMAL);
+		else if (cmeta->attlen > 0)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+			alloc_sz += MAXALIGN(cmeta->attlen);
+		}
+		else
+		{
+			assert(cmeta->attlen == -1);
+			switch (dclass)
+			{
+				case DATUM_CLASS__NORMAL:
+					len = VARSIZE_ANY(DatumGetPointer(src_values[j]));
+					break;
+				case DATUM_CLASS__VARLENA:
+					len = pg_varlena_datum_length(kcxt, src_values[j]);
+					break;
+				case DATUM_CLASS__ARRAY:
+					len = pg_array_datum_length(kcxt, src_values[j]);
+					break;
+				case DATUM_CLASS__COMPOSITE:
+					len = pg_composite_datum_length(kcxt, src_values[j]);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					len = pg_geometry_datum_length(kcxt, src_values[j]);
+					break;
+				default:
+					STROM_ELOG(kcxt, "unexpected internal format code");
+					return UINT_MAX;
+			}
+			alloc_sz += MAXALIGN(len);
+		}
 	}
+
+	/*
+	 * allocation of a new slot and extra buffer
+	 */
+	curval.i.nitems = __volatileRead(&kds_final->nitems);
+	curval.i.usage  = __volatileRead(&kds_final->usage);
+	do {
+		newval = oldval = curval;
+		newval.i.nitems += 1;
+		newval.i.usage  += __kds_packed(alloc_sz);
+		if (KERN_DATA_STORE_SLOT_LENGTH(kds_final, newval.i.nitems) +
+			__kds_unpack(newval.i.usage) > kds_final->length)
+		{
+			STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY,
+						  "out of memory (kds_final)");
+			return UINT_MAX;
+		}
+	} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_final->nitems,
+									 oldval.v64,
+									 newval.v64)) != oldval.v64);
+	/*
+	 * Move the initial values to kds_final
+	 */
+	dst_index = oldval.i.nitems;
+	dst_dclass = KERN_DATA_STORE_DCLASS(kds_final, dst_index);
+	dst_values = KERN_DATA_STORE_VALUES(kds_final, dst_index);
+	if (alloc_sz > 0)
+		extra = (char *)kds_final + kds_final->length - __kds_unpack(newval.i.usage);
+
+	/* copy the grouping keys */
+	for (int j=0; j < kds_src->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds_src->colmeta[j];
+		cl_char			dclass = src_dclass[j];
+		Datum			datum;
+		cl_uint			len;
+
+		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
+		{
+			/*
+			 * accumulate values shall be copied later,
+			 * by gpupreagg_copy_accum().
+			 */
+			assert(cmeta->attbyval);
+		}
+		else if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
+		{
+			dst_dclass[j] = dclass;
+            dst_values[j] = src_values[j];
+		}
+		else if (cmeta->attlen > 0)
+		{
+			assert(dclass == DATUM_CLASS__NORMAL);
+			memcpy(extra, DatumGetPointer(src_values[j]), cmeta->attlen);
+			dst_dclass[j] = DATUM_CLASS__NORMAL;
+			dst_values[j] = PointerGetDatum(extra);
+			extra += MAXALIGN(cmeta->attlen);
+		}
+		else
+		{
+			assert(cmeta->attlen == -1);
+			datum = src_values[j];
+			switch (dclass)
+			{
+				case DATUM_CLASS__NORMAL:
+					len = VARSIZE_ANY(datum);
+					memcpy(extra, DatumGetPointer(datum), len);
+					break;
+				case DATUM_CLASS__VARLENA:
+					len = pg_varlena_datum_write(kcxt, extra, datum);
+					break;
+				case DATUM_CLASS__ARRAY:
+					len =  pg_array_datum_write(kcxt, extra, datum);
+					break;
+				case DATUM_CLASS__COMPOSITE:
+					len = pg_composite_datum_write(kcxt, extra, datum);
+					break;
+				case DATUM_CLASS__GEOMETRY:
+					len = pg_geometry_datum_write(kcxt, extra, datum);
+					break;
+				default:
+					STROM_ELOG(kcxt, "unexpected internal format code");
+					return UINT_MAX;
+			}
+			dst_dclass[j] = DATUM_CLASS__NORMAL;
+			dst_values[j] = PointerGetDatum(extra);
+			extra += MAXALIGN(len);
+		}
+	}
+
+	/* copy the accum values */
+	if (l_dclass && l_values)
+		gpupreagg_copy_accum(dst_dclass,
+							 dst_values,
+							 GPUPREAGG_ACCUM_MAP_GLOBAL,
+							 l_dclass,
+							 l_values,
+							 GPUPREAGG_ACCUM_MAP_LOCAL);
+	else
+		gpupreagg_copy_accum(dst_dclass,
+							 dst_values,
+							 GPUPREAGG_ACCUM_MAP_GLOBAL,
+							 src_dclass,
+							 src_values,
+							 GPUPREAGG_ACCUM_MAP_GLOBAL);
+	__threadfence();
+
+	return dst_index;
 }
 
 /*
@@ -992,359 +1052,344 @@ gpupreagg_init_final_hash(kern_global_hashslot *f_hash,
  * hash-slot, if it returns true. So, caller MUST release it when a series of
  * operations get completed. Elsewhere, it returns false. caller MUST retry.
  */
-STATIC_FUNCTION(bool)
-gpupreagg_expand_final_hash(kern_context *kcxt,
-							kern_global_hashslot *f_hash,
-							cl_uint num_new_items)
+STATIC_FUNCTION(cl_bool)
+__do_expand_global_hash(kern_context *kcxt, kern_global_hashslot *f_hash)
 {
-	pagg_hashslot curval;
-	pagg_hashslot newval;
-	cl_uint		i, j, f_hashsize;
+	cl_bool		expanded = false;
+	cl_uint		i, j;
+
+	/*
+	 * Expand the global hash-slot
+	 */
+	if (get_local_id() == 0)
+	{
+		cl_uint		__nslots = 2 * f_hash->nslots + 2000;
+		cl_uint		__usage = 2 * f_hash->usage + 2000;
+		size_t		consumed;
+
+		/* expand twice and mode */
+		consumed = (MAXALIGN(offsetof(kern_global_hashslot, slots[__nslots])) +
+					MAXALIGN(sizeof(preagg_hash_item) * __usage));
+		if (consumed <= f_hash->length)
+		{
+			f_hash->nslots = __nslots;
+			expanded = true;
+		}
+		else
+		{
+			STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+						  "f_hash has no more space");
+		}
+	}
+	if (__syncthreads_count(expanded) == 0)
+		return false;		/* failed */
+
+	/* fix up the global hash-slot */
+	for (i = get_local_id(); i < f_hash->nslots; i += get_local_size())
+	{
+		f_hash->slots[i] = HASHITEM_EMPTY;
+	}
+	__syncthreads();
+
+	for (i = 0; i < f_hash->usage; i += get_local_size())
+	{
+		preagg_hash_item *hitem = NULL;
+		cl_uint		hindex = UINT_MAX;
+		cl_uint		next;
+		cl_bool		wait_lock;
+
+		j = i + get_local_id();
+		if (j < f_hash->usage)
+		{
+			hitem = GLOBAL_HASHSLOT_GETITEM(f_hash, j);
+			hindex = hitem->hash % f_hash->nslots;
+		}
+
+		do {
+			wait_lock = false;
+
+			if (hitem)
+			{
+				next = __volatileRead(&f_hash->slots[hindex]);
+				assert(next == HASHITEM_EMPTY || next < f_hash->usage);
+				hitem->next = next;
+				if (atomicCAS(&f_hash->slots[hindex], next, j) != next)
+					wait_lock = true;	/* update conflict, try again */
+				else
+					hitem = NULL;
+			}
+		} while(__syncthreads_count(wait_lock) > 0);
+	}
+	return true;
+}
+
+STATIC_INLINE(cl_bool)
+gpupreagg_expand_global_hash(kern_context *kcxt,
+							 kern_global_hashslot *f_hash,
+							 cl_uint required)
+{
+	cl_bool		lock_wait = false;
+	cl_bool		expand_hash = false;
 	cl_uint		old_lock;
-	cl_uint		cur_lock;
 	cl_uint		new_lock;
-	cl_uint		count;
-	cl_bool		lock_wait;
-	cl_bool		has_exclusive_lock = false;
-	__shared__ cl_uint	curr_usage;
-	__shared__ cl_uint	curr_size;
+	cl_uint		cur_usage;
 
-	/*
-	 * Get shared-lock on the final hash-slot
-	 */
-	if (get_local_id() == 0)
-	{
-		old_lock = __volatileRead(&f_hash->lock);
-		if ((old_lock & 0x0001) != 0)
-			lock_wait = true;		/* someone has exclusive lock */
-		else
-		{
-			new_lock = old_lock + 2;
-			cur_lock = atomicCAS(&f_hash->lock,
-								 old_lock,
-								 new_lock);
-			if (cur_lock == old_lock)
-				lock_wait = false;	/* OK, shared lock is acquired */
-			else
-				lock_wait = true;	/* Oops, conflict. Retry again */
-		}
-	}
-	else
-		lock_wait = false;
-	if (__syncthreads_count(lock_wait) > 0)
-		return false;
-
-	/*
-	 * Expand the final hash-slot on demand, if it may overflow.
-	 * No concurrent blocks are executable during the hash-slot eapansion,
-	 * we need to acquire exclusive lock here.
-	 */
-	if (get_local_id() == 0)
-	{
-		curr_usage = f_hash->hash_usage;
-		curr_size  = f_hash->hash_size;
-	}
-	__syncthreads();
-	if (curr_usage + num_new_items < GLOBAL_HASHSLOT_THRESHOLD(curr_size))
-		return true;		/* no need to expand the hash-slot now */
-	if (curr_size > f_hash->hash_limit)
-	{
-		/* no more space to expand */
-		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
-					  "f_hash has no more space");
-		goto out_unlock;
-	}
-
-	/*
-	 * Hmm... it looks current hash-slot usage is close to the current size,
-	 * so try to acquire the exclusive lock and expand the hash-slot.
-	 */
-	if (get_local_id() == 0)
-	{
-		old_lock = __volatileRead(&f_hash->lock);
-		if ((old_lock & 0x0001) != 0)
-			lock_wait = true;		/* someone already has exclusive lock */
-		else
-		{
-			assert(old_lock >= 0x0002);
-			/* release shared lock, and acquire exclusive lock */
-			new_lock = (old_lock - 2) | 0x0001;
-			cur_lock = atomicCAS(&f_hash->lock,
-								 old_lock,
-								 new_lock);
-			if (cur_lock == old_lock)
-				lock_wait = false;	/* OK, exclusive lock is acquired */
-			else
-				lock_wait = true;
-		}
-	}
-	else
-		lock_wait = false;
-
-	/* cannot acquire the exclusive lock? */
-	if (__syncthreads_count(lock_wait) > 0)
-		goto out_unlock;
-
-	/* wait for completion of other shared-lock holder */
-	for (;;)
-	{
+	/* Get shared/exclusive lock on the final hash slot */
+	do {
 		if (get_local_id() == 0)
-			lock_wait = (__volatileRead(&f_hash->lock) != 0x0001 ? true : false);
-		else
-			lock_wait = false;
-		if (__syncthreads_count(lock_wait) == 0)
-			break;
-	}
-	has_exclusive_lock = true;
-
-	/*
-	 * OK, Expand the final hash-slot
-	 */
-	if (get_local_id() == 0)
-		curr_size = f_hash->hash_size;
-	__syncthreads();
-	if (curr_size >= f_hash->hash_limit)
-	{
-		/* no more space to expand */
-		if (get_local_id() == 0)
-			f_hash->hash_size = UINT_MAX;
-		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
-					  "f_hash has no more space");
-		goto out_unlock;
-	}
-	else if (curr_size >= f_hash->hash_limit / 2)
-		f_hashsize = f_hash->hash_limit;
-	else
-		f_hashsize = curr_size * 2;
-
-	for (i = curr_size + get_local_id();
-		 i < f_hashsize;
-		 i += get_local_size())
-	{
-		f_hash->hash_slot[i].s.hash = 0;
-		f_hash->hash_slot[i].s.index = (cl_uint)(0xffffffff);
-	}
-	__syncthreads();
-
-	/*
-	 * Move the hash entries to new position
-	 */
-	count = 0;
-	for (i = get_local_id(); i < f_hashsize; i += get_local_size())
-	{
-		cl_int		nloops;
-
-		newval.s.hash = 0;
-		newval.s.index = (cl_uint)(0xffffffff);
-		curval.value = atomicExch(&f_hash->hash_slot[i].value, newval.value);
-
-		for (nloops = 32;
-			 nloops > 0 && curval.s.index != (cl_uint)(0xffffffff);
-			 nloops--)
 		{
-			/* should not be under locking */
-			assert(curval.s.index != (cl_uint)(0xfffffffe));
-			j = curval.s.hash % f_hashsize;
+			cur_usage = __volatileRead(&f_hash->usage);
+			expand_hash = (cur_usage + required > f_hash->nslots);
 
-			newval = curval;
-			curval.value = atomicExch(&f_hash->hash_slot[j].value,
-									  newval.value);
+			old_lock = __volatileRead(&f_hash->lock);
+			if ((old_lock & 0x0001) != 0)
+				lock_wait = true;	/* someone has exclusive lock */
+			else
+			{
+				new_lock = old_lock + 2;
+				if (expand_hash)
+					new_lock += 1;	/* exclusive lock */
+				if (atomicCAS(&f_hash->lock,
+							  old_lock,
+							  new_lock) == old_lock)
+					lock_wait = false;	/* Ok, lock is acquired */
+				else
+					lock_wait = true;	/* Oops, conflict. Retry again. */
+			}
 		}
+	} while (__syncthreads_count(lock_wait) > 0);
 
-		/*
-		 * NOTE: If hash-key gets too deep confliction than the threshold,
-		 * we give up to find out new location without shift operations.
-		 * It is a little waste of space on the kds_final buffer, but harmless
-		 * because partial aggregation results are already on the kds_final
-		 * buffer, then, further entries with same grouping keys will be added
-		 * as if it is newly injected.
-		 * It takes extra area of kds_final, however, it is much better than
-		 * infinite loop.
-		 */
-		if (curval.s.index != (cl_uint)(0xffffffff))
-			count++;
-	}
-	/* note: pgstromStairlikeSum contains __syncthreads() */
-	count = pgstromStairlikeSum(count, NULL);
-	if (get_local_id() == 0)
+	if (__syncthreads_count(expand_hash) > 0)
 	{
-		printf("GpuPreAgg: expand final hash slot %u -> %u (%u dropped)\n",
-			   f_hash->hash_size, f_hashsize, count);
-		f_hash->hash_size = f_hashsize;
+		if (!__do_expand_global_hash(kcxt, f_hash))
+		{
+			/* Error! release exclusive lock */
+			old_lock = atomicSub(&f_hash->lock, 3);
+			assert((old_lock & 0x0001) != 0);
+			return false;
+		}
+		/* Downgrade the lock */
+		old_lock = atomicSub(&f_hash->lock, 1);
+		assert((old_lock & 0x0001) != 0);
 	}
-	__syncthreads();
-
-out_unlock:
-	/* release exclusive lock and suggest caller retry */
-	if (get_local_id() == 0)
-	{
-		if (has_exclusive_lock)
-			atomicAnd(&f_hash->lock, (cl_uint)(0xfffffffe));
-		else
-			atomicSub(&f_hash->lock, 2);
-	}
-	return false;
+	return true;
 }
 
 /*
- * gpupreagg_final_reduction
+ * gpupreagg_global_reduction
  */
 STATIC_FUNCTION(cl_bool)
-gpupreagg_final_reduction(kern_context *kcxt,
-						  kern_gpupreagg *kgpreagg,
-						  kern_data_store *kds_slot,
-						  cl_uint slot_index,
-						  cl_uint hash_value,
-						  kern_data_store *kds_final,
-						  kern_global_hashslot *f_hash)
+gpupreagg_global_reduction(kern_context *kcxt,
+						   kern_data_store *kds_slot,
+						   cl_uint kds_index,
+						   cl_uint hash,
+						   kern_data_store *kds_final,
+						   kern_global_hashslot *f_hash,
+						   cl_char *l_dclass,	/* can be NULL */
+						   Datum *l_values)		/* can be NULL */
 {
-	size_t			f_hashsize = f_hash->hash_size;
-	cl_uint			nconflicts = 0;
-	cl_bool			is_owner = false;
-	cl_bool			meet_locked = false;
-	cl_uint			allocated = 0;
-	cl_uint			index;
-	pagg_hashslot	old_slot;
-	pagg_hashslot	new_slot;
-	pagg_hashslot	cur_slot;
+	preagg_hash_item *hitem = NULL;
+	cl_uint		hindex = hash % f_hash->nslots;
+	cl_uint		next;
+	cl_uint		curr;
+	cl_uint		dst_index;
+	cl_char	   *dst_dclass;
+	Datum	   *dst_values;
+	cl_bool		is_locked = false;
 
-	new_slot.s.hash	 = hash_value;
-	new_slot.s.index = (cl_uint)(0xfffffffeU);	/* LOCK */
-	old_slot.s.hash  = 0;
-	old_slot.s.index = (cl_uint)(0xffffffffU);	/* EMPTY */
-	index = hash_value % f_hashsize;
+	/*
+	 * Step-1: Lookup hash slot without locking
+	 */
+	curr = next = __volatileRead(&f_hash->slots[hindex]);
+	if (curr == HASHITEM_LOCKED)
+		return false;	/* locked, try again */
+restart:
+	while (curr != HASHITEM_EMPTY)
+	{
+		assert(curr < __volatileRead(&f_hash->usage));
 
-retry_fnext:
-	if (f_hashsize > f_hash->hash_limit)
-	{
-		/* no more space to expand */
-		STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
-					  "f_hash has no more space");
-		return false;
-	}
-	else if (f_hash->hash_usage > GLOBAL_HASHSLOT_THRESHOLD(f_hashsize))
-	{
-		/* try to expand the final hash-slot */
-		return false;
-	}
-	cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
-							   old_slot.value, new_slot.value);
-	if (cur_slot.value == old_slot.value)
-	{
-		atomicAdd(&f_hash->hash_usage, 1);
-
-		/*
-		 * This thread shall be responsible to this grouping-key
-		 *
-		 * MEMO: We may need to check whether the new nitems exceeds
-		 * usage of the extra length of the kds_final from the tail,
-		 * instead of the nrooms, however, some code assumes kds_final
-		 * can store at least 'nrooms' items. So, right now, we don't
-		 * allow to expand extra area across nrooms boundary.
-		 */
-		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
-		if (new_slot.s.index < kds_final->nrooms)
+		hitem = GLOBAL_HASHSLOT_GETITEM(f_hash, curr);
+		if (hitem->hash == hash &&
+			gpupreagg_keymatch(kcxt,
+							   kds_slot, kds_index,
+							   kds_final, hitem->index))
 		{
-			cl_int	len = gpupreagg_final_data_move(kcxt,
-													kds_slot,
-													slot_index,
-													kds_final,
-													new_slot.s.index);
-			if (len < 0)
-				new_slot.s.index = (cl_uint)(0xffffffffU);	/* EMPTY */
+			dst_dclass = KERN_DATA_STORE_DCLASS(kds_final, hitem->index);
+			dst_values = KERN_DATA_STORE_VALUES(kds_final, hitem->index);
+
+			if (l_dclass && l_values)
+				gpupreagg_merge_atomic(dst_dclass,
+									   dst_values,
+									   GPUPREAGG_ACCUM_MAP_GLOBAL,
+									   l_dclass,
+									   l_values,
+									   GPUPREAGG_ACCUM_MAP_LOCAL);
 			else
-				allocated += len;
+				 gpupreagg_merge_atomic(dst_dclass,
+										dst_values,
+										GPUPREAGG_ACCUM_MAP_GLOBAL,
+										KERN_DATA_STORE_DCLASS(kds_slot, kds_index),
+										KERN_DATA_STORE_VALUES(kds_slot, kds_index),
+										GPUPREAGG_ACCUM_MAP_GLOBAL);
+			if (is_locked)
+				atomicExch(&f_hash->slots[hindex], next);	//UNLOCK
+			return true;
 		}
-		else
-		{
-			new_slot.s.index = (cl_uint)(0xffffffffU);
-			STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
-						  "kds_final has no more space");
-		}
-		__threadfence();
-		/* UNLOCK */
-		old_slot.value = atomicExch(&f_hash->hash_slot[index].value,
-									new_slot.value);
-		assert(old_slot.s.hash == new_slot.s.hash &&
-			   old_slot.s.index == (cl_uint)(0xfffffffeU));
-		/* this thread performs as owner of this slot */
-		is_owner = true;
-	}
-	else if (cur_slot.s.hash != hash_value)
-	{
-		/* Hash-value conflicts by other grouping key */
-		index = (index + 1) % f_hashsize;
-		nconflicts++;
-		goto retry_fnext;
-	}
-	else if (cur_slot.s.index == (cl_uint)(0xfffffffe))
-	{
-		/*
-		 * This final hash-slot is currently locked by the concurrent thread,
-		 * so we cannot check grouping-keys right now. Caller must retry.
-		 */
-		meet_locked = true;
-		nconflicts++;
-	}
-	else if (!gpupreagg_keymatch(kcxt,
-								 kds_slot, slot_index,
-								 kds_final, cur_slot.s.index))
-	{
-		/*
-		 * Hash-value conflicts by other grouping key; which has same hash-
-		 * value, but grouping-keys itself are not identical. So, we try to
-		 * use the next slot instead.
-		 */
-		index = (index + 1) % f_hashsize;
-		goto retry_fnext;
-	}
-	else
-	{
-		/*
-		 * Global reduction for each column
-		 *
-		 * Any threads that are NOT responsible to grouping-key calculates
-		 * aggregation on the item that is responsibles.
-		 * Once atomic operations got finished, isnull/values of the current
-		 * thread shall be accumulated.
-		 */
-
-#if 0
-		/*
-		 * MEMO: Multiple concurrent threads updates @kds_final->nitems
-		 * using atomicAdd(), thus, this operation works on L2-cache.
-		 * On the other hands, NVIDIA says Volta architecture uses L1-cache
-		 * implicitly, if compiler detects the target variable is read-only.
-		 * If NVRTC compiler oversights memory update of atomicXXX() and
-		 * it does not invalidate L1-cache, we may look at older version
-		 * of the variable.
-		 * In fact, we never reproduce the problem when @kds_final->nitems
-		 * is referenced using atomic operation which has no effect.
-		 *
-		 * The above memo is just my hypothesis, shall be reported to
-		 * NVIDIA for confirmation and further investigation later.
-		 */
-		assert(cur_slot.s.index < Min(kds_final->nitems,
-									  kds_final->nrooms));
-#endif
-		gpupreagg_global_calc(
-			KERN_DATA_STORE_DCLASS(kds_final, cur_slot.s.index),
-			KERN_DATA_STORE_VALUES(kds_final, cur_slot.s.index),
-			KERN_DATA_STORE_DCLASS(kds_slot, slot_index),
-			KERN_DATA_STORE_VALUES(kds_slot, slot_index));
+		curr = hitem->next;
 	}
 
 	/*
-	 * update run-time statistics
+	 * Step-2: Ensure that f_hash has no entry under the lock
 	 */
-	if (is_owner)
-		atomicAdd(&kgpreagg->num_groups, 1);
-	if (allocated > 0)
-		atomicAdd(&kgpreagg->extra_usage, allocated);
-	if (nconflicts > 0)
-		atomicAdd(&kgpreagg->fhash_conflicts, nconflicts);
+	if (!is_locked)
+	{
+		curr = next = __volatileRead(&f_hash->slots[hindex]);
+		if (curr == HASHITEM_LOCKED ||
+			atomicCAS(&f_hash->slots[hindex],
+					  curr,
+					  HASHITEM_LOCKED) != curr)
+			return false;	/* already locked, try again */
+		is_locked = true;
+		goto restart;
+	}
 
-	return !meet_locked;
+	/*
+	 * Step-3: create a slot on kds_final
+	 */
+	dst_index = gpupreagg_create_final_slot(kcxt,
+											kds_final,
+											kds_slot,
+											kds_index,
+											l_dclass,
+											l_values);
+	if (dst_index == UINT_MAX)
+	{
+		/* likely, out of memory */
+		atomicExch(&f_hash->slots[hindex], next);	//UNLOCK
+		return false;
+	}
+
+	/*
+	 * Step-4: allocation of hash entry
+	 */
+	curr = atomicAdd(&f_hash->usage, 1);
+	if (offsetof(kern_global_hashslot, slots[f_hash->nslots]) +
+		sizeof(preagg_hash_item) * (curr + 1) >= f_hash->length)
+	{
+		STROM_EREPORT(kcxt, ERRCODE_OUT_OF_MEMORY, "out of memory");
+		atomicExch(&f_hash->slots[hindex], next);	//UNLOCK
+		return false;
+	}
+	hitem = GLOBAL_HASHSLOT_GETITEM(f_hash, curr);
+	hitem->index = dst_index;
+	hitem->hash = hash;
+	hitem->next = next;
+
+	atomicExch(&f_hash->slots[hindex], curr);		//UNLOCK;
+
+	return true;
+}
+
+/*
+ * gpupreagg_local_reduction
+ *
+ *
+ */
+STATIC_INLINE(int)
+gpupreagg_local_reduction(kern_context *kcxt,
+						  kern_data_store *kds_slot,
+						  cl_uint		index,
+						  cl_uint		hash,
+						  preagg_local_hashtable *l_htable,
+						  preagg_hash_item *l_hitems,
+						  cl_char     *l_dclass,
+						  Datum       *l_values)
+{
+	cl_uint		hindex = hash % GPUPREAGG_LOCAL_HASH_NSLOTS;
+	cl_uint		curr;
+	cl_uint		next;
+	cl_bool		is_locked = false;
+
+	curr = next = __volatileRead(&l_htable->l_hslots[hindex]);
+	if (curr == HASHITEM_LOCKED)
+		return -1;	/* locked */
+restart:
+	while (curr < GPUPREAGG_LOCAL_HASH_NROOMS)
+	{
+		preagg_hash_item   *hitem = &l_hitems[curr];
+
+		if (hitem->hash == hash &&
+			gpupreagg_keymatch(kcxt,
+							   kds_slot, index,
+							   kds_slot, hitem->index))
+		{
+			if (is_locked)
+				atomicExch(&l_htable->l_hslots[hindex], next);	//UNLOCK
+			goto found;
+		}
+		curr = hitem->next;
+	}
+	assert(curr == HASHITEM_EMPTY);
+
+	if (__volatileRead(&l_htable->nitems) >= GPUPREAGG_LOCAL_HASH_NROOMS)
+	{
+		/*
+		 * Here we could not find out the entry on the local hash-table,
+		 * but obviously no space on the local hash-table also.
+		 * In this case, thread goes to the second path for the global-to-
+		 * global reduction.
+		 */
+		if (is_locked)
+			atomicExch(&l_htable->l_hslots[hindex], next);	//UNLOCK
+		return 0;	/* not found */
+	}
+
+	/*
+	 * Begin critical section
+	 */
+	if (!is_locked)
+	{
+	    curr = next = __volatileRead(&l_htable->l_hslots[hindex]);
+		if (curr == HASHITEM_LOCKED ||
+			atomicCAS(&l_htable->l_hslots[hindex],
+					  next,
+					  HASHITEM_LOCKED) != next)
+			return -1;	/* lock contension, retry again. */
+		is_locked = true;
+		goto restart;
+	}
+	curr = atomicAdd(&l_htable->nitems, 1);
+	if (curr >= GPUPREAGG_LOCAL_HASH_NROOMS)
+	{
+		/*
+		 * Oops, the local hash-table has no space to save a new
+		 * entry any more. So, unlock the slot, then return to
+		 * the caller to go to the second path for the global-to-
+		 * global reduction.
+		 */
+		atomicExch(&l_htable->l_hslots[hindex], next);	//UNLOCK
+		return 0;	/* not found */
+	}
+
+	/*
+	 * initial allocation of the hash-item that is allocated above.
+	 */
+	l_hitems[curr].index = index;
+	l_hitems[curr].hash  = hash;
+	l_hitems[curr].next  = next;
+	gpupreagg_init_local_slot(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							  l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr);
+	/* UNLOCK */
+	atomicExch(&l_htable->l_hslots[hindex], curr);
+found:
+	/* Runs global-to-local reduction */
+	gpupreagg_merge_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+						   l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+						   GPUPREAGG_ACCUM_MAP_LOCAL,
+						   KERN_DATA_STORE_DCLASS(kds_slot, index),
+						   KERN_DATA_STORE_VALUES(kds_slot, index),
+						   GPUPREAGG_ACCUM_MAP_GLOBAL);
+	return 1;	/* ok, merged */
 }
 
 /*
@@ -1355,28 +1400,15 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_gpupreagg *kgpreagg,		/* in/out */
 							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
-							kern_data_store *kds_final,		/* shared out */
-							kern_global_hashslot *f_hash)	/* shared out */
+							kern_data_store *kds_final,		/* out */
+							kern_global_hashslot *f_hash,	/* out */
+							preagg_hash_item *l_hitems,     /* __shared__ */
+							cl_char    *l_dclass,           /* __shared__ */
+							Datum      *l_values)           /* __shared__ */
 {
-	varlena		   *kparam_0 = (varlena *)kparam_get_value(kcxt->kparams, 0);
-	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	cl_uint			i, j;
-	cl_uint			kds_index;
-	cl_uint			buf_index;
-	cl_uint			hash_index;
-	cl_uint			hash_value;
-	cl_bool			is_leader;
-	cl_bool			is_last_reduction = false;
-	cl_bool			l_hashslot_cleanup = true;
-	cl_char		   *row_inval_map;
-#define GROUPBY_LOCAL_HASHSIZE	2400
-#define GROUPBY_LOCAL_BUFSIZE	1800
-	__shared__ cl_bool	l_dclass[GROUPBY_LOCAL_BUFSIZE];
-	__shared__ Datum	l_values[GROUPBY_LOCAL_BUFSIZE];
-	__shared__ cl_short l_b2h_index[GROUPBY_LOCAL_BUFSIZE];	/* B->H index */
-	__shared__ pagg_hashslot l_hashslot[GROUPBY_LOCAL_HASHSIZE];
-	__shared__ cl_short	l_h2b_index[GROUPBY_LOCAL_HASHSIZE];/* H->B index */
-	__shared__ cl_uint	l_nitems;
+	cl_bool		is_last_reduction = false;
+	cl_uint		l_nitems;
+	__shared__ preagg_local_hashtable l_htable;
 	__shared__ cl_uint	base;
 
 	/* skip if previous stage reported an error */
@@ -1389,255 +1421,133 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	assert(kgpreagg->num_group_keys > 0);
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
-	row_inval_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
 	if (get_global_id() == 0)
 		kgpreagg->setup_slot_done = true;
 
-	do {
-		cl_bool	   *slot_dclass = NULL;
-		Datum	   *slot_values = NULL;
-		cl_bool	   *dest_dclass = NULL;
-		Datum	   *dest_values = NULL;
+	/*
+	 * setup local hash-table
+	 */
+	if (get_local_id() == 0)
+		l_htable.nitems = 0;
+	for (int i = get_local_id(); i < GPUPREAGG_LOCAL_HASH_NSLOTS; i += get_local_size())
+		l_htable.l_hslots[i] = HASHITEM_EMPTY;
+	__syncthreads();
 
-		/* cleanup hash-slot */
-		if (l_hashslot_cleanup)
-		{
-			l_hashslot_cleanup = false;
-			for (i = get_local_id();
-				 i < GROUPBY_LOCAL_HASHSIZE;
-				 i += get_local_size())
-			{
-				l_hashslot[i].s.hash = 0;
-				l_hashslot[i].s.index = (cl_uint)(0xffffffff);
-			}
-			if (get_local_id() == 0)
-				l_nitems = 0;
-			__syncthreads();
-		}
+	/*
+	 * main loop for the local/global hybrid reduction
+	 */
+	do {
+		cl_uint		hash = UINT_MAX;
+		int			status;
+		int			index;
+		int			count;
+
 		/* fetch next items from the kds_slot */
 		if (get_local_id() == 0)
 			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
 		__syncthreads();
+		if (base >= kds_slot->nitems)
+			break;
 		if (base + get_local_size() >= kds_slot->nitems)
 			is_last_reduction = true;
-		if (base >= kds_slot->nitems)
-			goto skip_local_reduction;
-		/*
-		 * Lookup local hash-slot, or create a new one if not exists
-		 */
-		kds_index = base + get_local_id();
-		if (kds_index < kds_slot->nitems)
+
+		/* calculation of the hash-value of the item */
+		index = base + get_local_id();
+		if (index < kds_slot->nitems)
 		{
-			slot_dclass = KERN_DATA_STORE_DCLASS(kds_slot, kds_index);
-			slot_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
-			hash_value = gpupreagg_hashvalue(kcxt,
-											 slot_dclass,
-											 slot_values);
+			cl_char	   *__dclass = KERN_DATA_STORE_DCLASS(kds_slot, index);
+			Datum	   *__values = KERN_DATA_STORE_VALUES(kds_slot, index);
+
+			hash = gpupreagg_hashvalue(kcxt, __dclass, __values);
 		}
-		/* error checks */
 		if (__syncthreads_count(kcxt->errcode) > 0)
-			return;
+			return;		/* error */
 
-		if (kds_index < kds_slot->nitems)
+		/*
+		 * 1st path - try local reduction
+		 */
+		status = -1;
+		do {
+			if (status < 0 && index < kds_slot->nitems)
+				status = gpupreagg_local_reduction(kcxt,
+												   kds_slot,
+												   index,
+												   hash,
+												   &l_htable,
+												   l_hitems,
+												   l_dclass,
+												   l_values);
+			else
+				status = 1;
+
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				return;		/* error */
+		} while (__syncthreads_count(status < 0) > 0);
+
+		/*
+		 * 2nd path - try global reduction
+		 */
+		assert(status >= 0);
+		while ((count = __syncthreads_count(status == 0)) > 0)
 		{
-			pagg_hashslot	old_slot;
-			pagg_hashslot	new_slot;
-			pagg_hashslot	cur_slot;
-
-			new_slot.s.hash     = hash_value;
-			new_slot.s.index    = kds_index;
-			old_slot.s.hash     = 0;
-			old_slot.s.index    = (cl_uint)(0xffffffff);
-			hash_index = hash_value % GROUPBY_LOCAL_HASHSIZE;
-			do {
-				cur_slot.value = atomicCAS(&l_hashslot[hash_index].value,
-										   old_slot.value,
-										   new_slot.value);
-				if (cur_slot.value == old_slot.value)
+			if (gpupreagg_expand_global_hash(kcxt, f_hash, count))
+			{
+				if (status == 0)
 				{
-					/* hash-slot was empty, so inject a new one */
-					buf_index = atomicAdd(&l_nitems, 1);
-					l_h2b_index[hash_index] = buf_index;
-					l_b2h_index[buf_index] = hash_index;
-					dest_dclass = slot_dclass;
-					dest_values = slot_values;
-					break;
+					assert(index < kds_slot->nitems);
+
+					if (gpupreagg_global_reduction(kcxt,
+												   kds_slot,
+												   index,
+												   hash,
+												   kds_final,
+												   f_hash,
+												   NULL,
+												   NULL))
+						status = 1;		/* successfully, merged */
 				}
-				assert(cur_slot.s.index < kds_slot->nitems &&
-					   cur_slot.s.index != kds_index);
-				if (cur_slot.s.hash == hash_value &&
-					gpupreagg_keymatch(kcxt,
-									   kds_slot, kds_index,
-									   kds_slot, cur_slot.s.index))
-				{
-					/* grouping-keys are already on hash-slot */
-					i = cur_slot.s.index;
-					dest_dclass = KERN_DATA_STORE_DCLASS(kds_slot, i);
-					dest_values = KERN_DATA_STORE_VALUES(kds_slot, i);
-					break;
-				}
-				hash_index = (hash_index + 1) % GROUPBY_LOCAL_HASHSIZE;
-			} while (kcxt->errcode == ERRCODE_STROM_SUCCESS);
-		}
-		else
-		{
-			hash_index = UINT_MAX;	/* shall never fit */
-		}
-		/* error checks */
-		if (__syncthreads_count(kcxt->errcode) > 0)
-			return;
-		/*
-		 * Note that l_h2b_index / l_b2h_index are not updated atomically,
-		 * so we have to fetch values from these array after synchronization
-		 * point.
-		 */
-		if (hash_index < GROUPBY_LOCAL_HASHSIZE)
-		{
-			buf_index = l_h2b_index[hash_index];
-			assert(buf_index < l_nitems);
-			assert(l_b2h_index[buf_index] == hash_index);
-		}
-		else
-			buf_index = UINT_MAX;	/* shall never fit */
-
-		/*
-		 * Determines the thread that performs as "owner" of the entry.
-		 * Owner loads initial value of reduction to l_dclass[]/l_values[]
-		 * buffer, then stores the reduction results to the same slot on
-		 * the kds_slot. These are NOT atomic operation.
-		 */
-		for (i = get_local_id();
-			 i < GROUPBY_LOCAL_BUFSIZE;
-			 i += get_local_size())
-			l_values[i] = 0;
-		__syncthreads();
-		if (buf_index < GROUPBY_LOCAL_BUFSIZE &&
-			atomicMax(&l_values[buf_index], 1) == 0)
-		{
-			is_leader = true;
-		}
-		else
-		{
-			is_leader = false;
-		}
-		__syncthreads();
-
-		/*
-		 * Local reduction for each column
-		 */
-		for (j=0; j < kds_slot->ncols; j++)
-		{
-			if (!attr_is_preagg[j])
-				continue;
-			/* load the value to local storage */
-			if (is_leader)
-			{
-				assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
-				l_dclass[buf_index] = dest_dclass[j];
-				l_values[buf_index] = dest_values[j];
 			}
-			__syncthreads();
-
-			/* reduction by atomic operation */
-			if (kds_index < kds_slot->nitems && slot_values != dest_values)
-			{
-				assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
-				gpupreagg_local_calc(j,
-									 &l_dclass[buf_index],
-									 &l_values[buf_index],
-									 slot_dclass[j],
-									 slot_values[j]);
-			}
-			__syncthreads();
-
-			/* store the value from local storage */
-			if (is_leader)
-			{
-				dest_dclass[j] = l_dclass[buf_index];
-				dest_values[j] = l_values[buf_index];
-			}
-			__syncthreads();
+			/* quick bailout on error */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				return;
 		}
-		/*
-		 * NOTE: This row is not merged to the final buffer yet, however,
-		 * its values are already accumulated to hash-owner's slot. So,
-		 * when CPU fallback routine processes the kds_slot, no need to
-		 * process this row again. (owner's row already contains its own
-		 * values and accumulated ones from non-owner's row)
-		 */
-		if (!is_leader && kds_index < kds_slot->nitems)
-			row_inval_map[kds_index] = true;
+	} while (!is_last_reduction);
 
-	skip_local_reduction:
-		/*
-		 * final reduction steps if needed
-		 */
-		if (is_last_reduction ||
-			l_nitems + get_local_size() > GROUPBY_LOCAL_BUFSIZE)
-		{
-			cl_uint		nloops;
-			cl_uint		loop;
-			cl_uint		nvalids;
+	__syncthreads();
 
-			nloops = (l_nitems + get_local_size() - 1) / get_local_size();
-			for (loop=0; loop < nloops; loop++)
+	/*
+	 * last path - flush pending local reductions
+	 */
+	l_nitems = Min(l_htable.nitems, GPUPREAGG_LOCAL_HASH_NROOMS);
+	for (cl_uint i = 0; i < l_nitems; i += get_local_size())
+	{
+		cl_uint		j = i + get_local_id();
+		cl_int		status = 0;
+
+		do {
+			if (!status && j < l_nitems)
 			{
-				cl_bool		reduction_done = false;
-				cl_bool		lock_wait;
+				preagg_hash_item *hitem = &l_hitems[j];
+				cl_char	   *my_dclass = l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * j;
+				Datum	   *my_values = l_values + GPUPREAGG_NUM_ACCUM_VALUES * j;
 
-				nvalids = Min(l_nitems - loop * get_local_size(),
-							  get_local_size());
-				do {
-					/*
-					 * Get shared-lock of the final hash-slot
-					 * If it may have overflow, expand length of the final
-					 * hash-slot on demand, under its exclusive lock.
-					 */
-					if (!gpupreagg_expand_final_hash(kcxt, f_hash, nvalids))
-						lock_wait = true;
-					else if (get_local_id() >= nvalids || reduction_done)
-						lock_wait = false;
-					else
-					{
-						buf_index  = get_local_size() * loop + get_local_id();
-						assert(buf_index < GROUPBY_LOCAL_BUFSIZE);
-						hash_index = l_b2h_index[buf_index];
-						assert(hash_index < GROUPBY_LOCAL_HASHSIZE);
-						kds_index  = l_hashslot[hash_index].s.index;
-						hash_value = l_hashslot[hash_index].s.hash;
-						assert(kds_index < kds_slot->nitems);
-
-						if (gpupreagg_final_reduction(kcxt,
-													  kgpreagg,
-													  kds_slot,
-													  kds_index,
-													  hash_value,
-													  kds_final,
-													  f_hash))
-						{
-							reduction_done = true;
-							lock_wait = false;
-						}
-						else
-						{
-							lock_wait = true;
-						}
-					}
-					__syncthreads();
-					/* release shared lock of the final hash-slot */
-					if (get_local_id() == 0)
-						atomicSub(&f_hash->lock, 2);
-					/* quick bailout on error */
-					if (__syncthreads_count(kcxt->errcode) > 0)
-						return;
-				} while (__syncthreads_count(lock_wait) > 0);
+				if (gpupreagg_global_reduction(kcxt,
+											   kds_slot,
+											   hitem->index,
+											   hitem->hash,
+											   kds_final,
+											   f_hash,
+											   my_dclass,
+											   my_values))
+					status = 1;		/* merged */
 			}
-			/*
-			 * OK, pending items were successfully moved to the final buffer.
-			 * Local hash-slots shall be reset, and restart.
-			 */
-			l_hashslot_cleanup = true;
-		}
-		__syncthreads();
-	} while(!is_last_reduction);
+			else
+			{
+				status = 1;
+			}
+			/* quick bailout on error */
+			if (__syncthreads_count(kcxt->errcode) > 0)
+				return;
+		} while (__syncthreads_count(status == 0) > 0);
+	}
 }
