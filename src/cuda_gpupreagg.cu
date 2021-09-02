@@ -1047,13 +1047,13 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 }
 
 /*
- * gpupreagg_expand_final_hash - expand size of the final hash slot on demand,
+ * gpupreagg_expand_global_hash - expand size of the global hash slot on demand.
  * up to the f_hashlimit. It internally acquires shared lock of the final
  * hash-slot, if it returns true. So, caller MUST release it when a series of
  * operations get completed. Elsewhere, it returns false. caller MUST retry.
  */
 STATIC_FUNCTION(cl_bool)
-__do_expand_global_hash(kern_context *kcxt, kern_global_hashslot *f_hash)
+__expand_global_hash(kern_context *kcxt, kern_global_hashslot *f_hash)
 {
 	cl_bool		expanded = false;
 	cl_uint		i, j;
@@ -1096,7 +1096,6 @@ __do_expand_global_hash(kern_context *kcxt, kern_global_hashslot *f_hash)
 		preagg_hash_item *hitem = NULL;
 		cl_uint		hindex = UINT_MAX;
 		cl_uint		next;
-		cl_bool		wait_lock;
 
 		j = i + get_local_id();
 		if (j < f_hash->usage)
@@ -1106,19 +1105,15 @@ __do_expand_global_hash(kern_context *kcxt, kern_global_hashslot *f_hash)
 		}
 
 		do {
-			wait_lock = false;
-
 			if (hitem)
 			{
 				next = __volatileRead(&f_hash->slots[hindex]);
 				assert(next == HASHITEM_EMPTY || next < f_hash->usage);
 				hitem->next = next;
-				if (atomicCAS(&f_hash->slots[hindex], next, j) != next)
-					wait_lock = true;	/* update conflict, try again */
-				else
+				if (atomicCAS(&f_hash->slots[hindex], next, j) == next)
 					hitem = NULL;
 			}
-		} while(__syncthreads_count(wait_lock) > 0);
+		} while(__syncthreads_count(hitem != NULL) > 0);
 	}
 	return true;
 }
@@ -1132,23 +1127,25 @@ gpupreagg_expand_global_hash(kern_context *kcxt,
 	cl_bool		expand_hash = false;
 	cl_uint		old_lock;
 	cl_uint		new_lock;
-	cl_uint		cur_usage;
+	cl_uint		curr_usage;
 
 	/* Get shared/exclusive lock on the final hash slot */
 	do {
 		if (get_local_id() == 0)
 		{
-			cur_usage = __volatileRead(&f_hash->usage);
-			expand_hash = (cur_usage + required > f_hash->nslots);
+			curr_usage = __volatileRead(&f_hash->usage);
+			expand_hash = (curr_usage + required > f_hash->nslots);
 
 			old_lock = __volatileRead(&f_hash->lock);
 			if ((old_lock & 0x0001) != 0)
 				lock_wait = true;	/* someone has exclusive lock */
 			else
 			{
-				new_lock = old_lock + 2;
 				if (expand_hash)
-					new_lock += 1;	/* exclusive lock */
+					new_lock = old_lock + 3;	/* shared + exclusive lock */
+				else
+					new_lock = old_lock + 2;	/* shared lock */
+
 				if (atomicCAS(&f_hash->lock,
 							  old_lock,
 							  new_lock) == old_lock)
@@ -1161,16 +1158,38 @@ gpupreagg_expand_global_hash(kern_context *kcxt,
 
 	if (__syncthreads_count(expand_hash) > 0)
 	{
-		if (!__do_expand_global_hash(kcxt, f_hash))
+		/* wait while other threads are running in the critial section */
+		lock_wait = false;
+		do {
+			if (get_local_id() == 0)
+			{
+				old_lock = __volatileRead(&f_hash->lock);
+				assert((old_lock & 1) == 1);
+				lock_wait = (old_lock != 3);
+			}
+		} while(__syncthreads_count(lock_wait) > 0);
+
+		/*
+		 * Expand the global hash table
+		 */
+		if (!__expand_global_hash(kcxt, f_hash))
 		{
 			/* Error! release exclusive lock */
-			old_lock = atomicSub(&f_hash->lock, 3);
-			assert((old_lock & 0x0001) != 0);
+			__syncthreads();
+			if (get_local_id() == 0)
+			{
+				old_lock = atomicSub(&f_hash->lock, 3);
+				assert((old_lock & 0x0001) != 0);
+			}
 			return false;
 		}
 		/* Downgrade the lock */
-		old_lock = atomicSub(&f_hash->lock, 1);
-		assert((old_lock & 0x0001) != 0);
+		__syncthreads();
+		if (get_local_id() == 0)
+		{
+			old_lock = atomicSub(&f_hash->lock, 1);
+			assert((old_lock & 0x0001) != 0);
+		}
 	}
 	return true;
 }
@@ -1506,6 +1525,10 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 												   NULL))
 						status = 1;		/* successfully, merged */
 				}
+				/* unlock global hash slots */
+				__syncthreads();
+				if (get_local_id() == 0)
+					atomicSub(&f_hash->lock, 2);
 			}
 			/* quick bailout on error */
 			if (__syncthreads_count(kcxt->errcode) > 0)
@@ -1523,31 +1546,40 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	{
 		cl_uint		j = i + get_local_id();
 		cl_int		status = 0;
+		cl_int		count;
 
-		do {
-			if (!status && j < l_nitems)
+		while ((count = __syncthreads_count(!status && j < l_nitems)) > 0)
+		{
+			if (gpupreagg_expand_global_hash(kcxt, f_hash, count))
 			{
-				preagg_hash_item *hitem = &l_hitems[j];
-				cl_char	   *my_dclass = l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * j;
-				Datum	   *my_values = l_values + GPUPREAGG_NUM_ACCUM_VALUES * j;
+				if (!status && j < l_nitems)
+				{
+					preagg_hash_item *hitem = &l_hitems[j];
+					cl_char    *my_dclass = l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * j;
+					Datum      *my_values = l_values + GPUPREAGG_NUM_ACCUM_VALUES * j;
 
-				if (gpupreagg_global_reduction(kcxt,
-											   kds_slot,
-											   hitem->index,
-											   hitem->hash,
-											   kds_final,
-											   f_hash,
-											   my_dclass,
-											   my_values))
-					status = 1;		/* merged */
-			}
-			else
-			{
-				status = 1;
-			}
-			/* quick bailout on error */
-			if (__syncthreads_count(kcxt->errcode) > 0)
-				return;
-		} while (__syncthreads_count(status == 0) > 0);
+					if (gpupreagg_global_reduction(kcxt,
+												   kds_slot,
+												   hitem->index,
+												   hitem->hash,
+												   kds_final,
+												   f_hash,
+												   my_dclass,
+												   my_values))
+						status = 1;		/* merged */
+				}
+				else
+				{
+					status = 1;
+				}
+                /* unlock global hash slots */
+                __syncthreads();
+                if (get_local_id() == 0)
+                    atomicSub(&f_hash->lock, 2);
+            }
+            /* quick bailout on error */
+            if (__syncthreads_count(kcxt->errcode) > 0)
+                return;
+		}
 	}
 }

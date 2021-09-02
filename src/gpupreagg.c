@@ -4809,8 +4809,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 	pgstrom_data_store *pds_final;
 	size_t			f_hash_nslots;
-//	size_t			f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
-	size_t			f_hash_length = (255UL << 20);	/* 255MB */
+	size_t			f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
 	CUdeviceptr		m_fhash;
 	CUresult		rc;
 
@@ -4820,8 +4819,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 	/* final buffer allocation */
 	pds_final = PDS_create_slot(gcontext,
 								gpa_tupdesc,
-//								0x3ffffe000);		/* almost 16GB managed */
-								0x07fffe000);		/* almost  2GB managed */
+								0x3ffffe000);		/* almost 16GB managed */
 	/* final hash-slot allocation */
 	if (gpas->plan_ngroups < 400000)
 		f_hash_nslots = 4 * gpas->plan_ngroups;
@@ -4833,7 +4831,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 		f_hash_nslots = (double)gpas->plan_ngroups * 1.25;
 	else
 		f_hash_nslots = gpas->plan_ngroups;
-
+	
 	/*
 	 * Hash table allocation up to @f_hashlimit items, however, it initially
 	 * uses only @f_hashsize slot. If needs, GPU kernel extends the final
