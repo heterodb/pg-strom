@@ -20,8 +20,8 @@ struct kern_gpupreagg
 	cl_uint			read_slot_pos;		/* offset to read kds_slot */
 	cl_uint			grid_sz;			/* grid-size of setup/join kernel */
 	cl_uint			block_sz;			/* block-size of setup/join kernel */
-	cl_uint			row_inval_map_size;	/* length of row-invalidation-map */
 	cl_bool			setup_slot_done;	/* setup stage is done, if true */
+	cl_bool			final_buffer_modified; /* true, if kds_final is modified */
 	/* -- suspend/resume (KDS_FORMAT_BLOCK) */
 	cl_bool			resume_context;		/* resume kernel, if true */
 	cl_uint			suspend_count;		/* number of suspended blocks */
@@ -84,11 +84,6 @@ typedef union
 		((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg) +		\
 		 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))) + (group_id) \
 	 : NULL)
-/* row-invalidation map */
-#define KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg)		\
-	((cl_char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg) +			\
-	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg) +				\
-	 (kgpreagg)->suspend_size)
 
 /*
  * preagg_hash_item
@@ -134,16 +129,12 @@ typedef struct
 STATIC_INLINE(void)
 gpupreagg_reset_kernel_task(kern_gpupreagg *kgpreagg, bool resume_context)
 {
-	cl_char	   *ri_map;
-
 	memset(&kgpreagg->kerror, 0, sizeof(kern_errorbuf));
 	kgpreagg->read_slot_pos   = 0;
 	kgpreagg->setup_slot_done = false;
+	kgpreagg->final_buffer_modified = false;
 	kgpreagg->resume_context  = resume_context;
 	kgpreagg->suspend_count   = 0;
-
-	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
-	memset(ri_map, 0, kgpreagg->row_inval_map_size);
 }
 #else	/* __CUDACC__ */
 /*

@@ -833,11 +833,14 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 			assert(cur_nitems == 0xffffffff);
 			goto try_again;
 		}
+		kgpreagg->final_buffer_modified = true;
 	}
 }
 
 #define HASHITEM_EMPTY		(0xffffffffU)
 #define HASHITEM_LOCKED		(0xfffffffeU)
+
+static __shared__ cl_bool l_final_buffer_modified;
 
 /*
  * gpupreagg_init_final_hash
@@ -964,6 +967,7 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	dst_values = KERN_DATA_STORE_VALUES(kds_final, dst_index);
 	if (alloc_sz > 0)
 		extra = (char *)kds_final + kds_final->length - __kds_unpack(newval.i.usage);
+	l_final_buffer_modified = true;
 
 	/* copy the grouping keys */
 	for (int j=0; j < kds_src->ncols; j++)
@@ -1252,6 +1256,7 @@ restart:
 										GPUPREAGG_ACCUM_MAP_GLOBAL);
 			if (is_locked)
 				atomicExch(&f_hash->slots[hindex], next);	//UNLOCK
+			l_final_buffer_modified = true;
 			return true;
 		}
 		curr = hitem->next;
@@ -1447,7 +1452,10 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	 * setup local hash-table
 	 */
 	if (get_local_id() == 0)
+	{
+		l_final_buffer_modified = false;
 		l_htable.nitems = 0;
+	}
 	for (int i = get_local_id(); i < GPUPREAGG_LOCAL_HASH_NSLOTS; i += get_local_size())
 		l_htable.l_hslots[i] = HASHITEM_EMPTY;
 	__syncthreads();
@@ -1582,4 +1590,7 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
                 return;
 		}
 	}
+	__syncthreads();
+	if (get_local_id() == 0 && l_final_buffer_modified)
+		kgpreagg->final_buffer_modified = true;
 }

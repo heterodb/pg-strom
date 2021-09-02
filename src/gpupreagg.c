@@ -4874,7 +4874,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	cl_int			sm_count;
 	Size			head_sz;
 	Size			suspend_sz = 0;
-	Size			row_inval_sz = 0;
 	Size			kgjoin_len = 0;
 
 	/* allocation of the final-buffer on demand */
@@ -4930,8 +4929,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	}
 	kds_slot_nrooms = (kds_slot_length -
 					   KERN_DATA_STORE_HEAD_LENGTH(kds_slot)) / unitsz;
-	/* buffer of row-invalidation-map */
-	row_inval_sz = STROMALIGN(sizeof(cl_char) * kds_slot_nrooms);
 
 	/* allocation of GpuPreAggTask */
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
@@ -4944,12 +4941,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							head_sz + suspend_sz + row_inval_sz + kgjoin_len,
+							head_sz + suspend_sz + kgjoin_len,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	gpreagg = (GpuPreAggTask *)m_deviceptr;
-	memset(gpreagg, 0, head_sz + suspend_sz + row_inval_sz);
+	memset(gpreagg, 0, head_sz + suspend_sz);
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->with_nvme_strom = with_nvme_strom;
@@ -4960,8 +4957,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	if (gpas->combined_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
-		gpreagg->kgjoin = (kern_gpujoin *)
-			((char *)gpreagg + head_sz + suspend_sz + row_inval_sz);
+		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz + suspend_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 		gpreagg->m_kmrels = m_kmrels;
 		gpreagg->outer_depth = outer_depth;
@@ -4974,7 +4970,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
 	gpreagg->kern.hash_size = kds_slot_nrooms; //deprecated?
 	gpreagg->kern.suspend_size = suspend_sz;
-	gpreagg->kern.row_inval_map_size = row_inval_sz;
 	/* kern_parambuf */
 	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
 		   gpas->gts.kern_params,
@@ -5108,22 +5103,19 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 	{
 		if (gpreagg->kds_slot)
 		{
-			/* CPU fallback with partial results */
+			/* CPU fallback with kds_slot built */
 			kern_data_store *kds_slot = gpreagg->kds_slot;
-			cl_char	   *ri_map;
-			cl_uint		row_index;
+			cl_uint		row_index = gpas->gts.curr_index++;
 
-			ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern);
-			row_index = gpas->gts.curr_index++;
-			if (row_index >= kds_slot->nitems)
-				slot = NULL;
-			else
+			if (row_index < kds_slot->nitems)
 			{
-				if (ri_map[row_index])
-					continue;
 				slot = gpas->gpreagg_slot;
 				if (!KDS_fetch_tuple_slot(slot, kds_slot, row_index))
 					continue;
+			}
+			else
+			{
+				slot = NULL;
 			}
 			break;
 		}
@@ -5339,10 +5331,6 @@ gpupreagg_throw_partial_result(GpuPreAggTask *gpreagg,
 	gresp->kds_slot			= kds_slot;
 	gresp->kds_slot_nrooms	= gpreagg->kds_slot_nrooms;
 	gresp->kds_slot_length	= gpreagg->kds_slot_length;
-	gresp->kern.row_inval_map_size = gpreagg->kern.row_inval_map_size;
-	memcpy(KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gresp->kern),
-		   KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern),
-		   gresp->kern.row_inval_map_size);
 
 	/* Back GpuTask to GTS */
 	pthreadMutexLock(&gcontext->worker_mutex);
@@ -5632,8 +5620,16 @@ resume_kernel:
 		retval = -1;
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
-			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0 &&
+			 !gpreagg->kern.final_buffer_modified)
 	{
+		/*
+		 * As long as final buffer is not modified by the reduction process
+		 * yet, we can help this GpuTask by CPU fallback.
+		 * If CpuReCheck is reported by gpupreagg_setup_xxxx(), kds_slot is
+		 * not built yet. So, CPU fallback routine has to refer the kds_src.
+		 * Elsewhere, we can reuse kds_slot built by the kernel.
+		 */
 		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 		gpreagg->task.cpu_fallback = true;
 
@@ -5659,6 +5655,10 @@ resume_kernel:
 			{
 				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
 			}
+			else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+			{
+				//TODO: memcopy D->H
+			}
 			/* restore the point where suspended most recently */
 			gpreagg->kern.resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -5667,35 +5667,13 @@ resume_kernel:
 				memcpy(temp, last_suspend, gpreagg->kern.suspend_size);
 			}
 		}
-		else if (gpreagg->kern.suspend_count > 0)
-		{
-			/*
-			 * gpupreagg_setup_xxxx successfully setup kds_slot, however,
-			 * reduction kernel reported CpuReCheck error, and GPU kernel
-			 * is suspended.
-			 */
-			kern_data_store	   *kds_slot
-				= (kern_data_store *) m_kds_slot;
-
-			CHECK_WORKER_TERMINATION();
-			m_kds_slot = (CUdeviceptr) KDS_clone(gcontext, kds_slot);
-			gpupreagg_throw_partial_result(gpreagg, kds_slot);
-
-			/* save the suspend status at this point, then resume */
-			gpupreagg_reset_kernel_task(&gpreagg->kern, true);
-			if (!last_suspend)
-				last_suspend = alloca(gpreagg->kern.suspend_size);
-			temp = KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
-			memcpy(last_suspend, temp, gpreagg->kern.suspend_size);
-			goto resume_kernel;
-		}
 		else
 		{
 			/*
 			 * gpupreagg_setup_xxxx successfully setup kds_slot, however,
-			 * reduction kernel reported CpuReCheck error. Fortunatelly,
-			 * no need to resume the kernel any more.
-			 * So, CPU fallback routine runs on kds_slot
+			 * reduction kernel reported CpuReCheck error, fortunatelly,
+			 * prior to any modification of the kds_final buffer.
+			 * So, CPU fallback routine can use the kds_slot, as-is.
 			 */
 			rc = cuMemPrefetchAsync(m_kds_slot,
 									gpreagg->kds_slot_length,
@@ -5992,24 +5970,28 @@ resume_kernel:
 			memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 			gpreagg->task.cpu_fallback = true;
 
-			if (pds_src &&
-				pds_src->kds.format == KDS_FORMAT_BLOCK &&
-				pds_src->nblocks_uncached > 0)
+			if (pds_src)
 			{
-				rc = cuMemcpyDtoH(&pds_src->kds,
-								  m_kds_src,
-								  pds_src->kds.length);
-				if (rc != CUDA_SUCCESS)
-					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-				pds_src->nblocks_uncached = 0;
+				if (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+					pds_src->nblocks_uncached > 0)
+				{
+					rc = cuMemcpyDtoH(&pds_src->kds,
+									  m_kds_src,
+									  pds_src->kds.length);
+					if (rc != CUDA_SUCCESS)
+						werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+					pds_src->nblocks_uncached = 0;
+				}
+				else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+						 pds_src->iovec != NULL)
+				{
+					gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
+				}
+				else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+				{
+					//TODO: cuMemCopyDtoH
+				}
 			}
-			else if (pds_src &&
-					 pds_src->kds.format == KDS_FORMAT_ARROW &&
-					 pds_src->iovec != NULL)
-			{
-				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
-			}
-
 			/* restore the suspend context if any */
 			kgjoin->resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -6026,16 +6008,16 @@ resume_kernel:
 	else if (gpreagg->kern.kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
 		if (pgstrom_cpu_fallback_enabled &&
-			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0 &&
+			!gpreagg->kern.final_buffer_modified)
 		{
 			/*
-			 * CPU fallback with partial results
+			 * CPU fallback by GpuPreAgg kernel
 			 *
 			 * If GpuPreAgg reported CpuReCheck error, it means kds_slot
-			 * is successfully built; but a part of them might be already
-			 * merged to the final buffer.
-			 * CPU fallback routine will run on the kds_slot with row-
-			 * invalidation-map
+			 * is successfully built, however, CPU fallback is required
+			 * during the reduction process prior to modification of the
+			 * final buffer.
 			 */
 			memset(&gpreagg->kern.kerror, 0, sizeof(kern_errorbuf));
 
