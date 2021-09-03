@@ -974,7 +974,7 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	{
 		kern_colmeta   *cmeta = &kds_src->colmeta[j];
 		cl_char			dclass = src_dclass[j];
-		Datum			datum;
+		Datum			datum = src_values[j];
 		cl_uint			len;
 
 		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
@@ -988,12 +988,12 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		else if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
 		{
 			dst_dclass[j] = dclass;
-            dst_values[j] = src_values[j];
+            dst_values[j] = datum;
 		}
 		else if (cmeta->attlen > 0)
 		{
 			assert(dclass == DATUM_CLASS__NORMAL);
-			memcpy(extra, DatumGetPointer(src_values[j]), cmeta->attlen);
+			memcpy(extra, DatumGetPointer(datum), cmeta->attlen);
 			dst_dclass[j] = DATUM_CLASS__NORMAL;
 			dst_values[j] = PointerGetDatum(extra);
 			extra += MAXALIGN(cmeta->attlen);
@@ -1001,7 +1001,6 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		else
 		{
 			assert(cmeta->attlen == -1);
-			datum = src_values[j];
 			switch (dclass)
 			{
 				case DATUM_CLASS__NORMAL:
@@ -1226,6 +1225,7 @@ gpupreagg_global_reduction(kern_context *kcxt,
 	 * Step-1: Lookup hash slot without locking
 	 */
 	curr = next = __volatileRead(&f_hash->slots[hindex]);
+	__threadfence();
 	if (curr == HASHITEM_LOCKED)
 		return false;	/* locked, try again */
 restart:
@@ -1270,6 +1270,7 @@ restart:
 	if (!is_locked)
 	{
 		curr = next = __volatileRead(&f_hash->slots[hindex]);
+		__threadfence();
 		if (curr == HASHITEM_LOCKED ||
 			atomicCAS(&f_hash->slots[hindex],
 					  curr,
@@ -1346,6 +1347,7 @@ gpupreagg_local_reduction(kern_context *kcxt,
 	cl_bool		is_locked = false;
 
 	curr = next = __volatileRead(&l_htable->l_hslots[hindex]);
+	__threadfence_block();
 	if (curr == HASHITEM_LOCKED)
 		return -1;	/* locked */
 restart:
@@ -1385,6 +1387,7 @@ restart:
 	if (!is_locked)
 	{
 	    curr = next = __volatileRead(&l_htable->l_hslots[hindex]);
+		__threadfence_block();
 		if (curr == HASHITEM_LOCKED ||
 			atomicCAS(&l_htable->l_hslots[hindex],
 					  next,
