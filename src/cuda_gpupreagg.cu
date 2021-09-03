@@ -1187,6 +1187,8 @@ gpupreagg_expand_global_hash(kern_context *kcxt,
 			}
 			return false;
 		}
+		/* Ensure the updates of f_hash visible to others */
+		__threadfence();
 		/* Downgrade the lock */
 		__syncthreads();
 		if (get_local_id() == 0)
