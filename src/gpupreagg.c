@@ -4554,17 +4554,10 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	CustomScan			   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo		   *gpa_info = deform_gpupreagg_info(cscan);
 	List				   *dcontext;
-	List				   *gpu_proj = NIL;
+	List				   *dev_proj = NIL;
+	List				   *group_keys = NIL;
 	ListCell			   *lc;
-	const char			   *policy;
-	char				   *exprstr;
-
-	/* shows reduction policy */
-	if (gpas->num_group_keys == 0)
-		policy = "NoGroup";
-	else
-		policy = "Local";
-	ExplainPropertyText("Reduction", policy, es);
+	char				   *temp;
 
 	if (gpa_rtstat)
 		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
@@ -4573,18 +4566,36 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
                                             (Node *)&gpas->gts.css.ss.ps,
                                             ancestors);
-	/* Show device projection (verbose only) */
+	/* device projection and grouping key */
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		dev_proj = lappend(dev_proj, tle->expr);
+		if (tle->ressortgroupref)
+			group_keys = lappend(group_keys, tle->expr);
+	}
+
 	if (es->verbose)
 	{
-		foreach (lc, cscan->custom_scan_tlist)
-			gpu_proj = lappend(gpu_proj, ((TargetEntry *) lfirst(lc))->expr);
-		if (gpu_proj != NIL)
-		{
-			exprstr = deparse_expression((Node *)gpu_proj, dcontext,
-										 es->verbose, false);
-			ExplainPropertyText("GPU Projection", exprstr, es);
-		}
+		temp = deparse_expression((Node *)dev_proj, dcontext,
+								  es->verbose, false);
+		ExplainPropertyText("GPU Projection", temp, es);
 	}
+
+	if (gpas->num_group_keys == 0)
+	{
+		Assert(group_keys == NIL);
+		ExplainPropertyText("Reduction", "NoGroup", es);
+	}
+	else
+	{
+		Assert(group_keys != 0);
+		temp = deparse_expression((Node *)group_keys, dcontext,
+								  es->verbose, false);
+		ExplainPropertyText("Group keys", temp, es);
+	}
+
 	pgstromExplainOuterScan(&gpas->gts,
 							dcontext, ancestors, es,
 							gpa_info->outer_quals,
