@@ -1309,6 +1309,15 @@ restart:
 	hitem->hash = hash;
 	hitem->next = next;
 
+	/*
+	 * NOTE: Above modification to kds_final/f_hash are weakly-ordered memory
+	 * writes, thus, updates on the hitem and kds_final may not be visible to
+	 * other threads in the device.
+	 * __threadfence() ensures any writes prior to the invocation are visible
+	 * to other threads. Don't eliminate this.
+	 */
+	__threadfence();
+
 	atomicExch(&f_hash->slots[hindex], curr);		//UNLOCK;
 
 	return true;
@@ -1403,6 +1412,11 @@ restart:
 	l_hitems[curr].next  = next;
 	gpupreagg_init_local_slot(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
 							  l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr);
+	/*
+	 * __threadfence_block() makes above updates visible to other concurent
+	 * threads within this block.
+	 */
+	__threadfence_block();
 	/* UNLOCK */
 	atomicExch(&l_htable->l_hslots[hindex], curr);
 found:
