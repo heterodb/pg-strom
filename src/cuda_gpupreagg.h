@@ -859,10 +859,6 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	 * nogroup reduction has no grouping-key, so GPUPREAGG_NUM_ACCUM_VALUES has
 	 * identical to the width of kds_slot/kds_final
 	 */
-//FIXME: select count(*), min(id), max(id) from t0 contains
-//       'id' in the target-list	
-//	assert(__GPUPREAGG_NUM_ACCUM_VALUES == kds_slot->ncols &&
-//		   __GPUPREAGG_NUM_ACCUM_VALUES == kds_final->ncols);
 	gpupreagg_nogroup_reduction(&u.kcxt,
 								kgpreagg,
 								kgjoin_errorbuf,
