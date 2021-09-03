@@ -1512,6 +1512,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 	fstate->atttypid   = arrowTypeToPGTypeOid(field, &fstate->atttypmod);
 	fstate->nitems     = fnode->length;
 	fstate->null_count = fnode->null_count;
+	fstate->stat_isnull = true;
 
 	switch (field->type.node.tag)
 	{
