@@ -490,9 +490,9 @@ link_cuda_libraries(char *ptx_image,
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuLinkCreate: %s", errorText(rc));
+		elog(ERROR, "failed on cuLinkCreate: %s", errorText(rc));
 
-	STROM_TRY();
+	PG_TRY();
 	{
 		static struct {
 			const char *libname;
@@ -520,7 +520,7 @@ link_cuda_libraries(char *ptx_image,
 						   ptx_image, ptx_length,
 						   "pg-strom", 0, NULL, NULL);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLinkAddData: %s", errorText(rc));
+			elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
 
 		/* other libraries */
 		for (i=0; catalog[i].libname != NULL; i++)
@@ -533,8 +533,8 @@ link_cuda_libraries(char *ptx_image,
 				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 								   pathname, 0, NULL, NULL);
 				if (rc != CUDA_SUCCESS)
-					werror("failed on cuLinkAddFile(\"%s\"): %s",
-						   pathname, errorText(rc));
+					elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
+						 pathname, errorText(rc));
 			}
 		}
 
@@ -551,16 +551,16 @@ link_cuda_libraries(char *ptx_image,
 				rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 								   pathname, 0, NULL, NULL);
 				if (rc != CUDA_SUCCESS)
-					werror("failed on cuLinkAddFile(\"%s\"): %s",
-						   pathname, errorText(rc));
+					elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
+						 pathname, errorText(rc));
 			}
 		}
 
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLinkComplete: %s\nLog: %s",
-				   errorText(rc), log_buffer);
+			elog(ERROR, "failed on cuLinkComplete: %s\nLog: %s",
+				 errorText(rc), log_buffer);
 
 		/*
 		 * copy onto the result buffer; because bin_image is owned by
@@ -568,21 +568,21 @@ link_cuda_libraries(char *ptx_image,
 		 */
 		bin_image = malloc(bin_length);
 		if (!bin_image)
-			werror("out of memory");
+			elog(ERROR, "out of memory");
 		memcpy(bin_image, temp, bin_length);
 	}
-	STROM_CATCH();
+	PG_CATCH();
 	{
 		rc = cuLinkDestroy(lstate);
 		if (rc != CUDA_SUCCESS)
-			wnotice("failed on cuLinkDestroy: %s", errorText(rc));
-		STROM_RE_THROW();
+			elog(NOTICE, "failed on cuLinkDestroy: %s", errorText(rc));
+		PG_RE_THROW();
 	}
-	STROM_END_TRY();
+	PG_END_TRY();
 
 	rc = cuLinkDestroy(lstate);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuLinkDestroy: %s", errorText(rc));
+		elog(ERROR, "failed on cuLinkDestroy: %s", errorText(rc));
 
 	return bin_image;
 }
@@ -744,9 +744,9 @@ build_cuda_program(program_cache_entry *src_entry)
 										src_entry->kern_define,
 										src_entry->kern_source);
 	if (!source)
-		werror("out of memory");
+		elog(ERROR, "out of memory");
 
-	STROM_TRY();
+	PG_TRY();
 	{
 		char	gpu_arch_option[256];
 
@@ -757,8 +757,8 @@ build_cuda_program(program_cache_entry *src_entry)
 								NULL,
 								NULL);
 		if (rc != NVRTC_SUCCESS)
-			werror("failed on nvrtcCreateProgram: %s",
-				   nvrtcGetErrorString(rc));
+			elog(ERROR, "failed on nvrtcCreateProgram: %s",
+				 nvrtcGetErrorString(rc));
 		/*
 		 * Put command line options
 		 */
@@ -791,8 +791,8 @@ build_cuda_program(program_cache_entry *src_entry)
 		}
 		else if (rc != NVRTC_SUCCESS)
 		{
-			werror("failed on nvrtcCompileProgram: %s",
-				   nvrtcGetErrorString(rc));
+			elog(ERROR, "failed on nvrtcCompileProgram: %s",
+				 nvrtcGetErrorString(rc));
 		}
 		else
 		{
@@ -801,16 +801,16 @@ build_cuda_program(program_cache_entry *src_entry)
 			 */
 			rc = nvrtcGetPTXSize(program, &ptx_length);
 			if (rc != NVRTC_SUCCESS)
-				werror("failed on nvrtcGetPTXSize: %s",
+				elog(ERROR, "failed on nvrtcGetPTXSize: %s",
 					   nvrtcGetErrorString(rc));
 			ptx_image = malloc(ptx_length + 1);
 			if (!ptx_image)
-				werror("out of memory");
+				elog(ERROR, "out of memory");
 
 			rc = nvrtcGetPTX(program, ptx_image);
 			if (rc != NVRTC_SUCCESS)
-				werror("failed on nvrtcGetPTX: %s",
-					   nvrtcGetErrorString(rc));
+				elog(ERROR, "failed on nvrtcGetPTX: %s",
+					 nvrtcGetErrorString(rc));
 			ptx_image[ptx_length++] = '\0';
 		}
 
@@ -819,22 +819,22 @@ build_cuda_program(program_cache_entry *src_entry)
 		 */
 		rc = nvrtcGetProgramLogSize(program, &log_length);
 		if (rc != NVRTC_SUCCESS)
-			werror("failed on nvrtcGetProgramLogSize: %s",
+			elog(ERROR, "failed on nvrtcGetProgramLogSize: %s",
 				   nvrtcGetErrorString(rc));
 		build_log = malloc(log_length + 1);
 		if (!build_log)
-			werror("out of memory");
+			elog(ERROR, "out of memory");
 
 		rc = nvrtcGetProgramLog(program, build_log);
 		if (rc != NVRTC_SUCCESS)
-			werror("failed on nvrtcGetProgramLog: %s",
-				   nvrtcGetErrorString(rc));
+			elog(ERROR, "failed on nvrtcGetProgramLog: %s",
+				 nvrtcGetErrorString(rc));
 		build_log[log_length] = '\0';	/* may not be necessary? */
 
 		/* release nvrtcProgram object */
 		rc = nvrtcDestroyProgram(&program);
 		if (rc != NVRTC_SUCCESS)
-			werror("failed on nvrtcDestroyProgram: %s",
+			elog(ERROR, "failed on nvrtcDestroyProgram: %s",
 				   nvrtcGetErrorString(rc));
 
 		/*
@@ -850,7 +850,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		if (!bin_entry)
 		{
 			SpinLockRelease(&pgcache_head->lock);
-			werror("out of CUDA program cache");
+			elog(ERROR, "out of CUDA program cache");
 		}
 		/*
 		 * OK, replace the src_entry by the bin_entry
@@ -919,7 +919,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		put_cuda_program_entry_nolock(src_entry);
 		SpinLockRelease(&pgcache_head->lock);
 	}
-	STROM_CATCH();
+	PG_CATCH();
 	{
 		if (build_log)
 			free(build_log);
@@ -929,14 +929,14 @@ build_cuda_program(program_cache_entry *src_entry)
 		{
 			rc = nvrtcDestroyProgram(&program);
 			if (rc != NVRTC_SUCCESS)
-				wnotice("failed on nvrtcDestroyProgram: %s",
-						nvrtcGetErrorString(rc));
+				elog(NOTICE, "failed on nvrtcDestroyProgram: %s",
+					 nvrtcGetErrorString(rc));
 		}
 		if (source)
 			free(source);
-		STROM_RE_THROW();
+		PG_RE_THROW();
 	}
-	STROM_END_TRY();
+	PG_END_TRY();
 	if (build_log)
 		free(build_log);
 	if (ptx_image)
@@ -1116,7 +1116,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	if (!entry)
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		werror("out of shared memory");
+		elog(ERROR, "out of shared memory");
 	}
 
 	/* find out a unique program_id */
@@ -1666,19 +1666,21 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	size_t		stack_sz, lvalue;
 	char	   *bin_image;
 
+	Assert(!GpuWorkerCurrentContext);
+
 	SpinLockAcquire(&pgcache_head->lock);
 retry_checks:
 	entry = lookup_cuda_program_entry_nolock(program_id);
 	if (!entry)
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		werror("CUDA Program ID=%lu was not found", program_id);
+		elog(ERROR, "CUDA Program ID=%lu was not found", program_id);
 	}
 	if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		werror("CUDA program build failure (id=%lu):\n%s",
-			   (long)program_id, entry->error_msg);
+		elog(ERROR, "CUDA program build failure (id=%lu):\n%s",
+			 (long)program_id, entry->error_msg);
 	}
 	else if (entry->ptx_image)
 	{
@@ -1709,18 +1711,18 @@ retry_checks:
 			Assert(__ptx_crc == entry->ptx_crc);
 		}
 #endif /* USE_ASSERT_CHECKING */
-		STROM_TRY();
+		PG_TRY();
 		{
 			bin_image = link_cuda_libraries(entry->ptx_image,
 											entry->ptx_length,
 											entry->extra_flags);
 		}
-		STROM_CATCH();
+		PG_CATCH();
 		{
 			put_cuda_program_entry(entry);
-			STROM_RE_THROW();
+			PG_RE_THROW();
 		}
-		STROM_END_TRY();
+		PG_END_TRY();
 		put_cuda_program_entry(entry);
 	}
 	else if (entry->build_chain.prev || entry->build_chain.next)
@@ -1733,20 +1735,18 @@ retry_checks:
 		memset(&entry->build_chain, 0, sizeof(dlist_node));
 		get_cuda_program_entry_nolock(entry);
 		SpinLockRelease(&pgcache_head->lock);
-		STROM_TRY();
+		PG_TRY();
 		{
 			entry = build_cuda_program(entry);
 		}
-		STROM_CATCH();
+		PG_CATCH();
 		{
 			put_cuda_program_entry(entry);
-			STROM_RE_THROW();
+			PG_RE_THROW();
 		}
-		STROM_END_TRY();
-		if (!GpuWorkerCurrentContext)
-			CHECK_FOR_INTERRUPTS();
-		else
-			CHECK_WORKER_TERMINATION();
+		PG_END_TRY();
+
+		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&pgcache_head->lock);
 		put_cuda_program_entry_nolock(entry);
 		goto retry_checks;
@@ -1755,26 +1755,23 @@ retry_checks:
 	{
 		/* NVRTC is still in-progress */
 		SpinLockRelease(&pgcache_head->lock);
-		if (!GpuWorkerCurrentContext)
-			CHECK_FOR_INTERRUPTS();
-		else
-			CHECK_WORKER_TERMINATION();
+		CHECK_FOR_INTERRUPTS();
 		pg_usleep(50000L);
 		SpinLockAcquire(&pgcache_head->lock);
 		goto retry_checks;
 	}
 	rc = cuModuleLoadData(&cuda_module, bin_image);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuModuleLoadData: %s", errorText(rc));
+		elog(ERROR, "failed on cuModuleLoadData: %s", errorText(rc));
 
 	rc = cuCtxGetLimit(&lvalue, CU_LIMIT_STACK_SIZE);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuCtxGetLimit: %s", errorText(rc));
+		elog(ERROR, "failed on cuCtxGetLimit: %s", errorText(rc));
 	if (stack_sz > lvalue)
 	{
 		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuCtxSetLimit: %s", errorText(rc));
+			elog(ERROR, "failed on cuCtxSetLimit: %s", errorText(rc));
 	}
 	return cuda_module;
 }

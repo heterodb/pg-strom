@@ -512,6 +512,10 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 {
 	TupleTableSlot *slot = NULL;
 
+	if (!gts->cuda_module && gts->program_id != INVALID_PROGRAM_ID)
+		gts->cuda_module = GpuContextLookupModule(gts->gcontext,
+												  gts->program_id);
+
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
 		GpuTask	   *gtask = gts->curr_task;
