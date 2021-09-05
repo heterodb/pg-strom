@@ -435,7 +435,7 @@ __GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id,
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMODULE,
 								   &program_id, sizeof(ProgramId));
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	STROM_TRY();
+	PG_TRY();
 	{
 		SpinLockAcquire(&gcontext->restrack_lock);
 		dlist_foreach(iter, restrack_list)
@@ -470,12 +470,12 @@ __GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id,
 		}
 		SpinLockRelease(&gcontext->restrack_lock);
 	}
-	STROM_CATCH();
+	PG_CATCH();
 	{
 		SpinLockRelease(&gcontext->restrack_lock);
-		STROM_RE_THROW();
+		PG_RE_THROW();
 	}
-	STROM_END_TRY();
+	PG_END_TRY();
 
 	return cuda_module;
 }
@@ -740,8 +740,10 @@ GpuContextWorkerMain(void *arg)
 			pthreadMutexUnlock(&gcontext->worker_mutex);
 
 			gts = gtask->gts;
-			cuda_module = GpuContextLookupModule(gcontext,
-												 gtask->program_id);
+			if (!gts->cuda_module)
+				werror("No CUDA module is not loaded");
+			cuda_module = gts->cuda_module;
+
 		retry_gputask:
 			/*
 			 * gts->cb_process_task shall return the following status:

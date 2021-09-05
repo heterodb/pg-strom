@@ -332,6 +332,7 @@ struct GpuTaskState
 	GpuContext	   *gcontext;
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
+	CUmodule		cuda_module;	/* CUDA binary module */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	cl_int			optimal_gpu;	/* GPU preference on plan time */
 	bool			scan_done;		/* True, if no more rows to read */

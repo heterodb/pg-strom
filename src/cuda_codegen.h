@@ -55,8 +55,7 @@ struct devfunc_info;
 struct devcast_info;
 struct codegen_context;
 
-typedef uint32 (*devtype_hashfunc_type)(struct devtype_info *dtype,
-										Datum datum);
+typedef uint32 (*devtype_hashfunc_type)(struct devtype_info *dtype, Datum datum);
 
 typedef struct devtype_info {
 	dlist_node	chain;
@@ -71,10 +70,6 @@ typedef struct devtype_info {
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
-	/* constant initializer cstring, if any */
-	const char *max_const;
-	const char *min_const;
-	const char *zero_const;
 	/*
 	 * required size for extra buffer, if device type has special
 	 * internal representation, or device type needs working buffer
