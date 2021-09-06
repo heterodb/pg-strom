@@ -17,15 +17,14 @@
 
 typedef struct
 {
+	size_t			entry_sz;		/* size of the entry itself */
+	cl_int			refcnt;
 	cl_int			magic;
-	cl_int			mclass;
-	dlist_node		free_chain;		/* zero clear, if active chunk */
 	/* -- fields below are valid only if active chunks -- */
 	dlist_node		pgid_chain;
 	dlist_node		hash_chain;
 	dlist_node		lru_chain;
 	dlist_node		build_chain;
-	cl_int			refcnt;
 	/* fields below are never updated once entry is constructed */
 	ProgramId		program_id;
 	pg_crc32		crc;			/* hash value by extra_flags */
@@ -66,9 +65,7 @@ typedef struct
 	dlist_head	hash_slots[PGCACHE_HASH_SIZE];
 	dlist_head	lru_list;
 	dlist_head	build_list;		/* build pending list */
-	dlist_head	addr_list;
-	dlist_head	free_list[PGCACHE_CHUNKSZ_MAX_BIT + 1];
-	char		base[FLEXIBLE_ARRAY_MEMBER];
+	size_t		program_cache_usage;
 } program_cache_head;
 
 typedef struct
@@ -117,117 +114,34 @@ lookup_cuda_program_entry_nolock(ProgramId program_id)
 }
 
 /*
- * split_cuda_program_entry_nolock
- */
-static bool
-split_cuda_program_entry_nolock(int mclass)
-{
-	program_cache_entry *entry1;
-	program_cache_entry *entry2;
-	dlist_node	   *dnode;
-
-	if (mclass > PGCACHE_CHUNKSZ_MAX_BIT)
-		return false;
-	Assert(mclass > PGCACHE_CHUNKSZ_MIN_BIT);
-	if (dlist_is_empty(&pgcache_head->free_list[mclass]))
-	{
-		if (!split_cuda_program_entry_nolock(mclass + 1))
-			return false;
-	}
-	Assert(!dlist_is_empty(&pgcache_head->free_list[mclass]));
-	dnode = dlist_pop_head_node(&pgcache_head->free_list[mclass]);
-	entry1 = dlist_container(program_cache_entry, free_chain, dnode);
-	Assert(entry1->magic == PGCACHE_CHUNK_MAGIC &&
-		   entry1->mclass == mclass);
-	entry2 = (program_cache_entry *)((char *)entry1 + (1UL << (mclass - 1)));
-	memset(entry2, 0, offsetof(program_cache_entry, data));
-
-	mclass--;
-	entry1->magic = PGCACHE_CHUNK_MAGIC;
-	entry1->mclass = mclass;
-	entry2->magic = PGCACHE_CHUNK_MAGIC;
-	entry2->mclass = mclass;
-	dlist_push_head(&pgcache_head->free_list[mclass], &entry1->free_chain);
-	dlist_push_head(&pgcache_head->free_list[mclass], &entry2->free_chain);
-
-	return true;
-}
-
-/*
  * reclaim_cuda_program_entry_nolock(int mclass)
  */
-static bool
-reclaim_cuda_program_entry_nolock(int mclass)
-{
-	program_cache_entry *entry;
-	dlist_node	   *dnode;
-
-	if (dlist_is_empty(&pgcache_head->lru_list))
-		return false;
-	dnode = dlist_tail_node(&pgcache_head->lru_list);
-
-	while (dlist_is_empty(&pgcache_head->free_list[mclass]) &&
-		   !split_cuda_program_entry_nolock(mclass + 1))
-	{
-	prev_entry:
-		entry = dlist_container(program_cache_entry, lru_chain, dnode);
-		if (entry->refcnt > 0)
-		{
-			if (dlist_has_prev(&pgcache_head->lru_list, dnode))
-			{
-				dnode = dlist_prev_node(&pgcache_head->lru_list, dnode);
-				goto prev_entry;
-			}
-			else
-				return false;
-		}
-		dlist_delete(&entry->pgid_chain);
-		dlist_delete(&entry->hash_chain);
-		dlist_delete(&entry->lru_chain);
-		memset(&entry->pgid_chain, 0, sizeof(dlist_node));
-		memset(&entry->hash_chain, 0, sizeof(dlist_node));
-		memset(&entry->lru_chain, 0, sizeof(dlist_node));
-
-		put_cuda_program_entry_nolock(entry);
-	}
-	return true;
-}
-
-/*
- * create_cuda_program_entry_nolock
- */
-static program_cache_entry *
-create_cuda_program_entry_nolock(size_t variable_length)
+static void
+reclaim_cuda_program_entry_nolock(void)
 {
 	program_cache_entry *entry;
 	dlist_node *dnode;
-	size_t		required;
-	cl_int		mclass;
+	size_t		threshold = ((size_t)program_cache_size_kb << 10);
 
-	required = offsetof(program_cache_entry, data) + variable_length;
-	mclass = get_next_log2(required);
-	if (mclass < PGCACHE_CHUNKSZ_MIN_BIT)
-		mclass = PGCACHE_CHUNKSZ_MIN_BIT;
-	if (mclass > PGCACHE_CHUNKSZ_MAX_BIT)
-		return NULL;	/* invalid length */
-
-	if (dlist_is_empty(&pgcache_head->free_list[mclass]))
+	while (threshold < pgcache_head->program_cache_usage &&
+		   !dlist_is_empty(&pgcache_head->lru_list))
 	{
-		if (!split_cuda_program_entry_nolock(mclass + 1))
+		dnode = dlist_tail_node(&pgcache_head->lru_list);
+		entry = dlist_container(program_cache_entry, lru_chain, dnode);
+
+		dlist_delete(&entry->lru_chain);
+		memset(&entry->lru_chain, 0, sizeof(dlist_node));
+		pgcache_head->program_cache_usage -= entry->entry_sz;
+
+		if (entry->refcnt == 0)
 		{
-			/* out of memory!, reclaim recently unused ones */
-			if (!reclaim_cuda_program_entry_nolock(mclass))
-				return NULL;	/* Oops! */
+			Assert(!entry->build_chain.prev && !entry->build_chain.next);
+			dlist_delete(&entry->pgid_chain);
+			dlist_delete(&entry->hash_chain);
+
+			pfree(entry);
 		}
 	}
-	Assert(!dlist_is_empty(&pgcache_head->free_list[mclass]));
-	dnode = dlist_pop_head_node(&pgcache_head->free_list[mclass]);
-	entry = dlist_container(program_cache_entry, free_chain, dnode);
-	Assert(entry->magic == PGCACHE_CHUNK_MAGIC &&
-		   entry->mclass == mclass);
-	memset(&entry->free_chain, 0, sizeof(dlist_node));
-
-	return entry;
 }
 
 /*
@@ -236,8 +150,8 @@ create_cuda_program_entry_nolock(size_t variable_length)
 static void
 get_cuda_program_entry_nolock(program_cache_entry *entry)
 {
-	Assert(entry->refcnt > 0);
-	entry->refcnt++;
+	Assert(entry->refcnt > 0 || (entry->lru_chain.prev && entry->lru_chain.next));
+	entry->refcnt += 2;
 	if (entry->lru_chain.prev && entry->lru_chain.next)
 		dlist_move_head(&pgcache_head->lru_list,
 						&entry->lru_chain);
@@ -249,64 +163,23 @@ get_cuda_program_entry_nolock(program_cache_entry *entry)
 static void
 put_cuda_program_entry_nolock(program_cache_entry *entry)
 {
-	program_cache_entry *buddy;
-	size_t		limit = (size_t)program_cache_size_kb << 10;
-	size_t		offset;
+	Assert(entry->refcnt > 0);
+	entry->refcnt -= 2;
 
-	if (--entry->refcnt > 0)
-		return;
-
-	/*
-	 * NOTE: unless program_cache_entry was not detached, refcnt shall
-	 * never be zero, so we confirm the entry is already detached.
-	 */
-	Assert(!entry->pgid_chain.next && !entry->pgid_chain.prev);
-	Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
-	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
-
-	while (entry->mclass < PGCACHE_CHUNKSZ_MAX_BIT)
+	if (entry->refcnt == 0 &&
+		!entry->lru_chain.next &&
+		!entry->lru_chain.prev)
 	{
-		offset = ((uintptr_t)entry - (uintptr_t)pgcache_head->base);
-		if ((offset & (1UL << entry->mclass)) == 0)
-		{
-			buddy = (program_cache_entry *)
-				((char *)entry + (1UL << entry->mclass));
-			if ((uintptr_t)buddy >= (uintptr_t)pgcache_head->base + limit)
-				break;		/* out of the range */
-			Assert(buddy->magic == PGCACHE_CHUNK_MAGIC);
-			if (!buddy->free_chain.prev ||		/* active? */
-				!buddy->free_chain.next ||		/* active? */
-				buddy->mclass != entry->mclass)	/* same size? */
-				break;
-			Assert(!buddy->pgid_chain.next && !buddy->pgid_chain.prev);
-			Assert(!buddy->hash_chain.next && !buddy->hash_chain.prev);
-			Assert(!buddy->lru_chain.next  && !buddy->lru_chain.prev);
-
-			dlist_delete(&buddy->free_chain);
-			entry->mclass++;
-		}
-		else
-		{
-			buddy = (program_cache_entry *)
-				((char *)entry - (1UL << entry->mclass));
-			if ((uintptr_t)buddy < (uintptr_t)pgcache_head->base)
-				break;		/* out of the range */
-			Assert(buddy->magic == PGCACHE_CHUNK_MAGIC);
-			if (!buddy->free_chain.prev ||		/* active? */
-				!buddy->free_chain.next ||		/* active? */
-				buddy->mclass != entry->mclass)	/* same size? */
-				break;
-			Assert(!buddy->pgid_chain.next && !buddy->pgid_chain.prev);
-			Assert(!buddy->hash_chain.next && !buddy->hash_chain.prev);
-			Assert(!buddy->lru_chain.next  && !buddy->lru_chain.prev);
-			dlist_delete(&buddy->free_chain);
-			entry = buddy;
-			entry->mclass++;
-		}
+		/*
+		 * release shared memory, if nobody referenced and already
+		 * reclaimed.
+		 */
+		Assert(!entry->build_chain.prev && !entry->build_chain.next);
+		dlist_delete(&entry->pgid_chain);
+		dlist_delete(&entry->hash_chain);
+		pgcache_head->program_cache_usage -= entry->entry_sz;
+		pfree(entry);
 	}
-	/* back to the free list */
-	dlist_push_head(&pgcache_head->free_list[entry->mclass],
-					&entry->free_chain);
 }
 
 /*
@@ -840,22 +713,23 @@ build_cuda_program(program_cache_entry *src_entry)
 		/*
 		 * Allocation of a new entry, to keep ptx_image/build_log
 		 */
-		length = (MAXALIGN(src_entry->kern_deflen + 1) +
+		length = (offsetof(program_cache_entry, data) +
+				  MAXALIGN(src_entry->kern_deflen + 1) +
 				  MAXALIGN(src_entry->kern_srclen + 1) +
 				  MAXALIGN(ptx_length + 1) +
 				  MAXALIGN(log_length + 1) +
 				  PGCACHE_MIN_ERRORMSG_BUFSIZE);
-		SpinLockAcquire(&pgcache_head->lock);
-		bin_entry = create_cuda_program_entry_nolock(length);
-		if (!bin_entry)
-		{
-			SpinLockRelease(&pgcache_head->lock);
-			elog(ERROR, "out of CUDA program cache");
-		}
+		bin_entry = MemoryContextAllocZero(TopSharedMemoryContext, length);
+
 		/*
 		 * OK, replace the src_entry by the bin_entry
 		 */
+		SpinLockAcquire(&pgcache_head->lock);
+		Assert((src_entry->refcnt & 1) == 1);	/* odd number */
 		offset = 0;
+		bin_entry->entry_sz         = length;
+		bin_entry->refcnt           = (src_entry->refcnt & 0xfffffffeU);
+		bin_entry->magic            = src_entry->magic;
 		bin_entry->program_id		= src_entry->program_id;
 		bin_entry->crc				= src_entry->crc;
 		bin_entry->target_cc        = src_entry->target_cc;
@@ -907,16 +781,18 @@ build_cuda_program(program_cache_entry *src_entry)
 		dlist_push_head(&pgcache_head->lru_list,
 						&bin_entry->lru_chain);
 		memset(&bin_entry->build_chain, 0, sizeof(dlist_node));
-		bin_entry->refcnt = src_entry->refcnt;
+		pgcache_head->program_cache_usage += bin_entry->entry_sz;
+
 		/* release src_entry */
-		src_entry->refcnt = 0;
 		dlist_delete(&src_entry->pgid_chain);
 		dlist_delete(&src_entry->hash_chain);
-		dlist_delete(&src_entry->lru_chain);
-		memset(&src_entry->pgid_chain, 0, sizeof(dlist_node));
-		memset(&src_entry->hash_chain, 0, sizeof(dlist_node));
-		memset(&src_entry->lru_chain, 0, sizeof(dlist_node));
-		put_cuda_program_entry_nolock(src_entry);
+		if (src_entry->lru_chain.prev || src_entry->lru_chain.next)
+			dlist_delete(&src_entry->lru_chain);
+		pgcache_head->program_cache_usage -= src_entry->entry_sz;
+		pfree(src_entry);
+
+		/* reclaim the program cache */
+		reclaim_cuda_program_entry_nolock();
 		SpinLockRelease(&pgcache_head->lock);
 	}
 	PG_CATCH();
@@ -1109,21 +985,29 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	 * Not found on the existing program cache.
 	 * So, create a new entry then kick NVRTC
 	 */
-	length = (MAXALIGN(kern_srclen + 1) +
+	length = (offsetof(program_cache_entry, data) +
+			  MAXALIGN(kern_srclen + 1) +
 			  MAXALIGN(kern_deflen + 1) +
 			  PGCACHE_MIN_ERRORMSG_BUFSIZE);
-	entry = create_cuda_program_entry_nolock(length);
-	if (!entry)
+	PG_TRY();
+	{
+		entry = MemoryContextAllocZero(TopSharedMemoryContext, length);
+	}
+	PG_CATCH();
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		elog(ERROR, "out of shared memory");
+		PG_RE_THROW();
 	}
+	PG_END_TRY();
 
 	/* find out a unique program_id */
 	do {
 		program_id = ++pgcache_head->last_program_id;
 	} while (lookup_cuda_program_entry_nolock(program_id) != NULL);
 
+	entry->entry_sz    = length;
+	entry->refcnt      = 3;		/* caller + build */
+	entry->magic       = PGCACHE_CHUNK_MAGIC;
 	entry->program_id  = program_id;
 	entry->crc         = crc;
 	entry->target_cc   = target_cc;
@@ -1167,7 +1051,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 					&entry->lru_chain);
 	dlist_push_head(&pgcache_head->build_list,
 					&entry->build_chain);
-	entry->refcnt = 2;	/* reference count (entry itself and owner) */
+	pgcache_head->program_cache_usage += entry->entry_sz;
 
 	/* track this program entry by GpuContext */
 	if (!trackCudaProgram(gcontext, program_id,
@@ -1177,6 +1061,9 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 		SpinLockRelease(&pgcache_head->lock);
 		elog(ERROR, "out of memory");
 	}
+	/* reclaim program cache entries if consumed too much */
+	reclaim_cuda_program_entry_nolock();
+
 	SpinLockRelease(&pgcache_head->lock);
 
 	/*
@@ -1730,6 +1617,9 @@ retry_checks:
 		/*
 		 * Nobody picked up this CUDA program for build yet, so we
 		 * try to build the program by ourselves, but synchronously.
+		 *
+		 * Note that (ptx_image==NULL && build_chain==NULL) means
+		 * CUDA program compilation is in-progress.
 		 */
 		dlist_delete(&entry->build_chain);
 		memset(&entry->build_chain, 0, sizeof(dlist_node));
@@ -1741,7 +1631,11 @@ retry_checks:
 		}
 		PG_CATCH();
 		{
-			put_cuda_program_entry(entry);
+			SpinLockAcquire(&pgcache_head->lock);
+			dlist_push_tail(&pgcache_head->build_list,
+							&entry->build_chain);
+			put_cuda_program_entry_nolock(entry);
+			SpinLockRelease(&pgcache_head->lock);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1914,18 +1808,16 @@ cudaProgramBuilderWakeUp(bool error_if_no_builders)
 static void
 pgstrom_startup_cuda_program(void)
 {
-	bool		found;
-	int			i, mclass;
-	size_t		offset;
 	size_t		length;
+	bool		found;
+	int			i;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
+	length = sizeof(program_cache_head);
 	pgcache_head = ShmemInitStruct("PG-Strom Program Cache",
-								   offsetof(program_cache_head, base) +
-								   ((size_t)program_cache_size_kb << 10),
-								   &found);
+								   length, &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for program cache already exists");
 
@@ -1939,30 +1831,6 @@ pgstrom_startup_cuda_program(void)
 	}
 	dlist_init(&pgcache_head->lru_list);
 	dlist_init(&pgcache_head->build_list);
-	dlist_init(&pgcache_head->addr_list);
-	for (i=0; i <= PGCACHE_CHUNKSZ_MAX_BIT; i++)
-		dlist_init(&pgcache_head->free_list[i]);
-
-	length = ((size_t)program_cache_size_kb << 10);
-	offset = 0;
-	mclass = PGCACHE_CHUNKSZ_MAX_BIT;
-	while (mclass >= PGCACHE_CHUNKSZ_MIN_BIT)
-	{
-		program_cache_entry *entry;
-
-		if (offset + (1UL << mclass) >= length)
-		{
-			mclass--;
-			continue;
-		}
-		entry = (program_cache_entry *)(pgcache_head->base + offset);
-		memset(entry, 0, offsetof(program_cache_entry, data));
-		entry->magic = PGCACHE_CHUNK_MAGIC;
-		entry->mclass = mclass;
-		dlist_push_tail(&pgcache_head->free_list[mclass],
-						&entry->free_chain);
-		offset += (1UL << mclass);
-	}
 
 	/* initialize program builder state */
 	length = offsetof(program_builder_state,
@@ -2034,8 +1902,9 @@ pgstrom_init_cuda_program(void)
 							NULL, NULL, NULL);
 
 	/* allocation of static shared memory */
-	RequestAddinShmemSpace(offsetof(program_cache_head, base) +
-						   ((size_t)program_cache_size_kb << 10));
+	RequestAddinShmemSpace(MAXALIGN(sizeof(program_cache_head)) +
+						   MAXALIGN(offsetof(program_builder_state,
+											 builders[num_program_builders])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
 
