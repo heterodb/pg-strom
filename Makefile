@@ -26,7 +26,7 @@ PGSTROM_RELEASE := devel
 #
 __PGSTROM_SQL = pg_strom--2.2.sql pg_strom--3.0.sql \
                 pg_strom--2.2--2.3.sql  pg_strom--2.3--3.0.sql \
-                pg_strom--3.0--3.1.sql
+                pg_strom--3.0--4.0.sql
 PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 
 #

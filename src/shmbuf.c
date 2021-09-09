@@ -93,9 +93,6 @@ static char	   *shmbuf_segment_vaddr_tail = NULL;
 static MemoryContextMethods sharedMemoryContextMethods;
 MemoryContext	TopSharedMemoryContext = NULL;
 
-/* -------- SQL functions -------- */
-Datum pgstrom_shmbuf_info(PG_FUNCTION_ARGS);
-
 /* -------- utility inline functions -------- */
 static inline int
 shmBufferSegmentId(shmBufferSegment *seg)
@@ -1076,7 +1073,7 @@ shmemContextCheck(MemoryContext __context)
 }
 #endif
 
-#if 1
+#if 0
 Datum pgstrom_shmbuf_alloc(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_free(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_realloc(PG_FUNCTION_ARGS);
@@ -1224,14 +1221,47 @@ __pgstrom_shmbuf_context_info(StringInfo str, shmBufferContext *context)
 	appendStringInfo(str, "]}");
 }
 
+PG_FUNCTION_INFO_V1(pgstrom_shared_buffer_info);
 Datum
-pgstrom_shmbuf_info(PG_FUNCTION_ARGS)
+pgstrom_shared_buffer_info(PG_FUNCTION_ARGS)
 {
 	StringInfoData	str;
 
 	initStringInfo(&str);
 	str.len += VARHDRSZ;
 
+#if 1
+	SpinLockAcquire(&shmBufSegHead->lock);
+    PG_TRY();
+	{
+		shmBufferContext *context = (shmBufferContext *)TopSharedMemoryContext;
+
+		if (context)
+		{
+			PG_TRY();
+			{
+				__pgstrom_shmbuf_context_info(&str, context);
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&context->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&context->lock);
+		}
+	}
+	PG_CATCH();
+    {
+        SpinLockRelease(&shmBufSegHead->lock);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SpinLockRelease(&shmBufSegHead->lock);
+#else
+	/*
+	 * multi shared-memory context - no longer required!
+	 */
 	appendStringInfo(&str, "[");
 	SpinLockAcquire(&shmBufSegHead->lock);
 	PG_TRY();
@@ -1267,11 +1297,10 @@ pgstrom_shmbuf_info(PG_FUNCTION_ARGS)
 	PG_END_TRY();
 	SpinLockRelease(&shmBufSegHead->lock);
 	appendStringInfo(&str, "]");
-
+#endif
 	SET_VARSIZE(str.data, str.len);
 	PG_RETURN_TEXT_P(str.data);
 }
-PG_FUNCTION_INFO_V1(pgstrom_shmbuf_info);
 
 /*
  * SharedMemoryContextCreate
