@@ -630,49 +630,47 @@ put_decimal_value(SQLfield *column,
 /*
  * Date
  */
-static inline size_t
-__put_date_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
-						 int64_t adjustment, int arrow_sz)
+static size_t
+__put_date_day_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	int64_t		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
 	else
 	{
-		assert(pgsql_sz == sizeof(DateADT));
-		sql_buffer_setbit(&column->nullmap, row_index);
+		assert(sz == sizeof(DateADT));
 		value = __fetch_32bit(addr);
 		value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-		/*
-		 * PostgreSQL native is ArrowDateUnit__Day.
-		 * Compiler optimization will remove the if-block below by constant
-		 * 'adjustment' argument.
-		 */
-		if (adjustment > 0)
-			value *= adjustment;
-		else if (adjustment < 0)
-			value /= adjustment;
-		sql_buffer_append(&column->values, &value, arrow_sz);
-
-		STAT_UPDATES(column,i64,value);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int32_t));
+		STAT_UPDATES(column,i32,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_date_day_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_date_value_generic(column, addr, sz,
-									0, sizeof(int32_t));
-}
-
-static size_t
 __put_date_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_date_value_generic(column, addr, sz,
-									86400000L, sizeof(int64_t));
+	size_t		row_index = column->nitems++;
+	int64_t		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(DateADT));
+		value = __fetch_32bit(addr);
+		value += (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+		/* adjust ArrowDateUnit__Day to __MilliSecond */
+		value *= 86400000L;
+
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
@@ -700,62 +698,85 @@ put_date_value(SQLfield *column, const char *addr, int sz)
 /*
  * Time
  */
-static inline size_t
-__put_time_value_generic(SQLfield *column, const char *addr, int pgsql_sz,
-						 int64_t adjustment, int arrow_sz)
+static size_t
+__put_time_sec_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	TimeADT		value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
 	else
 	{
-		assert(pgsql_sz == sizeof(TimeADT));
-		value = __fetch_64bit(addr);
-		/*
-		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
-		 * Compiler optimization will remove the if-block below by constant
-		 * 'adjustment' argument.
-		 */
-		if (adjustment > 0)
-			value *= adjustment;
-		else if (adjustment < 0)
-			value /= -adjustment;
+		assert(sz == sizeof(TimeADT));
+		/* convert from ArrowTimeUnit__MicroSecond to __Second */
+		value = __fetch_64bit(addr) / 1000000L;
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, arrow_sz);
+		sql_buffer_append(&column->values, &value, sizeof(int32_t));
+		STAT_UPDATES(column,i32,value);
+	}
+	return __buffer_usage_inline_type(column);
 
+}
+
+static size_t
+__put_time_ms_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+	TimeADT		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
+	else
+	{
+		assert(sz == sizeof(TimeADT));
+		/* convert from ArrowTimeUnit__MicroSecond to __MiliSecond */
+		value = __fetch_64bit(addr) / 1000L;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int32_t));
+		STAT_UPDATES(column,i32,value);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+__put_time_us_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t		row_index = column->nitems++;
+	TimeADT		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(TimeADT));
+		/* PostgreSQL native is ArrowTimeUnit__MicroSecond */
+		value = __fetch_64bit(addr);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
 		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_time_sec_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz,
-									-1000000L, sizeof(int32_t));
-}
-
-static size_t
-__put_time_ms_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz,
-									-1000L, sizeof(int32_t));
-}
-
-static size_t
-__put_time_us_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz,
-									0L, sizeof(int64_t));
-}
-
-static size_t
 __put_time_ns_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_time_value_generic(column, addr, sz,
-									1000L, sizeof(int64_t));
+	size_t		row_index = column->nitems++;
+	TimeADT		value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(TimeADT));
+		/* convert from ArrowTimeUnit__MicroSecond to __NanoSecond */
+		value = __fetch_64bit(addr) * 1000L;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
@@ -802,67 +823,98 @@ put_time_value(SQLfield *column, const char *addr, int sz)
 /*
  * Timestamp
  */
-static inline size_t
-__put_timestamp_value_generic(SQLfield *column,
-							  const char *addr, int pgsql_sz,
-							  int64_t adjustment, int arrow_sz)
+static size_t
+__put_timestamp_sec_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	Timestamp	value;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
 	else
 	{
-		assert(pgsql_sz == sizeof(Timestamp));
+		assert(sz == sizeof(Timestamp));
 		value = __fetch_64bit(addr);
-
 		/* convert PostgreSQL epoch to UNIX epoch */
 		value += (POSTGRES_EPOCH_JDATE -
 				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-		/*
-		 * PostgreSQL native is ArrowTimeUnit__MicroSecond
-		 * Compiler optimization will remove the if-block below by constant
-		 * 'adjustment' argument.
-		 */
-		if (adjustment > 0)
-			value *= adjustment;
-		else if (adjustment < 0)
-			value /= adjustment;
+		/* convert ArrowTimeUnit__MicroSecond to __Second */
+		value /= 1000000L;
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, arrow_sz);
-
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
 		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_timestamp_sec_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000000L, sizeof(int64_t));
-}
-
-static size_t
 __put_timestamp_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000L, sizeof(int64_t));
+	size_t		row_index = column->nitems++;
+	Timestamp	value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(Timestamp));
+		value = __fetch_64bit(addr);
+		/* convert PostgreSQL epoch to UNIX epoch */
+		value += (POSTGRES_EPOCH_JDATE -
+				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+		/* convert ArrowTimeUnit__MicroSecond to __MilliSecond */
+		value /= 1000L;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
 __put_timestamp_us_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz,
-										 0L, sizeof(int64_t));
+	size_t		row_index = column->nitems++;
+	Timestamp	value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(Timestamp));
+		value = __fetch_64bit(addr);
+		/* convert PostgreSQL epoch to UNIX epoch */
+		value += (POSTGRES_EPOCH_JDATE -
+				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
 __put_timestamp_ns_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_timestamp_value_generic(column, addr, sz,
-										 -1000L, sizeof(int64_t));
+	size_t		row_index = column->nitems++;
+	Timestamp	value;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		assert(sz == sizeof(Timestamp));
+		value = __fetch_64bit(addr);
+		/* convert PostgreSQL epoch to UNIX epoch */
+		value += (POSTGRES_EPOCH_JDATE -
+				  UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+		/* convert ArrowTimeUnit__MicroSecond to __MilliSecond */
+		value *= 1000L;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column,i64,value);
+	}
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t

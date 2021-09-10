@@ -1569,7 +1569,7 @@ __saveArrowRecordBatchStats(int rb_index, SQLfield *field)
 		field->stat_list = item;
 
 		/* reset statistics */
-		field->stat_datum.is_valid = false;
+		memset(&field->stat_datum, 0, sizeof(SQLstat));
 	}
 }
 

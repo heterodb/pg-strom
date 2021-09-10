@@ -1,3 +1,9 @@
+* xxxxxxxxxxxxxx KaiGai Kohei <kaigai@heterodb.com> - 3.2-1
+- GpuPreAgg: reduction logic reworked (local+global hybrid hash)
+- GpuPreAgg: add hyper-log-log mode for COUNT(distinct X)
+- Add information views for CUDA programs/shared memory chunks
+- Various bug fixes
+
 * Sat Aug 21 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.1-1
 - Arrow_Fdw supports min/max statistics as like BRIN index
 - GpuCache: BEFORE TRUNCATE trigger is not needed on PG13

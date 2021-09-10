@@ -820,50 +820,26 @@ extern void pgstrom_init_gpu_context(void);
  */
 #define STROM_TRY() \
 	do { \
-		ErrorContextCallback *saved_context_stack = error_context_stack; \
-		sigjmp_buf *saved_exception_stack = (!GpuWorkerCurrentContext \
-											 ? PG_exception_stack \
-											 : GpuWorkerExceptionStack); \
+		sigjmp_buf *saved_exception_stack = GpuWorkerExceptionStack; \
 		sigjmp_buf	local_sigjmp_buf; \
+		Assert(GpuWorkerCurrentContext != NULL); \
 		if (sigsetjmp(local_sigjmp_buf, 0) == 0) \
 		{ \
-			if (!GpuWorkerCurrentContext)\
-				PG_exception_stack = &local_sigjmp_buf; \
-			else \
-				GpuWorkerExceptionStack = &local_sigjmp_buf;
+			GpuWorkerExceptionStack = &local_sigjmp_buf;
 
 #define STROM_CATCH() \
 		} \
 		else \
 		{ \
-			if (!GpuWorkerCurrentContext) \
-			{ \
-				PG_exception_stack = saved_exception_stack;	\
-				error_context_stack = saved_context_stack;	\
-			} \
-			else \
-				GpuWorkerExceptionStack = saved_exception_stack
+			GpuWorkerExceptionStack = saved_exception_stack
 
-#define STROM_END_TRY()\
+#define STROM_END_TRY() \
 		} \
-		if (!GpuWorkerCurrentContext) \
-		{ \
-			PG_exception_stack = saved_exception_stack; \
-			error_context_stack = saved_context_stack; \
-		} \
-		else \
-		{ \
-			 GpuWorkerExceptionStack = saved_exception_stack; \
-		} \
+		GpuWorkerExceptionStack = saved_exception_stack;	\
 	} while(0)
 
 #define STROM_RE_THROW() \
-	do { \
-		if (!GpuWorkerCurrentContext) \
-			PG_RE_THROW(); \
-		else \
-			siglongjmp(*GpuWorkerExceptionStack, 1); \
-	} while(0)
+	siglongjmp(*GpuWorkerExceptionStack, 1)
 
 #define STROM_REPORT_ERROR(elevel,elabel,fmt,...)						\
 	do {																\
