@@ -28,6 +28,7 @@ typedef struct
 {
 	cl_int			num_group_keys;	/* number of grouping keys */
 	cl_int			num_accum_values; /* number of accumulation */
+	cl_int			accum_extra_bufsz;/* size of accumulation extra buffer */
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
 	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
@@ -60,6 +61,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 
 	privs = lappend(privs, makeInteger(gpa_info->num_group_keys));
 	privs = lappend(privs, makeInteger(gpa_info->num_accum_values));
+	privs = lappend(privs, makeInteger(gpa_info->accum_extra_bufsz));
 	privs = lappend(privs, pmakeFloat(gpa_info->plan_ngroups));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
@@ -96,6 +98,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 
 	gpa_info->num_group_keys = intVal(list_nth(privs, pindex++));
 	gpa_info->num_accum_values = intVal(list_nth(privs, pindex++));
+	gpa_info->accum_extra_bufsz = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_ngroups = floatVal(list_nth(privs, pindex++));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
@@ -134,6 +137,7 @@ typedef struct
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
 	cl_int			num_accum_values;
+	cl_int			accum_extra_bufsz;
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	ExprState	   *outer_quals;
 	TupleTableSlot *outer_slot;
@@ -1827,11 +1831,12 @@ replace_expression_by_outerref(Node *node, PathTarget *target_input)
  * is_altfunc_expression - true, if expression derives ALTFUNC_EXPR_*
  */
 static bool
-is_altfunc_expression(Node *node)
+is_altfunc_expression(Node *node, int *p_extra_sz)
 {
 	FuncExpr	   *f;
 	HeapTuple		tuple;
 	Form_pg_proc	form_proc;
+	int				extra_sz = 0;
 	bool			retval = false;
 
 	if (!IsA(node, FuncExpr))
@@ -1843,19 +1848,26 @@ is_altfunc_expression(Node *node)
 		elog(ERROR, "cache lookup failed for function %u", f->funcid);
 	form_proc = (Form_pg_proc) GETSTRUCT(tuple);
 
-	if (form_proc->pronamespace == get_namespace_oid("pgstrom", false) &&
-		(strcmp(NameStr(form_proc->proname), "nrows") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pmin") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pmax") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "psum") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "psum_x2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_x") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_y") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_x2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_y2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_xy") == 0))
-		retval = true;
+	if (form_proc->pronamespace == get_namespace_oid("pgstrom", false))
+	{
+		if (strcmp(NameStr(form_proc->proname), "nrows") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pmin") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pmax") == 0 ||
+			strcmp(NameStr(form_proc->proname), "psum") == 0 ||
+			strcmp(NameStr(form_proc->proname), "psum_x2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_x") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_y") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_x2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_y2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_xy") == 0)
+		{
+			retval = true;
+		}
+	}
 	ReleaseSysCache(tuple);
+
+	if (p_extra_sz)
+		*p_extra_sz = extra_sz;
 
 	return retval;
 }
@@ -3349,7 +3361,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 			continue;
 		if (IsA(tle->expr, Var))
 			continue;	/* should be already loaded */
-		if (is_altfunc_expression((Node *)tle->expr))
+		if (is_altfunc_expression((Node *)tle->expr, NULL))
 		{
 			FuncExpr   *f = (FuncExpr *) tle->expr;
 
@@ -3784,16 +3796,19 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 /*
  * code generator for initialization of a slot
  */
-static int
+static void
 gpupreagg_codegen_init_slot(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev)
+							List *tlist_dev,
+							int *p_num_accum_values,
+							int *p_accum_extra_bufsz)
 {
 	StringInfoData gbuf;
 	StringInfoData lbuf;
 	ListCell   *lc;
 	int			count1 = 0;
 	int			count2 = 0;
+	int			extra_total = 0;
 
 	initStringInfo(&gbuf);
 	initStringInfo(&lbuf);
@@ -3801,11 +3816,12 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
+		int				extra_sz = 0;
 		const char	   *label;
 
 		if (tle->resjunk)
 			continue;
-		if (!is_altfunc_expression((Node *)tle->expr))
+		if (!is_altfunc_expression((Node *)tle->expr, &extra_sz))
 		{
 			appendStringInfo(
 				&gbuf,
@@ -3830,6 +3846,7 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 				count1,
 				count1);
 			count1++;
+			extra_total += extra_sz;
 		}
 	}
 	appendStringInfo(
@@ -3847,7 +3864,10 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 	pfree(lbuf.data);
 	pfree(gbuf.data);
 
-	return count1;	/* number of accumulate values */
+	/* number of accumulate values */
+	*p_num_accum_values = count1;
+	/* size of extra area consumed by the accumulate values */
+	*p_accum_extra_bufsz = extra_total;
 }
 
 /*
@@ -3874,7 +3894,7 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 		const char	   *label;
 
 		/* only partial aggregate function's arguments */
-		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
+		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr, NULL))
 			continue;
 		label = gpupreagg_codegen_common_calc(tle, context, "shuffle");
 		appendStringInfo(
@@ -3966,17 +3986,15 @@ gpupreagg_codegen_variables(StringInfo kern,
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr))
+		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr, NULL))
 		{
-			if (count > 0)
-				appendStringInfoChar(kern, ',');
-			appendStringInfo(kern, " %d", count);
+			appendStringInfo(kern, " %d,", count);
 			count++;
 		}
 	}
 	appendStringInfoString(
 		kern,
-		" };\n"
+		" -1 };\n"
 		"__device__ cl_short GPUPREAGG_ACCUM_MAP_GLOBAL[]\n"
 		"  = {");
 	count = 0;
@@ -3984,31 +4002,27 @@ gpupreagg_codegen_variables(StringInfo kern,
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr))
+		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr, NULL))
 		{
-			if (count > 0)
-				appendStringInfoChar(kern, ',');
-			appendStringInfo(kern, " %d", tle->resno - 1);
+			appendStringInfo(kern, " %d,", tle->resno - 1);
 			count++;
 		}
 	}
 	appendStringInfoString(
 		kern,
-		" };\n"
+		" -1 };\n"
 		"__device__ cl_bool GPUPREAGG_ATTR_IS_ACCUM_VALUES[]\n"
 		"  = {");
 	count = 0;
 	foreach (lc, tlist_dev)
 	{
-		if (count > 0)
-			appendStringInfoChar(kern, ',');
-		appendStringInfo(kern, " %s",
+		appendStringInfo(kern, " %s, ",
 						 bms_is_member(count, pfunc_bitmap) ? "true" : "false");
 		count++;
 	}
 	appendStringInfoString(
 		kern,
-		" };\n\n");
+		" -1 };\n\n");
 }
 
 /*
@@ -4031,7 +4045,6 @@ gpupreagg_codegen(codegen_context *context,
 	Bitmapset	   *outer_refs_expr = NULL;
 	size_t			varlena_bufsz = 0;
 	int				nfields = list_length(tlist_dev);
-	int				count = 0;
 
 	initStringInfo(&kern);
 	initStringInfo(&body);
@@ -4089,16 +4102,17 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
 	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 
+	gpa_info->varlena_bufsz = varlena_bufsz;
+	
 	/* gpupreagg_init_slot */
-	count = gpupreagg_codegen_init_slot(&body, context, tlist_dev);
+	gpupreagg_codegen_init_slot(&body, context, tlist_dev,
+								&gpa_info->num_accum_values,
+								&gpa_info->accum_extra_bufsz);
 	/* gpupreagg_merge_* */
 	gpupreagg_codegen_accum_merge(&body, context, tlist_dev);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
-
-	gpa_info->num_accum_values = count;
-	gpa_info->varlena_bufsz = varlena_bufsz;
 
 	return kern.data;
 }
@@ -4170,6 +4184,8 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 	 */
 	appendStringInfo(buf, "#define __GPUPREAGG_NUM_ACCUM_VALUES %u\n",
 					 gpas->num_accum_values);
+	appendStringInfo(buf, "#define __GPUPREAGG_ACCUM_EXTRA_BUFSZ %u\n",
+					 gpas->accum_extra_bufsz);
 	/*
 	 * definition of GPUPREAGG_COMBINED_JOIN disables a dummy definition
 	 * of gpupreagg_projection_slot() in cuda_gpujoin.h, and switch to
