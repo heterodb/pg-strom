@@ -43,9 +43,8 @@ typedef struct
 	Oid				index_oid;		/* OID of BRIN-index, if any */
 	List		   *index_conds;	/* BRIN-index key conditions */
 	List		   *index_quals;	/* Original BRIN-index qualifiers */
-	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
-									 * initial projection; note that setrefs.c
-									 * should not update this field */
+	List		   *tlist_part;		/* template of kds_final */
+	List		   *tlist_prep;		/* template of kds_slot */
 	int				optimal_gpu;
 	char		   *kern_source;
 	cl_uint			extra_flags;
@@ -76,7 +75,8 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->index_oid));
 	privs = lappend(privs, gpa_info->index_conds);
 	exprs = lappend(exprs, gpa_info->index_quals);
-	privs = lappend(privs, gpa_info->tlist_fallback);
+	exprs = lappend(exprs, gpa_info->tlist_part);
+	exprs = lappend(exprs, gpa_info->tlist_prep);
 	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -113,7 +113,8 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->index_oid = intVal(list_nth(privs, pindex++));
 	gpa_info->index_conds = list_nth(privs, pindex++);
 	gpa_info->index_quals = list_nth(exprs, eindex++);
-	gpa_info->tlist_fallback = list_nth(privs, pindex++);
+	gpa_info->tlist_part = list_nth(exprs, eindex++);
+	gpa_info->tlist_prep = list_nth(exprs, eindex++);
 	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -138,7 +139,9 @@ typedef struct
 	cl_int			num_group_keys;
 	cl_int			num_accum_values;
 	cl_int			accum_extra_bufsz;
-	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
+	TupleTableSlot *part_slot;	/* slot reflects tlist_part (kds_final) */
+	TupleTableSlot *prep_slot;	/* slot reflects tlist_prep (kds_slot) */
+	//TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	ExprState	   *outer_quals;
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
@@ -215,7 +218,6 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											bool *p_can_pullup_outerscan);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
-								  List *tlist_dev,
 								  List *outer_tlist,
 								  GpuPreAggInfo *gpa_info,
 								  Bitmapset *pfunc_bitmap);
@@ -2607,6 +2609,129 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 }
 
 /*
+ * build_custom_scan_tlist
+ */
+static List *
+build_custom_scan_tlist(PlannerInfo *root,
+						PathTarget *target_device,
+						Index outer_scanrelid,
+						List *outer_tlist)
+{
+	List	   *results = NIL;
+	ListCell   *lc;
+	int			i, j;
+
+	/*
+	 * TLE list for the grouping-key and partial aggregation; that shall
+	 * be returned from the GPU kernel.
+	 * (a.k.a template of the kds_final)
+	 */
+	i = 0;
+	foreach (lc, target_device->exprs)
+	{
+		Node	   *node = lfirst(lc);
+		TargetEntry *tle;
+
+		tle = makeTargetEntry((Expr *)node,
+							  i + 1,
+							  NULL,
+							  false);
+		if (target_device->sortgrouprefs &&
+			target_device->sortgrouprefs[i])
+			tle->ressortgroupref = target_device->sortgrouprefs[i];
+
+		results = lappend(results, tle);
+		i++;
+	}
+
+	/*
+	 * Junk TLE entries for setrefs.c and EXPLAIN output
+	 */
+	if (outer_scanrelid != 0)
+	{
+		RangeTblEntry  *rte = root->simple_rte_array[outer_scanrelid];
+		Relation		rel;
+		TupleDesc		tupdesc;
+
+		Assert(rte->rtekind == RTE_RELATION);
+		rel = table_open(rte->relid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+			Var	   *varnode;
+			char   *resname;
+
+			if (attr->attisdropped)
+				continue;
+			/* add junk entry if not yet */
+			foreach(lc, results)
+			{
+				TargetEntry *tle = lfirst(lc);
+
+				if (!IsA(tle->expr, Var))
+					continue;
+				varnode = (Var *)tle->expr;
+				if (varnode->varno == outer_scanrelid &&
+					varnode->varattno == attr->attnum)
+				{
+					Assert(varnode->vartype == attr->atttypid &&
+						   varnode->vartypmod == attr->atttypmod &&
+						   varnode->varcollid == attr->attcollation);
+					break;
+				}
+			}
+
+			if (!lc)
+			{
+				varnode = makeVar(outer_scanrelid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation, 0);
+				resname = pstrdup(NameStr(attr->attname));
+				results = lappend(results,
+								  makeTargetEntry((Expr *)varnode,
+												  list_length(results) + 1,
+												  resname,
+												  true));
+			}
+		}
+		table_close(rel, NoLock);
+	}
+	else
+	{
+		foreach (lc, outer_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			ListCell	   *cell;
+
+			foreach (cell, results)
+			{
+				TargetEntry	   *__tle = lfirst(cell);
+
+				if (equal(tle->expr, __tle->expr))
+					break;
+			}
+			if (!cell)
+			{
+				char	   *resname = NULL;
+
+				if (tle->resname)
+					resname = pstrdup(tle->resname);
+
+				results = lappend(results,
+								  makeTargetEntry(copyObject(tle->expr),
+												  list_length(results) + 1,
+												  resname,
+												  true));
+			}
+		}
+	}
+	return results;
+}
+
+/*
  * PlanGpuPreAggPath
  *
  * Entrypoint to create CustomScan node
@@ -2623,14 +2748,10 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	GpuPreAggInfo  *gpa_info;
 	PathTarget	   *target_device;
 	Bitmapset	   *pfunc_bitmap;
-	List		   *tlist_dev = NIL;
 	Index			outer_scanrelid = 0;
-	Bitmapset	   *referenced = NULL;
 	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
-	ListCell	   *lc;
-	int				index;
 	char		   *kern_source;
 	codegen_context	context;
 
@@ -2648,66 +2769,11 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		outer_tlist = outer_plan->targetlist;
 	}
 
-	/*
-	 * Transform expressions in the @target_device to usual TLE form
-	 */
-	index = 0;
-	foreach (lc, target_device->exprs)
-	{
-		TargetEntry *tle;
-		Node	   *node = lfirst(lc);
-
-		Assert(!best_path->path.param_info);
-		tle = makeTargetEntry((Expr *)node,
-							  index + 1,
-							  NULL,
-							  false);
-		if (target_device->sortgrouprefs &&
-			target_device->sortgrouprefs[index])
-			tle->ressortgroupref = target_device->sortgrouprefs[index];
-
-		tlist_dev = lappend(tlist_dev, tle);
-		index++;
-	}
-
-	/*
-	 * In case when outer relation scan was pulled-up to the GpuPreAgg,
-	 * variables referenced by the outer quals may not appear in the
-	 * @target_device. So, add junk ones on demand.
-	 * (EXPLAIN needs junk entry to lookup variable name)
-	 */
-	if (gpa_info->outer_quals)
-	{
-		List	   *outer_vars;
-
-		if (outer_scanrelid)
-			pull_varattnos((Node *)gpa_info->outer_quals,
-						   outer_scanrelid, &referenced);
-
-		outer_vars = pull_var_clause((Node *)gpa_info->outer_quals,
-									 PVC_RECURSE_AGGREGATES |
-									 PVC_RECURSE_WINDOWFUNCS |
-									 PVC_INCLUDE_PLACEHOLDERS);
-		foreach (lc, outer_vars)
-		{
-			TargetEntry *tle;
-			void		*node = lfirst(lc);
-
-			if (!tlist_member(node, tlist_dev))
-			{
-				tle =  makeTargetEntry((Expr *)node,
-									   list_length(tlist_dev) + 1,
-									   NULL,
-									   true);
-				tlist_dev = lappend(tlist_dev, tle);
-			}
-		}
-	}
-
-	/* pick up referenced columns */
+	/* pick up referenced columns (for columnar-optimization) */
 	if (outer_scanrelid)
 	{
 		RelOptInfo *baserel = root->simple_rel_array[outer_scanrelid];
+		Bitmapset  *referenced = NULL;
 		int			i, j, k;
 
 		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
@@ -2717,6 +2783,10 @@ PlanGpuPreAggPath(PlannerInfo *root,
 			k = i - FirstLowInvalidHeapAttributeNumber;
 			referenced = bms_add_member(referenced, k);
 		}
+		if (gpa_info->outer_quals)
+			pull_varattnos((Node *)gpa_info->outer_quals,
+						   outer_scanrelid, &referenced);
+		
 		for (k = bms_next_member(referenced, -1);
 			 k >= 0;
 			 k = bms_next_member(referenced, k))
@@ -2732,16 +2802,17 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	outerPlan(cscan) = outer_plan;
 	cscan->scan.scanrelid = gpa_info->outer_scanrelid;
 	cscan->flags = best_path->flags;
-	cscan->custom_scan_tlist = tlist_dev;
 	cscan->methods = &gpupreagg_scan_methods;
-
+	cscan->custom_scan_tlist = build_custom_scan_tlist(root,
+													   target_device,
+													   outer_scanrelid,
+													   outer_tlist);
 	/*
 	 * construction of the GPU kernel code
 	 */
 	pgstrom_init_codegen_context(&context, root, best_path->path.parent);
 	kern_source = gpupreagg_codegen(&context,
 									cscan,
-									tlist_dev,
 									outer_tlist,
 									gpa_info,
 									pfunc_bitmap);
@@ -2821,9 +2892,9 @@ static Node *
 __make_tlist_device_projection(Node *node, void *__con)
 {
 	make_tlist_device_projection_context *con = __con;
-	bool	in_expression_saved = con->in_expression;
-	int		k;
-	Node   *newnode;
+	bool		in_expression_saved = con->in_expression;
+	int			k;
+	Node	   *newnode;
 
 	if (!node)
 		return NULL;
@@ -2833,7 +2904,6 @@ __make_tlist_device_projection(Node *node, void *__con)
 		if (IsA(node, Var))
 		{
 			Var	   *varnode = (Var *) node;
-			Var	   *newnode;
 
 			if (varnode->varno != con->outer_scanrelid)
 				elog(ERROR, "Bug? varnode references unknown relid: %s",
@@ -2842,17 +2912,8 @@ __make_tlist_device_projection(Node *node, void *__con)
 			con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
 			if (con->in_expression)
 				con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
-
 			Assert(varnode->varlevelsup == 0);
-			newnode = makeVar(INDEX_VAR,
-							  varnode->varattno,
-							  varnode->vartype,
-							  varnode->vartypmod,
-							  varnode->varcollid,
-							  varnode->varlevelsup);
-			newnode->varnosyn  = varnode->varno;
-			newnode->varattnosyn = varnode->varattno;
-			return (Node *) newnode;
+			return (Node *)copyObject(varnode);
 		}
 	}
 	else
@@ -2862,75 +2923,98 @@ __make_tlist_device_projection(Node *node, void *__con)
 		foreach (lc, con->outer_tlist)
 		{
 			TargetEntry    *tle = lfirst(lc);
-			Var			   *newnode;
 
 			if (equal(node, tle->expr))
 			{
 				k = tle->resno - FirstLowInvalidHeapAttributeNumber;
 				con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
 				if (con->in_expression)
-					con->outer_refs_expr = bms_add_member(con->outer_refs_expr,
-														  k);
-				newnode = makeVar(INDEX_VAR,
-								  tle->resno,
-								  exprType((Node *)tle->expr),
-								  exprTypmod((Node *)tle->expr),
-								  exprCollation((Node *)tle->expr),
-								  0);
-				if (IsA(node, Var))
-				{
-					Var	   *varnode = (Var *) node;
-
-					newnode->varnosyn = varnode->varno;
-					newnode->varattnosyn = varnode->varattno;
-				}
-				return (Node *)newnode;
+					con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
+				return (Node *)makeVar(OUTER_VAR,
+									   tle->resno,
+									   exprType((Node *)tle->expr),
+									   exprTypmod((Node *)tle->expr),
+									   exprCollation((Node *)tle->expr),
+									   0);
 			}
 		}
-
 		if (IsA(node, Var))
 			elog(ERROR, "Bug? varnode (%s) references unknown outer entry: %s",
 				 nodeToString(node),
 				 nodeToString(con->outer_tlist));
 	}
 	con->in_expression = true;
-	newnode = expression_tree_mutator(node,
-									  __make_tlist_device_projection,
-									  con);
+	newnode = expression_tree_mutator(node, __make_tlist_device_projection, con);
 	con->in_expression = in_expression_saved;
 
 	return newnode;
 }
 
 static List *
-make_tlist_device_projection(List *tlist_dev,
+make_tlist_device_projection(List *custom_scan_tlist,
 							 Index outer_scanrelid,
 							 List *outer_tlist,
 							 Bitmapset **p_outer_refs_any,
 							 Bitmapset **p_outer_refs_expr)
 {
 	make_tlist_device_projection_context con;
-	List	   *tlist_dev_alt = NIL;
+	List	   *tlist_part = NIL;
 	ListCell   *lc;
 
 	memset(&con, 0, sizeof(con));
 	con.outer_scanrelid = outer_scanrelid;
 	con.outer_tlist = outer_tlist;
 
-	foreach (lc, tlist_dev)
+	foreach (lc, custom_scan_tlist)
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_new = flatCopyTargetEntry(tle);
+		TargetEntry *tle = lfirst(lc);
+		TargetEntry *tmp;
+		Node	   *node;
 
+		if (tle->resjunk)
+			continue;
 		con.in_expression = false;
-		tle_new->expr = (Expr *)
-			__make_tlist_device_projection((Node *)tle->expr, &con);
-		tlist_dev_alt = lappend(tlist_dev_alt, tle_new);
+		node = __make_tlist_device_projection((Node *)tle->expr, &con);
+
+		tmp = flatCopyTargetEntry(tle);
+		tmp->expr  = (Expr *)node;
+		tmp->resno = list_length(tlist_part) + 1;
+		tlist_part = lappend(tlist_part, tmp);
 	}
 	*p_outer_refs_any = con.outer_refs_any;
 	*p_outer_refs_expr = con.outer_refs_expr;
 
-	return tlist_dev_alt;
+	return tlist_part;
+}
+
+static Node *
+__revert_tlist_device_projection(Node *node, void *datum)
+{
+	List	   *outer_tlist = (List *)datum;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *)node;
+		Node   *temp;
+
+		Assert(varnode->varno == OUTER_VAR &&
+			   varnode->varattno > 0 &&
+			   varnode->varattno <= list_length(outer_tlist));
+		temp = list_nth(outer_tlist, varnode->varattno - 1);
+		return copyObject(temp);
+	}
+	return expression_tree_mutator(node, __revert_tlist_device_projection, datum);
+}
+
+static List *
+revert_tlist_device_projection(List *tlist_dev,
+							   List *outer_tlist)
+{
+	if (outer_tlist == NIL)
+		return copyObject(tlist_dev);
+	return (List *)__revert_tlist_device_projection((Node *)tlist_dev, outer_tlist);
 }
 
 /*
@@ -3093,13 +3177,16 @@ codegen_projection_partial_funcion(FuncExpr *f, codegen_context *context)
 static void
 gpupreagg_codegen_projection(StringInfo kern,
 							 codegen_context *context,
-							 List *tlist_alt,
-							 Bitmapset *outer_refs_any,
-							 Bitmapset *outer_refs_expr,
-							 Index outer_scanrelid,
-							 List *outer_tlist)
+							 CustomScan *cscan,
+							 List *outer_tlist,
+							 List **p_tlist_part,
+							 List **p_tlist_prep)
 {
 	PlannerInfo	   *root = context->root;
+	Bitmapset	   *outer_refs_any = NULL;
+	Bitmapset	   *outer_refs_expr = NULL;
+	List		   *tlist_part = NIL;
+	List		   *tlist_prep = NIL;
 	StringInfoData	decl;
 	StringInfoData	tbody;		/* Row/Block */
 	StringInfoData	sbody;		/* Slot */
@@ -3113,6 +3200,14 @@ gpupreagg_codegen_projection(StringInfo kern,
 	int				i, k, nattrs;
 	int				outer_refno_max = -1;
 
+	/*
+	 * Extract tlist for device projection (a.k.a template of kds_slot)
+	 */
+	tlist_part = make_tlist_device_projection(cscan->custom_scan_tlist,
+											  cscan->scan.scanrelid,
+											  outer_tlist,
+											  &outer_refs_any,
+											  &outer_refs_expr);
 	initStringInfo(&decl);
 	initStringInfo(&tbody);
 	initStringInfo(&sbody);
@@ -3126,286 +3221,292 @@ gpupreagg_codegen_projection(StringInfo kern,
 		"  void        *addr    __attribute__((unused));\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
-	if (outer_scanrelid > 0)
+	if (cscan->scan.scanrelid == 0)
+	{
+		nattrs = list_length(outer_tlist);
+	}
+	else
 	{
 		RangeTblEntry  *rte;
 
-		Assert(outer_scanrelid > 0 &&
-			   outer_scanrelid < root->simple_rel_array_size);
-		rte = root->simple_rte_array[outer_scanrelid];
+		Assert(outer_tlist == NIL);
+		rte = root->simple_rte_array[cscan->scan.scanrelid];
 		outer_rel = table_open(rte->relid, NoLock);
 		outer_desc = RelationGetDescr(outer_rel);
 		nattrs = outer_desc->natts;
 	}
-	else
-	{
-		Assert(outer_scanrelid == 0);
-		nattrs = list_length(outer_tlist);
-	}
 
 	/* extract the supplied tuple and load variables */
-	if (!bms_is_empty(outer_refs_any))
+	if (bms_is_empty(outer_refs_any))
+		goto setup_expressions;
+
+	for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
 	{
-		for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k,
+						  outer_refs_any))
+			elog(ERROR, "Bug? system column or whole-row is referenced");
+	}
+
+	resetStringInfo(&temp);
+	for (i=1; i <= nattrs; i++)
+	{
+		devtype_info   *dtype;
+		bool	referenced = false;
+
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		if (!bms_is_member(k, outer_refs_any))
+			continue;
+
+		/* data type of the outer relation input stream */
+		if (cscan->scan.scanrelid == 0)
 		{
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs_any))
-				elog(ERROR, "Bug? system column or whole-row is referenced");
+			TargetEntry *tle = list_nth(outer_tlist, i-1);
+			Oid		type_oid = exprType((Node *)tle->expr);
+
+			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(type_oid));
+		}
+		else
+		{
+			Form_pg_attribute attr = tupleDescAttr(outer_desc, i-1);
+
+			dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(attr->atttypid));
 		}
 
-		resetStringInfo(&temp);
-		for (i=1; i <= nattrs; i++)
+		foreach (lc, tlist_part)
 		{
-			bool	referenced = false;
+			TargetEntry *tle = lfirst(lc);
+			Var		   *varnode;
 
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs_any))
+			Assert(!tle->resjunk);
+			if (!IsA(tle->expr, Var))
+				continue;
+			varnode = (Var *) tle->expr;
+			if ((varnode->varno != cscan->scan.scanrelid &&
+				 varnode->varno != OUTER_VAR) ||
+				(varnode->varattno < 1 ||
+				 varnode->varattno > nattrs))
+				elog(ERROR, "Bug? unexpected varnode: %s", nodeToString(varnode));
+			if (varnode->varattno != i)
+				continue;
+
+			/* row */
+			if (!referenced)
 			{
-				devtype_info   *dtype;
-
-				/* data type of the outer relation input stream */
-				if (outer_tlist == NIL)
-				{
-					Form_pg_attribute attr = tupleDescAttr(outer_desc, i-1);
-					
-					dtype = pgstrom_devtype_lookup_and_track(attr->atttypid,
-															 context);
-					if (!dtype)
-						elog(ERROR, "device type lookup failed: %s",
-							 format_type_be(attr->atttypid));
-				}
-				else
-				{
-					TargetEntry	   *tle = list_nth(outer_tlist, i-1);
-					Oid				type_oid = exprType((Node *)tle->expr);
-
-					dtype = pgstrom_devtype_lookup_and_track(type_oid,
-															 context);
-					if (!dtype)
-						elog(ERROR, "device type lookup failed: %s",
-							 format_type_be(type_oid));
-				}
-
-				foreach (lc, tlist_alt)
-				{
-					TargetEntry *tle = lfirst(lc);
-					Var		   *varnode;
-
-					if (tle->resjunk)
-						continue;
-					if (!IsA(tle->expr, Var))
-						continue;
-
-					varnode = (Var *) tle->expr;
-					if (varnode->varno != INDEX_VAR ||
-						varnode->varattno < 1 ||
-						varnode->varattno > nattrs)
-						elog(ERROR, "Bug? unexpected varnode: %s",
-							 nodeToString(varnode));
-					if (varnode->varattno != i)
-						continue;
-
-					/* row */
-					if (!referenced)
-					{
-						appendStringInfo(
-							&temp,
-							"  case %d:\n", i - 1);
-						outer_refno_max = i;
-					}
-
-					appendStringInfo(
-						&temp,
-						"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
-						"    pg_datum_store(kcxt, temp.%s_v,\n"
-						"                   dst_dclass[%d],\n"
-						"                   dst_values[%d]);\n",
-						dtype->type_name,
-						dtype->type_name,
-						tle->resno - 1,
-						tle->resno - 1);
-
-					/* slot */
-					appendStringInfo(
-						&sbody,
-						"  dst_dclass[%d] = src_dclass[%d];\n"
-						"  dst_values[%d] = src_values[%d];\n",
-						tle->resno-1, i-1,
-						tle->resno-1, i-1);
-
-					/* arrow */
-					appendStringInfo(
-						&abody,
-						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
-						"  pg_datum_store(kcxt, temp.%s_v,\n"
-						"                 dst_dclass[%d],\n"
-						"                 dst_values[%d]);\n",
-						dtype->type_name, i-1,
-						dtype->type_name,
-						tle->resno-1,
-						tle->resno-1);
-					/* column */
-					appendStringInfo(
-						&cbody,
-						"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n"
-						"  if (!addr)\n"
-						"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
-						"  else\n"
-						"  {\n"
-						"    dst_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-						"    dst_values[%d] = %s(addr);\n"
-						"  }\n",
-						i-1, tle->resno-1, tle->resno-1, tle->resno-1,
-						dtype->type_byval
-						? (dtype->type_length == 1 ? "READ_INT8_PTR"  :
-						   dtype->type_length == 2 ? "READ_INT16_PTR" :
-						   dtype->type_length == 4 ? "READ_INT32_PTR" :
-						   dtype->type_length == 8 ? "READ_INT64_PTR" : "NO_SUCH_TYPLEN")
-						: "PointerGetDatum");
-					referenced = true;
-				}
-
-				/*
-				 * KVAR_x must be set up if variables are referenced by
-				 * expressions.
-				 */
-				if (bms_is_member(k, outer_refs_expr))
-				{
-					appendStringInfo(
-						&decl,
-						"  pg_%s_t KVAR_%u;\n",
-						dtype->type_name, i);
-					/* row */
-					if (!referenced)
-					{
-						appendStringInfo(
-							&temp,
-							"  case %d:\n", i - 1);
-						outer_refno_max = i;
-					}
-					appendStringInfo(
-						&temp,
-						"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
-					/* slot */
-					appendStringInfo(
-						&sbody,
-						"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
-						"                    src_dclass[%d],\n"
-						"                    src_values[%d]);\n",
-						i, i-1, i-1);
-					/* arrow */
-					if (referenced)
-					{
-						appendStringInfo(
-							&abody,
-							"  KVAR_%u = temp.%s_v;\n",
-							i, dtype->type_name);
-					}
-					else
-					{
-						appendStringInfo(
-							&abody,
-							"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
-							i, i-1);
-					}
-					/* column */
-					if (!referenced)
-						appendStringInfo(
-							&cbody,
-							"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n",
-							i-1);
-					appendStringInfo(
-						&cbody,
-						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
-					referenced = true;
-				}
-				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-				type_oid_list = list_append_unique_oid(type_oid_list,
-													   dtype->type_oid);
-				if (referenced)
-					appendStringInfoString(
-						&temp,
-						"    break;\n");
+				appendStringInfo(
+					&temp,
+					"  case %d:\n", i - 1);
+				outer_refno_max = i;
 			}
+
+			appendStringInfo(
+				&temp,
+				"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+				"    pg_datum_store(kcxt, temp.%s_v,\n"
+				"                   dst_dclass[%d],\n"
+				"                   dst_values[%d]);\n",
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				tle->resno - 1);
+
+			/* slot */
+			appendStringInfo(
+				&sbody,
+				"  dst_dclass[%d] = src_dclass[%d];\n"
+				"  dst_values[%d] = src_values[%d];\n",
+				tle->resno-1, i-1,
+				tle->resno-1, i-1);
+
+			/* arrow */
+			appendStringInfo(
+				&abody,
+				"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
+				"  pg_datum_store(kcxt, temp.%s_v,\n"
+				"                 dst_dclass[%d],\n"
+				"                 dst_values[%d]);\n",
+				dtype->type_name, i-1,
+				dtype->type_name,
+				tle->resno-1,
+				tle->resno-1);
+			/* column */
+			appendStringInfo(
+				&cbody,
+				"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n"
+				"  if (!addr)\n"
+				"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
+				"  else\n"
+				"  {\n"
+				"    dst_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+				"    dst_values[%d] = %s(addr);\n"
+				"  }\n",
+				i-1, tle->resno-1, tle->resno-1, tle->resno-1,
+				dtype->type_byval
+				? (dtype->type_length == 1 ? "READ_INT8_PTR"  :
+				   dtype->type_length == 2 ? "READ_INT16_PTR" :
+				   dtype->type_length == 4 ? "READ_INT32_PTR" :
+				   dtype->type_length == 8 ? "READ_INT64_PTR" : "NO_SUCH_TYPLEN")
+				: "PointerGetDatum");
+			referenced = true;
 		}
 
-		if (temp.len > 0)
+		/*
+		 * KVAR_x must be set up if variables are referenced by
+		 * expressions.
+		 */
+		if (bms_is_member(k, outer_refs_expr))
 		{
 			appendStringInfo(
-				&tbody,
-				"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
-				"  switch (__colidx)\n"
-				"  {\n"
-				"%s"
-				"  default:\n"
-				"    break;\n"
-				"  }\n"
-				"  EXTRACT_HEAP_TUPLE_END();\n",
-				outer_refno_max,
-				temp.data);
+				&decl,
+				"  pg_%s_t KVAR_%u;\n",
+				dtype->type_name, i);
+			/* row */
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"  case %d:\n", i - 1);
+				outer_refno_max = i;
+			}
+			appendStringInfo(
+				&temp,
+				"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+			/* slot */
+			appendStringInfo(
+				&sbody,
+				"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
+				"                    src_dclass[%d],\n"
+				"                    src_values[%d]);\n",
+				i, i-1, i-1);
+			/* arrow */
+			if (referenced)
+			{
+				appendStringInfo(
+					&abody,
+					"  KVAR_%u = temp.%s_v;\n",
+					i, dtype->type_name);
+			}
+			else
+			{
+				appendStringInfo(
+					&abody,
+					"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
+					i, i-1);
+			}
+			/* column */
+			if (!referenced)
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n",
+					i-1);
+			appendStringInfo(
+				&cbody,
+				"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+			referenced = true;
 		}
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		type_oid_list = list_append_unique_oid(type_oid_list, dtype->type_oid);
+		if (referenced)
+			appendStringInfoString(
+				&temp,
+				"    break;\n");
+	}
+
+	if (temp.len > 0)
+	{
+		appendStringInfo(
+			&tbody,
+			"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
+			"  switch (__colidx)\n"
+			"  {\n"
+			"%s"
+			"  default:\n"
+			"    break;\n"
+			"  }\n"
+			"  EXTRACT_HEAP_TUPLE_END();\n",
+			outer_refno_max,
+			temp.data);
 	}
 
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
+setup_expressions:
 	resetStringInfo(&temp);
-	foreach (lc, tlist_alt)
+	foreach (lc, tlist_part)
 	{
 		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tmp;
 		Expr		   *expr;
+		Oid				type_oid;
 		devtype_info   *dtype;
-		const char	   *projection_label = NULL;
+		const char	   *label = NULL;
 
-		if (tle->resjunk)
-			continue;
+		Assert(!tle->resjunk);
 		if (IsA(tle->expr, Var))
-			continue;	/* should be already loaded */
-		if (is_altfunc_expression((Node *)tle->expr, NULL))
 		{
-			FuncExpr   *f = (FuncExpr *) tle->expr;
-
-			expr = codegen_projection_partial_funcion(f, context);
-			projection_label = "aggfunc-arg";
-		}
-		else if (tle->ressortgroupref)
-		{
+			/* should be already loaded */
 			expr = tle->expr;
-			projection_label = "grouping-key";
 		}
 		else
-			elog(ERROR, "Bug? unexpected expression: %s",
-                 nodeToString(tle->expr));
+		{
+			if (is_altfunc_expression((Node *)tle->expr, NULL))
+			{
+				FuncExpr   *f = (FuncExpr *) tle->expr;
 
-		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
-												 context);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed: %s",
-				 format_type_be(exprType((Node *)expr)));
-		appendStringInfo(
-			&temp,
-			"\n"
-			"  /* initial attribute %d (%s) */\n"
-			"  temp.%s_v = %s;\n"
-			"  if (!temp.%s_v.isnull)\n"
-			"    pg_datum_store(kcxt, temp.%s_v,\n"
-			"                   dst_dclass[%d],\n"
-			"                   dst_values[%d]);\n",
-			tle->resno, projection_label,
-			dtype->type_name,
-			pgstrom_codegen_expression((Node *)expr, context),
-			dtype->type_name,
-			dtype->type_name,
-			tle->resno-1,
-            tle->resno-1);
-		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-		type_oid_list = list_append_unique_oid(type_oid_list,
-											   dtype->type_oid);
+				expr = codegen_projection_partial_funcion(f, context);
+				label = "aggfunc-arg";
+			}
+			else if (tle->ressortgroupref)
+			{
+				expr = tle->expr;
+				label = "grouping-key";
+			}
+			else
+				elog(ERROR, "Bug? unexpected expression: %s",
+					 nodeToString(tle->expr));
+
+			type_oid = exprType((Node *)expr);
+			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(type_oid));
+			appendStringInfo(
+				&temp,
+				"\n"
+				"  /* initial attribute %d (%s) */\n"
+				"  temp.%s_v = %s;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"    pg_datum_store(kcxt, temp.%s_v,\n"
+				"                   dst_dclass[%d],\n"
+				"                   dst_values[%d]);\n",
+				tle->resno, label,
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)expr, context),
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno-1,
+				tle->resno-1);
+			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+			type_oid_list = list_append_unique_oid(type_oid_list, type_oid);
+		}
+		tmp = flatCopyTargetEntry(tle);
+		tmp->expr  = expr;
+		tlist_prep = lappend(tlist_prep, tmp);
 	}
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);
 	appendStringInfoString(&abody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
+
+	*p_tlist_part = revert_tlist_device_projection(tlist_part, outer_tlist);
+	*p_tlist_prep = revert_tlist_device_projection(tlist_prep, outer_tlist);
 
 	/* const/params and temporary variable */
 	pgstrom_codegen_param_declarations(&decl, context);
@@ -3493,7 +3594,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 static void
 gpupreagg_codegen_hashvalue(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev)
+							List *tlist_prep)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -3509,7 +3610,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		&decl,
 		"  cl_uint      hash = 0xffffffffU;\n");
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_prep)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -3587,7 +3688,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 static void
 gpupreagg_codegen_keymatch(StringInfo kern,
 						   codegen_context *context,
-						   List *tlist_dev)
+						   List *tlist_prep)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -3605,7 +3706,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"  Datum       *x_values = KERN_DATA_STORE_VALUES(x_kds, x_index);\n"
 		"  Datum       *y_values = KERN_DATA_STORE_VALUES(y_kds, y_index);\n");
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_prep)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -3799,7 +3900,7 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 static void
 gpupreagg_codegen_init_slot(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev,
+							List *tlist_prep,
 							int *p_num_accum_values,
 							int *p_accum_extra_bufsz)
 {
@@ -3813,7 +3914,7 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 	initStringInfo(&gbuf);
 	initStringInfo(&lbuf);
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_prep)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		int				extra_sz = 0;
@@ -3876,7 +3977,7 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 static void
 gpupreagg_codegen_accum_merge(StringInfo kern,
 							  codegen_context *context,
-							  List *tlist_dev)
+							  List *tlist_part)
 {
 	StringInfoData sbuf;	/* _shuffle */
 	StringInfoData nbuf;	/* _normal */
@@ -3888,7 +3989,7 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 	initStringInfo(&nbuf);
 	initStringInfo(&abuf);
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_part)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		const char	   *label;
@@ -4031,85 +4132,58 @@ gpupreagg_codegen_variables(StringInfo kern,
 static char *
 gpupreagg_codegen(codegen_context *context,
 				  CustomScan *cscan,
-				  List *tlist_dev,
 				  List *outer_tlist,
 				  GpuPreAggInfo *gpa_info,
 				  Bitmapset *pfunc_bitmap)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
-	List		   *tlist_alt;
-	List		   *tlist_fallback = NIL;
-	ListCell	   *lc;
-	Bitmapset	   *outer_refs_any = NULL;
-	Bitmapset	   *outer_refs_expr = NULL;
 	size_t			varlena_bufsz = 0;
-	int				nfields = list_length(tlist_dev);
+	int				nfields;
 
 	initStringInfo(&kern);
 	initStringInfo(&body);
-	/* device variables */
-	gpupreagg_codegen_variables(&kern, tlist_dev, pfunc_bitmap);
 
 	/* gpuscan_quals_eval */
 	codegen_gpuscan_quals(&body, context, "gpupreagg",
 						  cscan->scan.scanrelid,
 						  gpa_info->outer_quals);
-
-	/*
-	 * gpupreagg_projection_(row|slot)
-	 *
-	 * pick up columns which are referenced by the initial projection,
-	 * then constructs an alternative tlist that contains Var-node with
-     * INDEX_VAR + resno, for convenience of the later stages.
-	 */
-	tlist_alt = make_tlist_device_projection(tlist_dev,
-											 cscan->scan.scanrelid,
-											 outer_tlist,
-											 &outer_refs_any,
-											 &outer_refs_expr);
-	Assert(list_length(tlist_alt) == nfields);
-	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
-
+	/* gpupreagg_projection_xxxx */
 	gpupreagg_codegen_projection(&body,
 								 context,
-								 tlist_alt,
-								 outer_refs_any,
-								 outer_refs_expr,
-								 cscan->scan.scanrelid,
-								 outer_tlist);
+								 cscan,
+								 outer_tlist,
+								 &gpa_info->tlist_part,
+								 &gpa_info->tlist_prep);
+	nfields = list_length(gpa_info->tlist_prep);
 	varlena_bufsz = (context->varlena_bufsz +
 					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
 					 MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
 					 MAXALIGN(sizeof(cl_int)  * nfields));	/* tup_extra */
-
-	/* remove junk entries for tlist_fallback */
-	foreach (lc, tlist_alt)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (!tle->resjunk)
-			tlist_fallback = lappend(tlist_fallback, tle);
-	}
-	gpa_info->tlist_fallback = tlist_fallback;
+	/* device variables */
+	gpupreagg_codegen_variables(&kern, gpa_info->tlist_part, pfunc_bitmap);
 	/* gpupreagg_hashvalue */
 	context->varlena_bufsz = 0;
-	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
+	gpupreagg_codegen_hashvalue(&body, context,
+								gpa_info->tlist_prep);
 	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 
 	/* gpupreagg_keymatch */
 	context->varlena_bufsz = 0;
-	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
+	gpupreagg_codegen_keymatch(&body, context,
+							   gpa_info->tlist_prep);
 	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 
 	gpa_info->varlena_bufsz = varlena_bufsz;
 	
 	/* gpupreagg_init_slot */
-	gpupreagg_codegen_init_slot(&body, context, tlist_dev,
+	gpupreagg_codegen_init_slot(&body, context,
+								gpa_info->tlist_part,
 								&gpa_info->num_accum_values,
 								&gpa_info->accum_extra_bufsz);
 	/* gpupreagg_merge_* */
-	gpupreagg_codegen_accum_merge(&body, context, tlist_dev);
+	gpupreagg_codegen_accum_merge(&body, context,
+								  gpa_info->tlist_part);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
@@ -4229,9 +4303,9 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
-	List		   *tlist_dev = cscan->custom_scan_tlist;
 	ListCell	   *lc	__attribute__((unused));
-	TupleDesc		gpreagg_tupdesc;
+	TupleDesc		part_tupdesc;
+	TupleDesc		prep_tupdesc;
 	TupleDesc		outer_tupdesc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
@@ -4292,30 +4366,26 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 									gpa_info->index_quals);
 	}
 
-	/*
-	 * Initialization the stuff for CPU fallback.
-	 *
-	 * Projection from the outer-relation to the custom_scan_tlist is a job
-	 * of CPU fallback. It is equivalent to the initial device projection.
-	 */
-	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev);
-	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc,
-												  &TTSOpsVirtual);
-	//XXX - tlist_dev and tlist_fallback are compatible; needs Assert()?
-
+	/* Setup TupleTableSlot */
+	part_tupdesc = ExecCleanTypeFromTL(gpa_info->tlist_part);
+	gpas->part_slot = MakeSingleTupleTableSlot(part_tupdesc,
+											   &TTSOpsVirtual);
+	prep_tupdesc = ExecCleanTypeFromTL(gpa_info->tlist_prep);
+	gpas->prep_slot = MakeSingleTupleTableSlot(prep_tupdesc,
+											   &TTSOpsVirtual);
 	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc,
 												&TTSOpsHeapTuple);
-	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_fallback,
+	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_part,
 											   econtext,
-											   gpas->gpreagg_slot,
+											   gpas->part_slot,
 											   &gpas->gts.css.ss.ps,
 											   outer_tupdesc);
 	/* Template of kds_slot */
-	length = KDS_calculateHeadSize(gpreagg_tupdesc);
+	length = KDS_calculateHeadSize(prep_tupdesc);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,
 												 length);
 	init_kernel_data_store(gpas->kds_slot_head,
-						   gpreagg_tupdesc,
+						   prep_tupdesc,
 						   INT_MAX,		/* to be set individually */
 						   KDS_FORMAT_SLOT,
 						   INT_MAX);	/* to be set individually */
@@ -4421,8 +4491,10 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		gpuMemFree(gcontext, gpas->m_fhash);
 
 	/* release any other resources */
-	if (gpas->gpreagg_slot)
-		ExecDropSingleTupleTableSlot(gpas->gpreagg_slot);
+	if (gpas->part_slot)
+		ExecDropSingleTupleTableSlot(gpas->part_slot);
+	if (gpas->prep_slot)
+		ExecDropSingleTupleTableSlot(gpas->prep_slot);
 	if (gpas->outer_slot)
 		ExecDropSingleTupleTableSlot(gpas->outer_slot);
 	releaseGpuPreAggSharedState(gpas);
@@ -4570,7 +4642,6 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	CustomScan			   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo		   *gpa_info = deform_gpupreagg_info(cscan);
 	List				   *dcontext;
-	List				   *dev_proj = NIL;
 	List				   *group_keys = NIL;
 	ListCell			   *lc;
 	char				   *temp;
@@ -4582,21 +4653,39 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
                                             (Node *)&gpas->gts.css.ss.ps,
                                             ancestors);
-	/* device projection and grouping key */
+	/* extract grouping keys */
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		dev_proj = lappend(dev_proj, tle->expr);
 		if (tle->ressortgroupref)
 			group_keys = lappend(group_keys, tle->expr);
 	}
 
 	if (es->verbose)
 	{
-		temp = deparse_expression((Node *)dev_proj, dcontext,
-								  es->verbose, false);
-		ExplainPropertyText("GPU Projection", temp, es);
+		List	   *__tlist_part = NIL;
+		List	   *__tlist_prep = NIL;
+
+		foreach (lc, gpa_info->tlist_part)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			__tlist_part = lappend(__tlist_part, tle->expr);
+		}
+		temp = deparse_expression((Node *)__tlist_part,
+								  dcontext, false, false);
+		ExplainPropertyText("GPU Output", temp, es);
+
+		foreach (lc, gpa_info->tlist_prep)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			__tlist_prep = lappend(__tlist_prep, tle->expr);
+        }
+		temp = deparse_expression((Node *)__tlist_prep,
+								  dcontext, false, false);
+		ExplainPropertyText("GPU Setup", temp, es);
 	}
 
 	if (gpas->num_group_keys == 0)
@@ -4691,8 +4780,8 @@ static void
 gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
+	TupleTableSlot *part_slot = gpas->part_slot;
+	TupleDesc		part_tupdesc = part_slot->tts_tupleDescriptor;
 	pgstrom_data_store *pds_final;
 	size_t			f_hash_nslots;
 	size_t			f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
@@ -4704,7 +4793,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 
 	/* final buffer allocation */
 	pds_final = PDS_create_slot(gcontext,
-								gpa_tupdesc,
+								part_tupdesc,
 								0x3ffffe000);		/* almost 16GB managed */
 	/* final hash-slot allocation */
 	if (gpas->plan_ngroups < 400000)
@@ -4987,6 +5076,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 
 	for (;;)
 	{
+#if 0
 		if (gpreagg->kds_slot)
 		{
 			/* CPU fallback with kds_slot built */
@@ -5005,7 +5095,8 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 			}
 			break;
 		}
-		else if (gpas->combined_gpujoin)
+#endif
+		if (gpas->combined_gpujoin)
 		{
 			GpuTaskState   *outer_gts
 				= (GpuTaskState *)outerPlanState(gpas);
@@ -5071,7 +5162,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	}
 	else if (gpas->gts.curr_index < pds_final->kds.nitems)
 	{
-		slot = gpas->gpreagg_slot;
+		slot = gpas->part_slot;
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
 	}
@@ -5454,7 +5545,7 @@ resume_kernel:
 	rc = cuLaunchKernel(kern_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
-						sizeof(cl_int) * 1024,	/* for StairlikeSum */
+						0,
 						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
