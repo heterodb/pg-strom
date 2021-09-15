@@ -1955,31 +1955,4 @@ pthreadCondSignal(pthread_cond_t *cond)
 #define TP_DIFF(tp2,tp1)						\
 	((tp2.tv_sec - tp1.tv_sec) * 1000000000UL +	(tp2.tv_nsec - tp1.tv_nsec))
 
-/*
- * simple wrapper for permission checks
- */
-static inline void
-strom_proc_aclcheck(Oid func_oid, Oid user_id, AclMode mode)
-{
-	aclcheck_error(pg_proc_aclcheck(func_oid, user_id, mode),
-#if PG_VERSION_NUM < 110000
-				   ACL_KIND_PROC,
-#else
-				   OBJECT_FUNCTION,
-#endif
-				   format_procedure(func_oid));
-}
-
-static inline void
-strom_foreign_table_aclcheck(Oid ftable_oid, Oid user_id, AclMode mode)
-{
-	aclcheck_error(pg_class_aclcheck(ftable_oid, user_id, mode),
-#if PG_VERSION_NUM < 110000
-				   ACL_KIND_CLASS,
-#else
-				   OBJECT_FOREIGN_TABLE,
-#endif
-				   get_rel_name(ftable_oid));
-}
-
 #endif	/* PG_STROM_H */
