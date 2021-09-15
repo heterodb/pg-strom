@@ -28,8 +28,6 @@ double		pgstrom_gpu_operator_cost;
 /* misc static variables */
 static HTAB				   *gpu_path_htable = NULL;
 static planner_hook_type	planner_hook_next = NULL;
-static CustomPathMethods	pgstrom_dummy_path_methods;
-static CustomScanMethods	pgstrom_dummy_plan_methods;
 
 /* misc variables */
 long		PAGE_SIZE;
@@ -258,212 +256,8 @@ gpu_path_remember(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
- * pgstrom_create_dummy_path
- */
-Path *
-pgstrom_create_dummy_path(PlannerInfo *root,
-						  Path *subpath,
-						  PathTarget *target)
-{
-	CustomPath *cpath = makeNode(CustomPath);
-
-	cpath->path.pathtype		= T_CustomScan;
-	cpath->path.parent			= subpath->parent;
-	cpath->path.pathtarget		= target;
-	cpath->path.param_info		= NULL;
-	cpath->path.parallel_aware	= subpath->parallel_aware;
-	cpath->path.parallel_safe	= subpath->parallel_safe;
-	cpath->path.parallel_workers = subpath->parallel_workers;
-	cpath->path.pathkeys		= subpath->pathkeys;
-	cpath->path.rows			= subpath->rows;
-	cpath->path.startup_cost	= subpath->startup_cost;
-	cpath->path.total_cost		= subpath->total_cost;
-
-	cpath->custom_paths			= list_make1(subpath);
-	cpath->methods      		= &pgstrom_dummy_path_methods;
-
-	return &cpath->path;
-}
-
-/*
- * pgstrom_dummy_create_plan - PlanCustomPath callback
- */
-static Plan *
-pgstrom_dummy_create_plan(PlannerInfo *root,
-						  RelOptInfo *rel,
-						  CustomPath *best_path,
-						  List *tlist,
-						  List *clauses,
-						  List *custom_plans)
-{
-	CustomScan *cscan = makeNode(CustomScan);
-
-	Assert(list_length(custom_plans) == 1);
-	cscan->scan.plan.parallel_aware = best_path->path.parallel_aware;
-	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.plan.qual = NIL;
-	cscan->scan.plan.lefttree = linitial(custom_plans);
-	cscan->scan.scanrelid = 0;
-	cscan->custom_scan_tlist = tlist;
-	cscan->methods = &pgstrom_dummy_plan_methods;
-
-	return &cscan->scan.plan;
-}
-
-/*
- * pgstrom_dummy_remove_plan
- */
-static Plan *
-pgstrom_dummy_remove_plan(PlannedStmt *pstmt, CustomScan *cscan)
-{
-	Plan	   *subplan = outerPlan(cscan);
-	ListCell   *lc1;
-	ListCell   *lc2;
-
-	Assert(innerPlan(cscan) == NULL &&
-		   cscan->custom_plans == NIL);
-	Assert(list_length(cscan->scan.plan.targetlist) ==
-		   list_length(subplan->targetlist));
-	/*
-	 * Push down the resource name to subplan
-	 */
-	forboth (lc1, cscan->scan.plan.targetlist,
-			 lc2, subplan->targetlist)
-	{
-		TargetEntry	   *tle_1 = lfirst(lc1);
-		TargetEntry	   *tle_2 = lfirst(lc2);
-
-		if (exprType((Node *)tle_1->expr) != exprType((Node *)tle_2->expr))
-			elog(ERROR, "Bug? dummy custom scan node has incompatible tlist");
-
-		if (tle_2->resname != NULL &&
-			(tle_1->resname == NULL ||
-			 strcmp(tle_1->resname, tle_2->resname) != 0))
-		{
-			elog(DEBUG2,
-				 "attribute %d of subplan: [%s] is over-written by [%s]",
-				 tle_2->resno,
-				 tle_2->resname,
-				 tle_1->resname);
-		}
-		if (tle_1->resjunk != tle_2->resjunk)
-			elog(DEBUG2,
-				 "attribute %d of subplan: [%s] is marked as %s attribute",
-				 tle_2->resno,
-                 tle_2->resname,
-				 tle_1->resjunk ? "junk" : "non-junk");
-
-		tle_2->resname = tle_1->resname;
-		tle_2->resjunk = tle_1->resjunk;
-	}
-	return outerPlan(cscan);
-}
-
-/*
- * pgstrom_dummy_create_scan_state - CreateCustomScanState callback
- */
-static Node *
-pgstrom_dummy_create_scan_state(CustomScan *cscan)
-{
-	elog(ERROR, "Bug? dummy custom scan node still remain on executor stage");
-}
-
-/*
  * pgstrom_post_planner
- *
- * remove 'dummy' custom scan node.
  */
-static void
-pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
-{
-	Plan	   *plan = *p_plan;
-	ListCell   *lc;
-
-	Assert(plan != NULL);
-
-	switch (nodeTag(plan))
-	{
-		case T_ModifyTable:
-			{
-				ModifyTable *splan = (ModifyTable *) plan;
-
-				foreach (lc, splan->plans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-			
-		case T_Append:
-			{
-				Append	   *splan = (Append *) plan;
-
-				foreach (lc, splan->appendplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-
-		case T_MergeAppend:
-			{
-				MergeAppend *splan = (MergeAppend *) plan;
-
-				foreach (lc, splan->mergeplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-
-		case T_BitmapAnd:
-			{
-				BitmapAnd  *splan = (BitmapAnd *) plan;
-
-				foreach (lc, splan->bitmapplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-
-		case T_BitmapOr:
-			{
-				BitmapOr   *splan = (BitmapOr *) plan;
-
-				foreach (lc, splan->bitmapplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-
-		case T_SubqueryScan:
-			{
-				SubqueryScan *sscan = (SubqueryScan *) plan;
-
-				pgstrom_post_planner_recurse(pstmt, &sscan->subplan);
-			}
-			break;
-
-		case T_CustomScan:
-			{
-				CustomScan *cscan = (CustomScan *) plan;
-
-				if (cscan->methods == &pgstrom_dummy_plan_methods)
-				{
-					*p_plan = pgstrom_dummy_remove_plan(pstmt, cscan);
-					pgstrom_post_planner_recurse(pstmt, p_plan);
-					return;
-				}
-				else if (pgstrom_plan_is_gpupreagg(&cscan->scan.plan))
-					gpupreagg_post_planner(pstmt, cscan);
-
-				foreach (lc, cscan->custom_plans)
-					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
-			}
-			break;
-
-		default:
-			break;
-	}
-
-	if (plan->lefttree)
-		pgstrom_post_planner_recurse(pstmt, &plan->lefttree);
-	if (plan->righttree)
-		pgstrom_post_planner_recurse(pstmt, &plan->righttree);
-}
-
 static PlannedStmt *
 pgstrom_post_planner(Query *parse,
 #if PG_VERSION_NUM >= 130000
@@ -474,7 +268,6 @@ pgstrom_post_planner(Query *parse,
 {
 	HTAB		   *gpu_path_htable_saved = gpu_path_htable;
 	PlannedStmt	   *pstmt;
-	ListCell	   *lc;
 
 	PG_TRY();
 	{
@@ -512,10 +305,6 @@ pgstrom_post_planner(Query *parse,
 	PG_END_TRY();
 	hash_destroy(gpu_path_htable);
 	gpu_path_htable = gpu_path_htable_saved;
-
-	pgstrom_post_planner_recurse(pstmt, &pstmt->planTree);
-	foreach (lc, pstmt->subplans)
-		pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 
 	return pstmt;
 }
@@ -602,17 +391,6 @@ _PG_init(void)
 	pgstrom_init_relscan();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_gpu_cache();
-
-	/* dummy custom-scan node */
-	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
-	pgstrom_dummy_path_methods.CustomName	= "Dummy";
-	pgstrom_dummy_path_methods.PlanCustomPath
-		= pgstrom_dummy_create_plan;
-
-	memset(&pgstrom_dummy_plan_methods, 0, sizeof(CustomScanMethods));
-	pgstrom_dummy_plan_methods.CustomName	= "Dummy";
-	pgstrom_dummy_plan_methods.CreateCustomScanState
-		= pgstrom_dummy_create_scan_state;
 
 	/* planner hook registration */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);

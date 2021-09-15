@@ -1319,7 +1319,6 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 								AggClauseCosts *agg_final_costs)
 {
 	Query	   *parse = root->parse;
-	PathTarget *target_upper = root->upper_targets[UPPERREL_GROUP_AGG];
 	Path	   *sort_path;
 	Path	   *final_path;
 	bool		can_sort;
@@ -1345,9 +1344,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 											 havingQuals,
 											 agg_final_costs,
 											 num_groups);
-		add_path(group_rel, pgstrom_create_dummy_path(root,
-													  final_path,
-													  target_upper));
+		add_path(group_rel, final_path);
 	}
 	else
 	{
@@ -1451,9 +1448,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
-			add_path(group_rel, pgstrom_create_dummy_path(root,
-														  final_path,
-														  target_upper));
+			add_path(group_rel, final_path);
 		}
 
 		/* make a final grouping path (hash) */
@@ -1476,9 +1471,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 									havingQuals,
 									agg_final_costs,
 									num_groups);
-				add_path(group_rel, pgstrom_create_dummy_path(root,
-															  final_path,
-															  target_upper));
+				add_path(group_rel, final_path);
 			}
 		}
 	}
@@ -2460,7 +2453,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	RelOptInfo *input_rel = input_path->parent;
 	Node	   *havingQual = NULL;
 	ListCell   *lc;
-	cl_int		i, j, n;
+	cl_int		i;
 
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
@@ -2490,7 +2483,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		{
 			devtype_info   *dtype;
 			Oid				coll_oid;
-			ListCell	   *cell;
 
 			/*
 			 * Type of the grouping-key must have device equality-function
@@ -2538,7 +2530,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			if (exprType((Node *)expr) != exprType((Node *)temp))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
-			add_new_column_to_pathtarget(target_final, temp);
+			add_column_to_pathtarget(target_final, temp, 0);
 		}
 		i++;
 	}

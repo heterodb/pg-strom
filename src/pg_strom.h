@@ -1416,9 +1416,6 @@ extern bool	gpu_path_remember(PlannerInfo *root,
 							  bool inner_parallel,
 							  const Path *gpu_path);
 
-extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
-									   Path *subpath,
-									   PathTarget *target);
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 
