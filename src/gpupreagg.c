@@ -1389,15 +1389,11 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					create_groupingsets_path(root,
 											 group_rel,
 											 sort_path,
-#if PG_VERSION_NUM < 110000
-											 target_final,
-#endif
 											 (List *) parse->havingQual,
 											 rollup_strategy,
 											 rollup_data_list,
 											 agg_final_costs,
 											 num_groups);
-#if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
 				target_orig = final_path->pathtarget;
 				final_path->startup_cost += (target_final->cost.startup -
@@ -1407,7 +1403,6 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					(target_final->cost.per_tuple -
 					 target_orig->cost.per_tuple) * final_path->rows;
 				final_path->pathtarget = target_final;
-#endif
 			}
 			else if (parse->hasAggs)
 				final_path = (Path *)
@@ -1427,13 +1422,9 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					create_group_path(root,
 									  group_rel,
 									  sort_path,
-#if PG_VERSION_NUM < 110000
-									  target_final,
-#endif
 									  parse->groupClause,
 									  havingQuals,
 									  num_groups);
-#if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
 				target_orig = final_path->pathtarget;
 				final_path->startup_cost += (target_final->cost.startup -
@@ -1443,7 +1434,6 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					(target_final->cost.per_tuple -
 					 target_orig->cost.per_tuple) * final_path->rows;
 				final_path->pathtarget = target_final;
-#endif
 			}
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
@@ -1729,23 +1719,14 @@ static void
 gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 UpperRelationKind stage,
 							 RelOptInfo *input_rel,
-							 RelOptInfo *group_rel
-#if PG_VERSION_NUM >= 110000
-							 ,void *extra
-#endif
-	)
+							 RelOptInfo *group_rel,
+							 void *extra)
 {
 	Path	   *input_path;
 	ListCell   *lc;
 
 	if (create_upper_paths_next)
-	{
-#if PG_VERSION_NUM < 110000
-		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
-#else
 		(*create_upper_paths_next)(root, stage, input_rel, group_rel, extra);
-#endif
-	}
 
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
@@ -6102,7 +6083,6 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#if PG_VERSION_NUM >= 110000
 	/* pg_strom.enable_partitionwise_gpupreagg */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
 							 "(EXPERIMENTAL) Enables partition wise GpuPreAgg",
@@ -6112,9 +6092,6 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-#else
-	enable_partitionwise_gpupreagg = false;
-#endif
 	/* pg_strom.enable_numeric_aggfuncs */
 	DefineCustomBoolVariable("pg_strom.enable_numeric_aggfuncs",
 							 "Enables aggregate functions on numeric type",
