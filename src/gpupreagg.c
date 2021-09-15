@@ -2223,6 +2223,7 @@ make_alternative_aggref(PlannerInfo *root,
 		cl_int		action = aggfn_cat->partfn_argexprs[i];
 		cl_int		argtype = aggfn_cat->partfn_argtypes[i];
 		FuncExpr   *pfunc;
+		Node	   *temp;
 
 		switch (action)
 		{
@@ -2263,8 +2264,8 @@ make_alternative_aggref(PlannerInfo *root,
 		/* device executable? */
 		if (pfunc->args)
 		{
-			Node   *temp = replace_expression_by_outerref((Node *)pfunc->args,
-														  target_input);
+			temp = replace_expression_by_outerref((Node *)pfunc->args,
+												  target_input);
 			/*
 			 * MEMO: Expressions are replaced to Var-node that references
 			 * one of target_input, and these Var-nodes have INDEX_VAR.
@@ -2477,10 +2478,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	 * target_device shall be initialized according to the target_input
 	 * once, but its sortgrouprefs are not set.
 	 */
-	n = list_length(target_input->exprs);
-	target_device->exprs = copyObject(target_input->exprs);
-	target_device->sortgrouprefs = palloc0(sizeof(Index) * (n + 1));
-
 	i = 0;
 	foreach (lc, target_upper->exprs)
 	{
@@ -2522,52 +2519,13 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 */
 			if (!pgstrom_device_expression(root, input_rel, expr))
 				*p_can_pullup_outerscan = false;
-
-			/* grouping-key should be on the any of input items */
-			j = 0;
-			foreach (cell, target_device->exprs)
-			{
-				if (equal(expr, lfirst(cell)))
-				{
-					if (target_device->sortgrouprefs[j] != 0)
-						elog(ERROR, "Bug? duplicated grouping-keys");
-					target_device->sortgrouprefs[j] = sortgroupref;
-					break;
-				}
-				j++;
-			}
-			if (!cell)
-				elog(ERROR, "Bug? grouping-key is not found on input tlist");
-			/*
-			 * OK, It's a grouping-key column, so add it to both of
-			 * the target_final, target_partial and target_device as-is.
-			 */
-			j=0;
-			foreach (cell, target_partial->exprs)
-			{
-				if (equal(expr, lfirst(cell)) &&
-					(!target_partial->sortgrouprefs ||
-					 target_partial->sortgrouprefs[j] == 0))
-				{
-					n = list_length(target_partial->exprs);
-					target_partial->sortgrouprefs =
-						(!target_partial->sortgrouprefs
-						 ? palloc0(sizeof(Index) * (n+1))
-						 : repalloc(target_partial->sortgrouprefs,
-									sizeof(Index) * (n+1)));
-					target_partial->sortgrouprefs[j] = sortgroupref;
-					break;
-				}
-				j++;
-			}
-			if (!cell)
-				add_column_to_pathtarget(target_partial, expr, sortgroupref);
-
+			/* add grouping-keys */
+			add_column_to_pathtarget(target_device, expr, sortgroupref);
+			add_column_to_pathtarget(target_partial, expr, sortgroupref);
 			add_column_to_pathtarget(target_final, expr, sortgroupref);
 		}
 		else
 		{
-			Oid		orig_type = exprType((Node *)expr);
 			Expr   *temp;
 
 			temp = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
@@ -2577,10 +2535,10 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 					 nodeToString((Node *)expr));
 				return false;
 			}
-			if (orig_type != exprType((Node *)temp))
+			if (exprType((Node *)expr) != exprType((Node *)temp))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
-			add_column_to_pathtarget(target_final, temp, 0);
+			add_new_column_to_pathtarget(target_final, temp);
 		}
 		i++;
 	}
