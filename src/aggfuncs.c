@@ -57,6 +57,9 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_slope);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxx);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxy);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
+PG_FUNCTION_INFO_V1(pgstrom_hll_hash);
+PG_FUNCTION_INFO_V1(pgstrom_hll_count_trans);
+PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
 
 /* utility to reference numeric[] */
 static inline Datum
@@ -934,4 +937,244 @@ pgstrom_float8_regr_sxy(PG_FUNCTION_ARGS)
 	check_float8_value(numeratorXY, isinf(sumXY) || isinf(sumX) || isinf(sumY), true);
 
 	PG_RETURN_FLOAT8(numeratorXY / N);
+}
+
+/*
+ * ----------------------------------------------------------------
+ *
+ * Hyper-Log-Log support functions
+ *
+ * ----------------------------------------------------------------
+ */
+
+#include "common/md5.h"
+/*
+ * Hash-function based on Sip-Hash
+ *
+ * See https://en.wikipedia.org/wiki/SipHash
+ *     and https://github.com/veorq/SipHash
+ */
+/* default: SipHash-2-4 */
+#define cROUNDS 2
+#define dROUNDS 4
+#define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+
+#define U8TO64_LE(p)											\
+    (((uint64_t)((p)[0]))       | ((uint64_t)((p)[1]) <<  8) |	\
+     ((uint64_t)((p)[2]) << 16) | ((uint64_t)((p)[3]) << 24) |	\
+     ((uint64_t)((p)[4]) << 32) | ((uint64_t)((p)[5]) << 40) |	\
+     ((uint64_t)((p)[6]) << 48) | ((uint64_t)((p)[7]) << 56))
+
+#define SIPROUND					\
+    do {							\
+        v0 += v1;					\
+        v1 = ROTL(v1, 13);			\
+        v1 ^= v0;					\
+        v0 = ROTL(v0, 32);			\
+        v2 += v3;					\
+        v3 = ROTL(v3, 16);			\
+        v3 ^= v2;					\
+        v0 += v3;					\
+        v3 = ROTL(v3, 21);			\
+        v3 ^= v0;					\
+        v2 += v1;					\
+        v1 = ROTL(v1, 17);			\
+        v1 ^= v2;					\
+        v2 = ROTL(v2, 32);			\
+    } while (0)
+
+static uint64_t
+__pgstrom_hll_siphash_value(const void *ptr, const size_t len)
+{
+	const unsigned char *ni = (const unsigned char *)ptr;
+	uint64_t	v0 = 0x736f6d6570736575UL;
+	uint64_t	v1 = 0x646f72616e646f6dUL;
+	uint64_t	v2 = 0x6c7967656e657261UL;
+	uint64_t	v3 = 0x7465646279746573UL;
+	uint64_t	k0 = 0x9c38151cda15a76bUL;	/* random key-0 */
+	uint64_t	k1 = 0xfb4ff68fbd3e6658UL;	/* random key-1 */
+	uint64_t	m;
+	int			i;
+    const unsigned char *end = ni + len - (len % sizeof(uint64_t));
+    const int	left = len & 7;
+    uint64_t	b = ((uint64_t)len) << 56;
+
+    v3 ^= k1;
+    v2 ^= k0;
+    v1 ^= k1;
+    v0 ^= k0;
+
+	for (; ni != end; ni += 8)
+	{
+		m = U8TO64_LE(ni);
+		v3 ^= m;
+
+		for (i = 0; i < cROUNDS; ++i)
+			SIPROUND;
+
+		v0 ^= m;
+	}
+
+    switch (left)
+	{
+		case 7:
+			b |= ((uint64_t)ni[6]) << 48;		__attribute__ ((fallthrough));
+		case 6:
+			b |= ((uint64_t)ni[5]) << 40;		__attribute__ ((fallthrough));
+		case 5:
+			b |= ((uint64_t)ni[4]) << 32;		__attribute__ ((fallthrough));
+		case 4:
+			b |= ((uint64_t)ni[3]) << 24;		__attribute__ ((fallthrough));
+		case 3:
+			b |= ((uint64_t)ni[2]) << 16;		__attribute__ ((fallthrough));
+		case 2:
+			b |= ((uint64_t)ni[1]) << 8;		__attribute__ ((fallthrough));
+		case 1:
+			b |= ((uint64_t)ni[0]);
+			break;
+		case 0:
+			break;
+    }
+
+    v3 ^= b;
+	for (i = 0; i < cROUNDS; ++i)
+		SIPROUND;
+
+	v0 ^= b;
+
+	v2 ^= 0xff;
+
+	for (i = 0; i < dROUNDS; ++i)
+		SIPROUND;
+
+	b = v0 ^ v1 ^ v2 ^ v3;
+
+	return b;
+}
+
+/*
+ * pgstrom_hll_hash(any)
+ */
+Datum
+pgstrom_hll_hash(PG_FUNCTION_ARGS)
+{
+	TypeCacheEntry *tcache = fcinfo->flinfo->fn_extra;
+	uint64			hash;
+
+	if (!tcache)
+	{
+		Oid		type_oid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+
+		if (!OidIsValid(type_oid))
+			elog(ERROR, "could not determine data type of hll_hash() input");
+		tcache = lookup_type_cache(type_oid, 0);
+
+		fcinfo->flinfo->fn_extra = tcache;
+	}
+
+	if (PG_ARGISNULL(0))
+		hash = __pgstrom_hll_siphash_value(NULL, 0);
+	else
+	{
+		Datum		datum = PG_GETARG_DATUM(0);
+
+		if (tcache->typbyval)
+			hash = __pgstrom_hll_siphash_value(&datum, tcache->typlen);
+		else if (tcache->typlen > 0)
+			hash = __pgstrom_hll_siphash_value(DatumGetPointer(datum),
+											   tcache->typlen);
+		else if (tcache->typlen == -1)
+			hash = __pgstrom_hll_siphash_value(VARDATA_ANY(datum),
+											   VARSIZE_ANY(datum));
+		else
+			elog(ERROR, "unable to compute hash value for '%s' data type",
+				 format_type_be(tcache->type_id));
+	}
+	PG_RETURN_UINT64(hash);
+}
+
+/*
+ * pgstrom_hll_count_trans(bytea,bigint)
+ */
+Datum
+pgstrom_hll_count_trans(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	bytea		   *hll_state;
+	uint8		   *hll_regs;
+	uint64			hll_hash;
+	uint64			nrooms;
+	uint32			index;
+	uint32			count;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	nrooms = (1UL << pgstrom_hll_register_bits);
+	if (PG_ARGISNULL(0))
+	{
+		size_t	sz = VARHDRSZ + sizeof(uint8) * nrooms;
+
+		hll_state = MemoryContextAllocZero(aggcxt, sz);
+		SET_VARSIZE(hll_state, sz);
+	}
+	else
+	{
+		hll_state = PG_GETARG_BYTEA_P(0);
+	}
+	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "NULL-input for the HLL hash-value");
+	hll_hash = (uint64)PG_GETARG_DATUM(1);
+	index = hll_hash & (nrooms - 1);
+	Assert(index < nrooms);
+	count = __builtin_ctzll(hll_hash >> pgstrom_hll_register_bits) + 1;
+	if (hll_regs[index] < count)
+		hll_regs[index] = count;
+
+	PG_RETURN_BYTEA_P(hll_state);
+}
+
+/*
+ * pgstrom_hll_count_final
+ */
+Datum
+pgstrom_hll_count_final(PG_FUNCTION_ARGS)
+{
+	bytea	   *hll_state;
+	uint8	   *hll_regs;
+	uint32		nrooms;
+	uint32		index;
+	double		divider = 0.0;
+	double		estimate;
+	static double adjustment[] = {
+		-1.0, -1.0, -1.0, -1.0,		/* invalid register bits */
+		0.673,  0.697,  0.709,  0.715,
+		0.7183, 0.7198, 0.7205, 0.7209,
+		0.7211, 0.7212, 0.7213, 0.7213,
+	};
+
+	if (!AggCheckCallContext(fcinfo, NULL))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(0))
+		PG_RETURN_INT64(0);
+
+	/*
+	 * MEMO: Hyper-Log-Log merge algorithm
+	 * https://ja.wikiqube.net/wiki/HyperLogLog
+	 */
+	Assert(pgstrom_hll_register_bits >= 4 &&
+		   pgstrom_hll_register_bits <= 15);
+	nrooms = (1U << pgstrom_hll_register_bits);
+	hll_state = PG_GETARG_BYTEA_P(0);
+	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	for (index = 0; index < nrooms; index++)
+		divider += 1.0 / (double)(1UL << hll_regs[index]);
+
+	estimate = (adjustment[pgstrom_hll_register_bits] *
+				(double)nrooms * (double)nrooms / divider);
+	PG_RETURN_INT64((uint64)estimate);
 }

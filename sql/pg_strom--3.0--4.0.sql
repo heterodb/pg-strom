@@ -15,6 +15,32 @@ CREATE FUNCTION pgstrom.shared_buffer_info()
   LANGUAGE C STRICT;
 
 ---
+--- Hyper-Log-Log COUNT(distinct) support
+---
+CREATE FUNCTION pgstrom.hll_hash(anyelement)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_hll_hash'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.hll_count_trans(bytea, bigint)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_hll_count_trans'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.hll_count_final(bytea)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_hll_count_final'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE AGGREGATE pgstrom.hll_count(bigint)
+(
+  sfunc = pgstrom.hll_count_trans,
+  stype = bytea,
+  finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+---
 --- Re-define of VARIANCE/STDDEV
 ---
 CREATE FUNCTION pgstrom.float8_combine(float8[], float8[])
