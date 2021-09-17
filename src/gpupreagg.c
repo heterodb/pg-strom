@@ -346,8 +346,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  0, false, false
 	},
 	/* COUNT(distinct KEY) - only if hyper-log-log enabled */
-	{ "count",  1, {INT4OID},
-	  "s:hll_combine", BYTEAOID,
+	{ "count",  1, {ANYOID},
+	  "s:hll_count", BYTEAOID,
 	  "s:hll_pcount", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  0, false, true
@@ -996,33 +996,38 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 };
 
 static const aggfunc_catalog_t *
-aggfunc_lookup_by_oid(Oid aggfnoid)
+aggfunc_lookup_by_oid(Oid aggfnoid, bool aggref_with_distinct)
 {
-	Form_pg_proc	proform;
+	Form_pg_proc	proc;
 	HeapTuple		htup;
 	int				i;
 
 	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfnoid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u", aggfnoid);
-	proform = (Form_pg_proc) GETSTRUCT(htup);
-
-	for (i=0; i < lengthof(aggfunc_catalog); i++)
+	proc = (Form_pg_proc) GETSTRUCT(htup);
+	if (proc->pronamespace == PG_CATALOG_NAMESPACE)
 	{
-		aggfunc_catalog_t  *catalog = &aggfunc_catalog[i];
-
-		if (strcmp(catalog->aggfn_name, NameStr(proform->proname)) == 0 &&
-			catalog->aggfn_nargs == proform->pronargs &&
-			memcmp(catalog->aggfn_argtypes,
-				   proform->proargtypes.values,
-				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
+		for (i=0; i < lengthof(aggfunc_catalog); i++)
 		{
-			/* check status of device NUMERIC type support */
-			if (!enable_numeric_aggfuncs && catalog->numeric_aware)
-				catalog = NULL;
+			aggfunc_catalog_t  *catalog = &aggfunc_catalog[i];
 
-			ReleaseSysCache(htup);
-			return catalog;
+			if (strcmp(catalog->aggfn_name, NameStr(proc->proname)) == 0 &&
+				catalog->aggfn_nargs == proc->pronargs &&
+				memcmp(catalog->aggfn_argtypes,
+					   proc->proargtypes.values,
+					   sizeof(Oid) * catalog->aggfn_nargs) == 0)
+			{
+				/* Is NUMERIC with GpuPreAgg acceptable? */
+				if (catalog->numeric_aware && !enable_numeric_aggfuncs)
+					continue;
+				/* Check whether DISTINCT qualifier is attached */
+				if (catalog->distinct_aggfunc ^ aggref_with_distinct)
+					continue;
+				/* all ok */
+				ReleaseSysCache(htup);
+				return catalog;
+			}
 		}
 	}
 	ReleaseSysCache(htup);
@@ -1933,6 +1938,11 @@ is_altfunc_expression(Node *node, int *p_extra_sz)
 		{
 			retval = true;
 		}
+		else if (strcmp(NameStr(form_proc->proname), "hll_hash") == 0)
+		{
+			extra_sz = MAXALIGN(VARHDRSZ + (1UL << pgstrom_hll_register_bits));
+			retval = true;
+		}
 	}
 	ReleaseSysCache(tuple);
 
@@ -2228,6 +2238,62 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
 }
 
 /*
+ * make_altfunc_hll_hash - Hyper-Log-Log Hash function
+ */
+static FuncExpr *
+make_altfunc_hll_hash(Aggref *aggref)
+{
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	TargetEntry	   *tle;
+	Oid				type_oid;
+	oidvector	   *func_argtypes;
+	HeapTuple		tuple;
+	Form_pg_proc	proc;
+	FuncExpr	   *func = NULL;
+
+	/*
+	 * lookup suitable pgstrom.hll_hash() function, and checks
+	 * whether it is actually device executable.
+	 */
+	Assert(list_length(aggref->args) == 1);
+	tle = linitial(aggref->args);
+	Assert(IsA(tle, TargetEntry));
+	type_oid = exprType((Node *)tle->expr);
+	func_argtypes = buildoidvector(&type_oid, 1);
+
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum("hll_hash"),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+	{
+		elog(DEBUG2, "no such function: %s",
+			 funcname_signature_string("hll_hash", 1, NIL, &type_oid));
+		return NULL;
+	}
+	proc = (Form_pg_proc)GETSTRUCT(tuple);
+	if (pgstrom_devfunc_lookup(PgProcTupleGetOid(tuple),
+							   proc->prorettype,
+							   list_make1(tle->expr),
+							   InvalidOid))
+	{
+		func = makeFuncExpr(PgProcTupleGetOid(tuple),
+							proc->prorettype,
+							list_make1(tle->expr),
+							InvalidOid,
+							InvalidOid,
+							COERCE_EXPLICIT_CALL);
+	}
+	else
+	{
+		elog(DEBUG2, "no such device function: %s",
+			 funcname_signature_string("hll_hash", 1, NIL, &type_oid));
+	}
+	ReleaseSysCache(tuple);
+	return func;
+}
+
+/*
  * make_alternative_aggref
  *
  * It makes an alternative final aggregate function towards the supplied
@@ -2255,9 +2321,9 @@ make_alternative_aggref(PlannerInfo *root,
 	Form_pg_proc proc_form;
 	Form_pg_aggregate agg_form;
 
-	if (aggref->aggorder || aggref->aggdistinct)
+	if (aggref->aggorder)
 	{
-		elog(DEBUG2, "Aggregate with DISTINCT/ORDER BY is not supported: %s",
+		elog(DEBUG2, "Aggregate with ORDER BY is not supported: %s",
 			 nodeToString(aggref));
 		return NULL;
 	}
@@ -2271,7 +2337,8 @@ make_alternative_aggref(PlannerInfo *root,
 	/*
 	 * Lookup properties of aggregate function
 	 */
-	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid,
+									  aggref->aggdistinct != NIL);
 	if (!aggfn_cat)
 	{
 		elog(DEBUG2, "Aggregate function is not device executable: %s",
@@ -2325,10 +2392,17 @@ make_alternative_aggref(PlannerInfo *root,
 			case ALTFUNC_EXPR_PCOV_XY:  /* PCOV_XY(X,Y) */
 				pfunc = make_altfunc_pcov_xy(aggref, "pcov_xy");
 				break;
+			case ALTFUNC_EXPR_HLL_HASH:	/* HLL_HASH(X) */
+				pfunc = make_altfunc_hll_hash(aggref);
+				break;
 			default:
 				elog(ERROR, "unknown alternative function code: %d", action);
 				break;
 		}
+		/* actually supported? */
+		if (!pfunc)
+			return NULL;
+		
 		/* device executable? */
 		if (pfunc->args)
 		{
@@ -3082,6 +3156,7 @@ codegen_projection_partial_funcion(FuncExpr *f, codegen_context *context)
 	Form_pg_proc	proc_form;
 	const char	   *proc_name;
 	devtype_info   *dtype;
+	devfunc_info   *dfunc;
 	Expr		   *expr;
 
 	Assert(IsA(f, FuncExpr));
@@ -3188,6 +3263,20 @@ codegen_projection_partial_funcion(FuncExpr *f, codegen_context *context)
 
 		Assert(exprType((Node *)filter) == BOOLOID);
 		expr = make_expr_conditional(expr, filter, true);
+	}
+	else if (strcmp(proc_name, "hll_hash") == 0)
+	{
+		Assert(list_length(f->args) == 1);
+		dfunc = pgstrom_devfunc_lookup(f->funcid,
+									   f->funcresulttype,
+									   f->args,
+									   f->inputcollid);
+		if (!dfunc)
+			elog(ERROR, "device function lookup failed: %s",
+				 format_procedure(f->funcid));
+		pgstrom_devfunc_track(context, dfunc);
+
+		expr = (Expr *) f;
 	}
 	else
 	{
@@ -3875,6 +3964,15 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 			 strcmp(func_name, "pcov_y2") == 0 ||
 			 strcmp(func_name, "pcov_xy") == 0)
 		aggcalc_ops = "add";
+	else if (strcmp(func_name, "hll_hash") == 0)
+	{
+		pfree(func_name);
+		/* HLL registers are always bytea */
+		snprintf(sbuffer, sizeof(sbuffer),
+				 "aggcalc_%s_hll_registers",
+				 aggcalc_mode);
+		return sbuffer;
+	}
 	else
 		elog(ERROR, "Bug? unexpected partial function expression: %s",
 			 nodeToString(f));
@@ -4358,6 +4456,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_release_task    = gpupreagg_release_task;
 	gpas->num_group_keys		= gpa_info->num_group_keys;
 	gpas->num_accum_values		= gpa_info->num_accum_values;
+	gpas->accum_extra_bufsz		= gpa_info->accum_extra_bufsz;
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))

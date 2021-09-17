@@ -2221,6 +2221,10 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ POSTGIS3, "geometry st_expand(geometry,float8)",
 	  20, "gC/f:st_expand",
 	  vlbuf_estimate__st_expand },
+	/*
+	 * GpuPreAgg COUNT(distinct KEY) support
+	 */
+	{ PGSTROM, "int8 hll_hash(int4)",     1, "p/f:hll_hash_int4" },
 };
 
 #undef PGSTROM

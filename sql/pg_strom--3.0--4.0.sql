@@ -17,9 +17,9 @@ CREATE FUNCTION pgstrom.shared_buffer_info()
 ---
 --- Hyper-Log-Log COUNT(distinct) support
 ---
-CREATE FUNCTION pgstrom.hll_hash(anyelement)
+CREATE FUNCTION pgstrom.hll_hash(int4)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_hll_hash'
+  AS 'MODULE_PATHNAME','pgstrom_hll_hash_int4'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_pcount(bigint)

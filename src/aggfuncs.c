@@ -57,7 +57,7 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_slope);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxx);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxy);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
-PG_FUNCTION_INFO_V1(pgstrom_hll_hash);
+PG_FUNCTION_INFO_V1(pgstrom_hll_hash_int4);
 PG_FUNCTION_INFO_V1(pgstrom_hll_pcount);
 PG_FUNCTION_INFO_V1(pgstrom_hll_combined);
 PG_FUNCTION_INFO_V1(pgstrom_hll_hash_pcount);
@@ -1055,36 +1055,16 @@ __pgstrom_hll_siphash_value(const void *ptr, const size_t len)
 }
 
 /*
- * pgstrom_hll_hash(any)
+ * pgstrom_hll_hash_int4
  */
 Datum
-pgstrom_hll_hash(PG_FUNCTION_ARGS)
+pgstrom_hll_hash_int4(PG_FUNCTION_ARGS)
 {
-	TypeCacheEntry *tcache = fcinfo->flinfo->fn_extra;
 	Datum		datum = PG_GETARG_DATUM(0);
 	uint64		hash;
 
-	if (!tcache)
-	{
-		Oid		type_oid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	hash = __pgstrom_hll_siphash_value(&datum, sizeof(int32));
 
-		if (!OidIsValid(type_oid))
-			elog(ERROR, "could not determine data type of hll_hash() input");
-		tcache = lookup_type_cache(type_oid, 0);
-
-		fcinfo->flinfo->fn_extra = tcache;
-	}
-	if (tcache->typbyval)
-		hash = __pgstrom_hll_siphash_value(&datum, tcache->typlen);
-	else if (tcache->typlen > 0)
-		hash = __pgstrom_hll_siphash_value(DatumGetPointer(datum),
-										   tcache->typlen);
-	else if (tcache->typlen == -1)
-		hash = __pgstrom_hll_siphash_value(VARDATA_ANY(datum),
-										   VARSIZE_ANY(datum));
-	else
-		elog(ERROR, "unable to compute hash value for '%s' data type",
-			 format_type_be(tcache->type_id));
 	PG_RETURN_UINT64(hash);
 }
 
