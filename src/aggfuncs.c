@@ -58,7 +58,9 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxx);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxy);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
 PG_FUNCTION_INFO_V1(pgstrom_hll_hash);
-PG_FUNCTION_INFO_V1(pgstrom_hll_count_trans);
+PG_FUNCTION_INFO_V1(pgstrom_hll_pcount);
+PG_FUNCTION_INFO_V1(pgstrom_hll_combined);
+PG_FUNCTION_INFO_V1(pgstrom_hll_hash_pcount);
 PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
 
 /* utility to reference numeric[] */
@@ -1059,7 +1061,8 @@ Datum
 pgstrom_hll_hash(PG_FUNCTION_ARGS)
 {
 	TypeCacheEntry *tcache = fcinfo->flinfo->fn_extra;
-	uint64			hash;
+	Datum		datum = PG_GETARG_DATUM(0);
+	uint64		hash;
 
 	if (!tcache)
 	{
@@ -1071,13 +1074,143 @@ pgstrom_hll_hash(PG_FUNCTION_ARGS)
 
 		fcinfo->flinfo->fn_extra = tcache;
 	}
+	if (tcache->typbyval)
+		hash = __pgstrom_hll_siphash_value(&datum, tcache->typlen);
+	else if (tcache->typlen > 0)
+		hash = __pgstrom_hll_siphash_value(DatumGetPointer(datum),
+										   tcache->typlen);
+	else if (tcache->typlen == -1)
+		hash = __pgstrom_hll_siphash_value(VARDATA_ANY(datum),
+										   VARSIZE_ANY(datum));
+	else
+		elog(ERROR, "unable to compute hash value for '%s' data type",
+			 format_type_be(tcache->type_id));
+	PG_RETURN_UINT64(hash);
+}
 
+/*
+ * pgstrom_hll_pcount
+ */
+Datum
+pgstrom_hll_pcount(PG_FUNCTION_ARGS)
+{
+	uint64		nrooms = (1UL << pgstrom_hll_register_bits);
+	uint64		hll_hash = DatumGetUInt64(PG_GETARG_DATUM(0));
+	bytea	   *hll_state;
+	uint8	   *hll_regs;
+	uint32		count;
+	uint32		index;
+
+	hll_state = palloc0(VARHDRSZ + sizeof(uint8) * nrooms);
+	SET_VARSIZE(hll_state, VARHDRSZ + sizeof(uint8) * nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	index = hll_hash & (nrooms - 1);
+	Assert(index < nrooms);
+	count = __builtin_ctzll(hll_hash >> pgstrom_hll_register_bits) + 1;
+	if (hll_regs[index] < count)
+		hll_regs[index] = count;
+
+	PG_RETURN_BYTEA_P(hll_state);
+}
+
+/*
+ * pgstrom_hll_combined
+ */
+Datum
+pgstrom_hll_combined(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	bytea		   *hll_state = NULL;
+	uint8		   *hll_regs;
+	bytea		   *new_state;
+	uint8		   *new_regs;
+	uint32			nrooms;
+	uint32			index;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	nrooms = (1UL << pgstrom_hll_register_bits);
 	if (PG_ARGISNULL(0))
-		hash = __pgstrom_hll_siphash_value(NULL, 0);
+	{
+		size_t		len = sizeof(uint8) * nrooms;
+
+		if (PG_ARGISNULL(1))
+			PG_RETURN_NULL();
+		new_state = PG_GETARG_BYTEA_P(1);
+		if (VARSIZE_ANY_EXHDR(new_state) != len)
+			elog(ERROR, "invalid partial HLL state");
+		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + len);
+		SET_VARSIZE(hll_state, VARHDRSZ + len);
+		memcpy(VARDATA_ANY(hll_state), VARDATA_ANY(new_state), len);
+	}
 	else
 	{
-		Datum		datum = PG_GETARG_DATUM(0);
+		hll_state = PG_GETARG_BYTEA_P(0);
+		if (!PG_ARGISNULL(1))
+		{
+			new_state = PG_GETARG_BYTEA_P(1);
+			if (VARSIZE_ANY_EXHDR(hll_state) != sizeof(uint8) * nrooms ||
+				VARSIZE_ANY_EXHDR(new_state) != sizeof(uint8) * nrooms)
+				elog(ERROR, "invalid HLL state");
+			hll_regs = (uint8 *)VARDATA_ANY(hll_state);
+			new_regs = (uint8 *)VARDATA_ANY(new_state);
+			for (index=0; index < nrooms; index++)
+			{
+				if (hll_regs[index] < new_regs[index])
+					hll_regs[index] = new_regs[index];
+			}
+		}
+	}
+	PG_RETURN_POINTER(hll_state);
+}
 
+/*
+ * pgstrom_hll_hash_pcount
+ */
+Datum
+pgstrom_hll_hash_pcount(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	bytea		   *hll_state;
+	uint8		   *hll_regs;
+	uint64			nrooms;
+	uint32			index;
+	uint32			count;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	nrooms = (1UL << pgstrom_hll_register_bits);
+	if (PG_ARGISNULL(0))
+	{
+		if (PG_ARGISNULL(1))
+			PG_RETURN_NULL();
+		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + sizeof(uint8) * nrooms);
+		SET_VARSIZE(hll_state, VARHDRSZ + sizeof(uint8) * nrooms);
+	}
+	else
+	{
+		hll_state = PG_GETARG_BYTEA_P(0);
+	}
+	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	if (!PG_ARGISNULL(1))
+	{
+		TypeCacheEntry *tcache = fcinfo->flinfo->fn_extra;
+		Datum		datum = PG_GETARG_DATUM(1);
+		uint64		hash;
+
+		if (!tcache)
+		{
+			Oid		type_oid = get_fn_expr_argtype(fcinfo->flinfo, 1);
+
+			if (!OidIsValid(type_oid))
+				elog(ERROR, "could not determine data type of hll_hash_pcount()");
+			tcache = lookup_type_cache(type_oid, 0);
+
+			fcinfo->flinfo->fn_extra = tcache;
+		}
 		if (tcache->typbyval)
 			hash = __pgstrom_hll_siphash_value(&datum, tcache->typlen);
 		else if (tcache->typlen > 0)
@@ -1089,50 +1222,13 @@ pgstrom_hll_hash(PG_FUNCTION_ARGS)
 		else
 			elog(ERROR, "unable to compute hash value for '%s' data type",
 				 format_type_be(tcache->type_id));
+
+		index = hash & (nrooms - 1);
+		Assert(index < nrooms);
+		count = __builtin_ctzll(hash >> pgstrom_hll_register_bits) + 1;
+		if (hll_regs[index] < count)
+			hll_regs[index] = count;
 	}
-	PG_RETURN_UINT64(hash);
-}
-
-/*
- * pgstrom_hll_count_trans(bytea,bigint)
- */
-Datum
-pgstrom_hll_count_trans(PG_FUNCTION_ARGS)
-{
-	MemoryContext	aggcxt;
-	bytea		   *hll_state;
-	uint8		   *hll_regs;
-	uint64			hll_hash;
-	uint64			nrooms;
-	uint32			index;
-	uint32			count;
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-	nrooms = (1UL << pgstrom_hll_register_bits);
-	if (PG_ARGISNULL(0))
-	{
-		size_t	sz = VARHDRSZ + sizeof(uint8) * nrooms;
-
-		hll_state = MemoryContextAllocZero(aggcxt, sz);
-		SET_VARSIZE(hll_state, sz);
-	}
-	else
-	{
-		hll_state = PG_GETARG_BYTEA_P(0);
-	}
-	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
-	hll_regs = (uint8 *)VARDATA(hll_state);
-
-	if (PG_ARGISNULL(1))
-		elog(ERROR, "NULL-input for the HLL hash-value");
-	hll_hash = (uint64)PG_GETARG_DATUM(1);
-	index = hll_hash & (nrooms - 1);
-	Assert(index < nrooms);
-	count = __builtin_ctzll(hll_hash >> pgstrom_hll_register_bits) + 1;
-	if (hll_regs[index] < count)
-		hll_regs[index] = count;
-
 	PG_RETURN_BYTEA_P(hll_state);
 }
 
@@ -1147,19 +1243,13 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 	uint32		nrooms;
 	uint32		index;
 	double		divider = 0.0;
+	double		weight;
 	double		estimate;
-	static double adjustment[] = {
-		-1.0, -1.0, -1.0, -1.0,		/* invalid register bits */
-		0.673,  0.697,  0.709,  0.715,
-		0.7183, 0.7198, 0.7205, 0.7209,
-		0.7211, 0.7212, 0.7213, 0.7213,
-	};
 
 	if (!AggCheckCallContext(fcinfo, NULL))
 		elog(ERROR, "aggregate function called in non-aggregate context");
 	if (PG_ARGISNULL(0))
 		PG_RETURN_INT64(0);
-
 	/*
 	 * MEMO: Hyper-Log-Log merge algorithm
 	 * https://ja.wikiqube.net/wiki/HyperLogLog
@@ -1174,7 +1264,17 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 	for (index = 0; index < nrooms; index++)
 		divider += 1.0 / (double)(1UL << hll_regs[index]);
 
-	estimate = (adjustment[pgstrom_hll_register_bits] *
-				(double)nrooms * (double)nrooms / divider);
-	PG_RETURN_INT64((uint64)estimate);
+	if (pgstrom_hll_register_bits <= 6)
+	{
+		static double	__weights[] = {
+			-1.0, -1.0, -1.0, -1.0, 0.673, 0.697, 0.709
+		};
+		weight = __weights[pgstrom_hll_register_bits];
+	}
+	else
+	{
+		weight = 0.7213 / (1.0 + 1.079 / (double)nrooms);
+	}
+	estimate = (weight * (double)nrooms * (double)nrooms) / divider;
+	PG_RETURN_INT64((int64)estimate);
 }

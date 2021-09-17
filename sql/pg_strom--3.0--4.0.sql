@@ -20,11 +20,21 @@ CREATE FUNCTION pgstrom.shared_buffer_info()
 CREATE FUNCTION pgstrom.hll_hash(anyelement)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_hll_hash'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.hll_pcount(bigint)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_hll_pcount'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.hll_combined(bytea, bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_hll_combined'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_trans(bytea, bigint)
+CREATE FUNCTION pgstrom.hll_hash_pcount(bytea, anyelement)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_trans'
+  AS 'MODULE_PATHNAME','pgstrom_hll_hash_pcount'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_count_final(bytea)
@@ -32,9 +42,17 @@ CREATE FUNCTION pgstrom.hll_count_final(bytea)
   AS 'MODULE_PATHNAME','pgstrom_hll_count_final'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE AGGREGATE pgstrom.hll_count(bigint)
+CREATE AGGREGATE pgstrom.hll_count(bytea)
 (
-  sfunc = pgstrom.hll_count_trans,
+  sfunc = pgstrom.hll_combined,
+  stype = bytea,
+  finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_count(anyelement)
+(
+  sfunc = pgstrom.hll_hash_pcount,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
   parallel = safe
