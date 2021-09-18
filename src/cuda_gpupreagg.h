@@ -29,19 +29,14 @@ struct kern_gpupreagg
 	/* -- runtime statistics -- */
 	cl_uint			nitems_real;		/* out: # of outer input rows */
 	cl_uint			nitems_filtered;	/* out: # of removed rows by quals */
-	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
 	cl_uint			extra_usage;		/* out: size of new allocation */
-	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
-	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
 	/* -- debug counter -- */
 	cl_ulong		tv_stat_debug1;		/* out: debug counter 1 */
 	cl_ulong		tv_stat_debug2;		/* out: debug counter 2 */
 	cl_ulong		tv_stat_debug3;		/* out: debug counter 3 */
 	cl_ulong		tv_stat_debug4;		/* out: debug counter 4 */
-	/* -- other hashing parameters -- */
-	cl_uint			key_dist_salt;			/* hashkey distribution salt */
-	cl_uint			hash_size;				/* size of global hash-slots */
+	/* -- kernel parameters buffer -- */
 	kern_parambuf	kparams;
 	/* <-- gpupreaggSuspendContext[], if any --> */
 	/* <-- gpupreaggRowInvalidationMap. if any --> */

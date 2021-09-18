@@ -1053,13 +1053,11 @@ cost_gpupreagg(PlannerInfo *root,
 			   cl_long index_nblocks)
 {
 	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	double		ntuples_out;
 	Cost		startup_cost;
 	Cost		run_cost;
 	QualCost	qual_cost;
 	int			num_group_keys = 0;
 	Size		extra_sz = 0;
-	cl_int		key_dist_salt;
 	cl_int		index;
 	ListCell   *lc;
 
@@ -1154,32 +1152,6 @@ cost_gpupreagg(PlannerInfo *root,
 	}
 	if (num_group_keys == 0)
 		num_groups = 1.0;	/* AGG_PLAIN */
-	/*
-	 * NOTE: In case when the number of groups are too small, it leads too
-	 * many atomic contention on the device. So, we add a small salt to
-	 * distribute grouping keys than the actual number of keys.
-	 * It shall be adjusted on run-time, so configuration below is just
-	 * a baseline parameter.
-	 */
-	if (num_groups < (devBaselineMaxThreadsPerBlock / 5))
-	{
-		key_dist_salt = (devBaselineMaxThreadsPerBlock / (5 * num_groups));
-		key_dist_salt = Max(key_dist_salt, 1);
-	}
-	else
-		key_dist_salt = 1;
-	ntuples_out = num_groups * (double)key_dist_salt;
-#if 0
-	//FIXME
-	ncols = list_length(target_device->exprs);
-	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
-	kds_length = (KDS_CALCULATE_SLOT_LENGTH(ncols, nrooms) +
-				  STROMALIGN(extra_sz) * nrooms);
-	// unified memory eliminates limitation of the device memory
-	// however, some penalty is needed for large buffer
-	if (kds_length > gpuMemMaxAllocSize())
-		return false;	/* expected buffer size is too large */
-#endif
 
 	/* Cost estimation for the initial projection */
 	cost_qual_eval(&qual_cost, target_device->exprs, root);
@@ -1194,12 +1166,12 @@ cost_gpupreagg(PlannerInfo *root,
 					 target_device->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for host side functions */
 	startup_cost += target_partial->cost.startup;
-	run_cost += target_partial->cost.per_tuple * ntuples_out;
+	run_cost += target_partial->cost.per_tuple * num_groups;
 
 	/* Cost estimation to fetch results */
-	run_cost += cpu_tuple_cost * ntuples_out;
+	run_cost += cpu_tuple_cost * num_groups;
 
-	cpath->path.rows			= ntuples_out;
+	cpath->path.rows			= num_groups;
 	cpath->path.startup_cost	= startup_cost;
 	cpath->path.total_cost		= startup_cost + run_cost;
 
@@ -5081,7 +5053,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	}
 	/* if any grouping keys, determine the reduction policy later */
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
-	gpreagg->kern.hash_size = kds_slot_nrooms; //deprecated?
 	gpreagg->kern.suspend_size = suspend_sz;
 	/* kern_parambuf */
 	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
