@@ -1522,8 +1522,12 @@ typedef struct
  * device functions in cuda_common.fatbin
  */
 #ifdef __CUDACC__
+/* lightweight hash */
 DEVICE_FUNCTION(cl_uint)
 pg_hash_any(const cl_uchar *k, cl_int keylen);
+/* little bit heavy, but more randomized SipHash */
+DEVICE_FUNCTION(cl_ulong)
+pg_siphash_any(const unsigned char *buf, const size_t len);
 #endif /* __CUDACC__ */
 
 /*

@@ -39,7 +39,6 @@ struct kern_gpupreagg
 	/* -- kernel parameters buffer -- */
 	kern_parambuf	kparams;
 	/* <-- gpupreaggSuspendContext[], if any --> */
-	/* <-- gpupreaggRowInvalidationMap. if any --> */
 };
 typedef struct kern_gpupreagg	kern_gpupreagg;
 
@@ -179,6 +178,7 @@ gpupreagg_keymatch(kern_context *kcxt,
 extern __device__ cl_int		GPUPREAGG_NUM_ACCUM_VALUES;
 extern __device__ cl_int		GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 extern __device__ cl_int		GPUPREAGG_LOCAL_HASH_NROOMS;
+extern __device__ cl_int		GPUPREAGG_HLL_REGISTER_BITS;
 extern __device__ cl_short		GPUPREAGG_ACCUM_MAP_LOCAL[];
 extern __device__ cl_short		GPUPREAGG_ACCUM_MAP_GLOBAL[];
 extern __device__ cl_bool		GPUPREAGG_ATTR_IS_ACCUM_VALUES[];
@@ -189,10 +189,15 @@ gpupreagg_init_accum(cl_char  *dst_dclass,
 					 cl_short *dst_attmap);
 DEVICE_FUNCTION(void)
 gpupreagg_init_local_slot(cl_char  *dst_dclass,
-						  Datum    *dst_values);
+						  Datum    *dst_values,
+						  char     *dst_extras);
 DEVICE_FUNCTION(void)
-gpupreagg_init_global_slot(cl_char  *dst_dclass,
-						   Datum    *dst_values);
+gpupreagg_init_global_slot(cl_char *dst_dclass,
+						   Datum   *dst_values);
+DEVICE_FUNCTION(void)
+gpupreagg_init_final_slot(cl_char  *dst_dclass,
+						  Datum    *dst_values,
+						  char     *dst_extras);
 
 /* merge operation by shuffle */
 DEVICE_FUNCTION(void)
@@ -272,10 +277,9 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
 							kern_data_store *kds_final,		/* global out */
-							cl_char *l_dclass,		/* __shared__ */
-							Datum   *l_values,		/* __shared__ */
 							cl_char *p_dclass,		/* __private__ */
-							Datum   *p_values);		/* __private__ */
+							Datum   *p_values,		/* __private__ */
+							char    *p_extras);		/* __private__ */
 DEVICE_FUNCTION(void)
 gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_gpupreagg *kgpreagg,		/* in/out */
@@ -285,7 +289,8 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_global_hashslot *f_hash,	/* shared out */
 							preagg_hash_item *l_hitems,		/* __shared__ */
 							cl_char    *l_dclass,			/* __shared__ */
-							Datum      *l_values);			/* __shared__ */
+							Datum      *l_values,			/* __shared__ */
+							char       *l_extras);			/* __shared__ */
 #endif /* __CUDACC__ */
 
 /* ----------------------------------------------------------------
@@ -774,6 +779,27 @@ AGGCALC_SHUFFLE_TEMPLATE(max_double)
 AGGCALC_SHUFFLE_TEMPLATE(add_double)
 #undef AGGCALC_SHUFFLE_TEMPLATE
 
+/*
+ * aggcalc operations for hyper-log-log
+ */
+DEVICE_FUNCTION(void)
+aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
+						Datum   *p_accum_datum,
+						char    *extra_buffer);
+DEVICE_FUNCTION(void)
+aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
+						   Datum   *p_accum_datum,
+						   int      lane_id);
+DEVICE_FUNCTION(void)
+aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum);
+DEVICE_FUNCTION(void)
+aggcalc_atomic_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum);
 #endif	/* __CUDACC__ */
 
 #ifdef __CUDACC_RTC__
@@ -845,11 +871,18 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
-	__shared__ cl_char	l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES * MAXWARPS_PER_BLOCK];
-	__shared__ Datum	l_values[__GPUPREAGG_NUM_ACCUM_VALUES * MAXWARPS_PER_BLOCK];
-	cl_char				p_dclass[__GPUPREAGG_NUM_ACCUM_VALUES];
-	Datum				p_values[__GPUPREAGG_NUM_ACCUM_VALUES];
-
+#if __GPUPREAGG_NUM_ACCUM_VALUES > 0
+	cl_char		nogroup_p_dclass[__GPUPREAGG_NUM_ACCUM_VALUES];
+	Datum		nogroup_p_values[__GPUPREAGG_NUM_ACCUM_VALUES];
+#else
+#define nogroup_p_dclass	NULL
+#define nogroup_p_values	NULL
+#endif
+#if __GPUPREAGG_ACCUM_EXTRA_BUFSZ > 0
+	char		nogroup_p_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ];
+#else
+#define nogroup_p_extras	NULL
+#endif
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	/*
 	 * nogroup reduction has no grouping-key, so GPUPREAGG_NUM_ACCUM_VALUES has
@@ -860,25 +893,11 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 								kgjoin_errorbuf,
 								kds_slot,
 								kds_final,
-								l_dclass,
-								l_values,
-								p_dclass,
-								p_values);
+								nogroup_p_dclass,
+								nogroup_p_values,
+								nogroup_p_extras);
 	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
-
-/*
- * groupby reduction allocates 44kB for local hash area.
- * number of hash items depends on the number of accum values.
- * if number of groups exceeds the GPUPREAGG_LOCAL_HASH_NROOMS,
- * groupby reduction logic goes into direct global --> global
- * reduction.
- */
-#define __GPUPREAGG_LOCAL_HASH_NROOMS						\
-	((44 * 1024 - sizeof(preagg_local_hashtable))			\
-	 / (sizeof(preagg_hash_item) +							\
-		sizeof(cl_char) * __GPUPREAGG_NUM_ACCUM_VALUES +	\
-		sizeof(Datum)   * __GPUPREAGG_NUM_ACCUM_VALUES))
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
@@ -889,12 +908,25 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
-	__shared__ preagg_hash_item l_hitems[__GPUPREAGG_LOCAL_HASH_NROOMS];
-	__shared__ cl_char	l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES *
-								 __GPUPREAGG_LOCAL_HASH_NROOMS];
-	__shared__ Datum	l_values[__GPUPREAGG_NUM_ACCUM_VALUES *
-								 __GPUPREAGG_LOCAL_HASH_NROOMS];
-
+#if __GPUPREAGG_LOCAL_HASH_NROOMS > 0
+	__shared__ preagg_hash_item groupby_l_hitems[__GPUPREAGG_LOCAL_HASH_NROOMS];
+#if __GPUPREAGG_NUM_ACCUM_VALUES > 0
+	__shared__ cl_char	groupby_l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+	__shared__ Datum	groupby_l_values[__GPUPREAGG_NUM_ACCUM_VALUES *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+#else
+#define groupby_l_dclass	NULL
+#define groupby_l_values	NULL
+#endif
+	__shared__ char		groupby_l_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+#else
+#define groupby_l_hitems	NULL
+#define groupby_l_dclass	NULL
+#define groupby_l_values	NULL
+#define groupby_l_extras	NULL
+#endif
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 
 	gpupreagg_groupby_reduction(&u.kcxt,
@@ -903,9 +935,10 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 								kds_slot,
 								kds_final,
 								f_hash,
-								l_hitems,
-								l_dclass,
-								l_values);
+								groupby_l_hitems,
+								groupby_l_dclass,
+								groupby_l_values,
+								groupby_l_extras);
 	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
@@ -913,6 +946,7 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 __device__ cl_int	GPUPREAGG_NUM_ACCUM_VALUES  = __GPUPREAGG_NUM_ACCUM_VALUES;
 __device__ cl_int	GPUPREAGG_ACCUM_EXTRA_BUFSZ = __GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 __device__ cl_int	GPUPREAGG_LOCAL_HASH_NROOMS = __GPUPREAGG_LOCAL_HASH_NROOMS;
+__device__ cl_int	GPUPREAGG_HLL_REGISTER_BITS = __GPUPREAGG_HLL_REGISTER_BITS;
 
 #endif /* __CUDACC_RTC__ */
 #endif /* CUDA_GPUPREAGG_H */

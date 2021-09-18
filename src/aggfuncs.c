@@ -949,7 +949,6 @@ pgstrom_float8_regr_sxy(PG_FUNCTION_ARGS)
  * ----------------------------------------------------------------
  */
 
-#include "common/md5.h"
 /*
  * Hash-function based on Sip-Hash
  *

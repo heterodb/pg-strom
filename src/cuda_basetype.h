@@ -895,6 +895,27 @@ STROMCL_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, cl_double)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, cl_double)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, cl_double)
 
+/*
+ * Highly-randomized hash-function for hyper-log-log
+ */
+#ifdef __CUDACC__
+#define STROMCL_SIMPLE_HLL_HASH_TEMPLATE(NAME)							\
+	DEVICE_INLINE(pg_int8_t)											\
+	pgfn_hll_hash_##NAME(kern_context *kcxt, pg_##NAME##_t arg1)		\
+	{																	\
+		pg_int8_t	result;												\
+																		\
+		result.isnull = arg1.isnull;									\
+		if (!result.isnull)												\
+			result.value = pg_siphash_any((unsigned char *)&arg1.value,	\
+										  sizeof(arg1.value));			\
+		return result;													\
+	}
+STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int2)
+STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int4)
+STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int8)
+#endif	/* __CUDACC__ */
+
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
 #define PG_BYTEA_TYPE_DEFINED
