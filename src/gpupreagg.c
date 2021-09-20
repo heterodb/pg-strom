@@ -2876,7 +2876,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpupreagg_scan_methods;
 	cscan->custom_scan_tlist = build_custom_scan_tlist(root,
-													   target_device,
+													   best_path->path.pathtarget,
 													   outer_scanrelid,
 													   outer_tlist);
 	/*
@@ -4561,8 +4561,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 						  part_tupdesc,
 						  &TTSOpsVirtual);
 	ExecAssignScanProjectionInfoWithVarno(&gpas->gts.css.ss, INDEX_VAR);
-	elog(INFO, "plan_tlist => %s", nodeToString(gpas->gts.css.ss.ps.plan->targetlist));
-	gpas->gts.css.ss.ps.ps_ProjInfo = NULL;
 
 	/* Template of kds_slot */
 	length = KDS_calculateHeadSize(prep_tupdesc);
