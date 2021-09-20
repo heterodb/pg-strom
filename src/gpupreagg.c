@@ -3583,7 +3583,9 @@ setup_expressions:
 				"\n"
 				"  /* initial attribute %d (%s) */\n"
 				"  temp.%s_v = %s;\n"
-				"  if (!temp.%s_v.isnull)\n"
+				"  if (temp.%s_v.isnull)\n"
+				"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
+				"  else\n"
 				"    pg_datum_store(kcxt, temp.%s_v,\n"
 				"                   dst_dclass[%d],\n"
 				"                   dst_values[%d]);\n",
@@ -3591,6 +3593,7 @@ setup_expressions:
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)expr, context),
 				dtype->type_name,
+				tle->resno-1,
 				dtype->type_name,
 				tle->resno-1,
 				tle->resno-1);
@@ -3625,7 +3628,6 @@ setup_expressions:
 		"                         Datum   *dst_values)\n"
 		"{\n"
 		"%s%s\n"
-		"  gpupreagg_init_global_slot(dst_dclass, dst_values);\n"
 		"%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
@@ -3637,7 +3639,6 @@ setup_expressions:
 		"                          Datum   *dst_values)\n"
 		"{\n"
 		"%s%s\n"
-		"  gpupreagg_init_global_slot(dst_dclass, dst_values);\n"
 		"%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
@@ -3649,7 +3650,6 @@ setup_expressions:
 		"                           Datum   *dst_values)\n"
 		"{\n"
 		"%s%s\n"
-		"  gpupreagg_init_global_slot(dst_dclass, dst_values);\n"
 		"%s"
 		"}\n\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3661,7 +3661,6 @@ setup_expressions:
 		"                            Datum   *dst_values)\n"
 		"{\n"
 		"%s%s\n"
-		"  gpupreagg_init_global_slot(dst_dclass, dst_values);\n"
 		"%s"
 		"}\n\n",
 		decl.data, context->decl_temp.data,
@@ -4016,7 +4015,6 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 							int *p_accum_extra_bufsz)
 {
 	StringInfoData fbuf;
-	StringInfoData gbuf;
 	StringInfoData lbuf;
 	ListCell   *lc;
 	int			count1 = 0;
@@ -4024,7 +4022,6 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 	int			extra_total = 0;
 
 	initStringInfo(&fbuf);
-	initStringInfo(&gbuf);
 	initStringInfo(&lbuf);
 
 	foreach (lc, tlist_part)
@@ -4043,11 +4040,6 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 				"  aggcalc_init_null(&dst_dclass[%d], &dst_values[%d]);\n",
 				count1 + count2,
 				count1 + count2);
-			appendStringInfo(
-				&gbuf,
-				"  aggcalc_init_null(&dst_dclass[%d], &dst_values[%d]);\n",
-				count1 + count2,
-				count1 + count2);
 			count2++;
 		}
 		else if (extra_sz == 0)
@@ -4055,12 +4047,6 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 			label = gpupreagg_codegen_common_calc(tle, context, "init");
 			appendStringInfo(
 				&fbuf,
-				"  %s(&dst_dclass[%d], &dst_values[%d]);\n",
-				label,
-				count1 + count2,
-				count1 + count2);
-			appendStringInfo(
-				&gbuf,
 				"  %s(&dst_dclass[%d], &dst_values[%d]);\n",
 				label,
 				count1 + count2,
@@ -4085,12 +4071,6 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 				count1 + count2,
 				extra_sz);
 			appendStringInfo(
-				&gbuf,
-				"  %s(&dst_dclass[%d], &dst_values[%d], NULL);\n",
-				label,
-				count1 + count2,
-				count1 + count2);
-			appendStringInfo(
 				&lbuf,
 				"  %s(&dst_dclass[%d], &dst_values[%d], dst_extras);\n"
 				"  dst_extras += %u;\n",
@@ -4110,19 +4090,13 @@ gpupreagg_codegen_init_slot(StringInfo kern,
 		"                          char     *dst_extras)\n"
 		"{\n%s}\n\n"
 		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_init_global_slot(cl_char *dst_dclass,\n"
-		"                           Datum   *dst_values)\n"
-		"{\n%s}\n\n"
-		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_init_final_slot(cl_char  *dst_dclass,\n"
 		"                          Datum    *dst_values,\n"
 		"                          char     *dst_extras)\n"
 		"{\n%s}\n\n",
 		lbuf.data,
-		gbuf.data,
 		fbuf.data);
 	pfree(lbuf.data);
-	pfree(gbuf.data);
 	pfree(fbuf.data);
 
 	/* number of accumulate values */
@@ -4141,13 +4115,15 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 {
 	StringInfoData sbuf;	/* _shuffle */
 	StringInfoData nbuf;	/* _normal */
-	StringInfoData abuf;	/* _atomic */
+	StringInfoData mbuf;	/* _merge */
+	StringInfoData ubuf;	/* _update */
 	ListCell   *lc;
 	int			count = 0;
 
 	initStringInfo(&sbuf);
 	initStringInfo(&nbuf);
-	initStringInfo(&abuf);
+	initStringInfo(&mbuf);
+	initStringInfo(&ubuf);
 
 	foreach (lc, tlist_part)
 	{
@@ -4172,14 +4148,21 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
 			count, count, label);
 
-		label = gpupreagg_codegen_common_calc(tle, context, "atomic");
+		label = gpupreagg_codegen_common_calc(tle, context, "merge");
 		appendStringInfo(
-			&abuf,
+			&mbuf,
 			"  dst_index = dst_attmap[%d];\n"
 			"  src_index = src_attmap[%d];\n"
 			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
 			count, count, label);
 
+		label = gpupreagg_codegen_common_calc(tle, context, "update");
+		appendStringInfo(
+			&ubuf,
+			"  dst_index = dst_attmap[%d];\n"
+			"  src_index = src_attmap[%d];\n"
+			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
+			count, count, label);
 		count++;
     }
 	
@@ -4195,12 +4178,12 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 		"%s"
 		"}\n\n"
 		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_merge_normal(cl_char  *dst_dclass,\n"
-		"                       Datum    *dst_values,\n"
-		"                       cl_short *dst_attmap,\n"
-		"                       cl_char  *src_dclass,\n"
-		"                       Datum    *src_values,\n"
-		"                       cl_short *src_attmap)\n"
+		"gpupreagg_update_normal(cl_char  *dst_dclass,\n"
+		"                        Datum    *dst_values,\n"
+		"                        cl_short *dst_attmap,\n"
+		"                        cl_char  *src_dclass,\n"
+		"                        Datum    *src_values,\n"
+		"                        cl_short *src_attmap)\n"
 		"{\n"
 		"  int dst_index;\n"
 		"  int src_index;\n\n"
@@ -4217,14 +4200,28 @@ gpupreagg_codegen_accum_merge(StringInfo kern,
 		"  int dst_index;\n"
 		"  int src_index;\n\n"
 		"%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_update_atomic(cl_char  *dst_dclass,\n"
+		"                        Datum    *dst_values,\n"
+		"                        cl_short *dst_attmap,\n"
+		"                        cl_char  *src_dclass,\n"
+		"                        Datum    *src_values,\n"
+		"                        cl_short *src_attmap)\n"
+		"{\n"
+		"  int dst_index;\n"
+		"  int src_index;\n\n"
+		"%s"
 		"}\n\n",
 		sbuf.data,
 		nbuf.data,
-		abuf.data);
+		mbuf.data,
+		ubuf.data);
 	
 	pfree(sbuf.data);
 	pfree(nbuf.data);
-	pfree(abuf.data);
+	pfree(mbuf.data);
+	pfree(ubuf.data);
 }
 
 /*
@@ -4558,6 +4555,15 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   gpas->part_slot,
 											   &gpas->gts.css.ss.ps,
 											   outer_tupdesc);
+
+	ExecInitScanTupleSlot(estate,
+						  &gpas->gts.css.ss,
+						  part_tupdesc,
+						  &TTSOpsVirtual);
+	ExecAssignScanProjectionInfoWithVarno(&gpas->gts.css.ss, INDEX_VAR);
+	elog(INFO, "plan_tlist => %s", nodeToString(gpas->gts.css.ss.ps.plan->targetlist));
+	gpas->gts.css.ss.ps.ps_ProjInfo = NULL;
+
 	/* Template of kds_slot */
 	length = KDS_calculateHeadSize(prep_tupdesc);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,

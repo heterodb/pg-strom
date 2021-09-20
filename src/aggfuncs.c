@@ -1122,6 +1122,10 @@ pgstrom_hll_combined(PG_FUNCTION_ARGS)
 		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + len);
 		SET_VARSIZE(hll_state, VARHDRSZ + len);
 		memcpy(VARDATA_ANY(hll_state), VARDATA_ANY(new_state), len);
+
+		hll_regs = (uint8 *)VARDATA_ANY(hll_state);
+		for (index=0; index < nrooms; index++)
+			elog(INFO, "regs[%u] %u", index, (int)hll_regs[index]);
 	}
 	else
 	{
@@ -1136,6 +1140,7 @@ pgstrom_hll_combined(PG_FUNCTION_ARGS)
 			new_regs = (uint8 *)VARDATA_ANY(new_state);
 			for (index=0; index < nrooms; index++)
 			{
+				elog(INFO, "Regs[%u] %u", index, (int)hll_regs[index]);
 				if (hll_regs[index] < new_regs[index])
 					hll_regs[index] = new_regs[index];
 			}

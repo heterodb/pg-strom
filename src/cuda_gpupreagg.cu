@@ -15,71 +15,6 @@
 #include "cuda_postgis.h"
 
 /*
- * aggcalc operations for hyper-log-log
- */
-DEVICE_FUNCTION(void)
-aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
-                        Datum   *p_accum_datum,
-                        char    *extra_pos)
-{
-	if (!extra_pos)
-	{
-		/* init datum to store hll_hash */
-		*p_accum_dclass = DATUM_CLASS__NULL;
-		*p_accum_datum  = 0;
-	}
-	else
-	{
-		/* init datum to store hll_pcount */
-		cl_uint		sz = VARHDRSZ + (1U << GPUPREAGG_HLL_REGISTER_BITS);
-		
-		*p_accum_dclass = DATUM_CLASS__NULL;
-		memset(extra_pos, 0, sz);
-		SET_VARSIZE(extra_pos, sz);
-		*p_accum_datum = PointerGetDatum(extra_pos);
-	}
-}
-
-DEVICE_FUNCTION(void)
-aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
-                           Datum   *p_accum_datum,
-                           int      lane_id)
-{
-#if 0
-	cl_char		my_dclass;
-	cl_char		buddy_dclass;
-	varlena	   *hll_state = (varlena *)DatumGetPointer(*p_accum_datum);
-	cl_uchar   *hll_regs = VARDATA(hll_state);
-	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
-	cl_uint		index;
-
-	assert(VARSIZE(hll_state) == VARHDRSZ + nrooms);
-	assert(__activemask() == ~0U);
-
-	
-	my_dclass = *p_accum_dclass;
-	buddy_dclass = __shfl_sync(__activemask(), my_dclass, lane_id);
-
-	my_datum  = *p_accum_datum;
-
-#endif
-}
-
-DEVICE_FUNCTION(void)
-aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
-                          Datum   *p_accum_datum,
-                          cl_char  newval_dclass,
-                          Datum    newval_datum)
-{}
-
-DEVICE_FUNCTION(void)
-aggcalc_atomic_hll_pcount(cl_char *p_accum_dclass,
-						  Datum   *p_accum_datum,
-						  cl_char  newval_dclass,
-						  Datum    newval_datum)
-{}
-
-/*
  * common portion for gpupreagg_setup_*
  */
 STATIC_FUNCTION(bool)
@@ -732,24 +667,6 @@ skip:
 		my_suspend->c.src_base = src_base;
 }
 
-STATIC_INLINE(void)
-gpupreagg_copy_accum(cl_char  *dst_dclass,
-					 Datum    *dst_values,
-					 cl_short *dst_attmap,
-					 cl_char  *src_dclass,
-					 Datum    *src_values,
-					 cl_short *src_attmap)
-{
-	for (int j=0; j < GPUPREAGG_NUM_ACCUM_VALUES; j++)
-	{
-		cl_short	src_index = src_attmap[j];
-		cl_short	dst_index = dst_attmap[j];
-
-		dst_dclass[dst_index] = src_dclass[src_index];
-		dst_values[dst_index] = src_values[src_index];
-	}
-}
-
 /*
  * gpupreagg_nogroup_reduction
  */
@@ -802,12 +719,12 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		/* accumulate to the private buffer */
 		if (index < kds_slot->nitems)
 		{
-			gpupreagg_merge_normal(p_dclass,
-								   p_values,
-								   GPUPREAGG_ACCUM_MAP_LOCAL,
-								   KERN_DATA_STORE_DCLASS(kds_slot, index),
-								   KERN_DATA_STORE_VALUES(kds_slot, index),
-								   GPUPREAGG_ACCUM_MAP_GLOBAL);
+			gpupreagg_update_normal(p_dclass,
+									p_values,
+									GPUPREAGG_ACCUM_MAP_LOCAL,
+									KERN_DATA_STORE_DCLASS(kds_slot, index),
+									KERN_DATA_STORE_VALUES(kds_slot, index),
+									GPUPREAGG_ACCUM_MAP_GLOBAL);
 		}
 	} while (!is_last_reduction);
 
@@ -823,6 +740,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 								GPUPREAGG_ACCUM_MAP_LOCAL,
 								buddy_id);
 	}
+
 	/*
 	 * update the final buffer
 	 */
@@ -837,6 +755,8 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 				} i;
 				cl_ulong	v64;
 			} oldval, curval, newval;
+
+			assert((get_local_id() & (warpSize - 1)) == 0);
 
 			oldval.i.nitems = 0;
 			oldval.i.usage  = kds_final->usage;
@@ -878,7 +798,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 				assert(curval.i.nitems == 0xffffffffU);
 			}
 		}
-	} while (__syncthreads_count(try_final_merge) == 0);
+	} while (__syncthreads_count(try_final_merge) > 0);
 }
 
 #define HASHITEM_EMPTY		(0xffffffffU)
@@ -924,7 +844,7 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	cl_char	   *dst_dclass;
 	Datum	   *dst_values;
 	cl_uint		dst_index;
-	cl_uint		alloc_sz = 0;
+	cl_uint		alloc_sz;
 	char	   *extra = NULL;
 	union {
 		struct {
@@ -941,16 +861,22 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	assert(src_index < kds_src->nitems);
 
 	/* size for extra allocation */
+	alloc_sz = GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 	for (int j=0; j < kds_src->ncols; j++)
 	{
 		kern_colmeta   *cmeta = &kds_src->colmeta[j];
 		cl_char			dclass = src_dclass[j];
 		cl_uint			len;
 
+		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
+			continue;
 		if (dclass == DATUM_CLASS__NULL)
 			continue;
+
 		if (cmeta->attbyval)
+		{
 			assert(dclass == DATUM_CLASS__NORMAL);
+		}
 		else if (cmeta->attlen > 0)
 		{
 			assert(dclass == DATUM_CLASS__NORMAL);
@@ -1013,6 +939,10 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		extra = (char *)kds_final + kds_final->length - __kds_unpack(newval.i.usage);
 	l_final_buffer_modified = true;
 
+	/* init final slot */
+	gpupreagg_init_final_slot(dst_dclass, dst_values, extra);
+	extra += GPUPREAGG_ACCUM_EXTRA_BUFSZ;
+
 	/* copy the grouping keys */
 	for (int j=0; j < kds_src->ncols; j++)
 	{
@@ -1022,14 +952,9 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		cl_uint			len;
 
 		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
-		{
-			/*
-			 * accumulate values shall be copied later,
-			 * by gpupreagg_copy_accum().
-			 */
-			assert(cmeta->attbyval);
-		}
-		else if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
+			continue;
+
+		if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
 		{
 			dst_dclass[j] = dclass;
             dst_values[j] = datum;
@@ -1072,22 +997,21 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 			extra += MAXALIGN(len);
 		}
 	}
-
 	/* copy the accum values */
 	if (l_dclass && l_values)
-		gpupreagg_copy_accum(dst_dclass,
-							 dst_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL,
-							 l_dclass,
-							 l_values,
-							 GPUPREAGG_ACCUM_MAP_LOCAL);
+		gpupreagg_merge_atomic(dst_dclass,
+							   dst_values,
+							   GPUPREAGG_ACCUM_MAP_GLOBAL,
+							   l_dclass,
+							   l_values,
+							   GPUPREAGG_ACCUM_MAP_LOCAL);
 	else
-		gpupreagg_copy_accum(dst_dclass,
-							 dst_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL,
-							 src_dclass,
-							 src_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL);
+		gpupreagg_update_atomic(dst_dclass,
+								dst_values,
+								GPUPREAGG_ACCUM_MAP_GLOBAL,
+								src_dclass,
+								src_values,
+								GPUPREAGG_ACCUM_MAP_GLOBAL);
 	__threadfence();
 
 	return dst_index;
@@ -1294,7 +1218,7 @@ restart:
 									   l_values,
 									   GPUPREAGG_ACCUM_MAP_LOCAL);
 			else
-				 gpupreagg_merge_atomic(dst_dclass,
+				gpupreagg_update_atomic(dst_dclass,
 										dst_values,
 										GPUPREAGG_ACCUM_MAP_GLOBAL,
 										KERN_DATA_STORE_DCLASS(kds_slot, kds_index),
@@ -1382,9 +1306,9 @@ gpupreagg_local_reduction(kern_context *kcxt,
 						  cl_uint		hash,
 						  preagg_local_hashtable *l_htable,
 						  preagg_hash_item *l_hitems,
-						  cl_char     *l_dclass,
-						  Datum       *l_values,
-						  char        *l_extras)
+						  cl_char     *l_dclass,	/* __shared__ */
+						  Datum       *l_values,	/* __shared__ */
+						  char        *l_extras)	/* __shared__ */
 {
 	cl_uint		hindex = hash % GPUPREAGG_LOCAL_HASH_NSLOTS;
 	cl_uint		curr;
@@ -1425,7 +1349,7 @@ restart:
 			atomicExch(&l_htable->l_hslots[hindex], next);	//UNLOCK
 		return 0;	/* not found */
 	}
-	assert(l_hitems && l_dclass && l_values && l_extras);
+	assert(l_hitems && l_dclass && l_values);
 
 	/*
 	 * Begin critical section
@@ -1461,9 +1385,13 @@ restart:
 	l_hitems[curr].index = index;
 	l_hitems[curr].hash  = hash;
 	l_hitems[curr].next  = next;
-	gpupreagg_init_local_slot(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-							  l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-							  l_extras + GPUPREAGG_ACCUM_EXTRA_BUFSZ * curr);
+
+	l_dclass += GPUPREAGG_NUM_ACCUM_VALUES * curr;
+	l_values += GPUPREAGG_NUM_ACCUM_VALUES * curr;
+	if (l_extras)
+		l_extras += GPUPREAGG_ACCUM_EXTRA_BUFSZ * curr;
+	gpupreagg_init_local_slot(l_dclass, l_values, l_extras);
+
 	/*
 	 * __threadfence_block() makes above updates visible to other concurent
 	 * threads within this block.
@@ -1473,12 +1401,12 @@ restart:
 	atomicExch(&l_htable->l_hslots[hindex], curr);
 found:
 	/* Runs global-to-local reduction */
-	gpupreagg_merge_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-						   l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-						   GPUPREAGG_ACCUM_MAP_LOCAL,
-						   KERN_DATA_STORE_DCLASS(kds_slot, index),
-						   KERN_DATA_STORE_VALUES(kds_slot, index),
-						   GPUPREAGG_ACCUM_MAP_GLOBAL);
+	gpupreagg_update_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							GPUPREAGG_ACCUM_MAP_LOCAL,
+							KERN_DATA_STORE_DCLASS(kds_slot, index),
+							KERN_DATA_STORE_VALUES(kds_slot, index),
+							GPUPREAGG_ACCUM_MAP_GLOBAL);
 	return 1;	/* ok, merged */
 }
 
@@ -1661,4 +1589,185 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	__syncthreads();
 	if (get_local_id() == 0 && l_final_buffer_modified)
 		kgpreagg->final_buffer_modified = true;
+}
+
+/*
+ * aggcalc operations for hyper-log-log
+ */
+DEVICE_FUNCTION(void)
+aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
+                        Datum   *p_accum_datum,
+                        char    *extra_pos)
+{
+	cl_uint		sz = VARHDRSZ + (1U << GPUPREAGG_HLL_REGISTER_BITS);
+
+	*p_accum_dclass = DATUM_CLASS__NULL;
+	memset(extra_pos, 0, sz);
+	SET_VARSIZE(extra_pos, sz);
+	*p_accum_datum = PointerGetDatum(extra_pos);
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
+                           Datum   *p_accum_datum,
+                           int      lane_id)
+{
+	cl_char		my_dclass;
+	cl_char		buddy_dclass;
+	varlena	   *hll_state = (varlena *)DatumGetPointer(*p_accum_datum);
+	cl_uint	   *hll_regs = (cl_uint *)VARDATA(hll_state);
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+
+	assert(VARSIZE_EXHDR(hll_state) == nrooms);
+	assert(__activemask() == ~0U);
+	my_dclass = *p_accum_dclass;
+	buddy_dclass = __shfl_sync(__activemask(), my_dclass, lane_id);
+
+	nrooms /= sizeof(cl_uint);
+	for (index=0; index < nrooms; index++)
+	{
+		union {
+			cl_uchar	regs[4];
+			cl_uint		v32;
+		}	myself, buddy;
+
+		myself.v32 = hll_regs[index];
+		buddy.v32 = __shfl_sync(__activemask(), myself.v32, lane_id);
+		if (my_dclass == DATUM_CLASS__NULL)
+		{
+			if (buddy_dclass != DATUM_CLASS__NULL)
+			{
+				hll_regs[index] = buddy.v32;
+				*p_accum_dclass = DATUM_CLASS__NORMAL;
+			}
+		}
+		else
+		{
+			assert(my_dclass == DATUM_CLASS__NORMAL);
+			if (buddy_dclass != DATUM_CLASS__NULL)
+			{
+				assert(buddy_dclass == DATUM_CLASS__NORMAL);
+				if (myself.regs[0] < buddy.regs[0])
+					myself.regs[0] = buddy.regs[0];
+				if (myself.regs[1] < buddy.regs[1])
+					myself.regs[1] = buddy.regs[1];
+				if (myself.regs[2] < buddy.regs[2])
+					myself.regs[2] = buddy.regs[2];
+				if (myself.regs[3] < buddy.regs[3])
+					myself.regs[3] = buddy.regs[3];
+				hll_regs[index] = myself.v32;
+			}
+		}
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
+                          Datum   *p_accum_datum,
+                          cl_char  newval_dclass,
+                          Datum    newval_datum)	/* = int8 hash */
+{
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+	cl_uint		count;
+	cl_char	   *hll_regs;
+
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+
+		
+		index = (newval_datum & (nrooms - 1));
+		count = __clzll(__brevll(newval_datum >> GPUPREAGG_HLL_REGISTER_BITS)) + 1;
+		hll_regs = VARDATA(*p_accum_datum);
+		if (hll_regs[index] < count)
+			hll_regs[index] = count;
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_merge_hll_pcount(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum)		/* =bytea hll-registers */
+{
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		cl_uint	   *dst_regs = (cl_uint *)VARDATA(*p_accum_datum);
+		cl_uint	   *new_regs = (cl_uint *)VARDATA(newval_datum);
+		cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+		cl_uint		index;
+
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+		assert(VARSIZE_EXHDR(*p_accum_datum) == nrooms &&
+			   VARSIZE_EXHDR(newval_datum) == nrooms);
+		nrooms /= sizeof(cl_uint);
+		for (index=0; index < nrooms; index++)
+		{
+			union {
+				cl_uchar	regs[4];
+				cl_uint		v32;
+			}	oldval, curval, newval, tmpval;
+
+			tmpval.v32 = __volatileRead(&new_regs[index]);
+			curval.v32 = __volatileRead(&dst_regs[index]);
+			do {
+				newval = oldval = curval;
+				if (newval.regs[0] < tmpval.regs[0])
+					newval.regs[0] = tmpval.regs[0];
+				if (newval.regs[1] < tmpval.regs[1])
+					newval.regs[1] = tmpval.regs[1];
+				if (newval.regs[2] < tmpval.regs[2])
+					newval.regs[2] = tmpval.regs[2];
+				if (newval.regs[3] < tmpval.regs[3])
+					newval.regs[3] = tmpval.regs[3];
+				if (newval.v32 == curval.v32)
+					break;
+			} while ((curval.v32 = atomicCAS(&dst_regs[index],
+											 oldval.v32,
+											 newval.v32)) != oldval.v32);
+		}
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_update_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum)	/* =int8 hash */
+{
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+	cl_uint		count;
+	cl_uint	   *hll_regs;
+
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		union {
+			cl_uchar	regs[4];
+			cl_uint		v32;
+		}		oldval, curval, newval;
+
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+
+		index = (newval_datum & (nrooms - 1));
+		count = __clzll(__brevll(newval_datum >> GPUPREAGG_HLL_REGISTER_BITS)) + 1;
+		hll_regs = (cl_uint *)VARDATA(*p_accum_datum);
+		hll_regs += (index >> 2);
+		index &= 3;
+
+		curval.v32 = __volatileRead(hll_regs);
+		do {
+			if (count <= curval.regs[index])
+				break;
+			newval = oldval = curval;
+			newval.regs[index] = count;
+		} while ((curval.v32 = atomicCAS(hll_regs,
+										 oldval.v32,
+										 newval.v32)) != oldval.v32);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
 }
