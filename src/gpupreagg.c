@@ -1136,9 +1136,6 @@ cost_gpupreagg(PlannerInfo *root,
 	/* Cost estimation for aggregate function */
 	startup_cost += (target_partial->cost.per_tuple * input_path->rows +
 					 target_partial->cost.startup) * gpu_cpu_ratio;
-	/* Cost estimation for host side functions */
-	startup_cost += target_partial->cost.startup;
-	run_cost += target_partial->cost.per_tuple * num_groups;
 
 	/* Cost estimation to fetch results */
 	run_cost += cpu_tuple_cost * num_groups;
@@ -1187,7 +1184,6 @@ static CustomPath *
 make_gpupreagg_path(PlannerInfo *root,
 					RelOptInfo *group_rel,
 					PathTarget *target_partial,
-					PathTarget *target_device,
 					Bitmapset *pfunc_bitmap,
 					Path *input_path,
 					double num_groups,
@@ -1271,7 +1267,6 @@ static Path *
 prepend_gpupreagg_path(PlannerInfo *root,
 					   RelOptInfo *group_rel,
 					   PathTarget *target_partial,
-					   PathTarget *target_device,
 					   Path *input_path,
 					   Bitmapset *pfunc_bitmap,
 					   double num_groups,
@@ -1316,7 +1311,6 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	 */
 	cpath = make_gpupreagg_path(root, group_rel,
 								target_partial,
-								target_device,
 								pfunc_bitmap,
 								input_path,
 								num_groups,
@@ -1521,7 +1515,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   RelOptInfo *group_rel,
 							   PathTarget *target_final,
 							   PathTarget *target_partial,
-							   PathTarget *target_device,
 							   Path *input_path,
 							   Bitmapset *pfunc_bitmap,
 							   List *havingQual,
@@ -1561,7 +1554,6 @@ retry:
 		Path	   *sub_path = (Path *) lfirst(lc);
 		RelOptInfo *sub_rel = sub_path->parent;
 		PathTarget *curr_partial = copy_pathtarget(target_partial);
-		PathTarget *curr_device = copy_pathtarget(target_device);
 		Path	   *partial_path;
 		AppendRelInfo **appinfos;
 		int				nappinfos;
@@ -1572,14 +1564,10 @@ retry:
 		curr_partial->exprs = (List *)
 			adjust_appendrel_attrs(root, (Node *)curr_partial->exprs,
 								   nappinfos, appinfos);
-		curr_device->exprs = (List *)
-			adjust_appendrel_attrs(root, (Node *)curr_device->exprs,
-								   nappinfos, appinfos);
 
 		partial_path = prepend_gpupreagg_path(root,
 											  group_rel,
 											  curr_partial,
-											  curr_device,
 											  sub_path,
 											  pfunc_bitmap,
 											  num_groups,
@@ -1725,7 +1713,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									   group_rel,
 									   target_final,
 									   target_partial,
-									   target_device,
 									   input_path,
 									   pfunc_bitmap,
 									   (List *) havingQual,
@@ -1737,7 +1724,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	partial_path = prepend_gpupreagg_path(root,
 										  group_rel,
 										  target_partial,
-										  target_device,
 										  input_path,
 										  pfunc_bitmap,
 										  num_groups,
