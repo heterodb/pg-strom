@@ -31,7 +31,6 @@ typedef struct
 	cl_int			accum_extra_bufsz;/* size of accumulation extra buffer */
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
-	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
 	Cost			outer_startup_cost; /* copy of @startup_cost in outer */
 	Cost			outer_total_cost; /* copy of @total_cost in outer path */
 	double			outer_nrows;	/* number of estimated outer nrows */
@@ -63,7 +62,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->accum_extra_bufsz));
 	privs = lappend(privs, pmakeFloat(gpa_info->plan_ngroups));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
-	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_startup_cost));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_total_cost));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_nrows));
@@ -101,7 +99,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->accum_extra_bufsz = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_ngroups = floatVal(list_nth(privs, pindex++));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
-	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_nrows = floatVal(list_nth(privs, pindex++));
@@ -158,7 +155,6 @@ typedef struct
 	size_t			plan_nrows_per_chunk;	/* planned nrows/chunk */
 	size_t			plan_nrows_in;	/* num of outer rows planned */
 	size_t			plan_ngroups;	/* num of groups planned */
-	size_t			plan_extra_sz;	/* size of varlena planned */
 } GpuPreAggState;
 
 struct GpuPreAggRuntimeStat
@@ -1179,7 +1175,6 @@ cost_gpupreagg(PlannerInfo *root,
 	gpa_info->num_group_keys    = num_group_keys;
 	gpa_info->plan_ngroups		= num_groups;
 	gpa_info->plan_nchunks		= estimate_num_chunks(input_path);
-	gpa_info->plan_extra_sz		= extra_sz;
 
 	return true;
 }
@@ -4576,7 +4571,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		 : gpa_info->outer_nrows);
     gpas->plan_nrows_in		= gpa_info->outer_nrows;
 	gpas->plan_ngroups		= gpa_info->plan_ngroups;
-	gpas->plan_extra_sz		= gpa_info->plan_extra_sz;
 
 	/* Get CUDA program and async build if any */
 	if (gpas->combined_gpujoin)
