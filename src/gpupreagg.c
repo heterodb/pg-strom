@@ -1041,7 +1041,6 @@ cost_gpupreagg(PlannerInfo *root,
 			   CustomPath *cpath,
 			   GpuPreAggInfo *gpa_info,
 			   PathTarget *target_partial,
-			   PathTarget *target_device,
 			   Path *input_path,
 			   int parallel_nworkers,
 			   double num_groups,
@@ -1052,11 +1051,8 @@ cost_gpupreagg(PlannerInfo *root,
 	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	Cost		startup_cost;
 	Cost		run_cost;
-	QualCost	qual_cost;
 	int			num_group_keys = 0;
-	Size		extra_sz = 0;
-	cl_int		index;
-	ListCell   *lc;
+	int			j, ncols;
 
 	/* Cost come from the underlying path */
 	if (gpa_info->outer_scanrelid == 0)
@@ -1124,43 +1120,22 @@ cost_gpupreagg(PlannerInfo *root,
 	 * Estimation of the result buffer. It must fit to the target GPU device
 	 * memory size.
 	 */
-	index = 0;
-	foreach (lc, target_device->exprs)
+	ncols = list_length(target_partial->exprs);
+	for (j=0; j < ncols; j++)
 	{
-		Expr   *expr = lfirst(lc);
-		Oid		type_oid = exprType((Node *)expr);
-		int32	type_mod = exprTypmod((Node *)expr);
-		int16	typlen;
-		bool	typbyval;
-
-		/* extra buffer */
-		if (type_oid == NUMERICOID)
-			extra_sz += 32;
-		else
-		{
-			get_typlenbyval(type_oid, &typlen, &typbyval);
-			if (!typbyval)
-				extra_sz += get_typavgwidth(type_oid, type_mod);
-		}
-		/* count up number of the grouping keys */
-		if (get_pathtarget_sortgroupref(target_device, index))
+		if (get_pathtarget_sortgroupref(target_partial, j))
 			num_group_keys++;
-		index++;
 	}
 	if (num_group_keys == 0)
 		num_groups = 1.0;	/* AGG_PLAIN */
 
-	/* Cost estimation for the initial projection */
-	cost_qual_eval(&qual_cost, target_device->exprs, root);
-	startup_cost += (target_device->cost.per_tuple * input_path->rows +
-					 target_device->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for grouping */
 	startup_cost += (pgstrom_gpu_operator_cost *
 					 num_group_keys *
 					 input_path->rows);
 	/* Cost estimation for aggregate function */
-	startup_cost += (target_device->cost.per_tuple * input_path->rows +
-					 target_device->cost.startup) * gpu_cpu_ratio;
+	startup_cost += (target_partial->cost.per_tuple * input_path->rows +
+					 target_partial->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for host side functions */
 	startup_cost += target_partial->cost.startup;
 	run_cost += target_partial->cost.per_tuple * num_groups;
@@ -1254,10 +1229,16 @@ make_gpupreagg_path(PlannerInfo *root,
 		parallel_nworkers = input_path->parallel_workers;
 
 	/* cost estimation */
-	if (!cost_gpupreagg(root, cpath, gpa_info,
-						target_partial, target_device,
-						input_path, parallel_nworkers, num_groups,
-						index_opt, index_quals, index_nblocks))
+	if (!cost_gpupreagg(root,
+						cpath,
+						gpa_info,
+						target_partial,
+						input_path,
+						parallel_nworkers,
+						num_groups,
+						index_opt,
+						index_quals,
+						index_nblocks))
 	{
 		pfree(cpath);
 		return NULL;
