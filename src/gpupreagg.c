@@ -23,6 +23,9 @@ static bool					enable_pullup_outer_join;		/* GUC */
 static bool					enable_partitionwise_gpupreagg;	/* GUC */
 static bool					enable_numeric_aggfuncs; 		/* GUC */
 static double				gpupreagg_reduction_threshold;	/* GUC */
+static bool					pgstrom_enable_hll_count;		/* GUC */
+int							pgstrom_hll_register_bits;		/* GUC */
+
 
 typedef struct
 {
@@ -1090,8 +1093,17 @@ aggfunc_lookup_by_oid(Oid aggfnoid, bool aggref_with_distinct)
 				if (catalog->numeric_aware && !enable_numeric_aggfuncs)
 					continue;
 				/* Check whether DISTINCT qualifier is attached */
-				if (catalog->distinct_aggfunc ^ aggref_with_distinct)
-					continue;
+				if (catalog->distinct_aggfunc)
+				{
+					if (!pgstrom_enable_hll_count ||
+						!aggref_with_distinct)
+						continue;
+				}
+				else
+				{
+					if (aggref_with_distinct)
+						continue;
+				}
 				/* all ok */
 				ReleaseSysCache(htup);
 				return catalog;
@@ -6377,6 +6389,26 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.enable_hll_count */
+	DefineCustomBoolVariable("pg_strom.enable_hll_count",
+							 "Enables HyperLogLog for COUNT(distinct ...)",
+							 NULL,
+							 &pgstrom_enable_hll_count,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* pg_strom.hll_registers_bits */
+	DefineCustomIntVariable("pg_strom.hll_registers_bits",
+							"Accuracy of HyperLogLog COUNT(distinct ...) estimation",
+							NULL,
+							&pgstrom_hll_register_bits,
+							9,
+							4,
+							15,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
 							 "Minimus reduction ratio to use GpuPreAgg",

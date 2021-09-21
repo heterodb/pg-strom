@@ -25,9 +25,6 @@ double		pgstrom_gpu_setup_cost;
 double		pgstrom_gpu_dma_cost;
 double		pgstrom_gpu_operator_cost;
 
-/* hyper-log-log */
-int			pgstrom_hll_register_bits;
-
 /* misc static variables */
 static HTAB				   *gpu_path_htable = NULL;
 static planner_hook_type	planner_hook_next = NULL;
@@ -119,18 +116,6 @@ pgstrom_init_common_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* HyperLogLog parameters */
-	DefineCustomIntVariable("pg_strom.hll_registers_bits",
-							"Bit width of hyper-log-log register selector",
-							NULL,
-							&pgstrom_hll_register_bits,
-							9,
-							4,
-							15,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-
 	/* disables some platform specific EXPLAIN output */
 	DefineCustomBoolVariable("pg_strom.regression_test_mode",
 							 "Disables some platform specific output in EXPLAIN; that can lead undesired test failed but harmless",

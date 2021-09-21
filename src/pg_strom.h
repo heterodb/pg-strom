@@ -587,8 +587,6 @@ extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
 #define PAGE_ALIGN(sz)		TYPEALIGN(PAGE_SIZE,(sz))
 
-extern int		pgstrom_hll_register_bits;
-
 /* --------------------------------------------------------------------
  *
  * Function Declarations
@@ -1233,6 +1231,7 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 /*
  * gpupreagg.c
  */
+extern int	pgstrom_hll_register_bits;
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
