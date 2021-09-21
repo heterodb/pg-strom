@@ -4934,7 +4934,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 	TupleDesc		part_tupdesc = part_slot->tts_tupleDescriptor;
 	pgstrom_data_store *pds_final;
 	size_t			f_hash_nslots;
-	size_t			f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
+	size_t			f_hash_length = 256UL << 20; //0xffffe000UL;	/* almost 4GB managed */
 	CUdeviceptr		m_fhash;
 	CUresult		rc;
 
@@ -4944,7 +4944,8 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 	/* final buffer allocation */
 	pds_final = PDS_create_slot(gcontext,
 								part_tupdesc,
-								0x3ffffe000);		/* almost 16GB managed */
+								1UL << 30);
+								//0x3ffffe000);		/* almost 16GB managed */
 	/* final hash-slot allocation */
 	if (gpas->plan_ngroups < 400000)
 		f_hash_nslots = 4 * gpas->plan_ngroups;

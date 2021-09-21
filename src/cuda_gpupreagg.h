@@ -931,7 +931,8 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 #define nogroup_p_values	NULL
 #endif
 #if __GPUPREAGG_ACCUM_EXTRA_BUFSZ > 0
-	char		nogroup_p_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ];
+	char		nogroup_p_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ]
+				__attribute__ ((aligned(16)));
 #else
 #define nogroup_p_extras	NULL
 #endif
@@ -973,7 +974,8 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 #endif	/* __GPUPREAGG_NUM_ACCUM_VALUES */
 #if __GPUPREAGG_ACCUM_EXTRA_BUFSZ > 0
 	__shared__ char		groupby_l_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ *
-										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+										 __GPUPREAGG_LOCAL_HASH_NROOMS]
+						__attribute__((aligned(16)));
 #else	/* __GPUPREAGG_ACCUM_EXTRA_BUFSZ */
 #define groupby_l_extras	NULL
 #endif	/* __GPUPREAGG_ACCUM_EXTRA_BUFSZ */

@@ -1401,8 +1401,8 @@ restart:
 	atomicExch(&l_htable->l_hslots[hindex], curr);
 found:
 	/* Runs global-to-local reduction */
-	gpupreagg_update_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-							l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+	gpupreagg_update_atomic(l_dclass,
+							l_values,
 							GPUPREAGG_ACCUM_MAP_LOCAL,
 							KERN_DATA_STORE_DCLASS(kds_slot, index),
 							KERN_DATA_STORE_VALUES(kds_slot, index),
