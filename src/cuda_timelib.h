@@ -551,5 +551,19 @@ pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2);
 DEVICE_FUNCTION(pg_float8_t)
 pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2);
 
+/*
+ * Hyper-Log-Log hash functions
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_date(kern_context *kcxt, pg_date_t arg1);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_time(kern_context *kcxt, pg_time_t arg1);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timetz(kern_context *kcxt, pg_timetz_t arg1);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timestamp(kern_context *kcxt, pg_timestamp_t arg1);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timestamptz(kern_context *kcxt, pg_timestamptz_t arg1);
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TIMELIB_H */

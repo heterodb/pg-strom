@@ -110,6 +110,8 @@ DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_uuid(kern_context *kcxt, pg_uuid_t arg1);
 #endif /* __CUDACC__ */
 
 /* pg_macaddr_t */

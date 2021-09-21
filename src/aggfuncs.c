@@ -57,10 +57,8 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_slope);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxx);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxy);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
-PG_FUNCTION_INFO_V1(pgstrom_hll_hash_int4);
 PG_FUNCTION_INFO_V1(pgstrom_hll_pcount);
 PG_FUNCTION_INFO_V1(pgstrom_hll_combined);
-PG_FUNCTION_INFO_V1(pgstrom_hll_hash_pcount);
 PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
 
 /* utility to reference numeric[] */
@@ -1054,18 +1052,176 @@ __pgstrom_hll_siphash_value(const void *ptr, const size_t len)
 }
 
 /*
- * pgstrom_hll_hash_int4
+ * pgstrom_hll_hash_xxxx functions
  */
-Datum
-pgstrom_hll_hash_int4(PG_FUNCTION_ARGS)
+static uint64
+__pgstrom_hll_hash_int1(Datum datum)
 {
-	Datum		datum = PG_GETARG_DATUM(0);
-	uint64		hash;
-
-	hash = __pgstrom_hll_siphash_value(&datum, sizeof(int32));
-
-	PG_RETURN_UINT64(hash);
+	return __pgstrom_hll_siphash_value(&datum, sizeof(int8));
 }
+
+static uint64
+__pgstrom_hll_hash_int2(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(int16));
+}
+
+static uint64
+__pgstrom_hll_hash_int4(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(int32));
+}
+
+static uint64
+__pgstrom_hll_hash_int8(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(int64));
+}
+
+static uint64
+__pgstrom_hll_hash_numeric(Datum datum)
+{
+	kern_context kcxt;
+	pg_numeric_t num;
+	size_t		sz;
+
+	memset(&kcxt, 0, sizeof(kcxt));
+	num = pg_numeric_from_varlena(&kcxt, (struct varlena *)datum);
+	if (kcxt.errcode != ERRCODE_STROM_SUCCESS)
+		elog(ERROR, "failed on hash calculation of device numeric: %s",
+			 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
+	sz = offsetof(pg_numeric_t, weight) + sizeof(cl_short);
+	return __pgstrom_hll_siphash_value(&num, sz);
+}
+
+static uint64
+__pgstrom_hll_hash_date(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(DateADT));
+}
+
+static uint64
+__pgstrom_hll_hash_time(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(TimeADT));
+}
+
+static uint64
+__pgstrom_hll_hash_timetz(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(DatumGetPointer(datum), sizeof(TimeTzADT));
+}
+
+static uint64
+__pgstrom_hll_hash_timestamp(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(Timestamp));
+}
+
+static uint64
+__pgstrom_hll_hash_timestamptz(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(&datum, sizeof(TimestampTz));
+}
+
+static uint64
+__pgstrom_hll_hash_bpchar(Datum datum)
+{
+	BpChar	   *val = DatumGetBpCharPP(datum);
+	int			len = bpchartruelen(VARDATA_ANY(val),
+									VARSIZE_ANY_EXHDR(val));
+	return __pgstrom_hll_siphash_value(VARDATA_ANY(val), len);
+}
+
+static uint64
+__pgstrom_hll_hash_varlena(Datum datum)
+{
+	struct varlena *val = PG_DETOAST_DATUM(datum);
+
+	return __pgstrom_hll_siphash_value(VARDATA_ANY(val), VARSIZE_ANY_EXHDR(val));
+}
+
+static uint64
+__pgstrom_hll_hash_uuid(Datum datum)
+{
+	return __pgstrom_hll_siphash_value(DatumGetUUIDP(datum), sizeof(pg_uuid_t));
+}
+
+static bytea *
+__pgstrom_hll_count_update_common(PG_FUNCTION_ARGS, uint64 hash)
+{
+	MemoryContext	aggcxt;
+	bytea		   *hll_state;
+	uint8		   *hll_regs;
+	uint64			nrooms;
+	uint32			index;
+	uint32			count;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	nrooms = (1UL << pgstrom_hll_register_bits);
+	if (PG_ARGISNULL(0))
+	{
+		size_t	sz = VARHDRSZ + sizeof(uint8) * nrooms;
+		hll_state = MemoryContextAllocZero(aggcxt, sz);
+		SET_VARSIZE(hll_state, sz);
+	}
+	else
+	{
+		hll_state = PG_GETARG_BYTEA_P(0);
+	}
+	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	index = hash & (nrooms - 1);
+	count = __builtin_ctzll(hash >> pgstrom_hll_register_bits) + 1;
+	if (hll_regs[index] < count)
+		hll_regs[index] = count;
+	return hll_state;
+}
+
+#define PGSTROM_HLL_HANDLER_TEMPLATE(NAME)								\
+	PG_FUNCTION_INFO_V1(pgstrom_hll_hash_##NAME);						\
+	PG_FUNCTION_INFO_V1(pgstrom_hll_count_update_##NAME);				\
+	Datum																\
+	pgstrom_hll_hash_##NAME(PG_FUNCTION_ARGS)							\
+	{																	\
+		Datum	arg = PG_GETARG_DATUM(0);								\
+		PG_RETURN_UINT64(__pgstrom_hll_hash_##NAME(arg));				\
+	}																	\
+	Datum																\
+	pgstrom_hll_count_update_##NAME(PG_FUNCTION_ARGS)					\
+	{																	\
+		if (PG_ARGISNULL(1))											\
+		{																\
+			if (PG_ARGISNULL(0))										\
+				PG_RETURN_NULL();										\
+			PG_RETURN_DATUM(PG_GETARG_DATUM(0));						\
+		}																\
+		else															\
+		{																\
+			Datum	arg = PG_GETARG_DATUM(1);							\
+			uint64  hash = __pgstrom_hll_hash_##NAME(arg);				\
+			bytea  *state;												\
+																		\
+			state = __pgstrom_hll_count_update_common(fcinfo, hash);	\
+			PG_RETURN_BYTEA_P(state);									\
+		}																\
+	}
+
+PGSTROM_HLL_HANDLER_TEMPLATE(int1)
+PGSTROM_HLL_HANDLER_TEMPLATE(int2)
+PGSTROM_HLL_HANDLER_TEMPLATE(int4)
+PGSTROM_HLL_HANDLER_TEMPLATE(int8)
+PGSTROM_HLL_HANDLER_TEMPLATE(numeric)
+PGSTROM_HLL_HANDLER_TEMPLATE(date)
+PGSTROM_HLL_HANDLER_TEMPLATE(time)
+PGSTROM_HLL_HANDLER_TEMPLATE(timetz)
+PGSTROM_HLL_HANDLER_TEMPLATE(timestamp)
+PGSTROM_HLL_HANDLER_TEMPLATE(timestamptz)
+PGSTROM_HLL_HANDLER_TEMPLATE(bpchar)
+PGSTROM_HLL_HANDLER_TEMPLATE(varlena)
+PGSTROM_HLL_HANDLER_TEMPLATE(uuid)
 
 /*
  * pgstrom_hll_pcount
@@ -1144,73 +1300,6 @@ pgstrom_hll_combined(PG_FUNCTION_ARGS)
 		}
 	}
 	PG_RETURN_POINTER(hll_state);
-}
-
-/*
- * pgstrom_hll_hash_pcount
- */
-Datum
-pgstrom_hll_hash_pcount(PG_FUNCTION_ARGS)
-{
-	MemoryContext	aggcxt;
-	bytea		   *hll_state;
-	uint8		   *hll_regs;
-	uint64			nrooms;
-	uint32			index;
-	uint32			count;
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-	nrooms = (1UL << pgstrom_hll_register_bits);
-	if (PG_ARGISNULL(0))
-	{
-		if (PG_ARGISNULL(1))
-			PG_RETURN_NULL();
-		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + sizeof(uint8) * nrooms);
-		SET_VARSIZE(hll_state, VARHDRSZ + sizeof(uint8) * nrooms);
-	}
-	else
-	{
-		hll_state = PG_GETARG_BYTEA_P(0);
-	}
-	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
-	hll_regs = (uint8 *)VARDATA(hll_state);
-
-	if (!PG_ARGISNULL(1))
-	{
-		TypeCacheEntry *tcache = fcinfo->flinfo->fn_extra;
-		Datum		datum = PG_GETARG_DATUM(1);
-		uint64		hash;
-
-		if (!tcache)
-		{
-			Oid		type_oid = get_fn_expr_argtype(fcinfo->flinfo, 1);
-
-			if (!OidIsValid(type_oid))
-				elog(ERROR, "could not determine data type of hll_hash_pcount()");
-			tcache = lookup_type_cache(type_oid, 0);
-
-			fcinfo->flinfo->fn_extra = tcache;
-		}
-		if (tcache->typbyval)
-			hash = __pgstrom_hll_siphash_value(&datum, tcache->typlen);
-		else if (tcache->typlen > 0)
-			hash = __pgstrom_hll_siphash_value(DatumGetPointer(datum),
-											   tcache->typlen);
-		else if (tcache->typlen == -1)
-			hash = __pgstrom_hll_siphash_value(VARDATA_ANY(datum),
-											   VARSIZE_ANY(datum));
-		else
-			elog(ERROR, "unable to compute hash value for '%s' data type",
-				 format_type_be(tcache->type_id));
-
-		index = hash & (nrooms - 1);
-		Assert(index < nrooms);
-		count = __builtin_ctzll(hash >> pgstrom_hll_register_bits) + 1;
-		if (hll_regs[index] < count)
-			hll_regs[index] = count;
-	}
-	PG_RETURN_BYTEA_P(hll_state);
 }
 
 /*

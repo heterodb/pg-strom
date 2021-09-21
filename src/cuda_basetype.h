@@ -911,6 +911,7 @@ STROMCL_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, cl_double)
 										  sizeof(arg1.value));			\
 		return result;													\
 	}
+STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int1)
 STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int2)
 STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int4)
 STROMCL_SIMPLE_HLL_HASH_TEMPLATE(int8)

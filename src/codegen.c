@@ -2224,7 +2224,19 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
 	 * GpuPreAgg COUNT(distinct KEY) support
 	 */
-	{ PGSTROM, "int8 hll_hash(int4)",     1, "p/f:hll_hash_int4" },
+	{ PGSTROM, "int8 hll_hash(int1)",        1, "f:hll_hash_int1" },
+	{ PGSTROM, "int8 hll_hash(int2)",        1, "f:hll_hash_int2" },
+	{ PGSTROM, "int8 hll_hash(int4)",        1, "f:hll_hash_int4" },
+	{ PGSTROM, "int8 hll_hash(int8)",        1, "f:hll_hash_int8" },
+	{ PGSTROM, "int8 hll_hash(numeric)",     1, "f:hll_hash_numeric" },
+	{ PGSTROM, "int8 hll_hash(date)",        1, "t/f:hll_hash_date" },
+	{ PGSTROM, "int8 hll_hash(time)",        1, "t/f:hll_hash_time" },
+	{ PGSTROM, "int8 hll_hash(timetz)",      1, "t/f:hll_hash_timetz" },
+	{ PGSTROM, "int8 hll_hash(timestamp)",   1, "t/f:hll_hash_timestamp" },
+	{ PGSTROM, "int8 hll_hash(timestamptz)", 1, "t/f:hll_hash_timestamptz" },
+	{ PGSTROM, "int8 hll_hash(bpchar)",      1, "s/f:hll_hash_bpchar" },
+	{ PGSTROM, "int8 hll_hash(text)",        1, "s/f:hll_hash_text" },
+	{ PGSTROM, "int8 hll_hash(uuid)",        1, "m/f:hll_hash_uuid"}
 };
 
 #undef PGSTROM

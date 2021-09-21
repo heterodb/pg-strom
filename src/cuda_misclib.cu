@@ -362,6 +362,18 @@ pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_uuid(kern_context *kcxt, pg_uuid_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(pgsql_uuid_t));
+	return result;
+}
+
 /*
  * Data Types for network address types
  * ---------------------------------------------------------------- */
