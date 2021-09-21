@@ -208,16 +208,13 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_upper,
 											PathTarget *target_final,
 											PathTarget *target_partial,
-											PathTarget *target_device,
 											Path       *input_path,
-											Bitmapset **p_pfunc_bitmap,
-											Node **p_havingQual,
-											bool *p_can_pullup_outerscan);
+											Node      **p_havingQual,
+											bool       *p_can_pullup_outerscan);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
 								  List *outer_tlist,
-								  GpuPreAggInfo *gpa_info,
-								  Bitmapset *pfunc_bitmap);
+								  GpuPreAggInfo *gpa_info);
 static void createGpuPreAggSharedState(GpuPreAggState *gpas,
 									   ParallelContext *pcxt,
 									   void *dsm_addr);
@@ -1184,7 +1181,6 @@ static CustomPath *
 make_gpupreagg_path(PlannerInfo *root,
 					RelOptInfo *group_rel,
 					PathTarget *target_partial,
-					Bitmapset *pfunc_bitmap,
 					Path *input_path,
 					double num_groups,
 					bool can_pullup_outerscan)
@@ -1254,7 +1250,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parallel_workers = parallel_nworkers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
-	cpath->custom_private = list_make2(gpa_info, pfunc_bitmap);
+	cpath->custom_private = list_make1(gpa_info);
 	cpath->methods = &gpupreagg_path_methods;
 
 	return cpath;
@@ -1268,7 +1264,6 @@ prepend_gpupreagg_path(PlannerInfo *root,
 					   RelOptInfo *group_rel,
 					   PathTarget *target_partial,
 					   Path *input_path,
-					   Bitmapset *pfunc_bitmap,
 					   double num_groups,
 					   bool can_pullup_outerscan,
 					   bool with_gather_node)
@@ -1311,7 +1306,6 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	 */
 	cpath = make_gpupreagg_path(root, group_rel,
 								target_partial,
-								pfunc_bitmap,
 								input_path,
 								num_groups,
 								can_pullup_outerscan);
@@ -1516,7 +1510,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   PathTarget *target_final,
 							   PathTarget *target_partial,
 							   Path *input_path,
-							   Bitmapset *pfunc_bitmap,
 							   List *havingQual,
 							   double num_groups,
 							   AggClauseCosts *agg_final_costs,
@@ -1569,7 +1562,6 @@ retry:
 											  group_rel,
 											  curr_partial,
 											  sub_path,
-											  pfunc_bitmap,
 											  num_groups,
 											  can_pullup_outerscan,
 											  false);
@@ -1644,9 +1636,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	PathTarget	   *target_upper	= root->upper_targets[UPPERREL_GROUP_AGG];
 	PathTarget	   *target_final	= create_empty_pathtarget();
 	PathTarget	   *target_partial	= create_empty_pathtarget();
-	PathTarget	   *target_device	= create_empty_pathtarget();
 	Path		   *partial_path;
-	Bitmapset	   *pfunc_bitmap;
 	Node		   *havingQual;
 	double			num_groups;
 	double			reduction_ratio;
@@ -1685,9 +1675,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									 target_upper,
 									 target_final,
 									 target_partial,
-									 target_device,
 									 input_path,
-									 &pfunc_bitmap,
 									 &havingQual,
 									 &can_pullup_outerscan))
 		return;
@@ -1714,7 +1702,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									   target_final,
 									   target_partial,
 									   input_path,
-									   pfunc_bitmap,
 									   (List *) havingQual,
 									   num_groups,
 									   &agg_final_costs,
@@ -1725,7 +1712,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 										  group_rel,
 										  target_partial,
 										  input_path,
-										  pfunc_bitmap,
 										  num_groups,
 										  can_pullup_outerscan,
 										  try_parallel_path);
@@ -2236,10 +2222,8 @@ static Node *
 make_alternative_aggref(PlannerInfo *root,
 						Aggref *aggref,
 						PathTarget *target_partial,
-						PathTarget *target_device,
 						PathTarget *target_input,
-						RelOptInfo *input_rel,
-						Bitmapset **p_pfunc_bitmap)
+						RelOptInfo *input_rel)
 {
 	const aggfunc_catalog_t *aggfn_cat;
 	Aggref	   *aggref_new;
@@ -2350,16 +2334,6 @@ make_alternative_aggref(PlannerInfo *root,
 			if (!pgstrom_device_expression(root, NULL, (Expr *)temp))
 				return NULL;
 		}
-		/*
-		 * Add partial-aggregate function expression
-		 * Also see add_new_column_to_pathtarget().
-		 */
-		if (!list_member(target_device->exprs, pfunc))
-		{
-			add_column_to_pathtarget(target_device, (Expr *)pfunc, 0);
-			*p_pfunc_bitmap = bms_add_member(*p_pfunc_bitmap,
-											 list_length(target_device->exprs) - 1);
-		}
 		/* append to the argument list */
 		altfunc_args = lappend(altfunc_args, (Expr *)pfunc);
 	}
@@ -2463,10 +2437,9 @@ typedef struct
 	PlannerInfo *root;
 	PathTarget *target_upper;
 	PathTarget *target_partial;
-	PathTarget *target_device;
 	PathTarget *target_input;
 	RelOptInfo *input_rel;
-	Bitmapset  *pfunc_bitmap;
+	Bitmapset  *__pfunc_bitmap__;
 	List	   *groupby_keys;
 } gpupreagg_build_path_target_context;
 
@@ -2484,10 +2457,8 @@ replace_expression_by_altfunc(Node *node,
 		Node   *aggfn = make_alternative_aggref(con->root,
 												(Aggref *)node,
 												con->target_partial,
-												con->target_device,
 												con->target_input,
-												con->input_rel,
-												&con->pfunc_bitmap);
+												con->input_rel);
 		if (!aggfn)
 			con->device_executable = false;
 		return aggfn;
@@ -2500,8 +2471,6 @@ replace_expression_by_altfunc(Node *node,
 		if (equal(node, expr_in))
 		{
 			add_new_column_to_pathtarget(con->target_partial,
-										 copyObject(expr_in));
-			add_new_column_to_pathtarget(con->target_device,
 										 copyObject(expr_in));
 			return copyObject(node);
 		}
@@ -2523,9 +2492,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_upper,	/* in */
 							PathTarget *target_final,	/* out */
 							PathTarget *target_partial,	/* out */
-							PathTarget *target_device,	/* out */
 							Path       *input_path,     /* in */
-							Bitmapset **p_pfunc_bitmap,	/* out */
 							Node **p_havingQual,		/* out */
 							bool *p_can_pullup_outerscan) /* out */
 {
@@ -2542,10 +2509,8 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	con.root			= root;
 	con.target_upper	= target_upper;
 	con.target_partial	= target_partial;
-	con.target_device	= target_device;
 	con.target_input	= target_input;
 	con.input_rel       = input_rel;
-	con.pfunc_bitmap    = NULL;
 	con.groupby_keys    = NIL;
 
 	/*
@@ -2594,7 +2559,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			if (!pgstrom_device_expression(root, input_rel, expr))
 				*p_can_pullup_outerscan = false;
 			/* add grouping-keys */
-			add_column_to_pathtarget(target_device, expr, sortgroupref);
 			add_column_to_pathtarget(target_partial, expr, sortgroupref);
 			add_column_to_pathtarget(target_final, expr, sortgroupref);
 		}
@@ -2634,8 +2598,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 
 	set_pathtarget_cost_width(root, target_final);
 	set_pathtarget_cost_width(root, target_partial);
-	set_pathtarget_cost_width(root, target_device);
-	*p_pfunc_bitmap = con.pfunc_bitmap;
 
 	return true;
 }
@@ -2778,7 +2740,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 {
 	CustomScan	   *cscan = makeNode(CustomScan);
 	GpuPreAggInfo  *gpa_info;
-	Bitmapset	   *pfunc_bitmap;
 	Index			outer_scanrelid = 0;
 	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
@@ -2786,9 +2747,8 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	char		   *kern_source;
 	codegen_context	context;
 
-	Assert(list_length(best_path->custom_private) == 2);
+	Assert(list_length(best_path->custom_private) == 1);
 	gpa_info = linitial(best_path->custom_private);
-	pfunc_bitmap = lsecond(best_path->custom_private);
 
 	Assert(list_length(custom_plans) <= 1);
 	if (custom_plans == NIL)
@@ -2844,8 +2804,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	kern_source = gpupreagg_codegen(&context,
 									cscan,
 									outer_tlist,
-									gpa_info,
-									pfunc_bitmap);
+									gpa_info);
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
 	gpa_info->outer_refs = outer_refs;
@@ -3240,13 +3199,15 @@ gpupreagg_codegen_projection(StringInfo kern,
 							 CustomScan *cscan,
 							 List *outer_tlist,
 							 List **p_tlist_part,
-							 List **p_tlist_prep)
+							 List **p_tlist_prep,
+							 Bitmapset **p_pfunc_bitmap)
 {
 	PlannerInfo	   *root = context->root;
 	Bitmapset	   *outer_refs_any = NULL;
 	Bitmapset	   *outer_refs_expr = NULL;
 	List		   *tlist_part = NIL;
 	List		   *tlist_prep = NIL;
+	Bitmapset	   *pfunc_bitmap = NULL;
 	StringInfoData	decl;
 	StringInfoData	tbody;		/* Row/Block */
 	StringInfoData	sbody;		/* Slot */
@@ -3506,13 +3467,14 @@ setup_expressions:
 		Expr		   *expr;
 		Oid				type_oid;
 		devtype_info   *dtype;
-		const char	   *label = NULL;
+		const char	   *label;
 
 		Assert(!tle->resjunk);
 		if (IsA(tle->expr, Var))
 		{
 			/* should be already loaded */
 			expr = tle->expr;
+			label = "grouping-key";
 		}
 		else
 		{
@@ -3521,6 +3483,8 @@ setup_expressions:
 				FuncExpr   *f = (FuncExpr *) tle->expr;
 
 				expr = codegen_projection_partial_funcion(f, context);
+				pfunc_bitmap = bms_add_member(pfunc_bitmap,
+											  list_length(tlist_prep));
 				label = "aggfunc-arg";
 			}
 			else if (tle->ressortgroupref)
@@ -3571,6 +3535,7 @@ setup_expressions:
 
 	*p_tlist_part = revert_tlist_device_projection(tlist_part, outer_tlist);
 	*p_tlist_prep = revert_tlist_device_projection(tlist_prep, outer_tlist);
+	*p_pfunc_bitmap = pfunc_bitmap;
 
 	/* const/params and temporary variable */
 	pgstrom_codegen_param_declarations(&decl, context);
@@ -4249,11 +4214,11 @@ static char *
 gpupreagg_codegen(codegen_context *context,
 				  CustomScan *cscan,
 				  List *outer_tlist,
-				  GpuPreAggInfo *gpa_info,
-				  Bitmapset *pfunc_bitmap)
+				  GpuPreAggInfo *gpa_info)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
+	Bitmapset	   *pfunc_bitmap = NULL;
 	size_t			varlena_bufsz = 0;
 	int				nfields;
 
@@ -4270,7 +4235,8 @@ gpupreagg_codegen(codegen_context *context,
 								 cscan,
 								 outer_tlist,
 								 &gpa_info->tlist_part,
-								 &gpa_info->tlist_prep);
+								 &gpa_info->tlist_prep,
+								 &pfunc_bitmap);
 	nfields = list_length(gpa_info->tlist_prep);
 	varlena_bufsz = (context->varlena_bufsz +
 					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
