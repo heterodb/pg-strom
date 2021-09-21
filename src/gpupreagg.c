@@ -1282,9 +1282,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parallel_workers = parallel_nworkers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
-	cpath->custom_private = list_make3(gpa_info,
-									   target_device,
-									   pfunc_bitmap);
+	cpath->custom_private = list_make2(gpa_info, pfunc_bitmap);
 	cpath->methods = &gpupreagg_path_methods;
 
 	return cpath;
@@ -2818,7 +2816,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 {
 	CustomScan	   *cscan = makeNode(CustomScan);
 	GpuPreAggInfo  *gpa_info;
-	PathTarget	   *target_device;
 	Bitmapset	   *pfunc_bitmap;
 	Index			outer_scanrelid = 0;
 	List		   *outer_refs = NIL;
@@ -2827,10 +2824,9 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	char		   *kern_source;
 	codegen_context	context;
 
-	Assert(list_length(best_path->custom_private) == 3);
+	Assert(list_length(best_path->custom_private) == 2);
 	gpa_info = linitial(best_path->custom_private);
-	target_device = lsecond(best_path->custom_private);
-	pfunc_bitmap = lthird(best_path->custom_private);
+	pfunc_bitmap = lsecond(best_path->custom_private);
 
 	Assert(list_length(custom_plans) <= 1);
 	if (custom_plans == NIL)
@@ -3069,13 +3065,14 @@ __revert_tlist_device_projection(Node *node, void *datum)
 	if (IsA(node, Var))
 	{
 		Var	   *varnode = (Var *)node;
-		Node   *temp;
+		TargetEntry *tle;
 
 		Assert(varnode->varno == OUTER_VAR &&
 			   varnode->varattno > 0 &&
 			   varnode->varattno <= list_length(outer_tlist));
-		temp = list_nth(outer_tlist, varnode->varattno - 1);
-		return copyObject(temp);
+		tle = list_nth(outer_tlist, varnode->varattno - 1);
+		Assert(IsA(tle, TargetEntry));
+		return (Node *)copyObject(tle->expr);
 	}
 	return expression_tree_mutator(node, __revert_tlist_device_projection, datum);
 }
@@ -4465,7 +4462,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
-	ListCell	   *lc	__attribute__((unused));
 	TupleDesc		part_tupdesc;
 	TupleDesc		prep_tupdesc;
 	TupleDesc		outer_tupdesc;
@@ -4550,6 +4546,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   &TTSOpsVirtual);
 	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc,
 												&TTSOpsHeapTuple);
+	
 	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_part,
 											   econtext,
 											   gpas->part_slot,
