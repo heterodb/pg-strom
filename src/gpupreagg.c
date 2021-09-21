@@ -4933,42 +4933,54 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 	TupleTableSlot *part_slot = gpas->part_slot;
 	TupleDesc		part_tupdesc = part_slot->tts_tupleDescriptor;
 	pgstrom_data_store *pds_final;
-	size_t			f_hash_nslots;
-	size_t			f_hash_length = 256UL << 20; //0xffffe000UL;	/* almost 4GB managed */
-	CUdeviceptr		m_fhash;
+	size_t			f_length;
+	size_t			f_hash_nslots = 0;
+	size_t			f_hash_length = 0;
+	CUdeviceptr		m_fhash = 0UL;
 	CUresult		rc;
 
 	if (gpas->pds_final)
 		return;
 
 	/* final buffer allocation */
+	if (gpas->num_group_keys == 0)
+		f_length = 0x00ffe000UL;		/* almost 16MB managed */
+	else
+		f_length = 0x3ffffe000UL;		/* almost 16GB managed */
+
 	pds_final = PDS_create_slot(gcontext,
 								part_tupdesc,
-								1UL << 30);
-								//0x3ffffe000);		/* almost 16GB managed */
+								f_length);
 	/* final hash-slot allocation */
-	if (gpas->plan_ngroups < 400000)
-		f_hash_nslots = 4 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 1200000)
-		f_hash_nslots = 3 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 4000000)
-		f_hash_nslots = 2 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 10000000)
-		f_hash_nslots = (double)gpas->plan_ngroups * 1.25;
-	else
-		f_hash_nslots = gpas->plan_ngroups;
-	
-	/*
-	 * Hash table allocation up to @f_hashlimit items, however, it initially
-	 * uses only @f_hashsize slot. If needs, GPU kernel extends the final
-	 * hash table on demand.
-	 */
-	rc = gpuMemAllocManaged(gcontext,
-							&m_fhash,
-							f_hash_length,
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	if (gpas->num_group_keys > 0)
+	{
+		if (gpas->plan_ngroups < 400000)
+			f_hash_nslots = 4 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 1200000)
+			f_hash_nslots = 3 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 4000000)
+			f_hash_nslots = 2 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 10000000)
+			f_hash_nslots = (double)gpas->plan_ngroups * 1.25;
+		else
+			f_hash_nslots = gpas->plan_ngroups;
+
+		f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
+		/*
+		 * The final hash-slot allocation. It initially use the leading
+		 * offsetof(kern_global_hashslot, slots[f_hash_nslots]) bytes
+		 * of the managed device memory, thus, not entire memory chunk
+		 * is used physically at that time.
+		 * Once @f_hash_nslots becomes unsufficient, GPU kernel expand
+		 * the hash-slot on the demand.
+		 */
+		rc = gpuMemAllocManaged(gcontext,
+								&m_fhash,
+								f_hash_length,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	}
 	gpas->pds_final		= pds_final;
 	gpas->m_fhash		= m_fhash;
 	gpas->ev_init_fhash	= NULL;
@@ -5331,6 +5343,13 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 	cl_int		grid_sz;
 	cl_int		block_sz;
 	void	   *kern_args[3];
+
+	/*
+	 * NoGroup reduction does not have final-hash buffer, thus
+	 * no need to initialize this.
+	 */
+	if (gpas->m_fhash == 0UL)
+		return;
 
 	pthreadMutexLock(&gpas->f_mutex);
 	STROM_TRY();
