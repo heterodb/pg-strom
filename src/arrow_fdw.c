@@ -705,14 +705,16 @@ __atoi128(const char *tok, bool *p_isnull)
 	{
 		ival = 10 * ival + (*tok - '0');
 		tok++;
-		if (is_minus && ival != 0)
-		{
-			ival = -ival;
-			is_minus = false;
-		}
 	}
-	if (is_minus || *tok != '\0')
+
+	if (*tok != '\0')
 		*p_isnull = true;
+	if (is_minus)
+	{
+		if (ival == 0)
+			*p_isnull = true;
+		ival = -ival;
+	}
 	return ival;
 }
 
@@ -1159,7 +1161,7 @@ __buildArrowStatsOper(arrowStatsHint *arange,
 		arange->eval_quals = lappend(arange->eval_quals, expr);
 	}
 	else if (strategy == BTGreaterEqualStrategyNumber ||
-		strategy == BTGreaterStrategyNumber)
+			 strategy == BTGreaterStrategyNumber)
 	{
 		/* (VAR >= ARG) --> (Max >= ARG) */
 		/* (VAR > ARG) --> (Max > ARG) */
