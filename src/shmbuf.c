@@ -947,7 +947,8 @@ MemoryStatsPrintfStderr(MemoryContext context,
 static void
 __shmemContextStatsPrint(MemoryContext __context,
 						 MemoryStatsPrintFunc printfunc, void *passthru,
-						 MemoryContextCounters *totals)
+						 MemoryContextCounters *totals,
+						 bool print_to_stderr)
 {
 	shmBufferContext *context = (shmBufferContext *) __context;
 	dlist_iter	iter;
@@ -991,7 +992,6 @@ __shmemContextStatsPrint(MemoryContext __context,
 		}
 	}
 	SpinLockRelease(&context->lock);
-
 	if (printfunc)
 	{
 		char	temp[1024];
@@ -1000,9 +1000,12 @@ __shmemContextStatsPrint(MemoryContext __context,
 				 "active (%dblocks / %zu bytes), free (%dblocks / %zu bytes)",
 				 active_chunks, active_space,
 				 free_chunks, free_space);
+#if PG_VERSION_NUM < 140000
 		printfunc(__context, passthru, temp);
+#else
+		printfunc(__context, passthru, temp, print_to_stderr);
+#endif
 	}
-
 	if (totals)
 	{
 		totals->nblocks += (active_chunks + free_chunks);
@@ -1012,25 +1015,24 @@ __shmemContextStatsPrint(MemoryContext __context,
 	}
 }
 
-#if PG_VERSION_NUM < 110000
-static void
-shmemContextStatsPrint(MemoryContext __context, int level, bool print,
-					   MemoryContextCounters *totals)
-{
-	__shmemContextStatsPrint(__context,
-							 print ? MemoryStatsPrintfStderr : NULL,
-							 &level,
-							 totals);
-}
-#else	/* PG10 or older */
+#if PG_VERSION_NUM < 140000
 static void
 shmemContextStatsPrint(MemoryContext __context,
 					   MemoryStatsPrintFunc printfunc, void *passthru,
 					   MemoryContextCounters *totals)
 {
-	__shmemContextStatsPrint(__context, printfunc, passthru, totals);
+	__shmemContextStatsPrint(__context, printfunc, passthru, totals, false);
 }
-#endif	/* PG11 or newer */
+#else
+static void
+shmemContextStatsPrint(MemoryContext __context,
+                       MemoryStatsPrintFunc printfunc, void *passthru,
+                       MemoryContextCounters *totals,
+					   bool print_to_stderr)
+{
+	__shmemContextStatsPrint(__context, printfunc, passthru, totals, print_to_stderr);
+}
+#endif
 
 #ifdef MEMORY_CONTEXT_CHECKING
 /*
@@ -1302,10 +1304,11 @@ pgstrom_shared_buffer_info(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(str.data);
 }
 
+#if 0
 /*
  * SharedMemoryContextCreate
  */
-MemoryContext
+static MemoryContext
 SharedMemoryContextCreate(const char *name)
 {
 	shmBufferContext   *scxt;
@@ -1328,6 +1331,34 @@ SharedMemoryContextCreate(const char *name)
 	SpinLockRelease(&shmBufSegHead->lock);
 
 	return mcxt;
+}
+#endif
+
+/*
+ * shmbufAlloc
+ */
+void *
+shmbufAlloc(size_t sz)
+{
+	return MemoryContextAlloc(TopSharedMemoryContext, sz);
+}
+
+/*
+ * shmbufAllocZero
+ */
+void *
+shmbufAllocZero(size_t sz)
+{
+	return MemoryContextAllocZero(TopSharedMemoryContext, sz);
+}
+
+/*
+ * shmbufFree
+ */
+void
+shmbufFree(void *addr)
+{
+	pfree(addr);
 }
 
 /*

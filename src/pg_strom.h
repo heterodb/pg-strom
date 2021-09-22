@@ -640,9 +640,11 @@ extern CUresult __gpuOptimalBlockSize(int *p_grid_sz,
 /*
  * shmbuf.c
  */
-extern MemoryContext	SharedMemoryContextCreate(const char *name);
-extern void				pgstrom_init_shmbuf(void);
-extern MemoryContext	TopSharedMemoryContext;
+extern void	   *shmbufAlloc(size_t sz);
+extern void	   *shmbufAllocZero(size_t sz);
+extern void		shmbufFree(void *addr);
+extern void		pgstrom_init_shmbuf(void);
+extern MemoryContext TopSharedMemoryContext;
 
 /*
  * gpu_mmgr.c
