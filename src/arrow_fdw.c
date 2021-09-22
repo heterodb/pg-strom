@@ -1306,8 +1306,21 @@ __fetchArrowStatsDatum(RecordBatchFieldState *fstate,
 			break;
 		case NUMERICOID:
 			{
-				return 0;
+				Int128_t	decimal;
+				int			dscale = fstate->attopts.decimal.scale;
+				char	   *result = palloc0(sizeof(struct NumericData));
+
+				decimal.ival = sval->i128;
+				while (dscale > 0 && decimal.ival % 10 == 0)
+				{
+					decimal.ival /= 10;
+					dscale--;
+				}
+				pg_numeric_to_varlena(result, dscale, decimal);
+
+				datum = PointerGetDatum(result);
 			}
+			break;
 		case DATEOID:
 			shift = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
 			switch (fstate->attopts.date.unit)
