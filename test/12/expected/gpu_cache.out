@@ -617,12 +617,13 @@ SELECT count(*) FROM cache_corruption_test;
    Output: pgstrom.sum((pgstrom.nrows()))
    ->  Custom Scan (GpuPreAgg) on gpu_cache_temp_test.cache_corruption_test
          Output: (pgstrom.nrows())
+         GPU Output: (pgstrom.nrows())
+         GPU Setup: '1'::bigint
          Reduction: NoGroup
-         GPU Projection: pgstrom.nrows()
          Outer Scan: gpu_cache_temp_test.cache_corruption_test
          GPU Cache: GPU0 [max_num_rows: 5000, main: 0, extra: 0]
          GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-(9 rows)
+(10 rows)
 
 -- cleanup temporary resource
 SET client_min_messages = error;
