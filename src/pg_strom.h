@@ -13,8 +13,8 @@
 #define PG_STROM_H
 
 #include "postgres.h"
-#if PG_VERSION_NUM < 100000
-#error Base PostgreSQL version must be v10 or later
+#if PG_VERSION_NUM < 110000
+#error Base PostgreSQL version must be v11 or later
 #endif
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
@@ -32,6 +32,9 @@
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
+#if PG_VERSION_NUM >= 140000
+#include "access/syncscan.h"
+#endif
 #include "access/sysattr.h"
 #if PG_VERSION_NUM < 130000
 #include "access/tuptoaster.h"
@@ -168,6 +171,7 @@
 #include "utils/cash.h"
 #include "utils/catcache.h"
 #include "utils/date.h"
+#include "utils/datetime.h"
 #if PG_VERSION_NUM >= 120000
 #include "utils/float.h"
 #endif

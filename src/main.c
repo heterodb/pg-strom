@@ -276,7 +276,7 @@ pgstrom_post_planner(Query *parse,
 		/* make hash-table to preserve GPU-aware path-nodes */
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.hcxt = CurrentMemoryContext;
-		hctl.keysize = 0;
+		hctl.keysize = offsetof(gpu_path_entry, cheapest_gpu_path);
 		hctl.entrysize = sizeof(gpu_path_entry);
 		hctl.hash = gpu_path_entry_hashvalue;
 		hctl.match = gpu_path_entry_compare;

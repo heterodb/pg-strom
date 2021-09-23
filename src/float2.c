@@ -1562,6 +1562,7 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 							 0,
 							 false,
 							 false,
+							 true,
 							 false);
 	/* Post creation hook for new shell type */
 	InvokeObjectPostCreateHook(TypeRelationId, type_oid, 0);

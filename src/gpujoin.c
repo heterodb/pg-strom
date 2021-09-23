@@ -1425,7 +1425,7 @@ __fixup_gist_clause_for_device_walker(Node *node, void *__context)
 	if (con->build_pseudo_tlist)
 	{
 		RelOptInfo *rel = con->index->rel;
-		Relids		varnos = pull_varnos_of_level(node, 0);
+		Relids		varnos = pull_varnos_of_level(con->root, node, 0);
 
 		if (!bms_overlap(varnos, rel->relids))
 		{
@@ -2179,10 +2179,10 @@ __extract_partitionwise_pathlist(PlannerInfo *root,
 	{
 		AppendPath *append_path = (AppendPath *) outer_path;
 
-		if (append_path->partitioned_rels == NIL)
-			return NIL;		/* not a partition, give up */
 		/*
-		 * In case when we have no tables to join, just extract AppendPath
+		 * In case when we have no tables to join (likely, when we try to
+		 * distribute GpuPreAgg to the child nodes of AppendPath),
+		 * just extract AppendPath.
 		 */
 		if (!parent_joinrel)
 		{
@@ -2437,7 +2437,6 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 #if PG_VERSION_NUM >= 110000
 	Value	   *join_nrows = makeFloat(psprintf("%e", joinrel->rows));
 	List	   *subpaths_list = NIL;
-	List	   *partitioned_rels;
 	AppendPath *append_path;
 	int			parallel_nworkers;
 	Cost		discount_cost;
@@ -2470,14 +2469,16 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	 * Now inner_path X outer_path is distributed to all the leaf-pathnodes.
 	 * Then, create a new AppendPath.
 	 */
-	partitioned_rels = copyObject(append_path->partitioned_rels);
 	if (try_outer_parallel)
 	{
 		append_path = create_append_path(root, joinrel,
 										 NIL, subpaths_list,
 										 NIL, required_outer,
 										 parallel_nworkers, true,
-										 partitioned_rels, -1.0);
+#if PG_VERSION_NUM < 140000
+										 append_path->partitioned_rels,
+#endif
+										 -1.0);
 		append_path->path.total_cost -= discount_cost;
 		if (gpu_path_remember(root, joinrel,
 							  true, false,
@@ -2490,7 +2491,10 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 subpaths_list, NIL,
 										 NIL, required_outer,
 										 0, false,
-										 partitioned_rels, -1.0);
+#if PG_VERSION_NUM < 140000
+										 append_path->partitioned_rels,
+#endif
+										 -1.0);
 		append_path->path.total_cost -= discount_cost;
 		if (gpu_path_remember(root, joinrel,
 							  false, false,
@@ -3229,8 +3233,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 			OpExpr		   *op_clause = (OpExpr *) rinfo->clause;
 			Node		   *arg1 = (Node *)linitial(op_clause->args);
 			Node		   *arg2 = (Node *)lsecond(op_clause->args);
-			Relids			relids1 = pull_varnos(arg1);
-			Relids			relids2 = pull_varnos(arg2);
+			Relids			relids1 = pull_varnos(root, arg1);
+			Relids			relids2 = pull_varnos(root, arg2);
 
 			/*
 			 * NOTE: Both sides of hash-join operator may have different
