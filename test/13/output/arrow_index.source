@@ -36,7 +36,6 @@ INSERT INTO arrow_index_data (
 -- Pick a record to search.
 CREATE TABLE target_num AS SELECT * FROM arrow_index_data WHERE id=500000;
 \! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o @abs_builddir@/test_arrow_index.data --stat=date_num
--- Checking whether the index is generated correctly. grep is used to adopt pg2arrow format change.
 \! [[ $(pg2arrow --dump @abs_builddir@/test_arrow_index.data | grep -c "16436,17733,19026,20324.*17733,19026,20324,20452") -eq 1 ]] && echo OK
 OK
 IMPORT FOREIGN SCHEMA regtest_arrow
