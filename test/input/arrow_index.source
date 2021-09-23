@@ -9,7 +9,10 @@ RESET client_min_messages;
 
 SET search_path = regtest_arrow_index_temp,public;
 
-CREATE TABLE regtest_data (
+-- Prepare data for arrow index test
+--SELECT pgstrom.random_setseed(20210905);
+CREATE TABLE arrow_index_data (
+  id         int,
   int_num         int,
   float_num       float,
   decimal_num     numeric,
@@ -18,15 +21,73 @@ CREATE TABLE regtest_data (
   timestamp_num   timestamp
 );
 
-INSERT INTO regtest_data (
+INSERT INTO arrow_index_data (
     SELECT x,   -- int_num
-        pgstrom.random_float(2,-10000.0,10000.0),   -- float_num
-        pgstrom.random_float(2,-10000.0,10000.0),   -- decimal_num
-        pgstrom.random_date(2),                     -- date_num
-        pgstrom.random_time(2),                     -- time_num
-        pgstrom.random_timestamp(2)                     -- date_num
-    FROM generate_series(1,100000) x);
+        pgstrom.random_int(0, -16777216, 16777216),   -- int_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- float_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- decimal_num
+        pgstrom.random_date(0),            -- date_num
+        pgstrom.random_time(0),              -- time_num
+        pgstrom.random_timestamp(0)                     -- date_num
+    FROM generate_series(1,1000000) x);
 
-\! pg2arrow --progress --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.regtest_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data
+-- ORDER BY date_num
+ 
+select min(date_num) as date_min,max(date_num) as date_max,
+min(int_num) as int_min,max(int_num) as int_max,
+min(decimal_num) as decimal_min,max(decimal_num) as decimal_max,
+min(float_num) as float_min,max(float_num) as float_max,
+min(time_num) as time_min,max(time_num) as time_max,
+min(timestamp_num) as timestamp_min,max(timestamp_num) as timestamp_max
+ from arrow_index_data;
+
+-- Pick a record to search.
+CREATE TEMP TABLE target_num AS select * from arrow_index_data WHERE int_num>0 limit 1;
+select * from target_num;
+
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o @abs_builddir@/test_arrow_index.data --stat=date_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index.data
+IMPORT FOREIGN SCHEMA regtest_arrow
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_index_temp
+OPTIONS (file '@abs_builddir@/test_arrow_index.data');
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow WHERE date_num=(SELECT date_num FROM target_num);
+
+-- ORDER BY int_num
+
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index_2.data --stat=int_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index_2.data
+IMPORT FOREIGN SCHEMA regtest_arrow2
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_index_temp
+OPTIONS (file '@abs_builddir@/test_arrow_index_2.data');
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow2 WHERE int_num=(SELECT int_num FROM target_num);
+SELECT COUNT(*) FROM regtest_arrow2 WHERE int_num=(SELECT int_num FROM target_num);
+
+
+-- ORDER BY float
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o @abs_builddir@/test_arrow_index.data --stat=float_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index.data
+
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow WHERE float_num=(SELECT float_num FROM target_num);
+
+-- ORDER BY decimal
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o @abs_builddir@/test_arrow_index.data --stat=decimal_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index.data
+
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow WHERE decimal_num=(SELECT decimal_num FROM target_num);
+
+-- ORDER BY time
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o @abs_builddir@/test_arrow_index.data --stat=time_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index.data
+
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow WHERE time_num=(SELECT time_num FROM target_num);
+
+-- ORDER BY timestamp
+\! pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o @abs_builddir@/test_arrow_index.data --stat=timestamp_num
+\! pg2arrow --dump @abs_builddir@/test_arrow_index.data
+
+EXPLAIN ANALYZE SELECT * FROM regtest_arrow WHERE timestamp_num=(SELECT timestamp_num FROM target_num);
+
 
 DROP SCHEMA regtest_arrow_index_temp CASCADE;
