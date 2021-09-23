@@ -29,22 +29,16 @@ struct kern_gpupreagg
 	/* -- runtime statistics -- */
 	cl_uint			nitems_real;		/* out: # of outer input rows */
 	cl_uint			nitems_filtered;	/* out: # of removed rows by quals */
-	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
 	cl_uint			extra_usage;		/* out: size of new allocation */
-	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
-	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
 	/* -- debug counter -- */
 	cl_ulong		tv_stat_debug1;		/* out: debug counter 1 */
 	cl_ulong		tv_stat_debug2;		/* out: debug counter 2 */
 	cl_ulong		tv_stat_debug3;		/* out: debug counter 3 */
 	cl_ulong		tv_stat_debug4;		/* out: debug counter 4 */
-	/* -- other hashing parameters -- */
-	cl_uint			key_dist_salt;			/* hashkey distribution salt */
-	cl_uint			hash_size;				/* size of global hash-slots */
+	/* -- kernel parameters buffer -- */
 	kern_parambuf	kparams;
 	/* <-- gpupreaggSuspendContext[], if any --> */
-	/* <-- gpupreaggRowInvalidationMap. if any --> */
 };
 typedef struct kern_gpupreagg	kern_gpupreagg;
 
@@ -184,36 +178,59 @@ gpupreagg_keymatch(kern_context *kcxt,
 extern __device__ cl_int		GPUPREAGG_NUM_ACCUM_VALUES;
 extern __device__ cl_int		GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 extern __device__ cl_int		GPUPREAGG_LOCAL_HASH_NROOMS;
+extern __device__ cl_int		GPUPREAGG_HLL_REGISTER_BITS;
 extern __device__ cl_short		GPUPREAGG_ACCUM_MAP_LOCAL[];
 extern __device__ cl_short		GPUPREAGG_ACCUM_MAP_GLOBAL[];
 extern __device__ cl_bool		GPUPREAGG_ATTR_IS_ACCUM_VALUES[];
 
 DEVICE_FUNCTION(void)
-gpupreagg_init_accum(cl_char  *dst_dclass,
-					 Datum    *dst_values,
-					 cl_short *dst_attmap);
+gpupreagg_init_slot(cl_char  *dst_dclass,
+					Datum    *dst_values,
+					char     *dst_extras,
+					cl_short *dst_attmap);
+
+
+
 DEVICE_FUNCTION(void)
 gpupreagg_init_local_slot(cl_char  *dst_dclass,
-						  Datum    *dst_values);
+						  Datum    *dst_values,
+						  char     *dst_extras);
 DEVICE_FUNCTION(void)
-gpupreagg_init_global_slot(cl_char  *dst_dclass,
-						   Datum    *dst_values);
-
-/* merge operation by shuffle */
+gpupreagg_init_final_slot(cl_char  *dst_dclass,
+						  Datum    *dst_values,
+						  char     *dst_extras);
+/*
+ * merge operation by shuffle
+ *
+ * Its dclass/values must be private array built according to
+ * the tlist_part definition.
+ */
 DEVICE_FUNCTION(void)
 gpupreagg_merge_shuffle(cl_char  *priv_dclass,	// private
 						Datum    *priv_values,	// private
 						cl_short *priv_attmap,
 						int       lane_id);
-/* normal merge operation */
+/*
+ * normal update operation (not atomic operations)
+ *
+ * The source dclass/values must be built according to the tlist_prep
+ * (thus, slots on kds_slots should be given). On the other hands, the
+ * destination dclass/values must be built according to the tlist_part;
+ * like kds_final, or local/private array.
+ */
 DEVICE_FUNCTION(void)
-gpupreagg_merge_normal(cl_char  *dst_dclass,
-					   Datum    *dst_values,
-					   cl_short *dst_attmap,
-					   cl_char  *src_dclass,
-					   Datum    *src_values,
-					   cl_short *src_attmap);
-/* atomic merge operation */
+gpupreagg_update_normal(cl_char  *dst_dclass,	/* tlist_part */
+						Datum    *dst_values,	/* tlist_part */
+						cl_short *dst_attmap,
+						cl_char  *src_dclass,	/* tlist_prep (kds_slot) */
+						Datum    *src_values,	/* tlist_prep (kds_slot) */
+						cl_short *src_attmap);
+/*
+ * atomic merge operation
+ *
+ * Both of source/destination dclass/values must be built according to
+ * the tlist_part. So, slots on kds_slot should not be used.
+ */
 DEVICE_FUNCTION(void)
 gpupreagg_merge_atomic(cl_char  *dst_dclass,
 					   Datum    *dst_values,
@@ -221,6 +238,22 @@ gpupreagg_merge_atomic(cl_char  *dst_dclass,
 					   cl_char  *src_dclass,
 					   Datum    *src_values,
 					   cl_short *src_attmap);
+/*
+ * atomic update operations
+ *
+ * The source dclass/values must be built according to the tlist_prep
+ * (thus, slots on kds_slots should be given). On the other hands, the
+ * destination dclass/values must be built according to the tlist_part;
+ * like kds_final, or local/private array.
+ */
+DEVICE_FUNCTION(void)
+gpupreagg_update_atomic(cl_char *dst_dclass,
+						Datum    *dst_values,
+						cl_short *dst_attmap,
+						cl_char  *src_dclass,	/* tlist_prep(kds_slot) */
+						Datum    *src_values,	/* tlist_prep(kds_slot) */
+						cl_short *src_attmap);
+
 /*
  * translate a kern_data_store (input) into an output form
  * (auto generated function)
@@ -277,10 +310,9 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
 							kern_data_store *kds_final,		/* global out */
-							cl_char *l_dclass,		/* __shared__ */
-							Datum   *l_values,		/* __shared__ */
 							cl_char *p_dclass,		/* __private__ */
-							Datum   *p_values);		/* __private__ */
+							Datum   *p_values,		/* __private__ */
+							char    *p_extras);		/* __private__ */
 DEVICE_FUNCTION(void)
 gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_gpupreagg *kgpreagg,		/* in/out */
@@ -290,7 +322,8 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_global_hashslot *f_hash,	/* shared out */
 							preagg_hash_item *l_hitems,		/* __shared__ */
 							cl_char    *l_dclass,			/* __shared__ */
-							Datum      *l_values);			/* __shared__ */
+							Datum      *l_values,			/* __shared__ */
+							char       *l_extras);			/* __shared__ */
 #endif /* __CUDACC__ */
 
 /* ----------------------------------------------------------------
@@ -322,231 +355,6 @@ AGGCALC_INIT_TEMPLATE(min_double, __double_as_longlong(DBL_MAX))
 AGGCALC_INIT_TEMPLATE(max_double, __double_as_longlong(-DBL_MAX))
 AGGCALC_INIT_TEMPLATE(add_double, __double_as_longlong(0.0))
 #undef AGGCALC_INIT_TEMPLATE
-
-STATIC_INLINE(void)
-aggcalc_atomic_min_int(cl_char *p_accum_dclass,
-					   Datum   *p_accum_datum,
-					   cl_char  newval_dclass,
-					   Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
-
-		atomicMin((cl_int *)p_accum_datum, newval_int);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_max_int(cl_char *p_accum_dclass,
-					   Datum   *p_accum_datum,
-					   cl_char  newval_dclass,
-					   Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
-
-		atomicMax((cl_int *)p_accum_datum, newval_int);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_add_int(cl_char *p_accum_dclass,
-					   Datum   *p_accum_datum,
-					   cl_char  newval_dclass,
-					   Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_int		newval_int = (cl_int)(newval_datum & 0xffffffff);
-
-		atomicAdd((cl_int *)p_accum_datum, newval_int);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_min_long(cl_char *p_accum_dclass,
-						Datum   *p_accum_datum,
-						cl_char  newval_dclass,
-						Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		atomicMin((cl_long *)p_accum_datum, (cl_long)newval_datum);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-
-STATIC_INLINE(void)
-aggcalc_atomic_max_long(cl_char *p_accum_dclass,
-						Datum   *p_accum_datum,
-						cl_char  newval_dclass,
-						Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		atomicMax((cl_long *)p_accum_datum, (cl_long)newval_datum);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_add_long(cl_char *p_accum_dclass,
-						Datum   *p_accum_datum,
-						cl_char  newval_dclass,
-						Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		atomicAdd((cl_ulong *)p_accum_datum, (cl_ulong)newval_datum);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_min_float(cl_char *p_accum_dclass,
-						 Datum   *p_accum_datum,
-						 cl_char  newval_dclass,
-						 Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_uint		curval = *((cl_uint *)p_accum_datum);
-		cl_uint		newval = (newval_datum & 0xffffffff);
-		cl_uint		oldval;
-
-		do {
-			oldval = curval;
-			if (__int_as_float(oldval) < __int_as_float(newval))
-				break;
-		} while ((curval = atomicCAS((cl_uint *)p_accum_datum,
-									 oldval, newval)) != oldval);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_max_float(cl_char *p_accum_dclass,
-						 Datum   *p_accum_datum,
-						 cl_char  newval_dclass,
-						 Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_uint		curval = *((cl_uint *)p_accum_datum);
-		cl_uint		newval = (newval_datum & 0xffffffff);
-		cl_uint		oldval;
-
-		do {
-			oldval = curval;
-			if (__int_as_float(oldval) > __int_as_float(newval))
-				break;
-		} while ((curval = atomicCAS((cl_uint *)p_accum_datum,
-									 oldval, newval)) != oldval);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_add_float(cl_char *p_accum_dclass,
-						 Datum   *p_accum_datum,
-						 cl_char  newval_dclass,
-						 Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		atomicAdd((cl_float *)p_accum_datum,
-				  __int_as_float(newval_datum & 0xffffffff));
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_min_double(cl_char *p_accum_dclass,
-						  Datum   *p_accum_datum,
-						  cl_char  newval_dclass,
-						  Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_ulong	curval = *((cl_ulong *)p_accum_datum);
-		cl_ulong	newval = (cl_ulong)newval_datum;
-		cl_ulong	oldval;
-
-		do {
-			oldval = curval;
-			if (__longlong_as_double(oldval) < __longlong_as_double(newval))
-				break;
-		} while ((curval = atomicCAS((cl_ulong *)p_accum_datum,
-									 oldval, newval)) != oldval);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_max_double(cl_char *p_accum_dclass,
-						  Datum   *p_accum_datum,
-						  cl_char  newval_dclass,
-						  Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		cl_ulong	curval = *((cl_ulong *)p_accum_datum);
-		cl_ulong	newval = (cl_ulong)newval_datum;
-		cl_ulong	oldval;
-
-		do {
-			oldval = curval;
-			if (__longlong_as_double(oldval) > __longlong_as_double(newval))
-				break;
-		} while ((curval = atomicCAS((cl_ulong *)p_accum_datum,
-									 oldval, newval)) != oldval);
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_add_double(cl_char *p_accum_dclass,
-						  Datum   *p_accum_datum,
-						  cl_char  newval_dclass,
-						  Datum    newval_datum)
-{
-	if (newval_dclass == DATUM_CLASS__NORMAL)
-	{
-		atomicAdd((cl_double *)p_accum_datum,
-				  __longlong_as_double(newval_datum));
-		*p_accum_dclass = DATUM_CLASS__NORMAL;
-	}
-	else
-		assert(newval_dclass == DATUM_CLASS__NULL);
-}
 
 STATIC_INLINE(void)
 aggcalc_normal_min_int(cl_char *p_accum_dclass,
@@ -779,6 +587,271 @@ AGGCALC_SHUFFLE_TEMPLATE(max_double)
 AGGCALC_SHUFFLE_TEMPLATE(add_double)
 #undef AGGCALC_SHUFFLE_TEMPLATE
 
+STATIC_INLINE(void)
+aggcalc_merge_min_int(cl_char *p_accum_dclass,
+					  Datum   *p_accum_datum,
+					  cl_char  newval_dclass,
+					  Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
+		atomicMin((cl_int *)p_accum_datum, newval_int);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_max_int(cl_char *p_accum_dclass,
+					   Datum   *p_accum_datum,
+					   cl_char  newval_dclass,
+					   Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
+		atomicMax((cl_int *)p_accum_datum, newval_int);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_add_int(cl_char *p_accum_dclass,
+					  Datum   *p_accum_datum,
+					  cl_char  newval_dclass,
+					  Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_int		newval_int = (cl_int)(newval_datum & 0xffffffff);
+
+		atomicAdd((cl_int *)p_accum_datum, newval_int);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_min_long(cl_char *p_accum_dclass,
+					   Datum   *p_accum_datum,
+					   cl_char  newval_dclass,
+					   Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		atomicMin((cl_long *)p_accum_datum, (cl_long)newval_datum);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+
+STATIC_INLINE(void)
+aggcalc_merge_max_long(cl_char *p_accum_dclass,
+					   Datum   *p_accum_datum,
+					   cl_char  newval_dclass,
+					   Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		atomicMax((cl_long *)p_accum_datum, (cl_long)newval_datum);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_add_long(cl_char *p_accum_dclass,
+					   Datum   *p_accum_datum,
+					   cl_char  newval_dclass,
+					   Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		atomicAdd((cl_ulong *)p_accum_datum, (cl_ulong)newval_datum);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_min_float(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_uint		curval = *((cl_uint *)p_accum_datum);
+		cl_uint		newval = (newval_datum & 0xffffffff);
+		cl_uint		oldval;
+
+		do {
+			oldval = curval;
+			if (__int_as_float(oldval) < __int_as_float(newval))
+				break;
+		} while ((curval = atomicCAS((cl_uint *)p_accum_datum,
+									 oldval, newval)) != oldval);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_max_float(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_uint		curval = *((cl_uint *)p_accum_datum);
+		cl_uint		newval = (newval_datum & 0xffffffff);
+		cl_uint		oldval;
+
+		do {
+			oldval = curval;
+			if (__int_as_float(oldval) > __int_as_float(newval))
+				break;
+		} while ((curval = atomicCAS((cl_uint *)p_accum_datum,
+									 oldval, newval)) != oldval);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_add_float(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		atomicAdd((cl_float *)p_accum_datum,
+				  __int_as_float(newval_datum & 0xffffffff));
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_min_double(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_ulong	curval = *((cl_ulong *)p_accum_datum);
+		cl_ulong	newval = (cl_ulong)newval_datum;
+		cl_ulong	oldval;
+
+		do {
+			oldval = curval;
+			if (__longlong_as_double(oldval) < __longlong_as_double(newval))
+				break;
+		} while ((curval = atomicCAS((cl_ulong *)p_accum_datum,
+									 oldval, newval)) != oldval);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_max_double(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		cl_ulong	curval = *((cl_ulong *)p_accum_datum);
+		cl_ulong	newval = (cl_ulong)newval_datum;
+		cl_ulong	oldval;
+
+		do {
+			oldval = curval;
+			if (__longlong_as_double(oldval) > __longlong_as_double(newval))
+				break;
+		} while ((curval = atomicCAS((cl_ulong *)p_accum_datum,
+									 oldval, newval)) != oldval);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+STATIC_INLINE(void)
+aggcalc_merge_add_double(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum)
+{
+	if (newval_dclass == DATUM_CLASS__NORMAL)
+	{
+		atomicAdd((cl_double *)p_accum_datum,
+				  __longlong_as_double(newval_datum));
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+	else
+		assert(newval_dclass == DATUM_CLASS__NULL);
+}
+
+#define aggcalc_update_min_int(a,b,c,d)		aggcalc_merge_min_int((a),(b),(c),(d))
+#define aggcalc_update_max_int(a,b,c,d)		aggcalc_merge_max_int((a),(b),(c),(d))
+#define aggcalc_update_add_int(a,b,c,d)		aggcalc_merge_add_int((a),(b),(c),(d))
+#define aggcalc_update_min_long(a,b,c,d)	aggcalc_merge_min_long((a),(b),(c),(d))
+#define aggcalc_update_max_long(a,b,c,d)	aggcalc_merge_max_long((a),(b),(c),(d))
+#define aggcalc_update_add_long(a,b,c,d)	aggcalc_merge_add_long((a),(b),(c),(d))
+#define aggcalc_update_min_float(a,b,c,d)	aggcalc_merge_min_float((a),(b),(c),(d))
+#define aggcalc_update_max_float(a,b,c,d)	aggcalc_merge_max_float((a),(b),(c),(d))
+#define aggcalc_update_add_float(a,b,c,d)	aggcalc_merge_add_float((a),(b),(c),(d))
+#define aggcalc_update_min_double(a,b,c,d)	aggcalc_merge_min_double((a),(b),(c),(d))
+#define aggcalc_update_max_double(a,b,c,d)	aggcalc_merge_max_double((a),(b),(c),(d))
+#define aggcalc_update_add_double(a,b,c,d)	aggcalc_merge_add_double((a),(b),(c),(d))
+
+/*
+ * aggcalc operations for hyper-log-log support
+ */
+DEVICE_FUNCTION(void)
+aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
+						Datum   *p_accum_datum,
+						char    *extra_buffer);
+DEVICE_FUNCTION(void)
+aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
+						   Datum   *p_accum_datum,
+						   int      lane_id);
+DEVICE_FUNCTION(void)
+aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum);
+DEVICE_FUNCTION(void)
+aggcalc_merge_hll_pcount(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum);
+DEVICE_FUNCTION(void)
+aggcalc_update_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum);
+
 #endif	/* __CUDACC__ */
 
 #ifdef __CUDACC_RTC__
@@ -850,11 +923,19 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
-	__shared__ cl_char	l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES * MAXWARPS_PER_BLOCK];
-	__shared__ Datum	l_values[__GPUPREAGG_NUM_ACCUM_VALUES * MAXWARPS_PER_BLOCK];
-	cl_char				p_dclass[__GPUPREAGG_NUM_ACCUM_VALUES];
-	Datum				p_values[__GPUPREAGG_NUM_ACCUM_VALUES];
-
+#if __GPUPREAGG_NUM_ACCUM_VALUES > 0
+	cl_char		nogroup_p_dclass[__GPUPREAGG_NUM_ACCUM_VALUES];
+	Datum		nogroup_p_values[__GPUPREAGG_NUM_ACCUM_VALUES];
+#else
+#define nogroup_p_dclass	NULL
+#define nogroup_p_values	NULL
+#endif
+#if __GPUPREAGG_ACCUM_EXTRA_BUFSZ > 0
+	char		nogroup_p_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ]
+				__attribute__ ((aligned(16)));
+#else
+#define nogroup_p_extras	NULL
+#endif
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 	/*
 	 * nogroup reduction has no grouping-key, so GPUPREAGG_NUM_ACCUM_VALUES has
@@ -865,25 +946,11 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 								kgjoin_errorbuf,
 								kds_slot,
 								kds_final,
-								l_dclass,
-								l_values,
-								p_dclass,
-								p_values);
+								nogroup_p_dclass,
+								nogroup_p_values,
+								nogroup_p_extras);
 	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
-
-/*
- * groupby reduction allocates 44kB for local hash area.
- * number of hash items depends on the number of accum values.
- * if number of groups exceeds the GPUPREAGG_LOCAL_HASH_NROOMS,
- * groupby reduction logic goes into direct global --> global
- * reduction.
- */
-#define __GPUPREAGG_LOCAL_HASH_NROOMS						\
-	((44 * 1024 - sizeof(preagg_local_hashtable))			\
-	 / (sizeof(preagg_hash_item) +							\
-		sizeof(cl_char) * __GPUPREAGG_NUM_ACCUM_VALUES +	\
-		sizeof(Datum)   * __GPUPREAGG_NUM_ACCUM_VALUES))
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
@@ -894,12 +961,30 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
-	__shared__ preagg_hash_item l_hitems[__GPUPREAGG_LOCAL_HASH_NROOMS];
-	__shared__ cl_char	l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES *
-								 __GPUPREAGG_LOCAL_HASH_NROOMS];
-	__shared__ Datum	l_values[__GPUPREAGG_NUM_ACCUM_VALUES *
-								 __GPUPREAGG_LOCAL_HASH_NROOMS];
-
+#if __GPUPREAGG_LOCAL_HASH_NROOMS > 0
+	__shared__ preagg_hash_item groupby_l_hitems[__GPUPREAGG_LOCAL_HASH_NROOMS];
+#if __GPUPREAGG_NUM_ACCUM_VALUES > 0
+	__shared__ cl_char	groupby_l_dclass[__GPUPREAGG_NUM_ACCUM_VALUES *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+	__shared__ Datum	groupby_l_values[__GPUPREAGG_NUM_ACCUM_VALUES *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS];
+#else	/* __GPUPREAGG_NUM_ACCUM_VALUES */
+#define groupby_l_dclass	NULL
+#define groupby_l_values	NULL
+#endif	/* __GPUPREAGG_NUM_ACCUM_VALUES */
+#if __GPUPREAGG_ACCUM_EXTRA_BUFSZ > 0
+	__shared__ char		groupby_l_extras[__GPUPREAGG_ACCUM_EXTRA_BUFSZ *
+										 __GPUPREAGG_LOCAL_HASH_NROOMS]
+						__attribute__((aligned(16)));
+#else	/* __GPUPREAGG_ACCUM_EXTRA_BUFSZ */
+#define groupby_l_extras	NULL
+#endif	/* __GPUPREAGG_ACCUM_EXTRA_BUFSZ */
+#else	/* __GPUPREAGG_LOCAL_HASH_NROOMS */
+#define groupby_l_hitems	NULL
+#define groupby_l_dclass	NULL
+#define groupby_l_values	NULL
+#define groupby_l_extras	NULL
+#endif	/* __GPUPREAGG_LOCAL_HASH_NROOMS */
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
 
 	gpupreagg_groupby_reduction(&u.kcxt,
@@ -908,9 +993,10 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 								kds_slot,
 								kds_final,
 								f_hash,
-								l_hitems,
-								l_dclass,
-								l_values);
+								groupby_l_hitems,
+								groupby_l_dclass,
+								groupby_l_values,
+								groupby_l_extras);
 	kern_writeback_error_status(&kgpreagg->kerror, &u.kcxt);
 }
 
@@ -918,6 +1004,7 @@ kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
 __device__ cl_int	GPUPREAGG_NUM_ACCUM_VALUES  = __GPUPREAGG_NUM_ACCUM_VALUES;
 __device__ cl_int	GPUPREAGG_ACCUM_EXTRA_BUFSZ = __GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 __device__ cl_int	GPUPREAGG_LOCAL_HASH_NROOMS = __GPUPREAGG_LOCAL_HASH_NROOMS;
+__device__ cl_int	GPUPREAGG_HLL_REGISTER_BITS = __GPUPREAGG_HLL_REGISTER_BITS;
 
 #endif /* __CUDACC_RTC__ */
 #endif /* CUDA_GPUPREAGG_H */

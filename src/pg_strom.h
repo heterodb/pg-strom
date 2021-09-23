@@ -13,8 +13,8 @@
 #define PG_STROM_H
 
 #include "postgres.h"
-#if PG_VERSION_NUM < 100000
-#error Base PostgreSQL version must be v10 or later
+#if PG_VERSION_NUM < 110000
+#error Base PostgreSQL version must be v11 or later
 #endif
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
@@ -32,6 +32,9 @@
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/relscan.h"
+#if PG_VERSION_NUM >= 140000
+#include "access/syncscan.h"
+#endif
 #include "access/sysattr.h"
 #if PG_VERSION_NUM < 130000
 #include "access/tuptoaster.h"
@@ -168,6 +171,7 @@
 #include "utils/cash.h"
 #include "utils/catcache.h"
 #include "utils/date.h"
+#include "utils/datetime.h"
 #if PG_VERSION_NUM >= 120000
 #include "utils/float.h"
 #endif
@@ -640,9 +644,11 @@ extern CUresult __gpuOptimalBlockSize(int *p_grid_sz,
 /*
  * shmbuf.c
  */
-extern MemoryContext	SharedMemoryContextCreate(const char *name);
-extern void				pgstrom_init_shmbuf(void);
-extern MemoryContext	TopSharedMemoryContext;
+extern void	   *shmbufAlloc(size_t sz);
+extern void	   *shmbufAllocZero(size_t sz);
+extern void		shmbufFree(void *addr);
+extern void		pgstrom_init_shmbuf(void);
+extern MemoryContext TopSharedMemoryContext;
 
 /*
  * gpu_mmgr.c
@@ -1231,6 +1237,7 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 /*
  * gpupreagg.c
  */
+extern int	pgstrom_hll_register_bits;
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
@@ -1416,9 +1423,6 @@ extern bool	gpu_path_remember(PlannerInfo *root,
 							  bool inner_parallel,
 							  const Path *gpu_path);
 
-extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
-									   Path *subpath,
-									   PathTarget *target);
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 
@@ -1957,32 +1961,5 @@ pthreadCondSignal(pthread_cond_t *cond)
 	  (double)(tv2.tv_usec - tv1.tv_usec)) / 1000.0)
 #define TP_DIFF(tp2,tp1)						\
 	((tp2.tv_sec - tp1.tv_sec) * 1000000000UL +	(tp2.tv_nsec - tp1.tv_nsec))
-
-/*
- * simple wrapper for permission checks
- */
-static inline void
-strom_proc_aclcheck(Oid func_oid, Oid user_id, AclMode mode)
-{
-	aclcheck_error(pg_proc_aclcheck(func_oid, user_id, mode),
-#if PG_VERSION_NUM < 110000
-				   ACL_KIND_PROC,
-#else
-				   OBJECT_FUNCTION,
-#endif
-				   format_procedure(func_oid));
-}
-
-static inline void
-strom_foreign_table_aclcheck(Oid ftable_oid, Oid user_id, AclMode mode)
-{
-	aclcheck_error(pg_class_aclcheck(ftable_oid, user_id, mode),
-#if PG_VERSION_NUM < 110000
-				   ACL_KIND_CLASS,
-#else
-				   OBJECT_FOREIGN_TABLE,
-#endif
-				   get_rel_name(ftable_oid));
-}
 
 #endif	/* PG_STROM_H */

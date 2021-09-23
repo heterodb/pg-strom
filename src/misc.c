@@ -514,11 +514,16 @@ pathnode_tree_walker(Path *node,
 				return true;
 			break;
 		case T_ModifyTablePath:
+#if PG_VERSION_NUM < 140000
 			foreach (lc, ((ModifyTablePath *)node)->subpaths)
 			{
 				if (walker((Path *)lfirst(lc), context))
 					return true;
 			}
+#else
+			if (walker(((ModifyTablePath *)node)->subpath))
+				return true;
+#endif
 			break;
 		case T_LimitPath:
 			if (walker(((LimitPath *)node)->subpath, context))
@@ -802,12 +807,16 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			{
 				ModifyTablePath *a = (ModifyTablePath *)pathnode;
 				ModifyTablePath *b = pmemdup(a, sizeof(ModifyTablePath));
+#if PG_VERSION_NUM < 140000
 				List	   *subpaths = NIL;
 				ListCell   *lc;
 				foreach (lc, a->subpaths)
 					subpaths = lappend(subpaths,
 									   pgstrom_copy_pathnode(lfirst(lc)));
 				b->subpaths = subpaths;
+#else
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+#endif
 				return &b->path;
 			}
 		case T_LimitPath:

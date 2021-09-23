@@ -298,7 +298,7 @@ put_int16_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		assert(sz == sizeof(int16_t));
-		value = (int16_t)__fetch_16bit(addr);
+		value = __fetch_16bit(addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
@@ -333,7 +333,7 @@ static size_t
 put_int32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32_t	value;
+	int32_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint32_t));
@@ -395,7 +395,7 @@ static size_t
 put_uint64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	int64_t		value;
+	uint64_t	value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint64_t));
@@ -420,7 +420,7 @@ static size_t
 put_float16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint16_t	value;
+	int16_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint16_t));
@@ -431,7 +431,7 @@ put_float16_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i16,(int16_t)value);
+		STAT_UPDATES(column,i16,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -440,7 +440,7 @@ static size_t
 put_float32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint32_t	value;
+	int32_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint32_t));
@@ -451,7 +451,7 @@ put_float32_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i32,(int32_t)value);
+		STAT_UPDATES(column,i32,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -460,7 +460,7 @@ static size_t
 put_float64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	uint64_t	value;
+	int64_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint64_t));
@@ -471,7 +471,7 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i64,(int64_t)value);
+		STAT_UPDATES(column,i64,value);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -634,7 +634,7 @@ static size_t
 __put_date_day_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
-	int64_t		value;
+	int32_t		value;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(int32_t));

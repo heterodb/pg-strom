@@ -1124,3 +1124,44 @@ pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2)
 #undef LIKE_TRUE
 #undef LIKE_FALSE
 #undef LIKE_ABORT
+
+/*
+ * Hyper-Log-Log Hash Functions
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_bpchar(kern_context *kcxt, pg_bpchar_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		char   *s;
+		cl_int	len;
+
+		if (!pg_bpchar_datum_extract(kcxt, arg1, &s, &len))
+			result.isnull = true;
+		else
+			result.value = pg_siphash_any((unsigned char *)s, len);
+	}
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_text(kern_context *kcxt, pg_text_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		char   *s;
+		cl_int	len;
+
+		if (!pg_varlena_datum_extract(kcxt, arg1, &s, &len))
+			result.isnull = true;
+		else
+			result.value = pg_siphash_any((unsigned char *)s, len);
+	}
+	return result;
+}

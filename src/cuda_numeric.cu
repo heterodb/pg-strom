@@ -1236,4 +1236,20 @@ pgfn_type_compare(kern_context *kcxt,
 		result.value = numeric_cmp(kcxt, arg1, arg2);
 	return result;
 }
+
+/*
+ * Hash-function for Hyper-Log-Log
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_numeric(kern_context *kcxt, pg_numeric_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  offsetof(pg_numeric_t, weight) + sizeof(cl_short));
+	return result;
+}
+
 #endif /* __CUDACC__ */

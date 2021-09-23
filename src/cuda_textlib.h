@@ -115,5 +115,14 @@ DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpchariclike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
 DEVICE_FUNCTION(pg_bool_t)
 pgfn_bpcharicnlike(kern_context *kcxt, pg_bpchar_t arg1, pg_text_t arg2);
+
+/*
+ * Hyper-Log-Log Hash Functions
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_bpchar(kern_context *kcxt, pg_bpchar_t arg1);
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_text(kern_context *kcxt, pg_text_t arg1);
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TEXTLIB_H */

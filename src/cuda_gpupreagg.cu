@@ -667,24 +667,6 @@ skip:
 		my_suspend->c.src_base = src_base;
 }
 
-STATIC_INLINE(void)
-gpupreagg_copy_accum(cl_char  *dst_dclass,
-					 Datum    *dst_values,
-					 cl_short *dst_attmap,
-					 cl_char  *src_dclass,
-					 Datum    *src_values,
-					 cl_short *src_attmap)
-{
-	for (int j=0; j < GPUPREAGG_NUM_ACCUM_VALUES; j++)
-	{
-		cl_short	src_index = src_attmap[j];
-		cl_short	dst_index = dst_attmap[j];
-
-		dst_dclass[dst_index] = src_dclass[src_index];
-		dst_values[dst_index] = src_values[src_index];
-	}
-}
-
 /*
  * gpupreagg_nogroup_reduction
  */
@@ -694,26 +676,18 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
 							kern_data_store *kds_final,		/* global out */
-							cl_char *l_dclass,		/* __shared__ */
-                            Datum   *l_values,  	/* __shared__ */
                             cl_char *p_dclass,		/* __private__ */
-                            Datum   *p_values)		/* __private__ */
+                            Datum   *p_values,		/* __private__ */
+							char	*p_extras)		/* __private__ */
 {
-	cl_uint			index;
-	cl_bool			is_last_reduction = false;
+	cl_bool		is_last_reduction = false;
+	cl_bool		try_final_merge = true;
 	__shared__ cl_uint	base;
 
 	/* init local/private buffer */
 	assert(MAXWARPS_PER_BLOCK <= get_local_size() &&
 		   MAXWARPS_PER_BLOCK == warpSize);
-	if (get_local_id() < MAXWARPS_PER_BLOCK)
-	{
-		cl_char	   *__dclass = l_dclass + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
-		Datum	   *__values = l_values + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
-
-		gpupreagg_init_local_slot(__dclass, __values);
-	}
-	gpupreagg_init_local_slot(p_dclass, p_values);
+	gpupreagg_init_local_slot(p_dclass, p_values, p_extras);
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
@@ -730,7 +704,10 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		kgpreagg->setup_slot_done = true;
 
 	/* start private reduction */
+	is_last_reduction = false;
 	do {
+		cl_uint		index;
+
 		/* fetch next items from the kds_slot */
 		if (get_local_id() == 0)
 			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
@@ -742,16 +719,18 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 		/* accumulate to the private buffer */
 		if (index < kds_slot->nitems)
 		{
-			gpupreagg_merge_normal(p_dclass,
-								   p_values,
-								   GPUPREAGG_ACCUM_MAP_LOCAL,
-								   KERN_DATA_STORE_DCLASS(kds_slot, index),
-								   KERN_DATA_STORE_VALUES(kds_slot, index),
-								   GPUPREAGG_ACCUM_MAP_GLOBAL);
+			gpupreagg_update_normal(p_dclass,
+									p_values,
+									GPUPREAGG_ACCUM_MAP_LOCAL,
+									KERN_DATA_STORE_DCLASS(kds_slot, index),
+									KERN_DATA_STORE_VALUES(kds_slot, index),
+									GPUPREAGG_ACCUM_MAP_GLOBAL);
 		}
 	} while (!is_last_reduction);
 
-	/* 1st level local reduction (inside warp) */
+	/*
+	 * inter-warp reduction using shuffle operations
+	 */
 	for (cl_uint mask = 1; mask < warpSize; mask += mask)
 	{
 		cl_uint		buddy_id = ((get_local_id() ^ mask) & (warpSize-1));
@@ -761,80 +740,65 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 								GPUPREAGG_ACCUM_MAP_LOCAL,
 								buddy_id);
 	}
-	/* move to the shared memory for inter-warp shuffling */
-	if ((get_local_id() & (warpSize-1)) == 0)
-	{
-		cl_uint		shift = (get_local_id() / warpSize) * GPUPREAGG_NUM_ACCUM_VALUES;
 
-		memcpy(l_dclass + shift, p_dclass, sizeof(cl_char) * GPUPREAGG_NUM_ACCUM_VALUES);
-		memcpy(l_values + shift, p_values, sizeof(Datum) *   GPUPREAGG_NUM_ACCUM_VALUES);
-	}
-	__syncthreads();
-
-	/* 2nd level local reduction (inter warp) */
-	if (get_local_id() < MAXWARPS_PER_BLOCK)
-	{
-		cl_char	   *__dclass = l_dclass + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
-		Datum	   *__values = l_values + get_local_id() * GPUPREAGG_NUM_ACCUM_VALUES;
-
-		memcpy(p_dclass, __dclass, sizeof(cl_char) * GPUPREAGG_NUM_ACCUM_VALUES);
-		memcpy(p_values, __values, sizeof(Datum)   * GPUPREAGG_NUM_ACCUM_VALUES);
-
-		for (cl_uint mask = 1; mask < MAXWARPS_PER_BLOCK; mask += mask)
+	/*
+	 * update the final buffer
+	 */
+	try_final_merge = ((get_local_id() & (warpSize - 1)) == 0);
+	do {
+		if (try_final_merge)
 		{
-			cl_uint		buddy_id = ((get_local_id() ^ mask) & (MAXWARPS_PER_BLOCK-1));
+			union {
+				struct {
+					cl_uint	nitems;
+					cl_uint	usage;
+				} i;
+				cl_ulong	v64;
+			} oldval, curval, newval;
 
-			gpupreagg_merge_shuffle(p_dclass,
-									p_values,
-									GPUPREAGG_ACCUM_MAP_LOCAL,
-									buddy_id);
-		}
-	}
+			assert((get_local_id() & (warpSize - 1)) == 0);
 
-	/* update the final buffer */
-	if (get_local_id() == 0)
-	{
-		cl_uint		old_nitems = 0;
-		cl_uint		new_nitems = 0xffffffff;	/* LOCKED */
-		cl_uint		cur_nitems;
+			oldval.i.nitems = 0;
+			oldval.i.usage  = kds_final->usage;
+			newval.i.nitems = 0xffffffffU;		/* LOCKED */
+			newval.i.usage  = kds_final->usage
+				+ __kds_packed(GPUPREAGG_ACCUM_EXTRA_BUFSZ);
 
-	try_again:
-		cur_nitems = atomicCAS(&kds_final->nitems,
-							   old_nitems,
-							   new_nitems);
-		if (cur_nitems == 0)
-		{
-			gpupreagg_copy_accum(KERN_DATA_STORE_DCLASS(kds_final, 0),
-								 KERN_DATA_STORE_VALUES(kds_final, 0),
-								 GPUPREAGG_ACCUM_MAP_GLOBAL,
-								 p_dclass,
-								 p_values,
-								 GPUPREAGG_ACCUM_MAP_LOCAL);
-			atomicAdd(&kgpreagg->num_groups, 1);
-			atomicExch(&kds_final->nitems, 1);		/* UNLOCKED */
+			curval.v64 = atomicCAS((cl_ulong *)&kds_final->nitems,
+								   oldval.v64,
+								   newval.v64);
+			if (curval.i.nitems <= 1)
+			{
+				cl_char	   *f_dclass = KERN_DATA_STORE_DCLASS(kds_final, 0);
+				Datum	   *f_values = KERN_DATA_STORE_VALUES(kds_final, 0);
+				char	   *f_extras;
+
+				if (curval.i.nitems == 0)
+				{
+					f_extras = ((char *)kds_final +
+								kds_final->length -
+								__kds_unpack(curval.i.usage) -
+								GPUPREAGG_ACCUM_EXTRA_BUFSZ);
+					gpupreagg_init_final_slot(f_dclass, f_values, f_extras);
+					atomicAdd(&kgpreagg->num_groups, 1);
+					__threadfence();
+					atomicExch(&kds_final->nitems, 1);	/* UNLOCK */
+				}
+				gpupreagg_merge_atomic(f_dclass,
+									   f_values,
+									   GPUPREAGG_ACCUM_MAP_GLOBAL,
+									   p_dclass,
+									   p_values,
+									   GPUPREAGG_ACCUM_MAP_LOCAL);
+				try_final_merge = false;
+				kgpreagg->final_buffer_modified = true;
+			}
+			else
+			{
+				assert(curval.i.nitems == 0xffffffffU);
+			}
 		}
-		else if (cur_nitems == 1)
-		{
-			/*
-			 * NOTE: nogroup reduction has no grouping keys, and
-			 * GpuPreAgg does not support aggregate functions that
-			 * have variable length fields as internal state.
-			 * So, we don't care about copy of grouping keys.
-			 */
-			gpupreagg_merge_atomic(KERN_DATA_STORE_DCLASS(kds_final, 0),
-								   KERN_DATA_STORE_VALUES(kds_final, 0),
-								   GPUPREAGG_ACCUM_MAP_GLOBAL,
-								   p_dclass,
-								   p_values,
-								   GPUPREAGG_ACCUM_MAP_LOCAL);
-		}
-		else
-		{
-			assert(cur_nitems == 0xffffffff);
-			goto try_again;
-		}
-		kgpreagg->final_buffer_modified = true;
-	}
+	} while (__syncthreads_count(try_final_merge) > 0);
 }
 
 #define HASHITEM_EMPTY		(0xffffffffU)
@@ -880,7 +844,7 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	cl_char	   *dst_dclass;
 	Datum	   *dst_values;
 	cl_uint		dst_index;
-	cl_uint		alloc_sz = 0;
+	cl_uint		alloc_sz;
 	char	   *extra = NULL;
 	union {
 		struct {
@@ -897,16 +861,22 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 	assert(src_index < kds_src->nitems);
 
 	/* size for extra allocation */
+	alloc_sz = GPUPREAGG_ACCUM_EXTRA_BUFSZ;
 	for (int j=0; j < kds_src->ncols; j++)
 	{
 		kern_colmeta   *cmeta = &kds_src->colmeta[j];
 		cl_char			dclass = src_dclass[j];
 		cl_uint			len;
 
+		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
+			continue;
 		if (dclass == DATUM_CLASS__NULL)
 			continue;
+
 		if (cmeta->attbyval)
+		{
 			assert(dclass == DATUM_CLASS__NORMAL);
+		}
 		else if (cmeta->attlen > 0)
 		{
 			assert(dclass == DATUM_CLASS__NORMAL);
@@ -969,6 +939,10 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		extra = (char *)kds_final + kds_final->length - __kds_unpack(newval.i.usage);
 	l_final_buffer_modified = true;
 
+	/* init final slot */
+	gpupreagg_init_final_slot(dst_dclass, dst_values, extra);
+	extra += GPUPREAGG_ACCUM_EXTRA_BUFSZ;
+
 	/* copy the grouping keys */
 	for (int j=0; j < kds_src->ncols; j++)
 	{
@@ -978,14 +952,9 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 		cl_uint			len;
 
 		if (GPUPREAGG_ATTR_IS_ACCUM_VALUES[j])
-		{
-			/*
-			 * accumulate values shall be copied later,
-			 * by gpupreagg_copy_accum().
-			 */
-			assert(cmeta->attbyval);
-		}
-		else if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
+			continue;
+
+		if (dclass == DATUM_CLASS__NULL || cmeta->attbyval)
 		{
 			dst_dclass[j] = dclass;
             dst_values[j] = datum;
@@ -1028,22 +997,21 @@ gpupreagg_create_final_slot(kern_context *kcxt,
 			extra += MAXALIGN(len);
 		}
 	}
-
 	/* copy the accum values */
 	if (l_dclass && l_values)
-		gpupreagg_copy_accum(dst_dclass,
-							 dst_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL,
-							 l_dclass,
-							 l_values,
-							 GPUPREAGG_ACCUM_MAP_LOCAL);
+		gpupreagg_merge_atomic(dst_dclass,
+							   dst_values,
+							   GPUPREAGG_ACCUM_MAP_GLOBAL,
+							   l_dclass,
+							   l_values,
+							   GPUPREAGG_ACCUM_MAP_LOCAL);
 	else
-		gpupreagg_copy_accum(dst_dclass,
-							 dst_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL,
-							 src_dclass,
-							 src_values,
-							 GPUPREAGG_ACCUM_MAP_GLOBAL);
+		gpupreagg_update_atomic(dst_dclass,
+								dst_values,
+								GPUPREAGG_ACCUM_MAP_GLOBAL,
+								src_dclass,
+								src_values,
+								GPUPREAGG_ACCUM_MAP_GLOBAL);
 	__threadfence();
 
 	return dst_index;
@@ -1250,7 +1218,7 @@ restart:
 									   l_values,
 									   GPUPREAGG_ACCUM_MAP_LOCAL);
 			else
-				 gpupreagg_merge_atomic(dst_dclass,
+				gpupreagg_update_atomic(dst_dclass,
 										dst_values,
 										GPUPREAGG_ACCUM_MAP_GLOBAL,
 										KERN_DATA_STORE_DCLASS(kds_slot, kds_index),
@@ -1338,8 +1306,9 @@ gpupreagg_local_reduction(kern_context *kcxt,
 						  cl_uint		hash,
 						  preagg_local_hashtable *l_htable,
 						  preagg_hash_item *l_hitems,
-						  cl_char     *l_dclass,
-						  Datum       *l_values)
+						  cl_char     *l_dclass,	/* __shared__ */
+						  Datum       *l_values,	/* __shared__ */
+						  char        *l_extras)	/* __shared__ */
 {
 	cl_uint		hindex = hash % GPUPREAGG_LOCAL_HASH_NSLOTS;
 	cl_uint		curr;
@@ -1380,6 +1349,7 @@ restart:
 			atomicExch(&l_htable->l_hslots[hindex], next);	//UNLOCK
 		return 0;	/* not found */
 	}
+	assert(l_hitems && l_dclass && l_values);
 
 	/*
 	 * Begin critical section
@@ -1415,8 +1385,13 @@ restart:
 	l_hitems[curr].index = index;
 	l_hitems[curr].hash  = hash;
 	l_hitems[curr].next  = next;
-	gpupreagg_init_local_slot(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-							  l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr);
+
+	l_dclass += GPUPREAGG_NUM_ACCUM_VALUES * curr;
+	l_values += GPUPREAGG_NUM_ACCUM_VALUES * curr;
+	if (l_extras)
+		l_extras += GPUPREAGG_ACCUM_EXTRA_BUFSZ * curr;
+	gpupreagg_init_local_slot(l_dclass, l_values, l_extras);
+
 	/*
 	 * __threadfence_block() makes above updates visible to other concurent
 	 * threads within this block.
@@ -1426,12 +1401,12 @@ restart:
 	atomicExch(&l_htable->l_hslots[hindex], curr);
 found:
 	/* Runs global-to-local reduction */
-	gpupreagg_merge_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-						   l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
-						   GPUPREAGG_ACCUM_MAP_LOCAL,
-						   KERN_DATA_STORE_DCLASS(kds_slot, index),
-						   KERN_DATA_STORE_VALUES(kds_slot, index),
-						   GPUPREAGG_ACCUM_MAP_GLOBAL);
+	gpupreagg_update_atomic(l_dclass,
+							l_values,
+							GPUPREAGG_ACCUM_MAP_LOCAL,
+							KERN_DATA_STORE_DCLASS(kds_slot, index),
+							KERN_DATA_STORE_VALUES(kds_slot, index),
+							GPUPREAGG_ACCUM_MAP_GLOBAL);
 	return 1;	/* ok, merged */
 }
 
@@ -1447,7 +1422,8 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 							kern_global_hashslot *f_hash,	/* out */
 							preagg_hash_item *l_hitems,     /* __shared__ */
 							cl_char    *l_dclass,           /* __shared__ */
-							Datum      *l_values)           /* __shared__ */
+							Datum      *l_values,           /* __shared__ */
+							char	   *l_extras)			/* __shared__ */
 {
 	cl_bool		is_last_reduction = false;
 	cl_uint		l_nitems;
@@ -1522,7 +1498,8 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 												   &l_htable,
 												   l_hitems,
 												   l_dclass,
-												   l_values);
+												   l_values,
+												   l_extras);
 			else
 				status = 1;
 
@@ -1612,4 +1589,185 @@ gpupreagg_groupby_reduction(kern_context *kcxt,
 	__syncthreads();
 	if (get_local_id() == 0 && l_final_buffer_modified)
 		kgpreagg->final_buffer_modified = true;
+}
+
+/*
+ * aggcalc operations for hyper-log-log
+ */
+DEVICE_FUNCTION(void)
+aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
+                        Datum   *p_accum_datum,
+                        char    *extra_pos)
+{
+	cl_uint		sz = VARHDRSZ + (1U << GPUPREAGG_HLL_REGISTER_BITS);
+
+	*p_accum_dclass = DATUM_CLASS__NULL;
+	memset(extra_pos, 0, sz);
+	SET_VARSIZE(extra_pos, sz);
+	*p_accum_datum = PointerGetDatum(extra_pos);
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
+                           Datum   *p_accum_datum,
+                           int      lane_id)
+{
+	cl_char		my_dclass;
+	cl_char		buddy_dclass;
+	varlena	   *hll_state = (varlena *)DatumGetPointer(*p_accum_datum);
+	cl_uint	   *hll_regs = (cl_uint *)VARDATA(hll_state);
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+
+	assert(VARSIZE_EXHDR(hll_state) == nrooms);
+	assert(__activemask() == ~0U);
+	my_dclass = *p_accum_dclass;
+	buddy_dclass = __shfl_sync(__activemask(), my_dclass, lane_id);
+
+	nrooms /= sizeof(cl_uint);
+	for (index=0; index < nrooms; index++)
+	{
+		union {
+			cl_uchar	regs[4];
+			cl_uint		v32;
+		}	myself, buddy;
+
+		myself.v32 = hll_regs[index];
+		buddy.v32 = __shfl_sync(__activemask(), myself.v32, lane_id);
+		if (my_dclass == DATUM_CLASS__NULL)
+		{
+			if (buddy_dclass != DATUM_CLASS__NULL)
+			{
+				hll_regs[index] = buddy.v32;
+				*p_accum_dclass = DATUM_CLASS__NORMAL;
+			}
+		}
+		else
+		{
+			assert(my_dclass == DATUM_CLASS__NORMAL);
+			if (buddy_dclass != DATUM_CLASS__NULL)
+			{
+				assert(buddy_dclass == DATUM_CLASS__NORMAL);
+				if (myself.regs[0] < buddy.regs[0])
+					myself.regs[0] = buddy.regs[0];
+				if (myself.regs[1] < buddy.regs[1])
+					myself.regs[1] = buddy.regs[1];
+				if (myself.regs[2] < buddy.regs[2])
+					myself.regs[2] = buddy.regs[2];
+				if (myself.regs[3] < buddy.regs[3])
+					myself.regs[3] = buddy.regs[3];
+				hll_regs[index] = myself.v32;
+			}
+		}
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
+                          Datum   *p_accum_datum,
+                          cl_char  newval_dclass,
+                          Datum    newval_datum)	/* = int8 hash */
+{
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+	cl_uint		count;
+	cl_char	   *hll_regs;
+
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+
+		
+		index = (newval_datum & (nrooms - 1));
+		count = __clzll(__brevll(newval_datum >> GPUPREAGG_HLL_REGISTER_BITS)) + 1;
+		hll_regs = VARDATA(*p_accum_datum);
+		if (hll_regs[index] < count)
+			hll_regs[index] = count;
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_merge_hll_pcount(cl_char *p_accum_dclass,
+						 Datum   *p_accum_datum,
+						 cl_char  newval_dclass,
+						 Datum    newval_datum)		/* =bytea hll-registers */
+{
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		cl_uint	   *dst_regs = (cl_uint *)VARDATA(*p_accum_datum);
+		cl_uint	   *new_regs = (cl_uint *)VARDATA(newval_datum);
+		cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+		cl_uint		index;
+
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+		assert(VARSIZE_EXHDR(*p_accum_datum) == nrooms &&
+			   VARSIZE_EXHDR(newval_datum) == nrooms);
+		nrooms /= sizeof(cl_uint);
+		for (index=0; index < nrooms; index++)
+		{
+			union {
+				cl_uchar	regs[4];
+				cl_uint		v32;
+			}	oldval, curval, newval, tmpval;
+
+			tmpval.v32 = __volatileRead(&new_regs[index]);
+			curval.v32 = __volatileRead(&dst_regs[index]);
+			do {
+				newval = oldval = curval;
+				if (newval.regs[0] < tmpval.regs[0])
+					newval.regs[0] = tmpval.regs[0];
+				if (newval.regs[1] < tmpval.regs[1])
+					newval.regs[1] = tmpval.regs[1];
+				if (newval.regs[2] < tmpval.regs[2])
+					newval.regs[2] = tmpval.regs[2];
+				if (newval.regs[3] < tmpval.regs[3])
+					newval.regs[3] = tmpval.regs[3];
+				if (newval.v32 == curval.v32)
+					break;
+			} while ((curval.v32 = atomicCAS(&dst_regs[index],
+											 oldval.v32,
+											 newval.v32)) != oldval.v32);
+		}
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
+}
+
+DEVICE_FUNCTION(void)
+aggcalc_update_hll_pcount(cl_char *p_accum_dclass,
+						  Datum   *p_accum_datum,
+						  cl_char  newval_dclass,
+						  Datum    newval_datum)	/* =int8 hash */
+{
+	cl_uint		nrooms = (1U << GPUPREAGG_HLL_REGISTER_BITS);
+	cl_uint		index;
+	cl_uint		count;
+	cl_uint	   *hll_regs;
+
+	if (newval_dclass != DATUM_CLASS__NULL)
+	{
+		union {
+			cl_uchar	regs[4];
+			cl_uint		v32;
+		}		oldval, curval, newval;
+
+		assert(newval_dclass == DATUM_CLASS__NORMAL);
+
+		index = (newval_datum & (nrooms - 1));
+		count = __clzll(__brevll(newval_datum >> GPUPREAGG_HLL_REGISTER_BITS)) + 1;
+		hll_regs = (cl_uint *)VARDATA(*p_accum_datum);
+		hll_regs += (index >> 2);
+		index &= 3;
+
+		curval.v32 = __volatileRead(hll_regs);
+		do {
+			if (count <= curval.regs[index])
+				break;
+			newval = oldval = curval;
+			newval.regs[index] = count;
+		} while ((curval.v32 = atomicCAS(hll_regs,
+										 oldval.v32,
+										 newval.v32)) != oldval.v32);
+		*p_accum_dclass = DATUM_CLASS__NORMAL;
+	}
 }
