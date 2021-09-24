@@ -152,7 +152,6 @@ gpu_path_entry_hashvalue(const void *key, Size keysize)
 	uint32		hash;
 	uint32		flags = 0;
 
-	Assert(keysize == 0);
 	hash = hash_uint32(((uintptr_t)gent->root & 0xffffffffUL) ^
 					   ((uintptr_t)gent->root >> 32));
 	if (gent->relids != NULL)
@@ -177,8 +176,6 @@ gpu_path_entry_compare(const void *key1, const void *key2, Size keysize)
 	gpu_path_entry *gent1 = (gpu_path_entry *)key1;
 	gpu_path_entry *gent2 = (gpu_path_entry *)key2;
 
-	Assert(keysize == 0);
-
 	if (gent1->root == gent2->root &&
 		bms_equal(gent1->relids, gent2->relids) &&
 		gent1->outer_parallel == gent2->outer_parallel &&
@@ -194,7 +191,6 @@ gpu_path_entry_keycopy(void *dest, const void *src, Size keysize)
 	gpu_path_entry *dent = (gpu_path_entry *)dest;
 	const gpu_path_entry *sent = (const gpu_path_entry *)src;
 
-	Assert(keysize == 0);
 	dent->root = sent->root;
 	dent->relids = bms_copy(sent->relids);
 	dent->outer_parallel = sent->outer_parallel;
