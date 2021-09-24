@@ -1826,17 +1826,28 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  20, "t/f:overlaps_timestamp" },
 	{ NULL, "bool overlaps(timestamptz,timestamptz,timestamptz,timestamptz)",
 	  20, "t/f:overlaps_timestamptz" },
-	/* extract() */
+	/* extract() - PG14 changed to return numeric, not float8 */
 	{ NULL, "float8 date_part(text,timestamp)",
-	  100, "t/f:extract_timestamp"},
+	  100, "t/f:date_part_timestamp"},
 	{ NULL, "float8 date_part(text,timestamptz)",
-	  100, "t/f:extract_timestamptz"},
+	  100, "t/f:date_part_timestamptz"},
 	{ NULL, "float8 date_part(text,interval)",
-	  100, "t/f:extract_interval"},
+	  100, "t/f:date_part_interval"},
 	{ NULL, "float8 date_part(text,timetz)",
-	  100, "t/f:extract_timetz"},
+	  100, "t/f:date_part_timetz"},
 	{ NULL, "float8 date_part(text,time)",
+	  100, "t/f:date_part_time"},
+
+	{ NULL, "numeric extract(text,timestamp)",
+	  100, "t/f:extract_timestamp"},
+	{ NULL, "numeric extract(text,timestamptz)",
+	  100, "t/f:extract_timestamptz"},
+	{ NULL, "numeric extract(text,time)",
 	  100, "t/f:extract_time"},
+	{ NULL, "numeric extract(text,timetz)",
+	  100, "t/f:extract_timetz"},
+	{ NULL, "numeric extract(text,interval)",
+	  100, "t/f:extract_interval"},
 
 	/* other time and data functions */
 	{ NULL, "timestamptz now()", 1, "t/f:now" },
