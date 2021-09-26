@@ -22,9 +22,9 @@ CREATE FUNCTION pgstrom.hll_hash(int1)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_int1'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, int1)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, int1)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_int1'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_int1'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(int2)
@@ -32,9 +32,9 @@ CREATE FUNCTION pgstrom.hll_hash(int2)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_int2'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, int2)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, int2)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_int2'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_int2'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(int4)
@@ -42,9 +42,9 @@ CREATE FUNCTION pgstrom.hll_hash(int4)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_int4'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, int4)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, int4)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_int4'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_int4'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(int8)
@@ -52,9 +52,9 @@ CREATE FUNCTION pgstrom.hll_hash(int8)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, int8)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, int8)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_int8'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_int8'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(numeric)
@@ -62,9 +62,9 @@ CREATE FUNCTION pgstrom.hll_hash(numeric)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, numeric)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, numeric)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_numeric'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_numeric'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(date)
@@ -72,9 +72,9 @@ CREATE FUNCTION pgstrom.hll_hash(date)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_date'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, date)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, date)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_date'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_date'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(time)
@@ -82,9 +82,9 @@ CREATE FUNCTION pgstrom.hll_hash(time)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_time'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, time)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, time)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_time'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_time'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(timetz)
@@ -92,9 +92,9 @@ CREATE FUNCTION pgstrom.hll_hash(timetz)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_timetz'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, timetz)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, timetz)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_timetz'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_timetz'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(timestamp)
@@ -102,9 +102,9 @@ CREATE FUNCTION pgstrom.hll_hash(timestamp)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_timestamp'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, timestamp)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, timestamp)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_timestamp'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_timestamp'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(timestamptz)
@@ -112,9 +112,9 @@ CREATE FUNCTION pgstrom.hll_hash(timestamptz)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_timestamptz'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, timestamptz)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, timestamptz)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_timestamptz'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_timestamptz'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(bpchar)
@@ -122,9 +122,9 @@ CREATE FUNCTION pgstrom.hll_hash(bpchar)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_bpchar'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, bpchar)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, bpchar)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_bpchar'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_bpchar'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(text)
@@ -132,9 +132,9 @@ CREATE FUNCTION pgstrom.hll_hash(text)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_varlena'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, text)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, text)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_varlena'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_varlena'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.hll_hash(uuid)
@@ -142,29 +142,36 @@ CREATE FUNCTION pgstrom.hll_hash(uuid)
   AS 'MODULE_PATHNAME','pgstrom_hll_hash_uuid'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_count_update(bytea, uuid)
+CREATE FUNCTION pgstrom.hll_sketch_update(bytea, uuid)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_count_update_uuid'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_update_uuid'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_pcount(bigint)
+
+--- Makes a new HLL Sketch by hash
+CREATE FUNCTION pgstrom.hll_sketch_new(bigint)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_pcount'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_new'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.hll_combined(bytea, bytea)
+--- Merge two HLL Sketches
+CREATE FUNCTION pgstrom.hll_sketch_merge(bytea, bytea)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_hll_combined'
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_merge'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
+--- Make estimation of the cardinarity from the HLL Sketch
 CREATE FUNCTION pgstrom.hll_count_final(bytea)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_hll_count_final'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
+---
+--- to be pg_catalog.hll_merge
+---
 CREATE AGGREGATE pgstrom.hll_count(bytea)
 (
-  sfunc = pgstrom.hll_combined,
+  sfunc = pgstrom.hll_sketch_merge,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
   parallel = safe
@@ -172,105 +179,211 @@ CREATE AGGREGATE pgstrom.hll_count(bytea)
 
 CREATE AGGREGATE pg_catalog.hll_count(int1)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(int1)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(int2)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(int2)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(int4)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(int4)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(int8)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(int8)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(numeric)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(numeric)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(date)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(date)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(time)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(time)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(timetz)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(timetz)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(timestamp)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(timestamp)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(timestamptz)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(timestamptz)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(bpchar)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(bpchar)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
   parallel = safe
 );
 
 CREATE AGGREGATE pg_catalog.hll_count(text)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
   parallel = safe
 );
 
+CREATE AGGREGATE pg_catalog.hll_sketch(text)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
+  parallel = safe
+);
+
 CREATE AGGREGATE pg_catalog.hll_count(uuid)
 (
-  sfunc = pgstrom.hll_count_update,
+  sfunc = pgstrom.hll_sketch_update,
   stype = bytea,
   finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_sketch(uuid)
+(
+  sfunc = pgstrom.hll_sketch_update,
+  stype = bytea,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_merge(bytea)
+(
+  sfunc = pgstrom.hll_sketch_merge,
+  stype = bytea,
+  finalfunc = pgstrom.hll_count_final,
+  parallel = safe
+);
+
+CREATE AGGREGATE pg_catalog.hll_combine(bytea)
+(
+  sfunc = pgstrom.hll_sketch_merge,
+  stype = bytea,
   parallel = safe
 );
 

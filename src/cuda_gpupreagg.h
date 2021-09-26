@@ -829,25 +829,25 @@ aggcalc_merge_add_double(cl_char *p_accum_dclass,
  * aggcalc operations for hyper-log-log support
  */
 DEVICE_FUNCTION(void)
-aggcalc_init_hll_pcount(cl_char *p_accum_dclass,
+aggcalc_init_hll_sketch(cl_char *p_accum_dclass,
 						Datum   *p_accum_datum,
 						char    *extra_buffer);
 DEVICE_FUNCTION(void)
-aggcalc_shuffle_hll_pcount(cl_char *p_accum_dclass,
+aggcalc_shuffle_hll_sketch(cl_char *p_accum_dclass,
 						   Datum   *p_accum_datum,
 						   int      lane_id);
 DEVICE_FUNCTION(void)
-aggcalc_normal_hll_pcount(cl_char *p_accum_dclass,
+aggcalc_normal_hll_sketch(cl_char *p_accum_dclass,
 						  Datum   *p_accum_datum,
 						  cl_char  newval_dclass,
 						  Datum    newval_datum);
 DEVICE_FUNCTION(void)
-aggcalc_merge_hll_pcount(cl_char *p_accum_dclass,
+aggcalc_merge_hll_sketch(cl_char *p_accum_dclass,
 						 Datum   *p_accum_datum,
 						 cl_char  newval_dclass,
 						 Datum    newval_datum);
 DEVICE_FUNCTION(void)
-aggcalc_update_hll_pcount(cl_char *p_accum_dclass,
+aggcalc_update_hll_sketch(cl_char *p_accum_dclass,
 						  Datum   *p_accum_datum,
 						  cl_char  newval_dclass,
 						  Datum    newval_datum);

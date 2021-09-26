@@ -57,8 +57,8 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_slope);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxx);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_sxy);
 PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
-PG_FUNCTION_INFO_V1(pgstrom_hll_pcount);
-PG_FUNCTION_INFO_V1(pgstrom_hll_combined);
+PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_new);
+PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_merge);
 PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
 
 /* utility to reference numeric[] */
@@ -1148,7 +1148,7 @@ __pgstrom_hll_hash_uuid(Datum datum)
 }
 
 static bytea *
-__pgstrom_hll_count_update_common(PG_FUNCTION_ARGS, uint64 hash)
+__pgstrom_hll_sketch_update_common(PG_FUNCTION_ARGS, uint64 hash)
 {
 	MemoryContext	aggcxt;
 	bytea		   *hll_state;
@@ -1182,7 +1182,7 @@ __pgstrom_hll_count_update_common(PG_FUNCTION_ARGS, uint64 hash)
 
 #define PGSTROM_HLL_HANDLER_TEMPLATE(NAME)								\
 	PG_FUNCTION_INFO_V1(pgstrom_hll_hash_##NAME);						\
-	PG_FUNCTION_INFO_V1(pgstrom_hll_count_update_##NAME);				\
+	PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_update_##NAME);				\
 	Datum																\
 	pgstrom_hll_hash_##NAME(PG_FUNCTION_ARGS)							\
 	{																	\
@@ -1190,7 +1190,7 @@ __pgstrom_hll_count_update_common(PG_FUNCTION_ARGS, uint64 hash)
 		PG_RETURN_UINT64(__pgstrom_hll_hash_##NAME(arg));				\
 	}																	\
 	Datum																\
-	pgstrom_hll_count_update_##NAME(PG_FUNCTION_ARGS)					\
+	pgstrom_hll_sketch_update_##NAME(PG_FUNCTION_ARGS)					\
 	{																	\
 		if (PG_ARGISNULL(1))											\
 		{																\
@@ -1204,7 +1204,7 @@ __pgstrom_hll_count_update_common(PG_FUNCTION_ARGS, uint64 hash)
 			uint64  hash = __pgstrom_hll_hash_##NAME(arg);				\
 			bytea  *state;												\
 																		\
-			state = __pgstrom_hll_count_update_common(fcinfo, hash);	\
+			state = __pgstrom_hll_sketch_update_common(fcinfo, hash);	\
 			PG_RETURN_BYTEA_P(state);									\
 		}																\
 	}
@@ -1224,10 +1224,10 @@ PGSTROM_HLL_HANDLER_TEMPLATE(varlena)
 PGSTROM_HLL_HANDLER_TEMPLATE(uuid)
 
 /*
- * pgstrom_hll_pcount
+ * pgstrom_hll_sketch_new
  */
 Datum
-pgstrom_hll_pcount(PG_FUNCTION_ARGS)
+pgstrom_hll_sketch_new(PG_FUNCTION_ARGS)
 {
 	uint64		nrooms = (1UL << pgstrom_hll_register_bits);
 	uint64		hll_hash = DatumGetUInt64(PG_GETARG_DATUM(0));
@@ -1250,10 +1250,10 @@ pgstrom_hll_pcount(PG_FUNCTION_ARGS)
 }
 
 /*
- * pgstrom_hll_combined
+ * pgstrom_hll_sketch_merge
  */
 Datum
-pgstrom_hll_combined(PG_FUNCTION_ARGS)
+pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 {
 	MemoryContext	aggcxt;
 	bytea		   *hll_state = NULL;
@@ -1265,19 +1265,17 @@ pgstrom_hll_combined(PG_FUNCTION_ARGS)
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
-	nrooms = (1UL << pgstrom_hll_register_bits);
 	if (PG_ARGISNULL(0))
 	{
-		size_t		len = sizeof(uint8) * nrooms;
-
 		if (PG_ARGISNULL(1))
 			PG_RETURN_NULL();
 		new_state = PG_GETARG_BYTEA_P(1);
-		if (VARSIZE_ANY_EXHDR(new_state) != len)
-			elog(ERROR, "invalid partial HLL state");
-		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + len);
-		SET_VARSIZE(hll_state, VARHDRSZ + len);
-		memcpy(VARDATA_ANY(hll_state), VARDATA_ANY(new_state), len);
+		nrooms = VARSIZE_ANY_EXHDR(new_state);
+		if ((nrooms & (nrooms - 1)) != 0)
+			elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
+		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + nrooms);
+		SET_VARSIZE(hll_state, VARHDRSZ + nrooms);
+		memcpy(VARDATA_ANY(hll_state), VARDATA_ANY(new_state), nrooms);
 
 		hll_regs = (uint8 *)VARDATA_ANY(hll_state);
 	}
@@ -1287,15 +1285,17 @@ pgstrom_hll_combined(PG_FUNCTION_ARGS)
 		if (!PG_ARGISNULL(1))
 		{
 			new_state = PG_GETARG_BYTEA_P(1);
-			if (VARSIZE_ANY_EXHDR(hll_state) != sizeof(uint8) * nrooms ||
-				VARSIZE_ANY_EXHDR(new_state) != sizeof(uint8) * nrooms)
-				elog(ERROR, "invalid HLL state");
+			if (VARSIZE_ANY_EXHDR(hll_state) != VARSIZE_ANY_EXHDR(new_state))
+				elog(ERROR, "incompatible HLL sketch");
+			nrooms = VARSIZE_ANY_EXHDR(hll_state);
+			if ((nrooms & (nrooms - 1)) != 0)
+				elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 			hll_regs = (uint8 *)VARDATA_ANY(hll_state);
 			new_regs = (uint8 *)VARDATA_ANY(new_state);
 			for (index=0; index < nrooms; index++)
 			{
 				if (hll_regs[index] < new_regs[index])
-					hll_regs[index] = new_regs[index];
+                    hll_regs[index] = new_regs[index];
 			}
 		}
 	}
@@ -1316,8 +1316,14 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 	double		weight;
 	double		estimate;
 
+#if 0
+	/*
+	 * MEMO: Here to no reason to prohibit to use pgstrom.hll_count_final()
+	 * towards preliminary calculated HLL sketch.
+	 */
 	if (!AggCheckCallContext(fcinfo, NULL))
 		elog(ERROR, "aggregate function called in non-aggregate context");
+#endif
 	if (PG_ARGISNULL(0))
 		PG_RETURN_INT64(0);
 	/*
