@@ -60,6 +60,7 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
 PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_new);
 PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_merge);
 PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
+PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_histgram);
 
 /* utility to reference numeric[] */
 static inline Datum
@@ -1271,7 +1272,7 @@ pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 			PG_RETURN_NULL();
 		new_state = PG_GETARG_BYTEA_P(1);
 		nrooms = VARSIZE_ANY_EXHDR(new_state);
-		if ((nrooms & (nrooms - 1)) != 0)
+		if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
 			elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + nrooms);
 		SET_VARSIZE(hll_state, VARHDRSZ + nrooms);
@@ -1288,7 +1289,7 @@ pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 			if (VARSIZE_ANY_EXHDR(hll_state) != VARSIZE_ANY_EXHDR(new_state))
 				elog(ERROR, "incompatible HLL sketch");
 			nrooms = VARSIZE_ANY_EXHDR(hll_state);
-			if ((nrooms & (nrooms - 1)) != 0)
+			if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
 				elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 			hll_regs = (uint8 *)VARDATA_ANY(hll_state);
 			new_regs = (uint8 *)VARDATA_ANY(new_state);
@@ -1330,27 +1331,68 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 	 * MEMO: Hyper-Log-Log merge algorithm
 	 * https://ja.wikiqube.net/wiki/HyperLogLog
 	 */
-	Assert(pgstrom_hll_register_bits >= 4 &&
-		   pgstrom_hll_register_bits <= 15);
-	nrooms = (1U << pgstrom_hll_register_bits);
 	hll_state = PG_GETARG_BYTEA_P(0);
-	Assert(VARSIZE(hll_state) == VARHDRSZ + sizeof(uint8) * nrooms);
+	nrooms = VARSIZE_ANY_EXHDR(hll_state);
+	if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
+		elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 	hll_regs = (uint8 *)VARDATA(hll_state);
 
 	for (index = 0; index < nrooms; index++)
 		divider += 1.0 / (double)(1UL << hll_regs[index]);
-
-	if (pgstrom_hll_register_bits <= 6)
-	{
-		static double	__weights[] = {
-			-1.0, -1.0, -1.0, -1.0, 0.673, 0.697, 0.709
-		};
-		weight = __weights[pgstrom_hll_register_bits];
-	}
+	if (nrooms <= 16)
+		weight = 0.673;
+	else if (nrooms <= 32)
+		weight = 0.697;
+	else if (nrooms <= 64)
+		weight = 0.709;
 	else
-	{
 		weight = 0.7213 / (1.0 + 1.079 / (double)nrooms);
-	}
+
 	estimate = (weight * (double)nrooms * (double)nrooms) / divider;
 	PG_RETURN_INT64((int64)estimate);
+}
+
+
+
+/*
+ * pgstrom_hll_sketch_histgram
+ */
+Datum
+pgstrom_hll_sketch_histgram(PG_FUNCTION_ARGS)
+{
+	bytea	   *hll_state = PG_GETARG_BYTEA_P(0);
+	uint8	   *hll_regs;
+	uint32		nrooms;
+	uint32		index;
+	Datum		hll_hist[64];
+	int			max_hist = -1;
+	ArrayType  *result;
+
+	nrooms = VARSIZE_ANY_EXHDR(hll_state);
+	if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
+		elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
+	hll_regs = (uint8 *)VARDATA(hll_state);
+
+	memset(hll_hist, 0, sizeof(hll_hist));
+	for (index=0; index < nrooms; index++)
+	{
+		int		value = (int)hll_regs[index];
+
+		if (value < 0 || value >= 64)
+			elog(ERROR, "HLL sketch looks corrupted");
+		hll_hist[value]++;
+		if (max_hist < value)
+			max_hist = value;
+	}
+
+	if (max_hist < 0)
+		PG_RETURN_NULL();
+
+	result = construct_array(hll_hist,
+							 max_hist + 1,
+							 INT4OID,
+							 sizeof(int32),
+							 true,
+							 'i');
+	PG_RETURN_POINTER(result);
 }

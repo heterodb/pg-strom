@@ -166,6 +166,12 @@ CREATE FUNCTION pgstrom.hll_count_final(bytea)
   AS 'MODULE_PATHNAME','pgstrom_hll_count_final'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
+--- Histgram of HLL Sketch
+CREATE FUNCTION pgstrom.hll_sketch_histgram(bytea)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','pgstrom_hll_sketch_histgram'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
 ---
 --- to be pg_catalog.hll_merge
 ---
