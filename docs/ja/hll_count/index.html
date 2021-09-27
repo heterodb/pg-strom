@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>HyperLogLog - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "HyperLogLog";
+    var mkdocs_page_input_path = "hll_count.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<strong>Japanese</strong> | <a href="../../hll_count/"    style="color: #cccccc">English</a>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">HyperLogLog</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">背景</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">利用方法</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">注意事項</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#hll-sketch">HLL Sketchの再利用</a>
+    </li>
+    </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>利用ガイド &raquo;</li>
+        
+      
+    
+    <li>HyperLogLog</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="hyperloglog-countdistinct">HyperLogLog版 COUNT(distinct)</h1>
+<h2 id="_1">背景</h2>
+<p>ユニークユーザ数やユニークアイテム数（これをカーディナリティと呼びます）の集計を目的として、しばしば大量のデータセットに対して<code>SELECT COUNT(distinct KEY)</code>構文を実行する事があります。
+しかし、キー値の重複排除とGPUを含む並列・分散処理との間には厄介なジレンマが存在します。</p>
+<p>キー値の重複排除を実装する場合、２つの戦略を考える事ができます。</p>
+<p>一つは、集計処理を行う Aggregate 処理への入力を予めキー値でソートしておき、キー値の値が変化するたびにカウンタをインクリメントするという実装。単純ですが、大量のデータをソートするのは重い処理である上に、レコードを処理する順序に強く依存する方式であるため、シングルスレッドで実行するほかありません。</p>
+<p>もう一つは、集計処理を行う Aggregate 処理ノードの内部にハッシュ表を作成し、重複排除のためにキー値を全てトラックするという方法が考えられます。メモリ消費量が事前に予測し難く、過大なリソースを消費してしまう事があります。</p>
+<p>これらの特性が、集約関数<code>COUNT(distinct KEY)</code>をGPUで並列実行する上での障害となっており、現在のところ、PG-Stromではこれをサポートしていません。</p>
+<p><img alt="Count with distinct" src="../img/hll_count_background.png" /></p>
+<h2 id="_2">概要</h2>
+<p>例えば<code>COUNT(distinct KEY)</code>で集計したユニークユーザ数を単にグラフとして出力する、つまりある程度の誤差は十分に許容範囲であるような利用シーンにおいては、厳密にキー値の重複排除と集計を行うのではなく、代わりに、ある程度の正確さが数学的に予測された推定値で代替するという方法が考えられます。</p>
+<p>HyperLogLogとは、大きなデータセットから重複しないキー値の数を推定するためのアルゴリズムです。その特性から、大規模なテーブルのスキャンを複数のプロセスで分割統治する事が容易で、消費するメモリサイズは十分に小さく事前に予測可能であるといった、GPUでの処理に適した特性を備えています。</p>
+<p>基本的な考え方を説明します。</p>
+<p>はじめに、重複排除を行うキー値をハッシュ関数にかけ、ハッシュ値を計算します。ハッシュ関数の性能が十分に良ければ、キー値に対応するハッシュ値のビットパターンはランダムに分布すると仮定します。そうすると、何種類ものキー値から導出したハッシュ値の中には、0が連続して出現するような特徴的なものも存在すると考えられます。</p>
+<p>例えば、32種類のキー値が存在するデータセットであれば、キー値から生成したハッシュ値の中に、<code>.... 10110000</code> というように、下位ビットから4個の0が連続するというパターンが出現する事は不思議ではないでしょう。このようにHyperLogLogでは、生成したハッシュ値のビットパターンのうち、下位ビットから連続した0の個数の最大値を調べる事で、元のデータセットのカーディナリティを推定するのです。</p>
+<p>実用上は、ハッシュ値のうち何ビットかを「レジスタセレクタ」として使用します。例えば8bit分をセレクタとして使用するのであれば、256個のレジスタからなるHLL Sketchを予め確保し、ハッシュ値の下位8bitを用いてHLL Sketch上のレジスタを指定します。そして、残るハッシュ値のうち最下位ビットからの連続する 0 の個数をカウントして、レジスタ毎にその最大値を記録します。
+最後にスキャンの終了後、256個のレジスタの内容を平均（調和平均）し、補正を加える事で、比較的精度の高いカーディナリティの推定を行う事ができます。</p>
+<p>レジスタに記録するのは下位ビットから連続する0の個数です。したがって、PG-Stromで利用する64bitのハッシュ関数なら、それぞれ8bitもあれば十分に必要な情報を記録する事ができ、レジスタの数が256個であれば必要な記憶領域の合計は僅かに256バイトにすぎません。</p>
+<p><img alt="HLL Algorithm" src="../img/hll_count_algorithm.png" /></p>
+<h2 id="_3">利用方法</h2>
+<p><code>count(distinct KEY)</code>の代わりに、PG-Stromが独自に提供する集約関数<code>hll_count(KEY)</code>を使用する事で、HyperLogLogを使用したカーディナリティの推測を行う事ができます。</p>
+<p>例えば、以下のクエリで厳密に重複排除を行った<code>lo_custkey</code>列のカーディナリティ数は2,000,000ですが、6億行(87GB)のテーブル<code>lineorder</code>からこれを導出するのに400秒以上を要しています。
+実行計画を見ると、CPU並列クエリは選択されておらず、シングルプロセスでテーブル全体をスキャンしている事が分かります。</p>
+<pre><code>=# select count(distinct lo_custkey) from lineorder ;
+  count
+---------
+ 2000000
+(1 row)
+
+Time: 403360.908 ms (06:43.361)
+
+=# explain select count(distinct lo_custkey) from lineorder ;
+                                  QUERY PLAN
+------------------------------------------------------------------------------
+ Aggregate  (cost=18896094.80..18896094.81 rows=1 width=8)
+   -&gt;  Seq Scan on lineorder  (cost=0.00..17396057.84 rows=600014784 width=6)
+(2 rows)
+</code></pre>
+<p>一方、<code>count(distinct lo_custkey)</code>の代わりに<code>hll_count(lo_custkey)</code>を利用すると、カーディナリティの推測値2,005,437（実際の値に対する誤差率0.3%）という比較的正確な値を、同じハードウェア上で40倍以上も高速に導出できている事が分かります。
+実行計画を確認すると、CPU並列クエリに加えて、GPUでの集約、GPU-Direct SQLといった各種の高速化技術を利用している事が分かります。</p>
+<pre><code>=# select hll_count(lo_custkey) from lineorder ;
+ hll_count
+-----------
+   2005437
+(1 row)
+
+Time: 9660.810 ms (00:09.661)
+
+=# explain select hll_count(lo_custkey) from lineorder ;
+                                                QUERY PLAN
+----------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=4992387.95..4992387.96 rows=1 width=8)
+   -&gt;  Gather  (cost=4992387.72..4992387.93 rows=2 width=32)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=4991387.72..4991387.73 rows=1 width=32)
+               Reduction: NoGroup
+               Outer Scan: lineorder  (cost=2833.33..4913260.79 rows=250006160 width=6)
+               GPU Preference: GPU0 (Tesla V100-PCIE-16GB)
+               GPUDirect SQL: enabled
+(8 rows)
+</code></pre>
+<h3 id="_4">注意事項</h3>
+<p>HyperLogLogのアルゴリズムの特性上、キー値のカーディナリティが小さい属性に対しては推定誤差が無視できないほど大きくなります。
+例えば、以下の<code>lineorder</code>テーブルの<code>lo_orderpriority</code>列は、<code>'1-URGENT'</code>から<code>'5-LOW'</code>まで僅か5種類の値しか持ちえません。
+<code>count(distinct lo_orderpriority)</code>により、厳密な重複排除を行って集計すると結果は5と出力されます。
+一方、<code>hll_count(lo_orderpriority)</code>を用いてカーディナリティの推測を行った場合、その結果は370と出力されてしまいました。</p>
+<p><code>hll_count()</code>の利用に際しては、データの特性や分布に対しても注意が必要です。</p>
+<pre><code>=# select count(distinct lo_orderpriority) from lineorder ;
+ count
+-------
+     5
+(1 row)
+
+=# select hll_count(lo_orderpriority) from lineorder ;
+ hll_count
+-----------
+       370
+(1 row)
+</code></pre>
+<h2 id="hll-sketch">HLL Sketchの再利用</h2>
+<p>もう一度、集約関数 <code>hll_count()</code> を実行した時の実行計画を確認してみます。
+<code>explain verbose</code>を実行すると、それぞれの処理ステップでどのような出力が行われるのかを確認する事ができます。</p>
+<pre><code>=# explain verbose select hll_count(lo_custkey) from lineorder ;
+                                                   QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=4992387.95..4992387.96 rows=1 width=8)
+   Output: hll_merge((pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey))))
+   -&gt;  Gather  (cost=4992387.72..4992387.93 rows=2 width=32)
+         Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on public.lineorder  (cost=4991387.72..4991387.73 rows=1 width=32)
+               Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+               GPU Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+               GPU Setup: pgstrom.hll_hash(lo_custkey)
+               Reduction: NoGroup
+               Outer Scan: public.lineorder  (cost=2833.33..4913260.79 rows=250006160 width=6)
+               GPU Preference: GPU0 (Tesla V100-PCIE-16GB)
+               GPUDirect SQL: enabled
+               Kernel Source: /var/lib/pgdata/pgsql_tmp/pgsql_tmp_strom_374786.6.gpu
+               Kernel Binary: /var/lib/pgdata/pgsql_tmp/pgsql_tmp_strom_374786.7.ptx
+(15 rows)
+</code></pre>
+<p>集約関数<code>hll_count()</code>をCPUで実行する代わりに、Aggregateでは <code>hll_merge()</code> が実行されているのが分かります。
+これは HLL Sketch である bytea データを受け取り、カーディナリティの推定値を出力する集約関数です。</p>
+<p>HLL Sketchを生成するのは GpuPreAgg の役割で、ここでは、<code>pgstrom.hll_hash()</code> で生成したハッシュ値を <code>pgstrom.hll_sketch_new()</code> に渡して、<code>lo_custkey</code>列のHLL Sketchを生成しています。
+なお、ここで生成されるHLL Sketchは既に部分集約が終わった状態のものですので、およそ2億レコードを処理した後のHLL Sketchを各ワーカーごとにそれぞれ1行だけ返却するという処理になります。</p>
+<p>つまり、2億件のレコードを1件のHLL Sketchに集約するまではGPUで実行し、最終的にHLL Sketchをマージして推計値を集計するところはCPUで実行しているわけです。</p>
+<p>このようなアルゴリズムの特性により、例えば、月次のデータごとに HLL Sketch を予め計算してデータベースに保存しておけば、キー値のカーディナリティを推定するためにテーブル全体をスキャンしなくても、差分データの HLL Sketch を計算し、保存していた HLL Sketch と合成するだけでキー値のカーディナリティを推定する事ができます。</p>
+<p>例えば、以下のクエリは年次単位でHLL Sketchを計算し、1995年以前のデータだけで lo_custkey のカーディナリティを推定しています。
+これはランダムに生成したデータですので、先ほどの例と同じ値を出力していますが、現実にはユーザ数の増加などに伴い推定値が変動する事でしょう。</p>
+<pre><code>=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) into pg_temp.my_sketch from lineorder group by 1;
+SELECT 7
+
+=# select year, hll_sketch_histgram(hll_sketch) from pg_temp.my_sketch;
+ year |                  hll_sketch_histgram
+------+-------------------------------------------------------
+ 1992 | {0,0,0,0,0,0,0,0,0,0,13,63,114,126,87,60,24,11,8,4,2}
+ 1993 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1994 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1995 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1996 | {0,0,0,0,0,0,0,0,0,0,13,64,112,126,87,61,24,11,8,4,2}
+ 1997 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1998 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+(7 rows)
+
+=# select hll_merge(hll_sketch) from pg_temp.my_sketch where year &lt; 1995;
+ hll_merge
+-----------
+   2005437
+(1 row)
+</code></pre>
+<p>なお、<code>hll_sketch_histgram()</code>はHLL Sketchの生データを引数として受け取り、そのレジスタ値の分布をヒストグラムとして返す関数です。</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../troubles/" class="btn btn-neutral float-right" title="トラブルシューティング">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../postgis/" class="btn btn-neutral" title="GPU版PostGIS"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../postgis/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>

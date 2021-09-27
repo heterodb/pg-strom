@@ -60,7 +60,7 @@ PG_FUNCTION_INFO_V1(pgstrom_float8_regr_syy);
 PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_new);
 PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_merge);
 PG_FUNCTION_INFO_V1(pgstrom_hll_count_final);
-PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_histgram);
+PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_histogram);
 
 /* utility to reference numeric[] */
 static inline Datum
@@ -1355,10 +1355,10 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 
 
 /*
- * pgstrom_hll_sketch_histgram
+ * pgstrom_hll_sketch_histogram
  */
 Datum
-pgstrom_hll_sketch_histgram(PG_FUNCTION_ARGS)
+pgstrom_hll_sketch_histogram(PG_FUNCTION_ARGS)
 {
 	bytea	   *hll_state = PG_GETARG_BYTEA_P(0);
 	uint8	   *hll_regs;

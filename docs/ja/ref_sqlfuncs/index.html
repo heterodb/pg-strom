@@ -69,6 +69,8 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                     </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                    </li>
                     <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                     </li>
                 </ul>
@@ -94,6 +96,8 @@
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUキャッシュ</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog">HyperLogLog 関数</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_2">テストデータ生成</a>
     </li>
@@ -380,6 +384,30 @@ ERROR:  target lists can have at most 1664 entries
 <dd></dd>
 <dt><code>bigint pgstrom.gpucache_recovery(regclass)</code></dt>
 <dd>破損（corrupted）状態となったGPUキャッシュを復元しようと試みます。</dd>
+<dd></dd>
+</dl>
+<h2 id="hyperloglog">HyperLogLog 関数</h2>
+<dl>
+<dt><code>bigint pg_catalog.hll_count(TYPE)</code></dt>
+<dd>HyperLogLogアルゴリズムを使用してキー値のカーディナリティを推定する集約関数です。</dd>
+<dd></dd>
+<dd><code>TYPE</code>は<code>int1</code>、<code>int2</code>、<code>int4</code>、<code>int8</code>、<code>numeric</code>、<code>date</code>、<code>time</code>、<code>timetz</code>、<code>timestamp</code>、<code>timestamptz</code>、<code>bpchar</code>、<code>text</code>、または<code>uuid</code>のいずれかです。</dd>
+<dd></dd>
+<dd>PG-StromのHyperLogLog機能について、詳しくは<a href="../hll_count/">HyperLogLog</a>を参照してください。</dd>
+<dd></dd>
+<dt><code>bytea pg_catalog.hll_sketch(TYPE)</code></dt>
+<dd>引数で与えたキー値から、HyperLogLogアルゴリズムで使用するHLL Sketchを生成し、<code>bytea</code>データとして返す集約関数です。</dd>
+<dd></dd>
+<dd><code>TYPE</code>は<code>int1</code>、<code>int2</code>、<code>int4</code>、<code>int8</code>、<code>numeric</code>、<code>date</code>、<code>time</code>、<code>timetz</code>、<code>timestamp</code>、<code>timestamptz</code>、<code>bpchar</code>、<code>text</code>、または<code>uuid</code>のいずれかです。</dd>
+<dd></dd>
+<dt><code>bigint pg_catalog.hll_merge(bytea)</code></dt>
+<dd>HLL Sketchから、元になったキー値のカーディナリティを推定する集約関数です。引数は<code>hll_sketch()</code>関数の生成したHLL Sketchである事が期待されています。</dd>
+<dd></dd>
+<dt><code>bytea pg_catalog.hll_combine(bytea)</code></dt>
+<dd>複数のHLL Sketchを結合し、その結果をまたHLL Sketchとして出力する集約関数です。例えば週次データのHLL Sketchを月次データに変換するといった利用方法を想定しています。</dd>
+<dd></dd>
+<dt><code>int4[] pg_catalog.hll_sketch_histogram(bytea)</code></dt>
+<dd>引数として与えたHLL Sketchを走査し、各レジスタの値に基づくヒストグラムを作成して出力する関数です。これは集約関数ではありません。<code>hll_sketch()</code>などで出力したHLL Sketchの内容を可視化する事を目的としています。</dd>
 <dd></dd>
 </dl>
 <h2 id="_2">テストデータ生成</h2>

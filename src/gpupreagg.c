@@ -23,7 +23,6 @@ static bool					enable_pullup_outer_join;		/* GUC */
 static bool					enable_partitionwise_gpupreagg;	/* GUC */
 static bool					enable_numeric_aggfuncs; 		/* GUC */
 static double				gpupreagg_reduction_threshold;	/* GUC */
-static bool					pgstrom_enable_hll_count;		/* GUC */
 int							pgstrom_hll_register_bits;		/* GUC */
 
 
@@ -295,7 +294,6 @@ typedef struct {
 	size_t	  (*partfn_extra_sz)(void);
 	int			extra_flags;
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
-	bool		distinct_aggfunc;
 } aggfunc_catalog_t;
 
 static aggfunc_catalog_t  aggfunc_catalog[] = {
@@ -304,38 +302,38 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "avg",    1, {INT4OID},
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "avg",    1, {INT8OID},
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "avg",    1, {FLOAT4OID},
 	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "avg",    1, {FLOAT8OID},
 	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
 	  "s:favg_numeric", FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  NULL, 0, true, false
+	  NULL, 0, true
 	},
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
@@ -343,21 +341,13 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "count",  1, {ANYOID},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS},
-	  NULL, 0, false, false
-	},
-	/* COUNT(distinct KEY) - only if hyper-log-log enabled */
-	{ "count",  1, {ANYOID},
-	  "c:hll_merge", BYTEAOID,
-	  "s:hll_sketch_new", 1, {INT8OID},
-	  {ALTFUNC_EXPR_HLL_HASH},
-	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, true
+	  NULL, 0, false
 	},
 	/* HLL_COUNT(KEY) */
 	{ "hll_count", 1, {INT1OID},
@@ -365,28 +355,28 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 	{ "hll_count", 1, {INT2OID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 	{ "hll_count", 1, {INT4OID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 	{ "hll_count", 1, {INT8OID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "hll_count", 1, {NUMERICOID},
@@ -394,7 +384,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, true, false,
+	  0, true
 	},
 #endif
  	{ "hll_count", 1, {DATEOID},
@@ -402,56 +392,56 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {TIMEOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {TIMETZOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {TIMESTAMPOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {TIMESTAMPTZOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {BPCHAROID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
  	{ "hll_count", 1, {TEXTOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 	{ "hll_count", 1, {UUIDOID},
 	  "c:hll_merge", BYTEAOID,
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
 	},
 	/* HLL_SKETCH(KEY) */
 	{ "hll_sketch", 1, {INT1OID},
@@ -459,28 +449,28 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {INT2OID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {INT4OID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {INT8OID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "hll_sketch", 1, {NUMERICOID},
@@ -488,7 +478,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, true, false,
+      0, true
     },
 #endif
 	{ "hll_sketch", 1, {DATEOID},
@@ -496,195 +486,194 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:hll_sketch_new", 1, {INT8OID},
 	  {ALTFUNC_EXPR_HLL_HASH},
 	  __aggfunc_property_extra_sz__hll_count,
-	  0, false, false,
+	  0, false
     },
 	{ "hll_sketch", 1, {TIMEOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {TIMETZOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {TIMESTAMPOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {TIMESTAMPTZOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {BPCHAROID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {TEXTOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	{ "hll_sketch", 1, {UUIDOID},
       "c:hll_combine", BYTEAOID,
       "s:hll_sketch_new", 1, {INT8OID},
       {ALTFUNC_EXPR_HLL_HASH},
       __aggfunc_property_extra_sz__hll_count,
-      0, false, false,
+      0, false
     },
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max",    1, {INT2OID},
 	  "s:fmax_int2", INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {INT4OID},
 	  "c:max",      INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {INT8OID},
 	  "c:max",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {FLOAT4OID},
 	  "c:max",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {FLOAT8OID},
 	  "c:max",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max",    1, {NUMERICOID},
 	  "s:fmax_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, true, false
+	  NULL, 0, true
 	},
 #endif
 	{ "max",    1, {CASHOID},
 	  "c:max",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, DEVKERNEL_NEEDS_MISCLIB, false, false
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	{ "max",    1, {DATEOID},
 	  "c:max",      DATEOID,
 	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMEOID},
 	  "c:max",      TIMEOID,
 	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMESTAMPOID},
 	  "c:max",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMESTAMPTZOID},
 	  "c:max",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
-
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min",    1, {INT2OID},
 	  "s:fmin_int2", INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {INT4OID},
 	  "c:min",      INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {INT8OID},
 	  "c:min",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {FLOAT4OID},
 	  "c:min",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {FLOAT8OID},
 	  "c:min",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min",    1, {NUMERICOID},
 	  "s:fmin_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, true, false
+	  NULL, 0, true
 	},
 #endif
 	{ "min",    1, {CASHOID},
 	  "c:min",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX},
-	  NULL, DEVKERNEL_NEEDS_MISCLIB, false, false
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	{ "min",    1, {DATEOID},
 	  "c:min",      DATEOID,
 	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMEOID},
 	  "c:min",      TIMEOID,
 	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMESTAMPOID},
 	  "c:min",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMESTAMPTZOID},
 	  "c:min",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMIN},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
@@ -692,45 +681,45 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "sum",    1, {INT4OID},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "sum",    1, {INT8OID},
 	  "c:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "sum",    1, {FLOAT4OID},
 	  "c:sum",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "sum",    1, {FLOAT8OID},
 	  "c:sum",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum",    1, {NUMERICOID},
 	  "s:fsum_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, 0, true, false
+	  NULL, 0, true
 	},
 #endif
 	{ "sum",    1, {CASHOID},
 	  "c:sum",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM},
-	  NULL, DEVKERNEL_NEEDS_MISCLIB, false, false
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev",      1, {INT2OID},
@@ -739,7 +728,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -747,7 +736,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -755,7 +744,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {FLOAT4OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
@@ -763,7 +752,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {FLOAT8OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
@@ -771,7 +760,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev",      1, {NUMERICOID},
@@ -780,7 +769,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -790,7 +779,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -798,7 +787,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -806,7 +795,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {FLOAT4OID},
 	  "s:stddev_pop",    FLOAT8ARRAYOID,
@@ -814,7 +803,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {FLOAT8OID},
 	  "s:stddev_pop",    FLOAT8ARRAYOID,
@@ -822,7 +811,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_pop",  1, {NUMERICOID},
@@ -831,7 +820,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -841,7 +830,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -849,7 +838,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
@@ -857,7 +846,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp",   FLOAT8ARRAYOID,
@@ -865,7 +854,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {FLOAT8OID},
 	  "s:stddev_samp",   FLOAT8ARRAYOID,
@@ -873,7 +862,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_samp", 1, {NUMERICOID},
@@ -882,7 +871,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -892,7 +881,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "variance",    1, {INT4OID},
 	  "s:variance_numeric", FLOAT8ARRAYOID,
@@ -900,7 +889,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "variance",    1, {INT8OID},
 	  "s:variance_numeric", FLOAT8ARRAYOID,
@@ -908,7 +897,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "variance",    1, {FLOAT4OID},
 	  "s:variance",      FLOAT8ARRAYOID,
@@ -916,7 +905,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "variance",    1, {FLOAT8OID},
 	  "s:variance",      FLOAT8ARRAYOID,
@@ -924,7 +913,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "variance",    1, {NUMERICOID},
@@ -933,7 +922,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/* VAR_POP(X) = PGSTROM.VAR_POP(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -943,7 +932,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {INT4OID},
 	  "s:var_pop_numeric", FLOAT8ARRAYOID,
@@ -951,7 +940,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {INT8OID},
 	  "s:var_pop_numeric", FLOAT8ARRAYOID,
@@ -959,7 +948,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {FLOAT4OID},
 	  "s:var_pop",       FLOAT8ARRAYOID,
@@ -967,7 +956,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {FLOAT8OID},
 	  "s:var_pop",       FLOAT8ARRAYOID,
@@ -975,7 +964,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_pop",     1, {NUMERICOID},
@@ -984,7 +973,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/* VAR_SAMP(X) = PGSTROM.VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -994,7 +983,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {INT4OID},
 	  "s:var_samp_numeric", FLOAT8ARRAYOID,
@@ -1002,7 +991,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {INT8OID},
 	  "s:var_samp_numeric", FLOAT8ARRAYOID,
@@ -1010,7 +999,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {FLOAT4OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
@@ -1018,7 +1007,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {FLOAT8OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
@@ -1026,7 +1015,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_samp",    1, {NUMERICOID},
@@ -1035,7 +1024,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 #endif
 	/*
@@ -1054,7 +1043,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_pop",   FLOAT8ARRAYOID,
@@ -1066,7 +1055,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_samp",   FLOAT8ARRAYOID,
@@ -1078,7 +1067,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	/*
 	 * Aggregation to support least squares method
@@ -1096,7 +1085,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
        ALTFUNC_EXPR_PCOV_Y,
        ALTFUNC_EXPR_PCOV_Y2,
        ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_avgy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_avgy",   FLOAT8ARRAYOID,
@@ -1108,7 +1097,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_count", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:sum",      INT8OID,
@@ -1125,7 +1114,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_r2", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_r2",   FLOAT8ARRAYOID,
@@ -1137,7 +1126,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_slope", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_slope",   FLOAT8ARRAYOID,
@@ -1149,7 +1138,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_sxx", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxx",   FLOAT8ARRAYOID,
@@ -1161,7 +1150,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_sxy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxy",   FLOAT8ARRAYOID,
@@ -1173,7 +1162,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 	{ "regr_syy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_syy",   FLOAT8ARRAYOID,
@@ -1185,12 +1174,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
 	   ALTFUNC_EXPR_PCOV_XY},
-	  NULL, 0, false, false
+	  NULL, 0, false
 	},
 };
 
 static const aggfunc_catalog_t *
-aggfunc_lookup_by_oid(Oid aggfnoid, bool aggref_with_distinct)
+aggfunc_lookup_by_oid(Oid aggfnoid)
 {
 	Form_pg_proc	proc;
 	HeapTuple		htup;
@@ -1215,18 +1204,6 @@ aggfunc_lookup_by_oid(Oid aggfnoid, bool aggref_with_distinct)
 				/* Is NUMERIC with GpuPreAgg acceptable? */
 				if (catalog->numeric_aware && !enable_numeric_aggfuncs)
 					continue;
-				/* Check whether DISTINCT qualifier is attached */
-				if (catalog->distinct_aggfunc)
-				{
-					if (!pgstrom_enable_hll_count ||
-						!aggref_with_distinct)
-						continue;
-				}
-				else
-				{
-					if (aggref_with_distinct)
-						continue;
-				}
 				/* all ok */
 				ReleaseSysCache(htup);
 				return catalog;
@@ -2475,9 +2452,9 @@ make_alternative_aggref(PlannerInfo *root,
 	Form_pg_proc proc_form;
 	Form_pg_aggregate agg_form;
 
-	if (aggref->aggorder)
+	if (aggref->aggorder != NIL || aggref->aggdistinct != NIL)
 	{
-		elog(DEBUG2, "Aggregate with ORDER BY is not supported: %s",
+		elog(DEBUG2, "Aggregate with ORDER BY/DISTINCT is not supported: %s",
 			 nodeToString(aggref));
 		return NULL;
 	}
@@ -2491,8 +2468,7 @@ make_alternative_aggref(PlannerInfo *root,
 	/*
 	 * Lookup properties of aggregate function
 	 */
-	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid,
-									  aggref->aggdistinct != NIL);
+	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
 	if (!aggfn_cat)
 	{
 		elog(DEBUG2, "Aggregate function is not device executable: %s",
@@ -6547,15 +6523,6 @@ pgstrom_init_gpupreagg(void)
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* pg_strom.enable_hll_count */
-	DefineCustomBoolVariable("pg_strom.enable_hll_count",
-							 "Enables HyperLogLog for COUNT(distinct ...)",
-							 NULL,
-							 &pgstrom_enable_hll_count,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.hll_registers_bits */
 	DefineCustomIntVariable("pg_strom.hll_registers_bits",

@@ -69,6 +69,8 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
                     </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                    </li>
                     <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
                     </li>
                 </ul>
@@ -102,6 +104,8 @@
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-configuration">Arrow_Fdw Configuration</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-cache-configuration">GPU Cache configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog-configuration">HyperLogLog configuration</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a>
     </li>
@@ -276,6 +280,13 @@
 <dd>Its format is <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code>, and separated by comma if multiple tables are preloaded.</dd>
 <dd>Initial-loading of GPU Cache usually takes a lot of time. So, preloading enables to avoid delay of response time of search/analytic queries on the first time.</dd>
 <dd>If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.</dd>
+</dl>
+<h2 id="hyperloglog-configuration">HyperLogLog configuration</h2>
+<dl>
+<dt><code>pg_strom.hll_registers_bits</code> [type: <code>int</code> / default: <code>9</code>]</dt>
+<dd>It specifies the width of HLL Sketch used for HyperLogLog.</dd>
+<dd>PG-Strom allocates <code>2^pg_strom.hll_registers_bits</code> registers for HLL Sketch, then uses the latest <code>pg_strom.hll_registers_bits</code> bits of hash-values as register selector. It must be configured between 4 and 15.</dd>
+<dd>See <a href="../hll_count/">HyperLogLog</a> for more details of HyperLogLog functionality of PG-Strom.</dd>
 </dl>
 <h2 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h2>
 <dl>
