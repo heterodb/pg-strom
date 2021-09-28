@@ -228,44 +228,53 @@ In other words, it pre-processes the aggregation of 200 million records on the G
 @ja{
 このようなアルゴリズムの特性により、例えば、月次のデータごとに HLL Sketch を予め計算してデータベースに保存しておけば、キー値のカーディナリティを推定するためにテーブル全体をスキャンしなくても、差分データの HLL Sketch を計算し、保存していた HLL Sketch と合成するだけでキー値のカーディナリティを推定する事ができます。
 
-例えば、以下のクエリは年次単位でHLL Sketchを計算し、1995年以前のデータだけで lo_custkey のカーディナリティを推定しています。
-これはランダムに生成したデータですので、先ほどの例と同じ値を出力していますが、現実にはユーザ数の増加などに伴い推定値が変動する事でしょう。
+例えば、以下のクエリは年次単位でHLL Sketchを計算し、年次ごとのHLL Sketchをマージする事で累積でのカーディナリティを推定しています。
+これが人為的に`lo_custkey`のカーディナリティが増加するよう調整したデータですが、時間経過とともに累計ユーザ数の推定値が増えている事が分かります。
 }
 @en{
 Due to the characteristics of the algorithm, for example, if HLL Sketch is calculated in advance for each monthly data and saved in the database, the difference can be obtained without scanning the entire table to estimate the cardinality of key values. You can get the cardinarity estimation by calculating the HLL Sketch towards the differences and merging it with the saved HLL Sketches.
 
-For example, the following query calculates HLL Sketches on an annual basis and estimates the cardinality of `lo_custkey` from pre-1995 data only.
-Since this is randomly generated data, the same value as in the previous example is output, but in reality the estimated value shall fluctuate according to increases of the number of users.
+For example, the following query calculates HLL Sketch on annual basis and estimates the cumulative cardinality by merging the annual HLL Sketch.
+This data is artificially adjusted to increase the cardinality of `lo_custkey`. You can see the estimated total number of customers has increased year by year.
 }
 
 ```
-=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) into pg_temp.my_sketch from lineorder group by 1;
+=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) as sketch
+     into pg_temp.annual
+     from lineorder group by 1;
 SELECT 7
 
-=# select year, hll_sketch_histgram(hll_sketch) from pg_temp.my_sketch;
- year |                  hll_sketch_histgram
+=# select year, hll_sketch_histogram(sketch) from pg_temp.annual order by year;
+ year |                 hll_sketch_histogram
 ------+-------------------------------------------------------
- 1992 | {0,0,0,0,0,0,0,0,0,0,13,63,114,126,87,60,24,11,8,4,2}
- 1993 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1994 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1995 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1996 | {0,0,0,0,0,0,0,0,0,0,13,64,112,126,87,61,24,11,8,4,2}
- 1997 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1998 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1992 | {0,0,0,0,0,0,0,0,0,22,73,132,118,82,39,26,12,2,4,2}
+ 1993 | {0,0,0,0,0,0,0,0,0,9,59,118,125,96,50,30,15,2,6,2}
+ 1994 | {0,0,0,0,0,0,0,0,0,4,33,111,133,113,53,36,17,4,6,2}
+ 1995 | {0,0,0,0,0,0,0,0,0,2,21,99,131,121,62,42,18,5,7,3,1}
+ 1996 | {0,0,0,0,0,0,0,0,0,1,17,84,119,131,73,50,20,5,7,4,1}
+ 1997 | {0,0,0,0,0,0,0,0,0,0,14,71,118,128,82,53,23,10,7,4,2}
+ 1998 | {0,0,0,0,0,0,0,0,0,0,13,64,114,126,86,61,23,11,8,4,2}
 (7 rows)
 
-=# select hll_merge(hll_sketch) from pg_temp.my_sketch where year < 1995;
- hll_merge
------------
-   2005437
-(1 row)
+=# select max_y, (select hll_merge(sketch) from pg_temp.annual where year < max_y)
+     from generate_series(1993,1999) max_y;
+ max_y | hll_merge
+-------+-----------
+  1993 |    854093
+  1994 |   1052429
+  1995 |   1299916
+  1996 |   1514915
+  1997 |   1700274
+  1998 |   1889527
+  1999 |   2005437
+(7 rows)
 ```
 
 @ja{
-なお、`hll_sketch_histgram()`はHLL Sketchの生データを引数として受け取り、そのレジスタ値の分布をヒストグラムとして返す関数です。
+なお、`hll_sketch_histogram()`はHLL Sketchの生データを引数として受け取り、そのレジスタ値の分布をヒストグラムとして返す関数です。
 }
 @en{
-Note that `hll_sketch_histgram()` is a SQL function which receives a raw data of HLL Sketch, then returns its histgram of the distribution of register values.
+Note that `hll_sketch_histogram()` is a SQL function which receives a raw data of HLL Sketch, then returns its histogram of the distribution of register values.
 }
 
 

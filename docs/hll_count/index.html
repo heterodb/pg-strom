@@ -262,30 +262,39 @@ This is an aggregate function that receives bytea datum of HLL Sketch and output
 Note that the HLL Sketch generated here already completes partial aggregation, thus, only 1 row with HLL Sketch shall be poped for each worker process, where its internal state has been already updated according to the contents of 200 million rows.</p>
 <p>In other words, it pre-processes the aggregation of 200 million records on the GPU into 1 HLL Sketch, then CPU finally merges the HLL Sketches and generates the estimation.</p>
 <p>Due to the characteristics of the algorithm, for example, if HLL Sketch is calculated in advance for each monthly data and saved in the database, the difference can be obtained without scanning the entire table to estimate the cardinality of key values. You can get the cardinarity estimation by calculating the HLL Sketch towards the differences and merging it with the saved HLL Sketches.</p>
-<p>For example, the following query calculates HLL Sketches on an annual basis and estimates the cardinality of <code>lo_custkey</code> from pre-1995 data only.
-Since this is randomly generated data, the same value as in the previous example is output, but in reality the estimated value shall fluctuate according to increases of the number of users.</p>
-<pre><code>=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) into pg_temp.my_sketch from lineorder group by 1;
+<p>For example, the following query calculates HLL Sketch on annual basis and estimates the cumulative cardinality by merging the annual HLL Sketch.
+This data is artificially adjusted to increase the cardinality of <code>lo_custkey</code>. You can see the estimated total number of customers has increased year by year.</p>
+<pre><code>=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) as sketch
+     into pg_temp.annual
+     from lineorder group by 1;
 SELECT 7
 
-=# select year, hll_sketch_histgram(hll_sketch) from pg_temp.my_sketch;
- year |                  hll_sketch_histgram
+=# select year, hll_sketch_histogram(sketch) from pg_temp.annual order by year;
+ year |                 hll_sketch_histogram
 ------+-------------------------------------------------------
- 1992 | {0,0,0,0,0,0,0,0,0,0,13,63,114,126,87,60,24,11,8,4,2}
- 1993 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1994 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1995 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1996 | {0,0,0,0,0,0,0,0,0,0,13,64,112,126,87,61,24,11,8,4,2}
- 1997 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
- 1998 | {0,0,0,0,0,0,0,0,0,0,13,63,113,126,87,61,24,11,8,4,2}
+ 1992 | {0,0,0,0,0,0,0,0,0,22,73,132,118,82,39,26,12,2,4,2}
+ 1993 | {0,0,0,0,0,0,0,0,0,9,59,118,125,96,50,30,15,2,6,2}
+ 1994 | {0,0,0,0,0,0,0,0,0,4,33,111,133,113,53,36,17,4,6,2}
+ 1995 | {0,0,0,0,0,0,0,0,0,2,21,99,131,121,62,42,18,5,7,3,1}
+ 1996 | {0,0,0,0,0,0,0,0,0,1,17,84,119,131,73,50,20,5,7,4,1}
+ 1997 | {0,0,0,0,0,0,0,0,0,0,14,71,118,128,82,53,23,10,7,4,2}
+ 1998 | {0,0,0,0,0,0,0,0,0,0,13,64,114,126,86,61,23,11,8,4,2}
 (7 rows)
 
-=# select hll_merge(hll_sketch) from pg_temp.my_sketch where year &lt; 1995;
- hll_merge
------------
-   2005437
-(1 row)
+=# select max_y, (select hll_merge(sketch) from pg_temp.annual where year &lt; max_y)
+     from generate_series(1993,1999) max_y;
+ max_y | hll_merge
+-------+-----------
+  1993 |    854093
+  1994 |   1052429
+  1995 |   1299916
+  1996 |   1514915
+  1997 |   1700274
+  1998 |   1889527
+  1999 |   2005437
+(7 rows)
 </code></pre>
-<p>Note that <code>hll_sketch_histgram()</code> is a SQL function which receives a raw data of HLL Sketch, then returns its histgram of the distribution of register values.</p>
+<p>Note that <code>hll_sketch_histogram()</code> is a SQL function which receives a raw data of HLL Sketch, then returns its histogram of the distribution of register values.</p>
               
             </div>
           </div>
