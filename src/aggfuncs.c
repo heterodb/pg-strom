@@ -1277,20 +1277,18 @@ pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 		hll_state = MemoryContextAllocZero(aggcxt, VARHDRSZ + nrooms);
 		SET_VARSIZE(hll_state, VARHDRSZ + nrooms);
 		memcpy(VARDATA_ANY(hll_state), VARDATA_ANY(new_state), nrooms);
-
-		hll_regs = (uint8 *)VARDATA_ANY(hll_state);
 	}
 	else
 	{
 		hll_state = PG_GETARG_BYTEA_P(0);
+		nrooms = VARSIZE_ANY_EXHDR(hll_state);
+		if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
+			elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 		if (!PG_ARGISNULL(1))
 		{
 			new_state = PG_GETARG_BYTEA_P(1);
 			if (VARSIZE_ANY_EXHDR(hll_state) != VARSIZE_ANY_EXHDR(new_state))
 				elog(ERROR, "incompatible HLL sketch");
-			nrooms = VARSIZE_ANY_EXHDR(hll_state);
-			if (nrooms < 1 || (nrooms & (nrooms - 1)) != 0)
-				elog(ERROR, "HLL sketch must have 2^N rooms (%u)", nrooms);
 			hll_regs = (uint8 *)VARDATA_ANY(hll_state);
 			new_regs = (uint8 *)VARDATA_ANY(new_state);
 			for (index=0; index < nrooms; index++)

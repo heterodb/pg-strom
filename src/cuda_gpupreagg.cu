@@ -1386,12 +1386,11 @@ restart:
 	l_hitems[curr].hash  = hash;
 	l_hitems[curr].next  = next;
 
-	l_dclass += GPUPREAGG_NUM_ACCUM_VALUES * curr;
-	l_values += GPUPREAGG_NUM_ACCUM_VALUES * curr;
 	if (l_extras)
 		l_extras += GPUPREAGG_ACCUM_EXTRA_BUFSZ * curr;
-	gpupreagg_init_local_slot(l_dclass, l_values, l_extras);
-
+	gpupreagg_init_local_slot(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							  l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							  l_extras);
 	/*
 	 * __threadfence_block() makes above updates visible to other concurent
 	 * threads within this block.
@@ -1401,8 +1400,8 @@ restart:
 	atomicExch(&l_htable->l_hslots[hindex], curr);
 found:
 	/* Runs global-to-local reduction */
-	gpupreagg_update_atomic(l_dclass,
-							l_values,
+	gpupreagg_update_atomic(l_dclass + GPUPREAGG_NUM_ACCUM_VALUES * curr,
+							l_values + GPUPREAGG_NUM_ACCUM_VALUES * curr,
 							GPUPREAGG_ACCUM_MAP_LOCAL,
 							KERN_DATA_STORE_DCLASS(kds_slot, index),
 							KERN_DATA_STORE_VALUES(kds_slot, index),
