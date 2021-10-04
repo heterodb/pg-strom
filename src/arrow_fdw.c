@@ -5927,12 +5927,31 @@ __arrowExecTruncateRelation(Relation frel)
 	dlist_push_head(&arrow_write_redo_list, &redo->chain);
 }
 
+#if PG_VERSION_NUM >= 140000
+/*
+ * TRUNCATE support
+ */
+static void
+ArrowExecForeignTruncate(List *rels, DropBehavior behavior, bool restart_seqs)
+{
+	ListCell   *lc;
+
+	foreach (lc, rels)
+	{
+		Relation	frel = lfirst(lc);
+
+		__arrowExecTruncateRelation(frel);
+	}
+}
+#endif
+
 /*
  * pgstrom_arrow_fdw_truncate
  */
 Datum
 pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 {
+#if PG_VERSION_NUM < 140000
 	Oid			frel_oid = PG_GETARG_OID(0);
 	Relation	frel;
 	FdwRoutine *routine;
@@ -5952,7 +5971,9 @@ pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 	__arrowExecTruncateRelation(frel);
 
 	table_close(frel, NoLock);
-
+#else
+	elog(ERROR, "PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface");
+#endif
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
@@ -6203,6 +6224,9 @@ pgstrom_init_arrow_fdw(void)
 	r->AnalyzeForeignTable			= ArrowAnalyzeForeignTable;
 	/* IMPORT FOREIGN SCHEMA support */
 	r->ImportForeignSchema			= ArrowImportForeignSchema;
+#if PG_VERSION_NUM >= 140000
+	r->ExecForeignTruncate			= ArrowExecForeignTruncate;
+#endif
 	/* CPU Parallel support */
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
