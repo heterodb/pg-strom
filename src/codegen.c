@@ -252,29 +252,140 @@ get_extension_schema_by_name(const char *extname)
 	return namespace_oid;
 }
 
-static inline devtype_info *
+static const char *
+get_extension_name_by_object(Oid class_id, Oid object_id)
+{
+	Relation	rel;
+	ScanKeyData	skeys[2];
+	SysScanDesc	scan;
+	HeapTuple	htup;
+	const char *ext_name = NULL;
+
+	ScanKeyInit(&skeys[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(class_id));
+	ScanKeyInit(&skeys[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(object_id));
+
+	rel = table_open(DependRelationId, AccessShareLock);
+	scan = systable_beginscan(rel, DependDependerIndexId, true,
+							  NULL, 2, skeys);
+	while (HeapTupleIsValid(htup = systable_getnext(scan)))
+	{
+		Form_pg_depend	dep = (Form_pg_depend) GETSTRUCT(htup);
+		const char	   *__ext_name;
+
+		if (dep->refclassid == ExtensionRelationId &&
+			dep->deptype == DEPENDENCY_EXTENSION)
+		{
+			__ext_name = get_extension_name(dep->refobjid);
+			if (__ext_name)
+				ext_name = quote_identifier(__ext_name);
+			break;
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return ext_name;
+}
+
+static void
+append_string_devtype_identifier(StringInfo buf, Oid type_oid)
+{
+	HeapTuple		htup;
+	Form_pg_type	type_form;
+	char		   *nsp_name;
+
+	htup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	type_form = (Form_pg_type) GETSTRUCT(htup);
+
+	nsp_name = get_namespace_name(type_form->typnamespace);
+	if (!nsp_name)
+		elog(ERROR, "cache lookup failed for namespace %u", type_form->typnamespace);
+	appendStringInfo(buf, "%s.%s",
+					 quote_identifier(nsp_name),
+					 quote_identifier(NameStr(type_form->typname)));
+	ReleaseSysCache(htup);
+}
+
+/*
+ * build_extra_devtype_info
+ *
+ * it queries the extra device type support
+ */
+static devtype_info *
 __build_extra_devtype_info(TypeCacheEntry *tcache)
 {
-	devtype_info *dtype;
-	int		i;
+	StringInfoData	ident;
+	devtype_info	__dtype;
+	devtype_info   *dtype = NULL;
+	const char	   *ext_name;
+	int				i;
 
+	/*
+	 * setup arguments
+	 */
+	initStringInfo(&ident);
+	append_string_devtype_identifier(&ident, tcache->type_id);
+	ext_name = get_extension_name_by_object(TypeRelationId,
+											tcache->type_id);
+
+	memset(&__dtype, 0, sizeof(devtype_info));
+	__dtype.hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
+	__dtype.type_oid = tcache->type_id;
+	__dtype.type_flags = 0;
+	__dtype.type_length = tcache->typlen;
+	__dtype.type_align = typealign_get_width(tcache->typalign);
+	__dtype.type_byval = tcache->typbyval;
+	__dtype.type_name = NULL;	/* callback must set the device type name */
+	__dtype.extra_sz = 0;
+	__dtype.hash_func = NULL;
+	__dtype.type_eqfunc = get_opcode(tcache->eq_opr);
+	__dtype.type_cmpfunc = tcache->cmp_proc;
+	
 	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
 		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
-		if (extra->lookup_extra_devtype)
+		if (extra->lookup_extra_devtype &&
+			extra->lookup_extra_devtype(ext_name, ident.data, &__dtype))
 		{
-			dtype = extra->lookup_extra_devtype(devinfo_memcxt, tcache);
-			if (dtype)
+			MemoryContext	oldcxt;
+
+			/* must be still base type */
+			Assert(__dtype.type_element == NULL &&
+				   __dtype.comp_nfields == 0);
+			if (!__dtype.type_name)
 			{
-				dtype->hashvalue = GetSysCacheHashValue(TYPEOID,
-														dtype->type_oid, 0, 0, 0);
-				dtype->type_flags |= extra->extra_flags;
-				return dtype;
+				elog(DEBUG2, "Extra module didn't set device type name for '%s'",
+					 format_type_be(tcache->type_id));
+				continue;
 			}
+			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+			dtype = pmemdup(&__dtype, offsetof(devtype_info, comp_subtypes[0]));
+			dtype->type_name = pstrdup(__dtype.type_name);
+			dtype->type_flags |= extra->extra_flags;
+			MemoryContextSwitchTo(oldcxt);
+
+			break;
 		}
 	}
-	return NULL;
+	pfree(ident.data);
+	return dtype;
+}
+
+static inline devtype_info *
+build_extra_devtype_info(TypeCacheEntry *tcache)
+{
+	if (pgstrom_num_users_extra)
+		return NULL;
+	return __build_extra_devtype_info(tcache);
 }
 
 static devtype_info *
@@ -319,7 +430,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			return entry;
 		}
 	}
-	return __build_extra_devtype_info(tcache);
+	return build_extra_devtype_info(tcache);
 }
 
 static devtype_info *
@@ -2455,41 +2566,98 @@ pgstrom_devfunc_construct_fuzzy(const char *lib_name,
 	return NULL;
 }
 
-static inline devfunc_info *
+static devfunc_info *
 __build_extra_devfunc_info(HeapTuple protup,
 						   devtype_info *dfunc_rettype,
 						   int dfunc_nargs,
 						   devtype_info **dfunc_argtypes,
 						   Oid dfunc_collid)
 {
-	Oid		proc_oid = PgProcTupleGetOid(protup);
-	Form_pg_proc proc_form = (Form_pg_proc) GETSTRUCT(protup);
-	devfunc_info *dfunc;
-	int		i;
+	Form_pg_proc	proc_form = (Form_pg_proc) GETSTRUCT(protup);
+	StringInfoData	ident;
+	devfunc_info	__dfunc;
+	devfunc_info   *dfunc = NULL;
+	List		   *dfunc_args = NIL;
+	const char	   *nsp_name;
+	const char	   *ext_name;
+	int				i;
+
+	/* setup devfunc identifier */
+	initStringInfo(&ident);
+	append_string_devtype_identifier(&ident, dfunc_rettype->type_oid);
+	nsp_name = get_namespace_name(proc_form->pronamespace);
+	appendStringInfo(&ident, " %s.%s(",
+					 quote_identifier(nsp_name),
+					 quote_identifier(NameStr(proc_form->proname)));
+	for (i=0; i < dfunc_nargs; i++)
+	{
+		devtype_info   *dtype = dfunc_argtypes[i];
+
+		if (i > 0)
+			appendStringInfoChar(&ident, ',');
+		append_string_devtype_identifier(&ident, dtype->type_oid);
+		dfunc_args = lappend(dfunc_args, dtype);
+	}
+	appendStringInfoChar(&ident, ')');
+
+	ext_name = get_extension_name_by_object(ProcedureRelationId,
+											PgProcTupleGetOid(protup));
+
+	memset(&__dfunc, 0, sizeof(devfunc_info));
+	__dfunc.func_oid = PgProcTupleGetOid(protup);
+	__dfunc.hashvalue = GetSysCacheHashValue(PROCOID, __dfunc.func_oid, 0, 0, 0);
+	__dfunc.func_collid = dfunc_collid;
+	__dfunc.func_is_strict = proc_form->proisstrict;
+	__dfunc.func_args = dfunc_args;
+	__dfunc.func_rettype = dfunc_rettype;
+	__dfunc.func_sqlname = NameStr(proc_form->proname);
+	__dfunc.func_devname = NULL;		/* callback must set */
+	__dfunc.func_devcost = 0;			/* callback must set */
+	__dfunc.devfunc_result_sz = NULL;	/* callback must set, if any */
 
 	for (i=0; i < pgstrom_num_users_extra; i++)
 	{
 		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
-		if (extra->lookup_extra_devfunc)
+		if (extra->lookup_extra_devfunc &&
+			extra->lookup_extra_devfunc(ext_name, ident.data, &__dfunc))
 		{
-			dfunc = extra->lookup_extra_devfunc(devinfo_memcxt,
-												proc_oid,
-												proc_form,
-												dfunc_rettype,
-												dfunc_nargs,
-												dfunc_argtypes,
-												dfunc_collid);
-			if (dfunc)
+			MemoryContext	oldcxt;
+
+			/* must be */
+			if (!__dfunc.func_devname)
 			{
-				dfunc->func_flags |= extra->extra_flags;
-				if (!dfunc->devfunc_result_sz)
-					dfunc->devfunc_result_sz = devfunc_generic_result_sz;
-				return dfunc;
+				elog(DEBUG2, "Extra module didn't set device function name for %s",
+					 format_procedure(__dfunc.func_oid));
+				continue;
 			}
+			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+			dfunc = pmemdup(&__dfunc, sizeof(devfunc_info));
+			dfunc->func_sqlname = pstrdup(__dfunc.func_sqlname);
+			dfunc->func_devname = pstrdup(__dfunc.func_devname);
+			MemoryContextSwitchTo(oldcxt);
+
+			break;
 		}
 	}
-	return NULL;
+	pfree(ident.data);
+	return dfunc;
+}
+
+static inline devfunc_info *
+build_extra_devfunc_info(HeapTuple protup,
+						 devtype_info *dfunc_rettype,
+						 int dfunc_nargs,
+						 devtype_info **dfunc_argtypes,
+						 Oid dfunc_collid)
+{
+	if (pgstrom_num_users_extra == 0)
+		return NULL;
+	return __build_extra_devfunc_info(protup,
+									  dfunc_rettype,
+									  dfunc_nargs,
+									  dfunc_argtypes,
+									  dfunc_collid);
 }
 
 static devfunc_info *
@@ -2596,11 +2764,11 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	/* extra device function, if any */
 	if (!dfunc)
 	{
-		dfunc = __build_extra_devfunc_info(protup,
-										   dfunc_rettype,
-										   func_argtypes->dim1,
-										   dfunc_argtypes,
-										   func_collid);
+		dfunc = build_extra_devfunc_info(protup,
+										 dfunc_rettype,
+										 func_argtypes->dim1,
+										 dfunc_argtypes,
+										 func_collid);
 	}
 not_found:
 	if (lib_name)
@@ -2943,17 +3111,41 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 	/* extra type cast */
 	if (!dcast)
 	{
+		StringInfoData	src_ident;
+		StringInfoData	dst_ident;
+		const char	   *src_extname;
+		const char	   *dst_extname;
+		devcast_info	__dcast;
+
+		initStringInfo(&src_ident);
+		initStringInfo(&dst_ident);
+		src_extname = get_extension_name_by_object(TypeRelationId,
+												   dtype_s->type_oid);
+		append_string_devtype_identifier(&src_ident, dtype_s->type_oid);
+		dst_extname = get_extension_name_by_object(TypeRelationId,
+												   dtype_d->type_oid);
+		append_string_devtype_identifier(&dst_ident, dtype_d->type_oid);
+
+		memset(&__dcast, 0, sizeof(devcast_info));
+		__dcast.src_type = dtype_s;
+		__dcast.dst_type = dtype_d;
+		__dcast.has_domain_checks = false;	/* extra module must set, if any */
+
 		for (i=0; i < pgstrom_num_users_extra; i++)
 		{
 			pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
-			if (extra->lookup_extra_devcast)
+			if (extra->lookup_extra_devcast &&
+				extra->lookup_extra_devcast(src_extname, src_ident.data,
+											dst_extname, dst_ident.data,
+											&__dcast))
 			{
-				dcast = extra->lookup_extra_devcast(devinfo_memcxt,
-													dtype_s,
-													dtype_d);
-				if (dcast)
-					break;
+				MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+
+				dcast = pmemdup(&__dcast, sizeof(devcast_info));
+
+				MemoryContextSwitchTo(oldcxt);
+				break;
 			}
 		}
 	}

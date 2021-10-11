@@ -78,6 +78,7 @@
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
 #include "commands/explain.h"
+#include "commands/extension.h"
 #include "commands/proclang.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"

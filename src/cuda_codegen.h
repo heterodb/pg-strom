@@ -182,12 +182,16 @@ typedef struct
 	const char *extra_name;
 
 	/*
-	 * lookup_extra_devtype() can tell PG-Strom whether the supplied data type
-	 * is device-supported by the user's extra module.
-	 * If no supported type by the extra module, return NULL.
+	 * lookup_extra_devtype() can tell PG-Strom whether the supplied data
+	 * type is device supported by the user's extra module.
+	 * If supported, extra module set up properties of the given devtype_info,
+	 * then returns true.
+	 * Elsewhere, returns false.
 	 */
-	devtype_info *(*lookup_extra_devtype)(MemoryContext memcxt,
-										  TypeCacheEntry *tcache);
+	bool	(*lookup_extra_devtype)(const char *extension_name,
+									const char *type_ident,
+									devtype_info *dtype);
+
 	/*
 	 * lookup_extra_devfunc() can tell PG-Strom whether the supplied function
 	 * is device-supported by the user's extra module.
@@ -197,13 +201,9 @@ typedef struct
 	 * dfunc_argtypes, not function's declaration at proc_form.
 	 * If no supported function by the extra module, return NULL.
 	 */
-	devfunc_info *(*lookup_extra_devfunc)(MemoryContext memcxt,
-										  Oid proc_oid,
-										  Form_pg_proc proc_form,
-										  devtype_info *dfunc_rettype,
-										  int dfunc_nargs,
-										  devtype_info **dfunc_argtypes,
-										  Oid func_collid);
+	bool	(*lookup_extra_devfunc)(const char *extension_name,
+									const char *func_ident,
+									devfunc_info *dfunc);
 
 	/*
 	 * lookup_extra_devcast() can tell PG-Strom whether the supplied cast
@@ -211,9 +211,12 @@ typedef struct
 	 * extra module.
 	 * If no supported cast by the extra module, return NULL.
 	 */
-	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
-										  devtype_info *dtype_src,
-										  devtype_info *dtype_dst);
+	bool	(*lookup_extra_devcast)(const char *src_extension_name,
+									const char *src_type_ident,
+									const char *dst_extension_name,
+									const char *dst_type_ident,
+									devcast_info *dcast);
+
 	/*
 	 * arrow_lookup_pgtype() can tell PG-Strom a PostgreSQL type that shall
 	 * assign on the supplied ArrowField. It can reference 'hint_oid' that
