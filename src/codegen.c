@@ -45,6 +45,10 @@ static int	devcast_text2numeric_callback(codegen_context *context,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),	\
 			 errmsg((fmt), ##__VA_ARGS__)))
 
+/* known extension name */
+#define PGSTROM		"pg_strom"
+#define POSTGIS3	"postgis"
+
 /*
  * Catalog of data types supported by device code
  *
@@ -69,7 +73,7 @@ static int	devcast_text2numeric_callback(codegen_context *context,
 #endif
 
 static struct {
-	const char	   *type_schema;
+	const char	   *type_extension;
 	const char	   *type_name;
 	Oid				type_oid_fixed;	/* can be InvalidOid if not build-in */
 	const char	   *type_oid_label;
@@ -80,105 +84,105 @@ static struct {
 	/*
 	 * Primitive datatypes
 	 */
-	{ "pg_catalog", "bool", BOOLOID, "BOOLOID",
+	{ NULL, "bool", BOOLOID, "BOOLOID",
 	  0, 0, generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "int1", INT1OID, "INT1OID",
+	{ PGSTROM, "int1", INT1OID, "INT1OID",
 	  0, 0, pg_int1_devtype_hashfunc
 	},
-	{ "pg_catalog", "int2", INT2OID, "INT2OID",
+	{ NULL, "int2", INT2OID, "INT2OID",
 	  0, 0, pg_int2_devtype_hashfunc
 	},
-	{ "pg_catalog", "int4", INT4OID, "INT4OID",
+	{ NULL, "int4", INT4OID, "INT4OID",
 	  0, 0, pg_int4_devtype_hashfunc
 	},
-	{ "pg_catalog", "int8", INT8OID, "INT8OID",
+	{ NULL, "int8", INT8OID, "INT8OID",
 	  0, 0, pg_int8_devtype_hashfunc
 	},
 	/* XXX - float2 is not a built-in data type */
-	{ "pg_catalog", "float2", FLOAT2OID, "FLOAT2OID",
+	{ PGSTROM, "float2", FLOAT2OID, "FLOAT2OID",
 	  0, 0, pg_float2_devtype_hashfunc
 	},
-	{ "pg_catalog", "float4", FLOAT4OID, "FLOAT4OID",
+	{ NULL, "float4", FLOAT4OID, "FLOAT4OID",
 	  0, 0, pg_float4_devtype_hashfunc
 	},
-	{ "pg_catalog", "float8", FLOAT8OID, "FLOAT8OID",
+	{ NULL, "float8", FLOAT8OID, "FLOAT8OID",
 	  0, 0, pg_float8_devtype_hashfunc
 	},
 	/*
 	 * Misc data types
 	 */
-	{ "pg_catalog", "money", CASHOID, "CASHOID",
+	{ NULL, "money", CASHOID, "CASHOID",
 	  DEVKERNEL_NEEDS_MISCLIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "uuid", UUIDOID, "UUIDOID",
+	{ NULL, "uuid", UUIDOID, "UUIDOID",
 	  DEVKERNEL_NEEDS_MISCLIB, UUID_LEN,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "macaddr", MACADDROID, "MACADDROID",
+	{ NULL, "macaddr", MACADDROID, "MACADDROID",
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(macaddr),
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "inet", INETOID, "INETOID",
+	{ NULL, "inet", INETOID, "INETOID",
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 	  pg_inet_devtype_hashfunc
 	},
-	{ "pg_catalog", "cidr", CIDROID, "CIDROID",
+	{ NULL, "cidr", CIDROID, "CIDROID",
 	  DEVKERNEL_NEEDS_MISCLIB, sizeof(inet),
 	  pg_inet_devtype_hashfunc
 	},
 	/*
 	 * Date and time datatypes
 	 */
-	{ "pg_catalog", "date", DATEOID, "DATEOID",
+	{ NULL, "date", DATEOID, "DATEOID",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "time", TIMEOID, "TIMEOID",
+	{ NULL, "time", TIMEOID, "TIMEOID",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "timetz", TIMETZOID, "TIMETZOID",
+	{ NULL, "timetz", TIMETZOID, "TIMETZOID",
 	  DEVKERNEL_NEEDS_TIMELIB, sizeof(TimeTzADT),
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "timestamp", TIMESTAMPOID, "TIMESTAMPOID",
+	{ NULL, "timestamp", TIMESTAMPOID, "TIMESTAMPOID",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "timestamptz", TIMESTAMPTZOID, "TIMESTAMPTZOID",
+	{ NULL, "timestamptz", TIMESTAMPTZOID, "TIMESTAMPTZOID",
 	  DEVKERNEL_NEEDS_TIMELIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "interval", INTERVALOID, "INTERVALOID",
+	{ NULL, "interval", INTERVALOID, "INTERVALOID",
 	  DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
 	  pg_interval_devtype_hashfunc
 	},
 	/*
 	 * variable length datatypes
 	 */
-	{ "pg_catalog", "bpchar", BPCHAROID, "BPCHAROID",
+	{ NULL, "bpchar", BPCHAROID, "BPCHAROID",
 	  DEVKERNEL_NEEDS_TEXTLIB, 0,
 	  pg_bpchar_devtype_hashfunc
 	},
-	{ "pg_catalog", "varchar", VARCHAROID, "VARCHAROID",
+	{ NULL, "varchar", VARCHAROID, "VARCHAROID",
 	  DEVKERNEL_NEEDS_TEXTLIB, 0,
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "numeric", NUMERICOID, "NUMERICOID",
+	{ NULL, "numeric", NUMERICOID, "NUMERICOID",
 	  0, sizeof(struct NumericData),
 	  pg_numeric_devtype_hashfunc
 	},
-	{ "pg_catalog", "bytea", BYTEAOID, "BYTEAOID",
+	{ NULL, "bytea", BYTEAOID, "BYTEAOID",
 	  0, sizeof(pg_varlena_t),
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "text", TEXTOID, "TEXTOID",
+	{ NULL, "text", TEXTOID, "TEXTOID",
 	  DEVKERNEL_NEEDS_TEXTLIB, sizeof(pg_varlena_t),
 	  generic_devtype_hashfunc
 	},
-	{ "pg_catalog", "jsonb", JSONBOID, "JSONBOID",
+	{ NULL, "jsonb", JSONBOID, "JSONBOID",
 	  DEVKERNEL_NEEDS_JSONLIB,
 	  /* see comment at vlbuf_estimate_jsonb() */
 	  TOAST_TUPLE_THRESHOLD,
@@ -187,27 +191,27 @@ static struct {
 	/*
 	 * range types
 	 */
-	{ "pg_catalog", "int4range", INT4RANGEOID, "INT4RANGEOID",
+	{ NULL, "int4range", INT4RANGEOID, "INT4RANGEOID",
 	  DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(cl_int) + 1,
 	  pg_range_devtype_hashfunc
 	},
-	{ "pg_catalog", "int8range", INT8RANGEOID, "INT8RANGEOID",
+	{ NULL, "int8range", INT8RANGEOID, "INT8RANGEOID",
 	  DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(cl_long) + 1,
 	  pg_range_devtype_hashfunc
 	},
-	{ "pg_catalog", "tsrange", TSRANGEOID, "TSRANGEOID",
+	{ NULL, "tsrange", TSRANGEOID, "TSRANGEOID",
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(Timestamp) + 1,
 	  pg_range_devtype_hashfunc
 	},
-	{ "pg_catalog", "tstzrange", TSTZRANGEOID, "TSTZRANGEOID",
+	{ NULL, "tstzrange", TSTZRANGEOID, "TSTZRANGEOID",
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(TimestampTz) + 1,
 	  pg_range_devtype_hashfunc
 	},
-	{ "pg_catalog", "daterange", DATERANGEOID, "DATERANGEOID",
+	{ NULL, "daterange", DATERANGEOID, "DATERANGEOID",
 	  DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
 	  sizeof(RangeType) + 2 * sizeof(DateADT) + 1,
 	  pg_range_devtype_hashfunc
@@ -215,42 +219,17 @@ static struct {
 	/*
 	 * PostGIS types
 	 */
-	{ "@postgis", "geometry", InvalidOid, "GEOMETRYOID",
+	{ POSTGIS3, "geometry", InvalidOid, "GEOMETRYOID",
 	  DEVKERNEL_NEEDS_POSTGIS,
 	  sizeof(pg_geometry_t),
 	  pg_geometry_devtype_hashfunc
 	},
-	{ "@postgis", "box2df", InvalidOid, "BOX2DFOID",
+	{ POSTGIS3, "box2df", InvalidOid, "BOX2DFOID",
 	  DEVKERNEL_NEEDS_POSTGIS,
 	  sizeof(pg_box2df_t),
 	  pg_box2df_devtype_hashfunc
 	}
 };
-
-static Oid
-get_extension_schema_by_name(const char *extname)
-{
-	Relation	rel;
-	SysScanDesc	scan;
-	ScanKeyData	skey;
-	HeapTuple	tuple;
-	Oid			namespace_oid = InvalidOid;
-
-	rel = table_open(ExtensionRelationId, AccessShareLock);
-	ScanKeyInit(&skey,
-				Anum_pg_extension_extname,
-				BTEqualStrategyNumber, F_NAMEEQ,
-				CStringGetDatum(extname));
-	scan = systable_beginscan(rel, ExtensionNameIndexId, true,
-							  NULL, 1, &skey);
-	tuple = systable_getnext(scan);
-	if (HeapTupleIsValid(tuple))
-		namespace_oid = ((Form_pg_extension)GETSTRUCT(tuple))->extnamespace;
-	systable_endscan(scan);
-	table_close(rel, AccessShareLock);
-
-	return namespace_oid;
-}
 
 static const char *
 get_extension_name_by_object(Oid class_id, Oid object_id)
@@ -320,24 +299,20 @@ append_string_devtype_identifier(StringInfo buf, Oid type_oid)
  * it queries the extra device type support
  */
 static devtype_info *
-__build_extra_devtype_info(TypeCacheEntry *tcache)
+build_extra_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
 	StringInfoData	ident;
 	devtype_info	__dtype;
 	devtype_info   *dtype = NULL;
-	const char	   *ext_name;
 	int				i;
 
-	/*
-	 * setup arguments
-	 */
+	/* setup arguments */
 	initStringInfo(&ident);
 	append_string_devtype_identifier(&ident, tcache->type_id);
-	ext_name = get_extension_name_by_object(TypeRelationId,
-											tcache->type_id);
 
 	memset(&__dtype, 0, sizeof(devtype_info));
 	__dtype.hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
+	__dtype.type_extension = ext_name;
 	__dtype.type_oid = tcache->type_id;
 	__dtype.type_flags = 0;
 	__dtype.type_length = tcache->typlen;
@@ -354,7 +329,7 @@ __build_extra_devtype_info(TypeCacheEntry *tcache)
 		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
 		if (extra->lookup_extra_devtype &&
-			extra->lookup_extra_devtype(ext_name, ident.data, &__dtype))
+			extra->lookup_extra_devtype(ident.data, &__dtype))
 		{
 			MemoryContext	oldcxt;
 
@@ -369,10 +344,11 @@ __build_extra_devtype_info(TypeCacheEntry *tcache)
 			}
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dtype = pmemdup(&__dtype, offsetof(devtype_info, comp_subtypes[0]));
+			if (__dtype.type_extension)
+				dtype->type_extension = pstrdup(__dtype.type_extension);
 			dtype->type_name = pstrdup(__dtype.type_name);
 			dtype->type_flags |= extra->extra_flags;
 			MemoryContextSwitchTo(oldcxt);
-
 			break;
 		}
 	}
@@ -380,42 +356,46 @@ __build_extra_devtype_info(TypeCacheEntry *tcache)
 	return dtype;
 }
 
-static inline devtype_info *
-build_extra_devtype_info(TypeCacheEntry *tcache)
-{
-	if (pgstrom_num_users_extra)
-		return NULL;
-	return __build_extra_devtype_info(tcache);
-}
-
 static devtype_info *
-build_basic_devtype_info(TypeCacheEntry *tcache)
+build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
-	int		i;
+	HeapTuple		htup;
+	Form_pg_type	type_form;
+	const char	   *type_name;
+	devtype_info   *entry = NULL;
+	int				i;
+
+	htup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(tcache->type_id));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for type %u", tcache->type_id);
+	type_form = (Form_pg_type) GETSTRUCT(htup);
+	type_name = NameStr(type_form->typname);
 
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
-		const char *nsp_name = devtype_catalog[i].type_schema;
-		const char *typ_name = devtype_catalog[i].type_name;
-		Oid			nsp_oid;
-		Oid			typ_oid;
+		const char *__ext_name = devtype_catalog[i].type_extension;
+		const char *__type_name = devtype_catalog[i].type_name;
 
-		if (nsp_name[0] == '@')
-			nsp_oid = get_extension_schema_by_name(nsp_name+1);
-		else
-			nsp_oid = get_namespace_oid(nsp_name, true);
-		if (!OidIsValid(nsp_oid))
-			continue;
-
-		typ_oid = get_type_oid(typ_name, nsp_oid, true);
-		if (typ_oid == tcache->type_id)
+		if (ext_name)
 		{
-			devtype_info *entry
-				= MemoryContextAllocZero(devinfo_memcxt,
-										 offsetof(devtype_info,
-												  comp_subtypes[0]));
-			entry->hashvalue = GetSysCacheHashValue(TYPEOID, typ_oid, 0, 0, 0);
-			entry->type_oid = typ_oid;
+			if (!__ext_name || strcmp(ext_name, __ext_name) != 0)
+				continue;
+		}
+		else
+		{
+			if (__ext_name || type_form->typnamespace != PG_CATALOG_NAMESPACE)
+				continue;
+		}
+
+		if (strcmp(type_name, __type_name) == 0)
+		{
+			MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+
+			entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
+			entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
+			if (ext_name)
+				entry->type_extension = pstrdup(ext_name);
+			entry->type_oid = tcache->type_id;
 			entry->type_flags = devtype_catalog[i].type_flags;
 			entry->type_length = tcache->typlen;
 			entry->type_align = typealign_get_width(tcache->typalign);
@@ -427,28 +407,36 @@ build_basic_devtype_info(TypeCacheEntry *tcache)
 			entry->type_eqfunc = get_opcode(tcache->eq_opr);
 			entry->type_cmpfunc = tcache->cmp_proc;
 
-			return entry;
+			MemoryContextSwitchTo(oldcxt);
+			break;
 		}
 	}
-	return build_extra_devtype_info(tcache);
+	if (!entry && pgstrom_num_users_extra > 0)
+		entry = build_extra_devtype_info(tcache, ext_name);
+	ReleaseSysCache(htup);
+
+	return entry;
 }
 
 static devtype_info *
-build_array_devtype_info(TypeCacheEntry *tcache)
+build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
-	devtype_info *element;
-	devtype_info *entry;
-	Oid			typelem = get_element_type(tcache->type_id);
+	devtype_info   *element;
+	devtype_info   *entry;
+	Oid				typelem;
+	MemoryContext	oldcxt;
 
+	typelem = get_element_type(tcache->type_id);
 	Assert(OidIsValid(typelem) && tcache->typlen == -1);
 	element = pgstrom_devtype_lookup(typelem);
 	if (!element)
 		return NULL;
-	entry = MemoryContextAllocZero(devinfo_memcxt,
-								   offsetof(devtype_info,
-											comp_subtypes[0]));
-	entry->hashvalue = GetSysCacheHashValue(TYPEOID,
-											tcache->type_id, 0, 0, 0);
+
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
+	entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
+	if (ext_name)
+		entry->type_extension = pstrdup(ext_name);
 	entry->type_oid = tcache->type_id;
 	entry->type_flags = element->type_flags;
 	entry->type_length = tcache->typlen;
@@ -458,12 +446,13 @@ build_array_devtype_info(TypeCacheEntry *tcache)
 	entry->extra_sz = sizeof(pg_array_t);
 	entry->hash_func = generic_devtype_hashfunc;
 	entry->type_element = element;
+	MemoryContextSwitchTo(oldcxt);
 
 	return entry;
 }
 
 static devtype_info *
-build_composite_devtype_info(TypeCacheEntry *tcache)
+build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
 	Oid				type_relid = tcache->typrelid;
 	int				j, nfields = get_relnatts(type_relid);
@@ -471,6 +460,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache)
 	devtype_info   *entry;
 	cl_uint			extra_flags = 0;
 	size_t			extra_sz;
+	MemoryContext	oldcxt;
 
 	extra_sz = (MAXALIGN(sizeof(Datum) * nfields) +
 				MAXALIGN(sizeof(bool) * nfields));
@@ -496,11 +486,12 @@ build_composite_devtype_info(TypeCacheEntry *tcache)
 		extra_flags |= dtype->type_flags;
 		extra_sz    += MAXALIGN(dtype->extra_sz);
 	}
-	entry = MemoryContextAllocZero(devinfo_memcxt,
-								   offsetof(devtype_info,
-											comp_subtypes[nfields]));
-	entry->hashvalue = GetSysCacheHashValue(TYPEOID,
-											tcache->type_id, 0, 0, 0);
+
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	entry = palloc0(offsetof(devtype_info, comp_subtypes[nfields]));
+	entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
+	if (ext_name)
+		entry->type_extension = pstrdup(ext_name);
 	entry->type_oid = tcache->type_id;
 	entry->type_flags = extra_flags;
 	entry->type_length = tcache->typlen;
@@ -508,10 +499,11 @@ build_composite_devtype_info(TypeCacheEntry *tcache)
 	entry->type_byval = tcache->typbyval;
 	entry->type_name = "composite";
 	entry->extra_sz = extra_sz;
-
 	entry->comp_nfields = nfields;
 	memcpy(entry->comp_subtypes, subtypes,
 		   sizeof(devtype_info *) * nfields);
+	MemoryContextSwitchTo(oldcxt);
+
 	return entry;
 }
 
@@ -523,6 +515,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	int				hindex;
 	size_t			sz;
 	dlist_iter		iter;
+	const char	   *ext_name;
 
 	/* lookup dtype that is already built */
 	hindex = hash_uint32(type_oid) % lengthof(devtype_info_slot);
@@ -538,23 +531,24 @@ pgstrom_devtype_lookup(Oid type_oid)
 		}
 	}
 	/* try to build devtype_info entry */
+	ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
 	if (OidIsValid(tcache->typrelid))
 	{
 		/* composite type */
-		dtype = build_composite_devtype_info(tcache);
+		dtype = build_composite_devtype_info(tcache, ext_name);
 	}
 	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
 	{
 		/* array type */
-		dtype = build_array_devtype_info(tcache);
+		dtype = build_array_devtype_info(tcache, ext_name);
 	}
 	else
 	{
 		/* base or extra type */
-		dtype = build_basic_devtype_info(tcache);
+		dtype = build_basic_devtype_info(tcache, ext_name);
 	}
 	
 	/* makes a negative entry, if not in the catalog */
@@ -1156,16 +1150,12 @@ vlbuf_estimate__st_expand(codegen_context *context,
 #define DEVFUNC_MAX_NARGS	4
 
 typedef struct devfunc_catalog_t {
-	const char *func_library;	/* NULL, if internal functions */
+	const char *func_extension;	/* NULL, if built-in functions */
 	const char *func_signature;
 	int			func_devcost;	/* relative cost to run on device */
 	const char *func_template;	/* a template string if simple function */
 	devfunc_result_sz_type devfunc_result_sz;
 } devfunc_catalog_t;
-
-#define PGSTROM		"$libdir/pg_strom"
-#define POSTGIS3	"$libdir/postgis-3"
-#define POSTGIS2	"$libdir/postgis-2"
 
 static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
@@ -2381,7 +2371,8 @@ devfunc_generic_result_sz(codegen_context *context,
 }
 
 static devfunc_info *
-__construct_devfunc_info(HeapTuple protup,
+__construct_devfunc_info(const char *func_extension,
+						 HeapTuple protup,
 						 devtype_info *dfunc_rettype,
 						 int dfunc_nargs,
 						 devtype_info **dfunc_argtypes,
@@ -2456,6 +2447,8 @@ __construct_devfunc_info(HeapTuple protup,
 		dfunc_args = lappend(dfunc_args, dfunc_argtypes[j]);
 
 	dfunc = palloc0(sizeof(devfunc_info));
+	if (func_extension)
+		dfunc->func_extension = pstrdup(func_extension);
 	dfunc->func_oid = PgProcTupleGetOid(protup);
 	if (has_collation)
 	{
@@ -2480,7 +2473,7 @@ __construct_devfunc_info(HeapTuple protup,
 }
 
 static devfunc_info *
-pgstrom_devfunc_construct_fuzzy(const char *lib_name,
+pgstrom_devfunc_construct_fuzzy(const char *func_extension,
 								HeapTuple protup,
 								devtype_info *dfunc_rettype,
 								int dfunc_nargs,
@@ -2503,12 +2496,17 @@ pgstrom_devfunc_construct_fuzzy(const char *lib_name,
 		char	   *tok;
 		char	   *pos;
 
-		if (lib_name == NULL
-			? (procat->func_library != NULL)
-			: (procat->func_library == NULL ||
-			   strcmp(procat->func_library, lib_name) != 0))
-			continue;
-
+		if (func_extension)
+		{
+			if (!procat->func_extension ||
+				strcmp(procat->func_extension, func_extension) != 0)
+				continue;
+		}
+		else
+		{
+			if (procat->func_extension)
+				continue;
+		}
 		strncpy(buffer, procat->func_signature, sizeof(buffer));
 		pos = strchr(buffer, ' ');
 		if (!pos)
@@ -2553,7 +2551,8 @@ pgstrom_devfunc_construct_fuzzy(const char *lib_name,
 			continue;
 
 		/* Ok, found the fuzzy entry */
-		return __construct_devfunc_info(protup,
+		return __construct_devfunc_info(func_extension,
+										protup,
 										dfunc_rettype,
 										dfunc_nargs,
 										dfunc_argtypes,
@@ -2567,11 +2566,12 @@ pgstrom_devfunc_construct_fuzzy(const char *lib_name,
 }
 
 static devfunc_info *
-__build_extra_devfunc_info(HeapTuple protup,
-						   devtype_info *dfunc_rettype,
-						   int dfunc_nargs,
-						   devtype_info **dfunc_argtypes,
-						   Oid dfunc_collid)
+build_extra_devfunc_info(const char *func_extension,
+						 HeapTuple protup,
+						 devtype_info *dfunc_rettype,
+						 int dfunc_nargs,
+						 devtype_info **dfunc_argtypes,
+						 Oid dfunc_collid)
 {
 	Form_pg_proc	proc_form = (Form_pg_proc) GETSTRUCT(protup);
 	StringInfoData	ident;
@@ -2579,7 +2579,6 @@ __build_extra_devfunc_info(HeapTuple protup,
 	devfunc_info   *dfunc = NULL;
 	List		   *dfunc_args = NIL;
 	const char	   *nsp_name;
-	const char	   *ext_name;
 	int				i;
 
 	/* setup devfunc identifier */
@@ -2600,10 +2599,8 @@ __build_extra_devfunc_info(HeapTuple protup,
 	}
 	appendStringInfoChar(&ident, ')');
 
-	ext_name = get_extension_name_by_object(ProcedureRelationId,
-											PgProcTupleGetOid(protup));
-
 	memset(&__dfunc, 0, sizeof(devfunc_info));
+	__dfunc.func_extension = func_extension;
 	__dfunc.func_oid = PgProcTupleGetOid(protup);
 	__dfunc.hashvalue = GetSysCacheHashValue(PROCOID, __dfunc.func_oid, 0, 0, 0);
 	__dfunc.func_collid = dfunc_collid;
@@ -2620,7 +2617,7 @@ __build_extra_devfunc_info(HeapTuple protup,
 		pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
 		if (extra->lookup_extra_devfunc &&
-			extra->lookup_extra_devfunc(ext_name, ident.data, &__dfunc))
+			extra->lookup_extra_devfunc(ident.data, &__dfunc))
 		{
 			MemoryContext	oldcxt;
 
@@ -2644,22 +2641,6 @@ __build_extra_devfunc_info(HeapTuple protup,
 	return dfunc;
 }
 
-static inline devfunc_info *
-build_extra_devfunc_info(HeapTuple protup,
-						 devtype_info *dfunc_rettype,
-						 int dfunc_nargs,
-						 devtype_info **dfunc_argtypes,
-						 Oid dfunc_collid)
-{
-	if (pgstrom_num_users_extra == 0)
-		return NULL;
-	return __build_extra_devfunc_info(protup,
-									  dfunc_rettype,
-									  dfunc_nargs,
-									  dfunc_argtypes,
-									  dfunc_collid);
-}
-
 static devfunc_info *
 pgstrom_devfunc_construct(HeapTuple protup,
 						  Oid func_rettype,
@@ -2668,20 +2649,19 @@ pgstrom_devfunc_construct(HeapTuple protup,
 {
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	const char	   *proc_name = NameStr(proc->proname);
+	const char	   *func_extension;
 	StringInfoData	sig;
 	devtype_info   *dtype;
 	devtype_info   *dfunc_rettype;
 	devtype_info  **dfunc_argtypes;
 	devfunc_info   *dfunc = NULL;
-	char		   *lib_name = NULL;
 	int				fuzzy_index_head = -1;
 	int				fuzzy_index_tail = -1;
 	int				i;
 
-	lib_name = get_proc_library(protup);
-	if (lib_name == (void *)(~0UL))
-		return NULL;
-	
+	/* extension name */
+	func_extension = get_extension_name_by_object(ProcedureRelationId,
+												  PgProcTupleGetOid(protup));
 	/* make a signature string */
 	initStringInfo(&sig);
 	dfunc_rettype = pgstrom_devtype_lookup(func_rettype);
@@ -2705,17 +2685,21 @@ pgstrom_devfunc_construct(HeapTuple protup,
 
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
-		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
+		devfunc_catalog_t  *procat = &devfunc_common_catalog[i];
 
-		if (lib_name == NULL
-			? (procat->func_library != NULL)
-			: (procat->func_library == NULL ||
-			   strcmp(procat->func_library, lib_name) != 0))
+		if (func_extension)
+		{
+			if (!procat->func_extension ||
+				strcmp(procat->func_extension, func_extension) != 0)
+				continue;
+		}
+		else if (procat->func_extension)
 			continue;
 
 		if (strcmp(procat->func_signature, sig.data) == 0)
 		{
-			dfunc = __construct_devfunc_info(protup,
+			dfunc = __construct_devfunc_info(func_extension,
+											 protup,
 											 dfunc_rettype,
 											 func_argtypes->dim1,
 											 dfunc_argtypes,
@@ -2727,6 +2711,10 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		}
 		else
 		{
+			/*
+			 * In case when function name is identical, but argument list
+			 * does not match exactly. (
+			 */
 			const char *sname = strchr(procat->func_signature, ' ');
 			const char *pname = proc_name;
 
@@ -2752,7 +2740,7 @@ pgstrom_devfunc_construct(HeapTuple protup,
 	/* try invocation with implicit type relabel */
 	if (!dfunc && fuzzy_index_head >= 0)
 	{
-		dfunc = pgstrom_devfunc_construct_fuzzy(lib_name,
+		dfunc = pgstrom_devfunc_construct_fuzzy(func_extension,
 												protup,
 												dfunc_rettype,
 												func_argtypes->dim1,
@@ -2762,17 +2750,16 @@ pgstrom_devfunc_construct(HeapTuple protup,
 												fuzzy_index_tail);
 	}
 	/* extra device function, if any */
-	if (!dfunc)
+	if (!dfunc && pgstrom_num_users_extra > 0)
 	{
-		dfunc = build_extra_devfunc_info(protup,
+		dfunc = build_extra_devfunc_info(func_extension,
+										 protup,
 										 dfunc_rettype,
 										 func_argtypes->dim1,
 										 dfunc_argtypes,
 										 func_collid);
 	}
 not_found:
-	if (lib_name)
-		pfree(lib_name);
 	pfree(sig.data);
 	return dfunc;
 }
@@ -3113,17 +3100,11 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 	{
 		StringInfoData	src_ident;
 		StringInfoData	dst_ident;
-		const char	   *src_extname;
-		const char	   *dst_extname;
 		devcast_info	__dcast;
 
 		initStringInfo(&src_ident);
 		initStringInfo(&dst_ident);
-		src_extname = get_extension_name_by_object(TypeRelationId,
-												   dtype_s->type_oid);
 		append_string_devtype_identifier(&src_ident, dtype_s->type_oid);
-		dst_extname = get_extension_name_by_object(TypeRelationId,
-												   dtype_d->type_oid);
 		append_string_devtype_identifier(&dst_ident, dtype_d->type_oid);
 
 		memset(&__dcast, 0, sizeof(devcast_info));
@@ -3136,8 +3117,8 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 			pgstromUsersExtraDescriptor *extra = &pgstrom_users_extra_desc[i];
 
 			if (extra->lookup_extra_devcast &&
-				extra->lookup_extra_devcast(src_extname, src_ident.data,
-											dst_extname, dst_ident.data,
+				extra->lookup_extra_devcast(src_ident.data,
+											dst_ident.data,
 											&__dcast))
 			{
 				MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
@@ -3148,6 +3129,8 @@ build_devcast_info(Oid src_type_oid, Oid dst_type_oid)
 				break;
 			}
 		}
+		pfree(src_ident.data);
+		pfree(dst_ident.data);
 	}
 not_found:
 	/* negative entry */

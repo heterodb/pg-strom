@@ -60,6 +60,7 @@ typedef uint32 (*devtype_hashfunc_type)(struct devtype_info *dtype, Datum datum)
 typedef struct devtype_info {
 	dlist_node	chain;
 	uint32		hashvalue;
+	const char *type_extension;	/* Extension that provides this type, if any */
 	Oid			type_oid;
 	uint32		type_flags;
 	int16		type_length;
@@ -97,6 +98,7 @@ typedef int (*devfunc_result_sz_type)(struct codegen_context *context,
 typedef struct devfunc_info {
 	dlist_node	chain;
 	uint32		hashvalue;
+	const char *func_extension;	/* Extension that provides this function, if any */
 	Oid			func_oid;		/* OID of the SQL function */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
@@ -188,8 +190,7 @@ typedef struct
 	 * then returns true.
 	 * Elsewhere, returns false.
 	 */
-	bool	(*lookup_extra_devtype)(const char *extension_name,
-									const char *type_ident,
+	bool	(*lookup_extra_devtype)(const char *type_ident,
 									devtype_info *dtype);
 
 	/*
@@ -201,8 +202,7 @@ typedef struct
 	 * dfunc_argtypes, not function's declaration at proc_form.
 	 * If no supported function by the extra module, return NULL.
 	 */
-	bool	(*lookup_extra_devfunc)(const char *extension_name,
-									const char *func_ident,
+	bool	(*lookup_extra_devfunc)(const char *func_ident,
 									devfunc_info *dfunc);
 
 	/*
@@ -211,9 +211,7 @@ typedef struct
 	 * extra module.
 	 * If no supported cast by the extra module, return NULL.
 	 */
-	bool	(*lookup_extra_devcast)(const char *src_extension_name,
-									const char *src_type_ident,
-									const char *dst_extension_name,
+	bool	(*lookup_extra_devcast)(const char *src_type_ident,
 									const char *dst_type_ident,
 									devcast_info *dcast);
 
