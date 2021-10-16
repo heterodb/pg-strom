@@ -274,6 +274,22 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
+##HyperLogLogの設定
+`pg_strom.hll_registers_bits` [型: `int` / 初期値: `9`]
+:    HyperLogLogで使用する HLL Sketch の幅を指定します。
+:    実行時に`2^pg_strom.hll_registers_bits`個のレジスタを割当て、ハッシュ値の下位`pg_strom.hll_registers_bits`ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。
+:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](../hll_count/)を参照してください。
+}
+
+@en{
+##HyperLogLog configuration
+`pg_strom.hll_registers_bits` [type: `int` / default: `9`]
+:    It specifies the width of HLL Sketch used for HyperLogLog.
+:    PG-Strom allocates `2^pg_strom.hll_registers_bits` registers for HLL Sketch, then uses the latest `pg_strom.hll_registers_bits` bits of hash-values as register selector. It must be configured between 4 and 15.
+:    See [HyperLogLog](../hll_count/) for more details of HyperLogLog functionality of PG-Strom.
+}
+
+@ja{
 ##GPUコードの生成、およびJITコンパイルの設定
 
 `pg_strom.program_cache_size` [型: `int` / 初期値: `256MB`]

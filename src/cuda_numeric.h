@@ -405,5 +405,11 @@ pgfn_numeric_ge(kern_context *kcxt,
 DEVICE_FUNCTION(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt,
 				  pg_numeric_t arg1, pg_numeric_t arg2);
+/*
+ * Hash-function for Hyper-Log-Log
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_numeric(kern_context *kcxt, pg_numeric_t arg1);
+
 #endif /* __CUDACC__ */
 #endif /* CUDA_NUMERIC_H */

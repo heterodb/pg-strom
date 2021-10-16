@@ -93,9 +93,6 @@ static char	   *shmbuf_segment_vaddr_tail = NULL;
 static MemoryContextMethods sharedMemoryContextMethods;
 MemoryContext	TopSharedMemoryContext = NULL;
 
-/* -------- SQL functions -------- */
-Datum pgstrom_shmbuf_info(PG_FUNCTION_ARGS);
-
 /* -------- utility inline functions -------- */
 static inline int
 shmBufferSegmentId(shmBufferSegment *seg)
@@ -950,7 +947,8 @@ MemoryStatsPrintfStderr(MemoryContext context,
 static void
 __shmemContextStatsPrint(MemoryContext __context,
 						 MemoryStatsPrintFunc printfunc, void *passthru,
-						 MemoryContextCounters *totals)
+						 MemoryContextCounters *totals,
+						 bool print_to_stderr)
 {
 	shmBufferContext *context = (shmBufferContext *) __context;
 	dlist_iter	iter;
@@ -994,7 +992,6 @@ __shmemContextStatsPrint(MemoryContext __context,
 		}
 	}
 	SpinLockRelease(&context->lock);
-
 	if (printfunc)
 	{
 		char	temp[1024];
@@ -1003,9 +1000,12 @@ __shmemContextStatsPrint(MemoryContext __context,
 				 "active (%dblocks / %zu bytes), free (%dblocks / %zu bytes)",
 				 active_chunks, active_space,
 				 free_chunks, free_space);
+#if PG_VERSION_NUM < 140000
 		printfunc(__context, passthru, temp);
+#else
+		printfunc(__context, passthru, temp, print_to_stderr);
+#endif
 	}
-
 	if (totals)
 	{
 		totals->nblocks += (active_chunks + free_chunks);
@@ -1015,25 +1015,24 @@ __shmemContextStatsPrint(MemoryContext __context,
 	}
 }
 
-#if PG_VERSION_NUM < 110000
-static void
-shmemContextStatsPrint(MemoryContext __context, int level, bool print,
-					   MemoryContextCounters *totals)
-{
-	__shmemContextStatsPrint(__context,
-							 print ? MemoryStatsPrintfStderr : NULL,
-							 &level,
-							 totals);
-}
-#else	/* PG10 or older */
+#if PG_VERSION_NUM < 140000
 static void
 shmemContextStatsPrint(MemoryContext __context,
 					   MemoryStatsPrintFunc printfunc, void *passthru,
 					   MemoryContextCounters *totals)
 {
-	__shmemContextStatsPrint(__context, printfunc, passthru, totals);
+	__shmemContextStatsPrint(__context, printfunc, passthru, totals, false);
 }
-#endif	/* PG11 or newer */
+#else
+static void
+shmemContextStatsPrint(MemoryContext __context,
+                       MemoryStatsPrintFunc printfunc, void *passthru,
+                       MemoryContextCounters *totals,
+					   bool print_to_stderr)
+{
+	__shmemContextStatsPrint(__context, printfunc, passthru, totals, print_to_stderr);
+}
+#endif
 
 #ifdef MEMORY_CONTEXT_CHECKING
 /*
@@ -1076,7 +1075,7 @@ shmemContextCheck(MemoryContext __context)
 }
 #endif
 
-#if 1
+#if 0
 Datum pgstrom_shmbuf_alloc(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_free(PG_FUNCTION_ARGS);
 Datum pgstrom_shmbuf_realloc(PG_FUNCTION_ARGS);
@@ -1224,14 +1223,47 @@ __pgstrom_shmbuf_context_info(StringInfo str, shmBufferContext *context)
 	appendStringInfo(str, "]}");
 }
 
+PG_FUNCTION_INFO_V1(pgstrom_shared_buffer_info);
 Datum
-pgstrom_shmbuf_info(PG_FUNCTION_ARGS)
+pgstrom_shared_buffer_info(PG_FUNCTION_ARGS)
 {
 	StringInfoData	str;
 
 	initStringInfo(&str);
 	str.len += VARHDRSZ;
 
+#if 1
+	SpinLockAcquire(&shmBufSegHead->lock);
+    PG_TRY();
+	{
+		shmBufferContext *context = (shmBufferContext *)TopSharedMemoryContext;
+
+		if (context)
+		{
+			PG_TRY();
+			{
+				__pgstrom_shmbuf_context_info(&str, context);
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&context->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&context->lock);
+		}
+	}
+	PG_CATCH();
+    {
+        SpinLockRelease(&shmBufSegHead->lock);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    SpinLockRelease(&shmBufSegHead->lock);
+#else
+	/*
+	 * multi shared-memory context - no longer required!
+	 */
 	appendStringInfo(&str, "[");
 	SpinLockAcquire(&shmBufSegHead->lock);
 	PG_TRY();
@@ -1267,16 +1299,16 @@ pgstrom_shmbuf_info(PG_FUNCTION_ARGS)
 	PG_END_TRY();
 	SpinLockRelease(&shmBufSegHead->lock);
 	appendStringInfo(&str, "]");
-
+#endif
 	SET_VARSIZE(str.data, str.len);
 	PG_RETURN_TEXT_P(str.data);
 }
-PG_FUNCTION_INFO_V1(pgstrom_shmbuf_info);
 
+#if 0
 /*
  * SharedMemoryContextCreate
  */
-MemoryContext
+static MemoryContext
 SharedMemoryContextCreate(const char *name)
 {
 	shmBufferContext   *scxt;
@@ -1299,6 +1331,34 @@ SharedMemoryContextCreate(const char *name)
 	SpinLockRelease(&shmBufSegHead->lock);
 
 	return mcxt;
+}
+#endif
+
+/*
+ * shmbufAlloc
+ */
+void *
+shmbufAlloc(size_t sz)
+{
+	return MemoryContextAlloc(TopSharedMemoryContext, sz);
+}
+
+/*
+ * shmbufAllocZero
+ */
+void *
+shmbufAllocZero(size_t sz)
+{
+	return MemoryContextAllocZero(TopSharedMemoryContext, sz);
+}
+
+/*
+ * shmbufFree
+ */
+void
+shmbufFree(void *addr)
+{
+	pfree(addr);
 }
 
 /*

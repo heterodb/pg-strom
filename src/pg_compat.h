@@ -46,6 +46,7 @@
 #define PgProcTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define PgTypeTupleGetOid(tuple)	HeapTupleGetOid(tuple)
 #define PgTriggerTupleGetOid(tuple)	HeapTupleGetOid(tuple)
+#define PgExtensionTupleGetOid(tuple) HeapTupleGetOid(tuple)
 #define CreateTemplateTupleDesc(a)	CreateTemplateTupleDesc((a), false)
 #define ExecCleanTypeFromTL(a)		ExecCleanTypeFromTL((a),false)
 #define SystemAttributeDefinition(a)			\
@@ -62,6 +63,7 @@
 #define PgProcTupleGetOid(tuple)	(((Form_pg_proc)GETSTRUCT(tuple))->oid)
 #define PgTypeTupleGetOid(tuple)	(((Form_pg_type)GETSTRUCT(tuple))->oid)
 #define PgTriggerTupleGetOid(tuple)	(((Form_pg_trigger)GETSTRUCT(tuple))->oid)
+#define PgExtensionTupleGetOid(tuple) (((Form_pg_extension)GETSTRUCT(tuple))->oid)
 #endif
 
 /*
@@ -137,23 +139,23 @@
 #endif
 
 /*
- * MEMO: PG11.2, 10.7, and 9.6.12 changed ABI of GenerateTypeDependencies()
+ * MEMO: PG11.2, changed ABI of GenerateTypeDependencies()
  *
  * PG11: 1b55acb2cf48341822261bf9c36785be5ee275db
  * PG10: 2d83863ea2739dc559ed490c284f5c1817db4752
  * PG96: d431dff1af8c220490b84dd978aa3a508f71d415
  *
- * then, PG13 also changed API of GenerateTypeDependencies
+ * then, PG13 modified ABI of GenerateTypeDependencies
+ *
+ * then, PG13.5 added 'makeExtensionDep' argument.
  */
-#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION < 12) || \
-	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION < 7)  ||	\
-	 (PG_MAJOR_VERSION == 1100 && PG_MINOR_VERSION < 2))
-#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)					\
+#if PG_VERSION_NUM < 110002
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f,g)					\
 	do {																\
 		Form_pg_type __type = (Form_pg_type)GETSTRUCT(tup);				\
 																		\
 		GenerateTypeDependencies(__type->typnamespace,	/* typeNamespace */	\
-								 HeapTupleGetOid(tup),	/* typeObjectId */ \
+								 PgTypeTupleGetOid(tup),/* typeObjectId */ \
 								 __type->typrelid,		/* relationOid */ \
 								 (c),					/* relationKind */ \
 								 __type->typowner,		/* owner */		\
@@ -166,54 +168,19 @@
 								 __type->typanalyze,	/* analyzeProcedure */ \
 								 __type->typelem,		/* elementType */ \
 								 (d),					/* isImplicitArray */ \
-								 __type->typbasetype,	/* baseType */ \
+								 __type->typbasetype,	/* baseType */	\
 								 __type->typcollation,	/* typeCollation */	\
 								 (a),					/* defaultExpr */ \
-								 (f));					/* rebuild */ \
+								 (g));					/* rebuild */	\
 	} while(0)
-#elif PG_VERSION_NUM < 120000
-#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)		\
-	GenerateTypeDependencies(HeapTupleGetOid(tup),			\
-							 (Form_pg_type)GETSTRUCT(tup),	\
-							 (a),(b),(c),(d),(e),(f))
 #elif PG_VERSION_NUM < 130000
-#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f)					\
-	GenerateTypeDependencies(((Form_pg_type)GETSTRUCT(tup))->oid,		\
-							 ((Form_pg_type)GETSTRUCT(tup)),			\
-							 (a), (b), (c), (d), (e), (f))
-#endif
-
-#if 0
-/*
- * MEMO: PG9.6 does not define macros below
- */
-#if PG_MAJOR_VERSION < 1000
-/* convenience macros for accessing a JsonbContainer struct */
-#define JsonContainerSize(jc)       ((jc)->header & JB_CMASK)
-#define JsonContainerIsScalar(jc)   (((jc)->header & JB_FSCALAR) != 0)
-#define JsonContainerIsObject(jc)   (((jc)->header & JB_FOBJECT) != 0)
-#define JsonContainerIsArray(jc)    (((jc)->header & JB_FARRAY) != 0)
-
-#define IS_SIMPLE_REL(rel)							\
-	((rel)->reloptkind == RELOPT_BASEREL ||			\
-	 (rel)->reloptkind == RELOPT_OTHER_MEMBER_REL)
-
-static inline Oid
-CatalogTupleInsert(Relation heapRel, HeapTuple tup)
-{
-	CatalogIndexState indstate;
-	Oid         oid;
-
-	indstate = CatalogOpenIndexes(heapRel);
-
-	oid = simple_heap_insert(heapRel, tup);
-
-	CatalogIndexInsert(indstate, tup);
-	CatalogCloseIndexes(indstate);
-
-	return oid;
-}
-#endif
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f,g)		\
+	GenerateTypeDependencies(PgTypeTupleGetOid(tup),		\
+							 (Form_pg_type)GETSTRUCT(tup),	\
+							 (a),(b),(c),(d),(e),(g))
+#elif PG_VERSION_NUM < 130005
+#define GenerateTypeDependencies(tup,cat,a,b,c,d,e,f,g)		\
+	GenerateTypeDependencies((tup),(cat),(a),(b),(c),(d),(e),(g))
 #endif
 
 /*
@@ -329,6 +296,18 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #endif
 
 /*
+ * PG12 deprecated get_func_cost(), instead of add_function_cost()
+ */
+#if PG_VERSION_NUM < 120000
+static inline void
+add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
+				  QualCost *cost)
+{
+	cost->per_tuple += get_func_cost(funcid) * cpu_operator_cost;
+}
+#endif
+
+/*
  * PG13 changed varnoold/varoattno field names of Var-node,
  * to varnosyn/varattnosyn. Be careful to use these names.
  * 9ce77d75c5ab094637cc4a446296dc3be6e3c221
@@ -364,4 +343,11 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 	set_deparse_context_plan((deparse_cxt),((PlanState *)(planstate))->plan,ancestors)
 #endif
 
+/*
+ * PG14 changed API to pick up var-nodes from the expression.
+ */
+#if PG_VERSION_NUM < 140000
+#define pull_varnos_of_level(a,b,c)		pull_varnos_of_level((b),(c))
+#define pull_varnos(a,b)				pull_varnos(b)
+#endif
 #endif	/* PG_COMPAT_H */

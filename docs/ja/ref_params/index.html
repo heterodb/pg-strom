@@ -69,6 +69,8 @@
                     </li>
                     <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                     </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                    </li>
                     <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                     </li>
                 </ul>
@@ -102,6 +104,8 @@
     <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw関連の設定</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUキャッシュの設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog">HyperLogLogの設定</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpujit">GPUコードの生成、およびJITコンパイルの設定</a>
     </li>
@@ -275,6 +279,13 @@
 <dd>書式は <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code> で、複数個のテーブルを指定する場合はこれをカンマ区切りで並べます。</dd>
 <dd>GPUキャッシュの初回ロードは相応に時間のかかる処理ですが、事前に初回ロードを済ませておく事で、検索/分析クエリの初回実行時に応答速度が遅延するのを避けることができます。</dd>
 <dd>なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。</dd>
+</dl>
+<h2 id="hyperloglog">HyperLogLogの設定</h2>
+<dl>
+<dt><code>pg_strom.hll_registers_bits</code> [型: <code>int</code> / 初期値: <code>9</code>]</dt>
+<dd>HyperLogLogで使用する HLL Sketch の幅を指定します。</dd>
+<dd>実行時に<code>2^pg_strom.hll_registers_bits</code>個のレジスタを割当て、ハッシュ値の下位<code>pg_strom.hll_registers_bits</code>ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。</dd>
+<dd>PG-StromのHyperLogLog機能について、詳しくは<a href="../hll_count/">HyperLogLog</a>を参照してください。</dd>
 </dl>
 <h2 id="gpujit">GPUコードの生成、およびJITコンパイルの設定</h2>
 <dl>

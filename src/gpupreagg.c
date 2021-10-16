@@ -23,13 +23,16 @@ static bool					enable_pullup_outer_join;		/* GUC */
 static bool					enable_partitionwise_gpupreagg;	/* GUC */
 static bool					enable_numeric_aggfuncs; 		/* GUC */
 static double				gpupreagg_reduction_threshold;	/* GUC */
+int							pgstrom_hll_register_bits;		/* GUC */
+
 
 typedef struct
 {
 	cl_int			num_group_keys;	/* number of grouping keys */
+	cl_int			num_accum_values; /* number of accumulation */
+	cl_int			accum_extra_bufsz;/* size of accumulation extra buffer */
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
-	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
 	Cost			outer_startup_cost; /* copy of @startup_cost in outer */
 	Cost			outer_total_cost; /* copy of @total_cost in outer path */
 	double			outer_nrows;	/* number of estimated outer nrows */
@@ -41,9 +44,8 @@ typedef struct
 	Oid				index_oid;		/* OID of BRIN-index, if any */
 	List		   *index_conds;	/* BRIN-index key conditions */
 	List		   *index_quals;	/* Original BRIN-index qualifiers */
-	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
-									 * initial projection; note that setrefs.c
-									 * should not update this field */
+	List		   *tlist_part;		/* template of kds_final */
+	List		   *tlist_prep;		/* template of kds_slot */
 	int				optimal_gpu;
 	char		   *kern_source;
 	cl_uint			extra_flags;
@@ -58,9 +60,10 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *exprs = NIL;
 
 	privs = lappend(privs, makeInteger(gpa_info->num_group_keys));
+	privs = lappend(privs, makeInteger(gpa_info->num_accum_values));
+	privs = lappend(privs, makeInteger(gpa_info->accum_extra_bufsz));
 	privs = lappend(privs, pmakeFloat(gpa_info->plan_ngroups));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
-	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_startup_cost));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_total_cost));
 	privs = lappend(privs, pmakeFloat(gpa_info->outer_nrows));
@@ -72,7 +75,8 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->index_oid));
 	privs = lappend(privs, gpa_info->index_conds);
 	exprs = lappend(exprs, gpa_info->index_quals);
-	privs = lappend(privs, gpa_info->tlist_fallback);
+	exprs = lappend(exprs, gpa_info->tlist_part);
+	exprs = lappend(exprs, gpa_info->tlist_prep);
 	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -93,9 +97,10 @@ deform_gpupreagg_info(CustomScan *cscan)
 	int			eindex = 0;
 
 	gpa_info->num_group_keys = intVal(list_nth(privs, pindex++));
+	gpa_info->num_accum_values = intVal(list_nth(privs, pindex++));
+	gpa_info->accum_extra_bufsz = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_ngroups = floatVal(list_nth(privs, pindex++));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
-	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_nrows = floatVal(list_nth(privs, pindex++));
@@ -107,7 +112,8 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->index_oid = intVal(list_nth(privs, pindex++));
 	gpa_info->index_conds = list_nth(privs, pindex++);
 	gpa_info->index_quals = list_nth(exprs, eindex++);
-	gpa_info->tlist_fallback = list_nth(privs, pindex++);
+	gpa_info->tlist_part = list_nth(exprs, eindex++);
+	gpa_info->tlist_prep = list_nth(exprs, eindex++);
 	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -130,7 +136,12 @@ typedef struct
 	cl_bool			combined_gpujoin;
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
-	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
+	cl_int			num_accum_values;	/* __GPUPREAGG_NUM_ACCUM_VALUES */
+	cl_int			accum_extra_bufsz;	/* __GPUPREAGG_ACCUM_EXTRA_BUFSZ */
+	cl_int			local_hash_nrooms;	/* __GPUPREAGG_LOCAL_HASH_NROOMS */
+	TupleTableSlot *part_slot;	/* slot reflects tlist_part (kds_final) */
+	TupleTableSlot *prep_slot;	/* slot reflects tlist_prep (kds_slot) */
+	//TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	ExprState	   *outer_quals;
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
@@ -139,14 +150,13 @@ typedef struct
 	pgstrom_data_store *pds_final;
 	CUdeviceptr		m_fhash;
 	CUevent			ev_init_fhash;
-	size_t			f_hashsize;
-	size_t			f_hashlimit;
+	size_t			f_hash_nslots;
+	size_t			f_hash_length;
 	pthread_mutex_t	f_mutex;
 
 	size_t			plan_nrows_per_chunk;	/* planned nrows/chunk */
 	size_t			plan_nrows_in;	/* num of outer rows planned */
 	size_t			plan_ngroups;	/* num of groups planned */
-	size_t			plan_extra_sz;	/* size of varlena planned */
 } GpuPreAggState;
 
 struct GpuPreAggRuntimeStat
@@ -200,17 +210,14 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_upper,
 											PathTarget *target_final,
 											PathTarget *target_partial,
-											PathTarget *target_device,
 											Path       *input_path,
-											Bitmapset **p_pfunc_bitmap,
-											Node **p_havingQual,
-											bool *p_can_pullup_outerscan);
+											Node      **p_havingQual,
+											bool       *p_can_pullup_outerscan,
+											AggClauseCosts *p_final_clause_costs);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
-								  List *tlist_dev,
 								  List *outer_tlist,
-								  GpuPreAggInfo *gpa_info,
-								  Bitmapset *pfunc_bitmap);
+								  GpuPreAggInfo *gpa_info);
 static void createGpuPreAggSharedState(GpuPreAggState *gpas,
 									   ParallelContext *pcxt,
 									   void *dsm_addr);
@@ -237,6 +244,7 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 #define ALTFUNC_EXPR_PCOV_X2		108	/* PCOV_X2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_Y2		109	/* PCOV_Y2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
+#define ALTFUNC_EXPR_HLL_HASH		111	/* HLL_HASH(X) */
 
 /*
  * XXX - GpuPreAgg with Numeric arguments are problematic because
@@ -256,6 +264,12 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 #ifndef NUMERICARRAYOID
 #define NUMERICARRAYOID		1231	/* see pg_type.h */
 #endif
+
+static size_t
+__aggfunc_property_extra_sz__hll_count(void)
+{
+	return MAXALIGN(VARHDRSZ + (1U << pgstrom_hll_register_bits));
+}
 
 /*
  * List of supported aggregate functions
@@ -277,209 +291,435 @@ typedef struct {
 	int			partfn_nargs;
 	Oid			partfn_argtypes[8];
 	int			partfn_argexprs[8];
+	size_t	  (*partfn_extra_sz)(void);
 	int			extra_flags;
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 } aggfunc_catalog_t;
+
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "avg",    1, {INT4OID},
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "avg",    1, {INT8OID},
 	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "avg",    1, {FLOAT4OID},
 	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "avg",    1, {FLOAT8OID},
 	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
 	  "s:favg_numeric", FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, true
+	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  NULL, 0, true
 	},
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count",  0, {},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_NROWS}, 0, false
+	  {ALTFUNC_EXPR_NROWS},
+	  NULL, 0, false
 	},
 	{ "count",  1, {ANYOID},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_NROWS}, 0, false
+	  {ALTFUNC_EXPR_NROWS},
+	  NULL, 0, false
 	},
+	/* HLL_COUNT(KEY) */
+	{ "hll_count", 1, {INT1OID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+	{ "hll_count", 1, {INT2OID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+	{ "hll_count", 1, {INT4OID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+	{ "hll_count", 1, {INT8OID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
+	{ "hll_count", 1, {NUMERICOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, true
+	},
+#endif
+ 	{ "hll_count", 1, {DATEOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {TIMEOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {TIMETZOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {TIMESTAMPOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {TIMESTAMPTZOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {BPCHAROID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+ 	{ "hll_count", 1, {TEXTOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+	{ "hll_count", 1, {UUIDOID},
+	  "c:hll_merge", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+	},
+	/* HLL_SKETCH(KEY) */
+	{ "hll_sketch", 1, {INT1OID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {INT2OID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {INT4OID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {INT8OID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+#ifdef GPUPREAGG_SUPPORT_NUMERIC
+	{ "hll_sketch", 1, {NUMERICOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, true
+    },
+#endif
+	{ "hll_sketch", 1, {DATEOID},
+	  "c:hll_combine", BYTEAOID,
+	  "s:hll_sketch_new", 1, {INT8OID},
+	  {ALTFUNC_EXPR_HLL_HASH},
+	  __aggfunc_property_extra_sz__hll_count,
+	  0, false
+    },
+	{ "hll_sketch", 1, {TIMEOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {TIMETZOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {TIMESTAMPOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {TIMESTAMPTZOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {BPCHAROID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {TEXTOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
+	{ "hll_sketch", 1, {UUIDOID},
+      "c:hll_combine", BYTEAOID,
+      "s:hll_sketch_new", 1, {INT8OID},
+      {ALTFUNC_EXPR_HLL_HASH},
+      __aggfunc_property_extra_sz__hll_count,
+      0, false
+    },
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max",    1, {INT2OID},
 	  "s:fmax_int2", INT4OID,
 	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {INT4OID},
 	  "c:max",      INT4OID,
 	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {INT8OID},
 	  "c:max",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {FLOAT4OID},
 	  "c:max",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {FLOAT8OID},
 	  "c:max",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max",    1, {NUMERICOID},
 	  "s:fmax_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMAX}, 0, true
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, true
 	},
 #endif
 	{ "max",    1, {CASHOID},
 	  "c:max",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MISCLIB, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	{ "max",    1, {DATEOID},
 	  "c:max",      DATEOID,
 	  "varref", 1, {DATEOID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMEOID},
 	  "c:max",      TIMEOID,
 	  "varref", 1, {TIMEOID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMESTAMPOID},
 	  "c:max",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
 	{ "max",    1, {TIMESTAMPTZOID},
 	  "c:max",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMAX}, 0, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, 0, false
 	},
-
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min",    1, {INT2OID},
 	  "s:fmin_int2", INT4OID,
 	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {INT4OID},
 	  "c:min",      INT4OID,
 	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {INT8OID},
 	  "c:min",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {FLOAT4OID},
 	  "c:min",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {FLOAT8OID},
 	  "c:min",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min",    1, {NUMERICOID},
 	  "s:fmin_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMIN}, 0, true
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, true
 	},
 #endif
 	{ "min",    1, {CASHOID},
 	  "c:min",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MISCLIB, false
+	  {ALTFUNC_EXPR_PMAX},
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	{ "min",    1, {DATEOID},
 	  "c:min",      DATEOID,
 	  "varref", 1, {DATEOID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMEOID},
 	  "c:min",      TIMEOID,
 	  "varref", 1, {TIMEOID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMESTAMPOID},
 	  "c:min",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 	{ "min",    1, {TIMESTAMPTZOID},
 	  "c:min",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMIN}, 0, false
+	  {ALTFUNC_EXPR_PMIN},
+	  NULL, 0, false
 	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum",    1, {INT2OID},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "sum",    1, {INT4OID},
 	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "sum",    1, {INT8OID},
 	  "c:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "sum",    1, {FLOAT4OID},
 	  "c:sum",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 	{ "sum",    1, {FLOAT8OID},
 	  "c:sum",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum",    1, {NUMERICOID},
 	  "s:fsum_numeric", FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, true
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, 0, true
 	},
 #endif
 	{ "sum",    1, {CASHOID},
 	  "c:sum",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MISCLIB, false
+	  {ALTFUNC_EXPR_PSUM},
+	  NULL, DEVKERNEL_NEEDS_MISCLIB, false
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev",      1, {INT2OID},
@@ -487,35 +727,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0, false
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0, false
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0, false
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {FLOAT4OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0, false
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev",      1, {FLOAT8OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0, false
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev",      1, {NUMERICOID},
@@ -523,7 +768,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -532,35 +778,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {FLOAT4OID},
 	  "s:stddev_pop",    FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_pop",  1, {FLOAT8OID},
 	  "s:stddev_pop",    FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_pop",  1, {NUMERICOID},
@@ -568,7 +819,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -577,35 +829,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {INT4OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {INT8OID},
 	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp",   FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "stddev_samp", 1, {FLOAT8OID},
 	  "s:stddev_samp",   FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "stddev_samp", 1, {NUMERICOID},
@@ -613,7 +870,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -622,35 +880,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "variance",    1, {INT4OID},
 	  "s:variance_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "variance",    1, {INT8OID},
 	  "s:variance_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "variance",    1, {FLOAT4OID},
 	  "s:variance",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "variance",    1, {FLOAT8OID},
 	  "s:variance",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "variance",    1, {NUMERICOID},
@@ -658,7 +921,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/* VAR_POP(X) = PGSTROM.VAR_POP(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -667,35 +931,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {INT4OID},
 	  "s:var_pop_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {INT8OID},
 	  "s:var_pop_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {FLOAT4OID},
 	  "s:var_pop",       FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_pop",     1, {FLOAT8OID},
 	  "s:var_pop",       FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_pop",     1, {NUMERICOID},
@@ -703,7 +972,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/* VAR_SAMP(X) = PGSTROM.VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -712,35 +982,40 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {INT4OID},
 	  "s:var_samp_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {INT8OID},
 	  "s:var_samp_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {FLOAT4OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 	{ "var_samp",    1, {FLOAT8OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "var_samp",    1, {NUMERICOID},
@@ -748,7 +1023,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, 0
+	   ALTFUNC_EXPR_PSUM_X2},
+	  NULL, 0, false
 	},
 #endif
 	/*
@@ -766,7 +1042,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_pop",   FLOAT8ARRAYOID,
@@ -777,7 +1054,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:covar_samp",   FLOAT8ARRAYOID,
@@ -788,7 +1066,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	/*
 	 * Aggregation to support least squares method
@@ -805,7 +1084,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
        ALTFUNC_EXPR_PCOV_X2,
        ALTFUNC_EXPR_PCOV_Y,
        ALTFUNC_EXPR_PCOV_Y2,
-       ALTFUNC_EXPR_PCOV_XY}, 0
+       ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_avgy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_avgy",   FLOAT8ARRAYOID,
@@ -816,7 +1096,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_count", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:sum",      INT8OID,
@@ -832,7 +1113,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_r2", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_r2",   FLOAT8ARRAYOID,
@@ -843,7 +1125,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_slope", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_slope",   FLOAT8ARRAYOID,
@@ -854,7 +1137,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_sxx", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxx",   FLOAT8ARRAYOID,
@@ -865,7 +1149,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_sxy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_sxy",   FLOAT8ARRAYOID,
@@ -876,7 +1161,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 	{ "regr_syy", 2, {FLOAT8OID, FLOAT8OID},
 	  "s:regr_syy",   FLOAT8ARRAYOID,
@@ -887,38 +1173,41 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_X2,
 	   ALTFUNC_EXPR_PCOV_Y,
 	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY}, 0
+	   ALTFUNC_EXPR_PCOV_XY},
+	  NULL, 0, false
 	},
 };
 
 static const aggfunc_catalog_t *
 aggfunc_lookup_by_oid(Oid aggfnoid)
 {
-	Form_pg_proc	proform;
+	Form_pg_proc	proc;
 	HeapTuple		htup;
 	int				i;
 
 	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfnoid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u", aggfnoid);
-	proform = (Form_pg_proc) GETSTRUCT(htup);
-
-	for (i=0; i < lengthof(aggfunc_catalog); i++)
+	proc = (Form_pg_proc) GETSTRUCT(htup);
+	if (proc->pronamespace == PG_CATALOG_NAMESPACE)
 	{
-		aggfunc_catalog_t  *catalog = &aggfunc_catalog[i];
-
-		if (strcmp(catalog->aggfn_name, NameStr(proform->proname)) == 0 &&
-			catalog->aggfn_nargs == proform->pronargs &&
-			memcmp(catalog->aggfn_argtypes,
-				   proform->proargtypes.values,
-				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
+		for (i=0; i < lengthof(aggfunc_catalog); i++)
 		{
-			/* check status of device NUMERIC type support */
-			if (!enable_numeric_aggfuncs && catalog->numeric_aware)
-				catalog = NULL;
+			aggfunc_catalog_t  *catalog = &aggfunc_catalog[i];
 
-			ReleaseSysCache(htup);
-			return catalog;
+			if (strcmp(catalog->aggfn_name, NameStr(proc->proname)) == 0 &&
+				catalog->aggfn_nargs == proc->pronargs &&
+				memcmp(catalog->aggfn_argtypes,
+					   proc->proargtypes.values,
+					   sizeof(Oid) * catalog->aggfn_nargs) == 0)
+			{
+				/* Is NUMERIC with GpuPreAgg acceptable? */
+				if (catalog->numeric_aware && !enable_numeric_aggfuncs)
+					continue;
+				/* all ok */
+				ReleaseSysCache(htup);
+				return catalog;
+			}
 		}
 	}
 	ReleaseSysCache(htup);
@@ -935,7 +1224,6 @@ cost_gpupreagg(PlannerInfo *root,
 			   CustomPath *cpath,
 			   GpuPreAggInfo *gpa_info,
 			   PathTarget *target_partial,
-			   PathTarget *target_device,
 			   Path *input_path,
 			   int parallel_nworkers,
 			   double num_groups,
@@ -944,15 +1232,10 @@ cost_gpupreagg(PlannerInfo *root,
 			   cl_long index_nblocks)
 {
 	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	double		ntuples_out;
 	Cost		startup_cost;
 	Cost		run_cost;
-	QualCost	qual_cost;
 	int			num_group_keys = 0;
-	Size		extra_sz = 0;
-	cl_int		key_dist_salt;
-	cl_int		index;
-	ListCell   *lc;
+	int			j, ncols;
 
 	/* Cost come from the underlying path */
 	if (gpa_info->outer_scanrelid == 0)
@@ -1020,84 +1303,33 @@ cost_gpupreagg(PlannerInfo *root,
 	 * Estimation of the result buffer. It must fit to the target GPU device
 	 * memory size.
 	 */
-	index = 0;
-	foreach (lc, target_device->exprs)
+	ncols = list_length(target_partial->exprs);
+	for (j=0; j < ncols; j++)
 	{
-		Expr   *expr = lfirst(lc);
-		Oid		type_oid = exprType((Node *)expr);
-		int32	type_mod = exprTypmod((Node *)expr);
-		int16	typlen;
-		bool	typbyval;
-
-		/* extra buffer */
-		if (type_oid == NUMERICOID)
-			extra_sz += 32;
-		else
-		{
-			get_typlenbyval(type_oid, &typlen, &typbyval);
-			if (!typbyval)
-				extra_sz += get_typavgwidth(type_oid, type_mod);
-		}
-		/* count up number of the grouping keys */
-		if (get_pathtarget_sortgroupref(target_device, index))
+		if (get_pathtarget_sortgroupref(target_partial, j))
 			num_group_keys++;
-		index++;
 	}
 	if (num_group_keys == 0)
 		num_groups = 1.0;	/* AGG_PLAIN */
-	/*
-	 * NOTE: In case when the number of groups are too small, it leads too
-	 * many atomic contention on the device. So, we add a small salt to
-	 * distribute grouping keys than the actual number of keys.
-	 * It shall be adjusted on run-time, so configuration below is just
-	 * a baseline parameter.
-	 */
-	if (num_groups < (devBaselineMaxThreadsPerBlock / 5))
-	{
-		key_dist_salt = (devBaselineMaxThreadsPerBlock / (5 * num_groups));
-		key_dist_salt = Max(key_dist_salt, 1);
-	}
-	else
-		key_dist_salt = 1;
-	ntuples_out = num_groups * (double)key_dist_salt;
-#if 0
-	//FIXME
-	ncols = list_length(target_device->exprs);
-	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
-	kds_length = (KDS_CALCULATE_SLOT_LENGTH(ncols, nrooms) +
-				  STROMALIGN(extra_sz) * nrooms);
-	// unified memory eliminates limitation of the device memory
-	// however, some penalty is needed for large buffer
-	if (kds_length > gpuMemMaxAllocSize())
-		return false;	/* expected buffer size is too large */
-#endif
 
-	/* Cost estimation for the initial projection */
-	cost_qual_eval(&qual_cost, target_device->exprs, root);
-	startup_cost += (target_device->cost.per_tuple * input_path->rows +
-					 target_device->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for grouping */
 	startup_cost += (pgstrom_gpu_operator_cost *
 					 num_group_keys *
 					 input_path->rows);
 	/* Cost estimation for aggregate function */
-	startup_cost += (target_device->cost.per_tuple * input_path->rows +
-					 target_device->cost.startup) * gpu_cpu_ratio;
-	/* Cost estimation for host side functions */
-	startup_cost += target_partial->cost.startup;
-	run_cost += target_partial->cost.per_tuple * ntuples_out;
+	startup_cost += (target_partial->cost.per_tuple * input_path->rows +
+					 target_partial->cost.startup) * gpu_cpu_ratio;
 
 	/* Cost estimation to fetch results */
-	run_cost += cpu_tuple_cost * ntuples_out;
+	run_cost += cpu_tuple_cost * num_groups;
 
-	cpath->path.rows			= ntuples_out;
+	cpath->path.rows			= num_groups;
 	cpath->path.startup_cost	= startup_cost;
 	cpath->path.total_cost		= startup_cost + run_cost;
 
 	gpa_info->num_group_keys    = num_group_keys;
 	gpa_info->plan_ngroups		= num_groups;
 	gpa_info->plan_nchunks		= estimate_num_chunks(input_path);
-	gpa_info->plan_extra_sz		= extra_sz;
 
 	return true;
 }
@@ -1108,7 +1340,8 @@ cost_gpupreagg(PlannerInfo *root,
  * until PG12 at the optimizer/plan/planner.c.
  */
 static double
-estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
+estimate_hashagg_tablesize(PlannerInfo *root, Path *path,
+						   const AggClauseCosts *agg_costs,
                            double dNumGroups)
 {
 	Size		hashentrysize;
@@ -1124,6 +1357,9 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
 
 	return hashentrysize * dNumGroups;
 }
+#elif PG_VERSION_NUM < 140000
+#define estimate_hashagg_tablesize(a,b,c,d)		\
+	estimate_hashagg_tablesize((b),(c),(d))
 #endif
 
 /*
@@ -1135,8 +1371,6 @@ static CustomPath *
 make_gpupreagg_path(PlannerInfo *root,
 					RelOptInfo *group_rel,
 					PathTarget *target_partial,
-					PathTarget *target_device,
-					Bitmapset *pfunc_bitmap,
 					Path *input_path,
 					double num_groups,
 					bool can_pullup_outerscan)
@@ -1177,10 +1411,16 @@ make_gpupreagg_path(PlannerInfo *root,
 		parallel_nworkers = input_path->parallel_workers;
 
 	/* cost estimation */
-	if (!cost_gpupreagg(root, cpath, gpa_info,
-						target_partial, target_device,
-						input_path, parallel_nworkers, num_groups,
-						index_opt, index_quals, index_nblocks))
+	if (!cost_gpupreagg(root,
+						cpath,
+						gpa_info,
+						target_partial,
+						input_path,
+						parallel_nworkers,
+						num_groups,
+						index_opt,
+						index_quals,
+						index_nblocks))
 	{
 		pfree(cpath);
 		return NULL;
@@ -1200,9 +1440,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parallel_workers = parallel_nworkers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
-	cpath->custom_private = list_make3(gpa_info,
-									   target_device,
-									   pfunc_bitmap);
+	cpath->custom_private = list_make1(gpa_info);
 	cpath->methods = &gpupreagg_path_methods;
 
 	return cpath;
@@ -1215,9 +1453,7 @@ static Path *
 prepend_gpupreagg_path(PlannerInfo *root,
 					   RelOptInfo *group_rel,
 					   PathTarget *target_partial,
-					   PathTarget *target_device,
 					   Path *input_path,
-					   Bitmapset *pfunc_bitmap,
 					   double num_groups,
 					   bool can_pullup_outerscan,
 					   bool with_gather_node)
@@ -1260,8 +1496,6 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	 */
 	cpath = make_gpupreagg_path(root, group_rel,
 								target_partial,
-								target_device,
-								pfunc_bitmap,
 								input_path,
 								num_groups,
 								can_pullup_outerscan);
@@ -1306,10 +1540,9 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 								Path *partial_path,
 								List *havingQuals,
 								double num_groups,
-								AggClauseCosts *agg_final_costs)
+								AggClauseCosts *final_clause_costs)
 {
 	Query	   *parse = root->parse;
-	PathTarget *target_upper = root->upper_targets[UPPERREL_GROUP_AGG];
 	Path	   *sort_path;
 	Path	   *final_path;
 	bool		can_sort;
@@ -1319,7 +1552,6 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 	can_sort = grouping_is_sortable(parse->groupClause);
 	can_hash = (parse->groupClause != NIL &&
 				parse->groupingSets == NIL &&
-				agg_final_costs->numOrderedAggs == 0 &&
 				grouping_is_hashable(parse->groupClause));
 
 	/* make a final grouping path (nogroup) */
@@ -1333,11 +1565,9 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
 											 havingQuals,
-											 agg_final_costs,
+											 final_clause_costs,
 											 num_groups);
-		add_path(group_rel, pgstrom_create_dummy_path(root,
-													  final_path,
-													  target_upper));
+		add_path(group_rel, final_path);
 	}
 	else
 	{
@@ -1382,15 +1612,11 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					create_groupingsets_path(root,
 											 group_rel,
 											 sort_path,
-#if PG_VERSION_NUM < 110000
-											 target_final,
-#endif
 											 (List *) parse->havingQual,
 											 rollup_strategy,
 											 rollup_data_list,
-											 agg_final_costs,
+											 final_clause_costs,
 											 num_groups);
-#if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
 				target_orig = final_path->pathtarget;
 				final_path->startup_cost += (target_final->cost.startup -
@@ -1400,7 +1626,6 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					(target_final->cost.per_tuple -
 					 target_orig->cost.per_tuple) * final_path->rows;
 				final_path->pathtarget = target_final;
-#endif
 			}
 			else if (parse->hasAggs)
 				final_path = (Path *)
@@ -1412,7 +1637,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
 								    havingQuals,
-									agg_final_costs,
+									final_clause_costs,
 									num_groups);
 			else if (parse->groupClause)
 			{
@@ -1420,13 +1645,9 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					create_group_path(root,
 									  group_rel,
 									  sort_path,
-#if PG_VERSION_NUM < 110000
-									  target_final,
-#endif
 									  parse->groupClause,
 									  havingQuals,
 									  num_groups);
-#if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
 				target_orig = final_path->pathtarget;
 				final_path->startup_cost += (target_final->cost.startup -
@@ -1436,22 +1657,20 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 					(target_final->cost.per_tuple -
 					 target_orig->cost.per_tuple) * final_path->rows;
 				final_path->pathtarget = target_final;
-#endif
 			}
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
-			add_path(group_rel, pgstrom_create_dummy_path(root,
-														  final_path,
-														  target_upper));
+			add_path(group_rel, final_path);
 		}
 
 		/* make a final grouping path (hash) */
 		if (can_hash)
 		{
 			double	hashaggtablesize
-				= estimate_hashagg_tablesize(partial_path,
-											 agg_final_costs,
+				= estimate_hashagg_tablesize(root,
+											 partial_path,
+											 final_clause_costs,
 											 num_groups);
 			if (hashaggtablesize < work_mem * 1024L)
 			{
@@ -1464,11 +1683,9 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
 									havingQuals,
-									agg_final_costs,
+									final_clause_costs,
 									num_groups);
-				add_path(group_rel, pgstrom_create_dummy_path(root,
-															  final_path,
-															  target_upper));
+				add_path(group_rel, final_path);
 			}
 		}
 	}
@@ -1482,9 +1699,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   RelOptInfo *group_rel,
 							   PathTarget *target_final,
 							   PathTarget *target_partial,
-							   PathTarget *target_device,
 							   Path *input_path,
-							   Bitmapset *pfunc_bitmap,
 							   List *havingQual,
 							   double num_groups,
 							   AggClauseCosts *agg_final_costs,
@@ -1495,7 +1710,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	bool		try_inner_parallel = false;
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
-	List	   *partitioned_rels;
 	int			parallel_nworkers;
 	AppendPath *append_path;
 	Cost		discount_cost;
@@ -1522,7 +1736,6 @@ retry:
 		Path	   *sub_path = (Path *) lfirst(lc);
 		RelOptInfo *sub_rel = sub_path->parent;
 		PathTarget *curr_partial = copy_pathtarget(target_partial);
-		PathTarget *curr_device = copy_pathtarget(target_device);
 		Path	   *partial_path;
 		AppendRelInfo **appinfos;
 		int				nappinfos;
@@ -1533,16 +1746,11 @@ retry:
 		curr_partial->exprs = (List *)
 			adjust_appendrel_attrs(root, (Node *)curr_partial->exprs,
 								   nappinfos, appinfos);
-		curr_device->exprs = (List *)
-			adjust_appendrel_attrs(root, (Node *)curr_device->exprs,
-								   nappinfos, appinfos);
 
 		partial_path = prepend_gpupreagg_path(root,
 											  group_rel,
 											  curr_partial,
-											  curr_device,
 											  sub_path,
-											  pfunc_bitmap,
 											  num_groups,
 											  can_pullup_outerscan,
 											  false);
@@ -1552,19 +1760,24 @@ retry:
 		append_paths_list = lappend(append_paths_list, partial_path);
 	}
 	/* also see create_append_path(), some fields must be fixed up */
-	partitioned_rels = copyObject(append_path->partitioned_rels);
 	if (try_outer_parallel)
 		append_path = create_append_path(root, input_path->parent,
 										 NIL, append_paths_list,
 										 NIL, NULL,
 										 parallel_nworkers, true,
-										 partitioned_rels, -1.0);
+#if PG_VERSION_NUM < 140000
+										 append_path->partitioned_rels,
+#endif
+										 -1.0);
 	else
 		append_path = create_append_path(root, input_path->parent,
 										 append_paths_list, NIL,
 										 NIL, NULL,
 										 parallel_nworkers, false,
-										 partitioned_rels, -1.0);
+#if PG_VERSION_NUM < 140000
+										 append_path->partitioned_rels,
+#endif
+										 -1.0);
 	append_path->path.pathtarget = target_partial;
 	append_path->path.total_cost -= discount_cost;
 
@@ -1617,14 +1830,12 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	PathTarget	   *target_upper	= root->upper_targets[UPPERREL_GROUP_AGG];
 	PathTarget	   *target_final	= create_empty_pathtarget();
 	PathTarget	   *target_partial	= create_empty_pathtarget();
-	PathTarget	   *target_device	= create_empty_pathtarget();
 	Path		   *partial_path;
-	Bitmapset	   *pfunc_bitmap;
 	Node		   *havingQual;
 	double			num_groups;
 	double			reduction_ratio;
 	bool			can_pullup_outerscan = true;
-	AggClauseCosts	agg_final_costs;
+	AggClauseCosts	final_clause_costs;
 
 	/*
 	 * MEMO: The 'pg_strom.gpupreagg_reduction_threshold' is a tentative
@@ -1658,49 +1869,28 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									 target_upper,
 									 target_final,
 									 target_partial,
-									 target_device,
 									 input_path,
-									 &pfunc_bitmap,
 									 &havingQual,
-									 &can_pullup_outerscan))
+									 &can_pullup_outerscan,
+									 &final_clause_costs))
 		return;
-
-	/* Get cost of aggregations */
-	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
-	if (parse->hasAggs)
-	{
-		get_agg_clause_costs(root, (Node *)target_final->exprs,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-		get_agg_clause_costs(root, havingQual,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-	}
-	/* GpuPreAgg does not support ordered aggregation */
-	if (agg_final_costs.numOrderedAggs > 0)
-	{
-		elog(DEBUG2, "GpuPreAgg does not support ordered aggregation");
-		return;
-	}
 
 	if (enable_partitionwise_gpupreagg)
 		try_add_gpupreagg_append_paths(root,
 									   group_rel,
 									   target_final,
 									   target_partial,
-									   target_device,
 									   input_path,
-									   pfunc_bitmap,
 									   (List *) havingQual,
 									   num_groups,
-									   &agg_final_costs,
+									   &final_clause_costs,
 									   can_pullup_outerscan,
 									   try_parallel_path);
 
 	partial_path = prepend_gpupreagg_path(root,
 										  group_rel,
 										  target_partial,
-										  target_device,
 										  input_path,
-										  pfunc_bitmap,
 										  num_groups,
 										  can_pullup_outerscan,
 										  try_parallel_path);
@@ -1714,7 +1904,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									partial_path,
 									(List *) havingQual,
 									num_groups,
-									&agg_final_costs);
+									&final_clause_costs);
 }
 
 /*
@@ -1726,23 +1916,14 @@ static void
 gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 UpperRelationKind stage,
 							 RelOptInfo *input_rel,
-							 RelOptInfo *group_rel
-#if PG_VERSION_NUM >= 110000
-							 ,void *extra
-#endif
-	)
+							 RelOptInfo *group_rel,
+							 void *extra)
 {
 	Path	   *input_path;
 	ListCell   *lc;
 
 	if (create_upper_paths_next)
-	{
-#if PG_VERSION_NUM < 110000
-		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
-#else
 		(*create_upper_paths_next)(root, stage, input_rel, group_rel, extra);
-#endif
-	}
 
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
@@ -1823,11 +2004,12 @@ replace_expression_by_outerref(Node *node, PathTarget *target_input)
  * is_altfunc_expression - true, if expression derives ALTFUNC_EXPR_*
  */
 static bool
-is_altfunc_expression(Node *node)
+is_altfunc_expression(Node *node, int *p_extra_sz)
 {
 	FuncExpr	   *f;
 	HeapTuple		tuple;
 	Form_pg_proc	form_proc;
+	int				extra_sz = 0;
 	bool			retval = false;
 
 	if (!IsA(node, FuncExpr))
@@ -1839,19 +2021,31 @@ is_altfunc_expression(Node *node)
 		elog(ERROR, "cache lookup failed for function %u", f->funcid);
 	form_proc = (Form_pg_proc) GETSTRUCT(tuple);
 
-	if (form_proc->pronamespace == get_namespace_oid("pgstrom", false) &&
-		(strcmp(NameStr(form_proc->proname), "nrows") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pmin") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pmax") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "psum") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "psum_x2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_x") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_y") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_x2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_y2") == 0 ||
-		 strcmp(NameStr(form_proc->proname), "pcov_xy") == 0))
-		retval = true;
+	if (form_proc->pronamespace == get_namespace_oid("pgstrom", false))
+	{
+		if (strcmp(NameStr(form_proc->proname), "nrows") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pmin") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pmax") == 0 ||
+			strcmp(NameStr(form_proc->proname), "psum") == 0 ||
+			strcmp(NameStr(form_proc->proname), "psum_x2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_x") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_y") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_x2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_y2") == 0 ||
+			strcmp(NameStr(form_proc->proname), "pcov_xy") == 0)
+		{
+			retval = true;
+		}
+		else if (strcmp(NameStr(form_proc->proname), "hll_sketch_new") == 0)
+		{
+			extra_sz = __aggfunc_property_extra_sz__hll_count();
+			retval = true;
+		}
+	}
 	ReleaseSysCache(tuple);
+
+	if (p_extra_sz)
+		*p_extra_sz = extra_sz;
 
 	return retval;
 }
@@ -2142,6 +2336,96 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
 }
 
 /*
+ * make_altfunc_hll_hash - Hyper-Log-Log Hash function
+ */
+static FuncExpr *
+make_altfunc_hll_hash(Aggref *aggref)
+{
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	TargetEntry	   *tle;
+	Oid				type_oid;
+	oidvector	   *func_argtypes;
+	HeapTuple		tuple;
+	Form_pg_proc	proc;
+	FuncExpr	   *func = NULL;
+
+	/*
+	 * lookup suitable pgstrom.hll_hash() function, and checks
+	 * whether it is actually device executable.
+	 */
+	Assert(list_length(aggref->args) == 1);
+	tle = linitial(aggref->args);
+	Assert(IsA(tle, TargetEntry));
+	type_oid = exprType((Node *)tle->expr);
+	func_argtypes = buildoidvector(&type_oid, 1);
+
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum("hll_hash"),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+	{
+		elog(DEBUG2, "no such function: %s",
+			 funcname_signature_string("hll_hash", 1, NIL, &type_oid));
+		return NULL;
+	}
+	proc = (Form_pg_proc)GETSTRUCT(tuple);
+	if (pgstrom_devfunc_lookup(PgProcTupleGetOid(tuple),
+							   proc->prorettype,
+							   list_make1(tle->expr),
+							   InvalidOid))
+	{
+		func = makeFuncExpr(PgProcTupleGetOid(tuple),
+							proc->prorettype,
+							list_make1(tle->expr),
+							InvalidOid,
+							InvalidOid,
+							COERCE_EXPLICIT_CALL);
+	}
+	else
+	{
+		elog(DEBUG2, "no such device function: %s",
+			 funcname_signature_string("hll_hash", 1, NIL, &type_oid));
+	}
+	ReleaseSysCache(tuple);
+	return func;
+}
+
+/*
+ * __update_aggfunc_clause_cost
+ */
+static void
+__update_aggfunc_clause_cost(PlannerInfo *root,
+							 Aggref *aggref_alt,
+							 Form_pg_aggregate agg_form,
+							 const aggfunc_catalog_t *aggfn_cat,
+							 AggClauseCosts *final_costs)
+{
+#if PG_VERSION_NUM < 140000
+	get_agg_clause_costs(root,
+						 (Node *)aggref_alt,
+						 AGGSPLIT_SIMPLE,
+						 final_costs);
+#else
+	/*
+	 * MEMO: PG14 revised get_agg_clause_costs() to calculate
+	 * the cost of aggregate functions that are tracked on
+	 * the PlannerInfo; thus, not alternative once replaced
+	 * by GpuPreAgg. So, we put simplified logic to calculate
+	 * per-tuple cost of the alternative functions.
+	 */
+	if (OidIsValid(agg_form->aggtransfn))
+		add_function_cost(root, agg_form->aggtransfn, NULL,
+						  &final_costs->transCost);
+	if (OidIsValid(agg_form->aggfinalfn))
+		add_function_cost(root, agg_form->aggfinalfn, NULL,
+						  &final_costs->finalCost);
+	if (aggfn_cat->partfn_extra_sz)
+		final_costs->transitionSpace += aggfn_cat->partfn_extra_sz();
+#endif
+}
+
+/*
  * make_alternative_aggref
  *
  * It makes an alternative final aggregate function towards the supplied
@@ -2151,10 +2435,9 @@ static Node *
 make_alternative_aggref(PlannerInfo *root,
 						Aggref *aggref,
 						PathTarget *target_partial,
-						PathTarget *target_device,
 						PathTarget *target_input,
 						RelOptInfo *input_rel,
-						Bitmapset **p_pfunc_bitmap)
+						AggClauseCosts *final_clause_costs)
 {
 	const aggfunc_catalog_t *aggfn_cat;
 	Aggref	   *aggref_new;
@@ -2169,9 +2452,9 @@ make_alternative_aggref(PlannerInfo *root,
 	Form_pg_proc proc_form;
 	Form_pg_aggregate agg_form;
 
-	if (aggref->aggorder || aggref->aggdistinct)
+	if (aggref->aggorder != NIL || aggref->aggdistinct != NIL)
 	{
-		elog(DEBUG2, "Aggregate with DISTINCT/ORDER BY is not supported: %s",
+		elog(DEBUG2, "Aggregate with ORDER BY/DISTINCT is not supported: %s",
 			 nodeToString(aggref));
 		return NULL;
 	}
@@ -2205,6 +2488,7 @@ make_alternative_aggref(PlannerInfo *root,
 		cl_int		action = aggfn_cat->partfn_argexprs[i];
 		cl_int		argtype = aggfn_cat->partfn_argtypes[i];
 		FuncExpr   *pfunc;
+		Node	   *temp;
 
 		switch (action)
 		{
@@ -2238,15 +2522,22 @@ make_alternative_aggref(PlannerInfo *root,
 			case ALTFUNC_EXPR_PCOV_XY:  /* PCOV_XY(X,Y) */
 				pfunc = make_altfunc_pcov_xy(aggref, "pcov_xy");
 				break;
+			case ALTFUNC_EXPR_HLL_HASH:	/* HLL_HASH(X) */
+				pfunc = make_altfunc_hll_hash(aggref);
+				break;
 			default:
 				elog(ERROR, "unknown alternative function code: %d", action);
 				break;
 		}
+		/* actually supported? */
+		if (!pfunc)
+			return NULL;
+		
 		/* device executable? */
 		if (pfunc->args)
 		{
-			Node   *temp = replace_expression_by_outerref((Node *)pfunc->args,
-														  target_input);
+			temp = replace_expression_by_outerref((Node *)pfunc->args,
+												  target_input);
 			/*
 			 * MEMO: Expressions are replaced to Var-node that references
 			 * one of target_input, and these Var-nodes have INDEX_VAR.
@@ -2255,16 +2546,6 @@ make_alternative_aggref(PlannerInfo *root,
 			 */
 			if (!pgstrom_device_expression(root, NULL, (Expr *)temp))
 				return NULL;
-		}
-		/*
-		 * Add partial-aggregate function expression
-		 * Also see add_new_column_to_pathtarget().
-		 */
-		if (!list_member(target_device->exprs, pfunc))
-		{
-			add_column_to_pathtarget(target_device, (Expr *)pfunc, 0);
-			*p_pfunc_bitmap = bms_add_member(*p_pfunc_bitmap,
-											 list_length(target_device->exprs) - 1);
 		}
 		/* append to the argument list */
 		altfunc_args = lappend(altfunc_args, (Expr *)pfunc);
@@ -2358,6 +2639,9 @@ make_alternative_aggref(PlannerInfo *root,
 	aggref_new->aggsplit		= AGGSPLIT_SIMPLE;
 	aggref_new->location		= aggref->location;
 
+	/* update the final aggregation costs */
+	__update_aggfunc_clause_cost(root, aggref_new, agg_form, aggfn_cat,
+								 final_clause_costs);
 	ReleaseSysCache(tuple);
 
 	return (Node *)aggref_new;
@@ -2369,10 +2653,11 @@ typedef struct
 	PlannerInfo *root;
 	PathTarget *target_upper;
 	PathTarget *target_partial;
-	PathTarget *target_device;
 	PathTarget *target_input;
 	RelOptInfo *input_rel;
-	Bitmapset  *pfunc_bitmap;
+	Bitmapset  *__pfunc_bitmap__;
+	List	   *groupby_keys;
+	AggClauseCosts final_clause_costs;
 } gpupreagg_build_path_target_context;
 
 static Node *
@@ -2389,10 +2674,9 @@ replace_expression_by_altfunc(Node *node,
 		Node   *aggfn = make_alternative_aggref(con->root,
 												(Aggref *)node,
 												con->target_partial,
-												con->target_device,
 												con->target_input,
 												con->input_rel,
-												&con->pfunc_bitmap);
+												&con->final_clause_costs);
 		if (!aggfn)
 			con->device_executable = false;
 		return aggfn;
@@ -2405,8 +2689,6 @@ replace_expression_by_altfunc(Node *node,
 		if (equal(node, expr_in))
 		{
 			add_new_column_to_pathtarget(con->target_partial,
-										 copyObject(expr_in));
-			add_new_column_to_pathtarget(con->target_device,
 										 copyObject(expr_in));
 			return copyObject(node);
 		}
@@ -2428,11 +2710,10 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_upper,	/* in */
 							PathTarget *target_final,	/* out */
 							PathTarget *target_partial,	/* out */
-							PathTarget *target_device,	/* out */
 							Path       *input_path,     /* in */
-							Bitmapset **p_pfunc_bitmap,	/* out */
 							Node **p_havingQual,		/* out */
-							bool *p_can_pullup_outerscan) /* out */
+							bool *p_can_pullup_outerscan, /* out */
+							AggClauseCosts *p_final_clause_costs) /* out */
 {
 	gpupreagg_build_path_target_context con;
 	Query	   *parse = root->parse;
@@ -2440,27 +2721,22 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	RelOptInfo *input_rel = input_path->parent;
 	Node	   *havingQual = NULL;
 	ListCell   *lc;
-	cl_int		i, j, n;
+	cl_int		i;
 
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
 	con.root			= root;
 	con.target_upper	= target_upper;
 	con.target_partial	= target_partial;
-	con.target_device	= target_device;
 	con.target_input	= target_input;
 	con.input_rel       = input_rel;
-	con.pfunc_bitmap    = NULL;
+	con.groupby_keys    = NIL;
 
 	/*
 	 * NOTE: Not to inject unnecessary projection on the sub-path node,
 	 * target_device shall be initialized according to the target_input
 	 * once, but its sortgrouprefs are not set.
 	 */
-	n = list_length(target_input->exprs);
-	target_device->exprs = copyObject(target_input->exprs);
-	target_device->sortgrouprefs = palloc0(sizeof(Index) * (n + 1));
-
 	i = 0;
 	foreach (lc, target_upper->exprs)
 	{
@@ -2473,7 +2749,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		{
 			devtype_info   *dtype;
 			Oid				coll_oid;
-			ListCell	   *cell;
 
 			/*
 			 * Type of the grouping-key must have device equality-function
@@ -2502,52 +2777,12 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			 */
 			if (!pgstrom_device_expression(root, input_rel, expr))
 				*p_can_pullup_outerscan = false;
-
-			/* grouping-key should be on the any of input items */
-			j = 0;
-			foreach (cell, target_device->exprs)
-			{
-				if (equal(expr, lfirst(cell)))
-				{
-					if (target_device->sortgrouprefs[j] != 0)
-						elog(ERROR, "Bug? duplicated grouping-keys");
-					target_device->sortgrouprefs[j] = sortgroupref;
-					break;
-				}
-				j++;
-			}
-			if (!cell)
-				elog(ERROR, "Bug? grouping-key is not found on input tlist");
-			/*
-			 * OK, It's a grouping-key column, so add it to both of
-			 * the target_final, target_partial and target_device as-is.
-			 */
-			j=0;
-			foreach (cell, target_partial->exprs)
-			{
-				if (equal(expr, lfirst(cell)) &&
-					(!target_partial->sortgrouprefs ||
-					 target_partial->sortgrouprefs[j] == 0))
-				{
-					n = list_length(target_partial->exprs);
-					target_partial->sortgrouprefs =
-						(!target_partial->sortgrouprefs
-						 ? palloc0(sizeof(Index) * (n+1))
-						 : repalloc(target_partial->sortgrouprefs,
-									sizeof(Index) * (n+1)));
-					target_partial->sortgrouprefs[j] = sortgroupref;
-					break;
-				}
-				j++;
-			}
-			if (!cell)
-				add_column_to_pathtarget(target_partial, expr, sortgroupref);
-
+			/* add grouping-keys */
+			add_column_to_pathtarget(target_partial, expr, sortgroupref);
 			add_column_to_pathtarget(target_final, expr, sortgroupref);
 		}
 		else
 		{
-			Oid		orig_type = exprType((Node *)expr);
 			Expr   *temp;
 
 			temp = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
@@ -2557,7 +2792,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 					 nodeToString((Node *)expr));
 				return false;
 			}
-			if (orig_type != exprType((Node *)temp))
+			if (exprType((Node *)expr) != exprType((Node *)temp))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
 			add_column_to_pathtarget(target_final, temp, 0);
@@ -2579,13 +2814,136 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		}
 	}
 	*p_havingQual = havingQual;
+	memcpy(p_final_clause_costs, &con.final_clause_costs,
+		   sizeof(AggClauseCosts));
 
 	set_pathtarget_cost_width(root, target_final);
 	set_pathtarget_cost_width(root, target_partial);
-	set_pathtarget_cost_width(root, target_device);
-	*p_pfunc_bitmap = con.pfunc_bitmap;
 
 	return true;
+}
+
+/*
+ * build_custom_scan_tlist
+ */
+static List *
+build_custom_scan_tlist(PlannerInfo *root,
+						PathTarget *target_device,
+						Index outer_scanrelid,
+						List *outer_tlist)
+{
+	List	   *results = NIL;
+	ListCell   *lc;
+	int			i, j;
+
+	/*
+	 * TLE list for the grouping-key and partial aggregation; that shall
+	 * be returned from the GPU kernel.
+	 * (a.k.a template of the kds_final)
+	 */
+	i = 0;
+	foreach (lc, target_device->exprs)
+	{
+		Node	   *node = lfirst(lc);
+		TargetEntry *tle;
+
+		tle = makeTargetEntry((Expr *)node,
+							  i + 1,
+							  NULL,
+							  false);
+		if (target_device->sortgrouprefs &&
+			target_device->sortgrouprefs[i])
+			tle->ressortgroupref = target_device->sortgrouprefs[i];
+
+		results = lappend(results, tle);
+		i++;
+	}
+
+	/*
+	 * Junk TLE entries for setrefs.c and EXPLAIN output
+	 */
+	if (outer_scanrelid != 0)
+	{
+		RangeTblEntry  *rte = root->simple_rte_array[outer_scanrelid];
+		Relation		rel;
+		TupleDesc		tupdesc;
+
+		Assert(rte->rtekind == RTE_RELATION);
+		rel = table_open(rte->relid, NoLock);
+		tupdesc = RelationGetDescr(rel);
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
+			Var	   *varnode;
+			char   *resname;
+
+			if (attr->attisdropped)
+				continue;
+			/* add junk entry if not yet */
+			foreach(lc, results)
+			{
+				TargetEntry *tle = lfirst(lc);
+
+				if (!IsA(tle->expr, Var))
+					continue;
+				varnode = (Var *)tle->expr;
+				if (varnode->varno == outer_scanrelid &&
+					varnode->varattno == attr->attnum)
+				{
+					Assert(varnode->vartype == attr->atttypid &&
+						   varnode->vartypmod == attr->atttypmod &&
+						   varnode->varcollid == attr->attcollation);
+					break;
+				}
+			}
+
+			if (!lc)
+			{
+				varnode = makeVar(outer_scanrelid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation, 0);
+				resname = pstrdup(NameStr(attr->attname));
+				results = lappend(results,
+								  makeTargetEntry((Expr *)varnode,
+												  list_length(results) + 1,
+												  resname,
+												  true));
+			}
+		}
+		table_close(rel, NoLock);
+	}
+	else
+	{
+		foreach (lc, outer_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			ListCell	   *cell;
+
+			foreach (cell, results)
+			{
+				TargetEntry	   *__tle = lfirst(cell);
+
+				if (equal(tle->expr, __tle->expr))
+					break;
+			}
+			if (!cell)
+			{
+				char	   *resname = NULL;
+
+				if (tle->resname)
+					resname = pstrdup(tle->resname);
+
+				results = lappend(results,
+								  makeTargetEntry(copyObject(tle->expr),
+												  list_length(results) + 1,
+												  resname,
+												  true));
+			}
+		}
+	}
+	return results;
 }
 
 /*
@@ -2603,23 +2961,15 @@ PlanGpuPreAggPath(PlannerInfo *root,
 {
 	CustomScan	   *cscan = makeNode(CustomScan);
 	GpuPreAggInfo  *gpa_info;
-	PathTarget	   *target_device;
-	Bitmapset	   *pfunc_bitmap;
-	List		   *tlist_dev = NIL;
 	Index			outer_scanrelid = 0;
-	Bitmapset	   *referenced = NULL;
 	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
-	ListCell	   *lc;
-	int				index;
 	char		   *kern_source;
 	codegen_context	context;
 
-	Assert(list_length(best_path->custom_private) == 3);
+	Assert(list_length(best_path->custom_private) == 1);
 	gpa_info = linitial(best_path->custom_private);
-	target_device = lsecond(best_path->custom_private);
-	pfunc_bitmap = lthird(best_path->custom_private);
 
 	Assert(list_length(custom_plans) <= 1);
 	if (custom_plans == NIL)
@@ -2630,66 +2980,11 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		outer_tlist = outer_plan->targetlist;
 	}
 
-	/*
-	 * Transform expressions in the @target_device to usual TLE form
-	 */
-	index = 0;
-	foreach (lc, target_device->exprs)
-	{
-		TargetEntry *tle;
-		Node	   *node = lfirst(lc);
-
-		Assert(!best_path->path.param_info);
-		tle = makeTargetEntry((Expr *)node,
-							  index + 1,
-							  NULL,
-							  false);
-		if (target_device->sortgrouprefs &&
-			target_device->sortgrouprefs[index])
-			tle->ressortgroupref = target_device->sortgrouprefs[index];
-
-		tlist_dev = lappend(tlist_dev, tle);
-		index++;
-	}
-
-	/*
-	 * In case when outer relation scan was pulled-up to the GpuPreAgg,
-	 * variables referenced by the outer quals may not appear in the
-	 * @target_device. So, add junk ones on demand.
-	 * (EXPLAIN needs junk entry to lookup variable name)
-	 */
-	if (gpa_info->outer_quals)
-	{
-		List	   *outer_vars;
-
-		if (outer_scanrelid)
-			pull_varattnos((Node *)gpa_info->outer_quals,
-						   outer_scanrelid, &referenced);
-
-		outer_vars = pull_var_clause((Node *)gpa_info->outer_quals,
-									 PVC_RECURSE_AGGREGATES |
-									 PVC_RECURSE_WINDOWFUNCS |
-									 PVC_INCLUDE_PLACEHOLDERS);
-		foreach (lc, outer_vars)
-		{
-			TargetEntry *tle;
-			void		*node = lfirst(lc);
-
-			if (!tlist_member(node, tlist_dev))
-			{
-				tle =  makeTargetEntry((Expr *)node,
-									   list_length(tlist_dev) + 1,
-									   NULL,
-									   true);
-				tlist_dev = lappend(tlist_dev, tle);
-			}
-		}
-	}
-
-	/* pick up referenced columns */
+	/* pick up referenced columns (for columnar-optimization) */
 	if (outer_scanrelid)
 	{
 		RelOptInfo *baserel = root->simple_rel_array[outer_scanrelid];
+		Bitmapset  *referenced = NULL;
 		int			i, j, k;
 
 		for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
@@ -2699,6 +2994,10 @@ PlanGpuPreAggPath(PlannerInfo *root,
 			k = i - FirstLowInvalidHeapAttributeNumber;
 			referenced = bms_add_member(referenced, k);
 		}
+		if (gpa_info->outer_quals)
+			pull_varattnos((Node *)gpa_info->outer_quals,
+						   outer_scanrelid, &referenced);
+		
 		for (k = bms_next_member(referenced, -1);
 			 k >= 0;
 			 k = bms_next_member(referenced, k))
@@ -2714,19 +3013,19 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	outerPlan(cscan) = outer_plan;
 	cscan->scan.scanrelid = gpa_info->outer_scanrelid;
 	cscan->flags = best_path->flags;
-	cscan->custom_scan_tlist = tlist_dev;
 	cscan->methods = &gpupreagg_scan_methods;
-
+	cscan->custom_scan_tlist = build_custom_scan_tlist(root,
+													   best_path->path.pathtarget,
+													   outer_scanrelid,
+													   outer_tlist);
 	/*
 	 * construction of the GPU kernel code
 	 */
 	pgstrom_init_codegen_context(&context, root, best_path->path.parent);
 	kern_source = gpupreagg_codegen(&context,
 									cscan,
-									tlist_dev,
 									outer_tlist,
-									gpa_info,
-									pfunc_bitmap);
+									gpa_info);
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
 	gpa_info->outer_refs = outer_refs;
@@ -2803,9 +3102,9 @@ static Node *
 __make_tlist_device_projection(Node *node, void *__con)
 {
 	make_tlist_device_projection_context *con = __con;
-	bool	in_expression_saved = con->in_expression;
-	int		k;
-	Node   *newnode;
+	bool		in_expression_saved = con->in_expression;
+	int			k;
+	Node	   *newnode;
 
 	if (!node)
 		return NULL;
@@ -2815,7 +3114,6 @@ __make_tlist_device_projection(Node *node, void *__con)
 		if (IsA(node, Var))
 		{
 			Var	   *varnode = (Var *) node;
-			Var	   *newnode;
 
 			if (varnode->varno != con->outer_scanrelid)
 				elog(ERROR, "Bug? varnode references unknown relid: %s",
@@ -2824,17 +3122,8 @@ __make_tlist_device_projection(Node *node, void *__con)
 			con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
 			if (con->in_expression)
 				con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
-
 			Assert(varnode->varlevelsup == 0);
-			newnode = makeVar(INDEX_VAR,
-							  varnode->varattno,
-							  varnode->vartype,
-							  varnode->vartypmod,
-							  varnode->varcollid,
-							  varnode->varlevelsup);
-			newnode->varnosyn  = varnode->varno;
-			newnode->varattnosyn = varnode->varattno;
-			return (Node *) newnode;
+			return (Node *)copyObject(varnode);
 		}
 	}
 	else
@@ -2844,79 +3133,103 @@ __make_tlist_device_projection(Node *node, void *__con)
 		foreach (lc, con->outer_tlist)
 		{
 			TargetEntry    *tle = lfirst(lc);
-			Var			   *newnode;
 
 			if (equal(node, tle->expr))
 			{
 				k = tle->resno - FirstLowInvalidHeapAttributeNumber;
 				con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
 				if (con->in_expression)
-					con->outer_refs_expr = bms_add_member(con->outer_refs_expr,
-														  k);
-				newnode = makeVar(INDEX_VAR,
-								  tle->resno,
-								  exprType((Node *)tle->expr),
-								  exprTypmod((Node *)tle->expr),
-								  exprCollation((Node *)tle->expr),
-								  0);
-				if (IsA(node, Var))
-				{
-					Var	   *varnode = (Var *) node;
-
-					newnode->varnosyn = varnode->varno;
-					newnode->varattnosyn = varnode->varattno;
-				}
-				return (Node *)newnode;
+					con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
+				return (Node *)makeVar(OUTER_VAR,
+									   tle->resno,
+									   exprType((Node *)tle->expr),
+									   exprTypmod((Node *)tle->expr),
+									   exprCollation((Node *)tle->expr),
+									   0);
 			}
 		}
-
 		if (IsA(node, Var))
 			elog(ERROR, "Bug? varnode (%s) references unknown outer entry: %s",
 				 nodeToString(node),
 				 nodeToString(con->outer_tlist));
 	}
 	con->in_expression = true;
-	newnode = expression_tree_mutator(node,
-									  __make_tlist_device_projection,
-									  con);
+	newnode = expression_tree_mutator(node, __make_tlist_device_projection, con);
 	con->in_expression = in_expression_saved;
 
 	return newnode;
 }
 
 static List *
-make_tlist_device_projection(List *tlist_dev,
+make_tlist_device_projection(List *custom_scan_tlist,
 							 Index outer_scanrelid,
 							 List *outer_tlist,
 							 Bitmapset **p_outer_refs_any,
 							 Bitmapset **p_outer_refs_expr)
 {
 	make_tlist_device_projection_context con;
-	List	   *tlist_dev_alt = NIL;
+	List	   *tlist_part = NIL;
 	ListCell   *lc;
 
 	memset(&con, 0, sizeof(con));
 	con.outer_scanrelid = outer_scanrelid;
 	con.outer_tlist = outer_tlist;
 
-	foreach (lc, tlist_dev)
+	foreach (lc, custom_scan_tlist)
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_new = flatCopyTargetEntry(tle);
+		TargetEntry *tle = lfirst(lc);
+		TargetEntry *tmp;
+		Node	   *node;
 
+		if (tle->resjunk)
+			continue;
 		con.in_expression = false;
-		tle_new->expr = (Expr *)
-			__make_tlist_device_projection((Node *)tle->expr, &con);
-		tlist_dev_alt = lappend(tlist_dev_alt, tle_new);
+		node = __make_tlist_device_projection((Node *)tle->expr, &con);
+
+		tmp = flatCopyTargetEntry(tle);
+		tmp->expr  = (Expr *)node;
+		tmp->resno = list_length(tlist_part) + 1;
+		tlist_part = lappend(tlist_part, tmp);
 	}
 	*p_outer_refs_any = con.outer_refs_any;
 	*p_outer_refs_expr = con.outer_refs_expr;
 
-	return tlist_dev_alt;
+	return tlist_part;
+}
+
+static Node *
+__revert_tlist_device_projection(Node *node, void *datum)
+{
+	List	   *outer_tlist = (List *)datum;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *)node;
+		TargetEntry *tle;
+
+		Assert(varnode->varno == OUTER_VAR &&
+			   varnode->varattno > 0 &&
+			   varnode->varattno <= list_length(outer_tlist));
+		tle = list_nth(outer_tlist, varnode->varattno - 1);
+		Assert(IsA(tle, TargetEntry));
+		return (Node *)copyObject(tle->expr);
+	}
+	return expression_tree_mutator(node, __revert_tlist_device_projection, datum);
+}
+
+static List *
+revert_tlist_device_projection(List *tlist_dev,
+							   List *outer_tlist)
+{
+	if (outer_tlist == NIL)
+		return copyObject(tlist_dev);
+	return (List *)__revert_tlist_device_projection((Node *)tlist_dev, outer_tlist);
 }
 
 /*
- * gpupreagg_codegen_projection_XXXX - code generator for
+ * gpupreagg_codegen_projection - code generator for
  *
  * DEVICE_FUNCTION(void)
  * gpupreagg_projection_row(kern_context *kcxt,
@@ -2949,14 +3262,13 @@ make_tlist_device_projection(List *tlist_dev,
  *                             Datum   *dst_values);
  */
 static Expr *
-codegen_projection_partial_funcion(FuncExpr *f,
-								   codegen_context *context,
-								   const char **p_null_const_value)
+codegen_projection_partial_funcion(FuncExpr *f, codegen_context *context)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc_form;
 	const char	   *proc_name;
 	devtype_info   *dtype;
+	devfunc_info   *dfunc;
 	Expr		   *expr;
 
 	Assert(IsA(f, FuncExpr));
@@ -2981,7 +3293,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 								 FLOAT8PASSBYVAL);
 		if (f->args)
 			expr = make_expr_conditional(expr, linitial(f->args), true);
-		*p_null_const_value = "0";
 	}
 	else if (strcmp(proc_name, "pmin") == 0 ||
 			 strcmp(proc_name, "pmax") == 0)
@@ -2993,9 +3304,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %s",
 				 format_type_be(exprType((Node *)expr)));
-		*p_null_const_value = (strcmp(proc_name, "pmin") == 0
-							   ? dtype->max_const
-							   : dtype->min_const);
 	}
 	else if (strcmp(proc_name, "psum") == 0 ||
 			 strcmp(proc_name, "psum_x2") == 0)
@@ -3018,7 +3326,6 @@ codegen_projection_partial_funcion(FuncExpr *f,
 										InvalidOid,
 										COERCE_EXPLICIT_CALL);
 		}
-		*p_null_const_value = dtype->zero_const;		
 	}
 	else if (strcmp(proc_name, "pcov_x")  == 0 ||
 			 strcmp(proc_name, "pcov_y")  == 0 ||
@@ -3067,16 +3374,35 @@ codegen_projection_partial_funcion(FuncExpr *f,
 			elog(ERROR, "Bug? unexpected code path");
 
 		Assert(exprType((Node *)filter) == BOOLOID);
-		if (IsA(filter, Const) &&
-			DatumGetBool(((Const *)filter)->constvalue) &&
-			!((Const *)filter)->constisnull)
-		{
-			*p_null_const_value = "0.0";
-		}
-		else
-		{
-			expr = make_expr_conditional(expr, filter, true);
-		}
+		expr = make_expr_conditional(expr, filter, true);
+	}
+	else if (strcmp(proc_name, "hll_sketch_new") == 0)
+	{
+		FuncExpr   *hfunc;
+		char	   *hfunc_name;
+		Oid			hfunc_namespace;
+
+		Assert(list_length(f->args) == 1);
+		hfunc = linitial(f->args);
+		Assert(IsA(hfunc, FuncExpr));
+		hfunc_name = get_func_name(hfunc->funcid);
+		hfunc_namespace = get_func_namespace(hfunc->funcid);
+		if (strcmp(hfunc_name, "hll_hash") != 0 ||
+			hfunc_namespace != get_namespace_oid("pgstrom", false))
+			elog(ERROR, "Bug? hll_sketch_new() is invoked with %s",
+				 format_procedure(hfunc->funcid));
+		pfree(hfunc_name);
+
+		dfunc = pgstrom_devfunc_lookup(hfunc->funcid,
+									   hfunc->funcresulttype,
+									   hfunc->args,
+									   hfunc->inputcollid);
+		if (!dfunc)
+			elog(ERROR, "device function lookup failed: %s",
+				 format_procedure(hfunc->funcid));
+		pgstrom_devfunc_track(context, dfunc);
+
+		expr = (Expr *)hfunc;
 	}
 	else
 	{
@@ -3089,15 +3415,20 @@ codegen_projection_partial_funcion(FuncExpr *f,
 }
 
 static void
-gpupreagg_codegen_projection_row(StringInfo kern,
-								 codegen_context *context,
-								 List *tlist_alt,
-								 Bitmapset *outer_refs_any,
-								 Bitmapset *outer_refs_expr,
-								 Index outer_scanrelid,
-								 List *outer_tlist)
+gpupreagg_codegen_projection(StringInfo kern,
+							 codegen_context *context,
+							 CustomScan *cscan,
+							 List *outer_tlist,
+							 List **p_tlist_part,
+							 List **p_tlist_prep,
+							 Bitmapset **p_pfunc_bitmap)
 {
 	PlannerInfo	   *root = context->root;
+	Bitmapset	   *outer_refs_any = NULL;
+	Bitmapset	   *outer_refs_expr = NULL;
+	List		   *tlist_part = NIL;
+	List		   *tlist_prep = NIL;
+	Bitmapset	   *pfunc_bitmap = NULL;
 	StringInfoData	decl;
 	StringInfoData	tbody;		/* Row/Block */
 	StringInfoData	sbody;		/* Slot */
@@ -3111,6 +3442,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	int				i, k, nattrs;
 	int				outer_refno_max = -1;
 
+	/*
+	 * Extract tlist for device projection (a.k.a template of kds_slot)
+	 */
+	tlist_part = make_tlist_device_projection(cscan->scan.plan.targetlist,
+											  cscan->scan.scanrelid,
+											  outer_tlist,
+											  &outer_refs_any,
+											  &outer_refs_expr);
 	initStringInfo(&decl);
 	initStringInfo(&tbody);
 	initStringInfo(&sbody);
@@ -3124,299 +3463,300 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"  void        *addr    __attribute__((unused));\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
-	if (outer_scanrelid > 0)
+	if (cscan->scan.scanrelid == 0)
+	{
+		nattrs = list_length(outer_tlist);
+	}
+	else
 	{
 		RangeTblEntry  *rte;
 
-		Assert(outer_scanrelid > 0 &&
-			   outer_scanrelid < root->simple_rel_array_size);
-		rte = root->simple_rte_array[outer_scanrelid];
+		Assert(outer_tlist == NIL);
+		rte = root->simple_rte_array[cscan->scan.scanrelid];
 		outer_rel = table_open(rte->relid, NoLock);
 		outer_desc = RelationGetDescr(outer_rel);
 		nattrs = outer_desc->natts;
 	}
-	else
-	{
-		Assert(outer_scanrelid == 0);
-		nattrs = list_length(outer_tlist);
-	}
 
 	/* extract the supplied tuple and load variables */
-	if (!bms_is_empty(outer_refs_any))
+	if (bms_is_empty(outer_refs_any))
+		goto setup_expressions;
+
+	for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
 	{
-		for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k,
+						  outer_refs_any))
+			elog(ERROR, "Bug? system column or whole-row is referenced");
+	}
+
+	resetStringInfo(&temp);
+	for (i=1; i <= nattrs; i++)
+	{
+		devtype_info   *dtype;
+		bool	referenced = false;
+
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		if (!bms_is_member(k, outer_refs_any))
+			continue;
+
+		/* data type of the outer relation input stream */
+		if (cscan->scan.scanrelid == 0)
 		{
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs_any))
-				elog(ERROR, "Bug? system column or whole-row is referenced");
+			TargetEntry *tle = list_nth(outer_tlist, i-1);
+			Oid		type_oid = exprType((Node *)tle->expr);
+
+			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(type_oid));
+		}
+		else
+		{
+			Form_pg_attribute attr = tupleDescAttr(outer_desc, i-1);
+
+			dtype = pgstrom_devtype_lookup_and_track(attr->atttypid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(attr->atttypid));
 		}
 
-		resetStringInfo(&temp);
-		for (i=1; i <= nattrs; i++)
+		foreach (lc, tlist_part)
 		{
-			bool	referenced = false;
+			TargetEntry *tle = lfirst(lc);
+			Var		   *varnode;
 
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs_any))
+			Assert(!tle->resjunk);
+			if (!IsA(tle->expr, Var))
+				continue;
+			varnode = (Var *) tle->expr;
+			if ((varnode->varno != cscan->scan.scanrelid &&
+				 varnode->varno != OUTER_VAR) ||
+				(varnode->varattno < 1 ||
+				 varnode->varattno > nattrs))
+				elog(ERROR, "Bug? unexpected varnode: %s", nodeToString(varnode));
+			if (varnode->varattno != i)
+				continue;
+
+			/* row */
+			if (!referenced)
 			{
-				devtype_info   *dtype;
-
-				/* data type of the outer relation input stream */
-				if (outer_tlist == NIL)
-				{
-					Form_pg_attribute attr = tupleDescAttr(outer_desc, i-1);
-					
-					dtype = pgstrom_devtype_lookup_and_track(attr->atttypid,
-															 context);
-					if (!dtype)
-						elog(ERROR, "device type lookup failed: %s",
-							 format_type_be(attr->atttypid));
-				}
-				else
-				{
-					TargetEntry	   *tle = list_nth(outer_tlist, i-1);
-					Oid				type_oid = exprType((Node *)tle->expr);
-
-					dtype = pgstrom_devtype_lookup_and_track(type_oid,
-															 context);
-					if (!dtype)
-						elog(ERROR, "device type lookup failed: %s",
-							 format_type_be(type_oid));
-				}
-
-				foreach (lc, tlist_alt)
-				{
-					TargetEntry *tle = lfirst(lc);
-					Var		   *varnode;
-
-					if (tle->resjunk)
-						continue;
-					if (!IsA(tle->expr, Var))
-						continue;
-
-					varnode = (Var *) tle->expr;
-					if (varnode->varno != INDEX_VAR ||
-						varnode->varattno < 1 ||
-						varnode->varattno > nattrs)
-						elog(ERROR, "Bug? unexpected varnode: %s",
-							 nodeToString(varnode));
-					if (varnode->varattno != i)
-						continue;
-
-					/* row */
-					if (!referenced)
-					{
-						appendStringInfo(
-							&temp,
-							"  case %d:\n", i - 1);
-						outer_refno_max = i;
-					}
-
-					appendStringInfo(
-						&temp,
-						"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
-						"    pg_datum_store(kcxt, temp.%s_v,\n"
-						"                   dst_dclass[%d],\n"
-						"                   dst_values[%d]);\n",
-						dtype->type_name,
-						dtype->type_name,
-						tle->resno - 1,
-						tle->resno - 1);
-
-					/* slot */
-					appendStringInfo(
-						&sbody,
-						"  dst_dclass[%d] = src_dclass[%d];\n"
-						"  dst_values[%d] = src_values[%d];\n",
-						tle->resno-1, i-1,
-						tle->resno-1, i-1);
-
-					/* arrow */
-					appendStringInfo(
-						&abody,
-						"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
-						"  pg_datum_store(kcxt, temp.%s_v,\n"
-						"                 dst_dclass[%d],\n"
-						"                 dst_values[%d]);\n",
-						dtype->type_name, i-1,
-						dtype->type_name,
-						tle->resno-1,
-						tle->resno-1);
-					/* column */
-					appendStringInfo(
-						&cbody,
-						"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n"
-						"  if (!addr)\n"
-						"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
-						"  else\n"
-						"  {\n"
-						"    dst_dclass[%d] = DATUM_CLASS__NORMAL;\n"
-						"    dst_values[%d] = %s(addr);\n"
-						"  }\n",
-						i-1, tle->resno-1, tle->resno-1, tle->resno-1,
-						dtype->type_byval
-						? (dtype->type_length == 1 ? "READ_INT8_PTR"  :
-						   dtype->type_length == 2 ? "READ_INT16_PTR" :
-						   dtype->type_length == 4 ? "READ_INT32_PTR" :
-						   dtype->type_length == 8 ? "READ_INT64_PTR" : "NO_SUCH_TYPLEN")
-						: "PointerGetDatum");
-					referenced = true;
-				}
-
-				/*
-				 * KVAR_x must be set up if variables are referenced by
-				 * expressions.
-				 */
-				if (bms_is_member(k, outer_refs_expr))
-				{
-					appendStringInfo(
-						&decl,
-						"  pg_%s_t KVAR_%u;\n",
-						dtype->type_name, i);
-					/* row */
-					if (!referenced)
-					{
-						appendStringInfo(
-							&temp,
-							"  case %d:\n", i - 1);
-						outer_refno_max = i;
-					}
-					appendStringInfo(
-						&temp,
-						"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
-					/* slot */
-					appendStringInfo(
-						&sbody,
-						"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
-						"                    src_dclass[%d],\n"
-						"                    src_values[%d]);\n",
-						i, i-1, i-1);
-					/* arrow */
-					if (referenced)
-					{
-						appendStringInfo(
-							&abody,
-							"  KVAR_%u = temp.%s_v;\n",
-							i, dtype->type_name);
-					}
-					else
-					{
-						appendStringInfo(
-							&abody,
-							"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
-							i, i-1);
-					}
-					/* column */
-					if (!referenced)
-						appendStringInfo(
-							&cbody,
-							"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n",
-							i-1);
-					appendStringInfo(
-						&cbody,
-						"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
-					referenced = true;
-				}
-				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-				type_oid_list = list_append_unique_oid(type_oid_list,
-													   dtype->type_oid);
-				if (referenced)
-					appendStringInfoString(
-						&temp,
-						"    break;\n");
+				appendStringInfo(
+					&temp,
+					"  case %d:\n", i - 1);
+				outer_refno_max = i;
 			}
+
+			appendStringInfo(
+				&temp,
+				"    pg_datum_ref(kcxt, temp.%s_v, addr);\n"
+				"    pg_datum_store(kcxt, temp.%s_v,\n"
+				"                   dst_dclass[%d],\n"
+				"                   dst_values[%d]);\n",
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				tle->resno - 1);
+
+			/* slot */
+			appendStringInfo(
+				&sbody,
+				"  dst_dclass[%d] = src_dclass[%d];\n"
+				"  dst_values[%d] = src_values[%d];\n",
+				tle->resno-1, i-1,
+				tle->resno-1, i-1);
+
+			/* arrow */
+			appendStringInfo(
+				&abody,
+				"  pg_datum_ref_arrow(kcxt,temp.%s_v,kds_src,%d,src_index);\n"
+				"  pg_datum_store(kcxt, temp.%s_v,\n"
+				"                 dst_dclass[%d],\n"
+				"                 dst_values[%d]);\n",
+				dtype->type_name, i-1,
+				dtype->type_name,
+				tle->resno-1,
+				tle->resno-1);
+			/* column */
+			appendStringInfo(
+				&cbody,
+				"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n"
+				"  if (!addr)\n"
+				"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
+				"  else\n"
+				"  {\n"
+				"    dst_dclass[%d] = DATUM_CLASS__NORMAL;\n"
+				"    dst_values[%d] = %s(addr);\n"
+				"  }\n",
+				i-1, tle->resno-1, tle->resno-1, tle->resno-1,
+				dtype->type_byval
+				? (dtype->type_length == 1 ? "READ_INT8_PTR"  :
+				   dtype->type_length == 2 ? "READ_INT16_PTR" :
+				   dtype->type_length == 4 ? "READ_INT32_PTR" :
+				   dtype->type_length == 8 ? "READ_INT64_PTR" : "NO_SUCH_TYPLEN")
+				: "PointerGetDatum");
+			referenced = true;
 		}
 
-		if (temp.len > 0)
+		/*
+		 * KVAR_x must be set up if variables are referenced by
+		 * expressions.
+		 */
+		if (bms_is_member(k, outer_refs_expr))
 		{
 			appendStringInfo(
-				&tbody,
-				"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
-				"  switch (__colidx)\n"
-				"  {\n"
-				"%s"
-				"  default:\n"
-				"    break;\n"
-				"  }\n"
-				"  EXTRACT_HEAP_TUPLE_END();\n",
-				outer_refno_max,
-				temp.data);
+				&decl,
+				"  pg_%s_t KVAR_%u;\n",
+				dtype->type_name, i);
+			/* row */
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"  case %d:\n", i - 1);
+				outer_refno_max = i;
+			}
+			appendStringInfo(
+				&temp,
+				"    pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+			/* slot */
+			appendStringInfo(
+				&sbody,
+				"  pg_datum_ref_slot(kcxt,KVAR_%u,\n"
+				"                    src_dclass[%d],\n"
+				"                    src_values[%d]);\n",
+				i, i-1, i-1);
+			/* arrow */
+			if (referenced)
+			{
+				appendStringInfo(
+					&abody,
+					"  KVAR_%u = temp.%s_v;\n",
+					i, dtype->type_name);
+			}
+			else
+			{
+				appendStringInfo(
+					&abody,
+					"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds_src,%d,src_index);\n",
+					i, i-1);
+			}
+			/* column */
+			if (!referenced)
+				appendStringInfo(
+					&cbody,
+					"  addr = kern_get_datum_column(kds,extra,%d,rowid);\n",
+					i-1);
+			appendStringInfo(
+				&cbody,
+				"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
+			referenced = true;
 		}
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		type_oid_list = list_append_unique_oid(type_oid_list, dtype->type_oid);
+		if (referenced)
+			appendStringInfoString(
+				&temp,
+				"    break;\n");
+	}
+
+	if (temp.len > 0)
+	{
+		appendStringInfo(
+			&tbody,
+			"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src,htup,%d);\n"
+			"  switch (__colidx)\n"
+			"  {\n"
+			"%s"
+			"  default:\n"
+			"    break;\n"
+			"  }\n"
+			"  EXTRACT_HEAP_TUPLE_END();\n",
+			outer_refno_max,
+			temp.data);
 	}
 
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
+setup_expressions:
 	resetStringInfo(&temp);
-	foreach (lc, tlist_alt)
+	foreach (lc, tlist_part)
 	{
 		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tmp;
 		Expr		   *expr;
+		Oid				type_oid;
 		devtype_info   *dtype;
-		const char	   *null_const_value = NULL;
-		const char	   *projection_label = NULL;
+		const char	   *label;
 
-		if (tle->resjunk)
-			continue;
+		Assert(!tle->resjunk);
 		if (IsA(tle->expr, Var))
-			continue;	/* should be already loaded */
-		if (is_altfunc_expression((Node *)tle->expr))
 		{
-			FuncExpr   *f = (FuncExpr *) tle->expr;
-
-			expr = codegen_projection_partial_funcion(f,
-													  context,
-													  &null_const_value);
-			projection_label = "aggfunc-arg";
-		}
-		else if (tle->ressortgroupref)
-		{
+			/* should be already loaded */
 			expr = tle->expr;
-			null_const_value = "0";
-			projection_label = "grouping-key";
+			label = "grouping-key";
 		}
 		else
-			elog(ERROR, "Bug? unexpected expression: %s",
-                 nodeToString(tle->expr));
+		{
+			if (is_altfunc_expression((Node *)tle->expr, NULL))
+			{
+				FuncExpr   *f = (FuncExpr *) tle->expr;
 
-		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
-												 context);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed: %s",
-				 format_type_be(exprType((Node *)expr)));
-		appendStringInfo(
-			&temp,
-			"\n"
-			"  /* initial attribute %d (%s) */\n"
-			"  temp.%s_v = %s;\n",
-			tle->resno, projection_label,
-			dtype->type_name,
-			pgstrom_codegen_expression((Node *)expr, context));
+				expr = codegen_projection_partial_funcion(f, context);
+				pfunc_bitmap = bms_add_member(pfunc_bitmap,
+											  list_length(tlist_prep));
+				label = "aggfunc-arg";
+			}
+			else if (tle->ressortgroupref)
+			{
+				expr = tle->expr;
+				label = "grouping-key";
+			}
+			else
+				elog(ERROR, "Bug? unexpected expression: %s",
+					 nodeToString(tle->expr));
 
-		appendStringInfo(
-			&temp,
-			"  pg_datum_store(kcxt, temp.%s_v,\n"
-			"                 dst_dclass[%d],\n"
-			"                 dst_values[%d]);\n",
-			dtype->type_name,
-			tle->resno-1,
-			tle->resno-1);
-		if (null_const_value)
+			type_oid = exprType((Node *)expr);
+			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(type_oid));
 			appendStringInfo(
 				&temp,
+				"\n"
+				"  /* initial attribute %d (%s) */\n"
+				"  temp.%s_v = %s;\n"
 				"  if (temp.%s_v.isnull)\n"
-				"    dst_values[%d] = %s;\n",
+				"    dst_dclass[%d] = DATUM_CLASS__NULL;\n"
+				"  else\n"
+				"    pg_datum_store(kcxt, temp.%s_v,\n"
+				"                   dst_dclass[%d],\n"
+				"                   dst_values[%d]);\n",
+				tle->resno, label,
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)expr, context),
 				dtype->type_name,
 				tle->resno-1,
-				null_const_value);
-		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-		type_oid_list = list_append_unique_oid(type_oid_list,
-											   dtype->type_oid);
+				dtype->type_name,
+				tle->resno-1,
+				tle->resno-1);
+			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+			type_oid_list = list_append_unique_oid(type_oid_list, type_oid);
+		}
+		tmp = flatCopyTargetEntry(tle);
+		tmp->expr  = expr;
+		tlist_prep = lappend(tlist_prep, tmp);
 	}
+	Assert(list_length(tlist_prep) == list_length(tlist_part));
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&sbody, temp.data);
 	appendStringInfoString(&abody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
+
+	*p_tlist_part = revert_tlist_device_projection(tlist_part, outer_tlist);
+	*p_tlist_prep = revert_tlist_device_projection(tlist_prep, outer_tlist);
+	*p_pfunc_bitmap = pfunc_bitmap;
 
 	/* const/params and temporary variable */
 	pgstrom_codegen_param_declarations(&decl, context);
@@ -3432,7 +3772,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                         cl_char *dst_dclass,\n"
 		"                         Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3442,7 +3783,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                          cl_char *dst_dclass,\n"
 		"                          Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3452,7 +3794,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                           cl_char *dst_dclass,\n"
 		"                           Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"%s"
 		"}\n\n"
 		"DEVICE_FUNCTION(void)\n"
 		"gpupreagg_projection_column(kern_context *kcxt,\n"
@@ -3462,7 +3805,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                            cl_char *dst_dclass,\n"
 		"                            Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n%s"
+		"%s%s\n"
+		"%s"
 		"}\n\n",
 		decl.data, context->decl_temp.data,
 		tbody.data,
@@ -3496,7 +3840,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 static void
 gpupreagg_codegen_hashvalue(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev)
+							List *tlist_prep)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -3512,7 +3856,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		&decl,
 		"  cl_uint      hash = 0xffffffffU;\n");
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_prep)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -3590,7 +3934,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 static void
 gpupreagg_codegen_keymatch(StringInfo kern,
 						   codegen_context *context,
-						   List *tlist_dev)
+						   List *tlist_prep)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -3608,7 +3952,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"  Datum       *x_values = KERN_DATA_STORE_VALUES(x_kds, x_index);\n"
 		"  Datum       *y_values = KERN_DATA_STORE_VALUES(y_kds, y_index);\n");
 
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_prep)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -3725,7 +4069,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 static const char *
 gpupreagg_codegen_common_calc(TargetEntry *tle,
 							  codegen_context *context,
-							  bool is_atomic_ops)
+							  const char *aggcalc_mode)
 {
 	FuncExpr	   *f = (FuncExpr *)tle->expr;
 	char		   *func_name;
@@ -3752,6 +4096,15 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 			 strcmp(func_name, "pcov_y2") == 0 ||
 			 strcmp(func_name, "pcov_xy") == 0)
 		aggcalc_ops = "add";
+	else if (strcmp(func_name, "hll_sketch_new") == 0)
+	{
+		pfree(func_name);
+		/* HLL registers are always bytea */
+		snprintf(sbuffer, sizeof(sbuffer),
+				 "aggcalc_%s_hll_sketch",
+				 aggcalc_mode);
+		return sbuffer;
+	}
 	else
 		elog(ERROR, "Bug? unexpected partial function expression: %s",
 			 nodeToString(f));
@@ -3790,145 +4143,289 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 	}
 	snprintf(sbuffer, sizeof(sbuffer),
 			 "aggcalc_%s_%s_%s",
-			 is_atomic_ops ? "atomic" : "normal",
+			 aggcalc_mode,
 			 aggcalc_ops,
 			 aggcalc_type);
 	return sbuffer;
 }
 
 /*
- * gpupreagg_codegen_local_calc - code generator for local calculation
+ * code generator for initialization of a slot
  */
 static void
-gpupreagg_codegen_local_calc(StringInfo kern,
-							 codegen_context *context,
-							 List *tlist_dev)
+gpupreagg_codegen_init_slot(StringInfo kern,
+							codegen_context *context,
+							List *tlist_part,
+							int *p_num_accum_values,
+							int *p_accum_extra_bufsz)
 {
+	StringInfoData fbuf;
+	StringInfoData lbuf;
 	ListCell   *lc;
+	int			count1 = 0;
+	int			count2 = 0;
+	int			extra_total = 0;
 
-	appendStringInfoString(
-		kern,
-		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_local_calc(cl_int attnum,\n"
-		"                     cl_char *p_acm_dclass,\n"
-		"                     Datum   *p_acm_datum,\n"
-		"                     cl_char  new_dclass,\n"
-		"                     Datum    new_datum)\n"
-		"{\n"
-		"  switch (attnum)\n"
-		"  {\n");
-	foreach (lc, tlist_dev)
+	initStringInfo(&fbuf);
+	initStringInfo(&lbuf);
+
+	foreach (lc, tlist_part)
 	{
 		TargetEntry	   *tle = lfirst(lc);
+		int				extra_sz = 0;
 		const char	   *label;
 
-		/* only partial aggregate function's arguments */
-		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
+		if (tle->resjunk)
 			continue;
-
-		label = gpupreagg_codegen_common_calc(tle, context, true);
-		appendStringInfo(
-			kern,
-			"  case %d:\n"
-			"    %s(p_acm_dclass,p_acm_datum,new_dclass,new_datum);\n"
-			"    break;\n",
-			tle->resno - 1,
-			label);
+		if (!is_altfunc_expression((Node *)tle->expr, &extra_sz))
+		{
+			/* grouping-keys */
+			appendStringInfo(
+				&fbuf,
+				"  aggcalc_init_null(&dst_dclass[%d], &dst_values[%d]);\n",
+				count1 + count2,
+				count1 + count2);
+			count2++;
+		}
+		else if (extra_sz == 0)
+		{
+			label = gpupreagg_codegen_common_calc(tle, context, "init");
+			appendStringInfo(
+				&fbuf,
+				"  %s(&dst_dclass[%d], &dst_values[%d]);\n",
+				label,
+				count1 + count2,
+				count1 + count2);
+			appendStringInfo(
+				&lbuf,
+				"  %s(&dst_dclass[%d], &dst_values[%d]);\n",
+				label,
+				count1,
+				count1);
+			count1++;
+		}
+		else
+		{
+			label = gpupreagg_codegen_common_calc(tle, context, "init");
+			appendStringInfo(
+				&fbuf,
+				"  %s(&dst_dclass[%d], &dst_values[%d], dst_extras);\n"
+				"  dst_extras += %u;\n",
+				label,
+				count1 + count2,
+				count1 + count2,
+				extra_sz);
+			appendStringInfo(
+				&lbuf,
+				"  %s(&dst_dclass[%d], &dst_values[%d], dst_extras);\n"
+				"  dst_extras += %u;\n",
+				label,
+				count1,
+				count1,
+				extra_sz);
+			extra_total += extra_sz;
+			count1++;
+		}
 	}
-	appendStringInfoString(
+	appendStringInfo(
 		kern,
-		"  default:\n"
-		"    break;\n"
-		"  }\n"
-		"}\n\n");
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_init_local_slot(cl_char  *dst_dclass,\n"
+		"                          Datum    *dst_values,\n"
+		"                          char     *dst_extras)\n"
+		"{\n%s}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_init_final_slot(cl_char  *dst_dclass,\n"
+		"                          Datum    *dst_values,\n"
+		"                          char     *dst_extras)\n"
+		"{\n%s}\n\n",
+		lbuf.data,
+		fbuf.data);
+	pfree(lbuf.data);
+	pfree(fbuf.data);
+
+	/* number of accumulate values */
+	*p_num_accum_values = count1;
+	/* size of extra area consumed by the accumulate values */
+	*p_accum_extra_bufsz = extra_total;
 }
 
 /*
- * gpupreagg_codegen_global_calc - code generator for global calculation
+ * code generator for accum-values merge
  */
 static void
-gpupreagg_codegen_global_calc(StringInfo kern,
+gpupreagg_codegen_accum_merge(StringInfo kern,
 							  codegen_context *context,
-							  List *tlist_dev)
+							  List *tlist_part)
 {
+	StringInfoData sbuf;	/* _shuffle */
+	StringInfoData nbuf;	/* _normal */
+	StringInfoData mbuf;	/* _merge */
+	StringInfoData ubuf;	/* _update */
 	ListCell   *lc;
+	int			count = 0;
 
-	appendStringInfoString(
-		kern,
-		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_global_calc(cl_char *dst_dclass,\n"
-		"                      Datum   *dst_values,\n"
-		"                      cl_char *src_dclass,\n"
-		"                      Datum   *src_values)\n"
-		"{\n");
-	foreach (lc, tlist_dev)
+	initStringInfo(&sbuf);
+	initStringInfo(&nbuf);
+	initStringInfo(&mbuf);
+	initStringInfo(&ubuf);
+
+	foreach (lc, tlist_part)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		const char	   *label;
 
 		/* only partial aggregate function's arguments */
-		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
+		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr, NULL))
 			continue;
-
-		label = gpupreagg_codegen_common_calc(tle, context, true);
+		label = gpupreagg_codegen_common_calc(tle, context, "shuffle");
 		appendStringInfo(
-			kern,
-			"  %s(dst_dclass+%d, dst_values+%d, src_dclass[%d], src_values[%d]);\n",
-			label,
-			tle->resno - 1,
-			tle->resno - 1,
-			tle->resno - 1,
-			tle->resno - 1);
-	}
-	appendStringInfoString(
+			&sbuf,
+			"  index = priv_attmap[%d];\n"
+			"  %s(&priv_dclass[index], &priv_values[index], lane_id);\n",
+			count, label);
+
+		label = gpupreagg_codegen_common_calc(tle, context, "normal");
+		appendStringInfo(
+			&nbuf,
+			"  dst_index = dst_attmap[%d];\n"
+			"  src_index = src_attmap[%d];\n"
+			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
+			count, count, label);
+
+		label = gpupreagg_codegen_common_calc(tle, context, "merge");
+		appendStringInfo(
+			&mbuf,
+			"  dst_index = dst_attmap[%d];\n"
+			"  src_index = src_attmap[%d];\n"
+			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
+			count, count, label);
+
+		label = gpupreagg_codegen_common_calc(tle, context, "update");
+		appendStringInfo(
+			&ubuf,
+			"  dst_index = dst_attmap[%d];\n"
+			"  src_index = src_attmap[%d];\n"
+			"  %s(&dst_dclass[dst_index], &dst_values[dst_index], src_dclass[src_index], src_values[src_index]);\n",
+			count, count, label);
+		count++;
+    }
+	
+	appendStringInfo(
 		kern,
-		"}\n\n");
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_merge_shuffle(cl_char  *priv_dclass,\n"
+		"                        Datum    *priv_values,\n"
+		"                        cl_short *priv_attmap,\n"
+		"                        int       lane_id)\n"
+		"{\n"
+		"  int index;\n\n"
+		"%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_update_normal(cl_char  *dst_dclass,\n"
+		"                        Datum    *dst_values,\n"
+		"                        cl_short *dst_attmap,\n"
+		"                        cl_char  *src_dclass,\n"
+		"                        Datum    *src_values,\n"
+		"                        cl_short *src_attmap)\n"
+		"{\n"
+		"  int dst_index;\n"
+		"  int src_index;\n\n"
+		"%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_merge_atomic(cl_char  *dst_dclass,\n"
+		"                       Datum    *dst_values,\n"
+		"                       cl_short *dst_attmap,\n"
+		"                       cl_char  *src_dclass,\n"
+		"                       Datum    *src_values,\n"
+		"                       cl_short *src_attmap)\n"
+		"{\n"
+		"  int dst_index;\n"
+		"  int src_index;\n\n"
+		"%s"
+		"}\n\n"
+		"DEVICE_FUNCTION(void)\n"
+		"gpupreagg_update_atomic(cl_char  *dst_dclass,\n"
+		"                        Datum    *dst_values,\n"
+		"                        cl_short *dst_attmap,\n"
+		"                        cl_char  *src_dclass,\n"
+		"                        Datum    *src_values,\n"
+		"                        cl_short *src_attmap)\n"
+		"{\n"
+		"  int dst_index;\n"
+		"  int src_index;\n\n"
+		"%s"
+		"}\n\n",
+		sbuf.data,
+		nbuf.data,
+		mbuf.data,
+		ubuf.data);
+	
+	pfree(sbuf.data);
+	pfree(nbuf.data);
+	pfree(mbuf.data);
+	pfree(ubuf.data);
 }
 
 /*
- * gpupreagg_codegen_nogroup_calc - code generator for nogroup calculation
+ * gpupreagg_codegen_variables
  */
 static void
-gpupreagg_codegen_nogroup_calc(StringInfo kern,
-							   codegen_context *context,
-							   List *tlist_dev)
+gpupreagg_codegen_variables(StringInfo kern,
+							List *tlist_dev,
+							Bitmapset *pfunc_bitmap)
 {
-	ListCell   *lc;
+	ListCell *lc;
+	int		count;
 
 	appendStringInfoString(
-        kern,
-		"DEVICE_FUNCTION(void)\n"
-		"gpupreagg_nogroup_calc(cl_int attnum,\n"
-		"                       cl_char *p_acm_dclass,\n"
-		"                       Datum   *p_acm_datum,\n"
-		"                       cl_char  new_dclass,\n"
-		"                       Datum    new_datum)\n"
-		"{\n"
-		"  switch (attnum)\n"
-		"  {\n");
+		kern,
+		"__device__ cl_short GPUPREAGG_ACCUM_MAP_LOCAL[]\n"
+		"  = {");
+	count = 0;
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
-		const char	   *label;
 
-		/* only partial aggregate function's arguments */
-		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
-			continue;
-		label = gpupreagg_codegen_common_calc(tle, context, false);
-		appendStringInfo(
-			kern,
-			"  case %d:\n"
-			"    %s(p_acm_dclass, p_acm_datum, new_dclass, new_datum);\n"
-			"    break;\n",
-			tle->resno - 1,
-			label);
+		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr, NULL))
+		{
+			appendStringInfo(kern, " %d,", count);
+			count++;
+		}
 	}
 	appendStringInfoString(
 		kern,
-		"  default:\n"
-		"    break;\n"
-		"  }\n"
-		"}\n\n");
+		" -1 };\n"
+		"__device__ cl_short GPUPREAGG_ACCUM_MAP_GLOBAL[]\n"
+		"  = {");
+	count = 0;
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (!tle->resjunk && is_altfunc_expression((Node *)tle->expr, NULL))
+		{
+			appendStringInfo(kern, " %d,", tle->resno - 1);
+			count++;
+		}
+	}
+	appendStringInfoString(
+		kern,
+		" -1 };\n"
+		"__device__ cl_bool GPUPREAGG_ATTR_IS_ACCUM_VALUES[]\n"
+		"  = {");
+	count = 0;
+	foreach (lc, tlist_dev)
+	{
+		appendStringInfo(kern, " %s, ",
+						 bms_is_member(count, pfunc_bitmap) ? "true" : "false");
+		count++;
+	}
+	appendStringInfoString(
+		kern,
+		" -1 };\n\n");
 }
 
 /*
@@ -3937,112 +4434,62 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 static char *
 gpupreagg_codegen(codegen_context *context,
 				  CustomScan *cscan,
-				  List *tlist_dev,
 				  List *outer_tlist,
-				  GpuPreAggInfo *gpa_info,
-				  Bitmapset *pfunc_bitmap)
+				  GpuPreAggInfo *gpa_info)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
-	Size			length;
-	bytea		   *kparam_0;
-	cl_char		   *attr_is_preagg;
-	List		   *tlist_alt;
-	List		   *tlist_fallback = NIL;
-	ListCell	   *lc;
-	Bitmapset	   *outer_refs_any = NULL;
-	Bitmapset	   *outer_refs_expr = NULL;
+	Bitmapset	   *pfunc_bitmap = NULL;
 	size_t			varlena_bufsz = 0;
-	int				nfields = list_length(tlist_dev);
-	int				i = 0;
+	int				nfields;
 
 	initStringInfo(&kern);
 	initStringInfo(&body);
-	/*
-	 * System constants of GpuPreAgg:
-	 * KPARAM_0 is an array of cl_char to inform which field is grouping
-	 * keys, or target of (partial) aggregate function.
-	 */
-	length = sizeof(cl_char) * nfields;
-	kparam_0 = palloc0(length + VARHDRSZ);
-	SET_VARSIZE(kparam_0, length + VARHDRSZ);
-	attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	foreach (lc, tlist_dev)
-	{
-		attr_is_preagg[i] = (bms_is_member(i, pfunc_bitmap) ? 1 : 0);
-		i++;
-	}
-	context->used_params = list_make1(makeConst(BYTEAOID,
-												-1,
-												InvalidOid,
-												-1,
-												PointerGetDatum(kparam_0),
-												false,
-												false));
-	pgstrom_devtype_lookup_and_track(BYTEAOID, context);
 
 	/* gpuscan_quals_eval */
 	codegen_gpuscan_quals(&body, context, "gpupreagg",
 						  cscan->scan.scanrelid,
 						  gpa_info->outer_quals);
-
-	/*
-	 * gpupreagg_projection_(row|slot)
-	 *
-	 * pick up columns which are referenced by the initial projection,
-	 * then constructs an alternative tlist that contains Var-node with
-     * INDEX_VAR + resno, for convenience of the later stages.
-	 */
-	tlist_alt = make_tlist_device_projection(tlist_dev,
-											 cscan->scan.scanrelid,
-											 outer_tlist,
-											 &outer_refs_any,
-											 &outer_refs_expr);
-	Assert(list_length(tlist_alt) == nfields);
-	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
-
-	gpupreagg_codegen_projection_row(&body,
-									 context,
-									 tlist_alt,
-									 outer_refs_any,
-									 outer_refs_expr,
-									 cscan->scan.scanrelid,
-									 outer_tlist);
+	/* gpupreagg_projection_xxxx */
+	gpupreagg_codegen_projection(&body,
+								 context,
+								 cscan,
+								 outer_tlist,
+								 &gpa_info->tlist_part,
+								 &gpa_info->tlist_prep,
+								 &pfunc_bitmap);
+	nfields = list_length(gpa_info->tlist_prep);
 	varlena_bufsz = (context->varlena_bufsz +
 					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
 					 MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
 					 MAXALIGN(sizeof(cl_int)  * nfields));	/* tup_extra */
-
-	/* remove junk entries for tlist_fallback */
-	foreach (lc, tlist_alt)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (!tle->resjunk)
-			tlist_fallback = lappend(tlist_fallback, tle);
-	}
-	gpa_info->tlist_fallback = tlist_fallback;
+	/* device variables */
+	gpupreagg_codegen_variables(&kern, gpa_info->tlist_part, pfunc_bitmap);
 	/* gpupreagg_hashvalue */
 	context->varlena_bufsz = 0;
-	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
+	gpupreagg_codegen_hashvalue(&body, context,
+								gpa_info->tlist_prep);
 	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 
 	/* gpupreagg_keymatch */
 	context->varlena_bufsz = 0;
-	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
+	gpupreagg_codegen_keymatch(&body, context,
+							   gpa_info->tlist_prep);
 	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
 
-	/* gpupreagg_local_calc */
-	gpupreagg_codegen_local_calc(&body, context, tlist_dev);
-	/* gpupreagg_global_calc */
-	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
-	/* gpupreagg_nogroup_calc */
-	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
+	gpa_info->varlena_bufsz = varlena_bufsz;
+	
+	/* gpupreagg_init_xxxx_slot */
+	gpupreagg_codegen_init_slot(&body, context,
+								gpa_info->tlist_part,
+								&gpa_info->num_accum_values,
+								&gpa_info->accum_extra_bufsz);
+	/* gpupreagg_merge_* */
+	gpupreagg_codegen_accum_merge(&body, context,
+								  gpa_info->tlist_part);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
-
-	gpa_info->varlena_bufsz = varlena_bufsz;
 
 	return kern.data;
 }
@@ -4105,10 +4552,22 @@ void
 assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	CustomScan	   *cscan __attribute__((unused))
-		= (CustomScan *) gpas->gts.css.ss.ps.plan;
 
-	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
+	Assert(pgstrom_plan_is_gpupreagg(gpas->gts.css.ss.ps.plan));
+
+	/*
+	 * struct __preagg_accum_item is a local buffer to save a cumulative sum
+	 * for accumulation values.
+	 */
+	appendStringInfo(buf, "#define __GPUPREAGG_NUM_ACCUM_VALUES %u\n",
+					 gpas->num_accum_values);
+	appendStringInfo(buf, "#define __GPUPREAGG_ACCUM_EXTRA_BUFSZ %u\n",
+					 gpas->accum_extra_bufsz);
+	appendStringInfo(buf, "#define __GPUPREAGG_LOCAL_HASH_NROOMS %u\n",
+					 gpas->local_hash_nrooms);
+	appendStringInfo(buf, "#define __GPUPREAGG_HLL_REGISTER_BITS %u\n",
+					 pgstrom_hll_register_bits);
+
 	/*
 	 * definition of GPUPREAGG_COMBINED_JOIN disables a dummy definition
 	 * of gpupreagg_projection_slot() in cuda_gpujoin.h, and switch to
@@ -4152,9 +4611,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
-	List		   *tlist_dev = cscan->custom_scan_tlist;
-	ListCell	   *lc	__attribute__((unused));
-	TupleDesc		gpreagg_tupdesc;
+	TupleDesc		part_tupdesc;
+	TupleDesc		prep_tupdesc;
 	TupleDesc		outer_tupdesc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
@@ -4180,7 +4638,21 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_next_tuple      = gpupreagg_next_tuple;
 	gpas->gts.cb_process_task    = gpupreagg_process_task;
 	gpas->gts.cb_release_task    = gpupreagg_release_task;
-	gpas->num_group_keys	= gpa_info->num_group_keys;
+	gpas->num_group_keys		= gpa_info->num_group_keys;
+	gpas->num_accum_values		= gpa_info->num_accum_values;
+	gpas->accum_extra_bufsz		= gpa_info->accum_extra_bufsz;
+	/*
+	 * NOTE: groupby reduction tries to use 45kB of shared memory per SM
+	 * for the local hash area. Number of the local hash items depends on
+	 * the memory consumption for each row. It can be zero, if unit size
+	 * of the shared memory consumption is too large.
+	 */
+	gpas->local_hash_nrooms
+		= ((45 * 1024 - sizeof(preagg_local_hashtable))
+		   / (sizeof(preagg_hash_item) +
+			  sizeof(cl_char) * gpas->num_accum_values +
+			  sizeof(Datum)   * gpas->num_accum_values +
+			  gpas->accum_extra_bufsz));
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))
@@ -4214,30 +4686,34 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 									gpa_info->index_quals);
 	}
 
-	/*
-	 * Initialization the stuff for CPU fallback.
-	 *
-	 * Projection from the outer-relation to the custom_scan_tlist is a job
-	 * of CPU fallback. It is equivalent to the initial device projection.
-	 */
-	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev);
-	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc,
-												  &TTSOpsVirtual);
-	//XXX - tlist_dev and tlist_fallback are compatible; needs Assert()?
-
+	/* Setup TupleTableSlot */
+	part_tupdesc = ExecCleanTypeFromTL(gpa_info->tlist_part);
+	gpas->part_slot = MakeSingleTupleTableSlot(part_tupdesc,
+											   &TTSOpsVirtual);
+	prep_tupdesc = ExecCleanTypeFromTL(gpa_info->tlist_prep);
+	gpas->prep_slot = MakeSingleTupleTableSlot(prep_tupdesc,
+											   &TTSOpsVirtual);
 	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc,
 												&TTSOpsHeapTuple);
-	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_fallback,
+	
+	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_part,
 											   econtext,
-											   gpas->gpreagg_slot,
+											   gpas->part_slot,
 											   &gpas->gts.css.ss.ps,
 											   outer_tupdesc);
+
+	ExecInitScanTupleSlot(estate,
+						  &gpas->gts.css.ss,
+						  part_tupdesc,
+						  &TTSOpsVirtual);
+	ExecAssignScanProjectionInfoWithVarno(&gpas->gts.css.ss, INDEX_VAR);
+
 	/* Template of kds_slot */
-	length = KDS_calculateHeadSize(gpreagg_tupdesc);
+	length = KDS_calculateHeadSize(prep_tupdesc);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,
 												 length);
 	init_kernel_data_store(gpas->kds_slot_head,
-						   gpreagg_tupdesc,
+						   prep_tupdesc,
 						   INT_MAX,		/* to be set individually */
 						   KDS_FORMAT_SLOT,
 						   INT_MAX);	/* to be set individually */
@@ -4249,7 +4725,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		 : gpa_info->outer_nrows);
     gpas->plan_nrows_in		= gpa_info->outer_nrows;
 	gpas->plan_ngroups		= gpa_info->plan_ngroups;
-	gpas->plan_extra_sz		= gpa_info->plan_extra_sz;
 
 	/* Get CUDA program and async build if any */
 	if (gpas->combined_gpujoin)
@@ -4343,8 +4818,10 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		gpuMemFree(gcontext, gpas->m_fhash);
 
 	/* release any other resources */
-	if (gpas->gpreagg_slot)
-		ExecDropSingleTupleTableSlot(gpas->gpreagg_slot);
+	if (gpas->part_slot)
+		ExecDropSingleTupleTableSlot(gpas->part_slot);
+	if (gpas->prep_slot)
+		ExecDropSingleTupleTableSlot(gpas->prep_slot);
 	if (gpas->outer_slot)
 		ExecDropSingleTupleTableSlot(gpas->outer_slot);
 	releaseGpuPreAggSharedState(gpas);
@@ -4492,17 +4969,10 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	CustomScan			   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo		   *gpa_info = deform_gpupreagg_info(cscan);
 	List				   *dcontext;
-	List				   *gpu_proj = NIL;
+	List				   *group_keys = NIL;
 	ListCell			   *lc;
-	const char			   *policy;
-	char				   *exprstr;
-
-	/* shows reduction policy */
-	if (gpas->num_group_keys == 0)
-		policy = "NoGroup";
-	else
-		policy = "Local";
-	ExplainPropertyText("Reduction", policy, es);
+	char				   *temp;
+	char					buf[200];
 
 	if (gpa_rtstat)
 		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
@@ -4511,18 +4981,63 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
                                             (Node *)&gpas->gts.css.ss.ps,
                                             ancestors);
-	/* Show device projection (verbose only) */
+	/* extract grouping keys */
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->ressortgroupref)
+			group_keys = lappend(group_keys, tle->expr);
+	}
+
 	if (es->verbose)
 	{
-		foreach (lc, cscan->custom_scan_tlist)
-			gpu_proj = lappend(gpu_proj, ((TargetEntry *) lfirst(lc))->expr);
-		if (gpu_proj != NIL)
+		List	   *__tlist_part = NIL;
+		List	   *__tlist_prep = NIL;
+
+		foreach (lc, gpa_info->tlist_part)
 		{
-			exprstr = deparse_expression((Node *)gpu_proj, dcontext,
-										 es->verbose, false);
-			ExplainPropertyText("GPU Projection", exprstr, es);
+			TargetEntry	   *tle = lfirst(lc);
+
+			__tlist_part = lappend(__tlist_part, tle->expr);
 		}
+		temp = deparse_expression((Node *)__tlist_part,
+								  dcontext, false, false);
+		ExplainPropertyText("GPU Output", temp, es);
+
+		foreach (lc, gpa_info->tlist_prep)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			__tlist_prep = lappend(__tlist_prep, tle->expr);
+        }
+		temp = deparse_expression((Node *)__tlist_prep,
+								  dcontext, false, false);
+		ExplainPropertyText("GPU Setup", temp, es);
 	}
+
+	if (gpas->num_group_keys == 0)
+	{
+		Assert(group_keys == NIL);
+		ExplainPropertyText("Reduction", "NoGroup", es);
+	}
+	else
+	{
+		Assert(group_keys != 0);
+		if (gpas->local_hash_nrooms == 0)
+			ExplainPropertyText("Reduction", "GroupBy (Global Only)", es);
+		else
+		{
+			snprintf(buf, sizeof(buf),
+					 "GroupBy (Global+Local [nrooms: %u])",
+					 gpas->local_hash_nrooms);
+			ExplainPropertyText("Reduction", buf, es);
+		}
+		temp = deparse_expression((Node *)group_keys, dcontext,
+								  es->verbose, false);
+		ExplainPropertyText("Group keys", temp, es);
+	}
+
 	pgstromExplainOuterScan(&gpas->gts,
 							dcontext, ancestors, es,
 							gpa_info->outer_quals,
@@ -4602,60 +5117,62 @@ static void
 gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
+	TupleTableSlot *part_slot = gpas->part_slot;
+	TupleDesc		part_tupdesc = part_slot->tts_tupleDescriptor;
 	pgstrom_data_store *pds_final;
-	size_t			f_hashsize;
-	size_t			f_hashlimit;
-	CUdeviceptr		m_fhash;
+	size_t			f_length;
+	size_t			f_hash_nslots = 0;
+	size_t			f_hash_length = 0;
+	CUdeviceptr		m_fhash = 0UL;
 	CUresult		rc;
 
 	if (gpas->pds_final)
 		return;
 
 	/* final buffer allocation */
-	pds_final = PDS_create_slot(gcontext,
-								gpa_tupdesc,
-								0xffff8000UL);	/* 4GB - 32KB */
-	/* final hash-slot allocation */
-	f_hashlimit = (size_t)((double)pds_final->kds.nrooms * 1.33);
-	if (gpas->plan_ngroups < 400000)
-		f_hashsize = 4 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 1200000)
-		f_hashsize = 3 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 4000000)
-		f_hashsize = 2 * gpas->plan_ngroups;
-	else if (gpas->plan_ngroups < 10000000)
-		f_hashsize = (double)gpas->plan_ngroups * 1.25;
+	if (gpas->num_group_keys == 0)
+		f_length = 0x00ffe000UL;		/* almost 16MB managed */
 	else
-		f_hashsize = gpas->plan_ngroups;
+		f_length = 0x3ffffe000UL;		/* almost 16GB managed */
 
-	/* 2MB: minimum guarantee */
-	if (offsetof(kern_global_hashslot,
-				 hash_slot[f_hashsize]) < (1UL << 21))
+	pds_final = PDS_create_slot(gcontext,
+								part_tupdesc,
+								f_length);
+	/* final hash-slot allocation */
+	if (gpas->num_group_keys > 0)
 	{
-		f_hashsize = ((1UL << 21) - offsetof(kern_global_hashslot,
-											 hash_slot[0]))
-			/ sizeof(pagg_hashslot);
-	}
+		if (gpas->plan_ngroups < 400000)
+			f_hash_nslots = 4 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 1200000)
+			f_hash_nslots = 3 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 4000000)
+			f_hash_nslots = 2 * gpas->plan_ngroups;
+		else if (gpas->plan_ngroups < 10000000)
+			f_hash_nslots = (double)gpas->plan_ngroups * 1.25;
+		else
+			f_hash_nslots = gpas->plan_ngroups;
 
-	/*
-	 * Hash table allocation up to @f_hashlimit items, however, it initially
-	 * uses only @f_hashsize slot. If needs, GPU kernel extends the final
-	 * hash table on demand.
-	 */
-	rc = gpuMemAllocManaged(gcontext,
-							&m_fhash,
-							offsetof(kern_global_hashslot,
-									 hash_slot[f_hashlimit]),
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+		f_hash_length = 0xffffe000UL;	/* almost 4GB managed */
+		/*
+		 * The final hash-slot allocation. It initially use the leading
+		 * offsetof(kern_global_hashslot, slots[f_hash_nslots]) bytes
+		 * of the managed device memory, thus, not entire memory chunk
+		 * is used physically at that time.
+		 * Once @f_hash_nslots becomes unsufficient, GPU kernel expand
+		 * the hash-slot on the demand.
+		 */
+		rc = gpuMemAllocManaged(gcontext,
+								&m_fhash,
+								f_hash_length,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	}
 	gpas->pds_final		= pds_final;
 	gpas->m_fhash		= m_fhash;
 	gpas->ev_init_fhash	= NULL;
-	gpas->f_hashsize	= f_hashsize;
-	gpas->f_hashlimit	= f_hashlimit;
+	gpas->f_hash_nslots	= f_hash_nslots;
+	gpas->f_hash_length = f_hash_length;
 }
 
 /*
@@ -4668,8 +5185,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 					  int outer_depth)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	//TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	//TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 	GpuPreAggTask  *gpreagg;
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
@@ -4682,7 +5197,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	cl_int			sm_count;
 	Size			head_sz;
 	Size			suspend_sz = 0;
-	Size			row_inval_sz = 0;
 	Size			kgjoin_len = 0;
 
 	/* allocation of the final-buffer on demand */
@@ -4738,8 +5252,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	}
 	kds_slot_nrooms = (kds_slot_length -
 					   KERN_DATA_STORE_HEAD_LENGTH(kds_slot)) / unitsz;
-	/* buffer of row-invalidation-map */
-	row_inval_sz = STROMALIGN(sizeof(cl_char) * kds_slot_nrooms);
 
 	/* allocation of GpuPreAggTask */
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
@@ -4752,12 +5264,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							head_sz + suspend_sz + row_inval_sz + kgjoin_len,
+							head_sz + suspend_sz + kgjoin_len,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	gpreagg = (GpuPreAggTask *)m_deviceptr;
-	memset(gpreagg, 0, head_sz + suspend_sz + row_inval_sz);
+	memset(gpreagg, 0, head_sz + suspend_sz);
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->with_nvme_strom = with_nvme_strom;
@@ -4768,8 +5280,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	if (gpas->combined_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
-		gpreagg->kgjoin = (kern_gpujoin *)
-			((char *)gpreagg + head_sz + suspend_sz + row_inval_sz);
+		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz + suspend_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 		gpreagg->m_kmrels = m_kmrels;
 		gpreagg->outer_depth = outer_depth;
@@ -4780,9 +5291,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	}
 	/* if any grouping keys, determine the reduction policy later */
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
-	gpreagg->kern.hash_size = kds_slot_nrooms; //deprecated?
 	gpreagg->kern.suspend_size = suspend_sz;
-	gpreagg->kern.row_inval_map_size = row_inval_sz;
 	/* kern_parambuf */
 	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
 		   gpas->gts.kern_params,
@@ -4914,28 +5423,27 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 
 	for (;;)
 	{
+#if 0
 		if (gpreagg->kds_slot)
 		{
-			/* CPU fallback with partial results */
+			/* CPU fallback with kds_slot built */
 			kern_data_store *kds_slot = gpreagg->kds_slot;
-			cl_char	   *ri_map;
-			cl_uint		row_index;
+			cl_uint		row_index = gpas->gts.curr_index++;
 
-			ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern);
-			row_index = gpas->gts.curr_index++;
-			if (row_index >= kds_slot->nitems)
-				slot = NULL;
-			else
+			if (row_index < kds_slot->nitems)
 			{
-				if (ri_map[row_index])
-					continue;
 				slot = gpas->gpreagg_slot;
 				if (!KDS_fetch_tuple_slot(slot, kds_slot, row_index))
 					continue;
 			}
+			else
+			{
+				slot = NULL;
+			}
 			break;
 		}
-		else if (gpas->combined_gpujoin)
+#endif
+		if (gpas->combined_gpujoin)
 		{
 			GpuTaskState   *outer_gts
 				= (GpuTaskState *)outerPlanState(gpas);
@@ -5001,7 +5509,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	}
 	else if (gpas->gts.curr_index < pds_final->kds.nitems)
 	{
-		slot = gpas->gpreagg_slot;
+		slot = gpas->part_slot;
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
 	}
@@ -5022,6 +5530,13 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 	cl_int		grid_sz;
 	cl_int		block_sz;
 	void	   *kern_args[3];
+
+	/*
+	 * NoGroup reduction does not have final-hash buffer, thus
+	 * no need to initialize this.
+	 */
+	if (gpas->m_fhash == 0UL)
+		return;
 
 	pthreadMutexLock(&gpas->f_mutex);
 	STROM_TRY();
@@ -5046,11 +5561,11 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 									 0, 0);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
-			grid_sz = Min(grid_sz, (gpas->f_hashsize +
+			grid_sz = Min(grid_sz, (gpas->f_hash_nslots +
 									block_sz - 1) / block_sz);
 			kern_args[0] = &gpas->m_fhash;
-			kern_args[1] = &gpas->f_hashsize;
-			kern_args[2] = &gpas->f_hashlimit;
+			kern_args[1] = &gpas->f_hash_nslots;
+			kern_args[2] = &gpas->f_hash_length;
 			rc = cuLaunchKernel(kern_init_fhash,
 								grid_sz, 1, 1,
 								block_sz, 1, 1,
@@ -5147,10 +5662,6 @@ gpupreagg_throw_partial_result(GpuPreAggTask *gpreagg,
 	gresp->kds_slot			= kds_slot;
 	gresp->kds_slot_nrooms	= gpreagg->kds_slot_nrooms;
 	gresp->kds_slot_length	= gpreagg->kds_slot_length;
-	gresp->kern.row_inval_map_size = gpreagg->kern.row_inval_map_size;
-	memcpy(KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gresp->kern),
-		   KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern),
-		   gresp->kern.row_inval_map_size);
 
 	/* Back GpuTask to GTS */
 	pthreadMutexLock(&gcontext->worker_mutex);
@@ -5388,7 +5899,7 @@ resume_kernel:
 	rc = cuLaunchKernel(kern_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
-						sizeof(cl_int) * 1024,	/* for StairlikeSum */
+						0,
 						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
@@ -5440,8 +5951,16 @@ resume_kernel:
 		retval = -1;
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
-			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+			 (gpreagg->task.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0 &&
+			 !gpreagg->kern.final_buffer_modified)
 	{
+		/*
+		 * As long as final buffer is not modified by the reduction process
+		 * yet, we can help this GpuTask by CPU fallback.
+		 * If CpuReCheck is reported by gpupreagg_setup_xxxx(), kds_slot is
+		 * not built yet. So, CPU fallback routine has to refer the kds_src.
+		 * Elsewhere, we can reuse kds_slot built by the kernel.
+		 */
 		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 		gpreagg->task.cpu_fallback = true;
 
@@ -5467,6 +5986,10 @@ resume_kernel:
 			{
 				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
 			}
+			else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+			{
+				//TODO: memcopy D->H
+			}
 			/* restore the point where suspended most recently */
 			gpreagg->kern.resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -5475,35 +5998,13 @@ resume_kernel:
 				memcpy(temp, last_suspend, gpreagg->kern.suspend_size);
 			}
 		}
-		else if (gpreagg->kern.suspend_count > 0)
-		{
-			/*
-			 * gpupreagg_setup_xxxx successfully setup kds_slot, however,
-			 * reduction kernel reported CpuReCheck error, and GPU kernel
-			 * is suspended.
-			 */
-			kern_data_store	   *kds_slot
-				= (kern_data_store *) m_kds_slot;
-
-			CHECK_WORKER_TERMINATION();
-			m_kds_slot = (CUdeviceptr) KDS_clone(gcontext, kds_slot);
-			gpupreagg_throw_partial_result(gpreagg, kds_slot);
-
-			/* save the suspend status at this point, then resume */
-			gpupreagg_reset_kernel_task(&gpreagg->kern, true);
-			if (!last_suspend)
-				last_suspend = alloca(gpreagg->kern.suspend_size);
-			temp = KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
-			memcpy(last_suspend, temp, gpreagg->kern.suspend_size);
-			goto resume_kernel;
-		}
 		else
 		{
 			/*
 			 * gpupreagg_setup_xxxx successfully setup kds_slot, however,
-			 * reduction kernel reported CpuReCheck error. Fortunatelly,
-			 * no need to resume the kernel any more.
-			 * So, CPU fallback routine runs on kds_slot
+			 * reduction kernel reported CpuReCheck error, fortunatelly,
+			 * prior to any modification of the kds_final buffer.
+			 * So, CPU fallback routine can use the kds_slot, as-is.
 			 */
 			rc = cuMemPrefetchAsync(m_kds_slot,
 									gpreagg->kds_slot_length,
@@ -5800,24 +6301,28 @@ resume_kernel:
 			memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 			gpreagg->task.cpu_fallback = true;
 
-			if (pds_src &&
-				pds_src->kds.format == KDS_FORMAT_BLOCK &&
-				pds_src->nblocks_uncached > 0)
+			if (pds_src)
 			{
-				rc = cuMemcpyDtoH(&pds_src->kds,
-								  m_kds_src,
-								  pds_src->kds.length);
-				if (rc != CUDA_SUCCESS)
-					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-				pds_src->nblocks_uncached = 0;
+				if (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+					pds_src->nblocks_uncached > 0)
+				{
+					rc = cuMemcpyDtoH(&pds_src->kds,
+									  m_kds_src,
+									  pds_src->kds.length);
+					if (rc != CUDA_SUCCESS)
+						werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+					pds_src->nblocks_uncached = 0;
+				}
+				else if (pds_src->kds.format == KDS_FORMAT_ARROW &&
+						 pds_src->iovec != NULL)
+				{
+					gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
+				}
+				else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+				{
+					//TODO: cuMemCopyDtoH
+				}
 			}
-			else if (pds_src &&
-					 pds_src->kds.format == KDS_FORMAT_ARROW &&
-					 pds_src->iovec != NULL)
-			{
-				gpreagg->pds_src = PDS_writeback_arrow(pds_src, m_kds_src);
-			}
-
 			/* restore the suspend context if any */
 			kgjoin->resume_context = (last_suspend != NULL);
 			if (last_suspend)
@@ -5834,16 +6339,16 @@ resume_kernel:
 	else if (gpreagg->kern.kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
 		if (pgstrom_cpu_fallback_enabled &&
-			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0)
+			(gpreagg->kern.kerror.errcode & ERRCODE_FLAGS_CPU_FALLBACK) != 0 &&
+			!gpreagg->kern.final_buffer_modified)
 		{
 			/*
-			 * CPU fallback with partial results
+			 * CPU fallback by GpuPreAgg kernel
 			 *
 			 * If GpuPreAgg reported CpuReCheck error, it means kds_slot
-			 * is successfully built; but a part of them might be already
-			 * merged to the final buffer.
-			 * CPU fallback routine will run on the kds_slot with row-
-			 * invalidation-map
+			 * is successfully built, however, CPU fallback is required
+			 * during the reduction process prior to modification of the
+			 * final buffer.
 			 */
 			memset(&gpreagg->kern.kerror, 0, sizeof(kern_errorbuf));
 
@@ -6001,7 +6506,6 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-#if PG_VERSION_NUM >= 110000
 	/* pg_strom.enable_partitionwise_gpupreagg */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
 							 "(EXPERIMENTAL) Enables partition wise GpuPreAgg",
@@ -6011,9 +6515,6 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-#else
-	enable_partitionwise_gpupreagg = false;
-#endif
 	/* pg_strom.enable_numeric_aggfuncs */
 	DefineCustomBoolVariable("pg_strom.enable_numeric_aggfuncs",
 							 "Enables aggregate functions on numeric type",
@@ -6023,6 +6524,17 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.hll_registers_bits */
+	DefineCustomIntVariable("pg_strom.hll_registers_bits",
+							"Accuracy of HyperLogLog COUNT(distinct ...) estimation",
+							NULL,
+							&pgstrom_hll_register_bits,
+							9,
+							4,
+							15,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
 							 "Minimus reduction ratio to use GpuPreAgg",

@@ -705,14 +705,16 @@ __atoi128(const char *tok, bool *p_isnull)
 	{
 		ival = 10 * ival + (*tok - '0');
 		tok++;
-		if (is_minus && ival != 0)
-		{
-			ival = -ival;
-			is_minus = false;
-		}
 	}
-	if (is_minus || *tok != '\0')
+
+	if (*tok != '\0')
 		*p_isnull = true;
+	if (is_minus)
+	{
+		if (ival == 0)
+			*p_isnull = true;
+		ival = -ival;
+	}
 	return ival;
 }
 
@@ -1159,7 +1161,7 @@ __buildArrowStatsOper(arrowStatsHint *arange,
 		arange->eval_quals = lappend(arange->eval_quals, expr);
 	}
 	else if (strategy == BTGreaterEqualStrategyNumber ||
-		strategy == BTGreaterStrategyNumber)
+			 strategy == BTGreaterStrategyNumber)
 	{
 		/* (VAR >= ARG) --> (Max >= ARG) */
 		/* (VAR > ARG) --> (Max > ARG) */
@@ -1304,8 +1306,21 @@ __fetchArrowStatsDatum(RecordBatchFieldState *fstate,
 			break;
 		case NUMERICOID:
 			{
-				return 0;
+				Int128_t	decimal;
+				int			dscale = fstate->attopts.decimal.scale;
+				char	   *result = palloc0(sizeof(struct NumericData));
+
+				decimal.ival = sval->i128;
+				while (dscale > 0 && decimal.ival % 10 == 0)
+				{
+					decimal.ival /= 10;
+					dscale--;
+				}
+				pg_numeric_to_varlena(result, dscale, decimal);
+
+				datum = PointerGetDatum(result);
 			}
+			break;
 		case DATEOID:
 			shift = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
 			switch (fstate->attopts.date.unit)
@@ -1512,6 +1527,7 @@ setupRecordBatchField(setupRecordBatchContext *con,
 	fstate->atttypid   = arrowTypeToPGTypeOid(field, &fstate->atttypmod);
 	fstate->nitems     = fnode->length;
 	fstate->null_count = fnode->null_count;
+	fstate->stat_isnull = true;
 
 	switch (field->type.node.tag)
 	{
@@ -2808,6 +2824,70 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
  * However, it is not a reasonable restriction for foreign-table, because
  * it does not use heap-format internally.
  */
+static void
+__insertPgAttributeTuple(Relation pg_attr_rel,
+						 CatalogIndexState pg_attr_index,
+						 Oid ftable_oid,
+						 AttrNumber attnum,
+						 ArrowField *field)
+{
+	Oid			type_oid;
+	int32		type_mod;
+	int16		type_len;
+	bool		type_byval;
+	char		type_align;
+	int32		type_ndims;
+	char		type_storage;
+	Datum		values[Natts_pg_attribute];
+	bool		isnull[Natts_pg_attribute];
+	HeapTuple	tup;
+	ObjectAddress myself, referenced;
+
+	type_oid = arrowTypeToPGTypeOid(field, &type_mod);
+	get_typlenbyvalalign(type_oid,
+						 &type_len,
+						 &type_byval,
+						 &type_align);
+	type_ndims = (type_is_array(type_oid) ? 1 : 0);
+	type_storage = get_typstorage(type_oid);
+
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
+
+	values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(ftable_oid);
+	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(field->name);
+	values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(type_oid);
+	values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(-1);
+	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
+	values[Anum_pg_attribute_attnum - 1] = Int16GetDatum(attnum);
+	values[Anum_pg_attribute_attndims - 1] = Int32GetDatum(type_ndims);
+	values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
+	values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(type_mod);
+	values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(type_byval);
+	values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(type_storage);
+	values[Anum_pg_attribute_attalign - 1] = CharGetDatum(type_align);
+	values[Anum_pg_attribute_attnotnull - 1] = BoolGetDatum(!field->nullable);
+	values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(true);
+	isnull[Anum_pg_attribute_attacl - 1] = true;
+	isnull[Anum_pg_attribute_attoptions - 1] = true;
+	isnull[Anum_pg_attribute_attfdwoptions - 1] = true;
+	isnull[Anum_pg_attribute_attmissingval - 1] = true;
+
+	tup = heap_form_tuple(RelationGetDescr(pg_attr_rel), values, isnull);
+	CatalogTupleInsertWithInfo(pg_attr_rel, tup, pg_attr_index);
+
+	/* add dependency */
+	myself.classId = RelationRelationId;
+	myself.objectId = ftable_oid;
+	myself.objectSubId = attnum;
+	referenced.classId = TypeRelationId;
+	referenced.objectId = type_oid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	heap_freetuple(tup);
+}
+
 Datum
 pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 {
@@ -2822,7 +2902,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	Oid			ftable_oid;
 	Oid			type_oid;
 	int			type_mod;
-	ObjectAddress myself, referenced;
+	ObjectAddress myself;
 	ArrowFileInfo af_info;
 
 	/* read schema of the file */
@@ -2890,50 +2970,11 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 		
 		for (j=nfields; j < schema._num_fields; j++)
 		{
-			FormData_pg_attribute attr;
-			const char *name = schema.fields[j].name;
-			bool		nullable = schema.fields[j].nullable;
-			Oid			type_oid;
-			int			type_mod;
-			int16		type_len;
-			bool		type_byval;
-			char		type_align;
-
-			type_oid = arrowTypeToPGTypeOid(&schema.fields[j], &type_mod);
-			get_typlenbyvalalign(type_oid,
-								 &type_len,
-								 &type_byval,
-								 &type_align);
-
-			memset(&attr, 0, sizeof(FormData_pg_attribute));
-			attr.attrelid = ftable_oid;
-			strncpy(NameStr(attr.attname), name, NAMEDATALEN);
-			attr.atttypid = type_oid;
-			attr.attstattarget = -1;
-			attr.attlen = type_len;
-			attr.atttypmod = type_mod;
-			attr.attnum = j + 1;
-			attr.attbyval = type_byval;
-			attr.attndims = (type_is_array(type_oid) ? 1 : 0);
-			attr.attstorage = get_typstorage(type_oid);
-			attr.attalign = type_align;
-			attr.attnotnull = !nullable;
-			attr.attislocal = true;
-			/*
-			 * The above setup omits initializations by zero, to simplify 
-			 * multi-versions compilation, even if pg_attribute is extended
-			 * in the future version.
-			 */
-			InsertPgAttributeTuple(a_rel, &attr, (Datum) 0, a_index);
-
-			/* add dependency */
-			myself.classId = RelationRelationId;
-			myself.objectId = ftable_oid;
-			myself.objectSubId = attr.attnum;
-			referenced.classId = TypeRelationId;
-			referenced.objectId = type_oid;
-			referenced.objectSubId = 0;
-			recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+			__insertPgAttributeTuple(a_rel,
+									 a_index,
+									 ftable_oid,
+									 j+1,
+                                     &schema.fields[j]);
 		}
 		/* update relnatts also */
 		((Form_pg_class) GETSTRUCT(tup))->relnatts = schema._num_fields;
@@ -5886,12 +5927,31 @@ __arrowExecTruncateRelation(Relation frel)
 	dlist_push_head(&arrow_write_redo_list, &redo->chain);
 }
 
+#if PG_VERSION_NUM >= 140000
+/*
+ * TRUNCATE support
+ */
+static void
+ArrowExecForeignTruncate(List *rels, DropBehavior behavior, bool restart_seqs)
+{
+	ListCell   *lc;
+
+	foreach (lc, rels)
+	{
+		Relation	frel = lfirst(lc);
+
+		__arrowExecTruncateRelation(frel);
+	}
+}
+#endif
+
 /*
  * pgstrom_arrow_fdw_truncate
  */
 Datum
 pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 {
+#if PG_VERSION_NUM < 140000
 	Oid			frel_oid = PG_GETARG_OID(0);
 	Relation	frel;
 	FdwRoutine *routine;
@@ -5911,7 +5971,9 @@ pgstrom_arrow_fdw_truncate(PG_FUNCTION_ARGS)
 	__arrowExecTruncateRelation(frel);
 
 	table_close(frel, NoLock);
-
+#else
+	elog(ERROR, "PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface");
+#endif
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_truncate);
@@ -6162,6 +6224,9 @@ pgstrom_init_arrow_fdw(void)
 	r->AnalyzeForeignTable			= ArrowAnalyzeForeignTable;
 	/* IMPORT FOREIGN SCHEMA support */
 	r->ImportForeignSchema			= ArrowImportForeignSchema;
+#if PG_VERSION_NUM >= 140000
+	r->ExecForeignTruncate			= ArrowExecForeignTruncate;
+#endif
 	/* CPU Parallel support */
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;

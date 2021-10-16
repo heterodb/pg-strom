@@ -18,7 +18,7 @@ include $(STROM_BUILD_ROOT)/Makefile.cuda
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 3.1
+PGSTROM_VERSION := 3.2
 PGSTROM_RELEASE := devel
 
 #
@@ -26,7 +26,7 @@ PGSTROM_RELEASE := devel
 #
 __PGSTROM_SQL = pg_strom--2.2.sql pg_strom--3.0.sql \
                 pg_strom--2.2--2.3.sql  pg_strom--2.3--3.0.sql \
-                pg_strom--3.0--3.1.sql
+                pg_strom--3.0--4.0.sql
 PGSTROM_SQL := $(addprefix $(STROM_BUILD_ROOT)/sql/, $(__PGSTROM_SQL))
 
 #
@@ -90,7 +90,7 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
 # Markdown (document) files
 #
 __DOC_FILES = index.md install.md operations.md \
-              partition.md brin.md postgis.md troubles.md \
+              partition.md brin.md postgis.md hll_count.md troubles.md \
 	      ssd2gpu.md arrow_fdw.md gpucache.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
 	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md

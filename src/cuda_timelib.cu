@@ -3355,8 +3355,8 @@ NonFiniteTimestampTzPart(kern_context *kcxt,
  * date_part(text,timestamp) - timestamp_part
  */
 DEVICE_FUNCTION(pg_float8_t)
-pgfn_extract_timestamp(kern_context *kcxt,
-					   pg_text_t arg1, pg_timestamp_t arg2)
+pgfn_date_part_timestamp(kern_context *kcxt,
+						 pg_text_t arg1, pg_timestamp_t arg2)
 {
 	pg_float8_t	result;
 	char	   *s;
@@ -3525,11 +3525,30 @@ pgfn_extract_timestamp(kern_context *kcxt,
 }
 
 /*
+ * extract(text,timestamp)
+ */
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_extract_timestamp(kern_context *kcxt,
+					   pg_text_t arg1, pg_timestamp_t arg2)
+{
+	pg_numeric_t	result;
+	pg_float8_t		fval;
+
+	fval = pgfn_date_part_timestamp(kcxt, arg1, arg2);
+	if (fval.isnull)
+		result.isnull = true;
+	else
+		result = pgfn_float8_numeric(kcxt, fval);
+
+	return result;
+}
+
+/*
  * date_part(text,timestamp with time zone) - timestamptz_part
  */
 DEVICE_FUNCTION(pg_float8_t)
-pgfn_extract_timestamptz(kern_context *kcxt,
-						 pg_text_t arg1, pg_timestamptz_t arg2)
+pgfn_date_part_timestamptz(kern_context *kcxt,
+						   pg_text_t arg1, pg_timestamptz_t arg2)
 {
 	pg_float8_t	result;
 	char	   *s;
@@ -3714,10 +3733,29 @@ pgfn_extract_timestamptz(kern_context *kcxt,
 }
 
 /*
+ * extract(text,timestamptz)
+ */
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_extract_timestamptz(kern_context *kcxt,
+						 pg_text_t arg1, pg_timestamptz_t arg2)
+{
+	pg_numeric_t	result;
+	pg_float8_t		fval;
+
+	fval = pgfn_date_part_timestamptz(kcxt, arg1, arg2);
+	if (fval.isnull)
+		result.isnull = true;
+	else
+		result = pgfn_float8_numeric(kcxt, fval);
+
+	return result;
+}
+
+/*
  * date_part(text,interval) - interval_part
  */
 DEVICE_FUNCTION(pg_float8_t)
-pgfn_extract_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
+pgfn_date_part_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
 {
 	pg_float8_t	result;
 	char	   *s;
@@ -3810,10 +3848,29 @@ pgfn_extract_interval(kern_context *kcxt, pg_text_t arg1, pg_interval_t arg2)
 }
 
 /*
+ * extract(text,interval)
+ */
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_extract_interval(kern_context *kcxt,
+					  pg_text_t arg1, pg_interval_t arg2)
+{
+	pg_numeric_t	result;
+	pg_float8_t		fval;
+
+	fval = pgfn_date_part_interval(kcxt, arg1, arg2);
+	if (fval.isnull)
+		result.isnull = true;
+	else
+		result = pgfn_float8_numeric(kcxt, fval);
+
+	return result;
+}
+
+/*
  * date_part(text,time with time zone) - timetz_part
  */
 DEVICE_FUNCTION(pg_float8_t)
-pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
+pgfn_date_part_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
 {
 	pg_float8_t	result;
 	char	   *s;
@@ -3885,10 +3942,29 @@ pgfn_extract_timetz(kern_context *kcxt, pg_text_t arg1, pg_timetz_t arg2)
 }
 
 /*
+ * extract(text,timetz)
+ */
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_extract_timetz(kern_context *kcxt,
+					pg_text_t arg1, pg_timetz_t arg2)
+{
+	pg_numeric_t	result;
+	pg_float8_t		fval;
+
+	fval = pgfn_date_part_timetz(kcxt, arg1, arg2);
+	if (fval.isnull)
+		result.isnull = true;
+	else
+		result = pgfn_float8_numeric(kcxt, fval);
+
+	return result;
+}
+
+/*
  * date_part(text,time) - time_part
  */
 DEVICE_FUNCTION(pg_float8_t)
-pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
+pgfn_date_part_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 {
 	pg_float8_t	result;
 	char	   *s;
@@ -3956,5 +4032,87 @@ pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 	result.isnull = true;
     STROM_EREPORT(kcxt, ERRCODE_INVALID_PARAMETER_VALUE,
                   "not a recognized unit of time");
+	return result;
+}
+
+/*
+ * extract(text,timetz)
+ */
+DEVICE_FUNCTION(pg_numeric_t)
+pgfn_extract_time(kern_context *kcxt,
+				  pg_text_t arg1, pg_time_t arg2)
+{
+	pg_numeric_t	result;
+	pg_float8_t		fval;
+
+	fval = pgfn_date_part_time(kcxt, arg1, arg2);
+	if (fval.isnull)
+		result.isnull = true;
+	else
+		result = pgfn_float8_numeric(kcxt, fval);
+
+	return result;
+}
+
+/*
+ * Hyper-Log-Log hash functions
+ */
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_date(kern_context *kcxt, pg_date_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(DateADT));
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_time(kern_context *kcxt, pg_time_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(TimeADT));
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timetz(kern_context *kcxt, pg_timetz_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(TimeTzADT));
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timestamp(kern_context *kcxt, pg_timestamp_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(Timestamp));
+	return result;
+}
+
+DEVICE_FUNCTION(pg_int8_t)
+pgfn_hll_hash_timestamptz(kern_context *kcxt, pg_timestamptz_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = pg_siphash_any((unsigned char *)&arg1.value,
+									  sizeof(TimestampTz));
 	return result;
 }

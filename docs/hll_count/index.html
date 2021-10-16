@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>HyperLogLog - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "HyperLogLog";
+    var mkdocs_page_input_path = "hll_count.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/hll_count/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">HyperLogLog</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#background">Background</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#cautions">Cautions</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#re-use-of-hll-scketch">Re-use of HLL Scketch</a>
+    </li>
+    </ul>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>Tutorial &raquo;</li>
+        
+      
+    
+    <li>HyperLogLog</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="countdistinct-with-hyperloglog">COUNT(distinct) with HyperLogLog</h1>
+<h2 id="background">Background</h2>
+<p>We often run the <code>SELECT COUNT (distinct KEY)</code> command on large datasets to count the number of unique users or items (this is called cardinality).
+However, there is a nasty dilemma between key-value deduplication and parallel / distributed processing, including GPU utilization.</p>
+<p>There are two strategies to implement key-value deduplication.</p>
+<p>The first one is pre-sorting of the input data stream to the Aggregate operation that actually runs <code>COUNT(distinct)</code>. It increments the internal counter each time the key-value changes. It is a simple implementation, however, sorting a large amount of data is a heavy process, and this method strongly depends on the order in which records are processed, so there is no choice but to execute it in a single thread.</p>
+<p>One other idea is building an internal hash-table of Aggregate operation to track all the key-values for deduplication. It is not easy to predict amount of memory consumption in advance, and can often consume too much resources.</p>
+<p>These characteristics prevents to run <code>COUNT (distinct KEY)</code> aggregate function on GPUs in parallel, thus, PG-Strom does not support right now.</p>
+<p><img alt="Count with distinct" src="../img/hll_count_background.png" /></p>
+<h2 id="overview">Overview</h2>
+<p>For example, when we use the number of unique users aggregated by <code>COUNT (distinct KEY)</code> as a source of graph, in other words, in a usage scene where a certain amount of error is sufficiently acceptable, we may be able to subsitute a mathematically predicted estimation with a certain level of accuracy, instead of the strict deduplication and aggregation.</p>
+<p>HyperLogLog is an algorithm to estimate the number of unique key-values from a large data set. Due to its characteristics, it is easy to easy to partition large-scale table scans by multiple processes, and the memory consumption is sufficiently small and predictable in advance, so suitable for GPU processing.</p>
+<p>Below introduces the basic idea of HyperLogLog.</p>
+<p>First, the key-values for the deduplication shall be applied to the hash function to calculate the hash value. If the hash function performs good enough, we can assume the hash value bit patterns corresponding to the key-values are randomly distributed. Then, among the hash-values devived from many kind of key-values, we expect there is a characteristics one in which 0-bits appear consecutively.</p>
+<p>For example, in the case of a data set with 32 different key values, it is no wonder if there is 4 consecutive bits pattern from the latest bit, such as <code>... 1011000</code>, in any of the hash-values generated from the key-values. In this way, HyperLogLog estimates the cardinality of the original dataset by examining the maximum number of consecutive 0-bits from the leatest bits of the hash-values.</p>
+<p>In practice, some bits of the hash value are used as "register selectors". For example, if 8 bits are used as a selector, 256 registers shall be reserved for HLL Sketch in advance, and the register on HLL Scketch is indexed by the least 8 bits of the hash value. Then, the number of consecutive 0-bits from the least significant bit of the remaining hash values is counter, and the maximum value shall be recorded for each register.</p>
+<p>What recorded in the register is the number of 0-bits from the least bits, therefore, in case of the 64-bit hash function, used in PG-Strom, 8-bits registers are sufficient to record the necessary information. If the nummber of registers is 256, the total required storage area is only 256bytes.</p>
+<p><img alt="HLL Algorithm" src="../img/hll_count_algorithm.png" /></p>
+<h2 id="usage">Usage</h2>
+<p>By using the aggregate function the <code>hll_count(KEY)</code> provided by PG-Strom instead of the <code>count (distinct KEY)</code>, it allows to estimate the cardinality using HyperLogLog.</p>
+<p>For example, the strict deduplication of the <code>lo_custkey</code> column in the following query has a cardinality of 2,000,000, but it took more than 400 seconds to derive this result from the <code>lineorder</code> table with 600 million rows (87GB). increase.
+Its query execution plan by EXPLAIN displays that it does not choose CPU parallel query, thus it scans the entire table in a single process.</p>
+<pre><code>=# select count(distinct lo_custkey) from lineorder ;
+  count
+---------
+ 2000000
+(1 row)
+
+Time: 403360.908 ms (06:43.361)
+
+=# explain select count(distinct lo_custkey) from lineorder ;
+                                  QUERY PLAN
+------------------------------------------------------------------------------
+ Aggregate  (cost=18896094.80..18896094.81 rows=1 width=8)
+   -&gt;  Seq Scan on lineorder  (cost=0.00..17396057.84 rows=600014784 width=6)
+(2 rows)
+</code></pre>
+<p>On the other hand, use of the <code>hll_count(lo_custkey)</code> instead of the <code>count (distinct lo_custkey)</code> allows to get relatively accurate cardinality estimate of 2,005,437 (0.3% error rate to the actual value) on the same hardware, but 40 times faster than the strict deduplication.
+Its query execution plan by EXPLAIN displays that it utilizes various acceleration technologies, in addition to CPU parallel query, such as GPU aggregation and GPU-Direct SQL.</p>
+<pre><code>=# select hll_count(lo_custkey) from lineorder ;
+ hll_count
+-----------
+   2005437
+(1 row)
+
+Time: 9660.810 ms (00:09.661)
+
+=# explain select hll_count(lo_custkey) from lineorder ;
+                                                QUERY PLAN
+----------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=4992387.95..4992387.96 rows=1 width=8)
+   -&gt;  Gather  (cost=4992387.72..4992387.93 rows=2 width=32)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=4991387.72..4991387.73 rows=1 width=32)
+               Reduction: NoGroup
+               Outer Scan: lineorder  (cost=2833.33..4913260.79 rows=250006160 width=6)
+               GPU Preference: GPU0 (Tesla V100-PCIE-16GB)
+               GPUDirect SQL: enabled
+(8 rows)
+</code></pre>
+<h3 id="cautions">Cautions</h3>
+<p>Due to the characteristics of the HyperLogLog algorithm, the estimation error is not negligible for attributes with small key-value cardinality.
+For example, the <code>lo_orderpriority</code> column of the<code>lineorder</code> table below can have only 5 different values from <code>'1-URGENT'</code> to <code>'5-LOW'</code>.
+The <code>count (distinct lo_order priority)</code> tells us that its strict deduplicated cardinarity was 5.
+On the other hand, <code>hll_count (lo_orderpriority)</code> tells us the estimated cardinarity was 370.</p>
+<p>When using <code>hll_count()</code>, we need to pay attention for the characteristics and distribution of the data.</p>
+<pre><code>=# select count(distinct lo_orderpriority) from lineorder ;
+ count
+-------
+     5
+(1 row)
+
+=# select hll_count(lo_orderpriority) from lineorder ;
+ hll_count
+-----------
+       370
+(1 row)
+</code></pre>
+<h2 id="re-use-of-hll-scketch">Re-use of HLL Scketch</h2>
+<p>Check query execution plan again, when the aggregate function <code>hll_count()</code> is executed.
+We can confirm the output list for each execution step, by <code>explain verbose</code>.</p>
+<pre><code>=# explain verbose select hll_count(lo_custkey) from lineorder ;
+                                                   QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=4992387.95..4992387.96 rows=1 width=8)
+   Output: hll_merge((pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey))))
+   -&gt;  Gather  (cost=4992387.72..4992387.93 rows=2 width=32)
+         Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on public.lineorder  (cost=4991387.72..4991387.73 rows=1 width=32)
+               Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+               GPU Output: (pgstrom.hll_sketch_new(pgstrom.hll_hash(lo_custkey)))
+               GPU Setup: pgstrom.hll_hash(lo_custkey)
+               Reduction: NoGroup
+               Outer Scan: public.lineorder  (cost=2833.33..4913260.79 rows=250006160 width=6)
+               GPU Preference: GPU0 (Tesla V100-PCIE-16GB)
+               GPUDirect SQL: enabled
+               Kernel Source: /var/lib/pgdata/pgsql_tmp/pgsql_tmp_strom_374786.6.gpu
+               Kernel Binary: /var/lib/pgdata/pgsql_tmp/pgsql_tmp_strom_374786.7.ptx
+(15 rows)
+</code></pre>
+<p>It shows us the Aggregate node runs <code>hll_merge()</code> instead of the <code>hll_count()</code>.
+This is an aggregate function that receives bytea datum of HLL Sketch and outputs a cardinality estimate.</p>
+<p>It is the role of GpuPreAgg to generate the HLL Sketch, where the hash value generated by <code>pgstrom.hll_hash()</code> is passed to <code>pgstrom.hll_sketch_new()</code> to create a HLL Sketch of the <code>lo_custkey</code> column.
+Note that the HLL Sketch generated here already completes partial aggregation, thus, only 1 row with HLL Sketch shall be poped for each worker process, where its internal state has been already updated according to the contents of 200 million rows.</p>
+<p>In other words, it pre-processes the aggregation of 200 million records on the GPU into 1 HLL Sketch, then CPU finally merges the HLL Sketches and generates the estimation.</p>
+<p>Due to the characteristics of the algorithm, for example, if HLL Sketch is calculated in advance for each monthly data and saved in the database, the difference can be obtained without scanning the entire table to estimate the cardinality of key values. You can get the cardinarity estimation by calculating the HLL Sketch towards the differences and merging it with the saved HLL Sketches.</p>
+<p>For example, the following query calculates HLL Sketch on annual basis and estimates the cumulative cardinality by merging the annual HLL Sketch.
+This data is artificially adjusted to increase the cardinality of <code>lo_custkey</code>. You can see the estimated total number of customers has increased year by year.</p>
+<pre><code>=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) as sketch
+     into pg_temp.annual
+     from lineorder group by 1;
+SELECT 7
+
+=# select year, hll_sketch_histogram(sketch) from pg_temp.annual order by year;
+ year |                 hll_sketch_histogram
+------+-------------------------------------------------------
+ 1992 | {0,0,0,0,0,0,0,0,0,22,73,132,118,82,39,26,12,2,4,2}
+ 1993 | {0,0,0,0,0,0,0,0,0,9,59,118,125,96,50,30,15,2,6,2}
+ 1994 | {0,0,0,0,0,0,0,0,0,4,33,111,133,113,53,36,17,4,6,2}
+ 1995 | {0,0,0,0,0,0,0,0,0,2,21,99,131,121,62,42,18,5,7,3,1}
+ 1996 | {0,0,0,0,0,0,0,0,0,1,17,84,119,131,73,50,20,5,7,4,1}
+ 1997 | {0,0,0,0,0,0,0,0,0,0,14,71,118,128,82,53,23,10,7,4,2}
+ 1998 | {0,0,0,0,0,0,0,0,0,0,13,64,114,126,86,61,23,11,8,4,2}
+(7 rows)
+
+=# select max_y, (select hll_merge(sketch) from pg_temp.annual where year &lt; max_y)
+     from generate_series(1993,1999) max_y;
+ max_y | hll_merge
+-------+-----------
+  1993 |    854093
+  1994 |   1052429
+  1995 |   1299916
+  1996 |   1514915
+  1997 |   1700274
+  1998 |   1889527
+  1999 |   2005437
+(7 rows)
+</code></pre>
+<p>Note that <code>hll_sketch_histogram()</code> is a SQL function which receives a raw data of HLL Sketch, then returns its histogram of the distribution of register values.</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../troubles/" class="btn btn-neutral float-right" title="Trouble Shooting">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../postgis/" class="btn btn-neutral" title="PostGIS"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../postgis/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>

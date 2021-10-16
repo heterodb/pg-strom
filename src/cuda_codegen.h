@@ -55,12 +55,12 @@ struct devfunc_info;
 struct devcast_info;
 struct codegen_context;
 
-typedef uint32 (*devtype_hashfunc_type)(struct devtype_info *dtype,
-										Datum datum);
+typedef uint32 (*devtype_hashfunc_type)(struct devtype_info *dtype, Datum datum);
 
 typedef struct devtype_info {
 	dlist_node	chain;
 	uint32		hashvalue;
+	const char *type_extension;	/* Extension that provides this type, if any */
 	Oid			type_oid;
 	uint32		type_flags;
 	int16		type_length;
@@ -71,10 +71,6 @@ typedef struct devtype_info {
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
-	/* constant initializer cstring, if any */
-	const char *max_const;
-	const char *min_const;
-	const char *zero_const;
 	/*
 	 * required size for extra buffer, if device type has special
 	 * internal representation, or device type needs working buffer
@@ -102,6 +98,7 @@ typedef int (*devfunc_result_sz_type)(struct codegen_context *context,
 typedef struct devfunc_info {
 	dlist_node	chain;
 	uint32		hashvalue;
+	const char *func_extension;	/* Extension that provides this function, if any */
 	Oid			func_oid;		/* OID of the SQL function */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
@@ -187,12 +184,15 @@ typedef struct
 	const char *extra_name;
 
 	/*
-	 * lookup_extra_devtype() can tell PG-Strom whether the supplied data type
-	 * is device-supported by the user's extra module.
-	 * If no supported type by the extra module, return NULL.
+	 * lookup_extra_devtype() can tell PG-Strom whether the supplied data
+	 * type is device supported by the user's extra module.
+	 * If supported, extra module set up properties of the given devtype_info,
+	 * then returns true.
+	 * Elsewhere, returns false.
 	 */
-	devtype_info *(*lookup_extra_devtype)(MemoryContext memcxt,
-										  TypeCacheEntry *tcache);
+	bool	(*lookup_extra_devtype)(const char *type_ident,
+									devtype_info *dtype);
+
 	/*
 	 * lookup_extra_devfunc() can tell PG-Strom whether the supplied function
 	 * is device-supported by the user's extra module.
@@ -202,13 +202,8 @@ typedef struct
 	 * dfunc_argtypes, not function's declaration at proc_form.
 	 * If no supported function by the extra module, return NULL.
 	 */
-	devfunc_info *(*lookup_extra_devfunc)(MemoryContext memcxt,
-										  Oid proc_oid,
-										  Form_pg_proc proc_form,
-										  devtype_info *dfunc_rettype,
-										  int dfunc_nargs,
-										  devtype_info **dfunc_argtypes,
-										  Oid func_collid);
+	bool	(*lookup_extra_devfunc)(const char *func_ident,
+									devfunc_info *dfunc);
 
 	/*
 	 * lookup_extra_devcast() can tell PG-Strom whether the supplied cast
@@ -216,9 +211,10 @@ typedef struct
 	 * extra module.
 	 * If no supported cast by the extra module, return NULL.
 	 */
-	devcast_info *(*lookup_extra_devcast)(MemoryContext memcxt,
-										  devtype_info *dtype_src,
-										  devtype_info *dtype_dst);
+	bool	(*lookup_extra_devcast)(const char *src_type_ident,
+									const char *dst_type_ident,
+									devcast_info *dcast);
+
 	/*
 	 * arrow_lookup_pgtype() can tell PG-Strom a PostgreSQL type that shall
 	 * assign on the supplied ArrowField. It can reference 'hint_oid' that

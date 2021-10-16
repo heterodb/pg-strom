@@ -733,6 +733,113 @@ pg_hash_any(const cl_uchar *k, cl_int keylen)
 #undef final
 
 /*
+ * More randomizable hash function based on the SipHash algorithm
+ *   https://en.wikipedia.org/wiki/SipHash
+ *    and https://github.com/veorq/SipHash
+ */
+/* default: SipHash-2-4 */
+#define cROUNDS 2
+#define dROUNDS 4
+#define ROTL(x, b)	(cl_ulong)(((x) << (b)) | ((x) >> (64 - (b))))
+
+#define U8TO64_LE(p)											\
+    (((cl_ulong)((p)[0]))       | ((cl_ulong)((p)[1]) <<  8) |	\
+     ((cl_ulong)((p)[2]) << 16) | ((cl_ulong)((p)[3]) << 24) |	\
+     ((cl_ulong)((p)[4]) << 32) | ((cl_ulong)((p)[5]) << 40) |	\
+     ((cl_ulong)((p)[6]) << 48) | ((cl_ulong)((p)[7]) << 56))
+
+#define SIPROUND					\
+    do {							\
+        v0 += v1;					\
+        v1 = ROTL(v1, 13);			\
+        v1 ^= v0;					\
+        v0 = ROTL(v0, 32);			\
+        v2 += v3;					\
+        v3 = ROTL(v3, 16);			\
+        v3 ^= v2;					\
+        v0 += v3;					\
+        v3 = ROTL(v3, 21);			\
+        v3 ^= v0;					\
+        v2 += v1;					\
+        v1 = ROTL(v1, 17);			\
+        v1 ^= v2;					\
+        v2 = ROTL(v2, 32);			\
+    } while (0)
+
+DEVICE_FUNCTION(cl_ulong)
+pg_siphash_any(const unsigned char *buf, const size_t len)
+{
+	cl_ulong	v0 = 0x736f6d6570736575UL;
+	cl_ulong	v1 = 0x646f72616e646f6dUL;
+	cl_ulong	v2 = 0x6c7967656e657261UL;
+	cl_ulong	v3 = 0x7465646279746573UL;
+	cl_ulong	k0 = 0x9c38151cda15a76bUL;	/* random key-0 */
+	cl_ulong	k1 = 0xfb4ff68fbd3e6658UL;	/* random key-1 */
+	cl_ulong	m;
+	int			i;
+    const unsigned char *end = buf + len - (len % sizeof(cl_ulong));
+    const int	left = len & 7;
+    cl_ulong	b = ((cl_ulong)len) << 56;
+
+    v3 ^= k1;
+    v2 ^= k0;
+    v1 ^= k1;
+    v0 ^= k0;
+
+	for (; buf != end; buf += 8)
+	{
+		m = U8TO64_LE(buf);
+		v3 ^= m;
+
+		for (i = 0; i < cROUNDS; ++i)
+			SIPROUND;
+
+		v0 ^= m;
+	}
+
+    switch (left)
+	{
+		case 7:
+			b |= ((cl_ulong)buf[6]) << 48;		__attribute__ ((fallthrough));
+		case 6:
+			b |= ((cl_ulong)buf[5]) << 40;		__attribute__ ((fallthrough));
+		case 5:
+			b |= ((cl_ulong)buf[4]) << 32;		__attribute__ ((fallthrough));
+		case 4:
+			b |= ((cl_ulong)buf[3]) << 24;		__attribute__ ((fallthrough));
+		case 3:
+			b |= ((cl_ulong)buf[2]) << 16;		__attribute__ ((fallthrough));
+		case 2:
+			b |= ((cl_ulong)buf[1]) << 8;		__attribute__ ((fallthrough));
+		case 1:
+			b |= ((cl_ulong)buf[0]);
+			break;
+		case 0:
+			break;
+    }
+
+    v3 ^= b;
+	for (i = 0; i < cROUNDS; ++i)
+		SIPROUND;
+
+	v0 ^= b;
+
+	v2 ^= 0xff;
+
+	for (i = 0; i < dROUNDS; ++i)
+		SIPROUND;
+
+	b = v0 ^ v1 ^ v2 ^ v3;
+
+	return b;
+}
+#undef cROUNDS
+#undef dROUNDS
+#undef ROTL
+#undef U8TO64_LE
+#undef SIPROUND
+
+/*
  * varlena compress/decompress functions
  */
 
