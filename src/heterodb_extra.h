@@ -16,7 +16,7 @@
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
 
-#define HETERODB_EXTRA_API_VERSION	20210705
+#define HETERODB_EXTRA_API_VERSION	20211018
 
 /* gpudirect.c */
 typedef struct
@@ -46,7 +46,7 @@ typedef struct
 {
 	int			device_id;
 	char		device_name[128];
-	int			numa_node_id;	/* NUMA_NODE_ID */
+	const char *cpu_affinity;	/* __internal use__ */
 	int			pci_domain;		/* PCI_DOMAIN_ID */
 	int			pci_bus_id;		/* PCI_BUS_ID */
 	int			pci_dev_id;		/* PCI_DEVICE_ID */

@@ -291,7 +291,6 @@ extraSysfsSetupDistanceMap(const char *manual_config)
 		gpu->device_id = dattr->DEV_ID;
 		strncpy(gpu->device_name, dattr->DEV_NAME,
 				sizeof(gpu->device_name));
-		gpu->numa_node_id = dattr->NUMA_NODE_ID;
 		gpu->pci_domain = dattr->PCI_DOMAIN_ID;
 		gpu->pci_bus_id = dattr->PCI_BUS_ID;
 		gpu->pci_dev_id = dattr->PCI_DEVICE_ID;
@@ -416,7 +415,7 @@ parse_heterodb_extra_module_info(const char *extra_module_info,
 		}
 	}
 
-	if (api_version < 20210705)
+	if (api_version < HETERODB_EXTRA_API_VERSION)
 		elog(ERROR, "HeteroDB Extra Module has Unsupported API version [%08lu]",
 			 api_version);
 
