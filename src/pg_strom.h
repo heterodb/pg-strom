@@ -1413,7 +1413,7 @@ extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_s
  */
 extern int		pgstrom_num_users_extra;
 extern pgstromUsersExtraDescriptor pgstrom_users_extra_desc[];
-
+extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,
 										  bool outer_parallel,

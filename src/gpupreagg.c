@@ -1567,6 +1567,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 											 havingQuals,
 											 final_clause_costs,
 											 num_groups);
+		final_path = pgstrom_create_dummy_path(root, final_path);
 		add_path(group_rel, final_path);
 	}
 	else
@@ -1661,6 +1662,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
+			final_path = pgstrom_create_dummy_path(root, final_path);
 			add_path(group_rel, final_path);
 		}
 
@@ -1685,6 +1687,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 									havingQuals,
 									final_clause_costs,
 									num_groups);
+				final_path = pgstrom_create_dummy_path(root, final_path);
 				add_path(group_rel, final_path);
 			}
 		}
