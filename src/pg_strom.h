@@ -1312,6 +1312,7 @@ extern void pgstrom_init_gpu_cache(void);
 /*
  * misc.c
  */
+extern Node *fixup_varnode_to_origin(Node *expr, List *cscan_tlist);
 extern Expr *make_flat_ands_explicit(List *andclauses);
 extern AppendRelInfo **find_appinfos_by_relids_nofail(PlannerInfo *root,
 													  Relids relids,

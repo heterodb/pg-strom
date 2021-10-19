@@ -1647,34 +1647,6 @@ pgstrom_copy_gpuscan_path(const Path *pathnode)
 }
 
 /*
- * fixup_varnode_to_origin
- */
-static Node *
-fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
-{
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var	   *varnode = (Var *)node;
-		TargetEntry *tle;
-
-		if (custom_scan_tlist != NIL)
-		{
-			Assert(varnode->varno == INDEX_VAR);
-			Assert(varnode->varattno >= 1 &&
-				   varnode->varattno <= list_length(custom_scan_tlist));
-			tle = list_nth(custom_scan_tlist,
-						   varnode->varattno - 1);
-			return (Node *)copyObject(tle->expr);
-		}
-		Assert(!IS_SPECIAL_VARNO(varnode->varno));
-	}
-	return expression_tree_mutator(node, fixup_varnode_to_origin,
-								   (void *)custom_scan_tlist);
-}
-
-/*
  * assign_gpuscan_session_info
  */
 void
@@ -1748,21 +1720,11 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 						  &TTSOpsVirtual);
 	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
-	/*
-	 * @gss->dev_quals for CPU fallback (and min/max statistics of
-	 * Arrow files) references raw tuples regardless of the device
-	 * projection. So, its Var-node must be initialized to reference
-	 * the raw relation.
-	 */
-	dev_quals_raw = (List *)
-		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
-								cscan->custom_scan_tlist);
-
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
 							GpuTaskKind_GpuScan,
-							dev_quals_raw,
+							gs_info->dev_quals,
 							gs_info->outer_refs,
 							gs_info->used_params,
 							gs_info->optimal_gpu,
@@ -1775,6 +1737,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_release_task = gpuscan_release_task;
 
 	/* initialize device qualifiers/projection stuff, for CPU fallback */
+	dev_quals_raw = fixup_varnode_to_origin((Node *)gs_info->dev_quals,
+											cscan->custom_scan_tlist);
 	gss->dev_quals = ExecInitQual(dev_quals_raw, &gss->gts.css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{

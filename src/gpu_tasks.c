@@ -319,10 +319,18 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 			}
 		}
 		if (RelationIsArrowFdw(relation))
+		{
+			List	   *outer_quals_raw = outer_quals;
+
+			if (cscan->custom_scan_tlist != NIL)
+				outer_quals_raw = (List *)
+					fixup_varnode_to_origin((Node *)outer_quals,
+											cscan->custom_scan_tlist);
 			gts->af_state = ExecInitArrowFdw(&gts->css.ss,
 											 (optimal_gpu < 0 ? NULL : gcontext),
-											 outer_quals,
+											 outer_quals_raw,
 											 outer_refs);
+		}
 		if (RelationHasGpuCache(relation))
 			gts->gc_state = ExecInitGpuCache(&gts->css.ss, eflags, outer_refs);
 		/* we never use Apache Arrow and GPU Cache simultaneously */

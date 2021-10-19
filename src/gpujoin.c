@@ -3366,11 +3366,11 @@ typedef struct
 	int		depth;
 	List   *ps_src_depth;
 	List   *ps_src_resno;
-} fixup_varnode_to_origin_context;
+} fixup_inner_keys_to_origin_context;
 
 static Node *
-fixup_varnode_to_origin_mutator(Node *node,
-								fixup_varnode_to_origin_context *context)
+fixup_inner_keys_to_origin_mutator(Node *node,
+								   fixup_inner_keys_to_origin_context *context)
 {
 	if (!node)
 		return NULL;
@@ -3395,26 +3395,26 @@ fixup_varnode_to_origin_mutator(Node *node,
 		else if (src_depth > context->depth)
 			elog(ERROR, "Expression reference deeper than current depth");
 	}
-	return expression_tree_mutator(node, fixup_varnode_to_origin_mutator,
+	return expression_tree_mutator(node, fixup_inner_keys_to_origin_mutator,
 								   (void *) context);
 }
 
 static List *
-fixup_varnode_to_origin(int depth,
-						List *ps_src_depth,
-						List *ps_src_resno,
-						List *expr_list)
+fixup_inner_keys_to_origin(int depth,
+						   List *ps_src_depth,
+						   List *ps_src_resno,
+						   List *expr_list)
 {
-	fixup_varnode_to_origin_context	context;
+	fixup_inner_keys_to_origin_context	context;
 
 	Assert(IsA(expr_list, List));
-	memset(&context, 0 , sizeof(fixup_varnode_to_origin_context));
+	memset(&context, 0 , sizeof(fixup_inner_keys_to_origin_context));
 	context.depth = depth;
 	context.ps_src_depth = ps_src_depth;
 	context.ps_src_resno = ps_src_resno;
 
-	return (List *) fixup_varnode_to_origin_mutator((Node *)expr_list,
-													&context);
+	return (List *) fixup_inner_keys_to_origin_mutator((Node *)expr_list,
+													   &context);
 }
 
 /*
@@ -3717,10 +3717,11 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		Assert(list_length(hash_inner_keys) == list_length(hash_outer_keys));
 		if (hash_inner_keys != NIL && hash_outer_keys != NIL)
 		{
-			hash_inner_keys = fixup_varnode_to_origin(istate->depth,
-													  gj_info->ps_src_depth,
-													  gj_info->ps_src_resno,
-													  hash_inner_keys);
+			hash_inner_keys =
+				fixup_inner_keys_to_origin(istate->depth,
+										   gj_info->ps_src_depth,
+										   gj_info->ps_src_resno,
+										   hash_inner_keys);
 			forboth (lc1, hash_inner_keys,
 					 lc2, hash_outer_keys)
 			{
