@@ -25,16 +25,16 @@ PG_FUNCTION_INFO_V1(pgstrom_license_query);
 /*
  * heterodbExtraModuleInfo
  */
-static char *(*p_heterodb_extra_module_info)(void) = NULL;
+static char *(*p_heterodb_extra_module_init)(unsigned int pg_version_num) = NULL;
 
 static char *
-heterodbExtraModuleInfo(void)
+heterodbExtraModuleInit(void)
 {
 	char   *res;
 
-	if (!p_heterodb_extra_module_info)
+	if (!p_heterodb_extra_module_init)
 		elog(ERROR, "HeteroDB Extra module is not loaded yet");
-	res = p_heterodb_extra_module_info();
+	res = p_heterodb_extra_module_init(PG_VERSION_NUM);
 	if (!res)
 		elog(ERROR, "out of memory");
 	return res;
@@ -306,19 +306,25 @@ extraSysfsSetupDistanceMap(const char *manual_config)
 /*
  * extraSysfsLookupOptimalGpu
  */
-static int (*p_sysfs_lookup_optimal_gpu)(int fdesc) = NULL;
-
+static int (*p_sysfs_lookup_optimal_gpus)(int fdesc,
+										  int nrooms,
+										  int *optimal_gpus) = NULL;
 int
 extraSysfsLookupOptimalGpu(int fdesc)
 {
-	int		optimal_gpu;
+	int	   *optimal_gpus;
+	int		nitems;
 
-	if (!p_sysfs_lookup_optimal_gpu)
+	if (!p_sysfs_lookup_optimal_gpus || numDevAttrs == 0)
 		return -1;
-	optimal_gpu = p_sysfs_lookup_optimal_gpu(fdesc);
-	if (optimal_gpu < -1)
+	optimal_gpus = alloca(sizeof(int) * numDevAttrs);
+	nitems = p_sysfs_lookup_optimal_gpus(fdesc,
+										 numDevAttrs, optimal_gpus);
+	if (nitems < 0)
 		heterodbExtraEreport(ERROR);
-	return optimal_gpu;
+	if (nitems == 0)
+		return -1;
+	return optimal_gpus[0];
 }
 
 /*
@@ -482,8 +488,8 @@ pgstrom_init_extra(void)
 		int			default_gpudirect_driver;
 
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_error_data);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_info);
-		extra_module_info = heterodbExtraModuleInfo();
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
+		extra_module_info = heterodbExtraModuleInit();
 		parse_heterodb_extra_module_info(extra_module_info,
 										 &api_version,
 										 &has_cufile,
@@ -515,7 +521,7 @@ pgstrom_init_extra(void)
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_read_iov);
 		}
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_setup_distance_map);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpu);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpus);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_print_nvme_info);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
@@ -523,7 +529,7 @@ pgstrom_init_extra(void)
 	PG_CATCH();
     {
 		p_heterodb_extra_error_data = NULL;
-		p_heterodb_extra_module_info = NULL;
+		p_heterodb_extra_module_init = NULL;
 		p_gpudirect_init_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
@@ -532,7 +538,7 @@ pgstrom_init_extra(void)
 		p_gpudirect_unmap_gpu_memory = NULL;
 		p_gpudirect_file_read_iov = NULL;
 		p_sysfs_setup_distance_map = NULL;
-		p_sysfs_lookup_optimal_gpu = NULL;
+		p_sysfs_lookup_optimal_gpus = NULL;
 		p_sysfs_print_nvme_info = NULL;
 		p_heterodb_license_reload = NULL;
 		p_heterodb_license_query = NULL;
