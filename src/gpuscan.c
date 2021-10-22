@@ -1737,8 +1737,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_release_task = gpuscan_release_task;
 
 	/* initialize device qualifiers/projection stuff, for CPU fallback */
-	dev_quals_raw = fixup_varnode_to_origin((Node *)gs_info->dev_quals,
-											cscan->custom_scan_tlist);
+	dev_quals_raw = (List *)
+		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
+								cscan->custom_scan_tlist);
 	gss->dev_quals = ExecInitQual(dev_quals_raw, &gss->gts.css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
