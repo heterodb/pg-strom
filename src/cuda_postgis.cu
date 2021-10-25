@@ -366,6 +366,13 @@ pg_geometry_datum_ref(kern_context *kcxt, void *addr)
 		memset(&result, 0, sizeof(pg_geometry_t));
 		result.isnull = true;
 	}
+	else if (VARATT_IS_1B_E(addr))
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+						   "varlena datum is compressed or external");
+		memset(&result, 0, sizeof(pg_geometry_t));
+		result.isnull = true;
+	}
 	else
 	{
 		__GSERIALIZED  *g = (__GSERIALIZED *)VARDATA_ANY(addr);
@@ -1022,7 +1029,7 @@ pgfn_geometry_within(kern_context *kcxt,
 }
 
 DEVICE_FUNCTION(pg_bool_t)
-pgfn_geometry_box2df_within(kern_context *kcxt,
+pgfn_box2df_geometry_within(kern_context *kcxt,
 							const pg_box2df_t &arg1,
 							const pg_geometry_t &arg2)
 {
