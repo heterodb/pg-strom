@@ -1228,10 +1228,10 @@ extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts);
 extern int  gpujoinNextRightOuterJoinIfAny(GpuTaskState *gts);
-extern TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
-												struct kern_gpujoin *kgjoin,
-												pgstrom_data_store *pds_src,
-												cl_int outer_depth);
+extern TupleTableSlot *gpujoinNextTupleFallbackUpper(GpuTaskState *gts,
+													 struct kern_gpujoin *kgjoin,
+													 pgstrom_data_store *pds_src,
+													 cl_int outer_depth);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 

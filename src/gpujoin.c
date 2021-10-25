@@ -418,7 +418,10 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 GpuJoinInfo *gj_info,
 							 List *tlist,
 							 codegen_context *context);
-
+static TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
+												kern_gpujoin *kgjoin,
+												pgstrom_data_store *pds_src,
+												cl_int outer_depth);
 static void createGpuJoinSharedState(GpuJoinState *gjs,
 									 ParallelContext *pcxt,
 									 void *coordinate);
@@ -6438,44 +6441,31 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		else
 		{
 			kern_colmeta   *cmeta = &kds->colmeta[i];
+			void		   *addr;
 
 			if (cmeta->attlen > 0)
 				offset = TYPEALIGN(cmeta->attalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
 				offset = TYPEALIGN(cmeta->attalign, offset);
+			addr = ((char *)htup + offset);
+
+			if (cmeta->attbyval || cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else if (cmeta->attlen == -1)
+				offset += VARSIZE_ANY(addr);
+
 			if (resnum > 0)
 			{
-				void	   *addr = ((char *)htup + offset);
+				Datum		datum = 0;
+
+				if (cmeta->attbyval)
+					memcpy(&datum, addr, cmeta->attlen);
+				else
+					datum = PointerGetDatum(addr);
 
 				Assert(resnum <= tts_tupdesc->natts);
 				tts_isnull[resnum - 1] = false;
-				if (cmeta->attbyval)
-				{
-					Datum	datum = 0;
-
-					if (cmeta->attlen == sizeof(cl_char))
-                        datum = *((cl_char *)addr);
-                    else if (cmeta->attlen == sizeof(cl_short))
-                        datum = *((cl_short *)addr);
-                    else if (cmeta->attlen == sizeof(cl_int))
-						datum = *((cl_int *)addr);
-					else if (cmeta->attlen == sizeof(cl_long))
-						datum = *((cl_long *)addr);
-					else
-					{
-						Assert(cmeta->attlen <= sizeof(Datum));
-						memcpy(&datum, addr, cmeta->attlen);
-					}
-					tts_values[resnum - 1] = datum;
-					offset += cmeta->attlen;
-				}
-				else
-				{
-					tts_values[resnum - 1] = PointerGetDatum(addr);
-				    offset += (cmeta->attlen < 0
-							   ? VARSIZE_ANY(addr)
-							   : cmeta->attlen);
-				}
+				tts_values[resnum - 1] = datum;
 			}
 		}
 	}
@@ -7007,7 +6997,7 @@ lnext:
 /*
  * gpujoinNextTupleFallback - CPU Fallback
  */
-TupleTableSlot *
+static TupleTableSlot *
 gpujoinNextTupleFallback(GpuTaskState *gts,
 						 kern_gpujoin *kgjoin,
 						 pgstrom_data_store *pds_src,
@@ -7090,6 +7080,26 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 	/* rewind the fallback status for the further GpuJoinTask */
 	gjs->fallback_outer_index = -1;
 	return NULL;
+}
+
+/* entrypoint for GpuPreAgg with combined-mode */
+TupleTableSlot *
+gpujoinNextTupleFallbackUpper(GpuTaskState *gts,
+							  kern_gpujoin *kgjoin,
+							  pgstrom_data_store *pds_src,
+							  cl_int outer_depth)
+{
+	TupleTableSlot *slot;
+
+	slot = gpujoinNextTupleFallback(gts, kgjoin, pds_src, outer_depth);
+	if (TupIsNull(slot))
+		return NULL;
+	if (gts->css.ss.ps.ps_ProjInfo)
+	{
+		gts->css.ss.ps.ps_ExprContext->ecxt_scantuple = slot;
+		slot = ExecProject(gts->css.ss.ps.ps_ProjInfo);
+	}
+	return slot;
 }
 
 /* ----------------------------------------------------------------
