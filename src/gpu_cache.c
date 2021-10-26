@@ -3355,29 +3355,39 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheSharedState *gc_sstate, uint64 end_pos)
 		return rc;
 
 	pthreadRWLockWriteLock(&gc_sstate->gpu_buffer_lock);
-	if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
+	PG_TRY();
 	{
-		rc = CUDA_ERROR_NOT_READY;
-		goto out_unlock;
+		if (pg_atomic_read_u32(&gc_sstate->gpu_buffer_corrupted))
+		{
+			rc = CUDA_ERROR_NOT_READY;
+			goto out_unlock;
+		}
+
+		rc = gpuCacheAllocDeviceMemory(gc_sstate);
+		if (rc != CUDA_SUCCESS)
+			goto out_unlock;
+
+		rc = __gpuCacheSetupRedoLogBuffer(gc_sstate, end_pos, &m_redo);
+		if (rc != CUDA_SUCCESS)
+			goto out_unlock;
+		if (m_redo != 0UL)
+		{
+			rc = __gpuCacheLaunchApplyRedoKernel(gc_sstate, m_redo);
+
+			__rc = cuMemFree(m_redo);
+			if (__rc != CUDA_SUCCESS)
+				elog(LOG, "failed on cuMemFree: %s", errorText(__rc));
+		}
+	out_unlock:
+		pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 	}
-
-	rc = gpuCacheAllocDeviceMemory(gc_sstate);
-	if (rc != CUDA_SUCCESS)
-		goto out_unlock;
-
-	rc = __gpuCacheSetupRedoLogBuffer(gc_sstate, end_pos, &m_redo);
-	if (rc != CUDA_SUCCESS)
-		goto out_unlock;
-	if (m_redo != 0UL)
+	PG_CATCH();
 	{
-		rc = __gpuCacheLaunchApplyRedoKernel(gc_sstate, m_redo);
-
-		__rc = cuMemFree(m_redo);
-		if (__rc != CUDA_SUCCESS)
-			elog(LOG, "failed on cuMemFree: %s", errorText(__rc));
+		pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+		PG_RE_THROW();
 	}
-out_unlock:
-	pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
+	PG_END_TRY();
+
 	return rc;
 }
 
