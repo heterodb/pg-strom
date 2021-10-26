@@ -422,9 +422,9 @@ static TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
 												kern_gpujoin *kgjoin,
 												pgstrom_data_store *pds_src,
 												cl_int outer_depth);
-static void createGpuJoinSharedState(GpuJoinState *gjs,
-									 ParallelContext *pcxt,
-									 void *coordinate);
+static size_t createGpuJoinSharedState(GpuJoinState *gjs,
+									   ParallelContext *pcxt,
+									   void *coordinate);
 static void cleanupGpuJoinSharedStateOnAbort(dsm_segment *segment,
 											 Datum ptr);
 static void gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs);
@@ -4296,11 +4296,12 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   void *coordinate)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
+	size_t			len;
 
 	/* save the ParallelContext */
 	gjs->gts.pcxt = pcxt;
 	/* setup shared-state and runtime-statistics */
-	createGpuJoinSharedState(gjs, pcxt, coordinate);
+	len = createGpuJoinSharedState(gjs, pcxt, coordinate);
 	on_dsm_detach(pcxt->seg,
 				  cleanupGpuJoinSharedStateOnAbort,
 				  PointerGetDatum(gjs->gj_sstate));
@@ -4308,7 +4309,7 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gjs->gts.gcontext));
 	/* allocation of an empty multirel buffer */
-	coordinate = (char *)coordinate + gjs->gj_sstate->ss_length;
+	coordinate = (char *)coordinate + len;
 	if (gjs->gts.outer_index_state)
 	{
 		gjs->gts.outer_index_map = (Bitmapset *)coordinate;
@@ -8654,7 +8655,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
  * It construct an empty inner multi-relations buffer. It can be shared with
  * multiple backends, and referenced by CPU/GPU.
  */
-static void
+static size_t
 createGpuJoinSharedState(GpuJoinState *gjs,
 						 ParallelContext *pcxt,
 						 void *dsm_addr)
@@ -8710,6 +8711,8 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	SpinLockInit(&gj_rtstat->c.lock);
 
 	gjs->gj_sstate = gj_sstate;
+
+	return ss_length;
 }
 
 /*

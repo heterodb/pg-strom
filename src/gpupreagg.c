@@ -218,9 +218,9 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
 								  List *outer_tlist,
 								  GpuPreAggInfo *gpa_info);
-static void createGpuPreAggSharedState(GpuPreAggState *gpas,
-									   ParallelContext *pcxt,
-									   void *dsm_addr);
+static size_t createGpuPreAggSharedState(GpuPreAggState *gpas,
+										 ParallelContext *pcxt,
+										 void *dsm_addr);
 static void releaseGpuPreAggSharedState(GpuPreAggState *gpas);
 static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 
@@ -4926,6 +4926,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					 void *coordinate)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	size_t		len;
 
 	/* save ParallelContext */
 	gpas->gts.pcxt = pcxt;
@@ -4933,8 +4934,8 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
 	/* allocation of shared state */
-	createGpuPreAggSharedState(gpas, pcxt, coordinate);
-	coordinate = (char *)coordinate + gpas->gpa_sstate->ss_length;
+	len = createGpuPreAggSharedState(gpas, pcxt, coordinate);
+	coordinate = (char *)coordinate + len;
 	if (gpas->gts.outer_index_state)
 	{
 		gpas->gts.outer_index_map = (Bitmapset *)coordinate;
@@ -4943,6 +4944,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					  pgstromSizeOfBrinIndexMap(&gpas->gts));
 	}
 	pgstromInitDSMGpuTaskState(&gpas->gts, pcxt, coordinate);
+	pg_memory_barrier();
 }
 
 /*
@@ -4956,8 +4958,10 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggState		   *gpas = (GpuPreAggState *) node;
 	GpuPreAggSharedState   *gpa_sstate = coordinate;
 
+	pg_memory_barrier();
 	gpas->gpa_sstate = gpa_sstate;
-	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	gpas->gpa_rtstat = &gpa_sstate->gpa_rtstat;
+
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
@@ -5124,7 +5128,7 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 /*
  * createGpuPreAggSharedState
  */
-static void
+static size_t
 createGpuPreAggSharedState(GpuPreAggState *gpas,
 						   ParallelContext *pcxt,
 						   void *dsm_addr)
@@ -5147,6 +5151,8 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 
 	gpas->gpa_sstate = gpa_sstate;
 	gpas->gpa_rtstat = gpa_rtstat;
+
+	return ss_length;
 }
 
 /*

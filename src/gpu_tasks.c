@@ -718,7 +718,7 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 	Size		sz;
 
 	sz = sizeof(GpuTaskSharedState);
-	if (relation && !gts->af_state && !gts->gc_state)
+	if (relation)
 		sz += table_parallelscan_estimate(relation, snapshot);
 	return MAXALIGN(sz);
 }
@@ -739,9 +739,9 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 	memset(gtss, 0, offsetof(GpuTaskSharedState, phscan));
 	if (gts->af_state)
 		ExecInitDSMArrowFdw(gts->af_state, gtss);
-	else if (gts->gc_state)
+	if (gts->gc_state)
 		ExecInitDSMGpuCache(gts->gc_state, gtss);
-	else if (relation)
+	if (relation)
 	{
 		/* init state of block based table scan */
 		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
@@ -750,8 +750,6 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 		gtss->pbs_nallocated = 0;
 		/* import snapshot by the core logic */
 		table_parallelscan_initialize(relation, &gtss->phscan, snapshot);
-		/* per workers initialization inclusing the coordinator */
-		pgstromInitWorkerGpuTaskState(gts, coordinate);
 	}
 	gts->gtss = gtss;
 	gts->pcxt = pcxt;
@@ -768,9 +766,9 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 
 	if (gts->af_state)
 		ExecInitWorkerArrowFdw(gts->af_state, gtss);
-	else if (gts->gc_state)
+	if (gts->gc_state)
 		ExecInitWorkerGpuCache(gts->gc_state, gtss);
-	else if (relation)
+	if (relation)
 	{
 		/* begin parallel scan */
 		gts->css.ss.ss_currentScanDesc =
