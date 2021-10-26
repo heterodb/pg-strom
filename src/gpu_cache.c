@@ -3383,6 +3383,7 @@ gpuCacheBgWorkerApplyRedoLog(GpuCacheSharedState *gc_sstate, uint64 end_pos)
 	}
 	PG_CATCH();
 	{
+		pg_atomic_write_u32(&gc_sstate->gpu_buffer_corrupted, 1);
 		pthreadRWLockUnlock(&gc_sstate->gpu_buffer_lock);
 		PG_RE_THROW();
 	}
