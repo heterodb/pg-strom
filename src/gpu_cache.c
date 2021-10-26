@@ -1035,6 +1035,94 @@ __gpuCacheInitLoadTrackCtid(GpuCacheDesc *gc_desc,
 }
 
 /*
+ * __makeFlattenHeapTuple
+ */
+static HeapTuple
+__makeFlattenHeapTuple(Relation rel, HeapTuple tuple)
+{
+	TupleDesc		tupdesc = RelationGetDescr(rel);
+	HeapTupleHeader htup = tuple->t_data;
+	StringInfoData	buf;
+	bits8		   *nullmap = NULL;
+	int				j, natts;
+	uint32			hoff, diff;
+	int				alignval;
+	Datum			zero = 0;
+	bool			flatten = false;
+
+	/* shortcut path, if no varlena attributes */
+	if (!HeapTupleHasVarWidth(tuple))
+		return tuple;
+
+	/* HeapTupleData */
+	initStringInfo(&buf);
+	appendBinaryStringInfo(&buf, (char *)tuple, sizeof(HeapTupleData));
+	diff = MAXALIGN(sizeof(HeapTupleData)) - sizeof(HeapTupleData);
+	if (diff > 0)
+		appendBinaryStringInfo(&buf, (char *)&zero, diff);
+
+	/* HeapTupleHeaderData */
+	appendBinaryStringInfo(&buf, (char *)htup, htup->t_hoff);
+	natts = Min(HeapTupleHeaderGetNatts(htup), tupdesc->natts);
+	if (HeapTupleHasNulls(tuple))
+		nullmap = htup->t_bits;
+	hoff = htup->t_hoff;
+	Assert(buf.len == MAXALIGN(buf.len));
+	for (j=0; j < natts; j++)
+	{
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
+
+		if (nullmap && att_isnull(j, nullmap))
+			continue;
+
+		if (attr->attbyval || attr->attlen > 0)
+		{
+			alignval = typealign_get_width(attr->attalign);
+			hoff = TYPEALIGN(alignval, hoff);
+			diff = TYPEALIGN(alignval, buf.len) - buf.len;
+			if (diff > 0)
+				appendBinaryStringInfo(&buf, (char *)&zero, diff);
+			appendBinaryStringInfo(&buf, (char *)htup + hoff, attr->attlen);
+			hoff += attr->attlen;
+		}
+		else if (attr->attlen == -1)
+		{
+			struct varlena *datum;
+			void	   *addr;
+
+			alignval = typealign_get_width(attr->attalign);
+			if (!VARATT_NOT_PAD_BYTE((char *)htup + hoff))
+				hoff = TYPEALIGN(alignval, hoff);
+			addr = (char *)htup + hoff;
+			hoff += VARSIZE_ANY(addr);
+
+			datum = pg_detoast_datum_packed(addr);
+			if (VARATT_IS_4B(datum))
+			{
+				diff = TYPEALIGN(alignval, buf.len) - buf.len;
+				if (diff > 0)
+					appendBinaryStringInfo(&buf, (char *)&zero, diff);
+			}
+			appendBinaryStringInfo(&buf, (char *)datum, VARSIZE_ANY(datum));
+			if (datum != addr)
+				pfree(datum);
+		}
+		else
+		{
+			elog(ERROR, "unexpected type length of '%s'",
+                 format_type_be(attr->atttypid));
+		}
+	}
+	/* final setup of HeapTupleData */
+	tuple = (HeapTuple)buf.data;
+	tuple->t_len = buf.len - MAXALIGN(sizeof(HeapTupleData));
+	tuple->t_data = (HeapTupleHeader)(buf.data + MAXALIGN(sizeof(HeapTupleData)));
+	tuple->t_data->t_infomask &= ~HEAP_HASEXTERNAL;
+
+	return tuple;
+}
+
+/*
  * __execGpuCacheInitLoad
  */
 static void
@@ -1043,7 +1131,7 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 	GpuCacheDesc	hkey;
 	GpuCacheDesc   *gc_desc;
 	TableScanDesc	scandesc;
-	HeapTuple		tuple;
+	HeapTuple		scantup;
 	size_t			item_sz = 2048;
 	GCacheTxLogInsert *item = palloc(item_sz);
 	bool			found = false;
@@ -1098,17 +1186,19 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 	SpinLockRelease(&gc_sstate->redo_lock);
 
 	scandesc = table_beginscan(rel, SnapshotAny, 0, NULL);
-	while ((tuple = heap_getnext(scandesc, ForwardScanDirection)) != NULL)
+	while ((scantup = heap_getnext(scandesc, ForwardScanDirection)) != NULL)
 	{
 		TransactionId	gcache_xmin;
 		TransactionId	gcache_xmax;
+		HeapTuple		tuple;
 		size_t			sz;
 
-		if (!__gpuCacheInitLoadVisibilityCheck(tuple,
+		if (!__gpuCacheInitLoadVisibilityCheck(scantup,
 											   &gcache_xmin,
 											   &gcache_xmax))
 			continue;
 
+		tuple = __makeFlattenHeapTuple(rel, scantup);
 		sz = MAXALIGN(offsetof(GCacheTxLogInsert, htup) + tuple->t_len);
 		if (sz > item_sz)
 		{
@@ -1130,6 +1220,8 @@ __execGpuCacheInitLoad(GpuCacheSharedState *gc_sstate, Relation rel)
 			__gpuCacheInitLoadTrackCtid(gc_desc, gcache_xmin, 'I', &tuple->t_self);
 		if (TransactionIdIsNormal(gcache_xmax))
 			__gpuCacheInitLoadTrackCtid(gc_desc, gcache_xmax, 'D', &tuple->t_self);
+		if (tuple != scantup)
+			pfree(tuple);
 		CHECK_FOR_INTERRUPTS();
 	}
 	table_endscan(scandesc);
@@ -1689,6 +1781,7 @@ Datum
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
+	HeapTuple		tuple;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
 		elog(ERROR, "%s: must be called as trigger",
@@ -1711,12 +1804,20 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 
 		if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
 		{
-			__gpuCacheInsertLog(trigdata->tg_trigtuple, gc_desc);
+			tuple = __makeFlattenHeapTuple(trigdata->tg_relation,
+										   trigdata->tg_trigtuple);
+			__gpuCacheInsertLog(tuple, gc_desc);
+			if (tuple != trigdata->tg_trigtuple)
+				pfree(tuple);
 		}
 		else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 		{
+			tuple = __makeFlattenHeapTuple(trigdata->tg_relation,
+										   trigdata->tg_newtuple);
 			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_desc);
-			__gpuCacheInsertLog(trigdata->tg_newtuple, gc_desc);
+			__gpuCacheInsertLog(tuple, gc_desc);
+			if (tuple != trigdata->tg_newtuple)
+				pfree(tuple);
 		}
 		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
 		{

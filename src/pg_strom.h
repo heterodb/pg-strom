@@ -1663,15 +1663,19 @@ __trim(char *token)
 static inline int
 typealign_get_width(char type_align)
 {
-	if (type_align == 'c')
-		return sizeof(cl_char);
-	else if (type_align == 's')
-		return sizeof(cl_short);
-	else if (type_align == 'i')
-		return sizeof(cl_int);
-	else if (type_align == 'd')
-		return sizeof(cl_long);
-	elog(ERROR, "unexpected type alignment: %c", type_align);
+	switch (type_align)
+	{
+		case TYPALIGN_CHAR:
+			return 1;
+		case TYPALIGN_SHORT:
+			return ALIGNOF_SHORT;
+		case TYPALIGN_INT:
+			return ALIGNOF_INT;
+		case TYPALIGN_DOUBLE:
+			return ALIGNOF_DOUBLE;
+		default:
+			elog(ERROR, "unexpected type alignment: %c", type_align);
+	}
 	return -1;	/* be compiler quiet */
 }
 
