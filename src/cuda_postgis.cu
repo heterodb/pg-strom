@@ -233,12 +233,10 @@ __gserialized_get_srid(const __GSERIALIZED *gs)
 {
 	cl_int		srid;
 
-	/* Only the first 21 bits are set. Slide up and back to pull
-	 * the negative bits down, if we need them. */
+	/* Only the first 21 bits are set. */
 	srid = (((cl_uint)gs->srid[0] << 16) |
 			((cl_uint)gs->srid[1] <<  8) |
-			((cl_uint)gs->srid[0]));
-	srid = (srid << 11) >> 11;
+			((cl_uint)gs->srid[2])) & 0x001fffffU;
 	/* 0 is our internal unknown value */
 	return (srid == 0 ? SRID_UNKNOWN : srid);
 }
@@ -249,6 +247,7 @@ __geometry_datum_ref_v1(kern_context *kcxt, void *addr, cl_int sz)
 	/* see lwgeom_from_gserialized1() */
 	__GSERIALIZED  *gs = (__GSERIALIZED *)addr;
 	pg_geometry_t	geom;
+	cl_uint			gs_type;
 	cl_ushort		geom_flags = 0;
 	char		   *rawdata = gs->data;
 
@@ -271,8 +270,17 @@ __geometry_datum_ref_v1(kern_context *kcxt, void *addr, cl_int sz)
 		geom.bbox = (geom_bbox *)rawdata;
 		rawdata += geometry_bbox_size(geom.flags);
 	}
-	memcpy(&geom.type, rawdata, sizeof(cl_uint));
+	memcpy(&gs_type, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
+	if (GEOM_TYPE_IS_VALID(gs_type))
+		geom.type = gs_type;
+	else
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "geometry data v1 has unsupported type");
+		geom.isnull = true;
+	}
+
 	memcpy(&geom.nitems, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
 	geom.rawdata = rawdata;
@@ -302,22 +310,22 @@ __geometry_datum_ref_v2(kern_context *kcxt, void *addr, cl_int sz)
 	/* see lwgeom_from_gserialized2() */
 	__GSERIALIZED  *gs = (__GSERIALIZED *)addr;
 	pg_geometry_t	geom;
-	cl_uchar		gs_flags = gs->gflags;
+	cl_uint			gs_type;
 	cl_ushort		geom_flags = 0;
 	char		   *rawdata = gs->data;
 
 	memset(&geom, 0, sizeof(pg_geometry_t));
 
 	/* parse version.2 flags */
-	if ((gs_flags & G2FLAG_Z) != 0)
+	if ((gs->gflags & G2FLAG_Z) != 0)
 		geom_flags |= GEOM_FLAG__Z;
-	if ((gs_flags & G2FLAG_M) != 0)
+	if ((gs->gflags & G2FLAG_M) != 0)
 		geom_flags |= GEOM_FLAG__M;
-	if ((gs_flags & G2FLAG_BBOX) != 0)
+	if ((gs->gflags & G2FLAG_BBOX) != 0)
 		geom_flags |= GEOM_FLAG__BBOX;
-    if ((gs_flags & G2FLAG_GEODETIC) != 0)
+	if ((gs->gflags & G2FLAG_GEODETIC) != 0)
 		geom_flags |= G1FLAG_GEODETIC;
-	if ((gs_flags & G2FLAG_EXTENDED) != 0)
+	if ((gs->gflags & G2FLAG_EXTENDED) != 0)
 	{
 		cl_ulong    ex_flags;
 
@@ -333,8 +341,18 @@ __geometry_datum_ref_v2(kern_context *kcxt, void *addr, cl_int sz)
 		geom.bbox = (geom_bbox *)rawdata;
 		rawdata += geometry_bbox_size(geom.flags);
 	}
-	memcpy(&geom.type, rawdata, sizeof(cl_uint));
+
+	memcpy(&gs_type, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
+	if (GEOM_TYPE_IS_VALID(gs_type))
+		geom.type = gs_type;
+	else
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "geometry data v2 has unsupported type");
+		geom.isnull = true;
+	}
+
 	memcpy(&geom.nitems, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
 	geom.rawdata = rawdata;
