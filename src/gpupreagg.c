@@ -144,7 +144,7 @@ typedef struct
 	//TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	ExprState	   *outer_quals;
 	TupleTableSlot *outer_slot;
-	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
+	ProjectionInfo *fallback_proj;
 
 	kern_data_store *kds_slot_head;
 	pgstrom_data_store *pds_final;
@@ -218,9 +218,9 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
 								  List *outer_tlist,
 								  GpuPreAggInfo *gpa_info);
-static void createGpuPreAggSharedState(GpuPreAggState *gpas,
-									   ParallelContext *pcxt,
-									   void *dsm_addr);
+static size_t createGpuPreAggSharedState(GpuPreAggState *gpas,
+										 ParallelContext *pcxt,
+										 void *dsm_addr);
 static void releaseGpuPreAggSharedState(GpuPreAggState *gpas);
 static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 
@@ -1567,6 +1567,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 											 havingQuals,
 											 final_clause_costs,
 											 num_groups);
+		final_path = pgstrom_create_dummy_path(root, final_path);
 		add_path(group_rel, final_path);
 	}
 	else
@@ -1661,6 +1662,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
+			final_path = pgstrom_create_dummy_path(root, final_path);
 			add_path(group_rel, final_path);
 		}
 
@@ -1685,6 +1687,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 									havingQuals,
 									final_clause_costs,
 									num_groups);
+				final_path = pgstrom_create_dummy_path(root, final_path);
 				add_path(group_rel, final_path);
 			}
 		}
@@ -4578,6 +4581,59 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 }
 
 /*
+ * build_cpu_fallback_tlist
+ */
+static Node *
+__build_cpu_fallback_tlist_recurse(Node *node, List *outer_tlist)
+{
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	foreach (lc, outer_tlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (equal(node, tle->expr))
+		{
+			return (Node *)makeVar(INDEX_VAR,
+								   tle->resno,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node), 0);
+		}
+	}
+	return expression_tree_mutator(node, __build_cpu_fallback_tlist_recurse,
+								   (void *)outer_tlist);
+}
+
+static List *
+build_cpu_fallback_tlist(List *tlist_part, CustomScan *cscan)
+{
+	Plan	   *outer_plan = outerPlan(cscan);
+
+	if (cscan->custom_scan_tlist != NIL)
+		tlist_part = (List *)fixup_varnode_to_origin((Node *)tlist_part,
+													 cscan->custom_scan_tlist);
+	if (outer_plan)
+	{
+		List   *outer_tlist = outer_plan->targetlist;
+
+		if ((pgstrom_plan_is_gpujoin(outer_plan) ||
+			 pgstrom_plan_is_gpuscan(outer_plan)) &&
+			((CustomScan *)outer_plan)->custom_scan_tlist != NIL)
+		{
+			outer_tlist = (List *)
+				fixup_varnode_to_origin((Node *)outer_tlist,
+										((CustomScan *)outer_plan)->custom_scan_tlist);
+		}
+		tlist_part = (List *)
+			__build_cpu_fallback_tlist_recurse((Node *)tlist_part, outer_tlist);
+	}
+	return tlist_part;
+}
+
+/*
  * CreateGpuPreAggScanState - constructor of GpuPreAggState
  */
 static Node *
@@ -4614,6 +4670,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	TupleDesc		part_tupdesc;
 	TupleDesc		prep_tupdesc;
 	TupleDesc		outer_tupdesc;
+	List		   *tlist_fallback;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
 	size_t			length;
@@ -4657,11 +4714,12 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))
 	{
+		Plan	   *outer_plan = outerPlan(cscan);
 		PlanState  *outer_ps;
 
 		Assert(!scan_rel);
 		Assert(!gpa_info->outer_quals );
-		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
+		outer_ps = ExecInitNode(outer_plan, estate, eflags);
 		if (enable_pullup_outer_join &&
 			pgstrom_planstate_is_gpujoin(outer_ps) &&
 			!outer_ps->ps_ProjInfo)
@@ -4695,13 +4753,12 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   &TTSOpsVirtual);
 	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc,
 												&TTSOpsHeapTuple);
-	
-	gpas->outer_proj = ExecBuildProjectionInfo(gpa_info->tlist_part,
-											   econtext,
-											   gpas->part_slot,
-											   &gpas->gts.css.ss.ps,
-											   outer_tupdesc);
-
+	tlist_fallback = build_cpu_fallback_tlist(gpa_info->tlist_part, cscan);
+	gpas->fallback_proj = ExecBuildProjectionInfo(tlist_fallback,
+												  econtext,
+												  gpas->part_slot,
+												  &gpas->gts.css.ss.ps,
+												  outer_tupdesc);
 	ExecInitScanTupleSlot(estate,
 						  &gpas->gts.css.ss,
 						  part_tupdesc,
@@ -4869,6 +4926,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					 void *coordinate)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	size_t		len;
 
 	/* save ParallelContext */
 	gpas->gts.pcxt = pcxt;
@@ -4876,8 +4934,8 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
 	/* allocation of shared state */
-	createGpuPreAggSharedState(gpas, pcxt, coordinate);
-	coordinate = (char *)coordinate + gpas->gpa_sstate->ss_length;
+	len = createGpuPreAggSharedState(gpas, pcxt, coordinate);
+	coordinate = (char *)coordinate + len;
 	if (gpas->gts.outer_index_state)
 	{
 		gpas->gts.outer_index_map = (Bitmapset *)coordinate;
@@ -4886,6 +4944,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					  pgstromSizeOfBrinIndexMap(&gpas->gts));
 	}
 	pgstromInitDSMGpuTaskState(&gpas->gts, pcxt, coordinate);
+	pg_memory_barrier();
 }
 
 /*
@@ -4899,8 +4958,10 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggState		   *gpas = (GpuPreAggState *) node;
 	GpuPreAggSharedState   *gpa_sstate = coordinate;
 
+	pg_memory_barrier();
 	gpas->gpa_sstate = gpa_sstate;
-	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	gpas->gpa_rtstat = &gpa_sstate->gpa_rtstat;
+
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
@@ -5067,7 +5128,7 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 /*
  * createGpuPreAggSharedState
  */
-static void
+static size_t
 createGpuPreAggSharedState(GpuPreAggState *gpas,
 						   ParallelContext *pcxt,
 						   void *dsm_addr)
@@ -5090,6 +5151,8 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 
 	gpas->gpa_sstate = gpa_sstate;
 	gpas->gpa_rtstat = gpa_rtstat;
+
+	return ss_length;
 }
 
 /*
@@ -5416,80 +5479,50 @@ static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
 	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
-	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
-	ExprDoneCond		is_done	__attribute__((unused));
-	TupleTableSlot	   *slot;
-	bool				retval;
+	ExprContext	   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
 
 	for (;;)
 	{
-#if 0
-		if (gpreagg->kds_slot)
-		{
-			/* CPU fallback with kds_slot built */
-			kern_data_store *kds_slot = gpreagg->kds_slot;
-			cl_uint		row_index = gpas->gts.curr_index++;
-
-			if (row_index < kds_slot->nitems)
-			{
-				slot = gpas->gpreagg_slot;
-				if (!KDS_fetch_tuple_slot(slot, kds_slot, row_index))
-					continue;
-			}
-			else
-			{
-				slot = NULL;
-			}
-			break;
-		}
-#endif
 		if (gpas->combined_gpujoin)
 		{
+			TupleTableSlot *slot;
 			GpuTaskState   *outer_gts
 				= (GpuTaskState *)outerPlanState(gpas);
 
-			slot = gpujoinNextTupleFallback(outer_gts,
-											gpreagg->kgjoin,
-											gpreagg->pds_src,
-											Max(gpreagg->outer_depth, 0));
+			slot = gpujoinNextTupleFallbackUpper(outer_gts,
+												 gpreagg->kgjoin,
+												 gpreagg->pds_src,
+												 Max(gpreagg->outer_depth, 0));
 			if (TupIsNull(slot))
 				return NULL;
-			/* Run CPU Projection of GpuJoin, instead */
-			if (outer_gts->css.ss.ps.ps_ProjInfo)
-			{
-				outer_gts->css.ss.ps.ps_ExprContext->ecxt_scantuple = slot;
-				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo);
-			}
 			econtext->ecxt_scantuple = slot;
 		}
 		else
 		{
-			pgstrom_data_store *pds_src = gpreagg->pds_src;
 			/* fetch a tuple from the data-store */
 			ExecClearTuple(gpas->outer_slot);
 			if (!gpreagg->pds_src ||
 				!PDS_fetch_tuple(gpas->outer_slot,
-								 pds_src,
+								 gpreagg->pds_src,
 								 &gpas->gts))
 				return NULL;
-
 			econtext->ecxt_scantuple = gpas->outer_slot;
 		}
 		pg_atomic_add_fetch_u64(&gpa_rtstat->c.source_nitems, 1L);
 
 		/* filter out the tuple, if any outer quals */
-		retval = ExecQual(gpas->outer_quals, econtext);
-		if (!retval)
+		if (!ExecQual(gpas->outer_quals, econtext))
 		{
 			pg_atomic_add_fetch_u64(&gpa_rtstat->c.nitems_filtered, 1L);
 			continue;
 		}
+		pg_atomic_add_fetch_u64(&gpa_rtstat->c.fallback_count, 1);
 		/* makes a projection from the outer-scan to the pseudo-tlist */
-		slot = ExecProject(gpas->outer_proj);
-		break;
+		if (!gpas->fallback_proj)
+			return econtext->ecxt_scantuple;
+		return ExecProject(gpas->fallback_proj);
 	}
-	pg_atomic_add_fetch_u64(&gpa_rtstat->c.fallback_count, 1);
-	return slot;
+	return NULL;
 }
 
 /*

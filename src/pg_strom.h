@@ -1228,10 +1228,10 @@ extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts);
 extern int  gpujoinNextRightOuterJoinIfAny(GpuTaskState *gts);
-extern TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
-												struct kern_gpujoin *kgjoin,
-												pgstrom_data_store *pds_src,
-												cl_int outer_depth);
+extern TupleTableSlot *gpujoinNextTupleFallbackUpper(GpuTaskState *gts,
+													 struct kern_gpujoin *kgjoin,
+													 pgstrom_data_store *pds_src,
+													 cl_int outer_depth);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 
@@ -1312,6 +1312,7 @@ extern void pgstrom_init_gpu_cache(void);
 /*
  * misc.c
  */
+extern Node *fixup_varnode_to_origin(Node *expr, List *cscan_tlist);
 extern Expr *make_flat_ands_explicit(List *andclauses);
 extern AppendRelInfo **find_appinfos_by_relids_nofail(PlannerInfo *root,
 													  Relids relids,
@@ -1413,7 +1414,7 @@ extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_s
  */
 extern int		pgstrom_num_users_extra;
 extern pgstromUsersExtraDescriptor pgstrom_users_extra_desc[];
-
+extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,
 										  bool outer_parallel,
@@ -1662,15 +1663,19 @@ __trim(char *token)
 static inline int
 typealign_get_width(char type_align)
 {
-	if (type_align == 'c')
-		return sizeof(cl_char);
-	else if (type_align == 's')
-		return sizeof(cl_short);
-	else if (type_align == 'i')
-		return sizeof(cl_int);
-	else if (type_align == 'd')
-		return sizeof(cl_long);
-	elog(ERROR, "unexpected type alignment: %c", type_align);
+	switch (type_align)
+	{
+		case TYPALIGN_CHAR:
+			return 1;
+		case TYPALIGN_SHORT:
+			return ALIGNOF_SHORT;
+		case TYPALIGN_INT:
+			return ALIGNOF_INT;
+		case TYPALIGN_DOUBLE:
+			return ALIGNOF_DOUBLE;
+		default:
+			elog(ERROR, "unexpected type alignment: %c", type_align);
+	}
 	return -1;	/* be compiler quiet */
 }
 

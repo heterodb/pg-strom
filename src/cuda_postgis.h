@@ -68,6 +68,7 @@ typedef struct
 #define GEOM_TRIANGLETYPE			14
 #define GEOM_TINTYPE				15
 #define GEOM_NUMTYPES				16
+#define GEOM_TYPE_IS_VALID(gs_type)	((gs_type) >= 1 && (gs_type) <= GEOM_NUMTYPES)
 
 /* see LWFLAG_* in CPU code; at liblwgeom.h */
 #define GEOM_FLAG__Z			0x01

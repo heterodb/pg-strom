@@ -28,6 +28,8 @@ double		pgstrom_gpu_operator_cost;
 /* misc static variables */
 static HTAB				   *gpu_path_htable = NULL;
 static planner_hook_type	planner_hook_next = NULL;
+static CustomPathMethods	pgstrom_dummy_path_methods;
+static CustomScanMethods	pgstrom_dummy_plan_methods;
 
 /* misc variables */
 long		PAGE_SIZE;
@@ -252,6 +254,183 @@ gpu_path_remember(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
+ * pgstrom_create_dummy_path
+ */
+Path *
+pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath)
+{
+	CustomPath	   *cpath = makeNode(CustomPath);
+	PathTarget	   *final_target = root->upper_targets[UPPERREL_FINAL];
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+
+	/* sanity checks */
+	if (list_length(final_target->exprs) != list_length(subpath->pathtarget->exprs))
+		elog(ERROR, "CustomScan(dummy): incompatible tlist is supplied");
+	forboth (lc1, final_target->exprs,
+			 lc2, subpath->pathtarget->exprs)
+	{
+		Node   *node1 = lfirst(lc1);
+		Node   *node2 = lfirst(lc2);
+
+		if (exprType(node1) != exprType(node2))
+			elog(ERROR, "CustomScan(dummy): incompatible tlist entry: [%s] <-> [%s]",
+				 nodeToString(node1),
+				 nodeToString(node2));
+	}
+
+	cpath->path.pathtype		= T_CustomScan;
+	cpath->path.parent			= subpath->parent;
+	cpath->path.pathtarget		= final_target;
+	cpath->path.param_info		= NULL;
+	cpath->path.parallel_aware	= subpath->parallel_aware;
+	cpath->path.parallel_safe	= subpath->parallel_safe;
+	cpath->path.parallel_workers = subpath->parallel_workers;
+	cpath->path.pathkeys		= subpath->pathkeys;
+	cpath->path.rows			= subpath->rows;
+	cpath->path.startup_cost	= subpath->startup_cost;
+	cpath->path.total_cost		= subpath->total_cost;
+
+	cpath->custom_paths			= list_make1(subpath);
+	cpath->methods      		= &pgstrom_dummy_path_methods;
+
+	return &cpath->path;
+}
+
+/*
+ * pgstrom_dummy_create_plan - PlanCustomPath callback
+ */
+static Plan *
+pgstrom_dummy_create_plan(PlannerInfo *root,
+						  RelOptInfo *rel,
+						  CustomPath *best_path,
+						  List *tlist,
+						  List *clauses,
+						  List *custom_plans)
+{
+	CustomScan *cscan = makeNode(CustomScan);
+
+	Assert(list_length(custom_plans) == 1);
+	cscan->scan.plan.parallel_aware = best_path->path.parallel_aware;
+	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.qual = NIL;
+	cscan->scan.plan.lefttree = linitial(custom_plans);
+	cscan->scan.scanrelid = 0;
+	cscan->custom_scan_tlist = tlist;
+	cscan->methods = &pgstrom_dummy_plan_methods;
+
+	return &cscan->scan.plan;
+}
+
+/*
+ * pgstrom_dummy_create_scan_state - CreateCustomScanState callback
+ */
+static Node *
+pgstrom_dummy_create_scan_state(CustomScan *cscan)
+{
+	elog(ERROR, "Bug? dummy custom scan should not remain at the executor stage");
+}
+
+/*
+ * pgstrom_removal_dummy_plans
+ *
+ * Due to the interface design of the create_upper_paths_hook, some other path
+ * nodes can be stacked on the GpuPreAgg node, with the original final target-
+ * list. Even if a pair of Agg + GpuPreAgg adopted its modified target-list,
+ * the stacked path nodes (like sorting, window functions, ...) still consider
+ * it has the original target-list.
+ * It makes a problem at setrefs.c when PostgreSQL optimizer tries to replace
+ * the expressions by var-node using OUTER_VAR, because Agg + GpuPreAgg pair
+ * does not have the original expression, then it leads "variable not found"
+ * error.
+ */
+static void
+pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
+{
+	Plan	   *plan = *p_plan;
+	ListCell   *lc;
+
+	Assert(plan != NULL);
+	switch (nodeTag(plan))
+	{
+		case T_ModifyTable:
+			{
+				ModifyTable	   *splan = (ModifyTable *) plan;
+
+				foreach (lc, splan->plans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		case T_Append:
+			{
+				Append		   *splan = (Append *) plan;
+
+				foreach (lc, splan->appendplans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		case T_MergeAppend:
+			{
+				MergeAppend	   *splan = (MergeAppend *) plan;
+
+				foreach (lc, splan->mergeplans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		case T_BitmapAnd:
+			{
+				BitmapAnd	   *splan = (BitmapAnd *) plan;
+
+				foreach (lc, splan->bitmapplans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		case T_BitmapOr:
+			{
+				BitmapOr	   *splan = (BitmapOr *) plan;
+
+				foreach (lc, splan->bitmapplans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		case T_SubqueryScan:
+			{
+				SubqueryScan   *sscan = (SubqueryScan *) plan;
+
+				pgstrom_removal_dummy_plans(pstmt, &sscan->subplan);
+			}
+			break;
+
+		case T_CustomScan:
+			{
+				CustomScan	   *cscan = (CustomScan *) plan;
+
+				if (cscan->methods == &pgstrom_dummy_plan_methods)
+				{
+					*p_plan = outerPlan(cscan);
+					pgstrom_removal_dummy_plans(pstmt, p_plan);
+					return;
+				}
+				foreach (lc, cscan->custom_plans)
+					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+			}
+			break;
+
+		default:
+			break;
+	}
+	if (plan->lefttree)
+		pgstrom_removal_dummy_plans(pstmt, &plan->lefttree);
+	if (plan->righttree)
+		pgstrom_removal_dummy_plans(pstmt, &plan->righttree);
+}
+
+/*
  * pgstrom_post_planner
  */
 static PlannedStmt *
@@ -264,6 +443,7 @@ pgstrom_post_planner(Query *parse,
 {
 	HTAB		   *gpu_path_htable_saved = gpu_path_htable;
 	PlannedStmt	   *pstmt;
+	ListCell	   *lc;
 
 	PG_TRY();
 	{
@@ -301,6 +481,10 @@ pgstrom_post_planner(Query *parse,
 	PG_END_TRY();
 	hash_destroy(gpu_path_htable);
 	gpu_path_htable = gpu_path_htable_saved;
+
+	pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
+	foreach (lc, pstmt->subplans)
+		pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
 
 	return pstmt;
 }
@@ -387,6 +571,17 @@ _PG_init(void)
 	pgstrom_init_relscan();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_gpu_cache();
+
+	/* dummy custom-scan node */
+	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
+	pgstrom_dummy_path_methods.CustomName	= "Dummy";
+	pgstrom_dummy_path_methods.PlanCustomPath
+		= pgstrom_dummy_create_plan;
+
+	memset(&pgstrom_dummy_plan_methods, 0, sizeof(CustomScanMethods));
+	pgstrom_dummy_plan_methods.CustomName	= "Dummy";
+	pgstrom_dummy_plan_methods.CreateCustomScanState
+		= pgstrom_dummy_create_scan_state;
 
 	/* planner hook registration */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
