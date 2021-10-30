@@ -126,6 +126,19 @@ SELECT pgstrom.arrow_fdw_truncate('ft');
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
 
+BEGIN;
+TRUNCATE ft;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+ABORT;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
+TRUNCATE ft;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+
 --
 -- Arrow_Fdw and table partition
 --
