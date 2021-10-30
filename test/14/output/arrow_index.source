@@ -7,11 +7,11 @@ SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
 CREATE SCHEMA regtest_arrow_index_temp;
 RESET client_min_messages;
-
 SET search_path = regtest_arrow_index_temp,public;
-
 -- Prepare data for arrow index test
 SELECT pgstrom.random_setseed(20210905);
+ 
+
 CREATE TABLE arrow_index_data (
   id         int,
   int_num         int,
@@ -21,7 +21,6 @@ CREATE TABLE arrow_index_data (
   time_num        time,
   timestamp_num   timestamp
 );
-
 INSERT INTO arrow_index_data (
     SELECT x,   -- int_num
         pgstrom.random_int(0, -16777216, 16777216),   -- int_num
@@ -31,45 +30,127 @@ INSERT INTO arrow_index_data (
         pgstrom.random_time(0),              -- time_num
         pgstrom.random_timestamp(0)                     -- date_num
     FROM generate_series(1,1000000) x);
-
 -- ORDER BY date_num
-
 -- Pick a record to search.
 CREATE TABLE target_num AS SELECT * FROM arrow_index_data WHERE id=500000;
-
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o @abs_builddir@/test_arrow_index.data --stat=date_num
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_index_temp
 OPTIONS (file '@abs_builddir@/test_arrow_index.data');
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=239 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=80 loops=3)
+         Filter: (date_num = $0)
+         Rows Removed by Filter: 107466
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: date_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
+
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE date_num between '2019-04-14' and '2023-05-23') as is_ok FROM regtest_arrow WHERE date_num between '2019-04-14' and '2023-05-23';
+ t
 
 -- ORDER BY int_num
-
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data --stat=int_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=2 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=1 loops=3)
+         Filter: (int_num = $0)
+         Rows Removed by Filter: 107545
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: int_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
+
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE int_num between -50000 and 50000) as is_ok FROM regtest_arrow WHERE int_num between -50000 and 50000;
+ t
 
 -- ORDER BY float
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o @abs_builddir@/test_arrow_index.data --stat=float_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=0 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (float_num = $0)
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: float_num  [loaded: 0, skipped: 4]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
+
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE float_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE float_num between -5000 and 5000;
+ t
 
 -- ORDER BY decimal
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o @abs_builddir@/test_arrow_index.data --stat=decimal_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=0 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (decimal_num = $0)
+         Rows Removed by Filter: 107546
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: decimal_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
+
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE decimal_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE decimal_num between -5000 and 5000;
+ t
 
 -- ORDER BY time
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o @abs_builddir@/test_arrow_index.data --stat=time_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (time_num = $0)
+         Rows Removed by Filter: 107545
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: time_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
+
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE time_num between '09:00:00' and '17:00:00') as is_ok FROM regtest_arrow WHERE time_num between '09:00:00' and '17:00:00';
+ t
 
 -- ORDER BY timestamp
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o @abs_builddir@/test_arrow_index.data --stat=timestamp_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00') as is_ok FROM regtest_arrow WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (timestamp_num = $0)
+         Rows Removed by Filter: 107545
+         referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: timestamp_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
 
+SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00') as is_ok FROM regtest_arrow WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+ t
 
 DROP SCHEMA regtest_arrow_index_temp CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table arrow_index_data
+drop cascades to table target_num
+drop cascades to foreign table regtest_arrow
