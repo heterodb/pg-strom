@@ -55,7 +55,7 @@ INSERT INTO cache_test_table (
   ,pgstrom.random_int(1,-9223372036854775808,9223372036854775807)   -- d int8
   ,pgstrom.random_float(0.5, -32000, 32000)   -- e float2
   ,pgstrom.random_float(0.5, -32000, 32000)   -- f float4
-  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float8
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- g float8
   ,LEFT(MD5((x%479)::TEXT),(x%32+1)::INTEGER)     -- h text
   ,LEFT(MD5((x%479+1)::TEXT),(x%32+1)::INTEGER)     -- i text
   ,LEFT(MD5((x%479+2)::TEXT),(x%32+1)::INTEGER)     -- j text
