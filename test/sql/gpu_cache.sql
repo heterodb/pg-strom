@@ -52,7 +52,7 @@ INSERT INTO cache_test_table (
   ,pgstrom.random_int(1,-9223372036854775808,9223372036854775807)   -- d int8
   ,pgstrom.random_float(0.5, -32000, 32000)   -- e float2
   ,pgstrom.random_float(0.5, -32000, 32000)   -- f float4
-  ,pgstrom.random_float(0.5, -32000, 32000)   -- f float8
+  ,pgstrom.random_float(0.5, -32000, 32000)   -- g float8
   ,LEFT(MD5((x%479)::TEXT),(x%32+1)::INTEGER)     -- h text
   ,LEFT(MD5((x%479+1)::TEXT),(x%32+1)::INTEGER)     -- i text
   ,LEFT(MD5((x%479+2)::TEXT),(x%32+1)::INTEGER)     -- j text
@@ -245,8 +245,8 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
 ,ABS(c.d_max - n.d_max) < 1 AS d_max_ok
 ,ABS(c.d_min - n.d_min) < 1 AS d_min_ok
 ,ABS(c.e_count - n.e_count) < 1 AS e_count_ok
-,ABS(c.e_sum - n.e_sum) < 1 AS e_sum_ok
-,ABS(c.e_avg - n.e_avg) < 1 AS e_avg_ok
+,ABS(c.e_sum - n.e_sum)::double/ABS(n.e_sum) < 0.00001 AS e_sum_ok
+,ABS(c.e_avg - n.e_avg)::double/ABS(c.e_avg) < 0.00001 AS e_avg_ok
 ,ABS(c.e_max - n.e_max) < 1 AS e_max_ok
 ,ABS(c.e_min - n.e_min) < 1 AS e_min_ok
 ,ABS(c.f_count - n.f_count) < 1 AS f_count_ok
@@ -255,8 +255,8 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
 ,ABS(c.f_max - n.f_max) < 1 AS f_max_ok
 ,ABS(c.f_min - n.f_min) < 1 AS f_min_ok
 ,ABS(c.g_count - n.g_count) < 1 AS g_count_ok
-,ABS(c.g_sum - n.g_sum) < 1 AS g_sum_ok
-,ABS(c.g_avg - n.g_avg) < 1 AS g_avg_ok
+,ABS(c.g_sum - n.g_sum)::double/ABS(n.g_sum) < 0.00001 AS g_sum_ok
+,ABS(c.g_avg - n.g_avg)::double/ABS(c.g_avg) < 0.00001 AS g_avg_ok
 ,ABS(c.g_max - n.g_max) < 1 AS g_max_ok
 ,ABS(c.g_min - n.g_min) < 1 AS g_min_ok
  FROM cached_result AS c,

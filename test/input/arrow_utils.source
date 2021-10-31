@@ -1,6 +1,7 @@
 --
 -- arrow_utils - test for pg2arrow
 --
+\t on
 SET pg_strom.regression_test_mode=on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_utils_temp CASCADE;

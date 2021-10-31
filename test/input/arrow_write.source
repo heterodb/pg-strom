@@ -117,24 +117,18 @@ BEGIN;
 SELECT pgstrom.arrow_fdw_truncate('ft');
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
-
 ABORT;
-SELECT count(*) FROM ft;
-SELECT * FROM ft ORDER by id LIMIT 8;
-
-SELECT pgstrom.arrow_fdw_truncate('ft');
-SELECT count(*) FROM ft;
-SELECT * FROM ft ORDER by id LIMIT 8;
 
 BEGIN;
 TRUNCATE ft;
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
-
 ABORT;
+
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
 
+SELECT pgstrom.arrow_fdw_truncate('ft');
 TRUNCATE ft;
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
