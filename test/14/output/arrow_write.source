@@ -182,34 +182,6 @@ ERROR:  current transaction is aborted, commands ignored until end of transactio
 SELECT * FROM ft ORDER by id LIMIT 8;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 ABORT;
-SELECT count(*) FROM ft;
-    65
-
-SELECT * FROM ft ORDER by id LIMIT 8;
-  3 | -10095 |  -26620.98 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
-  6 | -27810 | -25407.672 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
-  8 | -13222 |  23282.627 |             | (-266014,o/XTO5UxSulBR+mACkz7QX9exaou3t5Lzqje13SIqjVtPL,"Mon Oct 29 01:27:48.36778 2018")   | 01-07-2015 | 13:24:40.402521
- 13 | -22777 | -48037.598 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
- 18 | -28017 |    98803.7 |  -5750.4796 | (235191,LTeNChSf0eOUAbuYxmQAajXygmqDVVBMEeVMCQ,"Sun Jul 28 23:00:06.451477 2024")           | 03-14-2016 | 23:31:54.669633
- 23 |  29018 |  -59691.65 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
- 26 |  12508 | -24710.822 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
- 28 | -25276 |   80008.08 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
-
-SELECT pgstrom.arrow_fdw_truncate('ft');
-ERROR:  PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface
-SELECT count(*) FROM ft;
-    65
-
-SELECT * FROM ft ORDER by id LIMIT 8;
-  3 | -10095 |  -26620.98 | -67417.3053 | (242887,Lrq1umneapWcZulWb/PnJCmJjSQSWL7/rRYxqkbcyZzJh86my,"Sun Aug 06 02:10:06.71387 2017") | 07-31-2021 | 17:11:18.812947
-  6 | -27810 | -25407.672 |  82034.2716 | (-155203,7/OIeqVUCZB/O5,"Mon Sep 09 01:21:42.707116 2024")                                  | 09-20-2021 | 02:47:39.890506
-  8 | -13222 |  23282.627 |             | (-266014,o/XTO5UxSulBR+mACkz7QX9exaou3t5Lzqje13SIqjVtPL,"Mon Oct 29 01:27:48.36778 2018")   | 01-07-2015 | 13:24:40.402521
- 13 | -22777 | -48037.598 |  86041.7558 | (-127706,BGITiibZjpfw2OK,"Tue Dec 10 02:11:25.925611 2024")                                 | 01-29-2024 | 05:04:37.74667
- 18 | -28017 |    98803.7 |  -5750.4796 | (235191,LTeNChSf0eOUAbuYxmQAajXygmqDVVBMEeVMCQ,"Sun Jul 28 23:00:06.451477 2024")           | 03-14-2016 | 23:31:54.669633
- 23 |  29018 |  -59691.65 |  67948.9983 | (-130673,Elbhl+kQVqAHgkNT6dyikHMT6DX0UJAe+nnFmm,"Tue Mar 22 08:43:56.886713 2016")          | 09-16-2020 | 09:41:45.675773
- 26 |  12508 | -24710.822 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
- 28 | -25276 |   80008.08 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
-
 BEGIN;
 TRUNCATE ft;
 SELECT count(*) FROM ft;
@@ -231,6 +203,8 @@ SELECT * FROM ft ORDER by id LIMIT 8;
  26 |  12508 | -24710.822 |  46079.7816 | (262302,layCmHNTBAOr/7NPBWgBz6n6I5yAN/xgqiMLp,"Fri Jun 17 17:07:50.419938 2022")            | 10-27-2018 | 08:16:35.188467
  28 | -25276 |   80008.08 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
 
+SELECT pgstrom.arrow_fdw_truncate('ft');
+ERROR:  PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface
 TRUNCATE ft;
 SELECT count(*) FROM ft;
      0
