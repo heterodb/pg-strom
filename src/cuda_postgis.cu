@@ -796,6 +796,8 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	POINT2D			pt;
 	cl_uint			unitsz;
 	const char	   *rawdata;
+	double			xmin, xmax;
+	double			ymin, ymax;
 	pg_geometry_t	temp;
 	const char	   *pos;
 
@@ -811,30 +813,28 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	if (geom->type == GEOM_POINTTYPE)
 	{
 		__loadPoint2d(&pt, geom->rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
-		return true;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 	}
 	else if (geom->type == GEOM_LINETYPE)
 	{
 		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
 
 		rawdata = __loadPoint2d(&pt, geom->rawdata, unitsz);
-		bbox->xmax = bbox->xmin = pt.x;
-        bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i = 1; i < geom->nitems; i++)
 		{
 			rawdata = __loadPoint2d(&pt, rawdata, unitsz);
-			if (bbox->xmax < pt.x)
-				bbox->xmax = pt.x;
-			if (bbox->xmin > pt.x)
-				bbox->xmin = pt.x;
-			if (bbox->ymax < pt.y)
-				bbox->ymax = pt.y;
-			if (bbox->ymin > pt.y)
-				bbox->ymin = pt.y;
+			if (xmax < pt.x)
+				xmax = pt.x;
+			if (xmin > pt.x)
+				xmin = pt.x;
+			if (ymax < pt.y)
+				ymax = pt.y;
+			if (ymin > pt.y)
+				ymin = pt.y;
 		}
-		return true;
 	}
 	else if (geom->type == GEOM_MULTIPOINTTYPE)
 	{
@@ -842,24 +842,23 @@ __geometry_get_bbox2d(kern_context *kcxt,
 		if (!pos)
 			return false;
 		__loadPoint2d(&pt, temp.rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
 			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
 			if (!pos)
 				return false;
 			__loadPoint2d(&pt, temp.rawdata, 0);
-			if (bbox->xmax < pt.x)
-				bbox->xmax = pt.x;
-			if (bbox->xmin > pt.x)
-				bbox->xmin = pt.x;
-			if (bbox->ymax < pt.y)
-				bbox->ymax = pt.y;
-			if (bbox->ymin > pt.y)
-				bbox->ymin = pt.y;
+			if (xmax < pt.x)
+				xmax = pt.x;
+			if (xmin > pt.x)
+				xmin = pt.x;
+			if (ymax < pt.y)
+				ymax = pt.y;
+			if (ymin > pt.y)
+				ymin = pt.y;
 		}
-		return true;
 	}
 	else if (geom->type == GEOM_MULTILINETYPE)
 	{
@@ -869,8 +868,8 @@ __geometry_get_bbox2d(kern_context *kcxt,
 		if (!pos)
 			return false;
 		__loadPoint2d(&pt, temp.rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
 			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
@@ -880,19 +879,27 @@ __geometry_get_bbox2d(kern_context *kcxt,
 			for (int j=0; j < temp.nitems; j++)
 			{
 				rawdata = __loadPoint2d(&pt, rawdata, unitsz);
-				if (bbox->xmax < pt.x)
-					bbox->xmax = pt.x;
-				if (bbox->xmin > pt.x)
-					bbox->xmin = pt.x;
-				if (bbox->ymax < pt.y)
-					bbox->ymax = pt.y;
-				if (bbox->ymin > pt.y)
-					bbox->ymin = pt.y;
+				if (xmax < pt.x)
+					xmax = pt.x;
+				if (xmin > pt.x)
+					xmin = pt.x;
+				if (ymax < pt.y)
+					ymax = pt.y;
+				if (ymin > pt.y)
+					ymin = pt.y;
 			}
 		}
-		return true;
 	}
-	return false;
+	else
+	{
+		return false;	/* not a supported type */
+	}
+	bbox->xmin = __double2float_rd(xmin);
+	bbox->xmax = __double2float_ru(xmax);
+	bbox->ymin = __double2float_rd(ymin);
+	bbox->ymax = __double2float_ru(ymax);
+
+	return true;
 }
 
 DEVICE_INLINE(cl_bool)

@@ -1048,7 +1048,6 @@ __makeFlattenHeapTuple(Relation rel, HeapTuple tuple)
 	uint32			hoff, diff;
 	int				alignval;
 	Datum			zero = 0;
-	bool			flatten = false;
 
 	/* shortcut path, if no varlena attributes */
 	if (!HeapTupleHasVarWidth(tuple))
