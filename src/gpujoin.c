@@ -1205,333 +1205,67 @@ match_funcclause_to_indexcol(PlannerInfo *root,
 	return NULL;
 }
 
-typedef struct
-{
-	PlannerInfo	   *root;
-	IndexOptInfo   *index;
-	AttrNumber		indexcol;
-	List		   *pseudo_tlist;
-	bool			build_pseudo_tlist;
-	bool			is_valid;
-} fixup_gist_clause_for_device_context;
-
-/*
- * Replace the functions / operators if argument types are mismatch
- * for index references.
- * In case when GiST-index reference, index relation can have different
- * data type from the indexed column on the heap, FuncExpr / OpExpr in
- * the expression tree generates wrong device code.
- * For example, '&&' operator of geometry type also references box2df
- * type on the IndexTuple. So, we have to inject another function that
- * takes box2df and geometry arguments.
- *
- * TODO: it should be at a separated file from gpujoin.c?
- */
-typedef struct altfunc_catalog_t {
-	const char *func_library;	/* NULL, if internal functions */
-	const char *func_signature;
-	const char *altfunc_library;
-	const char *altfunc_name;
-	const char *altfunc_args;
-} altfunc_catalog_t;
-
-#define PGSTROM		"$libdir/pg_strom"
-#define POSTGIS3	"$libdir/postgis-3"
-static altfunc_catalog_t	altfunc_common_catalog[] = {
-	{ POSTGIS3, "geometry_overlaps(geometry,geometry)",
-	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
-	{ POSTGIS3, "geometry_overlaps(geometry,geometry)",
-	  POSTGIS3, "overlaps_2d", "(box2df,geometry)" },
-	{ POSTGIS3, "geometry_contains(geometry,geometry)",
-	  POSTGIS3, "contains_2d", "(box2df,geometry)" },
-	{ POSTGIS3, "geometry_within(geometry,geometry)",
-	  POSTGIS3, "is_contained_2d", "(box2df,geometry)" },
-	{ NULL, NULL, NULL },
-};
-#undef POSTGIS3
-#undef PGSTROM
-
-static Node *
-__fixup_gist_device_funcion_if_mismatch(Oid func_oid,
-										Oid func_rettype,
-										List *func_args,
-										Oid func_collid,
-										Oid input_collid)
-{
-	StringInfoData	sig;
-	StringInfoData	arg;
-	HeapTuple		tup;
-	Form_pg_proc	proc;
-	const char	   *proc_lib = NULL;
-	oidvector	   *alt_argtypes;
-	size_t			sz;
-	ListCell	   *lc;
-	int				i, j;
-	Node		   *retval = NULL;
-
-	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	proc = (Form_pg_proc) GETSTRUCT(tup);
-	Assert(proc->pronargs == proc->proargtypes.dim1);
-	proc_lib = get_proc_library(tup);
-	if (proc_lib == (void *)(~0UL))
-		goto out;
-
-	/*
-	 * If function's argument list is fully compatible, no need to
-	 * replace the function call.
-	 */
-	if (list_length(func_args) == proc->pronargs)
-	{
-		i = 0;
-		foreach (lc, func_args)
-		{
-			Oid		__typeid = exprType(lfirst(lc));
-
-			if (!IsBinaryCoercible(__typeid, proc->proargtypes.values[i]))
-				break;
-			i++;
-		}
-		if (!lc)
-			goto out;
-	}
-
-	/*
-	 * construct a function signature string based on the system catalog
-	 */
-	initStringInfo(&sig);
-	appendStringInfo(&sig, "%s(", NameStr(proc->proname));
-	for (i=0; i < proc->pronargs; i++)
-	{
-		appendStringInfo(&sig, "%s%s", i==0 ? "" : ",",
-						 get_type_name(proc->proargtypes.values[i], false));
-	}
-	appendStringInfoChar(&sig, ')');
-
-	/* Also, signature of actual data types */
-	sz = offsetof(oidvector, values[list_length(func_args)]);
-	alt_argtypes = alloca(sz);
-	memset(alt_argtypes, 0, sz);
-	alt_argtypes->ndim = 1;
-	alt_argtypes->dataoffset = 0;
-	alt_argtypes->elemtype = OIDOID;
-	alt_argtypes->dim1 = list_length(func_args);
-	alt_argtypes->lbound1 = 0;
-
-	initStringInfo(&arg);
-	appendStringInfoChar(&arg, '(');
-	i = 0;
-	foreach (lc, func_args)
-	{
-		Oid			__typeid = exprType(lfirst(lc));
-
-		appendStringInfo(&arg, "%s%s", i==0 ? "" : ",",
-						 get_type_name(__typeid, false));
-		alt_argtypes->values[i++] = __typeid;
-	}
-	appendStringInfoChar(&arg, ')');
-
-	/*
-	 * Lookup alternative function, if any
-	 */
-	for (i=0; altfunc_common_catalog[i].func_signature != NULL; i++)
-	{
-		const char *func_lib = altfunc_common_catalog[i].func_library;
-		const char *func_sig = altfunc_common_catalog[i].func_signature;
-		const char *alt_lib  = altfunc_common_catalog[i].altfunc_library;
-		const char *alt_name = altfunc_common_catalog[i].altfunc_name;
-		const char *alt_args = altfunc_common_catalog[i].altfunc_args;
-
-		if ((!proc_lib ? !func_lib : strcmp(proc_lib, func_lib) == 0) &&
-			strcmp(func_sig, sig.data) == 0 &&
-			strcmp(alt_args, arg.data) == 0)
-		{
-			CatCList   *catlist;
-
-			catlist = SearchSysCacheList2(PROCNAMEARGSNSP,
-										  CStringGetDatum(alt_name),
-										  PointerGetDatum(alt_argtypes));
-			for (j=0; j < catlist->n_members; i++)
-			{
-				HeapTuple	__tup = &catlist->members[j]->tuple;
-				Form_pg_proc __proc = (Form_pg_proc) GETSTRUCT(__tup);
-				char	   *__lib_name;
-
-				/*
-				 * note: proname and proargtypes should be already matched,
-				 * so all we need to check here is library name.
-				 */
-				__lib_name = get_proc_library(__tup);
-				if (__lib_name == (void *)(~0UL))
-					continue;
-				if (!alt_lib ? !__lib_name : strcmp(alt_lib, __lib_name) == 0)
-				{
-					/* Ok, it is the alternative function we are looking for */
-					retval = (Node *)makeFuncExpr(PgProcTupleGetOid(__tup),
-												  __proc->prorettype,
-												  func_args,
-												  func_collid,
-												  input_collid,
-												  COERCE_EXPLICIT_CALL);
-					ReleaseSysCacheList(catlist);
-					goto out;
-				}
-			}
-			ReleaseSysCacheList(catlist);
-		}
-	}
-out:
-	ReleaseSysCache(tup);
-	return retval;
-}
-
-static Node *
-__fixup_gist_clause_for_device_walker(Node *node, void *__context)
-{
-	fixup_gist_clause_for_device_context *con = __context;
-	Node	   *newnode;
-	TargetEntry	*tle;
-
-	if (!node)
-		return NULL;
-	if (match_index_to_operand(node, con->indexcol, con->index))
-	{
-		IndexOptInfo *index = con->index;
-		AttrNumber	indexcol = con->indexcol;
-		Oid			raw_typid;
-		int32		raw_typmod;
-		Oid			raw_collid;
-		Var		   *ivar;
-
-		get_atttypetypmodcoll(index->indexoid,
-							  indexcol+1,
-							  &raw_typid,
-							  &raw_typmod,
-							  &raw_collid);
-		ivar = makeVar(INDEX_VAR,
-					   indexcol+1,
-					   raw_typid,
-					   raw_typmod,
-					   raw_collid, 0);
-		if (con->build_pseudo_tlist)
-		{
-			tle = makeTargetEntry((Expr *)ivar,
-								  list_length(con->pseudo_tlist) + 1,
-								  NULL,
-								  false);
-			con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
-		}
-		return (Node *)ivar;
-	}
-
-	if (con->build_pseudo_tlist)
-	{
-		RelOptInfo *rel = con->index->rel;
-		Relids		varnos = pull_varnos_of_level(con->root, node, 0);
-
-		if (!bms_overlap(varnos, rel->relids))
-		{
-			if (!IsA(node, Var))
-			{
-				List	   *subvars = pull_vars_of_level(node, 0);
-				ListCell   *lc;
-
-				foreach (lc, subvars)
-				{
-					Var	   *svar = lfirst(lc);
-
-					tle = makeTargetEntry((Expr *)copyObject(svar),
-										  list_length(con->pseudo_tlist) + 1,
-										  NULL,
-										  true);
-					con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
-				}
-			}
-			tle = makeTargetEntry((Expr *)copyObject(node),
-								  list_length(con->pseudo_tlist) + 1,
-								  NULL,
-								  false);
-			con->pseudo_tlist = lappend(con->pseudo_tlist, tle);
-			return (Node *)makeVar(OUTER_VAR,
-								   tle->resno,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node), 0);
-		}
-	}
-	newnode = expression_tree_mutator(node,
-									  __fixup_gist_clause_for_device_walker,
-									  __context);
-	if (IsA(newnode, FuncExpr))
-	{
-		FuncExpr   *fn = (FuncExpr *)newnode;
-		Node	   *altnode;
-
-		altnode = __fixup_gist_device_funcion_if_mismatch(fn->funcid,
-														  fn->funcresulttype,
-														  fn->args,
-														  fn->funccollid,
-														  fn->inputcollid);
-		if (altnode)
-			return altnode;
-	}
-	else if (IsA(newnode, OpExpr))
-	{
-		OpExpr	   *op = (OpExpr *)newnode;
-		Node	   *altnode;
-
-		set_opfuncid(op);
-		altnode = __fixup_gist_device_funcion_if_mismatch(op->opfuncid,
-														  op->opresulttype,
-														  op->args,
-														  op->opcollid,
-														  op->inputcollid);
-		if (altnode)
-			return altnode;
-	}
-	return newnode;
-}
-
-static Expr *
+static devindex_info *
 fixup_gist_clause_for_device(PlannerInfo *root,
 							 IndexOptInfo *index,
 							 AttrNumber indexcol,
-							 Expr *clause,
-							 List **p_pseudo_tlist)
+							 OpExpr *op,
+							 Var  **p_ivar,
+							 Expr **p_iarg)
 {
-	fixup_gist_clause_for_device_context con;
-	Node	   *result;
+	devindex_info *dindex;
+	Oid			opfamily = index->opfamily[indexcol];
+	Var		   *ivar;
+	Expr	   *iarg;
+	Oid			raw_typid;
+	int32		raw_typmod;
+	Oid			raw_collid;
 
-	if (clause)
-	{
-		memset(&con, 0, sizeof(con));
-		con.root = root;
-		con.index = index;
-		con.indexcol = indexcol;
-		con.pseudo_tlist = NIL;
-		con.build_pseudo_tlist = (p_pseudo_tlist != NULL);
-		con.is_valid = true;
+	if (!op || !IsA(op, OpExpr) || list_length(op->args) != 2)
+		return NULL;
+	dindex = pgstrom_devindex_lookup(op->opno, opfamily);
+	if (!dindex)
+		return NULL;
 
-		result = __fixup_gist_clause_for_device_walker((Node *)clause, &con);
-		if (con.is_valid)
-		{
-			if (p_pseudo_tlist)
-				*p_pseudo_tlist = con.pseudo_tlist;
-			return (Expr *)result;
-		}
-	}
+	if (match_index_to_operand((Node *)linitial(op->args),
+							   indexcol, index))
+		iarg = lsecond(op->args);
+	else if (match_index_to_operand((Node *)lsecond(op->args),
+									indexcol, index))
+		iarg = linitial(op->args);
+	else
+		return NULL;
 
-	if (p_pseudo_tlist)
-		*p_pseudo_tlist = con.pseudo_tlist;
-	return NULL;
+	/*
+	 * Replace the index expression by Var-node
+	 */
+	get_atttypetypmodcoll(index->indexoid,
+						  indexcol + 1,
+						  &raw_typid,
+						  &raw_typmod,
+						  &raw_collid);
+	if (dindex->ivar_dtype->type_oid != raw_typid)
+		return NULL;	/* type mismatch */
+	ivar = makeVar(INDEX_VAR,
+				   indexcol + 1,
+				   raw_typid,
+				   raw_typmod,
+				   raw_collid, 0);
+	Assert(dindex->iarg_dtype->type_oid == exprType((Node *)iarg));
+
+	if (p_ivar)
+		*p_ivar = ivar;
+	if (p_iarg)
+		*p_iarg = iarg;
+	return dindex;
 }
 
 static Expr *
 match_clause_to_index(PlannerInfo *root,
 					  IndexOptInfo *index,
 					  AttrNumber indexcol,
-					  List *restrict_clauses)
+					  List *restrict_clauses,
+					  Selectivity *p_selectivity)
 {
 	RelOptInfo *heap_rel = index->rel;
 	ListCell   *lc;
@@ -1544,8 +1278,8 @@ match_clause_to_index(PlannerInfo *root,
 	{
 		RestrictInfo *rinfo = lfirst(lc);
 		Expr	   *expr = NULL;
-		Expr	   *dev_expr;
-		Selectivity	__selectivity;
+		Var		   *ivar = NULL;
+		Expr	   *iarg = NULL;
 
 		if (rinfo->pseudoconstant ||
 			!restriction_is_securely_promotable(rinfo, heap_rel))
@@ -1557,14 +1291,19 @@ match_clause_to_index(PlannerInfo *root,
 		else if (IsA(rinfo->clause, FuncExpr))
 			expr = match_funcclause_to_indexcol(root, rinfo, index, indexcol);
 
-		dev_expr = fixup_gist_clause_for_device(root, index, indexcol, expr, NULL);
-		if (dev_expr && pgstrom_device_expression(root, NULL, dev_expr))
+		if (fixup_gist_clause_for_device(root, index, indexcol,
+										 (OpExpr *)expr,
+										 &ivar,
+										 &iarg) != NULL &&
+			pgstrom_device_expression(root, NULL, (Expr *)ivar) &&
+			pgstrom_device_expression(root, NULL, (Expr *)iarg))
 		{
-			__selectivity = clauselist_selectivity(root,
-												   list_make1(expr),
-												   heap_rel->relid,
-												   JOIN_INNER,
-												   NULL);
+			Selectivity	__selectivity
+				= clauselist_selectivity(root,
+										 list_make1(expr),
+										 heap_rel->relid,
+										 JOIN_INNER,
+										 NULL);
 			if (!clause || selectivity > __selectivity)
 			{
 				clause = expr;
@@ -1572,6 +1311,8 @@ match_clause_to_index(PlannerInfo *root,
 			}
 		}
 	}
+	if (clause)
+		*p_selectivity = selectivity;
 	return clause;
 }
 
@@ -1600,7 +1341,6 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 	foreach (lc, inner_rel->indexlist)
 	{
 		IndexOptInfo   *curr_index = (IndexOptInfo *) lfirst(lc);
-		List		   *curr_clauses = NIL;
 #if PG_VERSION_NUM < 110000
 		int				nkeycolumns = curr_index->ncolumns;
 #else
@@ -1620,32 +1360,18 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 
 		for (indexcol = 0; indexcol < nkeycolumns; indexcol++)
 		{
-			Expr   *clause = match_clause_to_index(root,
-												   curr_index,
-												   indexcol,
-												   restrict_clauses);
-			if (clause)
-				curr_clauses = lappend(curr_clauses, clause);
-			else
-			{
-				curr_clauses = NIL;
-				break;
-			}
-		}
+			Selectivity	curr_selectivity = 1.0;
+			Expr	   *clause;
 
-		if (curr_clauses)
-		{
-			Selectivity	curr_selectivity;
-
-			curr_selectivity = clauselist_selectivity(root,
-													  curr_clauses,
-													  inner_rel->relid,
-													  JOIN_INNER,
-													  NULL);
-			if (!gist_index || gist_selectivity > curr_selectivity)
+			clause = match_clause_to_index(root,
+										   curr_index,
+										   indexcol,
+										   restrict_clauses,
+										   &curr_selectivity);
+			if (clause && (!gist_index || gist_selectivity > curr_selectivity))
 			{
 				gist_index = curr_index;
-				gist_clauses = curr_clauses;
+				gist_clauses = list_make1(clause);
 				gist_selectivity = curr_selectivity;
 			}
 		}
@@ -4886,37 +4612,42 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 {
 	IndexOptInfo   *gist_index = gj_path->inners[depth-1].gist_index;
 	List		   *gist_clauses = gj_path->inners[depth-1].gist_clauses;
-	List		   *pseudo_tlist_saved = context->pseudo_tlist;
-	List		   *pseudo_tlist = NIL;
-	List		   *device_clauses;
 	List		   *kvars_list = NIL;
+	List		   *kvars_orig = NIL;
 	AttrNumber		indexcol = 0;
+	devindex_info  *dindex;
 	devtype_info   *dtype;
+	Var			   *i_var = NULL;
+	Expr		   *i_arg = NULL;
+	Oid				type_oid;
 	StringInfoData	body;
 	StringInfoData	decl;
 	StringInfoData	temp;
-	StringInfoData	alias;
 	StringInfoData	unalias;
 	ListCell	   *cell;
 
 	initStringInfo(&body);
 	initStringInfo(&decl);
 	initStringInfo(&temp);
-	initStringInfo(&alias);
 	initStringInfo(&unalias);
 
-	device_clauses = (List *)
-		fixup_gist_clause_for_device(root,
-									 gist_index,
-									 indexcol,
-									 (Expr *)gist_clauses,
-									 &pseudo_tlist);
-	context->pseudo_tlist = pseudo_tlist;
+	dindex = fixup_gist_clause_for_device(root,
+										  gist_index,
+										  indexcol,  //FIXME
+										  (OpExpr *)linitial(gist_clauses),
+										  &i_var,
+										  &i_arg);
+	kvars_orig = pull_var_clause((Node *)i_arg, 0);
 
 	/*
 	 * Build up the GpuJoinGiSTKeysDepth%u structure, and
 	 * GiST key variables to be loaded.
 	 */
+	type_oid = exprType((Node *)i_arg);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype)
+		elog(ERROR, "device type \"%s\" not found",
+			 format_type_be(type_oid));
 	appendStringInfo(
 		source,
 		"/* ------------------------------------------------\n"
@@ -4924,82 +4655,71 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 		" * GiST-Index support routines (depth=%u)\n"
 		" *\n"
 		" * ------------------------------------------------ */\n"
-		"typedef struct GpuJoinGiSTKeysDepth%u_s {\n",
-		depth, depth);
-	foreach (cell, pseudo_tlist)
+		"typedef struct GpuJoinGiSTKeysDepth%u_s {\n"
+		"  pg_%s_t INDEX_ARG;\n"
+		"} GpuJoinGiSTKeysDepth%u_t;\n",
+		depth,
+		depth, dtype->type_name,
+		depth);
+	context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+
+	foreach (cell, kvars_orig)
 	{
-		TargetEntry *tle = lfirst(cell);
-		Oid			type_oid;
+		Var		   *kvar = lfirst(cell);
+		bool		found = false;
+		ListCell   *lc1, *lc2, *lc3;
 
-		if (IsA(tle->expr, Var) && ((Var *)tle->expr)->varno == INDEX_VAR)
-			continue;		/* skip references to index tuple */
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
+		dtype = pgstrom_devtype_lookup(kvar->vartype);
 		if (!dtype)
 			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(type_oid));
-		if (!tle->resjunk)
-		{
-			appendStringInfo(
-				source,
-				"  pg_%s_t  __KVAR_%u;\n",
-				dtype->type_name, tle->resno);
-			appendStringInfo(
-				&alias,
-				"#define KVAR_%u ((keys)->__KVAR_%u)\n", tle->resno, tle->resno);
-			appendStringInfo(
-				&unalias,
-				"#undef  KVAR_%u\n", tle->resno);
+				 format_type_be(kvar->vartype));
 
-			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
-		}
-		else
+		forthree (lc1, context->pseudo_tlist,
+				  lc2, gj_info->ps_src_depth,
+				  lc3, gj_info->ps_src_resno)
 		{
-			/* temporary variable for expression calculation */
-			Assert(IsA(tle->expr, Var));
-			appendStringInfo(
-				&decl,
-				"  pg_%s_t  KVAR_%u;\n",
-				dtype->type_name, tle->resno);
-		}
+			TargetEntry *tle = lfirst(lc1);
+			int		src_depth = lfirst_int(lc2);
+			int		src_resno = lfirst_int(lc3);
+			Var	   *varnode;
 
-		if (IsA(tle->expr, Var))
-		{
-			Var		   *kvar = (Var *)tle->expr;
-			Var		   *keynode = NULL;
-			ListCell   *lc1, *lc2, *lc3;
-
-			forthree (lc1, pseudo_tlist_saved,
-					  lc2, gj_info->ps_src_depth,
-					  lc3, gj_info->ps_src_resno)
+			if (equal(tle->expr, kvar))
 			{
-				TargetEntry *__tle = lfirst(lc1);
-				int			src_depth = lfirst_int(lc2);
-				int			src_resno = lfirst_int(lc3);
+				varnode = makeVar(src_depth,
+								  src_resno,
+								  kvar->vartype,
+								  kvar->vartypmod,
+								  kvar->varcollid,
+								  kvar->varlevelsup);
+				varnode->varattnosyn = tle->resno;
+				if (src_depth < 0 || src_depth >= depth)
+					elog(ERROR, "Bug? device varnode out of range");
+				kvars_list = lappend(kvars_list, varnode);
 
-				if (equal(__tle->expr, kvar))
+				if (i_arg == (Expr *)kvar)
 				{
-					keynode = copyObject(kvar);
-					keynode->varno = src_depth;
-					keynode->varattno = src_resno;
-					keynode->varattnosyn = tle->resno;
-					if (src_depth < 0 || src_depth >= depth)
-						elog(ERROR, "Bug? device varnode out of range");
-					kvars_list = list_append_unique(kvars_list, keynode);
-					break;
+					appendStringInfo(source,
+									 "#define KVAR_%u ((keys)->INDEX_ARG)\n",
+									 tle->resno);
+					appendStringInfo(&unalias,
+									 "#undef KVAR_%u\n",
+									 tle->resno);
 				}
+				else
+				{
+					appendStringInfo(&decl,
+									 "  pg_%s_t  KVAR_%u;\n",
+									 dtype->type_name,
+									 tle->resno);
+				}
+				found = true;
+				break;
 			}
-			if (!keynode)
-				elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
-					 nodeToString(kvar));
 		}
+		if (!found)
+			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
+				 nodeToString(kvar));
 	}
-	appendStringInfo(
-		source,
-		"} GpuJoinGiSTKeysDepth%u_t;\n"
-		"%s\n",
-		depth, alias.data);
 
 	/*
 	 * Function to load GiST key variables
@@ -5009,26 +4729,18 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	resetStringInfo(&context->decl_temp);
 
 	pgstrom_codegen_var_declarations(&body, depth, kvars_list);
-	/* expressions if any */
-	foreach (cell, pseudo_tlist)
+	if (!IsA(i_arg, Var))
 	{
-		TargetEntry	*tle = lfirst(cell);
-		char	   *code;
-
-		if (tle->resjunk)
-			continue;
-		if (IsA(tle->expr, Var))
-			continue;
-		code = pgstrom_codegen_expression((Node *)tle->expr, context);
 		appendStringInfo(
 			&body,
-			"  KVAR_%u = %s;\n",
-			tle->resno, code);
+			"  keys->INDEX_ARG = %s;\n",
+			pgstrom_codegen_expression((Node *)i_arg, context));
 	}
 	pgstrom_codegen_param_declarations(&decl, context);
 
 	appendStringInfo(
 		source,
+		"\n"
 		"STATIC_FUNCTION(cl_bool)\n"
         "gpujoin_gist_load_keys_depth%d(kern_context *kcxt,\n"
         "                              kern_multirels *kmrels,\n"
@@ -5055,51 +4767,31 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	 */
 	resetStringInfo(&decl);
 	resetStringInfo(&body);
-	context->used_vars = NIL;
-    context->param_refs = NULL;
-    resetStringInfo(&context->decl_temp);
 
-	foreach (cell, pseudo_tlist)
-	{
-		TargetEntry *tle = lfirst(cell);
-		Var			*ivar = (Var *)tle->expr;
-
-		if (tle->resjunk || !IsA(ivar, Var) || ivar->varno != INDEX_VAR)
-			continue;
-		dtype = pgstrom_devtype_lookup(ivar->vartype);
-		if (!dtype)
-			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(ivar->vartype));
-		appendStringInfo(
-			&decl,
-			"  pg_%s_t KVAR_%u;\n",
-			dtype->type_name, tle->resno);
-	}
+	dtype = pgstrom_devtype_lookup(i_var->vartype);
+	if (!dtype)
+		elog(ERROR, "device type \"%s\" not found",
+			 format_type_be(i_var->vartype));
+	appendStringInfo(
+		&decl,
+		"  pg_%s_t KVAR_%u;\n",
+		dtype->type_name, i_var->varattnosyn);
 
 	appendStringInfoString(
 		&body,
 		"  EXTRACT_INDEX_TUPLE_BEGIN(addr, kds_gist, itup);\n");
 	for (indexcol=0; indexcol < gist_index->ncolumns; indexcol++)
 	{
-		foreach (cell, pseudo_tlist)
+		if (i_var->varno == INDEX_VAR &&
+			i_var->varattno == indexcol + 1)
 		{
-			TargetEntry *tle = lfirst(cell);
-			Var			*ivar = (Var *)tle->expr;
-
-			if (!tle->resjunk &&
-				IsA(ivar, Var) &&
-				ivar->varno == INDEX_VAR &&
-				ivar->varattno == indexcol+1)
-			{
-				appendStringInfo(
-					&body,
-					"%s"
-					"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
-					temp.data,
-					tle->resno);
-				resetStringInfo(&temp);
-				break;
-			}
+			appendStringInfo(
+				&body,
+				"%s"
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
+				temp.data,
+				i_var->varattnosyn);
+			break;
 		}
 		appendStringInfoString(
 			&temp,
@@ -5109,65 +4801,35 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 		&body,
 		"  EXTRACT_INDEX_TUPLE_END();\n\n");
 
-	/* fixup pseudo_tlist for expression */
-	context->pseudo_tlist = NIL;
-	foreach (cell, pseudo_tlist)
-	{
-		TargetEntry *tle = lfirst(cell);
-		Var			*pvar = (Var *)tle->expr;
-
-		if (!tle->resjunk &&
-			(!IsA(pvar, Var) || pvar->varno != INDEX_VAR))
-		{
-			Var	   *var = makeVar(OUTER_VAR,
-								  tle->resno,
-								  exprType((Node *)tle->expr),
-								  exprTypmod((Node *)tle->expr),
-								  exprCollation((Node *)tle->expr), 0);
-			tle = makeTargetEntry((Expr *)var, tle->resno, NULL, false);
-		}
-		context->pseudo_tlist = lappend(context->pseudo_tlist, tle);
-	}
-
-	foreach (cell, device_clauses)
-	{
-		Expr   *clause = lfirst(cell);
-
-		appendStringInfo(
-			&body,
-			"  if (!EVAL(%s))\n"
-			"    return false;\n",
-			pgstrom_codegen_expression((Node *)clause, context));
-	}
-	pgstrom_codegen_param_declarations(&decl, context);
-	
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_bool)\n"
 		"gpujoin_gist_index_quals_depth%u(kern_context *kcxt,\n"
 		"                                kern_data_store *kds_gist,\n"
+		"                                PageHeaderData *gist_page,\n"
 		"                                IndexTupleData *itup,\n"
 		"                                void *__keys)\n"
 		"{\n"
 		"  GpuJoinGiSTKeysDepth%u_t *keys = (GpuJoinGiSTKeysDepth%u_t *)__keys;\n"
 		"  char *addr;\n"
-		"%s\n"
-		"%s\n"
-		"  return true;\n"
+		"%s\n%s"
+		"  if (pgindex_%s(kcxt, gist_page, KVAR_%u, keys->INDEX_ARG))\n"
+		"    return true;\n"
+		"  return false;\n"
 		"}\n",
 		depth,
 		depth, depth,
 		decl.data,
-		body.data);
+		body.data,
+		dindex->index_fname,
+		i_var->varattnosyn);
 	appendStringInfo(source, "%s\n", unalias.data);
 
 	/* cleanup */
 	pfree(decl.data);
 	pfree(body.data);
 	pfree(temp.data);
-	pfree(alias.data);
 	pfree(unalias.data);
-	context->pseudo_tlist = pseudo_tlist_saved;
 }
 
 /*
@@ -5940,6 +5602,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"gpujoin_gist_index_quals(kern_context *kcxt,\n"
 		"                         cl_int depth,\n"
 		"                         kern_data_store *kds_gist,\n"
+		"                         PageHeaderData *gist_page,\n"
 		"                         IndexTupleData *itup,\n"
 		"                         void *gist_keys)\n"
 		"{\n");
@@ -5952,6 +5615,7 @@ gpujoin_codegen(PlannerInfo *root,
 			"  if (depth == %u)\n"
 			"    return gpujoin_gist_index_quals_depth%u(kcxt,\n"
 			"                                          kds_gist,\n"
+			"                                          gist_page,\n"
 			"                                          itup,\n"
 			"                                          gist_keys);\n",
 			depth+1, depth+1);

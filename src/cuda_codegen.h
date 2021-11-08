@@ -135,6 +135,23 @@ typedef struct devcast_info {
 } devcast_info;
 
 /*
+ * devindex_info - handler information of device GiST index
+ */
+typedef struct devindex_info {
+	dlist_node		chain;
+	uint32			hashvalue;
+	const char	   *oper_extension;
+	Oid				opcode;
+	Oid				opfamily;
+	int16			opstrategy;
+	const char	   *index_kind;		/* only "gist" is available now */
+	const char	   *index_fname;	/* device index handler name */
+	devtype_info   *ivar_dtype;		/* device type of index'ed value */
+	devtype_info   *iarg_dtype;		/* device type of index argument for search */
+	bool			index_is_negative;
+} devindex_info;
+
+/*
  * codegen.c
  */
 #ifdef __PGSTROM_MODULE__
@@ -214,6 +231,13 @@ typedef struct
 	bool	(*lookup_extra_devcast)(const char *src_type_ident,
 									const char *dst_type_ident,
 									devcast_info *dcast);
+
+	/*
+	 * lookup_extra_devindex can tell PG-Strom whether the supplied operator
+	 * has device supported index handler by the user's extra module.
+	 */
+	bool	(*lookup_extra_devindex)(const char *oper_ident,
+									 devindex_info *dindex);
 
 	/*
 	 * arrow_lookup_pgtype() can tell PG-Strom a PostgreSQL type that shall
