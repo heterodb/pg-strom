@@ -399,6 +399,7 @@ static CustomScanMethods	gpujoin_plan_methods;
 static CustomExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;				/* GUC */
 static bool					enable_gpuhashjoin;				/* GUC */
+static bool					enable_gpugistindex;			/* GUC */
 static bool					enable_partitionwise_gpujoin;	/* GUC */
 
 /* static functions */
@@ -1329,6 +1330,10 @@ extract_gpugistindex_clause(inner_path_item *ip_item,
 	List		   *gist_clauses = NIL;
 	Selectivity		gist_selectivity = 1.0;
 	ListCell	   *lc;
+
+	/* skip, if pg_strom.enable_gpugistindex is not set */
+	if (!enable_gpugistindex)
+		return;
 
 	/* GPU GiST Index is used only when GpuHashJoin is not available */
 	Assert(ip_item->hash_quals == NIL);
@@ -8434,6 +8439,15 @@ pgstrom_init_gpujoin(void)
 							 "Enables the use of GpuHashJoin logic",
 							 NULL,
 							 &enable_gpuhashjoin,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* tuan on/off gpugistindex */
+	DefineCustomBoolVariable("pg_strom.enable_gpugistindex",
+							 "Enables the use of GpuGistIndex logic",
+							 NULL,
+							 &enable_gpugistindex,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
