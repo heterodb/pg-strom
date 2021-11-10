@@ -17,6 +17,7 @@ static MemoryContext	devinfo_memcxt;
 static dlist_head	devtype_info_slot[128];
 static dlist_head	devfunc_info_slot[1024];
 static dlist_head	devcast_info_slot[48];
+static dlist_head	devindex_info_slot[48];
 
 static cl_uint generic_devtype_hashfunc(devtype_info *dtype, Datum datum);
 static cl_uint pg_int1_devtype_hashfunc(devtype_info *dtype, Datum datum);
@@ -311,7 +312,6 @@ build_extra_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	append_string_devtype_identifier(&ident, tcache->type_id);
 
 	memset(&__dtype, 0, sizeof(devtype_info));
-	__dtype.hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
 	__dtype.type_extension = ext_name;
 	__dtype.type_oid = tcache->type_id;
 	__dtype.type_flags = 0;
@@ -392,7 +392,6 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			MemoryContext	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 
 			entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
-			entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
 			if (ext_name)
 				entry->type_extension = pstrdup(ext_name);
 			entry->type_oid = tcache->type_id;
@@ -434,7 +433,6 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	entry = palloc0(offsetof(devtype_info, comp_subtypes[0]));
-	entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
 	if (ext_name)
 		entry->type_extension = pstrdup(ext_name);
 	entry->type_oid = tcache->type_id;
@@ -489,7 +487,6 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	entry = palloc0(offsetof(devtype_info, comp_subtypes[nfields]));
-	entry->hashvalue = GetSysCacheHashValue(TYPEOID, tcache->type_id, 0, 0, 0);
 	if (ext_name)
 		entry->type_extension = pstrdup(ext_name);
 	entry->type_oid = tcache->type_id;
@@ -512,13 +509,15 @@ pgstrom_devtype_lookup(Oid type_oid)
 {
 	TypeCacheEntry *tcache;
 	devtype_info   *dtype;
-	int				hindex;
+	uint32			hashvalue;
+	uint32			hindex;
 	size_t			sz;
 	dlist_iter		iter;
 	const char	   *ext_name;
 
 	/* lookup dtype that is already built */
-	hindex = hash_uint32(type_oid) % lengthof(devtype_info_slot);
+	hashvalue = GetSysCacheHashValue(TYPEOID, ObjectIdGetDatum(type_oid), 0, 0, 0);
+	hindex = hashvalue % lengthof(devtype_info_slot);
 	dlist_foreach(iter, &devtype_info_slot[hindex])
 	{
 		dtype = dlist_container(devtype_info, chain, iter.cur);
@@ -556,10 +555,10 @@ pgstrom_devtype_lookup(Oid type_oid)
 	{
 		sz = offsetof(devtype_info, comp_subtypes[0]);
 		dtype = MemoryContextAllocZero(devinfo_memcxt, sz);
-		dtype->hashvalue = GetSysCacheHashValue(TYPEOID, type_oid, 0, 0, 0);
 		dtype->type_oid = type_oid;
 		dtype->type_is_negative = true;
 	}
+	dtype->hashvalue = hashvalue;
 	dlist_push_head(&devtype_info_slot[hindex], &dtype->chain);
 
 	if (dtype->type_is_negative)
@@ -579,16 +578,71 @@ pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 }
 
 static devtype_info *
-pgstrom_devtype_lookup_by_name(const char *type_name)
+pgstrom_devtype_lookup_by_name(const char *type_ident)
 {
-	int		i;
+	char	   *type_name = NULL;
+	char	   *ext_name = NULL;
+	const char *__ext_name;
+	Oid			type_oid = InvalidOid;
+	Relation	rel;
+	ScanKeyData	skey;
+	SysScanDesc	sscan;
+	HeapTuple	htup;
 
-	for (i=0; i < lengthof(devtype_catalog); i++)
+	type_name = alloca(strlen(type_ident) + 1);
+	strcpy(type_name, type_ident);
+	ext_name = strchr(type_name, '@');
+	if (ext_name)
+		*ext_name++ = '\0';
+
+	htup = SearchSysCache2(TYPENAMENSP,
+						   CStringGetDatum(type_name),
+						   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	if (HeapTupleIsValid(htup))
 	{
-		if (strcmp(devtype_catalog[i].type_name, type_name) == 0 &&
-			OidIsValid(devtype_catalog[i].type_oid_fixed))
-			return pgstrom_devtype_lookup(devtype_catalog[i].type_oid_fixed);
+		type_oid = PgTypeTupleGetOid(htup);
+		__ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+		if (ext_name)
+		{
+			if (!__ext_name || strcmp(ext_name, __ext_name) != 0)
+				type_oid = InvalidOid;
+		}
+		else if (__ext_name != NULL)
+			type_oid = InvalidOid;
+		ReleaseSysCache(htup);
 	}
+
+	if (!OidIsValid(type_oid))
+	{
+		rel = table_open(TypeRelationId, AccessShareLock);
+
+		ScanKeyInit(&skey,
+					Anum_pg_type_typname,
+					BTEqualStrategyNumber, F_NAMEEQ,
+					CStringGetDatum(type_name));
+		sscan = systable_beginscan(rel, TypeNameNspIndexId,
+								   true, NULL, 1, &skey);
+		do {
+			htup = systable_getnext(sscan);
+			if (!HeapTupleIsValid(htup))
+				break;
+			type_oid = PgTypeTupleGetOid(htup);
+			__ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+			if (ext_name)
+			{
+				if (!__ext_name || strcmp(ext_name, __ext_name) != 0)
+					type_oid = InvalidOid;
+			}
+			else if (__ext_name != NULL)
+				type_oid = InvalidOid;
+		} while (!OidIsValid(type_oid));
+
+		systable_endscan(sscan);
+		table_close(rel, AccessShareLock);
+	}
+
+	if (OidIsValid(type_oid))
+		return pgstrom_devtype_lookup(type_oid);
 	return NULL;
 }
 
@@ -2351,10 +2405,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ PGSTROM, "int8 hll_hash(uuid)",        1, "m/f:hll_hash_uuid"}
 };
 
-#undef PGSTROM
-#undef POSTGIS3
-#undef POSTGIS2
-
 /* default of dfunc->dfunc_varlena_sz if not specified */
 static int
 devfunc_generic_result_sz(codegen_context *context,
@@ -3207,6 +3257,205 @@ pgstrom_devtype_can_relabel(Oid src_type_oid,
 		return true;
 
 	return false;
+}
+
+/*
+ * Device index support
+ *
+ * devide index handler must be declared as:
+ *
+ * DEVICE_FUNCTION(cl_bool)
+ * pgindex_<dev_index_fname>(kern_context *cxt,
+ *                           PageHeaderData *i_page,
+ *                           <left device type> arg1,
+ *                           <right device type> arg2);
+ */
+static struct {
+	const char	   *extname;
+	const char	   *signature;
+	const char	   *index_kind;
+	int				opstrategy;
+	const char	   *index_fname;
+	const char	   *ivar_typname;
+	const char	   *iarg_typname;
+} devindex_catalog[] = {
+	/* geometry overlap operator */
+	{ POSTGIS3, "geometry && geometry",
+	  "gist", RTOverlapStrategyNumber,
+	  "gist_geometry_overlap",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "box2df && geometry",
+	  "gist", RTOverlapStrategyNumber,
+	  "gist_geometry_overlap",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "geometry && box2df",
+	  "gist", RTOverlapStrategyNumber,
+	  "gist_box2df_overlap",
+	  "box2df@postgis",
+	  "box2df@postgis",
+	},
+	{ POSTGIS3, "box2df && box2df",
+	  "gist", RTOverlapStrategyNumber,
+	  "gist_box2df_overlap",
+	  "box2df@postgis",
+	  "box2df@postgis",
+	},
+	/* geometry contains operator */
+	{ POSTGIS3, "geometry ~ geometry",
+	  "gist", RTContainsStrategyNumber,
+	  "gist_geometry_contains",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "box2df ~ geometry",
+	  "gist", RTContainsStrategyNumber,
+	  "gist_geometry_contains",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "geometry ~ box2df",
+	  "gist", RTContainsStrategyNumber,
+	  "gist_box2df_contains",
+	  "box2df@postgis",
+	  "box2df@postgis",
+	},
+	{ POSTGIS3, "box2df ~ box2df",
+	  "gist", RTContainsStrategyNumber,
+	  "gist_box2df_contains",
+	  "box2df@postgis",
+	  "box2df@postgis",
+	},
+	/* geometry contained operator */
+	{ POSTGIS3, "geometry @ geometry",
+	  "gist", RTContainedByStrategyNumber,
+	  "gist_geometry_contained",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "box2df @ geometry",
+	  "gist", RTContainedByStrategyNumber,
+	  "gist_geometry_contained",
+	  "box2df@postgis",
+	  "geometry@postgis",
+	},
+	{ POSTGIS3, "geometry @ box2df",
+	  "gist", RTContainedByStrategyNumber,
+	  "gist_box2df_contained",
+     "box2df@postgis",
+     "box2df@postgis",
+	},
+	{ POSTGIS3, "box2df @ box2df",
+	  "gist", RTContainedByStrategyNumber,
+	  "gist_box2df_contained",
+	  "box2df@postgis",
+	  "box2df@postgis",
+	},
+};
+
+devindex_info *
+pgstrom_devindex_lookup(Oid opcode, Oid opfamily)
+{
+	devindex_info  *dindex = NULL;
+	uint32			hashvalue;
+	uint32			hindex;
+	HeapTuple		htup;
+	Form_pg_amop	amop;
+	dlist_iter		iter;
+	const char	   *extname;
+	char			signature[3*NAMEDATALEN + 100];
+	int				i;
+
+	hashvalue = GetSysCacheHashValue(AMOPOPID,
+									 ObjectIdGetDatum(opcode),
+									 CharGetDatum(AMOP_SEARCH),
+									 ObjectIdGetDatum(opfamily), 0);
+	hindex = hashvalue % lengthof(devindex_info_slot);
+	dlist_foreach(iter, &devindex_info_slot[hindex])
+	{
+		dindex = dlist_container(devindex_info, chain, iter.cur);
+		if (dindex->opcode == opcode &&
+			dindex->opfamily == opfamily)
+			goto found;
+	}
+
+	extname = get_extension_name_by_object(OperatorRelationId, opcode);
+	htup = SearchSysCache3(AMOPOPID,
+						   ObjectIdGetDatum(opcode),
+						   CharGetDatum(AMOP_SEARCH),
+						   ObjectIdGetDatum(opfamily));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "operator %u is not a member of opfamily %u",
+			 opcode, opfamily);
+	amop = (Form_pg_amop) GETSTRUCT(htup);
+	snprintf(signature, sizeof(signature), "%s %s %s",
+			 get_type_name(amop->amoplefttype, false),
+			 get_opname(opcode),
+			 get_type_name(amop->amoprighttype, false));
+
+	dindex = NULL;
+	for (i=0; i < lengthof(devindex_catalog); i++)
+	{
+		const char *__extname = devindex_catalog[i].extname;
+		const char *__signature = devindex_catalog[i].signature;
+		const char *__ivar_typname = devindex_catalog[i].ivar_typname;
+		const char *__iarg_typname = devindex_catalog[i].iarg_typname;
+		devtype_info   *ivar_dtype;
+		devtype_info   *iarg_dtype;
+
+		if (__extname)
+		{
+			if (!extname || strcmp(__extname, extname) != 0)
+				continue;
+		}
+		else if (extname != NULL)
+			continue;
+
+		if (strcmp(__signature, signature) != 0)
+			continue;
+
+		ivar_dtype = pgstrom_devtype_lookup_by_name(__ivar_typname);
+		if (!ivar_dtype)
+			continue;
+		iarg_dtype = pgstrom_devtype_lookup_by_name(__iarg_typname);
+		if (!iarg_dtype)
+			continue;
+
+		dindex = MemoryContextAllocZero(devinfo_memcxt, sizeof(devindex_info));
+		dindex->oper_extension = extname;
+		dindex->opcode = opcode;
+		dindex->opfamily = opfamily;
+		dindex->opstrategy = amop->amopstrategy;
+		dindex->index_kind = devindex_catalog[i].index_kind;
+		dindex->index_fname = devindex_catalog[i].index_fname;
+		dindex->ivar_dtype = ivar_dtype;
+		dindex->iarg_dtype = iarg_dtype;
+		break;
+	}
+
+	//TODO: call extra module
+
+	/* not supported, add negative entry */
+	if (!dindex)
+	{
+		dindex = MemoryContextAllocZero(devinfo_memcxt, sizeof(devindex_info));
+		dindex->oper_extension = extname;
+		dindex->opcode = opcode;
+		dindex->opfamily = opfamily;
+		dindex->opstrategy = amop->amopstrategy;
+		dindex->index_is_negative = true;
+	}
+	ReleaseSysCache(htup);
+
+	dindex->hashvalue = hashvalue;
+	dlist_push_head(&devindex_info_slot[hindex], &dindex->chain);
+found:
+	if (dindex->index_is_negative)
+		return NULL;
+	return dindex;
 }
 
 /*
@@ -4482,6 +4731,33 @@ devcast_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	}
 }
 
+static void
+devindex_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
+{
+	dlist_mutable_iter iter;
+	int		hindex;
+
+	Assert(cacheid == AMOPOPID);
+	if (hashvalue == 0)
+	{
+		for (hindex=0; hindex < lengthof(devindex_info_slot); hindex++)
+			dlist_init(&devindex_info_slot[hindex]);
+		return;
+	}
+
+	hindex = hashvalue % lengthof(devcast_info_slot);
+	dlist_foreach_modify (iter, &devcast_info_slot[hindex])
+	{
+		devindex_info *dindex = dlist_container(devindex_info,
+												chain, iter.cur);
+		if (dindex->hashvalue == hashvalue)
+		{
+			dlist_delete(&dindex->chain);
+			memset(&dindex->chain, 0, sizeof(dlist_node));
+		}
+	}
+}
+
 void
 pgstrom_init_codegen_context(codegen_context *context,
 							 PlannerInfo *root,
@@ -4506,12 +4782,14 @@ pgstrom_init_codegen(void)
 		dlist_init(&devfunc_info_slot[i]);
 	for (i=0; i < lengthof(devcast_info_slot); i++)
 		dlist_init(&devcast_info_slot[i]);
+	for (i=0; i < lengthof(devindex_info_slot); i++)
+		dlist_init(&devindex_info_slot[i]);
 
 	devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,
 										   "device type/func info cache",
 										   ALLOCSET_DEFAULT_SIZES);
 	CacheRegisterSyscacheCallback(PROCOID, devfunc_cache_invalidator, 0);
 	CacheRegisterSyscacheCallback(TYPEOID, devtype_cache_invalidator, 0);
-	CacheRegisterSyscacheCallback(CASTSOURCETARGET,
-								  devcast_cache_invalidator, 0);
+	CacheRegisterSyscacheCallback(CASTSOURCETARGET, devcast_cache_invalidator, 0);
+	CacheRegisterSyscacheCallback(AMOPOPID, devindex_cache_invalidator, 0);
 }

@@ -229,6 +229,40 @@ pgfn_st_expand(kern_context *kcxt,
 			   const pg_geometry_t &arg1, pg_float8_t arg2);
 
 /*
+ * GiST index handlers
+ */
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_overlap(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_overlap(kern_context *kcxt,
+							PageHeaderData *i_page,
+							const pg_box2df_t &i_var,
+							const pg_box2df_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contains(kern_context *kcxt,
+							   PageHeaderData *i_page,
+							   const pg_box2df_t &i_var,
+							   const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contains(kern_context *kcxt,
+							 PageHeaderData *i_page,
+							 const pg_box2df_t &i_var,
+							 const pg_box2df_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contained(kern_context *kcxt,
+								PageHeaderData *i_page,
+								const pg_box2df_t &i_var,
+								const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contained(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_box2df_t &i_arg);
+
+/*
  * PostGIS functions
  */
 DEVICE_FUNCTION(pg_geometry_t)

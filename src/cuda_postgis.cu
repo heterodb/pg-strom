@@ -1142,6 +1142,97 @@ pgfn_st_expand(kern_context *kcxt,
 
 /* ================================================================
  *
+ * GiST Index Handlers
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_overlap(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+		return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_overlap(kern_context *kcxt,
+							PageHeaderData *i_page,
+							const pg_box2df_t &i_var,
+							const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+		return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contains(kern_context *kcxt,
+							   PageHeaderData *i_page,
+							   const pg_box2df_t &i_var,
+							   const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+		return __geom_contains_bbox2d(&i_var.value, &__bbox);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contains(kern_context *kcxt,
+							 PageHeaderData *i_page,
+							 const pg_box2df_t &i_var,
+							 const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+		return __geom_contains_bbox2d(&i_var.value, &i_arg.value);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contained(kern_context *kcxt,
+								PageHeaderData *i_page,
+								const pg_box2df_t &i_var,
+								const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+	{
+		if (!GistPageIsLeaf(i_page))
+			return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
+		else
+			return __geom_within_bbox2d(&i_var.value, &__bbox);
+	}
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contained(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+	{
+		if (!GistPageIsLeaf(i_page))
+			return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
+		else
+			return __geom_within_bbox2d(&i_var.value, &i_arg.value);
+	}
+	return false;
+}
+
+/* ================================================================
+ *
  * St_Distance(geometry,geometry)
  *
  * ================================================================

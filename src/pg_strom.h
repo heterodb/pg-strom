@@ -63,6 +63,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
@@ -988,6 +989,8 @@ extern devcast_info *pgstrom_devcast_lookup(Oid src_type_oid,
 											Oid dst_type_oid);
 extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 										Oid dst_type_oid);
+extern devindex_info *pgstrom_devindex_lookup(Oid opcode,
+											  Oid opfamily);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
