@@ -1,6 +1,7 @@
 ---
 --- Test for apache_arrow with index
 ---
+\t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
@@ -9,10 +10,7 @@ RESET client_min_messages;
 SET search_path = regtest_arrow_index_temp,public;
 -- Prepare data for arrow index test
 SELECT pgstrom.random_setseed(20210905);
- random_setseed 
-----------------
  
-(1 row)
 
 CREATE TABLE arrow_index_data (
   id         int,
@@ -41,8 +39,6 @@ IMPORT FOREIGN SCHEMA regtest_arrow
   INTO regtest_arrow_index_temp
 OPTIONS (file '@abs_builddir@/test_arrow_index.data');
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=239 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -55,19 +51,13 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: date_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(12 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE date_num between '2019-04-14' and '2023-05-23') as is_ok FROM regtest_arrow WHERE date_num between '2019-04-14' and '2023-05-23';
- is_ok 
--------
  t
-(1 row)
 
 -- ORDER BY int_num
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data --stat=int_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=2 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -80,19 +70,13 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: int_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(12 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE int_num between -50000 and 50000) as is_ok FROM regtest_arrow WHERE int_num between -50000 and 50000;
- is_ok 
--------
  t
-(1 row)
 
 -- ORDER BY float
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o @abs_builddir@/test_arrow_index.data --stat=float_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=0 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -104,19 +88,13 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: float_num  [loaded: 0, skipped: 4]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(11 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE float_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE float_num between -5000 and 5000;
- is_ok 
--------
  t
-(1 row)
 
 -- ORDER BY decimal
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o @abs_builddir@/test_arrow_index.data --stat=decimal_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=0 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -129,19 +107,13 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: decimal_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(12 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE decimal_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE decimal_num between -5000 and 5000;
- is_ok 
--------
  t
-(1 row)
 
 -- ORDER BY time
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o @abs_builddir@/test_arrow_index.data --stat=time_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -154,19 +126,13 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: time_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(12 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE time_num between '09:00:00' and '17:00:00') as is_ok FROM regtest_arrow WHERE time_num between '09:00:00' and '17:00:00';
- is_ok 
--------
  t
-(1 row)
 
 -- ORDER BY timestamp
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o @abs_builddir@/test_arrow_index.data --stat=timestamp_num
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
@@ -179,13 +145,9 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_i
          referenced: id, int_num, float_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: timestamp_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 49.73MB, size: 49.60MB)
-(12 rows)
 
 SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00') as is_ok FROM regtest_arrow WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
- is_ok 
--------
  t
-(1 row)
 
 DROP SCHEMA regtest_arrow_index_temp CASCADE;
 NOTICE:  drop cascades to 3 other objects

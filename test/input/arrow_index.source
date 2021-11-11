@@ -1,6 +1,7 @@
 ---
 --- Test for apache_arrow with index
 ---
+\t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;

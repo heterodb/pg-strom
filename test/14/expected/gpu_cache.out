@@ -28,10 +28,7 @@ CREATE TABLE cache_test_table (
 ---
 CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
-CREATE TRIGGER stmt_sync_test BEFORE TRUNCATE ON cache_test_table FOR STATEMENT
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
-ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER stmt_sync_test;
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
@@ -78,12 +75,12 @@ SELECT * INTO TEMPORARY normal_table FROM cache_test_table;
 ---
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
-                                                                                                                                        QUERY PLAN                                                                                                                                        
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, ((((a + 1) % 127))::int1), b, c, d, e, f, g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, ((cache_test_table.a + 1) % 127), cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: ((((a + 1) % 127))::int1), ctid
+         GPU Projection: ((cache_test_table.a + 1) % 127), cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 97) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -93,12 +90,12 @@ UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
 UPDATE normal_table     SET a = (a+1) % 127 WHERE a%97=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
-                                                                                                                                         QUERY PLAN                                                                                                                                         
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, ((((b + 1) % 32767))::smallint), c, d, e, f, g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, ((cache_test_table.b + 1) % 32767), cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: ((((b + 1) % 32767))::smallint), ctid
+         GPU Projection: ((cache_test_table.b + 1) % 32767), cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 89) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -108,12 +105,12 @@ UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
 UPDATE normal_table     SET b = (b+1) % 32767 WHERE a%89=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
-                                                                                                                                           QUERY PLAN                                                                                                                                            
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, (((c + 1) % 2147483647)), d, e, f, g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, ((cache_test_table.c + 1) % 2147483647), cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: (((c + 1) % 2147483647)), ctid
+         GPU Projection: ((cache_test_table.c + 1) % 2147483647), cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 83) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -123,12 +120,12 @@ UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
 UPDATE normal_table     SET c = (c+1) % 2147483647 WHERE a%83=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
-                                                                                                                                                     QUERY PLAN                                                                                                                                                     
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, (((d + 1) % '9223372036854775807'::bigint)), e, f, g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, ((cache_test_table.d + 1) % '9223372036854775807'::bigint), cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: (((d + 1) % '9223372036854775807'::bigint)), ctid
+         GPU Projection: ((cache_test_table.d + 1) % '9223372036854775807'::bigint), cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 79) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -138,12 +135,12 @@ UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 UPDATE normal_table     SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
-                                                                                                                                                    QUERY PLAN                                                                                                                                                     
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, ((((e + '0.5'::double precision))::numeric) % '999999'::numeric), f, g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, ((cache_test_table.e + '0.5'::double precision))::numeric, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: ((((e + '0.5'::double precision))::numeric) % '999999'::numeric), ctid
+         GPU Projection: ((cache_test_table.e + '0.5'::double precision))::numeric, cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 73) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -153,12 +150,12 @@ UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
 UPDATE normal_table     SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
-                                                                                                                                                    QUERY PLAN                                                                                                                                                     
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, e, ((((f + '0.5'::double precision))::numeric) % '999999'::numeric), g, h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, ((cache_test_table.f + '0.5'::double precision))::numeric, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: ((((f + '0.5'::double precision))::numeric) % '999999'::numeric), ctid
+         GPU Projection: ((cache_test_table.f + '0.5'::double precision))::numeric, cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 71) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -168,12 +165,12 @@ UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
 UPDATE normal_table     SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
-                                                                                                                                                    QUERY PLAN                                                                                                                                                     
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, e, f, ((((g + '0.5'::double precision))::numeric) % '999999'::numeric), h, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, ((cache_test_table.g + '0.5'::double precision))::numeric, cache_test_table.h, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: ((((g + '0.5'::double precision))::numeric) % '999999'::numeric), ctid
+         GPU Projection: ((cache_test_table.g + '0.5'::double precision))::numeric, cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 67) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -183,12 +180,12 @@ UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
 UPDATE normal_table     SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
-                                                                                                                       QUERY PLAN                                                                                                                       
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, e, f, g, 'delete'::text, i, j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.i, cache_test_table.j, cache_test_table.ctid
+         Output: 'delete'::text, ctid
+         GPU Projection: cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 103) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -198,12 +195,12 @@ UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
 UPDATE normal_table     SET h = 'delete' WHERE a%103=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
-                                                                                                                       QUERY PLAN                                                                                                                       
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, e, f, g, h, 'delete'::character varying(32), j, ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.j, cache_test_table.ctid
+         Output: 'delete'::character varying(32), ctid
+         GPU Projection: cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 107) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -213,12 +210,12 @@ UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
 UPDATE normal_table     SET i = 'delete' WHERE a%107=0;
 EXPLAIN (costs off, verbose)
 UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
-                                                                                                                       QUERY PLAN                                                                                                                       
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
  Update on gpu_cache_temp_test.cache_test_table
    ->  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
-         Output: id, a, b, c, d, e, f, g, h, i, 'delete                          '::character(32), ctid
-         GPU Projection: cache_test_table.id, cache_test_table.a, cache_test_table.b, cache_test_table.c, cache_test_table.d, cache_test_table.e, cache_test_table.f, cache_test_table.g, cache_test_table.h, cache_test_table.i, cache_test_table.ctid
+         Output: 'delete                          '::character(32), ctid
+         GPU Projection: cache_test_table.ctid
          GPU Filter: (((cache_test_table.a)::integer % 109) = 0)
          GPU Cache: GPU0 [max_num_rows: 10000, main: 1032.19K, extra: 3200.02K]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
@@ -465,8 +462,8 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
 ,ABS(c.d_max - n.d_max) < 1 AS d_max_ok
 ,ABS(c.d_min - n.d_min) < 1 AS d_min_ok
 ,ABS(c.e_count - n.e_count) < 1 AS e_count_ok
-,ABS(c.e_sum - n.e_sum) < 1 AS e_sum_ok
-,ABS(c.e_avg - n.e_avg) < 1 AS e_avg_ok
+,ABS(c.e_sum - n.e_sum)::float8/ABS(n.e_sum) < 0.00001 AS e_sum_ok
+,ABS(c.e_avg - n.e_avg)::float8/ABS(c.e_avg) < 0.00001 AS e_avg_ok
 ,ABS(c.e_max - n.e_max) < 1 AS e_max_ok
 ,ABS(c.e_min - n.e_min) < 1 AS e_min_ok
 ,ABS(c.f_count - n.f_count) < 1 AS f_count_ok
@@ -475,8 +472,8 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
 ,ABS(c.f_max - n.f_max) < 1 AS f_max_ok
 ,ABS(c.f_min - n.f_min) < 1 AS f_min_ok
 ,ABS(c.g_count - n.g_count) < 1 AS g_count_ok
-,ABS(c.g_sum - n.g_sum) < 1 AS g_sum_ok
-,ABS(c.g_avg - n.g_avg) < 1 AS g_avg_ok
+,ABS(c.g_sum - n.g_sum)::float8/ABS(n.g_sum) < 0.00001 AS g_sum_ok
+,ABS(c.g_avg - n.g_avg)::float8/ABS(c.g_avg) < 0.00001 AS g_avg_ok
 ,ABS(c.g_max - n.g_max) < 1 AS g_max_ok
 ,ABS(c.g_min - n.g_min) < 1 AS g_min_ok
  FROM cached_result AS c,
@@ -522,10 +519,7 @@ CREATE TABLE cache_corruption_test (
 );
 CREATE TRIGGER row_sync_corruption AFTER INSERT OR UPDATE OR DELETE ON cache_corruption_test FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=5000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
-CREATE TRIGGER stmt_sync_corruption BEFORE TRUNCATE ON cache_corruption_test FOR STATEMENT
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
 ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_corruption;
-ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER stmt_sync_corruption;
 -- INSERT 4000 rows ( < max: 5000 rows )
 INSERT INTO cache_corruption_test (
   SELECT x 
