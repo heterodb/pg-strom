@@ -2331,16 +2331,15 @@ ExplainGpuCache(GpuCacheState *gcache_state,
 					gc_options->max_num_rows,
 					format_numeric(gpu_main_size),
 					format_numeric(gpu_extra_size));
+			ExplainPropertyText("GPU Cache", temp, es);			
 		}
-		else
+		else if (!es->verbose)
 		{
-			sprintf(temp, "GPU%d [max_num_rows: %ld, main: %s, extra: %s]",
+			sprintf(temp, "GPU%d [max_num_rows: %ld]",
 					gc_options->cuda_dindex,
-					gc_options->max_num_rows,
-					format_numeric(gpu_main_size),
-					format_numeric(gpu_extra_size));
+					gc_options->max_num_rows);
+			ExplainPropertyText("GPU Cache", temp, es);
 		}
-		ExplainPropertyText("GPU Cache", temp, es);
 	}
 	else
 	{
