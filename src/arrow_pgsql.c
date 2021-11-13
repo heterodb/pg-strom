@@ -416,11 +416,52 @@ put_uint64_value(SQLfield *column, const char *addr, int sz)
 /*
  * FloatingPointXX
  */
+static inline float
+fp16_to_fp32(uint16_t fp16val)
+{
+	uint32_t	sign = ((uint32_t)(fp16val & 0x8000) << 16);
+	int32_t		expo = ((fp16val & 0x7c00) >> 10);
+	int32_t		frac = ((fp16val & 0x03ff));
+	uint32_t	ival;
+	float		fval;
+
+	if (expo == 0x1f)
+	{
+		if (frac == 0)
+			ival = (sign | 0x7f800000);		/* +/-Infinity */
+		else
+			ival = 0xffffffff;				/* NaN */
+	}
+	else if (expo == 0 && frac == 0)
+		ival = sign;						/* +/-0.0 */
+	else
+	{
+		if (expo == 0)
+		{
+			expo = -14;		/* FP16_EXPO_MIN */
+			while ((frac & 0x400) == 0)
+			{
+				frac <<= 1;
+				expo--;
+			}
+			frac &= 0x3ff;
+		}
+		else
+			expo -= 15;		/* FP16_EXPO_BIAS */
+
+		expo += 127;		/* FP32_EXPO_BIAS */
+		ival = (sign | (expo << 23) | (frac << 13));
+	}
+	memcpy(&fval, &ival, sizeof(float));
+	return fval;
+}
+
 static size_t
 put_float16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	int16_t		value;
+	float		fval;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint16_t));
@@ -431,16 +472,72 @@ put_float16_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i16,value);
+		fval = fp16_to_fp32(value);
+		STAT_UPDATES(column,f32,fval);
 	}
 	return __buffer_usage_inline_type(column);
 }
+
+static int
+write_float16_stat(SQLfield *attr, char *buf, size_t len,
+				   const SQLstat__datum *datum)
+{
+	uint32_t	x = datum->u32;
+	uint32_t	u = (x & 0x7fffffffU);
+	uint32_t	sign = ((x >> 16U) & 0x8000U);
+	uint32_t	remainder;
+	uint32_t	result = 0;
+
+	if (u >= 0x7f800000U)
+	{
+		/* NaN/+Inf/-Inf */
+		remainder = 0U;
+		result = ((u == 0x7f800000U) ? (sign | 0x7c00U) : 0x7fffU);
+    }
+	else if (u > 0x477fefffU)
+	{
+		/* Overflows */
+		remainder = 0x80000000U;
+		result = (sign | 0x7bffU);
+    }
+	else if (u >= 0x38800000U)
+	{
+		/* Normal numbers */
+		remainder = u << 19U;
+		u -= 0x38000000U;
+		result = (sign | (u >> 13U));
+	}
+	else if (u < 0x33000001U)
+	{
+		/* +0/-0 */
+		remainder = u;
+		result = sign;
+	}
+	else
+	{
+		/* Denormal numbers */
+		const uint32_t	exponent = u >> 23U;
+		const uint32_t	shift = 0x7eU - exponent;
+		uint32_t		mantissa = (u & 0x7fffffU) | 0x800000U;
+
+		remainder = mantissa << (32U - shift);
+		result = (sign | (mantissa >> shift));
+	}
+
+	if ((remainder > 0x80000000U) ||
+		((remainder == 0x80000000U) && ((result & 0x1U) != 0U)))
+		result++;
+
+	return snprintf(buf, len, "%u", result);
+}
+
 
 static size_t
 put_float32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	int32_t		value;
+	float		fval;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint32_t));
@@ -451,7 +548,8 @@ put_float32_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i32,value);
+		memcpy(&fval, &value, sizeof(float));
+		STAT_UPDATES(column,f32,fval);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -461,6 +559,7 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	int64_t		value;
+	double		fval;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(uint64_t));
@@ -471,7 +570,8 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sz);
 
-		STAT_UPDATES(column,i64,value);
+		memcpy(&fval, &value, sizeof(double));
+		STAT_UPDATES(column,f64,fval);
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -1448,7 +1548,7 @@ assignArrowTypeFloatingPoint(SQLfield *column, ArrowField *arrow_field)
 			column->arrow_type.FloatingPoint.precision
 				= ArrowPrecision__Half;
 			column->put_value = put_float16_value;
-			column->write_stat = write_int16_stat;
+			column->write_stat = write_float16_stat;
 			break;
 		case sizeof(float):
 			column->arrow_type.FloatingPoint.precision
