@@ -353,6 +353,10 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 	Assert(plan != NULL);
 	switch (nodeTag(plan))
 	{
+#if PG_VERSION_NUM < 140000
+		/*
+		 * PG14 changed ModifyTable to use lefttree to save its subplan.
+		 */
 		case T_ModifyTable:
 			{
 				ModifyTable	   *splan = (ModifyTable *) plan;
@@ -361,7 +365,7 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 					pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
-
+#endif
 		case T_Append:
 			{
 				Append		   *splan = (Append *) plan;
@@ -412,7 +416,27 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 
 				if (cscan->methods == &pgstrom_dummy_plan_methods)
 				{
-					*p_plan = outerPlan(cscan);
+					Plan	   *subplan = outerPlan(cscan);
+					ListCell   *lc1, *lc2;
+
+					if (list_length(cscan->scan.plan.targetlist) !=
+						list_length(subplan->targetlist))
+						elog(ERROR, "Bug? dummy plan's targelist length mismatch");
+					forboth (lc1, cscan->scan.plan.targetlist,
+							 lc2, subplan->targetlist)
+					{
+						TargetEntry *tle1 = lfirst(lc1);
+						TargetEntry *tle2 = lfirst(lc2);
+
+						if (exprType((Node *)tle1->expr) !=
+							exprType((Node *)tle2->expr))
+							elog(ERROR, "Bug? dummy TLE type mismatch [%s] [%s]",
+								 nodeToString(tle1),
+								 nodeToString(tle2));
+						/* assign resource name */
+						tle2->resname = tle1->resname;
+					}
+					*p_plan = subplan;
 					pgstrom_removal_dummy_plans(pstmt, p_plan);
 					return;
 				}
