@@ -16,6 +16,7 @@ CREATE TABLE arrow_index_data (
   id         int,
   int_num         int,
   float_num       float,
+  half_num        float2,
   decimal_num     numeric,
   date_num        date,
   time_num        time,
@@ -26,6 +27,7 @@ INSERT INTO arrow_index_data (
     SELECT x,   -- int_num
         pgstrom.random_int(0, -16777216, 16777216),   -- int_num
         pgstrom.random_float(0,-10000.0,10000.0),        -- float_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- half_num
         pgstrom.random_float(0,-10000.0,10000.0),        -- decimal_num
         pgstrom.random_date(0),            -- date_num
         pgstrom.random_time(0),              -- time_num
@@ -93,16 +95,37 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
   FROM regtest_arrow
- WHERE float_num between -5000 and 5000;
+ WHERE float_num between -2000 and 2000;
 
 SELECT count(*)
   FROM regtest_arrow
- WHERE float_num between -5000 and 5000;
+ WHERE float_num between -2000 and 2000;
 
 SET pg_strom.enabled = off;
 SELECT count(*)
   FROM arrow_index_data
- WHERE float_num between -5000 and 5000;
+ WHERE float_num between -2000 and 2000;
+RESET pg_strom.enabled;
+
+-- ORDER BY half
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o @abs_builddir@/test_arrow_index.data --stat=half_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE half_num between -2000 and 2000;
 RESET pg_strom.enabled;
 
 -- ORDER BY decimal

@@ -1606,7 +1606,7 @@ CREATE OPERATOR CLASS pg_catalog.float2_ops
   operator 4 >= (float2, float2) for search,
   operator 5 >  (float2, float2) for search,
   function 1 (float2, float2) pgstrom.float2_cmp(float2, float2);
- 
+
 CREATE OPERATOR CLASS pg_catalog.float2_ops
   default for type pg_catalog.float2
   using hash family pg_catalog.float_ops as
