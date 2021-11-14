@@ -2698,7 +2698,6 @@ pgstrom_devfunc_construct(HeapTuple protup,
 						  Oid func_collid)
 {
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
-	const char	   *proc_name = NameStr(proc->proname);
 	const char	   *func_extension;
 	StringInfoData	sig;
 	devtype_info   *dtype;
@@ -2719,7 +2718,8 @@ pgstrom_devfunc_construct(HeapTuple protup,
 		goto not_found;
 	appendStringInfo(&sig, "%s %s(",
 					 dfunc_rettype->type_name,
-					 quote_identifier(proc_name));
+					 NameStr(proc->proname));
+
 	dfunc_argtypes = alloca(sizeof(devtype_info *) * func_argtypes->dim1);
 	for (i=0; i < func_argtypes->dim1; i++)
 	{
@@ -2766,7 +2766,7 @@ pgstrom_devfunc_construct(HeapTuple protup,
 			 * does not match exactly. (
 			 */
 			const char *sname = strchr(procat->func_signature, ' ');
-			const char *pname = proc_name;
+			const char *pname = NameStr(proc->proname);
 
 			if (sname)
 			{

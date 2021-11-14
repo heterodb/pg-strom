@@ -1,6 +1,7 @@
 --
 -- arrow_utils - test for pg2arrow
 --
+\t on
 SET pg_strom.regression_test_mode=on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_utils_temp CASCADE;
@@ -38,10 +39,7 @@ CREATE TABLE tt_2 (
 -- Test of basic feature 1
 --
 SELECT pgstrom.random_setseed(20200211);
- random_setseed 
-----------------
  
-(1 row)
 
 INSERT INTO tt_1 (
   SELECT x, pgstrom.random_int(1,   -32000,    32000),
@@ -64,14 +62,8 @@ IMPORT FOREIGN SCHEMA ft_1
   INTO regtest_arrow_utils_temp
 OPTIONS (file '@abs_builddir@/test_pg2arrow_tt1.arrow');
 SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1;
- id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
-----+----+----+----+----+----+----+---+-----
-(0 rows)
 
 SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1;
- id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
-----+----+----+----+----+----+----+---+-----
-(0 rows)
 
 --
 -- Test of basic feature 2
@@ -91,14 +83,8 @@ IMPORT FOREIGN SCHEMA ft_2
   INTO regtest_arrow_utils_temp
 OPTIONS (file '@abs_builddir@/test_pg2arrow_tt2.arrow');
 SELECT * FROM tt_2 EXCEPT SELECT * FROM ft_2 ORDER BY id;
- id | v1 | v2 | dt | tm | ts | tz 
-----+----+----+----+----+----+----
-(0 rows)
 
 SELECT * FROM ft_2 EXCEPT SELECT * FROM tt_2 ORDER BY id;
- id | v1 | v2 | dt | tm | ts | tz 
-----+----+----+----+----+----+----
-(0 rows)
 
 --
 -- Append mode
@@ -109,14 +95,8 @@ INSERT INTO tt_1 (
   SELECT id+3000,-i2,-i4,-i8,-f2,-f4,-f8,c,-num FROM tt_1
 );
 SELECT * FROM tt_1 EXCEPT SELECT * FROM ft_1 ORDER BY id;
- id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
-----+----+----+----+----+----+----+---+-----
-(0 rows)
 
 SELECT * FROM ft_1 EXCEPT SELECT * FROM tt_1 ORDER BY id;
- id | i2 | i4 | i8 | f2 | f4 | f8 | c | num 
-----+----+----+----+----+----+----+---+-----
-(0 rows)
 
 --
 -- TODO: Dictionary Batch

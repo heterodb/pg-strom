@@ -718,7 +718,7 @@ pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
 	Size		sz;
 
 	sz = sizeof(GpuTaskSharedState);
-	if (relation)
+	if (relation && RELATION_HAS_STORAGE(relation))
 		sz += table_parallelscan_estimate(relation, snapshot);
 	return MAXALIGN(sz);
 }
@@ -741,7 +741,7 @@ pgstromInitDSMGpuTaskState(GpuTaskState *gts,
 		ExecInitDSMArrowFdw(gts->af_state, gtss);
 	if (gts->gc_state)
 		ExecInitDSMGpuCache(gts->gc_state, gtss);
-	if (relation)
+	if (relation && RELATION_HAS_STORAGE(relation))
 	{
 		/* init state of block based table scan */
 		gtss->pbs_nblocks = RelationGetNumberOfBlocks(relation);
@@ -771,8 +771,9 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 	if (relation)
 	{
 		/* begin parallel scan */
-		gts->css.ss.ss_currentScanDesc =
-			table_beginscan_parallel(relation, &gtss->phscan);
+		if (RELATION_HAS_STORAGE(relation))
+			gts->css.ss.ss_currentScanDesc =
+				table_beginscan_parallel(relation, &gtss->phscan);
 		/* try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(gts);
 	}
@@ -796,9 +797,9 @@ pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
 
 	if (gts->af_state)
 		ExecReInitDSMArrowFdw(gts->af_state);
-	else if (gts->gc_state)
+	if (gts->gc_state)
 		ExecReInitDSMGpuCache(gts->gc_state);
-	else if (relation)
+	if (relation && RELATION_HAS_STORAGE(relation))
 		table_parallelscan_reinitialize(relation, &gtss->phscan);
 }
 

@@ -176,21 +176,19 @@ SELECT * FROM ft ORDER by id LIMIT 8;
 
 BEGIN;
 SELECT pgstrom.arrow_fdw_truncate('ft');
- 
-
+ERROR:  PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface
+SELECT count(*) FROM ft;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+SELECT * FROM ft ORDER by id LIMIT 8;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ABORT;
+BEGIN;
+TRUNCATE ft;
 SELECT count(*) FROM ft;
      0
 
 SELECT * FROM ft ORDER by id LIMIT 8;
 
-ABORT;
-BEGIN;
-TRUNCATE ft;
-ERROR:  "ft" is not a table
-SELECT count(*) FROM ft;
-ERROR:  current transaction is aborted, commands ignored until end of transaction block
-SELECT * FROM ft ORDER by id LIMIT 8;
-ERROR:  current transaction is aborted, commands ignored until end of transaction block
 ABORT;
 SELECT count(*) FROM ft;
     65
@@ -206,10 +204,8 @@ SELECT * FROM ft ORDER by id LIMIT 8;
  28 | -25276 |   80008.08 | -94243.5522 | (97606,E,"Thu Mar 12 20:55:46.182963 2020")                                                 | 04-12-2023 | 04:43:23.272217
 
 SELECT pgstrom.arrow_fdw_truncate('ft');
- 
-
+ERROR:  PostgreSQL v14 supports TRUNCATE <foreign table>; use the standard statement instead of the legacy interface
 TRUNCATE ft;
-ERROR:  "ft" is not a table
 SELECT count(*) FROM ft;
      0
 

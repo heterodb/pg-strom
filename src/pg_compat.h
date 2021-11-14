@@ -254,6 +254,22 @@ ExecFetchSlotHeapTuple(TupleTableSlot *slot,
 #endif	/* < PG12 */
 
 /*
+ * PG12 adds RELKIND_HAS_STORAGE macro to determine the relation kind
+ * that usually has physical storage.
+ */
+#if PG_VERSION_NUM < 120000
+#define RELATION_HAS_STORAGE(rel)							\
+	(RelationGetForm(rel)->relkind == RELKIND_RELATION ||	\
+	 RelationGetForm(rel)->relkind == RELKIND_INDEX ||		\
+	 RelationGetForm(rel)->relkind == RELKIND_SEQUENCE ||	\
+	 RelationGetForm(rel)->relkind == RELKIND_TOASTVALUE || \
+	 RelationGetForm(rel)->relkind == RELKIND_MATVIEW)
+#else
+#define RELATION_HAS_STORAGE(rel)				\
+	RELKIND_HAS_STORAGE(RelationGetForm(rel)->relkind)
+#endif
+
+/*
  * At PG13, 6f38d4dac381b5b8bead302a0b4f81761042cd25 changed
  * declaration of CheckForSerializableConflictOut(), and its role
  * was inherited to HeapCheckForSerializableConflictOut().

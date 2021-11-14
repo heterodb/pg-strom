@@ -1015,7 +1015,17 @@ __pgstrom_hll_siphash_value(const void *ptr, const size_t len)
 		v0 ^= m;
 	}
 
-    switch (left)
+#if 1
+	if (left > 0)
+	{
+		uint64_t	temp = 0;
+
+		memcpy(&temp, ni, left);
+		b |= (temp & ((1UL << (BITS_PER_BYTE * left)) - 1));
+	}
+#else
+	/* original code */
+	switch (left)
 	{
 		case 7:
 			b |= ((uint64_t)ni[6]) << 48;		__attribute__ ((fallthrough));
@@ -1035,6 +1045,7 @@ __pgstrom_hll_siphash_value(const void *ptr, const size_t len)
 		case 0:
 			break;
     }
+#endif
 
     v3 ^= b;
 	for (i = 0; i < cROUNDS; ++i)

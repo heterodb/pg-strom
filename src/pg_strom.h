@@ -1462,52 +1462,6 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 #ifndef SAMESIGN
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 #endif
-/*
- * int/float reinterpret functions
- */
-static inline cl_double
-long_as_double(cl_long ival)
-{
-	union {
-		cl_long		ival;
-		cl_double	fval;
-	} datum;
-	datum.ival = ival;
-	return datum.fval;
-}
-
-static inline cl_long
-double_as_long(cl_double fval)
-{
-	union {
-		cl_long		ival;
-		cl_double	fval;
-	} datum;
-	datum.fval = fval;
-	return datum.ival;
-}
-
-static inline cl_float
-int_as_float(cl_int ival)
-{
-	union {
-		cl_int		ival;
-		cl_float	fval;
-	} datum;
-	datum.ival = ival;
-	return datum.fval;
-}
-
-static inline cl_int
-float_as_int(cl_float fval)
-{
-	union {
-		cl_int		ival;
-		cl_float	fval;
-	} datum;
-	datum.fval = fval;
-	return datum.ival;
-}
 
 /*
  * trim_cstring - remove spaces from head/tail
@@ -1668,13 +1622,13 @@ typealign_get_width(char type_align)
 {
 	switch (type_align)
 	{
-		case TYPALIGN_CHAR:
+		case 'c':
 			return 1;
-		case TYPALIGN_SHORT:
+		case 's':
 			return ALIGNOF_SHORT;
-		case TYPALIGN_INT:
+		case 'i':
 			return ALIGNOF_INT;
-		case TYPALIGN_DOUBLE:
+		case 'd':
 			return ALIGNOF_DOUBLE;
 		default:
 			elog(ERROR, "unexpected type alignment: %c", type_align);

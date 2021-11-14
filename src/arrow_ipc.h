@@ -108,6 +108,8 @@ union SQLstat__datum
 	int64_t			i64;
 	int64_t			u64;
 	int128_t		i128;
+	float			f32;
+	double			f64;
 };
 
 struct SQLstat

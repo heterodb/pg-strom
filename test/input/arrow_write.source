@@ -1,6 +1,7 @@
 --
 -- arrow_write - test for writable arrow_fdw
 --
+\t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_write_temp CASCADE;
@@ -116,12 +117,19 @@ BEGIN;
 SELECT pgstrom.arrow_fdw_truncate('ft');
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
-
 ABORT;
+
+BEGIN;
+TRUNCATE ft;
+SELECT count(*) FROM ft;
+SELECT * FROM ft ORDER by id LIMIT 8;
+ABORT;
+
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
 
 SELECT pgstrom.arrow_fdw_truncate('ft');
+TRUNCATE ft;
 SELECT count(*) FROM ft;
 SELECT * FROM ft ORDER by id LIMIT 8;
 

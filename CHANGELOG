@@ -1,4 +1,4 @@
-* xxx KaiGai Kohei <kaigai@heterodb.com> - 3.3-1
+* Sun Nov 14 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-1
 - Support of heterodb-extra API version 20211018
 - Allows multiple optimal GPUs
 - GpuPreAgg: fix optimizer error if ORDER BY is used together.

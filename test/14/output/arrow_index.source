@@ -1,0 +1,352 @@
+---
+--- Test for apache_arrow with index
+---
+\t on
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
+CREATE SCHEMA regtest_arrow_index_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_index_temp,public;
+-- Prepare data for arrow index test
+SELECT pgstrom.random_setseed(20210905);
+ 
+
+CREATE TABLE arrow_index_data (
+  id         int,
+  int_num         int,
+  float_num       float,
+  half_num        float2,
+  decimal_num     numeric,
+  date_num        date,
+  time_num        time,
+  timestamp_num   timestamp
+);
+INSERT INTO arrow_index_data (
+    SELECT x,   -- int_num
+        pgstrom.random_int(0, -16777216, 16777216),   -- int_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- float_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- half_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- decimal_num
+        pgstrom.random_date(0),            -- date_num
+        pgstrom.random_time(0),              -- time_num
+        pgstrom.random_timestamp(0)                     -- date_num
+    FROM generate_series(1,1000000) x);
+-- ORDER BY date_num
+-- Pick a record to search.
+CREATE TABLE target_num AS SELECT * FROM arrow_index_data WHERE id=500000;
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY date_num' -o @abs_builddir@/test_arrow_index.data --stat=date_num
+IMPORT FOREIGN SCHEMA regtest_arrow
+  FROM SERVER arrow_fdw
+  INTO regtest_arrow_index_temp
+OPTIONS (file '@abs_builddir@/test_arrow_index.data');
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=269 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=90 loops=3)
+         Filter: (date_num = $0)
+         Rows Removed by Filter: 103473
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: date_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=621378 loops=1)
+         Outer Scan Filter: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date))
+         Rows Removed by Outer Scan Filter: 247025
+         referenced: date_num
+         Stats-Hint: (date_num >= '04-14-2019'::date), (date_num <= '05-23-2023'::date)  [loaded: 2, skipped: 2]
+         files0: @abs_builddir@/test_arrow_index.data (read: 3920.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+ 374353
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+ 374353
+
+RESET pg_strom.enabled;
+-- ORDER BY int_num
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data --stat=int_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (int_num = $0)
+         Rows Removed by Filter: 103563
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: int_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE int_num between -50000 and 50000;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=310689 loops=1)
+         Outer Scan Filter: ((int_num >= '-50000'::integer) AND (int_num <= 50000))
+         Rows Removed by Outer Scan Filter: 307748
+         referenced: int_num
+         Stats-Hint: (int_num >= '-50000'::integer), (int_num <= 50000)  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 3920.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE int_num between -50000 and 50000;
+  2941
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE int_num between -50000 and 50000;
+  2941
+
+RESET pg_strom.enabled;
+-- ORDER BY float
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o @abs_builddir@/test_arrow_index.data --stat=float_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (float_num = $0)
+         Rows Removed by Filter: 103563
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: float_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE float_num between -2000 and 2000;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=310689 loops=1)
+         Outer Scan Filter: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision))
+         Rows Removed by Outer Scan Filter: 110653
+         referenced: float_num
+         Stats-Hint: (float_num >= '-2000'::double precision), (float_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 7832.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE float_num between -2000 and 2000;
+ 200036
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE float_num between -2000 and 2000;
+ 200036
+
+RESET pg_strom.enabled;
+-- ORDER BY half
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o @abs_builddir@/test_arrow_index.data --stat=half_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
+ Foreign Scan on regtest_arrow (actual rows=15 loops=1)
+   Filter: (half_num = $0)
+   Rows Removed by Filter: 310674
+   referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+   Stats-Hint: half_num  [loaded: 1, skipped: 3]
+   files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+ Aggregate (actual rows=1 loops=1)
+   ->  Gather (actual rows=1 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         ->  Parallel Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=0 loops=2)
+               Reduction: NoGroup
+               Outer Scan: regtest_arrow (actual rows=310689 loops=1)
+               Outer Scan Filter: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision))
+               Rows Removed by Outer Scan Filter: 110907
+               referenced: half_num
+               Stats-Hint: (half_num >= '-2000'::double precision), (half_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
+               files0: @abs_builddir@/test_arrow_index.data (read: 1960.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+ 199782
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE half_num between -2000 and 2000;
+ 199782
+
+RESET pg_strom.enabled;
+-- ORDER BY decimal
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o @abs_builddir@/test_arrow_index.data --stat=decimal_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=0 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (decimal_num = $0)
+         Rows Removed by Filter: 103563
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: decimal_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE decimal_num between -5000 and 5000;
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=932067 loops=1)
+         Outer Scan Filter: ((decimal_num >= '-5000'::numeric) AND (decimal_num <= '5000'::numeric))
+         Rows Removed by Outer Scan Filter: 431484
+         referenced: decimal_num
+         Stats-Hint: (decimal_num >= '-5000'::numeric), (decimal_num <= '5000'::numeric)  [loaded: 3, skipped: 1]
+         files0: @abs_builddir@/test_arrow_index.data (read: 15.27MB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE decimal_num between -5000 and 5000;
+ 500583
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE decimal_num between -5000 and 5000;
+ 500583
+
+RESET pg_strom.enabled;
+-- ORDER BY time
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o @abs_builddir@/test_arrow_index.data --stat=time_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (time_num = $0)
+         Rows Removed by Filter: 103563
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: time_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE time_num between '09:00:00' and '17:00:00';
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=621378 loops=1)
+         Outer Scan Filter: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone))
+         Rows Removed by Outer Scan Filter: 287935
+         referenced: time_num
+         Stats-Hint: (time_num >= '09:00:00'::time without time zone), (time_num <= '17:00:00'::time without time zone)  [loaded: 2, skipped: 2]
+         files0: @abs_builddir@/test_arrow_index.data (read: 7832.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE time_num between '09:00:00' and '17:00:00';
+ 333443
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE time_num between '09:00:00' and '17:00:00';
+ 333443
+
+RESET pg_strom.enabled;
+-- ORDER BY timestamp
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o @abs_builddir@/test_arrow_index.data --stat=timestamp_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
+ Gather (actual rows=1 loops=1)
+   Workers Planned: 2
+   Params Evaluated: $0
+   Workers Launched: 2
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on target_num (actual rows=1 loops=1)
+   ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
+         Filter: (timestamp_num = $0)
+         Rows Removed by Filter: 103563
+         referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+         Stats-Hint: timestamp_num  [loaded: 1, skipped: 3]
+         files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+ Aggregate (actual rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         Reduction: NoGroup
+         Outer Scan: regtest_arrow (actual rows=621378 loops=1)
+         Outer Scan Filter: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone))
+         Rows Removed by Outer Scan Filter: 210494
+         referenced: timestamp_num
+         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
+         files0: @abs_builddir@/test_arrow_index.data (read: 7832.00KB, size: 51.50MB)
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+ 410884
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+ 410884
+
+RESET pg_strom.enabled;
+DROP SCHEMA regtest_arrow_index_temp CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table arrow_index_data
+drop cascades to table target_num
+drop cascades to foreign table regtest_arrow
