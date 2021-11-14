@@ -1622,13 +1622,13 @@ typealign_get_width(char type_align)
 {
 	switch (type_align)
 	{
-		case TYPALIGN_CHAR:
+		case 'c':
 			return 1;
-		case TYPALIGN_SHORT:
+		case 's':
 			return ALIGNOF_SHORT;
-		case TYPALIGN_INT:
+		case 'i':
 			return ALIGNOF_INT;
-		case TYPALIGN_DOUBLE:
+		case 'd':
 			return ALIGNOF_DOUBLE;
 		default:
 			elog(ERROR, "unexpected type alignment: %c", type_align);
