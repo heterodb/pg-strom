@@ -3481,18 +3481,20 @@ static int
 codegen_const_expression(codegen_context *context,
 						 Const *con)
 {
+	devtype_info *dtype;
 	cl_int		index;
 	cl_int		width;
 
-	if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
+	dtype = pgstrom_devtype_lookup_and_track(con->consttype, context);
+	if (!dtype)
 		__ELog("type %s is not device supported",
 			   format_type_be(con->consttype));
-
 	context->used_params = lappend(context->used_params,
 								   copyObject(con));
 	index = list_length(context->used_params) - 1;
 	__appendStringInfo(&context->str,
-					   "KPARAM_%u", index);
+					   "pg_%s_param(kcxt,%d)",
+					   dtype->type_name, index);
 	context->param_refs = bms_add_member(context->param_refs, index);
 	if (con->constisnull)
 		width = 0;
@@ -3526,21 +3528,18 @@ codegen_param_expression(codegen_context *context,
 	foreach (lc, context->used_params)
 	{
 		if (equal(param, lfirst(lc)))
-		{
-			__appendStringInfo(&context->str,
-							   "KPARAM_%u", index);
-			context->param_refs = bms_add_member(context->param_refs, index);
-			goto out;
-		}
+			goto found;
 		index++;
 	}
 	context->used_params = lappend(context->used_params,
 								   copyObject(param));
 	index = list_length(context->used_params) - 1;
+
+found:
 	__appendStringInfo(&context->str,
-					   "KPARAM_%u", index);
+					   "pg_%s_param(kcxt,%d)",
+					   dtype->type_name, index);
 	context->param_refs = bms_add_member(context->param_refs, index);
-out:
 	if (dtype->type_length > 0)
 		width = dtype->type_length;
 	else if (dtype->type_length == -1)
@@ -4387,58 +4386,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 
 	return context->str.data;
-}
-
-/*
- * pgstrom_codegen_param_declarations
- */
-void
-pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
-{
-	ListCell	   *cell;
-	devtype_info   *dtype;
-	int				index = 0;
-
-	foreach (cell, context->used_params)
-	{
-		Node	   *node = lfirst(cell);
-
-		if (!bms_is_member(index, context->param_refs))
-			goto lnext;
-
-		if (IsA(node, Const))
-		{
-			Const  *con = (Const *)node;
-
-			dtype = pgstrom_devtype_lookup(con->consttype);
-			if (!dtype)
-				__ELog("failed to lookup device type: %u",
-					   con->consttype);
-
-			appendStringInfo(
-				buf,
-				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
-				dtype->type_name, index, dtype->type_name, index);
-		}
-		else if (IsA(node, Param))
-		{
-			Param  *param = (Param *)node;
-
-			dtype = pgstrom_devtype_lookup(param->paramtype);
-			if (!dtype)
-				__ELog("failed to lookup device type: %u",
-					   param->paramtype);
-
-			appendStringInfo(
-				buf,
-				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
-				dtype->type_name, index, dtype->type_name, index);
-		}
-		else
-			elog(ERROR, "Bug? unexpected node: %s", nodeToString(node));
-	lnext:
-		index++;
-	}
 }
 
 /*

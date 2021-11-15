@@ -992,8 +992,6 @@ extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 extern devindex_info *pgstrom_devindex_lookup(Oid opcode,
 											  Oid opfamily);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern void pgstrom_codegen_param_declarations(StringInfo buf,
-											   codegen_context *context);
 extern void pgstrom_union_type_declarations(StringInfo buf,
 											const char *name,
 											List *type_oid_list);

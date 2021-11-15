@@ -3762,7 +3762,6 @@ setup_expressions:
 	*p_pfunc_bitmap = pfunc_bitmap;
 
 	/* const/params and temporary variable */
-	pgstrom_codegen_param_declarations(&decl, context);
 	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 
 	/* writeout kernel functions */

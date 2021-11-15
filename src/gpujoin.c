@@ -4404,11 +4404,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	}
 
 	/*
-	 * parameter declaration
-	 */
-	pgstrom_codegen_param_declarations(source, context);
-
-	/*
 	 * variable declarations
 	 */
 	appendStringInfoString(
@@ -4746,7 +4741,6 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	context->param_refs = NULL;
 	resetStringInfo(&context->decl_temp);
 
-	pgstrom_codegen_var_declarations(&body, depth, kvars_list);
 	if (!IsA(i_arg, Var))
 	{
 		appendStringInfo(
@@ -4754,7 +4748,6 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 			"  keys->INDEX_ARG = %s;\n",
 			pgstrom_codegen_expression((Node *)i_arg, context));
 	}
-	pgstrom_codegen_param_declarations(&decl, context);
 
 	appendStringInfo(
 		source,
@@ -5362,8 +5355,7 @@ gpujoin_codegen_projection(StringInfo source,
 		type_oid_list = list_append_unique_oid(type_oid_list,
 											   dtype->type_oid);
 	}
-	/* add const/param and temporary declarations */
-	pgstrom_codegen_param_declarations(&decl, context);
+	/* add temporary declarations */
 	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 	/* merge declarations and function body */
 	appendStringInfo(

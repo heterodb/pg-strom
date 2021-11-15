@@ -445,9 +445,9 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	char		   *expr_code = NULL;
 	ListCell	   *lc;
 
-	initStringInfo(&tfunc);
-	initStringInfo(&afunc);
-	initStringInfo(&cfunc);
+	initStringInfo(&tfunc);		/* = ROW/BLOCK */
+	initStringInfo(&afunc);		/* = ARROW */
+	initStringInfo(&cfunc);		/* = COLUMN */
 	initStringInfo(&temp);
 
 	if (scanrelid == 0 || dev_quals_list == NIL)
@@ -455,10 +455,6 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	/* Let's walk on the device expression tree */
 	dev_quals = (Node *)make_flat_ands_explicit(dev_quals_list);
 	expr_code = pgstrom_codegen_expression(dev_quals, context);
-	/* Const/Param declarations */
-	pgstrom_codegen_param_declarations(&tfunc, context);
-	pgstrom_codegen_param_declarations(&afunc, context);
-	pgstrom_codegen_param_declarations(&cfunc, context);
 	/* Sanity check of used_vars */
 	foreach (lc, context->used_vars)
 	{
@@ -997,9 +993,6 @@ codegen_gpuscan_projection(StringInfo kern,
 	appendStringInfoString(&tbody, temp.data);
 	appendStringInfoString(&abody, temp.data);
 	appendStringInfoString(&cbody, temp.data);
-
-	/* parameter references */
-	pgstrom_codegen_param_declarations(&decl, context);
 
 	/*
 	 * step.6 - put decl/body on the function body
