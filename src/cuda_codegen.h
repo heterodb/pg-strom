@@ -118,6 +118,7 @@ typedef struct devfunc_info {
  * In some special cases, device code can handle this class of type cast.
  */
 typedef int (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
+											  StringInfo body,
 											  struct devcast_info *dcast,
 											  CoerceViaIO *node);
 typedef struct devcast_info {
@@ -157,7 +158,6 @@ typedef struct devindex_info {
 #ifdef __PGSTROM_MODULE__
 
 typedef struct codegen_context {
-	StringInfoData	str;
 	StringInfoData	decl_temp;	/* declarations of temporary variables */
 	int				decl_count;	/* # of temporary variabes in decl */
 	PlannerInfo *root;		//not necessary?

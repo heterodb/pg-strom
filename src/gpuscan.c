@@ -581,11 +581,14 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		appendStringInfoString(
 			&tfunc,
 			"  default:\n"
-			"    break;"
+			"    break;\n"
 			"  }\n"
 			"  EXTRACT_HEAP_TUPLE_END();\n");
 	}
 output:
+	if (context->decl_temp.len > 0)
+		appendStringInfo(kern, "%s\n", context->decl_temp.data);
+
 	appendStringInfo(
 		kern,
 		"DEVICE_FUNCTION(cl_bool)\n"
@@ -595,7 +598,7 @@ output:
 		"                   HeapTupleHeaderData *htup)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
-		"%s%s\n"
+		"%s\n"
 		"  return %s;\n"
 		"}\n\n"
 		"DEVICE_FUNCTION(cl_bool)\n"
@@ -604,7 +607,7 @@ output:
 		"                         cl_uint row_index)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
-		"%s%s\n"
+		"%s\n"
 		"  return %s;\n"
 		"}\n\n"
 		"DEVICE_FUNCTION(cl_bool)\n"
@@ -614,19 +617,16 @@ output:
 		"                         cl_uint row_index)\n"
 		"{\n"
 		"  void *addr __attribute__((unused));\n"
-		"%s%s\n"
+		"%s\n"
 		"  return %s;\n"
 		"}\n\n",
 		component,
-		context->decl_temp.data,
 		tfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
 		component,
-		context->decl_temp.data,
 		afunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code),
 		component,
-		context->decl_temp.data,
 		cfunc.data,
 		!expr_code ? "true" : psprintf("EVAL(%s)", expr_code));
 }

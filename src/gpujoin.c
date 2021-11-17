@@ -4459,7 +4459,6 @@ gpujoin_codegen_join_quals(StringInfo source,
 	 */
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-	resetStringInfo(&context->decl_temp);
 	if (join_quals != NIL)
 		join_quals_code = pgstrom_codegen_expression((Node *)join_quals,
 													 context);
@@ -4479,8 +4478,8 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"                          cl_uint *o_buffer,\n"
 		"                          HeapTupleHeaderData *i_htup,\n"
 		"                          cl_bool *joinquals_matched)\n"
-		"{\n%s",
-		i_info->depth, context->decl_temp.data);
+		"{\n",
+		i_info->depth);
 
 	/*
 	 * variable/params declaration & initialization
@@ -4556,7 +4555,6 @@ gpujoin_codegen_hash_value(StringInfo source,
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-	resetStringInfo(&context->decl_temp);
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -4597,7 +4595,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                          cl_uint *o_buffer,\n"
 		"                          cl_bool *p_is_null_keys)\n"
 		"{\n"
-		"%s%s%s"
+		"%s%s"
 		"  *p_is_null_keys = is_null_keys;\n"
 		"  hash ^= 0xffffffff;\n"
 		"  return hash;\n"
@@ -4605,7 +4603,6 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"\n",
 		i_info->depth,
 		decl.data,
-		context->decl_temp.data,
 		body.data);
 	pfree(decl.data);
 	pfree(body.data);
@@ -4739,8 +4736,6 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	 */
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-	resetStringInfo(&context->decl_temp);
-
 	if (!IsA(i_arg, Var))
 	{
 		appendStringInfo(
@@ -4887,7 +4882,6 @@ gpujoin_codegen_projection(StringInfo source,
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-	resetStringInfo(&context->decl_temp);
 
 	/* expand varlena_bufsz for tup_dclass/values/extra array */
 	context->varlena_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
@@ -5378,10 +5372,10 @@ gpujoin_codegen_projection(StringInfo source,
 		"  cl_uint          sz          __attribute__((unused));\n"
 		"  cl_uint          extra_sum = 0;\n"
 		"  void            *addr        __attribute__((unused)) = NULL;\n"
-		"%s%s\n%s"
+		"%s\n%s"
 		"  return extra_sum;\n"
 		"}\n",
-		decl.data, context->decl_temp.data,
+		decl.data,
 		body.data);
 
 	pfree(decl.data);
@@ -5647,7 +5641,12 @@ gpujoin_codegen(PlannerInfo *root,
 	/* required varlena buffer size */
 	gj_info->varlena_bufsz = varlena_bufsz;
 
-	return source.data;
+	/* append source next to the declaration part */
+	if (context->decl_temp.len > 0)
+		appendStringInfoChar(&context->decl_temp, '\n');
+	appendStringInfoString(&context->decl_temp, source.data);
+
+	return context->decl_temp.data;
 }
 
 /*

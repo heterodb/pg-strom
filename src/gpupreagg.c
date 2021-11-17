@@ -3774,7 +3774,7 @@ setup_expressions:
 		"                         cl_char *dst_dclass,\n"
 		"                         Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n"
+		"%s\n"
 		"%s"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
@@ -3785,7 +3785,7 @@ setup_expressions:
 		"                          cl_char *dst_dclass,\n"
 		"                          Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n"
+		"%s\n"
 		"%s"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
@@ -3796,7 +3796,7 @@ setup_expressions:
 		"                           cl_char *dst_dclass,\n"
 		"                           Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n"
+		"%s\n"
 		"%s"
 		"}\n\n"
 		"DEVICE_FUNCTION(void)\n"
@@ -3807,17 +3807,13 @@ setup_expressions:
 		"                            cl_char *dst_dclass,\n"
 		"                            Datum   *dst_values)\n"
 		"{\n"
-		"%s%s\n"
+		"%s\n"
 		"%s"
 		"}\n\n",
-		decl.data, context->decl_temp.data,
-		tbody.data,
-		decl.data, context->decl_temp.data,
-		sbody.data,
-		decl.data, context->decl_temp.data,
-		abody.data,
-		decl.data, context->decl_temp.data,
-		cbody.data);
+		decl.data, tbody.data,
+		decl.data, sbody.data,
+		decl.data, abody.data,
+		decl.data, cbody.data);
 
 	if (outer_rel)
 		table_close(outer_rel, NoLock);

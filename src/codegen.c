@@ -38,6 +38,7 @@ static cl_uint pg_box2df_devtype_hashfunc(devtype_info *dtype, Datum datum);
 
 /* callback to handle special cases of device cast */
 static int	devcast_text2numeric_callback(codegen_context *context,
+										  StringInfo body,
 										  devcast_info *dcast,
 										  CoerceViaIO *node);
 /* error report */
@@ -3462,23 +3463,47 @@ found:
  * codegen_expression_walker - main logic of run-time code generator
  */
 static void codegen_expression_walker(codegen_context *context,
+									  StringInfo body,
 									  Node *node, int *p_varlena_sz);
 
 static Node *__codegen_current_node = NULL;
+static void
+__appendStringInfo(StringInfo str, const char *fmt,...)
+	pg_attribute_printf(2, 3);
 
-#define __appendStringInfo(str,fmt,...)						\
-	do {													\
-		if ((str)->data)									\
-			appendStringInfo((str),(fmt), ##__VA_ARGS__);	\
-	} while(0)
-#define __appendStringInfoChar(str,c)			\
-	do {										\
-		if ((str)->data)						\
-			appendStringInfoChar((str),(c));	\
-	} while(0)
+static void
+__appendStringInfo(StringInfo str, const char *fmt,...)
+{
+	int		save_errno = errno;
+
+	if (!str)
+		return;
+	for (;;)
+	{
+		va_list		va_args;
+		int			needed;
+
+		errno = save_errno;
+		va_start(va_args, fmt);
+		needed = appendStringInfoVA(str, fmt, va_args);
+		va_end(va_args);
+
+		if (needed == 0)
+			break;
+		enlargeStringInfo(str, needed);
+	}
+}
+
+static inline void
+__appendStringInfoChar(StringInfo str, char c)
+{
+	if (str)
+		appendStringInfoChar(str, c);
+}
 
 static int
 codegen_const_expression(codegen_context *context,
+						 StringInfo body,
 						 Const *con)
 {
 	devtype_info *dtype;
@@ -3492,7 +3517,8 @@ codegen_const_expression(codegen_context *context,
 	context->used_params = lappend(context->used_params,
 								   copyObject(con));
 	index = list_length(context->used_params) - 1;
-	__appendStringInfo(&context->str,
+
+	__appendStringInfo(body,
 					   "pg_%s_param(kcxt,%d)",
 					   dtype->type_name, index);
 	context->param_refs = bms_add_member(context->param_refs, index);
@@ -3509,6 +3535,7 @@ codegen_const_expression(codegen_context *context,
 
 static int
 codegen_param_expression(codegen_context *context,
+						 StringInfo body,
 						 Param *param)
 {
 	devtype_info   *dtype;
@@ -3536,7 +3563,7 @@ codegen_param_expression(codegen_context *context,
 	index = list_length(context->used_params) - 1;
 
 found:
-	__appendStringInfo(&context->str,
+	__appendStringInfo(body,
 					   "pg_%s_param(kcxt,%d)",
 					   dtype->type_name, index);
 	context->param_refs = bms_add_member(context->param_refs, index);
@@ -3552,7 +3579,8 @@ found:
 }
 
 static int
-codegen_varnode_expression(codegen_context *context, Var *var)
+codegen_varnode_expression(codegen_context *context,
+						   StringInfo body, Var *var)
 {
 	AttrNumber		varattno = var->varattno;
 	devtype_info   *dtype;
@@ -3612,11 +3640,11 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 				 nodeToString(context->pseudo_tlist));
 	}
 	if (varattno < 0)
-		__appendStringInfo(&context->str, "%s_S%u",
+		__appendStringInfo(body, "%s_S%u",
 						   context->var_label,
 						   -varattno);
 	else
-		__appendStringInfo(&context->str, "%s_%u",
+		__appendStringInfo(body, "%s_%u",
 						   context->var_label,
 						   varattno);
 	if (!list_member(context->used_vars, var))
@@ -3632,6 +3660,7 @@ codegen_varnode_expression(codegen_context *context, Var *var)
 
 static int
 codegen_function_expression(codegen_context *context,
+							StringInfo body,
 							devfunc_info *dfunc, List *args)
 {
 	ListCell *lc1, *lc2;
@@ -3639,7 +3668,7 @@ codegen_function_expression(codegen_context *context,
 	int	   *vl_width = alloca(sizeof(int) * list_length(args));
 	int		index = 0;
 
-	__appendStringInfo(&context->str,
+	__appendStringInfo(body,
 					   "pgfn_%s(kcxt",
 					   dfunc->func_devname);
 	forboth (lc1, dfunc->func_args,
@@ -3649,10 +3678,10 @@ codegen_function_expression(codegen_context *context,
 		Node   *expr = lfirst(lc2);
 		Oid		expr_type_oid = exprType(expr);
 
-		__appendStringInfo(&context->str, ", ");
+		__appendStringInfo(body, ", ");
 
 		if (dtype->type_oid == expr_type_oid)
-			codegen_expression_walker(context, expr, &vl_width[index]);
+			codegen_expression_walker(context, body, expr, &vl_width[index]);
 		else if (pgstrom_devtype_can_relabel(expr_type_oid,
 											 dtype->type_oid))
 		{
@@ -3666,9 +3695,9 @@ codegen_function_expression(codegen_context *context,
 			 * type checks. So, we have to inject an explicit type
 			 * relabel in this case.
 			 */
-			__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
-			codegen_expression_walker(context, expr, &vl_width[index]);
-			__appendStringInfoChar(&context->str, ')');
+			__appendStringInfo(body, "to_%s(", dtype->type_name);
+			codegen_expression_walker(context, body, expr, &vl_width[index]);
+			__appendStringInfoChar(body, ')');
 		}
 		else
 		{
@@ -3678,13 +3707,14 @@ codegen_function_expression(codegen_context *context,
 		}
 		fn_args[index++] = (Expr *)expr;
 	}
-	__appendStringInfoChar(&context->str, ')');
+	__appendStringInfoChar(body, ')');
 	/* estimation of function result width */
 	return dfunc->devfunc_result_sz(context, dfunc, fn_args, vl_width);
 }
 
 static int
 codegen_nulltest_expression(codegen_context *context,
+							StringInfo body,
 							NullTest *nulltest)
 {
 	devtype_info *dtype;
@@ -3700,18 +3730,18 @@ codegen_nulltest_expression(codegen_context *context,
 	switch (nulltest->nulltesttype)
 	{
 		case IS_NULL:
-			__appendStringInfo(&context->str, "PG_ISNULL");
+			__appendStringInfo(body, "PG_ISNULL");
 			break;
 		case IS_NOT_NULL:
-			__appendStringInfo(&context->str, "PG_ISNOTNULL");
+			__appendStringInfo(body, "PG_ISNOTNULL");
 			break;
 		default:
 			elog(ERROR, "unknown NullTestType: %d",
 				 (int)nulltest->nulltesttype);
 	}
-	__appendStringInfo(&context->str, "(kcxt, ");
-	codegen_expression_walker(context, (Node *) nulltest->arg, NULL);
-	__appendStringInfoChar(&context->str, ')');
+	__appendStringInfo(body, "(kcxt, ");
+	codegen_expression_walker(context, body, (Node *) nulltest->arg, NULL);
+	__appendStringInfoChar(body, ')');
 	context->devcost += 1;
 
 	return sizeof(cl_bool);
@@ -3719,6 +3749,7 @@ codegen_nulltest_expression(codegen_context *context,
 
 static int
 codegen_booleantest_expression(codegen_context *context,
+							   StringInfo body,
 							   BooleanTest *booltest)
 {
 	const char	   *func_name;
@@ -3752,63 +3783,104 @@ codegen_booleantest_expression(codegen_context *context,
 				 (int)booltest->booltesttype);
 			break;
 	}
-	__appendStringInfo(&context->str, "pgfn_%s(kcxt, ", func_name);
-	codegen_expression_walker(context, (Node *) booltest->arg, NULL);
-	__appendStringInfoChar(&context->str, ')');
+	__appendStringInfo(body, "pgfn_%s(kcxt, ", func_name);
+	codegen_expression_walker(context, body,
+							  (Node *) booltest->arg, NULL);
+	__appendStringInfoChar(body, ')');
 	context->devcost += 1;
 
 	return sizeof(cl_bool);
 }
 
 static int
-codegen_bool_expression(codegen_context *context, BoolExpr *b)
+codegen_bool_expression(codegen_context *context,
+						StringInfo body, BoolExpr *b)
 {
 	Node	   *node;
-	ListCell   *lc;
-	int			varno;
 
-	switch (b->boolop)
+	if (b->boolop == NOT_EXPR)
 	{
-		case NOT_EXPR:
-			Assert(list_length(b->args) == 1);
-			node = linitial(b->args);
+		Assert(list_length(b->args) == 1);
+		node = linitial(b->args);
 
-			__appendStringInfo(&context->str, "NOT(");
-			codegen_expression_walker(context, node, NULL);
-			__appendStringInfoChar(&context->str, ')');
-			break;
-		case AND_EXPR:
-		case OR_EXPR:
-			Assert(list_length(b->args) > 1);
-			varno = ++context->decl_count;
+		__appendStringInfo(body, "NOT(");
+		codegen_expression_walker(context, body, node, NULL);
+		__appendStringInfoChar(body, ')');
+	}
+	else if (b->boolop == AND_EXPR ||
+			 b->boolop == OR_EXPR)
+	{
+		StringInfoData temp;
+		List	   *used_vars_saved;
+		ListCell   *lc;
+
+		initStringInfo(&temp);
+
+		used_vars_saved = context->used_vars;
+		context->used_vars = NIL;
+		foreach (lc, b->args)
+		{
+			Node	   *node = lfirst(lc);
+
+			__appendStringInfo(&temp,
+							   "  status = ");
+			codegen_expression_walker(context, &temp, node, NULL);
+			__appendStringInfo(&temp,
+							   ";\n"
+							   "  if (PG_BOOL_%s(status))\n"
+							   "    return PG_BOOL_CONST(%d);\n",
+							   (b->boolop == AND_EXPR ? "ISFALSE" : "ISTRUE"),
+							   (b->boolop == AND_EXPR ? 0 : 1));
+		}
+
+		context->decl_count++;
+		__appendStringInfo(
+			&context->decl_temp,
+			"DEVICE_INLINE(pg_bool_t)\n"
+			"__exprBoolOp_%u(kern_context *kcxt",
+			context->decl_count);
+		__appendStringInfo(body,
+						   "__exprBoolOp_%u(kcxt", context->decl_count);
+		foreach (lc, context->used_vars)
+		{
+			devtype_info *dtype;
+			Var	   *var = lfirst(lc);
+
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			if (!dtype)
+				__ELog("type %s is not device supported",
+					   format_type_be(var->vartype));
 			__appendStringInfo(
 				&context->decl_temp,
-				"  pg_bool_t __temp%d __attribute__((unused));\n"
-				"  cl_bool   __anynull%d __attribute__((unused)) = false;\n",
-				varno, varno);
+				", pg_%s_t &",
+				dtype->type_name);
+			codegen_expression_walker(context,
+									  &context->decl_temp,
+									  (Node *)var, NULL);
+			__appendStringInfo(body, ", ");
+			codegen_expression_walker(context, body, (Node *)var, NULL);
 
-			foreach (lc, b->args)
-			{
-				Node   *node = lfirst(lc);
+			if (!list_member(used_vars_saved, var))
+				used_vars_saved = lappend(used_vars_saved, var);
+		}
+		__appendStringInfo(
+			&context->decl_temp,
+			")\n"
+			"{\n"
+			"  pg_bool_t status __attribute__((unused));\n"
+			"\n"
+			"%s"
+			"  return status;\n"
+			"}\n\n",
+			temp.data);
+		__appendStringInfo(body, ")");
+		context->used_vars = used_vars_saved;
 
-				Assert(exprType(node) == BOOLOID);
-				__appendStringInfo(
-					&context->str, "%s(__temp%d, __anynull%d, ",
-					b->boolop == AND_EXPR ? "AND" : "OR",
-					varno, varno);
-				codegen_expression_walker(context, node, NULL);
-				__appendStringInfo(&context->str, ", ");
-			}
-			__appendStringInfo(
-				&context->str,
-				"PG_BOOL(__anynull%d, %s)",
-				varno, b->boolop == AND_EXPR ? "true" : "false");
-			foreach (lc, b->args)
-				__appendStringInfo(&context->str, ")");
-			break;
-		default:
-			elog(ERROR, "unknown BoolExprType: %d", (int) b->boolop);
-			break;
+		pfree(temp.data);
+	}
+	else
+	{
+		elog(ERROR, "unknown BoolExprType: %d", (int) b->boolop);
 	}
 	context->devcost += list_length(b->args);
 	return sizeof(cl_bool);
@@ -3816,26 +3888,26 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 
 static int
 codegen_coalesce_expression(codegen_context *context,
+							StringInfo body,
 							CoalesceExpr *coalesce)
 {
 	devtype_info   *dtype;
+	StringInfoData	temp;
+	List		   *used_vars_saved;
 	ListCell	   *lc;
-	int				temp_nr;
 	int				maxlen = 0;
 
+	initStringInfo(&temp);
 	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 	if (!dtype)
 		__ELog("type %s is not device supported",
 			   format_type_be(coalesce->coalescetype));
-	temp_nr = ++context->decl_count;
-	__appendStringInfo(
-		&context->decl_temp,
-		"  pg_%s_t __temp%d __attribute__((unused));\n",
-		dtype->type_name, temp_nr);
 
+	used_vars_saved = context->used_vars;
+	context->used_vars = NIL;
 	foreach (lc, coalesce->args)
 	{
-		Node   *expr = (Node *)lfirst(lc);
+		Node   *expr = lfirst(lc);
 		Oid		type_oid = exprType(expr);
 		int		width;
 
@@ -3843,62 +3915,101 @@ codegen_coalesce_expression(codegen_context *context,
 			__ELog("device type mismatch in COALESCE: %s / %s",
 				   format_type_be(dtype->type_oid),
 				   format_type_be(type_oid));
-		if (list_tail(coalesce->args) != lc)
-		{
-			__appendStringInfo(&context->str, "((__temp%d = ", temp_nr);
-			codegen_expression_walker(context, expr, &width);
-			__appendStringInfo(&context->str,
-							   ").isnull == false ? __temp%d : ", temp_nr);
-		}
-		else
-		{
-			/* last item */
-			__appendStringInfo(&context->str, "(__temp%d = ", temp_nr);
-			codegen_expression_walker(context, expr, &width);
-		}
+		__appendStringInfo(&temp,
+						   "  retval = ");
+		codegen_expression_walker(context, &temp, expr, &width);
+		__appendStringInfo(&temp,
+						   ";\n"
+						   "  if (!retval.isnull)\n"
+						   "    return retval;\n");
 		if (width < 0)
 			maxlen = -1;
 		else if (maxlen >= 0)
 			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 	}
-	foreach (lc, coalesce->args)
-		__appendStringInfo(&context->str, ")");
+
+	context->decl_count++;
+	__appendStringInfo(
+		&context->decl_temp,
+		"DEVICE_INLINE(pg_%s_t)\n"
+		"__exprCoalesce_%u(kern_context *kcxt",
+		dtype->type_name,
+		context->decl_count);
+	__appendStringInfo(
+		body,
+		"__exprCoalesce_%u(kcxt",
+		context->decl_count);
+
+	foreach (lc, context->used_vars)
+	{
+		devtype_info *__dtype;
+		Var	   *var = lfirst(lc);
+
+		__dtype = pgstrom_devtype_lookup(var->vartype);
+		if (!__dtype)
+			__ELog("type %s is not device supported",
+				   format_type_be(var->vartype));
+		__appendStringInfo(
+			&context->decl_temp,
+			", pg_%s_t &",
+			__dtype->type_name);
+		codegen_expression_walker(context,
+								  &context->decl_temp,
+								  (Node *)var, NULL);
+		__appendStringInfo(body, ", ");
+		codegen_expression_walker(context, body, (Node *)var, NULL);
+
+		if (!list_member(used_vars_saved, var))
+			used_vars_saved = lappend(used_vars_saved, var);
+	}
+	__appendStringInfo(
+		&context->decl_temp,
+		")\n"
+		"{\n"
+		"  pg_%s_t retval __attribute__((unused));\n"
+		"\n"
+		"  retval.isnull = true;\n"
+		"%s"
+		"  return status;\n"
+		"}\n\n",
+		dtype->type_name,
+		temp.data);
+	__appendStringInfo(body, ")");
+	context->used_vars = used_vars_saved;
+
+	pfree(temp.data);
 
 	return maxlen;
 }
 
 static int
 codegen_minmax_expression(codegen_context *context,
+						  StringInfo body,
 						  MinMaxExpr *minmax)
 {
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
+	List		   *used_vars_saved;
 	ListCell	   *lc;
+	StringInfoData	temp;
 	int				maxlen = 0;
 
 	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 	if (!dtype)
 		__ELog("type %s is not device supported",
 			   format_type_be(minmax->minmaxtype));
+	context->extra_flags |= dtype->type_flags;
 
 	dfunc = pgstrom_devfunc_lookup_type_compare(dtype, minmax->inputcollid);
 	if (!dfunc)
 		__ELog("device type %s has no comparison operator",
 			   format_type_be(minmax->minmaxtype));
-	switch (minmax->op)
-	{
-		case IS_GREATEST:
-			__appendStringInfo(&context->str, "PG_GREATEST(kcxt");
-			break;
-		case IS_LEAST:
-			__appendStringInfo(&context->str, "PG_LEAST(kcxt");
-			break;
-		default:
-			elog(ERROR, "unknown MinMaxOp: %d", (int)minmax->op);
-			break;
-	}
-
+	context->extra_flags |= dfunc->func_flags;
+	
+	initStringInfo(&temp);
+	used_vars_saved = context->used_vars;
+	context->used_vars = NIL;
 	foreach (lc, minmax->args)
 	{
 		Node   *expr = lfirst(lc);
@@ -3909,21 +4020,87 @@ codegen_minmax_expression(codegen_context *context,
 			__ELog("device type mismatch in LEAST/GREATEST: %s / %s",
 				   format_type_be(dtype->type_oid),
 				   format_type_be(exprType(expr)));
-		__appendStringInfo(&context->str, ", ");
-		codegen_expression_walker(context, expr, &width);
+		if (lc == list_head(minmax->args))
+			__appendStringInfo(&temp, "  r = ");
+		else
+			__appendStringInfo(&temp, "  x = ");
+		codegen_expression_walker(context, &temp, expr, &width);
+		__appendStringInfo(&temp, ";\n");
+
+		if (lc != list_head(minmax->args))
+		{
+			__appendStringInfo(
+				&temp,
+				"  cmp = pgfn_%s(kcxt, r, x);\n"
+				"  if (!cmp.isnull && cmp.value %c 0)\n"
+				"    r = x;\n",
+				dfunc->func_devname,
+				minmax->op == IS_GREATEST ? '<' : '>');
+		}
 		if (width < 0)
 			maxlen = -1;
 		else if (maxlen >= 0)
 			maxlen = Max(maxlen, width);
 		context->devcost += 1;
 	}
-	__appendStringInfoChar(&context->str, ')');
+
+	context->decl_count++;
+    __appendStringInfo(
+		&context->decl_temp,
+		"DEVICE_INLINE(pg_%s_t)\n"
+        "__exprMinMax_%u(kern_context *kcxt",
+        dtype->type_name,
+        context->decl_count);
+    __appendStringInfo(
+        body,
+        "__exprMinMax_%u(kcxt",
+        context->decl_count);
+
+    foreach (lc, context->used_vars)
+    {
+        devtype_info *__dtype;
+        Var    *var = lfirst(lc);
+
+        __dtype = pgstrom_devtype_lookup(var->vartype);
+        if (!__dtype)
+            __ELog("type %s is not device supported",
+                   format_type_be(var->vartype));
+        __appendStringInfo(
+            &context->decl_temp,
+            ", pg_%s_t &",
+            __dtype->type_name);
+		codegen_expression_walker(context,
+								  &context->decl_temp,
+								  (Node *)var, NULL);
+        __appendStringInfo(body, ", ");
+        codegen_expression_walker(context, body, (Node *)var, NULL);
+
+        if (!list_member(used_vars_saved, var))
+            used_vars_saved = lappend(used_vars_saved, var);
+    }
+    __appendStringInfo(
+        &context->decl_temp,
+        ")\n"
+        "{\n"
+        "  pg_%s_t r, x __attribute__((unused));\n"
+		"  pg_int4_t cmp __attribute__((unused));\n"
+        "\n"
+        "%s"
+        "  return r;\n"
+        "}\n\n",
+		dtype->type_name,
+		temp.data);
+	__appendStringInfo(body, ")");
+	context->used_vars = used_vars_saved;
+
+	pfree(temp.data);
 
 	return maxlen;
 }
 
 static int
 codegen_relabel_expression(codegen_context *context,
+						   StringInfo body,
 						   RelabelType *relabel)
 {
 	devtype_info *dtype;
@@ -3944,15 +4121,16 @@ codegen_relabel_expression(codegen_context *context,
 			   format_type_be(stype_oid),
 			   format_type_be(relabel->resulttype));
 
-	__appendStringInfo(&context->str, "to_%s(", dtype->type_name);
-	codegen_expression_walker(context, (Node *)relabel->arg, &width);
-	__appendStringInfoChar(&context->str, ')');
+	__appendStringInfo(body, "to_%s(", dtype->type_name);
+	codegen_expression_walker(context, body, (Node *)relabel->arg, &width);
+	__appendStringInfoChar(body, ')');
 
 	return width;
 }
 
 static int
 codegen_coerceviaio_expression(codegen_context *context,
+							   StringInfo body,
 							   CoerceViaIO *coerce)
 {
 	devcast_info   *dcast;
@@ -3966,11 +4144,12 @@ codegen_coerceviaio_expression(codegen_context *context,
 			   format_type_be(dtype_oid));
 	context->devcost += 8;		/* just a rough estimation */
 
-	return dcast->dcast_coerceviaio_callback(context, dcast, coerce);
+	return dcast->dcast_coerceviaio_callback(context, body, dcast, coerce);
 }
 
 static int
 codegen_coercetodomain_expression(codegen_context *context,
+								  StringInfo body,
 								  CoerceToDomain *coerce_d)
 {
 	devcast_info *dcast;
@@ -3987,23 +4166,25 @@ codegen_coercetodomain_expression(codegen_context *context,
 		__ELog("type cast (%s -> %s) has no domain constraint",
 			   format_type_be(stype_oid),
 			   format_type_be(dtype_oid));
-	__appendStringInfo(&context->str, "to_%s_domain(kcxt,",
+	__appendStringInfo(body, "to_%s_domain(kcxt,",
 					   dcast->dst_type->type_name);
-	codegen_expression_walker(context, (Node *)coerce_d->arg, &width);
-	__appendStringInfoChar(&context->str, ')');
+	codegen_expression_walker(context, body, (Node *)coerce_d->arg, &width);
+	__appendStringInfoChar(body, ')');
 
 	return width;
 }
 
 static int
 codegen_casewhen_expression(codegen_context *context,
+							StringInfo body,
 							CaseExpr *caseexpr)
 {
 	devtype_info   *rtype;	/* result type */
 	devtype_info   *dtype;
-	devfunc_info   *dfunc;
+	StringInfoData	temp;
 	Node		   *defresult;
-	ListCell	   *cell;
+	List		   *used_vars_saved;
+	ListCell	   *lc;
 	Oid				type_oid;
 	int				width, maxlen = 0;
 
@@ -4025,120 +4206,110 @@ codegen_casewhen_expression(codegen_context *context,
 									  rtype->type_byval);
 	}
 
+	initStringInfo(&temp);
+	used_vars_saved = context->used_vars;
+	context->used_vars = NIL;
 	if (caseexpr->arg)
 	{
-		int			temp_nr;
-		int			count = 1;
 		/* type compare function internally used */
 		type_oid = exprType((Node *) caseexpr->arg);
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
 			__ELog("type %s is not device supported",
 				   format_type_be(type_oid));
-		dfunc = pgstrom_devfunc_lookup_type_compare(dtype, InvalidOid);
-		if (!dfunc)
-			__ELog("type %s has no device executable compare-operator",
-				   format_type_be(type_oid));
-		pgstrom_devfunc_track(context, dfunc);
 
-		temp_nr = ++context->decl_count;
-		__appendStringInfo(
-			&context->decl_temp,
-			"  pg_%s_t __temp%d __attribute__((unused));\n",
-			dtype->type_name, temp_nr);
+		__appendStringInfo(&temp, "  pg_%s_t CARG = ", dtype->type_name);
+		codegen_expression_walker(context, &temp,
+								  (Node *)caseexpr->arg, NULL);
+		__appendStringInfo(&temp, ";\n\n");
+	}
 
-		__appendStringInfo(
-			&context->str,
-			"(__temp%d = ", temp_nr);
-		codegen_expression_walker(context,
-								  (Node *)caseexpr->arg,
-								  NULL);
-		__appendStringInfo(&context->str, ", ");
+	foreach (lc, caseexpr->args)
+	{
+		CaseWhen   *casewhen = (CaseWhen *) lfirst(lc);
+		Expr	   *expr = casewhen->expr;
 
-		foreach (cell, caseexpr->args)
-		{
-			CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
-			OpExpr	   *op_expr;
-			Node	   *test_val;
-
-			Assert(IsA(casewhen, CaseWhen));
-			op_expr = (OpExpr *) casewhen->expr;
-			if (!IsA(op_expr, OpExpr) ||
-				op_expr->opresulttype != BOOLOID ||
-                list_length(op_expr->args) != 2)
-				elog(ERROR, "Bug? unexpected expression at CASE ... WHEN");
-
-			if (IsA(linitial(op_expr->args), CaseTestExpr) &&
-				!IsA(lsecond(op_expr->args), CaseTestExpr))
-				test_val = lsecond(op_expr->args);
-			else if (!IsA(linitial(op_expr->args), CaseTestExpr) &&
-					 IsA(lsecond(op_expr->args), CaseTestExpr))
-				test_val = linitial(op_expr->args);
-			else
-				elog(ERROR, "Bug? CaseTestExpr has unexpected arguments");
-
-			__appendStringInfo(&context->str,
-							   "(pgfn_type_equal(kcxt, __temp%d, ", temp_nr);
-			codegen_expression_walker(context, test_val, NULL);
-			__appendStringInfo(&context->str, ") ? (");
-			codegen_expression_walker(context,
-									  (Node *)casewhen->result,
-									  &width);
-			__appendStringInfo(&context->str, ") : ");
-			if (width < 0)
-				maxlen = -1;
-			else if (maxlen >= 0)
-				maxlen = Max(maxlen, width);
-			context->devcost += 1;
-			count++;
-		}
-		/* default value or NULL */
-		codegen_expression_walker(context, defresult, &width);
+		Assert(IsA(casewhen, CaseWhen) &&
+			   exprType((Node *)expr) == BOOLOID &&
+			   exprType((Node *)casewhen->result) == rtype->type_oid);
+		__appendStringInfo(&temp, "  if (EVAL(");
+		codegen_expression_walker(context, &temp, (Node *)expr, NULL);
+		__appendStringInfo(&temp, "))\n" "    return ");
+		codegen_expression_walker(context, &temp,
+								  (Node *)casewhen->result,
+								  &width);
+		__appendStringInfo(&temp, ";\n");
 		if (width < 0)
 			maxlen = -1;
 		else if (maxlen >= 0)
 			maxlen = Max(maxlen, width);
 		context->devcost += 1;
-
-		foreach (cell, caseexpr->args)
-			__appendStringInfo(&context->str, ")");
-		__appendStringInfo(&context->str, ")");
 	}
-	else
+	__appendStringInfo(&temp, "  return ");
+	codegen_expression_walker(context, &temp, defresult, NULL);
+	__appendStringInfo(&temp, ";\n");
+
+	context->decl_count++;
+	__appendStringInfo(
+		&context->decl_temp,
+		"DEVICE_INLINE(pg_%s_t)\n"
+		"__exprCaseWhen_%u(kern_context *kcxt",
+		rtype->type_name,
+		context->decl_count);
+	__appendStringInfo(
+		body,
+		"__exprCaseWhen_%u(kcxt",
+		context->decl_count);
+
+	foreach (lc, context->used_vars)
 	{
-		foreach (cell, caseexpr->args)
-		{
-			CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
+		devtype_info *__dtype;
+		Var    *var = lfirst(lc);
 
-			Assert(exprType((Node *)casewhen->expr) == BOOLOID);
-			Assert(exprType((Node *)casewhen->result) == rtype->type_oid);
-			__appendStringInfo(&context->str, "EVAL(");
-			codegen_expression_walker(context,
-									  (Node *)casewhen->expr, NULL);
-			__appendStringInfo(&context->str, ") ? (");
-			codegen_expression_walker(context, (Node *)casewhen->result,
-									  &width);
-			if (width < 0)
-				maxlen = -1;
-			else if (maxlen >= 0)
-				maxlen = Max(maxlen, width);
-			__appendStringInfo(&context->str, ") : (");
-		}
-		codegen_expression_walker(context, defresult, &width);
-		if (width < 0)
-			maxlen = -1;
-		else if (width >= 0)
-			maxlen = Max(maxlen, width);
-		context->devcost += 1;
+		__dtype = pgstrom_devtype_lookup(var->vartype);
+		if (!__dtype)
+			__ELog("type %s is not device supported",
+				   format_type_be(var->vartype));
+		__appendStringInfo(
+			&context->decl_temp,
+			", pg_%s_t &",
+			__dtype->type_name);
+		codegen_expression_walker(context,
+								  &context->decl_temp,
+								  (Node *)var, NULL);
+		__appendStringInfo(body, ", ");
+		codegen_expression_walker(context, body, (Node *)var, NULL);
 
-		foreach (cell, caseexpr->args)
-			__appendStringInfoChar(&context->str, ')');
+		if (!list_member(used_vars_saved, var))
+			used_vars_saved = lappend(used_vars_saved, var);
 	}
+	__appendStringInfo(
+		&context->decl_temp,
+		")\n"
+		"{\n"
+        "%s"
+        "}\n\n",
+		temp.data);
+	__appendStringInfo(body, ")");
+	context->used_vars = used_vars_saved;
+
+	pfree(temp.data);
+
 	return maxlen;
 }
 
 static int
+codegen_casetest_expression(codegen_context *context,
+							StringInfo body,
+							CaseTestExpr *ctest)
+{
+	__appendStringInfo(body, "CARG");
+	return 0;
+}
+
+static int
 codegen_scalar_array_op_expression(codegen_context *context,
+								   StringInfo body,
 								   ScalarArrayOpExpr *opexpr)
 {
 	devfunc_info *dfunc;
@@ -4199,13 +4370,13 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	PG_END_TRY();
 	ReleaseSysCache(fn_tup);
 
-	__appendStringInfo(&context->str,
+	__appendStringInfo(body,
 					   "PG_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
 					   dfunc->func_devname);
-	codegen_expression_walker(context, node_s, NULL);
-	__appendStringInfo(&context->str, ", ");
-	codegen_expression_walker(context, node_a, NULL);
-	__appendStringInfo(&context->str, ", %s, %d, %d)",
+	codegen_expression_walker(context, body, node_s, NULL);
+	__appendStringInfo(body, ", ");
+	codegen_expression_walker(context, body, node_a, NULL);
+	__appendStringInfo(body, ", %s, %d, %d)",
 					   opexpr->useOr ? "true" : "false",
 					   dtype_e->type_length,
 					   dtype_e->type_align);
@@ -4221,6 +4392,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 
 static void
 codegen_expression_walker(codegen_context *context,
+						  StringInfo body,
 						  Node *node, int *p_width)
 {
 	devfunc_info   *dfunc;
@@ -4236,15 +4408,15 @@ codegen_expression_walker(codegen_context *context,
 	switch (nodeTag(node))
 	{
 		case T_Const:
-			width = codegen_const_expression(context, (Const *) node);
+			width = codegen_const_expression(context, body, (Const *) node);
 			break;
 
 		case T_Param:
-			width = codegen_param_expression(context, (Param *) node);
+			width = codegen_param_expression(context, body, (Param *) node);
 			break;
 
 		case T_Var:
-			width = codegen_varnode_expression(context, (Var *) node);
+			width = codegen_varnode_expression(context, body, (Var *) node);
 			break;
 
 		case T_FuncExpr:
@@ -4260,6 +4432,7 @@ codegen_expression_walker(codegen_context *context,
 						   format_procedure(func->funcid));
 				pgstrom_devfunc_track(context, dfunc);
 				width = codegen_function_expression(context,
+													body,
 													dfunc,
 													func->args);
 				context->devcost += dfunc->func_devcost;
@@ -4281,6 +4454,7 @@ codegen_expression_walker(codegen_context *context,
 						   format_procedure(func_oid));
 				pgstrom_devfunc_track(context, dfunc);
 				width = codegen_function_expression(context,
+													body,
 													dfunc,
 													op->args);
 				context->devcost += dfunc->func_devcost;
@@ -4289,51 +4463,67 @@ codegen_expression_walker(codegen_context *context,
 
 		case T_NullTest:
 			width = codegen_nulltest_expression(context,
+												body,
 												(NullTest *) node);
 			break;
 
 		case T_BooleanTest:
 			width = codegen_booleantest_expression(context,
+												   body,
 												   (BooleanTest *) node);
 			break;
 
 		case T_BoolExpr:
 			width = codegen_bool_expression(context,
+											body,
 											(BoolExpr *) node);
 			break;
 
 		case T_CoalesceExpr:
 			width = codegen_coalesce_expression(context,
+												body,
 												(CoalesceExpr *) node);
 			break;
 
 		case T_MinMaxExpr:
 			width = codegen_minmax_expression(context,
+											  body,
 											  (MinMaxExpr *) node);
 			break;
 
 		case T_RelabelType:
 			width = codegen_relabel_expression(context,
+											   body,
 											   (RelabelType *) node);
 			break;
 
 		case T_CoerceViaIO:
 			width = codegen_coerceviaio_expression(context,
+												   body,
 												   (CoerceViaIO *) node);
 			break;
 
 		case T_CoerceToDomain:
 			width = codegen_coercetodomain_expression(context,
+													  body,
 													  (CoerceToDomain *) node);
 			break;
 
 		case T_CaseExpr:
 			width = codegen_casewhen_expression(context,
+												body,
 												(CaseExpr *) node);
+			break;
+
+		case T_CaseTestExpr:
+			width = codegen_casetest_expression(context,
+												body,
+												(CaseTestExpr *) node);
 			break;
 
 		case T_ScalarArrayOpExpr:
 			width = codegen_scalar_array_op_expression(context,
+													   body,
 												(ScalarArrayOpExpr *) node);
 			break;
 		default:
@@ -4349,13 +4539,10 @@ codegen_expression_walker(codegen_context *context,
 char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
+	StringInfoData	body;
 	devtype_info   *dtype;
 
-	if (!context->str.data)
-		initStringInfo(&context->str);
-	else
-		resetStringInfo(&context->str);
-
+	initStringInfo(&body);
 	if (IsA(expr, List))
 	{
 		if (list_length((List *)expr) == 1)
@@ -4366,7 +4553,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	PG_TRY();
 	{
-		codegen_expression_walker(context, expr, NULL);
+		codegen_expression_walker(context, &body, expr, NULL);
 	}
 	PG_CATCH();
 	{
@@ -4385,7 +4572,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	if (dtype)
 		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 
-	return context->str.data;
+	return body.data;
 }
 
 /*
@@ -4459,7 +4646,6 @@ __pgstrom_device_expression(PlannerInfo *root,
 	if (!expr)
 		return false;
 	pgstrom_init_codegen_context(&con, root, baserel);
-	Assert(!con.str.data);
 	PG_TRY();
 	{
 		if (IsA(expr, List))
@@ -4471,12 +4657,12 @@ __pgstrom_device_expression(PlannerInfo *root,
 			{
 				Node   *node = (Node *)lfirst(lc);
 
-				codegen_expression_walker(&con, node, &dummy);
+				codegen_expression_walker(&con, NULL, node, &dummy);
 			}
 		}
 		else
 		{
-			codegen_expression_walker(&con, (Node *)expr, &dummy);
+			codegen_expression_walker(&con, NULL, (Node *)expr, &dummy);
 		}
 	}
 	PG_CATCH();
@@ -4529,6 +4715,7 @@ __pgstrom_device_expression(PlannerInfo *root,
  */
 static int
 devcast_text2numeric_callback(codegen_context *context,
+							  StringInfo body,
 							  devcast_info *dcast,
 							  CoerceViaIO *node)
 {
@@ -4572,18 +4759,16 @@ devcast_text2numeric_callback(codegen_context *context,
 			__ELog("Not supported CoerceViaIO with jsonb key reference");
 	}
 	context->extra_flags |= DEVKERNEL_NEEDS_JSONLIB;
-	__appendStringInfo(&context->str,
-					   "pgfn_%s(kcxt",
-					   dfunc_name);
+	__appendStringInfo(body, "pgfn_%s(kcxt", dfunc_name);
 	foreach (lc, func_args)
 	{
 		Node   *expr = lfirst(lc);
 		int		dummy;
 
-		__appendStringInfo(&context->str, ", ");
-		codegen_expression_walker(context, expr, &dummy);
+		__appendStringInfo(body, ", ");
+		codegen_expression_walker(context, body, expr, &dummy);
 	}
-	__appendStringInfoChar(&context->str, ')');
+	__appendStringInfoChar(body, ')');
 	if (dtype->type_length > 0)
 		width = dtype->type_length;
 	else if (dtype->type_length == -1)
@@ -4593,9 +4778,6 @@ devcast_text2numeric_callback(codegen_context *context,
 
 	return width;
 }
-
-#undef __appendStringInfo
-#undef __appendStringInfoChar
 
 static void
 devtype_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
