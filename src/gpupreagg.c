@@ -3459,7 +3459,6 @@ gpupreagg_codegen_projection(StringInfo kern,
 	initStringInfo(&abody);
 	initStringInfo(&cbody);
 	initStringInfo(&temp);
-	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
@@ -3848,7 +3847,6 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
-	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
@@ -3904,7 +3902,6 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
 
 	/* no constants should appear */
-	Assert(bms_is_empty(context->param_refs));
 	appendStringInfo(
 		kern,
 		"DEVICE_FUNCTION(cl_uint)\n"
@@ -3941,7 +3938,6 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
-	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
@@ -4042,8 +4038,6 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 	/* declaration of temporary variable */
 	pgstrom_union_type_declarations(&decl, "x_temp", type_oid_list);
 	pgstrom_union_type_declarations(&decl, "y_temp", type_oid_list);
-	/* no constant values should be referenced */
-	Assert(bms_is_empty(context->param_refs));
 
 	appendStringInfo(
 		kern,

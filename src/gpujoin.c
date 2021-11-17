@@ -4458,7 +4458,6 @@ gpujoin_codegen_join_quals(StringInfo source,
 	 * make a text representation of join_qual
 	 */
 	context->used_vars = NIL;
-	context->param_refs = NULL;
 	if (join_quals != NIL)
 		join_quals_code = pgstrom_codegen_expression((Node *)join_quals,
 													 context);
@@ -4554,7 +4553,6 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"  cl_bool is_null_keys = true;\n");
 
 	context->used_vars = NIL;
-	context->param_refs = NULL;
 	foreach (lc, hash_outer_keys)
 	{
 		Node	   *key_expr = lfirst(lc);
@@ -4735,7 +4733,6 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 	 * Function to load GiST key variables
 	 */
 	context->used_vars = NIL;
-	context->param_refs = NULL;
 	if (!IsA(i_arg, Var))
 	{
 		appendStringInfo(
@@ -4881,8 +4878,6 @@ gpujoin_codegen_projection(StringInfo source,
 	initStringInfo(&outer);
 
 	context->used_vars = NIL;
-	context->param_refs = NULL;
-
 	/* expand varlena_bufsz for tup_dclass/values/extra array */
 	context->varlena_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
 							   MAXALIGN(sizeof(Datum)   * nfields) +

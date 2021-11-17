@@ -164,9 +164,6 @@ typedef struct codegen_context {
 	RelOptInfo	*baserel;	/* scope of Var-node, if any */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
-	Bitmapset  *param_refs;	/* referenced parameters */
-	const char *var_label;	/* prefix of var reference, if exist */
-	const char *kds_label;	/* label to reference kds, if exist */
 	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
 	int			extra_flags;	/* external libraries to be included */
 	int			varlena_bufsz;	/* required size of temporary varlena buffer */

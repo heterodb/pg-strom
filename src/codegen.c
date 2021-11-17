@@ -3521,7 +3521,6 @@ codegen_const_expression(codegen_context *context,
 	__appendStringInfo(body,
 					   "pg_%s_param(kcxt,%d)",
 					   dtype->type_name, index);
-	context->param_refs = bms_add_member(context->param_refs, index);
 	if (con->constisnull)
 		width = 0;
 	else if (con->constlen > 0)
@@ -3566,7 +3565,6 @@ found:
 	__appendStringInfo(body,
 					   "pg_%s_param(kcxt,%d)",
 					   dtype->type_name, index);
-	context->param_refs = bms_add_member(context->param_refs, index);
 	if (dtype->type_length > 0)
 		width = dtype->type_length;
 	else if (dtype->type_length == -1)
@@ -3640,13 +3638,9 @@ codegen_varnode_expression(codegen_context *context,
 				 nodeToString(context->pseudo_tlist));
 	}
 	if (varattno < 0)
-		__appendStringInfo(body, "%s_S%u",
-						   context->var_label,
-						   -varattno);
+		__appendStringInfo(body, "KVAR_S%u", -varattno);
 	else
-		__appendStringInfo(body, "%s_%u",
-						   context->var_label,
-						   varattno);
+		__appendStringInfo(body, "KVAR_%u",   varattno);
 	if (!list_member(context->used_vars, var))
 		context->used_vars = lappend(context->used_vars,
 									 copyObject(var));
@@ -4896,8 +4890,8 @@ pgstrom_init_codegen_context(codegen_context *context,
 	initStringInfo(&context->decl_temp);
 	context->root = root;
 	context->baserel = baserel;
-	context->var_label = "KVAR";
-	context->kds_label = "kds";
+//	context->var_label = "KVAR";
+//	context->kds_label = "kds";
 }
 
 void

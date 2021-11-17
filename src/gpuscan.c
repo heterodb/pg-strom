@@ -489,30 +489,30 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			dtype = pgstrom_devtype_lookup(var->vartype);
 			appendStringInfo(
 				&tfunc,
-				"  pg_%s_t %s_%u;\n\n"
+				"  pg_%s_t KVAR_%u;\n\n"
 				"  addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
-				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
 				dtype->type_name,
-				context->var_label, var->varattno,
+				var->varattno,
 				var->varattno - 1,
-				context->var_label, var->varattno);
+				var->varattno);
 			appendStringInfo(
 				&afunc,
-				"  pg_%s_t %s_%u;\n\n"
-				"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
+				"  pg_%s_t KVAR_%u;\n\n"
+				"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,row_index);\n",
 				dtype->type_name,
-				context->var_label, var->varattno,
-				context->var_label, var->varattno,
+				var->varattno,
+				var->varattno,
 				var->varattno - 1);
 			appendStringInfo(
 				&cfunc,
-				"  pg_%s_t %s_%u;\n\n"
+				"  pg_%s_t KVAR_%u;\n\n"
 				"  addr = kern_get_datum_column(kds,extra,%u,row_index);\n"
-				"  pg_datum_ref(kcxt,%s_%u,addr);\n",
+				"  pg_datum_ref(kcxt,KVAR_%u,addr);\n",
 				dtype->type_name,
-				context->var_label, var->varattno,
+				var->varattno,
 				var->varattno - 1,
-				context->var_label, var->varattno);
+				var->varattno);
 		}
 	}
 	else
@@ -529,9 +529,9 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			dtype = pgstrom_devtype_lookup(var->vartype);
 			appendStringInfo(
 				&temp,
-				"  pg_%s_t %s_%u;\n",
+				"  pg_%s_t KVAR_%u;\n",
 				dtype->type_name,
-				context->var_label, var->varattno);
+				var->varattno);
 			varattno_max = Max(varattno_max, var->varattno);
 		}
 		appendStringInfoString(&tfunc, temp.data);
@@ -557,22 +557,22 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 					appendStringInfo(
 						&tfunc,
 						"  case %u:\n"
-						"    pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n"
+						"    pg_datum_ref(kcxt,KVAR_%u,addr); // pg_%s_t\n"
 						"    break;\n",
 						anum - 1,
-						context->var_label, var->varattno,
+						var->varattno,
 						dtype->type_name);
 					appendStringInfo(
 						&afunc,
-						"  pg_datum_ref_arrow(kcxt,%s_%u,kds,%u,row_index);\n",
-						context->var_label, var->varattno,
+						"  pg_datum_ref_arrow(kcxt,KVAR_%u,kds,%u,row_index);\n",
+						var->varattno,
 						var->varattno - 1);
 					appendStringInfo(
 						&cfunc,
 						"  addr = kern_get_datum_column(kds,extra,%u,row_index);\n"
-						"  pg_datum_ref(kcxt,%s_%u,addr); // pg_%s_t\n",
+						"  pg_datum_ref(kcxt,KVAR_%u,addr); // pg_%s_t\n",
 						var->varattno - 1,
-						context->var_label, var->varattno,
+						var->varattno,
 						dtype->type_name);
 					break;	/* no need to read same value twice */
 				}
@@ -1432,7 +1432,6 @@ PlanGpuScanPath(PlannerInfo *root,
 					   baserel->relid, &varattnos);
 	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);
 
-	context.param_refs = NULL;
 	context.varlena_bufsz = Max(qual_extra_sz, proj_extra_sz);
 	codegen_gpuscan_projection(&kern,
 							   &context,
