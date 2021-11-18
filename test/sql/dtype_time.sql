@@ -617,8 +617,14 @@ SELECT id, EXTRACT (microseconds FROM t1) v1,
   FROM rt_datetime
  WHERE id > 0;
 
-(SELECT * FROM test41g EXCEPT SELECT * FROM test41p) ORDER BY id;
-(SELECT * FROM test41p EXCEPT SELECT * FROM test41g) ORDER BY id;
+SELECT * FROM test41g AS a, test41p AS b WHERE a.id=b.id AND
+(
+  ABS(a.v1 - b.v1) > 0.1
+  OR ABS(a.v2 - b.v2) > 0.1
+  OR ABS(a.v3 - b.v3) > 0.1
+  OR ABS(a.v4 - b.v4) > 0.1
+  OR ABS(a.v5 - b.v5) > 0.1
+) LIMIT 5;
 
 -- extract() on 'timetz' type
 SET pg_strom.enabled = on;
@@ -649,8 +655,14 @@ SELECT id, EXTRACT (microseconds FROM tz1) v1,
   FROM rt_datetime
  WHERE id > 0;
 
-(SELECT * FROM test42g EXCEPT SELECT * FROM test42p) ORDER BY id;
-(SELECT * FROM test42p EXCEPT SELECT * FROM test42g) ORDER BY id;
+SELECT * FROM test42g AS a, test42p AS b WHERE a.id=b.id AND
+(
+  ABS(a.v1 - b.v1) > 0.1
+  OR ABS(a.v2 - b.v2) > 0.1
+  OR ABS(a.v3 - b.v3) > 0.1
+  OR ABS(a.v4 - b.v4) > 0.1
+  OR ABS(a.v5 - b.v5) > 0.1
+) LIMIT 5;
 
 -- extract() on 'timestamp' type
 SET pg_strom.enabled = on;
@@ -720,8 +732,27 @@ SELECT id, EXTRACT (century         FROM ts1) v1,
   FROM rt_datetime
  WHERE id > 0;
 
-(SELECT * FROM test43g EXCEPT SELECT * FROM test43p) ORDER BY id;
-(SELECT * FROM test43p EXCEPT SELECT * FROM test43g) ORDER BY id;
+SELECT * FROM test43g AS a, test43p AS b WHERE a.id=b.id AND
+(
+  ABS(a.v1 - b.v1) > 0.1
+  OR ABS(a.v2 - b.v2) > 0.1
+  OR ABS(a.v3 - b.v3) > 0.1
+  OR ABS(a.v4 - b.v4) > 0.1
+  OR ABS(a.v5 - b.v5) > 0.1
+  OR ABS(a.v6 - b.v6) > 0.1
+  OR ABS(a.v7 - b.v7) > 0.1
+  OR ABS(a.v8 - b.v8) > 0.1
+  OR ABS(a.v9 - b.v9) > 0.1
+  OR ABS(a.v10 - b.v10) > 0.1
+  OR ABS(a.v11 - b.v11) > 0.1
+  OR ABS(a.v12 - b.v12) > 0.1
+  OR ABS(a.v13 - b.v13) > 0.1
+  OR ABS(a.v14 - b.v14) > 0.1
+  OR ABS(a.v15 - b.v15) > 0.1
+  OR ABS(a.v16 - b.v16) > 0.1
+  OR ABS(a.v17 - b.v17) > 0.1
+  OR ABS(a.v18 - b.v18) > 0.1
+) LIMIT 5;
 
 -- extract() on 'timestamptz' type
 SET pg_strom.enabled = on;
@@ -800,8 +831,30 @@ SELECT id, EXTRACT (century         FROM tsz1) v1,
   FROM rt_datetime
  WHERE id > 0;
 
-(SELECT * FROM test44g EXCEPT SELECT * FROM test44p) ORDER BY id;
-(SELECT * FROM test44p EXCEPT SELECT * FROM test44g) ORDER BY id;
+SELECT * FROM test44g AS a, test44p AS b WHERE a.id=b.id AND
+(
+  ABS(a.v1 - b.v1) > 0.1
+  OR ABS(a.v2 - b.v2) > 0.1
+  OR ABS(a.v3 - b.v3) > 0.1
+  OR ABS(a.v4 - b.v4) > 0.1
+  OR ABS(a.v5 - b.v5) > 0.1
+  OR ABS(a.v6 - b.v6) > 0.1
+  OR ABS(a.v7 - b.v7) > 0.1
+  OR ABS(a.v8 - b.v8) > 0.1
+  OR ABS(a.v9 - b.v9) > 0.1
+  OR ABS(a.v10 - b.v10) > 0.1
+  OR ABS(a.v11 - b.v11) > 0.1
+  OR ABS(a.v12 - b.v12) > 0.1
+  OR ABS(a.v13 - b.v13) > 0.1
+  OR ABS(a.v14 - b.v14) > 0.1
+  OR ABS(a.v15 - b.v15) > 0.1
+  OR ABS(a.v16 - b.v16) > 0.1
+  OR ABS(a.v17 - b.v17) > 0.1
+  OR ABS(a.v18 - b.v18) > 0.1
+  OR ABS(a.v19 - b.v19) > 0.1
+  OR ABS(a.v20 - b.v20) > 0.1
+  OR ABS(a.v21 - b.v21) > 0.1
+) LIMIT 5;
 
 -- extract() on 'interval' type
 SET pg_strom.enabled = on;
@@ -853,8 +906,21 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
   FROM rt_datetime
  WHERE id > 0;
 
-(SELECT * FROM test45g EXCEPT SELECT * FROM test45p) ORDER BY id;
-(SELECT * FROM test45p EXCEPT SELECT * FROM test45g) ORDER BY id;
+SELECT * FROM test45g AS a, test45p AS b WHERE a.id=b.id AND
+(
+  ABS(a.v1 - b.v1) > 0.1
+  OR ABS(a.v2 - b.v2) > 0.1
+  OR ABS(a.v3 - b.v3) > 0.1
+  OR ABS(a.v4 - b.v4) > 0.1
+  OR ABS(a.v5 - b.v5) > 0.1
+  OR ABS(a.v6 - b.v6) > 0.1
+  OR ABS(a.v7 - b.v7) > 0.1
+  OR ABS(a.v8 - b.v8) > 0.1
+  OR ABS(a.v9 - b.v9) > 0.1
+  OR ABS(a.v10 - b.v10) > 0.1
+  OR ABS(a.v11 - b.v11) > 0.1
+  OR ABS(a.v12 - b.v12) > 0.1
+) LIMIT 5;
 
 -- cleanup temporary resource
 SET client_min_messages = error;

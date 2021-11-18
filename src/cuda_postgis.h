@@ -68,6 +68,7 @@ typedef struct
 #define GEOM_TRIANGLETYPE			14
 #define GEOM_TINTYPE				15
 #define GEOM_NUMTYPES				16
+#define GEOM_TYPE_IS_VALID(gs_type)	((gs_type) >= 1 && (gs_type) <= GEOM_NUMTYPES)
 
 /* see LWFLAG_* in CPU code; at liblwgeom.h */
 #define GEOM_FLAG__Z			0x01
@@ -226,6 +227,40 @@ pgfn_box2df_geometry_within(kern_context *kcxt,
 DEVICE_FUNCTION(pg_geometry_t)
 pgfn_st_expand(kern_context *kcxt,
 			   const pg_geometry_t &arg1, pg_float8_t arg2);
+
+/*
+ * GiST index handlers
+ */
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_overlap(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_overlap(kern_context *kcxt,
+							PageHeaderData *i_page,
+							const pg_box2df_t &i_var,
+							const pg_box2df_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contains(kern_context *kcxt,
+							   PageHeaderData *i_page,
+							   const pg_box2df_t &i_var,
+							   const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contains(kern_context *kcxt,
+							 PageHeaderData *i_page,
+							 const pg_box2df_t &i_var,
+							 const pg_box2df_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contained(kern_context *kcxt,
+								PageHeaderData *i_page,
+								const pg_box2df_t &i_var,
+								const pg_geometry_t &i_arg);
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contained(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_box2df_t &i_arg);
 
 /*
  * PostGIS functions

@@ -270,6 +270,7 @@ DEVICE_FUNCTION(cl_bool)
 gpujoin_gist_index_quals(kern_context *kcxt,
 						 cl_int depth,
 						 kern_data_store *kds_gist,
+						 PageHeaderData *gist_page,
 						 IndexTupleData *itup,
 						 void *gist_keys);
 

@@ -715,6 +715,237 @@ CREATE AGGREGATE pgstrom.regr_syy(float8[])
 );
 
 ---
+--- Operator Class for float2 (missed in 3.0 definitions)
+---
+
+/* for B-tree */
+CREATE OPERATOR CLASS pg_catalog.float24_ops
+  for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float2, float4) for search,
+  operator 2 <= (float2, float4) for search,
+  operator 3 =  (float2, float4) for search,
+  operator 4 >= (float2, float4) for search,
+  operator 5 >  (float2, float4) for search,
+  function 1 (float2, float4) pgstrom.float24_cmp(float2, float4);
+
+CREATE OPERATOR CLASS pg_catalog.float28_ops
+  for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float2, float8) for search,
+  operator 2 <= (float2, float8) for search,
+  operator 3 =  (float2, float8) for search,
+  operator 4 >= (float2, float8) for search,
+  operator 5 >  (float2, float8) for search,
+  function 1 (float2, float8) pgstrom.float28_cmp(float2, float8);
+
+CREATE OPERATOR CLASS pg_catalog.float42_ops
+  for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float4, float2) for search,
+  operator 2 <= (float4, float2) for search,
+  operator 3 =  (float4, float2) for search,
+  operator 4 >= (float4, float2) for search,
+  operator 5 >  (float4, float2) for search,
+  function 1 (float4, float2) pgstrom.float42_cmp(float4, float2);
+
+CREATE OPERATOR CLASS pg_catalog.float82_ops
+  for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float8, float2) for search,
+  operator 2 <= (float8, float2) for search,
+  operator 3 =  (float8, float2) for search,
+  operator 4 >= (float8, float2) for search,
+  operator 5 >  (float8, float2) for search,
+  function 1 (float8, float2) pgstrom.float82_cmp(float8, float2);
+
+/* for BRIN */
+CREATE OPERATOR CLASS pg_catalog.float2_ops
+  default for type pg_catalog.float2
+  using brin family pg_catalog.float_minmax_ops as
+  operator 1 <  (float2, float2) for search,
+  operator 2 <= (float2, float2) for search,
+  operator 3 =  (float2, float2) for search,
+  operator 4 >= (float2, float2) for search,
+  operator 5 >  (float2, float2) for search,
+  function 1 (float2, float2) pgstrom.float2_cmp(float2, float2);
+
+CREATE OPERATOR CLASS pg_catalog.float24_ops
+  for type pg_catalog.float2
+  using brin family pg_catalog.float_minmax_ops as
+  operator 1 <  (float2, float4) for search,
+  operator 2 <= (float2, float4) for search,
+  operator 3 =  (float2, float4) for search,
+  operator 4 >= (float2, float4) for search,
+  operator 5 >  (float2, float4) for search,
+  function 1 (float2, float4) pgstrom.float24_cmp(float2, float4);
+
+CREATE OPERATOR CLASS pg_catalog.float28_ops
+  for type pg_catalog.float2
+  using brin family pg_catalog.float_minmax_ops as
+  operator 1 <  (float2, float8) for search,
+  operator 2 <= (float2, float8) for search,
+  operator 3 =  (float2, float8) for search,
+  operator 4 >= (float2, float8) for search,
+  operator 5 >  (float2, float8) for search,
+  function 1 (float2, float8) pgstrom.float28_cmp(float2, float8);
+
+CREATE OPERATOR CLASS pg_catalog.float42_ops
+  for type pg_catalog.float2
+  using brin family pg_catalog.float_minmax_ops as
+  operator 1 <  (float4, float2) for search,
+  operator 2 <= (float4, float2) for search,
+  operator 3 =  (float4, float2) for search,
+  operator 4 >= (float4, float2) for search,
+  operator 5 >  (float4, float2) for search,
+  function 1 (float4, float2) pgstrom.float42_cmp(float4, float2);
+
+CREATE OPERATOR CLASS pg_catalog.float82_ops
+  for type pg_catalog.float2
+  using brin family pg_catalog.float_minmax_ops as
+  operator 1 <  (float8, float2) for search,
+  operator 2 <= (float8, float2) for search,
+  operator 3 =  (float8, float2) for search,
+  operator 4 >= (float8, float2) for search,
+  operator 5 >  (float8, float2) for search,
+  function 1 (float8, float2) pgstrom.float82_cmp(float8, float2);
+
+---
+--- Operator Class for int1 (missed in 3.0 definitions)
+---
+/* for B-tree */
+CREATE OPERATOR CLASS pg_catalog.int12_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int1,int2) for search,
+  operator 2 <= (int1,int2) for search,
+  operator 3 =  (int1,int2) for search,
+  operator 4 >= (int1,int2) for search,
+  operator 5 >  (int1,int2) for search,
+  function 1 (int1,int2) pgstrom.btint12cmp(int1,int2);
+
+CREATE OPERATOR CLASS pg_catalog.int14_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int1,int4) for search,
+  operator 2 <= (int1,int4) for search,
+  operator 3 =  (int1,int4) for search,
+  operator 4 >= (int1,int4) for search,
+  operator 5 >  (int1,int4) for search,
+  function 1 (int1,int4) pgstrom.btint14cmp(int1,int4);
+
+CREATE OPERATOR CLASS pg_catalog.int18_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int1,int8) for search,
+  operator 2 <= (int1,int8) for search,
+  operator 3 =  (int1,int8) for search,
+  operator 4 >= (int1,int8) for search,
+  operator 5 >  (int1,int8) for search,
+  function 1 (int1,int8) pgstrom.btint18cmp(int1,int8);
+
+CREATE OPERATOR CLASS pg_catalog.int21_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int2,int1) for search,
+  operator 2 <= (int2,int1) for search,
+  operator 3 =  (int2,int1) for search,
+  operator 4 >= (int2,int1) for search,
+  operator 5 >  (int2,int1) for search,
+  function 1 (int2,int1) pgstrom.btint21cmp(int2,int1);
+
+CREATE OPERATOR CLASS pg_catalog.int41_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int4,int1) for search,
+  operator 2 <= (int4,int1) for search,
+  operator 3 =  (int4,int1) for search,
+  operator 4 >= (int4,int1) for search,
+  operator 5 >  (int4,int1) for search,
+  function 1 (int4,int1) pgstrom.btint41cmp(int4,int1);
+
+CREATE OPERATOR CLASS pg_catalog.int81_ops
+  for type pg_catalog.int1
+  using btree family pg_catalog.integer_ops as
+  operator 1 <  (int8,int1) for search,
+  operator 2 <= (int8,int1) for search,
+  operator 3 =  (int8,int1) for search,
+  operator 4 >= (int8,int1) for search,
+  operator 5 >  (int8,int1) for search,
+  function 1 (int8,int1) pgstrom.btint81cmp(int8,int1);
+
+/* for BRIN */
+CREATE OPERATOR CLASS pg_catalog.int1_ops
+  default for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int1,int1) for search,
+  operator 2 <= (int1,int1) for search,
+  operator 3 =  (int1,int1) for search,
+  operator 4 >= (int1,int1) for search,
+  operator 5 >  (int1,int1) for search,
+  function 1 (int1,int1) pgstrom.btint1cmp(int1,int1);
+
+CREATE OPERATOR CLASS pg_catalog.int12_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int1,int2) for search,
+  operator 2 <= (int1,int2) for search,
+  operator 3 =  (int1,int2) for search,
+  operator 4 >= (int1,int2) for search,
+  operator 5 >  (int1,int2) for search,
+  function 1 (int1,int2) pgstrom.btint12cmp(int1,int2);
+
+CREATE OPERATOR CLASS pg_catalog.int14_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int1,int4) for search,
+  operator 2 <= (int1,int4) for search,
+  operator 3 =  (int1,int4) for search,
+  operator 4 >= (int1,int4) for search,
+  operator 5 >  (int1,int4) for search,
+  function 1 (int1,int4) pgstrom.btint14cmp(int1,int4);
+
+CREATE OPERATOR CLASS pg_catalog.int18_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int1,int8) for search,
+  operator 2 <= (int1,int8) for search,
+  operator 3 =  (int1,int8) for search,
+  operator 4 >= (int1,int8) for search,
+  operator 5 >  (int1,int8) for search,
+  function 1 (int1,int8) pgstrom.btint18cmp(int1,int8);
+
+CREATE OPERATOR CLASS pg_catalog.int21_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int2,int1) for search,
+  operator 2 <= (int2,int1) for search,
+  operator 3 =  (int2,int1) for search,
+  operator 4 >= (int2,int1) for search,
+  operator 5 >  (int2,int1) for search,
+  function 1 (int2,int1) pgstrom.btint21cmp(int2,int1);
+
+CREATE OPERATOR CLASS pg_catalog.int41_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int4,int1) for search,
+  operator 2 <= (int4,int1) for search,
+  operator 3 =  (int4,int1) for search,
+  operator 4 >= (int4,int1) for search,
+  operator 5 >  (int4,int1) for search,
+  function 1 (int4,int1) pgstrom.btint41cmp(int4,int1);
+
+CREATE OPERATOR CLASS pg_catalog.int81_ops
+  for type pg_catalog.int1
+  using brin family pg_catalog.integer_minmax_ops as
+  operator 1 <  (int8,int1) for search,
+  operator 2 <= (int8,int1) for search,
+  operator 3 =  (int8,int1) for search,
+  operator 4 >= (int8,int1) for search,
+  operator 5 >  (int8,int1) for search,
+  function 1 (int8,int1) pgstrom.btint81cmp(int8,int1);
+
+---
 --- Deprecated Functions
 ---
 DROP FUNCTION IF EXISTS pgstrom.arrow_fdw_export_cupy(regclass, text[], int);

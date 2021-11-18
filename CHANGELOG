@@ -1,3 +1,9 @@
+* Sun Nov 14 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-1
+- Support of heterodb-extra API version 20211018
+- Allows multiple optimal GPUs
+- GpuPreAgg: fix optimizer error if ORDER BY is used together.
+- Various bug fixes
+
 * Tue Oct  5 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.2-1
 - GpuPreAgg: reduction logic reworked (local+global hybrid hash)
 - GpuPreAgg: add hyper-log-log cardinarity estimation with hll_count(X)

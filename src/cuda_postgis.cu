@@ -233,12 +233,10 @@ __gserialized_get_srid(const __GSERIALIZED *gs)
 {
 	cl_int		srid;
 
-	/* Only the first 21 bits are set. Slide up and back to pull
-	 * the negative bits down, if we need them. */
+	/* Only the first 21 bits are set. */
 	srid = (((cl_uint)gs->srid[0] << 16) |
 			((cl_uint)gs->srid[1] <<  8) |
-			((cl_uint)gs->srid[0]));
-	srid = (srid << 11) >> 11;
+			((cl_uint)gs->srid[2])) & 0x001fffffU;
 	/* 0 is our internal unknown value */
 	return (srid == 0 ? SRID_UNKNOWN : srid);
 }
@@ -249,6 +247,7 @@ __geometry_datum_ref_v1(kern_context *kcxt, void *addr, cl_int sz)
 	/* see lwgeom_from_gserialized1() */
 	__GSERIALIZED  *gs = (__GSERIALIZED *)addr;
 	pg_geometry_t	geom;
+	cl_uint			gs_type;
 	cl_ushort		geom_flags = 0;
 	char		   *rawdata = gs->data;
 
@@ -271,8 +270,17 @@ __geometry_datum_ref_v1(kern_context *kcxt, void *addr, cl_int sz)
 		geom.bbox = (geom_bbox *)rawdata;
 		rawdata += geometry_bbox_size(geom.flags);
 	}
-	memcpy(&geom.type, rawdata, sizeof(cl_uint));
+	memcpy(&gs_type, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
+	if (GEOM_TYPE_IS_VALID(gs_type))
+		geom.type = gs_type;
+	else
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "geometry data v1 has unsupported type");
+		geom.isnull = true;
+	}
+
 	memcpy(&geom.nitems, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
 	geom.rawdata = rawdata;
@@ -302,22 +310,22 @@ __geometry_datum_ref_v2(kern_context *kcxt, void *addr, cl_int sz)
 	/* see lwgeom_from_gserialized2() */
 	__GSERIALIZED  *gs = (__GSERIALIZED *)addr;
 	pg_geometry_t	geom;
-	cl_uchar		gs_flags = gs->gflags;
+	cl_uint			gs_type;
 	cl_ushort		geom_flags = 0;
 	char		   *rawdata = gs->data;
 
 	memset(&geom, 0, sizeof(pg_geometry_t));
 
 	/* parse version.2 flags */
-	if ((gs_flags & G2FLAG_Z) != 0)
+	if ((gs->gflags & G2FLAG_Z) != 0)
 		geom_flags |= GEOM_FLAG__Z;
-	if ((gs_flags & G2FLAG_M) != 0)
+	if ((gs->gflags & G2FLAG_M) != 0)
 		geom_flags |= GEOM_FLAG__M;
-	if ((gs_flags & G2FLAG_BBOX) != 0)
+	if ((gs->gflags & G2FLAG_BBOX) != 0)
 		geom_flags |= GEOM_FLAG__BBOX;
-    if ((gs_flags & G2FLAG_GEODETIC) != 0)
+	if ((gs->gflags & G2FLAG_GEODETIC) != 0)
 		geom_flags |= G1FLAG_GEODETIC;
-	if ((gs_flags & G2FLAG_EXTENDED) != 0)
+	if ((gs->gflags & G2FLAG_EXTENDED) != 0)
 	{
 		cl_ulong    ex_flags;
 
@@ -333,8 +341,18 @@ __geometry_datum_ref_v2(kern_context *kcxt, void *addr, cl_int sz)
 		geom.bbox = (geom_bbox *)rawdata;
 		rawdata += geometry_bbox_size(geom.flags);
 	}
-	memcpy(&geom.type, rawdata, sizeof(cl_uint));
+
+	memcpy(&gs_type, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
+	if (GEOM_TYPE_IS_VALID(gs_type))
+		geom.type = gs_type;
+	else
+	{
+		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
+					  "geometry data v2 has unsupported type");
+		geom.isnull = true;
+	}
+
 	memcpy(&geom.nitems, rawdata, sizeof(cl_uint));
 	rawdata += sizeof(cl_uint);
 	geom.rawdata = rawdata;
@@ -363,6 +381,13 @@ pg_geometry_datum_ref(kern_context *kcxt, void *addr)
 
 	if (!addr)
 	{
+		memset(&result, 0, sizeof(pg_geometry_t));
+		result.isnull = true;
+	}
+	else if (VARATT_IS_1B_E(addr))
+	{
+		STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+						   "varlena datum is compressed or external");
 		memset(&result, 0, sizeof(pg_geometry_t));
 		result.isnull = true;
 	}
@@ -771,6 +796,8 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	POINT2D			pt;
 	cl_uint			unitsz;
 	const char	   *rawdata;
+	double			xmin, xmax;
+	double			ymin, ymax;
 	pg_geometry_t	temp;
 	const char	   *pos;
 
@@ -786,30 +813,28 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	if (geom->type == GEOM_POINTTYPE)
 	{
 		__loadPoint2d(&pt, geom->rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
-		return true;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 	}
 	else if (geom->type == GEOM_LINETYPE)
 	{
 		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
 
 		rawdata = __loadPoint2d(&pt, geom->rawdata, unitsz);
-		bbox->xmax = bbox->xmin = pt.x;
-        bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i = 1; i < geom->nitems; i++)
 		{
 			rawdata = __loadPoint2d(&pt, rawdata, unitsz);
-			if (bbox->xmax < pt.x)
-				bbox->xmax = pt.x;
-			if (bbox->xmin > pt.x)
-				bbox->xmin = pt.x;
-			if (bbox->ymax < pt.y)
-				bbox->ymax = pt.y;
-			if (bbox->ymin > pt.y)
-				bbox->ymin = pt.y;
+			if (xmax < pt.x)
+				xmax = pt.x;
+			if (xmin > pt.x)
+				xmin = pt.x;
+			if (ymax < pt.y)
+				ymax = pt.y;
+			if (ymin > pt.y)
+				ymin = pt.y;
 		}
-		return true;
 	}
 	else if (geom->type == GEOM_MULTIPOINTTYPE)
 	{
@@ -817,24 +842,23 @@ __geometry_get_bbox2d(kern_context *kcxt,
 		if (!pos)
 			return false;
 		__loadPoint2d(&pt, temp.rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
 			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
 			if (!pos)
 				return false;
 			__loadPoint2d(&pt, temp.rawdata, 0);
-			if (bbox->xmax < pt.x)
-				bbox->xmax = pt.x;
-			if (bbox->xmin > pt.x)
-				bbox->xmin = pt.x;
-			if (bbox->ymax < pt.y)
-				bbox->ymax = pt.y;
-			if (bbox->ymin > pt.y)
-				bbox->ymin = pt.y;
+			if (xmax < pt.x)
+				xmax = pt.x;
+			if (xmin > pt.x)
+				xmin = pt.x;
+			if (ymax < pt.y)
+				ymax = pt.y;
+			if (ymin > pt.y)
+				ymin = pt.y;
 		}
-		return true;
 	}
 	else if (geom->type == GEOM_MULTILINETYPE)
 	{
@@ -844,8 +868,8 @@ __geometry_get_bbox2d(kern_context *kcxt,
 		if (!pos)
 			return false;
 		__loadPoint2d(&pt, temp.rawdata, 0);
-		bbox->xmax = bbox->xmin = pt.x;
-		bbox->ymax = bbox->ymin = pt.y;
+		xmin = xmax = pt.x;
+		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
 			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
@@ -855,19 +879,27 @@ __geometry_get_bbox2d(kern_context *kcxt,
 			for (int j=0; j < temp.nitems; j++)
 			{
 				rawdata = __loadPoint2d(&pt, rawdata, unitsz);
-				if (bbox->xmax < pt.x)
-					bbox->xmax = pt.x;
-				if (bbox->xmin > pt.x)
-					bbox->xmin = pt.x;
-				if (bbox->ymax < pt.y)
-					bbox->ymax = pt.y;
-				if (bbox->ymin > pt.y)
-					bbox->ymin = pt.y;
+				if (xmax < pt.x)
+					xmax = pt.x;
+				if (xmin > pt.x)
+					xmin = pt.x;
+				if (ymax < pt.y)
+					ymax = pt.y;
+				if (ymin > pt.y)
+					ymin = pt.y;
 			}
 		}
-		return true;
 	}
-	return false;
+	else
+	{
+		return false;	/* not a supported type */
+	}
+	bbox->xmin = __double2float_rd(xmin);
+	bbox->xmax = __double2float_ru(xmax);
+	bbox->ymin = __double2float_rd(ymin);
+	bbox->ymax = __double2float_ru(ymax);
+
+	return true;
 }
 
 DEVICE_INLINE(cl_bool)
@@ -1022,7 +1054,7 @@ pgfn_geometry_within(kern_context *kcxt,
 }
 
 DEVICE_FUNCTION(pg_bool_t)
-pgfn_geometry_box2df_within(kern_context *kcxt,
+pgfn_box2df_geometry_within(kern_context *kcxt,
 							const pg_box2df_t &arg1,
 							const pg_geometry_t &arg2)
 {
@@ -1106,6 +1138,97 @@ pgfn_st_expand(kern_context *kcxt,
 	pos += 10 * sizeof(double);
 
 	return geom;
+}
+
+/* ================================================================
+ *
+ * GiST Index Handlers
+ *
+ * ================================================================
+ */
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_overlap(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+		return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_overlap(kern_context *kcxt,
+							PageHeaderData *i_page,
+							const pg_box2df_t &i_var,
+							const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+		return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contains(kern_context *kcxt,
+							   PageHeaderData *i_page,
+							   const pg_box2df_t &i_var,
+							   const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+		return __geom_contains_bbox2d(&i_var.value, &__bbox);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contains(kern_context *kcxt,
+							 PageHeaderData *i_page,
+							 const pg_box2df_t &i_var,
+							 const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+		return __geom_contains_bbox2d(&i_var.value, &i_arg.value);
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_geometry_contained(kern_context *kcxt,
+								PageHeaderData *i_page,
+								const pg_box2df_t &i_var,
+								const pg_geometry_t &i_arg)
+{
+	geom_bbox_2d __bbox;
+
+	if (!i_var.isnull &&
+		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
+	{
+		if (!GistPageIsLeaf(i_page))
+			return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
+		else
+			return __geom_within_bbox2d(&i_var.value, &__bbox);
+	}
+	return false;
+}
+
+DEVICE_FUNCTION(cl_bool)
+pgindex_gist_box2df_contained(kern_context *kcxt,
+							  PageHeaderData *i_page,
+							  const pg_box2df_t &i_var,
+							  const pg_box2df_t &i_arg)
+{
+	if (!i_var.isnull && !i_arg.isnull)
+	{
+		if (!GistPageIsLeaf(i_page))
+			return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
+		else
+			return __geom_within_bbox2d(&i_var.value, &i_arg.value);
+	}
+	return false;
 }
 
 /* ================================================================

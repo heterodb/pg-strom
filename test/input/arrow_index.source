@@ -1,6 +1,7 @@
 ---
 --- Test for apache_arrow with index
 ---
+\t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
@@ -15,6 +16,7 @@ CREATE TABLE arrow_index_data (
   id         int,
   int_num         int,
   float_num       float,
+  half_num        float2,
   decimal_num     numeric,
   date_num        date,
   time_num        time,
@@ -25,6 +27,7 @@ INSERT INTO arrow_index_data (
     SELECT x,   -- int_num
         pgstrom.random_int(0, -16777216, 16777216),   -- int_num
         pgstrom.random_float(0,-10000.0,10000.0),        -- float_num
+        pgstrom.random_float(0,-10000.0,10000.0),        -- half_num
         pgstrom.random_float(0,-10000.0,10000.0),        -- decimal_num
         pgstrom.random_date(0),            -- date_num
         pgstrom.random_time(0),              -- time_num
@@ -41,34 +44,151 @@ IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_index_temp
 OPTIONS (file '@abs_builddir@/test_arrow_index.data');
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE date_num between '2019-04-14' and '2023-05-23') as is_ok FROM regtest_arrow WHERE date_num between '2019-04-14' and '2023-05-23';
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE date_num=(SELECT date_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE date_num between '2019-04-14' and '2023-05-23';
+RESET pg_strom.enabled;
 
 -- ORDER BY int_num
 
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY int_num' -o @abs_builddir@/test_arrow_index.data --stat=int_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE int_num between -50000 and 50000) as is_ok FROM regtest_arrow WHERE int_num between -50000 and 50000;
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE int_num=(SELECT int_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE int_num between -50000 and 50000;
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE int_num between -50000 and 50000;
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE int_num between -50000 and 50000;
+RESET pg_strom.enabled;
 
 -- ORDER BY float
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY float_num' -o @abs_builddir@/test_arrow_index.data --stat=float_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE float_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE float_num between -5000 and 5000;
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE float_num between -2000 and 2000;
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE float_num between -2000 and 2000;
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE float_num between -2000 and 2000;
+RESET pg_strom.enabled;
+
+-- ORDER BY half
+\! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY half_num' -o @abs_builddir@/test_arrow_index.data --stat=half_num
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE half_num between -2000 and 2000;
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE half_num between -2000 and 2000;
+RESET pg_strom.enabled;
 
 -- ORDER BY decimal
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY decimal_num' -o @abs_builddir@/test_arrow_index.data --stat=decimal_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE decimal_num between -5000 and 5000) as is_ok FROM regtest_arrow WHERE decimal_num between -5000 and 5000;
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE decimal_num=(SELECT decimal_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE decimal_num between -5000 and 5000;
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE decimal_num between -5000 and 5000;
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE decimal_num between -5000 and 5000;
+RESET pg_strom.enabled;
 
 -- ORDER BY time
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY time_num' -o @abs_builddir@/test_arrow_index.data --stat=time_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE time_num between '09:00:00' and '17:00:00') as is_ok FROM regtest_arrow WHERE time_num between '09:00:00' and '17:00:00';
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+ WHERE time_num=(SELECT time_num FROM regtest_arrow_index_temp.target_num);
+
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE time_num between '09:00:00' and '17:00:00';
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE time_num between '09:00:00' and '17:00:00';
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE time_num between '09:00:00' and '17:00:00';
+RESET pg_strom.enabled;
 
 -- ORDER BY timestamp
 \! @abs_builddir@/../../arrow-tools/pg2arrow -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_index_temp.arrow_index_data ORDER BY timestamp_num' -o @abs_builddir@/test_arrow_index.data --stat=timestamp_num
-EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF) SELECT * FROM regtest_arrow_index_temp.regtest_arrow WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
-SELECT count(*)=(SELECT count(*) as is_ok FROM arrow_index_data WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00') as is_ok FROM regtest_arrow WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT * FROM regtest_arrow_index_temp.regtest_arrow
+WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
 
+EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+
+SELECT count(*)
+  FROM regtest_arrow
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+
+SET pg_strom.enabled = off;
+SELECT count(*)
+  FROM arrow_index_data
+ WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
+RESET pg_strom.enabled;
 
 DROP SCHEMA regtest_arrow_index_temp CASCADE;

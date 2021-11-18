@@ -63,6 +63,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
@@ -969,6 +970,19 @@ extern void pgstrom_init_cuda_program(void);
  */
 #include "cuda_codegen.h"
 
+typedef struct codegen_context {
+	StringInfoData	decl;	/* declarations of functions for complex expression */
+	int				decl_count;	/* # of temporary variabes in decl */
+	PlannerInfo *root;		//not necessary?
+	RelOptInfo	*baserel;	/* scope of Var-node, if any */
+	List	   *used_params;/* list of Const/Param in use */
+	List	   *used_vars;	/* list of Var in use */
+	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
+	uint32_t	extra_flags;	/* external libraries to be included */
+	uint32_t	extra_bufsz;	/* required size of temporary varlena buffer */
+	int			devcost;	/* relative device cost */
+} codegen_context;
+
 extern size_t pgstrom_codegen_extra_devtypes(char *buf, size_t bufsz,
 											 uint32 extra_flags);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
@@ -988,9 +1002,9 @@ extern devcast_info *pgstrom_devcast_lookup(Oid src_type_oid,
 											Oid dst_type_oid);
 extern bool pgstrom_devtype_can_relabel(Oid src_type_oid,
 										Oid dst_type_oid);
+extern devindex_info *pgstrom_devindex_lookup(Oid opcode,
+											  Oid opfamily);
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern void pgstrom_codegen_param_declarations(StringInfo buf,
-											   codegen_context *context);
 extern void pgstrom_union_type_declarations(StringInfo buf,
 											const char *name,
 											List *type_oid_list);
@@ -1228,10 +1242,10 @@ extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts);
 extern int  gpujoinNextRightOuterJoinIfAny(GpuTaskState *gts);
-extern TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
-												struct kern_gpujoin *kgjoin,
-												pgstrom_data_store *pds_src,
-												cl_int outer_depth);
+extern TupleTableSlot *gpujoinNextTupleFallbackUpper(GpuTaskState *gts,
+													 struct kern_gpujoin *kgjoin,
+													 pgstrom_data_store *pds_src,
+													 cl_int outer_depth);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 
@@ -1312,6 +1326,7 @@ extern void pgstrom_init_gpu_cache(void);
 /*
  * misc.c
  */
+extern Node *fixup_varnode_to_origin(Node *expr, List *cscan_tlist);
 extern Expr *make_flat_ands_explicit(List *andclauses);
 extern AppendRelInfo **find_appinfos_by_relids_nofail(PlannerInfo *root,
 													  Relids relids,
@@ -1413,7 +1428,7 @@ extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_s
  */
 extern int		pgstrom_num_users_extra;
 extern pgstromUsersExtraDescriptor pgstrom_users_extra_desc[];
-
+extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern const Path *gpu_path_find_cheapest(PlannerInfo *root,
 										  RelOptInfo *rel,
 										  bool outer_parallel,
@@ -1458,52 +1473,6 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 #ifndef SAMESIGN
 #define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
 #endif
-/*
- * int/float reinterpret functions
- */
-static inline cl_double
-long_as_double(cl_long ival)
-{
-	union {
-		cl_long		ival;
-		cl_double	fval;
-	} datum;
-	datum.ival = ival;
-	return datum.fval;
-}
-
-static inline cl_long
-double_as_long(cl_double fval)
-{
-	union {
-		cl_long		ival;
-		cl_double	fval;
-	} datum;
-	datum.fval = fval;
-	return datum.ival;
-}
-
-static inline cl_float
-int_as_float(cl_int ival)
-{
-	union {
-		cl_int		ival;
-		cl_float	fval;
-	} datum;
-	datum.ival = ival;
-	return datum.fval;
-}
-
-static inline cl_int
-float_as_int(cl_float fval)
-{
-	union {
-		cl_int		ival;
-		cl_float	fval;
-	} datum;
-	datum.fval = fval;
-	return datum.ival;
-}
 
 /*
  * trim_cstring - remove spaces from head/tail
@@ -1662,15 +1631,19 @@ __trim(char *token)
 static inline int
 typealign_get_width(char type_align)
 {
-	if (type_align == 'c')
-		return sizeof(cl_char);
-	else if (type_align == 's')
-		return sizeof(cl_short);
-	else if (type_align == 'i')
-		return sizeof(cl_int);
-	else if (type_align == 'd')
-		return sizeof(cl_long);
-	elog(ERROR, "unexpected type alignment: %c", type_align);
+	switch (type_align)
+	{
+		case 'c':
+			return 1;
+		case 's':
+			return ALIGNOF_SHORT;
+		case 'i':
+			return ALIGNOF_INT;
+		case 'd':
+			return ALIGNOF_DOUBLE;
+		default:
+			elog(ERROR, "unexpected type alignment: %c", type_align);
+	}
 	return -1;	/* be compiler quiet */
 }
 

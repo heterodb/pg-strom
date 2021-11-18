@@ -118,6 +118,7 @@ typedef struct devfunc_info {
  * In some special cases, device code can handle this class of type cast.
  */
 typedef int (*devcast_coerceviaio_callback_f)(struct codegen_context *context,
+											  StringInfo body,
 											  struct devcast_info *dcast,
 											  CoerceViaIO *node);
 typedef struct devcast_info {
@@ -135,29 +136,25 @@ typedef struct devcast_info {
 } devcast_info;
 
 /*
+ * devindex_info - handler information of device GiST index
+ */
+typedef struct devindex_info {
+	dlist_node		chain;
+	uint32			hashvalue;
+	const char	   *oper_extension;
+	Oid				opcode;
+	Oid				opfamily;
+	int16			opstrategy;
+	const char	   *index_kind;		/* only "gist" is available now */
+	const char	   *index_fname;	/* device index handler name */
+	devtype_info   *ivar_dtype;		/* device type of index'ed value */
+	devtype_info   *iarg_dtype;		/* device type of index argument for search */
+	bool			index_is_negative;
+} devindex_info;
+
+/*
  * codegen.c
  */
-#ifdef __PGSTROM_MODULE__
-
-typedef struct codegen_context {
-	StringInfoData	str;
-	StringInfoData	decl_temp;	/* declarations of temporary variables */
-	int				decl_count;	/* # of temporary variabes in decl */
-	PlannerInfo *root;		//not necessary?
-	RelOptInfo	*baserel;	/* scope of Var-node, if any */
-	List	   *used_params;/* list of Const/Param in use */
-	List	   *used_vars;	/* list of Var in use */
-	Bitmapset  *param_refs;	/* referenced parameters */
-	const char *var_label;	/* prefix of var reference, if exist */
-	const char *kds_label;	/* label to reference kds, if exist */
-	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
-	int			extra_flags;	/* external libraries to be included */
-	int			varlena_bufsz;	/* required size of temporary varlena buffer */
-	int			devcost;	/* relative device cost */
-} codegen_context;
-
-#endif /* __PGSTROM_MODULE__ */
-
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 
 /*
@@ -214,6 +211,13 @@ typedef struct
 	bool	(*lookup_extra_devcast)(const char *src_type_ident,
 									const char *dst_type_ident,
 									devcast_info *dcast);
+
+	/*
+	 * lookup_extra_devindex can tell PG-Strom whether the supplied operator
+	 * has device supported index handler by the user's extra module.
+	 */
+	bool	(*lookup_extra_devindex)(const char *oper_ident,
+									 devindex_info *dindex);
 
 	/*
 	 * arrow_lookup_pgtype() can tell PG-Strom a PostgreSQL type that shall

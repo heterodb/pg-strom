@@ -541,21 +541,32 @@ NOT(pg_bool_t arg)
 	return arg;
 }
 
-DEVICE_INLINE(pg_bool_t)
-PG_BOOL(cl_bool isnull, cl_bool value)
+DEVICE_INLINE(cl_bool)
+PG_BOOL_ISTRUE(pg_bool_t arg)
 {
-	pg_bool_t	res;
-	res.isnull = isnull;
-	res.value  = value;
-	return res;
+	return (!arg.isnull && arg.value != 0);
 }
 
-#define AND(temp,anynull,x,y)						\
-	((temp) = (x), (anynull) |= (temp).isnull,		\
-	 ((!(temp).isnull && !(temp).value) ? (temp) : (y)))
-#define OR(temp,anynull,x,y)						\
-	((temp) = (x), (anynull) |= (temp).isnull,		\
-	 ((!(temp).isnull &&  (temp).value) ? (temp) : (y)))
+DEVICE_INLINE(cl_bool)
+PG_BOOL_ISFALSE(pg_bool_t arg)
+{
+	return (!arg.isnull && arg.value == 0);
+}
+
+/*
+ * support routine for GREATEST and LEAST
+ */
+DEVICE_INLINE(cl_bool)
+PG_LESS_THAN(pg_int4_t arg)
+{
+	return (!arg.isnull && arg.value < 0);
+}
+
+DEVICE_INLINE(cl_bool)
+PG_GREATER_THAN(pg_int4_t arg)
+{
+	return (!arg.isnull && arg.value > 0);
+}
 
 /*
  * A simple wrapper for pgfn_type_compare
@@ -569,81 +580,6 @@ pgfn_type_equal(kern_context *kcxt, T arg1, T arg2)
 	if (!cmp.isnull && cmp.value == 0)
 		return true;
 	return false;
-}
-
-/*
- * Support routine for COALESCE / GREATEST / LEAST
- */
-template <typename T>
-DEVICE_INLINE(T)
-PG_COALESCE(kern_context *kcxt, const T& arg)
-{
-	return arg;
-}
-
-template <typename T, typename ...R>
-DEVICE_INLINE(T)
-PG_COALESCE(kern_context *kcxt, const T& arg1, const R&... args_rest)
-{
-	if (!arg1.isnull)
-		return arg1;
-	return PG_COALESCE(kcxt, args_rest...);
-}
-
-template <typename T>
-DEVICE_INLINE(T)
-PG_GREATEST(kern_context *kcxt, const T& arg)
-{
-	return arg;
-}
-
-template <typename T, typename ...R>
-DEVICE_INLINE(T)
-PG_GREATEST(kern_context *kcxt, const T& arg1, const R&... args_rest)
-{
-	if (arg1.isnull)
-		return PG_GREATEST(kcxt, args_rest...);
-	else
-	{
-		T			arg2 = PG_GREATEST(kcxt, args_rest...);
-		pg_int4_t	cmp;
-
-		cmp = pgfn_type_compare(kcxt, arg1, arg2);
-		if (cmp.isnull)
-			return arg1;
-		else if (cmp.value > 0)
-			return arg1;
-		else
-			return arg2;
-	}
-}
-
-template <typename T>
-DEVICE_INLINE(T)
-PG_LEAST(kern_context *kcxt, const T& arg)
-{
-	return arg;
-}
-
-template <typename T, typename... R>
-DEVICE_INLINE(T)
-PG_LEAST(kern_context *kcxt, const T& arg1, const R&... args_rest)
-{
-	if (arg1.isnull)
-		return PG_LEAST(kcxt, args_rest...);
-	else
-	{
-		T			arg2 = PG_LEAST(kcxt, args_rest...);
-		pg_int4_t	cmp;
-
-		cmp = pgfn_type_compare(kcxt, arg1, arg2);
-		if (cmp.isnull)
-			return arg1;
-		else if (cmp.value > 0)
-			return arg2;
-		else
-			return arg1;
-	}
 }
 
 /*
