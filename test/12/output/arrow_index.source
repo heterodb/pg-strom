@@ -131,7 +131,7 @@ RESET pg_strom.enabled;
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE float_num=(SELECT float_num FROM regtest_arrow_index_temp.target_num);
- Gather (actual rows=0 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
    Workers Launched: 2
@@ -139,8 +139,9 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (float_num = $0)
+         Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: float_num  [loaded: 0, skipped: 4]
+         Stats-Hint: float_num  [loaded: 1, skipped: 3]
          files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
@@ -176,8 +177,9 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
  WHERE half_num=(SELECT half_num FROM regtest_arrow_index_temp.target_num);
  Foreign Scan on regtest_arrow (actual rows=15 loops=1)
    Filter: (half_num = $0)
-   Rows Removed by Filter: 999985
+   Rows Removed by Filter: 310674
    referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
+   Stats-Hint: half_num  [loaded: 1, skipped: 3]
    files0: @abs_builddir@/test_arrow_index.data (read: 51.61MB, size: 51.50MB)
    InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
@@ -192,10 +194,11 @@ SELECT count(*)
          Workers Launched: 1
          ->  Parallel Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=0 loops=2)
                Reduction: NoGroup
-               Outer Scan: regtest_arrow (actual rows=1000000 loops=1)
+               Outer Scan: regtest_arrow (actual rows=310689 loops=1)
                Outer Scan Filter: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision))
-               Rows Removed by Outer Scan Filter: 800218
+               Rows Removed by Outer Scan Filter: 110907
                referenced: half_num
+               Stats-Hint: (half_num >= '-2000'::double precision), (half_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
                files0: @abs_builddir@/test_arrow_index.data (read: 1960.00KB, size: 51.50MB)
 
 SELECT count(*)
