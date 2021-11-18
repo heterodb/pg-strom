@@ -970,6 +970,19 @@ extern void pgstrom_init_cuda_program(void);
  */
 #include "cuda_codegen.h"
 
+typedef struct codegen_context {
+	StringInfoData	decl;	/* declarations of functions for complex expression */
+	int				decl_count;	/* # of temporary variabes in decl */
+	PlannerInfo *root;		//not necessary?
+	RelOptInfo	*baserel;	/* scope of Var-node, if any */
+	List	   *used_params;/* list of Const/Param in use */
+	List	   *used_vars;	/* list of Var in use */
+	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
+	uint32_t	extra_flags;	/* external libraries to be included */
+	uint32_t	extra_bufsz;	/* required size of temporary varlena buffer */
+	int			devcost;	/* relative device cost */
+} codegen_context;
+
 extern size_t pgstrom_codegen_extra_devtypes(char *buf, size_t bufsz,
 											 uint32 extra_flags);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);

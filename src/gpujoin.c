@@ -56,7 +56,7 @@ typedef struct
 	int			optimal_gpu;
 	char	   *kern_source;
 	cl_uint		extra_flags;
-	cl_uint		varlena_bufsz;
+	cl_uint		extra_bufsz;
 	List	   *used_params;
 	List	   *outer_quals;
 	List	   *outer_refs;
@@ -110,7 +110,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->optimal_gpu));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
-	privs = lappend(privs, makeInteger(gj_info->varlena_bufsz));
+	privs = lappend(privs, makeInteger(gj_info->extra_bufsz));
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, gj_info->outer_refs);
@@ -173,7 +173,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gj_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
+	gj_info->extra_bufsz = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_refs = list_nth(privs, pindex++);
@@ -417,12 +417,10 @@ static cl_uint get_tuple_hashvalue(innerState *istate,
 								   TupleTableSlot *slot,
 								   bool *p_is_null_keys);
 
-static char *gpujoin_codegen(PlannerInfo *root,
-							 CustomScan *cscan,
-							 GpuJoinPath *gj_path,
-							 GpuJoinInfo *gj_info,
-							 List *tlist,
-							 codegen_context *context);
+static void gpujoin_codegen(PlannerInfo *root,
+							CustomScan *cscan,
+							GpuJoinPath *gj_path,
+							GpuJoinInfo *gj_info);
 static TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
 												kern_gpujoin *kgjoin,
 												pgstrom_data_store *pds_src,
@@ -2906,11 +2904,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 				List *custom_plans)
 {
 	GpuJoinPath	   *gjpath = (GpuJoinPath *) best_path;
-	RelOptInfo	   *joinrel = gjpath->cpath.path.parent;
 	Index			outer_relid = gjpath->outer_relid;
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
-	codegen_context	context;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	double			outer_nrows;
@@ -2935,6 +2931,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.outer_startup_cost = outer_plan->startup_cost;
 	gj_info.outer_total_cost = outer_plan->total_cost;
 	gj_info.num_rels = gjpath->num_rels;
+	gj_info.optimal_gpu = gjpath->optimal_gpu;
 
 	if (!gjpath->sibling_param_id)
 		gj_info.sibling_param_id = -1;
@@ -3096,16 +3093,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	/*
 	 * construct kernel code
 	 */
-	pgstrom_init_codegen_context(&context, root, joinrel);
-	gj_info.optimal_gpu = gjpath->optimal_gpu;
-	gj_info.kern_source = gpujoin_codegen(root,
-										  cscan,
-										  gjpath,
-										  &gj_info,
-										  tlist,
-										  &context);
-	gj_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUJOIN;
-	gj_info.used_params = context.used_params;
+	gpujoin_codegen(root, cscan, gjpath, &gj_info);
 
 	form_gpujoin_info(cscan, &gj_info);
 
@@ -3563,7 +3551,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							   gj_info->extra_flags);
 	program_id = pgstrom_create_cuda_program(gjs->gts.gcontext,
 											 gj_info->extra_flags,
-											 gj_info->varlena_bufsz,
+											 gj_info->extra_bufsz,
 											 gj_info->kern_source,
 											 kern_define.data,
 											 false,
@@ -4156,24 +4144,27 @@ ExecShutdownGpuJoin(CustomScanState *node)
 }
 
 /*
- * pgstrom_codegen_var_declarations
+ * gpujoin_codegen_decl_variables
  *
  * declaration of the variables
  */
 static void
-pgstrom_codegen_var_declarations(StringInfo source,
-								 int curr_depth,
-								 List *kvars_list)								 
+gpujoin_codegen_decl_variables(StringInfo source,
+							   GpuJoinInfo *gj_info,
+							   int curr_depth,
+							   codegen_context *context)
 {
 	StringInfoData	   *inners = alloca(sizeof(StringInfoData) * curr_depth);
 	StringInfoData		base;
 	StringInfoData		row;
 	StringInfoData		arrow;
 	StringInfoData		column;
+	List			   *kvars_list = NIL;
 	ListCell		   *lc;
+	devtype_info	   *dtype;
 	int					i;
 
-	/* init */
+	/* init buffers */
 	initStringInfo(&base);
 	initStringInfo(&row);
 	initStringInfo(&arrow);
@@ -4181,7 +4172,77 @@ pgstrom_codegen_var_declarations(StringInfo source,
 	for (i=0; i < curr_depth; i++)
 		initStringInfo(&inners[i]);
 
-	/* code to init variables */
+	/*
+	 * Pick up any variables used in this depth first
+	 */
+	Assert(curr_depth > 0 && curr_depth <= gj_info->num_rels);
+	foreach (lc, context->used_vars)
+	{
+		Var		   *varnode = lfirst(lc);
+		Var		   *kernode = NULL;
+		ListCell   *lc1;
+		ListCell   *lc2;
+		ListCell   *lc3;
+
+		Assert(IsA(varnode, Var));
+		/* GiST-index references shall be handled by the caller */
+		if (varnode->varno == INDEX_VAR)
+			continue;
+
+		forthree (lc1, context->pseudo_tlist,
+				  lc2, gj_info->ps_src_depth,
+				  lc3, gj_info->ps_src_resno)
+		{
+			TargetEntry	*tle = lfirst(lc1);
+			int		src_depth = lfirst_int(lc2);
+			int		src_resno = lfirst_int(lc3);
+
+			if (equal(tle->expr, varnode))
+			{
+				kernode = copyObject(varnode);
+				kernode->varno = src_depth;			/* save the source depth */
+				kernode->varattno = src_resno;		/* save the source resno */
+				kernode->varattnosyn = tle->resno;	/* resno on the ps_tlist */
+				if (src_depth < 0 || src_depth > curr_depth)
+					elog(ERROR, "Bug? device varnode out of range");
+				break;
+			}
+		}
+		if (!kernode)
+			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
+				 nodeToString(varnode));
+		kvars_list = lappend(kvars_list, kernode);
+	}
+
+	/*
+	 * variable declarations
+	 */
+	appendStringInfoString(
+		source,
+		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
+		"  kern_data_store *kds_in    __attribute__((unused));\n"
+		"  void *datum                __attribute__((unused));\n"
+		"  cl_uint offset             __attribute__((unused));\n");
+
+	foreach (lc, kvars_list)
+	{
+		Var	   *kvar = lfirst(lc);
+
+		dtype = pgstrom_devtype_lookup(kvar->vartype);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(kvar->vartype));
+		appendStringInfo(
+			source,
+			"  pg_%s_t KVAR_%u;\n",
+			dtype->type_name,
+			kvar->varattnosyn);
+	}
+	appendStringInfoChar(source, '\n');
+
+	/*
+	 * code to load the variables
+	 */
 	foreach (lc, kvars_list)
 	{
 		Var		   *kvar = lfirst(lc);
@@ -4346,92 +4407,6 @@ pgstrom_codegen_var_declarations(StringInfo source,
 }
 
 /*
- * gpujoin_codegen_var_decl
- *
- * declaration of the variables in 'used_var' list
- */
-static void
-gpujoin_codegen_var_param_decl(StringInfo source,
-							   GpuJoinInfo *gj_info,
-							   int cur_depth,
-							   codegen_context *context)
-{
-	List		   *kern_vars = NIL;
-	ListCell	   *cell;
-	devtype_info   *dtype;
-
-	/*
-	 * Pick up variables in-use and append its properties in the order
-	 * corresponding to depth/resno.
-	 */
-	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
-	foreach (cell, context->used_vars)
-	{
-		Var		   *varnode = lfirst(cell);
-		Var		   *kernode = NULL;
-		ListCell   *lc1;
-		ListCell   *lc2;
-		ListCell   *lc3;
-
-		Assert(IsA(varnode, Var));
-		/* GiST-index references shall be handled by the caller */
-		if (varnode->varno == INDEX_VAR)
-			continue;
-
-		forthree (lc1, context->pseudo_tlist,
-				  lc2, gj_info->ps_src_depth,
-				  lc3, gj_info->ps_src_resno)
-		{
-			TargetEntry	*tle = lfirst(lc1);
-			int		src_depth = lfirst_int(lc2);
-			int		src_resno = lfirst_int(lc3);
-
-			if (equal(tle->expr, varnode))
-			{
-				kernode = copyObject(varnode);
-				kernode->varno = src_depth;			/* save the source depth */
-				kernode->varattno = src_resno;		/* save the source resno */
-				kernode->varattnosyn = tle->resno;	/* resno on the ps_tlist */
-				if (src_depth < 0 || src_depth > cur_depth)
-					elog(ERROR, "Bug? device varnode out of range");
-				break;
-			}
-		}
-		if (!kernode)
-			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
-				 nodeToString(varnode));
-		kern_vars = lappend(kern_vars, kernode);
-	}
-
-	/*
-	 * variable declarations
-	 */
-	appendStringInfoString(
-		source,
-		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
-		"  kern_data_store *kds_in    __attribute__((unused));\n"
-		"  void *datum                __attribute__((unused));\n"
-		"  cl_uint offset             __attribute__((unused));\n");
-
-	foreach (cell, kern_vars)
-	{
-		Var	   *kvar = lfirst(cell);
-
-		dtype = pgstrom_devtype_lookup(kvar->vartype);
-		if (!dtype)
-			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(kvar->vartype));
-		appendStringInfo(
-			source,
-			"  pg_%s_t KVAR_%u;\n",
-			dtype->type_name,
-			kvar->varattnosyn);
-	}
-	appendStringInfoChar(source, '\n');
-	pgstrom_codegen_var_declarations(source, cur_depth, kern_vars);
-}
-
-/*
  * codegen for:
  * STATIC_FUNCTION(cl_bool)
  * gpujoin_join_quals_depth%u(kern_context *kcxt,
@@ -4483,8 +4458,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info,
-								   i_info->depth, context);
+	gpujoin_codegen_decl_variables(source, gj_info, i_info->depth, context);
 
 	/*
 	 * evaluation of other-quals and join-quals
@@ -4581,8 +4555,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 	 * variable/params declaration & initialization
 	 */
 	pgstrom_union_type_declarations(&decl, "temp", type_oid_list);
-	gpujoin_codegen_var_param_decl(&decl, gj_info,
-								   i_info->depth, context);
+	gpujoin_codegen_decl_variables(&decl, gj_info, i_info->depth, context);
 	appendStringInfo(
 		source,
 		"STATIC_FUNCTION(cl_uint)\n"
@@ -4669,7 +4642,7 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 		depth,
 		depth, dtype->type_name,
 		depth);
-	context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+	context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 
 	foreach (cell, kvars_orig)
 	{
@@ -4878,8 +4851,8 @@ gpujoin_codegen_projection(StringInfo source,
 	initStringInfo(&outer);
 
 	context->used_vars = NIL;
-	/* expand varlena_bufsz for tup_dclass/values/extra array */
-	context->varlena_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
+	/* expand extra_bufsz for tup_dclass/values/extra array */
+	context->extra_bufsz += (MAXALIGN(sizeof(cl_char) * nfields) +
 							   MAXALIGN(sizeof(Datum)   * nfields) +
 							   MAXALIGN(sizeof(cl_uint) * nfields));
 
@@ -5122,7 +5095,7 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						tle->resno - 1,
 						tle->resno - 1);
-					context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+					context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 					type_oid_list = list_append_unique_oid(type_oid_list,
 														   dtype->type_oid);
 				}
@@ -5340,7 +5313,7 @@ gpujoin_codegen_projection(StringInfo source,
 			tle->resno - 1,
 			tle->resno - 1,
 			tle->resno - 1);
-		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 		type_oid_list = list_append_unique_oid(type_oid_list,
 											   dtype->type_oid);
 	}
@@ -5380,22 +5353,23 @@ gpujoin_codegen_projection(StringInfo source,
 	pfree(arrow.data);
 }
 
-static char *
+static void
 gpujoin_codegen(PlannerInfo *root,
 				CustomScan *cscan,
 				GpuJoinPath *gj_path,
-				GpuJoinInfo *gj_info,
-				List *tlist,
-				codegen_context *context)
+				GpuJoinInfo *gj_info)
 {
-	StringInfoData source;
-	StringInfoData temp;
-	int			depth;
-	size_t		sz, off;
-	size_t		varlena_bufsz;
-	ListCell   *cell;
+	RelOptInfo	   *joinrel = gj_path->cpath.path.parent;
+	codegen_context context;
+	StringInfoData	source;
+	StringInfoData	temp;
+	int				depth;
+	size_t			sz, off;
+	size_t			extra_bufsz;
+	ListCell	   *cell;
 	gpujoinPseudoStack *pstack;
 
+	pgstrom_init_codegen_context(&context, root, joinrel);
 	initStringInfo(&source);
 	initStringInfo(&temp);
 
@@ -5419,34 +5393,34 @@ gpujoin_codegen(PlannerInfo *root,
 	}
 	pstack->ps_unitsz = off;
 
-	context->used_params = list_make1(makeConst(BYTEAOID,
-												-1,
-												InvalidOid,
-												-1,
-												PointerGetDatum(pstack),
-												false,
-												false));
+	context.used_params = list_make1(makeConst(BYTEAOID,
+											   -1,
+											   InvalidOid,
+											   -1,
+											   PointerGetDatum(pstack),
+											   false,
+											   false));
 	/*
 	 * gpuscan_quals_eval
 	 */
 	codegen_gpuscan_quals(&source,
-						  context,
+						  &context,
 						  "gpujoin",
 						  cscan->scan.scanrelid,
 						  gj_info->outer_quals);
-	varlena_bufsz = context->varlena_bufsz;
+	extra_bufsz = context.extra_bufsz;
 
 	/*
 	 * gpujoin_join_quals
 	 */
-	context->pseudo_tlist = cscan->custom_scan_tlist;
+	context.pseudo_tlist = cscan->custom_scan_tlist;
 	foreach (cell, gj_info->inner_infos)
 	{
 		GpuJoinInnerInfo *i_info = lfirst(cell);
 
-		context->varlena_bufsz = 0;
-		gpujoin_codegen_join_quals(&source, gj_info, i_info, context);
-		varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+		context.extra_bufsz = 0;
+		gpujoin_codegen_join_quals(&source, gj_info, i_info, &context);
+		extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 	}
 
 	appendStringInfo(
@@ -5493,9 +5467,9 @@ gpujoin_codegen(PlannerInfo *root,
 
 		if (i_info->hash_outer_keys)
 		{
-			context->varlena_bufsz = 0;
-			gpujoin_codegen_hash_value(&source, gj_info, i_info, context);
-			varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+			context.extra_bufsz = 0;
+			gpujoin_codegen_hash_value(&source, gj_info, i_info, &context);
+			extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 		}
 	}
 
@@ -5546,14 +5520,14 @@ gpujoin_codegen(PlannerInfo *root,
 	{
 		if (!gj_path->inners[depth].gist_index)
 			continue;
-		context->varlena_bufsz = 0;
+		context.extra_bufsz = 0;
 		gpujoin_codegen_gist_index_quals(&source,
 										 root,
 										 gj_info,
 										 gj_path,
 										 depth+1,
-										 context);
-		varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+										 &context);
+		extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 	}
 
 	appendStringInfoString(
@@ -5629,19 +5603,23 @@ gpujoin_codegen(PlannerInfo *root,
 	/*
 	 * gpujoin_projection
 	 */
-	context->varlena_bufsz = 0;
-	gpujoin_codegen_projection(&source, cscan, gj_info, context);
-	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
-
-	/* required varlena buffer size */
-	gj_info->varlena_bufsz = varlena_bufsz;
+	context.extra_bufsz = 0;
+	gpujoin_codegen_projection(&source, cscan, gj_info, &context);
+	extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 
 	/* append source next to the declaration part */
-	if (context->decl_temp.len > 0)
-		appendStringInfoChar(&context->decl_temp, '\n');
-	appendStringInfoString(&context->decl_temp, source.data);
+	if (context.decl.len > 0)
+		appendStringInfoChar(&context.decl, '\n');
+	appendStringInfoString(&context.decl, source.data);
 
-	return context->decl_temp.data;
+	/* save the kernel source on GpuJoinInfo */
+	gj_info->kern_source = context.decl.data;
+	gj_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUJOIN;
+	gj_info->extra_bufsz = extra_bufsz;
+	gj_info->used_params = context.used_params;
+
+	pfree(source.data);
+	pfree(temp.data);
 }
 
 /*
@@ -6781,7 +6759,7 @@ ProgramId
 GpuJoinCreateCombinedProgram(PlanState *node,
 							 GpuTaskState *gpa_gts,
 							 cl_uint gpa_extra_flags,
-							 cl_uint gpa_varlena_bufsz,
+							 cl_uint gpa_extra_bufsz,
 							 const char *gpa_kern_source,
 							 bool explain_only)
 {
@@ -6815,8 +6793,8 @@ GpuJoinCreateCombinedProgram(PlanState *node,
 
 	program_id = pgstrom_create_cuda_program(gpa_gts->gcontext,
 											 extra_flags,
-											 Max(gj_info->varlena_bufsz,
-												 gpa_varlena_bufsz),
+											 Max(gj_info->extra_bufsz,
+												 gpa_extra_bufsz),
 											 kern_source.data,
 											 kern_define.data,
 											 false,

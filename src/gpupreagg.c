@@ -49,7 +49,7 @@ typedef struct
 	int				optimal_gpu;
 	char		   *kern_source;
 	cl_uint			extra_flags;
-	cl_uint			varlena_bufsz;
+	cl_uint			extra_bufsz;
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
 
@@ -80,7 +80,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
-	privs = lappend(privs, makeInteger(gpa_info->varlena_bufsz));
+	privs = lappend(privs, makeInteger(gpa_info->extra_bufsz));
 	exprs = lappend(exprs, gpa_info->used_params);
 
 	cscan->custom_private = privs;
@@ -117,7 +117,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gpa_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
+	gpa_info->extra_bufsz = intVal(list_nth(privs, pindex++));
 	gpa_info->used_params = list_nth(exprs, eindex++);
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
@@ -214,7 +214,8 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											Node      **p_havingQual,
 											bool       *p_can_pullup_outerscan,
 											AggClauseCosts *p_final_clause_costs);
-static char	   *gpupreagg_codegen(codegen_context *context,
+static void		gpupreagg_codegen(PlannerInfo *root,
+								  RelOptInfo *baserel,
 								  CustomScan *cscan,
 								  List *outer_tlist,
 								  GpuPreAggInfo *gpa_info);
@@ -2957,7 +2958,7 @@ build_custom_scan_tlist(PlannerInfo *root,
 static Plan *
 PlanGpuPreAggPath(PlannerInfo *root,
 				  RelOptInfo *rel,
-				  struct CustomPath *best_path,
+				  CustomPath *best_path,
 				  List *tlist,
 				  List *clauses,
 				  List *custom_plans)
@@ -2968,8 +2969,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	List		   *outer_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
-	char		   *kern_source;
-	codegen_context	context;
 
 	Assert(list_length(best_path->custom_private) == 1);
 	gpa_info = linitial(best_path->custom_private);
@@ -3009,6 +3008,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 			outer_refs = lappend_int(outer_refs, i);
 		}
 	}
+	gpa_info->outer_refs = outer_refs;
 
 	/* setup CustomScan node */
 	cscan->scan.plan.targetlist = tlist;
@@ -3024,15 +3024,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	/*
 	 * construction of the GPU kernel code
 	 */
-	pgstrom_init_codegen_context(&context, root, best_path->path.parent);
-	kern_source = gpupreagg_codegen(&context,
-									cscan,
-									outer_tlist,
-									gpa_info);
-	gpa_info->kern_source = kern_source;
-	gpa_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
-	gpa_info->outer_refs = outer_refs;
-	gpa_info->used_params = context.used_params;
+	gpupreagg_codegen(root, best_path->path.parent, cscan, outer_tlist, gpa_info);
 
 	form_gpupreagg_info(cscan, gpa_info);
 
@@ -3654,7 +3646,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 				"  pg_datum_ref(kcxt, KVAR_%u, addr);\n", i);
 			referenced = true;
 		}
-		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 		type_oid_list = list_append_unique_oid(type_oid_list, dtype->type_oid);
 		if (referenced)
 			appendStringInfoString(
@@ -3743,7 +3735,7 @@ setup_expressions:
 				dtype->type_name,
 				tle->resno-1,
 				tle->resno-1);
-			context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+			context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 			type_oid_list = list_append_unique_oid(type_oid_list, type_oid);
 		}
 		tmp = flatCopyTargetEntry(tle);
@@ -4423,67 +4415,74 @@ gpupreagg_codegen_variables(StringInfo kern,
 /*
  * gpupreagg_codegen - entrypoint of code-generator for GpuPreAgg
  */
-static char *
-gpupreagg_codegen(codegen_context *context,
+static void
+gpupreagg_codegen(PlannerInfo *root,
+				  RelOptInfo *baserel,
 				  CustomScan *cscan,
 				  List *outer_tlist,
 				  GpuPreAggInfo *gpa_info)
 {
-	StringInfoData	kern;
+	codegen_context	context;
+	StringInfoData	vars;
 	StringInfoData	body;
 	Bitmapset	   *pfunc_bitmap = NULL;
-	size_t			varlena_bufsz = 0;
+	size_t			extra_bufsz = 0;
 	int				nfields;
 
-	initStringInfo(&kern);
+	pgstrom_init_codegen_context(&context, root, baserel);
+	initStringInfo(&vars);
 	initStringInfo(&body);
 
 	/* gpuscan_quals_eval */
-	codegen_gpuscan_quals(&body, context, "gpupreagg",
+	codegen_gpuscan_quals(&body, &context, "gpupreagg",
 						  cscan->scan.scanrelid,
 						  gpa_info->outer_quals);
 	/* gpupreagg_projection_xxxx */
 	gpupreagg_codegen_projection(&body,
-								 context,
+								 &context,
 								 cscan,
 								 outer_tlist,
 								 &gpa_info->tlist_part,
 								 &gpa_info->tlist_prep,
 								 &pfunc_bitmap);
 	nfields = list_length(gpa_info->tlist_prep);
-	varlena_bufsz = (context->varlena_bufsz +
-					 MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
-					 MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
-					 MAXALIGN(sizeof(cl_int)  * nfields));	/* tup_extra */
+	extra_bufsz = (context.extra_bufsz +
+				   MAXALIGN(sizeof(cl_char) * nfields) +	/* tup_values */
+				   MAXALIGN(sizeof(Datum)   * nfields) +	/* tup_isnull */
+				   MAXALIGN(sizeof(cl_int)  * nfields));	/* tup_extra */
 	/* device variables */
-	gpupreagg_codegen_variables(&kern, gpa_info->tlist_part, pfunc_bitmap);
+	gpupreagg_codegen_variables(&vars, gpa_info->tlist_part, pfunc_bitmap);
 	/* gpupreagg_hashvalue */
-	context->varlena_bufsz = 0;
-	gpupreagg_codegen_hashvalue(&body, context,
+	context.extra_bufsz = 0;
+	gpupreagg_codegen_hashvalue(&body, &context,
 								gpa_info->tlist_prep);
-	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+	extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 
 	/* gpupreagg_keymatch */
-	context->varlena_bufsz = 0;
-	gpupreagg_codegen_keymatch(&body, context,
+	context.extra_bufsz = 0;
+	gpupreagg_codegen_keymatch(&body, &context,
 							   gpa_info->tlist_prep);
-	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+	extra_bufsz = Max(extra_bufsz, context.extra_bufsz);
 
-	gpa_info->varlena_bufsz = varlena_bufsz;
-	
 	/* gpupreagg_init_xxxx_slot */
-	gpupreagg_codegen_init_slot(&body, context,
+	gpupreagg_codegen_init_slot(&body, &context,
 								gpa_info->tlist_part,
 								&gpa_info->num_accum_values,
 								&gpa_info->accum_extra_bufsz);
 	/* gpupreagg_merge_* */
-	gpupreagg_codegen_accum_merge(&body, context,
-								  gpa_info->tlist_part);
-	/* merge above kernel functions */
-	appendStringInfoString(&kern, body.data);
-	pfree(body.data);
+	gpupreagg_codegen_accum_merge(&body, &context, gpa_info->tlist_part);
 
-	return kern.data;
+	/* merge above kernel functions */
+	appendStringInfo(&context.decl, "\n%s\n%s", vars.data, body.data);
+
+	/* store the result */
+	gpa_info->kern_source = context.decl.data;
+	gpa_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUPREAGG;
+	gpa_info->extra_bufsz = Max(context.extra_bufsz, extra_bufsz);
+	gpa_info->used_params = context.used_params;
+
+	pfree(vars.data);
+	pfree(body.data);
 }
 
 /*
@@ -4778,7 +4777,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		program_id = GpuJoinCreateCombinedProgram(outerPlanState(gpas),
 												  &gpas->gts,
 												  gpa_info->extra_flags,
-												  gpa_info->varlena_bufsz,
+												  gpa_info->extra_bufsz,
 												  gpa_info->kern_source,
 												  explain_only);
 	}
@@ -4790,7 +4789,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 								   gpa_info->extra_flags);
 		program_id = pgstrom_create_cuda_program(gpas->gts.gcontext,
 												 gpa_info->extra_flags,
-												 gpa_info->varlena_bufsz,
+												 gpa_info->extra_bufsz,
 												 gpa_info->kern_source,
 												 kern_define.data,
 												 false,

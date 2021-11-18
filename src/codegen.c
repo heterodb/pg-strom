@@ -1101,7 +1101,7 @@ vlbuf_estimate_textcat(codegen_context *context,
 		maxlen += vl_width[i];
 	}
 	/* it consumes varlena buffer on run-time */
-	context->varlena_bufsz += MAXALIGN(maxlen + VARHDRSZ);
+	context->extra_bufsz += MAXALIGN(maxlen + VARHDRSZ);
 
 	return maxlen;
 }
@@ -1129,7 +1129,7 @@ vlbuf_estimate_jsonb(codegen_context *context,
 					 devfunc_info *dfunc,
 					 Expr **args, int *vl_width)
 {
-	context->varlena_bufsz += MAXALIGN(TOAST_TUPLE_THRESHOLD);
+	context->extra_bufsz += MAXALIGN(TOAST_TUPLE_THRESHOLD);
 	/*
 	 * We usually have no information about jsonb object length preliminary,
 	 * however, plain varlena must be less than the threshold of toasting.
@@ -1146,7 +1146,7 @@ vlbuf_estimate__st_makepoint(codegen_context *context,
 {
 	int		nargs = list_length(dfunc->func_args);
 
-	context->varlena_bufsz += MAXALIGN(sizeof(double) * 2 * nargs);
+	context->extra_bufsz += MAXALIGN(sizeof(double) * 2 * nargs);
 
 	return -1;
 }
@@ -1156,7 +1156,7 @@ vlbuf_estimate__st_relate(codegen_context *context,
 						  devfunc_info *dfunc,
 						  Expr **args, int *vl_width)
 {
-	context->varlena_bufsz += MAXALIGN(VARHDRSZ + 9);
+	context->extra_bufsz += MAXALIGN(VARHDRSZ + 9);
 
 	return VARHDRSZ + 9;
 }
@@ -1166,7 +1166,7 @@ vlbuf_estimate__st_expand(codegen_context *context,
 						  devfunc_info *dfunc,
 						  Expr **args, int *vl_width)
 {
-	context->varlena_bufsz += MAXALIGN(4 * sizeof(cl_float) +	/* bounding-box */
+	context->extra_bufsz += MAXALIGN(4 * sizeof(cl_float) +	/* bounding-box */
 									   2 * sizeof(cl_uint) +	/* nitems + padding */
 									   10 * sizeof(double));	/* polygon rawdata */
 	return -1;		/* not a normal varlena */
@@ -3816,20 +3816,19 @@ codegen_bool_expression(codegen_context *context,
 		{
 			Node	   *node = lfirst(lc);
 
+			if (lc != list_head(b->args))
+				__appendStringInfo(&temp, "  has_null |= status.isnull;\n");
 			__appendStringInfo(&temp,
 							   "  status = ");
 			codegen_expression_walker(context, &temp, node, NULL);
-			__appendStringInfo(&temp,
-							   ";\n"
+			__appendStringInfo(&temp, ";\n"
 							   "  if (PG_BOOL_%s(status))\n"
-							   "    return PG_BOOL_CONST(%d);\n",
-							   (b->boolop == AND_EXPR ? "ISFALSE" : "ISTRUE"),
-							   (b->boolop == AND_EXPR ? 0 : 1));
+							   "    return status;\n",
+							   (b->boolop == AND_EXPR ? "ISFALSE" : "ISTRUE"));
 		}
-
 		context->decl_count++;
 		__appendStringInfo(
-			&context->decl_temp,
+			&context->decl,
 			"DEVICE_INLINE(pg_bool_t)\n"
 			"__exprBoolOp_%u(kern_context *kcxt",
 			context->decl_count);
@@ -3845,11 +3844,11 @@ codegen_bool_expression(codegen_context *context,
 				__ELog("type %s is not device supported",
 					   format_type_be(var->vartype));
 			__appendStringInfo(
-				&context->decl_temp,
+				&context->decl,
 				", pg_%s_t &",
 				dtype->type_name);
 			codegen_expression_walker(context,
-									  &context->decl_temp,
+									  &context->decl,
 									  (Node *)var, NULL);
 			__appendStringInfo(body, ", ");
 			codegen_expression_walker(context, body, (Node *)var, NULL);
@@ -3858,12 +3857,14 @@ codegen_bool_expression(codegen_context *context,
 				used_vars_saved = lappend(used_vars_saved, var);
 		}
 		__appendStringInfo(
-			&context->decl_temp,
+			&context->decl,
 			")\n"
 			"{\n"
 			"  pg_bool_t status __attribute__((unused));\n"
+			"  cl_bool   has_null = false;\n"
 			"\n"
 			"%s"
+			"  status.isnull |= has_null;\n"
 			"  return status;\n"
 			"}\n\n",
 			temp.data);
@@ -3925,7 +3926,7 @@ codegen_coalesce_expression(codegen_context *context,
 
 	context->decl_count++;
 	__appendStringInfo(
-		&context->decl_temp,
+		&context->decl,
 		"DEVICE_INLINE(pg_%s_t)\n"
 		"__exprCoalesce_%u(kern_context *kcxt",
 		dtype->type_name,
@@ -3945,11 +3946,11 @@ codegen_coalesce_expression(codegen_context *context,
 			__ELog("type %s is not device supported",
 				   format_type_be(var->vartype));
 		__appendStringInfo(
-			&context->decl_temp,
+			&context->decl,
 			", pg_%s_t &",
 			__dtype->type_name);
 		codegen_expression_walker(context,
-								  &context->decl_temp,
+								  &context->decl,
 								  (Node *)var, NULL);
 		__appendStringInfo(body, ", ");
 		codegen_expression_walker(context, body, (Node *)var, NULL);
@@ -3958,14 +3959,14 @@ codegen_coalesce_expression(codegen_context *context,
 			used_vars_saved = lappend(used_vars_saved, var);
 	}
 	__appendStringInfo(
-		&context->decl_temp,
+		&context->decl,
 		")\n"
 		"{\n"
 		"  pg_%s_t retval __attribute__((unused));\n"
 		"\n"
 		"  retval.isnull = true;\n"
 		"%s"
-		"  return status;\n"
+		"  return retval;\n"
 		"}\n\n",
 		dtype->type_name,
 		temp.data);
@@ -4025,11 +4026,12 @@ codegen_minmax_expression(codegen_context *context,
 		{
 			__appendStringInfo(
 				&temp,
-				"  cmp = pgfn_%s(kcxt, r, x);\n"
-				"  if (!cmp.isnull && cmp.value %c 0)\n"
+				"  if (r.isnull)\n"
+				"    r = x;\n"
+				"  else if (!x.isnull && PG_%s_THAN(pgfn_%s(kcxt, x, r)))\n"
 				"    r = x;\n",
-				dfunc->func_devname,
-				minmax->op == IS_GREATEST ? '<' : '>');
+				minmax->op == IS_GREATEST ? "GREATER" : "LESS",
+				dfunc->func_devname);
 		}
 		if (width < 0)
 			maxlen = -1;
@@ -4040,7 +4042,7 @@ codegen_minmax_expression(codegen_context *context,
 
 	context->decl_count++;
     __appendStringInfo(
-		&context->decl_temp,
+		&context->decl,
 		"DEVICE_INLINE(pg_%s_t)\n"
         "__exprMinMax_%u(kern_context *kcxt",
         dtype->type_name,
@@ -4060,11 +4062,11 @@ codegen_minmax_expression(codegen_context *context,
             __ELog("type %s is not device supported",
                    format_type_be(var->vartype));
         __appendStringInfo(
-            &context->decl_temp,
+            &context->decl,
             ", pg_%s_t &",
             __dtype->type_name);
 		codegen_expression_walker(context,
-								  &context->decl_temp,
+								  &context->decl,
 								  (Node *)var, NULL);
         __appendStringInfo(body, ", ");
         codegen_expression_walker(context, body, (Node *)var, NULL);
@@ -4073,7 +4075,7 @@ codegen_minmax_expression(codegen_context *context,
             used_vars_saved = lappend(used_vars_saved, var);
     }
     __appendStringInfo(
-        &context->decl_temp,
+        &context->decl,
         ")\n"
         "{\n"
         "  pg_%s_t r, x __attribute__((unused));\n"
@@ -4245,7 +4247,7 @@ codegen_casewhen_expression(codegen_context *context,
 
 	context->decl_count++;
 	__appendStringInfo(
-		&context->decl_temp,
+		&context->decl,
 		"DEVICE_INLINE(pg_%s_t)\n"
 		"__exprCaseWhen_%u(kern_context *kcxt",
 		rtype->type_name,
@@ -4265,11 +4267,11 @@ codegen_casewhen_expression(codegen_context *context,
 			__ELog("type %s is not device supported",
 				   format_type_be(var->vartype));
 		__appendStringInfo(
-			&context->decl_temp,
+			&context->decl,
 			", pg_%s_t &",
 			__dtype->type_name);
 		codegen_expression_walker(context,
-								  &context->decl_temp,
+								  &context->decl,
 								  (Node *)var, NULL);
 		__appendStringInfo(body, ", ");
 		codegen_expression_walker(context, body, (Node *)var, NULL);
@@ -4278,7 +4280,7 @@ codegen_casewhen_expression(codegen_context *context,
 			used_vars_saved = lappend(used_vars_saved, var);
 	}
 	__appendStringInfo(
-		&context->decl_temp,
+		&context->decl,
 		")\n"
 		"{\n"
         "%s"
@@ -4564,7 +4566,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	 */
 	dtype = pgstrom_devtype_lookup(exprType((Node *) expr));
 	if (dtype)
-		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+		context->extra_bufsz += MAXALIGN(dtype->extra_sz);
 
 	return body.data;
 }
@@ -4686,17 +4688,17 @@ __pgstrom_device_expression(PlannerInfo *root,
 
 	if (result)
 	{
-		if (con.varlena_bufsz > KERN_CONTEXT_VARLENA_BUFSZ_LIMIT)
+		if (con.extra_bufsz > KERN_CONTEXT_VARLENA_BUFSZ_LIMIT)
 		{
 			elog(DEBUG2, "Expression consumes too much buffer (%u): %s",
-				 con.varlena_bufsz, nodeToString(expr));
+				 con.extra_bufsz, nodeToString(expr));
 			return false;
 		}
 		Assert(con.devcost >= 0);
 		if (p_devcost)
 			*p_devcost = con.devcost;
 		if (p_extra_sz)
-			*p_extra_sz = con.varlena_bufsz;
+			*p_extra_sz = con.extra_bufsz;
 	}
 	return result;
 }
@@ -4887,11 +4889,9 @@ pgstrom_init_codegen_context(codegen_context *context,
 							 RelOptInfo *baserel)
 {
 	memset(context, 0, sizeof(codegen_context));
-	initStringInfo(&context->decl_temp);
+	initStringInfo(&context->decl);
 	context->root = root;
 	context->baserel = baserel;
-//	context->var_label = "KVAR";
-//	context->kds_label = "kds";
 }
 
 void

@@ -553,33 +553,20 @@ PG_BOOL_ISFALSE(pg_bool_t arg)
 	return (!arg.isnull && arg.value == 0);
 }
 
+/*
+ * support routine for GREATEST and LEAST
+ */
 DEVICE_INLINE(cl_bool)
-PG_BOOL_ISNULL(pg_bool_t arg)
+PG_LESS_THAN(pg_int4_t arg)
 {
-	return arg.isnull;
+	return (!arg.isnull && arg.value < 0);
 }
 
-DEVICE_INLINE(pg_bool_t)
-PG_BOOL_CONST(cl_int code)
+DEVICE_INLINE(cl_bool)
+PG_GREATER_THAN(pg_int4_t arg)
 {
-	pg_bool_t	res;
-
-	if (code < 0)
-		res.isnull = true;		/* negative is null */
-	else
-	{
-		res.isnull = false;
-		res.value  = (code != 0);	/* zero is false, positive is true */
-	}
-	return res;
+	return (!arg.isnull && arg.value > 0);
 }
-
-#define AND(temp,anynull,x,y)						\
-	((temp) = (x), (anynull) |= (temp).isnull,		\
-	 ((!(temp).isnull && !(temp).value) ? (temp) : (y)))
-#define OR(temp,anynull,x,y)						\
-	((temp) = (x), (anynull) |= (temp).isnull,		\
-	 ((!(temp).isnull &&  (temp).value) ? (temp) : (y)))
 
 /*
  * A simple wrapper for pgfn_type_compare
