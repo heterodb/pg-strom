@@ -339,11 +339,12 @@ createArrowTypeFloatingPoint(ArrowTypeFloatingPoint *node)
 static FBTableBuf *
 createArrowTypeDecimal(ArrowTypeDecimal *node)
 {
-	FBTableBuf *buf = allocFBTableBuf(2);
+	FBTableBuf *buf = allocFBTableBuf(3);
 
 	assert(ArrowNodeIs(node, Decimal));
 	addBufferInt(buf, 0, node->precision);
 	addBufferInt(buf, 1, node->scale);
+	addBufferInt(buf, 2, node->bitWidth);
 
 	return makeBufferFlatten(buf);
 }

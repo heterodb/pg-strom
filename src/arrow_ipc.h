@@ -228,6 +228,7 @@ extern void		__initArrowNode(ArrowNode *node, ArrowNodeTag tag);
 extern char	   *dumpArrowNode(ArrowNode *node);
 extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
+extern bool		arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b);
 extern const char *arrowNodeName(ArrowNode *node);
 
 /* arrow_pgsql.c */

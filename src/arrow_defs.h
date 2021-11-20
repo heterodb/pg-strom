@@ -249,6 +249,7 @@ typedef struct		ArrowTypeDecimal
 	ArrowNode		node;
 	int32_t			precision;
 	int32_t			scale;
+	int32_t			bitWidth;		/* 128 [default] or 256 */
 } ArrowTypeDecimal;
 
 /* Date */
