@@ -107,6 +107,48 @@ ArrowIntervalUnitAsCstring(ArrowIntervalUnit unit)
 	}
 }
 
+static inline const char *
+ArrowFeatureAsCstring(ArrowFeature feature)
+{
+	switch (feature)
+	{
+		case ArrowFeature__Unused:
+			return "Unused";
+		case ArrowFeature__DictionaryReplacement:
+			return "DictionaryReplacement";
+		case ArrowFeature__CompressedBody:
+			return "CompressedBody";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowCompressionTypeAsCstring(ArrowCompressionType codec)
+{
+	switch (codec)
+	{
+		case ArrowCompressionType__LZ4_FRAME:
+			return "LZ4_FRAME";
+		case ArrowCompressionType__ZSTD:
+			return "ZSTD";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowBodyCompressionMethodAsCstring(ArrowBodyCompressionMethod method)
+{
+	switch (method)
+	{
+		case ArrowBodyCompressionMethod__BUFFER:
+			return "BUFFER";
+		default:
+			return "???";
+	}
+}
+
 static void
 __dumpArrowTypeInt(SQLbuffer *buf, ArrowNode *node)
 {
@@ -344,6 +386,13 @@ __dumpArrowSchema(SQLbuffer *buf, ArrowNode *node)
 			sql_buffer_printf(buf, ", ");
 		__dumpArrowNode(buf, (ArrowNode *)&s->custom_metadata[i]);
 	}
+	sql_buffer_printf(buf, "], features=[");
+	for (i=0; i < s->_num_features; i++)
+	{
+		if (i > 0)
+			sql_buffer_printf(buf, ", ");
+		sql_buffer_printf(buf, "%s", ArrowFeatureAsCstring(s->features[i]));
+	}
 	sql_buffer_printf(buf, "]}");
 }
 
@@ -439,6 +488,17 @@ __dumpArrowFooter(SQLbuffer *buf, ArrowNode *node)
 	sql_buffer_printf(buf, "]}");
 }
 
+static void
+__dumpArrowBodyCompression(SQLbuffer *buf, ArrowNode *node)
+{
+	ArrowBodyCompression *compress = (ArrowBodyCompression *)node;
+
+	sql_buffer_printf(
+		buf, "{BodyCompression: codec=%s, method=%s}",
+		ArrowCompressionTypeAsCstring(compress->codec),
+		ArrowBodyCompressionMethodAsCstring(compress->method));
+}
+
 char *
 dumpArrowNode(ArrowNode *node)
 {
@@ -495,14 +555,21 @@ sql_buffer_printf(SQLbuffer *buf, const char *fmt, ...)
 			(dest)->_##FIELD##_len = 0;					\
 		}												\
 	} while(0)
-#define COPY_VECTOR(FIELD, NODETYPE)								\
-	do {															\
-		int		j;													\
-																	\
-		(dest)->FIELD = palloc(sizeof(NODETYPE) * (src)->_num_##FIELD);	\
-		for (j=0; j < (src)->_num_##FIELD; j++)						\
-			__copy##NODETYPE(&(dest)->FIELD[j], &(src)->FIELD[j]);	\
-		(dest)->_num_##FIELD = (src)->_num_##FIELD;					\
+#define COPY_VECTOR(FIELD, NODETYPE)										\
+	do {																	\
+		int		j;															\
+																			\
+		if ((src)->_num_##FIELD == 0)										\
+		{																	\
+			(dest)->FIELD = NULL;											\
+		}																	\
+		else																\
+		{																	\
+			(dest)->FIELD = palloc(sizeof(NODETYPE) * (src)->_num_##FIELD);	\
+			for (j=0; j < (src)->_num_##FIELD; j++)							\
+				__copy##NODETYPE(&(dest)->FIELD[j], &(src)->FIELD[j]);		\
+		}																	\
+		(dest)->_num_##FIELD = (src)->_num_##FIELD;							\
 	} while(0)
 
 static void
@@ -585,8 +652,13 @@ __copyArrowTypeUnion(ArrowTypeUnion *dest, const ArrowTypeUnion *src)
 {
 	__copyArrowNode(&dest->node, &src->node);
 	COPY_SCALAR(mode);
-	dest->typeIds = palloc(sizeof(int32_t) * src->_num_typeIds);
-	memcpy(dest->typeIds, src->typeIds, sizeof(int32_t) * src->_num_typeIds);
+	if (!src->typeIds)
+		dest->typeIds = NULL;
+	else
+	{
+		dest->typeIds = palloc(sizeof(int32_t) * src->_num_typeIds);
+		memcpy(dest->typeIds, src->typeIds, sizeof(int32_t) * src->_num_typeIds);
+	}
 	dest->_num_typeIds = src->_num_typeIds;
 }
 
@@ -685,6 +757,15 @@ __copyArrowSchema(ArrowSchema *dest, const ArrowSchema *src)
 	COPY_SCALAR(endianness);
 	COPY_VECTOR(fields, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
+	if (!src->features)
+		dest->features = NULL;
+	else
+	{
+		dest->features = palloc0(sizeof(ArrowFeature) * src->_num_features);
+		memcpy(dest->features, src->features,
+			   sizeof(ArrowFeature) * src->_num_features);
+	}
+	dest->_num_features = src->_num_features;
 }
 
 static void
@@ -747,6 +828,14 @@ __copyArrowFooter(ArrowFooter *dest, const ArrowFooter *src)
 	__copyArrowSchema(&dest->schema, &src->schema);
 	COPY_VECTOR(dictionaries, ArrowBlock);
 	COPY_VECTOR(recordBatches, ArrowBlock);
+}
+
+static void
+__copyArrowBodyCompression(ArrowBodyCompression *dest, const ArrowBodyCompression *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(codec);
+	COPY_SCALAR(method);
 }
 
 void
@@ -904,6 +993,9 @@ arrowNodeName(ArrowNode *node)
 
 		case ArrowNodeTag__Footer:
 			return "Arrow::Footer";
+
+		case ArrowNodeTag__BodyCompression:
+			return "Arrow::BodyCompression";
 
 		default:
 			break;
@@ -1561,6 +1653,17 @@ readArrowField(ArrowField *field, const char *pos)
 }
 
 static void
+readArrowBodyCompression(ArrowBodyCompression *compression, const char *pos)
+{
+	FBTable		t = fetchFBTable((int32_t *)pos);
+
+	memset(compression, 0, sizeof(ArrowBodyCompression));
+	INIT_ARROW_NODE(compression, BodyCompression);
+	compression->codec	= fetchChar(&t, 0);
+	compression->method	= fetchChar(&t, 1);
+}
+
+static void
 readArrowSchema(ArrowSchema *schema, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *)pos);
@@ -1603,6 +1706,18 @@ readArrowSchema(ArrowSchema *schema, const char *pos)
 		}
 	}
 	schema->_num_custom_metadata = nitems;
+
+	/* [ features ] */
+	vector = fetchVector(&t, 3, &nitems);
+	if (nitems == 0)
+		schema->features = NULL;
+	else
+	{
+		schema->features = palloc0(sizeof(ArrowFeature) * nitems);
+		for (i=0; i < nitems; i++)
+			schema->features[i] = ((const uint64_t *)vector)[i];
+	}
+	schema->_num_features = nitems;
 }
 
 static size_t
@@ -1668,6 +1783,14 @@ readArrowRecordBatch(ArrowRecordBatch *rbatch, const char *pos)
 			next += readArrowBuffer(&rbatch->buffers[i], next);
 	}
 	rbatch->_num_buffers = nitems;
+
+	/* (optional) BodyCompression  */
+	next = (const char *)fetchOffset(&t, 3);
+	if (next)
+	{
+		rbatch->compression = palloc0(sizeof(ArrowBodyCompression));
+		readArrowBodyCompression(rbatch->compression, next);
+	}
 }
 
 static void

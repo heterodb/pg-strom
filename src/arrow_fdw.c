@@ -1676,6 +1676,14 @@ makeRecordBatchState(ArrowSchema *schema,
 	RecordBatchState *result;
 	int			j, ncols = schema->_num_fields;
 
+	/*
+	 * Right now, we have no support for compressed RecordBatches
+	 */
+	if (rbatch->compression)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("arrow_fdw: compressed record-batches are not supported")));
+	
 	result = palloc0(offsetof(RecordBatchState, columns[ncols]));
 	result->ncols = ncols;
 	result->rb_offset = block->offset + block->metaDataLength;
