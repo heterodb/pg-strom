@@ -4149,96 +4149,25 @@ ExecShutdownGpuJoin(CustomScanState *node)
  * declaration of the variables
  */
 static void
-gpujoin_codegen_decl_variables(StringInfo source,
-							   GpuJoinInfo *gj_info,
-							   int curr_depth,
-							   codegen_context *context)
+__gpujoin_codegen_decl_variables(StringInfo source,
+								 int curr_depth,
+								 List *kvars_list)
 {
-	StringInfoData	   *inners = alloca(sizeof(StringInfoData) * curr_depth);
-	StringInfoData		base;
-	StringInfoData		row;
-	StringInfoData		arrow;
-	StringInfoData		column;
-	List			   *kvars_list = NIL;
-	ListCell		   *lc;
-	devtype_info	   *dtype;
-	int					i;
+	StringInfoData *inners = alloca(sizeof(StringInfoData) * curr_depth);
+    StringInfoData	base;
+    StringInfoData	row;
+    StringInfoData	arrow;
+    StringInfoData	column;
+    ListCell	   *lc;
+	int				i;
 
-	/* init buffers */
+	/* init */
 	initStringInfo(&base);
 	initStringInfo(&row);
 	initStringInfo(&arrow);
 	initStringInfo(&column);
 	for (i=0; i < curr_depth; i++)
 		initStringInfo(&inners[i]);
-
-	/*
-	 * Pick up any variables used in this depth first
-	 */
-	Assert(curr_depth > 0 && curr_depth <= gj_info->num_rels);
-	foreach (lc, context->used_vars)
-	{
-		Var		   *varnode = lfirst(lc);
-		Var		   *kernode = NULL;
-		ListCell   *lc1;
-		ListCell   *lc2;
-		ListCell   *lc3;
-
-		Assert(IsA(varnode, Var));
-		/* GiST-index references shall be handled by the caller */
-		if (varnode->varno == INDEX_VAR)
-			continue;
-
-		forthree (lc1, context->pseudo_tlist,
-				  lc2, gj_info->ps_src_depth,
-				  lc3, gj_info->ps_src_resno)
-		{
-			TargetEntry	*tle = lfirst(lc1);
-			int		src_depth = lfirst_int(lc2);
-			int		src_resno = lfirst_int(lc3);
-
-			if (equal(tle->expr, varnode))
-			{
-				kernode = copyObject(varnode);
-				kernode->varno = src_depth;			/* save the source depth */
-				kernode->varattno = src_resno;		/* save the source resno */
-				kernode->varattnosyn = tle->resno;	/* resno on the ps_tlist */
-				if (src_depth < 0 || src_depth > curr_depth)
-					elog(ERROR, "Bug? device varnode out of range");
-				break;
-			}
-		}
-		if (!kernode)
-			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
-				 nodeToString(varnode));
-		kvars_list = lappend(kvars_list, kernode);
-	}
-
-	/*
-	 * variable declarations
-	 */
-	appendStringInfoString(
-		source,
-		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
-		"  kern_data_store *kds_in    __attribute__((unused));\n"
-		"  void *datum                __attribute__((unused));\n"
-		"  cl_uint offset             __attribute__((unused));\n");
-
-	foreach (lc, kvars_list)
-	{
-		Var	   *kvar = lfirst(lc);
-
-		dtype = pgstrom_devtype_lookup(kvar->vartype);
-		if (!dtype)
-			elog(ERROR, "device type \"%s\" not found",
-				 format_type_be(kvar->vartype));
-		appendStringInfo(
-			source,
-			"  pg_%s_t KVAR_%u;\n",
-			dtype->type_name,
-			kvar->varattnosyn);
-	}
-	appendStringInfoChar(source, '\n');
 
 	/*
 	 * code to load the variables
@@ -4404,6 +4333,101 @@ gpujoin_codegen_decl_variables(StringInfo source,
 	pfree(column.data);
 
 	appendStringInfoChar(source, '\n');
+}
+
+static void
+gpujoin_codegen_decl_variables(StringInfo source,
+							   GpuJoinInfo *gj_info,
+							   int curr_depth,
+							   codegen_context *context)
+{
+	StringInfoData	   *inners = alloca(sizeof(StringInfoData) * curr_depth);
+	StringInfoData		base;
+	StringInfoData		row;
+	StringInfoData		arrow;
+	StringInfoData		column;
+	List			   *kvars_list = NIL;
+	ListCell		   *lc;
+	devtype_info	   *dtype;
+	int					i;
+
+	/* init buffers */
+	initStringInfo(&base);
+	initStringInfo(&row);
+	initStringInfo(&arrow);
+	initStringInfo(&column);
+	for (i=0; i < curr_depth; i++)
+		initStringInfo(&inners[i]);
+
+	/*
+	 * Pick up any variables used in this depth first
+	 */
+	Assert(curr_depth > 0 && curr_depth <= gj_info->num_rels);
+	foreach (lc, context->used_vars)
+	{
+		Var		   *varnode = lfirst(lc);
+		Var		   *kernode = NULL;
+		ListCell   *lc1;
+		ListCell   *lc2;
+		ListCell   *lc3;
+
+		Assert(IsA(varnode, Var));
+		/* GiST-index references shall be handled by the caller */
+		if (varnode->varno == INDEX_VAR)
+			continue;
+
+		forthree (lc1, context->pseudo_tlist,
+				  lc2, gj_info->ps_src_depth,
+				  lc3, gj_info->ps_src_resno)
+		{
+			TargetEntry	*tle = lfirst(lc1);
+			int		src_depth = lfirst_int(lc2);
+			int		src_resno = lfirst_int(lc3);
+
+			if (equal(tle->expr, varnode))
+			{
+				kernode = copyObject(varnode);
+				kernode->varno = src_depth;			/* save the source depth */
+				kernode->varattno = src_resno;		/* save the source resno */
+				kernode->varattnosyn = tle->resno;	/* resno on the ps_tlist */
+				if (src_depth < 0 || src_depth > curr_depth)
+					elog(ERROR, "Bug? device varnode out of range");
+				break;
+			}
+		}
+		if (!kernode)
+			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
+				 nodeToString(varnode));
+		kvars_list = lappend(kvars_list, kernode);
+	}
+
+	/*
+	 * variable declarations
+	 */
+	appendStringInfoString(
+		source,
+		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
+		"  kern_data_store *kds_in    __attribute__((unused));\n"
+		"  void *datum                __attribute__((unused));\n"
+		"  cl_uint offset             __attribute__((unused));\n");
+
+	foreach (lc, kvars_list)
+	{
+		Var	   *kvar = lfirst(lc);
+
+		dtype = pgstrom_devtype_lookup(kvar->vartype);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(kvar->vartype));
+		appendStringInfo(
+			source,
+			"  pg_%s_t KVAR_%u;\n",
+			dtype->type_name,
+			kvar->varattnosyn);
+	}
+	appendStringInfoChar(source, '\n');
+
+	__gpujoin_codegen_decl_variables(source, curr_depth, kvars_list);
 }
 
 /*
@@ -4701,6 +4725,7 @@ gpujoin_codegen_gist_index_quals(StringInfo source,
 			elog(ERROR, "Bug? device varnode was not on the ps_tlist: %s",
 				 nodeToString(kvar));
 	}
+	__gpujoin_codegen_decl_variables(&body, depth, kvars_list);
 
 	/*
 	 * Function to load GiST key variables
