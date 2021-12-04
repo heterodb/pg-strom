@@ -243,29 +243,6 @@ on_sigint_handler(int signal)
  *
  * ----------------------------------------------------------------
  */
-static inline size_t
-__buffer_usage_inline_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = ARROWALIGN(column->values.usage);
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
-static inline size_t
-__buffer_usage_varlena_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = (ARROWALIGN(column->values.usage) +
-			 ARROWALIGN(column->extra.usage));
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
 static inline void
 __put_inline_null_value(SQLfield *column, size_t index, int sz)
 {

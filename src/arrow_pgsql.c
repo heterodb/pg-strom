@@ -164,29 +164,6 @@ static inline uint64_t __fetch_64bit(const void *addr)
 #endif
 }
 
-static inline size_t
-__buffer_usage_inline_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = ARROWALIGN(column->values.usage);
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
-static inline size_t
-__buffer_usage_varlena_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = (ARROWALIGN(column->values.usage) +
-			 ARROWALIGN(column->extra.usage));
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
 #define STAT_UPDATES(COLUMN,FIELD,VALUE)					\
 	do {													\
 		if ((COLUMN)->stat_enabled)							\
