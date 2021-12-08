@@ -14,7 +14,7 @@
 
   <link rel="stylesheet" href="../css/theme.css" />
   <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
   <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
   <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
   <link href="../custom.css" rel="stylesheet" />
@@ -28,9 +28,8 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
-  
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -200,6 +199,7 @@
   
   <hr/>
 </div>
+
           <div role="main">
             <div class="section">
               
@@ -210,7 +210,7 @@
 <li><strong>ハードウェア</strong><ul>
 <li>CUDA ToolkitのサポートするLinuxオペレーティングシステムを動作可能な x86_64 アーキテクチャのハードウェアが必要です。 </li>
 <li>CPU、ストレージ、およびネットワークデバイスには特別な要件はありませんが、<a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List">note002:HW Validation List</a>はハードウェア選定の上で参考になるかもしれません。</li>
-<li>GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。</li>
+<li>GPUダイレクトSQL実行を利用するにはNVME規格に対応したSSD、またはRoCEに対応した高速NICが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。</li>
 </ul>
 </li>
 <li><strong>GPUデバイス</strong><ul>
@@ -318,8 +318,13 @@ EOF
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
 <p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバなど関連するカーネルモジュールが使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
-<p>EPELリポジトリの定義は<code>epel-release</code>パッケージにより提供されます。以下のようにインストールしてください。</p>
-<pre><code># dnf install epel-release
+<p>EPELリポジトリの定義は <code>epel-release</code> パッケージにより提供され、<a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a>のサイトから入手する事ができます。
+CentOS8では<code>dnf</code>コマンドを用いてのインストールも可能です。</p>
+<pre><code>-- For RHEL8
+# dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+
+-- For CentOS8
+# dnf install epel-release
 </code></pre>
 <h3 id="heterodb-swdc">heterodb-swdcのインストール</h3>
 <p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
@@ -809,18 +814,19 @@ CREATE EXTENSION
 <p>PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。
 本節ではPostGISのインストール手順について説明を行いますが、必要に応じて読み飛ばしてください。</p>
 <p>PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
-以下の例は、PostgreSQL v12向けにビルドされたPostGIS v3.0をインストールするものです。</p>
+以下の例は、PostgreSQL v13向けにビルドされたPostGIS v3.2をインストールするものです。</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>CentOS 8の場合、PostGISの依存するライブラリが初期状態で有効となっているリポジトリに含まれていないため、
-<code>dnf</code>コマンドに<code>--enablerepo=powertools</code>オプションを付加してPowerToolsリポジトリを有効化してください。</p>
-<p>2021年5月現在、PGDBビルドのPostGISが、CentOS 8 Stream向けにビルドされた新しいバージョンのライブラリに
-依存しているため、<code>poppler</code>、および <code>poppler-data</code>は手動でインストールする必要があります。
-以下の例では、<code>ftp.riken.jp</code>にミラーされているパッケージをダウンロードしています。</p>
+<p>RHEL8およびCentOS8では、PostGISが必要とするパッケージのうちいくつかが初期状態で有効となっている
+リポジトリに含まれていません。
+そのため、RHEL8では<code>--enablerepo</code>オプションに<code>codeready-builder-for-rhel-8-x86_64-rpms</code>リポジトリを、
+CentOS8では<code>PowerTools</code>リポジトリを指定して、これらパッケージに対する依存関係を解決してください。</p>
 </div>
-<pre><code># dnf install -y https://ftp.riken.jp/Linux/centos/8-stream/AppStream/x86_64/os/Packages/poppler-20.11.0-2.el8.x86_64.rpm \
-                 https://ftp.riken.jp/Linux/centos/8-stream/AppStream/x86_64/os/Packages/poppler-data-0.4.9-1.el8.noarch.rpm
-# dnf install -y postgis31_13 --enablerepo=powertools
+<pre><code>-- For RHEL8
+# dnf install -y postgis32_13 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
+
+-- For CentOS8
+# dnf install -y postgis32_13 --enablerepo=powertools
 </code></pre>
 <p>データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから<code>CREATE EXTENSION</code>コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。
 これでPostGISのインストールは完了です。</p>
@@ -860,17 +866,18 @@ CREATE EXTENSION
   </div>
 
   <div class="rst-versions" role="note" aria-label="versions">
-    <span class="rst-current-version" data-toggle="rst-current-version">
-      
-      
-        <span><a href=".." style="color: #fcfcfc;">&laquo; Previous</a></span>
-      
-      
-        <span style="margin-left: 15px"><a href="../operations/" style="color: #fcfcfc">Next &raquo;</a></span>
-      
-    </span>
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href=".." style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../operations/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
 </div>
     <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
     <script defer>

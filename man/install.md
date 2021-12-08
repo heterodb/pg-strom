@@ -15,7 +15,7 @@ This chapter introduces the steps to install PG-Strom.
 - **ハードウェア**
     - CUDA ToolkitのサポートするLinuxオペレーティングシステムを動作可能な x86_64 アーキテクチャのハードウェアが必要です。 
     - CPU、ストレージ、およびネットワークデバイスには特別な要件はありませんが、[note002:HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List)はハードウェア選定の上で参考になるかもしれません。
-    - GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。
+    - GPUダイレクトSQL実行を利用するにはNVME規格に対応したSSD、またはRoCEに対応した高速NICが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。
 - **GPUデバイス**
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
@@ -35,7 +35,7 @@ This chapter introduces the steps to install PG-Strom.
 - **Server Hardware**
     - It requires generic x86_64 hardware that can run Linux operating system supported by CUDA Toolkit. We have no special requirement for CPU, storage and network devices.
     - [note002:HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List) may help you to choose the hardware.
-    - GPU Direct SQL Execution needs SSD devices which support NVMe specification, and to be installed under the same PCIe Root Complex where GPU is located on.
+    - GPU Direct SQL Execution needs NVME-SSD devices, or fast network card with RoCE support, and to be installed under the same PCIe Root Complex where GPU is located on.
 - **GPU Device**
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
@@ -240,13 +240,19 @@ One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Modu
 Linux kernel module must be rebuilt according to version-up of Linux kernel, so we don't recommend to operate the system without DKMS.
 }
 @ja{
-EPELリポジトリの定義は`epel-release`パッケージにより提供されます。以下のようにインストールしてください。
+EPELリポジトリの定義は `epel-release` パッケージにより提供され、[Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart)のサイトから入手する事ができます。
+CentOS8では`dnf`コマンドを用いてのインストールも可能です。
 }
 @en{
-`epel-release` package provides the repository definition of EPEL. Install the package as follows.
+`epel-release` package provides the repository definition of EPEL. You can obtain the package from the [Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart) website.
+For CentOS8, it can be installed using `dnf` command.
 }
 
 ```
+-- For RHEL8
+# dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+
+-- For CentOS8
 # dnf install epel-release
 ```
 
@@ -1239,33 +1245,29 @@ This section introduces the steps to install PostGIS module. Skip it on your dem
 
 @ja{
 PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
-以下の例は、PostgreSQL v12向けにビルドされたPostGIS v3.0をインストールするものです。
+以下の例は、PostgreSQL v13向けにビルドされたPostGIS v3.2をインストールするものです。
 
 !!! Note
-    CentOS 8の場合、PostGISの依存するライブラリが初期状態で有効となっているリポジトリに含まれていないため、
-    `dnf`コマンドに`--enablerepo=powertools`オプションを付加してPowerToolsリポジトリを有効化してください。
-    
-    2021年5月現在、PGDBビルドのPostGISが、CentOS 8 Stream向けにビルドされた新しいバージョンのライブラリに
-    依存しているため、`poppler`、および `poppler-data`は手動でインストールする必要があります。
-    以下の例では、`ftp.riken.jp`にミラーされているパッケージをダウンロードしています。
+    RHEL8およびCentOS8では、PostGISが必要とするパッケージのうちいくつかが初期状態で有効となっている
+    リポジトリに含まれていません。
+    そのため、RHEL8では`--enablerepo`オプションに`codeready-builder-for-rhel-8-x86_64-rpms`リポジトリを、
+    CentOS8では`PowerTools`リポジトリを指定して、これらパッケージに対する依存関係を解決してください。
 }
 @en{
 PostGIS module can be installed from the yum repository by PostgreSQL Global Development Group, like PostgreSQL itself.
-The example below shows the command to install PostGIS v3.0 built for PostgreSQL v12.
+The example below shows the command to install PostGIS v3.2 built for PostgreSQL v13.
 
 !!! Note
-    CentOS 8 initial configuration does not enable the repository that delivers some libraries required by PostgreSQL,
-    add `--enablerepo=powertools` on the `dnf` command to activate PowerTools repository.
-    
-    As of May 2021, PostGIS package built by PGDG depends on the newer version of libray built for CentOS 8 Stream,
-    `poppler` and `poppler-data` must be manually installed.
-    The example below downloads the packages mirroed at `ftp.riken.jp`.
+    In RHEL8 and CentOS8, several packages required by PostGIS are not distributed from the repositories enabled in the default installation.
+    So, add `codeready-builder-for-rhel-8-x86_64-rpms` repository in RHEL8, or `PowerTools` repository in CentOS8 for the `--enablerepo` option to resolve this dependency.
 }
 
 ```
-# dnf install -y https://ftp.riken.jp/Linux/centos/8-stream/AppStream/x86_64/os/Packages/poppler-20.11.0-2.el8.x86_64.rpm \
-                 https://ftp.riken.jp/Linux/centos/8-stream/AppStream/x86_64/os/Packages/poppler-data-0.4.9-1.el8.noarch.rpm
-# dnf install -y postgis31_13 --enablerepo=powertools
+-- For RHEL8
+# dnf install -y postgis32_13 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
+
+-- For CentOS8
+# dnf install -y postgis32_13 --enablerepo=powertools
 ```
 
 @ja{
