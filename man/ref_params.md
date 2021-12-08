@@ -181,8 +181,8 @@ This session introduces PG-Strom's configuration parameters.
 
 `pg_strom.nvme_distance_map` [型: `text` / 初期値: `null`]
 :   NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。
-:   書式は`<gpuX>=(<nvmeX>|<sfdvX>|</path/to/nfsmount>)[;<gpuY>=...]`で、NVMEデバイスなどストレージと対応するGPUのペアをセミコロン区切りの文字列で記述します。
-:   （例：`gpu0=nvme1; gpu1=/mnt/nfs_volume`）
+:   書式は `{(<gpuX>|<nvmeX>|<sfdvX>|</path/to/nfsmount>),...}[,{...}]`で、GPUとその近傍に位置するNVMEデバイスなどストレージの識別子を `{ ... }` で囲まれたグループに記述します。
+:   （例: `{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}`
 :   
 :   - `<gpuX>`はデバイス番号Xを持つGPUです。
 :   - `<nvmeX>`はローカルのNVME-SSDまたはリモートのNVME-oFデバイスを意味します。
@@ -210,9 +210,9 @@ This session introduces PG-Strom's configuration parameters.
 :   It is only available when `nvidia cufile` driver is used.
 
 `pg_strom.nvme_distance_map` [type: `text` / default: `null`]
-:   It manually configures the closest GPU for the particular storage devices, like NVME devices or NFS volumes.
-:   Its format string is `<gpuX>=(<nvmeX>|<sfdvX>|</path/to/nfsmount>)[;<gpuY>=...]`; semi-colon separated list of pairs of GPU and storage like NVME devices.
-:   (example: `gpu0=nvme1; gpu1=/mnt/nfs_volume`)
+:   It manually configures the closest GPU for particular storage evices, like NVME-SSD or NFS volumes.
+:   Its format string is `{(<gpuX>|<nvmeX>|<sfdvX>|</path/to/nfsmount>),...}[,{...}]`. It puts identifiers of GPU and NVME devices within `{ ... }` block to group these devices.
+:   (example: `{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}`
 :   
 :   - `<gpuX>` means a GPU with device identifier X.
 :   - `<nvmeX>` means a local NVME-SSD or a remote NVME-oF device.

@@ -93,7 +93,7 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#controls-using-guc-parameters">Controls using GUC parameters</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#ensure-usage-of-ssd-to-gpu-direct-sql-execution">Ensure usage of SSD-to-GPU Direct SQL Execution</a>
+    <li class="toctree-l3"><a class="reference internal" href="#ensure-usage-of-gpu-direct-sql-execution">Ensure usage of GPU Direct SQL Execution</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#attension-for-visibility-map">Attension for visibility map</a>
     </li>
@@ -220,10 +220,10 @@ Note that tablespace of the existing tables are not changed in thie case.</p>
 <h2 id="operations">Operations</h2>
 <h3 id="distance-between-gpu-and-nvme-ssd">Distance between GPU and NVME-SSD</h3>
 <p>On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.</p>
-<p><a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>, basis of the SSD-to-GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.</p>
+<p><a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>, basis of the GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.</p>
 <p>From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.</p>
 <p>The photo below is a motherboard of HPC server. It has 8 of PCIe x16 slots, and each pair is linked to the other over the PCIe switch. The slots in the left-side of the photo are connected to CPU1, and right-side are connected to CPU2.</p>
-<p>When a table on SSD-2 is scanned using SSD-to-GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.</p>
+<p>When a table on SSD-2 is scanned using GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.</p>
 <p><img alt="Motherboard of HPC Server" src="../img/pcie-hpc-server.png" /></p>
 <p>PG-Strom calculate logical distances on any pairs of GPU and NVME-SSD using PCIe bus topology information of the system on startup time.
 It is displayed at the start up log. Each NVME-SSD determines the preferable GPU based on the distance, for example, <code>GPU1</code> shall be used on scan of the <code>/dev/nvme2</code>.</p>
@@ -243,20 +243,20 @@ LOG:      nvme3      7   (   3)      7
 In case when NVME-over-Fabric(RDMA) is used, unable to identify the location of nvme device on the PCIe-bus, so you need to configure the logical distance between NVME-SSD and GPU manually.</p>
 <p>The example below shows the configuration of <code>gpu2</code> for <code>nvme1</code>, and <code>gpu1</code> for <code>nvme2</code> and <code>nvme3</code>.
 It shall be added to <code>postgresql.conf</code>. Please note than manual configuration takes priority than the automatic configuration.</p>
-<pre><code>pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
+<pre><code>pg_strom.nvme_distance_map = '{nvme1,gpu2},{nvme2,nvme3,gpu1}'
 </code></pre>
 <h3 id="controls-using-guc-parameters">Controls using GUC parameters</h3>
 <p>There are two GPU parameters related to GPU Direct SQL Execution.</p>
-<p>The first is <code>pg_strom.nvme_strom_enabled</code> that simply turn on/off the function of SSD-to-GPU Direct SQL Execution.
-If <code>off</code>, SSD-to-GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is <code>on</code>.</p>
-<p>The other one is <code>pg_strom.nvme_strom_threshold</code> which specifies the least table size to invoke SSD-to-GPU Direct SQL Execution.</p>
-<p>PG-Strom will choose SSD-to-GPU Direct SQL Execution when target table is located on NVMe-SSD volume (or md-raid0 volume which consists of NVMe-SSD only), and the table size is larger than this parameter.
-Its default is sum of the physical memory size and 1/3 of the <code>shared_buffers</code>. It means default configuration invokes SSD-to-GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.</p>
-<p>Even if SSD-to-GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.</p>
+<p>The first is <code>pg_strom.gpudirect_enabled</code> that simply turn on/off the function of GPU Direct SQL Execution.
+If <code>off</code>, GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is <code>on</code>.</p>
+<p>The other one is <code>pg_strom.nvme_strom_threshold</code> which specifies the least table size to invoke GPU Direct SQL Execution.</p>
+<p>PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
+Its default configuration is sum of the physical memory size and 1/3 of the <code>shared_buffers</code>. It means default configuration invokes GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.</p>
+<p>Even if GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.</p>
 <p>On course, this assumption is not always right depending on the workload charasteristics.</p>
-<h3 id="ensure-usage-of-ssd-to-gpu-direct-sql-execution">Ensure usage of SSD-to-GPU Direct SQL Execution</h3>
-<p><code>EXPLAIN</code> command allows to ensure whether SSD-to-GPU Direct SQL Execution shall be used in the target query, or not.</p>
-<p>In the example below, a scan on the <code>lineorder</code> table by <code>Custom Scan (GpuJoin)</code> shows <code>NVMe-Strom: enabled</code>. In this case, SSD-to-GPU Direct SQL Execution shall be used to read from the <code>lineorder</code> table.</p>
+<h3 id="ensure-usage-of-gpu-direct-sql-execution">Ensure usage of GPU Direct SQL Execution</h3>
+<p><code>EXPLAIN</code> command allows to ensure whether GPU Direct SQL Execution shall be used in the target query, or not.</p>
+<p>In the example below, a scan on the <code>lineorder</code> table by <code>Custom Scan (GpuJoin)</code> shows <code>NVMe-Strom: enabled</code>. In this case, GPU Direct SQL Execution shall be used to read from the <code>lineorder</code> table.</p>
 <pre><code># explain (costs off)
 select sum(lo_revenue), d_year, p_brand1
 from lineorder, date1, part, supplier
@@ -306,7 +306,7 @@ and s_region = 'AMERICA'
 <p>Right now, GPU routines of PG-Strom cannot run MVCC visibility checks per row, because only host code has a special data structure for visibility checks. It also leads a problem.</p>
 <p>We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.</p>
 <p>To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.</p>
-<p>SSD-to-GPU Direct SQL Execution utilizes this infrastructure. It checks the visibility map first, then only "all-visible" blocks are required to read with SSD-to-GPU P2P DMA.</p>
+<p>GPU Direct SQL Execution utilizes this infrastructure. It checks the visibility map first, then only "all-visible" blocks are required to read with P2P DMA.</p>
 <p>VACUUM constructs visibility map, so you can enforce PostgreSQL to construct visibility map by explicit launch of VACUUM command.</p>
 <pre><code>VACUUM ANALYZE linerorder;
 </code></pre>

@@ -234,8 +234,8 @@
 <dd><code>nvidia cufile</code>ドライバを使用する場合のみ有効です。</dd>
 <dt><code>pg_strom.nvme_distance_map</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
 <dd>NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。</dd>
-<dd>書式は<code>&lt;gpuX&gt;=(&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;)[;&lt;gpuY&gt;=...]</code>で、NVMEデバイスなどストレージと対応するGPUのペアをセミコロン区切りの文字列で記述します。</dd>
-<dd>（例：<code>gpu0=nvme1; gpu1=/mnt/nfs_volume</code>）</dd>
+<dd>書式は <code>{(&lt;gpuX&gt;|&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;),...}[,{...}]</code>で、GPUとその近傍に位置するNVMEデバイスなどストレージの識別子を <code>{ ... }</code> で囲まれたグループに記述します。</dd>
+<dd>（例: <code>{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}</code></dd>
 <dd></dd>
 <dd>
 <ul>

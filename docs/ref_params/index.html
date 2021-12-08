@@ -233,9 +233,9 @@
 <dd>Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases.</dd>
 <dd>It is only available when <code>nvidia cufile</code> driver is used.</dd>
 <dt><code>pg_strom.nvme_distance_map</code> [type: <code>text</code> / default: <code>null</code>]</dt>
-<dd>It manually configures the closest GPU for the particular storage devices, like NVME devices or NFS volumes.</dd>
-<dd>Its format string is <code>&lt;gpuX&gt;=(&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;)[;&lt;gpuY&gt;=...]</code>; semi-colon separated list of pairs of GPU and storage like NVME devices.</dd>
-<dd>(example: <code>gpu0=nvme1; gpu1=/mnt/nfs_volume</code>)</dd>
+<dd>It manually configures the closest GPU for particular storage evices, like NVME-SSD or NFS volumes.</dd>
+<dd>Its format string is <code>{(&lt;gpuX&gt;|&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;),...}[,{...}]</code>. It puts identifiers of GPU and NVME devices within <code>{ ... }</code> block to group these devices.</dd>
+<dd>(example: <code>{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}</code></dd>
 <dd></dd>
 <dd>
 <ul>
