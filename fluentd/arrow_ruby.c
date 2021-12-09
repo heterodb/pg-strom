@@ -40,6 +40,117 @@ trim_cstring(char *str)
 	return str;
 }
 
+/*
+ * context based memory allocation tracker
+ */
+typedef struct mallocContext
+{
+	struct mallocContext   *prev;
+	struct mallocContext   *next;
+	char		data[0];
+} mallocContext;
+
+#define mallocContextOfChunk(ptr)				\
+	((mallocContext *)((char *)(ptr) - offsetof(mallocContext, data)))
+
+static mallocContext	defaultMallocContext = { .prev = &defaultMallocContext,
+												 .next = &defaultMallocContext };
+static mallocContext   *currentMallocContext = &defaultMallocContext;
+
+static inline void
+mallocContextInit(mallocContext *mcxt)
+{
+	mcxt->prev = mcxt;
+	mcxt->next = mcxt;
+}
+
+static inline mallocContext *
+mallocContextSwitchTo(mallocContext *mcxt_new)
+{
+	mallocContext  *mcxt_old = currentMallocContext;
+
+	currentMallocContext = mcxt_new;
+
+	return mcxt_old;
+}
+
+static void
+mallocContextRelease(mallocContext *mcxt)
+{
+	mallocContext  *curr;
+	mallocContext  *next;
+
+	for (curr = mcxt->next; curr != mcxt; curr = next)
+	{
+		next = curr->next;
+		free(curr);
+	}
+}
+
+void *
+palloc(size_t sz)
+{
+	mallocContext  *next = currentMallocContext->next;
+	mallocContext  *curr;
+
+	curr = malloc(offsetof(mallocContext, data) + sz);
+	if (!curr)
+		rb_memerror();
+	currentMallocContext->next = curr;
+	curr->prev = currentMallocContext;
+	curr->next = next;
+	next->prev = curr;
+
+	return curr->data;
+}
+
+void *
+palloc0(size_t sz)
+{
+	void   *ptr = palloc(sz);
+
+	memset(ptr, 0, sz);
+
+	return ptr;
+}
+
+char *
+pstrdup(const char *str)
+{
+	void   *dst = palloc(strlen(str) + 1);
+
+	strcpy(dst, str);
+
+	return dst;
+}
+
+void *
+repalloc(void *old, size_t sz)
+{
+	mallocContext  *curr;
+
+	if (!old)
+		return palloc(sz);
+	curr = mallocContextOfChunk(old);
+	curr = realloc(curr, offsetof(mallocContext, data) + sz);
+	if (curr)
+	{
+		curr->prev->next = curr;
+		curr->next->prev = curr;
+		return curr->data;
+	}
+	rb_memerror();
+}
+
+void
+pfree(void *ptr)
+{
+	mallocContext  *curr = mallocContextOfChunk(ptr);
+	curr->prev->next = curr->next;
+	curr->next->prev = curr->prev;
+	free(curr);
+}
+
 /* ----------------------------------------------------------------
  *
  * Put values handler for Ruby VALUE
@@ -954,12 +1065,12 @@ write_ruby_uint64_stat(SQLfield *column, char *buf, size_t len,
  * ----------------------------------------------------------------
  */
 static void
-__ArrowFilePathnameValidator(VALUE __pathname)
+__arrowFilePathnameValidator(VALUE self, VALUE __pathname)
 {
 	const char *str;
 	uint32_t	len, i;
 
-	if (TYPE(__pathname) != T_STRING)
+	if (CLASS_OF(__pathname) != rb_cString)
 		Elog("pathname must be String");
 	str = RSTRING_PTR(__pathname);
 	len = RSTRING_LEN(__pathname);
@@ -991,50 +1102,26 @@ __ArrowFilePathnameValidator(VALUE __pathname)
 					 str[i], len, str);
 		}
 	}
+	rb_ivar_set(self, rb_intern("pathname"),
+				rb_str_new(RSTRING_PTR(__pathname),
+						   RSTRING_LEN(__pathname)));
 }
 
-static bool
+static void
 arrowFieldAddCustomMetadata(SQLfield *column,
                             const char *key,
                             const char *value)
 {
 	ArrowKeyValue *kv;
-	char	   *__key = NULL;
-	char	   *__value = NULL;
+	size_t		sz;
 
-	if (column->numCustomMetadata == 0)
-	{
-		assert(column->customMetadata == NULL);
-		column->customMetadata = palloc(sizeof(ArrowKeyValue));
-	}
-	else
-	{
-		size_t  sz = sizeof(ArrowKeyValue) * (column->numCustomMetadata + 1);
-
-		assert(column->customMetadata != NULL);
-		column->customMetadata = repalloc(column->customMetadata, sz);
-	}
-	__key = strdup(key);
-	if (!__key)
-		goto out_of_memory;
-	__value = strdup(value);
-	if (!__value)
-		goto out_of_memory;
-
+	sz = sizeof(ArrowKeyValue) * (column->numCustomMetadata + 1);
+	column->customMetadata = repalloc(column->customMetadata, sz);
 	kv = &column->customMetadata[column->numCustomMetadata++];
-	initArrowNode(&kv->node, KeyValue);
-	kv->key = __key;
+	kv->key = pstrdup(key);
 	kv->_key_len = strlen(key);
-	kv->value = __value;
+	kv->value = pstrdup(value);
 	kv->_value_len = strlen(value);
-
-	return true;
-out_of_memory:
-	if (__key)
-		free(__key);
-	if (__value)
-		free(__value);
-	return false;
 }
 
 static int
@@ -1076,7 +1163,7 @@ __assignFieldTypeInt(SQLfield *column, const char *extra)
 		column->write_stat = write_ruby_int64_stat;
 	}
 	else
-		return -2;		/* unsupported */
+		Elog("Not a supported Int width (%s)", extra);
 
 	return 2;	/* nullmap + values */
 }
@@ -1111,7 +1198,7 @@ __assignFieldTypeUint(SQLfield *column, const char *extra)
 		column->write_stat = write_ruby_uint64_stat;
 	}
 	else
-		return -2;		/* unsupported */
+		Elog("Not a supported Uint width (%s)", extra);
 
 	return 2;	/* nullmap + values */
 }
@@ -1142,7 +1229,7 @@ __assignFieldTypeFloatingPoint(SQLfield *column, const char *extra)
 		column->write_stat = write_ruby_int64_stat;
 	}
 	else
-		return -2;		/* unsupported */
+		Elog("Not a supported FloatingPoint width (%s)", extra);
 
 	return 2;	/* nullmap + values */
 }
@@ -1161,16 +1248,16 @@ __assignFieldTypeDecimal(SQLfield *column, const char *extra)
 		const char *tail = extra + strlen(extra) - 1;
 
 		if (*tail != ')')
-			return -2;			/* syntax error */
+			Elog("Arrow::Decimal definition syntax error");
 		if (sscanf(extra, "(%u,%u)", &precision, &scale) != 2)
 		{
 			precision = 30;		/* revert */
 			if (sscanf(extra, "(%u)", &scale) != 1)
-				return -2;
+				Elog("Arrow::Decimal definition syntax error");
 		}
 	}
 	else if (*extra != '\0')
-		return -2;		/* unsupported */
+		Elog("Arrow::Decimal definition syntax error");
 
 	initArrowNode(&column->arrow_type, Decimal);
 	column->arrow_type.Decimal.precision = precision;
@@ -1199,7 +1286,7 @@ __assignFieldTypeDate(SQLfield *column, const char *extra)
 		column->write_stat = write_ruby_int64_stat;
 	}
 	else
-		return -2;
+		Elog("Arrow::Date - not a supported unit size: %s", extra);
 
 	return 2;
 }
@@ -1233,7 +1320,7 @@ __assignFieldTypeTime(SQLfield *column, const char *extra)
 		column->write_stat = write_ruby_int64_stat;
 	}
 	else
-		return -2;	/* unsupported */
+		Elog("Arrow::Time - not a supported unit size: %s", extra);
 
 	return 2;	/* nullmap + values */
 }
@@ -1283,7 +1370,7 @@ __assignFieldTypeTimestamp(SQLfield *column, const char *extra)
         column->write_stat = write_ruby_int64_stat;
 	}
 	else
-		return -2;	/* unsupported */
+		Elog("Arrow::Time - not a supported unit size: %s", extra);
 
 	return 2;
 }
@@ -1291,8 +1378,7 @@ __assignFieldTypeTimestamp(SQLfield *column, const char *extra)
 static int
 __assignFieldTypeInterval(SQLfield *column, const char *extra)
 {
-	/* not implemented yet */
-	return -2;
+	Elog("Arrow::Interval - not implemented yet");
 }
 
 static int
@@ -1310,8 +1396,7 @@ __assignFieldTypeIpaddr4(SQLfield *column)
 	initArrowNode(&column->arrow_type, FixedSizeBinary);
 	column->arrow_type.FixedSizeBinary.byteWidth = IP4ADDR_LEN;
 	column->put_value = put_ruby_logical_ip4addr_value;
-	if (!arrowFieldAddCustomMetadata(column, "pg_type", "pg_catalog.inet"))
-		return -1;		/* out of memory */
+	arrowFieldAddCustomMetadata(column, "pg_type", "pg_catalog.inet");
 
 	return 2;	/* nullmap + values */
 }
@@ -1322,21 +1407,18 @@ __assignFieldTypeIpaddr6(SQLfield *column)
 	initArrowNode(&column->arrow_type, FixedSizeBinary);
 	column->arrow_type.FixedSizeBinary.byteWidth = IP6ADDR_LEN;
 	column->put_value = put_ruby_logical_ip6addr_value;
-	if (!arrowFieldAddCustomMetadata(column, "pg_type", "pg_catalog.inet"))
-		return -1;		/* out of memory */
+	arrowFieldAddCustomMetadata(column, "pg_type", "pg_catalog.inet");
 
 	return 2;	/* nullmap + values */
 }
 
 static int
-__ArrowFileAssignFieldType(SQLfield *column,
+__arrowFileAssignFieldType(SQLfield *column,
 						   const char *field_name,
 						   const char *field_type,
 						   bool stat_enabled)
 {
-	column->field_name = strdup(field_name);
-	if (!column->field_name)
-		return -1;	/* out of memory */
+	column->field_name = pstrdup(field_name);
 	column->stat_enabled = stat_enabled;
 
 	if (strcmp(field_type, "Bool") == 0)
@@ -1364,65 +1446,7 @@ __ArrowFileAssignFieldType(SQLfield *column,
 	else if (strcmp(field_type, "Ipaddr6") == 0)
 		return  __assignFieldTypeIpaddr6(column);
 
-	return -2;	/* not a supported type */
-}
-
-/*
- * SQLtable memory release routine
- */
-static void
-sql_field_release(SQLfield *column)
-{
-	int		i;
-
-	if (column->element)
-		sql_field_release(column->element);
-	if (column->subfields)
-	{
-		for (i=0; i < column->nfields; i++)
-			sql_field_release(&column->subfields[i]);
-		free(column->subfields);
-	}
-	if (column->nullmap.data)
-		free(column->nullmap.data);
-	if (column->values.data)
-		free(column->values.data);
-	if (column->extra.data)
-		free(column->extra.data);
-	if (column->customMetadata)
-	{
-		for (i=0; i < column->numCustomMetadata; i++)
-		{
-			free((void *)column->customMetadata[i].key);
-			free((void *)column->customMetadata[i].value);
-		}
-		free(column->customMetadata);
-	}
-}
-
-static void
-sql_table_release(SQLtable *table)
-{
-	int		i;
-
-	if (table->fdesc >= 0)
-		close(table->fdesc);
-	if (table->recordBatches)
-		free(table->recordBatches);
-	if (table->dictionaries)
-		free(table->dictionaries);
-	if (table->customMetadata)
-	{
-		for (i=0; i < table->numCustomMetadata; i++)
-		{
-			free((void *)table->customMetadata[i].key);
-			free((void *)table->customMetadata[i].value);
-		}
-	}
-	/* TODO: release sql_dict_list */
-	for (i=0; i < table->nfields; i++)
-		sql_field_release(&table->columns[i]);
-	free(table);
+	Elog("ArrowFile: not a supported type");
 }
 
 /*
@@ -1435,21 +1459,46 @@ typedef struct
 	bool		stat_enabled;
 } field_def;
 
-static SQLtable *
-__ArrowFileParseSchemaDefs(VALUE __schema_defs)
+static VALUE
+__arrowFileInitTable(VALUE arg)
 {
+	void	  **__args = (void **)arg;
+	SQLtable   *table = __args[0];
+	field_def  *fields = __args[1];
+	uint32_t	j, nbuffers = 0;
+
+	table->fdesc = -1;
+	for (j=0; j < table->nfields; j++)
+	{
+		nbuffers += __arrowFileAssignFieldType(&table->columns[j],
+											   fields[j].field_name,
+											   fields[j].field_type,
+											   fields[j].stat_enabled);
+	}
+	table->numFieldNodes = table->nfields;
+	table->numBuffers = nbuffers;
+
+	return Qnil;
+}
+
+static SQLtable *
+__arrowFileParseSchemaDefs(VALUE self, VALUE __schema_defs)
+{
+	VALUE		threshold = rb_ivar_get(self, rb_intern("record_batch_threshold"));
+	mallocContext *mcxt;
+	mallocContext *mcxt_saved;
 	char	   *schema_defs;
 	char	   *tok, *saveptr;
 	SQLtable   *table = NULL;
 	field_def  *fields = NULL;
-	int			j, k;
 	const char *str;
 	int			len;
 	int			nrooms = 0;
-	int			nbuffers = 0;
-	int			nfields = 0;
+	uintptr_t	nfields = 0;
+	int			status;
+	void	   *__args[3];
 
-	if (TYPE(__schema_defs) != T_STRING)
+	if (CLASS_OF(__schema_defs) != rb_cString)
 		Elog("schema_defs must be a String");
 	str = RSTRING_PTR(__schema_defs);
 	len = RSTRING_LEN(__schema_defs);
@@ -1514,47 +1563,44 @@ __ArrowFileParseSchemaDefs(VALUE __schema_defs)
 	}
 
 	/* construction of SQLtable */
-	table = calloc(1, offsetof(SQLtable, columns[nfields]));
-	if (!table)
+	mcxt = calloc(1, (offsetof(mallocContext, data) +
+					  offsetof(SQLtable, columns[nfields])));
+	if (!mcxt)
 		Elog("out of memory");
-	table->fdesc = -1;
+	table = (SQLtable *)mcxt->data;
+	table->segment_sz = NUM2LONG(threshold);
 	table->nfields = nfields;
-	for (j=0; j < nfields; j++)
+	mallocContextInit(mcxt);
+	mcxt_saved = mallocContextSwitchTo(mcxt);
+	__args[0] = table;
+	__args[1] = fields;
+	rb_protect(__arrowFileInitTable, (VALUE)__args, &status);
+	if (status != 0)
 	{
-		k = __ArrowFileAssignFieldType(&table->columns[j],
-									   fields[j].field_name,
-									   fields[j].field_type,
-									   fields[j].stat_enabled);
-		if (k < 0)
-			goto error;
-		nbuffers += k;
+		mallocContextSwitchTo(mcxt_saved);
+		mallocContextRelease(mcxt);
+		free(mcxt);
+		rb_jump_tag(status);	//throw again
 	}
-	table->numFieldNodes = nfields;
-	table->numBuffers = nbuffers;
+	mallocContextSwitchTo(mcxt_saved);
 
 	return table;
-
-error:
-	sql_table_release(table);
-	if (k == -1)
-		Elog("out of memory");
-	Elog("schema-definition syntax error: %.*s", len, str);
 }
 
 static void
-__ArrowFileParseParams(VALUE hash,
+__arrowFileParseParams(VALUE self,
+					   VALUE hash,
 					   VALUE *p_ts_column,
-					   VALUE *p_tag_column,
-					   long *p_record_batch_threshold,
-					   long *p_filesize_threshold)
+					   VALUE *p_tag_column)
 {
 	VALUE		datum;
-	long		value;
+	size_t		r_threshold = 240;
+	size_t		f_threshold = 10000;
 
-	if (TYPE(hash) == T_NIL)
-		return;
-	if (TYPE(hash) != T_HASH)
-		rb_raise(rb_eException, "ArrowFile: parameters must be Hash");
+	if (hash == Qnil)
+		goto out;
+	if (CLASS_OF(hash) != rb_cHash)
+		Elog("ArrowFile: parameters must be Hash");
 
 	datum = rb_hash_fetch(hash, rb_str_new_cstr("ts_column"));
 	if (datum != Qnil)
@@ -1575,20 +1621,23 @@ __ArrowFileParseParams(VALUE hash,
 	datum = rb_hash_fetch(hash, rb_str_new_cstr("record_batch_threshold"));
 	if (datum != Qnil)
 	{
-		value = NUM2LONG(datum);
-		if (value < 16 || value > 2048)
+		r_threshold = NUM2LONG(datum);
+		if (r_threshold < 16 || r_threshold > 2048)
 			Elog("record_batch_threshold must be [16...2048]");
-		*p_record_batch_threshold = value;
 	}
 
 	datum = rb_hash_fetch(hash, rb_str_new_cstr("filesize_threshold"));
 	if (datum != Qnil)
 	{
-		value = NUM2LONG(datum);
-		if (value < 16 || value > 1048576)
+		f_threshold = NUM2LONG(datum);
+		if (f_threshold < 16 || f_threshold > 1048576)
 			Elog("filesize_threshold must be [16...1048576]");
-		*p_filesize_threshold = value;
 	}
+out:
+	rb_ivar_set(self, rb_intern("record_batch_threshold"),
+				LONG2NUM(r_threshold << 20));
+	rb_ivar_set(self, rb_intern("filesize_threshold"),
+				LONG2NUM(f_threshold << 20));
 }
 
 static VALUE
@@ -1600,17 +1649,12 @@ rb_ArrowFile__initialize(VALUE self,
 	SQLtable   *table;
 	VALUE		ts_column = Qnil;
 	VALUE		tag_column = Qnil;
-	long		record_batch_threshold = 240;
-	long		filesize_threshold = 10000;
 
-	__ArrowFilePathnameValidator(__pathname);
-	__ArrowFileParseParams(__params,
+	__arrowFilePathnameValidator(self, __pathname);
+	__arrowFileParseParams(self, __params,
 						   &ts_column,
-						   &tag_column,
-						   &record_batch_threshold,
-						   &filesize_threshold);
-	table = __ArrowFileParseSchemaDefs(__schema_defs);
-	table->segment_sz = (record_batch_threshold << 10);
+						   &tag_column);
+	table = __arrowFileParseSchemaDefs(self, __schema_defs);
 
 	/* lookup ts_column/tag_column if any */
 	if (ts_column != Qnil || tag_column != Qnil)
@@ -1645,19 +1689,12 @@ rb_ArrowFile__initialize(VALUE self,
 			tag_column = (__tag_column < 0 ? Qnil : INT2NUM(__tag_column));
 	}
 	/* instance variables */
-	rb_ivar_set(self, rb_intern("pathname"),
-				rb_str_new(RSTRING_PTR(__pathname),
-						   RSTRING_LEN(__pathname)));
 	rb_ivar_set(self, rb_intern("schema_defs"),
 				rb_str_new(RSTRING_PTR(__schema_defs),
 						   RSTRING_LEN(__schema_defs)));
 	rb_ivar_set(self, rb_intern("table"), (VALUE)table);
 	rb_ivar_set(self, rb_intern("ts_column"), ts_column);
 	rb_ivar_set(self, rb_intern("tag_column"), tag_column);
-	rb_ivar_set(self, rb_intern("record_batch_threshold"),
-				LONG2FIX(record_batch_threshold));
-	rb_ivar_set(self, rb_intern("filesize_threshold"),
-				LONG2FIX(filesize_threshold));
 
 	return self;
 }
@@ -1668,39 +1705,36 @@ rb_ArrowFile__initialize(VALUE self,
  *
  * ----------------------------------------------------------------
  */
-static void
-__arrowFileSwitchNext(int fdesc, const char *pathname, struct stat *st_buf_new)
+static bool
+__arrowFileSwitchNext(int fdesc, const char *filename, struct stat *st_buf_new)
 {
 	char	   *d_name, *__d_buf;
 	char	   *b_name, *__b_buf;
 	struct stat	st_buf_cur;
 	int			d_desc = -1;
 
-	__d_buf = alloca(strlen(pathname) + 1);
-	strcpy(__d_buf, pathname);
+	__d_buf = alloca(strlen(filename) + 1);
+	strcpy(__d_buf, filename);
 	d_name = dirname(__d_buf);
 
-	__b_buf = alloca(strlen(pathname) + 1);
-	strcpy(__b_buf, pathname);
+	__b_buf = alloca(strlen(filename) + 1);
+	strcpy(__b_buf, filename);
 	b_name = basename(__b_buf);
 
 	d_desc = open(d_name, O_RDONLY | O_DIRECTORY);
 	if (d_desc < 0)
-		Elog("failed on open('%s'): %m", d_name);
+		goto error_0;
+
 	if (flock(d_desc, LOCK_EX) != 0)
-	{
-		close(d_desc);
-		Elog("failed on flock('%s'): %m", d_name);
-	}
+		goto error_1;
+
 	/* <-- exclusive lock on the directory --> */
-	if (stat(pathname, &st_buf_cur) != 0)
-	{
-		close(d_desc);
-		Elog("failed on stat('%s'): %m", pathname);
-	}
+	if (stat(filename, &st_buf_cur) != 0)
+		goto error_1;
+
 	/* pathname is not renamed yet? */
-	if (st_buf_new->st_dev == st_buf_cur.st_dev &&
-		st_buf_new->st_ino == st_buf_cur.st_ino)
+	if (st_buf_cur.st_dev == st_buf_new->st_dev &&
+		st_buf_cur.st_ino == st_buf_new->st_ino)
 	{
 		char   *n_name = alloca(strlen(b_name) + 100);
 		int		suffix;
@@ -1710,23 +1744,22 @@ __arrowFileSwitchNext(int fdesc, const char *pathname, struct stat *st_buf_new)
 			sprintf(n_name, "%s.%d", b_name, suffix);
 			if (faccessat(d_desc, n_name, F_OK, 0) != 0)
 			{
-				if (errno == ENOENT)
-				{
-					if (renameat(d_desc, b_name,
-								 d_desc, n_name) != 0)
-					{
-						close(d_desc);
-						Elog("failed on renameat('%s', '%s' -> '%s'): %m",
-							 d_name, b_name, n_name);
-					}
+				if (errno == ENOENT &&
+					renameat(d_desc, b_name,
+							 d_desc, n_name) == 0)
 					break;
-				}
-				close(d_desc);
-				Elog("failed on faccessat('%s', '%s'): %m", d_name, n_name);
+
+				goto error_1;
 			}
 		}
 	}
 	close(d_desc);
+	return true;
+
+error_1:
+	close(d_desc);
+error_0:
+	return false;
 }
 
 static void
@@ -1742,19 +1775,24 @@ __arrowFileClose(SQLtable *table)
 }
 
 static void
-__arrowFileOpen(SQLtable *table, VALUE pathname, bool force_next_file)
+arrowFileOpen(VALUE self, bool force_next_file)
 {
-	const char *str = RSTRING_PTR(pathname);
-	uint32_t	len = RSTRING_LEN(pathname);
+	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
+	VALUE		pathname = rb_ivar_get(self, rb_intern("pathname"));
+	const char *str;
 	char	   *buf = alloca(2000);
 	uint32_t	bufsz = 2000;
-	uint32_t	i, j;
+	uint32_t	i, j, len;
 	int			fdesc;
 	time_t		__time;
 	struct tm	tm;
 
 	__time = time(NULL);
 	localtime_r(&__time, &tm);
+
+	assert(CLASS_OF(pathname) == rb_cString);
+	str = RSTRING_PTR(pathname);
+	len = RSTRING_LEN(pathname);
 	for (i=0, j=0; i < len; i++)
 	{
 		int		c = str[i];
@@ -1811,14 +1849,12 @@ __arrowFileOpen(SQLtable *table, VALUE pathname, bool force_next_file)
 		}
 	}
 	buf[j] = '\0';
-
-	/* Ok, open the file */
 retry_again:
+	/* ok, try to open the output file */
 	fdesc = open(buf, O_RDWR | O_CREAT, 0644);
 	if (fdesc < 0)
 		Elog("ArrowWrite: failed to open '%s': %m", buf);
-
-	/* Close the previous output file */
+	/* close the previous output file, if any */
 	if (table->fdesc >= 0)
 	{
 		/*
@@ -1839,14 +1875,17 @@ retry_again:
 			if (st_buf_old.st_dev == st_buf_new.st_dev &&
 				st_buf_old.st_ino == st_buf_new.st_ino)
 			{
-				__arrowFileSwitchNext(fdesc, buf, &st_buf_new);
+				if (!__arrowFileSwitchNext(fdesc, buf, &st_buf_new))
+				{
+					close(fdesc);
+					Elog("failed on to switch output file [%s]", buf);
+				}
 				close(fdesc);
 				goto retry_again;
 			}
 		}
 		__arrowFileClose(table);
 	}
-
 	table->filename = strdup(buf);
 	if (!table->filename)
 	{
@@ -1856,55 +1895,60 @@ retry_again:
 	table->fdesc = fdesc;
 }
 
-static bool
-__arrowFileWriteRecordBatch(VALUE self, SQLtable *table)
+static VALUE
+__arrowFileWriteRecordBatch(VALUE self)
 {
+	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
+	size_t		threshold;
 	struct stat	stat_buf;
-	size_t		filesize_threshold;
-	bool		retval = true;
-	VALUE		datum;
+	int			j;
 
-	datum = rb_ivar_get(self, rb_intern("filesize_threshold"));
-	filesize_threshold = NUM2LONG(datum) << 20;
-
-	if (flock(table->fdesc, LOCK_EX) != 0)
-		Elog("failed on flock('%s', LOCK_EX): %m", table->filename);
-	/* <-- begin critical section --> */
+	threshold = NUM2LONG(rb_ivar_get(self, rb_intern("filesize_threshold")));
 	if (fstat(table->fdesc, &stat_buf) != 0)
-	{
-		flock(table->fdesc, LOCK_UN);
 		Elog("failed on fstat(2): %m");
+	if (stat_buf.st_size >= threshold)
+		return Qfalse;
+
+	/* cleanup temporary buffers during the writing out */
+	table->numRecordBatches = 0;
+	table->recordBatches = NULL;
+	table->numCustomMetadata = 0;
+	table->customMetadata = NULL;
+	for (j=0; j < table->numFieldNodes; j++)
+	{
+		SQLfield   *column = &table->columns[j];
+
+		column->customMetadata = NULL;
+		column->numCustomMetadata = 0;
 	}
 
-	if (stat_buf.st_size > filesize_threshold)
-		retval = false;
-	else if (stat_buf.st_size == 0)
+	if (stat_buf.st_size == 0)
 	{
-		/* case of the new file */
+		/* case of an empty file */
 		arrowFileWrite(table, "ARROW1\0\0", 8);
 		writeArrowSchema(table);
 	}
 	else
 	{
-		/* append record-batch on the tail */
-		ArrowFileInfo	af_info;
-		uint32_t		j, nitems;
-		size_t			nbytes;
-		size_t			offset;
-		char			buffer[80];
+		ArrowFileInfo af_info;
+		uint32_t	nitems;
+		size_t		nbytes;
+		size_t		offset;
+		char		buffer[80];
 
 		readArrowFileDesc(table->fdesc, &af_info);
-		//check Schema compatibility
-		//reload statistics
+		//TODO: check Schema compatibility
 
 		/* restore RecordBatches already in the file */
 		nitems = af_info.footer._num_recordBatches;
 		table->numRecordBatches = nitems;
-		table->recordBatches = repalloc(table->recordBatches,
-										sizeof(ArrowBlock) * nitems);
+		table->recordBatches = palloc(sizeof(ArrowBlock) * nitems);
 		memcpy(table->recordBatches,
 			   af_info.footer.recordBatches,
 			   sizeof(ArrowBlock) * nitems);
+
+		//TODO: if cleanup context, last chunk shall be
+		//      merged to the current buffer.
 
 		/* move to the file offset in front of the Footer */
 		nbytes = sizeof(int32_t) + 6;	/* strlen("ARROW1") */
@@ -1919,37 +1963,63 @@ __arrowFileWriteRecordBatch(VALUE self, SQLtable *table)
 	writeArrowRecordBatch(table);
 	writeArrowFooter(table);
 
-	/* <-- end critical section --> */
-	if (flock(table->fdesc, LOCK_UN) != 0)
-		Elog("failed on flock(LOCK_UN): %m");
-
-	return retval;
+	return Qtrue;
 }
 
-static VALUE
-rb_ArrowFile__open(VALUE self)
+static void
+arrowFileWriteRecordBatch(VALUE self)
 {
-	return Qnil;
+	SQLtable	   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
+	VALUE			retval;
+	int				status;
+	mallocContext	mcxt;
+	mallocContext  *mcxt_saved;
+
+	assert(table->nitems > 0);
+	for (;;)
+	{
+		/* BEGIN critical section */
+		if (flock(table->fdesc, LOCK_EX) != 0)
+			Elog("failed on flock('%s', LOCK_EX): %m", table->filename);
+
+		mallocContextInit(&mcxt);
+		mcxt_saved = mallocContextSwitchTo(&mcxt);
+		retval = rb_protect(__arrowFileWriteRecordBatch, self, &status);
+		if (status != 0)
+		{
+			flock(table->fdesc, LOCK_UN);
+			mallocContextSwitchTo(mcxt_saved);
+			mallocContextRelease(&mcxt);
+			rb_jump_tag(status);
+		}
+		/* END critical section */
+		flock(table->fdesc, LOCK_UN);
+		mallocContextSwitchTo(mcxt_saved);
+		mallocContextRelease(&mcxt);
+
+		if (retval == Qtrue)
+			break;
+		/* switch the output file again */
+		arrowFileOpen(self, true);
+	}
 }
 
+/*
+ * ArrowFile::writeRow method handler
+ */
 static VALUE
-rb_ArrowFile__close(VALUE self)
+__arrowFile__writeRow(VALUE __arg)
 {
-	return Qnil;
-}
-
-static VALUE
-rb_ArrowFile__writeRow(VALUE self,
-					   VALUE __tag,
-					   VALUE __ts,
-					   VALUE __record)
-{
-	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
-	VALUE		datum;
-	VALUE		pathname;
-	int			ts_column = -1;
+	VALUE	   *args = (VALUE *)__arg;
+	VALUE		self	= args[0];
+	VALUE		tag		= args[1];
+	VALUE		ts		= args[2];
+	VALUE		record	= args[3];
+	SQLtable   *table	= (SQLtable *)rb_ivar_get(self, rb_intern("table"));
 	int			tag_column = -1;
-	long		record_batch_threshold = -1;
+	int			ts_column = -1;
+	VALUE		datum;
+	long		threshold;
 	size_t		len;
 	int			j;
 
@@ -1960,14 +2030,10 @@ rb_ArrowFile__writeRow(VALUE self,
 	if (datum != Qnil)
 		tag_column = NUM2INT(datum);
 	datum = rb_ivar_get(self, rb_intern("record_batch_threshold"));
-	if (datum != Qnil)
-		record_batch_threshold = NUM2LONG(datum) << 20;
+	threshold = NUM2LONG(datum);
 
 	if (table->fdesc < 0)
-	{
-		pathname = rb_ivar_get(self, rb_intern("pathname"));
-		__arrowFileOpen(table, pathname, false);
-	}
+		arrowFileOpen(self, false);
 
 	for (j=0, len=0; j < table->nfields; j++)
 	{
@@ -1975,91 +2041,88 @@ rb_ArrowFile__writeRow(VALUE self,
 		const char *cname = column->field_name;
 
 		if (j == ts_column)
-			datum = __ts;
+			datum = ts;
 		else if (j == tag_column)
-			datum = __tag;
+			datum = tag;
 		else
-			datum = rb_hash_fetch(__record, rb_str_new_cstr(cname));
+			datum = rb_hash_fetch(record, rb_str_new_cstr(cname));
 
 		len += column->put_value(column, (const char *)datum, -1);
 	}
 	table->nitems++;
 
-	if (len >= record_batch_threshold)
+	if (len >= threshold)
 	{
-		pathname = rb_ivar_get(self, rb_intern("pathname"));
-		while (!__arrowFileWriteRecordBatch(self, table))
-			__arrowFileOpen(table, pathname, true);
+		arrowFileWriteRecordBatch(self);
 		sql_table_clear(table);
 	}
 	return Qnil;
 }
 
 static VALUE
-rb_ArrowFile__switchRecordBatch(VALUE self)
+rb_ArrowFile__writeRow(VALUE self,
+					   VALUE __tag,
+					   VALUE __ts,
+					   VALUE __record)
 {
 	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
-	VALUE		pathname = rb_ivar_get(self, rb_intern("pathname"));
+	size_t		nitems_saved = table->nitems;
+	VALUE		__args[4];
+	VALUE		retval;
+	int			j, status;
+	mallocContext *mcxt;
+	mallocContext *mcxt_saved;
+
+	__args[0] = self;
+	__args[1] = __tag;
+	__args[2] = __ts;
+	__args[3] = __record;
+	mcxt = mallocContextOfChunk(table);
+	mcxt_saved = mallocContextSwitchTo(mcxt);
+	retval = rb_protect(__arrowFile__writeRow, (VALUE)__args, &status);
+	if (status != 0)
+	{
+		/* revert current buffer usage, on errors */
+		for (j=0; j < table->numFieldNodes; j++)
+			table->columns[j].nitems = nitems_saved;
+		table->nitems = nitems_saved;
+
+		mallocContextSwitchTo(mcxt_saved);
+		rb_jump_tag(status);
+	}
+	mallocContextSwitchTo(mcxt_saved);
+
+	return retval;
+}
+
+static VALUE
+rb_ArrowFile__nextChunk(VALUE self)
+{
+	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
 
 	if (table->nitems > 0)
-	{
-		while (!__arrowFileWriteRecordBatch(self, table))
-			__arrowFileOpen(table, pathname, true);
-	}
+		arrowFileWriteRecordBatch(self);
 	return Qnil;
 }
 
 static VALUE
 rb_ArrowFile__cleanup(VALUE self)
 {
+	mallocContext *mcxt;
 	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
-	VALUE		pathname = rb_ivar_get(self, rb_intern("pathname"));
 
 	if (table->nitems > 0)
-	{
-		while (!__arrowFileWriteRecordBatch(self, table))
-			__arrowFileOpen(table, pathname, true);
-	}
-	sql_table_release((SQLtable *)table);
+		arrowFileWriteRecordBatch(self);
+	__arrowFileClose(table);
+	
+	mcxt = mallocContextOfChunk(table);
+	mallocContextRelease(mcxt);
+	free(mcxt);
 
 	return Qnil;
 }
 
-static VALUE
-rb_ArrowFile__nfields(VALUE self)
-{
-	VALUE		datum = rb_ivar_get(self, rb_intern("table"));
-	SQLtable   *table = (SQLtable *)datum;
-
-	return INT2NUM(table->nfields);
-}
-
-static VALUE
-rb_ArrowFile__field_name(VALUE self, VALUE __index)
-{
-	VALUE		datum = rb_ivar_get(self, rb_intern("table"));
-	SQLtable   *table = (SQLtable *)datum;
-	int			index = NUM2INT(__index);
-
-	if (index < 0 || index >= table->nfields)
-		Elog("column index %d is out of range", index);
-	return rb_str_new2(table->columns[index].field_name);
-}
-
-static VALUE
-rb_ArrowFile__field_type(VALUE self, VALUE __index)
-{
-	VALUE		datum = rb_ivar_get(self, rb_intern("table"));
-	SQLtable   *table = (SQLtable *)datum;
-	int			index = NUM2INT(__index);
-	ArrowNode  *node;
-
-	if (index < 0 || index >= table->nfields)
-		Elog("column index %d is out of range", index);
-	node = &table->columns[index].arrow_type.node;
-	return rb_str_new2(arrowNodeName(node));
-}
-
+#if 0
 static VALUE
 rb_ArrowFile__test(VALUE self, VALUE datum)
 {
@@ -2073,84 +2136,18 @@ rb_ArrowFile__test(VALUE self, VALUE datum)
 
 	return Qnil;
 }
+#endif
 
 void
 Init_ArrowFile(void)
 {
 	VALUE	klass;
 
-	klass = rb_define_class("ArrowFile", rb_cObject);
+	klass = rb_define_class("ArrowFile",  rb_cObject);
 	rb_define_method(klass, "initialize", rb_ArrowFile__initialize, 3);
-	rb_define_method(klass, "open", rb_ArrowFile__open, 0);
-	rb_define_method(klass, "close", rb_ArrowFile__close, 0);
-	rb_define_method(klass, "writeRow", rb_ArrowFile__writeRow, 3);
-	rb_define_method(klass, "switchRecordBatch", rb_ArrowFile__switchRecordBatch, 0);
-	rb_define_method(klass, "cleanup", rb_ArrowFile__cleanup, 0);
-	/* information of schema definition */
-	rb_define_method(klass, "nfields", rb_ArrowFile__nfields, 0);
-	rb_define_method(klass, "field_name", rb_ArrowFile__field_name, 1);
-	rb_define_method(klass, "field_type", rb_ArrowFile__field_type, 1);
+	rb_define_method(klass, "writeRow",   rb_ArrowFile__writeRow, 3);
+	rb_define_method(klass, "nextChunk",  rb_ArrowFile__nextChunk, 0);
+	rb_define_method(klass, "cleanup",    rb_ArrowFile__cleanup, 0);
 
-	rb_define_method(klass, "test", rb_ArrowFile__test, 1);
+	//rb_define_method(klass, "test", rb_ArrowFile__test, 1);
 }
-
-/*
- * SQLbuffer related routines
- */
-void *
-palloc(size_t sz)
-{
-	void   *p = malloc(sz);
-
-	if (p)
-		return p;
-	rb_memerror();
-}
-
-void *
-palloc0(size_t sz)
-{
-	void   *p = malloc(sz);
-
-	if (p)
-	{
-		memset(p, 0, sz);
-		return p;
-	}
-	rb_memerror();
-}
-
-char *pstrdup(const char *str)
-{
-	char   *p = strdup(str);
-
-	if (p)
-		return p;
-	rb_memerror();
-}
-
-void *
-repalloc(void *old, size_t sz)
-{
-	char   *p = realloc(old, sz);
-
-	if (p)
-		return p;
-	rb_memerror();
-}
-
-void
-pfree(void *ptr)
-{
-	free(ptr);
-}
-
-
-
-
-
-
-
-
-
-
