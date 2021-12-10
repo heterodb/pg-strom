@@ -339,11 +339,12 @@ createArrowTypeFloatingPoint(ArrowTypeFloatingPoint *node)
 static FBTableBuf *
 createArrowTypeDecimal(ArrowTypeDecimal *node)
 {
-	FBTableBuf *buf = allocFBTableBuf(2);
+	FBTableBuf *buf = allocFBTableBuf(3);
 
 	assert(ArrowNodeIs(node, Decimal));
 	addBufferInt(buf, 0, node->precision);
 	addBufferInt(buf, 1, node->scale);
+	addBufferInt(buf, 2, node->bitWidth);
 
 	return makeBufferFlatten(buf);
 }
@@ -607,6 +608,18 @@ createArrowKeyValue(ArrowKeyValue *node)
 }
 
 static FBTableBuf *
+createArrowBodyCompression(ArrowBodyCompression *node)
+{
+	FBTableBuf *buf = allocFBTableBuf(2);
+
+	assert(ArrowNodeIs(node, BodyCompression));
+	addBufferChar(buf, 0, node->codec);
+	addBufferChar(buf, 1, node->method);
+
+	return makeBufferFlatten(buf);
+}
+
+static FBTableBuf *
 createArrowDictionaryEncoding(ArrowDictionaryEncoding *node)
 {
 	FBTableBuf *buf = allocFBTableBuf(3);
@@ -667,7 +680,7 @@ createArrowField(ArrowField *node)
 static FBTableBuf *
 createArrowSchema(ArrowSchema *node)
 {
-	FBTableBuf	   *buf = allocFBTableBuf(3);
+	FBTableBuf	   *buf = allocFBTableBuf(4);
 	FBTableBuf	  **fields;
 	FBTableBuf	  **cmetadata;
 	int				i;
@@ -689,13 +702,28 @@ createArrowSchema(ArrowSchema *node)
 			cmetadata[i] = createArrowKeyValue(&node->custom_metadata[i]);
 		addBufferVector(buf, 2, node->_num_custom_metadata, cmetadata);
 	}
+	if (node->_num_features > 0)
+	{
+		size_t	sz = sizeof(int32_t) + sizeof(int64_t) * node->_num_features;
+		char   *temp = alloca(sz);
+
+		*((int32_t *)temp) = node->_num_features;
+		for (i=0; i < node->_num_features; i++)
+			((int64_t *)(temp + sizeof(int32_t)))[i] = node->features[i];
+		__addBufferBinary(buf, 3, temp, sz, sizeof(int32_t));
+	}
 	return makeBufferFlatten(buf);
 }
 
 static FBTableBuf *
 createArrowRecordBatch(ArrowRecordBatch *node)
 {
-	FBTableBuf *buf = allocFBTableBuf(3);
+	FBTableBuf *buf;
+
+	if (node->compression)
+		buf = allocFBTableBuf(4);
+	else
+		buf = allocFBTableBuf(3);
 
 	assert(ArrowNodeIs(node, RecordBatch));
 	addBufferLong(buf, 0, node->length);
@@ -705,6 +733,11 @@ createArrowRecordBatch(ArrowRecordBatch *node)
 	addBufferArrowBufferVector(buf, 2,
 							   node->_num_buffers,
 							   node->buffers);
+	if (node->compression)
+	{
+		FBTableBuf *sub = createArrowBodyCompression(node->compression);
+		addBufferOffset(buf, 3, sub);
+	}
 	return makeBufferFlatten(buf);
 }
 
@@ -1162,6 +1195,7 @@ setupArrowSchemaIOV(SQLtable *table)
 {
 	ArrowMessage	message;
 	ArrowSchema	   *schema;
+	ArrowFeature	feature = ArrowFeature__Unused;
 	int				i;
 
 	/* setup Message of Schema */
@@ -1176,6 +1210,9 @@ setupArrowSchemaIOV(SQLtable *table)
 		setupArrowField(&schema->fields[i], table, &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
+
+	schema->features = &feature;
+	schema->_num_features = 1;
 
 	return setupFlatBufferMessageIOV(table, &message);
 }
@@ -1615,6 +1652,7 @@ writeArrowFooter(SQLtable *table)
 {
 	ArrowFooter		footer;
 	ArrowSchema	   *schema;
+	ArrowFeature	feature = ArrowFeature__Unused;
 	int				i;
 
 	/* setup Footer */
@@ -1631,6 +1669,8 @@ writeArrowFooter(SQLtable *table)
 		setupArrowField(&schema->fields[i], table, &table->columns[i]);
 	schema->custom_metadata = table->customMetadata;
 	schema->_num_custom_metadata = table->numCustomMetadata;
+	schema->features = &feature;
+	schema->_num_features = 1;
 
 	/* [dictionaries] */
 	footer.dictionaries = table->dictionaries;

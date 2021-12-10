@@ -171,14 +171,14 @@ ALTER DATABASE my_database SET TABLESPACE my_nvme;
 @ja{
 サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。
 
-SSD-to-GPUダイレクトSQL機能がその基盤として使用している[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/)は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。
+GPUダイレクトSQL機能がその基盤として使用している[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/)は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。
 
 また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。
 }
 @en{
 On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.
 
-[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/), basis of the SSD-to-GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.
+[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/), basis of the GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.
 
 From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.
 }
@@ -186,12 +186,12 @@ From standpoint of the performance, it is recommended to use dedicated PCIe-swit
 @ja{
 以下の写真はHPC向けサーバのマザーボードで、8本のPCIe x16スロットがPCIeスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。
 
-例えば、SSD-2上に構築されたテーブルをSSD-to-GPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。
+例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。
 }
 @en{
 The photo below is a motherboard of HPC server. It has 8 of PCIe x16 slots, and each pair is linked to the other over the PCIe switch. The slots in the left-side of the photo are connected to CPU1, and right-side are connected to CPU2.
 
-When a table on SSD-2 is scanned using SSD-to-GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.
+When a table on SSD-2 is scanned using GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.
 }
 
 ![Motherboard of HPC Server](./img/pcie-hpc-server.png)
@@ -233,7 +233,7 @@ The example below shows the configuration of `gpu2` for `nvme1`, and `gpu1` for 
 It shall be added to `postgresql.conf`. Please note than manual configuration takes priority than the automatic configuration.
 }
 ```
-pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
+pg_strom.nvme_distance_map = '{nvme1,gpu2},{nvme2,nvme3,gpu1}'
 ```
 
 @ja:###GUCパラメータによる制御
@@ -246,46 +246,46 @@ GPUダイレクトSQL実行に関連するGUCパラメータは2つあります�
 There are two GPU parameters related to GPU Direct SQL Execution.
 }
 @ja{
-一つは`pg_strom.nvme_strom_enabled`で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
-本パラメータが`off`になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は`on`です。
+一つは`pg_strom.gpudirect_enabled`で、GPUダイレクト機能の有効/無効を単純にon/offします。
+本パラメータが`off`になっていると、テーブルのサイズや物理配置とは無関係にGPUダイレクトSQL実行は使用されません。デフォルト値は`on`です。
 }
 @en{
-The first is `pg_strom.nvme_strom_enabled` that simply turn on/off the function of SSD-to-GPU Direct SQL Execution.
-If `off`, SSD-to-GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is `on`.
+The first is `pg_strom.gpudirect_enabled` that simply turn on/off the function of GPU Direct SQL Execution.
+If `off`, GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is `on`.
 }
 @ja{
-もう一つのパラメータは`pg_strom.nvme_strom_threshold`で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。
+もう一つのパラメータは`pg_strom.gpudirect_threshold`で、GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。
 
-テーブルの物理配置がNVMe-SSD区画（または、NVMe-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはSSD-to-GPUダイレクトSQL実行を選択します。
-本パラメータのデフォルト値は、システムの物理メモリサイズと`shared_buffers`パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけSSD-to-GPUダイレクトSQL実行を行うよう調整されています。
+テーブルの物理配置がNVME-SSD区画（または、NVME-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
+本パラメータのデフォルト値は、システムの物理メモリサイズと`shared_buffers`パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけGPUダイレクトSQL実行を行うよう調整されています。
 
-これは、一回の読み出しであればSSD-to-GPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。
+これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。
 
 ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。
 }
 @en{
-The other one is `pg_strom.nvme_strom_threshold` which specifies the least table size to invoke SSD-to-GPU Direct SQL Execution.
+The other one is `pg_strom.nvme_strom_threshold` which specifies the least table size to invoke GPU Direct SQL Execution.
 
-PG-Strom will choose SSD-to-GPU Direct SQL Execution when target table is located on NVMe-SSD volume (or md-raid0 volume which consists of NVMe-SSD only), and the table size is larger than this parameter.
-Its default is sum of the physical memory size and 1/3 of the `shared_buffers`. It means default configuration invokes SSD-to-GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.
+PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
+Its default configuration is sum of the physical memory size and 1/3 of the `shared_buffers`. It means default configuration invokes GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.
 
-Even if SSD-to-GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.
+Even if GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.
 
 On course, this assumption is not always right depending on the workload charasteristics.
 }
 
-@ja:###SSD-to-GPUダイレクトSQL実行の利用を確認する
-@en:###Ensure usage of SSD-to-GPU Direct SQL Execution
+@ja:###GPUダイレクトSQL実行の利用を確認する
+@en:###Ensure usage of GPU Direct SQL Execution
 
 @ja{
-`EXPLAIN`コマンドを実行すると、当該クエリでSSD-to-GPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。
+`EXPLAIN`コマンドを実行すると、当該クエリでGPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。
 
-以下のクエリの例では、`Custom Scan (GpuJoin)`による`lineorder`テーブルに対するスキャンに`NVMe-Strom: enabled`との表示が出ています。この場合、`lineorder`テーブルからの読出しにはSSD-to-GPUダイレクトSQL実行が利用されます。
+以下のクエリの例では、`Custom Scan (GpuJoin)`による`lineorder`テーブルに対するスキャンに`NVMe-Strom: enabled`との表示が出ています。この場合、`lineorder`テーブルからの読出しにはGPUダイレクトSQL実行が利用されます。
 }
 @en{
-`EXPLAIN` command allows to ensure whether SSD-to-GPU Direct SQL Execution shall be used in the target query, or not.
+`EXPLAIN` command allows to ensure whether GPU Direct SQL Execution shall be used in the target query, or not.
 
-In the example below, a scan on the `lineorder` table by `Custom Scan (GpuJoin)` shows `NVMe-Strom: enabled`. In this case, SSD-to-GPU Direct SQL Execution shall be used to read from the `lineorder` table.
+In the example below, a scan on the `lineorder` table by `Custom Scan (GpuJoin)` shows `NVMe-Strom: enabled`. In this case, GPU Direct SQL Execution shall be used to read from the `lineorder` table.
 }
 
 ```
@@ -350,14 +350,14 @@ NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの�
 
 これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。
 
-SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがSSD-to-GPU P2P DMAで読み出すようリクエストが送出されます。
+GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがP2P DMAで読み出すようリクエストが送出されます。
 }
 @en{
 We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.
 
 To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.
 
-SSD-to-GPU Direct SQL Execution utilizes this infrastructure. It checks the visibility map first, then only "all-visible" blocks are required to read with SSD-to-GPU P2P DMA.
+GPU Direct SQL Execution utilizes this infrastructure. It checks the visibility map first, then only "all-visible" blocks are required to read with P2P DMA.
 }
 @ja{
 Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。

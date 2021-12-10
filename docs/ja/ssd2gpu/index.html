@@ -14,7 +14,7 @@
 
   <link rel="stylesheet" href="../css/theme.css" />
   <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/github.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
   <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
   <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
   <link href="../custom.css" rel="stylesheet" />
@@ -28,9 +28,8 @@
   
   <script src="../js/jquery-2.1.1.min.js" defer></script>
   <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
   <script>hljs.initHighlightingOnLoad();</script> 
-  
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -94,7 +93,7 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#guc">GUCパラメータによる制御</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行の利用を確認する</a>
+    <li class="toctree-l3"><a class="reference internal" href="#gpusql_1">GPUダイレクトSQL実行の利用を確認する</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#visibility-map">Visibility Mapに関する注意事項</a>
     </li>
@@ -162,6 +161,7 @@
   
   <hr/>
 </div>
+
           <div role="main">
             <div class="section">
               
@@ -221,10 +221,10 @@ PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下の�
 <h2 id="_5">運用</h2>
 <h3 id="gpunvme-ssd">GPUとNVME-SSD間の距離</h3>
 <p>サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。</p>
-<p>SSD-to-GPUダイレクトSQL機能がその基盤として使用している<a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。</p>
+<p>GPUダイレクトSQL機能がその基盤として使用している<a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。</p>
 <p>また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。</p>
 <p>以下の写真はHPC向けサーバのマザーボードで、8本のPCIe x16スロットがPCIeスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。</p>
-<p>例えば、SSD-2上に構築されたテーブルをSSD-to-GPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。</p>
+<p>例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。</p>
 <p><img alt="Motherboard of HPC Server" src="../img/pcie-hpc-server.png" /></p>
 <p>PG-Stromは起動時にシステムのPCIeバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
 これは以下のように起動時のログに記録されており、例えば<code>/dev/nvme2</code>をスキャンする時はGPU1といった具合に、各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。</p>
@@ -243,20 +243,20 @@ LOG:      nvme3      7   (   3)      7
 <p>通常は自動設定で問題ありません。
 ただ、NVME-over-Fabric(RDMA)を使用する場合はPCIeバス上のnvmeデバイスの位置を取得できないため、手動でNVME-SSDとGPUの位置関係を設定する必要があります。</p>
 <p>例えば<code>nvme1</code>には<code>gpu2</code>を、<code>nvme2</code>と<code>nvme3</code>には<code>gpu1</code>を割り当てる場合、以下の設定を<code>postgresql.conf</code>へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。</p>
-<pre><code>pg_strom.nvme_distance_map = nvme1:gpu2, nvme2:gpu1, nvme3:gpu1
+<pre><code>pg_strom.nvme_distance_map = '{nvme1,gpu2},{nvme2,nvme3,gpu1}'
 </code></pre>
 <h3 id="guc">GUCパラメータによる制御</h3>
 <p>GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
-<p>一つは<code>pg_strom.nvme_strom_enabled</code>で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
-本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
-<p>もう一つのパラメータは<code>pg_strom.nvme_strom_threshold</code>で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
-<p>テーブルの物理配置がNVMe-SSD区画（または、NVMe-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはSSD-to-GPUダイレクトSQL実行を選択します。
-本パラメータのデフォルト値は、システムの物理メモリサイズと<code>shared_buffers</code>パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけSSD-to-GPUダイレクトSQL実行を行うよう調整されています。</p>
-<p>これは、一回の読み出しであればSSD-to-GPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
+<p>一つは<code>pg_strom.gpudirect_enabled</code>で、GPUダイレクト機能の有効/無効を単純にon/offします。
+本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にGPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
+<p>もう一つのパラメータは<code>pg_strom.gpudirect_threshold</code>で、GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
+<p>テーブルの物理配置がNVME-SSD区画（または、NVME-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
+本パラメータのデフォルト値は、システムの物理メモリサイズと<code>shared_buffers</code>パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけGPUダイレクトSQL実行を行うよう調整されています。</p>
+<p>これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
 <p>ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。</p>
-<h3 id="ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行の利用を確認する</h3>
-<p><code>EXPLAIN</code>コマンドを実行すると、当該クエリでSSD-to-GPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。</p>
-<p>以下のクエリの例では、<code>Custom Scan (GpuJoin)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>NVMe-Strom: enabled</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはSSD-to-GPUダイレクトSQL実行が利用されます。</p>
+<h3 id="gpusql_1">GPUダイレクトSQL実行の利用を確認する</h3>
+<p><code>EXPLAIN</code>コマンドを実行すると、当該クエリでGPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。</p>
+<p>以下のクエリの例では、<code>Custom Scan (GpuJoin)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>NVMe-Strom: enabled</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはGPUダイレクトSQL実行が利用されます。</p>
 <pre><code># explain (costs off)
 select sum(lo_revenue), d_year, p_brand1
 from lineorder, date1, part, supplier
@@ -306,7 +306,7 @@ and s_region = 'AMERICA'
 <p>現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。</p>
 <p>NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
 <p>これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。</p>
-<p>SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがSSD-to-GPU P2P DMAで読み出すようリクエストが送出されます。</p>
+<p>GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがP2P DMAで読み出すようリクエストが送出されます。</p>
 <p>Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。</p>
 <pre><code>VACUUM ANALYZE linerorder;
 </code></pre>
@@ -343,17 +343,18 @@ and s_region = 'AMERICA'
   </div>
 
   <div class="rst-versions" role="note" aria-label="versions">
-    <span class="rst-current-version" data-toggle="rst-current-version">
-      
-      
-        <span><a href="../troubles/" style="color: #fcfcfc;">&laquo; Previous</a></span>
-      
-      
-        <span style="margin-left: 15px"><a href="../arrow_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
-      
-    </span>
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../troubles/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../arrow_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
 </div>
     <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
     <script src="../js/theme.js" defer></script>
       <script src="../search/main.js" defer></script>
     <script defer>

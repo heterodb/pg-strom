@@ -196,7 +196,6 @@ static size_t			arrow_metadata_cache_size;
 static int				arrow_record_batch_size_kb;		/* GUC */
 
 /* ---------- static functions ---------- */
-static bool		arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth);
 static Oid		arrowTypeToPGTypeOid(ArrowField *field, int *typmod);
 static const char *arrowTypeToPGTypeName(ArrowField *field);
 static size_t	arrowFieldLength(ArrowField *field, int64 nitems);
@@ -1677,6 +1676,14 @@ makeRecordBatchState(ArrowSchema *schema,
 	RecordBatchState *result;
 	int			j, ncols = schema->_num_fields;
 
+	/*
+	 * Right now, we have no support for compressed RecordBatches
+	 */
+	if (rbatch->compression)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("arrow_fdw: compressed record-batches are not supported")));
+	
 	result = palloc0(offsetof(RecordBatchState, columns[ncols]));
 	result->ncols = ncols;
 	result->rb_offset = block->offset + block->metaDataLength;
@@ -2762,14 +2769,12 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 			if (schema.endianness != stemp->endianness ||
 				schema._num_fields != stemp->_num_fields)
-				elog(ERROR, "file '%s' has incompatible schema definition",
-					 fname);
+				elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			for (j=0; j < schema._num_fields; j++)
 			{
-				if (arrowTypeIsEqual(&schema.fields[j],
-									 &stemp->fields[j], 0))
-					elog(ERROR, "file '%s' has incompatible schema definition",
-						 fname);
+				if (arrowFieldTypeIsEqual(&schema.fields[j],
+										  &stemp->fields[j]))
+					elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			}
 		}
 	}
@@ -3378,95 +3383,8 @@ pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
 
 /*
- * arrowTypeIsEqual
+ * arrowFieldGetPGTypeHint
  */
-static bool
-arrowTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
-{
-	int		j;
-
-	if (a->type.node.tag != b->type.node.tag)
-		return false;
-	switch (a->type.node.tag)
-	{
-		case ArrowNodeTag__Int:
-			if (a->type.Int.bitWidth != b->type.Int.bitWidth)
-				return false;
-			break;
-		case ArrowNodeTag__FloatingPoint:
-			{
-				ArrowPrecision	p1 = a->type.FloatingPoint.precision;
-				ArrowPrecision	p2 = b->type.FloatingPoint.precision;
-
-				if (p1 != p2)
-					return false;
-			}
-			break;
-		case ArrowNodeTag__Utf8:
-		case ArrowNodeTag__Binary:
-		case ArrowNodeTag__Bool:
-			break;
-
-		case ArrowNodeTag__Decimal:
-			if (a->type.Decimal.precision != b->type.Decimal.precision ||
-				a->type.Decimal.scale != b->type.Decimal.scale)
-				return false;
-			break;
-
-		case ArrowNodeTag__Date:
-			if (a->type.Date.unit != b->type.Date.unit)
-				return false;
-			break;
-
-		case ArrowNodeTag__Time:
-			if (a->type.Time.unit != b->type.Time.unit)
-				return false;
-			break;
-
-		case ArrowNodeTag__Timestamp:
-			if (a->type.Timestamp.unit != b->type.Timestamp.unit ||
-				a->type.Timestamp.timezone != NULL ||
-				b->type.Timestamp.timezone != NULL)
-				return false;
-			break;
-
-		case ArrowNodeTag__Interval:
-			if (a->type.Interval.unit != b->type.Interval.unit)
-				return false;
-			break;
-
-		case ArrowNodeTag__Struct:
-			if (depth > 0)
-				elog(ERROR, "arrow: nested composite types are not supported");
-			if (a->_num_children != b->_num_children)
-				return false;
-			for (j=0; j < a->_num_children; j++)
-			{
-				if (!arrowTypeIsEqual(&a->children[j],
-									  &b->children[j],
-									  depth + 1))
-					return false;
-			}
-			break;
-
-		case ArrowNodeTag__List:
-			if (depth > 0)
-				elog(ERROR, "arrow_fdw: nested array types are not supported");
-			if (a->_num_children != 1 || b->_num_children != 1)
-				elog(ERROR, "Bug? List of arrow type is corrupted.");
-			if (!arrowTypeIsEqual(&a->children[0],
-								  &b->children[0],
-								  depth + 1))
-				return false;
-			break;
-
-		default:
-			elog(ERROR, "'%s' of arrow type is not supported",
-				 a->type.node.tagName);
-	}
-	return true;
-}
-
 static Oid
 arrowFieldGetPGTypeHint(ArrowField *field)
 {
@@ -3626,7 +3544,9 @@ arrowTypeToPGTypeOid(ArrowField *field, int *p_type_mod)
 		case ArrowNodeTag__Bool:
 			return BOOLOID;
 		case ArrowNodeTag__Decimal:
-			return NUMERICOID;
+			if (t->Decimal.bitWidth == 128)
+				return NUMERICOID;
+			break;
 		case ArrowNodeTag__Date:
 			return DATEOID;
 		case ArrowNodeTag__Time:

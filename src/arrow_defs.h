@@ -18,6 +18,26 @@ typedef enum
 } ArrowMetadataVersion;
 
 /*
+ * Feature : long
+ */
+typedef enum
+{
+	/* Makes flatbuffers happy */
+	ArrowFeature__Unused = 0,
+	/*
+	 * The stream makes use of multiple full dictionaries with the
+	 * same ID and assumes clients implement dictionary replacement
+	 * correctly.
+	 */
+	ArrowFeature__DictionaryReplacement = 1,
+	/*
+	 * The stream makes use of compressed bodies as described
+	 * in the Message
+	 */
+	ArrowFeature__CompressedBody = 2,
+} ArrowFeature;
+
+/*
  * MessageHeader : byte
  */
 typedef enum
@@ -195,6 +215,7 @@ typedef enum
 	ArrowNodeTag__Message,
 	ArrowNodeTag__Block,
 	ArrowNodeTag__Footer,
+	ArrowNodeTag__BodyCompression,
 } ArrowNodeTag;
 
 /*
@@ -249,6 +270,7 @@ typedef struct		ArrowTypeDecimal
 	ArrowNode		node;
 	int32_t			precision;
 	int32_t			scale;
+	int32_t			bitWidth;		/* 128 [default] or 256 */
 } ArrowTypeDecimal;
 
 /* Date */
@@ -426,6 +448,33 @@ typedef struct		ArrowFieldNode
 } ArrowFieldNode;
 
 /*
+ * CompressionType : byte
+ */
+typedef enum		ArrowCompressionType
+{
+	ArrowCompressionType__LZ4_FRAME = 0,
+	ArrowCompressionType__ZSTD = 1,
+} ArrowCompressionType;
+
+/*
+ * BodyCompressionMethod : byte
+ */
+typedef enum		ArrowBodyCompressionMethod
+{
+	ArrowBodyCompressionMethod__BUFFER = 0,
+} ArrowBodyCompressionMethod;
+
+/*
+ * BodyCompression
+ */
+typedef struct		ArrowBodyCompression
+{
+	ArrowNode		node;
+	ArrowCompressionType		codec;
+	ArrowBodyCompressionMethod	method;
+} ArrowBodyCompression;
+
+/*
  * Schema
  */
 typedef struct		ArrowSchema
@@ -438,6 +487,9 @@ typedef struct		ArrowSchema
 	/* List of KeyValue */
 	ArrowKeyValue  *custom_metadata;
 	int				_num_custom_metadata;
+	/* List of Features */
+	ArrowFeature   *features;
+	int				_num_features;
 } ArrowSchema;
 
 /*
@@ -453,6 +505,8 @@ typedef struct		ArrowRecordBatch
 	/* vector of Buffer */
 	ArrowBuffer	    *buffers;
 	int				_num_buffers;
+	/* optional compression of the message body */
+	ArrowBodyCompression *compression;
 } ArrowRecordBatch;
 
 /*

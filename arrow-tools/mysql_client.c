@@ -37,29 +37,6 @@ __put_inline_null_value(SQLfield *column, size_t row_index, int sz)
 	sql_buffer_append_zero(&column->values, sz);
 }
 
-static inline size_t
-__buffer_usage_inline_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = ARROWALIGN(column->values.usage);
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
-static inline size_t
-__buffer_usage_variable_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = (ARROWALIGN(column->values.usage) +
-			 ARROWALIGN(column->extra.usage));
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
 static size_t
 __put_int8_value(SQLfield *column, const char *addr, int sz)
 {
@@ -580,7 +557,7 @@ put_variable_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_append(&column->values,
 						  &column->extra.usage, sizeof(uint32_t));
 	}
-	return __buffer_usage_variable_type(column);
+	return __buffer_usage_varlena_type(column);
 }
 
 #if 0
@@ -621,7 +598,7 @@ put_dictionary_value(SQLfield *column, const char *addr, int sz)
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &hitem->index, sizeof(uint32));
 	}
-	return __buffer_usage_variable_type(column);
+	return __buffer_usage_varlena_type(column);
 }
 #endif
 

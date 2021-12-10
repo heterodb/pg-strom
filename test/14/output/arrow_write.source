@@ -74,7 +74,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
  86 | -19878 |  43943.215 |  10560.4628 | (-87913,T9CQT65Q+tRPxrEH,"Sat May 15 22:14:07.791162 2021")                      | 04-28-2022 | 17:25:01.593062
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:6838
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6902
 BEGIN;
 INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 7 ORDER BY id LIMIT 7);
 SELECT count(*) FROM ft;
@@ -88,7 +88,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
  27 |  10411 |  31518.875 | -44265.9645 | (,iekTjZkQevw/nuGJlQwIRCz5gnCzNPU8lj83V3NKI6CeXftH,"Wed Mar 13 23:09:26.792112 2024") | 10-31-2019 | 18:56:29.289349
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:8462
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:8494
 ABORT;
 SELECT count(*) FROM ft;
     50
@@ -101,7 +101,7 @@ SELECT * FROM ft ORDER by id LIMIT 5;
  86 | -19878 |  43943.215 |  10560.4628 | (-87913,T9CQT65Q+tRPxrEH,"Sat May 15 22:14:07.791162 2021")                      | 04-28-2022 | 17:25:01.593062
 
 \! stat -c "name:%n, size:%s" '@abs_builddir@/test_arrow_write_ft.arrow'
-name:@abs_builddir@/test_arrow_write_ft.arrow, size:6838
+name:@abs_builddir@/test_arrow_write_ft.arrow, size:6902
 BEGIN;
 INSERT INTO ft (SELECT * FROM tt WHERE id % 10 = 3 ORDER BY id LIMIT 10);
 SELECT count(*) FROM ft;

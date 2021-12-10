@@ -164,29 +164,6 @@ static inline uint64_t __fetch_64bit(const void *addr)
 #endif
 }
 
-static inline size_t
-__buffer_usage_inline_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = ARROWALIGN(column->values.usage);
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
-static inline size_t
-__buffer_usage_varlena_type(SQLfield *column)
-{
-	size_t		usage;
-
-	usage = (ARROWALIGN(column->values.usage) +
-			 ARROWALIGN(column->extra.usage));
-	if (column->nullcount > 0)
-		usage += ARROWALIGN(column->nullmap.usage);
-	return usage;
-}
-
 #define STAT_UPDATES(COLUMN,FIELD,VALUE)					\
 	do {													\
 		if ((COLUMN)->stat_enabled)							\
@@ -572,8 +549,7 @@ init_var_from_num(NumericVar *nv, const char *addr, int sz)
 #endif	/* __PGSTROM_MODULE__ */
 
 static size_t
-put_decimal_value(SQLfield *column,
-			const char *addr, int sz)
+put_decimal_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 
@@ -1575,6 +1551,7 @@ assignArrowTypeDecimal(SQLfield *column, ArrowField *arrow_field)
 	initArrowNode(&column->arrow_type, Decimal);
 	column->arrow_type.Decimal.precision = precision;
 	column->arrow_type.Decimal.scale = scale;
+	column->arrow_type.Decimal.bitWidth = 128;
 	column->put_value = put_decimal_value;
 	column->write_stat = write_int128_stat;
 

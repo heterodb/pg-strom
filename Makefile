@@ -87,27 +87,12 @@ __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-41.sql ssbm-42.sql ssbm-43.sql
 
 #
-# Arrow utilities
+# Apache Arrow utilities
 #
 ARROW_BUILD_ROOT = $(STROM_BUILD_ROOT)/arrow-tools
 PG2ARROW     = $(ARROW_BUILD_ROOT)/pg2arrow
 MYSQL2ARROW  = $(ARROW_BUILD_ROOT)/mysql2arrow
 PCAP2ARROW   = $(ARROW_BUILD_ROOT)/pcap2arrow
-
-$(PG2ARROW):
-	make -C $(ARROW_BUILD_ROOT) pg2arrow
-
-pg2arrow: $(PG2ARROW)
-
-$(MYSQL2ARROW):
-	make -C $(ARROW_BUILD_ROOT) mysql2arrow
-
-mysql2arrow: $(MYSQL2ARROW)
-
-$(PCAP2ARROW):
-	make -C $(ARROW_BUILD_ROOT) pcap2arrow
-
-pcap2arrow: $(PCAP2ARROW)
 
 #
 # Markdown (document) files
@@ -297,6 +282,24 @@ $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
 	  echo ";") > $@
+
+#
+# Arrow utilities
+#
+$(PG2ARROW):
+	make -C $(ARROW_BUILD_ROOT) pg2arrow
+
+pg2arrow: $(PG2ARROW)
+
+$(MYSQL2ARROW):
+	make -C $(ARROW_BUILD_ROOT) mysql2arrow
+
+mysql2arrow: $(MYSQL2ARROW)
+
+$(PCAP2ARROW):
+	make -C $(ARROW_BUILD_ROOT) pcap2arrow
+
+pcap2arrow: $(PCAP2ARROW)
 
 #
 # Tarball

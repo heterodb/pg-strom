@@ -107,6 +107,48 @@ ArrowIntervalUnitAsCstring(ArrowIntervalUnit unit)
 	}
 }
 
+static inline const char *
+ArrowFeatureAsCstring(ArrowFeature feature)
+{
+	switch (feature)
+	{
+		case ArrowFeature__Unused:
+			return "Unused";
+		case ArrowFeature__DictionaryReplacement:
+			return "DictionaryReplacement";
+		case ArrowFeature__CompressedBody:
+			return "CompressedBody";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowCompressionTypeAsCstring(ArrowCompressionType codec)
+{
+	switch (codec)
+	{
+		case ArrowCompressionType__LZ4_FRAME:
+			return "LZ4_FRAME";
+		case ArrowCompressionType__ZSTD:
+			return "ZSTD";
+		default:
+			return "???";
+	}
+}
+
+static inline const char *
+ArrowBodyCompressionMethodAsCstring(ArrowBodyCompressionMethod method)
+{
+	switch (method)
+	{
+		case ArrowBodyCompressionMethod__BUFFER:
+			return "BUFFER";
+		default:
+			return "???";
+	}
+}
+
 static void
 __dumpArrowTypeInt(SQLbuffer *buf, ArrowNode *node)
 {
@@ -134,9 +176,10 @@ __dumpArrowTypeDecimal(SQLbuffer *buf, ArrowNode *node)
 	ArrowTypeDecimal *d = (ArrowTypeDecimal *)node;
 
 	sql_buffer_printf(
-		buf, "{Decimal: precision=%d, scale=%d}",
+		buf, "{Decimal: precision=%d, scale=%d, bitWidth=%d}",
 		d->precision,
-		d->scale);
+		d->scale,
+		d->bitWidth);
 }
 
 static void
@@ -343,6 +386,13 @@ __dumpArrowSchema(SQLbuffer *buf, ArrowNode *node)
 			sql_buffer_printf(buf, ", ");
 		__dumpArrowNode(buf, (ArrowNode *)&s->custom_metadata[i]);
 	}
+	sql_buffer_printf(buf, "], features=[");
+	for (i=0; i < s->_num_features; i++)
+	{
+		if (i > 0)
+			sql_buffer_printf(buf, ", ");
+		sql_buffer_printf(buf, "%s", ArrowFeatureAsCstring(s->features[i]));
+	}
 	sql_buffer_printf(buf, "]}");
 }
 
@@ -438,6 +488,17 @@ __dumpArrowFooter(SQLbuffer *buf, ArrowNode *node)
 	sql_buffer_printf(buf, "]}");
 }
 
+static void
+__dumpArrowBodyCompression(SQLbuffer *buf, ArrowNode *node)
+{
+	ArrowBodyCompression *compress = (ArrowBodyCompression *)node;
+
+	sql_buffer_printf(
+		buf, "{BodyCompression: codec=%s, method=%s}",
+		ArrowCompressionTypeAsCstring(compress->codec),
+		ArrowBodyCompressionMethodAsCstring(compress->method));
+}
+
 char *
 dumpArrowNode(ArrowNode *node)
 {
@@ -494,14 +555,21 @@ sql_buffer_printf(SQLbuffer *buf, const char *fmt, ...)
 			(dest)->_##FIELD##_len = 0;					\
 		}												\
 	} while(0)
-#define COPY_VECTOR(FIELD, NODETYPE)								\
-	do {															\
-		int		j;													\
-																	\
-		(dest)->FIELD = palloc(sizeof(NODETYPE) * (src)->_num_##FIELD);	\
-		for (j=0; j < (src)->_num_##FIELD; j++)						\
-			__copy##NODETYPE(&(dest)->FIELD[j], &(src)->FIELD[j]);	\
-		(dest)->_num_##FIELD = (src)->_num_##FIELD;					\
+#define COPY_VECTOR(FIELD, NODETYPE)										\
+	do {																	\
+		int		j;															\
+																			\
+		if ((src)->_num_##FIELD == 0)										\
+		{																	\
+			(dest)->FIELD = NULL;											\
+		}																	\
+		else																\
+		{																	\
+			(dest)->FIELD = palloc(sizeof(NODETYPE) * (src)->_num_##FIELD);	\
+			for (j=0; j < (src)->_num_##FIELD; j++)							\
+				__copy##NODETYPE(&(dest)->FIELD[j], &(src)->FIELD[j]);		\
+		}																	\
+		(dest)->_num_##FIELD = (src)->_num_##FIELD;							\
 	} while(0)
 
 static void
@@ -544,6 +612,7 @@ __copyArrowTypeDecimal(ArrowTypeDecimal *dest, const ArrowTypeDecimal *src)
 	__copyArrowNode(&dest->node, &src->node);
 	COPY_SCALAR(precision);
 	COPY_SCALAR(scale);
+	COPY_SCALAR(bitWidth);
 }
 
 static void
@@ -583,8 +652,13 @@ __copyArrowTypeUnion(ArrowTypeUnion *dest, const ArrowTypeUnion *src)
 {
 	__copyArrowNode(&dest->node, &src->node);
 	COPY_SCALAR(mode);
-	dest->typeIds = palloc(sizeof(int32_t) * src->_num_typeIds);
-	memcpy(dest->typeIds, src->typeIds, sizeof(int32_t) * src->_num_typeIds);
+	if (!src->typeIds)
+		dest->typeIds = NULL;
+	else
+	{
+		dest->typeIds = palloc(sizeof(int32_t) * src->_num_typeIds);
+		memcpy(dest->typeIds, src->typeIds, sizeof(int32_t) * src->_num_typeIds);
+	}
 	dest->_num_typeIds = src->_num_typeIds;
 }
 
@@ -683,6 +757,15 @@ __copyArrowSchema(ArrowSchema *dest, const ArrowSchema *src)
 	COPY_SCALAR(endianness);
 	COPY_VECTOR(fields, ArrowField);
 	COPY_VECTOR(custom_metadata, ArrowKeyValue);
+	if (!src->features)
+		dest->features = NULL;
+	else
+	{
+		dest->features = palloc0(sizeof(ArrowFeature) * src->_num_features);
+		memcpy(dest->features, src->features,
+			   sizeof(ArrowFeature) * src->_num_features);
+	}
+	dest->_num_features = src->_num_features;
 }
 
 static void
@@ -747,6 +830,14 @@ __copyArrowFooter(ArrowFooter *dest, const ArrowFooter *src)
 	COPY_VECTOR(recordBatches, ArrowBlock);
 }
 
+static void
+__copyArrowBodyCompression(ArrowBodyCompression *dest, const ArrowBodyCompression *src)
+{
+	__copyArrowNode(&dest->node, &src->node);
+	COPY_SCALAR(codec);
+	COPY_SCALAR(method);
+}
+
 void
 copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 {
@@ -792,10 +883,12 @@ arrowNodeName(ArrowNode *node)
 
 		case ArrowNodeTag__Decimal:
 			if (((ArrowTypeDecimal *)node)->scale == 0)
-				snprintf(buf, sizeof(buf), "Arrow::Decimal(%d)",
+				snprintf(buf, sizeof(buf), "Arrow::Decimal%d(%d)",
+						 ((ArrowTypeDecimal *)node)->bitWidth,
 						 ((ArrowTypeDecimal *)node)->precision);
 			else
-				snprintf(buf, sizeof(buf), "Arrow::Decimal(%d,%d)",
+				snprintf(buf, sizeof(buf), "Arrow::Decimal%d(%d,%d)",
+						 ((ArrowTypeDecimal *)node)->bitWidth,
 						 ((ArrowTypeDecimal *)node)->precision,
 						 ((ArrowTypeDecimal *)node)->scale);
 			return buf;
@@ -901,10 +994,113 @@ arrowNodeName(ArrowNode *node)
 		case ArrowNodeTag__Footer:
 			return "Arrow::Footer";
 
+		case ArrowNodeTag__BodyCompression:
+			return "Arrow::BodyCompression";
+
 		default:
 			break;
 	}
 	return "Unknown";
+}
+
+/* ------------------------------------------------
+ *
+ * Routines to compare Apache Arrow type nodes
+ *
+ * ------------------------------------------------
+ */
+static bool
+__arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
+{
+	int		j;
+
+	if (a->type.node.tag != b->type.node.tag)
+		return false;
+	switch (a->node.tag)
+	{
+		case ArrowNodeTag__Int:
+			if (a->type.Int.bitWidth != b->type.Int.bitWidth)
+				return false;
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			{
+				ArrowPrecision	p1 = a->type.FloatingPoint.precision;
+				ArrowPrecision	p2 = b->type.FloatingPoint.precision;
+
+				if (p1 != p2)
+					return false;
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__Bool:
+			break;
+
+		case ArrowNodeTag__Decimal:
+			if (a->type.Decimal.precision != b->type.Decimal.precision ||
+				a->type.Decimal.scale     != b->type.Decimal.scale ||
+				a->type.Decimal.bitWidth  != b->type.Decimal.bitWidth)
+				return false;
+			break;
+
+		case ArrowNodeTag__Date:
+			if (a->type.Date.unit != b->type.Date.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Time:
+			if (a->type.Time.unit != b->type.Time.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			if (a->type.Timestamp.unit != b->type.Timestamp.unit ||
+				a->type.Timestamp.timezone != NULL ||
+				b->type.Timestamp.timezone != NULL)
+				return false;
+			break;
+
+		case ArrowNodeTag__Interval:
+			if (a->type.Interval.unit != b->type.Interval.unit)
+				return false;
+			break;
+
+		case ArrowNodeTag__Struct:
+			if (depth > 0)
+				Elog("arrow: nested composite types are not supported");
+			if (a->_num_children != b->_num_children)
+				return false;
+			for (j=0; j < a->_num_children; j++)
+			{
+				if (!__arrowFieldTypeIsEqual(&a->children[j],
+											 &b->children[j],
+											 depth + 1))
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__List:
+			if (depth > 0)
+				Elog("arrow_fdw: nested array types are not supported");
+			if (a->_num_children != 1 || b->_num_children != 1)
+				Elog("Bug? List of arrow type is corrupted.");
+			if (!__arrowFieldTypeIsEqual(&a->children[0],
+										 &b->children[0],
+										 depth + 1))
+				return false;
+			break;
+
+		default:
+			Elog("'%s' of arrow type is not supported",
+				 a->node.tagName);
+	}
+	return true;
+}
+
+bool
+arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b)
+{
+	return __arrowFieldTypeIsEqual(a, b, 0);
 }
 
 /* ------------------------------------------------
@@ -1149,6 +1345,12 @@ readArrowTypeDecimal(ArrowTypeDecimal *node, const char *pos)
 
 	node->precision = fetchInt(&t, 0);
 	node->scale     = fetchInt(&t, 1);
+	node->bitWidth  = fetchInt(&t, 2);
+	if (node->bitWidth == 0)
+		node->bitWidth = 128;
+	else if (node->bitWidth != 128 && node->bitWidth != 256)
+		Elog("ArrowTypeDecimal has unsupported bitWidth (%d)",
+			 node->bitWidth);
 }
 
 static void
@@ -1451,6 +1653,17 @@ readArrowField(ArrowField *field, const char *pos)
 }
 
 static void
+readArrowBodyCompression(ArrowBodyCompression *compression, const char *pos)
+{
+	FBTable		t = fetchFBTable((int32_t *)pos);
+
+	memset(compression, 0, sizeof(ArrowBodyCompression));
+	INIT_ARROW_NODE(compression, BodyCompression);
+	compression->codec	= fetchChar(&t, 0);
+	compression->method	= fetchChar(&t, 1);
+}
+
+static void
 readArrowSchema(ArrowSchema *schema, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *)pos);
@@ -1493,6 +1706,18 @@ readArrowSchema(ArrowSchema *schema, const char *pos)
 		}
 	}
 	schema->_num_custom_metadata = nitems;
+
+	/* [ features ] */
+	vector = fetchVector(&t, 3, &nitems);
+	if (nitems == 0)
+		schema->features = NULL;
+	else
+	{
+		schema->features = palloc0(sizeof(ArrowFeature) * nitems);
+		for (i=0; i < nitems; i++)
+			schema->features[i] = ((const uint64_t *)vector)[i];
+	}
+	schema->_num_features = nitems;
 }
 
 static size_t
@@ -1558,6 +1783,14 @@ readArrowRecordBatch(ArrowRecordBatch *rbatch, const char *pos)
 			next += readArrowBuffer(&rbatch->buffers[i], next);
 	}
 	rbatch->_num_buffers = nitems;
+
+	/* (optional) BodyCompression  */
+	next = (const char *)fetchOffset(&t, 3);
+	if (next)
+	{
+		rbatch->compression = palloc0(sizeof(ArrowBodyCompression));
+		readArrowBodyCompression(rbatch->compression, next);
+	}
 }
 
 static void
