@@ -643,10 +643,9 @@ build_cuda_program(program_cache_entry *src_entry)
 				 "--gpu-architecture=compute_%u", src_entry->target_cc);
 		options[opt_index++] = gpu_arch_option;
 		if ((src_entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
-		{
 			options[opt_index++] = "--device-debug";
+		else
 			options[opt_index++] = "--generate-line-info";
-		}
 		options[opt_index++] = "--use_fast_math";
 		/* library linkage needs relocatable PTX */
 		options[opt_index++] = "--device-c";
