@@ -1,5 +1,6 @@
-* Sun Nov 28 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.2-2
+* Sat Dec 11 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-2
 - Rebuild for CUDA11.5 Update 1; contains compiler optimization bugfix
+- A critical bug fix on nogroup_reduction
 - Various bug fixes
 
 * Sun Nov 14 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-1
