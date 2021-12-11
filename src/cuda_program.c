@@ -80,6 +80,7 @@ typedef struct
 static int		program_cache_size_kb;
 static int		num_program_builders;
 static bool		pgstrom_debug_jit_compile_options;
+static bool		pgstrom_debug_cuda_enable_coredump_on_exception;
 static int		pgstrom_extra_kernel_stack_size;
 
 /* ---- static variables ---- */
@@ -1804,6 +1805,25 @@ cudaProgramBuilderWakeUp(bool error_if_no_builders)
 		elog(ERROR, "PG-Strom: no active CUDA C program builder");
 }
 
+/*
+ * GUC assign handler of pg_strom.debug_cuda_enable_coredump_on_exception
+ */
+static void
+assign_cuda_enable_coredump_on_exception(bool newval, void *extra)
+{
+	static const char *name = "CUDA_ENABLE_COREDUMP_ON_EXCEPTION";
+	if (newval)
+	{
+		if (setenv(name, "1", 1) != 0)
+			elog(ERROR, "failed on setenv('%s=1'): %m", name);
+	}
+	else
+	{
+		if (unsetenv(name) != 0)
+			elog(ERROR, "failed on unsetenv('%s'): %m", name);
+	}
+}
+
 static void
 pgstrom_startup_cuda_program(void)
 {
@@ -1885,7 +1905,17 @@ pgstrom_init_cuda_program(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							 NULL, NULL, NULL);
-
+	/*
+	 * Enables CUDA coredump on GPU kernel crash
+	 */
+	DefineCustomBoolVariable("pg_strom.debug_cuda_enable_coredump_on_exception",
+							 "Set/clear CUDA_ENABLE_COREDUMP_ON_EXCEPTION environment variable",
+							 NULL,
+							 &pgstrom_debug_cuda_enable_coredump_on_exception,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							 NULL, assign_cuda_enable_coredump_on_exception, NULL);	
 	/*
 	 * Configure extra kernel stack for heavy CUDA programs
 	 */
