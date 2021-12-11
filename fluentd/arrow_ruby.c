@@ -40,6 +40,12 @@ trim_cstring(char *str)
 	return str;
 }
 
+static VALUE
+rb_puts(VALUE obj)
+{
+	return rb_funcall(rb_mKernel, rb_intern("puts"), 1, obj);
+}
+
 /*
  * context based memory allocation tracker
  */
@@ -2096,6 +2102,36 @@ rb_ArrowFile__writeRow(VALUE self,
 }
 
 static VALUE
+callback_test(VALUE yield_value, VALUE private_datum, int argc, VALUE *argv)
+{
+	int		i;
+
+	puts("yield_value:");
+	rb_puts(yield_value);
+	puts("private_datum:");
+	rb_puts(private_datum);
+	printf("argc = %d\n", argc);
+	for (i=0; i < argc; i++)
+		rb_puts(argv[i]);
+
+	return Qnil;
+}
+
+static VALUE
+rb_ArrowFile__writeChunk(VALUE self,
+						 VALUE chunk)
+{
+	rb_block_call(chunk,
+				  rb_intern("each"),
+				  0,
+				  NULL,
+				  callback_test,
+				  self);
+	return Qnil;
+}
+
+#if 0
+static VALUE
 rb_ArrowFile__nextChunk(VALUE self)
 {
 	SQLtable   *table = (SQLtable *)rb_ivar_get(self, rb_intern("table"));
@@ -2104,6 +2140,7 @@ rb_ArrowFile__nextChunk(VALUE self)
 		arrowFileWriteRecordBatch(self);
 	return Qnil;
 }
+#endif
 
 static VALUE
 rb_ArrowFile__cleanup(VALUE self)
@@ -2146,7 +2183,8 @@ Init_ArrowFile(void)
 	klass = rb_define_class("ArrowFile",  rb_cObject);
 	rb_define_method(klass, "initialize", rb_ArrowFile__initialize, 3);
 	rb_define_method(klass, "writeRow",   rb_ArrowFile__writeRow, 3);
-	rb_define_method(klass, "nextChunk",  rb_ArrowFile__nextChunk, 0);
+	rb_define_method(klass, "writeChunk", rb_ArrowFile__writeChunk, 1);
+//	rb_define_method(klass, "nextChunk",  rb_ArrowFile__nextChunk, 0);
 	rb_define_method(klass, "cleanup",    rb_ArrowFile__cleanup, 0);
 
 	//rb_define_method(klass, "test", rb_ArrowFile__test, 1);
