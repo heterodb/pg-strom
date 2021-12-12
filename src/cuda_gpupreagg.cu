@@ -682,7 +682,7 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 {
 	cl_bool		is_last_reduction = false;
 	cl_bool		try_final_merge = true;
-	__shared__ cl_uint	base;
+	cl_uint		lane_id = (get_local_id() & warpSize - 1);
 
 	/* init local/private buffer */
 	assert(MAXWARPS_PER_BLOCK <= get_local_size() &&
@@ -708,14 +708,13 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 	do {
 		cl_uint		index;
 
-		/* fetch next items from the kds_slot */
-		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
-		__syncthreads();
-
-		if (base + get_local_size() >= kds_slot->nitems)
+		if (lane_id == 0)
+			index = atomicAdd(&kgpreagg->read_slot_pos, warpSize);
+		index = __shfl_sync(__activemask(), index, 0);
+		if (index + warpSize >= kds_slot->nitems)
 			is_last_reduction = true;
-		index = base + get_local_id();
+		index += lane_id;
+
 		/* accumulate to the private buffer */
 		if (index < kds_slot->nitems)
 		{
@@ -727,6 +726,8 @@ gpupreagg_nogroup_reduction(kern_context *kcxt,
 									GPUPREAGG_ACCUM_MAP_GLOBAL);
 		}
 	} while (!is_last_reduction);
+
+	__syncthreads();
 
 	/*
 	 * inter-warp reduction using shuffle operations
