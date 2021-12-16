@@ -72,6 +72,7 @@ typedef union  SQLstat__datum	SQLstat__datum;
 typedef union  SQLtype			SQLtype;
 typedef struct SQLtype__pgsql	SQLtype__pgsql;
 typedef struct SQLtype__mysql	SQLtype__mysql;
+typedef struct SQLtype__fluent	SQLtype__fluent;
 
 struct SQLbuffer
 {
@@ -97,10 +98,17 @@ struct SQLtype__mysql
 	int			typeid;
 };
 
+struct SQLtype__fluent
+{
+	bool		ts_column;		/* source is 'ts' (timestamp) */
+	bool		tag_column;		/* source is 'tag' (string) */
+};
+
 union SQLtype
 {
 	SQLtype__pgsql	pgsql;
 	SQLtype__mysql	mysql;
+	SQLtype__fluent	fluent;
 };
 
 union SQLstat__datum
