@@ -589,9 +589,9 @@ try_again:
 		datum = rb_funcall(datum, rb_intern("to_time"), 0);
 	else
 	{
-		/* elsewhere, convert to String, then cast to Time */
+		/* elsewhere, convert to String, then create a new Time object */
 		datum = rb_funcall(datum, rb_intern("to_s"), 0);
-		datum = rb_funcall(datum, rb_intern("to_time"), 0);
+		datum = rb_funcall(rb_cTime, rb_intern("parse"), 1, datum);
 	}
 
 	if (!retry)
@@ -1589,6 +1589,8 @@ rb_ArrowFile__initialize(VALUE self,
 						 VALUE __schema_defs,
 						 VALUE __params)
 {
+	rb_require("time");
+
 	__arrowFilePathnameValidator(self, __pathname);
 	__arrowFileParseSchemaDefs(self, __schema_defs);
 	__arrowFileParseParams(self, __params);
@@ -2151,15 +2153,14 @@ rb_ArrowFile__writeChunk(VALUE self,
 static VALUE
 rb_ArrowFile__test(VALUE self, VALUE datum)
 {
-	int128_t	value;
+	VALUE	retval;
 
-	printf("classname [%s]  ", rb_class2name(CLASS_OF(datum)));
-	if (!__ruby_fetch_decimal_value(datum, &value, 5))
-		printf(" --> NULL\n");
-	else
-		printf(" --> %ld\n", (int64_t)value);
+	retval = rb_funcall(rb_cTime, rb_intern("parse"), 1, datum);
 
-	return Qnil;
+	printf("classname [%s] -> [%s]\n",
+		   rb_class2name(CLASS_OF(datum)),
+		   rb_class2name(CLASS_OF(retval)));
+	return retval;
 }
 #endif
 
