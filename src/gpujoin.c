@@ -273,6 +273,7 @@ typedef struct
 {
 	GpuTaskState	gts;
 	struct GpuJoinSharedState *gj_sstate;	/* may be on DSM, if parallel */
+	gpujoinPseudoStack *pstack_head;
 
 	/* Inner Buffers */
 	struct GpuJoinSiblingState *sibling;	/* only partition-wise join */
@@ -3176,12 +3177,12 @@ assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 static Node *
 gpujoin_create_scan_state(CustomScan *node)
 {
-	GpuJoinState   *gjs;
-	cl_int			num_rels = list_length(node->custom_plans);
+	GpuJoinState *gjs;
+	cl_int		num_rels = list_length(node->custom_plans);
+	size_t		sz;
 
-	gjs = MemoryContextAllocZero(CurTransactionContext,
-								 offsetof(GpuJoinState,
-										  inners[num_rels]));
+	sz = offsetof(GpuJoinState, inners[num_rels]);
+	gjs = MemoryContextAllocZero(CurTransactionContext, sz);
 	NodeSetTag(gjs, T_CustomScanState);
 	gjs->gts.css.flags = node->flags;
 	gjs->gts.css.methods = &gpujoin_exec_methods;
@@ -3207,6 +3208,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	cl_int			i, j, nattrs;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
+	gpujoinPseudoStack *pstack_head;
+	size_t			off, sz;
 
 	/* activate a GpuContext for CUDA kernel execution */
 	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu, false, false);
@@ -3545,6 +3548,22 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 istate->state);
 	}
+	/* Pseudo GpuJoin stack */
+	sz = offsetof(gpujoinPseudoStack,
+				  ps_offset[gjs->num_rels+1]);
+	gjs->pstack_head = pstack_head = palloc0(sz);
+	pstack_head->ps_headsz = STROMALIGN(sz);
+	for (i=0, off=0; i <= gjs->num_rels; i++)
+	{
+		sz = sizeof(cl_uint) * (i+1) * GPUJOIN_PSEUDO_STACK_NROOMS;
+		pstack_head->ps_offset[i] = off;
+		off += sz;
+		if (i > 0 && gjs->inners[i-1].gist_irel)
+			off += sz;
+	}
+	pstack_head->ps_unitsz = off;
+
+	/* build GPU binary code */
 	initStringInfo(&kern_define);
 	pgstrom_build_session_info(&kern_define,
 							   &gjs->gts,
@@ -5389,42 +5408,13 @@ gpujoin_codegen(PlannerInfo *root,
 	StringInfoData	source;
 	StringInfoData	temp;
 	int				depth;
-	size_t			sz, off;
 	size_t			extra_bufsz;
 	ListCell	   *cell;
-	gpujoinPseudoStack *pstack;
 
 	pgstrom_init_codegen_context(&context, root, joinrel);
 	initStringInfo(&source);
 	initStringInfo(&temp);
 
-	/*
-	 * System constants of GpuJoin
-	 * KPARAM_0 is gpujoinPseudoStack, to indicate pseudo-stack offset
-	 * for each depth, per SM.
-	 */
-	sz = offsetof(gpujoinPseudoStack,
-				  ps_offset[gj_path->num_rels + 1]);
-	pstack = palloc0(sz);
-	SET_VARSIZE(pstack, sz);
-	for (depth=0, off=0; depth <= gj_path->num_rels; depth++)
-	{
-		sz = sizeof(cl_uint) * (depth+1) * GPUJOIN_PSEUDO_STACK_NROOMS;
-		pstack->ps_offset[depth] = off;
-		off += sz;
-		/* GiST-index support needs extra pseudo-stack */
-		if (depth > 0 && gj_path->inners[depth-1].gist_clause != NULL)
-			off += sz;
-	}
-	pstack->ps_unitsz = off;
-
-	context.used_params = list_make1(makeConst(BYTEAOID,
-											   -1,
-											   InvalidOid,
-											   -1,
-											   PointerGetDatum(pstack),
-											   false,
-											   false));
 	/*
 	 * gpuscan_quals_eval
 	 */
@@ -5656,37 +5646,54 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 {
 	GpuJoinState *gjs = (GpuJoinState *) gts;
 	GpuContext *gcontext = gjs->gts.gcontext;
+	gpujoinPseudoStack *pstack_head = gjs->pstack_head;
 	cl_int		nrels = gjs->num_rels;
-	size_t		head_sz;
-	size_t		param_sz;
-	size_t		suspend_sz;
+	char	   *pos = (char *)kgjoin;
 	int			mp_count;
-	gpujoinPseudoStack *pstack;
+	size_t		sz;
 
 	mp_count = (GPUKERNEL_MAX_SM_MULTIPLICITY *
 				devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT);
-	head_sz = STROMALIGN(offsetof(kern_gpujoin, stat[gjs->num_rels+1]));
-	param_sz = STROMALIGN(gjs->gts.kern_params->length);
-	pstack = (gpujoinPseudoStack *)kparam_get_value(gjs->gts.kern_params, 0);
-	suspend_sz = MAXALIGN(offsetof(gpujoinSuspendContext, pd[nrels + 1]));
+	/* head of kern_gpujoin */
+	sz = STROMALIGN(offsetof(kern_gpujoin, stat[nrels+1]));
+	if (kgjoin)
+		memset(pos, 0, sz);
+	pos += sz;
+
+	/* kern_parambuf */
+	sz = STROMALIGN(gjs->gts.kern_params->length);
 	if (kgjoin)
 	{
-		memset(kgjoin, 0, head_sz);
-		kgjoin->kparams_offset	= head_sz;
-		kgjoin->pstack_offset	= head_sz + param_sz;
-		kgjoin->suspend_offset	= head_sz + param_sz + mp_count * pstack->ps_unitsz;
-		kgjoin->suspend_size	= mp_count * suspend_sz;
-		kgjoin->num_rels		= gjs->num_rels;
-		kgjoin->src_read_pos	= 0;
-
-		/* kern_parambuf */
-		memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
-			   gjs->gts.kern_params,
-			   gjs->gts.kern_params->length);
+		kgjoin->kparams_offset = (pos - (char *)kgjoin);
+		memcpy(pos, &gjs->gts.kern_params, gjs->gts.kern_params->length);
 	}
-	return (head_sz + param_sz +
-			mp_count * pstack->ps_unitsz +
-			mp_count * suspend_sz);
+	pos += sz;
+
+	/* gpujoinPseudoStack */
+	sz = (pstack_head->ps_headsz + mp_count * pstack_head->ps_unitsz);
+	if (kgjoin)
+	{
+		kgjoin->pstack = (gpujoinPseudoStack *)pos;
+		memcpy(kgjoin->pstack, pstack_head, pstack_head->ps_headsz);
+	}
+	pos += sz;
+
+	/* gpujoinSuspendContext */
+	sz = mp_count * MAXALIGN(offsetof(gpujoinSuspendContext, pd[nrels+1]));
+	if (kgjoin)
+	{
+		kgjoin->suspend_offset = (pos - (char *)kgjoin);
+		kgjoin->suspend_size = sz;
+	}
+	pos += sz;
+
+	/* misc field init */
+	if (kgjoin)
+	{
+		kgjoin->num_rels	 = gjs->num_rels;
+		kgjoin->src_read_pos = 0;
+	}
+	return (pos - (char *)kgjoin);
 }
 
 /*
@@ -6461,7 +6468,7 @@ gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
 	cl_uint		write_pos;
 	cl_uint		read_pos;
 	cl_uint		row_index;
-	gpujoinPseudoStack *pstack;
+	gpujoinPseudoStack *pstack = kgjoin->pstack;
 	cl_uint	   *pstack_base;
 	cl_int		j;
 	gpujoinSuspendContext *sb;
@@ -6487,8 +6494,7 @@ lnext:
 	gjs->fallback_resume_depth = depth;
 
 	/* suspend context and pseudo stack */
-	pstack = (gpujoinPseudoStack *)kparam_get_value(gjs->gts.kern_params, 0);
-	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset +
+	pstack_base = (cl_uint *)((char *)pstack + pstack->ps_headsz +
 							  group_id * pstack->ps_unitsz +
 							  pstack->ps_offset[depth]);
 	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, group_id);

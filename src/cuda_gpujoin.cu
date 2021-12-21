@@ -1573,8 +1573,11 @@ bailout:
 }
 
 #define PSTACK_DEPTH(d)											\
-	((d) >= 0 && (d) <= kgjoin->num_rels ?						\
-	 (cl_uint *)(pstack_base + pstack->ps_offset[(d)]): NULL)
+	((d) >= 0 && (d) <= kgjoin->num_rels						\
+	 ? (cl_uint *)((char *)pstack + pstack->ps_headsz +			\
+				   get_group_id() * pstack->ps_unitsz +			\
+				   pstack->ps_offset[(d)])						\
+	 : NULL)
 
 /*
  * gpujoin_main
@@ -1590,9 +1593,9 @@ gpujoin_main(kern_context *kcxt,
 			 cl_uint *l_state,
 			 cl_bool *matched)
 {
+	gpujoinPseudoStack *pstack = kgjoin->pstack;
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	gpujoinPseudoStack *pstack;
 	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
@@ -1602,11 +1605,6 @@ gpujoin_main(kern_context *kcxt,
 		   kds_src->format == KDS_FORMAT_COLUMN);
 	assert((kds_dst->format == KDS_FORMAT_ROW  && kparams_gpreagg == NULL) ||
 		   (kds_dst->format == KDS_FORMAT_SLOT && kparams_gpreagg != NULL));
-
-	/* setup private variables */
-	pstack = (gpujoinPseudoStack *)kparam_get_value(kcxt->kparams, 0);
-	pstack_base = ((char *)kgjoin + kgjoin->pstack_offset +
-				   get_group_id() * pstack->ps_unitsz);
 
 	/* init per-depth context */
 	if (get_local_id() == 0)
@@ -1783,19 +1781,15 @@ gpujoin_right_outer(kern_context *kcxt,
 					cl_uint *l_state,
 					cl_bool *matched)
 {
+	gpujoinPseudoStack *pstack = kgjoin->pstack;
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	gpujoinPseudoStack *pstack;
 	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
 	assert((kds_dst->format == KDS_FORMAT_ROW  && kparams_gpreagg == NULL) ||
 		   (kds_dst->format == KDS_FORMAT_SLOT && kparams_gpreagg != NULL));
-	/* setup private variables */
-	pstack = (gpujoinPseudoStack *)kparam_get_value(kcxt->kparams, 0);
-	pstack_base = ((char *)kgjoin + kgjoin->pstack_offset +
-				   get_group_id() * pstack->ps_unitsz);
 
 	/* setup per-depth context */
 	memset(l_state, 0, sizeof(l_state));
