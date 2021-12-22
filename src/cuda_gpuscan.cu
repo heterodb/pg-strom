@@ -25,8 +25,6 @@ gpuscan_main_row(kern_context *kcxt,
 {
 	gpuscanSuspendContext *my_suspend
 		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
-	gpuscanResultIndex *gs_results	__attribute__((unused))
-		= KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
 	cl_uint		part_index = 0;
 	cl_uint		src_index;
 	cl_uint		src_base;

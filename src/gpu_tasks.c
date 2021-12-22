@@ -69,16 +69,21 @@ __appendXactIdVector(StringInfo buf)
 }
 
 /*
- * construct_kern_parambuf
+ * pgstromSetupKernParambuf
  *
- * It construct a kernel parameter buffer to deliver Const/Param nodes.
+ * It assigns a kernel parameter buffer for Const/Param.
  */
-kern_parambuf *
-construct_kern_parambuf(List *used_params, ExprContext *econtext,
-						List *custom_scan_tlist)
+static void
+__pgstromSetupKernParambuf(GpuTaskState *gts)
 {
-	StringInfoData	str;
-	kern_parambuf  *kparams;
+	List	   *used_params = gts->used_params;
+	ExprContext *econtext = gts->css.ss.ps.ps_ExprContext;
+	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
+	List	   *custom_scan_tlist = cscan->custom_scan_tlist;
+	StringInfoData str;
+	kern_parambuf *kparams;
+	CUdeviceptr	m_kparams;
+	CUresult	rc;
 	cl_ulong	zero = 0;
 	ListCell   *cell;
 	Size		offset;
@@ -262,7 +267,35 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 	kparams->length = str.len;
 	kparams->nparams = nparams;
 
-	return kparams;
+	rc = gpuMemAllocManaged(gts->gcontext,
+							&m_kparams,
+							str.len,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "out of managed memory");
+	memcpy((void *)m_kparams, kparams, str.len);
+	gts->kern_params = m_kparams;
+
+	pfree(str.data);
+}
+
+CUdeviceptr
+pgstromSetupKernParambuf(GpuTaskState *gts)
+{
+	if (gts->kern_params == 0UL)
+		__pgstromSetupKernParambuf(gts);
+	return gts->kern_params;
+}
+
+static void
+pgstromReleaseKernParambuf(GpuTaskState *gts)
+{
+	if (gts->kern_params != 0UL)
+	{
+		gpuMemFree(gts->gcontext,
+				   gts->kern_params);
+		gts->kern_params = 0UL;
+	}
 }
 
 /*
@@ -279,19 +312,19 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						cl_uint outer_nrows_per_block,
 						cl_int eflags)
 {
-	Relation		relation = gts->css.ss.ss_currentRelation;
-	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
-	EState		   *estate = gts->css.ss.ps.state;
-	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
-	Bitmapset	   *outer_refs = NULL;
-	ListCell	   *lc;
+	Relation	relation = gts->css.ss.ss_currentRelation;
+	EState	   *estate = gts->css.ss.ps.state;
+	CustomScan *cscan = (CustomScan *)(gts->css.ss.ps.plan);
+	Bitmapset  *outer_refs = NULL;
+	ListCell   *lc;
 
 	Assert(gts->gcontext == gcontext);
 	gts->optimal_gpu = optimal_gpu;
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
-	gts->kern_params = construct_kern_parambuf(used_params, econtext,
-											   cscan->custom_scan_tlist);
+	gts->kern_params = 0UL;					/* to be set later */
+	gts->used_params = used_params;
+
 	if (relation)
 	{
 		TupleDesc	tupdesc = RelationGetDescr(relation);
@@ -523,6 +556,7 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 	if (!gts->cuda_module && gts->program_id != INVALID_PROGRAM_ID)
 		gts->cuda_module = GpuContextLookupModule(gts->gcontext,
 												  gts->program_id);
+	pgstromSetupKernParambuf(gts);
 
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
@@ -569,11 +603,10 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		Assert(gts->num_ready_tasks >= 0);
 		gts->cb_release_task(gtask);
 	}
-
 	/* rewind the scan position if GTS scans a table */
 	pgstromRewindScanChunk(gts);
-
-	/* Also rewind the scan state of Arrow_Fdw/GpuCache */
+	pgstromReleaseKernParambuf(gts);
+	/* also rewind the scan state of Arrow_Fdw/GpuCache */
 	if (gts->af_state)
 		ExecReScanArrowFdw(gts->af_state);
 	if (gts->gc_state)
@@ -597,6 +630,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 		Assert(gts->num_ready_tasks >= 0);
 		gts->cb_release_task(gtask);
 	}
+	pgstromReleaseKernParambuf(gts);
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	InstrEndLoop(&gts->outer_instrument);

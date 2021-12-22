@@ -1596,7 +1596,6 @@ gpujoin_main(kern_context *kcxt,
 	gpujoinPseudoStack *pstack = kgjoin->pstack;
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW ||
@@ -1784,7 +1783,6 @@ gpujoin_right_outer(kern_context *kcxt,
 	gpujoinPseudoStack *pstack = kgjoin->pstack;
 	cl_int			max_depth = kgjoin->num_rels;
 	cl_int			depth;
-	char		   *pstack_base;
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));

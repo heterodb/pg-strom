@@ -339,7 +339,8 @@ struct GpuTaskState
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	CUmodule		cuda_module;	/* CUDA binary module */
-	kern_parambuf  *kern_params;	/* Const/Param buffer */
+	CUdeviceptr		kern_params;	/* Const/Param buffer */
+	List		   *used_params;	/* Const/Param expressions */
 	cl_int			optimal_gpu;	/* GPU preference on plan time */
 	bool			scan_done;		/* True, if no more rows to read */
 
@@ -906,9 +907,7 @@ CHECK_WORKER_TERMINATION(void)
 /*
  * gpu_tasks.c
  */
-extern kern_parambuf *construct_kern_parambuf(List *used_params,
-											  ExprContext *econtext,
-											  List *custom_scan_tlist);
+extern CUdeviceptr pgstromSetupKernParambuf(GpuTaskState *gts);
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,

@@ -5660,15 +5660,6 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 		memset(pos, 0, sz);
 	pos += sz;
 
-	/* kern_parambuf */
-	sz = STROMALIGN(gjs->gts.kern_params->length);
-	if (kgjoin)
-	{
-		kgjoin->kparams_offset = (pos - (char *)kgjoin);
-		memcpy(pos, &gjs->gts.kern_params, gjs->gts.kern_params->length);
-	}
-	pos += sz;
-
 	/* gpujoinPseudoStack */
 	sz = (pstack_head->ps_headsz + mp_count * pstack_head->ps_unitsz);
 	if (kgjoin)
@@ -6910,7 +6901,6 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 	cl_int			num_rels = pgjoin->kern.num_rels;
 	GpuJoinTask	   *gresp;
 	size_t			head_sz;
-	size_t			param_sz;
 	CUresult		rc;
 
 	/* async prefetch kds_dst; which should be on the device memory */
@@ -6921,14 +6911,12 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
-	/* setup responder task with supplied @kds_dst */
-	head_sz = STROMALIGN(offsetof(GpuJoinTask, kern) +
-						 offsetof(kern_gpujoin, stat[num_rels+1]));
-	param_sz = KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin->kern);
-	/* pstack/suspend buffer is not necessary */
+	/* setup responder task with supplied @kds_dst, however, it does
+	 * not need pstack/suspend buffer */
+	head_sz = STROMALIGN(offsetof(GpuJoinTask, kern.stat[num_rels+1]));
 	rc = gpuMemAllocManaged(gcontext,
 							(CUdeviceptr *)&gresp,
-							head_sz + param_sz,
+							head_sz,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
@@ -6941,11 +6929,8 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 	gresp->pds_src			= PDS_retain(pgjoin->pds_src);
 	gresp->pds_dst			= pds_dst;
 	gresp->outer_depth		= pgjoin->outer_depth;
-
 	gresp->kern.num_rels	= num_rels;
-	memcpy((char *)gresp + head_sz,
-		   KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
-		   KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin->kern));
+
 	/* assign a new empty buffer */
 	pgjoin->pds_dst			= pds_new;
 
@@ -7123,6 +7108,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 resume_kernel:
 	m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	kern_args[0] = &m_kgjoin;
+	kern_args[1] = &gjs->gts.kern_params;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &m_kds_src;
 	kern_args[3] = &m_kds_extra;

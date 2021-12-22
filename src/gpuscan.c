@@ -2033,9 +2033,8 @@ gpuscan_create_task(GpuScanState *gss,
 	GpuContext	   *gcontext = gss->gts.gcontext;
 	pgstrom_data_store *pds_dst = NULL;
 	GpuScanTask	   *gscan;
-	cl_int			sm_count = 0;
+	cl_int			mp_count = 0;
 	size_t			suspend_sz = 0;
-	size_t			result_index_sz = 0;
 	size_t			length;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
@@ -2051,17 +2050,14 @@ gpuscan_create_task(GpuScanState *gss,
 							  scan_tupdesc,
 							  pgstrom_chunk_size());
 
-	sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
+	mp_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
 	suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
-							GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
-
+							GPUKERNEL_MAX_SM_MULTIPLICITY * mp_count);
 	/*
 	 * allocation of pgstrom_gpuscan
 	 */
-	length = (STROMALIGN(offsetof(GpuScanTask, kern.kparams)) +
-			  STROMALIGN(gss->gts.kern_params->length) +
-			  STROMALIGN(suspend_sz) +
-			  STROMALIGN(result_index_sz));
+	length = (STROMALIGN(offsetof(GpuScanTask, kern.data)) +
+			  STROMALIGN(suspend_sz));
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
 							length,
@@ -2079,10 +2075,7 @@ gpuscan_create_task(GpuScanState *gss,
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
 	gscan->kern.suspend_sz = suspend_sz;
-	/* kern_parambuf */
-	memcpy(KERN_GPUSCAN_PARAMBUF(&gscan->kern),
-		   gss->gts.kern_params,
-		   gss->gts.kern_params->length);
+
 	return gscan;
 }
 
@@ -2320,35 +2313,12 @@ gpuscan_next_tuple(GpuTaskState *gts)
 
 	if (gscan->task.cpu_fallback)
 		slot = gpuscan_next_tuple_fallback(gss, gscan);
-	else if (gscan->pds_dst)
-	{
-		pgstrom_data_store *pds_dst = gscan->pds_dst;
-
-		slot = gss->gts.css.ss.ss_ScanTupleSlot;
-		ExecClearTuple(slot);
-		if (!PDS_fetch_tuple(slot, pds_dst, &gss->gts))
-			slot = NULL;
-	}
 	else
 	{
-		pgstrom_data_store *pds_src = gscan->pds_src;
-		gpuscanResultIndex *gs_results
-			= KERN_GPUSCAN_RESULT_INDEX(&gscan->kern);
-
-		Assert(pds_src->kds.format == KDS_FORMAT_ROW);
-		if (gss->gts.curr_index < gs_results->nitems)
-		{
-			HeapTuple	tuple = &gss->gts.curr_tuple;
-			cl_uint		kds_offset;
-
-			kds_offset = gs_results->results[gss->gts.curr_index++];
-			tuple->t_data = KDS_ROW_REF_HTUP(&pds_src->kds,
-											 kds_offset,
-											 &tuple->t_self,
-											 &tuple->t_len);
-			slot = gss->gts.css.ss.ss_ScanTupleSlot;
-			ExecForceStoreHeapTuple(tuple, slot, false);
-		}
+		slot = gss->gts.css.ss.ss_ScanTupleSlot;
+		ExecClearTuple(slot);
+		if (!PDS_fetch_tuple(slot, gscan->pds_dst, &gss->gts))
+			slot = NULL;
 	}
 	return slot;
 }
@@ -2362,25 +2332,19 @@ gpuscan_throw_partial_result(GpuScanTask *gscan, pgstrom_data_store *pds_dst)
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	GpuTaskState   *gts = gscan->task.gts;
 	GpuScanTask	   *gresp;		/* responder task */
-	size_t			length;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
 
 	/* setup responder task with supplied @pds_dst */
-	length = (STROMALIGN(offsetof(GpuScanTask, kern.kparams)) +
-			  STROMALIGN(gscan->kern.kparams.length));
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							length,
+							offsetof(GpuScanTask, kern.data),
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 	/* allocation of an empty result buffer */
 	gresp = (GpuScanTask *) m_deviceptr;
-	memset(gresp, 0, offsetof(GpuScanTask, kern.kparams));
-	memcpy(&gresp->kern.kparams,
-		   &gscan->kern.kparams,
-		   gscan->kern.kparams.length);
+	memset(gresp, 0, offsetof(GpuScanTask, kern.data));
 	gresp->task.task_kind	= gscan->task.task_kind;
 	gresp->task.program_id	= gscan->task.program_id;
 	gresp->task.gts			= gts;
@@ -2406,6 +2370,7 @@ static int
 __gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
+	GpuScanState   *gss = (GpuScanState *) gtask->gts;
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
@@ -2413,7 +2378,7 @@ __gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUdeviceptr		m_gpuscan = (CUdeviceptr)&gscan->kern;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_extra = 0UL;
-	CUdeviceptr		m_kds_dst = (pds_dst ? (CUdeviceptr)&pds_dst->kds : 0UL);
+	CUdeviceptr		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	bool			m_kds_src_release = false;
 	const char	   *kern_fname;
 	void		   *kern_args[5];
@@ -2506,9 +2471,8 @@ __gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	length = KERN_GPUSCAN_DMASEND_LENGTH(&gscan->kern);
 	rc = cuMemPrefetchAsync((CUdeviceptr)&gscan->kern,
-							length,
+							offsetof(kern_gpuscan, data),
 							CU_DEVICE_PER_THREAD,
 							CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
@@ -2539,16 +2503,13 @@ __gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 
 	/* head of the kds_dst, if any */
-	if (pds_dst)
-	{
-		length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
-		rc = cuMemPrefetchAsync((CUdeviceptr)&pds_dst->kds,
-								length,
-								CU_DEVICE_PER_THREAD,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-	}
+	length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
+	rc = cuMemPrefetchAsync(m_kds_dst,
+							length,
+							CU_DEVICE_PER_THREAD,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/*
 	 * KERNEL_FUNCTION(void)
@@ -2571,9 +2532,10 @@ resume_kernel:
 	gscan->kern.extra_size = 0;
 	gscan->kern.suspend_count = 0;
 	kern_args[0] = &m_gpuscan;
-	kern_args[1] = &m_kds_src;
-	kern_args[2] = &m_kds_extra;
-	kern_args[3] = &m_kds_dst;
+	kern_args[1] = &gss->gts.kern_params;
+	kern_args[2] = &m_kds_src;
+	kern_args[3] = &m_kds_extra;
+	kern_args[4] = &m_kds_dst;
 
 	rc = cuLaunchKernel(kern_gpuscan_quals,
 						grid_sz, 1, 1,
@@ -2613,24 +2575,10 @@ resume_kernel:
 								nitems_in);
 		pg_atomic_add_fetch_u64(&gs_rtstat->c.nitems_filtered,
 								nitems_in - nitems_out);
-		if (!pds_dst)
-		{
-			/* may not use this code path no longer */
-			Assert(gscan->kern.extra_size == 0);
-
-			rc = cuMemPrefetchAsync((CUdeviceptr)
-									KERN_GPUSCAN_RESULT_INDEX(&gscan->kern),
-									offsetof(gpuscanResultIndex,
-											 results[nitems_out]),
-									CU_DEVICE_CPU,
-									CU_STREAM_PER_THREAD);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-		}
-		else if (nitems_out > 0)
+		if (nitems_out > 0)
 		{
 			length = KERN_DATA_STORE_SLOT_LENGTH(&pds_dst->kds, nitems_out);
-			rc = cuMemPrefetchAsync((CUdeviceptr)&pds_dst->kds,
+			rc = cuMemPrefetchAsync(m_kds_dst,
 									length,
 									CU_DEVICE_CPU,
 									CU_STREAM_PER_THREAD);
@@ -2641,7 +2589,7 @@ resume_kernel:
 			{
 				length = __kds_unpack(pds_dst->kds.usage);
 				offset = pds_dst->kds.length - length;
-				rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
+				rc = cuMemPrefetchAsync(m_kds_dst + offset,
 										length,
 										CU_DEVICE_CPU,
 										CU_STREAM_PER_THREAD);

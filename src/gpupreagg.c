@@ -199,8 +199,10 @@ typedef struct
 									 * fallback jobs */
 	size_t				kds_slot_nrooms; /* for kds_slot */
 	size_t				kds_slot_length; /* for kds_slot */
+	/* <-- properties of combined mode --> */
 	kern_gpujoin	   *kgjoin;		/* kern_gpujoin, if combined mode */
 	CUdeviceptr			m_kmrels;	/* kern_multirels, if combined mode */
+	CUdeviceptr			m_kparams;	/* kern_params, if combined mode */
 	cl_int				outer_depth;/* RIGHT OUTER depth, if combined mode */
 	kern_gpupreagg		kern;
 } GpuPreAggTask;
@@ -5305,8 +5307,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 					   KERN_DATA_STORE_HEAD_LENGTH(kds_slot)) / unitsz;
 
 	/* allocation of GpuPreAggTask */
-	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
-						 gpas->gts.kern_params->length);
+	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.data));
 	if (gpas->combined_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
@@ -5331,9 +5332,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	if (gpas->combined_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
+
+		pgstromSetupKernParambuf(outer_gts);
 		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz + suspend_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 		gpreagg->m_kmrels = m_kmrels;
+		gpreagg->m_kparams = outer_gts->kern_params;
 		gpreagg->outer_depth = outer_depth;
 	}
 	else
@@ -5343,10 +5347,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	/* if any grouping keys, determine the reduction policy later */
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
 	gpreagg->kern.suspend_size = suspend_sz;
-	/* kern_parambuf */
-	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
-		   gpas->gts.kern_params,
-		   gpas->gts.kern_params->length);
 
 	return &gpreagg->task;
 }
@@ -5650,8 +5650,7 @@ gpupreagg_throw_partial_result(GpuPreAggTask *gpreagg,
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	GpuTaskState   *gts = gpreagg->task.gts;
 	GpuPreAggTask  *gresp;		/* responder task */
-    size_t          length;
-    CUresult        rc;
+	CUresult		rc;
 
 	/* async prefetch kds_slot; which should be on the device memory */
 	rc = cuMemPrefetchAsync((CUdeviceptr) kds_slot,
@@ -5662,23 +5661,17 @@ gpupreagg_throw_partial_result(GpuPreAggTask *gpreagg,
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* setup responder task with supplied @kds_slot */
-	length = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
-						gpreagg->kern.kparams.length) +
-		STROMALIGN(sizeof(cl_char) * gpreagg->kds_slot_nrooms);
 	rc = gpuMemAllocManaged(gcontext,
 							(CUdeviceptr *)&gresp,
-							length,
+							offsetof(GpuPreAggTask, kern.data),
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
-	memset(gresp, 0, offsetof(GpuPreAggTask, kern.kparams));
-	memcpy(&gresp->kern.kparams,
-		   &gpreagg->kern.kparams,
-		   gpreagg->kern.kparams.length);
+	memset(gresp, 0, offsetof(GpuPreAggTask, kern.data));
 	gresp->task.task_kind	= gpreagg->task.task_kind;
-    gresp->task.program_id	= gpreagg->task.program_id;
+	gresp->task.program_id	= gpreagg->task.program_id;
 	gresp->task.cpu_fallback= true;
-    gresp->task.gts			= gts;
+	gresp->task.gts			= gts;
 	gresp->pds_src			= PDS_retain(gpreagg->pds_src);
 	gresp->kds_slot			= kds_slot;
 	gresp->kds_slot_nrooms	= gpreagg->kds_slot_nrooms;
@@ -5883,9 +5876,10 @@ resume_kernel:
 	((kern_data_store *)m_kds_slot)->usage = 0;
 
 	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_kds_src;
-	kern_args[2] = &m_kds_extra;
-	kern_args[3] = &m_kds_slot;
+	kern_args[1] = &gpas->gts.kern_params;
+	kern_args[2] = &m_kds_src;
+	kern_args[3] = &m_kds_extra;
+	kern_args[4] = &m_kds_slot;
 	rc = cuLaunchKernel(kern_setup,
 						gpreagg->kern.grid_sz, 1, 1,
 						gpreagg->kern.block_sz, 1, 1,
@@ -5900,6 +5894,7 @@ resume_kernel:
 	 * Launch:
 	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
+	 *                          kern_parambuf *kparams,
 	 *                          kern_errorbuf *kgjoin_errorbuf,
 	 *                          kern_data_store *kds_slot,
 	 *                          kern_data_store *kds_final,
@@ -5913,10 +5908,11 @@ resume_kernel:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_nullptr;
-	kern_args[2] = &m_kds_slot;
-	kern_args[3] = &m_kds_final;
-	kern_args[4] = &m_fhash;
+	kern_args[1] = &gpas->gts.kern_params;
+	kern_args[2] = &m_nullptr;
+	kern_args[3] = &m_kds_slot;
+	kern_args[4] = &m_kds_final;
+	kern_args[5] = &m_fhash;
 	rc = cuLaunchKernel(kern_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
@@ -6069,14 +6065,13 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUfunction		kern_gpupreagg_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
 	CUdeviceptr		m_kgjoin = (CUdeviceptr)kgjoin;
+	CUdeviceptr		m_kparams = gpreagg->m_kparams;
 	CUdeviceptr		m_kmrels = gpreagg->m_kmrels;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
-	CUdeviceptr		m_kparams = ((CUdeviceptr)&gpreagg->kern +
-								 offsetof(kern_gpupreagg, kparams));
 	CUresult		rc;
 	bool			m_kds_src_release = false;
 	cl_int			grid_sz;
@@ -6218,6 +6213,7 @@ resume_kernel:
 	 * Launch:
 	 * KERNEL_FUNCTION(void)
 	 * gpujoin_main(kern_gpujoin *kgjoin,
+	 *              kern_parambuf *kparams,
 	 *              kern_multirels *kmrels,
 	 *              kern_data_store *kds_src,
 	 *              kern_data_extra *kds_extra,
@@ -6227,6 +6223,7 @@ resume_kernel:
 	 *
 	 * KERNEL_FUNCTION(void)
 	 * gpujoin_right_outer(kern_gpujoin *kgjoin,
+	 *                     kern_parambuf *kparams,
 	 *                     kern_multirels *kmrels,
 	 *                     cl_int outer_depth,
 	 *                     kern_data_store *kds_dst,
@@ -6243,19 +6240,20 @@ resume_kernel:
 	gpreagg->kern.block_sz = block_sz;
 
 	kern_args[0] = &m_kgjoin;
-	kern_args[1] = &m_kmrels;
+	kern_args[1] = &m_kparams;
+	kern_args[2] = &m_kmrels;
 	if (pds_src != NULL)
 	{
-		kern_args[2] = &m_kds_src;
-		kern_args[3] = &m_kds_extra;
-		kern_args[4] = &m_kds_slot;
-		kern_args[5] = &m_kparams;
+		kern_args[3] = &m_kds_src;
+		kern_args[4] = &m_kds_extra;
+		kern_args[5] = &m_kds_slot;
+		kern_args[6] = &gpas->gts.kern_params;
 	}
 	else
 	{
-		kern_args[2] = &gpreagg->outer_depth;
-		kern_args[3] = &m_kds_slot;
-		kern_args[4] = &m_kparams;
+		kern_args[3] = &gpreagg->outer_depth;
+		kern_args[4] = &m_kds_slot;
+		kern_args[5] = &gpas->gts.kern_params;
 	}
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
@@ -6271,6 +6269,7 @@ resume_kernel:
 	 * Launch:
 	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
+	 *                          kern_parambuf *kparams,
 	 *                          kern_errorbuf *kgjoin_errorbuf,
 	 *                          kern_data_store *kds_slot,
 	 *                          kern_data_store *kds_final,
@@ -6285,10 +6284,11 @@ resume_kernel:
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 
 	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_kgjoin;
-	kern_args[2] = &m_kds_slot;
-	kern_args[3] = &m_kds_final;
-	kern_args[4] = &m_fhash;
+	kern_args[1] = &gpas->gts.kern_params;
+	kern_args[2] = &m_kgjoin;
+	kern_args[3] = &m_kds_slot;
+	kern_args[4] = &m_kds_final;
+	kern_args[5] = &m_fhash;
 	rc = cuLaunchKernel(kern_gpupreagg_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
