@@ -21,7 +21,7 @@ typedef struct
 {
 	CustomPath		cpath;
 	int				num_rels;
-	int				optimal_gpu;
+	const Bitmapset *optimal_gpus;
 	Index			outer_relid;	/* valid, if outer scan pull-up */
 	List		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
@@ -53,7 +53,7 @@ typedef struct
 typedef struct
 {
 	int			num_rels;
-	int			optimal_gpu;
+	const Bitmapset *optimal_gpus;
 	char	   *kern_source;
 	cl_uint		extra_flags;
 	cl_uint		extra_bufsz;
@@ -107,7 +107,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	int			depth = 1;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
-	privs = lappend(privs, makeInteger(gj_info->optimal_gpu));
+	privs = lappend(privs, bms_to_pglist(gj_info->optimal_gpus));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, makeInteger(gj_info->extra_bufsz));
@@ -170,7 +170,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	int			depth;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
-	gj_info->optimal_gpu = intVal(list_nth(privs, pindex++));
+	gj_info->optimal_gpus = bms_from_pglist(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->extra_bufsz = intVal(list_nth(privs, pindex++));
@@ -480,14 +480,14 @@ pgstrom_planstate_is_gpujoin(const PlanState *ps)
 }
 
 /*
- * gpujoin_get_optimal_gpu
+ * gpujoin_get_optimal_gpus
  */
-cl_int
-gpujoin_get_optimal_gpu(const Path *pathnode)
+const Bitmapset *
+gpujoin_get_optimal_gpus(const Path *pathnode)
 {
 	if (pgstrom_path_is_gpujoin(pathnode))
-		return ((GpuJoinPath *)pathnode)->optimal_gpu;
-	return -1;
+		return ((GpuJoinPath *)pathnode)->optimal_gpus;
+	return NULL;
 }
 
 /*
@@ -979,7 +979,7 @@ create_gpujoin_path(PlannerInfo *root,
 	pgstrom_pullup_outer_scan(root, outer_path,
 							  &gjpath->outer_relid,
 							  &gjpath->outer_quals,
-							  &gjpath->optimal_gpu,
+							  &gjpath->optimal_gpus,
 							  &gjpath->index_opt,
 							  &gjpath->index_conds,
 							  &gjpath->index_quals,
@@ -2932,7 +2932,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.outer_startup_cost = outer_plan->startup_cost;
 	gj_info.outer_total_cost = outer_plan->total_cost;
 	gj_info.num_rels = gjpath->num_rels;
-	gj_info.optimal_gpu = gjpath->optimal_gpu;
+	gj_info.optimal_gpus = gjpath->optimal_gpus;
 
 	if (!gjpath->sibling_param_id)
 		gj_info.sibling_param_id = -1;
@@ -3212,7 +3212,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	size_t			off, sz;
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu, false, false);
+	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpus, false, false);
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
@@ -3238,7 +3238,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							gj_info->outer_quals,
 							gj_info->outer_refs,
 							gj_info->used_params,
-							gj_info->optimal_gpu,
+							gj_info->optimal_gpus,
 							gj_info->outer_nrows_per_block,
 							eflags);
 	gjs->gts.cb_next_tuple		= gpujoin_next_tuple;

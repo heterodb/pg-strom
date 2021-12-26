@@ -309,22 +309,25 @@ extraSysfsSetupDistanceMap(const char *manual_config)
 static int (*p_sysfs_lookup_optimal_gpus)(int fdesc,
 										  int nrooms,
 										  int *optimal_gpus) = NULL;
-int
-extraSysfsLookupOptimalGpu(int fdesc)
+Bitmapset *
+extraSysfsLookupOptimalGpus(int fdesc)
 {
-	int	   *optimal_gpus;
-	int		nitems;
+	Bitmapset  *optimal_gpus = NULL;
+	int			i, nitems;
+	int		   *__gpus;
 
 	if (!p_sysfs_lookup_optimal_gpus || numDevAttrs == 0)
-		return -1;
-	optimal_gpus = alloca(sizeof(int) * numDevAttrs);
-	nitems = p_sysfs_lookup_optimal_gpus(fdesc,
-										 numDevAttrs, optimal_gpus);
+		return NULL;
+	__gpus = alloca(sizeof(int) * numDevAttrs);
+	nitems = p_sysfs_lookup_optimal_gpus(fdesc, numDevAttrs, __gpus);
 	if (nitems < 0)
 		heterodbExtraEreport(ERROR);
-	if (nitems == 0)
-		return -1;
-	return optimal_gpus[0];
+	for (i=0; i < nitems; i++)
+	{
+		Assert(__gpus[i] >= 0 && __gpus[i] < numDevAttrs);
+		optimal_gpus = bms_add_member(optimal_gpus, __gpus[i]);
+	}
+	return optimal_gpus;
 }
 
 /*

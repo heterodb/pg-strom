@@ -308,7 +308,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						List *outer_quals,
 						List *outer_refs_list,
 						List *used_params,
-						cl_int optimal_gpu,
+						const Bitmapset *optimal_gpus,
 						cl_uint outer_nrows_per_block,
 						cl_int eflags)
 {
@@ -319,7 +319,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	ListCell   *lc;
 
 	Assert(gts->gcontext == gcontext);
-	gts->optimal_gpu = optimal_gpu;
+	gts->optimal_gpus = optimal_gpus;
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->kern_params = 0UL;					/* to be set later */
@@ -360,7 +360,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 					fixup_varnode_to_origin((Node *)outer_quals,
 											cscan->custom_scan_tlist);
 			gts->af_state = ExecInitArrowFdw(&gts->css.ss,
-											 (optimal_gpu < 0 ? NULL : gcontext),
+											 bms_is_empty(optimal_gpus) ? NULL : gcontext,
 											 outer_quals_raw,
 											 outer_refs);
 		}
@@ -658,23 +658,35 @@ pgstromExplainGpuTaskState(GpuTaskState *gts,
 						   List *dcontext)
 {
 	Relation	rel = gts->css.ss.ss_currentRelation;
-	char		temp[320];
+	char		temp[1600];
 
 	/* GPU preference, if any */
-	if (es->verbose || gts->optimal_gpu >= 0)
+	if (!pgstrom_regression_test_mode)
 	{
-		if (gts->optimal_gpu < 0)
-			snprintf(temp, sizeof(temp), "None");
-		else
+		if (!bms_is_empty(gts->optimal_gpus))
 		{
-			DevAttributes  *dattr = &devAttrs[gts->optimal_gpu];
+			int		k, off = 0;
 
-			snprintf(temp, sizeof(temp), "GPU%d (%s)%s",
-					 dattr->DEV_ID, dattr->DEV_NAME,
-					 gts->af_state ? " with GPUDirect SQL" : "");
-		}
-		if (!pgstrom_regression_test_mode)
+			for (k = bms_next_member(gts->optimal_gpus, -1);
+				 k >= 0;
+				 k = bms_next_member(gts->optimal_gpus, k))
+			{
+				DevAttributes  *dattr = &devAttrs[k];
+
+				Assert(k >= 0 && k <= numDevAttrs);
+				if (off > 0)
+					off += snprintf(temp+off, sizeof(temp)-off, ", ");
+				off += snprintf(temp + off, sizeof(temp) - off,
+								"GPU%d (%s)",
+								dattr->DEV_ID, 
+								dattr->DEV_NAME);
+			}
 			ExplainPropertyText("GPU Preference", temp, es);
+		}
+		else if (es->verbose)
+		{
+			ExplainPropertyText("GPU Preference", "None", es);
+		}
 	}
 
 	/* NVMe-Strom support */

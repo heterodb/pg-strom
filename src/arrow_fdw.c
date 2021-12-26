@@ -338,7 +338,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	ListCell	   *lc;
 	int				parallel_nworkers;
 	bool			writable;
-	int				optimal_gpu = INT_MAX;
+	Bitmapset	   *optimal_gpus = (void *)(~0UL);
 	int				j, k;
 
 	/* columns to be fetched */
@@ -359,6 +359,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		File		fdesc;
 		List	   *rb_cached;
 		ListCell   *cell;
+		Bitmapset  *__gpus;
 		size_t		len = 0;
 
 		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
@@ -369,11 +370,13 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			elog(ERROR, "failed to open file '%s' on behalf of '%s'",
 				 fname, get_rel_name(foreigntableid));
 		}
-		k = GetOptimalGpuForFile(fdesc);
-		if (optimal_gpu == INT_MAX)
-			optimal_gpu = k;
-		else if (optimal_gpu != k)
-			optimal_gpu = -1;
+		/* lookup optimal GPUs */
+		__gpus = extraSysfsLookupOptimalGpus(fdesc);
+		if (optimal_gpus == (void *)(~0UL))
+			optimal_gpus = __gpus;
+		else
+			optimal_gpus = bms_intersect(optimal_gpus, __gpus);
+		/* lookup or build metadata cache */
 		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
 		foreach (cell, rb_cached)
 		{
@@ -406,13 +409,12 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	}
 	bms_free(referenced);
 
-	if (optimal_gpu < 0 || optimal_gpu >= numDevAttrs)
-		optimal_gpu = -1;
-	else if (filesSizeTotal < pgstrom_gpudirect_threshold())
-		optimal_gpu = -1;
+	if (optimal_gpus == (void *)(~0UL) ||
+		filesSizeTotal < pgstrom_gpudirect_threshold())
+		optimal_gpus = NULL;
 
 	baserel->rel_parallel_workers = parallel_nworkers;
-	baserel->fdw_private = makeInteger(optimal_gpu);
+	baserel->fdw_private = list_make1(optimal_gpus);
 	baserel->pages = npages;
 	baserel->tuples = ntuples;
 	baserel->rows = ntuples *
@@ -424,20 +426,20 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 }
 
 /*
- * GetOptimalGpuForArrowFdw
+ * GetOptimalGpusForArrowFdw
  *
- * optimal GPU index is saved at baserel->fdw_private
+ * optimal GPUs bitmap is saved at baserel->fdw_private
  */
-cl_int
-GetOptimalGpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
+Bitmapset *
+GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
-	if (!baserel->fdw_private)
+	if (baserel->fdw_private == NIL)
 	{
 		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
 
 		ArrowGetForeignRelSize(root, baserel, rte->relid);
 	}
-	return intVal(baserel->fdw_private);
+	return linitial(baserel->fdw_private);
 }
 
 static void
@@ -2135,7 +2137,7 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 						  Bitmapset *referenced,
 						  GpuContext *gcontext,
 						  MemoryContext mcontext,
-						  int optimal_gpu)
+						  const Bitmapset *optimal_gpus)
 {
 	TupleDesc			tupdesc = RelationGetDescr(relation);
 	pgstrom_data_store *pds;
@@ -2162,7 +2164,7 @@ __arrowFdwLoadRecordBatch(RecordBatchState *rb_state,
 	 * PDS on host-pinned memory, with strom_io_vector.
 	 */
 	if (gcontext &&
-		gcontext->cuda_dindex == optimal_gpu &&
+		bms_is_member(gcontext->cuda_dindex, optimal_gpus) &&
 		iovec->nr_chunks > 0 &&
 		kds->length <= gpuMemAllocIOMapMaxLength() &&
 		rb_state->dfile != NULL)
@@ -2215,7 +2217,7 @@ arrowFdwLoadRecordBatch(ArrowFdwState *af_state,
 						Relation relation,
 						EState *estate,
 						GpuContext *gcontext,
-						int optimal_gpu)
+						const Bitmapset *optimal_gpus)
 {
 	RecordBatchState *rb_state;
 	uint32		rb_index;
@@ -2242,7 +2244,7 @@ retry:
 									 af_state->referenced,
 									 gcontext,
 									 estate->es_query_cxt,
-									 optimal_gpu);
+									 optimal_gpus);
 }
 
 /*
@@ -2258,7 +2260,7 @@ ExecScanChunkArrowFdw(GpuTaskState *gts)
 								  gts->css.ss.ss_currentRelation,
 								  gts->css.ss.ps.state,
 								  gts->gcontext,
-								  gts->optimal_gpu);
+								  gts->optimal_gpus);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
 	return pds;
@@ -2287,7 +2289,8 @@ ArrowIterateForeignScan(ForeignScanState *node)
 		af_state->curr_pds = arrowFdwLoadRecordBatch(af_state,
 													 relation,
 													 estate,
-													 NULL, -1);
+													 NULL,
+													 NULL);
 		if (!af_state->curr_pds)
 			return NULL;
 	}
@@ -2568,7 +2571,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 									referenced,
 									NULL,
 									CurrentMemoryContext,
-									-1);
+									NULL);
 	values = alloca(sizeof(Datum) * tupdesc->natts);
 	isnull = alloca(sizeof(bool)  * tupdesc->natts);
 	for (count = 0; count < nsamples; count++)

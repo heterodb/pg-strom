@@ -24,7 +24,7 @@ static bool					enable_pullup_outer_scan;
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
-	cl_int		optimal_gpu;	/* optimal GPU selection, or -1 */
+	const Bitmapset *optimal_gpus; /* optimal GPUs */
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	cl_uint		extra_bufsz;	/* buffer size of temporary varlena datum */
@@ -43,7 +43,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 
-	privs = lappend(privs, makeInteger(gs_info->optimal_gpu));
+	privs = lappend(privs, bms_to_pglist(gs_info->optimal_gpus));
 	privs = lappend(privs, makeString(gs_info->kern_source));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->extra_bufsz));
@@ -68,7 +68,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	int			pindex = 0;
 	int			eindex = 0;
 
-	gs_info->optimal_gpu = intVal(list_nth(privs, pindex++));
+	gs_info->optimal_gpus = bms_from_pglist(list_nth(privs, pindex++));
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->extra_bufsz = intVal(list_nth(privs, pindex++));
@@ -193,7 +193,7 @@ create_gpuscan_path(PlannerInfo *root,
 											&startup_cost,
 											&run_cost);
 	/* save the optimal GPU for the scan target */
-	gs_info->optimal_gpu = GetOptimalGpuForRelation(root, baserel);
+	gs_info->optimal_gpus = GetOptimalGpusForRelation(root, baserel);
 	/* save the BRIN-index if preferable to use */
 	if ((scan_mode & PGSTROM_RELSCAN_BRIN_INDEX) != 0)
 	{
@@ -1436,7 +1436,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 						  const Path *outer_path,
 						  Index *p_outer_relid,
 						  List **p_outer_quals,
-						  cl_int *p_cuda_dindex,
+						  const Bitmapset **p_optimal_gpus,
 						  IndexOptInfo **p_index_opt,
 						  List **p_index_conds,
 						  List **p_index_quals,
@@ -1446,7 +1446,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 	PathTarget *outer_target = outer_path->pathtarget;
 	List	   *outer_quals = NIL;
 	List	   *outer_costs = NIL;
-	cl_int		cuda_dindex = -1;
+	const Bitmapset *optimal_gpus = NULL;
 	IndexOptInfo *indexOpt = NULL;
 	List	   *indexConds = NIL;
 	List	   *indexQuals = NIL;
@@ -1514,7 +1514,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 			return false;
 	}
 	/* Optimal GPU selection */
-	cuda_dindex = GetOptimalGpuForRelation(root, baserel);
+	optimal_gpus = GetOptimalGpusForRelation(root, baserel);
 
 	/* BRIN-index parameters */
 	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
@@ -1523,7 +1523,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 										 &indexNBlocks);
 	*p_outer_relid = baserel->relid;
 	*p_outer_quals = outer_quals;
-	*p_cuda_dindex = cuda_dindex;
+	*p_optimal_gpus = optimal_gpus;
 	*p_index_opt = indexOpt;
 	*p_index_conds = indexConds;
 	*p_index_quals = indexQuals;
@@ -1645,7 +1645,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlanState(node) == NULL);
 	
 	/* setup GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(gs_info->optimal_gpu, false, false);
+	gcontext = AllocGpuContext(gs_info->optimal_gpus, false, false);
 	gss->gts.gcontext = gcontext;
 
 	/*
@@ -1667,7 +1667,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							gs_info->dev_quals,
 							gs_info->outer_refs,
 							gs_info->used_params,
-							gs_info->optimal_gpu,
+							gs_info->optimal_gpus,
 							gs_info->nrows_per_block,
 							eflags);
 	gss->gts.cb_next_task   = gpuscan_next_task;

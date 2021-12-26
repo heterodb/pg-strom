@@ -46,7 +46,7 @@ typedef struct
 	List		   *index_quals;	/* Original BRIN-index qualifiers */
 	List		   *tlist_part;		/* template of kds_final */
 	List		   *tlist_prep;		/* template of kds_slot */
-	int				optimal_gpu;
+	const Bitmapset *optimal_gpus;
 	char		   *kern_source;
 	cl_uint			extra_flags;
 	cl_uint			extra_bufsz;
@@ -77,7 +77,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	exprs = lappend(exprs, gpa_info->index_quals);
 	exprs = lappend(exprs, gpa_info->tlist_part);
 	exprs = lappend(exprs, gpa_info->tlist_prep);
-	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
+	privs = lappend(privs, bms_to_pglist(gpa_info->optimal_gpus));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, makeInteger(gpa_info->extra_bufsz));
@@ -114,7 +114,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->index_quals = list_nth(exprs, eindex++);
 	gpa_info->tlist_part = list_nth(exprs, eindex++);
 	gpa_info->tlist_prep = list_nth(exprs, eindex++);
-	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
+	gpa_info->optimal_gpus = bms_from_pglist(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->extra_bufsz = intVal(list_nth(privs, pindex++));
@@ -1392,19 +1392,19 @@ make_gpupreagg_path(PlannerInfo *root,
 		return NULL;
 
 	/* Try to pull up input_path if simple relation scan */
-	gpa_info->optimal_gpu = -1;
+	gpa_info->optimal_gpus = NULL;
 	if (!can_pullup_outerscan ||
 		!pgstrom_pullup_outer_scan(root, input_path,
 								   &gpa_info->outer_scanrelid,
 								   &gpa_info->outer_quals,
-								   &gpa_info->optimal_gpu,
+								   &gpa_info->optimal_gpus,
 								   &index_opt,
 								   &index_conds,
 								   &index_quals,
 								   &index_nblocks))
 	{
 		if (pgstrom_path_is_gpujoin(input_path))
-			gpa_info->optimal_gpu = gpujoin_get_optimal_gpu(input_path);
+			gpa_info->optimal_gpus = gpujoin_get_optimal_gpus(input_path);
 		custom_paths = list_make1(input_path);
 	}
 
@@ -4668,7 +4668,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu, false, false);
+	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpus, false, false);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,
@@ -4677,7 +4677,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 							gpa_info->outer_quals,
 							gpa_info->outer_refs,
 							gpa_info->used_params,
-							gpa_info->optimal_gpu,
+							gpa_info->optimal_gpus,
 							gpa_info->outer_nrows_per_block,
 							eflags);
 	gpas->gts.cb_next_task       = gpupreagg_next_task;
