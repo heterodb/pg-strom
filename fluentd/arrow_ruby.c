@@ -2057,7 +2057,7 @@ __arrowFileReleaseTable(SQLtable *table)
 }
 
 static VALUE
-__arrowFileWriteRow(VALUE __yield, VALUE __private, int argc, VALUE *argv)
+__arrowFileWriteRow(RB_BLOCK_CALL_FUNC_ARGLIST(__yield, __private))
 {
 	WriteChunkArgs *args = (WriteChunkArgs *)__private;
 	SQLtable   *table = args->table;
@@ -2165,7 +2165,7 @@ rb_ArrowFile__test(VALUE self, VALUE datum)
 #endif
 
 void
-Init_ArrowFile(void)
+Init_arrow_file(void)
 {
 	VALUE	klass;
 
