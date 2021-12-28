@@ -3,15 +3,16 @@ MODULE = arrow_file.so
 OBJS = arrow_nodes.o arrow_write.o arrow_ruby.o
 HEAD = arrow_defs.h arrow_ipc.h float2.h
 
+INC_PATHS = .
 ifneq ($(TD_AGENT),1)
-INC_PATHS = . /usr/include
-LIB_PATHS = /usr/lib64
 DEST_PATH = /usr/lib64/ruby/
 else
-INC_PATHS = . /opt/td-agent/include/ruby-2.7.0 /usr/include
-LIB_PATHS = /opt/td-agent/lib /usr/lib64
-DEST_PATH = /opt/td-agent/lib/ruby/2.7.0/x86_64-linux/
+INC_PATHS += $(shell dirname `ls /opt/td-agent/include/*/ruby.h`)
+LIB_PATHS += /opt/td-agent/lib
+DEST_PATH =  $(shell dirname `find /opt/td-agent | grep '/zlib.so$$'`)
 endif
+INC_PATHS += /usr/include
+LIB_PATHS += /usr/lib64
 
 CFLAGS = -g -O2 -fPIC -pipe -Wall \
          $(addprefix -I ,$(INC_PATHS)) \
