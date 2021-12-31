@@ -686,8 +686,9 @@ pgstrom_pullup_outer_refs(PlannerInfo *root,
  */
 typedef struct
 {
-	Oid		tablespace_oid;
-	int		optimal_gpu;
+	Oid			tablespace_oid;
+	bool		is_valid;
+	Bitmapset	optimal_gpus;
 } tablespace_optimal_gpu_hentry;
 
 static HTAB	   *tablespace_optimal_gpu_htable = NULL;
@@ -704,30 +705,16 @@ tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 /*
- * GetOptimalGpuForFile
+ * GetOptimalGpusForTablespace
  */
-int
-GetOptimalGpuForFile(File filp)
-{
-	int		fdesc = FileGetRawDesc(filp);
-
-	if (fdesc < 0)
-		elog(ERROR, "file [%s] is not opened now",
-			 FilePathName(filp));
-	return extraSysfsLookupOptimalGpu(fdesc);
-}
-
-/*
- * GetOptimalGpuForTablespace
- */
-static cl_int
-GetOptimalGpuForTablespace(Oid tablespace_oid)
+static const Bitmapset *
+GetOptimalGpusForTablespace(Oid tablespace_oid)
 {
 	tablespace_optimal_gpu_hentry *hentry;
 	bool		found;
 
 	if (!pgstrom_gpudirect_enabled())
-		return -1;
+		return NULL;
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
@@ -735,10 +722,12 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	if (!tablespace_optimal_gpu_htable)
 	{
 		HASHCTL		hctl;
+		int			nwords = (numDevAttrs / BITS_PER_BITMAPWORD) + 1;
 
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = sizeof(tablespace_optimal_gpu_hentry);
+		hctl.entrysize = MAXALIGN(offsetof(tablespace_optimal_gpu_hentry,
+										   optimal_gpus.words[nwords]));
 		tablespace_optimal_gpu_htable
 			= hash_create("TablespaceOptimalGpu", 128,
 						  &hctl, HASH_ELEM | HASH_BLOBS);
@@ -749,87 +738,81 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 					&tablespace_oid,
 					HASH_ENTER,
 					&found);
-	if (!found)
+	if (!found || !hentry->is_valid)
 	{
-		PG_TRY();
-		{
-			char   *pathname;
-			int		fdesc;
+		char	   *pathname;
+		File		filp;
+		Bitmapset  *optimal_gpus;
 
-			Assert(hentry->tablespace_oid == tablespace_oid);
-			hentry->optimal_gpu = -1;
+		Assert(hentry->tablespace_oid == tablespace_oid);
 
-			pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-			fdesc = open(pathname, O_RDONLY);
-			if (fdesc < 0)
-			{
-				elog(WARNING, "failed on open('%s') of tablespace %u: %m",
-					 pathname, tablespace_oid);
-			}
-			else
-			{
-				hentry->optimal_gpu = extraSysfsLookupOptimalGpu(fdesc);
-				close(fdesc);
-			}
-		}
-		PG_CATCH();
+		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+		filp = PathNameOpenFile(pathname, O_RDONLY);
+		if (filp < 0)
 		{
-			hash_search(tablespace_optimal_gpu_htable,
-						&tablespace_oid,
-						HASH_REMOVE,
-						NULL);
-			PG_RE_THROW();
+			elog(WARNING, "failed on open('%s') of tablespace %u: %m",
+				 pathname, tablespace_oid);
+			return NULL;
 		}
-		PG_END_TRY();
+		optimal_gpus = extraSysfsLookupOptimalGpus(filp);
+		if (!optimal_gpus)
+			hentry->optimal_gpus.nwords = 0;
+		else
+		{
+			Assert(optimal_gpus->nwords <= (numDevAttrs / BITS_PER_BITMAPWORD) + 1);
+			memcpy(&hentry->optimal_gpus, optimal_gpus,
+				   offsetof(Bitmapset, words[optimal_gpus->nwords]));
+			bms_free(optimal_gpus);
+		}
+		FileClose(filp);
+		hentry->is_valid = true;
 	}
-	return hentry->optimal_gpu;
+	Assert(hentry->is_valid);
+	return (hentry->optimal_gpus.nwords > 0 ? &hentry->optimal_gpus : NULL);
 }
 
-cl_int
-GetOptimalGpuForRelation(PlannerInfo *root, RelOptInfo *rel)
+const Bitmapset *
+GetOptimalGpusForRelation(PlannerInfo *root, RelOptInfo *rel)
 {
 	RangeTblEntry *rte;
 	HeapTuple	tup;
 	char		relpersistence;
-	cl_int		cuda_dindex;
+	const Bitmapset *optimal_gpus;
 
 	if (baseRelIsArrowFdw(rel))
 	{
 		if (pgstrom_gpudirect_enabled())
-			return GetOptimalGpuForArrowFdw(root, rel);
-		return -1;
+			return GetOptimalGpusForArrowFdw(root, rel);
+		return NULL;
 	}
 
-	cuda_dindex = GetOptimalGpuForTablespace(rel->reltablespace);
-	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
-		return -1;
+	optimal_gpus = GetOptimalGpusForTablespace(rel->reltablespace);
+	if (!bms_is_empty(optimal_gpus))
+	{
+		/* only permanent / unlogged table can use NVMe-Strom */
+		rte = root->simple_rte_array[rel->relid];
+		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for relation %u", rte->relid);
+		relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
+		ReleaseSysCache(tup);
 
-	/* only permanent / unlogged table can use NVMe-Strom */
-	rte = root->simple_rte_array[rel->relid];
-	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
-	relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
-	ReleaseSysCache(tup);
-
-	if (relpersistence == RELPERSISTENCE_PERMANENT ||
-		relpersistence == RELPERSISTENCE_UNLOGGED)
-		return cuda_dindex;
-
-	return -1;
+		if (relpersistence == RELPERSISTENCE_PERMANENT ||
+			relpersistence == RELPERSISTENCE_UNLOGGED)
+			return optimal_gpus;
+	}
+	return NULL;
 }
 
 bool
 RelationCanUseNvmeStrom(Relation relation)
 {
 	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
-	cl_int	cuda_dindex;
+
 	/* SSD2GPU on temp relation is not supported */
 	if (RelationUsesLocalBuffers(relation))
 		return false;
-	cuda_dindex = GetOptimalGpuForTablespace(tablespace_oid);
-	return (cuda_dindex >= 0 &&
-			cuda_dindex <  numDevAttrs);
+	return !bms_is_empty(GetOptimalGpusForTablespace(tablespace_oid));
 }
 
 /*
@@ -853,7 +836,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 	 */
 	if (baserel->reloptkind == RELOPT_BASEREL)
 	{
-		if (GetOptimalGpuForRelation(root, baserel) >= 0)
+		if (!bms_is_empty(GetOptimalGpusForRelation(root, baserel)))
 			num_scan_pages = baserel->pages;
 	}
 	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
@@ -886,7 +869,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 			if (appinfo->parent_relid != parent_relid)
 				continue;
 			rel = root->simple_rel_array[appinfo->child_relid];
-			if (GetOptimalGpuForRelation(root, rel) >= 0)
+			if (!bms_is_empty(GetOptimalGpusForRelation(root, rel)))
 				num_scan_pages += rel->pages;
 		}
 	}

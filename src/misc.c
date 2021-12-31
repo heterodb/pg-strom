@@ -408,6 +408,37 @@ bms_to_cstring(Bitmapset *bms)
 }
 
 /*
+ * Bitmapset <-> numeric List transition
+ */
+List *
+bms_to_pglist(const Bitmapset *bms)
+{
+	List   *pglist = NIL;
+	int		k;
+
+	for (k = bms_next_member(bms, -1);
+		 k >= 0;
+		 k = bms_next_member(bms, k))
+	{
+		pglist = lappend_int(pglist, k);
+	}
+	return pglist;
+}
+
+Bitmapset *
+bms_from_pglist(List *pglist)
+{
+	Bitmapset  *bms = NULL;
+	ListCell   *lc;
+
+	foreach (lc, pglist)
+	{
+		bms = bms_add_member(bms, lfirst_int(lc));
+	}
+	return bms;
+}
+
+/*
  * pathnode_tree_walker
  */
 static bool

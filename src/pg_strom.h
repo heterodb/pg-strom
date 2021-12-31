@@ -339,8 +339,9 @@ struct GpuTaskState
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	CUmodule		cuda_module;	/* CUDA binary module */
-	kern_parambuf  *kern_params;	/* Const/Param buffer */
-	cl_int			optimal_gpu;	/* GPU preference on plan time */
+	CUdeviceptr		kern_params;	/* Const/Param buffer */
+	List		   *used_params;	/* Const/Param expressions */
+	const Bitmapset *optimal_gpus;	/* GPUs preference on plan time */
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */
@@ -788,7 +789,7 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 	CHECK_FOR_INTERRUPTS();
 }
 extern CUresult gpuInit(unsigned int flags);
-extern GpuContext *AllocGpuContext(int cuda_dindex,
+extern GpuContext *AllocGpuContext(const Bitmapset *optimal_gpus,
 								   bool activate_context,
 								   bool activate_workers);
 extern void ActivateGpuContext(GpuContext *gcontext);
@@ -906,16 +907,14 @@ CHECK_WORKER_TERMINATION(void)
 /*
  * gpu_tasks.c
  */
-extern kern_parambuf *construct_kern_parambuf(List *used_params,
-											  ExprContext *econtext,
-											  List *custom_scan_tlist);
+extern CUdeviceptr pgstromSetupKernParambuf(GpuTaskState *gts);
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,
 									List *outer_quals,
 									List *outer_refs,
 									List *used_params,
-									cl_int optimal_gpu,
+									const Bitmapset *optimal_gpus,
 									cl_uint outer_nrows_per_block,
 									cl_int eflags);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
@@ -1142,9 +1141,8 @@ extern Bitmapset *pgstrom_pullup_outer_refs(PlannerInfo *root,
 											RelOptInfo *base_rel,
 											Bitmapset *referenced);
 
-extern int	GetOptimalGpuForFile(File fdesc);
-extern int	GetOptimalGpuForRelation(PlannerInfo *root,
-									 RelOptInfo *rel);
+extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
+												  RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
@@ -1190,7 +1188,7 @@ extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
 									  const Path *outer_path,
 									  Index *p_outer_relid,
 									  List **p_outer_quals,
-									  cl_int *p_cuda_dindex,
+									  const Bitmapset **p_optimal_gpus,
 									  IndexOptInfo **p_index_opt,
 									  List **p_index_conds,
 									  List **p_index_quals,
@@ -1212,7 +1210,7 @@ extern bool pgstrom_path_is_gpujoin(const Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
-extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
+extern const Bitmapset *gpujoin_get_optimal_gpus(const Path *pathnode);
 
 #if PG_VERSION_NUM >= 110000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
@@ -1267,8 +1265,8 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool RelationIsArrowFdw(Relation frel);
-extern cl_int GetOptimalGpuForArrowFdw(PlannerInfo *root,
-									   RelOptInfo *baserel);
+extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
+											RelOptInfo *baserel);
 extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index);
@@ -1355,6 +1353,8 @@ extern Oid	get_object_extension_oid(Oid class_id,
 									 int32 objsub_id,
 									 bool missing_ok);
 extern char *bms_to_cstring(Bitmapset *x);
+extern List *bms_to_pglist(const Bitmapset *bms);
+extern Bitmapset *bms_from_pglist(List *pglist);
 extern bool pathtree_has_gpupath(Path *node);
 extern bool pathtree_has_parallel_aware(Path *node);
 extern Path *pgstrom_copy_pathnode(const Path *pathnode);
@@ -1406,7 +1406,7 @@ extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
 extern void	extraSysfsSetupDistanceMap(const char *manual_config);
-extern int	extraSysfsLookupOptimalGpu(int fdesc);
+extern Bitmapset *extraSysfsLookupOptimalGpus(int fdesc);
 extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
