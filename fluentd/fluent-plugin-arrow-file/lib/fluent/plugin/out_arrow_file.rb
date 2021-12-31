@@ -1,6 +1,6 @@
 
 require "fluent/plugin/output"
-require_relative '/home/onishi/pg-strom/fluentd/ArrowFile.so'
+require 'arrow_file'
 
 module Fluent
   module Plugin
