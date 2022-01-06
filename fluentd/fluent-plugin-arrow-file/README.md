@@ -1,6 +1,6 @@
 # fluent-plugin-arrow-file
 
-[Fluentd](https://fluentd.org/) output plugin to do something.
+[Fluentd](https://fluentd.org/) output plugin to Apache Arrow file.
 
 TODO: write description for you plugin.
 

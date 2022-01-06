@@ -5,14 +5,12 @@ Gem::Specification.new do |spec|
   spec.name    = "fluent-plugin-arrow-file"
   spec.version = "0.1.0"
   spec.authors = ["HeteroDB"]
-  spec.email   = ["onishi@heterodb.com"]
+  spec.email   = ["contact@heterodb.com"]
 
-  #spec.summary       = %q{TODO: Write a short summary, because Rubygems requires one.}
-  #spec.description   = %q{TODO: Write a longer description or delete this line.}
   spec.summary       = "write arrow file"
   spec.description   = "write arrow file"
   spec.homepage      = "https://www.heterodb.com/"
-  spec.license       = ""
+  spec.license       = "PostgreSQL License"
 
   test_files, files  = `git ls-files -z`.split("\x0").partition do |f|
     f.match(%r{^(test|spec|features)/})

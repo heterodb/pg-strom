@@ -12,11 +12,15 @@ module Fluent
       desc "The Path of the arrow file"
       config_param :path, :string
       config_param :schema_defs, :string
+      config_param :ts_column, :string, default: NIL
+      config_param :tag_column, :string, default: NIL
+      config_param :filesize_thresold, :integer, default: 10000 * 1024 * 1024
 
       config_section :buffer do
         config_set_default :@type, 'memory'
         config_set_default :chunk_keys, ['tag']
-        config_set_default :chunk_limit_size, 2 * 1024 * 1024
+        # fit pg2arrow default 256MB
+        config_set_default :chunk_limit_size, 256 * 1024 * 1024
       end
 
       def prefer_buffered_processing
@@ -29,11 +33,9 @@ module Fluent
 
       def configure(conf)
         compat_parameters_convert(conf, :buffer, :inject, default_chunk_key: "time")
-
-        p conf
         super
 
-        @af=ArrowFile.new(@path,@schema_defs,{"ts_column" => "yourtime","tag_column" => "yourtag","filesize_threshold" => 10000})
+        @af=ArrowFile.new(@path,@schema_defs,{"ts_column" => @ts_column,"tag_column" => @tag_column,"filesize_threshold" => @filesize_threshold})
       end
 
       def format(tag,time,record)
