@@ -22,14 +22,15 @@
 	struct arrowColumn *column, \
 	const char *rb_chunk,		\
 	ArrowBuffer *buffers,		\
-	int64_t index
+	int64_t index,				\
+	const char *quote
 
 typedef struct arrowColumn
 {
 	ArrowType	arrow_type;
 	const char *colname;
 	const char *sqltype;
-	void	  (*print_datum)(ARROW_PRINT_DATUM_ARGS);
+	bool	  (*print_datum)(ARROW_PRINT_DATUM_ARGS);
 	bool		nullable;
 	int			buffer_index;
 	int			buffer_count;
@@ -45,19 +46,14 @@ static arrowColumn *arrow_columns = NULL;
 static int			arrow_num_columns = 0;
 static const char  *output_filename = NULL;
 static FILE		   *output_filp = NULL;
-static bool			csv_format = false;
-static bool			csv_header = false;
-static bool			schema_only = false;
+static bool			print_header = false;
+static char			csv_delimiter = ',';
+static char			current_context = 'n';
 static int64_t		num_skip_rows = -1;			/* --offset */
 static int64_t		num_dump_rows = -1;			/* --limit */
 static const char  *create_table_name = NULL;	/* --create-table */
 static const char  *tablespace_name = NULL;		/* --tablespace */
 static const char  *partition_name = NULL;		/* --partition-of */
-static const char  *current_tz_name = NULL;
-static const char  *current_datum_quote = "";
-
-#define Min(a,b)		((a) < (b) ? (a) : (b))
-#define Max(a,b)		((a) > (b) ? (b) : (a))
 
 static void
 usage(void)
@@ -66,15 +62,15 @@ usage(void)
 		  "OPTIONS:\n"
 		  "  -o|--output=FILENAME specify the output filename\n"
 		  "                 (default: stdout)\n"
-		  "  --csv          dump arrow files as CSV format\n"
-		  "  --header       dump column names as CSV header\n"
+		  "  --header       dump column names as csv header\n"
 		  "  --offset NUM   skip first NUM rows\n"
 		  "  --limit NUM    dump only NUM rows\n"
 		  "\n"
 		  "  --create-table=TABLE_NAME  dump with CREATE TABLE statement\n"
 		  "  --tablespace=TABLESPACE    specify tablespace of the table, if any\n"
 		  "  --partition-of=PARENT_NAME specify partition-parent of the table, if any\n"
-		  "  --schema-only  skip data dump\n"
+		  "\n"
+		  "  --help         print this message.\n"
 		  "\n"
 		  "Report bugs to <pgstrom@heterodb.com>.\n",
 		  stderr);
@@ -149,29 +145,34 @@ quote_ident(const char *ident)
 static void
 printNullDatum(void)
 {
-	fputs("null", output_filp);
+	/* print "null" only if List elements */
+	if (current_context == 'e')
+		fprintf(output_filp, "null");
 }
 
 static void
 printArrowDatum(arrowColumn *column,
 				ArrowBuffer *buffers,
 				const char *rb_chunk,
-				int64_t index)
+				int64_t index,
+				const char *quote)
 {
 	/* null checks */
 	if (column->nullable)
 	{
 		const char *nullmap = rb_chunk + buffers[0].offset;
 		int64_t		k = (index >> 3);
+		int32_t		mask = (1 << (index & 7));
 
-		if (k < buffers[0].length &&
-			(nullmap[k] & (1 << (index & 7))) == 0)
+		if (k < buffers[0].length && (nullmap[k] & mask) == 0)
 		{
 			printNullDatum();
 			return;
 		}
 	}
-	column->print_datum(column, rb_chunk, buffers, index);
+	if (column->print_datum(column, rb_chunk, buffers, index, quote))
+		return;
+	printNullDatum();
 }
 
 static inline const void *
@@ -195,178 +196,247 @@ __print_arrow_common_varlena(ARROW_PRINT_DATUM_ARGS, size_t *p_sz)
 
 #define ARROW_PRINT_DATUM_SETUP_INLINE(__TYPE)				\
 	__TYPE		datum;										\
-	if (sizeof(__TYPE) * (index+1) > buffers[1].length)	\
-	{														\
-		printNullDatum();									\
-		return;												\
-	}														\
+	if (sizeof(__TYPE) * (index+1) > buffers[1].length)		\
+		return false;										\
 	datum = ((const __TYPE *)(rb_chunk + buffers[1].offset))[index]
 
 #define ARROW_PRINT_DATUM_SETUP_FIXEDSIZEBINARY(__WIDTH)	\
 	const unsigned char *addr;								\
 	if ((__WIDTH) * (index+1) > buffers[1].length)			\
-	{														\
-		printNullDatum();									\
-		return;												\
-	}														\
+		return false;										\
 	addr = (const unsigned char *)							\
 		(rb_chunk + buffers[1].offset + (__WIDTH) * index)
 
-#define ARROW_PRINT_DATUM_SETUP_VARLENA()					\
-	const uint32_t *__values ;								\
-	const char	   *addr;									\
-	uint32_t		sz, __head, __tail;						\
-															\
-	if (sizeof(uint32_t) * (index+2) > buffers[1].length)	\
-	{														\
-		printNullDatum();									\
-		return;												\
-	}														\
-	__values = (const uint32_t *)							\
-		(rb_chunk + buffers[1].offset);						\
-	__head = __values[index];								\
-	__tail = __values[index+1];								\
-	if (__tail > buffers[2].length)							\
-	{														\
-		printNullDatum();									\
-		return;												\
-	}														\
-	addr = rb_chunk + buffers[2].offset + __head;			\
-	sz = __tail - __head
+static inline const void *
+__arrow_fetch_varlena32(const char *rb_chunk,
+						ArrowBuffer *buffers,
+						int64_t index,
+						size_t *p_sz)
+{
+	const uint32_t *values;
+	uint32_t		head, tail;
 
-static void
+	if (sizeof(uint32_t) * (index+2) > buffers[1].length)
+		return (const void *)NULL;
+	values = (const uint32_t *)(rb_chunk + buffers[1].offset);
+	head = values[index];
+	tail = values[index+1];
+	if (tail > buffers[2].length)
+		return (const void *)NULL;
+	*p_sz = (tail - head);
+	return (rb_chunk + buffers[2].offset + head);
+}
+
+static inline const void *
+__arrow_fetch_varlena64(const char *rb_chunk,
+						ArrowBuffer *buffers,
+						int64_t index,
+						size_t *p_sz)
+{
+	const uint64_t *values;
+	uint64_t		head, tail;
+
+	if (sizeof(uint64_t) * (index+2) > buffers[1].length)
+		return (const void *)NULL;
+	values = (const uint64_t *)(rb_chunk + buffers[1].offset);
+	head = values[index];
+	tail = values[index+1];
+	if (tail > buffers[2].length)
+		return (const void *)NULL;
+	*p_sz = (tail - head);
+	return (rb_chunk + buffers[2].offset + head);
+}
+
+static bool
 print_arrow_int8(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(int8_t);
-
 	fprintf(output_filp, "%d", (int)datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_uint8(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(uint8_t);
-
 	fprintf(output_filp, "%u", (unsigned int)datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_int16(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(int16_t);
-
 	fprintf(output_filp, "%d", (int)datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_uint16(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(int16_t);
-
 	fprintf(output_filp, "%u", (unsigned int)datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_int32(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(int32_t);
-
 	fprintf(output_filp, "%d", datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_uint32(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(uint32_t);
-
 	fprintf(output_filp, "%u", datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_int64(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(int64_t);
-
 	fprintf(output_filp, "%ld", datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_uint64(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(uint64_t);
-
 	fprintf(output_filp, "%lu", datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_float2(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(uint16_t);
-
 	fprintf(output_filp, "%f", fp16_to_fp64(datum));
+	return true;
 }
 
-static void
+static bool
 print_arrow_float4(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(float);
-
 	fprintf(output_filp, "%f", (double)datum);
+	return true;
 }
 
-static void
+static bool
 print_arrow_float8(ARROW_PRINT_DATUM_ARGS)
 {
 	ARROW_PRINT_DATUM_SETUP_INLINE(double);
-
 	fprintf(output_filp, "%f", datum);
+	return true;
 }
 
-static void
-print_arrow_utf8(ARROW_PRINT_DATUM_ARGS)
+static bool
+__print_arrow_utf8_common(const char *addr, size_t sz, const char *quote)
 {
-	ARROW_PRINT_DATUM_SETUP_VARLENA();
+	size_t	i;
 
-	fwrite(addr, 1, sz, output_filp);
-}
-
-static void
-print_arrow_binary(ARROW_PRINT_DATUM_ARGS)
-{
-	size_t		i;
-	ARROW_PRINT_DATUM_SETUP_VARLENA();
-
-	fprintf(output_filp, "\\x");
+	fprintf(output_filp, "%s", quote);
 	for (i=0; i < sz; i++)
 	{
-		static const char hextbl[] = "0123456789abcdef";
-		int		c = ((unsigned char *)addr)[i];
+		int		c = (unsigned char)addr[i];
+
+		if (c == '"')
+			fputc('"', output_filp);
+		fputc(c, output_filp);
+	}
+	fprintf(output_filp, "%s", quote);
+	return true;
+}
+
+static bool
+print_arrow_utf8(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena32(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_utf8_common(addr, sz, quote);
+}
+
+static bool
+print_arrow_large_utf8(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena64(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_utf8_common(addr, sz, quote);
+}
+
+static bool
+__print_arrow_binary_common(const char *addr, size_t sz, const char *quote)
+{
+	static const char hextbl[] = "0123456789abcdef";
+	size_t	i;
+
+	fprintf(output_filp, "%s\\x", quote);
+	for (i=0; i < sz; i++)
+	{
+		int		c = (unsigned char)addr[i];
 
 		fputc(hextbl[(c >> 4) & 0x0f], output_filp);
 		fputc(hextbl[(c & 0x0f)], output_filp);
 	}
+	fprintf(output_filp, "%s", quote);
+	return true;
 }
 
-static void
+static bool
+print_arrow_binary(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena32(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_binary_common(addr, sz, quote);
+}
+
+static bool
+print_arrow_large_binary(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena64(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_binary_common(addr, sz, quote);
+}
+
+static bool
 print_arrow_bool(ARROW_PRINT_DATUM_ARGS)
 {
 	int64_t		k = (index << 3);
+	int32_t		mask = (1 << (index & 7));
 	const char *bitmap = rb_chunk + buffers[1].offset;
 
-	if (k < buffers[1].offset)
-	{
-		if ((bitmap[k] & (1 << (index & 7))) != 0)
-			fprintf(output_filp, "true");
-		else
-			fprintf(output_filp, "false");
-	}
+	if (k >= buffers[1].length)
+		return false;
+
+	if ((bitmap[k] & mask) != 0)
+		fprintf(output_filp, "true");
 	else
-	{
-		printNullDatum();
-	}
+		fprintf(output_filp, "false");
+	return true;
 }
 
-static void
+static bool
 print_arrow_decimal128(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		scale = column->arrow_type.Decimal.scale;
@@ -386,7 +456,7 @@ print_arrow_decimal128(ARROW_PRINT_DATUM_ARGS)
 			while (scale-- > 0)
 				fputc('0', output_filp);
 		}
-		return;
+		return true;
 	}
 	/* negative handling */
 	if (datum < 0)
@@ -432,9 +502,10 @@ print_arrow_decimal128(ARROW_PRINT_DATUM_ARGS)
 	if (negative)
 		*--pos = '-';
 	fprintf(output_filp, "%s", pos);
+	return true;
 }
 
-static void
+static bool
 print_arrow_date_day(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -444,14 +515,15 @@ print_arrow_date_day(ARROW_PRINT_DATUM_ARGS)
 	t = (time_t)datum * 86400LL;
 	gmtime_r(&t, &tm);
 	fprintf(output_filp, "%s%04d-%02d-%02d%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_date_ms(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -463,7 +535,7 @@ print_arrow_date_ms(ARROW_PRINT_DATUM_ARGS)
 	t = datum / 1000;
 	gmtime_r(&t, &tm);
 	fprintf(output_filp, "%s%04d-%02d-%02d %02d:%02d:%02d.%03d%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
@@ -471,10 +543,11 @@ print_arrow_date_ms(ARROW_PRINT_DATUM_ARGS)
 			tm.tm_min,
 			tm.tm_sec,
 			msec,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_time_sec(ARROW_PRINT_DATUM_ARGS)
 {
 	uint32_t	min, sec;
@@ -485,12 +558,13 @@ print_arrow_time_sec(ARROW_PRINT_DATUM_ARGS)
 	min = datum % 60;
 	datum /= 60;
 	fprintf(output_filp, "%s%02u:%02u:%02u%s",
-			current_datum_quote,
+			quote,
 			datum, min, sec,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_time_ms(ARROW_PRINT_DATUM_ARGS)
 {
 	uint32_t	min, sec, ms;
@@ -503,12 +577,13 @@ print_arrow_time_ms(ARROW_PRINT_DATUM_ARGS)
 	min = datum % 60;
 	datum /= 60;
 	fprintf(output_filp, "%s%02u:%02u:%02u.%03u%s",
-			current_datum_quote,
+			quote,
 			datum, min, sec, ms,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_time_us(ARROW_PRINT_DATUM_ARGS)
 {
 	uint32_t	min, sec, us;
@@ -521,12 +596,13 @@ print_arrow_time_us(ARROW_PRINT_DATUM_ARGS)
 	min = datum % 60;
 	datum /= 60;
 	fprintf(output_filp, "%s%02d:%02d:%02d.%06d%s",
-			current_datum_quote,
+			quote,
 			(uint32_t)datum, min, sec, us,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_time_ns(ARROW_PRINT_DATUM_ARGS)
 {
 	uint32_t	min, sec, ns;
@@ -539,14 +615,17 @@ print_arrow_time_ns(ARROW_PRINT_DATUM_ARGS)
 	min = datum % 60;
 	datum /= 60;
 	fprintf(output_filp, "%s%02d:%02d:%02d.%09d%s",
-			current_datum_quote,
+			quote,
 			(uint32_t)datum, min, sec, ns,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static inline bool
+static bool
 __assign_timestamp_timezone(ArrowTypeTimestamp *timestamp)
 {
+	static const char  *current_tz_name = NULL;
+
 	if (!timestamp->timezone)
 		return false;
 	if (!current_tz_name || strcmp(current_tz_name, timestamp->timezone) != 0)
@@ -558,7 +637,7 @@ __assign_timestamp_timezone(ArrowTypeTimestamp *timestamp)
 	return true;
 }
 
-static void
+static bool
 print_arrow_timestamp_sec(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -572,17 +651,18 @@ print_arrow_timestamp_sec(ARROW_PRINT_DATUM_ARGS)
 		localtime_r(&t, &tm);
 	fprintf(output_filp,
 			"%s%04d-%02d-%02d %02d:%02d:%02d%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
 			tm.tm_hour,
 			tm.tm_min,
 			tm.tm_sec,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_timestamp_ms(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -599,7 +679,7 @@ print_arrow_timestamp_ms(ARROW_PRINT_DATUM_ARGS)
 		localtime_r(&t, &tm);
 	fprintf(output_filp,
 			"%s%04d-%02d-%02d %02d:%02d:%02d.%03u%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
@@ -607,10 +687,11 @@ print_arrow_timestamp_ms(ARROW_PRINT_DATUM_ARGS)
 			tm.tm_min,
 			tm.tm_sec,
 			ms,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_timestamp_us(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -627,7 +708,7 @@ print_arrow_timestamp_us(ARROW_PRINT_DATUM_ARGS)
 		localtime_r(&t, &tm);
 	fprintf(output_filp,
 			"%s%04d-%02d-%02d %02d:%02d:%02d.%06u%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
@@ -635,10 +716,11 @@ print_arrow_timestamp_us(ARROW_PRINT_DATUM_ARGS)
 			tm.tm_min,
 			tm.tm_sec,
 			us,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_timestamp_ns(ARROW_PRINT_DATUM_ARGS)
 {
 	time_t		t;
@@ -655,7 +737,7 @@ print_arrow_timestamp_ns(ARROW_PRINT_DATUM_ARGS)
 		localtime_r(&t, &tm);
 	fprintf(output_filp,
 			"%s%04d-%02d-%02d %02d:%02d:%02d.%09u%s",
-			current_datum_quote,
+			quote,
 			tm.tm_year + 1900,
 			tm.tm_mon + 1,
 			tm.tm_mday,
@@ -663,10 +745,11 @@ print_arrow_timestamp_ns(ARROW_PRINT_DATUM_ARGS)
 			tm.tm_min,
 			tm.tm_sec,
 			ns,
-			current_datum_quote);
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_interval_ym(ARROW_PRINT_DATUM_ARGS)
 {
 	int		year, mon;
@@ -680,7 +763,7 @@ print_arrow_interval_ym(ARROW_PRINT_DATUM_ARGS)
 	}
 	year = datum / 12;
 	mon = datum % 12;
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
 	if (year != 0 && mon != 0)
 		fprintf(output_filp, "%d %s %d %s",
 				year, (year > 1 ? "years" : "year"),
@@ -693,10 +776,11 @@ print_arrow_interval_ym(ARROW_PRINT_DATUM_ARGS)
 				mon, (mon > 1 ? "months" : "month"));
 	if (negative)
 		fprintf(output_filp, " ago");
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_interval_dt(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		days;
@@ -718,7 +802,7 @@ print_arrow_interval_dt(ARROW_PRINT_DATUM_ARGS)
 	min = datum % 60;
 	datum /= 60;
 	hour = datum;
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
 	if (days != 0)
 	{
 		if (hour != 0 || min != 0 || sec != 0)
@@ -735,16 +819,17 @@ print_arrow_interval_dt(ARROW_PRINT_DATUM_ARGS)
 		fprintf(output_filp, ".%03d", msec);
 	if (negative)
 		fprintf(output_filp, " ago");
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_fixedsizebinary(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		i, width = column->arrow_type.FixedSizeBinary.byteWidth;
 	ARROW_PRINT_DATUM_SETUP_FIXEDSIZEBINARY(width);
 
-	fprintf(output_filp, "%s\\x", current_datum_quote);
+	fprintf(output_filp, "%s\\x", quote);
 	for (i=0; i < width; i++)
 	{
 		static const char *hextbl = "0123456789abcdef";
@@ -753,10 +838,11 @@ print_arrow_fixedsizebinary(ARROW_PRINT_DATUM_ARGS)
 		fputc(hextbl[(c >> 4) & 0x0f], output_filp);
 		fputc(hextbl[(c & 0x0f)], output_filp);
 	}
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_macaddr(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		width = column->arrow_type.FixedSizeBinary.byteWidth;
@@ -764,17 +850,18 @@ print_arrow_macaddr(ARROW_PRINT_DATUM_ARGS)
 	assert(width == 6);
 	fprintf(output_filp,
 			"%s%02x:%02x:%02x:%02x:%02x:%02x%s",
-			current_datum_quote,
-			addr[0],
-			addr[1],
-			addr[2],
-			addr[3],
-			addr[4],
-			addr[5],
-			current_datum_quote);
+			quote,
+			(unsigned char)addr[0],
+			(unsigned char)addr[1],
+			(unsigned char)addr[2],
+			(unsigned char)addr[3],
+			(unsigned char)addr[4],
+			(unsigned char)addr[5],
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_inet4(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		width = column->arrow_type.FixedSizeBinary.byteWidth;
@@ -782,15 +869,16 @@ print_arrow_inet4(ARROW_PRINT_DATUM_ARGS)
     assert(width == 4);
 	fprintf(output_filp,
 			"%s%u.%u.%u.%u%s",
-			current_datum_quote,
-			addr[0],
-			addr[1],
-			addr[2],
-			addr[3],
-			current_datum_quote);
+			quote,
+			(unsigned char)addr[0],
+			(unsigned char)addr[1],
+			(unsigned char)addr[2],
+			(unsigned char)addr[3],
+			quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		width = column->arrow_type.FixedSizeBinary.byteWidth;
@@ -823,7 +911,7 @@ print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 	}
 
 	/* print out IPv6 */
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
 	for (i=0; i < 8; i++)
 	{
 		if (zero_base >= 0 &&
@@ -842,75 +930,74 @@ print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 										 (zero_len == 5 && words[5] == 0xffff)))
 		{
 			fprintf(output_filp, "%u.%u.%u.%u",
-					addr[12],
-					addr[13],
-					addr[14],
-					addr[15]);
+					(unsigned char)addr[12],
+					(unsigned char)addr[13],
+					(unsigned char)addr[14],
+					(unsigned char)addr[15]);
 			break;
 		}
 		fprintf(output_filp, "%x", words[i]);
 	}
 	if (zero_base >= 0 && zero_base + zero_len == 8)
 		fputc(':', output_filp);
-	fprintf(output_filp, "%s", current_datum_quote);
+	fprintf(output_filp, "%s", quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_list(ARROW_PRINT_DATUM_ARGS)
 {
-	const char *saved_datum_quote = current_datum_quote;
+	char			saved_context = current_context;
 	const uint32_t *values;
 	uint32_t		i, head, tail;
 	arrowColumn	   *child;
 	ArrowBuffer	   *__buffers;
 
 	if (sizeof(uint32_t) * (index+2) > buffers[1].length)
-	{
-		printNullDatum();
-		return;
-	}
+		return false;
+
 	values = (const uint32_t *)(rb_chunk + buffers[1].offset);
 	head = values[index];
 	tail = values[index+1];
 	if (head > tail)
-	{
-		printNullDatum();
-		return;
-	}
+		return false;
+
 	child = &column->children[0];
 	__buffers = buffers + (child->buffer_index -
 						   column->buffer_index);
-	fprintf(output_filp, "%s[", current_datum_quote);
-	current_datum_quote = "";
+	fprintf(output_filp, "%s[", quote);
+	current_context = 'e';
 	for (i=head; i < tail; i++)
 	{
 		if (i > head)
 			fprintf(output_filp, ",");
-		printArrowDatum(child, __buffers, rb_chunk, i);
+		printArrowDatum(child, __buffers, rb_chunk, i, "");
 	}
-	current_datum_quote = saved_datum_quote;
-	fprintf(output_filp, "%s]", current_datum_quote);
+	current_context = saved_context;
+	fprintf(output_filp, "%s]", quote);
+	return true;
 }
 
-static void
+static bool
 print_arrow_struct(ARROW_PRINT_DATUM_ARGS)
 {
-	const char *saved_datum_quote = current_datum_quote;
-	int		j;
+	char		saved_context = current_context;
+	int			j;
 
-	fprintf(output_filp, "%s(", current_datum_quote);
-	current_datum_quote = "";
+	fprintf(output_filp, "%s(", quote);
+	current_context = 'e';
 	for (j=0; j < column->num_children; j++)
 	{
 		arrowColumn *child = &column->children[j];
 		ArrowBuffer *__buffers = buffers + (child->buffer_index -
 											column->buffer_index);
 		if (j > 0)
-			fprintf(output_filp, ",");
-		printArrowDatum(child, __buffers, rb_chunk, index);
+			fprintf(output_filp, "%c", csv_delimiter);
+		printArrowDatum(child, __buffers, rb_chunk, index, "");
 	}
-	current_datum_quote = saved_datum_quote;
-	fprintf(output_filp, "%s)", current_datum_quote);
+	current_context = saved_context;
+	fprintf(output_filp, "%s)", quote);
+	return true;
 }
 
 static int
@@ -1011,14 +1098,22 @@ setupArrowColumn(arrowColumn *column, ArrowField *field, int buffer_index)
 			break;
 			
 		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__LargeUtf8:
 			column->sqltype = "text";
-			column->print_datum = print_arrow_utf8;
+			if (field->type.node.tag == ArrowNodeTag__Utf8)
+				column->print_datum = print_arrow_utf8;
+			else
+				column->print_datum = print_arrow_large_utf8;
 			buffer_count = 3;
 			break;
 
 		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__LargeBinary:
 			column->sqltype = "bytea";
-			column->print_datum = print_arrow_binary;
+			if (field->type.node.tag == ArrowNodeTag__Binary)
+				column->print_datum = print_arrow_binary;
+			else
+				column->print_datum = print_arrow_large_binary;
 			buffer_count = 3;
 			break;
 
@@ -1194,7 +1289,7 @@ setupArrowColumn(arrowColumn *column, ArrowField *field, int buffer_index)
 			}
 			buffer_count = 2;
 			break;
-
+			
 		default:
 			Elog("Arrow::%s is not a supported type",
 				 field->type.node.tagName);
@@ -1274,7 +1369,7 @@ printCreateTable(void)
 		fprintf(output_filp,
 				"\n  TABLESPACE %s",
 				quote_ident(tablespace_name));
-	fprintf(output_filp, ";\n\n");
+	fprintf(output_filp, ";\n");
 }
 
 static void
@@ -1288,7 +1383,10 @@ printRecordBatch(ArrowRecordBatch *rbatch, const char *rb_chunk)
 	else
 	{
 		i = num_skip_rows;
-		num_skip_rows -= Min(rbatch->length, num_skip_rows);
+		if (num_skip_rows > rbatch->length)
+			num_skip_rows -= rbatch->length;
+		else
+			num_skip_rows = 0;
 	}
 
 	while (i < rbatch->length && num_dump_rows != 0)
@@ -1299,7 +1397,7 @@ printRecordBatch(ArrowRecordBatch *rbatch, const char *rb_chunk)
 			ArrowBuffer	   *buffers;
 
 			if (j > 0)
-				fprintf(output_filp, "%c", csv_format ? ',' : '\t');
+				fprintf(output_filp, "%c", csv_delimiter);
 			if (j >= rbatch->_num_nodes)
 				printNullDatum();
 			else if (i >= rbatch->nodes[j].length)
@@ -1309,10 +1407,10 @@ printRecordBatch(ArrowRecordBatch *rbatch, const char *rb_chunk)
 				assert(column->buffer_index +
 					   column->buffer_count <= rbatch->_num_buffers);
 				buffers = rbatch->buffers + column->buffer_index;
-				printArrowDatum(column, buffers, rb_chunk, i);
+				printArrowDatum(column, buffers, rb_chunk, i, "\"");
 			}
 		}
-		fputc('\n', output_filp);
+		fprintf(output_filp, "\r\n");
 		i++;
 		if (num_dump_rows > 0)
 			num_dump_rows--;
@@ -1350,19 +1448,20 @@ main(int argc, char * const argv[])
 {
 	static struct option long_options[] = {
 		{"output",       required_argument, NULL, 'o'},
-		{"csv",          no_argument,       NULL, 1000},
 		{"header",       no_argument,       NULL, 1002},
 		{"offset",       required_argument, NULL, 1004},
 		{"limit",        required_argument, NULL, 1005},
+		/* CREATE TABLE & COPY FROM */
 		{"create-table", required_argument, NULL, 1200},
 		{"tablespace",   required_argument, NULL, 1201},
 		{"partition-of", required_argument, NULL, 1202},
-		{"schema-only",  no_argument,       NULL, 1203},
+		/* Other options */
+		{"help",         no_argument,       NULL, 9999},
 		{NULL, 0, NULL, 0},
 	};
 	int		i, j, c;
 
-	while ((c = getopt_long(argc, argv, "o:", long_options, NULL)) >= 0)
+	while ((c = getopt_long(argc, argv, "o:h", long_options, NULL)) >= 0)
 	{
 		switch (c)
 		{
@@ -1371,15 +1470,10 @@ main(int argc, char * const argv[])
 					Elog("-o|--output was specified twice");
 				output_filename = optarg;
 				break;
-			case 1000:	/* --csv */
-				if (csv_format)
-					Elog("--csv was specified twice");
-				csv_format = true;
-				break;
 			case 1002:
-				if (csv_header)
+				if (print_header)
 					Elog("--header was specified twice");
-				csv_header = true;
+				print_header = true;
 				break;
 			case 1004:	/* --offset */
 				if (num_skip_rows >= 0)
@@ -1410,26 +1504,18 @@ main(int argc, char * const argv[])
 					Elog("--partition-of was specified twice");
 				partition_name = optarg;
 				break;
-			case 1203:	/* --schema-only */
-				if (schema_only)
-					Elog("--schema-only was specified twice");
-				schema_only = true;
-				break;
+			case 'h':	/* --help */
 			default:
 				usage();
 				break;
 		}
 	}
 	/* sanity check */
-	if (csv_header && !csv_format)
-		Elog("--header must be used with --csv");
 	if (tablespace_name && !create_table_name)
 		Elog("--tablespace must be used with --create-table");
 	if (partition_name && !create_table_name)
 		Elog("--partition-of must be used with --create-table");
-	if (csv_format)
-		current_datum_quote = "\"";
-
+	
 	/* arrow files */
 	if (optind >= argc)
 		Elog("no input arrow files given");
@@ -1507,36 +1593,27 @@ main(int argc, char * const argv[])
 	if (create_table_name)
 	{
 		printCreateTable();
-		if (!schema_only)
-		{
-			fprintf(output_filp, "COPY %s FROM stdin",
-					quote_ident(create_table_name));
-			if (csv_format)
-			{
-				fprintf(output_filp, " FORMAT csv");
-				if (csv_header)
-					fprintf(output_filp, " HEADER");
-			}
-			fprintf(output_filp, ";\n");
-		}
+		fprintf(output_filp, "COPY %s FROM stdin csv%s;\r\n",
+				quote_ident(create_table_name),
+				print_header ? " HEADER" : "");
 	}
 	/* Dump column names */
-	if (csv_header)
+	if (print_header)
 	{
 		for (j=0; j < arrow_num_columns; j++)
 		{
 			const char *colname = arrow_columns[j].colname;
 			if (j > 0)
-				fprintf(output_filp, "%c", csv_format ? ',' : '\t');
+				fprintf(output_filp, "%c", csv_delimiter);
 			fprintf(output_filp, "%s", __quote_ident(colname));
 		}
-		fputc('\n', output_filp);
+		fprintf(output_filp, "\r\n");
 	}
 	/* Dump Arrpw files */
 	for (i=0; i < arrow_num_files; i++)
 		dumpArrowFile(&arrow_files[i], arrow_fdescs[i]);
-	if (create_table_name)
-		fprintf(output_filp, "\\.\n");
+	if (create_table_name && num_dump_rows != 0)
+		fprintf(output_filp, "\\.\r\n");
 	return 0;
 }
 
