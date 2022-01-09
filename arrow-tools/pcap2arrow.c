@@ -101,17 +101,17 @@ static pfring		  **pfring_desc_array = NULL;
 static uint64_t			pfring_desc_selector = 0;
 static int				pfring_desc_nums = -1;
 
-/* static variables for PCAP file scan mode */
-#define PCAP_MAGIC__HOST		0xa1b2c3d4U
-#define PCAP_MAGIC__SWAP		0xd4c3b2a1U
-#define PCAP_MAGIC__HOST_NS		0xa1b23c4dU
-#define PCAP_MAGIC__SWAP_NS		0x4d3cb2a1U
+/* definitions for PCAP/PCAPNG file scan mode */
+#define PCAP_MAGIC_LE		0xd4c3b2a1U
+#define PCAP_MAGIC_BE		0xa1b2c3d4U
+#define PCAPNG_MAGIC		0x0a0d0d0aU
 
 typedef struct
 {
 	pcap_t			   *pcap_handle;
 	FILE			   *pcap_filp;
 	const char		   *pcap_filename;
+	uint32_t			pcap_magic;
 	char				pcap_errbuf[PCAP_ERRBUF_SIZE];
 } pcapFileDesc;
 
@@ -2063,6 +2063,54 @@ pfring_worker_main(void *__arg)
 }
 
 /*
+ * __process_one_pcap_file
+ */
+static void
+__process_one_pcap_file(SQLtable *chunk, pcapFileDesc *pfdesc)
+{
+	const u_char *buffer;
+
+	pfdesc->pcap_handle =
+		pcap_fopen_offline_with_tstamp_precision(pfdesc->pcap_filp,
+												 PCAP_TSTAMP_PRECISION_MICRO,
+												 pfdesc->pcap_errbuf);
+	if (!pfdesc->pcap_handle)
+		Elog("failed on open pcap file ('%s'): %s",
+			 pfdesc->pcap_filename,
+			 pfdesc->pcap_errbuf);
+
+	while (!do_shutdown)
+	{
+		struct pcap_pkthdr hdr;
+		struct pfring_pkthdr __hdr;
+
+		buffer = pcap_next(pfdesc->pcap_handle, &hdr);
+		if (!buffer)
+			break;
+		__hdr.ts = hdr.ts;
+		__hdr.caplen = hdr.caplen;
+		__hdr.len = hdr.len;
+		__execCaptureOnePacket(chunk, &__hdr, buffer);
+		if (chunk->usage >= record_batch_threshold)
+		{
+			arrowChunkWriteOut(chunk);
+			sql_table_clear(chunk);
+		}
+	}
+	/* close */
+	pcap_close(pfdesc->pcap_handle);
+}
+
+/*
+ * __process_one_pcapng_file
+ */
+static void
+__process_one_pcapng_file(SQLtable *chunk, pcapFileDesc *pfdesc)
+{
+	Elog("not implemented yet");
+}
+
+/*
  * pcap_file_worker_main
  */
 static void *
@@ -2080,37 +2128,16 @@ pcap_file_worker_main(void *__arg)
 		 i += num_threads)
 	{
 		pcapFileDesc   *pfdesc = &pcap_file_desc_array[i];
-		const u_char   *buffer;
 
-		pfdesc->pcap_handle =
-			pcap_fopen_offline_with_tstamp_precision(pfdesc->pcap_filp,
-													 PCAP_TSTAMP_PRECISION_MICRO,
-													 pfdesc->pcap_errbuf);
-		if (!pfdesc->pcap_handle)
-			Elog("failed on open pcap file ('%s'): %s",
-				 pfdesc->pcap_filename,
-				 pfdesc->pcap_errbuf);
-
-		while (!do_shutdown)
-		{
-			struct pcap_pkthdr hdr;
-			struct pfring_pkthdr __hdr;
-
-			buffer = pcap_next(pfdesc->pcap_handle, &hdr);
-			if (!buffer)
-				break;
-			__hdr.ts = hdr.ts;
-			__hdr.caplen = hdr.caplen;
-			__hdr.len = hdr.len;
-			__execCaptureOnePacket(chunk, &__hdr, buffer);
-			if (chunk->usage >= record_batch_threshold)
-			{
-				arrowChunkWriteOut(chunk);
-				sql_table_clear(chunk);
-			}
-		}
-		/* close */
-		pcap_close(pfdesc->pcap_handle);
+		if (pfdesc->pcap_magic == PCAPNG_MAGIC)
+			__process_one_pcapng_file(chunk, pfdesc);
+		else if (pfdesc->pcap_magic == PCAP_MAGIC_LE ||
+				 pfdesc->pcap_magic == PCAP_MAGIC_BE)
+			__process_one_pcap_file(chunk, pfdesc);
+		else
+			Elog("Bug? unknown file magic '%08x' of '%s'",
+				 pfdesc->pcap_magic,
+				 pfdesc->pcap_filename);
     }
 	return final_merge_pending_chunks(chunk);
 }
@@ -2343,25 +2370,29 @@ parse_options(int argc, char *argv[])
 			pcapFileDesc   *pfdesc = &pcap_file_desc_array[i];
 			const char	   *filename = argv[optind + i];
 			FILE		   *filp;
+			uint32_t		magic;
 
 			filp = fopen(filename, "rb");
 			if (!filp)
 				Elog("failed to open '%s': %m", filename);
+			/* check magic */
+			if (fread(&magic, sizeof(uint32_t), 1, filp) != 1)
+				Elog("failed to read '%s' magic: %m", filename);
+			rewind(filp);
+			if (magic != PCAP_MAGIC_LE &&
+				magic != PCAP_MAGIC_BE &&
+				magic != PCAPNG_MAGIC)
+				Elog("magic of '%s' is neither PCAP nor PCAPNG (%08x)",
+					 filename, magic);
 			pfdesc->pcap_filp = filp;
 			pfdesc->pcap_filename = pstrdup(filename);
+			pfdesc->pcap_magic = magic;
 		}
 		pcap_file_desc_nums = nfiles;
 	}
 	else
 	{
-		/* input from stdin... */
-		pcapFileDesc   *pfdesc = palloc0(sizeof(pcapFileDesc));
-
-		pfdesc->pcap_filp = stdin;
-		pfdesc->pcap_filename = "/dev/stdin";
-
-		pcap_file_desc_nums = 1;
-		pcap_file_desc_array = pfdesc;
+		Elog("No network device or input PCAP/PCAPNG files are given");
 	}
 
 	for (pos = output_filename; *pos != '\0'; pos++)
