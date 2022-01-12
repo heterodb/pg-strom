@@ -14,7 +14,7 @@ module Fluent
       config_param :schema_defs, :string
       config_param :ts_column, :string, default: NIL
       config_param :tag_column, :string, default: NIL
-      config_param :filesize_thresold, :integer, default: 10000 * 1024 * 1024
+      config_param :filesize_thresold, :integer, default: 10485760000
 
       config_section :buffer do
         config_set_default :@type, 'memory'

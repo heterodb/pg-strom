@@ -1,37 +1,10 @@
 # fluent-plugin-arrow-file
 
-[Fluentd](https://fluentd.org/) output plugin to Apache Arrow file.
+[Fluentd](https://fluentd.org/) output plugin for Apache Arrow file.
 
-TODO: write description for you plugin.
+# How to run test 
 
-## Installation
-
-### RubyGems
-
+```bash
+cd ~/pg-strom/fluentd/fluent-plugin-arrow-file
+bundle exec rake test
 ```
-$ gem install fluent-plugin-arrow-file
-```
-
-### Bundler
-
-Add following line to your Gemfile:
-
-```ruby
-gem "fluent-plugin-arrow-file"
-```
-
-And then execute:
-
-```
-$ bundle
-```
-
-## Configuration
-
-You can generate configuration template:
-
-```
-$ fluent-plugin-config-format output arrow-file
-```
-
-You can copy and paste generated documents here.
