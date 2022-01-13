@@ -3,11 +3,12 @@
 #
 PG_CONFIG        ?= pg_config
 MYSQL_CONFIG     ?= mysql_config
-PROG		 = pg2arrow mysql2arrow pcap2arrow arrow2csv
+PROG             = pg2arrow mysql2arrow pcap2arrow arrow2csv
 PG2ARROW_OBJS    = sql2arrow.o pgsql_client.o arrow_nodes.o arrow_write.o arrow_pgsql.o
 MYSQL2ARROW_OBJS = sql2arrow.o mysql_client.o arrow_nodes.o arrow_write.o
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_nodes.o
+ALL_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) $(PCAP2ARROW_OBJS) $(ARROW2CSV_OBJS)
 
 CFLAGS = -O2 -fPIC -g -Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
@@ -57,7 +58,4 @@ install: install-pg2arrow install-mysql2arrow \
          install-pcap2arrow install-arrow2csv
 
 clean:
-	rm -f $(PROG) $(PG2ARROW_OBJS) \
-                      $(MYSQL2ARROW_OBJS) \
-                      $(PCAP2ARROW_OBJS) \
-                      $(ARROW2CSV_OBJS)
+	rm -f $(PROG) $(ALL_OBJS)

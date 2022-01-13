@@ -366,6 +366,17 @@ rpm-pcap2arrow: tarball
 	    > $(__SPECDIR)/pcap2arrow.spec
 	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec --undefine=_debugsource_packages
 
-rpm-arrow: rpm-pg2arrow rpm-mysql2arrow rpm-pcap2arrow
+rpm-arrow2csv: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pcap2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/arrow2csv.spec
+	rpmbuild -ba $(__SPECDIR)/arrow2csv.spec --undefine=_debugsource_packages
+
+rpm-arrow: rpm-pg2arrow rpm-mysql2arrow rpm-pcap2arrow rpm-arrow2csv
 
 .PHONY: docs
