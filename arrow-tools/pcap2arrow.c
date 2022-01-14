@@ -92,9 +92,6 @@ static pthread_cond_t	arrow_workers_cond;
 static bool			   *arrow_workers_completed;
 static SQLtable		  **arrow_chunks_array;			/* chunk buffer per-thread */
 static sem_t			pcap_worker_sem;
-#ifndef DIRECT_IO_ALIGN
-#define DIRECT_IO_ALIGN(x)		(((x) + 511UL) & ~511UL)
-#endif /* DIRECT_IO_ALIGN */
 
 /* static variable for PF-RING capture mode */
 static pfring		  **pfring_desc_array = NULL;
@@ -141,6 +138,9 @@ static volatile bool	do_shutdown = false;
 #ifndef INTALIGN
 #define INTALIGN(x)		(((uint64_t)(x) + 3UL) & ~3UL)
 #endif
+#ifndef DIRECT_IO_ALIGN
+#define DIRECT_IO_ALIGN(x)		PAGE_ALIGN(x)
+#endif /* DIRECT_IO_ALIGN */
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define __ntoh16(x)		__builtin_bswap16(x)
