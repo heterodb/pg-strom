@@ -63,7 +63,7 @@ static size_t			output_filesize_limit = ULONG_MAX;			/* No Limit */
 static size_t			record_batch_threshold = (128UL << 20);		/* 128MB */
 static bool				force_overwrite = false;
 static bool				enable_direct_io = false;
-static bool				only_headers = false;
+static bool				no_payload = false;
 static bool				composite_options = false;
 static int				print_stat_interval = -1;
 
@@ -849,7 +849,7 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(icmp_checksum, Uint16Bswap);
 	}
 	/* remained data - payload */
-	if (!only_headers)
+	if (!no_payload)
 		__ARROW_FIELD_INIT(payload,		  Binary);
 #undef __ARROW_FIELD_INIT
 	table->nfields = j;
@@ -1932,7 +1932,7 @@ __execCaptureOnePacket(SQLtable *chunk,
 	handlePacketMiscFields(chunk, proto, src_port, dst_port);
 
 	/* Payload */
-	if (!only_headers)
+	if (!no_payload)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 	return;
@@ -1949,7 +1949,7 @@ fillup_by_null:
 	if ((protocol_mask & __PCAP_PROTO__ICMP) != 0)
 		handlePacketIcmpHeader(chunk, NULL, 0, -1);
 	handlePacketMiscFields(chunk, -1, -1, -1);
-	if (!only_headers && pos != NULL)
+	if (!no_payload && pos != NULL)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 }
@@ -2818,7 +2818,7 @@ usage(int status)
 		  "         %q : sequence number for each output files\n"
 		  "       default is '/tmp/pcap_%i_%y%m%d_%H%M%S.arrow'\n"
 		  "  -f|--force : overwrite file, even if exists\n"
-		  "     --only-headers: disables capture of payload\n"
+		  "     --no-payload: disables capture of payload\n"
 		  "     --parallel-write=N_FILES\n"
 		  "       opens multiple output files simultaneously (default: 1)\n"
 		  "     --chunk-size=SIZE : size of record batch (default: 128MB)\n"
@@ -2860,7 +2860,7 @@ parse_options(int argc, char *argv[])
 		{"pcap-threads",   required_argument, NULL, 1000},
 		{"direct-io",      no_argument,       NULL, 1001},
 		{"chunk-size",     required_argument, NULL, 1002},
-		{"only-headers",   no_argument,       NULL, 1003},
+		{"no-payload",     no_argument,       NULL, 1003},
 		{"num-queues",     required_argument, NULL, 1004},
 		{"parallel-write", required_argument, NULL, 1005},
 		{"composite-options", no_argument,    NULL, 1006},
@@ -2980,8 +2980,8 @@ parse_options(int argc, char *argv[])
 						 optarg);
 				break;
 
-			case 1003:	/* --only-headers */
-				only_headers = true;
+			case 1003:	/* --no-payload */
+				no_payload = true;
 				break;
 
 			case 1004:	/* --num-queues */
