@@ -1456,7 +1456,9 @@ retry:
 
 	/* open file */
 	flags = O_RDWR | O_CREAT;
-	if (!force_overwrite)
+	if (force_overwrite)
+		flags |= O_TRUNC;
+	else
 		flags |= O_EXCL;
 
 	fdesc = open(path, flags, 0644);
