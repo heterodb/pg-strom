@@ -47,8 +47,8 @@ $(MODULE): $(OBJS) $(HEAD)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 install: $(MODULE)
+	mkdir -p $(DEST_PATH)
 	install -m 755 $(MODULE) $(DEST_PATH)
-
 
 clean:
 	rm -f $(MODULE) $(OBJS)
