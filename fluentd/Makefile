@@ -5,16 +5,18 @@ HEAD = arrow_defs.h arrow_ipc.h float2.h
 
 INC_PATHS = .
 ifneq ($(TD_AGENT),1)
-DEST_PATH = /usr/lib64/ruby/
+__DEST_PATH = /usr/lib64/ruby/
 else
 INC_PATHS += $(shell dirname `ls /opt/td-agent/include/*/ruby.h`)
 LIB_PATHS += /opt/td-agent/lib
-DEST_PATH =  $(shell dirname `find /opt/td-agent | grep '/zlib.so$$'`)
+__DEST_PATH =  $(shell dirname `find /opt/td-agent | grep '/zlib.so$$'`)
 endif
 INC_PATHS += /usr/include
 LIB_PATHS += /usr/lib64
 ifneq ($(DESTDIR),)
-DEST_PATH = $(DESTDIR)/$(DEST_PATH)
+DEST_PATH = $(DESTDIR)/$(__DEST_PATH)
+else
+DEST_PATH = $(__DEST_PATH)
 endif
 
 CFLAGS = -g -O2 -fPIC -pipe -Wall \
