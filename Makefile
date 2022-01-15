@@ -106,8 +106,8 @@ __DOC_FILES = index.md install.md operations.md \
 #
 # Files to be packaged
 #
-__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
-                  pg_strom.control src sql utils arrow-tools test man
+__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda pg_strom.control \
+                  src sql utils arrow-tools fluentd test man
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
 else

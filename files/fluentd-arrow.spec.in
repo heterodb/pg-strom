@@ -16,18 +16,17 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 %setup -q -n @@STROM_TARBALL@@
 
 %build
-%{__make} -C fluentd TD_AGENT=1DESTDIR=%{buildroot}
+%{__make} -C fluentd TD_AGENT=1 DESTDIR=%{buildroot}
 
 %install
 rm -rf %{buildroot}
-%{__make} -C fluentd TD_AGENT=1DESTDIR=%{buildroot} install
+%{__make} -C fluentd TD_AGENT=1 DESTDIR=%{buildroot} install
 
 %clean
 rm -rf %{buildroot}
 
 %files
 /opt/td-agent/lib/ruby/*
-
 
 
 

@@ -13,6 +13,9 @@ DEST_PATH =  $(shell dirname `find /opt/td-agent | grep '/zlib.so$$'`)
 endif
 INC_PATHS += /usr/include
 LIB_PATHS += /usr/lib64
+ifneq ($(DESTDIR),)
+DEST_PATH = $(DESTDIR)/$(DEST_PATH)
+endif
 
 CFLAGS = -g -O2 -fPIC -pipe -Wall \
          $(addprefix -I ,$(INC_PATHS)) \
