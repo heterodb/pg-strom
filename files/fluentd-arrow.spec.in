@@ -6,6 +6,8 @@ Group: Applications/File
 License: PostgreSQL
 URL: https://github.com/heterodb/pg-strom
 Source0: @@STROM_TARBALL@@.tar.gz
+Requires: td-agent
+BuildRequires: td-agent
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 
 %description
@@ -28,6 +30,4 @@ rm -rf %{buildroot}
 %files
 /opt/td-agent/lib/ruby/*
 
-
-
-
+%changelog
