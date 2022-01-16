@@ -63,7 +63,7 @@ static size_t			output_filesize_limit = ULONG_MAX;			/* No Limit */
 static size_t			record_batch_threshold = (128UL << 20);		/* 128MB */
 static bool				force_overwrite = false;
 static bool				enable_direct_io = false;
-static bool				only_headers = false;
+static bool				no_payload = false;
 static bool				composite_options = false;
 static int				print_stat_interval = -1;
 
@@ -92,9 +92,6 @@ static pthread_cond_t	arrow_workers_cond;
 static bool			   *arrow_workers_completed;
 static SQLtable		  **arrow_chunks_array;			/* chunk buffer per-thread */
 static sem_t			pcap_worker_sem;
-#ifndef DIRECT_IO_ALIGN
-#define DIRECT_IO_ALIGN(x)		(((x) + 511UL) & ~511UL)
-#endif /* DIRECT_IO_ALIGN */
 
 /* static variable for PF-RING capture mode */
 static pfring		  **pfring_desc_array = NULL;
@@ -141,6 +138,9 @@ static volatile bool	do_shutdown = false;
 #ifndef INTALIGN
 #define INTALIGN(x)		(((uint64_t)(x) + 3UL) & ~3UL)
 #endif
+#ifndef DIRECT_IO_ALIGN
+#define DIRECT_IO_ALIGN(x)		PAGE_ALIGN(x)
+#endif /* DIRECT_IO_ALIGN */
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define __ntoh16(x)		__builtin_bswap16(x)
@@ -849,7 +849,7 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(icmp_checksum, Uint16Bswap);
 	}
 	/* remained data - payload */
-	if (!only_headers)
+	if (!no_payload)
 		__ARROW_FIELD_INIT(payload,		  Binary);
 #undef __ARROW_FIELD_INIT
 	table->nfields = j;
@@ -1456,7 +1456,9 @@ retry:
 
 	/* open file */
 	flags = O_RDWR | O_CREAT;
-	if (!force_overwrite)
+	if (force_overwrite)
+		flags |= O_TRUNC;
+	else
 		flags |= O_EXCL;
 
 	fdesc = open(path, flags, 0644);
@@ -1930,7 +1932,7 @@ __execCaptureOnePacket(SQLtable *chunk,
 	handlePacketMiscFields(chunk, proto, src_port, dst_port);
 
 	/* Payload */
-	if (!only_headers)
+	if (!no_payload)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 	return;
@@ -1947,7 +1949,7 @@ fillup_by_null:
 	if ((protocol_mask & __PCAP_PROTO__ICMP) != 0)
 		handlePacketIcmpHeader(chunk, NULL, 0, -1);
 	handlePacketMiscFields(chunk, -1, -1, -1);
-	if (!only_headers && pos != NULL)
+	if (!no_payload && pos != NULL)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 }
@@ -2252,268 +2254,6 @@ pmemdup(const void *addr, size_t sz)
 	return result;
 }
 
-#if 0
-static void
-__process_pcapng_section_header(SQLtable *chunk, pcapFileDesc *pfdesc,
-								pcapngBlockHeaderCommon *hc,
-								bool *p_little_endian,
-								uint64_t *p_section_tail)
-{
-	pcapngSectionHeaderBlock hdr;
-	char	   *options;
-	uint64_t	section_sz;
-	uint32_t	block_sz;
-	uint32_t	len;
-	bool		little_endian;
-
-	if (fread(&hdr.byte_order,
-			  offsetof(pcapngSectionHeaderBlock, options) -
-			  offsetof(pcapngSectionHeaderBlock, byte_order), 1,
-			  pfdesc->pcap_filp) != 1)
-		Elog("failed on fread('%s'): %m", pfdesc->pcap_filename);
-	memcpy(&hdr.c, hc, sizeof(pcapngBlockHeaderCommon));
-	/* check byte ordering */
-	if (hdr.byte_order == 0x1a2b3c4dU)
-		little_endian = true;
-	else if (hdr.byte_order == 0x4d3c2b1aU)
-		little_endian = false;
-	else
-		Elog("pcapng file corrupted at '%s'", pfdesc->pcap_filename);
-	*p_little_endian = little_endian;
-
-	/* assign section_tail */
-	section_sz = __to_host64(hdr.section_length);
-	if (section_sz == ~0UL)
-	{
-		*p_section_tail = LONG_MAX;
-	}
-	else
-	{
-		*p_section_tail = (ftell(pfdesc->pcap_filp) -
-						   offsetof(pcapngSectionHeaderBlock, options) +
-						   section_sz);
-	}
-	block_sz = __to_host32(hc->block_length);
-	if (block_sz < offsetof(pcapngSectionHeaderBlock,
-							options) + sizeof(uint32_t))
-		Elog("pcapng SectionHeaderBlock looks too small");
-	len = block_sz - offsetof(pcapngSectionHeaderBlock, options);
-	options = alloca(len);
-	if (fread(options, len, 1, pfdesc->pcap_filp) != 1)
-		Elog("failed on fread('%s'): %m", pfdesc->pcap_filename);
-	if (block_sz != ((uint32_t *)(options + len))[-1])
-		Elog("pcapng SectionHeaderBlock looks corrupted");
-}
-
-/*
- * __process_pcapng_block_common
- */
-static inline bool
-__process_pcapng_block_common(char *block_buf, uint32_t block_sz,
-							  pcapFileDesc *pfdesc,
-							  pcapngBlockHeaderCommon *hc,
-							  bool little_endian,
-							  uint64_t section_tail)
-{
-	long	curr_pos;
-
-	curr_pos = ftell(pfdesc->pcap_filp);
-	if (curr_pos < 0)
-		Elog("failed on ftell('%s'): %m", pfdesc->pcap_filename);
-	if (curr_pos + block_sz > section_tail)
-		return false;	/* section overrun */
-
-	if (fread(block_buf + sizeof(pcapngBlockHeaderCommon),
-			  block_sz - sizeof(pcapngBlockHeaderCommon), 1,
-			  pfdesc->pcap_filp) != 1)
-	{
-		if (feof(pfdesc->pcap_filp))
-			return false;	/* end-of-file */
-		Elog("failed on fread('%s'): %m", pfdesc->pcap_filename);
-	}
-	if (block_sz != *((uint32_t *)(block_buf + block_sz - sizeof(uint32_t))))
-		Elog("pcapng file '%s' looks corrupted at %ld",
-			 pfdesc->pcap_filename, ftell(pfdesc->pcap_filp) - block_sz);
-	printf("hoge block_sz=%u <-> %u\n",
-		   block_sz,
-		   *((uint32_t *)(block_buf + block_sz - sizeof(uint32_t))));
-	memcpy(block_buf, hc, sizeof(pcapngBlockHeaderCommon));
-
-	return true;
-}
-
-/*
- * __process_pcapng_simple_packet
- */
-static bool
-__process_pcapng_simple_packet(SQLtable *chunk, pcapFileDesc *pfdesc,
-							   pcapngBlockHeaderCommon *hc,
-							   bool little_endian,
-							   uint64_t section_tail)
-{
-	uint32_t	block_sz = __to_host32(hc->block_length);
-	pcapngSimplePacketBlock *sp = alloca(block_sz);
-	struct pfring_pkthdr phdr;
-
-	if (!__process_pcapng_block_common((char *)sp, block_sz,
-									   pfdesc, hc,
-									   little_endian,
-									   section_tail))
-		return false;
-
-	memset(&phdr.ts, 0, sizeof(phdr.ts));	/* how to handle? */
-	phdr.caplen = (block_sz - offsetof(pcapngSimplePacketBlock,
-									   packet_data) - sizeof(uint32_t));
-	phdr.len = __to_host32(sp->original_packat_len);
-	__execCaptureOnePacket(chunk, &phdr, sp->packet_data);
-	if (chunk->usage >= record_batch_threshold)
-	{
-		arrowChunkWriteOut(chunk);
-		sql_table_clear(chunk);
-	}
-	return true;
-}
-
-/*
- * __process_pcapng_enhanced_packet
- */
-static bool
-__process_pcapng_enhanced_packet(SQLtable *chunk, pcapFileDesc *pfdesc,
-								 pcapngBlockHeaderCommon *hc,
-								 bool little_endian,
-								 uint64_t section_tail)
-{
-	uint32_t	block_sz = __to_host32(hc->block_length);
-	pcapngEnhancedPacketBlock *ep = alloca(block_sz);
-	struct pfring_pkthdr phdr;
-	uint64_t	ts_raw;
-	uint32_t	caplen;
-	uint32_t	optlen;
-	unsigned char *pos, *end;
-
-	if (!__process_pcapng_block_common((char *)ep, block_sz,
-									   pfdesc, hc,
-									   little_endian,
-									   section_tail))
-		return false;
-
-	printf("interface_id = %u\n", __to_host32(ep->interface_id));
-	ts_raw = (((uint64_t)__to_host32(ep->timestamp_hi) << 32) |
-			  ((uint64_t)__to_host32(ep->timestamp_lo)));
-	caplen = __to_host32(ep->captured_packet_len);
-	if (offsetof(pcapngEnhancedPacketBlock,
-				 packet_data) + caplen + sizeof(uint32_t) > block_sz)
-		Elog("pcapng file ('%s') looks corrupted", pfdesc->pcap_filename);
-	optlen = block_sz - (offsetof(pcapngEnhancedPacketBlock,
-								  packet_data) + caplen + sizeof(uint32_t));
-	/* parse enhanced packet options, if any */
-	pos = ep->packet_data + caplen;
-	end = pos + optlen;
-	while (pos < end)
-	{
-		uint16_t	__code;
-		uint16_t	__len;
-		uint32_t	__pen;
-
-		if (pos + sizeof(uint16_t) > end)
-			Elog("EPB option of pcapng ('%s') corrupted",
-				 pfdesc->pcap_filename);
-		__code = __to_host16(*((uint16_t *)pos));
-		pos += sizeof(uint16_t);
-		/* opt_endofopt? */
-		if (__code == 0)
-			break;
-
-		if (pos + sizeof(uint16_t) > end)
-			Elog("EPB option of pcapng ('%s') corrupted",
-				 pfdesc->pcap_filename);
-		__len = __to_host16(*((uint16_t *)pos));
-		pos += sizeof(uint16_t);
-		if (pos + __len > end)
-			Elog("EPB option of pcapng ('%s') corrupted",
-				 pfdesc->pcap_filename);
-		switch (__code)
-		{
-			case 1:			/* opt_comment */
-				printf("opt_comment -> %*s\n", __len, pos);
-				break;
-
-			case 2:			/* epb_flags */
-				if (__len != sizeof(uint32_t))
-					Elog("EPB option of pcapng ('%s') corrupted",
-						 pfdesc->pcap_filename);
-				printf("epb_flags -> %08x\n", __to_host32(*((uint32_t *)pos)));
-				break;
-			case 3:			/* epb_hash */
-				printf("epb_hash -> len: %u\n", __len);
-				break;
-			case 4:			/* epb_dropcount */
-				if (__len != sizeof(uint64_t))
-					Elog("EPB option of pcapng ('%s') corrupted",
-						 pfdesc->pcap_filename);
-				printf("epb_dropcount = %lu\n", __to_host64(*((uint64_t *)pos)));
-				break;
-			case 5:			/* epb_packetid */
-				if (__len != sizeof(uint64_t))
-					Elog("EPB option of pcapng ('%s') corrupted",
-						 pfdesc->pcap_filename);
-				printf("epb_packetid = %lu\n", __to_host64(*((uint64_t *)pos)));
-				break;
-			case 6:			/* epb_queue */
-				if (__len != sizeof(uint32_t))
-					Elog("EPB option of pcapng ('%s') corrupted",
-						 pfdesc->pcap_filename);
-				printf("epb_queue = %u\n", __to_host32(*((uint32_t *)pos)));
-				break;
-			case 7:			/* epb_verdict */
-				printf("epb_verdict -> len: %u\n", __len);
-				break;
-
-			case 2988:		/* custom */
-			case 2989:		/* custom */
-			case 19372:		/* custom */
-			case 19373:		/* custom */
-				if (__len < sizeof(uint32_t))
-					Elog("EPB option of pcapng ('%s') corrupted",
-						 pfdesc->pcap_filename);
-				__pen = __to_host32(*((uint32_t *)pos));
-				printf("custom(%d) len=%u pen=%08x\n", __code, __len, __pen);
-			default:
-				Elog("Unknown EPB option (%u) of pcapng ('%s')",
-					 __code, pfdesc->pcap_filename);
-		}
-		pos += INTALIGN(__len);
-	}
-
-		
-
-
-
-
-
-	
-
-#if 0
-    memset(&phdr.ts, 0, sizeof(phdr.ts));   /* how to handle? */
-    phdr.caplen = (block_sz - offsetof(pcapngSimplePacketBlock,
-                                       packet_data) - sizeof(uint32_t));
-    phdr.len = __to_host32(sp->original_packat_len);
-    __execCaptureOnePacket(chunk, &phdr, sp->packet_data);
-    if (chunk->usage >= record_batch_threshold)
-    {
-        arrowChunkWriteOut(chunk);
-        sql_table_clear(chunk);
-    }
-    return true;
-
-#endif
-
-
-	
-	return true;
-}
-#endif
-
 static inline unsigned char *
 __fetch_pcapng_options(pcapngSectionState *section,
 					   unsigned char *pos, unsigned char *end,
@@ -2773,6 +2513,7 @@ process_one_pcapng_block(SQLtable *chunk, pcapngSectionState *section)
 	pcapngBlockHeaderCommon hc;
 	uint32_t	block_type;
 	uint32_t	block_sz;
+	uint32_t   *checker;
 	void	   *buffer;
 
 	if (fread(&hc, sizeof(pcapngBlockHeaderCommon), 1, section->filp) != 1)
@@ -2799,7 +2540,8 @@ process_one_pcapng_block(SQLtable *chunk, pcapngSectionState *section)
 			return false;
 		Elog("failed on fread('%s'): %m", section->filename);
 	}
-	if (block_sz != *((uint32_t *)((char *)buffer + block_sz - sizeof(uint32_t))))
+	checker = (uint32_t *)((char *)buffer + block_sz - sizeof(uint32_t));
+	if (block_sz != __to_host32(*checker))
 		Elog("pcapng file '%s' looks corrupted", section->filename);
 	memcpy(buffer, &hc, sizeof(pcapngBlockHeaderCommon));
 
@@ -3076,7 +2818,7 @@ usage(int status)
 		  "         %q : sequence number for each output files\n"
 		  "       default is '/tmp/pcap_%i_%y%m%d_%H%M%S.arrow'\n"
 		  "  -f|--force : overwrite file, even if exists\n"
-		  "     --only-headers: disables capture of payload\n"
+		  "     --no-payload: disables capture of payload\n"
 		  "     --parallel-write=N_FILES\n"
 		  "       opens multiple output files simultaneously (default: 1)\n"
 		  "     --chunk-size=SIZE : size of record batch (default: 128MB)\n"
@@ -3118,7 +2860,7 @@ parse_options(int argc, char *argv[])
 		{"pcap-threads",   required_argument, NULL, 1000},
 		{"direct-io",      no_argument,       NULL, 1001},
 		{"chunk-size",     required_argument, NULL, 1002},
-		{"only-headers",   no_argument,       NULL, 1003},
+		{"no-payload",     no_argument,       NULL, 1003},
 		{"num-queues",     required_argument, NULL, 1004},
 		{"parallel-write", required_argument, NULL, 1005},
 		{"composite-options", no_argument,    NULL, 1006},
@@ -3238,8 +2980,8 @@ parse_options(int argc, char *argv[])
 						 optarg);
 				break;
 
-			case 1003:	/* --only-headers */
-				only_headers = true;
+			case 1003:	/* --no-payload */
+				no_payload = true;
 				break;
 
 			case 1004:	/* --num-queues */
