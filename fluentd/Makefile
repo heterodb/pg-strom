@@ -56,5 +56,9 @@ install: $(MODULE) $(SCRIPT)
 	install -m 755 $(MODULE) $(DEST_PATH)
 	install -m 644 $(SCRIPT) $(RUBY_PATH)
 
+uninstall:
+	rm -f $(DEST_PATH)/$(MODULE)
+	rm -f $(RUBY_PATH)/$(SCRIPT)
+
 clean:
 	rm -f $(MODULE) $(OBJS)
