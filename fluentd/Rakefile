@@ -2,6 +2,11 @@ require "bundler"
 Bundler::GemHelper.install_tasks
 
 require "rake/testtask"
+require "rake/extensiontask"
+
+Rake::ExtensionTask.new "arrow_file_write" do |ext|
+  ext.lib_dir = "lib/fluent/plugin"
+end
 
 Rake::TestTask.new(:test) do |t|
   t.libs.push("lib", "test")
