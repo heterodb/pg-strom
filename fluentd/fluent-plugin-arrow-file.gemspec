@@ -16,7 +16,13 @@ Gem::Specification.new do |spec|
   test_files, files  = "Gemfile Makefile \
                         fluent-plugin-arrow-file.gemspec \
                         lib/fluent/plugin/out_arrow_file.rb \
-                        lib/fluent/plugin/arrow_file_write.so".split(" ").partition do |f|
+                        ext/arrow_file_write/arrow_defs.h \
+                        ext/arrow_file_write/arrow_ipc.h \
+                        ext/arrow_file_write/float2.h \
+                        ext/arrow_file_write/arrow_ruby.c \
+                        ext/arrow_file_write/arrow_nodes.c \
+                        ext/arrow_file_write/arrow_write.c \
+                        ext/arrow_file_write/extconf.rb".split(" ").partition do |f|
     f.match(%r{^(test|spec|features)/})
   end
   spec.files         = files
