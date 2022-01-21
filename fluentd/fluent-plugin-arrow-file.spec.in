@@ -23,7 +23,7 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 %setup -q -n %{name}-%{version}
 
 %build
-%{__make} -C fluentd TD_AGENT=1
+%{__make} -C fluentd TD_AGENT=1 gem
 
 %install
 rm -rf %{buildroot}

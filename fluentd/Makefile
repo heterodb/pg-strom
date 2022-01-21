@@ -36,6 +36,8 @@ $(GEM_PACKAGE): $(RUBY_SCRIPTS) $(EXT_SOURCE) $(EXT_CONF)
 	cp -f $(EXT_SOURCE) $(EXT_DIR)
 	$(RUBY_GEM) build
 
+gem: $(GEM_PACKAGE)
+
 tarball:
 	(cd .. && git archive --format=tar              \
                       --prefix=$(basename $(TAR_NAME))/ \
