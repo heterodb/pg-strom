@@ -567,6 +567,13 @@ try_again:
 		*p_nsec = NUM2ULONG(nsec);
 		return true;
 	}
+	/* Is it Integer (elapsed seconds from Epoch) */
+	if (CLASS_OF(datum) == rb_cInteger)
+	{
+		*p_sec = NUM2ULONG(datum);
+		*p_nsec = 0;
+		return true;
+	}
 	/* Is convertible to UTC? (should happen only once) */
 	if (convert_to_utc && rb_respond_to(datum, rb_intern("getutc")))
 	{
