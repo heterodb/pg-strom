@@ -1,5 +1,5 @@
 require "fluent/plugin/output"
-require_relative "arrow_file_write"
+require "arrow_file_write"
 
 module Fluent
   module Plugin
