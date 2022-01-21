@@ -1043,7 +1043,7 @@ write_ruby_uint64_stat(SQLfield *column, char *buf, size_t len,
  * ----------------------------------------------------------------
  */
 static void
-__arrowFilePathnameValidator(VALUE self, VALUE __pathname)
+__arrowFileWritePathnameValidator(VALUE self, VALUE __pathname)
 {
 	const char *str;
 	uint32_t	len, i;
@@ -1433,7 +1433,7 @@ __arrowFileAssignFieldType(SQLfield *column,
  * Parsing the Schema Definition
  */
 static void
-__arrowFileParseSchemaDefs(VALUE self, VALUE __schema_defs)
+__arrowFileWriteParseSchemaDefs(VALUE self, VALUE __schema_defs)
 {
 	VALUE		schema_defs;
 	VALUE		schema = Qnil;
@@ -1518,8 +1518,8 @@ __arrowFileParseSchemaDefs(VALUE self, VALUE __schema_defs)
 }
 
 static void
-__arrowFileParseParams(VALUE self,
-					   VALUE __params)
+__arrowFileWriteParseParams(VALUE self,
+							VALUE __params)
 {
 	VALUE		datum;
 	VALUE		schema;
@@ -1584,16 +1584,16 @@ __arrowFileParseParams(VALUE self,
 }
 
 static VALUE
-rb_ArrowFile__initialize(VALUE self,
-						 VALUE __pathname,
-						 VALUE __schema_defs,
-						 VALUE __params)
+rb_ArrowFileWrite__initialize(VALUE self,
+							  VALUE __pathname,
+							  VALUE __schema_defs,
+							  VALUE __params)
 {
 	rb_require("time");
 
-	__arrowFilePathnameValidator(self, __pathname);
-	__arrowFileParseSchemaDefs(self, __schema_defs);
-	__arrowFileParseParams(self, __params);
+	__arrowFileWritePathnameValidator(self, __pathname);
+	__arrowFileWriteParseSchemaDefs(self, __schema_defs);
+	__arrowFileWriteParseParams(self, __params);
 
 	return self;
 }
@@ -2121,8 +2121,8 @@ __arrowFileWriteChunk(VALUE __args)
 }
 
 static VALUE
-rb_ArrowFile__writeChunk(VALUE self,
-						 VALUE chunk)
+rb_ArrowFileWrite__writeChunk(VALUE self,
+							  VALUE chunk)
 {
 	WriteChunkArgs args;
 	VALUE		retval;
@@ -2149,28 +2149,12 @@ rb_ArrowFile__writeChunk(VALUE self,
 	return retval;
 }
 
-#if 1
-static VALUE
-rb_ArrowFile__test(VALUE self, VALUE datum)
-{
-	VALUE	retval;
-
-	retval = rb_funcall(rb_cTime, rb_intern("parse"), 1, datum);
-
-	printf("classname [%s] -> [%s]\n",
-		   rb_class2name(CLASS_OF(datum)),
-		   rb_class2name(CLASS_OF(retval)));
-	return retval;
-}
-#endif
-
 void
-Init_arrow_file(void)
+Init_arrow_file_write(void)
 {
 	VALUE	klass;
 
-	klass = rb_define_class("ArrowFile",  rb_cObject);
-	rb_define_method(klass, "initialize", rb_ArrowFile__initialize, 3);
-	rb_define_method(klass, "writeChunk", rb_ArrowFile__writeChunk, 1);
-	rb_define_method(klass, "test",       rb_ArrowFile__test, 1);
+	klass = rb_define_class("ArrowFileWrite",  rb_cObject);
+	rb_define_method(klass, "initialize", rb_ArrowFileWrite__initialize, 3);
+	rb_define_method(klass, "writeChunk", rb_ArrowFileWrite__writeChunk, 1);
 }

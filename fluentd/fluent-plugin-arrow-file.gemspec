@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
   spec.email   = ["kaigai@heterodb.com"]
 
   spec.summary       = %q{Fluentd output plugin for Apache Arrow files.}
-  spec.description   = %q{Fluentd output plugin for Apache Arrow files.}
+  spec.description   = %q{Fluentd output plugin for Apache Arrow files. See documentation for more details.}
   spec.homepage      = "https://github.com/heterodb/pg-strom/"
   spec.license       = "PostgreSQL"
   spec.extensions    = %w[ext/arrow_file_write/extconf.rb]

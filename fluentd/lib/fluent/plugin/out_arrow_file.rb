@@ -1,5 +1,5 @@
 require "fluent/plugin/output"
-require "arrow_file"
+require_relative "arrow_file_write"
 
 module Fluent
   module Plugin
@@ -34,7 +34,7 @@ module Fluent
         compat_parameters_convert(conf, :buffer, :inject, default_chunk_key: "time")
         super
 
-        @af=ArrowFile.new(@path,@schema_defs,{"ts_column" => @ts_column,"tag_column" => @tag_column,"filesize_threshold" => @filesize_threshold})
+        @af=ArrowFileWrite.new(@path,@schema_defs,{"ts_column" => @ts_column,"tag_column" => @tag_column,"filesize_threshold" => @filesize_threshold})
       end
 
       def format(tag,time,record)
