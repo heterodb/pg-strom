@@ -1,8 +1,10 @@
 GITHASH ?= HEAD
 
 RUBY_GEM=gem
+RUBY_RAKE=rake
 ifeq ($(TD_AGENT), 1)
 RUBY_GEM=/opt/td-agent/bin/fluent-gem
+RUBY_RAKE=/opt/td-agent/bin/rake
 endif
 GEM_SPEC=fluent-plugin-arrow-file.gemspec
 GEM_VERSION=$(shell cat $(GEM_SPEC) | awk '/spec.version/{print $$3}' | sed 's/\"//g')
@@ -20,9 +22,15 @@ EXT_SOURCE=$(addprefix ../src/,$(__EXT_SOURCE)) arrow_ruby.c
 EXT_DIR=ext/arrow_file_write
 EXT_CONF=$(EXT_DIR)/extconf.rb
 
+BIN_MODULE=lib/fluent/plugin/arrow_file_write.so
+
 __SOURCEDIR = $(shell rpmbuild -E %{_sourcedir})
 __SPECDIR = $(shell rpmbuild -E %{_specdir})
 __SPECFILE = fluent-plugin-arrow-file.spec
+
+$(BIN_MODULE): $(EXT_SOURCE)
+	cp -f $(EXT_SOURCE) $(EXT_DIR)
+	$(RUBY_RAKE) compile
 
 $(GEM_PACKAGE): $(RUBY_SCRIPTS) $(EXT_SOURCE) $(EXT_CONF)
 	cp -f $(EXT_SOURCE) $(EXT_DIR)
@@ -52,5 +60,5 @@ uninstall:
 
 clean:
 	rm -rf $(EXT_MODULE) $(GEM_PACKAGE) tmp \
-	       $(addprefix ext/arrow_file_write,$(notdir $(EXT_SOURCE))) \
-               $(TAR_NAME)*
+	       $(addprefix ext/arrow_file_write/,$(notdir $(EXT_SOURCE))) \
+           $(BIN_MODULE) $(TAR_NAME)*

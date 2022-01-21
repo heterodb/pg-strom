@@ -1352,12 +1352,6 @@ __assignFieldTypeTimestamp(SQLfield *column, const char *extra)
 }
 
 static int
-__assignFieldTypeInterval(SQLfield *column, const char *extra)
-{
-	Elog("Arrow::Interval - not implemented yet");
-}
-
-static int
 __assignFieldTypeUtf8(SQLfield *column)
 {
 	initArrowNode(&column->arrow_type, Utf8);
@@ -1417,16 +1411,13 @@ __arrowFileAssignFieldType(SQLfield *column,
 		return  __assignFieldTypeDate(column, field_type + 4);
 	else if (strncmp(field_type, "Time", 4) == 0)
 		return  __assignFieldTypeTime(column, field_type + 4);
-	else if (strncmp(field_type, "Interval", 8) == 0)
-		return  __assignFieldTypeInterval(column, field_type + 8);
     else if (strcmp(field_type, "Utf8") == 0)
 		return  __assignFieldTypeUtf8(column);
 	else if (strcmp(field_type, "Ipaddr4") == 0)
 		return  __assignFieldTypeIpaddr4(column);
 	else if (strcmp(field_type, "Ipaddr6") == 0)
 		return  __assignFieldTypeIpaddr6(column);
-
-	Elog("ArrowFile: not a supported type");
+	Elog("ArrowFileWrite: not a supported type");
 }
 
 /*
@@ -1551,7 +1542,7 @@ __arrowFileWriteParseParams(VALUE self,
 		}
 	}
 	else if (__params != Qnil)
-		Elog("ArrowFile: parameters must be Hash");
+		Elog("ArrowFileWrite: parameters must be Hash");
 
 	schema = rb_ivar_get(self, rb_intern("schema"));
 	datum = rb_funcall(schema, rb_intern("count"), 0);
