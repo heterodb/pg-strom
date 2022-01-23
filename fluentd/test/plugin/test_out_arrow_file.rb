@@ -2,8 +2,19 @@ require "helper"
 require "fluent/plugin/out_arrow_file.rb"
 
 class ArrowFileOutputTest < Test::Unit::TestCase
-  # Define directory path where the test output file exists.
   TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../out_file#{ENV['TEST_ENV_NUMBER']}")
+  EXPECTED_DIR = File.expand_path(File.dirname(__FILE__) + "/../expected")
+  COMPARE_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_result.sh")
+
+  class << self
+    # Define directory path where the test output file exists.
+    def startup
+      p "create #{TMP_DIR}"
+      FileUtils.rm_rf TMP_DIR
+      FileUtils.mkdir_p TMP_DIR
+      FileUtils.rm_f File.expand_path(File.dirname(__FILE__) + "/../regression.diff")
+    end
+  end
 
   DEFAULT_CONFIG = %[
     path #{TMP_DIR}/arrow_file_test.arrow
@@ -11,111 +22,42 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   ]
   DEFALUT_TAG='test_tag'
 
-  def setup
-    Fluent::Test.setup
-    FileUtils.mkdir_p TMP_DIR
-  end
-
-  sub_test_case 'configuration' do
-    test "conf_paths" do
-      d = create_driver
-      assert_equal "#{TMP_DIR}/arrow_file_test.arrow",d.instance.path 
-    end
-  end
-=begin
-  test "feed_test" do
-    d = create_driver
-    d.run(default_tag: 'test_tag') do
-      d.feed({'uint8_column' => 93})
-    end
-
-    assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/arrow_file_test.arrow")
-  end
-
-    test "uint8" do
-
-      uint8_conf = %[
-        path #{TMP_DIR}/uint8_test.arrow
-        schema_defs "uint8_column=Uint8"
-      ]
-
-      assert_nothing_raised do
-        feed_record(uint8_conf,{'uint8_column' => 0})
-        feed_record(uint8_conf,{'uint8_column' => 255})
-      end
-
-      assert_raise RangeError do
-        feed_record(uint8_conf,{'uint8_column' => 256})
-      end
-      assert_raise RangeError do
-        feed_record(uint8_conf,{'uint8_column' => -1})
-      end
-    end
-
-  test "error_test" do
-    d = create_driver
-    assert_raise RangeError do
-      d.run(default_tag: 'test_tag') do
-        d.feed({'uint8_column' => 257})
-      end
-    endassert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/arrow_file_test.arrow")
-  end  2013-02-28 12:34:56.789
-=end
-
-  def feed_record(conf,record)
-    d = create_driver(conf)
-    d.run(default_tag: DEFALUT_TAG,flush:true,shutdown:true) do
-      d.feed(record)
-    end
-  end
-
   sub_test_case 'data_type' do
-
-=begin
-    test "timestamp" do
-      conf = %[
-        path #{TMP_DIR}/timestamp_ns_test.arrow
-        schema_defs "tsns=Timestamp"
-      ]
-      d=create_driver(conf)
-
-      ## EventTimeが何故かIntegerになってします。
-
-      #t1=event_time("2016-10-03 23:58:09 UTC")
-      #record={'nonpo' => t1}
-      #p record.class
-
-      #p record['tsns'].class
-      
-      d.run(default_tag: DEFAULT_CONFIG) do
-        ## FLuent::EventTime
-        #d.feed({'tsns' => 5})
-        #d.feed({'tsns' => event_time("2016-10-03 23:58:09 UTC")})
-        d.feed({'tsns' => '2013-02-28 12:34:56.789012'})
-        #d.feed('rururur',t1,record)
-      end
-
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/timestamp_ns_test.arrow")
-    end
-=end
-
-    test "uint8" do
+    test "uint_test" do
       conf = %[
         path #{TMP_DIR}/uint8_test.arrow
-        schema_defs "ui8=Uint8"
+        schema_defs "ui1=Uint8,ui2=Uint16,ui3=Uint32,ui4=Uint64"
       ]
 
       d=create_driver(conf)
 
       d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'ui8' => 0})
-        d.feed({'ui8' => 255})
+        d.feed({'ui1' => 0,'ui2' => 0, 'ui3' => 0, 'ui4' => 0})
+        d.feed({'ui1' => 255,'ui2' => 32767, 'ui3' => 2147483647, 'ui4' => 4294967295})
+        d.feed({'ui1' => nil,'ui2' => nil, 'ui3' => nil, 'ui4' => nil})
       end
 
-      # TODO: 比較チェックする。
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/uint8_test.arrow")
+      assert system("#{COMPARE_CMD} #{TMP_DIR}/uint8_test.arrow #{EXPECTED_DIR}/uint8_test.out")
     end
 
+    test "timestamp_check" do
+      conf = %[
+        path #{TMP_DIR}/timestamp_ns_test.arrow
+        schema_defs "tsns1=Timestamp,tsns2=Timestamp[sec],tsns3=Timestamp[ms],tsns4=Timestamp[us],tsns5=Timestamp[ns]"  #" #
+      ]
+      d=create_driver(conf)
+
+      t1=event_time("2016-10-03 23:58:09 UTC")
+      time_string='2000-02-29 12:34:56.789012'
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFAULT_CONFIG) do
+          d.feed({'tsns1' => t1, 'tsns2' => t1, 'tsns3' => t1, 'tsns4' => t1, 'tsns5' => t1})
+          d.feed({'tsns1' => time_string,'tsns2' => time_string, 'tsns3' => time_string, 'tsns4' => time_string, 'tsns5' => time_string})
+          d.feed({'tsns1' => nil,'tsns2' => nil, 'tsns3' => nil,'tsns4' => nil, 'tsns5' => nil})
+        end
+      end
+    end
 
     test "float64" do
       conf = %[
@@ -184,8 +126,15 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       d=create_driver(conf)
 
       d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'dec1' => 3.141})     # ???
-        d.feed({'dec1' => 2.71828})   # ???
+        #d.feed({'dec1' => 3.141592})     # ???
+        #d.feed({'dec1' => 2.436})   # ???
+        d.feed({'dec1' => 123})
+        d.feed({'dec1' => 456})
+        d.feed({'dec1' => 789})
+        d.feed({'dec1' => 987})
+        d.feed({'dec1' => 654})
+        d.feed({'dec1' => 321})
+        #d.feed({'dec1' => 0.1})   # ???
       end
 
       assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/decimal_1.arrow")
@@ -226,6 +175,10 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/utf8_1.arrow")
     end
 
+    test "compare_expected" do
+      assert system("ls -lah #{TMP_DIR}")
+    end
+
   end
 =begin
       # NG case: lower limit over
@@ -246,10 +199,6 @@ class ArrowFileOutputTest < Test::Unit::TestCase
     end
   end
 =end
-
-  teardown do
-    FileUtils.rm_rf TMP_DIR
-  end
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
