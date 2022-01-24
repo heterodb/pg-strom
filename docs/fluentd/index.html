@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>connect with Fluentd - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "connect with Fluentd";
+    var mkdocs_page_input_path = "fluentd.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/fluentd/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Tutorial</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Advanced Features</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">connect with Fluentd</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow-file-plugin">arrow-file plugin</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#internals">Internals</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#installation">Installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example">Example</a>
+    </li>
+    </ul>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">References</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">Release Note</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>Advanced Features &raquo;</li>
+        
+      
+    
+    <li>connect with Fluentd</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="connect-with-fluentd">connect with Fluentd</h1>
+<p>This chapter introduces the cooperation with Fluentd via Apache Arrow data format for the efficient importing of IoT/M2M log data.</p>
+<h2 id="overview">Overview</h2>
+<p><img alt="Fluentd with PG-Strom Overview" src="../img/fluentd_overview.png" /></p>
+<h2 id="arrow-file-plugin">arrow-file plugin</h2>
+<h3 id="internals">Internals</h3>
+<p><img alt="Fluentd Components" src="../img/fluentd_components.png" /></p>
+<h2 id="installation">Installation</h2>
+<pre><code>$ curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent4.sh | sh
+
+$ sudo /opt/td-agent/bin/fluent-gem install rake-compiler
+</code></pre>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/fluentd
+$ make TD_AGENT=1 gem
+$ sudo make TD_AGENT=1 install
+</code></pre>
+<pre><code>$ /opt/td-agent/bin/fluent-gem list | grep arrow
+fluent-plugin-arrow-file (0.2)
+</code></pre>
+<h2 id="configuration">Configuration</h2>
+<h2 id="example">Example</h2>
+<p><strong><em>Example configuration of <code>/etc/td-agent/td-agent.conf</code></em></strong></p>
+<pre><code>&lt;source&gt;
+  @typetail
+  path /var/log/httpd/access_log
+  pos_file /var/log/td-agent/httpd_access.pos
+  tag httpd
+  format apache2
+  &lt;parse&gt;
+    @typeapache2
+    expression /^(?&lt;host&gt;[^ ]*) [^ ]* (?&lt;user&gt;[^ ]*) \[(?&lt;time&gt;[^\]]*)\] &quot;(?&lt;method&gt;\S+)(?: +(?&lt;path&gt;(?:[^\&quot;]|\\.)*?)(?: +\S*)?)?&quot; (?&lt;code&gt;[^ ]*) (?&lt;size&gt;[^ ]*)(?: &quot;(?&lt;referer&gt;(?:[^\&quot;]|\\.)*)&quot; &quot;(?&lt;agent&gt;(?:[^\&quot;]|\\.)*)&quot;)?$/
+    time_format %d/%b/%Y:%H:%M:%S %z
+  &lt;/parse&gt;
+&lt;/source&gt;
+
+&lt;match httpd&gt;
+  @typearrow_file
+  path /tmp/mytest%Y%m%d.%p.arrow
+  schema_defs &quot;ts=Timestamp[sec],host=Utf8,method=Utf8,path=Utf8,code=Int32,size=Int32,referer=Utf8,agent=Utf8&quot;
+  ts_column &quot;ts&quot;
+  &lt;buffer&gt;
+    flush_interval 10s
+    chunk_limit_size 4MB
+    chunk_limit_records 200
+  &lt;/buffer&gt;
+&lt;/match&gt;
+</code></pre>
+<p>Start the <code>td-agent</code> service.</p>
+<pre><code>$ sudo systemctl start td-agent
+</code></pre>
+<pre><code>$ arrow2csv /tmp/mytest20220124.3206341.arrow --head --offset 300 --limit 10
+&quot;ts&quot;,&quot;host&quot;,&quot;method&quot;,&quot;path&quot;,&quot;code&quot;,&quot;size&quot;,&quot;referer&quot;,&quot;agent&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/js/theme_extra.js&quot;,200,195,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/js/theme.js&quot;,200,4401,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/img/fluentd_overview.png&quot;,200,121459,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/search/main.js&quot;,200,3027,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/Lato/lato-regular.woff2&quot;,200,182708,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/fontawesome-webfont.woff2?v=4.7.0&quot;,200,77160,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/RobotoSlab/roboto-slab-v7-bold.woff2&quot;,200,67312,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/Lato/lato-bold.woff2&quot;,200,184912,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:43&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/search/worker.js&quot;,200,3724,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:43&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/img/favicon.ico&quot;,200,1150,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+
+</code></pre>
+<pre><code>postgres=# IMPORT FOREIGN SCHEMA mytest
+           FROM SERVER arrow_fdw INTO public
+           OPTIONS (file '/tmp/mytest20220124.3206341.arrow');
+IMPORT FOREIGN SCHEMA
+
+postgres=# SELECT ts, host, path FROM mytest WHERE code = 404;
+         ts          |     host      |         path
+---------------------+---------------+----------------------
+ 2022-01-24 12:02:06 | 192.168.77.73 | /~kaigai/ja/fluentd/
+(1 row)
+
+postgres=# EXPLAIN SELECT ts, host, path FROM mytest WHERE code = 404;
+                                  QUERY PLAN
+------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on mytest  (cost=4026.12..4026.12 rows=3 width=72)
+   GPU Filter: (code = 404)
+   referenced: ts, host, path, code
+   files0: /tmp/mytest20220124.3206341.arrow (read: 128.00KB, size: 133.94KB)
+(4 rows)
+</code></pre>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ref_types/" class="btn btn-neutral float-right" title="Data Types">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../gpucache/" class="btn btn-neutral" title="GPU Cache"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../gpucache/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../ref_types/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>

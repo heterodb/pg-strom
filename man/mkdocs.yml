@@ -24,6 +24,7 @@ nav:
     - 'GPUDirect SQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
     - 'GPU Cache' : 'gpucache.md'
+    - 'connect with Fluentd' : 'fluentd.md'
 - 'References' :
     - 'Data Types' : 'ref_types.md'
     - 'Functions and Operators' : 'ref_devfuncs.md'
@@ -49,6 +50,7 @@ nav:
     - 'GPUダイレクトSQL' : 'ssd2gpu.md'
     - 'Apache Arrow' : 'arrow_fdw.md'
     - 'GPUキャッシュ' : 'gpucache.md'
+    - 'Fluentd連携' : 'fluentd.md'
 - 'リファレンス' :
     - 'データ型' : 'ref_types.md'
     - '関数と演算子' : 'ref_devfuncs.md'
