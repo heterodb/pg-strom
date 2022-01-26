@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Fluentd連携 - PG-Strom Manual</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
+
+  <link rel="stylesheet" href="../css/theme.css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+  <link href="../custom.css" rel="stylesheet" />
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Fluentd\u9023\u643a";
+    var mkdocs_page_input_path = "fluentd.md";
+    var mkdocs_page_url = null;
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js" defer></script>
+  <script src="../js/modernizr-2.8.3.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
+  <script>hljs.initHighlightingOnLoad();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<strong>Japanese</strong> | <a href="../../fluentd/"    style="color: #cccccc">English</a>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                    </li>
+                </ul>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">利用ガイド</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">先進機能</span></p>
+                <ul class="current">
+                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                    </li>
+                    <li class="toctree-l1 current"><a class="reference internal current" href="./">Fluentd連携</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow-file">arrow-file プラグイン</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#_2">内部構造</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">インストール</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">設定</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">使用例</a>
+    </li>
+    </ul>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リファレンス</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                    </li>
+                </ul>
+                <p class="caption"><span class="caption-text">リリースノート</span></p>
+                <ul>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                    </li>
+                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                    </li>
+                </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>先進機能 &raquo;</li>
+        
+      
+    
+    <li>Fluentd連携</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  
+  <hr/>
+</div>
+
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="fluentd">Fluentd連携</h1>
+<p>本章では、Apache Arrowデータ形式を介したFluentdとの連携と、IoT/M2Mログデータの効率的な取り込みについて説明します。</p>
+<h2 id="_1">概要</h2>
+<p>IoT/M2Mとよばれる技術領域においては、PCやサーバだけでなく、携帯電話や自動車、各種センサーなどのデバイスが生成した大量のログデータを蓄積し、これを分析するためのソフトウェアが数多く開発されています。大量のデバイスが時々刻々と生成するデータは非常に大きなサイズになりがちで、これを実用的な時間内に処理するには、特別な工夫が必要となるからです。</p>
+<p>PG-Stromの各種機能は、こういった規模のログデータを高速に処理するために設計・実装されています。
+しかし一方で、こうした規模のデータの検索・集計が可能な状態にするためにデータを移送し、データベースに取り込むには時間がかかりがちです。
+そこで、PG-StromにはFluentd向けにApache Arrow形式でログデータを出力する<code>fluent-plugin-arrow-file</code>モジュールを同梱し、ログデータのインポートという問題に対処を試みています。</p>
+<p><img alt="Fluentd with PG-Strom Overview" src="../img/fluentd_overview.png" /></p>
+<p>Fluentdは古橋貞之氏によって開発されたログ収集ツールで、SyslogのようなサーバログからIoT/M2M機器のデバイスログに至るまで、多種多様なログデータを集積・保存するために事実上のスタンダードとして利用されているソフトウェアです。
+Rubyで記述されたプラグインの追加により、ログデータの入出力や加工を自在にカスタマイズする事が可能で、2022年現在、800種類を越えるプラグインが公式Webサイトで紹介されています。</p>
+<p>PG-Stromが取り扱うことのできるデータ形式は、PostgreSQL Heap形式（トランザクショナル行データ）とApache Arrow形式（構造化列データ）の２種類ですが、IoT/M2M領域で想定されるような、時々刻々と大量のデータが発生するようなワークロードに対しては、Apache Arrow形式を用いた方が合理的です。</p>
+<h2 id="arrow-file">arrow-file プラグイン</h2>
+<p>以下では、Fluentdが収集したログデータをApache Arrow形式ファイルとして出力し、これをPG-Stromで参照するというアプローチについて説明します。
+また、Fluentdのパッケージには、Treasure Data社の提供する安定板<code>td-agent</code>を使用するものとします。</p>
+<p>PG-Stromに同梱のFluentd向けOutputプラグインの<code>fluent-plugin-arrow-file</code>モジュールを利用すると、Fluentdが収集したログデータを、指定したスキーマ構造を持つApache Arrow形式ファイルとして書き出すことができます。PG-StromのArrow_Fdw機能を使用すればこのApache Arrow形式ファイルを外部テーブルとして参照する事ができ、また保存先のストレージが適切に設定されていれば、GPU-Direct SQLを用いた高速な読み出しも可能です。</p>
+<p>この方法には以下のメリットがあります。
+- Fluentd が出力したデータをそのままPG-Stromで読み出せるため、改めてDBへデータをインポートする必要がない。
+- 列データ形式であるため、検索・集計処理に伴うデータの読み出し（I/O負荷）を必要最小限に抑える事ができる。
+- 古くなったログデータのアーカイブも、OS上のファイル移動のみで完了できる。</p>
+<p>一方で、Apache Arrow形式で性能上のメリットを得るには、Record Batchのサイズをある程度大きくしなければならないため、ログの発生頻度が小さく、一定サイズのログが溜まるまでに時間のかかる場合には、PostgreSQLのテーブルに出力させるなど、別の方法を試した方がよりリアルタイムに近いログ分析が可能でしょう。</p>
+<h3 id="_2">内部構造</h3>
+<p>Fluentdのプラグインにはいくつかカテゴリがあり、外部からログを受け取るInputプラグイン、ログを成形するParserプラグイン、受信したログを一時的に蓄積するBufferプラグイン、ログを出力するOutputプラグイン、などの種類があります。</p>
+<p>arrow-fileはOutputプラグインの一つですが、これはBufferプラグインから渡されたログデータの固まり(chunk)を、コンフィグで指定されたスキーマ構造を持つApache Arrow形式で書き出す役割を担っています。</p>
+<p><img alt="Fluentd Components" src="../img/fluentd_components.png" /></p>
+<p>Input/Parserプラグインの役割は、外部から受け取ったログを共通の形式に変換し、BufferプラグインやOutputプラグインが入力データの形式を意識することなく扱えるようにすることです。</p>
+<p>これは内部的には、ログの振り分けに利用することのできる識別子の<code>tag</code>、ログのタイムスタンプ<code>time</code>、および生ログを成形した連想配列である<code>record</code>の組です。</p>
+<p>arrow-fileプラグインは、<code>tag</code>、<code>time</code>の各フィールドと、<code>record</code>連想配列の各要素（一部を省略することも可能）を列として持つApache Arrow形式ファイルへの書き出しを行います。
+そのため、出力先のファイル名とスキーマ定義情報（連想配列の要素と列/型のマッピング）は必須の設定パラメータです。</p>
+<h2 id="_3">インストール</h2>
+<p>使用しているLinuxディストリビューション用の<code>td-agent</code>パッケージをインストールします。
+また、arrow-fileプラグインのインストールには<code>rake-compiler</code>モジュールが必要ですので、予めインストールしておきます。</p>
+<p>詳しくは<a href="https://docs.fluentd.org/installation/install-by-rpm">こちら</a>を参照してください。</p>
+<pre><code>$ curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent4.sh | sh
+
+$ sudo /opt/td-agent/bin/fluent-gem install rake-compiler
+</code></pre>
+<p>次に、PG-Stromのソースコードをダウンロードし、<code>fluentd</code> ディレクトリ以下の物件をビルドします。</p>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/fluentd
+$ make TD_AGENT=1 gem
+$ sudo make TD_AGENT=1 install
+</code></pre>
+<p>Fluentdのプラグインがインストールされている事を確認するため、以下のコマンドを実行します。</p>
+<pre><code>$ /opt/td-agent/bin/fluent-gem list | grep arrow
+fluent-plugin-arrow-file (0.2)
+</code></pre>
+<h2 id="_4">設定</h2>
+<p>前述の通り、arrow-fileプラグインを動作させるには、出力先のパス名とスキーマ定義を設定することが最低限必要です。</p>
+<p>これに加えて、Apache Arrowファイルの構造上、Record Batchと呼ばれるデータの固まりはある程度大きなサイズで区切っておいた方が、検索・集計処理を行う際の処理性能を引き出しやすいです。
+arrow-fileプラグインは、Bufferプラグインから渡されるchunkごとにRecord Batchを作成するため、Bufferプラグイン側のバッファサイズはこれに準じた設定を行うべきです。デフォルトでは 256MB のバッファサイズを取るように設定されています。</p>
+<p>arrow-fileプラグインの設定パラメータは以下の通りです。</p>
+<dl>
+<dt><code>path</code> [type: <code>String</code> ] (必須パラメータ)</dt>
+<dd>arrow-fileプラグインががログを出力するファイル名を指定します。</dd>
+<dd>このパラメータは必須で、以下の書式文字を含める事ができます。</dd>
+</dl>
+<table>
+<thead>
+<tr>
+<th>書式</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>%Y</code></td>
+<td>現在の年を西暦4桁で表現した数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%y</code></td>
+<td>現在の年の西暦下2桁で表現した数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%m</code></td>
+<td>現在の月を 01～12 で表した2桁の数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%d</code></td>
+<td>現在の日を 01～31 で表した2桁の数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%H</code></td>
+<td>現在時刻の時を00～23で表した2桁の数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%M</code></td>
+<td>現在時刻の分を00～59で表した2桁の数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%S</code></td>
+<td>現在時刻の秒を00～59で表した2桁の数値で置き換えます。</td>
+</tr>
+<tr>
+<td><code>%p</code></td>
+<td>現在の Fluentd プロセスのPIDで置き換えます。</td>
+</tr>
+</tbody>
+</table>
+<p>書式文字列はチャンクを書き出すタイミングで評価され、同名のApache Arrow形式ファイルが存在する場合には、Record Batchを追記します。存在しない場合はApache Arrow形式ファイルを新規作成し、最初のRecord Batchを書き出します。</p>
+<p>ただし、既存のApache Arrowファイルのサイズが後述の<code>filesize_threshold</code>設定値を越えている場合は、既存ファイルをリネームした後、新規にファイルを作成します。</p>
+<pre><code>（例）`path /tmp/arrow_logs/my_logs_%y%m%d.%p.log`
+</code></pre>
+<p>出力先のApache Arrowファイルは、チャンクを書き出すたびにフッタ領域を更新して全てのRecord Batchをポイントします。したがって、生成されたApache Arrowファイルは即座に読み出すことができますが、アクセス競合を避けるためには<code>lockf(3)</code>を用いて排他処理を行う必要があります。</p>
+<dl>
+<dt><code>schema_defs</code> [type: <code>String</code> ] (必須パラメータ)</dt>
+<dd><code>fluent-plugin-arrow-file</code>がログデータを出力する際の、Apache Arrow形式ファイルのスキーマ定義を指定します。</dd>
+<dd>このパラメータは必須で、以下の形式で記述された文字列によりスキーマ構造を定義します。</dd>
+</dl>
+<ul>
+<li><code>schema_defs := column_def1[,column_def2 ...]</code></li>
+<li><code>column_def := &lt;column_name&gt;=&lt;column_type&gt;[;&lt;column_attrs&gt;]</code><ul>
+<li><code>&lt;column_name&gt;</code>は列の名前です。Fluentdからarrow-fileに渡される連想配列のキー値と一致している必要があります。</li>
+<li><code>&lt;column_type&gt;</code>は列のデータ型です。以下の表を参照してください。</li>
+<li><code>&lt;column_attrs&gt;</code>は列の付加属性です。現時点では以下の属性のみがサポートされています。<ul>
+<li><code>stat_enabled</code> ... 列の統計情報を収集し、Record Batchごとの最大値/最小値を<code>max_values=...</code>および<code>min_values=...</code>カスタムメタデータとして埋め込みます。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p>（例）<code>schema_defs "ts=Timestamp;stat_enabled,dev_id=Uint32,temperature=Float32,humidity=Float32"</code></p>
+<p><strong><em>arrow-fileプラグインのサポートするデータ型</em></strong></p>
+<table>
+<thead>
+<tr>
+<th>データ型</th>
+<th>説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Int8</code> <code>Int16</code> <code>Int32</code> <code>Int64</code></td>
+<td>符号付き整数型で、それぞれ指定したビット幅を持ちます。</td>
+</tr>
+<tr>
+<td><code>Uint8</code> <code>Uint16</code> <code>Uint32</code> <code>Uint64</code></td>
+<td>符号なし整数型で、それぞれ指定したビット幅を持ちます。</td>
+</tr>
+<tr>
+<td><code>Float16</code> <code>Float32</code> <code>Float64</code></td>
+<td>浮動小数点型で、それぞれ半精度(16bit)、単精度(32bit)、倍精度(64bit)の幅を持ちます。</td>
+</tr>
+<tr>
+<td><code>Decimal</code> <code>Decimal128</code></td>
+<td>128bit固定小数点型です。256bit固定小数点型は現在未サポートです。</td>
+</tr>
+<tr>
+<td><code>Timestamp</code> <code>Timestamp[sec]</code> <code>Timestamp[ms]</code> <code>Timestamp[us]</code> <code>Timestamp[ns]</code></td>
+<td>タイムスタンプ型です。精度を指定することができ、省略した場合は暗黙に<code>[us]</code>を付加したものとして扱われます。</td>
+</tr>
+<tr>
+<td><code>Time</code> <code>Time[sec]</code> <code>Time[ms]</code> <code>Time[us]</code> <code>Time[ns]</code></td>
+<td>時刻型です。精度を指定することができ、省略した場合は暗黙に<code>[sec]</code>を付加したものとして扱われます。</td>
+</tr>
+<tr>
+<td><code>Date</code> <code>Date[dat]</code> <code>Date[ms]</code></td>
+<td>日付型です。精度を指定することができ、省略した場合は暗黙に<code>[day]</code>を付加したものとして扱われます。</td>
+</tr>
+<tr>
+<td><code>Utf8</code></td>
+<td>文字列型です。</td>
+</tr>
+<tr>
+<td><code>Ipaddr4</code></td>
+<td>IPv4アドレス型です。実際には<code>byteWidth=4</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
+</tr>
+<tr>
+<td><code>Ipaddr6</code></td>
+<td>IPv4アドレス型です。実際には<code>byteWidth=16</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
+</tr>
+</tbody>
+</table>
+<dl>
+<dt><code>ts_column</code> [type: <code>String</code> / default: なし]</dt>
+<dd>指定した列の値を（<code>record</code>連想配列からではなく）Fluentdから渡されたログのタイムスタンプ値より取得します。</dd>
+<dd>通常、このオプションで指定する列は<code>Timestamp</code>などの日付時刻型を持っており、また<code>stat_enabled</code>属性と併用することで検索処理の高速化が期待できます。</dd>
+<dt><code>tag_column</code> [type: <code>String</code> / default: なし]</dt>
+<dd>指定した列の値を（<code>record</code>連想配列からではなく）Fluentdから渡されたログのタグ値より取得します。</dd>
+<dd>通常、このオプションで指定する列は<code>Utf8</code>などの文字列型を持っています。</dd>
+<dt><code>filesize_threshold</code> [type: <code>Integer</code> / default: 10000]</dt>
+<dd><code>fluent-plugin-arrow-file</code>が出力先ファイルを切り替える閾値をMB単位で設定します。</dd>
+<dd>デフォルトではファイルサイズが約10GBを越えた辺りで出力先を切り替えます。</dd>
+</dl>
+<h2 id="_5">使用例</h2>
+<p>簡単な例として、ローカルのApache Httpdサーバのログを監視し、それをフィールド毎にパースしてApache Arrow形式ファイルに書き込みます。</p>
+<p><code>&lt;source&gt;</code>で<code>/var/log/httpd/access_log</code>をデータソースとして指定しているほか、<code>apache2</code>のParseプラグインを用いて、host, user, time, method, path, code, size, referer, agentの各フィールドを切り出しています。</p>
+<p>これらはarrow-fileプラグインに連想配列として渡され、<code>&lt;match&gt;</code>内の<code>schema_defs</code>には、これらのフィールドに対応するApache Arrowファイルの列定義を記述しています。</p>
+<p>また、ここでは簡単な使用例を示すことが目的ですので、<code>&lt;buffer&gt;</code>タグでチャンクサイズを最大4MB / 200行に縮小し、最大でも10秒でOutputプラグインに渡すよう設定しています。</p>
+<p><code>/etc/td-agent/td-agent.conf</code>の設定例</p>
+<pre><code>&lt;source&gt;
+  @typetail
+  path /var/log/httpd/access_log
+  pos_file /var/log/td-agent/httpd_access.pos
+  tag httpd
+  format apache2
+  &lt;parse&gt;
+    @typeapache2
+    expression /^(?&lt;host&gt;[^ ]*) [^ ]* (?&lt;user&gt;[^ ]*) \[(?&lt;time&gt;[^\]]*)\] &quot;(?&lt;method&gt;\S+)(?: +(?&lt;path&gt;(?:[^\&quot;]|\\.)*?)(?: +\S*)?)?&quot; (?&lt;code&gt;[^ ]*) (?&lt;size&gt;[^ ]*)(?: &quot;(?&lt;referer&gt;(?:[^\&quot;]|\\.)*)&quot; &quot;(?&lt;agent&gt;(?:[^\&quot;]|\\.)*)&quot;)?$/
+    time_format %d/%b/%Y:%H:%M:%S %z
+  &lt;/parse&gt;
+&lt;/source&gt;
+
+&lt;match httpd&gt;
+  @typearrow_file
+  path /tmp/mytest%Y%m%d.%p.arrow
+  schema_defs &quot;ts=Timestamp[sec],host=Utf8,method=Utf8,path=Utf8,code=Int32,size=Int32,referer=Utf8,agent=Utf8&quot;
+  ts_column &quot;ts&quot;
+  &lt;buffer&gt;
+    flush_interval 10s
+    chunk_limit_size 4MB
+    chunk_limit_records 200
+  &lt;/buffer&gt;
+&lt;/match&gt;
+</code></pre>
+<p><code>td-agent</code>を起動します。</p>
+<pre><code>$ sudo systemctl start td-agent
+</code></pre>
+<p>以下のように、Apache Httpdのログが <code>path</code> で設定した <code>/tmp/mytest%Y%m%d.%p.arrow</code> が展開された先である <code>/tmp/mytest20220124.3206341.arrow</code> に書き出されています。</p>
+<pre><code>$ arrow2csv /tmp/mytest20220124.3206341.arrow --head --offset 300 --limit 10
+&quot;ts&quot;,&quot;host&quot;,&quot;method&quot;,&quot;path&quot;,&quot;code&quot;,&quot;size&quot;,&quot;referer&quot;,&quot;agent&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/js/theme_extra.js&quot;,200,195,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/js/theme.js&quot;,200,4401,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/img/fluentd_overview.png&quot;,200,121459,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/search/main.js&quot;,200,3027,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/Lato/lato-regular.woff2&quot;,200,182708,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/fontawesome-webfont.woff2?v=4.7.0&quot;,200,77160,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/RobotoSlab/roboto-slab-v7-bold.woff2&quot;,200,67312,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:42&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/fonts/Lato/lato-bold.woff2&quot;,200,184912,&quot;http://buri/docs/ja/css/theme.css&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:43&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/search/worker.js&quot;,200,3724,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+&quot;2022-01-24 06:13:43&quot;,&quot;192.168.77.95&quot;,&quot;GET&quot;,&quot;/docs/ja/img/favicon.ico&quot;,200,1150,&quot;http://buri/docs/ja/fluentd/&quot;,&quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36&quot;
+
+</code></pre>
+<p>これを PG-Strom のArrow_Fdwを用いてPostgreSQLにマッピングしてみます。</p>
+<pre><code>postgres=# IMPORT FOREIGN SCHEMA mytest
+           FROM SERVER arrow_fdw INTO public
+           OPTIONS (file '/tmp/mytest20220124.3206341.arrow');
+IMPORT FOREIGN SCHEMA
+
+postgres=# SELECT ts, host, path FROM mytest WHERE code = 404;
+         ts          |     host      |         path
+---------------------+---------------+----------------------
+ 2022-01-24 12:02:06 | 192.168.77.73 | /~kaigai/ja/fluentd/
+(1 row)
+
+postgres=# EXPLAIN SELECT ts, host, path FROM mytest WHERE code = 404;
+                                  QUERY PLAN
+------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on mytest  (cost=4026.12..4026.12 rows=3 width=72)
+   GPU Filter: (code = 404)
+   referenced: ts, host, path, code
+   files0: /tmp/mytest20220124.3206341.arrow (read: 128.00KB, size: 133.94KB)
+(4 rows)
+</code></pre>
+<p>生成された Apache Arrow ファイルを外部テーブルとしてマッピングし、これをSQLから参照しています。</p>
+<p>Fluentd側で成形されたログの各フィールドを参照する検索条件を与える事ができます。
+上記の例では、HTTPステータスコード404のログを検索し、1件がヒットしています。</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ref_types/" class="btn btn-neutral float-right" title="データ型">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../gpucache/" class="btn btn-neutral" title="GPUキャッシュ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../gpucache/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../ref_types/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        };
+    </script>
+
+</body>
+</html>
