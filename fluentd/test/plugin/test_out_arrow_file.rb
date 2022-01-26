@@ -12,7 +12,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       p "create #{TMP_DIR}"
       FileUtils.rm_rf TMP_DIR
       FileUtils.mkdir_p TMP_DIR
-      FileUtils.rm_f File.expand_path(File.dirname(__FILE__) + "/../regression.diff")
+      FileUtils.rm_f File.expand_path(File.dirname(__FILE__) + "/../regression.diffs")
     end
   end
 
@@ -23,162 +23,105 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   DEFALUT_TAG='test_tag'
 
   sub_test_case 'data_type' do
-    test "uint_test" do
+    def get_driver(file_name,schema_defs)
       conf = %[
-        path #{TMP_DIR}/uint8_test.arrow
-        schema_defs "ui1=Uint8,ui2=Uint16,ui3=Uint32,ui4=Uint64"
+        path #{TMP_DIR}/#{file_name}.arrow
+        schema_defs "#{schema_defs}"
       ]
 
-      d=create_driver(conf)
+      return create_driver(conf)
+    end
 
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'ui1' => 0,'ui2' => 0, 'ui3' => 0, 'ui4' => 0})
-        d.feed({'ui1' => 255,'ui2' => 32767, 'ui3' => 2147483647, 'ui4' => 4294967295})
-        d.feed({'ui1' => nil,'ui2' => nil, 'ui3' => nil, 'ui4' => nil})
+    def compare_arrow(file_name)
+      system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out -s")
+    end
+
+    test "uint_test" do
+      file_name='uint_test'
+      d=get_driver(file_name,"ui1=Uint8,ui2=Uint16,ui3=Uint32,ui4=Uint64")
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'ui1' => 0,'ui2' => 0, 'ui3' => 0, 'ui4' => 0})
+          d.feed({'ui1' => 255,'ui2' => 32767, 'ui3' => 2147483647, 'ui4' => 4294967295})
+          d.feed({'ui1' => nil,'ui2' => nil, 'ui3' => nil, 'ui4' => nil})
+        end
       end
-
-      assert system("#{COMPARE_CMD} #{TMP_DIR}/uint8_test.arrow #{EXPECTED_DIR}/uint8_test.out")
+      assert compare_arrow(file_name)
     end
 
     test "timestamp_check" do
-      conf = %[
-        path #{TMP_DIR}/timestamp_ns_test.arrow
-        schema_defs "tsns1=Timestamp,tsns2=Timestamp[sec],tsns3=Timestamp[ms],tsns4=Timestamp[us],tsns5=Timestamp[ns]"  #" #
-      ]
-      d=create_driver(conf)
+      file_name='timestamp_check'
+      d=get_driver(file_name,"tsns1=Timestamp,tsns2=Timestamp[sec],tsns3=Timestamp[ms],tsns4=Timestamp[us],tsns5=Timestamp[ns]")
 
       t1=event_time("2016-10-03 23:58:09 UTC")
       time_string='2000-02-29 12:34:56.789012'
 
       assert_nothing_raised do
-        d.run(default_tag: DEFAULT_CONFIG) do
+        d.run(default_tag: DEFALUT_TAG) do
           d.feed({'tsns1' => t1, 'tsns2' => t1, 'tsns3' => t1, 'tsns4' => t1, 'tsns5' => t1})
           d.feed({'tsns1' => time_string,'tsns2' => time_string, 'tsns3' => time_string, 'tsns4' => time_string, 'tsns5' => time_string})
           d.feed({'tsns1' => nil,'tsns2' => nil, 'tsns3' => nil,'tsns4' => nil, 'tsns5' => nil})
         end
       end
+      assert compare_arrow(file_name)
     end
 
-    test "float64" do
-      conf = %[
-        path #{TMP_DIR}/float_64_test.arrow
-        schema_defs "f64=Float64"
-      ]
+    test "float_check" do
+      file_name='float_check'
+      d=get_driver(file_name,"float1=Float16,float2=Float32,float3=Float64")
 
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'f64' => 1.0009765625})
-        d.feed({'f64' => 3.1415926535})
-        d.feed({'f64' => -3.14159})
-        d.feed({'f64' => 0.1})
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'float1' => 3.96875, 'float2' => 3.96875, 'float3' => 3.96875})
+          d.feed({'float1' => -1.984375, 'float2' => -1.984375, 'float3' => -1.984375})
+          d.feed({'float1' => nil, 'float2' => nil, 'float3' => nil})
+        end
       end
-
-      # TODO: 比較チェックする。
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/float_64_test.arrow")
+      assert compare_arrow(file_name)
     end
 
+    # decimal skipping...
+    test "bool_check" do
+      file_name='bool_check'
+      d=get_driver(file_name,"bool1=Bool")
 
-    test "float32" do
-      conf = %[
-        path #{TMP_DIR}/float_32_test.arrow
-        schema_defs "f32=Float32"
-      ]
-
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'f32' => 1.0009765625})
-        d.feed({'f32' => 0.1})
-        d.feed({'f32' => 3.1415926535})
-        d.feed({'f32' => -3.14159})
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'bool1' => true})
+          d.feed({'bool1' => false})
+          d.feed({'bool1' => nil})
+        end
       end
-
-      # TODO: 比較チェックする。
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/float_32_test.arrow")
+      assert compare_arrow(file_name)
     end
 
-    test "float16" do
-      conf = %[
-        path #{TMP_DIR}/float_16_test.arrow
-        schema_defs "f16=Float16"
-      ]
+    test "utf8_check" do
+      file_name='utf8_check'
+      d=get_driver(file_name,"utf81=Utf8")
 
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'f16' => 1.0009765625})
-        d.feed({'f16' => 3.1415926535})
-        d.feed({'f16' => 0.1})
-        d.feed({'f16' => -3.14159})
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'utf81' => "fuga"})
+          d.feed({'utf81' => "ほげ彅😀"})   # text including special charactors.
+          d.feed({'utf81' => "ほげほげ".encode("EUC-JP")})    # text encoded in EUC-JP
+          d.feed({'utf81' => nil})
+        end
       end
-
-      # TODO: 比較チェックする。
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/float_16_test.arrow")
+      assert compare_arrow(file_name)
     end
 
-    test "decimal1" do
-      conf = %[
-        path #{TMP_DIR}/decimal_1.arrow
-        schema_defs "dec1=Decimal"
-      ]
+    test "ip_check" do
+      file_name='ip_check'
+      d=get_driver(file_name,"ip1=Ipaddr4")
 
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        #d.feed({'dec1' => 3.141592})     # ???
-        #d.feed({'dec1' => 2.436})   # ???
-        d.feed({'dec1' => 123})
-        d.feed({'dec1' => 456})
-        d.feed({'dec1' => 789})
-        d.feed({'dec1' => 987})
-        d.feed({'dec1' => 654})
-        d.feed({'dec1' => 321})
-        #d.feed({'dec1' => 0.1})   # ???
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'ip1' => IPAddr.new("192.168.0.1").to_s})
+          #d.feed({'ip1' => "192.168.0.1/24",'ip2' => nil})
+        end
       end
-
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/decimal_1.arrow")
-    end
-
-    test "bool" do
-      conf = %[
-        path #{TMP_DIR}/bool.arrow
-        schema_defs "bl1=Bool,tsns=Int64"
-        ts_column "tsns"
-      ]
-
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'bl1' => true})     # ???
-        d.feed({'bl1' => false})   # ???
-        d.feed({'bl1' => nil})   # ???
-      end
-
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/bool.arrow")
-    end
-
-    test "utf8" do
-      conf = %[
-        path #{TMP_DIR}/utf8_1.arrow
-        schema_defs "utf81=Utf8"
-      ]
-
-      d=create_driver(conf)
-
-      d.run(default_tag: DEFALUT_TAG) do
-        d.feed({'utf81' => "fuga"})     # ???
-        d.feed({'utf81' => "ほげ彅"})   # ???
-        d.feed({'utf81' => nil})   # ???
-      end
-
-      assert system("../arrow-tools/arrow2csv --header #{TMP_DIR}/utf8_1.arrow")
-    end
-
-    test "compare_expected" do
-      assert system("ls -lah #{TMP_DIR}")
-    end
-
+      assert compare_arrow(file_name)
+    end    
   end
 =begin
       # NG case: lower limit over

@@ -54,7 +54,7 @@ fi
 }
 
 # Compare
-declare -r regression_diff_file_path="${script_path}/regression.diff"
+declare -r regression_diff_file_path="${script_path}/regression.diffs"
 
 echo "Files ${arrow_file_path} and ${expected_file_path} differ" >> ${regression_diff_file_path}
 echo "------------------------" >> ${regression_diff_file_path}
