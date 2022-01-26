@@ -172,7 +172,7 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>PG-Stromが取り扱うことのできるデータ形式は、PostgreSQL Heap形式（トランザクショナル行データ）とApache Arrow形式（構造化列データ）の２種類ですが、IoT/M2M領域で想定されるような、時々刻々と大量のデータが発生するようなワークロードに対しては、Apache Arrow形式を用いた方が合理的です。</p>
 <h2 id="arrow-file">arrow-file プラグイン</h2>
 <p>以下では、Fluentdが収集したログデータをApache Arrow形式ファイルとして出力し、これをPG-Stromで参照するというアプローチについて説明します。
-また、Fluentdのパッケージには、Treasure Data社の提供する安定板<code>td-agent</code>を使用するものとします。</p>
+また、Fluentdのパッケージには、Treasure Data社の提供する安定版<code>td-agent</code>を使用するものとします。</p>
 <p>PG-Stromに同梱のFluentd向けOutputプラグインの<code>fluent-plugin-arrow-file</code>モジュールを利用すると、Fluentdが収集したログデータを、指定したスキーマ構造を持つApache Arrow形式ファイルとして書き出すことができます。PG-StromのArrow_Fdw機能を使用すればこのApache Arrow形式ファイルを外部テーブルとして参照する事ができ、また保存先のストレージが適切に設定されていれば、GPU-Direct SQLを用いた高速な読み出しも可能です。</p>
 <p>この方法には以下のメリットがあります。
 - Fluentd が出力したデータをそのままPG-Stromで読み出せるため、改めてDBへデータをインポートする必要がない。
@@ -212,7 +212,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <p>arrow-fileプラグインの設定パラメータは以下の通りです。</p>
 <dl>
 <dt><code>path</code> [type: <code>String</code> ] (必須パラメータ)</dt>
-<dd>arrow-fileプラグインががログを出力するファイル名を指定します。</dd>
+<dd>arrow-fileプラグインがログを出力するファイル名を指定します。</dd>
 <dd>このパラメータは必須で、以下の書式文字を含める事ができます。</dd>
 </dl>
 <table>
@@ -314,7 +314,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <td>時刻型です。精度を指定することができ、省略した場合は暗黙に<code>[sec]</code>を付加したものとして扱われます。</td>
 </tr>
 <tr>
-<td><code>Date</code> <code>Date[dat]</code> <code>Date[ms]</code></td>
+<td><code>Date</code> <code>Date[Day]</code> <code>Date[ms]</code></td>
 <td>日付型です。精度を指定することができ、省略した場合は暗黙に<code>[day]</code>を付加したものとして扱われます。</td>
 </tr>
 <tr>
@@ -327,7 +327,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 </tr>
 <tr>
 <td><code>Ipaddr6</code></td>
-<td>IPv4アドレス型です。実際には<code>byteWidth=16</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
+<td>IPv6アドレス型です。実際には<code>byteWidth=16</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
 </tr>
 </tbody>
 </table>
