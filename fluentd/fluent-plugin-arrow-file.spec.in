@@ -1,0 +1,55 @@
+Name: fluent-plugin-arrow-file
+Version: @@PLUGIN_VERSION@@
+Release: @@PLUGIN_RELEASE@@%{?dist}
+Summary: Fluentd output plugin to write out logs in Apache Arrow format
+Group: Applications/File
+License: PostgreSQL
+URL: https://github.com/heterodb/pg-strom
+Source0: %{name}-%{version}.tar.gz
+Requires: td-agent
+BuildRequires: td-agent
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+BuildArch: noarch
+
+%define fluent_dir	/opt/td-agent
+%define fluent_gem	%{fluent_dir}/bin/fluent-gem
+%define gem_package_dir	%{fluent_dir}/share/pkg
+
+%description
+fluentd-arrow provides ArrowWrite class designed for the Fluentd output plugin.
+This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
+
+%prep
+%setup -q -n %{name}-%{version}
+
+%build
+%{__make} -C fluentd TD_AGENT=1 gem
+
+%install
+rm -rf %{buildroot}
+%{__mkdir} -p %{buildroot}/%{gem_package_dir}
+%{__install} -m 0644 fluentd/%{name}-%{version}.gem %{buildroot}/%{gem_package_dir}
+
+%clean
+rm -rf %{buildroot}
+
+%post
+if ! %{fluent_gem} list --local | grep -q '^rake-compiler '; then
+    %{fluent_gem} install rake-compiler ||
+	(echo "failed on %{fluent_gem} install rake-compiler, install it manually"; exit 1)
+fi
+
+%{fluent_gem} install %{gem_package_dir}/%{name}-%{version}.gem
+
+%preun
+if [ $1 = 0 ]; then
+    %{fluent_gem} uninstall %{name} || \
+	(echo "failed to uninstall %{name}, remove it manually"; exit 0)
+fi
+
+%files
+/opt/td-agent/share/pkg/*
+
+%changelog
+* Fri Jan 21 2022 KaiGai Kohei <kaigai@heterodb.com> - 0.8
+- Initial commit

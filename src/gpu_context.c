@@ -941,13 +941,14 @@ activate_cuda_workers(GpuContext *gcontext)
  * GetGpuContext - acquire a free GpuContext
  */
 GpuContext *
-AllocGpuContext(int cuda_dindex,
+AllocGpuContext(const Bitmapset *optimal_gpus,
 				bool activate_context,
 				bool activate_workers)
 {
 	GpuContext	   *gcontext = NULL;
 	dlist_iter		iter;
 	CUresult		rc;
+	int				cuda_dindex;
 	int				i, num_workers = pgstrom_max_async_tasks;
 
 	/* per-process driver initialization */
@@ -964,7 +965,8 @@ AllocGpuContext(int cuda_dindex,
 		gcontext = dlist_container(GpuContext, chain, iter.cur);
 
 		if (gcontext->resowner == CurrentResourceOwner &&
-			(cuda_dindex < 0 || gcontext->cuda_dindex == cuda_dindex))
+			(bms_is_empty(optimal_gpus) ||
+			 bms_is_member(gcontext->cuda_dindex, optimal_gpus)))
 		{
 			pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
 			SpinLockRelease(&activeGpuContextLock);
@@ -979,14 +981,31 @@ AllocGpuContext(int cuda_dindex,
 	if (!gcontext)
 		elog(ERROR, "out of memory");
 
-	/* choose a device to use, if no preference */
-	if (cuda_dindex < 0)
+	/* choose a device to use */
+	if (bms_is_empty(optimal_gpus))
 	{
 		cuda_dindex = (IsParallelWorker()
 					   ? ParallelWorkerNumber
 					   : MyProc->pgprocno) % numDevAttrs;
 	}
+	else
+	{
+		int		ndiv = bms_num_members(optimal_gpus);
+		int		count;
 
+		Assert(ndiv > 0);
+		count = (IsParallelWorker()
+				 ? ParallelWorkerNumber
+				 : MyProc->pgprocno) % ndiv;
+		for (cuda_dindex = bms_next_member(optimal_gpus, -1);
+			 cuda_dindex >= 0;
+			 cuda_dindex = bms_next_member(optimal_gpus, cuda_dindex))
+		{
+			if (--count)
+				break;
+		}
+		Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+	}
 	/* setup fields */
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
 	gcontext->resowner		= CurrentResourceOwner;

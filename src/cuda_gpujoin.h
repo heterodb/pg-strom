@@ -94,11 +94,11 @@ typedef struct
 struct kern_gpujoin
 {
 	kern_errorbuf	kerror;				/* kernel error information */
-	cl_uint			kparams_offset;		/* offset to the kparams */
-	cl_uint			pstack_offset;		/* offset to the pseudo-stack */
+//	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			grid_sz;			/* grid-size on invocation */
 	cl_uint			block_sz;			/* block-size on invocation */
+	struct gpujoinPseudoStack *pstack;	/* pseudo-stack */
 	/* suspend/resume related */
 	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			suspend_size;		/* length of the suspend buffer */
@@ -117,7 +117,6 @@ struct kern_gpujoin
 		cl_uint		nitems;
 		cl_uint		nitems2;
 	}				stat[FLEXIBLE_ARRAY_MEMBER];	/* out: stat per depth */
-	/*-- kernel param/const buffer --*/
 	/*-- pseudo stack buffer --*/
 	/*-- suspend / resume context */
 };
@@ -140,9 +139,9 @@ gpujoin_reset_kernel_task(kern_gpujoin *kgjoin, bool resume_context)
  */
 struct gpujoinPseudoStack
 {
-	cl_uint			__vl_len;		/* varlena header */
-	cl_uint			ps_unitsz;		/* unit-size of pseudo-stack per SM */
-	cl_uint			ps_offset[FLEXIBLE_ARRAY_MEMBER];	/* for each depth */
+	cl_uint		ps_headsz;	/* = offsetof(gpujoinPseudoStack, ps_offset[nrel+1] */
+	cl_uint		ps_unitsz;	/* = unit-size of pseudo-stack per SM */
+	cl_uint		ps_offset[FLEXIBLE_ARRAY_MEMBER];	/* for each depth */
 };
 typedef struct gpujoinPseudoStack		gpujoinPseudoStack;
 
@@ -171,16 +170,6 @@ struct gpujoinSuspendContext
 };
 typedef struct gpujoinSuspendContext	gpujoinSuspendContext;
 
-#define KERN_GPUJOIN_PARAMBUF(kgjoin)					\
-	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))
-#define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)			\
-	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
-#define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)				\
-	STROMALIGN((char *)KERN_GPUJOIN_PARAMBUF(kgjoin) +	\
-			   KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin) -	\
-			   (char *)(kgjoin))
-#define KERN_GPUJOIN_PSEUDO_STACK(kgjoin)					\
-	((cl_uint *)((char *)(kgjoin) + (kgjoin)->pstack_offset))
 #define KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin,group_id)		\
 	((struct gpujoinSuspendContext *)						\
 	 ((char *)(kgjoin) + (kgjoin)->suspend_offset +			\
@@ -331,13 +320,13 @@ __shared__ cl_uint   stat_nitems2[GPUJOIN_MAX_DEPTH+1];
 
 KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_gpujoin *kgjoin,
+				  kern_parambuf *kparams,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst,
-				  kern_parambuf *kparams_gpreagg)
+				  kern_parambuf *kparams_gpreagg)	/* for combined GpuPreAgg */
 {
-	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	DECL_KERNEL_CONTEXT(u);
@@ -360,12 +349,12 @@ kern_gpujoin_main(kern_gpujoin *kgjoin,
 
 KERNEL_FUNCTION(void)
 kern_gpujoin_right_outer(kern_gpujoin *kgjoin,
+						 kern_parambuf *kparams,
 						 kern_multirels *kmrels,
 						 cl_int outer_depth,
 						 kern_data_store *kds_dst,
-						 kern_parambuf *kparams_gpreagg)
+						 kern_parambuf *kparams_gpreagg) /* for combined GpuPreAgg */
 {
-	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 	DECL_KERNEL_CONTEXT(u);

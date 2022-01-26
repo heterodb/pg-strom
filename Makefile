@@ -99,15 +99,15 @@ PCAP2ARROW   = $(ARROW_BUILD_ROOT)/pcap2arrow
 #
 __DOC_FILES = index.md install.md operations.md \
               partition.md brin.md postgis.md hll_count.md troubles.md \
-	      ssd2gpu.md arrow_fdw.md gpucache.md \
+	      ssd2gpu.md arrow_fdw.md gpucache.md fluentd.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
 	      release_v2.0.md release_v2.2.md release_v2.3.md release_v3.0.md
 
 #
 # Files to be packaged
 #
-__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda \
-                  pg_strom.control src sql utils arrow-tools test man
+__PACKAGE_FILES = LICENSE README.md Makefile Makefile.cuda pg_strom.control \
+                  src sql utils arrow-tools fluentd test man
 ifeq ($(PGSTROM_RELEASE),1)
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION)
 else
@@ -366,6 +366,28 @@ rpm-pcap2arrow: tarball
 	    > $(__SPECDIR)/pcap2arrow.spec
 	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec --undefine=_debugsource_packages
 
-rpm-arrow: rpm-pg2arrow rpm-mysql2arrow rpm-pcap2arrow
+rpm-arrow2csv: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/pcap2arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/arrow2csv.spec
+	rpmbuild -ba $(__SPECDIR)/arrow2csv.spec --undefine=_debugsource_packages
+
+rpm-fluentd-arrow: tarball
+	cp -f $(STROM_TGZ) $(__SOURCEDIR) || exit 1
+	(git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/files/fluentd-arrow.spec.in; \
+	 git show --format=raw $(PGSTROM_GITHASH):$(STROM_BUILD_ROOT)/CHANGELOG) | \
+	sed -e "s/@@STROM_VERSION@@/$(PGSTROM_VERSION)/g"   \
+	    -e "s/@@STROM_RELEASE@@/$(PGSTROM_RELEASE)/g"   \
+	    -e "s/@@STROM_TARBALL@@/$(__STROM_TGZ)/g"       \
+	    -e "s/@@PGSTROM_GITHASH@@/$(PGSTROM_GITHASH)/g" \
+	    > $(__SPECDIR)/fluentd-arrow.spec
+	rpmbuild -ba $(__SPECDIR)/fluentd-arrow.spec --undefine=_debugsource_packages
+
+rpm-arrow: rpm-pg2arrow rpm-mysql2arrow rpm-pcap2arrow rpm-arrow2csv rpm-fluentd-arrow
 
 .PHONY: docs

@@ -567,6 +567,13 @@ try_again:
 		*p_nsec = NUM2ULONG(nsec);
 		return true;
 	}
+	/* Is it Integer (elapsed seconds from Epoch) */
+	if (CLASS_OF(datum) == rb_cInteger)
+	{
+		*p_sec = NUM2ULONG(datum);
+		*p_nsec = 0;
+		return true;
+	}
 	/* Is convertible to UTC? (should happen only once) */
 	if (convert_to_utc && rb_respond_to(datum, rb_intern("getutc")))
 	{
@@ -1043,7 +1050,7 @@ write_ruby_uint64_stat(SQLfield *column, char *buf, size_t len,
  * ----------------------------------------------------------------
  */
 static void
-__arrowFilePathnameValidator(VALUE self, VALUE __pathname)
+__arrowFileWritePathnameValidator(VALUE self, VALUE __pathname)
 {
 	const char *str;
 	uint32_t	len, i;
@@ -1352,12 +1359,6 @@ __assignFieldTypeTimestamp(SQLfield *column, const char *extra)
 }
 
 static int
-__assignFieldTypeInterval(SQLfield *column, const char *extra)
-{
-	Elog("Arrow::Interval - not implemented yet");
-}
-
-static int
 __assignFieldTypeUtf8(SQLfield *column)
 {
 	initArrowNode(&column->arrow_type, Utf8);
@@ -1417,23 +1418,20 @@ __arrowFileAssignFieldType(SQLfield *column,
 		return  __assignFieldTypeDate(column, field_type + 4);
 	else if (strncmp(field_type, "Time", 4) == 0)
 		return  __assignFieldTypeTime(column, field_type + 4);
-	else if (strncmp(field_type, "Interval", 8) == 0)
-		return  __assignFieldTypeInterval(column, field_type + 8);
     else if (strcmp(field_type, "Utf8") == 0)
 		return  __assignFieldTypeUtf8(column);
 	else if (strcmp(field_type, "Ipaddr4") == 0)
 		return  __assignFieldTypeIpaddr4(column);
 	else if (strcmp(field_type, "Ipaddr6") == 0)
 		return  __assignFieldTypeIpaddr6(column);
-
-	Elog("ArrowFile: not a supported type");
+	Elog("ArrowFileWrite: not a supported type");
 }
 
 /*
  * Parsing the Schema Definition
  */
 static void
-__arrowFileParseSchemaDefs(VALUE self, VALUE __schema_defs)
+__arrowFileWriteParseSchemaDefs(VALUE self, VALUE __schema_defs)
 {
 	VALUE		schema_defs;
 	VALUE		schema = Qnil;
@@ -1518,8 +1516,8 @@ __arrowFileParseSchemaDefs(VALUE self, VALUE __schema_defs)
 }
 
 static void
-__arrowFileParseParams(VALUE self,
-					   VALUE __params)
+__arrowFileWriteParseParams(VALUE self,
+							VALUE __params)
 {
 	VALUE		datum;
 	VALUE		schema;
@@ -1551,7 +1549,7 @@ __arrowFileParseParams(VALUE self,
 		}
 	}
 	else if (__params != Qnil)
-		Elog("ArrowFile: parameters must be Hash");
+		Elog("ArrowFileWrite: parameters must be Hash");
 
 	schema = rb_ivar_get(self, rb_intern("schema"));
 	datum = rb_funcall(schema, rb_intern("count"), 0);
@@ -1584,16 +1582,16 @@ __arrowFileParseParams(VALUE self,
 }
 
 static VALUE
-rb_ArrowFile__initialize(VALUE self,
-						 VALUE __pathname,
-						 VALUE __schema_defs,
-						 VALUE __params)
+rb_ArrowFileWrite__initialize(VALUE self,
+							  VALUE __pathname,
+							  VALUE __schema_defs,
+							  VALUE __params)
 {
 	rb_require("time");
 
-	__arrowFilePathnameValidator(self, __pathname);
-	__arrowFileParseSchemaDefs(self, __schema_defs);
-	__arrowFileParseParams(self, __params);
+	__arrowFileWritePathnameValidator(self, __pathname);
+	__arrowFileWriteParseSchemaDefs(self, __schema_defs);
+	__arrowFileWriteParseParams(self, __params);
 
 	return self;
 }
@@ -2057,7 +2055,7 @@ __arrowFileReleaseTable(SQLtable *table)
 }
 
 static VALUE
-__arrowFileWriteRow(VALUE __yield, VALUE __private, int argc, VALUE *argv)
+__arrowFileWriteRow(RB_BLOCK_CALL_FUNC_ARGLIST(__yield, __private))
 {
 	WriteChunkArgs *args = (WriteChunkArgs *)__private;
 	SQLtable   *table = args->table;
@@ -2121,8 +2119,8 @@ __arrowFileWriteChunk(VALUE __args)
 }
 
 static VALUE
-rb_ArrowFile__writeChunk(VALUE self,
-						 VALUE chunk)
+rb_ArrowFileWrite__writeChunk(VALUE self,
+							  VALUE chunk)
 {
 	WriteChunkArgs args;
 	VALUE		retval;
@@ -2149,28 +2147,12 @@ rb_ArrowFile__writeChunk(VALUE self,
 	return retval;
 }
 
-#if 1
-static VALUE
-rb_ArrowFile__test(VALUE self, VALUE datum)
-{
-	VALUE	retval;
-
-	retval = rb_funcall(rb_cTime, rb_intern("parse"), 1, datum);
-
-	printf("classname [%s] -> [%s]\n",
-		   rb_class2name(CLASS_OF(datum)),
-		   rb_class2name(CLASS_OF(retval)));
-	return retval;
-}
-#endif
-
 void
-Init_ArrowFile(void)
+Init_arrow_file_write(void)
 {
 	VALUE	klass;
 
-	klass = rb_define_class("ArrowFile",  rb_cObject);
-	rb_define_method(klass, "initialize", rb_ArrowFile__initialize, 3);
-	rb_define_method(klass, "writeChunk", rb_ArrowFile__writeChunk, 1);
-	rb_define_method(klass, "test",       rb_ArrowFile__test, 1);
+	klass = rb_define_class("ArrowFileWrite",  rb_cObject);
+	rb_define_method(klass, "initialize", rb_ArrowFileWrite__initialize, 3);
+	rb_define_method(klass, "writeChunk", rb_ArrowFileWrite__writeChunk, 1);
 }

@@ -36,8 +36,8 @@ struct kern_gpupreagg
 	cl_ulong		tv_stat_debug2;		/* out: debug counter 2 */
 	cl_ulong		tv_stat_debug3;		/* out: debug counter 3 */
 	cl_ulong		tv_stat_debug4;		/* out: debug counter 4 */
-	/* -- kernel parameters buffer -- */
-	kern_parambuf	kparams;
+	/* -- variable length buffer -- */
+	cl_ulong		data[1];
 	/* <-- gpupreaggSuspendContext[], if any --> */
 };
 typedef struct kern_gpupreagg	kern_gpupreagg;
@@ -64,19 +64,13 @@ typedef union
 } gpupreaggSuspendContext;
 
 /* macro definitions to reference packed values */
-#define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
-	(&(kgpreagg)->kparams)
-#define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)		\
-	((kgpreagg)->kparams.length)
 #define KERN_GPUPREAGG_LENGTH(kgpreagg)					\
 	(offsetof(kern_gpupreagg, kparams) +				\
 	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
 /* suspend/resume buffer for KDS_FORMAT_BLOCK */
-#define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg,group_id)	\
-	((kgpreagg)->suspend_size > 0							\
-	 ? ((gpupreaggSuspendContext *)							\
-		((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg) +		\
-		 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))) + (group_id) \
+#define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg,group_id)			\
+	((kgpreagg)->suspend_size > 0									\
+	 ? (((gpupreaggSuspendContext *)(kgpreagg)->data) + (group_id))	\
 	 : NULL)
 
 /*
@@ -860,11 +854,11 @@ aggcalc_update_hll_sketch(cl_char *p_accum_dclass,
  */
 KERNEL_FUNCTION(void)
 kern_gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
+						 kern_parambuf *kparams,
 						 kern_data_store *kds_src,
 						 kern_data_extra *__always_null__,
 						 kern_data_store *kds_slot)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
@@ -874,11 +868,11 @@ kern_gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
+						   kern_parambuf *kparams,
 						   kern_data_store *kds_src,
 						   kern_data_extra *__always_null__,
 						   kern_data_store *kds_slot)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
@@ -888,11 +882,11 @@ kern_gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
+						   kern_parambuf *kparams,
 						   kern_data_store *kds_src,
 						   kern_data_extra *__always_null__,
 						   kern_data_store *kds_slot)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
@@ -902,11 +896,11 @@ kern_gpupreagg_setup_arrow(kern_gpupreagg *kgpreagg,
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
+							kern_parambuf *kparams,
 							kern_data_store *kds_src,
 							kern_data_extra *kds_extra,
 							kern_data_store *kds_slot)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 
 	INIT_KERNEL_CONTEXT(&u.kcxt, kparams);
@@ -916,12 +910,12 @@ kern_gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
+								 kern_parambuf *kparams,
 								 kern_errorbuf *kgjoin_errorbuf,
 								 kern_data_store *kds_slot,
 								 kern_data_store *kds_final,
 								 kern_global_hashslot *f_hash)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 #if __GPUPREAGG_NUM_ACCUM_VALUES > 0
 	cl_char		nogroup_p_dclass[__GPUPREAGG_NUM_ACCUM_VALUES];
@@ -954,12 +948,12 @@ kern_gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 
 KERNEL_FUNCTION(void)
 kern_gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,
+								 kern_parambuf *kparams,
 								 kern_errorbuf *kgjoin_errorbuf,
 								 kern_data_store *kds_slot,
 								 kern_data_store *kds_final,
 								 kern_global_hashslot *f_hash)
 {
-	kern_parambuf *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	DECL_KERNEL_CONTEXT(u);
 #if __GPUPREAGG_LOCAL_HASH_NROOMS > 0
 	__shared__ preagg_hash_item groupby_l_hitems[__GPUPREAGG_LOCAL_HASH_NROOMS];

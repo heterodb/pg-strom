@@ -63,7 +63,7 @@ static size_t			output_filesize_limit = ULONG_MAX;			/* No Limit */
 static size_t			record_batch_threshold = (128UL << 20);		/* 128MB */
 static bool				force_overwrite = false;
 static bool				enable_direct_io = false;
-static bool				only_headers = false;
+static bool				no_payload = false;
 static bool				composite_options = false;
 static int				print_stat_interval = -1;
 
@@ -92,26 +92,23 @@ static pthread_cond_t	arrow_workers_cond;
 static bool			   *arrow_workers_completed;
 static SQLtable		  **arrow_chunks_array;			/* chunk buffer per-thread */
 static sem_t			pcap_worker_sem;
-#ifndef DIRECT_IO_ALIGN
-#define DIRECT_IO_ALIGN(x)		(((x) + 511UL) & ~511UL)
-#endif /* DIRECT_IO_ALIGN */
 
 /* static variable for PF-RING capture mode */
 static pfring		  **pfring_desc_array = NULL;
 static uint64_t			pfring_desc_selector = 0;
 static int				pfring_desc_nums = -1;
 
-/* static variables for PCAP file scan mode */
-#define PCAP_MAGIC__HOST		0xa1b2c3d4U
-#define PCAP_MAGIC__SWAP		0xd4c3b2a1U
-#define PCAP_MAGIC__HOST_NS		0xa1b23c4dU
-#define PCAP_MAGIC__SWAP_NS		0x4d3cb2a1U
+/* definitions for PCAP/PCAPNG file scan mode */
+#define PCAP_MAGIC_LE		0xd4c3b2a1U
+#define PCAP_MAGIC_BE		0xa1b2c3d4U
+#define PCAPNG_MAGIC		0x0a0d0d0aU
 
 typedef struct
 {
 	pcap_t			   *pcap_handle;
 	FILE			   *pcap_filp;
 	const char		   *pcap_filename;
+	uint32_t			pcap_magic;
 	char				pcap_errbuf[PCAP_ERRBUF_SIZE];
 } pcapFileDesc;
 
@@ -141,6 +138,9 @@ static volatile bool	do_shutdown = false;
 #ifndef INTALIGN
 #define INTALIGN(x)		(((uint64_t)(x) + 3UL) & ~3UL)
 #endif
+#ifndef DIRECT_IO_ALIGN
+#define DIRECT_IO_ALIGN(x)		PAGE_ALIGN(x)
+#endif /* DIRECT_IO_ALIGN */
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define __ntoh16(x)		__builtin_bswap16(x)
@@ -849,7 +849,7 @@ arrowPcapSchemaInit(SQLtable *table)
 		__ARROW_FIELD_INIT(icmp_checksum, Uint16Bswap);
 	}
 	/* remained data - payload */
-	if (!only_headers)
+	if (!no_payload)
 		__ARROW_FIELD_INIT(payload,		  Binary);
 #undef __ARROW_FIELD_INIT
 	table->nfields = j;
@@ -1456,7 +1456,9 @@ retry:
 
 	/* open file */
 	flags = O_RDWR | O_CREAT;
-	if (!force_overwrite)
+	if (force_overwrite)
+		flags |= O_TRUNC;
+	else
 		flags |= O_EXCL;
 
 	fdesc = open(path, flags, 0644);
@@ -1930,7 +1932,7 @@ __execCaptureOnePacket(SQLtable *chunk,
 	handlePacketMiscFields(chunk, proto, src_port, dst_port);
 
 	/* Payload */
-	if (!only_headers)
+	if (!no_payload)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 	return;
@@ -1947,7 +1949,7 @@ fillup_by_null:
 	if ((protocol_mask & __PCAP_PROTO__ICMP) != 0)
 		handlePacketIcmpHeader(chunk, NULL, 0, -1);
 	handlePacketMiscFields(chunk, -1, -1, -1);
-	if (!only_headers && pos != NULL)
+	if (!no_payload && pos != NULL)
 		handlePacketPayload(chunk, pos, end - pos);
 	chunk->nitems++;
 }
@@ -2063,6 +2065,703 @@ pfring_worker_main(void *__arg)
 }
 
 /*
+ * process_one_pcap_file
+ */
+static void
+process_one_pcap_file(SQLtable *chunk, pcapFileDesc *pfdesc)
+{
+	const u_char *buffer;
+
+	pfdesc->pcap_handle =
+		pcap_fopen_offline_with_tstamp_precision(pfdesc->pcap_filp,
+												 PCAP_TSTAMP_PRECISION_MICRO,
+												 pfdesc->pcap_errbuf);
+	if (!pfdesc->pcap_handle)
+		Elog("failed on open pcap file ('%s'): %s",
+			 pfdesc->pcap_filename,
+			 pfdesc->pcap_errbuf);
+
+	while (!do_shutdown)
+	{
+		struct pcap_pkthdr hdr;
+		struct pfring_pkthdr __hdr;
+
+		buffer = pcap_next(pfdesc->pcap_handle, &hdr);
+		if (!buffer)
+			break;
+		__hdr.ts = hdr.ts;
+		__hdr.caplen = hdr.caplen;
+		__hdr.len = hdr.len;
+		__execCaptureOnePacket(chunk, &__hdr, buffer);
+		if (chunk->usage >= record_batch_threshold)
+		{
+			arrowChunkWriteOut(chunk);
+			sql_table_clear(chunk);
+		}
+	}
+	/* close */
+	pcap_close(pfdesc->pcap_handle);
+}
+
+/* ================================================================
+ * 
+ * Routines to handle PCAPNG (PCAP Next Generation) format
+ *
+ * ================================================================
+ */
+#define PCAPNG_TYPE__SECTION_HEADER_BLOCK			PCAPNG_MAGIC
+#define PCAPNG_TYPE__INTERFACE_DESCRIPTION_BLOCK	0x00000001U
+#define PCAPNG_TYPE__SIMPLE_PACKET_BLOCK			0x00000003U
+#define PCAPNG_TYPE__ENHANCED_PACKET_BLOCK			0x00000006U
+
+typedef struct
+{
+	uint32_t	block_type;
+	uint32_t	block_length;
+} pcapngBlockHeaderCommon;
+
+/* PCAPNG_TYPE__SECTION_HEADER_BLOCK */
+typedef struct
+{
+	pcapngBlockHeaderCommon c;
+	uint32_t	byte_order;
+	uint16_t	major;
+	uint16_t	minor;
+	uint64_t	section_length;
+	unsigned char options[1];		/* variable length */
+} pcapngSectionHeaderBlock;
+
+/* PCAPNG_TYPE__INTERFACE_DESCRIPTION_BLOCK */
+typedef struct
+{
+	pcapngBlockHeaderCommon c;
+	uint16_t	link_type;
+	uint16_t	__reserved__;
+	uint32_t	snaplen;
+	unsigned char options[1];		/* variable length */
+} pcapngInterfaceDescriptionBlock;
+
+/* PCAPNG_TYPE__SIMPLE_PACKET_BLOCK */
+typedef struct
+{
+	pcapngBlockHeaderCommon c;
+	uint32_t	original_packat_len;
+	unsigned char packet_data[1];	/* variable length */
+} pcapngSimplePacketBlock;
+
+/* PCAPNG_TYPE__ENHANCED_PACKET_BLOCK */
+typedef struct
+{
+	pcapngBlockHeaderCommon c;
+	uint32_t	interface_id;
+	uint32_t	timestamp_hi;
+	uint32_t	timestamp_lo;
+	uint32_t	captured_packet_len;
+	uint32_t	original_packat_len;
+	unsigned char packet_data[1];	/* variable length */
+} pcapngEnhancedPacketBlock;
+
+/* pcapngInterfaceState */
+typedef struct
+{
+	uint32_t	addr;
+	uint32_t	netmask;
+} pcapngIPv4addr;
+
+typedef struct
+{
+	uint128_t	addr;
+	uint8_t		prefix;
+} pcapngIPv6addr;
+
+typedef struct
+{
+	uint8_t		maddr[6];
+} pcapngMACaddr;
+
+typedef struct
+{
+	uint16_t	link_type;
+	uint32_t	snaplen;
+	char	   *comment;
+	int			_comment_len;
+	char	   *if_name;
+	int			_if_name_len;
+	char	   *if_description;
+	int			_if_description_len;
+	pcapngIPv4addr *if_ipv4addr;
+	int			_num_if_ipv4addr;
+	pcapngIPv6addr *if_ipv6addr;
+	int			_num_if_ipv6addr;
+	pcapngMACaddr  *if_macaddr;
+	uint64_t	if_euiaddr;
+	uint64_t	if_speed;
+	uint8_t		if_tsresol;
+	uint32_t	if_tzone;
+//	char	   *if_filter;
+	char	   *if_os;
+	int			_if_os_len;
+	uint8_t		if_fcslen;
+	uint64_t	if_tsoffset;
+	char	   *if_hardware;
+	int			_if_hardware_len;
+	uint64_t	if_txspeed;
+	uint64_t	if_rxspeed;
+} pcapngInterfaceState;
+
+/* pcapngSectionState */
+typedef struct
+{
+	FILE	   *filp;
+	const char *filename;
+	bool		little_endian;
+	uint16_t	major;
+	uint16_t	minor;
+	uint64_t	section_head;
+	uint64_t	section_sz;		/* can be ~0UL if unlimited */
+	/* section header options */
+	char	   *shb_comment;
+	int			_shb_comment_len;
+	char	   *shb_hardware;
+	int			_shb_hardware_len;
+	char	   *shb_os;
+	int			_shb_os_len;
+	char	   *shb_userappl;
+	int			_shb_userappl_len;
+	/* interface descriptions */
+	int			_num_if_states;
+	pcapngInterfaceState *if_states;
+} pcapngSectionState;
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define __to_host16(x)	(section->little_endian ? (x) : __builtin_bswap16(x))
+#define __to_host32(x)	(section->little_endian ? (x) : __builtin_bswap32(x))
+#define __to_host64(x)	(section->little_endian ? (x) : __builtin_bswap64(x))
+#else
+#define __to_host16(x)	(section->little_endian ? __builtin_bswap16(x) : (x))
+#define __to_host32(x)	(section->little_endian ? __builtin_bswap32(x) : (x))
+#define __to_host64(x)	(section->little_endian ? __builtin_bswap64(x) : (x))
+#endif
+
+static inline void *
+pmemdup(const void *addr, size_t sz)
+{
+	char   *result = palloc(sz+1);
+
+	memcpy(result, addr, sz);
+	result[sz] = '\0';		/* ensure null-termination if cstring */
+
+	return result;
+}
+
+static inline unsigned char *
+__fetch_pcapng_options(pcapngSectionState *section,
+					   unsigned char *pos, unsigned char *end,
+					   uint16_t *p_code, uint16_t *p_len)
+{
+	uint16_t	__code;
+	uint16_t	__len;
+
+	if (pos + sizeof(uint16_t) > end)
+		Elog("pcapng file '%s' may be corrupted", section->filename);
+	__code = __to_host16(*((uint16_t *)pos));
+	pos += sizeof(uint16_t);
+	if (__code == 0)
+		return NULL;	/* end-of-options */
+	if (pos + sizeof(uint16_t) > end)
+		Elog("pcapng file '%s' may be corrupted", section->filename);
+	__len = __to_host16(*((uint16_t *)pos));
+	pos += sizeof(uint16_t);
+	if (pos + __len > end)
+		Elog("pcapng file '%s' may be corrupted", section->filename);
+
+	*p_code = __code;
+	*p_len  = __len;
+	return pos;
+}
+
+static bool
+__process_pcapng_interface_description(SQLtable *chunk, pcapngSectionState *section,
+									   pcapngInterfaceDescriptionBlock *idb)
+{
+	pcapngInterfaceState *i_state;
+	uint32_t		block_sz;
+	unsigned char  *pos, *end;
+	size_t			sz;
+
+	sz = sizeof(pcapngInterfaceState) * (section->_num_if_states + 1);
+	section->if_states = repalloc(section->if_states, sz);
+	i_state = &section->if_states[section->_num_if_states++];
+	memset(i_state, 0, sizeof(pcapngInterfaceState));
+	i_state->if_tsresol = 6;	/* default setting; right? */
+
+	block_sz = __to_host32(idb->c.block_length);
+	i_state->link_type = __to_host16(idb->link_type);
+	i_state->snaplen = __to_host32(idb->snaplen);
+	pos = idb->options;
+	end = (unsigned char *)idb + block_sz - sizeof(uint32_t);
+	while (pos < end)
+	{
+		pcapngIPv4addr *ipv4;
+		pcapngIPv6addr *ipv6;
+		uint16_t	__code;
+		uint16_t	__len;
+
+		pos = __fetch_pcapng_options(section, pos, end, &__code, &__len);
+		if (!pos)
+			break;
+		switch (__code)
+		{
+			case 1:		/* comment */
+				i_state->comment = pmemdup(pos, __len);
+				i_state->_comment_len = __len;
+				break;
+			case 2:		/* if_name */
+				i_state->if_name = pmemdup(pos, __len);
+				i_state->_if_name_len = __len;
+				break;
+			case 3:		/* if_description */
+				i_state->if_description = pmemdup(pos, __len);
+				i_state->_if_description_len = __len;
+				break;
+			case 4:		/* if_IPv4addr */
+				sz = sizeof(pcapngIPv4addr) * (i_state->_num_if_ipv4addr + 1);
+				i_state->if_ipv4addr = repalloc(i_state->if_ipv4addr, sz);
+				ipv4 = &i_state->if_ipv4addr[i_state->_num_if_ipv4addr++];
+				memcpy(ipv4, pos, 8);
+				break;
+			case 5:		/* if_IPv6addr */
+				sz = sizeof(pcapngIPv6addr) * (i_state->_num_if_ipv6addr + 1);
+				i_state->if_ipv6addr = repalloc(i_state->if_ipv6addr, sz);
+				ipv6 = &i_state->if_ipv6addr[i_state->_num_if_ipv6addr++];
+				memcpy(ipv6, pos, 17);
+				break;
+			case 6:		/* if_MACaddr */
+				i_state->if_macaddr = palloc(sizeof(pcapngMACaddr));
+				memcpy(i_state->if_macaddr, pos, 6);
+				break;
+			case 7:		/* if_EUIaddr */
+				i_state->if_euiaddr = __to_host64(*((uint64_t *)pos));
+				break;
+			case 8:		/* if_speed */
+				i_state->if_speed = __to_host64(*((uint64_t *)pos));
+				break;
+			case 9:		/* if_tsresol */
+				i_state->if_tsresol = *((uint8_t *)pos);
+				break;
+			case 10:	/* if_tzone */
+				i_state->if_tzone = __to_host32(*((uint32_t *)pos));
+				break;
+			case 12:	/* if_os */
+				i_state->if_os = pmemdup(pos, __len);
+				i_state->_if_os_len = __len;
+				break;
+			case 13:	/* if_fcslen */
+				i_state->if_fcslen = *((uint8_t *)pos);
+				break;
+			case 14:	/* if_tsoffset */
+				i_state->if_tsoffset = __to_host64(*((uint64_t *)pos));
+				break;
+			case 15:	/* if_hardware */
+				i_state->if_hardware = pmemdup(pos, __len);
+				i_state->_if_hardware_len = __len;
+				break;
+			case 16:	/* if_txspeed */
+				i_state->if_txspeed = __to_host64(*((uint64_t *)pos));
+				break;
+			case 17:	/* if_rxspeed */
+				i_state->if_rxspeed = __to_host64(*((uint64_t *)pos));
+				break;
+			default:
+				printf("IDB code %x ignored\n", __code);
+				break;
+		}
+		pos += INTALIGN(__len);
+	}
+	return true;
+}
+
+static bool
+__process_pcapng_simple_packet(SQLtable *chunk, pcapngSectionState *section,
+							   pcapngSimplePacketBlock *spb)
+{
+	uint32_t	block_sz = __to_host32(spb->c.block_length);
+	struct pfring_pkthdr phdr;
+
+	memset(&phdr.ts, 0, sizeof(phdr.ts));	//no timestamp
+	phdr.caplen = (block_sz - offsetof(pcapngSimplePacketBlock,
+									   packet_data) - sizeof(uint32_t));
+	phdr.len = __to_host32(spb->original_packat_len);
+	__execCaptureOnePacket(chunk, &phdr, spb->packet_data);
+    if (chunk->usage >= record_batch_threshold)
+    {
+		arrowChunkWriteOut(chunk);
+        sql_table_clear(chunk);
+	}
+	return true;
+}
+
+static unsigned int __power_of_ten[] = {
+	1,
+	10,
+	100,
+	1000,
+	10000,
+	100000,
+	1000000,
+	10000000,
+	100000000,
+	1000000000,
+};
+
+static bool
+__process_pcapng_enhanced_packet(SQLtable *chunk, pcapngSectionState *section,
+								 pcapngEnhancedPacketBlock *epb)
+{
+	pcapngInterfaceState *i_state;
+	struct pfring_pkthdr phdr;
+	uint32_t	block_sz = __to_host32(epb->c.block_length);
+	uint32_t	interface_id = __to_host32(epb->interface_id);
+	uint64_t	ts_raw;
+	unsigned char *pos, *end;
+
+	if (interface_id >= section->_num_if_states)
+		Elog("pcapng file '%s' looks corrupted", section->filename);
+	i_state = &section->if_states[interface_id];
+
+	/* timestamp */
+	ts_raw = ((uint64_t)__to_host32(epb->timestamp_hi) << 32 |
+			  (uint64_t)__to_host32(epb->timestamp_lo));
+	if ((i_state->if_tsresol & 0x80) == 0)
+	{
+		/* timestamp resolution is 10^N; adjust to ms */
+		if (i_state->if_tsresol < 6)
+			ts_raw *= __power_of_ten[6 - i_state->if_tsresol];
+		else if (i_state->if_tsresol > 6)
+		{
+			int		count = i_state->if_tsresol - 6;
+			int		order;
+
+			while (count > 0)
+			{
+				order = (count < 9 ? count : 9);
+				ts_raw /= __power_of_ten[order];
+				count -= order;
+			}
+		}
+		phdr.ts.tv_sec  = ts_raw / 1000000UL;
+		phdr.ts.tv_usec = ts_raw % 1000000UL;
+	}
+	else
+	{
+		/* timestamp resolution is 2^N; adjust to ms */
+		int		order = (i_state->if_tsresol & 0x7f);
+
+		phdr.ts.tv_sec  = ts_raw >> order;
+		phdr.ts.tv_usec = ((ts_raw * 1000000UL) >> order) % 1000000UL;
+	}
+	phdr.caplen = __to_host32(epb->captured_packet_len);
+	phdr.len    = __to_host32(epb->original_packat_len);
+
+	/* parse EPB options */
+	pos = epb->packet_data + INTALIGN(phdr.caplen);
+	end = (unsigned char *)epb + block_sz - sizeof(uint32_t);
+	while (pos < end)
+	{
+		uint16_t	__code;
+		uint16_t	__len;
+
+		pos = __fetch_pcapng_options(section, pos, end, &__code, &__len);
+		if (!pos)
+			break;
+		switch (__code)
+		{
+			case 1:		/* comment */
+			case 2:		/* epb_flags */
+			case 3:		/* epb_hash */
+			case 4:		/* epb_dropcount */
+			case 5:		/* epb_packetid */
+			case 6:		/* epb_queue */
+			case 7:		/* epb_verdict */
+			case 2988:	/* custom */
+			case 2989:	/* custom */
+			case 19372:	/* custom */
+			case 19373:	/* custom */
+				break;
+			default:
+				Elog("pcapng file '%s' EPB contains unknown option",
+					 section->filename);
+		}
+		pos += INTALIGN(__len);
+	}
+
+	__execCaptureOnePacket(chunk, &phdr, epb->packet_data);
+	if (chunk->usage >= record_batch_threshold)
+	{
+		arrowChunkWriteOut(chunk);
+		sql_table_clear(chunk);
+	}
+	return true;
+}
+
+/*
+ * process_one_pcapng_block
+ */
+static bool
+process_one_pcapng_block(SQLtable *chunk, pcapngSectionState *section)
+{
+	pcapngBlockHeaderCommon hc;
+	uint32_t	block_type;
+	uint32_t	block_sz;
+	uint32_t   *checker;
+	void	   *buffer;
+
+	if (fread(&hc, sizeof(pcapngBlockHeaderCommon), 1, section->filp) != 1)
+	{
+		if (feof(section->filp))
+			return false;
+		Elog("failed on fread('%s'): %m", section->filename);
+	}
+
+	if (hc.block_type == PCAPNG_TYPE__SECTION_HEADER_BLOCK)
+	{
+		if (fseek(section->filp, -sizeof(pcapngBlockHeaderCommon), SEEK_CUR) < 0)
+			Elog("failed on fseek('%s'): %m", section->filename);
+		return false;
+	}
+	block_type = __to_host32(hc.block_type);
+	block_sz = __to_host32(hc.block_length);
+	buffer = alloca(block_sz);
+	if (fread(buffer + sizeof(pcapngBlockHeaderCommon),
+			  block_sz - sizeof(pcapngBlockHeaderCommon), 1,
+			  section->filp) != 1)
+	{
+		if (feof(section->filp))
+			return false;
+		Elog("failed on fread('%s'): %m", section->filename);
+	}
+	checker = (uint32_t *)((char *)buffer + block_sz - sizeof(uint32_t));
+	if (block_sz != __to_host32(*checker))
+		Elog("pcapng file '%s' looks corrupted", section->filename);
+	memcpy(buffer, &hc, sizeof(pcapngBlockHeaderCommon));
+
+	/* check section boundary overrun */
+	if (section->section_sz != ~0UL)
+	{
+		long	curr_pos = ftell(section->filp);
+
+		if (curr_pos < 0)
+			Elog("failed on ftell('%s'): %m", section->filename);
+		if (curr_pos < section->section_head ||
+			curr_pos >= section->section_head + section->section_sz)
+			return false;	/* out of section */
+	}
+
+	switch (block_type)
+	{
+		case PCAPNG_TYPE__INTERFACE_DESCRIPTION_BLOCK:
+			if (!__process_pcapng_interface_description(chunk, section, buffer))
+				return false;
+			break;
+		case PCAPNG_TYPE__SIMPLE_PACKET_BLOCK:
+			if (!__process_pcapng_simple_packet(chunk, section, buffer))
+				return false;
+			break;
+		case PCAPNG_TYPE__ENHANCED_PACKET_BLOCK:
+			if (!__process_pcapng_enhanced_packet(chunk, section, buffer))
+				return false;
+			break;
+		default:
+			/* unknown block - ignored */
+			break;
+	}
+	return true;
+}
+
+/*
+ * process_one_pcapng_section
+ */
+static void
+process_one_pcapng_section(SQLtable *chunk, pcapngSectionState *section)
+{
+	pcapngSectionHeaderBlock hdr;
+	long		section_head;
+	uint32_t	block_sz;
+	uint32_t	options_sz;
+	unsigned char *pos, *end;
+
+	if (fread(&hdr, offsetof(pcapngSectionHeaderBlock,
+							 options), 1, section->filp) != 1)
+	{
+		if (feof(section->filp))
+			return;		/* EOF */
+		Elog("failed on fread('%s'): %m", section->filename);
+	}
+	section_head = ftell(section->filp);
+	if (section_head < offsetof(pcapngSectionHeaderBlock, options))
+		Elog("failed on ftell('%s'): %m", section->filename);
+	section_head -= offsetof(pcapngSectionHeaderBlock, options);
+
+	/* confirm byte ordering */
+	if (hdr.byte_order == 0x1a2b3c4dU)
+		section->little_endian = true;
+	else if (hdr.byte_order == 0x4d3c2b1aU)
+		section->little_endian = false;
+	else
+		Elog("pcapng file '%s' looks corrupted", section->filename);
+
+	section->major = __to_host16(hdr.major);
+	section->minor = __to_host16(hdr.minor);
+	section->section_head = section_head;
+	section->section_sz = __to_host64(hdr.section_length);
+
+	/* parse options */
+	block_sz = __to_host32(hdr.c.block_length);
+	options_sz = block_sz - offsetof(pcapngSectionHeaderBlock, options);
+	if (options_sz < sizeof(uint32_t))
+		Elog("pcapng file '%s' looks corrupted", section->filename);
+	pos = alloca(options_sz);
+	end = pos + options_sz - sizeof(uint32_t);
+	if (fread(pos, options_sz, 1, section->filp) != 1)
+	{
+		if (feof(section->filp))
+			return;		/* EOF */
+		Elog("failed on fread('%s'): %m", section->filename);
+	}
+	if (block_sz != __to_host32(*((uint32_t *)end)))
+		Elog("pcapng file '%s' looks corrupted", section->filename);
+	while (pos < end)
+	{
+		uint16_t	__code;
+		uint16_t	__len;
+
+		if (pos + sizeof(uint16_t) > end)
+			Elog("pcapng file '%s' looks corrupted", section->filename);
+		__code = __to_host16(*((uint16_t *)pos));
+		pos += sizeof(uint16_t);
+		/* opt_endofopt? */
+		if (__code == 0)
+			break;
+		if (pos + sizeof(uint16_t) > end)
+			Elog("pcapng file '%s' looks corrupted", section->filename);
+		__len = __to_host16(*((uint16_t *)pos));
+		pos += sizeof(uint16_t);
+		if (pos + __len > end)
+			Elog("pcapng file '%s' looks corrupted", section->filename);
+
+		switch (__code)
+		{
+			case 1:		/* opt_comment */
+				section->shb_comment = pmemdup(pos, __len);
+				section->_shb_comment_len = __len;
+				break;
+			case 2:		/* shb_hardware */
+				section->shb_hardware = pmemdup(pos, __len);
+				section->_shb_hardware_len = __len;
+				break;
+			case 3:		/* shb_os */
+				section->shb_os = pmemdup(pos, __len);
+				section->_shb_os_len = __len;
+				break;
+			case 4:		/* shb_userappl */
+				section->shb_userappl = pmemdup(pos, __len);
+				section->_shb_userappl_len = __len;
+				break;
+			case 2988:	/* custom */
+			case 2989:	/* custom */
+			case 19372:	/* custom */
+			case 19373:	/* custom */
+				break;
+		}
+		pos += INTALIGN(__len);
+	}
+
+	/* walk on the following blocks */
+	while (!feof(section->filp))
+	{
+		if (section->section_sz != ~0UL)
+		{
+			long		curr_pos = ftell(section->filp);
+
+			if (curr_pos < 0)
+				Elog("failed on ftell('%s'): %m", section->filename);
+			if (curr_pos >= section->section_head + section->section_sz)
+				break;
+		}
+		if (!process_one_pcapng_block(chunk, section))
+			break;
+	}
+	/* move to the next section head, if any */
+	if (section->section_sz != ~0UL)
+	{
+		if (fseek(section->filp,
+				  section->section_head +
+				  section->section_sz, SEEK_SET) < 0)
+			Elog("failed on fseek('%s'): %m", section->filename);
+	}
+}
+
+/*
+ * process_one_pcapng_file
+ */
+static void
+process_one_pcapng_file(SQLtable *chunk, pcapFileDesc *pfdesc)
+{
+	pcapngSectionState section;
+	uint32_t	magic;
+	int			i;
+
+	memset(&section, 0, sizeof(pcapngSectionState));
+	for (;;)
+	{
+		if (fread(&magic, sizeof(uint32_t), 1, pfdesc->pcap_filp) != 1)
+		{
+			if (feof(pfdesc->pcap_filp))
+				break;	/* EOF */
+			Elog("failed on fread('%s'): %m", pfdesc->pcap_filename);
+		}
+		if (magic != PCAPNG_MAGIC)
+			continue;
+		if (fseek(pfdesc->pcap_filp, -sizeof(uint32_t), SEEK_CUR) < 0)
+			Elog("failed on fseek('%s'): %m", pfdesc->pcap_filename);
+		memset(&section, 0, sizeof(pcapngSectionState));
+		section.filp = pfdesc->pcap_filp;
+		section.filename = pfdesc->pcap_filename;
+		process_one_pcapng_section(chunk, &section);
+
+		/* cleanup section */
+		for (i=0; i < section._num_if_states; i++)
+		{
+			pcapngInterfaceState *if_state = &section.if_states[i];
+
+			if (if_state->if_name)
+				pfree(if_state->if_name);
+			if (if_state->if_description)
+				pfree(if_state->if_description);
+			if (if_state->if_ipv4addr)
+				pfree(if_state->if_ipv4addr);
+			if (if_state->if_ipv6addr)
+				pfree(if_state->if_ipv6addr);
+			if (if_state->if_macaddr)
+				pfree(if_state->if_macaddr);
+			if (if_state->if_os)
+				pfree(if_state->if_os);
+			if (if_state->if_hardware)
+				pfree(if_state->if_hardware);
+		}
+		if (section.shb_hardware)
+			pfree(section.shb_hardware);
+		if (section.shb_os)
+			pfree(section.shb_os);
+		if (section.shb_userappl)
+			pfree(section.shb_userappl);
+		if (section.if_states)
+			pfree(section.if_states);
+		memset(&section, 0, sizeof(pcapngSectionState));
+	}
+}
+
+/*
  * pcap_file_worker_main
  */
 static void *
@@ -2080,37 +2779,16 @@ pcap_file_worker_main(void *__arg)
 		 i += num_threads)
 	{
 		pcapFileDesc   *pfdesc = &pcap_file_desc_array[i];
-		const u_char   *buffer;
 
-		pfdesc->pcap_handle =
-			pcap_fopen_offline_with_tstamp_precision(pfdesc->pcap_filp,
-													 PCAP_TSTAMP_PRECISION_MICRO,
-													 pfdesc->pcap_errbuf);
-		if (!pfdesc->pcap_handle)
-			Elog("failed on open pcap file ('%s'): %s",
-				 pfdesc->pcap_filename,
-				 pfdesc->pcap_errbuf);
-
-		while (!do_shutdown)
-		{
-			struct pcap_pkthdr hdr;
-			struct pfring_pkthdr __hdr;
-
-			buffer = pcap_next(pfdesc->pcap_handle, &hdr);
-			if (!buffer)
-				break;
-			__hdr.ts = hdr.ts;
-			__hdr.caplen = hdr.caplen;
-			__hdr.len = hdr.len;
-			__execCaptureOnePacket(chunk, &__hdr, buffer);
-			if (chunk->usage >= record_batch_threshold)
-			{
-				arrowChunkWriteOut(chunk);
-				sql_table_clear(chunk);
-			}
-		}
-		/* close */
-		pcap_close(pfdesc->pcap_handle);
+		if (pfdesc->pcap_magic == PCAPNG_MAGIC)
+			process_one_pcapng_file(chunk, pfdesc);
+		else if (pfdesc->pcap_magic == PCAP_MAGIC_LE ||
+				 pfdesc->pcap_magic == PCAP_MAGIC_BE)
+			process_one_pcap_file(chunk, pfdesc);
+		else
+			Elog("Bug? unknown file magic '%08x' of '%s'",
+				 pfdesc->pcap_magic,
+				 pfdesc->pcap_filename);
     }
 	return final_merge_pending_chunks(chunk);
 }
@@ -2140,7 +2818,7 @@ usage(int status)
 		  "         %q : sequence number for each output files\n"
 		  "       default is '/tmp/pcap_%i_%y%m%d_%H%M%S.arrow'\n"
 		  "  -f|--force : overwrite file, even if exists\n"
-		  "     --only-headers: disables capture of payload\n"
+		  "     --no-payload: disables capture of payload\n"
 		  "     --parallel-write=N_FILES\n"
 		  "       opens multiple output files simultaneously (default: 1)\n"
 		  "     --chunk-size=SIZE : size of record batch (default: 128MB)\n"
@@ -2182,7 +2860,7 @@ parse_options(int argc, char *argv[])
 		{"pcap-threads",   required_argument, NULL, 1000},
 		{"direct-io",      no_argument,       NULL, 1001},
 		{"chunk-size",     required_argument, NULL, 1002},
-		{"only-headers",   no_argument,       NULL, 1003},
+		{"no-payload",     no_argument,       NULL, 1003},
 		{"num-queues",     required_argument, NULL, 1004},
 		{"parallel-write", required_argument, NULL, 1005},
 		{"composite-options", no_argument,    NULL, 1006},
@@ -2302,8 +2980,8 @@ parse_options(int argc, char *argv[])
 						 optarg);
 				break;
 
-			case 1003:	/* --only-headers */
-				only_headers = true;
+			case 1003:	/* --no-payload */
+				no_payload = true;
 				break;
 
 			case 1004:	/* --num-queues */
@@ -2343,25 +3021,29 @@ parse_options(int argc, char *argv[])
 			pcapFileDesc   *pfdesc = &pcap_file_desc_array[i];
 			const char	   *filename = argv[optind + i];
 			FILE		   *filp;
+			uint32_t		magic;
 
 			filp = fopen(filename, "rb");
 			if (!filp)
 				Elog("failed to open '%s': %m", filename);
+			/* check magic */
+			if (fread(&magic, sizeof(uint32_t), 1, filp) != 1)
+				Elog("failed to read '%s' magic: %m", filename);
+			rewind(filp);
+			if (magic != PCAP_MAGIC_LE &&
+				magic != PCAP_MAGIC_BE &&
+				magic != PCAPNG_MAGIC)
+				Elog("magic of '%s' is neither PCAP nor PCAPNG (%08x)",
+					 filename, magic);
 			pfdesc->pcap_filp = filp;
 			pfdesc->pcap_filename = pstrdup(filename);
+			pfdesc->pcap_magic = magic;
 		}
 		pcap_file_desc_nums = nfiles;
 	}
 	else
 	{
-		/* input from stdin... */
-		pcapFileDesc   *pfdesc = palloc0(sizeof(pcapFileDesc));
-
-		pfdesc->pcap_filp = stdin;
-		pfdesc->pcap_filename = "/dev/stdin";
-
-		pcap_file_desc_nums = 1;
-		pcap_file_desc_array = pfdesc;
+		Elog("No network device or input PCAP/PCAPNG files are given");
 	}
 
 	for (pos = output_filename; *pos != '\0'; pos++)
@@ -2724,4 +3406,10 @@ repalloc(void *old, size_t sz)
 	if (!ptr)
 		Elog("out of memory");
 	return ptr;
+}
+
+void
+pfree(void *ptr)
+{
+	free(ptr);
 }
