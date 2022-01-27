@@ -349,20 +349,20 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <p>また、ここでは簡単な使用例を示すことが目的ですので、<code>&lt;buffer&gt;</code>タグでチャンクサイズを最大4MB / 200行に縮小し、最大でも10秒でOutputプラグインに渡すよう設定しています。</p>
 <p><code>/etc/td-agent/td-agent.conf</code>の設定例</p>
 <pre><code>&lt;source&gt;
-  @typetail
+  @type tail
   path /var/log/httpd/access_log
   pos_file /var/log/td-agent/httpd_access.pos
   tag httpd
   format apache2
   &lt;parse&gt;
-    @typeapache2
+    @type apache2
     expression /^(?&lt;host&gt;[^ ]*) [^ ]* (?&lt;user&gt;[^ ]*) \[(?&lt;time&gt;[^\]]*)\] &quot;(?&lt;method&gt;\S+)(?: +(?&lt;path&gt;(?:[^\&quot;]|\\.)*?)(?: +\S*)?)?&quot; (?&lt;code&gt;[^ ]*) (?&lt;size&gt;[^ ]*)(?: &quot;(?&lt;referer&gt;(?:[^\&quot;]|\\.)*)&quot; &quot;(?&lt;agent&gt;(?:[^\&quot;]|\\.)*)&quot;)?$/
     time_format %d/%b/%Y:%H:%M:%S %z
   &lt;/parse&gt;
 &lt;/source&gt;
 
 &lt;match httpd&gt;
-  @typearrow_file
+  @type arrow_file
   path /tmp/mytest%Y%m%d.%p.arrow
   schema_defs &quot;ts=Timestamp[sec],host=Utf8,method=Utf8,path=Utf8,code=Int32,size=Int32,referer=Utf8,agent=Utf8&quot;
   ts_column &quot;ts&quot;
