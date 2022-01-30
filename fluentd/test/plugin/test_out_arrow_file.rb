@@ -2,15 +2,15 @@ require "helper"
 require "fluent/plugin/out_arrow_file.rb"
 
 class ArrowFileOutputTest < Test::Unit::TestCase
-  TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../out_file#{ENV['TEST_ENV_NUMBER']}")
+  TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../result")
   EXPECTED_DIR = File.expand_path(File.dirname(__FILE__) + "/../expected")
   COMPARE_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_result.sh")
   ARROW2CSV_CMD=File.expand_path(File.dirname(__FILE__) + "/../../../arrow-tools/arrow2csv")
 
+  # Common 
   class << self
     # Define directory path where the test output file exists.
     def startup
-      p "create #{TMP_DIR}"
       FileUtils.rm_rf TMP_DIR
       FileUtils.mkdir_p TMP_DIR
       FileUtils.rm_f File.expand_path(File.dirname(__FILE__) + "/../regression.diffs")
@@ -23,19 +23,21 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   ]
   DEFALUT_TAG='test_tag'
 
-  sub_test_case 'data_type' do
-    def get_driver(file_name,schema_defs)
-      conf = %[
-        path #{TMP_DIR}/#{file_name}.arrow
-        schema_defs "#{schema_defs}"
-      ]
+  def compare_arrow(file_name)
+    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
+  end
 
-      return create_driver(conf)
-    end
+  def get_driver(file_name,schema_defs)
+    conf = %[
+      path #{TMP_DIR}/#{file_name}.arrow
+      schema_defs "#{schema_defs}"
+    ]
 
-    def compare_arrow(file_name)
-      system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
-    end
+    return create_driver(conf)
+  end
+
+  # Data type check
+  ## http://heterodb.github.io/pg-strom/fluentd/#configuration
 
     test "uint_test" do
       file_name='uint_test'
@@ -45,6 +47,19 @@ class ArrowFileOutputTest < Test::Unit::TestCase
           d.feed({'ui1' => 0,'ui2' => 0, 'ui3' => 0, 'ui4' => 0})
           d.feed({'ui1' => 255,'ui2' => 32767, 'ui3' => 2147483647, 'ui4' => 4294967295})
           d.feed({'ui1' => nil,'ui2' => nil, 'ui3' => nil, 'ui4' => nil})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
+
+    test "int_test" do
+      file_name='int_test'
+      d=get_driver(file_name,"i1=Int8,i2=Int16,i3=Int32,i4=Int64")
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'i1' => -128,'i2' => -32767, 'i3' => -2147483647, 'i4' => -4294967295})
+          d.feed({'i1' => 127,'i2' => 32767, 'i3' => 2147483647, 'i4' => 4294967295})
+          d.feed({'i1' => nil,'i2' => nil, 'i3' => nil, 'i4' => nil})
         end
       end
       assert compare_arrow(file_name)
@@ -136,10 +151,10 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       #end
       #assert compare_arrow(file_name)
     #end
-  end
 
-  sub_test_case 'config_check' do
-
+  
+  # Configuration Check
+  ## Refer: http://heterodb.github.io/pg-strom/fluentd/#configuration
     test "timedate_file" do
       conf =%[
         path #{TMP_DIR}/test_%Y_%y_%m_%d_%H_%M_%S_%p.arrow
@@ -159,7 +174,30 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       p "Checking path: #{correct_filepath}"
       assert system("#{ARROW2CSV_CMD} #{correct_filepath}")
     end
-  end
+
+    test "column_replace" do
+      file_name="column_replace"
+      conf =%[
+        path #{TMP_DIR}/#{file_name}.arrow
+        schema_defs "new_time=Timestamp,new_tag=Utf8,payload=Utf8"
+        ts_column "new_time"
+        tag_column "new_tag"
+      ]
+      d = create_driver(conf)
+
+      t1=event_time("2000-02-29 23:59:09 UTC")
+      t2=event_time("1999-03-18 01:23:45 UTC")
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed('replaced_tag',t1, {'payload' => "success"})
+          # new_time and new_tag are also in record, and this should be replaced.
+          d.feed('replaced_tag',t1, {'new_time' => t2,'payload' => "success"})
+          d.feed('replaced_tag',t1, {'new_tag' => 'old_tag','payload' => "success"})
+          d.feed('replaced_tag',t1, {'new_time' => t2, 'new_tag' => 'old_tag','payload' => "success"})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
