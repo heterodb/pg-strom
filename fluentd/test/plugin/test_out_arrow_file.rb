@@ -33,7 +33,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
     end
 
     def compare_arrow(file_name)
-      system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out -s")
+      system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
     end
 
     test "uint_test" do
@@ -80,7 +80,18 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    # decimal skipping...
+    #test "decimal" do
+    #  file_name='decimal_check'
+    #  d=get_driver(file_name,"d1=Decimal,d2=Decimal(4,24)")
+
+    #  assert_nothing_raised do
+    #    d.run(default_tag: DEFALUT_TAG) do
+    #      d.feed({'d1' => 12345678901234567890.12345678,'d2' => 1234.123456789012345678901234})
+    #    end
+    #  end
+    #  assert compare_arrow(file_name)
+    #end
+
     test "bool_check" do
       file_name='bool_check'
       d=get_driver(file_name,"bool1=Bool")
@@ -110,38 +121,23 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "ip_check" do
-      file_name='ip_check'
-      d=get_driver(file_name,"ip1=Ipaddr4")
+    # skipping
+    #test "ip_check" do
+      #file_name='ip_check'
+      #d=get_driver(file_name,"ip1=Ipaddr4,ip2=Ipaddr6")
 
-      assert_nothing_raised do
-        d.run(default_tag: DEFALUT_TAG) do
-          d.feed({'ip1' => IPAddr.new("192.168.0.1").to_s})
-          #d.feed({'ip1' => "192.168.0.1/24",'ip2' => nil})
-        end
-      end
-      assert compare_arrow(file_name)
-    end    
-  end
-=begin
-      # NG case: lower limit over
-      assert_raises RangeError do 
-        d.run(default_tag: 'test_tag') do
-          d.feed({'uint8_column' => 1})
-        end
-      end
-    end
+      #assert_nothing_raised do
+      #  d.run(default_tag: DEFALUT_TAG) do
+      #    d.feed({'ip1' => "192.168.0.1",'ip2' => "2012::1"})
+      #    d.feed({'ip1' => "192.168.0.0/24",'ip2' => "fe80::/10"})
+      #    d.feed({'ip1' => nil,'ip2' => nil})
+      #  end
+      #end
+      #assert compare_arrow(file_name)
+    #end
   end
 
-  test "error_test" do
-    d = create_driver
-    assert_raise RangeError do
-      d.run(default_tag: 'test_tag') do
-        d.feed({'uint8_column' => 257})
-      end
-    end
-  end
-=end
+
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
