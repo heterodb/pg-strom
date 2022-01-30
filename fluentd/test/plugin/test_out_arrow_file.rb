@@ -5,6 +5,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../out_file#{ENV['TEST_ENV_NUMBER']}")
   EXPECTED_DIR = File.expand_path(File.dirname(__FILE__) + "/../expected")
   COMPARE_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_result.sh")
+  ARROW2CSV_CMD=File.expand_path(File.dirname(__FILE__) + "/../../../arrow-tools/arrow2csv")
 
   class << self
     # Define directory path where the test output file exists.
@@ -137,7 +138,28 @@ class ArrowFileOutputTest < Test::Unit::TestCase
     #end
   end
 
+  sub_test_case 'config_check' do
 
+    test "timedate_file" do
+      conf =%[
+        path #{TMP_DIR}/test_%Y_%y_%m_%d_%H_%M_%S_%p.arrow
+        schema_defs "dc=Utf8"
+      ]
+      d = create_driver(conf)
+      ct=Time.new
+      pid=Process.pid
+      correct_filename="test_#{ct.year}_#{ct.year%100}_#{format("%02d",ct.month)}_#{format("%02d",ct.day)}_#{format("%02d",ct.hour)}_#{format("%02d",ct.min)}_#{format("%02d",ct.sec)}_#{pid}.arrow"
+      correct_filepath="#{TMP_DIR}/#{correct_filename}"
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'dc' => "success"})
+        end
+      end
+      p "Checking path: #{correct_filepath}"
+      assert system("#{ARROW2CSV_CMD} #{correct_filepath}")
+    end
+  end
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
