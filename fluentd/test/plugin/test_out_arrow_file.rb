@@ -199,6 +199,35 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
+    test "filesize_threshold" do
+      file_path="#{TMP_DIR}/threshold.arrow"
+      generate_row_num=8192
+      payload_size=4096
+      get_row_num_command=File.expand_path(File.dirname(__FILE__) + "/../get_arrows_rows.sh")
+      conf =%[
+        path #{file_path}
+        schema_defs "payload=Utf8"
+        filesize_threshold 16
+
+        <buffer>
+          chunk_limit_records 1000
+        </buffer>
+      ]
+      d = create_driver(conf)
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          generate_row_num.times do
+            # generate random text.
+            txt=(0...payload_size).map { (65 + rand(26)).chr }.join
+            d.feed({'payload' => txt})
+          end
+        end
+      end
+      # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
+      assert `#{get_row_num_command} '#{file_path}*'`.to_s.to_i == generate_row_num 
+    end
+
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
   end
