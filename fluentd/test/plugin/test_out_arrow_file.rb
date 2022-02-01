@@ -6,6 +6,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   EXPECTED_DIR = File.expand_path(File.dirname(__FILE__) + "/../expected")
   COMPARE_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_result.sh")
   ARROW2CSV_CMD=File.expand_path(File.dirname(__FILE__) + "/../../../arrow-tools/arrow2csv")
+  GET_ROW_NUM_CMD=File.expand_path(File.dirname(__FILE__) + "/../get_arrows_rows.sh")
 
   # Common 
   class << self
@@ -199,18 +200,42 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
+    test "switching_files" do
+      file_path="#{TMP_DIR}/switch_test_%H_%M_%S.arrow"
+      generate_row_num=100
+      conf =%[
+        path #{file_path}
+        schema_defs "num=Uint32"
+
+        <buffer>
+          chunk_limit_records 10
+        </buffer>
+      ]
+      d = create_driver(conf)
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          for i in 1..generate_row_num do
+            d.feed({'num' => i})
+            sleep(0.01)
+          end
+        end
+      end
+      # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
+      assert `#{GET_ROW_NUM_CMD} '#{TMP_DIR}/switch_test*'`.to_s.to_i == generate_row_num 
+    end
+
     test "filesize_threshold" do
       file_path="#{TMP_DIR}/threshold.arrow"
       generate_row_num=8192
       payload_size=4096
-      get_row_num_command=File.expand_path(File.dirname(__FILE__) + "/../get_arrows_rows.sh")
       conf =%[
         path #{file_path}
         schema_defs "payload=Utf8"
         filesize_threshold 16
 
         <buffer>
-          chunk_limit_records 1000
+          chunk_limit_size 3MB
         </buffer>
       ]
       d = create_driver(conf)
@@ -218,15 +243,16 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           generate_row_num.times do
-            # generate random text.
+            # generate random text to create heavy file.
             txt=(0...payload_size).map { (65 + rand(26)).chr }.join
             d.feed({'payload' => txt})
           end
         end
       end
       # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
-      assert `#{get_row_num_command} '#{file_path}*'`.to_s.to_i == generate_row_num 
+      assert `#{GET_ROW_NUM_CMD} '#{file_path}*'`.to_s.to_i == generate_row_num 
     end
+
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
