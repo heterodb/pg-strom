@@ -26,7 +26,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   DEFALUT_TAG='test_tag'
 
   def compare_arrow(file_name)
-    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out -s")
+    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
   end
 
   def get_driver(file_name,schema_defs)
@@ -67,8 +67,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "timestamp_check" do
-      file_name='timestamp_check'
+    test "timestamp_test" do
+      file_name='timestamp_test'
       d=get_driver(file_name,"tsns1=Timestamp,tsns2=Timestamp[sec],tsns3=Timestamp[ms],tsns4=Timestamp[us],tsns5=Timestamp[ns]")
 
       t1=event_time("2016-10-03 23:58:09 UTC")
@@ -84,8 +84,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "float_check" do
-      file_name='float_check'
+    test "float_test" do
+      file_name='float_test'
       d=get_driver(file_name,"float1=Float16,float2=Float32,float3=Float64")
 
       assert_nothing_raised do
@@ -98,8 +98,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "decimal_check" do
-      file_name='decimal_check'
+    test "decimal_test" do
+      file_name='decimal_test'
       d=get_driver(file_name,"d1=Decimal,d2=Decimal128,d3=Decimal(38)")
 
       assert_nothing_raised do
@@ -114,8 +114,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "bool_check" do
-      file_name='bool_check'
+    test "bool_test" do
+      file_name='bool_test'
       d=get_driver(file_name,"bool1=Bool")
 
       assert_nothing_raised do
@@ -128,8 +128,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    test "utf8_check" do
-      file_name='utf8_check'
+    test "utf8_test" do
+      file_name='utf8_test'
       d=get_driver(file_name,"utf81=Utf8")
 
       assert_nothing_raised do
@@ -162,7 +162,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   
   # Configuration Check
   ## Refer: http://heterodb.github.io/pg-strom/fluentd/#configuration
-    test "timedate_file" do
+    test "timedate_file_test" do
       conf =%[
         path #{TMP_DIR}/test_%Y_%y_%m_%d_%H_%M_%S_%p.arrow
         schema_defs "dc=Utf8"
@@ -183,8 +183,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert system("#{ARROW2CSV_CMD} #{correct_filepath}")
     end
 
-    test "column_replace" do
-      file_name="column_replace"
+    test "column_replace_test" do
+      file_name="column_replace_test"
       conf =%[
         path #{TMP_DIR}/#{file_name}.arrow
         schema_defs "new_time=Timestamp,new_tag=Utf8,payload=Utf8"
@@ -232,7 +232,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert `#{GET_ROW_NUM_CMD} '#{TMP_DIR}/switch_test*'`.to_s.to_i == generate_row_num 
     end
 
-    test "filesize_threshold" do
+    test "filesize_threshold_test" do
       file_path="#{TMP_DIR}/threshold.arrow"
       generate_row_num=8192
       payload_size=4096
