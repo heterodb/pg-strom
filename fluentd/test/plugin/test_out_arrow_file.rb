@@ -5,6 +5,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../result")
   EXPECTED_DIR = File.expand_path(File.dirname(__FILE__) + "/../expected")
   COMPARE_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_result.sh")
+  COMPARE_METADATA_CMD=File.expand_path(File.dirname(__FILE__) + "/../compare_metadata.sh")
   ARROW2CSV_CMD=File.expand_path(File.dirname(__FILE__) + "/../../../arrow-tools/arrow2csv")
   GET_ROW_NUM_CMD=File.expand_path(File.dirname(__FILE__) + "/../get_arrows_rows.sh")
 
@@ -25,7 +26,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   DEFALUT_TAG='test_tag'
 
   def compare_arrow(file_name)
-    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
+    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out -s")
   end
 
   def get_driver(file_name,schema_defs)
@@ -97,17 +98,21 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    #test "decimal" do
-    #  file_name='decimal_check'
-    #  d=get_driver(file_name,"d1=Decimal,d2=Decimal(4,24)")
+    test "decimal_check" do
+      file_name='decimal_check'
+      d=get_driver(file_name,"d1=Decimal,d2=Decimal128,d3=Decimal(38)")
 
-    #  assert_nothing_raised do
-    #    d.run(default_tag: DEFALUT_TAG) do
-    #      d.feed({'d1' => 12345678901234567890.12345678,'d2' => 1234.123456789012345678901234})
-    #    end
-    #  end
-    #  assert compare_arrow(file_name)
-    #end
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'d1' => 0,'d2' => 0,'d3' => 0})
+          # Passing Float value.
+          d.feed({'d1' => 12345678901234567890.12345678,'d2' => 12345678901234567890.12345678,'d3'=>1.12345678901234567890123456789012345678})
+          d.feed({'d1' => "12345678901234567890.12345678",'d2' => "12345678901234567890.12345678",'d3'=>"1.12345678901234567890123456789012345678"})
+          d.feed({'d1' => nil,'d2' => nil,'d3' => nil})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
 
     test "bool_check" do
       file_name='bool_check'
@@ -129,8 +134,8 @@ class ArrowFileOutputTest < Test::Unit::TestCase
 
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
-          d.feed({'utf81' => "fuga"})
-          d.feed({'utf81' => "ほげ彅😀"})   # text including special charactors.
+          d.feed({'utf81' => "fuga0123456789"})
+          d.feed({'utf81' => "ほ げ禰彅a　0😀"})   # text including special charactors.
           d.feed({'utf81' => "ほげほげ".encode("EUC-JP")})    # text encoded in EUC-JP
           d.feed({'utf81' => nil})
         end
@@ -138,21 +143,22 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-    # skipping
-    #test "ip_check" do
-      #file_name='ip_check'
-      #d=get_driver(file_name,"ip1=Ipaddr4,ip2=Ipaddr6")
+=begin
+    test "ip_check" do
+      file_name='ip_check'
+      d=get_driver(file_name,"ip1=Ipaddr4,ip2=Ipaddr6")
 
-      #assert_nothing_raised do
-      #  d.run(default_tag: DEFALUT_TAG) do
-      #    d.feed({'ip1' => "192.168.0.1",'ip2' => "2012::1"})
-      #    d.feed({'ip1' => "192.168.0.0/24",'ip2' => "fe80::/10"})
-      #    d.feed({'ip1' => nil,'ip2' => nil})
-      #  end
-      #end
-      #assert compare_arrow(file_name)
-    #end
-
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'ip1' => "192.168.0.1",'ip2' => "b085:fe52:e3c1:bc49:5fab:65de:64d8:d5b8"})
+          d.feed({'ip1' => "0.0.0.0",'ip2' => "::1"})
+          d.feed({'ip1' => "255.255.255.255",'ip2' => "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"})
+          d.feed({'ip1' => nil,'ip2' => nil})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
+=end
   
   # Configuration Check
   ## Refer: http://heterodb.github.io/pg-strom/fluentd/#configuration
@@ -173,6 +179,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
         end
       end
       p "Checking path: #{correct_filepath}"
+      # Just checking the file exists.(output is ignored.)
       assert system("#{ARROW2CSV_CMD} #{correct_filepath}")
     end
 
@@ -253,6 +260,33 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert `#{GET_ROW_NUM_CMD} '#{file_path}*'`.to_s.to_i == generate_row_num 
     end
 
+    test "statistics_test" do
+      file_name="statistics_test"
+      generate_row_num=255
+
+      # TODO: Timestamp, Float, Decimal
+      conf =%[
+        path #{TMP_DIR}/#{file_name}.arrow
+        schema_defs "num1=Uint8;stat_enabled,num2=Uint16;stat_enabled,num3=Uint32;stat_enabled,num4=Uint64;stat_enabled,
+        num5=Int8;stat_enabled,num6=Int16;stat_enabled,num7=Int32;stat_enabled,num8=Int64;stat_enabled"
+
+        <buffer>
+          chunk_limit_records 100
+        </buffer>
+      ]
+      d = create_driver(conf)
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          for i in 1..generate_row_num do
+            d.feed({'num1' => i,'num2' => i*100,'num3' => i*10000000,'num4' => i*10000000,
+              'num5' => i-128,'num6' => (i*255)-32767,'num7' => (i*16777215)-2147483647,'num8' => (i*33554431)-4294967295})
+          end
+        end
+      end
+      # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
+      system("#{COMPARE_METADATA_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/statistics_test.dump")
+    end
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
     Fluent::Test::Driver::Output.new(Fluent::Plugin::ArrowFileOutput, opts: opts).configure(conf)
