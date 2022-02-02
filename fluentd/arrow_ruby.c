@@ -235,10 +235,22 @@ ruby_put_bool_value(SQLfield *column, const char *addr, int sz)
 /*
  * IntXX/UintXX
  */
+static VALUE
+__ruby_fetch_integer_value(VALUE datum)
+{
+	if (datum != Qnil && CLASS_OF(datum) != rb_cInteger)
+	{
+		if (!rb_respond_to(datum, rb_intern("to_i")))
+			datum = rb_funcall(datum, rb_intern("to_s"), 0);
+		datum = rb_funcall(datum, rb_intern("to_i"), 0);
+	}
+	return datum;
+}
+
 static size_t
 put_ruby_int8_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -258,7 +270,7 @@ put_ruby_int8_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_int16_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -278,7 +290,7 @@ put_ruby_int16_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_int32_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -298,7 +310,7 @@ put_ruby_int32_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_int64_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -318,7 +330,7 @@ put_ruby_int64_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_uint8_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -340,7 +352,7 @@ put_ruby_uint8_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_uint16_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -362,7 +374,7 @@ put_ruby_uint16_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_uint32_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -382,7 +394,7 @@ put_ruby_uint32_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_uint64_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_integer_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -402,10 +414,22 @@ put_ruby_uint64_value(SQLfield *column, const char *addr, int sz)
 /*
  * FloatingPointXX
  */
+static VALUE
+__ruby_fetch_float_value(VALUE datum)
+{
+	if (datum != Qnil && CLASS_OF(datum) != rb_cFloat)
+	{
+		if (!rb_respond_to(datum, rb_intern("to_f")))
+			datum = rb_funcall(datum, rb_intern("to_s"), 0);
+		datum = rb_funcall(datum, rb_intern("to_f"), 0);
+	}
+	return datum;
+}
+
 static size_t
 put_ruby_float16_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_float_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -426,7 +450,7 @@ put_ruby_float16_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_float32_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_float_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
@@ -446,7 +470,7 @@ put_ruby_float32_value(SQLfield *column, const char *addr, int sz)
 static size_t
 put_ruby_float64_value(SQLfield *column, const char *addr, int sz)
 {
-	VALUE		datum = (VALUE)addr;
+	VALUE		datum = __ruby_fetch_float_value((VALUE)addr);
 	size_t		row_index = column->nitems++;
 
 	if (datum == Qnil)
