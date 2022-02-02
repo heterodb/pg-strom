@@ -1257,12 +1257,8 @@ __assignFieldTypeDecimal(SQLfield *column, const char *extra)
 
 		if (*tail != ')')
 			Elog("Arrow::Decimal definition syntax error");
-		if (sscanf(extra, "(%u,%u)", &precision, &scale) != 2)
-		{
-			precision = 30;		/* revert */
-			if (sscanf(extra, "(%u)", &scale) != 1)
-				Elog("Arrow::Decimal definition syntax error");
-		}
+		if (sscanf(extra, "(%d)", &scale) != 1)
+			Elog("Arrow::Decimal definition syntax error");
 	}
 	else if (*extra != '\0')
 		Elog("Arrow::Decimal definition syntax error");
