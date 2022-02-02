@@ -444,7 +444,13 @@ print_arrow_decimal128(ARROW_PRINT_DATUM_ARGS)
 	size_t		len = 200 + (scale < 0 ? -scale : 0);
 	char	   *buf = alloca(len);
 	char	   *pos = buf + len;
-	ARROW_PRINT_DATUM_SETUP_INLINE(int128_t);
+	const char *src;
+	int128_t	datum;
+
+	if (sizeof(int128_t) * (index+1) > buffers[1].length)
+		return false;
+	src = rb_chunk + buffers[1].offset + sizeof(int128_t) * index;
+	memcpy(&datum, src, sizeof(int128_t));
 
 	/* zero handling */
 	if (datum == 0)
