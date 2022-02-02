@@ -1125,6 +1125,7 @@ arrowFieldAddCustomMetadata(SQLfield *column,
 	sz = sizeof(ArrowKeyValue) * (column->numCustomMetadata + 1);
 	column->customMetadata = repalloc(column->customMetadata, sz);
 	kv = &column->customMetadata[column->numCustomMetadata++];
+	initArrowNode(kv, KeyValue);
 	kv->key = pstrdup(key);
 	kv->_key_len = strlen(key);
 	kv->value = pstrdup(value);
