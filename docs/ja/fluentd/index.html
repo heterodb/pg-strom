@@ -172,7 +172,7 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>PG-Stromが取り扱うことのできるデータ形式は、PostgreSQL Heap形式（トランザクショナル行データ）とApache Arrow形式（構造化列データ）の２種類ですが、IoT/M2M領域で想定されるような、時々刻々と大量のデータが発生するようなワークロードに対しては、Apache Arrow形式を用いた方が合理的です。</p>
 <h2 id="arrow-file">arrow-file プラグイン</h2>
 <p>以下では、Fluentdが収集したログデータをApache Arrow形式ファイルとして出力し、これをPG-Stromで参照するというアプローチについて説明します。
-また、Fluentdのパッケージには、Treasure Data社の提供する安定板<code>td-agent</code>を使用するものとします。</p>
+また、Fluentdのパッケージには、Treasure Data社の提供する安定版<code>td-agent</code>を使用するものとします。</p>
 <p>PG-Stromに同梱のFluentd向けOutputプラグインの<code>fluent-plugin-arrow-file</code>モジュールを利用すると、Fluentdが収集したログデータを、指定したスキーマ構造を持つApache Arrow形式ファイルとして書き出すことができます。PG-StromのArrow_Fdw機能を使用すればこのApache Arrow形式ファイルを外部テーブルとして参照する事ができ、また保存先のストレージが適切に設定されていれば、GPU-Direct SQLを用いた高速な読み出しも可能です。</p>
 <p>この方法には以下のメリットがあります。
 - Fluentd が出力したデータをそのままPG-Stromで読み出せるため、改めてDBへデータをインポートする必要がない。
@@ -212,7 +212,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <p>arrow-fileプラグインの設定パラメータは以下の通りです。</p>
 <dl>
 <dt><code>path</code> [type: <code>String</code> ] (必須パラメータ)</dt>
-<dd>arrow-fileプラグインががログを出力するファイル名を指定します。</dd>
+<dd>arrow-fileプラグインがログを出力するファイル名を指定します。</dd>
 <dd>このパラメータは必須で、以下の書式文字を含める事ができます。</dd>
 </dl>
 <table>
@@ -314,7 +314,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <td>時刻型です。精度を指定することができ、省略した場合は暗黙に<code>[sec]</code>を付加したものとして扱われます。</td>
 </tr>
 <tr>
-<td><code>Date</code> <code>Date[dat]</code> <code>Date[ms]</code></td>
+<td><code>Date</code> <code>Date[Day]</code> <code>Date[ms]</code></td>
 <td>日付型です。精度を指定することができ、省略した場合は暗黙に<code>[day]</code>を付加したものとして扱われます。</td>
 </tr>
 <tr>
@@ -327,7 +327,7 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 </tr>
 <tr>
 <td><code>Ipaddr6</code></td>
-<td>IPv4アドレス型です。実際には<code>byteWidth=16</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
+<td>IPv6アドレス型です。実際には<code>byteWidth=16</code>である<code>FixedSizeBinary</code>型に、<code>pg_type=pg_catalog.inet</code>というカスタムメタデータを付与します。</td>
 </tr>
 </tbody>
 </table>
@@ -349,20 +349,20 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <p>また、ここでは簡単な使用例を示すことが目的ですので、<code>&lt;buffer&gt;</code>タグでチャンクサイズを最大4MB / 200行に縮小し、最大でも10秒でOutputプラグインに渡すよう設定しています。</p>
 <p><code>/etc/td-agent/td-agent.conf</code>の設定例</p>
 <pre><code>&lt;source&gt;
-  @typetail
+  @type tail
   path /var/log/httpd/access_log
   pos_file /var/log/td-agent/httpd_access.pos
   tag httpd
   format apache2
   &lt;parse&gt;
-    @typeapache2
+    @type apache2
     expression /^(?&lt;host&gt;[^ ]*) [^ ]* (?&lt;user&gt;[^ ]*) \[(?&lt;time&gt;[^\]]*)\] &quot;(?&lt;method&gt;\S+)(?: +(?&lt;path&gt;(?:[^\&quot;]|\\.)*?)(?: +\S*)?)?&quot; (?&lt;code&gt;[^ ]*) (?&lt;size&gt;[^ ]*)(?: &quot;(?&lt;referer&gt;(?:[^\&quot;]|\\.)*)&quot; &quot;(?&lt;agent&gt;(?:[^\&quot;]|\\.)*)&quot;)?$/
     time_format %d/%b/%Y:%H:%M:%S %z
   &lt;/parse&gt;
 &lt;/source&gt;
 
 &lt;match httpd&gt;
-  @typearrow_file
+  @type arrow_file
   path /tmp/mytest%Y%m%d.%p.arrow
   schema_defs &quot;ts=Timestamp[sec],host=Utf8,method=Utf8,path=Utf8,code=Int32,size=Int32,referer=Utf8,agent=Utf8&quot;
   ts_column &quot;ts&quot;
