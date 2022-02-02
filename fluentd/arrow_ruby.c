@@ -530,7 +530,7 @@ put_ruby_decimal_value(SQLfield *column, const char *addr, int sz)
 	else
 	{
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(double));
+		sql_buffer_append(&column->values, &value, sizeof(int128_t));
 
 		STAT_UPDATES(column,i128,value);
 	}
@@ -1869,7 +1869,7 @@ __arrowFileValidateColumn(SQLfield *column,
 			break;
 
 		case ArrowNodeTag__Decimal:
-			if (c->Decimal.scale != f->Decimal.precision ||
+			if (c->Decimal.scale != f->Decimal.scale ||
 				c->Decimal.bitWidth != f->Decimal.bitWidth)
 				Elog("Not a compatible Decimal: Decimal%d(%d,%d) <-> Decimal%d(%d,%d)",
 					 c->Decimal.bitWidth,
