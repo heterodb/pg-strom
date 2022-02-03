@@ -1,5 +1,6 @@
 require "helper"
 require "fluent/plugin/out_arrow_file.rb"
+require 'date'
 
 class ArrowFileOutputTest < Test::Unit::TestCase
   TMP_DIR = File.expand_path(File.dirname(__FILE__) + "/../result")
@@ -26,7 +27,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
   DEFALUT_TAG='test_tag'
 
   def compare_arrow(file_name)
-    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out")
+    system("#{COMPARE_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.out -s")
   end
 
   def get_driver(file_name,schema_defs)
@@ -83,6 +84,42 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       end
       assert compare_arrow(file_name)
     end
+
+    test "date_test" do
+      file_name='date_test'
+      d=get_driver(file_name,"dns1=Date,dns2=Date[ms],dns3=Date[day]")
+
+      t1=event_time("2016-10-03 23:58:09 UTC")
+      time_string='2000-02-29 12:34:56.789012'
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'dns1' => t1, 'dns2' => t1, 'dns3' => t1})
+          d.feed({'dns1' => time_string,'dns2' => time_string, 'dns3' => time_string})
+          d.feed({'dns1' => nil,'dns2' => nil, 'dns3' => nil})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
+
+=begin
+    test "time_test" do
+      file_name='time_test'
+      d=get_driver(file_name,"tsns1=Time[ns],tsns2=Time[sec],tsns3=Time[sec],tsns4=Time[sec],tsns5=Time[sec]")
+
+      t1=event_time("2016-10-03 23:58:09 UTC")
+      time_string='2000-02-29 12:34:56.789012'
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          d.feed({'tsns1' => t1, 'tsns2' => t1, 'tsns3' => t1, 'tsns4' => t1, 'tsns5' => t1})
+          d.feed({'tsns1' => time_string,'tsns2' => time_string, 'tsns3' => time_string, 'tsns4' => time_string, 'tsns5' => time_string})
+          d.feed({'tsns1' => nil,'tsns2' => nil, 'tsns3' => nil,'tsns4' => nil, 'tsns5' => nil})
+        end
+      end
+      assert compare_arrow(file_name)
+    end
+=end
 
     test "float_test" do
       file_name='float_test'
@@ -260,6 +297,36 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert `#{GET_ROW_NUM_CMD} '#{file_path}*'`.to_s.to_i == generate_row_num 
     end
 
+=begin
+    test "report_test" do
+      file_name="report_test"
+      generate_row_num=10
+
+      # TODO: Timestamp, Float, Decimal
+      conf =%[
+        path #{TMP_DIR}/#{file_name}.arrow
+        schema_defs "time1=Timestamp[sec];stat_enabled"   # "
+
+        <buffer>
+          chunk_limit_records 3
+        </buffer>
+      ]
+      d = create_driver(conf)
+
+      t1=DateTime.new(2000,2,28,12,34,56)
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          for i in 1..generate_row_num do
+            d.feed({'time1' => t1.next_day(0.1*i).to_s})
+          end
+        end
+      end
+      # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
+      system("#{COMPARE_METADATA_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.dump")
+    end
+=end
+
     test "statistics_test" do
       file_name="statistics_test"
       generate_row_num=255
@@ -268,7 +335,9 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       conf =%[
         path #{TMP_DIR}/#{file_name}.arrow
         schema_defs "num1=Uint8;stat_enabled,num2=Uint16;stat_enabled,num3=Uint32;stat_enabled,num4=Uint64;stat_enabled,
-        num5=Int8;stat_enabled,num6=Int16;stat_enabled,num7=Int32;stat_enabled,num8=Int64;stat_enabled"
+        num5=Int8;stat_enabled,num6=Int16;stat_enabled,num7=Int32;stat_enabled,num8=Int64;stat_enabled,
+        num9=Float16;stat_enabled,num10=Float32;stat_enabled,num11=Float64;stat_enabled,
+        num12=Decimal;stat_enabled"   # "
 
         <buffer>
           chunk_limit_records 100
@@ -276,16 +345,20 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       ]
       d = create_driver(conf)
 
+      t1=DateTime.new(2000,2,28,12,34,56)
+
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           for i in 1..generate_row_num do
             d.feed({'num1' => i,'num2' => i*100,'num3' => i*10000000,'num4' => i*10000000,
-              'num5' => i-128,'num6' => (i*255)-32767,'num7' => (i*16777215)-2147483647,'num8' => (i*33554431)-4294967295})
+              'num5' => i-128,'num6' => (i*255)-32767,'num7' => (i*16777215)-2147483647,'num8' => (i*33554431)-4294967295,
+              'num9' => -2.0 + i*0.01,'num10' => -0.02 + i * 0.001,'num11' => -0.0002 + i * 0.00001,
+              'num12' => i*100000})
           end
         end
       end
       # getting sum of the number of rows in generated arrow files, and check it equals generate_row_num
-      system("#{COMPARE_METADATA_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/statistics_test.dump")
+      system("#{COMPARE_METADATA_CMD} #{TMP_DIR}/#{file_name}.arrow #{EXPECTED_DIR}/#{file_name}.dump -s")
     end
 
   def create_driver(conf = DEFAULT_CONFIG,opts={})
