@@ -198,8 +198,8 @@ __dumpArrowTypeTime(SQLbuffer *buf, ArrowNode *node)
 	ArrowTypeTime *t = (ArrowTypeTime *)node;
 
 	sql_buffer_printf(
-		buf, "{Time: unit=%s}",
-		ArrowTimeUnitAsCstring(t->unit));
+		buf, "{Time: unit=%s, bitWidth=%d}",
+		ArrowTimeUnitAsCstring(t->unit), t->bitWidth);
 }
 
 static void
@@ -1049,7 +1049,8 @@ __arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 			break;
 
 		case ArrowNodeTag__Time:
-			if (a->type.Time.unit != b->type.Time.unit)
+			if (a->type.Time.unit != b->type.Time.unit ||
+				a->type.Time.bitWidth != b->type.Time.bitWidth)
 				return false;
 			break;
 

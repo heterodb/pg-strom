@@ -1301,24 +1301,28 @@ __assignFieldTypeTime(SQLfield *column, const char *extra)
 	initArrowNode(&column->arrow_type, Time);
 	if (strcmp(extra, "[sec]") == 0 || strcmp(extra, "") == 0)
 	{
+		column->arrow_type.Time.unit = ArrowTimeUnit__Second;
 		column->arrow_type.Time.bitWidth = 32;
 		column->put_value = put_ruby_time_sec_value;
 		column->write_stat = write_ruby_int32_stat;
 	}
 	else if (strcmp(extra, "[ms]") == 0)
 	{
+		column->arrow_type.Time.unit = ArrowTimeUnit__MilliSecond;
 		column->arrow_type.Time.bitWidth = 32;
 		column->put_value = put_ruby_time_ms_value;
 		column->write_stat = write_ruby_int32_stat;
 	}
 	else if (strcmp(extra, "[us]") == 0)
 	{
+		column->arrow_type.Time.unit = ArrowTimeUnit__MicroSecond;
 		column->arrow_type.Time.bitWidth = 64;
 		column->put_value = put_ruby_time_us_value;
 		column->write_stat = write_ruby_int64_stat;
 	}
 	else if (strcmp(extra, "[ns]") == 0)
 	{
+		column->arrow_type.Time.unit = ArrowTimeUnit__NanoSecond;
 		column->arrow_type.Time.bitWidth = 64;
 		column->put_value = put_ruby_time_ns_value;
 		column->write_stat = write_ruby_int64_stat;
