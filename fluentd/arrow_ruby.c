@@ -666,7 +666,7 @@ put_ruby_date_ms_value(SQLfield *column, const char *addr, int sz)
 		__put_inline_null_value(column, row_index, sizeof(int64_t));
 	else
 	{
-		uint64_t	value = (sec * 1000000L) + (nsec / 1000L);
+		uint64_t	value = (sec * 1000L) + (nsec / 1000000L);
 
 		sql_buffer_setbit(&column->nullmap, row_index);
 		sql_buffer_append(&column->values, &value, sizeof(uint64_t));
