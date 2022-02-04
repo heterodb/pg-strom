@@ -922,7 +922,7 @@ retry_again:
 			ival = rb_funcall(datum, rb_intern("to_i"), 0);
 
 			rb_integer_pack(ival, buf, IP4ADDR_LEN, 1, 0,
-							INTEGER_PACK_LITTLE_ENDIAN);
+							INTEGER_PACK_BIG_ENDIAN);
 			return true;
 		}
 		if ((ip_version == 6 || ip_version < 0) &&
@@ -931,7 +931,7 @@ retry_again:
 			ival = rb_funcall(datum, rb_intern("to_i"), 0);
 
 			rb_integer_pack(ival, buf, IP6ADDR_LEN, 1, 0,
-							INTEGER_PACK_LITTLE_ENDIAN);
+							INTEGER_PACK_BIG_ENDIAN);
 			return true;
 		}
 		Elog("IPAddr is not IPv%d format", ip_version);
