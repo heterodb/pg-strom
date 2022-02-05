@@ -1294,11 +1294,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "float8 float8pl(float8,float8)",   1, "p/f:float8pl" },
 
 	/* '-' : subtract operators */
-	{ PGSTROM, "int1 int1pl(int1,int1)",  1, "p/f:int1mi" },
-	{ PGSTROM, "int2 int12pl(int1,int2)", 1, "p/f:int12mi" },
-	{ PGSTROM, "int4 int14pl(int1,int4)", 1, "p/f:int14mi" },
-	{ PGSTROM, "int8 int18pl(int1,int8)", 1, "p/f:int18mi" },
-	{ PGSTROM, "int2 int21pl(int2,int1)", 1, "p/f:int21mi" },
+	{ PGSTROM, "int1 int1mi(int1,int1)",  1, "p/f:int1mi" },
+	{ PGSTROM, "int2 int12mi(int1,int2)", 1, "p/f:int12mi" },
+	{ PGSTROM, "int4 int14mi(int1,int4)", 1, "p/f:int14mi" },
+	{ PGSTROM, "int8 int18mi(int1,int8)", 1, "p/f:int18mi" },
+	{ PGSTROM, "int2 int21mi(int2,int1)", 1, "p/f:int21mi" },
 	{ NULL,    "int2 int2mi(int2,int2)",  1, "p/f:int2mi" },
 	{ NULL,    "int4 int24mi(int2,int4)", 1, "p/f:int24mi" },
 	{ NULL,    "int8 int28mi(int2,int8)", 1, "p/f:int28mi" },
