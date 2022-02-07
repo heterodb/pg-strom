@@ -12,6 +12,7 @@
  */
 #include <ctype.h>
 #include <getopt.h>
+#include <netinet/in.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include "arrow_ipc.h"
@@ -888,25 +889,28 @@ static bool
 print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		width = column->arrow_type.FixedSizeBinary.byteWidth;
-	uint16_t   *words;
+	uint16_t	words[8];
 	int			zero_base = -1;
 	int			zero_len = -1;
 	int			i, j;
 	ARROW_PRINT_DATUM_SETUP_FIXEDSIZEBINARY(width);
 	assert(width == 16);
 
+	/* copy IPv6 address */
+	for (i=0; i < 8; i++)
+		words[i] = ntohs(((uint16_t *)addr)[i]);
 	/* lookup the longest run of 0x00 */
-	words = (uint16_t *)addr;
 	for (i=0; i < 8; i++)
 	{
 		if (words[i] == 0)
 		{
 			int		count = 1;
 
-			for (j=i+i; j < 8; j++, count++)
+			for (j=i+1; j < 8; j++)
 			{
 				if (words[j] != 0)
 					break;
+				count++;
 			}
 			if (count > 1 && count > zero_len)
 			{
@@ -922,7 +926,7 @@ print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 	{
 		if (zero_base >= 0 &&
 			i >= zero_base &&
-			i <= zero_base + zero_len)
+			i <  zero_base + zero_len)
 		{
 			if (i == zero_base)
 				fputc(':', output_filp);
