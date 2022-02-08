@@ -74,11 +74,15 @@ class ArrowFileOutputTest < Test::Unit::TestCase
 
       t1=event_time("2016-10-03 23:58:09 UTC")
       time_string='2000-02-29 12:34:56.789012'
+      time_string_with_timezone='2000-02-29 12:34:56.789012 JST'
+      time_string_with_timediff='2000-02-29 12:34:56.789012+0500'
 
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           d.feed({'tsns1' => t1, 'tsns2' => t1, 'tsns3' => t1, 'tsns4' => t1, 'tsns5' => t1})
           d.feed({'tsns1' => time_string,'tsns2' => time_string, 'tsns3' => time_string, 'tsns4' => time_string, 'tsns5' => time_string})
+          d.feed({'tsns1' => time_string_with_timezone,'tsns2' => time_string_with_timezone, 'tsns3' => time_string_with_timezone, 'tsns4' => time_string_with_timezone, 'tsns5' => time_string_with_timezone})
+          d.feed({'tsns1' => time_string_with_timediff,'tsns2' => time_string_with_timediff, 'tsns3' => time_string_with_timediff, 'tsns4' => time_string_with_timediff, 'tsns5' => time_string_with_timediff})
           d.feed({'tsns1' => nil,'tsns2' => nil, 'tsns3' => nil,'tsns4' => nil, 'tsns5' => nil})
         end
       end
@@ -95,6 +99,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           d.feed({'dns1' => t1, 'dns2' => t1, 'dns3' => t1})
+          d.feed({'dns1' => "2016-10-03",'dns2'=>"2016-10-03",'dns3'=>"2016-10-03"})
           d.feed({'dns1' => time_string,'dns2' => time_string, 'dns3' => time_string})
           d.feed({'dns1' => nil,'dns2' => nil, 'dns3' => nil})
         end
@@ -102,13 +107,36 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-=begin
+    test "date_test2" do
+      file_name='date_test2'
+      generate_row_num=255
+
+      conf =%[
+        path #{TMP_DIR}/#{file_name}.arrow
+        schema_defs "ts2=Date"  ##"
+
+        <buffer>
+          chunk_limit_records 100
+        </buffer>
+      ]
+      d = create_driver(conf)
+
+      assert_nothing_raised do
+        d.run(default_tag: DEFALUT_TAG) do
+          for i in 1..generate_row_num do
+            p i
+            d.feed({'ts2' => "2012-12-12"})
+          end
+        end
+      end
+    end
+
     test "time_test" do
       file_name='time_test'
-      d=get_driver(file_name,"tsns1=Time[ns],tsns2=Time[sec],tsns3=Time[sec],tsns4=Time[sec],tsns5=Time[sec]")
+      d=get_driver(file_name,"tsns1=Time,tsns2=Time[ns],tsns3=Time[us],tsns4=Time[ms],tsns5=Time[sec]")
 
       t1=event_time("2016-10-03 23:58:09 UTC")
-      time_string='2000-02-29 12:34:56.789012'
+      time_string='2000-02-29 12:34:56.789012 UTC'
 
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
@@ -119,7 +147,6 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       end
       assert compare_arrow(file_name)
     end
-=end
 
     test "float_test" do
       file_name='float_test'
@@ -180,22 +207,21 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-=begin
-    test "ip_check" do
-      file_name='ip_check'
+    test "ip_test" do
+      file_name='ip_test'
       d=get_driver(file_name,"ip1=Ipaddr4,ip2=Ipaddr6")
 
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           d.feed({'ip1' => "192.168.0.1",'ip2' => "b085:fe52:e3c1:bc49:5fab:65de:64d8:d5b8"})
-          d.feed({'ip1' => "0.0.0.0",'ip2' => "::1"})
+          d.feed({'ip1' => "0.0.0.0",'ip2' => "::"})
+          d.feed({'ip1' => "0.0.0.1",'ip2' => "::1"})
           d.feed({'ip1' => "255.255.255.255",'ip2' => "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"})
           d.feed({'ip1' => nil,'ip2' => nil})
         end
       end
       assert compare_arrow(file_name)
     end
-=end
   
   # Configuration Check
   ## Refer: http://heterodb.github.io/pg-strom/fluentd/#configuration
@@ -337,7 +363,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
         schema_defs "num1=Uint8;stat_enabled,num2=Uint16;stat_enabled,num3=Uint32;stat_enabled,num4=Uint64;stat_enabled,
         num5=Int8;stat_enabled,num6=Int16;stat_enabled,num7=Int32;stat_enabled,num8=Int64;stat_enabled,
         num9=Float16;stat_enabled,num10=Float32;stat_enabled,num11=Float64;stat_enabled,
-        num12=Decimal;stat_enabled"   # "
+        num12=Decimal;stat_enabled,ts1=Timestamp;stat_enabled,ts2=Date;stat_enabled,ts3=Time;stat_enabled"
 
         <buffer>
           chunk_limit_records 100
@@ -350,10 +376,12 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert_nothing_raised do
         d.run(default_tag: DEFALUT_TAG) do
           for i in 1..generate_row_num do
+            ts_text=t1.next_day(i*0.1-12).to_s
             d.feed({'num1' => i,'num2' => i*100,'num3' => i*10000000,'num4' => i*10000000,
               'num5' => i-128,'num6' => (i*255)-32767,'num7' => (i*16777215)-2147483647,'num8' => (i*33554431)-4294967295,
               'num9' => -2.0 + i*0.01,'num10' => -0.02 + i * 0.001,'num11' => -0.0002 + i * 0.00001,
-              'num12' => i*100000})
+              'num12' => i*100000,
+              'ts1' => ts_text, 'ts2' => ts_text,'ts3' => ts_text})
           end
         end
       end
