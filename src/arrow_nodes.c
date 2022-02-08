@@ -1230,38 +1230,73 @@ __fetchPointer(FBTable *t, int index)
 }
 
 static inline bool
-fetchBool(FBTable *t, int index)
+__fetchBool(FBTable *t, int index, bool __default)
 {
 	bool	   *ptr = __fetchPointer(t, index);
-	return (ptr ? *ptr : false);
+
+	return (ptr ? *ptr : __default);
+}
+	
+static inline bool
+fetchBool(FBTable *t, int index)
+{
+	return __fetchBool(t, index, false);
+}
+
+static inline int8_t
+__fetchChar(FBTable *t, int index, int8_t __default)
+{
+	int8_t	   *ptr = __fetchPointer(t, index);
+
+	return (ptr ? *ptr : __default);
 }
 
 static inline int8_t
 fetchChar(FBTable *t, int index)
 {
-	int8_t	   *ptr = __fetchPointer(t, index);
-	return (ptr ? *ptr : 0);
+	return __fetchChar(t, index, 0);
+}
+
+static inline int16_t
+__fetchShort(FBTable *t, int index, int16_t __default)
+{
+	int16_t	   *ptr = __fetchPointer(t, index);
+
+	return (ptr ? *ptr : __default);
 }
 
 static inline int16_t
 fetchShort(FBTable *t, int index)
 {
-	int16_t	  *ptr = __fetchPointer(t, index);
-	return (ptr ? *ptr : 0);
+	return __fetchShort(t, index, 0);
+}
+
+static inline int32_t
+__fetchInt(FBTable *t, int index, int32_t __default)
+{
+	int32_t	   *ptr = __fetchPointer(t, index);
+
+	return (ptr ? *ptr : __default);
 }
 
 static inline int32_t
 fetchInt(FBTable *t, int index)
 {
-	int32_t	  *ptr = __fetchPointer(t, index);
-	return (ptr ? *ptr : 0);
+	return __fetchInt(t, index, 0);
+}
+
+static inline int64_t
+__fetchLong(FBTable *t, int index, int64_t __default)
+{
+	int64_t	   *ptr = __fetchPointer(t, index);
+
+	return (ptr ? *ptr : __default);
 }
 
 static inline int64_t
 fetchLong(FBTable *t, int index)
 {
-	int64_t	  *ptr = __fetchPointer(t, index);
-	return (ptr ? *ptr : 0);
+	return __fetchLong(t, index, 0);
 }
 
 static inline void *
@@ -1346,10 +1381,9 @@ readArrowTypeDecimal(ArrowTypeDecimal *node, const char *pos)
 
 	node->precision = fetchInt(&t, 0);
 	node->scale     = fetchInt(&t, 1);
-	node->bitWidth  = fetchInt(&t, 2);
-	if (node->bitWidth == 0)
-		node->bitWidth = 128;
-	else if (node->bitWidth != 128 && node->bitWidth != 256)
+	node->bitWidth  = __fetchInt(&t, 2, 128);
+	if (node->bitWidth != 128 &&
+		node->bitWidth != 256)
 		Elog("ArrowTypeDecimal has unsupported bitWidth (%d)",
 			 node->bitWidth);
 }
@@ -1358,11 +1392,9 @@ static void
 readArrowTypeDate(ArrowTypeDate *node, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *) pos);
-	int16_t	   *ptr;
 
 	/* Date->unit has non-zero default value */
-	ptr = __fetchPointer(&t, 0);
-	node->unit = (ptr != NULL ? *ptr : ArrowDateUnit__MilliSecond);
+	node->unit = __fetchShort(&t, 0, ArrowDateUnit__MilliSecond);
 	if (node->unit != ArrowDateUnit__Day &&
 		node->unit != ArrowDateUnit__MilliSecond)
 		Elog("ArrowTypeDate has unknown unit (%d)", node->unit);
@@ -1373,8 +1405,8 @@ readArrowTypeTime(ArrowTypeTime *node, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *) pos);
 
-	node->unit = fetchShort(&t, 0);
-	node->bitWidth = fetchInt(&t, 1);
+	node->unit = __fetchShort(&t, 0, ArrowTimeUnit__MilliSecond);
+	node->bitWidth = __fetchInt(&t, 1, 32);
 	switch (node->unit)
 	{
 		case ArrowTimeUnit__Second:
@@ -1413,7 +1445,7 @@ readArrowTypeInterval(ArrowTypeInterval *node, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *) pos);
 
-	node->unit = fetchShort(&t, 0);
+	node->unit = __fetchShort(&t, 0, ArrowTimeUnit__MilliSecond);
 	if (node->unit != ArrowIntervalUnit__Year_Month &&
 		node->unit != ArrowIntervalUnit__Day_Time)
 		Elog("ArrowTypeInterval has unknown unit (%d)", node->unit);
@@ -1467,7 +1499,7 @@ readArrowTypeDuration(ArrowTypeDuration *node, const char *pos)
 {
 	FBTable		t = fetchFBTable((int32_t *) pos);
 
-	node->unit = fetchShort(&t, 0);
+	node->unit = __fetchShort(&t, 0, ArrowTimeUnit__MilliSecond);
 	if (node->unit != ArrowTimeUnit__Second &&
 		node->unit != ArrowTimeUnit__MilliSecond &&
 		node->unit != ArrowTimeUnit__MicroSecond &&
