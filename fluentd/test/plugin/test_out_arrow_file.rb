@@ -158,7 +158,6 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       assert compare_arrow(file_name)
     end
 
-=begin
     test "bool_test" do
       file_name='bool_test'
       d=get_driver(file_name,"bool1=Bool")
@@ -177,16 +176,15 @@ class ArrowFileOutputTest < Test::Unit::TestCase
           d.feed({'bool1' => "f"})
           d.feed({'bool1' => "T"})
           d.feed({'bool1' => "F"})
-          d.feed({'bool1' => "0"})
           d.feed({'bool1' => "1"})
-          d.feed({'bool1' => 0})
+          d.feed({'bool1' => "0"})
           d.feed({'bool1' => 1})
+          d.feed({'bool1' => 0})
           d.feed({'bool1' => nil})
         end
       end
       assert compare_arrow(file_name)
     end
-=end
 
     test "utf8_test" do
       file_name='utf8_test'
@@ -323,8 +321,6 @@ class ArrowFileOutputTest < Test::Unit::TestCase
       file_name="statistics_test"
       generate_row_num=255
 
-      # Skiping bool
-=begin
       conf =%[
         path #{TMP_DIR}/#{file_name}.arrow
         schema_defs "num1=Uint8;stat_enabled,num2=Uint16;stat_enabled,num3=Uint32;stat_enabled,num4=Uint64;stat_enabled,
@@ -332,19 +328,6 @@ class ArrowFileOutputTest < Test::Unit::TestCase
         num9=Float16;stat_enabled,num10=Float32;stat_enabled,num11=Float64;stat_enabled,
         num12=Decimal;stat_enabled,ts1=Timestamp;stat_enabled,ts2=Date;stat_enabled,ts3=Time;stat_enabled,
         bool1=Bool,string1=Utf8,ip41=Ipaddr4,ip61=Ipaddr6"   # checking whether these types can be inserted without errors, or not; in situation: many columns, many rows.
-
-        <buffer>
-          chunk_limit_records 100
-        </buffer>
-      ]
-=end
-      conf =%[
-        path #{TMP_DIR}/#{file_name}.arrow
-        schema_defs "num1=Uint8;stat_enabled,num2=Uint16;stat_enabled,num3=Uint32;stat_enabled,num4=Uint64;stat_enabled,
-        num5=Int8;stat_enabled,num6=Int16;stat_enabled,num7=Int32;stat_enabled,num8=Int64;stat_enabled,
-        num9=Float16;stat_enabled,num10=Float32;stat_enabled,num11=Float64;stat_enabled,
-        num12=Decimal;stat_enabled,ts1=Timestamp;stat_enabled,ts2=Date;stat_enabled,ts3=Time;stat_enabled,
-        string1=Utf8,ip41=Ipaddr4,ip61=Ipaddr6"   # checking whether these types can be inserted without errors, or not; in situation: many columns, many rows.
 
         <buffer>
           chunk_limit_records 100
@@ -364,7 +347,7 @@ class ArrowFileOutputTest < Test::Unit::TestCase
               'num9' => -2.0 + i*0.01,'num10' => -0.02 + i * 0.001,'num11' => -0.0002 + i * 0.00001,
               'num12' => i*100000,
               'ts1' => ts_text, 'ts2' => ts_text,'ts3' => ts_text,
-              # 'bool1' => i%2==0,
+              'bool1' => i%2==0,
               'string1' => 'hello', 'ip41' => '192.168.0.1', 'ip61' => 'b085:fe52:e3c1:bc49:5fab:65de:64d8:d5b8'})
           end
         end
