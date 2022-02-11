@@ -225,9 +225,9 @@ ruby_put_bool_value(SQLfield *column, const char *addr, int sz)
 	{
 		sql_buffer_setbit(&column->nullmap, row_index);
 		if (bval != 0)
-			sql_buffer_setbit(&column->values,  row_index);
+			sql_buffer_setbit(&column->values, row_index);
 		else
-			sql_buffer_clrbit(&column->values,  row_index);		
+			sql_buffer_clrbit(&column->values, row_index);		
 	}
 	return __buffer_usage_inline_type(column);
 }
@@ -1897,6 +1897,9 @@ __arrowFileValidateColumn(SQLfield *column,
 			 c->node.tagName, f->node.tagName);
 	switch (c->node.tag)
 	{
+		case ArrowNodeTag__Bool:
+			break;
+
 		case ArrowNodeTag__Int:
 			if ((c->Int.is_signed && !f->Int.is_signed) ||
 				(!c->Int.is_signed && f->Int.is_signed))
