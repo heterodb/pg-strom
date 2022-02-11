@@ -11,14 +11,14 @@ cd pg-strom/fluentd
 bundle
 ```
 
-## Run test
+## Run all test cases
 
 ```
 cd pg-strom/fluentd
 rake test
 ```
 
-## Run one test
+## Run one test case
 
 ```bash
 rake test TESTOPTS="-n'test: <test name>'"
