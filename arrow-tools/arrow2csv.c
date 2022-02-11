@@ -423,7 +423,7 @@ print_arrow_large_binary(ARROW_PRINT_DATUM_ARGS)
 static bool
 print_arrow_bool(ARROW_PRINT_DATUM_ARGS)
 {
-	int64_t		k = (index << 3);
+	int64_t		k = (index >> 3);
 	int32_t		mask = (1 << (index & 7));
 	const char *bitmap = rb_chunk + buffers[1].offset;
 
