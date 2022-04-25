@@ -1380,7 +1380,7 @@ pg_datum_fetch_arrow(kern_context *kcxt,
 											  sizeof(cl_uint));
 			result.value.month = *ival;
 			result.value.day = 0;
-			result.value.month = 0;
+			result.value.time = 0;
 			result.isnull = false;
 			break;
 
