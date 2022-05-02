@@ -2680,7 +2680,15 @@ build_extra_devfunc_info(const char *func_extension,
 				continue;
 			}
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-			dfunc = pmemdup(&__dfunc, sizeof(devfunc_info));
+			dfunc = palloc0(sizeof(devfunc_info));
+			dfunc->func_extension = pstrdup(__dfunc.func_extension);
+			dfunc->func_oid = __dfunc.func_oid;
+			dfunc->func_collid = __dfunc.func_collid;
+			dfunc->func_is_negative = __dfunc.func_is_negative;
+			dfunc->func_is_strict = __dfunc.func_is_strict;
+			dfunc->func_flags = __dfunc.func_flags;
+			dfunc->func_args = list_copy(__dfunc.func_args);
+			dfunc->func_rettype = __dfunc.func_rettype;
 			dfunc->func_sqlname = pstrdup(__dfunc.func_sqlname);
 			dfunc->func_devname = pstrdup(__dfunc.func_devname);
 			if (__dfunc.devfunc_result_sz)
