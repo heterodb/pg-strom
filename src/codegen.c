@@ -2683,8 +2683,11 @@ build_extra_devfunc_info(const char *func_extension,
 			dfunc = pmemdup(&__dfunc, sizeof(devfunc_info));
 			dfunc->func_sqlname = pstrdup(__dfunc.func_sqlname);
 			dfunc->func_devname = pstrdup(__dfunc.func_devname);
+			if (__dfunc.devfunc_result_sz)
+				dfunc->devfunc_result_sz = __dfunc.devfunc_result_sz;
+			else
+				dfunc->devfunc_result_sz = devfunc_generic_result_sz;
 			MemoryContextSwitchTo(oldcxt);
-
 			break;
 		}
 	}
