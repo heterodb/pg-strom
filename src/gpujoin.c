@@ -7109,11 +7109,11 @@ resume_kernel:
 	m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->gts.kern_params;
-	kern_args[1] = &gjs->m_kmrels;
-	kern_args[2] = &m_kds_src;
-	kern_args[3] = &m_kds_extra;
-	kern_args[4] = &m_kds_dst;
-	kern_args[5] = &m_nullptr;
+	kern_args[2] = &gjs->m_kmrels;
+	kern_args[3] = &m_kds_src;
+	kern_args[4] = &m_kds_extra;
+	kern_args[5] = &m_kds_dst;
+	kern_args[6] = &m_nullptr;
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
