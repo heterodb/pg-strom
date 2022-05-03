@@ -310,9 +310,10 @@ static int (*p_sysfs_lookup_optimal_gpus)(int fdesc,
 										  int nrooms,
 										  int *optimal_gpus) = NULL;
 Bitmapset *
-extraSysfsLookupOptimalGpus(int fdesc)
+extraSysfsLookupOptimalGpus(File filp)
 {
 	Bitmapset  *optimal_gpus = NULL;
+	int			fdesc = FileGetRawDesc(filp);
 	int			i, nitems;
 	int		   *__gpus;
 
