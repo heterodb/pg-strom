@@ -473,12 +473,7 @@ __FUNC_LOCALE_OPCODE(bpcharicnlike, bpchar/text, NULL)
 
 /* String operations */
 __FUNC_OPCODE(textcat, text/text, NULL)
-FUNC_OPCODE(concat, text, DEVKERN__ANY, concat1, NULL)
-FUNC_OPCODE(concat, text/text, DEVKERN__ANY, concat2, NULL)
-FUNC_OPCODE(concat, text/text/text, DEVKERN__ANY, concat3, NULL)
-FUNC_OPCODE(concat, text/text/text/text, DEVKERN__ANY, concat4, NULL)
-FUNC_OPCODE(concat, text/text/text/text/text, DEVKERN__ANY, concat5, NULL)
-FUNC_OPCODE(concat, text/text/text/text/text/text, DEVKERN__ANY, concat6, NULL)
+__FUNC_OPCODE(concat, __text__, NULL)
 
 #undef EXPR_OPCODE
 #undef TYPE_OPCODE

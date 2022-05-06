@@ -546,64 +546,103 @@ static struct {
 static devfunc_info *
 pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 {
-	const char	   *extension;
+	const char	   *fextension;
 	const char	   *fname;
 	Oid				fnamespace;
-	StringInfoData	fargs;
+	StringInfoData	buf;
 	devfunc_info   *dfunc = NULL;
 	devtype_info   *dtype;
-	devtype_info  **dtype_args;
 	MemoryContext	oldcxt;
-	int				i;
+	int				i, j, sz;
 
-	initStringInfo(&fargs);
-	extension = get_extension_name_by_object(ProcedureRelationId, func_oid);
+	initStringInfo(&buf);
 	fname = get_func_name(func_oid);
 	if (!fname)
 		elog(ERROR, "cache lookup failed on procedure '%u'", func_oid);
 	fnamespace = get_func_namespace(func_oid);
-	dtype_args = alloca(sizeof(devtype_info *) * func_nargs);
-	for (i=0; i < func_nargs; i++)
-	{
-		dtype = pgstrom_devtype_lookup(func_argtypes[i]);
-		if (!dtype)
-			goto bailout;
-		dtype_args[i] = dtype;
-		if (i > 0)
-			appendStringInfoString(&fargs, "/");
-		appendStringInfoString(&fargs, dtype->type_name);
-	}
-	
+	/* we expect built-in functions are in pg_catalog namespace */
+	fextension = get_extension_name_by_object(ProcedureRelationId, func_oid);
+	if (!fextension && fnamespace != PG_CATALOG_NAMESPACE)
+		goto bailout;
+
 	for (i=0; devfunc_catalog[i].func_name != NULL; i++)
 	{
-		const char *func_extension = devfunc_catalog[i].func_extension;
+		const char *__extension = devfunc_catalog[i].func_extension;
+		const char *__name = devfunc_catalog[i].func_name;
+		char	   *tok, *saveptr;
 
-		if ((extension
-			 ? (func_extension && strcmp(extension, func_extension) == 0)
-			 : (!func_extension && fnamespace == PG_CATALOG_NAMESPACE)) &&
-			strcmp(fname, devfunc_catalog[i].func_name) == 0 &&
-			strcmp(fargs.data, devfunc_catalog[i].func_args) == 0)
+		if (fextension != NULL
+			? (__extension == NULL || strcmp(fextension, __extension) != 0)
+			: (__extension != NULL))
+			continue;
+		if (strcmp(fname, __name) != 0)
+			continue;
+
+		resetStringInfo(&buf);
+		appendStringInfoString(&buf, devfunc_catalog[i].func_args);
+		for (tok = strtok_r(buf.data, "/", &saveptr), j=0;
+			 tok != NULL && j < func_nargs;
+			 tok = strtok_r(NULL, "/", &saveptr), j++)
+		{
+			dtype = pgstrom_devtype_lookup(func_argtypes[j]);
+			if (!dtype)
+				goto bailout;
+
+			tok = __trim(tok);
+			sz = strlen(tok);
+			if (sz > 4 &&
+				tok[0] == '_' && tok[1] == '_' &&
+				tok[sz-1] == '_' && tok[sz-2] == '_')
+			{
+				/* __TYPE__ means variable length argument! */
+				tok[sz-1] = '\0';
+				if (strcmp(tok+2, dtype->type_name) != 0)
+					break;
+				/* must be the last argument set */
+				tok = strtok_r(NULL, "/", &saveptr);
+				if (tok)
+					break;
+				/* check whether the following arguments are identical */
+				while (j < func_nargs)
+				{
+					if (dtype->type_oid != func_argtypes[j])
+						break;
+					j++;
+				}
+			}
+			else
+			{
+				if (strcmp(tok, dtype->type_name) != 0)
+					break;
+			}
+		}
+
+		/* Ok, found an entry */
+		if (!tok && j == func_nargs)
 		{
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dfunc = palloc0(offsetof(devfunc_info,
 									 func_argtypes[func_nargs]));
-			if (extension)
-				dfunc->func_extension = pstrdup(extension);
+			if (fextension)
+				dfunc->func_extension = pstrdup(fextension);
 			dfunc->func_name = pstrdup(fname);
 			dfunc->func_oid = func_oid;
 			dfunc->func_flags = devfunc_catalog[i].func_flags;
 			dfunc->func_nargs = func_nargs;
-			memcpy(dfunc->func_argtypes, dtype_args,
-				   sizeof(devtype_info *) * func_nargs);
+			for (j=0; j < func_nargs; j++)
+			{
+				dtype = pgstrom_devtype_lookup(func_argtypes[j]);
+				Assert(dtype != NULL);
+				dfunc->func_argtypes[j] = dtype;
+			}
 			MemoryContextSwitchTo(oldcxt);
 			break;
 		}
 	}
 bailout:
-	pfree(fargs.data);
+	pfree(buf.data);
 	return dfunc;
 }
-
 
 typedef struct {
 	Oid		func_oid;
