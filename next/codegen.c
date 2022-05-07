@@ -22,20 +22,23 @@ static dlist_head		devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
 	static uint32_t devtype_##NAME##_hash(bool isnull, Datum value);
 #include "xpu_opcodes.h"
 
-#define TYPE_OPCODE(NAME,OID,EXTENSION)				\
-	{EXTENSION, #NAME, DEVKERN__ANY, devtype_##NAME##_hash, NULL },
+#define TYPE_OPCODE(NAME,OID,EXTENSION)		\
+	{ EXTENSION, #NAME,						\
+	  TypeOpCode__##NAME, DEVKERN__ANY,		\
+	  devtype_##NAME##_hash, InvalidOid},
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
+	TypeOpCode		type_code;
 	uint32_t		type_flags;
 	devtype_hashfunc_f type_hashfunc;
-	const char	   *type_alias;
+	Oid				type_alias;
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, "varchar", DEVKERN__ANY, NULL, "text"},
-	{NULL, "cidr", DEVKERN__ANY, NULL, "inet"},
-	{NULL, NULL, 0, NULL, NULL}
+	{NULL, "varchar", TypeOpCode__text, DEVKERN__ANY, devtype_text_hash, TEXTOID},
+	{NULL, "cidr",    TypeOpCode__inet, DEVKERN__ANY, devtype_inet_hash, INETOID},
+	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, InvalidOid}
 };
 
 static const char *
@@ -49,66 +52,12 @@ get_extension_name_by_object(Oid class_id, Oid object_id)
 }
 
 static devtype_info *
-pgstrom_devtype_lookup_by_name(const char *__type_name)
-{
-	char   *type_name = alloca(strlen(__type_name) + 1);
-	char   *type_extension = NULL;
-	Oid		type_oid = InvalidOid;
-
-	strcpy(type_name, __type_name);
-	type_extension = strchr(type_name, '@');
-	if (type_extension)
-	{
-		Relation	rel;
-		SysScanDesc	sdesc;
-		ScanKeyData	skey;
-		HeapTuple	tup;
-
-		*type_extension++ = '\0';
-		rel = table_open(TypeRelationId, AccessShareLock);
-		ScanKeyInit(&skey,
-					Anum_pg_type_typname,
-					BTEqualStrategyNumber, F_NAMEEQ,
-					CStringGetDatum(type_name));
-		sdesc = systable_beginscan(rel, TypeNameNspIndexId,
-								   true, NULL, 1, &skey);
-		while (HeapTupleIsValid(tup = systable_getnext(sdesc)))
-		{
-			Datum	datum;
-			bool	isnull;
-			const char *extname;
-
-			datum = heap_getattr(tup, Anum_pg_type_oid,
-								 RelationGetDescr(rel),
-								 &isnull);
-			extname = get_extension_name_by_object(TypeRelationId,
-												   DatumGetObjectId(datum));
-			if (extname && strcmp(extname, type_extension) == 0)
-			{
-				type_oid = DatumGetObjectId(datum);
-				break;
-			}
-		}
-	}
-	else
-	{
-		type_oid = GetSysCacheOid2(TYPENAMENSP,
-								   Anum_pg_type_oid,
-								   PointerGetDatum(type_name),
-								   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	}
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "catalog lookup failed for type '%s'", type_name);
-	return pgstrom_devtype_lookup(type_oid);
-}
-
-static devtype_info *
 build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
 	devtype_info   *dtype = NULL;
 	HeapTuple		htup;
 	Form_pg_type	__type;
-	const char	   *type_name;
+	char			type_name[NAMEDATALEN+1];
 	Oid				type_namespace;
 	int				i;
 
@@ -116,25 +65,56 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for type %u", tcache->type_id);
     __type = (Form_pg_type) GETSTRUCT(htup);
-    type_name = NameStr(__type->typname);
+	strcpy(type_name, NameStr(__type->typname));
 	type_namespace = __type->typnamespace;
-	
+	ReleaseSysCache(htup);
+	/* built-in types must be in pg_catalog */
+	if (!ext_name && type_namespace != PG_CATALOG_NAMESPACE)
+		return NULL;
 	for (i=0; devtype_catalog[i].type_name != NULL; i++)
 	{
-		const char	   *__ext_name = devtype_catalog[i].type_extension;
-		const char	   *__type_name = devtype_catalog[i].type_name;
-		const char	   *__type_alias = devtype_catalog[i].type_alias;
-		MemoryContext	oldcxt;
+		const char *__ext_name = devtype_catalog[i].type_extension;
+		const char *__type_name = devtype_catalog[i].type_name;
 
-		if (ext_name
-			? (__ext_name && strcmp(ext_name, __ext_name) == 0)
-			: (!__ext_name && type_namespace == PG_CATALOG_NAMESPACE) &&
+		if ((ext_name
+			 ? (__ext_name && strcmp(ext_name, __ext_name) == 0)
+			 : (__ext_name == NULL)) &&
 			strcmp(type_name, __type_name) == 0)
 		{
+			MemoryContext oldcxt;
+			Oid		__type_alias = devtype_catalog[i].type_alias;
+
+			/* check feasibility of type alias */
+			if (OidIsValid(__type_alias))
+			{
+				char		castmethod;
+
+				htup = SearchSysCache2(CASTSOURCETARGET,
+									   ObjectIdGetDatum(tcache->type_id),
+									   ObjectIdGetDatum(__type_alias));
+				if (!HeapTupleIsValid(htup))
+					elog(ERROR, "binary type cast %s to %s is not defined",
+						 format_type_be(tcache->type_id),
+						 format_type_be(__type_alias));
+				castmethod = ((Form_pg_cast)GETSTRUCT(htup))->castmethod;
+				if (castmethod != COERCION_METHOD_BINARY)
+					elog(ERROR, "type cast %s to %s is not binary compatible (%c)",
+						 format_type_be(tcache->type_id),
+						 format_type_be(__type_alias), castmethod);
+				ReleaseSysCache(htup);
+				/* use type name of the alias */
+				htup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(__type_alias));
+				if (!HeapTupleIsValid(htup))
+					elog(ERROR, "cache lookup failed for type %u", __type_alias);
+				__type = (Form_pg_type) GETSTRUCT(htup);
+				strcpy(type_name, NameStr(__type->typname));
+				ReleaseSysCache(htup);
+			}
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dtype = palloc0(offsetof(devtype_info, comp_subtypes[0]));
 			if (ext_name)
 				dtype->type_extension = pstrdup(ext_name);
+			dtype->type_code = devtype_catalog[i].type_code;
 			dtype->type_oid = tcache->type_id;
 			dtype->type_flags = devtype_catalog[i].type_flags;
 			dtype->type_length = tcache->typlen;
@@ -146,19 +126,11 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 			dtype->type_cmpfunc = tcache->cmp_proc;
 			MemoryContextSwitchTo(oldcxt);
-			/* type alias, if any */
-			if (__type_alias)
-			{
-				dtype->type_alias = pgstrom_devtype_lookup_by_name(__type_alias);
-				if (!dtype->type_alias)
-					dtype->type_is_negative = true;
-			}
-			break;
+
+			return dtype;
 		}
 	}
-	ReleaseSysCache(htup);
-
-	return dtype;
+	return NULL;		/* not found */
 }
 
 static devtype_info *
@@ -259,20 +231,33 @@ pgstrom_devtype_lookup(Oid type_oid)
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
-	if (OidIsValid(tcache->typrelid))
-	{
-		/* composite type */
-		dtype = build_composite_devtype_info(tcache, ext_name);
-	}
-	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	/* if domain, move to the base type */
+	while (tcache->nextDomain)
+		tcache = tcache->nextDomain;
+
+	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
 	{
 		/* array type */
 		dtype = build_array_devtype_info(tcache, ext_name);
 	}
+	else if (tcache->typtype == TYPTYPE_COMPOSITE)
+	{
+		/* composite type */
+		if (!OidIsValid(tcache->typrelid))
+			elog(ERROR, "Bug? wrong composite definition at %s",
+				 format_type_be(type_oid));
+		dtype = build_composite_devtype_info(tcache, ext_name);
+	}
+	else if (tcache->typtype == TYPTYPE_BASE ||
+			 tcache->typtype == TYPTYPE_RANGE)
+	{
+		/* base or range type */
+		dtype = build_basic_devtype_info(tcache, ext_name);
+	}
 	else
 	{
-		/* base type */
-		dtype = build_basic_devtype_info(tcache, ext_name);
+		/* not a supported type */
+		dtype = NULL;
 	}
 
 	/* make a negative entry, if not device executable */
@@ -280,9 +265,9 @@ pgstrom_devtype_lookup(Oid type_oid)
 	{
 		dtype = MemoryContextAllocZero(devinfo_memcxt,
 									   sizeof(devtype_info));
-		dtype->type_oid = type_oid;
 		dtype->type_is_negative = true;
 	}
+	dtype->type_oid = type_oid;
 	dtype->hash = hash;
 	dlist_push_head(&devtype_info_slot[index], &dtype->chain);
 found:
