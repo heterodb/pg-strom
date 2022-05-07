@@ -1081,7 +1081,7 @@ struct sql_datum_operators {
 	int			sql_type_sizeof;	/* =sizeof(sql_XXXX_t), not PG type! */
 	bool	  (*sql_datum_ref)(kern_context *kcxt,
 							   sql_datum_t *result,
-							   void *addr);
+							   const void *addr);
 	bool	  (*arrow_datum_ref)(kern_context *kcxt,
 								 sql_datum_t *result,
 								 kern_data_store *kds,
@@ -1211,57 +1211,33 @@ struct kern_expression
 	int				nargs;
 	TypeOpCode		rettype;
 	const sql_datum_operators *rettype_ops;	/* to be set by xPU service */
-	char			data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
+	union {
+		char		data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
+		struct {
+			bool	const_isnull;
+			char	const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
+		} c;
+		struct {
+			uint32_t param_id;
+		} p;
+		struct {
+			int16_t	var_depth;
+			int16_t	var_resno;
+		} v;
+	} u;
 };
 #define EXEC_KERN_EXPRESSION(__kcxt,__expr,__retval)	\
 	(__expr)->fn_dptr((__kcxt),(__expr),(sql_datum_t *)__retval)
 #define EXPR_OVERRUN_CHECKS(__arg)				\
 	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)expr + VARSIZE(expr))
-
-typedef struct
-{
-	uint32_t		_vl_len;
-	FuncOpCode		opcode;
-	sql_function_t	fn_dptr;		/* to be set by xPU service */
-	int				nargs;			/* = 0 */
-	TypeOpCode		rettype;
-	const sql_datum_operators *rettype_ops;	/* to be set by xPU service */
-	/* common field */
-	bool			const_isnull;
-	char			const_datum[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
-} kern_const_expression;
-
-typedef struct
-{
-	uint32_t		_vl_len;
-	FuncOpCode		opcode;
-	sql_function_t	fn_dptr;		/* to be set by xPU service */
-	int				nargs;			/* = 0 */
-	TypeOpCode		rettype;
-	const sql_datum_operators *rettype_ops;	/* to be set by xPU service */
-	/* common field */
-	uint32_t		param_id;
-} kern_param_expression;
-
-typedef struct
-{
-	uint32_t		_vl_len;
-	FuncOpCode		opcode;
-	sql_function_t	fn_dptr;		/* to be set by xPU service */
-	int				nargs;			/* = 0 */
-	TypeOpCode		rettype;
-	const sql_datum_operators *rettype_ops;	/* to be set by xPU service */
-	/* common field */
-	int16_t			var_depth;
-	int16_t			var_attno;
-} kern_var_expression;
-
-
-
-
-
-
-
+#define SizeOfKernExpr(__PAYLOAD_SZ)		\
+	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
+#define SizeOfKernExprConst(__PAYLOAD_SZ)	\
+	(offsetof(kern_expression, u.c.const_value) + (__PAYLOAD_SZ))
+#define SizeOfKernExprParam					\
+	(offsetof(kern_expression, u.p.param_id) + sizeof(uint32_t))
+#define SizeOfKernExprVar					\
+	(offsetof(kern_expression, u.v.var_resno) + sizeof(uint16_t))
 typedef struct {
 	FuncOpCode		func_opcode;
 	sql_function_t	func_dptr;

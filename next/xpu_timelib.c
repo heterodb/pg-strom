@@ -50,7 +50,7 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(timestamptz, TimestampTz);
 STATIC_FUNCTION(bool)
 sql_interval_datum_ref(kern_context *kcxt,
 					   sql_datum_t *__result,
-					   void *addr)
+					   const void *addr)
 {
 	sql_interval_t *result = (sql_interval_t *)__result;
 

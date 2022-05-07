@@ -33,7 +33,7 @@ bpchar_truelen(const char *s, int len)
 STATIC_FUNCTION(bool)
 sql_bpchar_datum_ref(kern_context *kcxt,
 					 sql_datum_t *__result,
-					 void *addr)
+					 const void *addr)
 {
 	sql_bpchar_t *result = (sql_bpchar_t *)__result;
 	memset(result, 0, sizeof(sql_bpchar_t));

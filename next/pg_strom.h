@@ -38,6 +38,7 @@
 #include "libpq/pqformat.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
@@ -56,6 +57,7 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/rangetypes.h"
+#include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
@@ -143,9 +145,11 @@ typedef struct devfunc_info
 {
 	dlist_node	chain;
 	uint32_t	hash;
+	FuncOpCode	func_code;
 	const char *func_extension;
 	const char *func_name;
 	Oid			func_oid;
+	struct devtype_info *func_rettype;
 	uint32_t	func_flags;
 	bool		func_is_negative;
 	int			func_nargs;
@@ -207,6 +211,14 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
+extern Const   *pgstrom_codegen_expression(Expr *expr,
+										   List **p_used_params,
+										   List **p_used_vars,
+										   uint32_t *p_extra_flags,
+										   uint32_t *p_extra_bufsz,
+										   int num_rels,
+										   List **rel_tlist);
+extern bool		pgstrom_gpu_expression(Expr *expr);
 extern void		pgstrom_init_codegen(void);
 
 /*

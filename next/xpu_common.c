@@ -27,21 +27,21 @@ pgfn_ExecExpression(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
-	kern_const_expression *con = (kern_const_expression *)expr;
-	void	   *addr;
+	const void *addr;
 
-	addr = (con->const_isnull ? NULL : con->const_datum);
-	return con->rettype_ops->sql_datum_ref(kcxt, __result, addr);
+	if (expr->u.c.const_isnull)
+		addr = NULL;
+	else
+		addr = expr->u.c.const_value;
+	return expr->rettype_ops->sql_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
-	kern_param_expression *prm = (kern_param_expression *)expr;
-	void	   *addr;
+	void	   *addr = kparam_get_value(kcxt->kparams, expr->u.p.param_id);
 
-	addr = kparam_get_value(kcxt->kparams, prm->param_id);
-	return prm->rettype_ops->sql_datum_ref(kcxt, __result, addr);
+	return expr->rettype_ops->sql_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -64,7 +64,7 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 		const kern_expression *arg;
 		sql_bool_t	status;
 
-		arg = (const kern_expression *)(expr->data + off);
+		arg = (const kern_expression *)(expr->u.data + off);
 		EXPR_OVERRUN_CHECKS(arg);
 		if (arg->rettype != TypeOpCode__bool)
 		{
@@ -101,7 +101,7 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 		const kern_expression *arg;
 		sql_bool_t	status;
 
-		arg = (const kern_expression *)(expr->data + off);
+		arg = (const kern_expression *)(expr->u.data + off);
 		EXPR_OVERRUN_CHECKS(arg);
 		if (arg->rettype != TypeOpCode__bool)
 		{
@@ -129,7 +129,7 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 {
 	sql_bool_t *result = (sql_bool_t *)__result;
 	sql_bool_t	status;
-	const kern_expression *arg = (const kern_expression *)expr->data;
+	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
 	memset(result, 0, sizeof(sql_bool_t));
 	result->ops = &sql_bool_ops;
@@ -155,7 +155,7 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	sql_bool_t	   *result = (sql_bool_t *)__result;
 	sql_datum_t	   *status;
-	const kern_expression *arg = (const kern_expression *)expr->data;
+	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
 	assert(expr->nargs == 1);
 	EXPR_OVERRUN_CHECKS(arg);
@@ -184,7 +184,7 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	sql_bool_t	   *result = (sql_bool_t *)__result;
 	sql_bool_t		status;
-	const kern_expression *arg = (const kern_expression *)expr->data;
+	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
 	assert(expr->nargs == 1);
 	EXPR_OVERRUN_CHECKS(arg);

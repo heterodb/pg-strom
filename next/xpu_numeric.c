@@ -32,7 +32,7 @@ set_normalized_numeric(sql_numeric_t *result, int128_t value, int16_t weight)
 STATIC_FUNCTION(bool)
 sql_numeric_from_varlena(kern_context *kcxt,
 						 sql_numeric_t *result,
-						 varlena *addr)
+						 const varlena *addr)
 {
 	uint32_t		len;
 
@@ -144,9 +144,10 @@ sql_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 STATIC_FUNCTION(bool)
 sql_numeric_datum_ref(kern_context *kcxt,
 					  sql_datum_t *__result,
-					  void *addr)
+					  const void *addr)
 {
-	return sql_numeric_from_varlena(kcxt, (sql_numeric_t *)__result, (varlena *)addr);
+	return sql_numeric_from_varlena(kcxt, (sql_numeric_t *)__result,
+									(const varlena *)addr);
 }
 
 STATIC_FUNCTION(bool)

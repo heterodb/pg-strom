@@ -549,9 +549,11 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 	const char	   *fextension;
 	const char	   *fname;
 	Oid				fnamespace;
+	Oid				frettype;
 	StringInfoData	buf;
 	devfunc_info   *dfunc = NULL;
-	devtype_info   *dtype;
+	devtype_info   *dtype_rettype;
+	devtype_info  **dtype_argtypes;
 	MemoryContext	oldcxt;
 	int				i, j, sz;
 
@@ -560,6 +562,17 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 	if (!fname)
 		elog(ERROR, "cache lookup failed on procedure '%u'", func_oid);
 	fnamespace = get_func_namespace(func_oid);
+	frettype = get_func_rettype(func_oid);
+	dtype_rettype = pgstrom_devtype_lookup(frettype);
+	if (!dtype_rettype)
+		goto bailout;
+	dtype_argtypes = alloca(sizeof(devtype_info *) * func_nargs);
+	for (j=0; j < func_nargs; j++)
+	{
+		dtype_argtypes[j] = pgstrom_devtype_lookup(func_argtypes[j]);
+		if (!dtype_argtypes[j])
+			goto bailout;
+	}
 	/* we expect built-in functions are in pg_catalog namespace */
 	fextension = get_extension_name_by_object(ProcedureRelationId, func_oid);
 	if (!fextension && fnamespace != PG_CATALOG_NAMESPACE)
@@ -584,9 +597,7 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 			 tok != NULL && j < func_nargs;
 			 tok = strtok_r(NULL, "/", &saveptr), j++)
 		{
-			dtype = pgstrom_devtype_lookup(func_argtypes[j]);
-			if (!dtype)
-				goto bailout;
+			devtype_info *dtype = dtype_argtypes[j];
 
 			tok = __trim(tok);
 			sz = strlen(tok);
@@ -623,18 +634,16 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dfunc = palloc0(offsetof(devfunc_info,
 									 func_argtypes[func_nargs]));
+			dfunc->func_code = devfunc_catalog[i].func_opcode;
 			if (fextension)
 				dfunc->func_extension = pstrdup(fextension);
 			dfunc->func_name = pstrdup(fname);
 			dfunc->func_oid = func_oid;
+			dfunc->func_rettype = dtype_rettype;
 			dfunc->func_flags = devfunc_catalog[i].func_flags;
 			dfunc->func_nargs = func_nargs;
-			for (j=0; j < func_nargs; j++)
-			{
-				dtype = pgstrom_devtype_lookup(func_argtypes[j]);
-				Assert(dtype != NULL);
-				dfunc->func_argtypes[j] = dtype;
-			}
+			memcpy(dfunc->func_argtypes, dtype_argtypes,
+				   sizeof(devtype_info *) * func_nargs);
 			MemoryContextSwitchTo(oldcxt);
 			break;
 		}
@@ -743,6 +752,509 @@ pgstrom_devfunc_lookup(Oid func_oid,
 		argtypes[i++] = exprType(node);
 	}
 	return __pgstrom_devfunc_lookup(func_oid, nargs, argtypes, func_collid);
+}
+
+/* ----------------------------------------------------------------
+ *
+ * xPU pseudo code generator
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	StringInfo	buf;
+	List	   *used_params;
+	List	   *used_vars;
+	uint32_t	extra_flags;
+	uint32_t	extra_bufsz;
+	int			num_rels;
+	List	   *rel_tlist[1];
+} codegen_context;
+
+#define __Elog(fmt,...)							\
+	do {										\
+		errmsg("%s:%d" fmt,						\
+			   basename(__FILE__), __LINE__,	\
+			   ##__VA_ARGS__);					\
+		return -1;								\
+	} while(0)
+
+static int	codegen_expression_walker(codegen_context *context, Expr *expr);
+
+static void
+__enlargeStringInfoAligned(StringInfo buf, int needed)
+{
+	static uint64_t __zero = 0;
+
+	if (MAXALIGN(buf->len) != buf->len)
+		appendBinaryStringInfo(buf, (char *)&__zero,
+							   MAXALIGN(buf->len) - buf->len);
+	Assert(MAXALIGN(buf->len) == buf->len);
+	enlargeStringInfo(buf, needed);
+}
+
+static int
+codegen_const_expression(codegen_context *context, Const *con)
+{
+	StringInfo		buf = context->buf;
+	devtype_info   *dtype;
+	int				width;
+
+	dtype = pgstrom_devtype_lookup(con->consttype);
+	if (!dtype)
+		__Elog("type %s is not device supported",
+			   format_type_be(con->consttype));
+	if (con->constisnull)
+		width = 0;
+	else if (con->constlen > 0)
+		width = con->constlen;
+	else if (con->constlen == -1)
+		width = VARSIZE_ANY(con->constvalue);
+	else
+		__Elog("unexpected type length: %d", con->constlen);
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExprConst(width);
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp = (kern_expression *)(buf->data + buf->len);
+		memset(kexp, 0, SizeOfKernExprConst(0));
+		kexp->opcode = FuncOpCode__ConstExpr;
+		kexp->nargs = 0;
+		kexp->rettype = dtype->type_code;
+		kexp->u.c.const_isnull = con->constisnull;
+		if (con->constbyval)
+			memcpy(kexp->u.c.const_value,
+				   &con->constvalue, width);
+		else
+			memcpy(kexp->u.c.const_value,
+				   DatumGetPointer(con->constvalue), width);
+		SET_VARSIZE(kexp, needed);
+
+		buf->len += needed;
+	}
+	return width;
+}
+
+static int
+codegen_param_expression(codegen_context *context, Param *param)
+{
+	StringInfo		buf = context->buf;
+	devtype_info   *dtype;
+	int				width;
+
+	if (param->paramkind != PARAM_EXTERN)
+		__Elog("Only PARAM_EXTERN is supported on device: %d",
+			   (int)param->paramkind);
+	dtype = pgstrom_devtype_lookup(param->paramtype);
+	if (!dtype)
+		__Elog("type %s is not device supported",
+			   format_type_be(param->paramtype));
+	if (dtype->type_length > 0)
+		width = dtype->type_length;
+	else if (dtype->type_length == -1)
+		width = type_maximum_size(param->paramtype,
+								  param->paramtypmod);
+	else
+		__Elog("unexpected type length: %d", dtype->type_length);
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExprParam;
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp = (kern_expression *)(buf->data + buf->len);
+		memset(kexp, 0, SizeOfKernExprParam);
+		kexp->opcode = FuncOpCode__ParamExpr;
+        kexp->nargs = 0;
+		kexp->rettype = dtype->type_code;
+		kexp->u.p.param_id = param->paramid;
+		SET_VARSIZE(kexp, needed);
+
+		buf->len += needed;
+	}
+	context->used_params = list_append_unique_int(context->used_params,
+												  param->paramid);
+	return width;
+}
+
+static int
+codegen_var_expression(codegen_context *context, Var *var)
+{
+	StringInfo		buf = context->buf;
+	devtype_info   *dtype;
+	int				width;
+
+	dtype = pgstrom_devtype_lookup(var->vartype);
+	if (!dtype)
+		__Elog("type %s is not device supported",
+			   format_type_be(var->vartype));
+	if (dtype->type_length > 0)
+		width = dtype->type_length;
+	else if (dtype->type_length == -1)
+		width = type_maximum_size(var->vartype,
+								  var->vartypmod);
+	else
+		__Elog("unexpected type length: %d", dtype->type_length);
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExprVar;
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp = (kern_expression *)(buf->data + buf->len);
+		memset(kexp, 0, offsetof(kern_expression, u.v));
+		kexp->opcode = FuncOpCode__VarExpr;
+		kexp->nargs = 0;
+		kexp->rettype = dtype->type_code;
+		if (context->num_rels == 0)
+		{
+			kexp->u.v.var_depth = 0;
+			kexp->u.v.var_resno = var->varattno;
+		}
+		else
+		{
+			ListCell *lc = NULL;
+			int		depth = -1;
+			int		resno = -1;
+
+			for (depth=0; depth < context->num_rels; depth++)
+			{
+				List   *tlist = context->rel_tlist[depth];
+
+				resno = 1;
+				foreach (lc, tlist)
+				{
+					Var	   *curr = lfirst(lc);
+
+					if (IsA(curr, Var) &&
+						var->varno == curr->varno &&
+						var->varattno == curr->varattno)
+					{
+						Assert(var->vartype == curr->vartype &&
+							   var->vartypmod == curr->vartypmod &&
+							   var->varcollid == curr->varcollid);
+						goto found;
+					}
+					resno++;
+				}
+			}
+			__Elog("var-node was not found at the targe-list: %s",
+				   nodeToString(var));
+		found:
+			kexp->u.v.var_depth = depth;
+			kexp->u.v.var_resno = resno;
+		}
+		SET_VARSIZE(kexp, needed);
+	}
+	context->used_vars = list_append_unique(context->used_vars, var);
+
+	return width;
+}
+
+static int
+__codegen_func_expression(codegen_context *context,
+						  Oid func_oid, List *func_args, Oid func_collid)
+{
+	StringInfo		buf = context->buf;
+	int				kexp_off = -1;
+	devfunc_info   *dfunc;
+	devtype_info   *dtype;
+	ListCell	   *lc;
+	int				width;
+
+	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
+	if (!dfunc)
+		__Elog("function %s is not supported",
+			   format_procedure(func_oid));
+	dtype = dfunc->func_rettype;
+	if (dtype->type_length > 0)
+		width = dtype->type_length;
+	else if (dtype->type_length == -1)
+		width = type_maximum_size(dtype->type_oid, -1);
+	else
+		__Elog("unexpected type length: %d", dtype->type_length);
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExpr(0);
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp_off = buf->len;
+		kexp = (kern_expression *)(buf->data + buf->len);
+		memset(kexp, 0, needed);
+		kexp->opcode = dfunc->func_code;
+		kexp->nargs = list_length(func_args);
+		kexp->rettype = dtype->type_code;
+		buf->len += needed;
+	}
+	foreach (lc, func_args)
+	{
+		if (codegen_expression_walker(context, (Expr *)lfirst(lc)) < 0)
+			return -1;
+	}
+	if (buf)
+		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
+	return width;
+}
+
+static int
+codegen_func_expression(codegen_context *context, FuncExpr *func)
+{
+	return __codegen_func_expression(context,
+									 func->funcid,
+									 func->args,
+									 func->funccollid);
+}
+
+static int
+codegen_oper_expression(codegen_context *context, OpExpr *oper)
+{
+	return __codegen_func_expression(context,
+									 get_opcode(oper->opno),
+									 oper->args,
+									 oper->opcollid);
+}
+
+static int
+codegen_bool_expression(codegen_context *context, BoolExpr *b)
+{
+	StringInfo		buf = context->buf;
+	int				kexp_off = -1;
+	ListCell	   *lc;
+	FuncOpCode		opcode;
+
+	switch (b->boolop)
+	{
+		case AND_EXPR:
+			if (list_length(b->args) < 2)
+				__Elog("BoolExpr(AND) must have 2 or more arguments");
+			opcode = FuncOpCode__BoolExpr_And;
+			break;
+		case OR_EXPR:
+			if (list_length(b->args) < 2)
+				__Elog("BoolExpr(OR) must have 2 or more arguments");
+			opcode = FuncOpCode__BoolExpr_Or;
+			break;
+		case NOT_EXPR:
+			if (list_length(b->args) != 1)
+				__Elog("BoolExpr(OR) must not have multiple arguments");
+			opcode = FuncOpCode__BoolExpr_Not;
+			break;
+		default:
+			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
+	}
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExpr(0);
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp_off = buf->len;
+		kexp = (kern_expression *)(buf->data + kexp_off);
+		memset(kexp, 0, needed);
+		kexp->opcode = opcode;
+		kexp->nargs = list_length(b->args);
+		kexp->rettype = TypeOpCode__bool;
+		buf->len += needed;
+	}
+	foreach (lc, b->args)
+	{
+		if (codegen_expression_walker(context, (Expr *)lfirst(lc)) < 0)
+			return -1;
+	}
+	if (buf)
+		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
+	return sizeof(bool);
+}
+
+static int
+codegen_nulltest_expression(codegen_context *context, NullTest *nt)
+{
+	StringInfo		buf = context->buf;
+	int				kexp_off = -1;
+	FuncOpCode		opcode;
+
+	switch (nt->nulltesttype)
+	{
+		case IS_NULL:
+			opcode = FuncOpCode__NullTestExpr_IsNull;
+			break;
+		case IS_NOT_NULL:
+			opcode = FuncOpCode__NullTestExpr_IsNotNull;
+			break;
+		default:
+			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
+	}
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExpr(0);
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp_off = buf->len;
+		kexp = (kern_expression *)(buf->data + kexp_off);
+		memset(kexp, 0, needed);
+		kexp->opcode = opcode;
+		kexp->nargs = 1;
+		kexp->rettype = TypeOpCode__bool;
+		buf->len += needed;
+	}
+	if (codegen_expression_walker(context, nt->arg) < 0)
+		return -1;
+	if (buf)
+		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
+	return sizeof(bool);
+}
+
+static int
+codegen_booleantest_expression(codegen_context *context, BooleanTest *bt)
+{
+	StringInfo		buf = context->buf;
+	int				kexp_off = -1;
+	FuncOpCode		opcode;
+
+	switch (bt->booltesttype)
+	{
+		case IS_TRUE:
+			opcode = FuncOpCode__BoolTestExpr_IsTrue;
+			break;
+		case IS_NOT_TRUE:
+			opcode = FuncOpCode__BoolTestExpr_IsNotTrue;
+			break;
+		case IS_FALSE:
+			opcode = FuncOpCode__BoolTestExpr_IsFalse;
+			break;
+		case IS_NOT_FALSE:
+			opcode = FuncOpCode__BoolTestExpr_IsNotFalse;
+			break;
+		case IS_UNKNOWN:
+			opcode = FuncOpCode__BoolTestExpr_IsUnknown;
+			break;
+		case IS_NOT_UNKNOWN:
+			opcode = FuncOpCode__BoolTestExpr_IsNotUnknown;
+			break;
+		default:
+			__Elog("BooleanTest has unknown BoolTestType (%d)",
+				   (int)bt->booltesttype);
+	}
+
+	if (buf)
+	{
+		kern_expression *kexp;
+		int			needed = SizeOfKernExpr(0);
+
+		__enlargeStringInfoAligned(buf, needed);
+		kexp_off = buf->len;
+		kexp = (kern_expression *)(buf->data + kexp_off);
+		memset(kexp, 0, needed);
+		kexp->opcode = opcode;
+		kexp->nargs = 1;
+		kexp->rettype = TypeOpCode__bool;
+		buf->len += needed;
+	}
+	if (codegen_expression_walker(context, bt->arg) < 0)
+		return -1;
+	if (buf)
+		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
+	return sizeof(bool);
+}
+
+static int
+codegen_expression_walker(codegen_context *context, Expr *expr)
+{
+	if (!expr)
+		return 0;
+	switch (nodeTag(expr))
+	{
+		case T_Const:
+			return codegen_const_expression(context, (Const *)expr);
+		case T_Param:
+			return codegen_param_expression(context, (Param *)expr);
+		case T_Var:
+			return codegen_var_expression(context, (Var *)expr);
+		case T_FuncExpr:
+			return codegen_func_expression(context, (FuncExpr *)expr);
+		case T_OpExpr:
+		case T_DistinctExpr:
+			return codegen_oper_expression(context, (OpExpr *)expr);
+		case T_BoolExpr:
+			return codegen_bool_expression(context, (BoolExpr *)expr);
+		case T_NullTest:
+			return codegen_nulltest_expression(context, (NullTest *)expr);
+		case T_BooleanTest:
+			return codegen_booleantest_expression(context, (BooleanTest *)expr);
+		case T_CoalesceExpr:
+		case T_MinMaxExpr:
+		case T_RelabelType:
+		case T_CoerceViaIO:
+		case T_CoerceToDomain:
+		case T_CaseExpr:
+		case T_CaseTestExpr:
+		case T_ScalarArrayOpExpr:
+		default:
+			__Elog("not a supported expression type: %d", (int)nodeTag(expr));
+	}
+	return -1;
+}
+#undef __Elog
+
+Const *
+pgstrom_codegen_expression(Expr *expr,
+						   List **p_used_params,
+						   List **p_used_vars,
+						   uint32_t *p_extra_flags,
+						   uint32_t *p_extra_bufsz,
+						   int num_rels,
+						   List **rel_tlist)
+{
+	codegen_context	   *context;
+	StringInfoData		buf;
+
+	context = alloca(offsetof(codegen_context, rel_tlist[num_rels]));
+	memset(context, 0, offsetof(codegen_context, rel_tlist));
+
+	initStringInfo(&buf);
+	context->buf = &buf;
+	if (num_rels > 0)
+		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
+	context->num_rels = num_rels;
+
+	if (IsA(expr, List) && list_length((List *)expr) > 1)
+		expr = make_andclause((List *)expr);
+	if (codegen_expression_walker(context, expr) < 0)
+	{
+		/* errmsg and errdetail shall be already set */
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errdetail("problematic expression: %s", nodeToString(expr))));
+		return NULL;
+	}
+	if (p_used_params)
+		*p_used_params = list_concat_unique_int(*p_used_params,
+												context->used_params);
+	if (p_used_vars)
+		*p_used_vars = list_concat_unique(*p_used_vars,
+										  context->used_vars);
+	if (p_extra_flags)
+		*p_extra_flags |= context->extra_flags;
+	if (p_extra_bufsz)
+		*p_extra_bufsz += context->extra_bufsz;
+
+	return makeConst(BYTEAOID,
+					 -1,
+					 InvalidOid,
+					 -1,
+					 PointerGetDatum(buf.data),
+					 false,
+					 false);
 }
 
 static void

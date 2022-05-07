@@ -16,7 +16,7 @@
 	STATIC_FUNCTION(bool)												\
 	sql_##NAME##_datum_ref(kern_context *kcxt,							\
 						   sql_datum_t *__result,						\
-						   void *addr)									\
+						   const void *addr)							\
 	{																	\
 		sql_##NAME##_t *result = (sql_##NAME##_t *)__result;			\
 																		\

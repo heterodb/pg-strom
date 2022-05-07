@@ -23,7 +23,7 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(money, Cash);
 STATIC_FUNCTION(bool)
 sql_uuid_datum_ref(kern_context *kcxt,
 				   sql_datum_t *__result,
-				   void *addr)
+				   const void *addr)
 {
 	sql_uuid_t *result = (sql_uuid_t *)__result;
 
@@ -96,7 +96,7 @@ PGSTROM_SQLTYPE_OPERATORS(uuid);
 STATIC_FUNCTION(bool)
 sql_macaddr_datum_ref(kern_context *kcxt,
 					  sql_datum_t *__result,
-					  void *addr)
+					  const void *addr)
 {
 	sql_macaddr_t *result = (sql_macaddr_t *)__result;
 
@@ -169,7 +169,7 @@ PGSTROM_SQLTYPE_OPERATORS(macaddr);
 PUBLIC_FUNCTION(bool)
 sql_inet_datum_ref(kern_context *kcxt,
 				   sql_datum_t *__result,
-				   void *addr)
+				   const void *addr)
 {
 	sql_inet_t *result = (sql_inet_t *)__result;
 
