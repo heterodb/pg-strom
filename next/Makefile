@@ -17,7 +17,7 @@ PGSTROM_RELEASE := devel
 # Source of PG-Strom host code
 #
 __STROM_OBJS = main.o shmbuf.o extra.o codegen.o misc.o \
-               gpu_device.o \
+               gpu_device.o gpu_service.o \
                $(__XPU_COMMON_OBJS) \
                float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
@@ -80,10 +80,12 @@ ifeq ($(shell uname -m),aarch64)
 PGSTROM_FLAGS += -DHAVE_FLOAT2 -mfp16-format=ieee
 endif
 PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)$(PGSTROM_GITHASH_SUFFIX)\"
+PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+PGSTROM_FLAGS += -DCUDA_BUILTIN_OBJS="\"$(__CUDA_OBJS)\""
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-SHLIB_LINK := -L $(CUDA_LIB_PATH) -lcuda
+SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
 #
 # Definition of PG-Strom Extension
@@ -92,7 +94,7 @@ MODULE_big = pg_strom
 MODULEDIR  = pg_strom
 DATA = $(STROM_SQL)
 OBJS = $(STROM_OBJS)
-DATA_built = $(CUDA_OPT_MODULE) $(CUDA_DBG_MODULE)
+DATA_built = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
 EXTRA_CLEAN = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
 EXTENSION = pg_strom
 
@@ -106,7 +108,3 @@ include $(PGXS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
 %.debug.fatbin: %.cu $(GPU_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<
-$(CUDA_OPT_MODULE): $(CUDA_HEADERS) $(CUDA_OPT_OBJS)
-	$(NVCC) -o $@ $(NVCC_FLAGS) --device-link --fatbin $(CUDA_OPT_OBJS)
-$(CUDA_DBG_MODULE): $(CUDA_HEADERS) $(CUDA_DBG_OBJS)
-	$(NVCC) -o $@ $(NVCC_FLAGS) --device-link --fatbin $(CUDA_DBG_OBJS)

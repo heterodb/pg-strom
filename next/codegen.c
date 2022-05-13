@@ -15,8 +15,10 @@
 #define DEVTYPE_INFO_NSLOTS		128
 #define DEVFUNC_INFO_NSLOTS		1024
 static MemoryContext	devinfo_memcxt = NULL;
-static dlist_head		devtype_info_slot[DEVTYPE_INFO_NSLOTS];
-static dlist_head		devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
+static List	   *devtype_info_slot[DEVTYPE_INFO_NSLOTS];
+static List	   *devtype_code_slot[DEVTYPE_INFO_NSLOTS];	/* by TypeOpCode */
+static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
+static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
 #define TYPE_OPCODE(NAME,OID,EXTENSION)			\
 	static uint32_t devtype_##NAME##_hash(bool isnull, Datum value);
@@ -158,12 +160,13 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 							 comp_subtypes[tupdesc->natts]));
 	if (ext_name)
 		dtype->type_extension = pstrdup(ext_name);
+	dtype->type_code = TypeOpCode__composite;
 	dtype->type_oid = tcache->type_id;
-    dtype->type_flags = extra_flags;
+	dtype->type_flags = extra_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
-    dtype->type_name = get_type_name(tcache->type_id, false);
+	dtype->type_name = "composite";
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->comp_nfields = tupdesc->natts;
 	memcpy(dtype->comp_subtypes, subtypes,
@@ -188,12 +191,13 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype = palloc0(offsetof(devtype_info, comp_subtypes[0]));
 	if (ext_name)
 		dtype->type_extension = pstrdup(ext_name);
+	dtype->type_code = TypeOpCode__array;
 	dtype->type_oid = tcache->type_id;
 	dtype->type_flags = elem->type_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
-	dtype->type_name = psprintf("%s[]", elem->type_name);
+	dtype->type_name = "array";
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
 	/* type equality functions */
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
@@ -208,17 +212,17 @@ devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
 {
 	devtype_info   *dtype;
-	uint32_t		hash;
+	Datum			hash;
 	uint32_t		index;
-	dlist_iter		iter;
+	ListCell	   *lc;
 	const char	   *ext_name;
 	TypeCacheEntry *tcache;
 
-	hash = GetSysCacheHashValue(TYPEOID, ObjectIdGetDatum(type_oid), 0, 0, 0);
+	hash = hash_any((unsigned char *)&type_oid, sizeof(Oid));
 	index = hash % DEVTYPE_INFO_NSLOTS;
-	dlist_foreach (iter, &devtype_info_slot[index])
+	foreach (lc, devtype_info_slot[index])
 	{
-		dtype = dlist_container(devtype_info, chain, iter.cur);
+		dtype = lfirst(lc);
 
 		if (dtype->type_oid == type_oid)
 		{
@@ -269,11 +273,41 @@ pgstrom_devtype_lookup(Oid type_oid)
 	}
 	dtype->type_oid = type_oid;
 	dtype->hash = hash;
-	dlist_push_head(&devtype_info_slot[index], &dtype->chain);
+	devtype_info_slot[index] = lappend_cxt(devinfo_memcxt,
+										   devtype_info_slot[index], dtype);
+	if (!dtype->type_is_negative)
+	{
+		hash = hash_any((unsigned char *)&dtype->type_code, sizeof(TypeOpCode));
+		index = hash % DEVTYPE_INFO_NSLOTS;
+		devtype_code_slot[index] = lappend_cxt(devinfo_memcxt,
+											   devtype_code_slot[index], dtype);
+	}
 found:
 	if (dtype->type_is_negative)
 		return NULL;
 	return dtype;
+}
+
+/*
+ * devtype_lookup_by_opcode
+ */
+static devtype_info *
+devtype_lookup_by_opcode(TypeOpCode type_code)
+{
+	Datum		hash;
+	uint32_t	index;
+	ListCell   *lc;
+
+	hash = hash_any((unsigned char *)&type_code, sizeof(TypeOpCode));
+	index = hash % DEVTYPE_INFO_NSLOTS;
+	foreach (lc, devtype_code_slot[index])
+	{
+		devtype_info *dtype = lfirst(lc);
+
+		if (dtype->type_code == type_code)
+			return dtype;
+	}
+	return NULL;
 }
 
 /*
@@ -521,7 +555,7 @@ static struct {
 	const char	   *func_name;
 	const char	   *func_args;
 	uint32_t		func_flags;
-	FuncOpCode		func_opcode;
+	FuncOpCode		func_code;
 	const char	   *func_extension;
 } devfunc_catalog[] = {
 #include "xpu_opcodes.h"
@@ -619,7 +653,7 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dfunc = palloc0(offsetof(devfunc_info,
 									 func_argtypes[func_nargs]));
-			dfunc->func_code = devfunc_catalog[i].func_opcode;
+			dfunc->func_code = devfunc_catalog[i].func_code;
 			if (fextension)
 				dfunc->func_extension = pstrdup(fextension);
 			dfunc->func_name = pstrdup(fname);
@@ -653,7 +687,7 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 	devfunc_cache_signature *signature;
 	devtype_info   *dtype = NULL;
 	devfunc_info   *dfunc = NULL;
-	dlist_iter		iter;
+	ListCell	   *lc;
 	uint32_t		hash;
 	int				i, j, sz;
 
@@ -667,9 +701,9 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 	hash = hash_any((unsigned char *)signature, sz);
 
 	i = hash % DEVFUNC_INFO_NSLOTS;
-	dlist_foreach (iter, &devfunc_info_slot[i])
+	foreach (lc, devfunc_info_slot[i])
 	{
-		dfunc = dlist_container(devfunc_info, chain, iter.cur);
+		dfunc = lfirst(lc);
 		if (dfunc->hash == hash &&
 			dfunc->func_oid == func_oid &&
 			dfunc->func_nargs == func_nargs)
@@ -709,7 +743,15 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 		MemoryContextSwitchTo(oldcxt);
 	}
 	dfunc->hash = hash;
-	dlist_push_head(&devfunc_info_slot[i], &dfunc->chain);
+	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
+									   devfunc_info_slot[i], dfunc);
+	if (!dfunc->func_is_negative)
+	{
+		hash = hash_any((unsigned char *)&dfunc->func_code, sizeof(FuncOpCode));
+		i = hash % DEVFUNC_INFO_NSLOTS;
+		devfunc_code_slot[i] = lappend_cxt(devinfo_memcxt,
+										   devfunc_code_slot[i], dfunc);
+	}
 found:
 	if (dfunc->func_is_negative)
 		return NULL;
@@ -737,6 +779,25 @@ pgstrom_devfunc_lookup(Oid func_oid,
 		argtypes[i++] = exprType(node);
 	}
 	return __pgstrom_devfunc_lookup(func_oid, nargs, argtypes, func_collid);
+}
+
+static devfunc_info *
+devfunc_lookup_by_opcode(FuncOpCode func_code)
+{
+	Datum		hash;
+	uint32_t	index;
+	ListCell   *lc;
+
+	hash = hash_any((unsigned char *)&func_code, sizeof(FuncOpCode));
+	index = hash % DEVFUNC_INFO_NSLOTS;
+	foreach (lc, devfunc_code_slot[index])
+	{
+		devfunc_info *dfunc = lfirst(lc);
+
+		if (dfunc->func_code == func_code)
+			return dfunc;
+	}
+	return NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -809,6 +870,7 @@ codegen_const_expression(codegen_context *context, Const *con)
 		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->nargs = 0;
 		kexp->rettype = dtype->type_code;
+		kexp->u.c.const_type = con->consttype;
 		kexp->u.c.const_isnull = con->constisnull;
 		if (con->constbyval)
 			memcpy(kexp->u.c.const_value,
@@ -1191,14 +1253,14 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 }
 #undef __Elog
 
-Const *
-pgstrom_codegen_expression(Expr *expr,
-						   List **p_used_params,
-						   List **p_used_vars,
-						   uint32_t *p_extra_flags,
-						   uint32_t *p_extra_bufsz,
-						   int num_rels,
-						   List **rel_tlist)
+bytea *
+pgstrom_build_xpucode(Expr *expr,
+					  List **p_used_params,
+					  List **p_used_vars,
+					  uint32_t *p_extra_flags,
+					  uint32_t *p_extra_bufsz,
+					  int num_rels,
+					  List **rel_tlist)
 {
 	codegen_context	   *context;
 	StringInfoData		buf;
@@ -1216,12 +1278,14 @@ pgstrom_codegen_expression(Expr *expr,
 		expr = make_andclause((List *)expr);
 	if (codegen_expression_walker(context, expr) < 0)
 	{
-		/* errmsg and errdetail shall be already set */
+		/* errmsg shall be already set */
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errdetail("problematic expression: %s", nodeToString(expr))));
 		return NULL;
 	}
+	SET_VARSIZE(buf.data, buf.len);
+
 	if (p_used_params)
 		*p_used_params = list_concat_unique_int(*p_used_params,
 												context->used_params);
@@ -1232,26 +1296,151 @@ pgstrom_codegen_expression(Expr *expr,
 		*p_extra_flags |= context->extra_flags;
 	if (p_extra_bufsz)
 		*p_extra_bufsz += context->extra_bufsz;
+	return (bytea *)buf.data;
+}
 
-	return makeConst(BYTEAOID,
-					 -1,
-					 InvalidOid,
-					 -1,
-					 PointerGetDatum(buf.data),
-					 false,
-					 false);
+/*
+ * pgstrom_xpucode_to_string
+ *
+ * transforms xPU code to human readable form.
+ */
+static void
+__xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
+{
+	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
+	devfunc_info   *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
+	const char	   *label;
+	int				i, off;
+
+	switch (kexp->opcode)
+	{
+		case FuncOpCode__ConstExpr:
+			if (kexp->u.c.const_isnull)
+			{
+				appendStringInfo(buf, "{Const(%s): value=null}",
+								 !dtype ? "???" : dtype->type_name);
+			}
+			else
+			{
+				int16	type_len;
+				bool	type_byval;
+				char	type_align;
+				char	type_delim;
+				Oid		type_ioparam;
+				Oid		type_outfunc;
+				Datum	datum;
+				Datum	label;
+
+				get_type_io_data(kexp->u.c.const_type,
+								 IOFunc_output,
+								 &type_len,
+								 &type_byval,
+								 &type_align,
+								 &type_delim,
+								 &type_ioparam,
+								 &type_outfunc);
+				if (!type_byval)
+					datum = PointerGetDatum(kexp->u.c.const_value);
+				else
+					memcpy(&datum, kexp->u.c.const_value, type_len);
+				label = OidFunctionCall1(type_outfunc, datum);
+				appendStringInfo(buf, "{Const: value='%s'}",
+								 DatumGetCString(label));
+			}
+			return;
+
+		case FuncOpCode__ParamExpr:
+			appendStringInfo(buf, "{Param(%s): param_id=%u}",
+							 !dtype ? "???" : dtype->type_name,
+							 kexp->u.p.param_id);
+			return;
+
+		case FuncOpCode__VarExpr:
+			appendStringInfo(buf, "{Var(%s): depth=%d resno=%d}",
+							 !dtype ? "???" : dtype->type_name,
+							 kexp->u.v.var_depth,
+							 kexp->u.v.var_resno);
+			return;
+
+		case FuncOpCode__BoolExpr_And:
+			label = "Bool::AND";
+			break;
+		case FuncOpCode__BoolExpr_Or:
+			label = "Bool::OR";
+			break;
+		case FuncOpCode__BoolExpr_Not:
+			label = "Bool::NOT";
+			break;
+		case FuncOpCode__NullTestExpr_IsNull:
+			label = "IsNull";
+			break;
+		case FuncOpCode__NullTestExpr_IsNotNull:
+			label = "IsNotNull";
+			break;
+		case FuncOpCode__BoolTestExpr_IsTrue:
+			label = "BoolTest::IsTrue";
+			break;
+		case FuncOpCode__BoolTestExpr_IsNotTrue:
+			label = "BoolTest::IsNotTrue";
+			break;
+		case FuncOpCode__BoolTestExpr_IsFalse:
+			label = "BoolTest::IsFalse";
+			break;
+		case FuncOpCode__BoolTestExpr_IsNotFalse:
+			label = "BoolTest::IsNotFalse";
+			break;
+		case FuncOpCode__BoolTestExpr_IsUnknown:
+			label = "BoolTest::IsUnknown";
+			break;
+		case FuncOpCode__BoolTestExpr_IsNotUnknown:
+			label = "BoolTest::IsNotUnknown";
+			break;
+		default:
+			if (dfunc)
+				label = psprintf("Func::%s", dfunc->func_name);
+			else
+				label = "Func::unknown";
+	}
+	appendStringInfo(buf, "{%s(%s) %s", label,
+					 !dtype ? "???" : dtype->type_name,
+					 kexp->nargs > 1 ? "args=[" : "arg=");
+	off = 0;
+	for (i=0; i < kexp->nargs; i++)
+	{
+		const kern_expression *arg = (const kern_expression *)(kexp->u.data + off);
+
+		if (VARSIZE(kexp) < offsetof(kern_expression, u.data) + off + VARSIZE(arg))
+			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu]",
+				 VARSIZE(kexp),
+				 offsetof(kern_expression, u.data) + off,
+				 offsetof(kern_expression, u.data) + off + VARSIZE(arg));
+		__xpucode_to_cstring(buf, arg);
+		off += MAXALIGN(VARSIZE(arg));
+	}
+	if (kexp->nargs > 1)
+		appendStringInfoString(buf, "]");
+	appendStringInfoString(buf, "}");
+}
+
+char *
+pgstrom_xpucode_to_string(bytea *xpu_code)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	__xpucode_to_cstring(&buf, (const kern_expression *)xpu_code);
+
+	return buf.data;
 }
 
 static void
 pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
-	int		i;
-
 	MemoryContextReset(devinfo_memcxt);
-	for (i=0; i < DEVTYPE_INFO_NSLOTS; i++)
-		dlist_init(&devtype_info_slot[i]);
-	for (i=0; i < DEVFUNC_INFO_NSLOTS; i++)
-		dlist_init(&devfunc_info_slot[i]);
+	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
+	memset(devtype_code_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
+	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
+	memset(devfunc_code_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 }
 
 void

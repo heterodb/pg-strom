@@ -11,7 +11,6 @@
  */
 #include "xpu_common.h"
 
-
 /*
  * Const Expression
  */
@@ -222,10 +221,14 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 /*
  * Catalog of built-in device types
  */
+/*
+ * Built-in SQL type / function catalog
+ */
+#define TYPE_OPCODE(NAME,a,b)							\
+	{ TypeOpCode__##NAME, &sql_##NAME##_ops },
 PUBLIC_DATA sql_type_catalog_entry builtin_sql_types_catalog[] = {
-	{TypeOpCode__int1, &sql_int1_ops},
-//#include "xpu_opcodes.h"
-	{TypeOpCode__Invalid, NULL},
+#include "xpu_opcodes.h"
+	{ TypeOpCode__Invalid, NULL }
 };
 
 /*

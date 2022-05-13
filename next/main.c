@@ -89,7 +89,7 @@ _PG_init(void)
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
-
+		pgstrom_init_gpu_service();
 
 	}
 }

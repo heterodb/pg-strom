@@ -41,9 +41,11 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
+#include "storage/latch.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
@@ -65,10 +67,16 @@
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/uuid.h"
+#include "utils/wait_event.h"
 #include <assert.h>
 #include <cuda.h>
 #include <limits.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include "xpu_common.h"
 #include "pg_utils.h"
@@ -118,7 +126,6 @@ typedef uint32_t (*devtype_hashfunc_f)(bool isnull, Datum value);
 
 typedef struct devtype_info
 {
-	dlist_node	chain;
 	uint32_t	hash;
 	TypeOpCode	type_code;
 	Oid			type_oid;
@@ -212,13 +219,14 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
-extern Const   *pgstrom_codegen_expression(Expr *expr,
-										   List **p_used_params,
-										   List **p_used_vars,
-										   uint32_t *p_extra_flags,
-										   uint32_t *p_extra_bufsz,
-										   int num_rels,
-										   List **rel_tlist);
+extern bytea   *pgstrom_build_xpucode(Expr *expr,
+									  List **p_used_params,
+									  List **p_used_vars,
+									  uint32_t *p_extra_flags,
+									  uint32_t *p_extra_bufsz,
+									  int num_rels,
+									  List **rel_tlist);
+extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern bool		pgstrom_gpu_expression(Expr *expr);
 extern void		pgstrom_init_codegen(void);
 
@@ -234,6 +242,16 @@ extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									size_t dyn_shmem_per_block,
 									size_t dyn_shmem_per_thread);
 extern bool		pgstrom_init_gpu_device(void);
+
+/*
+ * gpu_service.c
+ */
+extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
+extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
+extern pgsocket	gpuserv_open_connection(int cuda_dindex);
+extern void		pgstrom_init_gpu_service(void);
+
+
 
 /*
  * apache arrow related stuff

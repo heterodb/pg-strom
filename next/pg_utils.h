@@ -105,6 +105,19 @@ __trim(char *token)
 	return token;
 }
 
+/* lappend on the specified memory-context */
+static inline List *
+lappend_cxt(MemoryContext memcxt, List *list, void *datum)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	List   *r;
+
+	r = lappend(list, datum);
+	MemoryContextSwitchTo(oldcxt);
+
+	return r;
+}
+
 /*
  * formater of numeric/bytesz/millisec
  */
@@ -146,9 +159,5 @@ format_millisec(double milliseconds)
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
 }
-
-
-
-
 #endif	/* PG_UTILS_H */
 

@@ -1061,6 +1061,8 @@ typedef struct toast_compress_header
 typedef enum {
 	TypeOpCode__Invalid = 0,
 #include "xpu_opcodes.h"
+	TypeOpCode__composite,
+	TypeOpCode__array,
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
@@ -1214,6 +1216,7 @@ struct kern_expression
 	union {
 		char		data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		struct {
+			Oid		const_type;
 			bool	const_isnull;
 			char	const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		} c;
