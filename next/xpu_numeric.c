@@ -12,7 +12,7 @@
 #include "xpu_common.h"
 
 INLINE_FUNCTION(void)
-set_normalized_numeric(sql_numeric_t *result, int128_t value, int16_t weight)
+set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 {
 	if (value == 0)
 		weight = 0;
@@ -30,13 +30,13 @@ set_normalized_numeric(sql_numeric_t *result, int128_t value, int16_t weight)
 }
 
 STATIC_FUNCTION(bool)
-sql_numeric_from_varlena(kern_context *kcxt,
-						 sql_numeric_t *result,
+xpu_numeric_from_varlena(kern_context *kcxt,
+						 xpu_numeric_t *result,
 						 const varlena *addr)
 {
 	uint32_t		len;
 
-	result->ops = &sql_numeric_ops;
+	result->ops = &xpu_numeric_ops;
 	if (!addr)
 	{
 		result->isnull = true;
@@ -77,7 +77,7 @@ sql_numeric_from_varlena(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(int)
-sql_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
+xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 {
 	NumericData	   *numData = (NumericData *)buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
@@ -142,22 +142,22 @@ sql_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 }
 
 STATIC_FUNCTION(bool)
-sql_numeric_datum_ref(kern_context *kcxt,
-					  sql_datum_t *__result,
+xpu_numeric_datum_ref(kern_context *kcxt,
+					  xpu_datum_t *__result,
 					  const void *addr)
 {
-	return sql_numeric_from_varlena(kcxt, (sql_numeric_t *)__result,
+	return xpu_numeric_from_varlena(kcxt, (xpu_numeric_t *)__result,
 									(const varlena *)addr);
 }
 
 STATIC_FUNCTION(bool)
 arrow_numeric_datum_ref(kern_context *kcxt,
-						sql_datum_t *__result,
+						xpu_datum_t *__result,
 						kern_data_store *kds,
 						kern_colmeta *cmeta,
 						uint32_t rowidx)
 {
-	sql_numeric_t  *result = (sql_numeric_t *)__result;
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	void   *addr;
 
 	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,
@@ -173,28 +173,28 @@ arrow_numeric_datum_ref(kern_context *kcxt,
 		set_normalized_numeric(result, *((int128_t *)addr),
 							   cmeta->attopts.decimal.scale);
 	}
-	result->ops = &sql_numeric_ops;
+	result->ops = &xpu_numeric_ops;
 	return true;
 }
 
 PUBLIC_FUNCTION(int)
-sql_numeric_datum_store(kern_context *kcxt,
+xpu_numeric_datum_store(kern_context *kcxt,
 						char *buffer,
-						sql_datum_t *__arg)
+						xpu_datum_t *__arg)
 {
-	sql_numeric_t *arg = (sql_numeric_t *)__arg;
+	xpu_numeric_t *arg = (xpu_numeric_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
-	return sql_numeric_to_varlena(buffer, arg->weight, arg->value);
+	return xpu_numeric_to_varlena(buffer, arg->weight, arg->value);
 }
 
 PUBLIC_FUNCTION(bool)
-sql_numeric_datum_hash(kern_context *kcxt,
+xpu_numeric_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   sql_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	sql_numeric_t *arg = (sql_numeric_t *)__arg;
+	xpu_numeric_t *arg = (xpu_numeric_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;

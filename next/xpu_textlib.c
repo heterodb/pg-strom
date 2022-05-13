@@ -31,12 +31,12 @@ bpchar_truelen(const char *s, int len)
 }
 
 STATIC_FUNCTION(bool)
-sql_bpchar_datum_ref(kern_context *kcxt,
-					 sql_datum_t *__result,
+xpu_bpchar_datum_ref(kern_context *kcxt,
+					 xpu_datum_t *__result,
 					 const void *addr)
 {
-	sql_bpchar_t *result = (sql_bpchar_t *)__result;
-	memset(result, 0, sizeof(sql_bpchar_t));
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+	memset(result, 0, sizeof(xpu_bpchar_t));
 	if (!addr)
 		result->isnull = true;
 	else
@@ -44,24 +44,24 @@ sql_bpchar_datum_ref(kern_context *kcxt,
 		result->length = -1;
 		result->value = (char *)addr;
 	}
-	result->ops = &sql_bpchar_ops;
+	result->ops = &xpu_bpchar_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
 arrow_bpchar_datum_ref(kern_context *kcxt,
-					   sql_datum_t *__result,
+					   xpu_datum_t *__result,
 					   kern_data_store *kds,
 					   kern_colmeta *cmeta,
 					   uint32_t rowidx)
 {
-	sql_bpchar_t *result = (sql_bpchar_t *)__result;
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
 	int		unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
 	char   *addr = NULL;
 
 	if (unitsz > 0)
 		addr = (char *)KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx, unitsz);
-	memset(result, 0, sizeof(sql_bpchar_t));
+	memset(result, 0, sizeof(xpu_bpchar_t));
 	if (!addr)
 		result->isnull = true;
 	else
@@ -69,16 +69,16 @@ arrow_bpchar_datum_ref(kern_context *kcxt,
 		result->value = (char *)addr;
 		result->length = bpchar_truelen(addr, unitsz);
 	}
-	result->ops = &sql_bpchar_ops;
+	result->ops = &xpu_bpchar_ops;
 	return true;
 }
 
 STATIC_FUNCTION(int)
-sql_bpchar_datum_store(kern_context *kcxt,
+xpu_bpchar_datum_store(kern_context *kcxt,
 					   char *buffer,
-					   sql_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	sql_bpchar_t *arg = (sql_bpchar_t *)__arg;
+	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
 	char   *data;
 	int		len;
 
@@ -106,11 +106,11 @@ sql_bpchar_datum_store(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-sql_bpchar_datum_hash(kern_context*kcxt,
+xpu_bpchar_datum_hash(kern_context*kcxt,
 					  uint32_t *p_hash,
-					  sql_datum_t *__arg)
+					  xpu_datum_t *__arg)
 {
-	sql_bpchar_t *arg = (sql_bpchar_t *)__arg;
+	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
 	char   *data;
 	int		len;
 

@@ -13,40 +13,40 @@
 #include "xpu_common.h"
 
 /*
- * Currency data type (sql_money_t), functions and operators
+ * Currency data type (xpu_money_t), functions and operators
  */
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(money, Cash);
 
 /*
- * UUID data type (sql_uuid_t), functions and operators
+ * UUID data type (xpu_uuid_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-sql_uuid_datum_ref(kern_context *kcxt,
-				   sql_datum_t *__result,
+xpu_uuid_datum_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
 				   const void *addr)
 {
-	sql_uuid_t *result = (sql_uuid_t *)__result;
+	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
-	memset(result, 0, sizeof(sql_uuid_t));
+	memset(result, 0, sizeof(xpu_uuid_t));
 	if (!addr)
 		result->isnull = true;
 	else
 		memcpy(&result->value.data, addr, UUID_LEN);
-	result->ops = &sql_uuid_ops;
+	result->ops = &xpu_uuid_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
 arrow_uuid_datum_ref(kern_context *kcxt,
-					 sql_datum_t *__result,
+					 xpu_datum_t *__result,
 					 kern_data_store *kds,
 					 kern_colmeta *cmeta,
 					 uint32_t rowidx)
 {
-	sql_uuid_t *result = (sql_uuid_t *)__result;
+	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 	void   *addr;
 
-	memset(result, 0, sizeof(sql_uuid_t));
+	memset(result, 0, sizeof(xpu_uuid_t));
 	if (cmeta->attopts.fixed_size_binary.byteWidth == UUID_LEN)
 	{
 		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx, UUID_LEN);
@@ -54,7 +54,7 @@ arrow_uuid_datum_ref(kern_context *kcxt,
 			result->isnull = true;
 		else
 			memcpy(&result->value.data, addr, UUID_LEN);
-		result->ops = &sql_uuid_ops;
+		result->ops = &xpu_uuid_ops;
 		return true;
 	}
 	STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
@@ -62,11 +62,11 @@ arrow_uuid_datum_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(int)
-sql_uuid_datum_store(kern_context *kcxt,
+xpu_uuid_datum_store(kern_context *kcxt,
 					 char *buffer,
-					 sql_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	sql_uuid_t *arg = (sql_uuid_t *)__arg;
+	xpu_uuid_t *arg = (xpu_uuid_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -76,11 +76,11 @@ sql_uuid_datum_store(kern_context *kcxt,
 }
 
 PUBLIC_FUNCTION(bool)
-sql_uuid_datum_hash(kern_context *kcxt,
+xpu_uuid_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					sql_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	sql_uuid_t *arg = (sql_uuid_t *)__arg;
+	xpu_uuid_t *arg = (xpu_uuid_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;
@@ -91,34 +91,34 @@ sql_uuid_datum_hash(kern_context *kcxt,
 PGSTROM_SQLTYPE_OPERATORS(uuid);
 
 /*
- * Macaddr data type (sql_macaddr_t), functions and operators
+ * Macaddr data type (xpu_macaddr_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-sql_macaddr_datum_ref(kern_context *kcxt,
-					  sql_datum_t *__result,
+xpu_macaddr_datum_ref(kern_context *kcxt,
+					  xpu_datum_t *__result,
 					  const void *addr)
 {
-	sql_macaddr_t *result = (sql_macaddr_t *)__result;
+	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
-	memset(result, 0, sizeof(sql_macaddr_t));
+	memset(result, 0, sizeof(xpu_macaddr_t));
 	if (!addr)
 		result->isnull = true;
 	else
 		memcpy(&result->value, addr, sizeof(macaddr));
-	result->ops = &sql_macaddr_ops;
+	result->ops = &xpu_macaddr_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
 arrow_macaddr_datum_ref(kern_context *kcxt,
-						sql_datum_t *__result,
+						xpu_datum_t *__result,
 						kern_data_store *kds,
 						kern_colmeta *cmeta,
 						uint32_t rowidx)
 {
-	sql_macaddr_t *result = (sql_macaddr_t *)__result;
+	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
-	memset(result, 0, sizeof(sql_macaddr_t));
+	memset(result, 0, sizeof(xpu_macaddr_t));
 	if (cmeta->attopts.fixed_size_binary.byteWidth == sizeof(macaddr))
 	{
 		void   *addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,
@@ -127,7 +127,7 @@ arrow_macaddr_datum_ref(kern_context *kcxt,
 			result->isnull = true;
 		else
 			memcpy(&result->value, addr, sizeof(macaddr));
-		result->ops = &sql_macaddr_ops;
+		result->ops = &xpu_macaddr_ops;
 		return true;
 	}
 	STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
@@ -135,11 +135,11 @@ arrow_macaddr_datum_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(int)
-sql_macaddr_datum_store(kern_context *kcxt,
+xpu_macaddr_datum_store(kern_context *kcxt,
 						char *buffer,
-						sql_datum_t *__arg)
+						xpu_datum_t *__arg)
 {
-	sql_macaddr_t *arg = (sql_macaddr_t *)__arg;
+	xpu_macaddr_t *arg = (xpu_macaddr_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -149,11 +149,11 @@ sql_macaddr_datum_store(kern_context *kcxt,
 }
 
 PUBLIC_FUNCTION(bool)
-sql_macaddr_datum_hash(kern_context *kcxt,
+xpu_macaddr_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   sql_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	sql_macaddr_t *arg = (sql_macaddr_t *)__arg;
+	xpu_macaddr_t *arg = (xpu_macaddr_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;
@@ -164,16 +164,16 @@ sql_macaddr_datum_hash(kern_context *kcxt,
 PGSTROM_SQLTYPE_OPERATORS(macaddr);
 
 /*
- * Inet data type (sql_iner_t), functions and operators
+ * Inet data type (xpu_iner_t), functions and operators
  */
 PUBLIC_FUNCTION(bool)
-sql_inet_datum_ref(kern_context *kcxt,
-				   sql_datum_t *__result,
+xpu_inet_datum_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
 				   const void *addr)
 {
-	sql_inet_t *result = (sql_inet_t *)__result;
+	xpu_inet_t *result = (xpu_inet_t *)__result;
 
-	memset(result, 0, sizeof(sql_inet_t));
+	memset(result, 0, sizeof(xpu_inet_t));
 	if (!addr)
 	{
 		result->isnull = true;
@@ -202,18 +202,18 @@ sql_inet_datum_ref(kern_context *kcxt,
 		memcpy(&result->value, VARDATA_ANY(addr),
 			   offsetof(inet_struct, ipaddr[ip_size]));
 	}
-	result->ops = &sql_inet_ops;
+	result->ops = &xpu_inet_ops;
 	return true;
 }
 
 PUBLIC_FUNCTION(bool)
 arrow_inet_datum_ref(kern_context *kcxt,
-                     sql_datum_t *__result,
+                     xpu_datum_t *__result,
                      kern_data_store *kds,
                      kern_colmeta *cmeta,
                      uint32_t rowidx)
 {
-	sql_inet_t *result = (sql_inet_t *)__result;
+	xpu_inet_t *result = (xpu_inet_t *)__result;
 	int			byteWidth = cmeta->attopts.fixed_size_binary.byteWidth;
 	void	   *addr;
 
@@ -232,16 +232,16 @@ arrow_inet_datum_ref(kern_context *kcxt,
 		result->value.bits = 8 * byteWidth;
 		memcpy(result->value.ipaddr, addr, byteWidth);
 	}
-	result->ops = &sql_inet_ops;
+	result->ops = &xpu_inet_ops;
 	return true;
 }
 
 PUBLIC_FUNCTION(int)
-sql_inet_datum_store(kern_context *kcxt,
+xpu_inet_datum_store(kern_context *kcxt,
 					 char *buffer,
-					 sql_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	sql_inet_t *arg = (sql_inet_t *)__arg;
+	xpu_inet_t *arg = (xpu_inet_t *)__arg;
 	int			len;
 
 	if (arg->isnull)
@@ -264,11 +264,11 @@ sql_inet_datum_store(kern_context *kcxt,
 }
 
 PUBLIC_FUNCTION(bool)
-sql_inet_datum_hash(kern_context *kcxt,
+xpu_inet_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					sql_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	sql_inet_t *arg = (sql_inet_t *)__arg;
+	xpu_inet_t *arg = (xpu_inet_t *)__arg;
 	int			len;
 
 	if (arg->isnull)
@@ -281,7 +281,7 @@ sql_inet_datum_hash(kern_context *kcxt,
 			len = offsetof(inet_struct, ipaddr[16]);	/* IPv6 */
 		else
 		{
-			STROM_ELOG(kcxt, "sql_inet_t has unknown IP version");
+			STROM_ELOG(kcxt, "xpu_inet_t has unknown IP version");
 			return false;
 		}
 		*p_hash = pg_hash_any(&arg->value, len);

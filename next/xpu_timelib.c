@@ -48,32 +48,32 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(timestamp, Timestamp);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(timestamptz, TimestampTz);
 
 STATIC_FUNCTION(bool)
-sql_interval_datum_ref(kern_context *kcxt,
-					   sql_datum_t *__result,
+xpu_interval_datum_ref(kern_context *kcxt,
+					   xpu_datum_t *__result,
 					   const void *addr)
 {
-	sql_interval_t *result = (sql_interval_t *)__result;
+	xpu_interval_t *result = (xpu_interval_t *)__result;
 
-	memset(result, 0, sizeof(sql_interval_t));
+	memset(result, 0, sizeof(xpu_interval_t));
 	if (!addr)
 		result->isnull = true;
 	else
 		memcpy(&result->value, addr, sizeof(Interval));
-	result->ops = &sql_interval_ops;
+	result->ops = &xpu_interval_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
 arrow_interval_datum_ref(kern_context *kcxt,
-						 sql_datum_t *__result,
+						 xpu_datum_t *__result,
 						 kern_data_store *kds,
 						 kern_colmeta *cmeta,
 						 uint32_t rowidx)
 {
-	sql_interval_t *result = (sql_interval_t *)__result;
+	xpu_interval_t *result = (xpu_interval_t *)__result;
 	uint32_t   *ival;
 
-	memset(result, 0, sizeof(sql_interval_t));
+	memset(result, 0, sizeof(xpu_interval_t));
 	switch (cmeta->attopts.interval.unit)
 	{
 		case ArrowIntervalUnit__Year_Month:
@@ -102,16 +102,16 @@ arrow_interval_datum_ref(kern_context *kcxt,
 						  "unknown unit-size of Arrow::Interval");
 			return false;
 	}
-	result->ops = &sql_interval_ops;
+	result->ops = &xpu_interval_ops;
 	return true;
 }
 
 STATIC_FUNCTION(int)
-sql_interval_datum_store(kern_context *kcxt,
+xpu_interval_datum_store(kern_context *kcxt,
 						 char *buffer,
-						 sql_datum_t *__arg)
+						 xpu_datum_t *__arg)
 {
-	sql_interval_t *arg = (sql_interval_t *)__arg;
+	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -121,11 +121,11 @@ sql_interval_datum_store(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-sql_interval_datum_hash(kern_context *kcxt,
+xpu_interval_datum_hash(kern_context *kcxt,
 						uint32_t *p_hash,
-						sql_datum_t *__arg)
+						xpu_datum_t *__arg)
 {
-	sql_interval_t *arg = (sql_interval_t *)__arg;
+	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;

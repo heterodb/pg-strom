@@ -14,23 +14,23 @@
 
 #define PGSTROM_SIMPLE_BASETYPE_TEMPLATE(NAME,BASETYPE)					\
 	STATIC_FUNCTION(bool)												\
-	sql_##NAME##_datum_ref(kern_context *kcxt,							\
-						   sql_datum_t *__result,						\
+	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
+						   xpu_datum_t *__result,						\
 						   const void *addr)							\
 	{																	\
-		sql_##NAME##_t *result = (sql_##NAME##_t *)__result;			\
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		memset(result, 0, sizeof(sql_##NAME##_t));						\
+		memset(result, 0, sizeof(xpu_##NAME##_t));						\
 		if (!addr)														\
 			result->isnull = true;										\
 		else															\
 			result->value = *((const BASETYPE *)addr);					\
-		result->ops = &sql_##NAME##_ops;								\
+		result->ops = &xpu_##NAME##_ops;								\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
 	arrow_##NAME##_datum_ref(kern_context *kcxt,						\
-							 sql_datum_t *__result,						\
+							 xpu_datum_t *__result,						\
 							 kern_data_store *kds,						\
 							 kern_colmeta *cmeta,						\
 							 uint32_t rowidx)							\
@@ -39,14 +39,14 @@
 																		\
 		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,			\
 										  sizeof(BASETYPE));			\
-		return sql_##NAME##_datum_ref(kcxt, __result, addr);			\
+		return xpu_##NAME##_datum_ref(kcxt, __result, addr);			\
 	}																	\
 	STATIC_FUNCTION(int)												\
-	sql_##NAME##_datum_store(kern_context *kcxt,						\
+	xpu_##NAME##_datum_store(kern_context *kcxt,						\
 							 char *buffer,								\
-							 sql_datum_t *__arg)						\
+							 xpu_datum_t *__arg)						\
 	{																	\
-		sql_##NAME##_t *arg = (sql_##NAME##_t *)__arg;					\
+		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
 		if (arg->isnull)												\
 			return 0;													\
@@ -54,11 +54,11 @@
 		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	sql_##NAME##_datum_hash(kern_context *kcxt,							\
+	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
 							uint32_t *p_hash,							\
-							sql_datum_t *__arg)							\
+							xpu_datum_t *__arg)							\
 	{																	\
-		sql_##NAME##_t *arg = (sql_##NAME##_t *)__arg;					\
+		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
 		if (arg->isnull)												\
 			*p_hash = 0;												\

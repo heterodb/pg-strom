@@ -1066,59 +1066,59 @@ typedef enum {
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
-typedef struct sql_datum_t		sql_datum_t;
-typedef struct sql_datum_operators sql_datum_operators;
+typedef struct xpu_datum_t		xpu_datum_t;
+typedef struct xpu_datum_operators xpu_datum_operators;
 
-#define SQL_DATUM_COMMON_FIELD			\
-	const sql_datum_operators *ops;		\
+#define XPU_DATUM_COMMON_FIELD			\
+	const xpu_datum_operators *ops;		\
 	bool		isnull
 
-struct sql_datum_t {
-	SQL_DATUM_COMMON_FIELD;
+struct xpu_datum_t {
+	XPU_DATUM_COMMON_FIELD;
 };
 
-struct sql_datum_operators {
-	const char *sql_type_name;
-	TypeOpCode	sql_type_code;
-	int			sql_type_sizeof;	/* =sizeof(sql_XXXX_t), not PG type! */
-	bool	  (*sql_datum_ref)(kern_context *kcxt,
-							   sql_datum_t *result,
+struct xpu_datum_operators {
+	const char *xpu_type_name;
+	TypeOpCode	xpu_type_code;
+	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
+	bool	  (*xpu_datum_ref)(kern_context *kcxt,
+							   xpu_datum_t *result,
 							   const void *addr);
 	bool	  (*arrow_datum_ref)(kern_context *kcxt,
-								 sql_datum_t *result,
+								 xpu_datum_t *result,
 								 kern_data_store *kds,
 								 kern_colmeta *cmeta,
 								 uint32_t rowidx);
-	int		  (*sql_datum_store)(kern_context *kcxt,
+	int		  (*xpu_datum_store)(kern_context *kcxt,
 								 char *buffer,
-								 sql_datum_t *arg);
-	bool	  (*sql_datum_hash)(kern_context *kcxt,
+								 xpu_datum_t *arg);
+	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
-								sql_datum_t *arg);
+								xpu_datum_t *arg);
 };
 
 #define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
 	typedef struct {										\
-		SQL_DATUM_COMMON_FIELD;								\
+		XPU_DATUM_COMMON_FIELD;								\
 		BASETYPE	value;									\
-	} sql_##NAME##_t;										\
-	EXTERN_DATA sql_datum_operators sql_##NAME##_ops
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
 #define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
-		SQL_DATUM_COMMON_FIELD;								\
+		XPU_DATUM_COMMON_FIELD;								\
 		int		length;		/* -1, if PG verlena */			\
 		char   *value;										\
-	} sql_##NAME##_t;										\
-	EXTERN_DATA sql_datum_operators sql_##NAME##_ops
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
 #define PGSTROM_SQLTYPE_OPERATORS(NAME)						\
-	PUBLIC_DATA sql_datum_operators sql_##NAME##_ops = {	\
-		.sql_type_name = #NAME,								\
-		.sql_type_code = TypeOpCode__##NAME,				\
-		.sql_type_sizeof = sizeof(sql_##NAME##_t),			\
-		.sql_datum_ref = sql_##NAME##_datum_ref,			\
+	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {	\
+		.xpu_type_name = #NAME,								\
+		.xpu_type_code = TypeOpCode__##NAME,				\
+		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),			\
+		.xpu_datum_ref = xpu_##NAME##_datum_ref,			\
 		.arrow_datum_ref = arrow_##NAME##_datum_ref,		\
-		.sql_datum_store = sql_##NAME##_datum_store,		\
-		.sql_datum_hash = sql_##NAME##_datum_hash,			\
+		.xpu_datum_store = xpu_##NAME##_datum_store,		\
+		.xpu_datum_hash = xpu_##NAME##_datum_hash,			\
 	}
 
 #include "xpu_basetype.h"
@@ -1137,7 +1137,7 @@ struct sql_datum_operators {
  * the columnar buffer by @smeta.
  */
 typedef struct {
-	SQL_DATUM_COMMON_FIELD;
+	XPU_DATUM_COMMON_FIELD;
 	char	   *value;
 	int			length;
 	uint32_t	start;
@@ -1155,7 +1155,7 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(array, pg_array_t);
  * the values array on the KDS.
  */
 typedef struct {
-	SQL_DATUM_COMMON_FIELD;
+	XPU_DATUM_COMMON_FIELD;
 	int16_t		nfields;
 	uint32_t	rowidx;
 	char	   *value;
@@ -1167,10 +1167,10 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(composite, pg_composite_t);
 
 typedef struct {
 	TypeOpCode		type_opcode;
-	sql_datum_operators *type_ops;
-} sql_type_catalog_entry;
+	xpu_datum_operators *type_ops;
+} xpu_type_catalog_entry;
 
-EXTERN_DATA sql_type_catalog_entry	builtin_sql_types_catalog[];
+EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
 
 /* ----------------------------------------------------------------
  *
@@ -1202,17 +1202,17 @@ typedef enum {
 typedef struct kern_expression	kern_expression;
 #define XPU_PGFUNCTION_ARGS		kern_context *kcxt,			\
 								const kern_expression *expr,\
-								sql_datum_t *__result
-typedef bool  (*sql_function_t)(XPU_PGFUNCTION_ARGS);
+								xpu_datum_t *__result
+typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
 struct kern_expression
 {
 	uint32_t		_vl_len;
 	FuncOpCode		opcode;
-	sql_function_t	fn_dptr;		/* to be set by xPU service */
+	xpu_function_t	fn_dptr;		/* to be set by xPU service */
 	int				nargs;
 	TypeOpCode		rettype;
-	const sql_datum_operators *rettype_ops;	/* to be set by xPU service */
+	const xpu_datum_operators *rettype_ops;	/* to be set by xPU service */
 	union {
 		char		data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		struct {
@@ -1230,7 +1230,7 @@ struct kern_expression
 	} u;
 };
 #define EXEC_KERN_EXPRESSION(__kcxt,__expr,__retval)	\
-	(__expr)->fn_dptr((__kcxt),(__expr),(sql_datum_t *)__retval)
+	(__expr)->fn_dptr((__kcxt),(__expr),(xpu_datum_t *)__retval)
 #define EXPR_OVERRUN_CHECKS(__arg)				\
 	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)expr + VARSIZE(expr))
 #define SizeOfKernExpr(__PAYLOAD_SZ)		\
@@ -1243,10 +1243,10 @@ struct kern_expression
 	(offsetof(kern_expression, u.v.var_resno) + sizeof(uint16_t))
 typedef struct {
 	FuncOpCode		func_opcode;
-	sql_function_t	func_dptr;
-} sql_function_catalog_entry;
+	xpu_function_t	func_dptr;
+} xpu_function_catalog_entry;
 
-EXTERN_DATA sql_function_catalog_entry	builtin_sql_functions_catalog[];
+EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
 
 /* ----------------------------------------------------------------
  *

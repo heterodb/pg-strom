@@ -32,7 +32,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 		addr = NULL;
 	else
 		addr = expr->u.c.const_value;
-	return expr->rettype_ops->sql_datum_ref(kcxt, __result, addr);
+	return expr->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -40,7 +40,7 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
 	void	   *addr = kparam_get_value(kcxt->kparams, expr->u.p.param_id);
 
-	return expr->rettype_ops->sql_datum_ref(kcxt, __result, addr);
+	return expr->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -52,16 +52,16 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 {
-	sql_bool_t *result = (sql_bool_t *)__result;
+	xpu_bool_t *result = (xpu_bool_t *)__result;
 	int			i, off = 0;
 	bool		anynull = false;
 
-	memset(result, 0, sizeof(sql_bool_t));
-	result->ops = &sql_bool_ops;
+	memset(result, 0, sizeof(xpu_bool_t));
+	result->ops = &xpu_bool_ops;
 	for (i=0; i < expr->nargs; i++)
 	{
 		const kern_expression *arg;
-		sql_bool_t	status;
+		xpu_bool_t	status;
 
 		arg = (const kern_expression *)(expr->u.data + off);
 		EXPR_OVERRUN_CHECKS(arg);
@@ -89,16 +89,16 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 {
-	sql_bool_t *result = (sql_bool_t *)__result;
+	xpu_bool_t *result = (xpu_bool_t *)__result;
 	int			i, off = 0;
 	bool		anynull = false;
 
-	memset(result, 0, sizeof(sql_bool_t));
-	result->ops = &sql_bool_ops;
+	memset(result, 0, sizeof(xpu_bool_t));
+	result->ops = &xpu_bool_ops;
 	for (i=0; i < expr->nargs; i++)
 	{
 		const kern_expression *arg;
-		sql_bool_t	status;
+		xpu_bool_t	status;
 
 		arg = (const kern_expression *)(expr->u.data + off);
 		EXPR_OVERRUN_CHECKS(arg);
@@ -126,12 +126,12 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 {
-	sql_bool_t *result = (sql_bool_t *)__result;
-	sql_bool_t	status;
+	xpu_bool_t *result = (xpu_bool_t *)__result;
+	xpu_bool_t	status;
 	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
-	memset(result, 0, sizeof(sql_bool_t));
-	result->ops = &sql_bool_ops;
+	memset(result, 0, sizeof(xpu_bool_t));
+	result->ops = &xpu_bool_ops;
 	assert(expr->nargs == 1);
 
 	EXPR_OVERRUN_CHECKS(arg);
@@ -152,17 +152,17 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
-	sql_bool_t	   *result = (sql_bool_t *)__result;
-	sql_datum_t	   *status;
+	xpu_bool_t	   *result = (xpu_bool_t *)__result;
+	xpu_datum_t	   *status;
 	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
 	assert(expr->nargs == 1);
 	EXPR_OVERRUN_CHECKS(arg);
-	status = (sql_datum_t *)alloca(arg->rettype_ops->sql_type_sizeof);
+	status = (xpu_datum_t *)alloca(arg->rettype_ops->xpu_type_sizeof);
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, status))
 		return false;
-	memset(result, 0, sizeof(sql_bool_t));
-	result->ops = &sql_bool_ops;
+	memset(result, 0, sizeof(xpu_bool_t));
+	result->ops = &xpu_bool_ops;
 	switch (expr->opcode)
 	{
 		case FuncOpCode__NullTestExpr_IsNull:
@@ -181,16 +181,16 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 {
-	sql_bool_t	   *result = (sql_bool_t *)__result;
-	sql_bool_t		status;
+	xpu_bool_t	   *result = (xpu_bool_t *)__result;
+	xpu_bool_t		status;
 	const kern_expression *arg = (const kern_expression *)expr->u.data;
 
 	assert(expr->nargs == 1);
 	EXPR_OVERRUN_CHECKS(arg);
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
 		return false;
-	memset(result, 0, sizeof(sql_bool_t));
-	result->ops = &sql_bool_ops;
+	memset(result, 0, sizeof(xpu_bool_t));
+	result->ops = &xpu_bool_ops;
 	switch (expr->opcode)
 	{
 		case FuncOpCode__BoolTestExpr_IsTrue:
@@ -225,8 +225,8 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
  * Built-in SQL type / function catalog
  */
 #define TYPE_OPCODE(NAME,a,b)							\
-	{ TypeOpCode__##NAME, &sql_##NAME##_ops },
-PUBLIC_DATA sql_type_catalog_entry builtin_sql_types_catalog[] = {
+	{ TypeOpCode__##NAME, &xpu_##NAME##_ops },
+PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 #include "xpu_opcodes.h"
 	{ TypeOpCode__Invalid, NULL }
 };
@@ -234,7 +234,7 @@ PUBLIC_DATA sql_type_catalog_entry builtin_sql_types_catalog[] = {
 /*
  * Catalog of built-in device functions
  */
-PUBLIC_DATA sql_function_catalog_entry builtin_sql_functions_catalog[] = {
+PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },
 	{FuncOpCode__ParamExpr, 				pgfn_ParamExpr },
     {FuncOpCode__VarExpr,					pgfn_VarExpr },

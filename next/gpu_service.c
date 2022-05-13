@@ -303,7 +303,7 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 	HASHCTL		hctl;
 	HTAB	   *cuda_type_htab = NULL;
 	HTAB	   *cuda_func_htab = NULL;
-	sql_type_catalog_entry *builtin_sql_types_catalog;
+	xpu_type_catalog_entry *xpu_types_catalog;
 	CUdeviceptr	dptr;
 	CUresult	rc;
 	size_t		nbytes;
@@ -312,7 +312,7 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 	/* build device type table */
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = sizeof(TypeOpCode);
-	hctl.entrysize = sizeof(sql_type_catalog_entry);
+	hctl.entrysize = sizeof(xpu_type_catalog_entry);
 	hctl.hcxt = TopMemoryContext;
 	cuda_type_htab = hash_create("CUDA device type hash table",
 								 512,
@@ -323,15 +323,15 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
 
-	builtin_sql_types_catalog = alloca(nbytes);
-	rc = cuMemcpyDtoH(builtin_sql_types_catalog, dptr, nbytes);
+	xpu_types_catalog = alloca(nbytes);
+	rc = cuMemcpyDtoH(xpu_types_catalog, dptr, nbytes);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyDtoH: %s", cuStrError(rc));
-	for (i=0; builtin_sql_types_catalog[i].type_opcode != TypeOpCode__Invalid; i++)
+	for (i=0; xpu_types_catalog[i].type_opcode != TypeOpCode__Invalid; i++)
 	{
-		TypeOpCode	type_opcode = builtin_sql_types_catalog[i].type_opcode;
-		sql_datum_operators *type_ops = builtin_sql_types_catalog[i].type_ops;
-		sql_type_catalog_entry *entry;
+		TypeOpCode	type_opcode = xpu_types_catalog[i].type_opcode;
+		xpu_datum_operators *type_ops = xpu_types_catalog[i].type_ops;
+		xpu_type_catalog_entry *entry;
 		bool		found;
 
 		entry = hash_search(cuda_type_htab, &type_opcode, HASH_ENTER, &found);

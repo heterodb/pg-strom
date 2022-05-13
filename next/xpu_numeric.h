@@ -13,11 +13,11 @@
 #define XPU_NUMERIC_H
 
 typedef struct {
-	SQL_DATUM_COMMON_FIELD;
+	XPU_DATUM_COMMON_FIELD;
 	int16_t		weight;
 	int128_t	value;
-} sql_numeric_t;
-EXTERN_DATA sql_datum_operators sql_numeric_ops;
+} xpu_numeric_t;
+EXTERN_DATA xpu_datum_operators xpu_numeric_ops;
 
 /*
  * PostgreSQL numeric data type
