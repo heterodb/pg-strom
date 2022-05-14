@@ -26,21 +26,23 @@ pgfn_ExecExpression(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
+	const xpu_datum_operators *rettype_ops = kexp->rettype_ops;
 	const void *addr;
 
-	if (expr->u.c.const_isnull)
+	if (kexp->u.c.const_isnull)
 		addr = NULL;
 	else
-		addr = expr->u.c.const_value;
-	return expr->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
+		addr = kexp->u.c.const_value;
+	return rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
-	void	   *addr = kparam_get_value(kcxt->kparams, expr->u.p.param_id);
+	const xpu_datum_operators *rettype_ops = kexp->rettype_ops;
+	void	   *addr = kparam_get_value(kcxt->kparams, kexp->u.p.param_id);
 
-	return expr->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -53,18 +55,16 @@ STATIC_FUNCTION(bool)
 pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
-	int			i, off = 0;
+	int			i;
 	bool		anynull = false;
+	const kern_expression *arg;
 
-	memset(result, 0, sizeof(xpu_bool_t));
 	result->ops = &xpu_bool_ops;
-	for (i=0; i < expr->nargs; i++)
+	__EXPR_FIRST_ARG(arg);
+	for (i=0; i < kexp->nargs; i++)
 	{
-		const kern_expression *arg;
 		xpu_bool_t	status;
 
-		arg = (const kern_expression *)(expr->u.data + off);
-		EXPR_OVERRUN_CHECKS(arg);
 		if (arg->rettype != TypeOpCode__bool)
 		{
 			STROM_ELOG(kcxt, "corrupted kernel expression");
@@ -79,7 +79,7 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 			result->value = false;
 			return true;
 		}
-		off = MAXALIGN(off + VARSIZE(arg));
+		EXPR_NEXT_ARG(arg);
 	}
 	result->isnull = anynull;
 	result->value  = true;
@@ -90,18 +90,16 @@ STATIC_FUNCTION(bool)
 pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
-	int			i, off = 0;
+	int			i;
 	bool		anynull = false;
+	const kern_expression *arg;
 
-	memset(result, 0, sizeof(xpu_bool_t));
 	result->ops = &xpu_bool_ops;
-	for (i=0; i < expr->nargs; i++)
+	__EXPR_FIRST_ARG(arg);
+	for (i=0; i < kexp->nargs; i++)
 	{
-		const kern_expression *arg;
 		xpu_bool_t	status;
 
-		arg = (const kern_expression *)(expr->u.data + off);
-		EXPR_OVERRUN_CHECKS(arg);
 		if (arg->rettype != TypeOpCode__bool)
 		{
 			STROM_ELOG(kcxt, "corrupted kernel expression");
@@ -116,7 +114,7 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 			result->value = true;
 			return true;
 		}
-		off = MAXALIGN(off + VARSIZE(arg));
+		EXPR_NEXT_ARG(arg);
 	}
 	result->isnull = anynull;
 	result->value  = false;
@@ -128,13 +126,9 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	xpu_bool_t	status;
-	const kern_expression *arg = (const kern_expression *)expr->u.data;
+	const kern_expression *arg;
 
-	memset(result, 0, sizeof(xpu_bool_t));
-	result->ops = &xpu_bool_ops;
-	assert(expr->nargs == 1);
-
-	EXPR_OVERRUN_CHECKS(arg);
+	EXPR_FIRST_ARG(arg, 1);
 	if (arg->rettype != TypeOpCode__bool)
 	{
 		STROM_ELOG(kcxt, "corrupted kernel expression");
@@ -142,10 +136,14 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 	}
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
 		return false;
+	result->ops = &xpu_bool_ops;
 	if (status.isnull)
 		result->isnull = true;
 	else
+	{
+		result->isnull = false;
 		result->value = !result->value;
+	}
 	return true;
 }
 
@@ -154,16 +152,15 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t	   *result = (xpu_bool_t *)__result;
 	xpu_datum_t	   *status;
-	const kern_expression *arg = (const kern_expression *)expr->u.data;
+	const kern_expression *arg;
 
-	assert(expr->nargs == 1);
-	EXPR_OVERRUN_CHECKS(arg);
+	EXPR_FIRST_ARG(arg,1);
 	status = (xpu_datum_t *)alloca(arg->rettype_ops->xpu_type_sizeof);
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, status))
 		return false;
-	memset(result, 0, sizeof(xpu_bool_t));
 	result->ops = &xpu_bool_ops;
-	switch (expr->opcode)
+	result->isnull = false;
+	switch (kexp->opcode)
 	{
 		case FuncOpCode__NullTestExpr_IsNull:
 			result->value = status->isnull;
@@ -183,15 +180,14 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t	   *result = (xpu_bool_t *)__result;
 	xpu_bool_t		status;
-	const kern_expression *arg = (const kern_expression *)expr->u.data;
+	const kern_expression *arg;
 
-	assert(expr->nargs == 1);
-	EXPR_OVERRUN_CHECKS(arg);
+	EXPR_FIRST_ARG(arg,1);
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
 		return false;
-	memset(result, 0, sizeof(xpu_bool_t));
 	result->ops = &xpu_bool_ops;
-	switch (expr->opcode)
+	result->isnull = false;
+	switch (kexp->opcode)
 	{
 		case FuncOpCode__BoolTestExpr_IsTrue:
 			result->value = (!status.isnull && status.value);

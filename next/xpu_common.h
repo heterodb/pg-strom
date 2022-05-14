@@ -1201,7 +1201,7 @@ typedef enum {
 
 typedef struct kern_expression	kern_expression;
 #define XPU_PGFUNCTION_ARGS		kern_context *kcxt,			\
-								const kern_expression *expr,\
+								const kern_expression *kexp,\
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
@@ -1229,11 +1229,21 @@ struct kern_expression
 		} v;
 	} u;
 };
-#define EXEC_KERN_EXPRESSION(__kcxt,__expr,__retval)	\
-	(__expr)->fn_dptr((__kcxt),(__expr),(xpu_datum_t *)__retval)
-#define EXPR_OVERRUN_CHECKS(__arg)				\
-	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)expr + VARSIZE(expr))
-#define SizeOfKernExpr(__PAYLOAD_SZ)		\
+#define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
+	(__kexp)->fn_dptr((__kcxt),(__kexp),(xpu_datum_t *)__retval)
+#define EXPR_OVERRUN_CHECKS(__arg)									\
+	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)(kexp) + VARSIZE(kexp))
+#define __EXPR_FIRST_ARG(__arg)								\
+	__arg = ((const kern_expression *)((kexp)->u.data));	\
+	EXPR_OVERRUN_CHECKS(__arg)
+#define EXPR_FIRST_ARG(__arg,__nargs)								\
+	assert(kexp->nargs == (__nargs));								\
+	__EXPR_FIRST_ARG(__arg)
+#define EXPR_NEXT_ARG(__arg)										\
+	__arg = (const kern_expression *)								\
+		((const char *)(__arg) + MAXALIGN(VARSIZE(__arg)));			\
+	EXPR_OVERRUN_CHECKS(__arg)
+#define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
 #define SizeOfKernExprConst(__PAYLOAD_SZ)	\
 	(offsetof(kern_expression, u.c.const_value) + (__PAYLOAD_SZ))
