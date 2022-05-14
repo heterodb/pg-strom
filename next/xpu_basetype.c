@@ -24,22 +24,21 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float8, float8_t);
 /*
  * XPU Type Cast functions
  */
-#define PG_SIMPLE_TYPECAST_TEMPLATE(TARGET,SOURCE,CAST,PRECHECK)		\
+#define PG_SIMPLE_TYPECAST_TEMPLATE(TARGET,SOURCE,CAST,CHECK)			\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##SOURCE##_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																	\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;		\
 		xpu_##SOURCE##_t  datum;										\
-		const kern_expression *arg;										\
+		const kern_expression *arg = KEXP_FIRST_ARG(1,SOURCE);			\
 																		\
-		EXPR_FIRST_ARG(arg,1);											\
 		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))					\
 			return false;												\
 		result->ops = &xpu_##TARGET##_ops;								\
 		result->isnull = datum.isnull;									\
 		if (!result->isnull)											\
 		{																\
-			if (!PRECHECK(datum.value))									\
+			if (!CHECK(datum.value))									\
 			{															\
 				STROM_ELOG(kcxt, #SOURCE " to " #TARGET ": out of range"); \
 				return false;											\
@@ -142,12 +141,11 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(float8_t),__TYPECAST_NOCHECK)
 		xpu_bool_t *result = (xpu_bool_t *)__result;					\
 		xpu_##LNAME##_t lval;											\
 		xpu_##RNAME##_t rval;											\
-		const kern_expression *arg;										\
+		const kern_expression *arg = KEXP_FIRST_ARG(2,LNAME);			\
 																		\
-		EXPR_FIRST_ARG(arg, 2);											\
 		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &lval))					\
 			return false;												\
-		EXPR_NEXT_ARG(arg);												\
+		arg = KEXP_NEXT_ARG(arg, RNAME);								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &rval))					\
 			return false;												\
 		result->ops = &xpu_bool_ops;									\
