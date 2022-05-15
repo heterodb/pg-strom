@@ -42,6 +42,9 @@ else
   __NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
 endif
 __NVCC_FLAGS += --source-in-ptx
+# CUDA support FP16
+__NVCC_FLAGS += -DHAVE_FLOAT2
+
 
 __NVCC_DEBUG_FLAGS = $(__NVCC_FLAGS) --device-debug \
                      -DPGSTROM_DEBUG_BUILD=1

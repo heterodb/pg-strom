@@ -21,6 +21,14 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float2, float2_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float4, float4_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float8, float8_t);
 
+/* special support functions for float2 */
+INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf((float)fval); }
+INLINE_FUNCTION(bool) isnan(float2_t fval) { return isnan((float)fval); }
+INLINE_FUNCTION(long int) lrinth(float2_t fval) { return lrintf((float)fval); }
+INLINE_FUNCTION(bool) __iszero(float2_t fval) { return (float)fval == 0.0; }
+INLINE_FUNCTION(bool) __iszero(float4_t fval) { return fval == 0.0; }
+INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
+
 /*
  * XPU Type Cast functions
  */
@@ -56,7 +64,6 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float8, float8_t);
 #define __FLOAT8_FITS_IN_INT1(X)	(!isnan((double)(X)) &&				\
 									 rint((double)(X)) >= (double)SCHAR_MIN && \
 									 rint((double)(X)) <= (double)SCHAR_MAX)
-INLINE_FUNCTION(long int) lrinth(float2_t fval) { return lrintf((float)fval); }
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int2,(int8_t),__INTEGER_FITS_IN_INT1)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int4,(int8_t),__INTEGER_FITS_IN_INT1)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int8,(int8_t),__INTEGER_FITS_IN_INT1)
@@ -107,8 +114,8 @@ PG_SIMPLE_TYPECAST_TEMPLATE(int8,float8,llrintf,__FLOAT8_FITS_IN_INT8)
 
 #define __i2fp16(X)					((float2_t)((float)(X)))
 #define __INTEGER_FITS_IN_FLOAT2(X)	!isinf((float)__i2fp16(X))
-#define __FLOAT_FITS_IN_FLOAT2(X)	((!isinf((float)((float2_t)(X))) || isinf(X)) && \
-									 ((float)((float2_t)(X))) != 0.0 || (X) == 0.0)
+#define __FLOAT_FITS_IN_FLOAT2(X)	((!isinf((float2_t)(X))  || isinf(X)) && \
+									 (!__iszero((float2_t)(X)) || __iszero(X)))
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int1,__i2fp16,__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int2,__i2fp16,__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,int4,__i2fp16,__INTEGER_FITS_IN_FLOAT2)
@@ -117,8 +124,8 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float2,float4,(float2_t),__FLOAT_FITS_IN_FLOAT2)
 PG_SIMPLE_TYPECAST_TEMPLATE(float2,float8,(float2_t),__FLOAT_FITS_IN_FLOAT2)
 #undef __i2fp16
 
-#define __FLOAT_FITS_IN_FLOAT4(X)	((!isinf((float4_t)(X)) || isinf(X)) && \
-									 ((float4_t)(X) != 0.0 || (X) == 0.0))
+#define __FLOAT_FITS_IN_FLOAT4(X)	((!isinf((float4_t)(X))  || isinf(X)) && \
+									 (!__iszero((float4_t)(X)) || __iszero(X)))
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int1,(float4_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int2,(float4_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float4,int4,(float4_t),__TYPECAST_NOCHECK)
@@ -193,15 +200,345 @@ PG_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, float8_t)
 PG_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, float8_t)
 PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 
+/*
+ * Binary operator template
+ */
+#define PG_INT_BIN_OPERATOR_TEMPLATE(FNAME,RTYPE,XTYPE,YTYPE,OPER,		\
+									 __TEMP,__MIN,__MAX)				\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
+	{																	\
+		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
+		xpu_##XTYPE##_t x_val;											\
+		xpu_##YTYPE##_t y_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(2, XTYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+			return false;												\
+		result->ops = &xpu_##RTYPE##_ops;								\
+		result->isnull = (x_val.isnull | y_val.isnull);					\
+		if (!result->isnull)											\
+		{																\
+			__TEMP r = (__TEMP)x_val.value OPER (__TEMP)y_val.value;	\
+																		\
+			if (r < (__TEMP)__MIN || r > (__TEMP)__MAX)					\
+			{															\
+				STROM_ELOG(kcxt, #FNAME ": value out of range");		\
+				return false;											\
+			}															\
+			result->value = r;											\
+		}																\
+		return true;													\
+	}
+
+#define PG_FLOAT_BIN_OPERATOR_TEMPLATE(FNAME,RTYPE,XTYPE,YTYPE,OPER,	\
+									   __CAST,__INF_CHECK,__ZERO_CHECK)	\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
+	{																	\
+		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
+		xpu_##XTYPE##_t x_val;											\
+		xpu_##YTYPE##_t y_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(2, XTYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+			return false;												\
+		result->ops = &xpu_##RTYPE##_ops;								\
+		result->isnull = (x_val.isnull | y_val.isnull);					\
+		if (!result->isnull)											\
+		{																\
+			result->value = (__CAST)x_val.value OPER (__CAST)y_val.value; \
+			if ((__INF_CHECK  && (isinf(result->value) &&				\
+								  !isinf(x_val.value) &&				\
+								  !isinf(y_val.value))) ||				\
+				(__ZERO_CHECK && (__iszero(result->value) &&			\
+								  !__iszero(x_val.value) &&				\
+								  !__iszero(y_val.value))))				\
+			{															\
+				STROM_ELOG(kcxt, #FNAME ": value out of range");		\
+				return false;											\
+			}															\
+		}																\
+		return true;													\
+	}
+
 /* '+' : add operators */
+PG_INT_BIN_OPERATOR_TEMPLATE(int1pl, int1,int1,int1,+, int16_t,SCHAR_MIN,SCHAR_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int12pl,int2,int1,int2,+, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int14pl,int4,int1,int4,+, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int18pl,int8,int1,int8,+,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int21pl,int2,int2,int1,+, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int2pl, int2,int2,int2,+, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int24pl,int4,int2,int4,+, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int28pl,int8,int2,int8,+,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int41pl,int4,int4,int1,+, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int42pl,int4,int4,int2,+, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int4pl, int4,int4,int4,+, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int48pl,int8,int4,int8,+,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int81pl,int8,int8,int1,+,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int82pl,int8,int8,int2,+,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int84pl,int8,int8,int4,+,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int8pl, int8,int8,int8,+,int128_t,LLONG_MAX,LLONG_MIN)
 
-
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float2pl, float2,float2,float2,+,float2_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float24pl,float4,float2,float4,+,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float28pl,float8,float2,float8,+,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float42pl,float4,float4,float2,+,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float4pl, float4,float4,float4,+,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float48pl,float8,float4,float8,+,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float82pl,float8,float8,float2,+,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float84pl,float8,float8,float4,+,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8pl, float8,float8,float8,+,float8_t,true,false)
 
 /* '-' : subtract operators */
+PG_INT_BIN_OPERATOR_TEMPLATE(int1mi, int1,int1,int1,-, int16_t,SCHAR_MIN,SCHAR_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int12mi,int2,int1,int2,-, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int14mi,int4,int1,int4,-, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int18mi,int8,int1,int8,-,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int21mi,int2,int2,int1,-, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int2mi, int2,int2,int2,-, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int24mi,int4,int2,int4,-, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int28mi,int8,int2,int8,-,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int41mi,int4,int4,int1,-, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int42mi,int4,int4,int2,-, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int4mi, int4,int4,int4,-, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int48mi,int8,int4,int8,-,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int81mi,int8,int8,int1,-,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int82mi,int8,int8,int2,-,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int84mi,int8,int8,int4,-,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int8mi, int8,int8,int8,-,int128_t,LLONG_MAX,LLONG_MIN)
 
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float2mi, float2,float2,float2,-,float2_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float24mi,float4,float2,float4,-,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float28mi,float8,float2,float8,-,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float42mi,float4,float4,float2,-,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float4mi, float4,float4,float4,-,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float48mi,float8,float4,float8,-,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float82mi,float8,float8,float2,-,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float84mi,float8,float8,float4,-,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mi, float8,float8,float8,-,float8_t,true,false)
 
 /* '*' : multiply operators */
+PG_INT_BIN_OPERATOR_TEMPLATE(int1mul, int1,int1,int1,*, int16_t,SCHAR_MIN,SCHAR_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int12mul,int2,int1,int2,*, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int14mul,int4,int1,int4,*, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int18mul,int8,int1,int8,*,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int21mul,int2,int2,int1,*, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int2mul, int2,int2,int2,*, int32_t,SHRT_MIN,SHRT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int24mul,int4,int2,int4,*, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int28mul,int8,int2,int8,*,int128_t,LLONG_MIN,LLONG_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int41mul,int4,int4,int1,*, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int42mul,int4,int4,int2,*, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int4mul, int4,int4,int4,*, int64_t,INT_MIN,INT_MAX)
+PG_INT_BIN_OPERATOR_TEMPLATE(int48mul,int8,int4,int8,*,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int81mul,int8,int8,int1,*,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int82mul,int8,int8,int2,*,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int84mul,int8,int8,int4,*,int128_t,LLONG_MAX,LLONG_MIN)
+PG_INT_BIN_OPERATOR_TEMPLATE(int8mul, int8,int8,int8,*,int128_t,LLONG_MAX,LLONG_MIN)
 
-
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float2mul, float2,float2,float2,*,float2_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float24mul,float4,float2,float4,*,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float28mul,float8,float2,float8,*,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float42mul,float4,float4,float2,*,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float4mul, float4,float4,float4,*,float4_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float48mul,float8,float4,float8,*,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float82mul,float8,float8,float2,*,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float84mul,float8,float8,float4,*,float8_t,true,false)
+PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,float8_t,true,false)
 
 /* '/' : divide operators */
+#define PG_INT_DIV_OPERATOR_TEMPLATE(FNAME,RTYPE,XTYPE,YTYPE,__MIN)		\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
+	{																	\
+		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
+		xpu_##XTYPE##_t x_val;											\
+		xpu_##YTYPE##_t y_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(2, XTYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+			return false;												\
+		result->ops = &xpu_##RTYPE##_ops;								\
+		result->isnull = (x_val.isnull | y_val.isnull);					\
+		if (!result->isnull)											\
+		{																\
+			if (y_val.value == 0)										\
+			{															\
+				STROM_ELOG(kcxt, #FNAME ": division by zero");			\
+				return false;											\
+			}															\
+			/* if overflow may happen, __MIN should be set */			\
+			if (__MIN != 0 && y_val.value == -1)						\
+			{															\
+				if (x_val.value == __MIN)								\
+				{														\
+					STROM_ELOG(kcxt, #FNAME ": value out of range");	\
+					return false;										\
+				}														\
+				result->value = -x_val.value;							\
+			}															\
+			else														\
+			{															\
+				result->value = x_val.value / y_val.value;				\
+			}															\
+		}																\
+		return true;													\
+	}
+
+#define PG_FLOAT_DIV_OPERATOR_TEMPLATE(FNAME,RTYPE,XTYPE,YTYPE,__CAST)	\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)                                   \
+    {                                                                   \
+        xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;          \
+        xpu_##XTYPE##_t x_val;                                          \
+        xpu_##YTYPE##_t y_val;                                          \
+        const kern_expression *arg;                                     \
+                                                                        \
+        arg = KEXP_FIRST_ARG(2, XTYPE);                                 \
+        if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))                   \
+            return false;                                               \
+        arg = KEXP_NEXT_ARG(arg, YTYPE);                                \
+        if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))                   \
+            return false;                                               \
+        result->ops = &xpu_##RTYPE##_ops;                               \
+        result->isnull = (x_val.isnull | y_val.isnull);                 \
+        if (!result->isnull)                                            \
+        {                                                               \
+			if (__iszero(y_val.value))									\
+			{                                                           \
+				STROM_ELOG(kcxt, #FNAME ": division by zero");          \
+				return false;                                           \
+			}                                                           \
+			result->value = (__CAST)x_val.value / (__CAST)y_val.value;	\
+			/* CHECKFLOATVAL */											\
+			if ((isinf(result->value) && (!isinf(x_val.value) &&		\
+										  !isinf(y_val.value))) ||		\
+				(__iszero(result->value) && !__iszero(x_val.value)))	\
+			{															\
+				STROM_ELOG(kcxt, #FNAME ": value out of range");		\
+				return false;											\
+			}															\
+		}																\
+        return true;                                                    \
+    }
+
+PG_INT_DIV_OPERATOR_TEMPLATE(int1div, int1,int1,int1,SCHAR_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int12div,int2,int1,int2,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int14div,int4,int1,int4,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int18div,int8,int1,int8,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int21div,int2,int2,int1,SHRT_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int2div, int2,int2,int2,SHRT_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int24div,int4,int2,int4,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int28div,int8,int2,int8,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int41div,int4,int4,int1,INT_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int42div,int4,int4,int2,INT_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int4div, int4,int4,int4,INT_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int48div,int8,int4,int8,0)
+PG_INT_DIV_OPERATOR_TEMPLATE(int81div,int8,int8,int1,LLONG_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int82div,int8,int8,int2,LLONG_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int84div,int8,int8,int4,LLONG_MIN)
+PG_INT_DIV_OPERATOR_TEMPLATE(int8div, int8,int8,int8,LLONG_MIN)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float2div, float2,float2,float2,float2_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float24div,float4,float2,float4,float4_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float28div,float8,float2,float8,float8_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float42div,float4,float4,float2,float4_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float4div, float4,float4,float4,float4_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float48div,float8,float4,float8,float8_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float82div,float8,float8,float2,float8_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float84div,float8,float8,float4,float8_t)
+PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,float8_t)
+
+/*
+ * Bit operators: '&', '|', '#', '~', '>>', and '<<'
+ */
+#define PG_UNARY_OPERATOR_TEMPLATE(FNAME,XTYPE,OPER)					\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
+	{																	\
+		xpu_##XTYPE##_t *result = (xpu_##XTYPE##_t *)__result;			\
+		xpu_##XTYPE##_t x_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(1, XTYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		result->ops = &xpu_##XTYPE##_ops;								\
+		result->isnull = x_val.isnull;									\
+		if (!result->isnull)											\
+			result->value = OPER x_val.value;							\
+		return true;													\
+	}
+
+#define PG_BITWISE_OPERATOR_TEMPLATE(FNAME,RTYPE,XTYPE,YTYPE,OPER)		\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
+	{																	\
+		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
+		xpu_##XTYPE##_t x_val;											\
+		xpu_##YTYPE##_t y_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(2, XTYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+			return false;												\
+		result->ops = &xpu_##RTYPE##_ops;								\
+		result->isnull = (x_val.isnull | y_val.isnull);					\
+		if (!result->isnull)											\
+			result->value = x_val.value OPER y_val.value;				\
+		return true;													\
+	}
+
+PG_UNARY_OPERATOR_TEMPLATE(int1up,int1,)
+PG_UNARY_OPERATOR_TEMPLATE(int2up,int2,)
+PG_UNARY_OPERATOR_TEMPLATE(int4up,int4,)
+PG_UNARY_OPERATOR_TEMPLATE(int8up,int8,)
+
+PG_UNARY_OPERATOR_TEMPLATE(int1um,int1,-)
+PG_UNARY_OPERATOR_TEMPLATE(int2um,int2,-)
+PG_UNARY_OPERATOR_TEMPLATE(int4um,int4,-)
+PG_UNARY_OPERATOR_TEMPLATE(int8um,int8,-)
+
+PG_BITWISE_OPERATOR_TEMPLATE(int1and,int1,int1,int1,&)
+PG_BITWISE_OPERATOR_TEMPLATE(int2and,int2,int2,int2,&)
+PG_BITWISE_OPERATOR_TEMPLATE(int4and,int4,int4,int4,&)
+PG_BITWISE_OPERATOR_TEMPLATE(int8and,int8,int8,int8,&)
+
+PG_BITWISE_OPERATOR_TEMPLATE(int1or,int1,int1,int1,|)
+PG_BITWISE_OPERATOR_TEMPLATE(int2or,int2,int2,int2,|)
+PG_BITWISE_OPERATOR_TEMPLATE(int4or,int4,int4,int4,|)
+PG_BITWISE_OPERATOR_TEMPLATE(int8or,int8,int8,int8,|)
+
+PG_BITWISE_OPERATOR_TEMPLATE(int1xor,int1,int1,int1,^)
+PG_BITWISE_OPERATOR_TEMPLATE(int2xor,int2,int2,int2,^)
+PG_BITWISE_OPERATOR_TEMPLATE(int4xor,int4,int4,int4,^)
+PG_BITWISE_OPERATOR_TEMPLATE(int8xor,int8,int8,int8,^)
+
+PG_UNARY_OPERATOR_TEMPLATE(int1not,int1,~)
+PG_UNARY_OPERATOR_TEMPLATE(int2not,int2,~)
+PG_UNARY_OPERATOR_TEMPLATE(int4not,int4,~)
+PG_UNARY_OPERATOR_TEMPLATE(int8not,int8,~)
+
+PG_BITWISE_OPERATOR_TEMPLATE(int1shr,int1,int1,int4,>>)
+PG_BITWISE_OPERATOR_TEMPLATE(int2shr,int2,int2,int4,>>)
+PG_BITWISE_OPERATOR_TEMPLATE(int4shr,int4,int4,int4,>>)
+PG_BITWISE_OPERATOR_TEMPLATE(int8shr,int8,int8,int4,>>)
+
+PG_BITWISE_OPERATOR_TEMPLATE(int1shl,int1,int1,int4,<<)
+PG_BITWISE_OPERATOR_TEMPLATE(int2shl,int2,int2,int4,<<)
+PG_BITWISE_OPERATOR_TEMPLATE(int4shl,int4,int4,int4,<<)
+PG_BITWISE_OPERATOR_TEMPLATE(int8shl,int8,int8,int4,<<)
