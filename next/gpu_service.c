@@ -723,13 +723,31 @@ gpuservBgWorkerMain(Datum arg)
 }
 
 /*
- * gpuserv_open_connection
+ * Backend side functions
+ * ------------------------------------------------
+ */
+#define GPUSERV_CONNECTION_NSLOTS		24
+static dlist_head	gpuserv_connection_slots[GPUSERV_CONNECTION_NSLOTS];
+static int			gpuserv_num_connections = 0;
+
+typedef struct
+{
+	dlist_node	chain;
+	int			cuda_dindex;
+	pgsocket	sockfd;
+	ResourceOwner resowner;
+} gpuservConnTrack;
+
+/*
+ * gpuservOpenConnection
  */
 pgsocket
-gpuserv_open_connection(int cuda_dindex)
+gpuservOpenConnection(int cuda_dindex)
 {
 	struct sockaddr_un addr;
-	pgsocket	sockfd;
+	pgsocket		sockfd;
+	dlist_head	   *slot;
+	gpuservConnTrack *track;
 
 	if (cuda_dindex < 0 || cuda_dindex >= numGpuDevAttrs)
 		elog(ERROR, "GPU%d is not installed", cuda_dindex);
@@ -750,7 +768,85 @@ gpuserv_open_connection(int cuda_dindex)
 		elog(ERROR, "failed on connect('%s'): %s",
 			 addr.sun_path, strerror(__errno));
 	}
+	/* remember the connection */
+	track = calloc(1, sizeof(gpuservConnTrack));
+	if (!track)
+	{
+		close(sockfd);
+		elog(ERROR, "out of memory");
+	}
+	track->cuda_dindex = cuda_dindex;
+	track->sockfd = sockfd;
+	track->resowner = CurrentResourceOwner;
+	slot = &gpuserv_connection_slots[sockfd % GPUSERV_CONNECTION_NSLOTS];
+	dlist_push_tail(slot, &track->chain);
+	gpuserv_num_connections++;
+
+	/* TODO: initial negatiation here? */
 	return sockfd;
+}
+
+/*
+ * gpuservCloseConnection
+ */
+void
+gpuservCloseConnection(pgsocket sockfd)
+{
+	dlist_iter		iter;
+	dlist_head	   *slot
+		= &gpuserv_connection_slots[sockfd % GPUSERV_CONNECTION_NSLOTS];
+	dlist_foreach (iter, slot)
+	{
+		gpuservConnTrack *track = dlist_container(gpuservConnTrack,
+												  chain, iter.cur);
+		if (track->sockfd)
+		{
+			gpuserv_num_connections--;
+			dlist_delete(&track->chain);
+			if (close(track->sockfd) != 0)
+				elog(LOG, "failed on close(sockfd): %m");
+			free(track);
+			return;
+		}
+	}
+	elog(ERROR, "socket %d is not tracked as a client of GPU service", sockfd);
+}
+
+/*
+ * gpuservCleanupConnections
+ */
+static void
+gpuservCleanupConnections(ResourceReleasePhase phase,
+						  bool isCommit,
+						  bool isTopLevel,
+						  void *arg)
+{
+	int		i;
+
+	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS || gpuserv_num_connections == 0)
+		return;
+	for (i=0; i < GPUSERV_CONNECTION_NSLOTS; i++)
+	{
+		dlist_head	   *slot = &gpuserv_connection_slots[i];
+		dlist_mutable_iter iter;
+
+		dlist_foreach_modify(iter, slot)
+		{
+			gpuservConnTrack *track = dlist_container(gpuservConnTrack,
+													  chain, iter.cur);
+			if (track->resowner == CurrentResourceOwner)
+			{
+				gpuserv_num_connections--;
+				dlist_delete(&track->chain);
+				if (isCommit)
+					elog(LOG, "Bug? socket %d is not closed on ExecEnd",
+						 track->sockfd);
+				if (close(track->sockfd) != 0)
+					elog(LOG, "failed on close(sockfd): %m");
+				free(track);
+			}
+		}
+	}
 }
 
 /*
@@ -790,4 +886,6 @@ pgstrom_init_gpu_service(void)
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpuservBgWorkerMain");
 	worker.bgw_main_arg = 0;
 	RegisterBackgroundWorker(&worker);
+
+	RegisterResourceReleaseCallback(gpuservCleanupConnections, NULL);
 }

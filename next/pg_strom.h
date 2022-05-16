@@ -248,10 +248,9 @@ extern bool		pgstrom_init_gpu_device(void);
  */
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
-extern pgsocket	gpuserv_open_connection(int cuda_dindex);
+extern pgsocket	gpuservOpenConnection(int cuda_dindex);
+extern void		gpuservCloseConnection(pgsocket sockfd);
 extern void		pgstrom_init_gpu_service(void);
-
-
 
 /*
  * apache arrow related stuff
