@@ -1281,6 +1281,16 @@ EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
 
 /* ----------------------------------------------------------------
  *
+ * PostgreSQL Device Functions (Built-in)
+ *
+ * ----------------------------------------------------------------
+ */
+#define FUNC_OPCODE(a,b,c,NAME,d)				\
+	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
+#include "xpu_opcodes.h"
+
+/* ----------------------------------------------------------------
+ *
  * Common XPU functions
  *
  * ----------------------------------------------------------------

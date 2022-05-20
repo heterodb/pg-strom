@@ -14,9 +14,15 @@
 
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
+	uint8_t		kind;		/* one of XPU_NUMERIC_KIND__* below */
 	int16_t		weight;
 	int128_t	value;
 } xpu_numeric_t;
+#define XPU_NUMERIC_KIND__VALID		0x00
+#define XPU_NUMERIC_KIND__NAN		0x01
+#define XPU_NUMERIC_KIND__POS_INF	0x02
+#define XPU_NUMERIC_KIND__NEG_INF	0x03
+
 EXTERN_DATA xpu_datum_operators xpu_numeric_ops;
 
 /*
@@ -61,11 +67,23 @@ typedef struct NumericData	NumericData;
 #define NUMERIC_POS			0x0000
 #define NUMERIC_NEG			0x4000
 #define NUMERIC_SHORT		0x8000
-#define NUMERIC_NAN			0xC000
+#define NUMERIC_SPECIAL		0xC000
 
 #define NUMERIC_FLAGBITS(n_head)	((n_head) & NUMERIC_SIGN_MASK)
-#define NUMERIC_IS_NAN(n_head)		(NUMERIC_FLAGBITS(n_head) == NUMERIC_NAN)
 #define NUMERIC_IS_SHORT(n_head)	(NUMERIC_FLAGBITS(n_head) == NUMERIC_SHORT)
+#define NUMERIC_IS_SPECIAL(n_head)	(NUMERIC_FLAGBITS(n_head) == NUMERIC_SPECIAL)
+
+#define NUMERIC_EXT_SIGN_MASK	0xF000	/* high bits plus NaN/Inf flag bits */
+#define NUMERIC_NAN				0xC000
+#define NUMERIC_PINF			0xD000
+#define NUMERIC_NINF			0xF000
+#define NUMERIC_INF_SIGN_MASK	0x2000
+
+#define NUMERIC_EXT_FLAGBITS(n_head) (n_head & NUMERIC_EXT_SIGN_MASK)
+#define NUMERIC_IS_NAN(n_head)		(n_head == NUMERIC_NAN)
+#define NUMERIC_IS_PINF(n_head)		(n_head == NUMERIC_PINF)
+#define NUMERIC_IS_NINF(n_head)		(n_head == NUMERIC_NINF)
+#define NUMERIC_IS_INF(n_head)		((n_head & ~NUMERIC_INF_SIGN_MASK) == NUMERIC_PINF)
 
 #define NUMERIC_SHORT_SIGN_MASK		0x2000
 #define NUMERIC_SHORT_DSCALE_MASK	0x1F80
@@ -80,10 +98,8 @@ typedef struct NumericData	NumericData;
 #define NUMERIC_DSCALE_MASK         0x3FFF
 
 INLINE_FUNCTION(uint32_t)
-NUMERIC_NDIGITS(NumericChoice *nc, uint32_t nc_len)
+NUMERIC_NDIGITS(uint16_t n_head, uint32_t nc_len)
 {
-	uint16_t	n_head = __Fetch(&nc->n_header);
-
 	return (NUMERIC_IS_SHORT(n_head)
 			? (nc_len - offsetof(NumericChoice, n_short.n_data))
 			: (nc_len - offsetof(NumericChoice, n_long.n_data)))
@@ -91,37 +107,32 @@ NUMERIC_NDIGITS(NumericChoice *nc, uint32_t nc_len)
 }
 
 INLINE_FUNCTION(NumericDigit *)
-NUMERIC_DIGITS(NumericChoice *nc)
+NUMERIC_DIGITS(NumericChoice *nc, uint16_t n_head)
 {
-	uint16_t	n_head = __Fetch(&nc->n_header);
-
 	return NUMERIC_IS_SHORT(n_head) ? nc->n_short.n_data : nc->n_long.n_data;
 }
 
 INLINE_FUNCTION(int)
-NUMERIC_SIGN(NumericChoice *nc)
+NUMERIC_SIGN(uint16_t n_head)
 {
-	uint16_t	n_head = __Fetch(&nc->n_header);
-
 	if (NUMERIC_IS_SHORT(n_head))
-		return (n_head & NUMERIC_SHORT_SIGN_MASK) ? NUMERIC_NEG : NUMERIC_POS;
+		return ((n_head & NUMERIC_SHORT_SIGN_MASK) ? NUMERIC_NEG : NUMERIC_POS);
+	if (NUMERIC_IS_SPECIAL(n_head))
+		return NUMERIC_EXT_FLAGBITS(n_head);
 	return NUMERIC_FLAGBITS(n_head);
 }
 
 INLINE_FUNCTION(uint32_t)
-NUMERIC_DSCALE(NumericChoice *nc)
+NUMERIC_DSCALE(NumericChoice *nc, uint16_t n_head)
 {
-	uint16_t	n_head = __Fetch(&nc->n_header);
-
 	if (NUMERIC_IS_SHORT(n_head))
 		return ((n_head & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT);
 	return (__Fetch(&nc->n_long.n_sign_dscale) & NUMERIC_DSCALE_MASK);
 }
 
 INLINE_FUNCTION(int)
-NUMERIC_WEIGHT(NumericChoice *nc)
+NUMERIC_WEIGHT(NumericChoice *nc, uint16_t n_head)
 {
-	uint16_t	n_head = __Fetch(&nc->n_header);
 	int			weight;
 
 	if (NUMERIC_IS_SHORT(n_head))

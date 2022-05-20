@@ -385,9 +385,9 @@ devtype_numeric_hash(bool isnull, Datum value)
 	if (len >= sizeof(uint16_t))
 	{
 		NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(value);
-		NumericDigit   *digits = NUMERIC_DIGITS(nc);
-		int				weight = NUMERIC_WEIGHT(nc) + 1;
-		int				i, ndigits = NUMERIC_NDIGITS(nc, len);
+		NumericDigit   *digits = NUMERIC_DIGITS(nc, nc->n_header);
+		int				weight = NUMERIC_WEIGHT(nc, nc->n_header) + 1;
+		int				i, ndigits = NUMERIC_NDIGITS(nc->n_header, len);
 		int128_t		value = 0;
 
 		for (i=0; i < ndigits; i++)
@@ -398,7 +398,7 @@ devtype_numeric_hash(bool isnull, Datum value)
 			if (value < 0)
 				elog(ERROR, "numeric value is out of range");
 		}
-		if (NUMERIC_SIGN(nc) == NUMERIC_NEG)
+		if (NUMERIC_SIGN(nc->n_header) == NUMERIC_NEG)
 			value = -value;
 		weight = PG_DEC_DIGITS * (ndigits - weight);
 		/* see, set_normalized_numeric */
