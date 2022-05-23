@@ -141,34 +141,6 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,(float8_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(float8_t),__TYPECAST_NOCHECK)
 #undef PG_SIMPLE_TYPECAST_TEMPLATE
 
-#define __PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA)	\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_##FNAME##EXTRA(XPU_PGFUNCTION_ARGS)							\
-	{																	\
-		xpu_bool_t *result = (xpu_bool_t *)__result;					\
-		xpu_##LNAME##_t lval;											\
-		xpu_##RNAME##_t rval;											\
-		const kern_expression *arg = KEXP_FIRST_ARG(2,LNAME);			\
-																		\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &lval))					\
-			return false;												\
-		arg = KEXP_NEXT_ARG(arg, RNAME);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &rval))					\
-			return false;												\
-		result->ops = &xpu_bool_ops;									\
-		result->isnull = (lval.isnull | rval.isnull);					\
-		if (!result->isnull)											\
-			result->value = ((CAST)lval.value OPER (CAST)rval.value);	\
-		return true;													\
-	}
-
-#define PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)		\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,==,eq)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,!=,ne)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<,lt)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<=,le)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>,gt)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>=,ge)
 
 PG_SIMPLE_COMPARE_TEMPLATE(int1,  int1, int1, int8_t)
 PG_SIMPLE_COMPARE_TEMPLATE(int12, int1, int2, int16_t)

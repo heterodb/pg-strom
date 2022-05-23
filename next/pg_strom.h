@@ -111,13 +111,6 @@ extern int		numGpuDevAttrs;
 /*
  * devtype/devfunc/devcast definitions
  */
-#define DEVKERN__NVIDIA_GPU			0x0001U		/* CUDA-based GPU */
-#define DEVKERN__NVIDIA_DPU			0x0002U		/* BlueField-X DPU */
-#define DEVKERN__ARMv8_SPU			0x0004U		/* ARMv8-based SPU */
-#define DEVKERN__ANY				0x0007U		/* Runnable on xPU */
-#define DEVFUNC__LOCALE_AWARE		0x0100U		/* Device function is locale aware,
-												 * thus, available only if "C" or
-												 * no locale configuration */
 struct devtype_info;
 struct devfunc_info;
 struct devcast_info;
@@ -129,7 +122,7 @@ typedef struct devtype_info
 	uint32_t	hash;
 	TypeOpCode	type_code;
 	Oid			type_oid;
-	uint32		type_flags;
+	uint64_t	type_flags;
 	int16		type_length;
 	int16		type_align;
 	bool		type_byval;
@@ -158,7 +151,7 @@ typedef struct devfunc_info
 	const char *func_name;
 	Oid			func_oid;
 	struct devtype_info *func_rettype;
-	uint32_t	func_flags;
+	uint64_t	func_flags;
 	bool		func_is_negative;
 	int			func_nargs;
 	struct devtype_info *func_argtypes[1];
