@@ -885,8 +885,10 @@ struct kern_parambuf
 {
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
 	uint32_t	xactIdVector;		/* offset to xidvector */
-	struct xpu_tz_info *session_timezone;	/* set by xPU service mjio .IUm,*/
+	struct xpu_tz_info *session_timezone;	/* set by xPU service */
 	uint32_t	__session_timezone_offset;
+	struct xpu_encode_info *session_encode;	/* set by xPU service */
+	uint32_t	__session_encode_id;
 
 	/* variable length parameters / constants */
 	uint32_t	length;		/* total length of parambuf */

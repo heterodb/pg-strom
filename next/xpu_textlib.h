@@ -102,4 +102,17 @@ PGSTROM_SQLTYPE_VARLENA_DECLARATION(bytea);
 PGSTROM_SQLTYPE_VARLENA_DECLARATION(text);
 PGSTROM_SQLTYPE_VARLENA_DECLARATION(bpchar);
 
+/*
+ * Database Encoding Info
+ */
+struct xpu_encode_info {
+	char	encname[16];
+	int		enc_maxlen;
+	int	  (*enc_mblen)(const char *s);
+};
+typedef struct xpu_encode_info	xpu_encode_info;
+
+EXTERN_DATA xpu_encode_info		xpu_encode_catalog[];
+
+
 #endif  /* XPU_TEXTLIB_H */

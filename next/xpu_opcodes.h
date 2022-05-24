@@ -581,6 +581,25 @@ __FUNC_OPCODE(interval_le, interval/interval, NULL)
 __FUNC_OPCODE(interval_gt, interval/interval, NULL)
 __FUNC_OPCODE(interval_ge, interval/interval, NULL)
 
+/*
+ * Text functions/operators
+ */
+__FUNC_OPCODE(bpchareq, bpchar/bpchar, NULL)
+__FUNC_OPCODE(bpcharne, bpchar/bpchar, NULL)
+__FUNC_LOCALE_OPCODE(bpcharlt, bpchar/bpchar, NULL)
+__FUNC_LOCALE_OPCODE(bpcharle, bpchar/bpchar, NULL)
+__FUNC_LOCALE_OPCODE(bpchargt, bpchar/bpchar, NULL)
+__FUNC_LOCALE_OPCODE(bpcharge, bpchar/bpchar, NULL)
+FUNC_OPCODE(length, bpchar, DEVFUNC__LOCALE_AWARE|DEVKERN__ANY, bpcharlen, NULL)
+
+__FUNC_OPCODE(texteq, text/text, NULL)
+__FUNC_OPCODE(textne, text/text, NULL)
+__FUNC_LOCALE_OPCODE(text_lt, text/text, NULL)
+__FUNC_LOCALE_OPCODE(text_le, text/text, NULL)
+__FUNC_LOCALE_OPCODE(text_gt, text/text, NULL)
+__FUNC_LOCALE_OPCODE(text_ge, text/text, NULL)
+FUNC_OPCODE(length, text, DEVKERN__ANY, textlen, NULL)
+
 /* LIKE operators */
 __FUNC_OPCODE(like, text/text, NULL)
 __FUNC_OPCODE(textlike, text/text, NULL)
@@ -588,14 +607,14 @@ __FUNC_OPCODE(bpcharlike, bpchar/text, NULL)
 __FUNC_OPCODE(notlike, text/text, NULL)
 __FUNC_OPCODE(textnlike, text/text, NULL)
 __FUNC_OPCODE(bpcharnlike, bpchar/text, NULL)	
-__FUNC_LOCALE_OPCODE(texticlike, text/text, NULL)
-__FUNC_LOCALE_OPCODE(bpchariclike, bpchar/text, NULL)
-__FUNC_LOCALE_OPCODE(texticnlike, text/text, NULL)
-__FUNC_LOCALE_OPCODE(bpcharicnlike, bpchar/text, NULL)
+__FUNC_OPCODE(texticlike, text/text, NULL)
+__FUNC_OPCODE(bpchariclike, bpchar/text, NULL)
+__FUNC_OPCODE(texticnlike, text/text, NULL)
+__FUNC_OPCODE(bpcharicnlike, bpchar/text, NULL)
 
 /* String operations */
-__FUNC_OPCODE(textcat, text/text, NULL)
-__FUNC_OPCODE(concat, __text__, NULL)
+//__FUNC_OPCODE(textcat, text/text, NULL)
+//__FUNC_OPCODE(concat, __text__, NULL)
 
 #undef EXPR_OPCODE
 #undef TYPE_OPCODE
