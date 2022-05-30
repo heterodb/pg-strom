@@ -3881,7 +3881,7 @@ __arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 
 		if (!fstate->children)
 		{
-			/* shortcur, it should be a scalar built-in type */
+			/* shortcut, it should be a scalar built-in type */
 			Assert(fstate->num_children == 0);
 			if (attr->atttypid != fstate->atttypid)
 				return false;
@@ -3902,9 +3902,7 @@ __arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 				/* Arrow::List */
 				RecordBatchFieldState *cstate = &fstate->children[0];
 
-				if (attr->atttypid != cstate->atttypid)
-					type_is_ok = false;
-				else
+				if (typ->typelem == cstate->atttypid)
 				{
 					/*
 					 * overwrite typoid / typmod because a same arrow file
@@ -3913,6 +3911,10 @@ __arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
 					 */
 					fstate->atttypid = attr->atttypid;
 					fstate->atttypmod = attr->atttypmod;
+				}
+				else
+				{
+					type_is_ok = false;
 				}
 			}
 			else if (typ->typlen == -1 && OidIsValid(typ->typrelid))

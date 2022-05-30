@@ -371,20 +371,27 @@ __init_kernel_column_metadata(kern_data_store *kds,
 
 		if (OidIsValid(typ->typelem) && typ->typlen == -1)
 		{
-			char		elem_name[NAMEDATALEN + 10];
+			char	elem_name[NAMEDATALEN + 10];
+			int16	elem_len;
+			bool	elem_byval;
+			char	elem_align;
 
 			cmeta->atttypkind = TYPE_KIND__ARRAY;
 			cmeta->idx_subattrs = kds->nr_colmeta++;
 			cmeta->num_subattrs = 1;
 
 			snprintf(elem_name, sizeof(elem_name), "__%s", attname);
+			get_typlenbyvalalign(typ->typelem,
+								 &elem_len,
+								 &elem_byval,
+								 &elem_align);
 			__init_kernel_column_metadata(kds,
 										  cmeta->idx_subattrs,
 										  elem_name,
 										  1,				/* attnum */
-										  typ->typbyval,	/* attbyval */
-										  typ->typalign,	/* attalign */
-										  typ->typlen,		/* attlen */
+										  elem_byval,		/* attbyval */
+										  elem_align,		/* attalign */
+										  elem_len,			/* attlen */
 										  typ->typelem,		/* atttypid */
 										  -1,				/* atttypmod */
 										  NULL);			/* attcacheoff */
