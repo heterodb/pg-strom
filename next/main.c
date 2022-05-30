@@ -14,6 +14,12 @@
 PG_MODULE_MAGIC;
 
 /* misc variables */
+bool		pgstrom_enabled;				/* GUC */
+bool		pgstrom_cpu_fallback_enabled;	/* GUC */
+bool		pgstrom_regression_test_mode;	/* GUC */
+double		pgstrom_gpu_setup_cost = 100 * DEFAULT_SEQ_PAGE_COST;	/* GUC */
+double		pgstrom_gpu_dma_cost = DEFAULT_CPU_TUPLE_COST / 10.0;	/* GUC */
+double		pgstrom_gpu_operator_cost = DEFAULT_CPU_OPERATOR_COST / 16.0;	/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
@@ -54,6 +60,82 @@ pg_hash_any(const void *ptr, int sz)
 }
 
 /*
+ * pgstrom_init_misc_options
+ */
+static void
+pgstrom_init_misc_options(void)
+{
+	/* Disables PG-Strom features at all */
+	DefineCustomBoolVariable("pg_strom.enabled",
+							 "Enables the planner's use of PG-Strom",
+							 NULL,
+							 &pgstrom_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* turn on/off CPU fallback if GPU could not execute the query */
+	DefineCustomBoolVariable("pg_strom.cpu_fallback",
+							 "Enables CPU fallback if GPU required re-run",
+							 NULL,
+							 &pgstrom_cpu_fallback_enabled,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* disables some platform specific EXPLAIN output */
+	DefineCustomBoolVariable("pg_strom.regression_test_mode",
+							 "Disables some platform specific output in EXPLAIN; that can lead undesired test failed but harmless",
+							 NULL,
+							 &pgstrom_regression_test_mode,
+							 false,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+}
+
+/*
+ * pgstrom_init_gpu_options - init GUC params related to GPUs
+ */
+static void
+pgstrom_init_gpu_options(void)
+{
+	/* cost factor for Gpu setup */
+	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
+							 "Cost to setup GPU device to run",
+							 NULL,
+							 &pgstrom_gpu_setup_cost,
+							 100 * DEFAULT_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for each Gpu task */
+	DefineCustomRealVariable("pg_strom.gpu_dma_cost",
+							 "Cost to send/recv tuple via DMA",
+							 NULL,
+							 &pgstrom_gpu_dma_cost,
+							 DEFAULT_CPU_TUPLE_COST / 10.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for Gpu operator */
+	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
+							 "Cost of processing each operators by GPU",
+							 NULL,
+							 &pgstrom_gpu_operator_cost,
+							 DEFAULT_CPU_OPERATOR_COST / 16.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+}
+
+/*
  * _PG_init
  *
  * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
@@ -77,10 +159,11 @@ _PG_init(void)
 	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
 
 	/* init pg-strom infrastructure */
+	pgstrom_init_misc_options();
 	pgstrom_init_extra();
 	pgstrom_init_shmbuf();
 	pgstrom_init_codegen();
-
+	pgstrom_init_relscan();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
 		 PGSTROM_VERSION,
@@ -89,7 +172,10 @@ _PG_init(void)
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
+		pgstrom_init_gpu_options();
 		pgstrom_init_gpu_service();
-
+		pgstrom_init_gpu_scan();
+		//pgstrom_init_gpu_join();
+		//pgstrom_init_gpu_preagg();
 	}
 }

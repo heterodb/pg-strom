@@ -732,7 +732,6 @@ GetOptimalGpusForTablespace(Oid tablespace_oid)
 			= hash_create("TablespaceOptimalGpu", 128,
 						  &hctl, HASH_ELEM | HASH_BLOBS);
 	}
-
 	hentry = (tablespace_optimal_gpu_hentry *)
 		hash_search(tablespace_optimal_gpu_htable,
 					&tablespace_oid,

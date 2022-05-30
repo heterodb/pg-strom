@@ -19,17 +19,20 @@
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
 
+#include "access/brin.h"
 #include "access/genam.h"
 #include "access/table.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
 #include "commands/typecmds.h"
@@ -39,8 +42,16 @@
 #include "libpq/pqformat.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/pathnodes.h"
+#include "optimizer/clauses.h"
+#include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
+#include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
@@ -63,6 +74,8 @@
 #include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
+#include "utils/selfuncs.h"
+#include "utils/spccache.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
@@ -70,6 +83,7 @@
 #include "utils/wait_event.h"
 #include <assert.h>
 #include <cuda.h>
+#include <float.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -163,7 +177,6 @@ typedef struct devfunc_info
 
 
 
-
 /*
  * Global variables
  */
@@ -224,6 +237,29 @@ extern bool		pgstrom_gpu_expression(Expr *expr);
 extern void		pgstrom_init_codegen(void);
 
 /*
+ * datastore.c
+ */
+#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
+
+
+
+/*
+ * relscan.c
+ */
+extern bool		pgstrom_tryfind_brinindex(PlannerInfo *root,
+										  RelOptInfo *baserel,
+										  IndexOptInfo **p_indexOpt,
+										  List **p_indexConds,
+										  List **p_indexQuals,
+										  int64_t *p_indexNBlocks);
+
+extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
+												  RelOptInfo *rel);
+extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
+											   RelOptInfo *baserel);
+extern void		pgstrom_init_relscan(void);
+
+/*
  * gpu_device.c
  */
 extern bool		pgstrom_gpudirect_enabled(void);
@@ -244,6 +280,16 @@ extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern pgsocket	gpuservOpenConnection(int cuda_dindex);
 extern void		gpuservCloseConnection(pgsocket sockfd);
 extern void		pgstrom_init_gpu_service(void);
+
+/*
+ * gpu_scan.c
+ */
+extern void		pgstrom_init_gpu_scan(void);
+
+
+
+
+
 
 /*
  * apache arrow related stuff
@@ -268,6 +314,12 @@ extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
 /*
  * main.c
  */
+extern bool		pgstrom_enabled;
+extern bool		pgstrom_cpu_fallback_enabled;
+extern bool		pgstrom_regression_test_mode;
+extern double	pgstrom_gpu_setup_cost;
+extern double	pgstrom_gpu_dma_cost;
+extern double	pgstrom_gpu_operator_cost;
 extern void		_PG_init(void);
 
 
