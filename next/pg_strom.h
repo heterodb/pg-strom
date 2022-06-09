@@ -91,6 +91,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include "xpu_common.h"
 #include "pg_utils.h"
@@ -264,6 +265,10 @@ extern void		pgstrom_init_relscan(void);
  */
 extern bool		pgstrom_gpudirect_enabled(void);
 extern Size		pgstrom_gpudirect_threshold(void);
+
+extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
+extern CUresult gpuMemFree(CUdeviceptr dptr);
+
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
 									CUfunction kern_function,

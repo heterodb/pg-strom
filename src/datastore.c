@@ -1242,7 +1242,7 @@ __PDS_fillup_arrow(pgstrom_data_store *pds_dst,
 			}
 			else if (errno != EINTR)
 			{
-				werror("failed on pread(2) of arrow file: %m");
+				werror("failed on pread(2) of arrow file (dest=%p len=%zu pos=%lu): %m", dest, len, f_pos);
 			}
 		}
 		/*
