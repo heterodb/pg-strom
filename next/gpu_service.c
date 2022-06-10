@@ -126,6 +126,7 @@ typedef struct
 	dlist_head		free_chunks;	/* list of free chunks */
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
+	unsigned long	iomap_handle;	/* for old nvme_strom kmod */
 } gpuMemorySegment;
 
 typedef struct
@@ -197,6 +198,11 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 	rc = cuMemAlloc(&mseg->devptr, mseg->segment_sz);
 	if (rc != CUDA_SUCCESS)
 		goto error;
+	rc = gpuDirectMapGpuMemory(mseg->devptr,
+							   mseg->segment_sz,
+							   &mseg->iomap_handle);
+	if (rc != CUDA_SUCCESS)
+		goto error;
 
 	chunk->offset = 0;
 	chunk->length = segment_sz;
@@ -207,6 +213,8 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 
 	return mseg;
 error:
+	if (mseg->devptr)
+		cuMemFree(mseg->devptr);
 	if (mseg)
 		free(mseg);
 	if (chunk)
@@ -365,6 +373,10 @@ gpuMemoryPoolMaintenance(void)
 				continue;
 
 			/* ok, this segment should be released */
+			rc = gpuDirectUnmapGpuMemory(mseg->devptr,
+										 mseg->iomap_handle);
+			if (rc != CUDA_SUCCESS)
+				__FATAL("failed on gpuDirectUnmapGpuMemory: %s", cuStrError(rc));
 			rc = cuMemFree(mseg->devptr);
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuMemFree: %s", cuStrError(rc));
