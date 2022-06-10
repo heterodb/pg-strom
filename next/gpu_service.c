@@ -83,51 +83,9 @@ static dlist_head		gpuserv_gpucontext_list;
 void	gpuservBgWorkerMain(Datum arg);
 
 /*
- * fatal error (for worker threads)
- */
-#define __FATAL(fmt,...)						\
-	do {										\
-		fprintf(stderr, "(%s:%d) " fmt "\n",	\
-				basename(__FILE__), __LINE__,	\
-				##__VA_ARGS__);					\
-		_exit(1);								\
-	} while(0)
-
-static inline void
-pthreadMutexInit(pthread_mutex_t *mutex)
-{
-	if ((errno = pthread_mutex_init(mutex, NULL)) != 0)
-		__FATAL("failed on pthread_mutex_init: %m");
-}
-
-static inline void
-pthreadMutexLock(pthread_mutex_t *mutex)
-{
-	if ((errno = pthread_mutex_lock(mutex)) != 0)
-		__FATAL("failed on pthread_mutex_lock: %m");
-}
-
-static inline bool
-pthreadMutexTryLock(pthread_mutex_t *mutex)
-{
-	if ((errno = pthread_mutex_trylock(mutex)) == 0)
-		return true;
-	if (errno != EBUSY)
-		__FATAL("failed on pthread_mutex_trylock: %m");
-	return false;
-}
-
-static inline void
-pthreadMutexUnlock(pthread_mutex_t *mutex)
-{
-	if ((errno = pthread_mutex_unlock(mutex)) != 0)
-		__FATAL("failed on pthread_mutex_unlock: %m");
-}
-
-/*
  * cuStrError
  */
-static const char *
+const char *
 cuStrError(CUresult rc)
 {
 	static __thread char buffer[300];
@@ -640,7 +598,7 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 								 &hctl,
 								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
-						   "builtin_sql_types_catalog");
+						   "builtin_xpu_types_catalog");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
 

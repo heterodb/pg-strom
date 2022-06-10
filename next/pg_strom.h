@@ -92,6 +92,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "xpu_common.h"
 #include "pg_utils.h"
@@ -108,8 +110,7 @@ typedef struct GpuDevAttributes
 	int32		NUMA_NODE_ID;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
-	char		DEV_BRAND[16];
-	char		DEV_UUID[48];
+	char		DEV_UUID[sizeof(CUuuid)];
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
 	bool		DEV_SUPPORT_GPUDIRECTSQL;
@@ -191,6 +192,9 @@ extern long		PHYS_PAGES;
  * extra.c
  */
 extern void		pgstrom_init_extra(void);
+extern bool		heterodbValidateDevice(int gpu_device_id,
+									   const char *gpu_device_name,
+									   const char *gpu_device_uuid);
 extern int		gpuDirectInitDriver(void);
 extern void		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
 									  File pg_fdesc);
@@ -282,6 +286,7 @@ extern bool		pgstrom_init_gpu_device(void);
  */
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
+const char	   *cuStrError(CUresult rc);
 extern pgsocket	gpuservOpenConnection(int cuda_dindex);
 extern void		gpuservCloseConnection(pgsocket sockfd);
 extern void		pgstrom_init_gpu_service(void);
@@ -326,6 +331,5 @@ extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;
 extern double	pgstrom_gpu_operator_cost;
 extern void		_PG_init(void);
-
 
 #endif	/* PG_STROM_H */

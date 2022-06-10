@@ -159,5 +159,50 @@ format_millisec(double milliseconds)
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
 }
+
+/*
+ * Macros for worker threads
+ */
+#define __FATAL(fmt,...)                        \
+	do {                                        \
+		fprintf(stderr, "(%s:%d) " fmt "\n",    \
+				basename(__FILE__), __LINE__,   \
+				##__VA_ARGS__);                 \
+		_exit(1);                               \
+	} while(0)
+
+static inline void
+pthreadMutexInit(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_init(mutex, NULL)) != 0)
+		__FATAL("failed on pthread_mutex_init: %m");
+}
+
+static inline void
+pthreadMutexLock(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_lock(mutex)) != 0)
+		__FATAL("failed on pthread_mutex_lock: %m");
+}
+
+static inline bool
+pthreadMutexTryLock(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_trylock(mutex)) == 0)
+		return true;
+	if (errno != EBUSY)
+		__FATAL("failed on pthread_mutex_trylock: %m");
+	return false;
+}
+
+static inline void
+pthreadMutexUnlock(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_unlock(mutex)) != 0)
+		__FATAL("failed on pthread_mutex_unlock: %m");
+}
+
+
+
 #endif	/* PG_UTILS_H */
 

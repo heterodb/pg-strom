@@ -20,7 +20,7 @@ pgfn_ExecExpression(XPU_PGFUNCTION_ARGS)
 
 	
 	
-	
+	return false;
 }
 
 STATIC_FUNCTION(bool)

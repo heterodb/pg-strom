@@ -104,6 +104,24 @@ heterodbLicenseQuery(char *buf, size_t bufsz)
 }
 
 /*
+ * heterodbValidateDevice
+ */
+static int (*p_heterodb_validate_device)(int gpu_device_id,
+										 const char *gpu_device_name,
+                                         const char *gpu_device_uuid) = NULL;
+bool
+heterodbValidateDevice(int gpu_device_id,
+					   const char *gpu_device_name,
+					   const char *gpu_device_uuid)
+{
+	if (!p_heterodb_validate_device)
+		return false;
+	return (p_heterodb_validate_device(gpu_device_id,
+									   gpu_device_name,
+									   gpu_device_uuid) > 0);
+}
+
+/*
  * pgstrom_license_query
  */
 static char *
@@ -527,6 +545,7 @@ pgstrom_init_extra(void)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_print_nvme_info);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device);
 	}
 	PG_CATCH();
     {
@@ -544,6 +563,7 @@ pgstrom_init_extra(void)
 		p_sysfs_print_nvme_info = NULL;
 		p_heterodb_license_reload = NULL;
 		p_heterodb_license_query = NULL;
+		p_heterodb_validate_device = NULL;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
