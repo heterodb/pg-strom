@@ -61,44 +61,57 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(timestamptz, TimestampTz);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(interval, Interval);
 
 /*
- * session_timezone
+ * session_timezone (src/timezone/pgtz.h - pg_tz definition)
  */
-struct xpu_ttinfo
-{
-	int			tt_utoff;		/* UT offset in seconds */
+#define TZ_MAX_TIMES	2000
+#define TZ_MAX_TYPES	256
+#define TZ_MAX_LEAPS	50
+#ifndef TZ_STRLEN_MAX
+#define TZ_STRLEN_MAX	255
+#endif
+
+struct pg_tz_ttinfo
+{								/* time type information */
+	int32_t		tt_utoff;		/* UT offset in seconds */
 	bool		tt_isdst;		/* used to set tm_isdst */
-	int			tt_desigidx;	/* abbreviation list index */
+	int32_t		tt_desigidx;	/* abbreviation list index */
 	bool		tt_ttisstd;		/* transition is std time */
 	bool		tt_ttisut;		/* transition is UT */
 };
-typedef struct xpu_ttinfo	xpu_ttinfo;
 
-struct xpu_lsinfo
-{
-	int64_t		ls_trans;		/* transition time */
+struct pg_tz_lsinfo
+{								/* leap second information */
+	pg_time_t	ls_trans;		/* transition time */
 	int64_t		ls_corr;		/* correction to apply */
 };
-typedef struct xpu_lsinfo	xpu_lsinfo;
 
-struct xpu_tz_info
+struct pg_tz_state
 {
-	char		   *tzname;
-	int				leapcnt;
-	int				timecnt;
-	int				typecnt;
-	int				charcnt;
-	bool			goback;
-	bool			goahead;
-	int64_t		   *ats;
-	unsigned char  *types;
-	xpu_ttinfo	   *ttis;
-	char		   *chars;
-	xpu_lsinfo	   *lsis;
-	int				defaulttype;
+    int32_t		leapcnt;
+	int32_t		timecnt;
+	int32_t		typecnt;
+	int32_t		charcnt;
+	bool		goback;
+	bool		goahead;
+	int64_t		ats[TZ_MAX_TIMES];
+	uint8_t		types[TZ_MAX_TIMES];
+	struct pg_tz_ttinfo ttis[TZ_MAX_TYPES];
+	char		chars[2 * (TZ_STRLEN_MAX + 1)];
+	struct pg_tz_lsinfo lsis[TZ_MAX_LEAPS];
+	/*
+	 * The time type to use for early times or if no transitions. It is always
+	 * zero for recent tzdb releases. It might be nonzero for data from tzdb
+	 * 2018e or earlier.
+	 */
+	int			defaulttype;
 };
-typedef struct xpu_tz_info	xpu_tz_info;
-//TODO: encode/decode the structure
 
-
+struct pg_tz
+{
+	/* TZname contains the canonically-cased name of the timezone */
+	char		TZname[TZ_STRLEN_MAX + 1];
+	struct pg_tz_state state;
+};
+typedef struct pg_tz	pg_tz;
 
 #endif  /* XPU_TIMELIB_H */

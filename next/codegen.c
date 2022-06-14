@@ -27,13 +27,14 @@ static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 #define TYPE_OPCODE(NAME,OID,EXTENSION)		\
 	{ EXTENSION, #NAME,						\
 	  TypeOpCode__##NAME, DEVKERN__ANY,		\
-	  devtype_##NAME##_hash, InvalidOid},
+	  devtype_##NAME##_hash, sizeof(xpu_##NAME##_t), InvalidOid},
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
 	TypeOpCode		type_code;
 	uint32_t		type_flags;
 	devtype_hashfunc_f type_hashfunc;
+	int				type_sizeof;
 	Oid				type_alias;
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
@@ -123,6 +124,8 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			dtype->type_align = typealign_get_width(tcache->typalign);
 			dtype->type_byval = tcache->typbyval;
 			dtype->type_name = pstrdup(type_name);
+			dtype->type_extension = (ext_name ? pstrdup(ext_name) : NULL);
+			dtype->type_sizeof = devtype_catalog[i].type_sizeof;
 			dtype->type_hashfunc = devtype_catalog[i].type_hashfunc;
 			/* type equality functions */
 			dtype->type_eqfunc = get_opcode(tcache->eq_opr);
@@ -810,7 +813,7 @@ typedef struct
 {
 	StringInfo	buf;
 	List	   *used_params;
-	List	   *used_vars;
+	uint32_t	required_flags;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	int			num_rels;
@@ -923,8 +926,8 @@ codegen_param_expression(codegen_context *context, Param *param)
 
 		buf->len += needed;
 	}
-	context->used_params = list_append_unique_int(context->used_params,
-												  param->paramid);
+	context->used_params = list_append_unique(context->used_params, param);
+
 	return width;
 }
 
@@ -962,6 +965,7 @@ codegen_var_expression(codegen_context *context, Var *var)
 		{
 			kexp->u.v.var_depth = 0;
 			kexp->u.v.var_resno = var->varattno;
+			kexp->u.v.var_cache_id = -1;
 		}
 		else
 		{
@@ -995,11 +999,10 @@ codegen_var_expression(codegen_context *context, Var *var)
 		found:
 			kexp->u.v.var_depth = depth;
 			kexp->u.v.var_resno = resno;
+			kexp->u.v.var_cache_id = -1;
 		}
 		SET_VARSIZE(kexp, needed);
 	}
-	context->used_vars = list_append_unique(context->used_vars, var);
-
 	return width;
 }
 
@@ -1255,12 +1258,11 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 
 bytea *
 pgstrom_build_xpucode(Expr *expr,
-					  List **p_used_params,
-					  List **p_used_vars,
+					  int num_rels,
+					  List **rel_tlist,
 					  uint32_t *p_extra_flags,
 					  uint32_t *p_extra_bufsz,
-					  int num_rels,
-					  List **rel_tlist)
+					  List **p_used_params)
 {
 	codegen_context	   *context;
 	StringInfoData		buf;
@@ -1287,16 +1289,121 @@ pgstrom_build_xpucode(Expr *expr,
 	SET_VARSIZE(buf.data, buf.len);
 
 	if (p_used_params)
-		*p_used_params = list_concat_unique_int(*p_used_params,
-												context->used_params);
-	if (p_used_vars)
-		*p_used_vars = list_concat_unique(*p_used_vars,
-										  context->used_vars);
+		*p_used_params = list_concat_unique(*p_used_params, context->used_params);
 	if (p_extra_flags)
 		*p_extra_flags |= context->extra_flags;
 	if (p_extra_bufsz)
 		*p_extra_bufsz += context->extra_bufsz;
 	return (bytea *)buf.data;
+}
+
+/*
+ * pgstrom_apply_cached_varref
+ *
+ *
+ */
+typedef struct {
+	List	   *used_vars;
+	int			num_cached_vars;
+	uint32_t	extra_bufsz;
+} apply_cached_varref_context;
+
+static void
+__apply_cached_varref_walker(kern_expression *kexp,
+							 apply_cached_varref_context *context)
+{
+	int			i, off = 0;
+
+	if (kexp->opcode == FuncOpCode__VarExpr)
+	{
+		devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
+		ListCell	   *lc;
+
+		foreach (lc, context->used_vars)
+		{
+			kern_expression *kvar = lfirst(lc);
+
+			Assert(kvar->opcode == FuncOpCode__VarExpr);
+			if (kexp->u.v.var_depth == kvar->u.v.var_depth &&
+				kexp->u.v.var_resno == kvar->u.v.var_resno)
+			{
+				Assert(kexp->rettype == kvar->rettype);
+				if (kvar->u.v.var_cache_id < 0)
+				{
+					int		var_cache_id = context->num_cached_vars++;
+
+					kvar->u.v.var_cache_id = var_cache_id;
+					kexp->u.v.var_cache_id = var_cache_id;
+				}
+				else
+				{
+					int		var_cache_id = kvar->u.v.var_cache_id;
+
+					kexp->u.v.var_cache_id = var_cache_id;
+				}
+				context->extra_bufsz += MAXALIGN(dtype->type_sizeof);
+				break;
+			}
+		}
+		context->used_vars = lappend(context->used_vars, kexp);
+	}
+
+	for (i=0; i < kexp->nargs; i++)
+	{
+		kern_expression *arg = (kern_expression *)(kexp->u.data + off);
+
+		if (VARSIZE(kexp) < offsetof(kern_expression, u.data) + off + VARSIZE(arg))
+			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu]",
+				 VARSIZE(kexp),
+				 offsetof(kern_expression, u.data) + off,
+				 offsetof(kern_expression, u.data) + off + VARSIZE(arg));
+		__apply_cached_varref_walker(arg, context);
+		off += MAXALIGN(VARSIZE(arg));
+	}
+}
+
+int
+pgstrom_apply_cached_varref(bytea *kern_opcode, uint32_t *p_extra_bufsz)
+{
+	apply_cached_varref_context context;
+
+	memset(&context, 0, sizeof(apply_cached_varref_context));
+	__apply_cached_varref_walker((kern_expression *)kern_opcode, &context);
+
+	/* expand private buffer for varref cache */
+	if (context.num_cached_vars > 0)
+		context.extra_bufsz += MAXALIGN(sizeof(xpu_datum_t *) *
+										context.num_cached_vars);
+	*p_extra_bufsz += context.extra_bufsz;
+
+	return context.num_cached_vars;
+}
+
+/*
+ * pgstrom_gpu_expression
+ *
+ * checker whether the supplied expression is executable on GPU devices.
+ */
+bool
+pgstrom_gpu_expression(Expr *expr,
+					   int num_rels,
+					   List **rel_tlist)
+
+{
+	codegen_context	   *context;
+
+	context = alloca(offsetof(codegen_context, rel_tlist[num_rels]));
+	memset(&context, 0, offsetof(codegen_context, rel_tlist[num_rels]));
+	if (num_rels > 0)
+		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
+	context->num_rels = num_rels;
+
+	if (IsA(expr, List) && list_length((List *)expr) > 0)
+		expr = make_andclause((List *)expr);
+	if (codegen_expression_walker(context, expr) < 0)
+		return false;
+
+	return true;
 }
 
 /*

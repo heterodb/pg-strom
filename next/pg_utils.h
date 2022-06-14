@@ -12,6 +12,13 @@
 #ifndef PG_UTILS_H
 #define PG_UTILS_H
 
+/* Max/Min macros that takes 3 or more arguments */
+#define Max3(a,b,c)		((a) > (b) ? Max((a),(c)) : Max((b),(c)))
+#define Max4(a,b,c,d)	Max(Max((a),(b)), Max((c),(d)))
+
+#define Min3(a,b,c)		((a) > (b) ? Min((a),(c)) : Min((b),(c)))
+#define Min4(a,b,c,d)	Min(Min((a),(b)), Min((c),(d)))
+
 
 /*
  * transformation from align character into width

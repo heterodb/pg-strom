@@ -141,10 +141,58 @@ typedef struct {
 } kern_errorbuf;
 
 /*
+ * kern_session_info
+ *
+ * A set of immutable data during query execution (like, transaction info, timezone,
+ * parameter buffer).
+ */
+struct kern_session_info
+{
+	uint32_t	length;				/* total length of the session info */
+
+	/* kcxt initialization parameters */
+	uint32_t	num_cached_kvars;	/* # of cached_kvars[] items */
+	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+
+	/* database session info */
+	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
+	uint32_t	xact_id_array;		/* offset to array of xid */
+	uint32_t	session_timezone;	/* offset to pg_tz */
+	uint32_t	session_encode;		/* offset to xpu_encode_info;
+									 * !! function pointer must be set by server */
+	/* executor parameter buffer */
+	uint32_t	nparams;	/* number of parameters */
+	uint32_t	poffset[1];	/* offset of params */
+};
+typedef struct kern_session_info	kern_session_info;
+
+INLINE_FUNCTION(struct varlena *)
+SESSION_XACT_ID_ARRAY(kern_session_info *session)
+{
+	if (session->xact_id_array == 0)
+		return NULL;
+	return (struct varlena *)((char *)session + session->xact_id_array);
+}
+
+INLINE_FUNCTION(struct pg_tz *)
+SESSION_TIMEZONE(kern_session_info *session)
+{
+	if (session->session_timezone == 0)
+		return NULL;
+	return (struct pg_tz *)((char *)session + session->session_timezone);
+}
+
+INLINE_FUNCTION(struct xpu_encode_info *)
+SESSION_ENCODE(kern_session_info *session)
+{
+	if (session->session_encode == 0)
+		return NULL;
+	return (struct xpu_encode_info *)((char *)session + session->session_encode);
+}
+
+/*
  * kern_context - a set of run-time information
  */
-struct kern_parambuf;
-
 typedef struct
 {
 	int			errcode;
@@ -152,22 +200,30 @@ typedef struct
 	uint32_t	error_lineno;
 	const char *error_funcname;
 	const char *error_message;
-	struct kern_parambuf *kparams;
+	void	  **cached_kvars;
+	kern_session_info *session;
 	char	   *vlpos;
 	char	   *vlend;
 	char		vlbuf[1];
 } kern_context;
 
-#define DECL_KERNEL_CONTEXT(NAME,KPARAMS,BUFSZ)				\
-	union {													\
-		kern_context kcxt;									\
-		char __dummy__[offsetof(kern_context, vlbuf) +		\
-					   MAXALIGN(BUFSZ+1)];					\
-	} NAME;													\
-	memset(&NAME.kcxt, 0, offsetof(kern_context, vlbuf));	\
-	NAME.kcxt.kparams = (KPARAMS);							\
-	NAME.kcxt.vlpos = NAME.kcxt.vlbuf;						\
-	NAME.kcxt.vlend = NAME.kcxt.vlbuf + (BUFSZ)
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
+	do {																\
+		size_t	__sz = (offsetof(kern_context, vlbuf) +					\
+						MAXALIGN((SESSION)->kcxt_extra_bufsz) +			\
+						MAXALIGN(sizeof(void *) *						\
+								 (SESSION)->num_cached_kvars));			\
+		KCXT = alloca(__sz);											\
+		memset(KCXT, 0, __sz);											\
+		KCXT->session = (SESSION);										\
+		if ((SESSION)->num_cached_kvars > 0)							\
+			KCXT->cached_kvars = (void **)								\
+				((char *)KCXT +											\
+				 offsetof(kern_context, vlbuf) +						\
+				 MAXALIGN((SESSION)->kcxt_extra_bufsz));				\
+		KCXT->vlpos = vlbuf;											\
+		KCXT->vlend = vlbuf + (SESSION)->kcxt_extra_bufsz;				\
+	} while(0)
 
 INLINE_FUNCTION(void *)
 kcxt_alloc(kern_context *kcxt, size_t len)
@@ -185,6 +241,11 @@ kcxt_alloc(kern_context *kcxt, size_t len)
 INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
+	if (kcxt->cached_kvars)
+	{
+		uint32_t	__nrooms = kcxt->session->num_cached_kvars;
+		memset(kcxt->cached_kvars, 0, sizeof(void *) * __nrooms);
+	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
 
@@ -875,38 +936,6 @@ KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
 	return (extra + offset[rowidx]);	
 }
 
-/*
- * kern_parambuf
- *
- * Const and Parameter buffer. It stores constant values and system state
- * properties immutable during the query execution.
- */
-struct kern_parambuf
-{
-	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	xactIdVector;		/* offset to xidvector */
-	struct xpu_tz_info *session_timezone;	/* set by xPU service */
-	uint32_t	__session_timezone_offset;
-	struct xpu_encode_info *session_encode;	/* set by xPU service */
-	uint32_t	__session_encode_id;
-
-	/* variable length parameters / constants */
-	uint32_t	length;		/* total length of parambuf */
-	uint32_t	nparams;	/* number of parameters */
-	uint32_t	poffset[1];	/* offset of params */
-};
-typedef struct kern_parambuf	kern_parambuf;
-
-INLINE_FUNCTION(void *)
-kparam_get_value(kern_parambuf *kparams, uint32_t pindex)
-{
-	if (pindex >= kparams->nparams)
-		return NULL;
-	if (kparams->poffset[pindex] == 0)
-		return NULL;
-	return (char *)kparams + kparams->poffset[pindex];
-}
-
 /* ----------------------------------------------------------------
  *
  * Definitions of Varlena datum and related (mostly in postgres.h and c.h)
@@ -1246,6 +1275,7 @@ struct kern_expression
 		struct {
 			int16_t	var_depth;
 			int16_t	var_resno;
+			int16_t	var_cache_id;
 		} v;
 	} u;
 };

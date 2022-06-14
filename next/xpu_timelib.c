@@ -346,31 +346,31 @@ pg_next_dst_boundary(const pg_time_t *timep,
 					 pg_time_t *boundary,
 					 long int *after_gmtoff,
 					 int *after_isdst,
-					 const xpu_tz_info *tz)
+					 const pg_tz *tz)
 {
-	const struct xpu_ttinfo *ttisp;
+	const struct pg_tz_ttinfo *ttisp;
     const pg_time_t t = *timep;
 	int			i, j;
 
-	if (tz->timecnt == 0)
+	if (tz->state.timecnt == 0)
     {
         /* non-DST zone, use lowest-numbered standard type */
         i = 0;
-        while (tz->ttis[i].tt_isdst)
+        while (tz->state.ttis[i].tt_isdst)
 		{
-            if (++i >= tz->typecnt)
+            if (++i >= tz->state.typecnt)
             {
                 i = 0;
                 break;
             }
 		}
-        ttisp = &tz->ttis[i];
+        ttisp = &tz->state.ttis[i];
         *before_gmtoff = ttisp->tt_utoff;
         *before_isdst = ttisp->tt_isdst;
         return 0;
     }
-	if ((tz->goback && t < tz->ats[0]) ||
-		(tz->goahead && t > tz->ats[tz->timecnt - 1]))
+	if ((tz->state.goback  && t < tz->state.ats[0]) ||
+		(tz->state.goahead && t > tz->state.ats[tz->state.timecnt - 1]))
     {
 		/* For values outside the transition table, extrapolate */
 		pg_time_t	newt = t;
@@ -379,10 +379,10 @@ pg_next_dst_boundary(const pg_time_t *timep,
 		int64_t		icycles;
 		int			result;
 
-		if (t < tz->ats[0])
-			seconds = tz->ats[0] - t;
+		if (t < tz->state.ats[0])
+			seconds = tz->state.ats[0] - t;
 		else
-			seconds = t - tz->ats[tz->timecnt - 1];
+			seconds = t - tz->state.ats[tz->state.timecnt - 1];
 		--seconds;
 		tcycles = seconds / YEARSPERREPEAT / AVGSECSPERYEAR;
 		++tcycles;
@@ -392,12 +392,12 @@ pg_next_dst_boundary(const pg_time_t *timep,
 		seconds = icycles;
 		seconds *= YEARSPERREPEAT;
 		seconds *= AVGSECSPERYEAR;
-		if (t < tz->ats[0])
+		if (t < tz->state.ats[0])
 			newt += seconds;
 		else
 			newt -= seconds;
-		if (newt < tz->ats[0] ||
-			newt > tz->ats[tz->timecnt - 1])
+		if (newt < tz->state.ats[0] ||
+			newt > tz->state.ats[tz->state.timecnt - 1])
 			return -1;		/* "cannot happen" */
 
 		result = pg_next_dst_boundary(&newt, before_gmtoff,
@@ -406,40 +406,40 @@ pg_next_dst_boundary(const pg_time_t *timep,
 									  after_gmtoff,
 									  after_isdst,
 									  tz);
-		if (t < tz->ats[0])
+		if (t < tz->state.ats[0])
 			*boundary -= seconds;
 		else
 			*boundary += seconds;
 		return result;
 	}
-	if (t >= tz->ats[tz->timecnt - 1])
+	if (t >= tz->state.ats[tz->state.timecnt - 1])
 	{
 		/* No known transition > t, so use last known segment's type */
-		i = tz->types[tz->timecnt - 1];
-		ttisp = &tz->ttis[i];
+		i = tz->state.types[tz->state.timecnt - 1];
+		ttisp = &tz->state.ttis[i];
 		*before_gmtoff = ttisp->tt_utoff;
 		*before_isdst = ttisp->tt_isdst;
 		return 0;
 	}
-	if (t < tz->ats[0])
+	if (t < tz->state.ats[0])
 	{
 		/* For "before", use lowest-numbered standard type */
 		i = 0;
-		while (tz->ttis[i].tt_isdst)
+		while (tz->state.ttis[i].tt_isdst)
 		{
-			if (++i >= tz->typecnt)
+			if (++i >= tz->state.typecnt)
 			{
 				i = 0;
 				break;
 			}
 		}
-		ttisp = &tz->ttis[i];
+		ttisp = &tz->state.ttis[i];
 		*before_gmtoff = ttisp->tt_utoff;
 		*before_isdst = ttisp->tt_isdst;
-		*boundary = tz->ats[0];
+		*boundary = tz->state.ats[0];
 		/* And for "after", use the first segment's type */
-		i = tz->types[0];
-		ttisp = &tz->ttis[i];
+		i = tz->state.types[0];
+		ttisp = &tz->state.ttis[i];
 		*after_gmtoff = ttisp->tt_utoff;
 		*after_isdst = ttisp->tt_isdst;
 		return 1;
@@ -447,33 +447,33 @@ pg_next_dst_boundary(const pg_time_t *timep,
 	/* Else search to find the boundary following t */
 	{
 		int			lo = 1;
-		int			hi = tz->timecnt - 1;
+		int			hi = tz->state.timecnt - 1;
 
 		while (lo < hi)
 		{
 			int		mid = (lo + hi) >> 1;
 
-			if (t < tz->ats[mid])
+			if (t < tz->state.ats[mid])
 				hi = mid;
 			else
 				lo = mid + 1;
 		}
 		i = lo;
 	}
-	j = tz->types[i - 1];
-	ttisp = &tz->ttis[j];
+	j = tz->state.types[i - 1];
+	ttisp = &tz->state.ttis[j];
 	*before_gmtoff = ttisp->tt_utoff;
 	*before_isdst = ttisp->tt_isdst;
-	*boundary = tz->ats[i];
-	j = tz->types[i];
-	ttisp = &tz->ttis[j];
+	*boundary = tz->state.ats[i];
+	j = tz->state.types[i];
+	ttisp = &tz->state.ttis[j];
 	*after_gmtoff = ttisp->tt_utoff;
 	*after_isdst = ttisp->tt_isdst;
 	return 1;
 }
 
 STATIC_FUNCTION(int)
-DetermineTimeZoneOffset(struct pg_tm *tm, xpu_tz_info *tzp)
+DetermineTimeZoneOffset(struct pg_tm *tm, const pg_tz *tzp)
 {
 	pg_time_t	t;
 	pg_time_t  *tp = &t;
@@ -624,10 +624,9 @@ leaps_thru_end_of(int y)
 }
 
 STATIC_FUNCTION(bool)
-__timesub(struct pg_tm *tm, pg_time_t t, int32_t offset,
-		  const xpu_tz_info *tz)
+__timesub(struct pg_tm *tm, pg_time_t t, int32_t offset, const pg_tz *tz)
 {
-	const struct xpu_lsinfo *lp;
+	const struct pg_tz_lsinfo *lp;
 	pg_time_t	tdays;
 	int			idays;		/* unsigned would be so 2003 */
 	int64_t		rem;
@@ -638,10 +637,10 @@ __timesub(struct pg_tm *tm, pg_time_t t, int32_t offset,
 
 	corr = 0;
 	hit = false;
-	i = tz->leapcnt;
+	i = tz->state.leapcnt;
 	while (--i >= 0)
 	{
-		lp = &tz->lsis[i];
+		lp = &tz->state.lsis[i];
 		if (t >= lp->ls_trans)
 		{
 			corr = lp->ls_corr;
@@ -738,40 +737,40 @@ __timesub(struct pg_tm *tm, pg_time_t t, int32_t offset,
 }
 
 STATIC_FUNCTION(bool)
-pg_localtime(struct pg_tm *tx, pg_time_t t, const xpu_tz_info *tz)
+pg_localtime(struct pg_tm *tx, pg_time_t t, const pg_tz *tz)
 {
-	const struct xpu_ttinfo *ttisp;
+	const struct pg_tz_ttinfo *ttisp;
 	bool		rv;
 	int         i;
 
 	assert(tz != NULL);
-	if ((tz->goback && t < tz->ats[0]) ||
-        (tz->goahead && t > tz->ats[tz->timecnt - 1]))
+	if ((tz->state.goback && t < tz->state.ats[0]) ||
+        (tz->state.goahead && t > tz->state.ats[tz->state.timecnt - 1]))
     {
 		pg_time_t	newt = t;
 		pg_time_t	seconds;
 		pg_time_t	years;
 
-		if (t < tz->ats[0])
-			seconds = tz->ats[0] - t;
+		if (t < tz->state.ats[0])
+			seconds = tz->state.ats[0] - t;
 		else
-			seconds = t - tz->ats[tz->timecnt - 1];
+			seconds = t - tz->state.ats[tz->state.timecnt - 1];
 		--seconds;
 		years = (seconds / SECSPERREPEAT + 1) * YEARSPERREPEAT;
 		seconds = years * AVGSECSPERYEAR;
-		if (t < tz->ats[0])
+		if (t < tz->state.ats[0])
 			newt += seconds;
 		else
 			newt -= seconds;
-		if (newt < tz->ats[0] ||
-			newt > tz->ats[tz->timecnt - 1])
+		if (newt < tz->state.ats[0] ||
+			newt > tz->state.ats[tz->state.timecnt - 1])
 			return false;		/* cannot happen */
 		rv = pg_localtime(tx, newt, tz);
 		if (rv)
 		{
 			int64_t		newy = tx->tm_year;
 
-			if (t < tz->ats[0])
+			if (t < tz->state.ats[0])
 				newy -= years;
 			else
 				newy += years;
@@ -782,27 +781,27 @@ pg_localtime(struct pg_tm *tx, pg_time_t t, const xpu_tz_info *tz)
 		return rv;
 	}
 
-	if (tz->timecnt == 0 || t < tz->ats[0])
+	if (tz->state.timecnt == 0 || t < tz->state.ats[0])
 	{
-		i = tz->defaulttype;
+		i = tz->state.defaulttype;
 	}
 	else
 	{
 		int		lo = 1;
-        int		hi = tz->timecnt;
+        int		hi = tz->state.timecnt;
 
 		while (lo < hi)
 		{
 			int		mid = (lo + hi) >> 1;
 
-			if (t < tz->ats[mid])
+			if (t < tz->state.ats[mid])
 				hi = mid;
 			else
 				lo = mid + 1;
 		}
-		i = (int) tz->types[lo - 1];
+		i = (int) tz->state.types[lo - 1];
     }
-	ttisp = &tz->ttis[i];
+	ttisp = &tz->state.ttis[i];
 
 	/*
 	 * To get (wrong) behavior that's compatible with System V Release 2.0
@@ -817,8 +816,7 @@ pg_localtime(struct pg_tm *tx, pg_time_t t, const xpu_tz_info *tz)
 }
 
 STATIC_FUNCTION(bool)
-timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec,
-			 const xpu_tz_info *tz_info)
+timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec, const pg_tz *tz_info)
 {
 	Timestamp	date;
 	Timestamp	time;
@@ -878,7 +876,7 @@ timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec,
 
 STATIC_FUNCTION(bool)
 tm2timestamp(Timestamp *result, const struct pg_tm *tm, fsec_t fsec,
-			 const xpu_tz_info *tz_info)
+			 const pg_tz *tz_info)
 {
 	TimeOffset	date;
 	TimeOffset	time;
@@ -958,7 +956,6 @@ pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		}
 		else
 		{
-			kern_parambuf  *kparams = kcxt->kparams;
 			TimestampTz		tval;
 			struct pg_tm	tt;
 			int				tz;
@@ -966,8 +963,7 @@ pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 			memset(&tt, 0, sizeof(tt));
 			j2date(datum.value + POSTGRES_EPOCH_JDATE,
 				   &tt.tm_year, &tt.tm_mon, &tt.tm_mday);
-			assert(kcxt->kparams != NULL);
-			tz = DetermineTimeZoneOffset(&tt, kparams->session_timezone);
+			tz = DetermineTimeZoneOffset(&tt, SESSION_TIMEZONE(kcxt->session));
 			tval = datum.value * USECS_PER_DAY + tz * USECS_PER_SEC;
 
 			if (!IS_VALID_TIMESTAMP(tval))
@@ -1022,7 +1018,6 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
-		kern_parambuf  *kparams = kcxt->kparams;
 		struct pg_tm	tm;
 		Timestamp		ts = datum.value;
 		fsec_t			fsec;
@@ -1030,7 +1025,7 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
 		else if (!timestamp2tm(datum.value, &tm, &fsec,
-							   kparams->session_timezone))
+							   SESSION_TIMEZONE(kcxt->session)))
 		{
 			STROM_ELOG(kcxt, "timestamp out of range");
 			return false;
@@ -1187,8 +1182,7 @@ PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(gt, >)
 PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(ge, >=)
 
 INLINE_FUNCTION(int)
-__compare_date_timestamptz(DateADT a, TimestampTz b,
-						   kern_parambuf *kparams)
+__compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 {
 	Timestamp		ts;
 	struct pg_tm	tm;
@@ -1206,7 +1200,7 @@ __compare_date_timestamptz(DateADT a, TimestampTz b,
 			   &tm.tm_year,
 			   &tm.tm_mon,
 			   &tm.tm_mday);
-		tz = DetermineTimeZoneOffset(&tm, kparams->session_timezone);
+		tz = DetermineTimeZoneOffset(&tm, tz_info);
 		ts = a * USECS_PER_DAY + tz * USECS_PER_SEC;
 
 		if (!IS_VALID_TIMESTAMP(ts))
@@ -1245,9 +1239,10 @@ __compare_date_timestamptz(DateADT a, TimestampTz b,
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
+			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
 			comp = __compare_date_timestamptz(datum_a.value,			\
 											  datum_b.value,			\
-											  kcxt->kparams);			\
+											  tz_info);					\
 			result->value = (comp OPER 0);								\
 		}																\
 		return true;													\
@@ -1279,9 +1274,10 @@ PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
+			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
 			comp = __compare_date_timestamptz(datum_b.value,			\
 											  datum_a.value,			\
-											  kcxt->kparams);			\
+											  tz_info);					\
 			result->value = (0 OPER comp);								\
 		}																\
 		return true;													\
@@ -1296,7 +1292,7 @@ PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(ge, >=);
 INLINE_FUNCTION(int)
 __compare_timestamp_timestamptz(Timestamp a,
 								TimestampTz b,
-								kern_parambuf *kparams)
+								const pg_tz *tz_info)
 {
 	TimestampTz		ts;
 	struct pg_tm	tm;
@@ -1309,7 +1305,7 @@ __compare_timestamp_timestamptz(Timestamp a,
 		ts = (a < 0 ? DT_NOBEGIN : DT_NOEND);
 	else
 	{
-		tz = DetermineTimeZoneOffset(&tm, kparams->session_timezone);
+		tz = DetermineTimeZoneOffset(&tm, tz_info);
 		ts = a * USECS_PER_SEC + tz * USECS_PER_SEC;
 		if (ts < MIN_TIMESTAMP)
 			ts = DT_NOBEGIN;
@@ -1343,9 +1339,10 @@ __compare_timestamp_timestamptz(Timestamp a,
 		result->isnull = (datum_a.isnull | datum_b.isnull);             \
         if (!result->isnull)                                            \
         {                                                               \
+			const pg_tz	*tz_info = SESSION_TIMEZONE(kcxt->session);		\
             comp = __compare_timestamp_timestamptz(datum_b.value,		\
 												   datum_a.value,		\
-												   kcxt->kparams);		\
+												   tz_info);			\
 			result->value = (comp OPER 0);                              \
         }                                                               \
         return true;                                                    \
@@ -1377,9 +1374,10 @@ PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=)
 		result->isnull = (datum_a.isnull | datum_b.isnull);             \
         if (!result->isnull)                                            \
         {                                                               \
-            comp = __compare_timestamp_timestamptz(datum_b.value,		\
+			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
+			comp = __compare_timestamp_timestamptz(datum_b.value,		\
 												   datum_a.value,		\
-												   kcxt->kparams);		\
+												   tz_info);			\
 			result->value = (0 OPER comp);                              \
         }                                                               \
         return true;                                                    \

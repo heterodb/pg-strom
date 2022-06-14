@@ -22,6 +22,7 @@
 #include "access/brin.h"
 #include "access/genam.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -38,6 +39,7 @@
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
 #include "common/int.h"
+#include "executor/nodeSubplan.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "lib/stringinfo.h"
@@ -145,6 +147,7 @@ typedef struct devtype_info
 	bool		type_is_negative;
 	const char *type_name;
 	const char *type_extension;
+	int			type_sizeof;	/* sizeof(xpu_NAME_t) */
 	devtype_hashfunc_f type_hashfunc;
 	/* oid of type related functions */
 	Oid			type_eqfunc;
@@ -231,15 +234,26 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
 extern bytea   *pgstrom_build_xpucode(Expr *expr,
-									  List **p_used_params,
-									  List **p_used_vars,
+									  int num_rels,
+									  List **rel_tlist,
 									  uint32_t *p_extra_flags,
 									  uint32_t *p_extra_bufsz,
-									  int num_rels,
-									  List **rel_tlist);
+									  List **p_used_params);
+extern int		pgstrom_apply_cached_varref(bytea *kern_code,
+											uint32_t *p_extra_bufsz);
+extern bool		pgstrom_gpu_expression(Expr *expr,
+									   int num_rels,
+									   List **rel_tlist);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
-extern bool		pgstrom_gpu_expression(Expr *expr);
 extern void		pgstrom_init_codegen(void);
+
+/*
+ * exec.c
+ */
+extern kern_session_info *pgstrom_build_session_info(PlanState *ps,
+													 List *used_params,
+													 uint32_t num_cached_kvars,
+													 uint32_t kcxt_extra_bufsz);
 
 /*
  * datastore.c

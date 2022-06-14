@@ -521,13 +521,6 @@ PUBLIC_DATA	xpu_encode_info	xpu_encode_catalog[] = {
 	{ "__LAST__", -1, NULL },
 };
 
-
-
-
-
-
-
-
 /* ----------------------------------------------------------------
  *
  * Routines to support LIKE and ILIKE 
@@ -552,7 +545,7 @@ PUBLIC_DATA	xpu_encode_info	xpu_encode_catalog[] = {
 			 char *p, int plen,											\
 			 int depth)													\
 	{																	\
-		xpu_encode_info *encode = kcxt->kparams->session_encode;		\
+		xpu_encode_info	   *encode = SESSION_ENCODE(kcxt->session);		\
 																		\
 		/* Fast path for match-everything pattern */					\
 		if (plen == 1 && *p == '%')										\

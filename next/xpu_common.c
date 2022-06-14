@@ -38,8 +38,12 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
-	void	   *addr = kparam_get_value(kcxt->kparams, kexp->u.p.param_id);
+	kern_session_info *session = kcxt->session;
+	uint32_t	param_id = kexp->u.p.param_id;
+	void	   *addr = NULL;
 
+	if (param_id < session->nparams && session->poffset[param_id] != 0)
+		addr = (char *)session + session->poffset[param_id];
 	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
