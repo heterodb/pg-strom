@@ -300,7 +300,7 @@ extern bool		pgstrom_init_gpu_device(void);
  */
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
-const char	   *cuStrError(CUresult rc);
+extern const char *cuStrError(CUresult rc);
 extern pgsocket	gpuservOpenConnection(int cuda_dindex);
 extern void		gpuservCloseConnection(pgsocket sockfd);
 extern void		pgstrom_init_gpu_service(void);
@@ -308,11 +308,7 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_scan.c
  */
-extern void		pgstrom_init_gpu_scan(void);
-
-
-
-
+extern void		pgstrom_init_gpuscan(void);
 
 
 /*
