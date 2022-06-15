@@ -195,32 +195,43 @@ SESSION_ENCODE(kern_session_info *session)
  */
 typedef struct
 {
-	int			errcode;
-	const char *error_filename;
-	uint32_t	error_lineno;
-	const char *error_funcname;
-	const char *error_message;
-	void	  **cached_kvars;
+	int				errcode;
+	const char	   *error_filename;
+	uint32_t		error_lineno;
+	const char	   *error_funcname;
+	const char	   *error_message;
 	kern_session_info *session;
-	char	   *vlpos;
-	char	   *vlend;
-	char		vlbuf[1];
+	/* current outer relation focus */
+	struct kern_data_store *kds_outer;
+	struct kern_data_extra *kds_extra;	/* only if KDS_FORMAT_COLUMN */
+	struct kern_tupitem	*tup_outer;		/* if KDS_FORMAT_(HEAP|BLOCK) */
+	uint32_t		row_index;			/* if KDS_FORMAT_(COLUMN|ARROW) */
+	/* current inner relation focus (if GpuJoin) */
+	uint32_t		max_depth;
+	struct kern_data_store **kds_inners;
+	struct kern_tupitem	**tup_inners;	/* KDS_FORMAT_(HEAP|HASH) */
+	/* cached var reference if used multiple times */
+	void		  **cached_kvars;
+	/* variable length buffer */
+	char		   *vlpos;
+	char		   *vlend;
+	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_OUTER)						\
 	do {																\
 		size_t	__sz = (offsetof(kern_context, vlbuf) +					\
-						MAXALIGN((SESSION)->kcxt_extra_bufsz) +			\
-						MAXALIGN(sizeof(void *) *						\
-								 (SESSION)->num_cached_kvars));			\
+						MAXALIGN((SESSION)->kcxt_extra_bufsz));			\
 		KCXT = alloca(__sz);											\
 		memset(KCXT, 0, __sz);											\
 		KCXT->session = (SESSION);										\
+		KCXT->kds_outer = (KDS_OUTER);									\
 		if ((SESSION)->num_cached_kvars > 0)							\
-			KCXT->cached_kvars = (void **)								\
-				((char *)KCXT +											\
-				 offsetof(kern_context, vlbuf) +						\
-				 MAXALIGN((SESSION)->kcxt_extra_bufsz));				\
+		{																\
+			__sz = (sizeof(void *) * (SESSION)->num_cached_kvars);		\
+			KCXT->cached_kvars = alloca(__sz);							\
+			memset(KCXT->cached_kvars, 0, __sz);						\
+		}																\
 		KCXT->vlpos = vlbuf;											\
 		KCXT->vlend = vlbuf + (SESSION)->kcxt_extra_bufsz;				\
 	} while(0)
@@ -243,8 +254,8 @@ kcxt_reset(kern_context *kcxt)
 {
 	if (kcxt->cached_kvars)
 	{
-		uint32_t	__nrooms = kcxt->session->num_cached_kvars;
-		memset(kcxt->cached_kvars, 0, sizeof(void *) * __nrooms);
+		size_t	__sz = sizeof(void *) * kcxt->session->num_cached_kvars;
+		memset(kcxt->cached_kvars, 0, __sz);
 	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
@@ -353,7 +364,7 @@ struct kern_colmeta {
 };
 typedef struct kern_colmeta		kern_colmeta;
 
-#define KDS_FORMAT_ROW			1
+#define KDS_FORMAT_HEAP			1
 #define KDS_FORMAT_SLOT			2
 #define KDS_FORMAT_HASH			3	/* inner hash table for GpuHashJoin */
 #define KDS_FORMAT_BLOCK		4	/* raw blocks for direct loading */
@@ -749,11 +760,11 @@ KDS_BODY_ADDR(kern_data_store *kds)
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
 
-/* access functions for KDS_FORMAT_ROW/HASH */
+/* access functions for KDS_FORMAT_HEAP/HASH */
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_ROWINDEX(kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_ROW ||
+	Assert(kds->format == KDS_FORMAT_HEAP ||
 		   kds->format == KDS_FORMAT_HASH);
 	return (uint32_t *)KDS_BODY_ADDR(kds);
 }
@@ -778,7 +789,7 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 {
 	kern_tupitem   *tupitem;
 
-	Assert(kds->format == KDS_FORMAT_ROW ||
+	Assert(kds->format == KDS_FORMAT_HEAP ||
 		   kds->format == KDS_FORMAT_HASH);
 	if (tuple_offset == 0)
 		return NULL;

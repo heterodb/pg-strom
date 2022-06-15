@@ -12,6 +12,108 @@
 #include "xpu_common.h"
 
 /*
+ * kern_get_datum_xxx
+ *
+ * Reference to a particular datum on the supplied kernel data store.
+ * It returns NULL, if it is a really null-value in context of SQL,
+ * or in case when out of range with error code
+ *
+ * NOTE: We are paranoia for validation of the data being fetched from
+ * the kern_data_store in heap-format because we may see a phantom page
+ * if the source transaction that required this kernel execution was
+ * aborted during execution.
+ * Once a transaction gets aborted, shared buffers being pinned are
+ * released, even if DMA send request on the buffers are already
+ * enqueued. In this case, the calculation result shall be discarded,
+ * so no need to worry about correctness of the calculation, however,
+ * needs to be care about address of the variables being referenced.
+ */
+STATIC_FUNCTION(void *)
+kern_get_datum_tuple(kern_colmeta *colmeta,
+					 kern_tupitem *tupitem,
+					 uint32_t colidx)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+	uint32_t	offset = htup->t_hoff;
+	uint32_t	j, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+
+	/* shortcut if colidx is obviously out of range */
+	if (colidx >= ncols)
+		return NULL;
+	/* shortcut if tuple contains no NULL values */
+	if (!heap_hasnull)
+	{
+		kern_colmeta   *cmeta = &colmeta[colidx];
+
+		if (cmeta->attcacheoff >= 0)
+			return (char *)htup + cmeta->attcacheoff;
+	}
+	/* regular path that walks on heap-tuple from the head */
+	for (j=0; j < ncols; j++)
+	{
+		if (heap_hasnull && att_isnull(j, htup->t_bits))
+		{
+			if (j == colidx)
+				return NULL;
+		}
+		else
+		{
+			kern_colmeta   *cmeta = &colmeta[j];
+			char		   *addr;
+
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+
+			/* TODO: overrun checks here */
+			addr = ((char *) htup + offset);
+			if (j == colidx)
+				return addr;
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else
+				offset += VARSIZE_ANY(addr);
+		}
+	}
+	return NULL;
+}
+
+STATIC_FUNCTION(void *)
+kern_get_datum_column(kern_data_store *kds,
+					  kern_data_extra *extra,
+					  uint32_t colidx, uint32_t rowidx)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[colidx];
+	char		   *addr;
+
+	if (rowidx >= kds->nitems)
+		return NULL;	/* out of range */
+	if (cmeta->nullmap_offset != 0)
+	{
+		uint32_t   *nullmap = (uint32_t *)
+			((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+		if ((nullmap[rowidx>>5] & (1U << (rowidx & 0x1f))) == 0)
+			return NULL;
+	}
+
+	addr = (char *)kds + __kds_unpack(cmeta->values_offset);
+	if (cmeta->attlen > 0)
+	{
+		addr += TYPEALIGN(cmeta->attalign,
+						  cmeta->attlen) * rowidx;
+		return addr;
+	}
+	else if (cmeta->attlen == -1)
+	{
+		assert(extra != NULL);
+		return (char *)extra + __kds_unpack(((uint32_t *)addr)[rowidx]);
+	}
+	return NULL;
+}
+
+/*
  * Const Expression
  */
 PUBLIC_FUNCTION(bool)
@@ -50,7 +152,61 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 {
-	return true;
+	void   *addr = NULL;
+
+	/* fast path if var is cached */
+	if (kexp->u.v.var_cache_id >= 0 &&
+		kcxt->cached_kvars != NULL &&
+		kcxt->cached_kvars[kexp->u.v.var_cache_id] != NULL)
+	{
+		memcpy(__result,
+			   kcxt->cached_kvars[kexp->u.v.var_cache_id],
+			   kexp->rettype_ops->xpu_type_sizeof);
+		return true;
+	}
+
+	if (kexp->u.v.var_depth == 0)
+	{
+		kern_data_store	*kds = kcxt->kds_outer;
+		kern_colmeta	*cmeta;
+
+		switch (kds->format)
+		{
+			case KDS_FORMAT_HEAP:
+			case KDS_FORMAT_BLOCK:
+				if (!kcxt->tup_outer)
+					break;
+				addr = kern_get_datum_tuple(kds->colmeta,
+											kcxt->tup_outer,
+											kexp->u.v.var_resno);
+				break;
+			case KDS_FORMAT_COLUMN:
+				addr = kern_get_datum_column(kcxt->kds_outer,
+											 kcxt->kds_extra,
+											 kexp->u.v.var_resno,
+											 kcxt->row_index);
+				break;
+			case KDS_FORMAT_ARROW:
+				cmeta = &kds->colmeta[kexp->u.v.var_resno];
+				return kexp->rettype_ops->arrow_datum_ref(kcxt,
+														  __result,
+														  kds, cmeta,
+														  kcxt->row_index);
+			default:
+				STROM_ELOG(kcxt, "unknown KDS format");
+				return false;
+		}
+	}
+	else
+	{
+		kern_data_store *kds = kcxt->kds_inners[kexp->u.v.var_depth - 1];
+		kern_tupitem	*titem = kcxt->tup_inners[kexp->u.v.var_depth - 1];
+
+		assert(kds->format == KDS_FORMAT_HEAP ||
+			   kds->format == KDS_FORMAT_HASH);
+		addr = kern_get_datum_tuple(kds->colmeta, titem, kexp->u.v.var_resno);
+	}
+	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -212,6 +368,8 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 /*
  * Catalog of built-in device functions
  */
+#define FUNC_OPCODE(a,b,c,NAME,d)						\
+	{FuncOpCode__##NAME, pgfn_##NAME},
 PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },
 	{FuncOpCode__ParamExpr, 				pgfn_ParamExpr },
@@ -227,9 +385,8 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
     {FuncOpCode__BoolTestExpr_IsNotFalse,	pgfn_BoolTestExpr},
     {FuncOpCode__BoolTestExpr_IsUnknown,	pgfn_BoolTestExpr},
     {FuncOpCode__BoolTestExpr_IsNotUnknown,	pgfn_BoolTestExpr},
+#include "xpu_opcodes.h"
 	{FuncOpCode__Invalid, NULL},
-//#include "xpu_opcodes.h"
-
 };
 
 /*

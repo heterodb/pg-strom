@@ -17,7 +17,7 @@ PGSTROM_RELEASE := devel
 # Source of PG-Strom host code
 #
 __STROM_OBJS = main.o shmbuf.o extra.o codegen.o misc.o exec.o relscan.o \
-               gpu_device.o gpu_service.o gpu_scan.o \
+               gpu_device.o gpu_service.o \
                $(__XPU_COMMON_OBJS) \
                float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
