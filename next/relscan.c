@@ -337,10 +337,9 @@ extract_index_conditions(List *index_quals, IndexOptInfo *indexOpt)
 /*
  * pgstrom_tryfind_brinindex
  */
-bool
+IndexOptInfo *
 pgstrom_tryfind_brinindex(PlannerInfo *root,
 						  RelOptInfo *baserel,
-						  IndexOptInfo **p_indexOpt,
 						  List **p_indexConds,
 						  List **p_indexQuals,
 						  int64_t *p_indexNBlocks)
@@ -401,13 +400,11 @@ pgstrom_tryfind_brinindex(PlannerInfo *root,
 
 	if (indexOpt)
 	{
-		*p_indexOpt = indexOpt;
 		*p_indexConds = extract_index_conditions(indexQuals, indexOpt);
 		*p_indexQuals = indexQuals;
 		*p_indexNBlocks = indexNBlocks;
-		return true;
 	}
-	return false;
+	return indexOpt;
 }
 
 /* ----------------------------------------------------------------
@@ -502,120 +499,50 @@ GetOptimalGpusForTablespace(Oid tablespace_oid)
 	return (hentry->optimal_gpus.nwords > 0 ? &hentry->optimal_gpus : NULL);
 }
 
+/*
+ * baseRelCanUseGpuDirect - checks wthere the relation can use GPU-Direct SQL.
+ * If possible, it returns a bitmap of optimal GPUs.
+ */
 const Bitmapset *
-GetOptimalGpusForRelation(PlannerInfo *root, RelOptInfo *rel)
+baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
 {
-	RangeTblEntry *rte;
-	HeapTuple	tup;
-	char		relpersistence;
 	const Bitmapset *optimal_gpus;
+	double		total_sz;
+
+	if (!pgstrom_gpudirect_enabled())
+		return NULL;
 #if 0
-	if (baseRelIsArrowFdw(rel))
+	if (baseRelIsArrowFdw(baserel))
 	{
 		if (pgstrom_gpudirect_enabled())
-			return GetOptimalGpusForArrowFdw(root, rel);
+			return GetOptimalGpusForArrowFdw(root, baserel);
 		return NULL;
 	}
 #endif
-	optimal_gpus = GetOptimalGpusForTablespace(rel->reltablespace);
-	if (!bms_is_empty(optimal_gpus))
+	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
+	if (total_sz < pgstrom_gpudirect_threshold())
+		return NULL;	/* table is too small */
+
+	optimal_gpus = GetOptimalGpusForTablespace(baserel->reltablespace);
+	if (optimal_gpus)
 	{
-		/* only permanent / unlogged table can use NVMe-Strom */
-		rte = root->simple_rte_array[rel->relid];
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+		HeapTuple	tup;
+		char		relpersistence;
+
 		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
 		if (!HeapTupleIsValid(tup))
 			elog(ERROR, "cache lookup failed for relation %u", rte->relid);
 		relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
 		ReleaseSysCache(tup);
 
-		if (relpersistence == RELPERSISTENCE_PERMANENT ||
-			relpersistence == RELPERSISTENCE_UNLOGGED)
-			return optimal_gpus;
+		/* temporary table is not supported by GPU-Direct SQL */
+		if (relpersistence != RELPERSISTENCE_PERMANENT &&
+			relpersistence != RELPERSISTENCE_UNLOGGED)
+			optimal_gpus = NULL;
 	}
-	return NULL;
+	return optimal_gpus;
 }
-
-/*
- * baseRelCanUseGpuDirect - checks wthere the relation can use GPU-Direct SQL.
- * If possible, it returns a bitmap of optimal GPUs.
- */
-static size_t
-__total_partitioned_relpages(PlannerInfo *root, Index relid)
-{
-	RelOptInfo *rel = root->simple_rel_array[relid];
-	size_t		total_pages = 0;
-	ListCell   *lc;
-
-	if (rel && rel->reloptkind == RELOPT_BASEREL)
-		return rel->pages;
-	foreach (lc, root->append_rel_list)
-	{
-		AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(lc);
-
-		if (appinfo->parent_relid == relid)
-			total_pages += __total_partitioned_relpages(root, appinfo->child_relid);
-	}
-	return total_pages;
-}
-
-const Bitmapset *
-baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
-{
-	const Bitmapset *optimal_gpus;
-	size_t		total_scan_pages;
-
-	if (!pgstrom_gpudirect_enabled())
-		return NULL;
-
-	optimal_gpus = GetOptimalGpusForTablespace(baserel->reltablespace);
-	if (!optimal_gpus)
-		return NULL;
-
-	/*
-	 * Check expected amount of the scan i/o.
-	 * If 'baserel' is children of partition table, threshold shall be
-	 * checked towards the entire partition size, because the range of
-	 * child tables fully depend on scan qualifiers thus variable time
-	 * by time. Once user focus on a particular range, but he wants to
-	 * focus on other area. It leads potential thrashing on i/o.
-	 */
-	if (baserel->reloptkind == RELOPT_BASEREL)
-	{
-		total_scan_pages = baserel->pages;
-	}
-	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
-	{
-		Index		curr_relid = baserel->relid;
-		ListCell   *lc;
-
-		do {
-			foreach (lc, root->append_rel_list)
-			{
-				AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(lc);
-
-				if (curr_relid == appinfo->child_relid)
-				{
-					curr_relid = appinfo->parent_relid;
-					break;
-				}
-			}
-		} while (lc != NULL);
-		total_scan_pages = __total_partitioned_relpages(root, curr_relid);
-	}
-	else
-	{
-		/* elsewhere, not possible to use GPU-Direct SQL */
-		return NULL;
-	}
-
-	if (total_scan_pages >= pgstrom_gpudirect_threshold() / BLCKSZ)
-		return optimal_gpus;
-	return NULL;
-}
-
-
-
-
 
 void
 pgstrom_init_relscan(void)

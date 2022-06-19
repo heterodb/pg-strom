@@ -357,8 +357,6 @@ pgstrom_init_gpu_device(void)
 {
 	static char	*cuda_visible_devices = NULL;
 	bool		default_gpudirect_enabled = false;
-	size_t		default_threshold = 0;
-	size_t		shared_buffer_size = (size_t)NBuffers * (size_t)BLCKSZ;
 	int			i;
 
 	/*
@@ -402,24 +400,12 @@ pgstrom_init_gpu_device(void)
 							 GUC_NOT_IN_SAMPLE,
 							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
 
-	/*
-	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
-	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.5 + (shared_buffer size)
-	 *
-	 * If table size is enough large to issue real i/o, NVMe-Strom will
-	 * make advantage by higher i/o performance.
-	 */
-	if (PAGE_SIZE * PHYS_PAGES > shared_buffer_size / 2)
-		default_threshold = (PAGE_SIZE * PHYS_PAGES - shared_buffer_size / 2);
-	default_threshold += shared_buffer_size;
-
 	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
 							"Tablesize threshold to use GPUDirect SQL",
 							NULL,
 							&__pgstrom_gpudirect_threshold,
-							default_threshold >> 10,
-							262144,	/* 256MB */
+							5242880,	/* 5GB */
+							262144,		/* 256MB */
 							INT_MAX,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,

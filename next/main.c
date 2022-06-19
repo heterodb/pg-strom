@@ -17,13 +17,15 @@ PG_MODULE_MAGIC;
 bool		pgstrom_enabled;				/* GUC */
 bool		pgstrom_cpu_fallback_enabled;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
-double		pgstrom_gpu_setup_cost = 100 * DEFAULT_SEQ_PAGE_COST;	/* GUC */
-double		pgstrom_gpu_dma_cost = DEFAULT_CPU_TUPLE_COST / 10.0;	/* GUC */
-double		pgstrom_gpu_operator_cost = DEFAULT_CPU_OPERATOR_COST / 16.0;	/* GUC */
+double		pgstrom_gpu_setup_cost;			/* GUC */
+double		pgstrom_gpu_dma_cost;			/* GUC */
+double		pgstrom_gpu_operator_cost;		/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
+
+static planner_hook_type	planner_hook_next = NULL;
 
 /* pg_strom.githash() */
 PG_FUNCTION_INFO_V1(pgstrom_githash);
@@ -116,7 +118,7 @@ pgstrom_init_gpu_options(void)
 							 "Cost to send/recv tuple via DMA",
 							 NULL,
 							 &pgstrom_gpu_dma_cost,
-							 DEFAULT_CPU_TUPLE_COST / 10.0,
+							 DEFAULT_CPU_TUPLE_COST,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
@@ -133,6 +135,188 @@ pgstrom_init_gpu_options(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+}
+
+/*
+ * xPU-aware path tracker
+ *
+ * motivation: add_path() and add_partial_path() keeps only cheapest paths.
+ * Once some other dominates GpuXXX paths, it shall be wiped out, even if
+ * it potentially has a chance for more optimization (e.g, GpuJoin outer
+ * pull-up, GpuPreAgg + GpuJoin combined mode).
+ * So, we preserve PG-Strom related Path-nodes for the later referenced.
+ */
+typedef struct
+{
+	PlannerInfo	   *root;
+	Relids			relids;
+	bool			outer_parallel;
+	bool			inner_parallel;
+	const char	   *custom_name;
+	const CustomPath *cpath;
+} custom_path_entry;
+
+static HTAB	   *custom_path_htable = NULL;
+
+static uint32
+custom_path_entry_hashvalue(const void *key, Size keysize)
+{
+	custom_path_entry *cent = (custom_path_entry *)key;
+	const char *custom_name = cent->cpath->methods->CustomName;
+	uint32      hash;
+
+	hash = hash_any((unsigned char *)&cent->root, sizeof(PlannerInfo *));
+	if (cent->relids != NULL)
+	{
+		Bitmapset  *relids = cent->relids;
+
+		hash ^= hash_any((unsigned char *)relids,
+						 offsetof(Bitmapset, words[relids->nwords]));
+	}
+	if (cent->outer_parallel)
+		hash ^= 0x9e3779b9U;
+	if (cent->inner_parallel)
+		hash ^= 0x49a0f4ddU;
+	hash ^= hash_any((unsigned char *)custom_name, strlen(custom_name));
+
+	return hash;
+}
+
+static int
+custom_path_entry_compare(const void *key1, const void *key2, Size keysize)
+{
+	custom_path_entry *cent1 = (custom_path_entry *)key1;
+	custom_path_entry *cent2 = (custom_path_entry *)key2;
+
+	if (cent1->root == cent2->root &&
+		bms_equal(cent1->relids, cent2->relids) &&
+		cent1->outer_parallel == cent2->outer_parallel &&
+		cent1->inner_parallel == cent2->inner_parallel &&
+		strcmp(cent1->custom_name, cent2->custom_name) == 0)
+		return 0;
+	/* not equal */
+	return 1;
+}
+
+static void *
+custom_path_entry_keycopy(void *dest, const void *src, Size keysize)
+{
+	custom_path_entry *dent = (custom_path_entry *)dest;
+	const custom_path_entry *sent = (const custom_path_entry *)src;
+
+	dent->root = sent->root;
+	dent->relids = bms_copy(sent->relids);
+	dent->outer_parallel = sent->outer_parallel;
+	dent->inner_parallel = sent->inner_parallel;
+	dent->custom_name = pstrdup(sent->custom_name);
+
+	return dest;
+}
+
+const CustomPath *
+custom_path_find_cheapest(PlannerInfo *root,
+						  RelOptInfo *rel,
+						  bool outer_parallel,
+						  bool inner_parallel,
+						  const char *custom_name)
+{
+	custom_path_entry  hkey;
+	custom_path_entry *cent;
+
+	memset(&hkey, 0, sizeof(custom_path_entry));
+	hkey.root = root;
+	hkey.relids = rel->relids;
+	hkey.outer_parallel = outer_parallel;
+	hkey.inner_parallel = inner_parallel;
+	hkey.custom_name = custom_name;
+
+	cent = hash_search(custom_path_htable, &hkey, HASH_FIND, NULL);
+	if (!cent)
+		return NULL;
+	return cent->cpath;
+}
+
+bool
+custom_path_remember(PlannerInfo *root,
+					 RelOptInfo *rel,
+					 bool outer_parallel,
+					 bool inner_parallel,
+					 const CustomPath *cpath)
+{
+	custom_path_entry  hkey;
+	custom_path_entry *cent;
+	bool		found;
+
+	memset(&hkey, 0, sizeof(custom_path_entry));
+	hkey.root = root;
+	hkey.relids = rel->relids;
+	hkey.outer_parallel = outer_parallel;
+	hkey.inner_parallel = inner_parallel;
+	hkey.custom_name = cpath->methods->CustomName;
+
+	cent = hash_search(custom_path_htable, &hkey, HASH_ENTER, &found);
+	if (found)
+	{
+		/* new path is more expensive than prior one! */
+		if (cent->cpath->path.total_cost <= cpath->path.total_cost)
+			return false;
+	}
+	Assert(cent->root == root &&
+		   bms_equal(cent->relids, rel->relids) &&
+		   cent->outer_parallel == outer_parallel &&
+		   cent->inner_parallel == inner_parallel &&
+		   cent->custom_name == cpath->methods->CustomName);
+	cent->cpath = pgstrom_copy_pathnode(cpath);
+
+	return true;
+}
+
+/*
+ * pgstrom_post_planner
+ */
+static PlannedStmt *
+pgstrom_post_planner(Query *parse,
+					 const char *query_string,
+					 int cursorOptions,
+					 ParamListInfo boundParams)
+{
+	HTAB	   *custom_path_htable_saved = custom_path_htable;
+	HASHCTL		hctl;
+	PlannedStmt *pstmt;
+
+	PG_TRY();
+	{
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.hcxt = CurrentMemoryContext;
+		hctl.keysize = offsetof(custom_path_entry, cpath);
+		hctl.entrysize = sizeof(custom_path_entry);
+		hctl.hash = custom_path_entry_hashvalue;
+		hctl.match = custom_path_entry_compare;
+		hctl.keycopy = custom_path_entry_keycopy;
+		custom_path_htable = hash_create("HTable to preserve Custom-Paths",
+										 512,
+										 &hctl,
+										 HASH_CONTEXT |
+										 HASH_ELEM |
+										 HASH_FUNCTION |
+										 HASH_COMPARE |
+										 HASH_KEYCOPY);
+		pstmt = planner_hook_next(parse,
+								  query_string,
+								  cursorOptions,
+								  boundParams);
+	}
+	PG_CATCH();
+	{
+		hash_destroy(custom_path_htable);
+		custom_path_htable = custom_path_htable_saved;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	hash_destroy(custom_path_htable);
+	custom_path_htable = custom_path_htable_saved;
+
+	return pstmt;
 }
 
 /*
@@ -178,4 +362,7 @@ _PG_init(void)
 		//pgstrom_init_gpu_join();
 		//pgstrom_init_gpu_preagg();
 	}
+	/* post planner hook */
+	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
+	planner_hook = pgstrom_post_planner;
 }

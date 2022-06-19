@@ -206,6 +206,28 @@ get_type_name(Oid type_oid, bool missing_ok)
 }
 
 /*
+ * get_relation_am
+ */
+Oid
+get_relation_am(Oid rel_oid, bool missing_ok)
+{
+	HeapTuple	tup;
+	Oid			relam;
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rel_oid));
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for relation %u", rel_oid);
+		return InvalidOid;
+	}
+	relam = ((Form_pg_class) GETSTRUCT(tup))->relam;
+	ReleaseSysCache(tup);
+
+	return relam;
+}
+
+/*
  * Bitmapset <-> numeric List transition
  */
 List *
@@ -316,22 +338,18 @@ pathnode_tree_walker(Path *node,
 			if (walker(((GatherPath *)node)->subpath, context))
 				return true;
 			break;
-#if PG_VERSION_NUM >= 100000
 		case T_GatherMergePath:
 			if (walker(((GatherMergePath *)node)->subpath, context))
 				return true;
 			break;
-#endif		/* >= PG10 */
 		case T_ProjectionPath:
 			if (walker(((ProjectionPath *)node)->subpath, context))
 				return true;
 			break;
-#if PG_VERSION_NUM >= 100000
 		case T_ProjectSetPath:
 			if (walker(((ProjectSetPath *)node)->subpath, context))
 				return true;
 			break;
-#endif		/* >= PG10 */
 		case T_SortPath:
 			if (walker(((SortPath *)node)->subpath, context))
 				return true;
@@ -427,6 +445,7 @@ pathtree_has_parallel_aware(Path *node)
 {
 	return __pathtree_has_parallel_aware(node, NULL);
 }
+#endif
 
 /*
  * pgstrom_copy_pathnode
@@ -473,21 +492,17 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				return &b->path;
 			}
 		case T_CustomPath:
-			if (pgstrom_path_is_gpuscan(pathnode))
-				return pgstrom_copy_gpuscan_path(pathnode);
-			else if (pgstrom_path_is_gpujoin(pathnode))
-				return pgstrom_copy_gpujoin_path(pathnode);
-			else if (pgstrom_path_is_gpupreagg(pathnode))
-				return pgstrom_copy_gpupreagg_path(pathnode);
-			else
 			{
 				CustomPath	   *a = (CustomPath *)pathnode;
 				CustomPath	   *b = pmemdup(a, sizeof(CustomPath));
 				List		   *subpaths = NIL;
 				ListCell	   *lc;
+
 				foreach (lc, a->custom_paths)
-					subpaths = lappend(subpaths,
-									   pgstrom_copy_pathnode(lfirst(lc)));
+				{
+					Path	   *sp = pgstrom_copy_pathnode(lfirst(lc));
+					subpaths = lappend(subpaths, sp);
+				}
 				b->custom_paths = subpaths;
 				return &b->path;
 			}
@@ -545,13 +560,8 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpaths = subpaths;
 				return &b->path;
 			}
-#if PG_VERSION_NUM < 120000
-		case T_ResultPath:
-			return pmemdup(pathnode, sizeof(ResultPath));
-#else
 		case T_GroupResultPath:
 			return pmemdup(pathnode, sizeof(GroupResultPath));
-#endif
 		case T_MaterialPath:
 			{
 				MaterialPath   *a = (MaterialPath *)pathnode;
@@ -664,16 +674,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			{
 				ModifyTablePath *a = (ModifyTablePath *)pathnode;
 				ModifyTablePath *b = pmemdup(a, sizeof(ModifyTablePath));
-#if PG_VERSION_NUM < 140000
-				List	   *subpaths = NIL;
-				ListCell   *lc;
-				foreach (lc, a->subpaths)
-					subpaths = lappend(subpaths,
-									   pgstrom_copy_pathnode(lfirst(lc)));
-				b->subpaths = subpaths;
-#else
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
-#endif
 				return &b->path;
 			}
 		case T_LimitPath:
@@ -688,34 +689,6 @@ pgstrom_copy_pathnode(const Path *pathnode)
 	}
 	return NULL;
 }
-#endif
-
-#if 0
-/*
- * errorText - string form of the error code
- */
-const char *
-errorText(int errcode)
-{
-	static __thread char buffer[160];
-	const char *error_name;
-	const char *error_desc;
-
-	if (errcode >= 0 && errcode <= CUDA_ERROR_UNKNOWN)
-	{
-		if (cuGetErrorName(errcode, &error_name) == CUDA_SUCCESS &&
-			cuGetErrorString(errcode, &error_desc) == CUDA_SUCCESS)
-		{
-			snprintf(buffer, sizeof(buffer), "%s - %s",
-					 error_name, error_desc);
-			return buffer;
-		}
-	}
-	snprintf(buffer, sizeof(buffer),
-			 "%d - unknown", errcode);
-	return buffer;
-}
-#endif
 
 /*
  * pgstrom_define_shell_type - A wrapper for TypeShellMake with a particular OID

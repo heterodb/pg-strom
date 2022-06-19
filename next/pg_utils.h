@@ -168,6 +168,19 @@ format_millisec(double milliseconds)
 }
 
 /*
+ * pmemdup
+ */
+static inline void *
+pmemdup(const void *src, Size sz)
+{
+	void   *dst = palloc(sz);
+
+	memcpy(dst, src, sz);
+
+	return dst;
+}
+
+/*
  * Macros for worker threads
  */
 #define __FATAL(fmt,...)                        \

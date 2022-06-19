@@ -53,6 +53,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/planner.h"
 #include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
@@ -265,12 +266,11 @@ extern kern_session_info *pgstrom_build_session_info(PlanState *ps,
 /*
  * relscan.c
  */
-extern bool		pgstrom_tryfind_brinindex(PlannerInfo *root,
-										  RelOptInfo *baserel,
-										  IndexOptInfo **p_indexOpt,
-										  List **p_indexConds,
-										  List **p_indexQuals,
-										  int64_t *p_indexNBlocks);
+extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
+											   RelOptInfo *baserel,
+											   List **p_indexConds,
+											   List **p_indexQuals,
+											   int64_t *p_indexNBlocks);
 
 extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
 												  RelOptInfo *rel);
@@ -308,7 +308,7 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_scan.c
  */
-extern void		pgstrom_init_gpuscan(void);
+extern void		pgstrom_init_gpu_scan(void);
 
 
 /*
@@ -320,6 +320,7 @@ extern void		pgstrom_init_gpuscan(void);
  * misc.c
  */
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
+extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
 extern List	   *bms_to_pglist(const Bitmapset *bms);
 extern Bitmapset *bms_from_pglist(List *pglist);
 extern ssize_t	__readFile(int fdesc, void *buffer, size_t nbytes);
@@ -330,6 +331,7 @@ extern void	   *__mmapFile(void *addr, size_t length,
 						   int prot, int flags, int fdesc, off_t offset);
 extern int		__munmapFile(void *mmap_addr);
 extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
+extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 
 /*
  * main.c
@@ -340,6 +342,17 @@ extern bool		pgstrom_regression_test_mode;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;
 extern double	pgstrom_gpu_operator_cost;
+extern const CustomPath *
+custom_path_find_cheapest(PlannerInfo *root,
+						  RelOptInfo *rel,
+						  bool outer_parallel,
+						  bool inner_parallel,
+						  const char *custom_name);
+extern bool		custom_path_remember(PlannerInfo *root,
+									 RelOptInfo *rel,
+									 bool outer_parallel,
+									 bool inner_parallel,
+									 const CustomPath *cpath);
 extern void		_PG_init(void);
 
 #endif	/* PG_STROM_H */
