@@ -552,17 +552,18 @@ devtype_inet_hash(bool isnull, Datum value)
 /*
  * Built-in device functions/operators
  */
-#define FUNC_OPCODE(SQLNAME,FN_ARGS,FN_FLAGS,DEVNAME,EXTENSION)	\
-	{ #SQLNAME, #FN_ARGS, FN_FLAGS, FuncOpCode__##DEVNAME, EXTENSION },
+#define FUNC_OPCODE(SQLNAME,FN_ARGS,FN_FLAGS,DEVNAME,FUNC_COST,EXTENSION) \
+	{ #SQLNAME, #FN_ARGS, FN_FLAGS, FuncOpCode__##DEVNAME, FUNC_COST, EXTENSION },
 static struct {
 	const char	   *func_name;
 	const char	   *func_args;
 	uint32_t		func_flags;
 	FuncOpCode		func_code;
+	int				func_cost;
 	const char	   *func_extension;
 } devfunc_catalog[] = {
 #include "xpu_opcodes.h"
-	{NULL,NULL,0,FuncOpCode__Invalid,NULL}
+	{NULL,NULL,0,FuncOpCode__Invalid,0,NULL}
 };
 
 static devfunc_info *
@@ -663,6 +664,7 @@ pgstrom_devfunc_build(Oid func_oid, int func_nargs, Oid *func_argtypes)
 			dfunc->func_oid = func_oid;
 			dfunc->func_rettype = dtype_rettype;
 			dfunc->func_flags = devfunc_catalog[i].func_flags;
+			dfunc->func_cost = devfunc_catalog[i].func_cost;
 			dfunc->func_nargs = func_nargs;
 			memcpy(dfunc->func_argtypes, dtype_argtypes,
 				   sizeof(devtype_info *) * func_nargs);
@@ -816,6 +818,9 @@ typedef struct
 	uint32_t	required_flags;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
+	uint32_t	device_cost;
+	List	   *kvars_depth;
+	List	   *kvars_resno;
 	int			num_rels;
 	List	   *rel_tlist[1];
 } codegen_context;
@@ -828,72 +833,74 @@ typedef struct
 		return -1;								\
 	} while(0)
 
-static int	codegen_expression_walker(codegen_context *context, Expr *expr);
+static int	codegen_expression_walker(codegen_context *context, Expr *expr,
+									  bool is_projection_toplevel);
 
-static void
-__enlargeStringInfoAligned(StringInfo buf, int needed)
+static int
+__appendBinaryStringInfo(StringInfo buf, const void *data, int datalen)
 {
 	static uint64_t __zero = 0;
+	int		padding = (MAXALIGN(buf->len) - buf->len);
+	int		pos;
 
-	if (MAXALIGN(buf->len) != buf->len)
-		appendBinaryStringInfo(buf, (char *)&__zero,
-							   MAXALIGN(buf->len) - buf->len);
-	Assert(MAXALIGN(buf->len) == buf->len);
-	enlargeStringInfo(buf, needed);
+	if (padding > 0)
+		appendBinaryStringInfo(buf, (char *)&__zero, padding);
+	pos = buf->len;
+	appendBinaryStringInfo(buf, data, datalen);
+	return pos;
 }
 
 static int
 codegen_const_expression(codegen_context *context, Const *con)
 {
-	StringInfo		buf = context->buf;
 	devtype_info   *dtype;
-	int				width;
 
 	dtype = pgstrom_devtype_lookup(con->consttype);
 	if (!dtype)
 		__Elog("type %s is not device supported",
 			   format_type_be(con->consttype));
-	if (con->constisnull)
-		width = 0;
-	else if (con->constlen > 0)
-		width = con->constlen;
-	else if (con->constlen == -1)
-		width = VARSIZE_ANY(con->constvalue);
-	else
-		__Elog("unexpected type length: %d", con->constlen);
-
-	if (buf)
+	if (context->buf)
 	{
 		kern_expression *kexp;
-		int			needed = SizeOfKernExprConst(width);
+		int		sz = offsetof(kern_expression, u.c.const_value);
 
-		__enlargeStringInfoAligned(buf, needed);
-		kexp = (kern_expression *)(buf->data + buf->len);
-		memset(kexp, 0, SizeOfKernExprConst(0));
+		if (!con->constisnull)
+		{
+			if (con->constbyval)
+				sz += con->constlen;
+			else if (con->constlen == -1)
+				sz += VARSIZE_ANY(con->constvalue);
+			else
+				elog(ERROR, "unsupported type length: %d", con->constlen);
+		}
+		kexp = alloca(sz);
+		memset(kexp, 0, sz);
+		SET_VARSIZE(&kexp, sz);
 		kexp->opcode = FuncOpCode__ConstExpr;
-		kexp->nargs = 0;
 		kexp->rettype = dtype->type_code;
 		kexp->u.c.const_type = con->consttype;
-		kexp->u.c.const_isnull = con->constisnull;
-		if (con->constbyval)
-			memcpy(kexp->u.c.const_value,
-				   &con->constvalue, width);
-		else
-			memcpy(kexp->u.c.const_value,
-				   DatumGetPointer(con->constvalue), width);
-		SET_VARSIZE(kexp, needed);
-
-		buf->len += needed;
+        kexp->u.c.const_isnull = con->constisnull;
+		if (!con->constisnull)
+		{
+			if (con->constbyval)
+				memcpy(kexp->u.c.const_value,
+					   &con->constvalue,
+					   con->constlen);
+			else
+				memcpy(kexp->u.c.const_value,
+					   DatumGetPointer(con->constvalue),
+					   VARSIZE_ANY(con->constvalue));
+		}
+		__appendBinaryStringInfo(context->buf, kexp, sz);
 	}
-	return width;
+	return 0;
 }
 
 static int
 codegen_param_expression(codegen_context *context, Param *param)
 {
-	StringInfo		buf = context->buf;
+	kern_expression	kexp;
 	devtype_info   *dtype;
-	int				width;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Elog("Only PARAM_EXTERN is supported on device: %d",
@@ -902,108 +909,83 @@ codegen_param_expression(codegen_context *context, Param *param)
 	if (!dtype)
 		__Elog("type %s is not device supported",
 			   format_type_be(param->paramtype));
-	if (dtype->type_length > 0)
-		width = dtype->type_length;
-	else if (dtype->type_length == -1)
-		width = type_maximum_size(param->paramtype,
-								  param->paramtypmod);
-	else
-		__Elog("unexpected type length: %d", dtype->type_length);
-
-	if (buf)
+	if (context->buf)
 	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExprParam;
-
-		__enlargeStringInfoAligned(buf, needed);
-		kexp = (kern_expression *)(buf->data + buf->len);
-		memset(kexp, 0, SizeOfKernExprParam);
-		kexp->opcode = FuncOpCode__ParamExpr;
-        kexp->nargs = 0;
-		kexp->rettype = dtype->type_code;
-		kexp->u.p.param_id = param->paramid;
-		SET_VARSIZE(kexp, needed);
-
-		buf->len += needed;
+		memset(&kexp, 0, sizeof(kexp));
+		SET_VARSIZE(&kexp, SizeOfKernExprParam);
+		kexp.opcode = FuncOpCode__ParamExpr;
+		kexp.rettype = dtype->type_code;
+		kexp.u.p.param_id = param->paramid;
+		__appendBinaryStringInfo(context->buf, &kexp,
+								 SizeOfKernExprParam);
 	}
 	context->used_params = list_append_unique(context->used_params, param);
 
-	return width;
+	return 0;
 }
 
 static int
-codegen_var_expression(codegen_context *context, Var *var)
+__codegen_var_expression(codegen_context *context,
+						 Oid type_oid,
+						 bool is_projection_toplevel,
+						 int kvar_depth,
+						 int kvar_resno)
 {
-	StringInfo		buf = context->buf;
-	devtype_info   *dtype;
-	int				width;
+	devtype_info *dtype;
+	ListCell   *lc1, *lc2;
+	int			slot_id = 0;
 
-	dtype = pgstrom_devtype_lookup(var->vartype);
-	if (!dtype)
-		__Elog("type %s is not device supported",
-			   format_type_be(var->vartype));
-	if (dtype->type_length > 0)
-		width = dtype->type_length;
-	else if (dtype->type_length == -1)
-		width = type_maximum_size(var->vartype,
-								  var->vartypmod);
-	else
-		__Elog("unexpected type length: %d", dtype->type_length);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype && !is_projection_toplevel)
+		__Elog("type %s is not device supported", format_type_be(type_oid));
 
-	if (buf)
+	forboth (lc1, context->kvars_depth,
+			 lc2, context->kvars_resno)
 	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExprVar;
+		int		__depth = kvar_depth;
+		int		__resno = kvar_resno;
 
-		__enlargeStringInfoAligned(buf, needed);
-		kexp = (kern_expression *)(buf->data + buf->len);
-		memset(kexp, 0, offsetof(kern_expression, u.v));
-		kexp->opcode = FuncOpCode__VarExpr;
-		kexp->nargs = 0;
-		kexp->rettype = dtype->type_code;
-		if (context->num_rels == 0)
-		{
-			kexp->u.v.var_depth = 0;
-			kexp->u.v.var_resno = var->varattno;
-			kexp->u.v.var_cache_id = -1;
-		}
-		else
-		{
-			ListCell *lc = NULL;
-			int		depth = -1;
-			int		resno = -1;
-
-			for (depth=0; depth < context->num_rels; depth++)
-			{
-				List   *tlist = context->rel_tlist[depth];
-
-				resno = 1;
-				foreach (lc, tlist)
-				{
-					Var	   *curr = lfirst(lc);
-
-					if (IsA(curr, Var) &&
-						var->varno == curr->varno &&
-						var->varattno == curr->varattno)
-					{
-						Assert(var->vartype == curr->vartype &&
-							   var->vartypmod == curr->vartypmod &&
-							   var->varcollid == curr->varcollid);
-						goto found;
-					}
-					resno++;
-				}
-			}
-			__Elog("var-node was not found at the targe-list: %s",
-				   nodeToString(var));
-		found:
-			kexp->u.v.var_depth = depth;
-			kexp->u.v.var_resno = resno;
-			kexp->u.v.var_cache_id = -1;
-		}
-		SET_VARSIZE(kexp, needed);
+		if (kvar_depth == __depth && kvar_resno == __resno)
+			goto found;
+		slot_id++;
 	}
-	return width;
+	context->kvars_depth = lappend_int(context->kvars_depth, kvar_depth);
+	context->kvars_resno = lappend_int(context->kvars_resno, kvar_resno);
+	Assert(slot_id == list_length(context->kvars_depth) &&
+		   slot_id == list_length(context->kvars_resno));
+found:
+	if (context->buf)
+	{
+		kern_expression kexp;
+		int16		typlen;
+		bool		typbyval;
+		char		typalign;
+
+		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &typalign);
+
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.opcode = FuncOpCode__VarExpr;
+		kexp.nargs = 0;
+		kexp.rettype = (dtype ? dtype->type_code : TypeOpCode__unsupported);
+		kexp.u.v.var_typlen = typlen;
+		kexp.u.v.var_typbyval = typbyval;
+		kexp.u.v.var_typalign = typealign_get_width(typalign);
+		kexp.u.v.var_slot_id = slot_id;
+		SET_VARSIZE(&kexp, SizeOfKernExprVar);
+		__appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExprVar);
+	}
+	return 0;
+}
+
+static int
+codegen_var_expression(codegen_context *context, Var *var,
+					   bool is_projection_toplevel)
+{
+	return __codegen_var_expression(context,
+									var->vartype,
+									is_projection_toplevel,
+									0,				/* depth */
+									var->varattno);	/* resno */
 }
 
 static int
@@ -1011,46 +993,35 @@ __codegen_func_expression(codegen_context *context,
 						  Oid func_oid, List *func_args, Oid func_collid)
 {
 	StringInfo		buf = context->buf;
-	int				kexp_off = -1;
 	devfunc_info   *dfunc;
 	devtype_info   *dtype;
+	kern_expression	kexp;
+	int				pos = -1;
 	ListCell	   *lc;
-	int				width;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc)
 		__Elog("function %s is not supported",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
-	if (dtype->type_length > 0)
-		width = dtype->type_length;
-	else if (dtype->type_length == -1)
-		width = type_maximum_size(dtype->type_oid, -1);
-	else
-		__Elog("unexpected type length: %d", dtype->type_length);
+	context->device_cost += dfunc->func_cost;
 
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.opcode = dfunc->func_code;
+	kexp.nargs = list_length(func_args);
+	kexp.rettype = dtype->type_code;
 	if (buf)
-	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExpr(0);
-
-		__enlargeStringInfoAligned(buf, needed);
-		kexp_off = buf->len;
-		kexp = (kern_expression *)(buf->data + buf->len);
-		memset(kexp, 0, needed);
-		kexp->opcode = dfunc->func_code;
-		kexp->nargs = list_length(func_args);
-		kexp->rettype = dtype->type_code;
-		buf->len += needed;
-	}
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, func_args)
 	{
-		if (codegen_expression_walker(context, (Expr *)lfirst(lc)) < 0)
+		Expr   *arg = lfirst(lc);
+
+		if (codegen_expression_walker(context, arg, false) < 0)
 			return -1;
 	}
 	if (buf)
-		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
-	return width;
+		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	return 0;
 }
 
 static int
@@ -1075,153 +1046,153 @@ static int
 codegen_bool_expression(codegen_context *context, BoolExpr *b)
 {
 	StringInfo		buf = context->buf;
-	int				kexp_off = -1;
+	kern_expression	kexp;
+	int				pos = -1;
 	ListCell	   *lc;
-	FuncOpCode		opcode;
 
+	memset(&kexp, 0, sizeof(kexp));
 	switch (b->boolop)
 	{
 		case AND_EXPR:
-			if (list_length(b->args) < 2)
+			kexp.opcode = FuncOpCode__BoolExpr_And;
+			kexp.nargs = list_length(b->args);
+			if (kexp.nargs < 2)
 				__Elog("BoolExpr(AND) must have 2 or more arguments");
-			opcode = FuncOpCode__BoolExpr_And;
 			break;
 		case OR_EXPR:
-			if (list_length(b->args) < 2)
+			kexp.opcode = FuncOpCode__BoolExpr_Or;
+			kexp.nargs = list_length(b->args);
+			if (kexp.nargs < 2)
 				__Elog("BoolExpr(OR) must have 2 or more arguments");
-			opcode = FuncOpCode__BoolExpr_Or;
 			break;
 		case NOT_EXPR:
-			if (list_length(b->args) != 1)
+			kexp.opcode = FuncOpCode__BoolExpr_Not;
+			kexp.nargs = list_length(b->args);
+			if (kexp.nargs != 1)
 				__Elog("BoolExpr(OR) must not have multiple arguments");
-			opcode = FuncOpCode__BoolExpr_Not;
 			break;
 		default:
 			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
 	}
-
+	kexp.rettype = TypeOpCode__bool;
 	if (buf)
-	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExpr(0);
-
-		__enlargeStringInfoAligned(buf, needed);
-		kexp_off = buf->len;
-		kexp = (kern_expression *)(buf->data + kexp_off);
-		memset(kexp, 0, needed);
-		kexp->opcode = opcode;
-		kexp->nargs = list_length(b->args);
-		kexp->rettype = TypeOpCode__bool;
-		buf->len += needed;
-	}
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, b->args)
 	{
-		if (codegen_expression_walker(context, (Expr *)lfirst(lc)) < 0)
+		Expr   *arg = lfirst(lc);
+		if (codegen_expression_walker(context, arg, false) < 0)
 			return -1;
 	}
 	if (buf)
-		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
-	return sizeof(bool);
+		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	return 0;
 }
 
 static int
 codegen_nulltest_expression(codegen_context *context, NullTest *nt)
 {
 	StringInfo		buf = context->buf;
-	int				kexp_off = -1;
-	FuncOpCode		opcode;
+	kern_expression	kexp;
+	int				pos = -1;
 
+	memset(&kexp, 0, sizeof(kexp));
 	switch (nt->nulltesttype)
 	{
 		case IS_NULL:
-			opcode = FuncOpCode__NullTestExpr_IsNull;
+			kexp.opcode = FuncOpCode__NullTestExpr_IsNull;
 			break;
 		case IS_NOT_NULL:
-			opcode = FuncOpCode__NullTestExpr_IsNotNull;
+			kexp.opcode = FuncOpCode__NullTestExpr_IsNotNull;
 			break;
 		default:
 			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
 	}
-
+	kexp.nargs = 1;
+	kexp.rettype = TypeOpCode__bool;
 	if (buf)
-	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExpr(0);
-
-		__enlargeStringInfoAligned(buf, needed);
-		kexp_off = buf->len;
-		kexp = (kern_expression *)(buf->data + kexp_off);
-		memset(kexp, 0, needed);
-		kexp->opcode = opcode;
-		kexp->nargs = 1;
-		kexp->rettype = TypeOpCode__bool;
-		buf->len += needed;
-	}
-	if (codegen_expression_walker(context, nt->arg) < 0)
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	if (codegen_expression_walker(context, nt->arg, false) < 0)
 		return -1;
 	if (buf)
-		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
-	return sizeof(bool);
+		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	return 0;
 }
 
 static int
 codegen_booleantest_expression(codegen_context *context, BooleanTest *bt)
 {
 	StringInfo		buf = context->buf;
-	int				kexp_off = -1;
-	FuncOpCode		opcode;
+	kern_expression	kexp;
+	int				pos = -1;
 
+	memset(&kexp, 0, sizeof(kexp));
 	switch (bt->booltesttype)
 	{
 		case IS_TRUE:
-			opcode = FuncOpCode__BoolTestExpr_IsTrue;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsTrue;
 			break;
 		case IS_NOT_TRUE:
-			opcode = FuncOpCode__BoolTestExpr_IsNotTrue;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsNotTrue;
 			break;
 		case IS_FALSE:
-			opcode = FuncOpCode__BoolTestExpr_IsFalse;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsFalse;
 			break;
 		case IS_NOT_FALSE:
-			opcode = FuncOpCode__BoolTestExpr_IsNotFalse;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsNotFalse;
 			break;
 		case IS_UNKNOWN:
-			opcode = FuncOpCode__BoolTestExpr_IsUnknown;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsUnknown;
 			break;
 		case IS_NOT_UNKNOWN:
-			opcode = FuncOpCode__BoolTestExpr_IsNotUnknown;
+			kexp.opcode = FuncOpCode__BoolTestExpr_IsNotUnknown;
 			break;
 		default:
 			__Elog("BooleanTest has unknown BoolTestType (%d)",
 				   (int)bt->booltesttype);
 	}
-
+	kexp.nargs = 1;
+	kexp.rettype = TypeOpCode__bool;
 	if (buf)
-	{
-		kern_expression *kexp;
-		int			needed = SizeOfKernExpr(0);
-
-		__enlargeStringInfoAligned(buf, needed);
-		kexp_off = buf->len;
-		kexp = (kern_expression *)(buf->data + kexp_off);
-		memset(kexp, 0, needed);
-		kexp->opcode = opcode;
-		kexp->nargs = 1;
-		kexp->rettype = TypeOpCode__bool;
-		buf->len += needed;
-	}
-	if (codegen_expression_walker(context, bt->arg) < 0)
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	if (codegen_expression_walker(context, bt->arg, false) < 0)
 		return -1;
 	if (buf)
-		SET_VARSIZE(buf->data + kexp_off, buf->len - kexp_off);
-	return sizeof(bool);
+		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	return 0;
 }
 
 static int
-codegen_expression_walker(codegen_context *context, Expr *expr)
+codegen_expression_walker(codegen_context *context, Expr *expr,
+						  bool is_projection_toplevel)
 {
+	int		depth;
+
 	if (!expr)
 		return 0;
+	/*
+	 * MEMO: If expression matches any of input target-entries,
+	 * it shall be replaced to Var reference.
+	 */
+	for (depth=0; depth < context->num_rels; depth++)
+	{
+		List	   *tlist = context->rel_tlist[depth];
+		ListCell   *lc;
+
+		foreach (lc, tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			if (!tle->resjunk && equal(tle->expr, expr))
+			{
+				return __codegen_var_expression(context,
+												exprType((Node *)expr),
+												is_projection_toplevel,
+												depth,
+												tle->resno);
+			}
+		}
+	}
+
 	switch (nodeTag(expr))
 	{
 		case T_Const:
@@ -1229,7 +1200,8 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 		case T_Param:
 			return codegen_param_expression(context, (Param *)expr);
 		case T_Var:
-			return codegen_var_expression(context, (Var *)expr);
+			return codegen_var_expression(context, (Var *)expr,
+										  is_projection_toplevel);
 		case T_FuncExpr:
 			return codegen_func_expression(context, (FuncExpr *)expr);
 		case T_OpExpr:
@@ -1256,8 +1228,82 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 }
 #undef __Elog
 
-bytea *
-pgstrom_build_xpucode(Expr *expr,
+static bytea *
+attach_varloads_xpucode(codegen_context *context,
+						kern_expression *kexp)
+{
+	StringInfoData	buf;
+	kern_expression *vl;
+	ListCell   *lc1, *lc2;
+	size_t		sz;
+	int			nloads = list_length(context->kvars_depth);
+	int			i, j, k;
+
+	sz = MAXALIGN(offsetof(kern_expression,
+						   u.ld.kvars[nloads]));
+	vl = alloca(sz);
+	memset(vl, 0, sz);
+	vl->opcode = FuncOpCode__LoadVars;
+	if (kexp)
+	{
+		vl->nargs = 1;
+		vl->rettype = kexp->rettype;
+	}
+	else
+	{
+		vl->nargs = 0;
+		vl->rettype = TypeOpCode__bool;
+	}
+	vl->u.ld.nloads = nloads;
+	i = 0;
+	forboth (lc1, context->kvars_depth,
+			 lc2, context->kvars_resno)
+	{
+		int		__depth = lfirst_int(lc1);
+		int		__resno = lfirst_int(lc2);
+
+		vl->u.ld.kvars[i].var_depth = __depth;
+		vl->u.ld.kvars[i].var_resno = __resno;
+		vl->u.ld.kvars[i].var_slot_id = i;
+		i++;
+	}
+	/* sort by depth/resno */
+	for (i=0; i < nloads; i++)
+	{
+		k = i;
+		for (j=i+1; j < nloads; j++)
+		{
+			if (vl->u.ld.kvars[j].var_depth < vl->u.ld.kvars[k].var_depth ||
+				(vl->u.ld.kvars[j].var_depth == vl->u.ld.kvars[k].var_depth &&
+				 vl->u.ld.kvars[j].var_resno < vl->u.ld.kvars[k].var_resno))
+				k = j;
+		}
+		if (i != k)
+		{
+			int16_t		__depth = vl->u.ld.kvars[i].var_depth;
+			int16_t		__resno = vl->u.ld.kvars[i].var_resno;
+			uint32_t	__slot_id = vl->u.ld.kvars[i].var_slot_id;
+
+			vl->u.ld.kvars[i].var_depth   = vl->u.ld.kvars[k].var_depth;
+			vl->u.ld.kvars[i].var_resno   = vl->u.ld.kvars[k].var_resno;
+			vl->u.ld.kvars[i].var_slot_id = vl->u.ld.kvars[k].var_slot_id;
+			vl->u.ld.kvars[k].var_depth   = __depth;
+			vl->u.ld.kvars[k].var_resno   = __resno;
+			vl->u.ld.kvars[k].var_slot_id = __slot_id;
+		}
+	}
+	initStringInfo(&buf);
+	appendBinaryStringInfo(&buf, (const char *)vl, sz);
+	if (kexp)
+		appendBinaryStringInfo(&buf, (const char *)kexp, VARSIZE(kexp));
+	SET_VARSIZE(&buf, buf.len);
+
+	return (bytea *)buf.data;
+}
+
+void
+pgstrom_build_xpucode(bytea **p_xpucode,
+					  Expr *expr,
 					  int num_rels,
 					  List **rel_tlist,
 					  uint32_t *p_extra_flags,
@@ -1272,111 +1318,102 @@ pgstrom_build_xpucode(Expr *expr,
 
 	initStringInfo(&buf);
 	context->buf = &buf;
+	if (p_extra_flags)
+		context->extra_flags = *p_extra_flags;
+	if (p_extra_bufsz)
+		context->extra_bufsz = *p_extra_bufsz;
+	if (p_used_params)
+		context->used_params = *p_used_params;
 	if (num_rels > 0)
 		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
 	context->num_rels = num_rels;
 
 	if (IsA(expr, List) && list_length((List *)expr) > 1)
 		expr = make_andclause((List *)expr);
-	if (codegen_expression_walker(context, expr) < 0)
+	if (codegen_expression_walker(context, expr, false) < 0)
 	{
 		/* errmsg shall be already set */
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errdetail("problematic expression: %s", nodeToString(expr))));
-		return NULL;
 	}
 	SET_VARSIZE(buf.data, buf.len);
+	/* attach VarLoads operation */
+	*p_xpucode = attach_varloads_xpucode(context, (kern_expression *)buf.data);
 
 	if (p_used_params)
-		*p_used_params = list_concat_unique(*p_used_params, context->used_params);
+		*p_used_params = context->used_params;
 	if (p_extra_flags)
-		*p_extra_flags |= context->extra_flags;
+		*p_extra_flags = context->extra_flags;
 	if (p_extra_bufsz)
-		*p_extra_bufsz += context->extra_bufsz;
-	return (bytea *)buf.data;
+		*p_extra_bufsz = context->extra_bufsz;
+	pfree(buf.data);
 }
 
 /*
- * pgstrom_apply_cached_varref
- *
- *
+ * pgstrom_build_projection
  */
-typedef struct {
-	List	   *used_vars;
-	int			num_cached_vars;
-	uint32_t	extra_bufsz;
-} apply_cached_varref_context;
-
-static void
-__apply_cached_varref_walker(kern_expression *kexp,
-							 apply_cached_varref_context *context)
+void
+pgstrom_build_projection(bytea **p_xpucode_proj,
+						 bytea **p_xpucode_vload,
+						 List *tlist_dev,
+						 int num_rels,
+						 List **rel_tlist,
+						 uint32_t *p_extra_flags,
+						 uint32_t *p_extra_bufsz,
+						 List **p_used_params)
 {
-	int			i, off = 0;
+	codegen_context	   *context;
+	StringInfoData		buf;
+	kern_expression		kexp;
+	ListCell		   *lc;
 
-	if (kexp->opcode == FuncOpCode__VarExpr)
+	context = alloca(offsetof(codegen_context, rel_tlist[num_rels]));
+	memset(context, 0, offsetof(codegen_context, rel_tlist));
+	initStringInfo(&buf);
+	context->buf = &buf;
+	if (p_extra_flags)
+		context->extra_flags = *p_extra_flags;
+	if (p_extra_bufsz)
+		context->extra_bufsz = *p_extra_bufsz;
+	if (p_used_params)
+		context->used_params = *p_used_params;
+	if (num_rels > 0)
+		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
+	context->num_rels = num_rels;
+
+	/* FuncOp__Projection */
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.opcode = FuncOpCode__Projection;
+	kexp.nargs = list_length(tlist_dev);
+	kexp.rettype = TypeOpCode__record;
+	appendBinaryStringInfo(&buf, (char *)&kexp,
+						   offsetof(kern_expression, u.data));
+	foreach (lc, tlist_dev)
 	{
-		devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
-		ListCell	   *lc;
+		TargetEntry *tle = lfirst(lc);
 
-		foreach (lc, context->used_vars)
+		if (codegen_expression_walker(context, tle->expr, true) < 0)
 		{
-			kern_expression *kvar = lfirst(lc);
-
-			Assert(kvar->opcode == FuncOpCode__VarExpr);
-			if (kexp->u.v.var_depth == kvar->u.v.var_depth &&
-				kexp->u.v.var_resno == kvar->u.v.var_resno)
-			{
-				Assert(kexp->rettype == kvar->rettype);
-				if (kvar->u.v.var_cache_id < 0)
-				{
-					int		var_cache_id = context->num_cached_vars++;
-
-					kvar->u.v.var_cache_id = var_cache_id;
-					kexp->u.v.var_cache_id = var_cache_id;
-				}
-				else
-				{
-					int		var_cache_id = kvar->u.v.var_cache_id;
-
-					kexp->u.v.var_cache_id = var_cache_id;
-				}
-				context->extra_bufsz += MAXALIGN(dtype->type_sizeof);
-				break;
-			}
+			/* errmsg shall be already set */
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errdetail("problematic expression: %s",
+							   nodeToString(tle->expr))));
 		}
-		context->used_vars = lappend(context->used_vars, kexp);
 	}
+	SET_VARSIZE(buf.data, buf.len);
+	*p_xpucode_proj = (bytea *)buf.data;
 
-	for (i=0; i < kexp->nargs; i++)
-	{
-		kern_expression *arg = (kern_expression *)(kexp->u.data + off);
+	/* FuncOpCode__LoadVars */
+	*p_xpucode_vload = attach_varloads_xpucode(context, NULL);
 
-		if (VARSIZE(kexp) < offsetof(kern_expression, u.data) + off + VARSIZE(arg))
-			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu]",
-				 VARSIZE(kexp),
-				 offsetof(kern_expression, u.data) + off,
-				 offsetof(kern_expression, u.data) + off + VARSIZE(arg));
-		__apply_cached_varref_walker(arg, context);
-		off += MAXALIGN(VARSIZE(arg));
-	}
-}
-
-int
-pgstrom_apply_cached_varref(bytea *kern_opcode, uint32_t *p_extra_bufsz)
-{
-	apply_cached_varref_context context;
-
-	memset(&context, 0, sizeof(apply_cached_varref_context));
-	__apply_cached_varref_walker((kern_expression *)kern_opcode, &context);
-
-	/* expand private buffer for varref cache */
-	if (context.num_cached_vars > 0)
-		context.extra_bufsz += MAXALIGN(sizeof(xpu_datum_t *) *
-										context.num_cached_vars);
-	*p_extra_bufsz += context.extra_bufsz;
-
-	return context.num_cached_vars;
+	if (p_extra_flags)
+		*p_extra_flags = context->extra_flags;
+	if (p_extra_bufsz)
+		*p_extra_bufsz = context->extra_bufsz;
+	if (p_used_params)
+		*p_used_params = context->used_params;
 }
 
 /*
@@ -1387,8 +1424,8 @@ pgstrom_apply_cached_varref(bytea *kern_opcode, uint32_t *p_extra_bufsz)
 bool
 pgstrom_gpu_expression(Expr *expr,
 					   int num_rels,
-					   List **rel_tlist)
-
+					   List **rel_tlist,
+					   int *p_devcost)
 {
 	codegen_context	   *context;
 
@@ -1400,9 +1437,10 @@ pgstrom_gpu_expression(Expr *expr,
 
 	if (IsA(expr, List) && list_length((List *)expr) > 0)
 		expr = make_andclause((List *)expr);
-	if (codegen_expression_walker(context, expr) < 0)
+	if (codegen_expression_walker(context, expr, false) < 0)
 		return false;
-
+	if (p_devcost)
+		*p_devcost = context->device_cost;
 	return true;
 }
 
@@ -1417,7 +1455,10 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
 	devfunc_info   *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
 	const char	   *label;
-	int				i, off;
+	const char	   *extra = NULL;
+	const char	   *pos = kexp->u.data;
+	StringInfoData	temp;
+	int				i;
 
 	switch (kexp->opcode)
 	{
@@ -1463,10 +1504,9 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 			return;
 
 		case FuncOpCode__VarExpr:
-			appendStringInfo(buf, "{Var(%s): depth=%d resno=%d}",
+			appendStringInfo(buf, "{Var(%s): slot_id=%d}",
 							 !dtype ? "???" : dtype->type_name,
-							 kexp->u.v.var_depth,
-							 kexp->u.v.var_resno);
+							 kexp->u.v.var_slot_id);
 			return;
 
 		case FuncOpCode__BoolExpr_And:
@@ -1502,31 +1542,51 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 		case FuncOpCode__BoolTestExpr_IsNotUnknown:
 			label = "BoolTest::IsNotUnknown";
 			break;
+		case FuncOpCode__Projection:
+			label = "Projection";
+			break;
+		case FuncOpCode__LoadVars:
+			label = "LoadVars";
+			initStringInfo(&temp);
+			appendStringInfo(&temp, "[");
+			for (i=0; i < kexp->u.ld.nloads; i++)
+			{
+				int16_t		__depth = kexp->u.ld.kvars[i].var_depth;
+				int16_t		__resno = kexp->u.ld.kvars[i].var_resno;
+				uint32_t	__slot_id = kexp->u.ld.kvars[i].var_slot_id;
+
+				appendStringInfo(&temp, "%s(slot_id=%u, depth=%d, resno=%d)",
+								 i > 0 ? ", " : "",
+								 __slot_id,
+								 __depth,
+								 __resno);
+			}
+			appendStringInfo(&temp, "]");
+			extra = temp.data;
+			break;
 		default:
 			if (dfunc)
 				label = psprintf("Func::%s", dfunc->func_name);
 			else
 				label = "Func::unknown";
 	}
-	appendStringInfo(buf, "{%s(%s) %s", label,
+	appendStringInfo(buf, "{%s(%s) %sargs=[",
+					 label,
 					 !dtype ? "???" : dtype->type_name,
-					 kexp->nargs > 1 ? "args=[" : "arg=");
-	off = 0;
+					 !extra ? "" : extra);
 	for (i=0; i < kexp->nargs; i++)
 	{
-		const kern_expression *arg = (const kern_expression *)(kexp->u.data + off);
+		const kern_expression *arg = (const kern_expression *)pos;
 
-		if (VARSIZE(kexp) < offsetof(kern_expression, u.data) + off + VARSIZE(arg))
-			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu]",
+		if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
+			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu])",
 				 VARSIZE(kexp),
-				 offsetof(kern_expression, u.data) + off,
-				 offsetof(kern_expression, u.data) + off + VARSIZE(arg));
+				 (pos - kexp->u.data),
+				 (pos - kexp->u.data) + VARSIZE(arg));
 		__xpucode_to_cstring(buf, arg);
-		off += MAXALIGN(VARSIZE(arg));
+		pos += MAXALIGN(VARSIZE(arg));
 	}
-	if (kexp->nargs > 1)
-		appendStringInfoString(buf, "]");
-	appendStringInfoString(buf, "}");
+	appendStringInfoString(buf, "]}");
 }
 
 char *

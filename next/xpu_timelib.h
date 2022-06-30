@@ -20,6 +20,7 @@ typedef struct
     TimeADT     time;   /* all time units other than months and years */
     int32_t     zone;   /* numeric time zone, in seconds */
 } TimeTzADT;
+#define SizeOfTimeTzADT	(offsetof(TimeTzADT, zone) + sizeof(int32_t))
 
 typedef int64_t			pg_time_t;
 

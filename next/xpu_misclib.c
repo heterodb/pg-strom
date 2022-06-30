@@ -23,42 +23,26 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(money, Cash);
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   const kern_colmeta *cmeta,
+				   const void *addr, int len)
 {
 	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
 	memset(result, 0, sizeof(xpu_uuid_t));
+	result->ops = &xpu_uuid_ops;
 	if (!addr)
 		result->isnull = true;
 	else
-		memcpy(&result->value.data, addr, UUID_LEN);
-	result->ops = &xpu_uuid_ops;
-	return true;
-}
-
-STATIC_FUNCTION(bool)
-arrow_uuid_datum_ref(kern_context *kcxt,
-					 xpu_datum_t *__result,
-					 kern_data_store *kds,
-					 kern_colmeta *cmeta,
-					 uint32_t rowidx)
-{
-	xpu_uuid_t *result = (xpu_uuid_t *)__result;
-	void   *addr;
-
-	memset(result, 0, sizeof(xpu_uuid_t));
-	if (cmeta->attopts.fixed_size_binary.byteWidth == UUID_LEN)
 	{
-		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx, UUID_LEN);
-		if (!addr)
-			result->isnull = true;
-		else
-			memcpy(&result->value.data, addr, UUID_LEN);
-		result->ops = &xpu_uuid_ops;
-		return true;
+		if (cmeta &&
+			cmeta->attopts.fixed_size_binary.byteWidth != UUID_LEN)
+		{
+			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
+			return false;
+		}
+		memcpy(&result->value.data, addr, UUID_LEN);
 	}
-	STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
-	return false;
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -96,42 +80,26 @@ PGSTROM_SQLTYPE_OPERATORS(uuid);
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
-					  const void *addr)
+					  const kern_colmeta *cmeta,
+					  const void *addr, int len)
 {
 	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
 	memset(result, 0, sizeof(xpu_macaddr_t));
+	result->ops = &xpu_macaddr_ops;
 	if (!addr)
 		result->isnull = true;
 	else
-		memcpy(&result->value, addr, sizeof(macaddr));
-	result->ops = &xpu_macaddr_ops;
-	return true;
-}
-
-STATIC_FUNCTION(bool)
-arrow_macaddr_datum_ref(kern_context *kcxt,
-						xpu_datum_t *__result,
-						kern_data_store *kds,
-						kern_colmeta *cmeta,
-						uint32_t rowidx)
-{
-	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
-
-	memset(result, 0, sizeof(xpu_macaddr_t));
-	if (cmeta->attopts.fixed_size_binary.byteWidth == sizeof(macaddr))
 	{
-		void   *addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,
-												  sizeof(macaddr));
-		if (!addr)
-			result->isnull = true;
-		else
-			memcpy(&result->value, addr, sizeof(macaddr));
-		result->ops = &xpu_macaddr_ops;
-		return true;
+		if (cmeta &&
+			cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
+		{
+			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
+			return false;
+		}
+		memcpy(&result->value, addr, sizeof(macaddr));
 	}
-	STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
-	return false;
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -169,70 +137,61 @@ PGSTROM_SQLTYPE_OPERATORS(macaddr);
 PUBLIC_FUNCTION(bool)
 xpu_inet_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   const kern_colmeta *cmeta,
+				   const void *addr, int len)
 {
 	xpu_inet_t *result = (xpu_inet_t *)__result;
 
 	memset(result, 0, sizeof(xpu_inet_t));
+	result->ops = &xpu_inet_ops;
 	if (!addr)
 	{
 		result->isnull = true;
 	}
-	else if (VARATT_IS_COMPRESSED(addr) || VARATT_IS_EXTERNAL(addr))
+	else if (!cmeta)
 	{
-		STROM_CPU_FALLBACK(kcxt, ERRCODE_INTERNAL_ERROR,
-						   "inet value is compressed or toasted");
-		return false;
-	}
-	else if (VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
-	{
-		STROM_ELOG(kcxt, "corrupted inet datum");
-		return false;
-	}
-	else
-	{
-		inet_struct	   *ip_data = (inet_struct *)VARDATA_ANY(addr);
-		int				ip_size = ip_addrsize(ip_data);
-
-		if (VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr[ip_size]))
+		if (VARATT_IS_COMPRESSED(addr) || VARATT_IS_EXTERNAL(addr))
+		{
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_INTERNAL_ERROR,
+							   "inet value is compressed or toasted");
+			return false;
+		}
+		else if (VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
 		{
 			STROM_ELOG(kcxt, "corrupted inet datum");
 			return false;
 		}
-		memcpy(&result->value, VARDATA_ANY(addr),
-			   offsetof(inet_struct, ipaddr[ip_size]));
-	}
-	result->ops = &xpu_inet_ops;
-	return true;
-}
+		else
+		{
+			inet_struct *ip_data = (inet_struct *)VARDATA_ANY(addr);
+			int		ip_size = ip_addrsize(ip_data);
 
-PUBLIC_FUNCTION(bool)
-arrow_inet_datum_ref(kern_context *kcxt,
-                     xpu_datum_t *__result,
-                     kern_data_store *kds,
-                     kern_colmeta *cmeta,
-                     uint32_t rowidx)
-{
-	xpu_inet_t *result = (xpu_inet_t *)__result;
-	int			byteWidth = cmeta->attopts.fixed_size_binary.byteWidth;
-	void	   *addr;
-
-	if (byteWidth != 4 && byteWidth != 16)
-	{
-		STROM_ELOG(kcxt, "corrupted inet datum");
-		return false;
+			memcpy(&result->value, VARDATA_ANY(addr),
+				   offsetof(inet_struct, ipaddr[ip_size]));		
+		}
 	}
-	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx, byteWidth);
-	if (!addr)
-		result->isnull = true;
 	else
 	{
-		result->isnull = false;
-		result->value.family = (byteWidth == 4 ? PGSQL_AF_INET : PGSQL_AF_INET6);
-		result->value.bits = 8 * byteWidth;
-		memcpy(result->value.ipaddr, addr, byteWidth);
+		int		byteWidth = cmeta->attopts.fixed_size_binary.byteWidth;
+
+		if (byteWidth == 4)
+		{
+			result->value.family = PGSQL_AF_INET;
+			result->value.bits = 32;
+			memcpy(result->value.ipaddr, addr, byteWidth);
+		}
+		else if (byteWidth == 16)
+		{
+			result->value.family = PGSQL_AF_INET6;
+			result->value.bits = 128;
+			memcpy(result->value.ipaddr, addr, byteWidth);
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "corrupted inet datum");
+			return false;
+		}
 	}
-	result->ops = &xpu_inet_ops;
 	return true;
 }
 
@@ -281,7 +240,7 @@ xpu_inet_datum_hash(kern_context *kcxt,
 			len = offsetof(inet_struct, ipaddr[16]);	/* IPv6 */
 		else
 		{
-			STROM_ELOG(kcxt, "xpu_inet_t has unknown IP version");
+			STROM_ELOG(kcxt, "corrupted inet datum");
 			return false;
 		}
 		*p_hash = pg_hash_any(&arg->value, len);

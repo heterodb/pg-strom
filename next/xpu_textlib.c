@@ -12,9 +12,6 @@
  */
 #include "xpu_common.h"
 
-PGSTROM_VARLENA_BASETYPE_TEMPLATE(bytea);
-PGSTROM_VARLENA_BASETYPE_TEMPLATE(text);
-
 /*
  * bpchar type handlers
  */
@@ -32,7 +29,7 @@ bpchar_truelen(const char *s, int len)
 }
 
 STATIC_FUNCTION(bool)
-xpu_bpchar_datum_extract(kern_context *kcxt, char **s, int *len)
+xpu_bpchar_datum_extract(kern_context *kcxt, const char **s, int *len)
 {
 	if (*len < 0)
 	{
@@ -51,43 +48,27 @@ xpu_bpchar_datum_extract(kern_context *kcxt, char **s, int *len)
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_ref(kern_context *kcxt,
 					 xpu_datum_t *__result,
-					 const void *addr)
+					 const kern_colmeta *cmeta,
+					 const void *addr, int len)
 {
 	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+
 	memset(result, 0, sizeof(xpu_bpchar_t));
+	result->ops = &xpu_bpchar_ops;
 	if (!addr)
 		result->isnull = true;
-	else
+	else if (!cmeta)
 	{
 		result->length = -1;
 		result->value = (char *)addr;
 	}
-	result->ops = &xpu_bpchar_ops;
-	return true;
-}
-
-STATIC_FUNCTION(bool)
-arrow_bpchar_datum_ref(kern_context *kcxt,
-					   xpu_datum_t *__result,
-					   kern_data_store *kds,
-					   kern_colmeta *cmeta,
-					   uint32_t rowidx)
-{
-	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
-	int		unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
-	char   *addr = NULL;
-
-	if (unitsz > 0)
-		addr = (char *)KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx, unitsz);
-	memset(result, 0, sizeof(xpu_bpchar_t));
-	if (!addr)
-		result->isnull = true;
 	else
 	{
-		result->value = (char *)addr;
-		result->length = bpchar_truelen(addr, unitsz);
+		int		unitsz = Min(cmeta->attopts.fixed_size_binary.byteWidth, len);
+
+		result->value = (const char *)addr;
+		result->length = bpchar_truelen((const char *)addr, unitsz);
 	}
-	result->ops = &xpu_bpchar_ops;
 	return true;
 }
 
@@ -97,7 +78,7 @@ xpu_bpchar_datum_store(kern_context *kcxt,
 					   xpu_datum_t *__arg)
 {
 	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
-	char   *data;
+	const char *data;
 	int		len;
 
 	if (arg->isnull)
@@ -133,7 +114,7 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 		*p_hash = 0;
 	else
 	{
-		char   *data = arg->value;
+		const char *data = arg->value;
 		int		len = arg->length;
 
 		if (!xpu_bpchar_datum_extract(kcxt, &data, &len))
@@ -145,13 +126,162 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 PGSTROM_SQLTYPE_OPERATORS(bpchar);
 
 /*
+ * xpu_text_t device type handler
+ */
+STATIC_FUNCTION(bool)
+xpu_text_datum_extract(kern_context *kcxt, const char **s, int *len)
+{
+	if (*len < 0)
+	{
+		if (VARATT_IS_COMPRESSED(*s) || VARATT_IS_EXTERNAL(*s))
+		{
+			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
+							   "text datum is compressed or external");
+			return false;
+        }
+		*len = VARSIZE_ANY_EXHDR(*s);
+		*s = (const char *)VARDATA_ANY(*s);
+	}
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
+				   const kern_colmeta *cmeta,
+				   const void *addr, int len)
+{
+	xpu_text_t *result = (xpu_text_t *)__result;
+
+	memset(result, 0, sizeof(xpu_text_t));
+	result->ops = &xpu_text_ops;
+	if (!addr)
+		result->isnull = true;
+	else if (cmeta)
+	{
+		result->length = -1;
+		result->value = (const char *)addr;
+	}
+	else
+	{
+		result->length = len;
+		result->value = (const char *)addr;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_text_datum_store(kern_context *kcxt,
+					 char *buffer,
+					 xpu_datum_t *__arg)
+{
+	xpu_text_t *arg = (xpu_text_t *)__arg;
+	int		sz;
+
+	if (arg->isnull)
+		return 0;
+	sz = (arg->length < 0 ? VARSIZE_ANY(arg->value) : arg->length);
+	if (buffer)
+		memcpy(buffer, arg->value, sz);
+	return sz;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_hash(kern_context *kcxt,
+					uint32_t *p_hash,
+					xpu_datum_t *__arg)
+{
+	xpu_text_t *arg = (xpu_text_t *)__arg;
+
+	if (arg->isnull)
+		*p_hash = 0;
+	else
+	{
+		const char *data = arg->value;
+		int		len = arg->length;
+
+		if (!xpu_text_datum_extract(kcxt, &data, &len))
+			return false;
+		*p_hash = pg_hash_any(data, len);
+	}
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(text);
+
+/*
+ * xpu_bytea_t device type handler
+ */
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
+				   const kern_colmeta *cmeta,
+				   const void *addr, int len)
+{
+	xpu_bytea_t *result = (xpu_bytea_t *)__result;
+
+	memset(result, 0, sizeof(xpu_bytea_t));
+	result->ops = &xpu_bytea_ops;
+	if (!addr)
+		result->isnull = true;
+	else if (cmeta)
+	{
+		result->length = -1;
+		result->value = (const char *)addr;
+	}
+	else
+	{
+		result->length = len;
+		result->value = (const char *)addr;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_bytea_datum_store(kern_context *kcxt,
+					  char *buffer,
+					  xpu_datum_t *__arg)
+{
+	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
+	int		sz;
+
+	if (arg->isnull)
+		return 0;
+	sz = (arg->length < 0 ? VARSIZE_ANY(arg->value) : arg->length);
+	if (buffer)
+		memcpy(buffer, arg->value, sz);
+	return sz;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_hash(kern_context *kcxt,
+					 uint32_t *p_hash,
+					 xpu_datum_t *__arg)
+{
+	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
+
+	if (arg->isnull)
+		*p_hash = 0;
+	else
+	{
+		const char *data = arg->value;
+		int		len = arg->length;
+
+		if (!xpu_text_datum_extract(kcxt, &data, &len))
+			return false;
+		*p_hash = pg_hash_any(data, len);
+	}
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(bytea);
+
+/*
  * Bpchar functions
  */
 STATIC_FUNCTION(bool)
 __bpchar_compare(kern_context *kcxt,
 				 int *p_status,
-				 char *s1, int len1,
-				 char *s2, int len2)
+				 const char *s1, int len1,
+				 const char *s2, int len2)
 {
 	int		len;
 
@@ -251,27 +381,10 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
  * Text functions
  */
 STATIC_FUNCTION(bool)
-xpu_text_datum_extract(kern_context *kcxt, char **s, int *len)
-{
-	if (*len < 0)
-	{
-		if (VARATT_IS_COMPRESSED(*s) || VARATT_IS_EXTERNAL(*s))
-		{
-			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
-							   "varlena datum is compressed or external");
-			return false;
-		}
-		*len = VARSIZE_ANY_EXHDR(*s);
-		*s = VARDATA_ANY(*s);
-	}
-	return true;
-}
-
-STATIC_FUNCTION(bool)
 __text_compare(kern_context *kcxt,
 			   int *p_status,
-			   char *s1, int len1,
-			   char *s2, int len2)
+			   const char *s1, int len1,
+			   const char *s2, int len2)
 {
 	int		len;
 
@@ -347,7 +460,7 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
-		char   *s = datum.value;
+		const char *s = datum.value;
 		int		len = datum.length;
 
 		if (!xpu_text_datum_extract(kcxt, &s, &len))
@@ -536,13 +649,13 @@ PUBLIC_DATA	xpu_encode_info	xpu_encode_catalog[] = {
 	do { int __len = encode->enc_mblen(p);			\
 		(p) += __len; (plen) -= __len; } while(0)
 #define GetChar(c)			(c)
-#define GetCharUpper(c)		(((c) >= 'a' && (c) <= 'z') ? c += ('A' - 'a') : c)
+#define GetCharUpper(c)		(((c) >= 'a' && (c) <= 'z') ? c + ('A' - 'a') : c)
 
 #define GENERIC_MATCH_TEXT_TEMPLATE(FUNCNAME, GETCHAR)					\
 	STATIC_FUNCTION(int)												\
 	FUNCNAME(kern_context *kcxt,										\
-			 char *t, int tlen,											\
-			 char *p, int plen,											\
+			 const char *t, int tlen,									\
+			 const char *p, int plen,									\
 			 int depth)													\
 	{																	\
 		xpu_encode_info	   *encode = SESSION_ENCODE(kcxt->session);		\
@@ -735,8 +848,8 @@ GENERIC_MATCH_TEXT_TEMPLATE(GenericCaseMatchText, GetCharUpper)
 		result->isnull = (datum_a.isnull | datum_b.isnull);		\
 		if (!result->isnull)									\
 		{														\
-			char   *s1 = datum_a.value;							\
-			char   *s2 = datum_b.value;							\
+			const char *s1 = datum_a.value;						\
+			const char *s2 = datum_b.value;						\
 			int		len1 = datum_a.length;						\
 			int		len2 = datum_b.length;						\
 			int		status;										\
@@ -777,8 +890,8 @@ PG_TEXTLIKE_TEMPLATE(texticnlike, GenericCaseMatchText, !=)
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\
-			char   *s1 = datum_a.value;								\
-			char   *s2 = datum_b.value;								\
+			const char *s1 = datum_a.value;							\
+			const char *s2 = datum_b.value;							\
 			int		len1 = datum_a.length;							\
 			int		len2 = datum_b.length;							\
 			int		status;											\

@@ -401,7 +401,7 @@ pgstrom_tryfind_brinindex(PlannerInfo *root,
 	if (indexOpt)
 	{
 		*p_indexConds = extract_index_conditions(indexQuals, indexOpt);
-		*p_indexQuals = indexQuals;
+		*p_indexQuals = extract_actual_clauses(indexQuals, false);
 		*p_indexNBlocks = indexNBlocks;
 	}
 	return indexOpt;

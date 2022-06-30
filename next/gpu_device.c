@@ -290,7 +290,7 @@ pgstrom_collect_gpu_devices(void)
 		PG_END_TRY();
 		close(pipefd[0]);
 
-		while (waitpid(child, &status, 1) < 0)
+		while (waitpid(child, &status, 0) < 0)
 		{
 			if (errno != EINTR)
 			{

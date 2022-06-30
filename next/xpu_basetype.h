@@ -16,7 +16,8 @@
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
 						   xpu_datum_t *__result,						\
-						   const void *addr)							\
+						   const kern_colmeta *cmeta,					\
+						   const void *addr, int len)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
@@ -27,19 +28,6 @@
 			result->value = *((const BASETYPE *)addr);					\
 		result->ops = &xpu_##NAME##_ops;								\
 		return true;													\
-	}																	\
-	STATIC_FUNCTION(bool)												\
-	arrow_##NAME##_datum_ref(kern_context *kcxt,						\
-							 xpu_datum_t *__result,						\
-							 kern_data_store *kds,						\
-							 kern_colmeta *cmeta,						\
-							 uint32_t rowidx)							\
-	{																	\
-		void	   *addr;												\
-																		\
-		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,			\
-										  sizeof(BASETYPE));			\
-		return xpu_##NAME##_datum_ref(kcxt, __result, addr);			\
 	}																	\
 	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_store(kern_context *kcxt,						\
@@ -76,6 +64,12 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(int8, int64_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float2, float2_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float4, float4_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
+
+/*
+ * dummy handler for unsupported device types
+ */
+typedef xpu_datum_t		xpu_unsupported_t;
+EXTERN_DATA xpu_datum_operators xpu_unsupported_ops;
 
 /*
  * Template for simple comparison

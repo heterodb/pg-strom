@@ -12,6 +12,7 @@
  */
 #include "xpu_common.h"
 
+//MEMO: Arrow::Bool needs special handling for *addr pointer
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(bool, int8_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(int1, int8_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(int2, int16_t);
@@ -20,6 +21,36 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(int8, int64_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float2, float2_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float4, float4_t);
 PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float8, float8_t);
+
+/*
+ * dummy handler for unsupported device types
+ */
+STATIC_FUNCTION(bool)
+xpu_unsupported_datum_ref(kern_context *kcxt,
+						  xpu_datum_t *__result,
+						  const kern_colmeta *cmeta,
+						  const void *addr, int len)
+{
+	STROM_ELOG(kcxt, "not a device supported type");
+	return false;
+}
+STATIC_FUNCTION(int)
+xpu_unsupported_datum_store(kern_context *kcxt,
+							char *buffer,
+							xpu_datum_t *__arg)
+{
+	STROM_ELOG(kcxt, "not a device supported type");
+    return false;
+}
+STATIC_FUNCTION(bool)
+xpu_unsupported_datum_hash(kern_context *kcxt,
+						   uint32_t *p_hash,
+						   xpu_datum_t *__arg)
+{
+	STROM_ELOG(kcxt, "not a device supported type");
+	return false;
+}
+PGSTROM_SQLTYPE_OPERATORS(unsupported);
 
 /* special support functions for float2 */
 INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf((float)fval); }
@@ -57,6 +88,9 @@ INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
 	}
 
 #define __TYPECAST_NOCHECK(X)		(true)
+#define __INTEGER_FITS_IN_BOOL(X)	((X) != 0 ? true : false)
+PG_SIMPLE_TYPECAST_TEMPLATE(bool,int4,__INTEGER_FITS_IN_BOOL,__TYPECAST_NOCHECK)
+
 #define __INTEGER_FITS_IN_INT1(X)	((X) >= SCHAR_MIN && (X) <= SCHAR_MAX)
 #define __FLOAT4_FITS_IN_INT1(X)	(!isnan((float)(X)) &&				\
 									 rint((float)(X)) >= (float)SCHAR_MIN && \
@@ -141,6 +175,7 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,(float8_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(float8_t),__TYPECAST_NOCHECK)
 #undef PG_SIMPLE_TYPECAST_TEMPLATE
 
+__PG_SIMPLE_COMPARE_TEMPLATE(bool,bool,bool,bool,==,eq)
 
 PG_SIMPLE_COMPARE_TEMPLATE(int1,  int1, int1, int8_t)
 PG_SIMPLE_COMPARE_TEMPLATE(int12, int1, int2, int16_t)
@@ -433,9 +468,46 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float84div,float8,float8,float4,float8_t)
 PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,float8_t)
 
 /*
+ * Modulo operator: '%'
+ */
+#define PG_INT_MOD_OPERATOR_TEMPLATE(TYPE)								\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##TYPE##mod(XPU_PGFUNCTION_ARGS)								\
+	{																	\
+		xpu_##TYPE##_t *result = (xpu_##TYPE##_t *)__result;			\
+		xpu_##TYPE##_t x_val;											\
+		xpu_##TYPE##_t y_val;											\
+		const kern_expression *arg;										\
+																		\
+		arg = KEXP_FIRST_ARG(2, TYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+			return false;												\
+		arg = KEXP_NEXT_ARG(arg, TYPE);									\
+		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+			return false;												\
+		result->ops = &xpu_##TYPE##_ops;								\
+		result->isnull = (x_val.isnull | y_val.isnull);					\
+		if (!result->isnull)											\
+		{																\
+			if (y_val.value == 0)										\
+			{															\
+				STROM_ELOG(kcxt, #TYPE "mod : division by zero");		\
+				return false;											\
+			}															\
+			result->value = x_val.value % y_val.value;					\
+		}																\
+		return true;													\
+	}
+
+PG_INT_MOD_OPERATOR_TEMPLATE(int1)
+PG_INT_MOD_OPERATOR_TEMPLATE(int2)
+PG_INT_MOD_OPERATOR_TEMPLATE(int4)
+PG_INT_MOD_OPERATOR_TEMPLATE(int8)
+
+/*
  * Bit operators: '&', '|', '#', '~', '>>', and '<<'
  */
-#define PG_UNARY_OPERATOR_TEMPLATE(FNAME,XTYPE,OPER)					\
+#define PG_UNARY_OPERATOR_TEMPLATE(FNAME,XTYPE,OPER,CAST)				\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
@@ -449,7 +521,7 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,float8_t)
 		result->ops = &xpu_##XTYPE##_ops;								\
 		result->isnull = x_val.isnull;									\
 		if (!result->isnull)											\
-			result->value = OPER x_val.value;							\
+			result->value = OPER(CAST(x_val.value));					\
 		return true;													\
 	}
 
@@ -475,15 +547,29 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,float8_t)
 		return true;													\
 	}
 
-PG_UNARY_OPERATOR_TEMPLATE(int1up,int1,)
-PG_UNARY_OPERATOR_TEMPLATE(int2up,int2,)
-PG_UNARY_OPERATOR_TEMPLATE(int4up,int4,)
-PG_UNARY_OPERATOR_TEMPLATE(int8up,int8,)
+PG_UNARY_OPERATOR_TEMPLATE(int1up,int1,,)
+PG_UNARY_OPERATOR_TEMPLATE(int2up,int2,,)
+PG_UNARY_OPERATOR_TEMPLATE(int4up,int4,,)
+PG_UNARY_OPERATOR_TEMPLATE(int8up,int8,,)
+PG_UNARY_OPERATOR_TEMPLATE(float2up,float2,,)
+PG_UNARY_OPERATOR_TEMPLATE(float4up,float4,,)
+PG_UNARY_OPERATOR_TEMPLATE(float8up,float8,,)
 
-PG_UNARY_OPERATOR_TEMPLATE(int1um,int1,-)
-PG_UNARY_OPERATOR_TEMPLATE(int2um,int2,-)
-PG_UNARY_OPERATOR_TEMPLATE(int4um,int4,-)
-PG_UNARY_OPERATOR_TEMPLATE(int8um,int8,-)
+PG_UNARY_OPERATOR_TEMPLATE(int1um,int1,-,)
+PG_UNARY_OPERATOR_TEMPLATE(int2um,int2,-,)
+PG_UNARY_OPERATOR_TEMPLATE(int4um,int4,-,)
+PG_UNARY_OPERATOR_TEMPLATE(int8um,int8,-,)
+PG_UNARY_OPERATOR_TEMPLATE(float2um,float2,-,)
+PG_UNARY_OPERATOR_TEMPLATE(float4um,float4,-,)
+PG_UNARY_OPERATOR_TEMPLATE(float8um,float8,-,)
+
+PG_UNARY_OPERATOR_TEMPLATE(int1abs,int1,abs,)
+PG_UNARY_OPERATOR_TEMPLATE(int2abs,int2,abs,)
+PG_UNARY_OPERATOR_TEMPLATE(int4abs,int4,abs,)
+PG_UNARY_OPERATOR_TEMPLATE(int8abs,int8,llabs,)
+PG_UNARY_OPERATOR_TEMPLATE(float2abs,float2,fabs,float4_t)
+PG_UNARY_OPERATOR_TEMPLATE(float4abs,float4,fabs,)
+PG_UNARY_OPERATOR_TEMPLATE(float8abs,float8,fabs,)
 
 PG_BITWISE_OPERATOR_TEMPLATE(int1and,int1,int1,int1,&)
 PG_BITWISE_OPERATOR_TEMPLATE(int2and,int2,int2,int2,&)
@@ -500,10 +586,10 @@ PG_BITWISE_OPERATOR_TEMPLATE(int2xor,int2,int2,int2,^)
 PG_BITWISE_OPERATOR_TEMPLATE(int4xor,int4,int4,int4,^)
 PG_BITWISE_OPERATOR_TEMPLATE(int8xor,int8,int8,int8,^)
 
-PG_UNARY_OPERATOR_TEMPLATE(int1not,int1,~)
-PG_UNARY_OPERATOR_TEMPLATE(int2not,int2,~)
-PG_UNARY_OPERATOR_TEMPLATE(int4not,int4,~)
-PG_UNARY_OPERATOR_TEMPLATE(int8not,int8,~)
+PG_UNARY_OPERATOR_TEMPLATE(int1not,int1,~,)
+PG_UNARY_OPERATOR_TEMPLATE(int2not,int2,~,)
+PG_UNARY_OPERATOR_TEMPLATE(int4not,int4,~,)
+PG_UNARY_OPERATOR_TEMPLATE(int8not,int8,~,)
 
 PG_BITWISE_OPERATOR_TEMPLATE(int1shr,int1,int1,int4,>>)
 PG_BITWISE_OPERATOR_TEMPLATE(int2shr,int2,int2,int4,>>)

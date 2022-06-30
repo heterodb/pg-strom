@@ -21,6 +21,7 @@
 
 #include "access/brin.h"
 #include "access/genam.h"
+#include "access/relscan.h"
 #include "access/table.h"
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
@@ -172,6 +173,7 @@ typedef struct devfunc_info
 	Oid			func_oid;
 	struct devtype_info *func_rettype;
 	uint64_t	func_flags;
+	int			func_cost;
 	bool		func_is_negative;
 	int			func_nargs;
 	struct devtype_info *func_argtypes[1];
@@ -234,17 +236,27 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
-extern bytea   *pgstrom_build_xpucode(Expr *expr,
-									  int num_rels,
-									  List **rel_tlist,
-									  uint32_t *p_extra_flags,
-									  uint32_t *p_extra_bufsz,
-									  List **p_used_params);
+extern void	pgstrom_build_xpucode(bytea **p_xpucode,
+								  Expr *expr,
+								  int num_rels,
+								  List **rel_tlist,
+								  uint32_t *p_extra_flags,
+								  uint32_t *p_extra_bufsz,
+								  List **p_used_params);
+extern void	pgstrom_build_projection(bytea **p_xpucode_proj,
+									 bytea **p_xpucode_vload,
+									 List *tlist_dev,
+									 int num_rels,
+									 List **rel_tlist,
+									 uint32_t *p_extra_flags,
+									 uint32_t *p_extra_bufsz,
+									 List **p_used_params);
 extern int		pgstrom_apply_cached_varref(bytea *kern_code,
 											uint32_t *p_extra_bufsz);
 extern bool		pgstrom_gpu_expression(Expr *expr,
 									   int num_rels,
-									   List **rel_tlist);
+									   List **rel_tlist,
+									   int *p_devcost);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 

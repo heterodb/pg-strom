@@ -47,18 +47,11 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 }
 
 STATIC_FUNCTION(bool)
-xpu_numeric_from_varlena(kern_context *kcxt,
-						 xpu_numeric_t *result,
-						 const varlena *addr)
+__numeric_from_varlena(kern_context *kcxt,
+					   xpu_numeric_t *result,
+					   const varlena *addr)
 {
 	uint32_t		len;
-
-	result->ops = &xpu_numeric_ops;
-	if (!addr)
-	{
-		result->isnull = true;
-		return true;
-	}
 
 	len = VARSIZE_ANY_EXHDR(addr);
 	if (len >= sizeof(uint16_t))
@@ -120,7 +113,7 @@ error:
 }
 
 STATIC_FUNCTION(int)
-xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
+__numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 {
 	NumericData	   *numData = (NumericData *)buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
@@ -186,37 +179,32 @@ xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 STATIC_FUNCTION(bool)
 xpu_numeric_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
-					  const void *addr)
-{
-	return xpu_numeric_from_varlena(kcxt, (xpu_numeric_t *)__result,
-									(const varlena *)addr);
-}
-
-STATIC_FUNCTION(bool)
-arrow_numeric_datum_ref(kern_context *kcxt,
-						xpu_datum_t *__result,
-						kern_data_store *kds,
-						kern_colmeta *cmeta,
-						uint32_t rowidx)
+					  const kern_colmeta *cmeta,
+					  const void *addr, int len)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	void   *addr;
+	bool			rv = true;
 
-	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, rowidx,
-									  sizeof(int128_t));
+	result->ops = &xpu_numeric_ops;
 	if (!addr)
 		result->isnull = true;
-	else
+	else if (cmeta)
 	{
 		/*
 		 * Note that Decimal::scale is equivalent to numeric::weight.
 		 * It is the number of digits after the decimal point.
 		 */
-		set_normalized_numeric(result, *((int128_t *)addr),
+		result->isnull = false;
+		set_normalized_numeric(result,
+							   *((int128_t *)addr),
 							   cmeta->attopts.decimal.scale);
 	}
-	result->ops = &xpu_numeric_ops;
-	return true;
+	else
+	{
+		result->isnull = false;
+		rv = __numeric_from_varlena(kcxt, result, (const varlena *)addr);
+	}
+	return rv;
 }
 
 PUBLIC_FUNCTION(int)
@@ -246,7 +234,7 @@ xpu_numeric_datum_store(kern_context *kcxt,
 		}
 		return sz;
 	}
-	return xpu_numeric_to_varlena(buffer, arg->weight, arg->value);
+	return __numeric_to_varlena(buffer, arg->weight, arg->value);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -835,6 +823,76 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 		if (negative)
 			ival = -ival;
 		set_normalized_numeric(result, ival, weight);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
+{
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+	xpu_numeric_t	datum_a;
+	xpu_numeric_t	datum_b;
+	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
+		return false;
+	karg = KEXP_NEXT_ARG(karg, numeric);
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
+		return false;
+	result->ops = &xpu_numeric_ops;
+	result->isnull = (datum_a.isnull | datum_b.isnull);
+	if (result->isnull)
+		return true;
+	if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b.kind != XPU_NUMERIC_KIND__VALID)
+	{
+		if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
+			datum_b.kind == XPU_NUMERIC_KIND__NAN)
+		{
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF ||
+				 datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (datum_b.kind == XPU_NUMERIC_KIND__VALID &&
+				datum_b.value == 0)
+			{
+				STROM_ELOG(kcxt, "division by zero");
+				return false;
+			}
+			else
+			{
+				result->kind = XPU_NUMERIC_KIND__NAN;
+			}
+		}
+		else
+		{
+			/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
+			result->kind = datum_b.kind;
+			result->value = datum_b.value;
+		}
+	}
+	else if (datum_b.value == 0)
+	{
+		STROM_ELOG(kcxt, "division by zero");
+		return false;
+	}
+	else
+	{
+		while (datum_a.weight > datum_b.value)
+		{
+			datum_b.value *= 10;
+			datum_b.weight++;
+		}
+		while (datum_a.weight < datum_b.weight)
+		{
+			datum_a.value *= 10;
+			datum_a.weight++;
+		}
+		set_normalized_numeric(result,
+							   datum_a.value % datum_b.value,
+							   datum_a.weight);
 	}
 	return true;
 }

@@ -266,7 +266,7 @@ custom_path_remember(PlannerInfo *root,
 		   cent->outer_parallel == outer_parallel &&
 		   cent->inner_parallel == inner_parallel &&
 		   cent->custom_name == cpath->methods->CustomName);
-	cent->cpath = pgstrom_copy_pathnode(cpath);
+	cent->cpath = (const CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 
 	return true;
 }

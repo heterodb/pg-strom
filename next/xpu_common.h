@@ -201,39 +201,36 @@ typedef struct
 	const char	   *error_funcname;
 	const char	   *error_message;
 	kern_session_info *session;
-	/* current outer relation focus */
-	struct kern_data_store *kds_outer;
-	struct kern_data_extra *kds_extra;	/* only if KDS_FORMAT_COLUMN */
-	struct kern_tupitem	*tup_outer;		/* if KDS_FORMAT_(HEAP|BLOCK) */
-	uint32_t		row_index;			/* if KDS_FORMAT_(COLUMN|ARROW) */
-	/* current inner relation focus (if GpuJoin) */
-	uint32_t		max_depth;
-	struct kern_data_store **kds_inners;
-	struct kern_tupitem	**tup_inners;	/* KDS_FORMAT_(HEAP|HASH) */
-	/* cached var reference if used multiple times */
-	void		  **cached_kvars;
+	/* current slot of kernel variable references */
+	const struct kern_colmeta **kvars_cmeta;
+	const void	  **kvars_addr;
+	int			   *kvars_len;
+	int				kvars_num;
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_OUTER)						\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KVARS_NUM)						\
 	do {																\
 		size_t	__sz = (offsetof(kern_context, vlbuf) +					\
 						MAXALIGN((SESSION)->kcxt_extra_bufsz));			\
 		KCXT = alloca(__sz);											\
 		memset(KCXT, 0, __sz);											\
 		KCXT->session = (SESSION);										\
-		KCXT->kds_outer = (KDS_OUTER);									\
-		if ((SESSION)->num_cached_kvars > 0)							\
+		if ((KVARS_NUM) > 0)											\
 		{																\
-			__sz = (sizeof(void *) * (SESSION)->num_cached_kvars);		\
-			KCXT->cached_kvars = alloca(__sz);							\
-			memset(KCXT->cached_kvars, 0, __sz);						\
+			KCXT->kvars_num  = (KVARS_NUM);								\
+			KCXT->kvars_cmeta = alloca(sizeof(void *) * (KVARS_NUM));	\
+			KCXT->kvars_addr = alloca(sizeof(void *) * (KVARS_NUM));	\
+			KCXT->kvars_len  = alloca(sizeof(int) * (KVARS_NUM));		\
+			memset(KCXT->kvars_cmeta, 0, sizeof(void *) * (KVARS_NUM));	\
+			memset(KCXT->kvars_addr, 0, sizeof(void *) * (KVARS_NUM));	\
+			memset(KCXT->kvars_len, -1, sizeof(int) * (KVARS_NUM));		\
 		}																\
-		KCXT->vlpos = vlbuf;											\
-		KCXT->vlend = vlbuf + (SESSION)->kcxt_extra_bufsz;				\
+		KCXT->vlpos = KCXT->vlbuf;										\
+		KCXT->vlend = KCXT->vlbuf + (SESSION)->kcxt_extra_bufsz;		\
 	} while(0)
 
 INLINE_FUNCTION(void *)
@@ -252,10 +249,11 @@ kcxt_alloc(kern_context *kcxt, size_t len)
 INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
-	if (kcxt->cached_kvars)
+	if (kcxt->kvars_num > 0)
 	{
-		size_t	__sz = sizeof(void *) * kcxt->session->num_cached_kvars;
-		memset(kcxt->cached_kvars, 0, __sz);
+		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_num);
+		memset(kcxt->kvars_addr, 0, sizeof(void *) * kcxt->kvars_num);
+		memset(kcxt->kvars_len, -1, sizeof(int) * kcxt->kvars_num);
 	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
@@ -1109,6 +1107,8 @@ typedef enum {
 #include "xpu_opcodes.h"
 	TypeOpCode__composite,
 	TypeOpCode__array,
+	TypeOpCode__record,
+	TypeOpCode__unsupported,
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
@@ -1129,12 +1129,8 @@ struct xpu_datum_operators {
 	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
 							   xpu_datum_t *result,
-							   const void *addr);
-	bool	  (*arrow_datum_ref)(kern_context *kcxt,
-								 xpu_datum_t *result,
-								 kern_data_store *kds,
-								 kern_colmeta *cmeta,
-								 uint32_t rowidx);
+							   const kern_colmeta *cmeta,
+							   const void *addr, int len);
 	int		  (*xpu_datum_store)(kern_context *kcxt,
 								 char *buffer,
 								 xpu_datum_t *arg);
@@ -1152,8 +1148,8 @@ struct xpu_datum_operators {
 #define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
 		XPU_DATUM_COMMON_FIELD;								\
-		int		length;		/* -1, if PG verlena */			\
-		char   *value;										\
+		int			length;		/* -1, if PG verlena */		\
+		const char *value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
 #define PGSTROM_SQLTYPE_OPERATORS(NAME)						\
@@ -1162,7 +1158,6 @@ struct xpu_datum_operators {
 		.xpu_type_code = TypeOpCode__##NAME,				\
 		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),			\
 		.xpu_datum_ref = xpu_##NAME##_datum_ref,			\
-		.arrow_datum_ref = arrow_##NAME##_datum_ref,		\
 		.xpu_datum_store = xpu_##NAME##_datum_store,		\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,			\
 	}
@@ -1238,7 +1233,7 @@ EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
  * Definition of device functions
  *
  * ---------------------------------------------------------------- */
-#define FUNC_OPCODE(a,b,c,NAME,d)	FuncOpCode__##NAME,
+#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
 typedef enum {
 	FuncOpCode__Invalid = 0,
 	FuncOpCode__ConstExpr,
@@ -1256,6 +1251,9 @@ typedef enum {
 	FuncOpCode__BoolTestExpr_IsUnknown,
 	FuncOpCode__BoolTestExpr_IsNotUnknown,
 #include "xpu_opcodes.h"
+	/* for projection */
+	FuncOpCode__Projection,
+	FuncOpCode__LoadVars,
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 
@@ -1276,18 +1274,27 @@ struct kern_expression
 	union {
 		char		data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		struct {
+			int		nloads;
+			struct {
+				int16_t		var_depth;
+				int16_t		var_resno;
+				uint32_t	var_slot_id;
+			} kvars[1];
+		} ld;		/* LoadVars */
+		struct {
 			Oid		const_type;
 			bool	const_isnull;
 			char	const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
-		} c;
+		} c;		/* ConstExpr */
 		struct {
 			uint32_t param_id;
-		} p;
+		} p;		/* ParamExpr */
 		struct {
-			int16_t	var_depth;
-			int16_t	var_resno;
-			int16_t	var_cache_id;
-		} v;
+			int16_t		var_typlen;
+			bool		var_typbyval;
+			uint8_t		var_typalign;
+			uint32_t	var_slot_id;
+		} v;		/* VarExpr */
 	} u;
 };
 #define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
@@ -1332,7 +1339,7 @@ __KEXP_NEXT_ARG(const kern_expression *kexp,
 #define SizeOfKernExprParam					\
 	(offsetof(kern_expression, u.p.param_id) + sizeof(uint32_t))
 #define SizeOfKernExprVar					\
-	(offsetof(kern_expression, u.v.var_resno) + sizeof(uint16_t))
+	(offsetof(kern_expression, u.v.var_slot_id) + sizeof(int))
 typedef struct {
 	FuncOpCode		func_opcode;
 	xpu_function_t	func_dptr;
@@ -1346,7 +1353,7 @@ EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
  *
  * ----------------------------------------------------------------
  */
-#define FUNC_OPCODE(a,b,c,NAME,d)				\
+#define FUNC_OPCODE(a,b,c,NAME,d,e)			\
 	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
 #include "xpu_opcodes.h"
 

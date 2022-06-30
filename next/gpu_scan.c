@@ -28,6 +28,7 @@ typedef struct
 	const Bitmapset *gpu_direct_devs; /* device for GPU-Direct SQL, if any */
 	bytea		   *kern_quals;		/* device qualifiers */
 	bytea		   *kern_projs;		/* device projection */
+	bytea		   *kern_vload;		/* device var-loads for projection */
 	uint32_t		extra_flags;
 	uint32_t		extra_bufsz;
 	uint32_t		nrows_per_block;	/* average # rows per block */
@@ -61,6 +62,13 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 									 PointerGetDatum(gs_info->kern_projs),
 									 (gs_info->kern_projs == NULL),
 									 false));
+	privs = lappend(privs, makeConst(BYTEAOID,
+									 -1,
+									 InvalidOid,
+									 -1,
+									 PointerGetDatum(gs_info->kern_vload),
+									 (gs_info->kern_vload == NULL),
+									 false));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
@@ -75,10 +83,9 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	cscan->custom_exprs = exprs;
 }
 
-static GpuScanInfo *
-deform_gpuscan_info(CustomScan *cscan)
+static void
+deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 {
-	GpuScanInfo *gs_info = palloc0(sizeof(GpuScanInfo));
 	List	   *privs = cscan->custom_private;
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
@@ -93,6 +100,9 @@ deform_gpuscan_info(CustomScan *cscan)
 	con = list_nth(privs, pindex++);
 	if (!con->constisnull)
 		gs_info->kern_projs	= DatumGetByteaP(con->constvalue);
+	con = list_nth(privs, pindex++);
+    if (!con->constisnull)
+		gs_info->kern_vload = DatumGetByteaP(con->constvalue);
 	gs_info->extra_flags	= intVal(list_nth(privs, pindex++));
 	gs_info->extra_bufsz	= intVal(list_nth(privs, pindex++));
 	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
@@ -102,9 +112,40 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->index_oid		= intVal(list_nth(privs, pindex++));
 	gs_info->index_conds	= list_nth(exprs, eindex++);
 	gs_info->index_quals	= list_nth(exprs, eindex++);
-
-	return gs_info;
 }
+
+/*
+ * GpuScanSharedState
+ */
+typedef struct
+{
+	/* for arrow_fdw file scan */
+	pg_atomic_uint32	af_rbatch_index;
+	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
+	/* for gpu_cache cache scan */
+	pg_atomic_uint32	gc_fetch_count;
+	/* for block-based regular table scan */
+	BlockNumber			pbs_nblocks;		/* # blocks in relation at start of scan */
+	slock_t				pbs_mutex;			/* lock of the fields below */
+	BlockNumber			pbs_startblock;		/* starting block number */
+	BlockNumber			pbs_nallocated;		/* # of blocks allocated to workers */
+	/* common parallel table scan descriptor */
+	ParallelTableScanDescData phscan;
+} GpuScanSharedState;
+
+/*
+ * GpuScanState
+ */
+typedef struct
+{
+	CustomScanState	css;
+	GpuScanSharedState *gs_sstate;	/* shared state */
+	GpuScanInfo		gs_info;		/* planner info */
+	ExprState	   *dev_quals;
+	TupleTableSlot *base_slot;		/* base relation */
+	ProjectionInfo *base_proj;		/* base --> tlist_dev projection */
+} GpuScanState;
 
 /*
  * create_gpuscan_path - constructor of CustomPath(GpuScan) node
@@ -123,7 +164,6 @@ create_gpuscan_path(PlannerInfo *root,
 	GpuScanInfo	   *gs_info = palloc0(sizeof(GpuScanInfo));
 	CustomPath	   *cpath = makeNode(CustomPath);
 	ParamPathInfo  *param_info;
-	Bitmapset	   *outer_refs = NULL;
 	int				parallel_nworkers = 0;
 	double			parallel_divisor = 1.0;
 	double			gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
@@ -138,7 +178,7 @@ create_gpuscan_path(PlannerInfo *root,
 	QualCost		qcost;
 	double			ntuples;
 	double			nchunks;
-	int				j, nrows_per_block = 0;
+	int				nrows_per_block = 0;
 
 	/* CPU Parallel parameters */
 	if (parallel_aware)
@@ -240,7 +280,6 @@ create_gpuscan_path(PlannerInfo *root,
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
 	ntuples *= selectivity;		/* rows after dev_quals */
-	pull_varattnos((Node *)dev_quals, baserel->relid, &outer_refs);
 
 	/* Cost for DMA receive (GPU-->Host) */
 	run_cost += pgstrom_gpu_dma_cost * ntuples;
@@ -249,7 +288,6 @@ create_gpuscan_path(PlannerInfo *root,
 	cost_qual_eval(&qcost, host_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * ntuples;
-	pull_varattnos((Node *)host_quals, baserel->relid, &outer_refs);
 
 	/* PPI costs (as a part of host quals, if any) */
 	param_info = get_baserel_parampathinfo(root, baserel,
@@ -261,7 +299,6 @@ create_gpuscan_path(PlannerInfo *root,
 		cost_qual_eval(&qcost, ppi_quals, root);
 		startup_cost += qcost.startup;
 		run_cost += qcost.per_tuple * ntuples;
-		pull_varattnos((Node *)ppi_quals, baserel->relid, &outer_refs);
 	}
 
 	/* Cost for Projection */
@@ -272,19 +309,8 @@ create_gpuscan_path(PlannerInfo *root,
 	if (nchunks > 0)
 		startup_delay = run_cost * (1.0 / nchunks);
 
-	/* check referenced columns */
-	for (j=baserel->min_attr; j <= baserel->max_attr; j++)
-	{
-		if (!baserel->attr_needed[j - baserel->min_attr])
-			continue;
-		outer_refs = bms_add_member(outer_refs,
-									j - FirstLowInvalidHeapAttributeNumber);
-	}
-
 	/* setup GpuScanInfo (Path phase) */
 	gs_info->nrows_per_block = nrows_per_block;
-	gs_info->outer_refs = outer_refs;
-	gs_info->dev_quals = dev_quals;
 	if (indexOpt)
 	{
 		gs_info->index_oid = indexOpt->indexoid;
@@ -371,7 +397,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 	{
 		RestrictInfo *rinfo = lfirst(lc);
 
-		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL))
+		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL, NULL))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -412,6 +438,74 @@ GpuScanAddScanPath(PlannerInfo *root,
 }
 
 /*
+ * gpuscan_build_projection - make custom_scan_tlist
+ */
+typedef struct
+{
+	List	   *tlist_dev;
+	bool		resjunk;
+} build_projection_context;
+
+static bool
+__gpuscan_build_projection_walker(Node *node, void *__priv)
+{
+	build_projection_context *context = __priv;
+	ListCell   *lc;
+
+	if (!node)
+		return false;
+	foreach (lc, context->tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (equal(node, tle->expr))
+			return false;
+	}
+	if (IsA(node, Var) ||
+		pgstrom_gpu_expression((Expr *)node, 0, NULL, NULL))
+	{
+		AttrNumber		resno = list_length(context->tlist_dev) + 1;
+		TargetEntry	   *tle = makeTargetEntry((Expr *)node,
+											  resno,
+											  NULL,
+											  context->resjunk);
+		context->tlist_dev = lappend(context->tlist_dev, tle);
+		return false;
+	}
+	return expression_tree_walker(node, __gpuscan_build_projection_walker, __priv);
+}
+
+static List *
+gpuscan_build_projection(List *tlist,
+						 List *host_quals,
+						 List *dev_quals)
+{
+	build_projection_context context;
+	List	   *vars_list;
+	ListCell   *lc;
+
+	if (!tlist)
+		return NIL;		/* GPU returns tuple as is? */
+	memset(&context, 0, sizeof(build_projection_context));
+	foreach (lc, tlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+			continue;	/* no need to be carried back from GPU */
+		__gpuscan_build_projection_walker((Node *)tle->expr, &context);
+	}
+	vars_list = pull_vars_of_level((Node *)host_quals, 0);
+	__gpuscan_build_projection_walker((Node *)vars_list, &context);
+
+	context.resjunk = true;
+	vars_list = pull_vars_of_level((Node *)dev_quals, 0);
+	__gpuscan_build_projection_walker((Node *)vars_list, &context);
+
+	return context.tlist_dev;
+}
+
+/*
  * PlanGpuScanPath
  */
 static Plan *
@@ -422,8 +516,116 @@ PlanGpuScanPath(PlannerInfo *root,
 				List *clauses,
 				List *custom_children)
 {
-	//add opcode
-	return NULL;
+	GpuScanInfo	   *gs_info = linitial(best_path->custom_private);
+	CustomScan	   *cscan;
+	List		   *host_quals = NIL;
+	List		   *dev_quals = NIL;
+	List		   *dev_costs = NIL;
+	List		   *tlist_dev = NIL;
+	Bitmapset	   *outer_refs = NULL;
+	uint32_t		qual_extra_bufsz = 0;
+	uint32_t		proj_extra_bufsz = 0;
+	int				j, k;
+	ListCell	   *cell;
+
+	/* sanity checks */
+	Assert(baserel->relid > 0 &&
+		   baserel->rtekind == RTE_RELATION &&
+		   custom_children == NIL);
+	/* check referenced columns */
+	pull_varattnos((Node *)clauses, baserel->relid, &outer_refs);
+	for (j=baserel->min_attr; j <= baserel->max_attr; j++)
+	{
+		if (!baserel->attr_needed[j - baserel->min_attr])
+			continue;
+		k = j - FirstLowInvalidHeapAttributeNumber;
+		outer_refs = bms_add_member(outer_refs, k);
+	}
+
+	/*
+	 * Distribution of clauses into device executable and others.
+	 */
+	foreach (cell, clauses)
+	{
+		RestrictInfo *rinfo = lfirst(cell);
+		int		devcost;
+
+		Assert(exprType((Node *)rinfo->clause) != BOOLOID);
+		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL, &devcost))
+		{
+			ListCell   *lc1, *lc2;
+			int			pos = 0;
+
+			forboth (lc1, dev_quals,
+					 lc2, dev_costs)
+			{
+				if (devcost < lfirst_int(lc2))
+				{
+					dev_quals = list_insert_nth(dev_quals, pos, rinfo);
+					dev_costs = list_insert_nth_int(dev_quals, pos, devcost);
+					break;
+				}
+				pos++;
+			}
+			if (!lc1 && !lc2)
+			{
+				dev_quals = lappend(dev_quals, rinfo);
+				dev_costs = lappend_int(dev_costs, devcost);
+			}
+		}
+		else
+		{
+			host_quals = lappend(host_quals, rinfo);
+		}
+	}
+	if (dev_quals == NIL)
+		elog(ERROR, "GpuScan: Bug? no device executable qualifiers are given");
+	dev_quals = extract_actual_clauses(dev_quals, false);
+	host_quals = extract_actual_clauses(host_quals, false);
+
+	/* code generation for WHERE-clause */
+	pgstrom_build_xpucode(&gs_info->kern_quals,
+						  (Expr *)dev_quals,
+						  0, NULL,
+						  &gs_info->extra_flags,
+						  &qual_extra_bufsz,
+						  &gs_info->used_params);
+	/* code generation for the Projection */
+	tlist_dev = gpuscan_build_projection(tlist,
+										 host_quals,
+										 dev_quals);
+	pgstrom_build_projection(&gs_info->kern_projs,
+							 &gs_info->kern_vload,
+							 tlist_dev,
+							 0, NULL,
+							 &gs_info->extra_flags,
+							 &proj_extra_bufsz,
+							 &gs_info->used_params);
+	gs_info->extra_bufsz = Max(qual_extra_bufsz,
+							   proj_extra_bufsz);
+	gs_info->dev_quals = dev_quals;
+	gs_info->outer_refs = outer_refs;
+
+	elog(ERROR, "kern_quals = %s\nkern_projs = %s\nkern_vload = %s",
+		 pgstrom_xpucode_to_string(gs_info->kern_quals),
+		 pgstrom_xpucode_to_string(gs_info->kern_projs),
+		 pgstrom_xpucode_to_string(gs_info->kern_vload));
+	
+	/*
+	 * Build CustomScan(GpuScan) node
+	 */
+	cscan = makeNode(CustomScan);
+	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.qual = host_quals;
+	cscan->scan.scanrelid = baserel->relid;
+	cscan->flags = best_path->flags;
+	cscan->methods = &gpuscan_plan_methods;
+	cscan->custom_plans = NIL;
+	cscan->custom_scan_tlist = tlist_dev;
+
+	form_gpuscan_info(cscan, gs_info);
+
+	return &cscan->scan.plan;
 }
 
 /*
@@ -432,7 +634,16 @@ PlanGpuScanPath(PlannerInfo *root,
 static Node *
 CreateGpuScanState(CustomScan *cscan)
 {
-	return NULL;
+	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
+
+	/* Set tag and executor callbacks */
+	NodeSetTag(gss, T_CustomScanState);
+	gss->css.flags = cscan->flags;
+	Assert(cscan->methods == &gpuscan_plan_methods);
+	gss->css.methods = &gpuscan_exec_methods;
+	deform_gpuscan_info(&gss->gs_info, cscan);
+
+	return (Node *)gss;
 }
 
 /*

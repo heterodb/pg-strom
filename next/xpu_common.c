@@ -134,7 +134,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 		addr = NULL;
 	else
 		addr = kexp->u.c.const_value;
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
 }
 
 STATIC_FUNCTION(bool)
@@ -146,67 +146,24 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
 		addr = (char *)session + session->poffset[param_id];
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
 }
 
 STATIC_FUNCTION(bool)
 pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 {
-	void   *addr = NULL;
+	uint32_t	slot_id = kexp->u.v.var_slot_id;
+	const kern_colmeta *cmeta;
+	const void *addr = NULL;
+	int			len = -1;
 
-	/* fast path if var is cached */
-	if (kexp->u.v.var_cache_id >= 0 &&
-		kcxt->cached_kvars != NULL &&
-		kcxt->cached_kvars[kexp->u.v.var_cache_id] != NULL)
+	if (slot_id < kcxt->kvars_num)
 	{
-		memcpy(__result,
-			   kcxt->cached_kvars[kexp->u.v.var_cache_id],
-			   kexp->rettype_ops->xpu_type_sizeof);
-		return true;
+		cmeta = kcxt->kvars_cmeta[slot_id];
+		addr = kcxt->kvars_addr[slot_id];
+		len = kcxt->kvars_len[slot_id];
 	}
-
-	if (kexp->u.v.var_depth == 0)
-	{
-		kern_data_store	*kds = kcxt->kds_outer;
-		kern_colmeta	*cmeta;
-
-		switch (kds->format)
-		{
-			case KDS_FORMAT_HEAP:
-			case KDS_FORMAT_BLOCK:
-				if (!kcxt->tup_outer)
-					break;
-				addr = kern_get_datum_tuple(kds->colmeta,
-											kcxt->tup_outer,
-											kexp->u.v.var_resno);
-				break;
-			case KDS_FORMAT_COLUMN:
-				addr = kern_get_datum_column(kcxt->kds_outer,
-											 kcxt->kds_extra,
-											 kexp->u.v.var_resno,
-											 kcxt->row_index);
-				break;
-			case KDS_FORMAT_ARROW:
-				cmeta = &kds->colmeta[kexp->u.v.var_resno];
-				return kexp->rettype_ops->arrow_datum_ref(kcxt,
-														  __result,
-														  kds, cmeta,
-														  kcxt->row_index);
-			default:
-				STROM_ELOG(kcxt, "unknown KDS format");
-				return false;
-		}
-	}
-	else
-	{
-		kern_data_store *kds = kcxt->kds_inners[kexp->u.v.var_depth - 1];
-		kern_tupitem	*titem = kcxt->tup_inners[kexp->u.v.var_depth - 1];
-
-		assert(kds->format == KDS_FORMAT_HEAP ||
-			   kds->format == KDS_FORMAT_HASH);
-		addr = kern_get_datum_tuple(kds->colmeta, titem, kexp->u.v.var_resno);
-	}
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, cmeta, addr, len);
 }
 
 STATIC_FUNCTION(bool)
@@ -368,7 +325,7 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 /*
  * Catalog of built-in device functions
  */
-#define FUNC_OPCODE(a,b,c,NAME,d)						\
+#define FUNC_OPCODE(a,b,c,NAME,d,e)				\
 	{FuncOpCode__##NAME, pgfn_##NAME},
 PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },
