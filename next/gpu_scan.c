@@ -27,10 +27,11 @@ typedef struct
 	const Bitmapset *gpu_cache_devs; /* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs; /* device for GPU-Direct SQL, if any */
 	bytea		   *kern_quals;		/* device qualifiers */
-	bytea		   *kern_projs;		/* device projection */
-	bytea		   *kern_vload;		/* device var-loads for projection */
+	bytea		   *kern_proj_prep;	/* VarLoad for projection */
+	bytea		   *kern_proj_exec;	/* device projection */
 	uint32_t		extra_flags;
 	uint32_t		extra_bufsz;
+	uint32_t		kvars_nslots;
 	uint32_t		nrows_per_block;	/* average # rows per block */
 	const Bitmapset *outer_refs;	/* referenced columns */
 	List		   *used_params;	/* Param list in use */
@@ -59,18 +60,19 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 									 -1,
 									 InvalidOid,
 									 -1,
-									 PointerGetDatum(gs_info->kern_projs),
-									 (gs_info->kern_projs == NULL),
+									 PointerGetDatum(gs_info->kern_proj_prep),
+									 (gs_info->kern_proj_prep == NULL),
 									 false));
 	privs = lappend(privs, makeConst(BYTEAOID,
 									 -1,
 									 InvalidOid,
 									 -1,
-									 PointerGetDatum(gs_info->kern_vload),
-									 (gs_info->kern_vload == NULL),
+									 PointerGetDatum(gs_info->kern_proj_exec),
+									 (gs_info->kern_proj_exec == NULL),
 									 false));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->extra_bufsz));
+	privs = lappend(privs, makeInteger(gs_info->kvars_nslots));
 	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
 	privs = lappend(privs, bms_to_pglist(gs_info->outer_refs));
 	exprs = lappend(exprs, gs_info->used_params);
@@ -99,12 +101,13 @@ deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 		gs_info->kern_quals	= DatumGetByteaP(con->constvalue);
 	con = list_nth(privs, pindex++);
 	if (!con->constisnull)
-		gs_info->kern_projs	= DatumGetByteaP(con->constvalue);
+		gs_info->kern_proj_prep = DatumGetByteaP(con->constvalue);
 	con = list_nth(privs, pindex++);
-    if (!con->constisnull)
-		gs_info->kern_vload = DatumGetByteaP(con->constvalue);
+	if (!con->constisnull)
+		gs_info->kern_proj_exec = DatumGetByteaP(con->constvalue);
 	gs_info->extra_flags	= intVal(list_nth(privs, pindex++));
 	gs_info->extra_bufsz	= intVal(list_nth(privs, pindex++));
+	gs_info->kvars_nslots   = intVal(list_nth(privs, pindex++));
 	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
 	gs_info->outer_refs		= bms_from_pglist(list_nth(privs, pindex++));
 	gs_info->used_params	= list_nth(exprs, eindex++);
@@ -142,10 +145,27 @@ typedef struct
 	CustomScanState	css;
 	GpuScanSharedState *gs_sstate;	/* shared state */
 	GpuScanInfo		gs_info;		/* planner info */
+	GpuConnection  *conn;
+	GpuCacheState  *gc_state;
+	GpuDirectState *gd_state;
+	ArrowFdwState  *af_state;
+	/* for CPU fallbacks */
 	ExprState	   *dev_quals;
 	TupleTableSlot *base_slot;		/* base relation */
 	ProjectionInfo *base_proj;		/* base --> tlist_dev projection */
 } GpuScanState;
+
+/* declarations */
+static void		createGpuScanSharedState(GpuScanState *gss,
+										 ParallelContext *pcxt,
+										 void *dsm_addr);
+static void		resetGpuScanSharedState(GpuScanState *gss);
+
+
+
+
+
+
 
 /*
  * create_gpuscan_path - constructor of CustomPath(GpuScan) node
@@ -525,6 +545,8 @@ PlanGpuScanPath(PlannerInfo *root,
 	Bitmapset	   *outer_refs = NULL;
 	uint32_t		qual_extra_bufsz = 0;
 	uint32_t		proj_extra_bufsz = 0;
+	uint32_t		qual_kvars_nslots = 0;
+	uint32_t		proj_kvars_nslots = 0;
 	int				j, k;
 	ListCell	   *cell;
 
@@ -589,27 +611,31 @@ PlanGpuScanPath(PlannerInfo *root,
 						  0, NULL,
 						  &gs_info->extra_flags,
 						  &qual_extra_bufsz,
+						  &qual_kvars_nslots,
 						  &gs_info->used_params);
 	/* code generation for the Projection */
 	tlist_dev = gpuscan_build_projection(tlist,
 										 host_quals,
 										 dev_quals);
-	pgstrom_build_projection(&gs_info->kern_projs,
-							 &gs_info->kern_vload,
+	pgstrom_build_projection(&gs_info->kern_proj_prep,
+							 &gs_info->kern_proj_exec,
 							 tlist_dev,
 							 0, NULL,
 							 &gs_info->extra_flags,
 							 &proj_extra_bufsz,
+							 &proj_kvars_nslots,
 							 &gs_info->used_params);
 	gs_info->extra_bufsz = Max(qual_extra_bufsz,
 							   proj_extra_bufsz);
+	gs_info->kvars_nslots = Max(qual_kvars_nslots,
+								proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
 
 	elog(ERROR, "kern_quals = %s\nkern_projs = %s\nkern_vload = %s",
 		 pgstrom_xpucode_to_string(gs_info->kern_quals),
-		 pgstrom_xpucode_to_string(gs_info->kern_projs),
-		 pgstrom_xpucode_to_string(gs_info->kern_vload));
+		 pgstrom_xpucode_to_string(gs_info->kern_proj_prep),
+		 pgstrom_xpucode_to_string(gs_info->kern_proj_exec));
 	
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -651,7 +677,84 @@ CreateGpuScanState(CustomScan *cscan)
  */
 static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	Relation		rel = gss->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc;
+	List		   *dev_quals;
+	List		   *tlist_dev = NIL;
+	ListCell	   *lc;
+
+
+	/* sanity checks */
+	Assert(rel != NULL &&
+		   outerPlanState(node) == NULL &&
+		   innerPlanState(node) == NULL);
+
+	/*
+	 * Re-initialization of scan tuple-descriptor and projection-info,
+	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
+	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
+	 * of ExecCleanTypeFromTL; that leads incorrect projection.
+	 * So, we try to remove junk attributes from the scan-descriptor.
+	 *
+	 * And, device projection returns a tuple in heap-format, so we
+	 * prefer TTSOpsHeapTuple, instead of the TTSOpsVirtual.
+	 */
+	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+	ExecInitScanTupleSlot(estate, &gss->css.ss, tupdesc,
+						  &TTSOpsHeapTuple);
+	ExecAssignScanProjectionInfoWithVarno(&gss->css.ss, INDEX_VAR);
+
+	/*
+	 * Init resources for CPU fallbacks
+	 */
+	dev_quals = (List *)
+		fixup_varnode_to_origin((Node *)gss->gs_info.dev_quals,
+								cscan->custom_scan_tlist);
+	gss->dev_quals = ExecInitQual(dev_quals, &gss->css.ss.ps);
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (!tle->resjunk)
+			tlist_dev = lappend(tlist_dev, tle);
+	}
+	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+											  &TTSOpsHeapTuple);
+	gss->base_proj = ExecBuildProjectionInfo(tlist_dev,
+											 gss->css.ss.ps.ps_ExprContext,
+											 gss->css.ss.ss_ScanTupleSlot,
+											 &gss->css.ss.ps,
+											 RelationGetDescr(rel));
+	//init BRIN-Index Support
+	//init Arrow_Fdw Support
+
+	// build session info
+}
+
+/*
+ * GpuScanGetNext
+ */
+static TupleTableSlot *
+GpuScanGetNext(GpuScanState *gss)
+{
+	return NULL;
+}
+
+/*
+ * GpuScanReCheckTuple
+ */
+static bool
+GpuScanReCheckTuple(GpuScanState *gss, TupleTableSlot *epq_slot)
+{
+	/*
+	 * NOTE: Only immutable operators/functions are executable
+	 * on the GPU devices, so its decision will never changed.
+	 */
+	return true;
+}
 
 /*
  * ExecGpuScan
@@ -659,7 +762,32 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 static TupleTableSlot *
 ExecGpuScan(CustomScanState *node)
 {
-	return NULL;
+	GpuScanState   *gss = (GpuScanState *)node;
+
+	if (!gss->gs_sstate)
+		createGpuScanSharedState(gss, NULL, NULL);
+	if (!gss->conn)
+	{
+		kern_session_info *session;
+		const Bitmapset *gpuset = NULL;
+
+		session = pgstrom_build_session_info(&gss->css.ss.ps,
+											 gss->gs_info.used_params,
+											 gss->gs_info.extra_bufsz,
+											 gss->gs_info.kvars_nslots,
+											 gss->gs_info.kern_quals,
+											 gss->gs_info.kern_proj_prep,
+											 gss->gs_info.kern_proj_exec);
+		if (gss->gc_state)
+			gpuset = gss->gs_info.gpu_cache_devs;
+		else if (gss->gd_state)
+			gpuset = gss->gs_info.gpu_direct_devs;
+		gss->conn = gpuservOpenConnection(gpuset, session,
+										  gss->css.ss.ps.state->es_query_cxt);
+	}
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) GpuScanGetNext,
+					(ExecScanRecheckMtd) GpuScanReCheckTuple);
 }
 
 /*
@@ -726,6 +854,41 @@ ExplainGpuScan(CustomScanState *node,
 			   List *ancestors,
 			   ExplainState *es)
 {}
+
+/*
+ * createGpuScanSharedState
+ */
+static void
+createGpuScanSharedState(GpuScanState *gss,
+						 ParallelContext *pcxt,
+						 void *dsm_addr)
+{
+	Relation	rel = gss->css.ss.ss_currentRelation;
+	EState	   *estate = gss->css.ss.ps.state;
+	GpuScanSharedState *gs_sstate;
+
+	Assert(!gss->gs_sstate);
+
+	if (dsm_addr)
+		gs_sstate = dsm_addr;
+	else
+		gs_sstate = MemoryContextAlloc(estate->es_query_cxt,
+									   sizeof(GpuScanSharedState));
+	memset(gs_sstate, 0, offsetof(GpuScanSharedState, phscan));
+	gs_sstate->pbs_nblocks = RelationGetNumberOfBlocks(rel);
+	SpinLockInit(&gs_sstate->pbs_mutex);
+
+	gss->gs_sstate = gs_sstate;
+}
+
+/*
+ * resetGpuScanSharedState
+ */
+static void
+resetGpuScanSharedState(GpuScanState *gss)
+{
+	/* reset */
+}
 
 /*
  * pgstrom_init_gpuscan

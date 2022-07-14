@@ -154,14 +154,20 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 {
 	uint32_t	slot_id = kexp->u.v.var_slot_id;
 	const kern_colmeta *cmeta;
-	const void *addr = NULL;
-	int			len = -1;
+	const void *addr;
+	int			len;
 
-	if (slot_id < kcxt->kvars_num)
+	if (slot_id < kcxt->kvars_nslots)
 	{
 		cmeta = kcxt->kvars_cmeta[slot_id];
 		addr = kcxt->kvars_addr[slot_id];
 		len = kcxt->kvars_len[slot_id];
+	}
+	else
+	{
+		cmeta = NULL;
+		addr = NULL;
+		len = -1;
 	}
 	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, cmeta, addr, len);
 }

@@ -12,37 +12,6 @@
  */
 #include "pg_strom.h"
 
-#if 0
-/*
- * make_flat_ands_expr - similar to make_ands_explicit but it pulls up
- * underlying and-clause
- */
-Expr *
-make_flat_ands_explicit(List *andclauses)
-{
-	List	   *args = NIL;
-	ListCell   *lc;
-
-	if (andclauses == NIL)
-		return (Expr *) makeBoolConst(true, false);
-	else if (list_length(andclauses) == 1)
-		return (Expr *) linitial(andclauses);
-
-	foreach (lc, andclauses)
-	{
-		Expr   *expr = lfirst(lc);
-
-		Assert(exprType((Node *)expr) == BOOLOID);
-		if (IsA(expr, BoolExpr) &&
-			((BoolExpr *)expr)->boolop == AND_EXPR)
-			args = list_concat(args, ((BoolExpr *) expr)->args);
-		else
-			args = lappend(args, expr);
-	}
-	Assert(list_length(args) > 1);
-	return make_andclause(args);
-}
-
 /*
  * fixup_varnode_to_origin
  */
@@ -70,6 +39,7 @@ fixup_varnode_to_origin(Node *node, List *cscan_tlist)
 								   (void *)cscan_tlist);
 }
 
+#if 0
 /*
  * find_appinfos_by_relids_nofail
  *
@@ -182,6 +152,23 @@ get_parallel_divisor(Path *path)
 	return parallel_divisor;
 }
 #endif
+
+/*
+ * append a binary chunk at the aligned block
+ */
+int
+__appendBinaryStringInfo(StringInfo buf, const void *data, int datalen)
+{
+	static uint64_t __zero = 0;
+	int		padding = (MAXALIGN(buf->len) - buf->len);
+	int		pos;
+
+	if (padding > 0)
+		appendBinaryStringInfo(buf, (char *)&__zero, padding);
+	pos = buf->len;
+	appendBinaryStringInfo(buf, data, datalen);
+	return pos;
+}
 
 /*
  * get_type_name

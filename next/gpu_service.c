@@ -45,7 +45,7 @@ typedef struct
 	/* GPU client management */
 	pthread_mutex_t	lock;			/* protect the list below */
 	dlist_head		client_list;	/* list of gpuClient */
-	dlist_head		task_list;		/* list of gpuTask */
+	dlist_head		command_list;	/* list of XpuCommand */
 	volatile bool	terminate_workers; /* true, to terminate workers */
 	pthread_t		workers[1];
 } gpuContext;
@@ -54,7 +54,7 @@ typedef struct
 #define EPOLL_FLAGS__SERVER_FD		(EPOLLIN|EPOLLET|EPOLLONESHOT)
 #define EPOLL_FLAGS__EVENT_FD_ONE	(EPOLLIN|EPOLLET)
 #define EPOLL_FLAGS__EVENT_FD_ANY	(EPOLLIN)
-#define EPOLL_FLAGS__CLIENT_FD		(EPOLLIN|EPOLLRDHUP|EPOLLET|EPOLLONESHOT)
+#define EPOLL_FLAGS__CLIENT_FD		(EPOLLIN|EPOLLRDHUP|EPOLLET)
 #define EPOLL_DPTR__SERVER_FD		(NULL)
 #define EPOLL_DPTR__EVENT_FD		((void *)(~0UL))
 
@@ -62,9 +62,8 @@ typedef struct
 {
 	dlist_node		chain;
 	gpuContext	   *gcontext;
-	pg_atomic_uint32 refcnt;
-	//memo: state information like kern_gpuscan with kparams
-	//      will be saved here.
+	XpuCommand	   *session;	/* kern_session_info */
+	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
 } gpuClient;
@@ -411,10 +410,10 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 /*
  * gpuClientGet
  */
-static inline void
+static inline uint32_t
 gpuClientGet(gpuClient *gclient)
 {
-	pg_atomic_add_fetch_u32(&gclient->refcnt, 1);
+	return pg_atomic_add_fetch_u32(&gclient->refcnt, 2);
 }
 
 /*
@@ -423,7 +422,7 @@ gpuClientGet(gpuClient *gclient)
 static void
 gpuClientPut(gpuClient *gclient)
 {
-	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 1) == 0)
+	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 2) == 0)
 	{
 		gpuContext *gcontext = gclient->gcontext;
 
@@ -435,11 +434,90 @@ gpuClientPut(gpuClient *gclient)
 					  EPOLL_CTL_DEL,
 					  gclient->sockfd, NULL) != 0)
 			__FATAL("failed on epoll_ctl(EPOLL_CTL_DEL): %m\n");
-		fprintf(stderr, "close the client socket!\n");
 		close(gclient->sockfd);
+		if (gclient->session)
+			(void)cuMemFree((CUdeviceptr)gclient->session);
 		free(gclient);
 	}
 }
+
+/*
+ * gpuservReportError
+ */
+static void
+gpuservReportError(gpuClient *gclient, const char *fmt, ...)
+{
+	XpuCommand *resp;
+	int			off;
+	ssize_t		nbytes, count = 0;
+	va_list		ap;
+
+	resp = alloca(offsetof(XpuCommand, data) + 1024 + sizeof(uint32_t));
+	memset(resp, 0, offsetof(XpuCommand, data));
+	resp->tag = XpuCommandTag__Error;
+	va_start(ap, fmt);
+	off = vsnprintf(resp->data, 1024, fmt, ap);
+	va_end(ap);
+	off = INTALIGN(off + 1);
+	*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
+	resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
+
+	/* send back error status */
+	pthreadMutexLock(&gclient->mutex);
+	do {
+		nbytes = write(gclient->sockfd,
+					   (const char *)resp + count,
+					   resp->length - count);
+		if (nbytes > 0)
+			count += nbytes;
+		else if (nbytes == 0 || errno != EINTR)
+			break;
+	} while (count < nbytes);
+	pthreadMutexUnlock(&gclient->mutex);
+}
+
+/*
+ * gpuservHandleOpenSessionCommand
+ */
+static void
+gpuservHandleOpenSessionCommand(XpuCommand *xcmd)
+{
+	gpuClient  *gclient = xcmd->priv;
+	XpuCommand *resp;
+	size_t		off;
+
+	if (!gclient->session)
+	{
+		gclient->session = xcmd;
+		
+		resp = alloca(offsetof(XpuCommand, data) + sizeof(uint32_t));
+		memset(resp, 0, offsetof(XpuCommand, data));
+		resp->tag = XpuCommandTag__Success;
+		*((uint32_t *)resp->data) = XpuCommandMagicNumber;
+		resp->length = offsetof(XpuCommand, data) + sizeof(uint32_t);
+	}
+	else
+	{
+		resp = alloca(offsetof(XpuCommand, data) + 100);
+		memset(resp, 0, offsetof(XpuCommand, data));
+		resp->tag = XpuCommandTag__Error;
+		off = snprintf(resp->data, 100, "OpenSession is called twice");
+		off = INTALIGN(off + 1);
+		*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
+		resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
+	}
+	gpuservReportError(gclient, "OpenSession is called twice");
+
+	
+}
+
+
+
+
+
+
+
+
 
 /*
  * gpuservAcceptConnection
@@ -494,16 +572,70 @@ gpuservAcceptConnection(gpuContext *gcontext)
 }
 
 /*
- * gpuservHandleMessage
+ * gpuservRecvCommands
+ */
+static void *
+gpuservAllocXpuCommand(void *__priv, size_t sz)
+{
+	CUresult	rc;
+	CUdeviceptr	devptr;
+
+	rc = cuMemAllocManaged(&devptr, sz, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		return NULL;
+	return (void *)devptr;
+}
+
+static void
+gpuservAttachXpuCommand(void *__priv, XpuCommand *xcmd)
+{
+	gpuClient  *gclient = (gpuClient *)__priv;
+	gpuContext *gcontext = gclient->gcontext;
+
+	pg_atomic_fetch_add_u32(&gclient->refcnt, 1);
+	xcmd->priv = gclient;
+	pthreadMutexLock(&gcontext->lock);
+	dlist_push_tail(&gcontext->command_list, &xcmd->chain);
+	pthreadMutexUnlock(&gcontext->lock);
+}
+
+static void
+gpuservRecvCommands(gpuClient *gclient)
+{
+	char		errmsg[400];
+
+	if (pgstrom_receive_xpu_command(gclient->sockfd,
+									gpuservAllocXpuCommand,
+									gpuservAttachXpuCommand,
+									gclient,
+									__FUNCTION__,
+									errmsg, sizeof(errmsg)) < 0)
+	{
+		fputs(errmsg, stderr);
+		gpuserv_bgworker_got_signal = true;
+		SetLatch(MyLatch);
+	}
+}
+
+/*
+ * gpuservHandleXpuCommand
  */
 static void
-gpuservHandleMessage(gpuClient *gclient)
+gpuservHandleXpuCommand(XpuCommand *xcmd)
 {
-	char		buf[1024];
-	ssize_t		nbytes;
-
-	nbytes = read(gclient->sockfd, buf, 1024);
-	fprintf(stderr, "read %zd bytes from client socket\n", nbytes);
+	switch (xcmd->tag)
+	{
+		case XpuCommandTag__OpenSession:
+			gpuservHandleOpenSessionCommand(xcmd);
+			
+			//set session info
+			//return OK
+			break;
+		case XpuCommandTag__XpuScanExec:
+		default:
+			//error -> close socket
+			break;
+	}
 }
 
 /*
@@ -513,25 +645,33 @@ static void *
 gpuservGpuWorkerMain(void *__arg)
 {
 	gpuContext *gcontext = (gpuContext *)__arg;
+	CUresult	rc;
 
+	rc = cuCtxSetCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
 	GpuWorkerCurrentContext = gcontext;
 	pg_memory_barrier();
-	
+
 	while (!gcontext->terminate_workers)
 	{
 		struct epoll_event event;
 		int			nevents;
-#if 0
-		pthreadMutexLock(&gcontext->lock);
-		//check gcontext->task_list, and fetch one if any
-		pthreadMutexUnlock(&gcontext->lock);
+		XpuCommand *xcmd;
+		dlist_node *dnode;
 
-		if (gtask)
+		pthreadMutexLock(&gcontext->lock);
+		if (!dlist_is_empty(&gcontext->command_list))
 		{
-			//handle one gpuTask
+			dnode = dlist_pop_head_node(&gcontext->command_list);
+			xcmd = dlist_container(XpuCommand, chain, dnode);
+			pthreadMutexUnlock(&gcontext->lock);
+			gpuservHandleXpuCommand(xcmd);
 			continue;
 		}
-#endif
+		pthreadMutexUnlock(&gcontext->lock);
+
+		/* wait for messages from the clients */
 		nevents = epoll_wait(gcontext->epoll_fd, &event, 1, 15000);
 		if (nevents < 0)
 		{
@@ -547,9 +687,9 @@ gpuservGpuWorkerMain(void *__arg)
 		{
 			if (event.data.ptr == EPOLL_DPTR__SERVER_FD)
 			{
-				 fprintf(stderr, "epoll wakeup by server socket\n");
-
-				 gpuservAcceptConnection(gcontext);
+				fprintf(stderr, "epoll wakeup by server socket\n");
+				if (event.events & EPOLLIN)
+					gpuservAcceptConnection(gcontext);
 			}
 			else if (event.data.ptr == EPOLL_DPTR__EVENT_FD)
 			{
@@ -557,23 +697,17 @@ gpuservGpuWorkerMain(void *__arg)
 			}
 			else if (event.events & EPOLLRDHUP)
 			{
-				fprintf(stderr, "epoll shutdown\n");
+				fprintf(stderr, "epoll EPOLLRDHUP\n");
 				gpuClientPut((gpuClient *)event.data.ptr);
+			}
+			else if (event.events & EPOLLIN)
+			{
+				fprintf(stderr, "epoll EPOLLIN\n");
+				gpuservRecvCommands((gpuClient *)event.data.ptr);
 			}
 			else
 			{
-				gpuClient  *gclient = event.data.ptr;
-
-				if (event.events & EPOLLIN)
-					gpuservHandleMessage(gclient);
-				else
-					fprintf(stderr, "unexpected epoll event: %08x\n", event.events);
-
-				event.events = EPOLL_FLAGS__CLIENT_FD;
-				if (epoll_ctl(gcontext->epoll_fd,
-							  EPOLL_CTL_MOD,
-							  gclient->sockfd, &event) != 0)
-					__FATAL("failed on epoll_ctl(sockfd): %m");
+				fprintf(stderr, "unexpected epoll event: %08x\n", event.events);
 			}
 		}
 		else
@@ -781,7 +915,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	gpuMemoryPoolInit(&gcontext->pool, dattrs->DEV_TOTAL_MEMSZ);
 	pthreadMutexInit(&gcontext->lock);
 	dlist_init(&gcontext->client_list);
-	dlist_init(&gcontext->task_list);
+	dlist_init(&gcontext->command_list);
 
 	PG_TRY();
 	{
@@ -1014,35 +1148,227 @@ gpuservBgWorkerMain(Datum arg)
 		proc_exit(1);
 }
 
-/*
+/* ------------------------------------------------------------
+ *
  * Backend side functions
- * ------------------------------------------------
+ *
+ * ------------------------------------------------------------
  */
-#define GPUSERV_CONNECTION_NSLOTS		24
-static dlist_head	gpuserv_connection_slots[GPUSERV_CONNECTION_NSLOTS];
-static int			gpuserv_num_connections = 0;
+static dlist_head	gpu_connections_list;
 
-typedef struct
+struct GpuConnection
 {
-	dlist_node	chain;
-	int			cuda_dindex;
-	pgsocket	sockfd;
-	ResourceOwner resowner;
-} gpuservConnTrack;
+	dlist_node		chain;	/* link to gpuserv_connection_slots */
+	int				cuda_dindex;
+	pgsocket		sockfd;
+	ResourceOwner	resowner;
+	pthread_t		worker;
+	pthread_mutex_t	mutex;
+	int				num_running_tasks;
+	dlist_head		ready_commands_list;
+	dlist_head		active_commands_list;
+	int				terminated;	/* positive: normal exit
+								 * negative: exit with error */
+	char			errmsg[200];
+};
 
 /*
- * gpuservOpenConnection
+ * Worker thread to receive response messages
  */
-pgsocket
-gpuservOpenConnection(int cuda_dindex)
+static void *
+__gpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
 {
+	return malloc(sz);
+}
+
+static void
+__gpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
+{
+	GpuConnection *conn = __priv;
+
+	pthreadMutexLock(&conn->mutex);
+	Assert(conn->num_running_tasks > 0);
+	dlist_push_tail(&conn->ready_commands_list, &xcmd->chain);
+	conn->num_running_tasks--;
+	pthreadMutexUnlock(&conn->mutex);
+}
+
+static void *
+__gpuConnectSessionWorker(void *__priv)
+{
+	GpuConnection *conn = __priv;
+	char		errmsg[200];
+
+	for (;;)
+	{
+		struct pollfd pfd;
+		int		nevents;
+
+		pfd.fd = conn->sockfd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		nevents = poll(&pfd, 1, -1);
+		if (nevents < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			snprintf(errmsg, sizeof(errmsg),
+					 "failed on poll(2): %m");
+			break;
+		}
+		else if (nevents > 0)
+		{
+			Assert(nevents == 1);
+			if (pfd.revents & ~POLLIN)
+			{
+				/* peer socket closed */
+				pthreadMutexLock(&conn->mutex);
+				conn->terminated = 1;
+				pthreadMutexUnlock(&conn->mutex);
+				return NULL;
+			}
+			else if (pfd.revents & POLLIN)
+			{
+				if (pgstrom_receive_xpu_command(conn->sockfd,
+												__gpuConnectSessionWorkerAlloc,
+												__gpuConnectSessionWorkerAttach,
+												conn,
+												__FUNCTION__,
+												errmsg, sizeof(errmsg)) < 0)
+					break;
+			}
+		}
+	}
+	pthreadMutexLock(&conn->mutex);
+	conn->terminated = -1;
+	strcpy(conn->errmsg, errmsg);
+	pthreadMutexUnlock(&conn->mutex);
+	return NULL;
+}
+
+/*
+ * gpuConnectGetResponse
+ */
+XpuCommand *
+gpuConnectGetResponse(GpuConnection *conn, long timeout)
+{
+	XpuCommand *xcmd = NULL;
+	dlist_node *dnode;
+	TimestampTz	ts_expired = 0;
+	TimestampTz	ts_curr;
+	int			ev, flags = WL_LATCH_SET | WL_POSTMASTER_DEATH;
+
+	if (timeout > 0)
+	{
+		flags |= WL_TIMEOUT;
+		ts_expired = GetCurrentTimestamp() / 1000L + timeout;
+	}
+
+	for (;;)
+	{
+		pthreadMutexLock(&conn->mutex);
+		if (conn->terminated < 0)
+		{
+			pthreadMutexUnlock(&conn->mutex);
+			elog(ERROR, "GPU%d) %s", conn->cuda_dindex, conn->errmsg);
+		}
+		if (!dlist_is_empty(&conn->ready_commands_list))
+		{
+			dnode = dlist_pop_head_node(&conn->ready_commands_list);
+			xcmd = dlist_container(XpuCommand, chain, dnode);
+			dlist_push_tail(&conn->active_commands_list, &xcmd->chain);
+			pthreadMutexUnlock(&conn->mutex);
+			return xcmd;
+		}
+		/* if no running tasks, it makes no sense to wait for */
+		if (conn->num_running_tasks == 0 || conn->terminated != 0)
+			timeout = 0;
+		pthreadMutexUnlock(&conn->mutex);
+		if (timeout == 0)
+			break;
+		/* wait for response */
+		ev = WaitLatch(MyLatch, flags, timeout,
+					   PG_WAIT_EXTENSION);
+		if (ev & WL_POSTMASTER_DEATH)
+			elog(FATAL, "unexpected postmaster dead");
+		if (ev & WL_TIMEOUT)
+			break;
+		ts_curr = GetCurrentTimestamp() / 1000L;
+		if (ts_expired <= ts_curr)
+			break;
+		timeout = ts_expired - ts_curr;
+		CHECK_FOR_INTERRUPTS();
+	}
+	return NULL;
+}
+
+/*
+ * gpuclientInitSession
+ */
+static GpuConnection *
+__gpuclientInitSession(GpuConnection *conn,
+					   const XpuCommand *session)
+{
+	ssize_t		nbytes;
+	XpuCommand *xcmd;
+
+	nbytes = __writeFile(conn->sockfd, session, session->length);
+	if (nbytes != session->length)
+		elog(ERROR, "unable to initialize GPU service session");
+	xcmd = gpuConnectGetResponse(conn, -1);
+
+	
+	//serialize session info
+	//wait for "OK" reply
+
+	return conn;
+}
+
+/*
+ * __gpuConnectChooseDevice
+ */
+static int
+__gpuConnectChooseDevice(const Bitmapset *gpuset)
+{
+	static bool		rr_initialized = false;
+	static uint32	rr_counter = 0;
+
+	if (!rr_initialized)
+	{
+		rr_counter = (uint32)getpid();
+		rr_initialized = true;
+	}
+
+	if (!bms_is_empty(gpuset))
+	{
+		int		num = bms_num_members(gpuset);
+		int	   *dindex = alloca(sizeof(int) * num);
+		int		i, k;
+
+		for (i=0, k=bms_next_member(gpuset, -1);
+			 k >= 0;
+			 i++, k=bms_next_member(gpuset, k))
+		{
+			dindex[i] = k;
+		}
+		Assert(i == num);
+		return dindex[rr_counter++ % num];
+	}
+	/* a simple round-robin if no GPUs preference */
+	return (rr_counter++ % numGpuDevAttrs);
+}
+
+/*
+ * gpuConnectOpenSession
+ */
+GpuConnection *
+gpuConnectOpenSession(const Bitmapset *gpuset,
+					  const XpuCommand *session)
+{
+	int				cuda_dindex = __gpuConnectChooseDevice(gpuset);
+	GpuConnection  *conn;
 	struct sockaddr_un addr;
 	pgsocket		sockfd;
-	dlist_head	   *slot;
-	gpuservConnTrack *track;
-
-	if (cuda_dindex < 0 || cuda_dindex >= numGpuDevAttrs)
-		elog(ERROR, "GPU%d is not installed", cuda_dindex);
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
@@ -1061,82 +1387,83 @@ gpuservOpenConnection(int cuda_dindex)
 			 addr.sun_path, strerror(__errno));
 	}
 	/* remember the connection */
-	track = calloc(1, sizeof(gpuservConnTrack));
-	if (!track)
+	conn = calloc(1, sizeof(GpuConnection));
+	if (!conn)
 	{
 		close(sockfd);
 		elog(ERROR, "out of memory");
 	}
-	track->cuda_dindex = cuda_dindex;
-	track->sockfd = sockfd;
-	track->resowner = CurrentResourceOwner;
-	slot = &gpuserv_connection_slots[sockfd % GPUSERV_CONNECTION_NSLOTS];
-	dlist_push_tail(slot, &track->chain);
-	gpuserv_num_connections++;
+	conn->cuda_dindex = cuda_dindex;
+	conn->sockfd = sockfd;
+	conn->resowner = CurrentResourceOwner;
+	pthreadMutexInit(&conn->mutex);
+	dlist_init(&conn->ready_commands_list);
+	dlist_init(&conn->active_commands_list);
+	if ((errno = pthread_create(&conn->worker, NULL,
+								__gpuConnectSessionWorker, conn)) != 0)
+	{
+		free(conn);
+		close(sockfd);
+		elog(ERROR, "failed on pthread_create: %m");
+	}
+	dlist_push_tail(&gpu_connections_list, &conn->chain);
 
-	/* TODO: initial negatiation here? */
-	return sockfd;
+	return __gpuclientInitSession(conn, session);
 }
 
 /*
- * gpuservCloseConnection
+ * gpuConnectCloseSession
  */
 void
-gpuservCloseConnection(pgsocket sockfd)
+gpuConnectCloseSession(GpuConnection *conn)
 {
-	dlist_iter		iter;
-	dlist_head	   *slot
-		= &gpuserv_connection_slots[sockfd % GPUSERV_CONNECTION_NSLOTS];
-	dlist_foreach (iter, slot)
+	XpuCommand *xcmd;
+	dlist_node *dnode;
+
+	dlist_delete(&conn->chain);
+	close(conn->sockfd);
+	pthread_join(conn->worker, NULL);
+
+	while (!dlist_is_empty(&conn->ready_commands_list))
 	{
-		gpuservConnTrack *track = dlist_container(gpuservConnTrack,
-												  chain, iter.cur);
-		if (track->sockfd)
-		{
-			gpuserv_num_connections--;
-			dlist_delete(&track->chain);
-			if (close(track->sockfd) != 0)
-				elog(LOG, "failed on close(sockfd): %m");
-			free(track);
-			return;
-		}
+		dnode = dlist_pop_head_node(&conn->ready_commands_list);
+		xcmd = dlist_container(XpuCommand, chain, dnode);
+		free(xcmd);
 	}
-	elog(ERROR, "socket %d is not tracked as a client of GPU service", sockfd);
+	while (!dlist_is_empty(&conn->active_commands_list))
+	{
+		dnode = dlist_pop_head_node(&conn->active_commands_list);
+		xcmd = dlist_container(XpuCommand, chain, dnode);
+		free(xcmd);
+	}
+	free(conn);
 }
 
 /*
- * gpuservCleanupConnections
+ * gpuclientCleanupConnections
  */
 static void
-gpuservCleanupConnections(ResourceReleasePhase phase,
+gpuclientCleanupConnections(ResourceReleasePhase phase,
 						  bool isCommit,
 						  bool isTopLevel,
 						  void *arg)
 {
-	int		i;
+	dlist_mutable_iter	iter;
 
-	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS || gpuserv_num_connections == 0)
+	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
 		return;
-	for (i=0; i < GPUSERV_CONNECTION_NSLOTS; i++)
-	{
-		dlist_head	   *slot = &gpuserv_connection_slots[i];
-		dlist_mutable_iter iter;
 
-		dlist_foreach_modify(iter, slot)
+	dlist_foreach_modify(iter, &gpu_connections_list)
+	{
+		GpuConnection  *conn = dlist_container(GpuConnection,
+											   chain, iter.cur);
+		if (conn->resowner == CurrentResourceOwner)
 		{
-			gpuservConnTrack *track = dlist_container(gpuservConnTrack,
-													  chain, iter.cur);
-			if (track->resowner == CurrentResourceOwner)
-			{
-				gpuserv_num_connections--;
-				dlist_delete(&track->chain);
-				if (isCommit)
-					elog(LOG, "Bug? socket %d is not closed on ExecEnd",
-						 track->sockfd);
-				if (close(track->sockfd) != 0)
-					elog(LOG, "failed on close(sockfd): %m");
-				free(track);
-			}
+			if (isCommit)
+				elog(LOG, "Bug? GPU connection %d is not closed on ExecEnd",
+					 conn->sockfd);
+			dlist_delete(&conn->chain);
+			gpuConnectCloseSession(conn);
 		}
 	}
 }
@@ -1208,7 +1535,7 @@ pgstrom_init_gpu_service(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
-
+	
 	memset(&worker, 0, sizeof(BackgroundWorker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
@@ -1219,5 +1546,6 @@ pgstrom_init_gpu_service(void)
 	worker.bgw_main_arg = 0;
 	RegisterBackgroundWorker(&worker);
 
-	RegisterResourceReleaseCallback(gpuservCleanupConnections, NULL);
+	dlist_init(&gpu_connections_list);
+	RegisterResourceReleaseCallback(gpuclientCleanupConnections, NULL);
 }

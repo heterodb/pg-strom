@@ -15,95 +15,109 @@
 /* see xact.c */
 extern int				nParallelCurrentXids;
 extern TransactionId   *ParallelCurrentXids;
-static Datum			__zero = 0;
 
-static void
+static uint32_t
 __build_session_xact_id_vector(StringInfo buf)
 {
-	uint32_t	sz = VARHDRSZ + sizeof(TransactionId) * nParallelCurrentXids;
-	uint32_t	base;
-	uint32_t	temp;
-
-	if (buf->len != MAXALIGN(buf->len))
-	{
-		appendBinaryStringInfo(buf, (char *)&__zero,
-							   MAXALIGN(buf->len) - buf->len);
-	}
-	base = buf->len;
+	uint32_t	offset = 0;
 
 	if (nParallelCurrentXids > 0)
 	{
+		uint32_t	sz = VARHDRSZ + sizeof(TransactionId) * nParallelCurrentXids;
+		uint32_t	temp;
+
 		SET_VARSIZE(&temp, sz);
-		appendBinaryStringInfo(buf, (char *)&temp, VARHDRSZ);
+		offset = __appendBinaryStringInfo(buf, &temp, sizeof(uint32_t));
 		appendBinaryStringInfo(buf, (char *)ParallelCurrentXids,
 							   sizeof(TransactionId) * nParallelCurrentXids);
-		((kern_session_info *)buf->data)->xact_id_array = base;
 	}
+	return offset;
 }
 
-static void
+static uint32_t
 __build_session_timezone(StringInfo buf)
 {
-	uint32_t	base;
+	uint32_t	offset = 0;
 
-	if (!session_timezone)
-		return;
-	if (buf->len != MAXALIGN(buf->len))
+	if (session_timezone)
 	{
-		appendBinaryStringInfo(buf, (char *)&__zero,
-							   MAXALIGN(buf->len) - buf->len);
+		offset = __appendBinaryStringInfo(buf,
+										  session_timezone,
+										  sizeof(struct pg_tz));
 	}
-	base = buf->len;
-	appendBinaryStringInfo(buf, (char *)session_timezone, sizeof(struct pg_tz));
-	((kern_session_info *)buf->data)->session_timezone = base;
+	return offset;
 }
 
-static void
+static uint32_t
 __build_session_encode(StringInfo buf)
 {
 	xpu_encode_info encode;
-	uint32_t	base;
 
-	if (buf->len != MAXALIGN(buf->len))
-	{
-		appendBinaryStringInfo(buf, (char *)&__zero,
-							   MAXALIGN(buf->len) - buf->len);
-	}
-	base = buf->len;
-	
+	memset(&encode, 0, sizeof(xpu_encode_info));
 	strncpy(encode.encname,
 			GetDatabaseEncodingName(),
 			sizeof(encode.encname));
 	encode.enc_maxlen = pg_database_encoding_max_length();
 	encode.enc_mblen = NULL;
-	appendBinaryStringInfo(buf, (char *)&encode, sizeof(xpu_encode_info));
 
-	((kern_session_info *)buf->data)->session_encode = base;
+	return __appendBinaryStringInfo(buf, &encode, sizeof(xpu_encode_info));
 }
 
-kern_session_info *
-pgstrom_build_session_info(PlanState *ps, List *used_params,
-						   uint32_t num_cached_kvars,
-						   uint32_t kcxt_extra_bufsz)
+XpuCommand *
+pgstrom_build_session_info(PlanState *ps,
+						   List *used_params,
+						   uint32_t kcxt_extra_bufsz,
+						   uint32_t kcxt_kvars_nslots,
+						   const bytea *xpucode_scan_quals,
+						   const bytea *xpucode_scan_proj_prep,
+						   const bytea *xpucode_scan_proj_exec)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
 	uint32_t		offset;
 	StringInfoData	buf;
+	XpuCommand	   *xcmd;
 	kern_session_info *session;
+	static uint32_t	__magic = XpuCommandMagicNumber;
+
+	offset = offsetof(kern_session_info, poffset[nparams]);
+	session = alloca(offset);
+	memset(session, 0, offset);
 
 	initStringInfo(&buf);
-	offset = MAXALIGN(offsetof(kern_session_info, poffset[nparams]));
+	offset = (offsetof(XpuCommand, data) +
+			  offsetof(kern_session_info, poffset[nparams]));
 	enlargeStringInfo(&buf, offset);
 	memset(buf.data, 0, offset);
 	buf.len = offset;
 
-	/* Put executor parameters */
+	/* put XPU code */
+	if (xpucode_scan_quals)
+	{
+		session->xpucode_scan_quals =
+			__appendBinaryStringInfo(&buf, xpucode_scan_quals,
+									 VARSIZE(xpucode_scan_quals));
+	}
+	if (xpucode_scan_proj_prep)
+	{
+		session->xpucode_scan_proj_prep =
+			__appendBinaryStringInfo(&buf, xpucode_scan_proj_prep,
+									 VARSIZE(xpucode_scan_proj_prep));
+	}
+	if (xpucode_scan_proj_exec)
+	{
+		session->xpucode_scan_proj_exec =
+			__appendBinaryStringInfo(&buf, xpucode_scan_proj_exec,
+									 VARSIZE(xpucode_scan_proj_exec));
+	}
+
+	/* put executor parameters */
 	if (param_info)
 	{
 		ListCell   *lc;
 
+		session->nparams = nparams;
 		foreach (lc, used_params)
 		{
 			Param  *param = lfirst(lc);
@@ -151,40 +165,34 @@ pgstrom_build_session_info(PlanState *ps, List *used_params,
 				elog(ERROR, "Bug? unexpected parameter kind: %d",
 					 (int)param->paramkind);
 			}
-			session = (kern_session_info *)buf.data;
+
 			if (param_isnull)
-				session->poffset[param->paramid] = 0;
+				offset = 0;
 			else
 			{
 				int16	typlen;
 				bool	typbyval;
 
-				if (buf.len != MAXALIGN(buf.len))
-				{
-					appendBinaryStringInfo(&buf, (char *)&__zero,
-										   MAXALIGN(buf.len) - buf.len);
-				}
-				session->poffset[param->paramid] = buf.len;
 				get_typlenbyval(param->paramtype, &typlen, &typbyval);
 				if (typbyval)
 				{
-					appendBinaryStringInfo(&buf,
-										   (char *)&param_value,
-										   typlen);
+					offset = __appendBinaryStringInfo(&buf,
+													  (char *)&param_value,
+													  typlen);
 				}
 				else if (typlen > 0)
 				{
-					appendBinaryStringInfo(&buf,
-										   DatumGetPointer(param_value),
-										   typlen);
+					offset = __appendBinaryStringInfo(&buf,
+													  DatumGetPointer(param_value),
+													  typlen);
 				}
 				else if (typlen == -1)
 				{
 					struct varlena *temp = PG_DETOAST_DATUM(param_value);
 
-					appendBinaryStringInfo(&buf,
-										   DatumGetPointer(temp),
-										   VARSIZE(temp));
+					offset = __appendBinaryStringInfo(&buf,
+													  DatumGetPointer(temp),
+													  VARSIZE(temp));
 					if (param_value != PointerGetDatum(temp))
 						pfree(temp);
 				}
@@ -194,19 +202,161 @@ pgstrom_build_session_info(PlanState *ps, List *used_params,
 						 format_type_be(param->paramtype));
 				}
 			}
+			Assert(param->paramid >= 0 && param->paramid < nparams);
+			session->poffset[param->paramid] = offset;
 		}
 	}
 	/* other database session information */
-	session = (kern_session_info *)buf.data;
-	session->num_cached_kvars = num_cached_kvars;
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
+	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-	__build_session_xact_id_vector(&buf);
-	__build_session_timezone(&buf);
-	__build_session_encode(&buf);
+	session->xact_id_array = __build_session_xact_id_vector(&buf);
+	session->session_timezone = __build_session_timezone(&buf);
+	session->session_encode = __build_session_encode(&buf);
+	SET_VARSIZE(session, buf.len - offsetof(XpuCommand, data));
+	__appendBinaryStringInfo(&buf, &__magic, sizeof(uint32_t));
 
-	session = (kern_session_info *)buf.data;
-	session->length = buf.len;
+	xcmd = (XpuCommand *)buf.data;
+	xcmd->tag = XpuCommandTag__OpenSession;
+	xcmd->length = buf.len;
+	memcpy(xcmd->data, session, offsetof(kern_session_info, poffset[nparams]));
 
-	return session;
+	return xcmd;
+}
+
+/*
+ * pgstrom_receive_xpu_command
+ */
+int
+pgstrom_receive_xpu_command(pgsocket sockfd,
+							void *(*alloc_f)(void *priv, size_t sz),
+							void  (*attach_f)(void *priv, XpuCommand *xcmd),
+							void *priv,
+							const char *errmsg_label,
+							char *errmsg_buffer,
+							size_t errmsg_bufsz)
+{
+	char		buffer_local[2 * BLCKSZ];
+	char	   *buffer;
+	size_t		bufsz, offset;
+	ssize_t		nbytes;
+	int			recv_flags;
+	int			count = 0;
+	XpuCommand *curr = NULL;
+
+restart:
+	buffer = buffer_local;
+	bufsz  = sizeof(buffer_local);
+	offset = 0;
+	recv_flags = MSG_DONTWAIT;
+	curr   = NULL;
+
+	for (;;)
+	{
+		nbytes = recv(sockfd, buffer + offset, bufsz - offset, recv_flags);
+		if (nbytes < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+			{
+				/*
+				 * If we are under the read of a XpuCommand fraction,
+				 * we have to wait for completion of the XpuCommand.
+				 * (Its peer side should send the entire command very
+				 * soon.)
+				 * Elsewhere, we have no queued XpuCommand right now.
+				 */
+				if (!curr && offset == 0)
+					return count;
+				/* next recv(2) shall be blocking call */
+				recv_flags = 0;
+				continue;
+			}
+			snprintf(errmsg_buffer, errmsg_bufsz,
+					 "%s: failed on recv(%d, %p, %ld, %d): %m",
+					 errmsg_label,
+					 sockfd, buffer + offset, bufsz - offset, recv_flags);
+			return -1;
+		}
+		else if (nbytes == 0)
+		{
+			/* end of the stream */
+			if (curr || offset > 0)
+			{
+				snprintf(errmsg_buffer, errmsg_bufsz,
+						 "%s: connection closed during XpuCommand read",
+						 errmsg_label);
+				return -1;
+			}
+			return count;
+		}
+
+		offset += nbytes;
+		if (!curr)
+		{
+			XpuCommand *temp, *xcmd;
+		next:
+			if (offset < offsetof(XpuCommand, data))
+			{
+				if (buffer != buffer_local)
+				{
+					memmove(buffer_local, buffer, offset);
+					buffer = buffer_local;
+					bufsz  = sizeof(buffer_local);
+				}
+				recv_flags = 0;		/* next recv(2) shall be blockable */
+				continue;
+			}
+			temp = (XpuCommand *)buffer;
+			if (temp->length <= offset)
+			{
+				XPU_COMMAND_SANITY_CHECK(temp);
+				xcmd = alloc_f(priv, temp->length);
+				if (!xcmd)
+				{
+					snprintf(errmsg_buffer, errmsg_bufsz,
+							 "%s: out of memory (sz=%u): %m",
+							 errmsg_label, temp->length);
+					return -1;
+				}
+				attach_f(priv, xcmd);
+				count++;
+
+				if (temp->length == offset)
+					goto restart;
+				/* read remained portion, if any */
+				buffer += temp->length;
+				offset -= temp->length;
+				goto next;
+			}
+			else
+			{
+				curr = alloc_f(priv, temp->length);
+				if (!curr)
+				{
+					snprintf(errmsg_buffer, errmsg_bufsz,
+							 "%s: out of memory (sz=%u): %m",
+							 errmsg_label, temp->length);
+					return -1;
+				}
+				memcpy(curr, temp, offset);
+				buffer = (char *)curr;
+				bufsz  = temp->length;
+				recv_flags = 0;		/* blocking enabled */
+			}
+		}
+		else if (offset >= curr->length)
+		{
+			assert(offset == curr->length);
+			XPU_COMMAND_SANITY_CHECK(curr);
+			attach_f(priv, curr);
+			count++;
+			goto restart;
+		}
+	}
+	snprintf(errmsg_buffer, errmsg_bufsz,
+			 "%s: Bug? should not break this loop",
+			 errmsg_label);
+	return -1;
 }

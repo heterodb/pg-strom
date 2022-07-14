@@ -835,21 +835,6 @@ typedef struct
 
 static int	codegen_expression_walker(codegen_context *context, Expr *expr,
 									  bool is_projection_toplevel);
-
-static int
-__appendBinaryStringInfo(StringInfo buf, const void *data, int datalen)
-{
-	static uint64_t __zero = 0;
-	int		padding = (MAXALIGN(buf->len) - buf->len);
-	int		pos;
-
-	if (padding > 0)
-		appendBinaryStringInfo(buf, (char *)&__zero, padding);
-	pos = buf->len;
-	appendBinaryStringInfo(buf, data, datalen);
-	return pos;
-}
-
 static int
 codegen_const_expression(codegen_context *context, Const *con)
 {
@@ -1308,6 +1293,7 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 					  List **rel_tlist,
 					  uint32_t *p_extra_flags,
 					  uint32_t *p_extra_bufsz,
+					  uint32_t *p_kvars_nslots,
 					  List **p_used_params)
 {
 	codegen_context	   *context;
@@ -1347,6 +1333,8 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 		*p_extra_flags = context->extra_flags;
 	if (p_extra_bufsz)
 		*p_extra_bufsz = context->extra_bufsz;
+	if (p_kvars_nslots)
+		*p_kvars_nslots = list_length(context->kvars_depth);
 	pfree(buf.data);
 }
 
@@ -1354,13 +1342,14 @@ pgstrom_build_xpucode(bytea **p_xpucode,
  * pgstrom_build_projection
  */
 void
-pgstrom_build_projection(bytea **p_xpucode_proj,
-						 bytea **p_xpucode_vload,
+pgstrom_build_projection(bytea **p_xpucode_proj_prep,
+						 bytea **p_xpucode_proj_exec,
 						 List *tlist_dev,
 						 int num_rels,
 						 List **rel_tlist,
 						 uint32_t *p_extra_flags,
 						 uint32_t *p_extra_bufsz,
+						 uint32_t *p_kvars_nslots,
 						 List **p_used_params)
 {
 	codegen_context	   *context;
@@ -1403,15 +1392,17 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 		}
 	}
 	SET_VARSIZE(buf.data, buf.len);
-	*p_xpucode_proj = (bytea *)buf.data;
+	*p_xpucode_proj_exec = (bytea *)buf.data;
 
 	/* FuncOpCode__LoadVars */
-	*p_xpucode_vload = attach_varloads_xpucode(context, NULL);
+	*p_xpucode_proj_prep = attach_varloads_xpucode(context, NULL);
 
 	if (p_extra_flags)
 		*p_extra_flags = context->extra_flags;
 	if (p_extra_bufsz)
 		*p_extra_bufsz = context->extra_bufsz;
+	if (p_kvars_nslots)
+		*p_kvars_nslots = list_length(context->kvars_depth);
 	if (p_used_params)
 		*p_used_params = context->used_params;
 }

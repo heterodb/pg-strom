@@ -58,6 +58,7 @@
 #include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
@@ -93,6 +94,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
@@ -179,11 +181,9 @@ typedef struct devfunc_info
 	struct devtype_info *func_argtypes[1];
 } devfunc_info;
 
-
-
-
-
-
+typedef struct GpuCacheState	GpuCacheState;
+typedef struct GpuDirectState	GpuDirectState;
+typedef struct ArrowFdwState	ArrowFdwState;
 
 /*
  * Global variables
@@ -242,14 +242,16 @@ extern void	pgstrom_build_xpucode(bytea **p_xpucode,
 								  List **rel_tlist,
 								  uint32_t *p_extra_flags,
 								  uint32_t *p_extra_bufsz,
+								  uint32_t *p_kvars_nslots,
 								  List **p_used_params);
-extern void	pgstrom_build_projection(bytea **p_xpucode_proj,
-									 bytea **p_xpucode_vload,
+extern void	pgstrom_build_projection(bytea **p_xpucode_proj_prep,
+									 bytea **p_xpucode_proj_exec,
 									 List *tlist_dev,
 									 int num_rels,
 									 List **rel_tlist,
 									 uint32_t *p_extra_flags,
 									 uint32_t *p_extra_bufsz,
+									 uint32_t *p_kvars_nslots,
 									 List **p_used_params);
 extern int		pgstrom_apply_cached_varref(bytea *kern_code,
 											uint32_t *p_extra_bufsz);
@@ -263,10 +265,22 @@ extern void		pgstrom_init_codegen(void);
 /*
  * exec.c
  */
-extern kern_session_info *pgstrom_build_session_info(PlanState *ps,
-													 List *used_params,
-													 uint32_t num_cached_kvars,
-													 uint32_t kcxt_extra_bufsz);
+extern XpuCommand *
+pgstrom_build_session_info(PlanState *ps,
+						   List *used_params,
+						   uint32_t num_cached_kvars,
+						   uint32_t kcxt_extra_bufsz,
+						   const bytea *xpucode_scan_quals,
+						   const bytea *xpucode_scan_proj_prep,
+						   const bytea *xpucode_scan_proj_exec);
+extern int
+pgstrom_receive_xpu_command(pgsocket sockfd,
+							void *(*alloc_f)(void *priv, size_t sz),
+							void  (*attach_f)(void *priv, XpuCommand *xcmd),
+							void *priv,
+							const char *errmsg_label,
+							char *errmsg_buffer,
+							size_t errmsg_bufsz);
 
 /*
  * datastore.c
@@ -310,12 +324,24 @@ extern bool		pgstrom_init_gpu_device(void);
 /*
  * gpu_service.c
  */
+typedef struct GpuConnection	GpuConnection;
+
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
-extern pgsocket	gpuservOpenConnection(int cuda_dindex);
-extern void		gpuservCloseConnection(pgsocket sockfd);
+extern GpuConnection *gpuConnectOpenSession(const Bitmapset *gpuset,
+											const XpuCommand *session);
+extern void		gpuConnectCloseSession(GpuConnection *conn);
+extern XpuCommand *gpuConnectGetResponse(GpuConnection *conn, long timeout);
 extern void		pgstrom_init_gpu_service(void);
+
+/*
+ * gpu_cache.c
+ */
+
+
+
+
 
 /*
  * gpu_scan.c
@@ -331,6 +357,9 @@ extern void		pgstrom_init_gpu_scan(void);
 /*
  * misc.c
  */
+extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
+extern int		__appendBinaryStringInfo(StringInfo buf,
+										 const void *data, int datalen);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
 extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
 extern List	   *bms_to_pglist(const Bitmapset *bms);

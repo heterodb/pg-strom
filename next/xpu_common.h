@@ -141,6 +141,38 @@ typedef struct {
 } kern_errorbuf;
 
 /*
+ * PG-Strom Command Tag
+ */
+#define XpuCommandTag__Success			0
+#define XpuCommandTag__Error			1
+#define XpuCommandTag__CPUFallback		2
+#define XpuCommandTag__OpenSession		100
+#define XpuCommandTag__XpuScanExec		200
+#define XpuCommandMagicNumber			0xdeadbeafU
+
+#ifndef ILIST_H
+typedef struct dlist_node dlist_node;
+struct dlist_node
+{
+	dlist_node *prev;
+	dlist_node *next;
+};
+#endif
+typedef struct
+{
+	uint32_t	tag;
+	uint32_t	length;
+	void	   *priv;
+	dlist_node	chain;
+	char		data[1];
+} XpuCommand;
+
+#define XPU_COMMAND_SANITY_CHECK(xcmd)									\
+	Assert(__Fetch((uint32_t *)((char *)(xcmd) +						\
+								((XpuCommand *)(xcmd))->length -		\
+								sizeof(uint32_t))) == XpuCommandMagicNumber)
+
+/*
  * kern_session_info
  *
  * A set of immutable data during query execution (like, transaction info, timezone,
@@ -148,12 +180,17 @@ typedef struct {
  */
 struct kern_session_info
 {
-	uint32_t	length;				/* total length of the session info */
+	uint32_t	_vl_len;	/* varlena header */
 
 	/* kcxt initialization parameters */
-	uint32_t	num_cached_kvars;	/* # of cached_kvars[] items */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
 
+	/* xpucode for this session */
+	uint32_t	xpucode_scan_quals;
+	uint32_t	xpucode_scan_proj_prep;
+	uint32_t	xpucode_scan_proj_exec;
+	
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
 	uint32_t	xact_id_array;		/* offset to array of xid */
@@ -205,29 +242,30 @@ typedef struct
 	const struct kern_colmeta **kvars_cmeta;
 	const void	  **kvars_addr;
 	int			   *kvars_len;
-	int				kvars_num;
+	uint32_t		kvars_nslots;
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KVARS_NUM)						\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
-		size_t	__sz = (offsetof(kern_context, vlbuf) +					\
-						MAXALIGN((SESSION)->kcxt_extra_bufsz));			\
+		uint32_t	__nslots = (SESSION)->kvars_nslots;					\
+		uint32_t	__sz = (offsetof(kern_context, vlbuf) +				\
+							MAXALIGN((SESSION)->kcxt_extra_bufsz));		\
 		KCXT = alloca(__sz);											\
 		memset(KCXT, 0, __sz);											\
 		KCXT->session = (SESSION);										\
-		if ((KVARS_NUM) > 0)											\
+		if (__nslots > 0)												\
 		{																\
-			KCXT->kvars_num  = (KVARS_NUM);								\
-			KCXT->kvars_cmeta = alloca(sizeof(void *) * (KVARS_NUM));	\
-			KCXT->kvars_addr = alloca(sizeof(void *) * (KVARS_NUM));	\
-			KCXT->kvars_len  = alloca(sizeof(int) * (KVARS_NUM));		\
-			memset(KCXT->kvars_cmeta, 0, sizeof(void *) * (KVARS_NUM));	\
-			memset(KCXT->kvars_addr, 0, sizeof(void *) * (KVARS_NUM));	\
-			memset(KCXT->kvars_len, -1, sizeof(int) * (KVARS_NUM));		\
+			KCXT->kvars_nslots = __nslots;								\
+			KCXT->kvars_cmeta = alloca(sizeof(void *) * __nslots);		\
+			KCXT->kvars_addr = alloca(sizeof(void *) * __nslots);		\
+			KCXT->kvars_len  = alloca(sizeof(int) * __nslots);			\
+			memset(KCXT->kvars_cmeta, 0, sizeof(void *) * __nslots);	\
+			memset(KCXT->kvars_addr, 0, sizeof(void *) * __nslots);		\
+			memset(KCXT->kvars_len, -1, sizeof(int) * __nslots);		\
 		}																\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + (SESSION)->kcxt_extra_bufsz;		\
@@ -249,11 +287,11 @@ kcxt_alloc(kern_context *kcxt, size_t len)
 INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
-	if (kcxt->kvars_num > 0)
+	if (kcxt->kvars_nslots > 0)
 	{
-		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_num);
-		memset(kcxt->kvars_addr, 0, sizeof(void *) * kcxt->kvars_num);
-		memset(kcxt->kvars_len, -1, sizeof(int) * kcxt->kvars_num);
+		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_addr, 0, sizeof(void *) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_len, -1, sizeof(int) * kcxt->kvars_nslots);
 	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
