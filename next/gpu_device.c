@@ -187,7 +187,6 @@ collectGpuDevAttrs(int fdesc)
 				__FATAL("failed on write(pipefd): %m");
 		}
 	}
-	fprintf(stderr, "\nhogehoge\n\n");
 	return 0;
 }
 

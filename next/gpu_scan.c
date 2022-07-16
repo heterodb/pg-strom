@@ -768,7 +768,7 @@ ExecGpuScan(CustomScanState *node)
 		createGpuScanSharedState(gss, NULL, NULL);
 	if (!gss->conn)
 	{
-		kern_session_info *session;
+		const kern_session_info *session;
 		const Bitmapset *gpuset = NULL;
 
 		session = pgstrom_build_session_info(&gss->css.ss.ps,
@@ -782,8 +782,7 @@ ExecGpuScan(CustomScanState *node)
 			gpuset = gss->gs_info.gpu_cache_devs;
 		else if (gss->gd_state)
 			gpuset = gss->gs_info.gpu_direct_devs;
-		gss->conn = gpuservOpenConnection(gpuset, session,
-										  gss->css.ss.ps.state->es_query_cxt);
+		gss->conn = gpuClientOpenSession(gpuset, session);
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) GpuScanGetNext,

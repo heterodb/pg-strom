@@ -62,6 +62,7 @@
 #include "storage/ipc.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
+#include "storage/pmsignal.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
@@ -253,8 +254,6 @@ extern void	pgstrom_build_projection(bytea **p_xpucode_proj_prep,
 									 uint32_t *p_extra_bufsz,
 									 uint32_t *p_kvars_nslots,
 									 List **p_used_params);
-extern int		pgstrom_apply_cached_varref(bytea *kern_code,
-											uint32_t *p_extra_bufsz);
 extern bool		pgstrom_gpu_expression(Expr *expr,
 									   int num_rels,
 									   List **rel_tlist,
@@ -265,7 +264,7 @@ extern void		pgstrom_init_codegen(void);
 /*
  * exec.c
  */
-extern XpuCommand *
+extern const kern_session_info *
 pgstrom_build_session_info(PlanState *ps,
 						   List *used_params,
 						   uint32_t num_cached_kvars,
@@ -281,6 +280,9 @@ pgstrom_receive_xpu_command(pgsocket sockfd,
 							const char *errmsg_label,
 							char *errmsg_buffer,
 							size_t errmsg_bufsz);
+
+extern void		pgstrom_init_exec_common(void);
+
 
 /*
  * datastore.c
@@ -324,16 +326,24 @@ extern bool		pgstrom_init_gpu_device(void);
 /*
  * gpu_service.c
  */
-typedef struct GpuConnection	GpuConnection;
-
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
-extern GpuConnection *gpuConnectOpenSession(const Bitmapset *gpuset,
-											const XpuCommand *session);
-extern void		gpuConnectCloseSession(GpuConnection *conn);
-extern XpuCommand *gpuConnectGetResponse(GpuConnection *conn, long timeout);
 extern void		pgstrom_init_gpu_service(void);
+
+
+/*
+ * gpu_client.c
+ */
+typedef struct GpuConnection	GpuConnection;
+
+extern GpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
+										   const kern_session_info *session);
+extern void		gpuClientCloseSession(GpuConnection *conn);
+extern XpuCommand *gpuClientGetResponse(GpuConnection *conn, long timeout);
+extern void		gpuClientPutResponse(XpuCommand *xcmd);
+
+extern void		pgstrom_init_gpu_client(void);
 
 /*
  * gpu_cache.c

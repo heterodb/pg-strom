@@ -222,7 +222,54 @@ pthreadMutexUnlock(pthread_mutex_t *mutex)
 		__FATAL("failed on pthread_mutex_unlock: %m");
 }
 
+static inline void
+pthreadCondInit(pthread_cond_t *cond)
+{
+	if ((errno = pthread_cond_init(cond, NULL)) != 0)
+		__FATAL("failed on pthread_cond_init: %m");
+}
 
+static inline void
+pthreadCondWait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+{
+    if ((errno = pthread_cond_wait(cond, mutex)) != 0)
+		__FATAL("failed on pthread_cond_wait: %m");
+}
+
+static inline bool
+pthreadCondWaitTimeout(pthread_cond_t *cond, pthread_mutex_t *mutex,
+					   long timeout_ms)
+{
+	struct timespec tm;
+
+	clock_gettime(CLOCK_REALTIME, &tm);
+	tm.tv_sec += timeout_ms / 1000;
+	tm.tv_nsec += (timeout_ms % 1000) * 1000000;
+	if (tm.tv_nsec > 1000000000)
+	{
+		tm.tv_sec += tm.tv_nsec / 1000000000;
+		tm.tv_nsec = tm.tv_nsec % 1000000000;
+	}
+	errno = pthread_cond_timedwait(cond, mutex, &tm);
+	if (errno == 0)
+		return true;
+	else if (errno == ETIMEDOUT)
+		return false;
+	__FATAL("failed on pthread_cond_timedwait: %m");
+}
+
+static inline void
+pthreadCondBroadcast(pthread_cond_t *cond)
+{
+	if ((errno = pthread_cond_broadcast(cond)) != 0)
+		__FATAL("failed on pthread_cond_broadcast: %m");
+}
+
+static inline void
+pthreadCondSignal(pthread_cond_t *cond)
+{
+	if ((errno = pthread_cond_signal(cond)) != 0)
+		__FATAL("failed on pthread_cond_signal: %m");
+}
 
 #endif	/* PG_UTILS_H */
-

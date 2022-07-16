@@ -164,13 +164,19 @@ typedef struct
 	uint32_t	length;
 	void	   *priv;
 	dlist_node	chain;
-	char		data[1];
+	char		data[sizeof(uint32_t)]		__attribute__((__aligned__(8)));
 } XpuCommand;
 
 #define XPU_COMMAND_SANITY_CHECK(xcmd)									\
 	Assert(__Fetch((uint32_t *)((char *)(xcmd) +						\
 								((XpuCommand *)(xcmd))->length -		\
 								sizeof(uint32_t))) == XpuCommandMagicNumber)
+#define XPU_COMMAND_COMMON_FIELDS								\
+	uint32_t	tag;											\
+	uint32_t	length;											\
+	char		__dont_touch__[offsetof(XpuCommand, data)   -	\
+							   offsetof(XpuCommand, length) +	\
+							   sizeof(uint32_t)]
 
 /*
  * kern_session_info
@@ -180,13 +186,13 @@ typedef struct
  */
 struct kern_session_info
 {
-	uint32_t	_vl_len;	/* varlena header */
-
+	XPU_COMMAND_COMMON_FIELDS;
 	/* kcxt initialization parameters */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
 
 	/* xpucode for this session */
+	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_quals;
 	uint32_t	xpucode_scan_proj_prep;
 	uint32_t	xpucode_scan_proj_exec;

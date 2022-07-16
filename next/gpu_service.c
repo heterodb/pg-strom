@@ -19,6 +19,7 @@ typedef struct
 	CUmodule		cuda_module;
 	HTAB		   *cuda_type_htab;
 	HTAB		   *cuda_func_htab;
+	xpu_encode_info *cuda_encode_catalog;
 } gpuModule;
 
 typedef struct
@@ -34,38 +35,36 @@ typedef struct
 {
 	dlist_node		chain;
 	int				serv_fd;		/* for accept(2) */
-	int				epoll_fd;		/* for epoll(2) */
-	int				event_fd;		/* to wakeup threads */
 	int				cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
 	gpuModule		normal;			/* optimized kernel */
 	gpuModule		debug;			/* non-optimized debug kernel */
 	gpuMemoryPool	pool;
-	/* GPU client management */
-	pthread_mutex_t	lock;			/* protect the list below */
-	dlist_head		client_list;	/* list of gpuClient */
-	dlist_head		command_list;	/* list of XpuCommand */
-	volatile bool	terminate_workers; /* true, to terminate workers */
+	/* GPU client */
+	pthread_mutex_t	client_lock;
+	dlist_head		client_list;
+	/* XPU commands */
+	pthread_cond_t	cond;
+	pthread_mutex_t	lock;
+	dlist_head		command_list;
+	/* GPU task workers */
+	volatile bool	terminate_workers;
+	int				n_workers;
 	pthread_t		workers[1];
 } gpuContext;
 #define SizeOfGpuContext		\
 	offsetof(gpuContext, workers[pgstrom_max_async_gpu_tasks])
-#define EPOLL_FLAGS__SERVER_FD		(EPOLLIN|EPOLLET|EPOLLONESHOT)
-#define EPOLL_FLAGS__EVENT_FD_ONE	(EPOLLIN|EPOLLET)
-#define EPOLL_FLAGS__EVENT_FD_ANY	(EPOLLIN)
-#define EPOLL_FLAGS__CLIENT_FD		(EPOLLIN|EPOLLRDHUP|EPOLLET)
-#define EPOLL_DPTR__SERVER_FD		(NULL)
-#define EPOLL_DPTR__EVENT_FD		((void *)(~0UL))
 
 typedef struct
 {
-	dlist_node		chain;
+	dlist_node		chain;		/* gcontext->client_list */
 	gpuContext	   *gcontext;
-	XpuCommand	   *session;	/* kern_session_info */
+	kern_session_info *session;
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
+	pthread_t		worker;		/* receiver thread */
 } gpuClient;
 
 /*
@@ -78,6 +77,7 @@ static __thread gpuContext *GpuWorkerCurrentContext = NULL;
 #define CU_DEVICE_PER_THREAD	(GpuWorkerCurrentContext->cuda_device)
 static volatile int		gpuserv_bgworker_got_signal = 0;
 static dlist_head		gpuserv_gpucontext_list;
+static int				gpuserv_epoll_fdesc = -1;
 
 void	gpuservBgWorkerMain(Datum arg);
 
@@ -344,9 +344,9 @@ gpuMemFree(CUdeviceptr devptr)
 }
 
 static void
-gpuMemoryPoolMaintenance(void)
+gpuMemoryPoolMaintenance(gpuContext *gcontext)
 {
-	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool;
+	gpuMemoryPool  *pool = &gcontext->pool;
 	dlist_iter		iter;
 	struct timeval	tval;
 	int64			tdiff;
@@ -408,48 +408,72 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 }
 
 /*
- * gpuClientGet
- */
-static inline uint32_t
-gpuClientGet(gpuClient *gclient)
-{
-	return pg_atomic_add_fetch_u32(&gclient->refcnt, 2);
-}
-
-/*
  * gpuClientPut
  */
 static void
 gpuClientPut(gpuClient *gclient)
 {
-	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 2) == 0)
+	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 1) == 0)
 	{
 		gpuContext *gcontext = gclient->gcontext;
+		CUresult	rc;
 
-		pthreadMutexLock(&gcontext->lock);
+		pthreadMutexLock(&gcontext->client_lock);
 		dlist_delete(&gclient->chain);
-		pthreadMutexUnlock(&gcontext->lock);
+		pthreadMutexUnlock(&gcontext->client_lock);
 
-		if (epoll_ctl(gcontext->epoll_fd,
-					  EPOLL_CTL_DEL,
-					  gclient->sockfd, NULL) != 0)
-			__FATAL("failed on epoll_ctl(EPOLL_CTL_DEL): %m\n");
-		close(gclient->sockfd);
+		if (gclient->sockfd >= 0)
+			close(gclient->sockfd);
 		if (gclient->session)
-			(void)cuMemFree((CUdeviceptr)gclient->session);
+		{
+			rc = cuMemFree((CUdeviceptr)gclient->session);
+			if (rc != CUDA_SUCCESS)
+				fprintf(stderr, "failed on cuMemFree: %s", cuStrError(rc));
+		}
 		free(gclient);
 	}
 }
 
 /*
- * gpuservReportError
+ * gpuClientWriteBack
  */
 static void
-gpuservReportError(gpuClient *gclient, const char *fmt, ...)
+gpuClientWriteBack(gpuClient *gclient, XpuCommand *resp)
+{
+	XPU_COMMAND_SANITY_CHECK(resp);
+
+	pthreadMutexLock(&gclient->mutex);
+	if (gclient->sockfd >= 0)
+	{
+		ssize_t		count = 0;
+		ssize_t		nbytes;
+
+		while (count < resp->length)
+		{
+			nbytes = write(gclient->sockfd,
+						   (const char *)resp + count,
+						   resp->length - count);
+			if (nbytes > 0)
+				count += nbytes;
+			else if (nbytes == 0 || errno != EINTR)
+			{
+				close(gclient->sockfd);
+				gclient->sockfd = -1;
+				break;
+			}
+		}
+	}
+	pthreadMutexUnlock(&gclient->mutex);	
+}
+
+/*
+ * gpuClientELog
+ */
+static void
+gpuClientELog(gpuClient *gclient, const char *fmt, ...)
 {
 	XpuCommand *resp;
 	int			off;
-	ssize_t		nbytes, count = 0;
 	va_list		ap;
 
 	resp = alloca(offsetof(XpuCommand, data) + 1024 + sizeof(uint32_t));
@@ -462,189 +486,153 @@ gpuservReportError(gpuClient *gclient, const char *fmt, ...)
 	*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
 	resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
 
-	/* send back error status */
-	pthreadMutexLock(&gclient->mutex);
-	do {
-		nbytes = write(gclient->sockfd,
-					   (const char *)resp + count,
-					   resp->length - count);
-		if (nbytes > 0)
-			count += nbytes;
-		else if (nbytes == 0 || errno != EINTR)
-			break;
-	} while (count < nbytes);
-	pthreadMutexUnlock(&gclient->mutex);
+	gpuClientWriteBack(gclient, resp);
 }
 
 /*
- * gpuservHandleOpenSessionCommand
+ * gpuservHandleOpenSession
  */
+static bool
+__resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
+{
+	xpu_type_catalog_entry *xpu_type;
+	xpu_function_catalog_entry *xpu_func;
+	char   *pos = kexp->u.data;
+	int		i;
+
+	/* lookup device function */
+	xpu_func = hash_search(gmodule->cuda_func_htab,
+						   &kexp->opcode,
+						   HASH_FIND, NULL);
+	if (!xpu_func)
+	{
+		fprintf(stderr, "device function pointer for %u not found.\n",
+				(int)kexp->opcode);
+		return false;
+	}
+	kexp->fn_dptr = xpu_func->func_dptr;
+
+	/* lookup device type */
+	xpu_type = hash_search(gmodule->cuda_type_htab,
+						   &kexp->rettype,
+						   HASH_FIND, NULL);
+	if (!xpu_type)
+	{
+		fprintf(stderr, "device type pointer for %u not found.\n",
+                (int)kexp->rettype);
+		return false;
+	}
+	kexp->rettype_ops = xpu_type->type_ops;
+
+	for (i=0; i < kexp->nargs; i++)
+	{
+		kern_expression *arg = (kern_expression *)pos;
+
+		if (VARSIZE(kexp) < (pos + VARSIZE(arg) - (char *)kexp))
+		{
+			fprintf(stderr, "corrupted XPU code\n");
+			return false;
+		}
+		if (!__resolveDevicePointersWalker(gmodule, arg))
+			return false;
+		pos += MAXALIGN(VARSIZE(arg));
+	}
+	return true;
+}
+
+static bool
+__resolveDevicePointers(gpuModule *gmodule, kern_session_info *session)
+{
+	xpu_encode_info	*encode = SESSION_ENCODE(session);
+	kern_expression *kexp;
+	
+	if (session->xpucode_scan_quals)
+	{
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
+		if (!__resolveDevicePointersWalker(gmodule, kexp))
+			return false;
+	}
+	if (session->xpucode_scan_proj_prep)
+	{
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_prep);
+		if (!__resolveDevicePointersWalker(gmodule, kexp))
+			return false;
+	}
+	if (session->xpucode_scan_proj_exec)
+	{
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_exec);
+		if (!__resolveDevicePointersWalker(gmodule, kexp))
+			return false;
+	}
+
+	if (encode)
+	{
+		xpu_encode_info *catalog = gmodule->cuda_encode_catalog;
+		int		i;
+
+		for (i=0; ; i++)
+		{
+			if (!catalog[i].enc_mblen || catalog[i].enc_maxlen < 1)
+			{
+				fprintf(stderr, "encode [%s] was not found.\n", encode->encname);
+				return false;
+			}
+			if (strcmp(encode->encname, catalog[i].encname) == 0)
+			{
+				encode->enc_maxlen = catalog[i].enc_maxlen;
+				encode->enc_mblen  = catalog[i].enc_mblen;
+				break;
+			}
+		}
+	}
+	return true;
+}
+
 static void
-gpuservHandleOpenSessionCommand(XpuCommand *xcmd)
+gpuservHandleOpenSession(XpuCommand *xcmd)
 {
 	gpuClient  *gclient = xcmd->priv;
-	XpuCommand *resp;
-	size_t		off;
-
-	if (!gclient->session)
-	{
-		gclient->session = xcmd;
-		
-		resp = alloca(offsetof(XpuCommand, data) + sizeof(uint32_t));
-		memset(resp, 0, offsetof(XpuCommand, data));
-		resp->tag = XpuCommandTag__Success;
-		*((uint32_t *)resp->data) = XpuCommandMagicNumber;
-		resp->length = offsetof(XpuCommand, data) + sizeof(uint32_t);
-	}
-	else
-	{
-		resp = alloca(offsetof(XpuCommand, data) + 100);
-		memset(resp, 0, offsetof(XpuCommand, data));
-		resp->tag = XpuCommandTag__Error;
-		off = snprintf(resp->data, 100, "OpenSession is called twice");
-		off = INTALIGN(off + 1);
-		*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
-		resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
-	}
-	gpuservReportError(gclient, "OpenSession is called twice");
-
-	
-}
-
-
-
-
-
-
-
-
-
-/*
- * gpuservAcceptConnection
- */
-static void
-gpuservAcceptConnection(gpuContext *gcontext)
-{
-	gpuClient  *gclient = NULL;
-	int			sockfd;
-	struct epoll_event ep_event;
-
-	sockfd = accept(gcontext->serv_fd, NULL, NULL);
-	/* enables serv_fd again */
-	ep_event.events = EPOLL_FLAGS__SERVER_FD;
-	ep_event.data.ptr = EPOLL_DPTR__SERVER_FD;
-	if (epoll_ctl(gcontext->epoll_fd,
-				  EPOLL_CTL_MOD,
-				  gcontext->serv_fd,
-				  &ep_event) != 0)
-		__FATAL("failed on epoll_ctl(serv_fd): %m");
-
-	if (sockfd < 0)
-	{
-		fprintf(stderr, "GPU%d: cound not accept new connection: %m\n",
-				gcontext->cuda_dindex);
-		pg_usleep(100000L);		/* wait 0.1 sec */
-		return;
-	}
-
-	gclient = calloc(1, sizeof(gpuClient));
-	if (!gclient)
-	{
-		fprintf(stderr, "out of memory: %m\n");
-		close(sockfd);
-		return;
-	}
-	gclient->gcontext = gcontext;
-	pg_atomic_init_u32(&gclient->refcnt, 1);
-	pthreadMutexInit(&gclient->mutex);
-	gclient->sockfd = sockfd;
-	pthreadMutexLock(&gcontext->lock);
-	dlist_push_tail(&gcontext->client_list, &gclient->chain);
-	pthreadMutexUnlock(&gcontext->lock);
-
-	ep_event.events = EPOLL_FLAGS__CLIENT_FD;
-	ep_event.data.ptr = gclient;
-	if (epoll_ctl(gcontext->epoll_fd,
-				  EPOLL_CTL_ADD,
-				  gclient->sockfd,
-				  &ep_event) != 0)
-		__FATAL("failed on epoll_ctl(sockfd): %m");
-}
-
-/*
- * gpuservRecvCommands
- */
-static void *
-gpuservAllocXpuCommand(void *__priv, size_t sz)
-{
-	CUresult	rc;
-	CUdeviceptr	devptr;
-
-	rc = cuMemAllocManaged(&devptr, sz, CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		return NULL;
-	return (void *)devptr;
-}
-
-static void
-gpuservAttachXpuCommand(void *__priv, XpuCommand *xcmd)
-{
-	gpuClient  *gclient = (gpuClient *)__priv;
 	gpuContext *gcontext = gclient->gcontext;
+	gpuModule  *gmodule;
+	kern_session_info *session = (kern_session_info *)xcmd;
+	XpuCommand	resp;
 
-	pg_atomic_fetch_add_u32(&gclient->refcnt, 1);
-	xcmd->priv = gclient;
-	pthreadMutexLock(&gcontext->lock);
-	dlist_push_tail(&gcontext->command_list, &xcmd->chain);
-	pthreadMutexUnlock(&gcontext->lock);
-}
-
-static void
-gpuservRecvCommands(gpuClient *gclient)
-{
-	char		errmsg[400];
-
-	if (pgstrom_receive_xpu_command(gclient->sockfd,
-									gpuservAllocXpuCommand,
-									gpuservAttachXpuCommand,
-									gclient,
-									__FUNCTION__,
-									errmsg, sizeof(errmsg)) < 0)
+	if (gclient->session)
 	{
-		fputs(errmsg, stderr);
-		gpuserv_bgworker_got_signal = true;
-		SetLatch(MyLatch);
+		gpuClientELog(gclient, "OpenSession is called twice");
+		return;
 	}
+
+	/* resolve device pointers */
+	if (!session->xpucode_use_debug_code)
+		gmodule = &gcontext->normal;
+	else
+		gmodule = &gcontext->debug;
+	if (!__resolveDevicePointers(gmodule, session))
+	{
+		cuMemFree((CUdeviceptr)session);
+		gpuClientELog(gclient, "failed on device pointer lookup");
+		return;
+	}
+	gclient->session = session;
+
+	/* success status */
+	memset(&resp, 0, sizeof(resp));
+	resp.tag = XpuCommandTag__Success;
+	*((uint32_t *)resp.data) = XpuCommandMagicNumber;
+	resp.length = offsetof(XpuCommand, data) + sizeof(uint32_t);
+	gpuClientWriteBack(gclient, &resp);
 }
+
 
 /*
- * gpuservHandleXpuCommand
- */
-static void
-gpuservHandleXpuCommand(XpuCommand *xcmd)
-{
-	switch (xcmd->tag)
-	{
-		case XpuCommandTag__OpenSession:
-			gpuservHandleOpenSessionCommand(xcmd);
-			
-			//set session info
-			//return OK
-			break;
-		case XpuCommandTag__XpuScanExec:
-		default:
-			//error -> close socket
-			break;
-	}
-}
-
-/*
- * gpuservGpuWorkerMain
+ * gpuservGpuWorkerMain -- actual worker
  */
 static void *
 gpuservGpuWorkerMain(void *__arg)
 {
 	gpuContext *gcontext = (gpuContext *)__arg;
+	gpuClient  *gclient;
 	CUresult	rc;
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
@@ -653,82 +641,192 @@ gpuservGpuWorkerMain(void *__arg)
 	GpuWorkerCurrentContext = gcontext;
 	pg_memory_barrier();
 
+	pthreadMutexLock(&gcontext->lock);
 	while (!gcontext->terminate_workers)
 	{
-		struct epoll_event event;
-		int			nevents;
 		XpuCommand *xcmd;
 		dlist_node *dnode;
 
-		pthreadMutexLock(&gcontext->lock);
 		if (!dlist_is_empty(&gcontext->command_list))
 		{
 			dnode = dlist_pop_head_node(&gcontext->command_list);
 			xcmd = dlist_container(XpuCommand, chain, dnode);
 			pthreadMutexUnlock(&gcontext->lock);
-			gpuservHandleXpuCommand(xcmd);
+
+			gclient = xcmd->priv;
+			switch (xcmd->tag)
+			{
+				case XpuCommandTag__OpenSession:
+					gpuservHandleOpenSession(xcmd);
+					break;
+				default:
+					gpuClientELog(gclient, "unknown XPU command (%d)", (int)xcmd->tag);
+					gpuClientPut(gclient);
+					break;
+			}
+			pthreadMutexLock(&gcontext->lock);
 			continue;
 		}
-		pthreadMutexUnlock(&gcontext->lock);
-
-		/* wait for messages from the clients */
-		nevents = epoll_wait(gcontext->epoll_fd, &event, 1, 15000);
-		if (nevents < 0)
+		if (!pthreadCondWaitTimeout(&gcontext->cond,
+									&gcontext->lock,
+									15000))
 		{
-			if (errno == EINTR)
-			{
-				fprintf(stderr, "epoll_wait = %d (errno %m)\n", nevents);
-				continue;
-			}
-			fprintf(stderr, "epoll_wait = %d (errno %m), exit\n", nevents);
-			break;
-		}
-		else if (nevents > 0)
-		{
-			if (event.data.ptr == EPOLL_DPTR__SERVER_FD)
-			{
-				fprintf(stderr, "epoll wakeup by server socket\n");
-				if (event.events & EPOLLIN)
-					gpuservAcceptConnection(gcontext);
-			}
-			else if (event.data.ptr == EPOLL_DPTR__EVENT_FD)
-			{
-				fprintf(stderr, "epoll wakeup by eventfd\n");
-			}
-			else if (event.events & EPOLLRDHUP)
-			{
-				fprintf(stderr, "epoll EPOLLRDHUP\n");
-				gpuClientPut((gpuClient *)event.data.ptr);
-			}
-			else if (event.events & EPOLLIN)
-			{
-				fprintf(stderr, "epoll EPOLLIN\n");
-				gpuservRecvCommands((gpuClient *)event.data.ptr);
-			}
-			else
-			{
-				fprintf(stderr, "unexpected epoll event: %08x\n", event.events);
-			}
-		}
-		else
-		{
+			pthreadMutexUnlock(&gcontext->lock);
 			/* maintenance works */
-			gpuMemoryPoolMaintenance();
+			gpuMemoryPoolMaintenance(gcontext);
+			pthreadMutexLock(&gcontext->lock);
 		}
 	}
+	pthreadMutexUnlock(&gcontext->lock);
 	return NULL;
 }
 
 /*
- * gpuservSetupGpuLinkage
+ * gpuservMonitorClient
+ */
+static void *
+__gpuservMonitorClientAlloc(void *__priv, size_t sz)
+{
+	CUdeviceptr	devptr;
+	CUresult	rc;
+
+	rc = cuMemAllocManaged(&devptr, sz, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		return NULL;
+	return (void *)devptr;
+}
+
+static void
+__gpuservMonitorClientAttach(void *__priv, XpuCommand *xcmd)
+{
+	gpuClient  *gclient = (gpuClient *)__priv;
+	gpuContext *gcontext = gclient->gcontext;
+
+	pg_atomic_fetch_add_u32(&gclient->refcnt, 1);
+	xcmd->priv = gclient;
+
+	pthreadMutexLock(&gcontext->lock);
+	dlist_push_tail(&gcontext->command_list, &xcmd->chain);
+	pthreadMutexUnlock(&gcontext->lock);
+	pthreadCondSignal(&gcontext->cond);
+}
+
+static void *
+gpuservMonitorClient(void *__priv)
+{
+	gpuClient  *gclient = __priv;
+	gpuContext *gcontext = gclient->gcontext;
+	pgsocket	sockfd = gclient->sockfd;
+	char		errmsg[200];
+	CUresult	rc;
+
+	rc = cuCtxSetCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+	{
+		fprintf(stderr, "failed on cuCtxSetCurrent: %s\n", cuStrError(rc));
+		goto out;
+	}
+	GpuWorkerCurrentContext = gcontext;
+	pg_memory_barrier();
+
+	for (;;)
+	{
+		struct pollfd  pfd;
+		int		nevents;
+
+		pfd.fd = sockfd;
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		nevents = poll(&pfd, 1, -1);
+		if (nevents < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "failed on poll(2): %m\n");
+			break;
+		}
+		if (nevents == 0)
+			continue;
+		Assert(nevents == 1);
+		if (pfd.revents == POLLIN)
+		{
+			if (pgstrom_receive_xpu_command(sockfd,
+											__gpuservMonitorClientAlloc,
+											__gpuservMonitorClientAttach,
+											gclient,
+											__FUNCTION__,
+											errmsg, sizeof(errmsg)) < 0)
+			{
+				fputs(errmsg, stderr);
+				break;
+			}
+		}
+		else if (pfd.revents & ~POLLIN)
+		{
+			fprintf(stderr, "peer socket closed\n");
+			break;
+		}
+	}
+out:
+	gpuClientPut(gclient);
+	return NULL;
+}
+
+/*
+ * gpuservAcceptClient
  */
 static void
-gpuservSetupGpuLinkage(gpuModule *gmodule)
+gpuservAcceptClient(gpuContext *gcontext)
 {
-	HASHCTL		hctl;
-	HTAB	   *cuda_type_htab = NULL;
-	HTAB	   *cuda_func_htab = NULL;
+	gpuClient  *gclient;
+	pgsocket	sockfd;
+	int			errcode;
+
+	sockfd = accept(gcontext->serv_fd, NULL, NULL);
+	if (sockfd < 0)
+	{
+		elog(LOG, "GPU%d: could not accept new connection: %m",
+			 gcontext->cuda_dindex);
+		pg_usleep(10000L);		/* wait 10ms */
+		return;
+	}
+
+	gclient = calloc(1, sizeof(gpuClient));
+	if (!gclient)
+	{
+		elog(LOG, "GPU%d: out of memory: %m",
+			 gcontext->cuda_dindex);
+		close(sockfd);
+		return;
+	}
+	gclient->gcontext = gcontext;
+	pg_atomic_init_u32(&gclient->refcnt, 1);
+	pthreadMutexInit(&gclient->mutex);
+	gclient->sockfd = sockfd;
+
+	if ((errcode = pthread_create(&gclient->worker, NULL,
+								  gpuservMonitorClient,
+								  gclient)) != 0)
+	{
+		elog(LOG, "failed on pthread_create: %s", strerror(errcode));
+		close(sockfd);
+		free(gclient);
+		return;
+	}
+	pthreadMutexLock(&gcontext->client_lock);
+	dlist_push_tail(&gcontext->client_list, &gclient->chain);
+	pthreadMutexUnlock(&gcontext->client_lock);
+}
+
+/*
+ * __setupDevTypeLinkageTable
+ */
+static HTAB *
+__setupDevTypeLinkageTable(gpuModule *gmodule)
+{
 	xpu_type_catalog_entry *xpu_types_catalog;
+	HASHCTL		hctl;
+	HTAB	   *htab = NULL;
 	CUdeviceptr	dptr;
 	CUresult	rc;
 	size_t		nbytes;
@@ -739,10 +837,11 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 	hctl.keysize = sizeof(TypeOpCode);
 	hctl.entrysize = sizeof(xpu_type_catalog_entry);
 	hctl.hcxt = TopMemoryContext;
-	cuda_type_htab = hash_create("CUDA device type hash table",
-								 512,
-								 &hctl,
-								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	htab = hash_create("CUDA device type hash table",
+					   512,
+					   &hctl,
+					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
 	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
 						   "builtin_xpu_types_catalog");
 	if (rc != CUDA_SUCCESS)
@@ -755,22 +854,85 @@ gpuservSetupGpuLinkage(gpuModule *gmodule)
 	for (i=0; xpu_types_catalog[i].type_opcode != TypeOpCode__Invalid; i++)
 	{
 		TypeOpCode	type_opcode = xpu_types_catalog[i].type_opcode;
-		xpu_datum_operators *type_ops = xpu_types_catalog[i].type_ops;
 		xpu_type_catalog_entry *entry;
 		bool		found;
 
-		entry = hash_search(cuda_type_htab, &type_opcode, HASH_ENTER, &found);
+		entry = hash_search(htab, &type_opcode, HASH_ENTER, &found);
 		if (found)
 			elog(ERROR, "Bug? duplicated TypeOpCode: %u", (uint32_t)type_opcode);
-		entry->type_opcode = type_opcode;
-		entry->type_ops = type_ops;
+		Assert(entry->type_opcode == type_opcode);
+		entry->type_ops = xpu_types_catalog[i].type_ops;
 	}
-	//TODO: Extra device types
+	return htab;
+}
 
+/*
+ * __setupDevFuncLinkageTable
+ */
+static HTAB *
+__setupDevFuncLinkageTable(gpuModule *gmodule)
+{
+	xpu_function_catalog_entry *xpu_funcs_catalog;
+	HASHCTL		hctl;
+	HTAB	   *htab;
+	CUdeviceptr	dptr;
+	CUresult	rc;
+	size_t		nbytes;
+	int			i;
 
-	
-	gmodule->cuda_type_htab = cuda_type_htab;
-	gmodule->cuda_func_htab = cuda_func_htab;
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(FuncOpCode);
+	hctl.entrysize = sizeof(xpu_function_catalog_entry);
+	hctl.hcxt = TopMemoryContext;
+	htab = hash_create("CUDA device function hash table",
+					   1024,
+					   &hctl,
+					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
+						   "builtin_xpu_functions_catalog");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
+	xpu_funcs_catalog = alloca(nbytes);
+	rc = cuMemcpyDtoH(xpu_funcs_catalog, dptr, nbytes);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyDtoH: %s", cuStrError(rc));
+	for (i=0; xpu_funcs_catalog[i].func_opcode != FuncOpCode__Invalid; i++)
+	{
+		FuncOpCode	func_opcode = xpu_funcs_catalog[i].func_opcode;
+		xpu_function_catalog_entry *entry;
+		bool		found;
+
+		entry = hash_search(htab, &func_opcode, HASH_ENTER, &found);
+		if (found)
+			elog(ERROR, "Bug? duplicated FuncOpCode: %u", (uint32_t)func_opcode);
+		Assert(entry->func_opcode == func_opcode);
+		entry->func_dptr = xpu_funcs_catalog[i].func_dptr;
+	}
+	return htab;
+}
+
+/*
+ * __setupDevEncodeLinkageCatalog
+ */
+static xpu_encode_info *
+__setupDevEncodeLinkageCatalog(gpuModule *gmodule)
+{
+	xpu_encode_info *xpu_encode_catalog;
+	CUdeviceptr	dptr;
+	CUresult	rc;
+	size_t		nbytes;
+
+	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
+                           "xpu_encode_catalog");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
+	xpu_encode_catalog = MemoryContextAlloc(TopMemoryContext, nbytes);
+	rc = cuMemcpyDtoH(xpu_encode_catalog, dptr, nbytes);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyDtoH: %s", cuStrError(rc));
+
+	return xpu_encode_catalog;
 }
 
 /*
@@ -863,7 +1025,10 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLinkDestroy: %s", cuStrError(rc));
 
-	gpuservSetupGpuLinkage(gmodule);
+	/* setup XPU linkage hash tables */
+	gmodule->cuda_type_htab = __setupDevTypeLinkageTable(gmodule);
+	gmodule->cuda_func_htab = __setupDevFuncLinkageTable(gmodule);
+	gmodule->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(gmodule);
 }
 
 /*
@@ -876,19 +1041,14 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 static void
 __gpuContextTerminateWorkers(gpuContext *gcontext)
 {
-	struct epoll_event ep_event;
-	int64_t		one = 1;
+	int		i;
 
 	gcontext->terminate_workers = true;
 	pg_memory_barrier();
 
-	ep_event.events = EPOLL_FLAGS__EVENT_FD_ANY;
-	ep_event.data.ptr = EPOLL_DPTR__EVENT_FD;
-	if (epoll_ctl(gcontext->epoll_fd,
-				  EPOLL_CTL_MOD,
-				  gcontext->event_fd, &ep_event) != 0)
-		__FATAL("failed on epoll_ctl(event_fd): %m\n");
-	write(gcontext->event_fd, &one, sizeof(int64_t));
+	pthreadCondBroadcast(&gcontext->cond);
+	for (i=0; i < gcontext->n_workers; i++)
+		pthread_join(gcontext->workers[i], NULL);
 }
 
 /*
@@ -902,19 +1062,19 @@ gpuservSetupGpuContext(int cuda_dindex)
 	CUresult	rc;
 	int			i, status;
 	struct sockaddr_un addr;
-	struct epoll_event ep_ev;
 
 	/* gpuContext allocation */
 	gcontext = calloc(1, SizeOfGpuContext);
 	if (!gcontext)
 		elog(ERROR, "out of memory");
-	gcontext->cuda_dindex = cuda_dindex;
 	gcontext->serv_fd = -1;
-	gcontext->epoll_fd = -1;
-	gcontext->event_fd = -1;
+	gcontext->cuda_dindex = cuda_dindex;
 	gpuMemoryPoolInit(&gcontext->pool, dattrs->DEV_TOTAL_MEMSZ);
-	pthreadMutexInit(&gcontext->lock);
+	pthreadMutexInit(&gcontext->client_lock);
 	dlist_init(&gcontext->client_list);
+
+	pthreadCondInit(&gcontext->cond);
+	pthreadMutexInit(&gcontext->lock);
 	dlist_init(&gcontext->command_list);
 
 	PG_TRY();
@@ -945,50 +1105,22 @@ gpuservSetupGpuContext(int cuda_dindex)
 		if (pgstrom_load_gpu_debug_module)
 			gpuservSetupGpuModule(&gcontext->debug, true);
 
-		/* creation of epoll */
-		gcontext->epoll_fd = epoll_create(32);
-		if (gcontext->epoll_fd < 0)
-			elog(ERROR, "failed on epoll_create: %m");
-		/* register the server socket */
-		ep_ev.events = EPOLL_FLAGS__SERVER_FD;
-		ep_ev.data.ptr = EPOLL_DPTR__SERVER_FD;
-		if (epoll_ctl(gcontext->epoll_fd,
-					  EPOLL_CTL_ADD,
-					  gcontext->serv_fd, &ep_ev) != 0)
-			elog(ERROR, "failed on epoll_ctl: %m");
-		/* creation of eventfd */
-		gcontext->event_fd = eventfd(0, 0);
-		if (gcontext->event_fd < 0)
-			elog(ERROR, "failed on eventfd: %m");
-
-		ep_ev.events = EPOLL_FLAGS__EVENT_FD_ONE;
-		ep_ev.data.ptr = EPOLL_DPTR__EVENT_FD;
-		if (epoll_ctl(gcontext->epoll_fd,
-					  EPOLL_CTL_ADD,
-					  gcontext->event_fd, &ep_ev) != 0)
-			elog(ERROR, "failed on epoll_ctl: %m");
-
-		/* launch the worker threads */
+		/* launch worker threads */
 		for (i=0; i < pgstrom_max_async_gpu_tasks; i++)
 		{
 			if ((status = pthread_create(&gcontext->workers[i], NULL,
 										 gpuservGpuWorkerMain, gcontext)) != 0)
 			{
 				__gpuContextTerminateWorkers(gcontext);
-				while (i > 0)
-					pthread_join(gcontext->workers[--i], NULL);
 				elog(ERROR, "failed on pthread_create: %s", strerror(status));
 			}
+			gcontext->n_workers++;
 		}
 	}
 	PG_CATCH();
 	{
 		if (gcontext->cuda_context)
 			cuCtxDestroy(gcontext->cuda_context);
-		if (gcontext->event_fd >= 0)
-			close(gcontext->event_fd);
-		if (gcontext->epoll_fd >= 0)
-			close(gcontext->epoll_fd);
 		if (gcontext->serv_fd >= 0)
 			close(gcontext->serv_fd);
 		free(gcontext);
@@ -1005,14 +1137,8 @@ static void
 gpuservCleanupGpuContext(gpuContext *gcontext)
 {
 	CUresult	rc;
-	int			i;
 
 	__gpuContextTerminateWorkers(gcontext);
-	for (i=0; i < pgstrom_max_async_gpu_tasks; i++)
-	{
-		if (pthread_join(gcontext->workers[i], NULL) != 0)
-			elog(LOG, "failed on pthread_join: %m");
-	}
 
 	while (!dlist_is_empty(&gcontext->client_list))
 	{
@@ -1024,10 +1150,6 @@ gpuservCleanupGpuContext(gpuContext *gcontext)
 	}
 	if (close(gcontext->serv_fd) != 0)
 		elog(LOG, "failed on close(serv_fd): %m");
-	if (close(gcontext->epoll_fd) != 0)
-		elog(LOG, "failed on close(epoll_fd): %m");
-	if (close(gcontext->event_fd) != 0)
-		elog(LOG, "failed on close(event_fd): %m");
 	rc = cuCtxDestroy(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		elog(LOG, "failed on cuCtxDestroy: %s", cuStrError(rc));
@@ -1096,6 +1218,12 @@ gpuservBgWorkerMain(Datum arg)
 	dlist_init(&gpuserv_gpucontext_list);
 	before_shmem_exit(gpuservCleanupOnProcExit, 0);
 
+	/* Open epoll descriptor */
+	gpuserv_epoll_fdesc = epoll_create(30);
+	if (gpuserv_epoll_fdesc < 0)
+		elog(ERROR, "failed on epoll_create: %m");
+
+	/* Init GPU Context for each devices */
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", cuStrError(rc));
@@ -1109,16 +1237,31 @@ gpuservBgWorkerMain(Datum arg)
 
 		while (!gpuserv_bgworker_got_signal)
 		{
-			int		ev = WaitLatch(MyLatch,
-								   WL_LATCH_SET |
-								   WL_TIMEOUT |
-								   WL_POSTMASTER_DEATH,
-								   1000L,
-								   PG_WAIT_EXTENSION);
-			ResetLatch(MyLatch);
-			if (ev & WL_POSTMASTER_DEATH)
+			struct epoll_event	ep_ev;
+			int		status;
+
+			if (!PostmasterIsAlive())
 				elog(FATAL, "unexpected postmaster dead");
 			CHECK_FOR_INTERRUPTS();
+
+			status = epoll_wait(gpuserv_epoll_fdesc, &ep_ev, 1, 4000);
+			if (status < 0)
+			{
+				if (errno != EINTR)
+				{
+					elog(LOG, "failed on epoll_wait: %m");
+					break;
+				}
+			}
+			else if (status > 0)
+			{
+				/* errors on server socker? */
+				if ((ep_ev.events & ~EPOLLIN) != 0)
+					break;
+				/* any connection pending? */
+				if ((ep_ev.events & EPOLLIN) != 0)
+					gpuservAcceptClient((gpuContext *)ep_ev.data.ptr);
+			}
 		}
 	}
 	PG_CATCH();
@@ -1146,326 +1289,6 @@ gpuservBgWorkerMain(Datum arg)
 	 */
 	if (gpuserv_bgworker_got_signal == (1 << SIGHUP))
 		proc_exit(1);
-}
-
-/* ------------------------------------------------------------
- *
- * Backend side functions
- *
- * ------------------------------------------------------------
- */
-static dlist_head	gpu_connections_list;
-
-struct GpuConnection
-{
-	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	int				cuda_dindex;
-	pgsocket		sockfd;
-	ResourceOwner	resowner;
-	pthread_t		worker;
-	pthread_mutex_t	mutex;
-	int				num_running_tasks;
-	dlist_head		ready_commands_list;
-	dlist_head		active_commands_list;
-	int				terminated;	/* positive: normal exit
-								 * negative: exit with error */
-	char			errmsg[200];
-};
-
-/*
- * Worker thread to receive response messages
- */
-static void *
-__gpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
-{
-	return malloc(sz);
-}
-
-static void
-__gpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
-{
-	GpuConnection *conn = __priv;
-
-	pthreadMutexLock(&conn->mutex);
-	Assert(conn->num_running_tasks > 0);
-	dlist_push_tail(&conn->ready_commands_list, &xcmd->chain);
-	conn->num_running_tasks--;
-	pthreadMutexUnlock(&conn->mutex);
-}
-
-static void *
-__gpuConnectSessionWorker(void *__priv)
-{
-	GpuConnection *conn = __priv;
-	char		errmsg[200];
-
-	for (;;)
-	{
-		struct pollfd pfd;
-		int		nevents;
-
-		pfd.fd = conn->sockfd;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		nevents = poll(&pfd, 1, -1);
-		if (nevents < 0)
-		{
-			if (errno == EINTR)
-				continue;
-			snprintf(errmsg, sizeof(errmsg),
-					 "failed on poll(2): %m");
-			break;
-		}
-		else if (nevents > 0)
-		{
-			Assert(nevents == 1);
-			if (pfd.revents & ~POLLIN)
-			{
-				/* peer socket closed */
-				pthreadMutexLock(&conn->mutex);
-				conn->terminated = 1;
-				pthreadMutexUnlock(&conn->mutex);
-				return NULL;
-			}
-			else if (pfd.revents & POLLIN)
-			{
-				if (pgstrom_receive_xpu_command(conn->sockfd,
-												__gpuConnectSessionWorkerAlloc,
-												__gpuConnectSessionWorkerAttach,
-												conn,
-												__FUNCTION__,
-												errmsg, sizeof(errmsg)) < 0)
-					break;
-			}
-		}
-	}
-	pthreadMutexLock(&conn->mutex);
-	conn->terminated = -1;
-	strcpy(conn->errmsg, errmsg);
-	pthreadMutexUnlock(&conn->mutex);
-	return NULL;
-}
-
-/*
- * gpuConnectGetResponse
- */
-XpuCommand *
-gpuConnectGetResponse(GpuConnection *conn, long timeout)
-{
-	XpuCommand *xcmd = NULL;
-	dlist_node *dnode;
-	TimestampTz	ts_expired = 0;
-	TimestampTz	ts_curr;
-	int			ev, flags = WL_LATCH_SET | WL_POSTMASTER_DEATH;
-
-	if (timeout > 0)
-	{
-		flags |= WL_TIMEOUT;
-		ts_expired = GetCurrentTimestamp() / 1000L + timeout;
-	}
-
-	for (;;)
-	{
-		pthreadMutexLock(&conn->mutex);
-		if (conn->terminated < 0)
-		{
-			pthreadMutexUnlock(&conn->mutex);
-			elog(ERROR, "GPU%d) %s", conn->cuda_dindex, conn->errmsg);
-		}
-		if (!dlist_is_empty(&conn->ready_commands_list))
-		{
-			dnode = dlist_pop_head_node(&conn->ready_commands_list);
-			xcmd = dlist_container(XpuCommand, chain, dnode);
-			dlist_push_tail(&conn->active_commands_list, &xcmd->chain);
-			pthreadMutexUnlock(&conn->mutex);
-			return xcmd;
-		}
-		/* if no running tasks, it makes no sense to wait for */
-		if (conn->num_running_tasks == 0 || conn->terminated != 0)
-			timeout = 0;
-		pthreadMutexUnlock(&conn->mutex);
-		if (timeout == 0)
-			break;
-		/* wait for response */
-		ev = WaitLatch(MyLatch, flags, timeout,
-					   PG_WAIT_EXTENSION);
-		if (ev & WL_POSTMASTER_DEATH)
-			elog(FATAL, "unexpected postmaster dead");
-		if (ev & WL_TIMEOUT)
-			break;
-		ts_curr = GetCurrentTimestamp() / 1000L;
-		if (ts_expired <= ts_curr)
-			break;
-		timeout = ts_expired - ts_curr;
-		CHECK_FOR_INTERRUPTS();
-	}
-	return NULL;
-}
-
-/*
- * gpuclientInitSession
- */
-static GpuConnection *
-__gpuclientInitSession(GpuConnection *conn,
-					   const XpuCommand *session)
-{
-	ssize_t		nbytes;
-	XpuCommand *xcmd;
-
-	nbytes = __writeFile(conn->sockfd, session, session->length);
-	if (nbytes != session->length)
-		elog(ERROR, "unable to initialize GPU service session");
-	xcmd = gpuConnectGetResponse(conn, -1);
-
-	
-	//serialize session info
-	//wait for "OK" reply
-
-	return conn;
-}
-
-/*
- * __gpuConnectChooseDevice
- */
-static int
-__gpuConnectChooseDevice(const Bitmapset *gpuset)
-{
-	static bool		rr_initialized = false;
-	static uint32	rr_counter = 0;
-
-	if (!rr_initialized)
-	{
-		rr_counter = (uint32)getpid();
-		rr_initialized = true;
-	}
-
-	if (!bms_is_empty(gpuset))
-	{
-		int		num = bms_num_members(gpuset);
-		int	   *dindex = alloca(sizeof(int) * num);
-		int		i, k;
-
-		for (i=0, k=bms_next_member(gpuset, -1);
-			 k >= 0;
-			 i++, k=bms_next_member(gpuset, k))
-		{
-			dindex[i] = k;
-		}
-		Assert(i == num);
-		return dindex[rr_counter++ % num];
-	}
-	/* a simple round-robin if no GPUs preference */
-	return (rr_counter++ % numGpuDevAttrs);
-}
-
-/*
- * gpuConnectOpenSession
- */
-GpuConnection *
-gpuConnectOpenSession(const Bitmapset *gpuset,
-					  const XpuCommand *session)
-{
-	int				cuda_dindex = __gpuConnectChooseDevice(gpuset);
-	GpuConnection  *conn;
-	struct sockaddr_un addr;
-	pgsocket		sockfd;
-
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
-
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path),
-			 ".pg_strom.%u.gpu%u.sock",
-			 PostmasterPid, cuda_dindex);
-	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-	{
-		int		__errno = errno;
-
-		close(sockfd);
-		elog(ERROR, "failed on connect('%s'): %s",
-			 addr.sun_path, strerror(__errno));
-	}
-	/* remember the connection */
-	conn = calloc(1, sizeof(GpuConnection));
-	if (!conn)
-	{
-		close(sockfd);
-		elog(ERROR, "out of memory");
-	}
-	conn->cuda_dindex = cuda_dindex;
-	conn->sockfd = sockfd;
-	conn->resowner = CurrentResourceOwner;
-	pthreadMutexInit(&conn->mutex);
-	dlist_init(&conn->ready_commands_list);
-	dlist_init(&conn->active_commands_list);
-	if ((errno = pthread_create(&conn->worker, NULL,
-								__gpuConnectSessionWorker, conn)) != 0)
-	{
-		free(conn);
-		close(sockfd);
-		elog(ERROR, "failed on pthread_create: %m");
-	}
-	dlist_push_tail(&gpu_connections_list, &conn->chain);
-
-	return __gpuclientInitSession(conn, session);
-}
-
-/*
- * gpuConnectCloseSession
- */
-void
-gpuConnectCloseSession(GpuConnection *conn)
-{
-	XpuCommand *xcmd;
-	dlist_node *dnode;
-
-	dlist_delete(&conn->chain);
-	close(conn->sockfd);
-	pthread_join(conn->worker, NULL);
-
-	while (!dlist_is_empty(&conn->ready_commands_list))
-	{
-		dnode = dlist_pop_head_node(&conn->ready_commands_list);
-		xcmd = dlist_container(XpuCommand, chain, dnode);
-		free(xcmd);
-	}
-	while (!dlist_is_empty(&conn->active_commands_list))
-	{
-		dnode = dlist_pop_head_node(&conn->active_commands_list);
-		xcmd = dlist_container(XpuCommand, chain, dnode);
-		free(xcmd);
-	}
-	free(conn);
-}
-
-/*
- * gpuclientCleanupConnections
- */
-static void
-gpuclientCleanupConnections(ResourceReleasePhase phase,
-						  bool isCommit,
-						  bool isTopLevel,
-						  void *arg)
-{
-	dlist_mutable_iter	iter;
-
-	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
-		return;
-
-	dlist_foreach_modify(iter, &gpu_connections_list)
-	{
-		GpuConnection  *conn = dlist_container(GpuConnection,
-											   chain, iter.cur);
-		if (conn->resowner == CurrentResourceOwner)
-		{
-			if (isCommit)
-				elog(LOG, "Bug? GPU connection %d is not closed on ExecEnd",
-					 conn->sockfd);
-			dlist_delete(&conn->chain);
-			gpuConnectCloseSession(conn);
-		}
-	}
 }
 
 /*
@@ -1545,7 +1368,4 @@ pgstrom_init_gpu_service(void)
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpuservBgWorkerMain");
 	worker.bgw_main_arg = 0;
 	RegisterBackgroundWorker(&worker);
-
-	dlist_init(&gpu_connections_list);
-	RegisterResourceReleaseCallback(gpuclientCleanupConnections, NULL);
 }

@@ -11,7 +11,6 @@
  */
 #include "pg_strom.h"
 
-
 /* see xact.c */
 extern int				nParallelCurrentXids;
 extern TransactionId   *ParallelCurrentXids;
@@ -41,8 +40,7 @@ __build_session_timezone(StringInfo buf)
 
 	if (session_timezone)
 	{
-		offset = __appendBinaryStringInfo(buf,
-										  session_timezone,
+		offset = __appendBinaryStringInfo(buf, session_timezone,
 										  sizeof(struct pg_tz));
 	}
 	return offset;
@@ -63,7 +61,7 @@ __build_session_encode(StringInfo buf)
 	return __appendBinaryStringInfo(buf, &encode, sizeof(xpu_encode_info));
 }
 
-XpuCommand *
+const kern_session_info *
 pgstrom_build_session_info(PlanState *ps,
 						   List *used_params,
 						   uint32_t kcxt_extra_bufsz,
@@ -77,7 +75,6 @@ pgstrom_build_session_info(PlanState *ps,
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
 	uint32_t		offset;
 	StringInfoData	buf;
-	XpuCommand	   *xcmd;
 	kern_session_info *session;
 	static uint32_t	__magic = XpuCommandMagicNumber;
 
@@ -86,8 +83,6 @@ pgstrom_build_session_info(PlanState *ps,
 	memset(session, 0, offset);
 
 	initStringInfo(&buf);
-	offset = (offsetof(XpuCommand, data) +
-			  offsetof(kern_session_info, poffset[nparams]));
 	enlargeStringInfo(&buf, offset);
 	memset(buf.data, 0, offset);
 	buf.len = offset;
@@ -201,6 +196,7 @@ pgstrom_build_session_info(PlanState *ps,
 					elog(ERROR, "Not a supported data type for kernel parameter: %s",
 						 format_type_be(param->paramtype));
 				}
+				offset -= offsetof(XpuCommand, data);
 			}
 			Assert(param->paramid >= 0 && param->paramid < nparams);
 			session->poffset[param->paramid] = offset;
@@ -213,15 +209,13 @@ pgstrom_build_session_info(PlanState *ps,
 	session->xact_id_array = __build_session_xact_id_vector(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
-	SET_VARSIZE(session, buf.len - offsetof(XpuCommand, data));
 	__appendBinaryStringInfo(&buf, &__magic, sizeof(uint32_t));
 
-	xcmd = (XpuCommand *)buf.data;
-	xcmd->tag = XpuCommandTag__OpenSession;
-	xcmd->length = buf.len;
-	memcpy(xcmd->data, session, offsetof(kern_session_info, poffset[nparams]));
+	session->tag = XpuCommandTag__OpenSession;
+	session->length = buf.len;
+	memcpy(buf.data, session, offsetof(kern_session_info, poffset[nparams]));
 
-	return xcmd;
+	return (const kern_session_info *)buf.data;
 }
 
 /*

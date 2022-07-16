@@ -358,6 +358,7 @@ _PG_init(void)
 	{
 		pgstrom_init_gpu_options();
 		pgstrom_init_gpu_service();
+		pgstrom_init_gpu_client();
 		pgstrom_init_gpu_scan();
 		//pgstrom_init_gpu_join();
 		//pgstrom_init_gpu_preagg();
